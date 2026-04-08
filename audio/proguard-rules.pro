@@ -1,17 +1,18 @@
-# Audio Module ProGuard Rules
+# Watermelon Audio — ProGuard Rules
 
 # Keep JNI methods
 -keepclasseswithmembernames class * {
     native <methods>;
 }
 
-# Keep the native bridge class
--keep class com.watermellonstudios.audio.bridge.NativeAudioBridge { *; }
+# Keep the native bridge (unified JNI bindings)
+-keep class com.watermellonstudios.audio.internal.bridge.AudioNativeBridge { *; }
 
-# Keep all public API classes
+# Keep public API classes
 -keep class com.watermellonstudios.audio.api.** { *; }
--keep class com.watermellonstudios.audio.state.** { *; }
--keep class com.watermellonstudios.audio.effects.** { *; }
--keep class com.watermellonstudios.audio.oscillators.** { *; }
--keep class com.watermellonstudios.audio.modulators.** { *; }
--keep class com.watermellonstudios.audio.scale.** { *; }
+
+# Keep domain models (used by consumers for serialization, reflection, etc.)
+-keep class com.watermellonstudios.audio.domain.** { *; }
+
+# Keep callback interfaces (dependency inversion — implemented by consumers)
+-keep class com.watermellonstudios.audio.callback.** { *; }
