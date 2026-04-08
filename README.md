@@ -81,7 +81,7 @@ audio/src/
 dependencyResolutionManagement {
     repositories {
         maven {
-            url = uri("https://maven.pkg.github.com/watermellonstudios/watermelon-audio")
+            url = uri("https://maven.pkg.github.com/mati-araujo/watermelon-audio")
             credentials {
                 username = project.findProperty("gpr.user")?.toString()
                 password = project.findProperty("gpr.key")?.toString()
