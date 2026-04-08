@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Audio module requires RECORD_AUDIO for input features -->
+    <!-- Permission must be declared here and requested by the app -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Declare that this module uses audio features -->
+    <uses-feature
+        android:name="android.hardware.audio.output"
+        android:required="true" />
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+</manifest>

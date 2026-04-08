@@ -1,0 +1,404 @@
+/**
+ * IAudioBackend.h
+ *
+ * Abstract interface for audio backends (Oboe, libusb, etc.)
+ * This allows the AudioEngine to be agnostic about the audio I/O source.
+ *
+ * Design Goals:
+ * - Backend-agnostic DSP processing
+ * - Hot-swappable backends (USB connect/disconnect)
+ * - RT-safe callback interface
+ * - Unified error handling
+ */
+
+#pragma once
+
+#include <cstdint>
+#include <atomic>
+#include <string>
+
+namespace noisypad {
+
+// =============================================================================
+// Enums and Types
+// =============================================================================
+
+enum class BackendType {
+    NONE = 0,
+    OBOE = 1,
+    LIBUSB = 2
+};
+
+enum class BackendResult {
+    OK = 0,
+    ERROR_DEVICE_NOT_FOUND,
+    ERROR_PERMISSION_DENIED,
+    ERROR_DEVICE_BUSY,
+    ERROR_INVALID_CONFIG,
+    ERROR_USB_INIT_FAILED,
+    ERROR_STREAM_FAILED,
+    ERROR_ALREADY_RUNNING,
+    ERROR_NOT_INITIALIZED
+};
+
+enum class BackendError {
+    NONE = 0,
+    DEVICE_DISCONNECTED,
+    UNDERRUN,
+    OVERRUN,
+    TRANSFER_ERROR,
+    TIMEOUT,
+    FATAL
+};
+
+enum class AudioFormat {
+    FLOAT_32 = 0,   // Native format for DSP
+    INT_16,         // Common USB format
+    INT_24,         // Pro audio USB format
+    INT_32
+};
+
+// =============================================================================
+// Stream Configuration
+// =============================================================================
+
+struct StreamConfig {
+    int sampleRate = 48000;
+    int channelCount = 2;
+    int framesPerBuffer = 256;
+    AudioFormat format = AudioFormat::FLOAT_32;
+    bool enableInput = false;   // Full-duplex capture
+    bool enableOutput = true;   // Playback
+};
+
+struct StreamInfo {
+    int sampleRate = 48000;
+    int channelCount = 2;
+    int framesPerBuffer = 256;
+    AudioFormat format = AudioFormat::FLOAT_32;
+    float outputLatencyMs = 0.0f;
+    float inputLatencyMs = 0.0f;
+    bool isFullDuplex = false;
+    BackendType backendType = BackendType::NONE;
+
+    // USB-specific info
+    int usbVendorId = 0;
+    int usbProductId = 0;
+    std::string deviceName;
+};
+
+// =============================================================================
+// Audio Callback Interface
+// =============================================================================
+
+/**
+ * IAudioCallback
+ *
+ * Interface for receiving audio data from a backend.
+ * The onAudioReady() method is called from a high-priority audio thread.
+ *
+ * CRITICAL: All implementations MUST be RT-safe:
+ * - No memory allocations (new, malloc, std::vector::push_back)
+ * - No locks that can contend
+ * - No system calls (file I/O, logging, etc.)
+ * - No std::shared_ptr (atomic refcount operations)
+ * - Bounded execution time
+ */
+class IAudioCallback {
+public:
+    virtual ~IAudioCallback() = default;
+
+    enum class Result {
+        CONTINUE,   // Keep streaming
+        STOP        // Stop the stream gracefully
+    };
+
+    /**
+     * Called when audio data is ready for processing.
+     *
+     * @param outputData  Buffer to write output samples (interleaved stereo float).
+     *                    MUST be filled with numFrames * channelCount samples.
+     *                    Pre-filled with zeros if no prior data.
+     *
+     * @param inputData   Buffer containing input samples (interleaved stereo float).
+     *                    nullptr if input is not enabled or not available.
+     *                    Contains numFrames * channelCount samples.
+     *
+     * @param numFrames   Number of audio frames to process.
+     *                    One frame = channelCount samples (e.g., 2 for stereo).
+     *
+     * @return Result::CONTINUE to keep streaming, Result::STOP to stop gracefully.
+     *
+     * Threading: Called from high-priority audio thread.
+     *            Must complete within buffer duration (numFrames / sampleRate).
+     */
+    virtual Result onAudioReady(
+        float* outputData,
+        const float* inputData,
+        int32_t numFrames
+    ) = 0;
+
+    /**
+     * Called when an error occurs in the backend.
+     *
+     * This is NOT called from the RT audio thread - it's safe to:
+     * - Log messages
+     * - Allocate memory
+     * - Update UI state
+     *
+     * @param error  The type of error that occurred.
+     */
+    virtual void onBackendError(BackendError error) = 0;
+
+    /**
+     * Called when the stream configuration changes.
+     *
+     * This can happen when:
+     * - USB device is hot-plugged with different sample rate
+     * - Backend switches (Oboe <-> libusb)
+     * - Device routing changes
+     *
+     * NOT called from RT thread - safe to allocate/log.
+     *
+     * @param newInfo  The new stream configuration.
+     */
+    virtual void onStreamConfigChanged(const StreamInfo& newInfo) {}
+};
+
+// =============================================================================
+// Audio Backend Interface
+// =============================================================================
+
+/**
+ * IAudioBackend
+ *
+ * Abstract interface for audio I/O backends.
+ *
+ * Implementations:
+ * - OboeBackend: Uses Google's Oboe library (AAudio/OpenSL ES)
+ * - LibusbBackend: Direct USB Audio Class via libusb
+ *
+ * Lifecycle:
+ * 1. Create backend instance
+ * 2. Configure (setSampleRate, setBufferSize, etc.)
+ * 3. setCallback()
+ * 4. start()
+ * 5. ... audio flows via callback ...
+ * 6. stop()
+ * 7. Destroy instance
+ */
+class IAudioBackend {
+public:
+    virtual ~IAudioBackend() = default;
+
+    // =========================================================================
+    // Lifecycle Management
+    // =========================================================================
+
+    /**
+     * Start the audio stream.
+     *
+     * Opens the audio device and begins calling the callback.
+     * Must call setCallback() before start().
+     *
+     * @return BackendResult::OK on success, error code otherwise.
+     */
+    virtual BackendResult start() = 0;
+
+    /**
+     * Stop the audio stream.
+     *
+     * Stops callbacks and releases audio device resources.
+     * May block briefly while flushing pending buffers.
+     */
+    virtual void stop() = 0;
+
+    /**
+     * Pause the audio stream (if supported).
+     *
+     * Callbacks stop but device remains open for quick resume.
+     * Not all backends support pause - check with supportsPause().
+     */
+    virtual void pause() = 0;
+
+    /**
+     * Resume a paused stream.
+     */
+    virtual void resume() = 0;
+
+    // =========================================================================
+    // Configuration
+    // =========================================================================
+
+    /**
+     * Set the audio callback handler.
+     *
+     * MUST be called before start().
+     * Can be called while stopped to change callback.
+     *
+     * @param callback  Pointer to callback handler. Must remain valid until stop().
+     */
+    virtual void setCallback(IAudioCallback* callback) = 0;
+
+    /**
+     * Set desired sample rate.
+     *
+     * Must be called before start().
+     * Actual rate may differ - check getStreamInfo() after start().
+     *
+     * @param sampleRate  Desired sample rate in Hz (e.g., 44100, 48000, 96000)
+     */
+    virtual void setSampleRate(int sampleRate) = 0;
+
+    /**
+     * Set desired buffer size.
+     *
+     * Must be called before start().
+     * Smaller = lower latency but higher CPU usage.
+     * Actual size may differ - check getStreamInfo() after start().
+     *
+     * @param framesPerBuffer  Number of frames per callback (e.g., 128, 256, 512)
+     */
+    virtual void setBufferSize(int framesPerBuffer) = 0;
+
+    /**
+     * Enable or disable full-duplex mode.
+     *
+     * When enabled, inputData in onAudioReady() will contain captured audio.
+     * Must be called before start().
+     *
+     * @param enable  true to enable input capture, false for output only.
+     */
+    virtual void setFullDuplexEnabled(bool enable) = 0;
+
+    // =========================================================================
+    // State Queries
+    // =========================================================================
+
+    /**
+     * Get current stream information.
+     *
+     * Contains actual (not requested) values for sample rate, buffer size, etc.
+     * Only valid after start() returns OK.
+     */
+    virtual StreamInfo getStreamInfo() const = 0;
+
+    /**
+     * Check if the stream is currently running.
+     */
+    virtual bool isRunning() const = 0;
+
+    /**
+     * Get current output latency in milliseconds.
+     *
+     * Only valid while running.
+     */
+    virtual float getOutputLatencyMs() const = 0;
+
+    /**
+     * Get current input latency in milliseconds.
+     *
+     * Only valid while running and full-duplex is enabled.
+     */
+    virtual float getInputLatencyMs() const = 0;
+
+    /**
+     * Get the total round-trip latency in milliseconds.
+     *
+     * inputLatency + outputLatency + processing overhead.
+     */
+    virtual float getRoundTripLatencyMs() const {
+        return getInputLatencyMs() + getOutputLatencyMs();
+    }
+
+    /**
+     * Get the backend type.
+     */
+    virtual BackendType getType() const = 0;
+
+    /**
+     * Check if this backend supports full-duplex (simultaneous input/output).
+     */
+    virtual bool supportsFullDuplex() const = 0;
+
+    /**
+     * Check if this backend supports pause/resume.
+     */
+    virtual bool supportsPause() const { return true; }
+
+    // =========================================================================
+    // USB-Specific (Optional)
+    // =========================================================================
+
+    /**
+     * Initialize backend from an Android USB file descriptor.
+     *
+     * Only implemented by LibusbBackend.
+     * Other backends return false.
+     *
+     * @param fd        File descriptor from UsbDeviceConnection.getFileDescriptor()
+     * @param usbfsPath Path to the usbfs device (e.g., "/dev/bus/usb/001/002")
+     *
+     * @return true if initialization succeeded, false otherwise.
+     */
+    virtual bool initializeFromFileDescriptor(int fd, const char* usbfsPath) {
+        return false;  // Default: not supported
+    }
+
+    /**
+     * Get USB device information.
+     *
+     * Only valid for LibusbBackend.
+     *
+     * @param vendorId   Output: USB vendor ID
+     * @param productId  Output: USB product ID
+     *
+     * @return true if this is a USB backend with device info available.
+     */
+    virtual bool getUsbDeviceInfo(int* vendorId, int* productId) const {
+        return false;  // Default: not a USB backend
+    }
+};
+
+// =============================================================================
+// Utility Functions
+// =============================================================================
+
+inline const char* backendTypeToString(BackendType type) {
+    switch (type) {
+        case BackendType::NONE:   return "None";
+        case BackendType::OBOE:   return "Oboe";
+        case BackendType::LIBUSB: return "USB Audio";
+        default:                  return "Unknown";
+    }
+}
+
+inline const char* backendResultToString(BackendResult result) {
+    switch (result) {
+        case BackendResult::OK:                     return "OK";
+        case BackendResult::ERROR_DEVICE_NOT_FOUND: return "Device not found";
+        case BackendResult::ERROR_PERMISSION_DENIED:return "Permission denied";
+        case BackendResult::ERROR_DEVICE_BUSY:      return "Device busy";
+        case BackendResult::ERROR_INVALID_CONFIG:   return "Invalid configuration";
+        case BackendResult::ERROR_USB_INIT_FAILED:  return "USB initialization failed";
+        case BackendResult::ERROR_STREAM_FAILED:    return "Stream failed";
+        case BackendResult::ERROR_ALREADY_RUNNING:  return "Already running";
+        case BackendResult::ERROR_NOT_INITIALIZED:  return "Not initialized";
+        default:                                    return "Unknown error";
+    }
+}
+
+inline const char* backendErrorToString(BackendError error) {
+    switch (error) {
+        case BackendError::NONE:                return "No error";
+        case BackendError::DEVICE_DISCONNECTED: return "Device disconnected";
+        case BackendError::UNDERRUN:            return "Buffer underrun";
+        case BackendError::OVERRUN:             return "Buffer overrun";
+        case BackendError::TRANSFER_ERROR:      return "Transfer error";
+        case BackendError::TIMEOUT:             return "Timeout";
+        case BackendError::FATAL:               return "Fatal error";
+        default:                                return "Unknown error";
+    }
+}
+
+} // namespace noisypad
