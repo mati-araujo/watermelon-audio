@@ -8,7 +8,7 @@ android {
 }
 
 group = "com.watermellonstudios"
-version = "1.0.0-SNAPSHOT"
+version = findProperty("version")?.toString()?.takeIf { it != "unspecified" } ?: "1.0.0-SNAPSHOT"
 
 // KMP automatically creates publications for each target.
 // We only configure the repository here.
