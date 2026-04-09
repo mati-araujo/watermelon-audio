@@ -21,10 +21,14 @@
  * Version
  * ================================================================ */
 
+/* Defaults for standalone builds. Gradle-driven builds override these
+   via CMake compile definitions (-DWMA_VERSION_MAJOR=... etc.). */
+#ifndef WMA_VERSION_MAJOR
 #define WMA_VERSION_MAJOR 0
 #define WMA_VERSION_MINOR 1
 #define WMA_VERSION_PATCH 0
 #define WMA_VERSION_STRING "0.1.0"
+#endif
 
 /* ================================================================
  * Export / Visibility

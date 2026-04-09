@@ -4,6 +4,31 @@ project("watermelon_audio")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ========== VERSION FROM GRADLE ==========
+# Passed via -DWMA_PROJECT_VERSION=... from convention plugin.
+# Falls back to hardcoded values in watermelon_audio.h for standalone builds.
+if(DEFINED WMA_PROJECT_VERSION AND NOT WMA_PROJECT_VERSION STREQUAL "unspecified")
+    string(REPLACE "." ";" _WMA_VERSION_PARTS "${WMA_PROJECT_VERSION}")
+    list(LENGTH _WMA_VERSION_PARTS _WMA_VERSION_PARTS_LEN)
+    if(_WMA_VERSION_PARTS_LEN GREATER_EQUAL 2)
+        list(GET _WMA_VERSION_PARTS 0 _WMA_VER_MAJOR)
+        list(GET _WMA_VERSION_PARTS 1 _WMA_VER_MINOR)
+        if(_WMA_VERSION_PARTS_LEN GREATER 2)
+            list(GET _WMA_VERSION_PARTS 2 _WMA_VER_PATCH_RAW)
+            string(REGEX REPLACE "[^0-9].*" "" _WMA_VER_PATCH "${_WMA_VER_PATCH_RAW}")
+        else()
+            set(_WMA_VER_PATCH "0")
+        endif()
+        add_compile_definitions(
+            WMA_VERSION_MAJOR=${_WMA_VER_MAJOR}
+            WMA_VERSION_MINOR=${_WMA_VER_MINOR}
+            WMA_VERSION_PATCH=${_WMA_VER_PATCH}
+            WMA_VERSION_STRING="${WMA_PROJECT_VERSION}"
+        )
+        message(STATUS "WMA version from Gradle: ${WMA_PROJECT_VERSION}")
+    endif()
+endif()
+
 # Configurar alineación de 16 KB para compatibilidad con Android 15+
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
 

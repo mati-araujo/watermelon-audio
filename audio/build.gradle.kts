@@ -3,12 +3,20 @@ plugins {
     `maven-publish`
 }
 
-android {
-    namespace = "com.watermellonstudios.audio"
-}
-
 group = "com.watermellonstudios"
 version = findProperty("version")?.toString()?.takeIf { it != "unspecified" } ?: "1.0.0-SNAPSHOT"
+
+android {
+    namespace = "com.watermellonstudios.audio"
+
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                arguments += "-DWMA_PROJECT_VERSION=${project.version}"
+            }
+        }
+    }
+}
 
 // KMP automatically creates publications for each target.
 // We only configure the repository here.
