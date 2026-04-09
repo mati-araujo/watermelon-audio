@@ -9,7 +9,7 @@
  * Part of Stage 3: Mode System implementation.
  */
 
-namespace noisypad {
+namespace watermelon_audio {
 
 /**
  * @brief Factory class for mode configurations.
@@ -225,4 +225,4 @@ private:
     }
 };
 
-} // namespace noisypad
+} // namespace watermelon_audio

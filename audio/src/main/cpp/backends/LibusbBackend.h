@@ -38,7 +38,7 @@
 #include <thread>
 #include <functional>
 
-namespace noisypad {
+namespace watermelon_audio {
 
 // Forward declarations
 namespace usb {
@@ -442,4 +442,4 @@ private:
     void performBufferResize();
 };
 
-} // namespace noisypad
+} // namespace watermelon_audio

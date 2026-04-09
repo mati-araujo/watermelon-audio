@@ -11,7 +11,7 @@
  * Part of Stage 3: Mode System implementation.
  */
 
-namespace noisypad {
+namespace watermelon_audio {
 
 /**
  * @brief Available audio modes that define signal routing.
@@ -205,4 +205,4 @@ inline bool usesOscillator(AudioMode mode) {
 
 } // namespace ModeUtils
 
-} // namespace noisypad
+} // namespace watermelon_audio

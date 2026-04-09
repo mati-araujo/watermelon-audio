@@ -201,7 +201,7 @@ grep -rn "android.util.Log" audio/src/main/kotlin/ --include="*.kt" | \
 ### Contexto
 
 `AudioEngine` hereda de `oboe::AudioStreamCallback` (legacy) ademas de
-`noisypad::IAudioCallback` (nuevo). La herencia de Oboe:
+`watermelon_audio::IAudioCallback` (nuevo). La herencia de Oboe:
 - Fuerza `#include <oboe/Oboe.h>` en AudioEngine.h
 - Hace que cualquier consumer de AudioEngine.h dependa de Oboe
 - Es innecesaria porque `OboeBackend` ya maneja el callback internamente
@@ -218,10 +218,10 @@ Confirmar que `OboeBackend` ya tiene su propio `oboe::AudioStreamCallback`.
 ```cpp
 // ANTES (AudioEngine.h:91):
 class AudioEngine : public oboe::AudioStreamCallback,
-                    public noisypad::IAudioCallback {
+                    public watermelon_audio::IAudioCallback {
 
 // DESPUES:
-class AudioEngine : public noisypad::IAudioCallback {
+class AudioEngine : public watermelon_audio::IAudioCallback {
 ```
 
 #### 0B.3 — Eliminar metodos override de Oboe en AudioEngine
@@ -265,7 +265,7 @@ grep -rn "oboe/Oboe.h" audio/src/main/cpp/ --include="*.h" --include="*.cpp" | \
 ```
 
 ### Post-condiciones
-- `AudioEngine` solo implementa `noisypad::IAudioCallback`
+- `AudioEngine` solo implementa `watermelon_audio::IAudioCallback`
 - `#include <oboe/Oboe.h>` solo aparece en `backends/`
 - AudioEngine.h es compilable sin tener Oboe instalado
 - Build green, audio funciona identico

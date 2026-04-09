@@ -32,7 +32,7 @@
 #define THREAD_LOGW(...) wma::logMessage(wma::LogLevel::WARN, THREAD_LOG_TAG, __VA_ARGS__)
 #define THREAD_LOGE(...) wma::logMessage(wma::LogLevel::ERROR, THREAD_LOG_TAG, __VA_ARGS__)
 
-namespace noisypad {
+namespace watermelon_audio {
 
 class ThreadUtils {
 public:
@@ -320,4 +320,4 @@ private:
     }
 };
 
-} // namespace noisypad
+} // namespace watermelon_audio

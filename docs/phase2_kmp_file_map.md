@@ -129,7 +129,7 @@
 - [ ] Migration checklist documented
 
 ### Step 2: Build system switch (NEXT SESSION)
-1. Change `audio/build.gradle.kts` from `noisypad.android.native` to `noisypad.kmp.native`
+1. Change `audio/build.gradle.kts` from `watermelon.kmp.native` to `watermelon.kmp.native`
 2. Create `src/commonMain/kotlin/` and `src/androidMain/kotlin/` directories
 3. Move 51 pure files to `commonMain/`
 4. Move 14 android files to `androidMain/`

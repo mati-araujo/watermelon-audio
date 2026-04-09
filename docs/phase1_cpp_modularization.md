@@ -133,7 +133,7 @@ El `CMakeLists.txt` de `dsp/` debe compilar sin incluir nada del resto del proye
 ```cmake
 add_subdirectory(dsp)
 # ... link watermelon-dsp to main library
-target_link_libraries(noisypad-audio PRIVATE watermelon-dsp)
+target_link_libraries(watermelon_audio PRIVATE watermelon-dsp)
 ```
 
 ### Verificacion
@@ -447,7 +447,7 @@ Este es el refactoring mas critico: transformar `AudioEngine` de god class
 ### Arquitectura Target
 
 ```cpp
-class AudioEngine : public noisypad::IAudioCallback {
+class AudioEngine : public watermelon_audio::IAudioCallback {
 public:
     AudioEngine();
     ~AudioEngine();

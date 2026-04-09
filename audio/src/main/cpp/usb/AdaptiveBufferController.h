@@ -59,7 +59,7 @@
 #define LOGD(...) wma::logMessage(wma::LogLevel::DEBUG, ADAPTIVE_BUFFER_LOG_TAG, __VA_ARGS__)
 #endif
 
-namespace noisypad {
+namespace watermelon_audio {
 namespace usb {
 
 class AdaptiveBufferController {
@@ -465,4 +465,4 @@ private:
 };
 
 } // namespace usb
-} // namespace noisypad
+} // namespace watermelon_audio

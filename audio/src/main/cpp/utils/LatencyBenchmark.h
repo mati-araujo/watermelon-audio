@@ -29,7 +29,7 @@
 #include <numeric>
 #include <mutex>
 
-namespace noisypad {
+namespace watermelon_audio {
 
 // =============================================================================
 // Measurement Results
@@ -619,4 +619,4 @@ private:
     RoundTripDetector mRoundTripDetector;
 };
 
-} // namespace noisypad
+} // namespace watermelon_audio

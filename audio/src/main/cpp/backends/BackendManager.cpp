@@ -18,7 +18,7 @@
 #define LOGW(...) wma::logMessage(wma::LogLevel::WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) wma::logMessage(wma::LogLevel::ERROR, LOG_TAG, __VA_ARGS__)
 
-namespace noisypad {
+namespace watermelon_audio {
 
 // =============================================================================
 // Global Instance (Phase 0D: settable, no longer static-local only)
@@ -341,4 +341,4 @@ void BackendManager::applyConfigToBackend(IAudioBackend* backend) {
     backend->setFullDuplexEnabled(mFullDuplexEnabled);
 }
 
-} // namespace noisypad
+} // namespace watermelon_audio

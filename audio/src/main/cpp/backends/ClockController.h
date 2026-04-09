@@ -30,7 +30,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace noisypad {
+namespace watermelon_audio {
 
 // =============================================================================
 // PID Controller
@@ -419,4 +419,4 @@ struct ClockStatistics {
     uint64_t overrunCount = 0;
 };
 
-} // namespace noisypad
+} // namespace watermelon_audio

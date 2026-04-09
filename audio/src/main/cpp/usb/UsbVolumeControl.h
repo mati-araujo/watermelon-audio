@@ -26,7 +26,7 @@
 #define VOLUME_LOGW(...) wma::logMessage(wma::LogLevel::WARN, VOLUME_LOG_TAG, __VA_ARGS__)
 #define VOLUME_LOGE(...) wma::logMessage(wma::LogLevel::ERROR, VOLUME_LOG_TAG, __VA_ARGS__)
 
-namespace noisypad {
+namespace watermelon_audio {
 namespace usb {
 
 /**
@@ -291,4 +291,4 @@ private:
 };
 
 } // namespace usb
-} // namespace noisypad
+} // namespace watermelon_audio

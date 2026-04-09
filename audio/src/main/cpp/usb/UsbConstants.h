@@ -13,7 +13,7 @@
 
 #include <cstdint>
 
-namespace noisypad {
+namespace watermelon_audio {
 namespace usb {
 
 // ============================================================================
@@ -315,4 +315,4 @@ constexpr uint8_t UAC_MUTE_OFF = 0x00;
 constexpr uint8_t UAC_MUTE_ON = 0x01;
 
 } // namespace usb
-} // namespace noisypad
+} // namespace watermelon_audio

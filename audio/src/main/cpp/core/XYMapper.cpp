@@ -6,7 +6,7 @@
 #include <cmath>
 #include <algorithm>
 
-namespace noisypad {
+namespace watermelon_audio {
 
 XYMapper::XYMapper() {
     // Default configuration is set in XYMappingConfig constructor
@@ -333,4 +333,4 @@ void XYMapper::clearParameterCallback() {
     }
 }
 
-} // namespace noisypad
+} // namespace watermelon_audio

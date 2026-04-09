@@ -7,7 +7,7 @@
 #include "../nodes/OutputNode.h"
 #include "../backends/BackendManager.h"
 
-namespace noisypad {
+namespace watermelon_audio {
 
 ModeManager::ModeManager() {
     // Initialize with ChaosPad configuration
@@ -361,4 +361,4 @@ float ModeManager::getCurrentInputLevel() const {
     return mCurrentInputLevel.load(std::memory_order_acquire);
 }
 
-} // namespace noisypad
+} // namespace watermelon_audio

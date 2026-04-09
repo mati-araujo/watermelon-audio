@@ -19,7 +19,7 @@
 
 struct WmaEngine {
     // BackendManager owned by this engine instance (Phase 0D)
-    std::unique_ptr<noisypad::BackendManager> backendManager;
+    std::unique_ptr<watermelon_audio::BackendManager> backendManager;
 
     std::unique_ptr<AudioEngine> engine;
     std::shared_ptr<InputNode> inputNode;

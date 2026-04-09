@@ -42,7 +42,7 @@
 #include "../dsp/LockFreeRingBuffer.h"
 #include "../backends/ClockController.h"
 
-namespace noisypad {
+namespace watermelon_audio {
 namespace usb {
 
 // ============================================================================
@@ -522,4 +522,4 @@ private:
 };
 
 } // namespace usb
-} // namespace noisypad
+} // namespace watermelon_audio

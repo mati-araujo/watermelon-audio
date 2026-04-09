@@ -8,7 +8,7 @@
 #include <mutex>
 #include <functional>
 
-// Forward declarations (global namespace - these are NOT in noisypad namespace)
+// Forward declarations (global namespace - these are NOT in watermelon_audio namespace)
 class OscillatorNode;
 class InputNode;
 class MixerNode;
@@ -28,9 +28,9 @@ class OutputNode;
  * - Node activation/deactivation
  */
 
-namespace noisypad {
+namespace watermelon_audio {
 
-// Forward declarations for noisypad namespace
+// Forward declarations for watermelon_audio namespace
 class AudioGraph;
 
 /**
@@ -252,4 +252,4 @@ private:
     std::mutex mCallbackMutex;
 };
 
-} // namespace noisypad
+} // namespace watermelon_audio

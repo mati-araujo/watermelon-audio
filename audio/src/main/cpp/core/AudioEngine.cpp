@@ -29,7 +29,7 @@ public:
         auto result = mEngine->onAudioReady(
             static_cast<float*>(audioData), nullptr, numFrames);
 
-        return (result == noisypad::IAudioCallback::Result::CONTINUE)
+        return (result == watermelon_audio::IAudioCallback::Result::CONTINUE)
             ? oboe::DataCallbackResult::Continue
             : oboe::DataCallbackResult::Stop;
     }
@@ -38,7 +38,7 @@ public:
         wma::logMessage(wma::LogLevel::ERROR, "OboeAdapter",
             "Stream error before close: %s (%d)", oboe::convertToText(error), static_cast<int>(error));
         if (mEngine) {
-            mEngine->onBackendError(noisypad::BackendError::FATAL);
+            mEngine->onBackendError(watermelon_audio::BackendError::FATAL);
         }
     }
 
@@ -47,9 +47,9 @@ public:
             "Stream error after close: %s (%d)", oboe::convertToText(error), static_cast<int>(error));
         if (mEngine) {
             if (error == oboe::Result::ErrorDisconnected) {
-                mEngine->onBackendError(noisypad::BackendError::DEVICE_DISCONNECTED);
+                mEngine->onBackendError(watermelon_audio::BackendError::DEVICE_DISCONNECTED);
             } else {
-                mEngine->onBackendError(noisypad::BackendError::FATAL);
+                mEngine->onBackendError(watermelon_audio::BackendError::FATAL);
             }
         }
     }
@@ -341,7 +341,7 @@ bool AudioEngine::start(int fadeTimeMs) {
     if (mUseBackendManager.load(std::memory_order_acquire)) {
         LOGI("Starting via BackendManager...");
 
-        auto& manager = noisypad::BackendManager::getInstance();
+        auto& manager = watermelon_audio::BackendManager::getInstance();
 
         // Ensure callback is set
         manager.setCallback(this);
@@ -362,20 +362,20 @@ bool AudioEngine::start(int fadeTimeMs) {
         }
 
         // Start backend (DSP thread will immediately see Running state)
-        noisypad::BackendResult result = manager.start();
-        if (result != noisypad::BackendResult::OK) {
+        watermelon_audio::BackendResult result = manager.start();
+        if (result != watermelon_audio::BackendResult::OK) {
             LOGE("Failed to start via BackendManager: %s",
-                 noisypad::backendResultToString(result));
+                 watermelon_audio::backendResultToString(result));
             transitionToState(EngineState::Stopped);
             return false;
         }
 
         // Get stream info from backend to configure components
-        noisypad::StreamInfo info = manager.getStreamInfo();
+        watermelon_audio::StreamInfo info = manager.getStreamInfo();
         int sampleRate = info.sampleRate;
 
         LOGI("=== BACKEND MANAGER STREAM STARTED ===");
-        LOGI("  Backend type: %s", noisypad::backendTypeToString(info.backendType));
+        LOGI("  Backend type: %s", watermelon_audio::backendTypeToString(info.backendType));
         LOGI("  Sample rate: %d Hz", sampleRate);
         LOGI("  Channel count: %d", info.channelCount);
         LOGI("  Buffer size: %d frames", info.framesPerBuffer);
@@ -648,7 +648,7 @@ void AudioEngine::stop() {
     if (mUseBackendManager.load(std::memory_order_acquire)) {
         LOGI("Stopping via BackendManager...");
 
-        auto& manager = noisypad::BackendManager::getInstance();
+        auto& manager = watermelon_audio::BackendManager::getInstance();
         manager.stop();
 
         // Wait for any remaining callbacks
@@ -990,7 +990,7 @@ void AudioEngine::feedVocoderModulator(InputNode* inputNode, int32_t numFrames, 
     }
 }
 
-noisypad::IAudioCallback::Result AudioEngine::handleNotRunning(
+watermelon_audio::IAudioCallback::Result AudioEngine::handleNotRunning(
     float* output, int32_t numFrames, InputNode* inputNode) {
     const int32_t totalSamples = numFrames * 2;
     // Silence the synth output but allow monitoring
@@ -1034,10 +1034,10 @@ noisypad::IAudioCallback::Result AudioEngine::handleNotRunning(
             }
         }
     }
-    return noisypad::IAudioCallback::Result::CONTINUE;
+    return watermelon_audio::IAudioCallback::Result::CONTINUE;
 }
 
-noisypad::IAudioCallback::Result AudioEngine::renderViaGraph(
+watermelon_audio::IAudioCallback::Result AudioEngine::renderViaGraph(
     float* output, int32_t numFrames) {
     // Sync oscillator parameters from legacy oscillators to graph
     if (mGraphOscillatorHandle != INVALID_NODE_HANDLE && mOscBank.getPrimaryOscillator(0)) {
@@ -1066,7 +1066,7 @@ noisypad::IAudioCallback::Result AudioEngine::renderViaGraph(
     mAudioLooper.process(output, numFrames);
     mWaveformCapture.write(output, numFrames);
 
-    return noisypad::IAudioCallback::Result::CONTINUE;
+    return watermelon_audio::IAudioCallback::Result::CONTINUE;
 }
 
 void AudioEngine::renderInputFx(float* output, int32_t numFrames, InputNode* inputNode) {
@@ -1388,7 +1388,7 @@ void AudioEngine::handleMixMonitoring(float* output, int32_t numFrames,
 
 // ========== DECOMPOSED processAudioBlock ==========
 
-noisypad::IAudioCallback::Result AudioEngine::processAudioBlock(
+watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
     float* audioData, int32_t numFrames) {
     // RAII callback guard
     mActiveCallbacks.fetch_add(1, std::memory_order_acquire);
@@ -1434,7 +1434,7 @@ noisypad::IAudioCallback::Result AudioEngine::processAudioBlock(
             LOGE("Buffer overflow prevented: %d samples requested, %zu available",
                  totalSamples, mOutputStage.getTempBufferSize());
             std::fill(outputData, outputData + totalSamples, 0.0f);
-            return noisypad::IAudioCallback::Result::CONTINUE;
+            return watermelon_audio::IAudioCallback::Result::CONTINUE;
         }
 
         // AudioGraph path
@@ -1480,7 +1480,7 @@ noisypad::IAudioCallback::Result AudioEngine::processAudioBlock(
         mWaveformCapture.write(outputData, numFrames);
 
         mCallbackErrorCount.store(0, std::memory_order_relaxed);
-        return noisypad::IAudioCallback::Result::CONTINUE;
+        return watermelon_audio::IAudioCallback::Result::CONTINUE;
 
     } catch (const std::exception& e) {
         LOGE("CRITICAL: Exception in audio callback: %s", e.what());
@@ -1488,9 +1488,9 @@ noisypad::IAudioCallback::Result AudioEngine::processAudioBlock(
         int errorCount = mCallbackErrorCount.fetch_add(1, std::memory_order_relaxed) + 1;
         if (errorCount > 100) {
             LOGE("CRITICAL: Too many callback errors (%d), requesting stop", errorCount);
-            return noisypad::IAudioCallback::Result::STOP;
+            return watermelon_audio::IAudioCallback::Result::STOP;
         }
-        return noisypad::IAudioCallback::Result::CONTINUE;
+        return watermelon_audio::IAudioCallback::Result::CONTINUE;
 
     } catch (...) {
         LOGE("CRITICAL: Unknown exception in audio callback");
@@ -1498,9 +1498,9 @@ noisypad::IAudioCallback::Result AudioEngine::processAudioBlock(
         int errorCount = mCallbackErrorCount.fetch_add(1, std::memory_order_relaxed) + 1;
         if (errorCount > 100) {
             LOGE("CRITICAL: Too many callback errors (%d), requesting stop", errorCount);
-            return noisypad::IAudioCallback::Result::STOP;
+            return watermelon_audio::IAudioCallback::Result::STOP;
         }
-        return noisypad::IAudioCallback::Result::CONTINUE;
+        return watermelon_audio::IAudioCallback::Result::CONTINUE;
     }
 }
 
@@ -1618,7 +1618,7 @@ void AudioEngine::resumeWithFade(int fadeTimeMs) {
 bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const {
     // Try BackendManager first (works for both USB and Oboe-via-backend paths)
     if (mUseBackendManager.load(std::memory_order_acquire)) {
-        auto& manager = noisypad::BackendManager::getInstance();
+        auto& manager = watermelon_audio::BackendManager::getInstance();
         if (manager.isRunning()) {
             auto info = manager.getStreamInfo();
             sampleRate = info.sampleRate;
@@ -1758,7 +1758,7 @@ void AudioEngine::setUseBackendManager(bool enabled) {
 
     if (enabled) {
         // Register this AudioEngine as the callback for BackendManager
-        auto& manager = noisypad::BackendManager::getInstance();
+        auto& manager = watermelon_audio::BackendManager::getInstance();
         manager.setCallback(this);
 
         // Configure BackendManager with current preferred settings
@@ -1773,7 +1773,7 @@ void AudioEngine::setUseBackendManager(bool enabled) {
 // FIX PHASE 7.2 & 7.3: Refactored callback for USB audio
 // FIX PHASE 8: Direct USB INPUT_FX processing without double buffering
 
-noisypad::IAudioCallback::Result AudioEngine::onAudioReady(
+watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
     float* outputData,
     const float* inputData,
     int32_t numFrames) {
@@ -1827,7 +1827,7 @@ noisypad::IAudioCallback::Result AudioEngine::onAudioReady(
         if (mOutputStage.getTempBufferSize() < static_cast<size_t>(totalSamples)) {
             // Note: Resize should not happen in audio thread normally,
             // but this is a safety check
-            return noisypad::IAudioCallback::Result::CONTINUE;
+            return watermelon_audio::IAudioCallback::Result::CONTINUE;
         }
 
         // 1. Copy USB input to temp buffer for processing
@@ -1874,7 +1874,7 @@ noisypad::IAudioCallback::Result AudioEngine::onAudioReady(
             directOutLogCount = 0;
         }
 
-        return noisypad::IAudioCallback::Result::CONTINUE;
+        return watermelon_audio::IAudioCallback::Result::CONTINUE;
     }
 
     // ========== NON-INPUT_FX MODES (MIX, CHAOS_PAD, etc.) ==========
@@ -1904,8 +1904,8 @@ noisypad::IAudioCallback::Result AudioEngine::onAudioReady(
     return processAudioBlock(outputData, numFrames);
 }
 
-void AudioEngine::onBackendError(noisypad::BackendError error) {
-    LOGE("Backend error: %s", noisypad::backendErrorToString(error));
+void AudioEngine::onBackendError(watermelon_audio::BackendError error) {
+    LOGE("Backend error: %s", watermelon_audio::backendErrorToString(error));
 
     mStreamError.store(true, std::memory_order_release);
     mLastStreamErrorCode.store(static_cast<int>(error), std::memory_order_release);
@@ -1914,7 +1914,7 @@ void AudioEngine::onBackendError(noisypad::BackendError error) {
     // Transition to stopped
     mState.store(EngineState::Stopped, std::memory_order_release);
 
-    if (error == noisypad::BackendError::DEVICE_DISCONNECTED) {
+    if (error == watermelon_audio::BackendError::DEVICE_DISCONNECTED) {
         if (mUseBackendManager.load(std::memory_order_acquire)) {
             LOGI("Device disconnected, BackendManager will handle recovery");
             // BackendManager handles fallback to Oboe
@@ -1940,16 +1940,16 @@ void AudioEngine::onBackendError(noisypad::BackendError error) {
                 }
             });
         }
-    } else if (error == noisypad::BackendError::FATAL) {
+    } else if (error == watermelon_audio::BackendError::FATAL) {
         LOGE("Non-recoverable error. User intervention required.");
     }
 }
 
-void AudioEngine::onStreamConfigChanged(const noisypad::StreamInfo& newInfo) {
+void AudioEngine::onStreamConfigChanged(const watermelon_audio::StreamInfo& newInfo) {
     LOGI("Stream config changed: %dHz, %d channels, backend=%s",
          newInfo.sampleRate,
          newInfo.channelCount,
-         noisypad::backendTypeToString(newInfo.backendType));
+         watermelon_audio::backendTypeToString(newInfo.backendType));
 
     // Update sample rate in all components
     int sampleRate = newInfo.sampleRate;

@@ -22,7 +22,7 @@
 #define LOGE(...) wma::logMessage(wma::LogLevel::ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGD(...) wma::logMessage(wma::LogLevel::DEBUG, LOG_TAG, __VA_ARGS__)
 
-namespace noisypad {
+namespace watermelon_audio {
 namespace usb {
 
 // ============================================================================
@@ -1000,4 +1000,4 @@ bool UsbTransferManager::reconfigureBufferSize(int newBufferMs) {
 }
 
 } // namespace usb
-} // namespace noisypad
+} // namespace watermelon_audio

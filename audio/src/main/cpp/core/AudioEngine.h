@@ -81,7 +81,7 @@ enum class AudioProcessingMode {
  * Audio processing is now always routed through the IAudioCallback interface.
  * The legacy direct-Oboe path uses an internal OboeCallbackAdapter.
  */
-class AudioEngine : public noisypad::IAudioCallback {
+class AudioEngine : public watermelon_audio::IAudioCallback {
 public:
     AudioEngine();
     ~AudioEngine();
@@ -714,7 +714,7 @@ public:
      *
      * RT-safe: No locks, no allocations, no syscalls.
      */
-    noisypad::IAudioCallback::Result onAudioReady(
+    watermelon_audio::IAudioCallback::Result onAudioReady(
         float* outputData,
         const float* inputData,
         int32_t numFrames) override;
@@ -722,12 +722,12 @@ public:
     /**
      * @brief Called when backend encounters an error
      */
-    void onBackendError(noisypad::BackendError error) override;
+    void onBackendError(watermelon_audio::BackendError error) override;
 
     /**
      * @brief Called when stream configuration changes
      */
-    void onStreamConfigChanged(const noisypad::StreamInfo& newInfo) override;
+    void onStreamConfigChanged(const watermelon_audio::StreamInfo& newInfo) override;
 
 private:
     /**
@@ -735,15 +735,15 @@ private:
      * Contains all DSP: oscillators, voices, effects, looper, output stage.
      * RT-safe: No locks, no allocations, no syscalls.
      */
-    noisypad::IAudioCallback::Result processAudioBlock(float* audioData, int32_t numFrames);
+    watermelon_audio::IAudioCallback::Result processAudioBlock(float* audioData, int32_t numFrames);
 
     // ========== RENDER SUB-METHODS (Step 8 decomposition) ==========
 
     /** Handle audio output when engine is not in Running state */
-    noisypad::IAudioCallback::Result handleNotRunning(float* output, int32_t numFrames, InputNode* inputNode);
+    watermelon_audio::IAudioCallback::Result handleNotRunning(float* output, int32_t numFrames, InputNode* inputNode);
 
     /** Render via AudioGraph when enabled */
-    noisypad::IAudioCallback::Result renderViaGraph(float* output, int32_t numFrames);
+    watermelon_audio::IAudioCallback::Result renderViaGraph(float* output, int32_t numFrames);
 
     /** Render INPUT_FX mode: input through effect chain */
     void renderInputFx(float* output, int32_t numFrames, InputNode* inputNode);

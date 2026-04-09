@@ -17,7 +17,7 @@
 #include <atomic>
 #include <string>
 
-namespace noisypad {
+namespace watermelon_audio {
 
 // =============================================================================
 // Enums and Types
@@ -401,4 +401,4 @@ inline const char* backendErrorToString(BackendError error) {
     }
 }
 
-} // namespace noisypad
+} // namespace watermelon_audio

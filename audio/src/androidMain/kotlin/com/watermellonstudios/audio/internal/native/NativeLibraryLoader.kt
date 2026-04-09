@@ -26,7 +26,7 @@ import android.util.Log
  */
 internal actual object NativeLibraryLoader {
     private const val TAG = "NativeLibraryLoader"
-    private const val LIBRARY_NAME = "noisypad"
+    private const val LIBRARY_NAME = "watermelon_audio"
 
     @Volatile
     private var isLoaded = false

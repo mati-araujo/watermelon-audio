@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project("noisypad")
+project("watermelon_audio")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -147,7 +147,7 @@ set(JNI_SOURCES
         jni/jni_audio_bridge.cpp
 )
 
-add_library(noisypad SHARED
+add_library(watermelon_audio SHARED
         ${PLATFORM_SOURCES}
         ${API_SOURCES}
         ${JNI_SOURCES}
@@ -174,12 +174,12 @@ add_library(noisypad SHARED
 )
 
 # Include directories for JNI headers
-target_include_directories(noisypad PRIVATE
+target_include_directories(watermelon_audio PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/jni
 )
 
-target_link_libraries(noisypad
+target_link_libraries(watermelon_audio
         watermelon-voice
         watermelon-looper
         watermelon-engines
@@ -195,5 +195,5 @@ target_link_libraries(noisypad
 enable_testing()
 
 add_executable(EffectTest utils/EffectTest.cpp)
-target_link_libraries(EffectTest noisypad)
+target_link_libraries(EffectTest watermelon_audio)
 add_test(NAME EffectTest COMMAND EffectTest)

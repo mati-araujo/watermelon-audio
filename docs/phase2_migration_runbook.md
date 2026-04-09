@@ -9,7 +9,7 @@
 
 - [x] File map: `phase2_kmp_file_map.md` — 51 commonMain / 14 androidMain
 - [x] Version catalog: `kotlin-multiplatform` plugin + `kotlinx-coroutines-core` library agregados
-- [x] Convention plugin: `noisypad.kmp.native` (`KmpNativeConventionPlugin.kt`) creado y compilando
+- [x] Convention plugin: `watermelon.kmp.native` (`KmpNativeConventionPlugin.kt`) creado y compilando
 - [x] Build green con plugin registrado (no afecta build actual)
 
 ---
@@ -19,7 +19,7 @@
 ```kotlin
 // audio/build.gradle.kts — CAMBIAR DE:
 plugins {
-    id("noisypad.android.native")
+    id("watermelon.kmp.native")
 }
 android {
     namespace = "com.watermellonstudios.audio"
@@ -27,7 +27,7 @@ android {
 
 // A:
 plugins {
-    id("noisypad.kmp.native")
+    id("watermelon.kmp.native")
 }
 android {
     namespace = "com.watermellonstudios.audio"

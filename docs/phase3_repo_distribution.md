@@ -136,7 +136,7 @@ echo "PASS" || echo "FAIL"
 ### Contexto
 
 El modulo actual depende de `build-logic/convention/` de NoisyPad
-(plugin `noisypad.android.native`). Necesitamos un build system propio.
+(plugin `watermelon.kmp.native`). Necesitamos un build system propio.
 
 ### Tareas
 
@@ -286,7 +286,7 @@ grep -rn "noisypad" watermelon-audio/build-logic/ && echo "FAIL" || echo "PASS"
 cd watermelon-audio && ./gradlew :sample:assembleDebug
 
 # V-3B.4: CMake build works (native library produced)
-find watermelon-audio -name "libnoisypad-audio.so" | head -1 | \
+find watermelon-audio -name "libwatermelon_audio.so" | head -1 | \
   xargs test -f && echo "PASS" || echo "FAIL"
 ```
 

@@ -24,7 +24,7 @@
 #include <chrono>
 #include <thread>
 
-namespace noisypad {
+namespace watermelon_audio {
 
 // =============================================================================
 // Configuration Options
@@ -438,4 +438,4 @@ public:
     }
 };
 
-} // namespace noisypad
+} // namespace watermelon_audio

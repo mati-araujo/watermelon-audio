@@ -788,10 +788,10 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAud
     }
 
     try {
-        auto audioMode = static_cast<noisypad::AudioMode>(mode);
+        auto audioMode = static_cast<watermelon_audio::AudioMode>(mode);
 
         switch (audioMode) {
-            case noisypad::AudioMode::CHAOS_PAD:
+            case watermelon_audio::AudioMode::CHAOS_PAD:
                 LOGI("AudioNativeBridge.setAudioMode: configuring CHAOS_PAD");
                 g_jniState.engine->setOscillatorEnabled(true);
                 g_jniState.engine->setVocoderCarrierSource(false);
@@ -801,7 +801,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAud
                 }
                 break;
 
-            case noisypad::AudioMode::INPUT_FX: {
+            case watermelon_audio::AudioMode::INPUT_FX: {
                 LOGI("AudioNativeBridge.setAudioMode: configuring INPUT_FX");
                 g_jniState.engine->setOscillatorEnabled(false);
                 g_jniState.engine->setVocoderCarrierSource(true);
@@ -809,9 +809,9 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAud
                 // Ensure InputNode exists (may not have been created yet)
                 ensureInputNode();
 
-                auto& backendManager = noisypad::BackendManager::getInstance();
+                auto& backendManager = watermelon_audio::BackendManager::getInstance();
                 auto backendType = backendManager.getCurrentType();
-                bool isUsbActive = (backendType == noisypad::BackendType::LIBUSB);
+                bool isUsbActive = (backendType == watermelon_audio::BackendType::LIBUSB);
                 wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
                     "SET_MODE_INPUT_FX: inputNode=%p, backendType=%d, isUsbActive=%d",
                     static_cast<void*>(g_jniState.inputNode.get()),
@@ -846,15 +846,15 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAud
                 break;
             }
 
-            case noisypad::AudioMode::MIX:
+            case watermelon_audio::AudioMode::MIX:
                 LOGI("AudioNativeBridge.setAudioMode: configuring MIX");
                 g_jniState.engine->setOscillatorEnabled(true);
                 g_jniState.engine->setVocoderCarrierSource(true);
                 // Ensure InputNode exists for MIX mode
                 ensureInputNode();
                 if (g_jniState.inputNode) {
-                    auto& backendManager = noisypad::BackendManager::getInstance();
-                    bool isUsbActive = (backendManager.getCurrentType() == noisypad::BackendType::LIBUSB);
+                    auto& backendManager = watermelon_audio::BackendManager::getInstance();
+                    bool isUsbActive = (backendManager.getCurrentType() == watermelon_audio::BackendType::LIBUSB);
 
                     if (isUsbActive) {
                         if (g_jniState.inputNode->isInputStreamRunning()) {
@@ -900,14 +900,14 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetMod
 JNIEXPORT jstring JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetModeName(
     JNIEnv* env, jobject thiz, jint mode) {
-    const char* name = noisypad::ModeUtils::getModeName(static_cast<noisypad::AudioMode>(mode));
+    const char* name = watermelon_audio::ModeUtils::getModeName(static_cast<watermelon_audio::AudioMode>(mode));
     return env->NewStringUTF(name);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeModeRequiresInput(
     JNIEnv* env, jobject thiz, jint mode) {
-    return noisypad::ModeUtils::requiresInput(static_cast<noisypad::AudioMode>(mode)) ? JNI_TRUE : JNI_FALSE;
+    return watermelon_audio::ModeUtils::requiresInput(static_cast<watermelon_audio::AudioMode>(mode)) ? JNI_TRUE : JNI_FALSE;
 }
 
 // ==================== Input Functions ====================
@@ -1308,7 +1308,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVoc
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsbBackendAvailable(
     JNIEnv* env, jobject thiz) {
-    auto& backendManager = noisypad::BackendManager::getInstance();
+    auto& backendManager = watermelon_audio::BackendManager::getInstance();
     return backendManager.isUsbBackendAvailable() ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -1323,15 +1323,15 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUse
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelectBackend(
     JNIEnv* env, jobject thiz, jint backendId) {
-    auto& backendManager = noisypad::BackendManager::getInstance();
-    auto backendType = static_cast<noisypad::BackendType>(backendId);
+    auto& backendManager = watermelon_audio::BackendManager::getInstance();
+    auto backendType = static_cast<watermelon_audio::BackendType>(backendId);
     return backendManager.selectBackend(backendType) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetCurrentBackendType(
     JNIEnv* env, jobject thiz) {
-    auto& backendManager = noisypad::BackendManager::getInstance();
+    auto& backendManager = watermelon_audio::BackendManager::getInstance();
     return static_cast<jint>(backendManager.getCurrentType());
 }
 
@@ -1340,14 +1340,14 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsb
     JNIEnv* env, jobject thiz, jint modeId) {
     // Streaming mode is controlled via full-duplex enable
     // modeId: 0=PLAYBACK_ONLY, 1=CAPTURE_ONLY, 2=FULL_DUPLEX
-    auto& backendManager = noisypad::BackendManager::getInstance();
+    auto& backendManager = watermelon_audio::BackendManager::getInstance();
     backendManager.setFullDuplexEnabled(modeId == 2);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeConfigureUsbBackend(
     JNIEnv* env, jobject thiz, jint sampleRate, jint channels, jint bitDepth) {
-    auto& backendManager = noisypad::BackendManager::getInstance();
+    auto& backendManager = watermelon_audio::BackendManager::getInstance();
     backendManager.setSampleRate(sampleRate);
     backendManager.setBufferSize(bitDepth);  // Using bitDepth as buffer size hint
     // Note: channels parameter not directly used - backend uses its own channel config
@@ -1458,7 +1458,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeInitia
     gUsbDeviceState.fileDescriptor = fileDescriptor;
     gUsbDeviceState.usbfsPath = std::string(pathChars.c_str());
 
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     bool success = manager.initializeUsbBackend(fileDescriptor, pathChars.c_str());
 
     if (success) {
@@ -1478,7 +1478,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeCloseU
     LOGI("AudioNativeBridge.closeUsbDevice");
 
     if (gUsbDeviceState.isStreaming) {
-        auto& manager = noisypad::BackendManager::getInstance();
+        auto& manager = watermelon_audio::BackendManager::getInstance();
         auto* backend = manager.getLibusbBackend();
         if (backend) {
             backend->stop();
@@ -1486,7 +1486,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeCloseU
         gUsbDeviceState.isStreaming = false;
     }
 
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     manager.fallbackToOboe();
 
     gUsbDeviceState.fileDescriptor = -1;
@@ -1507,7 +1507,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeParseU
         return nullptr;
     }
 
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
 
     jfloat caps[7] = {1.0f, 0.0f, 48000.0f, 3.0f, 2.0f, 0.0f, 2.0f};
@@ -1554,7 +1554,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartU
 
     LOGI("AudioNativeBridge.startUsbStreaming: sampleRate=%d, channels=%d, bitDepth=%d", sampleRate, channels, bitDepth);
 
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
 
     if (!backend) {
@@ -1566,7 +1566,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartU
     backend->setBufferSize(256);
 
     auto result = backend->start();
-    if (result != noisypad::BackendResult::OK) {
+    if (result != watermelon_audio::BackendResult::OK) {
         LOGE("AudioNativeBridge.startUsbStreaming: failed to start LibusbBackend");
         return JNI_FALSE;
     }
@@ -1585,7 +1585,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStopUs
         return;
     }
 
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
 
     if (backend) {
@@ -1602,7 +1602,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
         return nullptr;
     }
 
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
 
     constexpr int STATS_SIZE = 13;
@@ -1641,18 +1641,18 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartU
         return gUsbDeviceState.isStreaming ? JNI_TRUE : JNI_FALSE;
     }
 
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
 
     if (!backend) {
         return JNI_FALSE;
     }
 
-    noisypad::UsbStreamingMode mode;
+    watermelon_audio::UsbStreamingMode mode;
     switch (streamingMode) {
-        case 0: mode = noisypad::UsbStreamingMode::PLAYBACK_ONLY; break;
-        case 1: mode = noisypad::UsbStreamingMode::CAPTURE_ONLY; break;
-        case 2: mode = noisypad::UsbStreamingMode::FULL_DUPLEX; break;
+        case 0: mode = watermelon_audio::UsbStreamingMode::PLAYBACK_ONLY; break;
+        case 1: mode = watermelon_audio::UsbStreamingMode::CAPTURE_ONLY; break;
+        case 2: mode = watermelon_audio::UsbStreamingMode::FULL_DUPLEX; break;
         default: return JNI_FALSE;
     }
 
@@ -1660,7 +1660,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartU
     backend->setSampleRate(sampleRate);
 
     auto result = backend->start();
-    if (result != noisypad::BackendResult::OK) {
+    if (result != watermelon_audio::BackendResult::OK) {
         return JNI_FALSE;
     }
 
@@ -1672,7 +1672,7 @@ JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbDeviceSupportsFullDuplex(
     JNIEnv* env, jobject thiz) {
     if (!gUsbDeviceState.isInitialized) return JNI_FALSE;
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
     return (backend && backend->supportsFullDuplex()) ? JNI_TRUE : JNI_FALSE;
 }
@@ -1681,7 +1681,7 @@ JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbDeviceHasCapture(
     JNIEnv* env, jobject thiz) {
     if (!gUsbDeviceState.isInitialized) return JNI_FALSE;
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
     return (backend && backend->hasCapture()) ? JNI_TRUE : JNI_FALSE;
 }
@@ -1690,7 +1690,7 @@ JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsbDeviceUacVersion(
     JNIEnv* env, jobject thiz) {
     if (!gUsbDeviceState.isInitialized) return 0;
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
     return backend ? static_cast<jint>(backend->getUacVersion()) : 0;
 }
@@ -1698,7 +1698,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsbDeviceDisconnected(
     JNIEnv* env, jobject thiz) {
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
     if (!backend) return JNI_TRUE;
     return !backend->isUsbDeviceReady() ? JNI_TRUE : JNI_FALSE;
@@ -1707,7 +1707,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsbD
 JNIEXPORT jintArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsbHealthStatus(
     JNIEnv* env, jobject thiz) {
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
     if (!backend) return nullptr;
 
@@ -1730,14 +1730,14 @@ JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeFallbackToOboeBackend(
     JNIEnv* env, jobject thiz) {
     LOGI("AudioNativeBridge.fallbackToOboeBackend: triggered from Kotlin");
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     manager.fallbackToOboe();
 }
 
 JNIEXPORT jfloatArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetAdaptiveBufferStats(
     JNIEnv* env, jobject thiz) {
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
     if (!backend) return nullptr;
 

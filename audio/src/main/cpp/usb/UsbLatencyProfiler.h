@@ -31,7 +31,7 @@
 #include <cmath>
 #include <algorithm>
 
-namespace noisypad {
+namespace watermelon_audio {
 namespace usb {
 
 // =============================================================================
@@ -646,4 +646,4 @@ private:
 };
 
 } // namespace usb
-} // namespace noisypad
+} // namespace watermelon_audio

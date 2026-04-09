@@ -66,7 +66,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
         JNIEnv *env, jobject thiz) {
     if (!gUsbDeviceState.isInitialized) return nullptr;
 
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
 
     constexpr int STATS_SIZE = 18;
@@ -104,7 +104,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsbProfilingEnabled(
         JNIEnv *env, jobject thiz, jboolean enabled) {
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
     if (backend) {
         auto* profiler = backend->getLatencyProfiler();
@@ -115,7 +115,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsb
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeResetUsbProfilingStats(
         JNIEnv *env, jobject thiz) {
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
     if (backend) {
         auto* profiler = backend->getLatencyProfiler();

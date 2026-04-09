@@ -25,7 +25,7 @@
 #include <cmath>
 #include <random>
 
-namespace noisypad {
+namespace watermelon_audio {
 namespace usb {
 
 // ============================================================================
@@ -402,4 +402,4 @@ inline void AudioFormatConverter::s32ToFloat(
 }
 
 } // namespace usb
-} // namespace noisypad
+} // namespace watermelon_audio

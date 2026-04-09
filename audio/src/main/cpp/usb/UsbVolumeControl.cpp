@@ -7,7 +7,7 @@
 #include "UsbVolumeControl.h"
 #include <cstring>
 
-namespace noisypad {
+namespace watermelon_audio {
 namespace usb {
 
 UsbVolumeControl::UsbVolumeControl(libusb_device_handle* deviceHandle,
@@ -362,4 +362,4 @@ float UsbVolumeControl::getVolumeDb() const {
 }
 
 } // namespace usb
-} // namespace noisypad
+} // namespace watermelon_audio

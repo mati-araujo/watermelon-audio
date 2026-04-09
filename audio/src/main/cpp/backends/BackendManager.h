@@ -30,7 +30,7 @@
 #include <atomic>
 #include <functional>
 
-namespace noisypad {
+namespace watermelon_audio {
 
 // Forward declarations
 class OboeBackend;
@@ -267,4 +267,4 @@ private:
     void applyConfigToBackend(IAudioBackend* backend);
 };
 
-} // namespace noisypad
+} // namespace watermelon_audio

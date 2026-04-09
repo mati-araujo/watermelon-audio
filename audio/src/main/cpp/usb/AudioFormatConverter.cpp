@@ -7,7 +7,7 @@
 #include "AudioFormatConverter.h"
 #include <vector>
 
-namespace noisypad {
+namespace watermelon_audio {
 namespace usb {
 
 AudioFormatConverter::AudioFormatConverter()
@@ -119,4 +119,4 @@ void AudioFormatConverter::convertFormat(
 }
 
 } // namespace usb
-} // namespace noisypad
+} // namespace watermelon_audio

@@ -22,7 +22,7 @@
 #include <atomic>
 #include <condition_variable>
 
-namespace noisypad {
+namespace watermelon_audio {
 
 /**
  * OboeBackend
@@ -162,4 +162,4 @@ private:
     void enableDenormalFlush();
 };
 
-} // namespace noisypad
+} // namespace watermelon_audio

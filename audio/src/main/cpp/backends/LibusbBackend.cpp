@@ -23,7 +23,7 @@
 #define LOGE(...) wma::logMessage(wma::LogLevel::ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGD(...) wma::logMessage(wma::LogLevel::DEBUG, LOG_TAG, __VA_ARGS__)
 
-namespace noisypad {
+namespace watermelon_audio {
 
 // ============================================================================
 // Constructor / Destructor
@@ -1284,4 +1284,4 @@ bool LibusbBackend::isUsingHardwareInputVolume() const {
     return mInputVolumeControl && mInputVolumeControl->isUsingHardwareVolume();
 }
 
-} // namespace noisypad
+} // namespace watermelon_audio

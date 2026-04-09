@@ -6,7 +6,7 @@
 #include <vector>
 #include <functional>
 
-// Forward declarations (global namespace - these are NOT in noisypad namespace)
+// Forward declarations (global namespace - these are NOT in watermelon_audio namespace)
 class OscillatorNode;
 class InputNode;
 class MixerNode;
@@ -26,7 +26,7 @@ class EffectChainNode;
  * - Thread-safe parameter updates
  */
 
-namespace noisypad {
+namespace watermelon_audio {
 
 /**
  * @brief Callback type for custom parameter application.
@@ -205,4 +205,4 @@ private:
     mutable std::mutex mCallbackMutex;
 };
 
-} // namespace noisypad
+} // namespace watermelon_audio

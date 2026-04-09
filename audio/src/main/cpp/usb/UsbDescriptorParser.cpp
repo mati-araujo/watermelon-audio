@@ -15,7 +15,7 @@
 #define LOGW(...) wma::logMessage(wma::LogLevel::WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) wma::logMessage(wma::LogLevel::ERROR, LOG_TAG, __VA_ARGS__)
 
-namespace noisypad {
+namespace watermelon_audio {
 namespace usb {
 
 // ============================================================================
@@ -980,4 +980,4 @@ std::string UsbAudioFormat::toString() const {
 }
 
 } // namespace usb
-} // namespace noisypad
+} // namespace watermelon_audio

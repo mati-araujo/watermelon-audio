@@ -126,7 +126,7 @@ la interfaz del looper controller a `audio-kotlin/commonMain/api/`.
 ```kotlin
 // audio/build.gradle.kts
 plugins {
-    id("noisypad.kmp.native")  // New convention plugin for KMP + native
+    id("watermelon.kmp.native")  // New convention plugin for KMP + native
     // OR manual setup:
     kotlin("multiplatform")
     id("com.android.library")
@@ -439,7 +439,7 @@ expect object NativeLibraryLoader {
 actual object NativeLibraryLoader {
     private var loaded = false
     actual fun loadAudioLibrary() {
-        System.loadLibrary("noisypad-audio")
+        System.loadLibrary("watermelon_audio")
         loaded = true
     }
     actual fun isLoaded() = loaded
@@ -710,7 +710,7 @@ audio/src/
 
 ### Build system changes
 
-- `audio/build.gradle.kts`: `noisypad.android.native` → `noisypad.kmp.native`
+- `audio/build.gradle.kts`: `watermelon.kmp.native` → `watermelon.kmp.native`
 - `KmpNativeConventionPlugin.kt`: aplica `kotlin-multiplatform` + `com.android.library`
 - `AndroidLibraryConventionPlugin.kt`: agrega explicit `kotlin-android` + JVM target 11
 - `AndroidApplicationConventionPlugin.kt`: agrega explicit `kotlin-android` + JVM target 11

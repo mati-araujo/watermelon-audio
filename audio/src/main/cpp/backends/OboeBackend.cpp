@@ -13,7 +13,7 @@
 #define LOGW(...) wma::logMessage(wma::LogLevel::WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) wma::logMessage(wma::LogLevel::ERROR, LOG_TAG, __VA_ARGS__)
 
-namespace noisypad {
+namespace watermelon_audio {
 
 // =============================================================================
 // Constructor / Destructor
@@ -432,4 +432,4 @@ void OboeBackend::enableDenormalFlush() {
     wma::platform::flushDenormals();
 }
 
-} // namespace noisypad
+} // namespace watermelon_audio

@@ -58,9 +58,9 @@ WmaEngine* wma_engine_create(void) {
         auto* e = new WmaEngine();
 
         // Create BackendManager owned by this engine (Phase 0D)
-        e->backendManager = std::make_unique<noisypad::BackendManager>();
+        e->backendManager = std::make_unique<watermelon_audio::BackendManager>();
         // Register as global instance so legacy code (JNI, AudioEngine) can find it
-        noisypad::BackendManager::setGlobalInstance(e->backendManager.get());
+        watermelon_audio::BackendManager::setGlobalInstance(e->backendManager.get());
 
         e->engine = std::make_unique<AudioEngine>();
         return e;
@@ -81,7 +81,7 @@ void wma_engine_destroy(WmaEngine* engine) {
     }
     // Clear global instance before destroying BackendManager
     if (engine->backendManager) {
-        noisypad::BackendManager::setGlobalInstance(nullptr);
+        watermelon_audio::BackendManager::setGlobalInstance(nullptr);
         engine->backendManager.reset();
     }
     delete engine;
@@ -558,10 +558,10 @@ void wma_set_audio_mode(WmaEngine* engine, int mode) {
     WMA_CHECK_VOID(engine);
     if (mode < 0 || mode > 2) return;
 
-    auto audioMode = static_cast<noisypad::AudioMode>(mode);
+    auto audioMode = static_cast<watermelon_audio::AudioMode>(mode);
 
     switch (audioMode) {
-        case noisypad::AudioMode::CHAOS_PAD:
+        case watermelon_audio::AudioMode::CHAOS_PAD:
             engine->engine->setOscillatorEnabled(true);
             engine->engine->setVocoderCarrierSource(false);
             engine->engine->setVocoderModulatorSource(engine->inputNode != nullptr);
@@ -570,7 +570,7 @@ void wma_set_audio_mode(WmaEngine* engine, int mode) {
             }
             break;
 
-        case noisypad::AudioMode::INPUT_FX:
+        case watermelon_audio::AudioMode::INPUT_FX:
             engine->engine->setOscillatorEnabled(false);
             engine->engine->setVocoderCarrierSource(true);
             ensureInputNode(engine);
@@ -583,7 +583,7 @@ void wma_set_audio_mode(WmaEngine* engine, int mode) {
             }
             break;
 
-        case noisypad::AudioMode::MIX:
+        case watermelon_audio::AudioMode::MIX:
             engine->engine->setOscillatorEnabled(true);
             engine->engine->setVocoderCarrierSource(true);
             ensureInputNode(engine);
@@ -616,7 +616,7 @@ float wma_get_mode_transition_progress(const WmaEngine* engine) {
 }
 
 bool wma_mode_requires_input(int mode) {
-    return noisypad::ModeUtils::requiresInput(static_cast<noisypad::AudioMode>(mode));
+    return watermelon_audio::ModeUtils::requiresInput(static_cast<watermelon_audio::AudioMode>(mode));
 }
 
 /* ================================================================
@@ -841,40 +841,40 @@ void wma_set_use_backend_manager(WmaEngine* engine, bool use) {
 }
 
 bool wma_select_backend(int backend_id) {
-    auto& manager = noisypad::BackendManager::getInstance();
-    return manager.selectBackend(static_cast<noisypad::BackendType>(backend_id));
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    return manager.selectBackend(static_cast<watermelon_audio::BackendType>(backend_id));
 }
 
 int wma_get_backend_type(void) {
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     return static_cast<int>(manager.getCurrentType());
 }
 
 bool wma_is_usb_available(void) {
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     return manager.isUsbBackendAvailable();
 }
 
 void wma_set_usb_streaming_mode(int mode_id) {
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     manager.setFullDuplexEnabled(mode_id == 2);
 }
 
 void wma_configure_usb_backend(int sample_rate, int channels, int bit_depth) {
     (void)channels;
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     manager.setSampleRate(sample_rate);
     manager.setBufferSize(bit_depth);
 }
 
 bool wma_usb_init_device(int file_descriptor, const char* usbfs_path) {
     if (file_descriptor < 0 || !usbfs_path) return false;
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     return manager.initializeUsbBackend(file_descriptor, usbfs_path);
 }
 
 void wma_usb_close_device(void) {
-    auto& manager = noisypad::BackendManager::getInstance();
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     manager.fallbackToOboe();
 }
 

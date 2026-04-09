@@ -17,7 +17,7 @@
 #include <optional>
 #include <functional>
 
-namespace noisypad {
+namespace watermelon_audio {
 namespace usb {
 
 // ============================================================================
@@ -500,4 +500,4 @@ struct UsbStreamConfig {
 };
 
 } // namespace usb
-} // namespace noisypad
+} // namespace watermelon_audio
