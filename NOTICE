@@ -1,0 +1,36 @@
+Watermelon Audio
+Copyright (c) 2026 Watermelon Studios
+
+This product includes the following third-party software:
+
+================================================================================
+
+libusb 1.0.27
+https://github.com/libusb/libusb
+
+Copyright (c) 2001 Johannes Erdfelt <johannes@erdfelt.com>
+Copyright (c) 2007-2009 Daniel Drake <dsd@gentoo.org>
+Copyright (c) 2010-2012 Peter Stuge <peter@stuge.se>
+Copyright (c) 2008-2016 Nathan Hjelm <hjelmn@users.sourceforge.net>
+Copyright (c) 2009-2013 Pete Batard <pete@akeo.ie>
+Copyright (c) 2009-2013 Ludovic Rousseau <ludovic.rousseau@gmail.com>
+
+Licensed under the GNU Lesser General Public License v2.1 (LGPL-2.1).
+See: audio/src/main/cpp/thirdparty/libusb/COPYING
+
+libusb is statically linked into this library. In compliance with
+LGPL-2.1 Section 6, the complete source code for libusb is included in
+audio/src/main/cpp/thirdparty/libusb/. Users may relink against a
+modified version of libusb by rebuilding this project from source.
+Source: https://github.com/mati-araujo/watermelon-audio
+
+================================================================================
+
+TinySoundFont 0.9
+https://github.com/schellingb/TinySoundFont
+
+Copyright (c) 2017-2025 Bernhard Schelling
+Based on SFZero, Copyright (c) 2012 Steve Folta
+
+Licensed under the MIT License.
+See: audio/src/main/cpp/thirdparty/tinysoundfont/tsf.h (header contains license)
