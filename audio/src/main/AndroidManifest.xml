@@ -7,7 +7,7 @@
     <!-- Declare that this module uses audio features -->
     <uses-feature
         android:name="android.hardware.audio.output"
-        android:required="true" />
+        android:required="false" />
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="false" />

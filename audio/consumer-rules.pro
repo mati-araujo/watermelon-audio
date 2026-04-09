@@ -6,8 +6,10 @@
     native <methods>;
 }
 
-# Keep the native bridge (unified JNI bindings)
--keep class com.watermellonstudios.audio.internal.bridge.AudioNativeBridge { *; }
+# Keep the native bridge (JNI method signatures required at runtime)
+-keepclasseswithmembernames class com.watermellonstudios.audio.internal.bridge.AudioNativeBridge {
+    native <methods>;
+}
 
 # Keep public API classes
 -keep class com.watermellonstudios.audio.api.** { *; }

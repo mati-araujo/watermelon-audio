@@ -22,6 +22,7 @@ class KmpNativeConventionPlugin : Plugin<Project> {
 
             extensions.configure<LibraryExtension> {
                 compileSdk = libs.version("compileSdk").toInt()
+                ndkVersion = libs.version("ndk")
 
                 defaultConfig {
                     minSdk = libs.version("minSdk").toInt()

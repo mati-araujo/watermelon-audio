@@ -31,9 +31,8 @@ jobs:
       - name: Install NDK and CMake
         run: |
           yes | sdkmanager --install \
-            "ndk;$(sdkmanager --list 2>/dev/null | grep -oP 'ndk;\K[0-9.]+' | sort -V | tail -1)" \
-            "cmake;3.22.1" \
-          || true
+            "ndk;28.2.13676358" \
+            "cmake;3.22.1"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
