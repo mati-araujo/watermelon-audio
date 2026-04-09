@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ========== VERSION FROM GRADLE ==========
-# Passed via -DWMA_PROJECT_VERSION=... from convention plugin.
+# Passed via -DWMA_PROJECT_VERSION=... from audio/build.gradle.kts.
 # Falls back to hardcoded values in watermelon_audio.h for standalone builds.
 if(DEFINED WMA_PROJECT_VERSION AND NOT WMA_PROJECT_VERSION STREQUAL "unspecified")
     string(REPLACE "." ";" _WMA_VERSION_PARTS "${WMA_PROJECT_VERSION}")
