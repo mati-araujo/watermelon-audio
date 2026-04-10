@@ -1065,6 +1065,17 @@ void LibusbBackend::dspThreadFunc() {
     int consecutiveWriteErrors = 0;
     static constexpr int MAX_CONSECUTIVE_ERRORS = 10;
 
+    // Per-window counters for the periodic INPUTFX_DIAG log. They cover the
+    // last ~300 DSP callbacks and help diagnose "no sound in input_fx mode"
+    // situations: if inputReadOk stays at 0 despite mSelectedCapture being
+    // set, we know readInput is failing (ring underrun from the USB side);
+    // if inputReadOk is climbing but the last observed peak is 0, the USB
+    // transfers are delivering silence from the device.
+    int inputReadOkCount = 0;
+    int inputReadFailCount = 0;
+    float lastInputPeakObserved = 0.0f;
+    size_t lastInputAvailBefore = 0;
+
     while (mDspRunning.load(std::memory_order_acquire)) {
         // P0-2: Check for device disconnection
         if (mTransferManager && mTransferManager->isDeviceDisconnected()) {
@@ -1140,7 +1151,11 @@ void LibusbBackend::dspThreadFunc() {
         // Get input data if capture is enabled
         const float* inputPtr = nullptr;
         if (mSelectedCapture) {
+            // Snapshot ring availability before the read so the periodic
+            // diagnostic log can report whether the ring was starving.
+            lastInputAvailBefore = mTransferManager->getInputBufferAvailable();
             if (mTransferManager->readInput(inputBuffer.data(), inputSamples)) {
+                ++inputReadOkCount;
                 // Apply digital input volume/mute if not using hardware control
                 if (!isUsingHardwareInputVolume()) {
                     bool inputMuted = mDigitalInputMute.load(std::memory_order_relaxed);
@@ -1171,7 +1186,20 @@ void LibusbBackend::dspThreadFunc() {
                 size_t stereoSamples = static_cast<size_t>(framesPerBlock * 2);
                 std::memcpy(mDspLastValidInput.data(), stereoSrc, stereoSamples * sizeof(float));
                 mDspHasValidInput = true;
+
+                // Track the peak of the most recent valid block for the
+                // diagnostic log (cheap: bounded scan over the stereo tail).
+                {
+                    const size_t scanLimit = std::min(stereoSamples, static_cast<size_t>(128));
+                    float peak = 0.0f;
+                    for (size_t i = 0; i < scanLimit; ++i) {
+                        float a = std::abs(stereoSrc[i]);
+                        if (a > peak) peak = a;
+                    }
+                    lastInputPeakObserved = peak;
+                }
             } else if (mDspHasValidInput) {
+                ++inputReadFailCount;
                 // Underrun: fade the last valid block to silence with a linear ramp.
                 // This produces a smooth tail instead of a repeated transient or hard cut.
                 size_t totalStereoSamples = static_cast<size_t>(framesPerBlock * 2);
@@ -1187,30 +1215,47 @@ void LibusbBackend::dspThreadFunc() {
                     wma::logMessage(wma::LogLevel::WARN, "INPUTFX_DIAG",
                         "USB_INPUT_UNDERRUN: using faded last block (%d)", underrunLogCount);
                 }
+            } else {
+                // readInput failed AND we have no previous block to fade
+                // from. inputPtr stays nullptr — the callback will see
+                // "no input this block". Count it so the diagnostic log
+                // can surface a persistent starve before anyone notices
+                // the silence.
+                ++inputReadFailCount;
             }
         }
 
         // Call audio callback
         float* outputPtr = mSelectedPlayback ? outputBuffer.data() : nullptr;
 
-        // DIAGNOSTIC: Log input state periodically
+        // DIAGNOSTIC: Log input state periodically (every ~300 DSP callbacks
+        // ≈ 1.6 s at 48 kHz / 256-frame blocks). The extra fields — ring
+        // availability before the read, readInput success/fail ratio for
+        // the window, and the peak of the last valid input block — are the
+        // minimum set needed to diagnose "no sound in input_fx mode":
+        //   - fail >> ok  → the USB input ring is starving (device not
+        //                    delivering packets, or processInputTransfer is
+        //                    failing to write to the ring)
+        //   - ok >> fail, peak ≈ 0 → the device IS delivering packets, but
+        //                             they are silence (nothing plugged in,
+        //                             or wrong altsetting / channel layout)
+        //   - ok >> fail, peak > 0  → input path is healthy, the issue is
+        //                              somewhere in the user callback
         static int usbDspDiagCount = 0;
         if (++usbDspDiagCount >= 300) {
-            float inputPeak = 0.0f;
-            if (inputPtr != nullptr) {
-                int samples = std::min(framesPerBlock * 2, 64);
-                for (int i = 0; i < samples; ++i) {
-                    float abs = std::abs(inputPtr[i]);
-                    if (abs > inputPeak) inputPeak = abs;
-                }
-            }
+            const int ioTotal = inputReadOkCount + inputReadFailCount;
             wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
-                "USB_DSP: hasCapture=%d, inputPtr=%p, outputPtr=%p, "
-                "frames=%d, inputPeak=%.5f, streamMode=%d",
+                "USB_DSP: hasCapture=%d inputPtr=%p outputPtr=%p "
+                "frames=%d streamMode=%d | read ok=%d fail=%d ratio=%.2f "
+                "ringAvailPre=%zu lastPeak=%.5f",
                 mSelectedCapture.has_value() ? 1 : 0, inputPtr, outputPtr,
-                framesPerBlock, inputPeak,
-                static_cast<int>(mStreamingMode));
+                framesPerBlock, static_cast<int>(mStreamingMode),
+                inputReadOkCount, inputReadFailCount,
+                ioTotal > 0 ? static_cast<float>(inputReadOkCount) / ioTotal : 0.0f,
+                lastInputAvailBefore, lastInputPeakObserved);
             usbDspDiagCount = 0;
+            inputReadOkCount = 0;
+            inputReadFailCount = 0;
         }
 
         if (mCallback) {
