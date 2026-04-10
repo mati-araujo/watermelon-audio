@@ -888,8 +888,18 @@ void UsbTransferManager::eventLoopThread() {
 
     uint64_t lastWatchdogCheck = getCurrentTimeMs();
 
-    while (!mStopRequested.load(std::memory_order_acquire) &&
-           !mDeviceDisconnected.load(std::memory_order_acquire)) {
+    // Deadline for the drain phase of stop(): once mStopRequested is set we
+    // keep iterating until every pending transfer has produced its CANCELLED
+    // callback, but never longer than this so we can't deadlock if a
+    // callback is somehow lost.
+    constexpr uint64_t DRAIN_DEADLINE_MS = 500;
+    uint64_t drainStartMs = 0;
+
+    while (true) {
+        if (mDeviceDisconnected.load(std::memory_order_acquire)) {
+            break;
+        }
+
         // Handle USB events
         int result = libusb_handle_events_timeout_completed(mContext, &timeout, nullptr);
         if (result != LIBUSB_SUCCESS && result != LIBUSB_ERROR_TIMEOUT) {
@@ -900,22 +910,51 @@ void UsbTransferManager::eventLoopThread() {
             }
         }
 
-        // Watchdog: Check periodically for device responsiveness
-        uint64_t now = getCurrentTimeMs();
-        if (now - lastWatchdogCheck >= WATCHDOG_CHECK_INTERVAL_MS) {
-            lastWatchdogCheck = now;
-            if (checkWatchdog()) {
-                LOGW("Watchdog detected device unresponsive, triggering disconnect");
-                reportError(UsbAudioError::DEVICE_DISCONNECTED, "Device unresponsive (watchdog timeout)");
-                break;
+        // Watchdog: Check periodically for device responsiveness (only while
+        // the stream is actually running — during the drain phase we expect
+        // no new transfers to complete).
+        if (!mStopRequested.load(std::memory_order_acquire)) {
+            uint64_t now = getCurrentTimeMs();
+            if (now - lastWatchdogCheck >= WATCHDOG_CHECK_INTERVAL_MS) {
+                lastWatchdogCheck = now;
+                if (checkWatchdog()) {
+                    LOGW("Watchdog detected device unresponsive, triggering disconnect");
+                    reportError(UsbAudioError::DEVICE_DISCONNECTED,
+                                "Device unresponsive (watchdog timeout)");
+                    break;
+                }
             }
         }
 
-        // Check if all transfers have completed (during stop)
-        if (mStopRequested.load() &&
-            mOutputPendingCount.load() == 0 &&
-            mInputPendingCount.load() == 0) {
-            break;
+        // Exit condition — this is the only place we leave the loop during
+        // a graceful stop(). We deliberately keep running after mStopRequested
+        // goes true until every pending transfer has delivered its CANCELLED
+        // callback, because libusb keeps those in its flying_transfers list
+        // until the callback fires. Freeing the transfer structs (which
+        // happens after stop() returns) while libusb still has pointers to
+        // them causes use-after-free crashes in the next libusb_control_transfer
+        // that happens to process events on the same context — which is
+        // exactly what stage 1's sample-rate negotiation does on every
+        // backend restart.
+        if (mStopRequested.load(std::memory_order_acquire)) {
+            if (drainStartMs == 0) {
+                drainStartMs = getCurrentTimeMs();
+            }
+            const int outPending = mOutputPendingCount.load(std::memory_order_acquire);
+            const int inPending = mInputPendingCount.load(std::memory_order_acquire);
+            if (outPending == 0 && inPending == 0) {
+                break;
+            }
+            // Safety timeout: if a cancelled callback never arrives after
+            // half a second, give up rather than blocking the backend
+            // shutdown forever. Leaks a transfer struct in the worst case,
+            // which is still preferable to a deadlocked teardown.
+            if (getCurrentTimeMs() - drainStartMs > DRAIN_DEADLINE_MS) {
+                LOGW("Drain deadline exceeded after stop(): "
+                     "output pending=%d input pending=%d — breaking anyway",
+                     outPending, inPending);
+                break;
+            }
         }
     }
 
