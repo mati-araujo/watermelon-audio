@@ -34,6 +34,11 @@ enum class UsbTestType(val id: Int, val displayName: String, val description: St
         id = 4,
         displayName = "Full Diagnostic",
         description = "Run all tests and generate comprehensive report"
+    ),
+    RATE_NEGOTIATION_SWEEP(
+        id = 5,
+        displayName = "Rate Negotiation Sweep",
+        description = "Iterate common sample rates and verify SET_CUR is honored end-to-end"
     );
 
     companion object {
@@ -406,6 +411,52 @@ object UsbTestPresets {
             testType = UsbTestType.LOOPBACK,
             streamingMode = UsbStreamingMode.FULL_DUPLEX,
             durationMs = 10000
+        )
+    )
+
+    /**
+     * Stage 1 — sample-rate sweep. Verifies that the host's class-specific
+     * SET_CUR negotiation is actually honored by the device end-to-end.
+     * The runner re-creates the stream at each rate for ~2s, validates that
+     * transfers are completing and that the underrun count stays bounded.
+     *
+     * Each entry is the same configuration except for sampleRate. The runner
+     * is responsible for collapsing the suite into a single
+     * RATE_NEGOTIATION_SWEEP test result with per-rate stats embedded in
+     * `statsSamples`.
+     */
+    val RATE_NEGOTIATION_SWEEP = listOf(
+        UsbTestConfig(
+            testType = UsbTestType.RATE_NEGOTIATION_SWEEP,
+            sampleRate = 44100,
+            bitDepth = 24,
+            durationMs = 2000,
+            maxAllowedLatencyMs = 30.0,
+            maxAllowedUnderruns = 5
+        ),
+        UsbTestConfig(
+            testType = UsbTestType.RATE_NEGOTIATION_SWEEP,
+            sampleRate = 48000,
+            bitDepth = 24,
+            durationMs = 2000,
+            maxAllowedLatencyMs = 30.0,
+            maxAllowedUnderruns = 5
+        ),
+        UsbTestConfig(
+            testType = UsbTestType.RATE_NEGOTIATION_SWEEP,
+            sampleRate = 88200,
+            bitDepth = 24,
+            durationMs = 2000,
+            maxAllowedLatencyMs = 30.0,
+            maxAllowedUnderruns = 5
+        ),
+        UsbTestConfig(
+            testType = UsbTestType.RATE_NEGOTIATION_SWEEP,
+            sampleRate = 96000,
+            bitDepth = 24,
+            durationMs = 2000,
+            maxAllowedLatencyMs = 30.0,
+            maxAllowedUnderruns = 5
         )
     )
 }
