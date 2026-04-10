@@ -262,57 +262,123 @@ bool LibusbBackend::selectBestInterfaces() {
          mStreamingMode == UsbStreamingMode::CAPTURE_ONLY ? "CAPTURE_ONLY" : "FULL_DUPLEX",
          needsPlayback, needsCapture);
 
-    // Find best playback interface matching requested sample rate
-    if (needsPlayback && !mUsbDevice->playbackInterfaces.empty()) {
-        // Try to find interface with requested sample rate
-        for (const auto& iface : mUsbDevice->playbackInterfaces) {
-            if (iface.format.supportsSampleRate(mRequestedSampleRate)) {
-                mSelectedPlayback = iface;
-                LOGI("Selected playback: IF%d Alt%d, %dHz, %dch, %dbit",
-                     iface.interfaceNumber, iface.alternateSetting,
-                     mRequestedSampleRate, iface.format.channels, iface.format.bitResolution);
-                break;
+    const bool isUac2 = (mUsbDevice->uacVersion == 2);
+
+    // Helper: log every altsetting of a direction so operators can see
+    // exactly what the device offered vs what we picked.
+    auto logAltsettings = [](const char* label,
+                              const std::vector<usb::UsbStreamingInterface>& list) {
+        LOGI("Available %s altsettings (%zu):", label, list.size());
+        for (size_t i = 0; i < list.size(); ++i) {
+            const auto& iface = list[i];
+            char rateBuf[128] = {0};
+            if (iface.format.hasContinuousRates) {
+                snprintf(rateBuf, sizeof(rateBuf), "%d-%d",
+                         iface.format.minSampleRate, iface.format.maxSampleRate);
+            } else if (!iface.format.sampleRates.empty()) {
+                size_t pos = 0;
+                for (size_t j = 0; j < iface.format.sampleRates.size() &&
+                                   pos + 8 < sizeof(rateBuf); ++j) {
+                    pos += snprintf(rateBuf + pos, sizeof(rateBuf) - pos,
+                                    "%s%d", (j == 0 ? "" : ","),
+                                    iface.format.sampleRates[j]);
+                }
+            } else {
+                snprintf(rateBuf, sizeof(rateBuf), "unknown");
+            }
+            LOGI("  [%zu] IF%d Alt%d: %dch/%dbit rates={%s} ep=0x%02x fb=%s",
+                 i, iface.interfaceNumber, iface.alternateSetting,
+                 iface.format.channels, iface.format.bitResolution, rateBuf,
+                 iface.dataEndpoint.address,
+                 iface.feedbackEndpoint ? "yes" : "no");
+        }
+    };
+
+    // Helper: score and pick the best altsetting in a given direction.
+    // Scoring: prefer higher bit depth first, then more channels. A UAC 1.0
+    // altsetting must explicitly list the requested rate; in UAC 2.0 the
+    // parser doesn't populate rates (they live in the clock source and
+    // stage 3 will query them via RANGE), so we accept any altsetting with
+    // a sane channel/bitdepth combination.
+    auto pickBest = [&](const std::vector<usb::UsbStreamingInterface>& list)
+        -> const usb::UsbStreamingInterface* {
+        const usb::UsbStreamingInterface* best = nullptr;
+        int bestScore = -1;
+        for (const auto& iface : list) {
+            if (iface.format.channels == 0 || iface.format.bitResolution == 0) {
+                continue;  // malformed / zero-bandwidth
+            }
+            if (!isUac2 &&
+                !iface.format.sampleRates.empty() &&
+                !iface.format.supportsSampleRate(mRequestedSampleRate)) {
+                continue;  // UAC 1.0 altsetting that doesn't list our rate
+            }
+            // Weight bit depth 100:1 over channels so a higher-quality
+            // stereo always beats a lower-quality multichannel variant.
+            int score = static_cast<int>(iface.format.bitResolution) * 100
+                      + static_cast<int>(iface.format.channels);
+            if (score > bestScore) {
+                best = &iface;
+                bestScore = score;
             }
         }
+        return best;
+    };
 
-        // Fallback to first available
-        if (!mSelectedPlayback && !mUsbDevice->playbackInterfaces.empty()) {
+    // Playback
+    if (needsPlayback && !mUsbDevice->playbackInterfaces.empty()) {
+        logAltsettings("playback", mUsbDevice->playbackInterfaces);
+        const auto* picked = pickBest(mUsbDevice->playbackInterfaces);
+        if (picked) {
+            mSelectedPlayback = *picked;
+            LOGI("Selected playback: IF%d Alt%d, %dHz, %dch, %dbit",
+                 picked->interfaceNumber, picked->alternateSetting,
+                 mRequestedSampleRate,
+                 picked->format.channels, picked->format.bitResolution);
+        } else {
+            // Last-resort: nothing scored. Fall back to the first entry and
+            // let the transfer manager surface an error if it really doesn't
+            // work.
             mSelectedPlayback = mUsbDevice->playbackInterfaces[0];
-            // Use first available sample rate
             if (!mSelectedPlayback->format.sampleRates.empty()) {
                 mRequestedSampleRate = mSelectedPlayback->format.sampleRates[0];
             } else if (mSelectedPlayback->format.hasContinuousRates) {
-                mRequestedSampleRate = std::min(48000, mSelectedPlayback->format.maxSampleRate);
+                mRequestedSampleRate = std::min(48000,
+                    mSelectedPlayback->format.maxSampleRate);
             }
-            LOGI("Fallback playback: IF%d Alt%d, %dHz",
-                 mSelectedPlayback->interfaceNumber, mSelectedPlayback->alternateSetting,
+            LOGW("No scoring playback candidate; using IF%d Alt%d as "
+                 "last-resort fallback (%dch/%dbit @ %dHz)",
+                 mSelectedPlayback->interfaceNumber,
+                 mSelectedPlayback->alternateSetting,
+                 mSelectedPlayback->format.channels,
+                 mSelectedPlayback->format.bitResolution,
                  mRequestedSampleRate);
         }
     }
 
-    // Find best capture interface
+    // Capture
     if (needsCapture && !mUsbDevice->captureInterfaces.empty()) {
-        for (const auto& iface : mUsbDevice->captureInterfaces) {
-            if (iface.format.supportsSampleRate(mRequestedSampleRate)) {
-                mSelectedCapture = iface;
-                LOGI("Selected capture: IF%d Alt%d, %dHz, %dch, %dbit",
-                     iface.interfaceNumber, iface.alternateSetting,
-                     mRequestedSampleRate, iface.format.channels, iface.format.bitResolution);
-                break;
-            }
-        }
-
-        // Fallback to first available capture if no matching sample rate
-        if (!mSelectedCapture && !mUsbDevice->captureInterfaces.empty()) {
+        logAltsettings("capture", mUsbDevice->captureInterfaces);
+        const auto* picked = pickBest(mUsbDevice->captureInterfaces);
+        if (picked) {
+            mSelectedCapture = *picked;
+            LOGI("Selected capture: IF%d Alt%d, %dHz, %dch, %dbit",
+                 picked->interfaceNumber, picked->alternateSetting,
+                 mRequestedSampleRate,
+                 picked->format.channels, picked->format.bitResolution);
+        } else {
             mSelectedCapture = mUsbDevice->captureInterfaces[0];
-            // If capture-only mode, use capture's sample rate
             if (mStreamingMode == UsbStreamingMode::CAPTURE_ONLY) {
                 if (!mSelectedCapture->format.sampleRates.empty()) {
                     mRequestedSampleRate = mSelectedCapture->format.sampleRates[0];
                 }
             }
-            LOGI("Fallback capture: IF%d Alt%d, %dHz",
-                 mSelectedCapture->interfaceNumber, mSelectedCapture->alternateSetting,
+            LOGW("No scoring capture candidate; using IF%d Alt%d as "
+                 "last-resort fallback (%dch/%dbit @ %dHz)",
+                 mSelectedCapture->interfaceNumber,
+                 mSelectedCapture->alternateSetting,
+                 mSelectedCapture->format.channels,
+                 mSelectedCapture->format.bitResolution,
                  mRequestedSampleRate);
         }
     }
@@ -853,10 +919,44 @@ bool LibusbBackend::setupTransferManager() {
             config.pcmFormat = usb::PcmFormat::PCM_S16_LE;
     }
 
-    // Calculate frames per packet (1ms at given sample rate)
-    config.framesPerPacket = mRequestedSampleRate / 1000;
-    config.packetsPerTransfer = 8;  // 8ms per transfer
-    config.numTransfers = 3;        // Triple buffering
+    // Determine the actual USB speed of the attached device. UAC 2.0 almost
+    // always runs at USB 2.0 high-speed, where iso endpoints are polled once
+    // per 125 µs microframe (8 packets per 1 ms SOF frame). UAC 1.0 is
+    // full-speed: 1 iso packet per 1 ms frame. The iso packet sizing has to
+    // match that cadence exactly — a high-speed device that receives a
+    // full-speed-sized packet (8× too large) consumes it 8× too fast per
+    // microframe and produces grossly distorted audio, which is what we saw
+    // on the first real UAC 2.0 test device (UGREEN CM720).
+    libusb_device* dev = libusb_get_device(mDeviceHandle);
+    const int speed = dev ? libusb_get_device_speed(dev) : LIBUSB_SPEED_FULL;
+    const bool isHighSpeed = (speed == LIBUSB_SPEED_HIGH ||
+                               speed == LIBUSB_SPEED_SUPER ||
+                               speed == LIBUSB_SPEED_SUPER_PLUS);
+    const int packetsPerMs = isHighSpeed ? 8 : 1;
+    const char* speedName =
+        (speed == LIBUSB_SPEED_LOW)        ? "LOW"   :
+        (speed == LIBUSB_SPEED_FULL)       ? "FULL"  :
+        (speed == LIBUSB_SPEED_HIGH)       ? "HIGH"  :
+        (speed == LIBUSB_SPEED_SUPER)      ? "SUPER" :
+        (speed == LIBUSB_SPEED_SUPER_PLUS) ? "SUPER+" :
+                                              "UNKNOWN";
+
+    // Frames per iso packet. At 48 kHz:
+    //   full-speed: 48000 / 1000 = 48 frames/packet
+    //   high-speed: 48000 / 8000 = 6  frames/packet  (microframes)
+    // Non-integer rates (44.1 kHz, 88.2 kHz) truncate here; the clock
+    // controller's fractional accumulator compensates via the feedback
+    // endpoint when available.
+    config.framesPerPacket = mRequestedSampleRate / (packetsPerMs * 1000);
+    // Keep ~8 ms of audio per libusb transfer in both speed classes so the
+    // event-loop cadence is constant regardless of USB speed.
+    config.packetsPerTransfer = 8 * packetsPerMs;  // 8 on FS, 64 on HS
+    config.numTransfers = 3;                       // Triple buffering
+
+    LOGI("USB speed: %s (libusb=%d) → %d packets/ms, %d frames/packet, "
+         "%d packets/xfer",
+         speedName, speed, packetsPerMs,
+         config.framesPerPacket, config.packetsPerTransfer);
 
     // Ring buffer size: start with reduced default (100ms instead of 200ms)
     // Adaptive buffer controller may adjust this based on system performance
