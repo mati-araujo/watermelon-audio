@@ -450,23 +450,91 @@ size_t UsbTransferManager::getInputBufferAvailable() const {
 // ============================================================================
 
 bool UsbTransferManager::allocateTransfers() {
-    int numPackets = mConfig.packetsPerTransfer;
+    const int numPackets = mConfig.packetsPerTransfer;
 
-    // Separate packet sizes for output vs input
-    int outputPacketSize = mConfig.bytesPerPacket();
-    int inputPacketSize = mConfig.inputBytesPerPacket();
+    // Nominal iso packet size derived from the negotiated stream config
+    // (sampleRate, channels, bitDepth). This is what the host EXPECTS to
+    // send / receive per packet in steady state.
+    const int outputPacketSizeNominal = mConfig.bytesPerPacket();
+    const int inputPacketSizeNominal = mConfig.inputBytesPerPacket();
 
-    LOGI("Allocating transfers: outputPacketSize=%d, inputPacketSize=%d",
-         outputPacketSize, inputPacketSize);
+    // Effective upper bound declared by each endpoint in its descriptor.
+    // Async devices typically declare a wMaxPacketSize *larger* than the
+    // nominal to reserve room for +1/+2 frames of drift compensation, and
+    // high-speed endpoints can declare additional transactions per
+    // microframe (bits 12:11 of wMaxPacketSize) that multiply the base
+    // size up to 3×. If we allocate the iso packet buffer at the nominal
+    // size only, packets that legitimately carry more bytes than nominal
+    // get truncated silently by the host controller — audible as
+    // distortion, lost samples, or subtle crackle on real hardware.
+    const int outputEndpointMax = mOutputInterface
+        ? mOutputInterface->dataEndpoint.effectiveMaxBytesPerPacket()
+        : 0;
+    const int inputEndpointMax = mInputInterface
+        ? mInputInterface->dataEndpoint.effectiveMaxBytesPerPacket()
+        : 0;
+
+    // Output additionally needs headroom for the clock controller's
+    // per-packet frame adjustment. getAdjustedFrameCount() clamps the
+    // adjustment to ± CLOCK_ADJUST_FRAMES_MAX from nominal, so the largest
+    // packet length we might set is nominalFrames + CLOCK_ADJUST_FRAMES_MAX
+    // frames. Without this headroom, a slot sized exactly at nominal can
+    // be told to carry a larger length via libusb_set_iso_packet_lengths
+    // and the host controller writes past the end of the slot — another
+    // silent overflow producing audible clicks at high drift.
+    //
+    // CLOCK_ADJUST_FRAMES_MAX must match the clamp value used in
+    // ClockController::getAdjustedFrameCount(); keeping it defensive here
+    // means this file owns the buffer sizing, not the clock controller.
+    constexpr int CLOCK_ADJUST_FRAMES_MAX = 4;
+    const int outputClockMarginBytes = mOutputInterface
+        ? CLOCK_ADJUST_FRAMES_MAX
+            * mConfig.channelCount
+            * (mConfig.bitDepth / 8)
+        : 0;
+
+    // Final slot sizes stored as members so fillOutputTransfer and
+    // processInputTransfer can use them as their per-packet stride into
+    // the buffer (matches what libusb_fill_iso_transfer reserves).
+    mOutputSlotBytes = mOutputInterface
+        ? std::max({outputPacketSizeNominal + outputClockMarginBytes,
+                    outputEndpointMax,
+                    outputPacketSizeNominal})
+        : 0;
+    mInputSlotBytes = mInputInterface
+        ? std::max(inputPacketSizeNominal, inputEndpointMax)
+        : 0;
+
+    if (mOutputInterface) {
+        LOGI("Allocating output transfers: nominal=%d, clockMargin=+%d, "
+             "endpoint wMaxPacketSize=0x%04x (effective=%d), slot=%d bytes/packet%s",
+             outputPacketSizeNominal, outputClockMarginBytes,
+             mOutputInterface->dataEndpoint.maxPacketSize, outputEndpointMax,
+             mOutputSlotBytes,
+             (mOutputSlotBytes > outputPacketSizeNominal)
+                 ? " (grew past nominal)"
+                 : "");
+    }
+    if (mInputInterface) {
+        LOGI("Allocating input transfers:  nominal=%d, "
+             "endpoint wMaxPacketSize=0x%04x (effective=%d), slot=%d bytes/packet%s",
+             inputPacketSizeNominal,
+             mInputInterface->dataEndpoint.maxPacketSize, inputEndpointMax,
+             mInputSlotBytes,
+             (mInputSlotBytes > inputPacketSizeNominal)
+                 ? " (grew past nominal — endpoint accepts larger packets)"
+                 : "");
+    }
 
     // Allocate output transfers
     if (mOutputInterface) {
+        const int outputTransferSize = mOutputSlotBytes * numPackets;
         for (int i = 0; i < mConfig.numTransfers; ++i) {
             auto ctx = std::make_unique<IsoTransfer>();
             ctx->manager = this;
             ctx->isOutput = true;
             ctx->packetCount = numPackets;
-            ctx->buffer.resize(static_cast<size_t>(mConfig.bytesPerTransfer()));
+            ctx->buffer.resize(static_cast<size_t>(outputTransferSize));
 
             ctx->transfer = libusb_alloc_transfer(numPackets);
             if (!ctx->transfer) {
@@ -487,25 +555,28 @@ bool UsbTransferManager::allocateTransfers() {
                 mConfig.transferTimeoutMs
             );
 
-            // Set individual packet sizes for OUTPUT
-            libusb_set_iso_packet_lengths(ctx->transfer, static_cast<unsigned int>(outputPacketSize));
+            // Set individual packet sizes for OUTPUT. On output this is the
+            // upper bound the host is allowed to push per packet; the
+            // clock controller's per-packet frame adjustment (in
+            // fillOutputTransfer) writes a smaller length at runtime.
+            libusb_set_iso_packet_lengths(ctx->transfer,
+                static_cast<unsigned int>(mOutputSlotBytes));
 
             mOutputTransfers.push_back(std::move(ctx));
         }
     }
 
-    // Allocate input transfers (using INPUT-specific sizes)
+    // Allocate input transfers (using INPUT-specific slot size)
     if (mInputInterface) {
-        int inputTransferSize = mConfig.inputBytesPerTransfer();
-        LOGI("Allocating input transfers: size=%d bytes (%d packets x %d bytes/packet)",
-             inputTransferSize, numPackets, inputPacketSize);
+        const int inputTransferSize = mInputSlotBytes * numPackets;
+        LOGI("Allocating input transfers: size=%d bytes (%d packets × %d bytes/packet)",
+             inputTransferSize, numPackets, mInputSlotBytes);
 
         for (int i = 0; i < mConfig.numTransfers; ++i) {
             auto ctx = std::make_unique<IsoTransfer>();
             ctx->manager = this;
             ctx->isOutput = false;
             ctx->packetCount = numPackets;
-            // FIX: Use input-specific buffer size
             ctx->buffer.resize(static_cast<size_t>(inputTransferSize));
 
             ctx->transfer = libusb_alloc_transfer(numPackets);
@@ -526,8 +597,11 @@ bool UsbTransferManager::allocateTransfers() {
                 mConfig.transferTimeoutMs
             );
 
-            // FIX: Set individual packet sizes for INPUT
-            libusb_set_iso_packet_lengths(ctx->transfer, static_cast<unsigned int>(inputPacketSize));
+            // Set individual packet sizes for INPUT. The device can fill
+            // up to this many bytes per packet; actual_length in each
+            // iso_packet_desc tells us how many it actually sent.
+            libusb_set_iso_packet_lengths(ctx->transfer,
+                static_cast<unsigned int>(mInputSlotBytes));
 
             mInputTransfers.push_back(std::move(ctx));
         }
@@ -765,38 +839,49 @@ void UsbTransferManager::handleFeedbackComplete(libusb_transfer* transfer) {
 // ============================================================================
 
 bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
-    int samplesPerPacket = mConfig.framesPerPacket * mConfig.channelCount;
-    int bytesPerSample = AudioFormatConverter::getBytesPerSample(mConfig.pcmFormat);
+    const int bytesPerSample = AudioFormatConverter::getBytesPerSample(mConfig.pcmFormat);
 
-    // Get adjusted frame count from clock controller
-    int nominalFrames = mConfig.framesPerPacket;
-    int adjustedFrames = mClockController->getAdjustedFrameCount(nominalFrames);
+    // Get adjusted frame count from the clock controller. This may be
+    // ± a few frames from nominal depending on the async feedback — the
+    // slot size reserved at allocate time accounts for the upper bound.
+    const int nominalFrames = mConfig.framesPerPacket;
+    const int adjustedFrames = mClockController->getAdjustedFrameCount(nominalFrames);
 
-    // Read from ring buffer
-    size_t samplesNeeded = static_cast<size_t>(adjustedFrames * mConfig.channelCount *
-                                                 ctx->packetCount);
+    const int samplesPerPacket = adjustedFrames * mConfig.channelCount;
+    const int bytesPerPacket = samplesPerPacket * bytesPerSample;
+    const size_t samplesNeeded = static_cast<size_t>(samplesPerPacket * ctx->packetCount);
+
+    // Read the whole transfer worth of samples from the ring in one go.
     bool success = mOutputRingBuffer->read(mFloatBuffer.data(), samplesNeeded);
-
     if (!success) {
-        // Underrun - fill with silence
+        // Underrun - fill the temp buffer with silence so every packet
+        // we submit is well-formed (audible dropout rather than an error).
         std::memset(mFloatBuffer.data(), 0, samplesNeeded * sizeof(float));
     }
 
-    // Convert to PCM format
-    mFormatConverter.floatToPcm(
-        mFloatBuffer.data(),
-        ctx->buffer.data(),
-        samplesNeeded,
-        mConfig.pcmFormat
-    );
+    // Write each packet into ITS OWN slot inside ctx->buffer. Slots are
+    // `mOutputSlotBytes` apart — which may be larger than `bytesPerPacket`
+    // when the endpoint declares a larger wMaxPacketSize or when we reserved
+    // headroom for the clock adjustment. Writing samples contiguously at
+    // the start of the buffer (the previous behavior) places packet i's
+    // data at offset i*bytesPerPacket, but libusb reads slot i from
+    // i*slotBytes — any mismatch between those two strides corrupts the
+    // stream on the wire, which is exactly the kind of subtle distortion
+    // that shows up only on devices whose endpoint differs from nominal.
+    uint8_t* bufPtr = ctx->buffer.data();
+    for (int p = 0; p < ctx->packetCount; ++p) {
+        const size_t srcSampleOffset = static_cast<size_t>(p * samplesPerPacket);
+        uint8_t* slotPtr = bufPtr + static_cast<ptrdiff_t>(p) * mOutputSlotBytes;
+        mFormatConverter.floatToPcm(
+            mFloatBuffer.data() + srcSampleOffset,
+            slotPtr,
+            static_cast<size_t>(samplesPerPacket),
+            mConfig.pcmFormat);
 
-    // Update packet sizes (may vary for clock adjustment)
-    // Also reset actual_length - required before resubmission on some devices
-    int bytesPerPacket = adjustedFrames * mConfig.channelCount * bytesPerSample;
-    for (int i = 0; i < ctx->packetCount; ++i) {
-        ctx->transfer->iso_packet_desc[i].length = static_cast<unsigned int>(bytesPerPacket);
-        ctx->transfer->iso_packet_desc[i].actual_length = 0;
-        ctx->transfer->iso_packet_desc[i].status = LIBUSB_TRANSFER_COMPLETED;
+        // Update per-packet length and reset status before resubmission.
+        ctx->transfer->iso_packet_desc[p].length = static_cast<unsigned int>(bytesPerPacket);
+        ctx->transfer->iso_packet_desc[p].actual_length = 0;
+        ctx->transfer->iso_packet_desc[p].status = LIBUSB_TRANSFER_COMPLETED;
     }
 
     mStats.packetsSubmitted.fetch_add(static_cast<uint64_t>(ctx->packetCount));
@@ -805,25 +890,31 @@ bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
 }
 
 bool UsbTransferManager::processInputTransfer(IsoTransfer* ctx) {
-    // FIX: Use input-specific bytes per sample based on input bit depth
     int bytesPerSample = mConfig.inputBitDepth / 8;
 
     // Process each packet
     uint8_t* bufPtr = ctx->buffer.data();
     size_t totalSamples = 0;
 
-    // FIX: Use input-specific packet size (may differ from output)
-    int inputPacketSize = mConfig.inputBytesPerPacket();
+    // The per-packet stride in the buffer is the slot size libusb reserved
+    // at allocation time, not the nominal bytesPerPacket — these can differ
+    // when the endpoint's wMaxPacketSize is larger than nominal (async USB
+    // devices with drift headroom). Using the nominal stride would read
+    // from a shifted position inside slot i, producing garbled audio on
+    // any device where the two differ.
+    const int slotBytes = mInputSlotBytes;
 
     for (int i = 0; i < ctx->packetCount; ++i) {
         auto& desc = ctx->transfer->iso_packet_desc[i];
         if (desc.status == LIBUSB_TRANSFER_COMPLETED && desc.actual_length > 0) {
             int samplesInPacket = desc.actual_length / bytesPerSample;
 
-            // Convert PCM to float
-            // FIX: Use inputPacketSize for buffer offset, not output bytesPerPacket
+            // Convert PCM to float starting at the beginning of this slot.
+            // desc.actual_length tells us how much of the slot the device
+            // actually filled this time around — bytes past that point in
+            // the same slot are stale and must not be read.
             mFormatConverter.pcmToFloat(
-                bufPtr + (i * inputPacketSize),
+                bufPtr + (i * slotBytes),
                 mFloatBuffer.data() + totalSamples,
                 static_cast<size_t>(samplesInPacket),
                 mConfig.pcmFormat

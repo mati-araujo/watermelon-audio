@@ -64,11 +64,20 @@ struct UsbDeviceInfo {
 
 /**
  * USB endpoint configuration.
+ *
+ * `maxPacketSize` holds the raw wMaxPacketSize field as it appears in the
+ * USB endpoint descriptor (16 bits, little-endian). In USB 2.0 high-speed
+ * that field is multiplexed: bits 10:0 are the per-transaction byte size,
+ * and bits 12:11 encode "additional transactions per microframe" (0, 1, or
+ * 2 → 1, 2, or 3 transactions per polling slot). In USB 1.1 full-speed and
+ * low-speed, bits 12:11 are always 0, so the raw value equals the effective
+ * max. Use effectiveMaxBytesPerPacket() to get the decoded upper bound the
+ * device can actually deliver per iso packet slot.
  */
 struct UsbEndpointInfo {
     uint8_t address = 0;           // Endpoint address (with direction bit)
     uint8_t attributes = 0;        // Transfer type, sync type, usage type
-    uint16_t maxPacketSize = 0;
+    uint16_t maxPacketSize = 0;    // Raw wMaxPacketSize (multiplexed in HS)
     uint8_t interval = 0;          // Polling interval
 
     // Derived properties
@@ -84,6 +93,31 @@ struct UsbEndpointInfo {
     bool isAsync() const { return ((attributes >> 2) & 0x03) == 0x01; }
     bool isAdaptive() const { return ((attributes >> 2) & 0x03) == 0x02; }
     bool isSynchronous() const { return ((attributes >> 2) & 0x03) == 0x03; }
+
+    /**
+     * Effective maximum bytes per iso packet slot, decoded from the raw
+     * multiplexed wMaxPacketSize field.
+     *
+     * USB 2.0 §9.6.6:
+     *   wMaxPacketSize:
+     *     bits 10:0  — max packet size per transaction
+     *     bits 12:11 — additional transactions per microframe (0..2)
+     *     bits 15:13 — reserved, must be 0
+     *
+     * For a high-speed endpoint that declares (base=1024, additional=2),
+     * libusb and the USB host controller treat each polling slot as being
+     * able to carry up to 1024 * 3 = 3072 bytes. The iso packet buffer
+     * allocation for such a slot must be sized accordingly, otherwise
+     * device-sent bytes get truncated silently.
+     *
+     * Full-speed endpoints (bits 12:11 == 0) get the same value back as
+     * the raw field, so this helper is safe to call unconditionally.
+     */
+    int effectiveMaxBytesPerPacket() const {
+        const uint16_t base = static_cast<uint16_t>(maxPacketSize & 0x07FF);
+        const uint16_t additional = static_cast<uint16_t>((maxPacketSize >> 11) & 0x03);
+        return static_cast<int>(base) * static_cast<int>(additional + 1);
+    }
 };
 
 /**

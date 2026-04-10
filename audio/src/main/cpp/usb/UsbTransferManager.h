@@ -514,6 +514,20 @@ private:
     std::vector<std::unique_ptr<IsoTransfer>> mInputTransfers;
     std::atomic<int> mInputPendingCount{0};
 
+    // Per-packet slot size actually reserved in the iso transfer buffers.
+    // These are derived by allocateTransfers() as the max of:
+    //   (a) the nominal bytesPerPacket from the stream config,
+    //   (b) the clock-adjustment headroom (output only: +4 frames),
+    //   (c) the endpoint descriptor's effective wMaxPacketSize.
+    //
+    // They are the authoritative stride used by fillOutputTransfer and
+    // processInputTransfer to compute per-packet offsets into the buffer.
+    // libusb_fill_iso_transfer sets the slot size as transferSize/numPackets,
+    // so the buffer layout is `numPackets * slotBytes` contiguous bytes with
+    // each packet living at [p * slotBytes .. p * slotBytes + length - 1].
+    int mOutputSlotBytes = 0;
+    int mInputSlotBytes = 0;
+
     // Ring buffers (float samples)
     std::unique_ptr<LockFreeRingBuffer> mOutputRingBuffer;
     std::unique_ptr<LockFreeRingBuffer> mInputRingBuffer;
