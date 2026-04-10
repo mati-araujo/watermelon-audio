@@ -144,6 +144,26 @@ bool LibusbBackend::initializeFromFileDescriptor(int fd, const char* usbfsPath) 
         return false;
     }
 
+    // Claim the AudioControl interface. In UAC 2.0 all class-specific
+    // requests (clock source SET_CUR, feature unit volume/mute, clock
+    // selector, etc.) are routed to the control interface, so it MUST be
+    // claimed before any of those requests can succeed. Without this,
+    // every class-specific interface request fails with LIBUSB_ERROR_IO
+    // — which is what caused both the UsbVolumeControl fallback to
+    // digital ("SET_CUR volume failed") and the sample rate negotiation
+    // failure in stage 1's first device tests.
+    //
+    // For UAC 1.0 it's not strictly required (sample rate is endpoint-
+    // recipient there), but claiming it anyway makes the volume control
+    // path work consistently and costs nothing.
+    if (!claimControlInterface()) {
+        LOGW("Failed to claim AudioControl interface %d — class-specific "
+             "requests (volume, clock source, sample rate UAC2) will fail "
+             "with LIBUSB_ERROR_IO. Continuing anyway because some devices "
+             "accept them without an explicit claim.",
+             mUsbDevice->controlInterface);
+    }
+
     // Initialize volume controls based on Feature Unit descriptors
     initializeVolumeControls();
 
@@ -309,6 +329,50 @@ bool LibusbBackend::selectBestInterfaces() {
     }
 
     return success;
+}
+
+bool LibusbBackend::claimControlInterface() {
+    if (!mDeviceHandle || !mUsbDevice) {
+        return false;
+    }
+    if (mControlInterfaceClaimed) {
+        return true;
+    }
+
+    const int ifNum = mUsbDevice->controlInterface;
+
+    // Android's usbfs needs auto-detach for most devices; be defensive
+    // about the result because not every libusb backend supports the option.
+    int r = libusb_set_auto_detach_kernel_driver(mDeviceHandle, 1);
+    if (r != LIBUSB_SUCCESS && r != LIBUSB_ERROR_NOT_SUPPORTED) {
+        LOGW("libusb_set_auto_detach_kernel_driver failed: %s",
+             libusb_error_name(r));
+    }
+
+    // Detach an active kernel driver if present. LIBUSB_ERROR_NOT_SUPPORTED
+    // is fine — it means the platform doesn't expose the concept.
+    int active = libusb_kernel_driver_active(mDeviceHandle, ifNum);
+    if (active == 1) {
+        int d = libusb_detach_kernel_driver(mDeviceHandle, ifNum);
+        if (d != LIBUSB_SUCCESS) {
+            LOGW("Failed to detach kernel driver from control interface %d: %s",
+                 ifNum, libusb_error_name(d));
+        } else {
+            LOGI("Detached kernel driver from control interface %d", ifNum);
+        }
+    }
+
+    r = libusb_claim_interface(mDeviceHandle, ifNum);
+    if (r != LIBUSB_SUCCESS) {
+        LOGE("libusb_claim_interface(%d) for AudioControl failed: %s",
+             ifNum, libusb_error_name(r));
+        mLastLibusbError.store(r);
+        return false;
+    }
+
+    mControlInterfaceClaimed = true;
+    LOGI("Claimed AudioControl interface %d", ifNum);
+    return true;
 }
 
 // ============================================================================
@@ -497,14 +561,13 @@ BackendResult LibusbBackend::start() {
          mFullDuplexEnabled ? "true" : "false",
          mSelectedCapture.has_value() ? "yes" : "no");
 
-    // Negotiate the device's sample rate via class-specific control transfer.
-    // Without this the device stays at its power-on default and the iso
-    // packet sizing we configure below would be wrong (or right by accident).
-    // See configureSampleRate() above for the per-UAC-version protocol.
-    if (!configureSampleRate()) {
-        LOGE("Sample rate negotiation failed at %d Hz", mRequestedSampleRate);
-        return BackendResult::ERROR_INVALID_CONFIG;
-    }
+    // Note: sample rate negotiation (configureSampleRate) used to run here,
+    // but it has to happen AFTER the transfer manager has claimed the
+    // streaming interface and put it in its active altsetting — otherwise
+    // UAC 1.0 endpoint-recipient SET_CUR fails with LIBUSB_ERROR_IO because
+    // the target endpoint only exists when the device is in alt > 0. The
+    // transfer manager invokes it via the clock config hook registered in
+    // setupTransferManager() below.
 
     // FIX: Tear down any existing transfer manager from a previous stop/start cycle.
     // stop() pauses the transfer manager but doesn't destroy it. If we don't
@@ -837,6 +900,17 @@ bool LibusbBackend::setupTransferManager() {
         // counting_semaphore::release is wait-free in the common case
         // (no waiters or single waiter) and saturates at the capacity.
         mDspWake.release();
+    });
+
+    // Register the clock configuration hook. The transfer manager invokes
+    // it once, synchronously, during start() — after claim_interface and
+    // set_interface_alt_setting for all streaming interfaces, but before
+    // any iso transfer is allocated or submitted. That is the earliest
+    // moment where the device's active endpoints actually exist on the
+    // wire, so endpoint-recipient requests like the UAC 1.0 sampling
+    // frequency SET_CUR reach a live target instead of failing with IO.
+    mTransferManager->setClockConfigHook([this]() {
+        return configureSampleRate();
     });
 
     return true;
@@ -1245,6 +1319,21 @@ void LibusbBackend::cleanup() {
     LOGI("cleanup() called, deviceDisconnected=%d", mDeviceDisconnected.load());
 
     teardownTransferManager();
+
+    // Release the AudioControl interface if we claimed it. Skip the call
+    // when the device is physically disconnected — the handle is invalid
+    // and libusb_release_interface can crash on Android usbfs in that state.
+    if (mControlInterfaceClaimed && mDeviceHandle && !mDeviceDisconnected.load()) {
+        const int ifNum = mUsbDevice ? mUsbDevice->controlInterface : 0;
+        int r = libusb_release_interface(mDeviceHandle, ifNum);
+        if (r != LIBUSB_SUCCESS) {
+            LOGW("Failed to release control interface %d: %s",
+                 ifNum, libusb_error_name(r));
+        } else {
+            LOGI("Released AudioControl interface %d", ifNum);
+        }
+    }
+    mControlInterfaceClaimed = false;
 
     // Only close device handle if device wasn't disconnected
     // When device is physically disconnected, the handle is already invalid

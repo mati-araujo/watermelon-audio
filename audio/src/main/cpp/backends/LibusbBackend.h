@@ -395,6 +395,16 @@ private:
     bool selectBestInterfaces();
     bool configureSampleRate();
 
+    // Claim the AudioControl interface so class-specific interface requests
+    // (volume, clock source, clock selector, sample rate on UAC2) can reach
+    // their target. Idempotent w.r.t. re-initialization. Detaches any kernel
+    // driver first, Android-friendly.
+    bool claimControlInterface();
+
+    // Track whether claimControlInterface() succeeded so cleanup() can
+    // release it correctly without a stale handle crash.
+    bool mControlInterfaceClaimed = false;
+
     // Transfer management
     bool setupTransferManager();
     void teardownTransferManager();

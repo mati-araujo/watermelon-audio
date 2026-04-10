@@ -242,6 +242,28 @@ public:
      */
     void setUacVersion(UacVersion version);
 
+    /**
+     * Register a hook invoked once during start(), AFTER claim_interface +
+     * set_interface_alt_setting for all configured interfaces, but BEFORE
+     * the iso transfers are allocated and submitted.
+     *
+     * This is the safe point to issue class-specific control transfers that
+     * require the target endpoint or interface to already be in its active
+     * state — notably SET_CUR to the audio sampling frequency control
+     * (endpoint-recipient in UAC 1.0, interface-recipient in UAC 2.0).
+     * Running those requests any earlier races with the device still sitting
+     * in altsetting 0 where the streaming endpoints don't exist yet, which
+     * produces LIBUSB_ERROR_IO on the wire.
+     *
+     * If the hook returns false, start() fails and the stream is not
+     * brought up.
+     */
+    using ClockConfigHook = std::function<bool()>;
+    void setClockConfigHook(ClockConfigHook hook) {
+        std::lock_guard<std::mutex> lock(mCallbackMutex);
+        mClockConfigHook = std::move(hook);
+    }
+
     // ========================================================================
     // Lifecycle
     // ========================================================================
@@ -520,6 +542,7 @@ private:
     TransferErrorCallback mErrorCallback;
     TransferStatsCallback mStatsCallback;
     std::function<void()> mDataReadyCallback;
+    ClockConfigHook mClockConfigHook;
 
     // Wake the DSP thread (if a notifier is registered) after a transfer
     // completes. Invoked from the USB event thread; must be wait-free.

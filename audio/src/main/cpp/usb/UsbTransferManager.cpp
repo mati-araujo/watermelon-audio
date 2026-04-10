@@ -252,6 +252,29 @@ bool UsbTransferManager::start() {
         }
     }
 
+    // Now that the streaming interface is claimed and in its active
+    // altsetting (so its isochronous endpoints exist on the wire), run
+    // any device-specific control transfers that depend on that state.
+    // In practice this is where the sample rate SET_CUR happens — see
+    // LibusbBackend::configureSampleRate() and the hook registered in
+    // setupTransferManager(). Doing this earlier (before setAlternateSetting)
+    // races with the device still sitting in alt 0 and produces
+    // LIBUSB_ERROR_IO on endpoint-recipient UAC 1.0 requests.
+    {
+        ClockConfigHook hookCopy;
+        {
+            std::lock_guard<std::mutex> lock(mCallbackMutex);
+            hookCopy = mClockConfigHook;
+        }
+        if (hookCopy) {
+            if (!hookCopy()) {
+                LOGE("Clock config hook failed");
+                stop();
+                return false;
+            }
+        }
+    }
+
     // Allocate transfers
     if (!allocateTransfers()) {
         LOGE("Failed to allocate transfers");
