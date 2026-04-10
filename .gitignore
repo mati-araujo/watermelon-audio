@@ -4,7 +4,7 @@
 /.idea
 .DS_Store
 /build
-/*/build
+**/build
 /captures
 .externalNativeBuild
 .cxx
@@ -18,3 +18,5 @@
 gen/
 out/
 *.log
+.kotlin/
+.claude/settings.local.json
