@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2](https://github.com/mati-araujo/watermelon-audio/compare/v1.1.1...v1.1.2) (2026-04-10)
+
+
+### Bug Fixes
+
+* **usb:** drain pending transfers before exiting the event loop on stop ([92772f1](https://github.com/mati-araujo/watermelon-audio/commit/92772f1358fbb637eb10b848e44abc5f3d03adba))
+* **usb:** size iso packets by USB speed and pick altsetting by bit depth ([893ed1e](https://github.com/mati-araujo/watermelon-audio/commit/893ed1eab9859ccad95cd31acb5395f8b0bff1b1))
+
 ## [1.1.1](https://github.com/mati-araujo/watermelon-audio/compare/v1.1.0...v1.1.1) (2026-04-10)
 
 
