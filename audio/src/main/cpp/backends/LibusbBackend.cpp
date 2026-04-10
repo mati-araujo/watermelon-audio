@@ -5,6 +5,8 @@
  */
 
 #include "LibusbBackend.h"
+#include "../usb/UsbConstants.h"
+#include "../usb/SampleRateRequest.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -310,6 +312,160 @@ bool LibusbBackend::selectBestInterfaces() {
 }
 
 // ============================================================================
+// Sample Rate Negotiation
+// ============================================================================
+//
+// USB Audio Class devices need an explicit class-specific control transfer
+// to set their internal clock to the desired rate. Without this, the device
+// stays at its power-on default and the host's iso packet sizing is wrong
+// (or right by accident only). Two protocols, two recipients:
+//
+//  - UAC 1.0: endpoint-recipient request to the data endpoint.
+//      bmRequestType = 0x22, bRequest = SET_CUR (0x01),
+//      wValue = SAMPLING_FREQ_CONTROL << 8, wIndex = endpoint address,
+//      data = 3-byte little-endian rate.
+//
+//  - UAC 2.0: interface-recipient request to the clock source unit.
+//      bmRequestType = 0x21, bRequest = CUR (0x01),
+//      wValue = CS_SAM_FREQ_CONTROL << 8, wIndex = (clockSrcId<<8) | controlIface,
+//      data = 4-byte little-endian rate.
+//
+// In both cases we follow with a GET_CUR to detect coercion (devices may
+// snap the rate to the nearest supported value). A failed GET_CUR is logged
+// but not fatal — some devices STALL GET while accepting SET.
+
+bool LibusbBackend::configureSampleRate() {
+    if (!mDeviceHandle || !mUsbDevice) {
+        LOGE("configureSampleRate: device not initialized");
+        return false;
+    }
+
+    const int version = mUsbDevice->uacVersion;
+    const uint32_t requested = static_cast<uint32_t>(mRequestedSampleRate);
+
+    if (version == 1) {
+        if (!mSelectedPlayback && !mSelectedCapture) {
+            LOGE("configureSampleRate UAC1: no selected interface");
+            return false;
+        }
+        const uint8_t epAddress = mSelectedPlayback
+            ? mSelectedPlayback->dataEndpoint.address
+            : mSelectedCapture->dataEndpoint.address;
+
+        // SET_CUR
+        auto setReq = usb::buildUac1SetSampleRateRequest(epAddress, requested);
+        int r = libusb_control_transfer(
+            mDeviceHandle,
+            setReq.bmRequestType,
+            setReq.bRequest,
+            setReq.wValue,
+            setReq.wIndex,
+            setReq.payload.data(),
+            static_cast<uint16_t>(setReq.payload.size()),
+            /*timeout*/ 1000);
+        if (r < 0) {
+            LOGE("UAC1 SET_CUR sample rate failed for EP 0x%02x (%u Hz): %s",
+                 epAddress, requested, libusb_error_name(r));
+            mLastLibusbError.store(r);
+            return false;
+        }
+
+        // GET_CUR (verification, non-fatal on STALL)
+        auto getReq = usb::buildUac1GetSampleRateRequest(epAddress);
+        std::array<uint8_t, 3> readback{};
+        int g = libusb_control_transfer(
+            mDeviceHandle,
+            getReq.bmRequestType,
+            getReq.bRequest,
+            getReq.wValue,
+            getReq.wIndex,
+            readback.data(),
+            static_cast<uint16_t>(readback.size()),
+            /*timeout*/ 1000);
+        if (g == 3) {
+            uint32_t actual = usb::decodeUac1SampleRateResponse(readback);
+            if (actual != requested) {
+                LOGW("UAC1 device coerced sample rate %u Hz -> %u Hz",
+                     requested, actual);
+                mRequestedSampleRate = static_cast<int>(actual);
+            }
+            LOGI("Rate negotiation: UAC1 EP 0x%02x req=%u actual=%u",
+                 epAddress, requested, actual);
+        } else {
+            LOGW("UAC1 GET_CUR sample rate readback failed: %s (continuing)",
+                 g < 0 ? libusb_error_name(g) : "short response");
+            LOGI("Rate negotiation: UAC1 EP 0x%02x req=%u (unverified)",
+                 epAddress, requested);
+        }
+        return true;
+    }
+
+    if (version == 2) {
+        if (mUsbDevice->clockSources.empty()) {
+            LOGE("UAC2 device has no parsed clock sources; cannot negotiate "
+                 "sample rate");
+            return false;
+        }
+        // Stage 1: pick the first clock source. Stage 3 introduces explicit
+        // selection via the clock graph.
+        const auto& clockSrc = mUsbDevice->clockSources.front();
+        const uint8_t clockId = clockSrc.clockId;
+        const uint8_t controlIface = mUsbDevice->controlInterface;
+
+        // SET_CUR
+        auto setReq = usb::buildUac2SetSampleRateRequest(
+            clockId, controlIface, requested);
+        int r = libusb_control_transfer(
+            mDeviceHandle,
+            setReq.bmRequestType,
+            setReq.bRequest,
+            setReq.wValue,
+            setReq.wIndex,
+            setReq.payload.data(),
+            static_cast<uint16_t>(setReq.payload.size()),
+            /*timeout*/ 1000);
+        if (r < 0) {
+            LOGE("UAC2 SET_CUR sample rate failed for clockSrc %d (%u Hz): %s",
+                 clockId, requested, libusb_error_name(r));
+            mLastLibusbError.store(r);
+            return false;
+        }
+
+        // GET_CUR (verification)
+        auto getReq = usb::buildUac2GetSampleRateRequest(clockId, controlIface);
+        std::array<uint8_t, 4> readback{};
+        int g = libusb_control_transfer(
+            mDeviceHandle,
+            getReq.bmRequestType,
+            getReq.bRequest,
+            getReq.wValue,
+            getReq.wIndex,
+            readback.data(),
+            static_cast<uint16_t>(readback.size()),
+            /*timeout*/ 1000);
+        if (g == 4) {
+            uint32_t actual = usb::decodeUac2SampleRateResponse(readback);
+            if (actual != requested) {
+                LOGW("UAC2 device coerced sample rate %u Hz -> %u Hz",
+                     requested, actual);
+                mRequestedSampleRate = static_cast<int>(actual);
+            }
+            LOGI("Rate negotiation: UAC2 clockSrc=%d req=%u actual=%u",
+                 clockId, requested, actual);
+        } else {
+            LOGW("UAC2 GET_CUR sample rate readback failed: %s (continuing)",
+                 g < 0 ? libusb_error_name(g) : "short response");
+            LOGI("Rate negotiation: UAC2 clockSrc=%d req=%u (unverified)",
+                 clockId, requested);
+        }
+        return true;
+    }
+
+    LOGE("configureSampleRate: unknown UAC version %d", version);
+    return false;
+}
+
+// ============================================================================
 // IAudioBackend Implementation
 // ============================================================================
 
@@ -340,6 +496,15 @@ BackendResult LibusbBackend::start() {
     LOGI("Starting with full-duplex=%s, capture selected=%s",
          mFullDuplexEnabled ? "true" : "false",
          mSelectedCapture.has_value() ? "yes" : "no");
+
+    // Negotiate the device's sample rate via class-specific control transfer.
+    // Without this the device stays at its power-on default and the iso
+    // packet sizing we configure below would be wrong (or right by accident).
+    // See configureSampleRate() above for the per-UAC-version protocol.
+    if (!configureSampleRate()) {
+        LOGE("Sample rate negotiation failed at %d Hz", mRequestedSampleRate);
+        return BackendResult::ERROR_INVALID_CONFIG;
+    }
 
     // FIX: Tear down any existing transfer manager from a previous stop/start cycle.
     // stop() pauses the transfer manager but doesn't destroy it. If we don't
@@ -412,8 +577,13 @@ void LibusbBackend::stop() {
 
     LOGI("Stopping LibusbBackend...");
 
-    // Stop DSP thread
+    // Stop DSP thread. Burst-release the wake semaphore so any pending
+    // try_acquire_for(5ms) returns immediately instead of waiting out the
+    // safety timeout. The releases saturate at the semaphore's capacity.
     mDspRunning.store(false);
+    for (int i = 0; i < 8; ++i) {
+        mDspWake.release();
+    }
     if (mDspThread.joinable()) {
         mDspThread.join();
     }
@@ -576,6 +746,16 @@ bool LibusbBackend::setupTransferManager() {
 
     mTransferManager = std::make_unique<usb::UsbTransferManager>(mDeviceHandle, mContext);
 
+    // Tell the transfer manager which UAC version we're talking to. This
+    // controls the feedback transfer's iso packet length (3 bytes for UAC1
+    // 10.14, 4 bytes for UAC2 16.16) and the version forwarded to the
+    // ClockController. Without this the manager would default to UAC2 and
+    // misparse feedback packets from UAC1 devices.
+    mTransferManager->setUacVersion(
+        mUsbDevice->uacVersion == 2
+            ? UacVersion::UAC_2_0
+            : UacVersion::UAC_1_0);
+
     // Configure transfer parameters from the primary interface (output)
     usb::TransferConfig config;
     config.sampleRate = mRequestedSampleRate;
@@ -648,6 +828,15 @@ bool LibusbBackend::setupTransferManager() {
     // Set error callback
     mTransferManager->setErrorCallback([this](usb::UsbAudioError error, const char* msg) {
         handleTransferError(error, msg);
+    });
+
+    // Register the data-ready notifier so the USB event thread wakes the
+    // DSP loop on every transfer completion. Replaces the previous 200µs
+    // polling sleep with futex-backed signaling.
+    mTransferManager->setDataReadyCallback([this]() {
+        // counting_semaphore::release is wait-free in the common case
+        // (no waiters or single waiter) and saturates at the capacity.
+        mDspWake.release();
     });
 
     return true;
@@ -749,22 +938,29 @@ void LibusbBackend::dspThreadFunc() {
             continue;
         }
 
-        // Check ALL buffer availability in a single gate to avoid
-        // wasting a full sleep cycle when one buffer is ready but the other isn't.
-        {
-            bool outputReady = !mSelectedPlayback ||
-                (mTransferManager->getOutputBufferAvailable() >= outputSamples);
-            bool inputReady = !mSelectedCapture ||
-                (mTransferManager->getInputBufferAvailable() >= inputSamples);
+        // Wait for the USB event thread to signal that data is available
+        // (or that output space was freed) before checking the ring buffers.
+        // The 5ms timeout is a safety net: if the device stalls, the
+        // disconnect detection above will catch it within 500ms via the
+        // watchdog. We don't want to block forever in case a wake is missed.
+        //
+        // Drain any backlog of pending wakes in one shot — counting_semaphore
+        // collapses naturally because we just re-check the readiness state
+        // after waking, and one wake is enough to cover N completed transfers.
+        (void)mDspWake.try_acquire_for(std::chrono::milliseconds(5));
+        if (!mDspRunning.load(std::memory_order_acquire)) {
+            break;
+        }
 
-            if (!outputReady || !inputReady) {
-                // Sleep proportional to how much data we're missing.
-                // At 48kHz stereo, 1 sample ≈ 10.4µs. Missing a full block (512 samples)
-                // means ~5.3ms until data arrives. Sleep for ~1/4 of a block period
-                // to balance responsiveness vs CPU usage.
-                std::this_thread::sleep_for(std::chrono::microseconds(200));
-                continue;
-            }
+        bool outputReady = !mSelectedPlayback ||
+            (mTransferManager->getOutputBufferAvailable() >= outputSamples);
+        bool inputReady = !mSelectedCapture ||
+            (mTransferManager->getInputBufferAvailable() >= inputSamples);
+
+        if (!outputReady || !inputReady) {
+            // Spurious or premature wake — go back to waiting. No sleep:
+            // try_acquire_for above is the throttle.
+            continue;
         }
 
         // Get input data if capture is enabled

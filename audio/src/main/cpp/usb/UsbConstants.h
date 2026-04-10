@@ -111,6 +111,13 @@ constexpr uint8_t UAC2_CS_UNDEFINED = 0x00;
 constexpr uint8_t UAC2_CS_SAM_FREQ_CONTROL = 0x01;
 constexpr uint8_t UAC2_CS_CLOCK_VALID_CONTROL = 0x02;
 
+// UAC 1.0 Endpoint Control Selectors (UAC 1.0 Spec 5.2.3.2.3)
+// Used as wValue high byte for class-specific endpoint requests
+// targeting an audio data endpoint.
+constexpr uint8_t UAC1_EP_CONTROL_UNDEFINED = 0x00;
+constexpr uint8_t UAC1_EP_SAMPLING_FREQ_CONTROL = 0x01;  // 5.2.3.2.3.1
+constexpr uint8_t UAC1_EP_PITCH_CONTROL = 0x02;          // 5.2.3.2.3.2
+
 // Audio Class-Specific AS Interface Descriptor Subtypes (UAC 1.0 A.6)
 constexpr uint8_t UAC_AS_DESCRIPTOR_UNDEFINED = 0x00;
 constexpr uint8_t UAC_AS_GENERAL = 0x01;
@@ -294,6 +301,20 @@ constexpr uint8_t UAC2_REQUEST_RANGE = 0x02;
 constexpr uint8_t UAC_REQUEST_TYPE_SET = 0x21;  // (ENDPOINT_OUT | TYPE_CLASS | RECIPIENT_INTERFACE)
 // Device-to-host, class, interface recipient
 constexpr uint8_t UAC_REQUEST_TYPE_GET = 0xA1;  // (ENDPOINT_IN | TYPE_CLASS | RECIPIENT_INTERFACE)
+
+// UAC 1.0 endpoint-recipient request types (used for sampling frequency
+// negotiation against an audio data endpoint).
+// Host-to-device, class, endpoint recipient
+constexpr uint8_t UAC_REQUEST_TYPE_SET_ENDPOINT = 0x22;  // (ENDPOINT_OUT | TYPE_CLASS | RECIPIENT_ENDPOINT)
+// Device-to-host, class, endpoint recipient
+constexpr uint8_t UAC_REQUEST_TYPE_GET_ENDPOINT = 0xA2;  // (ENDPOINT_IN  | TYPE_CLASS | RECIPIENT_ENDPOINT)
+
+// USB Audio Feedback Endpoint Packet Lengths
+// UAC 1.0 (full-speed): 10.14 fixed point, 3 bytes per packet
+// UAC 2.0 (high-speed): 16.16 fixed point, 4 bytes per packet
+// (UAC 1.0 spec 5.10.4.2 / UAC 2.0 spec 5.12.4.2)
+constexpr int UAC_FEEDBACK_LENGTH_UAC1 = 3;
+constexpr int UAC_FEEDBACK_LENGTH_UAC2 = 4;
 
 // ============================================================================
 // USB Audio Volume Constants

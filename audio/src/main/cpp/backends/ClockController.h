@@ -347,6 +347,23 @@ public:
         reset();
     }
 
+    /**
+     * Set the USB Audio Class version of the connected device.
+     *
+     * Stored for diagnostics and to allow callers to verify the wire
+     * format separately from the per-call `version` parameter of
+     * processFeedback(). Resets PID state on actual change so a stale
+     * convergence from a previous device doesn't bleed into the new one.
+     */
+    void setUacVersion(UacVersion version) {
+        if (mUacVersion != version) {
+            mUacVersion = version;
+            reset();
+        }
+    }
+
+    UacVersion getUacVersion() const { return mUacVersion; }
+
 private:
     /**
      * Parse raw feedback endpoint data.
@@ -376,6 +393,7 @@ private:
     static constexpr int FEEDBACK_BUFFER_SIZE = 16;
 
     int mNominalSampleRate;
+    UacVersion mUacVersion = UacVersion::UNKNOWN;
     PIDController mPid;
 
     // Circular buffer for feedback averaging

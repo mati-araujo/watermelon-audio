@@ -134,7 +134,43 @@ bool UsbDescriptorParser::parseDescriptors(
                 if (mContext.inAudioStreaming) {
                     UsbEndpointInfo endpoint;
                     if (parseEndpointDescriptor(descData, endpoint)) {
-                        mContext.currentStreaming.dataEndpoint = endpoint;
+                        // Route the endpoint based on its usage type bits
+                        // (bmAttributes 5:4 — see UsbConstants.h:185-188).
+                        const uint8_t usage = endpoint.attributes & 0x30;
+                        if (endpoint.isIsochronous() &&
+                            usage == USB_ENDPOINT_USAGE_FEEDBACK &&
+                            endpoint.isInput()) {
+                            // Explicit feedback endpoint: separate iso IN
+                            // endpoint that carries the device's actual rate.
+                            UsbFeedbackEndpoint fb;
+                            fb.endpoint = endpoint;
+                            fb.isImplicit = false;
+                            mContext.currentStreaming.feedbackEndpoint = fb;
+                            LOGI("Feedback endpoint detected (explicit): "
+                                 "addr=0x%02x maxPkt=%d interval=%d (IF%d Alt%d)",
+                                 endpoint.address, endpoint.maxPacketSize,
+                                 endpoint.interval,
+                                 mContext.currentStreaming.interfaceNumber,
+                                 mContext.currentStreaming.alternateSetting);
+                        } else {
+                            // Data endpoint (audio samples).
+                            mContext.currentStreaming.dataEndpoint = endpoint;
+                            // If this data endpoint also signals implicit
+                            // feedback timing, mark it so the transfer manager
+                            // can extract drift from packet completion.
+                            if (endpoint.isIsochronous() &&
+                                usage == USB_ENDPOINT_USAGE_IMPLICIT_FB) {
+                                UsbFeedbackEndpoint fb;
+                                fb.endpoint = endpoint;
+                                fb.isImplicit = true;
+                                mContext.currentStreaming.feedbackEndpoint = fb;
+                                LOGI("Implicit feedback detected on data EP "
+                                     "0x%02x (IF%d Alt%d)",
+                                     endpoint.address,
+                                     mContext.currentStreaming.interfaceNumber,
+                                     mContext.currentStreaming.alternateSetting);
+                            }
+                        }
                     }
                 }
                 break;

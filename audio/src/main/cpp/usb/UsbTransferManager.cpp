@@ -5,6 +5,7 @@
  */
 
 #include "UsbTransferManager.h"
+#include "UsbConstants.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -149,12 +150,62 @@ bool UsbTransferManager::setInputInterface(const UsbStreamingInterface& interfac
 }
 
 void UsbTransferManager::setFeedbackEnabled(bool enabled, const UsbFeedbackEndpoint* endpoint) {
-    mFeedbackEnabled = enabled;
-    if (endpoint) {
-        mFeedbackEndpoint = *endpoint;
-    } else {
-        mFeedbackEndpoint.reset();
+    if (!enabled || endpoint == nullptr) {
+        mFeedbackEnabled = enabled;
+        if (!endpoint) mFeedbackEndpoint.reset();
+        return;
     }
+
+    // Validate the endpoint really is an explicit feedback endpoint:
+    //   - isochronous transfer type (bmAttributes 1:0 == 01)
+    //   - usage type = feedback (bmAttributes 5:4 == 01)
+    //   - direction IN
+    // The parser is supposed to enforce this in stage 1, but defending
+    // here keeps the transfer manager honest if someone hands it the
+    // wrong endpoint.
+    const uint8_t attrs = endpoint->endpoint.attributes;
+    const bool isIso = (attrs & 0x03) == 0x01;
+    const bool isFeedbackUsage = ((attrs >> 4) & 0x03) == 0x01;
+    const bool isInput = (endpoint->endpoint.address & 0x80) != 0;
+
+    if (endpoint->isImplicit) {
+        // Implicit feedback rides on the data endpoint and is handled by
+        // mining iso_packet_desc.actual_length, not by a separate transfer.
+        // We do not allocate a feedback transfer in this case; just remember
+        // the flag for the clock controller's accounting.
+        mFeedbackEnabled = false;
+        mFeedbackEndpoint.reset();
+        LOGI("Feedback endpoint is implicit on data EP 0x%02x — clock sync "
+             "via packet timing (no dedicated transfer)",
+             endpoint->endpoint.address);
+        return;
+    }
+
+    if (!isIso || !isFeedbackUsage || !isInput) {
+        LOGW("Refusing to enable feedback on EP 0x%02x: "
+             "iso=%d feedbackUsage=%d in=%d (attrs=0x%02x)",
+             endpoint->endpoint.address, isIso, isFeedbackUsage, isInput, attrs);
+        mFeedbackEnabled = false;
+        mFeedbackEndpoint.reset();
+        return;
+    }
+
+    mFeedbackEnabled = true;
+    mFeedbackEndpoint = *endpoint;
+    LOGI("Feedback endpoint enabled: addr=0x%02x maxPkt=%d interval=%d",
+         endpoint->endpoint.address,
+         endpoint->endpoint.maxPacketSize,
+         endpoint->endpoint.interval);
+}
+
+void UsbTransferManager::setUacVersion(UacVersion version) {
+    mUacVersion = version;
+    if (mClockController) {
+        mClockController->setUacVersion(version);
+    }
+    LOGI("UsbTransferManager UAC version set to %d",
+         version == UacVersion::UAC_1_0 ? 1 :
+         version == UacVersion::UAC_2_0 ? 2 : 0);
 }
 
 // ============================================================================
@@ -474,7 +525,20 @@ bool UsbTransferManager::allocateTransfers() {
                 this,
                 mConfig.transferTimeoutMs
             );
-            libusb_set_iso_packet_lengths(mFeedbackTransfer, 4);
+            // UAC 1.0 (full-speed): 10.14 fixed point, 3 bytes per packet.
+            // UAC 2.0 (high-speed): 16.16 fixed point, 4 bytes per packet.
+            // If the version was never set we default to UAC2 to preserve
+            // historical behavior.
+            const int feedbackLen = (mUacVersion == UacVersion::UAC_1_0)
+                ? UAC_FEEDBACK_LENGTH_UAC1
+                : UAC_FEEDBACK_LENGTH_UAC2;
+            libusb_set_iso_packet_lengths(
+                mFeedbackTransfer,
+                static_cast<unsigned int>(feedbackLen));
+            LOGI("Feedback iso transfer allocated: packetLen=%d (UAC%d)",
+                 feedbackLen,
+                 mUacVersion == UacVersion::UAC_1_0 ? 1 :
+                 mUacVersion == UacVersion::UAC_2_0 ? 2 : 0);
         }
     }
 
@@ -588,6 +652,10 @@ void UsbTransferManager::handleOutputComplete(IsoTransfer* ctx, libusb_transfer*
             mOutputPendingCount.fetch_add(1);
         }
     }
+
+    // Output ring drained one transfer's worth -> wake the DSP thread so
+    // it can refill it without polling. Wait-free release on the futex.
+    notifyDataReady();
 }
 
 void UsbTransferManager::handleInputComplete(IsoTransfer* ctx, libusb_transfer* transfer) {
@@ -628,18 +696,30 @@ void UsbTransferManager::handleInputComplete(IsoTransfer* ctx, libusb_transfer* 
             mInputPendingCount.fetch_add(1);
         }
     }
+
+    // Input ring just got fresh samples -> wake the DSP thread so it can
+    // consume them. The output handler does the same; either wake suffices
+    // because the DSP loop re-checks both buffers after waking.
+    notifyDataReady();
 }
 
 void UsbTransferManager::handleFeedbackComplete(libusb_transfer* transfer) {
     if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
-        // Parse feedback data
-        if (transfer->iso_packet_desc[0].actual_length >= 3) {
-            UacVersion version = UacVersion::UAC_1_0;
-            int length = transfer->iso_packet_desc[0].actual_length;
-            if (length >= 4) {
-                version = UacVersion::UAC_2_0;
-            }
-            mClockController->processFeedback(mFeedbackBuffer.data(), length, version);
+        // Use the explicit UAC version we were told about at setup time
+        // instead of inferring from packet length (which used to misclassify
+        // UAC1 devices that happened to send 4-byte aligned packets).
+        // Default to UAC2 if the version was never set, matching the legacy
+        // behavior.
+        const UacVersion version = (mUacVersion == UacVersion::UAC_1_0)
+            ? UacVersion::UAC_1_0
+            : UacVersion::UAC_2_0;
+        const int expectedLen = (version == UacVersion::UAC_1_0)
+            ? UAC_FEEDBACK_LENGTH_UAC1
+            : UAC_FEEDBACK_LENGTH_UAC2;
+        const int actualLen = transfer->iso_packet_desc[0].actual_length;
+        if (actualLen >= expectedLen) {
+            mClockController->processFeedback(
+                mFeedbackBuffer.data(), actualLen, version);
         }
 
     } else if (transfer->status == LIBUSB_TRANSFER_CANCELLED) {

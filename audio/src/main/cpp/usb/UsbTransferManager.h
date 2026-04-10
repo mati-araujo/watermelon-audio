@@ -230,6 +230,18 @@ public:
      */
     void setFeedbackEnabled(bool enabled, const UsbFeedbackEndpoint* endpoint = nullptr);
 
+    /**
+     * Tell the transfer manager which UAC version the device implements.
+     *
+     * Required to (a) parse the feedback endpoint correctly (UAC1 = 3-byte
+     * 10.14, UAC2 = 4-byte 16.16) and (b) configure the iso packet length
+     * of the feedback transfer.
+     *
+     * Must be called before start(). Defaults to UNKNOWN, in which case
+     * the manager assumes UAC2 packet length (4) for backward compatibility.
+     */
+    void setUacVersion(UacVersion version);
+
     // ========================================================================
     // Lifecycle
     // ========================================================================
@@ -323,6 +335,20 @@ public:
     void setStatsCallback(TransferStatsCallback callback) {
         std::lock_guard<std::mutex> lock(mCallbackMutex);
         mStatsCallback = std::move(callback);
+    }
+
+    /**
+     * Set a notifier invoked from the USB event thread whenever data is
+     * consumable (input ring filled) or output space is freed (output
+     * transfer completed). Used by LibusbBackend's DSP thread to wake
+     * from a counting_semaphore wait without busy-polling.
+     *
+     * The callback runs on the libusb event thread; it must be wait-free
+     * and bounded. A `semaphore.release(1)` is the canonical use case.
+     */
+    void setDataReadyCallback(std::function<void()> callback) {
+        std::lock_guard<std::mutex> lock(mCallbackMutex);
+        mDataReadyCallback = std::move(callback);
     }
 
     // ========================================================================
@@ -453,6 +479,11 @@ private:
     libusb_transfer* mFeedbackTransfer = nullptr;
     std::array<uint8_t, 8> mFeedbackBuffer{};
 
+    // UAC version of the connected device. Determines feedback packet
+    // length (3 bytes for UAC1, 4 for UAC2) and is forwarded to the
+    // ClockController so processFeedback() doesn't have to guess.
+    UacVersion mUacVersion = UacVersion::UNKNOWN;
+
     // Output transfers (playback)
     std::vector<std::unique_ptr<IsoTransfer>> mOutputTransfers;
     std::atomic<int> mOutputPendingCount{0};
@@ -488,6 +519,18 @@ private:
     std::mutex mCallbackMutex;
     TransferErrorCallback mErrorCallback;
     TransferStatsCallback mStatsCallback;
+    std::function<void()> mDataReadyCallback;
+
+    // Wake the DSP thread (if a notifier is registered) after a transfer
+    // completes. Invoked from the USB event thread; must be wait-free.
+    void notifyDataReady() {
+        // No lock here on the hot path: the callback is set/cleared from
+        // setup/teardown, never concurrently with stream operation.
+        // Worst case under racing teardown is one wasted call into a
+        // valid std::function — std::counting_semaphore::release tolerates
+        // that. We accept this in exchange for zero per-transfer locking.
+        if (mDataReadyCallback) mDataReadyCallback();
+    }
 
     // ========================================================================
     // Watchdog for device disconnect detection

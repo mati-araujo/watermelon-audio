@@ -37,6 +37,7 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <semaphore>
 
 namespace watermelon_audio {
 
@@ -369,6 +370,14 @@ private:
     // DSP thread for audio processing
     std::thread mDspThread;
     std::atomic<bool> mDspRunning{false};
+
+    // Wake signal for the DSP loop. Posted by the USB transfer manager
+    // (via setDataReadyCallback) whenever data is consumable / output
+    // space is freed, and burst-released by stop() to unblock pending
+    // try_acquire_for waits before joining the thread. The capacity of 64
+    // is a generous upper bound on in-flight transfers; release saturates
+    // safely at the cap.
+    std::counting_semaphore<64> mDspWake{0};
 
     // Stream info cache
     mutable StreamInfo mCachedStreamInfo;
