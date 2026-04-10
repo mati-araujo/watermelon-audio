@@ -44,8 +44,12 @@ void setLogCallback(LogCallback callback);
 LogCallback getLogCallback();
 
 // Internal: dispatch a log message. NOT RT-safe.
+#if defined(__GNUC__) || defined(__clang__)
 void logMessage(LogLevel level, const char* tag, const char* fmt, ...)
     __attribute__((format(printf, 3, 4)));
+#else
+void logMessage(LogLevel level, const char* tag, const char* fmt, ...);
+#endif
 
 } // namespace wma
 

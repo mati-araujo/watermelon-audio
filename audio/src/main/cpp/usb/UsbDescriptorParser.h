@@ -86,12 +86,19 @@ public:
 
 private:
     // ========== Descriptor Header Structures ==========
+    //
+    // All raw USB descriptor structs are byte-packed (no padding) so they can
+    // be reinterpret_cast'd over the wire bytes returned by libusb. We use
+    // #pragma pack(push, 1) here because it's the only spelling supported by
+    // every compiler we target (GCC, Clang, MSVC).
+
+#pragma pack(push, 1)
 
     // Standard USB descriptor header
     struct DescriptorHeader {
         uint8_t bLength;
         uint8_t bDescriptorType;
-    } __attribute__((packed));
+    };
 
     // Configuration descriptor
     struct ConfigDescriptor {
@@ -103,7 +110,7 @@ private:
         uint8_t  iConfiguration;
         uint8_t  bmAttributes;
         uint8_t  bMaxPower;
-    } __attribute__((packed));
+    };
 
     // Interface descriptor
     struct InterfaceDescriptor {
@@ -116,7 +123,7 @@ private:
         uint8_t bInterfaceSubClass;
         uint8_t bInterfaceProtocol;
         uint8_t iInterface;
-    } __attribute__((packed));
+    };
 
     // Endpoint descriptor
     struct EndpointDescriptor {
@@ -126,7 +133,7 @@ private:
         uint8_t  bmAttributes;
         uint16_t wMaxPacketSize;
         uint8_t  bInterval;
-    } __attribute__((packed));
+    };
 
     // ========== UAC 1.0 Class-Specific Descriptors ==========
 
@@ -139,7 +146,7 @@ private:
         uint16_t wTotalLength;
         uint8_t  bInCollection;       // Number of AudioStreaming interfaces
         // Followed by bInCollection bytes of interface numbers
-    } __attribute__((packed));
+    };
 
     // Input Terminal Descriptor (UAC 1.0 Table 4-3)
     struct InputTerminalDescriptor {
@@ -153,7 +160,7 @@ private:
         uint16_t wChannelConfig;
         uint8_t  iChannelNames;
         uint8_t  iTerminal;
-    } __attribute__((packed));
+    };
 
     // Output Terminal Descriptor (UAC 1.0 Table 4-4)
     struct OutputTerminalDescriptor {
@@ -165,7 +172,7 @@ private:
         uint8_t  bAssocTerminal;
         uint8_t  bSourceID;
         uint8_t  iTerminal;
-    } __attribute__((packed));
+    };
 
     // Feature Unit Descriptor (UAC 1.0 Table 4-7)
     // Note: Variable length, bmaControls has (ch+1) entries
@@ -178,7 +185,7 @@ private:
         uint8_t bControlSize;
         // Followed by (bControlSize * (bNrChannels + 1)) bytes of controls
         // Followed by iFeature string index
-    } __attribute__((packed));
+    };
 
     // Audio Streaming Interface Descriptor (UAC 1.0 Table 4-19)
     struct ASGeneralDescriptor {
@@ -188,7 +195,7 @@ private:
         uint8_t  bTerminalLink;
         uint8_t  bDelay;
         uint16_t wFormatTag;
-    } __attribute__((packed));
+    };
 
     // Format Type I Descriptor (UAC 1.0 Table 2-1)
     struct FormatTypeIDescriptor {
@@ -203,7 +210,7 @@ private:
         // Followed by either:
         // - If bSamFreqType == 0: tLowerSamFreq (3 bytes) + tUpperSamFreq (3 bytes)
         // - If bSamFreqType > 0: bSamFreqType * tSamFreq (3 bytes each)
-    } __attribute__((packed));
+    };
 
     // Audio Endpoint Descriptor (UAC 1.0 Table 4-21)
     struct AudioEndpointDescriptor {
@@ -213,7 +220,7 @@ private:
         uint8_t bmAttributes;
         uint8_t bLockDelayUnits;
         uint16_t wLockDelay;
-    } __attribute__((packed));
+    };
 
     // ========== UAC 2.0 Class-Specific Descriptors ==========
 
@@ -227,7 +234,7 @@ private:
         uint8_t  bmControls;         // Clock frequency and validity controls
         uint8_t  bAssocTerminal;
         uint8_t  iClockSource;
-    } __attribute__((packed));
+    };
 
     // Clock Selector Descriptor (UAC 2.0 Table 4-7)
     struct UAC2ClockSelectorDescriptor {
@@ -239,7 +246,7 @@ private:
         // Followed by bNrInPins bytes of baCSourceID
         // Followed by bmControls (1 byte)
         // Followed by iClockSelector (1 byte)
-    } __attribute__((packed));
+    };
 
     // Clock Multiplier Descriptor (UAC 2.0 Table 4-8)
     struct UAC2ClockMultiplierDescriptor {
@@ -250,7 +257,7 @@ private:
         uint8_t  bCSourceID;
         uint8_t  bmControls;
         uint8_t  iClockMultiplier;
-    } __attribute__((packed));
+    };
 
     // Input Terminal Descriptor (UAC 2.0 Table 4-9)
     struct UAC2InputTerminalDescriptor {
@@ -266,7 +273,7 @@ private:
         uint8_t  iChannelNames;
         uint16_t bmControls;
         uint8_t  iTerminal;
-    } __attribute__((packed));
+    };
 
     // Output Terminal Descriptor (UAC 2.0 Table 4-10)
     struct UAC2OutputTerminalDescriptor {
@@ -280,7 +287,7 @@ private:
         uint8_t  bCSourceID;        // Clock source ID (UAC 2.0 specific)
         uint16_t bmControls;
         uint8_t  iTerminal;
-    } __attribute__((packed));
+    };
 
     // Feature Unit Descriptor (UAC 2.0 Table 4-13)
     // Note: Variable length, bmaControls are 4 bytes per channel in UAC 2.0
@@ -292,7 +299,7 @@ private:
         uint8_t  bSourceID;
         // Followed by bmaControls (4 bytes per channel + 1 for master)
         // Followed by iFeature string index
-    } __attribute__((packed));
+    };
 
     // Audio Streaming Interface Descriptor (UAC 2.0 Table 4-27)
     struct UAC2ASGeneralDescriptor {
@@ -306,7 +313,7 @@ private:
         uint8_t  bNrChannels;
         uint32_t bmChannelConfig;
         uint8_t  iChannelNames;
-    } __attribute__((packed));
+    };
 
     // Format Type I Descriptor (UAC 2.0 Table 2-2)
     struct UAC2FormatTypeIDescriptor {
@@ -317,7 +324,7 @@ private:
         uint8_t  bSubslotSize;      // Renamed from bSubframeSize in UAC 1.0
         uint8_t  bBitResolution;
         // Note: Sample rates are obtained via Clock Source in UAC 2.0
-    } __attribute__((packed));
+    };
 
     // Audio Data Endpoint Descriptor (UAC 2.0 Table 4-34)
     struct UAC2AudioEndpointDescriptor {
@@ -328,7 +335,9 @@ private:
         uint8_t  bmControls;
         uint8_t  bLockDelayUnits;
         uint16_t wLockDelay;
-    } __attribute__((packed));
+    };
+
+#pragma pack(pop)
 
     // ========== Parsing Methods ==========
 
