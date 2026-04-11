@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2](https://github.com/mati-araujo/watermelon-audio/compare/v1.2.1...v1.2.2) (2026-04-11)
+
+
+### Bug Fixes
+
+* **usb:** decode input PCM using the input's own bit depth, not the output's ([5ad6fbc](https://github.com/mati-araujo/watermelon-audio/commit/5ad6fbc2673b163a0af368b3dacd9ca930ba80f0))
+
 ## [1.2.1](https://github.com/mati-araujo/watermelon-audio/compare/v1.2.0...v1.2.1) (2026-04-10)
 
 
