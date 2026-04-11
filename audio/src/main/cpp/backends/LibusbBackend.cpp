@@ -904,20 +904,24 @@ bool LibusbBackend::setupTransferManager() {
         config.inputBitDepth = config.bitDepth;
     }
 
-    // Set PCM format based on bit depth
-    switch (config.bitDepth) {
-        case 16:
-            config.pcmFormat = usb::PcmFormat::PCM_S16_LE;
-            break;
-        case 24:
-            config.pcmFormat = usb::PcmFormat::PCM_S24_3LE;
-            break;
-        case 32:
-            config.pcmFormat = usb::PcmFormat::PCM_S32_LE;
-            break;
-        default:
-            config.pcmFormat = usb::PcmFormat::PCM_S16_LE;
-    }
+    // Set PCM format based on bit depth. Output and input can use different
+    // wire formats on the same device — e.g. the GHW USB AUDIO exposes
+    // 2ch/24-bit playback alongside 1ch/16-bit capture, so we need to track
+    // both formats independently and NEVER reuse the output format for the
+    // input converter. Doing so garbles the input byte-for-byte (the S24_3LE
+    // reader walks 3 bytes per sample over data that was laid out as 2-byte
+    // S16 samples, interpreting every 1.5 real samples as one "24-bit" one
+    // and reading 50% past the end of each packet).
+    auto bitDepthToFormat = [](int depth) {
+        switch (depth) {
+            case 16: return usb::PcmFormat::PCM_S16_LE;
+            case 24: return usb::PcmFormat::PCM_S24_3LE;
+            case 32: return usb::PcmFormat::PCM_S32_LE;
+            default: return usb::PcmFormat::PCM_S16_LE;
+        }
+    };
+    config.pcmFormat = bitDepthToFormat(config.bitDepth);
+    config.inputPcmFormat = bitDepthToFormat(config.inputBitDepth);
 
     // Determine the actual USB speed of the attached device. UAC 2.0 almost
     // always runs at USB 2.0 high-speed, where iso endpoints are polled once

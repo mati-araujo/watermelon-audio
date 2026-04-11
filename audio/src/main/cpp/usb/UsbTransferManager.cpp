@@ -907,7 +907,16 @@ bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
 }
 
 bool UsbTransferManager::processInputTransfer(IsoTransfer* ctx) {
-    int bytesPerSample = mConfig.inputBitDepth / 8;
+    // Use the INPUT's own PCM format, not the output's. On devices that
+    // expose different bit depths on each direction (e.g. GHW USB AUDIO:
+    // 24-bit playback + 16-bit capture), reading the input with the output
+    // format treats 2-byte S16 samples as 3-byte S24_3LE samples and
+    // produces straight garbage in the float buffer. The corresponding
+    // bytesPerSample used for the samplesInPacket math is already derived
+    // from inputBitDepth below, so both sides of the decode agree on the
+    // wire format.
+    const int bytesPerSample = mConfig.inputBitDepth / 8;
+    const usb::PcmFormat inputFormat = mConfig.inputPcmFormat;
 
     // Process each packet
     uint8_t* bufPtr = ctx->buffer.data();
@@ -934,7 +943,7 @@ bool UsbTransferManager::processInputTransfer(IsoTransfer* ctx) {
                 bufPtr + (i * slotBytes),
                 mFloatBuffer.data() + totalSamples,
                 static_cast<size_t>(samplesInPacket),
-                mConfig.pcmFormat
+                inputFormat
             );
 
             totalSamples += static_cast<size_t>(samplesInPacket);

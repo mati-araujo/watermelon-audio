@@ -73,6 +73,12 @@ struct TransferConfig {
     // Audio format (input) - can differ from output
     int inputChannelCount = 2;          // Input channel count (may differ from output)
     int inputBitDepth = 24;             // Input bit depth (may differ from output)
+    // PCM wire format of the input stream. Derived from inputBitDepth at
+    // setup time. Must NOT be conflated with the output pcmFormat above —
+    // devices that expose e.g. 24-bit playback plus 16-bit capture (the
+    // GHW USB AUDIO does exactly that) get byte-level garbled input if
+    // processInputTransfer decodes with the output format.
+    PcmFormat inputPcmFormat = PcmFormat::PCM_S24_3LE;
 
     // Ring buffer sizing
     // Ring buffer decouples USB transfers from DSP processing.
