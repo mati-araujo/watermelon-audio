@@ -30,6 +30,8 @@
 #include "../usb/UsbTransferManager.h"
 #include "../usb/UsbDescriptorParser.h"
 #include "../usb/UsbVolumeControl.h"
+#include "../usb/AltsettingSelector.h"
+#include "../usb/StreamPreference.h"
 
 #include <libusb.h>
 #include <memory>
@@ -230,6 +232,15 @@ public:
     DeviceCapabilities getCapabilities() const;
 
     /**
+     * Set a stream preference to guide altsetting selection.
+     * Takes effect on the next start() call. If not set, the default
+     * professional preset is used (prefer highest bit depth, async sync).
+     */
+    void setStreamPreference(const usb::StreamPreference& pref) {
+        mUserPreference = pref;
+    }
+
+    /**
      * Set error callback for USB-specific errors.
      */
     using ErrorCallback = std::function<void(usb::UsbAudioError, const char*)>;
@@ -359,6 +370,15 @@ private:
     // Selected interfaces for streaming
     std::optional<usb::UsbStreamingInterface> mSelectedPlayback;
     std::optional<usb::UsbStreamingInterface> mSelectedCapture;
+
+    // The specific format chosen within the selected altsetting (which may
+    // have multiple formats). Set by selectBestInterfaces() alongside the
+    // interface selection.
+    std::optional<usb::UsbAudioFormat> mSelectedPlaybackFormat;
+    std::optional<usb::UsbAudioFormat> mSelectedCaptureFormat;
+
+    // User-provided stream preference for altsetting scoring.
+    std::optional<usb::StreamPreference> mUserPreference;
 
     // Transfer manager
     std::unique_ptr<usb::UsbTransferManager> mTransferManager;

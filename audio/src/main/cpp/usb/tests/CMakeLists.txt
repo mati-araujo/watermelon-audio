@@ -1,7 +1,7 @@
 # ============================================================================
 # watermelon-usb unit tests
 #
-# Stage 1 — USB audio backend foundations
+# Stages 1 & 2 — USB audio backend foundations + discovery
 #
 # Uses Google Test. Run on host (x86_64), not on Android device.
 # Standalone build, not wired into the main CMakeLists. Mirrors the pattern
@@ -10,7 +10,7 @@
 # Build & run:
 #   cd audio/src/main/cpp/usb/tests
 #   mkdir -p build && cd build
-#   cmake .. && make -j$(nproc) && ctest --output-on-failure
+#   cmake .. && cmake --build . --config Debug && ctest --output-on-failure
 # ============================================================================
 
 cmake_minimum_required(VERSION 3.22.1)
@@ -47,6 +47,8 @@ add_executable(usb_tests
     test_clock_controller.cpp
     test_sample_rate_request.cpp
     test_usb_descriptor_parser.cpp
+    test_altsetting_selector.cpp
+    test_snapshot_codec.cpp
     ${USB_TESTED_SOURCES}
 )
 

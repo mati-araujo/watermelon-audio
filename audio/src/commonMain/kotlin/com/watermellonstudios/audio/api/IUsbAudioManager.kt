@@ -212,6 +212,20 @@ interface IUsbAudioManager {
      */
     fun getUacVersion(): Int
 
+    // ==================== Discovery (Stage 2) ====================
+
+    /**
+     * Get the latest capability snapshot from the native USB descriptor parser.
+     * Returns null if no device is connected or native parsing hasn't completed yet.
+     */
+    fun getCurrentCapabilitySnapshot(): UsbCapabilitySnapshot?
+
+    /**
+     * Set the stream preference used for altsetting selection.
+     * Takes effect on the next startStreaming() call.
+     */
+    fun setStreamPreference(preference: StreamPreference)
+
     // ==================== Lifecycle ====================
 
     /**

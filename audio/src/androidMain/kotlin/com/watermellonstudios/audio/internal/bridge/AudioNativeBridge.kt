@@ -2178,6 +2178,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun getUsbDeviceUacVersion(): Int = nativeGetUsbDeviceUacVersion()
 
     /**
+     * Get the full capability snapshot of the connected USB device.
+     * Returns null if no device is initialized natively.
+     */
+    fun getUsbCapabilitySnapshot(): ByteArray? = nativeGetUsbCapabilitySnapshot()
+
+    /**
      * Check if USB device was disconnected.
      */
     fun isUsbDeviceDisconnected(): Boolean = nativeIsUsbDeviceDisconnected()
@@ -2270,6 +2276,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeUsbDeviceSupportsFullDuplex(): Boolean
     private external fun nativeUsbDeviceHasCapture(): Boolean
     private external fun nativeGetUsbDeviceUacVersion(): Int
+    private external fun nativeGetUsbCapabilitySnapshot(): ByteArray?
     private external fun nativeIsUsbDeviceDisconnected(): Boolean
     private external fun nativeGetUsbHealthStatus(): IntArray?
     private external fun nativeFallbackToOboeBackend()

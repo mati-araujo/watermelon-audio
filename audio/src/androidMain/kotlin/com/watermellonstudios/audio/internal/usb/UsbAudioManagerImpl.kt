@@ -449,9 +449,7 @@ internal class UsbAudioManagerImpl(
         }
 
         return try {
-            // TODO: Parse descriptors using native UsbDescriptorParser
-            // For now, return basic capabilities from interface info
-            val capabilities = parseBasicCapabilities(usbDevice)
+            val capabilities = parseCapabilities(usbDevice)
             UsbResult.Success(capabilities)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get capabilities: ${e.message}", e)
@@ -459,7 +457,55 @@ internal class UsbAudioManagerImpl(
         }
     }
 
-    private fun parseBasicCapabilities(device: UsbDevice): UsbAudioCapabilities {
+    /**
+     * Current capability snapshot from the native parser.
+     * Populated when parseCapabilities() successfully decodes the snapshot.
+     */
+    private var _currentSnapshot: UsbCapabilitySnapshot? = null
+
+    /**
+     * Parse capabilities by trying the native snapshot first, falling back
+     * to basic interface enumeration if native is not yet initialized.
+     */
+    private fun parseCapabilities(device: UsbDevice): UsbAudioCapabilities {
+        // Try the native snapshot path (requires native device to be initialized)
+        val raw = nativeBridge.getUsbCapabilitySnapshot()
+        if (raw != null) {
+            try {
+                val snapshot = UsbSnapshotCodec.decode(raw)
+                _currentSnapshot = snapshot
+                Log.i(TAG, "Decoded native snapshot: UAC${snapshot.uacVersion}, " +
+                    "${snapshot.playbackAltsettings.size} playback, " +
+                    "${snapshot.captureAltsettings.size} capture altsettings")
+
+                val syncMode = snapshot.playbackAltsettings.firstOrNull()?.syncType
+                    ?: UsbSyncMode.UNKNOWN
+
+                return UsbAudioCapabilities(
+                    supportedSampleRates = snapshot.effectiveOutputSampleRates
+                        .ifEmpty { listOf(44100, 48000, 96000) },
+                    supportedBitDepths = snapshot.effectiveOutputBitDepths
+                        .ifEmpty { listOf(16, 24) },
+                    maxChannelsOutput = snapshot.playbackAltsettings.maxOfOrNull { alt ->
+                        alt.formats.maxOfOrNull { it.channels } ?: 0
+                    } ?: 0,
+                    maxChannelsInput = snapshot.captureAltsettings.maxOfOrNull { alt ->
+                        alt.formats.maxOfOrNull { it.channels } ?: 0
+                    } ?: 0,
+                    syncMode = syncMode,
+                    supportsFullDuplex = snapshot.isFullDuplex,
+                    uacVersion = snapshot.uacVersion,
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Snapshot decode failed, falling back to basic parse", e)
+            }
+        }
+
+        // Fallback: enumerate Android USB interfaces (same as old parseBasicCapabilities)
+        return parseBasicCapabilitiesFallback(device)
+    }
+
+    private fun parseBasicCapabilitiesFallback(device: UsbDevice): UsbAudioCapabilities {
         var hasOutput = false
         var hasInput = false
 
@@ -468,7 +514,6 @@ internal class UsbAudioManagerImpl(
             if (iface.interfaceClass == USB_CLASS_AUDIO &&
                 iface.interfaceSubclass == USB_SUBCLASS_AUDIOSTREAMING
             ) {
-                // Check endpoints for direction
                 for (j in 0 until iface.endpointCount) {
                     val endpoint = iface.getEndpoint(j)
                     if (endpoint.type == android.hardware.usb.UsbConstants.USB_ENDPOINT_XFER_ISOC) {
@@ -483,11 +528,11 @@ internal class UsbAudioManagerImpl(
         }
 
         return UsbAudioCapabilities(
-            supportedSampleRates = listOf(44100, 48000, 96000), // Default common rates
+            supportedSampleRates = listOf(44100, 48000, 96000),
             supportedBitDepths = listOf(16, 24),
             maxChannelsOutput = if (hasOutput) 2 else 0,
             maxChannelsInput = if (hasInput) 2 else 0,
-            syncMode = UsbSyncMode.ADAPTIVE, // Most common
+            syncMode = UsbSyncMode.ADAPTIVE,
             supportsFullDuplex = hasOutput && hasInput
         )
     }
@@ -495,6 +540,21 @@ internal class UsbAudioManagerImpl(
     override fun getFileDescriptor(): Int = currentFileDescriptor
 
     override fun getUsbfsPath(): String? = currentUsbfsPath
+
+    // ==================== Discovery (Stage 2) ====================
+
+    override fun getCurrentCapabilitySnapshot(): UsbCapabilitySnapshot? = _currentSnapshot
+
+    override fun setStreamPreference(preference: StreamPreference) {
+        Log.i(TAG, "Stream preference set: profile=${preference.profile}, " +
+            "rate=${preference.preferredSampleRate}, minCh=${preference.minChannels}")
+        // The preference is stored for the next startStreaming call.
+        // The native side is configured via LibusbBackend::setStreamPreference()
+        // which is called from the JNI startStreaming path.
+        _currentStreamPreference = preference
+    }
+
+    private var _currentStreamPreference: StreamPreference? = null
 
     // ==================== Lifecycle ====================
 
