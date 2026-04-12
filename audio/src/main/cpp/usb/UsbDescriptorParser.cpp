@@ -199,7 +199,8 @@ bool UsbDescriptorParser::parseDescriptors(
 
     // Save the last streaming interface if valid
     if (mContext.inAudioStreaming &&
-        mContext.currentStreaming.format.channels > 0 &&
+        !mContext.currentStreaming.formats.empty() &&
+        mContext.currentStreaming.formats[0].channels > 0 &&
         mContext.currentStreaming.dataEndpoint.maxPacketSize > 0) {
 
         if (mContext.currentStreaming.isPlayback()) {
@@ -250,7 +251,8 @@ bool UsbDescriptorParser::parseInterfaceDescriptor(
 
     // Save previous streaming interface if valid
     if (mContext.inAudioStreaming &&
-        mContext.currentStreaming.format.channels > 0 &&
+        !mContext.currentStreaming.formats.empty() &&
+        mContext.currentStreaming.formats[0].channels > 0 &&
         mContext.currentStreaming.dataEndpoint.maxPacketSize > 0) {
 
         if (mContext.currentStreaming.isPlayback()) {
@@ -404,7 +406,13 @@ bool UsbDescriptorParser::parseAudioStreamingInterface(
                 return parseUAC2ASGeneral(data, streaming);
 
             case UAC_AS_FORMAT_TYPE:
-                return parseUAC2FormatType(data, streaming.format);
+                // UAC2: AS_GENERAL always comes first and pushes a format entry.
+                // FORMAT_TYPE fills the last entry. If formats is somehow empty
+                // (malformed descriptor order), push a default so we don't crash.
+                if (streaming.formats.empty()) {
+                    streaming.formats.emplace_back();
+                }
+                return parseUAC2FormatType(data, streaming.formats.back());
 
             case UAC_AS_FORMAT_SPECIFIC:
                 // Not commonly used, skip
@@ -423,7 +431,14 @@ bool UsbDescriptorParser::parseAudioStreamingInterface(
             return parseASGeneral(data, streaming);
 
         case UAC_AS_FORMAT_TYPE:
-            return parseFormatType(data, streaming.format);
+            // UAC1: AS_GENERAL comes first and pushes a format entry.
+            // FORMAT_TYPE fills the last entry with channels, bit depth, rates.
+            // If a second FORMAT_TYPE appears (rare but spec-legal), push a new
+            // entry so we don't overwrite the first.
+            if (streaming.formats.empty()) {
+                streaming.formats.emplace_back();
+            }
+            return parseFormatType(data, streaming.formats.back());
 
         case UAC_AS_FORMAT_SPECIFIC:
             // Not commonly used, skip
@@ -572,10 +587,14 @@ bool UsbDescriptorParser::parseASGeneral(const uint8_t* data, UsbStreamingInterf
     const auto* general = reinterpret_cast<const ASGeneralDescriptor*>(data);
 
     streaming.terminalLink = general->bTerminalLink;
-    streaming.format.formatTag = readUint16LE(reinterpret_cast<const uint8_t*>(&general->wFormatTag));
+
+    // Push the first format entry for this altsetting. The subsequent
+    // FORMAT_TYPE descriptor will fill in channels, bit depth, etc.
+    streaming.formats.emplace_back();
+    streaming.formats.back().formatTag = readUint16LE(reinterpret_cast<const uint8_t*>(&general->wFormatTag));
 
     LOGD("AS General: TerminalLink=%d, FormatTag=0x%04x, Delay=%d",
-         general->bTerminalLink, streaming.format.formatTag, general->bDelay);
+         general->bTerminalLink, streaming.formats.back().formatTag, general->bDelay);
 
     return true;
 }
@@ -873,8 +892,12 @@ bool UsbDescriptorParser::parseUAC2ASGeneral(const uint8_t* data, UsbStreamingIn
     const auto* desc = reinterpret_cast<const UAC2ASGeneralDescriptor*>(data);
 
     streaming.terminalLink = desc->bTerminalLink;
-    streaming.format.formatType = desc->bFormatType;
-    streaming.format.channels = desc->bNrChannels;
+
+    // Push a format entry; FORMAT_TYPE descriptor will fill subslotSize/bitRes.
+    streaming.formats.emplace_back();
+    auto& fmt = streaming.formats.back();
+    fmt.formatType = desc->bFormatType;
+    fmt.channels = desc->bNrChannels;
 
     // bmFormats is a 32-bit field in UAC 2.0
     uint32_t bmFormats;
@@ -882,7 +905,7 @@ bool UsbDescriptorParser::parseUAC2ASGeneral(const uint8_t* data, UsbStreamingIn
 
     // Check for PCM format (bit 0)
     if (bmFormats & 0x01) {
-        streaming.format.formatTag = UAC_FORMAT_TYPE_I_PCM;
+        fmt.formatTag = UAC_FORMAT_TYPE_I_PCM;
     }
 
     LOGD("UAC 2.0 AS General: TerminalLink=%d, FormatType=%d, Channels=%d, bmFormats=0x%08x",

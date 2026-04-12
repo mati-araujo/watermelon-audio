@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -172,13 +173,17 @@ struct UsbAudioFormat {
 
 /**
  * Represents one alternate setting of an AudioStreaming interface.
+ *
+ * A single altsetting may declare multiple Format Type I descriptors
+ * (e.g. S24_3LE + S32_LE). Stage 1 stored only a scalar `format`
+ * which silently overwrote earlier entries. Stage 2 stores a vector.
  */
 struct UsbStreamingInterface {
     uint8_t interfaceNumber = 0;
     uint8_t alternateSetting = 0;
 
-    // Audio format supported by this alt setting
-    UsbAudioFormat format;
+    // Audio formats supported by this alt setting (may be >1)
+    std::vector<UsbAudioFormat> formats;
 
     // Data endpoint
     UsbEndpointInfo dataEndpoint;
@@ -192,6 +197,17 @@ struct UsbStreamingInterface {
     // Is this a playback (output) or capture (input) interface?
     bool isPlayback() const { return dataEndpoint.isOutput(); }
     bool isCapture() const { return dataEndpoint.isInput(); }
+
+    /**
+     * Convenience accessor for the primary (first) format.
+     * Most altsettings declare exactly one format; this avoids
+     * having to write formats[0] everywhere.
+     * Returns a default-constructed format if the vector is empty.
+     */
+    const UsbAudioFormat& primaryFormat() const {
+        static const UsbAudioFormat empty{};
+        return formats.empty() ? empty : formats[0];
+    }
 };
 
 // ============================================================================
@@ -439,6 +455,66 @@ struct UsbAudioDevice {
         int sampleRate, int channels, int bitDepth) const;
     std::optional<UsbStreamingInterface> findCaptureFormat(
         int sampleRate, int channels, int bitDepth) const;
+
+    // ====== Aggregate capability helpers (stage 2) ======
+
+    /** All distinct sample rates across all playback altsettings. */
+    std::vector<int> playbackSampleRates() const {
+        std::vector<int> rates;
+        for (const auto& iface : playbackInterfaces) {
+            for (const auto& fmt : iface.formats) {
+                for (int r : fmt.sampleRates) {
+                    if (std::find(rates.begin(), rates.end(), r) == rates.end())
+                        rates.push_back(r);
+                }
+            }
+        }
+        std::sort(rates.begin(), rates.end());
+        return rates;
+    }
+
+    /** All distinct bit depths across all playback altsettings. */
+    std::vector<int> playbackBitDepths() const {
+        std::vector<int> depths;
+        for (const auto& iface : playbackInterfaces) {
+            for (const auto& fmt : iface.formats) {
+                int d = fmt.bitResolution;
+                if (d > 0 && std::find(depths.begin(), depths.end(), d) == depths.end())
+                    depths.push_back(d);
+            }
+        }
+        std::sort(depths.begin(), depths.end());
+        return depths;
+    }
+
+    /** All distinct sample rates across all capture altsettings. */
+    std::vector<int> captureSampleRates() const {
+        std::vector<int> rates;
+        for (const auto& iface : captureInterfaces) {
+            for (const auto& fmt : iface.formats) {
+                for (int r : fmt.sampleRates) {
+                    if (std::find(rates.begin(), rates.end(), r) == rates.end())
+                        rates.push_back(r);
+                }
+            }
+        }
+        std::sort(rates.begin(), rates.end());
+        return rates;
+    }
+
+    /** All distinct bit depths across all capture altsettings. */
+    std::vector<int> captureBitDepths() const {
+        std::vector<int> depths;
+        for (const auto& iface : captureInterfaces) {
+            for (const auto& fmt : iface.formats) {
+                int d = fmt.bitResolution;
+                if (d > 0 && std::find(depths.begin(), depths.end(), d) == depths.end())
+                    depths.push_back(d);
+            }
+        }
+        std::sort(depths.begin(), depths.end());
+        return depths;
+    }
 };
 
 // ============================================================================

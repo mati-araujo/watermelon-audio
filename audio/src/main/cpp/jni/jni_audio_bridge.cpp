@@ -20,6 +20,7 @@
 #include "../nodes/InputNode.h"
 #include "../backends/BackendManager.h"
 #include "../backends/LibusbBackend.h"
+#include "../usb/UsbSnapshotCodec.h"
 #include "../voice/VoiceTypes.h"
 #include <cmath>
 #include <algorithm>
@@ -1693,6 +1694,25 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
     return backend ? static_cast<jint>(backend->getUacVersion()) : 0;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsbCapabilitySnapshot(
+    JNIEnv* env, jobject thiz) {
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    auto* backend = manager.getLibusbBackend();
+    if (!backend || !backend->isUsbDeviceReady()) return nullptr;
+
+    const auto* device = backend->getUsbAudioDevice();
+    if (!device) return nullptr;
+
+    auto encoded = watermelon_audio::usb::encodeSnapshot(*device);
+    jbyteArray result = env->NewByteArray(static_cast<jsize>(encoded.size()));
+    if (result) {
+        env->SetByteArrayRegion(result, 0, static_cast<jsize>(encoded.size()),
+                                 reinterpret_cast<const jbyte*>(encoded.data()));
+    }
+    return result;
 }
 
 JNIEXPORT jboolean JNICALL

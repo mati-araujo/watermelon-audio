@@ -251,6 +251,8 @@ bool LibusbBackend::selectBestInterfaces() {
     // Clear previous selections
     mSelectedPlayback.reset();
     mSelectedCapture.reset();
+    mSelectedPlaybackFormat.reset();
+    mSelectedCaptureFormat.reset();
 
     bool needsPlayback = (mStreamingMode == UsbStreamingMode::PLAYBACK_ONLY ||
                           mStreamingMode == UsbStreamingMode::FULL_DUPLEX);
@@ -262,8 +264,6 @@ bool LibusbBackend::selectBestInterfaces() {
          mStreamingMode == UsbStreamingMode::CAPTURE_ONLY ? "CAPTURE_ONLY" : "FULL_DUPLEX",
          needsPlayback, needsCapture);
 
-    const bool isUac2 = (mUsbDevice->uacVersion == 2);
-
     // Helper: log every altsetting of a direction so operators can see
     // exactly what the device offered vs what we picked.
     auto logAltsettings = [](const char* label,
@@ -271,87 +271,67 @@ bool LibusbBackend::selectBestInterfaces() {
         LOGI("Available %s altsettings (%zu):", label, list.size());
         for (size_t i = 0; i < list.size(); ++i) {
             const auto& iface = list[i];
+            const auto& fmt = iface.primaryFormat();
             char rateBuf[128] = {0};
-            if (iface.format.hasContinuousRates) {
+            if (fmt.hasContinuousRates) {
                 snprintf(rateBuf, sizeof(rateBuf), "%d-%d",
-                         iface.format.minSampleRate, iface.format.maxSampleRate);
-            } else if (!iface.format.sampleRates.empty()) {
+                         fmt.minSampleRate, fmt.maxSampleRate);
+            } else if (!fmt.sampleRates.empty()) {
                 size_t pos = 0;
-                for (size_t j = 0; j < iface.format.sampleRates.size() &&
+                for (size_t j = 0; j < fmt.sampleRates.size() &&
                                    pos + 8 < sizeof(rateBuf); ++j) {
                     pos += snprintf(rateBuf + pos, sizeof(rateBuf) - pos,
                                     "%s%d", (j == 0 ? "" : ","),
-                                    iface.format.sampleRates[j]);
+                                    fmt.sampleRates[j]);
                 }
             } else {
                 snprintf(rateBuf, sizeof(rateBuf), "unknown");
             }
-            LOGI("  [%zu] IF%d Alt%d: %dch/%dbit rates={%s} ep=0x%02x fb=%s",
+            LOGI("  [%zu] IF%d Alt%d: %dch/%dbit (%zu fmt) rates={%s} ep=0x%02x fb=%s",
                  i, iface.interfaceNumber, iface.alternateSetting,
-                 iface.format.channels, iface.format.bitResolution, rateBuf,
+                 fmt.channels, fmt.bitResolution, iface.formats.size(), rateBuf,
                  iface.dataEndpoint.address,
                  iface.feedbackEndpoint ? "yes" : "no");
         }
     };
 
-    // Helper: score and pick the best altsetting in a given direction.
-    // Scoring: prefer higher bit depth first, then more channels. A UAC 1.0
-    // altsetting must explicitly list the requested rate; in UAC 2.0 the
-    // parser doesn't populate rates (they live in the clock source and
-    // stage 3 will query them via RANGE), so we accept any altsetting with
-    // a sane channel/bitdepth combination.
-    auto pickBest = [&](const std::vector<usb::UsbStreamingInterface>& list)
-        -> const usb::UsbStreamingInterface* {
-        const usb::UsbStreamingInterface* best = nullptr;
-        int bestScore = -1;
-        for (const auto& iface : list) {
-            if (iface.format.channels == 0 || iface.format.bitResolution == 0) {
-                continue;  // malformed / zero-bandwidth
-            }
-            if (!isUac2 &&
-                !iface.format.sampleRates.empty() &&
-                !iface.format.supportsSampleRate(mRequestedSampleRate)) {
-                continue;  // UAC 1.0 altsetting that doesn't list our rate
-            }
-            // Weight bit depth 100:1 over channels so a higher-quality
-            // stereo always beats a lower-quality multichannel variant.
-            int score = static_cast<int>(iface.format.bitResolution) * 100
-                      + static_cast<int>(iface.format.channels);
-            if (score > bestScore) {
-                best = &iface;
-                bestScore = score;
-            }
-        }
-        return best;
-    };
+    // Build a preference from the current requested state, optionally
+    // overlaid with a user-provided preference (from setStreamPreference).
+    usb::StreamPreference pref = mUserPreference.value_or(
+        usb::StreamPreference::defaultPro());
+    pref.requiredSampleRate = mRequestedSampleRate;
 
     // Playback
     if (needsPlayback && !mUsbDevice->playbackInterfaces.empty()) {
         logAltsettings("playback", mUsbDevice->playbackInterfaces);
-        const auto* picked = pickBest(mUsbDevice->playbackInterfaces);
-        if (picked) {
-            mSelectedPlayback = *picked;
-            LOGI("Selected playback: IF%d Alt%d, %dHz, %dch, %dbit",
-                 picked->interfaceNumber, picked->alternateSetting,
+        auto match = usb::AltsettingSelector::pickPlayback(*mUsbDevice, pref);
+        if (match) {
+            mSelectedPlayback = *match->altsetting;
+            mSelectedPlaybackFormat = *match->format;
+            LOGI("Selected playback: IF%d Alt%d, %dHz, %dch, %dbit, score=%.3f",
+                 match->altsetting->interfaceNumber,
+                 match->altsetting->alternateSetting,
                  mRequestedSampleRate,
-                 picked->format.channels, picked->format.bitResolution);
+                 match->format->channels, match->format->bitResolution,
+                 match->score);
         } else {
             // Last-resort: nothing scored. Fall back to the first entry and
             // let the transfer manager surface an error if it really doesn't
             // work.
             mSelectedPlayback = mUsbDevice->playbackInterfaces[0];
-            if (!mSelectedPlayback->format.sampleRates.empty()) {
-                mRequestedSampleRate = mSelectedPlayback->format.sampleRates[0];
-            } else if (mSelectedPlayback->format.hasContinuousRates) {
+            mSelectedPlaybackFormat = mSelectedPlayback->primaryFormat();
+            if (!mSelectedPlaybackFormat->sampleRates.empty()) {
+                mRequestedSampleRate = mSelectedPlaybackFormat->sampleRates[0];
+            } else if (mSelectedPlaybackFormat->hasContinuousRates) {
                 mRequestedSampleRate = std::min(48000,
-                    mSelectedPlayback->format.maxSampleRate);
+                    mSelectedPlaybackFormat->maxSampleRate);
             }
             LOGW("No scoring playback candidate; using IF%d Alt%d as "
                  "last-resort fallback (%dch/%dbit @ %dHz)",
                  mSelectedPlayback->interfaceNumber,
                  mSelectedPlayback->alternateSetting,
-                 mSelectedPlayback->format.channels,
-                 mSelectedPlayback->format.bitResolution,
+                 mSelectedPlaybackFormat->channels,
+                 mSelectedPlaybackFormat->bitResolution,
                  mRequestedSampleRate);
         }
     }
@@ -359,26 +339,30 @@ bool LibusbBackend::selectBestInterfaces() {
     // Capture
     if (needsCapture && !mUsbDevice->captureInterfaces.empty()) {
         logAltsettings("capture", mUsbDevice->captureInterfaces);
-        const auto* picked = pickBest(mUsbDevice->captureInterfaces);
-        if (picked) {
-            mSelectedCapture = *picked;
-            LOGI("Selected capture: IF%d Alt%d, %dHz, %dch, %dbit",
-                 picked->interfaceNumber, picked->alternateSetting,
+        auto match = usb::AltsettingSelector::pickCapture(*mUsbDevice, pref);
+        if (match) {
+            mSelectedCapture = *match->altsetting;
+            mSelectedCaptureFormat = *match->format;
+            LOGI("Selected capture: IF%d Alt%d, %dHz, %dch, %dbit, score=%.3f",
+                 match->altsetting->interfaceNumber,
+                 match->altsetting->alternateSetting,
                  mRequestedSampleRate,
-                 picked->format.channels, picked->format.bitResolution);
+                 match->format->channels, match->format->bitResolution,
+                 match->score);
         } else {
             mSelectedCapture = mUsbDevice->captureInterfaces[0];
+            mSelectedCaptureFormat = mSelectedCapture->primaryFormat();
             if (mStreamingMode == UsbStreamingMode::CAPTURE_ONLY) {
-                if (!mSelectedCapture->format.sampleRates.empty()) {
-                    mRequestedSampleRate = mSelectedCapture->format.sampleRates[0];
+                if (!mSelectedCaptureFormat->sampleRates.empty()) {
+                    mRequestedSampleRate = mSelectedCaptureFormat->sampleRates[0];
                 }
             }
             LOGW("No scoring capture candidate; using IF%d Alt%d as "
                  "last-resort fallback (%dch/%dbit @ %dHz)",
                  mSelectedCapture->interfaceNumber,
                  mSelectedCapture->alternateSetting,
-                 mSelectedCapture->format.channels,
-                 mSelectedCapture->format.bitResolution,
+                 mSelectedCaptureFormat->channels,
+                 mSelectedCaptureFormat->bitResolution,
                  mRequestedSampleRate);
         }
     }
@@ -659,8 +643,10 @@ BackendResult LibusbBackend::start() {
     // Pre-allocate DSP buffers BEFORE starting the RT thread (P0-4 fix)
     {
         const int framesPerBlock = mRequestedBufferSize;
-        const int outputChannels = mSelectedPlayback ? mSelectedPlayback->format.channels : 0;
-        const int inputChannels = mSelectedCapture ? mSelectedCapture->format.channels : 0;
+        const int outputChannels = mSelectedPlaybackFormat ? mSelectedPlaybackFormat->channels
+                                : mSelectedPlayback ? mSelectedPlayback->primaryFormat().channels : 0;
+        const int inputChannels = mSelectedCaptureFormat ? mSelectedCaptureFormat->channels
+                                : mSelectedCapture ? mSelectedCapture->primaryFormat().channels : 0;
 
         // Track actual samples per block (used for read/write sizes in RT thread)
         mDspOutputSamples = static_cast<size_t>(framesPerBlock * std::max(outputChannels, 2));
@@ -783,7 +769,8 @@ StreamInfo LibusbBackend::getStreamInfo() const {
 
     StreamInfo info;
     info.sampleRate = mRequestedSampleRate;
-    info.channelCount = mSelectedPlayback ? mSelectedPlayback->format.channels : 2;
+    info.channelCount = mSelectedPlaybackFormat ? mSelectedPlaybackFormat->channels
+                      : mSelectedPlayback ? mSelectedPlayback->primaryFormat().channels : 2;
     info.framesPerBuffer = mRequestedBufferSize;
     info.format = AudioFormat::FLOAT_32;
     info.backendType = BackendType::LIBUSB;
@@ -885,16 +872,25 @@ bool LibusbBackend::setupTransferManager() {
             ? UacVersion::UAC_2_0
             : UacVersion::UAC_1_0);
 
-    // Configure transfer parameters from the primary interface (output)
+    // Configure transfer parameters from the selected format (not just
+    // primaryFormat, because AltsettingSelector may have picked a non-primary
+    // format within a multi-format altsetting).
     usb::TransferConfig config;
     config.sampleRate = mRequestedSampleRate;
-    config.channelCount = configInterface->format.channels;
-    config.bitDepth = configInterface->format.bitResolution;
+
+    // Use the explicitly selected format when available (set by selectBestInterfaces),
+    // otherwise fall back to primaryFormat() for backward compatibility.
+    const auto& outFmt = mSelectedPlaybackFormat
+        ? *mSelectedPlaybackFormat : configInterface->primaryFormat();
+    config.channelCount = outFmt.channels;
+    config.bitDepth = outFmt.bitResolution;
 
     // FIX: Configure input parameters separately (may differ from output)
     if (mSelectedCapture) {
-        config.inputChannelCount = mSelectedCapture->format.channels;
-        config.inputBitDepth = mSelectedCapture->format.bitResolution;
+        const auto& inFmt = mSelectedCaptureFormat
+            ? *mSelectedCaptureFormat : mSelectedCapture->primaryFormat();
+        config.inputChannelCount = inFmt.channels;
+        config.inputBitDepth = inFmt.bitResolution;
         LOGI("Input config: %d channels, %d-bit (output: %d channels, %d-bit)",
              config.inputChannelCount, config.inputBitDepth,
              config.channelCount, config.bitDepth);
@@ -1357,28 +1353,30 @@ LibusbBackend::DeviceCapabilities LibusbBackend::getCapabilities() const {
         return caps;
     }
 
-    // Collect from all playback interfaces
+    // Collect from all playback interfaces (iterating all formats per altsetting)
     for (const auto& iface : mUsbDevice->playbackInterfaces) {
-        // Sample rates
-        for (int rate : iface.format.sampleRates) {
-            if (std::find(caps.supportedSampleRates.begin(),
-                         caps.supportedSampleRates.end(), rate) ==
-                caps.supportedSampleRates.end()) {
-                caps.supportedSampleRates.push_back(rate);
+        for (const auto& fmt : iface.formats) {
+            // Sample rates
+            for (int rate : fmt.sampleRates) {
+                if (std::find(caps.supportedSampleRates.begin(),
+                             caps.supportedSampleRates.end(), rate) ==
+                    caps.supportedSampleRates.end()) {
+                    caps.supportedSampleRates.push_back(rate);
+                }
             }
-        }
 
-        // Bit depths
-        int depth = iface.format.bitResolution;
-        if (std::find(caps.supportedBitDepths.begin(),
-                     caps.supportedBitDepths.end(), depth) ==
-            caps.supportedBitDepths.end()) {
-            caps.supportedBitDepths.push_back(depth);
-        }
+            // Bit depths
+            int depth = fmt.bitResolution;
+            if (depth > 0 && std::find(caps.supportedBitDepths.begin(),
+                         caps.supportedBitDepths.end(), depth) ==
+                caps.supportedBitDepths.end()) {
+                caps.supportedBitDepths.push_back(depth);
+            }
 
-        // Channels
-        caps.maxChannelsOutput = std::max(caps.maxChannelsOutput,
-                                          static_cast<int>(iface.format.channels));
+            // Channels
+            caps.maxChannelsOutput = std::max(caps.maxChannelsOutput,
+                                              static_cast<int>(fmt.channels));
+        }
 
         // Feedback support
         if (iface.feedbackEndpoint) {
@@ -1388,8 +1386,10 @@ LibusbBackend::DeviceCapabilities LibusbBackend::getCapabilities() const {
 
     // Input channels
     for (const auto& iface : mUsbDevice->captureInterfaces) {
-        caps.maxChannelsInput = std::max(caps.maxChannelsInput,
-                                         static_cast<int>(iface.format.channels));
+        for (const auto& fmt : iface.formats) {
+            caps.maxChannelsInput = std::max(caps.maxChannelsInput,
+                                             static_cast<int>(fmt.channels));
+        }
     }
 
     // Sort for consistent ordering
