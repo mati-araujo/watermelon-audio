@@ -1,7 +1,8 @@
 # USB Audio Backend — Auditoría, propuesta y roadmap
 
 **Proyecto:** `watermelon-audio` (Watermelon Studios)
-**Versión del documento:** 1.0 — 2026-04-10
+**Versión del documento:** 1.1 — 2026-04-11
+**Estado de la etapa 1:** MERGED en v1.2.2. Los tres defectos críticos originales (sample rate negotiation, feedback endpoint UAC1, DSP thread polling) están corregidos. La validación hardware reveló 5 bugs adicionales (3 regresiones de stage 1 + 2 pre-existentes) todos resueltos en v1.1.1–v1.2.2. Ver `stage_01_foundations.md` para detalles.
 **Alcance:** `audio/src/main/cpp/backends/{LibusbBackend, BackendManager, ClockController, OboeBackend}`, `audio/src/main/cpp/usb/*`, `audio/src/main/cpp/jni/jni_usb.cpp`, `audio/src/androidMain/kotlin/.../internal/usb/*`, `audio/src/commonMain/kotlin/.../{api/IUsbAudioManager, domain/usb/*}`.
 
 ---
@@ -444,4 +445,73 @@ Al finalizar la etapa 7:
 
 **¿Cuál es el criterio de "listo"?** ≤ 10 ms round-trip medido en Scarlett Solo + Pixel 6+ tras la etapa 5, y ≤ 5 ms en Pixel 8+ tras la etapa 7. Device matrix ≥ 25 devices. 0 underruns en stress 30 min con buffer 64.
 
-**Siguiente paso.** Arrancar con [stage_01_foundations.md](stage_01_foundations.md) — es la única etapa bloqueante de todas las demás.
+**Siguiente paso.** Stage 1 está mergeada. Ver §10 para los glitches pendientes y la etapa óptima donde cada uno aterriza.
+
+---
+
+## 10. Glitches pendientes post-stage-1 y asignación a etapas
+
+Stage 1 resolvió los defectos bloqueantes y estableció streaming funcional en los tres devices de prueba. Sin embargo, dos clases de glitches persisten y deben ser abordados en etapas futuras. Este análisis los clasifica y asigna al stage con mejor contexto técnico para resolverlos.
+
+### 10.1 Glitches esporádicos en playback UAC1 (GHW USB AUDIO, C-Media)
+
+**Síntoma.** Clicks o micro-roturas intermitentes durante playback continuo, particularmente audibles en tonos sostenidos. No son constantes — pueden ocurrir cada 10–60 segundos, o en bursts durante cambios de carga del scheduler de Android.
+
+**Hipótesis candidatas (por probabilidad):**
+
+| # | Hipótesis | Evidencia | Etapa óptima |
+|---|---|---|---|
+| A | **PID del ClockController mal tuneado para UAC1.** El GHW es un endpoint asíncrono (Attr=0x05) sin feedback endpoint explícito (el parser de stage 1 no detectó feedback EP en la captura). Sin feedback, el `ClockController` no ajusta frame count → drift constante acumulado que produce underrun/overrun periódico. | El log muestra `fb=no` en ambos altsettings de playback. Sin feedback, `getAdjustedFrameCount` siempre retorna nominal. | **Stage 3** (Clock sync profesional) — ahí se implementa la detección de implicit feedback en adaptive endpoints, tuning del PID, y métricas de drift observables. |
+| B | **El output endpoint es Adaptive (Attr=0x09), no Async.** Esto cambia la semántica: en Adaptive, el device adapta su reloj al ritmo de host. Si el host envía exactamente 48 frames/ms y el device tiene un clock de 48.002 kHz, no hay mecanismo de corrección → el DAC acumula 0.002 samples/ms de error → cada ~500ms rebasa su buffer interno → click. | El log muestra `Attr=0x09 = Isochronous/Adaptive` para los endpoints de playback. Adaptive output no usa feedback endpoint sino que sincroniza via la tasa de packets recibidos del host. | **Stage 3** — la correcta implementación de Adaptive mode (host pacing exacto sin feedback, potencialmente con timestamps de SOF) es la pieza faltante. El PID del ClockController está diseñado para Async, no para Adaptive. |
+| C | **Jitter del DSP thread wakeup.** El `try_acquire_for(5ms)` del semáforo tiene un timeout de seguridad. Bajo carga de scheduler Android (doze kicks, GC pressure, thermal throttling), el wakeup puede llegar tarde → un callback entero se delay → underrun transitorio en el ring buffer de output. | Plausible pero menos probable: `underruns=0` en los stats de las corridas recientes. El profiler `dspCallback.p99LatencyUs` debería mostrar si hay outliers significativos. | **Stage 1 ya lo mejoró** con el semáforo. Para investigar más: habilitar el profiling (`nativeSetUsbProfilingEnabled(true)`) y correr una sesión de 5 minutos, analizando `p99LatencyUs`. Si p99 > 2ms, hay jitter problem. Si p99 < 500µs, el problema es clock drift, no DSP scheduling. |
+
+**Veredicto:** La causa más probable es **B (Adaptive mode)**: el host manda exactamente 48 frames/ms pero el device espera un rate ligeramente distinto. Sin mecanismo de corrección (ni feedback endpoint, ni rate-matching del host), drift acumula. **Stage 3 es el lugar correcto** porque ahí se rediseña el clock sync incluyendo:
+- Diferenciación de sync type (Async vs Adaptive vs Synchronous) en la selección de comportamiento del ClockController.
+- Para Adaptive output: el host debería variar ligeramente el frame count basado en SOF timestamps, no feedback endpoint.
+- Métricas de drift observables (`healthEvents: Flow<UsbHealthEvent>`) que permiten al consumer (NoisyPad) decidir si muestra un warning al usuario.
+
+**Acción inmediata (sin esperar stage 3):** habilitar profiling en el próximo test run y capturar `dspCallback.p99LatencyUs` + `driftPpm` durante 5 minutos. Si `driftPpm` crece monótonamente, confirma la hipótesis B y la priority de stage 3 sube.
+
+### 10.2 Glitches del UGREEN CM720 (UAC2) con auriculares+micrófono
+
+**Síntoma.** Al conectar auriculares con micrófono integrado al CM720, el playback (tono del chaos pad) tiene clicks frecuentes. Sin auriculares+mic (solo el DAC puro), el playback suena limpio.
+
+**Hipótesis candidatas:**
+
+| # | Hipótesis | Evidencia | Etapa óptima |
+|---|---|---|---|
+| A | **El device cambia de altsetting/mode cuando detecta mic.** Muchos adaptadores USB-C DAC "headset" re-enumeran los endpoints cuando un auricular con mic se conecta: el device puede pasar de "stereo playback only" a "stereo playback + mono capture" internamente, modificando el wMaxPacketSize o el bInterval de los endpoints activos sin que el host lo sepa (no hay re-negotiation automática en UAC2 sin el host chequeando). | Sin logs todavía — necesitamos ver el descriptor parsing cuando el auricular está conectado vs desconectado. | **Stage 2** (Discovery completo) — la re-enumeración de endpoints bajo hot-plug de accesorios es exactamente lo que `UsbTopology` + `UsbCapabilitySnapshot` están diseñados para manejar. |
+| B | **bInterval > 1 en el modo headset.** Si el endpoint del auricular declara `bInterval=2` (polling cada 250µs en lugar de 125µs en high-speed), nuestro código que asume `bInterval=1` podría estar mandando packets al doble de la tasa esperada → el device bufferiza la mitad de lo que esperábamos → clicks. | Plausible pero necesita confirmación. El log actual muestra `bInterval=1` pero eso fue capturado sin auriculares+mic. | **Stage 2** — el parser ya lee `bInterval` pero nadie lo usa en los cálculos de timing. Stage 2 introduce el `AltsettingDescriptor` que incluye `bInterval` como campo first-class y lo expone en la snapshot. |
+| C | **El CM720 en modo headset activa full-duplex internamente y compite por el bandwidth del bus.** UAC2 high-speed con playback + capture en microframes simultáneos puede saturar el bus USB si el host no space los transfers correctamente. | Menos probable en USB 2.0 que tiene headroom de bandwidth para audio stereo+mono. | **Stage 4** (Routing) — la composición de input/output backends con clock reconciliation ayudaría, pero este caso es un solo device haciendo full-duplex en su propio hub. No es un caso de multi-backend. |
+
+**Veredicto:** Necesitamos los logs del CM720 **con auriculares+mic conectados** para discriminar entre A (re-enumeración) y B (bInterval). La captura del descriptor parsing con el accesorio puesto va a mostrar:
+- Si los altsettings/endpoints cambian respecto al caso sin accesorio.
+- Si `bInterval` o `wMaxPacketSize` difieren.
+- Si aparecen interfaces de capture nuevas.
+
+**Etapa óptima: Stage 2** para la detection y Stage 3 para la corrección de clock behavior con bInterval variado. Si los endpoints no cambian con el accesorio, la causa es más sutil (posiblemente C) y stage 4 la abordaría.
+
+**Acción inmediata:** capturar los logs del CM720 con auriculares+mic enchufado, desde el connect hasta playback, y comparar con los logs sin accesorio ya capturados.
+
+### 10.3 Resumen de asignación
+
+| Glitch | Causa más probable | Etapa óptima | Prioridad |
+|---|---|---|---|
+| UAC1 clicks esporádicos en playback | Adaptive mode sin rate correction | **Stage 3** (Clock sync) | Alta — afecta a usuarios con DACs baratos que son la mayoría |
+| CM720 clicks con auriculares+mic | Re-enumeración de endpoints o bInterval | **Stage 2** (Discovery) → **Stage 3** (Clock) | Media — afecta solo un device/accesorios específicos |
+| Stage 6 test gaps revelados | No hay smoke tests paramétricos para iso layout/format divergentes | **Stage 6** (Test harness) | Alta para prevenir regresiones futuras |
+
+### 10.4 Prioridad de etapas actualizada post-stage-1
+
+```
+Etapa 2 (Discovery)  ─┬─ Preparación para Stage 3 + fix de CM720 headset
+                       │
+Etapa 3 (Clock sync) ─┘─ Fix de glitches UAC1 adaptive + CM720 bInterval
+                         ─ Prerequisito para stages 4 y 5
+
+Etapa 6 (Test harness) ─── Puede ejecutarse en paralelo con 2/3 para
+                            cerrar los gaps de validación que produjeron
+                            las 3 regresiones de stage 1
+```
+
+La recomendación es ejecutar **Stage 2 → Stage 3 en secuencia** como próximo bloque de trabajo, intercalando Stage 6 si hay tiempo. Stages 4, 5 y 7 quedan para después de que el clock sync esté estable.

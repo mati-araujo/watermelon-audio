@@ -1,9 +1,42 @@
 # Etapa 1 — Fundamentos críticos
 
-**Estado:** propuesta — no iniciada.
+**Estado:** MERGED — v1.2.2 publicada el 2026-04-11.
 **Dependencias:** ninguna. Es la primera etapa y bloquea todas las demás.
-**Duración estimada:** 3–5 días de trabajo concentrado.
-**Severidad de los bugs que resuelve:** 2× Crítico, 1× Mayor.
+**Duración real:** ~1 sesión de trabajo concentrada + 5 hotfixes on-device.
+**Severidad de los bugs que resuelve:** 2× Crítico, 1× Mayor + 4 regresiones descubiertas y corregidas en la validación hardware.
+
+### Releases publicadas
+
+| Versión | Commits | Estado |
+|---|---|---|
+| v1.1.0 | Stage 1 base (5 commits: docs, portability, core, tests, Kotlin preset) | Publicada, superseded |
+| v1.1.1 | `fix(usb): run SET_CUR after set_interface_alt_setting, claim control interface` | Publicada, superseded |
+| v1.1.2 | `fix(usb): size iso packets by USB speed and pick altsetting by bit depth` | Publicada, superseded |
+| v1.2.0 | `fix(usb): size iso packet slots by endpoint wMaxPacketSize and clock margin` — **regresión** | Publicada, broken (distorsión output por layout slot-based incorrecto) |
+| v1.2.1 | `fix(usb): write output iso packets contiguously, not slot-strided` — fix de la regresión 1.2.0 | Publicada, superseded |
+| v1.2.2 | `fix(usb): decode input PCM using the input's own bit depth, not the output's` | **Versión estable actual** |
+
+### Bugs encontrados y corregidos durante la validación hardware
+
+| # | Bug | Descubierto en | Root cause | Fix |
+|---|---|---|---|---|
+| 1 | SET_CUR al sample rate falla con `LIBUSB_ERROR_IO` en ambos DACs | v1.1.0 | (a) SET_CUR corre antes del `SET_INTERFACE(alt)`, endpoints no activos; (b) AudioControl interface nunca claimed para requests interface-recipient UAC2 | v1.1.1: ClockConfigHook post-setAlt + `claimControlInterface()` |
+| 2 | Audio distorsionado en DAC UAC2 (UGREEN CM720) | v1.1.1 | (a) `framesPerPacket = sampleRate/1000` asume full-speed — en high-speed debía ser `/8000`; (b) selector "primer match" elegía 16-bit cuando había 32-bit porque UAC2 no popula `format.sampleRates` | v1.1.2: `libusb_get_device_speed()` + scoring por bit depth |
+| 3 | Crash tras 4-5 switches de modo en full-duplex UAC1 | v1.1.2 | `eventLoopThread` exit condition no esperaba que los callbacks CANCELLED drenaran → transfers zombies en `flying_transfers` list de libusb → use-after-free en el siguiente `libusb_control_transfer` | v1.1.2 (hotfix): drain loop con deadline de 500ms |
+| 4 | **REGRESIÓN** — Distorsión total en output para todos los DACs | v1.2.0 | `fillOutputTransfer` escribía packets a offsets `p × slotSize` (slot-based layout), pero `linux_usbfs` lee a offsets sumatorios de `iso_packet_desc[].length` (length-based layout) | v1.2.1: revertir a escritura contigua, mantener clock margin en allocation |
+| 5 | Audio garbled / ruido en input_fx modo full-duplex (GHW USB AUDIO) | v1.2.1 | `processInputTransfer` usaba `mConfig.pcmFormat` (output S24_3LE) para decodificar input S16_LE → cada 3 bytes wire = 1 "sample" decodificado cuando deberían ser 2 bytes | v1.2.2: nuevo `TransferConfig::inputPcmFormat` derivado de `inputBitDepth` |
+
+### Aprendizajes clave
+
+1. **El host gtest suite tiene un gap de cobertura crítico**: no ejercita el pipeline iso transfer (solo parser + builders). Los 3 bugs de regresión (#3, #4, #5) nunca se manifestaron en tests y requirieron validación hardware. Stage 6 debe agregar smoke tests paramétricos que cubran endpoint_max > nominal, bit depth asimétrico, y channel count asimétrico.
+
+2. **`linux_usbfs` tiene un modelo de layout de buffer distinto** al que documentan otros backends de libusb (Windows, macOS). Los iso packets en el buffer del kernel se acumulan contiguamente por `sum(lengths)`, no por slots fijos. Cualquier cambio al buffer de iso transfers DEBE validarse contra un device donde `wMaxPacketSize > nominal` (muy común: altsettings multi-rate como 48k/96k).
+
+3. **Input y output en el mismo device pueden tener formatos completamente distintos** (1ch/16bit vs 2ch/24bit). Cualquier campo del `TransferConfig` que esté unificado para las dos direcciones es un bug esperando ser descubierto. El `pcmFormat`/`inputPcmFormat` split es el ejemplo; deberían auditarse otros campos por el mismo patrón.
+
+4. **El orden de los class-specific control transfers respecto al lifecycle de las interfaces USB importa enormemente.** `SET_CUR` al endpoint no funciona si el altsetting que lo contiene no está activo. `SET_CUR` al clock source no funciona si la AudioControl interface no está claimed. El hook `ClockConfigHook` resuelve el timing correctamente.
+
+5. **Los altsettings con rates múltiples (48k/96k) declaran `wMaxPacketSize` para el peor caso (96k)**, no para el nominal (48k). Eso es ~2× lo que usamos en steady state. El sizing del buffer de iso output debe basarse en `nominal + clockMargin`, no en el endpoint max, porque el kernel lee por acumulación de longitudes declaradas, no por slots.
 
 ---
 
