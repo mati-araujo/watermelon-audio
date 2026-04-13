@@ -352,6 +352,38 @@ struct UsbFeatureUnit {
 };
 
 // ============================================================================
+// Audio Terminals (full records, stage 3)
+// ============================================================================
+
+/**
+ * Parsed Input Terminal record.
+ *
+ * UAC 2.0 terminals carry a `bCSourceID` that points at a clock source/
+ * selector/multiplier in the clock graph. Stage 1 dropped this on the
+ * floor (only kept a bare id list); stage 3 needs it to route SET_CUR
+ * sample rate requests to the correct clock.
+ *
+ * For UAC 1.0 devices `clockSourceId` is 0 — UAC1 has no explicit clock
+ * graph and sample rate goes straight to the streaming endpoint.
+ */
+struct UsbInputTerminal {
+    uint8_t  terminalId = 0;
+    uint16_t terminalType = 0;
+    uint8_t  clockSourceId = 0;   // UAC2 only
+    uint8_t  numChannels = 0;
+};
+
+/**
+ * Parsed Output Terminal record.
+ */
+struct UsbOutputTerminal {
+    uint8_t  terminalId = 0;
+    uint16_t terminalType = 0;
+    uint8_t  sourceId = 0;        // data-path input (FU, mixer, etc)
+    uint8_t  clockSourceId = 0;   // UAC2 only
+};
+
+// ============================================================================
 // Complete USB Audio Device Representation
 // ============================================================================
 
@@ -366,8 +398,12 @@ struct UsbAudioDevice {
 
     // Audio Control interface info
     uint8_t controlInterface = 0;
-    std::vector<uint8_t> inputTerminalIds;
-    std::vector<uint8_t> outputTerminalIds;
+    std::vector<uint8_t> inputTerminalIds;   // kept for legacy callers
+    std::vector<uint8_t> outputTerminalIds;  // kept for legacy callers
+
+    // Stage 3: full terminal records with clock-source linkage
+    std::vector<UsbInputTerminal>  inputTerminals;
+    std::vector<UsbOutputTerminal> outputTerminals;
 
     // UAC 2.0 clock topology
     std::vector<UsbClockSource> clockSources;
@@ -396,6 +432,27 @@ struct UsbAudioDevice {
             if (cs.clockId == clockId) return &cs;
         }
         return nullptr;
+    }
+
+    /**
+     * Resolve the clock source ID feeding a given streaming interface's
+     * `terminalLink`. The terminalLink field of an AS General descriptor
+     * points to the terminal attached to the streaming endpoint — for a
+     * playback stream that's an Output Terminal (the DAC), for a capture
+     * stream it's an Input Terminal (the mic/line-in).
+     *
+     * Returns 0 if the link can't be resolved (UAC 1.0, or mismatched topology).
+     * In that case the caller should fall back to `clockSources.front()`.
+     */
+    uint8_t resolveClockSourceId(uint8_t terminalLinkId) const {
+        if (terminalLinkId == 0) return 0;
+        for (const auto& t : outputTerminals) {
+            if (t.terminalId == terminalLinkId) return t.clockSourceId;
+        }
+        for (const auto& t : inputTerminals) {
+            if (t.terminalId == terminalLinkId) return t.clockSourceId;
+        }
+        return 0;
     }
 
     // Feature Unit methods

@@ -7,6 +7,7 @@
 #include "LibusbBackend.h"
 #include "../usb/UsbConstants.h"
 #include "../usb/SampleRateRequest.h"
+#include "../usb/ClockSourceRangeParser.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -163,6 +164,11 @@ bool LibusbBackend::initializeFromFileDescriptor(int fd, const char* usbfsPath) 
              "accept them without an explicit claim.",
              mUsbDevice->controlInterface);
     }
+
+    // Stage 3: query clock source RANGE to populate real sample rates
+    // for UAC2 devices. No-op on UAC1. Must run AFTER the control interface
+    // is claimed so interface-recipient requests can reach their target.
+    populateClockSourceRates();
 
     // Initialize volume controls based on Feature Unit descriptors
     initializeVolumeControls();
@@ -432,6 +438,90 @@ bool LibusbBackend::claimControlInterface() {
 }
 
 // ============================================================================
+// Stage 3: Clock Source RANGE query
+// ============================================================================
+//
+// UAC 2.0 clock sources advertise their supported sample rates via a RANGE
+// control request (spec 5.2.1):
+//   bmRequestType = 0xA1  (D2H | Class | Interface)
+//   bRequest      = 0x02  (RANGE)
+//   wValue        = CS_SAM_FREQ_CONTROL << 8  = 0x0100
+//   wIndex        = (clockSourceId << 8) | controlInterface
+//
+// The response is variable-length: 2 bytes wNumSubRanges followed by
+// numSubRanges * 12 bytes of (dMIN, dMAX, dRES) u32 LE triplets.
+//
+// Before stage 3 this was a TODO stub (UsbDescriptorParser.cpp:950) that
+// hardcoded 44100..192000. That made the Kotlin capability snapshot lie
+// about what the device actually supports. Now we query for real.
+void LibusbBackend::populateClockSourceRates() {
+    if (!mDeviceHandle || !mUsbDevice) return;
+    if (mUsbDevice->uacVersion != 2) return;  // UAC1 has no clock graph
+    if (mUsbDevice->clockSources.empty()) return;
+
+    const uint8_t controlIface = mUsbDevice->controlInterface;
+
+    for (auto& cs : mUsbDevice->clockSources) {
+        if (!cs.canControlFrequency) {
+            LOGD("Clock source %d has no frequency control bit, skipping RANGE",
+                 cs.clockId);
+            continue;
+        }
+
+        // Clear any stale fallback rates from the old stub path.
+        cs.sampleRates.clear();
+        cs.hasContinuousRates = false;
+        cs.minSampleRate = 0;
+        cs.maxSampleRate = 0;
+
+        const uint16_t wValue = static_cast<uint16_t>(
+            usb::UAC2_CS_SAM_FREQ_CONTROL << 8);
+        const uint16_t wIndex = static_cast<uint16_t>(
+            (cs.clockId << 8) | controlIface);
+
+        // Read the full payload in one shot. Sub-ranges are 12 bytes each;
+        // 32 sub-ranges cover virtually any real device (typically ≤ 6).
+        // Overallocation is fine — libusb returns actual length.
+        constexpr size_t kMaxSubRanges = 32;
+        constexpr size_t kBufSize = 2 + kMaxSubRanges * 12;
+        std::array<uint8_t, kBufSize> buf{};
+
+        int r = libusb_control_transfer(
+            mDeviceHandle,
+            /*bmRequestType*/ 0xA1,  // D2H | Class | Interface
+            /*bRequest*/      usb::UAC2_REQUEST_RANGE,
+            /*wValue*/        wValue,
+            /*wIndex*/        wIndex,
+            buf.data(),
+            static_cast<uint16_t>(buf.size()),
+            /*timeout*/       1000);
+
+        if (r < 2) {
+            LOGW("Clock source %d: RANGE request failed (%d: %s), "
+                 "rates will stay empty",
+                 cs.clockId, r,
+                 (r < 0 ? libusb_error_name(r) : "short response"));
+            continue;
+        }
+
+        auto ranges = usb::parseClockRangeResponse(
+            buf.data(), static_cast<size_t>(r));
+        if (ranges.empty()) {
+            LOGW("Clock source %d: RANGE decoded to 0 sub-ranges", cs.clockId);
+            continue;
+        }
+
+        usb::applyRangesToClockSource(ranges, cs);
+
+        LOGI("Clock source %d: %zu sub-ranges → %zu discrete rates, "
+             "continuous=%d, min=%d, max=%d",
+             cs.clockId, ranges.size(), cs.sampleRates.size(),
+             cs.hasContinuousRates ? 1 : 0,
+             cs.minSampleRate, cs.maxSampleRate);
+    }
+}
+
+// ============================================================================
 // Sample Rate Negotiation
 // ============================================================================
 //
@@ -526,57 +616,94 @@ bool LibusbBackend::configureSampleRate() {
                  "sample rate");
             return false;
         }
-        // Stage 1: pick the first clock source. Stage 3 introduces explicit
-        // selection via the clock graph.
-        const auto& clockSrc = mUsbDevice->clockSources.front();
-        const uint8_t clockId = clockSrc.clockId;
+
         const uint8_t controlIface = mUsbDevice->controlInterface;
 
-        // SET_CUR
-        auto setReq = usb::buildUac2SetSampleRateRequest(
-            clockId, controlIface, requested);
-        int r = libusb_control_transfer(
-            mDeviceHandle,
-            setReq.bmRequestType,
-            setReq.bRequest,
-            setReq.wValue,
-            setReq.wIndex,
-            setReq.payload.data(),
-            static_cast<uint16_t>(setReq.payload.size()),
-            /*timeout*/ 1000);
-        if (r < 0) {
-            LOGE("UAC2 SET_CUR sample rate failed for clockSrc %d (%u Hz): %s",
-                 clockId, requested, libusb_error_name(r));
-            mLastLibusbError.store(r);
-            return false;
+        // Stage 3: resolve the clock source(s) actually feeding the selected
+        // streaming terminal(s). Devices like UGREEN CM720 expose two clock
+        // sources (id=27 for the mic input terminal, id=30 for the playback
+        // output terminal). We need to SET_CUR on each one — stage 1 only
+        // set clockSources.front() which was wrong for full-duplex devices
+        // with asymmetric clocks.
+        std::vector<uint8_t> clockIdsToSet;
+        auto addUnique = [&](uint8_t id) {
+            if (id == 0) return;
+            for (uint8_t existing : clockIdsToSet) {
+                if (existing == id) return;
+            }
+            clockIdsToSet.push_back(id);
+        };
+
+        if (mSelectedPlayback) {
+            addUnique(mUsbDevice->resolveClockSourceId(mSelectedPlayback->terminalLink));
+        }
+        if (mSelectedCapture) {
+            addUnique(mUsbDevice->resolveClockSourceId(mSelectedCapture->terminalLink));
         }
 
-        // GET_CUR (verification)
-        auto getReq = usb::buildUac2GetSampleRateRequest(clockId, controlIface);
-        std::array<uint8_t, 4> readback{};
-        int g = libusb_control_transfer(
-            mDeviceHandle,
-            getReq.bmRequestType,
-            getReq.bRequest,
-            getReq.wValue,
-            getReq.wIndex,
-            readback.data(),
-            static_cast<uint16_t>(readback.size()),
-            /*timeout*/ 1000);
-        if (g == 4) {
-            uint32_t actual = usb::decodeUac2SampleRateResponse(readback);
-            if (actual != requested) {
-                LOGW("UAC2 device coerced sample rate %u Hz -> %u Hz",
-                     requested, actual);
-                mRequestedSampleRate = static_cast<int>(actual);
+        if (clockIdsToSet.empty()) {
+            // Fall back to clockSources.front() if resolution failed — e.g.
+            // terminals don't have clockSourceId populated for some reason.
+            LOGW("Could not resolve clock source for any selected terminal; "
+                 "falling back to clockSources.front() (clockId=%d)",
+                 mUsbDevice->clockSources.front().clockId);
+            clockIdsToSet.push_back(mUsbDevice->clockSources.front().clockId);
+        }
+
+        // Lambda: run SET_CUR + GET_CUR for a single clock source.
+        auto setOneClock = [&](uint8_t clockId) -> bool {
+            auto setReq = usb::buildUac2SetSampleRateRequest(
+                clockId, controlIface, requested);
+            int r = libusb_control_transfer(
+                mDeviceHandle,
+                setReq.bmRequestType,
+                setReq.bRequest,
+                setReq.wValue,
+                setReq.wIndex,
+                setReq.payload.data(),
+                static_cast<uint16_t>(setReq.payload.size()),
+                /*timeout*/ 1000);
+            if (r < 0) {
+                LOGE("UAC2 SET_CUR sample rate failed for clockSrc %d (%u Hz): %s",
+                     clockId, requested, libusb_error_name(r));
+                mLastLibusbError.store(r);
+                return false;
             }
-            LOGI("Rate negotiation: UAC2 clockSrc=%d req=%u actual=%u",
-                 clockId, requested, actual);
-        } else {
-            LOGW("UAC2 GET_CUR sample rate readback failed: %s (continuing)",
-                 g < 0 ? libusb_error_name(g) : "short response");
-            LOGI("Rate negotiation: UAC2 clockSrc=%d req=%u (unverified)",
-                 clockId, requested);
+
+            // GET_CUR verification
+            auto getReq = usb::buildUac2GetSampleRateRequest(clockId, controlIface);
+            std::array<uint8_t, 4> readback{};
+            int g = libusb_control_transfer(
+                mDeviceHandle,
+                getReq.bmRequestType,
+                getReq.bRequest,
+                getReq.wValue,
+                getReq.wIndex,
+                readback.data(),
+                static_cast<uint16_t>(readback.size()),
+                /*timeout*/ 1000);
+            if (g == 4) {
+                uint32_t actual = usb::decodeUac2SampleRateResponse(readback);
+                if (actual != requested) {
+                    LOGW("UAC2 device coerced sample rate %u Hz -> %u Hz on clockSrc %d",
+                         requested, actual, clockId);
+                    mRequestedSampleRate = static_cast<int>(actual);
+                }
+                LOGI("Rate negotiation: UAC2 clockSrc=%d req=%u actual=%u",
+                     clockId, requested, actual);
+            } else {
+                LOGW("UAC2 GET_CUR sample rate readback failed on clockSrc %d: %s (continuing)",
+                     clockId, g < 0 ? libusb_error_name(g) : "short response");
+                LOGI("Rate negotiation: UAC2 clockSrc=%d req=%u (unverified)",
+                     clockId, requested);
+            }
+            return true;
+        };
+
+        for (uint8_t clockId : clockIdsToSet) {
+            if (!setOneClock(clockId)) {
+                return false;
+            }
         }
         return true;
     }

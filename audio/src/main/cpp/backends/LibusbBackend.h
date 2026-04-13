@@ -415,6 +415,12 @@ private:
     bool selectBestInterfaces();
     bool configureSampleRate();
 
+    // Stage 3: query UAC2 clock sources for their supported sample rate ranges
+    // via RANGE control transfers and populate mUsbDevice->clockSources rate
+    // fields. No-op on UAC1. Must be called AFTER claimControlInterface() so
+    // interface-recipient requests can reach the control interface.
+    void populateClockSourceRates();
+
     // Claim the AudioControl interface so class-specific interface requests
     // (volume, clock source, clock selector, sample rate on UAC2) can reach
     // their target. Idempotent w.r.t. re-initialization. Detaches any kernel

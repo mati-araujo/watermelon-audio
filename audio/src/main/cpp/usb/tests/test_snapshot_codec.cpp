@@ -149,6 +149,61 @@ TEST(UsbSnapshotCodec, RoundTripWithClockSources) {
     EXPECT_TRUE(decoded->clockSources[0].hasValidityControl);
 }
 
+// Stage 3: clock sources now carry sample rate lists from the RANGE query.
+TEST(UsbSnapshotCodec, RoundTripWithClockSourceSampleRates) {
+    UsbAudioDevice device;
+    device.uacVersion = 2;
+
+    UsbClockSource cs;
+    cs.clockId = 30;
+    cs.type = ClockSourceType::INTERNAL_PROGRAMMABLE;
+    cs.canControlFrequency = true;
+    cs.hasContinuousRates = false;
+    cs.sampleRates = {44100, 48000, 88200, 96000};
+    cs.minSampleRate = 44100;
+    cs.maxSampleRate = 96000;
+    device.clockSources.push_back(cs);
+
+    auto encoded = encodeSnapshot(device);
+    auto decoded = decodeSnapshot(encoded.data(), encoded.size());
+    ASSERT_TRUE(decoded.has_value());
+
+    ASSERT_EQ(decoded->clockSources.size(), 1u);
+    const auto& dcs = decoded->clockSources[0];
+    EXPECT_EQ(dcs.clockId, 30);
+    EXPECT_FALSE(dcs.hasContinuousRates);
+    EXPECT_EQ(dcs.minSampleRate, 44100);
+    EXPECT_EQ(dcs.maxSampleRate, 96000);
+    ASSERT_EQ(dcs.sampleRates.size(), 4u);
+    EXPECT_EQ(dcs.sampleRates[0], 44100);
+    EXPECT_EQ(dcs.sampleRates[3], 96000);
+}
+
+TEST(UsbSnapshotCodec, RoundTripWithContinuousClockSource) {
+    UsbAudioDevice device;
+    device.uacVersion = 2;
+
+    UsbClockSource cs;
+    cs.clockId = 1;
+    cs.type = ClockSourceType::INTERNAL_VARIABLE;
+    cs.canControlFrequency = true;
+    cs.hasContinuousRates = true;
+    cs.minSampleRate = 8000;
+    cs.maxSampleRate = 192000;
+    // Empty discrete list — continuous range has no explicit rates
+    device.clockSources.push_back(cs);
+
+    auto encoded = encodeSnapshot(device);
+    auto decoded = decodeSnapshot(encoded.data(), encoded.size());
+    ASSERT_TRUE(decoded.has_value());
+
+    ASSERT_EQ(decoded->clockSources.size(), 1u);
+    EXPECT_TRUE(decoded->clockSources[0].hasContinuousRates);
+    EXPECT_EQ(decoded->clockSources[0].minSampleRate, 8000);
+    EXPECT_EQ(decoded->clockSources[0].maxSampleRate, 192000);
+    EXPECT_TRUE(decoded->clockSources[0].sampleRates.empty());
+}
+
 TEST(UsbSnapshotCodec, RoundTripWithFeatureUnits) {
     UsbAudioDevice device;
     device.uacVersion = 1;

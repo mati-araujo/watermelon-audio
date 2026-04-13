@@ -49,6 +49,7 @@ add_executable(usb_tests
     test_usb_descriptor_parser.cpp
     test_altsetting_selector.cpp
     test_snapshot_codec.cpp
+    test_clock_range_parser.cpp
     ${USB_TESTED_SOURCES}
 )
 

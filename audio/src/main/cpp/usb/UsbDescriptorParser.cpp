@@ -493,6 +493,16 @@ bool UsbDescriptorParser::parseInputTerminal(const uint8_t* data, UsbAudioDevice
 
     device.inputTerminalIds.push_back(term->bTerminalID);
 
+    // Stage 3: also store the full terminal record. UAC1 has no clock source
+    // reference, so clockSourceId stays 0 — resolveClockSourceId() falls
+    // through to the UAC1 path (endpoint-recipient SET_CUR).
+    UsbInputTerminal rec;
+    rec.terminalId = term->bTerminalID;
+    rec.terminalType = termType;
+    rec.clockSourceId = 0;
+    rec.numChannels = term->bNrChannels;
+    device.inputTerminals.push_back(rec);
+
     LOGD("Input Terminal: ID=%d, Type=0x%04x, Channels=%d",
          term->bTerminalID, termType, term->bNrChannels);
 
@@ -509,6 +519,14 @@ bool UsbDescriptorParser::parseOutputTerminal(const uint8_t* data, UsbAudioDevic
     uint16_t termType = readUint16LE(reinterpret_cast<const uint8_t*>(&term->wTerminalType));
 
     device.outputTerminalIds.push_back(term->bTerminalID);
+
+    // Stage 3: store full record. UAC1 clockSourceId = 0.
+    UsbOutputTerminal rec;
+    rec.terminalId = term->bTerminalID;
+    rec.terminalType = termType;
+    rec.sourceId = term->bSourceID;
+    rec.clockSourceId = 0;
+    device.outputTerminals.push_back(rec);
 
     LOGD("Output Terminal: ID=%d, Type=0x%04x, SourceID=%d",
          term->bTerminalID, termType, term->bSourceID);
@@ -799,6 +817,14 @@ bool UsbDescriptorParser::parseUAC2InputTerminal(const uint8_t* data, UsbAudioDe
 
     device.inputTerminalIds.push_back(desc->bTerminalID);
 
+    // Stage 3: store full terminal record with clock source linkage.
+    UsbInputTerminal rec;
+    rec.terminalId = desc->bTerminalID;
+    rec.terminalType = termType;
+    rec.clockSourceId = desc->bCSourceID;
+    rec.numChannels = desc->bNrChannels;
+    device.inputTerminals.push_back(rec);
+
     LOGD("UAC 2.0 Input Terminal: ID=%d, Type=0x%04x, Channels=%d, ClockSrc=%d",
          desc->bTerminalID, termType, desc->bNrChannels, desc->bCSourceID);
 
@@ -815,6 +841,14 @@ bool UsbDescriptorParser::parseUAC2OutputTerminal(const uint8_t* data, UsbAudioD
     uint16_t termType = readUint16LE(reinterpret_cast<const uint8_t*>(&desc->wTerminalType));
 
     device.outputTerminalIds.push_back(desc->bTerminalID);
+
+    // Stage 3: store full terminal record with clock source linkage.
+    UsbOutputTerminal rec;
+    rec.terminalId = desc->bTerminalID;
+    rec.terminalType = termType;
+    rec.sourceId = desc->bSourceID;
+    rec.clockSourceId = desc->bCSourceID;
+    device.outputTerminals.push_back(rec);
 
     LOGD("UAC 2.0 Output Terminal: ID=%d, Type=0x%04x, SourceID=%d, ClockSrc=%d",
          desc->bTerminalID, termType, desc->bSourceID, desc->bCSourceID);

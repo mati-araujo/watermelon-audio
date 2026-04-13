@@ -29,11 +29,22 @@ data class UsbCapabilitySnapshot(
     val hasAsyncFeedback: Boolean
         get() = playbackAltsettings.any { it.hasFeedbackEndpoint }
 
-    /** All distinct sample rates across all playback altsettings. */
+    /**
+     * All distinct sample rates supported by the playback path.
+     *
+     * UAC 1.0 populates rates directly on each Format Type I descriptor.
+     * UAC 2.0 keeps them on the clock source (exposed via RANGE request,
+     * populated in stage 3). If altsetting rates are empty, fall back to
+     * the union of clock source rates.
+     */
     val effectiveOutputSampleRates: List<Int>
-        get() = playbackAltsettings.flatMap { alt ->
-            alt.formats.flatMap { it.sampleRates }
-        }.distinct().sorted()
+        get() {
+            val fromAlts = playbackAltsettings.flatMap { alt ->
+                alt.formats.flatMap { it.sampleRates }
+            }.distinct().sorted()
+            if (fromAlts.isNotEmpty()) return fromAlts
+            return clockSources.flatMap { it.sampleRates }.distinct().sorted()
+        }
 
     /** All distinct bit depths across all playback altsettings. */
     val effectiveOutputBitDepths: List<Int>
@@ -41,11 +52,15 @@ data class UsbCapabilitySnapshot(
             alt.formats.map { it.bitResolution }
         }.filter { it > 0 }.distinct().sorted()
 
-    /** All distinct sample rates across all capture altsettings. */
+    /** All distinct sample rates supported by the capture path (see output docs). */
     val effectiveInputSampleRates: List<Int>
-        get() = captureAltsettings.flatMap { alt ->
-            alt.formats.flatMap { it.sampleRates }
-        }.distinct().sorted()
+        get() {
+            val fromAlts = captureAltsettings.flatMap { alt ->
+                alt.formats.flatMap { it.sampleRates }
+            }.distinct().sorted()
+            if (fromAlts.isNotEmpty()) return fromAlts
+            return clockSources.flatMap { it.sampleRates }.distinct().sorted()
+        }
 
     /** All distinct bit depths across all capture altsettings. */
     val effectiveInputBitDepths: List<Int>
@@ -81,6 +96,11 @@ data class ClockSourceInfo(
     val syncedToSof: Boolean,
     val hasFrequencyControl: Boolean,
     val hasValidityControl: Boolean,
+    // Stage 3: sample rates from the UAC2 RANGE query
+    val sampleRates: List<Int> = emptyList(),
+    val hasContinuousRates: Boolean = false,
+    val minSampleRate: Int = 0,
+    val maxSampleRate: Int = 0,
 )
 
 enum class ClockSourceType {

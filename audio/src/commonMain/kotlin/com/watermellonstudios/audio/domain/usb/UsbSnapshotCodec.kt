@@ -43,15 +43,30 @@ object UsbSnapshotCodec {
         val numCapture = buf.getShort().toInt() and 0xFFFF
         val captureAlts = (0 until numCapture).map { readAltsetting(buf) }
 
-        // Clock sources
+        // Clock sources (stage 3: now carries sample rate list from RANGE query)
         val numClocks = buf.get().toInt() and 0xFF
         val clockSources = (0 until numClocks).map {
+            val clockId = buf.get().toInt() and 0xFF
+            val type = ClockSourceType.fromId(buf.get().toInt() and 0xFF)
+            val syncedToSof = buf.get().toInt() != 0
+            val hasFreqControl = buf.get().toInt() != 0
+            val hasValidityControl = buf.get().toInt() != 0
+            // Stage 3: rates
+            val hasContinuous = buf.get().toInt() != 0
+            val minRate = buf.getInt()
+            val maxRate = buf.getInt()
+            val numRates = buf.get().toInt() and 0xFF
+            val rates = (0 until numRates).map { buf.getInt() }
             ClockSourceInfo(
-                clockId = buf.get().toInt() and 0xFF,
-                type = ClockSourceType.fromId(buf.get().toInt() and 0xFF),
-                syncedToSof = buf.get().toInt() != 0,
-                hasFrequencyControl = buf.get().toInt() != 0,
-                hasValidityControl = buf.get().toInt() != 0,
+                clockId = clockId,
+                type = type,
+                syncedToSof = syncedToSof,
+                hasFrequencyControl = hasFreqControl,
+                hasValidityControl = hasValidityControl,
+                sampleRates = rates,
+                hasContinuousRates = hasContinuous,
+                minSampleRate = minRate,
+                maxSampleRate = maxRate,
             )
         }
 

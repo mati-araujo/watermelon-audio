@@ -119,7 +119,7 @@ inline std::vector<uint8_t> encodeSnapshot(const UsbAudioDevice& device) {
         writeAltsetting(alt);
     }
 
-    // ===== Clock sources =====
+    // ===== Clock sources (stage 3: now includes sample rate list) =====
     writeU8(static_cast<uint8_t>(std::min(device.clockSources.size(), size_t(255))));
     for (const auto& cs : device.clockSources) {
         writeU8(cs.clockId);
@@ -127,6 +127,14 @@ inline std::vector<uint8_t> encodeSnapshot(const UsbAudioDevice& device) {
         writeU8(cs.syncedToSof ? 1 : 0);
         writeU8(cs.canControlFrequency ? 1 : 0);
         writeU8(cs.hasValidityControl ? 1 : 0);
+        // Stage 3: sample rates from RANGE query
+        writeU8(cs.hasContinuousRates ? 1 : 0);
+        writeU32(static_cast<uint32_t>(cs.minSampleRate));
+        writeU32(static_cast<uint32_t>(cs.maxSampleRate));
+        writeU8(static_cast<uint8_t>(std::min(cs.sampleRates.size(), size_t(255))));
+        for (size_t i = 0; i < cs.sampleRates.size() && i < 255; ++i) {
+            writeU32(static_cast<uint32_t>(cs.sampleRates[i]));
+        }
     }
 
     // ===== Feature units =====
@@ -271,6 +279,14 @@ inline std::optional<UsbAudioDevice> decodeSnapshot(const uint8_t* data, size_t 
         cs.syncedToSof = readU8() != 0;
         cs.canControlFrequency = readU8() != 0;
         cs.hasValidityControl = readU8() != 0;
+        // Stage 3: sample rate list
+        cs.hasContinuousRates = readU8() != 0;
+        cs.minSampleRate = static_cast<int>(readU32());
+        cs.maxSampleRate = static_cast<int>(readU32());
+        uint8_t numRates = readU8();
+        for (int j = 0; j < numRates; ++j) {
+            cs.sampleRates.push_back(static_cast<int>(readU32()));
+        }
         device.clockSources.push_back(cs);
     }
 
