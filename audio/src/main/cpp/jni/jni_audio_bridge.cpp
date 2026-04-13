@@ -1701,12 +1701,25 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     JNIEnv* env, jobject thiz) {
     auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
-    if (!backend || !backend->isUsbDeviceReady()) return nullptr;
+    if (!backend) {
+        LOGW("nativeGetUsbCapabilitySnapshot: no LibusbBackend in BackendManager");
+        return nullptr;
+    }
+    if (!backend->isUsbDeviceReady()) {
+        LOGW("nativeGetUsbCapabilitySnapshot: backend not ready");
+        return nullptr;
+    }
 
     const auto* device = backend->getUsbAudioDevice();
-    if (!device) return nullptr;
+    if (!device) {
+        LOGW("nativeGetUsbCapabilitySnapshot: backend has no parsed device");
+        return nullptr;
+    }
 
     auto encoded = watermelon_audio::usb::encodeSnapshot(*device);
+    LOGI("nativeGetUsbCapabilitySnapshot: encoded %zu bytes (UAC%d, %zu pb / %zu cap)",
+         encoded.size(), device->uacVersion,
+         device->playbackInterfaces.size(), device->captureInterfaces.size());
     jbyteArray result = env->NewByteArray(static_cast<jsize>(encoded.size()));
     if (result) {
         env->SetByteArrayRegion(result, 0, static_cast<jsize>(encoded.size()),

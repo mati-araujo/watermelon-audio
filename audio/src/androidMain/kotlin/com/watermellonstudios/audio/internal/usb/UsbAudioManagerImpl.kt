@@ -543,7 +543,25 @@ internal class UsbAudioManagerImpl(
 
     // ==================== Discovery (Stage 2) ====================
 
-    override fun getCurrentCapabilitySnapshot(): UsbCapabilitySnapshot? = _currentSnapshot
+    /**
+     * Returns the current capability snapshot. Always queries the native
+     * side (rather than relying on the cached `_currentSnapshot` populated
+     * by getDeviceCapabilities()), because callers like MainViewModel may
+     * invoke this from the DeviceConnected event handler before any explicit
+     * getDeviceCapabilities() call has happened. Updates the cache as a
+     * side effect so subsequent reads have it.
+     */
+    override fun getCurrentCapabilitySnapshot(): UsbCapabilitySnapshot? {
+        val raw = nativeBridge.getUsbCapabilitySnapshot() ?: return _currentSnapshot
+        return try {
+            val snapshot = UsbSnapshotCodec.decode(raw)
+            _currentSnapshot = snapshot
+            snapshot
+        } catch (e: Exception) {
+            Log.e(TAG, "getCurrentCapabilitySnapshot: decode failed", e)
+            _currentSnapshot
+        }
+    }
 
     override fun setStreamPreference(preference: StreamPreference) {
         Log.i(TAG, "Stream preference set: profile=${preference.profile}, " +
