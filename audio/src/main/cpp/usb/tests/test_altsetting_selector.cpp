@@ -236,3 +236,33 @@ TEST(AltsettingSelector, CaptureSelection) {
     ASSERT_TRUE(match.has_value());
     EXPECT_EQ(match->format->channels, 1);
 }
+
+// ---- Regression: GHW USB AUDIO mono capture must not be filtered when
+// minChannels is relaxed to 1 (the LibusbBackend uses a relaxed pref for
+// capture so devices with mono inputs aren't false-rejected). ----
+TEST(AltsettingSelector, MonoCaptureNotRejectedWithMinChannelsOne) {
+    auto device = makeDevice(1);
+    UsbStreamingInterface alt;
+    alt.interfaceNumber = 1;
+    alt.alternateSetting = 1;
+    alt.formats.push_back(makeFormat(1, 16, {48000}));  // GHW shape
+    alt.dataEndpoint.attributes = 0x05;
+    alt.dataEndpoint.address = 0x81;
+    alt.dataEndpoint.maxPacketSize = 96;
+    device.captureInterfaces.push_back(alt);
+
+    // Use the playback default (minChannels=2) and verify it's rejected
+    StreamPreference playbackPref = StreamPreference::defaultPro();
+    playbackPref.requiredSampleRate = 48000;
+    auto rejected = AltsettingSelector::pickCapture(device, playbackPref);
+    EXPECT_FALSE(rejected.has_value())
+        << "Default profile (minChannels=2) should reject mono capture";
+
+    // Now relax minChannels to 1 and verify it's selected
+    StreamPreference capturePref = playbackPref;
+    capturePref.minChannels = 1;
+    auto match = AltsettingSelector::pickCapture(device, capturePref);
+    ASSERT_TRUE(match.has_value());
+    EXPECT_EQ(match->format->channels, 1);
+    EXPECT_EQ(match->format->bitResolution, 16);
+}

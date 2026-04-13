@@ -339,7 +339,13 @@ bool LibusbBackend::selectBestInterfaces() {
     // Capture
     if (needsCapture && !mUsbDevice->captureInterfaces.empty()) {
         logAltsettings("capture", mUsbDevice->captureInterfaces);
-        auto match = usb::AltsettingSelector::pickCapture(*mUsbDevice, pref);
+        // Capture devices commonly expose mono inputs (e.g. GHW USB AUDIO has
+        // a single 1ch/16bit capture altsetting). The default playback pref
+        // requires minChannels=2 which would falsely reject these. Use a
+        // capture-specific copy with minChannels relaxed to 1.
+        usb::StreamPreference capturePref = pref;
+        capturePref.minChannels = 1;
+        auto match = usb::AltsettingSelector::pickCapture(*mUsbDevice, capturePref);
         if (match) {
             mSelectedCapture = *match->altsetting;
             mSelectedCaptureFormat = *match->format;

@@ -1,6 +1,6 @@
-# Etapa 2 — Descubrimiento completo y selección dirigida
+clcl# Etapa 2 — Descubrimiento completo y selección dirigida
 
-**Estado:** propuesta — no iniciada.
+**Estado:** IMPLEMENTADA — core mergeado, pending hardware validation.
 **Dependencias:** stage 1 mergeado (necesita `configureSampleRate()` funcional y UAC version explícita).
 **Duración estimada:** 4–6 días.
 **Severidad de los bugs que resuelve:** 1× Mayor, 1× Mayor, 2× menores.
