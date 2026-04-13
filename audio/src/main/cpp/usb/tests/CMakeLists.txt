@@ -41,6 +41,7 @@ FetchContent_MakeAvailable(googletest)
 set(USB_TESTED_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../UsbDescriptorParser.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../platform/Logger.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../effects/LookaheadLimiter.cpp
 )
 
 add_executable(usb_tests
@@ -50,6 +51,7 @@ add_executable(usb_tests
     test_altsetting_selector.cpp
     test_snapshot_codec.cpp
     test_clock_range_parser.cpp
+    test_lookahead_limiter_reset.cpp
     ${USB_TESTED_SOURCES}
 )
 

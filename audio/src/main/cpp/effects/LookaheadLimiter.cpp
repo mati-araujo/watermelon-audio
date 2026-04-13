@@ -14,13 +14,35 @@ void LookaheadLimiter::prepare(int32_t sampleRate) {
     // Calculate lookahead buffer size (stereo)
     mLookaheadSamples = static_cast<int32_t>(LOOKAHEAD_MS * sampleRate / 1000.0f);
     mDelayBuffer.resize(mLookaheadSamples * 2, 0.0f);  // Stereo
+
+    // IMPORTANT: std::vector::resize(N, 0.0f) only default-initializes NEW
+    // elements. If the vector already has size N (a re-prepare with the
+    // same sample rate — the common case on stream stop/start), the
+    // existing contents are preserved. Explicitly zero the buffer so a
+    // fresh session doesn't read back stale samples from the previous
+    // one during the first ~5 ms of output. See first-playback distortion
+    // fix in AudioEngine / OutputStage.
+    std::fill(mDelayBuffer.begin(), mDelayBuffer.end(), 0.0f);
+
     mWritePos = 0;
 
     // Initialize gain to unity
     mGain = 1.0f;
+    mCurrentGainReduction.store(0.0f, std::memory_order_relaxed);
 
     // Calculate envelope coefficients
     updateCoefficients();
+}
+
+void LookaheadLimiter::reset() {
+    // Zero the delay buffer in place — no allocation.
+    std::fill(mDelayBuffer.begin(), mDelayBuffer.end(), 0.0f);
+    mWritePos = 0;
+
+    // Restore the gain envelope to unity so the next block doesn't
+    // apply stale gain reduction from a previous loud passage.
+    mGain = 1.0f;
+    mCurrentGainReduction.store(0.0f, std::memory_order_relaxed);
 }
 
 void LookaheadLimiter::updateCoefficients() {
