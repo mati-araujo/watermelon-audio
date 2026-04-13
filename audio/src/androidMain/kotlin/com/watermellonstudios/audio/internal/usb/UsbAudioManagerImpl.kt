@@ -163,6 +163,23 @@ internal class UsbAudioManagerImpl(
             val audioDevices = scanForAudioDevices()
             _connectedDevices.value = audioDevices
             Log.d(TAG, "Found ${audioDevices.size} USB Audio devices")
+
+            // Cold-start auto-connect: when the app opens with a DAC already
+            // plugged in, the runtime BroadcastReceiver never fires (it only
+            // catches new attachments). Without this loop, the user sees the
+            // app fall back to Oboe even though the DAC is right there with
+            // permission persisted from a previous session. Re-enter the
+            // standard handleDeviceAttached() flow for each pre-existing
+            // device that we already have permission for.
+            if (autoConnectEnabled && _selectedDevice.value == null) {
+                usbManager.deviceList.values.forEach { usbDevice ->
+                    if (isAudioDevice(usbDevice) && usbManager.hasPermission(usbDevice)) {
+                        Log.i(TAG, "Cold-start: device ${usbDevice.productName} already " +
+                                  "attached with persisted permission, triggering auto-connect")
+                        handleDeviceAttached(usbDevice)
+                    }
+                }
+            }
         }
     }
 
@@ -692,9 +709,19 @@ internal class UsbAudioManagerImpl(
                     Log.i(TAG, "  selectedDevice before auto-connect: ${_selectedDevice.value?.displayName}")
                     Log.i(TAG, "  isDeviceReady before auto-connect: ${nativeBridge.isUsbDeviceInitialized()}")
 
-                    // Auto-connect if enabled and not already connected
-                    if (autoConnectEnabled && _selectedDevice.value == null) {
-                        Log.i(TAG, "Auto-connecting to ${audioDevice.displayName}")
+                    // Auto-connect if enabled and not already connected.
+                    //
+                    // IMPORTANT: only auto-connect from the broadcast path if
+                    // permission is ALREADY granted. Otherwise we race the
+                    // activity intent path: the runtime BroadcastReceiver fires
+                    // first, calls connectDevice() → requestPermission(), and
+                    // the user sees a redundant permission dialog. The activity
+                    // intent (USB_DEVICE_ATTACHED) is delivered shortly after
+                    // with implicit permission from Android, and its handler
+                    // (MainActivity.handleUsbIntent → handleUsbDeviceFromIntent)
+                    // calls connectDevice() where hasPermission is already true.
+                    if (autoConnectEnabled && _selectedDevice.value == null && usbManager.hasPermission(device)) {
+                        Log.i(TAG, "Auto-connecting to ${audioDevice.displayName} (permission already granted)")
                         val result = connectDevice(audioDevice)
                         Log.i(TAG, "Auto-connect result: $result")
                         Log.i(TAG, "  isDeviceReady after auto-connect: ${nativeBridge.isUsbDeviceInitialized()}")
@@ -708,6 +735,13 @@ internal class UsbAudioManagerImpl(
                             // Still emit event so UI knows device was detected
                             _deviceEvents.emit(UsbDeviceEvent.CompatibleDeviceDetected(audioDevice, compatibility))
                         }
+                    } else if (autoConnectEnabled && _selectedDevice.value == null) {
+                        // Permission not yet granted — defer to the activity
+                        // intent path which will get implicit permission from
+                        // Android when the app is launched via the USB intent.
+                        Log.i(TAG, "Skipping auto-connect from broadcast: no permission yet for " +
+                                  "${audioDevice.displayName}. Activity intent path will handle.")
+                        _deviceEvents.emit(UsbDeviceEvent.CompatibleDeviceDetected(audioDevice, compatibility))
                     } else {
                         // Not auto-connecting, emit event immediately
                         Log.w(TAG, "Skipping auto-connect: autoConnectEnabled=$autoConnectEnabled, selectedDevice=${_selectedDevice.value?.displayName}")
