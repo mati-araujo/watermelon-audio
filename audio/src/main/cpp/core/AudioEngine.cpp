@@ -430,7 +430,7 @@ bool AudioEngine::start(int fadeTimeMs) {
             mFadeCtrl.setPaused(false);
         }
 
-        wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
             "START_USB_FADE: sampleRate=%d, fadeTimeMs=%d",
             actualRate > 0 ? actualRate : expectedRate, fadeTimeMs);
 
@@ -1117,7 +1117,7 @@ void AudioEngine::renderInputFx(float* output, int32_t numFrames, InputNode* inp
     static int oboeInputFxLogCount = 0;
     if (++oboeInputFxLogCount >= 300) {
         bool inputRunning = inputNode ? inputNode->isInputStreamRunning() : false;
-        wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
             "OBOE_INPUT_FX: inputNode=%p, monEnabled=%d, inputStreamRunning=%d",
             inputNode, inputNode ? inputNode->isMonitoringEnabled() : 0, inputRunning);
         oboeInputFxLogCount = 0;
@@ -1136,7 +1136,7 @@ void AudioEngine::renderInputFx(float* output, int32_t numFrames, InputNode* inp
                 float abs = std::abs(mOutputStage.getTempBuffer()[i]);
                 if (abs > monPeak) monPeak = abs;
             }
-            wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+            wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
                 "OBOE_INPUT_FX_READ: framesRead=%d/%d, monPeak=%.5f",
                 framesRead, numFrames, monPeak);
             framesReadLogCount = 0;
@@ -1597,7 +1597,7 @@ void AudioEngine::pauseWithFade(int fadeTimeMs) {
     mFadeCtrl.cancel();
 
     bool useBackend = mUseBackendManager.load(std::memory_order_acquire);
-    wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+    wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
         "PAUSE_WITH_FADE: fadeTimeMs=%d, mStream=%p, useBackendMgr=%d",
         fadeTimeMs, mStream.get(), useBackend);
 
@@ -1611,7 +1611,7 @@ void AudioEngine::pauseWithFade(int fadeTimeMs) {
         // FIX: When using BackendManager (USB), mStream is null.
         // Pause immediately without fade (USB DSP thread is still running).
         mFadeCtrl.setPaused(true);
-        wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
             "PAUSE_WITH_FADE_USB: mStream=null, set paused=true directly");
     }
 }
@@ -1622,7 +1622,7 @@ void AudioEngine::resumeWithFade(int fadeTimeMs) {
     mFadeCtrl.cancel();
 
     bool useBackend = mUseBackendManager.load(std::memory_order_acquire);
-    wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+    wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
         "RESUME_WITH_FADE: fadeTimeMs=%d, mStream=%p, useBackendMgr=%d",
         fadeTimeMs, mStream.get(), useBackend);
 
@@ -1638,7 +1638,7 @@ void AudioEngine::resumeWithFade(int fadeTimeMs) {
         mFadeCtrl.setPaused(false);
         mFadeCtrl.startFade(1.0f, 1.0f, 48000, 0);  // Instant restore to full volume
 
-        wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
             "RESUME_WITH_FADE_USB: mStream=null, set fadeVol=1.0 directly");
     }
 }
@@ -1844,7 +1844,7 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
             }
         }
 
-        wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
             "USB_CB: inputData=%p, oscEnabled=%d, isUsbInputFxMode=%d, "
             "outputData=%p, numFrames=%d, state=%d, paused=%d, "
             "fadeVol=%.3f, masterVol=%.3f, inputPeak=%.5f",
@@ -1907,7 +1907,7 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
                 float abs = std::abs(outputData[i]);
                 if (abs > outPeak) outPeak = abs;
             }
-            wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+            wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
                 "USB_DIRECT_OUT: gainStart=%.3f, gainEnd=%.3f, fadeStart=%.3f, "
                 "fadeEnd=%.3f, masterVol=%.3f, outPeak=%.5f, effects=%d",
                 gainStart, gainEnd, fadeStart, fadeEnd, masterVol, outPeak,

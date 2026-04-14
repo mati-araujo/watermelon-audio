@@ -813,7 +813,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAud
                 auto& backendManager = watermelon_audio::BackendManager::getInstance();
                 auto backendType = backendManager.getCurrentType();
                 bool isUsbActive = (backendType == watermelon_audio::BackendType::LIBUSB);
-                wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+                wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
                     "SET_MODE_INPUT_FX: inputNode=%p, backendType=%d, isUsbActive=%d",
                     static_cast<void*>(g_jniState.inputNode.get()),
                     static_cast<int>(backendType),
@@ -836,12 +836,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAud
                     g_jniState.inputNode->setMonitoringEnabled(true);
                     g_jniState.engine->setInputNode(g_jniState.inputNode);
 
-                    wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+                    wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
                         "SET_MODE_INPUT_FX_DONE: monEnabled=%d, inputStreamRunning=%d",
                         g_jniState.inputNode->isMonitoringEnabled(),
                         g_jniState.inputNode->isInputStreamRunning());
                 } else {
-                    wma::logMessage(wma::LogLevel::WARN, "INPUTFX_DIAG",
+                    wma::logMessage(wma::LogLevel::WARN, "WMA_AUDIT",
                         "SET_MODE_INPUT_FX: NO INPUT NODE! Input will be silent.");
                 }
                 break;

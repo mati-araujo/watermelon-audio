@@ -1234,7 +1234,7 @@ void LibusbBackend::dspThreadFunc() {
     int consecutiveWriteErrors = 0;
     static constexpr int MAX_CONSECUTIVE_ERRORS = 10;
 
-    // Per-window counters for the periodic INPUTFX_DIAG log. They cover the
+    // Per-window counters for the periodic WMA_AUDIT log. They cover the
     // last ~300 DSP callbacks and help diagnose "no sound in input_fx mode"
     // situations: if inputReadOk stays at 0 despite mSelectedCapture being
     // set, we know readInput is failing (ring underrun from the USB side);
@@ -1387,7 +1387,7 @@ void LibusbBackend::dspThreadFunc() {
 
                 static int underrunLogCount = 0;
                 if (++underrunLogCount <= 5) {
-                    wma::logMessage(wma::LogLevel::WARN, "INPUTFX_DIAG",
+                    wma::logMessage(wma::LogLevel::WARN, "WMA_AUDIT",
                         "USB_INPUT_UNDERRUN: using faded last block (%d)", underrunLogCount);
                 }
             } else {
@@ -1419,7 +1419,7 @@ void LibusbBackend::dspThreadFunc() {
         static int usbDspDiagCount = 0;
         if (++usbDspDiagCount >= 300) {
             const int ioTotal = inputReadOkCount + inputReadFailCount;
-            wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
+            wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
                 "USB_DSP: hasCapture=%d inputPtr=%p outputPtr=%p "
                 "frames=%d streamMode=%d | read ok=%d fail=%d ratio=%.2f "
                 "ringAvailPre=%zu lastInPeak=%.5f lastOutPeak=%.5f",
