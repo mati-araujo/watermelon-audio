@@ -651,7 +651,41 @@ bool LibusbBackend::configureSampleRate() {
         }
 
         // Lambda: run SET_CUR + GET_CUR for a single clock source.
+        // Stage 3 fix: GET_CUR FIRST. If the device is already at the
+        // requested rate, skip SET_CUR entirely. Some UAC2 devices
+        // (UGREEN CM720) trigger an internal clock-domain re-sync on
+        // every SET_CUR even when the value is unchanged, which produces
+        // audible noise on the playback output during the resync window.
+        // For clock sources that only support a single rate (e.g. UGREEN
+        // mic clock id=27 = 48000-only), every SET_CUR is redundant.
         auto setOneClock = [&](uint8_t clockId) -> bool {
+            // Step 1: GET_CUR — what rate is the clock currently at?
+            auto getReq = usb::buildUac2GetSampleRateRequest(clockId, controlIface);
+            std::array<uint8_t, 4> currentReadback{};
+            int curRead = libusb_control_transfer(
+                mDeviceHandle,
+                getReq.bmRequestType,
+                getReq.bRequest,
+                getReq.wValue,
+                getReq.wIndex,
+                currentReadback.data(),
+                static_cast<uint16_t>(currentReadback.size()),
+                /*timeout*/ 1000);
+            if (curRead == 4) {
+                uint32_t current = usb::decodeUac2SampleRateResponse(currentReadback);
+                if (current == requested) {
+                    LOGI("Rate negotiation: UAC2 clockSrc=%d already at %u Hz "
+                         "(skipping SET_CUR to avoid resync glitch)",
+                         clockId, requested);
+                    return true;
+                }
+                LOGI("Rate negotiation: UAC2 clockSrc=%d currently %u, will SET to %u",
+                     clockId, current, requested);
+            }
+            // GET_CUR failure is non-fatal — fall through to SET_CUR which
+            // will fail clearly if the device truly can't accept the rate.
+
+            // Step 2: SET_CUR — only reached if the rate actually needs to change
             auto setReq = usb::buildUac2SetSampleRateRequest(
                 clockId, controlIface, requested);
             int r = libusb_control_transfer(
@@ -670,15 +704,17 @@ bool LibusbBackend::configureSampleRate() {
                 return false;
             }
 
-            // GET_CUR verification
-            auto getReq = usb::buildUac2GetSampleRateRequest(clockId, controlIface);
+            // GET_CUR verification (re-use the same getReq shape from the
+            // pre-check above; declare under a different name to avoid
+            // shadowing the outer scope).
+            auto verifyReq = usb::buildUac2GetSampleRateRequest(clockId, controlIface);
             std::array<uint8_t, 4> readback{};
             int g = libusb_control_transfer(
                 mDeviceHandle,
-                getReq.bmRequestType,
-                getReq.bRequest,
-                getReq.wValue,
-                getReq.wIndex,
+                verifyReq.bmRequestType,
+                verifyReq.bRequest,
+                verifyReq.wValue,
+                verifyReq.wIndex,
                 readback.data(),
                 static_cast<uint16_t>(readback.size()),
                 /*timeout*/ 1000);
@@ -1208,6 +1244,12 @@ void LibusbBackend::dspThreadFunc() {
     int inputReadFailCount = 0;
     float lastInputPeakObserved = 0.0f;
     size_t lastInputAvailBefore = 0;
+    // Output peak observed after the audio callback fills outputBuffer,
+    // before it goes through writeOutput → ring buffer → format converter
+    // → iso transfer → DAC. Lets us distinguish "engine produced bad
+    // output" (high outPeak before USB processing) from "USB pipeline
+    // corrupted clean output" (engine outPeak normal but DAC plays noise).
+    float lastOutputPeakObserved = 0.0f;
 
     while (mDspRunning.load(std::memory_order_acquire)) {
         // P0-2: Check for device disconnection
@@ -1380,15 +1422,17 @@ void LibusbBackend::dspThreadFunc() {
             wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
                 "USB_DSP: hasCapture=%d inputPtr=%p outputPtr=%p "
                 "frames=%d streamMode=%d | read ok=%d fail=%d ratio=%.2f "
-                "ringAvailPre=%zu lastPeak=%.5f",
+                "ringAvailPre=%zu lastInPeak=%.5f lastOutPeak=%.5f",
                 mSelectedCapture.has_value() ? 1 : 0, inputPtr, outputPtr,
                 framesPerBlock, static_cast<int>(mStreamingMode),
                 inputReadOkCount, inputReadFailCount,
                 ioTotal > 0 ? static_cast<float>(inputReadOkCount) / ioTotal : 0.0f,
-                lastInputAvailBefore, lastInputPeakObserved);
+                lastInputAvailBefore, lastInputPeakObserved,
+                lastOutputPeakObserved);
             usbDspDiagCount = 0;
             inputReadOkCount = 0;
             inputReadFailCount = 0;
+            lastOutputPeakObserved = 0.0f;
         }
 
         if (mCallback) {
@@ -1413,6 +1457,22 @@ void LibusbBackend::dspThreadFunc() {
             }
         } else if (outputPtr) {
             std::fill(outputBuffer.begin(), outputBuffer.begin() + outputSamples, 0.0f);
+        }
+
+        // Sample the engine output peak BEFORE writeOutput. Lets us
+        // diagnose "engine produced this noise" vs "USB pipeline garbled
+        // clean engine output". Bounded scan (≤ 512 samples = ~256 frames)
+        // so we don't add measurable RT cost.
+        if (outputPtr && outputSamples > 0) {
+            float peak = 0.0f;
+            const size_t scanSamples = std::min(outputSamples, size_t(512));
+            for (size_t i = 0; i < scanSamples; ++i) {
+                float a = std::fabs(outputPtr[i]);
+                if (a > peak) peak = a;
+            }
+            if (peak > lastOutputPeakObserved) {
+                lastOutputPeakObserved = peak;
+            }
         }
 
         // Write to output buffer if playback is enabled
