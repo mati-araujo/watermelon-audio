@@ -10,8 +10,11 @@
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
 #include <cstring>
+#include <cstdio>
+#include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <vector>
 
 #define LOG_TAG "UsbTransferManager"
 #undef LOGI
@@ -888,11 +891,84 @@ bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
     // packet but the first picked up zeros / stale data and the stream
     // decoded as brutal distortion on every real device. See libusb's
     // linux_usbfs.c submit path for the contiguous-accumulation layout.
+    // ---- pre-conversion engine peak (for USB_FMT diagnostic) ----
+    float engineFloatPeak = 0.0f;
+    {
+        const size_t scanN = std::min(samplesNeeded, size_t(512));
+        for (size_t i = 0; i < scanN; ++i) {
+            float a = std::fabs(mFloatBuffer[i]);
+            if (a > engineFloatPeak) engineFloatPeak = a;
+        }
+    }
+
     mFormatConverter.floatToPcm(
         mFloatBuffer.data(),
         ctx->buffer.data(),
         samplesNeeded,
         mConfig.pcmFormat);
+
+    // ---- Diag 3: USB_FMT — validate the format conversion ----
+    // Decode the first ~256 samples of the just-written PCM bytes back
+    // to float and compute the peak. Compare with the pre-conversion
+    // engine peak. If they disagree sharply, floatToPcm is corrupting
+    // data (wrong byte order, wrong bit depth, alignment off by one).
+    // Also dump the first 16 bytes of the iso buffer so byte-level
+    // corruption is visible in the logs.
+    //
+    // Rate-limited to every ~300 fill calls (~1.6 s at 48 kHz) so the
+    // cost is negligible on the RT thread.
+    {
+        static thread_local int usbFmtDiagCount = 0;
+        if (++usbFmtDiagCount >= 300) {
+            usbFmtDiagCount = 0;
+
+            // Decode the first min(samplesNeeded, 256) samples back.
+            const size_t decodeSamples = std::min(samplesNeeded, size_t(256));
+            static thread_local std::vector<float> decodedTmp;
+            if (decodedTmp.size() < decodeSamples) {
+                decodedTmp.resize(decodeSamples);
+            }
+            mFormatConverter.pcmToFloat(
+                ctx->buffer.data(),
+                decodedTmp.data(),
+                decodeSamples,
+                mConfig.pcmFormat);
+
+            float postPeak = 0.0f;
+            for (size_t i = 0; i < decodeSamples; ++i) {
+                float a = std::fabs(decodedTmp[i]);
+                if (a > postPeak) postPeak = a;
+            }
+
+            // Hex dump first 16 bytes of the converted iso buffer.
+            char hexBuf[64] = {0};
+            size_t hexDumpBytes = std::min(ctx->buffer.size(), size_t(16));
+            const uint8_t* pcm = ctx->buffer.data();
+            for (size_t i = 0; i < hexDumpBytes; ++i) {
+                std::snprintf(hexBuf + i * 3, sizeof(hexBuf) - i * 3,
+                    "%02X ", pcm[i]);
+            }
+
+            // Format enum name for readability.
+            const char* fmtName = "UNKNOWN";
+            switch (mConfig.pcmFormat) {
+                case usb::PcmFormat::PCM_S16_LE:  fmtName = "S16_LE";  break;
+                case usb::PcmFormat::PCM_S24_LE:  fmtName = "S24_LE";  break;
+                case usb::PcmFormat::PCM_S24_3LE: fmtName = "S24_3LE"; break;
+                case usb::PcmFormat::PCM_S24_4LE: fmtName = "S24_4LE"; break;
+                case usb::PcmFormat::PCM_S32_LE:  fmtName = "S32_LE";  break;
+                default: break;
+            }
+
+            wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+                "USB_FMT: fmt=%s bytesPerSample=%d samplesNeeded=%zu "
+                "bytesPerPacket=%d packets=%d enginePeak=%.5f postPeak=%.5f "
+                "first16=%s",
+                fmtName, bytesPerSample, samplesNeeded,
+                bytesPerPacket, ctx->packetCount,
+                engineFloatPeak, postPeak, hexBuf);
+        }
+    }
 
     // Update per-packet length and reset status before (re)submission.
     for (int p = 0; p < ctx->packetCount; ++p) {

@@ -349,6 +349,9 @@ bool AudioEngine::start(int fadeTimeMs) {
         // Push preferred sample rate to BackendManager BEFORE starting so
         // the device negotiates to it during start().
         int preferredRate = mPreferredSampleRate.load(std::memory_order_acquire);
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+            "[START] entry: preferredRate=%d useBackendMgr=1 fadeTimeMs=%d",
+            preferredRate, fadeTimeMs);
         if (preferredRate > 0) {
             manager.setSampleRate(preferredRate);
         }
@@ -379,32 +382,48 @@ bool AudioEngine::start(int fadeTimeMs) {
         // is idempotent for matching rates).
         // ====================================================================
         const int expectedRate = (preferredRate > 0) ? preferredRate : 48000;
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+            "[START] pre-configure components: expectedRate=%d", expectedRate);
         configureComponentsWithSampleRate(expectedRate);
 
         // Pre-start the fade envelope so initial callbacks see a valid
         // (0 → 1) ramp instead of whatever the previous stop() left in
         // mFadeCtrl (typically 0 → 0).
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+            "[START] pre-fade: 0.0 -> 1.0 over %dms @ %dHz",
+            fadeTimeMs, expectedRate);
         mFadeCtrl.startFade(0.0f, 1.0f, expectedRate, fadeTimeMs);
         mFadeCtrl.setPaused(false);
 
         // FIX PHASE 7.1: Transition to Running BEFORE starting the backend
         // This prevents the race condition where the DSP thread starts calling
         // onAudioReady() while state is still Starting, causing silence.
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+            "[START] transition -> Running");
         if (!transitionToState(EngineState::Running)) {
             LOGE("Failed to transition to Running state");
+            wma::logMessage(wma::LogLevel::ERROR, "WMA_AUDIT",
+                "[START] transition -> Running FAILED");
             transitionToState(EngineState::Stopped);
             return false;
         }
 
         // NOW start the backend. Callbacks fire into already-prepared
         // components and the engine state is Running.
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+            "[START] calling manager.start()...");
         watermelon_audio::BackendResult result = manager.start();
         if (result != watermelon_audio::BackendResult::OK) {
             LOGE("Failed to start via BackendManager: %s",
                  watermelon_audio::backendResultToString(result));
+            wma::logMessage(wma::LogLevel::ERROR, "WMA_AUDIT",
+                "[START] manager.start() FAILED: %s",
+                watermelon_audio::backendResultToString(result));
             transitionToState(EngineState::Stopped);
             return false;
         }
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+            "[START] manager.start() -> OK");
 
         // Defensive: verify the actual rate the device negotiated. If it
         // differs from our pre-configuration assumption, re-prepare
@@ -422,12 +441,23 @@ bool AudioEngine::start(int fadeTimeMs) {
         LOGI("  Output latency: %.1f ms", info.outputLatencyMs);
         LOGI("======================================");
 
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+            "[START] getStreamInfo: actualRate=%d channels=%d frames=%d latencyMs=%.1f",
+            actualRate, info.channelCount, info.framesPerBuffer, info.outputLatencyMs);
+
         if (actualRate > 0 && actualRate != expectedRate) {
             LOGW("Device coerced sample rate %d -> %d, re-configuring components",
                  expectedRate, actualRate);
+            wma::logMessage(wma::LogLevel::WARN, "WMA_AUDIT",
+                "[START] reconfigure needed: YES (expected=%d actual=%d)",
+                expectedRate, actualRate);
             configureComponentsWithSampleRate(actualRate);
             mFadeCtrl.startFade(0.0f, 1.0f, actualRate, fadeTimeMs);
             mFadeCtrl.setPaused(false);
+        } else {
+            wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+                "[START] reconfigure needed: NO (actualRate=%d matches expectedRate)",
+                actualRate);
         }
 
         wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",

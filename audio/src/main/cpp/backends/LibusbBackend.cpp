@@ -659,6 +659,9 @@ bool LibusbBackend::configureSampleRate() {
         // For clock sources that only support a single rate (e.g. UGREEN
         // mic clock id=27 = 48000-only), every SET_CUR is redundant.
         auto setOneClock = [&](uint8_t clockId) -> bool {
+            wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+                "[SET_CUR] clockSrc=%d entry: requested=%u", clockId, requested);
+
             // Step 1: GET_CUR — what rate is the clock currently at?
             auto getReq = usb::buildUac2GetSampleRateRequest(clockId, controlIface);
             std::array<uint8_t, 4> currentReadback{};
@@ -673,19 +676,38 @@ bool LibusbBackend::configureSampleRate() {
                 /*timeout*/ 1000);
             if (curRead == 4) {
                 uint32_t current = usb::decodeUac2SampleRateResponse(currentReadback);
+                wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+                    "[SET_CUR] clockSrc=%d GET_CUR result: current=%u",
+                    clockId, current);
                 if (current == requested) {
+                    wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+                        "[SET_CUR] clockSrc=%d decision: SKIP (already at target %u)",
+                        clockId, requested);
                     LOGI("Rate negotiation: UAC2 clockSrc=%d already at %u Hz "
                          "(skipping SET_CUR to avoid resync glitch)",
                          clockId, requested);
                     return true;
                 }
+                wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+                    "[SET_CUR] clockSrc=%d decision: PROCEED (current=%u != target=%u)",
+                    clockId, current, requested);
                 LOGI("Rate negotiation: UAC2 clockSrc=%d currently %u, will SET to %u",
                      clockId, current, requested);
+            } else {
+                wma::logMessage(wma::LogLevel::WARN, "WMA_AUDIT",
+                    "[SET_CUR] clockSrc=%d GET_CUR failed: %s (curRead=%d). "
+                    "Falling through to SET_CUR.",
+                    clockId,
+                    curRead < 0 ? libusb_error_name(curRead) : "short response",
+                    curRead);
             }
             // GET_CUR failure is non-fatal — fall through to SET_CUR which
             // will fail clearly if the device truly can't accept the rate.
 
             // Step 2: SET_CUR — only reached if the rate actually needs to change
+            wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+                "[SET_CUR] clockSrc=%d SET_CUR request=%u (issuing)",
+                clockId, requested);
             auto setReq = usb::buildUac2SetSampleRateRequest(
                 clockId, controlIface, requested);
             int r = libusb_control_transfer(
@@ -698,11 +720,16 @@ bool LibusbBackend::configureSampleRate() {
                 static_cast<uint16_t>(setReq.payload.size()),
                 /*timeout*/ 1000);
             if (r < 0) {
+                wma::logMessage(wma::LogLevel::ERROR, "WMA_AUDIT",
+                    "[SET_CUR] clockSrc=%d SET_CUR FAILED: %s",
+                    clockId, libusb_error_name(r));
                 LOGE("UAC2 SET_CUR sample rate failed for clockSrc %d (%u Hz): %s",
                      clockId, requested, libusb_error_name(r));
                 mLastLibusbError.store(r);
                 return false;
             }
+            wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+                "[SET_CUR] clockSrc=%d SET_CUR result: OK", clockId);
 
             // GET_CUR verification (re-use the same getReq shape from the
             // pre-check above; declare under a different name to avoid
@@ -720,6 +747,9 @@ bool LibusbBackend::configureSampleRate() {
                 /*timeout*/ 1000);
             if (g == 4) {
                 uint32_t actual = usb::decodeUac2SampleRateResponse(readback);
+                wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+                    "[SET_CUR] clockSrc=%d verify GET_CUR: actual=%u (requested=%u)",
+                    clockId, actual, requested);
                 if (actual != requested) {
                     LOGW("UAC2 device coerced sample rate %u Hz -> %u Hz on clockSrc %d",
                          requested, actual, clockId);
@@ -728,6 +758,10 @@ bool LibusbBackend::configureSampleRate() {
                 LOGI("Rate negotiation: UAC2 clockSrc=%d req=%u actual=%u",
                      clockId, requested, actual);
             } else {
+                wma::logMessage(wma::LogLevel::WARN, "WMA_AUDIT",
+                    "[SET_CUR] clockSrc=%d verify GET_CUR failed: %s (continuing)",
+                    clockId,
+                    g < 0 ? libusb_error_name(g) : "short response");
                 LOGW("UAC2 GET_CUR sample rate readback failed on clockSrc %d: %s (continuing)",
                      clockId, g < 0 ? libusb_error_name(g) : "short response");
                 LOGI("Rate negotiation: UAC2 clockSrc=%d req=%u (unverified)",
@@ -1244,12 +1278,19 @@ void LibusbBackend::dspThreadFunc() {
     int inputReadFailCount = 0;
     float lastInputPeakObserved = 0.0f;
     size_t lastInputAvailBefore = 0;
-    // Output peak observed after the audio callback fills outputBuffer,
-    // before it goes through writeOutput → ring buffer → format converter
-    // → iso transfer → DAC. Lets us distinguish "engine produced bad
-    // output" (high outPeak before USB processing) from "USB pipeline
-    // corrupted clean output" (engine outPeak normal but DAC plays noise).
+    // Output fingerprint observed in the engine output buffer, AFTER the
+    // audio callback fills it but BEFORE it goes through writeOutput →
+    // ring buffer → format converter → iso transfer → DAC. Lets us
+    // distinguish "engine produced bad output" (abnormal fingerprint
+    // before USB processing) from "USB pipeline corrupted clean output"
+    // (fingerprint normal but DAC plays noise). Updated once per DSP
+    // callback, reset once per log window.
     float lastOutputPeakObserved = 0.0f;
+    float lastOutputMinObserved = 0.0f;
+    double lastOutputSumForMean = 0.0;  // sum of scanned samples
+    int   lastOutputSumCount = 0;        // number of samples in the sum
+    int   lastOutputZeroCrossings = 0;
+    uint32_t lastOutputFirst4Bits = 0u;  // raw bits of outputBuffer[0]
 
     while (mDspRunning.load(std::memory_order_acquire)) {
         // P0-2: Check for device disconnection
@@ -1419,20 +1460,31 @@ void LibusbBackend::dspThreadFunc() {
         static int usbDspDiagCount = 0;
         if (++usbDspDiagCount >= 300) {
             const int ioTotal = inputReadOkCount + inputReadFailCount;
+            const double mean = (lastOutputSumCount > 0)
+                ? (lastOutputSumForMean / static_cast<double>(lastOutputSumCount))
+                : 0.0;
             wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
                 "USB_DSP: hasCapture=%d inputPtr=%p outputPtr=%p "
                 "frames=%d streamMode=%d | read ok=%d fail=%d ratio=%.2f "
-                "ringAvailPre=%zu lastInPeak=%.5f lastOutPeak=%.5f",
+                "ringAvailPre=%zu lastInPeak=%.5f "
+                "lastOutPeak=%.5f lastOutMin=%.5f lastOutMean=%.6f zeroX=%d "
+                "first4=0x%08x",
                 mSelectedCapture.has_value() ? 1 : 0, inputPtr, outputPtr,
                 framesPerBlock, static_cast<int>(mStreamingMode),
                 inputReadOkCount, inputReadFailCount,
                 ioTotal > 0 ? static_cast<float>(inputReadOkCount) / ioTotal : 0.0f,
                 lastInputAvailBefore, lastInputPeakObserved,
-                lastOutputPeakObserved);
+                lastOutputPeakObserved, lastOutputMinObserved,
+                mean, lastOutputZeroCrossings, lastOutputFirst4Bits);
             usbDspDiagCount = 0;
             inputReadOkCount = 0;
             inputReadFailCount = 0;
             lastOutputPeakObserved = 0.0f;
+            lastOutputMinObserved = 0.0f;
+            lastOutputSumForMean = 0.0;
+            lastOutputSumCount = 0;
+            lastOutputZeroCrossings = 0;
+            // lastOutputFirst4Bits left as-is — last sample snapshot
         }
 
         if (mCallback) {
@@ -1459,20 +1511,37 @@ void LibusbBackend::dspThreadFunc() {
             std::fill(outputBuffer.begin(), outputBuffer.begin() + outputSamples, 0.0f);
         }
 
-        // Sample the engine output peak BEFORE writeOutput. Lets us
-        // diagnose "engine produced this noise" vs "USB pipeline garbled
-        // clean engine output". Bounded scan (≤ 512 samples = ~256 frames)
-        // so we don't add measurable RT cost.
+        // Compute engine-output fingerprint BEFORE writeOutput: peak, min,
+        // running mean, zero-crossings, and the raw bits of outputBuffer[0].
+        // Together these let us compare session-to-session and prove whether
+        // the engine output itself differs or the corruption is downstream.
+        // Bounded scan (≤ 512 samples = ~256 frames) — RT cost is negligible.
         if (outputPtr && outputSamples > 0) {
-            float peak = 0.0f;
             const size_t scanSamples = std::min(outputSamples, size_t(512));
+            float peak = 0.0f;
+            float minVal = 0.0f;
+            double sum = 0.0;
+            int zeroCross = 0;
+            float prev = outputPtr[0];
             for (size_t i = 0; i < scanSamples; ++i) {
-                float a = std::fabs(outputPtr[i]);
+                float v = outputPtr[i];
+                float a = std::fabs(v);
                 if (a > peak) peak = a;
+                if (v < minVal) minVal = v;
+                sum += static_cast<double>(v);
+                if (i > 0 && ((prev < 0.0f && v >= 0.0f) || (prev >= 0.0f && v < 0.0f))) {
+                    ++zeroCross;
+                }
+                prev = v;
             }
-            if (peak > lastOutputPeakObserved) {
-                lastOutputPeakObserved = peak;
-            }
+            if (peak > lastOutputPeakObserved) lastOutputPeakObserved = peak;
+            if (minVal < lastOutputMinObserved) lastOutputMinObserved = minVal;
+            lastOutputSumForMean += sum;
+            lastOutputSumCount += static_cast<int>(scanSamples);
+            lastOutputZeroCrossings += zeroCross;
+            // Capture raw bits of the very first sample of this callback.
+            // Helps detect "engine wrote literal 0.0 / NaN / denormal".
+            std::memcpy(&lastOutputFirst4Bits, &outputPtr[0], sizeof(uint32_t));
         }
 
         // Write to output buffer if playback is enabled
