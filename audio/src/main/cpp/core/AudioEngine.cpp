@@ -346,22 +346,58 @@ bool AudioEngine::start(int fadeTimeMs) {
         // Ensure callback is set
         manager.setCallback(this);
 
-        // Configure sample rate if preferred
+        // Push preferred sample rate to BackendManager BEFORE starting so
+        // the device negotiates to it during start().
         int preferredRate = mPreferredSampleRate.load(std::memory_order_acquire);
         if (preferredRate > 0) {
             manager.setSampleRate(preferredRate);
         }
 
+        // ====================================================================
+        // CRITICAL: configure components BEFORE starting the backend.
+        //
+        // The Oboe path (lines 590+) prepares all components — OutputStage,
+        // OscillatorBank, EffectChain, voice manager, audio graph nodes —
+        // and only THEN calls mStream->requestStart(). That ordering means
+        // the very first audio callback fires into a fully-initialised state.
+        //
+        // Stage 1's USB path inverted this: manager.start() spun up the DSP
+        // thread, then configureComponentsWithSampleRate() ran on the main
+        // thread. The DSP thread's first onAudioReady() callback (which can
+        // fire within ~1 ms of manager.start() returning) would hit the
+        // shared component state mid-configuration. On a cold launch the
+        // components were still in constructor defaults (wrong sample rate,
+        // unprepared filter coefficients) → first ~ms of output garbled
+        // and that garbled audio got captured into the USB ring buffer.
+        // Subsequent stop/start cycles inherited valid state from the
+        // previous configureComponents call so the bug appeared to "go away"
+        // after one mode switch.
+        //
+        // Fix: prepare everything with the preferred sample rate now. If
+        // the device coerces to a different rate during manager.start(),
+        // re-run configureComponentsWithSampleRate() afterwards (the call
+        // is idempotent for matching rates).
+        // ====================================================================
+        const int expectedRate = (preferredRate > 0) ? preferredRate : 48000;
+        configureComponentsWithSampleRate(expectedRate);
+
+        // Pre-start the fade envelope so initial callbacks see a valid
+        // (0 → 1) ramp instead of whatever the previous stop() left in
+        // mFadeCtrl (typically 0 → 0).
+        mFadeCtrl.startFade(0.0f, 1.0f, expectedRate, fadeTimeMs);
+        mFadeCtrl.setPaused(false);
+
         // FIX PHASE 7.1: Transition to Running BEFORE starting the backend
         // This prevents the race condition where the DSP thread starts calling
-        // onAudioReady() while state is still Starting, causing silence
+        // onAudioReady() while state is still Starting, causing silence.
         if (!transitionToState(EngineState::Running)) {
             LOGE("Failed to transition to Running state");
             transitionToState(EngineState::Stopped);
             return false;
         }
 
-        // Start backend (DSP thread will immediately see Running state)
+        // NOW start the backend. Callbacks fire into already-prepared
+        // components and the engine state is Running.
         watermelon_audio::BackendResult result = manager.start();
         if (result != watermelon_audio::BackendResult::OK) {
             LOGE("Failed to start via BackendManager: %s",
@@ -370,28 +406,33 @@ bool AudioEngine::start(int fadeTimeMs) {
             return false;
         }
 
-        // Get stream info from backend to configure components
+        // Defensive: verify the actual rate the device negotiated. If it
+        // differs from our pre-configuration assumption, re-prepare
+        // components with the corrected rate. In practice the three test
+        // DACs (GHW UAC1, UGREEN CM720 UAC2, C-Media UC02 UAC1) all honor
+        // the requested rate exactly, so this fallback is rarely hit.
         watermelon_audio::StreamInfo info = manager.getStreamInfo();
-        int sampleRate = info.sampleRate;
+        int actualRate = info.sampleRate;
 
         LOGI("=== BACKEND MANAGER STREAM STARTED ===");
         LOGI("  Backend type: %s", watermelon_audio::backendTypeToString(info.backendType));
-        LOGI("  Sample rate: %d Hz", sampleRate);
+        LOGI("  Sample rate: %d Hz (expected %d)", actualRate, expectedRate);
         LOGI("  Channel count: %d", info.channelCount);
         LOGI("  Buffer size: %d frames", info.framesPerBuffer);
         LOGI("  Output latency: %.1f ms", info.outputLatencyMs);
         LOGI("======================================");
 
-        // Configure all audio components with the sample rate
-        configureComponentsWithSampleRate(sampleRate);
-
-        // FIX: Initialize fade-in for BackendManager path (was missing — caused fadeVol=0 silence)
-        mFadeCtrl.startFade(0.0f, 1.0f, sampleRate, fadeTimeMs);
-        mFadeCtrl.setPaused(false);
+        if (actualRate > 0 && actualRate != expectedRate) {
+            LOGW("Device coerced sample rate %d -> %d, re-configuring components",
+                 expectedRate, actualRate);
+            configureComponentsWithSampleRate(actualRate);
+            mFadeCtrl.startFade(0.0f, 1.0f, actualRate, fadeTimeMs);
+            mFadeCtrl.setPaused(false);
+        }
 
         wma::logMessage(wma::LogLevel::INFO, "INPUTFX_DIAG",
             "START_USB_FADE: sampleRate=%d, fadeTimeMs=%d",
-            sampleRate, fadeTimeMs);
+            actualRate > 0 ? actualRate : expectedRate, fadeTimeMs);
 
         LOGI("AudioEngine started via BackendManager successfully");
         return true;
