@@ -1291,6 +1291,16 @@ void LibusbBackend::dspThreadFunc() {
     int   lastOutputSumCount = 0;        // number of samples in the sum
     int   lastOutputZeroCrossings = 0;
     uint32_t lastOutputFirst4Bits = 0u;  // raw bits of outputBuffer[0]
+    // Output ring buffer starvation tracking. `ringLvlMin/Max` bracket the
+    // fill level observed during the window (after writeOutput). The
+    // `underrunsAtWindowStart` snapshot lets us compute a DELTA for the
+    // window, not an all-time count — so session 1's underruns don't
+    // carry over to session 2's log line.
+    size_t lastOutputRingLevelMin = SIZE_MAX;
+    size_t lastOutputRingLevelMax = 0;
+    uint64_t underrunsAtWindowStart = mTransferManager
+        ? mTransferManager->getStatistics().underruns.load(std::memory_order_relaxed)
+        : 0ull;
 
     while (mDspRunning.load(std::memory_order_acquire)) {
         // P0-2: Check for device disconnection
@@ -1463,19 +1473,32 @@ void LibusbBackend::dspThreadFunc() {
             const double mean = (lastOutputSumCount > 0)
                 ? (lastOutputSumForMean / static_cast<double>(lastOutputSumCount))
                 : 0.0;
+            // Delta of underrun counter since the start of this window.
+            // If this is large (dozens+) session 1 vs small (0) session 2,
+            // the first-playback noise is ring starvation, not corruption.
+            uint64_t underrunsNow = mTransferManager
+                ? mTransferManager->getStatistics().underruns.load(std::memory_order_relaxed)
+                : 0ull;
+            uint64_t underrunsDelta = (underrunsNow >= underrunsAtWindowStart)
+                ? (underrunsNow - underrunsAtWindowStart) : 0ull;
+            size_t ringLvlMin = (lastOutputRingLevelMin == SIZE_MAX)
+                ? 0 : lastOutputRingLevelMin;
+
             wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
                 "USB_DSP: hasCapture=%d inputPtr=%p outputPtr=%p "
                 "frames=%d streamMode=%d | read ok=%d fail=%d ratio=%.2f "
                 "ringAvailPre=%zu lastInPeak=%.5f "
                 "lastOutPeak=%.5f lastOutMin=%.5f lastOutMean=%.6f zeroX=%d "
-                "first4=0x%08x",
+                "first4=0x%08x outRingLvl=[%zu..%zu] outUnderrunsDelta=%llu",
                 mSelectedCapture.has_value() ? 1 : 0, inputPtr, outputPtr,
                 framesPerBlock, static_cast<int>(mStreamingMode),
                 inputReadOkCount, inputReadFailCount,
                 ioTotal > 0 ? static_cast<float>(inputReadOkCount) / ioTotal : 0.0f,
                 lastInputAvailBefore, lastInputPeakObserved,
                 lastOutputPeakObserved, lastOutputMinObserved,
-                mean, lastOutputZeroCrossings, lastOutputFirst4Bits);
+                mean, lastOutputZeroCrossings, lastOutputFirst4Bits,
+                ringLvlMin, lastOutputRingLevelMax,
+                static_cast<unsigned long long>(underrunsDelta));
             usbDspDiagCount = 0;
             inputReadOkCount = 0;
             inputReadFailCount = 0;
@@ -1485,6 +1508,9 @@ void LibusbBackend::dspThreadFunc() {
             lastOutputSumCount = 0;
             lastOutputZeroCrossings = 0;
             // lastOutputFirst4Bits left as-is — last sample snapshot
+            lastOutputRingLevelMin = SIZE_MAX;
+            lastOutputRingLevelMax = 0;
+            underrunsAtWindowStart = underrunsNow;
         }
 
         if (mCallback) {
@@ -1570,6 +1596,14 @@ void LibusbBackend::dspThreadFunc() {
             } else {
                 consecutiveWriteErrors = 0;
             }
+
+            // Diag 5: sample the output ring buffer level right after we
+            // wrote. If this stays at/near 0 while the transfer thread is
+            // consuming, we are starving the DAC and fillOutputTransfer is
+            // memsetting silence into packets — audible as noise/garble.
+            size_t ringLvl = mTransferManager->getOutputRingLevel();
+            if (ringLvl < lastOutputRingLevelMin) lastOutputRingLevelMin = ringLvl;
+            if (ringLvl > lastOutputRingLevelMax) lastOutputRingLevelMax = ringLvl;
         }
     }
 

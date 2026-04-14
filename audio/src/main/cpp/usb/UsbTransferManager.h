@@ -332,9 +332,18 @@ public:
     bool readInput(float* samples, size_t numSamples);
 
     /**
-     * Get available samples in output ring buffer.
+     * Get free space in output ring buffer (available to write).
+     * Used by the DSP thread to decide whether there's room for more samples.
      */
     size_t getOutputBufferAvailable() const;
+
+    /**
+     * Get queued samples in output ring buffer (available to READ).
+     * Used by the DSP thread diagnostic to detect ring starvation —
+     * if this drops to 0 repeatedly, fillOutputTransfer is underrunning
+     * and silence-filling iso packets.
+     */
+    size_t getOutputRingLevel() const;
 
     /**
      * Get available samples in input ring buffer.

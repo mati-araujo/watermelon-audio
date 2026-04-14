@@ -444,6 +444,10 @@ size_t UsbTransferManager::getOutputBufferAvailable() const {
     return mOutputRingBuffer ? mOutputRingBuffer->availableToWrite() : 0;
 }
 
+size_t UsbTransferManager::getOutputRingLevel() const {
+    return mOutputRingBuffer ? mOutputRingBuffer->availableToRead() : 0;
+}
+
 size_t UsbTransferManager::getInputBufferAvailable() const {
     return mInputRingBuffer ? mInputRingBuffer->availableToRead() : 0;
 }
