@@ -12,10 +12,6 @@ void OutputStage::prepare(int sampleRate, int /*maxBlockSize*/) {
 void OutputStage::reset() {
     mDCBlocker.reset();
     mDitherer.reset();
-    // Stage 3 bugfix: the lookahead limiter is stateful (delay buffer +
-    // gain envelope) and used to silently retain state across stream
-    // restarts, causing distortion on first-playback. Cascade the reset.
-    mLookaheadLimiter.reset();
 }
 
 void OutputStage::dcBlock(float* stereoData, int numFrames) {

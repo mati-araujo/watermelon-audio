@@ -36,20 +36,6 @@ public:
     void prepare(int32_t sampleRate);
 
     /**
-     * @brief Reset internal state without reallocating.
-     *
-     * Zeros the lookahead delay buffer, resets the write position, and
-     * restores the gain envelope to unity (no reduction). Call this when
-     * restarting a stream to prevent stale samples from the previous
-     * session bleeding into the first ~5 ms of new output — a bug that
-     * caused audible distortion on first-playback in chaos pad mode.
-     *
-     * Mirrors DCBlocker::reset() / Ditherer::reset() so OutputStage::reset()
-     * can cascade through all stateful components.
-     */
-    void reset();
-
-    /**
      * @brief Process audio through the limiter
      * @param input Input buffer (stereo interleaved)
      * @param output Output buffer (stereo interleaved)

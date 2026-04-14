@@ -385,15 +385,6 @@ bool AudioEngine::start(int fadeTimeMs) {
         // Configure all audio components with the sample rate
         configureComponentsWithSampleRate(sampleRate);
 
-        // Stage 3 bugfix: reset the output stage (DC blocker, ditherer, and
-        // lookahead limiter) so stateful components don't retain samples
-        // from a previous stream session. The Oboe path does this implicitly
-        // via OutputStage::prepare() on every start, but configureComponents
-        // only re-prepares, and on same-sample-rate re-entry the limiter's
-        // delay buffer used to silently keep stale data → audible distortion
-        // on first-playback in chaos pad mode.
-        mOutputStage.reset();
-
         // FIX: Initialize fade-in for BackendManager path (was missing — caused fadeVol=0 silence)
         mFadeCtrl.startFade(0.0f, 1.0f, sampleRate, fadeTimeMs);
         mFadeCtrl.setPaused(false);
