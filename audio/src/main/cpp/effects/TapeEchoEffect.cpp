@@ -2,6 +2,15 @@
 #include <cmath>
 #include <algorithm>
 
+void TapeEchoEffect::reset() {
+    // Clear the delay lines (2.5s of echo history) and feedback-path
+    // LPF state. Wow/flutter LFO phase is harmless — leave it alone.
+    mDelayL.clear();
+    mDelayR.clear();
+    mTapeLpfL.reset();
+    mTapeLpfR.reset();
+}
+
 TapeEchoEffect::TapeEchoEffect()
     : mDelayL(static_cast<int>(48000 * 2.5f)),
       mDelayR(static_cast<int>(48000 * 2.5f)) {

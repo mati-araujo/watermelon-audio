@@ -95,6 +95,23 @@ public:
      */
     void process(float* input, float* output, int numFrames);
 
+    /**
+     * @brief Clear all DSP state inside the chain and every effect.
+     *
+     * Zeros the chain-owned scratch/feedback/crossfade buffers AND calls
+     * Effect::reset() on each effect in the active snapshot. Used when
+     * the audio context changes in a way that would let stale state
+     * bleed through — notably the chaos_pad → input_fx mode transition,
+     * where a reverb tail cooked by synth audio would otherwise leak
+     * into the first blocks of mic processing as a loud burst.
+     *
+     * RT-SAFE: zero-fills in place, no allocations, no locks. Must be
+     * called from the audio thread (AudioEngine::onAudioReady dispatches
+     * it via an atomic pending flag). Effect-internal state is owned by
+     * the audio thread, so this is race-free with respect to process().
+     */
+    void reset();
+
     // ========== ROUTING MODE ==========
 
     /**

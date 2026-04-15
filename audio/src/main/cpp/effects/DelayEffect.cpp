@@ -143,6 +143,15 @@ void DelayEffect::setSampleRate(int sampleRate) {
     updateDelaySamples();
 }
 
+void DelayEffect::reset() {
+    // Zero-fill circular delay buffers WITHOUT resizing — RT-safe.
+    // The feedback path accumulates seconds of audio that would
+    // otherwise echo into the new signal after a mode transition.
+    std::fill(bufferL.begin(), bufferL.end(), 0.0f);
+    std::fill(bufferR.begin(), bufferR.end(), 0.0f);
+    writePos.store(0, std::memory_order_release);
+}
+
 void DelayEffect::updateDelaySamples() {
     int newDelaySamples;
     if (sync) {

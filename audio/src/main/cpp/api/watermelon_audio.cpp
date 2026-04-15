@@ -861,10 +861,14 @@ void wma_set_usb_streaming_mode(int mode_id) {
 }
 
 void wma_configure_usb_backend(int sample_rate, int channels, int bit_depth) {
+    // `channels` and `bit_depth` are informational only. LibusbBackend picks
+    // the actual stream format via AltsettingSelector. See the matching JNI
+    // binding nativeConfigureUsbBackend in jni_audio_bridge.cpp for the full
+    // story on why we no longer route bit_depth into setBufferSize().
     (void)channels;
+    (void)bit_depth;
     auto& manager = watermelon_audio::BackendManager::getInstance();
     manager.setSampleRate(sample_rate);
-    manager.setBufferSize(bit_depth);
 }
 
 bool wma_usb_init_device(int file_descriptor, const char* usbfs_path) {

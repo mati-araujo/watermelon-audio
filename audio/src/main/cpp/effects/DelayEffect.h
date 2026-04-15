@@ -92,6 +92,17 @@ public:
      */
     void setSampleRate(int sampleRate) override;
 
+    /**
+     * @brief Clear the delay buffers (RT-safe, no resize).
+     *
+     * A delay with feedback accumulates seconds of audio in its
+     * circular buffer. When the upstream audio context suddenly
+     * changes (e.g. chaos_pad → input_fx), the old content leaks
+     * into the new signal as an echo of the previous session. This
+     * zero-fills bufferL/bufferR and resets the write position.
+     */
+    void reset() override;
+
 private:
     int mSampleRate = 48000;  /**< Current sample rate */
     std::atomic<float> delayTime{500.0f}; /**< Tiempo de delay en ms (atómico) */

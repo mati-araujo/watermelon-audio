@@ -194,6 +194,42 @@ void EffectChain::reorderEffects(size_t from, size_t to) {
     LOGI("Effects reordered: from=%zu to=%zu", from, to);
 }
 
+// ========== STATE RESET ==========
+
+void EffectChain::reset() {
+    // Zero-fill all chain-owned scratch and state buffers. These are
+    // pre-sized in the constructor so no allocation happens here —
+    // std::fill is a memset on contiguous float vectors.
+    std::fill(tempBuffer1.begin(), tempBuffer1.end(), 0.0f);
+    std::fill(tempBuffer2.begin(), tempBuffer2.end(), 0.0f);
+    std::fill(mBranchBufferA.begin(), mBranchBufferA.end(), 0.0f);
+    std::fill(mBranchBufferB.begin(), mBranchBufferB.end(), 0.0f);
+    std::fill(mMixBuffer.begin(), mMixBuffer.end(), 0.0f);
+    std::fill(mFeedbackBuffer.begin(), mFeedbackBuffer.end(), 0.0f);
+    std::fill(mCrossfadeBuffer.begin(), mCrossfadeBuffer.end(), 0.0f);
+
+    // Walk the currently active snapshot (read via atomic acquire — we
+    // are on the audio thread which is the only reader, so race-free)
+    // and call reset() on every effect. Effects whose state is purely
+    // parameter-driven (no buffers) inherit the no-op default from
+    // Effect::reset() and this is a cheap iteration.
+    EffectSnapshot* snapshot = mActiveSnapshot.load(std::memory_order_acquire);
+    if (snapshot) {
+        for (size_t i = 0; i < snapshot->size; ++i) {
+            if (snapshot->effects[i]) {
+                snapshot->effects[i]->reset();
+            }
+        }
+    }
+
+    // Reset crossfade counter — a stale partial crossfade from before
+    // the reset would leak the old routing mode's buffer contents.
+    mCrossfadeCounter = 0;
+    mFeedbackHighEnergyFrames = 0;
+
+    LOGI("EffectChain state reset");
+}
+
 // ========== ROUTING MODE SETTERS ==========
 
 void EffectChain::setRoutingMode(RoutingMode mode) {

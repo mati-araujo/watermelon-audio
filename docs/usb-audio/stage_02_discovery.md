@@ -1,4 +1,4 @@
-clcl# Etapa 2 — Descubrimiento completo y selección dirigida
+clclaucl# Etapa 2 — Descubrimiento completo y selección dirigida
 
 **Estado:** IMPLEMENTADA — core mergeado, pending hardware validation.
 **Dependencias:** stage 1 mergeado (necesita `configureSampleRate()` funcional y UAC version explícita).

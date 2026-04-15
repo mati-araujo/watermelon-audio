@@ -15,6 +15,11 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /**
+     * @brief Clear pre-delay, multitap, and diffusion filter state.
+     */
+    void reset() override;
+
     static constexpr int PARAM_ATTACK_TIME = 0;
     static constexpr int PARAM_DECAY = 1;
     static constexpr int PARAM_SIZE = 2;

@@ -51,6 +51,11 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /**
+     * @brief Clear delay lines and LFO phase (RT-safe, no allocation).
+     */
+    void reset() override;
+
 private:
     static constexpr int MAX_DELAY_SAMPLES = 4800;  // 100ms at 48kHz
     static constexpr int MAX_VOICES = 4;
@@ -77,7 +82,6 @@ private:
     ParameterSmoother mMixSmoother{0.995f};
 
     float interpolatedRead(const std::array<float, MAX_DELAY_SAMPLES>& line, float delaySamples) const;
-    void reset();
 };
 
 #endif // CHORUSEFFECT_H

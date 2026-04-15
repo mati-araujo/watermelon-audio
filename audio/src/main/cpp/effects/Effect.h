@@ -48,6 +48,30 @@ public:
      * @param bpm Beats per minute (default no-op, override in effects that need it)
      */
     virtual void setBpm(float bpm) { (void)bpm; }
+
+    /**
+     * @brief Clear all internal DSP state without destroying the effect.
+     *
+     * Default is a no-op — override in effects that carry state across
+     * process() calls (delay lines, comb/allpass buffers, reverb tails,
+     * filter memory, envelope followers, etc.).
+     *
+     * Called when the audio context changes in a way that would otherwise
+     * let stale state bleed through — e.g. transitioning from OSCILLATOR
+     * mode (where effects may have been fed loud synth audio for seconds)
+     * into INPUT_FX mode (where they'll process quiet mic input). Without
+     * reset, a reverb tail cooked by chaos_pad leaks into the first
+     * blocks of input_fx as a loud residual burst.
+     *
+     * Must be RT-safe: NO allocations, NO locks. Zero-fill existing
+     * buffers only; do not resize them.
+     *
+     * Called from the audio thread (via EffectChain::reset() which is
+     * dispatched from AudioEngine::onAudioReady when a reset is
+     * pending). Effect state is owned by the audio thread so this is
+     * race-free with respect to process().
+     */
+    virtual void reset() {}
 };
 
 #endif // EFFECT_H

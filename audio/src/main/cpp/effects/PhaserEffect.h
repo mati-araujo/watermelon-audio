@@ -49,6 +49,12 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /**
+     * @brief Clear all-pass filter state, LFO phase, and feedback taps.
+     * RT-safe: zero-fills existing arrays, no allocation.
+     */
+    void reset() override;
+
 private:
     static constexpr int MAX_STAGES = 12;
     static constexpr float MIN_FREQ = 200.0f;
@@ -84,7 +90,6 @@ private:
 
     // Process single all-pass stage
     float processAllPass(float input, float& prevInput, float& state, float coefficient);
-    void reset();
 };
 
 #endif // PHASEREFFECT_H

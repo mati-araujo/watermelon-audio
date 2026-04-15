@@ -1260,6 +1260,31 @@ void LibusbBackend::dspThreadFunc() {
     const size_t outputSamples = mDspOutputSamples;  // Exact samples for output write
     const size_t inputSamples = mDspInputSamples;    // Exact samples for input read
 
+    // Target fill level the DSP aims to keep in the output ring. The loop
+    // produces immediately while the ring holds less than this, and only
+    // blocks on the wake signal once the ring reaches it.
+    //
+    // In PLAYBACK_ONLY this IS the pacer — without it the loop runs 1:1
+    // with transfer completion wakes (125/s at 48 kHz HS with 8 ms
+    // transfers), which at framesPerBlock=256 yields 64000 samples/sec
+    // produced vs 96000 samples/sec consumed, causing permanent ~33%
+    // ring starvation and audible garble on every first playback.
+    //
+    // In FULL_DUPLEX the input ring drain rate paces the loop to the
+    // nominal 187.5/s, but that matches the consumer rate exactly and
+    // leaves no slack for OS scheduling jitter. Any callback that
+    // overruns its 5.3 ms budget (Android scheduling, thermal throttle,
+    // cache miss, etc.) forces the DSP to miss iterations and the ring
+    // drains by 768 samples per missed 8 ms window. The target sets
+    // how much jitter the ring can absorb before underrunning — see
+    // UsbTransferManager::getOutputRingTargetLevel for the arithmetic.
+    //
+    // Value comes from the transfer manager so it tracks any adaptive-
+    // buffer reconfiguration.
+    const size_t outputRingTarget = (mSelectedPlayback && mTransferManager)
+        ? mTransferManager->getOutputRingTargetLevel()
+        : 0;
+
     // Adaptive buffer evaluation counter
     int callbackCount = 0;
     const int ADAPTIVE_EVAL_INTERVAL = 100;
@@ -1349,29 +1374,42 @@ void LibusbBackend::dspThreadFunc() {
             continue;
         }
 
-        // Wait for the USB event thread to signal that data is available
-        // (or that output space was freed) before checking the ring buffers.
-        // The 5ms timeout is a safety net: if the device stalls, the
-        // disconnect detection above will catch it within 500ms via the
-        // watchdog. We don't want to block forever in case a wake is missed.
+        // Ring-level pacing (see outputRingTarget comment above for the
+        // full rationale). We check readiness FIRST and only block on
+        // the wake signal if there's actually nothing to do right now.
         //
-        // Drain any backlog of pending wakes in one shot — counting_semaphore
-        // collapses naturally because we just re-check the readiness state
-        // after waking, and one wake is enough to cover N completed transfers.
-        (void)mDspWake.try_acquire_for(std::chrono::milliseconds(5));
-        if (!mDspRunning.load(std::memory_order_acquire)) {
-            break;
-        }
-
+        // outputReady here means "the output ring NEEDS more data" — not
+        // "there is space to write". The distinction matters: in
+        // PLAYBACK_ONLY the ring is usually drained far below capacity,
+        // so the old `availableToWrite >= outputSamples` check was
+        // trivially true and the DSP ended up paced purely by wake
+        // arrival rate.
         bool outputReady = !mSelectedPlayback ||
-            (mTransferManager->getOutputBufferAvailable() >= outputSamples);
+            (mTransferManager->getOutputRingLevel() < outputRingTarget);
         bool inputReady = !mSelectedCapture ||
             (mTransferManager->getInputBufferAvailable() >= inputSamples);
 
         if (!outputReady || !inputReady) {
-            // Spurious or premature wake — go back to waiting. No sleep:
-            // try_acquire_for above is the throttle.
+            // Nothing to produce yet — output ring is at or above target,
+            // or input ring doesn't have enough samples. Block on the
+            // wake signal with a 5ms safety timeout so the disconnect
+            // watchdog (500ms) can still catch a fully stalled device.
+            (void)mDspWake.try_acquire_for(std::chrono::milliseconds(5));
+            if (!mDspRunning.load(std::memory_order_acquire)) {
+                break;
+            }
             continue;
+        }
+
+        // Ring is below target — produce more NOW. Drain any pending
+        // wakes without blocking so subsequent iterations are paced by
+        // ring level rather than by queued wake events. Without this,
+        // a backlog of wakes (one per transfer completion) would force
+        // the DSP to process one callback per wake even when the ring
+        // still needs refilling, defeating the whole point of the
+        // ring-level pacer.
+        while (mDspWake.try_acquire()) {
+            // drain
         }
 
         // Get input data if capture is enabled

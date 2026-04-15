@@ -1,5 +1,14 @@
 #include "HpfDelayEffect.h"
 
+void HpfDelayEffect::reset() {
+    // Clear delay lines (which hold the feedback echo path) and
+    // the HPF state (which holds the last-sample filter memory).
+    mDelayL.clear();
+    mDelayR.clear();
+    mHpfL.reset();
+    mHpfR.reset();
+}
+
 HpfDelayEffect::HpfDelayEffect()
     : mDelayL(2000.0f, 48000.0f),   // 2 second max delay
       mDelayR(2000.0f, 48000.0f),

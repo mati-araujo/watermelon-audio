@@ -362,6 +362,25 @@ public:
     EffectType getEffectType(size_t index) const { return mEffectChain.getEffectType(index); }
     bool isBypassed(size_t index) const { return mEffectChain.getBypass(index); }
 
+    /**
+     * @brief Ask the audio thread to clear all effect chain DSP state
+     *        on its next onAudioReady callback.
+     *
+     * Lock-free request: sets an atomic flag read by the audio thread.
+     * The actual EffectChain::reset() call happens on the audio thread
+     * (race-free with process()). Call this from the UI / JNI thread
+     * when the audio context changes in a way that would let stale
+     * effect state bleed through — notably the chaos_pad → input_fx
+     * mode transition, where a reverb tail cooked by loud synth audio
+     * leaks into the first blocks of mic processing as a loud burst.
+     *
+     * Idempotent: multiple requests before the audio thread services
+     * the flag collapse into a single reset.
+     */
+    void requestResetEffectChain() {
+        mResetEffectChainPending.store(true, std::memory_order_release);
+    }
+
     // ========== EFFECT ROUTING MODE ==========
 
     void setRoutingMode(RoutingMode mode) {
@@ -804,6 +823,14 @@ private:
 
     // Cadena de efectos
     EffectChain mEffectChain;
+
+    // Pending request for EffectChain state reset. Set by UI / JNI
+    // thread via requestResetEffectChain(); serviced by the audio
+    // thread at the top of onAudioReady() before any effect processing
+    // runs for the block. Used on chaos_pad → input_fx transitions to
+    // stop stale reverb tails / delay feedback from bleeding into the
+    // first blocks of mic processing.
+    std::atomic<bool> mResetEffectChainPending{false};
 
     // ========== OUTPUT STAGE (Phase 1E) ==========
     // DC blocker, limiter, soft clipper, ditherer + scratch buffer

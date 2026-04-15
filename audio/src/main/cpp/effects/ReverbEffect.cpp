@@ -424,3 +424,35 @@ void ReverbEffect::setSampleRate(int sampleRate) {
     // ===== RECALCULATE COMB GAINS =====
     updateParameters();
 }
+
+// ============================================================================
+// STATE RESET
+// ============================================================================
+
+void ReverbEffect::reset() {
+    // Zero the late-reverb comb filter buffers WITHOUT resizing them.
+    // std::fill on a contiguous vector compiles to a memset — RT-safe,
+    // no allocations. This is the critical step: combBuffers holds the
+    // reverb tail (up to several seconds of audio), and zeroing them
+    // immediately silences the tail.
+    for (int i = 0; i < 4; ++i) {
+        std::fill(combBuffers[i].begin(), combBuffers[i].end(), 0.0f);
+        combPos[i].store(0, std::memory_order_relaxed);
+        combPrevFiltered[i] = 0.0f;  // damping filter memory
+    }
+
+    // Zero the allpass diffuser buffers too — they hold a few ms of
+    // post-comb state that would otherwise be audible as a brief click.
+    for (int i = 0; i < 2; ++i) {
+        std::fill(allpassBuffers[i].begin(), allpassBuffers[i].end(), 0.0f);
+        allpassPos[i].store(0, std::memory_order_relaxed);
+    }
+
+    // Note: sub-component state (preDelayLine, lowCut/highCutFilter,
+    // stereoProcessor, earlyReflections, modulationLFOs) is NOT reset
+    // here. Their internal memory is short (single-sample filter taps
+    // or pre-delay < 100 ms) and reaches steady state within a few
+    // blocks of audio — well before the user would notice anything.
+    // If a future audit shows those components bleeding state, add
+    // reset() methods to them and call through here.
+}

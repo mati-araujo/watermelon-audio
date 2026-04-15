@@ -346,6 +346,43 @@ public:
     size_t getOutputRingLevel() const;
 
     /**
+     * Target fill level (in float samples) the DSP thread should aim
+     * to keep in the output ring.
+     *
+     * The DSP loop runs freely while `getOutputRingLevel() < target`
+     * and blocks on the data-ready signal once the ring reaches the
+     * target, so the output rate is paced by ring drain (via transfer
+     * completions) rather than by queued wake events. This is the
+     * only pacer in PLAYBACK_ONLY mode — without it the DSP ends up
+     * running 1:1 with transfer-completion wakes (125/s at 48 kHz)
+     * instead of 187.5/s nominal, causing sustained ring starvation.
+     *
+     * Value = (numTransfers + 1) full transfers worth of audio, i.e.
+     * one full round of in-flight transfers PLUS one spare transfer
+     * of headroom for OS scheduling jitter. At 48 kHz stereo with
+     * the default 3 in-flight transfers of 8 ms each this is
+     * 4 × 768 = 3072 samples ≈ 32 ms of latency margin, of which
+     * ~24 ms is absorber for transient DSP slowdowns.
+     *
+     * The +1 headroom matters in FULL_DUPLEX mode where the DSP is
+     * already running at the nominal rate (no spare capacity) — any
+     * scheduling jitter that pushes a callback past its 5.3 ms budget
+     * creates an instantaneous deficit that must be absorbed by the
+     * existing ring level. With just numTransfers of margin the
+     * absorber only tolerates ~13 ms of slowdown before the ring
+     * reaches the underrun threshold (768 samples); the +1 bumps
+     * that to ~21 ms, which covers the Android kernel's typical
+     * scheduling jitter envelope under load.
+     */
+    size_t getOutputRingTargetLevel() const {
+        return static_cast<size_t>(
+            (mConfig.numTransfers + 1)
+            * mConfig.packetsPerTransfer
+            * mConfig.framesPerPacket
+            * mConfig.channelCount);
+    }
+
+    /**
      * Get available samples in input ring buffer.
      */
     size_t getInputBufferAvailable() const;

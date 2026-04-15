@@ -2,6 +2,16 @@
 #include <cmath>
 #include <algorithm>
 
+void HallReverbEffect::reset() {
+    // Clear all delay line and FDN state. RT-safe: DelayLine::clear()
+    // and FDN::reset() zero-fill existing buffers without resizing.
+    mPreDelayL.clear();
+    mPreDelayR.clear();
+    mEarlyL.clear();
+    mEarlyR.clear();
+    mFdn.reset();
+}
+
 HallReverbEffect::HallReverbEffect()
     : mPreDelayL(200.0f),
       mPreDelayR(200.0f),

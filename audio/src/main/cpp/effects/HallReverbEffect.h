@@ -16,6 +16,12 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /**
+     * @brief Clear pre-delay, early reflection, and FDN late-reverb state.
+     * RT-safe: delegates to sub-component clear/reset methods, no allocation.
+     */
+    void reset() override;
+
     static constexpr int PARAM_DECAY_TIME = 0;
     static constexpr int PARAM_SIZE = 1;
     static constexpr int PARAM_PRE_DELAY = 2;

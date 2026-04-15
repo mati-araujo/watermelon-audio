@@ -1849,6 +1849,20 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
     const float* inputData,
     int32_t numFrames) {
 
+    // Service a pending EffectChain reset before doing ANY audio work
+    // this block. The UI / JNI thread sets the flag via
+    // requestResetEffectChain() when the audio context changes in a
+    // way that would let stale state bleed through — primarily the
+    // chaos_pad → input_fx transition, where a reverb tail cooked by
+    // loud synth audio would otherwise leak into the first blocks of
+    // mic processing. Compare-exchange acquires ownership atomically
+    // so concurrent requests collapse into a single reset.
+    bool expected = true;
+    if (mResetEffectChainPending.compare_exchange_strong(
+            expected, false, std::memory_order_acq_rel)) {
+        mEffectChain.reset();
+    }
+
     // ========== DIRECT USB INPUT_FX MODE ==========
     // When USB backend provides input AND oscillator is disabled (INPUT_FX mode),
     // process input directly through effect chain without going through InputNode.

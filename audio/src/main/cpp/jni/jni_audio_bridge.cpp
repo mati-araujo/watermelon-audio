@@ -804,6 +804,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAud
 
             case watermelon_audio::AudioMode::INPUT_FX: {
                 LOGI("AudioNativeBridge.setAudioMode: configuring INPUT_FX");
+                // Request an effect chain state reset BEFORE flipping
+                // oscillatorEnabled. On the next audio callback the
+                // audio thread will zero-fill the chain's scratch and
+                // feedback buffers and call reset() on every effect,
+                // stopping stale reverb tails / delay feedback cooked
+                // by chaos_pad from bleeding into the first blocks of
+                // mic processing as a loud burst. Without this, the
+                // longer the user stays in chaos_pad, the louder the
+                // residual when entering INPUT_FX.
+                g_jniState.engine->requestResetEffectChain();
                 g_jniState.engine->setOscillatorEnabled(false);
                 g_jniState.engine->setVocoderCarrierSource(true);
 
@@ -1348,10 +1358,24 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsb
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeConfigureUsbBackend(
     JNIEnv* env, jobject thiz, jint sampleRate, jint channels, jint bitDepth) {
+    // `channels` and `bitDepth` are informational only. LibusbBackend picks
+    // the actual stream format via AltsettingSelector based on the parsed
+    // device topology and the registered StreamPreference — the JNI layer
+    // has no business overriding those.
+    //
+    // Historical code routed `bitDepth` into BackendManager::setBufferSize()
+    // as a "buffer size hint", which was a latent time bomb: any caller
+    // passing a realistic bitDepth (16/24/32) would set mRequestedBufferSize
+    // to 16/24/32 frames, drop mDspOutputSamples to ~32-64, and starve the
+    // output ring so badly that every iso transfer would silence-fill. Today
+    // the bug is dormant only because NoisyPad's AudioEngineStateManager.
+    // startWithUsbMode() — the only code path that calls configureUsbBackend
+    // — is itself dead (no invocations). Remove the misrouted call before
+    // someone wakes both up at once.
+    (void)channels;
+    (void)bitDepth;
     auto& backendManager = watermelon_audio::BackendManager::getInstance();
     backendManager.setSampleRate(sampleRate);
-    backendManager.setBufferSize(bitDepth);  // Using bitDepth as buffer size hint
-    // Note: channels parameter not directly used - backend uses its own channel config
 }
 
 // ==================== Memory/Resource Functions ====================

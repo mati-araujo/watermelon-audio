@@ -2,6 +2,22 @@
 #include <cmath>
 #include <algorithm>
 
+void RiserReverbEffect::reset() {
+    // Clear the multitap delay buffers (main tail) and the pre-delay
+    // buffers. Also reset the diffusion/darkening filters to zero
+    // state so stale tap content doesn't re-emerge through them.
+    mPreDelayL.clear();
+    mPreDelayR.clear();
+    mTapDelayL.clear();
+    mTapDelayR.clear();
+    mDiffuseL1.reset();
+    mDiffuseL2.reset();
+    mDiffuseR1.reset();
+    mDiffuseR2.reset();
+    mTapLpfL.reset();
+    mTapLpfR.reset();
+}
+
 RiserReverbEffect::RiserReverbEffect()
     : mPreDelayL(200.0f),
       mPreDelayR(200.0f),

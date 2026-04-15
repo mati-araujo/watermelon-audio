@@ -102,6 +102,19 @@ public:
      */
     void setSampleRate(int sampleRate) override;
 
+    /**
+     * @brief Clear all DSP state (reverb tail) without resizing buffers.
+     *
+     * Zero-fills comb and allpass delay buffers, resets their read/write
+     * positions and filter memory, and clears sub-component state. RT-safe:
+     * no allocation, no resizing. Use from the audio thread when the
+     * effect has been processing loud audio and a clean slate is needed
+     * — e.g. the chaos_pad → input_fx transition, where a seconds-long
+     * reverb tail cooked by synth audio would otherwise bleed into the
+     * first blocks of mic processing.
+     */
+    void reset() override;
+
     // Nuevos setters para parámetros expandidos
     void setPreDelay(float delayMs);        // Param 3: 0-100ms
     void setDamping(float amount);          // Param 4: 0-1

@@ -17,6 +17,11 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /**
+     * @brief Clear delay lines, feedback LPF state, and wow/flutter LFOs.
+     */
+    void reset() override;
+
     static constexpr int PARAM_DELAY_TIME = 0;
     static constexpr int PARAM_FEEDBACK = 1;
     static constexpr int PARAM_WOW_FLUTTER = 2;

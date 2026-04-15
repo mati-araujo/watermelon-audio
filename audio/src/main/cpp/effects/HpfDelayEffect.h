@@ -28,6 +28,11 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /**
+     * @brief Clear delay lines and feedback HPF state. RT-safe.
+     */
+    void reset() override;
+
     // Parameter IDs
     static constexpr int PARAM_HPF_CUTOFF = 0;    // 20-8000 Hz (XY: X)
     static constexpr int PARAM_DELAY_TIME = 1;     // 10-2000 ms (XY: Y)
