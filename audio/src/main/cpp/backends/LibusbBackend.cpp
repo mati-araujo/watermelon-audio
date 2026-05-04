@@ -8,6 +8,7 @@
 #include "../usb/UsbConstants.h"
 #include "../usb/SampleRateRequest.h"
 #include "../usb/ClockSourceRangeParser.h"
+#include "../usb/UsbClockGraph.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -595,6 +596,156 @@ void LibusbBackend::populateClockSourceRates() {
     }
 }
 
+uint8_t LibusbBackend::selectClockSourceForTerminal(uint8_t terminalLinkId) {
+    if (!mDeviceHandle || !mUsbDevice || mUsbDevice->uacVersion != 2) {
+        return 0;
+    }
+    if (terminalLinkId == 0) {
+        return 0;
+    }
+
+    usb::UsbClockGraph graph(*mUsbDevice);
+    const usb::UsbClockSource* preferred = graph.pickDefaultSource(terminalLinkId);
+    if (!preferred) {
+        LOGW("Clock graph: terminal %d has no reachable clock source",
+             terminalLinkId);
+        return 0;
+    }
+
+    auto preferredPath = graph.pathToSource(terminalLinkId, preferred->clockId);
+    if (!preferredPath || !preferredPath->source) {
+        LOGW("Clock graph: terminal %d could not resolve preferred clock source %d",
+             terminalLinkId, preferred->clockId);
+        return 0;
+    }
+
+    const auto* selector = preferredPath->selector;
+    if (!selector) {
+        LOGI("Clock graph: terminal %d uses clock source %d directly",
+             terminalLinkId, preferred->clockId);
+        return preferred->clockId;
+    }
+
+    auto sourceForPin = [&](uint8_t pin) -> const usb::UsbClockSource* {
+        if (pin == 0 || pin > selector->sourceIds.size()) {
+            return nullptr;
+        }
+        const auto reachable = graph.reachableSourcesFor(terminalLinkId);
+        for (const auto* source : reachable) {
+            auto path = graph.pathToSource(terminalLinkId, source->clockId);
+            if (path && path->selector == selector && path->selectorPin == pin) {
+                return source;
+            }
+        }
+        return mUsbDevice->findClockSource(selector->sourceIds[pin - 1]);
+    };
+
+    auto getSelectorPin = [&]() -> std::optional<uint8_t> {
+        std::array<uint8_t, 1> readback{};
+        const uint16_t wValue = static_cast<uint16_t>(
+            usb::UAC2_CX_CLOCK_SELECTOR_CONTROL << 8);
+        const uint16_t wIndex = static_cast<uint16_t>(
+            (static_cast<uint16_t>(selector->clockId) << 8) |
+            mUsbDevice->controlInterface);
+        int r = libusb_control_transfer(
+            mDeviceHandle,
+            usb::UAC_REQUEST_TYPE_GET,
+            usb::UAC2_REQUEST_CUR,
+            wValue,
+            wIndex,
+            readback.data(),
+            static_cast<uint16_t>(readback.size()),
+            /*timeout*/ 1000);
+        if (r != 1) {
+            LOGW("Clock selector %d GET_CUR failed: %s",
+                 selector->clockId,
+                 r < 0 ? libusb_error_name(r) : "short response");
+            return std::nullopt;
+        }
+        return readback[0];
+    };
+
+    auto setSelectorPin = [&](uint8_t pin) -> bool {
+        std::array<uint8_t, 1> payload{{pin}};
+        const uint16_t wValue = static_cast<uint16_t>(
+            usb::UAC2_CX_CLOCK_SELECTOR_CONTROL << 8);
+        const uint16_t wIndex = static_cast<uint16_t>(
+            (static_cast<uint16_t>(selector->clockId) << 8) |
+            mUsbDevice->controlInterface);
+        int r = libusb_control_transfer(
+            mDeviceHandle,
+            usb::UAC_REQUEST_TYPE_SET,
+            usb::UAC2_REQUEST_CUR,
+            wValue,
+            wIndex,
+            payload.data(),
+            static_cast<uint16_t>(payload.size()),
+            /*timeout*/ 1000);
+        if (r < 0) {
+            LOGW("Clock selector %d SET_CUR pin %d failed: %s",
+                 selector->clockId, pin, libusb_error_name(r));
+            mLastLibusbError.store(r);
+            return false;
+        }
+        return true;
+    };
+
+    const uint8_t desiredPin = preferredPath->selectorPin;
+    auto currentPin = getSelectorPin();
+    if (currentPin) {
+        if (const auto* currentSource = sourceForPin(*currentPin)) {
+            if (*currentPin == desiredPin) {
+                LOGI("Clock selector %d already on pin %d (source %d)",
+                     selector->clockId, *currentPin, currentSource->clockId);
+                return currentSource->clockId;
+            }
+            LOGI("Clock selector %d current pin %d source %d, preferred pin %d source %d",
+                 selector->clockId, *currentPin, currentSource->clockId,
+                 desiredPin, preferred->clockId);
+        }
+    }
+
+    if (!selector->canControlSelector) {
+        if (currentPin) {
+            if (const auto* currentSource = sourceForPin(*currentPin)) {
+                LOGW("Clock selector %d is read-only; using current source %d",
+                     selector->clockId, currentSource->clockId);
+                return currentSource->clockId;
+            }
+        }
+        LOGW("Clock selector %d is read-only and current pin is unknown; "
+             "using preferred source %d for rate negotiation only",
+             selector->clockId, preferred->clockId);
+        return preferred->clockId;
+    }
+
+    if (desiredPin == 0) {
+        LOGW("Clock selector %d has no valid pin for source %d",
+             selector->clockId, preferred->clockId);
+        return preferred->clockId;
+    }
+
+    if (setSelectorPin(desiredPin)) {
+        LOGI("Clock selector %d -> pin %d (source %d)",
+             selector->clockId, desiredPin, preferred->clockId);
+        return preferred->clockId;
+    }
+
+    currentPin = getSelectorPin();
+    if (currentPin) {
+        if (const auto* currentSource = sourceForPin(*currentPin)) {
+            LOGW("Clock selector %d SET_CUR failed; continuing with current source %d",
+                 selector->clockId, currentSource->clockId);
+            return currentSource->clockId;
+        }
+    }
+
+    LOGW("Clock selector %d SET_CUR failed and current source is unknown; "
+         "using preferred source %d for rate negotiation only",
+         selector->clockId, preferred->clockId);
+    return preferred->clockId;
+}
+
 // ============================================================================
 // Sample Rate Negotiation
 // ============================================================================
@@ -709,10 +860,10 @@ bool LibusbBackend::configureSampleRate() {
         };
 
         if (mSelectedPlayback) {
-            addUnique(mUsbDevice->resolveClockSourceId(mSelectedPlayback->terminalLink));
+            addUnique(selectClockSourceForTerminal(mSelectedPlayback->terminalLink));
         }
         if (mSelectedCapture) {
-            addUnique(mUsbDevice->resolveClockSourceId(mSelectedCapture->terminalLink));
+            addUnique(selectClockSourceForTerminal(mSelectedCapture->terminalLink));
         }
 
         if (clockIdsToSet.empty()) {

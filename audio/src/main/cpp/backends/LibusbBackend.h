@@ -427,6 +427,7 @@ private:
     bool parseDeviceDescriptors();
     bool selectBestInterfaces();
     bool configureSampleRate();
+    uint8_t selectClockSourceForTerminal(uint8_t terminalLinkId);
 
     // Stage 3: query UAC2 clock sources for their supported sample rate ranges
     // via RANGE control transfers and populate mUsbDevice->clockSources rate

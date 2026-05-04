@@ -110,6 +110,7 @@ constexpr uint8_t UAC2_FUNCTION_OTHER = 0xFF;
 constexpr uint8_t UAC2_CS_UNDEFINED = 0x00;
 constexpr uint8_t UAC2_CS_SAM_FREQ_CONTROL = 0x01;
 constexpr uint8_t UAC2_CS_CLOCK_VALID_CONTROL = 0x02;
+constexpr uint8_t UAC2_CX_CLOCK_SELECTOR_CONTROL = 0x01;
 
 // UAC 1.0 Endpoint Control Selectors (UAC 1.0 Spec 5.2.3.2.3)
 // Used as wValue high byte for class-specific endpoint requests
