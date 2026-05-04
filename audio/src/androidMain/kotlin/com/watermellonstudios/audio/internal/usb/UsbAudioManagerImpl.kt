@@ -90,6 +90,7 @@ internal class UsbAudioManagerImpl(
     private var lastHealthSampleMs = 0L
     private var lastHealthClockSourceId = -1
     private var lastDriftSeverity = UsbHealthEvent.Severity.INFO
+    private var lastUnderrunSeverity = UsbHealthEvent.Severity.INFO
 
     // Permission request continuation
     private var permissionContinuation: CancellableContinuation<Boolean>? = null
@@ -1264,6 +1265,7 @@ internal class UsbAudioManagerImpl(
         lastHealthSampleMs = lastHealthyTime
         lastHealthClockSourceId = -1
         lastDriftSeverity = UsbHealthEvent.Severity.INFO
+        lastUnderrunSeverity = UsbHealthEvent.Severity.INFO
 
         healthCheckJob = scope.launch {
             Log.d(TAG, "Health check started")
@@ -1364,11 +1366,13 @@ internal class UsbAudioManagerImpl(
                 perMinute >= 5 -> UsbHealthEvent.Severity.WARNING
                 else -> UsbHealthEvent.Severity.INFO
             }
-            if (underrunSeverity != UsbHealthEvent.Severity.INFO) {
+            if (underrunSeverity != lastUnderrunSeverity &&
+                underrunSeverity != UsbHealthEvent.Severity.INFO) {
                 _healthEvents.tryEmit(
                     UsbHealthEvent.UnderrunRate(perMinute, underrunSeverity)
                 )
             }
+            lastUnderrunSeverity = underrunSeverity
         }
         lastHealthUnderruns = stats.underruns
         lastHealthSampleMs = now

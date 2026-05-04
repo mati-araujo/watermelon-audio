@@ -9,6 +9,7 @@
 #include "../usb/SampleRateRequest.h"
 #include "../usb/ClockSourceRangeParser.h"
 #include "../usb/UsbClockGraph.h"
+#include "../usb/UsbIsoTiming.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -1405,14 +1406,10 @@ bool LibusbBackend::setupTransferManager() {
     const bool isHighSpeed = (speed == LIBUSB_SPEED_HIGH ||
                                speed == LIBUSB_SPEED_SUPER ||
                                speed == LIBUSB_SPEED_SUPER_PLUS);
-    const int endpointInterval = std::max(1, static_cast<int>(
-        configInterface->dataEndpoint.interval == 0 ? 1 : configInterface->dataEndpoint.interval));
-    const int serviceSlots = isHighSpeed
-        ? (1 << std::clamp(endpointInterval - 1, 0, 7))
-        : endpointInterval;
-    const int packetsPerSecond = isHighSpeed
-        ? std::max(1, 8000 / serviceSlots)
-        : std::max(1, 1000 / serviceSlots);
+    const auto timing = usb::calculateIsoTransferTiming(
+        mRequestedSampleRate,
+        isHighSpeed,
+        static_cast<int>(configInterface->dataEndpoint.interval));
     const char* speedName =
         (speed == LIBUSB_SPEED_LOW)        ? "LOW"   :
         (speed == LIBUSB_SPEED_FULL)       ? "FULL"  :
@@ -1427,17 +1424,17 @@ bool LibusbBackend::setupTransferManager() {
     // Non-integer rates (44.1 kHz, 88.2 kHz) truncate here; the clock
     // controller's fractional accumulator compensates via the feedback
     // endpoint when available.
-    config.endpointInterval = endpointInterval;
-    config.packetsPerSecond = packetsPerSecond;
-    config.framesPerPacket = std::max(1, mRequestedSampleRate / packetsPerSecond);
+    config.endpointInterval = timing.endpointInterval;
+    config.packetsPerSecond = timing.packetsPerSecond;
+    config.framesPerPacket = timing.framesPerPacket;
     // Keep ~8 ms of audio per libusb transfer in both speed classes so the
     // event-loop cadence is constant regardless of USB speed.
-    config.packetsPerTransfer = std::max(1, (packetsPerSecond * 8) / 1000);
+    config.packetsPerTransfer = timing.packetsPerTransfer;
     config.numTransfers = 3;                       // Triple buffering
 
     LOGI("USB speed: %s (libusb=%d), bInterval=%d, %d packets/sec, "
          "%d frames/packet, %d packets/xfer",
-         speedName, speed, endpointInterval, packetsPerSecond,
+         speedName, speed, config.endpointInterval, config.packetsPerSecond,
          config.framesPerPacket, config.packetsPerTransfer);
 
     // Ring buffer size: start with reduced default (100ms instead of 200ms)

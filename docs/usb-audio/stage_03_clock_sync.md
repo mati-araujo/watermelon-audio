@@ -1,13 +1,13 @@
 # Etapa 3 — Clock sync profesional
 
-**Estado:** AVANZADA — RANGE de clock sources, `UsbClockGraph`, selectors/multipliers, Clock Selector `CUR`, bInterval en snapshot/timing y observabilidad básica de clock health ya existen; falta validación prolongada de drift/jitter y pulir eventos/diagnóstico en más hardware.
+**Estado:** CERRADA funcionalmente para entrada a Stage 4 — RANGE de clock sources, `UsbClockGraph`, selectors/multipliers, Clock Selector `CUR`, bInterval en snapshot/timing y observabilidad básica de clock health ya existen. La validación manual de hardware fue reportada como OK; quedan como pendientes explícitos la validación prolongada de drift/jitter, más devices con `bInterval > 1` y refinamiento de thresholds/diagnóstico en más hardware.
 **Dependencias:** stages 1 y 2 mergeados. Necesita `UsbTopology` para navegar el clock graph y `configureSampleRate()` para aplicar la selección.
 **Duración estimada:** 3–4 días.
 **Severidad de los bugs que resuelve:** 1× Crítico + pulido del feedback end-to-end iniciado en stage 1.
 
 **Relevamiento 2026-04-30:** `ClockSourceRangeParser.h` existe y está testeado; `LibusbBackend::populateClockSourceRates()` consulta UAC2 `RANGE`; `configureSampleRate()` ya intenta resolver clocks desde los terminales seleccionados y evita SET_CUR redundante con GET_CUR previo.
 
-**Avance posterior:** `UsbClockGraph` navega terminales, selectors y multipliers hasta la fuente final; `LibusbBackend` aplica Clock Selector `CUR` cuando corresponde; `UsbTransferStats` expone sample rate medido, drift PPM, feedback counters y clock source activo; `UsbCapabilitySnapshot` serializa `bInterval`; el pacing nativo deriva `framesPerPacket` desde velocidad USB + `bInterval`. La validación de hardware de graph/selector fue reportada como pasada antes de avanzar estos puntos.
+**Cierre Stage 3 / entrada Stage 4 (2026-05-04):** `UsbClockGraph` navega terminales, selectors y multipliers hasta la fuente final; `LibusbBackend` aplica Clock Selector `CUR` cuando corresponde; `UsbTransferStats` expone sample rate medido, drift PPM, feedback counters y clock source activo; `UsbCapabilitySnapshot` serializa `bInterval`; el pacing nativo deriva `framesPerPacket` desde velocidad USB + `bInterval`. La validación manual de hardware fue reportada como OK antes de preparar la entrada a Stage 4.
 
 ---
 
@@ -382,6 +382,26 @@ Preset `DRIFT_STABILITY`: streaming continuo 5 minutos, monitorear `driftPpm` ca
 
 ---
 
+## 4.5 Cierre de validación manual
+
+Resultado reportado el 2026-05-04: validación manual de hardware OK para el avance de Stage 3. Con esto quedan cerrados para entrada a Stage 4:
+
+- Resolución de clock graph real desde terminales hacia clock source final.
+- Clock Selector `GET_CUR`/`SET_CUR` antes de `SET_CUR` de sample rate.
+- `selectClockSource(clockSourceId)` para aplicar en el próximo `startStreaming()`.
+- Observabilidad básica de clock/feedback desde `UsbTransferStats` y `healthEvents`.
+- Serialización de `bInterval` y pacing de paquetes derivado de velocidad USB + `bInterval`.
+
+Pendientes intencionales que no bloquean Stage 4:
+
+- Validación prolongada de drift/jitter (10 minutos o más) y preset `DRIFT_STABILITY` en al menos 2 devices.
+- Más hardware UAC2 con `bInterval > 1` para confirmar pacing en endpoints de cadencia reducida.
+- Refinar thresholds de `healthEvents` con datos reales; valores actuales: drift warning 100 PPM, drift critical 500 PPM, underrun warning 5/min, underrun critical 30/min.
+- Modelar rangos completos de clock source en snapshot si NoisyPad necesita mostrar sub-ranges, no solo sample rates/min/max/continuous.
+- Considerar `UsbControlRequests` centralizado cuando Stage 4 toque más controles class-specific; no es requisito para cerrar esta etapa.
+
+---
+
 ## 5. Criterios de aceptación
 
 - [x] `UsbClockGraph` implementado con tests de construcción y navegación.
@@ -392,8 +412,9 @@ Preset `DRIFT_STABILITY`: streaming continuo 5 minutos, monitorear `driftPpm` ca
 - [x] `UsbTransferStats` incluye `driftPpm`, `currentSampleRateHz`, `activeClockSourceId`, `feedbackPacketsReceived`, `feedbackPacketsInvalid`.
 - [ ] **Parcial:** `UsbCapabilitySnapshot.ClockSourceInfo.sampleRateRanges` poblado en UAC2. Estado real: se serializan sample rates/min/max/continuous; falta modelar rangos completos y graph.
 - [x] `IUsbAudioManager.healthEvents: Flow<UsbHealthEvent>` expuesto y operacional desde el health loop Android.
-- [ ] Scarlett Solo 3rd Gen: drift sostenido < 50 PPM durante 10 minutos con clock source single. Logs confirman SET_CUR al clock selector efectivo.
-- [ ] Un device UAC1 sigue funcionando sin regresiones tras los cambios (no debe intentar `selectClockSource`).
+- [x] Validación manual de hardware reportada OK para cerrar Stage 3 funcional.
+- [ ] Pendiente largo: drift sostenido < 50 PPM durante 10 minutos con clock source single. Logs confirman SET_CUR al clock selector efectivo.
+- [ ] Pendiente largo: un device UAC1 sigue funcionando sin regresiones tras los cambios (no debe intentar `selectClockSource`).
 - [ ] Preset `DRIFT_STABILITY` pasa en al menos 2 devices del allowlist.
 
 ---
@@ -438,4 +459,10 @@ Commit messages sugeridos:
 
 ## 8. Siguiente etapa
 
-Antes de pasar a [stage_04_mixing_routing.md](stage_04_mixing_routing.md), cerrar el clock graph real (`UsbClockGraph`), selector CUR, métricas de drift/jitter y comportamiento adaptive/bInterval. El trabajo ya iniciado de `RANGE` y SET_CUR por clock source reduce el alcance restante, pero Stage 4 no debería arrancar hasta que esos puntos estén validados en hardware.
+Stage 4 puede entrar en planificación con [stage_04_mixing_routing.md](stage_04_mixing_routing.md). No implementar todavía `SplitBackend`, resize atómico de ring buffers, per-channel volume ni routing matrix sin revisar alcance, porque Stage 4 cambia superficie de backend y API pública.
+
+Antes de implementación Stage 4, confirmar:
+
+- Alcance mínimo compatible con NoisyPad.
+- Evidencia adicional de drift/jitter si el nuevo routing depende de clock reconciliation.
+- Si el resize atómico de ring buffer debe ir primero por estabilidad antes de routing/mixing.

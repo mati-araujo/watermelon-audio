@@ -51,6 +51,7 @@ add_executable(usb_tests
     test_snapshot_codec.cpp
     test_clock_range_parser.cpp
     test_clock_graph.cpp
+    test_usb_iso_timing.cpp
     ${USB_TESTED_SOURCES}
 )
 
