@@ -9,6 +9,7 @@ import com.watermellonstudios.audio.api.NativeEffectSnapshot
 import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
+import com.watermellonstudios.audio.domain.usb.StreamPreference
 import com.watermellonstudios.audio.internal.native.NativeLibraryLoader
 import com.watermellonstudios.audio.internal.optimization.EffectParameterUpdate
 import com.watermellonstudios.audio.internal.optimization.JniMetrics
@@ -1664,7 +1665,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Set secondary oscillator type.
      */
-    override fun setSecondaryOscillatorType(typeId: Int) = nativeSetSecondaryOscillatorType(typeId)
+    override fun setSecondaryOscillatorType(type: Int) = nativeSetSecondaryOscillatorType(type)
 
     /**
      * Check if dual touch mode is enabled.
@@ -1676,7 +1677,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Enable or disable the polyphonic voice system.
      */
-    override fun enableVoiceSystem(enable: Boolean) = nativeEnableVoiceSystem(enable)
+    override fun enableVoiceSystem(enabled: Boolean) = nativeEnableVoiceSystem(enabled)
 
     /**
      * Check if voice system is enabled.
@@ -1701,7 +1702,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Set voice stealing strategy.
      */
-    override fun setVoiceStealingStrategy(strategy: Int) = nativeSetVoiceStealingStrategy(strategy)
+    override fun setVoiceStealingStrategy(strategyId: Int) = nativeSetVoiceStealingStrategy(strategyId)
 
     // ==================== Chord Operations (Phase 9C) ====================
 
@@ -1964,7 +1965,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Set whether to use BackendManager for audio output.
      */
-    override fun setUseBackendManager(use: Boolean) = nativeSetUseBackendManager(use)
+    override fun setUseBackendManager(useBackendManager: Boolean) = nativeSetUseBackendManager(useBackendManager)
 
     /**
      * Select audio backend.
@@ -2184,6 +2185,24 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun getUsbCapabilitySnapshot(): ByteArray? = nativeGetUsbCapabilitySnapshot()
 
     /**
+     * Set the USB stream preference used by native altsetting selection.
+     * Takes effect on the next USB start.
+     */
+    fun setUsbStreamPreference(preference: StreamPreference): Boolean =
+        nativeSetUsbStreamPreference(
+            preference.preferredSampleRate,
+            preference.minChannels,
+            preference.requireFeedback,
+            preference.profile.ordinal
+        )
+
+    /**
+     * Select a playback altsetting+format to apply on the next USB start.
+     */
+    fun selectUsbAltsetting(interfaceNumber: Int, alternateSetting: Int, formatIndex: Int): Boolean =
+        nativeSelectUsbAltsetting(interfaceNumber, alternateSetting, formatIndex)
+
+    /**
      * Check if USB device was disconnected.
      */
     fun isUsbDeviceDisconnected(): Boolean = nativeIsUsbDeviceDisconnected()
@@ -2277,6 +2296,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeUsbDeviceHasCapture(): Boolean
     private external fun nativeGetUsbDeviceUacVersion(): Int
     private external fun nativeGetUsbCapabilitySnapshot(): ByteArray?
+    private external fun nativeSetUsbStreamPreference(
+        preferredSampleRate: Int,
+        minChannels: Int,
+        requireFeedback: Boolean,
+        profile: Int
+    ): Boolean
+    private external fun nativeSelectUsbAltsetting(interfaceNumber: Int, alternateSetting: Int, formatIndex: Int): Boolean
     private external fun nativeIsUsbDeviceDisconnected(): Boolean
     private external fun nativeGetUsbHealthStatus(): IntArray?
     private external fun nativeFallbackToOboeBackend()

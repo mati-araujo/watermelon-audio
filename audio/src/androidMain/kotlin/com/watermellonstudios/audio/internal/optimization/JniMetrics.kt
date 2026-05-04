@@ -152,7 +152,7 @@ object JniMetrics {
  * nativeSetParameter(index, paramId, value).measuredAs("setParameter")
  * ```
  */
-inline fun <T> T.measuredAs(operation: String, durationNs: Long): T {
+fun <T> T.measuredAs(operation: String, durationNs: Long): T {
     JniMetrics.recordCall(operation, durationNs)
     return this
 }

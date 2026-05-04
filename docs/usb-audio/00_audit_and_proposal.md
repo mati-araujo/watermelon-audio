@@ -1,8 +1,9 @@
 # USB Audio Backend — Auditoría, propuesta y roadmap
 
 **Proyecto:** `watermelon-audio` (Watermelon Studios)
-**Versión del documento:** 1.1 — 2026-04-11
+**Versión del documento:** 1.2 — 2026-04-30
 **Estado de la etapa 1:** MERGED en v1.2.2. Los tres defectos críticos originales (sample rate negotiation, feedback endpoint UAC1, DSP thread polling) están corregidos. La validación hardware reveló 5 bugs adicionales (3 regresiones de stage 1 + 2 pre-existentes) todos resueltos en v1.1.1–v1.2.2. Ver `stage_01_foundations.md` para detalles.
+**Estado relevado el 2026-04-30:** Stage 1 está integrado y compila. Stage 2 tiene el core implementado (`formats`, `AltsettingSelector`, snapshot JNI/Kotlin y tests host), pero la API pública de selección todavía está incompleta. Stage 3 ya empezó parcialmente (`RANGE` real de clock sources y SET_CUR por clock source resuelto desde terminales), aunque faltan `UsbClockGraph`, clock selectors/multipliers, soporte real de adaptive/bInterval y observabilidad de drift/jitter.
 **Alcance:** `audio/src/main/cpp/backends/{LibusbBackend, BackendManager, ClockController, OboeBackend}`, `audio/src/main/cpp/usb/*`, `audio/src/main/cpp/jni/jni_usb.cpp`, `audio/src/androidMain/kotlin/.../internal/usb/*`, `audio/src/commonMain/kotlin/.../{api/IUsbAudioManager, domain/usb/*}`.
 
 ---
@@ -445,7 +446,7 @@ Al finalizar la etapa 7:
 
 **¿Cuál es el criterio de "listo"?** ≤ 10 ms round-trip medido en Scarlett Solo + Pixel 6+ tras la etapa 5, y ≤ 5 ms en Pixel 8+ tras la etapa 7. Device matrix ≥ 25 devices. 0 underruns en stress 30 min con buffer 64.
 
-**Siguiente paso.** Stage 1 está mergeada. Ver §10 para los glitches pendientes y la etapa óptima donde cada uno aterriza.
+**Siguiente paso.** Cerrar el remanente de Stage 2 (API pública de ranking/override y propagación real de `StreamPreference` a native), validar hardware con CM720 headset vs sin headset, y continuar Stage 3 sobre el clock graph real. Ver §10 y §11 para los glitches pendientes y la prioridad actualizada.
 
 ---
 
@@ -514,4 +515,74 @@ Etapa 6 (Test harness) ─── Puede ejecutarse en paralelo con 2/3 para
                             las 3 regresiones de stage 1
 ```
 
-La recomendación es ejecutar **Stage 2 → Stage 3 en secuencia** como próximo bloque de trabajo, intercalando Stage 6 si hay tiempo. Stages 4, 5 y 7 quedan para después de que el clock sync esté estable.
+La recomendación actualizada es cerrar primero el **remanente de Stage 2** (API pública y validación hardware), continuar inmediatamente con el **núcleo faltante de Stage 3** (`UsbClockGraph`, selectors/multipliers, adaptive/bInterval y métricas), e intercalar Stage 6 para cubrir los gaps de regresión revelados por Stage 1. Stages 4, 5 y 7 quedan para después de que el clock sync esté estable.
+
+---
+
+## 11. Estado real relevado — 2026-04-30
+
+Esta sección registra el estado observado directamente en el código y en la verificación local del 2026-04-30.
+
+### 11.1 Evidencia verificada
+
+- **Build Android/C++:** `./gradlew :audio:assembleDebug` pasó correctamente, incluyendo CMake para `x86`, `x86_64`, `arm64-v8a` y `armeabi-v7a`.
+- **Kotlin Android:** `./gradlew :audio:compileDebugKotlin` pasó correctamente.
+- **Suite host USB:** `audio/src/main/cpp/usb/tests/build/Debug/usb_tests.exe` pasó 50/50 tests.
+- **Warnings pendientes:** Gradle avisa que `org.jetbrains.kotlin.multiplatform` ya no será compatible con `com.android.library` desde AGP 9.0+; conviene planificar migración a `com.android.kotlin.multiplatform.library`.
+
+### 11.2 Stage 1 — cerrado en código
+
+Confirmado en código:
+
+- `LibusbBackend::configureSampleRate()` implementa SET_CUR/GET_CUR UAC1 y UAC2.
+- `UsbTransferManager` recibe versión UAC explícita y usa 3 bytes para UAC1 / 4 bytes para UAC2.
+- `setFeedbackEnabled()` valida que el endpoint sea isochronous IN con usage feedback antes de activar transfer dedicado.
+- `LibusbBackend::dspThreadFunc()` usa wake event-driven vía `std::counting_semaphore` para el loop normal.
+- `RATE_NEGOTIATION_SWEEP` existe en `UsbAudioTestRunner`.
+
+Riesgo residual:
+
+- La validación host no reemplaza hardware. Los bugs de layout iso y formatos asimétricos de Stage 1 demostraron que hace falta seguir validando en devices reales.
+
+### 11.3 Stage 2 — core integrado, API incompleta
+
+Implementado:
+
+- `UsbStreamingInterface` usa `std::vector<UsbAudioFormat> formats`.
+- `AltsettingSelector` y `StreamPreference` existen y están integrados en `LibusbBackend::selectBestInterfaces()`.
+- `mSelectedPlaybackFormat` / `mSelectedCaptureFormat` preservan el formato elegido dentro del altsetting.
+- `UsbSnapshotCodec` C++ y `UsbSnapshotCodec` Kotlin existen; `nativeGetUsbCapabilitySnapshot()` está expuesto y `UsbAudioManagerImpl` lo consume como camino primario, con fallback legacy.
+- Tests host cubren selector, snapshot codec, parser de feedback y helpers de sample rate.
+
+Pendiente para cerrar Stage 2:
+
+- `IUsbAudioManager` aún no expone `rankPlaybackAltsettings(...)`, `selectAltsetting(...)` ni `currentCapabilitySnapshot: StateFlow<UsbCapabilitySnapshot?>`; hoy expone `getCurrentCapabilitySnapshot()` y `setStreamPreference(...)`.
+- `UsbAudioManagerImpl.setStreamPreference()` guarda `_currentStreamPreference`, pero la preferencia no se propaga a JNI/native antes de `backend->start()`.
+- No hay override manual de `(interfaceNumber, alternateSetting, formatIndex)` aplicado al siguiente `startStreaming()`.
+- `bInterval` se parsea en C++, pero no viaja en el snapshot ni participa en el timing.
+- Falta validación hardware documentada de `DISCOVERY_WALK`/snapshot en CM720 con headset, CM720 sin headset, UAC1 C-Media/GHW y Scarlett.
+
+### 11.4 Stage 3 — iniciado parcialmente
+
+Implementado o iniciado:
+
+- `ClockSourceRangeParser.h` decodifica respuestas UAC2 `RANGE`.
+- `LibusbBackend::populateClockSourceRates()` consulta `RANGE` real por clock source después de claim del AudioControl interface.
+- `configureSampleRate()` ya intenta resolver clock source desde `terminalLink` y aplicar SET_CUR a los clocks relevantes, no solo a `clockSources.front()`.
+- El camino UAC2 hace GET_CUR previo y evita SET_CUR redundante cuando el clock ya está en el rate pedido.
+
+Pendiente crítico:
+
+- No existe aún `UsbClockGraph`; `resolveClockSourceId()` devuelve el `bCSourceID` del terminal, pero no navega selectors/multipliers hasta un source final.
+- `Clock Selector CUR` todavía no está implementado. Devices con selector real pueden quedar usando una fuente no deseada.
+- Falta soporte diferenciado para Async vs Adaptive vs Synchronous. El `ClockController` sigue centrado en feedback/PID; adaptive output sin feedback sigue siendo el sospechoso principal de clicks UAC1.
+- `bInterval` no afecta `framesPerPacket`, pacing ni diagnóstico.
+- Drift/jitter no están expuestos como API tipada; hay arrays de profiling, pero no `healthEvents` ni campos claros en `UsbTransferStats`.
+
+### 11.5 Próximo bloque recomendado
+
+1. Cerrar Stage 2 API: `rankPlaybackAltsettings`, `selectAltsetting`, `StateFlow` de snapshot y propagación JNI de `StreamPreference`.
+2. Capturar snapshots/logs CM720 con auriculares+mic y sin ellos; comparar altsettings, endpoints, `wMaxPacketSize`, `bInterval`, capture interfaces y clock sources.
+3. Implementar `UsbClockGraph` mínimo: terminal → selector/multiplier → source, con tests de topologías artificiales.
+4. Implementar `Clock Selector CUR` solo después de tener graph navegable.
+5. Añadir métricas tipadas: `driftPpm`, `effectiveSyncType`, `feedbackMode`, `dspP95/P99`, `clockSourceId`, `bInterval`.

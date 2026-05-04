@@ -1,8 +1,5 @@
 package com.watermellonstudios.audio.domain.usb
 
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-
 /**
  * Decodes a binary capability snapshot produced by the C++ UsbSnapshotCodec
  * (encodeSnapshot in UsbSnapshotCodec.h) into a [UsbCapabilitySnapshot].
@@ -13,50 +10,50 @@ import java.nio.ByteOrder
  */
 object UsbSnapshotCodec {
 
-    private const val FORMAT_VERSION: Byte = 0x01
+    private const val FORMAT_VERSION: Int = 0x01
 
     fun decode(bytes: ByteArray): UsbCapabilitySnapshot {
-        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val reader = SnapshotReader(bytes)
 
         // Version
-        val version = buf.get()
+        val version = reader.readU8()
         check(version == FORMAT_VERSION) {
             "Unknown snapshot format version: $version (expected $FORMAT_VERSION)"
         }
 
         // Total length (informational, we use buffer limit)
-        buf.getInt()  // skip
+        reader.readU32()  // skip
 
         // Device info
-        val vendorId = buf.getShort().toInt() and 0xFFFF
-        val productId = buf.getShort().toInt() and 0xFFFF
-        val uacVersion = buf.get().toInt() and 0xFF
-        val productName = readString(buf)
-        val manufacturer = readString(buf)
-        val serialNumber = readString(buf)
+        val vendorId = reader.readU16()
+        val productId = reader.readU16()
+        val uacVersion = reader.readU8()
+        val productName = reader.readString()
+        val manufacturer = reader.readString()
+        val serialNumber = reader.readString()
 
         // Playback altsettings
-        val numPlayback = buf.getShort().toInt() and 0xFFFF
-        val playbackAlts = (0 until numPlayback).map { readAltsetting(buf) }
+        val numPlayback = reader.readU16()
+        val playbackAlts = (0 until numPlayback).map { readAltsetting(reader) }
 
         // Capture altsettings
-        val numCapture = buf.getShort().toInt() and 0xFFFF
-        val captureAlts = (0 until numCapture).map { readAltsetting(buf) }
+        val numCapture = reader.readU16()
+        val captureAlts = (0 until numCapture).map { readAltsetting(reader) }
 
         // Clock sources (stage 3: now carries sample rate list from RANGE query)
-        val numClocks = buf.get().toInt() and 0xFF
+        val numClocks = reader.readU8()
         val clockSources = (0 until numClocks).map {
-            val clockId = buf.get().toInt() and 0xFF
-            val type = ClockSourceType.fromId(buf.get().toInt() and 0xFF)
-            val syncedToSof = buf.get().toInt() != 0
-            val hasFreqControl = buf.get().toInt() != 0
-            val hasValidityControl = buf.get().toInt() != 0
+            val clockId = reader.readU8()
+            val type = ClockSourceType.fromId(reader.readU8())
+            val syncedToSof = reader.readU8() != 0
+            val hasFreqControl = reader.readU8() != 0
+            val hasValidityControl = reader.readU8() != 0
             // Stage 3: rates
-            val hasContinuous = buf.get().toInt() != 0
-            val minRate = buf.getInt()
-            val maxRate = buf.getInt()
-            val numRates = buf.get().toInt() and 0xFF
-            val rates = (0 until numRates).map { buf.getInt() }
+            val hasContinuous = reader.readU8() != 0
+            val minRate = reader.readU32()
+            val maxRate = reader.readU32()
+            val numRates = reader.readU8()
+            val rates = (0 until numRates).map { reader.readU32() }
             ClockSourceInfo(
                 clockId = clockId,
                 type = type,
@@ -71,8 +68,8 @@ object UsbSnapshotCodec {
         }
 
         // Feature units
-        val numFUs = buf.get().toInt() and 0xFF
-        val featureUnits = (0 until numFUs).map { readFeatureUnit(buf) }
+        val numFUs = reader.readU8()
+        val featureUnits = (0 until numFUs).map { readFeatureUnit(reader) }
 
         return UsbCapabilitySnapshot(
             vendorId = vendorId,
@@ -88,21 +85,13 @@ object UsbSnapshotCodec {
         )
     }
 
-    private fun readString(buf: ByteBuffer): String {
-        val len = buf.getShort().toInt() and 0xFFFF
-        if (len == 0) return ""
-        val bytes = ByteArray(len)
-        buf.get(bytes)
-        return String(bytes, Charsets.UTF_8)
-    }
-
-    private fun readAltsetting(buf: ByteBuffer): AltsettingInfo {
-        val ifNum = buf.get().toInt() and 0xFF
-        val altNum = buf.get().toInt() and 0xFF
-        val syncTypeRaw = buf.get().toInt() and 0xFF
-        val flags = buf.get().toInt() and 0xFF
-        val epAddress = buf.get().toInt() and 0xFF
-        val termLink = buf.get().toInt() and 0xFF
+    private fun readAltsetting(reader: SnapshotReader): AltsettingInfo {
+        val ifNum = reader.readU8()
+        val altNum = reader.readU8()
+        val syncTypeRaw = reader.readU8()
+        val flags = reader.readU8()
+        val epAddress = reader.readU8()
+        val termLink = reader.readU8()
 
         val syncMode = when (syncTypeRaw) {
             0x01 -> UsbSyncMode.ASYNCHRONOUS
@@ -111,8 +100,8 @@ object UsbSnapshotCodec {
             else -> UsbSyncMode.UNKNOWN
         }
 
-        val numFormats = buf.get().toInt() and 0xFF
-        val formats = (0 until numFormats).map { readFormat(buf) }
+        val numFormats = reader.readU8()
+        val formats = (0 until numFormats).map { readFormat(reader) }
 
         return AltsettingInfo(
             interfaceNumber = ifNum,
@@ -126,15 +115,15 @@ object UsbSnapshotCodec {
         )
     }
 
-    private fun readFormat(buf: ByteBuffer): AudioFormatInfo {
-        val channels = buf.get().toInt() and 0xFF
-        val bitRes = buf.get().toInt() and 0xFF
-        val bytesPerSample = buf.get().toInt() and 0xFF
-        val hasContinuous = buf.get().toInt() != 0
-        val minRate = buf.getInt()
-        val maxRate = buf.getInt()
-        val numRates = buf.get().toInt() and 0xFF
-        val rates = (0 until numRates).map { buf.getInt() }
+    private fun readFormat(reader: SnapshotReader): AudioFormatInfo {
+        val channels = reader.readU8()
+        val bitRes = reader.readU8()
+        val bytesPerSample = reader.readU8()
+        val hasContinuous = reader.readU8() != 0
+        val minRate = reader.readU32()
+        val maxRate = reader.readU32()
+        val numRates = reader.readU8()
+        val rates = (0 until numRates).map { reader.readU32() }
 
         return AudioFormatInfo(
             channels = channels,
@@ -147,17 +136,17 @@ object UsbSnapshotCodec {
         )
     }
 
-    private fun readFeatureUnit(buf: ByteBuffer): FeatureUnitInfo {
-        val unitId = buf.get().toInt() and 0xFF
-        val sourceId = buf.get().toInt() and 0xFF
-        val numChannels = buf.get().toInt() and 0xFF
-        val masterFlags = buf.get().toInt() and 0xFF
-        val numCh = buf.get().toInt() and 0xFF
+    private fun readFeatureUnit(reader: SnapshotReader): FeatureUnitInfo {
+        val unitId = reader.readU8()
+        val sourceId = reader.readU8()
+        val numChannels = reader.readU8()
+        val masterFlags = reader.readU8()
+        val numCh = reader.readU8()
 
         val perChVolume = mutableListOf<Boolean>()
         val perChMute = mutableListOf<Boolean>()
         for (i in 0 until numCh) {
-            val chFlags = buf.get().toInt() and 0xFF
+            val chFlags = reader.readU8()
             perChVolume.add((chFlags and 0x01) != 0)
             perChMute.add((chFlags and 0x02) != 0)
         }
@@ -171,5 +160,43 @@ object UsbSnapshotCodec {
             perChannelVolume = perChVolume,
             perChannelMute = perChMute,
         )
+    }
+
+    private class SnapshotReader(private val bytes: ByteArray) {
+        private var position = 0
+
+        fun readU8(): Int {
+            requireRemaining(1)
+            return bytes[position++].toInt() and 0xFF
+        }
+
+        fun readU16(): Int {
+            val b0 = readU8()
+            val b1 = readU8()
+            return b0 or (b1 shl 8)
+        }
+
+        fun readU32(): Int {
+            val b0 = readU8()
+            val b1 = readU8()
+            val b2 = readU8()
+            val b3 = readU8()
+            return b0 or (b1 shl 8) or (b2 shl 16) or (b3 shl 24)
+        }
+
+        fun readString(): String {
+            val length = readU16()
+            if (length == 0) return ""
+            requireRemaining(length)
+            val value = bytes.copyOfRange(position, position + length).decodeToString()
+            position += length
+            return value
+        }
+
+        private fun requireRemaining(count: Int) {
+            require(position + count <= bytes.size) {
+                "Truncated USB capability snapshot at byte $position"
+            }
+        }
     }
 }

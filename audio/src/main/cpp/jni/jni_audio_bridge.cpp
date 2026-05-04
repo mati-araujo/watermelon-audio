@@ -1753,6 +1753,58 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
 }
 
 JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsbStreamPreference(
+    JNIEnv* env, jobject thiz, jint preferredSampleRate, jint minChannels,
+    jboolean requireFeedback, jint profile) {
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    auto* backend = manager.getLibusbBackend();
+    if (!backend) {
+        LOGW("nativeSetUsbStreamPreference: no LibusbBackend");
+        return JNI_FALSE;
+    }
+
+    watermelon_audio::usb::StreamPreference pref;
+    switch (profile) {
+        case 1:
+            pref = watermelon_audio::usb::StreamPreference::lowestLatency();
+            break;
+        case 2:
+            pref = watermelon_audio::usb::StreamPreference::highestFidelity();
+            break;
+        default:
+            pref = watermelon_audio::usb::StreamPreference::defaultPro();
+            break;
+    }
+    pref.requiredSampleRate = static_cast<int>(preferredSampleRate);
+    pref.minChannels = std::max(1, static_cast<int>(minChannels));
+    pref.requireFeedback = (requireFeedback == JNI_TRUE);
+    pref.skipRateCheck = false;
+
+    backend->setStreamPreference(pref);
+    LOGI("nativeSetUsbStreamPreference: rate=%d minCh=%d requireFeedback=%d profile=%d",
+         pref.requiredSampleRate, pref.minChannels,
+         pref.requireFeedback ? 1 : 0, profile);
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelectUsbAltsetting(
+    JNIEnv* env, jobject thiz, jint interfaceNumber, jint alternateSetting,
+    jint formatIndex) {
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    auto* backend = manager.getLibusbBackend();
+    if (!backend) {
+        LOGW("nativeSelectUsbAltsetting: no LibusbBackend");
+        return JNI_FALSE;
+    }
+    const bool ok = backend->selectAltsetting(
+        static_cast<int>(interfaceNumber),
+        static_cast<int>(alternateSetting),
+        static_cast<int>(formatIndex));
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsbDeviceDisconnected(
     JNIEnv* env, jobject thiz) {
     auto& manager = watermelon_audio::BackendManager::getInstance();

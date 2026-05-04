@@ -310,7 +310,36 @@ bool LibusbBackend::selectBestInterfaces() {
     // Playback
     if (needsPlayback && !mUsbDevice->playbackInterfaces.empty()) {
         logAltsettings("playback", mUsbDevice->playbackInterfaces);
-        auto match = usb::AltsettingSelector::pickPlayback(*mUsbDevice, pref);
+        std::optional<usb::ScoredMatch> match;
+        if (mManualPlaybackSelection) {
+            const auto& manual = *mManualPlaybackSelection;
+            auto altIt = std::find_if(
+                mUsbDevice->playbackInterfaces.begin(),
+                mUsbDevice->playbackInterfaces.end(),
+                [&](const usb::UsbStreamingInterface& iface) {
+                    return iface.interfaceNumber == manual.interfaceNumber &&
+                           iface.alternateSetting == manual.alternateSetting;
+                });
+            if (altIt != mUsbDevice->playbackInterfaces.end() &&
+                manual.formatIndex >= 0 &&
+                manual.formatIndex < static_cast<int>(altIt->formats.size())) {
+                match = usb::ScoredMatch{
+                    &(*altIt),
+                    &altIt->formats[static_cast<size_t>(manual.formatIndex)],
+                    0.0f
+                };
+                LOGI("Using manual playback selection: IF%d Alt%d formatIndex=%d",
+                     manual.interfaceNumber, manual.alternateSetting,
+                     manual.formatIndex);
+            } else {
+                LOGE("Manual playback selection invalid: IF%d Alt%d formatIndex=%d",
+                     manual.interfaceNumber, manual.alternateSetting,
+                     manual.formatIndex);
+                return false;
+            }
+        } else {
+            match = usb::AltsettingSelector::pickPlayback(*mUsbDevice, pref);
+        }
         if (match) {
             mSelectedPlayback = *match->altsetting;
             mSelectedPlaybackFormat = *match->format;
@@ -391,6 +420,51 @@ bool LibusbBackend::selectBestInterfaces() {
     }
 
     return success;
+}
+
+bool LibusbBackend::selectAltsetting(
+    int interfaceNumber,
+    int alternateSetting,
+    int formatIndex) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mIsRunning.load()) {
+        LOGW("selectAltsetting rejected while stream is running");
+        return false;
+    }
+    if (!mUsbDevice) {
+        LOGW("selectAltsetting rejected: no parsed USB device");
+        return false;
+    }
+    auto altIt = std::find_if(
+        mUsbDevice->playbackInterfaces.begin(),
+        mUsbDevice->playbackInterfaces.end(),
+        [&](const usb::UsbStreamingInterface& iface) {
+            return iface.interfaceNumber == interfaceNumber &&
+                   iface.alternateSetting == alternateSetting;
+        });
+    if (altIt == mUsbDevice->playbackInterfaces.end()) {
+        LOGW("selectAltsetting rejected: playback IF%d Alt%d not found",
+             interfaceNumber, alternateSetting);
+        return false;
+    }
+    if (formatIndex < 0 ||
+        formatIndex >= static_cast<int>(altIt->formats.size())) {
+        LOGW("selectAltsetting rejected: IF%d Alt%d formatIndex=%d out of range (formats=%zu)",
+             interfaceNumber, alternateSetting, formatIndex,
+             altIt->formats.size());
+        return false;
+    }
+
+    mManualPlaybackSelection = ManualAltsettingSelection{
+        interfaceNumber,
+        alternateSetting,
+        formatIndex
+    };
+    const auto& fmt = altIt->formats[static_cast<size_t>(formatIndex)];
+    LOGI("Manual playback altsetting queued: IF%d Alt%d formatIndex=%d (%dch/%dbit)",
+         interfaceNumber, alternateSetting, formatIndex,
+         fmt.channels, fmt.bitResolution);
+    return true;
 }
 
 bool LibusbBackend::claimControlInterface() {

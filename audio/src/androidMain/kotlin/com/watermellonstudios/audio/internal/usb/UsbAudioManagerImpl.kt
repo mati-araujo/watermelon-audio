@@ -57,6 +57,10 @@ internal class UsbAudioManagerImpl(
     private val _connectionState = MutableStateFlow(UsbConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<UsbConnectionState> = _connectionState.asStateFlow()
 
+    private val _currentCapabilitySnapshot = MutableStateFlow<UsbCapabilitySnapshot?>(null)
+    override val currentCapabilitySnapshot: StateFlow<UsbCapabilitySnapshot?> =
+        _currentCapabilitySnapshot.asStateFlow()
+
     private val _deviceEvents = MutableSharedFlow<UsbDeviceEvent>(
         replay = 0,
         extraBufferCapacity = 16
@@ -334,6 +338,8 @@ internal class UsbAudioManagerImpl(
             currentUsbfsPath = null
 
             _selectedDevice.value = null
+            _currentCapabilitySnapshot.value = null
+            _selectedAltsetting = null
             _connectionState.value = UsbConnectionState.DISCONNECTED
 
             device?.let {
@@ -478,7 +484,11 @@ internal class UsbAudioManagerImpl(
      * Current capability snapshot from the native parser.
      * Populated when parseCapabilities() successfully decodes the snapshot.
      */
-    private var _currentSnapshot: UsbCapabilitySnapshot? = null
+    private var _currentSnapshot: UsbCapabilitySnapshot?
+        get() = _currentCapabilitySnapshot.value
+        set(value) {
+            _currentCapabilitySnapshot.value = value
+        }
 
     /**
      * Parse capabilities by trying the native snapshot first, falling back
@@ -580,16 +590,148 @@ internal class UsbAudioManagerImpl(
         }
     }
 
+    override fun rankPlaybackAltsettings(preference: StreamPreference): List<ScoredAltsetting> {
+        val snapshot = getCurrentCapabilitySnapshot() ?: return emptyList()
+        return snapshot.playbackAltsettings.flatMap { alt ->
+            alt.formats.mapIndexedNotNull { index, format ->
+                if (!passesHardConstraints(snapshot, alt, format, preference)) {
+                    null
+                } else {
+                    val score = scoreAltsetting(alt, format, preference)
+                    ScoredAltsetting(
+                        altsetting = alt,
+                        format = format,
+                        formatIndex = index,
+                        score = score,
+                        recommendation = recommendationFor(alt, format, score)
+                    )
+                }
+            }
+        }.sortedWith(
+            compareByDescending<ScoredAltsetting> { it.score }
+                .thenBy { it.altsetting.alternateSetting }
+                .thenBy { it.formatIndex }
+        )
+    }
+
+    override suspend fun selectAltsetting(
+        interfaceNumber: Int,
+        alternateSetting: Int,
+        formatIndex: Int,
+    ): UsbResult<Unit> {
+        if (formatIndex < 0) {
+            return UsbResult.Failure(UsbAudioError.UNSUPPORTED_FORMAT, "formatIndex must be >= 0")
+        }
+        val snapshot = getCurrentCapabilitySnapshot()
+            ?: return UsbResult.Failure(UsbAudioError.DESCRIPTOR_PARSE_ERROR, "No capability snapshot available")
+        val alt = snapshot.playbackAltsettings.firstOrNull {
+            it.interfaceNumber == interfaceNumber && it.alternateSetting == alternateSetting
+        } ?: return UsbResult.Failure(
+            UsbAudioError.UNSUPPORTED_FORMAT,
+            "Playback IF$interfaceNumber Alt$alternateSetting not found"
+        )
+        if (formatIndex !in alt.formats.indices) {
+            return UsbResult.Failure(
+                UsbAudioError.UNSUPPORTED_FORMAT,
+                "Format index $formatIndex not found for IF$interfaceNumber Alt$alternateSetting"
+            )
+        }
+
+        return withContext(Dispatchers.IO) {
+            val applied = nativeBridge.selectUsbAltsetting(interfaceNumber, alternateSetting, formatIndex)
+            if (applied) {
+                _selectedAltsetting = SelectedAltsetting(interfaceNumber, alternateSetting, formatIndex)
+                UsbResult.Success(Unit)
+            } else {
+                UsbResult.Failure(
+                    UsbAudioError.UNSUPPORTED_FORMAT,
+                    "Native backend rejected IF$interfaceNumber Alt$alternateSetting format $formatIndex"
+                )
+            }
+        }
+    }
+
     override fun setStreamPreference(preference: StreamPreference) {
         Log.i(TAG, "Stream preference set: profile=${preference.profile}, " +
             "rate=${preference.preferredSampleRate}, minCh=${preference.minChannels}")
-        // The preference is stored for the next startStreaming call.
-        // The native side is configured via LibusbBackend::setStreamPreference()
-        // which is called from the JNI startStreaming path.
         _currentStreamPreference = preference
     }
 
     private var _currentStreamPreference: StreamPreference? = null
+    private var _selectedAltsetting: SelectedAltsetting? = null
+
+    private data class SelectedAltsetting(
+        val interfaceNumber: Int,
+        val alternateSetting: Int,
+        val formatIndex: Int,
+    )
+
+    private fun passesHardConstraints(
+        snapshot: UsbCapabilitySnapshot,
+        alt: AltsettingInfo,
+        format: AudioFormatInfo,
+        preference: StreamPreference,
+    ): Boolean {
+        if (format.channels <= 0 || format.bitResolution <= 0) return false
+        if (format.channels < preference.minChannels) return false
+        if (preference.requireFeedback && !alt.hasFeedbackEndpoint) return false
+        if (snapshot.uacVersion != 2 &&
+            preference.preferredSampleRate > 0 &&
+            format.sampleRates.isNotEmpty() &&
+            preference.preferredSampleRate !in format.sampleRates
+        ) {
+            return false
+        }
+        return true
+    }
+
+    private fun scoreAltsetting(
+        alt: AltsettingInfo,
+        format: AudioFormatInfo,
+        preference: StreamPreference,
+    ): Double {
+        val weights = when (preference.profile) {
+            StreamPreference.Profile.LOWEST_LATENCY -> Weights(bitDepth = 0.3, channels = 0.5, sync = 0.5, feedback = 0.0)
+            StreamPreference.Profile.HIGHEST_FIDELITY -> Weights(bitDepth = 1.5, channels = 0.8, sync = 0.8, feedback = 0.3)
+            else -> Weights(bitDepth = 1.0, channels = 0.5, sync = 1.0, feedback = 0.3)
+        }
+        return weights.bitDepth * normalize(format.bitResolution.toDouble(), 16.0, 32.0) +
+            weights.channels * normalize(format.channels.toDouble(), 1.0, 8.0) +
+            weights.sync * syncScore(alt.syncType) +
+            if (alt.hasFeedbackEndpoint) weights.feedback else 0.0
+    }
+
+    private data class Weights(
+        val bitDepth: Double,
+        val channels: Double,
+        val sync: Double,
+        val feedback: Double,
+    )
+
+    private fun normalize(value: Double, low: Double, high: Double): Double {
+        if (high <= low) return 0.0
+        return ((value - low) / (high - low)).coerceIn(0.0, 1.0)
+    }
+
+    private fun syncScore(syncType: UsbSyncMode): Double = when (syncType) {
+        UsbSyncMode.ASYNCHRONOUS -> 1.0
+        UsbSyncMode.ADAPTIVE -> 0.5
+        UsbSyncMode.SYNCHRONOUS -> 0.25
+        UsbSyncMode.UNKNOWN -> 0.0
+    }
+
+    private fun recommendationFor(
+        alt: AltsettingInfo,
+        format: AudioFormatInfo,
+        score: Double,
+    ): String = buildString {
+        append("${format.channels}ch/${format.bitResolution}bit")
+        append(" ")
+        append(alt.syncType.displayName)
+        if (alt.hasFeedbackEndpoint) append(" feedback")
+        append(" score=")
+        append((score * 100.0).toInt() / 100.0)
+    }
 
     // ==================== Lifecycle ====================
 
@@ -879,6 +1021,17 @@ internal class UsbAudioManagerImpl(
 
         return withContext(Dispatchers.IO) {
             try {
+                val preference = (_currentStreamPreference ?: StreamPreference())
+                    .copy(preferredSampleRate = sampleRate)
+                nativeBridge.setUsbStreamPreference(preference)
+                _selectedAltsetting?.let {
+                    nativeBridge.selectUsbAltsetting(
+                        it.interfaceNumber,
+                        it.alternateSetting,
+                        it.formatIndex
+                    )
+                }
+
                 val success = nativeBridge.startUsbStreamingWithMode(
                     sampleRate,
                     channels,

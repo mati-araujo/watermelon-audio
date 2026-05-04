@@ -103,7 +103,6 @@ internal class ModeTransitionManagerImpl(
         val fromMode = when (currentState) {
             is ModeTransitionState.Idle -> currentState.currentMode
             is ModeTransitionState.Failed -> currentState.fromMode
-            else -> throw IllegalStateException("Invalid transition state")
         }
 
         // Already in target mode

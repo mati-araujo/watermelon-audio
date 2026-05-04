@@ -241,6 +241,12 @@ public:
     }
 
     /**
+     * Select a playback altsetting+format for the next start() call.
+     * Returns false if the parsed topology does not contain that tuple.
+     */
+    bool selectAltsetting(int interfaceNumber, int alternateSetting, int formatIndex);
+
+    /**
      * Set error callback for USB-specific errors.
      */
     using ErrorCallback = std::function<void(usb::UsbAudioError, const char*)>;
@@ -379,6 +385,13 @@ private:
 
     // User-provided stream preference for altsetting scoring.
     std::optional<usb::StreamPreference> mUserPreference;
+
+    struct ManualAltsettingSelection {
+        int interfaceNumber = -1;
+        int alternateSetting = -1;
+        int formatIndex = -1;
+    };
+    std::optional<ManualAltsettingSelection> mManualPlaybackSelection;
 
     // Transfer manager
     std::unique_ptr<usb::UsbTransferManager> mTransferManager;

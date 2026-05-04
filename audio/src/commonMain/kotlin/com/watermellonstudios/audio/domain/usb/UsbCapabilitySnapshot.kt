@@ -131,6 +131,14 @@ data class FeatureUnitInfo(
     val perChannelMute: List<Boolean>,
 )
 
+data class ScoredAltsetting(
+    val altsetting: AltsettingInfo,
+    val format: AudioFormatInfo,
+    val formatIndex: Int,
+    val score: Double,
+    val recommendation: String,
+)
+
 /**
  * Stream preference for altsetting selection.
  * Passed to the native selector to influence which altsetting is picked.

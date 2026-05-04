@@ -218,7 +218,27 @@ interface IUsbAudioManager {
      * Get the latest capability snapshot from the native USB descriptor parser.
      * Returns null if no device is connected or native parsing hasn't completed yet.
      */
+    val currentCapabilitySnapshot: StateFlow<UsbCapabilitySnapshot?>
+
+    /**
+     * Backward-compatible getter for callers that are not Flow-based yet.
+     * Prefer [currentCapabilitySnapshot] for reactive UI.
+     */
     fun getCurrentCapabilitySnapshot(): UsbCapabilitySnapshot?
+
+    /**
+     * Rank playback altsettings against the provided preference.
+     */
+    fun rankPlaybackAltsettings(preference: StreamPreference): List<ScoredAltsetting>
+
+    /**
+     * Select a specific playback altsetting+format for the next startStreaming() call.
+     */
+    suspend fun selectAltsetting(
+        interfaceNumber: Int,
+        alternateSetting: Int,
+        formatIndex: Int,
+    ): UsbResult<Unit>
 
     /**
      * Set the stream preference used for altsetting selection.
