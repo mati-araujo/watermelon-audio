@@ -1630,7 +1630,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
 
-    constexpr int STATS_SIZE = 13;
+    constexpr int STATS_SIZE = 19;
     jfloat statsArray[STATS_SIZE] = {0};
 
     if (backend) {
@@ -1649,6 +1649,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
             statsArray[10] = stats->ringBufferFillPct.load();
             statsArray[11] = 3840.0f;
             statsArray[12] = statsArray[1] * 192.0f;
+            statsArray[13] = stats->currentSampleRateHz.load();
+            statsArray[14] = stats->driftPpm.load();
+            statsArray[15] = stats->feedbackEffectiveFramesPerPacket.load();
+            statsArray[16] = static_cast<float>(stats->feedbackPacketsReceived.load());
+            statsArray[17] = static_cast<float>(stats->feedbackPacketsInvalid.load());
+            statsArray[18] = static_cast<float>(stats->activeClockSourceId.load());
         }
     }
 
@@ -1801,6 +1807,19 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelect
         static_cast<int>(interfaceNumber),
         static_cast<int>(alternateSetting),
         static_cast<int>(formatIndex));
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelectUsbClockSource(
+    JNIEnv* env, jobject thiz, jint clockSourceId) {
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    auto* backend = manager.getLibusbBackend();
+    if (!backend) {
+        LOGW("nativeSelectUsbClockSource: no LibusbBackend");
+        return JNI_FALSE;
+    }
+    const bool ok = backend->selectClockSource(static_cast<int>(clockSourceId));
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 

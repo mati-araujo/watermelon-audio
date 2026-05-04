@@ -78,6 +78,7 @@ data class AltsettingInfo(
     val hasImplicitFeedback: Boolean,
     val dataEndpointAddress: Int,
     val terminalLinkId: Int,
+    val endpointInterval: Int = 0,
 )
 
 data class AudioFormatInfo(

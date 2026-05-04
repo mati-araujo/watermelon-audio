@@ -247,6 +247,12 @@ public:
     bool selectAltsetting(int interfaceNumber, int alternateSetting, int formatIndex);
 
     /**
+     * Select a UAC2 clock source for the next start() call.
+     * The clock graph validates reachability per selected terminal at start.
+     */
+    bool selectClockSource(int clockSourceId);
+
+    /**
      * Set error callback for USB-specific errors.
      */
     using ErrorCallback = std::function<void(usb::UsbAudioError, const char*)>;
@@ -392,6 +398,8 @@ private:
         int formatIndex = -1;
     };
     std::optional<ManualAltsettingSelection> mManualPlaybackSelection;
+    std::atomic<int> mActiveClockSourceId{-1};
+    std::optional<int> mManualClockSourceId;
 
     // Transfer manager
     std::unique_ptr<usb::UsbTransferManager> mTransferManager;
@@ -428,6 +436,7 @@ private:
     bool selectBestInterfaces();
     bool configureSampleRate();
     uint8_t selectClockSourceForTerminal(uint8_t terminalLinkId);
+    void publishActiveClockSource(uint8_t clockSourceId);
 
     // Stage 3: query UAC2 clock sources for their supported sample rate ranges
     // via RANGE control transfers and populate mUsbDevice->clockSources rate

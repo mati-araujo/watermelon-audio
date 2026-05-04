@@ -1,11 +1,13 @@
 # Etapa 3 — Clock sync profesional
 
-**Estado:** PARCIALMENTE INICIADA — RANGE de clock sources y SET_CUR por clock source ya existen; falta clock graph completo, selectors/multipliers, adaptive/bInterval y observabilidad.
+**Estado:** AVANZADA — RANGE de clock sources, `UsbClockGraph`, selectors/multipliers, Clock Selector `CUR`, bInterval en snapshot/timing y observabilidad básica de clock health ya existen; falta validación prolongada de drift/jitter y pulir eventos/diagnóstico en más hardware.
 **Dependencias:** stages 1 y 2 mergeados. Necesita `UsbTopology` para navegar el clock graph y `configureSampleRate()` para aplicar la selección.
 **Duración estimada:** 3–4 días.
 **Severidad de los bugs que resuelve:** 1× Crítico + pulido del feedback end-to-end iniciado en stage 1.
 
-**Relevamiento 2026-04-30:** `ClockSourceRangeParser.h` existe y está testeado; `LibusbBackend::populateClockSourceRates()` consulta UAC2 `RANGE`; `configureSampleRate()` ya intenta resolver clocks desde los terminales seleccionados y evita SET_CUR redundante con GET_CUR previo. El documento todavía describe varias tareas como futuras porque faltan las piezas profesionales: `UsbClockGraph`, `Clock Selector CUR`, navegación de multipliers/selectors, soporte de adaptive output y exposición de drift/jitter como API.
+**Relevamiento 2026-04-30:** `ClockSourceRangeParser.h` existe y está testeado; `LibusbBackend::populateClockSourceRates()` consulta UAC2 `RANGE`; `configureSampleRate()` ya intenta resolver clocks desde los terminales seleccionados y evita SET_CUR redundante con GET_CUR previo.
+
+**Avance posterior:** `UsbClockGraph` navega terminales, selectors y multipliers hasta la fuente final; `LibusbBackend` aplica Clock Selector `CUR` cuando corresponde; `UsbTransferStats` expone sample rate medido, drift PPM, feedback counters y clock source activo; `UsbCapabilitySnapshot` serializa `bInterval`; el pacing nativo deriva `framesPerPacket` desde velocidad USB + `bInterval`. La validación de hardware de graph/selector fue reportada como pasada antes de avanzar estos puntos.
 
 ---
 
@@ -17,15 +19,15 @@ Problemas concretos resueltos:
 
 1. **Clock source selection UAC 2.0.** `UsbDescriptorParser` guarda los clock sources en `UsbTopology::clockSources` pero nadie los usa. Devices con múltiples fuentes (word clock externo, internal VCO, SPDIF in) no son controlables.
 2. **`queryClockSourceSampleRates` TODO stub** (`UsbDescriptorParser.cpp:894`). Los rates soportados por cada clock no se consultan vía `RANGE` request.
-3. **Clock selector nunca configurado.** Si hay un `UAC2_AC_CLOCK_SELECTOR`, la fuente actual se setea con `SET_CUR` al `CS_CX_CLOCK_SELECTOR_CONTROL` del selector. Hoy nadie lo hace.
-4. **Métricas de drift no observables desde Kotlin.** `ClockController::getDriftPpm()` existe, pero no se expone en `UsbTransferStats` ni como evento reactivo.
+3. **Clock selector nunca configurado.** Resuelto en el path de `LibusbBackend::configureSampleRate()`: el graph elige fuente final, consulta selector `GET_CUR` y aplica selector `SET_CUR` si es escribible.
+4. **Métricas de drift no observables desde Kotlin.** Parcialmente resuelto: `UsbTransferStats` expone drift/sample-rate/feedback counters/clock source activo y `IUsbAudioManager.healthEvents` emite drift/underrun/clock-source changes.
 
 Estado real de esos puntos al 2026-04-30:
 
 - El punto 2 está parcialmente resuelto fuera del parser: `LibusbBackend::populateClockSourceRates()` consulta `RANGE` y usa `ClockSourceRangeParser.h`.
 - El punto 1 está parcialmente resuelto para topologías simples: `configureSampleRate()` usa `resolveClockSourceId(terminalLink)` para elegir clock IDs. No navega todavía selectors/multipliers.
-- El punto 3 sigue pendiente: no hay `Clock Selector CUR`.
-- El punto 4 sigue pendiente: hay arrays de profiling y `ClockController::getDriftPpm()`, pero no API tipada ni eventos.
+- El punto 3 está implementado para la fuente default o seleccionada manualmente, con fallback no fatal si el selector es read-only o rechaza `SET_CUR`.
+- El punto 4 está implementado como observabilidad básica; quedan validación prolongada y refinamiento de thresholds/eventos.
 
 ---
 
@@ -382,14 +384,14 @@ Preset `DRIFT_STABILITY`: streaming continuo 5 minutos, monitorear `driftPpm` ca
 
 ## 5. Criterios de aceptación
 
-- [ ] `UsbClockGraph` implementado con tests de construcción y navegación.
+- [x] `UsbClockGraph` implementado con tests de construcción y navegación.
 - [ ] **Parcial:** `UsbControlRequests::getClockSourceRangeSampleRates()` implementado y testeado con mocks. Estado real: existe `ClockSourceRangeParser` + consulta directa en `LibusbBackend::populateClockSourceRates()`, pero no helper centralizado `UsbControlRequests`.
-- [ ] `UsbControlRequests::setClockSelectorCur()` implementado.
-- [ ] `LibusbBackend::selectClockSource()` funcional — en un device con selector, el pin correcto se escribe y GET_CUR devuelve el valor esperado.
-- [ ] **Parcial:** `configureSampleRate()` usa clock IDs resueltos desde playback/capture en UAC2. Falta `mActiveClockSourceId` explícito y falta navegar selectors/multipliers hasta un source final.
-- [ ] `UsbTransferStats` incluye `driftPpm`, `currentSampleRateHz`, `activeClockSourceId`, `feedbackPacketsReceived`, `feedbackPacketsInvalid`.
+- [x] Clock Selector `CUR` implementado en `LibusbBackend` con `GET_CUR`/`SET_CUR` directo; helper centralizado `UsbControlRequests` sigue diferido.
+- [x] `LibusbBackend::selectClockSource()` funcional para selección manual del próximo start; el graph valida reachability por terminal y hardware validation fue reportada como pasada.
+- [x] `configureSampleRate()` usa clock IDs finales resueltos por graph desde playback/capture en UAC2, incluyendo selectors/multipliers.
+- [x] `UsbTransferStats` incluye `driftPpm`, `currentSampleRateHz`, `activeClockSourceId`, `feedbackPacketsReceived`, `feedbackPacketsInvalid`.
 - [ ] **Parcial:** `UsbCapabilitySnapshot.ClockSourceInfo.sampleRateRanges` poblado en UAC2. Estado real: se serializan sample rates/min/max/continuous; falta modelar rangos completos y graph.
-- [ ] `IUsbAudioManager.healthEvents: Flow<UsbHealthEvent>` expuesto y operacional.
+- [x] `IUsbAudioManager.healthEvents: Flow<UsbHealthEvent>` expuesto y operacional desde el health loop Android.
 - [ ] Scarlett Solo 3rd Gen: drift sostenido < 50 PPM durante 10 minutos con clock source single. Logs confirman SET_CUR al clock selector efectivo.
 - [ ] Un device UAC1 sigue funcionando sin regresiones tras los cambios (no debe intentar `selectClockSource`).
 - [ ] Preset `DRIFT_STABILITY` pasa en al menos 2 devices del allowlist.

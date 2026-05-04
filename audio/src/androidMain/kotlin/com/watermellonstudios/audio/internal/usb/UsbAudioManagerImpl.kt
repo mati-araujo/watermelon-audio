@@ -67,6 +67,12 @@ internal class UsbAudioManagerImpl(
     )
     override val deviceEvents: SharedFlow<UsbDeviceEvent> = _deviceEvents.asSharedFlow()
 
+    private val _healthEvents = MutableSharedFlow<UsbHealthEvent>(
+        replay = 0,
+        extraBufferCapacity = 16
+    )
+    override val healthEvents: SharedFlow<UsbHealthEvent> = _healthEvents.asSharedFlow()
+
     // Current connection
     private var currentConnection: android.hardware.usb.UsbDeviceConnection? = null
     private var currentFileDescriptor: Int = -1
@@ -80,6 +86,10 @@ internal class UsbAudioManagerImpl(
     private var lastHealthyTime = 0L
     private var consecutiveUnhealthyChecks = 0
     private val maxUnhealthyChecksBeforeFallback = 3  // 3 seconds of unhealthy = fallback
+    private var lastHealthUnderruns = 0L
+    private var lastHealthSampleMs = 0L
+    private var lastHealthClockSourceId = -1
+    private var lastDriftSeverity = UsbHealthEvent.Severity.INFO
 
     // Permission request continuation
     private var permissionContinuation: CancellableContinuation<Boolean>? = null
@@ -657,6 +667,34 @@ internal class UsbAudioManagerImpl(
         _currentStreamPreference = preference
     }
 
+    override suspend fun selectClockSource(clockSourceId: Int): UsbResult<Unit> {
+        if (clockSourceId <= 0) {
+            return UsbResult.Failure(UsbAudioError.UNSUPPORTED_FORMAT, "clockSourceId must be > 0")
+        }
+        val snapshot = getCurrentCapabilitySnapshot()
+            ?: return UsbResult.Failure(UsbAudioError.DESCRIPTOR_PARSE_ERROR, "No capability snapshot available")
+        if (snapshot.uacVersion != 2) {
+            return UsbResult.Failure(UsbAudioError.UNSUPPORTED_FORMAT, "Clock source selection only applies to UAC2")
+        }
+        if (snapshot.clockSources.none { it.clockId == clockSourceId }) {
+            return UsbResult.Failure(
+                UsbAudioError.UNSUPPORTED_FORMAT,
+                "Clock source $clockSourceId not found"
+            )
+        }
+
+        return withContext(Dispatchers.IO) {
+            if (nativeBridge.selectUsbClockSource(clockSourceId)) {
+                UsbResult.Success(Unit)
+            } else {
+                UsbResult.Failure(
+                    UsbAudioError.INTERNAL_ERROR,
+                    "Native backend rejected clock source $clockSourceId"
+                )
+            }
+        }
+    }
+
     private var _currentStreamPreference: StreamPreference? = null
     private var _selectedAltsetting: SelectedAltsetting? = null
 
@@ -1116,12 +1154,14 @@ internal class UsbAudioManagerImpl(
             val bufferAdjustments = adaptiveStats?.getOrNull(8)?.toInt() ?: 0
 
             statsArray?.let { arr ->
-                // Extended stats array format (13 elements):
+                // Extended stats array format (19 elements):
                 // [0] packetsSubmitted, [1] packetsCompleted, [2] packetsErrors
                 // [3] underruns, [4] overruns
                 // [5] currentLatencyMs, [6] avgLatencyMs, [7] minLatencyMs, [8] maxLatencyMs
                 // [9] ringBufferLevel, [10] ringBufferFillPct, [11] ringBufferCapacity
                 // [12] bytesTransferred
+                // [13] currentSampleRateHz, [14] driftPpm, [15] feedbackEffectiveFramesPerPacket
+                // [16] feedbackPacketsReceived, [17] feedbackPacketsInvalid, [18] activeClockSourceId
                 if (arr.size >= 13) {
                     UsbTransferStats(
                         packetsSubmitted = arr[0].toLong(),
@@ -1139,7 +1179,13 @@ internal class UsbAudioManagerImpl(
                         ringBufferCapacity = arr[11].toInt(),
                         bufferMs = currentBufferMs,
                         healthScore = healthScore,
-                        bufferAdjustments = bufferAdjustments
+                        bufferAdjustments = bufferAdjustments,
+                        currentSampleRateHz = arr.getOrElse(13) { 0f },
+                        driftPpm = arr.getOrElse(14) { 0f },
+                        feedbackEffectiveFramesPerPacket = arr.getOrElse(15) { 0f },
+                        feedbackPacketsReceived = arr.getOrElse(16) { 0f }.toLong(),
+                        feedbackPacketsInvalid = arr.getOrElse(17) { 0f }.toLong(),
+                        activeClockSourceId = arr.getOrElse(18) { -1f }.toInt()
                     )
                 } else {
                     // Fallback for old format (5 elements)
@@ -1214,6 +1260,10 @@ internal class UsbAudioManagerImpl(
         healthCheckJob?.cancel()
         consecutiveUnhealthyChecks = 0
         lastHealthyTime = System.currentTimeMillis()
+        lastHealthUnderruns = 0L
+        lastHealthSampleMs = lastHealthyTime
+        lastHealthClockSourceId = -1
+        lastDriftSeverity = UsbHealthEvent.Severity.INFO
 
         healthCheckJob = scope.launch {
             Log.d(TAG, "Health check started")
@@ -1248,6 +1298,8 @@ internal class UsbAudioManagerImpl(
                             Log.d(TAG, "Health check: isDisconnected=${status[0]}, errors=${status[1]}")
                         }
                     }
+
+                    emitUsbHealthEvents(getTransferStats())
                 } catch (e: Exception) {
                     Log.e(TAG, "Health check error: ${e.message}")
                     consecutiveUnhealthyChecks++
@@ -1268,6 +1320,58 @@ internal class UsbAudioManagerImpl(
         healthCheckJob?.cancel()
         healthCheckJob = null
         consecutiveUnhealthyChecks = 0
+    }
+
+    private fun emitUsbHealthEvents(stats: UsbTransferStats?) {
+        if (stats == null) return
+
+        val clockSourceId = stats.activeClockSourceId
+        if (clockSourceId >= 0 &&
+            lastHealthClockSourceId >= 0 &&
+            clockSourceId != lastHealthClockSourceId) {
+            _healthEvents.tryEmit(
+                UsbHealthEvent.ClockSourceChanged(lastHealthClockSourceId, clockSourceId)
+            )
+        }
+        if (clockSourceId >= 0) {
+            lastHealthClockSourceId = clockSourceId
+        }
+
+        val absDrift = kotlin.math.abs(stats.driftPpm)
+        val severity = when {
+            absDrift >= 500f -> UsbHealthEvent.Severity.CRITICAL
+            absDrift >= 100f -> UsbHealthEvent.Severity.WARNING
+            else -> UsbHealthEvent.Severity.INFO
+        }
+        if (severity != lastDriftSeverity) {
+            when (severity) {
+                UsbHealthEvent.Severity.CRITICAL ->
+                    _healthEvents.tryEmit(UsbHealthEvent.DriftCritical(stats.driftPpm))
+                UsbHealthEvent.Severity.WARNING ->
+                    _healthEvents.tryEmit(UsbHealthEvent.DriftWarning(stats.driftPpm))
+                UsbHealthEvent.Severity.INFO -> Unit
+            }
+            lastDriftSeverity = severity
+        }
+
+        val now = System.currentTimeMillis()
+        val elapsedMs = now - lastHealthSampleMs
+        if (elapsedMs >= healthCheckIntervalMs && lastHealthSampleMs > 0L) {
+            val deltaUnderruns = (stats.underruns - lastHealthUnderruns).coerceAtLeast(0L)
+            val perMinute = ((deltaUnderruns * 60_000L) / elapsedMs.coerceAtLeast(1L)).toInt()
+            val underrunSeverity = when {
+                perMinute >= 30 -> UsbHealthEvent.Severity.CRITICAL
+                perMinute >= 5 -> UsbHealthEvent.Severity.WARNING
+                else -> UsbHealthEvent.Severity.INFO
+            }
+            if (underrunSeverity != UsbHealthEvent.Severity.INFO) {
+                _healthEvents.tryEmit(
+                    UsbHealthEvent.UnderrunRate(perMinute, underrunSeverity)
+                )
+            }
+        }
+        lastHealthUnderruns = stats.underruns
+        lastHealthSampleMs = now
     }
 
     /**

@@ -179,6 +179,14 @@ data class UsbTransferStats(
     val healthScore: Float = 100f,      // System health score (0-100)
     val bufferAdjustments: Int = 0,     // Number of buffer size adjustments made
 
+    // Clock health (Stage 3)
+    val currentSampleRateHz: Float = 0.0f,
+    val driftPpm: Float = 0.0f,
+    val feedbackEffectiveFramesPerPacket: Float = 0.0f,
+    val feedbackPacketsReceived: Long = 0,
+    val feedbackPacketsInvalid: Long = 0,
+    val activeClockSourceId: Int = -1,
+
     // Timestamp for stats
     val timestampMs: Long = System.currentTimeMillis()
 ) {
@@ -207,6 +215,19 @@ data class UsbTransferStats(
      */
     val bufferDisplay: String
         get() = String.format("%d/%d (%.0f%%)", ringBufferLevel, ringBufferCapacity, ringBufferFillPct * 100)
+}
+
+sealed class UsbHealthEvent {
+    data class DriftWarning(val ppm: Float) : UsbHealthEvent()
+    data class DriftCritical(val ppm: Float) : UsbHealthEvent()
+    data class UnderrunRate(val perMinute: Int, val severity: Severity) : UsbHealthEvent()
+    data class ClockSourceChanged(val oldId: Int, val newId: Int) : UsbHealthEvent()
+
+    enum class Severity {
+        INFO,
+        WARNING,
+        CRITICAL
+    }
 }
 
 /**

@@ -102,10 +102,11 @@ bool UsbTransferManager::configure(const TransferConfig& config) {
     MemoryUtils::prepareVectorForRealtime(mFloatBuffer);
     MemoryUtils::prepareVectorForRealtime(mPcmBuffer);
 
-    LOGI("Configured: %dHz, out=%dch/%dbit, in=%dch/%dbit, %d frames/packet, %d packets/xfer",
+    LOGI("Configured: %dHz, out=%dch/%dbit, in=%dch/%dbit, %d frames/packet, %d packets/xfer, bInterval=%d, packets/sec=%d",
          config.sampleRate, config.channelCount, config.bitDepth,
          config.inputChannelCount, config.inputBitDepth,
-         config.framesPerPacket, config.packetsPerTransfer);
+         config.framesPerPacket, config.packetsPerTransfer,
+         config.endpointInterval, config.packetsPerSecond);
 
     // Configure latency profiler
     mLatencyProfiler.configureFromTransfer(
@@ -831,6 +832,17 @@ void UsbTransferManager::handleFeedbackComplete(libusb_transfer* transfer) {
         if (actualLen >= expectedLen) {
             mClockController->processFeedback(
                 mFeedbackBuffer.data(), actualLen, version);
+            mStats.feedbackPacketsReceived.fetch_add(1, std::memory_order_relaxed);
+            mStats.currentSampleRateHz.store(
+                mClockController->getCurrentSampleRate(), std::memory_order_relaxed);
+            mStats.driftPpm.store(
+                mClockController->getDriftPpm(), std::memory_order_relaxed);
+            mStats.feedbackEffectiveFramesPerPacket.store(
+                mClockController->getCurrentSampleRate() /
+                    static_cast<float>(std::max(1, mConfig.packetsPerSecond)),
+                std::memory_order_relaxed);
+        } else {
+            mStats.feedbackPacketsInvalid.fetch_add(1, std::memory_order_relaxed);
         }
 
     } else if (transfer->status == LIBUSB_TRANSFER_CANCELLED) {

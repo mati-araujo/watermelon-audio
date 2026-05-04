@@ -92,6 +92,7 @@ object UsbSnapshotCodec {
         val flags = reader.readU8()
         val epAddress = reader.readU8()
         val termLink = reader.readU8()
+        val endpointInterval = reader.readU8()
 
         val syncMode = when (syncTypeRaw) {
             0x01 -> UsbSyncMode.ASYNCHRONOUS
@@ -112,6 +113,7 @@ object UsbSnapshotCodec {
             hasImplicitFeedback = (flags and 0x02) != 0,
             dataEndpointAddress = epAddress,
             terminalLinkId = termLink,
+            endpointInterval = endpointInterval,
         )
     }
 

@@ -468,6 +468,27 @@ bool LibusbBackend::selectAltsetting(
     return true;
 }
 
+bool LibusbBackend::selectClockSource(int clockSourceId) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mIsRunning.load()) {
+        LOGW("selectClockSource rejected while stream is running");
+        return false;
+    }
+    if (!mUsbDevice || mUsbDevice->uacVersion != 2) {
+        LOGW("selectClockSource rejected: no UAC2 USB device initialized");
+        return false;
+    }
+    if (clockSourceId <= 0 || clockSourceId > 255 ||
+        !mUsbDevice->findClockSource(static_cast<uint8_t>(clockSourceId))) {
+        LOGW("selectClockSource rejected: clock source %d not found", clockSourceId);
+        return false;
+    }
+
+    mManualClockSourceId = clockSourceId;
+    LOGI("Manual clock source queued: %d", clockSourceId);
+    return true;
+}
+
 bool LibusbBackend::claimControlInterface() {
     if (!mDeviceHandle || !mUsbDevice) {
         return false;
@@ -605,7 +626,21 @@ uint8_t LibusbBackend::selectClockSourceForTerminal(uint8_t terminalLinkId) {
     }
 
     usb::UsbClockGraph graph(*mUsbDevice);
-    const usb::UsbClockSource* preferred = graph.pickDefaultSource(terminalLinkId);
+    const usb::UsbClockSource* preferred = nullptr;
+    if (mManualClockSourceId) {
+        auto manualPath = graph.pathToSource(
+            terminalLinkId, static_cast<uint8_t>(*mManualClockSourceId));
+        if (manualPath && manualPath->source) {
+            preferred = manualPath->source;
+        } else {
+            LOGW("Clock graph: requested clock source %d is not reachable "
+                 "from terminal %d; falling back to default",
+                 *mManualClockSourceId, terminalLinkId);
+        }
+    }
+    if (!preferred) {
+        preferred = graph.pickDefaultSource(terminalLinkId);
+    }
     if (!preferred) {
         LOGW("Clock graph: terminal %d has no reachable clock source",
              terminalLinkId);
@@ -746,6 +781,14 @@ uint8_t LibusbBackend::selectClockSourceForTerminal(uint8_t terminalLinkId) {
     return preferred->clockId;
 }
 
+void LibusbBackend::publishActiveClockSource(uint8_t clockSourceId) {
+    const int id = clockSourceId == 0 ? -1 : static_cast<int>(clockSourceId);
+    mActiveClockSourceId.store(id, std::memory_order_relaxed);
+    if (mTransferManager) {
+        mTransferManager->setActiveClockSourceId(id);
+    }
+}
+
 // ============================================================================
 // Sample Rate Negotiation
 // ============================================================================
@@ -779,6 +822,7 @@ bool LibusbBackend::configureSampleRate() {
     const uint32_t requested = static_cast<uint32_t>(mRequestedSampleRate);
 
     if (version == 1) {
+        publishActiveClockSource(0);
         if (!mSelectedPlayback && !mSelectedCapture) {
             LOGE("configureSampleRate UAC1: no selected interface");
             return false;
@@ -874,6 +918,7 @@ bool LibusbBackend::configureSampleRate() {
                  mUsbDevice->clockSources.front().clockId);
             clockIdsToSet.push_back(mUsbDevice->clockSources.front().clockId);
         }
+        publishActiveClockSource(clockIdsToSet.front());
 
         // Lambda: run SET_CUR + GET_CUR for a single clock source.
         // Stage 3 fix: GET_CUR FIRST. If the device is already at the
@@ -1360,7 +1405,14 @@ bool LibusbBackend::setupTransferManager() {
     const bool isHighSpeed = (speed == LIBUSB_SPEED_HIGH ||
                                speed == LIBUSB_SPEED_SUPER ||
                                speed == LIBUSB_SPEED_SUPER_PLUS);
-    const int packetsPerMs = isHighSpeed ? 8 : 1;
+    const int endpointInterval = std::max(1, static_cast<int>(
+        configInterface->dataEndpoint.interval == 0 ? 1 : configInterface->dataEndpoint.interval));
+    const int serviceSlots = isHighSpeed
+        ? (1 << std::clamp(endpointInterval - 1, 0, 7))
+        : endpointInterval;
+    const int packetsPerSecond = isHighSpeed
+        ? std::max(1, 8000 / serviceSlots)
+        : std::max(1, 1000 / serviceSlots);
     const char* speedName =
         (speed == LIBUSB_SPEED_LOW)        ? "LOW"   :
         (speed == LIBUSB_SPEED_FULL)       ? "FULL"  :
@@ -1375,15 +1427,17 @@ bool LibusbBackend::setupTransferManager() {
     // Non-integer rates (44.1 kHz, 88.2 kHz) truncate here; the clock
     // controller's fractional accumulator compensates via the feedback
     // endpoint when available.
-    config.framesPerPacket = mRequestedSampleRate / (packetsPerMs * 1000);
+    config.endpointInterval = endpointInterval;
+    config.packetsPerSecond = packetsPerSecond;
+    config.framesPerPacket = std::max(1, mRequestedSampleRate / packetsPerSecond);
     // Keep ~8 ms of audio per libusb transfer in both speed classes so the
     // event-loop cadence is constant regardless of USB speed.
-    config.packetsPerTransfer = 8 * packetsPerMs;  // 8 on FS, 64 on HS
+    config.packetsPerTransfer = std::max(1, (packetsPerSecond * 8) / 1000);
     config.numTransfers = 3;                       // Triple buffering
 
-    LOGI("USB speed: %s (libusb=%d) → %d packets/ms, %d frames/packet, "
-         "%d packets/xfer",
-         speedName, speed, packetsPerMs,
+    LOGI("USB speed: %s (libusb=%d), bInterval=%d, %d packets/sec, "
+         "%d frames/packet, %d packets/xfer",
+         speedName, speed, endpointInterval, packetsPerSecond,
          config.framesPerPacket, config.packetsPerTransfer);
 
     // Ring buffer size: start with reduced default (100ms instead of 200ms)

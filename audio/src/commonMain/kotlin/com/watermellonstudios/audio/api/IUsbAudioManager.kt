@@ -52,6 +52,11 @@ interface IUsbAudioManager {
      */
     val deviceEvents: SharedFlow<UsbDeviceEvent>
 
+    /**
+     * Flow of USB clock/transfer health events emitted while streaming.
+     */
+    val healthEvents: SharedFlow<UsbHealthEvent>
+
     // ==================== Device Discovery ====================
 
     /**
@@ -239,6 +244,11 @@ interface IUsbAudioManager {
         alternateSetting: Int,
         formatIndex: Int,
     ): UsbResult<Unit>
+
+    /**
+     * Select a UAC2 clock source for the next startStreaming() call.
+     */
+    suspend fun selectClockSource(clockSourceId: Int): UsbResult<Unit>
 
     /**
      * Set the stream preference used for altsetting selection.

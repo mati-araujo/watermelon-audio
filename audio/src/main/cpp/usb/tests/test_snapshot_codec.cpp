@@ -356,6 +356,7 @@ TEST(UsbSnapshotCodec, RoundTripGhwUac1DiscoveryLogFixture) {
     ASSERT_EQ(decoded->playbackInterfaces.size(), 2u);
     EXPECT_EQ(decoded->playbackInterfaces[0].interfaceNumber, 2);
     EXPECT_EQ(decoded->playbackInterfaces[0].alternateSetting, 1);
+    EXPECT_EQ(decoded->playbackInterfaces[0].dataEndpoint.interval, 1);
     EXPECT_EQ(decoded->playbackInterfaces[0].primaryFormat().bitResolution, 16);
     EXPECT_EQ(decoded->playbackInterfaces[1].alternateSetting, 2);
     EXPECT_EQ(decoded->playbackInterfaces[1].primaryFormat().bitResolution, 24);
@@ -390,6 +391,7 @@ TEST(UsbSnapshotCodec, RoundTripCm720Uac2DiscoveryLogFixture) {
     EXPECT_EQ(decoded->playbackInterfaces[2].alternateSetting, 3);
     EXPECT_EQ(decoded->playbackInterfaces[2].primaryFormat().bitResolution, 32);
     EXPECT_EQ(decoded->playbackInterfaces[2].terminalLink, 14);
+    EXPECT_EQ(decoded->playbackInterfaces[2].dataEndpoint.interval, 1);
 
     ASSERT_EQ(decoded->captureInterfaces.size(), 1u);
     EXPECT_EQ(decoded->captureInterfaces[0].primaryFormat().channels, 2);

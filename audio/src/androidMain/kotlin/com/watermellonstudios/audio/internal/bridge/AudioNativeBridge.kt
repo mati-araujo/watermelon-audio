@@ -2203,6 +2203,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         nativeSelectUsbAltsetting(interfaceNumber, alternateSetting, formatIndex)
 
     /**
+     * Select a UAC2 clock source to apply on the next USB start.
+     */
+    fun selectUsbClockSource(clockSourceId: Int): Boolean =
+        nativeSelectUsbClockSource(clockSourceId)
+
+    /**
      * Check if USB device was disconnected.
      */
     fun isUsbDeviceDisconnected(): Boolean = nativeIsUsbDeviceDisconnected()
@@ -2303,6 +2309,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         profile: Int
     ): Boolean
     private external fun nativeSelectUsbAltsetting(interfaceNumber: Int, alternateSetting: Int, formatIndex: Int): Boolean
+    private external fun nativeSelectUsbClockSource(clockSourceId: Int): Boolean
     private external fun nativeIsUsbDeviceDisconnected(): Boolean
     private external fun nativeGetUsbHealthStatus(): IntArray?
     private external fun nativeFallbackToOboeBackend()

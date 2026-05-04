@@ -89,6 +89,8 @@ struct TransferConfig {
 
     // Timing
     int transferTimeoutMs = 100;        // Timeout for USB transfers
+    int endpointInterval = 1;           // Active data endpoint bInterval
+    int packetsPerSecond = 1000;        // Polling cadence derived from speed+bInterval
 
     // ========== Output (playback) calculations ==========
     int bytesPerFrame() const {
@@ -154,6 +156,14 @@ struct TransferStatistics {
     std::atomic<int> ringBufferLevel{0};       // Current fill level (samples)
     std::atomic<float> ringBufferFillPct{0.0f}; // Fill percentage
 
+    // Clock health
+    std::atomic<float> currentSampleRateHz{0.0f};
+    std::atomic<float> driftPpm{0.0f};
+    std::atomic<float> feedbackEffectiveFramesPerPacket{0.0f};
+    std::atomic<uint32_t> feedbackPacketsReceived{0};
+    std::atomic<uint32_t> feedbackPacketsInvalid{0};
+    std::atomic<int> activeClockSourceId{-1};
+
     void reset() {
         packetsSubmitted.store(0);
         packetsCompleted.store(0);
@@ -164,6 +174,12 @@ struct TransferStatistics {
         avgLatencyMs.store(0.0f);
         ringBufferLevel.store(0);
         ringBufferFillPct.store(0.0f);
+        currentSampleRateHz.store(0.0f);
+        driftPpm.store(0.0f);
+        feedbackEffectiveFramesPerPacket.store(0.0f);
+        feedbackPacketsReceived.store(0);
+        feedbackPacketsInvalid.store(0);
+        activeClockSourceId.store(-1);
     }
 };
 
@@ -433,6 +449,10 @@ public:
      * Get current transfer statistics.
      */
     const TransferStatistics& getStatistics() const { return mStats; }
+
+    void setActiveClockSourceId(int clockSourceId) {
+        mStats.activeClockSourceId.store(clockSourceId, std::memory_order_relaxed);
+    }
 
     /**
      * Get clock controller for monitoring.
