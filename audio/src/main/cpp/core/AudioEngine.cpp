@@ -1036,7 +1036,16 @@ void AudioEngine::applyEffectsAndOutput(float* output, int32_t numFrames) {
     mOutputStage.dcBlock(mOutputStage.getTempBuffer(), numFrames);
     mEffectChain.process(mOutputStage.getTempBuffer(), output, numFrames);
 
+    // ---- PRE-ROLL CAPTURE ----
+    // Stash the post-FX signal into the pre-roll ring BEFORE the looper consumes it.
+    // The looper uses snapshots of this ring to seed new recordings with audio
+    // captured before the user pressed REC, eliminating reaction-time gaps.
+    mPreRollRing.write(output, numFrames);
+
     // ---- TRANSPORT TICK ----
+    // Snapshot Transport's play position BEFORE the tick so we pass the
+    // block-start frame to the looper (not the post-tick frame).
+    const int64_t playFrameAtBlockStart = mTransport.getPlayFrame();
     // Emits any scheduled metronome clicks for this audio block. RT-safe; runs
     // before the looper so the click is mixed by AudioLooper::process.
     mTransport.tick(numFrames, mAudioLooper);
@@ -1046,7 +1055,8 @@ void AudioEngine::applyEffectsAndOutput(float* output, int32_t numFrames) {
     // signal (post-effects) without being attenuated by master volume or fade.
     // This makes recording independent of the user adjusting global volume
     // mid-take and is the standard practice in professional loopers.
-    mAudioLooper.process(output, numFrames);
+    // playFrame is used by armed-recording for downbeat alignment.
+    mAudioLooper.process(output, numFrames, playFrameAtBlockStart);
 
     // Fade + master volume
     float fadeStart, fadeEnd;
@@ -1751,6 +1761,10 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate) {
     // Configure looper (click envelope is sample-rate aware; transport too).
     mAudioLooper.setSampleRate(sampleRate);
     mTransport.setSampleRate(sampleRate);
+
+    // Pre-roll ring: 1 second of post-FX output for seeding new recordings.
+    // This is the maximum pre-roll duration; UI requests N ms <= 1000.
+    mPreRollRing.prepare(sampleRate);
 
     // Configure arpeggiator
     mArpSequencer.prepare(sampleRate);

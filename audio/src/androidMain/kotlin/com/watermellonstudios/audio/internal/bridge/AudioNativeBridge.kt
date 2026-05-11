@@ -2548,6 +2548,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     // State mutations (call from coroutine/UI thread)
     private external fun nativeLooperPrepareTrack(trackIndex: Int, lengthFrames: Int, sampleRate: Int): Int
+    private external fun nativeLooperPrepareTrackBars(trackIndex: Int, bars: Int, sampleRate: Int): Int
+    private external fun nativeLooperArmAtNextBar(trackIndex: Int): Long
+    private external fun nativeLooperCancelArm()
+    private external fun nativeLooperGetArmedTrack(): Int
+    private external fun nativeLooperSetTailMs(ms: Int)
+    private external fun nativeLooperGetTailMs(): Int
+    private external fun nativeLooperStartRecordingWithPreRoll(trackIndex: Int, preRollMs: Int)
     private external fun nativeLooperStartRecording(trackIndex: Int)
     private external fun nativeLooperStopRecording()
     private external fun nativeLooperStartOverdub(trackIndex: Int)
@@ -2615,6 +2622,46 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         val result = nativeLooperPrepareTrack(trackIndex, lengthFrames, sampleRate)
         return result >= 0
     }
+
+    /**
+     * Prepare a track quantized to N musical bars at the current Transport
+     * BPM/beats-per-bar/sample rate. Returns the actual loop length in frames,
+     * or -1 if preparation failed (memory budget, invalid bars, transport not ready).
+     */
+    fun looperPrepareTrackBars(trackIndex: Int, bars: Int, sampleRate: Int): Int =
+        nativeLooperPrepareTrackBars(trackIndex, bars, sampleRate)
+
+    /**
+     * Arm a track to start recording at the next bar boundary on the Transport.
+     * Used to keep multi-track recordings phase-aligned. Returns the absolute
+     * trigger frame (Transport playFrame), or -1 on failure.
+     */
+    fun looperArmAtNextBar(trackIndex: Int): Long = nativeLooperArmAtNextBar(trackIndex)
+
+    /** Cancel a pending armed recording (does not affect a recording in progress). */
+    fun looperCancelArm() = nativeLooperCancelArm()
+
+    /** Returns the armed track index, or -1 if no track is armed. */
+    fun looperGetArmedTrack(): Int = nativeLooperGetArmedTrack()
+
+    /**
+     * Tail capture length in milliseconds. The looper allocates `loopFrames + tailFrames`
+     * per track and continues recording past the loop boundary into the tail region.
+     * On playback, the tail is mixed into the start of each iteration with linear
+     * fade-out, preserving sustain of pads/delays/reverbs at the loop seam.
+     * Default 250 ms. Affects tracks prepared AFTER this call. Set to 0 to disable.
+     */
+    fun looperSetTailMs(ms: Int) = nativeLooperSetTailMs(ms)
+    fun looperGetTailMs(): Int = nativeLooperGetTailMs()
+
+    /**
+     * Start recording with a pre-roll seed: the first `preRollMs` of the track
+     * is filled with the most recent post-FX audio captured by the engine,
+     * eliminating the reaction-time gap between hearing a sound and pressing REC.
+     * preRollMs is clamped to [0, 1000]. preRollMs=0 falls back to looperStartRecording.
+     */
+    fun looperStartRecordingWithPreRoll(trackIndex: Int, preRollMs: Int) =
+        nativeLooperStartRecordingWithPreRoll(trackIndex, preRollMs)
 
     fun looperStartRecording(trackIndex: Int) = nativeLooperStartRecording(trackIndex)
     fun looperStopRecording() = nativeLooperStopRecording()

@@ -2548,6 +2548,94 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     return l > r ? l : r;
 }
 
+// Pre-roll: start recording with `preRollMs` of prior post-FX audio seeded
+// at the start of the track. Eliminates the human-reaction gap when arming.
+// preRollMs is clamped to [0, 1000].
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperStartRecordingWithPreRoll(
+    JNIEnv* env, jobject thiz, jint trackIndex, jint preRollMs) {
+    if (!g_jniState.engine) return;
+    if (preRollMs < 0) preRollMs = 0;
+    if (preRollMs > 1000) preRollMs = 1000;
+
+    auto& engine = *g_jniState.engine;
+    auto& looper = engine.getAudioLooper();
+
+    if (preRollMs == 0) {
+        looper.startRecording(trackIndex);
+        return;
+    }
+
+    const int sr = looper.getSampleRate();
+    const int preRollFrames = (preRollMs * sr) / 1000;
+    if (preRollFrames <= 0) {
+        looper.startRecording(trackIndex);
+        return;
+    }
+
+    // UI thread allocation — acceptable (not the audio thread).
+    std::vector<float> preRoll(static_cast<size_t>(preRollFrames) * 2, 0.0f);
+    engine.getPreRollRing().snapshot(preRoll.data(), preRollFrames);
+    looper.startRecordingWithPreRoll(trackIndex, preRoll.data(), preRollFrames);
+}
+
+// Tail capture configuration (preserves sustain at loop seam).
+// Affects tracks prepared AFTER this call. Default 250 ms.
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTailMs(
+    JNIEnv* env, jobject thiz, jint ms) {
+    if (g_jniState.engine)
+        g_jniState.engine->getAudioLooper().setTailMs(ms);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetTailMs(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getTailMs();
+}
+
+// Armed recording: schedule recording to start at the next bar boundary.
+// Returns the absolute trigger frame (>=0), or -1 on failure.
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperArmAtNextBar(
+    JNIEnv* env, jobject thiz, jint trackIndex) {
+    if (!g_jniState.engine) return -1;
+    auto& transport = g_jniState.engine->getTransport();
+    int64_t now = transport.getPlayFrame();
+    int64_t triggerFrame = transport.nextBarBoundary(now);
+    g_jniState.engine->getAudioLooper().armRecording(trackIndex, triggerFrame);
+    return triggerFrame;
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperCancelArm(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine)
+        g_jniState.engine->getAudioLooper().cancelArm();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetArmedTrack(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return -1;
+    return g_jniState.engine->getAudioLooper().getArmedTrack();
+}
+
+// Loop quantization: prepare a track sized to N bars at current BPM/SR.
+// Returns the loop length in frames (>=0) on success, or -1 on failure.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperPrepareTrackBars(
+    JNIEnv* env, jobject thiz, jint trackIndex, jint bars, jint sampleRate) {
+    if (!g_jniState.engine) return -1;
+    auto& transport = g_jniState.engine->getTransport();
+    int framesPerBar1 = transport.framesPerBar(1);
+    if (framesPerBar1 <= 0) return -1;
+    bool ok = g_jniState.engine->getAudioLooper()
+                  .prepareTrackBars(trackIndex, bars, framesPerBar1, sampleRate);
+    return ok ? bars * framesPerBar1 : -1;
+}
+
 // ========== TRANSPORT (BPM, beats, RT-safe metronome scheduler) ==========
 
 JNIEXPORT void JNICALL

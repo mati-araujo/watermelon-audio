@@ -28,6 +28,7 @@ namespace oboe { class AudioStream; }
 #include "../sequencer/ArpSequencer.h"
 #include "../looper/AudioLooper.h"
 #include "../looper/Transport.h"
+#include "../looper/PreRollRing.h"
 #include "FadeController.h"
 #include "ChordHarmony.h"
 
@@ -434,6 +435,10 @@ public:
     /** Musical transport (BPM, beats, metronome scheduler). */
     Transport& getTransport() { return mTransport; }
     const Transport& getTransport() const { return mTransport; }
+
+    /** Recent-output ring used to seed pre-roll on startRecording. */
+    PreRollRing& getPreRollRing() { return mPreRollRing; }
+    const PreRollRing& getPreRollRing() const { return mPreRollRing; }
 
     // ========== VOCODER INTEGRATION ==========
 
@@ -938,6 +943,7 @@ private:
     // ========== AUDIO LOOPER (Phase 11) ==========
     AudioLooper mAudioLooper;
     Transport mTransport;
+    PreRollRing mPreRollRing;
 
     // ========== SYNTH ENGINE SYSTEM (Phase 6, Phase 1E — extracted to SynthEngineDispatcher) ==========
     SynthEngineDispatcher mEngineDispatcher;

@@ -38,18 +38,28 @@ public:
 
     /**
      * @brief Allocate buffer for recording. Call from UI thread before arming.
-     * @param lengthFrames Number of stereo frames to allocate
-     * @param sampleRate Sample rate at time of allocation
-     * @return Allocated size in bytes, or 0 on failure
+     * @param loopFrames Musical loop length in stereo frames.
+     * @param sampleRate Sample rate at time of allocation.
+     * @param tailFrames Additional frames captured AFTER the loop boundary, mixed
+     *                   into the start of the next iteration with linear fade-out.
+     *                   This preserves the natural decay of sustained sounds at
+     *                   the loop seam. Default 0 = legacy behavior (no tail).
+     * @return Allocated size in bytes, or 0 on failure.
      */
-    size_t allocate(int lengthFrames, int sampleRate) {
-        if (lengthFrames <= 0) return 0;
+    size_t allocate(int loopFrames, int sampleRate, int tailFrames = 0) {
+        if (loopFrames <= 0) return 0;
+        if (tailFrames < 0) tailFrames = 0;
+        // Cap tail at loopFrames to avoid pathological cases with very short loops.
+        if (tailFrames > loopFrames) tailFrames = loopFrames;
+        const int totalFrames = loopFrames + tailFrames;
         try {
-            mBuffer.resize(static_cast<size_t>(lengthFrames) * 2, 0.0f);
+            mBuffer.resize(static_cast<size_t>(totalFrames) * 2, 0.0f);
         } catch (...) {
             return 0;
         }
-        mCapacityFrames = lengthFrames;
+        mCapacityFrames = totalFrames;
+        mLoopCapacityFrames = loopFrames;
+        mTailFrames.store(tailFrames, std::memory_order_release);
         mSampleRate = sampleRate;
         mWriteHead.store(0, std::memory_order_release);
         mLengthFrames.store(0, std::memory_order_release);
@@ -57,6 +67,11 @@ public:
         mPeakLevel.store(0.0f, std::memory_order_release);
         return mBuffer.size() * sizeof(float);
     }
+
+    /** Returns the loop length capacity (musical loop, NOT including tail). */
+    int getLoopCapacityFrames() const { return mLoopCapacityFrames; }
+    /** Returns configured tail frames. */
+    int getTailFrames() const { return mTailFrames.load(std::memory_order_acquire); }
 
     /**
      * @brief Release all memory.
@@ -98,6 +113,8 @@ public:
         // capacity (set in allocate()), which becomes meaningless once length=0. Reset
         // here prevents writeFrame() from accepting frames before next allocate().
         mCapacityFrames = 0;
+        mLoopCapacityFrames = 0;
+        mTailFrames.store(0, std::memory_order_relaxed);
     }
 
     /**
@@ -122,8 +139,20 @@ public:
 
         pos++;
         mWriteHead.store(pos, std::memory_order_relaxed);
-        mLengthFrames.store(pos, std::memory_order_release);
+        // Loop length saturates at loopCapacity. The tail region (pos > loopCap)
+        // is captured into the buffer but not exposed to playback as loop length —
+        // mixInto() reads it via the tail-mix path with fade-out instead.
+        const int lenForLoop = (mLoopCapacityFrames > 0 && pos > mLoopCapacityFrames)
+                               ? mLoopCapacityFrames
+                               : pos;
+        mLengthFrames.store(lenForLoop, std::memory_order_release);
         return true;
+    }
+
+    /** True iff write head has reached or passed the musical loop boundary. */
+    bool hasReachedLoopEnd() const {
+        if (mLoopCapacityFrames <= 0) return false;
+        return mWriteHead.load(std::memory_order_acquire) >= mLoopCapacityFrames;
     }
 
     /**
@@ -182,6 +211,17 @@ public:
         float peakL = 0.0f;
         float peakR = 0.0f;
 
+        // Tail mixing: if a tail region was captured, mix it into the start of
+        // each loop iteration with a linear fade-out. This preserves the natural
+        // decay of sustained notes at the loop seam (delays, reverbs, pads).
+        const int tailFrames = mTailFrames.load(std::memory_order_acquire);
+        const int loopCap = mLoopCapacityFrames;
+        // Tail mixing only applies to full-buffer playback (no custom loop region).
+        const bool tailActive = (tailFrames > 0)
+                              && (loopStart == 0)
+                              && (loopEnd == loopCap);
+        const float invTail = (tailFrames > 0) ? 1.0f / static_cast<float>(tailFrames) : 0.0f;
+
         for (int i = 0; i < numFrames; ++i) {
             // Smooth volume, mute gain, and pan
             vol = kSmoothCoeff * vol + (1.0f - kSmoothCoeff) * targetVol;
@@ -201,20 +241,37 @@ public:
             // Absolute position in buffer = loopStart + regionPos
             float fPos = static_cast<float>(loopStart) + regionPos;
 
-            // Linear interpolation between samples
-            int pos0 = static_cast<int>(fPos);
-            // Wrap pos1 within the loop region
-            int pos1 = pos0 + 1;
-            if (pos1 >= loopEnd) pos1 = loopStart;
-            float frac = fPos - static_cast<float>(pos0);
+            // Catmull-Rom cubic interpolation (4-tap). Significantly reduces
+            // aliasing artifacts vs linear interpolation when speed != 1.0,
+            // while staying RT-safe (no transcendentals, no allocs). Neighbours
+            // wrap inside the loop region so playback at non-integer speeds
+            // remains seamless across the loop boundary.
+            int pos1 = static_cast<int>(fPos);
+            int pos0 = pos1 - 1; if (pos0 < loopStart) pos0 = loopEnd - 1;
+            int pos2 = pos1 + 1; if (pos2 >= loopEnd) pos2 = loopStart;
+            int pos3 = pos2 + 1; if (pos3 >= loopEnd) pos3 = loopStart;
+            float t = fPos - static_cast<float>(pos1);
 
-            float sampleL = mBuffer[static_cast<size_t>(pos0) * 2] * (1.0f - frac)
-                          + mBuffer[static_cast<size_t>(pos1) * 2] * frac;
-            float sampleR = mBuffer[static_cast<size_t>(pos0) * 2 + 1] * (1.0f - frac)
-                          + mBuffer[static_cast<size_t>(pos1) * 2 + 1] * frac;
+            // Catmull-Rom basis: y(t) = 0.5 * ((2*p1) + (-p0+p2)*t +
+            //   (2*p0 - 5*p1 + 4*p2 - p3)*t^2 + (-p0 + 3*p1 - 3*p2 + p3)*t^3)
+            const float t2 = t * t;
+            const float t3 = t2 * t;
+            auto interp = [&](int channel) -> float {
+                const float p0 = mBuffer[static_cast<size_t>(pos0) * 2 + channel];
+                const float p1 = mBuffer[static_cast<size_t>(pos1) * 2 + channel];
+                const float p2 = mBuffer[static_cast<size_t>(pos2) * 2 + channel];
+                const float p3 = mBuffer[static_cast<size_t>(pos3) * 2 + channel];
+                return 0.5f * ((2.0f * p1)
+                             + (-p0 + p2) * t
+                             + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2
+                             + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+            };
+            float sampleL = interp(0);
+            float sampleR = interp(1);
 
-            // Crossfade at loop region boundary to avoid clicks
-            int distToEnd = loopEnd - pos0;
+            // Crossfade at loop region boundary to avoid clicks (pos1 is the
+            // floor of the fractional position, i.e. the "current" integer sample).
+            int distToEnd = loopEnd - pos1;
             if (distToEnd <= crossfadeFrames && crossfadeFrames > 0) {
                 float fade = static_cast<float>(distToEnd) / static_cast<float>(crossfadeFrames);
                 int wrapPos = loopStart + (crossfadeFrames - distToEnd);
@@ -223,6 +280,22 @@ public:
                     float wrapR = mBuffer[static_cast<size_t>(wrapPos) * 2 + 1];
                     sampleL = sampleL * fade + wrapL * (1.0f - fade);
                     sampleR = sampleR * fade + wrapR * (1.0f - fade);
+                }
+            }
+
+            // Tail mixing: in the first `tailFrames` of each iteration, sum
+            // samples from the captured tail (post-loop-end region) with a
+            // linear fade-out. Position in tail mirrors position in loop:
+            //   regionPos=0   -> tail[0]   * 1.0
+            //   regionPos=N-1 -> tail[N-1] * (1/N)
+            // This makes the loop boundary perceptually continuous.
+            if (tailActive && pos1 < loopCap + tailFrames) {
+                int tailIdx = static_cast<int>(regionPos);
+                if (tailIdx < tailFrames) {
+                    int tailBufIdx = loopCap + tailIdx;
+                    float tailFade = 1.0f - (static_cast<float>(tailIdx) * invTail);
+                    sampleL += mBuffer[static_cast<size_t>(tailBufIdx) * 2]     * tailFade;
+                    sampleR += mBuffer[static_cast<size_t>(tailBufIdx) * 2 + 1] * tailFade;
                 }
             }
 
@@ -397,10 +470,12 @@ private:
     }
 
     // Audio data
-    std::vector<float> mBuffer;        // Stereo interleaved, heap
+    std::vector<float> mBuffer;        // Stereo interleaved, heap (loop + tail)
     std::vector<float> mUndoBuffer;    // Lazy undo snapshot
-    int mCapacityFrames{0};
+    int mCapacityFrames{0};            // Total frames including tail (= loopCap + tail)
+    int mLoopCapacityFrames{0};        // Musical loop capacity (excludes tail)
     int mSampleRate{48000};
+    std::atomic<int> mTailFrames{0};   // Captured tail length (decay region)
 
     // State (atomic for cross-thread access)
     std::atomic<int> mLengthFrames{0};

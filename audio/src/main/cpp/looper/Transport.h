@@ -114,6 +114,37 @@ public:
         return mBeatsRemaining.load(std::memory_order_acquire);
     }
 
+    // ========== Play position (musical clock) ==========
+    //
+    // The transport maintains a monotonically increasing frame counter while
+    // the metronome is running. This counter is used by the looper to align
+    // armed-recording starts with bar boundaries.
+
+    /** Reset the play frame counter. Called when transport is restarted. */
+    void resetPlayPosition() {
+        mPlayFrameCounter.store(0, std::memory_order_release);
+    }
+
+    /**
+     * @brief Current play position in frames since last resetPlayPosition().
+     *        Lock-free; safe from any thread.
+     */
+    int64_t getPlayFrame() const {
+        return mPlayFrameCounter.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Frame index of the next bar boundary at or after `fromFrame`.
+     *        Returns the smallest multiple of framesPerBar(1) that is >= fromFrame.
+     *        If transport is not ready, returns fromFrame.
+     */
+    int64_t nextBarBoundary(int64_t fromFrame) const {
+        const int64_t fpb = static_cast<int64_t>(framesPerBar(1));
+        if (fpb <= 0) return fromFrame;
+        const int64_t mod = fromFrame % fpb;
+        return (mod == 0) ? fromFrame : fromFrame + (fpb - mod);
+    }
+
     // ========== Audio thread tick (RT-safe) ==========
 
     /**
@@ -127,6 +158,12 @@ public:
      *       a future revision can split the block at the click frame.
      */
     void tick(int numFrames, AudioLooper& looper) {
+        // Advance the global play frame counter unconditionally — the looper
+        // uses this for armed-recording downbeat alignment whether or not the
+        // metronome is running.
+        mPlayFrameCounter.fetch_add(static_cast<int64_t>(numFrames),
+                                    std::memory_order_release);
+
         int beatsLeft = mBeatsRemaining.load(std::memory_order_acquire);
         if (beatsLeft <= 0) return;
 
@@ -179,4 +216,8 @@ private:
     std::atomic<int>  mClickIndex{0};            // 0..N-1 within current schedule
     std::atomic<int>  mPatternMode{0};           // 0 = "first is down", 1 = "every bar"
     std::atomic<bool> mFirstIsDownbeat{true};
+
+    // Monotonic frame counter advanced on every tick(). Used by the looper for
+    // armed-recording downbeat alignment.
+    std::atomic<int64_t> mPlayFrameCounter{0};
 };

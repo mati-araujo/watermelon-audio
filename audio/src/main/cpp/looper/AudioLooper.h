@@ -59,8 +59,29 @@ public:
 
     // ========== Audio thread (RT-safe) ==========
 
-    void process(float* audioData, int numFrames) {
+    /**
+     * @brief Audio thread tick. The optional `playFrame` parameter is the
+     *        Transport's play position at the START of this audio block. It is
+     *        used to fire armed recordings exactly at the requested trigger
+     *        frame (downbeat-aligned).
+     */
+    void process(float* audioData, int numFrames, int64_t playFrame = -1) {
         if (!mEnabled.load(std::memory_order_acquire)) return;
+
+        // ---- ARMED-RECORDING TRIGGER ----
+        // If a track is armed and Transport's play position has reached or
+        // passed the trigger frame, transition to recording. We do this first
+        // so capture begins on this same audio block.
+        int armed = mArmedTrack.load(std::memory_order_acquire);
+        if (armed >= 0 && playFrame >= 0) {
+            int64_t trigger = mArmedTriggerFrame.load(std::memory_order_acquire);
+            if (playFrame + numFrames > trigger) {
+                // The trigger falls inside (or before) this block — start now.
+                // We accept up to one block of jitter (≤ ~10ms) for now.
+                startRecording(armed);
+                mArmedTrack.store(-1, std::memory_order_release);
+            }
+        }
 
         int recTrack = mRecordingTrack.load(std::memory_order_acquire);
         bool overdubbing = mOverdubbing.load(std::memory_order_acquire);
@@ -80,24 +101,45 @@ public:
                         pos, audioData[i * 2], audioData[i * 2 + 1], gain, decay);
                 }
             } else {
-                // Normal recording
+                // Normal recording (with optional tail capture).
+                // Capacity here is total buffer length: loopFrames + tailFrames.
+                // We split the lifecycle into two checkpoints:
+                //   1. Write head crosses loopCapacity  -> finalize loop, start playback
+                //      (recording continues into tail region for tailFrames more samples).
+                //   2. Write head reaches total capacity -> stop recording entirely.
                 int capacity = mRecordCapacityFrames.load(std::memory_order_relaxed);
                 int remaining = mRecordFramesRemaining.load(std::memory_order_relaxed);
+                bool loopFinalized = mLoopFinalizedDuringRec.load(std::memory_order_relaxed);
+
                 for (int i = 0; i < numFrames && remaining > 0; ++i) {
                     mTracks[recTrack].writeFrame(audioData[i * 2], audioData[i * 2 + 1]);
                     remaining--;
                 }
                 mRecordFramesRemaining.store(remaining, std::memory_order_relaxed);
 
-                // Update recording progress (0.0 → 1.0)
+                // Update recording progress relative to the loop region (0..1).
+                // After the loop is finalized, progress stays at 1.0 while the
+                // tail finishes capturing in the background.
                 if (capacity > 0) {
                     float recProg = 1.0f - (static_cast<float>(remaining) / static_cast<float>(capacity));
-                    mRecordProgress.store(recProg, std::memory_order_relaxed);
+                    mRecordProgress.store(std::min(recProg, 1.0f), std::memory_order_relaxed);
                 }
 
-                // Auto-stop when recording complete (only in fixed-length mode)
+                // Checkpoint 1: loop boundary crossed → start playback.
+                if (!loopFinalized && mTracks[recTrack].hasReachedLoopEnd()) {
+                    finalizeLoopStartPlayback(recTrack);
+                    mLoopFinalizedDuringRec.store(true, std::memory_order_release);
+                }
+
+                // Checkpoint 2: total capacity reached → stop recording (only in fixed-length mode).
                 if (remaining <= 0 && !mFreeLength.load(std::memory_order_relaxed)) {
-                    finalizeCurrentRecording();
+                    if (!mLoopFinalizedDuringRec.load(std::memory_order_relaxed)) {
+                        // No tail captured (tail==0) — finalize loop now.
+                        finalizeLoopStartPlayback(recTrack);
+                    }
+                    // Recording done (loop + tail).
+                    mRecordingTrack.store(-1, std::memory_order_release);
+                    mLoopFinalizedDuringRec.store(false, std::memory_order_release);
                 }
             }
         }
@@ -157,21 +199,60 @@ public:
 
     // ========== Control (UI thread) ==========
 
+    /**
+     * @brief Prepare a track sized to N musical bars at the current Transport
+     *        BPM/beats-per-bar/sample rate. Convenience wrapper around prepareTrack.
+     * @param trackIndex 0..MAX_TRACKS-1
+     * @param bars Number of bars (>=1)
+     * @param framesPerBar Frames-per-bar from Transport::framesPerBar(bars=1).
+     *        Caller computes via Transport so we keep AudioLooper free of the
+     *        Transport include and avoid header coupling.
+     * @return true if allocated successfully
+     */
+    bool prepareTrackBars(int trackIndex, int bars, int framesPerBar, int sampleRate) {
+        if (bars <= 0 || framesPerBar <= 0) return false;
+        return prepareTrack(trackIndex, bars * framesPerBar, sampleRate);
+    }
+
     bool prepareTrack(int trackIndex, int lengthFrames, int sampleRate) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return false;
         if (lengthFrames <= 0) return false;
 
+        // Tail buffer: extra frames captured AFTER loop boundary, mixed with
+        // fade-out into the start of the next iteration. Preserves sustain of
+        // pads/delays/reverbs across the loop seam. tailMs is global, see
+        // setTailMs(). Tail is capped at loopFrames internally by TrackBuffer
+        // to keep the math sane for very short loops.
+        const int tailMs = mTailMs.load(std::memory_order_acquire);
+        const int tailFrames = (tailMs > 0)
+            ? (tailMs * sampleRate) / 1000
+            : 0;
+        const int totalFrames = lengthFrames + tailFrames;
+
         // Each track can have its own length — no master loop enforcement
-        size_t needed = static_cast<size_t>(lengthFrames) * 2 * sizeof(float);
+        size_t needed = static_cast<size_t>(totalFrames) * 2 * sizeof(float);
         size_t currentUsage = getTotalAllocatedBytes();
         size_t trackCurrent = mTracks[trackIndex].allocatedBytes();
         if (currentUsage - trackCurrent + needed > MEMORY_BUDGET_BYTES) {
             return false;
         }
 
-        size_t allocated = mTracks[trackIndex].allocate(lengthFrames, sampleRate);
+        size_t allocated = mTracks[trackIndex].allocate(lengthFrames, sampleRate, tailFrames);
         return allocated > 0;
     }
+
+    /**
+     * @brief Set the tail capture length in milliseconds (default 250ms).
+     *        Affects all tracks prepared AFTER this call (existing tracks unchanged).
+     *        Set to 0 to disable tail capture (legacy behavior).
+     *        Capped at 2000 ms.
+     */
+    void setTailMs(int ms) {
+        if (ms < 0) ms = 0;
+        if (ms > 2000) ms = 2000;
+        mTailMs.store(ms, std::memory_order_release);
+    }
+    int getTailMs() const { return mTailMs.load(std::memory_order_acquire); }
 
     void startRecording(int trackIndex) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return;
@@ -180,9 +261,71 @@ public:
         mRecordCapacityFrames.store(capacity, std::memory_order_release);
         mRecordFramesRemaining.store(capacity, std::memory_order_release);
         mRecordProgress.store(0.0f, std::memory_order_release);
+        mLoopFinalizedDuringRec.store(false, std::memory_order_release);
         mOverdubbing.store(false, std::memory_order_release);
         mRecordingTrack.store(trackIndex, std::memory_order_release);
         mEnabled.store(true, std::memory_order_release);
+    }
+
+    /**
+     * @brief Start recording with a pre-roll seed: writes `preRollFrames` of
+     *        prior audio into the start of the track, then continues capturing
+     *        live audio from the audio thread. Call from UI thread; the
+     *        seed write is one-shot and finishes before recording begins.
+     * @param trackIndex Target track.
+     * @param preRollData Stereo interleaved buffer (size = preRollFrames * 2).
+     * @param preRollFrames Number of pre-roll frames (clamped to track capacity-1).
+     */
+    void startRecordingWithPreRoll(int trackIndex, const float* preRollData, int preRollFrames) {
+        if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return;
+        const int capacity = mTracks[trackIndex].getCapacityFrames();
+        if (capacity <= 0) return;
+        if (preRollFrames < 0) preRollFrames = 0;
+        if (preRollFrames >= capacity) preRollFrames = capacity - 1;
+
+        // Write the pre-roll into the buffer head BEFORE flipping the recording
+        // flag so the audio thread doesn't race with our seed writes.
+        if (preRollData && preRollFrames > 0) {
+            for (int i = 0; i < preRollFrames; ++i) {
+                mTracks[trackIndex].writeFrame(preRollData[i * 2], preRollData[i * 2 + 1]);
+            }
+        }
+
+        // Now arm the audio thread to fill the remaining capacity.
+        mRecordCapacityFrames.store(capacity, std::memory_order_release);
+        mRecordFramesRemaining.store(capacity - preRollFrames, std::memory_order_release);
+        // Progress already accounts for the pre-roll seed.
+        const float seedProgress = (capacity > 0)
+            ? static_cast<float>(preRollFrames) / static_cast<float>(capacity)
+            : 0.0f;
+        mRecordProgress.store(seedProgress, std::memory_order_release);
+        mLoopFinalizedDuringRec.store(false, std::memory_order_release);
+        mOverdubbing.store(false, std::memory_order_release);
+        mRecordingTrack.store(trackIndex, std::memory_order_release);
+        mEnabled.store(true, std::memory_order_release);
+    }
+
+    /**
+     * @brief Arm a track to start recording when the transport reaches
+     *        `triggerFrame`. Used for downbeat-aligned multi-track sync.
+     *        Caller computes triggerFrame via Transport::nextBarBoundary().
+     *        Pass triggerFrame=0 to record immediately on next callback.
+     */
+    void armRecording(int trackIndex, int64_t triggerFrame) {
+        if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return;
+        if (mTracks[trackIndex].getCapacityFrames() <= 0) return;
+        mArmedTriggerFrame.store(triggerFrame, std::memory_order_release);
+        mArmedTrack.store(trackIndex, std::memory_order_release);
+        mEnabled.store(true, std::memory_order_release);
+    }
+
+    /** Cancel any pending armed recording (does not affect a recording in progress). */
+    void cancelArm() {
+        mArmedTrack.store(-1, std::memory_order_release);
+    }
+
+    int getArmedTrack() const {
+        return mArmedTrack.load(std::memory_order_acquire);
     }
 
     /**
@@ -231,6 +374,7 @@ public:
             finalizeCurrentRecording();
         }
         mRecordingTrack.store(-1, std::memory_order_release);
+        mArmedTrack.store(-1, std::memory_order_release);
         mOverdubbing.store(false, std::memory_order_release);
         for (int i = 0; i < MAX_TRACKS; ++i) {
             mTracks[i].setPlaying(false);
@@ -247,6 +391,7 @@ public:
 
     void clearAll() {
         mRecordingTrack.store(-1, std::memory_order_release);
+        mArmedTrack.store(-1, std::memory_order_release);
         mOverdubbing.store(false, std::memory_order_release);
         for (int i = 0; i < MAX_TRACKS; ++i) {
             mTracks[i].clear();  // clear() resets mPlaying, mPlayHead, mProgress
@@ -404,18 +549,28 @@ public:
                         wavData.sampleRate, sampleRate, ratio, wavData.numFrames, outputFrames);
 
             resampledBuffer.resize(static_cast<size_t>(outputFrames) * 2);
+            // Catmull-Rom cubic resample. For boundary frames the neighbours
+            // clamp to [0, numFrames-1] (no wrap — sources are not loops).
+            const int srcLast = wavData.numFrames - 1;
             for (int i = 0; i < outputFrames; ++i) {
-                // Source position (fractional)
-                double srcPos = i / ratio;
-                int srcIdx0 = static_cast<int>(srcPos);
-                int srcIdx1 = std::min(srcIdx0 + 1, wavData.numFrames - 1);
-                float frac = static_cast<float>(srcPos - srcIdx0);
-
-                // Linear interpolation
-                resampledBuffer[i * 2]     = wavData.buffer[srcIdx0 * 2]     * (1.0f - frac)
-                                           + wavData.buffer[srcIdx1 * 2]     * frac;
-                resampledBuffer[i * 2 + 1] = wavData.buffer[srcIdx0 * 2 + 1] * (1.0f - frac)
-                                           + wavData.buffer[srcIdx1 * 2 + 1] * frac;
+                const double srcPos = i / ratio;
+                const int s1 = std::min(static_cast<int>(srcPos), srcLast);
+                const int s0 = (s1 > 0) ? s1 - 1 : 0;
+                const int s2 = std::min(s1 + 1, srcLast);
+                const int s3 = std::min(s1 + 2, srcLast);
+                const float t = static_cast<float>(srcPos - s1);
+                const float t2 = t * t;
+                const float t3 = t2 * t;
+                for (int ch = 0; ch < 2; ++ch) {
+                    const float p0 = wavData.buffer[s0 * 2 + ch];
+                    const float p1 = wavData.buffer[s1 * 2 + ch];
+                    const float p2 = wavData.buffer[s2 * 2 + ch];
+                    const float p3 = wavData.buffer[s3 * 2 + ch];
+                    resampledBuffer[i * 2 + ch] = 0.5f * ((2.0f * p1)
+                        + (-p0 + p2) * t
+                        + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2
+                        + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+                }
             }
         }
 
@@ -590,22 +745,38 @@ public:
     const TrackBuffer& getTrack(int index) const { return mTracks[index]; }
 
 private:
-    /** Finalize a recording in progress — set master loop, auto-start playback. */
-    void finalizeCurrentRecording() {
-        int recTrack = mRecordingTrack.load(std::memory_order_acquire);
+    /**
+     * @brief Activate the loop for playback while recording continues into the
+     *        tail region. Called when the write head crosses the loop boundary.
+     */
+    void finalizeLoopStartPlayback(int recTrack) {
         if (recTrack < 0 || recTrack >= MAX_TRACKS) return;
-
         mTracks[recTrack].finalizeRecording();
         mTracks[recTrack].resetPlayHead();
         mTracks[recTrack].setPlaying(true);
-        mRecordingTrack.store(-1, std::memory_order_release);
 
-        // Also start any other active tracks that should be playing
+        // Also start any other active tracks that should be playing.
         for (int i = 0; i < MAX_TRACKS; ++i) {
             if (mTracks[i].isActive() && !mTracks[i].isTrackPlaying()) {
                 mTracks[i].setPlaying(true);
             }
         }
+    }
+
+    /**
+     * @brief Finalize a recording in progress — used by stopRecording() and
+     *        free-length mode. Stops capture immediately and starts playback.
+     *        Tail region (if any) may be partially captured at this point.
+     */
+    void finalizeCurrentRecording() {
+        int recTrack = mRecordingTrack.load(std::memory_order_acquire);
+        if (recTrack < 0 || recTrack >= MAX_TRACKS) return;
+
+        if (!mLoopFinalizedDuringRec.load(std::memory_order_acquire)) {
+            finalizeLoopStartPlayback(recTrack);
+        }
+        mRecordingTrack.store(-1, std::memory_order_release);
+        mLoopFinalizedDuringRec.store(false, std::memory_order_release);
     }
 
     bool hasAnyActiveTracks() const {
@@ -626,7 +797,11 @@ private:
     TrackBuffer mTracks[MAX_TRACKS];
 
     std::atomic<int> mRecordingTrack{-1};
+    std::atomic<int> mArmedTrack{-1};
+    std::atomic<int64_t> mArmedTriggerFrame{0};
     std::atomic<bool> mOverdubbing{false};
+    std::atomic<bool> mLoopFinalizedDuringRec{false};
+    std::atomic<int> mTailMs{250};  // Default tail capture (preserves sustain at loop seam)
     std::atomic<int> mRecordFramesRemaining{0};
     std::atomic<int> mRecordCapacityFrames{0};
     std::atomic<bool> mEnabled{false};
