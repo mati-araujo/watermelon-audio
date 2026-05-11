@@ -1332,6 +1332,15 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUse
 }
 
 JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeCreateSplitBackend(
+    JNIEnv* env, jobject thiz, jint inputBackendId, jint outputBackendId) {
+    auto& backendManager = watermelon_audio::BackendManager::getInstance();
+    auto inputType = static_cast<watermelon_audio::BackendType>(inputBackendId);
+    auto outputType = static_cast<watermelon_audio::BackendType>(outputBackendId);
+    return backendManager.createSplitBackend(inputType, outputType) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelectBackend(
     JNIEnv* env, jobject thiz, jint backendId) {
     auto& backendManager = watermelon_audio::BackendManager::getInstance();
@@ -2525,6 +2534,78 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     JNIEnv* env, jobject thiz, jboolean isDownbeat) {
     if (g_jniState.engine)
         g_jniState.engine->getAudioLooper().triggerClick(isDownbeat == JNI_TRUE);
+}
+
+// Input metering (lock-free) — peak level of the input stream, useful as a
+// pre-record signal indicator. Returns 0 if no input source is active.
+// Returns max of L/R channels in linear [0..1] range.
+JNIEXPORT jfloat JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetInputPeak(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.inputNode) return 0.0f;
+    float l = g_jniState.inputNode->getInputLevelLinear(0);
+    float r = g_jniState.inputNode->getInputLevelLinear(1);
+    return l > r ? l : r;
+}
+
+// ========== TRANSPORT (BPM, beats, RT-safe metronome scheduler) ==========
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportSetBeatsPerBar(
+    JNIEnv* env, jobject thiz, jint beatsPerBar) {
+    if (g_jniState.engine)
+        g_jniState.engine->getTransport().setBeatsPerBar(beatsPerBar);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportGetBeatsPerBar(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 4;
+    return g_jniState.engine->getTransport().getBeatsPerBar();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportFramesPerBeat(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getTransport().framesPerBeat();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportFramesPerBar(
+    JNIEnv* env, jobject thiz, jint bars) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getTransport().framesPerBar(bars);
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportStartMetronome(
+    JNIEnv* env, jobject thiz, jint beats, jboolean firstIsDownbeat,
+    jboolean everyBeatPattern) {
+    if (g_jniState.engine)
+        g_jniState.engine->getTransport().startMetronome(
+            beats, firstIsDownbeat == JNI_TRUE, everyBeatPattern == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportStopMetronome(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine)
+        g_jniState.engine->getTransport().stopMetronome();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportIsMetronomeRunning(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    return g_jniState.engine->getTransport().isMetronomeRunning() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportGetRemainingBeats(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getTransport().getRemainingBeats();
 }
 
 // Export / Import (NOT RT-safe — call from IO thread)

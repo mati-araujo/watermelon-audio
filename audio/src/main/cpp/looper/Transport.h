@@ -1,0 +1,182 @@
+#pragma once
+
+#include "AudioLooper.h"
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+
+/**
+ * @class Transport
+ * @brief Sample-accurate musical transport for tempo/BPM-driven scheduling.
+ *
+ * Owns the global musical clock: BPM, beats-per-bar, sample rate. Provides:
+ *  - frame-precise quantization helpers (frames-per-beat, frames-per-bar)
+ *  - RT-safe metronome scheduler that emits N clicks at exact frame intervals
+ *    independent of UI thread responsiveness.
+ *
+ * The UI calls `startMetronome(beats, withDownbeat)` once and the audio thread
+ * delivers every click on time. This eliminates the "click sometimes plays,
+ * sometimes doesn't" symptom caused by UI-driven scheduling jank.
+ *
+ * Threading:
+ *  - setBpm/setBeatsPerBar/setSampleRate/startMetronome/stopMetronome → UI thread
+ *  - tick() → audio thread (RT-safe, lock-free)
+ *  - All cross-thread state via std::atomic
+ *
+ * Future extensions (Sprint 2+):
+ *  - Bar/beat quantization helpers for loop length
+ *  - "Armed → wait for downbeat → record" state machine
+ *  - Ableton Link / MIDI clock sync
+ */
+class Transport {
+public:
+    static constexpr float MIN_BPM = 20.0f;
+    static constexpr float MAX_BPM = 300.0f;
+    static constexpr int MIN_BEATS_PER_BAR = 1;
+    static constexpr int MAX_BEATS_PER_BAR = 16;
+
+    Transport() { recompute(); }
+
+    // ========== Configuration (UI thread) ==========
+
+    void setSampleRate(int sampleRate) {
+        if (sampleRate <= 0) return;
+        mSampleRate.store(sampleRate, std::memory_order_release);
+        recompute();
+    }
+
+    void setBpm(float bpm) {
+        bpm = std::clamp(bpm, MIN_BPM, MAX_BPM);
+        mBpm.store(bpm, std::memory_order_release);
+        recompute();
+    }
+
+    void setBeatsPerBar(int beats) {
+        beats = std::clamp(beats, MIN_BEATS_PER_BAR, MAX_BEATS_PER_BAR);
+        mBeatsPerBar.store(beats, std::memory_order_release);
+    }
+
+    int getSampleRate()   const { return mSampleRate.load(std::memory_order_acquire); }
+    float getBpm()        const { return mBpm.load(std::memory_order_acquire); }
+    int getBeatsPerBar()  const { return mBeatsPerBar.load(std::memory_order_acquire); }
+
+    // ========== Quantization helpers (any thread) ==========
+
+    /** Frames per beat at current BPM/SR. */
+    int framesPerBeat() const {
+        return mFramesPerBeat.load(std::memory_order_acquire);
+    }
+
+    /** Frames in `bars` complete bars at current BPM/SR/beats-per-bar. */
+    int framesPerBar(int bars) const {
+        if (bars <= 0) return 0;
+        return mFramesPerBeat.load(std::memory_order_acquire)
+             * mBeatsPerBar.load(std::memory_order_acquire)
+             * bars;
+    }
+
+    // ========== Metronome scheduling (UI thread) ==========
+
+    /**
+     * @brief Schedule N clicks at exact beat intervals starting "now".
+     *        First click fires on the next audio callback; subsequent clicks
+     *        fire framesPerBeat() frames apart with sample accuracy.
+     * @param beats Number of clicks to emit (e.g. 4 for a one-bar pre-count).
+     * @param firstIsDownbeat If true, the first click is a downbeat (higher pitch).
+     * @param everyBeatDownbeatPattern If true, clicks N where N % beatsPerBar == 0
+     *        are downbeats; otherwise only the first click is a downbeat.
+     */
+    void startMetronome(int beats, bool firstIsDownbeat = true,
+                        bool everyBeatDownbeatPattern = false) {
+        if (beats <= 0) {
+            stopMetronome();
+            return;
+        }
+        // Configure click pattern atomically — audio thread will pick this up
+        // on the next tick().
+        mPatternMode.store(everyBeatDownbeatPattern ? 1 : 0, std::memory_order_relaxed);
+        mFirstIsDownbeat.store(firstIsDownbeat, std::memory_order_relaxed);
+        mClickIndex.store(0, std::memory_order_relaxed);
+        mFramesUntilNextClick.store(0, std::memory_order_relaxed);  // fire immediately
+        mBeatsRemaining.store(beats, std::memory_order_release);    // arms scheduler
+    }
+
+    /** Cancel any in-flight metronome schedule. Currently-sounding click decays naturally. */
+    void stopMetronome() {
+        mBeatsRemaining.store(0, std::memory_order_release);
+    }
+
+    bool isMetronomeRunning() const {
+        return mBeatsRemaining.load(std::memory_order_acquire) > 0;
+    }
+
+    int getRemainingBeats() const {
+        return mBeatsRemaining.load(std::memory_order_acquire);
+    }
+
+    // ========== Audio thread tick (RT-safe) ==========
+
+    /**
+     * @brief Advance the transport by `numFrames` frames. Emits any clicks that
+     *        fall within this audio block via `looper.triggerClick(...)`.
+     *        RT-safe: lock-free, no allocations, no syscalls.
+     *
+     * Note: Click is fired at the audio block granularity, not sample-accurate
+     *       to within the block. Jitter is bounded by `numFrames` (typically
+     *       <10 ms at default Oboe burst sizes). For sample-accurate triggering,
+     *       a future revision can split the block at the click frame.
+     */
+    void tick(int numFrames, AudioLooper& looper) {
+        int beatsLeft = mBeatsRemaining.load(std::memory_order_acquire);
+        if (beatsLeft <= 0) return;
+
+        const int fpb = mFramesPerBeat.load(std::memory_order_relaxed);
+        if (fpb <= 0) return;
+
+        int next = mFramesUntilNextClick.load(std::memory_order_relaxed);
+        next -= numFrames;
+
+        const int beatsPerBar = mBeatsPerBar.load(std::memory_order_relaxed);
+        const int patternMode = mPatternMode.load(std::memory_order_relaxed);
+        const bool firstDown = mFirstIsDownbeat.load(std::memory_order_relaxed);
+        int idx = mClickIndex.load(std::memory_order_relaxed);
+
+        // Emit all clicks whose target frame fell inside this block. Tight bounded
+        // loop — at most 1 iteration in practice (numFrames <= ~1024, fpb >= 1600).
+        while (next <= 0 && beatsLeft > 0) {
+            const bool isDown = (patternMode == 1)
+                ? (idx % beatsPerBar) == 0
+                : (idx == 0 && firstDown);
+            looper.triggerClick(isDown);
+            idx++;
+            beatsLeft--;
+            next += fpb;
+        }
+
+        mClickIndex.store(idx, std::memory_order_relaxed);
+        mFramesUntilNextClick.store(next, std::memory_order_relaxed);
+        mBeatsRemaining.store(beatsLeft, std::memory_order_release);
+    }
+
+private:
+    void recompute() {
+        const int sr = mSampleRate.load(std::memory_order_relaxed);
+        const float bpm = mBpm.load(std::memory_order_relaxed);
+        if (sr <= 0 || bpm <= 0.0f) return;
+        const float fpb = (60.0f / bpm) * static_cast<float>(sr);
+        mFramesPerBeat.store(static_cast<int>(std::round(fpb)),
+                             std::memory_order_release);
+    }
+
+    std::atomic<int>   mSampleRate{48000};
+    std::atomic<float> mBpm{120.0f};
+    std::atomic<int>   mBeatsPerBar{4};
+    std::atomic<int>   mFramesPerBeat{24000};   // = 60/120 * 48000
+
+    // Metronome scheduler state
+    std::atomic<int>  mBeatsRemaining{0};        // 0 = idle
+    std::atomic<int>  mFramesUntilNextClick{0};  // can go negative briefly
+    std::atomic<int>  mClickIndex{0};            // 0..N-1 within current schedule
+    std::atomic<int>  mPatternMode{0};           // 0 = "first is down", 1 = "every bar"
+    std::atomic<bool> mFirstIsDownbeat{true};
+};

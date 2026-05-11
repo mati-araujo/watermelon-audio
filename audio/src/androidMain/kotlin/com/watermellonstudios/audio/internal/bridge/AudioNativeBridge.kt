@@ -1970,10 +1970,19 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Select audio backend.
      *
-     * @param backendId Backend ID (0=OBOE, 1=LIBUSB)
+     * @param backendId Backend ID (1=OBOE, 2=LIBUSB, 3=SPLIT)
      * @return true if backend was selected successfully
      */
     override fun selectBackend(backendId: Int): Boolean = nativeSelectBackend(backendId)
+
+    /**
+     * Create an opt-in split backend from two existing native backends.
+     *
+     * Use backend IDs 1=OBOE and 2=LIBUSB. After this returns true, call
+     * [selectBackend] with backend ID 3 to activate the split.
+     */
+    override fun createSplitBackend(inputBackendId: Int, outputBackendId: Int): Boolean =
+        nativeCreateSplitBackend(inputBackendId, outputBackendId)
 
     /**
      * Get current backend type.
@@ -2069,6 +2078,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     private external fun nativeIsUsbBackendAvailable(): Boolean
     private external fun nativeSetUseBackendManager(use: Boolean)
+    private external fun nativeCreateSplitBackend(inputBackendId: Int, outputBackendId: Int): Boolean
     private external fun nativeSelectBackend(backendId: Int): Boolean
     private external fun nativeGetCurrentBackendType(): Int
     private external fun nativeSetUsbStreamingMode(modeId: Int)
@@ -2581,6 +2591,20 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperGetTrackLoopStart(trackIndex: Int): Int
     private external fun nativeLooperGetTrackLoopEnd(trackIndex: Int): Int
     private external fun nativeLooperTriggerClick(isDownbeat: Boolean)
+    private external fun nativeLooperGetInputPeak(): Float
+
+    // Musical transport (BPM-driven scheduler, RT-safe metronome)
+    private external fun nativeTransportSetBeatsPerBar(beatsPerBar: Int)
+    private external fun nativeTransportGetBeatsPerBar(): Int
+    private external fun nativeTransportFramesPerBeat(): Int
+    private external fun nativeTransportFramesPerBar(bars: Int): Int
+    private external fun nativeTransportStartMetronome(
+        beats: Int, firstIsDownbeat: Boolean, everyBeatPattern: Boolean
+    )
+    private external fun nativeTransportStopMetronome()
+    private external fun nativeTransportIsMetronomeRunning(): Boolean
+    private external fun nativeTransportGetRemainingBeats(): Int
+
     private external fun nativeLooperExportMix(filePath: String): Boolean
     private external fun nativeLooperExportTrack(trackIndex: Int, filePath: String): Boolean
     private external fun nativeLooperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean
@@ -2652,6 +2676,43 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     // Metronome click (lock-free)
     fun looperTriggerClick(isDownbeat: Boolean) = nativeLooperTriggerClick(isDownbeat)
+
+    /**
+     * Linear input peak [0..1], max of L/R channels. Useful for pre-record level
+     * indicator UI when the user is about to arm a track from input_fx mode.
+     * Returns 0 when no input source is active.
+     */
+    fun looperGetInputPeak(): Float = nativeLooperGetInputPeak()
+
+    // ========== TRANSPORT (BPM, beats, RT-safe metronome scheduler) ==========
+    //
+    // Use this instead of looperTriggerClick() for sample-accurate metronome.
+    // The scheduler runs in C++ on the audio thread, so clicks fire on time
+    // regardless of UI/Compose jank.
+    //
+    // Typical pre-count usage:
+    //   setBpm(120f)
+    //   transportSetBeatsPerBar(4)
+    //   transportStartMetronome(beats = 4, firstIsDownbeat = true,
+    //                           everyBeatPattern = true)
+    //
+    // Loop-length quantization (frames for N bars at current BPM/SR):
+    //   val frames = transportFramesPerBar(2)  // 2-bar loop
+    //   looperPrepareTrack(idx, frames, sr)
+
+    fun transportSetBeatsPerBar(beatsPerBar: Int) =
+        nativeTransportSetBeatsPerBar(beatsPerBar)
+    fun transportGetBeatsPerBar(): Int = nativeTransportGetBeatsPerBar()
+    fun transportFramesPerBeat(): Int = nativeTransportFramesPerBeat()
+    fun transportFramesPerBar(bars: Int): Int = nativeTransportFramesPerBar(bars)
+    fun transportStartMetronome(
+        beats: Int,
+        firstIsDownbeat: Boolean = true,
+        everyBeatPattern: Boolean = true
+    ) = nativeTransportStartMetronome(beats, firstIsDownbeat, everyBeatPattern)
+    fun transportStopMetronome() = nativeTransportStopMetronome()
+    fun transportIsMetronomeRunning(): Boolean = nativeTransportIsMetronomeRunning()
+    fun transportGetRemainingBeats(): Int = nativeTransportGetRemainingBeats()
 
     // Export / Import (call from IO thread)
     fun looperExportMix(filePath: String): Boolean = nativeLooperExportMix(filePath)

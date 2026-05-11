@@ -1036,6 +1036,18 @@ void AudioEngine::applyEffectsAndOutput(float* output, int32_t numFrames) {
     mOutputStage.dcBlock(mOutputStage.getTempBuffer(), numFrames);
     mEffectChain.process(mOutputStage.getTempBuffer(), output, numFrames);
 
+    // ---- TRANSPORT TICK ----
+    // Emits any scheduled metronome clicks for this audio block. RT-safe; runs
+    // before the looper so the click is mixed by AudioLooper::process.
+    mTransport.tick(numFrames, mAudioLooper);
+
+    // ---- LOOPER TAP: post-FX, PRE-master-vol/fade ----
+    // Capturing here ensures the looper records the user-perceived "instrument"
+    // signal (post-effects) without being attenuated by master volume or fade.
+    // This makes recording independent of the user adjusting global volume
+    // mid-take and is the standard practice in professional loopers.
+    mAudioLooper.process(output, numFrames);
+
     // Fade + master volume
     float fadeStart, fadeEnd;
     mFadeCtrl.processFadeBlock(numFrames, fadeStart, fadeEnd);
@@ -1546,8 +1558,9 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
         // MIX mode monitoring (post-render)
         handleMixMonitoring(outputData, numFrames, inputNode, oscillatorEnabled, hasInputMonitoring);
 
-        // Audio looper + waveform capture (all legacy branches)
-        mAudioLooper.process(outputData, numFrames);
+        // Waveform capture (final post-master output for visualization).
+        // Looper tap moved INTO applyEffectsAndOutput (post-FX, pre-master-vol)
+        // so it captures the dry instrument signal independent of master volume.
         mWaveformCapture.write(outputData, numFrames);
 
         mCallbackErrorCount.store(0, std::memory_order_relaxed);
@@ -1734,6 +1747,10 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate) {
 
     // Configure effect chain
     mEffectChain.setSampleRate(sampleRate);
+
+    // Configure looper (click envelope is sample-rate aware; transport too).
+    mAudioLooper.setSampleRate(sampleRate);
+    mTransport.setSampleRate(sampleRate);
 
     // Configure arpeggiator
     mArpSequencer.prepare(sampleRate);

@@ -349,6 +349,22 @@ struct UsbFeatureUnit {
         }
         return false;
     }
+
+    std::vector<uint8_t> volumeControlChannels(uint8_t uacVersion = 1) const {
+        std::vector<uint8_t> channels;
+        for (uint8_t ch = 0; ch < channelControls.size(); ++ch) {
+            if (hasVolumeControl(ch, uacVersion)) channels.push_back(ch);
+        }
+        return channels;
+    }
+
+    std::vector<uint8_t> muteControlChannels(uint8_t uacVersion = 1) const {
+        std::vector<uint8_t> channels;
+        for (uint8_t ch = 0; ch < channelControls.size(); ++ch) {
+            if (hasMuteControl(ch, uacVersion)) channels.push_back(ch);
+        }
+        return channels;
+    }
 };
 
 // ============================================================================

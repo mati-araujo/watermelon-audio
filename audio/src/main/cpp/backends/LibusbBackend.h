@@ -114,6 +114,7 @@ public:
     BackendType getType() const override { return BackendType::LIBUSB; }
     bool supportsFullDuplex() const override;
     bool supportsPause() const override { return true; }
+    BackendEndpointCapabilities getEndpointCapabilities() const override;
 
     /**
      * Check if the device has audio capture capability.
@@ -203,6 +204,14 @@ public:
      * Device capabilities query.
      */
     struct DeviceCapabilities {
+        struct ChannelHardwareVolumeCapability {
+            int channelNumber = 0;  // 0 = master, 1+ = physical/logical channel
+            bool hasHardwareVolume = false;
+            bool hasHardwareMute = false;
+            bool volumeVerified = false;
+            bool muteVerified = false;
+        };
+
         std::vector<int> supportedSampleRates;
         std::vector<int> supportedBitDepths;
         int maxChannelsOutput = 0;
@@ -223,6 +232,9 @@ public:
         float outputVolumeMaxDb = 0.0f;
         float inputVolumeMinDb = -96.0f;
         float inputVolumeMaxDb = 0.0f;
+
+        std::vector<ChannelHardwareVolumeCapability> outputHardwareChannelCaps;
+        std::vector<ChannelHardwareVolumeCapability> inputHardwareChannelCaps;
     };
 
     /**

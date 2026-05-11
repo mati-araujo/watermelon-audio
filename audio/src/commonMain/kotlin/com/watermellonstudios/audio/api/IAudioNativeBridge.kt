@@ -113,6 +113,7 @@ interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter {
     // ==================== BACKEND ====================
 
     fun setUseBackendManager(useBackendManager: Boolean)
+    fun createSplitBackend(inputBackendId: Int, outputBackendId: Int): Boolean
     fun selectBackend(backendId: Int): Boolean
     fun getCurrentBackendType(): Int
     fun isUsbBackendAvailable(): Boolean

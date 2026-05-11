@@ -7,9 +7,10 @@
 #include <cstring>
 #include "../platform/Logger.h"
 
-#define P12_LOG_TAG "P12.Looper"
-#define P12_LOGD(...) wma::logMessage(wma::LogLevel::DEBUG, P12_LOG_TAG, __VA_ARGS__)
-#define P12_LOGE(...) wma::logMessage(wma::LogLevel::ERROR, P12_LOG_TAG, __VA_ARGS__)
+#define LOOPER_LOG_TAG "Looper"
+#define LOOPER_LOGD(...) wma::logMessage(wma::LogLevel::DEBUG, LOOPER_LOG_TAG, __VA_ARGS__)
+#define LOOPER_LOGI(...) wma::logMessage(wma::LogLevel::INFO,  LOOPER_LOG_TAG, __VA_ARGS__)
+#define LOOPER_LOGE(...) wma::logMessage(wma::LogLevel::ERROR, LOOPER_LOG_TAG, __VA_ARGS__)
 
 /**
  * @class AudioLooper
@@ -33,12 +34,28 @@ class AudioLooper {
 public:
     static constexpr int MAX_TRACKS = 8;
     static constexpr size_t MEMORY_BUDGET_BYTES = 48ULL * 1024ULL * 1024ULL;  // 48 MB
-    static constexpr int CLICK_DURATION_FRAMES = 480;   // ~10ms @ 48kHz
-    static constexpr int CLICK_FADE_FRAMES = 120;       // fade-out last 25%
-    static constexpr int MAX_BUFFER_FRAMES = 1024;      // Max Oboe buffer size
+    // Click envelope is sample-rate aware; recompute on prepare()/setSampleRate()
+    static constexpr float CLICK_DURATION_MS = 10.0f;
+    static constexpr float CLICK_FADE_MS = 2.5f;        // ~25% of duration
+    // Initial mix buffer capacity; grows on demand if Oboe gives larger callbacks.
+    static constexpr int INITIAL_MIX_CAPACITY_FRAMES = 2048;
 
-    AudioLooper() = default;
+    AudioLooper() {
+        mLooperMixBuf.resize(static_cast<size_t>(INITIAL_MIX_CAPACITY_FRAMES) * 2, 0.0f);
+        recomputeClickFrames();
+    }
     ~AudioLooper() = default;
+
+    /**
+     * @brief Update sample rate. Call from UI/control thread (NOT audio thread).
+     *        Recomputes click envelope durations.
+     */
+    void setSampleRate(int sampleRate) {
+        if (sampleRate <= 0) return;
+        mSampleRate.store(sampleRate, std::memory_order_release);
+        recomputeClickFrames();
+    }
+    int getSampleRate() const { return mSampleRate.load(std::memory_order_acquire); }
 
     // ========== Audio thread (RT-safe) ==========
 
@@ -86,11 +103,20 @@ public:
         }
 
         // ---- PLAYBACK (mix all tracks into temp buffer, apply master volume) ----
-        int framesToProcess = std::min(numFrames, MAX_BUFFER_FRAMES);
-        std::memset(mLooperMixBuf, 0, sizeof(float) * framesToProcess * 2);
+        // mLooperMixBuf grows on demand if Oboe delivers larger callbacks than the initial
+        // capacity. The growth path runs on the audio thread, but is rare in steady state
+        // (only first oversized callback triggers it). After grow, subsequent callbacks reuse.
+        const size_t needed = static_cast<size_t>(numFrames) * 2;
+        if (mLooperMixBuf.capacity() < needed) {
+            // RT-unfriendly grow — accept one-time allocation, log it for visibility.
+            mLooperMixBuf.resize(needed);
+            LOOPER_LOGI("mix buffer grown to %d frames (callback exceeded initial capacity)",
+                        numFrames);
+        }
+        std::memset(mLooperMixBuf.data(), 0, sizeof(float) * needed);
 
         for (int t = 0; t < MAX_TRACKS; ++t) {
-            mTracks[t].mixInto(mLooperMixBuf, framesToProcess);
+            mTracks[t].mixInto(mLooperMixBuf.data(), numFrames);
         }
 
         // Apply master volume with smoothing, then add to main output
@@ -98,7 +124,7 @@ public:
         float targetMaster = mMasterVolume.load(std::memory_order_acquire);
         constexpr float kSmooth = 0.995f;
 
-        for (int i = 0; i < framesToProcess; ++i) {
+        for (int i = 0; i < numFrames; ++i) {
             masterVol = kSmooth * masterVol + (1.0f - kSmooth) * targetMaster;
             audioData[i * 2]     += mLooperMixBuf[i * 2]     * masterVol;
             audioData[i * 2 + 1] += mLooperMixBuf[i * 2 + 1] * masterVol;
@@ -111,13 +137,14 @@ public:
             int phase = mClickPhase.load(std::memory_order_relaxed);
             float freq = mClickFreq.load(std::memory_order_relaxed);
             float gain = mClickGain.load(std::memory_order_relaxed);
+            const float invSr = mInvSampleRate.load(std::memory_order_relaxed);
+            const int fadeFrames = mClickFadeFrames.load(std::memory_order_relaxed);
             for (int i = 0; i < numFrames && remaining > 0; ++i) {
-                // Sine burst with envelope (fade out last 25%)
-                float env = (remaining < CLICK_FADE_FRAMES)
-                    ? static_cast<float>(remaining) / static_cast<float>(CLICK_FADE_FRAMES)
+                float env = (remaining < fadeFrames && fadeFrames > 0)
+                    ? static_cast<float>(remaining) / static_cast<float>(fadeFrames)
                     : 1.0f;
                 float sample = std::sin(2.0f * static_cast<float>(M_PI) * freq
-                    * static_cast<float>(phase) / 48000.0f) * gain * env;
+                    * static_cast<float>(phase) * invSr) * gain * env;
                 audioData[i * 2] += sample;
                 audioData[i * 2 + 1] += sample;
                 phase++;
@@ -357,13 +384,13 @@ public:
     bool importTrack(int trackIndex, const char* filePath, int sampleRate) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return false;
 
-        P12_LOGD("[P12] importTrack: reading %s", filePath);
+        LOOPER_LOGD("importTrack: reading %s", filePath);
         wav::WavData wavData = wav::readWav(filePath);
         if (wavData.numFrames <= 0) {
-            P12_LOGE("[P12] importTrack FAILED: readWav returned 0 frames (unsupported format or corrupt file)");
+            LOOPER_LOGE("importTrack FAILED: readWav returned 0 frames (unsupported format or corrupt file)");
             return false;
         }
-        P12_LOGD("[P12] importTrack: %d frames, %dHz, %d ch", wavData.numFrames, wavData.sampleRate, wavData.numChannels);
+        LOOPER_LOGD("importTrack: %d frames, %dHz, %d ch", wavData.numFrames, wavData.sampleRate, wavData.numChannels);
 
         // Resample if source sample rate differs from target (e.g., 44100 → 48000)
         bool needsResample = (wavData.sampleRate > 0 && wavData.sampleRate != sampleRate);
@@ -373,8 +400,8 @@ public:
         if (needsResample) {
             double ratio = static_cast<double>(sampleRate) / static_cast<double>(wavData.sampleRate);
             outputFrames = static_cast<int>(std::ceil(wavData.numFrames * ratio));
-            P12_LOGD("[P12] Resampling %dHz → %dHz (ratio=%.4f, %d → %d frames)",
-                     wavData.sampleRate, sampleRate, ratio, wavData.numFrames, outputFrames);
+            LOOPER_LOGD("Resampling %dHz -> %dHz (ratio=%.4f, %d -> %d frames)",
+                        wavData.sampleRate, sampleRate, ratio, wavData.numFrames, outputFrames);
 
             resampledBuffer.resize(static_cast<size_t>(outputFrames) * 2);
             for (int i = 0; i < outputFrames; ++i) {
@@ -399,8 +426,8 @@ public:
         size_t currentUsage = getTotalAllocatedBytes();
         size_t trackCurrent = mTracks[trackIndex].allocatedBytes();
         if (currentUsage - trackCurrent + needed > MEMORY_BUDGET_BYTES) {
-            P12_LOGE("[P12] importTrack FAILED: memory budget exceeded (need %zu, budget %zu, used %zu)",
-                     needed, MEMORY_BUDGET_BYTES, currentUsage - trackCurrent);
+            LOOPER_LOGE("importTrack FAILED: memory budget exceeded (need %zu, budget %zu, used %zu)",
+                        needed, MEMORY_BUDGET_BYTES, currentUsage - trackCurrent);
             return false;
         }
 
@@ -506,12 +533,13 @@ public:
         return mTracks[index].getLoopEnd();
     }
 
-    /** Trigger a metronome click. Call from UI thread during pre-count. */
+    /** Trigger a metronome click. RT-safe — can be called from UI or audio thread. */
     void triggerClick(bool isDownbeat) {
         mClickFreq.store(isDownbeat ? 1200.0f : 900.0f, std::memory_order_relaxed);
         mClickGain.store(isDownbeat ? 0.35f : 0.25f, std::memory_order_relaxed);
         mClickPhase.store(0, std::memory_order_relaxed);
-        mClickRemaining.store(CLICK_DURATION_FRAMES, std::memory_order_release);
+        mClickRemaining.store(mClickDurationFrames.load(std::memory_order_relaxed),
+                              std::memory_order_release);
     }
 
     // ========== State queries (lock-free) ==========
@@ -610,11 +638,33 @@ private:
     // Master volume (applied to combined looper output)
     std::atomic<float> mMasterVolume{1.0f};
     std::atomic<float> mMasterVolSmoother{1.0f};
-    float mLooperMixBuf[MAX_BUFFER_FRAMES * 2] = {};  // Pre-allocated temp buffer for mixing
+
+    // Pre-allocated mixing buffer (heap, grows on demand from audio thread).
+    // Sized at construction to INITIAL_MIX_CAPACITY_FRAMES, only grows if a callback
+    // ever exceeds it (one-shot allocation, then steady-state).
+    std::vector<float> mLooperMixBuf;
+
+    // Sample rate (kept in sync with engine via setSampleRate()).
+    std::atomic<int> mSampleRate{48000};
+    std::atomic<float> mInvSampleRate{1.0f / 48000.0f};
+    std::atomic<int> mClickDurationFrames{480};
+    std::atomic<int> mClickFadeFrames{120};
 
     // Metronome click state (lock-free)
     std::atomic<int> mClickRemaining{0};
     std::atomic<int> mClickPhase{0};
     std::atomic<float> mClickFreq{1000.0f};
     std::atomic<float> mClickGain{0.3f};
+
+    void recomputeClickFrames() {
+        const int sr = mSampleRate.load(std::memory_order_relaxed);
+        if (sr <= 0) return;
+        mInvSampleRate.store(1.0f / static_cast<float>(sr), std::memory_order_relaxed);
+        mClickDurationFrames.store(
+            static_cast<int>(CLICK_DURATION_MS * 0.001f * static_cast<float>(sr)),
+            std::memory_order_relaxed);
+        mClickFadeFrames.store(
+            static_cast<int>(CLICK_FADE_MS * 0.001f * static_cast<float>(sr)),
+            std::memory_order_relaxed);
+    }
 };

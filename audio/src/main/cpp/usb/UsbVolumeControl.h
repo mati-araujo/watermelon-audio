@@ -15,9 +15,11 @@
 #include <atomic>
 #include <mutex>
 #include <cmath>
+#include <vector>
 #include <libusb.h>
 #include "../platform/Logger.h"
 #include "UsbConstants.h"
+#include "UsbAudioTypes.h"
 
 // Logging macros
 #define VOLUME_LOG_TAG "UsbVolumeControl"
@@ -33,6 +35,14 @@ namespace usb {
  * Volume control capabilities for a Feature Unit.
  */
 struct VolumeCapabilities {
+    struct Channel {
+        uint8_t channelNumber = 0;  // 0 = master, 1+ = physical/logical channel
+        bool hasHardwareVolume = false;
+        bool hasHardwareMute = false;
+        bool volumeVerified = false;
+        bool muteVerified = false;
+    };
+
     bool hasVolumeControl = false;
     bool hasMuteControl = false;
 
@@ -49,6 +59,15 @@ struct VolumeCapabilities {
 
     // Direction: true = output (playback), false = input (capture)
     bool isOutput = true;
+
+    std::vector<Channel> channels;
+
+    const Channel* findChannel(uint8_t channelNumber) const {
+        for (const auto& channel : channels) {
+            if (channel.channelNumber == channelNumber) return &channel;
+        }
+        return nullptr;
+    }
 
     /**
      * Convert UAC volume units to dB.
@@ -150,6 +169,14 @@ public:
                     bool isOutput, uint8_t uacVersion);
 
     /**
+     * Initialize from a parsed Feature Unit descriptor, preserving exact
+     * master/per-channel hardware volume and mute capability bits.
+     */
+    bool initialize(const UsbFeatureUnit& featureUnit,
+                    bool isOutput,
+                    uint8_t uacVersion);
+
+    /**
      * Check if hardware volume control is available and initialized.
      */
     bool hasHardwareVolume() const { return mHardwareVolumeAvailable; }
@@ -163,6 +190,20 @@ public:
      * Get volume capabilities.
      */
     const VolumeCapabilities& getCapabilities() const { return mCapabilities; }
+
+    /**
+     * Set volume for a specific Feature Unit channel.
+     * Channel 0 is master; channels 1..N are physical/logical channels.
+     */
+    bool setChannelVolume(uint8_t channel, float volume);
+
+    /**
+     * Get current volume for a specific Feature Unit channel.
+     */
+    float getChannelVolume(uint8_t channel) const;
+
+    bool setChannelMute(uint8_t channel, bool muted);
+    bool isChannelMuted(uint8_t channel) const;
 
     /**
      * Set master volume (linear 0.0 - 1.0).
@@ -241,7 +282,11 @@ private:
      * Query volume range from device.
      * @return true if successful
      */
-    bool queryVolumeRange();
+    bool queryVolumeRange(uint8_t channel = 0);
+
+    void populateChannelCapabilities(const UsbFeatureUnit& featureUnit, uint8_t uacVersion);
+    uint8_t preferredVolumeChannel() const;
+    uint8_t preferredMuteChannel() const;
 
     /**
      * Set volume via USB control transfer.

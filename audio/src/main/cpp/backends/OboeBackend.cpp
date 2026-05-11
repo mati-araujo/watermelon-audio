@@ -8,6 +8,9 @@
 #include "../platform/Logger.h"
 #include "../platform/Platform.h"
 
+#include <algorithm>
+#include <cstring>
+
 #define LOG_TAG "OboeBackend"
 #define LOGI(...) wma::logMessage(wma::LogLevel::INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) wma::logMessage(wma::LogLevel::WARN, LOG_TAG, __VA_ARGS__)
@@ -232,6 +235,36 @@ float OboeBackend::getInputLatencyMs() const {
     return 0.0f;
 }
 
+BackendEndpointCapabilities OboeBackend::getEndpointCapabilities() const {
+    BackendEndpointCapabilities caps;
+    caps.roles = mFullDuplexEnabled
+        ? (BackendStreamRole::INPUT_SOURCE | BackendStreamRole::OUTPUT_SINK)
+        : BackendStreamRole::OUTPUT_SINK;
+    caps.hasInputSourceContract = mFullDuplexEnabled;
+    caps.callbackCarriesInput = mFullDuplexEnabled;
+    caps.drivesUserCallback = true;
+    return caps;
+}
+
+int32_t OboeBackend::readInput(float* outputData, int32_t maxFrames) {
+    if (!outputData || maxFrames <= 0 || !mInputCaptureRing) {
+        return 0;
+    }
+
+    const size_t samples = static_cast<size_t>(maxFrames * 2);
+    if (!mInputCaptureRing->read(outputData, samples)) {
+        mInputRingUnderruns.fetch_add(1, std::memory_order_relaxed);
+    }
+    return maxFrames;
+}
+
+StreamInfo OboeBackend::getInputStreamInfo() const {
+    StreamInfo info = getStreamInfo();
+    info.channelCount = 2;
+    info.isFullDuplex = (mInputStream != nullptr);
+    return info;
+}
+
 int32_t OboeBackend::getXRunCount() const {
     if (!mOutputStream) {
         return 0;
@@ -257,6 +290,21 @@ oboe::DataCallbackResult OboeBackend::onAudioReady(
     // Track active callbacks for safe shutdown
     mActiveCallbacks.fetch_add(1);
 
+    if (mInputStream && oboeStream == mInputStream.get()) {
+        if (!mIsPaused.load() && audioData && mInputCaptureRing && numFrames > 0) {
+            const size_t samples = static_cast<size_t>(numFrames * oboeStream->getChannelCount());
+            if (!mInputCaptureRing->write(static_cast<const float*>(audioData), samples)) {
+                mInputRingOverruns.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        mActiveCallbacks.fetch_sub(1);
+        if (mActiveCallbacks.load() == 0) {
+            mStopCondition.notify_all();
+        }
+        return oboe::DataCallbackResult::Continue;
+    }
+
     // Early exit if paused or no callback
     if (mIsPaused.load() || !mCallback) {
         // Fill with silence
@@ -268,10 +316,14 @@ oboe::DataCallbackResult OboeBackend::onAudioReady(
         return oboe::DataCallbackResult::Continue;
     }
 
-    // Get input data if available (full-duplex)
     const float* inputData = nullptr;
-    // Note: Full-duplex input handling would go here
-    // For now, we only support output
+    const size_t inputSamples = static_cast<size_t>(numFrames * 2);
+    if (mInputCaptureRing && mInputCallbackBuffer.size() >= inputSamples) {
+        if (!mInputCaptureRing->read(mInputCallbackBuffer.data(), inputSamples)) {
+            mInputRingUnderruns.fetch_add(1, std::memory_order_relaxed);
+        }
+        inputData = mInputCallbackBuffer.data();
+    }
 
     // Call the audio callback
     auto result = mCallback->onAudioReady(
@@ -387,7 +439,9 @@ BackendResult OboeBackend::openInputStream() {
            ->setSharingMode(oboe::SharingMode::Shared)
            ->setFormat(oboe::AudioFormat::Float)
            ->setChannelCount(oboe::ChannelCount::Stereo)
-           ->setSampleRate(mOutputStream->getSampleRate());  // Match output
+           ->setSampleRate(mOutputStream->getSampleRate())
+           ->setCallback(this)
+           ->setErrorCallback(this);  // Match output
 
     oboe::Result result = builder.openStream(mInputStream);
     if (result != oboe::Result::OK) {
@@ -395,8 +449,33 @@ BackendResult OboeBackend::openInputStream() {
         return BackendResult::ERROR_STREAM_FAILED;
     }
 
+    prepareInputCaptureBuffers();
+
     LOGI("Input stream opened at %d Hz", mInputStream->getSampleRate());
     return BackendResult::OK;
+}
+
+void OboeBackend::prepareInputCaptureBuffers() {
+    if (!mInputStream) {
+        mInputCaptureRing.reset();
+        mInputCallbackBuffer.clear();
+        mInputBufferCapacityFrames = 0;
+        return;
+    }
+
+    const int sampleRate = std::max(mInputStream->getSampleRate(), 48000);
+    const int framesPerBurst = std::max(mInputStream->getFramesPerBurst(), 1);
+    const int requestedFrames = std::max(mRequestedBufferSize, framesPerBurst * 4);
+    mInputBufferCapacityFrames = std::max(requestedFrames, 4096);
+
+    const size_t callbackSamples = static_cast<size_t>(mInputBufferCapacityFrames * 2);
+    const size_t ringSamples = static_cast<size_t>((sampleRate / 5) * 2);  // 200 ms stereo
+
+    mInputCallbackBuffer.assign(callbackSamples, 0.0f);
+    mInputCaptureRing = std::make_unique<LockFreeRingBuffer>(
+        std::max(ringSamples, callbackSamples * 2 + 1));
+    mInputRingOverruns.store(0, std::memory_order_release);
+    mInputRingUnderruns.store(0, std::memory_order_release);
 }
 
 void OboeBackend::closeStreams() {
@@ -408,6 +487,9 @@ void OboeBackend::closeStreams() {
         mInputStream->close();
         mInputStream.reset();
     }
+    mInputCaptureRing.reset();
+    mInputCallbackBuffer.clear();
+    mInputBufferCapacityFrames = 0;
 }
 
 void OboeBackend::updateStreamInfo() {

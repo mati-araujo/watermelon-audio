@@ -40,6 +40,8 @@ FetchContent_MakeAvailable(googletest)
 # Android, no Oboe.
 set(USB_TESTED_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../UsbDescriptorParser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../backends/DriftResampler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../backends/SplitBackend.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../platform/Logger.cpp
 )
 
@@ -52,6 +54,13 @@ add_executable(usb_tests
     test_clock_range_parser.cpp
     test_clock_graph.cpp
     test_usb_iso_timing.cpp
+    test_resizable_ring_buffer.cpp
+    test_channel_map.cpp
+    test_feature_unit_caps.cpp
+    test_recovery_policy.cpp
+    test_backend_endpoint_contract.cpp
+    test_drift_resampler.cpp
+    test_split_backend.cpp
     ${USB_TESTED_SOURCES}
 )
 

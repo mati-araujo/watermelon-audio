@@ -27,6 +27,7 @@ namespace oboe { class AudioStream; }
 #include "SynthEngineDispatcher.h"
 #include "../sequencer/ArpSequencer.h"
 #include "../looper/AudioLooper.h"
+#include "../looper/Transport.h"
 #include "FadeController.h"
 #include "ChordHarmony.h"
 
@@ -410,6 +411,7 @@ public:
         bpm = std::clamp(bpm, 20.0f, 300.0f);
         mBpm.store(bpm, std::memory_order_relaxed);
         mEffectChain.setBpm(bpm);
+        mTransport.setBpm(bpm);
         incrementStateVersion();
     }
 
@@ -428,6 +430,10 @@ public:
 
     AudioLooper& getAudioLooper() { return mAudioLooper; }
     const AudioLooper& getAudioLooper() const { return mAudioLooper; }
+
+    /** Musical transport (BPM, beats, metronome scheduler). */
+    Transport& getTransport() { return mTransport; }
+    const Transport& getTransport() const { return mTransport; }
 
     // ========== VOCODER INTEGRATION ==========
 
@@ -931,6 +937,7 @@ private:
 
     // ========== AUDIO LOOPER (Phase 11) ==========
     AudioLooper mAudioLooper;
+    Transport mTransport;
 
     // ========== SYNTH ENGINE SYSTEM (Phase 6, Phase 1E — extracted to SynthEngineDispatcher) ==========
     SynthEngineDispatcher mEngineDispatcher;

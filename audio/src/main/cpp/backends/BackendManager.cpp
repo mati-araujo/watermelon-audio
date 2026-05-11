@@ -7,6 +7,7 @@
 #include "BackendManager.h"
 #include "OboeBackend.h"
 #include "LibusbBackend.h"
+#include "SplitBackend.h"
 #include "../usb/UsbAudioTypes.h"
 #include "../platform/Logger.h"
 
@@ -92,6 +93,15 @@ bool BackendManager::selectBackend(BackendType type) {
                 LOGW("LibUSB backend not available, falling back to Oboe");
                 newBackend = mOboeBackend.get();
                 type = BackendType::OBOE;
+            }
+            break;
+
+        case BackendType::SPLIT:
+            if (mSplitBackend) {
+                newBackend = mSplitBackend.get();
+            } else {
+                LOGW("Split backend not configured");
+                return false;
             }
             break;
 
@@ -249,6 +259,14 @@ bool BackendManager::initializeUsbBackend(int fd, const char* usbfsPath) {
     LOGI("Initializing USB backend: fd=%d, path=%s", fd, usbfsPath);
 
     // Clean up existing USB backend if any
+    if (mSplitBackend) {
+        mSplitBackend->stop();
+        mSplitBackend.reset();
+        if (mCurrentType.load(std::memory_order_acquire) == BackendType::SPLIT) {
+            mActiveBackend = nullptr;
+            mCurrentType.store(BackendType::NONE, std::memory_order_release);
+        }
+    }
     if (mLibusbBackend) {
         mLibusbBackend->stop();
         mLibusbBackend.reset();
@@ -286,6 +304,44 @@ bool BackendManager::initializeUsbBackend(int fd, const char* usbfsPath) {
     return true;
 }
 
+bool BackendManager::createSplitBackend(BackendType inputType, BackendType outputType) {
+    std::lock_guard<std::mutex> lock(mMutex);
+
+    IAudioBackend* input = resolveBackendForSplit(inputType);
+    IAudioBackend* output = resolveBackendForSplit(outputType);
+
+    if (!input || !output || input == output) {
+        LOGW("Cannot create Split backend: invalid endpoints input=%d output=%d",
+             static_cast<int>(inputType), static_cast<int>(outputType));
+        return false;
+    }
+
+    const bool wasRunning = (mActiveBackend != nullptr && mActiveBackend->isRunning());
+    if (wasRunning && mActiveBackend) {
+        mActiveBackend->stop();
+    }
+
+    mSplitBackend = std::make_unique<SplitBackend>(*input, *output);
+    applyConfigToBackend(mSplitBackend.get());
+
+    if (wasRunning) {
+        mActiveBackend = mSplitBackend.get();
+        mCurrentType.store(BackendType::SPLIT, std::memory_order_release);
+        BackendResult result = mActiveBackend->start();
+        if (result != BackendResult::OK) {
+            LOGE("Failed to start Split backend: %s", backendResultToString(result));
+            mSplitBackend.reset();
+            mActiveBackend = nullptr;
+            mCurrentType.store(BackendType::NONE, std::memory_order_release);
+            return false;
+        }
+    }
+
+    LOGI("Split backend configured: input=%s output=%s",
+         backendTypeToString(inputType), backendTypeToString(outputType));
+    return true;
+}
+
 void BackendManager::fallbackToOboe() {
     LOGI("Falling back to Oboe backend");
 
@@ -295,6 +351,10 @@ void BackendManager::fallbackToOboe() {
     selectBackend(BackendType::OBOE);
 
     // Clean up LibUSB backend
+    if (mSplitBackend) {
+        mSplitBackend->stop();
+        mSplitBackend.reset();
+    }
     if (mLibusbBackend) {
         mLibusbBackend->stop();
         mLibusbBackend.reset();
@@ -339,6 +399,19 @@ void BackendManager::applyConfigToBackend(IAudioBackend* backend) {
         backend->setBufferSize(mBufferSize);
     }
     backend->setFullDuplexEnabled(mFullDuplexEnabled);
+}
+
+IAudioBackend* BackendManager::resolveBackendForSplit(BackendType type) const {
+    switch (type) {
+        case BackendType::OBOE:
+            return mOboeBackend.get();
+        case BackendType::LIBUSB:
+            return (mLibusbBackend && mUsbBackendAvailable.load(std::memory_order_acquire))
+                ? mLibusbBackend.get()
+                : nullptr;
+        default:
+            return nullptr;
+    }
 }
 
 } // namespace watermelon_audio

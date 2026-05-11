@@ -39,6 +39,9 @@
 #include "AudioFormatConverter.h"
 #include "UsbLatencyProfiler.h"
 #include "AdaptiveBufferController.h"
+#include "ChannelMap.h"
+#include "RecoveryPolicy.h"
+#include "ResizableRingBuffer.h"
 #include "../dsp/LockFreeRingBuffer.h"
 #include "../backends/ClockController.h"
 
@@ -538,6 +541,13 @@ private:
     // Submit a transfer
     bool submitTransfer(libusb_transfer* transfer);
 
+    // Recovery handling. Transfer callbacks only request recovery; the USB
+    // event loop performs cancellation/restart outside the callback path.
+    bool handleTransientTransferError(int transferStatus);
+    void handleRecoveryRestartIfNeeded();
+    void requestRecoveryRestart();
+    bool performRecoveryRestart();
+
     // USB event loop
     void eventLoopThread();
 
@@ -562,6 +572,8 @@ private:
     std::atomic<bool> mIsRunning{false};
     std::atomic<bool> mStopRequested{false};
     std::atomic<bool> mDeviceDisconnected{false};  // Set when device is physically disconnected
+    std::atomic<bool> mRecoveryRestartRequested{false};
+    std::atomic<bool> mRecoveryRestartInProgress{false};
 
     // Streaming interfaces
     std::optional<UsbStreamingInterface> mOutputInterface;
@@ -600,16 +612,24 @@ private:
     int mOutputSlotBytes = 0;
     int mInputSlotBytes = 0;
 
-    // Ring buffers (float samples)
-    std::unique_ptr<LockFreeRingBuffer> mOutputRingBuffer;
-    std::unique_ptr<LockFreeRingBuffer> mInputRingBuffer;
+    // Ring buffers (float samples). ResizableRingBuffer publishes whole
+    // LockFreeRingBuffer instances by atomic slot swap so streaming resize
+    // never mutates a vector that the DSP/USB threads may still be touching.
+    ResizableRingBuffer mOutputRingBuffer;
+    ResizableRingBuffer mInputRingBuffer;
 
     // Format conversion
     AudioFormatConverter mFormatConverter;
 
     // Temp buffers for format conversion
     std::vector<float> mFloatBuffer;
+    std::vector<float> mMappedFloatBuffer;
     std::vector<uint8_t> mPcmBuffer;
+
+    // Channel routing/mixing. Defaults to identity and is intentionally
+    // internal for Stage 4 Slice 2; public Kotlin/JNI routing is a later
+    // slice after the pure mapping behavior is covered.
+    ChannelMap mChannelMap;
 
     // Clock synchronization
     std::unique_ptr<ClockController> mClockController;
@@ -653,6 +673,7 @@ private:
     // Watchdog state
     std::atomic<uint64_t> mLastCompletedTimeMs{0};        // Timestamp of last successful transfer
     std::atomic<int> mConsecutiveErrors{0};               // Count of consecutive transfer errors
+    RecoveryPolicy mRecoveryPolicy;
 
     // Get current time in milliseconds
     static uint64_t getCurrentTimeMs();

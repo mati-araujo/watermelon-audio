@@ -88,10 +88,15 @@ public:
         mPanSmoother.store(0.0f, std::memory_order_relaxed);
         mLoopStart.store(0, std::memory_order_relaxed);
         mLoopEnd.store(0, std::memory_order_relaxed);
+        // Retain heap capacity to avoid fragmentation across many record/clear cycles.
+        // size() drops to 0; capacity() stays. Re-recording skips the allocation cost as
+        // long as the new track length fits in the existing capacity. allocate() will
+        // resize() up if needed; the only way to truly free is destruction of TrackBuffer.
         mBuffer.clear();
-        mBuffer.shrink_to_fit();
         mUndoBuffer.clear();
-        mUndoBuffer.shrink_to_fit();
+        // Note: mCapacityFrames is intentionally NOT reset — it tracks the LOGICAL track
+        // capacity (set in allocate()), which becomes meaningless once length=0. Reset
+        // here prevents writeFrame() from accepting frames before next allocate().
         mCapacityFrames = 0;
     }
 

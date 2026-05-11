@@ -154,6 +154,8 @@ set(BACKEND_SOURCES
         backends/OboeBackend.cpp
         backends/BackendManager.cpp
         backends/LibusbBackend.cpp
+        backends/DriftResampler.cpp
+        backends/SplitBackend.cpp
 )
 
 # USB Audio Driver (Phase 1 & 2 - Fundamentos y Transferencias)

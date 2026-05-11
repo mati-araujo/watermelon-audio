@@ -35,6 +35,7 @@ namespace watermelon_audio {
 // Forward declarations
 class OboeBackend;
 class LibusbBackend;
+class SplitBackend;
 
 /**
  * BackendManager
@@ -184,6 +185,14 @@ public:
     bool initializeUsbBackend(int fd, const char* usbfsPath);
 
     /**
+     * Create an internal split backend from existing managed backends.
+     *
+     * The split backend is opt-in and does not take ownership of the selected
+     * endpoints. It is destroyed before either endpoint is reset.
+     */
+    bool createSplitBackend(BackendType inputType, BackendType outputType);
+
+    /**
      * Fallback to Oboe backend.
      *
      * Called when USB device is disconnected or USB backend fails.
@@ -240,6 +249,7 @@ private:
     // Backend instances
     std::unique_ptr<OboeBackend> mOboeBackend;
     std::unique_ptr<LibusbBackend> mLibusbBackend;
+    std::unique_ptr<SplitBackend> mSplitBackend;
 
     // Current active backend
     IAudioBackend* mActiveBackend = nullptr;
@@ -265,6 +275,7 @@ private:
     void notifyBackendChanged(BackendType oldType, BackendType newType);
     void notifyError(BackendError error);
     void applyConfigToBackend(IAudioBackend* backend);
+    IAudioBackend* resolveBackendForSplit(BackendType type) const;
 };
 
 } // namespace watermelon_audio

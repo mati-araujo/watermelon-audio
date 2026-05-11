@@ -1301,6 +1301,23 @@ bool LibusbBackend::hasCapture() const {
     return false;
 }
 
+BackendEndpointCapabilities LibusbBackend::getEndpointCapabilities() const {
+    BackendEndpointCapabilities caps;
+    const bool captureAvailable = hasCapture();
+
+    caps.roles = captureAvailable
+        ? (BackendStreamRole::INPUT_SOURCE | BackendStreamRole::OUTPUT_SINK)
+        : BackendStreamRole::OUTPUT_SINK;
+    caps.hasInputSourceContract = captureAvailable;
+    caps.callbackCarriesInput =
+        captureAvailable &&
+        (mStreamingMode == UsbStreamingMode::CAPTURE_ONLY ||
+         mStreamingMode == UsbStreamingMode::FULL_DUPLEX ||
+         mSelectedCapture.has_value());
+    caps.drivesUserCallback = true;
+    return caps;
+}
+
 int LibusbBackend::getUacVersion() const {
     if (mUsbDevice) {
         return mUsbDevice->uacVersion;
@@ -2007,6 +2024,21 @@ LibusbBackend::DeviceCapabilities LibusbBackend::getCapabilities() const {
     std::sort(caps.supportedBitDepths.begin(), caps.supportedBitDepths.end());
 
     // Volume control capabilities
+    auto copyChannelCaps = [](const usb::VolumeCapabilities& volCaps,
+                              std::vector<DeviceCapabilities::ChannelHardwareVolumeCapability>& out) {
+        out.clear();
+        out.reserve(volCaps.channels.size());
+        for (const auto& channel : volCaps.channels) {
+            out.push_back(DeviceCapabilities::ChannelHardwareVolumeCapability{
+                static_cast<int>(channel.channelNumber),
+                channel.hasHardwareVolume,
+                channel.hasHardwareMute,
+                channel.volumeVerified,
+                channel.muteVerified
+            });
+        }
+    };
+
     if (mOutputVolumeControl) {
         const auto& volCaps = mOutputVolumeControl->getCapabilities();
         caps.hasOutputVolumeControl = volCaps.hasVolumeControl || true;  // Always true (digital fallback)
@@ -2014,6 +2046,7 @@ LibusbBackend::DeviceCapabilities LibusbBackend::getCapabilities() const {
         caps.isUsingHardwareOutputVolume = mOutputVolumeControl->isUsingHardwareVolume();
         caps.outputVolumeMinDb = volCaps.volumeToDb(volCaps.minVolume);
         caps.outputVolumeMaxDb = volCaps.volumeToDb(volCaps.maxVolume);
+        copyChannelCaps(volCaps, caps.outputHardwareChannelCaps);
     } else {
         // Digital fallback always available
         caps.hasOutputVolumeControl = true;
@@ -2028,6 +2061,7 @@ LibusbBackend::DeviceCapabilities LibusbBackend::getCapabilities() const {
         caps.isUsingHardwareInputVolume = mInputVolumeControl->isUsingHardwareVolume();
         caps.inputVolumeMinDb = volCaps.volumeToDb(volCaps.minVolume);
         caps.inputVolumeMaxDb = volCaps.volumeToDb(volCaps.maxVolume);
+        copyChannelCaps(volCaps, caps.inputHardwareChannelCaps);
     } else if (!mUsbDevice->captureInterfaces.empty()) {
         // Digital fallback for capture
         caps.hasInputVolumeControl = true;
@@ -2214,7 +2248,7 @@ void LibusbBackend::initializeVolumeControls() {
                 mDeviceHandle, mUsbDevice->controlInterface);
 
             bool hwAvailable = mOutputVolumeControl->initialize(
-                outputFU->unitId, hasVolume, hasMute,
+                *outputFU,
                 true,  // isOutput
                 mUsbDevice->uacVersion);
 
@@ -2236,7 +2270,7 @@ void LibusbBackend::initializeVolumeControls() {
                 mDeviceHandle, mUsbDevice->controlInterface);
 
             bool hwAvailable = mInputVolumeControl->initialize(
-                inputFU->unitId, hasVolume, hasMute,
+                *inputFU,
                 false,  // isOutput
                 mUsbDevice->uacVersion);
 
