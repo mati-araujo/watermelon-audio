@@ -1,5 +1,6 @@
 #pragma once
 
+#include "PanLUT.h"
 #include <algorithm>
 #include <atomic>
 #include <vector>
@@ -25,7 +26,8 @@
  */
 class TrackBuffer {
 public:
-    static constexpr int CROSSFADE_FRAMES = 128;  // ~2.7ms @ 48kHz
+    static constexpr int CROSSFADE_FRAMES = 128;  // ~2.7ms @ 48kHz — minimum/fallback for very short loops
+    static constexpr float DEFAULT_SEAM_CROSSFADE_MS = 50.0f;  // long, musical crossfade at the loop seam
 
     TrackBuffer() = default;
     ~TrackBuffer() = default;
@@ -61,6 +63,12 @@ public:
         mLoopCapacityFrames = loopFrames;
         mTailFrames.store(tailFrames, std::memory_order_release);
         mSampleRate = sampleRate;
+        // Compute seam crossfade in frames from the configured ms default. Equal-power
+        // crossfade smooths the loop seam for sustained material (pads, reverb tails).
+        const int seamXf = static_cast<int>(DEFAULT_SEAM_CROSSFADE_MS * 0.001f
+                                          * static_cast<float>(sampleRate));
+        mSeamCrossfadeFrames.store(std::max(CROSSFADE_FRAMES, seamXf),
+                                   std::memory_order_release);
         mWriteHead.store(0, std::memory_order_release);
         mLengthFrames.store(0, std::memory_order_release);
         mActive.store(false, std::memory_order_release);
@@ -185,8 +193,9 @@ public:
         int loopLen = loopEnd - loopStart;
         if (loopLen <= 0) return;
 
-        // Adaptive crossfade: reduce for short regions
-        int crossfadeFrames = CROSSFADE_FRAMES;
+        // Adaptive seam crossfade: prefer the configured long window (default 50ms);
+        // shrink for short loop regions so the crossfade never exceeds half the loop.
+        int crossfadeFrames = mSeamCrossfadeFrames.load(std::memory_order_relaxed);
         if (loopLen < crossfadeFrames * 2) {
             crossfadeFrames = loopLen / 2;
         }
@@ -214,24 +223,30 @@ public:
         // Tail mixing: if a tail region was captured, mix it into the start of
         // each loop iteration with a linear fade-out. This preserves the natural
         // decay of sustained notes at the loop seam (delays, reverbs, pads).
-        const int tailFrames = mTailFrames.load(std::memory_order_acquire);
-        const int loopCap = mLoopCapacityFrames;
-        // Tail mixing only applies to full-buffer playback (no custom loop region).
-        const bool tailActive = (tailFrames > 0)
-                              && (loopStart == 0)
-                              && (loopEnd == loopCap);
-        const float invTail = (tailFrames > 0) ? 1.0f / static_cast<float>(tailFrames) : 0.0f;
+        //
+        // Tail source = the frames recorded immediately AFTER the user's current
+        // loopEnd. For full-buffer playback (loopEnd == loopCap) this is the
+        // dedicated tail region [loopCap, loopCap + tailFrames). For custom loop
+        // regions, it's the "what came next in the original take" [loopEnd, ...) —
+        // which is musically the right continuation at that seam.
+        const int tailFrames    = mTailFrames.load(std::memory_order_acquire);
+        const int tailSrcStart  = loopEnd;
+        const int tailSrcAvail  = std::max(0, mCapacityFrames - tailSrcStart);
+        const int effectiveTail = std::min(tailFrames, tailSrcAvail);
+        const bool tailActive   = (effectiveTail > 0);
+        const float invTail = tailActive ? 1.0f / static_cast<float>(effectiveTail) : 0.0f;
 
+        const auto& panLut = wm::EqualPowerPanLUT::instance();
         for (int i = 0; i < numFrames; ++i) {
             // Smooth volume, mute gain, and pan
             vol = kSmoothCoeff * vol + (1.0f - kSmoothCoeff) * targetVol;
             muteGain = kSmoothCoeff * muteGain + (1.0f - kSmoothCoeff) * muteTarget;
             panSmooth = kSmoothCoeff * panSmooth + (1.0f - kSmoothCoeff) * targetPan;
 
-            // Equal-power: L = cos(angle), R = sin(angle), angle = (pan+1)*pi/4
-            float angle = (panSmooth + 1.0f) * 0.25f * static_cast<float>(M_PI);
-            float panL = std::cos(angle);
-            float panR = std::sin(angle);
+            // Equal-power pan via LUT (replaces cos/sin per sample).
+            const auto pp = panLut.lookup(panSmooth);
+            const float panL = pp.l;
+            const float panR = pp.r;
 
             // Fractional position WITHIN the loop region
             float regionPos = std::fmod(playHeadF + static_cast<float>(i) * speed,
@@ -269,31 +284,41 @@ public:
             float sampleL = interp(0);
             float sampleR = interp(1);
 
-            // Crossfade at loop region boundary to avoid clicks (pos1 is the
-            // floor of the fractional position, i.e. the "current" integer sample).
+            // Equal-power crossfade at loop region boundary. pos1 is the floor of
+            // the fractional position (the "current" integer sample). When we are
+            // within `crossfadeFrames` of loopEnd, blend the current sample with
+            // the matching sample at the START of the loop using a sqrt curve so
+            // total energy stays constant across the seam — masks the cut for
+            // sustained material (pads, reverb tails) at the cost of doubling the
+            // material in the crossfade window.
             int distToEnd = loopEnd - pos1;
             if (distToEnd <= crossfadeFrames && crossfadeFrames > 0) {
-                float fade = static_cast<float>(distToEnd) / static_cast<float>(crossfadeFrames);
+                float fade  = static_cast<float>(distToEnd) / static_cast<float>(crossfadeFrames);
                 int wrapPos = loopStart + (crossfadeFrames - distToEnd);
                 if (wrapPos < loopEnd) {
                     float wrapL = mBuffer[static_cast<size_t>(wrapPos) * 2];
                     float wrapR = mBuffer[static_cast<size_t>(wrapPos) * 2 + 1];
-                    sampleL = sampleL * fade + wrapL * (1.0f - fade);
-                    sampleR = sampleR * fade + wrapR * (1.0f - fade);
+                    const float gOld = std::sqrt(fade);
+                    const float gNew = std::sqrt(1.0f - fade);
+                    sampleL = sampleL * gOld + wrapL * gNew;
+                    sampleR = sampleR * gOld + wrapR * gNew;
                 }
             }
 
-            // Tail mixing: in the first `tailFrames` of each iteration, sum
-            // samples from the captured tail (post-loop-end region) with a
-            // linear fade-out. Position in tail mirrors position in loop:
-            //   regionPos=0   -> tail[0]   * 1.0
-            //   regionPos=N-1 -> tail[N-1] * (1/N)
-            // This makes the loop boundary perceptually continuous.
-            if (tailActive && pos1 < loopCap + tailFrames) {
+            // Tail mixing: in the first `effectiveTail` frames of each iteration,
+            // sum samples from the captured tail region with a fade-out that
+            // approximates natural exponential decay. Linear fade would drop the
+            // sustain too aggressively at the start (where ears are most sensitive);
+            // (1-t)^2 stays close to 1.0 for the first ~30% then accelerates.
+            // For full-buffer playback the tail source is [loopCap, loopCap + tail);
+            // for a custom loop region it's the "post-region" frames in the original
+            // take. Either way this makes the seam perceptually continuous.
+            if (tailActive) {
                 int tailIdx = static_cast<int>(regionPos);
-                if (tailIdx < tailFrames) {
-                    int tailBufIdx = loopCap + tailIdx;
-                    float tailFade = 1.0f - (static_cast<float>(tailIdx) * invTail);
+                if (tailIdx < effectiveTail) {
+                    int tailBufIdx = tailSrcStart + tailIdx;
+                    const float lin = 1.0f - (static_cast<float>(tailIdx) * invTail);
+                    const float tailFade = lin * lin;  // quasi-exponential decay shape
                     sampleL += mBuffer[static_cast<size_t>(tailBufIdx) * 2]     * tailFade;
                     sampleR += mBuffer[static_cast<size_t>(tailBufIdx) * 2 + 1] * tailFade;
                 }
@@ -475,7 +500,8 @@ private:
     int mCapacityFrames{0};            // Total frames including tail (= loopCap + tail)
     int mLoopCapacityFrames{0};        // Musical loop capacity (excludes tail)
     int mSampleRate{48000};
-    std::atomic<int> mTailFrames{0};   // Captured tail length (decay region)
+    std::atomic<int> mTailFrames{0};           // Captured tail length (decay region)
+    std::atomic<int> mSeamCrossfadeFrames{128}; // Equal-power crossfade window @ loop seam
 
     // State (atomic for cross-thread access)
     std::atomic<int> mLengthFrames{0};

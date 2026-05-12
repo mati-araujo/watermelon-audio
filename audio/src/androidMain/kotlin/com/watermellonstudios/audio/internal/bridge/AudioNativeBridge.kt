@@ -20,6 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -2608,13 +2609,37 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeTransportStartMetronome(
         beats: Int, firstIsDownbeat: Boolean, everyBeatPattern: Boolean
     )
+    private external fun nativeTransportStartMetronomeContinuous(everyBeatPattern: Boolean)
     private external fun nativeTransportStopMetronome()
     private external fun nativeTransportIsMetronomeRunning(): Boolean
+    private external fun nativeTransportIsMetronomeContinuous(): Boolean
     private external fun nativeTransportGetRemainingBeats(): Int
 
     private external fun nativeLooperExportMix(filePath: String): Boolean
     private external fun nativeLooperExportTrack(trackIndex: Int, filePath: String): Boolean
     private external fun nativeLooperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean
+
+    // Export V2 (with options + metadata + limiter)
+    private external fun nativeLooperExportMixV2(
+        filePath: String, bitDepth: Int, repeatLoops: Int,
+        countInBeats: Int, applyLimiter: Boolean,
+        projectName: String?, artist: String?, comment: String?, bpm: Int
+    ): Boolean
+    private external fun nativeLooperExportStems(
+        directory: String, bitDepth: Int, repeatLoops: Int,
+        countInBeats: Int, applyLimiter: Boolean, bpm: Int
+    ): Int
+    private external fun nativeLooperGetExportProgress(): Float
+    private external fun nativeLooperCancelExport()
+    private external fun nativeLooperIsExportInProgress(): Boolean
+
+    // Telemetry
+    private external fun nativeLooperGetFramesDropped(): Long
+    private external fun nativeLooperGetExportsCompleted(): Long
+    private external fun nativeLooperGetExportsFailed(): Long
+    private external fun nativeLooperGetStemsWritten(): Long
+    private external fun nativeLooperGetArmedTriggered(): Long
+    private external fun nativeLooperResetTelemetry()
 
     // Public Looper API
 
@@ -2757,12 +2782,101 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         firstIsDownbeat: Boolean = true,
         everyBeatPattern: Boolean = true
     ) = nativeTransportStartMetronome(beats, firstIsDownbeat, everyBeatPattern)
+    /**
+     * Run the metronome continuously (as an in-take reference click) until
+     * [transportStopMetronome] is called. NoisyPad wires this to a user-facing
+     * "metronome during recording" toggle.
+     */
+    fun transportStartMetronomeContinuous(everyBeatPattern: Boolean = true) =
+        nativeTransportStartMetronomeContinuous(everyBeatPattern)
     fun transportStopMetronome() = nativeTransportStopMetronome()
     fun transportIsMetronomeRunning(): Boolean = nativeTransportIsMetronomeRunning()
+    fun transportIsMetronomeContinuous(): Boolean = nativeTransportIsMetronomeContinuous()
     fun transportGetRemainingBeats(): Int = nativeTransportGetRemainingBeats()
 
     // Export / Import (call from IO thread)
     fun looperExportMix(filePath: String): Boolean = nativeLooperExportMix(filePath)
     fun looperExportTrack(trackIndex: Int, filePath: String): Boolean = nativeLooperExportTrack(trackIndex, filePath)
     fun looperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean = nativeLooperImportTrack(trackIndex, filePath, sampleRate)
+
+    // ========== EXPORT V2 (suspend wrappers, professional) ==========
+    //
+    // These run on Dispatchers.IO so the caller (UI / coroutine scope) is not
+    // blocked during file write. Cancellation: call looperCancelExport() from
+    // any thread; the C++ side bails at the next track/iteration.
+    //
+    // bitDepth: 16 (PCM), 24 (PCM), or 32 (IEEE float).
+    // repeatLoops: number of full-loop iterations (>=1).
+    // countInBeats: leading silence in beats (uses Transport's framesPerBeat).
+    // applyLimiter: true-peak limiter (-1 dBFS, 5 ms lookahead).
+    // bpm=0 → engine uses the current Transport BPM in metadata.
+
+    enum class ExportBitDepth(val raw: Int) { PCM_16(16), PCM_24(24), FLOAT_32(32) }
+
+    suspend fun looperExportMixPro(
+        filePath: String,
+        bitDepth: ExportBitDepth = ExportBitDepth.PCM_16,
+        repeatLoops: Int = 1,
+        countInBeats: Int = 0,
+        applyLimiter: Boolean = true,
+        projectName: String? = null,
+        artist: String? = null,
+        comment: String? = null,
+        bpm: Int = 0
+    ): Boolean = withContext(Dispatchers.IO) {
+        nativeLooperExportMixV2(
+            filePath, bitDepth.raw, repeatLoops, countInBeats,
+            applyLimiter, projectName, artist, comment, bpm
+        )
+    }
+
+    /**
+     * Export every active track as a separate WAV file in `directory`. Each stem
+     * shares the same length and bit depth so they can be loaded into a DAW.
+     * @return number of stems written, or -1 on failure.
+     */
+    suspend fun looperExportStems(
+        directory: String,
+        bitDepth: ExportBitDepth = ExportBitDepth.PCM_16,
+        repeatLoops: Int = 1,
+        countInBeats: Int = 0,
+        applyLimiter: Boolean = true,
+        bpm: Int = 0
+    ): Int = withContext(Dispatchers.IO) {
+        nativeLooperExportStems(
+            directory, bitDepth.raw, repeatLoops, countInBeats, applyLimiter, bpm
+        )
+    }
+
+    /** Polled by UI to render a progress bar. [0..1]. */
+    fun looperGetExportProgress(): Float = nativeLooperGetExportProgress()
+
+    /** Request cancellation of the current export. The export bails at the next iteration. */
+    fun looperCancelExport() = nativeLooperCancelExport()
+
+    fun looperIsExportInProgress(): Boolean = nativeLooperIsExportInProgress()
+
+    // ========== TELEMETRY ==========
+    //
+    // Lock-free monotonic counters for runtime observability. Useful for
+    // debug overlays, crash reports, or in-app diagnostics. Values are not
+    // synchronized — read with `looperGetTelemetry()` for an atomic snapshot.
+
+    data class LooperTelemetry(
+        val framesDropped: Long,
+        val exportsCompleted: Long,
+        val exportsFailed: Long,
+        val stemsWritten: Long,
+        val armedTriggered: Long,
+    )
+
+    fun looperGetTelemetry(): LooperTelemetry = LooperTelemetry(
+        framesDropped    = nativeLooperGetFramesDropped(),
+        exportsCompleted = nativeLooperGetExportsCompleted(),
+        exportsFailed    = nativeLooperGetExportsFailed(),
+        stemsWritten     = nativeLooperGetStemsWritten(),
+        armedTriggered   = nativeLooperGetArmedTriggered(),
+    )
+
+    fun looperResetTelemetry() = nativeLooperResetTelemetry()
 }

@@ -94,6 +94,7 @@ public:
         }
         // Configure click pattern atomically — audio thread will pick this up
         // on the next tick().
+        mContinuous.store(false, std::memory_order_relaxed);
         mPatternMode.store(everyBeatDownbeatPattern ? 1 : 0, std::memory_order_relaxed);
         mFirstIsDownbeat.store(firstIsDownbeat, std::memory_order_relaxed);
         mClickIndex.store(0, std::memory_order_relaxed);
@@ -101,9 +102,34 @@ public:
         mBeatsRemaining.store(beats, std::memory_order_release);    // arms scheduler
     }
 
+    /**
+     * @brief Run the metronome continuously until stopMetronome() is called.
+     *        Intended for the "click as reference during recording" mode — the
+     *        scheduler does NOT decrement beatsRemaining, so clicks fire forever
+     *        at exactly framesPerBeat intervals (sample-accurate).
+     * @param everyBeatDownbeatPattern If true, clicks where idx % beatsPerBar == 0
+     *        are downbeats (recommended for in-take reference).
+     */
+    void startMetronomeContinuous(bool everyBeatDownbeatPattern = true) {
+        mPatternMode.store(everyBeatDownbeatPattern ? 1 : 0, std::memory_order_relaxed);
+        mFirstIsDownbeat.store(true, std::memory_order_relaxed);
+        mClickIndex.store(0, std::memory_order_relaxed);
+        mFramesUntilNextClick.store(0, std::memory_order_relaxed);
+        mContinuous.store(true, std::memory_order_release);
+        // Set a non-zero beatsRemaining sentinel so the tick() guard arms the
+        // scheduler. The actual value is irrelevant in continuous mode because
+        // the tick loop will not decrement it.
+        mBeatsRemaining.store(1, std::memory_order_release);
+    }
+
     /** Cancel any in-flight metronome schedule. Currently-sounding click decays naturally. */
     void stopMetronome() {
+        mContinuous.store(false, std::memory_order_release);
         mBeatsRemaining.store(0, std::memory_order_release);
+    }
+
+    bool isMetronomeContinuous() const {
+        return mContinuous.load(std::memory_order_acquire);
     }
 
     bool isMetronomeRunning() const {
@@ -176,23 +202,28 @@ public:
         const int beatsPerBar = mBeatsPerBar.load(std::memory_order_relaxed);
         const int patternMode = mPatternMode.load(std::memory_order_relaxed);
         const bool firstDown = mFirstIsDownbeat.load(std::memory_order_relaxed);
+        const bool continuous = mContinuous.load(std::memory_order_relaxed);
         int idx = mClickIndex.load(std::memory_order_relaxed);
 
         // Emit all clicks whose target frame fell inside this block. Tight bounded
         // loop — at most 1 iteration in practice (numFrames <= ~1024, fpb >= 1600).
+        // In continuous mode we don't decrement beatsLeft so the scheduler fires
+        // forever until stopMetronome() flips the flag.
         while (next <= 0 && beatsLeft > 0) {
             const bool isDown = (patternMode == 1)
                 ? (idx % beatsPerBar) == 0
                 : (idx == 0 && firstDown);
             looper.triggerClick(isDown);
             idx++;
-            beatsLeft--;
+            if (!continuous) beatsLeft--;
             next += fpb;
         }
 
         mClickIndex.store(idx, std::memory_order_relaxed);
         mFramesUntilNextClick.store(next, std::memory_order_relaxed);
-        mBeatsRemaining.store(beatsLeft, std::memory_order_release);
+        if (!continuous) {
+            mBeatsRemaining.store(beatsLeft, std::memory_order_release);
+        }
     }
 
 private:
@@ -216,6 +247,7 @@ private:
     std::atomic<int>  mClickIndex{0};            // 0..N-1 within current schedule
     std::atomic<int>  mPatternMode{0};           // 0 = "first is down", 1 = "every bar"
     std::atomic<bool> mFirstIsDownbeat{true};
+    std::atomic<bool> mContinuous{false};         // true → run metronome forever
 
     // Monotonic frame counter advanced on every tick(). Used by the looper for
     // armed-recording downbeat alignment.

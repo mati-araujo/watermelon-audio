@@ -3,20 +3,36 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <string>
 #include <vector>
 #include <cmath>
 #include <algorithm>
 
 /**
- * @brief Header-only WAV file reader/writer for PCM 16-bit stereo audio.
+ * @brief Header-only WAV file reader/writer for stereo audio.
  *
- * WavWriter: Mixes looper tracks and writes to a .wav file.
- * WavReader: Reads a .wav file into a float buffer (stereo interleaved).
+ * Writer formats supported: 16-bit PCM, 24-bit PCM, 32-bit IEEE float.
+ * Reader formats supported: 16/24-bit PCM and 32-bit IEEE float (mono auto-stereoized).
+ * Optional LIST/INFO metadata chunk (BPM, project name, free-form comment).
  *
  * NOT RT-safe — call from IO/background thread only.
  */
 
 namespace wav {
+
+enum class BitDepth {
+    PCM_16 = 16,
+    PCM_24 = 24,
+    FLOAT_32 = 32,
+};
+
+struct WavMetadata {
+    std::string projectName;   // INAM
+    std::string artist;        // IART
+    std::string comment;       // ICMT (free-form, can include BPM, date)
+    std::string software;      // ISFT (default: "Watermelon Audio")
+    int bpm = 0;               // appended to ICMT if > 0
+};
 
 // ========== WAV Header Structures ==========
 
@@ -27,7 +43,7 @@ struct WavHeader {
     char wave[4]{'W', 'A', 'V', 'E'};
     char fmt[4]{'f', 'm', 't', ' '};
     uint32_t fmtSize{16};
-    uint16_t audioFormat{1};  // PCM
+    uint16_t audioFormat{1};  // 1 = PCM, 3 = IEEE float
     uint16_t numChannels{2};  // Stereo
     uint32_t sampleRate{48000};
     uint32_t byteRate{0};     // sampleRate * numChannels * bitsPerSample/8
@@ -38,49 +54,145 @@ struct WavHeader {
 };
 #pragma pack(pop)
 
+// ========== Metadata helpers (RIFF LIST/INFO) ==========
+
+namespace detail {
+
+inline void writeUInt32LE(std::ofstream& f, uint32_t v) {
+    f.write(reinterpret_cast<const char*>(&v), 4);
+}
+
+/**
+ * @brief Build LIST/INFO chunk bytes for the given metadata. Returns empty
+ *        vector if no fields are populated. RIFF info subchunks are 4-byte ID
+ *        + uint32 size + null-terminated string + pad byte to align to 2.
+ */
+inline std::vector<uint8_t> buildInfoChunk(const WavMetadata& meta) {
+    auto pushSub = [](std::vector<uint8_t>& out, const char* id, const std::string& s) {
+        if (s.empty()) return;
+        // Subchunk: ID(4) + size(4) + data + null + optional pad
+        std::string payload = s;
+        payload.push_back('\0');
+        if (payload.size() & 1u) payload.push_back('\0');
+        out.insert(out.end(), id, id + 4);
+        const uint32_t sz = static_cast<uint32_t>(s.size() + 1);
+        out.push_back(static_cast<uint8_t>(sz & 0xFF));
+        out.push_back(static_cast<uint8_t>((sz >> 8) & 0xFF));
+        out.push_back(static_cast<uint8_t>((sz >> 16) & 0xFF));
+        out.push_back(static_cast<uint8_t>((sz >> 24) & 0xFF));
+        out.insert(out.end(), payload.begin(), payload.end());
+    };
+
+    std::vector<uint8_t> body;
+    // "INFO" type identifier inside LIST chunk
+    const char info[4] = {'I', 'N', 'F', 'O'};
+    body.insert(body.end(), info, info + 4);
+
+    pushSub(body, "INAM", meta.projectName);
+    pushSub(body, "IART", meta.artist);
+    std::string comment = meta.comment;
+    if (meta.bpm > 0) {
+        if (!comment.empty()) comment += " ";
+        comment += "BPM=" + std::to_string(meta.bpm);
+    }
+    pushSub(body, "ICMT", comment);
+    pushSub(body, "ISFT", meta.software.empty() ? std::string("Watermelon Audio") : meta.software);
+
+    if (body.size() == 4) return {};  // only "INFO" tag, nothing else — skip
+
+    // Wrap in LIST chunk: "LIST" + size + body
+    std::vector<uint8_t> chunk;
+    const char list[4] = {'L', 'I', 'S', 'T'};
+    chunk.insert(chunk.end(), list, list + 4);
+    const uint32_t sz = static_cast<uint32_t>(body.size());
+    chunk.push_back(static_cast<uint8_t>(sz & 0xFF));
+    chunk.push_back(static_cast<uint8_t>((sz >> 8) & 0xFF));
+    chunk.push_back(static_cast<uint8_t>((sz >> 16) & 0xFF));
+    chunk.push_back(static_cast<uint8_t>((sz >> 24) & 0xFF));
+    chunk.insert(chunk.end(), body.begin(), body.end());
+    return chunk;
+}
+
+}  // namespace detail
+
 // ========== WAV Writer ==========
 
 /**
- * @brief Write stereo float audio to a 16-bit PCM WAV file.
- * @param filePath Output file path
- * @param buffer Stereo interleaved float samples (-1.0..+1.0)
- * @param numFrames Number of stereo frames
- * @param sampleRate Sample rate (default 48000)
- * @return true if successful
+ * @brief Write stereo float audio to a WAV file.
+ * @param filePath Output file path.
+ * @param buffer Stereo interleaved float samples [-1.0..+1.0].
+ * @param numFrames Number of stereo frames.
+ * @param sampleRate Sample rate (default 48000).
+ * @param bitDepth 16-bit PCM, 24-bit PCM, or 32-bit IEEE float.
+ * @param meta Optional metadata. Empty fields are skipped.
+ * @return true if successful.
  */
 inline bool writeWav(const char* filePath,
                      const float* buffer,
                      int numFrames,
-                     int sampleRate = 48000) {
+                     int sampleRate = 48000,
+                     BitDepth bitDepth = BitDepth::PCM_16,
+                     const WavMetadata& meta = {}) {
     if (!filePath || !buffer || numFrames <= 0) return false;
 
     WavHeader header;
     header.sampleRate = static_cast<uint32_t>(sampleRate);
+    header.bitsPerSample = static_cast<uint16_t>(bitDepth);
+    header.audioFormat = (bitDepth == BitDepth::FLOAT_32) ? 3 : 1;
     header.byteRate = header.sampleRate * header.numChannels * header.bitsPerSample / 8;
     header.blockAlign = header.numChannels * header.bitsPerSample / 8;
     header.dataSize = static_cast<uint32_t>(numFrames) * header.blockAlign;
-    header.fileSize = sizeof(WavHeader) - 8 + header.dataSize;
+
+    auto infoChunk = detail::buildInfoChunk(meta);
+    const uint32_t infoSize = static_cast<uint32_t>(infoChunk.size());
+    header.fileSize = sizeof(WavHeader) - 8 + header.dataSize + infoSize;
 
     std::ofstream file(filePath, std::ios::binary);
     if (!file.is_open()) return false;
 
-    // Write header
+    // RIFF header + fmt + data header
     file.write(reinterpret_cast<const char*>(&header), sizeof(WavHeader));
 
-    // Convert float -> int16 and write in chunks to avoid large temp buffer
+    // Audio payload — chunked to avoid large temp buffer.
     constexpr int CHUNK_FRAMES = 4096;
-    int16_t chunk[CHUNK_FRAMES * 2];
-
-    for (int offset = 0; offset < numFrames; offset += CHUNK_FRAMES) {
-        int count = std::min(CHUNK_FRAMES, numFrames - offset);
-        for (int i = 0; i < count * 2; ++i) {
-            float sample = buffer[(offset * 2) + i];
-            // Clamp and convert to int16
-            sample = std::clamp(sample, -1.0f, 1.0f);
-            chunk[i] = static_cast<int16_t>(sample * 32767.0f);
+    if (bitDepth == BitDepth::PCM_16) {
+        int16_t chunk[CHUNK_FRAMES * 2];
+        for (int offset = 0; offset < numFrames; offset += CHUNK_FRAMES) {
+            const int count = std::min(CHUNK_FRAMES, numFrames - offset);
+            for (int i = 0; i < count * 2; ++i) {
+                float s = std::clamp(buffer[(offset * 2) + i], -1.0f, 1.0f);
+                chunk[i] = static_cast<int16_t>(s * 32767.0f);
+            }
+            file.write(reinterpret_cast<const char*>(chunk),
+                       static_cast<std::streamsize>(count) * 2 * sizeof(int16_t));
         }
-        file.write(reinterpret_cast<const char*>(chunk),
-                   static_cast<std::streamsize>(count) * 2 * sizeof(int16_t));
+    } else if (bitDepth == BitDepth::PCM_24) {
+        // 24-bit packed little-endian (3 bytes per sample).
+        std::vector<uint8_t> chunk(static_cast<size_t>(CHUNK_FRAMES) * 2 * 3);
+        for (int offset = 0; offset < numFrames; offset += CHUNK_FRAMES) {
+            const int count = std::min(CHUNK_FRAMES, numFrames - offset);
+            for (int i = 0; i < count * 2; ++i) {
+                float s = std::clamp(buffer[(offset * 2) + i], -1.0f, 1.0f);
+                int32_t v = static_cast<int32_t>(s * 8388607.0f);  // 2^23 - 1
+                chunk[i * 3 + 0] = static_cast<uint8_t>(v & 0xFF);
+                chunk[i * 3 + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+                chunk[i * 3 + 2] = static_cast<uint8_t>((v >> 16) & 0xFF);
+            }
+            file.write(reinterpret_cast<const char*>(chunk.data()),
+                       static_cast<std::streamsize>(count) * 2 * 3);
+        }
+    } else {  // FLOAT_32
+        for (int offset = 0; offset < numFrames; offset += CHUNK_FRAMES) {
+            const int count = std::min(CHUNK_FRAMES, numFrames - offset);
+            file.write(reinterpret_cast<const char*>(buffer + offset * 2),
+                       static_cast<std::streamsize>(count) * 2 * sizeof(float));
+        }
+    }
+
+    // LIST/INFO metadata chunk (optional, after audio data).
+    if (!infoChunk.empty()) {
+        file.write(reinterpret_cast<const char*>(infoChunk.data()),
+                   static_cast<std::streamsize>(infoChunk.size()));
     }
 
     return file.good();

@@ -1955,6 +1955,14 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
         // 3. Process through effect chain (INPUT → EFFECTS → OUTPUT)
         mEffectChain.process(mOutputStage.getTempBuffer(), outputData, numFrames);
 
+        // 3b. Looper integration (post-FX, pre-master). Mirrors applyEffectsAndOutput.
+        // Without this the USB direct INPUT_FX fast-path bypasses the looper entirely:
+        // no recording, no playback of existing tracks, no transport advance.
+        mPreRollRing.write(outputData, numFrames);
+        const int64_t usbPlayFrameAtBlockStart = mTransport.getPlayFrame();
+        mTransport.tick(numFrames, mAudioLooper);
+        mAudioLooper.process(outputData, numFrames, usbPlayFrameAtBlockStart);
+
         // 4. Apply fade and master volume (block-based interpolation)
         float fadeStart, fadeEnd;
         mFadeCtrl.processFadeBlock(numFrames, fadeStart, fadeEnd);

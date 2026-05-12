@@ -2676,6 +2676,20 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransp
 }
 
 JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportStartMetronomeContinuous(
+    JNIEnv* env, jobject thiz, jboolean everyBeatPattern) {
+    if (g_jniState.engine)
+        g_jniState.engine->getTransport().startMetronomeContinuous(everyBeatPattern == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportIsMetronomeContinuous(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    return g_jniState.engine->getTransport().isMetronomeContinuous() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportStopMetronome(
     JNIEnv* env, jobject thiz) {
     if (g_jniState.engine)
@@ -2725,6 +2739,142 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     bool ok = g_jniState.engine->getAudioLooper().importTrack(trackIndex, path, sampleRate);
     env->ReleaseStringUTFChars(filePath, path);
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// Export with options. bitDepth: 16, 24, 32 (32 = float).
+// repeatLoops: number of iterations (>=1). countInBeats: leading silence beats.
+// applyLimiter: 1 to apply true-peak limiter, 0 for raw.
+// projectName / artist / comment: optional metadata strings (null/"" to skip).
+// bpm: embedded in comment if > 0; 0 = use Transport BPM if non-zero.
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperExportMixV2(
+    JNIEnv* env, jobject thiz,
+    jstring filePath, jint bitDepth, jint repeatLoops,
+    jint countInBeats, jboolean applyLimiter,
+    jstring projectName, jstring artist, jstring comment, jint bpm) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    AudioLooper::ExportOptions opts;
+    switch (bitDepth) {
+        case 24: opts.bitDepth = wav::BitDepth::PCM_24; break;
+        case 32: opts.bitDepth = wav::BitDepth::FLOAT_32; break;
+        default: opts.bitDepth = wav::BitDepth::PCM_16; break;
+    }
+    opts.repeatLoops = (repeatLoops > 0) ? repeatLoops : 1;
+    opts.applyLimiter = (applyLimiter == JNI_TRUE);
+
+    // Translate count-in beats to frames using the Transport.
+    auto& transport = g_jniState.engine->getTransport();
+    opts.countInFrames = (countInBeats > 0)
+        ? countInBeats * transport.framesPerBeat()
+        : 0;
+
+    // Resolve metadata BPM: if caller passed 0, use Transport BPM.
+    opts.metadata.bpm = (bpm > 0) ? bpm : static_cast<int>(transport.getBpm());
+
+    auto pickStr = [env](jstring js, std::string& out) {
+        if (!js) return;
+        const char* c = env->GetStringUTFChars(js, nullptr);
+        if (c) {
+            out = c;
+            env->ReleaseStringUTFChars(js, c);
+        }
+    };
+    pickStr(projectName, opts.metadata.projectName);
+    pickStr(artist, opts.metadata.artist);
+    pickStr(comment, opts.metadata.comment);
+
+    const char* path = env->GetStringUTFChars(filePath, nullptr);
+    bool ok = g_jniState.engine->getAudioLooper().exportMix(path, opts);
+    env->ReleaseStringUTFChars(filePath, path);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// Export each active track as a separate WAV file in `directory`.
+// Returns number of stems written, or -1 on failure.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperExportStems(
+    JNIEnv* env, jobject thiz,
+    jstring directory, jint bitDepth, jint repeatLoops,
+    jint countInBeats, jboolean applyLimiter, jint bpm) {
+    if (!g_jniState.engine) return -1;
+    AudioLooper::ExportOptions opts;
+    switch (bitDepth) {
+        case 24: opts.bitDepth = wav::BitDepth::PCM_24; break;
+        case 32: opts.bitDepth = wav::BitDepth::FLOAT_32; break;
+        default: opts.bitDepth = wav::BitDepth::PCM_16; break;
+    }
+    opts.repeatLoops = (repeatLoops > 0) ? repeatLoops : 1;
+    opts.applyLimiter = (applyLimiter == JNI_TRUE);
+    auto& transport = g_jniState.engine->getTransport();
+    opts.countInFrames = (countInBeats > 0)
+        ? countInBeats * transport.framesPerBeat()
+        : 0;
+    opts.metadata.bpm = (bpm > 0) ? bpm : static_cast<int>(transport.getBpm());
+
+    const char* dir = env->GetStringUTFChars(directory, nullptr);
+    int n = g_jniState.engine->getAudioLooper().exportStems(dir, opts);
+    env->ReleaseStringUTFChars(directory, dir);
+    return n;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetExportProgress(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0.0f;
+    return g_jniState.engine->getAudioLooper().getExportProgress();
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperCancelExport(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine)
+        g_jniState.engine->getAudioLooper().cancelExport();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperIsExportInProgress(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    return g_jniState.engine->getAudioLooper().isExportInProgress() ? JNI_TRUE : JNI_FALSE;
+}
+
+// ========== TELEMETRY (lock-free counters for observability) ==========
+
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetFramesDropped(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getFramesDropped();
+}
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetExportsCompleted(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getExportsCompleted();
+}
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetExportsFailed(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getExportsFailed();
+}
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetStemsWritten(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getStemsWritten();
+}
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetArmedTriggered(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getArmedTriggered();
+}
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperResetTelemetry(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine)
+        g_jniState.engine->getAudioLooper().resetTelemetry();
 }
 
 } // extern "C"
