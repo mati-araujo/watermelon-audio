@@ -10,7 +10,7 @@ cmake = "3.22.1"
 ndk = "28.2.13676358"
 
 # Dependencies
-kotlinxCoroutines = "1.10.2"
+kotlinxCoroutines = "1.11.0"
 oboe = "1.10.0"
 coreKtx = "1.18.0"
 lifecycleRuntimeKtx = "2.10.0"
