@@ -432,6 +432,15 @@ public:
     AudioLooper& getAudioLooper() { return mAudioLooper; }
     const AudioLooper& getAudioLooper() const { return mAudioLooper; }
 
+    /**
+     * @brief Dispatcher for looper state-change events (push-based).
+     *        The audio thread pushes onto its lock-free queue; a worker
+     *        thread drains and invokes the registered sink (set by JNI).
+     */
+    wm::LooperEventDispatcher& getLooperEventDispatcher() {
+        return mLooperEventDispatcher;
+    }
+
     /** Musical transport (BPM, beats, metronome scheduler). */
     Transport& getTransport() { return mTransport; }
     const Transport& getTransport() const { return mTransport; }
@@ -939,9 +948,13 @@ private:
 
     // ========== ARPEGGIATOR (Phase 7) ==========
     ArpSequencer mArpSequencer;
+    int mArpSfPrevMidiNote{-1};  // audio thread only — tracks last SoundFont note for clean noteOff
 
     // ========== AUDIO LOOPER (Phase 11) ==========
     AudioLooper mAudioLooper;
+    // Event dispatcher: owned by AudioEngine, lifetime tied to engine.
+    // Started in ctor (after wiring into mAudioLooper), stopped+joined in dtor.
+    wm::LooperEventDispatcher mLooperEventDispatcher;
     Transport mTransport;
     PreRollRing mPreRollRing;
 

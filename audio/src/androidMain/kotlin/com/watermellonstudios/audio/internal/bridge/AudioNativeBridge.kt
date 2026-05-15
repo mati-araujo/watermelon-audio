@@ -2592,6 +2592,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperGetTrackWaveform(trackIndex: Int, outBins: FloatArray, numBins: Int): Int
     private external fun nativeLooperSetTrackSpeed(trackIndex: Int, speed: Float)
     private external fun nativeLooperGetTrackSpeed(trackIndex: Int): Float
+
+    // Push-based state notifications (replaces per-track polling).
+    private external fun nativeLooperRegisterStateListener(
+        listener: com.watermellonstudios.audio.api.LooperStateListener
+    ): Boolean
+    private external fun nativeLooperUnregisterStateListener()
+    private external fun nativeLooperGetDroppedEvents(): Long
     private external fun nativeLooperSetMasterVolume(volume: Float)
     private external fun nativeLooperGetMasterVolume(): Float
     private external fun nativeLooperSetTrackLoopRegion(trackIndex: Int, startFrame: Int, endFrame: Int)
@@ -2706,6 +2713,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     // Metering queries (lock-free)
     fun looperGetProgress(): Float = nativeLooperGetProgress()
+    @Deprecated(
+        "Polling the per-track peak is the lag source identified in audit AUD-1. " +
+        "Use setLooperStateListener() and react to onTrackPeakChanged. " +
+        "Will be removed in WP-1.",
+        level = DeprecationLevel.WARNING,
+    )
     fun looperGetTrackPeakLevel(trackIndex: Int): Float = nativeLooperGetTrackPeakLevel(trackIndex)
     fun looperIsTrackActive(trackIndex: Int): Boolean = nativeLooperIsTrackActive(trackIndex)
     fun looperIsPlaying(): Boolean = nativeLooperIsPlaying()
@@ -2716,7 +2729,19 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // Per-track playback control
     fun looperPauseTrack(trackIndex: Int) = nativeLooperPauseTrack(trackIndex)
     fun looperResumeTrack(trackIndex: Int) = nativeLooperResumeTrack(trackIndex)
+    @Deprecated(
+        "Polling per-track play state contributes to the ~800 JNI calls/sec hot path " +
+        "(audit COR-1). Use setLooperStateListener() and react to onTrackPlayingChanged. " +
+        "Will be removed in WP-1.",
+        level = DeprecationLevel.WARNING,
+    )
     fun looperIsTrackPlaying(trackIndex: Int): Boolean = nativeLooperIsTrackPlaying(trackIndex)
+    @Deprecated(
+        "Polling per-track progress at 30 fps is the main lag source (audit COR-1). " +
+        "Use setLooperStateListener() and react to onTrackProgress. " +
+        "Will be removed in WP-1.",
+        level = DeprecationLevel.WARNING,
+    )
     fun looperGetTrackProgress(trackIndex: Int): Float = nativeLooperGetTrackProgress(trackIndex)
     fun looperGetTrackLengthFrames(trackIndex: Int): Int = nativeLooperGetTrackLengthFrames(trackIndex)
     fun looperResetTrackPlayHead(trackIndex: Int) = nativeLooperResetTrackPlayHead(trackIndex)
@@ -2734,6 +2759,32 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // Track speed
     fun looperSetTrackSpeed(trackIndex: Int, speed: Float) = nativeLooperSetTrackSpeed(trackIndex, speed)
     fun looperGetTrackSpeed(trackIndex: Int): Float = nativeLooperGetTrackSpeed(trackIndex)
+
+    /**
+     * Install a [com.watermellonstudios.audio.api.LooperStateListener] to
+     * receive push-based notifications of track progress, play state, and
+     * peak level changes. Pass `null` to unregister.
+     *
+     * Callbacks arrive on a single background worker thread — the
+     * implementation must marshal to the UI thread itself.
+     *
+     * Returns `true` if registration succeeded (or unregister was performed).
+     */
+    fun setLooperStateListener(listener: com.watermellonstudios.audio.api.LooperStateListener?): Boolean {
+        return if (listener == null) {
+            nativeLooperUnregisterStateListener()
+            true
+        } else {
+            nativeLooperRegisterStateListener(listener)
+        }
+    }
+
+    /**
+     * Telemetry: total looper state events dropped because the dispatcher
+     * queue was full. Should sit at 0 in steady state; non-zero indicates
+     * the listener is slower than the audio thread can produce events.
+     */
+    fun looperGetDroppedEvents(): Long = nativeLooperGetDroppedEvents()
 
     // Master volume (lock-free)
     fun looperSetMasterVolume(volume: Float) = nativeLooperSetMasterVolume(volume)

@@ -4,6 +4,7 @@
 #include "WavFile.h"
 #include "Limiter.h"
 #include "PanLUT.h"
+#include "LooperEventDispatcher.h"
 #include "../dsp/SIMDUtils.h"
 #include <algorithm>
 #include <atomic>
@@ -41,6 +42,14 @@ public:
     // Click envelope is sample-rate aware; recompute on prepare()/setSampleRate()
     static constexpr float CLICK_DURATION_MS = 10.0f;
     static constexpr float CLICK_FADE_MS = 2.5f;        // ~25% of duration
+
+    // ===== Event-emission thresholds (push-based state notifications) =====
+    // Crossing any of these vs. the last-emitted state for a track triggers
+    // a LooperEvent push onto the dispatcher queue. Sized to keep UI ~23fps
+    // worst case while cutting event rate by an order of magnitude vs. the
+    // 30fps pull-based polling NoisyPad uses today.
+    static constexpr int   kProgressFrameThreshold = 2048;  // ~43ms @ 48k
+    static constexpr float kPeakDbThreshold = 0.5f;         // 0.5 dB
     // Initial mix buffer capacity; grows on demand if Oboe gives larger callbacks.
     static constexpr int INITIAL_MIX_CAPACITY_FRAMES = 2048;
 
@@ -232,6 +241,23 @@ public:
             mClickPhase.store(phase, std::memory_order_relaxed);
             mClickRemaining.store(remaining, std::memory_order_relaxed);
         }
+
+        // ---- STATE-CHANGE NOTIFICATIONS (push-based) ----
+        // Compare each track's observable state against the last-emitted
+        // snapshot; push a LooperEvent when a threshold is crossed. Lock-free
+        // and RT-safe — the dispatcher's queue absorbs jitter, a worker thread
+        // drains it and invokes the Kotlin listener off the audio thread.
+        if (mDispatcher) emitStateEvents();
+    }
+
+    /**
+     * @brief Register the dispatcher that the audio thread will push state
+     *        events to. Set ONCE from the owning AudioEngine at construction
+     *        time, before audio callbacks start. Pass nullptr to disable.
+     *        Not thread-safe wrt audio thread — must be done before start.
+     */
+    void setEventDispatcher(wm::LooperEventDispatcher* dispatcher) {
+        mDispatcher = dispatcher;
     }
 
     // ========== Control (UI thread) ==========
@@ -1143,6 +1169,20 @@ private:
 
     TrackBuffer mTracks[MAX_TRACKS];
 
+    // Event dispatcher (non-owning). Set once via setEventDispatcher() from
+    // the owning AudioEngine before audio callbacks start. Read from the
+    // audio thread in emitStateEvents(); never written from RT.
+    wm::LooperEventDispatcher* mDispatcher{nullptr};
+
+    // Last-emitted state per track — audio thread only, no synchronization.
+    // playhead==-1 sentinel means "no prior emission since (re)play start",
+    // forcing the next playing frame to emit a fresh progress event.
+    int   mLastEmittedPlayhead[MAX_TRACKS]{-1, -1, -1, -1, -1, -1, -1, -1};
+    bool  mLastEmittedPlaying [MAX_TRACKS]{false, false, false, false,
+                                           false, false, false, false};
+    float mLastEmittedPeakDb  [MAX_TRACKS]{-120.0f, -120.0f, -120.0f, -120.0f,
+                                           -120.0f, -120.0f, -120.0f, -120.0f};
+
     std::atomic<int> mRecordingTrack{-1};
     std::atomic<int> mArmedTrack{-1};
     std::atomic<int64_t> mArmedTriggerFrame{0};
@@ -1195,6 +1235,84 @@ private:
     std::atomic<int> mClickPhase{0};
     std::atomic<float> mClickFreq{1000.0f};
     std::atomic<float> mClickGain{0.3f};
+
+    /**
+     * @brief RT-safe: diff each track's observable state against the last
+     *        emitted snapshot and push events onto the dispatcher when a
+     *        threshold is crossed. Called once per audio block from process().
+     *
+     * Push-based replacement for the per-track polling NoisyPad's
+     * LooperViewModel was doing every 33ms (8 tracks × 3 fields = ~800
+     * JNI calls/sec). At the configured thresholds we emit at most
+     * ~70 events/sec per active track (progress) plus discrete events on
+     * play/stop and on ≥0.5dB peak changes. Inactive tracks emit nothing.
+     */
+    void emitStateEvents() {
+        for (int i = 0; i < MAX_TRACKS; ++i) {
+            const auto& track = mTracks[i];
+            const bool active = track.isActive();
+
+            // Inactive tracks: only emit a one-shot "stopped" if we previously
+            // told the UI they were playing — then skip everything else.
+            if (!active) {
+                if (mLastEmittedPlaying[i]) {
+                    wm::LooperEvent ev{
+                        wm::LooperEvent::Type::PlayingChanged, i, 0.0f
+                    };
+                    mDispatcher->pushFromRT(ev);
+                    mLastEmittedPlaying[i] = false;
+                }
+                continue;
+            }
+
+            // --- isPlaying ---
+            const bool playing = track.isTrackPlaying();
+            if (playing != mLastEmittedPlaying[i]) {
+                wm::LooperEvent ev{
+                    wm::LooperEvent::Type::PlayingChanged,
+                    i,
+                    playing ? 1.0f : 0.0f
+                };
+                mDispatcher->pushFromRT(ev);
+                mLastEmittedPlaying[i] = playing;
+            }
+
+            // --- progress (only meaningful while playing) ---
+            if (playing) {
+                const int head = track.getPlayHead();
+                const int last = mLastEmittedPlayhead[i];
+                // Wrap-aware delta: if head jumped backward (loop wrap) the
+                // unsigned diff still triggers an emit, which is what we want.
+                const int delta = std::abs(head - last);
+                if (delta >= kProgressFrameThreshold || last < 0) {
+                    wm::LooperEvent ev{
+                        wm::LooperEvent::Type::Progress, i, track.getProgress()
+                    };
+                    mDispatcher->pushFromRT(ev);
+                    mLastEmittedPlayhead[i] = head;
+                }
+            } else {
+                // Invalidate cached playhead so next play start re-emits.
+                mLastEmittedPlayhead[i] = -1;
+            }
+
+            // --- peak level (dB-domain threshold) ---
+            // peak is a linear amplitude 0..1. Compare in dB so small
+            // changes near silence aren't drowned out by large absolute
+            // changes near full-scale, and vice versa.
+            const float peak = track.getPeakLevel();
+            const float peakDb = (peak > 1e-6f)
+                ? 20.0f * std::log10(peak)
+                : -120.0f;
+            if (std::abs(peakDb - mLastEmittedPeakDb[i]) >= kPeakDbThreshold) {
+                wm::LooperEvent ev{
+                    wm::LooperEvent::Type::PeakChanged, i, peak
+                };
+                mDispatcher->pushFromRT(ev);
+                mLastEmittedPeakDb[i] = peakDb;
+            }
+        }
+    }
 
     void recomputeClickFrames() {
         const int sr = mSampleRate.load(std::memory_order_relaxed);

@@ -112,6 +112,11 @@ void AudioEngine::OboeAdapterDeleter::operator()(void* p) const {
 } while(0)
 
 AudioEngine::AudioEngine() {
+    // Wire looper event dispatcher into AudioLooper BEFORE starting the
+    // dispatcher worker thread, so the first audio callback can already push.
+    mAudioLooper.setEventDispatcher(&mLooperEventDispatcher);
+    mLooperEventDispatcher.start();
+
     // IMPROVED (Fase 2.2.3): Manejo robusto de memoria insuficiente
     try {
         // Intentar pre-alocar buffers con tamaño completo
@@ -266,6 +271,12 @@ AudioEngine::~AudioEngine() {
     // RAII: Cancel pending fade thread and ensure stream is closed
     mFadeCtrl.cancel();
     stop();
+
+    // Stop the looper dispatcher AFTER the audio stream is closed so no
+    // RT thread can still be pushing while we drain & join the worker.
+    mAudioLooper.setEventDispatcher(nullptr);
+    mLooperEventDispatcher.setSink(nullptr);
+    mLooperEventDispatcher.stop();
 
     // IMPROVED (Fase 2.1.4): Limpiar recovery thread si existe
     if (mRecoveryThread && mRecoveryThread->joinable()) {
@@ -970,10 +981,24 @@ bool AudioEngine::isSoundFontLoaded() const {
 }
 
 void AudioEngine::sfNoteOn(int touchId, int midiNote, float velocity) {
+    if (touchId == 0
+        && mArpSequencer.isEnabled()
+        && mEngineDispatcher.getEngineType() == 6 /* SOUNDFONT */) {
+        float freq = 440.0f * std::pow(2.0f, (midiNote - 69) / 12.0f);
+        mArpSequencer.setBaseFrequency(freq);
+        mArpSequencer.setTouchActive(true);
+        return;
+    }
     mEngineDispatcher.sfNoteOn(touchId, midiNote, velocity);
 }
 
 void AudioEngine::sfNoteOff(int touchId) {
+    if (touchId == 0
+        && mArpSequencer.isEnabled()
+        && mEngineDispatcher.getEngineType() == 6 /* SOUNDFONT */) {
+        mArpSequencer.setTouchActive(false);
+        return;
+    }
     mEngineDispatcher.sfNoteOff(touchId);
 }
 
@@ -1214,16 +1239,28 @@ void AudioEngine::renderInputFx(float* output, int32_t numFrames, InputNode* inp
 
 void AudioEngine::renderSoundFont(float* output, int32_t numFrames) {
     auto* sfEngine = mEngineDispatcher.getSoundFontEngine();
+    if (!sfEngine) {
+        std::fill_n(output, numFrames * 2, 0.0f);
+        return;
+    }
 
     if (mArpSequencer.isEnabled()) {
         float bpm = mBpm.load(std::memory_order_relaxed);
         auto arpOut = mArpSequencer.process(numFrames, bpm);
 
-        if (arpOut.frequency > 0.0f && arpOut.amplitude > 0.001f) {
-            int midiNote = SoundFontEngine::frequencyToMidi(arpOut.frequency);
+        const bool gateOn = arpOut.frequency > 0.0f && arpOut.amplitude > 0.001f;
+        if (gateOn) {
+            const int midiNote = SoundFontEngine::frequencyToMidi(arpOut.frequency);
+            if (arpOut.trigger && mArpSfPrevMidiNote >= 0 && mArpSfPrevMidiNote != midiNote) {
+                sfEngine->noteOff(0);
+            }
             sfEngine->noteOn(0, midiNote, arpOut.amplitude);
+            mArpSfPrevMidiNote = midiNote;
         } else {
-            sfEngine->noteOff(0);
+            if (mArpSfPrevMidiNote >= 0) {
+                sfEngine->noteOff(0);
+                mArpSfPrevMidiNote = -1;
+            }
         }
     }
 

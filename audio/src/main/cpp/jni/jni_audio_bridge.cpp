@@ -20,10 +20,12 @@
 #include "../nodes/InputNode.h"
 #include "../backends/BackendManager.h"
 #include "../backends/LibusbBackend.h"
+#include "../looper/LooperEventDispatcher.h"
 #include "../usb/UsbSnapshotCodec.h"
 #include "../voice/VoiceTypes.h"
 #include <cmath>
 #include <algorithm>
+#include <mutex>
 #include <vector>
 
 // External declarations from jni_usb.cpp for USB volume
@@ -2875,6 +2877,168 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     JNIEnv* env, jobject thiz) {
     if (g_jniState.engine)
         g_jniState.engine->getAudioLooper().resetTelemetry();
+}
+
+// ============================================================================
+// Looper state listener (push-based notifications C++ → Kotlin)
+//
+// Replaces the per-track polling pattern (~800 JNI calls/sec at 8 tracks ×
+// 30fps × 3 fields) in NoisyPad's LooperViewModel. The audio thread pushes
+// events onto LooperEventDispatcher's lock-free queue; the dispatcher's
+// worker thread drains it and invokes the Kotlin listener through the sink
+// installed below. All Kotlin callbacks therefore arrive on a single
+// background thread — listener implementations must marshal to main thread.
+// ============================================================================
+
+namespace {
+
+std::mutex                g_looperListenerMutex;
+jobject                   g_looperListenerGlobalRef = nullptr;
+jclass                    g_looperListenerClass = nullptr;
+jmethodID                 g_looperOnTrackProgress = nullptr;
+jmethodID                 g_looperOnTrackPlayingChanged = nullptr;
+jmethodID                 g_looperOnTrackPeakChanged = nullptr;
+
+/**
+ * Attach the worker thread to the JVM if it isn't already, returning a
+ * JNIEnv* valid on this thread. We use AttachCurrentThreadAsDaemon so the
+ * JVM doesn't insist on a clean detach if the worker outlives the engine
+ * (which it shouldn't, but daemon-attach is the safer default).
+ */
+JNIEnv* attachWorkerEnv() {
+    if (!g_javaVm) return nullptr;
+    JNIEnv* env = nullptr;
+    jint rc = g_javaVm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+    if (rc == JNI_OK) return env;
+    if (rc == JNI_EDETACHED) {
+        if (g_javaVm->AttachCurrentThreadAsDaemon(&env, nullptr) != JNI_OK) {
+            return nullptr;
+        }
+        return env;
+    }
+    return nullptr;
+}
+
+void dispatchLooperEvent(const wm::LooperEvent& ev) {
+    JNIEnv* env = attachWorkerEnv();
+    if (!env) return;
+
+    // Snapshot under the mutex to allow unregister to race safely.
+    jobject  listener = nullptr;
+    jmethodID method  = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_looperListenerMutex);
+        if (!g_looperListenerGlobalRef) return;
+        listener = g_looperListenerGlobalRef;
+        switch (ev.type) {
+            case wm::LooperEvent::Type::Progress:
+                method = g_looperOnTrackProgress; break;
+            case wm::LooperEvent::Type::PlayingChanged:
+                method = g_looperOnTrackPlayingChanged; break;
+            case wm::LooperEvent::Type::PeakChanged:
+                method = g_looperOnTrackPeakChanged; break;
+        }
+    }
+    if (!listener || !method) return;
+
+    if (ev.type == wm::LooperEvent::Type::PlayingChanged) {
+        env->CallVoidMethod(listener, method,
+                            static_cast<jint>(ev.trackIndex),
+                            ev.value > 0.5f ? JNI_TRUE : JNI_FALSE);
+    } else {
+        env->CallVoidMethod(listener, method,
+                            static_cast<jint>(ev.trackIndex),
+                            static_cast<jfloat>(ev.value));
+    }
+    // Swallow exceptions from the Kotlin side so one bad listener call
+    // doesn't kill the worker thread.
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+}
+
+}  // namespace
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperRegisterStateListener(
+    JNIEnv* env, jobject thiz, jobject listener) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    if (!listener) return JNI_FALSE;
+
+    std::lock_guard<std::mutex> lk(g_looperListenerMutex);
+
+    // Drop any previous registration first.
+    if (g_looperListenerGlobalRef) {
+        env->DeleteGlobalRef(g_looperListenerGlobalRef);
+        g_looperListenerGlobalRef = nullptr;
+    }
+    if (g_looperListenerClass) {
+        env->DeleteGlobalRef(g_looperListenerClass);
+        g_looperListenerClass = nullptr;
+    }
+
+    g_looperListenerGlobalRef = env->NewGlobalRef(listener);
+    if (!g_looperListenerGlobalRef) return JNI_FALSE;
+
+    jclass localCls = env->GetObjectClass(listener);
+    if (!localCls) {
+        env->DeleteGlobalRef(g_looperListenerGlobalRef);
+        g_looperListenerGlobalRef = nullptr;
+        return JNI_FALSE;
+    }
+    g_looperListenerClass = static_cast<jclass>(env->NewGlobalRef(localCls));
+    env->DeleteLocalRef(localCls);
+
+    g_looperOnTrackProgress = env->GetMethodID(
+        g_looperListenerClass, "onTrackProgress", "(IF)V");
+    g_looperOnTrackPlayingChanged = env->GetMethodID(
+        g_looperListenerClass, "onTrackPlayingChanged", "(IZ)V");
+    g_looperOnTrackPeakChanged = env->GetMethodID(
+        g_looperListenerClass, "onTrackPeakChanged", "(IF)V");
+
+    if (!g_looperOnTrackProgress
+        || !g_looperOnTrackPlayingChanged
+        || !g_looperOnTrackPeakChanged) {
+        LOGE("LooperStateListener: missing methods on %s",
+             "LooperStateListener");
+        env->ExceptionClear();
+        env->DeleteGlobalRef(g_looperListenerGlobalRef);
+        env->DeleteGlobalRef(g_looperListenerClass);
+        g_looperListenerGlobalRef = nullptr;
+        g_looperListenerClass = nullptr;
+        return JNI_FALSE;
+    }
+
+    g_jniState.engine->getLooperEventDispatcher().setSink(&dispatchLooperEvent);
+    return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperUnregisterStateListener(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine) {
+        g_jniState.engine->getLooperEventDispatcher().setSink(nullptr);
+    }
+    std::lock_guard<std::mutex> lk(g_looperListenerMutex);
+    if (g_looperListenerGlobalRef) {
+        env->DeleteGlobalRef(g_looperListenerGlobalRef);
+        g_looperListenerGlobalRef = nullptr;
+    }
+    if (g_looperListenerClass) {
+        env->DeleteGlobalRef(g_looperListenerClass);
+        g_looperListenerClass = nullptr;
+    }
+    g_looperOnTrackProgress = nullptr;
+    g_looperOnTrackPlayingChanged = nullptr;
+    g_looperOnTrackPeakChanged = nullptr;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetDroppedEvents(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getLooperEventDispatcher().getDroppedEvents();
 }
 
 } // extern "C"

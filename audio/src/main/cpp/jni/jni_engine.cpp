@@ -24,6 +24,7 @@
 JniGlobalState g_jniState;
 WmaEngine* g_wmaEngine = nullptr;  // Owns AudioEngine + BackendManager (Phase 0D)
 JniCache g_jniCache;
+JavaVM* g_javaVm = nullptr;        // Cached in JNI_OnLoad for worker-thread attachment
 
 // Phase 4.5: Float array pool for high-frequency operations
 FloatArrayPool g_floatArrayPool;
@@ -106,6 +107,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
         return JNI_ERR;
     }
 
+    g_javaVm = vm;  // Workers attach via this in jni_audio_bridge.cpp (LooperStateListener sink).
     g_jniCache.initialize(env);
     LOGI("JNI_OnLoad: Native library loaded");
 
