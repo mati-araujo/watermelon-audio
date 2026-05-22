@@ -77,6 +77,10 @@ class KmpNativeConventionPlugin : Plugin<Project> {
                     commonMain.dependencies {
                         implementation(libs.library("kotlinx-coroutines-core"))
                     }
+                    commonTest.dependencies {
+                        implementation(kotlin("test"))
+                        implementation(libs.library("kotlinx-coroutines-test"))
+                    }
                     androidMain.dependencies {
                         implementation(libs.library("oboe"))
                         implementation(libs.library("kotlinx-coroutines-android"))

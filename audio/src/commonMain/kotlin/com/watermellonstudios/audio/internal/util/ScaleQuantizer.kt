@@ -1,5 +1,8 @@
 package com.watermellonstudios.audio.internal.util
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.ln
@@ -52,9 +55,32 @@ object ScaleQuantizer {
     // Last quantized MIDI note (integer) for hysteresis tracking
     @Volatile private var lastQuantizedMidi: Int = -1
 
-    /** The current quantized MIDI note (or -1 if none). Read by NoteNameEffect. */
-    @Volatile var currentMidiNote: Int = -1
-        private set
+    // Backing StateFlow for currentMidiNote. StateFlow's equality-based emission
+    // suppression means consumers only see real changes — no need for an explicit
+    // distinctUntilChanged. See [currentMidiNoteFlow] for the public API.
+    private val _currentMidiNoteFlow = MutableStateFlow(-1)
+
+    /**
+     * Push-based stream of the current quantized MIDI note (AUD-3).
+     *
+     * Emits whenever the quantized note changes. Frame-rate writers that pass
+     * the same int (e.g. the XY drag staying inside a note's hysteresis zone,
+     * or sub-cent jitter in free mode) do NOT cause emissions — `MutableStateFlow`
+     * collapses identical values internally. Consumers can replace per-frame
+     * `currentMidiNote` polling with a single collector.
+     *
+     * The value is `-1` until the first quantization, and is reset to `-1` when
+     * the active engine returns to a free-frequency mode with no scale.
+     */
+    val currentMidiNoteFlow: StateFlow<Int> = _currentMidiNoteFlow.asStateFlow()
+
+    /**
+     * The current quantized MIDI note (or -1 if none). Read by NoteNameEffect
+     * and other synchronous consumers. Backed by [currentMidiNoteFlow]; new
+     * consumers should prefer the flow to avoid polling.
+     */
+    val currentMidiNote: Int
+        get() = _currentMidiNoteFlow.value
 
     /** True if current note is a quarter-tone (between semitones). */
     @Volatile var isQuarterTone: Boolean = false
@@ -161,7 +187,7 @@ object ScaleQuantizer {
 
         val prevMidi = lastQuantizedMidi
         lastQuantizedMidi = midiNote
-        currentMidiNote = midiNote
+        _currentMidiNoteFlow.value = midiNote
         isQuarterTone = false
         android.util.Log.d("XY_TRACE", "[SQ-EQ] NOTE %d→%d idx=%d/%d".format(prevMidi, midiNote, index, scaleNotes.size))
         return QuantizationResult(midiToFrequency(midiNote.toFloat()), changed = true)
@@ -236,7 +262,7 @@ object ScaleQuantizer {
         // If no intervals, return raw frequency (free mode) — always "changed"
         if (intervals.isEmpty()) {
             lastQuantizedMidi = -1
-            currentMidiNote = (69f + 12f * (ln(rawFreq / 440f) / ln(2f))).roundToInt()
+            _currentMidiNoteFlow.value = (69f + 12f * (ln(rawFreq / 440f) / ln(2f))).roundToInt()
             isQuarterTone = false
             return QuantizationResult(rawFreq, changed = true)
         }
@@ -289,7 +315,7 @@ object ScaleQuantizer {
         }
 
         lastQuantizedMidi = quarterMidi
-        currentMidiNote = quarterMidi / 2  // floor: C+4 (qMidi=121) → midi 60 (C4)
+        _currentMidiNoteFlow.value = quarterMidi / 2  // floor: C+4 (qMidi=121) → midi 60 (C4)
         isQuarterTone = (quarterMidi % 2) != 0  // odd = between semitones
         val quantizedFreq = midiToFrequency(quarterMidi / 2f)
         return QuantizationResult(quantizedFreq, changed = true)
@@ -328,7 +354,7 @@ object ScaleQuantizer {
 
         val prevMidi = lastQuantizedMidi
         lastQuantizedMidi = newMidi
-        currentMidiNote = newMidi
+        _currentMidiNoteFlow.value = newMidi
         isQuarterTone = false
         val (sqMin, sqMax) = getFrequencyRange()
         android.util.Log.d("XY_TRACE", "[SQ] NOTE %d→%d freq=%.1f rawMidi=%.1f range=[%.1f,%.1f] root=%d oct=%d".format(prevMidi, newMidi, midiToFrequency(quantizedMidi), midiNote, sqMin, sqMax, currentRootNoteId, currentOctaveRange))
