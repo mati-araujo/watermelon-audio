@@ -334,6 +334,11 @@ void wma_sf_note_off_all(WmaEngine* engine) {
     engine->engine->sfNoteOffAll();
 }
 
+void wma_sf_note_off_all_except(WmaEngine* engine, int keep_touch_id) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->sfNoteOffAllExcept(keep_touch_id);
+}
+
 /* ================================================================
  * 7. Voice Filter
  * ================================================================ */

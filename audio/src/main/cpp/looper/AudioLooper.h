@@ -1188,7 +1188,7 @@ private:
     std::atomic<int64_t> mArmedTriggerFrame{0};
     std::atomic<bool> mOverdubbing{false};
     std::atomic<bool> mLoopFinalizedDuringRec{false};
-    std::atomic<int> mTailMs{750};  // Default tail capture (preserves sustain at loop seam)
+    std::atomic<int> mTailMs{1750};  // Default tail capture (preserves sustain at loop seam)
                                     // 750ms covers most natural decays (pads, reverb tails,
                                     // long pianos). NoisyPad can override via setTailMs().
 

@@ -1,4 +1,4 @@
-# Etapa 7 — Android 14 bit-perfect y fast path AAudio MMAP
+ # Etapa 7 — Android 14 bit-perfect y fast path AAudio MMAP
 
 **Estado:** propuesta — no iniciada.
 **Dependencias:** stages 1–5 mergeados. Stage 6 no es estrictamente bloqueante pero se recomienda tenerlo para validar.

@@ -406,6 +406,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfNote
     g_jniState.engine->sfNoteOffAll();
 }
 
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfNoteOffAllExcept(
+    JNIEnv* env, jobject thiz, jint keepTouchId) {
+    if (!ensureEngine()) return;
+    g_jniState.engine->sfNoteOffAllExcept(keepTouchId);
+}
+
 // ========== VOICE FILTER (Phase 6) ==========
 
 JNIEXPORT void JNICALL

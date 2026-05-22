@@ -832,6 +832,18 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     }
 
     /**
+     * Release every active SoundFont touch except [keepTouchId].
+     *
+     * Single lock-free JNI call. Designed for single-touch XY drag flows
+     * (e.g. ChaosPad SoundFont mode) to replace per-frame loops of
+     * `sfNoteOff(i)` over the remaining slots — the touch-state scan
+     * happens on the audio thread.
+     */
+    fun sfNoteOffAllExcept(keepTouchId: Int) {
+        nativeSfNoteOffAllExcept(keepTouchId)
+    }
+
+    /**
      * Get waveform samples for visualization.
      *
      * @param buffer Buffer to fill with samples
@@ -1857,6 +1869,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeSfNoteOn(touchId: Int, midiNote: Int, velocity: Float)
     private external fun nativeSfNoteOff(touchId: Int)
     private external fun nativeSfNoteOffAll()
+    private external fun nativeSfNoteOffAllExcept(keepTouchId: Int)
     private external fun nativeSetVoiceFilterEnabled(enabled: Boolean)
     private external fun nativeSetVoiceFilterCutoff(hz: Float)
     private external fun nativeSetVoiceFilterResonance(q: Float)

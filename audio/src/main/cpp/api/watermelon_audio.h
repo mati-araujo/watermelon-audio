@@ -299,6 +299,14 @@ WMA_API void wma_sf_note_off(WmaEngine* engine, int touch_id);
 /** Release all SoundFont notes. */  /* RT-safe */
 WMA_API void wma_sf_note_off_all(WmaEngine* engine);
 
+/**
+ * Release every active SoundFont touch except @p keep_touch_id.
+ * One lock-free call; the touch-state scan runs on the audio thread.
+ * Use this instead of looping wma_sf_note_off() over all "other" slots.
+ */
+/* RT-safe */
+WMA_API void wma_sf_note_off_all_except(WmaEngine* engine, int keep_touch_id);
+
 /* ================================================================
  * 7. Voice Filter
  * ================================================================ */

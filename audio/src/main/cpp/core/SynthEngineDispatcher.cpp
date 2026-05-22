@@ -337,3 +337,9 @@ void SynthEngineDispatcher::sfNoteOffAll() {
         mSoundFontEngine->noteOffAll();
     }
 }
+
+void SynthEngineDispatcher::sfNoteOffAllExcept(int keepTouchId) {
+    if (mSoundFontEngine) {
+        mSoundFontEngine->noteOffAllExcept(keepTouchId);
+    }
+}

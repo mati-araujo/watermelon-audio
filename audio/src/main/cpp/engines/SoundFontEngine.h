@@ -79,6 +79,19 @@ public:
     }
 
     /**
+     * @brief Release every active touch except @p keepTouchId.
+     *
+     * Replaces the per-frame cleanup pattern of calling noteOff() for every
+     * "other" touchId from the UI thread (which costs one JNI call per slot).
+     * The actual scan over mTouches happens on the audio thread inside
+     * drainEvents(), so this is a single lock-free enqueue regardless of how
+     * many touches are active.
+     */
+    void noteOffAllExcept(int keepTouchId) {
+        pushEvent(NoteEvent::makeNoteOffAllExcept(keepTouchId));
+    }
+
+    /**
      * @brief Render audio for all active notes into buffer
      *
      * AUDIO THREAD ONLY. Drains the event queue first, then renders.
@@ -165,7 +178,8 @@ private:
     enum class EventType : uint8_t {
         NOTE_ON,
         NOTE_OFF,
-        NOTE_OFF_ALL
+        NOTE_OFF_ALL,
+        NOTE_OFF_ALL_EXCEPT
     };
 
     struct NoteEvent {
@@ -183,6 +197,10 @@ private:
         }
         static NoteEvent makeNoteOffAll() {
             return {EventType::NOTE_OFF_ALL, 0, 0, 0.0f};
+        }
+        static NoteEvent makeNoteOffAllExcept(int keepTouchId) {
+            return {EventType::NOTE_OFF_ALL_EXCEPT,
+                    static_cast<int8_t>(keepTouchId), 0, 0.0f};
         }
     };
 
@@ -242,6 +260,18 @@ private:
                 case EventType::NOTE_OFF_ALL: {
                     tsf_note_off_all(sf);
                     for (auto& t : mTouches) t.active = false;
+                    break;
+                }
+                case EventType::NOTE_OFF_ALL_EXCEPT: {
+                    int keep = event.touchId;
+                    for (int i = 0; i < MAX_TOUCHES; ++i) {
+                        if (i == keep) continue;
+                        auto& touch = mTouches[i];
+                        if (touch.active) {
+                            tsf_note_off(sf, mActivePreset, touch.midiNote);
+                            touch.active = false;
+                        }
+                    }
                     break;
                 }
             }

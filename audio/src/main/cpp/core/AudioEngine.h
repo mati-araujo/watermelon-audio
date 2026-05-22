@@ -284,6 +284,16 @@ public:
     void sfNoteOffAll();
 
     /**
+     * @brief Release every active SoundFont touch except @p keepTouchId.
+     *
+     * Designed for single-touch XY drag flows where the UI must release
+     * leftover dual-touch slots without paying one JNI call per slot.
+     * Lock-free: enqueues a single event onto the SoundFontEngine queue;
+     * the touch-state scan runs on the audio thread.
+     */
+    void sfNoteOffAllExcept(int keepTouchId);
+
+    /**
      * @brief Cambia el tipo de modulador activo
      * @param typeId Tipo de modulador (0=NONE, 1=BURST, 2=AM, 3=FM, 4=PWM, 5=ENV, 6=RING, 7=GATE)
      * Lock-free: Seguro llamar desde cualquier thread
