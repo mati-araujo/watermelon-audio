@@ -1,6 +1,7 @@
 package com.watermellonstudios.audio.internal.effect
 
 import com.watermellonstudios.audio.api.EffectNotFoundException
+import com.watermellonstudios.audio.api.EffectParameterUpdate
 import com.watermellonstudios.audio.api.EffectPreset
 import com.watermellonstudios.audio.api.IEffectManager
 import com.watermellonstudios.audio.api.IEffectStateWriter
@@ -213,6 +214,28 @@ internal class EffectManagerImpl(
         // For individual parameters, we don't wait for full sync
         // The polling will capture it in the next cycle
         // This allows responsive UI during slider drags
+        return Result.success(Unit)
+    }
+
+    override suspend fun setEffectParametersBatch(
+        updates: List<EffectParameterUpdate>
+    ): Result<Unit> {
+        if (updates.isEmpty()) return Result.success(Unit)
+
+        val chainSize = effectsState.value.size
+        for (update in updates) {
+            if (update.effectIndex < 0 || update.effectIndex >= chainSize) {
+                return Result.failure(EffectNotFoundException(update.effectIndex, chainSize))
+            }
+        }
+
+        val result = stateWriter.setMultipleEffectParameters(updates)
+        if (result.isFailure) {
+            logger.error(TAG, "setEffectParametersBatch: native call failed", result.exceptionOrNull())
+            return result
+        }
+
+        logger.debug(TAG, "setEffectParametersBatch: ${updates.size} updates applied")
         return Result.success(Unit)
     }
 

@@ -4,6 +4,7 @@
 namespace oboe { class AudioStream; }
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 #include <memory>
 #include <atomic>
@@ -342,6 +343,37 @@ public:
         mEffectChain.setParameter(index, paramId, value);
         incrementStateVersion();
     }
+
+    /**
+     * Apply many parameter updates with a single state-version bump.
+     *
+     * Scene-load fast path. Each update writes directly through the existing
+     * lock-free atomic snapshot on EffectChain — individual params are
+     * std::atomic, so audio-thread reads remain consistent. We bump the state
+     * version exactly once at the end so the Kotlin-side StateSynchronizer
+     * emits a single coherent post-batch state.
+     *
+     * Out-of-range effect indices are skipped silently.
+     */
+    void setParametersBatch(const int* effectIndices,
+                            const int* paramIds,
+                            const float* values,
+                            size_t count) {
+        if (count == 0 || effectIndices == nullptr || paramIds == nullptr || values == nullptr) {
+            return;
+        }
+        const size_t chainSize = mEffectChain.getNumEffects();
+        bool anyApplied = false;
+        for (size_t i = 0; i < count; ++i) {
+            const int idx = effectIndices[i];
+            if (idx >= 0 && static_cast<size_t>(idx) < chainSize && std::isfinite(values[i])) {
+                mEffectChain.setParameter(static_cast<size_t>(idx), paramIds[i], values[i]);
+                anyApplied = true;
+            }
+        }
+        if (anyApplied) incrementStateVersion();
+    }
+
     float getParameter(size_t index, int paramId) const { return mEffectChain.getParameter(index, paramId); }
     void savePreset(size_t presetId, const std::string& name) { mEffectChain.savePreset(presetId, name); }
     void loadPreset(size_t presetId) {

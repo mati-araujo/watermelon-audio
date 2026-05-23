@@ -11,7 +11,7 @@ import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.usb.StreamPreference
 import com.watermellonstudios.audio.internal.native.NativeLibraryLoader
-import com.watermellonstudios.audio.internal.optimization.EffectParameterUpdate
+import com.watermellonstudios.audio.api.EffectParameterUpdate
 import com.watermellonstudios.audio.internal.optimization.JniMetrics
 import com.watermellonstudios.audio.internal.optimization.SnapshotCacheConfig
 import com.watermellonstudios.audio.internal.optimization.XYCoalescerConfig
@@ -212,7 +212,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param updates List of effect parameter updates
      * @return Result.success if all updates applied, Result.failure otherwise
      */
-    suspend fun setMultipleEffectParameters(
+    override suspend fun setMultipleEffectParameters(
         updates: List<EffectParameterUpdate>
     ): Result<Unit> = withContext(Dispatchers.Default) {
         if (updates.isEmpty()) return@withContext Result.success(Unit)

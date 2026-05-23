@@ -583,11 +583,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEff
     }
 
     try {
-        for (jsize i = 0; i < length; ++i) {
-            if (std::isfinite(vals.get()[i])) {
-                g_jniState.engine->setParameter(static_cast<size_t>(index), ids.get()[i], vals.get()[i]);
-            }
-        }
+        // Single-effect batch: build a stack-allocated effectIndices array and
+        // route through setParametersBatch so we get one state-version bump
+        // for the whole batch instead of N.
+        std::vector<int> effectIndices(static_cast<size_t>(length), index);
+        g_jniState.engine->setParametersBatch(
+            effectIndices.data(),
+            ids.get(),
+            vals.get(),
+            static_cast<size_t>(length)
+        );
         return JniError::SUCCESS;
     } catch (...) {
         return JniError::UNKNOWN_ERROR;
@@ -624,19 +629,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMul
         return JniError::SUCCESS;
     }
 
-    size_t chainSize = g_jniState.engine->getNumEffects();
-
     try {
-        for (jsize i = 0; i < length; ++i) {
-            jint effectIdx = indices.get()[i];
-            if (effectIdx >= 0 && static_cast<size_t>(effectIdx) < chainSize && std::isfinite(vals.get()[i])) {
-                g_jniState.engine->setParameter(
-                    static_cast<size_t>(effectIdx),
-                    params.get()[i],
-                    vals.get()[i]
-                );
-            }
-        }
+        // Single state-version bump at the end (AUD-6): scene loads previously
+        // produced N version bumps for N parameters, causing the Kotlin
+        // synchronizer to potentially observe partial states between updates.
+        g_jniState.engine->setParametersBatch(
+            indices.get(),
+            params.get(),
+            vals.get(),
+            static_cast<size_t>(length)
+        );
         LOGI("nativeSetMultipleEffectParameters: applied %d updates", static_cast<int>(length));
         return JniError::SUCCESS;
     } catch (const std::exception& e) {

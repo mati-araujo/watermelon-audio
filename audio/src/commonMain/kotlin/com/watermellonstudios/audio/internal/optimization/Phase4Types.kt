@@ -8,28 +8,6 @@ package com.watermellonstudios.audio.internal.optimization
  */
 
 /**
- * Represents a single effect parameter update for batch operations (Phase 4.1).
- *
- * Usage:
- * ```kotlin
- * val updates = listOf(
- *     EffectParameterUpdate(effectIndex = 0, paramId = 1, value = 0.5f),
- *     EffectParameterUpdate(effectIndex = 1, paramId = 2, value = 0.8f)
- * )
- * bridge.setMultipleEffectParameters(updates)
- * ```
- *
- * @param effectIndex Index of the effect in the chain (0-based)
- * @param paramId Parameter ID within the effect
- * @param value New value for the parameter
- */
-data class EffectParameterUpdate(
-    val effectIndex: Int,
-    val paramId: Int,
-    val value: Float
-)
-
-/**
  * Statistics for a single JNI operation type (Phase 4.4).
  *
  * @param callCount Total number of calls

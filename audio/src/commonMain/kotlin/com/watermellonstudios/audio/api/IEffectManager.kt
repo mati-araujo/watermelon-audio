@@ -102,6 +102,25 @@ interface IEffectManager {
     suspend fun applyPreset(effectIndex: Int, preset: EffectPreset): Result<Unit>
 
     /**
+     * Applies parameter updates across multiple effects in a single JNI call.
+     *
+     * Use this for scene loads or any case where the caller already has a
+     * fully-formed snapshot of "what every effect's params should be". With
+     * 10 effects × 5 params, the per-effect [applyPreset] path crosses JNI 10
+     * times; this path crosses once and triggers a single state-version bump,
+     * so [effectsState] emits one coherent post-batch state instead of N
+     * intermediate ones.
+     *
+     * Caller is responsible for ensuring [updates] target valid effect
+     * indices in the current chain (indices outside the chain are silently
+     * skipped in native code).
+     *
+     * @param updates Parameter updates targeting any effect/param in the chain
+     * @return Result.success if applied, or failure with appropriate exception
+     */
+    suspend fun setEffectParametersBatch(updates: List<EffectParameterUpdate>): Result<Unit>
+
+    /**
      * Toggles the bypass state of an effect.
      *
      * When bypassed, an effect passes audio through without processing.
