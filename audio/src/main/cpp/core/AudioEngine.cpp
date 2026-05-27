@@ -1079,20 +1079,32 @@ void AudioEngine::applyEffectsAndOutput(float* output, int32_t numFrames) {
     // before the looper so the click is mixed by AudioLooper::process.
     mTransport.tick(numFrames, mAudioLooper);
 
-    // ---- LOOPER TAP: post-FX, PRE-master-vol/fade ----
-    // Capturing here ensures the looper records the user-perceived "instrument"
-    // signal (post-effects) without being attenuated by master volume or fade.
-    // This makes recording independent of the user adjusting global volume
-    // mid-take and is the standard practice in professional loopers.
-    // playFrame is used by armed-recording for downbeat alignment.
-    mAudioLooper.process(output, numFrames, playFrameAtBlockStart);
-
-    // Fade + master volume
+    // ---- FADE (applied to synth + FX only — NOT to loops) ----
+    // The pause/scene-change fade mutes the instrument signal but must let
+    // existing loops keep playing through the transition. We apply the fade
+    // BEFORE the looper mixes its playback into `output`. The looper's
+    // recording tap reads `output` here, so an in-progress recording would
+    // capture the fade-out + transition + fade-in; callers that care about
+    // clean takes must abort recording before triggering the fade (handled
+    // on the NoisyPad side via the scene-change orchestrator).
     float fadeStart, fadeEnd;
     mFadeCtrl.processFadeBlock(numFrames, fadeStart, fadeEnd);
-    float masterVol = mMasterVolume.load(std::memory_order_acquire);
-    if (mFadeCtrl.isPaused()) masterVol = 0.0f;
-    simd::applyStereoGainRamp(output, numFrames, fadeStart * masterVol, fadeEnd * masterVol);
+    if (mFadeCtrl.isPaused()) { fadeStart = 0.0f; fadeEnd = 0.0f; }
+    simd::applyStereoGainRamp(output, numFrames, fadeStart, fadeEnd);
+
+    // ---- LOOPER TAP + PLAYBACK MIX ----
+    // Captures the faded synth/FX signal for recording; then mixes the loop
+    // playback into `output`. Loop playback is intentionally NOT scaled by
+    // the engine fade so loops remain audible during scene changes.
+    mAudioLooper.process(output, numFrames, playFrameAtBlockStart);
+
+    // ---- MASTER VOLUME (whole mix, no fade) ----
+    // Applied AFTER the looper mix so master volume scales the combined
+    // synth + FX + loops bus uniformly.
+    const float masterVol = mMasterVolume.load(std::memory_order_acquire);
+    if (masterVol != 1.0f) {
+        simd::applyStereoGain(output, numFrames, masterVol);
+    }
 
     // Output stage protection
     mOutputStage.processOutput(output, numFrames);

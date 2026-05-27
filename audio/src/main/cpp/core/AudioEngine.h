@@ -330,6 +330,10 @@ public:
         mEffectChain.removeEffect(index);
         incrementStateVersion();
     }
+    void clearAllEffects() {
+        mEffectChain.clearAllEffects();
+        incrementStateVersion();
+    }
     void reorderEffects(size_t from, size_t to) {
         mEffectChain.reorderEffects(from, to);
         incrementStateVersion();

@@ -538,6 +538,20 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeRemove
 }
 
 JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeClearAllEffects(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) {
+        return JniError::ENGINE_NOT_INITIALIZED;
+    }
+    try {
+        g_jniState.engine->clearAllEffects();
+        return JniError::SUCCESS;
+    } catch (...) {
+        return JniError::UNKNOWN_ERROR;
+    }
+}
+
+JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEffectParameter(
     JNIEnv* env, jobject thiz, jint index, jint paramId, jfloat value) {
     if (!g_jniState.engine) {
@@ -2250,6 +2264,14 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     if (g_jniState.engine) {
         g_jniState.engine->getAudioLooper().stopRecording();
         // Looper state is polled independently at 30fps via LooperViewModel
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperAbortRecording(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine) {
+        g_jniState.engine->getAudioLooper().abortRecording();
     }
 }
 

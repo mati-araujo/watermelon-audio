@@ -396,6 +396,16 @@ WmaResult wma_effect_remove(WmaEngine* engine, int index) {
     }
 }
 
+WmaResult wma_effect_clear_all(WmaEngine* engine) {
+    WMA_CHECK(engine);
+    try {
+        engine->engine->clearAllEffects();
+        return WMA_OK;
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
 WmaResult wma_effect_set_param(WmaEngine* engine, int index, int param_id, float value) {
     WMA_CHECK(engine);
     if (index < 0 || static_cast<size_t>(index) >= engine->engine->getNumEffects()) {

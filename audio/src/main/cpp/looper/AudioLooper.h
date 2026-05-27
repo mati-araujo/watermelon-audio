@@ -413,6 +413,56 @@ public:
         }
     }
 
+    /**
+     * @brief Abort the in-progress recording (if any) WITHOUT committing it.
+     *
+     * Unlike stopRecording() — which finalizes the take and starts playback —
+     * abortRecording() throws away whatever has been captured so far and
+     * leaves the target track in the idle/empty state. Used by scene-change
+     * flows that would otherwise capture fade-out / FX-transition / fade-in
+     * into the take.
+     *
+     * Safe to call when no recording is in progress (no-op).
+     *
+     * Lock-free / RT-safe: flips atomic flags then clears the track buffer.
+     * Track::clear() resets play state and zeros the buffer (no allocation).
+     */
+    void abortRecording() {
+        const int recTrack = mRecordingTrack.load(std::memory_order_acquire);
+        const int armed = mArmedTrack.load(std::memory_order_acquire);
+
+        // Always clear any armed-recording so a pending take doesn't fire
+        // moments after the abort.
+        mArmedTrack.store(-1, std::memory_order_release);
+
+        if (recTrack < 0 || recTrack >= MAX_TRACKS) {
+            // Nothing was recording, but we may have cleared an armed slot.
+            if (armed >= 0) {
+                LOOPER_LOGI("abortRecording: cleared armed track %d", armed);
+            }
+            return;
+        }
+
+        // Stop the audio thread from writing further samples to the buffer.
+        // The audio thread reads mRecordingTrack with acquire ordering, so
+        // the next callback after this store will skip the capture branch.
+        mRecordingTrack.store(-1, std::memory_order_release);
+        mOverdubbing.store(false, std::memory_order_release);
+        mLoopFinalizedDuringRec.store(false, std::memory_order_release);
+        mRecordFramesRemaining.store(0, std::memory_order_release);
+        mRecordProgress.store(0.0f, std::memory_order_release);
+
+        // Discard any partial content. clear() zeros the buffer and resets
+        // play state — the track returns to "empty / idle". Note: if this
+        // was an overdub on an already-finalized track, clear() also wipes
+        // the previously committed loop. That's the desired semantics for
+        // a scene change: callers must decide before calling whether to
+        // preserve overdub bases (current handleLoadScene path discards).
+        mTracks[recTrack].clear();
+
+        LOOPER_LOGI("abortRecording: discarded take on track %d", recTrack);
+    }
+
     void startOverdub(int trackIndex) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return;
         if (!mTracks[trackIndex].isActive()) return;

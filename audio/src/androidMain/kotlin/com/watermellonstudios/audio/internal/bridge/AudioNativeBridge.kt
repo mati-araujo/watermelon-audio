@@ -10,6 +10,7 @@ import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.usb.StreamPreference
+import com.watermellonstudios.audio.export.Mp4AacTranscoder
 import com.watermellonstudios.audio.internal.native.NativeLibraryLoader
 import com.watermellonstudios.audio.api.EffectParameterUpdate
 import com.watermellonstudios.audio.internal.optimization.JniMetrics
@@ -1258,22 +1259,18 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override suspend fun clearAllEffects(): Result<Unit> = withContext(Dispatchers.Default) {
         effectsMutex.withLock {
             try {
-                var chainSize = nativeGetEffectChainSize()
-
-                while (chainSize > 0) {
-                    val result = nativeRemoveEffect(chainSize - 1)
-                    if (result != 0) {
-                        Log.e(TAG, "clearAllEffects: failed to remove effect at ${chainSize - 1}")
-                        return@withContext Result.failure(
-                            NativeBridgeException.fromCode(result, "clearAllEffects")
-                        )
-                    }
-                    chainSize = nativeGetEffectChainSize()
+                // Single native call: removes ALL effects under one chainMutex
+                // acquisition and pays the 20ms grace sleep ONCE for the batch
+                // (vs. 20ms × N when removing per-effect). Scene-load fast path.
+                val result = nativeClearAllEffects()
+                if (result != 0) {
+                    Log.e(TAG, "clearAllEffects: native call failed (code=$result)")
+                    return@withContext Result.failure(
+                        NativeBridgeException.fromCode(result, "clearAllEffects")
+                    )
                 }
-
-                Log.d(TAG, "clearAllEffects: all effects removed")
+                Log.d(TAG, "clearAllEffects: all effects removed (atomic)")
                 Result.success(Unit)
-
             } catch (e: Exception) {
                 Log.e(TAG, "clearAllEffects: exception", e)
                 Result.failure(e)
@@ -1885,6 +1882,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     private external fun nativeAddEffect(typeId: Int): Int
     private external fun nativeRemoveEffect(index: Int): Int
+    private external fun nativeClearAllEffects(): Int
     private external fun nativeSetEffectParameter(index: Int, paramId: Int, value: Float): Int
     private external fun nativeSetEffectParametersBatch(index: Int, paramIds: IntArray, values: FloatArray): Int
     private external fun nativeSetMultipleEffectParameters(effectIndices: IntArray, paramIds: IntArray, values: FloatArray): Int
@@ -2571,6 +2569,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperStartRecordingWithPreRoll(trackIndex: Int, preRollMs: Int)
     private external fun nativeLooperStartRecording(trackIndex: Int)
     private external fun nativeLooperStopRecording()
+    private external fun nativeLooperAbortRecording()
     private external fun nativeLooperStartOverdub(trackIndex: Int)
     private external fun nativeLooperStopAll()
     private external fun nativeLooperPause()
@@ -2710,6 +2709,17 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     fun looperStartRecording(trackIndex: Int) = nativeLooperStartRecording(trackIndex)
     fun looperStopRecording() = nativeLooperStopRecording()
+
+    /**
+     * Abort the in-progress recording WITHOUT committing it.
+     * Unlike [looperStopRecording], the captured samples are discarded and
+     * the target track is left empty. Use this for scene changes / state
+     * transitions where the in-flight take would otherwise be polluted by
+     * fade-out + FX transition + fade-in.
+     * Safe to call when no recording is in progress (no-op).
+     */
+    fun looperAbortRecording() = nativeLooperAbortRecording()
+
     fun looperStartOverdub(trackIndex: Int) = nativeLooperStartOverdub(trackIndex)
     fun looperStopAll() = nativeLooperStopAll()
     fun looperPause() = nativeLooperPause()
@@ -2910,6 +2920,75 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         nativeLooperExportStems(
             directory, bitDepth.raw, repeatLoops, countInBeats, applyLimiter, bpm
         )
+    }
+
+    /**
+     * Export the current mix to a compressed AAC LC file (.m4a, MPEG-4 container).
+     *
+     * Pipeline: render a temporary lossless WAV via [looperExportMixPro], then
+     * transcode it with Android's MediaCodec (hardware-accelerated) into AAC.
+     * Result is typically 8–12× smaller than 24-bit WAV at 192 kbps with
+     * transparent quality for most material — ideal for sharing via messaging apps.
+     *
+     * @param m4aFilePath  Final M4A output path.
+     * @param tempWavPath  Scratch WAV path (must be writable; deleted on success
+     *                     unless [keepWav] is true).
+     * @param bitrateBps   AAC bitrate. See [Mp4AacTranscoder.Bitrate].
+     * @param repeatLoops  Loop iterations (same semantics as exportMixPro).
+     * @param countInBeats Leading silence in beats.
+     * @param applyLimiter True-peak limiter before transcode.
+     * @param projectName  Optional metadata (currently embedded in temp WAV only).
+     * @param artist       Optional metadata.
+     * @param comment      Optional metadata.
+     * @param bpm          Optional BPM tag (0 = use Transport's BPM).
+     * @param keepWav      If true, the intermediate WAV is left at [tempWavPath]
+     *                     after success. Default false → deleted.
+     * @return [Mp4AacTranscoder.Result] from the transcode step. Failure of the
+     *         underlying WAV render is reported as `success=false`,
+     *         `error="wav render failed"`.
+     */
+    suspend fun looperExportMixCompressed(
+        m4aFilePath: String,
+        tempWavPath: String,
+        bitrateBps: Int = Mp4AacTranscoder.Bitrate.HIGH,
+        repeatLoops: Int = 1,
+        countInBeats: Int = 0,
+        applyLimiter: Boolean = true,
+        projectName: String? = null,
+        artist: String? = null,
+        comment: String? = null,
+        bpm: Int = 0,
+        keepWav: Boolean = false,
+        onProgress: ((Float) -> Unit)? = null
+    ): Mp4AacTranscoder.Result = withContext(Dispatchers.IO) {
+        // Phase 1: render lossless WAV (mixdown). Reserve [0..0.7] for this step.
+        val wavOk = looperExportMixPro(
+            filePath = tempWavPath,
+            bitDepth = ExportBitDepth.PCM_16,  // 16-bit is sufficient pre-AAC
+            repeatLoops = repeatLoops,
+            countInBeats = countInBeats,
+            applyLimiter = applyLimiter,
+            projectName = projectName,
+            artist = artist,
+            comment = comment,
+            bpm = bpm
+        )
+        if (!wavOk) {
+            return@withContext Mp4AacTranscoder.Result(false, error = "wav render failed")
+        }
+        onProgress?.invoke(0.7f)
+
+        // Phase 2: WAV → AAC. Reserve [0.7..1.0] for this step.
+        val result = Mp4AacTranscoder.wavToM4a(
+            wavPath = tempWavPath,
+            m4aPath = m4aFilePath,
+            bitrateBps = bitrateBps,
+            onProgress = { p -> onProgress?.invoke(0.7f + p * 0.3f) }
+        )
+        if (!keepWav) {
+            runCatching { java.io.File(tempWavPath).delete() }
+        }
+        result
     }
 
     /** Polled by UI to render a progress bar. [0..1]. */

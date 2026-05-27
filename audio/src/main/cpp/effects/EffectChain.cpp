@@ -167,6 +167,53 @@ void EffectChain::removeEffect(size_t index) {
     LOGI("Effect destroyed safely");
 }
 
+void EffectChain::clearAllEffects() {
+    // Move ALL effects out of the chain under the lock, publish an empty
+    // snapshot, then drop the lock and sleep ONCE to let the audio thread
+    // finish any in-flight read of the previous snapshot before the
+    // batched unique_ptrs are destroyed at scope exit.
+    //
+    // This is the batch equivalent of removeEffect() — same RT-safety
+    // guarantees (audio thread reads atomic snapshot), but the 20ms grace
+    // is paid once for N effects instead of N times.
+    std::vector<std::unique_ptr<Effect>> removed;
+
+    {
+        std::lock_guard<std::mutex> lock(chainMutex);
+
+        if (effects.empty()) {
+            LOGI("clearAllEffects: chain already empty");
+            return;
+        }
+
+        removed = std::move(effects);
+        effects.clear();
+        effectTypes.clear();
+        bypassed.clear();
+
+        // Reset bypass smoothers for the slots we just freed so that
+        // re-adding effects later starts from a clean (fully active) state.
+        for (size_t i = 0; i < MAX_BYPASS_SLOTS; ++i) {
+            mBypassSmooth[i].reset(0.0f);
+            mBypassTarget[i].store(0.0f, std::memory_order_relaxed);
+        }
+
+        // Publish empty snapshot ONCE.
+        updateSnapshot();
+
+        LOGI("clearAllEffects: %zu effects removed in batch", removed.size());
+    }
+
+    // Single 20ms grace period covers the entire batch. The audio thread
+    // is lock-free reading the now-empty snapshot; the old per-effect
+    // pointers stored in `removed` are still valid here. After the sleep
+    // any in-flight callback has finished, and `removed` destructs at
+    // scope exit, taking all old Effect instances with it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    LOGI("clearAllEffects: batch destruction complete");
+}
+
 void EffectChain::reorderEffects(size_t from, size_t to) {
     std::lock_guard<std::mutex> lock(chainMutex);
 
