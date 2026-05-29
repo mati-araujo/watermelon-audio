@@ -104,6 +104,24 @@ interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter {
     )
     fun setDualTouchMixMode(modeId: Int)
 
+    // ==================== CHORD VOICES ====================
+
+    /**
+     * Dispara las voces de un acorde. Las voces se asignan en el VoicePool
+     * con un SOURCE_ID dedicado a chords (no interfiere con el oscilador principal).
+     *
+     * @param frequencies Frecuencias de armonía en Hz (NO incluye la raíz)
+     * @param amplitude Amplitud 0.0–1.0
+     * @param oscillatorType Tipo de oscilador para las voces del acorde
+     */
+    fun triggerChordNotes(frequencies: FloatArray, amplitude: Float, oscillatorType: Int)
+
+    /** Actualiza freqs y amplitud de las voces activas del acorde (RT-safe). */
+    fun updateChordNotes(frequencies: FloatArray, amplitude: Float)
+
+    /** Libera todas las voces del acorde. */
+    fun releaseChordNotes()
+
     // ==================== MODE ====================
 
     suspend fun setAudioMode(mode: Int): Result<Unit>

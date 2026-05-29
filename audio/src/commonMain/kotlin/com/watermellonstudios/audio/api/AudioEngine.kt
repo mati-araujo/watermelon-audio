@@ -185,6 +185,28 @@ interface AudioEngine {
      */
     fun setScaleMode(mode: ScaleMode)
 
+    // ==================== CHORD VOICES ====================
+
+    /**
+     * Dispara las voces de un acorde (path oscilador / VoicePool).
+     * Las frecuencias se computan en la capa de aplicación (ver
+     * [com.watermellonstudios.audio.internal.util.ChordGenerator]).
+     *
+     * @param frequencies Frecuencias de armonía en Hz (NO incluye la raíz)
+     * @param amplitude Amplitud 0.0–1.0
+     * @param oscillatorType ID del oscilador (ver [OscillatorType.id])
+     */
+    fun triggerChord(frequencies: FloatArray, amplitude: Float, oscillatorType: Int)
+
+    /**
+     * Actualiza freqs y amplitud de las voces activas del acorde.
+     * RT-safe — pensado para invocarse durante drag sobre el XY.
+     */
+    fun updateChord(frequencies: FloatArray, amplitude: Float)
+
+    /** Libera todas las voces del acorde. */
+    fun releaseChord()
+
     // ==================== VOLUME ====================
 
     /**

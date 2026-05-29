@@ -2764,6 +2764,24 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
+// Session capture: write the FULL track buffer (ignoring loop region) at the
+// given bit depth (16/24 PCM, 32 = float). 32 = lossless round-trip.
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperCaptureTrack(
+    JNIEnv* env, jobject thiz, jint trackIndex, jstring filePath, jint bitDepth) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    wav::BitDepth depth;
+    switch (bitDepth) {
+        case 24: depth = wav::BitDepth::PCM_24; break;
+        case 32: depth = wav::BitDepth::FLOAT_32; break;
+        default: depth = wav::BitDepth::PCM_16; break;
+    }
+    const char* path = env->GetStringUTFChars(filePath, nullptr);
+    bool ok = g_jniState.engine->getAudioLooper().captureTrack(trackIndex, path, depth);
+    env->ReleaseStringUTFChars(filePath, path);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperImportTrack(
     JNIEnv* env, jobject thiz, jint trackIndex, jstring filePath, jint sampleRate) {

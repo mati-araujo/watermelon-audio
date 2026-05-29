@@ -325,6 +325,20 @@ internal class AudioEngineImpl(
         logger.debug(TAG, "Scale mode changed", mapOf("mode" to mode.label))
     }
 
+    // ==================== CHORD VOICES ====================
+
+    override fun triggerChord(frequencies: FloatArray, amplitude: Float, oscillatorType: Int) {
+        bridge.triggerChordNotes(frequencies, amplitude.coerceIn(0f, 1f), oscillatorType)
+    }
+
+    override fun updateChord(frequencies: FloatArray, amplitude: Float) {
+        bridge.updateChordNotes(frequencies, amplitude.coerceIn(0f, 1f))
+    }
+
+    override fun releaseChord() {
+        bridge.releaseChordNotes()
+    }
+
     // ==================== VOLUME ====================
 
     override fun setMasterVolume(volume: Float) {

@@ -690,6 +690,34 @@ public:
         return exportTrack(trackIndex, filePath, ExportOptions{});
     }
 
+    /**
+     * @brief Session capture: write the FULL track buffer to a WAV.
+     *
+     * Unlike [exportTrack], this ignores any active loop region — the entire
+     * recorded buffer is written so a session save/restore cycle is lossless
+     * (the loop region is persisted as metadata by the caller and re-applied on
+     * restore). Use [wav::BitDepth::FLOAT_32] for bit-exact round-trips.
+     *
+     * @param trackIndex Track to capture (0-7).
+     * @param filePath   Output WAV path.
+     * @param bitDepth   16/24-bit PCM or 32-bit float (float = lossless).
+     * @return true if successful.
+     */
+    bool captureTrack(int trackIndex, const char* filePath,
+                      wav::BitDepth bitDepth) {
+        if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return false;
+        if (!mTracks[trackIndex].isActive()) return false;
+
+        const ExportGuard guard(*this);
+        const float* data = mTracks[trackIndex].data();
+        const int len = mTracks[trackIndex].getLengthFrames();
+        const int sr = mTracks[trackIndex].getSampleRate();
+        if (!data || len <= 0) return false;
+
+        wav::WavMetadata meta;
+        return wav::writeWav(filePath, data, len, sr, bitDepth, meta);
+    }
+
     // ========== Export progress / cancel ==========
 
     /** [0..1] progress of last/in-flight export. Lock-free. */

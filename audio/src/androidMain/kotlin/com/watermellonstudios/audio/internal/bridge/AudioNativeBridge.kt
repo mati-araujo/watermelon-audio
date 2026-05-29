@@ -1722,19 +1722,19 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param amplitude Voice amplitude 0.0-1.0
      * @param oscillatorType Oscillator type for chord voices
      */
-    fun triggerChordNotes(frequencies: FloatArray, amplitude: Float, oscillatorType: Int) =
+    override fun triggerChordNotes(frequencies: FloatArray, amplitude: Float, oscillatorType: Int) =
         nativeTriggerChordNotes(frequencies, amplitude, oscillatorType)
 
     /**
      * Update frequencies/amplitude of active chord voices.
      */
-    fun updateChordNotes(frequencies: FloatArray, amplitude: Float) =
+    override fun updateChordNotes(frequencies: FloatArray, amplitude: Float) =
         nativeUpdateChordNotes(frequencies, amplitude)
 
     /**
      * Release all chord voices.
      */
-    fun releaseChordNotes() = nativeReleaseChordNotes()
+    override fun releaseChordNotes() = nativeReleaseChordNotes()
 
     // ==================== Vocoder Operations ====================
 
@@ -2636,6 +2636,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     private external fun nativeLooperExportMix(filePath: String): Boolean
     private external fun nativeLooperExportTrack(trackIndex: Int, filePath: String): Boolean
+    private external fun nativeLooperCaptureTrack(trackIndex: Int, filePath: String, bitDepth: Int): Boolean
     private external fun nativeLooperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean
 
     // Export V2 (with options + metadata + limiter)
@@ -2871,6 +2872,14 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // Export / Import (call from IO thread)
     fun looperExportMix(filePath: String): Boolean = nativeLooperExportMix(filePath)
     fun looperExportTrack(trackIndex: Int, filePath: String): Boolean = nativeLooperExportTrack(trackIndex, filePath)
+
+    /**
+     * Session capture: write the FULL track buffer (ignoring loop region) at
+     * [bitDepth] (16/24 = PCM, 32 = IEEE float). Use 32 for a lossless save/
+     * restore round-trip. Synchronous — call off the main thread.
+     */
+    fun looperCaptureTrack(trackIndex: Int, filePath: String, bitDepth: Int): Boolean =
+        nativeLooperCaptureTrack(trackIndex, filePath, bitDepth)
     fun looperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean = nativeLooperImportTrack(trackIndex, filePath, sampleRate)
 
     // ========== EXPORT V2 (suspend wrappers, professional) ==========
