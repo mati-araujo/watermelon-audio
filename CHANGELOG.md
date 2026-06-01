@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.2.2...v1.3.0) (2026-06-01)
+
+
+### Features
+
+* **usb:** implement stage 2 discovery and directed selection ([6fb53df](https://github.com/mati-araujo/watermelon-audio/commit/6fb53df2f1643db8f767bcaf1e1cbd29311d2f8a))
+* **usb:** populate UAC2 clock source rates via RANGE query (stage 3) ([09577ca](https://github.com/mati-araujo/watermelon-audio/commit/09577ca6da5d307c3dbf638e41f81ab408c956af))
+
+
+### Bug Fixes
+
+* **audio:** configure components before starting USB backend ([8a3f97c](https://github.com/mati-araujo/watermelon-audio/commit/8a3f97cbbf27a0fcfc3ca088ffb259385ce13c29))
+* **audio:** reset effect chain state on chaos_pad→input_fx transition ([e4b727b](https://github.com/mati-araujo/watermelon-audio/commit/e4b727bf992e9538e00970bd373af86843539db3))
+* **audio:** reset LookaheadLimiter state on stop/start to prevent first-playback distortion ([36f446d](https://github.com/mati-araujo/watermelon-audio/commit/36f446d9940b99b2fbd0ee200ea94500ea071d57))
+* **usb:** avoid permission dialog race and add cold-start auto-connect ([ee3a30d](https://github.com/mati-araujo/watermelon-audio/commit/ee3a30d2311c0919be8bf0d3d8a219f45301daaf))
+* **usb:** query native snapshot directly, drop cache reliance ([f8dbb5a](https://github.com/mati-araujo/watermelon-audio/commit/f8dbb5a47a2c9f7bc9e1605f762e992b698a8c88))
+* **usb:** relax minChannels for capture selection ([9e871f5](https://github.com/mati-araujo/watermelon-audio/commit/9e871f54991f5a017a3320e30b6e14617fccda8d))
+* **usb:** skip redundant SET_CUR and add output peak meter ([69f0809](https://github.com/mati-araujo/watermelon-audio/commit/69f080989a00718ae3326407230948c1d77e46a0))
+
 ## [1.2.2](https://github.com/mati-araujo/watermelon-audio/compare/v1.2.1...v1.2.2) (2026-04-11)
 
 
