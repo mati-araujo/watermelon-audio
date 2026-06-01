@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.watermellonstudios"
-version = findProperty("version")?.toString()?.takeIf { it != "unspecified" } ?: "1.0.0-SNAPSHOT"
+version = providers.gradleProperty("version").get()
 
 android {
     namespace = "com.watermellonstudios.audio"

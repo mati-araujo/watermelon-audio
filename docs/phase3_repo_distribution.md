@@ -149,7 +149,7 @@ compileSdk = "36"
 minSdk = "29"
 targetSdk = "36"
 
-agp = "9.1.0"
+agp = "9.2.1"
 kotlin = "2.3.20"
 cmake = "3.22.1"
 

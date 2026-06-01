@@ -92,7 +92,7 @@ dependencyResolutionManagement {
 
 // build.gradle.kts
 dependencies {
-    implementation("com.watermellonstudios:audio-android:1.0.0")
+    implementation("com.watermellonstudios:audio-android:1.3.1")
 }
 ```
 
@@ -104,7 +104,7 @@ dependencies {
 
 # In consuming project — add mavenLocal() to repositories:
 dependencies {
-    implementation("com.watermellonstudios:audio-android:1.0.0-SNAPSHOT")
+    implementation("com.watermellonstudios:audio-android:1.3.1")
 }
 ```
 
@@ -154,14 +154,14 @@ engine.release()
 
 ### Requirements
 
-| Requirement | Version |
-|------------|---------|
-| Android Min SDK | 29 (Android 10) |
-| Compile SDK | 36 |
-| Kotlin | 2.3.20 |
-| AGP | 9.1.0 |
-| CMake | 3.22.1 |
-| C++ | C++20 |
+| Requirement | Version                             |
+|------------|-------------------------------------|
+| Android Min SDK | 29 (Android 10)                     |
+| Compile SDK | 36                                  |
+| Kotlin | 2.3.20                              |
+| AGP | 9.2.1                               |
+| CMake | 3.22.1                              |
+| C++ | C++20                               |
 | NDK ABIs | arm64-v8a, armeabi-v7a, x86_64, x86 |
 
 ## Thread Safety
