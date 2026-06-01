@@ -18,16 +18,34 @@ UsbVolumeControl::UsbVolumeControl(libusb_device_handle* deviceHandle,
 
 bool UsbVolumeControl::initialize(uint8_t featureUnitId, bool hasVolume,
                                   bool hasMute, bool isOutput, uint8_t uacVersion) {
+    UsbFeatureUnit featureUnit;
+    featureUnit.unitId = featureUnitId;
+    featureUnit.numChannels = 0;
+    uint32_t masterControls = 0;
+    if (hasMute) masterControls |= (uacVersion == 2) ? 0x00000003 : (1u << 0);
+    if (hasVolume) masterControls |= (uacVersion == 2) ? 0x0000000C : (1u << 1);
+    featureUnit.channelControls.push_back(masterControls);
+    return initialize(featureUnit, isOutput, uacVersion);
+}
+
+bool UsbVolumeControl::initialize(const UsbFeatureUnit& featureUnit,
+                                  bool isOutput,
+                                  uint8_t uacVersion) {
     std::lock_guard<std::mutex> lock(mMutex);
 
     mUacVersion = uacVersion;
-    mCapabilities.featureUnitId = featureUnitId;
-    mCapabilities.hasVolumeControl = hasVolume;
-    mCapabilities.hasMuteControl = hasMute;
+    mCapabilities = VolumeCapabilities{};
+    mCapabilities.featureUnitId = featureUnit.unitId;
+    mCapabilities.sourceId = featureUnit.sourceId;
+    mCapabilities.hasVolumeControl = featureUnit.hasAnyVolumeControl(uacVersion);
+    mCapabilities.hasMuteControl = featureUnit.hasAnyMuteControl(uacVersion);
+    mCapabilities.numChannels = featureUnit.numChannels;
     mCapabilities.isOutput = isOutput;
+    populateChannelCapabilities(featureUnit, uacVersion);
 
-    VOLUME_LOGI("UsbVolumeControl: Initializing FU=%d, hasVolume=%d, hasMute=%d, isOutput=%d, UAC=%d",
-         featureUnitId, hasVolume, hasMute, isOutput, uacVersion);
+    VOLUME_LOGI("UsbVolumeControl: Initializing FU=%d, hasVolume=%d, hasMute=%d, channels=%d, isOutput=%d, UAC=%d",
+         featureUnit.unitId, mCapabilities.hasVolumeControl, mCapabilities.hasMuteControl,
+         mCapabilities.numChannels, isOutput, uacVersion);
 
     if (!mDeviceHandle) {
         VOLUME_LOGW("UsbVolumeControl: No device handle, using digital volume only");
@@ -35,33 +53,45 @@ bool UsbVolumeControl::initialize(uint8_t featureUnitId, bool hasVolume,
     }
 
     // Try to query volume range if volume control is present
-    if (hasVolume) {
-        if (queryVolumeRange()) {
+    if (mCapabilities.hasVolumeControl) {
+        const uint8_t volumeChannel = preferredVolumeChannel();
+        if (queryVolumeRange(volumeChannel)) {
             // Try to get current volume to verify the control works
-            int16_t currentVol = getHardwareVolume(0);
-            if (currentVol != UAC_VOLUME_SILENCE || getHardwareMute(0)) {
+            int16_t currentVol = getHardwareVolume(volumeChannel);
+            if (currentVol != UAC_VOLUME_SILENCE || getHardwareMute(volumeChannel)) {
                 mHardwareVolumeAvailable = true;
                 mCurrentVolume = currentVol;
                 VOLUME_LOGI("UsbVolumeControl: Hardware volume available, current=%d (%.1f dB)",
                      currentVol, mCapabilities.volumeToDb(currentVol));
             } else {
                 // Try setting volume to verify write works
-                if (setHardwareVolume(UAC_VOLUME_0DB, 0)) {
+                if (setHardwareVolume(UAC_VOLUME_0DB, volumeChannel)) {
                     mHardwareVolumeAvailable = true;
                     mCurrentVolume = UAC_VOLUME_0DB;
                     VOLUME_LOGI("UsbVolumeControl: Hardware volume verified via SET_CUR");
+                }
+            }
+            for (auto& channel : mCapabilities.channels) {
+                if (channel.hasHardwareVolume) {
+                    channel.volumeVerified = mHardwareVolumeAvailable;
                 }
             }
         }
     }
 
     // Check mute control
-    if (hasMute) {
-        bool muteState = getHardwareMute(0);
+    if (mCapabilities.hasMuteControl) {
+        const uint8_t muteChannel = preferredMuteChannel();
+        bool muteState = getHardwareMute(muteChannel);
         // If we can read mute state without error, mute control is available
         mHardwareMuteAvailable = true;
         mDigitalMute.store(muteState, std::memory_order_relaxed);
         VOLUME_LOGI("UsbVolumeControl: Hardware mute available, current=%d", muteState);
+        for (auto& channel : mCapabilities.channels) {
+            if (channel.hasHardwareMute) {
+                channel.muteVerified = true;
+            }
+        }
     }
 
     // Set initial digital volume based on hardware state
@@ -77,14 +107,14 @@ bool UsbVolumeControl::initialize(uint8_t featureUnitId, bool hasVolume,
     return mHardwareVolumeAvailable;
 }
 
-bool UsbVolumeControl::queryVolumeRange() {
+bool UsbVolumeControl::queryVolumeRange(uint8_t channel) {
     if (!mDeviceHandle) return false;
 
     int16_t minVol = 0, maxVol = 0, resVol = 1;
     uint8_t data[2];
     int result;
 
-    uint16_t wValue = buildWValue(UAC_FU_VOLUME_CONTROL, 0);  // Master channel
+    uint16_t wValue = buildWValue(UAC_FU_VOLUME_CONTROL, channel);
     uint16_t wIndex = buildWIndex();
 
     if (mUacVersion == 2) {
@@ -304,21 +334,36 @@ bool UsbVolumeControl::setVolume(float volume) {
     std::lock_guard<std::mutex> lock(mMutex);
 
     volume = std::clamp(volume, 0.0f, 1.0f);
-
-    // Always update digital volume for fallback/consistency
     mDigitalVolume.store(volume, std::memory_order_relaxed);
 
-    if (mHardwareVolumeAvailable) {
-        int16_t uacVolume = mCapabilities.linearToVolume(volume);
+    if (!mHardwareVolumeAvailable) {
+        return true;
+    }
+
+    const int16_t uacVolume = mCapabilities.linearToVolume(volume);
+    if (const auto* master = mCapabilities.findChannel(0);
+        master && master->hasHardwareVolume) {
         if (setHardwareVolume(uacVolume, 0)) {
             mCurrentVolume = uacVolume;
             return true;
-        } else {
-            VOLUME_LOGW("UsbVolumeControl: Hardware volume set failed, using digital");
         }
+        VOLUME_LOGW("UsbVolumeControl: Master hardware volume set failed, using digital");
+        return true;
     }
 
-    return true;  // Digital volume always succeeds
+    bool anySet = false;
+    for (const auto& channel : mCapabilities.channels) {
+        if (channel.hasHardwareVolume &&
+            setHardwareVolume(uacVolume, channel.channelNumber)) {
+            anySet = true;
+        }
+    }
+    if (anySet) {
+        mCurrentVolume = uacVolume;
+    } else {
+        VOLUME_LOGW("UsbVolumeControl: Per-channel hardware volume set failed, using digital");
+    }
+    return true;
 }
 
 float UsbVolumeControl::getVolume() const {
@@ -328,21 +373,94 @@ float UsbVolumeControl::getVolume() const {
 bool UsbVolumeControl::setMute(bool muted) {
     std::lock_guard<std::mutex> lock(mMutex);
 
+    mDigitalMute.store(muted, std::memory_order_relaxed);
+
+    if (!mHardwareMuteAvailable) {
+        return true;
+    }
+
+    if (const auto* master = mCapabilities.findChannel(0);
+        master && master->hasHardwareMute) {
+        if (!setHardwareMute(muted, 0)) {
+            VOLUME_LOGW("UsbVolumeControl: Master hardware mute set failed, using digital");
+        }
+        return true;
+    }
+
+    bool anySet = false;
+    for (const auto& channel : mCapabilities.channels) {
+        if (channel.hasHardwareMute &&
+            setHardwareMute(muted, channel.channelNumber)) {
+            anySet = true;
+        }
+    }
+    if (!anySet) {
+        VOLUME_LOGW("UsbVolumeControl: Per-channel hardware mute set failed, using digital");
+    }
+    return true;
+}
+
+bool UsbVolumeControl::isMuted() const {
+    return mDigitalMute.load(std::memory_order_relaxed);
+}
+
+bool UsbVolumeControl::setChannelVolume(uint8_t channel, float volume) {
+    std::lock_guard<std::mutex> lock(mMutex);
+
+    volume = std::clamp(volume, 0.0f, 1.0f);
+
+    // Always update digital volume for fallback/consistency
+    mDigitalVolume.store(volume, std::memory_order_relaxed);
+
+    const auto* channelCaps = mCapabilities.findChannel(channel);
+    const bool channelHasHardware = channelCaps && channelCaps->hasHardwareVolume;
+
+    if (mHardwareVolumeAvailable && channelHasHardware) {
+        int16_t uacVolume = mCapabilities.linearToVolume(volume);
+        if (setHardwareVolume(uacVolume, channel)) {
+            mCurrentVolume = uacVolume;
+            return true;
+        } else {
+            VOLUME_LOGW("UsbVolumeControl: Hardware volume set failed on channel %d, using digital", channel);
+        }
+    }
+
+    return true;  // Digital volume always succeeds
+}
+
+float UsbVolumeControl::getChannelVolume(uint8_t channel) const {
+    const auto* channelCaps = mCapabilities.findChannel(channel);
+    if (mHardwareVolumeAvailable && channelCaps && channelCaps->hasHardwareVolume) {
+        return mCapabilities.volumeToLinear(getHardwareVolume(channel));
+    }
+    return mDigitalVolume.load(std::memory_order_relaxed);
+}
+
+bool UsbVolumeControl::setChannelMute(uint8_t channel, bool muted) {
+    std::lock_guard<std::mutex> lock(mMutex);
+
     // Always update digital mute
     mDigitalMute.store(muted, std::memory_order_relaxed);
 
-    if (mHardwareMuteAvailable) {
-        if (setHardwareMute(muted, 0)) {
+    const auto* channelCaps = mCapabilities.findChannel(channel);
+    const bool channelHasHardware = channelCaps && channelCaps->hasHardwareMute;
+
+    if (mHardwareMuteAvailable && channelHasHardware) {
+        if (setHardwareMute(muted, channel)) {
             return true;
         } else {
-            VOLUME_LOGW("UsbVolumeControl: Hardware mute set failed, using digital");
+            VOLUME_LOGW("UsbVolumeControl: Hardware mute set failed on channel %d, using digital", channel);
         }
     }
 
     return true;  // Digital mute always succeeds
 }
 
-bool UsbVolumeControl::isMuted() const {
+bool UsbVolumeControl::isChannelMuted(uint8_t channel) const {
+    const auto* channelCaps = mCapabilities.findChannel(channel);
+    if (mHardwareMuteAvailable && channelCaps && channelCaps->hasHardwareMute) {
+        return getHardwareMute(channel);
+    }
     return mDigitalMute.load(std::memory_order_relaxed);
 }
 
@@ -359,6 +477,46 @@ float UsbVolumeControl::getVolumeDb() const {
         // Convert linear to dB: 20 * log10(linear)
         return 20.0f * std::log10(linear);
     }
+}
+
+void UsbVolumeControl::populateChannelCapabilities(const UsbFeatureUnit& featureUnit,
+                                                   uint8_t uacVersion) {
+    mCapabilities.channels.clear();
+    for (uint8_t ch = 0; ch < featureUnit.channelControls.size(); ++ch) {
+        VolumeCapabilities::Channel channel;
+        channel.channelNumber = ch;
+        channel.hasHardwareVolume = featureUnit.hasVolumeControl(ch, uacVersion);
+        channel.hasHardwareMute = featureUnit.hasMuteControl(ch, uacVersion);
+        if (channel.hasHardwareVolume || channel.hasHardwareMute) {
+            mCapabilities.channels.push_back(channel);
+        }
+    }
+}
+
+uint8_t UsbVolumeControl::preferredVolumeChannel() const {
+    if (const auto* master = mCapabilities.findChannel(0);
+        master && master->hasHardwareVolume) {
+        return 0;
+    }
+    for (const auto& channel : mCapabilities.channels) {
+        if (channel.hasHardwareVolume) {
+            return channel.channelNumber;
+        }
+    }
+    return 0;
+}
+
+uint8_t UsbVolumeControl::preferredMuteChannel() const {
+    if (const auto* master = mCapabilities.findChannel(0);
+        master && master->hasHardwareMute) {
+        return 0;
+    }
+    for (const auto& channel : mCapabilities.channels) {
+        if (channel.hasHardwareMute) {
+            return channel.channelNumber;
+        }
+    }
+    return 0;
 }
 
 } // namespace usb

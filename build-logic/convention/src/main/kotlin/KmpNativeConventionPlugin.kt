@@ -62,6 +62,10 @@ class KmpNativeConventionPlugin : Plugin<Project> {
             }
 
             extensions.configure<KotlinMultiplatformExtension> {
+                compilerOptions {
+                    freeCompilerArgs.add("-Xexpect-actual-classes")
+                }
+
                 androidTarget {
                     compilerOptions {
                         jvmTarget.set(JvmTarget.JVM_11)
@@ -72,6 +76,10 @@ class KmpNativeConventionPlugin : Plugin<Project> {
                 sourceSets.apply {
                     commonMain.dependencies {
                         implementation(libs.library("kotlinx-coroutines-core"))
+                    }
+                    commonTest.dependencies {
+                        implementation(kotlin("test"))
+                        implementation(libs.library("kotlinx-coroutines-test"))
                     }
                     androidMain.dependencies {
                         implementation(libs.library("oboe"))

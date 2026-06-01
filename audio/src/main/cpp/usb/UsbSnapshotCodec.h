@@ -86,6 +86,7 @@ inline std::vector<uint8_t> encodeSnapshot(const UsbAudioDevice& device) {
         writeU8(flags);
         writeU8(alt.dataEndpoint.address);
         writeU8(alt.terminalLink);
+        writeU8(alt.dataEndpoint.interval);
         // Formats
         writeU8(static_cast<uint8_t>(std::min(alt.formats.size(), size_t(255))));
         for (const auto& fmt : alt.formats) {
@@ -231,6 +232,7 @@ inline std::optional<UsbAudioDevice> decodeSnapshot(const uint8_t* data, size_t 
         uint8_t flags = readU8();
         alt.dataEndpoint.address = readU8();
         alt.terminalLink = readU8();
+        alt.dataEndpoint.interval = readU8();
         if (flags & 0x01) {
             UsbFeedbackEndpoint fb;
             fb.isImplicit = (flags & 0x02) != 0;

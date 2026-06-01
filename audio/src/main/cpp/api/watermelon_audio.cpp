@@ -334,6 +334,11 @@ void wma_sf_note_off_all(WmaEngine* engine) {
     engine->engine->sfNoteOffAll();
 }
 
+void wma_sf_note_off_all_except(WmaEngine* engine, int keep_touch_id) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->sfNoteOffAllExcept(keep_touch_id);
+}
+
 /* ================================================================
  * 7. Voice Filter
  * ================================================================ */
@@ -385,6 +390,16 @@ WmaResult wma_effect_remove(WmaEngine* engine, int index) {
     }
     try {
         engine->engine->removeEffect(static_cast<size_t>(index));
+        return WMA_OK;
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
+WmaResult wma_effect_clear_all(WmaEngine* engine) {
+    WMA_CHECK(engine);
+    try {
+        engine->engine->clearAllEffects();
         return WMA_OK;
     } catch (...) {
         return WMA_ERROR_UNKNOWN;

@@ -26,7 +26,8 @@ namespace watermelon_audio {
 enum class BackendType {
     NONE = 0,
     OBOE = 1,
-    LIBUSB = 2
+    LIBUSB = 2,
+    SPLIT = 3
 };
 
 enum class BackendResult {
@@ -49,6 +50,41 @@ enum class BackendError {
     TRANSFER_ERROR,
     TIMEOUT,
     FATAL
+};
+
+enum class BackendStreamRole : uint32_t {
+    NONE = 0,
+    INPUT_SOURCE = 1u << 0,
+    OUTPUT_SINK = 1u << 1,
+    FULL_DUPLEX = (1u << 0) | (1u << 1)
+};
+
+inline BackendStreamRole operator|(BackendStreamRole lhs, BackendStreamRole rhs) {
+    return static_cast<BackendStreamRole>(
+        static_cast<uint32_t>(lhs) | static_cast<uint32_t>(rhs));
+}
+
+inline bool hasBackendRole(BackendStreamRole roles, BackendStreamRole role) {
+    return (static_cast<uint32_t>(roles) & static_cast<uint32_t>(role)) ==
+           static_cast<uint32_t>(role);
+}
+
+struct BackendEndpointCapabilities {
+    BackendStreamRole roles = BackendStreamRole::OUTPUT_SINK;
+
+    // True only when this backend can provide captured frames through a
+    // pull-style input source contract. This is deliberately stricter than
+    // supportsFullDuplex(): Oboe can open an input stream today, but does not
+    // yet bridge it into engine callbacks or an input-source adapter.
+    bool hasInputSourceContract = false;
+
+    // True when the backend's normal onAudioReady callback includes non-null
+    // inputData in capture/full-duplex mode.
+    bool callbackCarriesInput = false;
+
+    // True when this backend is allowed to drive the user's DSP callback.
+    // Split composition should set this true only on the output sink.
+    bool drivesUserCallback = true;
 };
 
 enum class AudioFormat {
@@ -85,6 +121,34 @@ struct StreamInfo {
     int usbVendorId = 0;
     int usbProductId = 0;
     std::string deviceName;
+};
+
+class IAudioInputSource {
+public:
+    virtual ~IAudioInputSource() = default;
+
+    /**
+     * Pull captured input frames into outputData.
+     *
+     * Returns the number of frames written. Implementations must be bounded
+     * and must not allocate, lock, sleep, or log in a real-time pull path.
+     */
+    virtual int32_t readInput(float* outputData, int32_t maxFrames) = 0;
+    virtual StreamInfo getInputStreamInfo() const = 0;
+};
+
+class IAudioOutputSink {
+public:
+    virtual ~IAudioOutputSink() = default;
+
+    /**
+     * Push output frames to the sink.
+     *
+     * Returns the number of frames consumed. Implementations must be bounded
+     * and RT-safe when called from an audio render path.
+     */
+    virtual int32_t writeOutput(const float* inputData, int32_t frames) = 0;
+    virtual StreamInfo getOutputStreamInfo() const = 0;
 };
 
 // =============================================================================
@@ -326,6 +390,24 @@ public:
      */
     virtual bool supportsPause() const { return true; }
 
+    /**
+     * Return explicit endpoint roles for backend composition.
+     *
+     * This separates "can be used as an output sink" from "can provide real
+     * input frames". SplitBackend must require hasInputSourceContract for its
+     * input side and drivesUserCallback only on its output side.
+     */
+    virtual BackendEndpointCapabilities getEndpointCapabilities() const {
+        BackendEndpointCapabilities caps;
+        caps.roles = supportsFullDuplex()
+            ? BackendStreamRole::FULL_DUPLEX
+            : BackendStreamRole::OUTPUT_SINK;
+        caps.hasInputSourceContract = false;
+        caps.callbackCarriesInput = false;
+        caps.drivesUserCallback = true;
+        return caps;
+    }
+
     // =========================================================================
     // USB-Specific (Optional)
     // =========================================================================
@@ -369,6 +451,7 @@ inline const char* backendTypeToString(BackendType type) {
         case BackendType::NONE:   return "None";
         case BackendType::OBOE:   return "Oboe";
         case BackendType::LIBUSB: return "USB Audio";
+        case BackendType::SPLIT:  return "Split";
         default:                  return "Unknown";
     }
 }

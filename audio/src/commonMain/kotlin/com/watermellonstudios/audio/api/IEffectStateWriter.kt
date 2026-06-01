@@ -51,6 +51,20 @@ interface IEffectStateWriter {
     suspend fun setParametersBatch(effectIndex: Int, parameters: Map<Int, Float>): Result<Unit>
 
     /**
+     * Applies parameter updates across multiple effects in a single JNI call.
+     *
+     * The chain-wide batch path. Intended for scene loads where the caller
+     * has a fully-formed list of updates spanning every effect. Implementations
+     * must apply all updates under the chain's existing lock-free atomic
+     * snapshot and emit a single state-version bump at the end, so subscribers
+     * see one coherent post-batch state rather than N intermediate snapshots.
+     *
+     * @param updates Parallel updates targeting any effect/param in the chain
+     * @return Result.success if applied, or failure with exception
+     */
+    suspend fun setMultipleEffectParameters(updates: List<EffectParameterUpdate>): Result<Unit>
+
+    /**
      * Sets the bypass state for an effect.
      *
      * @param effectIndex The index of the effect

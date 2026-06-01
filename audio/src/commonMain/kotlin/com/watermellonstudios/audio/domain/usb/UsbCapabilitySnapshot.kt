@@ -78,6 +78,7 @@ data class AltsettingInfo(
     val hasImplicitFeedback: Boolean,
     val dataEndpointAddress: Int,
     val terminalLinkId: Int,
+    val endpointInterval: Int = 0,
 )
 
 data class AudioFormatInfo(
@@ -129,6 +130,14 @@ data class FeatureUnitInfo(
     val hasMasterMute: Boolean,
     val perChannelVolume: List<Boolean>,
     val perChannelMute: List<Boolean>,
+)
+
+data class ScoredAltsetting(
+    val altsetting: AltsettingInfo,
+    val format: AudioFormatInfo,
+    val formatIndex: Int,
+    val score: Double,
+    val recommendation: String,
 )
 
 /**

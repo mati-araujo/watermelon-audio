@@ -20,10 +20,12 @@
 #include "../nodes/InputNode.h"
 #include "../backends/BackendManager.h"
 #include "../backends/LibusbBackend.h"
+#include "../looper/LooperEventDispatcher.h"
 #include "../usb/UsbSnapshotCodec.h"
 #include "../voice/VoiceTypes.h"
 #include <cmath>
 #include <algorithm>
+#include <mutex>
 #include <vector>
 
 // External declarations from jni_usb.cpp for USB volume
@@ -404,6 +406,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfNote
     g_jniState.engine->sfNoteOffAll();
 }
 
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfNoteOffAllExcept(
+    JNIEnv* env, jobject thiz, jint keepTouchId) {
+    if (!ensureEngine()) return;
+    g_jniState.engine->sfNoteOffAllExcept(keepTouchId);
+}
+
 // ========== VOICE FILTER (Phase 6) ==========
 
 JNIEXPORT void JNICALL
@@ -529,6 +538,20 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeRemove
 }
 
 JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeClearAllEffects(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) {
+        return JniError::ENGINE_NOT_INITIALIZED;
+    }
+    try {
+        g_jniState.engine->clearAllEffects();
+        return JniError::SUCCESS;
+    } catch (...) {
+        return JniError::UNKNOWN_ERROR;
+    }
+}
+
+JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEffectParameter(
     JNIEnv* env, jobject thiz, jint index, jint paramId, jfloat value) {
     if (!g_jniState.engine) {
@@ -574,11 +597,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEff
     }
 
     try {
-        for (jsize i = 0; i < length; ++i) {
-            if (std::isfinite(vals.get()[i])) {
-                g_jniState.engine->setParameter(static_cast<size_t>(index), ids.get()[i], vals.get()[i]);
-            }
-        }
+        // Single-effect batch: build a stack-allocated effectIndices array and
+        // route through setParametersBatch so we get one state-version bump
+        // for the whole batch instead of N.
+        std::vector<int> effectIndices(static_cast<size_t>(length), index);
+        g_jniState.engine->setParametersBatch(
+            effectIndices.data(),
+            ids.get(),
+            vals.get(),
+            static_cast<size_t>(length)
+        );
         return JniError::SUCCESS;
     } catch (...) {
         return JniError::UNKNOWN_ERROR;
@@ -615,19 +643,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMul
         return JniError::SUCCESS;
     }
 
-    size_t chainSize = g_jniState.engine->getNumEffects();
-
     try {
-        for (jsize i = 0; i < length; ++i) {
-            jint effectIdx = indices.get()[i];
-            if (effectIdx >= 0 && static_cast<size_t>(effectIdx) < chainSize && std::isfinite(vals.get()[i])) {
-                g_jniState.engine->setParameter(
-                    static_cast<size_t>(effectIdx),
-                    params.get()[i],
-                    vals.get()[i]
-                );
-            }
-        }
+        // Single state-version bump at the end (AUD-6): scene loads previously
+        // produced N version bumps for N parameters, causing the Kotlin
+        // synchronizer to potentially observe partial states between updates.
+        g_jniState.engine->setParametersBatch(
+            indices.get(),
+            params.get(),
+            vals.get(),
+            static_cast<size_t>(length)
+        );
         LOGI("nativeSetMultipleEffectParameters: applied %d updates", static_cast<int>(length));
         return JniError::SUCCESS;
     } catch (const std::exception& e) {
@@ -1332,6 +1357,15 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUse
 }
 
 JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeCreateSplitBackend(
+    JNIEnv* env, jobject thiz, jint inputBackendId, jint outputBackendId) {
+    auto& backendManager = watermelon_audio::BackendManager::getInstance();
+    auto inputType = static_cast<watermelon_audio::BackendType>(inputBackendId);
+    auto outputType = static_cast<watermelon_audio::BackendType>(outputBackendId);
+    return backendManager.createSplitBackend(inputType, outputType) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelectBackend(
     JNIEnv* env, jobject thiz, jint backendId) {
     auto& backendManager = watermelon_audio::BackendManager::getInstance();
@@ -1630,7 +1664,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
 
-    constexpr int STATS_SIZE = 13;
+    constexpr int STATS_SIZE = 19;
     jfloat statsArray[STATS_SIZE] = {0};
 
     if (backend) {
@@ -1649,6 +1683,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
             statsArray[10] = stats->ringBufferFillPct.load();
             statsArray[11] = 3840.0f;
             statsArray[12] = statsArray[1] * 192.0f;
+            statsArray[13] = stats->currentSampleRateHz.load();
+            statsArray[14] = stats->driftPpm.load();
+            statsArray[15] = stats->feedbackEffectiveFramesPerPacket.load();
+            statsArray[16] = static_cast<float>(stats->feedbackPacketsReceived.load());
+            statsArray[17] = static_cast<float>(stats->feedbackPacketsInvalid.load());
+            statsArray[18] = static_cast<float>(stats->activeClockSourceId.load());
         }
     }
 
@@ -1750,6 +1790,71 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
                                  reinterpret_cast<const jbyte*>(encoded.data()));
     }
     return result;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsbStreamPreference(
+    JNIEnv* env, jobject thiz, jint preferredSampleRate, jint minChannels,
+    jboolean requireFeedback, jint profile) {
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    auto* backend = manager.getLibusbBackend();
+    if (!backend) {
+        LOGW("nativeSetUsbStreamPreference: no LibusbBackend");
+        return JNI_FALSE;
+    }
+
+    watermelon_audio::usb::StreamPreference pref;
+    switch (profile) {
+        case 1:
+            pref = watermelon_audio::usb::StreamPreference::lowestLatency();
+            break;
+        case 2:
+            pref = watermelon_audio::usb::StreamPreference::highestFidelity();
+            break;
+        default:
+            pref = watermelon_audio::usb::StreamPreference::defaultPro();
+            break;
+    }
+    pref.requiredSampleRate = static_cast<int>(preferredSampleRate);
+    pref.minChannels = std::max(1, static_cast<int>(minChannels));
+    pref.requireFeedback = (requireFeedback == JNI_TRUE);
+    pref.skipRateCheck = false;
+
+    backend->setStreamPreference(pref);
+    LOGI("nativeSetUsbStreamPreference: rate=%d minCh=%d requireFeedback=%d profile=%d",
+         pref.requiredSampleRate, pref.minChannels,
+         pref.requireFeedback ? 1 : 0, profile);
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelectUsbAltsetting(
+    JNIEnv* env, jobject thiz, jint interfaceNumber, jint alternateSetting,
+    jint formatIndex) {
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    auto* backend = manager.getLibusbBackend();
+    if (!backend) {
+        LOGW("nativeSelectUsbAltsetting: no LibusbBackend");
+        return JNI_FALSE;
+    }
+    const bool ok = backend->selectAltsetting(
+        static_cast<int>(interfaceNumber),
+        static_cast<int>(alternateSetting),
+        static_cast<int>(formatIndex));
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelectUsbClockSource(
+    JNIEnv* env, jobject thiz, jint clockSourceId) {
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    auto* backend = manager.getLibusbBackend();
+    if (!backend) {
+        LOGW("nativeSelectUsbClockSource: no LibusbBackend");
+        return JNI_FALSE;
+    }
+    const bool ok = backend->selectClockSource(static_cast<int>(clockSourceId));
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
@@ -2163,6 +2268,14 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 }
 
 JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperAbortRecording(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine) {
+        g_jniState.engine->getAudioLooper().abortRecording();
+    }
+}
+
+JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperStartOverdub(
     JNIEnv* env, jobject thiz, jint trackIndex) {
     if (g_jniState.engine) {
@@ -2253,6 +2366,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
         g_jniState.engine->getAudioLooper().clearAll();
         // Looper state is polled independently at 30fps via LooperViewModel
     }
+}
+
+// Trim a track's buffer to its recorded length (frees unused capacity). UI/IO
+// thread; safe no-op while recording/exporting. Returns true if trimmed.
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperTrimTrack(
+    JNIEnv* env, jobject thiz, jint trackIndex) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    return g_jniState.engine->getAudioLooper().trimTrack(trackIndex)
+        ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
@@ -2456,6 +2579,180 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
         g_jniState.engine->getAudioLooper().triggerClick(isDownbeat == JNI_TRUE);
 }
 
+// Input metering (lock-free) — peak level of the input stream, useful as a
+// pre-record signal indicator. Returns 0 if no input source is active.
+// Returns max of L/R channels in linear [0..1] range.
+JNIEXPORT jfloat JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetInputPeak(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.inputNode) return 0.0f;
+    float l = g_jniState.inputNode->getInputLevelLinear(0);
+    float r = g_jniState.inputNode->getInputLevelLinear(1);
+    return l > r ? l : r;
+}
+
+// Pre-roll: start recording with `preRollMs` of prior post-FX audio seeded
+// at the start of the track. Eliminates the human-reaction gap when arming.
+// preRollMs is clamped to [0, 1000].
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperStartRecordingWithPreRoll(
+    JNIEnv* env, jobject thiz, jint trackIndex, jint preRollMs) {
+    if (!g_jniState.engine) return;
+    if (preRollMs < 0) preRollMs = 0;
+    if (preRollMs > 1000) preRollMs = 1000;
+
+    auto& engine = *g_jniState.engine;
+    auto& looper = engine.getAudioLooper();
+
+    if (preRollMs == 0) {
+        looper.startRecording(trackIndex);
+        return;
+    }
+
+    const int sr = looper.getSampleRate();
+    const int preRollFrames = (preRollMs * sr) / 1000;
+    if (preRollFrames <= 0) {
+        looper.startRecording(trackIndex);
+        return;
+    }
+
+    // UI thread allocation — acceptable (not the audio thread).
+    std::vector<float> preRoll(static_cast<size_t>(preRollFrames) * 2, 0.0f);
+    engine.getPreRollRing().snapshot(preRoll.data(), preRollFrames);
+    looper.startRecordingWithPreRoll(trackIndex, preRoll.data(), preRollFrames);
+}
+
+// Tail capture configuration (preserves sustain at loop seam).
+// Affects tracks prepared AFTER this call. Default 250 ms.
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTailMs(
+    JNIEnv* env, jobject thiz, jint ms) {
+    if (g_jniState.engine)
+        g_jniState.engine->getAudioLooper().setTailMs(ms);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetTailMs(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getTailMs();
+}
+
+// Armed recording: schedule recording to start at the next bar boundary.
+// Returns the absolute trigger frame (>=0), or -1 on failure.
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperArmAtNextBar(
+    JNIEnv* env, jobject thiz, jint trackIndex) {
+    if (!g_jniState.engine) return -1;
+    auto& transport = g_jniState.engine->getTransport();
+    int64_t now = transport.getPlayFrame();
+    int64_t triggerFrame = transport.nextBarBoundary(now);
+    g_jniState.engine->getAudioLooper().armRecording(trackIndex, triggerFrame);
+    return triggerFrame;
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperCancelArm(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine)
+        g_jniState.engine->getAudioLooper().cancelArm();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetArmedTrack(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return -1;
+    return g_jniState.engine->getAudioLooper().getArmedTrack();
+}
+
+// Loop quantization: prepare a track sized to N bars at current BPM/SR.
+// Returns the loop length in frames (>=0) on success, or -1 on failure.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperPrepareTrackBars(
+    JNIEnv* env, jobject thiz, jint trackIndex, jint bars, jint sampleRate) {
+    if (!g_jniState.engine) return -1;
+    auto& transport = g_jniState.engine->getTransport();
+    int framesPerBar1 = transport.framesPerBar(1);
+    if (framesPerBar1 <= 0) return -1;
+    bool ok = g_jniState.engine->getAudioLooper()
+                  .prepareTrackBars(trackIndex, bars, framesPerBar1, sampleRate);
+    return ok ? bars * framesPerBar1 : -1;
+}
+
+// ========== TRANSPORT (BPM, beats, RT-safe metronome scheduler) ==========
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportSetBeatsPerBar(
+    JNIEnv* env, jobject thiz, jint beatsPerBar) {
+    if (g_jniState.engine)
+        g_jniState.engine->getTransport().setBeatsPerBar(beatsPerBar);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportGetBeatsPerBar(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 4;
+    return g_jniState.engine->getTransport().getBeatsPerBar();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportFramesPerBeat(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getTransport().framesPerBeat();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportFramesPerBar(
+    JNIEnv* env, jobject thiz, jint bars) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getTransport().framesPerBar(bars);
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportStartMetronome(
+    JNIEnv* env, jobject thiz, jint beats, jboolean firstIsDownbeat,
+    jboolean everyBeatPattern) {
+    if (g_jniState.engine)
+        g_jniState.engine->getTransport().startMetronome(
+            beats, firstIsDownbeat == JNI_TRUE, everyBeatPattern == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportStartMetronomeContinuous(
+    JNIEnv* env, jobject thiz, jboolean everyBeatPattern) {
+    if (g_jniState.engine)
+        g_jniState.engine->getTransport().startMetronomeContinuous(everyBeatPattern == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportIsMetronomeContinuous(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    return g_jniState.engine->getTransport().isMetronomeContinuous() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportStopMetronome(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine)
+        g_jniState.engine->getTransport().stopMetronome();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportIsMetronomeRunning(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    return g_jniState.engine->getTransport().isMetronomeRunning() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportGetRemainingBeats(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getTransport().getRemainingBeats();
+}
+
 // Export / Import (NOT RT-safe — call from IO thread)
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperExportMix(
@@ -2477,6 +2774,24 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
+// Session capture: write the FULL track buffer (ignoring loop region) at the
+// given bit depth (16/24 PCM, 32 = float). 32 = lossless round-trip.
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperCaptureTrack(
+    JNIEnv* env, jobject thiz, jint trackIndex, jstring filePath, jint bitDepth) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    wav::BitDepth depth;
+    switch (bitDepth) {
+        case 24: depth = wav::BitDepth::PCM_24; break;
+        case 32: depth = wav::BitDepth::FLOAT_32; break;
+        default: depth = wav::BitDepth::PCM_16; break;
+    }
+    const char* path = env->GetStringUTFChars(filePath, nullptr);
+    bool ok = g_jniState.engine->getAudioLooper().captureTrack(trackIndex, path, depth);
+    env->ReleaseStringUTFChars(filePath, path);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperImportTrack(
     JNIEnv* env, jobject thiz, jint trackIndex, jstring filePath, jint sampleRate) {
@@ -2485,6 +2800,304 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     bool ok = g_jniState.engine->getAudioLooper().importTrack(trackIndex, path, sampleRate);
     env->ReleaseStringUTFChars(filePath, path);
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// Export with options. bitDepth: 16, 24, 32 (32 = float).
+// repeatLoops: number of iterations (>=1). countInBeats: leading silence beats.
+// applyLimiter: 1 to apply true-peak limiter, 0 for raw.
+// projectName / artist / comment: optional metadata strings (null/"" to skip).
+// bpm: embedded in comment if > 0; 0 = use Transport BPM if non-zero.
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperExportMixV2(
+    JNIEnv* env, jobject thiz,
+    jstring filePath, jint bitDepth, jint repeatLoops,
+    jint countInBeats, jboolean applyLimiter,
+    jstring projectName, jstring artist, jstring comment, jint bpm) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    AudioLooper::ExportOptions opts;
+    switch (bitDepth) {
+        case 24: opts.bitDepth = wav::BitDepth::PCM_24; break;
+        case 32: opts.bitDepth = wav::BitDepth::FLOAT_32; break;
+        default: opts.bitDepth = wav::BitDepth::PCM_16; break;
+    }
+    opts.repeatLoops = (repeatLoops > 0) ? repeatLoops : 1;
+    opts.applyLimiter = (applyLimiter == JNI_TRUE);
+
+    // Translate count-in beats to frames using the Transport.
+    auto& transport = g_jniState.engine->getTransport();
+    opts.countInFrames = (countInBeats > 0)
+        ? countInBeats * transport.framesPerBeat()
+        : 0;
+
+    // Resolve metadata BPM: if caller passed 0, use Transport BPM.
+    opts.metadata.bpm = (bpm > 0) ? bpm : static_cast<int>(transport.getBpm());
+
+    auto pickStr = [env](jstring js, std::string& out) {
+        if (!js) return;
+        const char* c = env->GetStringUTFChars(js, nullptr);
+        if (c) {
+            out = c;
+            env->ReleaseStringUTFChars(js, c);
+        }
+    };
+    pickStr(projectName, opts.metadata.projectName);
+    pickStr(artist, opts.metadata.artist);
+    pickStr(comment, opts.metadata.comment);
+
+    const char* path = env->GetStringUTFChars(filePath, nullptr);
+    bool ok = g_jniState.engine->getAudioLooper().exportMix(path, opts);
+    env->ReleaseStringUTFChars(filePath, path);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// Export each active track as a separate WAV file in `directory`.
+// Returns number of stems written, or -1 on failure.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperExportStems(
+    JNIEnv* env, jobject thiz,
+    jstring directory, jint bitDepth, jint repeatLoops,
+    jint countInBeats, jboolean applyLimiter, jint bpm) {
+    if (!g_jniState.engine) return -1;
+    AudioLooper::ExportOptions opts;
+    switch (bitDepth) {
+        case 24: opts.bitDepth = wav::BitDepth::PCM_24; break;
+        case 32: opts.bitDepth = wav::BitDepth::FLOAT_32; break;
+        default: opts.bitDepth = wav::BitDepth::PCM_16; break;
+    }
+    opts.repeatLoops = (repeatLoops > 0) ? repeatLoops : 1;
+    opts.applyLimiter = (applyLimiter == JNI_TRUE);
+    auto& transport = g_jniState.engine->getTransport();
+    opts.countInFrames = (countInBeats > 0)
+        ? countInBeats * transport.framesPerBeat()
+        : 0;
+    opts.metadata.bpm = (bpm > 0) ? bpm : static_cast<int>(transport.getBpm());
+
+    const char* dir = env->GetStringUTFChars(directory, nullptr);
+    int n = g_jniState.engine->getAudioLooper().exportStems(dir, opts);
+    env->ReleaseStringUTFChars(directory, dir);
+    return n;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetExportProgress(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0.0f;
+    return g_jniState.engine->getAudioLooper().getExportProgress();
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperCancelExport(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine)
+        g_jniState.engine->getAudioLooper().cancelExport();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperIsExportInProgress(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    return g_jniState.engine->getAudioLooper().isExportInProgress() ? JNI_TRUE : JNI_FALSE;
+}
+
+// ========== TELEMETRY (lock-free counters for observability) ==========
+
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetFramesDropped(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getFramesDropped();
+}
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetExportsCompleted(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getExportsCompleted();
+}
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetExportsFailed(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getExportsFailed();
+}
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetStemsWritten(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getStemsWritten();
+}
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetArmedTriggered(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().getArmedTriggered();
+}
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperResetTelemetry(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine)
+        g_jniState.engine->getAudioLooper().resetTelemetry();
+}
+
+// ============================================================================
+// Looper state listener (push-based notifications C++ → Kotlin)
+//
+// Replaces the per-track polling pattern (~800 JNI calls/sec at 8 tracks ×
+// 30fps × 3 fields) in NoisyPad's LooperViewModel. The audio thread pushes
+// events onto LooperEventDispatcher's lock-free queue; the dispatcher's
+// worker thread drains it and invokes the Kotlin listener through the sink
+// installed below. All Kotlin callbacks therefore arrive on a single
+// background thread — listener implementations must marshal to main thread.
+// ============================================================================
+
+namespace {
+
+std::mutex                g_looperListenerMutex;
+jobject                   g_looperListenerGlobalRef = nullptr;
+jclass                    g_looperListenerClass = nullptr;
+jmethodID                 g_looperOnTrackProgress = nullptr;
+jmethodID                 g_looperOnTrackPlayingChanged = nullptr;
+jmethodID                 g_looperOnTrackPeakChanged = nullptr;
+
+/**
+ * Attach the worker thread to the JVM if it isn't already, returning a
+ * JNIEnv* valid on this thread. We use AttachCurrentThreadAsDaemon so the
+ * JVM doesn't insist on a clean detach if the worker outlives the engine
+ * (which it shouldn't, but daemon-attach is the safer default).
+ */
+JNIEnv* attachWorkerEnv() {
+    if (!g_javaVm) return nullptr;
+    JNIEnv* env = nullptr;
+    jint rc = g_javaVm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+    if (rc == JNI_OK) return env;
+    if (rc == JNI_EDETACHED) {
+        if (g_javaVm->AttachCurrentThreadAsDaemon(&env, nullptr) != JNI_OK) {
+            return nullptr;
+        }
+        return env;
+    }
+    return nullptr;
+}
+
+void dispatchLooperEvent(const wm::LooperEvent& ev) {
+    JNIEnv* env = attachWorkerEnv();
+    if (!env) return;
+
+    // Snapshot under the mutex to allow unregister to race safely.
+    jobject  listener = nullptr;
+    jmethodID method  = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_looperListenerMutex);
+        if (!g_looperListenerGlobalRef) return;
+        listener = g_looperListenerGlobalRef;
+        switch (ev.type) {
+            case wm::LooperEvent::Type::Progress:
+                method = g_looperOnTrackProgress; break;
+            case wm::LooperEvent::Type::PlayingChanged:
+                method = g_looperOnTrackPlayingChanged; break;
+            case wm::LooperEvent::Type::PeakChanged:
+                method = g_looperOnTrackPeakChanged; break;
+        }
+    }
+    if (!listener || !method) return;
+
+    if (ev.type == wm::LooperEvent::Type::PlayingChanged) {
+        env->CallVoidMethod(listener, method,
+                            static_cast<jint>(ev.trackIndex),
+                            ev.value > 0.5f ? JNI_TRUE : JNI_FALSE);
+    } else {
+        env->CallVoidMethod(listener, method,
+                            static_cast<jint>(ev.trackIndex),
+                            static_cast<jfloat>(ev.value));
+    }
+    // Swallow exceptions from the Kotlin side so one bad listener call
+    // doesn't kill the worker thread.
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+}
+
+}  // namespace
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperRegisterStateListener(
+    JNIEnv* env, jobject thiz, jobject listener) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    if (!listener) return JNI_FALSE;
+
+    std::lock_guard<std::mutex> lk(g_looperListenerMutex);
+
+    // Drop any previous registration first.
+    if (g_looperListenerGlobalRef) {
+        env->DeleteGlobalRef(g_looperListenerGlobalRef);
+        g_looperListenerGlobalRef = nullptr;
+    }
+    if (g_looperListenerClass) {
+        env->DeleteGlobalRef(g_looperListenerClass);
+        g_looperListenerClass = nullptr;
+    }
+
+    g_looperListenerGlobalRef = env->NewGlobalRef(listener);
+    if (!g_looperListenerGlobalRef) return JNI_FALSE;
+
+    jclass localCls = env->GetObjectClass(listener);
+    if (!localCls) {
+        env->DeleteGlobalRef(g_looperListenerGlobalRef);
+        g_looperListenerGlobalRef = nullptr;
+        return JNI_FALSE;
+    }
+    g_looperListenerClass = static_cast<jclass>(env->NewGlobalRef(localCls));
+    env->DeleteLocalRef(localCls);
+
+    g_looperOnTrackProgress = env->GetMethodID(
+        g_looperListenerClass, "onTrackProgress", "(IF)V");
+    g_looperOnTrackPlayingChanged = env->GetMethodID(
+        g_looperListenerClass, "onTrackPlayingChanged", "(IZ)V");
+    g_looperOnTrackPeakChanged = env->GetMethodID(
+        g_looperListenerClass, "onTrackPeakChanged", "(IF)V");
+
+    if (!g_looperOnTrackProgress
+        || !g_looperOnTrackPlayingChanged
+        || !g_looperOnTrackPeakChanged) {
+        LOGE("LooperStateListener: missing methods on %s",
+             "LooperStateListener");
+        env->ExceptionClear();
+        env->DeleteGlobalRef(g_looperListenerGlobalRef);
+        env->DeleteGlobalRef(g_looperListenerClass);
+        g_looperListenerGlobalRef = nullptr;
+        g_looperListenerClass = nullptr;
+        return JNI_FALSE;
+    }
+
+    g_jniState.engine->getLooperEventDispatcher().setSink(&dispatchLooperEvent);
+    return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperUnregisterStateListener(
+    JNIEnv* env, jobject thiz) {
+    if (g_jniState.engine) {
+        g_jniState.engine->getLooperEventDispatcher().setSink(nullptr);
+    }
+    std::lock_guard<std::mutex> lk(g_looperListenerMutex);
+    if (g_looperListenerGlobalRef) {
+        env->DeleteGlobalRef(g_looperListenerGlobalRef);
+        g_looperListenerGlobalRef = nullptr;
+    }
+    if (g_looperListenerClass) {
+        env->DeleteGlobalRef(g_looperListenerClass);
+        g_looperListenerClass = nullptr;
+    }
+    g_looperOnTrackProgress = nullptr;
+    g_looperOnTrackPlayingChanged = nullptr;
+    g_looperOnTrackPeakChanged = nullptr;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetDroppedEvents(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getLooperEventDispatcher().getDroppedEvents();
 }
 
 } // extern "C"

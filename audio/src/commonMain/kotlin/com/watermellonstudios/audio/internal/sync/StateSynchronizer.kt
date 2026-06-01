@@ -5,7 +5,6 @@ import com.watermellonstudios.audio.callback.AudioLogger
 import com.watermellonstudios.audio.callback.NoOpAudioLogger
 import com.watermellonstudios.audio.api.NativeEffectSnapshot
 import com.watermellonstudios.audio.domain.effect.EffectState
-import com.watermellonstudios.audio.domain.effect.EffectType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -407,15 +406,11 @@ class StateSynchronizer(
                 logger.debug(TAG, "handleDivergence: accepting native state")
             }
 
-            ReconciliationStrategy.ACCEPT_LOCAL -> {
-                // Kotlin wins: would need to push local state to C++
-                // This requires IEffectStateWriter and is complex
-                logger.warn(TAG, "handleDivergence: ACCEPT_LOCAL not fully implemented, using ACCEPT_NATIVE")
-            }
-
-            ReconciliationStrategy.MERGE -> {
-                // Intelligent merge: very complex, not implemented
-                logger.warn(TAG, "handleDivergence: MERGE not implemented, using ACCEPT_NATIVE")
+            else -> {
+                logger.warn(
+                    TAG,
+                    "handleDivergence: ${config.reconciliationStrategy} is not implemented, using ACCEPT_NATIVE"
+                )
             }
         }
 
@@ -432,20 +427,6 @@ class StateSynchronizer(
         }
         _syncEvents.emit(SyncEvent.SyncError(error))
     }
-}
-
-// ==================== Extension Functions ====================
-
-/**
- * Converts NativeEffectSnapshot to domain EffectState.
- */
-private fun NativeEffectSnapshot.toEffectState(): EffectState {
-    return EffectState(
-        index = index,
-        type = EffectType.fromId(typeId) ?: EffectType.FILTER,
-        isBypassed = isBypassed,
-        parameters = parameters
-    )
 }
 
 /**

@@ -778,7 +778,7 @@ bool UsbDescriptorParser::parseUAC2ClockSelector(const uint8_t* data, UsbAudioDe
     // Controls byte is after the source IDs
     if (5 + desc->bNrInPins < data[0]) {
         uint8_t bmControls = data[5 + desc->bNrInPins];
-        clockSelector.canControlSelector = (bmControls & 0x03) != 0;
+        clockSelector.canControlSelector = (bmControls & 0x03) >= 0x02;
     }
 
     LOGD("UAC 2.0 Clock Selector: ID=%d, NrInPins=%d", clockSelector.clockId, desc->bNrInPins);

@@ -8,6 +8,8 @@
 #include "../usb/UsbConstants.h"
 #include "../usb/SampleRateRequest.h"
 #include "../usb/ClockSourceRangeParser.h"
+#include "../usb/UsbClockGraph.h"
+#include "../usb/UsbIsoTiming.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -310,7 +312,36 @@ bool LibusbBackend::selectBestInterfaces() {
     // Playback
     if (needsPlayback && !mUsbDevice->playbackInterfaces.empty()) {
         logAltsettings("playback", mUsbDevice->playbackInterfaces);
-        auto match = usb::AltsettingSelector::pickPlayback(*mUsbDevice, pref);
+        std::optional<usb::ScoredMatch> match;
+        if (mManualPlaybackSelection) {
+            const auto& manual = *mManualPlaybackSelection;
+            auto altIt = std::find_if(
+                mUsbDevice->playbackInterfaces.begin(),
+                mUsbDevice->playbackInterfaces.end(),
+                [&](const usb::UsbStreamingInterface& iface) {
+                    return iface.interfaceNumber == manual.interfaceNumber &&
+                           iface.alternateSetting == manual.alternateSetting;
+                });
+            if (altIt != mUsbDevice->playbackInterfaces.end() &&
+                manual.formatIndex >= 0 &&
+                manual.formatIndex < static_cast<int>(altIt->formats.size())) {
+                match = usb::ScoredMatch{
+                    &(*altIt),
+                    &altIt->formats[static_cast<size_t>(manual.formatIndex)],
+                    0.0f
+                };
+                LOGI("Using manual playback selection: IF%d Alt%d formatIndex=%d",
+                     manual.interfaceNumber, manual.alternateSetting,
+                     manual.formatIndex);
+            } else {
+                LOGE("Manual playback selection invalid: IF%d Alt%d formatIndex=%d",
+                     manual.interfaceNumber, manual.alternateSetting,
+                     manual.formatIndex);
+                return false;
+            }
+        } else {
+            match = usb::AltsettingSelector::pickPlayback(*mUsbDevice, pref);
+        }
         if (match) {
             mSelectedPlayback = *match->altsetting;
             mSelectedPlaybackFormat = *match->format;
@@ -391,6 +422,72 @@ bool LibusbBackend::selectBestInterfaces() {
     }
 
     return success;
+}
+
+bool LibusbBackend::selectAltsetting(
+    int interfaceNumber,
+    int alternateSetting,
+    int formatIndex) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mIsRunning.load()) {
+        LOGW("selectAltsetting rejected while stream is running");
+        return false;
+    }
+    if (!mUsbDevice) {
+        LOGW("selectAltsetting rejected: no parsed USB device");
+        return false;
+    }
+    auto altIt = std::find_if(
+        mUsbDevice->playbackInterfaces.begin(),
+        mUsbDevice->playbackInterfaces.end(),
+        [&](const usb::UsbStreamingInterface& iface) {
+            return iface.interfaceNumber == interfaceNumber &&
+                   iface.alternateSetting == alternateSetting;
+        });
+    if (altIt == mUsbDevice->playbackInterfaces.end()) {
+        LOGW("selectAltsetting rejected: playback IF%d Alt%d not found",
+             interfaceNumber, alternateSetting);
+        return false;
+    }
+    if (formatIndex < 0 ||
+        formatIndex >= static_cast<int>(altIt->formats.size())) {
+        LOGW("selectAltsetting rejected: IF%d Alt%d formatIndex=%d out of range (formats=%zu)",
+             interfaceNumber, alternateSetting, formatIndex,
+             altIt->formats.size());
+        return false;
+    }
+
+    mManualPlaybackSelection = ManualAltsettingSelection{
+        interfaceNumber,
+        alternateSetting,
+        formatIndex
+    };
+    const auto& fmt = altIt->formats[static_cast<size_t>(formatIndex)];
+    LOGI("Manual playback altsetting queued: IF%d Alt%d formatIndex=%d (%dch/%dbit)",
+         interfaceNumber, alternateSetting, formatIndex,
+         fmt.channels, fmt.bitResolution);
+    return true;
+}
+
+bool LibusbBackend::selectClockSource(int clockSourceId) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mIsRunning.load()) {
+        LOGW("selectClockSource rejected while stream is running");
+        return false;
+    }
+    if (!mUsbDevice || mUsbDevice->uacVersion != 2) {
+        LOGW("selectClockSource rejected: no UAC2 USB device initialized");
+        return false;
+    }
+    if (clockSourceId <= 0 || clockSourceId > 255 ||
+        !mUsbDevice->findClockSource(static_cast<uint8_t>(clockSourceId))) {
+        LOGW("selectClockSource rejected: clock source %d not found", clockSourceId);
+        return false;
+    }
+
+    mManualClockSourceId = clockSourceId;
+    LOGI("Manual clock source queued: %d", clockSourceId);
+    return true;
 }
 
 bool LibusbBackend::claimControlInterface() {
@@ -521,6 +618,178 @@ void LibusbBackend::populateClockSourceRates() {
     }
 }
 
+uint8_t LibusbBackend::selectClockSourceForTerminal(uint8_t terminalLinkId) {
+    if (!mDeviceHandle || !mUsbDevice || mUsbDevice->uacVersion != 2) {
+        return 0;
+    }
+    if (terminalLinkId == 0) {
+        return 0;
+    }
+
+    usb::UsbClockGraph graph(*mUsbDevice);
+    const usb::UsbClockSource* preferred = nullptr;
+    if (mManualClockSourceId) {
+        auto manualPath = graph.pathToSource(
+            terminalLinkId, static_cast<uint8_t>(*mManualClockSourceId));
+        if (manualPath && manualPath->source) {
+            preferred = manualPath->source;
+        } else {
+            LOGW("Clock graph: requested clock source %d is not reachable "
+                 "from terminal %d; falling back to default",
+                 *mManualClockSourceId, terminalLinkId);
+        }
+    }
+    if (!preferred) {
+        preferred = graph.pickDefaultSource(terminalLinkId);
+    }
+    if (!preferred) {
+        LOGW("Clock graph: terminal %d has no reachable clock source",
+             terminalLinkId);
+        return 0;
+    }
+
+    auto preferredPath = graph.pathToSource(terminalLinkId, preferred->clockId);
+    if (!preferredPath || !preferredPath->source) {
+        LOGW("Clock graph: terminal %d could not resolve preferred clock source %d",
+             terminalLinkId, preferred->clockId);
+        return 0;
+    }
+
+    const auto* selector = preferredPath->selector;
+    if (!selector) {
+        LOGI("Clock graph: terminal %d uses clock source %d directly",
+             terminalLinkId, preferred->clockId);
+        return preferred->clockId;
+    }
+
+    auto sourceForPin = [&](uint8_t pin) -> const usb::UsbClockSource* {
+        if (pin == 0 || pin > selector->sourceIds.size()) {
+            return nullptr;
+        }
+        const auto reachable = graph.reachableSourcesFor(terminalLinkId);
+        for (const auto* source : reachable) {
+            auto path = graph.pathToSource(terminalLinkId, source->clockId);
+            if (path && path->selector == selector && path->selectorPin == pin) {
+                return source;
+            }
+        }
+        return mUsbDevice->findClockSource(selector->sourceIds[pin - 1]);
+    };
+
+    auto getSelectorPin = [&]() -> std::optional<uint8_t> {
+        std::array<uint8_t, 1> readback{};
+        const uint16_t wValue = static_cast<uint16_t>(
+            usb::UAC2_CX_CLOCK_SELECTOR_CONTROL << 8);
+        const uint16_t wIndex = static_cast<uint16_t>(
+            (static_cast<uint16_t>(selector->clockId) << 8) |
+            mUsbDevice->controlInterface);
+        int r = libusb_control_transfer(
+            mDeviceHandle,
+            usb::UAC_REQUEST_TYPE_GET,
+            usb::UAC2_REQUEST_CUR,
+            wValue,
+            wIndex,
+            readback.data(),
+            static_cast<uint16_t>(readback.size()),
+            /*timeout*/ 1000);
+        if (r != 1) {
+            LOGW("Clock selector %d GET_CUR failed: %s",
+                 selector->clockId,
+                 r < 0 ? libusb_error_name(r) : "short response");
+            return std::nullopt;
+        }
+        return readback[0];
+    };
+
+    auto setSelectorPin = [&](uint8_t pin) -> bool {
+        std::array<uint8_t, 1> payload{{pin}};
+        const uint16_t wValue = static_cast<uint16_t>(
+            usb::UAC2_CX_CLOCK_SELECTOR_CONTROL << 8);
+        const uint16_t wIndex = static_cast<uint16_t>(
+            (static_cast<uint16_t>(selector->clockId) << 8) |
+            mUsbDevice->controlInterface);
+        int r = libusb_control_transfer(
+            mDeviceHandle,
+            usb::UAC_REQUEST_TYPE_SET,
+            usb::UAC2_REQUEST_CUR,
+            wValue,
+            wIndex,
+            payload.data(),
+            static_cast<uint16_t>(payload.size()),
+            /*timeout*/ 1000);
+        if (r < 0) {
+            LOGW("Clock selector %d SET_CUR pin %d failed: %s",
+                 selector->clockId, pin, libusb_error_name(r));
+            mLastLibusbError.store(r);
+            return false;
+        }
+        return true;
+    };
+
+    const uint8_t desiredPin = preferredPath->selectorPin;
+    auto currentPin = getSelectorPin();
+    if (currentPin) {
+        if (const auto* currentSource = sourceForPin(*currentPin)) {
+            if (*currentPin == desiredPin) {
+                LOGI("Clock selector %d already on pin %d (source %d)",
+                     selector->clockId, *currentPin, currentSource->clockId);
+                return currentSource->clockId;
+            }
+            LOGI("Clock selector %d current pin %d source %d, preferred pin %d source %d",
+                 selector->clockId, *currentPin, currentSource->clockId,
+                 desiredPin, preferred->clockId);
+        }
+    }
+
+    if (!selector->canControlSelector) {
+        if (currentPin) {
+            if (const auto* currentSource = sourceForPin(*currentPin)) {
+                LOGW("Clock selector %d is read-only; using current source %d",
+                     selector->clockId, currentSource->clockId);
+                return currentSource->clockId;
+            }
+        }
+        LOGW("Clock selector %d is read-only and current pin is unknown; "
+             "using preferred source %d for rate negotiation only",
+             selector->clockId, preferred->clockId);
+        return preferred->clockId;
+    }
+
+    if (desiredPin == 0) {
+        LOGW("Clock selector %d has no valid pin for source %d",
+             selector->clockId, preferred->clockId);
+        return preferred->clockId;
+    }
+
+    if (setSelectorPin(desiredPin)) {
+        LOGI("Clock selector %d -> pin %d (source %d)",
+             selector->clockId, desiredPin, preferred->clockId);
+        return preferred->clockId;
+    }
+
+    currentPin = getSelectorPin();
+    if (currentPin) {
+        if (const auto* currentSource = sourceForPin(*currentPin)) {
+            LOGW("Clock selector %d SET_CUR failed; continuing with current source %d",
+                 selector->clockId, currentSource->clockId);
+            return currentSource->clockId;
+        }
+    }
+
+    LOGW("Clock selector %d SET_CUR failed and current source is unknown; "
+         "using preferred source %d for rate negotiation only",
+         selector->clockId, preferred->clockId);
+    return preferred->clockId;
+}
+
+void LibusbBackend::publishActiveClockSource(uint8_t clockSourceId) {
+    const int id = clockSourceId == 0 ? -1 : static_cast<int>(clockSourceId);
+    mActiveClockSourceId.store(id, std::memory_order_relaxed);
+    if (mTransferManager) {
+        mTransferManager->setActiveClockSourceId(id);
+    }
+}
+
 // ============================================================================
 // Sample Rate Negotiation
 // ============================================================================
@@ -554,6 +823,7 @@ bool LibusbBackend::configureSampleRate() {
     const uint32_t requested = static_cast<uint32_t>(mRequestedSampleRate);
 
     if (version == 1) {
+        publishActiveClockSource(0);
         if (!mSelectedPlayback && !mSelectedCapture) {
             LOGE("configureSampleRate UAC1: no selected interface");
             return false;
@@ -635,10 +905,10 @@ bool LibusbBackend::configureSampleRate() {
         };
 
         if (mSelectedPlayback) {
-            addUnique(mUsbDevice->resolveClockSourceId(mSelectedPlayback->terminalLink));
+            addUnique(selectClockSourceForTerminal(mSelectedPlayback->terminalLink));
         }
         if (mSelectedCapture) {
-            addUnique(mUsbDevice->resolveClockSourceId(mSelectedCapture->terminalLink));
+            addUnique(selectClockSourceForTerminal(mSelectedCapture->terminalLink));
         }
 
         if (clockIdsToSet.empty()) {
@@ -649,6 +919,7 @@ bool LibusbBackend::configureSampleRate() {
                  mUsbDevice->clockSources.front().clockId);
             clockIdsToSet.push_back(mUsbDevice->clockSources.front().clockId);
         }
+        publishActiveClockSource(clockIdsToSet.front());
 
         // Lambda: run SET_CUR + GET_CUR for a single clock source.
         // Stage 3 fix: GET_CUR FIRST. If the device is already at the
@@ -1030,6 +1301,23 @@ bool LibusbBackend::hasCapture() const {
     return false;
 }
 
+BackendEndpointCapabilities LibusbBackend::getEndpointCapabilities() const {
+    BackendEndpointCapabilities caps;
+    const bool captureAvailable = hasCapture();
+
+    caps.roles = captureAvailable
+        ? (BackendStreamRole::INPUT_SOURCE | BackendStreamRole::OUTPUT_SINK)
+        : BackendStreamRole::OUTPUT_SINK;
+    caps.hasInputSourceContract = captureAvailable;
+    caps.callbackCarriesInput =
+        captureAvailable &&
+        (mStreamingMode == UsbStreamingMode::CAPTURE_ONLY ||
+         mStreamingMode == UsbStreamingMode::FULL_DUPLEX ||
+         mSelectedCapture.has_value());
+    caps.drivesUserCallback = true;
+    return caps;
+}
+
 int LibusbBackend::getUacVersion() const {
     if (mUsbDevice) {
         return mUsbDevice->uacVersion;
@@ -1135,7 +1423,10 @@ bool LibusbBackend::setupTransferManager() {
     const bool isHighSpeed = (speed == LIBUSB_SPEED_HIGH ||
                                speed == LIBUSB_SPEED_SUPER ||
                                speed == LIBUSB_SPEED_SUPER_PLUS);
-    const int packetsPerMs = isHighSpeed ? 8 : 1;
+    const auto timing = usb::calculateIsoTransferTiming(
+        mRequestedSampleRate,
+        isHighSpeed,
+        static_cast<int>(configInterface->dataEndpoint.interval));
     const char* speedName =
         (speed == LIBUSB_SPEED_LOW)        ? "LOW"   :
         (speed == LIBUSB_SPEED_FULL)       ? "FULL"  :
@@ -1150,15 +1441,17 @@ bool LibusbBackend::setupTransferManager() {
     // Non-integer rates (44.1 kHz, 88.2 kHz) truncate here; the clock
     // controller's fractional accumulator compensates via the feedback
     // endpoint when available.
-    config.framesPerPacket = mRequestedSampleRate / (packetsPerMs * 1000);
+    config.endpointInterval = timing.endpointInterval;
+    config.packetsPerSecond = timing.packetsPerSecond;
+    config.framesPerPacket = timing.framesPerPacket;
     // Keep ~8 ms of audio per libusb transfer in both speed classes so the
     // event-loop cadence is constant regardless of USB speed.
-    config.packetsPerTransfer = 8 * packetsPerMs;  // 8 on FS, 64 on HS
+    config.packetsPerTransfer = timing.packetsPerTransfer;
     config.numTransfers = 3;                       // Triple buffering
 
-    LOGI("USB speed: %s (libusb=%d) → %d packets/ms, %d frames/packet, "
-         "%d packets/xfer",
-         speedName, speed, packetsPerMs,
+    LOGI("USB speed: %s (libusb=%d), bInterval=%d, %d packets/sec, "
+         "%d frames/packet, %d packets/xfer",
+         speedName, speed, config.endpointInterval, config.packetsPerSecond,
          config.framesPerPacket, config.packetsPerTransfer);
 
     // Ring buffer size: start with reduced default (100ms instead of 200ms)
@@ -1731,6 +2024,21 @@ LibusbBackend::DeviceCapabilities LibusbBackend::getCapabilities() const {
     std::sort(caps.supportedBitDepths.begin(), caps.supportedBitDepths.end());
 
     // Volume control capabilities
+    auto copyChannelCaps = [](const usb::VolumeCapabilities& volCaps,
+                              std::vector<DeviceCapabilities::ChannelHardwareVolumeCapability>& out) {
+        out.clear();
+        out.reserve(volCaps.channels.size());
+        for (const auto& channel : volCaps.channels) {
+            out.push_back(DeviceCapabilities::ChannelHardwareVolumeCapability{
+                static_cast<int>(channel.channelNumber),
+                channel.hasHardwareVolume,
+                channel.hasHardwareMute,
+                channel.volumeVerified,
+                channel.muteVerified
+            });
+        }
+    };
+
     if (mOutputVolumeControl) {
         const auto& volCaps = mOutputVolumeControl->getCapabilities();
         caps.hasOutputVolumeControl = volCaps.hasVolumeControl || true;  // Always true (digital fallback)
@@ -1738,6 +2046,7 @@ LibusbBackend::DeviceCapabilities LibusbBackend::getCapabilities() const {
         caps.isUsingHardwareOutputVolume = mOutputVolumeControl->isUsingHardwareVolume();
         caps.outputVolumeMinDb = volCaps.volumeToDb(volCaps.minVolume);
         caps.outputVolumeMaxDb = volCaps.volumeToDb(volCaps.maxVolume);
+        copyChannelCaps(volCaps, caps.outputHardwareChannelCaps);
     } else {
         // Digital fallback always available
         caps.hasOutputVolumeControl = true;
@@ -1752,6 +2061,7 @@ LibusbBackend::DeviceCapabilities LibusbBackend::getCapabilities() const {
         caps.isUsingHardwareInputVolume = mInputVolumeControl->isUsingHardwareVolume();
         caps.inputVolumeMinDb = volCaps.volumeToDb(volCaps.minVolume);
         caps.inputVolumeMaxDb = volCaps.volumeToDb(volCaps.maxVolume);
+        copyChannelCaps(volCaps, caps.inputHardwareChannelCaps);
     } else if (!mUsbDevice->captureInterfaces.empty()) {
         // Digital fallback for capture
         caps.hasInputVolumeControl = true;
@@ -1938,7 +2248,7 @@ void LibusbBackend::initializeVolumeControls() {
                 mDeviceHandle, mUsbDevice->controlInterface);
 
             bool hwAvailable = mOutputVolumeControl->initialize(
-                outputFU->unitId, hasVolume, hasMute,
+                *outputFU,
                 true,  // isOutput
                 mUsbDevice->uacVersion);
 
@@ -1960,7 +2270,7 @@ void LibusbBackend::initializeVolumeControls() {
                 mDeviceHandle, mUsbDevice->controlInterface);
 
             bool hwAvailable = mInputVolumeControl->initialize(
-                inputFU->unitId, hasVolume, hasMute,
+                *inputFU,
                 false,  // isOutput
                 mUsbDevice->uacVersion);
 

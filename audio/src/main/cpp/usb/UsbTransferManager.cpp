@@ -76,12 +76,11 @@ bool UsbTransferManager::configure(const TransferConfig& config) {
          outputRingBufferSize, outputRingBufferSize * sizeof(float),
          inputRingBufferSize, inputRingBufferSize * sizeof(float));
 
-    mOutputRingBuffer = std::make_unique<LockFreeRingBuffer>(outputRingBufferSize);
-    mInputRingBuffer = std::make_unique<LockFreeRingBuffer>(inputRingBufferSize);
-
-    // Lock ring buffers in memory to prevent page faults during audio streaming
-    MemoryUtils::prepareForRealtime(mOutputRingBuffer->data(), mOutputRingBuffer->sizeBytes());
-    MemoryUtils::prepareForRealtime(mInputRingBuffer->data(), mInputRingBuffer->sizeBytes());
+    auto prepareRing = [](LockFreeRingBuffer& ring) {
+        MemoryUtils::prepareForRealtime(ring.data(), ring.sizeBytes());
+    };
+    mOutputRingBuffer.reset(outputRingBufferSize, prepareRing);
+    mInputRingBuffer.reset(inputRingBufferSize, prepareRing);
 
     // Allocate temp buffers for format conversion (use max of input/output)
     size_t maxOutputSamples = static_cast<size_t>(config.framesPerPacket *
@@ -92,6 +91,7 @@ bool UsbTransferManager::configure(const TransferConfig& config) {
                                                   config.inputChannelCount);
     size_t maxSamples = std::max(maxOutputSamples, maxInputSamples);
     mFloatBuffer.resize(maxSamples);
+    mMappedFloatBuffer.resize(maxSamples);
 
     // PCM buffer needs to be large enough for both directions
     size_t maxPcmSize = std::max(static_cast<size_t>(config.bytesPerTransfer()),
@@ -100,12 +100,20 @@ bool UsbTransferManager::configure(const TransferConfig& config) {
 
     // Lock temp buffers in memory to prevent page faults during USB transfers
     MemoryUtils::prepareVectorForRealtime(mFloatBuffer);
+    MemoryUtils::prepareVectorForRealtime(mMappedFloatBuffer);
     MemoryUtils::prepareVectorForRealtime(mPcmBuffer);
 
-    LOGI("Configured: %dHz, out=%dch/%dbit, in=%dch/%dbit, %d frames/packet, %d packets/xfer",
+    mChannelMap = ChannelMap::identity(
+        config.channelCount,
+        config.channelCount,
+        config.inputChannelCount,
+        config.inputChannelCount);
+
+    LOGI("Configured: %dHz, out=%dch/%dbit, in=%dch/%dbit, %d frames/packet, %d packets/xfer, bInterval=%d, packets/sec=%d",
          config.sampleRate, config.channelCount, config.bitDepth,
          config.inputChannelCount, config.inputBitDepth,
-         config.framesPerPacket, config.packetsPerTransfer);
+         config.framesPerPacket, config.packetsPerTransfer,
+         config.endpointInterval, config.packetsPerSecond);
 
     // Configure latency profiler
     mLatencyProfiler.configureFromTransfer(
@@ -233,6 +241,9 @@ bool UsbTransferManager::start() {
     // Initialize watchdog
     mLastCompletedTimeMs.store(getCurrentTimeMs(), std::memory_order_release);
     mConsecutiveErrors.store(0, std::memory_order_release);
+    mRecoveryRestartRequested.store(false, std::memory_order_release);
+    mRecoveryRestartInProgress.store(false, std::memory_order_release);
+    mRecoveryPolicy.reset(mLastCompletedTimeMs.load(std::memory_order_acquire));
 
     // Claim interfaces and set alternate settings
     if (mOutputInterface) {
@@ -291,7 +302,7 @@ bool UsbTransferManager::start() {
                                                   mConfig.numTransfers *
                                                   mConfig.channelCount * 2);
     std::vector<float> silence(prefillSamples, 0.0f);
-    mOutputRingBuffer->write(silence.data(), silence.size());
+    mOutputRingBuffer.write(silence.data(), silence.size());
 
     mIsRunning.store(true, std::memory_order_release);
 
@@ -399,8 +410,8 @@ void UsbTransferManager::stop() {
     mIsRunning.store(false, std::memory_order_release);
 
     // Clear ring buffers
-    if (mOutputRingBuffer) mOutputRingBuffer->clear();
-    if (mInputRingBuffer) mInputRingBuffer->clear();
+    mOutputRingBuffer.clear();
+    mInputRingBuffer.clear();
 
     LOGI("Stopped USB transfers. Stats: submitted=%llu, completed=%llu, errors=%llu, underruns=%llu",
          (unsigned long long)mStats.packetsSubmitted.load(),
@@ -414,16 +425,16 @@ void UsbTransferManager::stop() {
 // ============================================================================
 
 bool UsbTransferManager::writeOutput(const float* samples, size_t numSamples) {
-    if (!mOutputRingBuffer) {
+    if (mOutputRingBuffer.capacity() == 0) {
         return false;
     }
 
-    bool success = mOutputRingBuffer->write(samples, numSamples);
+    bool success = mOutputRingBuffer.write(samples, numSamples);
 
     // Update statistics
-    int level = static_cast<int>(mOutputRingBuffer->availableToRead());
+    int level = static_cast<int>(mOutputRingBuffer.availableToRead());
     mStats.ringBufferLevel.store(level, std::memory_order_relaxed);
-    float fillPct = static_cast<float>(level) / static_cast<float>(mOutputRingBuffer->capacity());
+    float fillPct = static_cast<float>(level) / static_cast<float>(mOutputRingBuffer.capacity());
     mStats.ringBufferFillPct.store(fillPct * 100.0f, std::memory_order_relaxed);
 
     if (!success) {
@@ -434,22 +445,22 @@ bool UsbTransferManager::writeOutput(const float* samples, size_t numSamples) {
 }
 
 bool UsbTransferManager::readInput(float* samples, size_t numSamples) {
-    if (!mInputRingBuffer) {
+    if (mInputRingBuffer.capacity() == 0) {
         return false;
     }
-    return mInputRingBuffer->read(samples, numSamples);
+    return mInputRingBuffer.read(samples, numSamples);
 }
 
 size_t UsbTransferManager::getOutputBufferAvailable() const {
-    return mOutputRingBuffer ? mOutputRingBuffer->availableToWrite() : 0;
+    return mOutputRingBuffer.availableToWrite();
 }
 
 size_t UsbTransferManager::getOutputRingLevel() const {
-    return mOutputRingBuffer ? mOutputRingBuffer->availableToRead() : 0;
+    return mOutputRingBuffer.availableToRead();
 }
 
 size_t UsbTransferManager::getInputBufferAvailable() const {
-    return mInputRingBuffer ? mInputRingBuffer->availableToRead() : 0;
+    return mInputRingBuffer.availableToRead();
 }
 
 // ============================================================================
@@ -725,6 +736,7 @@ void UsbTransferManager::handleOutputComplete(IsoTransfer* ctx, libusb_transfer*
         // Watchdog: Update last completed time and reset error counter
         mLastCompletedTimeMs.store(getCurrentTimeMs(), std::memory_order_release);
         mConsecutiveErrors.store(0, std::memory_order_release);
+        mRecoveryPolicy.onSuccess();
 
         // Adaptive buffer: track successful output transfer
         if (mBufferController) {
@@ -741,13 +753,16 @@ void UsbTransferManager::handleOutputComplete(IsoTransfer* ctx, libusb_transfer*
 
     } else {
         mStats.packetsErrors.fetch_add(1);
-        mConsecutiveErrors.fetch_add(1, std::memory_order_release);  // Watchdog: track errors
-        LOGW("Output transfer error: %d", transfer->status);
+        if (!handleTransientTransferError(transfer->status)) {
+            return;
+        }
     }
 
     // Resubmit if still running and device not disconnected
     if (!mStopRequested.load(std::memory_order_acquire) &&
-        !mDeviceDisconnected.load(std::memory_order_acquire)) {
+        !mDeviceDisconnected.load(std::memory_order_acquire) &&
+        !mRecoveryRestartRequested.load(std::memory_order_acquire) &&
+        !mRecoveryRestartInProgress.load(std::memory_order_acquire)) {
         if (!fillOutputTransfer(ctx)) {
             mStats.underruns.fetch_add(1, std::memory_order_relaxed);
             // Adaptive buffer: track underrun
@@ -783,6 +798,7 @@ void UsbTransferManager::handleInputComplete(IsoTransfer* ctx, libusb_transfer* 
         // Watchdog: Update last completed time and reset error counter
         mLastCompletedTimeMs.store(getCurrentTimeMs(), std::memory_order_release);
         mConsecutiveErrors.store(0, std::memory_order_release);
+        mRecoveryPolicy.onSuccess();
 
     } else if (transfer->status == LIBUSB_TRANSFER_CANCELLED) {
         return;
@@ -793,12 +809,16 @@ void UsbTransferManager::handleInputComplete(IsoTransfer* ctx, libusb_transfer* 
 
     } else {
         mStats.packetsErrors.fetch_add(1);
-        mConsecutiveErrors.fetch_add(1, std::memory_order_release);  // Watchdog: track errors
+        if (!handleTransientTransferError(transfer->status)) {
+            return;
+        }
     }
 
     // Resubmit if still running and device not disconnected
     if (!mStopRequested.load(std::memory_order_acquire) &&
-        !mDeviceDisconnected.load(std::memory_order_acquire)) {
+        !mDeviceDisconnected.load(std::memory_order_acquire) &&
+        !mRecoveryRestartRequested.load(std::memory_order_acquire) &&
+        !mRecoveryRestartInProgress.load(std::memory_order_acquire)) {
         // Profile: record new transfer submission
         if (mLatencyProfiler.isEnabled()) {
             ctx->profilingToken = mLatencyProfiler.onInputSubmitted();
@@ -831,6 +851,17 @@ void UsbTransferManager::handleFeedbackComplete(libusb_transfer* transfer) {
         if (actualLen >= expectedLen) {
             mClockController->processFeedback(
                 mFeedbackBuffer.data(), actualLen, version);
+            mStats.feedbackPacketsReceived.fetch_add(1, std::memory_order_relaxed);
+            mStats.currentSampleRateHz.store(
+                mClockController->getCurrentSampleRate(), std::memory_order_relaxed);
+            mStats.driftPpm.store(
+                mClockController->getDriftPpm(), std::memory_order_relaxed);
+            mStats.feedbackEffectiveFramesPerPacket.store(
+                mClockController->getCurrentSampleRate() /
+                    static_cast<float>(std::max(1, mConfig.packetsPerSecond)),
+                std::memory_order_relaxed);
+        } else {
+            mStats.feedbackPacketsInvalid.fetch_add(1, std::memory_order_relaxed);
         }
 
     } else if (transfer->status == LIBUSB_TRANSFER_CANCELLED) {
@@ -846,6 +877,131 @@ void UsbTransferManager::handleFeedbackComplete(libusb_transfer* transfer) {
         !mDeviceDisconnected.load(std::memory_order_acquire)) {
         submitTransfer(transfer);
     }
+}
+
+bool UsbTransferManager::handleTransientTransferError(int transferStatus) {
+    const int errors = mConsecutiveErrors.fetch_add(1, std::memory_order_release) + 1;
+    (void)errors;
+
+    const auto action = mRecoveryPolicy.onTransientError(getCurrentTimeMs());
+    if (action == RecoveryPolicy::Action::RESUBMIT) {
+        return true;
+    }
+    if (action == RecoveryPolicy::Action::REQUEST_RESTART) {
+        requestRecoveryRestart();
+        return false;
+    }
+
+    LOGW("Recovery policy exhausted after transfer status=%d", transferStatus);
+    reportError(UsbAudioError::DEVICE_DISCONNECTED,
+                "USB transfer errors exceeded recovery policy");
+    return false;
+}
+
+void UsbTransferManager::requestRecoveryRestart() {
+    if (!mStopRequested.load(std::memory_order_acquire) &&
+        !mDeviceDisconnected.load(std::memory_order_acquire)) {
+        mRecoveryRestartRequested.store(true, std::memory_order_release);
+    }
+}
+
+void UsbTransferManager::handleRecoveryRestartIfNeeded() {
+    if (!mRecoveryRestartRequested.load(std::memory_order_acquire) ||
+        mStopRequested.load(std::memory_order_acquire) ||
+        mDeviceDisconnected.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    if (!mRecoveryRestartInProgress.exchange(true, std::memory_order_acq_rel)) {
+        LOGW("USB recovery restart requested; cancelling active data transfers");
+        for (auto& ctx : mOutputTransfers) {
+            if (ctx && ctx->transfer) {
+                int result = libusb_cancel_transfer(ctx->transfer);
+                if (result != LIBUSB_SUCCESS && result != LIBUSB_ERROR_NOT_FOUND) {
+                    LOGW("Recovery cancel output transfer failed: %s", libusb_error_name(result));
+                }
+            }
+        }
+        for (auto& ctx : mInputTransfers) {
+            if (ctx && ctx->transfer) {
+                int result = libusb_cancel_transfer(ctx->transfer);
+                if (result != LIBUSB_SUCCESS && result != LIBUSB_ERROR_NOT_FOUND) {
+                    LOGW("Recovery cancel input transfer failed: %s", libusb_error_name(result));
+                }
+            }
+        }
+    }
+
+    const int outPending = mOutputPendingCount.load(std::memory_order_acquire);
+    const int inPending = mInputPendingCount.load(std::memory_order_acquire);
+    if (outPending == 0 && inPending == 0) {
+        if (!performRecoveryRestart()) {
+            reportError(UsbAudioError::DEVICE_DISCONNECTED,
+                        "USB recovery restart failed");
+        }
+    }
+}
+
+bool UsbTransferManager::performRecoveryRestart() {
+    if (!mDeviceHandle) {
+        return false;
+    }
+
+    LOGW("Performing USB recovery restart");
+    const uint64_t now = getCurrentTimeMs();
+    mRecoveryPolicy.onRestartStarted(now);
+
+    if (mOutputInterface) {
+        if (!setAlternateSetting(mOutputInterface->interfaceNumber, 0) ||
+            !setAlternateSetting(mOutputInterface->interfaceNumber,
+                                 mOutputInterface->alternateSetting)) {
+            mRecoveryRestartInProgress.store(false, std::memory_order_release);
+            return false;
+        }
+    }
+    if (mInputInterface) {
+        if (!setAlternateSetting(mInputInterface->interfaceNumber, 0) ||
+            !setAlternateSetting(mInputInterface->interfaceNumber,
+                                 mInputInterface->alternateSetting)) {
+            mRecoveryRestartInProgress.store(false, std::memory_order_release);
+            return false;
+        }
+    }
+
+    mConsecutiveErrors.store(0, std::memory_order_release);
+    mLastCompletedTimeMs.store(now, std::memory_order_release);
+    mRecoveryRestartRequested.store(false, std::memory_order_release);
+
+    for (auto& ctx : mOutputTransfers) {
+        if (!ctx || !ctx->transfer) continue;
+        if (!fillOutputTransfer(ctx.get())) {
+            mStats.underruns.fetch_add(1, std::memory_order_relaxed);
+            if (mBufferController) {
+                mBufferController->onUnderrun();
+            }
+        }
+        if (mLatencyProfiler.isEnabled()) {
+            ctx->profilingToken = mLatencyProfiler.onOutputSubmitted();
+        }
+        if (submitTransfer(ctx->transfer)) {
+            mOutputPendingCount.fetch_add(1, std::memory_order_release);
+        }
+    }
+
+    for (auto& ctx : mInputTransfers) {
+        if (!ctx || !ctx->transfer) continue;
+        if (mLatencyProfiler.isEnabled()) {
+            ctx->profilingToken = mLatencyProfiler.onInputSubmitted();
+        }
+        if (submitTransfer(ctx->transfer)) {
+            mInputPendingCount.fetch_add(1, std::memory_order_release);
+        }
+    }
+
+    mRecoveryRestartInProgress.store(false, std::memory_order_release);
+    notifyDataReady();
+    LOGI("USB recovery restart complete");
+    return true;
 }
 
 // ============================================================================
@@ -878,7 +1034,7 @@ bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
     const size_t samplesNeeded = static_cast<size_t>(samplesPerPacket * ctx->packetCount);
 
     // Read the whole transfer worth of samples from the ring in one go.
-    bool success = mOutputRingBuffer->read(mFloatBuffer.data(), samplesNeeded);
+    bool success = mOutputRingBuffer.read(mFloatBuffer.data(), samplesNeeded);
     if (!success) {
         // Underrun — fill the temp buffer with silence so every packet
         // we submit is well-formed (audible dropout rather than an error).
@@ -905,8 +1061,20 @@ bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
         }
     }
 
+    const float* conversionInput = mFloatBuffer.data();
+    if (!mChannelMap.isOutputIdentity(mConfig.channelCount, mConfig.channelCount)) {
+        const int framesToMap = static_cast<int>(samplesNeeded / mConfig.channelCount);
+        mChannelMap.applyOutput(
+            mFloatBuffer.data(),
+            mMappedFloatBuffer.data(),
+            framesToMap,
+            mConfig.channelCount,
+            mConfig.channelCount);
+        conversionInput = mMappedFloatBuffer.data();
+    }
+
     mFormatConverter.floatToPcm(
-        mFloatBuffer.data(),
+        conversionInput,
         ctx->buffer.data(),
         samplesNeeded,
         mConfig.pcmFormat);
@@ -1032,7 +1200,21 @@ bool UsbTransferManager::processInputTransfer(IsoTransfer* ctx) {
 
     // Write to input ring buffer
     if (totalSamples > 0) {
-        if (!mInputRingBuffer->write(mFloatBuffer.data(), totalSamples)) {
+        const float* ringInput = mFloatBuffer.data();
+        size_t ringInputSamples = totalSamples;
+        if (!mChannelMap.isInputIdentity(mConfig.inputChannelCount, mConfig.inputChannelCount)) {
+            const int framesToMap = static_cast<int>(totalSamples / mConfig.inputChannelCount);
+            mChannelMap.applyInput(
+                mFloatBuffer.data(),
+                mMappedFloatBuffer.data(),
+                framesToMap,
+                mConfig.inputChannelCount,
+                mConfig.inputChannelCount);
+            ringInput = mMappedFloatBuffer.data();
+            ringInputSamples = static_cast<size_t>(framesToMap * mConfig.inputChannelCount);
+        }
+
+        if (!mInputRingBuffer.write(ringInput, ringInputSamples)) {
             mStats.overruns.fetch_add(1);
             return false;
         }
@@ -1051,9 +1233,11 @@ bool UsbTransferManager::submitTransfer(libusb_transfer* transfer) {
              transfer->length,
              transfer->type);
 
-        // On LIBUSB_ERROR_IO, report as device error
-        if (result == LIBUSB_ERROR_IO || result == LIBUSB_ERROR_NO_DEVICE) {
+        if (result == LIBUSB_ERROR_NO_DEVICE) {
             reportError(UsbAudioError::DEVICE_DISCONNECTED, "Device disconnected");
+        } else if (result == LIBUSB_ERROR_IO) {
+            mStats.packetsErrors.fetch_add(1, std::memory_order_relaxed);
+            requestRecoveryRestart();
         }
         return false;
     }
@@ -1107,6 +1291,8 @@ void UsbTransferManager::eventLoopThread() {
             }
         }
 
+        handleRecoveryRestartIfNeeded();
+
         // Watchdog: Check periodically for device responsiveness (only while
         // the stream is actually running — during the drain phase we expect
         // no new transfers to complete).
@@ -1115,10 +1301,16 @@ void UsbTransferManager::eventLoopThread() {
             if (now - lastWatchdogCheck >= WATCHDOG_CHECK_INTERVAL_MS) {
                 lastWatchdogCheck = now;
                 if (checkWatchdog()) {
-                    LOGW("Watchdog detected device unresponsive, triggering disconnect");
-                    reportError(UsbAudioError::DEVICE_DISCONNECTED,
-                                "Device unresponsive (watchdog timeout)");
-                    break;
+                    const auto action = mRecoveryPolicy.onRestartRequested(now);
+                    if (action == RecoveryPolicy::Action::REQUEST_RESTART) {
+                        LOGW("Watchdog detected device unresponsive, requesting recovery restart");
+                        requestRecoveryRestart();
+                    } else {
+                        LOGW("Watchdog detected device unresponsive, triggering disconnect");
+                        reportError(UsbAudioError::DEVICE_DISCONNECTED,
+                                    "Device unresponsive (watchdog timeout)");
+                        break;
+                    }
                 }
             }
         }
@@ -1307,31 +1499,33 @@ bool UsbTransferManager::reconfigureBufferSize(int newBufferMs) {
     LOGI("Reconfiguring buffer: %dms -> %dms (output=%zu samples, input=%zu samples)",
          oldBufferMs, newBufferMs, newOutputSize, newInputSize);
 
-    // Resize ring buffers
-    // Note: resize() clears the buffer content, which may cause a brief audio gap
-    if (mOutputRingBuffer) {
-        mOutputRingBuffer->resize(newOutputSize);
-        MemoryUtils::prepareForRealtime(mOutputRingBuffer->data(), mOutputRingBuffer->sizeBytes());
+    auto prepareRing = [](LockFreeRingBuffer& ring) {
+        MemoryUtils::prepareForRealtime(ring.data(), ring.sizeBytes());
+    };
+
+    // Pre-fill the staging output slot before publishing it. The old active
+    // slot remains alive after the swap, so any in-flight USB callback that
+    // already loaded it can finish safely.
+    size_t prefillSamples = 0;
+    std::vector<float> silence;
+    if (mIsRunning.load(std::memory_order_acquire)) {
+        prefillSamples = static_cast<size_t>(mConfig.framesPerPacket *
+                                             mConfig.packetsPerTransfer *
+                                             mConfig.numTransfers *
+                                             mConfig.channelCount);
+        silence.assign(prefillSamples, 0.0f);
     }
 
-    if (mInputRingBuffer) {
-        mInputRingBuffer->resize(newInputSize);
-        MemoryUtils::prepareForRealtime(mInputRingBuffer->data(), mInputRingBuffer->sizeBytes());
-    }
+    mOutputRingBuffer.resize(
+        newOutputSize,
+        prepareRing,
+        silence.empty() ? nullptr : silence.data(),
+        silence.size());
+    mInputRingBuffer.resize(newInputSize, prepareRing);
 
     // Update buffer controller
     if (mBufferController) {
         mBufferController->setCurrentBufferMs(newBufferMs);
-    }
-
-    // Pre-fill with silence to prevent initial underrun after resize
-    if (mOutputRingBuffer && mIsRunning.load()) {
-        size_t prefillSamples = static_cast<size_t>(mConfig.framesPerPacket *
-                                                      mConfig.packetsPerTransfer *
-                                                      mConfig.numTransfers *
-                                                      mConfig.channelCount);
-        std::vector<float> silence(prefillSamples, 0.0f);
-        mOutputRingBuffer->write(silence.data(), silence.size());
     }
 
     LOGI("Buffer reconfiguration complete: %dms", newBufferMs);

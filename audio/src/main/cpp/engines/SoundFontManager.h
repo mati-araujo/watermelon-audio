@@ -3,7 +3,10 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
+#include <string>
+#include <vector>
 #include "../platform/Logger.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -32,6 +35,18 @@
  */
 class SoundFontManager {
 public:
+    /**
+     * @brief Cached, immutable metadata for a single preset (AUD-4).
+     *
+     * Populated once at load time from the tsf instance. Reads on the JNI
+     * thread hit the cache and never re-scan tsf internals.
+     */
+    struct PresetInfo {
+        std::string name;
+        int minKey;
+        int maxKey;
+    };
+
     SoundFontManager() = default;
 
     ~SoundFontManager() {
@@ -130,6 +145,7 @@ public:
     void unload() {
         std::lock_guard<std::mutex> lock(mLoadMutex);
         tsf* old = mActiveSF.exchange(nullptr, std::memory_order_release);
+        mPresetCache.reset();
         if (old) {
             tsf* expected = nullptr;
             if (!mPendingDelete.compare_exchange_strong(expected, old,
@@ -163,28 +179,53 @@ public:
         return mActiveSF.load(std::memory_order_acquire) != nullptr;
     }
 
+    /**
+     * @brief Preset count from the cache (AUD-4).
+     *
+     * Thread model: read from JNI/main thread under [mLoadMutex]. Returns 0
+     * when no SoundFont is loaded.
+     */
     int getPresetCount() const {
-        tsf* sf = mActiveSF.load(std::memory_order_acquire);
-        return sf ? tsf_get_presetcount(sf) : 0;
+        std::lock_guard<std::mutex> lock(mLoadMutex);
+        return mPresetCache ? static_cast<int>(mPresetCache->size()) : 0;
     }
 
+    /**
+     * @brief Preset name from the cache (AUD-4).
+     *
+     * Thread model: read from JNI/main thread under [mLoadMutex]. The returned
+     * pointer is owned by the cache and is valid until the next load/unload.
+     * Returns nullptr for out-of-range indices or when no SoundFont is loaded.
+     */
     const char* getPresetName(int presetIndex) const {
-        tsf* sf = mActiveSF.load(std::memory_order_acquire);
-        if (!sf || presetIndex < 0 || presetIndex >= tsf_get_presetcount(sf)) {
+        std::lock_guard<std::mutex> lock(mLoadMutex);
+        if (!mPresetCache || presetIndex < 0 ||
+            presetIndex >= static_cast<int>(mPresetCache->size())) {
             return nullptr;
         }
-        return tsf_get_presetname(sf, presetIndex);
+        return (*mPresetCache)[presetIndex].name.c_str();
     }
 
     int32_t getSampleRate() const { return mSampleRate; }
 
     /**
-     * @brief Get the effective MIDI key range for a preset (Phase 10B)
-     * Iterates all regions of the preset and returns (lowestKey, highestKey).
-     * NOT RT-safe — call from JNI/background thread.
-     * Implemented in SoundFontManager.cpp (needs full tsf struct access).
+     * @brief Effective MIDI key range for a preset, from the cache (AUD-4).
+     *
+     * Pre-computed at load time using the same heuristic as before. Thread
+     * model: read from JNI/main thread under [mLoadMutex]; no tsf access here.
+     * @return true if the preset exists and outMinKey/outMaxKey were populated.
      */
-    bool getPresetKeyRange(int presetIndex, int& outMinKey, int& outMaxKey) const;
+    bool getPresetKeyRange(int presetIndex, int& outMinKey, int& outMaxKey) const {
+        std::lock_guard<std::mutex> lock(mLoadMutex);
+        if (!mPresetCache || presetIndex < 0 ||
+            presetIndex >= static_cast<int>(mPresetCache->size())) {
+            return false;
+        }
+        const auto& info = (*mPresetCache)[presetIndex];
+        outMinKey = info.minKey;
+        outMaxKey = info.maxKey;
+        return true;
+    }
 
 private:
     /**
@@ -198,8 +239,15 @@ private:
         SFM_LOGI("[SF8] Loaded SF2 (%zu bytes, %d presets, sr=%d)",
                  fileSize, presetCount, sampleRate);
 
+        // Build the immutable preset cache (AUD-4). buildPresetCache must run
+        // before the atomic swap so consumers see metadata in lockstep with
+        // the active SF — reads on the JNI thread can never observe a window
+        // where the SF is published but the cache is still stale.
+        auto cache = buildPresetCache(newSF, presetCount);
+
         // Atomic swap to audio thread
         tsf* old = mActiveSF.exchange(newSF, std::memory_order_release);
+        mPresetCache = std::move(cache);
         if (old) {
             tsf* expected = nullptr;
             if (!mPendingDelete.compare_exchange_strong(expected, old,
@@ -213,8 +261,20 @@ private:
         return true;
     }
 
+    /**
+     * @brief Build the immutable preset cache from a freshly parsed tsf.
+     * Implemented in SoundFontManager.cpp where the heuristic lives.
+     * Called only from configurAndSwap under mLoadMutex.
+     */
+    static std::shared_ptr<const std::vector<PresetInfo>> buildPresetCache(
+        tsf* sf, int presetCount);
+
     std::atomic<tsf*> mActiveSF{nullptr};
     std::atomic<tsf*> mPendingDelete{nullptr};
     mutable std::mutex mLoadMutex;
+    // Immutable post-load preset metadata. Replaced wholesale on load/unload
+    // while [mLoadMutex] is held. Reads on JNI thread take the mutex briefly
+    // to copy/inspect; the pointed-to vector is never mutated in place.
+    std::shared_ptr<const std::vector<PresetInfo>> mPresetCache;
     int32_t mSampleRate = 48000;
 };

@@ -112,6 +112,11 @@ void AudioEngine::OboeAdapterDeleter::operator()(void* p) const {
 } while(0)
 
 AudioEngine::AudioEngine() {
+    // Wire looper event dispatcher into AudioLooper BEFORE starting the
+    // dispatcher worker thread, so the first audio callback can already push.
+    mAudioLooper.setEventDispatcher(&mLooperEventDispatcher);
+    mLooperEventDispatcher.start();
+
     // IMPROVED (Fase 2.2.3): Manejo robusto de memoria insuficiente
     try {
         // Intentar pre-alocar buffers con tamaño completo
@@ -266,6 +271,12 @@ AudioEngine::~AudioEngine() {
     // RAII: Cancel pending fade thread and ensure stream is closed
     mFadeCtrl.cancel();
     stop();
+
+    // Stop the looper dispatcher AFTER the audio stream is closed so no
+    // RT thread can still be pushing while we drain & join the worker.
+    mAudioLooper.setEventDispatcher(nullptr);
+    mLooperEventDispatcher.setSink(nullptr);
+    mLooperEventDispatcher.stop();
 
     // IMPROVED (Fase 2.1.4): Limpiar recovery thread si existe
     if (mRecoveryThread && mRecoveryThread->joinable()) {
@@ -970,15 +981,33 @@ bool AudioEngine::isSoundFontLoaded() const {
 }
 
 void AudioEngine::sfNoteOn(int touchId, int midiNote, float velocity) {
+    if (touchId == 0
+        && mArpSequencer.isEnabled()
+        && mEngineDispatcher.getEngineType() == 6 /* SOUNDFONT */) {
+        float freq = 440.0f * std::pow(2.0f, (midiNote - 69) / 12.0f);
+        mArpSequencer.setBaseFrequency(freq);
+        mArpSequencer.setTouchActive(true);
+        return;
+    }
     mEngineDispatcher.sfNoteOn(touchId, midiNote, velocity);
 }
 
 void AudioEngine::sfNoteOff(int touchId) {
+    if (touchId == 0
+        && mArpSequencer.isEnabled()
+        && mEngineDispatcher.getEngineType() == 6 /* SOUNDFONT */) {
+        mArpSequencer.setTouchActive(false);
+        return;
+    }
     mEngineDispatcher.sfNoteOff(touchId);
 }
 
 void AudioEngine::sfNoteOffAll() {
     mEngineDispatcher.sfNoteOffAll();
+}
+
+void AudioEngine::sfNoteOffAllExcept(int keepTouchId) {
+    mEngineDispatcher.sfNoteOffAllExcept(keepTouchId);
 }
 
 void AudioEngine::setOscillatorType(int typeId) {
@@ -1036,12 +1065,46 @@ void AudioEngine::applyEffectsAndOutput(float* output, int32_t numFrames) {
     mOutputStage.dcBlock(mOutputStage.getTempBuffer(), numFrames);
     mEffectChain.process(mOutputStage.getTempBuffer(), output, numFrames);
 
-    // Fade + master volume
+    // ---- PRE-ROLL CAPTURE ----
+    // Stash the post-FX signal into the pre-roll ring BEFORE the looper consumes it.
+    // The looper uses snapshots of this ring to seed new recordings with audio
+    // captured before the user pressed REC, eliminating reaction-time gaps.
+    mPreRollRing.write(output, numFrames);
+
+    // ---- TRANSPORT TICK ----
+    // Snapshot Transport's play position BEFORE the tick so we pass the
+    // block-start frame to the looper (not the post-tick frame).
+    const int64_t playFrameAtBlockStart = mTransport.getPlayFrame();
+    // Emits any scheduled metronome clicks for this audio block. RT-safe; runs
+    // before the looper so the click is mixed by AudioLooper::process.
+    mTransport.tick(numFrames, mAudioLooper);
+
+    // ---- FADE (applied to synth + FX only — NOT to loops) ----
+    // The pause/scene-change fade mutes the instrument signal but must let
+    // existing loops keep playing through the transition. We apply the fade
+    // BEFORE the looper mixes its playback into `output`. The looper's
+    // recording tap reads `output` here, so an in-progress recording would
+    // capture the fade-out + transition + fade-in; callers that care about
+    // clean takes must abort recording before triggering the fade (handled
+    // on the NoisyPad side via the scene-change orchestrator).
     float fadeStart, fadeEnd;
     mFadeCtrl.processFadeBlock(numFrames, fadeStart, fadeEnd);
-    float masterVol = mMasterVolume.load(std::memory_order_acquire);
-    if (mFadeCtrl.isPaused()) masterVol = 0.0f;
-    simd::applyStereoGainRamp(output, numFrames, fadeStart * masterVol, fadeEnd * masterVol);
+    if (mFadeCtrl.isPaused()) { fadeStart = 0.0f; fadeEnd = 0.0f; }
+    simd::applyStereoGainRamp(output, numFrames, fadeStart, fadeEnd);
+
+    // ---- LOOPER TAP + PLAYBACK MIX ----
+    // Captures the faded synth/FX signal for recording; then mixes the loop
+    // playback into `output`. Loop playback is intentionally NOT scaled by
+    // the engine fade so loops remain audible during scene changes.
+    mAudioLooper.process(output, numFrames, playFrameAtBlockStart);
+
+    // ---- MASTER VOLUME (whole mix, no fade) ----
+    // Applied AFTER the looper mix so master volume scales the combined
+    // synth + FX + loops bus uniformly.
+    const float masterVol = mMasterVolume.load(std::memory_order_acquire);
+    if (masterVol != 1.0f) {
+        simd::applyStereoGain(output, numFrames, masterVol);
+    }
 
     // Output stage protection
     mOutputStage.processOutput(output, numFrames);
@@ -1192,16 +1255,28 @@ void AudioEngine::renderInputFx(float* output, int32_t numFrames, InputNode* inp
 
 void AudioEngine::renderSoundFont(float* output, int32_t numFrames) {
     auto* sfEngine = mEngineDispatcher.getSoundFontEngine();
+    if (!sfEngine) {
+        std::fill_n(output, numFrames * 2, 0.0f);
+        return;
+    }
 
     if (mArpSequencer.isEnabled()) {
         float bpm = mBpm.load(std::memory_order_relaxed);
         auto arpOut = mArpSequencer.process(numFrames, bpm);
 
-        if (arpOut.frequency > 0.0f && arpOut.amplitude > 0.001f) {
-            int midiNote = SoundFontEngine::frequencyToMidi(arpOut.frequency);
+        const bool gateOn = arpOut.frequency > 0.0f && arpOut.amplitude > 0.001f;
+        if (gateOn) {
+            const int midiNote = SoundFontEngine::frequencyToMidi(arpOut.frequency);
+            if (arpOut.trigger && mArpSfPrevMidiNote >= 0 && mArpSfPrevMidiNote != midiNote) {
+                sfEngine->noteOff(0);
+            }
             sfEngine->noteOn(0, midiNote, arpOut.amplitude);
+            mArpSfPrevMidiNote = midiNote;
         } else {
-            sfEngine->noteOff(0);
+            if (mArpSfPrevMidiNote >= 0) {
+                sfEngine->noteOff(0);
+                mArpSfPrevMidiNote = -1;
+            }
         }
     }
 
@@ -1546,8 +1621,9 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
         // MIX mode monitoring (post-render)
         handleMixMonitoring(outputData, numFrames, inputNode, oscillatorEnabled, hasInputMonitoring);
 
-        // Audio looper + waveform capture (all legacy branches)
-        mAudioLooper.process(outputData, numFrames);
+        // Waveform capture (final post-master output for visualization).
+        // Looper tap moved INTO applyEffectsAndOutput (post-FX, pre-master-vol)
+        // so it captures the dry instrument signal independent of master volume.
         mWaveformCapture.write(outputData, numFrames);
 
         mCallbackErrorCount.store(0, std::memory_order_relaxed);
@@ -1734,6 +1810,14 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate) {
 
     // Configure effect chain
     mEffectChain.setSampleRate(sampleRate);
+
+    // Configure looper (click envelope is sample-rate aware; transport too).
+    mAudioLooper.setSampleRate(sampleRate);
+    mTransport.setSampleRate(sampleRate);
+
+    // Pre-roll ring: 1 second of post-FX output for seeding new recordings.
+    // This is the maximum pre-roll duration; UI requests N ms <= 1000.
+    mPreRollRing.prepare(sampleRate);
 
     // Configure arpeggiator
     mArpSequencer.prepare(sampleRate);
@@ -1923,6 +2007,14 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
 
         // 3. Process through effect chain (INPUT → EFFECTS → OUTPUT)
         mEffectChain.process(mOutputStage.getTempBuffer(), outputData, numFrames);
+
+        // 3b. Looper integration (post-FX, pre-master). Mirrors applyEffectsAndOutput.
+        // Without this the USB direct INPUT_FX fast-path bypasses the looper entirely:
+        // no recording, no playback of existing tracks, no transport advance.
+        mPreRollRing.write(outputData, numFrames);
+        const int64_t usbPlayFrameAtBlockStart = mTransport.getPlayFrame();
+        mTransport.tick(numFrames, mAudioLooper);
+        mAudioLooper.process(outputData, numFrames, usbPlayFrameAtBlockStart);
 
         // 4. Apply fade and master volume (block-based interpolation)
         float fadeStart, fadeEnd;

@@ -45,6 +45,91 @@ UsbStreamingInterface makeAlt(uint8_t ifNum, uint8_t altNum, UsbAudioFormat fmt,
     return alt;
 }
 
+UsbStreamingInterface makeLogAlt(uint8_t ifNum, uint8_t altNum, uint8_t endpoint,
+                                  uint8_t attributes, uint16_t maxPacket,
+                                  uint8_t terminalLink, UsbAudioFormat fmt) {
+    UsbStreamingInterface alt;
+    alt.interfaceNumber = ifNum;
+    alt.alternateSetting = altNum;
+    alt.formats.push_back(std::move(fmt));
+    alt.dataEndpoint.address = endpoint;
+    alt.dataEndpoint.attributes = attributes;
+    alt.dataEndpoint.maxPacketSize = maxPacket;
+    alt.dataEndpoint.interval = 1;
+    alt.terminalLink = terminalLink;
+    return alt;
+}
+
+UsbAudioDevice makeGhwUac1DiscoveryLogFixture() {
+    UsbAudioDevice device;
+    device.deviceInfo.vendorId = 0x31B2;
+    device.deviceInfo.productId = 0x0011;
+    device.deviceInfo.manufacturer = "GHW Micro";
+    device.deviceInfo.product = "GHW USB AUDIO";
+    device.uacVersion = 1;
+
+    // Derived from docs/usb-audio/descovery_test_results.md:
+    // IF1 Alt1 capture 1ch/16bit 48 kHz, IF2 Alt1/2 playback 2ch 16/24bit.
+    device.captureInterfaces.push_back(
+        makeLogAlt(1, 1, 0x81, 0x05, 96, 4, makeFormat(1, 16, {48000})));
+    device.playbackInterfaces.push_back(
+        makeLogAlt(2, 1, 0x01, 0x09, 384, 5, makeFormat(2, 16, {48000, 96000})));
+    device.playbackInterfaces.push_back(
+        makeLogAlt(2, 2, 0x01, 0x09, 576, 5, makeFormat(2, 24, {48000, 96000})));
+
+    UsbFeatureUnit playbackVolume;
+    playbackVolume.unitId = 2;
+    playbackVolume.sourceId = 1;
+    playbackVolume.numChannels = 0;
+    playbackVolume.channelControls = {0x03};
+    device.featureUnits.push_back(playbackVolume);
+
+    UsbFeatureUnit captureVolume;
+    captureVolume.unitId = 7;
+    captureVolume.sourceId = 6;
+    captureVolume.numChannels = 1;
+    captureVolume.channelControls = {0x01, 0x02};
+    device.featureUnits.push_back(captureVolume);
+
+    return device;
+}
+
+UsbAudioDevice makeCm720Uac2DiscoveryLogFixture() {
+    UsbAudioDevice device;
+    device.deviceInfo.vendorId = 0x2B89;
+    device.deviceInfo.productId = 0x64EC;
+    device.deviceInfo.manufacturer = "Realtek";
+    device.deviceInfo.product = "UGREEN CM720 USB Audio";
+    device.uacVersion = 2;
+
+    // Derived from docs/usb-audio/descovery_test_results.md:
+    // UAC2 exposes one capture altsetting and three adaptive playback altsettings.
+    device.captureInterfaces.push_back(
+        makeLogAlt(1, 1, 0x81, 0x05, 28, 2, makeFormat(2, 16)));
+    device.playbackInterfaces.push_back(
+        makeLogAlt(2, 1, 0x07, 0x09, 248, 14, makeFormat(2, 16)));
+    device.playbackInterfaces.push_back(
+        makeLogAlt(2, 2, 0x07, 0x09, 372, 14, makeFormat(2, 24)));
+    device.playbackInterfaces.push_back(
+        makeLogAlt(2, 3, 0x07, 0x09, 496, 14, makeFormat(2, 32)));
+
+    UsbClockSource playbackClock;
+    playbackClock.clockId = 27;
+    playbackClock.type = ClockSourceType::INTERNAL_PROGRAMMABLE;
+    playbackClock.syncedToSof = true;
+    playbackClock.canControlFrequency = true;
+    device.clockSources.push_back(playbackClock);
+
+    UsbClockSource captureClock;
+    captureClock.clockId = 30;
+    captureClock.type = ClockSourceType::INTERNAL_PROGRAMMABLE;
+    captureClock.syncedToSof = true;
+    captureClock.canControlFrequency = true;
+    device.clockSources.push_back(captureClock);
+
+    return device;
+}
+
 } // namespace
 
 TEST(UsbSnapshotCodec, RoundTripSimpleDevice) {
@@ -255,6 +340,69 @@ TEST(UsbSnapshotCodec, RejectsUnknownVersion) {
     encoded[0] = 0xFF;
     auto decoded = decodeSnapshot(encoded.data(), encoded.size());
     EXPECT_FALSE(decoded.has_value());
+}
+
+TEST(UsbSnapshotCodec, RoundTripGhwUac1DiscoveryLogFixture) {
+    auto encoded = encodeSnapshot(makeGhwUac1DiscoveryLogFixture());
+    auto decoded = decodeSnapshot(encoded.data(), encoded.size());
+    ASSERT_TRUE(decoded.has_value());
+
+    EXPECT_EQ(decoded->deviceInfo.vendorId, 0x31B2);
+    EXPECT_EQ(decoded->deviceInfo.productId, 0x0011);
+    EXPECT_EQ(decoded->deviceInfo.manufacturer, "GHW Micro");
+    EXPECT_EQ(decoded->deviceInfo.product, "GHW USB AUDIO");
+    EXPECT_EQ(decoded->uacVersion, 1);
+
+    ASSERT_EQ(decoded->playbackInterfaces.size(), 2u);
+    EXPECT_EQ(decoded->playbackInterfaces[0].interfaceNumber, 2);
+    EXPECT_EQ(decoded->playbackInterfaces[0].alternateSetting, 1);
+    EXPECT_EQ(decoded->playbackInterfaces[0].dataEndpoint.interval, 1);
+    EXPECT_EQ(decoded->playbackInterfaces[0].primaryFormat().bitResolution, 16);
+    EXPECT_EQ(decoded->playbackInterfaces[1].alternateSetting, 2);
+    EXPECT_EQ(decoded->playbackInterfaces[1].primaryFormat().bitResolution, 24);
+    ASSERT_EQ(decoded->playbackInterfaces[1].primaryFormat().sampleRates.size(), 2u);
+    EXPECT_EQ(decoded->playbackInterfaces[1].primaryFormat().sampleRates[1], 96000);
+    EXPECT_EQ(decoded->playbackInterfaces[1].terminalLink, 5);
+
+    ASSERT_EQ(decoded->captureInterfaces.size(), 1u);
+    EXPECT_EQ(decoded->captureInterfaces[0].interfaceNumber, 1);
+    EXPECT_EQ(decoded->captureInterfaces[0].primaryFormat().channels, 1);
+    EXPECT_EQ(decoded->captureInterfaces[0].primaryFormat().bitResolution, 16);
+    EXPECT_EQ(decoded->captureInterfaces[0].terminalLink, 4);
+    EXPECT_EQ(decoded->featureUnits.size(), 2u);
+}
+
+TEST(UsbSnapshotCodec, RoundTripCm720Uac2DiscoveryLogFixture) {
+    auto encoded = encodeSnapshot(makeCm720Uac2DiscoveryLogFixture());
+    auto decoded = decodeSnapshot(encoded.data(), encoded.size());
+    ASSERT_TRUE(decoded.has_value());
+
+    EXPECT_EQ(decoded->deviceInfo.vendorId, 0x2B89);
+    EXPECT_EQ(decoded->deviceInfo.productId, 0x64EC);
+    EXPECT_EQ(decoded->deviceInfo.manufacturer, "Realtek");
+    EXPECT_EQ(decoded->deviceInfo.product, "UGREEN CM720 USB Audio");
+    EXPECT_EQ(decoded->uacVersion, 2);
+
+    ASSERT_EQ(decoded->playbackInterfaces.size(), 3u);
+    EXPECT_EQ(decoded->playbackInterfaces[0].alternateSetting, 1);
+    EXPECT_EQ(decoded->playbackInterfaces[0].primaryFormat().bitResolution, 16);
+    EXPECT_EQ(decoded->playbackInterfaces[1].alternateSetting, 2);
+    EXPECT_EQ(decoded->playbackInterfaces[1].primaryFormat().bitResolution, 24);
+    EXPECT_EQ(decoded->playbackInterfaces[2].alternateSetting, 3);
+    EXPECT_EQ(decoded->playbackInterfaces[2].primaryFormat().bitResolution, 32);
+    EXPECT_EQ(decoded->playbackInterfaces[2].terminalLink, 14);
+    EXPECT_EQ(decoded->playbackInterfaces[2].dataEndpoint.interval, 1);
+
+    ASSERT_EQ(decoded->captureInterfaces.size(), 1u);
+    EXPECT_EQ(decoded->captureInterfaces[0].primaryFormat().channels, 2);
+    EXPECT_EQ(decoded->captureInterfaces[0].primaryFormat().bitResolution, 16);
+
+    ASSERT_EQ(decoded->clockSources.size(), 2u);
+    EXPECT_EQ(decoded->clockSources[0].clockId, 27);
+    EXPECT_EQ(decoded->clockSources[0].type, ClockSourceType::INTERNAL_PROGRAMMABLE);
+    EXPECT_TRUE(decoded->clockSources[0].syncedToSof);
+    EXPECT_TRUE(decoded->clockSources[0].canControlFrequency);
+    EXPECT_EQ(decoded->clockSources[1].clockId, 30);
 }
 
 TEST(UsbSnapshotCodec, RejectsTruncatedBuffer) {

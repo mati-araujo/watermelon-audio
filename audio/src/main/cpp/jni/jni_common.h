@@ -86,6 +86,7 @@ struct JniGlobalState {
 
 extern JniGlobalState g_jniState;
 extern WmaEngine* g_wmaEngine;  // Owns AudioEngine + BackendManager + InputNode
+extern JavaVM* g_javaVm;        // Cached in JNI_OnLoad; used by worker threads to AttachCurrentThread
 
 // ==================== Helper Functions ====================
 

@@ -83,6 +83,17 @@ public:
     void removeEffect(size_t index);
 
     /**
+     * @brief Atomically clear ALL effects from the chain.
+     *
+     * Fast equivalent of calling removeEffect() in a loop. Single snapshot
+     * swap + single 20ms grace sleep covering the entire batch (vs. one
+     * sleep per effect with the per-effect API). Scene-load fast path.
+     *
+     * Thread-safe: Uses chainMutex internally.
+     */
+    void clearAllEffects();
+
+    /**
      * @brief Reordena efectos en la cadena
      * Thread-safe: Usa mutex interno
      */

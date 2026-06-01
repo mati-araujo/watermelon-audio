@@ -4,6 +4,7 @@
 namespace oboe { class AudioStream; }
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 #include <memory>
 #include <atomic>
@@ -27,6 +28,8 @@ namespace oboe { class AudioStream; }
 #include "SynthEngineDispatcher.h"
 #include "../sequencer/ArpSequencer.h"
 #include "../looper/AudioLooper.h"
+#include "../looper/Transport.h"
+#include "../looper/PreRollRing.h"
 #include "FadeController.h"
 #include "ChordHarmony.h"
 
@@ -282,6 +285,16 @@ public:
     void sfNoteOffAll();
 
     /**
+     * @brief Release every active SoundFont touch except @p keepTouchId.
+     *
+     * Designed for single-touch XY drag flows where the UI must release
+     * leftover dual-touch slots without paying one JNI call per slot.
+     * Lock-free: enqueues a single event onto the SoundFontEngine queue;
+     * the touch-state scan runs on the audio thread.
+     */
+    void sfNoteOffAllExcept(int keepTouchId);
+
+    /**
      * @brief Cambia el tipo de modulador activo
      * @param typeId Tipo de modulador (0=NONE, 1=BURST, 2=AM, 3=FM, 4=PWM, 5=ENV, 6=RING, 7=GATE)
      * Lock-free: Seguro llamar desde cualquier thread
@@ -317,6 +330,10 @@ public:
         mEffectChain.removeEffect(index);
         incrementStateVersion();
     }
+    void clearAllEffects() {
+        mEffectChain.clearAllEffects();
+        incrementStateVersion();
+    }
     void reorderEffects(size_t from, size_t to) {
         mEffectChain.reorderEffects(from, to);
         incrementStateVersion();
@@ -330,6 +347,37 @@ public:
         mEffectChain.setParameter(index, paramId, value);
         incrementStateVersion();
     }
+
+    /**
+     * Apply many parameter updates with a single state-version bump.
+     *
+     * Scene-load fast path. Each update writes directly through the existing
+     * lock-free atomic snapshot on EffectChain — individual params are
+     * std::atomic, so audio-thread reads remain consistent. We bump the state
+     * version exactly once at the end so the Kotlin-side StateSynchronizer
+     * emits a single coherent post-batch state.
+     *
+     * Out-of-range effect indices are skipped silently.
+     */
+    void setParametersBatch(const int* effectIndices,
+                            const int* paramIds,
+                            const float* values,
+                            size_t count) {
+        if (count == 0 || effectIndices == nullptr || paramIds == nullptr || values == nullptr) {
+            return;
+        }
+        const size_t chainSize = mEffectChain.getNumEffects();
+        bool anyApplied = false;
+        for (size_t i = 0; i < count; ++i) {
+            const int idx = effectIndices[i];
+            if (idx >= 0 && static_cast<size_t>(idx) < chainSize && std::isfinite(values[i])) {
+                mEffectChain.setParameter(static_cast<size_t>(idx), paramIds[i], values[i]);
+                anyApplied = true;
+            }
+        }
+        if (anyApplied) incrementStateVersion();
+    }
+
     float getParameter(size_t index, int paramId) const { return mEffectChain.getParameter(index, paramId); }
     void savePreset(size_t presetId, const std::string& name) { mEffectChain.savePreset(presetId, name); }
     void loadPreset(size_t presetId) {
@@ -410,6 +458,7 @@ public:
         bpm = std::clamp(bpm, 20.0f, 300.0f);
         mBpm.store(bpm, std::memory_order_relaxed);
         mEffectChain.setBpm(bpm);
+        mTransport.setBpm(bpm);
         incrementStateVersion();
     }
 
@@ -428,6 +477,23 @@ public:
 
     AudioLooper& getAudioLooper() { return mAudioLooper; }
     const AudioLooper& getAudioLooper() const { return mAudioLooper; }
+
+    /**
+     * @brief Dispatcher for looper state-change events (push-based).
+     *        The audio thread pushes onto its lock-free queue; a worker
+     *        thread drains and invokes the registered sink (set by JNI).
+     */
+    wm::LooperEventDispatcher& getLooperEventDispatcher() {
+        return mLooperEventDispatcher;
+    }
+
+    /** Musical transport (BPM, beats, metronome scheduler). */
+    Transport& getTransport() { return mTransport; }
+    const Transport& getTransport() const { return mTransport; }
+
+    /** Recent-output ring used to seed pre-roll on startRecording. */
+    PreRollRing& getPreRollRing() { return mPreRollRing; }
+    const PreRollRing& getPreRollRing() const { return mPreRollRing; }
 
     // ========== VOCODER INTEGRATION ==========
 
@@ -928,9 +994,15 @@ private:
 
     // ========== ARPEGGIATOR (Phase 7) ==========
     ArpSequencer mArpSequencer;
+    int mArpSfPrevMidiNote{-1};  // audio thread only — tracks last SoundFont note for clean noteOff
 
     // ========== AUDIO LOOPER (Phase 11) ==========
     AudioLooper mAudioLooper;
+    // Event dispatcher: owned by AudioEngine, lifetime tied to engine.
+    // Started in ctor (after wiring into mAudioLooper), stopped+joined in dtor.
+    wm::LooperEventDispatcher mLooperEventDispatcher;
+    Transport mTransport;
+    PreRollRing mPreRollRing;
 
     // ========== SYNTH ENGINE SYSTEM (Phase 6, Phase 1E — extracted to SynthEngineDispatcher) ==========
     SynthEngineDispatcher mEngineDispatcher;

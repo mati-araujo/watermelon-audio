@@ -1,5 +1,6 @@
 #pragma once
 
+#include "PanLUT.h"
 #include <algorithm>
 #include <atomic>
 #include <vector>
@@ -25,7 +26,8 @@
  */
 class TrackBuffer {
 public:
-    static constexpr int CROSSFADE_FRAMES = 128;  // ~2.7ms @ 48kHz
+    static constexpr int CROSSFADE_FRAMES = 128;  // ~2.7ms @ 48kHz — minimum/fallback for very short loops
+    static constexpr float DEFAULT_SEAM_CROSSFADE_MS = 50.0f;  // long, musical crossfade at the loop seam
 
     TrackBuffer() = default;
     ~TrackBuffer() = default;
@@ -38,25 +40,46 @@ public:
 
     /**
      * @brief Allocate buffer for recording. Call from UI thread before arming.
-     * @param lengthFrames Number of stereo frames to allocate
-     * @param sampleRate Sample rate at time of allocation
-     * @return Allocated size in bytes, or 0 on failure
+     * @param loopFrames Musical loop length in stereo frames.
+     * @param sampleRate Sample rate at time of allocation.
+     * @param tailFrames Additional frames captured AFTER the loop boundary, mixed
+     *                   into the start of the next iteration with linear fade-out.
+     *                   This preserves the natural decay of sustained sounds at
+     *                   the loop seam. Default 0 = legacy behavior (no tail).
+     * @return Allocated size in bytes, or 0 on failure.
      */
-    size_t allocate(int lengthFrames, int sampleRate) {
-        if (lengthFrames <= 0) return 0;
+    size_t allocate(int loopFrames, int sampleRate, int tailFrames = 0) {
+        if (loopFrames <= 0) return 0;
+        if (tailFrames < 0) tailFrames = 0;
+        // Cap tail at loopFrames to avoid pathological cases with very short loops.
+        if (tailFrames > loopFrames) tailFrames = loopFrames;
+        const int totalFrames = loopFrames + tailFrames;
         try {
-            mBuffer.resize(static_cast<size_t>(lengthFrames) * 2, 0.0f);
+            mBuffer.resize(static_cast<size_t>(totalFrames) * 2, 0.0f);
         } catch (...) {
             return 0;
         }
-        mCapacityFrames = lengthFrames;
+        mCapacityFrames = totalFrames;
+        mLoopCapacityFrames = loopFrames;
+        mTailFrames.store(tailFrames, std::memory_order_release);
         mSampleRate = sampleRate;
+        // Compute seam crossfade in frames from the configured ms default. Equal-power
+        // crossfade smooths the loop seam for sustained material (pads, reverb tails).
+        const int seamXf = static_cast<int>(DEFAULT_SEAM_CROSSFADE_MS * 0.001f
+                                          * static_cast<float>(sampleRate));
+        mSeamCrossfadeFrames.store(std::max(CROSSFADE_FRAMES, seamXf),
+                                   std::memory_order_release);
         mWriteHead.store(0, std::memory_order_release);
         mLengthFrames.store(0, std::memory_order_release);
         mActive.store(false, std::memory_order_release);
         mPeakLevel.store(0.0f, std::memory_order_release);
         return mBuffer.size() * sizeof(float);
     }
+
+    /** Returns the loop length capacity (musical loop, NOT including tail). */
+    int getLoopCapacityFrames() const { return mLoopCapacityFrames; }
+    /** Returns configured tail frames. */
+    int getTailFrames() const { return mTailFrames.load(std::memory_order_acquire); }
 
     /**
      * @brief Release all memory.
@@ -88,11 +111,20 @@ public:
         mPanSmoother.store(0.0f, std::memory_order_relaxed);
         mLoopStart.store(0, std::memory_order_relaxed);
         mLoopEnd.store(0, std::memory_order_relaxed);
-        mBuffer.clear();
-        mBuffer.shrink_to_fit();
-        mUndoBuffer.clear();
-        mUndoBuffer.shrink_to_fit();
+        // Free the heap buffers outright (swap-with-empty). Previously we retained
+        // capacity() to skip re-allocation on re-record, but that made the memory
+        // budget accounting (allocatedBytes() counts capacity()) hold on to large
+        // buffers — fatal for free-length tracks which pre-size to MAX_FREE seconds.
+        // Releasing here keeps getTotalAllocatedBytes() honest so prepareTrack()
+        // never falsely fails the 48 MB budget after a clear/record cycle.
+        std::vector<float>().swap(mBuffer);
+        std::vector<float>().swap(mUndoBuffer);
+        // Note: mCapacityFrames is intentionally NOT reset — it tracks the LOGICAL track
+        // capacity (set in allocate()), which becomes meaningless once length=0. Reset
+        // here prevents writeFrame() from accepting frames before next allocate().
         mCapacityFrames = 0;
+        mLoopCapacityFrames = 0;
+        mTailFrames.store(0, std::memory_order_relaxed);
     }
 
     /**
@@ -117,8 +149,20 @@ public:
 
         pos++;
         mWriteHead.store(pos, std::memory_order_relaxed);
-        mLengthFrames.store(pos, std::memory_order_release);
+        // Loop length saturates at loopCapacity. The tail region (pos > loopCap)
+        // is captured into the buffer but not exposed to playback as loop length —
+        // mixInto() reads it via the tail-mix path with fade-out instead.
+        const int lenForLoop = (mLoopCapacityFrames > 0 && pos > mLoopCapacityFrames)
+                               ? mLoopCapacityFrames
+                               : pos;
+        mLengthFrames.store(lenForLoop, std::memory_order_release);
         return true;
+    }
+
+    /** True iff write head has reached or passed the musical loop boundary. */
+    bool hasReachedLoopEnd() const {
+        if (mLoopCapacityFrames <= 0) return false;
+        return mWriteHead.load(std::memory_order_acquire) >= mLoopCapacityFrames;
     }
 
     /**
@@ -126,6 +170,52 @@ public:
      */
     void finalizeRecording() {
         mActive.store(true, std::memory_order_release);
+    }
+
+    /**
+     * @brief Shrink the heap buffer down to the actually-recorded length,
+     *        releasing the unused tail of a pre-sized buffer. UI/IO thread ONLY.
+     *
+     * Free-length tracks are allocated to MAX_FREE seconds (~60s ≈ 23 MB) but
+     * the take usually ends far earlier. Without trimming, every free track
+     * holds its full pre-size against the 48 MB budget, so the 2nd free take
+     * fails prepareTrack(). This reallocs to exactly [0, length) frames.
+     *
+     * RT-safety: mirrors importTrack()'s pattern — pause playback, full fence,
+     * then realloc. The audio thread skips a paused/short track in mixInto().
+     * The (fractional) playhead is preserved; playback resumes seamlessly.
+     *
+     * @return true if the buffer was trimmed, false if nothing to do / failure.
+     */
+    bool trimToLength() {
+        const int len = mLengthFrames.load(std::memory_order_acquire);
+        if (len <= 0) return false;
+        const int curFrames = static_cast<int>(mBuffer.size() / 2);
+        if (curFrames <= len) return false;  // nothing to trim
+
+        const bool wasPlaying = mPlaying.load(std::memory_order_acquire);
+        mPlaying.store(false, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+
+        try {
+            std::vector<float> trimmed(mBuffer.begin(),
+                                       mBuffer.begin() + static_cast<size_t>(len) * 2);
+            mBuffer.swap(trimmed);
+        } catch (...) {
+            if (wasPlaying) mPlaying.store(true, std::memory_order_release);
+            return false;
+        }
+
+        mCapacityFrames = len;
+        mLoopCapacityFrames = std::min(mLoopCapacityFrames, len);
+        // The dedicated tail region (if any) lived past the loop boundary; after a
+        // free-take trim it's gone, so disable tail mixing to avoid reading OOB.
+        mTailFrames.store(0, std::memory_order_release);
+        mWriteHead.store(len, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+
+        if (wasPlaying) mPlaying.store(true, std::memory_order_release);
+        return true;
     }
 
     // ========== Playback (audio thread) ==========
@@ -151,8 +241,9 @@ public:
         int loopLen = loopEnd - loopStart;
         if (loopLen <= 0) return;
 
-        // Adaptive crossfade: reduce for short regions
-        int crossfadeFrames = CROSSFADE_FRAMES;
+        // Adaptive seam crossfade: prefer the configured long window (default 50ms);
+        // shrink for short loop regions so the crossfade never exceeds half the loop.
+        int crossfadeFrames = mSeamCrossfadeFrames.load(std::memory_order_relaxed);
         if (loopLen < crossfadeFrames * 2) {
             crossfadeFrames = loopLen / 2;
         }
@@ -177,16 +268,33 @@ public:
         float peakL = 0.0f;
         float peakR = 0.0f;
 
+        // Tail mixing: if a tail region was captured, mix it into the start of
+        // each loop iteration with a linear fade-out. This preserves the natural
+        // decay of sustained notes at the loop seam (delays, reverbs, pads).
+        //
+        // Tail source = the frames recorded immediately AFTER the user's current
+        // loopEnd. For full-buffer playback (loopEnd == loopCap) this is the
+        // dedicated tail region [loopCap, loopCap + tailFrames). For custom loop
+        // regions, it's the "what came next in the original take" [loopEnd, ...) —
+        // which is musically the right continuation at that seam.
+        const int tailFrames    = mTailFrames.load(std::memory_order_acquire);
+        const int tailSrcStart  = loopEnd;
+        const int tailSrcAvail  = std::max(0, mCapacityFrames - tailSrcStart);
+        const int effectiveTail = std::min(tailFrames, tailSrcAvail);
+        const bool tailActive   = (effectiveTail > 0);
+        const float invTail = tailActive ? 1.0f / static_cast<float>(effectiveTail) : 0.0f;
+
+        const auto& panLut = wm::EqualPowerPanLUT::instance();
         for (int i = 0; i < numFrames; ++i) {
             // Smooth volume, mute gain, and pan
             vol = kSmoothCoeff * vol + (1.0f - kSmoothCoeff) * targetVol;
             muteGain = kSmoothCoeff * muteGain + (1.0f - kSmoothCoeff) * muteTarget;
             panSmooth = kSmoothCoeff * panSmooth + (1.0f - kSmoothCoeff) * targetPan;
 
-            // Equal-power: L = cos(angle), R = sin(angle), angle = (pan+1)*pi/4
-            float angle = (panSmooth + 1.0f) * 0.25f * static_cast<float>(M_PI);
-            float panL = std::cos(angle);
-            float panR = std::sin(angle);
+            // Equal-power pan via LUT (replaces cos/sin per sample).
+            const auto pp = panLut.lookup(panSmooth);
+            const float panL = pp.l;
+            const float panR = pp.r;
 
             // Fractional position WITHIN the loop region
             float regionPos = std::fmod(playHeadF + static_cast<float>(i) * speed,
@@ -196,28 +304,71 @@ public:
             // Absolute position in buffer = loopStart + regionPos
             float fPos = static_cast<float>(loopStart) + regionPos;
 
-            // Linear interpolation between samples
-            int pos0 = static_cast<int>(fPos);
-            // Wrap pos1 within the loop region
-            int pos1 = pos0 + 1;
-            if (pos1 >= loopEnd) pos1 = loopStart;
-            float frac = fPos - static_cast<float>(pos0);
+            // Catmull-Rom cubic interpolation (4-tap). Significantly reduces
+            // aliasing artifacts vs linear interpolation when speed != 1.0,
+            // while staying RT-safe (no transcendentals, no allocs). Neighbours
+            // wrap inside the loop region so playback at non-integer speeds
+            // remains seamless across the loop boundary.
+            int pos1 = static_cast<int>(fPos);
+            int pos0 = pos1 - 1; if (pos0 < loopStart) pos0 = loopEnd - 1;
+            int pos2 = pos1 + 1; if (pos2 >= loopEnd) pos2 = loopStart;
+            int pos3 = pos2 + 1; if (pos3 >= loopEnd) pos3 = loopStart;
+            float t = fPos - static_cast<float>(pos1);
 
-            float sampleL = mBuffer[static_cast<size_t>(pos0) * 2] * (1.0f - frac)
-                          + mBuffer[static_cast<size_t>(pos1) * 2] * frac;
-            float sampleR = mBuffer[static_cast<size_t>(pos0) * 2 + 1] * (1.0f - frac)
-                          + mBuffer[static_cast<size_t>(pos1) * 2 + 1] * frac;
+            // Catmull-Rom basis: y(t) = 0.5 * ((2*p1) + (-p0+p2)*t +
+            //   (2*p0 - 5*p1 + 4*p2 - p3)*t^2 + (-p0 + 3*p1 - 3*p2 + p3)*t^3)
+            const float t2 = t * t;
+            const float t3 = t2 * t;
+            auto interp = [&](int channel) -> float {
+                const float p0 = mBuffer[static_cast<size_t>(pos0) * 2 + channel];
+                const float p1 = mBuffer[static_cast<size_t>(pos1) * 2 + channel];
+                const float p2 = mBuffer[static_cast<size_t>(pos2) * 2 + channel];
+                const float p3 = mBuffer[static_cast<size_t>(pos3) * 2 + channel];
+                return 0.5f * ((2.0f * p1)
+                             + (-p0 + p2) * t
+                             + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2
+                             + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+            };
+            float sampleL = interp(0);
+            float sampleR = interp(1);
 
-            // Crossfade at loop region boundary to avoid clicks
-            int distToEnd = loopEnd - pos0;
+            // Equal-power crossfade at loop region boundary. pos1 is the floor of
+            // the fractional position (the "current" integer sample). When we are
+            // within `crossfadeFrames` of loopEnd, blend the current sample with
+            // the matching sample at the START of the loop using a sqrt curve so
+            // total energy stays constant across the seam — masks the cut for
+            // sustained material (pads, reverb tails) at the cost of doubling the
+            // material in the crossfade window.
+            int distToEnd = loopEnd - pos1;
             if (distToEnd <= crossfadeFrames && crossfadeFrames > 0) {
-                float fade = static_cast<float>(distToEnd) / static_cast<float>(crossfadeFrames);
+                float fade  = static_cast<float>(distToEnd) / static_cast<float>(crossfadeFrames);
                 int wrapPos = loopStart + (crossfadeFrames - distToEnd);
                 if (wrapPos < loopEnd) {
                     float wrapL = mBuffer[static_cast<size_t>(wrapPos) * 2];
                     float wrapR = mBuffer[static_cast<size_t>(wrapPos) * 2 + 1];
-                    sampleL = sampleL * fade + wrapL * (1.0f - fade);
-                    sampleR = sampleR * fade + wrapR * (1.0f - fade);
+                    const float gOld = std::sqrt(fade);
+                    const float gNew = std::sqrt(1.0f - fade);
+                    sampleL = sampleL * gOld + wrapL * gNew;
+                    sampleR = sampleR * gOld + wrapR * gNew;
+                }
+            }
+
+            // Tail mixing: in the first `effectiveTail` frames of each iteration,
+            // sum samples from the captured tail region with a fade-out that
+            // approximates natural exponential decay. Linear fade would drop the
+            // sustain too aggressively at the start (where ears are most sensitive);
+            // (1-t)^2 stays close to 1.0 for the first ~30% then accelerates.
+            // For full-buffer playback the tail source is [loopCap, loopCap + tail);
+            // for a custom loop region it's the "post-region" frames in the original
+            // take. Either way this makes the seam perceptually continuous.
+            if (tailActive) {
+                int tailIdx = static_cast<int>(regionPos);
+                if (tailIdx < effectiveTail) {
+                    int tailBufIdx = tailSrcStart + tailIdx;
+                    const float lin = 1.0f - (static_cast<float>(tailIdx) * invTail);
+                    const float tailFade = lin * lin;  // quasi-exponential decay shape
+                    sampleL += mBuffer[static_cast<size_t>(tailBufIdx) * 2]     * tailFade;
+                    sampleR += mBuffer[static_cast<size_t>(tailBufIdx) * 2 + 1] * tailFade;
                 }
             }
 
@@ -392,10 +543,13 @@ private:
     }
 
     // Audio data
-    std::vector<float> mBuffer;        // Stereo interleaved, heap
+    std::vector<float> mBuffer;        // Stereo interleaved, heap (loop + tail)
     std::vector<float> mUndoBuffer;    // Lazy undo snapshot
-    int mCapacityFrames{0};
+    int mCapacityFrames{0};            // Total frames including tail (= loopCap + tail)
+    int mLoopCapacityFrames{0};        // Musical loop capacity (excludes tail)
     int mSampleRate{48000};
+    std::atomic<int> mTailFrames{0};           // Captured tail length (decay region)
+    std::atomic<int> mSeamCrossfadeFrames{128}; // Equal-power crossfade window @ loop seam
 
     // State (atomic for cross-thread access)
     std::atomic<int> mLengthFrames{0};

@@ -114,6 +114,7 @@ public:
     BackendType getType() const override { return BackendType::LIBUSB; }
     bool supportsFullDuplex() const override;
     bool supportsPause() const override { return true; }
+    BackendEndpointCapabilities getEndpointCapabilities() const override;
 
     /**
      * Check if the device has audio capture capability.
@@ -203,6 +204,14 @@ public:
      * Device capabilities query.
      */
     struct DeviceCapabilities {
+        struct ChannelHardwareVolumeCapability {
+            int channelNumber = 0;  // 0 = master, 1+ = physical/logical channel
+            bool hasHardwareVolume = false;
+            bool hasHardwareMute = false;
+            bool volumeVerified = false;
+            bool muteVerified = false;
+        };
+
         std::vector<int> supportedSampleRates;
         std::vector<int> supportedBitDepths;
         int maxChannelsOutput = 0;
@@ -223,6 +232,9 @@ public:
         float outputVolumeMaxDb = 0.0f;
         float inputVolumeMinDb = -96.0f;
         float inputVolumeMaxDb = 0.0f;
+
+        std::vector<ChannelHardwareVolumeCapability> outputHardwareChannelCaps;
+        std::vector<ChannelHardwareVolumeCapability> inputHardwareChannelCaps;
     };
 
     /**
@@ -239,6 +251,18 @@ public:
     void setStreamPreference(const usb::StreamPreference& pref) {
         mUserPreference = pref;
     }
+
+    /**
+     * Select a playback altsetting+format for the next start() call.
+     * Returns false if the parsed topology does not contain that tuple.
+     */
+    bool selectAltsetting(int interfaceNumber, int alternateSetting, int formatIndex);
+
+    /**
+     * Select a UAC2 clock source for the next start() call.
+     * The clock graph validates reachability per selected terminal at start.
+     */
+    bool selectClockSource(int clockSourceId);
 
     /**
      * Set error callback for USB-specific errors.
@@ -380,6 +404,15 @@ private:
     // User-provided stream preference for altsetting scoring.
     std::optional<usb::StreamPreference> mUserPreference;
 
+    struct ManualAltsettingSelection {
+        int interfaceNumber = -1;
+        int alternateSetting = -1;
+        int formatIndex = -1;
+    };
+    std::optional<ManualAltsettingSelection> mManualPlaybackSelection;
+    std::atomic<int> mActiveClockSourceId{-1};
+    std::optional<int> mManualClockSourceId;
+
     // Transfer manager
     std::unique_ptr<usb::UsbTransferManager> mTransferManager;
 
@@ -414,6 +447,8 @@ private:
     bool parseDeviceDescriptors();
     bool selectBestInterfaces();
     bool configureSampleRate();
+    uint8_t selectClockSourceForTerminal(uint8_t terminalLinkId);
+    void publishActiveClockSource(uint8_t clockSourceId);
 
     // Stage 3: query UAC2 clock sources for their supported sample rate ranges
     // via RANGE control transfers and populate mUsbDevice->clockSources rate

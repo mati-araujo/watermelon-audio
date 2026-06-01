@@ -1,9 +1,11 @@
-clclaucl# Etapa 2 — Descubrimiento completo y selección dirigida
+# Etapa 2 — Descubrimiento completo y selección dirigida
 
-**Estado:** IMPLEMENTADA — core mergeado, pending hardware validation.
+**Estado:** API PÚBLICA, WIRING Y FIXTURES HOST IMPLEMENTADOS — pendiente validación hardware/golden raw.
 **Dependencias:** stage 1 mergeado (necesita `configureSampleRate()` funcional y UAC version explícita).
 **Duración estimada:** 4–6 días.
 **Severidad de los bugs que resuelve:** 1× Mayor, 1× Mayor, 2× menores.
+
+**Relevamiento 2026-04-30:** `formats`, `AltsettingSelector`, `StreamPreference`, `UsbSnapshotCodec`, `nativeGetUsbCapabilitySnapshot()` y el consumo Kotlin del snapshot existen. La API pública ahora expone `currentCapabilitySnapshot`, `rankPlaybackAltsettings(...)` y `selectAltsetting(...)`; `UsbAudioManagerImpl` propaga `StreamPreference` y override manual a native antes de `startStreaming()`. La etapa todavía no debe marcarse cerrada al 100% porque faltan validación hardware documentada, golden fixtures con descriptores/snapshots crudos y `bInterval` aplicado a timing.
 
 ---
 
@@ -18,6 +20,42 @@ Tres problemas concretos a resolver:
 3. **Capabilities opacas en Kotlin.** `UsbAudioManagerImpl.parseBasicCapabilities()` devuelve `[44100, 48000, 96000]` y `[16, 24]` hardcoded. Debe derivarse del snapshot real del device.
 
 Al terminar, un device Scarlett 2i2 (que expone múltiples altsettings con combinaciones de 2ch/4ch × 16/24 bit × 44.1/48/88.2/96 kHz) debe ser enumerable completo desde Kotlin, y una llamada `selectAltsetting(preference = highestBitDepth)` debe elegir la combinación correcta.
+
+---
+
+## 1.1 Estado real auditado — 2026-04-30
+
+### Implementado
+
+- `UsbStreamingInterface::formats` reemplaza al formato escalar y el parser preserva múltiples formatos.
+- `AltsettingSelector` está integrado en `LibusbBackend::selectBestInterfaces()` y selecciona `mSelectedPlaybackFormat` / `mSelectedCaptureFormat`.
+- `StreamPreference` existe en C++ y Kotlin.
+- `UsbSnapshotCodec.h` serializa el snapshot y `UsbSnapshotCodec.kt` lo decodifica.
+- `nativeGetUsbCapabilitySnapshot()` existe en `jni_audio_bridge.cpp`; `AudioNativeBridge.kt` lo expone como `getUsbCapabilitySnapshot()`.
+- `UsbAudioManagerImpl.parseCapabilities()` intenta el snapshot nativo primero y solo cae al parser básico si no hay snapshot.
+- Tests host cubren selector, snapshots, parser y fixtures de topologías reales derivadas de logs; `usb_tests.exe` pasó 52/52.
+
+### Implementado en el cierre de API
+
+- `IUsbAudioManager` expone `currentCapabilitySnapshot: StateFlow<UsbCapabilitySnapshot?>` manteniendo `getCurrentCapabilitySnapshot()` para compatibilidad con NoisyPad.
+- `rankPlaybackAltsettings(preference)` rankea playback altsettings en commonMain/Android sin depender de APIs Android.
+- `selectAltsetting(interfaceNumber, alternateSetting, formatIndex)` valida contra el snapshot, persiste el override y lo aplica al próximo `startStreaming()`.
+- `AudioNativeBridge` expone `setUsbStreamPreference(...)` y `selectUsbAltsetting(...)`.
+- `jni_audio_bridge.cpp` traduce `StreamPreference` a `usb::StreamPreference` y llama `LibusbBackend::setStreamPreference()` antes de `backend->start()`.
+- `LibusbBackend::selectBestInterfaces()` respeta el override manual de playback cuando existe.
+
+### Pendiente
+
+- `bInterval` está en `UsbEndpointInfo`, pero no se serializa al snapshot ni se usa para timing. Se deja explícitamente para Stage 3 porque cambiar el wire format ahora no aporta a ranking/override y sí mezcla selección con pacing/adaptive timing.
+- Hay fixtures host derivados de logs reales para GHW USB AUDIO (UAC1) y UGREEN CM720 (UAC2). Todavía faltan golden fixtures con descriptores o snapshots crudos capturados del device.
+- Falta `DISCOVERY_WALK` documentado como pasado en hardware.
+
+### Verificación local
+
+- `audio/src/main/cpp/usb/tests/build/Debug/usb_tests.exe`: 52 tests passing.
+- `./gradlew :audio:compileDebugKotlin`: passing.
+- `./gradlew :audio:assembleDebug`: passing.
+- Warning observado: KMP advierte que `org.jetbrains.kotlin.multiplatform` deja de ser compatible con `com.android.library` desde AGP 9.0 y recomienda migrar a `com.android.kotlin.multiplatform.library`.
 
 ---
 
@@ -604,16 +642,16 @@ Añadir preset `DISCOVERY_WALK`: abre el device, captura el snapshot, itera sobr
 
 ## 9. Criterios de aceptación
 
-- [ ] `UsbStreamingInterface::format` eliminado. Todo el código usa `formats` (vector). Ninguna compilación falla con TODOs pendientes.
-- [ ] `AltsettingSelector` implementado con tests unitarios pasando para: preferencia de bit depth, preferencia de sync type, restricción de canales, fallback cuando no hay match, determinismo en empates.
-- [ ] `encodeSnapshot`/`decodeSnapshot` con tests de round-trip en al menos 2 devices (UAC1 + UAC2). Golden fixtures comiteados.
-- [ ] `nativeGetUsbCapabilitySnapshot()` expuesto en JNI y consumido desde `UsbAudioManagerImpl`.
-- [ ] `UsbAudioManagerImpl.parseBasicCapabilities()` eliminado (o reducido a fallback puro cuando el nativo no devuelve snapshot).
-- [ ] `currentCapabilitySnapshot: StateFlow<UsbCapabilitySnapshot?>` expuesto por `IUsbAudioManager`.
-- [ ] `rankPlaybackAltsettings(preference)` devuelve una lista ordenada correctamente en Scarlett Solo (UAC2) y C-Media UC02 (UAC1).
-- [ ] `selectAltsetting(if, alt, formatIndex)` permite override manual y se aplica al siguiente `startStreaming`.
+- [x] `UsbStreamingInterface::format` eliminado. Todo el código usa `formats` (vector). Ninguna compilación falla con TODOs pendientes.
+- [x] `AltsettingSelector` implementado con tests unitarios pasando para: preferencia de bit depth, preferencia de sync type, restricción de canales, fallback cuando no hay match, determinismo en empates.
+- [ ] **Parcial:** `encodeSnapshot`/`decodeSnapshot` con tests de round-trip. Hay tests host sintéticos y fixtures derivados de logs reales UAC1/UAC2 pasando; faltan golden fixtures con bytes crudos capturados.
+- [x] `nativeGetUsbCapabilitySnapshot()` expuesto en JNI y consumido desde `UsbAudioManagerImpl`.
+- [x] `UsbAudioManagerImpl.parseBasicCapabilities()` reducido a fallback cuando el nativo no devuelve snapshot.
+- [x] `currentCapabilitySnapshot: StateFlow<UsbCapabilitySnapshot?>` expuesto por `IUsbAudioManager`; `getCurrentCapabilitySnapshot()` se conserva por compatibilidad.
+- [x] `rankPlaybackAltsettings(preference)` devuelve una lista ordenada usando el mismo modelo de scoring que native.
+- [x] `selectAltsetting(if, alt, formatIndex)` permite override manual y se aplica al siguiente `startStreaming`.
 - [ ] En Scarlett Solo (UAC2, que expone ≥ 4 altsettings), el `DISCOVERY_WALK` completa sin errores.
-- [ ] `UsbAudioDevice` sigue compilando como typealias (no se rompe ABI externa).
+- [x] `UsbAudioDevice` sigue compilando como nombre estable; la ABI externa no se rompió en el build local.
 
 ---
 
@@ -660,4 +698,4 @@ Commit messages sugeridos:
 
 ## 12. Siguiente etapa
 
-Con el descubrimiento robusto y la API de selección en su lugar, [stage_03_clock_sync.md](stage_03_clock_sync.md) completa el clock graph UAC 2.0 (clock sources, selectors, multiplicadores) y el feedback endpoint end-to-end.
+Antes de declarar Stage 2 cerrada, validar en hardware `DISCOVERY_WALK`/snapshot en CM720 con headset, CM720 sin headset, UAC1 C-Media/GHW y Scarlett, y agregar golden fixtures crudos UAC1/UAC2 capturados del device. En paralelo, [stage_03_clock_sync.md](stage_03_clock_sync.md) ya puede continuar sobre el trabajo parcial existente de `RANGE` y SET_CUR por clock source, pero no debería avanzar a routing hasta que la selección y la validación hardware estén cerradas.

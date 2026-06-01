@@ -299,6 +299,14 @@ WMA_API void wma_sf_note_off(WmaEngine* engine, int touch_id);
 /** Release all SoundFont notes. */  /* RT-safe */
 WMA_API void wma_sf_note_off_all(WmaEngine* engine);
 
+/**
+ * Release every active SoundFont touch except @p keep_touch_id.
+ * One lock-free call; the touch-state scan runs on the audio thread.
+ * Use this instead of looping wma_sf_note_off() over all "other" slots.
+ */
+/* RT-safe */
+WMA_API void wma_sf_note_off_all_except(WmaEngine* engine, int keep_touch_id);
+
 /* ================================================================
  * 7. Voice Filter
  * ================================================================ */
@@ -324,6 +332,15 @@ WMA_API int wma_effect_add(WmaEngine* engine, int type_id);
  * @return WMA_OK on success
  */
 WMA_API WmaResult wma_effect_remove(WmaEngine* engine, int index);
+
+/**
+ * Remove ALL effects from the chain atomically.
+ * Equivalent to calling wma_effect_remove() in a loop, but pays the audio-thread
+ * grace period (~20ms) ONCE for the batch instead of per-effect. Scene-load
+ * fast path.
+ * @return WMA_OK on success
+ */
+WMA_API WmaResult wma_effect_clear_all(WmaEngine* engine);
 
 /** Set one effect parameter. */
 WMA_API WmaResult wma_effect_set_param(WmaEngine* engine, int index, int param_id, float value);

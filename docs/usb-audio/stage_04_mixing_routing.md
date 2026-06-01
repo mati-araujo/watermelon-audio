@@ -1,6 +1,6 @@
 # Etapa 4 — Routing, mezcla de backends y control fino
 
-**Estado:** propuesta — no iniciada.
+**Estado:** implementacion nativa principal lista; validacion hardware/NoisyPad pendiente. Ver [stage_04_audit_and_setup.md](stage_04_audit_and_setup.md) para la auditoria inicial.
 **Dependencias:** stages 1, 2, 3 mergeados. Necesita clock sync estable porque el `SplitBackend` confía en drift controlado.
 **Duración estimada:** 5–7 días.
 **Severidad de los bugs que resuelve:** 1× Mayor + múltiples menores.
@@ -18,6 +18,16 @@ Capacidades nuevas que agrega esta etapa:
 3. **Per-channel volume** — `UsbVolumeControl` solo expone master (canal 0). Se extiende a per-channel para devices multicanal.
 4. **Routing matrix para multi-canal** — downmix 4→2, selector de canal de captura, channel map explícito.
 5. **Recovery automático en hot errors** — más allá del watchdog actual, auto-retry del stream ante errores no-fatales.
+
+**Orden auditado recomendado:** empezar por resize seguro del ring buffer, luego `ChannelMap`, per-channel volume, `RecoveryPolicy`, contrato input-source, `SplitBackend`, y recien al final API/JNI. `SplitBackend` no debe ser el primer cambio porque el codigo actual de Oboe todavia no entrega input real al callback.
+
+### Progreso de implementacion
+
+- Slices 1-5 completados: resize seguro de ring buffer, `ChannelMap`, caps/control hardware por canal, `RecoveryPolicy`, y contrato explicito input-source/output-sink.
+- Slice 6 completado a nivel nativo: `SplitBackend` interno, bridge SPSC preallocado, gate por `BackendEndpointCapabilities`, y `DriftResampler` lineal con tests host.
+- Slice 6b completado a nivel nativo: `OboeBackend` ahora puede alimentar input real en full-duplex mediante stream de entrada + ring SPSC.
+- Slice 7 expone solo el minimo opt-in: `createSplitBackend(inputBackendId, outputBackendId)` y seleccion posterior de `BackendType::SPLIT`.
+- Pendiente externo: smoke manual con hardware USB + mic interno y validacion de consumo desde NoisyPad.
 
 ---
 
@@ -420,16 +430,16 @@ Simular 3 errores consecutivos en el stub de libusb callback, luego éxito. Veri
 
 ## 8. Criterios de aceptación
 
-- [ ] `SplitBackend` implementa `IAudioBackend` y multiplexa dos inner backends correctamente.
-- [ ] `DriftResampler` compensa ±500 PPM sin glitches audibles.
-- [ ] `BackendManager` expone `createSplit(inputType, outputType)` como opción.
-- [ ] Preset `SPLIT_OBOE_IN_USB_OUT` pasa en Pixel 6 + Scarlett Solo con micrófono interno como fuente.
-- [ ] `UsbTransferManager::reconfigureBufferSize()` usa double-buffer swap; no hay race condition observable en el stress test (100 swaps × 5 segundos de streaming continuo).
-- [ ] `UsbVolumeControl` expone `setChannelVolume(ch, vol)` y funciona en un device con volumen por canal (verificar con GET_CUR).
-- [ ] `ChannelMap` implementado con presets; el mono→stereo hardcoded del DSP thread se reemplaza por una instancia de `ChannelMap::monoToStereoDownmix()`.
+- [x] `SplitBackend` implementa `IAudioBackend` y multiplexa dos inner backends correctamente en tests host con fakes.
+- [x] `DriftResampler` compensa ±500 PPM en tests host deterministicos.
+- [x] `BackendManager` expone `createSplitBackend(inputType, outputType)` como opcion interna/JNI opt-in.
+- [ ] Preset `SPLIT_OBOE_IN_USB_OUT` pasa en Pixel 6 + Scarlett Solo con microfono interno como fuente.
+- [x] `UsbTransferManager::reconfigureBufferSize()` usa double-buffer swap; no hay race condition observable en el stress test host.
+- [x] `UsbVolumeControl` expone `setChannelVolume(ch, vol)` a nivel nativo; pendiente verificacion manual en device con volumen por canal.
+- [x] `ChannelMap` implementado con presets e integrado con default identity.
 - [ ] `IUsbAudioManager.perChannelVolumeCaps: StateFlow` operacional; refleja cambios de hardware.
 - [ ] `IUsbAudioManager.setChannelRouting(routing)` funcional.
-- [ ] `RecoveryPolicy` con auto-restart funciona: un device con 3 errores transitorios se recupera sin disconnect spurious (mockeable con libusb stub).
+- [x] `RecoveryPolicy` con auto-restart tiene policy pura testeada y wiring nativo; pendiente smoke hardware de errores transitorios reales.
 - [ ] Cero underruns en stress test 30 minutos con `RecoveryPolicy` active y errores inyectados cada 3 segundos.
 
 ---

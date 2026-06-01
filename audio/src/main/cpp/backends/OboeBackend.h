@@ -16,11 +16,13 @@
 #pragma once
 
 #include "IAudioBackend.h"
+#include "../dsp/LockFreeRingBuffer.h"
 #include <oboe/Oboe.h>
 #include <memory>
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
+#include <vector>
 
 namespace watermelon_audio {
 
@@ -37,6 +39,7 @@ namespace watermelon_audio {
  * - Full-duplex support (when hardware supports it)
  */
 class OboeBackend : public IAudioBackend,
+                    public IAudioInputSource,
                     public oboe::AudioStreamCallback {
 public:
     OboeBackend();
@@ -69,6 +72,10 @@ public:
     BackendType getType() const override { return BackendType::OBOE; }
     bool supportsFullDuplex() const override { return true; }
     bool supportsPause() const override { return true; }
+    BackendEndpointCapabilities getEndpointCapabilities() const override;
+
+    int32_t readInput(float* outputData, int32_t maxFrames) override;
+    StreamInfo getInputStreamInfo() const override;
 
     // USB methods not supported by Oboe backend
     bool initializeFromFileDescriptor(int fd, const char* usbfsPath) override {
@@ -136,6 +143,11 @@ private:
 
     // Input stream (for full-duplex)
     std::shared_ptr<oboe::AudioStream> mInputStream;
+    std::unique_ptr<LockFreeRingBuffer> mInputCaptureRing;
+    std::vector<float> mInputCallbackBuffer;
+    int32_t mInputBufferCapacityFrames = 0;
+    std::atomic<uint64_t> mInputRingOverruns{0};
+    std::atomic<uint64_t> mInputRingUnderruns{0};
 
     // State management
     std::atomic<bool> mIsRunning{false};
@@ -155,6 +167,7 @@ private:
     // Internal methods
     BackendResult openOutputStream();
     BackendResult openInputStream();
+    void prepareInputCaptureBuffers();
     void closeStreams();
     void updateStreamInfo();
 
