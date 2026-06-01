@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1](https://github.com/mati-araujo/watermelon-audio/compare/v1.3.0...v1.3.1) (2026-06-01)
+
+
+### Bug Fixes
+
+* versoin and publish workflow ([9f64e68](https://github.com/mati-araujo/watermelon-audio/commit/9f64e68a4a05cd057fa3fd23ba8626d3c2236f84))
+* versoin and publish workflow ([754dd6a](https://github.com/mati-araujo/watermelon-audio/commit/754dd6a19b2be1e0d8d458d278fd45bd5691a1ea))
+
+
+### Performance Improvements
+
+* **audit:** AUD-3 currentMidiNoteFlow + AUD-4 SoundFont preset cache ([bf27051](https://github.com/mati-araujo/watermelon-audio/commit/bf2705107351e4812363054e2322258a5adb5713))
+
 ## [1.3.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.2.2...v1.3.0) (2026-06-01)
 
 
