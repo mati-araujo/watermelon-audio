@@ -111,12 +111,14 @@ public:
         mPanSmoother.store(0.0f, std::memory_order_relaxed);
         mLoopStart.store(0, std::memory_order_relaxed);
         mLoopEnd.store(0, std::memory_order_relaxed);
-        // Retain heap capacity to avoid fragmentation across many record/clear cycles.
-        // size() drops to 0; capacity() stays. Re-recording skips the allocation cost as
-        // long as the new track length fits in the existing capacity. allocate() will
-        // resize() up if needed; the only way to truly free is destruction of TrackBuffer.
-        mBuffer.clear();
-        mUndoBuffer.clear();
+        // Free the heap buffers outright (swap-with-empty). Previously we retained
+        // capacity() to skip re-allocation on re-record, but that made the memory
+        // budget accounting (allocatedBytes() counts capacity()) hold on to large
+        // buffers — fatal for free-length tracks which pre-size to MAX_FREE seconds.
+        // Releasing here keeps getTotalAllocatedBytes() honest so prepareTrack()
+        // never falsely fails the 48 MB budget after a clear/record cycle.
+        std::vector<float>().swap(mBuffer);
+        std::vector<float>().swap(mUndoBuffer);
         // Note: mCapacityFrames is intentionally NOT reset — it tracks the LOGICAL track
         // capacity (set in allocate()), which becomes meaningless once length=0. Reset
         // here prevents writeFrame() from accepting frames before next allocate().
@@ -168,6 +170,52 @@ public:
      */
     void finalizeRecording() {
         mActive.store(true, std::memory_order_release);
+    }
+
+    /**
+     * @brief Shrink the heap buffer down to the actually-recorded length,
+     *        releasing the unused tail of a pre-sized buffer. UI/IO thread ONLY.
+     *
+     * Free-length tracks are allocated to MAX_FREE seconds (~60s ≈ 23 MB) but
+     * the take usually ends far earlier. Without trimming, every free track
+     * holds its full pre-size against the 48 MB budget, so the 2nd free take
+     * fails prepareTrack(). This reallocs to exactly [0, length) frames.
+     *
+     * RT-safety: mirrors importTrack()'s pattern — pause playback, full fence,
+     * then realloc. The audio thread skips a paused/short track in mixInto().
+     * The (fractional) playhead is preserved; playback resumes seamlessly.
+     *
+     * @return true if the buffer was trimmed, false if nothing to do / failure.
+     */
+    bool trimToLength() {
+        const int len = mLengthFrames.load(std::memory_order_acquire);
+        if (len <= 0) return false;
+        const int curFrames = static_cast<int>(mBuffer.size() / 2);
+        if (curFrames <= len) return false;  // nothing to trim
+
+        const bool wasPlaying = mPlaying.load(std::memory_order_acquire);
+        mPlaying.store(false, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+
+        try {
+            std::vector<float> trimmed(mBuffer.begin(),
+                                       mBuffer.begin() + static_cast<size_t>(len) * 2);
+            mBuffer.swap(trimmed);
+        } catch (...) {
+            if (wasPlaying) mPlaying.store(true, std::memory_order_release);
+            return false;
+        }
+
+        mCapacityFrames = len;
+        mLoopCapacityFrames = std::min(mLoopCapacityFrames, len);
+        // The dedicated tail region (if any) lived past the loop boundary; after a
+        // free-take trim it's gone, so disable tail mixing to avoid reading OOB.
+        mTailFrames.store(0, std::memory_order_release);
+        mWriteHead.store(len, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+
+        if (wasPlaying) mPlaying.store(true, std::memory_order_release);
+        return true;
     }
 
     // ========== Playback (audio thread) ==========

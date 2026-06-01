@@ -2368,6 +2368,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     }
 }
 
+// Trim a track's buffer to its recorded length (frees unused capacity). UI/IO
+// thread; safe no-op while recording/exporting. Returns true if trimmed.
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperTrimTrack(
+    JNIEnv* env, jobject thiz, jint trackIndex) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    return g_jniState.engine->getAudioLooper().trimTrack(trackIndex)
+        ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetEnabled(
     JNIEnv* env, jobject thiz, jboolean enabled) {

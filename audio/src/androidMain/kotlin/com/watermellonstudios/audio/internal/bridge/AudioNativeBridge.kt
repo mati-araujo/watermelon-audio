@@ -2580,6 +2580,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperSetTrackPan(trackIndex: Int, pan: Float)
     private external fun nativeLooperClearTrack(trackIndex: Int)
     private external fun nativeLooperClearAll()
+    private external fun nativeLooperTrimTrack(trackIndex: Int): Boolean
     private external fun nativeLooperSetEnabled(enabled: Boolean)
 
     // Lock-free queries (safe from any thread)
@@ -2728,6 +2729,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun looperSetFreeLength(freeLength: Boolean) = nativeLooperSetFreeLength(freeLength)
     fun looperClearTrack(trackIndex: Int) = nativeLooperClearTrack(trackIndex)
     fun looperClearAll() = nativeLooperClearAll()
+
+    /**
+     * Trim a track's buffer down to its recorded length, freeing unused capacity.
+     * UI/IO thread; safe no-op while recording/exporting. Returns true if trimmed.
+     * Primarily used after a free-length take to release its pre-sized buffer.
+     */
+    fun looperTrimTrack(trackIndex: Int): Boolean = nativeLooperTrimTrack(trackIndex)
     fun looperSetEnabled(enabled: Boolean) = nativeLooperSetEnabled(enabled)
 
     // Real-time params (lock-free, no suspend)

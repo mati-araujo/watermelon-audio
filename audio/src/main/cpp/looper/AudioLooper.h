@@ -160,8 +160,13 @@ public:
                     mLoopFinalizedDuringRec.store(true, std::memory_order_release);
                 }
 
-                // Checkpoint 2: total capacity reached → stop recording (only in fixed-length mode).
-                if (remaining <= 0 && !mFreeLength.load(std::memory_order_relaxed)) {
+                // Checkpoint 2: total buffer capacity reached → stop recording.
+                // Applies in BOTH fixed and free-length modes: a free take can't
+                // exceed its pre-sized buffer, so when the buffer fills we must
+                // finalize and clear mRecordingTrack. Previously this was guarded
+                // by !mFreeLength, which left isRecording() stuck true forever once
+                // a free take hit the cap — the record button then stayed disabled.
+                if (remaining <= 0) {
                     if (!mLoopFinalizedDuringRec.load(std::memory_order_relaxed)) {
                         // No tail captured (tail==0) — finalize loop now.
                         finalizeLoopStartPlayback(recTrack);
@@ -506,6 +511,19 @@ public:
             mRecordingTrack.store(-1, std::memory_order_release);
         }
         mTracks[trackIndex].clear();  // clear() resets mPlaying, mPlayHead, mProgress
+    }
+
+    /**
+     * @brief Trim a track's buffer to its recorded length (frees unused capacity).
+     *        UI/IO thread only — NOT RT-safe. No-op if recording into this track.
+     *        Primarily used after a free-length take so the pre-sized 60s buffer
+     *        is released back to the memory budget. Returns true if trimmed.
+     */
+    bool trimTrack(int trackIndex) {
+        if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return false;
+        if (mRecordingTrack.load(std::memory_order_acquire) == trackIndex) return false;
+        if (mExportInProgress.load(std::memory_order_acquire)) return false;
+        return mTracks[trackIndex].trimToLength();
     }
 
     void clearAll() {
