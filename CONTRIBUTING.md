@@ -69,19 +69,23 @@ SNAPSHOT versions in local Maven are resolved fresh each build — no version bu
 For shipping to production:
 
 ```bash
-# 1. Update version in watermelon-audio
-# audio/build.gradle.kts: version = "1.1.0"
+# 1. Use Conventional Commit prefixes on the changes that should drive the release
+# feat:, fix:, perf:, build:, docs:, chore:
 
-# 2. Publish to GitHub Packages
-./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository
+# 2. Merge the Release Please PR on master
+# It updates CHANGELOG.md, .release-please-manifest.json, and gradle.properties.
 
-# 3. Update version in NoisyPad
-# All build.gradle.kts: "com.watermellonstudios:audio-android:1.1.0"
+# 3. Let the tag-triggered Publish workflow deploy to GitHub Packages.
 
-# 4. Build and test NoisyPad
+# 4. Update version in NoisyPad
+# All build.gradle.kts: "com.watermellonstudios:audio-android:<released-version>"
+
+# 5. Build and test NoisyPad
 cd ~/android/NoisyPad
 ./gradlew assembleRelease
 ```
+
+See `docs/release.md` for the full release and emergency publish workflow.
 
 ## Adding a new effect
 

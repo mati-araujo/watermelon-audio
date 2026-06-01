@@ -41,15 +41,15 @@ audio/src/
 
 | Componente | Version |
 |------------|---------|
-| Kotlin | 2.3.20 |
-| AGP | 9.1.0 |
-| Oboe | 1.10.0 |
-| C++ | C++20 |
-| CMake | 3.22.1 |
-| Min SDK | 29 |
-| Compile SDK | 36 |
-| kotlinx-coroutines | 1.10.2 |
-| TinySoundFont | 0.9 |
+| Kotlin | 2.3.20  |
+| AGP | 9.2.1   |
+| Oboe | 1.10.0  |
+| C++ | C++20   |
+| CMake | 3.22.1  |
+| Min SDK | 29      |
+| Compile SDK | 36      |
+| kotlinx-coroutines | 1.10.2  |
+| TinySoundFont | 0.9     |
 
 ---
 

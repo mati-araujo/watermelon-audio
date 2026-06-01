@@ -6,6 +6,13 @@
   "bump-minor-pre-major": true,
   "pull-request-title-pattern": "chore: release ${version}",
   "packages": {
-    ".": {}
+    ".": {
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "gradle.properties"
+        }
+      ]
+    }
   }
 }
