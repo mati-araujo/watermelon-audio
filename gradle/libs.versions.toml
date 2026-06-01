@@ -4,8 +4,8 @@ compileSdk = "36"
 minSdk = "29"
 
 # Build Tools
-agp = "9.1.0"
-kotlin = "2.3.21"
+agp = "9.2.1"
+kotlin = "2.3.20"
 cmake = "3.22.1"
 ndk = "28.2.13676358"
 
