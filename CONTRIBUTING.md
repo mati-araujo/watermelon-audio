@@ -75,7 +75,7 @@ For shipping to production:
 # 2. Merge the Release Please PR on master
 # It updates CHANGELOG.md, .release-please-manifest.json, and gradle.properties.
 
-# 3. Let the tag-triggered Publish workflow deploy to GitHub Packages.
+# 3. Let the Release Please workflow publish to GitHub Packages.
 
 # 4. Update version in NoisyPad
 # All build.gradle.kts: "com.watermellonstudios:audio-android:<released-version>"
