@@ -25,10 +25,11 @@ passes it to CMake so `wma_get_version()` reports the same value.
    - `gradle.properties`
 4. Merge the release PR.
 5. Release Please creates the GitHub release and `vX.Y.Z` tag.
-6. The `Publish` workflow runs from the tag and publishes to GitHub Packages.
+6. The `Release Please` workflow publishes the tag to GitHub Packages.
 
-The publish workflow fails before building if the tag version does not match
-`gradle.properties`.
+The publish job fails before building if the tag version does not match
+`gradle.properties`. There is also a separate `Publish` workflow for manual or
+emergency re-runs against an existing tag.
 
 ## Manual publish checks
 
@@ -46,6 +47,9 @@ same version:
 git tag v1.3.1
 git push origin v1.3.1
 ```
+
+If the tag already exists but the package was not published, run the `Publish`
+workflow manually from GitHub Actions and choose the existing tag ref.
 
 Avoid passing `-Pversion=...` for releases. It can make the artifact version
 different from the checked-in version metadata.
