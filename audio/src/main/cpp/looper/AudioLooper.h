@@ -79,7 +79,10 @@ public:
      *        frame (downbeat-aligned).
      */
     void process(float* audioData, int numFrames, int64_t playFrame = -1) {
-        if (!mEnabled.load(std::memory_order_acquire)) return;
+        if (!mEnabled.load(std::memory_order_acquire)) {
+            processClick(audioData, numFrames);
+            return;
+        }
 
         // ---- ARMED-RECORDING TRIGGER ----
         // If a track is armed and Transport's play position has reached or
@@ -224,28 +227,7 @@ public:
 
         mMasterVolSmoother.store(masterVolEnd, std::memory_order_relaxed);
 
-        // ---- METRONOME CLICK (pre-count beat indicator — NOT affected by master volume) ----
-        if (mClickRemaining.load(std::memory_order_relaxed) > 0) {
-            int remaining = mClickRemaining.load(std::memory_order_relaxed);
-            int phase = mClickPhase.load(std::memory_order_relaxed);
-            float freq = mClickFreq.load(std::memory_order_relaxed);
-            float gain = mClickGain.load(std::memory_order_relaxed);
-            const float invSr = mInvSampleRate.load(std::memory_order_relaxed);
-            const int fadeFrames = mClickFadeFrames.load(std::memory_order_relaxed);
-            for (int i = 0; i < numFrames && remaining > 0; ++i) {
-                float env = (remaining < fadeFrames && fadeFrames > 0)
-                    ? static_cast<float>(remaining) / static_cast<float>(fadeFrames)
-                    : 1.0f;
-                float sample = std::sin(2.0f * static_cast<float>(M_PI) * freq
-                    * static_cast<float>(phase) * invSr) * gain * env;
-                audioData[i * 2] += sample;
-                audioData[i * 2 + 1] += sample;
-                phase++;
-                remaining--;
-            }
-            mClickPhase.store(phase, std::memory_order_relaxed);
-            mClickRemaining.store(remaining, std::memory_order_relaxed);
-        }
+        processClick(audioData, numFrames);
 
         // ---- STATE-CHANGE NOTIFICATIONS (push-based) ----
         // Compare each track's observable state against the last-emitted
@@ -1420,5 +1402,31 @@ private:
         mClickFadeFrames.store(
             static_cast<int>(CLICK_FADE_MS * 0.001f * static_cast<float>(sr)),
             std::memory_order_relaxed);
+    }
+
+    // RT-safe and independent of mEnabled/master volume so count-in clicks can
+    // sound before the first track has enabled looper playback or recording.
+    void processClick(float* audioData, int numFrames) {
+        if (mClickRemaining.load(std::memory_order_relaxed) <= 0) return;
+
+        int remaining = mClickRemaining.load(std::memory_order_relaxed);
+        int phase = mClickPhase.load(std::memory_order_relaxed);
+        float freq = mClickFreq.load(std::memory_order_relaxed);
+        float gain = mClickGain.load(std::memory_order_relaxed);
+        const float invSr = mInvSampleRate.load(std::memory_order_relaxed);
+        const int fadeFrames = mClickFadeFrames.load(std::memory_order_relaxed);
+        for (int i = 0; i < numFrames && remaining > 0; ++i) {
+            float env = (remaining < fadeFrames && fadeFrames > 0)
+                ? static_cast<float>(remaining) / static_cast<float>(fadeFrames)
+                : 1.0f;
+            float sample = std::sin(2.0f * static_cast<float>(M_PI) * freq
+                * static_cast<float>(phase) * invSr) * gain * env;
+            audioData[i * 2] += sample;
+            audioData[i * 2 + 1] += sample;
+            phase++;
+            remaining--;
+        }
+        mClickPhase.store(phase, std::memory_order_relaxed);
+        mClickRemaining.store(remaining, std::memory_order_relaxed);
     }
 };
