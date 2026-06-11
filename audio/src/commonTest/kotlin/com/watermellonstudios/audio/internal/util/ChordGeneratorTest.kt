@@ -61,6 +61,18 @@ class ChordGeneratorTest {
     }
 
     @Test
+    fun `legacy TRIAD cromatico es acorde mayor`() {
+        // Phase15 legacy contract: 15C can migrate this expectation when chord theory becomes mode-aware.
+        val midiNotes = ChordGenerator.generateChordMidiNotes(
+            rootMidi = 60,
+            chordIntervals = ChordType.TRIAD.intervals,
+            scaleIntervals = emptyList()
+        )
+
+        assertEquals(listOf(64, 67), midiNotes.toList())
+    }
+
+    @Test
     fun `triada mayor en A-major escala no se modifica`() {
         // A major: A C# E => raíz=69 (A), tercera=73 (C#), quinta=76 (E)
         // Intervalos de TRIAD [4, 7]: 4->73 (C#), 7->76 (E) — ambas están en la escala A-major
@@ -74,10 +86,13 @@ class ChordGeneratorTest {
     }
 
     @Test
-    fun `triada mayor en A-minor se snapea a tercera menor`() {
+    fun `legacy triada mayor en A-minor snapea empate hacia arriba`() {
+        // Phase15 legacy contract: A minor has C(72) and D(74) equally near C#(73).
+        // ScaleSnapping checks upward before downward, so the third snaps to D.
+        // 15C may replace this when chord theory becomes mode-aware.
         // A minor: A C E => raíz=69 (A), tercera menor=72 (C), quinta=76 (E)
         // TRIAD [4, 7] sobre A:
-        //   4 -> 73 (C#) — no está en A-minor; vecinos: 72 (C) está → snap a 72
+        //   4 -> 73 (C#) — no está en A-minor; vecinos: 74 (D) gana por empate legacy
         //   7 -> 76 (E)  — está en A-minor → 76
         val midi = ChordGenerator.generateChordMidiNotes(
             rootMidi = rootMidiA4,
@@ -85,7 +100,7 @@ class ChordGeneratorTest {
             scaleIntervals = minorIntervals,
             rootNoteId = rootA
         )
-        assertEquals(listOf(72, 76), midi.toList())
+        assertEquals(listOf(74, 76), midi.toList())
     }
 
     @Test

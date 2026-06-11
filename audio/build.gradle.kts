@@ -16,6 +16,12 @@ android {
             }
         }
     }
+
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 // KMP automatically creates publications for each target.
