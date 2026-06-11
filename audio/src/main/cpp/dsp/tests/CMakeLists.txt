@@ -16,6 +16,7 @@ project(watermelon-dsp-tests CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+enable_testing()
 
 # Fetch Google Test
 include(FetchContent)
@@ -42,6 +43,7 @@ add_executable(dsp_tests
 )
 
 target_link_libraries(dsp_tests PRIVATE watermelon-dsp GTest::gtest_main)
+target_compile_definitions(dsp_tests PRIVATE _USE_MATH_DEFINES)
 
 # Register with CTest
 include(GoogleTest)

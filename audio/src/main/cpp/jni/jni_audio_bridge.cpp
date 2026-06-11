@@ -748,6 +748,33 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsEffe
     }
 }
 
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEffectsBypass(
+    JNIEnv* env, jobject thiz, jboolean bypass) {
+    if (!g_jniState.engine) {
+        return JniError::ENGINE_NOT_INITIALIZED;
+    }
+    try {
+        g_jniState.engine->setEffectsBypass(bypass == JNI_TRUE);
+        return JniError::SUCCESS;
+    } catch (...) {
+        return JniError::UNKNOWN_ERROR;
+    }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsEffectsBypassed(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.engine) {
+        return JNI_FALSE;
+    }
+    try {
+        return g_jniState.engine->isEffectsBypassed() ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
 // ==================== Global BPM ====================
 
 JNIEXPORT void JNICALL

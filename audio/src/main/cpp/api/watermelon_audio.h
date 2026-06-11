@@ -364,6 +364,12 @@ WMA_API WmaResult wma_effect_set_bypass(WmaEngine* engine, int index, bool bypas
 /** Check if an effect is bypassed. */
 WMA_API bool wma_effect_is_bypassed(const WmaEngine* engine, int index);
 
+/** Set global bypass state for the full effect chain. */
+WMA_API WmaResult wma_effect_set_global_bypass(WmaEngine* engine, bool bypass);
+
+/** Check if the full effect chain is globally bypassed. */
+WMA_API bool wma_effect_is_global_bypassed(const WmaEngine* engine);
+
 /** Reorder an effect from one position to another. */
 WMA_API WmaResult wma_effect_reorder(WmaEngine* engine, int from_index, int to_index);
 

@@ -4,6 +4,10 @@
 #include <cmath>
 #include <algorithm>
 
+namespace {
+constexpr float kPi = 3.14159265358979323846f;
+}
+
 FilterEffect::FilterEffect() {
     // Initialize smoothers with default values to avoid transients
     cutoffSmoother.reset(cutoff.load());
@@ -127,7 +131,7 @@ void FilterEffect::updateCoefficients() {
     float c = cutoff.load();
     float r = resonance.load();
     // IMPROVED: Use dynamic sample rate instead of constant
-    float omega = 2.0f * M_PI * c / mSampleRate;
+    float omega = 2.0f * kPi * c / mSampleRate;
     float alpha = sinf(omega) / (2.0f * r);
     float cos_omega = cosf(omega);
     float a0;

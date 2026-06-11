@@ -74,6 +74,16 @@ interface IEffectStateWriter {
     suspend fun setBypass(effectIndex: Int, bypassed: Boolean): Result<Unit>
 
     /**
+     * Sets global bypass state for the full effect chain.
+     *
+     * This does not modify individual effect bypass states.
+     *
+     * @param bypassed true to bypass the whole chain, false to process it
+     * @return Result.success if set, or failure with exception
+     */
+    suspend fun setEffectsBypass(bypassed: Boolean): Result<Unit>
+
+    /**
      * Reorders effects in the chain.
      *
      * @param fromIndex The current index of the effect to move

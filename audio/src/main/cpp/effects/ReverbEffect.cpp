@@ -16,6 +16,9 @@ ReverbEffect::ReverbEffect()
       stereoProcessor(mSampleRate),
       earlyReflections(mSampleRate)             // Early reflections (Iteración 2)
 {
+    earlyLateMix.store(0.5f, std::memory_order_relaxed);
+    modRate.store(1.0f, std::memory_order_relaxed);
+
     // ===== LATE REVERB (Freeverb - comb filters) =====
     float baseCombDelays[4] = {0.0297f, 0.0371f, 0.0411f, 0.0437f};
     for (int i = 0; i < 4; ++i) {
@@ -65,12 +68,12 @@ ReverbEffect::ReverbEffect()
 // ============================================================================
 
 void ReverbEffect::setDecay(float d) {
-    decay.store(std::clamp(d, 0.1f, 5.0f), std::memory_order_relaxed);
+    decay.store(std::clamp(d, 0.1f, 10.0f), std::memory_order_relaxed);
     updateParameters();
 }
 
 void ReverbEffect::setSize(float s) {
-    float clamped = std::clamp(s, 0.5f, 2.0f);
+    float clamped = std::clamp(s, 0.1f, 2.0f);
     size.store(clamped, std::memory_order_relaxed);
 
     // Actualizar el tamaño de early reflections (Iteración 2)
@@ -160,6 +163,11 @@ void ReverbEffect::process(float* input, float* output, int numFrames) {
     const float preDelayAmount = preDelayMs.load(std::memory_order_acquire);
     const float earlyLateMixAmount = earlyLateMix.load(std::memory_order_acquire);
 
+    if (wet <= 0.0001f) {
+        std::copy(input, input + numFrames * 2, output);
+        return;
+    }
+
     for (int i = 0; i < numFrames * 2; i += 2) {
         const float inL = input[i];
         const float inR = input[i + 1];
@@ -199,12 +207,12 @@ void ReverbEffect::process(float* input, float* output, int numFrames) {
         // CRITICAL FIX: Soft clip en lugar de hard clip (más musical)
         // Arctan soft clipper con headroom de ±2.5
         // Fórmula: atan(x * 0.8) * 1.273 donde 1.273 ≈ 2/π
-        output[i] = std::atan(output[i] * 0.8f) * 1.273f;
-        output[i + 1] = std::atan(output[i + 1] * 0.8f) * 1.273f;
+        output[i] = std::clamp(output[i], -4.0f, 4.0f);
+        output[i + 1] = std::clamp(output[i + 1], -4.0f, 4.0f);
 
         // Hard limit como safety final (solo para valores extremos)
-        output[i] = std::clamp(output[i], -1.0f, 1.0f);
-        output[i + 1] = std::clamp(output[i + 1], -1.0f, 1.0f);
+        output[i] = std::clamp(output[i], -4.0f, 4.0f);
+        output[i + 1] = std::clamp(output[i + 1], -4.0f, 4.0f);
     }
 }
 

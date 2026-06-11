@@ -24,6 +24,9 @@ add_library(watermelon-effects STATIC
     ReverbEffect.cpp
     HallReverbEffect.cpp
     RiserReverbEffect.cpp
+    SpringReverbEffect.cpp
+    PlateReverbEffect.cpp
+    ShimmerReverbEffect.cpp
 
     # Delay
     DelayEffect.cpp

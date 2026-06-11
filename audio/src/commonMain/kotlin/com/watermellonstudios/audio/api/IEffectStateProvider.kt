@@ -57,13 +57,15 @@ interface IEffectStateProvider {
  * Snapshot of the entire effect chain from native code.
  *
  * @property effects List of effect snapshots in order
+ * @property isGloballyBypassed Whether the full effect chain is globally bypassed
  * @property version Monotonically increasing version number for change detection
  * @property timestamp Timestamp when snapshot was taken (System.nanoTime())
  */
 data class EffectChainSnapshot(
     val effects: List<NativeEffectSnapshot>,
     val version: Long,
-    val timestamp: Long = System.nanoTime()
+    val timestamp: Long = System.nanoTime(),
+    val isGloballyBypassed: Boolean = false
 ) {
     val size: Int get() = effects.size
     val isEmpty: Boolean get() = effects.isEmpty()
@@ -73,7 +75,8 @@ data class EffectChainSnapshot(
      */
     fun toEffectChainState(): EffectChainState {
         return EffectChainState(
-            effects = effects.map { it.toEffectState() }
+            effects = effects.map { it.toEffectState() },
+            isGloballyBypassed = isGloballyBypassed
         )
     }
 }

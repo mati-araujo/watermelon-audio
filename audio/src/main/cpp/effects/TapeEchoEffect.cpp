@@ -2,6 +2,21 @@
 #include <cmath>
 #include <algorithm>
 
+namespace {
+float subdivisionToMs(int subdivision, float bpm) {
+    float quarterMs = 60000.0f / bpm;
+    switch (std::clamp(subdivision, 0, 5)) {
+        case 0: return quarterMs;
+        case 1: return quarterMs * 0.5f;
+        case 2: return quarterMs * 0.75f;
+        case 3: return quarterMs / 3.0f;
+        case 4: return quarterMs * 0.25f;
+        case 5: return quarterMs * 1.5f;
+        default: return quarterMs * 0.75f;
+    }
+}
+}
+
 void TapeEchoEffect::reset() {
     // Clear the delay lines (2.5s of echo history) and feedback-path
     // LPF state. Wow/flutter LFO phase is harmless — leave it alone.
@@ -55,6 +70,10 @@ void TapeEchoEffect::setSampleRate(int sampleRate) {
     mTapeLpfR.setLowpass(8000.0f, 0.707f);
 }
 
+void TapeEchoEffect::setBpm(float bpm) {
+    mBpm.store(std::clamp(bpm, 20.0f, 300.0f), std::memory_order_relaxed);
+}
+
 void TapeEchoEffect::setParam(int paramId, float value) {
     switch (paramId) {
         case PARAM_DELAY_TIME:
@@ -75,6 +94,21 @@ void TapeEchoEffect::setParam(int paramId, float value) {
         case PARAM_MIX:
             mMix.store(std::clamp(value, 0.0f, 1.0f), std::memory_order_relaxed);
             break;
+        case PARAM_SYNC:
+            mSync.store(value > 0.5f, std::memory_order_relaxed);
+            break;
+        case PARAM_SUBDIVISION:
+            mSubdivision.store(std::clamp(static_cast<int>(value), 0, 5), std::memory_order_relaxed);
+            break;
+        case PARAM_PING_PONG:
+            mPingPong.store(value > 0.5f, std::memory_order_relaxed);
+            break;
+        case PARAM_DUCKING:
+            mDucking.store(std::clamp(value, 0.0f, 1.0f), std::memory_order_relaxed);
+            break;
+        case PARAM_NOISE_LEVEL:
+            mNoiseLevel.store(std::clamp(value, 0.0f, 1.0f), std::memory_order_relaxed);
+            break;
     }
 }
 
@@ -86,25 +120,36 @@ float TapeEchoEffect::getParam(int paramId) {
         case PARAM_TAPE_AGE: return mTapeAge.load(std::memory_order_relaxed);
         case PARAM_SATURATION: return mSaturation.load(std::memory_order_relaxed);
         case PARAM_MIX: return mMix.load(std::memory_order_relaxed);
+        case PARAM_SYNC: return mSync.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
+        case PARAM_SUBDIVISION: return static_cast<float>(mSubdivision.load(std::memory_order_relaxed));
+        case PARAM_PING_PONG: return mPingPong.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
+        case PARAM_DUCKING: return mDucking.load(std::memory_order_relaxed);
+        case PARAM_NOISE_LEVEL: return mNoiseLevel.load(std::memory_order_relaxed);
         default: return 0.0f;
     }
 }
 
 void TapeEchoEffect::process(float* input, float* output, int numFrames) {
     // Load all params ONCE (atomic load)
-    float delayMs = mDelayTime.load(std::memory_order_relaxed);
+    float delayMs = mSync.load(std::memory_order_relaxed)
+        ? subdivisionToMs(mSubdivision.load(std::memory_order_relaxed),
+                          mBpm.load(std::memory_order_relaxed))
+        : mDelayTime.load(std::memory_order_relaxed);
     float feedback = mFeedback.load(std::memory_order_relaxed);
     float wowFlutter = mWowFlutter.load(std::memory_order_relaxed);
     float tapeAge = mTapeAge.load(std::memory_order_relaxed);
     float saturation = mSaturation.load(std::memory_order_relaxed);
     float mix = mMix.load(std::memory_order_relaxed);
+    bool pingPong = mPingPong.load(std::memory_order_relaxed);
+    float ducking = mDucking.load(std::memory_order_relaxed);
+    float noiseLevel = mNoiseLevel.load(std::memory_order_relaxed);
 
     // Tape Age controls LPF cutoff and hiss level (recalc per block)
     float smoothTapeAge = mTapeAgeSmooth.process(tapeAge);
     float lpfCutoff = 12000.0f * std::pow(1000.0f / 12000.0f, smoothTapeAge);
     mTapeLpfL.setLowpass(lpfCutoff, 0.707f);
     mTapeLpfR.setLowpass(lpfCutoff, 0.707f);
-    float hissLevel = smoothTapeAge * 0.01f;
+    float hissLevel = noiseLevel * smoothTapeAge * 0.01f;
 
     for (int i = 0; i < numFrames; ++i) {
         float smoothDelay = mDelaySmooth.process(delayMs);
@@ -150,16 +195,22 @@ void TapeEchoEffect::process(float* input, float* output, int numFrames) {
         // Tape hiss
         float hiss = generateNoise() * hissLevel;
 
-        // Write to delay
-        mDelayL.write(dryL + fbL);
-        mDelayR.write(dryR + fbR);
+        if (pingPong) {
+            mDelayL.write(dryL + fbR);
+            mDelayR.write(dryR + fbL);
+        } else {
+            mDelayL.write(dryL + fbL);
+            mDelayR.write(dryR + fbR);
+        }
 
         // Output: dry + wet + hiss
         float wetL = delayedL + hiss;
         float wetR = delayedR + hiss;
 
-        float outL = dryL + (wetL - dryL) * smoothMix;
-        float outR = dryR + (wetR - dryR) * smoothMix;
+        float inputLevel = std::clamp((std::abs(dryL) + std::abs(dryR)) * 0.5f * 2.0f, 0.0f, 1.0f);
+        float duckGain = 1.0f - ducking * inputLevel;
+        float outL = dryL + (wetL * duckGain - dryL) * smoothMix;
+        float outR = dryR + (wetR * duckGain - dryR) * smoothMix;
 
         // NaN/Inf protection
         if (!std::isfinite(outL)) outL = dryL;

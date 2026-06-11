@@ -73,6 +73,9 @@ enum EffectType {
     HALL_REVERB = 17,   ///< Lush stereo hall reverb (REVERB)
     RISER_REVERB = 18,  ///< Shimmer/pitch-shifting reverb (REVERB)
     BEAT_GRAIN = 19,    ///< Beat-synced granular delay (DELAY)
+    SPRING_REVERB = 20, ///< Guitar spring tank reverb (REVERB)
+    PLATE_REVERB = 21,  ///< Guitar plate reverb (REVERB)
+    SHIMMER_REVERB = 22,///< Pitch-shifted shimmer reverb (REVERB)
 
     EFFECT_TYPE_COUNT   ///< Number of effect types (for array sizing)
 };
@@ -116,6 +119,9 @@ inline EffectCategory getEffectCategory(EffectType type) {
             return EffectCategory::DELAY;
         case HALL_REVERB:
         case RISER_REVERB:
+        case SPRING_REVERB:
+        case PLATE_REVERB:
+        case SHIMMER_REVERB:
             return EffectCategory::REVERB;
         default:
             return EffectCategory::UTILITY;
@@ -150,6 +156,9 @@ inline const char* getEffectTypeName(EffectType type) {
         case HALL_REVERB:   return "Hall Reverb";
         case RISER_REVERB:  return "Riser Reverb";
         case BEAT_GRAIN:    return "Beat Grain";
+        case SPRING_REVERB: return "Spring Reverb";
+        case PLATE_REVERB:  return "Plate Reverb";
+        case SHIMMER_REVERB:return "Shimmer Reverb";
         default:            return "Unknown";
     }
 }

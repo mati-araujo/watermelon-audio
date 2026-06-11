@@ -25,6 +25,9 @@
 #include "TapeEchoEffect.h"
 #include "HallReverbEffect.h"
 #include "RiserReverbEffect.h"
+#include "SpringReverbEffect.h"
+#include "PlateReverbEffect.h"
+#include "ShimmerReverbEffect.h"
 #include "BeatGrainEffect.h"
 
 void registerBuiltinEffects(EffectRegistry& registry) {
@@ -32,7 +35,7 @@ void registerBuiltinEffects(EffectRegistry& registry) {
     registry.registerEffect(REVERB,       "Reverb",      12, []{ return std::make_unique<ReverbEffect>(); });
     registry.registerEffect(DELAY,        "Delay",        6, []{ return std::make_unique<DelayEffect>(); });
     registry.registerEffect(VOCODER,      "Vocoder",      7, []{ return std::make_unique<VocoderEffect>(); });
-    registry.registerEffect(DISTORTION,   "Distortion",   8, []{ return std::make_unique<DistortionEffect>(); });
+    registry.registerEffect(DISTORTION,   "Distortion",   DistortionEffect::PARAM_COUNT, []{ return std::make_unique<DistortionEffect>(); });
     registry.registerEffect(COMPRESSOR,   "Compressor",   6, []{ return std::make_unique<CompressorEffect>(); });
     registry.registerEffect(CHORUS,       "Chorus",       6, []{ return std::make_unique<ChorusEffect>(); });
     registry.registerEffect(PHASER,       "Phaser",       5, []{ return std::make_unique<PhaserEffect>(); });
@@ -43,9 +46,12 @@ void registerBuiltinEffects(EffectRegistry& registry) {
     registry.registerEffect(AUTO_PAN,     "AutoPan",      5, []{ return std::make_unique<AutoPanEffect>(); });
     registry.registerEffect(COMPLEX_TREM, "ComplexTrem",  6, []{ return std::make_unique<ComplexTremEffect>(); });
     registry.registerEffect(RANDOM_RESO,  "RandomReso",   5, []{ return std::make_unique<RandomResoEffect>(); });
-    registry.registerEffect(HPF_DELAY,    "HPFDelay",     4, []{ return std::make_unique<HpfDelayEffect>(); });
-    registry.registerEffect(TAPE_ECHO,    "TapeEcho",     6, []{ return std::make_unique<TapeEchoEffect>(); });
+    registry.registerEffect(HPF_DELAY,    "HPFDelay",     HpfDelayEffect::PARAM_COUNT, []{ return std::make_unique<HpfDelayEffect>(); });
+    registry.registerEffect(TAPE_ECHO,    "TapeEcho",     TapeEchoEffect::PARAM_COUNT, []{ return std::make_unique<TapeEchoEffect>(); });
     registry.registerEffect(HALL_REVERB,  "HallReverb",   8, []{ return std::make_unique<HallReverbEffect>(); });
     registry.registerEffect(RISER_REVERB, "RiserReverb",  6, []{ return std::make_unique<RiserReverbEffect>(); });
     registry.registerEffect(BEAT_GRAIN,   "BeatGrain",    6, []{ return std::make_unique<BeatGrainEffect>(); });
+    registry.registerEffect(SPRING_REVERB, "SpringReverb", SpringReverbEffect::PARAM_COUNT, []{ return std::make_unique<SpringReverbEffect>(); });
+    registry.registerEffect(PLATE_REVERB,  "PlateReverb",  PlateReverbEffect::PARAM_COUNT, []{ return std::make_unique<PlateReverbEffect>(); });
+    registry.registerEffect(SHIMMER_REVERB,"ShimmerReverb",ShimmerReverbEffect::PARAM_COUNT, []{ return std::make_unique<ShimmerReverbEffect>(); });
 }

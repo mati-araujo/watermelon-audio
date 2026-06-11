@@ -136,14 +136,14 @@ private:
     // PARÁMETROS (12 total, atomics para thread-safety)
     // ============================================================================
     // Parámetros básicos (compatibles con versión anterior)
-    std::atomic<float> decay{1.0f};         // Param 0: 0.1-5.0s
-    std::atomic<float> size{1.0f};          // Param 1: 0.5-2.0
+    std::atomic<float> decay{2.0f};         // Param 0: 0.1-10.0s
+    std::atomic<float> size{0.8f};          // Param 1: 0.1-2.0
     std::atomic<float> mix{0.3f};           // Param 2: 0-1
 
     // Parámetros nuevos (Iteración 1)
-    std::atomic<float> preDelayMs{0.0f};    // Param 3: 0-100ms
-    std::atomic<float> damping{0.4f};       // Param 4: 0-1 (antes hardcoded)
-    std::atomic<float> stereoWidth{0.7f};   // Param 6: 0-1
+    std::atomic<float> preDelayMs{20.0f};   // Param 3: 0-100ms
+    std::atomic<float> damping{0.5f};       // Param 4: 0-1
+    std::atomic<float> stereoWidth{1.0f};   // Param 6: 0-1
     std::atomic<float> lowCutFreq{80.0f};   // Param 10: 20-500Hz
     std::atomic<float> highCutFreq{12000.0f}; // Param 11: 1k-20kHz
 

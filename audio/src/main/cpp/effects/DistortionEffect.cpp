@@ -137,6 +137,57 @@ void DistortionEffect::setSampleRate(int sampleRate) {
     LOGI("DistortionEffect sample rate set to %d", sampleRate);
 }
 
+void DistortionEffect::reset() {
+    mDriveSmoother.reset(mDrive.load(std::memory_order_relaxed));
+    mLevelSmoother.reset(mLevel.load(std::memory_order_relaxed));
+    mMixSmoother.reset(mMix.load(std::memory_order_relaxed));
+
+    mLastSlewL = 0.0f;
+    mLastSlewR = 0.0f;
+    mSagVoltage = 1.0f;
+    mOctavePhaseL = 0.0f;
+    mOctavePhaseR = 0.0f;
+    mBitcrushHoldL = 0.0f;
+    mBitcrushHoldR = 0.0f;
+    mBitcrushCounter = 0;
+
+    mOversamplerL.reset();
+    mOversamplerR.reset();
+
+    mPreHPF_L.reset();
+    mPreHPF_R.reset();
+    mPostLPF_L.reset();
+    mPostLPF_R.reset();
+    mTSMidBoost_L.reset();
+    mTSMidBoost_R.reset();
+    mRATFilter_L.reset();
+    mRATFilter_R.reset();
+    mMuffToneLPF_L.reset();
+    mMuffToneLPF_R.reset();
+    mMuffToneHPF_L.reset();
+    mMuffToneHPF_R.reset();
+    mMuffMidScoop_L.reset();
+    mMuffMidScoop_R.reset();
+    mHM2LowShelf_L.reset();
+    mHM2LowShelf_R.reset();
+    mHM2HighShelf_L.reset();
+    mHM2HighShelf_R.reset();
+    mHM2MidScoop_L.reset();
+    mHM2MidScoop_R.reset();
+    mHM2Presence_L.reset();
+    mHM2Presence_R.reset();
+    mMTLowShelf_L.reset();
+    mMTLowShelf_R.reset();
+    mMTHighShelf_L.reset();
+    mMTHighShelf_R.reset();
+    mMTMidPeak_L.reset();
+    mMTMidPeak_R.reset();
+    mPreTone_L.reset();
+    mPreTone_R.reset();
+    mPostTone_L.reset();
+    mPostTone_R.reset();
+}
+
 void DistortionEffect::setParam(int paramId, float value) {
     switch (paramId) {
         case DRIVE: {
@@ -314,8 +365,11 @@ void DistortionEffect::process(float* input, float* output, int numFrames) {
         float preL = mPreHPF_L.process(input[i * 2]);
         float preR = mPreHPF_R.process(input[i * 2 + 1]);
 
-        mInputL[i] = mPreTone_L.process(preL);
-        mInputR[i] = mPreTone_R.process(preR);
+        preL = mPreTone_L.process(preL);
+        preR = mPreTone_R.process(preR);
+
+        mInputL[i] = applyGate(preL, gateThreshold);
+        mInputR[i] = applyGate(preR, gateThreshold);
     }
 
     // Upsample
@@ -329,8 +383,10 @@ void DistortionEffect::process(float* input, float* output, int numFrames) {
 
     // Apply distortion at upsampled rate
     for (int i = 0; i < upsampledSize; ++i) {
-        mProcessedL[i] = applyDistortion(mUpsampledL[i], drive, algorithm);
-        mProcessedR[i] = applyDistortion(mUpsampledR[i], drive, algorithm);
+        float sagInputLevel = std::max(std::abs(mUpsampledL[i]), std::abs(mUpsampledR[i]));
+        float saggedDrive = std::clamp(drive * applySag(sagInputLevel), 0.0f, 1.0f);
+        mProcessedL[i] = applyDistortion(mUpsampledL[i], saggedDrive, algorithm, true);
+        mProcessedR[i] = applyDistortion(mUpsampledR[i], saggedDrive, algorithm, false);
     }
 
     // Downsample
@@ -349,9 +405,12 @@ void DistortionEffect::process(float* input, float* output, int numFrames) {
         float mix = mMixSmoother.process(mixTarget);
         float outputGain = level * level * 1.5f;  // Quadratic curve for natural feel
 
-        // Post-filtering (low-pass + tone)
-        float postL = mPostLPF_L.process(mOutputL[i]);
-        float postR = mPostLPF_R.process(mOutputR[i]);
+        // Pedal-specific tone stacks, then universal post filtering.
+        float postL = applyPedalToneStack(mOutputL[i], algorithm, true);
+        float postR = applyPedalToneStack(mOutputR[i], algorithm, false);
+
+        postL = mPostLPF_L.process(postL);
+        postR = mPostLPF_R.process(postR);
 
         postL = mPostTone_L.process(postL);
         postR = mPostTone_R.process(postR);
@@ -366,7 +425,7 @@ void DistortionEffect::process(float* input, float* output, int numFrames) {
     }
 }
 
-float DistortionEffect::applyDistortion(float input, float drive, int algorithm) {
+float DistortionEffect::applyDistortion(float input, float drive, int algorithm, bool isLeft) {
     using namespace DistortionVariants;
 
     switch (algorithm) {
@@ -384,7 +443,7 @@ float DistortionEffect::applyDistortion(float input, float drive, int algorithm)
         case BOSS_DS1:
             return processBossDS1(input, drive);
         case RAT:
-            return processRAT(input, drive, true);  // Default to left channel behavior
+            return processRAT(input, drive, isLeft);
         case DIST_PLUS:
             return processDistortionPlus(input, drive);
         case METAL_ZONE:
@@ -398,7 +457,7 @@ float DistortionEffect::applyDistortion(float input, float drive, int algorithm)
         case FUZZ_FACE_SI:
             return processFuzzFace(input, drive, false);  // Silicon
         case OCTAVE_FUZZ:
-            return processOctaveFuzz(input, drive, mOctavePhaseL);
+            return processOctaveFuzz(input, drive, isLeft ? mOctavePhaseL : mOctavePhaseR);
 
         // ========== SPECIAL Pedals ==========
         case HM2_CHAINSAW:
@@ -420,6 +479,59 @@ float DistortionEffect::applyDistortion(float input, float drive, int algorithm)
 
         default:
             return processTubeScreamer(input, drive);  // Default to Tube Screamer
+    }
+}
+
+float DistortionEffect::applyPedalToneStack(float input, int algorithm, bool isLeft) {
+    using namespace DistortionVariants;
+
+    switch (algorithm) {
+        case TUBE_SCREAMER:
+            return isLeft ? mTSMidBoost_L.process(input) : mTSMidBoost_R.process(input);
+
+        case RAT:
+            return isLeft ? mRATFilter_L.process(input) : mRATFilter_R.process(input);
+
+        case METAL_ZONE: {
+            float x = input;
+            if (isLeft) {
+                x = mMTLowShelf_L.process(x);
+                x = mMTMidPeak_L.process(x);
+                x = mMTHighShelf_L.process(x);
+            } else {
+                x = mMTLowShelf_R.process(x);
+                x = mMTMidPeak_R.process(x);
+                x = mMTHighShelf_R.process(x);
+            }
+            return x;
+        }
+
+        case BIG_MUFF: {
+            float lpf = isLeft ? mMuffToneLPF_L.process(input) : mMuffToneLPF_R.process(input);
+            float hpf = isLeft ? mMuffToneHPF_L.process(input) : mMuffToneHPF_R.process(input);
+            float tone = mTone.load(std::memory_order_relaxed);
+            float x = DSPMath::crossfade(lpf, hpf, tone);
+            return isLeft ? mMuffMidScoop_L.process(x) : mMuffMidScoop_R.process(x);
+        }
+
+        case HM2_CHAINSAW: {
+            float x = input;
+            if (isLeft) {
+                x = mHM2LowShelf_L.process(x);
+                x = mHM2MidScoop_L.process(x);
+                x = mHM2HighShelf_L.process(x);
+                x = mHM2Presence_L.process(x);
+            } else {
+                x = mHM2LowShelf_R.process(x);
+                x = mHM2MidScoop_R.process(x);
+                x = mHM2HighShelf_R.process(x);
+                x = mHM2Presence_R.process(x);
+            }
+            return x;
+        }
+
+        default:
+            return input;
     }
 }
 
@@ -904,17 +1016,20 @@ float DistortionEffect::transistorSaturate(float input, float vbe, float hfe) {
     return std::tanh(collector * 0.1f) * 10.0f;
 }
 
-float DistortionEffect::applySag(float drive) {
+float DistortionEffect::applySag(float inputLevel) {
     // Voltage sag simulation (for tube-like behavior)
     float sagAmount = mSag.load(std::memory_order_relaxed);
     if (sagAmount <= 0.0f) {
         return 1.0f;
     }
 
-    // Sag reduces gain when signal is loud
-    float sagFactor = 1.0f - sagAmount * drive * 0.3f;
-    mSagVoltage = mSagVoltage * 0.99f + sagFactor * 0.01f;  // Smooth
-    return std::clamp(mSagVoltage, 0.7f, 1.0f);
+    // Loud input pulls the virtual supply down; release is intentionally slower
+    // than attack for a guitar-like compression feel.
+    float level = std::clamp(inputLevel, 0.0f, 2.0f);
+    float targetVoltage = 1.0f - sagAmount * std::min(level * 0.35f, 0.35f);
+    float coeff = (targetVoltage < mSagVoltage) ? 0.995f : 0.9995f;
+    mSagVoltage = coeff * mSagVoltage + (1.0f - coeff) * targetVoltage;
+    return std::clamp(mSagVoltage, 0.65f, 1.0f);
 }
 
 float DistortionEffect::applyGate(float input, float threshold) {

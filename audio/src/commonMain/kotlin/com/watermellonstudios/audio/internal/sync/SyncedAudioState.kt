@@ -9,6 +9,7 @@ import com.watermellonstudios.audio.domain.effect.EffectState
  * UI should observe this state via StateFlow to get consistent views.
  *
  * @property effects Current list of effects in the chain
+ * @property effectsBypassed Global effect-chain bypass state
  * @property lastSyncTimestamp Timestamp of last successful sync (System.nanoTime())
  * @property syncVersion Monotonically increasing version from C++
  * @property isSyncing True while a sync operation is in progress
@@ -17,6 +18,7 @@ import com.watermellonstudios.audio.domain.effect.EffectState
  */
 data class SyncedAudioState(
     val effects: List<EffectState> = emptyList(),
+    val effectsBypassed: Boolean = false,
     val lastSyncTimestamp: Long = 0L,
     val syncVersion: Long = 0L,
     val isSyncing: Boolean = false,

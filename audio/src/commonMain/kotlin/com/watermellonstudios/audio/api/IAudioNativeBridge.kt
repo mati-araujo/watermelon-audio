@@ -72,6 +72,8 @@ interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter {
     fun setEffectParameterSync(effectIndex: Int, paramId: Int, value: Float)
     fun getEffectParameterSync(effectIndex: Int, paramId: Int): Float
     fun setEffectBypassSync(index: Int, bypass: Boolean)
+    fun setEffectsBypassSync(bypass: Boolean)
+    fun isEffectsBypassedSync(): Boolean
     fun reorderEffectsSync(fromIndex: Int, toIndex: Int)
 
     // ==================== EFFECT ROUTING ====================

@@ -295,6 +295,14 @@ internal class AudioEngineImpl(
         }
     }
 
+    override fun setEffectsBypass(bypass: Boolean) {
+        bridge.setEffectsBypassSync(bypass)
+
+        _state.update { state ->
+            state.copy(effectChain = state.effectChain.copy(isGloballyBypassed = bypass))
+        }
+    }
+
     override fun reorderEffects(fromIndex: Int, toIndex: Int) {
         bridge.reorderEffectsSync(fromIndex, toIndex)
 

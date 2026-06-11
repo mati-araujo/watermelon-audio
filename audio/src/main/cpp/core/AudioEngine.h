@@ -343,6 +343,11 @@ public:
         incrementStateVersion();
     }
     bool getBypass(size_t index) const { return mEffectChain.getBypass(index); }
+    void setEffectsBypass(bool bypass) {
+        mEffectChain.setGlobalBypass(bypass);
+        incrementStateVersion();
+    }
+    bool isEffectsBypassed() const { return mEffectChain.getGlobalBypass(); }
     void setParameter(size_t index, int paramId, float value) {
         mEffectChain.setParameter(index, paramId, value);
         incrementStateVersion();

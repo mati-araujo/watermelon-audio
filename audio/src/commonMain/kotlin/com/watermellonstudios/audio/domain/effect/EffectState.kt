@@ -20,10 +20,12 @@ data class EffectState(
  *
  * @property effects List of effects in order
  * @property maxEffects Maximum number of effects allowed
+ * @property isGloballyBypassed Whether the full effect chain is globally bypassed
  */
 data class EffectChainState(
     val effects: List<EffectState> = emptyList(),
-    val maxEffects: Int = 12
+    val maxEffects: Int = 12,
+    val isGloballyBypassed: Boolean = false
 ) {
     val canAddEffect: Boolean get() = effects.size < maxEffects
     val isEmpty: Boolean get() = effects.isEmpty()

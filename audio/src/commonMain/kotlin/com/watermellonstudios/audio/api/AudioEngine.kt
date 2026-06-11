@@ -171,6 +171,16 @@ interface AudioEngine {
     fun setEffectBypass(index: Int, bypass: Boolean)
 
     /**
+     * Set global effect-chain bypass state.
+     *
+     * This does not modify individual effect bypass states. It is intended for
+     * performance controls such as a guitar FX master bypass.
+     *
+     * @param bypass true to bypass the whole effect chain, false to process it
+     */
+    fun setEffectsBypass(bypass: Boolean)
+
+    /**
      * Reorder effects in the chain.
      *
      * @param fromIndex Source index

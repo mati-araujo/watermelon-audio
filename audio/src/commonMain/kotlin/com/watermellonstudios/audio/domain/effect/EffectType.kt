@@ -31,7 +31,10 @@ enum class EffectType(
     TAPE_ECHO(16, "TapeEcho"),
     HALL_REVERB(17, "Hall Reverb"),
     RISER_REVERB(18, "Riser Reverb"),
-    BEAT_GRAIN(19, "BeatGrain");
+    BEAT_GRAIN(19, "BeatGrain"),
+    SPRING_REVERB(20, "Spring Reverb"),
+    PLATE_REVERB(21, "Plate Reverb"),
+    SHIMMER_REVERB(22, "Shimmer Reverb");
 
     companion object {
         fun fromId(id: Int): EffectType? = entries.find { it.id == id }

@@ -151,6 +151,7 @@ public:
      * @param sampleRate Sample rate in Hz
      */
     void setSampleRate(int sampleRate) override;
+    void reset() override;
 
 private:
     int mSampleRate{48000};
@@ -264,7 +265,8 @@ private:
      * @param algorithm Pedal type from DistortionVariants
      * @return Distorted sample
      */
-    float applyDistortion(float input, float drive, int algorithm);
+    float applyDistortion(float input, float drive, int algorithm, bool isLeft);
+    float applyPedalToneStack(float input, int algorithm, bool isLeft);
 
     // ========== OVERDRIVE Pedals ==========
 
@@ -352,7 +354,7 @@ private:
     float transistorSaturate(float input, float vbe, float hfe);
 
     /** @brief Apply voltage sag effect */
-    float applySag(float drive);
+    float applySag(float inputLevel);
 
     /** @brief Noise gate */
     float applyGate(float input, float threshold);

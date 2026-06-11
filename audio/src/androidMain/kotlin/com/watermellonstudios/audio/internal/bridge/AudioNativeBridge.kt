@@ -946,6 +946,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         }
     }
 
+    override fun setEffectsBypassSync(bypass: Boolean) {
+        nativeSetEffectsBypass(bypass)
+    }
+
+    override fun isEffectsBypassedSync(): Boolean = nativeIsEffectsBypassed()
+
     // ==================== Global BPM ====================
 
     /**
@@ -1216,6 +1222,29 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
             }
         }
 
+    override suspend fun setEffectsBypass(bypassed: Boolean): Result<Unit> =
+        withContext(Dispatchers.Default) {
+            effectsMutex.withLock {
+                try {
+                    val result = nativeSetEffectsBypass(bypassed)
+
+                    if (result != 0) {
+                        Log.e(TAG, "setEffectsBypass: native returned error $result")
+                        return@withContext Result.failure(
+                            NativeBridgeException.fromCode(result, "setEffectsBypass")
+                        )
+                    }
+
+                    Log.d(TAG, "setEffectsBypass: bypassed=$bypassed")
+                    Result.success(Unit)
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "setEffectsBypass: exception", e)
+                    Result.failure(e)
+                }
+            }
+        }
+
     override suspend fun reorderEffects(fromIndex: Int, toIndex: Int): Result<Unit> =
         withContext(Dispatchers.Default) {
             effectsMutex.withLock {
@@ -1322,7 +1351,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
                     val snapshot = EffectChainSnapshot(
                         effects = effects,
-                        version = version
+                        version = version,
+                        isGloballyBypassed = nativeIsEffectsBypassed()
                     )
 
                     // 4.3: Update cache
@@ -1887,6 +1917,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeSetEffectParametersBatch(index: Int, paramIds: IntArray, values: FloatArray): Int
     private external fun nativeSetMultipleEffectParameters(effectIndices: IntArray, paramIds: IntArray, values: FloatArray): Int
     private external fun nativeSetEffectBypass(index: Int, bypass: Boolean): Int
+    private external fun nativeSetEffectsBypass(bypass: Boolean): Int
+    private external fun nativeIsEffectsBypassed(): Boolean
     private external fun nativeReorderEffects(fromIndex: Int, toIndex: Int): Int
     private external fun nativeGetEffectChainSize(): Int
     private external fun nativeGetEffectType(index: Int): Int
