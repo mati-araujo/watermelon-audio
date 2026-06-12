@@ -222,6 +222,15 @@ constexpr int USB_AUDIO_MAX_PACKET_SIZE_HS = 3072;   // High-speed max (3x1024)
 constexpr int USB_TRANSFER_QUEUE_DEPTH = 8;          // Transfers in flight
 constexpr int USB_TRANSFER_TIMEOUT_MS = 1000;        // Timeout for async transfers
 
+// Maximum per-packet clock adjustment, in audio frames, that
+// ClockController::getAdjustedFrameCount() is allowed to deviate from the
+// nominal frames-per-packet. This is a SINGLE source of truth shared by:
+//   - ClockController (clamp on the fractional accumulator output)
+//   - UsbTransferManager::allocateTransfers() (output slot byte headroom)
+// Both MUST use this constant so the buffer always has room for the largest
+// length the clock controller can emit.
+constexpr int kClockAdjustFramesMax = 4;
+
 // ============================================================================
 // libusb Error Codes (for reference)
 // ============================================================================

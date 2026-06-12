@@ -10,6 +10,7 @@
 #include "../usb/ClockSourceRangeParser.h"
 #include "../usb/UsbClockGraph.h"
 #include "../usb/UsbIsoTiming.h"
+#include "../usb/RateCoercionPolicy.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -865,9 +866,13 @@ bool LibusbBackend::configureSampleRate() {
         if (g == 3) {
             uint32_t actual = usb::decodeUac1SampleRateResponse(readback);
             if (actual != requested) {
-                LOGW("UAC1 device coerced sample rate %u Hz -> %u Hz",
-                     requested, actual);
-                mRequestedSampleRate = static_cast<int>(actual);
+                // Don't accept the coercion silently — abort the start so
+                // start() can reconfigure TransferConfig at the real rate
+                // (otherwise the rate ratio drifts systematically).
+                LOGW("UAC1 device coerced sample rate %u Hz -> %u Hz; "
+                     "restart required", requested, actual);
+                mNegotiatedSampleRate.store(static_cast<int>(actual));
+                return false;
             }
             LOGI("Rate negotiation: UAC1 EP 0x%02x req=%u actual=%u",
                  epAddress, requested, actual);
@@ -1022,9 +1027,10 @@ bool LibusbBackend::configureSampleRate() {
                     "[SET_CUR] clockSrc=%d verify GET_CUR: actual=%u (requested=%u)",
                     clockId, actual, requested);
                 if (actual != requested) {
-                    LOGW("UAC2 device coerced sample rate %u Hz -> %u Hz on clockSrc %d",
-                         requested, actual, clockId);
-                    mRequestedSampleRate = static_cast<int>(actual);
+                    LOGW("UAC2 device coerced sample rate %u Hz -> %u Hz on "
+                         "clockSrc %d; restart required", requested, actual, clockId);
+                    mNegotiatedSampleRate.store(static_cast<int>(actual));
+                    return false;
                 }
                 LOGI("Rate negotiation: UAC2 clockSrc=%d req=%u actual=%u",
                      clockId, requested, actual);
@@ -1102,13 +1108,29 @@ BackendResult LibusbBackend::start() {
         teardownTransferManager();
     }
 
-    // Setup transfer manager
-    if (!setupTransferManager()) {
-        return BackendResult::ERROR_USB_INIT_FAILED;
-    }
+    // Setup + start the transfer manager. The clock-config hook negotiates the
+    // sample rate and aborts the start if the device coerces it to a different
+    // value (0.4, hallazgo C5). In that case we reconfigure at the real rate
+    // and retry exactly once, so TransferConfig (framesPerPacket, rings,
+    // ClockController) is computed against the rate the device truly runs.
+    for (int attempt = 0; ; ++attempt) {
+        if (!setupTransferManager()) {
+            return BackendResult::ERROR_USB_INIT_FAILED;
+        }
+        if (mTransferManager->start()) {
+            break;  // started cleanly
+        }
 
-    // Start transfer manager
-    if (!mTransferManager->start()) {
+        const int coerced = mNegotiatedSampleRate.exchange(0);
+        const auto action = usb::decideRateCoercion(
+            /*startSucceeded=*/false, coerced, mRequestedSampleRate, attempt);
+        if (action == usb::RateCoercionAction::RetryAtCoercedRate) {
+            LOGI("Retrying start at device-coerced rate %d Hz", coerced);
+            mRequestedSampleRate = coerced;
+            teardownTransferManager();
+            continue;
+        }
+
         LOGE("Failed to start transfer manager");
         teardownTransferManager();
         return BackendResult::ERROR_STREAM_FAILED;
@@ -1281,10 +1303,17 @@ float LibusbBackend::getOutputLatencyMs() const {
 
 float LibusbBackend::getInputLatencyMs() const {
     if (mSelectedCapture && mTransferManager) {
-        // Similar to output for symmetric full-duplex
-        return mTransferManager->getStatistics().currentLatencyMs.load();
+        // Host-side software latency of the capture path (L7). No longer
+        // aliases the output latency.
+        return mTransferManager->getStatistics().currentInputLatencyMs.load();
     }
     return 0.0f;
+}
+
+float LibusbBackend::getRoundTripLatencyMs() const {
+    // Host-side software round-trip = output + input. The full analog
+    // round-trip (converters + URB scheduling, +1–3 ms) is measured in Fase 5.
+    return getOutputLatencyMs() + getInputLatencyMs();
 }
 
 bool LibusbBackend::supportsFullDuplex() const {
@@ -1484,6 +1513,33 @@ bool LibusbBackend::setupTransferManager() {
         }
     }
 
+    // Implicit feedback activation (0.2, hallazgo C2).
+    //
+    // An asynchronous playback EP without an explicit feedback endpoint runs
+    // at nominal forever → free drift. When a capture stream is present we can
+    // recover the device clock from the capture rate and slave the output to
+    // it. We enable this whenever:
+    //   - playback data EP is asynchronous,
+    //   - there is no EXPLICIT feedback endpoint (an implicit-marked one
+    //     doesn't count — it has no dedicated transfer to mine), and
+    //   - capture is active.
+    // This deliberately covers FULL_DUPLEX even when the EP doesn't declare
+    // implicit feedback: a single-clock async device (the normal case) is
+    // safe to slave, and it keeps both rings balanced. A future per-device
+    // gate (UsbClockGraph shared-clock check) can disable it for the rare
+    // separate-clock hardware.
+    const bool playbackAsync =
+        mSelectedPlayback && mSelectedPlayback->dataEndpoint.isAsync();
+    const bool hasExplicitFeedback =
+        mSelectedPlayback && mSelectedPlayback->feedbackEndpoint &&
+        !mSelectedPlayback->feedbackEndpoint->isImplicit;
+    const bool enableImplicitFeedback =
+        playbackAsync && !hasExplicitFeedback && static_cast<bool>(mSelectedCapture);
+    mTransferManager->setImplicitFeedbackEnabled(enableImplicitFeedback);
+    if (enableImplicitFeedback) {
+        LOGI("Implicit feedback enabled: slaving async playback to capture rate");
+    }
+
     // Set error callback
     mTransferManager->setErrorCallback([this](usb::UsbAudioError error, const char* msg) {
         handleTransferError(error, msg);
@@ -1618,6 +1674,11 @@ void LibusbBackend::dspThreadFunc() {
     size_t lastOutputRingLevelMax = 0;
     uint64_t underrunsAtWindowStart = mTransferManager
         ? mTransferManager->getStatistics().underruns.load(std::memory_order_relaxed)
+        : 0ull;
+    // Same idea for input-ring overruns, so the periodic clock-health log can
+    // report a per-window delta (Fase 0 acceptance: delta == 0 in régimen).
+    uint64_t overrunsAtWindowStart = mTransferManager
+        ? mTransferManager->getStatistics().overruns.load(std::memory_order_relaxed)
         : 0ull;
 
     while (mDspRunning.load(std::memory_order_acquire)) {
@@ -1830,6 +1891,49 @@ void LibusbBackend::dspThreadFunc() {
                 mean, lastOutputZeroCrossings, lastOutputFirst4Bits,
                 ringLvlMin, lastOutputRingLevelMax,
                 static_cast<unsigned long long>(underrunsDelta));
+
+            // Clock-health line (Fase 0): drift, effective rate and xrun
+            // deltas in one place so the 30-min acceptance run is verifiable
+            // straight from logcat without the UI. In régimen expect
+            // drift stable (≈ device's real ppm), effFpp coherent with the
+            // nominal frames/packet, and both xrun deltas == 0.
+            if (mTransferManager) {
+                const auto& s = mTransferManager->getStatistics();
+                uint64_t overrunsNow = s.overruns.load(std::memory_order_relaxed);
+                uint64_t overrunsDelta = (overrunsNow >= overrunsAtWindowStart)
+                    ? (overrunsNow - overrunsAtWindowStart) : 0ull;
+
+                // Read rate/drift from the clock controller so they reflect the
+                // fractional nominal (not a stale 0) when no feedback source is
+                // active — e.g. ADAPTIVE playback, where the device follows the
+                // host clock and never sends feedback. `src` says which path is
+                // driving the clock: explicit feedback EP, implicit (capture
+                // rate), or plain nominal.
+                auto* cc = mTransferManager->getClockController();
+                const bool stable = cc && cc->isStable();
+                const char* src = stable
+                    ? (mTransferManager->isImplicitFeedbackEnabled() ? "implicit"
+                                                                     : "explicit")
+                    : "nominal";
+                const float sr = cc ? cc->getCurrentSampleRate() : 0.0f;
+                const float drift = cc ? cc->getDriftPpm() : 0.0f;
+                const double nomFpp = cc ? cc->getNominalFramesPerPacket() : 0.0;
+                wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+                    "USB_CLOCK: src=%s sr=%.1fHz drift=%.1fppm nomFpp=%.4f "
+                    "effFpp=%.4f fbRecv=%u fbInvalid=%u | "
+                    "outLatMs=%.2f inLatMs=%.2f | "
+                    "underrunsDelta=%llu overrunsDelta=%llu",
+                    src, sr, drift, nomFpp,
+                    s.feedbackEffectiveFramesPerPacket.load(std::memory_order_relaxed),
+                    s.feedbackPacketsReceived.load(std::memory_order_relaxed),
+                    s.feedbackPacketsInvalid.load(std::memory_order_relaxed),
+                    s.currentLatencyMs.load(std::memory_order_relaxed),
+                    s.currentInputLatencyMs.load(std::memory_order_relaxed),
+                    static_cast<unsigned long long>(underrunsDelta),
+                    static_cast<unsigned long long>(overrunsDelta));
+                overrunsAtWindowStart = overrunsNow;
+            }
+
             usbDspDiagCount = 0;
             inputReadOkCount = 0;
             inputReadFailCount = 0;

@@ -81,6 +81,13 @@ struct UsbEndpointInfo {
     uint16_t maxPacketSize = 0;    // Raw wMaxPacketSize (multiplexed in HS)
     uint8_t interval = 0;          // Polling interval
 
+    // UAC 1.0 audio endpoint extras (bLength==9 standard EP descriptor).
+    // 0 when absent (UAC2 / 7-byte descriptors). bSynchAddress on the DATA
+    // endpoint points at its legacy explicit feedback/sync endpoint; bRefresh
+    // encodes the feedback update period as 2^(bRefresh-1) ms.
+    uint8_t refresh = 0;           // bRefresh (offset 7)
+    uint8_t synchAddress = 0;      // bSynchAddress (offset 8)
+
     // Derived properties
     bool isInput() const { return (address & 0x80) != 0; }
     bool isOutput() const { return (address & 0x80) == 0; }

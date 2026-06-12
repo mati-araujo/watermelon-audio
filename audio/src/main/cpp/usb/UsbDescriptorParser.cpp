@@ -134,43 +134,11 @@ bool UsbDescriptorParser::parseDescriptors(
                 if (mContext.inAudioStreaming) {
                     UsbEndpointInfo endpoint;
                     if (parseEndpointDescriptor(descData, endpoint)) {
-                        // Route the endpoint based on its usage type bits
-                        // (bmAttributes 5:4 — see UsbConstants.h:185-188).
-                        const uint8_t usage = endpoint.attributes & 0x30;
-                        if (endpoint.isIsochronous() &&
-                            usage == USB_ENDPOINT_USAGE_FEEDBACK &&
-                            endpoint.isInput()) {
-                            // Explicit feedback endpoint: separate iso IN
-                            // endpoint that carries the device's actual rate.
-                            UsbFeedbackEndpoint fb;
-                            fb.endpoint = endpoint;
-                            fb.isImplicit = false;
-                            mContext.currentStreaming.feedbackEndpoint = fb;
-                            LOGI("Feedback endpoint detected (explicit): "
-                                 "addr=0x%02x maxPkt=%d interval=%d (IF%d Alt%d)",
-                                 endpoint.address, endpoint.maxPacketSize,
-                                 endpoint.interval,
-                                 mContext.currentStreaming.interfaceNumber,
-                                 mContext.currentStreaming.alternateSetting);
-                        } else {
-                            // Data endpoint (audio samples).
-                            mContext.currentStreaming.dataEndpoint = endpoint;
-                            // If this data endpoint also signals implicit
-                            // feedback timing, mark it so the transfer manager
-                            // can extract drift from packet completion.
-                            if (endpoint.isIsochronous() &&
-                                usage == USB_ENDPOINT_USAGE_IMPLICIT_FB) {
-                                UsbFeedbackEndpoint fb;
-                                fb.endpoint = endpoint;
-                                fb.isImplicit = true;
-                                mContext.currentStreaming.feedbackEndpoint = fb;
-                                LOGI("Implicit feedback detected on data EP "
-                                     "0x%02x (IF%d Alt%d)",
-                                     endpoint.address,
-                                     mContext.currentStreaming.interfaceNumber,
-                                     mContext.currentStreaming.alternateSetting);
-                            }
-                        }
+                        // Defer classification: accumulate every endpoint and
+                        // resolve data vs feedback once the altsetting closes
+                        // (resolvePendingEndpoints). Greedy per-arrival routing
+                        // let a legacy sync IN endpoint clobber the data OUT.
+                        mContext.pendingEndpoints.push_back(endpoint);
                     }
                 }
                 break;
@@ -197,7 +165,10 @@ bool UsbDescriptorParser::parseDescriptors(
         offset += header->bLength;
     }
 
-    // Save the last streaming interface if valid
+    // Resolve + save the last streaming interface if valid
+    if (mContext.inAudioStreaming) {
+        resolvePendingEndpoints(mContext.currentStreaming);
+    }
     if (mContext.inAudioStreaming &&
         !mContext.currentStreaming.formats.empty() &&
         mContext.currentStreaming.formats[0].channels > 0 &&
@@ -249,7 +220,10 @@ bool UsbDescriptorParser::parseInterfaceDescriptor(
 
     const auto* iface = reinterpret_cast<const InterfaceDescriptor*>(data);
 
-    // Save previous streaming interface if valid
+    // Resolve + save previous streaming interface if valid
+    if (mContext.inAudioStreaming) {
+        resolvePendingEndpoints(mContext.currentStreaming);
+    }
     if (mContext.inAudioStreaming &&
         !mContext.currentStreaming.formats.empty() &&
         mContext.currentStreaming.formats[0].channels > 0 &&
@@ -270,6 +244,7 @@ bool UsbDescriptorParser::parseInterfaceDescriptor(
     mContext.inAudioControl = false;
     mContext.inAudioStreaming = false;
     mContext.currentStreaming = UsbStreamingInterface{};
+    mContext.pendingEndpoints.clear();
 
     if (iface->bInterfaceClass != USB_CLASS_AUDIO) {
         return true; // Not an audio interface, skip
@@ -676,6 +651,16 @@ bool UsbDescriptorParser::parseEndpointDescriptor(const uint8_t* data, UsbEndpoi
     endpoint.attributes = ep->bmAttributes;
     endpoint.maxPacketSize = readUint16LE(reinterpret_cast<const uint8_t*>(&ep->wMaxPacketSize));
     endpoint.interval = ep->bInterval;
+    endpoint.refresh = 0;
+    endpoint.synchAddress = 0;
+
+    // UAC 1.0 audio endpoints use the 9-byte standard endpoint descriptor:
+    // bRefresh at offset 7, bSynchAddress at offset 8 (USB Audio 1.0 §4.6.1.2).
+    // Standard 7-byte descriptors leave these at 0.
+    if (data[0] >= 9) {
+        endpoint.refresh      = data[7];
+        endpoint.synchAddress = data[8];
+    }
 
     LOGD("Endpoint: Address=0x%02x, Attr=0x%02x, MaxPacket=%d, Interval=%d",
          endpoint.address, endpoint.attributes, endpoint.maxPacketSize, endpoint.interval);
@@ -692,6 +677,100 @@ bool UsbDescriptorParser::parseEndpointDescriptor(const uint8_t* data, UsbEndpoi
     }
 
     return true;
+}
+
+void UsbDescriptorParser::resolvePendingEndpoints(UsbStreamingInterface& streaming) {
+    auto& pending = mContext.pendingEndpoints;
+    if (pending.empty()) {
+        return;
+    }
+
+    auto usageOf = [](const UsbEndpointInfo& ep) -> uint8_t {
+        return ep.attributes & 0x30;  // bmAttributes bits 5:4
+    };
+    auto isReferencedAsSync = [&](uint8_t addr) -> bool {
+        for (const auto& e : pending) {
+            if (e.synchAddress != 0 && e.synchAddress == addr) return true;
+        }
+        return false;
+    };
+
+    // 1. Data endpoint: the iso endpoint that is neither an explicit feedback
+    //    endpoint (usage == FEEDBACK) nor a legacy sync endpoint pointed at by
+    //    some data EP's bSynchAddress. Among the remaining candidates the
+    //    audio data EP is the one carrying real payload, so it has the largest
+    //    effective max packet size (a feedback/sync EP is only 3-4 bytes).
+    //    This makes the choice independent of descriptor ordering.
+    const UsbEndpointInfo* dataEp = nullptr;
+    for (const auto& ep : pending) {
+        if (!ep.isIsochronous()) continue;
+        if (usageOf(ep) == USB_ENDPOINT_USAGE_FEEDBACK) continue;
+        if (isReferencedAsSync(ep.address)) continue;
+        if (dataEp == nullptr ||
+            ep.effectiveMaxBytesPerPacket() > dataEp->effectiveMaxBytesPerPacket()) {
+            dataEp = &ep;
+        }
+    }
+    if (dataEp == nullptr) {
+        return;  // no usable data endpoint in this altsetting
+    }
+    streaming.dataEndpoint = *dataEp;
+    const bool dataIsInput = dataEp->isInput();
+    const uint8_t dataSynch = dataEp->synchAddress;
+    const uint8_t dataUsage = usageOf(*dataEp);
+
+    // 2. Explicit feedback endpoint (modern usage bits): iso, usage == FEEDBACK,
+    //    direction OPPOSITE to the data EP.
+    for (const auto& ep : pending) {
+        if (&ep == dataEp || !ep.isIsochronous()) continue;
+        if (usageOf(ep) == USB_ENDPOINT_USAGE_FEEDBACK &&
+            ep.isInput() != dataIsInput) {
+            UsbFeedbackEndpoint fb;
+            fb.endpoint = ep;
+            fb.isImplicit = false;
+            streaming.feedbackEndpoint = fb;
+            LOGI("Feedback endpoint (explicit): addr=0x%02x maxPkt=%d interval=%d "
+                 "(IF%d Alt%d)", ep.address, ep.maxPacketSize, ep.interval,
+                 streaming.interfaceNumber, streaming.alternateSetting);
+            break;
+        }
+    }
+
+    // 3. Legacy UAC1 feedback by bSynchAddress: if no modern feedback EP was
+    //    found and the data EP names a sync address, the endpoint at that
+    //    address is the (explicit) feedback EP.
+    if (!streaming.feedbackEndpoint && dataSynch != 0) {
+        for (const auto& ep : pending) {
+            if (&ep == dataEp || !ep.isIsochronous()) continue;
+            if (ep.address == dataSynch) {
+                UsbFeedbackEndpoint fb;
+                fb.endpoint = ep;
+                fb.isImplicit = false;
+                // The feedback cadence is governed by the data EP's bRefresh;
+                // inherit it if the sync EP descriptor didn't carry its own.
+                if (fb.endpoint.refresh == 0) fb.endpoint.refresh = dataEp->refresh;
+                streaming.feedbackEndpoint = fb;
+                LOGI("Feedback endpoint (UAC1 legacy bSynchAddress): addr=0x%02x "
+                     "bRefresh=%d (data EP 0x%02x, IF%d Alt%d)",
+                     ep.address, fb.endpoint.refresh, dataEp->address,
+                     streaming.interfaceNumber, streaming.alternateSetting);
+                break;
+            }
+        }
+    }
+
+    // 4. Implicit feedback: the data EP itself signals implicit-feedback usage.
+    //    Only when no explicit/legacy feedback EP was selected.
+    if (!streaming.feedbackEndpoint &&
+        dataUsage == USB_ENDPOINT_USAGE_IMPLICIT_FB) {
+        UsbFeedbackEndpoint fb;
+        fb.endpoint = *dataEp;
+        fb.isImplicit = true;
+        streaming.feedbackEndpoint = fb;
+        LOGI("Implicit feedback on data EP 0x%02x (IF%d Alt%d)",
+             dataEp->address, streaming.interfaceNumber,
+             streaming.alternateSetting);
+    }
 }
 
 bool UsbDescriptorParser::parseAudioEndpoint(const uint8_t* data, UsbStreamingInterface& streaming) {

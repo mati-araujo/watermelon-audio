@@ -352,6 +352,10 @@ private:
                                       UsbStreamingInterface& streaming);
     bool parseEndpointDescriptor(const uint8_t* data, UsbEndpointInfo& endpoint);
 
+    // Second-pass classification of the iso endpoints collected for one
+    // altsetting into data + (explicit/legacy/implicit) feedback endpoints.
+    void resolvePendingEndpoints(UsbStreamingInterface& streaming);
+
     // Parse UAC 1.0 class-specific descriptors
     bool parseACHeader(const uint8_t* data, UsbAudioDevice& device);
     bool parseInputTerminal(const uint8_t* data, UsbAudioDevice& device);
@@ -404,6 +408,11 @@ private:
         bool inAudioControl = false;
         bool inAudioStreaming = false;
         UsbStreamingInterface currentStreaming;
+        // Iso endpoints seen in the current altsetting, classified in a second
+        // pass at altsetting close (see resolvePendingEndpoints). Accumulating
+        // first avoids the greedy ordering bug where a legacy sync IN endpoint
+        // clobbered the data OUT endpoint.
+        std::vector<UsbEndpointInfo> pendingEndpoints;
     };
 
     ParsingContext mContext;

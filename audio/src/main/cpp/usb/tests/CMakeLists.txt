@@ -47,6 +47,9 @@ set(USB_TESTED_SOURCES
 
 add_executable(usb_tests
     test_clock_controller.cpp
+    test_implicit_feedback.cpp
+    test_rate_coercion_policy.cpp
+    test_usb_latency_math.cpp
     test_sample_rate_request.cpp
     test_usb_descriptor_parser.cpp
     test_altsetting_selector.cpp

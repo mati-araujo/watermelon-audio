@@ -110,6 +110,7 @@ public:
     bool isRunning() const override;
     float getOutputLatencyMs() const override;
     float getInputLatencyMs() const override;
+    float getRoundTripLatencyMs() const override;
 
     BackendType getType() const override { return BackendType::LIBUSB; }
     bool supportsFullDuplex() const override;
@@ -383,6 +384,10 @@ private:
 
     // Configuration
     int mRequestedSampleRate = 48000;
+    // Set by configureSampleRate() (clock hook) when the device coerces the
+    // requested rate to one it actually supports. start() reads + clears it to
+    // restart the transfer manager at the real rate (0.4, hallazgo C5).
+    std::atomic<int> mNegotiatedSampleRate{0};
     int mRequestedBufferSize = 256;
     bool mFullDuplexEnabled = false;  // Legacy, use mStreamingMode
     UsbStreamingMode mStreamingMode = UsbStreamingMode::PLAYBACK_ONLY;

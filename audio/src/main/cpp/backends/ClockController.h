@@ -5,7 +5,7 @@
  *
  * USB Audio devices (UAC 1.0/2.0) with Asynchronous mode use a feedback
  * endpoint to communicate their actual sample rate to the host. This allows
- * the host to adjust the number of samples sent per USB frame to match
+ * the host to adjust the number of samples sent per USB packet to match
  * the device's clock.
  *
  * Without proper clock synchronization:
@@ -13,132 +13,38 @@
  * - Buffer overruns (device overflows, audio glitches)
  * - Long-term drift (buffers grow/shrink over time)
  *
- * This controller implements:
- * - Feedback endpoint parsing (10.14 and 16.16 formats)
- * - PID controller for smooth rate adjustment
- * - Fractional sample accumulator for sub-sample precision
- * - Moving average filter for noise rejection
+ * Design (post-audit, hallazgos C1/C3/M2/M3):
+ *   The feedback value Ff is NOT an error to be "corrected" against the
+ *   nominal rate by a PID. Ff *is* the setpoint: it is exactly the number of
+ *   audio frames the device wants per service interval. This controller
+ *   therefore tracks Ff directly:
+ *     - parse Ff (10.14 UAC1 / 16.16 UAC2)
+ *     - convert it to frames-per-DATA-PACKET using the real packetsPerSecond
+ *       cadence (NOT an assumed 1000/8000 split by UAC version)
+ *     - EMA-smooth it
+ *     - a pure fractional accumulator turns the smoothed fractional target
+ *       into integer per-packet frame counts (the 44-44-44-45 pattern at
+ *       44.1 kHz falls out naturally, even with no feedback at all)
  *
- * Reference: USB Audio Class 2.0 Specification, Section 5.12
+ * Thread Safety:
+ * - processFeedback()/setMeasuredFramesPerPacket(): USB event thread
+ * - getAdjustedFrameCount(): USB transfer/fill thread
+ * - Cross-thread state held in atomics; the fractional accumulator is owned
+ *   exclusively by the transfer thread.
+ *
+ * Reference: USB Audio Class 1.0/2.0 Specification, Section 5.12.
  */
 
 #pragma once
 
 #include <atomic>
-#include <array>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 
+#include "../usb/UsbConstants.h"
+
 namespace watermelon_audio {
-
-// =============================================================================
-// PID Controller
-// =============================================================================
-
-/**
- * PIDController
- *
- * Discrete PID controller for audio clock synchronization.
- *
- * Design considerations for audio:
- * - Conservative gains to prevent oscillation
- * - Anti-windup to handle large initial errors
- * - Smooth output to prevent audible artifacts
- *
- * Tuning guidelines:
- * - Kp: 0.01 - 0.1 (start low, increase if response is slow)
- * - Ki: 0.001 - 0.01 (eliminates steady-state error)
- * - Kd: 0.0001 - 0.001 (dampens oscillation, often set to 0)
- */
-class PIDController {
-public:
-    /**
-     * Construct a PID controller.
-     *
-     * @param kp  Proportional gain (immediate response to error)
-     * @param ki  Integral gain (eliminates steady-state error)
-     * @param kd  Derivative gain (dampens oscillation)
-     */
-    PIDController(float kp = 0.05f, float ki = 0.005f, float kd = 0.0005f)
-        : mKp(kp)
-        , mKi(ki)
-        , mKd(kd)
-    {
-    }
-
-    /**
-     * Calculate control output.
-     *
-     * @param setpoint    Desired value (expected feedback rate)
-     * @param measurement Actual measured value (received feedback)
-     * @return            Control adjustment (frames to add/remove)
-     */
-    float calculate(float setpoint, float measurement) {
-        float error = setpoint - measurement;
-
-        // Proportional term
-        float p = mKp * error;
-
-        // Integral term with anti-windup
-        mIntegral += error;
-        mIntegral = std::clamp(mIntegral, -mIntegralLimit, mIntegralLimit);
-        float i = mKi * mIntegral;
-
-        // Derivative term (rate of change of error)
-        float derivative = error - mLastError;
-        float d = mKd * derivative;
-        mLastError = error;
-
-        // Combined output with output limiting
-        float output = p + i + d;
-        return std::clamp(output, mOutputMin, mOutputMax);
-    }
-
-    /**
-     * Reset controller state.
-     *
-     * Call when:
-     * - Starting a new stream
-     * - After a large discontinuity
-     * - When switching USB devices
-     */
-    void reset() {
-        mIntegral = 0.0f;
-        mLastError = 0.0f;
-    }
-
-    // Setters for tuning
-    void setGains(float kp, float ki, float kd) {
-        mKp = kp;
-        mKi = ki;
-        mKd = kd;
-    }
-
-    void setOutputLimits(float min, float max) {
-        mOutputMin = min;
-        mOutputMax = max;
-    }
-
-    void setIntegralLimit(float limit) {
-        mIntegralLimit = limit;
-    }
-
-    // Getters for monitoring
-    float getProportionalTerm() const { return mKp * mLastError; }
-    float getIntegralTerm() const { return mKi * mIntegral; }
-    float getDerivativeTerm() const { return mKd * (mLastError - mPrevError); }
-
-private:
-    float mKp, mKi, mKd;
-    float mIntegral = 0.0f;
-    float mLastError = 0.0f;
-    float mPrevError = 0.0f;
-
-    float mIntegralLimit = 100.0f;   // Prevent integral windup
-    float mOutputMin = -10.0f;        // Max frames to remove per packet
-    float mOutputMax = 10.0f;         // Max frames to add per packet
-};
 
 // =============================================================================
 // USB Audio Class Version
@@ -154,206 +60,180 @@ enum class UacVersion {
 // Clock Controller
 // =============================================================================
 
-/**
- * ClockController
- *
- * Processes USB audio feedback endpoint data and provides
- * frame count adjustments to maintain clock synchronization.
- *
- * Thread Safety:
- * - processFeedback(): Called from USB event thread
- * - getAdjustedFrameCount(): Called from USB transfer thread
- * - Both can be called concurrently (uses atomics)
- */
 class ClockController {
 public:
     /**
      * Construct a clock controller.
      *
+     * The default cadence (1000 packets/s) matches full-speed / 1 ms service
+     * intervals. Real streams MUST call configure() with the cadence derived
+     * from USB speed + bInterval; the default exists so unit tests and early
+     * construction have sane fractional nominals.
+     *
      * @param nominalSampleRate  Expected sample rate (e.g., 48000)
      */
-    explicit ClockController(int nominalSampleRate = 48000)
-        : mNominalSampleRate(nominalSampleRate)
-        , mPid(0.05f, 0.005f, 0.0005f)  // Conservative tuning
-    {
-        // Limit output to ±8 frames per 1ms packet
-        mPid.setOutputLimits(-8.0f, 8.0f);
-
-        // Initialize feedback buffer with expected value
-        float expectedRate = static_cast<float>(nominalSampleRate) / 8000.0f;
-        mFeedbackBuffer.fill(expectedRate);
-
-        mCurrentRate.store(static_cast<float>(nominalSampleRate),
-                          std::memory_order_relaxed);
+    explicit ClockController(int nominalSampleRate = 48000) {
+        configure(nominalSampleRate, kDefaultPacketsPerSecond);
     }
 
     /**
-     * Process feedback from the USB feedback endpoint.
+     * Configure the nominal operating point.
      *
-     * USB Audio Feedback Format:
-     *
-     * UAC 1.0 (Full-Speed): 10.14 fixed point, 3 bytes
-     *   - Value represents samples per USB frame (1ms)
-     *   - At 48kHz: 48.0 → raw value = 48 * 16384 = 786432
-     *
-     * UAC 2.0 (High-Speed): 16.16 fixed point, 4 bytes
-     *   - Value represents samples per microframe (125µs)
-     *   - At 48kHz: 6.0 → raw value = 6 * 65536 = 393216
-     *   - Note: High-Speed has 8 microframes per 1ms frame
-     *
-     * @param data    Raw feedback data from endpoint
-     * @param length  Number of bytes in data (3 for UAC1, 4 for UAC2)
-     * @param version UAC version for correct parsing
+     * @param sampleRateHz       Nominal sample rate (Hz)
+     * @param packetsPerSecond   Real data-EP service cadence (from
+     *                           TransferConfig: speed + bInterval). NOT
+     *                           assumed from the UAC version.
      */
-    void processFeedback(const uint8_t* data, int length, UacVersion version) {
-        float feedbackRate = parseFeedbackValue(data, length, version);
-
-        if (feedbackRate <= 0.0f) {
-            return;  // Invalid feedback data
-        }
-
-        // Store in circular buffer for moving average
-        mFeedbackBuffer[mFeedbackIndex] = feedbackRate;
-        mFeedbackIndex = (mFeedbackIndex + 1) % FEEDBACK_BUFFER_SIZE;
-
-        if (mSamplesReceived < FEEDBACK_BUFFER_SIZE) {
-            mSamplesReceived++;
-        }
-
-        // Calculate moving average (noise reduction)
-        float avgRate = 0.0f;
-        int samples = std::min(mSamplesReceived, FEEDBACK_BUFFER_SIZE);
-        for (int i = 0; i < samples; ++i) {
-            avgRate += mFeedbackBuffer[i];
-        }
-        avgRate /= static_cast<float>(samples);
-
-        // Calculate expected rate based on USB speed
-        float expectedRate;
-        if (version == UacVersion::UAC_2_0) {
-            // High-Speed: samples per microframe
-            expectedRate = static_cast<float>(mNominalSampleRate) / 8000.0f;
-        } else {
-            // Full-Speed: samples per frame
-            expectedRate = static_cast<float>(mNominalSampleRate) / 1000.0f;
-        }
-
-        // PID adjustment
-        float adjustment = mPid.calculate(expectedRate, avgRate);
-        mFrameAdjustment.store(adjustment, std::memory_order_release);
-
-        // Calculate actual sample rate for monitoring
-        float actualRate;
-        if (version == UacVersion::UAC_2_0) {
-            actualRate = avgRate * 8000.0f;  // Convert from samples/microframe
-        } else {
-            actualRate = avgRate * 1000.0f;  // Convert from samples/frame
-        }
-        mCurrentRate.store(actualRate, std::memory_order_relaxed);
-
-        // Update statistics
-        float drift = actualRate - static_cast<float>(mNominalSampleRate);
-        mDriftPpm.store((drift / mNominalSampleRate) * 1000000.0f,
-                       std::memory_order_relaxed);
-    }
-
-    /**
-     * Get adjusted frame count for the next USB packet.
-     *
-     * Call this before filling each output USB transfer.
-     * The returned value accounts for clock drift via the PID controller.
-     *
-     * @param nominalFrames  Nominal frames per packet (e.g., 48 for 48kHz/1ms)
-     * @return               Adjusted frame count (may be ±1-2 from nominal)
-     */
-    int getAdjustedFrameCount(int nominalFrames) {
-        float adjustment = mFrameAdjustment.load(std::memory_order_acquire);
-
-        // Accumulate fractional adjustments
-        mFractionalAccumulator += adjustment;
-
-        // Extract integer part when accumulator crosses ±1
-        int intAdjustment = 0;
-        if (mFractionalAccumulator >= 1.0f) {
-            intAdjustment = static_cast<int>(mFractionalAccumulator);
-            mFractionalAccumulator -= static_cast<float>(intAdjustment);
-        } else if (mFractionalAccumulator <= -1.0f) {
-            intAdjustment = static_cast<int>(mFractionalAccumulator);
-            mFractionalAccumulator -= static_cast<float>(intAdjustment);
-        }
-
-        // Clamp to prevent extreme adjustments
-        int result = nominalFrames + intAdjustment;
-        return std::clamp(result, nominalFrames - 4, nominalFrames + 4);
-    }
-
-    /**
-     * Reset the controller state.
-     *
-     * Call when starting a new stream or after device reconnect.
-     */
-    void reset() {
-        mPid.reset();
-        mFractionalAccumulator = 0.0f;
-        mFeedbackIndex = 0;
-        mSamplesReceived = 0;
-        mFrameAdjustment.store(0.0f, std::memory_order_relaxed);
-
-        float expectedRate = static_cast<float>(mNominalSampleRate) / 8000.0f;
-        mFeedbackBuffer.fill(expectedRate);
-    }
-
-    // =========================================================================
-    // Monitoring/Debug
-    // =========================================================================
-
-    /**
-     * Get current measured sample rate.
-     */
-    float getCurrentSampleRate() const {
-        return mCurrentRate.load(std::memory_order_relaxed);
-    }
-
-    /**
-     * Get clock drift in parts per million (PPM).
-     *
-     * Positive = device is faster than nominal
-     * Negative = device is slower than nominal
-     * Normal range: ±50 PPM for quality devices
-     */
-    float getDriftPpm() const {
-        return mDriftPpm.load(std::memory_order_relaxed);
-    }
-
-    /**
-     * Get current frame adjustment value.
-     */
-    float getCurrentAdjustment() const {
-        return mFrameAdjustment.load(std::memory_order_relaxed);
-    }
-
-    /**
-     * Check if controller has received enough feedback data.
-     */
-    bool isStable() const {
-        return mSamplesReceived >= FEEDBACK_BUFFER_SIZE;
-    }
-
-    /**
-     * Set nominal sample rate.
-     */
-    void setNominalSampleRate(int sampleRate) {
-        mNominalSampleRate = sampleRate;
+    void configure(int sampleRateHz, int packetsPerSecond) {
+        mSampleRate = sampleRateHz;
+        mPacketsPerSecond = std::max(1, packetsPerSecond);
+        mNominalFramesPerPacket =
+            double(sampleRateHz) / double(mPacketsPerSecond);
         reset();
     }
 
     /**
-     * Set the USB Audio Class version of the connected device.
+     * Process feedback from the explicit USB feedback endpoint.
      *
-     * Stored for diagnostics and to allow callers to verify the wire
-     * format separately from the per-call `version` parameter of
-     * processFeedback(). Resets PID state on actual change so a stale
-     * convergence from a previous device doesn't bleed into the new one.
+     * UAC 1.0 (Full-Speed): 10.14 fixed point, 3 bytes — samples per 1 ms frame
+     * UAC 2.0 (High-Speed): 16.16 fixed point, 4 bytes — samples per 125 µs
+     *                       microframe
+     *
+     * Ff is converted to frames-per-DATA-PACKET via the real cadence:
+     *
+     *   unitsPerSecond = 1000 (UAC1)  |  8000 (UAC2)
+     *   target = Ff * (unitsPerSecond / packetsPerSecond)
+     *
+     * @param data    Raw feedback bytes
+     * @param length  Byte count (3 for UAC1, 4 for UAC2)
+     * @param version UAC version for correct parsing
+     */
+    void processFeedback(const uint8_t* data, int length, UacVersion version) {
+        const double ff = parseFeedbackValue(data, length, version);
+        if (ff <= 0.0) {
+            return;  // malformed / too-short payload
+        }
+        const double unitsPerSecond =
+            (version == UacVersion::UAC_2_0) ? 8000.0 : 1000.0;
+        const double target = ff * (unitsPerSecond / double(mPacketsPerSecond));
+        applyTarget(target, kFeedbackEmaAlpha);
+    }
+
+    /**
+     * Feed an externally measured frames-per-output-packet value (implicit
+     * feedback, 0.2). Same validation + EMA path as explicit feedback, but a
+     * gentler alpha because the measurement window is long and already clean.
+     */
+    void setMeasuredFramesPerPacket(double framesPerPacket) {
+        applyTarget(framesPerPacket, kMeasuredEmaAlpha);
+    }
+
+    /**
+     * Get the integer frame count to use for every packet of the next output
+     * transfer fill.
+     *
+     * The smoothed fractional target is integrated by a pure accumulator. The
+     * caller applies the returned value uniformly to all `packetCount` packets
+     * of the transfer, so the accumulator is advanced by `packetCount * target`
+     * and the integer is distributed across the packets (the per-packet
+     * remainder is carried back into the accumulator — no rounding bias).
+     *
+     * @param nominalFrames  Nominal integer frames per packet (e.g. 48)
+     * @param packetCount    Packets in this transfer fill (>= 1)
+     * @return               Per-packet frame count, clamped to
+     *                       nominalFrames ± kClockAdjustFramesMax.
+     */
+    int getAdjustedFrameCount(int nominalFrames, int packetCount) {
+        if (packetCount < 1) packetCount = 1;
+
+        const double target = mHasMeasurement.load(std::memory_order_acquire)
+            ? mTargetFramesPerPacket.load(std::memory_order_acquire)
+            : mNominalFramesPerPacket;
+
+        mAccum += target * double(packetCount);
+
+        // floor(mAccum) — mAccum stays positive in steady state, but guard
+        // with std::floor so a transient negative residue still truncates
+        // toward -inf consistently.
+        double totalF = std::floor(mAccum);
+        mAccum -= totalF;
+        long long total = static_cast<long long>(totalF);
+
+        long long perPacket = total / packetCount;
+        long long remainder = total - perPacket * packetCount;
+        // Carry the undistributable remainder back so it lands next fill.
+        mAccum += double(remainder);
+
+        const long long lo = nominalFrames - usb::kClockAdjustFramesMax;
+        const long long hi = nominalFrames + usb::kClockAdjustFramesMax;
+        int frames = static_cast<int>(perPacket);
+        if (perPacket < lo) {
+            mAccum += double(perPacket - lo) * packetCount;
+            frames = static_cast<int>(lo);
+        } else if (perPacket > hi) {
+            mAccum += double(perPacket - hi) * packetCount;
+            frames = static_cast<int>(hi);
+        }
+
+        // Anti-windup: keep the catch-up residue bounded so a transient can't
+        // produce a long burst of clamped packets after it clears.
+        mAccum = std::clamp(mAccum,
+                            -2.0 * usb::kClockAdjustFramesMax,
+                            +2.0 * usb::kClockAdjustFramesMax);
+        return frames;
+    }
+
+    /**
+     * Reset to nominal (no measurement). Call on stream start / device change.
+     */
+    void reset() {
+        mAccum = 0.0;
+        mHasMeasurement.store(false, std::memory_order_release);
+        mTargetFramesPerPacket.store(mNominalFramesPerPacket,
+                                     std::memory_order_release);
+        mCurrentRate.store(static_cast<float>(mSampleRate),
+                           std::memory_order_relaxed);
+        mDriftPpm.store(0.0f, std::memory_order_relaxed);
+        mFrameAdjustment.store(0.0f, std::memory_order_relaxed);
+    }
+
+    // =========================================================================
+    // Monitoring / Debug (same signatures as before for stats consumers)
+    // =========================================================================
+
+    /** Current measured sample rate (Hz), derived from the EMA target. */
+    float getCurrentSampleRate() const {
+        return mCurrentRate.load(std::memory_order_relaxed);
+    }
+
+    /** Clock drift in PPM (positive = device faster than nominal). */
+    float getDriftPpm() const {
+        return mDriftPpm.load(std::memory_order_relaxed);
+    }
+
+    /** Current fractional frame adjustment (target − nominal), for stats. */
+    float getCurrentAdjustment() const {
+        return mFrameAdjustment.load(std::memory_order_relaxed);
+    }
+
+    /** True once at least one valid measurement has been integrated. */
+    bool isStable() const {
+        return mHasMeasurement.load(std::memory_order_acquire);
+    }
+
+    /** Count of feedback/measurement values rejected by the ±10 % gate. */
+    uint32_t getFeedbackRejectedCount() const {
+        return mFeedbackRejected.load(std::memory_order_relaxed);
+    }
+
+    /** Adjust nominal sample rate, keeping the current cadence. */
+    void setNominalSampleRate(int sampleRate) {
+        configure(sampleRate, mPacketsPerSecond);
+    }
+
+    /**
+     * Set the UAC version of the connected device. Resets state on an actual
+     * change so a stale convergence from a previous device can't bleed in.
      */
     void setUacVersion(UacVersion version) {
         if (mUacVersion != version) {
@@ -364,50 +244,89 @@ public:
 
     UacVersion getUacVersion() const { return mUacVersion; }
 
+    /** Nominal frames-per-packet (fractional), for tests / diagnostics. */
+    double getNominalFramesPerPacket() const { return mNominalFramesPerPacket; }
+
 private:
+    static constexpr int kDefaultPacketsPerSecond = 1000;
+    static constexpr double kFeedbackEmaAlpha = 0.10;
+    static constexpr double kMeasuredEmaAlpha = 0.05;
+    static constexpr double kMaxRelativeDeviation = 0.10;  // ±10 %
+
     /**
-     * Parse raw feedback endpoint data.
+     * Validate `target` (frames/packet) against nominal, EMA-smooth it, and
+     * publish derived stats. Rejected values are counted and leave the target
+     * untouched.
      */
-    float parseFeedbackValue(const uint8_t* data, int length, UacVersion version) {
+    void applyTarget(double target, double alpha) {
+        if (target <= 0.0 || mNominalFramesPerPacket <= 0.0) {
+            mFeedbackRejected.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        const double rel =
+            std::abs(target / mNominalFramesPerPacket - 1.0);
+        if (rel > kMaxRelativeDeviation) {
+            mFeedbackRejected.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        const double prev = mHasMeasurement.load(std::memory_order_acquire)
+            ? mTargetFramesPerPacket.load(std::memory_order_acquire)
+            : mNominalFramesPerPacket;
+        const double ema = prev + alpha * (target - prev);
+
+        mTargetFramesPerPacket.store(ema, std::memory_order_release);
+        mHasMeasurement.store(true, std::memory_order_release);
+
+        const double rate = ema * double(mPacketsPerSecond);
+        mCurrentRate.store(static_cast<float>(rate), std::memory_order_relaxed);
+        mDriftPpm.store(
+            static_cast<float>((rate - mSampleRate) / mSampleRate * 1.0e6),
+            std::memory_order_relaxed);
+        mFrameAdjustment.store(
+            static_cast<float>(ema - mNominalFramesPerPacket),
+            std::memory_order_relaxed);
+    }
+
+    /**
+     * Parse raw feedback endpoint data into the device's reported samples per
+     * service interval (samples/ms-frame for UAC1, samples/microframe UAC2).
+     */
+    double parseFeedbackValue(const uint8_t* data, int length,
+                              UacVersion version) const {
         if (version == UacVersion::UAC_1_0 && length >= 3) {
-            // 10.14 fixed point format (3 bytes, little-endian)
-            // 10 bits integer, 14 bits fractional
+            // 10.14 fixed point (3 bytes, little-endian)
             uint32_t raw = static_cast<uint32_t>(data[0]) |
                           (static_cast<uint32_t>(data[1]) << 8) |
                           (static_cast<uint32_t>(data[2]) << 16);
-            return static_cast<float>(raw) / 16384.0f;  // 2^14
+            return static_cast<double>(raw) / 16384.0;  // 2^14
         }
-        else if (version == UacVersion::UAC_2_0 && length >= 4) {
-            // 16.16 fixed point format (4 bytes, little-endian)
-            // 16 bits integer, 16 bits fractional
+        if (version == UacVersion::UAC_2_0 && length >= 4) {
+            // 16.16 fixed point (4 bytes, little-endian)
             uint32_t raw = static_cast<uint32_t>(data[0]) |
                           (static_cast<uint32_t>(data[1]) << 8) |
                           (static_cast<uint32_t>(data[2]) << 16) |
                           (static_cast<uint32_t>(data[3]) << 24);
-            return static_cast<float>(raw) / 65536.0f;  // 2^16
+            return static_cast<double>(raw) / 65536.0;  // 2^16
         }
-
-        return 0.0f;  // Invalid
+        return 0.0;  // invalid
     }
 
-    static constexpr int FEEDBACK_BUFFER_SIZE = 16;
-
-    int mNominalSampleRate;
+    int mSampleRate = 48000;
+    int mPacketsPerSecond = kDefaultPacketsPerSecond;
+    double mNominalFramesPerPacket = 48.0;
     UacVersion mUacVersion = UacVersion::UNKNOWN;
-    PIDController mPid;
 
-    // Circular buffer for feedback averaging
-    std::array<float, FEEDBACK_BUFFER_SIZE> mFeedbackBuffer{};
-    int mFeedbackIndex = 0;
-    int mSamplesReceived = 0;
+    // Fractional accumulator — owned by the transfer thread only.
+    double mAccum = 0.0;
 
-    // Fractional accumulator for sub-sample precision
-    float mFractionalAccumulator = 0.0f;
-
-    // Atomic state for cross-thread access
-    std::atomic<float> mFrameAdjustment{0.0f};
+    // Cross-thread state.
+    std::atomic<double> mTargetFramesPerPacket{48.0};
+    std::atomic<bool> mHasMeasurement{false};
     std::atomic<float> mCurrentRate{48000.0f};
     std::atomic<float> mDriftPpm{0.0f};
+    std::atomic<float> mFrameAdjustment{0.0f};
+    std::atomic<uint32_t> mFeedbackRejected{0};
 };
 
 // =============================================================================

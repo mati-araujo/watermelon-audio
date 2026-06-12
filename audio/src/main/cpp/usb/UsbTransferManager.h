@@ -42,6 +42,7 @@
 #include "ChannelMap.h"
 #include "RecoveryPolicy.h"
 #include "ResizableRingBuffer.h"
+#include "ImplicitFeedbackEstimator.h"
 #include "../dsp/LockFreeRingBuffer.h"
 #include "../backends/ClockController.h"
 
@@ -151,9 +152,12 @@ struct TransferStatistics {
     std::atomic<uint64_t> underruns{0};
     std::atomic<uint64_t> overruns{0};
 
-    // Latency tracking
+    // Latency tracking (output)
     std::atomic<float> currentLatencyMs{0.0f};
     std::atomic<float> avgLatencyMs{0.0f};
+    // Latency tracking (input) — host-side software latency of the capture
+    // path. Kept separate so getInputLatencyMs() stops aliasing the output.
+    std::atomic<float> currentInputLatencyMs{0.0f};
 
     // Ring buffer state
     std::atomic<int> ringBufferLevel{0};       // Current fill level (samples)
@@ -175,6 +179,7 @@ struct TransferStatistics {
         overruns.store(0);
         currentLatencyMs.store(0.0f);
         avgLatencyMs.store(0.0f);
+        currentInputLatencyMs.store(0.0f);
         ringBufferLevel.store(0);
         ringBufferFillPct.store(0.0f);
         currentSampleRateHz.store(0.0f);
@@ -254,6 +259,25 @@ public:
      * @param endpoint Feedback endpoint info (from descriptor parser)
      */
     void setFeedbackEnabled(bool enabled, const UsbFeedbackEndpoint* endpoint = nullptr);
+
+    /**
+     * Enable/disable implicit feedback (0.2, hallazgo C2).
+     *
+     * When enabled, the manager measures the real rate of the CAPTURE stream
+     * (synchronous to the device clock) over a window of service intervals and
+     * forwards it to the ClockController as the output target. Use this for
+     * full-duplex asynchronous interfaces that have no explicit feedback EP.
+     *
+     * Mutually exclusive in effect with an explicit feedback endpoint: the
+     * caller should only enable one source. Requires an active input stream;
+     * with no capture the controller simply stays at the fractional nominal.
+     */
+    void setImplicitFeedbackEnabled(bool enabled) {
+        mImplicitFeedbackActive = enabled;
+        mImplicitFeedbackEstimator.reset();
+    }
+
+    bool isImplicitFeedbackEnabled() const { return mImplicitFeedbackActive; }
 
     /**
      * Tell the transfer manager which UAC version the device implements.
@@ -589,6 +613,13 @@ private:
     // length (3 bytes for UAC1, 4 for UAC2) and is forwarded to the
     // ClockController so processFeedback() doesn't have to guess.
     UacVersion mUacVersion = UacVersion::UNKNOWN;
+
+    // Implicit feedback (0.2). When active, processInputTransfer() feeds the
+    // measured capture rate into the estimator; closed windows drive
+    // ClockController::setMeasuredFramesPerPacket(). Touched only from the
+    // event thread, so no atomics beyond the activation flag.
+    bool mImplicitFeedbackActive = false;
+    ImplicitFeedbackEstimator mImplicitFeedbackEstimator;
 
     // Output transfers (playback)
     std::vector<std::unique_ptr<IsoTransfer>> mOutputTransfers;
