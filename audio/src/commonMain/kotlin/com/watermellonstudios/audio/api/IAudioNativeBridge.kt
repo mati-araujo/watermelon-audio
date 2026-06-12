@@ -137,4 +137,17 @@ interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter {
     fun selectBackend(backendId: Int): Boolean
     fun getCurrentBackendType(): Int
     fun isUsbBackendAvailable(): Boolean
+
+    /**
+     * Select the USB latency profile (Fase 1). Re-parametrizes the USB
+     * transfer pipeline (iso transfer duration, URBs in flight, pacer jitter
+     * budget, DSP block size, ring capacity).
+     *
+     * Latched and applied on the next USB stream start — same semantics as the
+     * USB streaming mode. A running stream keeps its current profile until it is
+     * restarted. Fails only if there is no USB backend.
+     */
+    fun setUsbLatencyProfile(
+        profile: com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
+    ): Result<Unit>
 }

@@ -2251,6 +2251,34 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         )
 
     /**
+     * Select the USB latency profile (Fase 1). Only valid while USB streaming
+     * is stopped; the native layer rejects the change otherwise.
+     */
+    override fun setUsbLatencyProfile(
+        profile: com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
+    ): Result<Unit> {
+        val ok = nativeSetUsbLatencyProfile(profile.ordinal)
+        return if (ok) Result.success(Unit)
+        else Result.failure(
+            IllegalStateException("setUsbLatencyProfile failed (stream running or no USB backend)")
+        )
+    }
+
+    /**
+     * Fine-grained USB latency tuning (Fase 1). Advanced override of the named
+     * profile; only valid while stopped. See native UsbLatencyTuning.
+     */
+    fun setUsbLatencyTuning(
+        targetTransferMs: Int,
+        numTransfers: Int,
+        jitterBudgetMs: Int,
+        dspBlockFrames: Int,
+        ringCapacityMs: Int,
+    ): Boolean = nativeSetUsbLatencyTuning(
+        targetTransferMs, numTransfers, jitterBudgetMs, dspBlockFrames, ringCapacityMs
+    )
+
+    /**
      * Select a playback altsetting+format to apply on the next USB start.
      */
     fun selectUsbAltsetting(interfaceNumber: Int, alternateSetting: Int, formatIndex: Int): Boolean =
@@ -2361,6 +2389,14 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         minChannels: Int,
         requireFeedback: Boolean,
         profile: Int
+    ): Boolean
+    private external fun nativeSetUsbLatencyProfile(profile: Int): Boolean
+    private external fun nativeSetUsbLatencyTuning(
+        targetTransferMs: Int,
+        numTransfers: Int,
+        jitterBudgetMs: Int,
+        dspBlockFrames: Int,
+        ringCapacityMs: Int
     ): Boolean
     private external fun nativeSelectUsbAltsetting(interfaceNumber: Int, alternateSetting: Int, formatIndex: Int): Boolean
     private external fun nativeSelectUsbClockSource(clockSourceId: Int): Boolean

@@ -1649,7 +1649,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartU
     }
 
     backend->setSampleRate(sampleRate);
-    backend->setBufferSize(256);
+    // DSP block size comes from the active latency profile (Fase 1): the
+    // tuning's dspBlockFrames is stored in mRequestedBufferSize by
+    // setLatencyTuning/setLatencyProfile. Defaults to 256 (SAFE) when no
+    // profile was set, so removing the old hardcoded setBufferSize(256) is
+    // behavior-preserving for existing callers while letting LOW_LATENCY use
+    // its 96-frame block.
 
     auto result = backend->start();
     if (result != watermelon_audio::BackendResult::OK) {
@@ -1851,6 +1856,47 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsb
     LOGI("nativeSetUsbStreamPreference: rate=%d minCh=%d requireFeedback=%d profile=%d",
          pref.requiredSampleRate, pref.minChannels,
          pref.requireFeedback ? 1 : 0, profile);
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsbLatencyProfile(
+    JNIEnv* env, jobject thiz, jint profile) {
+    // Persist on the BackendManager (not the LibusbBackend directly): it
+    // survives backend recreation and is re-applied via applyConfigToBackend,
+    // exactly like the USB streaming mode (setFullDuplexEnabled). Consumed by
+    // setupTransferManager() on the next start().
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    const auto p = (profile == 1)
+        ? watermelon_audio::usb::UsbLatencyProfile::LOW_LATENCY
+        : watermelon_audio::usb::UsbLatencyProfile::SAFE;
+    manager.setLatencyProfile(p);
+    LOGI("nativeSetUsbLatencyProfile: profile=%d", static_cast<int>(p));
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsbLatencyTuning(
+    JNIEnv* env, jobject thiz, jint targetTransferMs, jint numTransfers,
+    jint jitterBudgetMs, jint dspBlockFrames, jint ringCapacityMs) {
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    auto* backend = manager.getLibusbBackend();
+    if (!backend) {
+        LOGW("nativeSetUsbLatencyTuning: no LibusbBackend");
+        return JNI_FALSE;
+    }
+    // Latched; consumed on the next start() (see nativeSetUsbLatencyProfile).
+    watermelon_audio::usb::UsbLatencyTuning tuning;
+    tuning.targetTransferMs = static_cast<int>(targetTransferMs);
+    tuning.numTransfers     = static_cast<int>(numTransfers);
+    tuning.jitterBudgetMs   = static_cast<int>(jitterBudgetMs);
+    tuning.dspBlockFrames   = static_cast<int>(dspBlockFrames);
+    tuning.ringCapacityMs   = static_cast<int>(ringCapacityMs);
+    backend->setLatencyTuning(tuning);
+    LOGI("nativeSetUsbLatencyTuning: targetTransferMs=%d numTransfers=%d "
+         "jitterBudgetMs=%d dspBlockFrames=%d ringCapacityMs=%d",
+         tuning.targetTransferMs, tuning.numTransfers, tuning.jitterBudgetMs,
+         tuning.dspBlockFrames, tuning.ringCapacityMs);
     return JNI_TRUE;
 }
 

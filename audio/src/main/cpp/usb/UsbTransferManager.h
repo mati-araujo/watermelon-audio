@@ -36,6 +36,7 @@
 #include <libusb.h>
 
 #include "UsbAudioTypes.h"
+#include "LatencyProfile.h"
 #include "AudioFormatConverter.h"
 #include "UsbLatencyProfiler.h"
 #include "AdaptiveBufferController.h"
@@ -95,6 +96,13 @@ struct TransferConfig {
     int transferTimeoutMs = 100;        // Timeout for USB transfers
     int endpointInterval = 1;           // Active data endpoint bInterval
     int packetsPerSecond = 1000;        // Polling cadence derived from speed+bInterval
+
+    // Output ring pacer margin, in milliseconds, ABOVE one transfer worth of
+    // audio (Fase 1, L2). The pacer target is framesPerTransfer + this budget,
+    // so the margin tracks real OS scheduling jitter instead of scaling with
+    // the transfer size. 24 ms reproduces the historical SAFE target exactly
+    // (8 ms transfer + 24 ms = 32 ms); LOW_LATENCY uses 4 ms.
+    int jitterBudgetMs = 24;
 
     // ========== Output (playback) calculations ==========
     int bytesPerFrame() const {
@@ -400,29 +408,27 @@ public:
      * running 1:1 with transfer-completion wakes (125/s at 48 kHz)
      * instead of 187.5/s nominal, causing sustained ring starvation.
      *
-     * Value = (numTransfers + 1) full transfers worth of audio, i.e.
-     * one full round of in-flight transfers PLUS one spare transfer
-     * of headroom for OS scheduling jitter. At 48 kHz stereo with
-     * the default 3 in-flight transfers of 8 ms each this is
-     * 4 × 768 = 3072 samples ≈ 32 ms of latency margin, of which
-     * ~24 ms is absorber for transient DSP slowdowns.
+     * Value = one transfer worth of audio (so the ring can always feed the
+     * next URB) PLUS a jitter budget expressed in absolute milliseconds
+     * (mConfig.jitterBudgetMs). Pinning the margin to wall-clock jitter rather
+     * than to a multiple of the transfer size is the L2 fix: with 8 ms
+     * transfers the historical "(numTransfers+1) transfers" margin happened to
+     * be 24 ms of absorber, but with 1 ms transfers that same formula would
+     * collapse to ~5 ms by accident. Here SAFE keeps jitterBudgetMs=24 →
+     * 8 + 24 = 32 ms (bit-identical to the old target), and LOW_LATENCY uses
+     * 1 + 4 = 5 ms.
      *
-     * The +1 headroom matters in FULL_DUPLEX mode where the DSP is
-     * already running at the nominal rate (no spare capacity) — any
-     * scheduling jitter that pushes a callback past its 5.3 ms budget
-     * creates an instantaneous deficit that must be absorbed by the
-     * existing ring level. With just numTransfers of margin the
-     * absorber only tolerates ~13 ms of slowdown before the ring
-     * reaches the underrun threshold (768 samples); the +1 bumps
-     * that to ~21 ms, which covers the Android kernel's typical
-     * scheduling jitter envelope under load.
+     * The jitter budget is the absorber for transient DSP slowdowns: any
+     * callback that overruns its block budget (Android scheduling, thermal
+     * throttle, cache miss) drains the ring, and the budget sets how much of
+     * that the ring tolerates before underrunning. Read per-iteration by the
+     * DSP loop so Fase 2 can make it adaptive without restarting the stream;
+     * it is a pure integer calc over immutable config today.
      */
     size_t getOutputRingTargetLevel() const {
-        return static_cast<size_t>(
-            (mConfig.numTransfers + 1)
-            * mConfig.packetsPerTransfer
-            * mConfig.framesPerPacket
-            * mConfig.channelCount);
+        return outputRingTargetSamples(
+            mConfig.packetsPerTransfer, mConfig.framesPerPacket,
+            mConfig.jitterBudgetMs, mConfig.sampleRate, mConfig.channelCount);
     }
 
     /**
@@ -524,6 +530,13 @@ public:
      * Get current ring buffer size in milliseconds.
      */
     int getCurrentBufferMs() const { return mConfig.ringBufferMs; }
+
+    /**
+     * Frames per iso packet of the active stream. Used by LibusbBackend to
+     * round the DSP block size to a packet multiple (Fase 1, L3) so the input
+     * gating doesn't oscillate between 1 and 2 transfers of wait.
+     */
+    int getFramesPerPacket() const { return mConfig.framesPerPacket; }
 
 private:
     // ========================================================================

@@ -256,6 +256,15 @@ interface IUsbAudioManager {
      */
     fun setStreamPreference(preference: StreamPreference)
 
+    /**
+     * Select the USB latency profile (Fase 1). Re-parametrizes the transfer
+     * pipeline to trade buffering headroom for round-trip latency.
+     *
+     * Only valid while streaming is stopped — call before [startStreaming].
+     * Returns failure if a stream is currently running.
+     */
+    fun setLatencyProfile(profile: UsbLatencyProfile): UsbResult<Unit>
+
     // ==================== Lifecycle ====================
 
     /**

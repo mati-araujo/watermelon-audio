@@ -1136,6 +1136,35 @@ BackendResult LibusbBackend::start() {
         return BackendResult::ERROR_STREAM_FAILED;
     }
 
+    // Validate the DSP block size (Fase 1, L3). Always clamp to [16, 1024].
+    //
+    // Packet-multiple rounding (so input gating doesn't oscillate between 1 and
+    // 2 transfers of wait) is applied ONLY in a low-latency tuning, i.e. when
+    // targetTransferMs is more aggressive than SAFE. This keeps SAFE
+    // bit-identical (its 256-frame block, which is not a packet multiple, is
+    // preserved exactly — acceptance criterion #1) while still aligning the
+    // small blocks that LOW_LATENCY / custom aggressive tunings use, where the
+    // gating granularity actually matters. In practice LOW_LATENCY's 96-frame
+    // block is already a multiple of both FS (48) and HS (6) packet sizes, so
+    // this only ever adjusts arbitrary custom blocks.
+    {
+        const int framesPerPacket = mTransferManager
+            ? mTransferManager->getFramesPerPacket() : 0;
+        const bool lowLatencyRegime =
+            mTuning.targetTransferMs < usb::UsbLatencyTuning::safe().targetTransferMs;
+        int block = std::clamp(mRequestedBufferSize, 16, 1024);
+        if (lowLatencyRegime && framesPerPacket > 0 && framesPerPacket <= block) {
+            const int rounded = (block / framesPerPacket) * framesPerPacket;
+            if (rounded >= 16) block = rounded;
+        }
+        if (block != mRequestedBufferSize) {
+            LOGI("DSP block %d -> %d (clamped to [16,1024]%s)",
+                 mRequestedBufferSize, block,
+                 lowLatencyRegime ? ", rounded to packet multiple" : "");
+            mRequestedBufferSize = block;
+        }
+    }
+
     // Pre-allocate DSP buffers BEFORE starting the RT thread (P0-4 fix)
     {
         const int framesPerBlock = mRequestedBufferSize;
@@ -1455,7 +1484,8 @@ bool LibusbBackend::setupTransferManager() {
     const auto timing = usb::calculateIsoTransferTiming(
         mRequestedSampleRate,
         isHighSpeed,
-        static_cast<int>(configInterface->dataEndpoint.interval));
+        static_cast<int>(configInterface->dataEndpoint.interval),
+        mTuning.targetTransferMs);
     const char* speedName =
         (speed == LIBUSB_SPEED_LOW)        ? "LOW"   :
         (speed == LIBUSB_SPEED_FULL)       ? "FULL"  :
@@ -1473,19 +1503,23 @@ bool LibusbBackend::setupTransferManager() {
     config.endpointInterval = timing.endpointInterval;
     config.packetsPerSecond = timing.packetsPerSecond;
     config.framesPerPacket = timing.framesPerPacket;
-    // Keep ~8 ms of audio per libusb transfer in both speed classes so the
-    // event-loop cadence is constant regardless of USB speed.
+    // Transfer duration comes from the active latency tuning (Fase 1):
+    // SAFE keeps ~8 ms/transfer, LOW_LATENCY drops to 1 ms. packetsPerTransfer
+    // is already derived from targetTransferMs inside calculateIsoTransferTiming.
     config.packetsPerTransfer = timing.packetsPerTransfer;
-    config.numTransfers = 3;                       // Triple buffering
+    config.numTransfers = mTuning.numTransfers;
+    config.jitterBudgetMs = mTuning.jitterBudgetMs;
 
     LOGI("USB speed: %s (libusb=%d), bInterval=%d, %d packets/sec, "
-         "%d frames/packet, %d packets/xfer",
+         "%d frames/packet, %d packets/xfer, %d transfers, "
+         "targetTransferMs=%d, jitterBudgetMs=%d",
          speedName, speed, config.endpointInterval, config.packetsPerSecond,
-         config.framesPerPacket, config.packetsPerTransfer);
+         config.framesPerPacket, config.packetsPerTransfer, config.numTransfers,
+         mTuning.targetTransferMs, mTuning.jitterBudgetMs);
 
-    // Ring buffer size: start with reduced default (100ms instead of 200ms)
-    // Adaptive buffer controller may adjust this based on system performance
-    config.ringBufferMs = 100;
+    // Ring capacity is headroom for USB jitter, NOT latency (the pacer fixes
+    // latency). Comes from the active tuning: SAFE=100 ms, LOW_LATENCY=50 ms.
+    config.ringBufferMs = mTuning.ringCapacityMs;
 
     if (!mTransferManager->configure(config)) {
         LOGE("Failed to configure transfer manager");
@@ -1630,9 +1664,11 @@ void LibusbBackend::dspThreadFunc() {
     //
     // Value comes from the transfer manager so it tracks any adaptive-
     // buffer reconfiguration.
-    const size_t outputRingTarget = (mSelectedPlayback && mTransferManager)
-        ? mTransferManager->getOutputRingTargetLevel()
-        : 0;
+    //
+    // Read per-iteration inside the loop (not cached here) so Fase 2 can make
+    // the jitter budget atomic and adjust the target live without a stream
+    // restart (L2). Today it's a pure integer calc over immutable config, so
+    // the per-iteration cost is negligible.
 
     // Adaptive buffer evaluation counter
     int callbackCount = 0;
@@ -1738,6 +1774,9 @@ void LibusbBackend::dspThreadFunc() {
         // so the old `availableToWrite >= outputSamples` check was
         // trivially true and the DSP ended up paced purely by wake
         // arrival rate.
+        const size_t outputRingTarget = mSelectedPlayback
+            ? mTransferManager->getOutputRingTargetLevel()
+            : 0;
         bool outputReady = !mSelectedPlayback ||
             (mTransferManager->getOutputRingLevel() < outputRingTarget);
         bool inputReady = !mSelectedCapture ||
@@ -1876,6 +1915,12 @@ void LibusbBackend::dspThreadFunc() {
             size_t ringLvlMin = (lastOutputRingLevelMin == SIZE_MAX)
                 ? 0 : lastOutputRingLevelMin;
 
+#if WMA_USB_DIAG
+            // Verbose per-window dump of the engine-output fingerprint
+            // (peaks/mean/zero-crossings). Gated with WMA_USB_DIAG since its
+            // fields come from the per-callback fingerprint scan above, which
+            // is itself diag-only. The cheap counters (underruns delta, ring
+            // min/max) stay in the always-on clock-health line below.
             wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
                 "USB_DSP: hasCapture=%d inputPtr=%p outputPtr=%p "
                 "frames=%d streamMode=%d | read ok=%d fail=%d ratio=%.2f "
@@ -1891,6 +1936,9 @@ void LibusbBackend::dspThreadFunc() {
                 mean, lastOutputZeroCrossings, lastOutputFirst4Bits,
                 ringLvlMin, lastOutputRingLevelMax,
                 static_cast<unsigned long long>(underrunsDelta));
+#else
+            (void)ioTotal; (void)mean; (void)ringLvlMin; (void)underrunsDelta;
+#endif  // WMA_USB_DIAG
 
             // Clock-health line (Fase 0): drift, effective rate and xrun
             // deltas in one place so the 30-min acceptance run is verifiable
@@ -1976,7 +2024,11 @@ void LibusbBackend::dspThreadFunc() {
         // running mean, zero-crossings, and the raw bits of outputBuffer[0].
         // Together these let us compare session-to-session and prove whether
         // the engine output itself differs or the corruption is downstream.
-        // Bounded scan (≤ 512 samples = ~256 frames) — RT cost is negligible.
+        // Bounded scan (≤ 512 samples = ~256 frames). Gated behind
+        // WMA_USB_DIAG (Fase 1, L8): this runs EVERY callback, so at 1 ms
+        // transfers (1000 callbacks/s) it stops being negligible and pollutes
+        // the CPU measurement. OFF in release.
+#if WMA_USB_DIAG
         if (outputPtr && outputSamples > 0) {
             const size_t scanSamples = std::min(outputSamples, size_t(512));
             float peak = 0.0f;
@@ -2004,6 +2056,7 @@ void LibusbBackend::dspThreadFunc() {
             // Helps detect "engine wrote literal 0.0 / NaN / denormal".
             std::memcpy(&lastOutputFirst4Bits, &outputPtr[0], sizeof(uint32_t));
         }
+#endif  // WMA_USB_DIAG
 
         // Write to output buffer if playback is enabled
         if (mSelectedPlayback) {

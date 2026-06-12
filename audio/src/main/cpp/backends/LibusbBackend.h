@@ -32,6 +32,7 @@
 #include "../usb/UsbVolumeControl.h"
 #include "../usb/AltsettingSelector.h"
 #include "../usb/StreamPreference.h"
+#include "../usb/LatencyProfile.h"
 
 #include <libusb.h>
 #include <memory>
@@ -245,6 +246,37 @@ public:
     DeviceCapabilities getCapabilities() const;
 
     /**
+     * Set the USB latency tuning (Fase 1). Re-parametrizes the transfer
+     * pipeline (iso transfer duration, URBs in flight, pacer jitter budget,
+     * DSP block size, ring capacity) without structural changes.
+     *
+     * Must be called while stopped — the tuning is consumed by
+     * setupTransferManager() on the next start(). The caller (JNI layer) is
+     * responsible for rejecting the change when isRunning().
+     *
+     * LOW_LATENCY additionally forces adaptive buffering off (it operates on
+     * ring capacity, irrelevant to latency, and would fight the fixed target
+     * until Fase 2).
+     */
+    void setLatencyTuning(const usb::UsbLatencyTuning& tuning) {
+        mTuning = tuning;
+        // dspBlockFrames is the DSP callback block; keep mRequestedBufferSize
+        // (the existing knob the DSP loop reads) in sync so both routes agree.
+        mRequestedBufferSize = tuning.dspBlockFrames;
+    }
+
+    /** Convenience: apply the tuning preset for a named profile. */
+    void setLatencyProfile(usb::UsbLatencyProfile profile) {
+        setLatencyTuning(usb::UsbLatencyTuning::forProfile(profile));
+        if (profile == usb::UsbLatencyProfile::LOW_LATENCY) {
+            setAdaptiveBufferingEnabled(false);
+        }
+    }
+
+    /** Current latency tuning (defaults to SAFE). */
+    const usb::UsbLatencyTuning& getLatencyTuning() const { return mTuning; }
+
+    /**
      * Set a stream preference to guide altsetting selection.
      * Takes effect on the next start() call. If not set, the default
      * professional preset is used (prefer highest bit depth, async sync).
@@ -408,6 +440,10 @@ private:
 
     // User-provided stream preference for altsetting scoring.
     std::optional<usb::StreamPreference> mUserPreference;
+
+    // Active USB latency tuning (Fase 1). Defaults to SAFE == current behavior.
+    // Consumed by setupTransferManager() to parametrize the transfer config.
+    usb::UsbLatencyTuning mTuning = usb::UsbLatencyTuning::safe();
 
     struct ManualAltsettingSelection {
         int interfaceNumber = -1;

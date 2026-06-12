@@ -25,6 +25,7 @@
 #pragma once
 
 #include "IAudioBackend.h"
+#include "../usb/LatencyProfile.h"
 #include <memory>
 #include <mutex>
 #include <atomic>
@@ -168,6 +169,14 @@ public:
      */
     void setFullDuplexEnabled(bool enable);
 
+    /**
+     * Select the USB latency profile (Fase 1). Persisted on the manager so it
+     * survives backend recreation and is re-applied to the LibusbBackend each
+     * time it is (re)configured — same lifecycle as the streaming mode. Takes
+     * effect on the next USB stream start.
+     */
+    void setLatencyProfile(usb::UsbLatencyProfile profile);
+
     // =========================================================================
     // USB Support (Future)
     // =========================================================================
@@ -260,6 +269,7 @@ private:
     int mSampleRate = 0;
     int mBufferSize = 0;
     bool mFullDuplexEnabled = false;
+    usb::UsbLatencyProfile mLatencyProfile = usb::UsbLatencyProfile::SAFE;
 
     // USB state
     std::atomic<bool> mUsbBackendAvailable{false};

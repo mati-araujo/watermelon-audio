@@ -916,6 +916,17 @@ void wma_usb_close_device(void) {
     manager.fallbackToOboe();
 }
 
+bool wma_usb_set_latency_profile(int profile) {
+    // Persist on the BackendManager so it survives backend recreation and is
+    // re-applied at start (Fase 1) — same semantics as the USB streaming mode.
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    const auto p = (profile == 1)
+        ? watermelon_audio::usb::UsbLatencyProfile::LOW_LATENCY
+        : watermelon_audio::usb::UsbLatencyProfile::SAFE;
+    manager.setLatencyProfile(p);
+    return true;
+}
+
 /* ================================================================
  * 17. XY Mapping / Automation
  * ================================================================ */
