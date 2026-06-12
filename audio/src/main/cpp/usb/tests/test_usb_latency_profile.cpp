@@ -61,14 +61,15 @@ TEST(LatencyProfilePacer, SafeTargetMatchesHistoricalFullSpeed) {
     EXPECT_EQ(target, 1536u * 2);
 }
 
-TEST(LatencyProfilePacer, LowLatencyTargetIsFiveMs) {
-    // LOW_LATENCY HS: 1 ms transfer (8*6=48 frames) + 4 ms jitter (192 frames)
-    // = 240 frames = 5 ms @ 48k.
+TEST(LatencyProfilePacer, LowLatencyTargetFromPreset) {
+    // LOW_LATENCY HS: 1 ms transfer (8*6=48 frames) + jitterBudgetMs of margin.
+    // With the robust preset (jitterBudgetMs=8): 48 + 8*48 = 432 frames = 9 ms.
     const auto tuning = UsbLatencyTuning::lowLatency();
     const size_t target = outputRingTargetSamples(
         /*packetsPerTransfer=*/8, /*framesPerPacket=*/6,
         tuning.jitterBudgetMs, 48000, /*channelCount=*/1);
-    EXPECT_EQ(target, 240u);  // 48 + 4*48
+    EXPECT_EQ(target,
+              static_cast<size_t>(48 + tuning.jitterBudgetMs * 48));
 }
 
 TEST(LatencyProfilePacer, LowLatencyTargetAt44100) {
@@ -115,8 +116,8 @@ TEST(LatencyProfilePresets, SafeIsCurrentBehavior) {
 TEST(LatencyProfilePresets, LowLatencyKnobs) {
     const auto l = UsbLatencyTuning::lowLatency();
     EXPECT_EQ(l.targetTransferMs, 1);
-    EXPECT_EQ(l.numTransfers, 4);
-    EXPECT_EQ(l.jitterBudgetMs, 4);
+    EXPECT_EQ(l.numTransfers, 6);
+    EXPECT_EQ(l.jitterBudgetMs, 8);
     EXPECT_EQ(l.dspBlockFrames, 96);
     EXPECT_EQ(l.ringCapacityMs, 50);
 }

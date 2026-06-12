@@ -1871,7 +1871,9 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsb
         ? watermelon_audio::usb::UsbLatencyProfile::LOW_LATENCY
         : watermelon_audio::usb::UsbLatencyProfile::SAFE;
     manager.setLatencyProfile(p);
-    LOGI("nativeSetUsbLatencyProfile: profile=%d", static_cast<int>(p));
+    wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+        "USB_SET_LATENCY_PROFILE: profile=%d (0=SAFE,1=LOW_LATENCY)",
+        static_cast<int>(p));
     return JNI_TRUE;
 }
 

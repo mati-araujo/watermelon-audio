@@ -1397,6 +1397,23 @@ bool LibusbBackend::getUsbDeviceInfo(int* vendorId, int* productId) const {
 // ============================================================================
 
 bool LibusbBackend::setupTransferManager() {
+    // Fase 1: auto-select LOW_LATENCY for input-active streaming modes
+    // (CAPTURE_ONLY / FULL_DUPLEX = Input FX / Guitar FX) here, at start, where
+    // the streaming mode is already reliably set. This is race-free, unlike a
+    // profile pushed asynchronously from the app, which can land after start().
+    //
+    // We only upgrade from a non-aggressive baseline (targetTransferMs >= SAFE's
+    // 8 ms): an explicit LOW_LATENCY or custom aggressive tuning already set by
+    // the caller is preserved, and PLAYBACK_ONLY keeps its configured profile
+    // (SAFE by default — bit-identical).
+    if (mStreamingMode != UsbStreamingMode::PLAYBACK_ONLY &&
+        mTuning.targetTransferMs >= usb::UsbLatencyTuning::safe().targetTransferMs) {
+        setLatencyTuning(usb::UsbLatencyTuning::lowLatency());
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+            "USB_LATENCY_AUTO: input mode (streamMode=%d) -> LOW_LATENCY",
+            static_cast<int>(mStreamingMode));
+    }
+
     // Determine which interface to use for configuration
     const usb::UsbStreamingInterface* configInterface = nullptr;
 
@@ -1516,6 +1533,15 @@ bool LibusbBackend::setupTransferManager() {
          speedName, speed, config.endpointInterval, config.packetsPerSecond,
          config.framesPerPacket, config.packetsPerTransfer, config.numTransfers,
          mTuning.targetTransferMs, mTuning.jitterBudgetMs);
+
+    // Fase 1 diagnostic on the WMA_AUDIT tag so the active latency tuning is
+    // visible in the same filtered logcat as USB_CLOCK/[START].
+    wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+        "USB_LATENCY_TUNING: targetTransferMs=%d numTransfers=%d "
+        "jitterBudgetMs=%d dspBlockFrames=%d ringCapacityMs=%d streamMode=%d",
+        mTuning.targetTransferMs, mTuning.numTransfers, mTuning.jitterBudgetMs,
+        mTuning.dspBlockFrames, mTuning.ringCapacityMs,
+        static_cast<int>(mStreamingMode));
 
     // Ring capacity is headroom for USB jitter, NOT latency (the pacer fixes
     // latency). Comes from the active tuning: SAFE=100 ms, LOW_LATENCY=50 ms.
@@ -1808,6 +1834,22 @@ void LibusbBackend::dspThreadFunc() {
         // Get input data if capture is enabled
         const float* inputPtr = nullptr;
         if (mSelectedCapture) {
+            // Bound capture latency (Fase 1, L4): the input ring otherwise
+            // freezes at whatever backlog accumulated during startup (output is
+            // prefilled to target, so the DSP blocks on outputReady before it
+            // ever drains input — in duplex that pins inLatMs at ~20 ms). Drop
+            // the oldest blocks beyond one input target so capture latency
+            // tracks the pacer. Discards the stale tail (a one-off click at
+            // startup); a no-op in régimen where the ring sits near target.
+            const size_t inTarget = mTransferManager->getInputRingTargetLevel();
+            size_t inAvail = mTransferManager->getInputBufferAvailable();
+            while (inAvail >= inTarget + inputSamples) {
+                if (!mTransferManager->readInput(inputBuffer.data(), inputSamples)) {
+                    break;
+                }
+                inAvail -= inputSamples;
+            }
+
             // Snapshot ring availability before the read so the periodic
             // diagnostic log can report whether the ring was starving.
             lastInputAvailBefore = mTransferManager->getInputBufferAvailable();

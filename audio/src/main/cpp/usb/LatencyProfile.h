@@ -47,8 +47,8 @@ struct UsbLatencyTuning {
     static UsbLatencyTuning lowLatency() {
         return {
             .targetTransferMs = 1,
-            .numTransfers     = 4,
-            .jitterBudgetMs   = 4,
+            .numTransfers     = 6,    // 6 URBs in flight: rides out late resubmits
+            .jitterBudgetMs   = 8,    // output absorber for DSP/effect CPU spikes
             .dspBlockFrames   = 96,   // 2 ms @ 48k
             .ringCapacityMs   = 50,
         };

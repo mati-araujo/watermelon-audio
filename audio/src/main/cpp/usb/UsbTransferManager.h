@@ -432,6 +432,28 @@ public:
     }
 
     /**
+     * Target fill level (float samples) for the INPUT ring (Fase 1, L4).
+     *
+     * Deliberately NOT tied to jitterBudgetMs (which is the OUTPUT absorber for
+     * DSP/effect CPU spikes): capture is just monitored through, so its standing
+     * latency should be as small as the input can sustain without underrunning,
+     * independent of how much output headroom the profile carries. Three
+     * transfers gives one DSP block (≥2 transfers to satisfy the input gate)
+     * plus a transfer of delivery-jitter margin. The DSP consumer drains any
+     * backlog above this so capture latency tracks the device rate instead of
+     * the frozen startup accumulation that otherwise pins inLatMs high in duplex.
+     *
+     * For SAFE this is 3×8 ms = 24 ms, above the natural standing level, so the
+     * drain effectively never fires — SAFE input behavior stays unchanged.
+     */
+    size_t getInputRingTargetLevel() const {
+        const int framesPerTransfer =
+            mConfig.packetsPerTransfer * mConfig.framesPerPacket;
+        return static_cast<size_t>(3 * framesPerTransfer)
+            * static_cast<size_t>(mConfig.inputChannelCount);
+    }
+
+    /**
      * Get available samples in input ring buffer.
      */
     size_t getInputBufferAvailable() const;
