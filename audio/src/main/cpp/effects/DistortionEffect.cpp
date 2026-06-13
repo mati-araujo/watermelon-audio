@@ -1051,7 +1051,6 @@ float DistortionEffect::applyGate(float input, float threshold) {
 void DistortionEffect::updateFilters() {
     float preLowCut = mPreLowCut.load(std::memory_order_relaxed);
     float postHighCut = mPostHighCut.load(std::memory_order_relaxed);
-    float tone = mTone.load(std::memory_order_relaxed);
     int algorithm = mAlgorithm.load(std::memory_order_relaxed);
 
     // Universal pre-distortion high-pass (remove low rumble)

@@ -47,8 +47,17 @@ struct UsbLatencyTuning {
     static UsbLatencyTuning lowLatency() {
         return {
             .targetTransferMs = 1,
-            .numTransfers     = 6,    // 6 URBs in flight: rides out late resubmits
-            .jitterBudgetMs   = 8,    // output absorber for DSP/effect CPU spikes
+            .numTransfers     = 8,    // resubmit deadline / in-flight depth.
+                                      // Userspace (libusb) reap stalls of
+                                      // 6-8 ms under Android CFS were measured
+                                      // on real hardware (maxGapMs telemetry)
+                                      // with every ring counter clean — iso
+                                      // OUT loses frames silently when the
+                                      // kernel queue drains. 8 ms covers the
+                                      // observed stall distribution; the
+                                      // residual tail (>8 ms) needs ADPF, not
+                                      // more queue. See outputWireGaps.
+            .jitterBudgetMs   = 4,    // output absorber for DSP/effect CPU spikes
             .dspBlockFrames   = 96,   // 2 ms @ 48k
             .ringCapacityMs   = 50,
         };
@@ -87,15 +96,26 @@ inline size_t outputRingTargetSamples(int packetsPerTransfer, int framesPerPacke
  * Initial output prefill, in float samples: numTransfers worth of audio
  * (consumed by the initial fills) plus the pacer target, so the ring lands
  * exactly at target once the initial transfers are submitted (L4).
+ *
+ * startupLeadFrames compensates the standing deficit the duplex pipeline
+ * acquires at startup: the output ring drains at wire rate from the first
+ * SOF, but the DSP cannot produce until the input path has delivered a full
+ * block (~1 transfer of URB latency + 1 block of accumulation). Production is
+ * input-gated, so that initial drain is never recovered — it permanently
+ * shrinks the pacer's absorber unless it is prefilled here. SAFE passes 0
+ * (bit-identical); the low-latency regime passes dspBlock + 1 transfer.
  */
 inline size_t outputPrefillSamples(int numTransfers, int packetsPerTransfer,
                                    int framesPerPacket, int channelCount,
-                                   size_t targetSamples) {
+                                   size_t targetSamples,
+                                   int startupLeadFrames = 0) {
     const size_t inflight = static_cast<size_t>(numTransfers) *
                             static_cast<size_t>(packetsPerTransfer) *
                             static_cast<size_t>(framesPerPacket) *
                             static_cast<size_t>(channelCount);
-    return inflight + targetSamples;
+    const size_t lead = static_cast<size_t>(startupLeadFrames > 0 ? startupLeadFrames : 0)
+                      * static_cast<size_t>(channelCount);
+    return inflight + targetSamples + lead;
 }
 
 }  // namespace usb

@@ -13,8 +13,14 @@ FetchContent_Declare(googletest
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../dsp ${CMAKE_BINARY_DIR}/dsp)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_BINARY_DIR}/effects)
+# Guarded so the unified test root (../tests) can pull this suite in
+# alongside dsp/tests without defining these libraries twice.
+if(NOT TARGET watermelon-dsp)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../dsp ${CMAKE_BINARY_DIR}/dsp)
+endif()
+if(NOT TARGET watermelon-effects)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_BINARY_DIR}/effects)
+endif()
 
 add_executable(effects_tests
     test_guitar_delay_reverb.cpp

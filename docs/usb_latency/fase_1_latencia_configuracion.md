@@ -51,7 +51,7 @@ Justificación de `lowLatency`:
 | Kotlin | `IAudioNativeBridge` (commonMain): `setUsbLatencyProfile(profile: UsbLatencyProfile): Result<Unit>`; enum en `domain/usb/`. Implementación en `AudioNativeBridge.kt` (androidMain). Exponer en `IUsbAudioManager` para que NoisyPad lo setee desde settings. |
 | C API | `wma_usb_set_latency_profile(int)` en `watermelon_audio.h/cpp` (opcional pero recomendado por la regla del repo). |
 
-**Restricción:** el perfil solo puede cambiar con el stream detenido (`mIsRunning == false`); el setter devuelve error si no.
+**Restricción (actualizada en implementación):** el setter no rechaza con el stream corriendo — latchea el perfil (persistido en `BackendManager`) y lo aplica en el próximo `start()`, igual que `setUsbStreamingMode`. Además, `setupTransferManager` auto-deriva LOW_LATENCY para modos con input (`streamMode != PLAYBACK_ONLY`) cuando el tuning configurado no es agresivo, porque un push asíncrono desde la app puede llegar después del start (race observada con NoisyPad).
 
 ---
 
@@ -134,6 +134,70 @@ Tras los `numTransfers` fills iniciales el ring queda exactamente en `target`: e
 | usbfs `MAX_ISO_BUFFER` / límites de URB | 8 packets × ~300 bytes ≪ límites | Sin riesgo |
 
 ---
+
+## 1.6b — Estabilidad del pipeline duplex (hallazgos de la validación en DAC1)
+
+La primera validación en hardware (UAC1 FS, duplex) mostró underruns persistentes del
+output ring en régimen, insensibles a jitterBudget/numTransfers. Causa raíz y mecanismos
+añadidos:
+
+1. **Ley de conservación / trim por exceso combinado.** La producción del DSP está gateada
+   1:1 por input disponible, así que `inputRing + outputRing` se conserva: un stall del DSP
+   drena el output ring y estaciona ese mismo audio como backlog de input, que las
+   iteraciones de catch-up del pacer reconvierten en nivel de output. Un trim incondicional
+   del backlog (el intento original de acotar `inLatMs`) destruye ese combustible y vuelve
+   PERMANENTE cada déficit transitorio (ratchet → ring en cero → underruns continuos).
+   El trim ahora descarta solo el **exceso combinado** en frames:
+   `(in − inTarget) + (out − outTarget) ≥ 1 bloque`. En régimen recorta el backlog de
+   startup (acota `inLatMs`); tras un stall el déficit de output cancela el backlog y no se
+   descarta nada. Telemetría: `inputSamplesTrimmed` (delta `trimDelta` en `USB_CLOCK`) —
+   en régimen debe ser 0.
+2. **Producción de emergencia.** Si el output ring cae bajo `max(1 bloque, target/2)` y el
+   input no tiene un bloque completo (hipo de captura, paquetes perdidos), el DSP produce
+   igual: `readInput` falla sin consumir y el fade del último bloque válido mantiene la
+   salida continua. Un fade breve de input es mucho menos audible que un packet de silencio
+   en el DAC.
+3. **Startup lead** (`TransferConfig.startupLeadFrames`). En duplex el output drena a wire
+   rate desde el primer SOF mientras el DSP espera el primer bloque de input (~1 transfer +
+   1 bloque); con producción input-gated ese drenado inicial nunca se recupera y comería
+   ~la mitad del jitter budget. Se prefill-ea (bloque + 1 transfer) solo en régimen
+   low-latency; SAFE pasa 0 (bit-idéntico).
+4. **Event thread a REALTIME.** A 1000 completions/s por dirección con URBs de 1 ms y
+   `fillOutputTransfer` en su hot path, el deadline de resubmit es `numTransfers` ms;
+   `Priority::HIGH` (nice −10) pierde esa carrera bajo presión de scheduling.
+5. **Feedback implícito también para playback ADAPTIVE** (régimen low-latency, duplex,
+   sin feedback endpoint explícito). Con producción input-gated, cualquier surplus del
+   clock de captura vs SOF aparece como trim periódico de 96 frames (empalme de 2 ms
+   audible cada pocos segundos) y cualquier déficit como drenado lento del output. Los EP
+   adaptive recuperan su clock de la tasa de datos entrante, así que esclavizar el sizing
+   de paquetes de salida a la tasa de captura (la maquinaria de Fase 0) es exactamente lo
+   que saben trackear → `inRing + outRing` conservado con deriva neta cero. SAFE no cambia
+   (siempre corrió adaptive-at-nominal y su umbral de trim de 24 ms esconde la deriva).
+6. **Jitter budget adaptativo** (`mJitterExtraMs`, telemetría `jbExtra` en `USB_CLOCK`).
+   El perfil arranca en el absorber mínimo (4 ms) y por cada underrun de output sube 1 ms
+   (cap +12). No decae en la sesión (sesgo a estabilidad); se resetea en `configure()`.
+   El refill al nuevo target es automático: el mismo stall que causó el underrun estacionó
+   el audio faltante como backlog de input, y el target más alto evita que el trim lo
+   descarte — se convierte en nivel de output. Resultado: la latencia converge a la mínima
+   que ese dispositivo/sistema realmente sostiene sin glitches.
+7. **De-click de empalmes de input.** Cada evento de trim (descarte de bloque) o de
+   dropout/reanudación (fade del último bloque válido) era una discontinuidad dura en la
+   señal monitoreada — el "click" audible que queda incluso con xruns en cero. Ahora: el
+   bloque de fade arranca mezclado desde el último sample entregado (era una repetición del
+   bloque anterior → step), y el primer bloque real tras un trim/fade hace fade-in de ~1 ms
+   desde el valor sostenido (tras un fade completo ese valor es ~0 → reanudación limpia).
+8. **Warmup del budget adaptativo** (`kAdaptiveWarmupMs=1000`). Los underruns del primer
+   segundo tras (re)start son estructurales (gap entre el submit inicial y el DSP thread
+   llegando a su loop, enmascarado por el fade de la app) — no suben `jbExtra`. Sin esto,
+   cada sesión pagaba ~2 ms de latencia permanente por un artefacto de arranque inaudible.
+9. **Detector de wire gaps** (`outputWireGaps`, `wireGapsDelta=` en `USB_CLOCK`). La clase
+   de glitch invisible para todos los contadores de ring: iso OUT no tiene ACK, así que si
+   el event thread pierde la carrera de resubmit y la cola del kernel se vacía, el DAC pasa
+   ≥1 intervalo de servicio sin datos con el ring sano y el URB completando OK. Se detecta
+   midiendo el spacing entre completions: ≥ `numTransfers × transferMs` ⇒ gap seguro.
+   Tras observar artefactos audibles con TODOS los counters en cero en hardware real,
+   `numTransfers` volvió a 6 (deadline de resubmit 6 ms — el seguro contra la latencia de
+   userspace bajo scheduling Android; cuesta +2 ms de round-trip).
 
 ## 1.7 — Presupuesto de latencia esperado (LOW_LATENCY, 48 kHz HS)
 

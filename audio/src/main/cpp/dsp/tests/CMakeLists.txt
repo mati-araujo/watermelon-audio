@@ -27,8 +27,12 @@ FetchContent_Declare(googletest
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-# Build watermelon-dsp as a static library (parent directory)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_BINARY_DIR}/dsp)
+# Build watermelon-dsp as a static library (parent directory).
+# Guarded so the unified test root (../tests) can pull this suite in
+# alongside effects/tests without defining watermelon-dsp twice.
+if(NOT TARGET watermelon-dsp)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_BINARY_DIR}/dsp)
+endif()
 
 # Test executable
 add_executable(dsp_tests

@@ -104,6 +104,15 @@ struct TransferConfig {
     // (8 ms transfer + 24 ms = 32 ms); LOW_LATENCY uses 4 ms.
     int jitterBudgetMs = 24;
 
+    // Extra output prefill, in FRAMES, on top of inflight + target (Fase 1).
+    // Compensates the startup deficit of the duplex pipeline: the output ring
+    // drains at wire rate from the first SOF while the DSP waits for the input
+    // path to deliver its first block. Production being input-gated, that
+    // drain is otherwise permanent and eats into the jitter budget. 0 keeps
+    // SAFE bit-identical; LibusbBackend sets dspBlock + 1 transfer in the
+    // low-latency regime.
+    int startupLeadFrames = 0;
+
     // ========== Output (playback) calculations ==========
     int bytesPerFrame() const {
         return channelCount * (bitDepth / 8);
@@ -159,6 +168,22 @@ struct TransferStatistics {
     // Buffer health
     std::atomic<uint64_t> underruns{0};
     std::atomic<uint64_t> overruns{0};
+    // Input samples deliberately discarded by the DSP consumer's latency trim
+    // (combined-excess drain in dspThreadFunc). In régimen this should grow
+    // only after genuine latency excess (startup backlog, post-stall trim);
+    // sustained growth correlated with output underruns means the trim is
+    // discarding the refill fuel — the exact bug the combined-excess condition
+    // exists to prevent.
+    std::atomic<uint64_t> inputSamplesTrimmed{0};
+    // Certain gaps on the OUTPUT wire from late resubmits: counted when the
+    // spacing between consecutive output completions reaches the full
+    // in-flight queue depth (numTransfers × transfer duration), i.e. the
+    // kernel ran out of queued URBs and the DAC went at least one service
+    // interval without data. This is the glitch class every ring counter is
+    // blind to — iso OUT has no ACK, the ring stays healthy, and the URB
+    // still completes OK. Nonzero deltas in régimen mean the event thread is
+    // losing the resubmit race (raise numTransfers or thread priority).
+    std::atomic<uint64_t> outputWireGaps{0};
 
     // Latency tracking (output)
     std::atomic<float> currentLatencyMs{0.0f};
@@ -185,6 +210,8 @@ struct TransferStatistics {
         packetsErrors.store(0);
         underruns.store(0);
         overruns.store(0);
+        inputSamplesTrimmed.store(0);
+        outputWireGaps.store(0);
         currentLatencyMs.store(0.0f);
         avgLatencyMs.store(0.0f);
         currentInputLatencyMs.store(0.0f);
@@ -421,14 +448,38 @@ public:
      * The jitter budget is the absorber for transient DSP slowdowns: any
      * callback that overruns its block budget (Android scheduling, thermal
      * throttle, cache miss) drains the ring, and the budget sets how much of
-     * that the ring tolerates before underrunning. Read per-iteration by the
-     * DSP loop so Fase 2 can make it adaptive without restarting the stream;
-     * it is a pure integer calc over immutable config today.
+     * that the ring tolerates before underrunning.
+     *
+     * On top of the configured budget rides an ADAPTIVE extra (mJitterExtraMs)
+     * that ratchets up 1 ms per output underrun, capped: the profile starts at
+     * the lowest latency and grows only on evidence that this device/system
+     * combination actually needs more absorber. It never decays within a
+     * session (stability bias) and resets on configure(). The ring refills to
+     * the raised target on its own: the very stall that caused the underrun
+     * parked the missing audio as input backlog, which the raised target stops
+     * the latency trim from discarding. Read per-iteration by the DSP loop, so
+     * the raise takes effect without a stream restart.
      */
     size_t getOutputRingTargetLevel() const {
         return outputRingTargetSamples(
             mConfig.packetsPerTransfer, mConfig.framesPerPacket,
-            mConfig.jitterBudgetMs, mConfig.sampleRate, mConfig.channelCount);
+            mConfig.jitterBudgetMs +
+                mJitterExtraMs.load(std::memory_order_relaxed),
+            mConfig.sampleRate, mConfig.channelCount);
+    }
+
+    /** Current adaptive addition to the jitter budget, for telemetry. */
+    int getJitterExtraMs() const {
+        return mJitterExtraMs.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * Windowed max of the output completion-reap gap (ms), reset on read.
+     * The race with the event thread's store may drop one update — fine for
+     * telemetry.
+     */
+    uint32_t fetchAndResetMaxReapGapMs() {
+        return mMaxReapGapMs.exchange(0, std::memory_order_relaxed);
     }
 
     /**
@@ -457,6 +508,19 @@ public:
      * Get available samples in input ring buffer.
      */
     size_t getInputBufferAvailable() const;
+
+    /** Channel counts of the ring buffers (for sample↔frame conversions). */
+    int getOutputChannelCount() const { return mConfig.channelCount; }
+    int getInputChannelCount() const { return mConfig.inputChannelCount; }
+
+    /**
+     * Account input samples discarded by the DSP consumer's latency trim.
+     * Wait-free; called from the DSP thread.
+     */
+    void addInputSamplesTrimmed(size_t samples) {
+        mStats.inputSamplesTrimmed.fetch_add(
+            static_cast<uint64_t>(samples), std::memory_order_relaxed);
+    }
 
     // ========================================================================
     // Callbacks
@@ -708,6 +772,32 @@ private:
 
     // Statistics
     TransferStatistics mStats;
+
+    // Adaptive addition to mConfig.jitterBudgetMs (see
+    // getOutputRingTargetLevel). Written only by the event thread (+1 ms per
+    // output underrun, saturating at kJitterExtraCapMs), read lock-free by the
+    // DSP loop's per-iteration target. Reset in configure().
+    static constexpr int kJitterExtraCapMs = 12;
+    std::atomic<int> mJitterExtraMs{0};
+
+    // Underruns inside this window after (re)start don't raise the adaptive
+    // budget: the gap between the initial transfer submission and the DSP
+    // thread reaching its loop is structural (thread spawn + RT setup, masked
+    // by the app-level start fade), not scheduling-jitter evidence. Without
+    // this, every session permanently pays ~2 ms of latency for a startup
+    // artifact nobody hears.
+    static constexpr uint64_t kAdaptiveWarmupMs = 1000;
+    std::atomic<uint64_t> mStreamStartTimeMs{0};
+
+    // Wall-clock of the previous output completion, for the wire-gap detector
+    // (see TransferStatistics::outputWireGaps). Event thread only.
+    uint64_t mLastOutputCompletionMs = 0;
+
+    // Largest spacing between consecutive output completions observed since
+    // the last telemetry read (fetchAndResetMaxReapGapMs). Sizes the event
+    // thread's stalls: gaps just past numTransfers ms are solvable with queue
+    // depth; 15 ms+ means scheduling pressure that only ADPF/priority can fix.
+    std::atomic<uint32_t> mMaxReapGapMs{0};
 
     // Callbacks
     std::mutex mCallbackMutex;

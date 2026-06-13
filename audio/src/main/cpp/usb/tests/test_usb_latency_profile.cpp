@@ -63,7 +63,7 @@ TEST(LatencyProfilePacer, SafeTargetMatchesHistoricalFullSpeed) {
 
 TEST(LatencyProfilePacer, LowLatencyTargetFromPreset) {
     // LOW_LATENCY HS: 1 ms transfer (8*6=48 frames) + jitterBudgetMs of margin.
-    // With the robust preset (jitterBudgetMs=8): 48 + 8*48 = 432 frames = 9 ms.
+    // With the preset (jitterBudgetMs=4): 48 + 4*48 = 240 frames = 5 ms.
     const auto tuning = UsbLatencyTuning::lowLatency();
     const size_t target = outputRingTargetSamples(
         /*packetsPerTransfer=*/8, /*framesPerPacket=*/6,
@@ -100,6 +100,24 @@ TEST(LatencyProfilePrefill, PrefillLeavesRingAtTargetLowLatency) {
     EXPECT_EQ(prefill - inflight, target);
 }
 
+TEST(LatencyProfilePrefill, StartupLeadAddsFramesPerChannel) {
+    // Duplex low-latency passes dspBlock + 1 transfer of lead so the ring
+    // lands at target + lead, compensating the input pipeline's startup
+    // drain (production is input-gated and can never recover it).
+    const size_t target = outputRingTargetSamples(8, 6, 4, 48000, 2);
+    const size_t base = outputPrefillSamples(4, 8, 6, 2, target);
+    const int leadFrames = 96 + 48;  // block + 1 transfer (HS)
+    const size_t withLead = outputPrefillSamples(4, 8, 6, 2, target, leadFrames);
+    EXPECT_EQ(withLead - base, static_cast<size_t>(leadFrames) * 2);
+}
+
+TEST(LatencyProfilePrefill, StartupLeadDefaultsToZero) {
+    // SAFE never passes a lead — the default keeps it bit-identical.
+    const size_t target = outputRingTargetSamples(64, 6, 24, 48000, 2);
+    EXPECT_EQ(outputPrefillSamples(3, 64, 6, 2, target),
+              outputPrefillSamples(3, 64, 6, 2, target, 0));
+}
+
 // ============================================================================
 // Presets sanity
 // ============================================================================
@@ -116,8 +134,8 @@ TEST(LatencyProfilePresets, SafeIsCurrentBehavior) {
 TEST(LatencyProfilePresets, LowLatencyKnobs) {
     const auto l = UsbLatencyTuning::lowLatency();
     EXPECT_EQ(l.targetTransferMs, 1);
-    EXPECT_EQ(l.numTransfers, 6);
-    EXPECT_EQ(l.jitterBudgetMs, 8);
+    EXPECT_EQ(l.numTransfers, 8);
+    EXPECT_EQ(l.jitterBudgetMs, 4);
     EXPECT_EQ(l.dspBlockFrames, 96);
     EXPECT_EQ(l.ringCapacityMs, 50);
 }

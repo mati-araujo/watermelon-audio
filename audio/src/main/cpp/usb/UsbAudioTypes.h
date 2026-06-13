@@ -494,7 +494,7 @@ struct UsbAudioDevice {
         for (const auto& fu : featureUnits) {
             if (fu.hasAnyVolumeControl(uacVersion)) {
                 // Check if this FU is in the output path
-                for (uint8_t termId : outputTerminalIds) {
+                for ([[maybe_unused]] uint8_t termId : outputTerminalIds) {
                     // Simple heuristic: FU's unit ID is often numerically between
                     // the input terminal and output terminal it connects
                     // A more accurate approach would trace the full topology

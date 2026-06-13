@@ -134,7 +134,9 @@ void FilterEffect::updateCoefficients() {
     float omega = 2.0f * kPi * c / mSampleRate;
     float alpha = sinf(omega) / (2.0f * r);
     float cos_omega = cosf(omega);
-    float a0;
+    // Initialized to the value every handled branch assigns, so an unhandled
+    // `type` can never divide the coefficients by an uninitialized a0 below.
+    float a0 = 1.0f + alpha;
 
     Coefficients& next = coeffs[nextIdx];
 

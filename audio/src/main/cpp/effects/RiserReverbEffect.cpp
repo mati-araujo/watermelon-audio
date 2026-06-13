@@ -120,7 +120,7 @@ void RiserReverbEffect::process(float* input, float* output, int numFrames) {
     float decay = mDecay.load(std::memory_order_relaxed);
     float size = mSize.load(std::memory_order_relaxed);
     float mix = mMix.load(std::memory_order_relaxed);
-    float damping = mDamping.load(std::memory_order_relaxed);
+    // damping is applied via the damping LPF coefficients, not read here.
 
     float sr = static_cast<float>(mSampleRate);
 

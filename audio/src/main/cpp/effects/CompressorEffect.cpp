@@ -11,9 +11,8 @@ CompressorEffect::CompressorEffect() {
 }
 
 void CompressorEffect::process(float* input, float* output, int numFrames) {
-    const float threshold = mThresholdDb.load(std::memory_order_relaxed);
-    const float ratio = mRatio.load(std::memory_order_relaxed);
-    const float knee = mKneeDb.load(std::memory_order_relaxed);
+    // threshold/ratio/knee are read inside computeGain() via members; only the
+    // makeup gain is needed here.
     const float makeupTarget = std::pow(10.0f, mMakeupDb.load(std::memory_order_relaxed) / 20.0f);
 
     float maxGainReduction = 0.0f;

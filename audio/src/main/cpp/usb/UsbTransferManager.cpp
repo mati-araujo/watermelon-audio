@@ -6,6 +6,7 @@
 
 #include "UsbTransferManager.h"
 #include "UsbConstants.h"
+#include "UsbLatencyMath.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -64,8 +65,33 @@ bool UsbTransferManager::configure(const TransferConfig& config) {
 
     mConfig = config;
 
-    // Update clock controller sample rate
-    mClockController->setNominalSampleRate(config.sampleRate);
+    // Fresh device/profile: forget the adaptive absorber learned for the
+    // previous configuration.
+    mJitterExtraMs.store(0, std::memory_order_relaxed);
+
+    // Invariant (L2): the ring must be able to overshoot the pacer target by at
+    // least two transfers without overrunning, otherwise the pacer can't push
+    // past target transiently. Non-fatal — log loudly so a too-small
+    // ringCapacityMs for the chosen profile is caught in validation.
+    {
+        const size_t framesPerTransfer = static_cast<size_t>(
+            config.packetsPerTransfer * config.framesPerPacket);
+        const size_t ringCapacityFrames =
+            static_cast<size_t>(config.ringBufferFrames());
+        const size_t targetFrames =
+            getOutputRingTargetLevel() / std::max(1, config.channelCount);
+        if (ringCapacityFrames < targetFrames + 2 * framesPerTransfer) {
+            LOGW("Ring capacity %zu frames < target %zu + 2x transfer %zu — "
+                 "pacer headroom too small (ringCapacityMs=%d, jitterBudgetMs=%d)",
+                 ringCapacityFrames, targetFrames, framesPerTransfer,
+                 config.ringBufferMs, config.jitterBudgetMs);
+        }
+    }
+
+    // Configure clock controller with the real service cadence (NOT an
+    // assumed 1000/8000 split): nominal frames-per-packet is derived from
+    // sampleRate / packetsPerSecond.
+    mClockController->configure(config.sampleRate, config.packetsPerSecond);
 
     // Allocate ring buffers (separate sizes for input vs output)
     size_t outputRingBufferSize = static_cast<size_t>(config.ringBufferSamples());
@@ -296,13 +322,25 @@ bool UsbTransferManager::start() {
         return false;
     }
 
-    // Pre-fill output ring buffer with silence to prevent initial underrun
-    size_t prefillSamples = static_cast<size_t>(mConfig.framesPerPacket *
-                                                  mConfig.packetsPerTransfer *
-                                                  mConfig.numTransfers *
-                                                  mConfig.channelCount * 2);
+    // Pre-fill output ring buffer with silence to prevent initial underrun.
+    //
+    // The first numTransfers fills (submitInitialOutputTransfers below) each
+    // drain one transfer worth of audio out of the ring. To leave the ring at
+    // EXACTLY the pacer target once those fills complete — so the DSP starts in
+    // régimen with no drain transient and no input backlog in duplex — prefill
+    // inflight + target (L4). The audible initial silence drops from ~48 ms (HS
+    // SAFE) to the target itself (5 ms in LOW_LATENCY).
+    const size_t prefillSamples = outputPrefillSamples(
+        mConfig.numTransfers, mConfig.packetsPerTransfer, mConfig.framesPerPacket,
+        mConfig.channelCount, getOutputRingTargetLevel(),
+        mConfig.startupLeadFrames);
     std::vector<float> silence(prefillSamples, 0.0f);
     mOutputRingBuffer.write(silence.data(), silence.size());
+
+    // Adaptive-budget warmup reference: underruns within kAdaptiveWarmupMs of
+    // this point are startup-structural and don't raise the jitter budget.
+    mStreamStartTimeMs.store(getCurrentTimeMs(), std::memory_order_relaxed);
+    mLastOutputCompletionMs = 0;  // don't count the stopped period as a wire gap
 
     mIsRunning.store(true, std::memory_order_release);
 
@@ -503,11 +541,11 @@ bool UsbTransferManager::allocateTransfers() {
     const int inputPacketSizeNominal = mConfig.inputBytesPerPacket();
 
     // Output headroom for ClockController::getAdjustedFrameCount(), which
-    // clamps the per-packet adjustment to ± CLOCK_ADJUST_FRAMES_MAX frames
-    // from nominal. Must match that clamp exactly.
-    constexpr int CLOCK_ADJUST_FRAMES_MAX = 4;
+    // clamps the per-packet adjustment to ± kClockAdjustFramesMax frames
+    // from nominal. Single shared constant (UsbConstants.h) so the clamp and
+    // this allocation can never disagree.
     const int outputClockMarginBytes = mOutputInterface
-        ? CLOCK_ADJUST_FRAMES_MAX
+        ? kClockAdjustFramesMax
             * mConfig.channelCount
             * (mConfig.bitDepth / 8)
         : 0;
@@ -657,10 +695,20 @@ bool UsbTransferManager::allocateTransfers() {
             libusb_set_iso_packet_lengths(
                 mFeedbackTransfer,
                 static_cast<unsigned int>(feedbackLen));
-            LOGI("Feedback iso transfer allocated: packetLen=%d (UAC%d)",
+            // bRefresh (UAC1) encodes the feedback update period as
+            // 2^(bRefresh-1) ms. The 1-packet transfer re-submitted at
+            // completion already follows the device's cadence (the host
+            // controller only completes when the device transmits), so this
+            // is logged for diagnostics only — no functional change needed.
+            const uint8_t refresh = mFeedbackEndpoint->endpoint.refresh;
+            LOGI("Feedback iso transfer allocated: packetLen=%d (UAC%d) "
+                 "addr=0x%02x bRefresh=%d (~%d ms period)",
                  feedbackLen,
                  mUacVersion == UacVersion::UAC_1_0 ? 1 :
-                 mUacVersion == UacVersion::UAC_2_0 ? 2 : 0);
+                 mUacVersion == UacVersion::UAC_2_0 ? 2 : 0,
+                 mFeedbackEndpoint->endpoint.address,
+                 refresh,
+                 refresh > 0 ? (1 << (refresh - 1)) : 1);
         }
     }
 
@@ -733,6 +781,32 @@ void UsbTransferManager::handleOutputComplete(IsoTransfer* ctx, libusb_transfer*
         }
         mStats.packetsCompleted.fetch_add(static_cast<uint64_t>(completedPackets));
 
+        // Wire-gap detector: completions arrive one per transfer duration
+        // (in batches when the event loop wakes late). If the spacing since
+        // the previous completion reaches the full in-flight depth, the
+        // kernel's URB queue must have drained and the DAC went unfed for at
+        // least one service interval — an audible gap NO ring counter sees
+        // (iso OUT has no ACK and the ring stays healthy). 1 ms clock
+        // granularity only understates true gaps, never invents them.
+        {
+            const uint64_t now = getCurrentTimeMs();
+            if (mLastOutputCompletionMs != 0) {
+                const uint64_t gapMs = now - mLastOutputCompletionMs;
+                if (gapMs > mMaxReapGapMs.load(std::memory_order_relaxed)) {
+                    mMaxReapGapMs.store(static_cast<uint32_t>(gapMs),
+                                        std::memory_order_relaxed);
+                }
+                const uint64_t transferMs = std::max(1,
+                    mConfig.packetsPerTransfer * mConfig.framesPerPacket * 1000
+                        / std::max(1, mConfig.sampleRate));
+                if (gapMs >= transferMs *
+                        static_cast<uint64_t>(mConfig.numTransfers)) {
+                    mStats.outputWireGaps.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            mLastOutputCompletionMs = now;
+        }
+
         // Watchdog: Update last completed time and reset error counter
         mLastCompletedTimeMs.store(getCurrentTimeMs(), std::memory_order_release);
         mConsecutiveErrors.store(0, std::memory_order_release);
@@ -769,6 +843,26 @@ void UsbTransferManager::handleOutputComplete(IsoTransfer* ctx, libusb_transfer*
             if (mBufferController) {
                 mBufferController->onUnderrun();
             }
+            // Adaptive jitter budget: this device/system combination just
+            // proved the current absorber too small — ratchet the pacer
+            // target up 1 ms (saturating). The stall that caused this
+            // underrun parked the missing audio as input backlog; the raised
+            // target lets the DSP convert it into output ring level instead
+            // of the latency trim discarding it, so the ring settles at the
+            // new target without any extra action. Single writer (event
+            // thread), so load+store is race-free.
+            //
+            // Startup underruns (DSP thread not in its loop yet, masked by
+            // the app start fade) are structural, not jitter evidence —
+            // don't let them inflate the session's latency.
+            const uint64_t sinceStartMs = getCurrentTimeMs() -
+                mStreamStartTimeMs.load(std::memory_order_relaxed);
+            const int extra = mJitterExtraMs.load(std::memory_order_relaxed);
+            if (sinceStartMs >= kAdaptiveWarmupMs && extra < kJitterExtraCapMs) {
+                mJitterExtraMs.store(extra + 1, std::memory_order_relaxed);
+                LOGW("Output underrun: jitter budget raised to %d+%d ms",
+                     mConfig.jitterBudgetMs, extra + 1);
+            }
         }
         // Profile: record new transfer submission
         if (mLatencyProfiler.isEnabled()) {
@@ -777,6 +871,23 @@ void UsbTransferManager::handleOutputComplete(IsoTransfer* ctx, libusb_transfer*
         if (submitTransfer(transfer)) {
             mOutputPendingCount.fetch_add(1);
         }
+    }
+
+    // Reported output latency (L7): host-side software latency = ring fill +
+    // transfers in flight. O(1) on the event thread where stats already live.
+    {
+        const double framesPerTransfer =
+            double(mConfig.packetsPerTransfer) * double(mConfig.framesPerPacket);
+        const float outMs = usb::computeOutputLatencyMs(
+            static_cast<double>(mOutputRingBuffer.availableToRead()),
+            mConfig.channelCount,
+            mOutputPendingCount.load(std::memory_order_relaxed),
+            framesPerTransfer,
+            mConfig.sampleRate);
+        mStats.currentLatencyMs.store(outMs, std::memory_order_relaxed);
+        const float prevAvg = mStats.avgLatencyMs.load(std::memory_order_relaxed);
+        const float avg = (prevAvg <= 0.0f) ? outMs : (0.95f * prevAvg + 0.05f * outMs);
+        mStats.avgLatencyMs.store(avg, std::memory_order_relaxed);
     }
 
     // Output ring drained one transfer's worth -> wake the DSP thread so
@@ -826,6 +937,19 @@ void UsbTransferManager::handleInputComplete(IsoTransfer* ctx, libusb_transfer* 
         if (submitTransfer(transfer)) {
             mInputPendingCount.fetch_add(1);
         }
+    }
+
+    // Reported input latency (L7): ring fill + ~half a transfer being
+    // assembled. Uses the INPUT channel count, not the output's.
+    {
+        const double framesPerTransfer =
+            double(mConfig.packetsPerTransfer) * double(mConfig.framesPerPacket);
+        const float inMs = usb::computeInputLatencyMs(
+            static_cast<double>(mInputRingBuffer.availableToRead()),
+            mConfig.inputChannelCount,
+            framesPerTransfer,
+            mConfig.sampleRate);
+        mStats.currentInputLatencyMs.store(inMs, std::memory_order_relaxed);
     }
 
     // Input ring just got fresh samples -> wake the DSP thread so it can
@@ -971,6 +1095,28 @@ bool UsbTransferManager::performRecoveryRestart() {
     mConsecutiveErrors.store(0, std::memory_order_release);
     mLastCompletedTimeMs.store(now, std::memory_order_release);
     mRecoveryRestartRequested.store(false, std::memory_order_release);
+    // Restart re-arms the stream from a prefilled ring; its settle-in
+    // underruns are as structural as a cold start's.
+    mStreamStartTimeMs.store(now, std::memory_order_relaxed);
+    mLastOutputCompletionMs = 0;  // restart pause is not a wire gap
+
+    // Pre-fill the output ring to the same level start() uses (L4 / 1.6): the
+    // historical restart re-submitted transfers against whatever residual the
+    // ring held, so a restart after an underrun re-armed the stream already
+    // starved and immediately silence-filled again. Bring it up to
+    // inflight + target before the initial fills below so the restart lands in
+    // régimen, matching a cold start.
+    {
+        const size_t prefillSamples = outputPrefillSamples(
+            mConfig.numTransfers, mConfig.packetsPerTransfer, mConfig.framesPerPacket,
+            mConfig.channelCount, getOutputRingTargetLevel(),
+            mConfig.startupLeadFrames);
+        const size_t current = getOutputRingLevel();
+        if (current < prefillSamples) {
+            std::vector<float> silence(prefillSamples - current, 0.0f);
+            mOutputRingBuffer.write(silence.data(), silence.size());
+        }
+    }
 
     for (auto& ctx : mOutputTransfers) {
         if (!ctx || !ctx->transfer) continue;
@@ -1019,7 +1165,8 @@ bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
     // clamp, but the length the kernel computes offsets from has to
     // never exceed what the buffer can hold.
     const int nominalFrames = mConfig.framesPerPacket;
-    int adjustedFrames = mClockController->getAdjustedFrameCount(nominalFrames);
+    int adjustedFrames =
+        mClockController->getAdjustedFrameCount(nominalFrames, ctx->packetCount);
 
     int samplesPerPacket = adjustedFrames * mConfig.channelCount;
     int bytesPerPacket = samplesPerPacket * bytesPerSample;
@@ -1051,7 +1198,11 @@ bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
     // packet but the first picked up zeros / stale data and the stream
     // decoded as brutal distortion on every real device. See libusb's
     // linux_usbfs.c submit path for the contiguous-accumulation layout.
+#if WMA_USB_DIAG
     // ---- pre-conversion engine peak (for USB_FMT diagnostic) ----
+    // Gated behind WMA_USB_DIAG (Fase 1, L8): at 1000 completions/s the peak
+    // scan + periodic decode-back stop being negligible and contaminate the
+    // CPU measurement. OFF in release.
     float engineFloatPeak = 0.0f;
     {
         const size_t scanN = std::min(samplesNeeded, size_t(512));
@@ -1060,6 +1211,7 @@ bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
             if (a > engineFloatPeak) engineFloatPeak = a;
         }
     }
+#endif  // WMA_USB_DIAG
 
     const float* conversionInput = mFloatBuffer.data();
     if (!mChannelMap.isOutputIdentity(mConfig.channelCount, mConfig.channelCount)) {
@@ -1079,6 +1231,7 @@ bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
         samplesNeeded,
         mConfig.pcmFormat);
 
+#if WMA_USB_DIAG
     // ---- Diag 3: USB_FMT — validate the format conversion ----
     // Decode the first ~256 samples of the just-written PCM bytes back
     // to float and compute the peak. Compare with the pre-conversion
@@ -1141,6 +1294,7 @@ bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
                 engineFloatPeak, postPeak, hexBuf);
         }
     }
+#endif  // WMA_USB_DIAG
 
     // Update per-packet length and reset status before (re)submission.
     for (int p = 0; p < ctx->packetCount; ++p) {
@@ -1220,6 +1374,37 @@ bool UsbTransferManager::processInputTransfer(IsoTransfer* ctx) {
         }
     }
 
+    // Implicit feedback (0.2): the capture stream is synchronous to the device
+    // clock, so the frames it delivers per service interval ARE the device's
+    // rate. Zero-length packets count as an elapsed interval carrying 0 frames
+    // — that is exactly the rate information, not noise to be dropped.
+    if (mImplicitFeedbackActive && mConfig.inputChannelCount > 0) {
+        const uint64_t framesThisTransfer =
+            static_cast<uint64_t>(totalSamples) /
+            static_cast<uint64_t>(mConfig.inputChannelCount);
+        auto window = mImplicitFeedbackEstimator.onPackets(
+            framesThisTransfer, static_cast<uint64_t>(ctx->packetCount));
+        if (window.has_value()) {
+            const double inFramesPerInPacket = *window;
+            // Normalize to the OUTPUT cadence. Until the bInterval-split work
+            // of Fase 2 the input and output cadences are common, so this is
+            // a 1.0 ratio; the multiplier is kept explicit for that future.
+            const int outPps = std::max(1, mConfig.packetsPerSecond);
+            const int inPps = outPps;  // hoy == outputPacketsPerSecond
+            const double outFramesPerOutPacket =
+                inFramesPerInPacket * (double(inPps) / double(outPps));
+            mClockController->setMeasuredFramesPerPacket(outFramesPerOutPacket);
+            mStats.feedbackEffectiveFramesPerPacket.store(
+                static_cast<float>(outFramesPerOutPacket),
+                std::memory_order_relaxed);
+            mStats.driftPpm.store(
+                mClockController->getDriftPpm(), std::memory_order_relaxed);
+            mStats.currentSampleRateHz.store(
+                mClockController->getCurrentSampleRate(),
+                std::memory_order_relaxed);
+        }
+    }
+
     mStats.packetsCompleted.fetch_add(static_cast<uint64_t>(ctx->packetCount));
     return true;
 }
@@ -1251,10 +1436,23 @@ bool UsbTransferManager::submitTransfer(libusb_transfer* transfer) {
 void UsbTransferManager::eventLoopThread() {
     LOGI("USB event loop started");
 
-    // Configure this thread for high priority audio I/O
-    ThreadUtils::setCurrentThreadRealtime("UsbEventLoop", ThreadUtils::Priority::HIGH);
+    // Configure this thread as real-time audio I/O. In the low-latency
+    // profile this loop services up to 2000 completions/s with
+    // fillOutputTransfer (format conversion included) on its hot path, and a
+    // hard deadline: with N 1 ms URBs in flight, any stall > N ms is a gap on
+    // the wire plus lost capture frames. Priority::HIGH (nice -10 / SCHED_RR)
+    // measurably loses that race against Android scheduling pressure;
+    // REALTIME requests SCHED_FIFO and falls back to nice -19 where the
+    // platform denies it.
+    ThreadUtils::setCurrentThreadRealtime("UsbEventLoop", ThreadUtils::Priority::REALTIME);
 
-    // Pin to a different core than the DSP thread if possible
+    // Pin to a big core, away from the DSP thread (which takes numCpus-2).
+    // Measured both ways on hardware (DAC1, low-latency duplex): unpinned was
+    // WORSE — reap gaps grew from ~6 ms to up to 11 ms and fired more often.
+    // This thread's CPU utilization is tiny, so EAS places it on LITTLE cores
+    // when unpinned, which is exactly where scheduling pressure hits hardest.
+    // Pinning to a big core costs the wake-time-migration option but wins on
+    // average: see outputWireGaps / maxGapMs telemetry.
     int numCpus = ThreadUtils::getNumCpus();
     if (numCpus >= 4) {
         int targetCore = numCpus - 1;  // Last core for event loop

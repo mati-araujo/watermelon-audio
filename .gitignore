@@ -18,5 +18,8 @@
 gen/
 out/
 *.log
+# Host C++ test runner: shared googletest FetchContent cache + bench build dir
+**/cpp/tests/.deps
+**/cpp/tests/.bench-build
 .kotlin/
 .claude/settings.local.json

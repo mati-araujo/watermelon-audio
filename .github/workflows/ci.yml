@@ -10,6 +10,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Fast host C++ unit tests (dsp + effects + looper + usb) via googletest.
+  # No Android SDK / NDK / device needed — pure x86_64. Single configure +
+  # build + ctest pass driven by scripts/run-cpp-tests.sh.
+  cpp-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake g++
+
+      - name: Build & run C++ test suite
+        run: bash scripts/run-cpp-tests.sh
+
   build:
     runs-on: ubuntu-latest
 
@@ -34,6 +48,9 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+
+      - name: Kotlin unit tests (commonTest)
+        run: ./gradlew :audio:testDebugUnitTest
 
       - name: Build debug
         run: ./gradlew :audio:assembleDebug

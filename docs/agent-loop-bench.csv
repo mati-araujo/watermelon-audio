@@ -1,0 +1,4 @@
+﻿timestamp,git_rev,label,generator,compiler,jobs,stress,scenario,runs,median_s,min_s,max_s
+2026-06-13T10:57:32,dea1e8d,baseline-ninja-auto,Ninja,gcc-15.2.0,0,0,cold_total,1,27.263,27.263,27.263
+2026-06-13T10:57:32,dea1e8d,baseline-ninja-auto,Ninja,gcc-15.2.0,0,0,incremental,3,2.587,2.493,2.743
+2026-06-13T10:57:32,dea1e8d,baseline-ninja-auto,Ninja,gcc-15.2.0,0,0,test_only,3,4.102,3.933,4.142
