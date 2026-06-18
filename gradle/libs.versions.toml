@@ -13,7 +13,7 @@ ndk = "28.2.13676358"
 kotlinxCoroutines = "1.11.0"
 oboe = "1.10.0"
 coreKtx = "1.18.0"
-lifecycleRuntimeKtx = "2.10.0"
+lifecycleRuntimeKtx = "2.11.0"
 datastore = "1.2.1"
 
 # Testing
