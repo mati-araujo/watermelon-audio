@@ -122,20 +122,42 @@ public:
                         pos, audioData[i * 2], audioData[i * 2 + 1], gain, decay);
                 }
             } else {
-                // Normal recording (with optional tail capture).
-                // Capacity here is total buffer length: loopFrames + tailFrames.
-                // We split the lifecycle into two checkpoints:
-                //   1. Write head crosses loopCapacity  -> finalize loop, start playback
-                //      (recording continues into tail region for tailFrames more samples).
-                //   2. Write head reaches total capacity -> stop recording entirely.
+                // Normal recording with circular wrap-mix tail.
+                // mRecordCapacityFrames = loopFrames + tailWindow (tailWindow is 0
+                // for percussion / free-at-cap; set in startRecording).
+                //   1. First `loopFrames` frames are captured linearly into the body.
+                //   2. The next `tailWindow` frames — the audio still ringing past the
+                //      loop boundary — are OVERDUBBED (mixed, soft-clipped) into the
+                //      START of the loop with a decay, so sustained sounds bleed across
+                //      the seam (standard looper behavior; mixed, not overwritten).
+                // Checkpoints:
+                //   1. Write head reaches loopCapacity -> finalize loop, start playback.
+                //   2. remaining reaches 0 -> stop recording entirely.
                 int capacity = mRecordCapacityFrames.load(std::memory_order_relaxed);
                 int remaining = mRecordFramesRemaining.load(std::memory_order_relaxed);
                 bool loopFinalized = mLoopFinalizedDuringRec.load(std::memory_order_relaxed);
 
+                const int loopCap = mTracks[recTrack].getLoopCapacityFrames();
+                const int tailWindow = capacity - loopCap;   // 0 = no wrap-mix
+                const int recordedSoFar = capacity - remaining;
+                const float invTail = (tailWindow > 0)
+                    ? 1.0f / static_cast<float>(tailWindow) : 0.0f;
+
                 int dropped = 0;
                 for (int i = 0; i < numFrames && remaining > 0; ++i) {
-                    if (!mTracks[recTrack].writeFrame(audioData[i * 2], audioData[i * 2 + 1])) {
-                        ++dropped;
+                    const float l = audioData[i * 2];
+                    const float r = audioData[i * 2 + 1];
+                    const int pos = recordedSoFar + i;
+                    if (pos < loopCap) {
+                        // First pass — linear capture into the loop body.
+                        if (!mTracks[recTrack].writeFrame(l, r)) ++dropped;
+                    } else if (tailWindow > 0) {
+                        // Wrap-mix tail — overdub the ringing continuation into the
+                        // loop start with a quasi-exponential decay (1-t)^2.
+                        const int tailIdx = pos - loopCap;       // 0..tailWindow-1
+                        float fade = 1.0f - static_cast<float>(tailIdx) * invTail;
+                        fade = fade * fade;
+                        mTracks[recTrack].overdubFrame(tailIdx, l, r, fade, 0.0f);
                     }
                     remaining--;
                 }
@@ -268,19 +290,17 @@ public:
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return false;
         if (lengthFrames <= 0) return false;
 
-        // Tail buffer: extra frames captured AFTER loop boundary, mixed with
-        // fade-out into the start of the next iteration. Preserves sustain of
-        // pads/delays/reverbs across the loop seam. tailMs is global, see
-        // setTailMs(). Tail is capped at loopFrames internally by TrackBuffer
-        // to keep the math sane for very short loops.
+        // Wrap-mix tail window (in frames): the ringing continuation past the loop
+        // boundary is overdubbed INTO the loop start at record time, so no extra
+        // buffer is allocated for it — the window is just metadata. tailMs is
+        // global (see setTailMs); TrackBuffer caps it at loopFrames.
         const int tailMs = mTailMs.load(std::memory_order_acquire);
         const int tailFrames = (tailMs > 0)
             ? (tailMs * sampleRate) / 1000
             : 0;
-        const int totalFrames = lengthFrames + tailFrames;
 
-        // Each track can have its own length — no master loop enforcement
-        size_t needed = static_cast<size_t>(totalFrames) * 2 * sizeof(float);
+        // Buffer is exactly the loop body (no separate tail region anymore).
+        size_t needed = static_cast<size_t>(lengthFrames) * 2 * sizeof(float);
         size_t currentUsage = getTotalAllocatedBytes();
         size_t trackCurrent = mTracks[trackIndex].allocatedBytes();
         if (currentUsage - trackCurrent + needed > MEMORY_BUDGET_BYTES) {
@@ -306,14 +326,21 @@ public:
 
     void startRecording(int trackIndex) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return;
-        int capacity = mTracks[trackIndex].getCapacityFrames();
-        if (capacity <= 0) return;
-        mRecordCapacityFrames.store(capacity, std::memory_order_release);
-        mRecordFramesRemaining.store(capacity, std::memory_order_release);
+        const int loopCap = mTracks[trackIndex].getLoopCapacityFrames();
+        if (loopCap <= 0) return;
+        // Total frames to capture = loop body + wrap-mix tail window. The tail is
+        // skipped for percussion tracks (hard seam, no bleed). The body is captured
+        // linearly; the tail overdubs into the loop start (see process()).
+        // Wrap-mix window never exceeds half the loop, so the baked decay can't
+        // swamp the loop start on short loops.
+        const int tailWindow = mTracks[trackIndex].isPercussionMode()
+            ? 0 : std::min(mTracks[trackIndex].getTailFrames(), loopCap / 2);
+        const int recordTotal = loopCap + tailWindow;
+        mRecordCapacityFrames.store(recordTotal, std::memory_order_release);
+        mRecordFramesRemaining.store(recordTotal, std::memory_order_release);
         // Musical loop length (excludes tail) — used by recording progress so the
         // bar fills in lockstep with the bar boundary, not the post-tail boundary.
-        mMusicalLoopFrames.store(mTracks[trackIndex].getLoopCapacityFrames(),
-                                 std::memory_order_release);
+        mMusicalLoopFrames.store(loopCap, std::memory_order_release);
         mRecordProgress.store(0.0f, std::memory_order_release);
         mLoopFinalizedDuringRec.store(false, std::memory_order_release);
         mOverdubbing.store(false, std::memory_order_release);
@@ -370,14 +397,68 @@ public:
     void armRecording(int trackIndex, int64_t triggerFrame) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return;
         if (mTracks[trackIndex].getCapacityFrames() <= 0) return;
+        mSyncRefTrack.store(-1, std::memory_order_release);  // plain arm = no phase-lock
         mArmedTriggerFrame.store(triggerFrame, std::memory_order_release);
         mArmedTrack.store(trackIndex, std::memory_order_release);
         mEnabled.store(true, std::memory_order_release);
     }
 
+    /**
+     * @brief Arm `trackIndex` to begin recording when the loop reference (the
+     *        longest active & playing track) next reaches its loop boundary, plus
+     *        `latencyFrames` of round-trip compensation. Phase-locks an overdub
+     *        layer to the existing loop:
+     *          - the trigger lands `latencyFrames` after the reference's next
+     *            loop-zero, so the user's downbeat (recorded late by the round
+     *            trip) is captured at the new track's frame 0; and
+     *          - at finalize the new track's playhead is set to the reference's
+     *            playhead (see finalizeLoopStartPlayback) so the two loops play
+     *            in phase.
+     *        Assumes the reference plays at speed 1.0 and the new take's length is
+     *        equal to (or a multiple of) the reference for a drift-free lock.
+     * @param trackIndex   Track to record into (already prepared).
+     * @param playFrameNow Transport play position at call time (passed by caller
+     *                     so AudioLooper stays free of the Transport include).
+     * @param latencyFrames Round-trip latency compensation in frames (>=0).
+     * @return the absolute trigger frame, or -1 if no reference track is playing
+     *         (caller should fall back to a non-synced arm).
+     */
+    int64_t armSyncedToLoop(int trackIndex, int64_t playFrameNow, int latencyFrames) {
+        if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return -1;
+        if (mTracks[trackIndex].getCapacityFrames() <= 0) return -1;
+        if (latencyFrames < 0) latencyFrames = 0;
+
+        int refIdx = -1;
+        int refLen = 0;
+        for (int i = 0; i < MAX_TRACKS; ++i) {
+            if (i == trackIndex) continue;
+            if (mTracks[i].isActive() && mTracks[i].isTrackPlaying()) {
+                const int len = mTracks[i].getLoopLength();
+                if (len > refLen) { refLen = len; refIdx = i; }
+            }
+        }
+        if (refIdx < 0 || refLen <= 0) return -1;
+
+        int playhead = mTracks[refIdx].getPlayHead();
+        if (playhead < 0) playhead = 0;
+        int framesToWrap = refLen - (playhead % refLen);
+        if (framesToWrap <= 0) framesToWrap = refLen;  // already at boundary → next loop
+
+        const int64_t trigger = playFrameNow
+                              + static_cast<int64_t>(framesToWrap)
+                              + static_cast<int64_t>(latencyFrames);
+
+        mSyncRefTrack.store(refIdx, std::memory_order_release);
+        mArmedTriggerFrame.store(trigger, std::memory_order_release);
+        mArmedTrack.store(trackIndex, std::memory_order_release);
+        mEnabled.store(true, std::memory_order_release);
+        return trigger;
+    }
+
     /** Cancel any pending armed recording (does not affect a recording in progress). */
     void cancelArm() {
         mArmedTrack.store(-1, std::memory_order_release);
+        mSyncRefTrack.store(-1, std::memory_order_release);
     }
 
     int getArmedTrack() const {
@@ -421,6 +502,7 @@ public:
         // Always clear any armed-recording so a pending take doesn't fire
         // moments after the abort.
         mArmedTrack.store(-1, std::memory_order_release);
+        mSyncRefTrack.store(-1, std::memory_order_release);
 
         if (recTrack < 0 || recTrack >= MAX_TRACKS) {
             // Nothing was recording, but we may have cleared an armed slot.
@@ -481,6 +563,7 @@ public:
         }
         mRecordingTrack.store(-1, std::memory_order_release);
         mArmedTrack.store(-1, std::memory_order_release);
+        mSyncRefTrack.store(-1, std::memory_order_release);
         mOverdubbing.store(false, std::memory_order_release);
         for (int i = 0; i < MAX_TRACKS; ++i) {
             mTracks[i].setPlaying(false);
@@ -511,6 +594,7 @@ public:
     void clearAll() {
         mRecordingTrack.store(-1, std::memory_order_release);
         mArmedTrack.store(-1, std::memory_order_release);
+        mSyncRefTrack.store(-1, std::memory_order_release);
         mOverdubbing.store(false, std::memory_order_release);
         for (int i = 0; i < MAX_TRACKS; ++i) {
             mTracks[i].clear();  // clear() resets mPlaying, mPlayHead, mProgress
@@ -635,8 +719,20 @@ public:
             if (opts.applyLimiter) limiter.processStereo(stem.data(), totalFrames);
 
             const std::string path = base + "track_" + std::to_string(t) + ".wav";
-            if (!wav::writeWav(path.c_str(), stem.data(), totalFrames,
-                               sr, opts.bitDepth, opts.metadata)) {
+            // Resample each stem to the requested export rate (0 = engine rate).
+            const float* stemPtr = stem.data();
+            int stemFrames = totalFrames;
+            int stemSr = sr;
+            std::vector<float> stemResampled;
+            const int targetSr = mExportSampleRate.load(std::memory_order_acquire);
+            if (targetSr > 0 && targetSr != sr) {
+                stemResampled = resampleStereo(stem.data(), totalFrames, sr, targetSr);
+                stemPtr = stemResampled.data();
+                stemFrames = static_cast<int>(stemResampled.size() / 2);
+                stemSr = targetSr;
+            }
+            if (!wav::writeWav(path.c_str(), stemPtr, stemFrames,
+                               stemSr, opts.bitDepth, opts.metadata)) {
                 LOOPER_LOGE("exportStems: failed to write %s", path.c_str());
                 continue;
             }
@@ -728,6 +824,16 @@ public:
     /** Set the cancel flag. exportMix/exportStems will bail at the next iteration. */
     void cancelExport() {
         mCancelExport.store(true, std::memory_order_release);
+    }
+
+    /**
+     * Target sample rate for subsequent exports (0 = engine rate). When nonzero
+     * and different from the engine rate, exportMix/exportStems resample the
+     * rendered mix to this rate — e.g. 44100 for DAWs that default to 44.1 kHz.
+     * WAV / stems path only; the caller keeps the engine rate for compressed export.
+     */
+    void setExportSampleRate(int sampleRate) {
+        mExportSampleRate.store(sampleRate > 0 ? sampleRate : 0, std::memory_order_release);
     }
 
     bool isExportInProgress() const {
@@ -872,6 +978,15 @@ public:
     void setTrackSpeed(int index, float speed) {
         if (index >= 0 && index < MAX_TRACKS) mTracks[index].setSpeed(speed);
     }
+    /** Switch a track's loop-seam profile (true = percussion / hard cut, no tail
+     *  bleed; false = sustained / long crossfade + tail). Live & RT-safe. */
+    void setTrackPercussionMode(int index, bool percussion) {
+        if (index >= 0 && index < MAX_TRACKS) mTracks[index].setPercussionMode(percussion);
+    }
+    bool isTrackPercussionMode(int index) const {
+        if (index < 0 || index >= MAX_TRACKS) return false;
+        return mTracks[index].isPercussionMode();
+    }
     /**
      * @brief Get a waveform summary (peak amplitudes) for visualization.
      *
@@ -968,6 +1083,44 @@ public:
     void resetTrackLoopRegion(int index) {
         if (index >= 0 && index < MAX_TRACKS) mTracks[index].resetLoopRegion();
     }
+
+    /**
+     * @brief Onset bounds (first/last audible frame) of a track, for trimming the
+     *        leading/trailing silence of a free take. UI/IO thread only.
+     * @return (first << 32) | (last & 0xFFFFFFFF); first==last (both 0) if silent
+     *         or invalid. `last` is exclusive.
+     */
+    int64_t findTrackContentBounds(int index, float thresholdRatio) const {
+        if (index < 0 || index >= MAX_TRACKS) return 0;
+        int first = 0, last = 0;
+        mTracks[index].findContentBounds(thresholdRatio, first, last);
+        return (static_cast<int64_t>(first) << 32)
+             | (static_cast<int64_t>(static_cast<uint32_t>(last)));
+    }
+    /**
+     * @brief Detect onsets in a track for tempo derivation (free auto-loop).
+     *        UI/IO thread only. @return number of onsets written.
+     */
+    int detectTrackOnsets(int index, int* outOnsets, int maxOnsets,
+                          int hopFrames, float sensitivity) const {
+        if (index < 0 || index >= MAX_TRACKS) return 0;
+        return mTracks[index].detectOnsets(outOnsets, maxOnsets, hopFrames, sensitivity);
+    }
+
+    /**
+     * @brief Bar-snap + seam-bake a free take's loop region (Free-loop auto-sync,
+     *        phases A+C). Pads with silence if loopEnd runs past the recording,
+     *        bakes the seam wrap-mix when tailFrames>0, and sets the loop region.
+     *        UI/IO thread only; no-op while recording into or exporting this track.
+     * @return true on success.
+     */
+    bool finalizeFreeLoop(int index, int loopStart, int loopEnd, int tailFrames) {
+        if (index < 0 || index >= MAX_TRACKS) return false;
+        if (mRecordingTrack.load(std::memory_order_acquire) == index) return false;
+        if (mExportInProgress.load(std::memory_order_acquire)) return false;
+        return mTracks[index].finalizeFreeLoop(loopStart, loopEnd, tailFrames);
+    }
+
     int getTrackLoopStart(int index) const {
         if (index < 0 || index >= MAX_TRACKS) return 0;
         return mTracks[index].getLoopStart();
@@ -1041,7 +1194,23 @@ private:
     void finalizeLoopStartPlayback(int recTrack) {
         if (recTrack < 0 || recTrack >= MAX_TRACKS) return;
         mTracks[recTrack].finalizeRecording();
-        mTracks[recTrack].resetPlayHead();
+
+        // Phase-lock a sync-armed overdub (armSyncedToLoop) to its reference: set
+        // the new track's playhead to the reference's current playhead instead of
+        // resetting to 0. Because capture started `latencyFrames` after the
+        // reference's loop-zero, the reference is now `latencyFrames` into its
+        // loop, so the new track's frame 0 (the user's downbeat) will play exactly
+        // when the reference next wraps to 0 — the two loops lock in phase and the
+        // round-trip latency is cancelled. -1 (the solo/first-take case) keeps the
+        // legacy resetPlayHead(), so that path is unchanged.
+        const int syncRef = mSyncRefTrack.load(std::memory_order_acquire);
+        if (syncRef >= 0 && syncRef < MAX_TRACKS && syncRef != recTrack
+            && mTracks[syncRef].isActive()) {
+            mTracks[recTrack].setPlayHeadF(mTracks[syncRef].getPlayHeadF());
+        } else {
+            mTracks[recTrack].resetPlayHead();
+        }
+        mSyncRefTrack.store(-1, std::memory_order_release);
         mTracks[recTrack].setPlaying(true);
 
         // Also start any other active tracks that should be playing.
@@ -1160,6 +1329,42 @@ private:
         }
     }
 
+    // Catmull-Rom cubic resample of an interleaved-stereo buffer from [inSR] to
+    // [outSR]. Used to export at a target rate (e.g. 48k → 44.1k). Boundary frames
+    // clamp their neighbours (no wrap — the render is not a seamless loop here).
+    static std::vector<float> resampleStereo(const float* in, int inFrames,
+                                             int inSR, int outSR) {
+        if (!in || inFrames <= 0 || inSR <= 0 || outSR <= 0 || inSR == outSR) {
+            const int n = (in && inFrames > 0) ? inFrames : 0;
+            return std::vector<float>(in, in + static_cast<size_t>(n) * 2);
+        }
+        const double ratio = static_cast<double>(outSR) / static_cast<double>(inSR);
+        const int outFrames = static_cast<int>(std::ceil(inFrames * ratio));
+        std::vector<float> out(static_cast<size_t>(outFrames) * 2);
+        const int srcLast = inFrames - 1;
+        for (int i = 0; i < outFrames; ++i) {
+            const double srcPos = i / ratio;
+            const int s1 = std::min(static_cast<int>(srcPos), srcLast);
+            const int s0 = (s1 > 0) ? s1 - 1 : 0;
+            const int s2 = std::min(s1 + 1, srcLast);
+            const int s3 = std::min(s1 + 2, srcLast);
+            const float t = static_cast<float>(srcPos - s1);
+            const float t2 = t * t;
+            const float t3 = t2 * t;
+            for (int ch = 0; ch < 2; ++ch) {
+                const float p0 = in[s0 * 2 + ch];
+                const float p1 = in[s1 * 2 + ch];
+                const float p2 = in[s2 * 2 + ch];
+                const float p3 = in[s3 * 2 + ch];
+                out[i * 2 + ch] = 0.5f * ((2.0f * p1)
+                    + (-p0 + p2) * t
+                    + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2
+                    + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+            }
+        }
+        return out;
+    }
+
     bool exportMixInternal(const char* filePath, const ExportOptions& opts) {
         if (!filePath) return false;
         ExportGuard guard(*this);
@@ -1206,8 +1411,20 @@ private:
         }
         updateExportProgress(0.95f);
 
-        const bool ok = wav::writeWav(filePath, mixBuffer.data(), totalFrames,
-                                      sr, opts.bitDepth, opts.metadata);
+        // Resample the finished mix to the requested export rate (0 = engine rate).
+        int outSr = sr;
+        const float* writePtr = mixBuffer.data();
+        int writeFrames = totalFrames;
+        std::vector<float> resampled;
+        const int targetSr = mExportSampleRate.load(std::memory_order_acquire);
+        if (targetSr > 0 && targetSr != sr) {
+            resampled = resampleStereo(mixBuffer.data(), totalFrames, sr, targetSr);
+            writePtr = resampled.data();
+            writeFrames = static_cast<int>(resampled.size() / 2);
+            outSr = targetSr;
+        }
+        const bool ok = wav::writeWav(filePath, writePtr, writeFrames,
+                                      outSr, opts.bitDepth, opts.metadata);
         mExportProgress.store(1.0f, std::memory_order_release);
         if (ok) mExportsCompleted.fetch_add(1, std::memory_order_relaxed);
         else    mExportsFailed.fetch_add(1, std::memory_order_relaxed);
@@ -1264,9 +1481,17 @@ private:
     std::atomic<int> mRecordingTrack{-1};
     std::atomic<int> mArmedTrack{-1};
     std::atomic<int64_t> mArmedTriggerFrame{0};
+    // Reference track for a sync-armed overdub layer (armSyncedToLoop). When >=0,
+    // the just-finalized take is phase-locked to this track's playhead instead of
+    // resetting to 0, compensating round-trip latency so the overdub aligns.
+    // -1 = no sync (solo/first take) — finalize keeps its legacy resetPlayHead().
+    std::atomic<int> mSyncRefTrack{-1};
     std::atomic<bool> mOverdubbing{false};
     std::atomic<bool> mLoopFinalizedDuringRec{false};
-    std::atomic<int> mTailMs{1750};  // Default tail capture (preserves sustain at loop seam)
+    // Default wrap-mix tail window. 500ms gives sustained sounds room to ring
+    // across the seam without baking a large chunk of new playing into the loop
+    // start. (The old 1750ms was tuned for the removed playback-fade tail.)
+    std::atomic<int> mTailMs{500};   // Wrap-mix decay window (ms)
                                     // 750ms covers most natural decays (pads, reverb tails,
                                     // long pianos). NoisyPad can override via setTailMs().
 
@@ -1275,6 +1500,8 @@ private:
     mutable std::atomic<bool>  mExportInProgress{false};
     mutable std::atomic<bool>  mCancelExport{false};
     mutable std::atomic<float> mExportProgress{0.0f};
+    // Target export rate (0 = engine rate). Set from the UI before an export.
+    std::atomic<int>           mExportSampleRate{0};
 
     // Telemetry counters (relaxed atomics; observability only, not synchronization).
     WaveformCache mWaveformCache[MAX_TRACKS]{};

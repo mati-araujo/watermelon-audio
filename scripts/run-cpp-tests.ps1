@@ -26,7 +26,8 @@
 [CmdletBinding()]
 param(
     [string]$Filter,
-    [switch]$Clean
+    [switch]$Clean,
+    [switch]$Fast
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,6 +111,9 @@ if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
 $ctestBin = Join-Path (Split-Path -Parent $cmakeBin) 'ctest.exe'
 $ctestArgs = @('--test-dir', $BuildDir, '--output-on-failure')
 if ($Filter) { $ctestArgs += @('-R', $Filter) }
+# -Fast: skip slow stress tests (name contains Stress/Slow) for a tight
+# edit -> test loop. They still run in CI and in an unflagged local run.
+if ($Fast) { $ctestArgs += @('-E', 'Stress|Slow') }
 
 & $ctestBin @ctestArgs
 exit $LASTEXITCODE

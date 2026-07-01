@@ -2630,6 +2630,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperPrepareTrack(trackIndex: Int, lengthFrames: Int, sampleRate: Int): Int
     private external fun nativeLooperPrepareTrackBars(trackIndex: Int, bars: Int, sampleRate: Int): Int
     private external fun nativeLooperArmAtNextBar(trackIndex: Int): Long
+    private external fun nativeLooperArmInFrames(trackIndex: Int, offsetFrames: Long): Long
+    private external fun nativeLooperArmSyncedToLoop(trackIndex: Int, latencyFrames: Long): Long
     private external fun nativeLooperCancelArm()
     private external fun nativeLooperGetArmedTrack(): Int
     private external fun nativeLooperSetTailMs(ms: Int)
@@ -2642,6 +2644,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperStopAll()
     private external fun nativeLooperPause()
     private external fun nativeLooperResume()
+    private external fun nativeLooperSetExportSampleRate(sampleRate: Int)
     private external fun nativeLooperSetFreeLength(freeLength: Boolean)
     private external fun nativeLooperSetTrackMuted(trackIndex: Int, muted: Boolean)
     private external fun nativeLooperSetTrackVolume(trackIndex: Int, volume: Float)
@@ -2673,6 +2676,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperGetTrackWaveform(trackIndex: Int, outBins: FloatArray, numBins: Int): Int
     private external fun nativeLooperSetTrackSpeed(trackIndex: Int, speed: Float)
     private external fun nativeLooperGetTrackSpeed(trackIndex: Int): Float
+    private external fun nativeLooperSetTrackPercussionMode(trackIndex: Int, percussion: Boolean)
+    private external fun nativeLooperIsTrackPercussionMode(trackIndex: Int): Boolean
 
     // Push-based state notifications (replaces per-track polling).
     private external fun nativeLooperRegisterStateListener(
@@ -2686,6 +2691,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperResetTrackLoopRegion(trackIndex: Int)
     private external fun nativeLooperGetTrackLoopStart(trackIndex: Int): Int
     private external fun nativeLooperGetTrackLoopEnd(trackIndex: Int): Int
+    private external fun nativeLooperFindContentBounds(trackIndex: Int, thresholdRatio: Float): Long
+    private external fun nativeLooperDetectOnsets(
+        trackIndex: Int, maxOnsets: Int, hopFrames: Int, sensitivity: Float
+    ): IntArray
+    private external fun nativeLooperFinalizeFreeLoop(
+        trackIndex: Int, loopStart: Int, loopEnd: Int, tailFrames: Int
+    ): Boolean
     private external fun nativeLooperTriggerClick(isDownbeat: Boolean)
     private external fun nativeLooperGetInputPeak(): Float
 
@@ -2752,6 +2764,30 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     fun looperArmAtNextBar(trackIndex: Int): Long = nativeLooperArmAtNextBar(trackIndex)
 
+    /**
+     * Arm a track to start recording `offsetFrames` after the current Transport
+     * play position. Used for latency-compensated record start: pass
+     * (countInFrames + roundTripLatencyFrames) so capture begins exactly that far
+     * ahead of "now", placing the user's first downbeat — which lands late in the
+     * buffer by the round-trip latency — at loop frame 0. The play-frame anchor is
+     * read natively, so no UI-thread jitter leaks into the trigger.
+     * Returns the absolute trigger frame (>=0), or -1 on failure.
+     */
+    fun looperArmInFrames(trackIndex: Int, offsetFrames: Long): Long =
+        nativeLooperArmInFrames(trackIndex, offsetFrames)
+
+    /**
+     * Sync-armed overdub: phase-lock a new layer to the existing loop. Arms
+     * [trackIndex] to start at the loop reference's (longest active playing track)
+     * next boundary + [latencyFrames] of round-trip compensation, and tags the take
+     * so finalize phase-locks it to the reference — cancelling the round-trip
+     * latency so the overdub plays in time with the existing loop.
+     * @return the trigger frame, or -1 if no reference track is playing (caller
+     *         should fall back to [looperArmInFrames]).
+     */
+    fun looperArmSyncedToLoop(trackIndex: Int, latencyFrames: Long): Long =
+        nativeLooperArmSyncedToLoop(trackIndex, latencyFrames)
+
     /** Cancel a pending armed recording (does not affect a recording in progress). */
     fun looperCancelArm() = nativeLooperCancelArm()
 
@@ -2794,6 +2830,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun looperStopAll() = nativeLooperStopAll()
     fun looperPause() = nativeLooperPause()
     fun looperResume() = nativeLooperResume()
+    /** Target sample rate for subsequent WAV/stems exports (0 = engine rate). */
+    fun looperSetExportSampleRate(sampleRate: Int) = nativeLooperSetExportSampleRate(sampleRate)
     fun looperSetFreeLength(freeLength: Boolean) = nativeLooperSetFreeLength(freeLength)
     fun looperClearTrack(trackIndex: Int) = nativeLooperClearTrack(trackIndex)
     fun looperClearAll() = nativeLooperClearAll()
@@ -2861,6 +2899,16 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun looperGetTrackSpeed(trackIndex: Int): Float = nativeLooperGetTrackSpeed(trackIndex)
 
     /**
+     * Per-track loop-seam profile. true = percussion (near-instant declick cut, no
+     * tail bleed — preserves rhythmic transients at the seam); false = sustained
+     * (long 50 ms crossfade + tail mixing for pads/reverbs). Live & RT-safe.
+     */
+    fun looperSetTrackPercussionMode(trackIndex: Int, percussion: Boolean) =
+        nativeLooperSetTrackPercussionMode(trackIndex, percussion)
+    fun looperIsTrackPercussionMode(trackIndex: Int): Boolean =
+        nativeLooperIsTrackPercussionMode(trackIndex)
+
+    /**
      * Install a [com.watermellonstudios.audio.api.LooperStateListener] to
      * receive push-based notifications of track progress, play state, and
      * peak level changes. Pass `null` to unregister.
@@ -2896,6 +2944,41 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun looperResetTrackLoopRegion(trackIndex: Int) = nativeLooperResetTrackLoopRegion(trackIndex)
     fun looperGetTrackLoopStart(trackIndex: Int): Int = nativeLooperGetTrackLoopStart(trackIndex)
     fun looperGetTrackLoopEnd(trackIndex: Int): Int = nativeLooperGetTrackLoopEnd(trackIndex)
+
+    /**
+     * Onset bounds (first/last audible frame) of a track, for trimming a free
+     * take's leading/trailing silence. [thresholdRatio] is the fraction of the
+     * track's peak that counts as content (e.g. 0.03). Returns (first, lastExclusive);
+     * (0, 0) if silent/invalid.
+     */
+    fun looperFindContentBounds(trackIndex: Int, thresholdRatio: Float): Pair<Int, Int> {
+        val packed = nativeLooperFindContentBounds(trackIndex, thresholdRatio)
+        val first = (packed shr 32).toInt()
+        val last = (packed and 0xFFFFFFFFL).toInt()
+        return first to last
+    }
+
+    /**
+     * Detect note onsets (transient frame positions, ascending) in a track, for
+     * deriving a free take's tempo from its rhythm (inter-onset intervals).
+     * UI/IO thread only — call after recording has stopped.
+     * @param hopFrames analysis window (256 ≈ 5.3ms@48k); [sensitivity] >1 = more onsets.
+     */
+    fun looperDetectOnsets(
+        trackIndex: Int,
+        maxOnsets: Int = 512,
+        hopFrames: Int = 256,
+        sensitivity: Float = 1.0f
+    ): IntArray = nativeLooperDetectOnsets(trackIndex, maxOnsets, hopFrames, sensitivity)
+
+    /**
+     * Bar-snap + seam-bake a free take's loop (Free-loop auto-sync, phases A+C):
+     * pads with silence if [loopEnd] runs past the recording, bakes the seam
+     * wrap-mix when [tailFrames] > 0, and sets the loop region to [loopStart, loopEnd).
+     * UI/IO thread only. Returns true on success.
+     */
+    fun looperFinalizeFreeLoop(trackIndex: Int, loopStart: Int, loopEnd: Int, tailFrames: Int): Boolean =
+        nativeLooperFinalizeFreeLoop(trackIndex, loopStart, loopEnd, tailFrames)
 
     // Metronome click (lock-free)
     fun looperTriggerClick(isDownbeat: Boolean) = nativeLooperTriggerClick(isDownbeat)

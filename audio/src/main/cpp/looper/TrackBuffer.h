@@ -53,13 +53,15 @@ public:
         if (tailFrames < 0) tailFrames = 0;
         // Cap tail at loopFrames to avoid pathological cases with very short loops.
         if (tailFrames > loopFrames) tailFrames = loopFrames;
-        const int totalFrames = loopFrames + tailFrames;
         try {
-            mBuffer.resize(static_cast<size_t>(totalFrames) * 2, 0.0f);
+            // Buffer is exactly the loop body. The wrap-mix tail overdubs INTO the
+            // loop start at record time, so no separate tail region is allocated;
+            // tailFrames is kept only as the wrap-mix decay window length.
+            mBuffer.resize(static_cast<size_t>(loopFrames) * 2, 0.0f);
         } catch (...) {
             return 0;
         }
-        mCapacityFrames = totalFrames;
+        mCapacityFrames = loopFrames;
         mLoopCapacityFrames = loopFrames;
         mTailFrames.store(tailFrames, std::memory_order_release);
         mSampleRate = sampleRate;
@@ -97,8 +99,13 @@ public:
         // before we deallocate the heap buffer.
         std::atomic_thread_fence(std::memory_order_seq_cst);
 
-        // Step 3: Now safe to deallocate — audio thread won't access buffer
-        // because mixInto() returns early when !mPlaying || !mActive || length<=0.
+        // Step 2b: Wait out any in-flight mixInto() for this track. The early-return
+        // guards above only protect mixInto calls that START after this point; a
+        // call already mid-render holds a stale buffer pointer, so we must let it
+        // finish before freeing (else use-after-free in the interp read).
+        waitForRenderIdle();
+
+        // Step 3: Now safe to deallocate — no mixInto is reading mBuffer.
         mPlayHead.store(0, std::memory_order_relaxed);
         mPlayHeadF.store(0.0f, std::memory_order_relaxed);
         mProgress.store(0.0f, std::memory_order_relaxed);
@@ -125,6 +132,7 @@ public:
         mCapacityFrames = 0;
         mLoopCapacityFrames = 0;
         mTailFrames.store(0, std::memory_order_relaxed);
+        mTailEnabled.store(true, std::memory_order_relaxed);  // back to Sustained default
     }
 
     /**
@@ -196,6 +204,7 @@ public:
         const bool wasPlaying = mPlaying.load(std::memory_order_acquire);
         mPlaying.store(false, std::memory_order_release);
         std::atomic_thread_fence(std::memory_order_seq_cst);
+        waitForRenderIdle();  // no mixInto may be reading mBuffer while we realloc
 
         try {
             std::vector<float> trimmed(mBuffer.begin(),
@@ -228,6 +237,10 @@ public:
      * @param numFrames Number of frames to process
      */
     void mixInto(float* output, int numFrames) {
+        // Marks this track as "rendering" for the whole block so clear()/trim/
+        // finalizeFreeLoop() can't free mBuffer mid-read. Cleared on every return.
+        RenderScope renderScope(mRendering);
+
         if (!mActive.load(std::memory_order_acquire)) return;
         if (!mPlaying.load(std::memory_order_acquire)) return;
 
@@ -268,22 +281,11 @@ public:
         float peakL = 0.0f;
         float peakR = 0.0f;
 
-        // Tail mixing: if a tail region was captured, mix it into the start of
-        // each loop iteration with a linear fade-out. This preserves the natural
-        // decay of sustained notes at the loop seam (delays, reverbs, pads).
-        //
-        // Tail source = the frames recorded immediately AFTER the user's current
-        // loopEnd. For full-buffer playback (loopEnd == loopCap) this is the
-        // dedicated tail region [loopCap, loopCap + tailFrames). For custom loop
-        // regions, it's the "what came next in the original take" [loopEnd, ...) —
-        // which is musically the right continuation at that seam.
-        const int tailFrames    = mTailFrames.load(std::memory_order_acquire);
-        const int tailSrcStart  = loopEnd;
-        const int tailSrcAvail  = std::max(0, mCapacityFrames - tailSrcStart);
-        const int effectiveTail = std::min(tailFrames, tailSrcAvail);
-        const bool tailActive   = (effectiveTail > 0);
-        const float invTail = tailActive ? 1.0f / static_cast<float>(effectiveTail) : 0.0f;
-
+        // NOTE: the loop seam's tail/decay is no longer mixed at playback. The
+        // ringing continuation past the boundary is now overdubbed (wrap-mixed)
+        // into the loop START at RECORD time (see AudioLooper::process), so it is
+        // already baked into the buffer here. The equal-power crossfade below still
+        // smooths the cut itself.
         const auto& panLut = wm::EqualPowerPanLUT::instance();
         for (int i = 0; i < numFrames; ++i) {
             // Smooth volume, mute gain, and pan
@@ -350,25 +352,6 @@ public:
                     const float gNew = std::sqrt(1.0f - fade);
                     sampleL = sampleL * gOld + wrapL * gNew;
                     sampleR = sampleR * gOld + wrapR * gNew;
-                }
-            }
-
-            // Tail mixing: in the first `effectiveTail` frames of each iteration,
-            // sum samples from the captured tail region with a fade-out that
-            // approximates natural exponential decay. Linear fade would drop the
-            // sustain too aggressively at the start (where ears are most sensitive);
-            // (1-t)^2 stays close to 1.0 for the first ~30% then accelerates.
-            // For full-buffer playback the tail source is [loopCap, loopCap + tail);
-            // for a custom loop region it's the "post-region" frames in the original
-            // take. Either way this makes the seam perceptually continuous.
-            if (tailActive) {
-                int tailIdx = static_cast<int>(regionPos);
-                if (tailIdx < effectiveTail) {
-                    int tailBufIdx = tailSrcStart + tailIdx;
-                    const float lin = 1.0f - (static_cast<float>(tailIdx) * invTail);
-                    const float tailFade = lin * lin;  // quasi-exponential decay shape
-                    sampleL += mBuffer[static_cast<size_t>(tailBufIdx) * 2]     * tailFade;
-                    sampleR += mBuffer[static_cast<size_t>(tailBufIdx) * 2 + 1] * tailFade;
                 }
             }
 
@@ -472,6 +455,8 @@ public:
     bool isTrackPlaying() const { return mPlaying.load(std::memory_order_acquire); }
     float getProgress() const { return mProgress.load(std::memory_order_acquire); }
     int getPlayHead() const { return mPlayHead.load(std::memory_order_acquire); }
+    /** Fractional playhead within the loop region. Used for cross-track phase-lock. */
+    float getPlayHeadF() const { return mPlayHeadF.load(std::memory_order_acquire); }
 
     void resetPlayHead() {
         mPlayHead.store(0, std::memory_order_release);
@@ -479,8 +464,44 @@ public:
         mProgress.store(0.0f, std::memory_order_release);
     }
 
+    /**
+     * @brief Set the (fractional) playhead position. Used to phase-lock a freshly
+     *        recorded overdub layer to the reference loop at finalize. mProgress
+     *        self-corrects on the next mixInto() block (≤ one callback).
+     */
+    void setPlayHeadF(float pos) {
+        if (pos < 0.0f) pos = 0.0f;
+        mPlayHeadF.store(pos, std::memory_order_release);
+        mPlayHead.store(static_cast<int>(pos), std::memory_order_release);
+    }
+
     void setSpeed(float speed) { mSpeed.store(std::clamp(speed, 0.25f, 4.0f), std::memory_order_release); }
     float getSpeed() const { return mSpeed.load(std::memory_order_acquire); }
+
+    /**
+     * @brief Switch the loop seam profile for this track. RT-safe; takes effect on
+     *        the next mixInto() block, so it can be toggled live on an already
+     *        recorded track.
+     *
+     * Percussion: a near-instant equal-power crossfade (just enough to declick)
+     * and NO tail-into-seam mixing — preserves the attack of a rhythmic transient
+     * sitting near the loop point instead of smearing/flamming it.
+     * Sustained: the long musical crossfade (default 50 ms) + tail mixing — masks
+     * the seam for pads, delays and reverb tails.
+     */
+    void setPercussionMode(bool percussion) {
+        if (percussion) {
+            mSeamCrossfadeFrames.store(CROSSFADE_FRAMES, std::memory_order_release);  // ~2.7ms declick
+            mTailEnabled.store(false, std::memory_order_release);
+        } else {
+            const int seamXf = static_cast<int>(DEFAULT_SEAM_CROSSFADE_MS * 0.001f
+                                              * static_cast<float>(mSampleRate));
+            mSeamCrossfadeFrames.store(std::max(CROSSFADE_FRAMES, seamXf),
+                                       std::memory_order_release);
+            mTailEnabled.store(true, std::memory_order_release);
+        }
+    }
+    bool isPercussionMode() const { return !mTailEnabled.load(std::memory_order_acquire); }
 
     // ========== State queries (lock-free) ==========
 
@@ -533,6 +554,245 @@ public:
     }
     int getLoopLength() const { return getLoopEnd() - getLoopStart(); }
 
+    /**
+     * @brief Find the first and last frames of audible content (onset bounds),
+     *        for trimming leading/trailing silence of a free take. UI/IO thread
+     *        only — call after recording has stopped (no concurrent writes).
+     *
+     * The threshold is relative to the track's peak (so it adapts to recording
+     * level), floored at a small absolute value to ignore noise. If the track is
+     * silent, returns false and the bounds span the whole buffer.
+     *
+     * @param thresholdRatio Fraction of peak amplitude that counts as content
+     *                       (e.g. 0.03 = 3% of peak ≈ -30 dB below peak).
+     * @param outFirst       First content frame (inclusive).
+     * @param outLast        One past the last content frame (exclusive).
+     * @return true if content was found.
+     */
+    bool findContentBounds(float thresholdRatio, int& outFirst, int& outLast) const {
+        const int len = mLengthFrames.load(std::memory_order_acquire);
+        outFirst = 0;
+        outLast = len;
+        if (len <= 0 || mBuffer.size() < static_cast<size_t>(len) * 2) return false;
+
+        float peak = 0.0f;
+        for (int i = 0; i < len; ++i) {
+            const float m = std::max(std::abs(mBuffer[static_cast<size_t>(i) * 2]),
+                                     std::abs(mBuffer[static_cast<size_t>(i) * 2 + 1]));
+            if (m > peak) peak = m;
+        }
+        if (peak <= 0.0f) return false;
+
+        const float threshold = std::max(peak * thresholdRatio, 1.0e-4f);
+
+        int first = 0;
+        while (first < len) {
+            const float m = std::max(std::abs(mBuffer[static_cast<size_t>(first) * 2]),
+                                     std::abs(mBuffer[static_cast<size_t>(first) * 2 + 1]));
+            if (m > threshold) break;
+            ++first;
+        }
+        int last = len - 1;
+        while (last > first) {
+            const float m = std::max(std::abs(mBuffer[static_cast<size_t>(last) * 2]),
+                                     std::abs(mBuffer[static_cast<size_t>(last) * 2 + 1]));
+            if (m > threshold) break;
+            --last;
+        }
+        outFirst = first;
+        outLast = std::min(last + 1, len);  // exclusive end
+        return outLast > outFirst;
+    }
+
+    /**
+     * @brief Detect note onsets (transients) via energy flux, for deriving a
+     *        free take's tempo from its RHYTHM (inter-onset intervals) rather
+     *        than its total length. UI/IO thread only — call after recording has
+     *        stopped (no concurrent writes).
+     *
+     * Algorithm (lightweight; RT not required here):
+     *   1. Short-time energy per window (sum of L²+R² over `hopFrames`).
+     *   2. Positive log-energy flux (rectified first difference) — log domain
+     *      keeps soft and loud hits comparable.
+     *   3. Adaptive peak-pick: a window is an onset if its flux exceeds a local
+     *      moving-average threshold, is a local maximum, and is ≥ ~50ms after the
+     *      previous onset (rejects flams / double triggers).
+     *
+     * @param outOnsets   Caller buffer for onset frame positions (ascending).
+     * @param maxOnsets   Capacity of outOnsets.
+     * @param hopFrames   Analysis window size in frames (e.g. 256 ≈ 5.3ms@48k).
+     * @param sensitivity >1 = more onsets (lower threshold), <1 = fewer (~1.0 default).
+     * @return number of onsets written (0 if silent / too short / invalid).
+     */
+    int detectOnsets(int* outOnsets, int maxOnsets,
+                     int hopFrames, float sensitivity) const {
+        if (!outOnsets || maxOnsets <= 0) return 0;
+        if (hopFrames < 32) hopFrames = 32;
+        const int len = mLengthFrames.load(std::memory_order_acquire);
+        if (len <= hopFrames * 4) return 0;
+        if (mBuffer.size() < static_cast<size_t>(len) * 2) return 0;
+
+        const int numWin = len / hopFrames;
+        if (numWin < 4) return 0;
+
+        std::vector<float> energy, smoothed, flux;
+        try {
+            energy.assign(static_cast<size_t>(numWin), 0.0f);
+            smoothed.assign(static_cast<size_t>(numWin), 0.0f);
+            flux.assign(static_cast<size_t>(numWin), 0.0f);
+        } catch (...) {
+            return 0;
+        }
+
+        // 1) Short-time energy per window.
+        for (int w = 0; w < numWin; ++w) {
+            const int base = w * hopFrames;
+            float e = 0.0f;
+            for (int i = 0; i < hopFrames; ++i) {
+                const float l = mBuffer[static_cast<size_t>(base + i) * 2];
+                const float r = mBuffer[static_cast<size_t>(base + i) * 2 + 1];
+                e += l * l + r * r;
+            }
+            energy[w] = e;
+        }
+
+        // 1b) Smooth the energy (±2-window moving average) BEFORE the flux. A
+        // sustained/tonal note whose period exceeds the hop makes the raw windowed
+        // energy oscillate every block, which the flux reads as a stream of false
+        // onsets (a held synth pad reported >100 onsets / 6 s). Averaging over a few
+        // windows flattens that wobble while a real transient still steps the
+        // smoothed energy up sharply.
+        const int sm = 2;
+        for (int w = 0; w < numWin; ++w) {
+            const int a = std::max(0, w - sm);
+            const int b = std::min(numWin - 1, w + sm);
+            float sum = 0.0f;
+            for (int k = a; k <= b; ++k) sum += energy[k];
+            smoothed[w] = sum / static_cast<float>(b - a + 1);
+        }
+
+        // 2) Positive log-energy flux on the smoothed envelope.
+        for (int w = 1; w < numWin; ++w) {
+            const float d = std::log(smoothed[w] + 1e-9f) - std::log(smoothed[w - 1] + 1e-9f);
+            flux[w] = (d > 0.0f) ? d : 0.0f;
+        }
+
+        // 3) Adaptive peak-pick.
+        const float mult = (sensitivity > 0.01f) ? (1.0f / sensitivity) : 1.0f;
+        // Absolute log-energy flux floor (≈ +3 dB jump). The adaptive threshold
+        // alone adapts UP with the local flux, so sustained/tonal material (whose
+        // windowed energy wobbles every block) trips it constantly — a take of a
+        // held synth pad reported ~88 onsets / 5 s. A real transient jumps energy
+        // by several dB (flux ≫ this); steady-tone wobble does not. Scales with the
+        // sensitivity knob so the param still works.
+        const float minFlux = 0.5f * mult;
+        const int half = 8;  // local-mean window (± windows)
+        const int minGapWin =
+            std::max(1, static_cast<int>(0.05f * static_cast<float>(mSampleRate)
+                                         / static_cast<float>(hopFrames)));
+        int count = 0;
+        int lastOnsetWin = -minGapWin - 1;
+        for (int w = 1; w < numWin - 1 && count < maxOnsets; ++w) {
+            const float f = flux[w];
+            if (f <= minFlux) continue;
+            const int a = std::max(1, w - half);
+            const int b = std::min(numWin - 1, w + half);
+            float sum = 0.0f;
+            int n = 0;
+            for (int k = a; k < b; ++k) { sum += flux[k]; ++n; }
+            const float localMean = (n > 0) ? sum / static_cast<float>(n) : 0.0f;
+            const float threshold = localMean * 1.5f * mult + 1.0e-4f;
+            if (f > threshold && f >= flux[w - 1] && f > flux[w + 1]
+                && (w - lastOnsetWin) >= minGapWin) {
+                outOnsets[count++] = w * hopFrames;
+                lastOnsetWin = w;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * @brief Bar-snap + seam-bake a free take's loop in one RT-safe pass.
+     *        UI/IO thread only (mirrors trimToLength()'s pause/fence/realloc
+     *        pattern). No-op semantics handled by the AudioLooper guard.
+     *
+     *   1. SEAM BAKE (when `tailFrames` > 0): overdub the natural continuation
+     *      past `loopEnd` into the loop START with a quasi-exponential decay, so
+     *      a sound still ringing across the seam bleeds in instead of being cut.
+     *      Uses the ORIGINAL recorded content beyond loopEnd (before padding).
+     *   2. PAD: if `loopEnd` extends past the recording (user finished a hair
+     *      early → bar rounded up), grow the buffer with trailing silence so the
+     *      loop closes exactly on the grid.
+     *   3. REGION: set the loop region to [loopStart, loopEnd) and restart the
+     *      playhead at the region start.
+     *
+     * @return true on success; false on degenerate args / alloc failure.
+     */
+    bool finalizeFreeLoop(int loopStart, int loopEnd, int tailFrames) {
+        const int origLen = mLengthFrames.load(std::memory_order_acquire);
+        if (origLen <= 0) return false;
+        if (loopStart < 0) loopStart = 0;
+        if (loopEnd <= loopStart) return false;
+        if (mBuffer.size() < static_cast<size_t>(origLen) * 2) return false;
+
+        const bool wasPlaying = mPlaying.load(std::memory_order_acquire);
+        mPlaying.store(false, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        waitForRenderIdle();  // no mixInto may read mBuffer while we bake/realloc it
+
+        // 1) Seam wrap-mix from the continuation past loopEnd into the loop start.
+        if (tailFrames > 0) {
+            const int loopLen = loopEnd - loopStart;
+            int tail = std::min(tailFrames, loopLen / 2);
+            tail = std::min(tail, origLen - loopEnd);  // only what we actually recorded
+            const float invTail = (tail > 0) ? 1.0f / static_cast<float>(tail) : 0.0f;
+            for (int i = 0; i < tail; ++i) {
+                const int src = loopEnd + i;
+                const int dst = loopStart + i;
+                if (src >= origLen) break;
+                float fade = 1.0f - static_cast<float>(i) * invTail;
+                fade = fade * fade;  // (1-t)^2 decay, matches record-time wrap-mix
+                const size_t di = static_cast<size_t>(dst) * 2;
+                const size_t si = static_cast<size_t>(src) * 2;
+                mBuffer[di]     = tanhClip(mBuffer[di]     + mBuffer[si]     * fade);
+                mBuffer[di + 1] = tanhClip(mBuffer[di + 1] + mBuffer[si + 1] * fade);
+            }
+        }
+
+        // 2) Pad with silence if the snapped loop end runs past the recording.
+        if (loopEnd > origLen) {
+            try {
+                std::vector<float> grown(static_cast<size_t>(loopEnd) * 2, 0.0f);
+                std::copy(mBuffer.begin(),
+                          mBuffer.begin() + static_cast<size_t>(origLen) * 2,
+                          grown.begin());
+                mBuffer.swap(grown);
+            } catch (...) {
+                if (wasPlaying) mPlaying.store(true, std::memory_order_release);
+                return false;
+            }
+            mCapacityFrames = loopEnd;
+            mLoopCapacityFrames = loopEnd;
+            mLengthFrames.store(loopEnd, std::memory_order_release);
+            mWriteHead.store(loopEnd, std::memory_order_release);
+            mTailFrames.store(0, std::memory_order_release);  // no dedicated tail region
+        }
+
+        // 3) Set the bar-snapped loop region and restart from the top.
+        const int len = mLengthFrames.load(std::memory_order_acquire);
+        const int s = std::clamp(loopStart, 0, len - 1);
+        const int e = std::clamp(loopEnd, s + 1, len);
+        mLoopStart.store(s, std::memory_order_release);
+        mLoopEnd.store(e, std::memory_order_release);
+        mPlayHead.store(0, std::memory_order_relaxed);
+        mPlayHeadF.store(0.0f, std::memory_order_relaxed);
+        mProgress.store(0.0f, std::memory_order_relaxed);
+
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (wasPlaying) mPlaying.store(true, std::memory_order_release);
+        return true;
+    }
+
     // ========== Buffer access (for export — snapshot copy first!) ==========
 
     const float* data() const { return mBuffer.data(); }
@@ -542,14 +802,44 @@ private:
         return std::tanh(x * 0.666f) * 1.5f;
     }
 
+    // RT-safety: clear()/trimToLength()/finalizeFreeLoop() free or realloc mBuffer
+    // from the UI/IO thread, while mixInto() (audio thread) reads mBuffer across a
+    // whole block. mRendering marks "audio thread is inside mixInto for this
+    // track"; the freeing paths set mPlaying=false then spin until it clears, so
+    // the buffer is never deallocated mid-render (fixes a use-after-free crash on
+    // clearAll() while a track is playing).
+    std::atomic<bool> mRendering{false};
+
+    struct RenderScope {
+        std::atomic<bool>& flag;
+        explicit RenderScope(std::atomic<bool>& f) : flag(f) {
+            flag.store(true, std::memory_order_seq_cst);
+        }
+        ~RenderScope() { flag.store(false, std::memory_order_release); }
+    };
+
+    /**
+     * @brief UI/IO thread: block until the audio thread is not mid-mixInto() for
+     *        this track. Call AFTER setting mPlaying=false (so mixInto bails on the
+     *        next block) and BEFORE freeing/reallocating mBuffer. Bounded by one
+     *        audio callback (~a few ms) — not RT-safe, never call from audio thread.
+     */
+    void waitForRenderIdle() const {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        while (mRendering.load(std::memory_order_acquire)) {
+            // brief spin; the audio thread clears the flag at the end of mixInto()
+        }
+    }
+
     // Audio data
     std::vector<float> mBuffer;        // Stereo interleaved, heap (loop + tail)
     std::vector<float> mUndoBuffer;    // Lazy undo snapshot
-    int mCapacityFrames{0};            // Total frames including tail (= loopCap + tail)
+    int mCapacityFrames{0};            // Buffer length in frames (= loop body; no tail region)
     int mLoopCapacityFrames{0};        // Musical loop capacity (excludes tail)
     int mSampleRate{48000};
     std::atomic<int> mTailFrames{0};           // Captured tail length (decay region)
     std::atomic<int> mSeamCrossfadeFrames{128}; // Equal-power crossfade window @ loop seam
+    std::atomic<bool> mTailEnabled{true};      // Tail-into-seam mixing (off = percussion)
 
     // State (atomic for cross-thread access)
     std::atomic<int> mLengthFrames{0};

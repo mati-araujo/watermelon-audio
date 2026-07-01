@@ -100,9 +100,15 @@ configura+compila+corre las 4 suites** (dsp + effects + looper + usb, ~217 tests
 ```powershell
 # Windows (este entorno) — auto-localiza MinGW g++ (C:\msys64\mingw64) + Ninja (Android SDK)
 pwsh scripts/run-cpp-tests.ps1
+pwsh scripts/run-cpp-tests.ps1 -Fast                         # loop rápido: salta el stress test de 5s
 pwsh scripts/run-cpp-tests.ps1 -Filter UsbDescriptorParser   # solo un subconjunto (ctest -R)
 pwsh scripts/run-cpp-tests.ps1 -Clean                        # rebuild limpio
 ```
+
+**Warning gate**: el build host compila con `-Wall -Wextra -Werror` (solo host, no el
+NDK). Si introducís un warning real (uninitialized, reorder, format, dead code), el
+build falla. Apagarlo localmente: `-DWMA_TESTS_WERROR=OFF`. Convención: nombrá los
+tests lentos con `Stress`/`Slow` para que `-Fast` (ctest `-E`) los excluya.
 
 ```bash
 # Linux / macOS / CI

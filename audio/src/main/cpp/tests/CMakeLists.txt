@@ -45,6 +45,32 @@ FetchContent_Declare(googletest
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+# ----------------------------------------------------------------------------
+# Warning gate — host test build ONLY (never the NDK/production build).
+#
+# Placed AFTER googletest is fetched so third-party code is not held to it, and
+# BEFORE the test suites so it propagates to them and to the watermelon-* libs
+# they compile. This is what catches real defects early (e.g. the uninitialized
+# `a0` in FilterEffect). Turn the gate off locally with -DWMA_TESTS_WERROR=OFF.
+# ----------------------------------------------------------------------------
+# -Wno-unused-parameter: this engine has many interface defaults / override
+# stubs that legitimately ignore parameters; flagging them is noise. The
+# high-value checks (uninitialized, reorder, format, unused-variable) stay on.
+add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+
+if(WIN32)
+    # MinGW's default (msvcrt) printf rejects C99 %zu/%lld length modifiers that
+    # are valid on the Android/bionic target, producing host-only false -Wformat
+    # positives. This switches MinGW to its C99-compliant stdio so -Wformat
+    # validates against the real target semantics instead of blocking the gate.
+    add_compile_definitions(__USE_MINGW_ANSI_STDIO=1)
+endif()
+
+option(WMA_TESTS_WERROR "Treat host-test warnings as errors" ON)
+if(WMA_TESTS_WERROR)
+    add_compile_options(-Werror)
+endif()
+
 # Order is irrelevant — the shared-library subdirectories are guarded.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../dsp/tests     dsp_tests)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../effects/tests effects_tests)

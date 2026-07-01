@@ -2602,6 +2602,24 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     return g_jniState.engine->getAudioLooper().getTrackSpeed(trackIndex);
 }
 
+// Per-track loop-seam profile: true = percussion (hard declick cut, no tail
+// bleed), false = sustained (long crossfade + tail). Live & RT-safe.
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackPercussionMode(
+    JNIEnv* env, jobject thiz, jint trackIndex, jboolean percussion) {
+    if (g_jniState.engine)
+        g_jniState.engine->getAudioLooper().setTrackPercussionMode(
+            trackIndex, percussion == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperIsTrackPercussionMode(
+    JNIEnv* env, jobject thiz, jint trackIndex) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    return g_jniState.engine->getAudioLooper().isTrackPercussionMode(trackIndex)
+        ? JNI_TRUE : JNI_FALSE;
+}
+
 // Master volume (lock-free)
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetMasterVolume(
@@ -2637,6 +2655,40 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     JNIEnv* env, jobject thiz, jint trackIndex) {
     if (!g_jniState.engine) return 0;
     return g_jniState.engine->getAudioLooper().getTrackLoopStart(trackIndex);
+}
+
+// Onset bounds for trimming a free take's leading/trailing silence.
+// Returns (firstFrame << 32) | (lastFrame & 0xFFFFFFFF); last is exclusive.
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperFindContentBounds(
+    JNIEnv* env, jobject thiz, jint trackIndex, jfloat thresholdRatio) {
+    if (!g_jniState.engine) return 0;
+    return g_jniState.engine->getAudioLooper().findTrackContentBounds(trackIndex, thresholdRatio);
+}
+
+// Onset detection for tempo derivation (free auto-loop, phase B). Returns an
+// int[] of onset frame positions (ascending), capped at maxOnsets.
+JNIEXPORT jintArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperDetectOnsets(
+    JNIEnv* env, jobject thiz, jint trackIndex, jint maxOnsets,
+    jint hopFrames, jfloat sensitivity) {
+    if (!g_jniState.engine || maxOnsets <= 0) return env->NewIntArray(0);
+    std::vector<jint> onsets(static_cast<size_t>(maxOnsets), 0);
+    int n = g_jniState.engine->getAudioLooper().detectTrackOnsets(
+        trackIndex, onsets.data(), maxOnsets, hopFrames, sensitivity);
+    if (n < 0) n = 0;
+    jintArray result = env->NewIntArray(n);
+    if (result && n > 0) env->SetIntArrayRegion(result, 0, n, onsets.data());
+    return result;
+}
+
+// Bar-snap + seam-bake a free take's loop (Free-loop auto-sync, phases A+C).
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperFinalizeFreeLoop(
+    JNIEnv* env, jobject thiz, jint trackIndex, jint loopStart, jint loopEnd, jint tailFrames) {
+    if (!g_jniState.engine) return JNI_FALSE;
+    return g_jniState.engine->getAudioLooper().finalizeFreeLoop(
+        trackIndex, loopStart, loopEnd, tailFrames) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
@@ -2724,6 +2776,39 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     int64_t triggerFrame = transport.nextBarBoundary(now);
     g_jniState.engine->getAudioLooper().armRecording(trackIndex, triggerFrame);
     return triggerFrame;
+}
+
+// Armed recording with an explicit frame offset from the current Transport play
+// position. Used for latency-compensated record start: the caller passes
+// (countInFrames + roundTripLatencyFrames) so capture begins exactly that many
+// frames after "now", placing the user's first downbeat (which lands late in the
+// buffer by the round-trip latency) at loop frame 0. The anchor (play frame) is
+// read on this thread atomically — no UI-thread jitter leaks into the trigger.
+// Returns the absolute trigger frame (>=0), or -1 on failure.
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperArmInFrames(
+    JNIEnv* env, jobject thiz, jint trackIndex, jlong offsetFrames) {
+    if (!g_jniState.engine) return -1;
+    if (offsetFrames < 0) offsetFrames = 0;
+    auto& transport = g_jniState.engine->getTransport();
+    int64_t triggerFrame = transport.getPlayFrame() + offsetFrames;
+    g_jniState.engine->getAudioLooper().armRecording(trackIndex, triggerFrame);
+    return triggerFrame;
+}
+
+// Sync-armed overdub: phase-lock a new layer to the existing loop. Arms `track`
+// to start at the loop reference's next boundary + `latencyFrames`, and tags the
+// take so finalize phase-locks it to the reference (cancels round-trip latency).
+// Returns the trigger frame, or -1 if no reference track is playing (caller falls
+// back to a plain latency-armed start).
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperArmSyncedToLoop(
+    JNIEnv* env, jobject thiz, jint trackIndex, jlong latencyFrames) {
+    if (!g_jniState.engine) return -1;
+    if (latencyFrames < 0) latencyFrames = 0;
+    const int64_t playFrame = g_jniState.engine->getTransport().getPlayFrame();
+    return g_jniState.engine->getAudioLooper().armSyncedToLoop(
+        trackIndex, playFrame, static_cast<int>(latencyFrames));
 }
 
 JNIEXPORT void JNICALL
@@ -2965,6 +3050,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     JNIEnv* env, jobject thiz) {
     if (g_jniState.engine)
         g_jniState.engine->getAudioLooper().cancelExport();
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetExportSampleRate(
+    JNIEnv* env, jobject thiz, jint sampleRate) {
+    if (g_jniState.engine)
+        g_jniState.engine->getAudioLooper().setExportSampleRate(sampleRate);
 }
 
 JNIEXPORT jboolean JNICALL

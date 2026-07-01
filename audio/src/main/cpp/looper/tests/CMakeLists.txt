@@ -40,6 +40,7 @@ add_executable(looper_tests
     test_limiter.cpp
     test_transport.cpp
     test_track_buffer.cpp
+    test_free_loop_autosync.cpp
     test_pre_roll_ring.cpp
     test_pan_lut.cpp
     ${LOOPER_TESTED_SOURCES}

@@ -45,8 +45,12 @@ LogCallback getLogCallback();
 
 // Internal: dispatch a log message. NOT RT-safe.
 #if defined(__GNUC__) || defined(__clang__)
+// gnu_printf (not printf) so the format check uses C99/GNU semantics — %zu,
+// %lld etc. — matching the Android/bionic target. With the plain `printf`
+// archetype, MinGW hosts validate against msvcrt semantics and false-flag the
+// valid %zu used throughout the engine. Real format bugs are still caught.
 void logMessage(LogLevel level, const char* tag, const char* fmt, ...)
-    __attribute__((format(printf, 3, 4)));
+    __attribute__((format(__gnu_printf__, 3, 4)));
 #else
 void logMessage(LogLevel level, const char* tag, const char* fmt, ...);
 #endif
