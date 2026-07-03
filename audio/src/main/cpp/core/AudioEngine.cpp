@@ -976,6 +976,10 @@ bool AudioEngine::getSoundFontPresetKeyRange(int presetIndex, int& outMinKey, in
     return mEngineDispatcher.getSoundFontPresetKeyRange(presetIndex, outMinKey, outMaxKey);
 }
 
+bool AudioEngine::getSoundFontPresetBankProgram(int presetIndex, int& outBank, int& outProgram) const {
+    return mEngineDispatcher.getSoundFontPresetBankProgram(presetIndex, outBank, outProgram);
+}
+
 bool AudioEngine::isSoundFontLoaded() const {
     return mEngineDispatcher.isSoundFontLoaded();
 }

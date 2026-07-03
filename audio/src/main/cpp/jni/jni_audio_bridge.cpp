@@ -383,6 +383,20 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetSou
     return result;
 }
 
+JNIEXPORT jintArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetSoundFontPresetBankProgram(
+    JNIEnv* env, jobject thiz, jint presetIndex) {
+    if (!ensureEngine()) return nullptr;
+    int bank = -1, program = -1;
+    bool ok = g_jniState.engine->getSoundFontPresetBankProgram(presetIndex, bank, program);
+    if (!ok) return nullptr;
+    jintArray result = env->NewIntArray(2);
+    if (!result) return nullptr;
+    jint buf[2] = { bank, program };
+    env->SetIntArrayRegion(result, 0, 2, buf);
+    return result;
+}
+
 // ========== SOUNDFONT POLYPHONY (Phase 8E) ==========
 
 JNIEXPORT void JNICALL

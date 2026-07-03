@@ -316,6 +316,11 @@ bool SynthEngineDispatcher::getSoundFontPresetKeyRange(int presetIndex, int& out
     return mSoundFontManager->getPresetKeyRange(presetIndex, outMinKey, outMaxKey);
 }
 
+bool SynthEngineDispatcher::getSoundFontPresetBankProgram(int presetIndex, int& outBank, int& outProgram) const {
+    if (!mSoundFontManager) return false;
+    return mSoundFontManager->getPresetBankProgram(presetIndex, outBank, outProgram);
+}
+
 bool SynthEngineDispatcher::isSoundFontLoaded() const {
     return mSoundFontManager && mSoundFontManager->isLoaded();
 }

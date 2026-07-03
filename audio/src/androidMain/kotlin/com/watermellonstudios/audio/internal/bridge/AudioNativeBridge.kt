@@ -808,6 +808,15 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         return nativeGetSoundFontPresetKeyRange(presetIndex)
     }
 
+    /**
+     * Get the SF2 bank + GM program for a SoundFont preset.
+     * @param presetIndex Preset index (0-based)
+     * @return IntArray [bank, program] (bank 128 = GM percussion kit) or null if invalid
+     */
+    fun getSoundFontPresetBankProgram(presetIndex: Int): IntArray? {
+        return nativeGetSoundFontPresetBankProgram(presetIndex)
+    }
+
     // ========== SOUNDFONT POLYPHONY (Phase 8E) ==========
 
     /**
@@ -1892,6 +1901,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeGetSoundFontPresetName(presetIndex: Int): String?
     private external fun nativeIsSoundFontLoaded(): Boolean
     private external fun nativeGetSoundFontPresetKeyRange(presetIndex: Int): IntArray?
+    private external fun nativeGetSoundFontPresetBankProgram(presetIndex: Int): IntArray?
     // SoundFont polyphony (Phase 8E)
     private external fun nativeSfNoteOn(touchId: Int, midiNote: Int, velocity: Float)
     private external fun nativeSfNoteOff(touchId: Int)

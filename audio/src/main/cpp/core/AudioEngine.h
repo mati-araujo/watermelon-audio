@@ -261,6 +261,15 @@ public:
     bool getSoundFontPresetKeyRange(int presetIndex, int& outMinKey, int& outMaxKey) const;
 
     /**
+     * @brief Get the SF2 bank + GM program for a SoundFont preset.
+     * @param presetIndex Preset index
+     * @param outBank SF2 bank (128 = GM percussion kit)
+     * @param outProgram GM program number (0-127)
+     * @return true if preset exists
+     */
+    bool getSoundFontPresetBankProgram(int presetIndex, int& outBank, int& outProgram) const;
+
+    /**
      * @brief Check if a SoundFont is loaded
      */
     bool isSoundFontLoaded() const;

@@ -23,3 +23,16 @@
 
 #define TSF_IMPLEMENTATION
 #include "tsf.h"
+
+#include "tsf_ext.h"
+
+// Preset bank/program accessors (see tsf_ext.h). `struct tsf` / `struct
+// tsf_preset` are fully defined in this TU (TSF_IMPLEMENTATION), so we can read
+// the sorted preset table directly. tsf sorts presets by (bank, program), so a
+// bank of 128 marks a GM percussion kit even when its name lacks "kit"/"drums".
+extern "C" int tsf_get_preset_bank(const tsf* f, int i) {
+    return (f && i >= 0 && i < f->presetNum) ? static_cast<int>(f->presets[i].bank) : -1;
+}
+extern "C" int tsf_get_preset_number(const tsf* f, int i) {
+    return (f && i >= 0 && i < f->presetNum) ? static_cast<int>(f->presets[i].preset) : -1;
+}
