@@ -2674,7 +2674,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 // Loop Region (lock-free)
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackLoopRegion(
-    JNIEnv* env, jobject thiz, jint trackIndex, jint startFrame, jint endFrame) {
+    JNIEnv* env, jobject thiz, jint trackIndex, jlong startFrame, jlong endFrame) {
     if (g_jniState.engine)
         g_jniState.engine->getAudioLooper().setTrackLoopRegion(trackIndex, startFrame, endFrame);
 }

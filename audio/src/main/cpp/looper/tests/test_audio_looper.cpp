@@ -478,3 +478,102 @@ TEST(AudioLooper, Export24BitReadsBack) {
     EXPECT_EQ(wd.numChannels, 2);
     EXPECT_EQ(wd.sampleRate, kSR);
 }
+
+// Max |sample| across a WAV — used by the guard test to tell a pure snapshot from
+// an overdub-contaminated one.
+static float wavMaxAbs(const std::string& path) {
+    wav::WavData wd = wav::readWav(path.c_str());
+    float m = 0.0f;
+    for (float s : wd.buffer) m = std::max(m, std::fabs(s));
+    return m;
+}
+
+// ExportGuard: while an export is in flight, process() must skip destructive
+// overdub writes so the render sees an immutable snapshot (plan §4.1). We hold an
+// overdub active on a playing track and hammer process() from another thread for
+// the whole duration of a deliberately large export; the exported mix must still
+// contain only the ORIGINAL content. Then, with the guard released, the same
+// overdub DOES change the track — proving the guard (not a broken overdub) is what
+// held the snapshot still. Storage-agnostic: runs under both backends.
+TEST(AudioLooper, ExportGuardBlocksOverdubDuringSnapshot) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    const int L = 48000;                          // 1 s loop
+    WavTempFile src("wm_guard_src.wav");
+    ASSERT_TRUE(makeWav(src.str(), L, kSR, 0.5f));
+    ASSERT_TRUE(looper.importTrack(0, src.str().c_str(), kSR));
+    looper.resumeTrack(0);                         // playhead advances during export
+
+    // Pure 0.5 track at default pan/volume exports at ~0.5*0.7071 ≈ 0.354. An
+    // overdub (input 0.9, gain 0.8, decay 0) pushes the stored sample past 0.7, so
+    // the export would exceed 0.45. 0.45 cleanly separates the two cases.
+    constexpr float kPureCeil = 0.45f;
+
+    AudioLooper::ExportOptions opts;
+    opts.applyLimiter = false;
+    opts.repeatLoops = 60;                         // ~2.88M frames → export takes a while
+
+    // Run the export on a background thread while hammering process() (which would
+    // overdub if the guard didn't block it). gtest macros stay on the main thread.
+    looper.startOverdub(0);
+    WavTempFile guarded("wm_guard_during.wav");
+    std::atomic<bool> exportDone{false};
+    std::atomic<bool> exportOk{false};
+    std::thread exporter([&] {
+        exportOk.store(looper.exportMix(guarded.str().c_str(), opts));
+        exportDone.store(true);
+    });
+    std::vector<float> blk(512 * 2, 0.9f);
+    while (!exportDone.load()) {
+        if (looper.isExportInProgress()) looper.process(blk.data(), 512);
+        else                             std::this_thread::yield();
+    }
+    exporter.join();
+
+    EXPECT_TRUE(exportOk.load());
+    EXPECT_LT(wavMaxAbs(guarded.str()), kPureCeil)
+        << "overdub bled into the export snapshot — guard not holding";
+
+    // Guard released: the SAME overdub now mutates the track (a full pass), so a
+    // fresh export shows the elevated level.
+    for (int i = 0; i < L * 2; i += 512) looper.process(blk.data(), 512);
+    WavTempFile after("wm_guard_after.wav");
+    ASSERT_TRUE(looper.exportMix(after.str().c_str(), opts));
+    EXPECT_GT(wavMaxAbs(after.str()), kPureCeil)
+        << "overdub never took effect even without the guard";
+}
+
+// cancelExport aborts an in-flight export: the render bails at the next
+// checkpoint, exportMix returns false, and no file is written (plan §4.1).
+TEST(AudioLooper, CancelExportMidwayWritesNothing) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    WavTempFile src("wm_cancel_src.wav");
+    ASSERT_TRUE(makeWav(src.str(), 48000, kSR, 0.4f));
+    ASSERT_TRUE(looper.importTrack(0, src.str().c_str(), kSR));
+
+    AudioLooper::ExportOptions opts;
+    opts.applyLimiter = false;
+    opts.repeatLoops = 120;                        // large mix → cancel lands mid-render
+
+    WavTempFile out("wm_cancel_out.wav");
+    std::atomic<bool> result{true};
+    std::atomic<bool> done{false};
+    std::thread exporter([&] {
+        result.store(looper.exportMix(out.str().c_str(), opts));
+        done.store(true);
+    });
+    // ExportGuard clears the cancel flag once at start, so a single call could be
+    // missed — keep asserting it until the export returns.
+    while (!done.load()) {
+        if (looper.isExportInProgress()) looper.cancelExport();
+        std::this_thread::yield();
+    }
+    exporter.join();
+
+    EXPECT_FALSE(result.load()) << "cancelled export must report failure";
+    EXPECT_FALSE(std::filesystem::exists(out.path))
+        << "cancelled export must not leave a partial file";
+}

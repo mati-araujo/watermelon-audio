@@ -2699,7 +2699,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperGetDroppedEvents(): Long
     private external fun nativeLooperSetMasterVolume(volume: Float)
     private external fun nativeLooperGetMasterVolume(): Float
-    private external fun nativeLooperSetTrackLoopRegion(trackIndex: Int, startFrame: Int, endFrame: Int)
+    private external fun nativeLooperSetTrackLoopRegion(trackIndex: Int, startFrame: Long, endFrame: Long)
     private external fun nativeLooperResetTrackLoopRegion(trackIndex: Int)
     private external fun nativeLooperGetTrackLoopStart(trackIndex: Int): Int
     private external fun nativeLooperGetTrackLoopEnd(trackIndex: Int): Int
@@ -2968,7 +2968,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun looperGetMasterVolume(): Float = nativeLooperGetMasterVolume()
 
     // Loop region (lock-free)
-    fun looperSetTrackLoopRegion(trackIndex: Int, startFrame: Int, endFrame: Int) =
+    fun looperSetTrackLoopRegion(trackIndex: Int, startFrame: Long, endFrame: Long) =
         nativeLooperSetTrackLoopRegion(trackIndex, startFrame, endFrame)
     fun looperResetTrackLoopRegion(trackIndex: Int) = nativeLooperResetTrackLoopRegion(trackIndex)
     fun looperGetTrackLoopStart(trackIndex: Int): Int = nativeLooperGetTrackLoopStart(trackIndex)

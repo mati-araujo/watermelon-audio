@@ -11,6 +11,7 @@
 #include "../dsp/SIMDUtils.h"
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include "../platform/Logger.h"
@@ -997,8 +998,15 @@ public:
 
     // ========== Loop Region (lock-free delegates) ==========
 
-    void setTrackLoopRegion(int index, int start, int end) {
-        if (index >= 0 && index < MAX_TRACKS) mTracks[index].setLoopRegion(start, end);
+    // Frames are int64_t at the public/JNI contract (plan §3.5) so the ABI never
+    // has to widen when high-tier devices record multi-hour tracks. TrackBuffer
+    // still stores frames as int32 today, so saturate into range before delegating
+    // (a valid loop region is always well under INT_MAX frames ≈ 12.4 h @48k).
+    void setTrackLoopRegion(int index, int64_t start, int64_t end) {
+        if (index < 0 || index >= MAX_TRACKS) return;
+        const int s = static_cast<int>(std::clamp<int64_t>(start, INT32_MIN, INT32_MAX));
+        const int e = static_cast<int>(std::clamp<int64_t>(end, INT32_MIN, INT32_MAX));
+        mTracks[index].setLoopRegion(s, e);
     }
     void resetTrackLoopRegion(int index) {
         if (index >= 0 && index < MAX_TRACKS) mTracks[index].resetLoopRegion();
