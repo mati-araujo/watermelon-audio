@@ -494,3 +494,24 @@ TEST(TrackBuffer, MuteRampsToSilence) {
     for (float s : out) maxAbs = std::max(maxAbs, std::fabs(s));
     EXPECT_LT(maxAbs, 1e-3f);
 }
+
+// A large-capacity take that records only a little and is trimmed hands the unused
+// backing store back: reservedBytes() collapses toward the recorded content. Dense
+// reallocs its vector; chunked returns pool chunks to the OS — same observable
+// outcome, and the reason the paged backend can default on without a RAM
+// regression (plan §3.1). Storage-agnostic.
+TEST(TrackBuffer, TrimReclaimsReservedMemory) {
+    TrackBuffer tb;
+    const int cap = 2'000'000;                     // ~16 MB backing store
+    ASSERT_GT(tb.allocate(cap, 48000), 0u);
+    const size_t reservedFull = tb.reservedBytes();
+    EXPECT_GT(reservedFull, 8u * 1024 * 1024) << "prepare reserves the full capacity";
+
+    writeConstant(tb, 0.5f, 50'000);               // record ~1 s of the 40 s capacity
+    tb.finalizeRecording();
+    EXPECT_EQ(tb.getLengthFrames(), 50'000);
+
+    ASSERT_TRUE(tb.trimToLength());
+    const size_t reservedTrimmed = tb.reservedBytes();
+    EXPECT_LT(reservedTrimmed, reservedFull / 4) << "trim must reclaim the unused RAM";
+}

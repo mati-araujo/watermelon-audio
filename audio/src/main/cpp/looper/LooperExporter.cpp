@@ -352,10 +352,10 @@ bool LooperExporter::importTrack(int trackIndex, const char* filePath, int sampl
 
     const float* srcBuffer = needsResample ? resampledBuffer.data() : wavData.buffer.data();
 
-    // Check memory budget
+    // Check memory budget (reserved RAM — see AudioLooper::prepareTrack).
     size_t needed = static_cast<size_t>(outputFrames) * 2 * sizeof(float);
-    size_t currentUsage = mL.getTotalAllocatedBytes();
-    size_t trackCurrent = mL.mTracks[trackIndex].allocatedBytes();
+    size_t currentUsage = mL.getTotalReservedBytes();
+    size_t trackCurrent = mL.mTracks[trackIndex].reservedBytes();
     const size_t budget = mL.getMemoryBudgetBytes();
     if (currentUsage - trackCurrent + needed > budget) {
         EXP_LOGE("importTrack FAILED: memory budget exceeded (need %zu, budget %zu, used %zu)",
@@ -371,7 +371,8 @@ bool LooperExporter::importTrack(int trackIndex, const char* filePath, int sampl
     // Clear existing content
     mL.mTracks[trackIndex].clear();
 
-    // Allocate and fill with (possibly resampled) data
+    // Allocate and fill with (possibly resampled) data. allocate() pre-reserves the
+    // pool for the full capacity, so the writes below never hit an empty pool.
     size_t allocated = mL.mTracks[trackIndex].allocate(outputFrames, sampleRate);
     if (allocated == 0) return false;
 

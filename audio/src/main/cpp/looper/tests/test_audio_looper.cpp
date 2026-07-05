@@ -75,11 +75,10 @@ bool makeWav(const std::string& path, int frames, int sr, float value,
 
 // ======================= Memory budget =======================
 
-// These two assert the DENSE budget model, where prepareTrack reserves the full
-// capacity up front. The paged (chunked) model deliberately diverges — an empty
-// prepared track costs 0 budget until audio is written (silence = no memory), so
-// the chunked equivalents live below under WM_LOOPER_CHUNKED_BUFFER.
-#ifndef WM_LOOPER_CHUNKED_BUFFER
+// Both storage backends bound the SAME thing now: reserved RAM. A paged track
+// pre-reserves its whole capacity in the chunk pool at prepare time (counted by
+// reservedBytes()), and hands the slack back to the OS when a shorter take is
+// trimmed — so these budget assertions hold identically for dense and chunked.
 
 // Prepare tracks until the 48 MB budget is exhausted → clean failure, no crash.
 // Clearing a track frees its bytes so a subsequent prepare succeeds (regression
@@ -112,27 +111,6 @@ TEST(AudioLooper, ReprepareSameTrackDoesNotDoubleCount) {
     // this look like 96 MB and fail.
     EXPECT_TRUE(looper.prepareTrack(0, nearMax, kSR));
 }
-
-#else  // WM_LOOPER_CHUNKED_BUFFER — paged budget model
-
-// An empty prepared take costs no budget (silent pages aren't materialised), so
-// two 6M-frame free takes — 96 MB of dense capacity, well over the 48 MB cap —
-// both prepare successfully. This is the "free take no longer pre-consumes the
-// budget" win the paging is for.
-TEST(AudioLooper, ChunkedEmptyTakesDoNotConsumeBudget) {
-    AudioLooper looper;
-    looper.setSampleRate(kSR);
-    EXPECT_TRUE(looper.prepareTrack(0, 6'000'000, kSR));
-    EXPECT_TRUE(looper.prepareTrack(1, 6'000'000, kSR));
-    // A short take still records fine afterwards.
-    looper.setTailMs(0);
-    ASSERT_TRUE(looper.prepareTrack(2, 24000, kSR));
-    looper.startRecording(2);
-    feed(looper, 0.5f, 24000, 512);
-    EXPECT_TRUE(looper.isTrackActive(2));
-}
-
-#endif  // WM_LOOPER_CHUNKED_BUFFER
 
 // ======================= Runtime capabilities (F3) =======================
 
@@ -185,8 +163,7 @@ TEST(AudioLooper, LoweringMaxActiveTracksKeepsActiveTrack) {
     EXPECT_TRUE(looper.isTrackPlaying(10));
 }
 
-// Budget is runtime-configurable (dense model: prepare reserves capacity).
-#ifndef WM_LOOPER_CHUNKED_BUFFER
+// Budget is runtime-configurable (prepare reserves capacity in both backends).
 TEST(AudioLooper, SetBudgetChangesWhatFits) {
     AudioLooper looper;
     looper.setSampleRate(kSR);
@@ -202,7 +179,6 @@ TEST(AudioLooper, SetBudgetChangesWhatFits) {
     looper.setCapabilities(caps);
     EXPECT_TRUE(looper.prepareTrack(0, 3'000'000, kSR));
 }
-#endif
 
 // A finite play count auto-stops the track and pushes a TrackCompleted event
 // through the dispatcher end-to-end (emit → queue → worker → sink).
@@ -366,11 +342,9 @@ TEST(AudioLooper, ImportResamples44kTo48k) {
     EXPECT_TRUE(looper.isTrackActive(0));
 }
 
-// Import must honour the memory budget: with the budget nearly full, importing
-// a track that doesn't fit fails cleanly and leaves the target track empty.
-// Dense-only: it relies on a prepared-but-empty track reserving its capacity,
-// which the paged model intentionally does not do (see budget note above).
-#ifndef WM_LOOPER_CHUNKED_BUFFER
+// Import must honour the memory budget: with the budget nearly full (a prepared
+// track reserves its capacity in both backends), importing a track that doesn't
+// fit fails cleanly and leaves the target track empty.
 TEST(AudioLooper, ImportRespectsBudget) {
     AudioLooper looper;
     looper.setSampleRate(kSR);
@@ -385,7 +359,6 @@ TEST(AudioLooper, ImportRespectsBudget) {
     EXPECT_FALSE(looper.isTrackActive(0));
     EXPECT_EQ(looper.getTrackLengthFrames(0), 0);
 }
-#endif  // WM_LOOPER_CHUNKED_BUFFER
 
 // Regression: an imported track must actually play back — importTrack sets
 // mEnabled so process() doesn't early-return into silence.

@@ -3,16 +3,22 @@
 // ============================================================================
 // TrackStorage — the audio-sample storage backing a single looper track.
 //
-// Two interchangeable implementations selected at compile time (plan §3.1, F2.2):
-//   - default:                    dense std::vector<float> (legacy behaviour).
-//   - -D WM_LOOPER_CHUNKED_BUFFER: paged ChunkedAudioBuffer (silence = no memory,
-//                                  O(pages) trim/pad, copy-on-write undo).
+// Two interchangeable implementations selected at compile time (plan §3.1):
+//   - default:                  paged ChunkedAudioBuffer (silence = no memory,
+//                               O(pages) trim/pad, copy-on-write undo, budget
+//                               bounds pool RAM which trim hands back to the OS).
+//   - -D WM_LOOPER_DENSE_BUFFER: legacy dense std::vector<float> escape hatch.
 //
 // TrackBuffer talks only to this uniform API, so the RT/analysis code has no
-// #ifdefs. During the transition dense stays the default; the chunked path is
-// exercised by a parallel test target built with the flag. The final F2 step
-// flips the default (and renames the fallback flag to WM_LOOPER_DENSE_BUFFER).
+// #ifdefs. Everything internally keys off WM_LOOPER_CHUNKED_BUFFER, which we
+// DERIVE below (defined unless the dense opt-out is requested) so no existing
+// #ifdef site had to flip when the paged backend became the default.
 // ============================================================================
+
+// Backend selection: paged is the default; WM_LOOPER_DENSE_BUFFER opts out.
+#if !defined(WM_LOOPER_DENSE_BUFFER) && !defined(WM_LOOPER_CHUNKED_BUFFER)
+#define WM_LOOPER_CHUNKED_BUFFER 1
+#endif
 
 #include <algorithm>
 #include <cstddef>
@@ -35,8 +41,9 @@ public:
         mCapacity = frames;
 #ifdef WM_LOOPER_CHUNKED_BUFFER
         // Prefill the pool to cover the whole capacity so the audio thread never
-        // has to allocate while recording within [0, frames). (Working-set sizing
-        // + IO refill to realise the live-recording RAM win is a follow-up.)
+        // allocates while recording within [0, frames). This RAM is now honestly
+        // counted by reservedBytes() (the memory budget bounds it) and handed back
+        // to the OS by shrinkToContent() once a shorter take is trimmed.
         mPool.prefill(static_cast<size_t>(pageCountFor(frames)));
         mChunked.setPool(&mPool);
         mChunked.reset(frames);
@@ -46,11 +53,37 @@ public:
         return static_cast<size_t>(frames) * 2 * sizeof(float);
     }
 
+    /**
+     * @brief Return the pool's unused slack to the OS, keeping only the in-use
+     *        chunks plus a small headroom. UI/IO thread; caller guarantees RT is
+     *        quiesced (post-finalize / not recording). No-op when dense. This is
+     *        what makes a 60 s free take that recorded only 10 s cost ~4 MB, not 23.
+     */
+    void shrinkToContent() {
+#ifdef WM_LOOPER_CHUNKED_BUFFER
+        mPool.trimTo(mChunked.ownedChunks() + kPoolRetainChunks);
+#endif
+    }
+
+    /**
+     * @brief Real RAM this track reserves: pool-owned chunks (chunked) or the
+     *        buffer + undo capacity (dense). This — not allocatedBytes(), which
+     *        counts only materialised pages — is what the memory budget must bound.
+     */
+    size_t reservedBytes() const {
+#ifdef WM_LOOPER_CHUNKED_BUFFER
+        return mPool.totalChunks() * Chunk::kBytes;
+#else
+        return mBuffer.capacity() * sizeof(float) + mUndoBuffer.capacity() * sizeof(float);
+#endif
+    }
+
     /** Release all memory / return chunks to the pool; go empty. */
     void release() {
         mCapacity = 0;
 #ifdef WM_LOOPER_CHUNKED_BUFFER
         mChunked.clear();
+        mPool.trimTo(kPoolRetainChunks);   // hand the freed chunks back to the OS
 #else
         std::vector<float>().swap(mBuffer);
         std::vector<float>().swap(mUndoBuffer);
@@ -64,6 +97,7 @@ public:
         mCapacity = frames;
 #ifdef WM_LOOPER_CHUNKED_BUFFER
         mChunked.trim(frames);
+        shrinkToContent();                 // reclaim the pre-reserved free-take slack
 #else
         std::vector<float> trimmed(mBuffer.begin(),
                                    mBuffer.begin() + std::min(mBuffer.size(),
@@ -146,9 +180,10 @@ public:
 
     bool saveUndo() {
 #ifdef WM_LOOPER_CHUNKED_BUFFER
-        // Give the pool headroom so copy-on-write materialisation during the
-        // overdub never has to allocate on the audio thread.
-        mPool.prefill(static_cast<size_t>(pageCountFor(mCapacity)));
+        // COW headroom so materialisation during the overdub never allocates on the
+        // audio thread. An overdub copies at most every currently in-use page, so
+        // reserve that many free chunks — bounded by real content, not full capacity.
+        mPool.prefill(mPool.freeCount() + mChunked.ownedChunks());
         mChunked.snapshotForUndo();
         return true;
 #else
@@ -190,6 +225,10 @@ public:
 #endif
 
 private:
+    // Free chunks the pool keeps after a shrink, so a subsequent short write does
+    // not immediately have to grow the pool again.
+    static constexpr size_t kPoolRetainChunks = 2;
+
     static int pageCountFor(int frames) {
 #ifdef WM_LOOPER_CHUNKED_BUFFER
         return (frames + ChunkedAudioBuffer::kChunkFrames - 1)

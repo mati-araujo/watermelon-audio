@@ -398,10 +398,12 @@ public:
             ? (tailMs * sampleRate) / 1000
             : 0;
 
-        // Buffer is exactly the loop body (no separate tail region anymore).
+        // Budget bounds RESERVED RAM (pool-owned chunks / dense buffer), not just
+        // materialised pages — otherwise a paged track that pre-reserves its whole
+        // capacity would read as ~0 and the cap could be blown many times over.
         size_t needed = static_cast<size_t>(lengthFrames) * 2 * sizeof(float);
-        size_t currentUsage = getTotalAllocatedBytes();
-        size_t trackCurrent = mTracks[trackIndex].allocatedBytes();
+        size_t currentUsage = getTotalReservedBytes();
+        size_t trackCurrent = mTracks[trackIndex].reservedBytes();
         if (currentUsage - trackCurrent + needed
                 > mMemoryBudgetBytes.load(std::memory_order_acquire)) {
             return false;
@@ -1211,6 +1213,16 @@ private:
         for (int i = 0; i < MAX_TRACKS_HW; ++i) {
             total += mTracks[i].allocatedBytes();
         }
+        return total;
+    }
+
+    // Real RAM reserved across all tracks (pool-owned chunks / dense buffers). This
+    // is what the memory budget bounds — allocatedBytes() only counts pages that
+    // already hold audio, which under-counts the chunk pool's full-capacity
+    // pre-reservation until a take is trimmed to its recorded length.
+    size_t getTotalReservedBytes() const {
+        size_t total = 0;
+        for (int i = 0; i < MAX_TRACKS_HW; ++i) total += mTracks[i].reservedBytes();
         return total;
     }
 

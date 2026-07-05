@@ -146,10 +146,14 @@ TEST(AudioLooper, ClickIsRenderedAfterRecordingTapWhenEnabled) {
         return sample != 0.0f;
     }));
 
-    const float* recorded = looper.getTrack(0).data();
-    EXPECT_TRUE(std::all_of(recorded, recorded + buffer.size(), [](float sample) {
-        return sample == 0.0f;
-    }));
+    // The click is rendered to the OUTPUT but never captured into the track — the
+    // recorded buffer stays silent. Read via sampleAt() so this holds for both the
+    // dense and the paged backend (buffer.size() floats = buffer.size()/2 frames).
+    const TrackBuffer& recorded = looper.getTrack(0);
+    for (int f = 0; f < static_cast<int>(buffer.size()) / 2; ++f) {
+        EXPECT_FLOAT_EQ(recorded.sampleAt(f, 0), 0.0f);
+        EXPECT_FLOAT_EQ(recorded.sampleAt(f, 1), 0.0f);
+    }
 }
 
 TEST(Transport, NextBarBoundaryQuantizes) {

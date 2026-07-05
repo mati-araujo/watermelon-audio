@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -96,6 +97,28 @@ public:
         } while (!mFreeHead.compare_exchange_weak(head, c,
                     std::memory_order_release, std::memory_order_relaxed));
         mFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Delete free chunks until at most `targetTotal` remain owned, returning
+     *        the RAM to the OS. UI/IO thread only; the caller MUST guarantee the
+     *        audio thread is not concurrently acquiring (RT quiesced — the pool's
+     *        owner holds it when not recording / after waitForRenderIdle()).
+     *
+     * Only free-list chunks are deleted, so this can never shrink below the in-use
+     * count: acquire() stops returning chunks once the free-list is empty. This is
+     * how a free take that pre-reserved its full capacity returns the unused slack
+     * after finalize/trim.
+     */
+    void trimTo(size_t targetTotal) {
+        std::lock_guard<std::mutex> lk(mOwnMutex);
+        while (mOwned.size() > targetTotal) {
+            Chunk* c = acquire();   // pop a free chunk (no concurrent RT acquire here)
+            if (!c) break;          // no free chunks left; the rest are in use
+            auto it = std::find(mOwned.begin(), mOwned.end(), c);
+            if (it != mOwned.end()) { *it = mOwned.back(); mOwned.pop_back(); }
+            delete c;
+        }
     }
 
     /** Approximate free-chunk count (telemetry / tests). */

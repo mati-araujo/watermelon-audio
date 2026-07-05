@@ -153,6 +153,14 @@ public:
         return mStore.allocatedBytes();
     }
 
+    /**
+     * @brief Real RAM this track reserves (pool-owned chunks / dense buffer). The
+     *        memory budget bounds THIS, not allocatedBytes() which counts only the
+     *        materialised pages. Control thread. trimToLength() shrinks it back to
+     *        the recorded content.
+     */
+    size_t reservedBytes() const { return mStore.reservedBytes(); }
+
     // ========== Recording (audio thread) ==========
 
     /**
