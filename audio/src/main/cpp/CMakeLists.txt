@@ -197,6 +197,8 @@ add_library(watermelon_audio SHARED
         core/SynthEngineDispatcher.cpp
         core/OutputStage.cpp
         core/OscillatorBank.cpp
+        # Looper offline export/import bodies (moved out of AudioLooper.h — plan §3.3)
+        looper/LooperExporter.cpp
         # Effects now in watermelon-effects sub-library (Phase 1B)
         # Audio Graph (Etapa 1)
         ${GRAPH_SOURCES}

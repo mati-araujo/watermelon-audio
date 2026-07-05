@@ -2609,6 +2609,28 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
         g_jniState.engine->getAudioLooper().setTrackSpeed(trackIndex, speed);
 }
 
+// Runtime capabilities (F3.2). budgetBytes uses jlong (64-bit) so a high tier
+// can exceed 2 GB; 0 keeps the current default. maxTracks is clamped to the
+// hardware ceiling (16); maxFreeSeconds is stored for the caller to read back.
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetCapabilities(
+    JNIEnv* env, jobject thiz, jlong budgetBytes, jint maxTracks, jint maxFreeSeconds) {
+    if (!g_jniState.engine) return;
+    AudioLooper::LooperCapabilities caps;
+    if (budgetBytes > 0) caps.memoryBudgetBytes = static_cast<size_t>(budgetBytes);
+    if (maxTracks > 0)   caps.maxActiveTracks = maxTracks;
+    if (maxFreeSeconds > 0) caps.maxFreeSeconds = maxFreeSeconds;
+    g_jniState.engine->getAudioLooper().setCapabilities(caps);
+}
+
+// Loop N times then auto-stop + emit onTrackCompleted (F3.4). plays <= 0 = infinite.
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackPlayCount(
+    JNIEnv* env, jobject thiz, jint trackIndex, jint plays) {
+    if (g_jniState.engine)
+        g_jniState.engine->getAudioLooper().setTrackPlayCount(trackIndex, plays);
+}
+
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetTrackSpeed(
     JNIEnv* env, jobject thiz, jint trackIndex) {
@@ -3138,6 +3160,8 @@ jclass                    g_looperListenerClass = nullptr;
 jmethodID                 g_looperOnTrackProgress = nullptr;
 jmethodID                 g_looperOnTrackPlayingChanged = nullptr;
 jmethodID                 g_looperOnTrackPeakChanged = nullptr;
+jmethodID                 g_looperOnTrackRecordProgress = nullptr;  // optional (QW-5)
+jmethodID                 g_looperOnTrackCompleted = nullptr;       // optional (F3.4)
 
 /**
  * Attach the worker thread to the JVM if it isn't already, returning a
@@ -3177,6 +3201,10 @@ void dispatchLooperEvent(const wm::LooperEvent& ev) {
                 method = g_looperOnTrackPlayingChanged; break;
             case wm::LooperEvent::Type::PeakChanged:
                 method = g_looperOnTrackPeakChanged; break;
+            case wm::LooperEvent::Type::RecordProgress:
+                method = g_looperOnTrackRecordProgress; break;
+            case wm::LooperEvent::Type::TrackCompleted:
+                method = g_looperOnTrackCompleted; break;
         }
     }
     if (!listener || !method) return;
@@ -3185,6 +3213,9 @@ void dispatchLooperEvent(const wm::LooperEvent& ev) {
         env->CallVoidMethod(listener, method,
                             static_cast<jint>(ev.trackIndex),
                             ev.value > 0.5f ? JNI_TRUE : JNI_FALSE);
+    } else if (ev.type == wm::LooperEvent::Type::TrackCompleted) {
+        // onTrackCompleted(trackIndex) — no value payload.
+        env->CallVoidMethod(listener, method, static_cast<jint>(ev.trackIndex));
     } else {
         env->CallVoidMethod(listener, method,
                             static_cast<jint>(ev.trackIndex),
@@ -3236,6 +3267,21 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
         g_looperListenerClass, "onTrackPlayingChanged", "(IZ)V");
     g_looperOnTrackPeakChanged = env->GetMethodID(
         g_looperListenerClass, "onTrackPeakChanged", "(IF)V");
+    // Optional (QW-5): older listeners predate this callback. It has a Kotlin
+    // default body, so a conforming implementation still exposes it, but we
+    // must not fail registration if it's absent — clear any pending lookup
+    // exception and dispatch RecordProgress only when present.
+    g_looperOnTrackRecordProgress = env->GetMethodID(
+        g_looperListenerClass, "onTrackRecordProgress", "(IF)V");
+    if (!g_looperOnTrackRecordProgress && env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+    // Optional (F3.4): older listeners predate onTrackCompleted (Kotlin default body).
+    g_looperOnTrackCompleted = env->GetMethodID(
+        g_looperListenerClass, "onTrackCompleted", "(I)V");
+    if (!g_looperOnTrackCompleted && env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
 
     if (!g_looperOnTrackProgress
         || !g_looperOnTrackPlayingChanged
@@ -3272,6 +3318,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     g_looperOnTrackProgress = nullptr;
     g_looperOnTrackPlayingChanged = nullptr;
     g_looperOnTrackPeakChanged = nullptr;
+    g_looperOnTrackRecordProgress = nullptr;
+    g_looperOnTrackCompleted = nullptr;
 }
 
 JNIEXPORT jlong JNICALL

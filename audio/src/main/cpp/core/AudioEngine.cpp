@@ -1817,6 +1817,14 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate) {
 
     // Configure looper (click envelope is sample-rate aware; transport too).
     mAudioLooper.setSampleRate(sampleRate);
+    {
+        // Pre-size the looper mix buffer to the largest block Oboe can deliver so
+        // the audio thread never has to grow it on the fly (QW-4). Same sizing
+        // policy as the other nodes above (framesPerBurst × 4, min 4096).
+        int framesPerBurst = mStream ? mStream->getFramesPerBurst() : 256;
+        int maxBlock = std::max(framesPerBurst * 4, 4096);
+        mAudioLooper.prepareMixBuffer(maxBlock);
+    }
     mTransport.setSampleRate(sampleRate);
 
     // Pre-roll ring: 1 second of post-FX output for seeding new recordings.

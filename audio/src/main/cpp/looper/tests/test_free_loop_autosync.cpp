@@ -150,8 +150,8 @@ TEST(FreeLoopAutoSync, SeamBakeCollapsesTheWrapDiscontinuity) {
     tb.finalizeRecording();
 
     // The wrap step BEFORE baking: last body sample vs the (silent) loop start.
-    const float origStart = tb.data()[static_cast<size_t>(loopStart) * 2];
-    const float seamPrev  = tb.data()[static_cast<size_t>(loopEnd - 1) * 2];
+    const float origStart = tb.sampleAt(loopStart, 0);
+    const float seamPrev  = tb.sampleAt(loopEnd - 1, 0);
     const float rawStep = std::fabs(seamPrev - origStart);
 
     ASSERT_TRUE(tb.finalizeFreeLoop(loopStart, loopEnd, /*tailFrames=*/600));
@@ -159,7 +159,7 @@ TEST(FreeLoopAutoSync, SeamBakeCollapsesTheWrapDiscontinuity) {
 
     // After baking, the loop start carries the ringing continuation, so it lines
     // up with where the body left off — the wrap step shrinks dramatically.
-    const float bakedStart = tb.data()[static_cast<size_t>(loopStart) * 2];
+    const float bakedStart = tb.sampleAt(loopStart, 0);
     const float bakedStep = std::fabs(seamPrev - bakedStart);
 
     EXPECT_GT(rawStep, 0.3f);                  // raw cut really does jump

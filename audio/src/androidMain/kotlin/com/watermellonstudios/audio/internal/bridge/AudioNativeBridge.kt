@@ -2688,6 +2688,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperGetTrackSpeed(trackIndex: Int): Float
     private external fun nativeLooperSetTrackPercussionMode(trackIndex: Int, percussion: Boolean)
     private external fun nativeLooperIsTrackPercussionMode(trackIndex: Int): Boolean
+    private external fun nativeLooperSetCapabilities(budgetBytes: Long, maxTracks: Int, maxFreeSeconds: Int)
+    private external fun nativeLooperSetTrackPlayCount(trackIndex: Int, plays: Int)
 
     // Push-based state notifications (replaces per-track polling).
     private external fun nativeLooperRegisterStateListener(
@@ -2907,6 +2909,23 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // Track speed
     fun looperSetTrackSpeed(trackIndex: Int, speed: Float) = nativeLooperSetTrackSpeed(trackIndex, speed)
     fun looperGetTrackSpeed(trackIndex: Int): Float = nativeLooperGetTrackSpeed(trackIndex)
+
+    /**
+     * Configure runtime looper capabilities for the device tier (F3.2). Defaults
+     * reproduce the historical behaviour, so pass 0 for any value to leave it
+     * unchanged. `budgetBytes` is 64-bit; `maxTracks` is clamped to the hardware
+     * ceiling (16) and never lowers an already-active track.
+     */
+    fun looperSetCapabilities(budgetBytes: Long, maxTracks: Int, maxFreeSeconds: Int) =
+        nativeLooperSetCapabilities(budgetBytes, maxTracks, maxFreeSeconds)
+
+    /**
+     * Set how many times a track's loop plays before it auto-stops and fires
+     * [com.watermellonstudios.audio.api.LooperStateListener.onTrackCompleted]
+     * (F3.4). `plays <= 0` = infinite (default).
+     */
+    fun looperSetTrackPlayCount(trackIndex: Int, plays: Int) =
+        nativeLooperSetTrackPlayCount(trackIndex, plays)
 
     /**
      * Per-track loop-seam profile. true = percussion (near-instant declick cut, no

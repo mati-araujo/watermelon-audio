@@ -135,12 +135,12 @@ TEST(TrackBuffer, UndoSaveAndRestoreRoundTrip) {
 
     // Overdub a different value into the first sample, then restore.
     tb.overdubFrame(0, /*left=*/1.0f, /*right=*/1.0f, /*gain=*/1.0f, /*decay=*/1.0f);
-    EXPECT_NE(tb.data()[0], 0.4f);
+    EXPECT_NE(tb.sampleAt(0, 0), 0.4f);
 
     EXPECT_TRUE(tb.restoreUndo());
     EXPECT_FALSE(tb.hasUndo());
     // After restore, original constant content is back.
-    EXPECT_FLOAT_EQ(tb.data()[0], 0.4f);
+    EXPECT_FLOAT_EQ(tb.sampleAt(0, 0), 0.4f);
 }
 
 TEST(TrackBuffer, RestoreUndoFailsWithoutSnapshot) {
@@ -247,8 +247,8 @@ TEST(TrackBuffer, FinalizeFreeLoopPadsWithSilencePastRecording) {
     EXPECT_TRUE(tb.finalizeFreeLoop(0, 16000, /*tailFrames=*/0));
     EXPECT_EQ(tb.getLengthFrames(), 16000);
     EXPECT_EQ(tb.getLoopEnd(), 16000);
-    EXPECT_FLOAT_EQ(tb.data()[15000 * 2], 0.0f);  // padded tail is silent
-    EXPECT_FLOAT_EQ(tb.data()[5000 * 2], 0.5f);   // original content preserved
+    EXPECT_FLOAT_EQ(tb.sampleAt(15000, 0), 0.0f);  // padded tail is silent
+    EXPECT_FLOAT_EQ(tb.sampleAt(5000, 0), 0.5f);   // original content preserved
 }
 
 TEST(TrackBuffer, FinalizeFreeLoopBakesSeamFromContinuation) {
@@ -264,8 +264,8 @@ TEST(TrackBuffer, FinalizeFreeLoopBakesSeamFromContinuation) {
 
     EXPECT_TRUE(tb.finalizeFreeLoop(0, 10000, /*tailFrames=*/2000));
     // The continuation has been baked into the loop start with a decaying fade.
-    EXPECT_GT(std::fabs(tb.data()[0]), 0.0f);
-    EXPECT_FLOAT_EQ(tb.data()[5000 * 2], 0.0f);  // past the tail window → untouched
+    EXPECT_GT(std::fabs(tb.sampleAt(0, 0)), 0.0f);
+    EXPECT_FLOAT_EQ(tb.sampleAt(5000, 0), 0.0f);  // past the tail window → untouched
 }
 
 TEST(TrackBuffer, VolumeAndPanClampedToValidRange) {
@@ -280,4 +280,217 @@ TEST(TrackBuffer, VolumeAndPanClampedToValidRange) {
     EXPECT_FLOAT_EQ(tb.getPan(), -1.0f);
     tb.setPan(5.0f);
     EXPECT_FLOAT_EQ(tb.getPan(), 1.0f);
+}
+
+// ----- QW-1 / QW-2: unity-speed fast path + block gain ramp -----
+
+// At speed 1.0 with an integer playhead and settled gains, the fast path must
+// reproduce the recorded content scaled ONLY by the centre-pan gain (-3 dB).
+// Uses a per-frame-varying pattern so a copy bug (wrong offset/stride) can't
+// hide behind a constant signal.
+TEST(TrackBuffer, UnitySpeedFastPathReproducesContent) {
+    TrackBuffer tb;
+    const int loop = 2048;
+    tb.allocate(loop, 48000);
+    for (int i = 0; i < loop; ++i) {
+        const float l = std::sin(2.0f * static_cast<float>(M_PI) * 3.0f * i / loop);
+        const float r = std::cos(2.0f * static_cast<float>(M_PI) * 5.0f * i / loop);
+        tb.writeFrame(l, r);
+    }
+    tb.finalizeRecording();
+    tb.setPlaying(true);
+    tb.setVolume(1.0f);
+    tb.setPan(0.0f);   // centre → equal-power -3 dB ≈ 0.7071 on both channels
+    tb.setMuted(false);
+
+    const int block = 512;
+    std::vector<float> out(block * 2, 0.0f);
+    tb.mixInto(out.data(), block);  // playhead 0 → fast path (no wrap, no seam)
+
+    // Expected per-channel gain comes from the SAME quantized equal-power LUT the
+    // mixer uses (centre index ≈ -3 dB but not perfectly symmetric); hardcoding
+    // 0.7071 would false-fail on the LUT quantization.
+    const auto centre = wm::EqualPowerPanLUT::instance().lookup(0.0f);
+    for (int i = 0; i < block; ++i) {
+        const float l = std::sin(2.0f * static_cast<float>(M_PI) * 3.0f * i / loop);
+        const float r = std::cos(2.0f * static_cast<float>(M_PI) * 5.0f * i / loop);
+        EXPECT_NEAR(out[i * 2],     l * centre.l, 1e-4f) << "L frame " << i;
+        EXPECT_NEAR(out[i * 2 + 1], r * centre.r, 1e-4f) << "R frame " << i;
+    }
+}
+
+// Multi-page loop: the unity-speed fast path must read correctly ACROSS a
+// chunk-page boundary (32768 frames). In dense mode this is one contiguous run;
+// in chunked mode the block splits into per-page runs — this is the regression
+// guard for that split (the small-loop tests above stay within one page).
+TEST(TrackBuffer, UnitySpeedFastPathCrossesPageBoundary) {
+    TrackBuffer tb;
+    const int loop = 40000;                   // > 32768 → spans 2 chunk pages
+    tb.allocate(loop, 48000);
+    auto content = [](int i) { return static_cast<float>((i % 997)) / 997.0f - 0.5f; };
+    for (int i = 0; i < loop; ++i) tb.writeFrame(content(i), content(i));
+    tb.finalizeRecording();
+    tb.setPlaying(true);
+    tb.setVolume(1.0f); tb.setPan(0.0f); tb.setMuted(false);
+
+    const auto centre = wm::EqualPowerPanLUT::instance().lookup(0.0f);
+    const int block = 3000;                   // unaligned to the page → blocks straddle 32768
+    std::vector<float> out(block * 2);
+    int pos = 0;
+    // Stay clear of the seam crossfade window (last ~2400 frames) so we remain on
+    // the fast path; cover [0, 36000) which includes the page boundary at 32768.
+    for (int blk = 0; blk < 12; ++blk) {
+        std::fill(out.begin(), out.end(), 0.0f);
+        tb.mixInto(out.data(), block);
+        for (int i = 0; i < block; ++i) {
+            const float expected = content(pos + i);
+            EXPECT_NEAR(out[i * 2],     expected * centre.l, 1e-4f) << "L pos " << (pos + i);
+            EXPECT_NEAR(out[i * 2 + 1], expected * centre.r, 1e-4f) << "R pos " << (pos + i);
+        }
+        pos += block;
+    }
+}
+
+// Non-unity speed must stay on the interpolating slow path and still produce
+// bounded audio (no NaN/Inf from the Catmull-Rom + fmod path).
+TEST(TrackBuffer, NonUnitySpeedProducesBoundedAudio) {
+    TrackBuffer tb;
+    const int loop = 2048;
+    tb.allocate(loop, 48000);
+    for (int i = 0; i < loop; ++i) {
+        const float v = 0.5f * std::sin(2.0f * static_cast<float>(M_PI) * 4.0f * i / loop);
+        tb.writeFrame(v, v);
+    }
+    tb.finalizeRecording();
+    tb.setPlaying(true);
+    tb.setSpeed(0.5f);
+
+    std::vector<float> out(512 * 2, 0.0f);
+    float maxAbs = 0.0f;
+    for (int blk = 0; blk < 8; ++blk) {          // sweep across the loop + seam
+        std::fill(out.begin(), out.end(), 0.0f);
+        tb.mixInto(out.data(), 512);
+        for (float s : out) {
+            EXPECT_TRUE(std::isfinite(s));
+            maxAbs = std::max(maxAbs, std::fabs(s));
+        }
+    }
+    EXPECT_GT(maxAbs, 0.0f);
+    EXPECT_LT(maxAbs, 2.0f);
+}
+
+// ----- QW-6: live incremental waveform -----
+
+// Mid-recording, getLiveWaveform must reflect the captured prefix (non-zero)
+// and leave the not-yet-recorded tail at zero — a left-to-right fill — without
+// any O(n) buffer scan.
+TEST(TrackBuffer, LiveWaveformReflectsRecordedPrefix) {
+    TrackBuffer tb;
+    const int loop = 4096;               // framesPerBin = 4096/512 = 8
+    tb.allocate(loop, 48000);
+    writeConstant(tb, 0.5f, loop / 2);   // record exactly the first half
+
+    const int numBins = 64;
+    std::vector<float> bins(numBins, -1.0f);
+    EXPECT_EQ(tb.getLiveWaveform(bins.data(), numBins), numBins);
+
+    // First half of the bins map to recorded frames → ~0.5 peak.
+    for (int i = 0; i < numBins / 2 - 1; ++i) {
+        EXPECT_GT(bins[i], 0.4f) << "recorded bin " << i;
+    }
+    // Second half maps past the write head → still silent.
+    for (int i = numBins / 2 + 1; i < numBins; ++i) {
+        EXPECT_FLOAT_EQ(bins[i], 0.0f) << "unrecorded bin " << i;
+    }
+}
+
+// A freshly allocated (unrecorded) track yields an all-zero live waveform.
+TEST(TrackBuffer, LiveWaveformZeroBeforeRecording) {
+    TrackBuffer tb;
+    tb.allocate(2048, 48000);
+    std::vector<float> bins(32, -1.0f);
+    EXPECT_EQ(tb.getLiveWaveform(bins.data(), 32), 32);
+    for (float b : bins) EXPECT_FLOAT_EQ(b, 0.0f);
+}
+
+// clear() must wipe the live waveform so a reused track doesn't show ghosts.
+TEST(TrackBuffer, LiveWaveformClearedOnClear) {
+    TrackBuffer tb;
+    tb.allocate(2048, 48000);
+    writeConstant(tb, 0.5f, 2048);
+    tb.clear();
+    tb.allocate(2048, 48000);
+    std::vector<float> bins(32, -1.0f);
+    tb.getLiveWaveform(bins.data(), 32);
+    for (float b : bins) EXPECT_FLOAT_EQ(b, 0.0f);
+}
+
+// ----- F3.4: finite play count -----
+
+// A track set to play N times auto-stops after N passes of its loop region and
+// latches "completed" exactly once. Infinite (default) never stops.
+TEST(TrackBuffer, PlayCountStopsAfterNPasses) {
+    TrackBuffer tb;
+    const int loop = 2048;
+    tb.allocate(loop, 48000);
+    writeConstant(tb, 0.5f, loop);
+    tb.finalizeRecording();
+    tb.setPlaying(true);
+    tb.setPlayCount(2);                       // two passes then stop
+
+    std::vector<float> out(512 * 2, 0.0f);
+    bool stopped = false;
+    int blocksToStop = 0;
+    for (int blk = 0; blk < 12 && !stopped; ++blk) {
+        std::fill(out.begin(), out.end(), 0.0f);
+        tb.mixInto(out.data(), 512);
+        ++blocksToStop;
+        stopped = !tb.isTrackPlaying();
+    }
+    EXPECT_TRUE(stopped);
+    EXPECT_EQ(tb.getRemainingPlays(), 0);
+    // 2 passes × 2048 = 4096 frames = 8 blocks of 512.
+    EXPECT_EQ(blocksToStop, 8);
+    EXPECT_TRUE(tb.consumeCompleted());       // latched once
+    EXPECT_FALSE(tb.consumeCompleted());      // and only once
+}
+
+TEST(TrackBuffer, PlayCountInfiniteByDefaultNeverStops) {
+    TrackBuffer tb;
+    const int loop = 1024;
+    tb.allocate(loop, 48000);
+    writeConstant(tb, 0.5f, loop);
+    tb.finalizeRecording();
+    tb.setPlaying(true);
+    // No setPlayCount → infinite.
+
+    std::vector<float> out(512 * 2, 0.0f);
+    for (int blk = 0; blk < 40; ++blk) {      // 20+ passes
+        std::fill(out.begin(), out.end(), 0.0f);
+        tb.mixInto(out.data(), 512);
+    }
+    EXPECT_TRUE(tb.isTrackPlaying());
+    EXPECT_EQ(tb.getRemainingPlays(), -1);
+    EXPECT_FALSE(tb.consumeCompleted());
+}
+
+// Mute must ramp the block gain down to (near) silence within a few blocks,
+// confirming the block-ramped mute smoother still converges.
+TEST(TrackBuffer, MuteRampsToSilence) {
+    TrackBuffer tb;
+    const int loop = 2048;
+    tb.allocate(loop, 48000);
+    writeConstant(tb, 0.5f, loop);
+    tb.finalizeRecording();
+    tb.setPlaying(true);
+    tb.setMuted(true);
+
+    std::vector<float> out(512 * 2, 0.0f);
+    for (int blk = 0; blk < 12; ++blk) {   // ~128ms of settling at 48k
+        std::fill(out.begin(), out.end(), 0.0f);
+        tb.mixInto(out.data(), 512);
+    }
+    float maxAbs = 0.0f;
+    for (float s : out) maxAbs = std::max(maxAbs, std::fabs(s));
+    EXPECT_LT(maxAbs, 1e-3f);
 }
