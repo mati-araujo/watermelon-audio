@@ -74,5 +74,7 @@ endif()
 # Order is irrelevant — the shared-library subdirectories are guarded.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../dsp/tests     dsp_tests)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../effects/tests effects_tests)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../engines/tests engine_tests)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../voice/tests   voice_tests)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../looper/tests  looper_tests)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../usb/tests     usb_tests)
