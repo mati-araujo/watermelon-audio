@@ -279,6 +279,7 @@ class StateSynchronizer(
             _syncedState.update { current ->
                 current.copy(
                     effects = newEffects,
+                    effectsBypassed = nativeSnapshot.isGloballyBypassed,
                     lastSyncTimestamp = nativeSnapshot.timestamp,
                     syncVersion = nativeSnapshot.version,
                     lastError = null,

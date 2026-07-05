@@ -249,6 +249,19 @@ void BackendManager::setFullDuplexEnabled(bool enable) {
     }
 }
 
+void BackendManager::setLatencyProfile(usb::UsbLatencyProfile profile) {
+    std::lock_guard<std::mutex> lock(mMutex);
+
+    mLatencyProfile = profile;
+
+    // Apply immediately to the existing LibusbBackend (takes effect at its next
+    // start). Persisted in mLatencyProfile so applyConfigToBackend re-applies it
+    // if the backend is later recreated — same lifecycle as the streaming mode.
+    if (mLibusbBackend) {
+        mLibusbBackend->setLatencyProfile(profile);
+    }
+}
+
 // =============================================================================
 // USB Support
 // =============================================================================
@@ -399,6 +412,13 @@ void BackendManager::applyConfigToBackend(IAudioBackend* backend) {
         backend->setBufferSize(mBufferSize);
     }
     backend->setFullDuplexEnabled(mFullDuplexEnabled);
+
+    // USB latency profile (Fase 1) — LibusbBackend-specific. Re-applied here so
+    // a freshly created/activated USB backend picks up the persisted profile.
+    // Identity comparison instead of dynamic_cast to avoid an RTTI dependency.
+    if (mLibusbBackend && backend == mLibusbBackend.get()) {
+        mLibusbBackend->setLatencyProfile(mLatencyProfile);
+    }
 }
 
 IAudioBackend* BackendManager::resolveBackendForSplit(BackendType type) const {

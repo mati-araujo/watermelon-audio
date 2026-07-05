@@ -478,6 +478,25 @@ bool wma_effect_is_bypassed(const WmaEngine* engine, int index) {
     }
 }
 
+WmaResult wma_effect_set_global_bypass(WmaEngine* engine, bool bypass) {
+    WMA_CHECK(engine);
+    try {
+        engine->engine->setEffectsBypass(bypass);
+        return WMA_OK;
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
+bool wma_effect_is_global_bypassed(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, false);
+    try {
+        return engine->engine->isEffectsBypassed();
+    } catch (...) {
+        return false;
+    }
+}
+
 WmaResult wma_effect_reorder(WmaEngine* engine, int from_index, int to_index) {
     WMA_CHECK(engine);
     size_t chainSize = engine->engine->getNumEffects();
@@ -895,6 +914,17 @@ bool wma_usb_init_device(int file_descriptor, const char* usbfs_path) {
 void wma_usb_close_device(void) {
     auto& manager = watermelon_audio::BackendManager::getInstance();
     manager.fallbackToOboe();
+}
+
+bool wma_usb_set_latency_profile(int profile) {
+    // Persist on the BackendManager so it survives backend recreation and is
+    // re-applied at start (Fase 1) — same semantics as the USB streaming mode.
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    const auto p = (profile == 1)
+        ? watermelon_audio::usb::UsbLatencyProfile::LOW_LATENCY
+        : watermelon_audio::usb::UsbLatencyProfile::SAFE;
+    manager.setLatencyProfile(p);
+    return true;
 }
 
 /* ================================================================

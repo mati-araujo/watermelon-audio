@@ -668,6 +668,19 @@ internal class UsbAudioManagerImpl(
         _currentStreamPreference = preference
     }
 
+    override fun setLatencyProfile(profile: UsbLatencyProfile): UsbResult<Unit> {
+        Log.i(TAG, "Latency profile set: $profile")
+        return nativeBridge.setUsbLatencyProfile(profile).fold(
+            onSuccess = { UsbResult.Success(Unit) },
+            onFailure = {
+                UsbResult.Failure(
+                    UsbAudioError.UNSUPPORTED_FORMAT,
+                    it.message ?: "setLatencyProfile failed"
+                )
+            }
+        )
+    }
+
     override suspend fun selectClockSource(clockSourceId: Int): UsbResult<Unit> {
         if (clockSourceId <= 0) {
             return UsbResult.Failure(UsbAudioError.UNSUPPORTED_FORMAT, "clockSourceId must be > 0")

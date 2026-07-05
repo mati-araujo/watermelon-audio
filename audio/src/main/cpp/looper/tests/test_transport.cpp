@@ -2,8 +2,8 @@
 // metronome scheduling arming, play-frame counter accounting, and the
 // nextBarBoundary quantizer used by armed recording.
 //
-// Note: tick(numFrames, AudioLooper&) is not exercised here because it
-// requires a live AudioLooper. Click dispatch is covered by on-device QA.
+#include <algorithm>
+#include <array>
 #include <gtest/gtest.h>
 #include "Transport.h"
 #include "AudioLooper.h"
@@ -96,6 +96,64 @@ TEST(Transport, PlayFrameAdvancesOnTick) {
 
     t.resetPlayPosition();
     EXPECT_EQ(t.getPlayFrame(), 0);
+}
+
+TEST(Transport, ScheduledMetronomeRendersClickWhenLooperDisabled) {
+    Transport t;
+    t.setSampleRate(48000);
+    t.setBpm(120.0f);
+
+    AudioLooper looper;
+    looper.setSampleRate(48000);
+    looper.setEnabled(false);
+
+    std::array<float, 256> buffer{};
+    t.startMetronome(4);
+    t.tick(128, looper);
+    looper.process(buffer.data(), 128);
+
+    EXPECT_TRUE(std::any_of(buffer.begin(), buffer.end(), [](float sample) {
+        return sample != 0.0f;
+    }));
+    EXPECT_EQ(t.getRemainingBeats(), 3);
+}
+
+TEST(AudioLooper, DirectClickRendersWhenDisabled) {
+    AudioLooper looper;
+    looper.setSampleRate(48000);
+    looper.setEnabled(false);
+
+    std::array<float, 256> buffer{};
+    looper.triggerClick(true);
+    looper.process(buffer.data(), 128);
+
+    EXPECT_TRUE(std::any_of(buffer.begin(), buffer.end(), [](float sample) {
+        return sample != 0.0f;
+    }));
+}
+
+TEST(AudioLooper, ClickIsRenderedAfterRecordingTapWhenEnabled) {
+    AudioLooper looper;
+    looper.setSampleRate(48000);
+    ASSERT_TRUE(looper.prepareTrack(0, 512, 48000));
+    looper.startRecording(0);
+
+    std::array<float, 256> buffer{};
+    looper.triggerClick(true);
+    looper.process(buffer.data(), 128);
+
+    EXPECT_TRUE(std::any_of(buffer.begin(), buffer.end(), [](float sample) {
+        return sample != 0.0f;
+    }));
+
+    // The click is rendered to the OUTPUT but never captured into the track — the
+    // recorded buffer stays silent. Read via sampleAt() so this holds for both the
+    // dense and the paged backend (buffer.size() floats = buffer.size()/2 frames).
+    const TrackBuffer& recorded = looper.getTrack(0);
+    for (int f = 0; f < static_cast<int>(buffer.size()) / 2; ++f) {
+        EXPECT_FLOAT_EQ(recorded.sampleAt(f, 0), 0.0f);
+        EXPECT_FLOAT_EQ(recorded.sampleAt(f, 1), 0.0f);
+    }
 }
 
 TEST(Transport, NextBarBoundaryQuantizes) {

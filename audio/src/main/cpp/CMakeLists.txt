@@ -29,6 +29,21 @@ if(DEFINED WMA_PROJECT_VERSION AND NOT WMA_PROJECT_VERSION STREQUAL "unspecified
     endif()
 endif()
 
+# ========== USB DIAGNOSTICS FLAG (Fase 1, L8) ==========
+# Expensive USB diagnostics (per-callback output fingerprint, periodic
+# decode-back + hexdump, verbose USB_DSP log) are compiled out unless explicitly
+# enabled. At 1 ms iso transfers these run up to 1000×/s and contaminate the CPU
+# measurement; the cheap counters (underruns/overruns delta, ring min/max,
+# clock-health line) stay always on. OFF by default — turn on with
+# -DWMA_USB_DIAG=ON for a debug measurement session.
+option(WMA_USB_DIAG "Enable expensive USB audio diagnostics" OFF)
+if(WMA_USB_DIAG)
+    add_compile_definitions(WMA_USB_DIAG=1)
+    message(STATUS "WMA_USB_DIAG enabled — expensive USB diagnostics compiled in")
+else()
+    add_compile_definitions(WMA_USB_DIAG=0)
+endif()
+
 # Configurar alineación de 16 KB para compatibilidad con Android 15+
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
 
@@ -182,6 +197,8 @@ add_library(watermelon_audio SHARED
         core/SynthEngineDispatcher.cpp
         core/OutputStage.cpp
         core/OscillatorBank.cpp
+        # Looper offline export/import bodies (moved out of AudioLooper.h — plan §3.3)
+        looper/LooperExporter.cpp
         # Effects now in watermelon-effects sub-library (Phase 1B)
         # Audio Graph (Etapa 1)
         ${GRAPH_SOURCES}

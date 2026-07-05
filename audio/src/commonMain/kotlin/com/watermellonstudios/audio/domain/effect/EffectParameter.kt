@@ -408,6 +408,12 @@ sealed class EffectParameter(
     /** HpfDelay wet/dry mix (0-1) */
     data object HpfDelayMix : EffectParameter(3, 0f, 1f, 0.5f, "Mix")
 
+    data object HpfDelaySync : EffectParameter(4, 0f, 1f, 0f, "Sync")
+    data object HpfDelaySubdivision : EffectParameter(5, 0f, 5f, 1f, "Subdivision")
+    data object HpfDelayPingPong : EffectParameter(6, 0f, 1f, 0f, "Ping Pong")
+    data object HpfDelayDucking : EffectParameter(7, 0f, 1f, 0f, "Ducking")
+    data object HpfDelayLpfCutoff : EffectParameter(8, 1000f, 20000f, 12000f, "LPF Cutoff")
+
     // ========== TAPE ECHO (KORG NTS-3 FX-006) ==========
 
     /** TapeEcho delay time in ms (50-2000) */
@@ -427,6 +433,12 @@ sealed class EffectParameter(
 
     /** TapeEcho wet/dry mix (0-1) */
     data object TapeEchoMix : EffectParameter(5, 0f, 1f, 0.5f, "Mix")
+
+    data object TapeEchoSync : EffectParameter(6, 0f, 1f, 0f, "Sync")
+    data object TapeEchoSubdivision : EffectParameter(7, 0f, 5f, 2f, "Subdivision")
+    data object TapeEchoPingPong : EffectParameter(8, 0f, 1f, 0f, "Ping Pong")
+    data object TapeEchoDucking : EffectParameter(9, 0f, 1f, 0f, "Ducking")
+    data object TapeEchoNoiseLevel : EffectParameter(10, 0f, 1f, 0f, "Noise")
 
     // ========== HALL REVERB (KORG NTS-3 FX-010) ==========
 
@@ -493,6 +505,34 @@ sealed class EffectParameter(
 
     /** BeatGrain wet/dry mix (0-1) */
     data object BeatGrainMix : EffectParameter(5, 0f, 1f, 0.5f, "Mix")
+
+    // ========== SPRING REVERB (GUITAR) ==========
+
+    data object SpringReverbDecay : EffectParameter(0, 0.4f, 5f, 2.2f, "Decay")
+    data object SpringReverbTone : EffectParameter(1, 0f, 1f, 0.55f, "Tone")
+    data object SpringReverbDrip : EffectParameter(2, 0f, 1f, 0.35f, "Drip")
+    data object SpringReverbTension : EffectParameter(3, 0f, 1f, 0.5f, "Tension")
+    data object SpringReverbMix : EffectParameter(4, 0f, 1f, 0.25f, "Mix")
+
+    // ========== PLATE REVERB (GUITAR) ==========
+
+    data object PlateReverbDecay : EffectParameter(0, 0.5f, 8f, 2.4f, "Decay")
+    data object PlateReverbPreDelay : EffectParameter(1, 0f, 150f, 18f, "Pre-Delay")
+    data object PlateReverbDamping : EffectParameter(2, 0f, 1f, 0.35f, "Damping")
+    data object PlateReverbModulation : EffectParameter(3, 0f, 1f, 0.12f, "Modulation")
+    data object PlateReverbLowCut : EffectParameter(4, 20f, 500f, 120f, "Low Cut")
+    data object PlateReverbHighCut : EffectParameter(5, 1000f, 20000f, 9000f, "High Cut")
+    data object PlateReverbMix : EffectParameter(6, 0f, 1f, 0.28f, "Mix")
+
+    // ========== SHIMMER REVERB (GUITAR) ==========
+
+    data object ShimmerReverbDecay : EffectParameter(0, 1f, 15f, 5f, "Decay")
+    data object ShimmerReverbSize : EffectParameter(1, 0.1f, 1f, 0.85f, "Size")
+    data object ShimmerReverbPitchSemitones : EffectParameter(2, -12f, 24f, 12f, "Pitch")
+    data object ShimmerReverbAmount : EffectParameter(3, 0f, 1f, 0.35f, "Shimmer")
+    data object ShimmerReverbFeedback : EffectParameter(4, 0f, 0.85f, 0.35f, "Feedback")
+    data object ShimmerReverbTone : EffectParameter(5, 0f, 1f, 0.65f, "Tone")
+    data object ShimmerReverbMix : EffectParameter(6, 0f, 1f, 0.35f, "Mix")
 
     companion object {
         /**
@@ -635,7 +675,12 @@ sealed class EffectParameter(
                     HpfDelayCutoff,
                     HpfDelayTime,
                     HpfDelayFeedback,
-                    HpfDelayMix
+                    HpfDelayMix,
+                    HpfDelaySync,
+                    HpfDelaySubdivision,
+                    HpfDelayPingPong,
+                    HpfDelayDucking,
+                    HpfDelayLpfCutoff
                 )
                 EffectType.TAPE_ECHO -> listOf(
                     TapeEchoDelayTime,
@@ -643,7 +688,12 @@ sealed class EffectParameter(
                     TapeEchoWowFlutter,
                     TapeEchoTapeAge,
                     TapeEchoSaturation,
-                    TapeEchoMix
+                    TapeEchoMix,
+                    TapeEchoSync,
+                    TapeEchoSubdivision,
+                    TapeEchoPingPong,
+                    TapeEchoDucking,
+                    TapeEchoNoiseLevel
                 )
                 EffectType.HALL_REVERB -> listOf(
                     HallReverbDecayTime,
@@ -670,6 +720,31 @@ sealed class EffectParameter(
                     BeatGrainPitchShift,
                     BeatGrainBufferLength,
                     BeatGrainMix
+                )
+                EffectType.SPRING_REVERB -> listOf(
+                    SpringReverbDecay,
+                    SpringReverbTone,
+                    SpringReverbDrip,
+                    SpringReverbTension,
+                    SpringReverbMix
+                )
+                EffectType.PLATE_REVERB -> listOf(
+                    PlateReverbDecay,
+                    PlateReverbPreDelay,
+                    PlateReverbDamping,
+                    PlateReverbModulation,
+                    PlateReverbLowCut,
+                    PlateReverbHighCut,
+                    PlateReverbMix
+                )
+                EffectType.SHIMMER_REVERB -> listOf(
+                    ShimmerReverbDecay,
+                    ShimmerReverbSize,
+                    ShimmerReverbPitchSemitones,
+                    ShimmerReverbAmount,
+                    ShimmerReverbFeedback,
+                    ShimmerReverbTone,
+                    ShimmerReverbMix
                 )
             }
         }

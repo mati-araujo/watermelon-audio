@@ -35,6 +35,7 @@ class EffectManagerBatchTest {
         var singleSetParameterCalls = 0
         var setParametersBatchCalls = 0
         var setBypassCalls = 0
+        var setEffectsBypassCalls = 0
         var clearAllCalls = 0
 
         override suspend fun addEffect(type: EffectType): Result<Int> =
@@ -68,6 +69,11 @@ class EffectManagerBatchTest {
 
         override suspend fun setBypass(effectIndex: Int, bypassed: Boolean): Result<Unit> {
             setBypassCalls++
+            return Result.success(Unit)
+        }
+
+        override suspend fun setEffectsBypass(bypassed: Boolean): Result<Unit> {
+            setEffectsBypassCalls++
             return Result.success(Unit)
         }
 

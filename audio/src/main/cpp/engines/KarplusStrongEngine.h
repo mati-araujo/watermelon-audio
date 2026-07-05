@@ -2,6 +2,7 @@
 
 #include "SynthEngine.h"
 #include "../dsp/DelayLine.h"
+#include <algorithm>  // std::clamp / std::min / std::max
 #include <cmath>
 #include <random>
 

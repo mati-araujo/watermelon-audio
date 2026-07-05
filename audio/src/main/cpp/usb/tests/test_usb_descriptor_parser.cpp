@@ -303,3 +303,99 @@ TEST(UsbDescriptorParserFeedbackTest, ImplicitFeedbackOnDataEndpointIsMarked) {
     EXPECT_TRUE(iface.feedbackEndpoint->isImplicit);
     EXPECT_EQ(iface.feedbackEndpoint->endpoint.address, 0x01);
 }
+
+// 7-byte endpoint descriptors must leave refresh/synchAddress at 0 and not
+// fabricate a phantom feedback endpoint from stale bytes (0.3 test 4).
+TEST(UsbDescriptorParserFeedbackTest, SevenByteEndpointHasNoRefreshOrSynch) {
+    auto descriptor = buildUac1AsyncConfigDescriptor();
+    UsbDescriptorParser parser;
+    auto result = parser.parse(descriptor.data(), descriptor.size(), makeFakeDeviceInfo());
+    ASSERT_TRUE(result.has_value());
+    const auto& iface = result->playbackInterfaces[0];
+    EXPECT_EQ(iface.dataEndpoint.refresh, 0);
+    EXPECT_EQ(iface.dataEndpoint.synchAddress, 0);
+}
+
+// ---------------------------------------------------------------------------
+// 0.3 — UAC1 legacy feedback by bSynchAddress + data-EP clobbering regression
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// UAC1 legacy playback altsetting:
+//   - data EP OUT 0x01, 9-byte descriptor, usage=data(00), bRefresh=4,
+//     bSynchAddress=0x81
+//   - sync EP IN 0x81, iso, usage=data(00) (NOT the modern feedback usage)
+// `reverseOrder` emits the IN endpoint before the OUT one to prove the
+// classification is order-independent.
+std::vector<uint8_t> buildUac1LegacySynchConfigDescriptor(bool reverseOrder) {
+    std::vector<uint8_t> d;
+    const size_t cfg = d.size();
+    d.insert(d.end(), {0x09, 0x02, 0x00, 0x00, 0x02, 0x01, 0x00, 0x80, 0x32});
+
+    // IF0 AudioControl + AC header
+    d.insert(d.end(), {0x09, 0x04, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00});
+    d.insert(d.end(), {0x09, 0x24, 0x01, 0x00, 0x01, 0x1E, 0x00, 0x01, 0x01});
+
+    // IF1 Alt0 idle
+    d.insert(d.end(), {0x09, 0x04, 0x01, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00});
+    // IF1 Alt1 with 2 endpoints
+    d.insert(d.end(), {0x09, 0x04, 0x01, 0x01, 0x02, 0x01, 0x02, 0x00, 0x00});
+    // AS General + Format Type I
+    d.insert(d.end(), {0x07, 0x24, 0x01, 0x01, 0x01, 0x01, 0x00});
+    d.insert(d.end(), {0x0B, 0x24, 0x02, 0x01, 0x02, 0x03, 0x18, 0x01,
+                       0x80, 0xBB, 0x00});
+
+    // Data EP OUT 0x01, 9-byte (bRefresh=4 @7, bSynchAddress=0x81 @8),
+    // bmAttributes = iso/async/data = 0x05, maxPkt=192.
+    const std::vector<uint8_t> dataEp = {
+        0x09, 0x05, 0x01, 0x05, 0xC0, 0x00, 0x01, 0x04, 0x81};
+    // Legacy sync EP IN 0x81, 7-byte, iso/none/data = 0x01, maxPkt=3.
+    const std::vector<uint8_t> syncEp = {
+        0x07, 0x05, 0x81, 0x01, 0x03, 0x00, 0x01};
+
+    if (reverseOrder) {
+        d.insert(d.end(), syncEp.begin(), syncEp.end());
+        d.insert(d.end(), dataEp.begin(), dataEp.end());
+    } else {
+        d.insert(d.end(), dataEp.begin(), dataEp.end());
+        d.insert(d.end(), syncEp.begin(), syncEp.end());
+    }
+
+    const uint16_t totalLen = static_cast<uint16_t>(d.size() - cfg);
+    d[cfg + 2] = static_cast<uint8_t>(totalLen & 0xff);
+    d[cfg + 3] = static_cast<uint8_t>((totalLen >> 8) & 0xff);
+    return d;
+}
+
+void expectLegacyResolved(const std::vector<uint8_t>& descriptor) {
+    UsbDescriptorParser parser;
+    auto result = parser.parse(descriptor.data(), descriptor.size(), makeFakeDeviceInfo());
+    ASSERT_TRUE(result.has_value()) << "parse() failed: " << parser.getLastError();
+    ASSERT_EQ(result->playbackInterfaces.size(), 1u);
+    const auto& iface = result->playbackInterfaces[0];
+
+    // Data EP must be the OUT endpoint — NOT clobbered by the IN sync EP.
+    EXPECT_EQ(iface.dataEndpoint.address, 0x01);
+    EXPECT_TRUE(iface.dataEndpoint.isOutput());
+    EXPECT_EQ(iface.dataEndpoint.synchAddress, 0x81);
+    EXPECT_EQ(iface.dataEndpoint.refresh, 4);
+
+    // Feedback EP resolved from bSynchAddress, explicit, at 0x81.
+    ASSERT_TRUE(iface.feedbackEndpoint.has_value());
+    EXPECT_FALSE(iface.feedbackEndpoint->isImplicit);
+    EXPECT_EQ(iface.feedbackEndpoint->endpoint.address, 0x81);
+    EXPECT_TRUE(iface.feedbackEndpoint->endpoint.isInput());
+    EXPECT_EQ(iface.feedbackEndpoint->endpoint.refresh, 4);  // inherited from data EP
+}
+
+}  // namespace
+
+TEST(UsbDescriptorParserFeedbackTest, LegacyUac1SynchAddressInOrder) {
+    expectLegacyResolved(buildUac1LegacySynchConfigDescriptor(/*reverseOrder=*/false));
+}
+
+TEST(UsbDescriptorParserFeedbackTest, LegacyUac1SynchAddressReverseOrderNoClobber) {
+    // IN sync endpoint appears before the OUT data endpoint in the descriptor.
+    expectLegacyResolved(buildUac1LegacySynchConfigDescriptor(/*reverseOrder=*/true));
+}

@@ -46,4 +46,34 @@ interface LooperStateListener {
      * @param peakLevel  Linear peak amplitude in [0, 1].
      */
     fun onTrackPeakChanged(trackIndex: Int, peakLevel: Float)
+
+    /**
+     * Recording progress of the track currently being captured (QW-5). Push
+     * replacement for polling `getRecordProgress()` on a timer.
+     *
+     * Fires when the record progress changes by >= ~0.02 (about 50 updates over
+     * a full take). A **negative** [progress] (sentinel -1.0) signals that the
+     * recording on [trackIndex] has ENDED (loop finalized, free-take cap reached,
+     * or stopped) — use it to clear any "recording…" UI state without polling
+     * `isRecording()`.
+     *
+     * Has a no-op default so existing implementations keep compiling; override
+     * it to retire the record-progress polling loop.
+     *
+     * @param trackIndex 0..7
+     * @param progress   Record progress in [0, 1], or < 0 when recording ended.
+     */
+    fun onTrackRecordProgress(trackIndex: Int, progress: Float) {}
+
+    /**
+     * The track finished its finite play count (see `setTrackPlayCount`) and
+     * auto-stopped (F3.4). Distinct from [onTrackPlayingChanged] with
+     * `isPlaying = false` so the UI can tell "completed N plays" apart from a
+     * user-initiated stop (e.g. to advance a song section or trigger the next clip).
+     *
+     * Has a no-op default so existing implementations keep compiling.
+     *
+     * @param trackIndex 0..15
+     */
+    fun onTrackCompleted(trackIndex: Int) {}
 }

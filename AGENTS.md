@@ -83,11 +83,74 @@ audio/src/
 ## Comandos
 
 ```bash
-./gradlew :audio:assembleDebug                                     # Build debug (4 ABIs)
+./gradlew :audio:assembleDebug                                     # Build debug (4 ABIs, lento, requiere NDK)
 ./gradlew :audio:assembleRelease                                   # Build release
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 ```
+
+---
+
+## Tests — loop rápido para agentes
+
+La verificación más rápida NO es Gradle. El motor C++ tiene una suite host
+(googletest) que corre en x86_64 sin NDK, sin Oboe, sin device. **Un comando
+configura+compila+corre las 4 suites** (dsp + effects + looper + usb, ~217 tests):
+
+```powershell
+# Windows (este entorno) — auto-localiza MinGW g++ (C:\msys64\mingw64) + Ninja (Android SDK)
+pwsh scripts/run-cpp-tests.ps1
+pwsh scripts/run-cpp-tests.ps1 -Fast                         # loop rápido: salta el stress test de 5s
+pwsh scripts/run-cpp-tests.ps1 -Filter UsbDescriptorParser   # solo un subconjunto (ctest -R)
+pwsh scripts/run-cpp-tests.ps1 -Clean                        # rebuild limpio
+```
+
+**Warning gate**: el build host compila con `-Wall -Wextra -Werror` (solo host, no el
+NDK). Si introducís un warning real (uninitialized, reorder, format, dead code), el
+build falla. Apagarlo localmente: `-DWMA_TESTS_WERROR=OFF`. Convención: nombrá los
+tests lentos con `Stress`/`Slow` para que `-Fast` (ctest `-E`) los excluya.
+
+```bash
+# Linux / macOS / CI
+bash scripts/run-cpp-tests.sh
+bash scripts/run-cpp-tests.sh -R Clock                       # ctest args pasan directo
+```
+
+- Aggregator CMake: `audio/src/main/cpp/tests/CMakeLists.txt` (un solo fetch de googletest).
+- Las suites siguen compilando standalone (`cd <subdir>/tests && cmake ...`).
+
+### Tests Kotlin (commonTest)
+
+```bash
+./gradlew :audio:testDebugUnitTest    # ScaleQuantizer, ChordGenerator, EffectManagerBatch
+```
+
+### Todo junto
+
+```bash
+./gradlew :audio:check                # Kotlin unit tests + suite C++ (via task :audio:cppTest)
+```
+
+CI (`.github/workflows/ci.yml`): job `cpp-tests` (host, rápido) + `testDebugUnitTest`
++ `assembleDebug`/`assembleRelease`.
+
+### Benchmark del loop (comparar configuraciones de build)
+
+Para medir el rendimiento del loop edit→build→test (lo que paga un agente al
+iterar) y comparar configuraciones a lo largo del tiempo:
+
+```powershell
+pwsh scripts/bench-agent-loop.ps1 -Label ninja-auto                 # baseline
+pwsh scripts/bench-agent-loop.ps1 -Generator "Unix Makefiles" -Jobs 4 -Label make-j4
+pwsh scripts/bench-agent-loop.ps1 -Stress -Label con-stress
+```
+
+Mide `cold_total` / `incremental` / `test_only` (N corridas, mediana), captura
+contexto (git rev, generador, compilador, `-j`, stress) y appendea a
+`docs/agent-loop-bench.csv`. Cada `-Label` es una fila comparable: corré, cambiá
+la config, volvé a correr, y diff de filas. El incremental y el test_only son las
+métricas que importan (un agente las paga decenas de veces; el cold solo una).
+Versión Linux/CI: `scripts/bench-agent-loop.sh -l <label> -g <gen> -j <n> [-s]`.
 
 ---
 

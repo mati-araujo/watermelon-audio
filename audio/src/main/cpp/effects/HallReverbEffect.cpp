@@ -106,8 +106,8 @@ float HallReverbEffect::getParam(int paramId) {
 }
 
 void HallReverbEffect::process(float* input, float* output, int numFrames) {
-    // Load params once
-    float decayTime = mDecayTime.load(std::memory_order_relaxed);
+    // Load params once (decay is applied via the feedback coefficients on
+    // param change, not per-block).
     float size = mSize.load(std::memory_order_relaxed);
     float preDelayMs = mPreDelay.load(std::memory_order_relaxed);
     float diffusion = mDiffusion.load(std::memory_order_relaxed);

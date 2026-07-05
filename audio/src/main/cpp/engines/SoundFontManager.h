@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "tsf.h"
+#include "tsf_ext.h"
 
 #ifndef SFM_LOG_TAG
 #define SFM_LOG_TAG "SF8.Manager"
@@ -45,6 +46,8 @@ public:
         std::string name;
         int minKey;
         int maxKey;
+        int bank = -1;     // SF2 bank (128 = GM percussion kit)
+        int program = -1;  // GM program number (0-127)
     };
 
     SoundFontManager() = default;
@@ -224,6 +227,25 @@ public:
         const auto& info = (*mPresetCache)[presetIndex];
         outMinKey = info.minKey;
         outMaxKey = info.maxKey;
+        return true;
+    }
+
+    /**
+     * @brief SF2 bank + GM program for a preset, from the cache.
+     *
+     * Used for instrument classification (bank 128 = percussion → DrumGrid).
+     * Thread model: read from JNI/main thread under [mLoadMutex].
+     * @return true if the preset exists and outBank/outProgram were populated.
+     */
+    bool getPresetBankProgram(int presetIndex, int& outBank, int& outProgram) const {
+        std::lock_guard<std::mutex> lock(mLoadMutex);
+        if (!mPresetCache || presetIndex < 0 ||
+            presetIndex >= static_cast<int>(mPresetCache->size())) {
+            return false;
+        }
+        const auto& info = (*mPresetCache)[presetIndex];
+        outBank = info.bank;
+        outProgram = info.program;
         return true;
     }
 

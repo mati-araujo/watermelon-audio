@@ -151,6 +151,7 @@ public:
     int getSoundFontPresetCount() const;
     const char* getSoundFontPresetName(int presetIndex) const;
     bool getSoundFontPresetKeyRange(int presetIndex, int& outMinKey, int& outMaxKey) const;
+    bool getSoundFontPresetBankProgram(int presetIndex, int& outBank, int& outProgram) const;
     bool isSoundFontLoaded() const;
     void sfNoteOn(int touchId, int midiNote, float velocity);
     void sfNoteOff(int touchId);

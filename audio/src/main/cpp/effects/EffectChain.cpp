@@ -54,6 +54,8 @@ EffectChain::EffectChain() {
         mBypassSmooth[i].reset(0.0f);
         mBypassTarget[i].store(0.0f, std::memory_order_relaxed);
     }
+    mGlobalBypassSmooth.reset(0.0f);
+    mGlobalBypassTarget.store(0.0f, std::memory_order_relaxed);
 
     // Inicializar snapshot vacío
     mActiveSnapshot.store(&mSnapshot1, std::memory_order_release);
@@ -378,6 +380,13 @@ void EffectChain::process(float* input, float* output, int numFrames) {
     }
 
     const int totalSamples = numFrames * 2;
+    const float globalBypassTarget = mGlobalBypassTarget.load(std::memory_order_relaxed);
+    const float globalBypassLevel = mGlobalBypassSmooth.process(globalBypassTarget);
+
+    if (globalBypassLevel > 0.999f && globalBypassTarget > 0.999f) {
+        std::copy(input, input + totalSamples, output);
+        return;
+    }
 
     if (allBypassed) {
         std::copy(input, input + totalSamples, output);
@@ -440,6 +449,12 @@ void EffectChain::process(float* input, float* output, int numFrames) {
         }
     } else {
         processWithMode(mCurrentProcessingMode, snapshot, input, output, numFrames);
+    }
+
+    if (globalBypassLevel > 0.001f) {
+        for (int s = 0; s < totalSamples; ++s) {
+            output[s] = output[s] * (1.0f - globalBypassLevel) + input[s] * globalBypassLevel;
+        }
     }
 
     // Silence detection: flag when input has signal but output is silent
@@ -819,6 +834,15 @@ bool EffectChain::getBypass(size_t index) const {
     return false;
 }
 
+void EffectChain::setGlobalBypass(bool bypass) {
+    mGlobalBypassTarget.store(bypass ? 1.0f : 0.0f, std::memory_order_relaxed);
+    LOGI("Global effect bypass set to %d", bypass ? 1 : 0);
+}
+
+bool EffectChain::getGlobalBypass() const {
+    return mGlobalBypassTarget.load(std::memory_order_relaxed) > 0.5f;
+}
+
 void EffectChain::setParameter(size_t index, int paramId, float value) {
     // Lock-free: read from atomic snapshot to avoid race with addEffect() reallocation.
     // Effect parameters themselves use atomics internally.
@@ -999,12 +1023,16 @@ void EffectChain::setAutomationParameter(size_t effectIndex, int paramId, float 
             if (paramId == 0) mappedValue = mapValueLogarithmic(xyValue, 20.0f, 8000.0f);  // HPF Cutoff (log)
             else if (paramId == 1) mappedValue = mapValue(xyValue, 10.0f, 2000.0f);         // Delay Time (linear)
             else if (paramId == 2) mappedValue = mapValue(xyValue, 0.0f, 0.95f);            // Feedback (linear)
+            else if (paramId == 3) mappedValue = mapValue(xyValue, 0.0f, 1.0f);             // Mix
+            else if (paramId == 7) mappedValue = mapValue(xyValue, 0.0f, 1.0f);             // Ducking
             else return;
             break;
         case TAPE_ECHO:
             if (paramId == 0) mappedValue = mapValue(xyValue, 50.0f, 2000.0f);              // Delay Time (linear)
             else if (paramId == 1) mappedValue = mapValue(xyValue, 0.0f, 0.95f);            // Feedback (linear)
             else if (paramId == 2) mappedValue = mapValue(xyValue, 0.0f, 1.0f);             // Wow/Flutter (linear)
+            else if (paramId == 5) mappedValue = mapValue(xyValue, 0.0f, 1.0f);             // Mix
+            else if (paramId == 9) mappedValue = mapValue(xyValue, 0.0f, 1.0f);             // Ducking
             else return;
             break;
         case HALL_REVERB:
@@ -1023,6 +1051,24 @@ void EffectChain::setAutomationParameter(size_t effectIndex, int paramId, float 
             if (paramId == 0) mappedValue = mapValue(xyValue, 1.0f, 200.0f);                // Grain Size (linear)
             else if (paramId == 1) mappedValue = mapValue(xyValue, 0.0f, 3.0f);             // Density (linear)
             else if (paramId == 5) mappedValue = mapValue(xyValue, 0.0f, 1.0f);             // Mix (linear)
+            else return;
+            break;
+        case SPRING_REVERB:
+            if (paramId == 0) mappedValue = mapValue(xyValue, 0.4f, 5.0f);
+            else if (paramId == 1) mappedValue = mapValue(xyValue, 0.0f, 1.0f);
+            else if (paramId == 4) mappedValue = mapValue(xyValue, 0.0f, 1.0f);
+            else return;
+            break;
+        case PLATE_REVERB:
+            if (paramId == 0) mappedValue = mapValue(xyValue, 0.5f, 8.0f);
+            else if (paramId == 2) mappedValue = mapValue(xyValue, 0.0f, 1.0f);
+            else if (paramId == 6) mappedValue = mapValue(xyValue, 0.0f, 1.0f);
+            else return;
+            break;
+        case SHIMMER_REVERB:
+            if (paramId == 0) mappedValue = mapValue(xyValue, 1.0f, 15.0f);
+            else if (paramId == 3) mappedValue = mapValue(xyValue, 0.0f, 1.0f);
+            else if (paramId == 6) mappedValue = mapValue(xyValue, 0.0f, 1.0f);
             else return;
             break;
         default: return;
@@ -1172,6 +1218,7 @@ void EffectChain::setSampleRate(int sampleRate) {
     for (size_t i = 0; i < MAX_BYPASS_SLOTS; ++i) {
         mBypassSmooth[i].setSmoothingTime(20.0f, sr);
     }
+    mGlobalBypassSmooth.setSmoothingTime(20.0f, sr);
 
     // Routing mode crossfade: ~30ms
     mCrossfadeSamples = static_cast<int>(sr * 0.030f);

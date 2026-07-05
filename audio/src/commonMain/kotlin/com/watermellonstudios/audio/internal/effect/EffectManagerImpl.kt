@@ -106,6 +106,15 @@ internal class EffectManagerImpl(
                 initialValue = emptyList()
             )
 
+    override val effectsBypassState: StateFlow<Boolean> =
+        synchronizer.syncedState
+            .map { it.effectsBypassed }
+            .stateIn(
+                scope = scope,
+                started = SharingStarted.Eagerly,
+                initialValue = false
+            )
+
     override val maxEffects: Int = config.maxEffects
 
     // =========================================================================
@@ -336,6 +345,32 @@ internal class EffectManagerImpl(
         return Result.success(Unit)
     }
 
+    override suspend fun toggleEffectsBypass(): Result<Boolean> {
+        val newBypassed = !effectsBypassState.value
+        return setEffectsBypass(newBypassed).map { newBypassed }
+    }
+
+    override suspend fun setEffectsBypass(bypassed: Boolean): Result<Unit> {
+        val result = stateWriter.setEffectsBypass(bypassed)
+        if (result.isFailure) {
+            logger.error(TAG, "setEffectsBypass: native call failed", result.exceptionOrNull())
+            return result
+        }
+
+        val synced = withTimeoutOrNull(config.syncTimeoutMs) {
+            synchronizer.syncedState.first { state ->
+                state.effectsBypassed == bypassed
+            }
+        }
+
+        if (synced == null) {
+            logger.error(TAG, "setEffectsBypass: sync timeout")
+            return Result.failure(SyncTimeoutException(config.syncTimeoutMs, "setEffectsBypass"))
+        }
+
+        return Result.success(Unit)
+    }
+
     // =========================================================================
     // REORDER
     // =========================================================================
@@ -423,7 +458,7 @@ internal class EffectManagerImpl(
     // ROUTING MODE (lock-free, non-suspend)
     // =========================================================================
 
-    private val bridge = getAudioBridge()
+    private val bridge by lazy(LazyThreadSafetyMode.NONE) { getAudioBridge() }
 
     override fun setRoutingMode(mode: Int) {
         bridge.setRoutingMode(mode)

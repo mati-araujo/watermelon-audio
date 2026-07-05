@@ -72,6 +72,8 @@ SoundFontManager::buildPresetCache(tsf* sf, int presetCount) {
         PresetInfo info;
         info.name = name ? name : "";
         inferKeyRange(name, info.minKey, info.maxKey);
+        info.bank = tsf_get_preset_bank(sf, i);
+        info.program = tsf_get_preset_number(sf, i);
         cache->push_back(std::move(info));
     }
 

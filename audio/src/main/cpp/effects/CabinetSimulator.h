@@ -5,8 +5,6 @@
 #include "BuiltInIRs.h"
 #include <atomic>
 #include <array>
-#include <vector>
-#include <complex>
 #include <mutex>
 
 /**
@@ -44,10 +42,8 @@ public:
         PARAM_COUNT = 4
     };
 
-    // FFT/IR constants
+    // IR constants
     static constexpr size_t IR_LENGTH = BuiltInIRs::IR_LENGTH;  // 512 samples
-    static constexpr size_t FFT_SIZE = 1024;  // Next power of 2 for IR_LENGTH
-    static constexpr size_t BLOCK_SIZE = FFT_SIZE - IR_LENGTH;  // 512 samples
 
     CabinetSimulator();
     ~CabinetSimulator() override = default;
@@ -56,6 +52,7 @@ public:
     void setParam(int paramId, float value) override;
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
+    void reset() override;
 
 private:
     int mSampleRate{48000};
@@ -66,19 +63,15 @@ private:
     std::atomic<float> mLowCut{80.0f};
     std::atomic<float> mHighCut{12000.0f};
 
-    // FFT buffers (pre-allocated)
-    std::array<std::complex<float>, FFT_SIZE> mIRFreqDomain;  // IR in frequency domain
-    std::array<std::complex<float>, FFT_SIZE> mInputFreqDomain;  // Input FFT
-    std::array<std::complex<float>, FFT_SIZE> mOutputFreqDomain;  // Output FFT
-    std::array<float, FFT_SIZE> mFftBuffer;  // Working buffer
-    std::array<float, FFT_SIZE> mIfftBuffer;  // IFFT output
+    // Double-buffered normalized IRs. loadIR() fills the inactive buffer and
+    // atomically publishes it, so process() remains lock-free.
+    std::array<std::array<float, IR_LENGTH>, 2> mIRBuffers{};
+    std::atomic<int> mActiveIRBuffer{0};
 
-    // Overlap-add buffers (stereo)
-    std::array<float, IR_LENGTH> mOverlapL;  // Left channel overlap
-    std::array<float, IR_LENGTH> mOverlapR;  // Right channel overlap
-    std::array<float, BLOCK_SIZE> mInputBufferL;  // Left input accumulator
-    std::array<float, BLOCK_SIZE> mInputBufferR;  // Right input accumulator
-    size_t mInputPos = 0;  // Current position in input buffer
+    // Circular delay lines for full-length FIR convolution.
+    std::array<float, IR_LENGTH> mDelayLineL{};
+    std::array<float, IR_LENGTH> mDelayLineR{};
+    size_t mDelayPos = 0;
 
     // One-pole filter state (low/high cut)
     float mLowCutStateL = 0.0f;
@@ -92,16 +85,8 @@ private:
     std::mutex mIRMutex;
     std::atomic<bool> mIRReady{false};
 
-    // Load IR into frequency domain
+    // Load normalized IR into the inactive time-domain buffer
     void loadIR(BuiltInIRs::CabinetType type);
-
-    // FFT operations (Cooley-Tukey radix-2)
-    void fft(std::complex<float>* data, size_t n, bool inverse);
-    void bitReverse(std::complex<float>* data, size_t n);
-
-    // Process a single block through convolution
-    void processBlock(const float* inputL, const float* inputR,
-                      float* outputL, float* outputR);
 
     // Update filter coefficients
     void updateFilterCoefficients();
@@ -109,6 +94,8 @@ private:
     // Apply one-pole filters
     float applyLowCut(float input, float& state);
     float applyHighCut(float input, float& state);
+    float processFirSample(float input, std::array<float, IR_LENGTH>& delayLine,
+                           const std::array<float, IR_LENGTH>& ir);
 };
 
 #endif // CABINETSIMULATOR_H

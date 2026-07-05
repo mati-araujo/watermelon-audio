@@ -72,4 +72,17 @@ class ScaleQuantizerFlowTest {
         // the time we get here .value is already `high`, confirming emission.
         assertEquals(high, ScaleQuantizer.currentMidiNoteFlow.first())
     }
+
+    @Test
+    fun snapping_tie_currently_prefers_higher_scale_degree() {
+        // Phase15 legacy contract: C# is equally far from C and D in C major.
+        // The current helper checks upward before downward, so it snaps to D.
+        val snapped = ScaleSnapping.snapMidiToScale(
+            midiNote = 61,
+            scaleIntervals = majorIntervals,
+            rootNoteId = 0
+        )
+
+        assertEquals(62, snapped)
+    }
 }

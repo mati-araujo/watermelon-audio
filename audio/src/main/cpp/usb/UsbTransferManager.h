@@ -36,12 +36,14 @@
 #include <libusb.h>
 
 #include "UsbAudioTypes.h"
+#include "LatencyProfile.h"
 #include "AudioFormatConverter.h"
 #include "UsbLatencyProfiler.h"
 #include "AdaptiveBufferController.h"
 #include "ChannelMap.h"
 #include "RecoveryPolicy.h"
 #include "ResizableRingBuffer.h"
+#include "ImplicitFeedbackEstimator.h"
 #include "../dsp/LockFreeRingBuffer.h"
 #include "../backends/ClockController.h"
 
@@ -94,6 +96,22 @@ struct TransferConfig {
     int transferTimeoutMs = 100;        // Timeout for USB transfers
     int endpointInterval = 1;           // Active data endpoint bInterval
     int packetsPerSecond = 1000;        // Polling cadence derived from speed+bInterval
+
+    // Output ring pacer margin, in milliseconds, ABOVE one transfer worth of
+    // audio (Fase 1, L2). The pacer target is framesPerTransfer + this budget,
+    // so the margin tracks real OS scheduling jitter instead of scaling with
+    // the transfer size. 24 ms reproduces the historical SAFE target exactly
+    // (8 ms transfer + 24 ms = 32 ms); LOW_LATENCY uses 4 ms.
+    int jitterBudgetMs = 24;
+
+    // Extra output prefill, in FRAMES, on top of inflight + target (Fase 1).
+    // Compensates the startup deficit of the duplex pipeline: the output ring
+    // drains at wire rate from the first SOF while the DSP waits for the input
+    // path to deliver its first block. Production being input-gated, that
+    // drain is otherwise permanent and eats into the jitter budget. 0 keeps
+    // SAFE bit-identical; LibusbBackend sets dspBlock + 1 transfer in the
+    // low-latency regime.
+    int startupLeadFrames = 0;
 
     // ========== Output (playback) calculations ==========
     int bytesPerFrame() const {
@@ -150,10 +168,29 @@ struct TransferStatistics {
     // Buffer health
     std::atomic<uint64_t> underruns{0};
     std::atomic<uint64_t> overruns{0};
+    // Input samples deliberately discarded by the DSP consumer's latency trim
+    // (combined-excess drain in dspThreadFunc). In régimen this should grow
+    // only after genuine latency excess (startup backlog, post-stall trim);
+    // sustained growth correlated with output underruns means the trim is
+    // discarding the refill fuel — the exact bug the combined-excess condition
+    // exists to prevent.
+    std::atomic<uint64_t> inputSamplesTrimmed{0};
+    // Certain gaps on the OUTPUT wire from late resubmits: counted when the
+    // spacing between consecutive output completions reaches the full
+    // in-flight queue depth (numTransfers × transfer duration), i.e. the
+    // kernel ran out of queued URBs and the DAC went at least one service
+    // interval without data. This is the glitch class every ring counter is
+    // blind to — iso OUT has no ACK, the ring stays healthy, and the URB
+    // still completes OK. Nonzero deltas in régimen mean the event thread is
+    // losing the resubmit race (raise numTransfers or thread priority).
+    std::atomic<uint64_t> outputWireGaps{0};
 
-    // Latency tracking
+    // Latency tracking (output)
     std::atomic<float> currentLatencyMs{0.0f};
     std::atomic<float> avgLatencyMs{0.0f};
+    // Latency tracking (input) — host-side software latency of the capture
+    // path. Kept separate so getInputLatencyMs() stops aliasing the output.
+    std::atomic<float> currentInputLatencyMs{0.0f};
 
     // Ring buffer state
     std::atomic<int> ringBufferLevel{0};       // Current fill level (samples)
@@ -173,8 +210,11 @@ struct TransferStatistics {
         packetsErrors.store(0);
         underruns.store(0);
         overruns.store(0);
+        inputSamplesTrimmed.store(0);
+        outputWireGaps.store(0);
         currentLatencyMs.store(0.0f);
         avgLatencyMs.store(0.0f);
+        currentInputLatencyMs.store(0.0f);
         ringBufferLevel.store(0);
         ringBufferFillPct.store(0.0f);
         currentSampleRateHz.store(0.0f);
@@ -254,6 +294,25 @@ public:
      * @param endpoint Feedback endpoint info (from descriptor parser)
      */
     void setFeedbackEnabled(bool enabled, const UsbFeedbackEndpoint* endpoint = nullptr);
+
+    /**
+     * Enable/disable implicit feedback (0.2, hallazgo C2).
+     *
+     * When enabled, the manager measures the real rate of the CAPTURE stream
+     * (synchronous to the device clock) over a window of service intervals and
+     * forwards it to the ClockController as the output target. Use this for
+     * full-duplex asynchronous interfaces that have no explicit feedback EP.
+     *
+     * Mutually exclusive in effect with an explicit feedback endpoint: the
+     * caller should only enable one source. Requires an active input stream;
+     * with no capture the controller simply stays at the fractional nominal.
+     */
+    void setImplicitFeedbackEnabled(bool enabled) {
+        mImplicitFeedbackActive = enabled;
+        mImplicitFeedbackEstimator.reset();
+    }
+
+    bool isImplicitFeedbackEnabled() const { return mImplicitFeedbackActive; }
 
     /**
      * Tell the transfer manager which UAC version the device implements.
@@ -376,35 +435,92 @@ public:
      * running 1:1 with transfer-completion wakes (125/s at 48 kHz)
      * instead of 187.5/s nominal, causing sustained ring starvation.
      *
-     * Value = (numTransfers + 1) full transfers worth of audio, i.e.
-     * one full round of in-flight transfers PLUS one spare transfer
-     * of headroom for OS scheduling jitter. At 48 kHz stereo with
-     * the default 3 in-flight transfers of 8 ms each this is
-     * 4 × 768 = 3072 samples ≈ 32 ms of latency margin, of which
-     * ~24 ms is absorber for transient DSP slowdowns.
+     * Value = one transfer worth of audio (so the ring can always feed the
+     * next URB) PLUS a jitter budget expressed in absolute milliseconds
+     * (mConfig.jitterBudgetMs). Pinning the margin to wall-clock jitter rather
+     * than to a multiple of the transfer size is the L2 fix: with 8 ms
+     * transfers the historical "(numTransfers+1) transfers" margin happened to
+     * be 24 ms of absorber, but with 1 ms transfers that same formula would
+     * collapse to ~5 ms by accident. Here SAFE keeps jitterBudgetMs=24 →
+     * 8 + 24 = 32 ms (bit-identical to the old target), and LOW_LATENCY uses
+     * 1 + 4 = 5 ms.
      *
-     * The +1 headroom matters in FULL_DUPLEX mode where the DSP is
-     * already running at the nominal rate (no spare capacity) — any
-     * scheduling jitter that pushes a callback past its 5.3 ms budget
-     * creates an instantaneous deficit that must be absorbed by the
-     * existing ring level. With just numTransfers of margin the
-     * absorber only tolerates ~13 ms of slowdown before the ring
-     * reaches the underrun threshold (768 samples); the +1 bumps
-     * that to ~21 ms, which covers the Android kernel's typical
-     * scheduling jitter envelope under load.
+     * The jitter budget is the absorber for transient DSP slowdowns: any
+     * callback that overruns its block budget (Android scheduling, thermal
+     * throttle, cache miss) drains the ring, and the budget sets how much of
+     * that the ring tolerates before underrunning.
+     *
+     * On top of the configured budget rides an ADAPTIVE extra (mJitterExtraMs)
+     * that ratchets up 1 ms per output underrun, capped: the profile starts at
+     * the lowest latency and grows only on evidence that this device/system
+     * combination actually needs more absorber. It never decays within a
+     * session (stability bias) and resets on configure(). The ring refills to
+     * the raised target on its own: the very stall that caused the underrun
+     * parked the missing audio as input backlog, which the raised target stops
+     * the latency trim from discarding. Read per-iteration by the DSP loop, so
+     * the raise takes effect without a stream restart.
      */
     size_t getOutputRingTargetLevel() const {
-        return static_cast<size_t>(
-            (mConfig.numTransfers + 1)
-            * mConfig.packetsPerTransfer
-            * mConfig.framesPerPacket
-            * mConfig.channelCount);
+        return outputRingTargetSamples(
+            mConfig.packetsPerTransfer, mConfig.framesPerPacket,
+            mConfig.jitterBudgetMs +
+                mJitterExtraMs.load(std::memory_order_relaxed),
+            mConfig.sampleRate, mConfig.channelCount);
+    }
+
+    /** Current adaptive addition to the jitter budget, for telemetry. */
+    int getJitterExtraMs() const {
+        return mJitterExtraMs.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * Windowed max of the output completion-reap gap (ms), reset on read.
+     * The race with the event thread's store may drop one update — fine for
+     * telemetry.
+     */
+    uint32_t fetchAndResetMaxReapGapMs() {
+        return mMaxReapGapMs.exchange(0, std::memory_order_relaxed);
+    }
+
+    /**
+     * Target fill level (float samples) for the INPUT ring (Fase 1, L4).
+     *
+     * Deliberately NOT tied to jitterBudgetMs (which is the OUTPUT absorber for
+     * DSP/effect CPU spikes): capture is just monitored through, so its standing
+     * latency should be as small as the input can sustain without underrunning,
+     * independent of how much output headroom the profile carries. Three
+     * transfers gives one DSP block (≥2 transfers to satisfy the input gate)
+     * plus a transfer of delivery-jitter margin. The DSP consumer drains any
+     * backlog above this so capture latency tracks the device rate instead of
+     * the frozen startup accumulation that otherwise pins inLatMs high in duplex.
+     *
+     * For SAFE this is 3×8 ms = 24 ms, above the natural standing level, so the
+     * drain effectively never fires — SAFE input behavior stays unchanged.
+     */
+    size_t getInputRingTargetLevel() const {
+        const int framesPerTransfer =
+            mConfig.packetsPerTransfer * mConfig.framesPerPacket;
+        return static_cast<size_t>(3 * framesPerTransfer)
+            * static_cast<size_t>(mConfig.inputChannelCount);
     }
 
     /**
      * Get available samples in input ring buffer.
      */
     size_t getInputBufferAvailable() const;
+
+    /** Channel counts of the ring buffers (for sample↔frame conversions). */
+    int getOutputChannelCount() const { return mConfig.channelCount; }
+    int getInputChannelCount() const { return mConfig.inputChannelCount; }
+
+    /**
+     * Account input samples discarded by the DSP consumer's latency trim.
+     * Wait-free; called from the DSP thread.
+     */
+    void addInputSamplesTrimmed(size_t samples) {
+        mStats.inputSamplesTrimmed.fetch_add(
+            static_cast<uint64_t>(samples), std::memory_order_relaxed);
+    }
 
     // ========================================================================
     // Callbacks
@@ -501,6 +617,13 @@ public:
      */
     int getCurrentBufferMs() const { return mConfig.ringBufferMs; }
 
+    /**
+     * Frames per iso packet of the active stream. Used by LibusbBackend to
+     * round the DSP block size to a packet multiple (Fase 1, L3) so the input
+     * gating doesn't oscillate between 1 and 2 transfers of wait.
+     */
+    int getFramesPerPacket() const { return mConfig.framesPerPacket; }
+
 private:
     // ========================================================================
     // Internal Transfer Handling
@@ -590,6 +713,13 @@ private:
     // ClockController so processFeedback() doesn't have to guess.
     UacVersion mUacVersion = UacVersion::UNKNOWN;
 
+    // Implicit feedback (0.2). When active, processInputTransfer() feeds the
+    // measured capture rate into the estimator; closed windows drive
+    // ClockController::setMeasuredFramesPerPacket(). Touched only from the
+    // event thread, so no atomics beyond the activation flag.
+    bool mImplicitFeedbackActive = false;
+    ImplicitFeedbackEstimator mImplicitFeedbackEstimator;
+
     // Output transfers (playback)
     std::vector<std::unique_ptr<IsoTransfer>> mOutputTransfers;
     std::atomic<int> mOutputPendingCount{0};
@@ -642,6 +772,32 @@ private:
 
     // Statistics
     TransferStatistics mStats;
+
+    // Adaptive addition to mConfig.jitterBudgetMs (see
+    // getOutputRingTargetLevel). Written only by the event thread (+1 ms per
+    // output underrun, saturating at kJitterExtraCapMs), read lock-free by the
+    // DSP loop's per-iteration target. Reset in configure().
+    static constexpr int kJitterExtraCapMs = 12;
+    std::atomic<int> mJitterExtraMs{0};
+
+    // Underruns inside this window after (re)start don't raise the adaptive
+    // budget: the gap between the initial transfer submission and the DSP
+    // thread reaching its loop is structural (thread spawn + RT setup, masked
+    // by the app-level start fade), not scheduling-jitter evidence. Without
+    // this, every session permanently pays ~2 ms of latency for a startup
+    // artifact nobody hears.
+    static constexpr uint64_t kAdaptiveWarmupMs = 1000;
+    std::atomic<uint64_t> mStreamStartTimeMs{0};
+
+    // Wall-clock of the previous output completion, for the wire-gap detector
+    // (see TransferStatistics::outputWireGaps). Event thread only.
+    uint64_t mLastOutputCompletionMs = 0;
+
+    // Largest spacing between consecutive output completions observed since
+    // the last telemetry read (fetchAndResetMaxReapGapMs). Sizes the event
+    // thread's stalls: gaps just past numTransfers ms are solvable with queue
+    // depth; 15 ms+ means scheduling pressure that only ADPF/priority can fix.
+    std::atomic<uint32_t> mMaxReapGapMs{0};
 
     // Callbacks
     std::mutex mCallbackMutex;

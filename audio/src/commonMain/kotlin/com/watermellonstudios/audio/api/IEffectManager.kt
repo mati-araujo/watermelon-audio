@@ -50,6 +50,13 @@ interface IEffectManager {
     val maxEffects: Int
 
     /**
+     * Global bypass state for the full effect chain.
+     *
+     * This is independent from [EffectState.isBypassed] on individual effects.
+     */
+    val effectsBypassState: StateFlow<Boolean>
+
+    /**
      * Adds a new effect to the chain.
      *
      * The effect is added with default parameters. Use [setParameter] or
@@ -138,6 +145,24 @@ interface IEffectManager {
      * @return Result.success if set, or failure with appropriate exception
      */
     suspend fun setBypass(index: Int, bypassed: Boolean): Result<Unit>
+
+    /**
+     * Toggles global bypass for the full effect chain.
+     *
+     * Individual effect bypass states are preserved and restored naturally
+     * when the global bypass is disabled.
+     *
+     * @return Result containing the new global bypass state (true = bypassed)
+     */
+    suspend fun toggleEffectsBypass(): Result<Boolean>
+
+    /**
+     * Sets global bypass for the full effect chain.
+     *
+     * @param bypassed true to bypass all effects, false to process the chain
+     * @return Result.success if set, or failure with appropriate exception
+     */
+    suspend fun setEffectsBypass(bypassed: Boolean): Result<Unit>
 
     /**
      * Reorders effects in the chain.

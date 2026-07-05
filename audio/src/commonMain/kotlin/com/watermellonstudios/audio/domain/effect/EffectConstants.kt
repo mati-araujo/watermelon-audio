@@ -64,6 +64,15 @@ object EffectConstants {
     /** BeatGrain effect type ID (KORG NTS-3) */
     const val BEAT_GRAIN = 19
 
+    /** Spring Reverb effect type ID (guitar) */
+    const val SPRING_REVERB = 20
+
+    /** Plate Reverb effect type ID (guitar) */
+    const val PLATE_REVERB = 21
+
+    /** Shimmer Reverb effect type ID (guitar) */
+    const val SHIMMER_REVERB = 22
+
     // ===========================================
     // FILTER PARAMETERS
     // ===========================================
@@ -351,6 +360,12 @@ object EffectConstants {
 
         /** Wet/dry mix (0.0-1.0) */
         const val MIX = 3
+
+        const val SYNC = 4
+        const val SUBDIVISION = 5
+        const val PING_PONG = 6
+        const val DUCKING = 7
+        const val LPF_CUTOFF = 8
     }
 
     // ===========================================
@@ -375,6 +390,12 @@ object EffectConstants {
 
         /** Wet/dry mix (0-1) */
         const val MIX = 5
+
+        const val SYNC = 6
+        const val SUBDIVISION = 7
+        const val PING_PONG = 8
+        const val DUCKING = 9
+        const val NOISE_LEVEL = 10
     }
 
     // ===========================================
@@ -453,6 +474,43 @@ object EffectConstants {
 
         /** Wet/dry mix (0-1) */
         const val MIX = 5
+    }
+
+    object DelaySubdivision {
+        const val QUARTER = 0
+        const val EIGHTH = 1
+        const val DOTTED_EIGHTH = 2
+        const val EIGHTH_TRIPLET = 3
+        const val SIXTEENTH = 4
+        const val DOTTED_QUARTER = 5
+    }
+
+    object SpringReverb {
+        const val DECAY = 0
+        const val TONE = 1
+        const val DRIP = 2
+        const val TENSION = 3
+        const val MIX = 4
+    }
+
+    object PlateReverb {
+        const val DECAY = 0
+        const val PRE_DELAY = 1
+        const val DAMPING = 2
+        const val MODULATION = 3
+        const val LOW_CUT = 4
+        const val HIGH_CUT = 5
+        const val MIX = 6
+    }
+
+    object ShimmerReverb {
+        const val DECAY = 0
+        const val SIZE = 1
+        const val PITCH_SEMITONES = 2
+        const val SHIMMER_AMOUNT = 3
+        const val FEEDBACK = 4
+        const val TONE = 5
+        const val MIX = 6
     }
 
     // ===========================================

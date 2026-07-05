@@ -158,6 +158,20 @@ public:
     bool getBypass(size_t index) const;
 
     /**
+     * @brief Set a global bypass over the full effect chain.
+     *
+     * This is independent from per-effect bypass flags. It behaves like a
+     * performance "all FX bypass" pedal: individual bypass states remain
+     * unchanged and are heard again when the global bypass is disabled.
+     */
+    void setGlobalBypass(bool bypass);
+
+    /**
+     * @brief Get requested global bypass state for the full effect chain.
+     */
+    bool getGlobalBypass() const;
+
+    /**
      * @brief Establece parámetro de efecto
      * Lock-free: Los efectos usan atómicos internamente
      */
@@ -333,6 +347,8 @@ private:
     static constexpr size_t MAX_BYPASS_SLOTS = MAX_EFFECTS;  // matches MAX_EFFECTS
     std::array<ParameterSmoother, MAX_BYPASS_SLOTS> mBypassSmooth;
     std::array<std::atomic<float>, MAX_BYPASS_SLOTS> mBypassTarget;
+    ParameterSmoother mGlobalBypassSmooth;
+    std::atomic<float> mGlobalBypassTarget{0.0f};
 
     /**
      * @brief Actualiza el snapshot activo después de cambios estructurales

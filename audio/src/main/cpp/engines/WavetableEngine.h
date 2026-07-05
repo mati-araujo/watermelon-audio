@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SynthEngine.h"
+#include <algorithm>  // std::clamp
 #include <cmath>
 #include <vector>
 #include <array>

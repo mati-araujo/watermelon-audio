@@ -16,7 +16,34 @@ android {
             }
         }
     }
+
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 }
+
+// Host C++ unit tests (dsp + effects + looper + usb googletest suites).
+// Delegates to the platform wrapper, which locates a host toolchain
+// (MinGW g++ + Ninja on Windows, system g++ elsewhere). Wired into `check`
+// so `./gradlew :audio:check` runs Kotlin AND C++ tests. Requires a host
+// C++ compiler — see scripts/run-cpp-tests.{ps1,sh}.
+val cppTest by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Build and run the host C++ (googletest) test suite."
+    workingDir = rootProject.projectDir
+    commandLine = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+        listOf(
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", "scripts/run-cpp-tests.ps1",
+        )
+    } else {
+        listOf("bash", "scripts/run-cpp-tests.sh")
+    }
+}
+
+tasks.named("check") { dependsOn(cppTest) }
 
 // KMP automatically creates publications for each target.
 // We only configure the repository here.

@@ -32,7 +32,23 @@ TEST(ResizableRingBufferTest, StressWriterReaderAndRepeatedResize) {
         std::vector<float> chunk(kChunkSamples);
         uint64_t nextValue = 1;
 
+        // A 32-bit float represents every integer exactly only up to 2^24;
+        // past that, consecutive integers collide (16777217 rounds to
+        // 16777216.0f). Since we encode a strictly-increasing sequence as
+        // float and the reader below asserts strict monotonicity, the
+        // sequence MUST stay within the float-exact range — otherwise a
+        // fast writer that produces >2^24 samples within kDuration trips the
+        // check spuriously (machine-speed-dependent, not a ring-buffer bug).
+        constexpr uint64_t kMaxExactValue = 1ull << 24;  // 16,777,216
+
         while (!stop.load(std::memory_order_acquire)) {
+            if (nextValue + kChunkSamples >= kMaxExactValue) {
+                // Float-exact sequence space exhausted. Stop producing, but
+                // leave the reader and resizer to keep stressing concurrent
+                // resize for the rest of the window.
+                break;
+            }
+
             for (size_t i = 0; i < chunk.size(); ++i) {
                 chunk[i] = static_cast<float>(nextValue + i);
             }

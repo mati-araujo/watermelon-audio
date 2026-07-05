@@ -19,6 +19,15 @@ struct LooperEvent {
         Progress = 0,
         PlayingChanged = 1,
         PeakChanged = 2,
+        // Recording progress for the track currently being captured. `value` is
+        // the record progress in [0,1]; a value < 0 (sentinel -1.0) means the
+        // recording on `trackIndex` has ENDED — lets the UI drop its 33ms record
+        // polling loop and go fully push-based (QW-5).
+        RecordProgress = 3,
+        // The track finished its finite play count (setTrackPlayCount) and
+        // auto-stopped. `value` unused. Distinct from PlayingChanged(false) so the
+        // UI can tell "completed N plays" from "user stopped" (F3.4).
+        TrackCompleted = 4,
     };
 
     Type    type;

@@ -10,6 +10,7 @@
 #include "../usb/ClockSourceRangeParser.h"
 #include "../usb/UsbClockGraph.h"
 #include "../usb/UsbIsoTiming.h"
+#include "../usb/RateCoercionPolicy.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -865,9 +866,13 @@ bool LibusbBackend::configureSampleRate() {
         if (g == 3) {
             uint32_t actual = usb::decodeUac1SampleRateResponse(readback);
             if (actual != requested) {
-                LOGW("UAC1 device coerced sample rate %u Hz -> %u Hz",
-                     requested, actual);
-                mRequestedSampleRate = static_cast<int>(actual);
+                // Don't accept the coercion silently — abort the start so
+                // start() can reconfigure TransferConfig at the real rate
+                // (otherwise the rate ratio drifts systematically).
+                LOGW("UAC1 device coerced sample rate %u Hz -> %u Hz; "
+                     "restart required", requested, actual);
+                mNegotiatedSampleRate.store(static_cast<int>(actual));
+                return false;
             }
             LOGI("Rate negotiation: UAC1 EP 0x%02x req=%u actual=%u",
                  epAddress, requested, actual);
@@ -1022,9 +1027,10 @@ bool LibusbBackend::configureSampleRate() {
                     "[SET_CUR] clockSrc=%d verify GET_CUR: actual=%u (requested=%u)",
                     clockId, actual, requested);
                 if (actual != requested) {
-                    LOGW("UAC2 device coerced sample rate %u Hz -> %u Hz on clockSrc %d",
-                         requested, actual, clockId);
-                    mRequestedSampleRate = static_cast<int>(actual);
+                    LOGW("UAC2 device coerced sample rate %u Hz -> %u Hz on "
+                         "clockSrc %d; restart required", requested, actual, clockId);
+                    mNegotiatedSampleRate.store(static_cast<int>(actual));
+                    return false;
                 }
                 LOGI("Rate negotiation: UAC2 clockSrc=%d req=%u actual=%u",
                      clockId, requested, actual);
@@ -1102,16 +1108,61 @@ BackendResult LibusbBackend::start() {
         teardownTransferManager();
     }
 
-    // Setup transfer manager
-    if (!setupTransferManager()) {
-        return BackendResult::ERROR_USB_INIT_FAILED;
-    }
+    // Setup + start the transfer manager. The clock-config hook negotiates the
+    // sample rate and aborts the start if the device coerces it to a different
+    // value (0.4, hallazgo C5). In that case we reconfigure at the real rate
+    // and retry exactly once, so TransferConfig (framesPerPacket, rings,
+    // ClockController) is computed against the rate the device truly runs.
+    for (int attempt = 0; ; ++attempt) {
+        if (!setupTransferManager()) {
+            return BackendResult::ERROR_USB_INIT_FAILED;
+        }
+        if (mTransferManager->start()) {
+            break;  // started cleanly
+        }
 
-    // Start transfer manager
-    if (!mTransferManager->start()) {
+        const int coerced = mNegotiatedSampleRate.exchange(0);
+        const auto action = usb::decideRateCoercion(
+            /*startSucceeded=*/false, coerced, mRequestedSampleRate, attempt);
+        if (action == usb::RateCoercionAction::RetryAtCoercedRate) {
+            LOGI("Retrying start at device-coerced rate %d Hz", coerced);
+            mRequestedSampleRate = coerced;
+            teardownTransferManager();
+            continue;
+        }
+
         LOGE("Failed to start transfer manager");
         teardownTransferManager();
         return BackendResult::ERROR_STREAM_FAILED;
+    }
+
+    // Validate the DSP block size (Fase 1, L3). Always clamp to [16, 1024].
+    //
+    // Packet-multiple rounding (so input gating doesn't oscillate between 1 and
+    // 2 transfers of wait) is applied ONLY in a low-latency tuning, i.e. when
+    // targetTransferMs is more aggressive than SAFE. This keeps SAFE
+    // bit-identical (its 256-frame block, which is not a packet multiple, is
+    // preserved exactly — acceptance criterion #1) while still aligning the
+    // small blocks that LOW_LATENCY / custom aggressive tunings use, where the
+    // gating granularity actually matters. In practice LOW_LATENCY's 96-frame
+    // block is already a multiple of both FS (48) and HS (6) packet sizes, so
+    // this only ever adjusts arbitrary custom blocks.
+    {
+        const int framesPerPacket = mTransferManager
+            ? mTransferManager->getFramesPerPacket() : 0;
+        const bool lowLatencyRegime =
+            mTuning.targetTransferMs < usb::UsbLatencyTuning::safe().targetTransferMs;
+        int block = std::clamp(mRequestedBufferSize, 16, 1024);
+        if (lowLatencyRegime && framesPerPacket > 0 && framesPerPacket <= block) {
+            const int rounded = (block / framesPerPacket) * framesPerPacket;
+            if (rounded >= 16) block = rounded;
+        }
+        if (block != mRequestedBufferSize) {
+            LOGI("DSP block %d -> %d (clamped to [16,1024]%s)",
+                 mRequestedBufferSize, block,
+                 lowLatencyRegime ? ", rounded to packet multiple" : "");
+            mRequestedBufferSize = block;
+        }
     }
 
     // Pre-allocate DSP buffers BEFORE starting the RT thread (P0-4 fix)
@@ -1281,10 +1332,17 @@ float LibusbBackend::getOutputLatencyMs() const {
 
 float LibusbBackend::getInputLatencyMs() const {
     if (mSelectedCapture && mTransferManager) {
-        // Similar to output for symmetric full-duplex
-        return mTransferManager->getStatistics().currentLatencyMs.load();
+        // Host-side software latency of the capture path (L7). No longer
+        // aliases the output latency.
+        return mTransferManager->getStatistics().currentInputLatencyMs.load();
     }
     return 0.0f;
+}
+
+float LibusbBackend::getRoundTripLatencyMs() const {
+    // Host-side software round-trip = output + input. The full analog
+    // round-trip (converters + URB scheduling, +1–3 ms) is measured in Fase 5.
+    return getOutputLatencyMs() + getInputLatencyMs();
 }
 
 bool LibusbBackend::supportsFullDuplex() const {
@@ -1339,6 +1397,23 @@ bool LibusbBackend::getUsbDeviceInfo(int* vendorId, int* productId) const {
 // ============================================================================
 
 bool LibusbBackend::setupTransferManager() {
+    // Fase 1: auto-select LOW_LATENCY for input-active streaming modes
+    // (CAPTURE_ONLY / FULL_DUPLEX = Input FX / Guitar FX) here, at start, where
+    // the streaming mode is already reliably set. This is race-free, unlike a
+    // profile pushed asynchronously from the app, which can land after start().
+    //
+    // We only upgrade from a non-aggressive baseline (targetTransferMs >= SAFE's
+    // 8 ms): an explicit LOW_LATENCY or custom aggressive tuning already set by
+    // the caller is preserved, and PLAYBACK_ONLY keeps its configured profile
+    // (SAFE by default — bit-identical).
+    if (mStreamingMode != UsbStreamingMode::PLAYBACK_ONLY &&
+        mTuning.targetTransferMs >= usb::UsbLatencyTuning::safe().targetTransferMs) {
+        setLatencyTuning(usb::UsbLatencyTuning::lowLatency());
+        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+            "USB_LATENCY_AUTO: input mode (streamMode=%d) -> LOW_LATENCY",
+            static_cast<int>(mStreamingMode));
+    }
+
     // Determine which interface to use for configuration
     const usb::UsbStreamingInterface* configInterface = nullptr;
 
@@ -1426,7 +1501,8 @@ bool LibusbBackend::setupTransferManager() {
     const auto timing = usb::calculateIsoTransferTiming(
         mRequestedSampleRate,
         isHighSpeed,
-        static_cast<int>(configInterface->dataEndpoint.interval));
+        static_cast<int>(configInterface->dataEndpoint.interval),
+        mTuning.targetTransferMs);
     const char* speedName =
         (speed == LIBUSB_SPEED_LOW)        ? "LOW"   :
         (speed == LIBUSB_SPEED_FULL)       ? "FULL"  :
@@ -1444,19 +1520,47 @@ bool LibusbBackend::setupTransferManager() {
     config.endpointInterval = timing.endpointInterval;
     config.packetsPerSecond = timing.packetsPerSecond;
     config.framesPerPacket = timing.framesPerPacket;
-    // Keep ~8 ms of audio per libusb transfer in both speed classes so the
-    // event-loop cadence is constant regardless of USB speed.
+    // Transfer duration comes from the active latency tuning (Fase 1):
+    // SAFE keeps ~8 ms/transfer, LOW_LATENCY drops to 1 ms. packetsPerTransfer
+    // is already derived from targetTransferMs inside calculateIsoTransferTiming.
     config.packetsPerTransfer = timing.packetsPerTransfer;
-    config.numTransfers = 3;                       // Triple buffering
+    config.numTransfers = mTuning.numTransfers;
+    config.jitterBudgetMs = mTuning.jitterBudgetMs;
+
+    // Startup lead (low-latency regime only; 0 keeps SAFE bit-identical).
+    // In duplex the DSP cannot produce until the input path delivers its
+    // first block (~1 transfer of URB latency + 1 block of accumulation),
+    // while the output ring drains at wire rate from the first SOF. With
+    // input-gated production that initial drain is never recovered and would
+    // permanently eat ~half the jitter budget; prefill it instead. The block
+    // value mirrors the clamp applied in start() (which runs after this).
+    if (mTuning.targetTransferMs <
+            usb::UsbLatencyTuning::safe().targetTransferMs &&
+        mStreamingMode != UsbStreamingMode::PLAYBACK_ONLY) {
+        const int blockFrames = std::clamp(mRequestedBufferSize, 16, 1024);
+        config.startupLeadFrames = blockFrames +
+            timing.packetsPerTransfer * timing.framesPerPacket;
+    }
 
     LOGI("USB speed: %s (libusb=%d), bInterval=%d, %d packets/sec, "
-         "%d frames/packet, %d packets/xfer",
+         "%d frames/packet, %d packets/xfer, %d transfers, "
+         "targetTransferMs=%d, jitterBudgetMs=%d",
          speedName, speed, config.endpointInterval, config.packetsPerSecond,
-         config.framesPerPacket, config.packetsPerTransfer);
+         config.framesPerPacket, config.packetsPerTransfer, config.numTransfers,
+         mTuning.targetTransferMs, mTuning.jitterBudgetMs);
 
-    // Ring buffer size: start with reduced default (100ms instead of 200ms)
-    // Adaptive buffer controller may adjust this based on system performance
-    config.ringBufferMs = 100;
+    // Fase 1 diagnostic on the WMA_AUDIT tag so the active latency tuning is
+    // visible in the same filtered logcat as USB_CLOCK/[START].
+    wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+        "USB_LATENCY_TUNING: targetTransferMs=%d numTransfers=%d "
+        "jitterBudgetMs=%d dspBlockFrames=%d ringCapacityMs=%d streamMode=%d",
+        mTuning.targetTransferMs, mTuning.numTransfers, mTuning.jitterBudgetMs,
+        mTuning.dspBlockFrames, mTuning.ringCapacityMs,
+        static_cast<int>(mStreamingMode));
+
+    // Ring capacity is headroom for USB jitter, NOT latency (the pacer fixes
+    // latency). Comes from the active tuning: SAFE=100 ms, LOW_LATENCY=50 ms.
+    config.ringBufferMs = mTuning.ringCapacityMs;
 
     if (!mTransferManager->configure(config)) {
         LOGE("Failed to configure transfer manager");
@@ -1482,6 +1586,48 @@ bool LibusbBackend::setupTransferManager() {
             LOGE("Failed to set input interface");
             return false;
         }
+    }
+
+    // Implicit feedback activation (0.2, hallazgo C2).
+    //
+    // An asynchronous playback EP without an explicit feedback endpoint runs
+    // at nominal forever → free drift. When a capture stream is present we can
+    // recover the device clock from the capture rate and slave the output to
+    // it. We enable this whenever:
+    //   - playback data EP is asynchronous,
+    //   - there is no EXPLICIT feedback endpoint (an implicit-marked one
+    //     doesn't count — it has no dedicated transfer to mine), and
+    //   - capture is active.
+    // This deliberately covers FULL_DUPLEX even when the EP doesn't declare
+    // implicit feedback: a single-clock async device (the normal case) is
+    // safe to slave, and it keeps both rings balanced. A future per-device
+    // gate (UsbClockGraph shared-clock check) can disable it for the rare
+    // separate-clock hardware.
+    const bool playbackAsync =
+        mSelectedPlayback && mSelectedPlayback->dataEndpoint.isAsync();
+    // ADAPTIVE playback EPs recover their clock from the incoming data rate,
+    // so slaving the output packet sizing to the capture rate is exactly what
+    // they are built to track. In the low-latency regime this matters a lot:
+    // with input-gated production, any capture-vs-SOF clock surplus surfaces
+    // as a periodic 96-frame input trim — an audible 2 ms splice every few
+    // seconds — and any deficit as a slow output drain. Capture-locked output
+    // keeps inputRing + outputRing conserved with zero net drift. Restricted
+    // to the low-latency regime so SAFE stays bit-identical (it has run
+    // adaptive-at-nominal forever and its 24 ms trim threshold hides drift).
+    const bool playbackAdaptive =
+        mSelectedPlayback && mSelectedPlayback->dataEndpoint.isAdaptive();
+    const bool lowLatencyRegime = mTuning.targetTransferMs <
+        usb::UsbLatencyTuning::safe().targetTransferMs;
+    const bool hasExplicitFeedback =
+        mSelectedPlayback && mSelectedPlayback->feedbackEndpoint &&
+        !mSelectedPlayback->feedbackEndpoint->isImplicit;
+    const bool enableImplicitFeedback =
+        (playbackAsync || (playbackAdaptive && lowLatencyRegime)) &&
+        !hasExplicitFeedback && static_cast<bool>(mSelectedCapture);
+    mTransferManager->setImplicitFeedbackEnabled(enableImplicitFeedback);
+    if (enableImplicitFeedback) {
+        LOGI("Implicit feedback enabled: slaving %s playback to capture rate",
+             playbackAsync ? "async" : "adaptive");
     }
 
     // Set error callback
@@ -1574,9 +1720,11 @@ void LibusbBackend::dspThreadFunc() {
     //
     // Value comes from the transfer manager so it tracks any adaptive-
     // buffer reconfiguration.
-    const size_t outputRingTarget = (mSelectedPlayback && mTransferManager)
-        ? mTransferManager->getOutputRingTargetLevel()
-        : 0;
+    //
+    // Read per-iteration inside the loop (not cached here) so Fase 2 can make
+    // the jitter budget atomic and adjust the target live without a stream
+    // restart (L2). Today it's a pure integer calc over immutable config, so
+    // the per-iteration cost is negligible.
 
     // Adaptive buffer evaluation counter
     int callbackCount = 0;
@@ -1619,6 +1767,29 @@ void LibusbBackend::dspThreadFunc() {
     uint64_t underrunsAtWindowStart = mTransferManager
         ? mTransferManager->getStatistics().underruns.load(std::memory_order_relaxed)
         : 0ull;
+    // Same idea for input-ring overruns, so the periodic clock-health log can
+    // report a per-window delta (Fase 0 acceptance: delta == 0 in régimen).
+    uint64_t overrunsAtWindowStart = mTransferManager
+        ? mTransferManager->getStatistics().overruns.load(std::memory_order_relaxed)
+        : 0ull;
+    // And for the input latency trim: a nonzero per-window delta in régimen
+    // means real latency excess was discarded (expected only at startup or
+    // right after a stall); sustained deltas correlated with underruns would
+    // mean the combined-excess condition regressed.
+    uint64_t trimmedAtWindowStart = mTransferManager
+        ? mTransferManager->getStatistics().inputSamplesTrimmed.load(std::memory_order_relaxed)
+        : 0ull;
+    // Output wire gaps (late-resubmit starvation, the counter-invisible glitch
+    // class) — per-window delta like the rest.
+    uint64_t wireGapsAtWindowStart = mTransferManager
+        ? mTransferManager->getStatistics().outputWireGaps.load(std::memory_order_relaxed)
+        : 0ull;
+    // Set when the delivered input signal is about to be discontinuous with
+    // the previous block (latency trim discarded audio, or a faded dropout is
+    // being resumed). The next real block then gets a short fade-in from the
+    // last delivered sample value instead of a hard step — the step is what
+    // makes each trim/dropout event audible as a click.
+    bool inputSplicePending = false;
 
     while (mDspRunning.load(std::memory_order_acquire)) {
         // P0-2: Check for device disconnection
@@ -1677,12 +1848,30 @@ void LibusbBackend::dspThreadFunc() {
         // so the old `availableToWrite >= outputSamples` check was
         // trivially true and the DSP ended up paced purely by wake
         // arrival rate.
+        const size_t outputRingTarget = mSelectedPlayback
+            ? mTransferManager->getOutputRingTargetLevel()
+            : 0;
+        const size_t outputRingLevel = mSelectedPlayback
+            ? mTransferManager->getOutputRingLevel()
+            : 0;
         bool outputReady = !mSelectedPlayback ||
-            (mTransferManager->getOutputRingLevel() < outputRingTarget);
+            (outputRingLevel < outputRingTarget);
         bool inputReady = !mSelectedCapture ||
             (mTransferManager->getInputBufferAvailable() >= inputSamples);
 
-        if (!outputReady || !inputReady) {
+        // Emergency production: in duplex the input gate must never starve
+        // the DAC. If the output ring falls below half the pacer target (or
+        // one block, whichever is larger) while input hasn't delivered a full
+        // block — capture hiccup, lost iso packets, device stall — produce
+        // anyway: readInput below fails without consuming and the existing
+        // last-valid-block fade keeps the output continuous. A brief input
+        // fade is far less audible than a silence-filled output packet, and
+        // the combined-excess trim below reconciles the extra produced audio
+        // once capture resumes.
+        const bool outputCritical = mSelectedPlayback && mSelectedCapture &&
+            outputRingLevel < std::max(outputSamples, outputRingTarget / 2);
+
+        if (!outputReady || (!inputReady && !outputCritical)) {
             // Nothing to produce yet — output ring is at or above target,
             // or input ring doesn't have enough samples. Block on the
             // wake signal with a 5ms safety timeout so the disconnect
@@ -1708,6 +1897,58 @@ void LibusbBackend::dspThreadFunc() {
         // Get input data if capture is enabled
         const float* inputPtr = nullptr;
         if (mSelectedCapture) {
+            // Bound capture latency (Fase 1, L4) WITHOUT breaking the pipeline's
+            // conservation law. Production is input-gated 1:1, so the system
+            // conserves inputRing + outputRing: any DSP stall drains the output
+            // ring and parks the same audio as input backlog, which the pacer
+            // then converts back into output ring level (the catch-up
+            // iterations of the gate above). That backlog is the refill fuel —
+            // an unconditional trim here destroys it and turns every transient
+            // stall into a PERMANENT output deficit (a one-way ratchet that
+            // drains the ring to zero and bounces on underruns regardless of
+            // jitter budget; root cause of the LOW_LATENCY glitches).
+            //
+            // So discard only the COMBINED excess: input backlog beyond its
+            // target that the output ring does not need (i.e. not offset by an
+            // output deficit). Both terms normalized to frames — the rings run
+            // different channel counts (e.g. stereo out, mono in).
+            //   - régimen (output at target): excess == input backlog → trims
+            //     the startup accumulation that otherwise pins inLatMs at
+            //     ~20 ms, keeping capture latency at the input target.
+            //   - post-stall (output in deficit): excess ≈ 0 → no trim, the
+            //     backlog refills the output ring. Self-healing restored.
+            const size_t inTarget = mTransferManager->getInputRingTargetLevel();
+            size_t inAvail = mTransferManager->getInputBufferAvailable();
+            {
+                const int inCh = std::max(1, mTransferManager->getInputChannelCount());
+                const long inExcessFrames =
+                    (static_cast<long>(inAvail) - static_cast<long>(inTarget))
+                    / inCh;
+                long excessFrames = inExcessFrames;
+                if (mSelectedPlayback) {
+                    const int outCh =
+                        std::max(1, mTransferManager->getOutputChannelCount());
+                    excessFrames += (static_cast<long>(outputRingLevel)
+                                     - static_cast<long>(outputRingTarget))
+                                    / outCh;
+                }
+                size_t trimmed = 0;
+                while (excessFrames >= framesPerBlock &&
+                       inAvail >= inTarget + inputSamples) {
+                    if (!mTransferManager->readInput(inputBuffer.data(),
+                                                     inputSamples)) {
+                        break;
+                    }
+                    inAvail -= inputSamples;
+                    excessFrames -= framesPerBlock;
+                    trimmed += inputSamples;
+                }
+                if (trimmed > 0) {
+                    mTransferManager->addInputSamplesTrimmed(trimmed);
+                    inputSplicePending = true;
+                }
+            }
+
             // Snapshot ring availability before the read so the periodic
             // diagnostic log can report whether the ring was starving.
             lastInputAvailBefore = mTransferManager->getInputBufferAvailable();
@@ -1738,6 +1979,32 @@ void LibusbBackend::dspThreadFunc() {
                     inputPtr = inputBuffer.data();
                 }
 
+                // De-click a pending splice (latency trim discard, or resume
+                // after a faded dropout): ramp the first ~1 ms of this block
+                // in from the LAST DELIVERED sample value. Removes the step
+                // discontinuity without repeating audio. After a full fade
+                // the held value is ~0, so a resume becomes a clean fade-in.
+                if (inputSplicePending) {
+                    if (mDspHasValidInput && framesPerBlock > 0) {
+                        float* dst = needsMonoToStereo ? stereoInputBuffer.data()
+                                                       : inputBuffer.data();
+                        const size_t tail =
+                            static_cast<size_t>((framesPerBlock - 1) * 2);
+                        const float holdL = mDspLastValidInput[tail];
+                        const float holdR = mDspLastValidInput[tail + 1];
+                        const int xfFrames = std::min(framesPerBlock, 48);
+                        for (int f = 0; f < xfFrames; ++f) {
+                            const float w = static_cast<float>(f + 1)
+                                          / static_cast<float>(xfFrames);
+                            dst[f * 2]     = w * dst[f * 2]
+                                           + (1.0f - w) * holdL;
+                            dst[f * 2 + 1] = w * dst[f * 2 + 1]
+                                           + (1.0f - w) * holdR;
+                        }
+                    }
+                    inputSplicePending = false;
+                }
+
                 // Save last valid stereo input for underrun protection
                 const float* stereoSrc = needsMonoToStereo ? stereoInputBuffer.data() : inputBuffer.data();
                 size_t stereoSamples = static_cast<size_t>(framesPerBlock * 2);
@@ -1760,12 +2027,32 @@ void LibusbBackend::dspThreadFunc() {
                 // Underrun: fade the last valid block to silence with a linear ramp.
                 // This produces a smooth tail instead of a repeated transient or hard cut.
                 size_t totalStereoSamples = static_cast<size_t>(framesPerBlock * 2);
+                // The fade block REPEATS the previous block, so its first
+                // sample is discontinuous with the previous block's last —
+                // capture that held value first and de-click the head below.
+                const float holdL = mDspLastValidInput[totalStereoSamples - 2];
+                const float holdR = mDspLastValidInput[totalStereoSamples - 1];
                 for (size_t i = 0; i < totalStereoSamples; ++i) {
                     float fade = 1.0f - (static_cast<float>(i) / static_cast<float>(totalStereoSamples));
                     mDspLastValidInput[i] *= fade;
                 }
+                {
+                    const int xfFrames = std::min(framesPerBlock, 48);
+                    for (int f = 0; f < xfFrames; ++f) {
+                        const float w = static_cast<float>(f + 1)
+                                      / static_cast<float>(xfFrames);
+                        mDspLastValidInput[static_cast<size_t>(f * 2)] =
+                            w * mDspLastValidInput[static_cast<size_t>(f * 2)]
+                            + (1.0f - w) * holdL;
+                        mDspLastValidInput[static_cast<size_t>(f * 2 + 1)] =
+                            w * mDspLastValidInput[static_cast<size_t>(f * 2 + 1)]
+                            + (1.0f - w) * holdR;
+                    }
+                }
                 inputPtr = mDspLastValidInput.data();
-                // Next underrun will produce silence (data is faded to zero)
+                // Next underrun will produce silence (data is faded to zero);
+                // the next REAL block must fade back in from ~0.
+                inputSplicePending = true;
 
                 static int underrunLogCount = 0;
                 if (++underrunLogCount <= 5) {
@@ -1815,6 +2102,12 @@ void LibusbBackend::dspThreadFunc() {
             size_t ringLvlMin = (lastOutputRingLevelMin == SIZE_MAX)
                 ? 0 : lastOutputRingLevelMin;
 
+#if WMA_USB_DIAG
+            // Verbose per-window dump of the engine-output fingerprint
+            // (peaks/mean/zero-crossings). Gated with WMA_USB_DIAG since its
+            // fields come from the per-callback fingerprint scan above, which
+            // is itself diag-only. The cheap counters (underruns delta, ring
+            // min/max) stay in the always-on clock-health line below.
             wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
                 "USB_DSP: hasCapture=%d inputPtr=%p outputPtr=%p "
                 "frames=%d streamMode=%d | read ok=%d fail=%d ratio=%.2f "
@@ -1830,6 +2123,67 @@ void LibusbBackend::dspThreadFunc() {
                 mean, lastOutputZeroCrossings, lastOutputFirst4Bits,
                 ringLvlMin, lastOutputRingLevelMax,
                 static_cast<unsigned long long>(underrunsDelta));
+#else
+            (void)ioTotal; (void)mean; (void)ringLvlMin; (void)underrunsDelta;
+#endif  // WMA_USB_DIAG
+
+            // Clock-health line (Fase 0): drift, effective rate and xrun
+            // deltas in one place so the 30-min acceptance run is verifiable
+            // straight from logcat without the UI. In régimen expect
+            // drift stable (≈ device's real ppm), effFpp coherent with the
+            // nominal frames/packet, and both xrun deltas == 0.
+            if (mTransferManager) {
+                const auto& s = mTransferManager->getStatistics();
+                uint64_t overrunsNow = s.overruns.load(std::memory_order_relaxed);
+                uint64_t overrunsDelta = (overrunsNow >= overrunsAtWindowStart)
+                    ? (overrunsNow - overrunsAtWindowStart) : 0ull;
+                uint64_t trimmedNow =
+                    s.inputSamplesTrimmed.load(std::memory_order_relaxed);
+                uint64_t trimmedDelta = (trimmedNow >= trimmedAtWindowStart)
+                    ? (trimmedNow - trimmedAtWindowStart) : 0ull;
+                trimmedAtWindowStart = trimmedNow;
+                uint64_t wireGapsNow =
+                    s.outputWireGaps.load(std::memory_order_relaxed);
+                uint64_t wireGapsDelta = (wireGapsNow >= wireGapsAtWindowStart)
+                    ? (wireGapsNow - wireGapsAtWindowStart) : 0ull;
+                wireGapsAtWindowStart = wireGapsNow;
+
+                // Read rate/drift from the clock controller so they reflect the
+                // fractional nominal (not a stale 0) when no feedback source is
+                // active — e.g. ADAPTIVE playback, where the device follows the
+                // host clock and never sends feedback. `src` says which path is
+                // driving the clock: explicit feedback EP, implicit (capture
+                // rate), or plain nominal.
+                auto* cc = mTransferManager->getClockController();
+                const bool stable = cc && cc->isStable();
+                const char* src = stable
+                    ? (mTransferManager->isImplicitFeedbackEnabled() ? "implicit"
+                                                                     : "explicit")
+                    : "nominal";
+                const float sr = cc ? cc->getCurrentSampleRate() : 0.0f;
+                const float drift = cc ? cc->getDriftPpm() : 0.0f;
+                const double nomFpp = cc ? cc->getNominalFramesPerPacket() : 0.0;
+                wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+                    "USB_CLOCK: src=%s sr=%.1fHz drift=%.1fppm nomFpp=%.4f "
+                    "effFpp=%.4f fbRecv=%u fbInvalid=%u | "
+                    "outLatMs=%.2f inLatMs=%.2f jbExtra=%d | "
+                    "underrunsDelta=%llu overrunsDelta=%llu trimDelta=%llu "
+                    "wireGapsDelta=%llu maxGapMs=%u",
+                    src, sr, drift, nomFpp,
+                    s.feedbackEffectiveFramesPerPacket.load(std::memory_order_relaxed),
+                    s.feedbackPacketsReceived.load(std::memory_order_relaxed),
+                    s.feedbackPacketsInvalid.load(std::memory_order_relaxed),
+                    s.currentLatencyMs.load(std::memory_order_relaxed),
+                    s.currentInputLatencyMs.load(std::memory_order_relaxed),
+                    mTransferManager->getJitterExtraMs(),
+                    static_cast<unsigned long long>(underrunsDelta),
+                    static_cast<unsigned long long>(overrunsDelta),
+                    static_cast<unsigned long long>(trimmedDelta),
+                    static_cast<unsigned long long>(wireGapsDelta),
+                    mTransferManager->fetchAndResetMaxReapGapMs());
+                overrunsAtWindowStart = overrunsNow;
+            }
+
             usbDspDiagCount = 0;
             inputReadOkCount = 0;
             inputReadFailCount = 0;
@@ -1872,7 +2226,11 @@ void LibusbBackend::dspThreadFunc() {
         // running mean, zero-crossings, and the raw bits of outputBuffer[0].
         // Together these let us compare session-to-session and prove whether
         // the engine output itself differs or the corruption is downstream.
-        // Bounded scan (≤ 512 samples = ~256 frames) — RT cost is negligible.
+        // Bounded scan (≤ 512 samples = ~256 frames). Gated behind
+        // WMA_USB_DIAG (Fase 1, L8): this runs EVERY callback, so at 1 ms
+        // transfers (1000 callbacks/s) it stops being negligible and pollutes
+        // the CPU measurement. OFF in release.
+#if WMA_USB_DIAG
         if (outputPtr && outputSamples > 0) {
             const size_t scanSamples = std::min(outputSamples, size_t(512));
             float peak = 0.0f;
@@ -1900,6 +2258,7 @@ void LibusbBackend::dspThreadFunc() {
             // Helps detect "engine wrote literal 0.0 / NaN / denormal".
             std::memcpy(&lastOutputFirst4Bits, &outputPtr[0], sizeof(uint32_t));
         }
+#endif  // WMA_USB_DIAG
 
         // Write to output buffer if playback is enabled
         if (mSelectedPlayback) {

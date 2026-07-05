@@ -120,19 +120,20 @@ void RiserReverbEffect::process(float* input, float* output, int numFrames) {
     float decay = mDecay.load(std::memory_order_relaxed);
     float size = mSize.load(std::memory_order_relaxed);
     float mix = mMix.load(std::memory_order_relaxed);
-    float damping = mDamping.load(std::memory_order_relaxed);
+    // damping is applied via the damping LPF coefficients, not read here.
 
     float sr = static_cast<float>(mSampleRate);
+
+    float smoothAttack = mAttackSmooth.process(attackTime);
 
     // Pre-compute tap gains (rising envelope, scaled by decay)
     // Gains are computed per-block since they don't change per-sample
     float tapGains[NUM_TAPS];
     for (int t = 0; t < NUM_TAPS; ++t) {
-        float normalized = static_cast<float>(t) / (NUM_TAPS - 1);
-        // Quadratic rise
+        float tapTimeMs = TAP_BASE_MS[t] * size;
+        float normalized = std::clamp(tapTimeMs / std::max(smoothAttack, 1.0f), 0.0f, 1.0f);
         float riseGain = normalized * normalized;
         // Decay factor: later taps decay more
-        float tapTimeMs = TAP_BASE_MS[t] * size;
         float decayGain = std::pow(10.0f, -3.0f * (tapTimeMs / 1000.0f) / decay);
         tapGains[t] = riseGain * decayGain;
     }

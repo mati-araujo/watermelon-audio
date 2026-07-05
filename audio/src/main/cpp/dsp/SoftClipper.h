@@ -143,8 +143,8 @@ public:
     explicit TruePeakLimiter(float thresholdDb = -0.1f, float releaseMs = 50.0f)
         : mThreshold(std::pow(10.0f, thresholdDb / 20.0f))
         , mReleaseMs(releaseMs)
-        , mGainReduction(1.0f)
-        , mReleaseCoeff(0.999f) {}
+        , mReleaseCoeff(0.999f)
+        , mGainReduction(1.0f) {}
 
     /**
      * @brief Configura el sample rate (necesario para calcular release)

@@ -364,6 +364,12 @@ WMA_API WmaResult wma_effect_set_bypass(WmaEngine* engine, int index, bool bypas
 /** Check if an effect is bypassed. */
 WMA_API bool wma_effect_is_bypassed(const WmaEngine* engine, int index);
 
+/** Set global bypass state for the full effect chain. */
+WMA_API WmaResult wma_effect_set_global_bypass(WmaEngine* engine, bool bypass);
+
+/** Check if the full effect chain is globally bypassed. */
+WMA_API bool wma_effect_is_global_bypassed(const WmaEngine* engine);
+
 /** Reorder an effect from one position to another. */
 WMA_API WmaResult wma_effect_reorder(WmaEngine* engine, int from_index, int to_index);
 
@@ -608,6 +614,19 @@ WMA_API bool wma_usb_init_device(int file_descriptor, const char* usbfs_path);
 
 /** Close the USB audio device and fall back to Oboe. */
 WMA_API void wma_usb_close_device(void);
+
+/**
+ * Select the USB latency profile (Fase 1).
+ * Re-parametrizes the transfer pipeline (iso transfer duration, URBs in flight,
+ * pacer jitter budget, DSP block size, ring capacity).
+ *
+ * Latched and applied on the next stream start (same semantics as the USB
+ * streaming mode); a running stream keeps its current profile until restarted.
+ *
+ * @param profile  0 = SAFE (current behavior), 1 = LOW_LATENCY (~10–14 ms).
+ * @return true if latched; false if no USB backend.
+ */
+WMA_API bool wma_usb_set_latency_profile(int profile);
 
 /* ================================================================
  * 17. XY Mapping / Automation

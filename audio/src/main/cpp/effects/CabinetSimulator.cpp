@@ -13,11 +13,7 @@
 
 CabinetSimulator::CabinetSimulator() {
     // Initialize buffers to zero
-    std::fill(mOverlapL.begin(), mOverlapL.end(), 0.0f);
-    std::fill(mOverlapR.begin(), mOverlapR.end(), 0.0f);
-    std::fill(mInputBufferL.begin(), mInputBufferL.end(), 0.0f);
-    std::fill(mInputBufferR.begin(), mInputBufferR.end(), 0.0f);
-    std::fill(mIRFreqDomain.begin(), mIRFreqDomain.end(), std::complex<float>(0.0f, 0.0f));
+    reset();
 
     updateFilterCoefficients();
 
@@ -37,21 +33,24 @@ void CabinetSimulator::loadIR(BuiltInIRs::CabinetType type) {
         return;
     }
 
-    // Zero-pad IR to FFT_SIZE and convert to complex
-    std::array<std::complex<float>, FFT_SIZE> irComplex;
-    for (size_t i = 0; i < FFT_SIZE; ++i) {
-        if (i < IR_LENGTH) {
-            irComplex[i] = std::complex<float>(irData[i], 0.0f);
-        } else {
-            irComplex[i] = std::complex<float>(0.0f, 0.0f);
-        }
+    int activeIndex = mActiveIRBuffer.load(std::memory_order_acquire);
+    int inactiveIndex = 1 - activeIndex;
+    auto& targetIR = mIRBuffers[static_cast<size_t>(inactiveIndex)];
+
+    float absSum = 0.0f;
+    for (size_t i = 0; i < IR_LENGTH; ++i) {
+        absSum += std::abs(irData[i]);
     }
 
-    // Transform IR to frequency domain
-    fft(irComplex.data(), FFT_SIZE, false);
+    // The built-in IRs are peak-normalized and have high absolute sums. Normalize
+    // to conservative unity area so switching from 16 taps to 512 taps does not
+    // create a large level jump in high-gain guitar chains.
+    float norm = (absSum > 0.001f) ? (1.0f / absSum) : 1.0f;
+    for (size_t i = 0; i < IR_LENGTH; ++i) {
+        targetIR[i] = irData[i] * norm;
+    }
 
-    // Store in member (atomic copy not needed, protected by mutex)
-    mIRFreqDomain = irComplex;
+    mActiveIRBuffer.store(inactiveIndex, std::memory_order_release);
     mIRReady.store(true, std::memory_order_release);
 
     LOGI("IR loaded for cabinet type %d (%s)", static_cast<int>(type),
@@ -68,29 +67,13 @@ void CabinetSimulator::process(float* input, float* output, int numFrames) {
         return;
     }
 
-    // Process frame by frame, accumulating into block buffer
+    int irIndex = mActiveIRBuffer.load(std::memory_order_acquire);
+    const auto& ir = mIRBuffers[static_cast<size_t>(irIndex)];
+
     for (int i = 0; i < numFrames; ++i) {
         const int idx = i * 2;
         float dryL = input[idx];
         float dryR = input[idx + 1];
-
-        // Accumulate into input buffers
-        mInputBufferL[mInputPos] = dryL;
-        mInputBufferR[mInputPos] = dryR;
-        mInputPos++;
-
-        // When we have a full block, process it
-        if (mInputPos >= BLOCK_SIZE) {
-            // Temporary output buffers
-            std::array<float, BLOCK_SIZE> wetL, wetR;
-
-            processBlock(mInputBufferL.data(), mInputBufferR.data(),
-                        wetL.data(), wetR.data());
-
-            // Output the processed block (will be output in next iterations)
-            // For now, we use a simpler approach: direct output with overlap
-            mInputPos = 0;
-        }
 
         // Apply filters to the current sample
         float wetSampleL = applyLowCut(dryL, mLowCutStateL);
@@ -99,147 +82,13 @@ void CabinetSimulator::process(float* input, float* output, int numFrames) {
         float wetSampleR = applyLowCut(dryR, mLowCutStateR);
         wetSampleR = applyHighCut(wetSampleR, mHighCutStateR);
 
-        // Simple convolution approximation for real-time
-        // (Full FFT convolution would require block-based processing)
-        // Using a simplified approach: apply the first few IR samples directly
-        const float* irData = BuiltInIRs::getIRData(
-            static_cast<BuiltInIRs::CabinetType>(mCabinetType.load(std::memory_order_relaxed)));
-
-        if (irData != nullptr) {
-            // Simple FIR approximation using first 16 samples
-            constexpr int FIR_TAPS = 16;
-            float convL = 0.0f, convR = 0.0f;
-
-            // Shift overlap buffer and add new sample
-            for (int t = IR_LENGTH - 1; t > 0; --t) {
-                if (t < FIR_TAPS) {
-                    mOverlapL[t] = mOverlapL[t - 1];
-                    mOverlapR[t] = mOverlapR[t - 1];
-                }
-            }
-            mOverlapL[0] = wetSampleL;
-            mOverlapR[0] = wetSampleR;
-
-            // Convolve with IR
-            for (int t = 0; t < FIR_TAPS; ++t) {
-                convL += mOverlapL[t] * irData[t];
-                convR += mOverlapR[t] * irData[t];
-            }
-
-            wetSampleL = convL;
-            wetSampleR = convR;
-        }
+        wetSampleL = processFirSample(wetSampleL, mDelayLineL, ir);
+        wetSampleR = processFirSample(wetSampleR, mDelayLineR, ir);
+        mDelayPos = (mDelayPos + 1) % IR_LENGTH;
 
         // Mix dry and wet
         output[idx] = dryL * (1.0f - mix) + wetSampleL * mix;
         output[idx + 1] = dryR * (1.0f - mix) + wetSampleR * mix;
-    }
-}
-
-void CabinetSimulator::processBlock(const float* inputL, const float* inputR,
-                                     float* outputL, float* outputR) {
-    // This function performs full FFT convolution on a block
-    // Currently simplified - full implementation would use overlap-add
-
-    // Zero-pad input to FFT_SIZE
-    for (size_t i = 0; i < FFT_SIZE; ++i) {
-        if (i < BLOCK_SIZE) {
-            mFftBuffer[i] = inputL[i];
-        } else {
-            mFftBuffer[i] = 0.0f;
-        }
-    }
-
-    // Convert to complex
-    for (size_t i = 0; i < FFT_SIZE; ++i) {
-        mInputFreqDomain[i] = std::complex<float>(mFftBuffer[i], 0.0f);
-    }
-
-    // Forward FFT
-    fft(mInputFreqDomain.data(), FFT_SIZE, false);
-
-    // Multiply in frequency domain
-    for (size_t i = 0; i < FFT_SIZE; ++i) {
-        mOutputFreqDomain[i] = mInputFreqDomain[i] * mIRFreqDomain[i];
-    }
-
-    // Inverse FFT
-    fft(mOutputFreqDomain.data(), FFT_SIZE, true);
-
-    // Extract real part and apply overlap-add
-    for (size_t i = 0; i < BLOCK_SIZE; ++i) {
-        outputL[i] = mOutputFreqDomain[i].real() + mOverlapL[i];
-    }
-
-    // Save overlap for next block
-    for (size_t i = 0; i < IR_LENGTH; ++i) {
-        if (i + BLOCK_SIZE < FFT_SIZE) {
-            mOverlapL[i] = mOutputFreqDomain[i + BLOCK_SIZE].real();
-        } else {
-            mOverlapL[i] = 0.0f;
-        }
-    }
-
-    // Repeat for right channel (simplified: copy from left for now)
-    std::copy(outputL, outputL + BLOCK_SIZE, outputR);
-}
-
-void CabinetSimulator::fft(std::complex<float>* data, size_t n, bool inverse) {
-    // Cooley-Tukey radix-2 FFT
-    if (n <= 1) return;
-
-    // Bit-reversal permutation
-    bitReverse(data, n);
-
-    // Butterfly operations
-    for (size_t len = 2; len <= n; len *= 2) {
-        float angle = 2.0f * static_cast<float>(M_PI) / static_cast<float>(len);
-        if (inverse) angle = -angle;
-
-        std::complex<float> wlen(std::cos(angle), std::sin(angle));
-
-        for (size_t i = 0; i < n; i += len) {
-            std::complex<float> w(1.0f, 0.0f);
-
-            for (size_t j = 0; j < len / 2; ++j) {
-                std::complex<float> u = data[i + j];
-                std::complex<float> v = data[i + j + len / 2] * w;
-
-                data[i + j] = u + v;
-                data[i + j + len / 2] = u - v;
-
-                w *= wlen;
-            }
-        }
-    }
-
-    // Scale for inverse FFT
-    if (inverse) {
-        float scale = 1.0f / static_cast<float>(n);
-        for (size_t i = 0; i < n; ++i) {
-            data[i] *= scale;
-        }
-    }
-}
-
-void CabinetSimulator::bitReverse(std::complex<float>* data, size_t n) {
-    size_t bits = 0;
-    size_t temp = n;
-    while (temp > 1) {
-        bits++;
-        temp >>= 1;
-    }
-
-    for (size_t i = 0; i < n; ++i) {
-        size_t j = 0;
-        for (size_t k = 0; k < bits; ++k) {
-            if (i & (1 << k)) {
-                j |= (1 << (bits - 1 - k));
-            }
-        }
-        if (i < j) {
-            std::swap(data[i], data[j]);
-        }
     }
 }
 
@@ -266,6 +115,31 @@ float CabinetSimulator::applyHighCut(float input, float& state) {
     // Low-pass filter (removes high frequencies)
     state = mHighCutCoeff * state + (1.0f - mHighCutCoeff) * input;
     return state;
+}
+
+float CabinetSimulator::processFirSample(float input,
+                                         std::array<float, IR_LENGTH>& delayLine,
+                                         const std::array<float, IR_LENGTH>& ir) {
+    delayLine[mDelayPos] = input;
+
+    float output = 0.0f;
+    size_t readPos = mDelayPos;
+    for (size_t tap = 0; tap < IR_LENGTH; ++tap) {
+        output += delayLine[readPos] * ir[tap];
+        readPos = (readPos == 0) ? (IR_LENGTH - 1) : (readPos - 1);
+    }
+    return output;
+}
+
+void CabinetSimulator::reset() {
+    std::fill(mDelayLineL.begin(), mDelayLineL.end(), 0.0f);
+    std::fill(mDelayLineR.begin(), mDelayLineR.end(), 0.0f);
+    mDelayPos = 0;
+
+    mLowCutStateL = 0.0f;
+    mLowCutStateR = 0.0f;
+    mHighCutStateL = 0.0f;
+    mHighCutStateR = 0.0f;
 }
 
 void CabinetSimulator::setParam(int paramId, float value) {
