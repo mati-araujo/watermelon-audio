@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.3.2...v1.4.0) (2026-07-05)
+
+
+### Features
+
+* looper evolution, midis and touch 2.0 ([0850791](https://github.com/mati-araujo/watermelon-audio/commit/0850791765023c17443a1a2469590bf88e03ee4d))
+* **looper:** default to the paged buffer with budget-bounded pool RAM ([537986f](https://github.com/mati-araujo/watermelon-audio/commit/537986f761ce570bc98f3d827b4a2c6bf51b8e5f))
+* **looper:** widen setTrackLoopRegion frame contract to int64 ([0fa4630](https://github.com/mati-araujo/watermelon-audio/commit/0fa4630051b658a19963b88b8b892ccbae4a1946))
+
 ## [1.3.2](https://github.com/mati-araujo/watermelon-audio/compare/v1.3.1...v1.3.2) (2026-06-02)
 
 
