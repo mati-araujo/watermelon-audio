@@ -332,6 +332,22 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLoadSo
     return result ? JNI_TRUE : JNI_FALSE;
 }
 
+// fd OWNERSHIP: the fd stays owned by the Kotlin caller. This call is
+// synchronous — native mmaps the [offset, offset+length) region, lets tsf
+// parse it, and unmaps before returning. It never dup()s, close()s, or
+// retains the fd, so the caller (which typically holds an AssetFileDescriptor)
+// must keep the fd open for the duration of the call and close it afterwards.
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLoadSoundFontFromFd(
+    JNIEnv* env, jobject thiz, jint fd, jlong offset, jlong length) {
+    if (!ensureEngine()) return JNI_FALSE;
+    bool result = g_jniState.engine->loadSoundFontFromFd(
+        static_cast<int>(fd),
+        static_cast<int64_t>(offset),
+        static_cast<int64_t>(length));
+    return result ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUnloadSoundFont(
     JNIEnv* env, jobject thiz) {

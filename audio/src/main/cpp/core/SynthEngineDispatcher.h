@@ -146,6 +146,7 @@ public:
 
     bool loadSoundFont(const void* data, int size, int sampleRate);
     bool loadSoundFontFromPath(const char* path, int sampleRate);
+    bool loadSoundFontFromFd(int fd, int64_t offset, int64_t length, int sampleRate);
     void unloadSoundFont();
     void setSoundFontPreset(int presetIndex);
     int getSoundFontPresetCount() const;

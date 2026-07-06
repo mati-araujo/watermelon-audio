@@ -276,6 +276,12 @@ bool wma_sf_load_path(WmaEngine* engine, const char* path) {
     return engine->engine->loadSoundFontFromPath(path);
 }
 
+bool wma_sf_load_fd(WmaEngine* engine, int fd, int64_t offset, int64_t length) {
+    WMA_CHECK_VAL(engine, false);
+    if (fd < 0 || length <= 0 || offset < 0) return false;
+    return engine->engine->loadSoundFontFromFd(fd, offset, length);
+}
+
 bool wma_sf_load_data(WmaEngine* engine, const void* data, int size) {
     WMA_CHECK_VAL(engine, false);
     if (!data || size <= 0) return false;

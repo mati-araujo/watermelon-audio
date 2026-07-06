@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include "tsf.h"
 #include "tsf_ext.h"
+#include "SoundFontFdRegion.h"
 
 #ifndef SFM_LOG_TAG
 #define SFM_LOG_TAG "SF8.Manager"
@@ -25,12 +26,13 @@
  * @class SoundFontManager
  * @brief Manages SoundFont loading/unloading lifecycle with RT-safe pointer swap
  *
- * Supports two loading methods:
+ * Supports three loading methods:
  *   - loadFromPath(): mmap-based, zero-copy — preferred for large files
+ *   - loadFromFd():   mmap a sub-region of an fd — for bundled assets (PAD)
  *   - loadFromMemory(): buffer-based — fallback for JNI byte arrays
  *
  * Thread model:
- *   - loadFromPath() / loadFromMemory() / unload(): JNI thread (mutex-protected)
+ *   - loadFromPath() / loadFromFd() / loadFromMemory() / unload(): JNI thread (mutex-protected)
  *   - getActiveSF(): audio thread (lock-free atomic load)
  *   - cleanupPending(): JNI thread after audio is paused
  */
@@ -119,6 +121,100 @@ public:
         }
 
         return configurAndSwap(newSF, sampleRate, fileSize);
+    }
+
+    /**
+     * @brief Load a SoundFont from a sub-region [offset, offset+length) of a
+     *        file descriptor, using mmap (zero-copy).
+     * @param fd         Open, readable file descriptor. Owned by the CALLER.
+     * @param offset     Byte offset of the SoundFont within the fd's file.
+     * @param length     Length of the SoundFont region, in bytes (> 0).
+     * @param sampleRate Audio output sample rate
+     * @return true if loading succeeded
+     *
+     * Designed for assets shipped inside a Play Asset Delivery install-time
+     * pack, which Android exposes only as an AssetFileDescriptor
+     * (fd + startOffset + declaredLength) — never a plain path. This maps just
+     * the declared region instead of forcing a copy-to-storage first.
+     *
+     * fd OWNERSHIP: the fd is NOT dup'd, closed, or retained. This call is
+     * fully synchronous — it maps the region, lets tsf parse (tsf keeps its own
+     * copy of everything it needs), then unmaps before returning. The caller
+     * therefore keeps ownership and may close the fd any time after this
+     * returns. The fd only needs to stay open for the duration of the call.
+     *
+     * mmap requires a page-aligned offset; AssetFileDescriptor offsets are not.
+     * We align down and map a slightly larger region — see SoundFontFdRegion.h.
+     *
+     * NOT RT-safe — call from background/JNI thread.
+     */
+    bool loadFromFd(int fd, int64_t offset, int64_t length, int32_t sampleRate) {
+        std::lock_guard<std::mutex> lock(mLoadMutex);
+
+        if (fd < 0) {
+            SFM_LOGE("[SF8] loadFromFd: invalid fd=%d", fd);
+            return false;
+        }
+
+        // Validate the region against the actual file size.
+        struct stat st{};
+        if (fstat(fd, &st) < 0) {
+            SFM_LOGE("[SF8] loadFromFd: fstat failed (fd=%d, errno=%d)", fd, errno);
+            return false;
+        }
+
+        wma::MmapRegion region{};
+        const long pageSize = sysconf(_SC_PAGE_SIZE);
+        if (!wma::computeSoundFontMmapRegion(static_cast<int64_t>(st.st_size),
+                                             offset, length,
+                                             static_cast<int64_t>(pageSize),
+                                             region)) {
+            SFM_LOGE("[SF8] loadFromFd: region out of range "
+                     "(offset=%lld, length=%lld, fileSize=%lld)",
+                     static_cast<long long>(offset),
+                     static_cast<long long>(length),
+                     static_cast<long long>(st.st_size));
+            return false;
+        }
+
+        // mmap the page-aligned region — read-only, private.
+        // mmap64/off64_t (not plain mmap/off_t): off_t is 32-bit on the 32-bit
+        // ABIs (armeabi-v7a, x86), which would truncate a large asset offset.
+        // loadFromPath is immune (it always maps at offset 0); this path takes
+        // an arbitrary offset, so it must use the 64-bit variant.
+        void* mapped = mmap64(nullptr, static_cast<size_t>(region.mapLength),
+                              PROT_READ, MAP_PRIVATE, fd,
+                              static_cast<off64_t>(region.alignedOffset));
+        if (mapped == MAP_FAILED) {
+            SFM_LOGE("[SF8] loadFromFd: mmap failed for %lld bytes at offset %lld (errno=%d)",
+                     static_cast<long long>(region.mapLength),
+                     static_cast<long long>(region.alignedOffset), errno);
+            return false;
+        }
+
+        // Advise kernel: we'll read sequentially (improves readahead)
+        madvise(mapped, static_cast<size_t>(region.mapLength), MADV_SEQUENTIAL);
+
+        // SF data starts `dataDelta` bytes into the (page-aligned) mapping.
+        const uint8_t* sfData =
+            static_cast<const uint8_t*>(mapped) + region.dataDelta;
+
+        SFM_LOGI("[SF8] loadFromFd: mmap'd %lld bytes (fd=%d, offset=%lld)",
+                 static_cast<long long>(length), fd,
+                 static_cast<long long>(offset));
+
+        // Parse SF2/SF3 from the mmap'd memory — tsf copies what it needs.
+        tsf* newSF = tsf_load_memory(sfData, static_cast<int>(length));
+
+        // Release mmap — tsf has its own copy of parsed data.
+        munmap(mapped, static_cast<size_t>(region.mapLength));
+
+        if (!newSF) {
+            SFM_LOGE("[SF8] loadFromFd: tsf_load_memory failed");
+            return false;
+        }
+
+        return configurAndSwap(newSF, sampleRate, static_cast<size_t>(length));
     }
 
     /**

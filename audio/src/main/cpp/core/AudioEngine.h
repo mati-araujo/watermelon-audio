@@ -229,6 +229,18 @@ public:
     bool loadSoundFontFromPath(const char* path);
 
     /**
+     * @brief Load a SoundFont from a sub-region of a file descriptor (mmap).
+     * @param fd     Open, readable fd. Owned by the caller (not dup'd/closed here).
+     * @param offset Byte offset of the SoundFont within the fd's file.
+     * @param length Length of the SoundFont region, in bytes.
+     * @return true if loading succeeded
+     *
+     * For bundled assets exposed as an AssetFileDescriptor (Play Asset
+     * Delivery). Synchronous; the fd only needs to stay open for the call.
+     */
+    bool loadSoundFontFromFd(int fd, int64_t offset, int64_t length);
+
+    /**
      * @brief Unload the current SoundFont
      */
     void unloadSoundFont();

@@ -35,6 +35,7 @@ endif()
 
 add_executable(engine_tests
     test_engines.cpp
+    test_soundfont_fd_region.cpp
 )
 
 target_include_directories(engine_tests PRIVATE

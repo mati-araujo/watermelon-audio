@@ -757,6 +757,50 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     }
 
     /**
+     * Load a SoundFont from a sub-region `[offset, offset + length)` of an
+     * open file descriptor, using mmap (zero-copy).
+     *
+     * Intended for SoundFonts bundled inside a Play Asset Delivery install-time
+     * asset pack, which Android exposes only as an [android.content.res.AssetFileDescriptor]
+     * (fd + startOffset + declaredLength) — not a plain path. Mapping the region
+     * directly avoids the seed-to-storage copy that duplicates the file in
+     * `filesDir`.
+     *
+     * fd OWNERSHIP: the fd stays owned by the CALLER. This call is synchronous —
+     * native maps the region, lets the parser copy what it needs, and unmaps
+     * before returning. The fd is never dup'd, closed, or retained natively, so
+     * the caller must keep it open for the duration of the call and close it
+     * (e.g. `assetFileDescriptor.close()`) afterwards. Typical usage:
+     *
+     * ```
+     * context.assets.openFd("soundfonts/GeneralUser_GS.sf3").use { afd ->
+     *     bridge.loadSoundFontFromFd(
+     *         afd.parcelFileDescriptor.fd,
+     *         afd.startOffset,
+     *         afd.declaredLength,
+     *     )
+     * }
+     * ```
+     *
+     * @param fd     Open, readable file descriptor.
+     * @param offset Byte offset of the SoundFont within the fd's file (>= 0).
+     * @param length Length of the SoundFont region, in bytes (> 0).
+     * @return true if loading succeeded; false for an invalid fd, non-positive
+     *         length, or a region outside the file (never throws/crashes).
+     */
+    fun loadSoundFontFromFd(fd: Int, offset: Long, length: Long): Boolean {
+        if (fd < 0) {
+            Log.w(TAG, "loadSoundFontFromFd: invalid fd=$fd")
+            return false
+        }
+        if (length <= 0L || offset < 0L) {
+            Log.w(TAG, "loadSoundFontFromFd: invalid region (offset=$offset, length=$length)")
+            return false
+        }
+        return nativeLoadSoundFontFromFd(fd, offset, length)
+    }
+
+    /**
      * Unload the current SoundFont.
      */
     fun unloadSoundFont() {
@@ -1895,6 +1939,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // SoundFont (Phase 8)
     private external fun nativeLoadSoundFont(data: ByteArray): Boolean
     private external fun nativeLoadSoundFontFromPath(path: String): Boolean
+    private external fun nativeLoadSoundFontFromFd(fd: Int, offset: Long, length: Long): Boolean
     private external fun nativeUnloadSoundFont()
     private external fun nativeSetSoundFontPreset(presetIndex: Int)
     private external fun nativeGetSoundFontPresetCount(): Int

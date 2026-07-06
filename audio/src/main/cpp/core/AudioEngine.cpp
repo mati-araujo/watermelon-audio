@@ -955,6 +955,13 @@ bool AudioEngine::loadSoundFontFromPath(const char* path) {
     return mEngineDispatcher.loadSoundFontFromPath(path, sampleRate);
 }
 
+bool AudioEngine::loadSoundFontFromFd(int fd, int64_t offset, int64_t length) {
+    int sampleRate = mStream ? mStream->getSampleRate() : 0;
+    if (sampleRate <= 0) sampleRate = mPreferredSampleRate.load(std::memory_order_acquire);
+    if (sampleRate <= 0) sampleRate = 48000;
+    return mEngineDispatcher.loadSoundFontFromFd(fd, offset, length, sampleRate);
+}
+
 void AudioEngine::unloadSoundFont() {
     mEngineDispatcher.unloadSoundFont();
 }

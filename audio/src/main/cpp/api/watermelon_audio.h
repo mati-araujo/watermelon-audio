@@ -256,6 +256,22 @@ WMA_API int wma_get_engine_type(const WmaEngine* engine);
 WMA_API bool wma_sf_load_path(WmaEngine* engine, const char* path);
 
 /**
+ * Load a SoundFont from a sub-region [offset, offset+length) of an open file
+ * descriptor (mmap, zero-copy). NOT RT-safe.
+ *
+ * For bundled assets exposed as an AssetFileDescriptor (fd + offset + length),
+ * such as a Play Asset Delivery install-time pack. The fd stays owned by the
+ * caller: this call is synchronous and never dup()s, close()s, or retains it —
+ * the fd only needs to stay open for the duration of the call.
+ *
+ * @param fd      Open, readable file descriptor
+ * @param offset  Byte offset of the SoundFont within the fd's file (>= 0)
+ * @param length  Length of the SoundFont region, in bytes (> 0)
+ * @return true on success; false for an invalid fd/region (never crashes)
+ */
+WMA_API bool wma_sf_load_fd(WmaEngine* engine, int fd, int64_t offset, int64_t length);
+
+/**
  * Load a SoundFont from a memory buffer. NOT RT-safe.
  * @param data  Pointer to .sf2 bytes
  * @param size  Size in bytes

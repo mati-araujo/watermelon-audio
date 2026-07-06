@@ -292,6 +292,14 @@ bool SynthEngineDispatcher::loadSoundFontFromPath(const char* path, int sampleRa
     return mSoundFontManager->loadFromPath(path, sampleRate);
 }
 
+bool SynthEngineDispatcher::loadSoundFontFromFd(int fd, int64_t offset, int64_t length, int sampleRate) {
+    if (!mSoundFontManager) {
+        LOGE("loadSoundFontFromFd: SoundFontManager not initialized");
+        return false;
+    }
+    return mSoundFontManager->loadFromFd(fd, offset, length, sampleRate);
+}
+
 void SynthEngineDispatcher::unloadSoundFont() {
     if (mSoundFontManager) {
         mSoundFontManager->unload();
