@@ -2642,6 +2642,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperArmAtNextBar(trackIndex: Int): Long
     private external fun nativeLooperArmInFrames(trackIndex: Int, offsetFrames: Long): Long
     private external fun nativeLooperArmSyncedToLoop(trackIndex: Int, latencyFrames: Long): Long
+    private external fun nativeLooperArmSyncedToLoopQuantized(trackIndex: Int, latencyFrames: Long, quantumFrames: Int): Long
     private external fun nativeLooperCancelArm()
     private external fun nativeLooperGetArmedTrack(): Int
     private external fun nativeLooperSetTailMs(ms: Int)
@@ -2799,6 +2800,19 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     fun looperArmSyncedToLoop(trackIndex: Int, latencyFrames: Long): Long =
         nativeLooperArmSyncedToLoop(trackIndex, latencyFrames)
+
+    /**
+     * Quantized variant of [looperArmSyncedToLoop]: capture starts at the next
+     * multiple of [quantumFrames] inside the reference cycle (e.g. the next bar
+     * — pass the bar length in frames) instead of the next loop wrap, so a
+     * punch-in can begin at any moment of the current loop rather than waiting
+     * out the remaining bars. The take's rotated start offset is cancelled at
+     * finalize, so playback still phase-locks to the reference.
+     * [quantumFrames] <= 0 behaves exactly like [looperArmSyncedToLoop].
+     * @return the trigger frame, or -1 if no reference track is playing.
+     */
+    fun looperArmSyncedToLoopQuantized(trackIndex: Int, latencyFrames: Long, quantumFrames: Int): Long =
+        nativeLooperArmSyncedToLoopQuantized(trackIndex, latencyFrames, quantumFrames)
 
     /** Cancel a pending armed recording (does not affect a recording in progress). */
     fun looperCancelArm() = nativeLooperCancelArm()

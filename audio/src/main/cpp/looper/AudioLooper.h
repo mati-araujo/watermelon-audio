@@ -500,6 +500,7 @@ public:
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return;
         if (mTracks[trackIndex].getCapacityFrames() <= 0) return;
         mSyncRefTrack.store(-1, std::memory_order_release);  // plain arm = no phase-lock
+        mSyncStartOffset.store(0, std::memory_order_release);
         mArmedTriggerFrame.store(triggerFrame, std::memory_order_release);
         mArmedTrack.store(trackIndex, std::memory_order_release);
         mEnabled.store(true, std::memory_order_release);
@@ -522,10 +523,22 @@ public:
      * @param playFrameNow Transport play position at call time (passed by caller
      *                     so AudioLooper stays free of the Transport include).
      * @param latencyFrames Round-trip latency compensation in frames (>=0).
+     * @param quantumFrames Optional start quantum WITHIN the reference cycle
+     *                     (e.g. one bar in frames). 0 (default) = legacy behavior:
+     *                     capture starts at the reference's next loop wrap. > 0:
+     *                     capture starts at the next multiple of `quantumFrames`
+     *                     inside the reference's cycle, so the user can punch in
+     *                     without waiting a whole loop. The take's buffer then
+     *                     starts mid-cycle (rotated content); the start offset is
+     *                     remembered and cancelled at finalize (see
+     *                     finalizeLoopStartPlayback) so playback still locks in
+     *                     phase. `quantumFrames` should divide the reference
+     *                     length (bars always do — loops are bar-exact).
      * @return the absolute trigger frame, or -1 if no reference track is playing
      *         (caller should fall back to a non-synced arm).
      */
-    int64_t armSyncedToLoop(int trackIndex, int64_t playFrameNow, int latencyFrames) {
+    int64_t armSyncedToLoop(int trackIndex, int64_t playFrameNow, int latencyFrames,
+                            int quantumFrames = 0) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return -1;
         if (mTracks[trackIndex].getCapacityFrames() <= 0) return -1;
         if (latencyFrames < 0) latencyFrames = 0;
@@ -543,13 +556,27 @@ public:
 
         int playhead = mTracks[refIdx].getPlayHead();
         if (playhead < 0) playhead = 0;
-        int framesToWrap = refLen - (playhead % refLen);
-        if (framesToWrap <= 0) framesToWrap = refLen;  // already at boundary → next loop
+        const int refPos = playhead % refLen;
+
+        int framesToStart;
+        int startOffset;
+        if (quantumFrames > 0 && quantumFrames < refLen) {
+            // Next quantum boundary (e.g. next bar) inside the reference cycle.
+            framesToStart = quantumFrames - (refPos % quantumFrames);
+            if (framesToStart <= 0) framesToStart = quantumFrames;
+            startOffset = (refPos + framesToStart) % refLen;
+        } else {
+            // Legacy: next loop wrap → the take starts at the cycle's frame 0.
+            framesToStart = refLen - refPos;
+            if (framesToStart <= 0) framesToStart = refLen;
+            startOffset = 0;
+        }
 
         const int64_t trigger = playFrameNow
-                              + static_cast<int64_t>(framesToWrap)
+                              + static_cast<int64_t>(framesToStart)
                               + static_cast<int64_t>(latencyFrames);
 
+        mSyncStartOffset.store(startOffset, std::memory_order_release);
         mSyncRefTrack.store(refIdx, std::memory_order_release);
         mArmedTriggerFrame.store(trigger, std::memory_order_release);
         mArmedTrack.store(trackIndex, std::memory_order_release);
@@ -561,6 +588,7 @@ public:
     void cancelArm() {
         mArmedTrack.store(-1, std::memory_order_release);
         mSyncRefTrack.store(-1, std::memory_order_release);
+        mSyncStartOffset.store(0, std::memory_order_release);
     }
 
     int getArmedTrack() const {
@@ -605,6 +633,7 @@ public:
         // moments after the abort.
         mArmedTrack.store(-1, std::memory_order_release);
         mSyncRefTrack.store(-1, std::memory_order_release);
+        mSyncStartOffset.store(0, std::memory_order_release);
 
         if (recTrack < 0 || recTrack >= MAX_TRACKS) {
             // Nothing was recording, but we may have cleared an armed slot.
@@ -666,6 +695,7 @@ public:
         mRecordingTrack.store(-1, std::memory_order_release);
         mArmedTrack.store(-1, std::memory_order_release);
         mSyncRefTrack.store(-1, std::memory_order_release);
+        mSyncStartOffset.store(0, std::memory_order_release);
         mOverdubbing.store(false, std::memory_order_release);
         for (int i = 0; i < MAX_TRACKS; ++i) {
             mTracks[i].setPlaying(false);
@@ -1129,14 +1159,28 @@ private:
         // when the reference next wraps to 0 — the two loops lock in phase and the
         // round-trip latency is cancelled. -1 (the solo/first-take case) keeps the
         // legacy resetPlayHead(), so that path is unchanged.
+        //
+        // Quantized start (armSyncedToLoop with quantumFrames > 0): the take's
+        // frame 0 corresponds to cycle position `mSyncStartOffset`, not 0 — so
+        // the lock position is the reference playhead SHIFTED BACK by that
+        // offset (mod refLen). With offset 0 this reduces to the legacy formula.
+        // The result is < refLen <= take length, so it's always a valid position.
         const int syncRef = mSyncRefTrack.load(std::memory_order_acquire);
         if (syncRef >= 0 && syncRef < MAX_TRACKS && syncRef != recTrack
             && mTracks[syncRef].isActive()) {
-            mTracks[recTrack].setPlayHeadF(mTracks[syncRef].getPlayHeadF());
+            const int startOffset = mSyncStartOffset.load(std::memory_order_acquire);
+            const int refLen = mTracks[syncRef].getLoopLength();
+            float pos = mTracks[syncRef].getPlayHeadF();
+            if (startOffset > 0 && refLen > 0) {
+                pos -= static_cast<float>(startOffset);
+                while (pos < 0.0f) pos += static_cast<float>(refLen);
+            }
+            mTracks[recTrack].setPlayHeadF(pos);
         } else {
             mTracks[recTrack].resetPlayHead();
         }
         mSyncRefTrack.store(-1, std::memory_order_release);
+        mSyncStartOffset.store(0, std::memory_order_release);
         mTracks[recTrack].setPlaying(true);
 
         // Also start any other active tracks that should be playing.
@@ -1263,6 +1307,11 @@ private:
     // resetting to 0, compensating round-trip latency so the overdub aligns.
     // -1 = no sync (solo/first take) — finalize keeps its legacy resetPlayHead().
     std::atomic<int> mSyncRefTrack{-1};
+    // Cycle position (frames within the reference loop) at which a quantized
+    // sync-armed take starts capturing (armSyncedToLoop quantumFrames > 0).
+    // 0 = capture starts at the cycle's frame 0 (legacy wrap-armed path).
+    // Cancelled out at finalize so the rotated take still phase-locks.
+    std::atomic<int> mSyncStartOffset{0};
     std::atomic<bool> mOverdubbing{false};
     std::atomic<bool> mLoopFinalizedDuringRec{false};
     // Default wrap-mix tail window. 500ms gives sustained sounds room to ring

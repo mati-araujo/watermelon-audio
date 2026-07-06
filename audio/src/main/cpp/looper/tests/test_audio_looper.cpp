@@ -550,3 +550,100 @@ TEST(AudioLooper, CancelExportMidwayWritesNothing) {
     EXPECT_FALSE(std::filesystem::exists(out.path))
         << "cancelled export must not leave a partial file";
 }
+
+// ======================= Quantized sync-arm =======================
+//
+// armSyncedToLoop(quantumFrames > 0): capture starts at the next multiple of
+// `quantumFrames` (e.g. the next bar) inside the reference cycle instead of the
+// next loop wrap, so a punch-in can begin at any moment of the current loop.
+// The rotated start offset is cancelled at finalize (finalizeLoopStartPlayback),
+// so the take still phase-locks to the reference.
+
+namespace {
+
+// Record a full fixed-length take into `track` and finalize it (playing).
+int64_t seedPlayingLoop(AudioLooper& looper, int track, int frames, int64_t pf) {
+    EXPECT_TRUE(looper.prepareTrack(track, frames, kSR));
+    looper.startRecording(track);
+    pf = feed(looper, 0.5f, frames, 256, pf);
+    looper.stopRecording();   // loop already closed at the boundary; ends the tail
+    EXPECT_TRUE(looper.getTrack(track).isTrackPlaying());
+    return pf;
+}
+
+// Circular distance between two positions on a loop of length `len`.
+int circularDist(int a, int b, int len) {
+    int d = std::abs(a - b) % len;
+    return std::min(d, len - d);
+}
+
+}  // namespace
+
+// Legacy contract (quantum = 0): the trigger still waits for the loop wrap.
+TEST(AudioLooper, SyncArmDefaultStillWaitsForTheWrap) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.prepareMixBuffer(512);
+
+    const int bar = 12'000;
+    const int refLen = 4 * bar;
+    int64_t pf = seedPlayingLoop(looper, 0, refLen, 0);
+
+    // Advance into the middle of the cycle.
+    pf = feed(looper, 0.0f, bar + bar / 2, 256, pf);
+    const int refPos = looper.getTrack(0).getPlayHead() % refLen;
+
+    ASSERT_TRUE(looper.prepareTrack(1, refLen, kSR));
+    const int64_t trigger = looper.armSyncedToLoop(1, pf, /*latencyFrames=*/0);
+    ASSERT_GE(trigger, 0);
+    EXPECT_EQ(trigger - pf, static_cast<int64_t>(refLen - refPos))
+        << "default sync-arm must keep waiting for the wrap";
+    looper.cancelArm();
+}
+
+// Quantized: the trigger lands on the NEXT BAR (short wait), and after the take
+// closes its loop, the rotated content still plays phase-locked to the reference.
+TEST(AudioLooper, QuantizedSyncArmStartsAtNextBarAndPhaseLocks) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.prepareMixBuffer(512);
+
+    const int bar = 12'000;
+    const int refLen = 4 * bar;
+    int64_t pf = seedPlayingLoop(looper, 0, refLen, 0);
+
+    // Advance partway into bar 2 so the wrap is still ~2.5 bars away.
+    pf = feed(looper, 0.0f, bar + bar / 2, 256, pf);
+    const int refPosAtArm = looper.getTrack(0).getPlayHead() % refLen;
+
+    ASSERT_TRUE(looper.prepareTrack(1, refLen, kSR));
+    const int64_t trigger =
+        looper.armSyncedToLoop(1, pf, /*latencyFrames=*/0, /*quantumFrames=*/bar);
+    ASSERT_GE(trigger, 0);
+
+    const int wait = static_cast<int>(trigger - pf);
+    EXPECT_GT(wait, 0);
+    EXPECT_LE(wait, bar) << "quantized arm must start within one bar";
+    EXPECT_LT(wait, refLen - refPosAtArm)
+        << "quantized arm must start strictly before the loop wrap";
+    // Where in the cycle the take will start capturing (its buffer frame 0).
+    const int startOffset = (refPosAtArm + wait) % refLen;
+    EXPECT_EQ(startOffset % bar, 0) << "capture must start on a bar boundary";
+
+    // Reach the trigger, capture a full take, then end the tail phase.
+    pf = feed(looper, 0.25f, wait, 256, pf);
+    pf = feed(looper, 0.25f, refLen + 512, 256, pf);   // loop closes at refLen
+    looper.stopRecording();
+    ASSERT_TRUE(looper.getTrack(1).isTrackPlaying());
+
+    // Let both tracks run a little, then check the lock: the take's position must
+    // equal the reference's position shifted back by the start offset (mod len).
+    pf = feed(looper, 0.0f, 4096, 256, pf);
+    const int refPos = looper.getTrack(0).getPlayHead() % refLen;
+    const int takePos = looper.getTrack(1).getPlayHead() % refLen;
+    int expected = (refPos - startOffset) % refLen;
+    if (expected < 0) expected += refLen;
+    EXPECT_LE(circularDist(takePos, expected, refLen), 512)
+        << "rotated take must phase-lock to the reference (refPos=" << refPos
+        << " startOffset=" << startOffset << " takePos=" << takePos << ")";
+}

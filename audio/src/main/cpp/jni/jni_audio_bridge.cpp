@@ -2847,6 +2847,21 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
         trackIndex, playFrame, static_cast<int>(latencyFrames));
 }
 
+// Quantized variant: capture starts at the next multiple of `quantumFrames`
+// inside the reference cycle (e.g. the next bar) instead of the next loop wrap,
+// so a punch-in doesn't wait out the rest of the loop. The rotated start offset
+// is cancelled at finalize, so playback still phase-locks to the reference.
+// quantumFrames <= 0 behaves exactly like nativeLooperArmSyncedToLoop.
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperArmSyncedToLoopQuantized(
+    JNIEnv* env, jobject thiz, jint trackIndex, jlong latencyFrames, jint quantumFrames) {
+    if (!g_jniState.engine) return -1;
+    if (latencyFrames < 0) latencyFrames = 0;
+    const int64_t playFrame = g_jniState.engine->getTransport().getPlayFrame();
+    return g_jniState.engine->getAudioLooper().armSyncedToLoop(
+        trackIndex, playFrame, static_cast<int>(latencyFrames), quantumFrames);
+}
+
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperCancelArm(
     JNIEnv* env, jobject thiz) {
