@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.4.0...v1.5.0) (2026-07-06)
+
+
+### Features
+
+* local midis ([f5a1548](https://github.com/mati-araujo/watermelon-audio/commit/f5a15485def5c89070f7f84a8886c02354314a07))
+
 ## [1.4.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.3.2...v1.4.0) (2026-07-05)
 
 
