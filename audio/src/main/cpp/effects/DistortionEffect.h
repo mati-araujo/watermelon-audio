@@ -356,8 +356,29 @@ private:
     /** @brief Apply voltage sag effect */
     float applySag(float inputLevel);
 
-    /** @brief Noise gate */
-    float applyGate(float input, float threshold);
+    /**
+     * @brief Per-channel noise gate state (envelope follower + smoothed gain).
+     *
+     * The gate decides open/close on the ENVELOPE, never on the instantaneous
+     * sample value: gating per sample zeroes the low-amplitude spans of every
+     * waveform cycle near the threshold, which chops the signal into buzzy
+     * fragments instead of muting silence.
+     */
+    struct GateState {
+        float envelope = 0.0f;
+        float gain = 0.0f;
+        bool open = false;
+    };
+
+    void updateGateCoefficients();
+
+    /** @brief Envelope-based noise gate with hysteresis and smooth gain ramp */
+    float applyGate(float input, float threshold, GateState& state);
+
+    GateState mGateStateL;
+    GateState mGateStateR;
+    float mGateAttackCoeff = 0.0f;   // ~1 ms  (open fast on pick attack)
+    float mGateReleaseCoeff = 0.0f;  // ~30 ms (close without chopping decays)
 };
 
 #endif // DISTORTIONEFFECT_H

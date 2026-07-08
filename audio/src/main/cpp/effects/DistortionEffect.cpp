@@ -68,6 +68,7 @@ DistortionEffect::DistortionEffect()
     mOutputR.resize(MAX_BUFFER_SIZE, 0.0f);
 
     // Initialize filters
+    updateGateCoefficients();
     updateFilters();
 
     LOGI("DistortionEffect created with professional pedal emulations");
@@ -132,6 +133,7 @@ void DistortionEffect::setSampleRate(int sampleRate) {
     mLevelSmoother.setSmoothingTime(10.0f, sr);
     mMixSmoother.setSmoothingTime(10.0f, sr);
 
+    updateGateCoefficients();
     updateFilters();
 
     LOGI("DistortionEffect sample rate set to %d", sampleRate);
@@ -144,6 +146,8 @@ void DistortionEffect::reset() {
 
     mLastSlewL = 0.0f;
     mLastSlewR = 0.0f;
+    mGateStateL = GateState{};
+    mGateStateR = GateState{};
     mSagVoltage = 1.0f;
     mOctavePhaseL = 0.0f;
     mOctavePhaseR = 0.0f;
@@ -368,8 +372,8 @@ void DistortionEffect::process(float* input, float* output, int numFrames) {
         preL = mPreTone_L.process(preL);
         preR = mPreTone_R.process(preR);
 
-        mInputL[i] = applyGate(preL, gateThreshold);
-        mInputR[i] = applyGate(preR, gateThreshold);
+        mInputL[i] = applyGate(preL, gateThreshold, mGateStateL);
+        mInputR[i] = applyGate(preR, gateThreshold, mGateStateR);
     }
 
     // Upsample
@@ -1032,16 +1036,40 @@ float DistortionEffect::applySag(float inputLevel) {
     return std::clamp(mSagVoltage, 0.65f, 1.0f);
 }
 
-float DistortionEffect::applyGate(float input, float threshold) {
-    // Simple noise gate
+void DistortionEffect::updateGateCoefficients() {
+    const float sr = static_cast<float>(mSampleRate > 0 ? mSampleRate : 48000);
+    // 1 ms attack (open fast on pick attack), 30 ms release (close decays
+    // smoothly instead of chopping them).
+    mGateAttackCoeff = std::exp(-1.0f / (0.001f * sr));
+    mGateReleaseCoeff = std::exp(-1.0f / (0.030f * sr));
+}
+
+float DistortionEffect::applyGate(float input, float threshold, GateState& g) {
     if (threshold <= 0.0f) {
         return input;
     }
-    float absInput = std::abs(input);
-    if (absInput < threshold * 0.1f) {
-        return 0.0f;
+    // Same threshold mapping as before (param 0-1 -> linear amplitude * 0.1)
+    // so existing presets keep their calibration; the decision now runs on the
+    // envelope with 6 dB hysteresis and a smoothed gain, never on the raw
+    // sample (which zeroed every near-zero-crossing span of the waveform).
+    const float openThreshold = threshold * 0.1f;
+    const float closeThreshold = openThreshold * 0.5f;  // 6 dB below open
+
+    const float level = std::abs(input);
+    const float envCoeff = (level > g.envelope) ? mGateAttackCoeff : mGateReleaseCoeff;
+    g.envelope = envCoeff * g.envelope + (1.0f - envCoeff) * level;
+
+    if (g.open) {
+        if (g.envelope < closeThreshold) g.open = false;
+    } else {
+        if (g.envelope > openThreshold) g.open = true;
     }
-    return input;
+
+    const float target = g.open ? 1.0f : 0.0f;
+    const float gainCoeff = g.open ? mGateAttackCoeff : mGateReleaseCoeff;
+    g.gain = gainCoeff * g.gain + (1.0f - gainCoeff) * target;
+
+    return input * g.gain;
 }
 
 // ============================================================================
