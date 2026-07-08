@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <chrono>
 #include <vector>
+#include <sys/syscall.h>  // SYS_gettid (F4: was resolved only transitively)
+#include <unistd.h>       // syscall()
 
 #define LOG_TAG "LibusbBackend"
 #undef LOGI
@@ -1828,10 +1830,9 @@ void LibusbBackend::dspThreadFunc() {
             break;
         }
 
-        // Check for pending buffer resize
-        if (mBufferResizePending.load(std::memory_order_acquire)) {
-            performBufferResize();
-        }
+        // (Legacy ring-capacity resize removed from the DSP loop — F3: the only
+        // setter, requestBufferResize(), has no callers. performBufferResize() and
+        // ResizableRingBuffer survive behind the deprecated JNI until App plan D.)
 
         // Adaptive jitter-budget convergence (Fase 2 / H4). Replaces the legacy
         // AdaptiveBufferController, which resized ring CAPACITY — the wrong lever

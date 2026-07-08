@@ -67,15 +67,20 @@ bool UsbTransferManager::configure(const TransferConfig& config) {
 
     // Fresh device/profile: reset the live adaptive jitter budget and derive its
     // range from the profile's configured budget. SAFE (large budget) is frozen
-    // — min == initial, so the down-convergence can never lower it (bit-identical
-    // to before). The low-latency regime can converge down to 1 ms and ratchet up
-    // to initial + cap (preserving the previous up-only ratchet exactly).
+    // via downConvergeEnabled=false: the underrun ratchet may still raise the
+    // budget above the floor, but the controller never walks it back down, so SAFE
+    // stays bit-identical to the legacy up-only behaviour. The low-latency regime
+    // (min < initial) can converge down to 1 ms and ratchet up to initial + cap
+    // (preserving the previous up-only ratchet exactly).
     const int initialBudget = config.jitterBudgetMs;
     mJitterBudgetMaxMs = initialBudget + kJitterUpRatchetCapMs;
     mJitterBudgetMinMs = (initialBudget > 16) ? initialBudget : 1;
     mJitterBudgetMs.store(initialBudget, std::memory_order_relaxed);
     JitterBudgetController::Config jcfg;
     jcfg.minBudgetMs = mJitterBudgetMinMs;
+    // Only converge down when the profile actually leaves room below its initial
+    // budget. SAFE derives min == initial → frozen (up-only, legacy behaviour).
+    jcfg.downConvergeEnabled = (mJitterBudgetMinMs < initialBudget);
     mJitterController.configure(jcfg);
     mJitterWindowStartMs = 0;
     mJitterWindowUnderrunsAtStart = 0;

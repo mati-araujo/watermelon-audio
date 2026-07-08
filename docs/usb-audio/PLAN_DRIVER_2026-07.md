@@ -5,6 +5,23 @@
 **Objetivo:** driver USB de primer nivel — mínima latencia a máxima calidad y estabilidad, con cobertura de tests, responsabilidad única y mantenibilidad.
 **Documento hermano:** `NoisyPad/docs/usb-audio/PLAN_USO_DRIVER_2026-07.md` (lado consumidor).
 
+---
+
+## ⚠️ Estado de ejecución y addenda (2026-07-08)
+
+| Etapa | Estado | Notas |
+|---|---|---|
+| E1 (quick wins) | ✅ Implementada y **auditada** | Ver `AUDITORIA_E1-E3_2026-07-08.md`; ADPF activo en debug y release |
+| E2 (sanitizers + DspPacer) | ✅ Implementada y auditada | Bit-identidad verificada por diff. **Delta:** el item 2.4 (tests de secuencia duplex fade/splice) se **difirió a la Etapa 5** — se testea host-side al extraer `usb/DspLoop` |
+| E3 (Fase 2 adaptativo) | 🟠 Core implementado, **fixes F1–F4 pendientes** (ver auditoría) | **Deltas de alcance:** (a) la **persistencia por dispositivo (3.3)** NO está — el lado driver (JNI `getConvergedTuning`/`setInitialTuning`) se implementa junto con **App D**; (b) los items 2.2 (timing por dirección) y 2.4 (hardening) del spec `fase_2_ajuste_fino_adaptativo.md` quedaron **fuera de E3** — reevaluarlos tras la campaña de validación: si el round-trip medido (E4) ya cumple ≤9 ms estables, se descartan |
+| E4 (round-trip) | ⬜ Pendiente — **próxima**, en paralelo con App V | |
+| E5 (SRP split) | ⬜ Pendiente | Incluye los tests duplex diferidos de E2.4 |
+| E6 (bit-perfect) / E7 (microframe) | ⬜ Pendientes, sin cambios | E7 mantiene su go/no-go tras E4 |
+
+**Secuencia repriorizada** (razones en `NoisyPad/docs/usb-audio/PLAN_VALIDACION_ON_DEVICE_2026-07.md`): fixes F1–F4 → E4 ∥ App V → campaña de validación on-device (3 DACs) → App C → App D (incluye persistencia 3.3) → E5 → resto.
+
+---
+
 Este plan **continúa** el programa `docs/usb_latency/00_indice.md` (derivado de `docs/auditoria_usb_uac_latencia.md`, 2026-06-12) — no lo reemplaza. Aquí se consolida el estado real verificado en código a 2026-07-07 y se agrega lo que el programa de latencia no cubre: refactoring SRP, deuda de mecanismos duplicados, sanitizers y plan de tests.
 
 ---

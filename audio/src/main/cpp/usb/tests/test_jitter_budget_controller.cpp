@@ -72,14 +72,39 @@ TEST(JitterBudgetController, NeverLowersWhenAlreadyAtFloor) {
 }
 
 TEST(JitterBudgetController, SafeProfileIsFrozen) {
-    // SAFE: caller sets min == initial (24) → can never lower.
-    JitterBudgetController c(smallCfg(/*minMs=*/24));
+    // SAFE: caller derives downConvergeEnabled=false (min == initial). Even after
+    // the event-thread underrun ratchet has raised the budget above the floor
+    // (24 → 27), the controller must NEVER lower it — legacy up-only behaviour.
+    // (Regression for F1: the previous test kept budget==24 the whole time, so it
+    //  never exercised the ratcheted case the down-converger actually broke.)
+    JitterBudgetController::Config cfg = smallCfg(/*minMs=*/24);
+    cfg.downConvergeEnabled = false;
+    JitterBudgetController c(cfg);
     c.reset(24);
-    int budget = 24;
+
+    int budget = 27;  // simulated: underrun ratchet already pushed 24 → 27
     for (int i = 0; i < 100; ++i) {
-        EXPECT_EQ(Action::HOLD, c.onWindow(false, budget));
+        EXPECT_EQ(Action::HOLD, c.onWindow(/*hadXrun=*/false, budget));
+        // Interleave an occasional xrun window: still must not lower.
+        if (i % 20 == 0) {
+            EXPECT_EQ(Action::HOLD, c.onWindow(/*hadXrun=*/true, budget));
+        }
     }
-    EXPECT_EQ(24, budget);
+    EXPECT_EQ(27, budget);  // budget untouched by the controller
+}
+
+TEST(JitterBudgetController, LowLatencyProfileStillConverges) {
+    // Counterpart to the frozen case: min < initial → downConvergeEnabled=true,
+    // so a ratcheted budget does walk back down toward the floor.
+    JitterBudgetController::Config cfg = smallCfg(/*minMs=*/2);
+    cfg.downConvergeEnabled = true;
+    JitterBudgetController c(cfg);
+    c.reset(4);
+    int budget = 6;  // ratcheted up from 4
+    for (int i = 0; i < 200; ++i) {
+        budget = stableWindow(c, budget);
+    }
+    EXPECT_EQ(2, budget);
 }
 
 TEST(JitterBudgetController, XrunResetsProgressTowardLower) {

@@ -468,8 +468,9 @@ public:
      * JitterBudgetController walks it back DOWN 1 ms per long clean stretch toward
      * a per-session floor — the old mJitterExtraMs only ever went up, pinning the
      * session's latency after any transient. Read per-iteration by the DSP loop,
-     * so both directions take effect without a stream restart. SAFE is frozen: its
-     * min == its initial budget (set in configure()), so the loop can't lower it.
+     * so both directions take effect without a stream restart. SAFE is frozen via
+     * the controller's downConvergeEnabled=false flag (set in configure() when
+     * min == initial): the ratchet may raise it but the loop never lowers it.
      */
     size_t getOutputRingTargetLevel() const {
         return outputRingTargetSamples(

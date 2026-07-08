@@ -17,11 +17,17 @@
  * machine driven one call per evaluation window (~2 s); the caller owns the clock
  * and the xrun signal, so this is fully host-testable with no timing.
  *
- * SAFE stays bit-identical: the caller sets minBudgetMs == the initial budget for
- * SAFE, so currentBudget is never > floor and the loop can never lower it.
+ * SAFE stays bit-identical to the legacy up-only behaviour via the explicit
+ * `downConvergeEnabled = false` flag: the controller then NEVER emits LOWER, so
+ * the live budget only ever moves via the event thread's underrun ratchet — even
+ * after a ratchet has raised it above the configured min. (The old comment claimed
+ * "min == initial so currentBudget is never > floor"; that was false — the ratchet
+ * routinely pushes currentBudget above the floor, and without this flag the loop
+ * would walk it back down, which the legacy SAFE never did.)
  */
 
 #include <algorithm>
+#include <atomic>
 
 namespace watermelon_audio {
 namespace usb {
@@ -37,6 +43,9 @@ public:
         int minBudgetMs = 1;          // absolute floor (profile-derived by caller)
         int stableWindowsToLower = 30; // clean windows required before a lower (~60 s @ 2 s)
         int cooldownWindows = 15;      // windows to wait after any change (~30 s)
+        // When false the controller never emits LOWER (frozen / up-only profile,
+        // e.g. SAFE). Derived by the caller from the profile in configure().
+        bool downConvergeEnabled = true;
     };
 
     JitterBudgetController() = default;
@@ -49,7 +58,7 @@ public:
 
     /** Reset for a new session; @p initialBudget is the profile's starting budget. */
     void reset(int initialBudget) {
-        mFloor = mConfig.minBudgetMs;
+        setFloor(mConfig.minBudgetMs);
         mStableCount = 0;
         mCooldown = 0;
         mWindowsSinceLower = kNeverLowered;
@@ -64,12 +73,19 @@ public:
      * @return HOLD, or LOWER when a long clean stretch allows stepping down 1 ms.
      */
     Action onWindow(bool hadXrun, int currentBudget) {
+        // Frozen / up-only profile (SAFE): never converge down. The event thread's
+        // underrun ratchet is the only thing that moves the budget — bit-identical
+        // to the legacy behaviour. No bookkeeping needed since we never lower.
+        if (!mConfig.downConvergeEnabled) {
+            return Action::HOLD;
+        }
+
         if (hadXrun) {
             // An xrun shortly after we lowered means the lower was too aggressive:
             // pin the floor at the (already-ratcheted-up) current budget so this
             // session never dips below it again.
             if (mWindowsSinceLower <= mConfig.cooldownWindows) {
-                mFloor = std::max(mFloor, currentBudget);
+                setFloor(std::max(mFloor, currentBudget));
             }
             mStableCount = 0;
             mCooldown = mConfig.cooldownWindows;
@@ -98,14 +114,28 @@ public:
         return Action::HOLD;
     }
 
-    /** Per-session floor discovered so far (>= configured min). Telemetry / 2.3. */
-    int sessionFloorMs() const { return mFloor; }
+    /**
+     * Per-session floor discovered so far (>= configured min). Telemetry / 2.3.
+     * mFloor itself is DSP-thread-owned (written only from onWindow/reset); this
+     * getter reads an atomic mirror so a JNI/UI thread polling the floor doesn't
+     * race the DSP writer (F2).
+     */
+    int sessionFloorMs() const {
+        return mFloorPublished.load(std::memory_order_relaxed);
+    }
 
 private:
     static constexpr int kNeverLowered = 1 << 20;
 
+    // Single point of truth for floor writes: keeps the atomic mirror in sync.
+    void setFloor(int value) {
+        mFloor = value;
+        mFloorPublished.store(value, std::memory_order_relaxed);
+    }
+
     Config mConfig{};
     int mFloor = 1;
+    std::atomic<int> mFloorPublished{1};  // cross-thread mirror of mFloor (F2)
     int mStableCount = 0;
     int mCooldown = 0;
     int mWindowsSinceLower = kNeverLowered;
