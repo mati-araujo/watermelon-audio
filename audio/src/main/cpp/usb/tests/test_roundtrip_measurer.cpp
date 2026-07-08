@@ -46,7 +46,9 @@ struct LoopbackHarness {
     void step() {
         std::vector<float> out(static_cast<size_t>(kBlock * kChannels), 0.0f);
         std::vector<float> in(static_cast<size_t>(kBlock * kChannels), 0.0f);
-        std::normal_distribution<float> noise(0.0f, noiseStd);
+        // stddev must be > 0 even if never sampled (libstdc++ asserts in the
+        // ctor); the > 0 gate below keeps no-noise runs noise-free.
+        std::normal_distribution<float> noise(0.0f, noiseStd > 0.0f ? noiseStd : 1.0f);
         for (int i = 0; i < kBlock; ++i) {
             const int64_t src = processed + i - delay;
             float s = 0.0f;
