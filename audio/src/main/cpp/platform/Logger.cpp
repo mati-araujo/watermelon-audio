@@ -1,4 +1,5 @@
 #include "Logger.h"
+#include "LogCaptureBuffer.h"
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -27,6 +28,11 @@ void logMessage(LogLevel level, const char* tag, const char* fmt, ...) {
     va_start(args, fmt);
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
+
+    // Second sink (App V §3.2): capture to the in-memory ring when enabled. This
+    // runs REGARDLESS of the callback below so the export is the full history;
+    // it's a no-op relaxed atomic load when capture is off.
+    LogCaptureBuffer::instance().capture(level, tag, buf);
 
     // Check for custom callback first
     auto callback = g_logCallback.load(std::memory_order_acquire);

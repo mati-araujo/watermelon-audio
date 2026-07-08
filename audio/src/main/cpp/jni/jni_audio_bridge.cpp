@@ -23,6 +23,7 @@
 #include "../looper/LooperEventDispatcher.h"
 #include "../usb/UsbSnapshotCodec.h"
 #include "../usb/RoundTripMeasurer.h"
+#include "../platform/LogCaptureBuffer.h"
 #include "../voice/VoiceTypes.h"
 #include <cmath>
 #include <algorithm>
@@ -3514,6 +3515,66 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRou
     rtRestoreCallbackLocked();  // restore FIRST, then tear the measurer down
     g_rtMeasurer.cancel();
     LOGI("Round-trip: cancelled");
+}
+
+// ==================== USB RT environment (App V §4, steps 2 & 5) ==========
+//
+// One poll for the USB Lab RT-env + jitter-budget steps. floats:
+// [0]=dspSchedResult [1]=eventLoopSchedResult [2]=adpfState
+// [3]=jitterBudgetMs [4]=convergedFloorMs [5]=latencyProfileOrdinal
+// (ThreadUtils::SchedResult ordinals; adpfState 0/1/2.) All -1/0 if no USB.
+JNIEXPORT jfloatArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsbRtEnv(
+        JNIEnv* env, jobject thiz) {
+    (void)thiz;
+    jfloat v[6] = {-1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    auto* backend = watermelon_audio::BackendManager::getInstance().getLibusbBackend();
+    if (backend) {
+        v[0] = static_cast<float>(backend->getDspSchedResult());
+        v[1] = static_cast<float>(backend->getEventLoopSchedResult());
+        v[2] = static_cast<float>(backend->getAdpfState());
+        v[3] = static_cast<float>(backend->getJitterBudgetMs());
+        v[4] = static_cast<float>(backend->getConvergedFloorMs());
+        v[5] = static_cast<float>(backend->getLatencyProfileOrdinal());
+    }
+    jfloatArray result = env->NewFloatArray(6);
+    if (result) env->SetFloatArrayRegion(result, 0, 6, v);
+    return result;
+}
+
+// ==================== Native Log Capture (App V §3.2) ====================
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetLogCaptureEnabled(
+        JNIEnv* env, jobject thiz, jboolean enabled) {
+    (void)env; (void)thiz;
+    wma::LogCaptureBuffer::instance().setEnabled(enabled == JNI_TRUE);
+}
+
+// Drain the captured lines since the last call (each "L/TAG: message").
+JNIEXPORT jobjectArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeDrainCapturedLogs(
+        JNIEnv* env, jobject thiz) {
+    (void)thiz;
+    const std::vector<std::string> lines = wma::LogCaptureBuffer::instance().drain();
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (!stringClass) return nullptr;
+    jobjectArray arr = env->NewObjectArray(
+        static_cast<jsize>(lines.size()), stringClass, nullptr);
+    if (!arr) return nullptr;
+    for (jsize i = 0; i < static_cast<jsize>(lines.size()); ++i) {
+        jstring s = env->NewStringUTF(lines[static_cast<size_t>(i)].c_str());
+        env->SetObjectArrayElement(arr, i, s);
+        env->DeleteLocalRef(s);  // avoid overflowing the local ref table on big drains
+    }
+    return arr;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetLogCaptureDropped(
+        JNIEnv* env, jobject thiz) {
+    (void)env; (void)thiz;
+    return static_cast<jint>(wma::LogCaptureBuffer::instance().droppedCount());
 }
 
 } // extern "C"

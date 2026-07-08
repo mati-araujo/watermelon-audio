@@ -2607,6 +2607,28 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /** Cancel the round-trip test and restore the original backend callback. */
     fun usbRoundTripCancel() = nativeUsbRoundTripCancel()
 
+    // ==================== USB RT Environment (App V §4) ====================
+
+    /**
+     * USB RT-environment snapshot for the USB Lab. 6 floats:
+     *   [0]=dspSchedResult [1]=eventLoopSchedResult [2]=adpfState (0/1/2)
+     *   [3]=jitterBudgetMs [4]=convergedFloorMs [5]=latencyProfileOrdinal.
+     * SchedResult values are ThreadUtils::SchedResult ordinals. All -1/0 if no
+     * USB backend is running.
+     */
+    fun getUsbRtEnv(): FloatArray? = nativeGetUsbRtEnv()
+
+    // ==================== Native Log Capture (App V §3.2) ====================
+
+    /** Enable/disable the native in-memory log capture (second sink). */
+    fun setLogCaptureEnabled(enabled: Boolean) = nativeSetLogCaptureEnabled(enabled)
+
+    /** Drain captured native log lines since the last call ("L/TAG: message"). */
+    fun drainCapturedLogs(): Array<String> = nativeDrainCapturedLogs() ?: emptyArray()
+
+    /** Count of lines dropped because the capture ring overflowed. */
+    fun getLogCaptureDropped(): Int = nativeGetLogCaptureDropped()
+
     // ==================== Native Methods: Latency Benchmark ====================
 
     private external fun nativeGetDetailedLatencyInfo(): FloatArray?
@@ -2629,6 +2651,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeUsbRoundTripStart(config: FloatArray): Boolean
     private external fun nativeUsbRoundTripPoll(): FloatArray?
     private external fun nativeUsbRoundTripCancel()
+
+    // ==================== Native Methods: USB RT env + Log Capture ==========
+
+    private external fun nativeGetUsbRtEnv(): FloatArray?
+    private external fun nativeSetLogCaptureEnabled(enabled: Boolean)
+    private external fun nativeDrainCapturedLogs(): Array<String>?
+    private external fun nativeGetLogCaptureDropped(): Int
 
     // ==================== Arpeggiator (Phase 7) ====================
 

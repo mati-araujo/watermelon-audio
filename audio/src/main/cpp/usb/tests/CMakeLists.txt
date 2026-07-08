@@ -63,6 +63,7 @@ add_executable(usb_tests
     test_jitter_budget_controller.cpp
     test_roundtrip_analyzer.cpp
     test_roundtrip_measurer.cpp
+    test_log_capture_buffer.cpp
     test_resizable_ring_buffer.cpp
     test_channel_map.cpp
     test_feature_unit_caps.cpp
