@@ -1,6 +1,7 @@
 package com.watermellonstudios.audio.api.latency
 
 import com.watermellonstudios.audio.internal.bridge.AudioNativeBridge
+import com.watermellonstudios.audio.domain.usb.RoundTripTestState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -271,30 +272,48 @@ class LatencyAnalyzer {
     /**
      * Run round-trip test as a Flow that emits progress updates.
      *
-     * @param timeoutMs Maximum time to wait for result
-     * @param pollIntervalMs How often to check for result
+     * Fase 5 migration: this now drives the USB analog-loopback measurer
+     * (RoundTripMeasurer) instead of the never-implemented Oboe scaffolding. It
+     * requires an active FULL_DUPLEX USB stream with OUT wired to IN. The legacy
+     * single-shot [startRoundTripTest]/[getRoundTripResult]/[cancelRoundTripTest]
+     * remain as deprecated no-ops.
+     *
+     * @param timeoutMs Maximum time to wait for result (floored to fit the test)
+     * @param pollIntervalMs How often to poll the measurer
      */
     fun runRoundTripTestFlow(
         timeoutMs: Long = 5000,
         pollIntervalMs: Long = 100
     ): Flow<RoundTripResult> = flow {
-        if (!startRoundTripTest()) {
+        val bridge = AudioNativeBridge.getInstance()
+        // [burstCount, burstIntervalMs, amplitude, searchWindowMs]
+        val config = floatArrayOf(10f, 300f, 0.25f, 250f)
+        if (!bridge.usbRoundTripStart(config)) {
             emit(RoundTripResult(-1f, RoundTripState.IDLE))
             return@flow
         }
 
+        // The measurement itself takes ~burstCount×interval + analysis; never
+        // time out before it can finish.
+        val effectiveTimeout = maxOf(timeoutMs, 10L * 300 + 6000)
         val startTime = System.currentTimeMillis()
 
         while (true) {
-            val result = getRoundTripResult()
-            emit(result)
-
-            if (result.isComplete || result.state == RoundTripState.TIMEOUT) {
-                break
+            val data = bridge.usbRoundTripPoll()
+            if (data != null && data.size >= 10) {
+                val mapped = when (data[0].toInt()) {
+                    RoundTripTestState.COMPLETE.code -> RoundTripState.COMPLETE
+                    RoundTripTestState.ERROR.code -> RoundTripState.TIMEOUT
+                    RoundTripTestState.IDLE.code -> RoundTripState.IDLE
+                    else -> RoundTripState.RUNNING
+                }
+                val latency = if (mapped == RoundTripState.COMPLETE) data[3] else -1f
+                emit(RoundTripResult(latency, mapped))
+                if (mapped == RoundTripState.COMPLETE || mapped == RoundTripState.TIMEOUT) break
             }
 
-            if (System.currentTimeMillis() - startTime > timeoutMs) {
-                cancelRoundTripTest()
+            if (System.currentTimeMillis() - startTime > effectiveTimeout) {
+                bridge.usbRoundTripCancel()
                 emit(RoundTripResult(-1f, RoundTripState.TIMEOUT))
                 break
             }

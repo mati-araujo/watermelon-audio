@@ -34,6 +34,21 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 enable_testing()
 
+# ----------------------------------------------------------------------------
+# Sanitizers — host test build ONLY (never the NDK/production build). Enable
+# with -DWMA_TESTS_SANITIZE=address,undefined  or  =thread. Placed BEFORE the
+# googletest fetch so the whole graph (gtest + the watermelon libs + the tests)
+# is instrumented — TSan in particular needs every translation unit compiled
+# with -fsanitize=thread. See the two CI jobs in .github/workflows/ci.yml.
+# ----------------------------------------------------------------------------
+set(WMA_TESTS_SANITIZE "" CACHE STRING
+    "Host-test sanitizers passed to -fsanitize, e.g. 'address,undefined' or 'thread'")
+if(WMA_TESTS_SANITIZE)
+    message(STATUS "Host tests: sanitizers = ${WMA_TESTS_SANITIZE}")
+    add_compile_options(-fsanitize=${WMA_TESTS_SANITIZE} -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=${WMA_TESTS_SANITIZE})
+endif()
+
 # Fetch googletest once, here. The child suites also declare it, but
 # FetchContent dedupes by name, so this is the single source of truth and
 # the only network hit. Pin matches every child suite (v1.15.2).

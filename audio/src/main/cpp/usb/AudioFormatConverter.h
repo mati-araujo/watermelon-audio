@@ -66,6 +66,25 @@ struct PcmFormatInfo {
     }
 };
 
+/**
+ * Map a wire bit depth (as reported by the UAC format descriptor) to the packed
+ * PCM format the converter expects. Single source of truth: negotiation code in
+ * LibusbBackend and any future caller must derive the format through here rather
+ * than reimplementing the switch (H7 — this used to be duplicated inline).
+ *
+ * 24-bit maps to the packed 3-byte layout (PCM_S24_3LE) because that is how UAC
+ * lays 24-bit samples on the wire; the 4-byte container variants are only used
+ * internally by the converter.
+ */
+inline PcmFormat pcmFormatForBitDepth(int bitDepth) {
+    switch (bitDepth) {
+        case 16: return PcmFormat::PCM_S16_LE;
+        case 24: return PcmFormat::PCM_S24_3LE;
+        case 32: return PcmFormat::PCM_S32_LE;
+        default: return PcmFormat::PCM_S16_LE;
+    }
+}
+
 // ============================================================================
 // Dithering
 // ============================================================================

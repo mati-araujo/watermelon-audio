@@ -155,7 +155,10 @@ data class UsbTestResult(
     val errorMessage: String? = null,
 
     // Collected stats samples for detailed analysis
-    val statsSamples: List<UsbTransferStats> = emptyList()
+    val statsSamples: List<UsbTransferStats> = emptyList(),
+
+    // Physical loopback round-trip result (LOOPBACK test only; Fase 5).
+    val roundTrip: RoundTripTestResult? = null
 ) {
     /**
      * Check if the test passed based on thresholds.

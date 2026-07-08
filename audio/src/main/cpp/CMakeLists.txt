@@ -179,6 +179,7 @@ set(USB_SOURCES
         usb/AudioFormatConverter.cpp
         usb/UsbTransferManager.cpp
         usb/UsbVolumeControl.cpp
+        usb/RoundTripMeasurer.cpp
 )
 
 # JNI Bridge Sources (Phase 3 - Unified bridge)

@@ -22,6 +22,8 @@
 #include "../backends/LibusbBackend.h"
 #include "../looper/LooperEventDispatcher.h"
 #include "../usb/UsbSnapshotCodec.h"
+#include "../usb/RoundTripMeasurer.h"
+#include "../platform/LogCaptureBuffer.h"
 #include "../voice/VoiceTypes.h"
 #include <cmath>
 #include <algorithm>
@@ -1142,6 +1144,38 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInp
         return 0.0f;
     }
     return g_jniState.inputNode->getInputLatencyMs();
+}
+
+// Batched input metering: returns the 7 values a UI meter polls per frame in a
+// single JNI crossing (was 7 separate getters + a running-state check = 8
+// crossings/tick at 60 fps ≈ 480/s). Layout MUST stay in sync with the Kotlin
+// consumer (InputStateManager):
+//   [0] level dB ch0    [1] level dB ch1
+//   [2] level linear ch0 [3] level linear ch1
+//   [4] clipping (1/0)  [5] noise gate open (1/0)  [6] latency ms
+// Returns null when there is no input node so the caller can fall back to the
+// individual getters (older library / no active stream).
+JNIEXPORT jfloatArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInputMeteringSnapshot(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.inputNode) {
+        return nullptr;
+    }
+    jfloat values[7] = {
+        g_jniState.inputNode->getInputLevel(0),
+        g_jniState.inputNode->getInputLevel(1),
+        g_jniState.inputNode->getInputLevelLinear(0),
+        g_jniState.inputNode->getInputLevelLinear(1),
+        g_jniState.inputNode->isClipping() ? 1.0f : 0.0f,
+        g_jniState.inputNode->isNoiseGateOpen() ? 1.0f : 0.0f,
+        g_jniState.inputNode->getInputLatencyMs(),
+    };
+    jfloatArray result = env->NewFloatArray(7);
+    if (result == nullptr) {
+        return nullptr;
+    }
+    env->SetFloatArrayRegion(result, 0, 7, values);
+    return result;
 }
 
 JNIEXPORT void JNICALL
@@ -3358,6 +3392,189 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     JNIEnv* env, jobject thiz) {
     if (!g_jniState.engine) return 0;
     return g_jniState.engine->getLooperEventDispatcher().getDroppedEvents();
+}
+
+// ==================== USB Round-Trip Loopback Test (Fase 5) ====================
+//
+// A single global measurer installed on the running LibusbBackend via
+// swapCallback. lifecycleMutex serializes start/cancel (which mutate the backend
+// callback) and the terminal-phase auto-restore in poll(). The original callback
+// (the engine) is stashed in g_rtPrevCallback and restored on
+// COMPLETE/ERROR/cancel — a guaranteed round-trip so the stream never keeps the
+// measurer as its callback.
+
+namespace {
+watermelon_audio::usb::RoundTripMeasurer g_rtMeasurer;
+watermelon_audio::IAudioCallback* g_rtPrevCallback = nullptr;
+bool g_rtInstalled = false;
+std::mutex g_rtLifecycleMutex;
+
+// Restore the backend's original callback. Caller holds g_rtLifecycleMutex.
+void rtRestoreCallbackLocked() {
+    if (!g_rtInstalled) return;
+    auto* backend = watermelon_audio::BackendManager::getInstance().getLibusbBackend();
+    if (backend) backend->swapCallback(g_rtPrevCallback);
+    g_rtPrevCallback = nullptr;
+    g_rtInstalled = false;
+}
+}  // namespace
+
+// config floats: [0]=burstCount [1]=burstIntervalMs [2]=amplitude [3]=searchWindowMs
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRoundTripStart(
+        JNIEnv* env, jobject thiz, jfloatArray config) {
+    std::lock_guard<std::mutex> lock(g_rtLifecycleMutex);
+    if (g_rtInstalled) {
+        LOGE("Round-trip: test already active");
+        return JNI_FALSE;
+    }
+    auto* backend = watermelon_audio::BackendManager::getInstance().getLibusbBackend();
+    if (!backend || !backend->isRunning()) {
+        LOGE("Round-trip: USB backend not running");
+        return JNI_FALSE;
+    }
+    const auto info = backend->getStreamInfo();
+    if (!info.isFullDuplex) {
+        LOGE("Round-trip: requires FULL_DUPLEX");
+        return JNI_FALSE;  // Kotlin pre-check surfaces REQUIRES_FULL_DUPLEX
+    }
+
+    watermelon_audio::usb::RoundTripMeasurer::StartParams params;
+    params.sampleRate = info.sampleRate > 0 ? info.sampleRate : 48000;
+    params.outChannels = info.channelCount > 0 ? info.channelCount : 2;
+    params.inChannels = params.outChannels;  // engine-facing layout is symmetric
+    params.jitterBudgetMs = backend->getJitterBudgetMs();
+    params.profile = backend->getLatencyProfileOrdinal();
+
+    if (config) {
+        const jsize n = env->GetArrayLength(config);
+        jfloat buf[4] = {10.0f, 300.0f, 0.25f, 250.0f};
+        env->GetFloatArrayRegion(config, 0, std::min<jsize>(n, 4), buf);
+        params.config.burstCount = std::max(1, static_cast<int>(buf[0]));
+        params.config.burstIntervalMs = std::max(50, static_cast<int>(buf[1]));
+        params.config.amplitude = std::clamp(buf[2], 0.01f, 1.0f);
+        params.config.searchWindowMs = std::max(50, static_cast<int>(buf[3]));
+    }
+
+    if (!g_rtMeasurer.start(params)) {
+        LOGE("Round-trip: measurer.start() failed");
+        return JNI_FALSE;
+    }
+    g_rtPrevCallback = backend->swapCallback(&g_rtMeasurer);
+    g_rtInstalled = true;
+    LOGI("Round-trip: installed measurer over live stream");
+    return JNI_TRUE;
+}
+
+// poll floats [10]: [0]=state [1]=progressPct [2]=currentBurst [3]=medianMs
+// [4]=madMs [5]=confidence [6]=softwareOutMs [7]=softwareInMs [8]=validBursts
+// [9]=errorCode
+JNIEXPORT jfloatArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRoundTripPoll(
+        JNIEnv* env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_rtLifecycleMutex);
+    const auto snap = g_rtMeasurer.poll();
+
+    // Feed the software-latency (L7) average while actively measuring.
+    if (g_rtInstalled &&
+        snap.phase == watermelon_audio::usb::RoundTripMeasurer::Phase::MEASURING) {
+        if (auto* backend =
+                watermelon_audio::BackendManager::getInstance().getLibusbBackend()) {
+            g_rtMeasurer.noteSoftwareLatency(backend->getOutputLatencyMs(),
+                                             backend->getInputLatencyMs());
+        }
+    }
+
+    jfloat v[10] = {0};
+    v[0] = static_cast<float>(snap.phase);
+    v[1] = snap.progressPct;
+    v[2] = static_cast<float>(snap.currentBurst);
+    v[3] = snap.result.medianMs;
+    v[4] = snap.result.madMs;
+    v[5] = snap.result.confidence;
+    v[6] = snap.result.softwareOutputMs;
+    v[7] = snap.result.softwareInputMs;
+    v[8] = static_cast<float>(snap.result.validBursts);
+    v[9] = static_cast<float>(snap.result.error);
+
+    // Guaranteed restore the moment the test reaches a terminal phase.
+    using Phase = watermelon_audio::usb::RoundTripMeasurer::Phase;
+    if (snap.phase == Phase::COMPLETE || snap.phase == Phase::ERROR) {
+        rtRestoreCallbackLocked();
+    }
+
+    jfloatArray result = env->NewFloatArray(10);
+    if (result) env->SetFloatArrayRegion(result, 0, 10, v);
+    return result;
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRoundTripCancel(
+        JNIEnv* env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_rtLifecycleMutex);
+    rtRestoreCallbackLocked();  // restore FIRST, then tear the measurer down
+    g_rtMeasurer.cancel();
+    LOGI("Round-trip: cancelled");
+}
+
+// ==================== USB RT environment (App V §4, steps 2 & 5) ==========
+//
+// One poll for the USB Lab RT-env + jitter-budget steps. floats:
+// [0]=dspSchedResult [1]=eventLoopSchedResult [2]=adpfState
+// [3]=jitterBudgetMs [4]=convergedFloorMs [5]=latencyProfileOrdinal
+// (ThreadUtils::SchedResult ordinals; adpfState 0/1/2.) All -1/0 if no USB.
+JNIEXPORT jfloatArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsbRtEnv(
+        JNIEnv* env, jobject thiz) {
+    (void)thiz;
+    jfloat v[6] = {-1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    auto* backend = watermelon_audio::BackendManager::getInstance().getLibusbBackend();
+    if (backend) {
+        v[0] = static_cast<float>(backend->getDspSchedResult());
+        v[1] = static_cast<float>(backend->getEventLoopSchedResult());
+        v[2] = static_cast<float>(backend->getAdpfState());
+        v[3] = static_cast<float>(backend->getJitterBudgetMs());
+        v[4] = static_cast<float>(backend->getConvergedFloorMs());
+        v[5] = static_cast<float>(backend->getLatencyProfileOrdinal());
+    }
+    jfloatArray result = env->NewFloatArray(6);
+    if (result) env->SetFloatArrayRegion(result, 0, 6, v);
+    return result;
+}
+
+// ==================== Native Log Capture (App V §3.2) ====================
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetLogCaptureEnabled(
+        JNIEnv* env, jobject thiz, jboolean enabled) {
+    (void)env; (void)thiz;
+    wma::LogCaptureBuffer::instance().setEnabled(enabled == JNI_TRUE);
+}
+
+// Drain the captured lines since the last call (each "L/TAG: message").
+JNIEXPORT jobjectArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeDrainCapturedLogs(
+        JNIEnv* env, jobject thiz) {
+    (void)thiz;
+    const std::vector<std::string> lines = wma::LogCaptureBuffer::instance().drain();
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (!stringClass) return nullptr;
+    jobjectArray arr = env->NewObjectArray(
+        static_cast<jsize>(lines.size()), stringClass, nullptr);
+    if (!arr) return nullptr;
+    for (jsize i = 0; i < static_cast<jsize>(lines.size()); ++i) {
+        jstring s = env->NewStringUTF(lines[static_cast<size_t>(i)].c_str());
+        env->SetObjectArrayElement(arr, i, s);
+        env->DeleteLocalRef(s);  // avoid overflowing the local ref table on big drains
+    }
+    return arr;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetLogCaptureDropped(
+        JNIEnv* env, jobject thiz) {
+    (void)env; (void)thiz;
+    return static_cast<jint>(wma::LogCaptureBuffer::instance().droppedCount());
 }
 
 } // extern "C"

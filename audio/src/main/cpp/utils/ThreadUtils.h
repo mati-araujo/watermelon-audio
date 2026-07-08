@@ -47,6 +47,29 @@ public:
     };
 
     /**
+     * Actual scheduling outcome of a realtime-priority request. Android usually
+     * denies SCHED_FIFO/SCHED_RR to non-privileged apps and we fall back to a
+     * nice value — callers that need real-time guarantees (Fase 3 microframe)
+     * must be able to observe which happened instead of assuming success.
+     */
+    enum class SchedResult {
+        FIFO_GRANTED,   // SCHED_FIFO applied — hard real-time
+        RR_GRANTED,     // SCHED_RR applied
+        NICE_FALLBACK,  // RT policy denied; nice value applied (typical Android)
+        FAILED          // Could not set any scheduling parameters
+    };
+
+    static const char* toString(SchedResult r) {
+        switch (r) {
+            case SchedResult::FIFO_GRANTED:  return "FIFO_GRANTED";
+            case SchedResult::RR_GRANTED:    return "RR_GRANTED";
+            case SchedResult::NICE_FALLBACK: return "NICE_FALLBACK";
+            case SchedResult::FAILED:        return "FAILED";
+        }
+        return "UNKNOWN";
+    }
+
+    /**
      * @brief Configure a thread for real-time audio processing
      *
      * Sets the thread to:
@@ -76,7 +99,7 @@ public:
         }
 
         // 2. Set scheduling priority
-        if (!setThreadPriority(handle, priority)) {
+        if (setThreadPriority(handle, priority) == SchedResult::FAILED) {
             THREAD_LOGW("Failed to set thread priority for: %s", name);
             success = false;
         }
@@ -91,22 +114,17 @@ public:
     /**
      * @brief Configure the current thread for real-time audio
      *
-     * Same as setRealtimeAudioThread but for the calling thread
+     * Same as setRealtimeAudioThread but for the calling thread.
+     *
+     * @return the actual scheduling outcome (SCHED_FIFO granted vs. nice
+     *         fallback). Callers that need hard real-time guarantees inspect
+     *         this instead of assuming the request succeeded.
      */
-    static bool setCurrentThreadRealtime(const char* name,
-                                          Priority priority = Priority::REALTIME) {
+    static SchedResult setCurrentThreadRealtime(const char* name,
+                                                Priority priority = Priority::REALTIME) {
         pthread_t handle = pthread_self();
-        bool success = true;
-
-        if (!setThreadName(handle, name)) {
-            success = false;
-        }
-
-        if (!setThreadPriority(handle, priority)) {
-            success = false;
-        }
-
-        return success;
+        setThreadName(handle, name);
+        return setThreadPriority(handle, priority);
     }
 
     /**
@@ -196,7 +214,7 @@ private:
 #endif
     }
 
-    static bool setThreadPriority(pthread_t handle, Priority priority) {
+    static SchedResult setThreadPriority(pthread_t handle, Priority priority) {
 #if defined(__ANDROID__) || defined(__linux__)
         // First, try to use Android's nice value (works without root)
         // Lower nice = higher priority, range is -20 to 19
@@ -219,7 +237,8 @@ private:
         // Set nice value for this thread
         // Note: setpriority with PRIO_PROCESS and tid=0 sets current thread
         pid_t tid = syscall(SYS_gettid);
-        if (setpriority(PRIO_PROCESS, tid, niceValue) == 0) {
+        bool niceApplied = (setpriority(PRIO_PROCESS, tid, niceValue) == 0);
+        if (niceApplied) {
             THREAD_LOGI("Set nice value to %d for tid %d", niceValue, tid);
         }
 
@@ -248,24 +267,27 @@ private:
                 break;
 
             default:
-                // NORMAL priority - don't change scheduler
-                return true;
+                // NORMAL priority - don't change scheduler. The nice value (0)
+                // is the only lever; report it as the "fallback" outcome.
+                return niceApplied ? SchedResult::NICE_FALLBACK : SchedResult::FAILED;
         }
 
         int result = pthread_setschedparam(handle, policy, &param);
         if (result != 0) {
-            // Expected to fail on Android without root
-            // The nice value we set earlier should still help
+            // Expected to fail on Android without root. The nice value we set
+            // earlier still applies, so this is a graceful fallback, not an
+            // error — but callers can distinguish it from a granted RT policy.
             THREAD_LOGW("pthread_setschedparam failed (errno=%d), using nice value only", result);
-            return true; // Still return true because nice value was set
+            return niceApplied ? SchedResult::NICE_FALLBACK : SchedResult::FAILED;
         }
 
         THREAD_LOGI("Set scheduling policy=%d, priority=%d", policy, param.sched_priority);
-        return true;
+        return (policy == SCHED_FIFO) ? SchedResult::FIFO_GRANTED
+                                      : SchedResult::RR_GRANTED;
 #else
         (void)handle;
         (void)priority;
-        return true;
+        return SchedResult::NICE_FALLBACK;
 #endif
     }
 

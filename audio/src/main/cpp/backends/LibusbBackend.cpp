@@ -11,6 +11,7 @@
 #include "../usb/UsbClockGraph.h"
 #include "../usb/UsbIsoTiming.h"
 #include "../usb/RateCoercionPolicy.h"
+#include "../usb/DspPacer.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -18,6 +19,8 @@
 #include <algorithm>
 #include <chrono>
 #include <vector>
+#include <sys/syscall.h>  // SYS_gettid (F4: was resolved only transitively)
+#include <unistd.h>       // syscall()
 
 #define LOG_TAG "LibusbBackend"
 #undef LOGI
@@ -1075,7 +1078,7 @@ BackendResult LibusbBackend::start() {
         return BackendResult::ERROR_NOT_INITIALIZED;
     }
 
-    if (!mCallback) {
+    if (!mCallback.load(std::memory_order_acquire)) {
         LOGE("No audio callback set");
         return BackendResult::ERROR_INVALID_CONFIG;
     }
@@ -1259,7 +1262,13 @@ void LibusbBackend::resume() {
 }
 
 void LibusbBackend::setCallback(IAudioCallback* callback) {
-    mCallback = callback;
+    mCallback.store(callback, std::memory_order_release);
+}
+
+IAudioCallback* LibusbBackend::swapCallback(IAudioCallback* next) {
+    // Glitchless hot-swap: the DSP loop reads mCallback once per iteration with
+    // acquire ordering, so the exchange takes effect on the next block boundary.
+    return mCallback.exchange(next, std::memory_order_acq_rel);
 }
 
 void LibusbBackend::setSampleRate(int sampleRate) {
@@ -1474,16 +1483,9 @@ bool LibusbBackend::setupTransferManager() {
     // reader walks 3 bytes per sample over data that was laid out as 2-byte
     // S16 samples, interpreting every 1.5 real samples as one "24-bit" one
     // and reading 50% past the end of each packet).
-    auto bitDepthToFormat = [](int depth) {
-        switch (depth) {
-            case 16: return usb::PcmFormat::PCM_S16_LE;
-            case 24: return usb::PcmFormat::PCM_S24_3LE;
-            case 32: return usb::PcmFormat::PCM_S32_LE;
-            default: return usb::PcmFormat::PCM_S16_LE;
-        }
-    };
-    config.pcmFormat = bitDepthToFormat(config.bitDepth);
-    config.inputPcmFormat = bitDepthToFormat(config.inputBitDepth);
+    // Single source of truth for bitDepth→PcmFormat (usb/AudioFormatConverter.h).
+    config.pcmFormat = usb::pcmFormatForBitDepth(config.bitDepth);
+    config.inputPcmFormat = usb::pcmFormatForBitDepth(config.inputBitDepth);
 
     // Determine the actual USB speed of the attached device. UAC 2.0 almost
     // always runs at USB 2.0 high-speed, where iso endpoints are polled once
@@ -1678,8 +1680,13 @@ void LibusbBackend::dspThreadFunc() {
          mStreamingMode == UsbStreamingMode::PLAYBACK_ONLY ? "PLAYBACK_ONLY" :
          mStreamingMode == UsbStreamingMode::CAPTURE_ONLY ? "CAPTURE_ONLY" : "FULL_DUPLEX");
 
-    // Configure this thread for real-time audio from within the thread
-    ThreadUtils::setCurrentThreadRealtime("UsbDspThread", ThreadUtils::Priority::REALTIME);
+    // Configure this thread for real-time audio from within the thread. Capture
+    // the real outcome (SCHED_FIFO granted vs. nice fallback) for telemetry and
+    // as the Fase 3 microframe precondition.
+    const auto dspSched = ThreadUtils::setCurrentThreadRealtime(
+        "UsbDspThread", ThreadUtils::Priority::REALTIME);
+    mDspSchedResult.store(static_cast<int>(dspSched), std::memory_order_relaxed);
+    LOGI("DSP thread scheduling: %s", ThreadUtils::toString(dspSched));
 
     // Pin this thread to a performance core (big core on ARM big.LITTLE)
     int numCpus = ThreadUtils::getNumCpus();
@@ -1698,6 +1705,41 @@ void LibusbBackend::dspThreadFunc() {
     const int framesPerBlock = mRequestedBufferSize;
     const size_t outputSamples = mDspOutputSamples;  // Exact samples for output write
     const size_t inputSamples = mDspInputSamples;    // Exact samples for input read
+
+    // ADPF (Android Dynamic Performance Framework): register the DSP thread —
+    // and the libusb event thread if it has already started — in a hint session
+    // whose target is one DSP block of work per iteration. This asks the CPU
+    // governor not to drop the core frequency during the tiny periodic
+    // LOW_LATENCY loads, which is the dominant cause of the residual >8 ms reap
+    // tail flagged in LatencyProfile.h. dlsym-guarded, no-op below API 33 —
+    // SCHED_FIFO/affinity behavior above is unchanged on older devices.
+    AdpfSession dspAdpf;
+    {
+        const int adpfSampleRate =
+            mNegotiatedSampleRate.load(std::memory_order_relaxed) > 0
+                ? mNegotiatedSampleRate.load(std::memory_order_relaxed)
+                : 48000;
+        const int64_t adpfTargetNanos =
+            static_cast<int64_t>(framesPerBlock) * 1000000000LL / adpfSampleRate;
+        std::vector<int32_t> adpfTids;
+        adpfTids.push_back(static_cast<int32_t>(syscall(SYS_gettid)));
+        const int eventTid =
+            mTransferManager ? mTransferManager->getEventThreadTid() : 0;
+        if (eventTid > 0) {
+            adpfTids.push_back(static_cast<int32_t>(eventTid));
+        }
+        if (dspAdpf.init(adpfTids, adpfTargetNanos)) {
+            LOGI("ADPF hint session active (target=%lld ns, threads=%zu)",
+                 (long long)adpfTargetNanos, adpfTids.size());
+        } else {
+            LOGI("ADPF hint session unavailable (API<33 or denied) — no-op");
+        }
+    }
+    const bool adpfActive = dspAdpf.isActive();
+    // Publish ADPF state for the USB Lab RT-env step: 2 active, 1 available but
+    // not active, 0 unavailable.
+    mAdpfState.store(adpfActive ? 2 : (AdpfSession::isSupported() ? 1 : 0),
+                     std::memory_order_relaxed);
 
     // Target fill level the DSP aims to keep in the output ring. The loop
     // produces immediately while the ring holds less than this, and only
@@ -1725,10 +1767,6 @@ void LibusbBackend::dspThreadFunc() {
     // the jitter budget atomic and adjust the target live without a stream
     // restart (L2). Today it's a pure integer calc over immutable config, so
     // the per-iteration cost is negligible.
-
-    // Adaptive buffer evaluation counter
-    int callbackCount = 0;
-    const int ADAPTIVE_EVAL_INTERVAL = 100;
 
     // Error tracking for disconnect detection (P0-2 fix)
     int consecutiveWriteErrors = 0;
@@ -1792,37 +1830,33 @@ void LibusbBackend::dspThreadFunc() {
     bool inputSplicePending = false;
 
     while (mDspRunning.load(std::memory_order_acquire)) {
+        // Load the callback once per iteration (Fase 5 hot-swap): a concurrent
+        // swapCallback() takes effect on the NEXT iteration, never mid-block.
+        IAudioCallback* cb = mCallback.load(std::memory_order_acquire);
+
         // P0-2: Check for device disconnection
         if (mTransferManager && mTransferManager->isDeviceDisconnected()) {
             LOGI("Device disconnected detected in DSP thread, exiting");
             mDeviceDisconnected.store(true, std::memory_order_release);
-            if (mCallback) {
-                mCallback->onBackendError(BackendError::DEVICE_DISCONNECTED);
+            if (cb) {
+                cb->onBackendError(BackendError::DEVICE_DISCONNECTED);
             }
             break;
         }
 
-        // Check for pending buffer resize
-        if (mBufferResizePending.load(std::memory_order_acquire)) {
-            performBufferResize();
-        }
+        // (Legacy ring-capacity resize removed from the DSP loop — F3: the only
+        // setter, requestBufferResize(), has no callers. performBufferResize() and
+        // ResizableRingBuffer survive behind the deprecated JNI until App plan D.)
 
-        // Periodic adaptive buffer evaluation
-        if (mAdaptiveBufferingEnabled.load(std::memory_order_relaxed) &&
-            mTransferManager && ++callbackCount >= ADAPTIVE_EVAL_INTERVAL) {
-            callbackCount = 0;
-
-            auto* controller = mTransferManager->getBufferController();
-            if (controller) {
-                auto stats = mTransferManager->getProfilingStats();
-                controller->updateFromProfiler(stats);
-
-                auto recommendation = controller->evaluate();
-                if (recommendation != usb::AdaptiveBufferController::Recommendation::NO_CHANGE) {
-                    int newBufferMs = controller->getRecommendedBufferMs();
-                    requestBufferResize(newBufferMs);
-                }
-            }
+        // Adaptive jitter-budget convergence (Fase 2 / H4). Replaces the legacy
+        // AdaptiveBufferController, which resized ring CAPACITY — the wrong lever
+        // (latency is the jitter budget, adjusted live with no resize/glitch).
+        // Internally time-windowed (~2 s) with a cheap early-out, so it's safe to
+        // call every iteration. The UP direction stays immediate in the event
+        // thread's underrun ratchet; this only walks the budget back DOWN toward
+        // the per-session floor after a long clean stretch. SAFE is frozen.
+        if (mTransferManager) {
+            mTransferManager->maybeConvergeJitterBudget();
         }
 
         // P1-3: Paused state — drain/fill with short sleep (reduced from 1ms to 200µs)
@@ -1838,44 +1872,43 @@ void LibusbBackend::dspThreadFunc() {
             continue;
         }
 
-        // Ring-level pacing (see outputRingTarget comment above for the
-        // full rationale). We check readiness FIRST and only block on
-        // the wake signal if there's actually nothing to do right now.
-        //
-        // outputReady here means "the output ring NEEDS more data" — not
-        // "there is space to write". The distinction matters: in
-        // PLAYBACK_ONLY the ring is usually drained far below capacity,
-        // so the old `availableToWrite >= outputSamples` check was
-        // trivially true and the DSP ended up paced purely by wake
-        // arrival rate.
+        // Ring-level pacing: we check readiness FIRST and only block on the
+        // wake signal if there's nothing to do right now. "Ready" means the
+        // output ring NEEDS more data (drained below target) — not that there
+        // is space to write; in PLAYBACK_ONLY the ring sits far below capacity,
+        // so a capacity check would be trivially true and pace the DSP purely by
+        // wake arrival rate. Full rationale + rules now live in DspPacer.h.
         const size_t outputRingTarget = mSelectedPlayback
             ? mTransferManager->getOutputRingTargetLevel()
             : 0;
         const size_t outputRingLevel = mSelectedPlayback
             ? mTransferManager->getOutputRingLevel()
             : 0;
-        bool outputReady = !mSelectedPlayback ||
-            (outputRingLevel < outputRingTarget);
-        bool inputReady = !mSelectedCapture ||
-            (mTransferManager->getInputBufferAvailable() >= inputSamples);
 
-        // Emergency production: in duplex the input gate must never starve
-        // the DAC. If the output ring falls below half the pacer target (or
-        // one block, whichever is larger) while input hasn't delivered a full
-        // block — capture hiccup, lost iso packets, device stall — produce
-        // anyway: readInput below fails without consuming and the existing
-        // last-valid-block fade keeps the output continuous. A brief input
-        // fade is far less audible than a silence-filled output packet, and
-        // the combined-excess trim below reconciles the extra produced audio
-        // once capture resumes.
-        const bool outputCritical = mSelectedPlayback && mSelectedCapture &&
-            outputRingLevel < std::max(outputSamples, outputRingTarget / 2);
+        // Ring-level pacer gate. The decision (WAIT vs PRODUCE, and the
+        // emergency "produce anyway" case when the DAC is starving in duplex)
+        // is extracted bit-identically into usb::evaluatePacer (DspPacer.h) so
+        // it can be host-tested. outputReady means "the ring NEEDS more data",
+        // not "there is space to write"; outputCritical lets the input gate be
+        // bypassed when the output ring falls critically low so the last-valid-
+        // block fade covers a capture hiccup instead of glitching the DAC.
+        const usb::PacerAction pacerAction = usb::evaluatePacer({
+            .hasPlayback = mSelectedPlayback.has_value(),
+            .hasCapture = mSelectedCapture.has_value(),
+            .outputRingLevel = outputRingLevel,
+            .outputRingTarget = outputRingTarget,
+            .outputSamplesPerBlock = outputSamples,
+            .inputAvailable = mSelectedCapture
+                ? mTransferManager->getInputBufferAvailable()
+                : size_t{0},
+            .inputSamplesPerBlock = inputSamples,
+        });
 
-        if (!outputReady || (!inputReady && !outputCritical)) {
+        if (pacerAction == usb::PacerAction::WAIT) {
             // Nothing to produce yet — output ring is at or above target,
             // or input ring doesn't have enough samples. Block on the
             // wake signal with a 5ms safety timeout so the disconnect
-            // watchdog (500ms) can still catch a fully stalled device.
+            // watchdog can still catch a fully stalled device.
             (void)mDspWake.try_acquire_for(std::chrono::milliseconds(5));
             if (!mDspRunning.load(std::memory_order_acquire)) {
                 break;
@@ -1892,6 +1925,14 @@ void LibusbBackend::dspThreadFunc() {
         // ring-level pacer.
         while (mDspWake.try_acquire()) {
             // drain
+        }
+
+        // ADPF: this is the start of a real produce cycle (the wait/paused
+        // paths above all `continue` before reaching here). Measure the
+        // wall-clock cost of producing this block and report it below.
+        std::chrono::steady_clock::time_point adpfWorkStart;
+        if (adpfActive) {
+            adpfWorkStart = std::chrono::steady_clock::now();
         }
 
         // Get input data if capture is enabled
@@ -1918,29 +1959,30 @@ void LibusbBackend::dspThreadFunc() {
             //   - post-stall (output in deficit): excess ≈ 0 → no trim, the
             //     backlog refills the output ring. Self-healing restored.
             const size_t inTarget = mTransferManager->getInputRingTargetLevel();
-            size_t inAvail = mTransferManager->getInputBufferAvailable();
+            const size_t inAvail = mTransferManager->getInputBufferAvailable();
             {
-                const int inCh = std::max(1, mTransferManager->getInputChannelCount());
-                const long inExcessFrames =
-                    (static_cast<long>(inAvail) - static_cast<long>(inTarget))
-                    / inCh;
-                long excessFrames = inExcessFrames;
-                if (mSelectedPlayback) {
-                    const int outCh =
-                        std::max(1, mTransferManager->getOutputChannelCount());
-                    excessFrames += (static_cast<long>(outputRingLevel)
-                                     - static_cast<long>(outputRingTarget))
-                                    / outCh;
-                }
+                // Combined-excess trim — extracted bit-identically to
+                // usb::computeTrimBlocks (DspPacer.h). It returns how many input
+                // blocks the excess lets us discard; we execute exactly that
+                // many reads, stopping early only if a read fails (as the
+                // original while-loop did on readInput failure).
+                const int trimBlocks = usb::computeTrimBlocks({
+                    .hasPlayback = mSelectedPlayback.has_value(),
+                    .inputAvailable = inAvail,
+                    .inputTarget = inTarget,
+                    .inputChannels = mTransferManager->getInputChannelCount(),
+                    .outputRingLevel = outputRingLevel,
+                    .outputRingTarget = outputRingTarget,
+                    .outputChannels = mTransferManager->getOutputChannelCount(),
+                    .framesPerBlock = framesPerBlock,
+                    .inputSamplesPerBlock = inputSamples,
+                });
                 size_t trimmed = 0;
-                while (excessFrames >= framesPerBlock &&
-                       inAvail >= inTarget + inputSamples) {
+                for (int b = 0; b < trimBlocks; ++b) {
                     if (!mTransferManager->readInput(inputBuffer.data(),
                                                      inputSamples)) {
                         break;
                     }
-                    inAvail -= inputSamples;
-                    excessFrames -= framesPerBlock;
                     trimmed += inputSamples;
                 }
                 if (trimmed > 0) {
@@ -2166,7 +2208,7 @@ void LibusbBackend::dspThreadFunc() {
                 wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
                     "USB_CLOCK: src=%s sr=%.1fHz drift=%.1fppm nomFpp=%.4f "
                     "effFpp=%.4f fbRecv=%u fbInvalid=%u | "
-                    "outLatMs=%.2f inLatMs=%.2f jbExtra=%d | "
+                    "outLatMs=%.2f inLatMs=%.2f jbMs=%d | "
                     "underrunsDelta=%llu overrunsDelta=%llu trimDelta=%llu "
                     "wireGapsDelta=%llu maxGapMs=%u",
                     src, sr, drift, nomFpp,
@@ -2175,7 +2217,7 @@ void LibusbBackend::dspThreadFunc() {
                     s.feedbackPacketsInvalid.load(std::memory_order_relaxed),
                     s.currentLatencyMs.load(std::memory_order_relaxed),
                     s.currentInputLatencyMs.load(std::memory_order_relaxed),
-                    mTransferManager->getJitterExtraMs(),
+                    mTransferManager->getJitterBudgetMs(),
                     static_cast<unsigned long long>(underrunsDelta),
                     static_cast<unsigned long long>(overrunsDelta),
                     static_cast<unsigned long long>(trimmedDelta),
@@ -2198,13 +2240,13 @@ void LibusbBackend::dspThreadFunc() {
             underrunsAtWindowStart = underrunsNow;
         }
 
-        if (mCallback) {
+        if (cb) {
             auto& profiler = mTransferManager->getLatencyProfiler();
             if (profiler.isEnabled()) {
                 profiler.onDspCallbackStart();
             }
 
-            auto result = mCallback->onAudioReady(
+            auto result = cb->onAudioReady(
                 outputPtr,
                 inputPtr,
                 framesPerBlock
@@ -2278,8 +2320,8 @@ void LibusbBackend::dspThreadFunc() {
                 if (++consecutiveWriteErrors > MAX_CONSECUTIVE_ERRORS) {
                     LOGE("Too many consecutive write errors (%d), possible disconnect",
                          consecutiveWriteErrors);
-                    if (mCallback) {
-                        mCallback->onBackendError(BackendError::UNDERRUN);
+                    if (cb) {
+                        cb->onBackendError(BackendError::UNDERRUN);
                     }
                     consecutiveWriteErrors = 0;
                 }
@@ -2294,6 +2336,17 @@ void LibusbBackend::dspThreadFunc() {
             size_t ringLvl = mTransferManager->getOutputRingLevel();
             if (ringLvl < lastOutputRingLevelMin) lastOutputRingLevelMin = ringLvl;
             if (ringLvl > lastOutputRingLevelMax) lastOutputRingLevelMax = ringLvl;
+        }
+
+        // ADPF: report the actual work duration of this produce cycle so the
+        // governor can size the boost. Single forwarded call, no-op when the
+        // session is inactive.
+        if (adpfActive) {
+            const auto adpfElapsed =
+                std::chrono::steady_clock::now() - adpfWorkStart;
+            dspAdpf.reportActualWorkDuration(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(adpfElapsed)
+                    .count());
         }
     }
 
@@ -2449,12 +2502,12 @@ void LibusbBackend::handleTransferError(usb::UsbAudioError error, const char* me
     }
 
     // Notify callback
-    if (mCallback) {
+    if (IAudioCallback* cb = mCallback.load(std::memory_order_acquire)) {
         BackendError backendError = BackendError::TRANSFER_ERROR;
         if (error == usb::UsbAudioError::DEVICE_DISCONNECTED) {
             backendError = BackendError::DEVICE_DISCONNECTED;
         }
-        mCallback->onBackendError(backendError);
+        cb->onBackendError(backendError);
     }
 
     // Notify USB error callback

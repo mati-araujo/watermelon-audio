@@ -4,6 +4,11 @@ Real-time audio synthesis and effects engine for Android. C++20 + Oboe + Kotlin 
 
 **Watermelon Studios** — *Make sound. See sound. Feel sound.*
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Kotlin](https://img.shields.io/badge/Kotlin-2.3.20-7F52FF.svg)
+![C++](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)
+![Platform](https://img.shields.io/badge/Platform-Android-3DDC84.svg)
+
 ---
 
 ## Features
@@ -92,7 +97,7 @@ dependencyResolutionManagement {
 
 // build.gradle.kts
 dependencies {
-    implementation("com.watermellonstudios:audio-android:1.3.1")
+    implementation("com.watermellonstudios:audio-android:1.5.0")
 }
 ```
 
@@ -104,7 +109,7 @@ dependencies {
 
 # In consuming project — add mavenLocal() to repositories:
 dependencies {
-    implementation("com.watermellonstudios:audio-android:1.3.1")
+    implementation("com.watermellonstudios:audio-android:1.5.0")
 }
 ```
 
@@ -184,4 +189,4 @@ engine.release()
 
 ## License
 
-Copyright 2026 Watermelon Studios. All rights reserved.
+Released under the [MIT License](LICENSE). Copyright (c) 2026 Matías Araujo (Watermelon Studios).

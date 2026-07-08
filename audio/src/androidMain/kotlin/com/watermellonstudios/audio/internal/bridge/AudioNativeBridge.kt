@@ -1668,6 +1668,17 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun getInputLatencyMs(): Float = nativeGetInputLatencyMs()
 
     /**
+     * Batched input metering snapshot in a single JNI crossing. Returns 7
+     * floats — see the native layout — or null when there is no input node (the
+     * caller should fall back to the individual getters). Used by level meters
+     * that poll at frame rate to avoid ~480 JNI crossings/sec.
+     *
+     * Layout: [0]=levelDb ch0, [1]=levelDb ch1, [2]=levelLinear ch0,
+     * [3]=levelLinear ch1, [4]=clipping(1/0), [5]=noiseGateOpen(1/0), [6]=latencyMs.
+     */
+    fun getInputMeteringSnapshot(): FloatArray? = nativeGetInputMeteringSnapshot()
+
+    /**
      * Release input node resources.
      */
     suspend fun releaseInputNode(): Result<Unit> = withContext(Dispatchers.Default) {
@@ -2018,6 +2029,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeIsInputClipping(): Boolean
     private external fun nativeIsNoiseGateOpen(): Boolean
     private external fun nativeGetInputLatencyMs(): Float
+    private external fun nativeGetInputMeteringSnapshot(): FloatArray?
     private external fun nativeReleaseInputNode()
 
     // ==================== Native Methods: Monitoring ====================
@@ -2571,6 +2583,52 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     fun resetUsbProfilingStats() = nativeResetUsbProfilingStats()
 
+    // ==================== USB Round-Trip Loopback (Fase 5) ====================
+
+    /**
+     * Start the physical loopback round-trip latency test on the running USB
+     * backend. Requires a FULL_DUPLEX stream with OUT wired to IN.
+     *
+     * @param config [burstCount, burstIntervalMs, amplitude, searchWindowMs]
+     * @return true if the measurer was installed; false if the backend is not
+     *   running, not full-duplex, or a test is already active.
+     */
+    fun usbRoundTripStart(config: FloatArray): Boolean = nativeUsbRoundTripStart(config)
+
+    /**
+     * Poll the round-trip test. Returns 10 floats:
+     *   [0]=state [1]=progressPct [2]=currentBurst [3]=medianMs [4]=madMs
+     *   [5]=confidence [6]=softwareOutMs [7]=softwareInMs [8]=validBursts
+     *   [9]=errorCode. Restores the original backend callback on the first poll
+     *   that observes a terminal (COMPLETE/ERROR) phase.
+     */
+    fun usbRoundTripPoll(): FloatArray? = nativeUsbRoundTripPoll()
+
+    /** Cancel the round-trip test and restore the original backend callback. */
+    fun usbRoundTripCancel() = nativeUsbRoundTripCancel()
+
+    // ==================== USB RT Environment (App V §4) ====================
+
+    /**
+     * USB RT-environment snapshot for the USB Lab. 6 floats:
+     *   [0]=dspSchedResult [1]=eventLoopSchedResult [2]=adpfState (0/1/2)
+     *   [3]=jitterBudgetMs [4]=convergedFloorMs [5]=latencyProfileOrdinal.
+     * SchedResult values are ThreadUtils::SchedResult ordinals. All -1/0 if no
+     * USB backend is running.
+     */
+    fun getUsbRtEnv(): FloatArray? = nativeGetUsbRtEnv()
+
+    // ==================== Native Log Capture (App V §3.2) ====================
+
+    /** Enable/disable the native in-memory log capture (second sink). */
+    fun setLogCaptureEnabled(enabled: Boolean) = nativeSetLogCaptureEnabled(enabled)
+
+    /** Drain captured native log lines since the last call ("L/TAG: message"). */
+    fun drainCapturedLogs(): Array<String> = nativeDrainCapturedLogs() ?: emptyArray()
+
+    /** Count of lines dropped because the capture ring overflowed. */
+    fun getLogCaptureDropped(): Int = nativeGetLogCaptureDropped()
+
     // ==================== Native Methods: Latency Benchmark ====================
 
     private external fun nativeGetDetailedLatencyInfo(): FloatArray?
@@ -2587,6 +2645,19 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeGetUsbProfilingStats(): FloatArray?
     private external fun nativeSetUsbProfilingEnabled(enabled: Boolean)
     private external fun nativeResetUsbProfilingStats()
+
+    // ==================== Native Methods: USB Round-Trip (Fase 5) ============
+
+    private external fun nativeUsbRoundTripStart(config: FloatArray): Boolean
+    private external fun nativeUsbRoundTripPoll(): FloatArray?
+    private external fun nativeUsbRoundTripCancel()
+
+    // ==================== Native Methods: USB RT env + Log Capture ==========
+
+    private external fun nativeGetUsbRtEnv(): FloatArray?
+    private external fun nativeSetLogCaptureEnabled(enabled: Boolean)
+    private external fun nativeDrainCapturedLogs(): Array<String>?
+    private external fun nativeGetLogCaptureDropped(): Int
 
     // ==================== Arpeggiator (Phase 7) ====================
 

@@ -40,6 +40,7 @@ FetchContent_MakeAvailable(googletest)
 # Android, no Oboe.
 set(USB_TESTED_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../UsbDescriptorParser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../RoundTripMeasurer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../backends/DriftResampler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../backends/SplitBackend.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../platform/Logger.cpp
@@ -58,6 +59,11 @@ add_executable(usb_tests
     test_clock_graph.cpp
     test_usb_iso_timing.cpp
     test_usb_latency_profile.cpp
+    test_dsp_pacer.cpp
+    test_jitter_budget_controller.cpp
+    test_roundtrip_analyzer.cpp
+    test_roundtrip_measurer.cpp
+    test_log_capture_buffer.cpp
     test_resizable_ring_buffer.cpp
     test_channel_map.cpp
     test_feature_unit_caps.cpp
@@ -73,7 +79,8 @@ target_include_directories(usb_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
 )
 
-target_link_libraries(usb_tests PRIVATE GTest::gtest_main)
+find_package(Threads REQUIRED)
+target_link_libraries(usb_tests PRIVATE GTest::gtest_main Threads::Threads)
 
 # Register with CTest
 include(GoogleTest)

@@ -40,6 +40,7 @@
 #include "AudioFormatConverter.h"
 #include "UsbLatencyProfiler.h"
 #include "AdaptiveBufferController.h"
+#include "JitterBudgetController.h"
 #include "ChannelMap.h"
 #include "RecoveryPolicy.h"
 #include "ResizableRingBuffer.h"
@@ -149,6 +150,17 @@ struct TransferConfig {
 
     int inputRingBufferSamples() const {
         return ringBufferFrames() * inputChannelCount;
+    }
+
+    // Wall-clock duration of one iso transfer (URB) at the active cadence, in
+    // whole milliseconds (rounded up, floored at 1). Used to size regime-
+    // proportional timeouts: with 1 ms transfers a fixed 500 ms watchdog is
+    // 500 lost transfers before it reacts, whereas 8 ms transfers only lose ~60.
+    int transferDurationMs() const {
+        const int framesPerTransfer = packetsPerTransfer * framesPerPacket;
+        const int sr = sampleRate > 0 ? sampleRate : 48000;
+        const int ms = (framesPerTransfer * 1000 + sr - 1) / sr;  // ceil
+        return ms > 0 ? ms : 1;
     }
 };
 
@@ -450,28 +462,66 @@ public:
      * throttle, cache miss) drains the ring, and the budget sets how much of
      * that the ring tolerates before underrunning.
      *
-     * On top of the configured budget rides an ADAPTIVE extra (mJitterExtraMs)
-     * that ratchets up 1 ms per output underrun, capped: the profile starts at
-     * the lowest latency and grows only on evidence that this device/system
-     * combination actually needs more absorber. It never decays within a
-     * session (stability bias) and resets on configure(). The ring refills to
-     * the raised target on its own: the very stall that caused the underrun
-     * parked the missing audio as input backlog, which the raised target stops
-     * the latency trim from discarding. Read per-iteration by the DSP loop, so
-     * the raise takes effect without a stream restart.
+     * The live budget (mJitterBudgetMs) starts at the profile's configured value
+     * and is adapted at runtime (Fase 2 / H4): the event thread ratchets it UP
+     * 1 ms per output underrun (immediate recovery, capped), and the
+     * JitterBudgetController walks it back DOWN 1 ms per long clean stretch toward
+     * a per-session floor — the old mJitterExtraMs only ever went up, pinning the
+     * session's latency after any transient. Read per-iteration by the DSP loop,
+     * so both directions take effect without a stream restart. SAFE is frozen via
+     * the controller's downConvergeEnabled=false flag (set in configure() when
+     * min == initial): the ratchet may raise it but the loop never lowers it.
      */
     size_t getOutputRingTargetLevel() const {
         return outputRingTargetSamples(
             mConfig.packetsPerTransfer, mConfig.framesPerPacket,
-            mConfig.jitterBudgetMs +
-                mJitterExtraMs.load(std::memory_order_relaxed),
+            mJitterBudgetMs.load(std::memory_order_relaxed),
             mConfig.sampleRate, mConfig.channelCount);
     }
 
-    /** Current adaptive addition to the jitter budget, for telemetry. */
-    int getJitterExtraMs() const {
-        return mJitterExtraMs.load(std::memory_order_relaxed);
+    /** Live adaptive jitter budget in ms, for telemetry / persistence (2.3). */
+    int getJitterBudgetMs() const {
+        return mJitterBudgetMs.load(std::memory_order_relaxed);
     }
+
+    /** Per-session converged floor discovered by the adaptive loop (telemetry). */
+    int getConvergedFloorMs() const { return mJitterController.sessionFloorMs(); }
+
+    /**
+     * Seed the live jitter budget directly (clamped to the profile's [min,max]).
+     * Used at session start to apply a persisted converged value (2.3). Safe from
+     * any thread.
+     */
+    void setJitterBudgetMs(int ms) {
+        mJitterBudgetMs.store(
+            std::clamp(ms, mJitterBudgetMinMs, mJitterBudgetMaxMs),
+            std::memory_order_relaxed);
+    }
+
+    /**
+     * Atomically add @p delta to the live jitter budget, clamped to [min,max].
+     * CAS loop so the event-thread up-ratchet and the DSP-thread down-convergence
+     * never lose each other's updates.
+     */
+    void adjustJitterBudgetMs(int delta) {
+        int cur = mJitterBudgetMs.load(std::memory_order_relaxed);
+        for (;;) {
+            const int next =
+                std::clamp(cur + delta, mJitterBudgetMinMs, mJitterBudgetMaxMs);
+            if (next == cur) return;
+            if (mJitterBudgetMs.compare_exchange_weak(
+                    cur, next, std::memory_order_relaxed)) {
+                return;
+            }
+        }
+    }
+
+    /**
+     * Run the adaptive down-convergence if a ~2 s evaluation window has elapsed
+     * (Fase 2 / 2.1). Called every DSP iteration; cheap early-out otherwise. The
+     * UP direction is handled immediately by the event thread's underrun ratchet.
+     */
+    void maybeConvergeJitterBudget();
 
     /**
      * Windowed max of the output completion-reap gap (ms), reset on read.
@@ -624,6 +674,24 @@ public:
      */
     int getFramesPerPacket() const { return mConfig.framesPerPacket; }
 
+    /**
+     * Linux tid of the libusb event loop thread, or 0 if it hasn't started yet.
+     * Lets LibusbBackend register both hot threads in a single ADPF hint
+     * session so the governor boosts them together.
+     */
+    int getEventThreadTid() const {
+        return mEventThreadTid.load(std::memory_order_acquire);
+    }
+
+    /**
+     * Actual scheduling outcome of the event loop thread
+     * (ThreadUtils::SchedResult as int). -1 until the thread has run. Consulted
+     * as a precondition for the Fase 3 experimental microframe profile.
+     */
+    int getEventLoopSchedResult() const {
+        return mEventLoopSchedResult.load(std::memory_order_relaxed);
+    }
+
 private:
     // ========================================================================
     // Internal Transfer Handling
@@ -766,6 +834,12 @@ private:
 
     // Event loop thread
     std::thread mEventThread;
+    // Published by eventLoopThread() at startup (syscall(SYS_gettid)); read by
+    // LibusbBackend to co-register this thread in the DSP ADPF hint session.
+    std::atomic<int> mEventThreadTid{0};
+    // Real scheduling outcome (ThreadUtils::SchedResult as int) of the event
+    // loop thread; -1 until it runs.
+    std::atomic<int> mEventLoopSchedResult{-1};
 
     // Claimed interfaces
     std::vector<int> mClaimedInterfaces;
@@ -773,12 +847,21 @@ private:
     // Statistics
     TransferStatistics mStats;
 
-    // Adaptive addition to mConfig.jitterBudgetMs (see
-    // getOutputRingTargetLevel). Written only by the event thread (+1 ms per
-    // output underrun, saturating at kJitterExtraCapMs), read lock-free by the
-    // DSP loop's per-iteration target. Reset in configure().
-    static constexpr int kJitterExtraCapMs = 12;
-    std::atomic<int> mJitterExtraMs{0};
+    // Live adaptive jitter budget (Fase 2, see getOutputRingTargetLevel). Starts
+    // at mConfig.jitterBudgetMs; the event thread ratchets UP (+1 ms per output
+    // underrun) and the JitterBudgetController walks DOWN toward a per-session
+    // floor. Both go through adjustJitterBudgetMs (CAS). Read lock-free by the
+    // DSP loop's per-iteration target. Range set in configure().
+    static constexpr int kJitterUpRatchetCapMs = 12;  // max ms above the initial budget
+    std::atomic<int> mJitterBudgetMs{4};
+    int mJitterBudgetMinMs = 1;   // absolute floor (== initial for SAFE → frozen)
+    int mJitterBudgetMaxMs = 16;  // initial + kJitterUpRatchetCapMs
+    JitterBudgetController mJitterController;
+    // 2 s evaluation window for the down-convergence (time-based, not callbacks).
+    static constexpr uint64_t kJitterWindowMs = 2000;
+    uint64_t mJitterWindowStartMs = 0;
+    uint64_t mJitterWindowUnderrunsAtStart = 0;
+    uint64_t mJitterWindowOverrunsAtStart = 0;
 
     // Underruns inside this window after (re)start don't raise the adaptive
     // budget: the gap between the initial transfer submission and the DSP
@@ -821,10 +904,24 @@ private:
     // Watchdog for device disconnect detection
     // ========================================================================
 
-    // Watchdog configuration
-    static constexpr int WATCHDOG_TIMEOUT_MS = 500;       // P1-8: 500ms (reduced from 2s for faster recovery)
+    // Watchdog configuration. The effective timeout is now proportional to the
+    // active transfer duration — 50 × transferMs, floored at
+    // WATCHDOG_TIMEOUT_FLOOR_MS and capped at WATCHDOG_TIMEOUT_MAX_MS (see
+    // checkWatchdog / effectiveWatchdogTimeoutMs). A fixed 500 ms was ~60 lost
+    // transfers in SAFE but 500 in LOW_LATENCY before the watchdog reacted.
+    static constexpr int WATCHDOG_TIMEOUT_MAX_MS = 500;   // upper cap (was the fixed value)
+    static constexpr int WATCHDOG_TIMEOUT_FLOOR_MS = 100; // never react faster than this
     static constexpr int WATCHDOG_CHECK_INTERVAL_MS = 50;  // Check every 50ms (was 100ms)
     static constexpr int MAX_CONSECUTIVE_ERRORS = 10;     // Max errors before declaring disconnected
+
+    // Effective watchdog timeout for the active regime (proportional to the
+    // per-transfer wall-clock; clamped to [FLOOR, MAX]).
+    int effectiveWatchdogTimeoutMs() const {
+        const int proportional = 50 * mConfig.transferDurationMs();
+        if (proportional < WATCHDOG_TIMEOUT_FLOOR_MS) return WATCHDOG_TIMEOUT_FLOOR_MS;
+        if (proportional > WATCHDOG_TIMEOUT_MAX_MS) return WATCHDOG_TIMEOUT_MAX_MS;
+        return proportional;
+    }
 
     // Watchdog state
     std::atomic<uint64_t> mLastCompletedTimeMs{0};        // Timestamp of last successful transfer
