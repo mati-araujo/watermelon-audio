@@ -33,6 +33,7 @@
 #include "../usb/AltsettingSelector.h"
 #include "../usb/StreamPreference.h"
 #include "../usb/LatencyProfile.h"
+#include "../utils/AdpfSession.h"
 
 #include <libusb.h>
 #include <memory>
@@ -181,6 +182,15 @@ public:
      * Get clock controller for drift monitoring.
      */
     ClockController* getClockController();
+
+    /**
+     * Actual scheduling outcome of the DSP thread (ThreadUtils::SchedResult as
+     * int, -1 until the thread has run). Consulted as a precondition for the
+     * Fase 3 experimental microframe profile, which requires SCHED_FIFO.
+     */
+    int getDspSchedResult() const {
+        return mDspSchedResult.load(std::memory_order_relaxed);
+    }
 
     /**
      * Check if USB device is initialized and ready.
@@ -464,6 +474,9 @@ private:
     // DSP thread for audio processing
     std::thread mDspThread;
     std::atomic<bool> mDspRunning{false};
+    // Real scheduling outcome (ThreadUtils::SchedResult as int) of the DSP
+    // thread; -1 until it runs. See getDspSchedResult().
+    std::atomic<int> mDspSchedResult{-1};
 
     // Wake signal for the DSP loop. Posted by the USB transfer manager
     // (via setDataReadyCallback) whenever data is consumable / output

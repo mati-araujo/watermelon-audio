@@ -1144,6 +1144,38 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInp
     return g_jniState.inputNode->getInputLatencyMs();
 }
 
+// Batched input metering: returns the 7 values a UI meter polls per frame in a
+// single JNI crossing (was 7 separate getters + a running-state check = 8
+// crossings/tick at 60 fps ≈ 480/s). Layout MUST stay in sync with the Kotlin
+// consumer (InputStateManager):
+//   [0] level dB ch0    [1] level dB ch1
+//   [2] level linear ch0 [3] level linear ch1
+//   [4] clipping (1/0)  [5] noise gate open (1/0)  [6] latency ms
+// Returns null when there is no input node so the caller can fall back to the
+// individual getters (older library / no active stream).
+JNIEXPORT jfloatArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInputMeteringSnapshot(
+    JNIEnv* env, jobject thiz) {
+    if (!g_jniState.inputNode) {
+        return nullptr;
+    }
+    jfloat values[7] = {
+        g_jniState.inputNode->getInputLevel(0),
+        g_jniState.inputNode->getInputLevel(1),
+        g_jniState.inputNode->getInputLevelLinear(0),
+        g_jniState.inputNode->getInputLevelLinear(1),
+        g_jniState.inputNode->isClipping() ? 1.0f : 0.0f,
+        g_jniState.inputNode->isNoiseGateOpen() ? 1.0f : 0.0f,
+        g_jniState.inputNode->getInputLatencyMs(),
+    };
+    jfloatArray result = env->NewFloatArray(7);
+    if (result == nullptr) {
+        return nullptr;
+    }
+    env->SetFloatArrayRegion(result, 0, 7, values);
+    return result;
+}
+
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReleaseInputNode(
     JNIEnv* env, jobject thiz) {

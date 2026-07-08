@@ -19,10 +19,13 @@
 #include <thread>
 #include <chrono>
 
-// Round-trip test state
-static std::atomic<bool> roundTripTestActive{false};
-static std::atomic<float> roundTripResultMs{-1.0f};
-static std::atomic<int> roundTripState{0};  // 0=idle, 1=waiting, 2=measuring, 3=complete
+// NOTE: the Oboe-path round-trip test (nativeStartRoundTripTest / …GetResult /
+// …CancelRoundTripTest below) was never implemented — it only ever set a
+// "waiting" state that never advanced, so runRoundTripTestFlow() always timed
+// out after 5 s. The real round-trip measurement is the USB analog-loopback
+// path (docs/usb-audio Fase 5 / RoundTripMeasurer). These three JNI symbols are
+// kept as honest deprecated stubs so AudioNativeBridge/LatencyAnalyzer still
+// link; startRoundTripTest() now returns false and the Flow ends immediately.
 
 extern "C" {
 
@@ -126,41 +129,35 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeRunLat
     return result;
 }
 
+// DEPRECATED stub. The Oboe-path round-trip test was never implemented; use the
+// USB analog-loopback measurer (Fase 5). Returns false so the Kotlin Flow ends
+// immediately instead of polling a state that never advances.
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartRoundTripTest(
         JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine || !g_jniState.inputNode) {
-        return JNI_FALSE;
-    }
-    if (roundTripTestActive.load()) {
-        return JNI_FALSE;
-    }
-    roundTripTestActive.store(true, std::memory_order_release);
-    roundTripResultMs.store(-1.0f, std::memory_order_release);
-    roundTripState.store(1, std::memory_order_release);
-    return JNI_TRUE;
+    (void)env; (void)thiz;
+    return JNI_FALSE;
 }
 
+// DEPRECATED stub. Always reports {latencyMs=-1, state=0 (IDLE)}.
 JNIEXPORT jfloatArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetRoundTripResult(
         JNIEnv* env, jobject thiz) {
+    (void)thiz;
     jfloatArray result = env->NewFloatArray(2);
     if (result == nullptr) {
         return nullptr;
     }
-    float values[2] = {
-        roundTripResultMs.load(std::memory_order_acquire),
-        static_cast<float>(roundTripState.load(std::memory_order_acquire))
-    };
+    float values[2] = {-1.0f, 0.0f};  // IDLE
     env->SetFloatArrayRegion(result, 0, 2, values);
     return result;
 }
 
+// DEPRECATED stub. No-op.
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeCancelRoundTripTest(
         JNIEnv* env, jobject thiz) {
-    roundTripTestActive.store(false, std::memory_order_release);
-    roundTripState.store(0, std::memory_order_release);
+    (void)env; (void)thiz;
 }
 
 JNIEXPORT jint JNICALL

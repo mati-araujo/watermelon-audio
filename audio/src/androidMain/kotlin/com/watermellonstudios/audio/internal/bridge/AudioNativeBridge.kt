@@ -1668,6 +1668,17 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun getInputLatencyMs(): Float = nativeGetInputLatencyMs()
 
     /**
+     * Batched input metering snapshot in a single JNI crossing. Returns 7
+     * floats — see the native layout — or null when there is no input node (the
+     * caller should fall back to the individual getters). Used by level meters
+     * that poll at frame rate to avoid ~480 JNI crossings/sec.
+     *
+     * Layout: [0]=levelDb ch0, [1]=levelDb ch1, [2]=levelLinear ch0,
+     * [3]=levelLinear ch1, [4]=clipping(1/0), [5]=noiseGateOpen(1/0), [6]=latencyMs.
+     */
+    fun getInputMeteringSnapshot(): FloatArray? = nativeGetInputMeteringSnapshot()
+
+    /**
      * Release input node resources.
      */
     suspend fun releaseInputNode(): Result<Unit> = withContext(Dispatchers.Default) {
@@ -2018,6 +2029,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeIsInputClipping(): Boolean
     private external fun nativeIsNoiseGateOpen(): Boolean
     private external fun nativeGetInputLatencyMs(): Float
+    private external fun nativeGetInputMeteringSnapshot(): FloatArray?
     private external fun nativeReleaseInputNode()
 
     // ==================== Native Methods: Monitoring ====================

@@ -58,6 +58,8 @@ add_executable(usb_tests
     test_clock_graph.cpp
     test_usb_iso_timing.cpp
     test_usb_latency_profile.cpp
+    test_dsp_pacer.cpp
+    test_jitter_budget_controller.cpp
     test_resizable_ring_buffer.cpp
     test_channel_map.cpp
     test_feature_unit_caps.cpp

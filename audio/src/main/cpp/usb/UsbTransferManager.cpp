@@ -65,9 +65,21 @@ bool UsbTransferManager::configure(const TransferConfig& config) {
 
     mConfig = config;
 
-    // Fresh device/profile: forget the adaptive absorber learned for the
-    // previous configuration.
-    mJitterExtraMs.store(0, std::memory_order_relaxed);
+    // Fresh device/profile: reset the live adaptive jitter budget and derive its
+    // range from the profile's configured budget. SAFE (large budget) is frozen
+    // — min == initial, so the down-convergence can never lower it (bit-identical
+    // to before). The low-latency regime can converge down to 1 ms and ratchet up
+    // to initial + cap (preserving the previous up-only ratchet exactly).
+    const int initialBudget = config.jitterBudgetMs;
+    mJitterBudgetMaxMs = initialBudget + kJitterUpRatchetCapMs;
+    mJitterBudgetMinMs = (initialBudget > 16) ? initialBudget : 1;
+    mJitterBudgetMs.store(initialBudget, std::memory_order_relaxed);
+    JitterBudgetController::Config jcfg;
+    jcfg.minBudgetMs = mJitterBudgetMinMs;
+    mJitterController.configure(jcfg);
+    mJitterWindowStartMs = 0;
+    mJitterWindowUnderrunsAtStart = 0;
+    mJitterWindowOverrunsAtStart = 0;
 
     // Invariant (L2): the ring must be able to overshoot the pacer target by at
     // least two transfers without overrunning, otherwise the pacer can't push
@@ -857,11 +869,16 @@ void UsbTransferManager::handleOutputComplete(IsoTransfer* ctx, libusb_transfer*
             // don't let them inflate the session's latency.
             const uint64_t sinceStartMs = getCurrentTimeMs() -
                 mStreamStartTimeMs.load(std::memory_order_relaxed);
-            const int extra = mJitterExtraMs.load(std::memory_order_relaxed);
-            if (sinceStartMs >= kAdaptiveWarmupMs && extra < kJitterExtraCapMs) {
-                mJitterExtraMs.store(extra + 1, std::memory_order_relaxed);
-                LOGW("Output underrun: jitter budget raised to %d+%d ms",
-                     mConfig.jitterBudgetMs, extra + 1);
+            if (sinceStartMs >= kAdaptiveWarmupMs) {
+                // Immediate up-ratchet: +1 ms, clamped to the profile max. CAS
+                // (adjustJitterBudgetMs) so it can't clobber a concurrent
+                // down-step from the DSP loop's convergence.
+                const int before = getJitterBudgetMs();
+                adjustJitterBudgetMs(+1);
+                const int after = getJitterBudgetMs();
+                if (after != before) {
+                    LOGW("Output underrun: jitter budget raised to %d ms", after);
+                }
             }
         }
         // Profile: record new transfer submission
@@ -1436,6 +1453,11 @@ bool UsbTransferManager::submitTransfer(libusb_transfer* transfer) {
 void UsbTransferManager::eventLoopThread() {
     LOGI("USB event loop started");
 
+    // Publish this thread's tid so LibusbBackend can co-register it in the DSP
+    // ADPF hint session (best-effort; the DSP thread starts right after us).
+    mEventThreadTid.store(static_cast<int>(syscall(SYS_gettid)),
+                          std::memory_order_release);
+
     // Configure this thread as real-time audio I/O. In the low-latency
     // profile this loop services up to 2000 completions/s with
     // fillOutputTransfer (format conversion included) on its hot path, and a
@@ -1444,7 +1466,10 @@ void UsbTransferManager::eventLoopThread() {
     // measurably loses that race against Android scheduling pressure;
     // REALTIME requests SCHED_FIFO and falls back to nice -19 where the
     // platform denies it.
-    ThreadUtils::setCurrentThreadRealtime("UsbEventLoop", ThreadUtils::Priority::REALTIME);
+    const auto sched = ThreadUtils::setCurrentThreadRealtime(
+        "UsbEventLoop", ThreadUtils::Priority::REALTIME);
+    mEventLoopSchedResult.store(static_cast<int>(sched), std::memory_order_relaxed);
+    LOGI("USB event loop scheduling: %s", ThreadUtils::toString(sched));
 
     // Pin to a big core, away from the DSP thread (which takes numCpus-2).
     // Measured both ways on hardware (DAC1, low-latency duplex): unpinned was
@@ -1655,10 +1680,13 @@ bool UsbTransferManager::checkWatchdog() {
 
     uint64_t elapsed = now - lastCompleted;
 
-    // Check for timeout (no successful transfers for too long)
-    if (elapsed > WATCHDOG_TIMEOUT_MS) {
+    // Check for timeout (no successful transfers for too long). Threshold is
+    // proportional to the active transfer duration so LOW_LATENCY reacts in
+    // ~100 ms instead of eating 500 lost 1 ms transfers.
+    const int timeoutMs = effectiveWatchdogTimeoutMs();
+    if (elapsed > static_cast<uint64_t>(timeoutMs)) {
         LOGW("Watchdog: No successful transfers for %llu ms (threshold: %d ms)",
-             (unsigned long long)elapsed, WATCHDOG_TIMEOUT_MS);
+             (unsigned long long)elapsed, timeoutMs);
         return true;
     }
 
@@ -1674,8 +1702,53 @@ bool UsbTransferManager::checkWatchdog() {
 }
 
 // ============================================================================
-// Adaptive Buffer Reconfiguration
+// Adaptive Jitter Budget (Fase 2 / 2.1)
 // ============================================================================
+
+void UsbTransferManager::maybeConvergeJitterBudget() {
+    const uint64_t now = getCurrentTimeMs();
+
+    // Anchor the first window (also re-anchored after each configure()).
+    if (mJitterWindowStartMs == 0) {
+        mJitterWindowStartMs = now;
+        mJitterWindowUnderrunsAtStart =
+            mStats.underruns.load(std::memory_order_relaxed);
+        mJitterWindowOverrunsAtStart =
+            mStats.overruns.load(std::memory_order_relaxed);
+        return;
+    }
+    if (now - mJitterWindowStartMs < kJitterWindowMs) {
+        return;  // window not elapsed yet — cheap early-out on the DSP hot path
+    }
+
+    const uint64_t underrunsNow = mStats.underruns.load(std::memory_order_relaxed);
+    const uint64_t overrunsNow = mStats.overruns.load(std::memory_order_relaxed);
+    const bool hadXrun = (underrunsNow > mJitterWindowUnderrunsAtStart) ||
+                         (overrunsNow > mJitterWindowOverrunsAtStart);
+
+    const int current = getJitterBudgetMs();
+    if (mJitterController.onWindow(hadXrun, current) ==
+        JitterBudgetController::Action::LOWER) {
+        adjustJitterBudgetMs(-1);
+        LOGI("Adaptive: jitter budget %d -> %d ms (session floor %d)",
+             current, getJitterBudgetMs(), mJitterController.sessionFloorMs());
+    }
+
+    // Start the next window.
+    mJitterWindowStartMs = now;
+    mJitterWindowUnderrunsAtStart = underrunsNow;
+    mJitterWindowOverrunsAtStart = overrunsNow;
+}
+
+// ============================================================================
+// Adaptive Buffer Reconfiguration (DEPRECATED — legacy ring-capacity resize)
+// ============================================================================
+//
+// Superseded by maybeConvergeJitterBudget above: resizing the ring CAPACITY does
+// not control latency (the jitter budget does). Kept only so getAdaptiveBufferStats
+// still has a controller to read for the NoisyPad diagnostics UI until that UI is
+// repointed at the jitter-budget telemetry (App plan Etapa D). No longer invoked
+// from the DSP loop.
 
 bool UsbTransferManager::reconfigureBufferSize(int newBufferMs) {
     // Clamp to valid range
