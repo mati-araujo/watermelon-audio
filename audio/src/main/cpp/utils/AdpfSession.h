@@ -69,6 +69,11 @@ public:
 
     bool isActive() const { return mSession != nullptr; }
 
+    /** True when the ADPF NDK symbols resolved (API 33+). Independent of any
+     *  session — lets callers distinguish "unavailable" from "available but not
+     *  active" for diagnostics. */
+    static bool isSupported() { return api_().available(); }
+
     /** Report the wall-clock duration of the last work cycle. No-op if inert. */
     void reportActualWorkDuration(int64_t actualNanos) {
         if (mSession == nullptr || actualNanos <= 0) {

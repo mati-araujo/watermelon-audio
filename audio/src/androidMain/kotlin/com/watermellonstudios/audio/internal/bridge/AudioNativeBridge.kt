@@ -2583,6 +2583,30 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     fun resetUsbProfilingStats() = nativeResetUsbProfilingStats()
 
+    // ==================== USB Round-Trip Loopback (Fase 5) ====================
+
+    /**
+     * Start the physical loopback round-trip latency test on the running USB
+     * backend. Requires a FULL_DUPLEX stream with OUT wired to IN.
+     *
+     * @param config [burstCount, burstIntervalMs, amplitude, searchWindowMs]
+     * @return true if the measurer was installed; false if the backend is not
+     *   running, not full-duplex, or a test is already active.
+     */
+    fun usbRoundTripStart(config: FloatArray): Boolean = nativeUsbRoundTripStart(config)
+
+    /**
+     * Poll the round-trip test. Returns 10 floats:
+     *   [0]=state [1]=progressPct [2]=currentBurst [3]=medianMs [4]=madMs
+     *   [5]=confidence [6]=softwareOutMs [7]=softwareInMs [8]=validBursts
+     *   [9]=errorCode. Restores the original backend callback on the first poll
+     *   that observes a terminal (COMPLETE/ERROR) phase.
+     */
+    fun usbRoundTripPoll(): FloatArray? = nativeUsbRoundTripPoll()
+
+    /** Cancel the round-trip test and restore the original backend callback. */
+    fun usbRoundTripCancel() = nativeUsbRoundTripCancel()
+
     // ==================== Native Methods: Latency Benchmark ====================
 
     private external fun nativeGetDetailedLatencyInfo(): FloatArray?
@@ -2599,6 +2623,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeGetUsbProfilingStats(): FloatArray?
     private external fun nativeSetUsbProfilingEnabled(enabled: Boolean)
     private external fun nativeResetUsbProfilingStats()
+
+    // ==================== Native Methods: USB Round-Trip (Fase 5) ============
+
+    private external fun nativeUsbRoundTripStart(config: FloatArray): Boolean
+    private external fun nativeUsbRoundTripPoll(): FloatArray?
+    private external fun nativeUsbRoundTripCancel()
 
     // ==================== Arpeggiator (Phase 7) ====================
 

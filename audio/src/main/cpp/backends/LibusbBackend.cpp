@@ -1078,7 +1078,7 @@ BackendResult LibusbBackend::start() {
         return BackendResult::ERROR_NOT_INITIALIZED;
     }
 
-    if (!mCallback) {
+    if (!mCallback.load(std::memory_order_acquire)) {
         LOGE("No audio callback set");
         return BackendResult::ERROR_INVALID_CONFIG;
     }
@@ -1262,7 +1262,13 @@ void LibusbBackend::resume() {
 }
 
 void LibusbBackend::setCallback(IAudioCallback* callback) {
-    mCallback = callback;
+    mCallback.store(callback, std::memory_order_release);
+}
+
+IAudioCallback* LibusbBackend::swapCallback(IAudioCallback* next) {
+    // Glitchless hot-swap: the DSP loop reads mCallback once per iteration with
+    // acquire ordering, so the exchange takes effect on the next block boundary.
+    return mCallback.exchange(next, std::memory_order_acq_rel);
 }
 
 void LibusbBackend::setSampleRate(int sampleRate) {
@@ -1730,6 +1736,10 @@ void LibusbBackend::dspThreadFunc() {
         }
     }
     const bool adpfActive = dspAdpf.isActive();
+    // Publish ADPF state for the USB Lab RT-env step: 2 active, 1 available but
+    // not active, 0 unavailable.
+    mAdpfState.store(adpfActive ? 2 : (AdpfSession::isSupported() ? 1 : 0),
+                     std::memory_order_relaxed);
 
     // Target fill level the DSP aims to keep in the output ring. The loop
     // produces immediately while the ring holds less than this, and only
@@ -1820,12 +1830,16 @@ void LibusbBackend::dspThreadFunc() {
     bool inputSplicePending = false;
 
     while (mDspRunning.load(std::memory_order_acquire)) {
+        // Load the callback once per iteration (Fase 5 hot-swap): a concurrent
+        // swapCallback() takes effect on the NEXT iteration, never mid-block.
+        IAudioCallback* cb = mCallback.load(std::memory_order_acquire);
+
         // P0-2: Check for device disconnection
         if (mTransferManager && mTransferManager->isDeviceDisconnected()) {
             LOGI("Device disconnected detected in DSP thread, exiting");
             mDeviceDisconnected.store(true, std::memory_order_release);
-            if (mCallback) {
-                mCallback->onBackendError(BackendError::DEVICE_DISCONNECTED);
+            if (cb) {
+                cb->onBackendError(BackendError::DEVICE_DISCONNECTED);
             }
             break;
         }
@@ -2226,13 +2240,13 @@ void LibusbBackend::dspThreadFunc() {
             underrunsAtWindowStart = underrunsNow;
         }
 
-        if (mCallback) {
+        if (cb) {
             auto& profiler = mTransferManager->getLatencyProfiler();
             if (profiler.isEnabled()) {
                 profiler.onDspCallbackStart();
             }
 
-            auto result = mCallback->onAudioReady(
+            auto result = cb->onAudioReady(
                 outputPtr,
                 inputPtr,
                 framesPerBlock
@@ -2306,8 +2320,8 @@ void LibusbBackend::dspThreadFunc() {
                 if (++consecutiveWriteErrors > MAX_CONSECUTIVE_ERRORS) {
                     LOGE("Too many consecutive write errors (%d), possible disconnect",
                          consecutiveWriteErrors);
-                    if (mCallback) {
-                        mCallback->onBackendError(BackendError::UNDERRUN);
+                    if (cb) {
+                        cb->onBackendError(BackendError::UNDERRUN);
                     }
                     consecutiveWriteErrors = 0;
                 }
@@ -2488,12 +2502,12 @@ void LibusbBackend::handleTransferError(usb::UsbAudioError error, const char* me
     }
 
     // Notify callback
-    if (mCallback) {
+    if (IAudioCallback* cb = mCallback.load(std::memory_order_acquire)) {
         BackendError backendError = BackendError::TRANSFER_ERROR;
         if (error == usb::UsbAudioError::DEVICE_DISCONNECTED) {
             backendError = BackendError::DEVICE_DISCONNECTED;
         }
-        mCallback->onBackendError(backendError);
+        cb->onBackendError(backendError);
     }
 
     // Notify USB error callback

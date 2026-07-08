@@ -22,6 +22,7 @@
 #include "../backends/LibusbBackend.h"
 #include "../looper/LooperEventDispatcher.h"
 #include "../usb/UsbSnapshotCodec.h"
+#include "../usb/RoundTripMeasurer.h"
 #include "../voice/VoiceTypes.h"
 #include <cmath>
 #include <algorithm>
@@ -3390,6 +3391,129 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     JNIEnv* env, jobject thiz) {
     if (!g_jniState.engine) return 0;
     return g_jniState.engine->getLooperEventDispatcher().getDroppedEvents();
+}
+
+// ==================== USB Round-Trip Loopback Test (Fase 5) ====================
+//
+// A single global measurer installed on the running LibusbBackend via
+// swapCallback. lifecycleMutex serializes start/cancel (which mutate the backend
+// callback) and the terminal-phase auto-restore in poll(). The original callback
+// (the engine) is stashed in g_rtPrevCallback and restored on
+// COMPLETE/ERROR/cancel — a guaranteed round-trip so the stream never keeps the
+// measurer as its callback.
+
+namespace {
+watermelon_audio::usb::RoundTripMeasurer g_rtMeasurer;
+watermelon_audio::IAudioCallback* g_rtPrevCallback = nullptr;
+bool g_rtInstalled = false;
+std::mutex g_rtLifecycleMutex;
+
+// Restore the backend's original callback. Caller holds g_rtLifecycleMutex.
+void rtRestoreCallbackLocked() {
+    if (!g_rtInstalled) return;
+    auto* backend = watermelon_audio::BackendManager::getInstance().getLibusbBackend();
+    if (backend) backend->swapCallback(g_rtPrevCallback);
+    g_rtPrevCallback = nullptr;
+    g_rtInstalled = false;
+}
+}  // namespace
+
+// config floats: [0]=burstCount [1]=burstIntervalMs [2]=amplitude [3]=searchWindowMs
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRoundTripStart(
+        JNIEnv* env, jobject thiz, jfloatArray config) {
+    std::lock_guard<std::mutex> lock(g_rtLifecycleMutex);
+    if (g_rtInstalled) {
+        LOGE("Round-trip: test already active");
+        return JNI_FALSE;
+    }
+    auto* backend = watermelon_audio::BackendManager::getInstance().getLibusbBackend();
+    if (!backend || !backend->isRunning()) {
+        LOGE("Round-trip: USB backend not running");
+        return JNI_FALSE;
+    }
+    const auto info = backend->getStreamInfo();
+    if (!info.isFullDuplex) {
+        LOGE("Round-trip: requires FULL_DUPLEX");
+        return JNI_FALSE;  // Kotlin pre-check surfaces REQUIRES_FULL_DUPLEX
+    }
+
+    watermelon_audio::usb::RoundTripMeasurer::StartParams params;
+    params.sampleRate = info.sampleRate > 0 ? info.sampleRate : 48000;
+    params.outChannels = info.channelCount > 0 ? info.channelCount : 2;
+    params.inChannels = params.outChannels;  // engine-facing layout is symmetric
+    params.jitterBudgetMs = backend->getJitterBudgetMs();
+    params.profile = backend->getLatencyProfileOrdinal();
+
+    if (config) {
+        const jsize n = env->GetArrayLength(config);
+        jfloat buf[4] = {10.0f, 300.0f, 0.25f, 250.0f};
+        env->GetFloatArrayRegion(config, 0, std::min<jsize>(n, 4), buf);
+        params.config.burstCount = std::max(1, static_cast<int>(buf[0]));
+        params.config.burstIntervalMs = std::max(50, static_cast<int>(buf[1]));
+        params.config.amplitude = std::clamp(buf[2], 0.01f, 1.0f);
+        params.config.searchWindowMs = std::max(50, static_cast<int>(buf[3]));
+    }
+
+    if (!g_rtMeasurer.start(params)) {
+        LOGE("Round-trip: measurer.start() failed");
+        return JNI_FALSE;
+    }
+    g_rtPrevCallback = backend->swapCallback(&g_rtMeasurer);
+    g_rtInstalled = true;
+    LOGI("Round-trip: installed measurer over live stream");
+    return JNI_TRUE;
+}
+
+// poll floats [10]: [0]=state [1]=progressPct [2]=currentBurst [3]=medianMs
+// [4]=madMs [5]=confidence [6]=softwareOutMs [7]=softwareInMs [8]=validBursts
+// [9]=errorCode
+JNIEXPORT jfloatArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRoundTripPoll(
+        JNIEnv* env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_rtLifecycleMutex);
+    const auto snap = g_rtMeasurer.poll();
+
+    // Feed the software-latency (L7) average while actively measuring.
+    if (g_rtInstalled &&
+        snap.phase == watermelon_audio::usb::RoundTripMeasurer::Phase::MEASURING) {
+        if (auto* backend =
+                watermelon_audio::BackendManager::getInstance().getLibusbBackend()) {
+            g_rtMeasurer.noteSoftwareLatency(backend->getOutputLatencyMs(),
+                                             backend->getInputLatencyMs());
+        }
+    }
+
+    jfloat v[10] = {0};
+    v[0] = static_cast<float>(snap.phase);
+    v[1] = snap.progressPct;
+    v[2] = static_cast<float>(snap.currentBurst);
+    v[3] = snap.result.medianMs;
+    v[4] = snap.result.madMs;
+    v[5] = snap.result.confidence;
+    v[6] = snap.result.softwareOutputMs;
+    v[7] = snap.result.softwareInputMs;
+    v[8] = static_cast<float>(snap.result.validBursts);
+    v[9] = static_cast<float>(snap.result.error);
+
+    // Guaranteed restore the moment the test reaches a terminal phase.
+    using Phase = watermelon_audio::usb::RoundTripMeasurer::Phase;
+    if (snap.phase == Phase::COMPLETE || snap.phase == Phase::ERROR) {
+        rtRestoreCallbackLocked();
+    }
+
+    jfloatArray result = env->NewFloatArray(10);
+    if (result) env->SetFloatArrayRegion(result, 0, 10, v);
+    return result;
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRoundTripCancel(
+        JNIEnv* env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_rtLifecycleMutex);
+    rtRestoreCallbackLocked();  // restore FIRST, then tear the measurer down
+    g_rtMeasurer.cancel();
+    LOGI("Round-trip: cancelled");
 }
 
 } // extern "C"

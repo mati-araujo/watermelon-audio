@@ -98,6 +98,16 @@ public:
     void resume() override;
 
     void setCallback(IAudioCallback* callback) override;
+
+    /**
+     * Atomically swap the live audio callback while the stream is running,
+     * returning the previous one (Fase 5). The DSP loop loads mCallback once per
+     * iteration with acquire ordering, so the swap is glitchless. Used by the
+     * round-trip measurer to install itself over the running stream and restore
+     * the original callback when done. Safe from any thread.
+     */
+    IAudioCallback* swapCallback(IAudioCallback* next);
+
     void setSampleRate(int sampleRate) override;
     void setBufferSize(int framesPerBuffer) override;
     void setFullDuplexEnabled(bool enable) override;
@@ -193,6 +203,38 @@ public:
     }
 
     /**
+     * Actual scheduling outcome of the libusb event thread (ThreadUtils::
+     * SchedResult as int, -1 until it runs). Reported by the USB Lab RT-env step.
+     */
+    int getEventLoopSchedResult() const {
+        return mTransferManager ? mTransferManager->getEventLoopSchedResult() : -1;
+    }
+
+    /**
+     * ADPF hint-session state of the DSP loop: 0 = unavailable (pre-API 33 or
+     * dlsym failed), 1 = available but not active, 2 = active. Published by the
+     * DSP thread after AdpfSession::init().
+     */
+    int getAdpfState() const {
+        return mAdpfState.load(std::memory_order_relaxed);
+    }
+
+    /** Live adaptive jitter budget in ms (Fase 2 telemetry; 0 if not streaming). */
+    int getJitterBudgetMs() const {
+        return mTransferManager ? mTransferManager->getJitterBudgetMs() : 0;
+    }
+
+    /** Per-session converged jitter-budget floor (telemetry; 0 if not streaming). */
+    int getConvergedFloorMs() const {
+        return mTransferManager ? mTransferManager->getConvergedFloorMs() : 0;
+    }
+
+    /** Current latency profile as an ordinal (usb::UsbLatencyProfile). */
+    int getLatencyProfileOrdinal() const {
+        return static_cast<int>(mLatencyProfile);
+    }
+
+    /**
      * Check if USB device is initialized and ready.
      */
     bool isUsbDeviceReady() const { return mDeviceReady.load(); }
@@ -277,6 +319,7 @@ public:
 
     /** Convenience: apply the tuning preset for a named profile. */
     void setLatencyProfile(usb::UsbLatencyProfile profile) {
+        mLatencyProfile = profile;
         setLatencyTuning(usb::UsbLatencyTuning::forProfile(profile));
         if (profile == usb::UsbLatencyProfile::LOW_LATENCY) {
             setAdaptiveBufferingEnabled(false);
@@ -467,8 +510,9 @@ private:
     // Transfer manager
     std::unique_ptr<usb::UsbTransferManager> mTransferManager;
 
-    // Audio callback
-    IAudioCallback* mCallback = nullptr;
+    // Audio callback. Atomic so it can be hot-swapped while the stream runs
+    // (swapCallback, Fase 5); the DSP loop loads it once per iteration.
+    std::atomic<IAudioCallback*> mCallback{nullptr};
     ErrorCallback mErrorCallback;
 
     // DSP thread for audio processing
@@ -477,6 +521,13 @@ private:
     // Real scheduling outcome (ThreadUtils::SchedResult as int) of the DSP
     // thread; -1 until it runs. See getDspSchedResult().
     std::atomic<int> mDspSchedResult{-1};
+
+    // ADPF hint-session state published by the DSP thread: 0 unavailable,
+    // 1 available-inactive, 2 active. See getAdpfState().
+    std::atomic<int> mAdpfState{0};
+
+    // Current latency profile (metadata for telemetry / USB Lab / round-trip).
+    usb::UsbLatencyProfile mLatencyProfile = usb::UsbLatencyProfile::SAFE;
 
     // Wake signal for the DSP loop. Posted by the USB transfer manager
     // (via setDataReadyCallback) whenever data is consumable / output

@@ -22,12 +22,20 @@ import kotlin.math.min
  */
 class UsbAudioTestRunner(
     private val usbManager: IUsbAudioManager,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob()),
+    private val roundTripTester: IRoundTripLatencyTester = RoundTripLatencyTesterImpl()
 ) {
     companion object {
         private const val TAG = "UsbAudioTestRunner"
         private const val STATS_POLL_INTERVAL_MS = 100L
     }
+
+    /**
+     * Per-burst progress of the physical loopback round-trip test (Fase 5). The
+     * UI can collect this during a LOOPBACK run to show the chirp countdown.
+     */
+    val roundTripProgress: StateFlow<RoundTripTestProgress>
+        get() = roundTripTester.progress
 
     // Test state
     private var currentTestJob: Job? = null
@@ -218,6 +226,9 @@ class UsbAudioTestRunner(
     fun cancelCurrentTest() {
         currentTestJob?.cancel()
         currentTestJob = null
+        // Tear down any in-flight round-trip measurer and restore the backend
+        // callback (no-op if none is running).
+        roundTripTester.cancel()
         _isRunning.value = false
         _progress.value = null
     }
@@ -371,16 +382,59 @@ class UsbAudioTestRunner(
     }
 
     private suspend fun runLoopbackTest(config: UsbTestConfig, startTime: Long): UsbTestResult {
-        // Full-duplex support is already checked in runTest()
-        // Run similar to playback test but in full-duplex mode
-        // Actual loopback latency measurement requires native impulse detection
-        return runPlaybackTest(
-            config.copy(
-                testType = UsbTestType.LOOPBACK,
-                streamingMode = UsbStreamingMode.FULL_DUPLEX
-            ),
-            startTime
+        // Full-duplex support is already checked in runTest(). Delegates the real
+        // measurement to the native RoundTripMeasurer (Fase 5): chirp bursts over
+        // the live stream + cross-correlation. The UI drives progress via the
+        // runner's `progress` flow; here we just await the terminal result.
+        val tester: IRoundTripLatencyTester = roundTripTester
+        val rt = tester.run(
+            RoundTripTestConfig(
+                burstCount = 10,
+                burstIntervalMs = 300,
+                amplitude = config.toneAmplitude.coerceIn(0.05f, 0.5f),
+            )
         )
+
+        val endTime = System.currentTimeMillis()
+        if (!rt.isSuccess) {
+            return UsbTestResult(
+                testType = UsbTestType.LOOPBACK,
+                config = config,
+                status = UsbTestStatus.FAILED,
+                startTimeMs = startTime,
+                endTimeMs = endTime,
+                errorMessage = loopbackErrorMessage(rt.error),
+                roundTrip = rt,
+            )
+        }
+
+        return UsbTestResult(
+            testType = UsbTestType.LOOPBACK,
+            config = config,
+            status = UsbTestStatus.PASSED,
+            startTimeMs = startTime,
+            endTimeMs = endTime,
+            avgLatencyMs = rt.medianMs.toDouble(),
+            minLatencyMs = rt.medianMs.toDouble() - rt.jitterMs,
+            maxLatencyMs = rt.medianMs.toDouble() + rt.jitterMs,
+            roundTrip = rt,
+        )
+    }
+
+    private fun loopbackErrorMessage(error: RoundTripTestError): String = when (error) {
+        RoundTripTestError.NO_SIGNAL ->
+            "No loopback signal — check the OUT→IN cable and that the DAC volume isn't at zero."
+        RoundTripTestError.CLIPPING ->
+            "Loopback signal is clipping — lower the DAC output/monitor volume and retry."
+        RoundTripTestError.UNRELIABLE ->
+            "Measurement unreliable — likely electrical noise or a faulty cable."
+        RoundTripTestError.REQUIRES_FULL_DUPLEX ->
+            "Round-trip test requires an active full-duplex stream."
+        RoundTripTestError.STREAM_LOST ->
+            "The USB stream stopped during the test."
+        RoundTripTestError.TIMEOUT ->
+            "The round-trip test timed out."
+        RoundTripTestError.NONE -> "Unknown error."
     }
 
     private suspend fun runStressTest(config: UsbTestConfig, startTime: Long): UsbTestResult {
