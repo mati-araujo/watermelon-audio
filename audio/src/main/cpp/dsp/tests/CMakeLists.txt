@@ -44,6 +44,7 @@ add_executable(dsp_tests
     test_lfo.cpp
     test_dc_blocker.cpp
     test_dsp_math.cpp
+    test_noise_gate.cpp
 )
 
 target_link_libraries(dsp_tests PRIVATE watermelon-dsp GTest::gtest_main)
