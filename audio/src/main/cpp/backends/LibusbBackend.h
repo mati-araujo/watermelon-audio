@@ -311,10 +311,12 @@ public:
      * until Fase 2).
      */
     void setLatencyTuning(const usb::UsbLatencyTuning& tuning) {
-        mTuning = tuning;
-        // dspBlockFrames is the DSP callback block; keep mRequestedBufferSize
-        // (the existing knob the DSP loop reads) in sync so both routes agree.
-        mRequestedBufferSize = tuning.dspBlockFrames;
+        // Remember what the APP configured — setupTransferManager() re-derives
+        // the effective tuning from this baseline on EVERY start, so the
+        // per-start auto-upgrade (input mode -> LOW_LATENCY) never leaks into
+        // later PLAYBACK_ONLY starts.
+        mConfiguredTuning = tuning;
+        applyTuningForStart(tuning);
     }
 
     /** Convenience: apply the tuning preset for a named profile. */
@@ -497,6 +499,20 @@ private:
     // Active USB latency tuning (Fase 1). Defaults to SAFE == current behavior.
     // Consumed by setupTransferManager() to parametrize the transfer config.
     usb::UsbLatencyTuning mTuning = usb::UsbLatencyTuning::safe();
+
+    // The tuning the APP configured (via setLatencyTuning/Profile). mTuning is
+    // re-derived from this on every start; the input-mode auto-upgrade only
+    // mutates mTuning for that start.
+    usb::UsbLatencyTuning mConfiguredTuning = usb::UsbLatencyTuning::safe();
+
+    // Apply a tuning for the upcoming start WITHOUT changing the configured
+    // baseline (used by the per-start auto-upgrade).
+    void applyTuningForStart(const usb::UsbLatencyTuning& tuning) {
+        mTuning = tuning;
+        // dspBlockFrames is the DSP callback block; keep mRequestedBufferSize
+        // (the existing knob the DSP loop reads) in sync so both routes agree.
+        mRequestedBufferSize = tuning.dspBlockFrames;
+    }
 
     struct ManualAltsettingSelection {
         int interfaceNumber = -1;

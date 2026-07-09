@@ -1415,9 +1415,14 @@ bool LibusbBackend::setupTransferManager() {
     // 8 ms): an explicit LOW_LATENCY or custom aggressive tuning already set by
     // the caller is preserved, and PLAYBACK_ONLY keeps its configured profile
     // (SAFE by default — bit-identical).
+    // Symmetric: every start begins from the APP-configured baseline. Without
+    // this reset the auto-upgrade below leaked into later PLAYBACK_ONLY starts
+    // (observed on-device: post-loopback playback ran 1 ms transfers on a
+    // NICE_FALLBACK phone and underran; SAFE is the configured default).
+    applyTuningForStart(mConfiguredTuning);
     if (mStreamingMode != UsbStreamingMode::PLAYBACK_ONLY &&
         mTuning.targetTransferMs >= usb::UsbLatencyTuning::safe().targetTransferMs) {
-        setLatencyTuning(usb::UsbLatencyTuning::lowLatency());
+        applyTuningForStart(usb::UsbLatencyTuning::lowLatency());
         wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
             "USB_LATENCY_AUTO: input mode (streamMode=%d) -> LOW_LATENCY",
             static_cast<int>(mStreamingMode));
@@ -1687,6 +1692,21 @@ void LibusbBackend::dspThreadFunc() {
         "UsbDspThread", ThreadUtils::Priority::REALTIME);
     mDspSchedResult.store(static_cast<int>(dspSched), std::memory_order_relaxed);
     LOGI("DSP thread scheduling: %s", ThreadUtils::toString(dspSched));
+
+    // A device that denies SCHED_FIFO schedules these threads with ordinary
+    // CFS latency: LOW_LATENCY's 4 ms absorber is routinely pierced in the
+    // first seconds (observed on-device: repeated underruns + audible thumps
+    // while the ratchet walked 4->7 ms). Seed the live budget at 8 ms so the
+    // session starts above that known floor; the convergence loop still walks
+    // it back down if this system sustains less, and SAFE (>= 24 ms) is
+    // unaffected by the max().
+    if (dspSched == ThreadUtils::SchedResult::NICE_FALLBACK && mTransferManager) {
+        const int seeded = std::max(8, mTransferManager->getJitterBudgetMs());
+        if (seeded != mTransferManager->getJitterBudgetMs()) {
+            mTransferManager->setJitterBudgetMs(seeded);
+            LOGI("No RT scheduling — jitter budget seeded to %d ms", seeded);
+        }
+    }
 
     // Pin this thread to a performance core (big core on ARM big.LITTLE)
     int numCpus = ThreadUtils::getNumCpus();
