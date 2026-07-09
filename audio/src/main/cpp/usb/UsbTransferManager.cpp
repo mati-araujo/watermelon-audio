@@ -7,6 +7,7 @@
 #include "UsbTransferManager.h"
 #include "UsbConstants.h"
 #include "UsbLatencyMath.h"
+#include "PacketLayout.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -1187,20 +1188,16 @@ bool UsbTransferManager::fillOutputTransfer(IsoTransfer* ctx) {
     // clamp, but the length the kernel computes offsets from has to
     // never exceed what the buffer can hold.
     const int nominalFrames = mConfig.framesPerPacket;
-    int adjustedFrames =
+    const int adjustedFrames =
         mClockController->getAdjustedFrameCount(nominalFrames, ctx->packetCount);
 
-    int samplesPerPacket = adjustedFrames * mConfig.channelCount;
-    int bytesPerPacket = samplesPerPacket * bytesPerSample;
-    if (bytesPerPacket > mOutputSlotBytes) {
-        // Clamp down to the allocated headroom and re-derive so that the
-        // kernel's offsets (which walk the buffer by summing lengths) stay
-        // inside our allocation.
-        bytesPerPacket = mOutputSlotBytes;
-        samplesPerPacket = bytesPerPacket / bytesPerSample;
-        adjustedFrames = samplesPerPacket / mConfig.channelCount;
-    }
-    const size_t samplesNeeded = static_cast<size_t>(samplesPerPacket * ctx->packetCount);
+    // Per-packet sizing + slot clamp — usb::computeOutputPacketLayout. The clamp
+    // keeps the kernel's contiguous offset walk inside our allocation (see header).
+    const usb::OutputPacketLayout layout = usb::computeOutputPacketLayout(
+        adjustedFrames, mConfig.channelCount, bytesPerSample,
+        mOutputSlotBytes, ctx->packetCount);
+    const int bytesPerPacket = layout.bytesPerPacket;
+    const size_t samplesNeeded = layout.samplesNeeded;
 
     // Read the whole transfer worth of samples from the ring in one go.
     bool success = mOutputRingBuffer.read(mFloatBuffer.data(), samplesNeeded);
