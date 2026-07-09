@@ -60,6 +60,7 @@ add_executable(usb_tests
     test_usb_iso_timing.cpp
     test_usb_latency_profile.cpp
     test_dsp_pacer.cpp
+    test_dsp_block_ops.cpp
     test_jitter_budget_controller.cpp
     test_roundtrip_analyzer.cpp
     test_roundtrip_measurer.cpp

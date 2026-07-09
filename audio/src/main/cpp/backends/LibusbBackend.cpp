@@ -12,6 +12,7 @@
 #include "../usb/UsbIsoTiming.h"
 #include "../usb/RateCoercionPolicy.h"
 #include "../usb/DspPacer.h"
+#include "../usb/DspBlockOps.h"
 #include "../utils/ThreadUtils.h"
 #include "../utils/MemoryUtils.h"
 #include "../platform/Logger.h"
@@ -2028,14 +2029,10 @@ void LibusbBackend::dspThreadFunc() {
                     }
                 }
 
-                // Convert mono input to stereo for AudioEngine callback (P1-2: with -3dB)
+                // Convert mono input to stereo for AudioEngine callback (P1-2: -3 dB).
                 if (needsMonoToStereo) {
-                    constexpr float monoGain = 0.707f; // -3dB to prevent clipping
-                    for (int i = 0; i < framesPerBlock; ++i) {
-                        float sample = inputBuffer[static_cast<size_t>(i)] * monoGain;
-                        stereoInputBuffer[static_cast<size_t>(i * 2)] = sample;
-                        stereoInputBuffer[static_cast<size_t>(i * 2 + 1)] = sample;
-                    }
+                    usb::monoToStereo(inputBuffer.data(), stereoInputBuffer.data(),
+                                      framesPerBlock);
                     inputPtr = stereoInputBuffer.data();
                 } else {
                     inputPtr = inputBuffer.data();
@@ -2052,17 +2049,9 @@ void LibusbBackend::dspThreadFunc() {
                                                        : inputBuffer.data();
                         const size_t tail =
                             static_cast<size_t>((framesPerBlock - 1) * 2);
-                        const float holdL = mDspLastValidInput[tail];
-                        const float holdR = mDspLastValidInput[tail + 1];
-                        const int xfFrames = std::min(framesPerBlock, 48);
-                        for (int f = 0; f < xfFrames; ++f) {
-                            const float w = static_cast<float>(f + 1)
-                                          / static_cast<float>(xfFrames);
-                            dst[f * 2]     = w * dst[f * 2]
-                                           + (1.0f - w) * holdL;
-                            dst[f * 2 + 1] = w * dst[f * 2 + 1]
-                                           + (1.0f - w) * holdR;
-                        }
+                        usb::spliceDeclickHead(dst, framesPerBlock,
+                                               mDspLastValidInput[tail],
+                                               mDspLastValidInput[tail + 1]);
                     }
                     inputSplicePending = false;
                 }
@@ -2088,29 +2077,16 @@ void LibusbBackend::dspThreadFunc() {
                 ++inputReadFailCount;
                 // Underrun: fade the last valid block to silence with a linear ramp.
                 // This produces a smooth tail instead of a repeated transient or hard cut.
-                size_t totalStereoSamples = static_cast<size_t>(framesPerBlock * 2);
+                const size_t totalStereoSamples = static_cast<size_t>(framesPerBlock * 2);
                 // The fade block REPEATS the previous block, so its first
                 // sample is discontinuous with the previous block's last —
-                // capture that held value first and de-click the head below.
+                // capture that held value BEFORE the fade and de-click the head
+                // against it afterwards.
                 const float holdL = mDspLastValidInput[totalStereoSamples - 2];
                 const float holdR = mDspLastValidInput[totalStereoSamples - 1];
-                for (size_t i = 0; i < totalStereoSamples; ++i) {
-                    float fade = 1.0f - (static_cast<float>(i) / static_cast<float>(totalStereoSamples));
-                    mDspLastValidInput[i] *= fade;
-                }
-                {
-                    const int xfFrames = std::min(framesPerBlock, 48);
-                    for (int f = 0; f < xfFrames; ++f) {
-                        const float w = static_cast<float>(f + 1)
-                                      / static_cast<float>(xfFrames);
-                        mDspLastValidInput[static_cast<size_t>(f * 2)] =
-                            w * mDspLastValidInput[static_cast<size_t>(f * 2)]
-                            + (1.0f - w) * holdL;
-                        mDspLastValidInput[static_cast<size_t>(f * 2 + 1)] =
-                            w * mDspLastValidInput[static_cast<size_t>(f * 2 + 1)]
-                            + (1.0f - w) * holdR;
-                    }
-                }
+                usb::fadeBlockToSilence(mDspLastValidInput.data(), framesPerBlock);
+                usb::spliceDeclickHead(mDspLastValidInput.data(), framesPerBlock,
+                                       holdL, holdR);
                 inputPtr = mDspLastValidInput.data();
                 // Next underrun will produce silence (data is faded to zero);
                 // the next REAL block must fade back in from ~0.
