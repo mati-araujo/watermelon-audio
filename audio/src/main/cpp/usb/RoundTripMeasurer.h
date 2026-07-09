@@ -151,9 +151,8 @@ private:
     std::vector<float> mTemplate;     // chirp template (mChirpLen)
     std::vector<float> mCapture;      // absolute-indexed mono input capture
     std::vector<int64_t> mEmitSample; // per-burst emit sample offset
-    float mNoiseFloor = 0.0f;         // input RMS from calibration (validity gate)
 
-    Result mResult;                   // published under phase == COMPLETE/ERROR
+    Result mResult;                   // start()-seeded; stats published by the worker
     std::thread mWorker;
 };
 

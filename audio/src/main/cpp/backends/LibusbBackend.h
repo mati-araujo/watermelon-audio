@@ -231,7 +231,7 @@ public:
 
     /** Current latency profile as an ordinal (usb::UsbLatencyProfile). */
     int getLatencyProfileOrdinal() const {
-        return static_cast<int>(mLatencyProfile);
+        return static_cast<int>(mLatencyProfile.load(std::memory_order_relaxed));
     }
 
     /**
@@ -321,7 +321,7 @@ public:
 
     /** Convenience: apply the tuning preset for a named profile. */
     void setLatencyProfile(usb::UsbLatencyProfile profile) {
-        mLatencyProfile = profile;
+        mLatencyProfile.store(profile, std::memory_order_relaxed);
         setLatencyTuning(usb::UsbLatencyTuning::forProfile(profile));
         if (profile == usb::UsbLatencyProfile::LOW_LATENCY) {
             setAdaptiveBufferingEnabled(false);
@@ -543,7 +543,9 @@ private:
     std::atomic<int> mAdpfState{0};
 
     // Current latency profile (metadata for telemetry / USB Lab / round-trip).
-    usb::UsbLatencyProfile mLatencyProfile = usb::UsbLatencyProfile::SAFE;
+    // Atomic: written on the config thread (setLatencyProfile), read cross-thread
+    // by getLatencyProfileOrdinal (JNI poll).
+    std::atomic<usb::UsbLatencyProfile> mLatencyProfile{usb::UsbLatencyProfile::SAFE};
 
     // Wake signal for the DSP loop. Posted by the USB transfer manager
     // (via setDataReadyCallback) whenever data is consumable / output
