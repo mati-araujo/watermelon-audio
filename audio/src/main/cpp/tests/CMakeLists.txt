@@ -86,6 +86,23 @@ if(WMA_TESTS_WERROR)
     add_compile_options(-Werror)
 endif()
 
+# TSan and standalone fences. GCC emits -Wtsan ("'atomic_thread_fence' is not
+# supported with '-fsanitize=thread'") for every TU that even *includes*
+# TrackBuffer.h, so with the -Werror gate above the thread job died at compile
+# time — before running a single test. Demoted here, after the gate, so the
+# suite builds.
+#
+# Be clear about what this buys and what it doesn't: TSan does not model
+# standalone fences, so it cannot prove the accesses ordered by the 8 fences in
+# looper/TrackBuffer.h (+1 in LooperExporter.cpp) are safe, and it may report
+# them as races in the two concurrent looper suites. Nothing outside looper/
+# uses fences, so the dsp/usb ring-buffer concurrency — the reason this job
+# exists — is fully modelled. Silencing the warning hides a tooling limitation,
+# not a defect TSan found.
+if(WMA_TESTS_SANITIZE MATCHES "thread")
+    add_compile_options(-Wno-tsan)
+endif()
+
 # Order is irrelevant — the shared-library subdirectories are guarded.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../dsp/tests     dsp_tests)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../effects/tests effects_tests)

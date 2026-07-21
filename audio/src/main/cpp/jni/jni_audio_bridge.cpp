@@ -3466,9 +3466,9 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRou
     return JNI_TRUE;
 }
 
-// poll floats [10]: [0]=state [1]=progressPct [2]=currentBurst [3]=medianMs
+// poll floats [13]: [0]=state [1]=progressPct [2]=currentBurst [3]=medianMs
 // [4]=madMs [5]=confidence [6]=softwareOutMs [7]=softwareInMs [8]=validBursts
-// [9]=errorCode
+// [9]=errorCode [10]=minMs [11]=maxMs [12]=sampleRate
 JNIEXPORT jfloatArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRoundTripPoll(
         JNIEnv* env, jobject thiz) {
@@ -3485,7 +3485,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRou
         }
     }
 
-    jfloat v[10] = {0};
+    jfloat v[13] = {0};
     v[0] = static_cast<float>(snap.phase);
     v[1] = snap.progressPct;
     v[2] = static_cast<float>(snap.currentBurst);
@@ -3496,6 +3496,9 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRou
     v[7] = snap.result.softwareInputMs;
     v[8] = static_cast<float>(snap.result.validBursts);
     v[9] = static_cast<float>(snap.result.error);
+    v[10] = snap.result.minMs;
+    v[11] = snap.result.maxMs;
+    v[12] = static_cast<float>(snap.result.sampleRate);
 
     // Guaranteed restore the moment the test reaches a terminal phase.
     using Phase = watermelon_audio::usb::RoundTripMeasurer::Phase;
@@ -3503,8 +3506,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRou
         rtRestoreCallbackLocked();
     }
 
-    jfloatArray result = env->NewFloatArray(10);
-    if (result) env->SetFloatArrayRegion(result, 0, 10, v);
+    jfloatArray result = env->NewFloatArray(13);
+    if (result) env->SetFloatArrayRegion(result, 0, 13, v);
     return result;
 }
 

@@ -123,7 +123,9 @@ private:
     // DSP processing
     StereoDCBlocker mDCBlocker;
     NoiseGate mNoiseGate;
-    std::atomic<bool> mNoiseGateEnabled{true};
+    // Off by default: a -60 dB gate after +12 dB input gain cuts audible
+    // guitar decay tails. Opt-in from the UI (InputTestScreen / Gain Staging).
+    std::atomic<bool> mNoiseGateEnabled{false};
     LevelMeter mLevelMeter;
 
     // Temporary buffer for processing (pre-allocated in prepare())

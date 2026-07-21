@@ -26,6 +26,7 @@ add_executable(effects_tests
     test_guitar_delay_reverb.cpp
     test_filter_compressor.cpp
     test_distortion_amp.cpp
+    test_distortion_gate.cpp
     test_modulation.cpp
     test_misc_effects.cpp
     test_logger_stub.cpp

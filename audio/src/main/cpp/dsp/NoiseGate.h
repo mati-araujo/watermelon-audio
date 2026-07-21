@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <atomic>
 
@@ -57,7 +58,9 @@ public:
      * @param hysteresisDb Hysteresis in dB (prevents gate chatter)
      */
     void setHysteresis(float hysteresisDb) {
-        mHysteresisDb.store(hysteresisDb, std::memory_order_relaxed);
+        // Negative hysteresis would put the close threshold ABOVE the open
+        // threshold and guarantee chatter.
+        mHysteresisDb.store(std::max(0.0f, hysteresisDb), std::memory_order_relaxed);
     }
 
     /**
@@ -82,8 +85,12 @@ public:
                 mEnvelope = releaseCoeff * mEnvelope + (1.0f - releaseCoeff) * level;
             }
 
-            // Gate with hysteresis
-            float gateThreshold = mGateOpen ? (threshold - hysteresis) : threshold;
+            // Gate with hysteresis: the close threshold sits hysteresisDb
+            // BELOW the open threshold, i.e. divide the linear amplitude by
+            // the linear ratio. (Subtracting the ratio from the amplitude
+            // made the close threshold negative, so the gate could never
+            // re-close once open.)
+            float gateThreshold = mGateOpen ? (threshold / hysteresis) : threshold;
 
             if (mEnvelope > gateThreshold) {
                 mGateOpen = true;

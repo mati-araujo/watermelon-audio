@@ -81,7 +81,6 @@ bool RoundTripMeasurer::start(const StartParams& params) {
     mCalibSumSq = 0.0;
     mCalibPeak = 0.0f;
     mCalibPhase = 0.0;
-    mNoiseFloor = 0.0f;
 
     mResult = Result{};
     mResult.totalBursts = burstCount;
@@ -129,7 +128,11 @@ RoundTripMeasurer::Snapshot RoundTripMeasurer::poll() const {
     s.currentBurst = mCurrentBurst.load(std::memory_order_relaxed);
     s.totalBursts = mResult.totalBursts;
     if (s.phase == Phase::COMPLETE || s.phase == Phase::ERROR) {
-        s.result = mResult;  // published-before-release by the worker
+        s.result = mResult;  // published-before-release by the worker (or start())
+        // Single source of truth for the terminal error: the atomic. mResult.error
+        // is never written off the worker, so terminal paths that only flip the
+        // phase (RT calibration failures, worker STREAM_LOST/TIMEOUT) report here.
+        s.result.error = static_cast<Error>(mErrorCode.load(std::memory_order_acquire));
     }
     return s;
 }
@@ -178,8 +181,7 @@ IAudioCallback::Result RoundTripMeasurer::onAudioReady(
             if (rmsIn < kNoSignalRms) {
                 mErrorCode.store(static_cast<int>(Error::NO_SIGNAL),
                                  std::memory_order_relaxed);
-                mResult.error = Error::NO_SIGNAL;
-                setPhase(Phase::ERROR);
+                setPhase(Phase::ERROR);  // error read from mErrorCode (see poll())
             } else if (mCalibPeak > kClipPeak && mCalibRetries < kMaxCalibRetry) {
                 // Too hot — halve amplitude and re-run calibration.
                 mAmplitude *= 0.5f;
@@ -190,10 +192,8 @@ IAudioCallback::Result RoundTripMeasurer::onAudioReady(
             } else if (mCalibPeak > kClipPeak) {
                 mErrorCode.store(static_cast<int>(Error::CLIPPING),
                                  std::memory_order_relaxed);
-                mResult.error = Error::CLIPPING;
-                setPhase(Phase::ERROR);
+                setPhase(Phase::ERROR);  // error read from mErrorCode (see poll())
             } else {
-                mNoiseFloor = rmsIn;
                 mSampleCounter = 0;
                 mBurstIndex = 0;
                 setPhase(Phase::MEASURING);
@@ -260,10 +260,9 @@ void RoundTripMeasurer::analysisLoop() {
 
         if (mStreamLost.load(std::memory_order_acquire) &&
             p != Phase::COMPLETE && p != Phase::ERROR) {
-            mResult.error = Error::STREAM_LOST;
             mErrorCode.store(static_cast<int>(Error::STREAM_LOST),
                              std::memory_order_relaxed);
-            setPhase(Phase::ERROR);
+            setPhase(Phase::ERROR);  // error read from mErrorCode (see poll())
             continue;
         }
         if (p == Phase::ANALYZING) {
@@ -276,10 +275,9 @@ void RoundTripMeasurer::analysisLoop() {
         }
         if (std::chrono::steady_clock::now() - startTime > timeout) {
             LOGW("round-trip test timed out in phase %d", static_cast<int>(p));
-            mResult.error = Error::TIMEOUT;
             mErrorCode.store(static_cast<int>(Error::TIMEOUT),
                              std::memory_order_relaxed);
-            setPhase(Phase::ERROR);
+            setPhase(Phase::ERROR);  // error read from mErrorCode (see poll())
             continue;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));

@@ -88,18 +88,20 @@ class RoundTripLatencyTesterImpl(
         val median = d[3]
         val swOut = d[6]
         val swIn = d[7]
+        // Extended fields [10..12] added later; read defensively so a leaner poll
+        // array (older native) still yields a valid headline result.
         return RoundTripTestResult(
             medianMs = median,
             jitterMs = d[4],
-            minMs = 0f,   // not carried in the poll array; median/jitter are the headline
-            maxMs = 0f,
+            minMs = d.getOrElse(10) { 0f },
+            maxMs = d.getOrElse(11) { 0f },
             confidence = d[5],
             validBursts = d[8].toInt(),
             totalBursts = config.burstCount,
             softwareOutputMs = swOut,
             softwareInputMs = swIn,
             residualMs = median - (swOut + swIn),
-            sampleRate = 0,   // owned by the stream; not carried in the poll array
+            sampleRate = d.getOrElse(12) { 0f }.toInt(),
             profile = profile,
             error = RoundTripTestError.fromCode(d[9].toInt()),
         )

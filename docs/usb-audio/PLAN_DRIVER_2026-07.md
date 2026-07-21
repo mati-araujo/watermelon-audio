@@ -15,10 +15,20 @@
 | E2 (sanitizers + DspPacer) | ✅ Implementada y auditada | Bit-identidad verificada por diff. **Delta:** el item 2.4 (tests de secuencia duplex fade/splice) se **difirió a la Etapa 5** — se testea host-side al extraer `usb/DspLoop` |
 | E3 (Fase 2 adaptativo) | 🟠 Core implementado, **fixes F1–F4 pendientes** (ver auditoría) | **Deltas de alcance:** (a) la **persistencia por dispositivo (3.3)** NO está — el lado driver (JNI `getConvergedTuning`/`setInitialTuning`) se implementa junto con **App D**; (b) los items 2.2 (timing por dirección) y 2.4 (hardening) del spec `fase_2_ajuste_fino_adaptativo.md` quedaron **fuera de E3** — reevaluarlos tras la campaña de validación: si el round-trip medido (E4) ya cumple ≤9 ms estables, se descartan |
 | E4 (round-trip) | ⬜ Pendiente — **próxima**, en paralelo con App V | |
-| E5 (SRP split) | ⬜ Pendiente | Incluye los tests duplex diferidos de E2.4 |
+| E5 (SRP split) | 🟠 **En curso** — 1ª costura hecha 2026-07-09 (`usb/DspBlockOps.h`) | Incluye los tests duplex diferidos de E2.4. Ver addendum abajo |
 | E6 (bit-perfect) / E7 (microframe) | ⬜ Pendientes, sin cambios | E7 mantiene su go/no-go tras E4 |
 
 **Secuencia repriorizada** (razones en `NoisyPad/docs/usb-audio/PLAN_VALIDACION_ON_DEVICE_2026-07.md`): fixes F1–F4 → E4 ∥ App V → campaña de validación on-device (3 DACs) → App C → App D (incluye persistencia 3.3) → E5 → resto.
+
+### Addendum Etapa 5 — primera costura 2026-07-09 (`usb/DspBlockOps.h`)
+
+Estrategia: **una extracción por PR, bit-idéntica, validada con la suite host** (la única red disponible en el sandbox; el NDK no buildea acá). El orden lo dicta el valor/riesgo/testabilidad, no el tamaño.
+
+- **Descartado como primera costura: `PacketCodec`** (fill/processTransfer de UsbTransferManager) — está fuertemente entrelazado con descriptores libusb + rings + estado miembro; las partes puras (float↔PCM, ChannelMap) ya están extraídas y testeadas → alto riesgo, bajo valor de test.
+- **Costura 1 — transformaciones DSP puras del loop → `usb/DspBlockOps.h`** (`monoToStereo` −3dB, `spliceDeclickHead`, `fadeBlockToSilence`). El de-click de splice estaba **duplicado** inline (splice-pending + underrun-fade); ahora es una sola función. `test_dsp_block_ops.cpp` con golden values a mano, incl. la secuencia del underrun (hold→fade→declick) — cubre H6. Bit-idéntico. `LibusbBackend.cpp` −23 líneas. (build exitoso en AS confirmado por el usuario 2026-07-09).
+- **Costura 2 — layout de packets de salida → `usb/PacketLayout.h`** (`computeOutputPacketLayout`: sizing + clamp al slot + re-derive con truncación entera), sacada de `UsbTransferManager::fillOutputTransfer`. El clamp es un **invariante de correctness** (byte length > slot → el kernel linux_usbfs camina offsets fuera de la allocation → distorsión brutal), antes inline y sin test. `test_packet_layout.cpp` (no-clamp, clamp+re-derive, boundary exacto, truncación). Bit-idéntico. **Suite host 490/490.**
+- **Nota de estrategia:** las dos costuras hechas fueron **piezas puras host-testeables** (bit-identidad demostrable sin hardware). El pozo de piezas puras del loop está mayormente agotado (DspPacer+DspBlockOps cubren pacer/trim/splice/fade/mono; PacketLayout cubre el sizing). `UsbVolumeController` ya está esencialmente extraído (`usb/UsbVolumeControl.h` + `test_feature_unit_caps.cpp`).
+- **Costuras siguientes (grandes, libusb/estado-pesadas — NO host-testeables):** `usb/StreamNegotiator` (`configureSampleRate` ~821+ = control transfers directos con `mDeviceHandle`, topología, callbacks a miembros → extracción de clase pesada) y `usb/DspLoop` (cuerpo del loop, la más delicada, última). **Estas dos requieren el gate del plan que no tengo en el sandbox: profiler stats antes/después + round-trip en hardware.** Hacerlas a ciegas (solo build) va contra la disciplina bit-idéntica de E5. Recomendación: hacerlas con el usuario en un loop de build/on-device.
 
 ---
 
