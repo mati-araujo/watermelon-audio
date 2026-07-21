@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.5.0...v1.6.0) (2026-07-21)
+
+
+### Features
+
+* **usb:** App V library support — native log capture + RT-env probe ([0118f8d](https://github.com/mati-araujo/watermelon-audio/commit/0118f8d6d772a14702b00ebc7b30e7701f43cc60))
+* **usb:** E4 RoundTripMeasurer — physical loopback latency (Fase 5) ([e204b66](https://github.com/mati-araujo/watermelon-audio/commit/e204b66af08d9ac6ec1756fe6fe85be45a3040bd))
+
+
+### Bug Fixes
+
+* **effects:** envelope-based noise gate in DistortionEffect ([3030eb6](https://github.com/mati-araujo/watermelon-audio/commit/3030eb675122e2d18912eb6c3ae3d5dcf7711e10))
+* **effects:** FilterType con underlying type fijo — UB al castear fuera de rango ([ec029d7](https://github.com/mati-araujo/watermelon-audio/commit/ec029d75ee465fbb563abfde2172097384c132eb))
+* **input:** noise gate off by default + hysteresis unit bug ([10650cb](https://github.com/mati-araujo/watermelon-audio/commit/10650cbebcb31c31cdf9ad561235ecc9cdba4fad))
+* **usb/effects:** costuras E5 + fixes de auditoría, con los dos jobs de sanitizers en verde ([167fd34](https://github.com/mati-araujo/watermelon-audio/commit/167fd34196d2e5ef2c544dc091db975a079e80a8))
+* **usb:** audit fixes F1-F4 for jitter-budget convergence (E1-E3) ([ade3771](https://github.com/mati-araujo/watermelon-audio/commit/ade37716d8dfa91d076aa45d64294aaf87f56073))
+* **usb:** audit follow-ups — round-trip error via atomic, poll widened ([6d64322](https://github.com/mati-araujo/watermelon-audio/commit/6d643229c05205b88399fb3a8374f9534c33bf52))
+* **usb:** data race real en ResizableRingBuffer — el lector veía el unique_ptr mutado ([471eeb4](https://github.com/mati-araujo/watermelon-audio/commit/471eeb475c57f4e9f2490ecef9f850aa27ca50e3))
+* **usb:** guard normal_distribution ctor in roundtrip test harness ([c28dbb9](https://github.com/mati-araujo/watermelon-audio/commit/c28dbb901da274e1d4c9bf47d4f70af373d926bc))
+* **usb:** latency profile no longer leaks across starts + nice-fallback seed ([5577abd](https://github.com/mati-araujo/watermelon-audio/commit/5577abd5dd3b3ac0ec82496ca8506040c5f04074))
+
 ## [1.5.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.4.0...v1.5.0) (2026-07-06)
 
 
