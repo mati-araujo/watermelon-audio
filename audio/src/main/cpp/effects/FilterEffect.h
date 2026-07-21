@@ -32,8 +32,16 @@ public:
     /**
      * @enum FilterType
      * @brief Tipos de filtro disponibles.
+     *
+     * El underlying type es fijo a propósito. `setParam(2, x)` castea un valor
+     * arbitrario del host a este enum, y para un enum *sin* underlying type
+     * fijo el rango válido es sólo el que necesitan sus enumeradores (acá
+     * 0..3): guardar 9 y volver a leerlo es undefined behaviour, y UBSan lo
+     * marca con razón. Fijarlo a `int` hace representable cualquier int, así
+     * el fallback de tipo desconocido en updateCoefficients() queda bien
+     * definido en vez de simplemente andar por suerte.
      */
-    enum FilterType {
+    enum FilterType : int {
         LPF, /**< Filtro paso bajo */
         HPF, /**< Filtro paso alto */
         BPF  /**< Filtro banda de paso */
