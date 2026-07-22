@@ -5,10 +5,8 @@
  */
 
 #include "BackendManager.h"
-#include "OboeBackend.h"
-#include "LibusbBackend.h"
+#include "PlatformBackends.h"
 #include "SplitBackend.h"
-#include "../usb/UsbAudioTypes.h"
 #include "../platform/Logger.h"
 
 #define LOG_TAG "BackendManager"
@@ -44,10 +42,13 @@ void BackendManager::setGlobalInstance(BackendManager* instance) {
 BackendManager::BackendManager() {
     LOGI("BackendManager initialized");
 
-    // Create Oboe backend (always available)
-    mOboeBackend = std::make_unique<OboeBackend>();
+    // The platform decides what this is; the manager only sees IAudioBackend.
+    mSystemBackend = createSystemAudioBackend();
+    if (!mSystemBackend) {
+        LOGW("No built-in audio backend on this platform — selectBackend(OBOE) will fail");
+    }
 
-    // LibUSB backend will be created on-demand when USB device connects
+    // The USB backend is created on demand, when a device is handed to us.
 }
 
 BackendManager::~BackendManager() {
@@ -83,16 +84,23 @@ bool BackendManager::selectBackend(BackendType type) {
 
     switch (type) {
         case BackendType::OBOE:
-            newBackend = mOboeBackend.get();
+            if (!mSystemBackend) {
+                LOGE("No built-in audio backend available on this platform");
+                return false;
+            }
+            newBackend = mSystemBackend.get();
             break;
 
         case BackendType::LIBUSB:
-            if (mLibusbBackend && mUsbBackendAvailable.load()) {
-                newBackend = mLibusbBackend.get();
-            } else {
-                LOGW("LibUSB backend not available, falling back to Oboe");
-                newBackend = mOboeBackend.get();
+            if (mUsbBackend && mUsbBackendAvailable.load()) {
+                newBackend = mUsbBackend.get();
+            } else if (mSystemBackend) {
+                LOGW("USB backend not available, falling back to the built-in backend");
+                newBackend = mSystemBackend.get();
                 type = BackendType::OBOE;
+            } else {
+                LOGE("USB backend not available and no built-in backend to fall back to");
+                return false;
             }
             break;
 
@@ -254,11 +262,11 @@ void BackendManager::setLatencyProfile(usb::UsbLatencyProfile profile) {
 
     mLatencyProfile = profile;
 
-    // Apply immediately to the existing LibusbBackend (takes effect at its next
+    // Apply immediately to the existing USB backend (takes effect at its next
     // start). Persisted in mLatencyProfile so applyConfigToBackend re-applies it
     // if the backend is later recreated — same lifecycle as the streaming mode.
-    if (mLibusbBackend) {
-        mLibusbBackend->setLatencyProfile(profile);
+    if (mUsbBackend) {
+        mUsbBackend->setUsbLatencyProfile(profile);
     }
 }
 
@@ -280,27 +288,31 @@ bool BackendManager::initializeUsbBackend(int fd, const char* usbfsPath) {
             mCurrentType.store(BackendType::NONE, std::memory_order_release);
         }
     }
-    if (mLibusbBackend) {
-        mLibusbBackend->stop();
-        mLibusbBackend.reset();
+    if (mUsbBackend) {
+        mUsbBackend->stop();
+        mUsbBackend.reset();
     }
 
-    // Create new LibusbBackend
-    mLibusbBackend = std::make_unique<LibusbBackend>();
-
-    // Initialize with file descriptor from Android
-    if (!mLibusbBackend->initializeFromFileDescriptor(fd, usbfsPath)) {
-        LOGE("Failed to initialize LibUSB backend");
-        mLibusbBackend.reset();
+    mUsbBackend = createUsbAudioBackend();
+    if (!mUsbBackend) {
+        LOGE("USB audio is not supported on this platform");
         mUsbBackendAvailable.store(false, std::memory_order_release);
         return false;
     }
 
-    // Set up USB error callback for automatic fallback on disconnect
-    mLibusbBackend->setUsbErrorCallback([this](usb::UsbAudioError error, const char* message) {
+    // Initialize with file descriptor from Android
+    if (!mUsbBackend->initializeFromFileDescriptor(fd, usbfsPath)) {
+        LOGE("Failed to initialize USB backend");
+        mUsbBackend.reset();
+        mUsbBackendAvailable.store(false, std::memory_order_release);
+        return false;
+    }
+
+    // Set up the error callback for automatic fallback on disconnect
+    mUsbBackend->setErrorCallback([this](BackendError error, const char* message) {
         LOGW("USB error callback: %s", message);
-        if (error == usb::UsbAudioError::DEVICE_DISCONNECTED) {
-            LOGI("Device disconnected detected, triggering automatic fallback to Oboe");
+        if (error == BackendError::DEVICE_DISCONNECTED) {
+            LOGI("Device disconnected detected, triggering automatic fallback");
             // Don't call fallbackToOboe() directly from callback to avoid deadlock
             // Instead, post to a handler or use a flag
             // For now, we'll notify the error callback which can be handled by JNI
@@ -309,7 +321,7 @@ bool BackendManager::initializeUsbBackend(int fd, const char* usbfsPath) {
     });
 
     // Apply current configuration
-    applyConfigToBackend(mLibusbBackend.get());
+    applyConfigToBackend(mUsbBackend.get());
 
     mUsbBackendAvailable.store(true, std::memory_order_release);
     LOGI("USB backend initialized successfully");
@@ -368,15 +380,15 @@ void BackendManager::fallbackToOboe() {
         mSplitBackend->stop();
         mSplitBackend.reset();
     }
-    if (mLibusbBackend) {
-        mLibusbBackend->stop();
-        mLibusbBackend.reset();
+    if (mUsbBackend) {
+        mUsbBackend->stop();
+        mUsbBackend.reset();
     }
 }
 
 LibusbBackend* BackendManager::getLibusbBackend() {
     std::lock_guard<std::mutex> lock(mMutex);
-    return mLibusbBackend.get();
+    return asLibusbBackend(mUsbBackend.get());
 }
 
 // =============================================================================
@@ -413,21 +425,20 @@ void BackendManager::applyConfigToBackend(IAudioBackend* backend) {
     }
     backend->setFullDuplexEnabled(mFullDuplexEnabled);
 
-    // USB latency profile (Fase 1) — LibusbBackend-specific. Re-applied here so
-    // a freshly created/activated USB backend picks up the persisted profile.
-    // Identity comparison instead of dynamic_cast to avoid an RTTI dependency.
-    if (mLibusbBackend && backend == mLibusbBackend.get()) {
-        mLibusbBackend->setLatencyProfile(mLatencyProfile);
-    }
+    // USB latency profile (Fase 1). Re-applied here so a freshly created or
+    // reactivated USB backend picks up the persisted profile. Pushed
+    // unconditionally: the interface default is a no-op, so backends without
+    // USB latency knobs ignore it and no type test is needed.
+    backend->setUsbLatencyProfile(mLatencyProfile);
 }
 
 IAudioBackend* BackendManager::resolveBackendForSplit(BackendType type) const {
     switch (type) {
         case BackendType::OBOE:
-            return mOboeBackend.get();
+            return mSystemBackend.get();
         case BackendType::LIBUSB:
-            return (mLibusbBackend && mUsbBackendAvailable.load(std::memory_order_acquire))
-                ? mLibusbBackend.get()
+            return (mUsbBackend && mUsbBackendAvailable.load(std::memory_order_acquire))
+                ? mUsbBackend.get()
                 : nullptr;
         default:
             return nullptr;

@@ -328,6 +328,15 @@ public:
         }
     }
 
+    /**
+     * IAudioBackend entry point for the same knob. BackendManager pushes the
+     * profile through the interface so it never has to know this is the USB
+     * backend; the USB-only spelling above stays for direct callers.
+     */
+    void setUsbLatencyProfile(usb::UsbLatencyProfile profile) override {
+        setLatencyProfile(profile);
+    }
+
     /** Current latency tuning (defaults to SAFE). */
     const usb::UsbLatencyTuning& getLatencyTuning() const { return mTuning; }
 
@@ -357,6 +366,16 @@ public:
      */
     using ErrorCallback = std::function<void(usb::UsbAudioError, const char*)>;
     void setUsbErrorCallback(ErrorCallback callback);
+
+    /**
+     * IAudioBackend error channel. Translates USB error codes into the
+     * transport-agnostic BackendError so BackendManager can arm its disconnect
+     * fallback without linking against libusb's error vocabulary.
+     *
+     * Shares the single USB error slot with setUsbErrorCallback() — the last
+     * caller wins.
+     */
+    void setErrorCallback(BackendErrorCallback callback) override;
 
     // =========================================================================
     // Volume Control

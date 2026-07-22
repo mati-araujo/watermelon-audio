@@ -2484,6 +2484,23 @@ void LibusbBackend::setUsbErrorCallback(ErrorCallback callback) {
     mErrorCallback = std::move(callback);
 }
 
+void LibusbBackend::setErrorCallback(BackendErrorCallback callback) {
+    if (!callback) {
+        mErrorCallback = nullptr;
+        return;
+    }
+    setUsbErrorCallback([cb = std::move(callback)](usb::UsbAudioError error, const char* message) {
+        // Only DEVICE_DISCONNECTED has a behavioural contract upstream (it arms
+        // the fallback to the built-in backend). The rest collapse into
+        // TRANSFER_ERROR, which upstream treats as log-and-continue — same
+        // outcome as before, minus the USB vocabulary.
+        cb(error == usb::UsbAudioError::DEVICE_DISCONNECTED
+               ? BackendError::DEVICE_DISCONNECTED
+               : BackendError::TRANSFER_ERROR,
+           message);
+    });
+}
+
 // ============================================================================
 // Error Handling
 // ============================================================================

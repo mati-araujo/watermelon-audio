@@ -13,8 +13,11 @@
 
 #pragma once
 
+#include "../usb/LatencyProfile.h"
+
 #include <cstdint>
 #include <atomic>
+#include <functional>
 #include <string>
 
 namespace watermelon_audio {
@@ -51,6 +54,19 @@ enum class BackendError {
     TIMEOUT,
     FATAL
 };
+
+/**
+ * Asynchronous, backend-agnostic error notification.
+ *
+ * Exists so BackendManager can learn about device loss without knowing which
+ * implementation reported it: a transport-specific channel (libusb error codes,
+ * an Oboe stream error) is mapped to BackendError by the backend itself. The
+ * message is for logging only and is not owned by the callee.
+ *
+ * Invoked off the audio callback — implementations must not call this from the
+ * RT path.
+ */
+using BackendErrorCallback = std::function<void(BackendError error, const char* message)>;
 
 enum class BackendStreamRole : uint32_t {
     NONE = 0,
@@ -305,6 +321,15 @@ public:
     virtual void setCallback(IAudioCallback* callback) = 0;
 
     /**
+     * Subscribe to asynchronous backend errors (device loss, fatal transport
+     * failures). Optional: backends that cannot fail asynchronously ignore it.
+     *
+     * Declared here rather than on the concrete backends so the manager can
+     * arm the fallback path without naming an implementation.
+     */
+    virtual void setErrorCallback(BackendErrorCallback /*callback*/) {}
+
+    /**
      * Set desired sample rate.
      *
      * Must be called before start().
@@ -439,6 +464,20 @@ public:
      */
     virtual bool getUsbDeviceInfo(int* vendorId, int* productId) const {
         return false;  // Default: not a USB backend
+    }
+
+    /**
+     * Apply a USB latency profile.
+     *
+     * Only LibusbBackend acts on it; every other backend ignores it. Having the
+     * no-op default here lets BackendManager persist and re-apply the profile
+     * without a type test — the profile is manager state that must survive
+     * backend recreation, so it is pushed on every (re)configuration.
+     *
+     * Takes effect on the next start().
+     */
+    virtual void setUsbLatencyProfile(usb::UsbLatencyProfile /*profile*/) {
+        // Default: no USB latency knobs.
     }
 };
 

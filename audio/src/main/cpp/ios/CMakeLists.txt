@@ -92,6 +92,8 @@ if(WMA_IOS_PROBE_CORE)
         ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
         ${WMA_CPP_ROOT}/platform/Logger.cpp
         ${WMA_CPP_ROOT}/backends/BackendManager.cpp
+        ${WMA_CPP_ROOT}/backends/PlatformBackends.cpp
+        ${WMA_CPP_ROOT}/backends/SplitBackend.cpp
         ${WMA_CPP_ROOT}/backends/DriftResampler.cpp
         ${WMA_CPP_ROOT}/api/watermelon_audio.cpp
     )

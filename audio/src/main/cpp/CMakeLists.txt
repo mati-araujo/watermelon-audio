@@ -168,6 +168,7 @@ set(API_SOURCES
 set(BACKEND_SOURCES
         backends/OboeBackend.cpp
         backends/BackendManager.cpp
+        backends/PlatformBackends.cpp
         backends/LibusbBackend.cpp
         backends/DriftResampler.cpp
         backends/SplitBackend.cpp

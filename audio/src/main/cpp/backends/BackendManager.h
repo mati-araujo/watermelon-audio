@@ -33,8 +33,8 @@
 
 namespace watermelon_audio {
 
-// Forward declarations
-class OboeBackend;
+// Forward declarations. The manager never names a concrete backend beyond
+// getLibusbBackend()'s return type — see PlatformBackends.h.
 class LibusbBackend;
 class SplitBackend;
 
@@ -255,9 +255,18 @@ private:
     // Mutex for thread-safe operations
     mutable std::mutex mMutex;
 
-    // Backend instances
-    std::unique_ptr<OboeBackend> mOboeBackend;
-    std::unique_ptr<LibusbBackend> mLibusbBackend;
+    // Backend instances. Held as IAudioBackend so this header stays free of
+    // Oboe and libusb: which implementations exist is decided once, in
+    // PlatformBackends.cpp. Null where the platform provides none.
+    //
+    // "System" is the platform's built-in audio path — Oboe on Android,
+    // CoreAudio on iOS (WA-2.4). BackendType::OBOE remains its public name
+    // because that value is mirrored by the Kotlin enum and the JNI encoding.
+    std::unique_ptr<IAudioBackend> mSystemBackend;
+    std::unique_ptr<IAudioBackend> mUsbBackend;
+
+    // SplitBackend is portable — it composes two IAudioBackends and pulls in no
+    // platform SDK — so it is held by its concrete type.
     std::unique_ptr<SplitBackend> mSplitBackend;
 
     // Current active backend
