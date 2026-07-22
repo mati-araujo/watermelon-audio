@@ -1179,6 +1179,23 @@ public:
     bool getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const;
 
     /**
+     * @brief The sample rate actually in effect, whatever the audio path.
+     *
+     * Resolves in order: the running stream (BackendManager or legacy Oboe,
+     * via getStreamInfo) → the preferred rate → 48000.
+     *
+     * Use this instead of reaching for mStream directly. Call sites that did
+     * `mStream ? mStream->getSampleRate() : 0` silently returned 0 on the
+     * BackendManager path, because there mStream is always null — which is how
+     * the fade in stopWithFade came to be skipped entirely and how SoundFonts
+     * ended up loaded at the *preferred* rate rather than the negotiated one.
+     *
+     * Never returns <= 0. Not RT-safe (may touch the backend); call from
+     * control threads only.
+     */
+    int currentSampleRate() const;
+
+    /**
      * @brief Gets the legacy Oboe output stream (for benchmark/diagnostics only).
      * @return Pointer to AudioStream or nullptr if using BackendManager.
      * @note Will be removed once legacy Oboe path is eliminated.

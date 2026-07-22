@@ -942,23 +942,17 @@ void AudioEngine::setEngineParameter(int paramId, float value) {
 // ========== SOUNDFONT ENGINE (Phase 8, Phase 1E — delegated to SynthEngineDispatcher) ==========
 
 bool AudioEngine::loadSoundFont(const void* data, int size) {
-    int sampleRate = mStream ? mStream->getSampleRate() : 0;
-    if (sampleRate <= 0) sampleRate = mPreferredSampleRate.load(std::memory_order_acquire);
-    if (sampleRate <= 0) sampleRate = 48000;
+    const int sampleRate = currentSampleRate();
     return mEngineDispatcher.loadSoundFont(data, size, sampleRate);
 }
 
 bool AudioEngine::loadSoundFontFromPath(const char* path) {
-    int sampleRate = mStream ? mStream->getSampleRate() : 0;
-    if (sampleRate <= 0) sampleRate = mPreferredSampleRate.load(std::memory_order_acquire);
-    if (sampleRate <= 0) sampleRate = 48000;
+    const int sampleRate = currentSampleRate();
     return mEngineDispatcher.loadSoundFontFromPath(path, sampleRate);
 }
 
 bool AudioEngine::loadSoundFontFromFd(int fd, int64_t offset, int64_t length) {
-    int sampleRate = mStream ? mStream->getSampleRate() : 0;
-    if (sampleRate <= 0) sampleRate = mPreferredSampleRate.load(std::memory_order_acquire);
-    if (sampleRate <= 0) sampleRate = 48000;
+    const int sampleRate = currentSampleRate();
     return mEngineDispatcher.loadSoundFontFromFd(fd, offset, length, sampleRate);
 }
 
@@ -1469,7 +1463,7 @@ void AudioEngine::handleMixMonitoring(float* output, int32_t numFrames,
     // DEBUG: Log monitoring status periodically with sample rate info
     static int monitorCheckCount = 0;
     if (++monitorCheckCount >= 500) {
-        int outputSampleRate = mStream ? mStream->getSampleRate() : 0;
+        int outputSampleRate = currentSampleRate();
         int inputSampleRate = inputNode ? inputNode->getStreamSampleRate() : 0;
         LOGI("ENGINE MONITOR CHECK: inputNode=%p, monitoringEnabled=%d, oscEnabled=%d, outputSR=%d, inputSR=%d, mixerNode=%p",
              inputNode,
@@ -1690,10 +1684,12 @@ bool AudioEngine::startWithFade(int fadeTimeMs) {
 void AudioEngine::stopWithFade(int fadeTimeMs) {
     mFadeCtrl.cancel();
 
-    // Configurar fade out then stop
-    if (mStream) {
-        int sampleRate = mStream->getSampleRate();
-        mFadeCtrl.startFade(1.0f, 0.0f, sampleRate, fadeTimeMs);
+    // Fade out, then stop. Previously this was gated on `if (mStream)`, so the
+    // BackendManager path (mStream always null) fell through to a bare stop()
+    // and cut the audio dead — an audible click. currentSampleRate() resolves
+    // on both paths, so the fade now happens regardless of backend.
+    if (fadeTimeMs > 0) {
+        mFadeCtrl.startFade(1.0f, 0.0f, currentSampleRate(), fadeTimeMs);
 
         LOGI("Stopping with fade out: %d ms", fadeTimeMs);
         AUDIO_DIAG("ENGINE STOP_WITH_FADE: fadeMs=%d", fadeTimeMs);
@@ -1718,18 +1714,17 @@ void AudioEngine::pauseWithFade(int fadeTimeMs) {
         "PAUSE_WITH_FADE: fadeTimeMs=%d, mStream=%p, useBackendMgr=%d",
         fadeTimeMs, mStream.get(), useBackend);
 
-    if (mStream) {
-        int sampleRate = mStream->getSampleRate();
-        mFadeCtrl.fadeOutAndPause(sampleRate, fadeTimeMs);
+    // The old shape was `if (mStream) fade; else if (useBackend) pause abruptly`,
+    // because mStream is always null on the BackendManager path. With
+    // currentSampleRate() the fade resolves on both paths, so USB/CoreAudio get
+    // the same fade Oboe always got instead of an abrupt pause.
+    if (fadeTimeMs > 0) {
+        mFadeCtrl.fadeOutAndPause(currentSampleRate(), fadeTimeMs);
 
         LOGI("Pausing with fade out: %d ms", fadeTimeMs);
         AUDIO_DIAG("ENGINE PAUSE_WITH_FADE: fadeMs=%d", fadeTimeMs);
-    } else if (useBackend) {
-        // FIX: When using BackendManager (USB), mStream is null.
-        // Pause immediately without fade (USB DSP thread is still running).
+    } else {
         mFadeCtrl.setPaused(true);
-        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-            "PAUSE_WITH_FADE_USB: mStream=null, set paused=true directly");
     }
 }
 
@@ -1743,20 +1738,17 @@ void AudioEngine::resumeWithFade(int fadeTimeMs) {
         "RESUME_WITH_FADE: fadeTimeMs=%d, mStream=%p, useBackendMgr=%d",
         fadeTimeMs, mStream.get(), useBackend);
 
-    if (mStream) {
-        int sampleRate = mStream->getSampleRate();
-        mFadeCtrl.resumeWithFade(sampleRate, fadeTimeMs);
+    // Same story as pauseWithFade: the BackendManager path used to skip the
+    // fade and snap straight back to full volume.
+    if (fadeTimeMs > 0) {
+        mFadeCtrl.resumeWithFade(currentSampleRate(), fadeTimeMs);
 
         LOGI("Resuming with fade in: %d ms", fadeTimeMs);
         AUDIO_DIAG("ENGINE RESUME_WITH_FADE: fadeMs=%d", fadeTimeMs);
-    } else if (useBackend) {
-        // FIX: When using BackendManager (USB), mStream is null.
-        // Set fade volume directly to 1.0 to avoid stuck-at-zero silence.
+    } else {
+        // Instant restore to full volume — avoids stuck-at-zero silence.
         mFadeCtrl.setPaused(false);
-        mFadeCtrl.startFade(1.0f, 1.0f, 48000, 0);  // Instant restore to full volume
-
-        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-            "RESUME_WITH_FADE_USB: mStream=null, set fadeVol=1.0 directly");
+        mFadeCtrl.startFade(1.0f, 1.0f, currentSampleRate(), 0);
     }
 }
 
@@ -1772,6 +1764,21 @@ void AudioEngine::resumeWithFade(int fadeTimeMs) {
 // ========== COMPONENT CONFIGURATION HELPER ==========
 
 // ========== STREAM INFO (moved from header in Phase 0B) ==========
+
+int AudioEngine::currentSampleRate() const {
+    int32_t sampleRate = 0;
+    int32_t bufferSize = 0;
+    double latencyMillis = 0.0;
+    if (getStreamInfo(sampleRate, bufferSize, latencyMillis) && sampleRate > 0) {
+        return sampleRate;
+    }
+
+    const int preferred = mPreferredSampleRate.load(std::memory_order_acquire);
+    if (preferred > 0) {
+        return preferred;
+    }
+    return 48000;
+}
 
 bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const {
     // Try BackendManager first (works for both USB and Oboe-via-backend paths)
