@@ -999,8 +999,16 @@ private:
 
     // ========== BACKEND MANAGER (USB Audio Phase 1) ==========
     // Feature flag to use BackendManager instead of direct Oboe stream
-    // When enabled, AudioEngine delegates stream lifecycle to BackendManager
+    // When enabled, AudioEngine delegates stream lifecycle to BackendManager.
+    //
+    // Defaults false on Android to preserve the shipping behaviour (the direct
+    // Oboe path), and true everywhere else, where that path does not exist and
+    // BackendManager is the only way to open a stream.
+#if defined(__ANDROID__)
     std::atomic<bool> mUseBackendManager{false};
+#else
+    std::atomic<bool> mUseBackendManager{true};
+#endif
 
     // Node handles for quick access to graph nodes
     NodeHandle mGraphOscillatorHandle{INVALID_NODE_HANDLE};

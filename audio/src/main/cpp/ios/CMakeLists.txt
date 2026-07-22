@@ -55,6 +55,10 @@ endif()
 
 include(${WMA_CPP_ROOT}/thirdparty/tinysoundfont.cmake)
 
+# WA-2.0 probe: how much of the core compiles without Oboe. Not part of the
+# shipped target yet — see the aggregate target at the bottom.
+option(WMA_IOS_PROBE_CORE "Also try to compile core/nodes/api for iOS" OFF)
+
 add_subdirectory(${WMA_CPP_ROOT}/dsp     ${CMAKE_BINARY_DIR}/dsp)
 add_subdirectory(${WMA_CPP_ROOT}/effects ${CMAKE_BINARY_DIR}/effects)
 add_subdirectory(${WMA_CPP_ROOT}/engines ${CMAKE_BINARY_DIR}/engines)
@@ -67,3 +71,33 @@ add_subdirectory(${WMA_CPP_ROOT}/voice   ${CMAKE_BINARY_DIR}/voice)
 add_custom_target(watermelon_audio_ios ALL
     DEPENDS watermelon-dsp watermelon-effects watermelon-engines watermelon-voice tinysoundfont
 )
+
+if(WMA_IOS_PROBE_CORE)
+    # InputNode.cpp stays out: its Oboe adapter is Android-only. The *header* is
+    # Oboe-free, so anything including it still compiles.
+    add_library(watermelon-core-probe STATIC
+        ${WMA_CPP_ROOT}/core/AudioEngine.cpp
+        ${WMA_CPP_ROOT}/core/SynthEngineDispatcher.cpp
+        ${WMA_CPP_ROOT}/core/OutputStage.cpp
+        ${WMA_CPP_ROOT}/core/OscillatorBank.cpp
+        ${WMA_CPP_ROOT}/core/MusicalScale.cpp
+        ${WMA_CPP_ROOT}/core/XYMapper.cpp
+        ${WMA_CPP_ROOT}/core/ModeManager.cpp
+        ${WMA_CPP_ROOT}/core/graph/AudioGraph.cpp
+        ${WMA_CPP_ROOT}/nodes/OscillatorNode.cpp
+        ${WMA_CPP_ROOT}/nodes/EffectChainNode.cpp
+        ${WMA_CPP_ROOT}/nodes/OutputNode.cpp
+        ${WMA_CPP_ROOT}/nodes/MixerNode.cpp
+        ${WMA_CPP_ROOT}/analysis/SpectrumAnalyzer.cpp
+        ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
+        ${WMA_CPP_ROOT}/platform/Logger.cpp
+        ${WMA_CPP_ROOT}/backends/BackendManager.cpp
+        ${WMA_CPP_ROOT}/backends/DriftResampler.cpp
+        ${WMA_CPP_ROOT}/api/watermelon_audio.cpp
+    )
+    target_include_directories(watermelon-core-probe PRIVATE ${WMA_CPP_ROOT})
+    target_link_libraries(watermelon-core-probe
+        PUBLIC watermelon-voice watermelon-looper watermelon-engines
+               watermelon-effects watermelon-dsp tinysoundfont
+    )
+endif()

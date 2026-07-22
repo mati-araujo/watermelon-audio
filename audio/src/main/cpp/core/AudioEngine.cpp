@@ -1,5 +1,19 @@
 #include "AudioEngine.h"
+
+// Oboe is Android-only. Everywhere else the engine runs exclusively through
+// BackendManager/IAudioBackend — which is the path iOS uses with
+// CoreAudioBackend (WA-2.4). The direct-Oboe path below is legacy: it predates
+// IAudioBackend and is kept because it is what Android ships today.
+//
+// AudioEngine.h needs no guard: it already forward-declares oboe::AudioStream
+// and hides the callback adapter behind an opaque unique_ptr<void>, so the
+// header is Oboe-free by construction.
+#if defined(__ANDROID__)
+#define WMA_HAS_OBOE 1
 #include <oboe/Oboe.h>
+#else
+#define WMA_HAS_OBOE 0
+#endif
 #include "../backends/BackendManager.h"
 #include "../nodes/InputNode.h"
 #include "../dsp/SIMDUtils.h"
@@ -10,6 +24,7 @@
 #include <thread>
 #include <chrono>
 
+#if WMA_HAS_OBOE
 // ========== OBOE CALLBACK ADAPTER (Phase 0B) ==========
 // Bridges the legacy direct-Oboe path to AudioEngine's IAudioCallback interface.
 // This adapter owns the oboe::AudioStreamCallback inheritance so AudioEngine doesn't need to.
@@ -80,6 +95,11 @@ private:
 void AudioEngine::OboeAdapterDeleter::operator()(void* p) const {
     delete static_cast<OboeCallbackAdapter*>(p);
 }
+#else
+// Without Oboe nothing ever populates mOboeAdapter, but the deleter is
+// declared in the header and must still link.
+void AudioEngine::OboeAdapterDeleter::operator()(void*) const {}
+#endif  // WMA_HAS_OBOE
 
 #define LOG_TAG "AudioEngine"
 
@@ -481,6 +501,15 @@ bool AudioEngine::start(int fadeTimeMs) {
 
     // ========== LEGACY OBOE PATH ==========
     // Direct Oboe stream creation (original code)
+#if !WMA_HAS_OBOE
+    // Reaching here off Android means the caller never enabled BackendManager,
+    // and there is no other way to open a stream. Callers on those platforms
+    // must call setUseBackendManager(true) (the constructor defaults it to true
+    // where Oboe is unavailable, so this is a misuse, not a normal path).
+    LOGE("Cannot start: no Oboe on this platform and BackendManager is disabled");
+    transitionToState(EngineState::Stopped);
+    return false;
+#else
 
     // Construir y abrir stream
     // CRITICAL FIX: Use Shared mode to allow automatic device routing (headphones, etc.)
@@ -568,7 +597,13 @@ bool AudioEngine::start(int fadeTimeMs) {
 
     // ========== SYNTH ENGINE PREPARATION (Phase 6, Phase 1E — delegated to SynthEngineDispatcher) ==========
     {
+#if WMA_HAS_OBOE
         int framesPerBurst = mStream ? mStream->getFramesPerBurst() : 256;
+#else
+        // No Oboe: the backend owns the burst size. 256 is the same fallback
+        // the Oboe path uses when the stream is not open yet.
+        const int framesPerBurst = 256;
+#endif
         int maxBlock = std::max(framesPerBurst * 4, 4096);
         mEngineDispatcher.prepare(sampleRate, maxBlock);
         // Assign engines to voices
@@ -708,6 +743,7 @@ bool AudioEngine::start(int fadeTimeMs) {
     LOGI("AudioEngine started successfully");
     AUDIO_DIAG("ENGINE START: state=Running, sampleRate=%d, bufferSize=%d", sampleRate, actualBufferSize);
     return true;
+#endif  // WMA_HAS_OBOE
 }
 
 void AudioEngine::stop() {
@@ -764,10 +800,12 @@ void AudioEngine::stop() {
 
     // ========== LEGACY OBOE PATH ==========
     // Detener el stream (esto previene nuevos callbacks)
+#if WMA_HAS_OBOE
     if (mStream) {
         LOGI("Stopping audio stream...");
         mStream->stop();
     }
+#endif
 
     // CRÍTICO: Esperar a que todos los callbacks activos terminen
     // Timeout de 1 segundo para evitar deadlocks
@@ -784,11 +822,13 @@ void AudioEngine::stop() {
     }
 
     // Cerrar el stream
+#if WMA_HAS_OBOE
     if (mStream) {
         mStream->close();
         mStream.reset();
         LOGI("Audio stream closed");
     }
+#endif
 
     // FIX: Clear all internal buffers to prevent dirty buffer clicks on next start
     mOutputStage.clearTempBuffer();
@@ -1793,7 +1833,9 @@ bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double
         }
     }
 
-    // Legacy Oboe path
+    // Legacy Oboe path. Off Android mStream is never populated, so this is the
+    // only branch and it reports "no stream" — which is correct: without
+    // BackendManager running there is nothing to describe.
     if (!mStream) {
         sampleRate = -1;
         bufferSize = -1;
@@ -1801,6 +1843,7 @@ bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double
         return false;
     }
 
+#if WMA_HAS_OBOE
     sampleRate = mStream->getSampleRate();
     bufferSize = mStream->getFramesPerBurst();
 
@@ -1811,6 +1854,9 @@ bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double
         latencyMillis = -1.0;
     }
     return true;
+#else
+    return false;
+#endif
 }
 
 oboe::AudioStream* AudioEngine::getOutputStream() const {
@@ -1832,10 +1878,17 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate) {
     // Configure looper (click envelope is sample-rate aware; transport too).
     mAudioLooper.setSampleRate(sampleRate);
     {
-        // Pre-size the looper mix buffer to the largest block Oboe can deliver so
-        // the audio thread never has to grow it on the fly (QW-4). Same sizing
-        // policy as the other nodes above (framesPerBurst × 4, min 4096).
+        // Pre-size the looper mix buffer to the largest block the backend can
+        // deliver so the audio thread never has to grow it on the fly (QW-4).
+        // Same sizing policy as the other nodes above (framesPerBurst × 4,
+        // min 4096).
+#if WMA_HAS_OBOE
         int framesPerBurst = mStream ? mStream->getFramesPerBurst() : 256;
+#else
+        // No Oboe: the backend owns the burst size. 256 matches the fallback
+        // the Oboe path uses before the stream is open.
+        const int framesPerBurst = 256;
+#endif
         int maxBlock = std::max(framesPerBurst * 4, 4096);
         mAudioLooper.prepareMixBuffer(maxBlock);
     }
