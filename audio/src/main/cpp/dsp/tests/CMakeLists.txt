@@ -41,6 +41,7 @@ add_executable(dsp_tests
     test_soft_clipper.cpp
     test_lock_free_ring_buffer.cpp
     test_delay_line.cpp
+    test_fdn.cpp
     test_lfo.cpp
     test_dc_blocker.cpp
     test_dsp_math.cpp

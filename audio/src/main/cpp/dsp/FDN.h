@@ -3,6 +3,7 @@
 #include "DelayLine.h"
 #include "BiquadFilter.h"
 #include "LFO.h"
+#include "ParameterSmoother.h"
 #include <atomic>
 #include <cmath>
 
@@ -55,6 +56,13 @@ private:
     float mFeedbackGainA[FDN_CHANNELS] = {};
     float mFeedbackGainB[FDN_CHANNELS] = {};
     std::atomic<int> mActiveGainBuffer{0};  // 0 = A, 1 = B
+
+    // Size feeds the delay taps directly, so a raw jump teleports every read
+    // pointer and splices unrelated tail into the output. Glide it instead.
+    // Decay time needs no equivalent: it only reaches the audio thread through
+    // the double-buffered feedback gains above, which are already glitch-free.
+    ParameterSmoother mSizeSmooth;
+    static constexpr float SIZE_SMOOTHING_MS = 30.0f;
 
     static constexpr float DENORMAL_THRESHOLD = 1e-20f;
 

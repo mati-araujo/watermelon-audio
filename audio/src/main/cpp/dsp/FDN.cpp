@@ -12,6 +12,12 @@ FDN::FDN()
         mModLfo[i].setRate(0.3f + 0.1f * static_cast<float>(i));
         mModLfo[i].setPhaseOffset(static_cast<float>(i) / FDN_CHANNELS);
     }
+    // Start the smoother at the current size, not at ParameterSmoother's 0.0f
+    // default — otherwise the first block glides up from a degenerate 1-sample
+    // delay and the network screams on the very first note.
+    mSizeSmooth.reset(mSize.load(std::memory_order_relaxed));
+    mSizeSmooth.setSmoothingTime(SIZE_SMOOTHING_MS,
+                                 static_cast<float>(mSampleRate.load(std::memory_order_relaxed)));
     updateFeedbackGains();
 }
 
@@ -23,6 +29,12 @@ void FDN::setSampleRate(int sampleRate) {
         mDelays[i] = DelayLine(150.0f, sr);
         mModLfo[i].setSampleRate(sampleRate);
     }
+
+    // Coefficient is sample-rate dependent; re-derive it and snap to the
+    // current target (the delay lines were just rebuilt, so there is no tail
+    // left to protect and gliding from a stale value would be audible).
+    mSizeSmooth.setSmoothingTime(SIZE_SMOOTHING_MS, sr);
+    mSizeSmooth.reset(mSize.load(std::memory_order_relaxed));
 
     updateDamping();
     updateFeedbackGains();
@@ -49,8 +61,10 @@ void FDN::setModulation(float depth) {
 }
 
 void FDN::process(float inputL, float inputR, float& outputL, float& outputR) {
-    // Load parameters atomically
-    float size = mSize.load(std::memory_order_relaxed);
+    // Load parameters atomically. Size is glided toward its target so the delay
+    // taps sweep instead of jumping; the resulting slow pitch drift during the
+    // move is the same behaviour the mod LFO already imposes on these taps.
+    float size = mSizeSmooth.process(mSize.load(std::memory_order_relaxed));
     float modDepth = mModDepth.load(std::memory_order_relaxed);
     int sampleRate = mSampleRate.load(std::memory_order_relaxed);
     float sr = static_cast<float>(sampleRate);
@@ -108,6 +122,9 @@ void FDN::reset() {
     for (int i = 0; i < FDN_CHANNELS; ++i) {
         mDelays[i].clear();
     }
+    // No tail survives a reset, so there is nothing to glide for: snap to the
+    // target and let the next note start at the size the user actually set.
+    mSizeSmooth.reset(mSize.load(std::memory_order_relaxed));
 }
 
 void FDN::updateFeedbackGains() {
