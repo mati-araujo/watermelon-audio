@@ -1,0 +1,147 @@
+# ============================================================================
+# core/AudioEngine unit tests (dev host — no NDK, no Oboe, no device)
+#
+# The first host suite for core/. It exists because WA-2.0 + WA-2.7 removed the
+# two things that made AudioEngine untestable off-device: AudioEngine.cpp no
+# longer includes Oboe outside __ANDROID__, and BackendManager no longer names a
+# concrete backend.
+#
+# Scope: the BackendManager audio path — the one USB uses today and CoreAudio
+# will use on iOS. The legacy direct-Oboe path is Android-only by construction
+# (WMA_HAS_OBOE) and stays out of host scope.
+#
+# TWO SOURCES ARE SUBSTITUTED, both under support/ and both marked as stubs:
+#
+#   backends/PlatformBackends.cpp -> support/test_platform_backends.cpp
+#       Hands BackendManager a FakeAudioBackend. The real file returns nullptr
+#       off Android, which leaves nothing able to report a running stream.
+#
+#   nodes/InputNode.cpp           -> support/test_input_node_stub.cpp
+#       Does not compile on the host (its capture adapter inherits from
+#       oboe::AudioStreamDataCallback). Link-time bodies only, no behaviour.
+#
+# Build & run standalone:
+#   cd audio/src/main/cpp/core/tests
+#   mkdir -p build && cd build
+#   cmake .. && cmake --build . && ctest --output-on-failure
+# ============================================================================
+
+cmake_minimum_required(VERSION 3.22.1)
+project(watermelon-core-tests CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Harmless when this directory is pulled in by ../../tests (which already
+# enabled testing); required for the standalone flow documented above to
+# actually register the discovered tests with CTest.
+enable_testing()
+
+include(FetchContent)
+FetchContent_Declare(googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG v1.15.2
+)
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+set(WMA_CPP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+
+# Guarded so the unified test root (../../tests) can pull this suite in
+# alongside the other suites without defining the shared libs twice.
+if(NOT TARGET watermelon-dsp)
+    add_subdirectory(${WMA_CPP_ROOT}/dsp     ${CMAKE_BINARY_DIR}/dsp)
+endif()
+if(NOT TARGET watermelon-effects)
+    add_subdirectory(${WMA_CPP_ROOT}/effects ${CMAKE_BINARY_DIR}/effects)
+endif()
+if(NOT TARGET watermelon-engines)
+    add_subdirectory(${WMA_CPP_ROOT}/engines ${CMAKE_BINARY_DIR}/engines)
+endif()
+if(NOT TARGET watermelon-voice)
+    add_subdirectory(${WMA_CPP_ROOT}/voice   ${CMAKE_BINARY_DIR}/voice)
+endif()
+if(NOT TARGET watermelon-looper)
+    add_subdirectory(${WMA_CPP_ROOT}/looper  ${CMAKE_BINARY_DIR}/looper)
+endif()
+if(NOT TARGET tinysoundfont)
+    include(${WMA_CPP_ROOT}/thirdparty/tinysoundfont.cmake)
+endif()
+
+# The slice of the engine AudioEngine.cpp needs to link. Mirrors the iOS probe
+# target in ios/CMakeLists.txt (WMA_IOS_PROBE_CORE) minus api/, which the tests
+# do not exercise, and with the two substitutions described in the header above.
+set(CORE_TESTED_SOURCES
+    ${WMA_CPP_ROOT}/core/AudioEngine.cpp
+    ${WMA_CPP_ROOT}/core/SynthEngineDispatcher.cpp
+    ${WMA_CPP_ROOT}/core/OutputStage.cpp
+    ${WMA_CPP_ROOT}/core/OscillatorBank.cpp
+    ${WMA_CPP_ROOT}/core/MusicalScale.cpp
+    ${WMA_CPP_ROOT}/core/XYMapper.cpp
+    ${WMA_CPP_ROOT}/core/ModeManager.cpp
+    ${WMA_CPP_ROOT}/core/graph/AudioGraph.cpp
+    ${WMA_CPP_ROOT}/nodes/OscillatorNode.cpp
+    ${WMA_CPP_ROOT}/nodes/EffectChainNode.cpp
+    ${WMA_CPP_ROOT}/nodes/OutputNode.cpp
+    ${WMA_CPP_ROOT}/nodes/MixerNode.cpp
+    ${WMA_CPP_ROOT}/analysis/SpectrumAnalyzer.cpp
+    ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
+    ${WMA_CPP_ROOT}/platform/Logger.cpp
+    # Despite the name, this file is plain POSIX + inline asm with the only
+    # __ANDROID__ guard inside setAudioThreadPriority(). AudioEngine::start()
+    # calls flushDenormals(), so the real implementation is compiled in rather
+    # than stubbed — one less divergence between host and device behaviour.
+    ${WMA_CPP_ROOT}/platform/PlatformAndroid.cpp
+    ${WMA_CPP_ROOT}/backends/BackendManager.cpp
+    ${WMA_CPP_ROOT}/backends/SplitBackend.cpp
+    ${WMA_CPP_ROOT}/backends/DriftResampler.cpp
+)
+
+add_executable(core_tests
+    test_current_sample_rate.cpp
+    test_fade_lifecycle.cpp
+    support/test_platform_backends.cpp
+    support/test_input_node_stub.cpp
+    ${CORE_TESTED_SOURCES}
+)
+
+target_include_directories(core_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${WMA_CPP_ROOT}
+)
+
+# ----------------------------------------------------------------------------
+# Pre-existing dead code, demoted for THIS TARGET ONLY.
+#
+# core/ and nodes/ had never been compiled on the host, so the -Werror gate in
+# ../../tests/CMakeLists.txt meets them here for the first time and stops the
+# build on three vestigial declarations that predate this suite:
+#
+#   core/MusicalScale.cpp:131        int rootNote — loaded, never read
+#   modulators/BurstModulator.h:52   normalizedPos — computed, never read
+#   core/AudioEngine.h:1027          mLastBpm — superseded by EffectChain::mLastBpm
+#
+# All three are unread values, not behaviour. Removing them belongs in its own
+# change, not in the commit that introduces the tests, so they are demoted here
+# rather than edited. Drop this block once they are cleaned up — the gate should
+# apply to core/ in full.
+target_compile_options(core_tests PRIVATE -Wno-unused-variable)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # GCC has no such warning and rejects unknown -Wno-* once anything else fires.
+    target_compile_options(core_tests PRIVATE -Wno-unused-private-field)
+endif()
+
+find_package(Threads REQUIRED)
+target_link_libraries(core_tests PRIVATE
+    watermelon-voice
+    watermelon-looper
+    watermelon-engines
+    watermelon-effects
+    watermelon-dsp
+    tinysoundfont
+    GTest::gtest_main
+    Threads::Threads
+)
+
+include(GoogleTest)
+gtest_discover_tests(core_tests)
