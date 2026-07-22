@@ -54,6 +54,86 @@ jobs:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: bash scripts/run-cpp-tests.sh
 
+  # WA-0.3 — macOS / iOS job.
+  #
+  # Two things no other job can catch:
+  #   1. The C++ suite under Apple clang (WA-T.1) — the ubuntu jobs use g++ and
+  #      the Windows wrapper uses MinGW, so clang-apple diagnostics only surface
+  #      here. This is the early-warning system for the iOS C++ build (WA-2.1).
+  #   2. That commonMain still compiles for Kotlin/Native. commonMain is only
+  #      ever type-checked against the JVM classpath elsewhere, which is exactly
+  #      how it silently accumulated 34 JVM-only references before WA-0.2
+  #      (String.format, System.currentTimeMillis, @Volatile, java.* reflection).
+  #      Without this job that debt comes straight back.
+  #
+  # Must stay on an arm64 runner: iosSimulatorArm64 tests cannot execute on x86.
+  ios:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # C++ first: it needs no JDK/SDK/Gradle, so a portability break fails
+      # before we pay for the toolchain setup below.
+      # The runner image normally ships both; install only what is missing so a
+      # future image change cannot break this job, and a normal run costs ~0s.
+      # Note this needs a system cmake — the "cmake;3.22.1" installed into the
+      # Android SDK further down is not on PATH and is for AGP, not for this.
+      - name: Install C++ build tools
+        run: |
+          for tool in cmake ninja; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "$tool already present: $(command -v "$tool")"
+            else
+              echo "Installing $tool ..."
+              brew install "$tool"
+            fi
+          done
+
+      - name: Build & run C++ test suite (Apple clang) — WA-T.1
+        run: bash scripts/run-cpp-tests.sh
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # Required even though this job builds no Android artifact: the module
+      # applies com.android.library, so AGP needs an SDK to configure the
+      # project at all — without it Gradle fails before reaching any iOS task.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      # AGP resolves (and silently auto-downloads) the NDK even for iOS-only
+      # tasks. Installing it explicitly keeps that ~1 GB download visible in the
+      # log and pinned to the catalog version instead of happening implicitly.
+      - name: Install NDK and CMake
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1
+          sdkmanager --install \
+            "ndk;28.2.13676358" \
+            "cmake;3.22.1"
+
+      # The Kotlin/Native toolchain is a ~1 GB download per run otherwise.
+      - name: Cache Kotlin/Native toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: konan-${{ runner.os }}-
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Compile iOS targets
+        run: ./gradlew :audio:compileKotlinIosArm64 :audio:compileKotlinIosSimulatorArm64
+
+      # Runs commonTest on the simulator — the only place the shared Kotlin is
+      # executed (not merely compiled) under Kotlin/Native.
+      - name: Run commonTest on iOS simulator
+        run: ./gradlew :audio:iosSimulatorArm64Test
+
   build:
     runs-on: ubuntu-latest
 
