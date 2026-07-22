@@ -22,6 +22,17 @@
 #define SFM_LOGI(...) wma::logMessage(wma::LogLevel::INFO, SFM_LOG_TAG, __VA_ARGS__)
 #define SFM_LOGE(...) wma::logMessage(wma::LogLevel::ERROR, SFM_LOG_TAG, __VA_ARGS__)
 
+// Darwin has no mmap64/off64_t: there off_t is unconditionally 64-bit, so plain
+// mmap already gives what the *64 variants give on the 32-bit Android ABIs.
+// See loadFromFd() for why a 64-bit offset is required in the first place.
+#if defined(__APPLE__)
+#define WMA_MMAP ::mmap
+using WmaMapOffset = ::off_t;
+#else
+#define WMA_MMAP ::mmap64
+using WmaMapOffset = ::off64_t;
+#endif
+
 /**
  * @class SoundFontManager
  * @brief Manages SoundFont loading/unloading lifecycle with RT-safe pointer swap
@@ -178,13 +189,14 @@ public:
         }
 
         // mmap the page-aligned region — read-only, private.
-        // mmap64/off64_t (not plain mmap/off_t): off_t is 32-bit on the 32-bit
+        // A 64-bit offset is mandatory here: off_t is 32-bit on the 32-bit
         // ABIs (armeabi-v7a, x86), which would truncate a large asset offset.
         // loadFromPath is immune (it always maps at offset 0); this path takes
-        // an arbitrary offset, so it must use the 64-bit variant.
-        void* mapped = mmap64(nullptr, static_cast<size_t>(region.mapLength),
-                              PROT_READ, MAP_PRIVATE, fd,
-                              static_cast<off64_t>(region.alignedOffset));
+        // an arbitrary offset. WMA_MMAP resolves to mmap64 where that matters
+        // and to plain mmap on Darwin, where off_t is already 64-bit.
+        void* mapped = WMA_MMAP(nullptr, static_cast<size_t>(region.mapLength),
+                                PROT_READ, MAP_PRIVATE, fd,
+                                static_cast<WmaMapOffset>(region.alignedOffset));
         if (mapped == MAP_FAILED) {
             SFM_LOGE("[SF8] loadFromFd: mmap failed for %lld bytes at offset %lld (errno=%d)",
                      static_cast<long long>(region.mapLength),

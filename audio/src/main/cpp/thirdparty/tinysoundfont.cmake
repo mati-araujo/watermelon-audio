@@ -4,7 +4,11 @@
 # Usage: include() this file, then link tinysoundfont target.
 # The implementation is compiled via tsf_impl.cpp (one TU only).
 
-set(TSF_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/tinysoundfont)
+# CMAKE_CURRENT_LIST_DIR (this file's own directory), not
+# CMAKE_CURRENT_SOURCE_DIR (the includer's): lets the iOS build under ios/
+# include this without pretending to be cpp/. Same path when included from
+# cpp/CMakeLists.txt, so the Android build is unaffected.
+set(TSF_DIR ${CMAKE_CURRENT_LIST_DIR}/tinysoundfont)
 
 add_library(tinysoundfont STATIC
     ${TSF_DIR}/tsf_impl.cpp
