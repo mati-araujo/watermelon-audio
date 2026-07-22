@@ -125,9 +125,9 @@ Prioridades: P0 = bloqueante, P1 = importante, P2 = diferible. Esfuerzo: S (< 1 
 
 | ID | Requerimiento | Detalle | Criterio de aceptación | Prio | Esf | Estado |
 |---|---|---|---|---|---|---|
-| WA-0.1 | **Gap analysis C API vs JNI** | Inventario función por función: **278** JNIEXPORT vs **189** `wma_*`. Clasificar el gap (**~89**) por categoría (looper avanzado, mixer/regions, mode transitions, spectrum/waveform, metronome, input monitor, benchmark) y marcar cuáles son Android-only (USB) y no se portan | Tabla de cobertura en `docs/kmp/c_api_coverage.md` con estado por función | P0 | M | Pendiente |
+| WA-0.1 | **Gap analysis C API vs JNI** | Inventario función por función: **278** JNIEXPORT vs **187** `wma_*`. Clasificar el gap por categoría y marcar cuáles son Android-only (USB) y no se portan | Tabla de cobertura en `docs/kmp/c_api_coverage.md` con estado por función | P0 | M | ✅ **HECHO** 2026-07-22 — ver `docs/kmp/c_api_coverage.md`, reproducible con `scripts/c-api-gap.py` |
 | WA-0.2 | Targets iOS en Gradle | Ampliar el convention plugin `watermelon.kmp.native`: `iosArm64` + `iosSimulatorArm64`; verificar el lockstep de Kotlin con NoisyPad (D8). ~~Los 52 archivos de commonMain deben compilar para iOS sin cambios~~ → **requirió 34 fixes de portabilidad**, ver nota abajo | `:audio:compileKotlinIosArm64` verde | P0 | M | ✅ **HECHO** 2026-07-22 |
-| WA-0.3 | CI macOS | Job en GitHub Actions (runner macOS): compila targets iOS + tests C++ con clang de Xcode (WA-T.1) | Job verde en PR de prueba | P0 | M | ✅ **HECHO** 2026-07-22 — job `ios` en `.github/workflows/ci.yml`; falta la primera corrida real en un PR |
+| WA-0.3 | CI macOS | Job en GitHub Actions (runner macOS): compila targets iOS + tests C++ con clang de Xcode (WA-T.1) | Job verde en PR de prueba | P0 | M | ✅ **HECHO Y VERIFICADO** 2026-07-22 — job `ios` verde en PR #45 (5m36s), con `iosSimulatorArm64Test` ejecutando de verdad y 490/490 tests C++ bajo Apple clang |
 | WA-0.4 | Guardrail de portabilidad C++ | Check de CI que falle si aparece `#include <jni.h>`/`<android/...>` fuera de `jni/`, `backends/Oboe*`, `backends/Libusb*`, `usb/` y `platform/PlatformAndroid.cpp`. **Ampliar a Kotlin:** el equivalente para `commonMain` es que WA-0.3 compile los targets iOS en cada PR — es lo que habría atajado los 34 errores de WA-0.2 | CI rojo ante include prohibido (probado con PR sintético) | P1 | S | Pendiente |
 
 ### Nota de cierre — WA-0.2 (2026-07-22)
@@ -210,11 +210,64 @@ iOS-only**: sin él Gradle ni configura el proyecto.
 **Cachés:** `~/.konan` (toolchain de Kotlin/Native, ~1 GB por corrida sin cache),
 más el cache de `gradle/actions/setup-gradle`.
 
-**Verificado localmente:** YAML válido; suite C++ avanza más allá del bug de bash tras
-el fix. **No verificado localmente:** el paso `iosSimulatorArm64Test` (bloqueado por el
-*first launch* de Xcode, §11) y la corrida completa de la suite C++ con clang (falta
-`cmake` en el PATH de la máquina de desarrollo — `brew install cmake`). Ambos se
-validan solos en la primera corrida del job.
+**Resultado de la primera corrida (PR #45): el job encontró dos bugs reales**, ambos
+invisibles para g++ porque son diagnósticos exclusivos de clang:
+
+1. **`platform/Logger.h` no compilaba con clang** (`'format' attribute argument not
+   supported: gnu_printf`). El guard era `#if defined(__GNUC__) || defined(__clang__)`,
+   pero clang define `__GNUC__` también, así que caía en la rama de `gnu_printf` — un
+   archetype que clang rechaza. **Efecto lateral:** el NDK de Android también es clang,
+   o sea que ahí el atributo venía siendo *ignorado en silencio* y no había ningún
+   chequeo de formato en el build Android. Ahora sí lo hay (y no agregó ni un warning).
+2. **Campos muertos en `FDN.h`** (`-Wunused-private-field`): `mSmoothSize` y
+   `mSmoothDecayTime`, declarados pero nunca usados. Ver nota abajo.
+
+> [!NOTE]
+> **Lección de método.** El CI solo habría mostrado el #2: ninja se detiene en el primer
+> error y paró en FDN. El problema de `Logger.h` — el más importante, y en un archivo que
+> este mismo documento daba por listo para iOS — apareció sólo porque se compiló local
+> con `ninja -k 0`. Al encarar WA-2.1 conviene compilar local y en paralelo, no iterar
+> contra el CI.
+
+> [!WARNING]
+> **Deuda destapada por FDN, fuera del alcance de WA-0.3.** El smoothing que
+> `mSmoothSize`/`mSmoothDecayTime` pretendían **sí hace falta**: `FDN::process()` corre
+> en el audio thread y lee `mSize` por sample para calcular los delay taps, así que mover
+> el control de size lo cambia de golpe. `setSize`/`setDecayTime` ya usan ganancias
+> double-buffered para el feedback, pero `mSize` no pasa por ese mecanismo. Contradice la
+> regla de CLAUDE.md ("parámetros con smoothing para evitar zipper noise"). Cablearlo es
+> un cambio de DSP audible y va en su propio ticket.
+
+### Nota de cierre — WA-0.1 (2026-07-22)
+
+Entregable: **`docs/kmp/c_api_coverage.md`**, reproducible con
+`python3 scripts/c-api-gap.py` (el script lee el JNI y el header directamente, así que
+los números siguen al código y se re-corren al cerrar cada categoría de WA-2.5).
+
+| Métrica | Valor |
+|---|---|
+| JNIEXPORT | 278 |
+| Funciones `wma_*` | 187 |
+| Cubiertas (match exacto de tokens) | 136 |
+| **Gap total** | **142** |
+| — USB, no se porta (D4) | 32 |
+| — **Gap portable** | **110** |
+| — de esos, con near-match a revisar | 31 |
+| — **neto a implementar en WA-2.5** | **~79** |
+
+**La estimación original (~89) queda confirmada:** el gap portable real está entre 79 y
+110 según cuántos near-match resulten ser la misma función con otro nombre, y ~89 cae
+cómodo en ese rango. WA-2.5 no hay que re-dimensionarlo.
+
+**El hallazgo que sí cambia la planificación: el looper es el 35% del gap portable**
+(39 de 110), muy por encima de cualquier otra categoría (le sigue input/monitor con 14).
+Es el bloque de trabajo dominante de WA-2.5 y conviene decidir temprano si NoisyPad iOS
+v1 necesita el looper completo o alcanza con un subconjunto.
+
+Limitación honesta del método: el matching es por conjunto de tokens y no puede decidir
+los near-match — `SetNoiseGateEnabled ~ wma_input_set_noise_gate` es plausible, pero
+`LooperGetArmedTrack ~ wma_looper_get_track_peak` es un falso positivo evidente. Se
+revisan a mano al encarar cada categoría.
 
 ---
 
@@ -241,7 +294,7 @@ Mejoras de valor inmediato para el mantenimiento Android actual, que además des
 | WA-2.2 | `PlatformApple.cpp` | Implementar `wma::platform`: denormals (FPCR, reutiliza WA-1.6), `setAudioThreadPriority()` (pthread `THREAD_TIME_CONSTRAINT_POLICY` — solo como refuerzo: el thread de Core Audio ya viene priorizado), SIMD caps (NEON fijo en arm64) | `engine_tests` linkea y pasa en macOS con PlatformApple | P0 | M |
 | WA-2.3 | Logger Apple | Sink `os_log` por defecto en builds Apple; callback configurable idéntico a Android | Log visible en Console.app desde sample app | P1 | S |
 | WA-2.4 | **`CoreAudioBackend`** | Implementar `IAudioBackend` para iOS (D2): AVAudioEngine + AVAudioSourceNode (output) y AVAudioSinkNode/inputNode (input full-duplex para guitar/input FX). Reglas: el render block invoca directo el mix C++ (sin ObjC dispatch, sin allocs, sin locks); negociación de sample rate/buffer contra el hardware; manejo de formato (Float32 nativo de Core Audio vs pipeline interno) | Sine + cadena de efectos + looper suenan en device real; callback verificado sin allocs (Instruments) | P0 | L |
-| WA-2.5 | **Completar la C API** | Cerrar el gap de WA-0.1: agregar a `watermelon_audio.h` las **~89** funciones faltantes (excluyendo USB). Reglas de ABI: handles opacos, códigos de error enteros (sin excepciones cruzando la frontera), sin tipos C++ en firmas, documentación de thread-safety por función (RT-safe vs coordinación) | Cobertura 1:1 con el JNI no-USB según tabla WA-0.1 | P0 | L |
+| WA-2.5 | **Completar la C API** | Cerrar el gap de WA-0.1: agregar a `watermelon_audio.h` las funciones faltantes (excluyendo USB). **Dimensionado por WA-0.1: 110 portables, de las cuales ~79 netas tras descartar near-matches — y 39 son del looper.** Ver `docs/kmp/c_api_coverage.md` para el detalle por categoría. Reglas de ABI: handles opacos, códigos de error enteros (sin excepciones cruzando la frontera), sin tipos C++ en firmas, documentación de thread-safety por función (RT-safe vs coordinación) | Cobertura 1:1 con el JNI no-USB según tabla WA-0.1 | P0 | L |
 | WA-2.6 | **JNI → wrapper de la C API** (alto valor) | Refactor incremental por categorías (lifecycle → effects → looper → mode → análisis): cada `Java_..._nativeXxx` pasa a llamar `wma_xxx` en vez del engine directo. El JNI queda como capa de traducción de tipos JNI↔C de ~1 línea por función | Paridad Android/iOS por construcción; tests C++ y smoke Android verdes tras cada categoría | P1 | L |
 | WA-2.7 | Selección de backend por plataforma | `BackendManager` compila con Oboe+Libusb en Android y CoreAudio en iOS (compile-time, `#if` mínimos en un solo archivo de registro de backends) | Sin `#ifdef` dispersos; un único punto de registro | P1 | S |
 
@@ -322,7 +375,7 @@ inicializado.
 |---|---|---|
 | Latencia iOS insuficiente con AVAudioEngine | UX del instrumento | Medir temprano (WA-4.3); plan B explícito: AURemoteIO detrás del mismo `IAudioBackend` (D2) |
 | Overhead cinterop en llamadas de alta frecuencia (`setXY` por frame de gesto) | Jitter de control | Las llamadas C desde K/N son baratas; medir en WA-4.3; plan B: batching de eventos XY (la infraestructura de colas ya existe) |
-| Gap real de la C API mayor al estimado (~89) | Cronograma F2 | WA-0.1 primero — es análisis puro y barato; el refactor WA-2.6 es incremental por categorías |
+| ~~Gap real de la C API mayor al estimado (~89)~~ | ~~Cronograma F2~~ | **MITIGADO (WA-0.1, 2026-07-22):** gap portable = 110, ~79 neto. La estimación se confirmó. Riesgo residual: el looper concentra 39 de esas 110 |
 | Divergencia silenciosa JNI vs C API durante la transición | Bugs solo-iOS o solo-Android | WA-2.6 (JNI sobre C API) elimina la clase de bug por construcción; hasta entonces, la tabla WA-0.1 es el contrato |
 | Kotlin/Native + libs estáticas grandes: tiempos de link | DX | Cachear XCFramework (WA-4.1); compilar targets iOS solo en CI/macOS |
 | libusb (LGPL) | Licenciamiento iOS | No aplica: libusb queda excluido del build iOS (D4) |
@@ -369,16 +422,21 @@ WA-0 (gap + targets + CI) ──► WA-1 (quick wins) ──► WA-2 (C++: CMake
 
 | Fase | Estado |
 |---|---|
-| **Fase 0** — Análisis y fundaciones | 🟡 En curso — WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.1 y WA-0.4 pendientes |
+| **Fase 0** — Análisis y fundaciones | 🟢 Casi cerrada — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · **solo falta WA-0.4** (esfuerzo S) |
 | **Fase 1** — Quick wins | 🟡 Tocada de refilón por WA-0.2 (WA-1.1 y WA-1.5 parciales) |
 | **Fase 2** — C++ multiplataforma | ⬜ No iniciada — **ruta crítica** |
 | **Fase 3** — Kotlin iosMain | ⬜ No iniciada (salvo los 2 `actual` mínimos de WA-0.2) |
 | **Fase 4** — Empaquetado y publicación | ⬜ No iniciada |
 
-**Próximo paso recomendado:** **WA-0.1** (gap analysis C API vs JNI). Es análisis puro
-y barato, y gobierna el dimensionamiento de toda la Fase 2 — que es la ruta crítica
-hacia el gate G2. Con WA-0.2 y WA-0.3 cerrados, el andamiaje ya está: hay targets iOS
-que compilan y un CI que los vigila.
+**Próximo paso recomendado:** **WA-2.1** (build CMake para iOS). Es el primer eslabón de
+la ruta crítica hacia G2 y desbloquea WA-2.2 (`PlatformApple`) y sobre todo **WA-2.4**
+(`CoreAudioBackend`), que el propio § 14 marca como lo que conviene arrancar apenas
+cierre WA-2.1. El andamiaje de Fase 0 ya está: targets iOS que compilan, un CI que los
+vigila con clang, y el gap de la C API dimensionado.
 
-**Pendiente de bajo costo:** WA-0.4 (guardrail de `#include <jni.h>`), que ahora es
-puramente aditivo — el equivalente Kotlin del guardrail ya lo cubre el job `ios`.
+**Pendiente de bajo costo:** WA-0.4 (guardrail de `#include <jni.h>`), esfuerzo S y
+puramente aditivo — el equivalente Kotlin del guardrail ya lo cubre el job `ios`. Cierra
+la Fase 0 en una sentada.
+
+**Decisión de producto a tomar temprano:** si NoisyPad iOS v1 necesita el looper completo.
+Son 39 de las 110 funciones portables del gap (WA-0.1) — el bloque más grande de WA-2.5.
