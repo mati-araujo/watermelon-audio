@@ -93,6 +93,13 @@ jobs:
       - name: Build & run C++ test suite (Apple clang) — WA-T.1
         run: bash scripts/run-cpp-tests.sh
 
+      # WA-2.1 — cross-compiles the portable DSP for device + simulator. This is
+      # the only job that catches Darwin-vs-bionic breakage (mmap64, off64_t and
+      # friends), which the host clang suite above cannot see because it builds
+      # for macOS, not iOS.
+      - name: Build C++ for iOS (device + simulator) — WA-2.1
+        run: bash scripts/build-ios.sh
+
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
