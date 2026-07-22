@@ -1,8 +1,12 @@
 package com.watermellonstudios.audio.internal.util
 
+import com.watermellonstudios.audio.callback.AudioLogger
+import com.watermellonstudios.audio.callback.NoOpAudioLogger
+import com.watermellonstudios.audio.domain.scale.ScaleMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.concurrent.Volatile
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.ln
@@ -34,6 +38,16 @@ data class QuantizationResult(val frequency: Float, val changed: Boolean)
  * number of octaves centered around the root note.
  */
 object ScaleQuantizer {
+
+    /**
+     * Trace sink for note-change events. Defaults to no-op, so the per-gesture
+     * quantization path costs nothing unless a consumer opts in — previously
+     * these were unconditional `android.util.Log.d` calls, which both violated
+     * the commonMain "no android.*" rule and logged on every note change.
+     */
+    @Volatile var logger: AudioLogger = NoOpAudioLogger
+
+    private const val TAG = "XY_TRACE"
 
     // Default frequency range (used when octaveRange <= 0 or in free mode)
     private const val DEFAULT_MIN_FREQ = 20f
@@ -189,7 +203,7 @@ object ScaleQuantizer {
         lastQuantizedMidi = midiNote
         _currentMidiNoteFlow.value = midiNote
         isQuarterTone = false
-        android.util.Log.d("XY_TRACE", "[SQ-EQ] NOTE %d→%d idx=%d/%d".format(prevMidi, midiNote, index, scaleNotes.size))
+        logger.debug(TAG, "[SQ-EQ] NOTE $prevMidi→$midiNote idx=$index/${scaleNotes.size}")
         return QuantizationResult(midiToFrequency(midiNote.toFloat()), changed = true)
     }
 
@@ -272,25 +286,21 @@ object ScaleQuantizer {
     }
 
     /**
-     * Convenience overload for scale modes with intervals property.
-     * Works with any type that has an 'intervals' property.
+     * Convenience overload for [ScaleMode].
+     *
+     * Was previously generic + JVM reflection (`getMethod("getIntervals")`) on
+     * every call — which is both non-portable and needlessly expensive on the
+     * per-gesture-frame `setXY` path. [ScaleMode.intervals] is typed, so the
+     * reflection bought nothing.
      */
-    inline fun <reified T> quantizeFrequency(x: Float, scaleMode: T): Float where T : Any {
-        return quantizeFrequencyWithResult(x, scaleMode).frequency
-    }
+    fun quantizeFrequency(x: Float, scaleMode: ScaleMode): Float =
+        quantizeFrequencyWithResult(x, scaleMode).frequency
 
     /**
      * Convenience overload returning [QuantizationResult] for change detection.
      */
-    inline fun <reified T> quantizeFrequencyWithResult(x: Float, scaleMode: T): QuantizationResult where T : Any {
-        val intervals = try {
-            scaleMode::class.java.getMethod("getIntervals").invoke(scaleMode) as? List<*>
-        } catch (e: Exception) {
-            null
-        }
-        @Suppress("UNCHECKED_CAST")
-        return quantizeFrequencyWithResult(x, (intervals as? List<Int>) ?: emptyList())
-    }
+    fun quantizeFrequencyWithResult(x: Float, scaleMode: ScaleMode): QuantizationResult =
+        quantizeFrequencyWithResult(x, scaleMode.intervals)
 
     /**
      * Resets hysteresis state. Call when switching scales or starting a new touch.
@@ -357,7 +367,12 @@ object ScaleQuantizer {
         _currentMidiNoteFlow.value = newMidi
         isQuarterTone = false
         val (sqMin, sqMax) = getFrequencyRange()
-        android.util.Log.d("XY_TRACE", "[SQ] NOTE %d→%d freq=%.1f rawMidi=%.1f range=[%.1f,%.1f] root=%d oct=%d".format(prevMidi, newMidi, midiToFrequency(quantizedMidi), midiNote, sqMin, sqMax, currentRootNoteId, currentOctaveRange))
+        logger.debug(
+            TAG,
+            "[SQ] NOTE $prevMidi→$newMidi freq=${midiToFrequency(quantizedMidi).fmt(1)} " +
+                "rawMidi=${midiNote.fmt(1)} range=[${sqMin.fmt(1)},${sqMax.fmt(1)}] " +
+                "root=$currentRootNoteId oct=$currentOctaveRange"
+        )
 
         // Convert back to frequency
         return QuantizationResult(midiToFrequency(quantizedMidi), changed = true)

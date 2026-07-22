@@ -1,5 +1,9 @@
 package com.watermellonstudios.audio.domain.usb
 
+import com.watermellonstudios.audio.internal.util.epochMillis
+import com.watermellonstudios.audio.internal.util.fmt
+import com.watermellonstudios.audio.internal.util.formatEpochMillisUtc
+
 /**
  * USB Audio Test Suite - Result Types
  *
@@ -201,13 +205,13 @@ data class UsbTestResult(
             appendLine("Duration: ${actualDurationMs}ms")
             appendLine()
             appendLine("Latency:")
-            appendLine("  Average: ${String.format("%.2f", avgLatencyMs)}ms")
-            appendLine("  Min/Max: ${String.format("%.2f", minLatencyMs)}/${String.format("%.2f", maxLatencyMs)}ms")
-            appendLine("  Jitter:  ${String.format("%.2f", latencyJitterMs)}ms")
+            appendLine("  Average: ${avgLatencyMs.fmt(2)}ms")
+            appendLine("  Min/Max: ${minLatencyMs.fmt(2)}/${maxLatencyMs.fmt(2)}ms")
+            appendLine("  Jitter:  ${latencyJitterMs.fmt(2)}ms")
             appendLine()
             appendLine("Packets:")
             appendLine("  Total:      $totalPackets")
-            appendLine("  Successful: $successfulPackets (${String.format("%.2f", successRate)}%)")
+            appendLine("  Successful: $successfulPackets (${successRate.fmt(2)}%)")
             appendLine("  Underruns:  $underruns")
             appendLine("  Overruns:   $overruns")
             appendLine("  Errors:     $errors")
@@ -215,8 +219,8 @@ data class UsbTestResult(
             if (avgInputLevelDb != Float.NEGATIVE_INFINITY) {
                 appendLine()
                 appendLine("Input Level:")
-                appendLine("  Average: ${String.format("%.1f", avgInputLevelDb)} dB")
-                appendLine("  Peak:    ${String.format("%.1f", peakInputLevelDb)} dB")
+                appendLine("  Average: ${avgInputLevelDb.fmt(1)} dB")
+                appendLine("  Peak:    ${peakInputLevelDb.fmt(1)} dB")
             }
 
             errorMessage?.let {
@@ -246,7 +250,7 @@ data class UsbTestResult(
             config = config,
             status = UsbTestStatus.CANCELLED,
             startTimeMs = startTimeMs,
-            endTimeMs = System.currentTimeMillis()
+            endTimeMs = epochMillis()
         )
 
         /**
@@ -262,7 +266,7 @@ data class UsbTestResult(
             config = config,
             status = UsbTestStatus.FAILED,
             startTimeMs = startTimeMs,
-            endTimeMs = System.currentTimeMillis(),
+            endTimeMs = epochMillis(),
             errorMessage = errorMessage
         )
     }
@@ -281,7 +285,7 @@ data class UsbTestReport(
     val results: List<UsbTestResult>,
 
     // Report metadata
-    val generatedAt: Long = System.currentTimeMillis(),
+    val generatedAt: Long = epochMillis(),
     val totalDurationMs: Long = results.sumOf { it.actualDurationMs }
 ) {
     /**
@@ -320,7 +324,7 @@ data class UsbTestReport(
             appendLine("Device: $deviceName")
             appendLine("VID:PID: $deviceVidPid")
             appendLine("UAC Version: $uacVersion")
-            appendLine("Generated: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(generatedAt)}")
+            appendLine("Generated: ${formatEpochMillisUtc(generatedAt)}")
             appendLine()
             appendLine("═══════════════════════════════════════════════════════════════")
             appendLine("SUMMARY: $statusSummary")

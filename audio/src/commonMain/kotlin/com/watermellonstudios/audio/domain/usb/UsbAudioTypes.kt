@@ -1,5 +1,9 @@
 package com.watermellonstudios.audio.domain.usb
 
+import com.watermellonstudios.audio.internal.util.epochMillis
+import com.watermellonstudios.audio.internal.util.fmt
+import com.watermellonstudios.audio.internal.util.toHex4
+
 /**
  * USB Audio domain types.
  *
@@ -28,7 +32,7 @@ data class UsbAudioDevice(
      * VID:PID string for debugging.
      */
     val vidPid: String
-        get() = String.format("%04X:%04X", vendorId, productId)
+        get() = "${vendorId.toHex4()}:${productId.toHex4()}"
 }
 
 /**
@@ -188,7 +192,7 @@ data class UsbTransferStats(
     val activeClockSourceId: Int = -1,
 
     // Timestamp for stats
-    val timestampMs: Long = System.currentTimeMillis()
+    val timestampMs: Long = epochMillis()
 ) {
     /**
      * Check if there are any errors in the stats.
@@ -208,13 +212,13 @@ data class UsbTransferStats(
      * Format latency as a display string.
      */
     val latencyDisplay: String
-        get() = String.format("%.2fms (%.1f-%.1f)", avgLatencyMs, minLatencyMs, maxLatencyMs)
+        get() = "${avgLatencyMs.fmt(2)}ms (${minLatencyMs.fmt(1)}-${maxLatencyMs.fmt(1)})"
 
     /**
      * Format buffer level as a display string.
      */
     val bufferDisplay: String
-        get() = String.format("%d/%d (%.0f%%)", ringBufferLevel, ringBufferCapacity, ringBufferFillPct * 100)
+        get() = "$ringBufferLevel/$ringBufferCapacity (${(ringBufferFillPct * 100).fmt(0)}%)"
 }
 
 sealed class UsbHealthEvent {

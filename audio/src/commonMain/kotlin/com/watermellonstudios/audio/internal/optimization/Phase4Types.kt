@@ -1,5 +1,7 @@
 package com.watermellonstudios.audio.internal.optimization
 
+import com.watermellonstudios.audio.internal.util.fmt
+
 /**
  * Phase 4 Optimization Types
  *
@@ -20,7 +22,7 @@ data class JniOperationStats(
     val avgTimeUs: Double
 ) {
     override fun toString(): String =
-        "calls=$callCount, total=${String.format("%.2f", totalTimeMs)}ms, avg=${String.format("%.1f", avgTimeUs)}μs"
+        "calls=$callCount, total=${totalTimeMs.fmt(2)}ms, avg=${avgTimeUs.fmt(1)}μs"
 }
 
 /**

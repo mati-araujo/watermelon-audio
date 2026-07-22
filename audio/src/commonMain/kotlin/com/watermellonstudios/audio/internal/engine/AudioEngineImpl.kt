@@ -19,6 +19,7 @@ import com.watermellonstudios.audio.domain.state.StreamInfo
 import com.watermellonstudios.audio.domain.usb.AudioBackendType
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
 import com.watermellonstudios.audio.internal.util.ScaleQuantizer
+import com.watermellonstudios.audio.internal.util.epochMillis
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -93,7 +94,7 @@ internal class AudioEngineImpl(
             refreshStreamInfo()
 
             // Analytics
-            sessionStartTime = System.currentTimeMillis()
+            sessionStartTime = epochMillis()
             _state.value.streamInfo?.let { analytics.onSessionStarted(it) }
 
             // Start state polling
@@ -126,7 +127,7 @@ internal class AudioEngineImpl(
 
             // Analytics
             if (sessionStartTime > 0) {
-                val duration = System.currentTimeMillis() - sessionStartTime
+                val duration = epochMillis() - sessionStartTime
                 analytics.onSessionEnded(duration)
                 sessionStartTime = 0
             }
