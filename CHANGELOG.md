@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.6.0...v1.7.0) (2026-07-22)
+
+
+### Features
+
+* **kmp:** targets iOS y commonMain realmente multiplataforma (WA-0.2) ([9fbc8b7](https://github.com/mati-araujo/watermelon-audio/commit/9fbc8b78d609844876d41096536137dd603237ff))
+
+
+### Bug Fixes
+
+* **dsp:** elimina campos muertos de FDN que rompian el build con clang ([f109a9e](https://github.com/mati-araujo/watermelon-audio/commit/f109a9e0966cd71c7996c5aaaac277f34d6353d4))
+* **dsp:** mSize sin smoothing en FDN::process() — click audible al mover size ([df4c5d4](https://github.com/mati-araujo/watermelon-audio/commit/df4c5d44309811c6759b8d5add052a9dbfbabb3e))
+* **dsp:** mSize sin smoothing en FDN::process() — click audible al mover size ([50e5b9f](https://github.com/mati-araujo/watermelon-audio/commit/50e5b9fc8a56a88bcba311710b09ea5bb337a72e))
+* **platform:** Logger.h no compilaba con clang — gnu_printf no existe ahi ([8880fea](https://github.com/mati-araujo/watermelon-audio/commit/8880fea29029ca380d90aeaf86ad5e42721f6c1d))
+* portabilidad C++ con Apple clang — desbloquea el job macOS (WA-0.3) ([3fa5dee](https://github.com/mati-araujo/watermelon-audio/commit/3fa5dee4c37816cb84b74120e8703338b9f8d7fd))
+* **scripts:** run-cpp-tests.sh nunca corrio en macOS — bash 3.2 y set -u ([949c119](https://github.com/mati-araujo/watermelon-audio/commit/949c119a177c0d5ceb6458e3703307d3f710ce55))
+
 ## [1.6.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.5.0...v1.6.0) (2026-07-21)
 
 
