@@ -56,10 +56,6 @@ private:
     float mFeedbackGainB[FDN_CHANNELS] = {};
     std::atomic<int> mActiveGainBuffer{0};  // 0 = A, 1 = B
 
-    // Cached smoothed values for audio thread
-    float mSmoothSize = 0.7f;
-    float mSmoothDecayTime = 3.0f;
-
     static constexpr float DENORMAL_THRESHOLD = 1e-20f;
 
     void updateFeedbackGains();
