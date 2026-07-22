@@ -3,6 +3,7 @@ package com.watermellonstudios.audio.api
 import com.watermellonstudios.audio.domain.effect.EffectChainState
 import com.watermellonstudios.audio.domain.effect.EffectState
 import com.watermellonstudios.audio.domain.effect.EffectType
+import com.watermellonstudios.audio.internal.util.monotonicNanos
 
 /**
  * Interface for reading effect state from the native audio engine.
@@ -59,12 +60,12 @@ interface IEffectStateProvider {
  * @property effects List of effect snapshots in order
  * @property isGloballyBypassed Whether the full effect chain is globally bypassed
  * @property version Monotonically increasing version number for change detection
- * @property timestamp Timestamp when snapshot was taken (System.nanoTime())
+ * @property timestamp Monotonic nanosecond timestamp when snapshot was taken
  */
 data class EffectChainSnapshot(
     val effects: List<NativeEffectSnapshot>,
     val version: Long,
-    val timestamp: Long = System.nanoTime(),
+    val timestamp: Long = monotonicNanos(),
     val isGloballyBypassed: Boolean = false
 ) {
     val size: Int get() = effects.size

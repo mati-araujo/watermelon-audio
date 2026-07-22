@@ -73,6 +73,11 @@ class KmpNativeConventionPlugin : Plugin<Project> {
                     publishLibraryVariants("release")
                 }
 
+                // WA-0.2 — iOS targets. Por ahora solo compilan Kotlin: el motor C++
+                // (cinterop + XCFramework) llega en WA-2.1/WA-3.1.
+                iosArm64()
+                iosSimulatorArm64()
+
                 sourceSets.apply {
                     commonMain.dependencies {
                         implementation(libs.library("kotlinx-coroutines-core"))

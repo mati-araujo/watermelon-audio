@@ -42,10 +42,14 @@ if [[ "${CLEAN:-0}" == "1" ]]; then
     rm -rf "$BUILD_DIR"
 fi
 
-cmake -S "$SRC_DIR" -B "$BUILD_DIR" "${GEN_ARGS[@]}" \
+# The "${arr[@]+"${arr[@]}"}" dance is required, not decorative: macOS ships
+# bash 3.2, where `set -u` treats an empty array as unbound and aborts the
+# script. GEN_ARGS is empty whenever ninja is absent, and SAN_ARGS is empty on
+# every non-sanitizer run — so a plain "${arr[@]}" breaks every macOS run.
+cmake -S "$SRC_DIR" -B "$BUILD_DIR" "${GEN_ARGS[@]+"${GEN_ARGS[@]}"}" \
     -DCMAKE_BUILD_TYPE=Debug \
     -DFETCHCONTENT_BASE_DIR="$DEPS_DIR" \
-    "${SAN_ARGS[@]}"
+    "${SAN_ARGS[@]+"${SAN_ARGS[@]}"}"
 
 cmake --build "$BUILD_DIR" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
