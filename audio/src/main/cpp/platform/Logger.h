@@ -44,7 +44,14 @@ void setLogCallback(LogCallback callback);
 LogCallback getLogCallback();
 
 // Internal: dispatch a log message. NOT RT-safe.
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__clang__)
+// clang must be checked BEFORE __GNUC__: it defines __GNUC__ too, but rejects
+// the gnu_printf archetype (-Wignored-attributes, fatal under -Werror). Its
+// plain `printf` archetype already validates with C99 semantics, so %zu/%lld
+// are accepted — the MinGW problem described below is GCC-specific.
+void logMessage(LogLevel level, const char* tag, const char* fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+#elif defined(__GNUC__)
 // gnu_printf (not printf) so the format check uses C99/GNU semantics — %zu,
 // %lld etc. — matching the Android/bionic target. With the plain `printf`
 // archetype, MinGW hosts validate against msvcrt semantics and false-flag the
