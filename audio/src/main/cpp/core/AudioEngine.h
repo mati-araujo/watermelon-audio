@@ -947,6 +947,12 @@ private:
     std::atomic<int> mLastXRunCount{0};  // For XRun (underrun/overrun) monitoring
     std::unique_ptr<std::thread> mRecoveryThread;
 
+    // Deferred-stop worker for stopWithFade(). Owned (not detached) so the
+    // destructor can join it — a detached thread could outlive the engine and
+    // call stop() on freed memory. Touched only from control threads.
+    std::unique_ptr<std::thread> mStopFadeThread;
+    std::atomic<bool> mStopFadeCancel{false};
+
     // IMPROVED: Manejo de memoria insuficiente (Fase 2.2.3)
     std::atomic<bool> mInitializationFailed{false};
     bool mUsingReducedBuffers{false};

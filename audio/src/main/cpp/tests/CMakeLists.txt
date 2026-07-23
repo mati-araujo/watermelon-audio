@@ -101,7 +101,13 @@ endif()
 # exists — is fully modelled. Silencing the warning hides a tooling limitation,
 # not a defect TSan found.
 if(WMA_TESTS_SANITIZE MATCHES "thread")
-    add_compile_options(-Wno-tsan)
+    # -Wno-tsan is a GCC spelling; Apple clang rejects it as an unknown warning
+    # option (fatal under -Werror), which blocks running this job locally on
+    # macOS. Guard it to GCC — same rationale as the Clang-only guard on
+    # -Wno-unused-private-field in core/tests.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        add_compile_options(-Wno-tsan)
+    endif()
 endif()
 
 # Order is irrelevant — the shared-library subdirectories are guarded.

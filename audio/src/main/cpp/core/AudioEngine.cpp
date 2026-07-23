@@ -288,6 +288,15 @@ AudioEngine::AudioEngine() {
 }
 
 AudioEngine::~AudioEngine() {
+    // Reclaim the deferred-stop worker FIRST, before touching mFadeCtrl: it runs
+    // stop()->mFadeCtrl.cancel(), so joining it here is what keeps that off the
+    // destructor's own cancel() below (the data race TSan caught) and stops it
+    // outliving `this`.
+    mStopFadeCancel.store(true, std::memory_order_release);
+    if (mStopFadeThread && mStopFadeThread->joinable()) {
+        mStopFadeThread->join();
+    }
+
     // RAII: Cancel pending fade thread and ensure stream is closed
     mFadeCtrl.cancel();
     stop();
@@ -1734,13 +1743,29 @@ void AudioEngine::stopWithFade(int fadeTimeMs) {
         LOGI("Stopping with fade out: %d ms", fadeTimeMs);
         AUDIO_DIAG("ENGINE STOP_WITH_FADE: fadeMs=%d", fadeTimeMs);
 
-        // Delayed stop after fade completes.
-        // NOTE: stopWithFade needs to call stop() (not just setPaused), so we can't
-        // use FadeController::fadeOutAndPause. Use a detached thread since stop() is idempotent.
-        std::thread([this, fadeTimeMs]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(fadeTimeMs + 50));
-            stop();
-        }).detach();
+        // Delayed stop after the fade completes. Owned (see mStopFadeThread) so
+        // the destructor can reclaim it; a detached thread could outlive the
+        // engine and call stop() on freed memory. A prior worker, if any, is
+        // superseded: cancel and join it before starting the next.
+        if (mStopFadeThread && mStopFadeThread->joinable()) {
+            mStopFadeCancel.store(true, std::memory_order_release);
+            mStopFadeThread->join();
+        }
+        mStopFadeCancel.store(false, std::memory_order_release);
+        mStopFadeThread = std::make_unique<std::thread>([this, fadeTimeMs]() {
+            // Chunked sleep so teardown can reclaim the thread promptly instead
+            // of blocking for the whole fade.
+            const auto deadline = std::chrono::steady_clock::now()
+                                + std::chrono::milliseconds(fadeTimeMs + 50);
+            while (!mStopFadeCancel.load(std::memory_order_acquire)) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    stop();  // idempotent
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            // Cancelled: the engine is tearing down and owns the stop() itself.
+        });
     } else {
         stop();
     }

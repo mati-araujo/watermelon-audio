@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <chrono>
 #include <climits>
@@ -114,7 +115,7 @@ public:
         startFade(1.0f, 0.0f, sampleRate, fadeTimeMs);
 
         mCancelFade.store(false, std::memory_order_release);
-        mFadeThread = std::make_unique<std::thread>([this, fadeTimeMs]() {
+        auto thread = std::make_unique<std::thread>([this, fadeTimeMs]() {
             auto start = std::chrono::steady_clock::now();
             auto duration = std::chrono::milliseconds(fadeTimeMs + 50);
 
@@ -128,6 +129,11 @@ public:
                 mIsPaused.store(true, std::memory_order_release);
             }
         });
+        // mThreadMutex serialises every access to mFadeThread. cancel() can run
+        // on the UI thread and on AudioEngine's stopWithFade worker at the same
+        // time; without this the two race on the unique_ptr (caught by TSan).
+        std::lock_guard<std::mutex> lock(mThreadMutex);
+        mFadeThread = std::move(thread);
     }
 
     /**
@@ -144,10 +150,18 @@ public:
      */
     void cancel() {
         mCancelFade.store(true, std::memory_order_release);
-        if (mFadeThread && mFadeThread->joinable()) {
-            mFadeThread->join();
+        // Take ownership of the thread under the lock, then join OUTSIDE it: two
+        // concurrent cancel() callers each move-out at most once (the loser gets
+        // nullptr and joins nothing), and we never hold the mutex across the
+        // potentially long join.
+        std::unique_ptr<std::thread> toJoin;
+        {
+            std::lock_guard<std::mutex> lock(mThreadMutex);
+            toJoin = std::move(mFadeThread);
         }
-        mFadeThread.reset();
+        if (toJoin && toJoin->joinable()) {
+            toJoin->join();
+        }
     }
 
     // =========== Getters ===========
@@ -174,5 +188,6 @@ private:
     std::atomic<int> mFadeTotalFrames{0};
     std::atomic<bool> mIsPaused{false};
     std::unique_ptr<std::thread> mFadeThread;
+    std::mutex mThreadMutex;  // guards mFadeThread lifecycle only — never held on the RT path
     std::atomic<bool> mCancelFade{false};
 };
