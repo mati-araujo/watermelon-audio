@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1](https://github.com/mati-araujo/watermelon-audio/compare/v1.8.0...v1.8.1) (2026-07-23)
+
+
+### Bug Fixes
+
+* **ci:** publicar aunque release-please falle post-tag (!cancelled) ([#56](https://github.com/mati-araujo/watermelon-audio/issues/56)) ([7577882](https://github.com/mati-araujo/watermelon-audio/commit/757788258b5886d99c7f3dbba9ee6fabf1eb187e))
+
 ## [1.8.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.7.1...v1.8.0) (2026-07-23)
 
 
