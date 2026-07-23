@@ -6,15 +6,23 @@
 # linker flags). Keeping the iOS build here means zero regression risk for the
 # shipping Android build.
 #
-# SCOPE TODAY — portable DSP only:
+# SHIPPED TARGET — portable DSP only:
 #     watermelon-dsp / -effects / -engines / -voice / -looper + tinysoundfont
 #
-# NOT here yet: core/, nodes/, api/, backends/. Those do not compile for iOS —
-# AudioEngine.cpp and InputNode are coupled to Oboe directly (InputNode even
-# inherits oboe::AudioStreamDataCallback), not just through IAudioBackend.
-# Decoupling them is its own requirement and a prerequisite for WA-2.4
-# (CoreAudioBackend). When that lands, add core/nodes/api here and this target
-# becomes the real libwatermelon_audio.a.
+# core/, nodes/, api/ and backends/ DO compile for iOS since WA-2.0 and WA-2.7,
+# but they are still behind WMA_IOS_PROBE_CORE rather than in the shipped
+# target, because two gaps remain before the archive is usable:
+#
+#   - nodes/InputNode.cpp — its Oboe adapter is Android-only, so it leaves ~22
+#     undefined symbols. iOS needs its own input path.
+#   - CoreAudioBackend (WA-2.4) — createSystemAudioBackend() returns nullptr on
+#     iOS today, so the manager constructs but cannot open a stream.
+#
+# Note a STATIC target would NOT fail on those undefined symbols, which is why
+# the probe is checked with `nm -u` rather than by whether it builds.
+#
+# Once WA-2.4 lands, promote the probe sources into watermelon_audio_ios and
+# this becomes the real libwatermelon_audio.a.
 #
 # Excluded by design (D4 / platform): jni/, usb/, OboeBackend, LibusbBackend,
 # PlatformAndroid.cpp.
