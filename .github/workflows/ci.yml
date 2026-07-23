@@ -124,7 +124,7 @@ jobs:
 
       # The Kotlin/Native toolchain is a ~1 GB download per run otherwise.
       - name: Cache Kotlin/Native toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.konan
           key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
