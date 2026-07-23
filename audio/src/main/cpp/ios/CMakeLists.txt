@@ -81,8 +81,9 @@ add_custom_target(watermelon_audio_ios ALL
 )
 
 if(WMA_IOS_PROBE_CORE)
-    # InputNode.cpp stays out: its Oboe adapter is Android-only. The *header* is
-    # Oboe-free, so anything including it still compiles.
+    # The full engine as it builds for iOS. InputNode.cpp and PlatformApple.cpp
+    # (WA-2.2 / WA-3) closed the last two link gaps — this archive now has no
+    # unresolved project symbols, which is what cinterop needs to link against.
     add_library(watermelon-core-probe STATIC
         ${WMA_CPP_ROOT}/core/AudioEngine.cpp
         ${WMA_CPP_ROOT}/core/SynthEngineDispatcher.cpp
@@ -96,9 +97,11 @@ if(WMA_IOS_PROBE_CORE)
         ${WMA_CPP_ROOT}/nodes/EffectChainNode.cpp
         ${WMA_CPP_ROOT}/nodes/OutputNode.cpp
         ${WMA_CPP_ROOT}/nodes/MixerNode.cpp
+        ${WMA_CPP_ROOT}/nodes/InputNode.cpp
         ${WMA_CPP_ROOT}/analysis/SpectrumAnalyzer.cpp
         ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
         ${WMA_CPP_ROOT}/platform/Logger.cpp
+        ${WMA_CPP_ROOT}/platform/PlatformApple.cpp
         ${WMA_CPP_ROOT}/backends/BackendManager.cpp
         ${WMA_CPP_ROOT}/backends/PlatformBackends.cpp
         ${WMA_CPP_ROOT}/backends/SplitBackend.cpp

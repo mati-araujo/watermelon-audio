@@ -1,6 +1,19 @@
 #include "InputNode.h"
 #include "../platform/Logger.h"
+
+// Oboe is Android-only. The input *capture* path (opening a mic/line stream)
+// lives entirely behind this guard; the rest of InputNode — DSP, gain, noise
+// gate, level metering, the ring buffers — is portable and compiles everywhere.
+// On iOS the stream methods are inert (no capture yet); a CoreAudio input
+// adapter would slot in at this same seam. See AudioEngine.cpp for the same
+// WMA_HAS_OBOE pattern.
+#if defined(__ANDROID__)
+#define WMA_HAS_OBOE 1
 #include <oboe/Oboe.h>
+#else
+#define WMA_HAS_OBOE 0
+#endif
+
 #include <cmath>
 #include <algorithm>
 #include <cassert>
@@ -11,6 +24,7 @@
 #define LOGW(...) wma::logMessage(wma::LogLevel::WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) wma::logMessage(wma::LogLevel::ERROR, LOG_TAG, __VA_ARGS__)
 
+#if WMA_HAS_OBOE
 // ========== OBOE ADAPTER (WA-2.0) ==========
 // Concentrates every Oboe dependency of InputNode: the callback inheritance and
 // the stream handle. InputNode only sees it through an opaque pointer, which is
@@ -70,6 +84,14 @@ oboe::InputPreset inputPresetForSource(InputSource source) {
 
 }  // namespace
 
+#else  // !WMA_HAS_OBOE
+
+// Without Oboe nothing populates mBackendAdapter, but the deleter is declared in
+// the header and must still link.
+void InputNode::BackendAdapterDeleter::operator()(void*) const {}
+
+#endif  // WMA_HAS_OBOE
+
 InputNode::InputNode()
     : mRingBuffer(48000 * 2 * RING_BUFFER_SECONDS)  // Initial size: 1 second stereo at 48kHz
     , mMonitoringBuffer(48000 * 2 * RING_BUFFER_SECONDS)  // Same size for monitoring
@@ -112,6 +134,11 @@ void InputNode::reset() {
 }
 
 bool InputNode::createInputStream() {
+#if !WMA_HAS_OBOE
+    // No capture backend on this platform yet (iOS input is future work). The
+    // node still exists and processes; it just never has a live input stream.
+    return false;
+#else
     // The adapter is created on first use and then kept for the lifetime of the
     // node: Oboe holds a raw pointer to it while a stream is open, so it must
     // outlive every stream it is registered with.
@@ -167,9 +194,11 @@ bool InputNode::createInputStream() {
     mSampleRate = actualSampleRate;
 
     return true;
+#endif  // WMA_HAS_OBOE
 }
 
 void InputNode::closeInputStream() {
+#if WMA_HAS_OBOE
     auto* adapter = asAdapter(mBackendAdapter.get());
     if (adapter && adapter->stream) {
         adapter->stream->stop();
@@ -177,9 +206,13 @@ void InputNode::closeInputStream() {
         adapter->stream.reset();
         LOGI("Input stream closed");
     }
+#endif
 }
 
 bool InputNode::startInputStream() {
+#if !WMA_HAS_OBOE
+    return false;  // No capture backend on this platform (see createInputStream).
+#else
     if (mInputStreamRunning.load()) {
         LOGI("Input stream already running");
         return true;
@@ -202,6 +235,7 @@ bool InputNode::startInputStream() {
     mInputStreamRunning.store(true);
     LOGI("Input stream started");
     return true;
+#endif  // WMA_HAS_OBOE
 }
 
 void InputNode::stopInputStream() {
@@ -451,6 +485,10 @@ float InputNode::getInputLatencyMs() const {
 }
 
 void InputNode::updateLatency() {
+#if !WMA_HAS_OBOE
+    mInputLatencyFrames.store(0);
+    return;
+#else
     auto* adapter = asAdapter(mBackendAdapter.get());
     if (!adapter || !adapter->stream) {
         mInputLatencyFrames.store(0);
@@ -477,6 +515,7 @@ void InputNode::updateLatency() {
              static_cast<float>(estimatedFrames) / stream->getSampleRate() * 1000.0f,
              (long long)estimatedFrames);
     }
+#endif  // WMA_HAS_OBOE
 }
 
 // Monitoring functions
