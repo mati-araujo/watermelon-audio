@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.7.1...v1.8.0) (2026-07-23)
+
+
+### Features
+
+* **backends:** CoreAudioBackend para iOS/macOS (WA-2.4) ([f488993](https://github.com/mati-araujo/watermelon-audio/commit/f4889935a67562c7e001fd6bf38df72116af9459))
+* CoreAudioBackend para iOS — WA-2.4 (output) ([3453003](https://github.com/mati-araujo/watermelon-audio/commit/3453003d1f5a891f1d7253b0bafbdebf6bc1fb7c))
+* **ios:** PlatformApple + InputNode portable — el .a de iOS linkea sin gaps (WA-2.2 + prep WA-3) ([d1092e5](https://github.com/mati-araujo/watermelon-audio/commit/d1092e576888c34314486623206663aab7227b17))
+* **ios:** PlatformApple + InputNode portable — el .a de iOS linkea sin gaps (WA-2.2, WA-3 prep) ([cdd75e4](https://github.com/mati-araujo/watermelon-audio/commit/cdd75e4679c7ffc4cb1fa5e31713abce372b4d17))
+
 ## [1.7.1](https://github.com/mati-araujo/watermelon-audio/compare/v1.7.0...v1.7.1) (2026-07-23)
 
 
