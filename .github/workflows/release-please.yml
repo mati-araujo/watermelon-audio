@@ -24,7 +24,14 @@ jobs:
 
   publish:
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    # `!cancelled()` para que el publish corra aunque el job release-please termine
+    # en fallo DESPUÉS de haber creado el release. La action a veces tira un error
+    # secundario post-tag (p.ej. "Backfilling file list… release-please failed:")
+    # que hace fallar el job pero deja el tag + el output release_created ya seteados;
+    # con el gate original (`success()` implícito) el publish se saltea y el artefacto
+    # nunca llega a Packages — fue exactamente lo que pasó con v1.8.0 (run 30019140010).
+    # El segundo clause sigue publicando SOLO cuando de verdad se creó un release.
+    if: ${{ !cancelled() && needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
