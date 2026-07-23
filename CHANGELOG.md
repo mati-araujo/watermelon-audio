@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1](https://github.com/mati-araujo/watermelon-audio/compare/v1.7.0...v1.7.1) (2026-07-23)
+
+
+### Bug Fixes
+
+* **core:** currentSampleRate() unifica los caminos y arregla 3 bugs del backend ([c1f822d](https://github.com/mati-araujo/watermelon-audio/commit/c1f822d19c0003ad46a8c3d44bf8cf1036145a5a))
+* **core:** data race + use-after-free en el fade de stopWithFade (TSan) ([10e3548](https://github.com/mati-araujo/watermelon-audio/commit/10e35487588603929e4e6712b5289880f6cc3a6c))
+* **engines:** mmap64/off64_t no existen en Darwin ([158d976](https://github.com/mati-araujo/watermelon-audio/commit/158d976dea5bf347772770113eb124fa64568d5d))
+
 ## [1.7.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.6.0...v1.7.0) (2026-07-22)
 
 
