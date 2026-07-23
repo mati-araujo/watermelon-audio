@@ -5,7 +5,8 @@
 #include "../dsp/NoiseGate.h"
 #include "../dsp/LevelMeter.h"
 #include "../dsp/DCBlocker.h"
-#include <oboe/Oboe.h>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -33,8 +34,13 @@ enum class InputSource {
  *
  * The input stream runs on a separate thread and communicates with the
  * output processing thread via a lock-free ring buffer.
+ *
+ * The capture backend (Oboe on Android) is kept out of this header on purpose:
+ * every backend detail lives behind the opaque adapter below, so including this
+ * file does not drag a platform audio API into the translation unit. That is
+ * what allows the core to be compiled for platforms without Oboe (WA-2.0).
  */
-class InputNode : public AudioNode, public oboe::AudioStreamDataCallback {
+class InputNode : public AudioNode {
 public:
     InputNode();
     ~InputNode() override;
@@ -47,11 +53,14 @@ public:
     void reset() override;
     void process(AudioBuffer& inputBuffer, int numFrames) override;
 
-    // Oboe callback (input stream)
-    oboe::DataCallbackResult onAudioReady(
-        oboe::AudioStream* stream,
-        void* audioData,
-        int32_t numFrames) override;
+    // Entry point for the platform capture callback: takes one interleaved
+    // block straight from the device and runs the input DSP chain on it.
+    // Returns false when the capture stream must stop.
+    //
+    // Called on the input audio thread — the implementation is allocation- and
+    // lock-free, and the channel count is passed in (instead of being queried
+    // from a stream object) so no backend type leaks into this header.
+    bool processInputBlock(float* audioData, int numFrames, int channelCount);
 
     // Stream management
     bool startInputStream();
@@ -101,11 +110,16 @@ public:
 private:
     bool createInputStream();
     void closeInputStream();
-    oboe::InputPreset getInputPresetForSource(InputSource source) const;
 
 private:
-    // Input stream
-    std::shared_ptr<oboe::AudioStream> mInputStream;
+    // Opaque handle to the capture-backend adapter defined in InputNode.cpp.
+    // It owns both the backend callback inheritance and the stream handle, so
+    // no backend type has to appear here. void* plus a custom deleter is used
+    // because unique_ptr cannot delete an incomplete type; the deleter is
+    // defined in the .cpp where the adapter is complete.
+    struct BackendAdapterDeleter { void operator()(void* p) const; };
+    std::unique_ptr<void, BackendAdapterDeleter> mBackendAdapter;
+
     std::atomic<bool> mInputStreamRunning{false};
 
     // Ring buffer for input data (1 second capacity)

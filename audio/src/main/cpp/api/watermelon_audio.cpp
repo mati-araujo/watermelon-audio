@@ -12,7 +12,6 @@
 
 #include "../core/AudioMode.h"
 #include "../core/ModeConfigurations.h"
-#include "../backends/LibusbBackend.h"
 #include "../voice/VoiceTypes.h"
 #include "../platform/Logger.h"
 

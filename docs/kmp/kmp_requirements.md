@@ -2,9 +2,9 @@
 
 **Proyecto:** watermelon-audio (`com.watermellonstudios:audio-android`, v1.6.0)
 **Documento hermano:** `NoisyPad/docs/kmp/kmp_requirements.md` (consumidor)
-**Estado:** EN CURSO — Fase 0 parcial (WA-0.2 cerrado)
-**Fecha:** 2026-07-05 · **Última actualización:** 2026-07-22 (cifras del diagnóstico
-re-auditadas contra el código y resultado de WA-0.2)
+**Estado:** EN CURSO — Fase 0 casi cerrada · Fase 2 en curso (WA-2.0 y WA-2.7 cerrados)
+**Fecha:** 2026-07-05 · **Última actualización:** 2026-07-22 (cifras re-auditadas contra
+el código; WA-0.1/0.2/0.3, WA-2.1 parcial, WA-2.0 y WA-2.7 cerrados)
 **Objetivo estratégico:** que la librería de audio compile y funcione en iOS con el mismo motor C++ y la misma API Kotlin (`commonMain`) que hoy consume NoisyPad Android, habilitando la versión iOS de NoisyPad.
 
 ---
@@ -46,16 +46,16 @@ camino andado:
 - Abstracciones de plataforma ya existen: `platform/Logger.h` (callback configurable, sin `__android_log_print` en DSP) y `platform/Platform.h` (denormals, prioridad de thread, SIMD caps) con `PlatformAndroid.cpp` como única implementación.
 - Ya existe una **C API pura**: `api/watermelon_audio.h/.cpp` con **189** funciones.
 - Backends detrás de interfaz: `IAudioBackend` + `BackendManager` (hot-swap) — el diseño ya contempla múltiples backends.
-- Tests C++ (googletest) **host-compilables**: dsp/effects/looper/voice/engine/usb suites, scripts `run-cpp-tests.{ps1,sh}`, integrados a `check`.
+- Tests C++ (googletest) **host-compilables**: dsp/effects/looper/voice/engine/usb + **core** (nuevo con WA-2.0, 22 tests de `AudioEngine`) suites, scripts `run-cpp-tests.{ps1,sh}`, integrados a `check`. **517 tests en total.**
 
 **Trabajo pendiente (el objeto de este requerimiento):**
 
 | Área | Estado | Problema |
 |---|---|---|
-| Audio I/O | `OboeBackend` (Android-only) | No hay backend iOS |
+| Audio I/O | `OboeBackend` (Android-only) | No hay backend iOS — **WA-2.4 es lo único que falta para que suene** |
 | Puente nativo | JNI: `jni_audio_bridge.cpp` 3.583 LOC, **278 JNIEXPORT** | iOS no tiene JNI; además el JNI llama al engine directo, no vía C API |
 | C API | **189 funciones** | **Gap ~89 funciones** vs JNI (cobertura incompleta: looper avanzado, mixer, regions, transiciones de modo, análisis) |
-| Platform C++ | Solo `PlatformAndroid.cpp` | Falta implementación Apple |
+| Platform C++ | Solo `PlatformAndroid.cpp` | Falta implementación Apple (WA-2.2). Nota: pese al nombre, `PlatformAndroid.cpp` es POSIX puro salvo un `#if` dentro de `setAudioThreadPriority()`, y ya se compila en host |
 | Kotlin androidMain | `Mp4AacTranscoder` (MediaCodec), `UsbAudioManagerImpl`, `TrustedUsbDevicesRepository` (DataStore), `DeviceCapabilities` (Context) | Sin contrapartes iOS ni interfaces comunes en algunos casos |
 | Build | CMake vía AGP `externalNativeBuild` | No hay toolchain iOS ni empaquetado XCFramework |
 | ~~Targets Gradle~~ | ~~Solo `androidTarget`~~ | **RESUELTO (WA-0.2):** `iosArm64` + `iosSimulatorArm64` compilan |
@@ -291,13 +291,13 @@ Mejoras de valor inmediato para el mantenimiento Android actual, que además des
 | ID | Requerimiento | Detalle | Criterio de aceptación | Prio | Esf |
 |---|---|---|---|---|---|
 | WA-2.1 | Build CMake iOS | Toolchain/presets iOS (device arm64 + simulator arm64): compilar `watermelon-dsp/effects/engines/voice/looper` ~~+ core + nodes + api~~ como **librería estática** por slice. Excluir del build iOS: `jni/`, `usb/`, `OboeBackend`, `LibusbBackend`, `PlatformAndroid.cpp`. Definir `USE_NEON=1` en arm64 Apple | ~~`libwatermelon_audio.a`~~ → **alcance ajustado:** `libwatermelon-audio-ios.a` (DSP portable) para ambos slices compila con Xcode clang, C++20 | P0 | L | 🟡 **PARCIAL** 2026-07-22 — ver nota; el core queda bloqueado por WA-2.0 |
-| **WA-2.0** | **Desacoplar el core de Oboe** (NUEVO) | `core/AudioEngine.cpp` (30 usos de `oboe::`, con `OboeCallbackAdapter` propio y apertura directa de streams) y `nodes/InputNode` (**hereda** `oboe::AudioStreamDataCallback`, 32 usos) deben pasar **exclusivamente** por `IAudioBackend`. Incluye `BackendManager` y `api/watermelon_audio.cpp`, que instancian los backends Android directo | `core/`, `nodes/` y `api/` compilan para iOS; Android sin regresiones (suite C++ + smoke) | **P0** | **L** | **Pendiente — bloquea WA-2.4** |
+| **WA-2.0** | **Desacoplar el core de Oboe** | `core/AudioEngine.cpp` (30 usos de `oboe::`, con `OboeCallbackAdapter` propio y apertura directa de streams) y `nodes/InputNode` (**hereda** `oboe::AudioStreamDataCallback`, 32 usos) deben pasar **exclusivamente** por `IAudioBackend`. Incluye `BackendManager` y `api/watermelon_audio.cpp`, que instancian los backends Android directo | `core/`, `nodes/` y `api/` compilan para iOS; Android sin regresiones (suite C++ + smoke) | **P0** | **L** | ✅ **HECHO** 2026-07-22 — `core/`, `nodes/`, `api/` y `backends/` compilan para iOS |
 | WA-2.2 | `PlatformApple.cpp` | Implementar `wma::platform`: denormals (FPCR, reutiliza WA-1.6), `setAudioThreadPriority()` (pthread `THREAD_TIME_CONSTRAINT_POLICY` — solo como refuerzo: el thread de Core Audio ya viene priorizado), SIMD caps (NEON fijo en arm64) | `engine_tests` linkea y pasa en macOS con PlatformApple | P0 | M |
 | WA-2.3 | Logger Apple | Sink `os_log` por defecto en builds Apple; callback configurable idéntico a Android | Log visible en Console.app desde sample app | P1 | S |
 | WA-2.4 | **`CoreAudioBackend`** | Implementar `IAudioBackend` para iOS (D2): AVAudioEngine + AVAudioSourceNode (output) y AVAudioSinkNode/inputNode (input full-duplex para guitar/input FX). Reglas: el render block invoca directo el mix C++ (sin ObjC dispatch, sin allocs, sin locks); negociación de sample rate/buffer contra el hardware; manejo de formato (Float32 nativo de Core Audio vs pipeline interno) | Sine + cadena de efectos + looper suenan en device real; callback verificado sin allocs (Instruments) | P0 | L |
 | WA-2.5 | **Completar la C API** | Cerrar el gap de WA-0.1: agregar a `watermelon_audio.h` las funciones faltantes (excluyendo USB). **Dimensionado por WA-0.1: 110 portables, de las cuales ~79 netas tras descartar near-matches — y 39 son del looper.** Ver `docs/kmp/c_api_coverage.md` para el detalle por categoría. Reglas de ABI: handles opacos, códigos de error enteros (sin excepciones cruzando la frontera), sin tipos C++ en firmas, documentación de thread-safety por función (RT-safe vs coordinación) | Cobertura 1:1 con el JNI no-USB según tabla WA-0.1 | P0 | L |
 | WA-2.6 | **JNI → wrapper de la C API** (alto valor) | Refactor incremental por categorías (lifecycle → effects → looper → mode → análisis): cada `Java_..._nativeXxx` pasa a llamar `wma_xxx` en vez del engine directo. El JNI queda como capa de traducción de tipos JNI↔C de ~1 línea por función | Paridad Android/iOS por construcción; tests C++ y smoke Android verdes tras cada categoría | P1 | L |
-| WA-2.7 | Selección de backend por plataforma | `BackendManager` compila con Oboe+Libusb en Android y CoreAudio en iOS (compile-time, `#if` mínimos en un solo archivo de registro de backends). **Depende de WA-2.0** | Sin `#ifdef` dispersos; un único punto de registro | P1 | S |
+| WA-2.7 | Selección de backend por plataforma | `BackendManager` compila con Oboe+Libusb en Android y CoreAudio en iOS (compile-time, `#if` mínimos en un solo archivo de registro de backends) | Sin `#ifdef` dispersos; un único punto de registro | P1 | S | ✅ **HECHO** 2026-07-22 — `backends/PlatformBackends.{h,cpp}`; **una sola guarda en todo `backends/`**, cero en `BackendManager` |
 
 ### Nota de cierre — WA-2.1 parcial (2026-07-22)
 
@@ -463,17 +463,30 @@ WA-0 (gap + targets + CI) ──► WA-1 (quick wins) ──► WA-2 (C++: CMake
 |---|---|
 | **Fase 0** — Análisis y fundaciones | 🟢 Casi cerrada — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · **solo falta WA-0.4** (esfuerzo S) |
 | **Fase 1** — Quick wins | 🟡 Tocada de refilón por WA-0.2 (WA-1.1 y WA-1.5 parciales) |
-| **Fase 2** — C++ multiplataforma | 🟡 Iniciada — WA-2.1 parcial ✅ (DSP portable compila para ambos slices). **Bloqueada por WA-2.0**, descubierto al hacer WA-2.1 — **ruta crítica** |
+| **Fase 2** — C++ multiplataforma | 🟡 WA-2.1 parcial ✅ · WA-2.0 ✅ · WA-2.7 ✅. Todo el core compila para iOS. **Falta WA-2.4 (`CoreAudioBackend`) y el camino de input de iOS** — **ruta crítica** |
 | **Fase 3** — Kotlin iosMain | ⬜ No iniciada (salvo los 2 `actual` mínimos de WA-0.2) |
 | **Fase 4** — Empaquetado y publicación | ⬜ No iniciada |
 
-**Próximo paso recomendado:** **WA-2.0** (desacoplar el core de Oboe). Pasó a ser el
-cuello de botella de todo el programa: sin él no compilan `core/`, `nodes/` ni `api/`
-para iOS, y por lo tanto no hay dónde enchufar `CoreAudioBackend` (WA-2.4) ni qué
-bindear con cinterop (WA-3.1). Es el único ítem entre el estado actual y el gate G2.
+**Próximo paso recomendado:** **WA-2.4** (`CoreAudioBackend`). Con WA-2.0 y WA-2.7
+cerrados, todo el core compila para iOS y `createSystemAudioBackend()` ya tiene el hueco
+donde enchufarlo (hoy devuelve `nullptr` en iOS). Es lo único que falta para que **suene
+audio** en iOS, junto con el camino de input de iOS que reemplace al adapter Oboe de
+`InputNode` (Android-only).
 
 Se puede hacer **WA-2.2** (`PlatformApple`) y **WA-1.6** (factorizar denormals arm64) en
-paralelo: no dependen de WA-2.0 y son acotados.
+paralelo: son acotados y WA-2.4 se apoya en WA-2.2. Ya hay un build iOS
+(`WMA_IOS_PROBE_CORE`) donde probar `PlatformApple`.
+
+**Deuda técnica registrada al cerrar WA-2.0/2.7 (candidatos a ticket propio):**
+- `stopWithFade` detacha un `std::thread` que captura `this` y duerme `fadeMs + 50` antes
+  de `stop()`. Si el motor se destruye en esa ventana es use-after-free; el destructor
+  cancela el fade pero no tiene handle sobre ese thread.
+- Tres declaraciones muertas expuestas al pasar `core/`/`nodes/` por `-Werror` por primera
+  vez (`MusicalScale.cpp:131`, `BurstModulator.h:52`, `AudioEngine.h:1027`), hoy tapadas
+  por un `-Wno-unused-variable` acotado en `core/tests/` con comentario que las nombra.
+- Bug 3 de WA-2.0 (SoundFont al rate negociado): los 3 `loadSoundFont*` siguen sin test
+  directo — necesitan un fixture SF2. `currentSampleRate()`, el mecanismo compartido, sí
+  está cubierto.
 
 **Pendiente de bajo costo:** WA-0.4 (guardrail de `#include <jni.h>`), esfuerzo S y
 puramente aditivo — el equivalente Kotlin del guardrail ya lo cubre el job `ios`. Cierra

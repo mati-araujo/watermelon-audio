@@ -947,6 +947,12 @@ private:
     std::atomic<int> mLastXRunCount{0};  // For XRun (underrun/overrun) monitoring
     std::unique_ptr<std::thread> mRecoveryThread;
 
+    // Deferred-stop worker for stopWithFade(). Owned (not detached) so the
+    // destructor can join it — a detached thread could outlive the engine and
+    // call stop() on freed memory. Touched only from control threads.
+    std::unique_ptr<std::thread> mStopFadeThread;
+    std::atomic<bool> mStopFadeCancel{false};
+
     // IMPROVED: Manejo de memoria insuficiente (Fase 2.2.3)
     std::atomic<bool> mInitializationFailed{false};
     bool mUsingReducedBuffers{false};
@@ -999,8 +1005,16 @@ private:
 
     // ========== BACKEND MANAGER (USB Audio Phase 1) ==========
     // Feature flag to use BackendManager instead of direct Oboe stream
-    // When enabled, AudioEngine delegates stream lifecycle to BackendManager
+    // When enabled, AudioEngine delegates stream lifecycle to BackendManager.
+    //
+    // Defaults false on Android to preserve the shipping behaviour (the direct
+    // Oboe path), and true everywhere else, where that path does not exist and
+    // BackendManager is the only way to open a stream.
+#if defined(__ANDROID__)
     std::atomic<bool> mUseBackendManager{false};
+#else
+    std::atomic<bool> mUseBackendManager{true};
+#endif
 
     // Node handles for quick access to graph nodes
     NodeHandle mGraphOscillatorHandle{INVALID_NODE_HANDLE};
@@ -1177,6 +1191,23 @@ public:
      * Works with both legacy Oboe path and BackendManager path.
      */
     bool getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const;
+
+    /**
+     * @brief The sample rate actually in effect, whatever the audio path.
+     *
+     * Resolves in order: the running stream (BackendManager or legacy Oboe,
+     * via getStreamInfo) → the preferred rate → 48000.
+     *
+     * Use this instead of reaching for mStream directly. Call sites that did
+     * `mStream ? mStream->getSampleRate() : 0` silently returned 0 on the
+     * BackendManager path, because there mStream is always null — which is how
+     * the fade in stopWithFade came to be skipped entirely and how SoundFonts
+     * ended up loaded at the *preferred* rate rather than the negotiated one.
+     *
+     * Never returns <= 0. Not RT-safe (may touch the backend); call from
+     * control threads only.
+     */
+    int currentSampleRate() const;
 
     /**
      * @brief Gets the legacy Oboe output stream (for benchmark/diagnostics only).

@@ -1,5 +1,19 @@
 #include "AudioEngine.h"
+
+// Oboe is Android-only. Everywhere else the engine runs exclusively through
+// BackendManager/IAudioBackend — which is the path iOS uses with
+// CoreAudioBackend (WA-2.4). The direct-Oboe path below is legacy: it predates
+// IAudioBackend and is kept because it is what Android ships today.
+//
+// AudioEngine.h needs no guard: it already forward-declares oboe::AudioStream
+// and hides the callback adapter behind an opaque unique_ptr<void>, so the
+// header is Oboe-free by construction.
+#if defined(__ANDROID__)
+#define WMA_HAS_OBOE 1
 #include <oboe/Oboe.h>
+#else
+#define WMA_HAS_OBOE 0
+#endif
 #include "../backends/BackendManager.h"
 #include "../nodes/InputNode.h"
 #include "../dsp/SIMDUtils.h"
@@ -10,6 +24,7 @@
 #include <thread>
 #include <chrono>
 
+#if WMA_HAS_OBOE
 // ========== OBOE CALLBACK ADAPTER (Phase 0B) ==========
 // Bridges the legacy direct-Oboe path to AudioEngine's IAudioCallback interface.
 // This adapter owns the oboe::AudioStreamCallback inheritance so AudioEngine doesn't need to.
@@ -80,6 +95,11 @@ private:
 void AudioEngine::OboeAdapterDeleter::operator()(void* p) const {
     delete static_cast<OboeCallbackAdapter*>(p);
 }
+#else
+// Without Oboe nothing ever populates mOboeAdapter, but the deleter is
+// declared in the header and must still link.
+void AudioEngine::OboeAdapterDeleter::operator()(void*) const {}
+#endif  // WMA_HAS_OBOE
 
 #define LOG_TAG "AudioEngine"
 
@@ -268,6 +288,15 @@ AudioEngine::AudioEngine() {
 }
 
 AudioEngine::~AudioEngine() {
+    // Reclaim the deferred-stop worker FIRST, before touching mFadeCtrl: it runs
+    // stop()->mFadeCtrl.cancel(), so joining it here is what keeps that off the
+    // destructor's own cancel() below (the data race TSan caught) and stops it
+    // outliving `this`.
+    mStopFadeCancel.store(true, std::memory_order_release);
+    if (mStopFadeThread && mStopFadeThread->joinable()) {
+        mStopFadeThread->join();
+    }
+
     // RAII: Cancel pending fade thread and ensure stream is closed
     mFadeCtrl.cancel();
     stop();
@@ -481,6 +510,15 @@ bool AudioEngine::start(int fadeTimeMs) {
 
     // ========== LEGACY OBOE PATH ==========
     // Direct Oboe stream creation (original code)
+#if !WMA_HAS_OBOE
+    // Reaching here off Android means the caller never enabled BackendManager,
+    // and there is no other way to open a stream. Callers on those platforms
+    // must call setUseBackendManager(true) (the constructor defaults it to true
+    // where Oboe is unavailable, so this is a misuse, not a normal path).
+    LOGE("Cannot start: no Oboe on this platform and BackendManager is disabled");
+    transitionToState(EngineState::Stopped);
+    return false;
+#else
 
     // Construir y abrir stream
     // CRITICAL FIX: Use Shared mode to allow automatic device routing (headphones, etc.)
@@ -568,7 +606,13 @@ bool AudioEngine::start(int fadeTimeMs) {
 
     // ========== SYNTH ENGINE PREPARATION (Phase 6, Phase 1E — delegated to SynthEngineDispatcher) ==========
     {
+#if WMA_HAS_OBOE
         int framesPerBurst = mStream ? mStream->getFramesPerBurst() : 256;
+#else
+        // No Oboe: the backend owns the burst size. 256 is the same fallback
+        // the Oboe path uses when the stream is not open yet.
+        const int framesPerBurst = 256;
+#endif
         int maxBlock = std::max(framesPerBurst * 4, 4096);
         mEngineDispatcher.prepare(sampleRate, maxBlock);
         // Assign engines to voices
@@ -708,6 +752,7 @@ bool AudioEngine::start(int fadeTimeMs) {
     LOGI("AudioEngine started successfully");
     AUDIO_DIAG("ENGINE START: state=Running, sampleRate=%d, bufferSize=%d", sampleRate, actualBufferSize);
     return true;
+#endif  // WMA_HAS_OBOE
 }
 
 void AudioEngine::stop() {
@@ -764,10 +809,12 @@ void AudioEngine::stop() {
 
     // ========== LEGACY OBOE PATH ==========
     // Detener el stream (esto previene nuevos callbacks)
+#if WMA_HAS_OBOE
     if (mStream) {
         LOGI("Stopping audio stream...");
         mStream->stop();
     }
+#endif
 
     // CRÍTICO: Esperar a que todos los callbacks activos terminen
     // Timeout de 1 segundo para evitar deadlocks
@@ -784,11 +831,13 @@ void AudioEngine::stop() {
     }
 
     // Cerrar el stream
+#if WMA_HAS_OBOE
     if (mStream) {
         mStream->close();
         mStream.reset();
         LOGI("Audio stream closed");
     }
+#endif
 
     // FIX: Clear all internal buffers to prevent dirty buffer clicks on next start
     mOutputStage.clearTempBuffer();
@@ -942,23 +991,17 @@ void AudioEngine::setEngineParameter(int paramId, float value) {
 // ========== SOUNDFONT ENGINE (Phase 8, Phase 1E — delegated to SynthEngineDispatcher) ==========
 
 bool AudioEngine::loadSoundFont(const void* data, int size) {
-    int sampleRate = mStream ? mStream->getSampleRate() : 0;
-    if (sampleRate <= 0) sampleRate = mPreferredSampleRate.load(std::memory_order_acquire);
-    if (sampleRate <= 0) sampleRate = 48000;
+    const int sampleRate = currentSampleRate();
     return mEngineDispatcher.loadSoundFont(data, size, sampleRate);
 }
 
 bool AudioEngine::loadSoundFontFromPath(const char* path) {
-    int sampleRate = mStream ? mStream->getSampleRate() : 0;
-    if (sampleRate <= 0) sampleRate = mPreferredSampleRate.load(std::memory_order_acquire);
-    if (sampleRate <= 0) sampleRate = 48000;
+    const int sampleRate = currentSampleRate();
     return mEngineDispatcher.loadSoundFontFromPath(path, sampleRate);
 }
 
 bool AudioEngine::loadSoundFontFromFd(int fd, int64_t offset, int64_t length) {
-    int sampleRate = mStream ? mStream->getSampleRate() : 0;
-    if (sampleRate <= 0) sampleRate = mPreferredSampleRate.load(std::memory_order_acquire);
-    if (sampleRate <= 0) sampleRate = 48000;
+    const int sampleRate = currentSampleRate();
     return mEngineDispatcher.loadSoundFontFromFd(fd, offset, length, sampleRate);
 }
 
@@ -1469,7 +1512,7 @@ void AudioEngine::handleMixMonitoring(float* output, int32_t numFrames,
     // DEBUG: Log monitoring status periodically with sample rate info
     static int monitorCheckCount = 0;
     if (++monitorCheckCount >= 500) {
-        int outputSampleRate = mStream ? mStream->getSampleRate() : 0;
+        int outputSampleRate = currentSampleRate();
         int inputSampleRate = inputNode ? inputNode->getStreamSampleRate() : 0;
         LOGI("ENGINE MONITOR CHECK: inputNode=%p, monitoringEnabled=%d, oscEnabled=%d, outputSR=%d, inputSR=%d, mixerNode=%p",
              inputNode,
@@ -1690,21 +1733,39 @@ bool AudioEngine::startWithFade(int fadeTimeMs) {
 void AudioEngine::stopWithFade(int fadeTimeMs) {
     mFadeCtrl.cancel();
 
-    // Configurar fade out then stop
-    if (mStream) {
-        int sampleRate = mStream->getSampleRate();
-        mFadeCtrl.startFade(1.0f, 0.0f, sampleRate, fadeTimeMs);
+    // Fade out, then stop. Previously this was gated on `if (mStream)`, so the
+    // BackendManager path (mStream always null) fell through to a bare stop()
+    // and cut the audio dead — an audible click. currentSampleRate() resolves
+    // on both paths, so the fade now happens regardless of backend.
+    if (fadeTimeMs > 0) {
+        mFadeCtrl.startFade(1.0f, 0.0f, currentSampleRate(), fadeTimeMs);
 
         LOGI("Stopping with fade out: %d ms", fadeTimeMs);
         AUDIO_DIAG("ENGINE STOP_WITH_FADE: fadeMs=%d", fadeTimeMs);
 
-        // Delayed stop after fade completes.
-        // NOTE: stopWithFade needs to call stop() (not just setPaused), so we can't
-        // use FadeController::fadeOutAndPause. Use a detached thread since stop() is idempotent.
-        std::thread([this, fadeTimeMs]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(fadeTimeMs + 50));
-            stop();
-        }).detach();
+        // Delayed stop after the fade completes. Owned (see mStopFadeThread) so
+        // the destructor can reclaim it; a detached thread could outlive the
+        // engine and call stop() on freed memory. A prior worker, if any, is
+        // superseded: cancel and join it before starting the next.
+        if (mStopFadeThread && mStopFadeThread->joinable()) {
+            mStopFadeCancel.store(true, std::memory_order_release);
+            mStopFadeThread->join();
+        }
+        mStopFadeCancel.store(false, std::memory_order_release);
+        mStopFadeThread = std::make_unique<std::thread>([this, fadeTimeMs]() {
+            // Chunked sleep so teardown can reclaim the thread promptly instead
+            // of blocking for the whole fade.
+            const auto deadline = std::chrono::steady_clock::now()
+                                + std::chrono::milliseconds(fadeTimeMs + 50);
+            while (!mStopFadeCancel.load(std::memory_order_acquire)) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    stop();  // idempotent
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            // Cancelled: the engine is tearing down and owns the stop() itself.
+        });
     } else {
         stop();
     }
@@ -1718,18 +1779,17 @@ void AudioEngine::pauseWithFade(int fadeTimeMs) {
         "PAUSE_WITH_FADE: fadeTimeMs=%d, mStream=%p, useBackendMgr=%d",
         fadeTimeMs, mStream.get(), useBackend);
 
-    if (mStream) {
-        int sampleRate = mStream->getSampleRate();
-        mFadeCtrl.fadeOutAndPause(sampleRate, fadeTimeMs);
+    // The old shape was `if (mStream) fade; else if (useBackend) pause abruptly`,
+    // because mStream is always null on the BackendManager path. With
+    // currentSampleRate() the fade resolves on both paths, so USB/CoreAudio get
+    // the same fade Oboe always got instead of an abrupt pause.
+    if (fadeTimeMs > 0) {
+        mFadeCtrl.fadeOutAndPause(currentSampleRate(), fadeTimeMs);
 
         LOGI("Pausing with fade out: %d ms", fadeTimeMs);
         AUDIO_DIAG("ENGINE PAUSE_WITH_FADE: fadeMs=%d", fadeTimeMs);
-    } else if (useBackend) {
-        // FIX: When using BackendManager (USB), mStream is null.
-        // Pause immediately without fade (USB DSP thread is still running).
+    } else {
         mFadeCtrl.setPaused(true);
-        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-            "PAUSE_WITH_FADE_USB: mStream=null, set paused=true directly");
     }
 }
 
@@ -1743,20 +1803,17 @@ void AudioEngine::resumeWithFade(int fadeTimeMs) {
         "RESUME_WITH_FADE: fadeTimeMs=%d, mStream=%p, useBackendMgr=%d",
         fadeTimeMs, mStream.get(), useBackend);
 
-    if (mStream) {
-        int sampleRate = mStream->getSampleRate();
-        mFadeCtrl.resumeWithFade(sampleRate, fadeTimeMs);
+    // Same story as pauseWithFade: the BackendManager path used to skip the
+    // fade and snap straight back to full volume.
+    if (fadeTimeMs > 0) {
+        mFadeCtrl.resumeWithFade(currentSampleRate(), fadeTimeMs);
 
         LOGI("Resuming with fade in: %d ms", fadeTimeMs);
         AUDIO_DIAG("ENGINE RESUME_WITH_FADE: fadeMs=%d", fadeTimeMs);
-    } else if (useBackend) {
-        // FIX: When using BackendManager (USB), mStream is null.
-        // Set fade volume directly to 1.0 to avoid stuck-at-zero silence.
+    } else {
+        // Instant restore to full volume — avoids stuck-at-zero silence.
         mFadeCtrl.setPaused(false);
-        mFadeCtrl.startFade(1.0f, 1.0f, 48000, 0);  // Instant restore to full volume
-
-        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-            "RESUME_WITH_FADE_USB: mStream=null, set fadeVol=1.0 directly");
+        mFadeCtrl.startFade(1.0f, 1.0f, currentSampleRate(), 0);
     }
 }
 
@@ -1773,6 +1830,21 @@ void AudioEngine::resumeWithFade(int fadeTimeMs) {
 
 // ========== STREAM INFO (moved from header in Phase 0B) ==========
 
+int AudioEngine::currentSampleRate() const {
+    int32_t sampleRate = 0;
+    int32_t bufferSize = 0;
+    double latencyMillis = 0.0;
+    if (getStreamInfo(sampleRate, bufferSize, latencyMillis) && sampleRate > 0) {
+        return sampleRate;
+    }
+
+    const int preferred = mPreferredSampleRate.load(std::memory_order_acquire);
+    if (preferred > 0) {
+        return preferred;
+    }
+    return 48000;
+}
+
 bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const {
     // Try BackendManager first (works for both USB and Oboe-via-backend paths)
     if (mUseBackendManager.load(std::memory_order_acquire)) {
@@ -1786,7 +1858,9 @@ bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double
         }
     }
 
-    // Legacy Oboe path
+    // Legacy Oboe path. Off Android mStream is never populated, so this is the
+    // only branch and it reports "no stream" — which is correct: without
+    // BackendManager running there is nothing to describe.
     if (!mStream) {
         sampleRate = -1;
         bufferSize = -1;
@@ -1794,6 +1868,7 @@ bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double
         return false;
     }
 
+#if WMA_HAS_OBOE
     sampleRate = mStream->getSampleRate();
     bufferSize = mStream->getFramesPerBurst();
 
@@ -1804,6 +1879,9 @@ bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double
         latencyMillis = -1.0;
     }
     return true;
+#else
+    return false;
+#endif
 }
 
 oboe::AudioStream* AudioEngine::getOutputStream() const {
@@ -1825,10 +1903,17 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate) {
     // Configure looper (click envelope is sample-rate aware; transport too).
     mAudioLooper.setSampleRate(sampleRate);
     {
-        // Pre-size the looper mix buffer to the largest block Oboe can deliver so
-        // the audio thread never has to grow it on the fly (QW-4). Same sizing
-        // policy as the other nodes above (framesPerBurst × 4, min 4096).
+        // Pre-size the looper mix buffer to the largest block the backend can
+        // deliver so the audio thread never has to grow it on the fly (QW-4).
+        // Same sizing policy as the other nodes above (framesPerBurst × 4,
+        // min 4096).
+#if WMA_HAS_OBOE
         int framesPerBurst = mStream ? mStream->getFramesPerBurst() : 256;
+#else
+        // No Oboe: the backend owns the burst size. 256 matches the fallback
+        // the Oboe path uses before the stream is open.
+        const int framesPerBurst = 256;
+#endif
         int maxBlock = std::max(framesPerBurst * 4, 4096);
         mAudioLooper.prepareMixBuffer(maxBlock);
     }

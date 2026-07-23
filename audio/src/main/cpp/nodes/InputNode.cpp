@@ -1,13 +1,74 @@
 #include "InputNode.h"
 #include "../platform/Logger.h"
+#include <oboe/Oboe.h>
 #include <cmath>
 #include <algorithm>
 #include <cassert>
+#include <cstring>
 
 #define LOG_TAG "InputNode"
 #define LOGI(...) wma::logMessage(wma::LogLevel::INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) wma::logMessage(wma::LogLevel::WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) wma::logMessage(wma::LogLevel::ERROR, LOG_TAG, __VA_ARGS__)
+
+// ========== OBOE ADAPTER (WA-2.0) ==========
+// Concentrates every Oboe dependency of InputNode: the callback inheritance and
+// the stream handle. InputNode only sees it through an opaque pointer, which is
+// what keeps <oboe/Oboe.h> out of InputNode.h and lets the core be built for
+// platforms that have no Oboe. A CoreAudio adapter would sit at this same seam.
+class InputOboeAdapter : public oboe::AudioStreamDataCallback {
+public:
+    explicit InputOboeAdapter(InputNode* node) : mNode(node) {}
+
+    oboe::DataCallbackResult onAudioReady(oboe::AudioStream* stream,
+                                          void* audioData,
+                                          int32_t numFrames) override {
+        // RT path: one pointer hop plus getChannelCount(), which in Oboe is a
+        // plain member read. No allocation, no locking, no indirect call setup.
+        return mNode->processInputBlock(static_cast<float*>(audioData),
+                                        numFrames,
+                                        stream->getChannelCount())
+                   ? oboe::DataCallbackResult::Continue
+                   : oboe::DataCallbackResult::Stop;
+    }
+
+    // Owned here rather than in InputNode so the header stays Oboe-free.
+    std::shared_ptr<oboe::AudioStream> stream;
+
+private:
+    InputNode* mNode;
+};
+
+void InputNode::BackendAdapterDeleter::operator()(void* p) const {
+    delete static_cast<InputOboeAdapter*>(p);
+}
+
+namespace {
+
+// The nested deleter type is private, so the adapter is reached by casting the
+// raw void* rather than by a helper that would have to name that type.
+InputOboeAdapter* asAdapter(void* p) {
+    return static_cast<InputOboeAdapter*>(p);
+}
+
+oboe::InputPreset inputPresetForSource(InputSource source) {
+    switch (source) {
+        case InputSource::MIC:
+            // VoicePerformance is optimized for low-latency music/voice
+            return oboe::InputPreset::VoicePerformance;
+        case InputSource::LINE_IN:
+            // Unprocessed gives raw audio without AGC/noise suppression
+            return oboe::InputPreset::Unprocessed;
+        case InputSource::USB_DAC:
+            return oboe::InputPreset::Unprocessed;
+        case InputSource::BLUETOOTH:
+            return oboe::InputPreset::Generic;
+        default:
+            return oboe::InputPreset::Generic;
+    }
+}
+
+}  // namespace
 
 InputNode::InputNode()
     : mRingBuffer(48000 * 2 * RING_BUFFER_SECONDS)  // Initial size: 1 second stereo at 48kHz
@@ -51,6 +112,14 @@ void InputNode::reset() {
 }
 
 bool InputNode::createInputStream() {
+    // The adapter is created on first use and then kept for the lifetime of the
+    // node: Oboe holds a raw pointer to it while a stream is open, so it must
+    // outlive every stream it is registered with.
+    if (!mBackendAdapter) {
+        mBackendAdapter.reset(new InputOboeAdapter(this));
+    }
+    auto* adapter = asAdapter(mBackendAdapter.get());
+
     oboe::AudioStreamBuilder builder;
 
     // Use Shared mode for better device routing compatibility
@@ -61,10 +130,10 @@ bool InputNode::createInputStream() {
             ->setFormat(oboe::AudioFormat::Float)
             ->setChannelCount(oboe::ChannelCount::Stereo)
             // Don't force sample rate - let system choose best rate for the device
-            ->setDataCallback(this)
-            ->setInputPreset(getInputPresetForSource(mInputSource.load()));
+            ->setDataCallback(adapter)
+            ->setInputPreset(inputPresetForSource(mInputSource.load()));
 
-    oboe::Result result = builder.openStream(mInputStream);
+    oboe::Result result = builder.openStream(adapter->stream);
 
     if (result != oboe::Result::OK) {
         LOGE("Failed to open input stream: %s", oboe::convertToText(result));
@@ -74,22 +143,23 @@ bool InputNode::createInputStream() {
     // Update latency with actual measurement
     updateLatency();
 
-    auto framesPerBurst = mInputStream->getFramesPerBurst();
-    auto actualSampleRate = mInputStream->getSampleRate();
-    auto deviceId = mInputStream->getDeviceId();
-    auto sharingMode = mInputStream->getSharingMode();
+    auto& stream = adapter->stream;
+    auto framesPerBurst = stream->getFramesPerBurst();
+    auto actualSampleRate = stream->getSampleRate();
+    auto deviceId = stream->getDeviceId();
+    auto sharingMode = stream->getSharingMode();
 
     // DEBUG: Detailed stream info for routing diagnostics
     LOGI("=== INPUT STREAM OPENED ===");
     LOGI("  Sample rate: %d Hz", actualSampleRate);
-    LOGI("  Channel count: %d", mInputStream->getChannelCount());
+    LOGI("  Channel count: %d", stream->getChannelCount());
     LOGI("  Sharing mode: %s", sharingMode == oboe::SharingMode::Shared ? "Shared" : "Exclusive");
     LOGI("  Performance mode: %s",
-         mInputStream->getPerformanceMode() == oboe::PerformanceMode::LowLatency ? "LowLatency" :
-         mInputStream->getPerformanceMode() == oboe::PerformanceMode::PowerSaving ? "PowerSaving" : "None");
+         stream->getPerformanceMode() == oboe::PerformanceMode::LowLatency ? "LowLatency" :
+         stream->getPerformanceMode() == oboe::PerformanceMode::PowerSaving ? "PowerSaving" : "None");
     LOGI("  Device ID: %d", deviceId);
     LOGI("  Frames per burst: %d", framesPerBurst);
-    LOGI("  Buffer capacity: %d frames", mInputStream->getBufferCapacityInFrames());
+    LOGI("  Buffer capacity: %d frames", stream->getBufferCapacityInFrames());
     LOGI("  Latency: %.1f ms", getInputLatencyMs());
     LOGI("===========================");
 
@@ -100,10 +170,11 @@ bool InputNode::createInputStream() {
 }
 
 void InputNode::closeInputStream() {
-    if (mInputStream) {
-        mInputStream->stop();
-        mInputStream->close();
-        mInputStream.reset();
+    auto* adapter = asAdapter(mBackendAdapter.get());
+    if (adapter && adapter->stream) {
+        adapter->stream->stop();
+        adapter->stream->close();
+        adapter->stream.reset();
         LOGI("Input stream closed");
     }
 }
@@ -114,13 +185,15 @@ bool InputNode::startInputStream() {
         return true;
     }
 
-    if (!mInputStream) {
+    auto* adapter = asAdapter(mBackendAdapter.get());
+    if (!adapter || !adapter->stream) {
         if (!createInputStream()) {
             return false;
         }
+        adapter = asAdapter(mBackendAdapter.get());
     }
 
-    oboe::Result result = mInputStream->requestStart();
+    oboe::Result result = adapter->stream->requestStart();
     if (result != oboe::Result::OK) {
         LOGE("Failed to start input stream: %s", oboe::convertToText(result));
         return false;
@@ -142,18 +215,12 @@ bool InputNode::isInputStreamRunning() const {
     return mInputStreamRunning.load();
 }
 
-oboe::DataCallbackResult InputNode::onAudioReady(
-    oboe::AudioStream* stream,
-    void* audioData,
-    int32_t numFrames) {
-
+bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCount) {
     if (!mInputStreamRunning.load()) {
-        return oboe::DataCallbackResult::Stop;
+        return false;
     }
 
-    float* inputData = static_cast<float*>(audioData);
-    int channelCount = stream->getChannelCount();
-    float* processBuffer = inputData;
+    float* processBuffer = audioData;
 
     // Handle mono input by duplicating to stereo
     // mTempBuffer is pre-allocated in prepare() to maxBlockSize * 2.
@@ -164,13 +231,13 @@ oboe::DataCallbackResult InputNode::onAudioReady(
     if (channelCount == 1) {
         // Convert mono to stereo in temp buffer
         for (int i = numFrames - 1; i >= 0; --i) {
-            mTempBuffer[i * 2] = inputData[i];
-            mTempBuffer[i * 2 + 1] = inputData[i];
+            mTempBuffer[i * 2] = audioData[i];
+            mTempBuffer[i * 2 + 1] = audioData[i];
         }
         processBuffer = mTempBuffer.data();
     } else if (channelCount == 2) {
         // For stereo, copy to temp buffer so we can process without modifying original
-        std::copy(inputData, inputData + numFrames * 2, mTempBuffer.begin());
+        std::copy(audioData, audioData + numFrames * 2, mTempBuffer.begin());
         processBuffer = mTempBuffer.data();
     }
 
@@ -280,7 +347,7 @@ oboe::DataCallbackResult InputNode::onAudioReady(
         }
     }
 
-    return oboe::DataCallbackResult::Continue;
+    return true;
 }
 
 void InputNode::process(AudioBuffer& inputBuffer, int numFrames) {
@@ -383,46 +450,31 @@ float InputNode::getInputLatencyMs() const {
     return static_cast<float>(mInputLatencyFrames.load()) / mSampleRate * 1000.0f;
 }
 
-oboe::InputPreset InputNode::getInputPresetForSource(InputSource source) const {
-    switch (source) {
-        case InputSource::MIC:
-            // VoicePerformance is optimized for low-latency music/voice
-            return oboe::InputPreset::VoicePerformance;
-        case InputSource::LINE_IN:
-            // Unprocessed gives raw audio without AGC/noise suppression
-            return oboe::InputPreset::Unprocessed;
-        case InputSource::USB_DAC:
-            return oboe::InputPreset::Unprocessed;
-        case InputSource::BLUETOOTH:
-            return oboe::InputPreset::Generic;
-        default:
-            return oboe::InputPreset::Generic;
-    }
-}
-
 void InputNode::updateLatency() {
-    if (!mInputStream) {
+    auto* adapter = asAdapter(mBackendAdapter.get());
+    if (!adapter || !adapter->stream) {
         mInputLatencyFrames.store(0);
         return;
     }
+    auto& stream = adapter->stream;
 
     // Try to get actual latency from Oboe
     // calculateLatencyMillis() returns the estimated latency in milliseconds
-    oboe::ResultWithValue<double> latencyResult = mInputStream->calculateLatencyMillis();
+    oboe::ResultWithValue<double> latencyResult = stream->calculateLatencyMillis();
 
     if (latencyResult.error() == oboe::Result::OK) {
         // Convert ms to frames
         double latencyMs = latencyResult.value();
-        int64_t latencyFrames = static_cast<int64_t>(latencyMs * mInputStream->getSampleRate() / 1000.0);
+        int64_t latencyFrames = static_cast<int64_t>(latencyMs * stream->getSampleRate() / 1000.0);
         mInputLatencyFrames.store(latencyFrames);
         LOGI("Input latency measured: %.1fms (%lld frames)", latencyMs, (long long)latencyFrames);
     } else {
         // Fallback to estimate: framesPerBurst * 2 (double buffering)
-        auto framesPerBurst = mInputStream->getFramesPerBurst();
+        auto framesPerBurst = stream->getFramesPerBurst();
         int64_t estimatedFrames = framesPerBurst * 2;
         mInputLatencyFrames.store(estimatedFrames);
         LOGI("Input latency estimated: %.1fms (%lld frames) - actual measurement unavailable",
-             static_cast<float>(estimatedFrames) / mInputStream->getSampleRate() * 1000.0f,
+             static_cast<float>(estimatedFrames) / stream->getSampleRate() * 1000.0f,
              (long long)estimatedFrames);
     }
 }

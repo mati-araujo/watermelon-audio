@@ -17,6 +17,11 @@
 
 #pragma once
 
+// The pacer helpers below return size_t. This header used to get it by luck,
+// from whatever the includer had already pulled in; it is now included first by
+// IAudioBackend.h, so it must be self-contained.
+#include <cstddef>
+
 namespace watermelon_audio {
 namespace usb {
 
