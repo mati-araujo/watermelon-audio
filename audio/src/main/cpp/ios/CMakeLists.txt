@@ -103,11 +103,29 @@ if(WMA_IOS_PROBE_CORE)
         ${WMA_CPP_ROOT}/backends/PlatformBackends.cpp
         ${WMA_CPP_ROOT}/backends/SplitBackend.cpp
         ${WMA_CPP_ROOT}/backends/DriftResampler.cpp
+        ${WMA_CPP_ROOT}/backends/CoreAudioBackend.mm
         ${WMA_CPP_ROOT}/api/watermelon_audio.cpp
     )
     target_include_directories(watermelon-core-probe PRIVATE ${WMA_CPP_ROOT})
+
+    # CoreAudioBackend.mm is Objective-C++ (clang detects .mm automatically) and
+    # relies on ARC for the AVAudioEngine object lifetime — enable it per-file.
+    set_source_files_properties(
+        ${WMA_CPP_ROOT}/backends/CoreAudioBackend.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
+    )
+
+    # Apple audio frameworks. CoreAudio is iOS/macOS; AVFoundation + AudioToolbox
+    # + Foundation carry AVAudioEngine and the AudioBufferList types.
+    find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
+    find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox REQUIRED)
+    find_library(COREAUDIO_FRAMEWORK    CoreAudio    REQUIRED)
+    find_library(FOUNDATION_FRAMEWORK   Foundation   REQUIRED)
+
     target_link_libraries(watermelon-core-probe
         PUBLIC watermelon-voice watermelon-looper watermelon-engines
                watermelon-effects watermelon-dsp tinysoundfont
+        PRIVATE ${AVFOUNDATION_FRAMEWORK} ${AUDIOTOOLBOX_FRAMEWORK}
+                ${COREAUDIO_FRAMEWORK} ${FOUNDATION_FRAMEWORK}
     )
 endif()

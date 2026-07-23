@@ -12,6 +12,8 @@
 #if defined(__ANDROID__)
 #include "OboeBackend.h"
 #include "LibusbBackend.h"
+#elif defined(__APPLE__)
+#include "CoreAudioBackend.h"
 #endif
 
 namespace watermelon_audio {
@@ -31,10 +33,25 @@ LibusbBackend* asLibusbBackend(IAudioBackend* backend) {
     return static_cast<LibusbBackend*>(backend);
 }
 
+#elif defined(__APPLE__)
+
+std::unique_ptr<IAudioBackend> createSystemAudioBackend() {
+    // iOS / macOS: AVAudioEngine-based output (WA-2.4, decision D2 iteration 1).
+    return std::make_unique<CoreAudioBackend>();
+}
+
+std::unique_ptr<IAudioBackend> createUsbAudioBackend() {
+    return nullptr;  // D4: USB audio is Android-only.
+}
+
+LibusbBackend* asLibusbBackend(IAudioBackend*) {
+    return nullptr;
+}
+
 #else
 
 std::unique_ptr<IAudioBackend> createSystemAudioBackend() {
-    // iOS lands here until CoreAudioBackend exists (WA-2.4). Returning null
+    // Any other platform lands here: no built-in backend yet. Returning null
     // rather than asserting keeps the manager constructible, so the parts of
     // the engine that never start a stream (offline render, tests) still work.
     return nullptr;
@@ -48,6 +65,6 @@ LibusbBackend* asLibusbBackend(IAudioBackend*) {
     return nullptr;
 }
 
-#endif  // __ANDROID__
+#endif  // platform
 
 } // namespace watermelon_audio

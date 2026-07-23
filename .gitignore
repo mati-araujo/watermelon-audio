@@ -23,3 +23,5 @@ out/
 **/cpp/tests/.bench-build
 .kotlin/
 .claude/settings.local.json
+# Host sanitizer build dir (run-cpp-tests.sh SANITIZE=...)
+**/cpp/tests/build-san

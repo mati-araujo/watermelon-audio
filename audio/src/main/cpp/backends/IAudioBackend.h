@@ -30,7 +30,8 @@ enum class BackendType {
     NONE = 0,
     OBOE = 1,
     LIBUSB = 2,
-    SPLIT = 3
+    SPLIT = 3,
+    COREAUDIO = 4   // iOS/macOS, WA-2.4
 };
 
 enum class BackendResult {
@@ -491,6 +492,7 @@ inline const char* backendTypeToString(BackendType type) {
         case BackendType::OBOE:   return "Oboe";
         case BackendType::LIBUSB: return "USB Audio";
         case BackendType::SPLIT:  return "Split";
+        case BackendType::COREAUDIO: return "Core Audio";
         default:                  return "Unknown";
     }
 }

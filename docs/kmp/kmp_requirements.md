@@ -294,7 +294,7 @@ Mejoras de valor inmediato para el mantenimiento Android actual, que además des
 | **WA-2.0** | **Desacoplar el core de Oboe** | `core/AudioEngine.cpp` (30 usos de `oboe::`, con `OboeCallbackAdapter` propio y apertura directa de streams) y `nodes/InputNode` (**hereda** `oboe::AudioStreamDataCallback`, 32 usos) deben pasar **exclusivamente** por `IAudioBackend`. Incluye `BackendManager` y `api/watermelon_audio.cpp`, que instancian los backends Android directo | `core/`, `nodes/` y `api/` compilan para iOS; Android sin regresiones (suite C++ + smoke) | **P0** | **L** | ✅ **HECHO** 2026-07-22 — `core/`, `nodes/`, `api/` y `backends/` compilan para iOS |
 | WA-2.2 | `PlatformApple.cpp` | Implementar `wma::platform`: denormals (FPCR, reutiliza WA-1.6), `setAudioThreadPriority()` (pthread `THREAD_TIME_CONSTRAINT_POLICY` — solo como refuerzo: el thread de Core Audio ya viene priorizado), SIMD caps (NEON fijo en arm64) | `engine_tests` linkea y pasa en macOS con PlatformApple | P0 | M |
 | WA-2.3 | Logger Apple | Sink `os_log` por defecto en builds Apple; callback configurable idéntico a Android | Log visible en Console.app desde sample app | P1 | S |
-| WA-2.4 | **`CoreAudioBackend`** | Implementar `IAudioBackend` para iOS (D2): AVAudioEngine + AVAudioSourceNode (output) y AVAudioSinkNode/inputNode (input full-duplex para guitar/input FX). Reglas: el render block invoca directo el mix C++ (sin ObjC dispatch, sin allocs, sin locks); negociación de sample rate/buffer contra el hardware; manejo de formato (Float32 nativo de Core Audio vs pipeline interno) | Sine + cadena de efectos + looper suenan en device real; callback verificado sin allocs (Instruments) | P0 | L |
+| WA-2.4 | **`CoreAudioBackend`** | Implementar `IAudioBackend` para iOS (D2): AVAudioEngine + AVAudioSourceNode (output) y AVAudioSinkNode/inputNode (input full-duplex para guitar/input FX). Reglas: el render block invoca directo el mix C++ (sin ObjC dispatch, sin allocs, sin locks); negociación de sample rate/buffer contra el hardware; manejo de formato (Float32 nativo de Core Audio vs pipeline interno) | Sine + cadena de efectos + looper suenan en device real; callback verificado sin allocs (Instruments) | P0 | L | 🟡 **OUTPUT HECHO** 2026-07-23 — `backends/CoreAudioBackend.{h,mm}`, compila y linkea para ambos slices, enchufado en el seam. **Falta:** input/full-duplex y la validación en device (sonido + Instruments) que es WA-4.3 |
 | WA-2.5 | **Completar la C API** | Cerrar el gap de WA-0.1: agregar a `watermelon_audio.h` las funciones faltantes (excluyendo USB). **Dimensionado por WA-0.1: 110 portables, de las cuales ~79 netas tras descartar near-matches — y 39 son del looper.** Ver `docs/kmp/c_api_coverage.md` para el detalle por categoría. Reglas de ABI: handles opacos, códigos de error enteros (sin excepciones cruzando la frontera), sin tipos C++ en firmas, documentación de thread-safety por función (RT-safe vs coordinación) | Cobertura 1:1 con el JNI no-USB según tabla WA-0.1 | P0 | L |
 | WA-2.6 | **JNI → wrapper de la C API** (alto valor) | Refactor incremental por categorías (lifecycle → effects → looper → mode → análisis): cada `Java_..._nativeXxx` pasa a llamar `wma_xxx` en vez del engine directo. El JNI queda como capa de traducción de tipos JNI↔C de ~1 línea por función | Paridad Android/iOS por construcción; tests C++ y smoke Android verdes tras cada categoría | P1 | L |
 | WA-2.7 | Selección de backend por plataforma | `BackendManager` compila con Oboe+Libusb en Android y CoreAudio en iOS (compile-time, `#if` mínimos en un solo archivo de registro de backends) | Sin `#ifdef` dispersos; un único punto de registro | P1 | S | ✅ **HECHO** 2026-07-22 — `backends/PlatformBackends.{h,cpp}`; **una sola guarda en todo `backends/`**, cero en `BackendManager` |
@@ -463,19 +463,24 @@ WA-0 (gap + targets + CI) ──► WA-1 (quick wins) ──► WA-2 (C++: CMake
 |---|---|
 | **Fase 0** — Análisis y fundaciones | 🟢 Casi cerrada — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · **solo falta WA-0.4** (esfuerzo S) |
 | **Fase 1** — Quick wins | 🟡 Tocada de refilón por WA-0.2 (WA-1.1 y WA-1.5 parciales) |
-| **Fase 2** — C++ multiplataforma | 🟡 WA-2.1 parcial ✅ · WA-2.0 ✅ · WA-2.7 ✅. Todo el core compila para iOS. **Falta WA-2.4 (`CoreAudioBackend`) y el camino de input de iOS** — **ruta crítica** |
+| **Fase 2** — C++ multiplataforma | 🟢 WA-2.1 parcial ✅ · WA-2.0 ✅ · WA-2.7 ✅ · WA-2.4 output ✅. El motor abre stream en iOS. **Falta:** input path iOS, `PlatformApple` (WA-2.2), y validación en device (WA-4.3) |
 | **Fase 3** — Kotlin iosMain | ⬜ No iniciada (salvo los 2 `actual` mínimos de WA-0.2) |
 | **Fase 4** — Empaquetado y publicación | ⬜ No iniciada |
 
-**Próximo paso recomendado:** **WA-2.4** (`CoreAudioBackend`). Con WA-2.0 y WA-2.7
-cerrados, todo el core compila para iOS y `createSystemAudioBackend()` ya tiene el hueco
-donde enchufarlo (hoy devuelve `nullptr` en iOS). Es lo único que falta para que **suene
-audio** en iOS, junto con el camino de input de iOS que reemplace al adapter Oboe de
-`InputNode` (Android-only).
+**Próximo paso recomendado:** **WA-3** (cinterop + `IosAudioBridge`). El C++ ya abre
+stream en iOS; el siguiente eslabón hacia el gate G2 es que Kotlin/Native lo maneje —
+`watermelon_audio.def` (WA-3.1) + `IosAudioBridge` sobre la C API (WA-3.2). Ese camino no
+necesita el input de iOS ni `PlatformApple`, así que es la ruta más corta a "algo suena
+desde Kotlin en el simulador".
 
-Se puede hacer **WA-2.2** (`PlatformApple`) y **WA-1.6** (factorizar denormals arm64) en
-paralelo: son acotados y WA-2.4 se apoya en WA-2.2. Ya hay un build iOS
-(`WMA_IOS_PROBE_CORE`) donde probar `PlatformApple`.
+En paralelo, acotados y sin dependencias entre sí:
+- **WA-2.2** (`PlatformApple`) + **WA-1.6** (factorizar denormals arm64) — hay build iOS
+  (`WMA_IOS_PROBE_CORE`) donde probarlos.
+- **Input path de iOS** — reemplazar el adapter Oboe de `InputNode` (Android-only); son
+  los 22 símbolos sin resolver que hoy impiden el `.a` 100% completo. No bloquea output.
+- **WA-4.3** (validación en device) — sonido real + Instruments sobre el render block de
+  `CoreAudioBackend`; confirma qué rama del ABL (interleaved vs planar) toma el OS y mide
+  latencia. Necesita hardware.
 
 **Deuda técnica registrada al cerrar WA-2.0/2.7 (candidatos a ticket propio):**
 - `stopWithFade` detacha un `std::thread` que captura `this` y duerme `fadeMs + 50` antes
