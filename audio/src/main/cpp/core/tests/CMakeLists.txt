@@ -68,9 +68,9 @@ if(NOT TARGET tinysoundfont)
     include(${WMA_CPP_ROOT}/thirdparty/tinysoundfont.cmake)
 endif()
 
-# The slice of the engine AudioEngine.cpp needs to link. Mirrors the iOS probe
-# target in ios/CMakeLists.txt (WMA_IOS_PROBE_CORE) minus api/, which the tests
-# do not exercise, and with the two substitutions described in the header above.
+# The slice of the engine AudioEngine.cpp needs to link. Mirrors the
+# watermelon-core target in ios/CMakeLists.txt minus api/, which the tests do
+# not exercise, and with the two substitutions described in the header above.
 set(CORE_TESTED_SOURCES
     ${WMA_CPP_ROOT}/core/AudioEngine.cpp
     ${WMA_CPP_ROOT}/core/SynthEngineDispatcher.cpp

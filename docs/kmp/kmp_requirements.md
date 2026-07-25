@@ -2,9 +2,9 @@
 
 **Proyecto:** watermelon-audio (`com.watermellonstudios:audio-android`, v1.6.0)
 **Documento hermano:** `NoisyPad/docs/kmp/kmp_requirements.md` (consumidor)
-**Estado:** EN CURSO — Fase 2 casi completa (el motor abre stream en iOS y el .a linkea sin gaps) · Fase 3 (cinterop) es el próximo eslabón
-**Fecha:** 2026-07-05 · **Última actualización:** 2026-07-23 (cerrados: WA-0.1/0.2/0.3,
-WA-2.1 parcial, WA-2.0, WA-2.7, WA-2.4 output, WA-2.2; InputNode portable a iOS)
+**Estado:** EN CURSO — **Fase 0 cerrada**; Fase 2 casi completa (el motor abre stream en iOS y `libwatermelon_audio.a` linkea) · G1 y luego Fase 3 (cinterop) son los próximos eslabones
+**Fecha:** 2026-07-05 · **Última actualización:** 2026-07-25 (cerrados: WA-0.1/0.2/0.3/0.4,
+**WA-2.1 completo**, WA-2.0, WA-2.7, WA-2.4 output, WA-2.2; InputNode portable a iOS)
 **Objetivo estratégico:** que la librería de audio compile y funcione en iOS con el mismo motor C++ y la misma API Kotlin (`commonMain`) que hoy consume NoisyPad Android, habilitando la versión iOS de NoisyPad.
 
 ---
@@ -57,7 +57,7 @@ camino andado:
 | C API | **189 funciones** | **Gap ~89 funciones** vs JNI (cobertura incompleta: looper avanzado, mixer, regions, transiciones de modo, análisis) |
 | ~~Platform C++~~ | **RESUELTO (WA-2.2):** `PlatformApple.cpp` existe; el `.a` de iOS linkea sin gaps de proyecto |
 | Kotlin androidMain | `Mp4AacTranscoder` (MediaCodec), `UsbAudioManagerImpl`, `TrustedUsbDevicesRepository` (DataStore), `DeviceCapabilities` (Context) | Sin contrapartes iOS ni interfaces comunes en algunos casos |
-| Build | CMake vía AGP `externalNativeBuild` | No hay toolchain iOS ni empaquetado XCFramework |
+| Build | CMake vía AGP `externalNativeBuild` + `ios/CMakeLists.txt` (separado) | **RESUELTO parcial (WA-2.1):** hay toolchain iOS y `libwatermelon_audio.a` por slice; **falta** el empaquetado XCFramework (WA-4.1) y que Gradle invoque el build C++ de iOS |
 | ~~Targets Gradle~~ | ~~Solo `androidTarget`~~ | **RESUELTO (WA-0.2):** `iosArm64` + `iosSimulatorArm64` compilan |
 | ~~Pureza de commonMain~~ | ~~Asumida~~ | **RESUELTO (WA-0.2):** 34 deps JVM/Android eliminadas; ver recuadro arriba |
 | Tests Kotlin | 5 suites en `commonTest` (34 tests) | Cubren ChordGenerator, ScaleQuantizer, EffectManagerBatch, Format, Time. **Falta** lo que WA-1.5 pedía: `StateSynchronizer`, `AudioEngineImpl`, mapeo de errores |
@@ -128,7 +128,7 @@ Prioridades: P0 = bloqueante, P1 = importante, P2 = diferible. Esfuerzo: S (< 1 
 | WA-0.1 | **Gap analysis C API vs JNI** | Inventario función por función: **278** JNIEXPORT vs **187** `wma_*`. Clasificar el gap por categoría y marcar cuáles son Android-only (USB) y no se portan | Tabla de cobertura en `docs/kmp/c_api_coverage.md` con estado por función | P0 | M | ✅ **HECHO** 2026-07-22 — ver `docs/kmp/c_api_coverage.md`, reproducible con `scripts/c-api-gap.py` |
 | WA-0.2 | Targets iOS en Gradle | Ampliar el convention plugin `watermelon.kmp.native`: `iosArm64` + `iosSimulatorArm64`; verificar el lockstep de Kotlin con NoisyPad (D8). ~~Los 52 archivos de commonMain deben compilar para iOS sin cambios~~ → **requirió 34 fixes de portabilidad**, ver nota abajo | `:audio:compileKotlinIosArm64` verde | P0 | M | ✅ **HECHO** 2026-07-22 |
 | WA-0.3 | CI macOS | Job en GitHub Actions (runner macOS): compila targets iOS + tests C++ con clang de Xcode (WA-T.1) | Job verde en PR de prueba | P0 | M | ✅ **HECHO Y VERIFICADO** 2026-07-22 — job `ios` verde en PR #45 (5m36s), con `iosSimulatorArm64Test` ejecutando de verdad y 490/490 tests C++ bajo Apple clang |
-| WA-0.4 | Guardrail de portabilidad C++ | Check de CI que falle si aparece `#include <jni.h>`/`<android/...>` fuera de `jni/`, `backends/Oboe*`, `backends/Libusb*`, `usb/` y `platform/PlatformAndroid.cpp`. **Ampliar a Kotlin:** el equivalente para `commonMain` es que WA-0.3 compile los targets iOS en cada PR — es lo que habría atajado los 34 errores de WA-0.2 | CI rojo ante include prohibido (probado con PR sintético) | P1 | S | Pendiente |
+| WA-0.4 | Guardrail de portabilidad C++ | Check de CI que falle si aparece `#include <jni.h>`/`<android/...>` fuera de `jni/`, `backends/Oboe*`, `backends/Libusb*`, `usb/` y `platform/PlatformAndroid.cpp`. **Ampliar a Kotlin:** el equivalente para `commonMain` es que WA-0.3 compile los targets iOS en cada PR — es lo que habría atajado los 34 errores de WA-0.2 | CI rojo ante include prohibido (probado con PR sintético) | P1 | S | ✅ **HECHO** 2026-07-25 — `scripts/check-cpp-portability.sh`, paso en el job `cpp-tests` (ver nota) |
 
 ### Nota de cierre — WA-0.2 (2026-07-22)
 
@@ -290,7 +290,7 @@ Mejoras de valor inmediato para el mantenimiento Android actual, que además des
 
 | ID | Requerimiento | Detalle | Criterio de aceptación | Prio | Esf |
 |---|---|---|---|---|---|
-| WA-2.1 | Build CMake iOS | Toolchain/presets iOS (device arm64 + simulator arm64): compilar `watermelon-dsp/effects/engines/voice/looper` ~~+ core + nodes + api~~ como **librería estática** por slice. Excluir del build iOS: `jni/`, `usb/`, `OboeBackend`, `LibusbBackend`, `PlatformAndroid.cpp`. Definir `USE_NEON=1` en arm64 Apple | ~~`libwatermelon_audio.a`~~ → **alcance ajustado:** `libwatermelon-audio-ios.a` (DSP portable) para ambos slices compila con Xcode clang, C++20 | P0 | L | 🟡 **PARCIAL** 2026-07-22 — ver nota; el core queda bloqueado por WA-2.0 |
+| WA-2.1 | Build CMake iOS | Toolchain/presets iOS (device arm64 + simulator arm64): compilar `watermelon-dsp/effects/engines/voice/looper` ~~+ core + nodes + api~~ como **librería estática** por slice. Excluir del build iOS: `jni/`, `usb/`, `OboeBackend`, `LibusbBackend`, `PlatformAndroid.cpp`. Definir `USE_NEON=1` en arm64 Apple `libwatermelon_audio.a` (motor completo) para ambos slices compila con Xcode clang, C++20, y **linkea** | P0 | L | ✅ **HECHO** 2026-07-25 — la sonda se promovió al target shipped; ver notas de cierre |
 | **WA-2.0** | **Desacoplar el core de Oboe** | `core/AudioEngine.cpp` (30 usos de `oboe::`, con `OboeCallbackAdapter` propio y apertura directa de streams) y `nodes/InputNode` (**hereda** `oboe::AudioStreamDataCallback`, 32 usos) deben pasar **exclusivamente** por `IAudioBackend`. Incluye `BackendManager` y `api/watermelon_audio.cpp`, que instancian los backends Android directo | `core/`, `nodes/` y `api/` compilan para iOS; Android sin regresiones (suite C++ + smoke) | **P0** | **L** | ✅ **HECHO** 2026-07-22 — `core/`, `nodes/`, `api/` y `backends/` compilan para iOS |
 | WA-2.2 | `PlatformApple.cpp` | Implementar `wma::platform`: denormals (FPCR, reutiliza WA-1.6), `setAudioThreadPriority()` (pthread `THREAD_TIME_CONSTRAINT_POLICY` — solo como refuerzo: el thread de Core Audio ya viene priorizado), SIMD caps (NEON fijo en arm64) | `engine_tests` linkea y pasa en macOS con PlatformApple | P0 | M | ✅ **HECHO** 2026-07-23 — `platform/PlatformApple.cpp`. FPCR arm64 idéntico a Android (WA-1.6 aún sin factorizar a `.inc`) |
 | WA-2.3 | Logger Apple | Sink `os_log` por defecto en builds Apple; callback configurable idéntico a Android | Log visible en Console.app desde sample app | P1 | S |
@@ -335,6 +335,31 @@ es así. `AudioEngine` tiene un camino directo a Oboe *además* del backend.
 Por eso el §2 ("el C++ está modularizado sin dependencias Android") vale para las
 sub-librerías pero **no para el core**. Se levanta **WA-2.0** como prerequisito real de
 WA-2.4: sin él no hay dónde enchufar `CoreAudioBackend`.
+
+### Nota de cierre — WA-2.1 completo (2026-07-25)
+
+La sonda `WMA_IOS_PROBE_CORE` **se promovió al target shipped**. WA-2.2 y WA-2.4 habían
+cerrado los dos gaps que la mantenían aparte, así que la opción ya no separaba nada: era
+deuda de andamio. `ios/CMakeLists.txt` ahora define `watermelon-core` (core, nodes, api,
+backends, platform, analysis) linkeando las cinco sub-librerías, y `build-ios.sh` produce
+el `libwatermelon_audio.a` que el criterio original pedía.
+
+**Resultado: 18 MB, arm64, 14.771 símbolos**, para `iphoneos` e `iphonesimulator`.
+
+**Cambio de método en la verificación.** Hasta ahora la linkeabilidad se comprobaba con
+`nm -u` (undefined menos definido). Se reemplazó por un **link check real**: `build-ios.sh`
+compila un `main()` trivial y lo linkea contra el archivo con `-Wl,-force_load`, que
+arrastra **todos** los miembros del `.a` y obliga a resolver cada símbolo que cualquiera de
+ellos referencie. Es la diferencia entre una heurística —`nm -u` no puede distinguir un
+símbolo que aporta el sistema de uno que falta— y la verdad del linker, que es exactamente
+lo que va a hacer cinterop en WA-3.1. De paso valida la lista de frameworks.
+
+> [!NOTE]
+> **Sigue faltando la captura de audio en iOS, y no es un gap de link.**
+> `InputNode::createInputStream()`/`startInputStream()` devuelven `false` en cualquier
+> plataforma sin Oboe: el nodo existe y procesa, pero nunca tiene stream de entrada. El
+> archivo linkea igual. Full-duplex / guitar FX en iOS necesita un adapter de captura
+> CoreAudio en la costura `WMA_HAS_OBOE`.
 
 ---
 
@@ -461,24 +486,38 @@ WA-0 (gap + targets + CI) ──► WA-1 (quick wins) ──► WA-2 (C++: CMake
 
 | Fase | Estado |
 |---|---|
-| **Fase 0** — Análisis y fundaciones | 🟢 Casi cerrada — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · **solo falta WA-0.4** (esfuerzo S) |
+| **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 Tocada de refilón por WA-0.2 (WA-1.1 y WA-1.5 parciales) |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — WA-2.1 parcial ✅ · WA-2.0 ✅ · WA-2.7 ✅ · WA-2.4 output ✅ · WA-2.2 ✅. **El `.a` de iOS linkea sin gaps de proyecto** (ambos slices). Falta solo validación en device (WA-4.3) e input path iOS |
-| **Fase 3** — Kotlin iosMain | 🟡 Desbloqueada — los 2 `actual` de WA-0.2 + el `.a` linkeable. **Próximo: WA-3.1 (cinterop)** |
-| **Fase 4** — Empaquetado y publicación | ⬜ No iniciada |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · WA-2.4 output ✅ · WA-2.2 ✅. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3), input path iOS, WA-2.3 (os_log), WA-2.5 y WA-2.6 |
+| **Fase 3** — Kotlin iosMain | 🟡 Desbloqueada — los 2 `actual` de WA-0.2 + el `.a` shipped y linkeable. **Próximo: WA-3.1 (cinterop)** |
+| **Fase 4** — Empaquetado y publicación | ⬜ No iniciada — **ver el riesgo de host abajo** |
 
-**Próximo paso recomendado:** **WA-3.1** (cinterop). El `.a` de iOS ya linkea sin gaps
-(verificado con undefined-menos-definido en ambos slices), que era la precondición dura.
-Falta: `nativeInterop/cinterop/watermelon_audio.def` sobre `watermelon_audio.h`, el wiring
-de Gradle en el convention plugin (`cinterops { ... }` + link estático del `.a` por
-target), y verificar que Kotlin/Native resuelve los símbolos `wma_*`. Después WA-3.2
-(`IosAudioBridge` sobre esos bindings) y WA-3.3 (el `actual` de `getAudioBridge` que hoy
-lanza `NotImplementedError`).
+**Próximo paso recomendado:** **G1** (WA-4.2 parcial) y después **WA-3.1**. G1 es lo único
+del programa que desbloquea a otro equipo (NoisyPad convierte su `core-domain` en paralelo)
+y sus dos precondiciones ya están dadas.
 
-> **Ojo con el orden de build:** el `.a` que cinterop linkea es el de la sonda
-> (`WMA_IOS_PROBE_CORE`), que hoy no está en el target shipped ni lo produce
-> `build-ios.sh`. WA-3.1 tiene que decidir si promueve la sonda a target real o si el
-> Gradle arma el `.a` completo aparte. Es la primera decisión de WA-3.1.
+> [!WARNING]
+> **G1 no es "un solo paso": el publish corre en el host equivocado.** El job `publish` de
+> `.github/workflows/release-please.yml` corre en `ubuntu-latest` y llama
+> `publishAllPublicationsToGitHubPackagesRepository`. Los klibs de Kotlin/Native para iOS
+> **no se pueden compilar en Linux**. Los targets iOS existen desde WA-0.2 (2026-07-22) y
+> 1.8.0/1.8.1 se publicaron después, así que hay que **empezar por el diagnóstico**: bajar
+> el `.module` de `audio-android:1.8.1` de GitHub Packages y ver qué variantes declara.
+> Si no hay variantes iOS, NoisyPad no resolvería el source set iOS y G1 está roto hoy.
+> La corrección esperable es mover el publish a `macos-latest`, o partirlo en una matriz
+> host-specific si el minutaje macOS (×10) pesa demasiado.
+
+Para **WA-3.1** falta: `nativeInterop/cinterop/watermelon_audio.def` sobre
+`watermelon_audio.h`, el wiring de Gradle en el convention plugin (`cinterops { ... }` +
+link estático del `.a` por target, más los cuatro frameworks de Apple, que un `.a` no
+linkea por sí solo), y verificar que Kotlin/Native resuelve los símbolos `wma_*`. Después
+WA-3.2 (`IosAudioBridge`) y WA-3.3 (el `actual` de `getAudioBridge` que hoy lanza
+`NotImplementedError`).
+
+> **La primera decisión de WA-3.1 ya está tomada** (2026-07-25): la sonda se promovió al
+> target shipped, así que `build-ios.sh` produce el `.a` completo contra el cual cinterop
+> linkea. Lo que queda por resolver es cómo lo invoca Gradle — envolver el script en una
+> task o dejar que la task de cinterop dependa de él.
 
 Trabajo paralelo, sin bloquear WA-3:
 - **Input path de iOS** — un adapter CoreAudio de captura en la costura `WMA_HAS_OBOE` de
@@ -500,9 +539,29 @@ Trabajo paralelo, sin bloquear WA-3:
   directo — necesitan un fixture SF2. `currentSampleRate()`, el mecanismo compartido, sí
   está cubierto.
 
-**Pendiente de bajo costo:** WA-0.4 (guardrail de `#include <jni.h>`), esfuerzo S y
-puramente aditivo — el equivalente Kotlin del guardrail ya lo cubre el job `ios`. Cierra
-la Fase 0 en una sentada.
+**Hallazgos de la auditoría 2026-07-25 (candidatos a ticket propio):**
 
-**Decisión de producto a tomar temprano:** si NoisyPad iOS v1 necesita el looper completo.
-Son 39 de las 110 funciones portables del gap (WA-0.1) — el bloque más grande de WA-2.5.
+- **`InputNode` está duplicado entre el JNI y la C API.** El JNI usa
+  `g_jniState.inputNode` y la C API usa `e->inputNode` — **dos instancias distintas**,
+  ambas enchufables al mismo `AudioEngine` vía `setInputNode()`. Hoy no rompe nada porque
+  Android sólo recorre el camino JNI, pero implica que **todo el bloque `wma_input_*` es
+  código muerto en producción**, e iOS (WA-3.2) va a ser su primer usuario real.
+  Unificarlo **antes** de que WA-3.2 lo ejercite, no después del bug raro.
+- **WA-2.6 es más barato de lo que dice §3/D3.** El ciclo de vida ya está unificado:
+  `ensureEngine()` (`jni/jni_engine.cpp:41`) **ya crea el motor con `wma_engine_create()`**
+  y cachea un puntero crudo a su `AudioEngine`. El refactor no es cirugía de lifecycle sino
+  una reescritura mecánica por función. Eso habilita fusionarlo con WA-2.5 (abajo).
+
+**Decisión de método (2026-07-25): WA-2.5 y WA-2.6 se hacen fusionados, por categoría.**
+En vez de completar la C API y después migrar el JNI, cada PR toma una categoría
+(lifecycle → input/monitor → effects → oscillator/synth → voice → mode → análisis →
+metronome → benchmark → **looper**), agrega las `wma_*` faltantes **y** migra en el mismo
+PR las `Java_…` de esa categoría a llamarlas. Cada función se escribe una vez y nace
+multiplataforma, que es literalmente el objetivo de D3. Separados, se escriben ~79
+funciones nuevas y después se vuelven a tocar 278 puntos del JNI.
+
+**Decisión de producto (2026-07-25): NoisyPad iOS v1 SÍ necesita el looper completo.**
+Las 39 funciones de looper del gap portable entran en WA-2.5 sin recortar. Es el bloque
+más grande y va **último** en la secuencia de categorías, para llegar con el mecanismo ya
+rodado. Esto refuerza la fusión WA-2.5/2.6: el looper es justo donde escribir cada función
+dos veces más cuesta.

@@ -18,6 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # WA-0.4 — pure grep, no toolchain. Runs here rather than in the `ios`
+      # job on purpose: macOS minutes cost 10x, and a forbidden include is just
+      # as red when Linux says so.
+      - name: Portability guardrail (WA-0.4)
+        run: bash scripts/check-cpp-portability.sh
+
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build cmake g++
 
@@ -93,31 +99,21 @@ jobs:
       - name: Build & run C++ test suite (Apple clang) — WA-T.1
         run: bash scripts/run-cpp-tests.sh
 
-      # WA-2.1 — cross-compiles the portable DSP for device + simulator. This is
-      # the only job that catches Darwin-vs-bionic breakage (mmap64, off64_t and
-      # friends), which the host clang suite above cannot see because it builds
-      # for macOS, not iOS.
-      - name: Build C++ for iOS (device + simulator) — WA-2.1
+      # WA-2.1 / WA-2.4 — cross-compiles the WHOLE engine (core, nodes, api,
+      # backends including CoreAudioBackend.mm, plus the portable DSP) for
+      # device + simulator, and link-checks each slice.
+      #
+      # This is the only job that catches Darwin-vs-bionic breakage (mmap64,
+      # off64_t and friends), which the host clang suite above cannot see
+      # because it builds for macOS, not iOS. Both slices, because the .mm is
+      # the same Objective-C++ on each and the simulator SDK diverges from the
+      # device SDK.
+      #
+      # Used to be two steps — a DSP-only build plus a separate core probe.
+      # WA-2.2 and WA-2.4 closed the link gaps that kept the core out of the
+      # shipped target, so the probe was promoted and the steps collapsed.
+      - name: Build & link-check C++ for iOS (device + simulator) — WA-2.1/2.4
         run: bash scripts/build-ios.sh
-
-      # WA-2.4 — the shipped slice above is DSP-only, so it never compiles the
-      # core, the backends, or CoreAudioBackend.mm. The probe target does. This
-      # is the only thing standing between "CoreAudioBackend compiles for iOS"
-      # and a silent break: without it, breaking the .mm turns no job red.
-      # Both slices, because the .mm is the same Objective-C++ on each and the
-      # simulator SDK diverges from the device SDK.
-      - name: Compile core + CoreAudio for iOS (probe) — WA-2.4
-        run: |
-          set -euo pipefail
-          for sdk in iphoneos iphonesimulator; do
-            cmake -S audio/src/main/cpp/ios -B "audio/src/main/cpp/ios/build/ci-$sdk" -G Ninja \
-              -DCMAKE_SYSTEM_NAME=iOS \
-              -DCMAKE_OSX_ARCHITECTURES=arm64 \
-              -DCMAKE_OSX_SYSROOT="$sdk" \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
-              -DWMA_IOS_PROBE_CORE=ON
-            cmake --build "audio/src/main/cpp/ios/build/ci-$sdk" --target watermelon-core-probe
-          done
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
