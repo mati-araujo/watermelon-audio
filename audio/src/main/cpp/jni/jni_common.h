@@ -75,6 +75,9 @@ struct WmaEngine;
  */
 struct JniGlobalState {
     AudioEngine* engine = nullptr;            // Non-owning, points into g_wmaEngine
+    // Same instance as g_wmaEngine->inputNode, NOT a second node. A shared_ptr
+    // rather than a raw pointer only because the call sites already treat it as
+    // one. See ensureInputNode() / releaseInputNode().
     std::shared_ptr<InputNode> inputNode;
     std::mutex engineMutex;
 
@@ -101,6 +104,13 @@ bool ensureEngine();
  * @return true if input node is ready
  */
 bool ensureInputNode();
+
+/**
+ * Stop and release the InputNode, dropping BOTH handles to it — the JNI's and the
+ * WmaEngine's. They are the same instance (see ensureInputNode), so releasing only
+ * one would leave the engine holding a node the JNI thinks is gone.
+ */
+void releaseInputNode();
 
 // ==================== JNI Cache ====================
 

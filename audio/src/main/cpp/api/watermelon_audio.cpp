@@ -31,7 +31,9 @@
  * Internal helpers
  * ================================================================ */
 
-static bool ensureInputNode(WmaEngine* e) {
+// Declared in watermelon_audio_internal.h so the JNI bridge shares this exact
+// node instead of creating a second one — see the comment there.
+bool wmaEnsureInputNode(WmaEngine* e) {
     if (!e) return false;
     std::lock_guard<std::mutex> lock(e->inputNodeMutex);
     if (!e->inputNode) {
@@ -47,6 +49,8 @@ static bool ensureInputNode(WmaEngine* e) {
     }
     return true;
 }
+
+static bool ensureInputNode(WmaEngine* e) { return wmaEnsureInputNode(e); }
 
 /* ================================================================
  * 1. Lifecycle

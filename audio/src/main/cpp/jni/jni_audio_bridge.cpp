@@ -1181,10 +1181,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInp
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReleaseInputNode(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.inputNode) {
-        g_jniState.inputNode->stopInputStream();
-        g_jniState.inputNode.reset();
-    }
+    releaseInputNode();
 }
 
 // ==================== Monitoring Functions ====================

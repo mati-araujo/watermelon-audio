@@ -615,10 +615,9 @@ hay tipos, no hay audio. Es deliberado y hay que comunicarlo para que no se lea 
 | **Fase 3** — Kotlin iosMain | 🟢 **WA-3.1 ✅** — Kotlin/Native llama al motor en el simulador (41 tests, 0 fallas). **Próximo: WA-1.4 → WA-3.2 (`IosAudioBridge`) → WA-3.3** |
 | **Fase 4** — Empaquetado y publicación | 🟡 Iniciada de hecho — el pipeline **ya publica metadata KMP + klibs iOS** desde 1.8.0; falta validar el consumo desde NoisyPad (G1) y el XCFramework (WA-4.1) |
 
-**Próximo paso recomendado:** **unificar el `InputNode` duplicado** (ver hallazgos abajo) y
-después **WA-3.2** (`IosAudioBridge`), que ya tiene todo lo que necesitaba: cinterop
-(WA-3.1) y `BridgeConcurrency` (WA-1.4). El orden importa: WA-3.2 va a ser el primer usuario
-real de `wma_input_*`, que hoy es código muerto en producción.
+**Próximo paso recomendado:** **WA-3.2** (`IosAudioBridge`). Ya tiene sus tres
+precondiciones: cinterop (WA-3.1), `BridgeConcurrency` (WA-1.4) y el `InputNode` unificado,
+así que `wma_input_*` ya no es un camino muerto cuando iOS lo estrene.
 
 **G1** queda del lado de NoisyPad: el pipeline ya publica los klibs de iOS con los bindings
 adentro, así que sólo falta declarar la coordenada raíz allá, verificar que resuelve para
@@ -675,12 +674,25 @@ Trabajo paralelo, sin bloquear WA-3:
 
 **Hallazgos de la auditoría 2026-07-25 (candidatos a ticket propio):**
 
-- **`InputNode` está duplicado entre el JNI y la C API.** El JNI usa
-  `g_jniState.inputNode` y la C API usa `e->inputNode` — **dos instancias distintas**,
-  ambas enchufables al mismo `AudioEngine` vía `setInputNode()`. Hoy no rompe nada porque
-  Android sólo recorre el camino JNI, pero implica que **todo el bloque `wma_input_*` es
-  código muerto en producción**, e iOS (WA-3.2) va a ser su primer usuario real.
-  Unificarlo **antes** de que WA-3.2 lo ejercite, no después del bug raro.
+- ~~**`InputNode` está duplicado entre el JNI y la C API.**~~ ✅ **RESUELTO 2026-07-25.**
+  El JNI usaba `g_jniState.inputNode` y la C API `e->inputNode` — dos instancias distintas,
+  ambas enchufables al mismo `AudioEngine`. Nunca rompió en Android porque sólo se recorría
+  uno de los dos caminos, pero implicaba que **todo el bloque `wma_input_*` era código
+  muerto en producción**, e iOS (WA-3.2) iba a ser su primer usuario real.
+  Ahora `g_jniState.inputNode` es un `shared_ptr` **a la misma instancia** que posee el
+  `WmaEngine` — el mismo patrón que ya seguía `g_jniState.engine`. El `ensureInputNode()`
+  del JNI delega en `wmaEnsureInputNode()` (expuesto en `watermelon_audio_internal.h`), y
+  el nuevo `releaseInputNode()` suelta **ambos** handles, porque soltar uno solo
+  recrearía el split.
+  **Ojo con la verificación:** esto no lo cubre la suite de host (el JNI necesita device y
+  `core/tests/` sustituye `InputNode` por un stub). El gate fue el compilador más el
+  argumento estructural.
+- **El estado de modo también está duplicado** (hallado al unificar el `InputNode`):
+  `JniGlobalState` y `WmaEngine` tienen **cada uno** su `currentMode`,
+  `modeTransitionInProgress` y `modeTransitionProgress`, y son copias independientes — el
+  JNI usa las suyas en 2 lugares y la C API las suyas en 2. Es la misma clase de bug, sin
+  arreglar todavía: corresponde a la categoría `mode` de **WA-2.5/2.6**, donde el JNI pasa
+  a llamar la C API y la duplicación desaparece por construcción.
 - **WA-2.6 es más barato de lo que dice §3/D3.** El ciclo de vida ya está unificado:
   `ensureEngine()` (`jni/jni_engine.cpp:41`) **ya crea el motor con `wma_engine_create()`**
   y cachea un puntero crudo a su `AudioEngine`. El refactor no es cirugía de lifecycle sino
