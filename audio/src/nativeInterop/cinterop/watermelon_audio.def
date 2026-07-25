@@ -1,0 +1,37 @@
+# ============================================================================
+# Kotlin/Native cinterop over the C API (WA-3.1).
+#
+# This is the ONLY bridge between Kotlin and the engine on iOS (decision D1):
+# no hand-written Swift shim, no Objective-C++ in the middle. cinterop generates
+# direct calls, which matters for the high-frequency control path — wma_set_xy()
+# runs once per gesture frame.
+#
+# headerFilter keeps the generated bindings to our own header: without it the
+# declarations pulled in from stdint/stdbool/stddef would land in the package
+# too, for no benefit and a slower build.
+#
+# staticLibraries embeds libwatermelon_audio.a INTO the klib, which is what
+# decision D5 asks for — NoisyPad consumes one KMP coordinate and no CocoaPods
+# or SPM package has to be maintained alongside it.
+#
+# What is deliberately NOT here: -libraryPath. The archive lives in a different
+# directory per slice (iphoneos vs iphonesimulator) and a .def cannot branch, so
+# Gradle passes it per target — see KmpNativeConventionPlugin.
+# ============================================================================
+
+headers = watermelon_audio.h
+headerFilter = watermelon_audio.h
+
+package = com.watermellonstudios.audio.internal.cinterop
+
+staticLibraries = libwatermelon_audio.a
+
+# The archive is C++ underneath the C surface, so the C++ runtime has to come
+# along. The four frameworks are what CoreAudioBackend.mm needs — mirrored from
+# ios/CMakeLists.txt, where they are usage requirements a static archive cannot
+# carry on its own.
+linkerOpts = -lc++ \
+             -framework AVFoundation \
+             -framework AudioToolbox \
+             -framework CoreAudio \
+             -framework Foundation

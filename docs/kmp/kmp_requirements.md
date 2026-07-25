@@ -386,12 +386,55 @@ Sigue valiendo la regla de siempre: el logger **no es RT-safe** y no va en el ho
 
 | ID | Requerimiento | Detalle | Criterio de aceptación | Prio | Esf |
 |---|---|---|---|---|---|
-| WA-3.1 | cinterop | `watermelon_audio.def` sobre `watermelon_audio.h`; link estático de los `.a` por target; verificación de que los 181+ símbolos resuelven | Kotlin/Native llama `wma_start_engine()` desde un test de simulador | P0 | M |
+| WA-3.1 | cinterop | `watermelon_audio.def` sobre `watermelon_audio.h`; link estático de los `.a` por target; verificación de que los 191 símbolos resuelven | Kotlin/Native llama la C API desde un test de simulador | P0 | M | ✅ **HECHO** 2026-07-25 — ver nota de cierre |
 | WA-3.2 | `IosAudioBridge` | Implementación de `IAudioNativeBridge` en iosMain sobre cinterop: mismos contratos `Result<T>`, mismos mutexes por categoría (reutiliza `BridgeConcurrency` de WA-1.4), mapeo error-code→excepción idéntico. Los métodos RT (`setXY`, `setFrequencyAndAmplitude`) llaman la función C directa sin suspend ni locks | Suite commonTest de bridge (WA-1.5) pasa contra el bridge iOS en simulador | P0 | L |
 | WA-3.3 | actuals iOS | `NativeLibraryLoader` (no-op, link estático), `AudioBridgeProvider` (retorna `IosAudioBridge`), `DeviceCapabilities` (ProcessInfo/UIDevice) | `AudioEngineFactory.create()` funciona en iOS | P0 | S |
 | WA-3.4 | `AudioSessionManager` | Helper iosMain para AVAudioSession: categoría `playAndRecord`, `preferredIOBufferDuration`/`preferredSampleRate`, notificaciones de interrupción y route change expuestas como Flow para que el consumidor (NoisyPad) las mapee a start/stop | Interrupción por llamada entrante pausa y reanuda el engine en sample app | P0 | M |
 | WA-3.5 | Transcoder abstracto | `Mp4AacTranscoder` (MediaCodec) → interfaz `IAudioTranscoder` en commonMain; actual Android existente; actual iOS con `AVAssetWriter` (diferible: el export WAV no lo necesita) | Interfaz común; iOS actual puede llegar después | P2 | M |
-| WA-3.6 | Regla RT documentada | Documentar y hacer cumplir D6: ningún callback del thread RT entra a Kotlin; estado via polling/colas. Incluir en el README de contribución | Doc + revisión de que ningún path actual lo viola | P1 | S |
+| WA-3.6 | Regla RT documentada | Documentar y hacer cumplir D6: ningún callback del thread RT entra a Kotlin; estado via polling/colas. Incluir en el README de contribución | Doc + revisión de que ningún path actual lo viola | P1 | S | Parcial — la regla ya está en `CLAUDE.md` §portabilidad; falta la revisión de paths |
+
+### Nota de cierre — WA-3.1 (2026-07-25)
+
+**Kotlin/Native llama al motor C++ en el simulador.** `iosSimulatorArm64Test`: **41 tests,
+0 fallas**, de los cuales 7 son el nuevo `CinteropSmokeTest` (WA-T.3).
+
+Piezas:
+
+- `audio/src/nativeInterop/cinterop/watermelon_audio.def` — `staticLibraries` embebe
+  `libwatermelon_audio.a` **dentro del klib**, que es lo que pedía D5: NoisyPad consume una
+  sola coordenada KMP y no hay CocoaPods ni SPM que mantener al lado. `headerFilter` evita
+  que se generen bindings para stdint/stdbool/stddef.
+- `KmpNativeConventionPlugin` — bloque `cinterops` por target y la task `buildIosNativeLib`,
+  que invoca `scripts/build-ios.sh` con inputs/outputs declarados (sin eso el `.a` se
+  recompilaría en cada build). `-libraryPath` se pasa **desde Gradle y no desde el `.def`**
+  porque es lo único que cambia entre slices, y un `.def` no puede ramificar.
+- Artefactos publicados: `audio-ios{arm64,simulatorarm64}-<v>-cinterop-watermelonAudio.klib`,
+  4,7 MB cada uno — el archivo embebido, verificado con `publishToMavenLocal`.
+
+**El smoke prueba marshalling, no DSP.** El comportamiento del motor ya lo cubren los 517
+tests C++; lo que no cubría nada es que los símbolos resuelvan desde Kotlin y que cada
+familia de tipos cruce intacta. Por eso los casos están elegidos por categoría —puntero
+opaco, `const char*`, `int`, `float`, `bool`— y no por feature. **No arranca el motor a
+propósito:** `wma_engine_start()` abre un stream de CoreAudio y volvería el test flaky por
+una razón ajena al cinterop. El sonido real es WA-4.3, en device.
+
+> [!NOTE]
+> **Un falso positivo que quedó convertido en test.** La primera versión del round-trip de
+> float pedía `set_param(cutoff, 0.25)` y recibía `20.0`. Parecía un bug de marshalling y
+> era el motor haciendo lo correcto: `FilterEffect.cpp:21` clampea el cutoff a
+> [20, 20000] Hz, y el param 0 de FILTER son **Hz, no un valor normalizado**. El float
+> había cruzado perfecto. Quedó como `outOfRangeParameterIsClampedByTheEngineNotSilentlyAccepted`,
+> que ahora documenta que la C API aplica el dominio del motor y no es un passthrough de
+> bytes.
+
+**El publish se movió a `macos-latest`** (`release-please.yml`), que era la consecuencia
+anticipada: cinterop necesita el SDK de iOS para parsear el header y el `.a` que sólo
+produce Xcode. Se descartó la matriz host-specific porque parte la publicación en dos jobs
+que pueden divergir de versión — el modo de falla que ya mordió con 1.8.0.
+
+**Prerrequisito de entorno resuelto:** el bloqueo de §11 (`iosSimulatorArm64Test` se colgaba
+esperando privilegios de admin) **ya no existe** — `xcodebuild -checkFirstLaunchStatus`
+devuelve 0 y hay simuladores disponibles. Los tests K/N corren local.
 
 ---
 
@@ -422,23 +465,17 @@ Sigue valiendo la regla de siempre: el logger **no es RT-safe** y no va en el ho
 |---|---|---|---|---|
 | WA-T.1 | Tests C++ en macOS | Los googletest existentes (dsp/effects/looper/voice/engine) ya compilan en host: agregar job macOS con clang de Xcode — detecta problemas de portabilidad (MSVC/MinGW vs clang-apple) antes de tocar iOS | P0 (parte de WA-0.3) | ✅ **HECHO** — paso en el job `ios`; ya encontró un bug (script roto en bash 3.2, ver §5) |
 | WA-T.2 | commonTest Kotlin | Cobertura de la lógica común (WA-1.5) corriendo en JVM y luego contra `IosAudioBridge` en simulador (WA-3.2) | P1 | Parcial — 34 tests verdes en JVM; el binario K/N de test linkea |
-| WA-T.3 | Smoke cinterop | Test de simulador: round-trip completo `AudioEngineFactory.create()` → start → setXY → addEffect → stop | P0 | Bloqueado por WA-2.x + WA-3.1 |
+| WA-T.3 | Smoke cinterop | Test de simulador sobre la C API: handle, version, cadena de efectos, params, bypass, setXY | P0 | ✅ **HECHO** 2026-07-25 — `iosTest/CinteropSmokeTest.kt`, 7 tests. El round-trip vía `AudioEngineFactory.create()` que pedía el criterio original llega con WA-3.2, cuando exista el bridge |
 | WA-T.4 | Verificación RT | Sesión de Instruments (Time Profiler + Allocations) sobre el render callback de `CoreAudioBackend`: cero allocs, cero locks, sin prioridad invertida | P0 (criterio de WA-2.4) | Pendiente |
 
-### Prerrequisito de entorno local (detectado 2026-07-22)
+### Prerrequisito de entorno local — RESUELTO (2026-07-25)
 
-`./gradlew :audio:iosSimulatorArm64Test` **se cuelga indefinidamente** en la máquina de
-desarrollo: Xcode 26.6 no tiene completado su *first launch*, y Gradle dispara
-`xcodebuild -runFirstLaunch`, que espera privilegios de admin sin TTY disponible.
+~~`./gradlew :audio:iosSimulatorArm64Test` **se cuelga indefinidamente** en la máquina de
+desarrollo: Xcode 26.6 no tiene completado su *first launch*.~~
 
-```bash
-sudo xcodebuild -runFirstLaunch
-```
-
-Hasta entonces, la verificación local de tests K/N se hace con
-`:audio:linkDebugTestIosSimulatorArm64` (compila y linkea el binario sin ejecutarlo).
-**No afecta a WA-0.3:** los runners macOS de GitHub Actions vienen con Xcode ya
-inicializado.
+Ya no aplica: `xcodebuild -checkFirstLaunchStatus` devuelve 0 y hay simuladores
+disponibles. **Los tests de Kotlin/Native corren local**, que es como se verificó WA-3.1.
+Ya no hace falta conformarse con `:audio:linkDebugTestIosSimulatorArm64`.
 
 ---
 
@@ -535,14 +572,20 @@ hay tipos, no hay audio. Es deliberado y hay que comunicarlo para que no se lea 
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales · **falta WA-1.2, WA-1.3 y WA-1.4** (este último es prerequisito de WA-3.2) |
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · WA-2.4 output ✅ · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3), input path iOS, y el bloque grande: WA-2.5 + WA-2.6 |
-| **Fase 3** — Kotlin iosMain | 🟡 Desbloqueada — los 2 `actual` de WA-0.2 + el `.a` shipped y linkeable. **Próximo: WA-3.1 (cinterop)** |
+| **Fase 3** — Kotlin iosMain | 🟢 **WA-3.1 ✅** — Kotlin/Native llama al motor en el simulador (41 tests, 0 fallas). **Próximo: WA-1.4 → WA-3.2 (`IosAudioBridge`) → WA-3.3** |
 | **Fase 4** — Empaquetado y publicación | 🟡 Iniciada de hecho — el pipeline **ya publica metadata KMP + klibs iOS** desde 1.8.0; falta validar el consumo desde NoisyPad (G1) y el XCFramework (WA-4.1) |
 
-**Próximo paso recomendado:** **G1** (WA-4.2 parcial) y después **WA-3.1**. G1 es lo único
-del programa que desbloquea a otro equipo (NoisyPad convierte su `core-domain` en paralelo)
-y sus dos precondiciones ya están dadas. Mejor todavía de lo que se creía: el pipeline ya
-viene publicando los klibs de iOS (ver nota abajo), así que G1 se reduce a **validar el
-consumo** desde NoisyPad y confirmar el lockstep de Kotlin (D8: este repo está en 2.4.0).
+**Próximo paso recomendado:** **WA-1.4** (`BridgeConcurrency`) y después **WA-3.2**
+(`IosAudioBridge`). En ese orden y no al revés: si `IosAudioBridge` se escribe primero,
+duplica los mutexes por categoría y el mapeo error→excepción de `AudioNativeBridge`
+(3.352 LOC) y después hay que reconciliarlos.
+
+**Antes de WA-3.2, unificar el `InputNode` duplicado** (ver hallazgos abajo): WA-3.2 va a
+ser el primer usuario real de `wma_input_*`, que hoy es código muerto en producción.
+
+**G1** queda del lado de NoisyPad: el pipeline ya publica los klibs de iOS con los bindings
+adentro, así que sólo falta declarar la coordenada raíz allá, verificar que resuelve para
+ambos targets y confirmar el lockstep de Kotlin (D8: este repo está en 2.4.0).
 
 > [!NOTE]
 > **El publish en Linux hoy funciona — pero WA-3.1 lo rompe.** Verificado 2026-07-25

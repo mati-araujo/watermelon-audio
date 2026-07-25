@@ -148,12 +148,19 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Compile iOS targets
+      # Since WA-3.1 these also run cinterop, which re-invokes build-ios.sh through
+      # the buildIosNativeLib task. That is not wasted work: the CMake tree from the
+      # step above is still in the workspace, so ninja reports "no work to do" and
+      # the re-run costs seconds. The standalone step stays because it fails BEFORE
+      # the JDK/SDK/Gradle setup below, which is the expensive part.
+      - name: Compile iOS targets (incl. cinterop) — WA-3.1
         run: ./gradlew :audio:compileKotlinIosArm64 :audio:compileKotlinIosSimulatorArm64
 
-      # Runs commonTest on the simulator — the only place the shared Kotlin is
-      # executed (not merely compiled) under Kotlin/Native.
-      - name: Run commonTest on iOS simulator
+      # The only place the shared Kotlin is executed — not merely compiled — under
+      # Kotlin/Native. Since WA-3.1 it also runs CinteropSmokeTest (WA-T.3), which
+      # is the only check that the wma_* symbols actually resolve from Kotlin and
+      # that each type family survives the boundary.
+      - name: Run commonTest + cinterop smoke on iOS simulator — WA-T.3
         run: ./gradlew :audio:iosSimulatorArm64Test
 
   build:
