@@ -10,23 +10,28 @@ Motor de sintesis en tiempo real con efectos DSP profesionales. C++20 + Oboe + K
 
 ```
 audio/src/
-  commonMain/kotlin/    64 files — pure Kotlin, zero Android deps
+  commonMain/kotlin/    67 files — pure Kotlin, zero Android deps
     api/                AudioEngine interface, IAudioNativeBridge, IEffectManager,
                         factories (AudioEngine, EffectManager, StateSynchronizer)
     domain/             Effect types, oscillators, scales, modes, USB types, errors
     callback/           AudioLogger, AudioAnalyticsListener (dependency inversion)
     internal/           AudioEngineImpl, EffectManagerImpl, StateSynchronizer,
-                        ScaleQuantizer, ChordGenerator, util/Format, util/Time
-                        expect: AudioBridgeProvider, NativeLibraryLoader
-  androidMain/kotlin/   21 files — JNI bridge, USB, platform-specific
+                        ScaleQuantizer, ChordGenerator, BridgeConcurrency,
+                        util/Format, util/Time
+                        expect: AudioBridgeProvider, NativeLibraryLoader,
+                                currentDeviceCapabilities
+    domain/device/      DeviceCapabilities (interfaz de hechos) + Snapshot
+  androidMain/kotlin/   23 files — JNI bridge, USB, platform-specific
     internal/bridge/    AudioNativeBridge (3,352 LOC, 289 external funs)
     internal/usb/       USB audio driver (DataStore, BroadcastReceiver)
     internal/mode/      ModeTransitionManagerImpl, NativeModeStateWriter
-  iosMain/kotlin/       2 files — actual de NativeLibraryLoader (no-op, link estatico)
-                        y AudioBridgeProvider (lanza NotImplementedError hasta WA-3.2)
-  commonTest/kotlin/    5 suites
+  iosMain/kotlin/       5 files — IosAudioBridge (sobre cinterop), AudioBridgeProvider,
+                        AudioSessionManager (AVAudioSession como Flow),
+                        NativeLibraryLoader (no-op, link estatico),
+                        DeviceCapabilitiesProvider (NSProcessInfo)
+  commonTest/kotlin/    7 suites  ·  iosTest/kotlin/ 4 suites
   main/cpp/             C++20 engine
-    api/                C API — watermelon_audio.h (191 functions, pure C)
+    api/                C API — watermelon_audio.h (187 functions, pure C)
     dsp/                watermelon-dsp sub-library (30 files, zero deps)
     effects/            watermelon-effects sub-library (59 files, 23 efectos + EffectRegistry)
     engines/            watermelon-engines sub-library (SynthEngine + 6 engines
@@ -36,7 +41,8 @@ audio/src/
                         LooperExporter.cpp)
     core/               AudioEngine facade + subsistemas (22 files)
     backends/           IAudioBackend, BackendManager, SplitBackend, DriftResampler,
-                        OboeBackend + LibusbBackend (Android), CoreAudioBackend.mm (iOS),
+                        OboeBackend + LibusbBackend (Android),
+                        CoreAudioBackend.mm (iOS, output + captura full-duplex),
                         PlatformBackends.cpp (unico punto que nombra backends concretos)
     jni/                5 files — jni_audio_bridge.cpp (278 JNIEXPORT), jni_engine,
                         jni_usb, jni_benchmark, jni_common.h

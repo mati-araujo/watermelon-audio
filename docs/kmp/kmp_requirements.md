@@ -734,7 +734,42 @@ pausando y reanudando el motor. Eso necesita hardware y va con WA-4.3.
 |---|---|---|---|---|---|
 | WA-4.1 | XCFramework en el pipeline | Task Gradle que ensambla el XCFramework (device+simulator) y lo integra al klib/publicación; cache para no recompilar C++ sin cambios | `./gradlew :audio:assembleWatermelonXCFramework` reproducible en CI | P0 | M | ✅ **HECHO** 2026-07-25 — `XCFramework("Watermelon")` en el convention plugin, framework estático, wired al job `ios` de CI con verificación de símbolos. Ver nota |
 | WA-4.2 | Publicación KMP | Publicar a GitHub Packages el artefacto KMP completo (metadata común + AAR Android + klibs iOS). Release Please sigue gobernando la versión. Validar consumo desde un proyecto de prueba iOS y desde NoisyPad Android (sin cambios para el consumidor Android actual) | NoisyPad resuelve la misma coordenada para ambos targets — **desbloquea gate G1 de NoisyPad** | P0 | M |
-| WA-4.3 | Sample app iOS | Mini app (puede vivir en el repo) que haga smoke de la librería: start engine, sine, un efecto, looper record/play, medición de latencia round-trip | Smoke manual documentado; latencia medida y registrada | P1 | M |
+| WA-4.3 | Sample app iOS | Mini app (puede vivir en el repo) que haga smoke de la librería: start engine, sine, un efecto, looper record/play, medición de latencia round-trip | Smoke manual documentado; latencia medida y registrada | P1 | M | 🟡 **Partido en dos, primera mitad APROBADA 2026-07-25** (sin empezar). Ver decisión abajo |
+
+### Decisión — WA-4.3 se parte en dos (aprobada 2026-07-25, sin empezar)
+
+**Primera mitad: sample app en el simulador. No necesita hardware. Aprobada, pendiente.**
+**Segunda mitad: validación en device. Sigue bloqueada por el iPhone.**
+
+**Qué NO cierra el simulador**, y por qué no es cuestión de intentarlo igual:
+
+| Criterio de WA-4.3 | En simulador |
+|---|---|
+| Instruments sobre el render block (cero allocs, cero locks) | **No sirve** — corre el CoreAudio de macOS sobre el hardware del Mac, no el I/O unit del iPhone. El comportamiento RT no es representativo |
+| Latencia round-trip medida | **No sirve** — mediría la placa de audio del Mac |
+| Interrupción por llamada entrante (cierra el criterio de WA-3.4) | **Imposible** — no hay llamadas |
+
+**Qué sí, y por qué vale la pena igual:** el simulador usa el **micrófono del Mac**, así que
+es lo único disponible hoy que ejercita **el input path que se escribió a ciegas**. Las
+etapas 1 y 2 se cerraron declarando que "nada de esto prueba que entre audio"; esto lo
+prueba. En concreto: el `AVAudioSinkNode`, la normalización del ABL, el ring SPSC, el
+camino del `@try` cuando se niega el permiso, y el reopen de `wma_input_start()`.
+
+De paso responde la pregunta que WA-4.1 dejó abierta: si el XCFramework es **realmente
+consumible** desde Swift, no sólo si se construye.
+
+**Forma acordada:**
+
+- Proyecto Xcode mínimo en `samples/ios/`, SwiftUI.
+- Consume el **XCFramework** (`import Watermelon`), **no** la C API directa: así ejercita el
+  stack completo tal como lo va a hacer NoisyPad —Swift → Kotlin → cinterop → C API → C++—
+  que es justo donde está el riesgo no verificado. Una app Swift pelada contra
+  `libwatermelon_audio.a` sería menos código y no probaría ni la capa Kotlin ni el
+  XCFramework.
+- Controles: start/stop, sine, agregar un efecto, looper record/play, toggle de input con
+  medidor de nivel.
+- `NSMicrophoneUsageDescription` en el `Info.plist`. **Negar el permiso a propósito es un
+  caso a probar**, no un accidente: es el único disparador del `@try` de `CoreAudioBackend`.
 
 ### Nota de cierre — WA-4.1 (2026-07-25)
 
@@ -906,21 +941,35 @@ hay tipos, no hay audio. Es deliberado y hay que comunicarlo para que no se lea 
 
 ### Dónde retomar (2026-07-25)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, 4 commits sobre `master`, **sin pushear**.
-`master` está en el merge del PR #58, con CI verde en los 5 jobs.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **7 commits sobre `master`, sin pushear**.
+`master` está en el merge del PR #58, con CI verde en los 5 jobs. Árbol limpio.
 
-**La Fase 3 está cerrada.** WA-1.2 cerró WA-3.3 y con eso el último pendiente de
-`iosMain`: `AudioEngineFactory.create()` funciona en iOS de punta a punta.
+```
+ce2a105 feat(build): XCFramework en el pipeline (WA-4.1) + publish.yml a macOS
+4fc0484 feat(ios): armado de la captura — input path etapa 2
+9876b08 feat(ios): captura full-duplex en CoreAudioBackend — input path etapa 1
+7f1d284 feat(kmp): DeviceCapabilities comun — cierra WA-1.2 y WA-3.3 (Fase 3)
+cfc0794 docs(kmp): estado de cierre de sesion y ruta para retomar
+de1a79e feat(ios): AudioSessionManager (WA-3.4)
+b9017c1 feat(ios): IosAudioBridge sobre cinterop (WA-3.2, WA-3.3 parcial)
+```
+
+**Se cerró la Fase 3 entera** (WA-1.2 cerró WA-3.3), **el input path de iOS** (etapas 1 y 2)
+y **WA-4.1**. Con eso **ya no queda nada grande que se pueda hacer sin hardware** en el
+camino iOS: lo que sigue necesita un iPhone (WA-4.3) o está del lado de NoisyPad (G1).
+El trabajo sin bloqueo es **WA-2.5 + WA-2.6**.
 
 **Cómo verificar que todo sigue en pie antes de tocar nada** (todo corre local; el
 bloqueo de Xcode de §11 ya no existe):
 
 ```bash
-bash scripts/check-cpp-portability.sh   # guardrail WA-0.4
-bash scripts/run-cpp-tests.sh           # 527 tests C++
-bash scripts/build-ios.sh               # ambos slices + link check
-./gradlew :audio:iosSimulatorArm64Test  # 75 tests iOS
-./gradlew :audio:assembleDebug          # Android, 4 ABIs
+bash scripts/check-cpp-portability.sh          # guardrail WA-0.4
+bash scripts/run-cpp-tests.sh                  # 527 tests C++
+bash scripts/build-ios.sh                      # ambos slices + link check
+./gradlew :audio:iosSimulatorArm64Test         # 87 tests iOS
+./gradlew :audio:testDebugUnitTest             # 50 tests JVM
+./gradlew :audio:assembleDebug                 # Android, 4 ABIs
+./gradlew :audio:assembleWatermelonXCFramework # XCFramework (sólo macOS)
 ```
 
 **Deuda de verificación que conviene saldar temprano:** los métodos de
@@ -943,18 +992,43 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso recomendado.** Ya **no queda nada grande que se pueda hacer sin hardware**
-en el camino iOS: lo que sigue necesita un iPhone (WA-4.3) o está del lado de NoisyPad (G1 /
-WA-4.2). El trabajo sin bloqueo es el bloque WA-2.5 + WA-2.6, abajo.
+**Próximo paso: WA-2.5 + WA-2.6, primera categoría.** Es lo único grande que queda sin
+bloqueo — todo lo demás del camino iOS necesita hardware o está del lado de NoisyPad.
 
-1. **WA-4.3 validación en device** (M). **Necesita un iPhone.** Sonido real, Instruments
-   sobre el render block de `CoreAudioBackend` (cero allocs, cero locks), latencia
-   round-trip medida, y la interrupción por llamada entrante que cierra el criterio
-   original de WA-3.4. → **G2**
+**Arranque concreto para la próxima sesión** (el método ya está decidido, ver abajo — no
+re-litigarlo):
 
-**En paralelo, sin bloquear nada de lo anterior:** WA-2.5 + WA-2.6 fusionados por
-categoría (ver la decisión de método más abajo). Es el bloque más grande que queda del
-programa, y el looper —39 funciones— va último.
+1. Leer `docs/kmp/c_api_coverage.md` (regenerable con `python3 scripts/c-api-gap.py`) para
+   el detalle de la categoría.
+2. Tomar **`lifecycle`**, la primera del orden acordado. Es la más barata y la que rueda el
+   mecanismo: WA-2.6 ya está medio hecho ahí — `ensureEngine()`
+   (`jni/jni_engine.cpp:41`) **ya crea el motor con `wma_engine_create()`**.
+3. En el **mismo PR**: agregar las `wma_*` faltantes de esa categoría **y** migrar las
+   `Java_…` correspondientes a llamarlas.
+4. Regenerar `c_api_coverage.md` y actualizar el estado acá.
+
+**Orden de categorías:** lifecycle → input/monitor → effects → oscillator/synth → voice →
+**mode** → análisis → metronome → benchmark → **looper**.
+
+- **`mode` no es una más**: ahí desaparece por construcción la duplicación de
+  `currentMode` / `modeTransitionInProgress` / `modeTransitionProgress` entre
+  `JniGlobalState` y `WmaEngine` (ver hallazgos abajo).
+- **`looper` va último** — 39 funciones, el bloque más grande, y conviene llegar con el
+  mecanismo ya rodado.
+
+**Ojo con la verificación en este trabajo:** las funciones JNI **no tienen tests** (necesitan
+device). El gate real es el compilador, la suite C++ de host donde aplique, y revisión del
+diff. Donde se pueda meter un test de host —como se hizo con `test_capture_requests.cpp` en
+la etapa 2 del input path— conviene hacerlo: es la diferencia entre verificar y confiar.
+
+**Después, bloqueado por hardware:**
+
+- **WA-4.3 primera mitad** (sample app en simulador) — **aprobada, sin empezar**. No necesita
+  iPhone; ver la decisión en §9. Es lo que probaría que el input path realmente captura.
+- **WA-4.3 segunda mitad, en device** (M). **Necesita un iPhone.** Sonido real, Instruments
+  sobre el render block de `CoreAudioBackend` (cero allocs, cero locks), latencia
+  round-trip medida, y la interrupción por llamada entrante que cierra el criterio
+  original de WA-3.4. → **G2**
 
 **G1** queda del lado de NoisyPad: el pipeline ya publica los klibs de iOS con los bindings
 adentro, así que sólo falta declarar la coordenada raíz allá, verificar que resuelve para
