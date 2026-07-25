@@ -429,7 +429,7 @@ Sigue valiendo la regla de siempre: el logger **no es RT-safe** y no va en el ho
 | WA-3.1 | cinterop | `watermelon_audio.def` sobre `watermelon_audio.h`; link estático de los `.a` por target; verificación de que los 191 símbolos resuelven | Kotlin/Native llama la C API desde un test de simulador | P0 | M | ✅ **HECHO** 2026-07-25 — ver nota de cierre |
 | WA-3.2 | `IosAudioBridge` | Implementación de `IAudioNativeBridge` en iosMain sobre cinterop: mismos contratos `Result<T>`, mismos mutexes por categoría (reutiliza `BridgeConcurrency` de WA-1.4), mapeo error-code→excepción idéntico. Los métodos RT (`setXY`, `setFrequencyAndAmplitude`) llaman la función C directa sin suspend ni locks | Suite commonTest de bridge (WA-1.5) pasa contra el bridge iOS en simulador | P0 | L | ✅ **HECHO** 2026-07-25 — 87 de 88 miembros sobre la C API; 13 tests en `iosTest`. Ver nota |
 | WA-3.3 | actuals iOS | `NativeLibraryLoader` (no-op, link estático), `AudioBridgeProvider` (retorna `IosAudioBridge`), `DeviceCapabilities` (ProcessInfo/UIDevice) | `AudioEngineFactory.create()` funciona en iOS | P0 | S | 🟡 **PARCIAL** 2026-07-25 — `NativeLibraryLoader` ✅ y `AudioBridgeProvider` ✅ (ya no lanza `NotImplementedError`). Falta `DeviceCapabilities` (WA-1.2) |
-| WA-3.4 | `AudioSessionManager` | Helper iosMain para AVAudioSession: categoría `playAndRecord`, `preferredIOBufferDuration`/`preferredSampleRate`, notificaciones de interrupción y route change expuestas como Flow para que el consumidor (NoisyPad) las mapee a start/stop | Interrupción por llamada entrante pausa y reanuda el engine en sample app | P0 | M |
+| WA-3.4 | `AudioSessionManager` | Helper iosMain para AVAudioSession: categoría `playAndRecord`, `preferredIOBufferDuration`/`preferredSampleRate`, notificaciones de interrupción y route change expuestas como Flow para que el consumidor (NoisyPad) las mapee a start/stop | Interrupción por llamada entrante pausa y reanuda el engine en sample app | P0 | M | ✅ **HECHO** 2026-07-25 — `internal/audio/AudioSessionManager.kt` + 13 tests. La validación con llamada entrante real queda para WA-4.3 (device) |
 | WA-3.5 | Transcoder abstracto | `Mp4AacTranscoder` (MediaCodec) → interfaz `IAudioTranscoder` en commonMain; actual Android existente; actual iOS con `AVAssetWriter` (diferible: el export WAV no lo necesita) | Interfaz común; iOS actual puede llegar después | P2 | M |
 | WA-3.6 | Regla RT documentada | Documentar y hacer cumplir D6: ningún callback del thread RT entra a Kotlin; estado via polling/colas. Incluir en el README de contribución | Doc + revisión de que ningún path actual lo viola | P1 | S | Parcial — la regla ya está en `CLAUDE.md` §portabilidad; falta la revisión de paths |
 
@@ -515,6 +515,49 @@ sino a `typealias WmaResult = Int`, y el handle opaco vive en
 `cnames.structs.WmaEngine`, no en el paquete del `.def`. Se descubrió leyendo el klib
 con `klib dump-metadata`, que es la forma confiable de saber qué generó cinterop en
 vez de suponerlo.
+
+
+### Nota de cierre — WA-3.4 (2026-07-25)
+
+`AudioSessionManager` en iosMain: `configure()` / `activate()` / `deactivate()`, los
+valores **concedidos** (`actualSampleRate`, `actualIOBufferDuration`, latencias) y un
+`Flow<AudioSessionEvent>` con interrupciones y cambios de ruta. 13 tests en el
+simulador — **75 tests iOS en total, 0 fallas**.
+
+**No actúa sobre el motor, sólo informa.** Quién decide pausar o reanudar es NoisyPad,
+que es el único que sabe si había un loop grabando o si conviene avisar en pantalla. Un
+manager que pausa por su cuenta le saca esa decisión al consumidor.
+
+**Lo que pedís no es lo que obtenés.** `preferredSampleRate` y
+`preferredIOBufferDuration` son preferencias; iOS puede ignorarlas según hardware, ruta
+y qué estén haciendo otras apps. Por eso hay que leer los `actual*` **después** de
+activar: son los valores con los que el motor va a trabajar de verdad, y son los que
+van a `prepare()`.
+
+> [!WARNING]
+> **Dos bugs propios que encontró el proceso, no el diseño.**
+>
+> 1. **`runCatching` sobre `AVAudioSession` daba éxito siempre.** Los setters de
+>    `AVAudioSession` **no lanzan**: devuelven `false` y llenan un `NSError`.
+>    Envolverlos en `runCatching` reportaba éxito incluso cuando el sistema rechazaba
+>    la configuración — justo el caso que interesa detectar. Reemplazado por un helper
+>    que chequea el `Boolean` y conserva el `localizedDescription`.
+> 2. **El `Flow` podía perder eventos en silencio.** `trySend` desde un callback de
+>    `NSNotificationCenter` no puede suspender, así que sin capacidad explícita un
+>    evento se descarta sin rastro. Ahora hay `.buffer(16, DROP_OLDEST)`. El comentario
+>    ya decía `DROP_OLDEST` antes de que el código lo hiciera — el doc iba adelante del
+>    código, que es su propia clase de bug.
+
+**Los tests están partidos en dos a propósito.** El parseo del `userInfo` (tipos y
+opciones son enteros mágicos del ABI de iOS) se prueba llamando a los parsers directo:
+determinista y rápido. El cableado del `Flow` tiene **un solo** test, que reintenta con
+timeout. La primera versión probaba todo por el `Flow` bajo `runTest` y los cinco tests
+colgaban hasta el timeout —5 minutos— porque el tiempo virtual de `runTest` no se lleva
+con la entrega **síncrona** de `NSNotificationCenter`: la notificación se posteaba antes
+de que el observer estuviera registrado y se perdía.
+
+**Falta para cerrar el criterio original:** la interrupción por llamada entrante real
+pausando y reanudando el motor. Eso necesita hardware y va con WA-4.3.
 
 ---
 
@@ -652,7 +695,7 @@ hay tipos, no hay audio. Es deliberado y hay que comunicarlo para que no se lea 
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 avanzó ambas) · **falta WA-1.2 y WA-1.3** |
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · WA-2.4 output ✅ · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3), input path iOS, y el bloque grande: WA-2.5 + WA-2.6 |
-| **Fase 3** — Kotlin iosMain | 🟢 **WA-3.1 ✅ · WA-3.2 ✅ · WA-3.3 parcial** — `getAudioBridge()` devuelve un bridge real (62 tests iOS, 0 fallas). Falta `AudioSessionManager` (WA-3.4) y `DeviceCapabilities` |
+| **Fase 3** — Kotlin iosMain | 🟢 **WA-3.1 ✅ · WA-3.2 ✅ · WA-3.3 parcial** — `getAudioBridge()` devuelve un bridge real (62 tests iOS, 0 fallas). **WA-3.4 ✅**. Falta sólo `DeviceCapabilities` (WA-1.2) |
 | **Fase 4** — Empaquetado y publicación | 🟡 Iniciada de hecho — el pipeline **ya publica metadata KMP + klibs iOS** desde 1.8.0; falta validar el consumo desde NoisyPad (G1) y el XCFramework (WA-4.1) |
 
 **Próximo paso recomendado:** **WA-3.2** (`IosAudioBridge`). Ya tiene sus tres
