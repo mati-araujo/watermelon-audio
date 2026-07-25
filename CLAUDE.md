@@ -121,7 +121,9 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 bash scripts/run-cpp-tests.sh              # Suite C++ de host (527 tests, googletest)
 bash scripts/check-cpp-portability.sh      # Guardrail WA-0.4 (jni.h / android/)
 bash scripts/build-ios.sh                  # libwatermelon_audio.a — ambos slices + link check
-python3 scripts/c-api-gap.py               # Regenera docs/kmp/c_api_coverage.md
+python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2.6).
+                                           # Imprime; docs/kmp/c_api_coverage.md
+                                           # se actualiza a mano con esa salida
 
 ./gradlew :audio:assembleWatermelonXCFramework   # XCFramework (device + simulador)
 

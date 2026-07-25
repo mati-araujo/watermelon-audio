@@ -218,6 +218,45 @@ getter de un setter, que son funciones distintas.
 - `nativeGetModeName`
 ---
 
+## 4b. Delegación del JNI (WA-2.6)
+
+El gap de arriba responde la pregunta de **WA-2.5**: ¿existe una `wma_*` con
+este nombre? **WA-2.6 es otra pregunta**: ¿el entry point del JNI *llama* a la C
+API, o sigue entrando a `AudioEngine` por su cuenta? Una categoría puede tener
+gap cero y estar duplicada de punta a punta.
+
+**`lifecycle` fue exactamente eso.** Sus 8 "faltantes" son un artefacto del
+matcher por tokens — las 8 ya existían con otro nombre
+(`nativeHasInitializationFailed` ↔ `wma_has_init_failed`,
+`nativeStartEngineWithFade` ↔ `wma_engine_start`, …). El gap real de la
+categoría era **0**, y aun así el JNI transcribía las 22 funciones a mano. Por
+eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
+función JNI.
+
+```
+WA-2.6 — JNI delegando: 22/278
+```
+
+| Categoría (heurística del script) | Delegan |
+|---|---|
+| Engine / lifecycle | 12/14 |
+| Otros | 8/27 |
+| Benchmark / diagnostics | 2/6 |
+| el resto | 0 |
+
+Las 22 son el bloque `lifecycle` cerrado: secciones 1 (Lifecycle), 2 (State) y
+3 (Volume & Fade) de `watermelon_audio.h`. Se reparten entre tres categorías del
+script porque la heurística clasifica por keyword del nombre
+(`nativeGetStateVersion` cae en "Benchmark" por `stat`), no por la sección real
+de la C API. Los dos pendientes de "Engine / lifecycle" son
+`nativeGetEngineType` / `nativeSetEngineType`, que son el *synth engine*, no el
+ciclo de vida: van con `oscillator/synth`.
+
+> [!IMPORTANT]
+> Lección para las categorías que siguen: **el gap no dimensiona WA-2.6**. Antes
+> de dar una categoría por barata porque su gap es chico, hay que mirar cuántos
+> de sus entry points delegan.
+
 ## 5. Lecturas del análisis
 
 **El looper es el 35% del gap portable** (39 de 110) — es, por lejos, la
@@ -242,10 +281,13 @@ script es por keywords y no acierta siempre; ese cajón es el residuo.
 ## 6. Cómo actualizar este documento
 
 ```bash
-python3 scripts/c-api-gap.py             # resumen numérico
+python3 scripts/c-api-gap.py             # resumen numérico + delegación (§4b)
 python3 scripts/c-api-gap.py --markdown  # secciones 3 y 4 de este doc
 ```
 
 El script lee directamente `jni/jni_audio_bridge.cpp` y `api/watermelon_audio.h`,
-así que los números siguen al código. Al cerrar cada categoría en WA-2.5,
+así que los números siguen al código. Al cerrar cada categoría en WA-2.5/2.6,
 re-correrlo y actualizar acá.
+
+**El doc no se regenera solo.** `--markdown` emite las secciones 3 y 4 en
+stdout; hay que pegarlas. El resto (§1, §2, §4b, §5, §6) es prosa a mano.

@@ -17,6 +17,13 @@ they distinguish a getter from a setter.
 Exact token-set equality is reported as covered. Everything else is a gap,
 except that near-misses (Jaccard >= 0.6) are flagged separately — those are
 usually the same function under a different name and need a human to confirm.
+
+The gap number answers WA-2.5 ("does a wma_* with this name exist?"). It says
+nothing about WA-2.6, which is a different question: does the JNI entry point
+actually *call* the C API, or does it still reach into AudioEngine on its own?
+A category can have a gap of zero and still be fully duplicated — `lifecycle`
+was exactly that. So delegation is measured separately, by looking inside each
+JNI function body for a wma_* call.
 """
 import argparse
 import re
@@ -94,6 +101,41 @@ def collect():
     return jni, capi
 
 
+def jni_bodies():
+    """Map each JNI entry point to its function body.
+
+    Brace matching from the first `{` after the signature. Crude, but the file
+    is generated-looking C with no string literals containing braces, and a
+    miscount would show up as an absurd delegation number rather than silently.
+    """
+    src = JNI_SRC.read_text()
+    bodies = {}
+    for m in re.finditer(re.escape(JNI_PREFIX) + r"([A-Za-z0-9_]+)", src):
+        name = m.group(1)
+        if name in JNI_PLACEHOLDERS:
+            continue
+        open_brace = src.find("{", m.end())
+        if open_brace < 0:
+            continue
+        depth, i = 0, open_brace
+        while i < len(src):
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        bodies[name] = src[open_brace:i]
+    return bodies
+
+
+def delegating():
+    """JNI entry points whose body calls at least one wma_* function."""
+    return {n for n, body in jni_bodies().items()
+            if re.search(r"\bwma_[a-z0-9_]+\s*\(", body)}
+
+
 def analyze():
     jni, capi = collect()
     capi_keys = {c: snake_tokens(c) for c in capi}
@@ -119,7 +161,7 @@ def analyze():
     usb = [j for j in gap if categorize(j).startswith("USB")]
     portable = [j for j in gap if j not in usb]
     return dict(jni=jni, capi=capi, covered=covered, gap=gap, unused=unused,
-                near=near, usb=usb, portable=portable)
+                near=near, usb=usb, portable=portable, delegating=delegating())
 
 
 def main():
@@ -139,6 +181,16 @@ def main():
         print(f"    with a near-match:       {len([j for j in r['near'] if j in r['portable']])}")
         print(f"    net (needs new C API):   ~{net}")
         print(f"C API not reached from JNI:  {len(r['unused'])}")
+        print()
+        print(f"WA-2.6 — JNI delegating:     {len(r['delegating'])}/{len(r['jni'])}")
+        by_cat_deleg = defaultdict(lambda: [0, 0])
+        for j in r["jni"]:
+            slot = by_cat_deleg[categorize(j)]
+            slot[0] += j in r["delegating"]
+            slot[1] += 1
+        for cat in sorted(by_cat_deleg, key=lambda c: (-by_cat_deleg[c][0], c)):
+            done, total = by_cat_deleg[cat]
+            print(f"    {cat:26} {done}/{total}")
         return 0
 
     by_cat = defaultdict(list)

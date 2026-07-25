@@ -939,10 +939,52 @@ hay tipos, no hay audio. Es deliberado y hay que comunicarlo para que no se lea 
 
 ## 16. Estado del programa
 
+### Nota de cierre — WA-2.5/2.6, categoría `lifecycle` (2026-07-25)
+
+**Primera categoría de la fusión WA-2.5/2.6, cerrada.** Las 22 funciones JNI de
+lifecycle / state / volume pasan por la C API; el JNI ya no entra a `AudioEngine` en ese
+bloque. Delegación medida: **22/278** (`python3 scripts/c-api-gap.py`).
+
+**El hallazgo que cambia cómo se dimensionan las categorías que siguen:** las 8
+"faltantes" de `lifecycle` en `c_api_coverage.md` **no eran un gap**. Las 8 ya existían
+con otro nombre y el matcher por tokens no las unía (`nativeHasInitializationFailed` ↔
+`wma_has_init_failed`, `nativeStartEngineWithFade` ↔ `wma_engine_start`, …). El gap real
+era 0 — y aun así el JNI transcribía las 22 a mano. **El número de gap no dimensiona
+WA-2.6.** Por eso el script ahora mide delegación aparte, mirando adentro del cuerpo de
+cada función JNI, y `c_api_coverage.md` tiene un §4b con esa métrica.
+
+**El bug que sí apareció, y es una divergencia Android/iOS viva:** `AudioEngine::start`
+declara `int fadeTimeMs = 10`, así que el default del motor **no es 0**. El JNI siempre
+distinguió dos operaciones — `nativeStartEngine()` toma ese default, y
+`nativeStartEngineWithFade(0)` corta de una y cancela cualquier fade en curso. La C API
+las colapsaba: ramificaba en `fade_time_ms > 0`, así que un 0 explícito caía en el
+default. `IosAudioBridge` mapeaba **las dos** a `wma_engine_start(engine, 0)`. Misma
+llamada, dos plataformas, dos comportamientos.
+
+Se arregló con **`WMA_FADE_DEFAULT (-1)`** en `watermelon_audio.h`: `fade_time_ms >= 0`
+es una rampa explícita (0 = corte), y sólo el sentinel cae al default del motor. El
+bridge de iOS lo toma del header por cinterop, no copiado a mano.
+
+**Verificación — hay tests de host de verdad, no sólo el compilador.**
+`api/watermelon_audio.cpp` entró al target `core_tests` (antes estaba excluido: *"minus
+api/, which the tests do not exercise"*) y se sumó `test_c_api_lifecycle.cpp`, 13 tests:
+la distinción `WMA_FADE_DEFAULT` vs 0 explícito, el contrato de handle nulo —que es lo
+que justifica haber borrado los 20 `if (!g_jniState.engine) return <default>;` del JNI— y
+el clamp de master volume. Suite: **540 tests, 0 fallas** (eran 527).
+
+Los dos tests discriminantes se corrieron **contra la implementación vieja** antes de
+darlos por buenos: fallan con el síntoma exacto (fade volume 0.1333 = 64/480 frames, la
+rampa de 10 ms que nadie pidió). Los otros 11 pasan en ambas versiones: fijan contrato,
+no regresión.
+
+**Lo que sigue sin tests:** las 22 funciones JNI en sí. Necesitan device. El gate fue el
+compilador más el hecho de que ahora el cuerpo es una línea sobre código sí cubierto.
+
 ### Dónde retomar (2026-07-25)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **7 commits sobre `master`, sin pushear**.
-`master` está en el merge del PR #58, con CI verde en los 5 jobs. Árbol limpio.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **7 commits sobre `master` + el trabajo de
+`lifecycle` sin commitear**. `master` está en el merge del PR #58, con CI verde en los 5
+jobs.
 
 ```
 ce2a105 feat(build): XCFramework en el pipeline (WA-4.1) + publish.yml a macOS
@@ -957,7 +999,7 @@ b9017c1 feat(ios): IosAudioBridge sobre cinterop (WA-3.2, WA-3.3 parcial)
 **Se cerró la Fase 3 entera** (WA-1.2 cerró WA-3.3), **el input path de iOS** (etapas 1 y 2)
 y **WA-4.1**. Con eso **ya no queda nada grande que se pueda hacer sin hardware** en el
 camino iOS: lo que sigue necesita un iPhone (WA-4.3) o está del lado de NoisyPad (G1).
-El trabajo sin bloqueo es **WA-2.5 + WA-2.6**.
+El trabajo sin bloqueo es **WA-2.5 + WA-2.6**, del que ya cayó `lifecycle`.
 
 **Cómo verificar que todo sigue en pie antes de tocar nada** (todo corre local; el
 bloqueo de Xcode de §11 ya no existe):
@@ -988,27 +1030,35 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: WA-2.5 + WA-2.6 |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅ cerrada** (delegación 22/278) |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso: WA-2.5 + WA-2.6, primera categoría.** Es lo único grande que queda sin
-bloqueo — todo lo demás del camino iOS necesita hardware o está del lado de NoisyPad.
+**Próximo paso: WA-2.5 + WA-2.6, categoría `input/monitor`** (21 entry points, 0 delegan
+hoy). Es lo único grande que queda sin bloqueo — todo lo demás del camino iOS necesita
+hardware o está del lado de NoisyPad.
 
 **Arranque concreto para la próxima sesión** (el método ya está decidido, ver abajo — no
 re-litigarlo):
 
-1. Leer `docs/kmp/c_api_coverage.md` (regenerable con `python3 scripts/c-api-gap.py`) para
-   el detalle de la categoría.
-2. Tomar **`lifecycle`**, la primera del orden acordado. Es la más barata y la que rueda el
-   mecanismo: WA-2.6 ya está medio hecho ahí — `ensureEngine()`
-   (`jni/jni_engine.cpp:41`) **ya crea el motor con `wma_engine_create()`**.
-3. En el **mismo PR**: agregar las `wma_*` faltantes de esa categoría **y** migrar las
-   `Java_…` correspondientes a llamarlas.
-4. Regenerar `c_api_coverage.md` y actualizar el estado acá.
+1. Leer `docs/kmp/c_api_coverage.md` — §4 para el gap de la categoría y **§4b para cuántos
+   de sus entry points ya delegan**. Correr `python3 scripts/c-api-gap.py` para los números
+   al día (imprime; el doc se actualiza a mano con esa salida).
+2. **No dimensionar la categoría por su gap.** `lifecycle` tenía gap 8 sobre el papel, gap
+   real 0, y 22 funciones para migrar igual. El número que importa para WA-2.6 es el de
+   delegación.
+3. En el **mismo PR**: agregar las `wma_*` que falten de verdad **y** migrar las `Java_…`
+   de esa categoría a llamarlas.
+4. Donde el comportamiento sea observable desde la C API, sumar tests a
+   `core/tests/test_c_api_*.cpp` — `api/watermelon_audio.cpp` ya está en ese target. Y
+   correrlos contra la implementación vieja antes de darlos por buenos.
+5. Actualizar `c_api_coverage.md` y el estado acá.
 
-**Orden de categorías:** lifecycle → input/monitor → effects → oscillator/synth → voice →
-**mode** → análisis → metronome → benchmark → **looper**.
+`input/monitor` tiene una ventaja para arrancar: el `InputNode` ya está unificado entre el
+JNI y la C API (ver hallazgos abajo), así que la migración no arrastra el split que había.
+
+**Orden de categorías:** ~~lifecycle~~ ✅ → **input/monitor** → effects → oscillator/synth →
+voice → **mode** → análisis → metronome → benchmark → **looper**.
 
 - **`mode` no es una más**: ahí desaparece por construcción la duplicación de
   `currentMode` / `modeTransitionInProgress` / `modeTransitionProgress` entre
