@@ -1,6 +1,7 @@
 # Requerimiento: KMP/iOS Readiness — watermelon-audio
 
-**Proyecto:** watermelon-audio (`com.watermellonstudios:audio-android`, v1.6.0)
+**Proyecto:** watermelon-audio (v1.8.1). Coordenada **KMP**: `com.watermellonstudios:audio`
+— `:audio-android` es el módulo Android suelto, **no** el que debe usar un consumidor KMP
 **Documento hermano:** `NoisyPad/docs/kmp/kmp_requirements.md` (consumidor)
 **Estado:** EN CURSO — **Fase 0 cerrada**; Fase 2 casi completa (el motor abre stream en iOS y `libwatermelon_audio.a` linkea) · G1 y luego Fase 3 (cinterop) son los próximos eslabones
 **Fecha:** 2026-07-05 · **Última actualización:** 2026-07-25 (cerrados: WA-0.1/0.2/0.3/0.4,
@@ -481,10 +482,37 @@ WA-0 (gap + targets + CI) ──► WA-1 (quick wins) ──► WA-2 (C++: CMake
 ```
 
 - **G1 (temprano):** NoisyPad solo necesita que los tipos de `domain/` estén disponibles como metadata KMP para convertir su `core-domain` — eso se logra con WA-0.2 + una publicación intermedia (WA-4.2 parcial), sin esperar el backend de audio.
-  **Estado 2026-07-22: WA-0.2 ✅ — G1 queda a un solo paso.** Lo único que falta es la
-  publicación intermedia (WA-4.2 parcial). Antes de dispararla conviene cerrar WA-0.3,
-  para no publicar metadata desde una máquina de desarrollo, y confirmar el lockstep de
-  Kotlin con NoisyPad (D8: este repo está en 2.4.0).
+  **Estado 2026-07-25: la publicación KMP YA EXISTE — G1 es sólo validar el consumo.**
+  Ver la verificación abajo.
+
+#### Verificación de la publicación KMP (2026-07-25)
+
+Reproducida con `./gradlew :audio:publishToMavenLocal` y contrastada con los logs del run
+de release 1.8.1 en CI. El módulo raíz `com.watermellonstudios:audio:1.8.1` declara **las
+tres plataformas**, cada una apuntando a su módulo:
+
+| Variante | platform | target | `available-at` |
+|---|---|---|---|
+| `metadataApiElements` | common | — | (inline) |
+| `releaseApiElements-published` | androidJvm | — | `audio-android` |
+| `iosArm64ApiElements-published` | native | `ios_arm64` | `audio-iosarm64` |
+| `iosSimulatorArm64ApiElements-published` | native | `ios_simulator_arm64` | `audio-iossimulatorarm64` |
+
+Los artefactos existen y están completos: `.aar` para Android y **`.klib` para cada slice
+de iOS**, cada uno con su `-sources.jar` y `-metadata.jar`.
+
+> [!IMPORTANT]
+> **La coordenada que debe usar NoisyPad es `com.watermellonstudios:audio`, no
+> `:audio-android`.** El sufijo `-android` es el módulo Android suelto; Gradle llega a él
+> solo, vía el `available-at` del módulo raíz, cuando el consumidor declara el raíz. Un
+> consumidor KMP que pida `:audio-android` se queda clavado en Android y no resuelve el
+> source set iOS — y el síntoma sería "la metadata KMP no funciona", cuando en realidad
+> funciona. Este documento lo venía escribiendo mal en su encabezado.
+
+Queda entonces para G1, y sólo eso: declarar el raíz en NoisyPad, confirmar que resuelve
+para ambos targets, y verificar el lockstep de Kotlin (D8 — este repo está en 2.4.0).
+Recordar que en iOS `getAudioBridge()` sigue lanzando `NotImplementedError` hasta WA-3.2:
+hay tipos, no hay audio. Es deliberado y hay que comunicarlo para que no se lea como bug.
 - **G2 (ruta crítica):** el sonido en iOS depende de WA-2.4 + WA-3 + WA-4. Es la ruta crítica de todo el programa KMP; conviene arrancar WA-2.4 (CoreAudioBackend) apenas cierre WA-2.1.
 
 ---
@@ -508,22 +536,31 @@ WA-0 (gap + targets + CI) ──► WA-1 (quick wins) ──► WA-2 (C++: CMake
 | **Fase 1** — Quick wins | 🟡 **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales · **falta WA-1.2, WA-1.3 y WA-1.4** (este último es prerequisito de WA-3.2) |
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · WA-2.4 output ✅ · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3), input path iOS, y el bloque grande: WA-2.5 + WA-2.6 |
 | **Fase 3** — Kotlin iosMain | 🟡 Desbloqueada — los 2 `actual` de WA-0.2 + el `.a` shipped y linkeable. **Próximo: WA-3.1 (cinterop)** |
-| **Fase 4** — Empaquetado y publicación | ⬜ No iniciada — **ver el riesgo de host abajo** |
+| **Fase 4** — Empaquetado y publicación | 🟡 Iniciada de hecho — el pipeline **ya publica metadata KMP + klibs iOS** desde 1.8.0; falta validar el consumo desde NoisyPad (G1) y el XCFramework (WA-4.1) |
 
 **Próximo paso recomendado:** **G1** (WA-4.2 parcial) y después **WA-3.1**. G1 es lo único
 del programa que desbloquea a otro equipo (NoisyPad convierte su `core-domain` en paralelo)
-y sus dos precondiciones ya están dadas.
+y sus dos precondiciones ya están dadas. Mejor todavía de lo que se creía: el pipeline ya
+viene publicando los klibs de iOS (ver nota abajo), así que G1 se reduce a **validar el
+consumo** desde NoisyPad y confirmar el lockstep de Kotlin (D8: este repo está en 2.4.0).
 
-> [!WARNING]
-> **G1 no es "un solo paso": el publish corre en el host equivocado.** El job `publish` de
-> `.github/workflows/release-please.yml` corre en `ubuntu-latest` y llama
-> `publishAllPublicationsToGitHubPackagesRepository`. Los klibs de Kotlin/Native para iOS
-> **no se pueden compilar en Linux**. Los targets iOS existen desde WA-0.2 (2026-07-22) y
-> 1.8.0/1.8.1 se publicaron después, así que hay que **empezar por el diagnóstico**: bajar
-> el `.module` de `audio-android:1.8.1` de GitHub Packages y ver qué variantes declara.
-> Si no hay variantes iOS, NoisyPad no resolvería el source set iOS y G1 está roto hoy.
-> La corrección esperable es mover el publish a `macos-latest`, o partirlo en una matriz
-> host-specific si el minutaje macOS (×10) pesa demasiado.
+> [!NOTE]
+> **El publish en Linux hoy funciona — pero WA-3.1 lo rompe.** Verificado 2026-07-25
+> sobre los logs del run de release 1.8.1 (`ubuntu-latest`): `compileKotlinIosArm64`,
+> `compileKotlinIosSimulatorArm64`, `iosArm64Klib` y ambos
+> `publishIos*PublicationToGitHubPackagesRepository` **corrieron y pasaron**. Kotlin/Native
+> compila klibs de iOS en Linux sin problema: el toolchain de Apple hace falta para
+> *linkear* (frameworks, ejecutables) y para correr tests, no para producir un `.klib` a
+> partir de fuentes Kotlin. El único warning de host en ese run es
+> `Native task 'iosSimulatorArm64Test' is disabled`, que es el test, no la compilación.
+>
+> **Lo que sí rompe:** en cuanto WA-3.1 agregue **cinterop**, las compilaciones de iOS
+> pasan a depender de `cinteropWatermelonAudio<Target>`, que necesita el **SDK de iOS**
+> para parsear `watermelon_audio.h`, más el `.a` que sólo produce Xcode. Eso **no** corre
+> en Linux. O sea: el job `publish` de `release-please.yml` hay que moverlo a
+> `macos-latest` (o partirlo en matriz host-specific si el minutaje ×10 pesa) **como parte
+> de WA-3.1**, no antes. Si se posterga, el síntoma no va a ser un error claro sino una
+> publicación que compila sin los bindings.
 
 Para **WA-3.1** falta: `nativeInterop/cinterop/watermelon_audio.def` sobre
 `watermelon_audio.h`, el wiring de Gradle en el convention plugin (`cinterops { ... }` +
