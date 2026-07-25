@@ -163,6 +163,32 @@ jobs:
       - name: Run commonTest + cinterop smoke on iOS simulator — WA-T.3
         run: ./gradlew :audio:iosSimulatorArm64Test
 
+      # WA-4.1. Linkea de verdad ambos slices y los empaqueta, que es lo unico que
+      # prueba que el archivo estatico embebido en el klib resuelve al linkear un
+      # binario — el link check de build-ios.sh valida el archivo, no el framework.
+      - name: Assemble XCFramework — WA-4.1
+        run: ./gradlew :audio:assembleWatermelonXCFramework
+
+      # Un XCFramework que "se construyo" pero no trae el motor adentro pasaria el
+      # paso anterior sin chistar. Esto falla si falta un slice o si los simbolos
+      # wma_* no viajaron.
+      - name: Verify the XCFramework carries the engine — WA-4.1
+        run: |
+          XCF=audio/build/XCFrameworks/release/Watermelon.xcframework
+          for slice in ios-arm64 ios-arm64-simulator; do
+            BIN="$XCF/$slice/Watermelon.framework/Watermelon"
+            if [ ! -f "$BIN" ]; then
+              echo "missing slice: $slice" >&2
+              exit 1
+            fi
+            COUNT="$(nm -gU "$BIN" | grep -c ' T _wma_' || true)"
+            echo "$slice: $COUNT wma_* symbols"
+            if [ "$COUNT" -lt 100 ]; then
+              echo "$slice does not carry the C API — the static archive did not make it in" >&2
+              exit 1
+            fi
+          done
+
   build:
     runs-on: ubuntu-latest
 

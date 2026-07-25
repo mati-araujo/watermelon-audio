@@ -15,7 +15,16 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    # macOS, no ubuntu — y no es una preferencia. Desde WA-3.1 las compilaciones de
+    # iOS pasan por cinterop, que necesita el SDK de iOS para parsear
+    # watermelon_audio.h y el .a que sólo produce Xcode. En Linux esto no corre.
+    # release-please.yml se movió con WA-3.1; este workflow se pasó por alto y
+    # habría fallado en el próximo tag v*.
+    #
+    # Mismo trade-off que allá: cuesta ~10x el minutaje, y se paga entero porque
+    # partirlo en una matriz host-specific deja la publicación en dos jobs que
+    # pueden divergir de versión.
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v7
@@ -33,12 +42,26 @@ jobs:
             exit 1
           fi
 
+      # cmake/ninja de sistema para el build iOS (scripts/build-ios.sh). NO es el
+      # "cmake;3.22.1" del Android SDK más abajo: ese no está en PATH y es para AGP.
+      - name: Install C++ build tools
+        run: |
+          for tool in cmake ninja; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "$tool already present: $(command -v "$tool")"
+            else
+              brew install "$tool"
+            fi
+          done
+
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
 
+      # Necesario aunque el foco sea iOS: el módulo aplica com.android.library, así
+      # que sin SDK Gradle ni configura el proyecto.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
@@ -48,6 +71,14 @@ jobs:
           sdkmanager --install \
             "ndk;28.2.13676358" \
             "cmake;3.22.1"
+
+      # ~1 GB por corrida sin cache.
+      - name: Cache Kotlin/Native toolchain
+        uses: actions/cache@v6
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-konan-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: ${{ runner.os }}-konan-
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6

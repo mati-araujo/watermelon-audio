@@ -117,6 +117,8 @@ bash scripts/check-cpp-portability.sh      # Guardrail WA-0.4 (jni.h / android/)
 bash scripts/build-ios.sh                  # libwatermelon_audio.a — ambos slices + link check
 python3 scripts/c-api-gap.py               # Regenera docs/kmp/c_api_coverage.md
 
+./gradlew :audio:assembleWatermelonXCFramework   # XCFramework (device + simulador)
+
 ./gradlew :audio:compileKotlinIosArm64     # Compilar Kotlin para iOS
 ./gradlew :audio:iosSimulatorArm64Test     # Tests K/N en simulador (requiere Xcode
                                            # con first-launch hecho, ver docs/kmp)

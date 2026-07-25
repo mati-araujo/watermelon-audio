@@ -10,6 +10,7 @@ import org.gradle.kotlin.dsl.configure
 import org.gradle.kotlin.dsl.register
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
+import org.jetbrains.kotlin.gradle.plugin.mpp.apple.XCFramework
 
 /**
  * Convention plugin for KMP library modules with native C++ code (CMake).
@@ -130,6 +131,17 @@ class KmpNativeConventionPlugin : Plugin<Project> {
                     iosSimulatorArm64() to "iphonesimulator",
                 )
 
+                // WA-4.1 — XCFramework. El nombre define la task: KGP genera
+                // `assembleWatermelonXCFramework` (mas las variantes Debug/Release)
+                // a partir de XCFramework("Watermelon").
+                //
+                // Para que sirve, si D5 dice que NoisyPad consume el klib: es la via
+                // de salida para un consumidor iOS que NO es KMP — un proyecto Xcode
+                // que quiere `import WatermelonAudio` desde Swift. Las dos formas de
+                // consumo son alternativas, no complementarias: usar las dos en la
+                // misma app duplicaria el motor.
+                val xcf = XCFramework("Watermelon")
+
                 iosSlices.forEach { (iosTarget, sdk) ->
                     iosTarget.compilations.getByName("main").cinterops.create("watermelonAudio") {
                         definitionFile.set(file("src/nativeInterop/cinterop/watermelon_audio.def"))
@@ -140,6 +152,36 @@ class KmpNativeConventionPlugin : Plugin<Project> {
                             "-libraryPath",
                             file("src/main/cpp/ios/build/$sdk").absolutePath,
                         )
+                    }
+
+                    iosTarget.binaries.framework {
+                        // Tiene que coincidir con el nombre del XCFramework: KGP no
+                        // soporta renombrar el framework interno y avisa que el
+                        // resultado puede no ser consumible. Es tambien el nombre del
+                        // modulo Swift: `import Watermelon`.
+                        baseName = "Watermelon"
+
+                        // Estatico a proposito. El motor C++ ya viaja como archivo
+                        // estatico dentro del klib (staticLibraries en el .def), asi
+                        // que un framework dinamico agregaria un dylib que la app
+                        // tiene que embeber y firmar, mas un salto de dyld en el
+                        // arranque, sin ganar nada a cambio.
+                        isStatic = true
+
+                        xcf.add(this)
+                    }
+                }
+
+                // Linkear un framework de iOS necesita Xcode. En Linux la task no
+                // puede correr, y saltearla con un mensaje es mejor que un error de
+                // linker a mitad del pipeline. Las tasks de link son las que hay que
+                // guardar: declarar el binario es inocuo, ejecutarlo no.
+                tasks.matching {
+                    it.name.startsWith("link") && it.name.contains("Framework")
+                }.configureEach {
+                    onlyIf {
+                        if (!isMac) logger.lifecycle("${name}: se saltea (requiere macOS)")
+                        isMac
                     }
                 }
 

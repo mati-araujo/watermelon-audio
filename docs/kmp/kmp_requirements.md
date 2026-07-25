@@ -732,9 +732,56 @@ pausando y reanudando el motor. Eso necesita hardware y va con WA-4.3.
 
 | ID | Requerimiento | Detalle | Criterio de aceptación | Prio | Esf |
 |---|---|---|---|---|---|
-| WA-4.1 | XCFramework en el pipeline | Task Gradle que ensambla el XCFramework (device+simulator) y lo integra al klib/publicación; cache para no recompilar C++ sin cambios | `./gradlew :audio:assembleWatermelonXCFramework` reproducible en CI | P0 | M |
+| WA-4.1 | XCFramework en el pipeline | Task Gradle que ensambla el XCFramework (device+simulator) y lo integra al klib/publicación; cache para no recompilar C++ sin cambios | `./gradlew :audio:assembleWatermelonXCFramework` reproducible en CI | P0 | M | ✅ **HECHO** 2026-07-25 — `XCFramework("Watermelon")` en el convention plugin, framework estático, wired al job `ios` de CI con verificación de símbolos. Ver nota |
 | WA-4.2 | Publicación KMP | Publicar a GitHub Packages el artefacto KMP completo (metadata común + AAR Android + klibs iOS). Release Please sigue gobernando la versión. Validar consumo desde un proyecto de prueba iOS y desde NoisyPad Android (sin cambios para el consumidor Android actual) | NoisyPad resuelve la misma coordenada para ambos targets — **desbloquea gate G1 de NoisyPad** | P0 | M |
 | WA-4.3 | Sample app iOS | Mini app (puede vivir en el repo) que haga smoke de la librería: start engine, sine, un efecto, looper record/play, medición de latencia round-trip | Smoke manual documentado; latencia medida y registrada | P1 | M |
+
+### Nota de cierre — WA-4.1 (2026-07-25)
+
+`XCFramework("Watermelon")` en el convention plugin, con `binaries.framework` por slice.
+`./gradlew :audio:assembleWatermelonXCFramework` — el nombre exacto del criterio.
+
+**El nombre no es libre.** El del XCFramework y el `baseName` del framework interno tienen
+que coincidir: KGP no soporta renombrar y avisa que el resultado puede no ser consumible. El
+criterio fija la task en `assembleWatermelonXCFramework`, así que el módulo Swift es
+`import Watermelon`, no `WatermelonAudio`.
+
+**Estático a propósito.** El motor C++ ya viaja como archivo estático dentro del klib
+(`staticLibraries` en el `.def`), así que un framework dinámico agregaría un dylib que la app
+tiene que embeber y firmar, más un salto de dyld en el arranque, sin ganar nada.
+
+**Para qué sirve, si D5 dice que NoisyPad consume el klib:** es la vía de salida para un
+consumidor iOS que **no** es KMP — un proyecto Xcode que quiere `import Watermelon` desde
+Swift. Las dos formas de consumo son **alternativas, no complementarias**: usar las dos en la
+misma app duplicaría el motor.
+
+**Verificado que el artefacto es real, no que la task diga OK:**
+
+| Chequeo | Resultado |
+|---|---|
+| Slices | `ios-arm64` + `ios-arm64-simulator`, ambos en el `Info.plist` |
+| Tipo de binario | `current ar archive` — estático, como se pidió |
+| C API adentro | **187 símbolos `wma_*`** por slice |
+| Motor C++ adentro | 58 símbolos de `CoreAudioBackend` |
+| Módulo Swift | `Headers/Watermelon.h` + `Modules/` |
+| Cache | segunda corrida: 12 de 13 tasks UP-TO-DATE, 1 s |
+
+Ese chequeo de símbolos quedó **en el job `ios` de CI**, no sólo en esta sesión: un
+XCFramework que se construye pero no trae el motor adentro pasaría un `assemble` sin chistar.
+Es además lo único que prueba que el archivo estático embebido en el klib **resuelve al
+linkear un binario** — el link check de `build-ios.sh` valida el archivo, no el framework.
+
+> [!WARNING]
+> **Bug latente encontrado y arreglado de paso: `publish.yml` seguía en `ubuntu-latest`.**
+> La nota de WA-3.1 avisó que el publish tenía que moverse a macOS en cuanto entrara cinterop,
+> y `release-please.yml` se movió — pero `publish.yml`, que dispara con cualquier tag `v*` y
+> con `workflow_dispatch`, quedó en Linux. Habría fallado en el próximo tag. Movido a
+> `macos-latest` con el mismo setup (cmake/ninja de sistema, cache de `~/.konan`).
+
+**Declarar los binarios de framework no toca los jobs de Linux:** verificado con
+`--dry-run` sobre `assembleRelease + publishAllPublications...` → **0** tasks de framework
+arrastradas. Además las tasks `link*Framework*` tienen un `onlyIf` de macOS, que es el
+cinturón sobre los tirantes.
 
 ---
 
@@ -894,12 +941,13 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: WA-2.5 + WA-2.6 |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
-| **Fase 4** — Empaquetado y publicación | 🟡 Iniciada de hecho — el pipeline **ya publica metadata KMP + klibs iOS** desde 1.8.0; falta validar el consumo desde NoisyPad (G1) y el XCFramework (WA-4.1) |
+| **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso recomendado — en este orden:**
+**Próximo paso recomendado.** Ya **no queda nada grande que se pueda hacer sin hardware**
+en el camino iOS: lo que sigue necesita un iPhone (WA-4.3) o está del lado de NoisyPad (G1 /
+WA-4.2). El trabajo sin bloqueo es el bloque WA-2.5 + WA-2.6, abajo.
 
-1. **WA-4.1 XCFramework** (M). Es lo último que se puede hacer **sin hardware**.
-2. **WA-4.3 validación en device** (M). **Necesita un iPhone.** Sonido real, Instruments
+1. **WA-4.3 validación en device** (M). **Necesita un iPhone.** Sonido real, Instruments
    sobre el render block de `CoreAudioBackend` (cero allocs, cero locks), latencia
    round-trip medida, y la interrupción por llamada entrante que cierra el criterio
    original de WA-3.4. → **G2**
