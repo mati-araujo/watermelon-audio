@@ -401,7 +401,7 @@ manual en NoisyPad Android antes de publicar.
 | **WA-2.0** | **Desacoplar el core de Oboe** | `core/AudioEngine.cpp` (30 usos de `oboe::`, con `OboeCallbackAdapter` propio y apertura directa de streams) y `nodes/InputNode` (**hereda** `oboe::AudioStreamDataCallback`, 32 usos) deben pasar **exclusivamente** por `IAudioBackend`. Incluye `BackendManager` y `api/watermelon_audio.cpp`, que instancian los backends Android directo | `core/`, `nodes/` y `api/` compilan para iOS; Android sin regresiones (suite C++ + smoke) | **P0** | **L** | ✅ **HECHO** 2026-07-22 — `core/`, `nodes/`, `api/` y `backends/` compilan para iOS |
 | WA-2.2 | `PlatformApple.cpp` | Implementar `wma::platform`: denormals (FPCR, reutiliza WA-1.6), `setAudioThreadPriority()` (pthread `THREAD_TIME_CONSTRAINT_POLICY` — solo como refuerzo: el thread de Core Audio ya viene priorizado), SIMD caps (NEON fijo en arm64) | `engine_tests` linkea y pasa en macOS con PlatformApple | P0 | M | ✅ **HECHO** 2026-07-23 — `platform/PlatformApple.cpp`. FPCR arm64 idéntico a Android (WA-1.6 aún sin factorizar a `.inc`) |
 | WA-2.3 | Logger Apple | Sink `os_log` por defecto en builds Apple; callback configurable idéntico a Android | Log visible en Console.app desde sample app | P1 | S | ✅ **HECHO** 2026-07-25 — `platform/Logger.cpp`, subsistema `com.watermellonstudios.audio`, categoría `engine`. Ver nota |
-| WA-2.4 | **`CoreAudioBackend`** | Implementar `IAudioBackend` para iOS (D2): AVAudioEngine + AVAudioSourceNode (output) y AVAudioSinkNode/inputNode (input full-duplex para guitar/input FX). Reglas: el render block invoca directo el mix C++ (sin ObjC dispatch, sin allocs, sin locks); negociación de sample rate/buffer contra el hardware; manejo de formato (Float32 nativo de Core Audio vs pipeline interno) | Sine + cadena de efectos + looper suenan en device real; callback verificado sin allocs (Instruments) | P0 | L | 🟡 **OUTPUT HECHO** 2026-07-23 — `backends/CoreAudioBackend.{h,mm}`, compila y linkea para ambos slices, enchufado en el seam. **Falta:** input/full-duplex y la validación en device (sonido + Instruments) que es WA-4.3 |
+| WA-2.4 | **`CoreAudioBackend`** | Implementar `IAudioBackend` para iOS (D2): AVAudioEngine + AVAudioSourceNode (output) y AVAudioSinkNode/inputNode (input full-duplex para guitar/input FX). Reglas: el render block invoca directo el mix C++ (sin ObjC dispatch, sin allocs, sin locks); negociación de sample rate/buffer contra el hardware; manejo de formato (Float32 nativo de Core Audio vs pipeline interno) | Sine + cadena de efectos + looper suenan en device real; callback verificado sin allocs (Instruments) | P0 | L | 🟡 **OUTPUT ✅ + INPUT ✅ (código)** — output 2026-07-23, captura full-duplex 2026-07-25: `AVAudioSinkNode` sobre el **mismo** `AVAudioEngine`, ring SPSC hacia el render block, `supportsFullDuplex()` → true. **Falta:** que el switch de modo en caliente arme la captura (ver nota) y la validación en device (sonido + Instruments) que es WA-4.3 |
 | WA-2.5 | **Completar la C API** | Cerrar el gap de WA-0.1: agregar a `watermelon_audio.h` las funciones faltantes (excluyendo USB). **Dimensionado por WA-0.1: 110 portables, de las cuales ~79 netas tras descartar near-matches — y 39 son del looper.** Ver `docs/kmp/c_api_coverage.md` para el detalle por categoría. Reglas de ABI: handles opacos, códigos de error enteros (sin excepciones cruzando la frontera), sin tipos C++ en firmas, documentación de thread-safety por función (RT-safe vs coordinación) | Cobertura 1:1 con el JNI no-USB según tabla WA-0.1 | P0 | L |
 | WA-2.6 | **JNI → wrapper de la C API** (alto valor) | Refactor incremental por categorías (lifecycle → effects → looper → mode → análisis): cada `Java_..._nativeXxx` pasa a llamar `wma_xxx` en vez del engine directo. El JNI queda como capa de traducción de tipos JNI↔C de ~1 línea por función | Paridad Android/iOS por construcción; tests C++ y smoke Android verdes tras cada categoría | P1 | L |
 | WA-2.7 | Selección de backend por plataforma | `BackendManager` compila con Oboe+Libusb en Android y CoreAudio en iOS (compile-time, `#if` mínimos en un solo archivo de registro de backends) | Sin `#ifdef` dispersos; un único punto de registro | P1 | S | ✅ **HECHO** 2026-07-22 — `backends/PlatformBackends.{h,cpp}`; **una sola guarda en todo `backends/`**, cero en `BackendManager` |
@@ -467,6 +467,70 @@ lo que va a hacer cinterop en WA-3.1. De paso valida la lista de frameworks.
 > plataforma sin Oboe: el nodo existe y procesa, pero nunca tiene stream de entrada. El
 > archivo linkea igual. Full-duplex / guitar FX en iOS necesita un adapter de captura
 > CoreAudio en la costura `WMA_HAS_OBOE`.
+
+### Nota de cierre — Input path de iOS, etapa 1 (2026-07-25)
+
+**Decisión de arquitectura (no re-litigar): la captura NO va en un adapter propio de
+`InputNode`, va full-duplex en `CoreAudioBackend`.**
+
+Se evaluaron tres caminos. El que decía el plan original —un `InputCoreAudioAdapter.mm`
+con su propio `AVAudioEngine` en la costura `!WMA_HAS_OBOE`— se descartó al descubrir que
+**el lado consumidor ya existe y ya es agnóstico de plataforma**:
+`AudioEngine::onAudioReady(output, inputData, frames)` rutea `inputData` a INPUT_FX directo
+(guitar FX) o a `InputNode::feedExternalInput()` (vocoder / MIX). Los comentarios dicen
+"USB" pero el mecanismo no tiene nada de USB — es "el backend entregó input". Sólo faltaba
+que `CoreAudioBackend` pasara ese puntero.
+
+Un segundo `AVAudioEngine` habría costado un buffer extra de latencia y CPU para reimplementar
+un camino que ya estaba escrito y probado.
+
+**Qué se hizo:**
+
+- `AVAudioSinkNode` colgado de `engine.inputNode`, en el **mismo** `AVAudioEngine` que el
+  output: un solo dominio de reloj, así que el ring no tiene que absorber drift (sólo el
+  desfasaje de un buffer entre los dos callbacks) y no hace falta `DriftResampler`.
+- Ring SPSC lock-free (`LockFreeRingBuffer`) del thread de captura al de render. Un scratch
+  pre-alocado **por thread** — los dos bloques corren en threads distintos de CoreAudio y no
+  pueden compartir memoria.
+- Normalización a estéreo intercalado en el bloque de captura, cubriendo las tres formas en
+  que el OS puede entregar el ABL (planar mono —el mic del iPhone—, planar estéreo,
+  intercalado). `supportsFullDuplex()` → true, `getInputLatencyMs()` real.
+
+**Tres decisiones de robustez que valen la pena:**
+
+- **El `@try` alrededor del setup de captura no es relleno.** `engine.inputNode` y `connect:`
+  reportan "no hay entrada usable" **lanzando**, no devolviendo error. Sin eso, un usuario que
+  negó el micrófono se llevaba el proceso entero en vez de perder la captura.
+- **La captura nunca es fatal para el output.** Sin permiso de micrófono, o en un simulador
+  sin dispositivo de entrada, el formato vuelve en cero: se loguea y se sigue output-only.
+  Por eso `isCaptureActive()` existe aparte de `supportsFullDuplex()` — la capacidad y el
+  hecho son cosas distintas.
+- **`playAndRecord` sólo si se pidió captura.** Pedirla siempre significaría prompt de
+  micrófono para toda app y ruteo al receiver en vez del parlante. Ojo: hay solapamiento con
+  `AudioSessionManager` (WA-3.4, Kotlin), que también configura la sesión — las opciones se
+  espejan a propósito, y el backend nunca **degrada** una sesión de grabación a `playback`.
+
+> [!WARNING]
+> **Lo que falta para que esto sirva de punta a punta (etapa 2).** `setFullDuplexEnabled()`
+> aplica en el **próximo `start()`** —mismo contrato que `OboeBackend`, donde también es un
+> flag leído al abrir el stream. Como `wma_mode_set` llama
+> `BackendManager::setFullDuplexEnabled(mode == 2)` **en caliente**, cambiar a INPUT_FX con
+> el motor ya corriendo **no** abre el micrófono: se loguea un WARN y `isCaptureActive()`
+> devuelve false. Funciona hoy si el modo se fija **antes** de arrancar.
+>
+> Un restart interno desde `setFullDuplexEnabled()` se descartó: `stop()` espera hasta 1 s a
+> que dren los callbacks, y esa llamada llega desde el hilo de UI. La etapa 2 tiene que
+> resolverlo desde arriba —y de paso resolver que **dos escritores** (el modo y
+> `wma_input_start()`) no se peleen por el mismo flag, que es la clase de bug que ya mordió
+> dos veces acá (`InputNode` duplicado, estado de modo duplicado).
+
+**Verificado:** ambos slices compilan y linkean (link check con `-force_load`), 517/517 tests
+C++ de host, guardrail WA-0.4 verde, `assembleDebug` de Android sin regresiones.
+**Nada de esto prueba que entre audio**: el bloque de captura no lo ejercita ninguna suite
+—necesita device— así que el gate fue el compilador, el link check y revisión. Sonido real e
+Instruments sobre el render block van en WA-4.3.
+
+---
 
 ### Nota de cierre — WA-2.3 (2026-07-25)
 
@@ -791,17 +855,18 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · WA-2.4 output ✅ · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3), input path iOS, y el bloque grande: WA-2.5 + WA-2.6 |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3), la **etapa 2** del input path (armado en caliente), y el bloque grande: WA-2.5 + WA-2.6 |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 Iniciada de hecho — el pipeline **ya publica metadata KMP + klibs iOS** desde 1.8.0; falta validar el consumo desde NoisyPad (G1) y el XCFramework (WA-4.1) |
 
 **Próximo paso recomendado — en este orden:**
 
-1. **Input path de iOS** (M). Un adapter de captura CoreAudio en la costura
-   `WMA_HAS_OBOE` de `InputNode.cpp`, hoy inerte en iOS
-   (`createInputStream()`/`startInputStream()` devuelven `false`). Habilita full-duplex y
-   guitar FX. El `InputNode` ya está unificado entre JNI y C API, así que `wma_input_*`
-   no es un camino muerto.
+1. **Input path de iOS, etapa 2** (S/M). La etapa 1 ✅ está hecha: `CoreAudioBackend`
+   captura y entrega `inputData` (ver nota de cierre). Falta que el **switch de modo en
+   caliente** arme la captura —hoy `setFullDuplexEnabled()` aplica recién en el próximo
+   `start()`, así que pasar a INPUT_FX con el motor corriendo no abre el micrófono— y que
+   `wma_input_start()` deje de devolver `false` en iOS. **Lo delicado no es el código sino
+   evitar dos escritores sobre el mismo flag** (el modo y `wma_input_start`).
 2. **WA-4.1 XCFramework** (M). Es lo último que se puede hacer **sin hardware**.
 3. **WA-4.3 validación en device** (M). **Necesita un iPhone.** Sonido real, Instruments
    sobre el render block de `CoreAudioBackend` (cero allocs, cero locks), latencia

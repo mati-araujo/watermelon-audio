@@ -5,9 +5,15 @@
  * This is the CoreAudio counterpart to OboeBackend: AAudio is to Android what
  * AVAudioEngine is to Apple.
  *
- * Scope (WA-2.4, decision D2 iteration 1): OUTPUT ONLY. No capture, no
- * full-duplex — that path is InputNode, still Android-only. supportsFullDuplex()
- * therefore returns false and setFullDuplexEnabled() is a no-op.
+ * Scope: output (WA-2.4) plus full-duplex capture. Capture rides the SAME
+ * AVAudioEngine as the output — an AVAudioSinkNode hanging off `engine.inputNode`
+ * — rather than a second engine. One engine means one clock domain, so there is
+ * no input/output drift to resample away, and one buffer less of latency.
+ *
+ * The captured audio is handed to the engine through the `inputData` argument of
+ * IAudioCallback::onAudioReady, which is the same path the USB backend already
+ * uses. AudioEngine routes it to direct INPUT_FX (guitar FX) or to
+ * InputNode::feedExternalInput() (vocoder / MIX) with no platform-specific code.
  *
  * This header is deliberately free of any Objective-C: it is included from
  * PlatformBackends.cpp (compiled as C++), so every Apple/ObjC type is hidden
@@ -16,14 +22,15 @@
  * Thread Safety:
  * - Configuration methods: call from a control thread before start().
  * - start/stop/pause/resume: serialized by mStreamMutex.
- * - The render block: runs on the CoreAudio real-time thread. It touches only
- *   atomics and the pre-allocated scratch buffer — never the PIMPL, never ObjC,
- *   never a lock or allocation.
+ * - The render and capture blocks: run on CoreAudio real-time threads (two
+ *   different ones). They touch only atomics, the pre-allocated scratch buffers
+ *   and an SPSC ring — never the PIMPL, never ObjC, never a lock or allocation.
  */
 
 #pragma once
 
 #include "IAudioBackend.h"
+#include "../dsp/LockFreeRingBuffer.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -68,10 +75,20 @@ public:
     StreamInfo getStreamInfo() const override;
     bool isRunning() const override;
     float getOutputLatencyMs() const override;
-    float getInputLatencyMs() const override { return 0.0f; }  // output-only
+    float getInputLatencyMs() const override;
     BackendType getType() const override { return BackendType::COREAUDIO; }
-    bool supportsFullDuplex() const override { return false; }
+    bool supportsFullDuplex() const override { return true; }
     bool supportsPause() const override { return true; }
+
+    /**
+     * True when a capture stream is actually live.
+     *
+     * Distinct from supportsFullDuplex(): capture can be requested and still not
+     * happen — no mic permission, a simulator with no input device, or a session
+     * the host app configured for playback only. Callers that need to know
+     * whether input is really flowing must ask this, not the capability.
+     */
+    bool isCaptureActive() const { return mCaptureActive.load(std::memory_order_acquire); }
 
 private:
     // Opaque holder for the Objective-C engine objects (AVAudioEngine,
@@ -101,6 +118,39 @@ private:
     // render block can read .data() lock-free.
     std::vector<float> mScratchInterleaved;
     int mMaxFrames = 0;
+
+    // -------------------------------------------------------------------------
+    // Capture (full duplex).
+    // -------------------------------------------------------------------------
+
+    // Requested by setFullDuplexEnabled(). Read under mStreamMutex at open time;
+    // like OboeBackend, a change only takes effect on the next start().
+    bool mFullDuplexRequested = false;
+
+    // A capture stream is open and the sink block is running.
+    std::atomic<bool> mCaptureActive{false};
+
+    // Gates *delivery* of captured audio to the callback, so a mode change can
+    // turn input off and on again live without restarting the engine. Capture
+    // itself keeps running — tearing down the sink node at runtime would mean
+    // reconfiguring the audio session, which glitches output.
+    std::atomic<bool> mDeliverInput{false};
+
+    // Latched once the ring holds a full block. Without it the first blocks would
+    // alternate between "input available" and "not available", and AudioEngine
+    // reads a null inputData as "not in INPUT_FX mode" — the mode would flap.
+    std::atomic<bool> mCapturePrimed{false};
+
+    // Capture thread -> render thread. SPSC: the sink block is the only writer,
+    // the render block the only reader. Sized in start() to one second.
+    LockFreeRingBuffer mInputRing;
+
+    // Interleaved stereo scratch, one per RT thread so they never share memory.
+    // Both sized in start() to mMaxFrames * 2 and never resized while running.
+    std::vector<float> mCaptureScratch;  // sink block only
+    std::vector<float> mInputScratch;    // render block only
+
+    std::atomic<float> mInputLatencyMs{0.0f};
 
     // Teardown synchronization — stop() blocks until in-flight callbacks drain,
     // exactly like OboeBackend.
