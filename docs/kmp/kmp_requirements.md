@@ -3,9 +3,10 @@
 **Proyecto:** watermelon-audio (v1.8.1). Coordenada **KMP**: `com.watermellonstudios:audio`
 — `:audio-android` es el módulo Android suelto, **no** el que debe usar un consumidor KMP
 **Documento hermano:** `NoisyPad/docs/kmp/kmp_requirements.md` (consumidor)
-**Estado:** EN CURSO — **Fase 0 cerrada**; Fase 2 casi completa (el motor abre stream en iOS y `libwatermelon_audio.a` linkea) · G1 y luego Fase 3 (cinterop) son los próximos eslabones
+**Estado:** EN CURSO — **Fases 0 y 3 esencialmente cerradas**: Kotlin/Native ejecuta el motor C++ en el simulador (75 tests iOS, 0 fallas). Queda `DeviceCapabilities`, el input path de iOS, el XCFramework, y la validación en device (G2)
 **Fecha:** 2026-07-05 · **Última actualización:** 2026-07-25 (cerrados: WA-0.1/0.2/0.3/0.4,
-**WA-2.1 completo**, WA-2.0, WA-2.7, WA-2.4 output, WA-2.2; InputNode portable a iOS)
+WA-1.4, WA-1.6, WA-2.0, **WA-2.1 completo**, WA-2.2, WA-2.3, WA-2.4 output, WA-2.7,
+**WA-3.1, WA-3.2, WA-3.4**, WA-3.3 parcial, WA-T.1/T.3; `InputNode` unificado JNI↔C API)
 **Objetivo estratégico:** que la librería de audio compile y funcione en iOS con el mismo motor C++ y la misma API Kotlin (`commonMain`) que hoy consume NoisyPad Android, habilitando la versión iOS de NoisyPad.
 
 ---
@@ -690,6 +691,29 @@ hay tipos, no hay audio. Es deliberado y hay que comunicarlo para que no se lea 
 
 ## 16. Estado del programa
 
+### Dónde retomar (2026-07-25)
+
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, 2 commits sobre `master`, **sin pushear**.
+`master` está en el merge del PR #58, con CI verde en los 5 jobs.
+
+**Cómo verificar que todo sigue en pie antes de tocar nada** (todo corre local; el
+bloqueo de Xcode de §11 ya no existe):
+
+```bash
+bash scripts/check-cpp-portability.sh   # guardrail WA-0.4
+bash scripts/run-cpp-tests.sh           # 517 tests C++
+bash scripts/build-ios.sh               # ambos slices + link check
+./gradlew :audio:iosSimulatorArm64Test  # 75 tests iOS
+./gradlew :audio:assembleDebug          # Android, 4 ABIs
+```
+
+**Deuda de verificación que conviene saldar temprano:** los métodos de
+`AudioNativeBridge` **no tienen tests** (necesitan JNI y device), así que la migración a
+`BridgeConcurrency` (WA-1.4, 26 call sites) se verificó con el compilador y revisión de
+diff. Antes de publicar una versión con eso, un smoke manual en NoisyPad Android.
+
+
+
 | Fase | Estado |
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
@@ -698,9 +722,26 @@ hay tipos, no hay audio. Es deliberado y hay que comunicarlo para que no se lea 
 | **Fase 3** — Kotlin iosMain | 🟢 **WA-3.1 ✅ · WA-3.2 ✅ · WA-3.3 parcial** — `getAudioBridge()` devuelve un bridge real (62 tests iOS, 0 fallas). **WA-3.4 ✅**. Falta sólo `DeviceCapabilities` (WA-1.2) |
 | **Fase 4** — Empaquetado y publicación | 🟡 Iniciada de hecho — el pipeline **ya publica metadata KMP + klibs iOS** desde 1.8.0; falta validar el consumo desde NoisyPad (G1) y el XCFramework (WA-4.1) |
 
-**Próximo paso recomendado:** **WA-3.2** (`IosAudioBridge`). Ya tiene sus tres
-precondiciones: cinterop (WA-3.1), `BridgeConcurrency` (WA-1.4) y el `InputNode` unificado,
-así que `wma_input_*` ya no es un camino muerto cuando iOS lo estrene.
+**Próximo paso recomendado — en este orden:**
+
+1. **WA-1.2 `DeviceCapabilities`** (esfuerzo S). Interfaz/expect en commonMain (RAM,
+   low-latency hint, nivel de API abstracto); el `actual` Android existente queda como
+   está y se agrega el de iOS con `NSProcessInfo`/`UIDevice`. **Cierra WA-3.3 y con eso
+   la Fase 3 entera.**
+2. **Input path de iOS** (M). Un adapter de captura CoreAudio en la costura
+   `WMA_HAS_OBOE` de `InputNode.cpp`, hoy inerte en iOS
+   (`createInputStream()`/`startInputStream()` devuelven `false`). Habilita full-duplex y
+   guitar FX. El `InputNode` ya está unificado entre JNI y C API, así que `wma_input_*`
+   no es un camino muerto.
+3. **WA-4.1 XCFramework** (M). Es lo último que se puede hacer **sin hardware**.
+4. **WA-4.3 validación en device** (M). **Necesita un iPhone.** Sonido real, Instruments
+   sobre el render block de `CoreAudioBackend` (cero allocs, cero locks), latencia
+   round-trip medida, y la interrupción por llamada entrante que cierra el criterio
+   original de WA-3.4. → **G2**
+
+**En paralelo, sin bloquear nada de lo anterior:** WA-2.5 + WA-2.6 fusionados por
+categoría (ver la decisión de método más abajo). Es el bloque más grande que queda del
+programa, y el looper —39 funciones— va último.
 
 **G1** queda del lado de NoisyPad: el pipeline ya publica los klibs de iOS con los bindings
 adentro, así que sólo falta declarar la coordenada raíz allá, verificar que resuelve para
