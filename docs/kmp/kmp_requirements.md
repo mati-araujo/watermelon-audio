@@ -280,11 +280,76 @@ Mejoras de valor inmediato para el mantenimiento Android actual, que además des
 | ID | Requerimiento | Detalle | Criterio de aceptación | Prio | Esf | Estado |
 |---|---|---|---|---|---|---|
 | WA-1.1 | Logging unificado en Kotlin | `AudioNativeBridge.kt` usa `android.util.Log` directo; migrar a la interfaz `AudioLogger` ya existente en `commonMain/callback/`. **Quedan 10 archivos en androidMain** (`AudioNativeBridge`, `NativeLibraryLoader`, `ModeTransitionManagerImpl`, `NativeModeStateWriter`, `DeviceCapabilities`, USB ×3, `LatencyBenchmarkRunner`, `Mp4AacTranscoder`) — nótese que en androidMain `android.util.Log` está permitido por CLAUDE.md, así que esto es prolijidad, no bloqueo | Cero `android.util.Log` fuera de un actual Android de `AudioLogger` | P1 | S | Parcial — `ScaleQuantizer` (commonMain) migrado en WA-0.2 |
-| WA-1.2 | `DeviceCapabilities` común | Definir interfaz/expect en commonMain (RAM, low-latency hint, API level abstracto); actual Android actual queda como está; deja el hueco para el actual iOS | `AudioEngineFactory` consume la abstracción | P1 | S | Pendiente |
+| WA-1.2 | `DeviceCapabilities` común | Definir interfaz/expect en commonMain (RAM, low-latency hint, API level abstracto); actual Android actual queda como está; deja el hueco para el actual iOS | `AudioEngineFactory` consume la abstracción | P1 | S | ✅ **HECHO** 2026-07-25 — `domain/device/DeviceCapabilities.kt` + `expect fun currentDeviceCapabilities()`, actuals Android e iOS, `AudioEngineConfig.tunedFor()`. 12 tests nuevos. Ver nota |
 | WA-1.3 | API USB segregada | Asegurar que los tipos/factories USB (`IUsbAudioManager`, `UsbAudioManagerFactory`) no sean requeridos para usar el resto de la API (interface segregation). Mover a androidMain lo que no necesite estar en common, o documentar como android-only.<br>**Acoplamiento real medido (2026-07-22): sólo 3 puntos.** (a) `AudioBackendType` vive en `domain/usb/UsbAudioTypes.kt` pero **no es un tipo USB** — lo consumen `AudioEngine` y `AudioEngineImpl`; debería mudarse a `domain/`. (b) `IAudioNativeBridge.isUsbBackendAvailable()`. (c) `IAudioNativeBridge.setUsbLatencyProfile()`. Nada más de commonMain depende de `domain/usb/` | Un consumidor sin USB compila para iOS sin stubs USB | P1 | M | Pendiente — **decisión 2026-07-22:** en WA-0.2 se optó por portar `domain/usb/` en su lugar (sigue en commonMain) para no mezclar un cambio de API pública dentro de WA-0.2 |
 | WA-1.4 | Extraer `BridgeConcurrency` | Los mutexes por categoría (lifecycle/effects/mode/input) y el mapeo error-code→excepción de `AudioNativeBridge` (**3.352 LOC**) se extraen a commonMain para reutilizarlos en `IosAudioBridge` sin duplicar | AudioNativeBridge delega en la clase común; tests Android verdes | P1 | M | ✅ **HECHO** 2026-07-25 — `internal/bridge/BridgeConcurrency.kt` + 8 tests en commonTest. Los 26 call sites migrados. Ver nota |
 | WA-1.5 | Tests Kotlin de commonMain | ~~hoy: cero tests Kotlin~~ → **hoy hay 5 suites / 34 tests** (`ChordGenerator`, `ScaleQuantizerFlow`, `EffectManagerBatch`, + `Format` y `Time` de WA-0.2). **Falta lo central:** `StateSynchronizer`, `AudioEngineImpl`, mapeo de errores | Suite commonTest corriendo en JVM en CI | P1 | M | Parcial |
 | WA-1.6 | Factorizar denormals ARM64 | El código FPCR de `PlatformAndroid.cpp` para arm64 es idéntico al que necesitará Apple Silicon → extraer a `PlatformArm64.inc` compartido | PlatformAndroid compila igual; código listo para PlatformApple | P2 | S | ✅ **HECHO** 2026-07-25 — `platform/PlatformIsa.inc`. **La duplicación era más ancha que el FPCR:** el bloque x86_64 (MXCSR) y **las dos funciones de SIMD caps** también eran byte-for-byte idénticas. De ahí el nombre más amplio que el `PlatformArm64.inc` del ticket. En los `.cpp` queda sólo `setAudioThreadPriority()`, que es lo único que difiere de verdad |
+
+### Nota de cierre — WA-1.2 (2026-07-25)
+
+**Cierra también WA-3.3, y con eso la Fase 3 entera.**
+
+- `commonMain/domain/device/DeviceCapabilities.kt` — interfaz de **hechos**
+  (`platform`, `apiLevel`, `totalRamMb`, `cpuCoreCount`, `supportsLowLatencyAudio`,
+  `isLowEndDevice`) + `DeviceCapabilitiesSnapshot` para construir una a mano.
+- `commonMain/api/DeviceCapabilitiesProvider.kt` — `expect fun currentDeviceCapabilities()`,
+  cacheado por proceso.
+- Actual Android: `/proc/meminfo` + topología de CPU + `Build.VERSION.SDK_INT`.
+  Actual iOS: `NSProcessInfo` (**no** `UIDevice`: da todo lo que hace falta sin arrastrar
+  UIKit a una librería de audio ni exigir main thread).
+- `AudioEngineConfig.tunedFor(caps, base)` — la **política**, separada de la detección.
+- `AudioEngineFactory.create()` la consume: sin argumentos, el default sale ajustado al
+  dispositivo.
+
+**El `object DeviceCapabilities` de androidMain quedó intacto**, como pedía el ticket. La
+sobrecarga `deviceCapabilities(context)` de androidMain delega en él para el criterio de
+gama baja, así que no hay dos definiciones de "gama baja" en el mismo módulo. El alias de
+import (`as AndroidDeviceCapabilities`) está porque el object legacy y la interfaz nueva se
+llaman igual.
+
+**Hechos y política separados a propósito.** La interfaz no tiene "cuántos efectos usar":
+el umbral de gama baja es una heurística por plataforma que va a cambiar, y no debería
+arrastrar consigo la detección. Por eso el recorte vive en `tunedFor()`, donde el consumidor
+lo puede ignorar.
+
+**El recorte es un techo, no un valor fijo.** `maxEffects` baja a 6 en gama baja, pero
+`minOf(base.maxEffects, 6)`: quien pidió 3 sigue teniendo 3, no 6.
+
+> [!WARNING]
+> **Cambio de comportamiento en Android.** `AudioEngineFactory.create()` **sin argumentos**
+> ahora devuelve `maxEffects = 6` en un dispositivo de gama baja, donde antes devolvía 12
+> siempre. La política existía desde antes en el `object DeviceCapabilities` de androidMain,
+> pero **nunca había estado conectada al factory** — WA-1.2 la activa. Con una config
+> explícita no se toca nada: lo que se pasa es lo que se usa. Conviene mirarlo en el smoke
+> manual de NoisyPad Android junto con lo de WA-1.4.
+
+**Dos gotchas de plataforma que se resolvieron en el camino:**
+
+- **`Runtime.availableProcessors()` cuenta CPUs *online*, no las que el dispositivo tiene.**
+  Mapea a `_SC_NPROCESSORS_ONLN`, así que un governor que apagó cores por temperatura hace
+  que un octa-core reporte 4 — y como la foto se cachea por proceso, esa lectura transitoria
+  quedaría congelada y marcaría el dispositivo como gama baja **para siempre**. El actual
+  lee `/sys/devices/system/cpu/possible` (topología de boot) y usa el conteo online sólo
+  como piso.
+- **El umbral de iOS no es el de Android, y no por descuido.** 3 GB en iOS vs 2 GB en
+  Android: el piso de iOS es más alto (deployment target 15.0 → el dispositivo más flojo es
+  un 6s con 2 GB), y los núcleos de Apple no son comparables uno a uno con los de un
+  big.LITTLE barato. En iOS el que discrimina es la RAM; el umbral de núcleos (≤2) sólo
+  atrapa a los A9/A10.
+
+**Verificado local:** 50/50 en JVM (eran 42), 87/87 en el simulador (eran 75) — 8 tests
+comunes de política + 4 de `iosTest` sobre el actual iOS. `assembleDebug` y
+`assembleRelease` verdes, ambos slices de iOS compilan.
+
+**Alcance de esa verificación:** en el simulador `NSProcessInfo` reporta la RAM y los
+núcleos del **Mac anfitrión**, no los de un iPhone, así que el path de gama baja de iOS
+está cubierto sólo con `DeviceCapabilitiesSnapshot` armado a mano. El parseo de
+`/proc/meminfo` y de `/sys/devices/system/cpu/possible` **no corre en el host de tests**
+(macOS no los tiene): ambos devuelven un valor de "no sé" y el gate real fue revisión.
+Se confirma en el smoke de device.
+
+---
 
 ### Nota de cierre — WA-1.4 (2026-07-25)
 
@@ -429,7 +494,7 @@ Sigue valiendo la regla de siempre: el logger **no es RT-safe** y no va en el ho
 |---|---|---|---|---|---|
 | WA-3.1 | cinterop | `watermelon_audio.def` sobre `watermelon_audio.h`; link estático de los `.a` por target; verificación de que los 191 símbolos resuelven | Kotlin/Native llama la C API desde un test de simulador | P0 | M | ✅ **HECHO** 2026-07-25 — ver nota de cierre |
 | WA-3.2 | `IosAudioBridge` | Implementación de `IAudioNativeBridge` en iosMain sobre cinterop: mismos contratos `Result<T>`, mismos mutexes por categoría (reutiliza `BridgeConcurrency` de WA-1.4), mapeo error-code→excepción idéntico. Los métodos RT (`setXY`, `setFrequencyAndAmplitude`) llaman la función C directa sin suspend ni locks | Suite commonTest de bridge (WA-1.5) pasa contra el bridge iOS en simulador | P0 | L | ✅ **HECHO** 2026-07-25 — 87 de 88 miembros sobre la C API; 13 tests en `iosTest`. Ver nota |
-| WA-3.3 | actuals iOS | `NativeLibraryLoader` (no-op, link estático), `AudioBridgeProvider` (retorna `IosAudioBridge`), `DeviceCapabilities` (ProcessInfo/UIDevice) | `AudioEngineFactory.create()` funciona en iOS | P0 | S | 🟡 **PARCIAL** 2026-07-25 — `NativeLibraryLoader` ✅ y `AudioBridgeProvider` ✅ (ya no lanza `NotImplementedError`). Falta `DeviceCapabilities` (WA-1.2) |
+| WA-3.3 | actuals iOS | `NativeLibraryLoader` (no-op, link estático), `AudioBridgeProvider` (retorna `IosAudioBridge`), `DeviceCapabilities` (ProcessInfo/UIDevice) | `AudioEngineFactory.create()` funciona en iOS | P0 | S | ✅ **HECHO** 2026-07-25 — `NativeLibraryLoader` ✅, `AudioBridgeProvider` ✅, `DeviceCapabilities` ✅ (WA-1.2). **Cierra la Fase 3** |
 | WA-3.4 | `AudioSessionManager` | Helper iosMain para AVAudioSession: categoría `playAndRecord`, `preferredIOBufferDuration`/`preferredSampleRate`, notificaciones de interrupción y route change expuestas como Flow para que el consumidor (NoisyPad) las mapee a start/stop | Interrupción por llamada entrante pausa y reanuda el engine en sample app | P0 | M | ✅ **HECHO** 2026-07-25 — `internal/audio/AudioSessionManager.kt` + 13 tests. La validación con llamada entrante real queda para WA-4.3 (device) |
 | WA-3.5 | Transcoder abstracto | `Mp4AacTranscoder` (MediaCodec) → interfaz `IAudioTranscoder` en commonMain; actual Android existente; actual iOS con `AVAssetWriter` (diferible: el export WAV no lo necesita) | Interfaz común; iOS actual puede llegar después | P2 | M |
 | WA-3.6 | Regla RT documentada | Documentar y hacer cumplir D6: ningún callback del thread RT entra a Kotlin; estado via polling/colas. Incluir en el README de contribución | Doc + revisión de que ningún path actual lo viola | P1 | S | Parcial — la regla ya está en `CLAUDE.md` §portabilidad; falta la revisión de paths |
@@ -693,8 +758,11 @@ hay tipos, no hay audio. Es deliberado y hay que comunicarlo para que no se lea 
 
 ### Dónde retomar (2026-07-25)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, 2 commits sobre `master`, **sin pushear**.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, 4 commits sobre `master`, **sin pushear**.
 `master` está en el merge del PR #58, con CI verde en los 5 jobs.
+
+**La Fase 3 está cerrada.** WA-1.2 cerró WA-3.3 y con eso el último pendiente de
+`iosMain`: `AudioEngineFactory.create()` funciona en iOS de punta a punta.
 
 **Cómo verificar que todo sigue en pie antes de tocar nada** (todo corre local; el
 bloqueo de Xcode de §11 ya no existe):
@@ -712,29 +780,30 @@ bash scripts/build-ios.sh               # ambos slices + link check
 `BridgeConcurrency` (WA-1.4, 26 call sites) se verificó con el compilador y revisión de
 diff. Antes de publicar una versión con eso, un smoke manual en NoisyPad Android.
 
+**En el mismo smoke conviene mirar WA-1.2:** `AudioEngineFactory.create()` sin argumentos
+ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
+`/proc/meminfo` ni el de `/sys/devices/system/cpu/possible` corren en el host de tests
+(macOS no los tiene).
+
 
 
 | Fase | Estado |
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
-| **Fase 1** — Quick wins | 🟡 **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 avanzó ambas) · **falta WA-1.2 y WA-1.3** |
+| **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · WA-2.4 output ✅ · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3), input path iOS, y el bloque grande: WA-2.5 + WA-2.6 |
-| **Fase 3** — Kotlin iosMain | 🟢 **WA-3.1 ✅ · WA-3.2 ✅ · WA-3.3 parcial** — `getAudioBridge()` devuelve un bridge real (62 tests iOS, 0 fallas). **WA-3.4 ✅**. Falta sólo `DeviceCapabilities` (WA-1.2) |
+| **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 Iniciada de hecho — el pipeline **ya publica metadata KMP + klibs iOS** desde 1.8.0; falta validar el consumo desde NoisyPad (G1) y el XCFramework (WA-4.1) |
 
 **Próximo paso recomendado — en este orden:**
 
-1. **WA-1.2 `DeviceCapabilities`** (esfuerzo S). Interfaz/expect en commonMain (RAM,
-   low-latency hint, nivel de API abstracto); el `actual` Android existente queda como
-   está y se agrega el de iOS con `NSProcessInfo`/`UIDevice`. **Cierra WA-3.3 y con eso
-   la Fase 3 entera.**
-2. **Input path de iOS** (M). Un adapter de captura CoreAudio en la costura
+1. **Input path de iOS** (M). Un adapter de captura CoreAudio en la costura
    `WMA_HAS_OBOE` de `InputNode.cpp`, hoy inerte en iOS
    (`createInputStream()`/`startInputStream()` devuelven `false`). Habilita full-duplex y
    guitar FX. El `InputNode` ya está unificado entre JNI y C API, así que `wma_input_*`
    no es un camino muerto.
-3. **WA-4.1 XCFramework** (M). Es lo último que se puede hacer **sin hardware**.
-4. **WA-4.3 validación en device** (M). **Necesita un iPhone.** Sonido real, Instruments
+2. **WA-4.1 XCFramework** (M). Es lo último que se puede hacer **sin hardware**.
+3. **WA-4.3 validación en device** (M). **Necesita un iPhone.** Sonido real, Instruments
    sobre el render block de `CoreAudioBackend` (cero allocs, cero locks), latencia
    round-trip medida, y la interrupción por llamada entrante que cierra el criterio
    original de WA-3.4. → **G2**
