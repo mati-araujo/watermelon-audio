@@ -112,7 +112,7 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # Suite C++ de host (517 tests, googletest)
+bash scripts/run-cpp-tests.sh              # Suite C++ de host (527 tests, googletest)
 bash scripts/check-cpp-portability.sh      # Guardrail WA-0.4 (jni.h / android/)
 bash scripts/build-ios.sh                  # libwatermelon_audio.a — ambos slices + link check
 python3 scripts/c-api-gap.py               # Regenera docs/kmp/c_api_coverage.md

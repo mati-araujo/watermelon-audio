@@ -26,14 +26,25 @@ public:
     // ---- IAudioBackend ----------------------------------------------------
 
     watermelon_audio::BackendResult start() override {
+        ++mStartCount;
         if (mStartResult != watermelon_audio::BackendResult::OK) {
             return mStartResult;
         }
+        // Capture is decided HERE, not when it was requested — the same as every
+        // real backend (OboeBackend.cpp:63 reads its flag in start(); CoreAudio
+        // attaches its sink node while opening). A fake that honored the request
+        // the moment it arrived would make the reopen logic untestable, because
+        // the case that needs a reopen would never occur.
+        mInfo.isFullDuplex = mFullDuplexRequested && mCaptureAvailable;
         mRunning.store(true, std::memory_order_release);
         return watermelon_audio::BackendResult::OK;
     }
 
-    void stop() override { mRunning.store(false, std::memory_order_release); }
+    void stop() override {
+        mRunning.store(false, std::memory_order_release);
+        // No stream, no capture.
+        mInfo.isFullDuplex = false;
+    }
     void pause() override { mPaused = true; }
     void resume() override { mPaused = false; }
 
@@ -49,7 +60,7 @@ public:
         mInfo.framesPerBuffer = framesPerBuffer;
     }
 
-    void setFullDuplexEnabled(bool enable) override { mInfo.isFullDuplex = enable; }
+    void setFullDuplexEnabled(bool enable) override { mFullDuplexRequested = enable; }
 
     watermelon_audio::StreamInfo getStreamInfo() const override { return mInfo; }
 
@@ -75,6 +86,21 @@ public:
     /// Make start() fail, so the manager never reports isRunning().
     void setStartResult(watermelon_audio::BackendResult result) { mStartResult = result; }
 
+    /**
+     * Whether the "device" will actually grant capture when asked.
+     *
+     * False models a denied microphone or a machine with no input: the request
+     * is accepted, the stream opens, and capture still never goes live. That gap
+     * is the whole reason isCaptureLive() exists separately from the request.
+     */
+    void setCaptureAvailable(bool available) { mCaptureAvailable = available; }
+
+    /// The capture request currently pending for the next start().
+    bool fullDuplexRequested() const { return mFullDuplexRequested; }
+
+    /// How many times start() has been called — a reopen shows up as +1.
+    int startCount() const { return mStartCount; }
+
     watermelon_audio::IAudioCallback* callback() const { return mCallback; }
     bool isPaused() const { return mPaused; }
 
@@ -85,6 +111,9 @@ private:
     std::atomic<bool> mRunning{false};
     bool mPaused = false;
     int mRequestedSampleRate = 0;
+    bool mFullDuplexRequested = false;
+    bool mCaptureAvailable = true;
+    int mStartCount = 0;
 };
 
 /**

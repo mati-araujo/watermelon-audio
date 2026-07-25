@@ -666,20 +666,67 @@ bool wma_mode_requires_input(int mode) {
  * 12. Input
  * ================================================================ */
 
+/*
+ * Two ways for audio to get in, tried in order — and no platform #if anywhere,
+ * because the fallthrough itself is the platform test.
+ *
+ *   1. InputNode's own capture backend. Oboe on Android: it opens a dedicated
+ *      input stream and returns true, so Android stops right here and behaves
+ *      exactly as it always has.
+ *
+ *   2. The audio backend carrying input through onAudioReady's inputData. That
+ *      is the Apple path (CoreAudioBackend's AVAudioSinkNode) and the USB one.
+ *      InputNode has no capture backend there, so step 1 returns false and the
+ *      request falls through to here.
+ *
+ * AudioEngine already routes a non-null inputData to direct INPUT_FX or to
+ * InputNode::feedExternalInput(), so both roads end in the same DSP.
+ */
 bool wma_input_start(WmaEngine* engine) {
     if (!engine) return false;
     if (!ensureInputNode(engine)) return false;
-    return engine->inputNode->startInputStream();
+
+    if (engine->inputNode->startInputStream()) {
+        return true;
+    }
+
+    if (!engine->backendManager) return false;
+
+    // The caller explicitly asked for the microphone, so a stream reopen is
+    // authorized: every backend decides on capture when it opens. The mode path
+    // does NOT get this permission — see BackendManager::requestCapture.
+    return engine->backendManager->requestCapture(
+        watermelon_audio::BackendManager::CaptureRequester::INPUT_NODE,
+        /*want=*/true,
+        /*allowRestart=*/true);
 }
 
 void wma_input_stop(WmaEngine* engine) {
-    if (!engine || !engine->inputNode) return;
-    engine->inputNode->stopInputStream();
+    if (!engine) return;
+
+    if (engine->inputNode) {
+        engine->inputNode->stopInputStream();
+    }
+
+    // Withdraw the request either way: on the backend-capture path there is no
+    // node-level stream to stop, and leaving the request standing would make the
+    // next reopen turn the microphone back on by itself.
+    if (engine->backendManager) {
+        engine->backendManager->requestCapture(
+            watermelon_audio::BackendManager::CaptureRequester::INPUT_NODE,
+            /*want=*/false,
+            /*allowRestart=*/false);
+    }
 }
 
 bool wma_input_is_running(const WmaEngine* engine) {
-    if (!engine || !engine->inputNode) return false;
-    return engine->inputNode->isInputStreamRunning();
+    if (!engine) return false;
+
+    if (engine->inputNode && engine->inputNode->isInputStreamRunning()) {
+        return true;
+    }
+
+    return engine->backendManager && engine->backendManager->isCaptureLive();
 }
 
 void wma_input_set_source(WmaEngine* engine, int source) {

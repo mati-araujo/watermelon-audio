@@ -164,10 +164,54 @@ public:
     void setBufferSize(int framesPerBuffer);
 
     /**
-     * Enable/disable full-duplex mode.
-     * Must be called before start().
+     * Who is asking for capture.
+     *
+     * Two independent callers want input, and they must not overwrite each
+     * other: the mode system (INPUT_FX needs input) and an explicit
+     * wma_input_start(). A single bool would make the last writer win — turning
+     * the mode off would kill a capture the app had started on purpose. The
+     * effective request is the OR of both bits.
+     */
+    enum class CaptureRequester {
+        MODE,        ///< The mode system: setFullDuplexEnabled()
+        INPUT_NODE,  ///< An explicit wma_input_start() / wma_input_stop()
+    };
+
+    /**
+     * Register (or withdraw) one requester's need for captured input.
+     *
+     * @param who          which requester is speaking
+     * @param want         whether that requester needs capture
+     * @param allowRestart permission to restart a RUNNING stream in order to
+     *                     honor the request. Every backend reads its full-duplex
+     *                     flag at start() — Oboe at OboeBackend.cpp:63, CoreAudio
+     *                     when it attaches the sink node — so a stream already
+     *                     running cannot grow a capture path without reopening.
+     *                     Restarting is audible, so it is opt-in: the mode path
+     *                     passes false (it must never punch a gap into playback),
+     *                     an explicit input-start passes true (the caller asked
+     *                     for the microphone and a brief gap is the price).
+     *
+     * @return whether capture is actually live after the call. False is a real
+     *         answer, not an error: the user may have denied the microphone.
+     */
+    bool requestCapture(CaptureRequester who, bool want, bool allowRestart);
+
+    /**
+     * Enable/disable full-duplex mode — the [CaptureRequester::MODE] requester.
+     *
+     * Applies at the next start(); never restarts a running stream. See
+     * requestCapture() for why.
      */
     void setFullDuplexEnabled(bool enable);
+
+    /**
+     * Whether the active backend is actually delivering captured frames.
+     *
+     * Distinct from the request: capture can be asked for and not happen (no
+     * microphone permission, no input device).
+     */
+    bool isCaptureLive() const;
 
     /**
      * Select the USB latency profile (Fase 1). Persisted on the manager so it
@@ -277,7 +321,12 @@ private:
     IAudioCallback* mCallback = nullptr;
     int mSampleRate = 0;
     int mBufferSize = 0;
+    // Effective capture request — the OR of the two requesters below. Kept as a
+    // member (rather than recomputed) because applyConfigToBackend() replays it
+    // onto a backend that was created or swapped later.
     bool mFullDuplexEnabled = false;
+    bool mCaptureRequestedByMode = false;
+    bool mCaptureRequestedByInputNode = false;
     usb::UsbLatencyProfile mLatencyProfile = usb::UsbLatencyProfile::SAFE;
 
     // USB state

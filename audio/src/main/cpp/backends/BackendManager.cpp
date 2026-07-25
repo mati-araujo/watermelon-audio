@@ -248,13 +248,96 @@ void BackendManager::setBufferSize(int framesPerBuffer) {
 }
 
 void BackendManager::setFullDuplexEnabled(bool enable) {
+    // The mode requester never restarts a running stream: a mode change must not
+    // punch an audible gap into playback.
+    requestCapture(CaptureRequester::MODE, enable, /*allowRestart=*/false);
+}
+
+bool BackendManager::isCaptureLive() const {
     std::lock_guard<std::mutex> lock(mMutex);
+    return mActiveBackend && mActiveBackend->isRunning() &&
+           mActiveBackend->getStreamInfo().isFullDuplex;
+}
 
-    mFullDuplexEnabled = enable;
+bool BackendManager::requestCapture(CaptureRequester who, bool want, bool allowRestart) {
+    // Every path that does NOT need a reopen returns from inside this block, so
+    // reaching the code after it *is* the decision to reopen.
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
 
-    if (mActiveBackend) {
-        mActiveBackend->setFullDuplexEnabled(enable);
+        if (who == CaptureRequester::MODE) {
+            mCaptureRequestedByMode = want;
+        } else {
+            mCaptureRequestedByInputNode = want;
+        }
+
+        const bool effective = mCaptureRequestedByMode || mCaptureRequestedByInputNode;
+        mFullDuplexEnabled = effective;
+
+        if (!mActiveBackend) {
+            return false;
+        }
+
+        // Always push the request: it is what the backend reads at its next
+        // start(), and applyConfigToBackend() replays it if the backend is
+        // recreated. Backends that can honor a change live (CoreAudio flips
+        // delivery of an already-attached capture stream) do it inside here.
+        mActiveBackend->setFullDuplexEnabled(effective);
+
+        if (!mActiveBackend->isRunning()) {
+            return false;
+        }
+
+        const bool live = mActiveBackend->getStreamInfo().isFullDuplex;
+
+        if (live == effective) {
+            return live;
+        }
+
+        if (!effective) {
+            // Asked to stop capturing and the stream still carries input. Not
+            // worth a restart: the backend has already stopped delivering it, so
+            // the only cost is some capture work nobody consumes. Trading that
+            // for an audible gap would be a bad deal.
+            return false;
+        }
+
+        if (!allowRestart) {
+            LOGW("Capture requested on a running stream that has none — takes "
+                 "effect on the next start()");
+            return false;
+        }
     }
+
+    // Reopen OUTSIDE the lock: start()/stop() take mMutex themselves, and stop()
+    // additionally blocks until in-flight RT callbacks drain.
+    LOGI("Reopening the stream to add a capture path");
+    stop();
+
+    if (start() == BackendResult::OK) {
+        const bool live = isCaptureLive();
+        if (!live) {
+            LOGW("Stream reopened but capture is still not live — most likely "
+                 "microphone access was denied");
+        }
+        return live;
+    }
+
+    // The reopen failed with capture on. Falling back to no capture is the only
+    // way out that leaves the user with audio instead of silence.
+    LOGE("Failed to reopen with capture — retrying without it");
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mCaptureRequestedByInputNode = false;
+        mFullDuplexEnabled = mCaptureRequestedByMode;
+        if (mActiveBackend) {
+            mActiveBackend->setFullDuplexEnabled(mFullDuplexEnabled);
+        }
+    }
+    if (start() != BackendResult::OK) {
+        LOGE("Fallback start failed too — the stream is down");
+    }
+    return false;
 }
 
 void BackendManager::setLatencyProfile(usb::UsbLatencyProfile profile) {

@@ -100,6 +100,7 @@ set(CORE_TESTED_SOURCES
 add_executable(core_tests
     test_current_sample_rate.cpp
     test_fade_lifecycle.cpp
+    test_capture_requests.cpp
     support/test_platform_backends.cpp
     support/test_input_node_stub.cpp
     ${CORE_TESTED_SOURCES}
