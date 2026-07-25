@@ -281,9 +281,49 @@ Mejoras de valor inmediato para el mantenimiento Android actual, que además des
 | WA-1.1 | Logging unificado en Kotlin | `AudioNativeBridge.kt` usa `android.util.Log` directo; migrar a la interfaz `AudioLogger` ya existente en `commonMain/callback/`. **Quedan 10 archivos en androidMain** (`AudioNativeBridge`, `NativeLibraryLoader`, `ModeTransitionManagerImpl`, `NativeModeStateWriter`, `DeviceCapabilities`, USB ×3, `LatencyBenchmarkRunner`, `Mp4AacTranscoder`) — nótese que en androidMain `android.util.Log` está permitido por CLAUDE.md, así que esto es prolijidad, no bloqueo | Cero `android.util.Log` fuera de un actual Android de `AudioLogger` | P1 | S | Parcial — `ScaleQuantizer` (commonMain) migrado en WA-0.2 |
 | WA-1.2 | `DeviceCapabilities` común | Definir interfaz/expect en commonMain (RAM, low-latency hint, API level abstracto); actual Android actual queda como está; deja el hueco para el actual iOS | `AudioEngineFactory` consume la abstracción | P1 | S | Pendiente |
 | WA-1.3 | API USB segregada | Asegurar que los tipos/factories USB (`IUsbAudioManager`, `UsbAudioManagerFactory`) no sean requeridos para usar el resto de la API (interface segregation). Mover a androidMain lo que no necesite estar en common, o documentar como android-only.<br>**Acoplamiento real medido (2026-07-22): sólo 3 puntos.** (a) `AudioBackendType` vive en `domain/usb/UsbAudioTypes.kt` pero **no es un tipo USB** — lo consumen `AudioEngine` y `AudioEngineImpl`; debería mudarse a `domain/`. (b) `IAudioNativeBridge.isUsbBackendAvailable()`. (c) `IAudioNativeBridge.setUsbLatencyProfile()`. Nada más de commonMain depende de `domain/usb/` | Un consumidor sin USB compila para iOS sin stubs USB | P1 | M | Pendiente — **decisión 2026-07-22:** en WA-0.2 se optó por portar `domain/usb/` en su lugar (sigue en commonMain) para no mezclar un cambio de API pública dentro de WA-0.2 |
-| WA-1.4 | Extraer `BridgeConcurrency` | Los mutexes por categoría (lifecycle/effects/mode/input) y el mapeo error-code→excepción de `AudioNativeBridge` (**3.352 LOC**) se extraen a commonMain para reutilizarlos en `IosAudioBridge` sin duplicar | AudioNativeBridge delega en la clase común; tests Android verdes | P1 | M | Pendiente |
+| WA-1.4 | Extraer `BridgeConcurrency` | Los mutexes por categoría (lifecycle/effects/mode/input) y el mapeo error-code→excepción de `AudioNativeBridge` (**3.352 LOC**) se extraen a commonMain para reutilizarlos en `IosAudioBridge` sin duplicar | AudioNativeBridge delega en la clase común; tests Android verdes | P1 | M | ✅ **HECHO** 2026-07-25 — `internal/bridge/BridgeConcurrency.kt` + 8 tests en commonTest. Los 26 call sites migrados. Ver nota |
 | WA-1.5 | Tests Kotlin de commonMain | ~~hoy: cero tests Kotlin~~ → **hoy hay 5 suites / 34 tests** (`ChordGenerator`, `ScaleQuantizerFlow`, `EffectManagerBatch`, + `Format` y `Time` de WA-0.2). **Falta lo central:** `StateSynchronizer`, `AudioEngineImpl`, mapeo de errores | Suite commonTest corriendo en JVM en CI | P1 | M | Parcial |
 | WA-1.6 | Factorizar denormals ARM64 | El código FPCR de `PlatformAndroid.cpp` para arm64 es idéntico al que necesitará Apple Silicon → extraer a `PlatformArm64.inc` compartido | PlatformAndroid compila igual; código listo para PlatformApple | P2 | S | ✅ **HECHO** 2026-07-25 — `platform/PlatformIsa.inc`. **La duplicación era más ancha que el FPCR:** el bloque x86_64 (MXCSR) y **las dos funciones de SIMD caps** también eran byte-for-byte idénticas. De ahí el nombre más amplio que el `PlatformArm64.inc` del ticket. En los `.cpp` queda sólo `setAudioThreadPriority()`, que es lo único que difiere de verdad |
+
+### Nota de cierre — WA-1.4 (2026-07-25)
+
+`commonMain/internal/bridge/BridgeConcurrency.kt` + 8 tests en `commonTest` (corren en JVM
+**y** en el simulador, así que la primitiva queda verificada en las dos plataformas que la
+van a usar). Los **26 call sites** de `AudioNativeBridge` migrados.
+
+**El mapeo error-code→excepción que pedía el ticket ya estaba compartido:**
+`NativeBridgeException.fromCode()` vive en `commonMain/domain/error/` desde antes. Esa
+mitad del ticket no existía como trabajo. Lo que sí estaba duplicado —y ahora no— es el
+*envelope*: `withContext(Dispatchers.Default)` + mutex de categoría + `try/catch` → `Result`.
+
+> [!WARNING]
+> **El refactor destapó un bug real de producción en Android.** Los **22 bloques
+> `catch (e: Exception)`** de `AudioNativeBridge` **se tragaban `CancellationException`**.
+> En Kotlin, `CancellationException` **es** una `Exception`: cada uno de esos bloques
+> convertía una cancelación en `Result.failure`, así que el scope padre nunca se enteraba
+> de que había sido cancelado y la concurrencia estructurada dejaba de funcionar. No había
+> una sola mención de `CancellationException` en las 3.352 líneas.
+>
+> `BridgeConcurrency.guarded()` la re-lanza explícitamente antes de cualquier otro manejo.
+> El test `cancellationPropagatesInsteadOfBecomingAFailure` lo fija. Sin WA-1.4 este bug se
+> habría replicado tal cual a `IosAudioBridge`.
+
+**Dos primitivas, no una.** De los 26 sites, 4 son **lecturas** que devuelven valores crudos
+(`Int`, `Boolean`, `EffectType?`, un `Map`), no `Result<T>`. Meterlas en `guarded()`
+obligaría a inventarles un `Result` que nadie pidió y a elegir un valor "de fallo" que no
+existe. Para ellas está `serialized()`, que sólo hace dispatcher + mutex y **deja propagar**
+las excepciones — que es lo correcto para una lectura y lo que ya hacían.
+
+**`LogcatAudioLogger`** (androidMain) existe para que centralizar el manejo de errores no se
+lleve puesta la diagnosticabilidad: el default de `BridgeConcurrency` es `NoOpAudioLogger`
+—una librería no decide por el consumidor a dónde van los logs— pero en Android esos errores
+venían saliendo por logcat y ahí se los busca. Avanza WA-1.1 de paso.
+
+**Verificado:** 42/42 en JVM, 49/49 en el simulador, `assembleDebug` y `assembleRelease`
+verdes. Ojo con el alcance de esa verificación: **los métodos de `AudioNativeBridge` no
+tienen tests** (necesitan JNI y device), así que para ellos el gate real fue el compilador
+más la revisión del diff. La migración es mecánicamente uniforme, pero conviene un smoke
+manual en NoisyPad Android antes de publicar.
 
 ---
 
@@ -570,18 +610,15 @@ hay tipos, no hay audio. Es deliberado y hay que comunicarlo para que no se lea 
 | Fase | Estado |
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
-| **Fase 1** — Quick wins | 🟡 **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales · **falta WA-1.2, WA-1.3 y WA-1.4** (este último es prerequisito de WA-3.2) |
+| **Fase 1** — Quick wins | 🟡 **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 avanzó ambas) · **falta WA-1.2 y WA-1.3** |
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · WA-2.4 output ✅ · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3), input path iOS, y el bloque grande: WA-2.5 + WA-2.6 |
 | **Fase 3** — Kotlin iosMain | 🟢 **WA-3.1 ✅** — Kotlin/Native llama al motor en el simulador (41 tests, 0 fallas). **Próximo: WA-1.4 → WA-3.2 (`IosAudioBridge`) → WA-3.3** |
 | **Fase 4** — Empaquetado y publicación | 🟡 Iniciada de hecho — el pipeline **ya publica metadata KMP + klibs iOS** desde 1.8.0; falta validar el consumo desde NoisyPad (G1) y el XCFramework (WA-4.1) |
 
-**Próximo paso recomendado:** **WA-1.4** (`BridgeConcurrency`) y después **WA-3.2**
-(`IosAudioBridge`). En ese orden y no al revés: si `IosAudioBridge` se escribe primero,
-duplica los mutexes por categoría y el mapeo error→excepción de `AudioNativeBridge`
-(3.352 LOC) y después hay que reconciliarlos.
-
-**Antes de WA-3.2, unificar el `InputNode` duplicado** (ver hallazgos abajo): WA-3.2 va a
-ser el primer usuario real de `wma_input_*`, que hoy es código muerto en producción.
+**Próximo paso recomendado:** **unificar el `InputNode` duplicado** (ver hallazgos abajo) y
+después **WA-3.2** (`IosAudioBridge`), que ya tiene todo lo que necesitaba: cinterop
+(WA-3.1) y `BridgeConcurrency` (WA-1.4). El orden importa: WA-3.2 va a ser el primer usuario
+real de `wma_input_*`, que hoy es código muerto en producción.
 
 **G1** queda del lado de NoisyPad: el pipeline ya publica los klibs de iOS con los bindings
 adentro, así que sólo falta declarar la coordenada raíz allá, verificar que resuelve para

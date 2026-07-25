@@ -23,8 +23,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -42,7 +40,7 @@ import kotlinx.coroutines.withContext
  *
  * ### 1. Lifecycle Operations (suspend, mutex-protected)
  * - Engine start/stop/pause/resume
- * - Protected by [lifecycleMutex]
+ * - Protected by el mutex de LIFECYCLE de [BridgeConcurrency]
  * - Return [Result] for error handling
  *
  * ### 2. State-Modifying Operations (suspend, mutex-protected)
@@ -112,19 +110,20 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         }
     }
 
-    // ==================== Category Mutexes ====================
+    // ==================== Serialización por categoría ====================
 
-    /** For engine lifecycle: start, stop, pause, resume */
-    private val lifecycleMutex = Mutex()
-
-    /** For effect chain modifications: add, remove, reorder, set parameters */
-    private val effectsMutex = Mutex()
-
-    /** For mode transitions */
-    private val modeMutex = Mutex()
-
-    /** For input node operations */
-    private val inputMutex = Mutex()
+    /**
+     * Serialización por categoría, compartida con iOS (WA-1.4).
+     *
+     * Los cuatro mutexes y el envelope de manejo de errores viven en commonMain
+     * ([BridgeConcurrency]) para que `IosAudioBridge` use exactamente la misma
+     * disciplina en vez de reinventarla: dos implementaciones del mismo contrato
+     * divergen en silencio, y el bug resultante sólo aparece en una plataforma.
+     *
+     * Se le pasa [LogcatAudioLogger] porque el default de la librería es no-op y
+     * perder estos errores de logcat sería una regresión de diagnosticabilidad.
+     */
+    private val concurrency = BridgeConcurrency(logger = LogcatAudioLogger)
 
     // Note: Real-time params (setXY, setFrequency) are lock-free
 
@@ -215,51 +214,46 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override suspend fun setMultipleEffectParameters(
         updates: List<EffectParameterUpdate>
-    ): Result<Unit> = withContext(Dispatchers.Default) {
-        if (updates.isEmpty()) return@withContext Result.success(Unit)
+    ): Result<Unit> {
+        if (updates.isEmpty()) return Result.success(Unit)
 
-        effectsMutex.withLock {
-            try {
-                val chainSize = nativeGetEffectChainSize()
+        return concurrency.guarded(BridgeConcurrency.Category.EFFECTS, "setMultipleEffectParameters") {
+            val chainSize = nativeGetEffectChainSize()
 
-                // Validate all indices first
-                for (update in updates) {
-                    if (update.effectIndex < 0 || update.effectIndex >= chainSize) {
-                        return@withContext Result.failure(
-                            NativeBridgeException.InvalidEffectIndex(update.effectIndex, chainSize)
-                        )
-                    }
-                }
-
-                // Prepare arrays for JNI
-                val effectIndices = IntArray(updates.size)
-                val paramIds = IntArray(updates.size)
-                val values = FloatArray(updates.size)
-
-                updates.forEachIndexed { i, update ->
-                    effectIndices[i] = update.effectIndex
-                    paramIds[i] = update.paramId
-                    values[i] = update.value
-                }
-
-                val result = JniMetrics.measured("setMultipleEffectParameters") {
-                    nativeSetMultipleEffectParameters(effectIndices, paramIds, values)
-                }
-
-                if (result != 0) {
-                    Log.e(TAG, "setMultipleEffectParameters: native returned error $result")
-                    return@withContext Result.failure(
-                        NativeBridgeException.fromCode(result, "setMultipleEffectParameters")
+            // Validate all indices first
+            for (update in updates) {
+                if (update.effectIndex < 0 || update.effectIndex >= chainSize) {
+                    return@guarded Result.failure(
+                        NativeBridgeException.InvalidEffectIndex(update.effectIndex, chainSize)
                     )
                 }
-
-                Log.d(TAG, "setMultipleEffectParameters: ${updates.size} updates applied")
-                Result.success(Unit)
-
-            } catch (e: Exception) {
-                Log.e(TAG, "setMultipleEffectParameters: exception", e)
-                Result.failure(e)
             }
+
+            // Prepare arrays for JNI
+            val effectIndices = IntArray(updates.size)
+            val paramIds = IntArray(updates.size)
+            val values = FloatArray(updates.size)
+
+            updates.forEachIndexed { i, update ->
+                effectIndices[i] = update.effectIndex
+                paramIds[i] = update.paramId
+                values[i] = update.value
+            }
+
+            val result = JniMetrics.measured("setMultipleEffectParameters") {
+                nativeSetMultipleEffectParameters(effectIndices, paramIds, values)
+            }
+
+            if (result != 0) {
+                Log.e(TAG, "setMultipleEffectParameters: native returned error $result")
+                return@guarded Result.failure(
+                    NativeBridgeException.fromCode(result, "setMultipleEffectParameters")
+                )
+            }
+
+            Log.d(TAG, "setMultipleEffectParameters: ${updates.size} updates applied")
+            Result.success(Unit)
+
         }
     }
 
@@ -270,37 +264,23 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @return Result.success(Unit) if started, Result.failure with error otherwise
      */
-    override suspend fun startEngine(): Result<Unit> = withContext(Dispatchers.Default) {
-        lifecycleMutex.withLock {
-            try {
-                JniMetrics.measured("startEngine") {
-                    nativeStartEngine()
-                }
-                Log.d(TAG, "startEngine: success")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "startEngine failed", e)
-                Result.failure(e)
-            }
+    override suspend fun startEngine(): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "startEngine") {
+        JniMetrics.measured("startEngine") {
+            nativeStartEngine()
         }
+        Log.d(TAG, "startEngine: success")
+        Result.success(Unit)
     }
 
     /**
      * Stop the audio engine.
      */
-    override suspend fun stopEngine(): Result<Unit> = withContext(Dispatchers.Default) {
-        lifecycleMutex.withLock {
-            try {
-                JniMetrics.measured("stopEngine") {
-                    nativeStopEngine()
-                }
-                Log.d(TAG, "stopEngine: success")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "stopEngine failed", e)
-                Result.failure(e)
-            }
+    override suspend fun stopEngine(): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "stopEngine") {
+        JniMetrics.measured("stopEngine") {
+            nativeStopEngine()
         }
+        Log.d(TAG, "stopEngine: success")
+        Result.success(Unit)
     }
 
     /**
@@ -308,17 +288,10 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @param fadeTimeMs Fade duration in milliseconds
      */
-    override suspend fun startEngineWithFade(fadeTimeMs: Int): Result<Unit> = withContext(Dispatchers.Default) {
-        lifecycleMutex.withLock {
-            try {
-                nativeStartEngineWithFade(fadeTimeMs.coerceAtLeast(0))
-                Log.d(TAG, "startEngineWithFade: fadeTimeMs=$fadeTimeMs")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "startEngineWithFade failed", e)
-                Result.failure(e)
-            }
-        }
+    override suspend fun startEngineWithFade(fadeTimeMs: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "startEngineWithFade") {
+        nativeStartEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+        Log.d(TAG, "startEngineWithFade: fadeTimeMs=$fadeTimeMs")
+        Result.success(Unit)
     }
 
     /**
@@ -326,17 +299,10 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @param fadeTimeMs Fade duration in milliseconds
      */
-    override suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit> = withContext(Dispatchers.Default) {
-        lifecycleMutex.withLock {
-            try {
-                nativeStopEngineWithFade(fadeTimeMs.coerceAtLeast(0))
-                Log.d(TAG, "stopEngineWithFade: fadeTimeMs=$fadeTimeMs")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "stopEngineWithFade failed", e)
-                Result.failure(e)
-            }
-        }
+    override suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "stopEngineWithFade") {
+        nativeStopEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+        Log.d(TAG, "stopEngineWithFade: fadeTimeMs=$fadeTimeMs")
+        Result.success(Unit)
     }
 
     /**
@@ -344,17 +310,10 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @param fadeTimeMs Fade duration in milliseconds
      */
-    override suspend fun pauseEngineWithFade(fadeTimeMs: Int): Result<Unit> = withContext(Dispatchers.Default) {
-        lifecycleMutex.withLock {
-            try {
-                nativePauseEngineWithFade(fadeTimeMs.coerceAtLeast(0))
-                Log.d(TAG, "pauseEngineWithFade: fadeTimeMs=$fadeTimeMs")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "pauseEngineWithFade failed", e)
-                Result.failure(e)
-            }
-        }
+    override suspend fun pauseEngineWithFade(fadeTimeMs: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "pauseEngineWithFade") {
+        nativePauseEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+        Log.d(TAG, "pauseEngineWithFade: fadeTimeMs=$fadeTimeMs")
+        Result.success(Unit)
     }
 
     /**
@@ -362,17 +321,10 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @param fadeTimeMs Fade duration in milliseconds
      */
-    override suspend fun resumeEngineWithFade(fadeTimeMs: Int): Result<Unit> = withContext(Dispatchers.Default) {
-        lifecycleMutex.withLock {
-            try {
-                nativeResumeEngineWithFade(fadeTimeMs.coerceAtLeast(0))
-                Log.d(TAG, "resumeEngineWithFade: fadeTimeMs=$fadeTimeMs")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "resumeEngineWithFade failed", e)
-                Result.failure(e)
-            }
-        }
+    override suspend fun resumeEngineWithFade(fadeTimeMs: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "resumeEngineWithFade") {
+        nativeResumeEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+        Log.d(TAG, "resumeEngineWithFade: fadeTimeMs=$fadeTimeMs")
+        Result.success(Unit)
     }
 
     // ==================== Lifecycle Operations (Synchronous - Legacy Compatibility) ====================
@@ -1061,303 +1013,249 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     // ==================== IEffectStateWriter Implementation ====================
 
-    override suspend fun addEffect(type: EffectType): Result<Int> = withContext(Dispatchers.Default) {
-        effectsMutex.withLock {
-            try {
-                val engineInit = isEngineInitialized()
-                Log.d(TAG, "addEffect: engineInitialized=$engineInit")
+    override suspend fun addEffect(type: EffectType): Result<Int> = concurrency.guarded(BridgeConcurrency.Category.EFFECTS, "addEffect") {
+        val engineInit = isEngineInitialized()
+        Log.d(TAG, "addEffect: engineInitialized=$engineInit")
 
-                if (!engineInit) {
-                    Log.e(TAG, "addEffect: engine NOT initialized!")
-                    return@withContext Result.failure(
-                        NativeBridgeException.EngineNotInitialized()
-                    )
-                }
-
-                val currentSize = nativeGetEffectChainSize()
-                Log.d(TAG, "addEffect: currentSize=$currentSize, MAX_EFFECTS=$MAX_EFFECTS")
-
-                if (currentSize >= MAX_EFFECTS) {
-                    Log.w(TAG, "addEffect: chain full")
-                    return@withContext Result.failure(
-                        NativeBridgeException.EffectChainFull(MAX_EFFECTS)
-                    )
-                }
-
-                val result = JniMetrics.measured("addEffect") {
-                    nativeAddEffect(type.id)
-                }
-
-                if (result < 0) {
-                    Log.e(TAG, "addEffect: native returned error $result")
-                    return@withContext Result.failure(
-                        NativeBridgeException.fromCode(result, "addEffect")
-                    )
-                }
-
-                // Invalidate snapshot cache after adding effect
-                invalidateSnapshotCache()
-
-                Log.d(TAG, "addEffect: type=${type.displayName}, index=$result")
-                Result.success(result)
-
-            } catch (e: Exception) {
-                Log.e(TAG, "addEffect: exception", e)
-                Result.failure(e)
-            }
+        if (!engineInit) {
+            Log.e(TAG, "addEffect: engine NOT initialized!")
+            return@guarded Result.failure(
+                NativeBridgeException.EngineNotInitialized()
+            )
         }
+
+        val currentSize = nativeGetEffectChainSize()
+        Log.d(TAG, "addEffect: currentSize=$currentSize, MAX_EFFECTS=$MAX_EFFECTS")
+
+        if (currentSize >= MAX_EFFECTS) {
+            Log.w(TAG, "addEffect: chain full")
+            return@guarded Result.failure(
+                NativeBridgeException.EffectChainFull(MAX_EFFECTS)
+            )
+        }
+
+        val result = JniMetrics.measured("addEffect") {
+            nativeAddEffect(type.id)
+        }
+
+        if (result < 0) {
+            Log.e(TAG, "addEffect: native returned error $result")
+            return@guarded Result.failure(
+                NativeBridgeException.fromCode(result, "addEffect")
+            )
+        }
+
+        // Invalidate snapshot cache after adding effect
+        invalidateSnapshotCache()
+
+        Log.d(TAG, "addEffect: type=${type.displayName}, index=$result")
+        Result.success(result)
+
     }
 
-    override suspend fun removeEffect(index: Int): Result<Unit> = withContext(Dispatchers.Default) {
-        effectsMutex.withLock {
-            try {
-                val chainSize = nativeGetEffectChainSize()
-                if (index < 0 || index >= chainSize) {
-                    return@withContext Result.failure(
-                        NativeBridgeException.InvalidEffectIndex(index, chainSize)
-                    )
-                }
-
-                val result = JniMetrics.measured("removeEffect") {
-                    nativeRemoveEffect(index)
-                }
-
-                if (result != 0) {
-                    Log.e(TAG, "removeEffect: native returned error $result")
-                    return@withContext Result.failure(
-                        NativeBridgeException.fromCode(result, "removeEffect")
-                    )
-                }
-
-                // Invalidate snapshot cache after removing effect
-                invalidateSnapshotCache()
-
-                Log.d(TAG, "removeEffect: index=$index")
-                Result.success(Unit)
-
-            } catch (e: Exception) {
-                Log.e(TAG, "removeEffect: exception", e)
-                Result.failure(e)
-            }
+    override suspend fun removeEffect(index: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.EFFECTS, "removeEffect") {
+        val chainSize = nativeGetEffectChainSize()
+        if (index < 0 || index >= chainSize) {
+            return@guarded Result.failure(
+                NativeBridgeException.InvalidEffectIndex(index, chainSize)
+            )
         }
+
+        val result = JniMetrics.measured("removeEffect") {
+            nativeRemoveEffect(index)
+        }
+
+        if (result != 0) {
+            Log.e(TAG, "removeEffect: native returned error $result")
+            return@guarded Result.failure(
+                NativeBridgeException.fromCode(result, "removeEffect")
+            )
+        }
+
+        // Invalidate snapshot cache after removing effect
+        invalidateSnapshotCache()
+
+        Log.d(TAG, "removeEffect: index=$index")
+        Result.success(Unit)
+
     }
 
     override suspend fun setParameter(
         effectIndex: Int,
         paramId: Int,
         value: Float
-    ): Result<Unit> = withContext(Dispatchers.Default) {
-        effectsMutex.withLock {
-            try {
-                val chainSize = nativeGetEffectChainSize()
-                if (effectIndex < 0 || effectIndex >= chainSize) {
-                    return@withContext Result.failure(
-                        NativeBridgeException.InvalidEffectIndex(effectIndex, chainSize)
-                    )
-                }
-
-                val effectType = getEffectTypeSync(effectIndex)
-                if (effectType == null) {
-                    return@withContext Result.failure(
-                        NativeBridgeException.InvalidEffectIndex(effectIndex)
-                    )
-                }
-
-                val validationResult = validateParameter(effectType, paramId, value)
-                if (validationResult.isFailure) {
-                    return@withContext Result.failure(validationResult.exceptionOrNull()!!)
-                }
-
-                val validatedValue = validationResult.getOrThrow()
-
-                val result = JniMetrics.measured("setParameter") {
-                    nativeSetEffectParameter(effectIndex, paramId, validatedValue)
-                }
-
-                if (result != 0) {
-                    Log.e(TAG, "setParameter: native returned error $result")
-                    return@withContext Result.failure(
-                        NativeBridgeException.fromCode(result, "setParameter")
-                    )
-                }
-
-                Result.success(Unit)
-
-            } catch (e: Exception) {
-                Log.e(TAG, "setParameter: exception", e)
-                Result.failure(e)
-            }
+    ): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.EFFECTS, "setParameter") {
+        val chainSize = nativeGetEffectChainSize()
+        if (effectIndex < 0 || effectIndex >= chainSize) {
+            return@guarded Result.failure(
+                NativeBridgeException.InvalidEffectIndex(effectIndex, chainSize)
+            )
         }
+
+        val effectType = getEffectTypeSync(effectIndex)
+        if (effectType == null) {
+            return@guarded Result.failure(
+                NativeBridgeException.InvalidEffectIndex(effectIndex)
+            )
+        }
+
+        val validationResult = validateParameter(effectType, paramId, value)
+        if (validationResult.isFailure) {
+            return@guarded Result.failure(validationResult.exceptionOrNull()!!)
+        }
+
+        val validatedValue = validationResult.getOrThrow()
+
+        val result = JniMetrics.measured("setParameter") {
+            nativeSetEffectParameter(effectIndex, paramId, validatedValue)
+        }
+
+        if (result != 0) {
+            Log.e(TAG, "setParameter: native returned error $result")
+            return@guarded Result.failure(
+                NativeBridgeException.fromCode(result, "setParameter")
+            )
+        }
+
+        Result.success(Unit)
+
     }
 
     override suspend fun setParametersBatch(
         effectIndex: Int,
         parameters: Map<Int, Float>
-    ): Result<Unit> = withContext(Dispatchers.Default) {
-        if (parameters.isEmpty()) return@withContext Result.success(Unit)
+    ): Result<Unit> {
+        if (parameters.isEmpty()) return Result.success(Unit)
 
-        effectsMutex.withLock {
-            try {
-                val chainSize = nativeGetEffectChainSize()
-                if (effectIndex < 0 || effectIndex >= chainSize) {
-                    return@withContext Result.failure(
-                        NativeBridgeException.InvalidEffectIndex(effectIndex, chainSize)
-                    )
-                }
-
-                val effectType = getEffectTypeSync(effectIndex)
-                if (effectType == null) {
-                    return@withContext Result.failure(
-                        NativeBridgeException.InvalidEffectIndex(effectIndex)
-                    )
-                }
-
-                val validatedParams = mutableMapOf<Int, Float>()
-                for ((paramId, value) in parameters) {
-                    val validationResult = validateParameter(effectType, paramId, value)
-                    if (validationResult.isFailure) {
-                        return@withContext Result.failure(validationResult.exceptionOrNull()!!)
-                    }
-                    validatedParams[paramId] = validationResult.getOrThrow()
-                }
-
-                val paramIds = validatedParams.keys.toIntArray()
-                val values = validatedParams.values.toFloatArray()
-
-                val result = JniMetrics.measured("setParametersBatch") {
-                    nativeSetEffectParametersBatch(effectIndex, paramIds, values)
-                }
-
-                if (result != 0) {
-                    Log.e(TAG, "setParametersBatch: native returned error $result")
-                    return@withContext Result.failure(
-                        NativeBridgeException.fromCode(result, "setParametersBatch")
-                    )
-                }
-
-                Log.d(TAG, "setParametersBatch: ${parameters.size} params for effect $effectIndex")
-                Result.success(Unit)
-
-            } catch (e: Exception) {
-                Log.e(TAG, "setParametersBatch: exception", e)
-                Result.failure(e)
+        return concurrency.guarded(BridgeConcurrency.Category.EFFECTS, "setParametersBatch") {
+            val chainSize = nativeGetEffectChainSize()
+            if (effectIndex < 0 || effectIndex >= chainSize) {
+                return@guarded Result.failure(
+                    NativeBridgeException.InvalidEffectIndex(effectIndex, chainSize)
+                )
             }
+
+            val effectType = getEffectTypeSync(effectIndex)
+            if (effectType == null) {
+                return@guarded Result.failure(
+                    NativeBridgeException.InvalidEffectIndex(effectIndex)
+                )
+            }
+
+            val validatedParams = mutableMapOf<Int, Float>()
+            for ((paramId, value) in parameters) {
+                val validationResult = validateParameter(effectType, paramId, value)
+                if (validationResult.isFailure) {
+                    return@guarded Result.failure(validationResult.exceptionOrNull()!!)
+                }
+                validatedParams[paramId] = validationResult.getOrThrow()
+            }
+
+            val paramIds = validatedParams.keys.toIntArray()
+            val values = validatedParams.values.toFloatArray()
+
+            val result = JniMetrics.measured("setParametersBatch") {
+                nativeSetEffectParametersBatch(effectIndex, paramIds, values)
+            }
+
+            if (result != 0) {
+                Log.e(TAG, "setParametersBatch: native returned error $result")
+                return@guarded Result.failure(
+                    NativeBridgeException.fromCode(result, "setParametersBatch")
+                )
+            }
+
+            Log.d(TAG, "setParametersBatch: ${parameters.size} params for effect $effectIndex")
+            Result.success(Unit)
+
         }
     }
 
     override suspend fun setBypass(effectIndex: Int, bypassed: Boolean): Result<Unit> =
-        withContext(Dispatchers.Default) {
-            effectsMutex.withLock {
-                try {
-                    val chainSize = nativeGetEffectChainSize()
-                    if (effectIndex < 0 || effectIndex >= chainSize) {
-                        return@withContext Result.failure(
-                            NativeBridgeException.InvalidEffectIndex(effectIndex, chainSize)
-                        )
-                    }
-
-                    val result = nativeSetEffectBypass(effectIndex, bypassed)
-
-                    if (result != 0) {
-                        Log.e(TAG, "setBypass: native returned error $result")
-                        return@withContext Result.failure(
-                            NativeBridgeException.fromCode(result, "setBypass")
-                        )
-                    }
-
-                    Log.d(TAG, "setBypass: index=$effectIndex, bypassed=$bypassed")
-                    Result.success(Unit)
-
-                } catch (e: Exception) {
-                    Log.e(TAG, "setBypass: exception", e)
-                    Result.failure(e)
-                }
+        concurrency.guarded(BridgeConcurrency.Category.EFFECTS, "setBypass") {
+            val chainSize = nativeGetEffectChainSize()
+            if (effectIndex < 0 || effectIndex >= chainSize) {
+                return@guarded Result.failure(
+                    NativeBridgeException.InvalidEffectIndex(effectIndex, chainSize)
+                )
             }
+
+            val result = nativeSetEffectBypass(effectIndex, bypassed)
+
+            if (result != 0) {
+                Log.e(TAG, "setBypass: native returned error $result")
+                return@guarded Result.failure(
+                    NativeBridgeException.fromCode(result, "setBypass")
+                )
+            }
+
+            Log.d(TAG, "setBypass: index=$effectIndex, bypassed=$bypassed")
+            Result.success(Unit)
+
         }
 
     override suspend fun setEffectsBypass(bypassed: Boolean): Result<Unit> =
-        withContext(Dispatchers.Default) {
-            effectsMutex.withLock {
-                try {
-                    val result = nativeSetEffectsBypass(bypassed)
+        concurrency.guarded(BridgeConcurrency.Category.EFFECTS, "setEffectsBypass") {
+            val result = nativeSetEffectsBypass(bypassed)
 
-                    if (result != 0) {
-                        Log.e(TAG, "setEffectsBypass: native returned error $result")
-                        return@withContext Result.failure(
-                            NativeBridgeException.fromCode(result, "setEffectsBypass")
-                        )
-                    }
-
-                    Log.d(TAG, "setEffectsBypass: bypassed=$bypassed")
-                    Result.success(Unit)
-
-                } catch (e: Exception) {
-                    Log.e(TAG, "setEffectsBypass: exception", e)
-                    Result.failure(e)
-                }
+            if (result != 0) {
+                Log.e(TAG, "setEffectsBypass: native returned error $result")
+                return@guarded Result.failure(
+                    NativeBridgeException.fromCode(result, "setEffectsBypass")
+                )
             }
+
+            Log.d(TAG, "setEffectsBypass: bypassed=$bypassed")
+            Result.success(Unit)
+
         }
 
     override suspend fun reorderEffects(fromIndex: Int, toIndex: Int): Result<Unit> =
-        withContext(Dispatchers.Default) {
-            effectsMutex.withLock {
-                try {
-                    val chainSize = nativeGetEffectChainSize()
+        concurrency.guarded(BridgeConcurrency.Category.EFFECTS, "reorderEffects") {
+            val chainSize = nativeGetEffectChainSize()
 
-                    if (fromIndex < 0 || fromIndex >= chainSize) {
-                        return@withContext Result.failure(
-                            NativeBridgeException.InvalidEffectIndex(fromIndex, chainSize)
-                        )
-                    }
-                    if (toIndex < 0 || toIndex >= chainSize) {
-                        return@withContext Result.failure(
-                            NativeBridgeException.InvalidEffectIndex(toIndex, chainSize)
-                        )
-                    }
-
-                    if (fromIndex == toIndex) {
-                        return@withContext Result.success(Unit)
-                    }
-
-                    val result = nativeReorderEffects(fromIndex, toIndex)
-
-                    if (result != 0) {
-                        Log.e(TAG, "reorderEffects: native returned error $result")
-                        return@withContext Result.failure(
-                            NativeBridgeException.fromCode(result, "reorderEffects")
-                        )
-                    }
-
-                    Log.d(TAG, "reorderEffects: $fromIndex -> $toIndex")
-                    Result.success(Unit)
-
-                } catch (e: Exception) {
-                    Log.e(TAG, "reorderEffects: exception", e)
-                    Result.failure(e)
-                }
+            if (fromIndex < 0 || fromIndex >= chainSize) {
+                return@guarded Result.failure(
+                    NativeBridgeException.InvalidEffectIndex(fromIndex, chainSize)
+                )
             }
+            if (toIndex < 0 || toIndex >= chainSize) {
+                return@guarded Result.failure(
+                    NativeBridgeException.InvalidEffectIndex(toIndex, chainSize)
+                )
+            }
+
+            if (fromIndex == toIndex) {
+                return@guarded Result.success(Unit)
+            }
+
+            val result = nativeReorderEffects(fromIndex, toIndex)
+
+            if (result != 0) {
+                Log.e(TAG, "reorderEffects: native returned error $result")
+                return@guarded Result.failure(
+                    NativeBridgeException.fromCode(result, "reorderEffects")
+                )
+            }
+
+            Log.d(TAG, "reorderEffects: $fromIndex -> $toIndex")
+            Result.success(Unit)
+
         }
 
-    override suspend fun clearAllEffects(): Result<Unit> = withContext(Dispatchers.Default) {
-        effectsMutex.withLock {
-            try {
-                // Single native call: removes ALL effects under one chainMutex
-                // acquisition and pays the 20ms grace sleep ONCE for the batch
-                // (vs. 20ms × N when removing per-effect). Scene-load fast path.
-                val result = nativeClearAllEffects()
-                if (result != 0) {
-                    Log.e(TAG, "clearAllEffects: native call failed (code=$result)")
-                    return@withContext Result.failure(
-                        NativeBridgeException.fromCode(result, "clearAllEffects")
-                    )
-                }
-                Log.d(TAG, "clearAllEffects: all effects removed (atomic)")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "clearAllEffects: exception", e)
-                Result.failure(e)
-            }
+    override suspend fun clearAllEffects(): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.EFFECTS, "clearAllEffects") {
+        // Single native call: removes ALL effects under one chainMutex
+        // acquisition and pays the 20ms grace sleep ONCE for the batch
+        // (vs. 20ms × N when removing per-effect). Scene-load fast path.
+        val result = nativeClearAllEffects()
+        if (result != 0) {
+            Log.e(TAG, "clearAllEffects: native call failed (code=$result)")
+            return@guarded Result.failure(
+                NativeBridgeException.fromCode(result, "clearAllEffects")
+            )
         }
+        Log.d(TAG, "clearAllEffects: all effects removed (atomic)")
+        Result.success(Unit)
     }
 
     // ==================== IEffectStateProvider Implementation ====================
@@ -1374,7 +1272,11 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
                 }
             }
 
-            effectsMutex.withLock {
+            // El withContext de arriba se conserva a propósito: el chequeo de caché
+            // corre ANTES de tomar el mutex, y queremos que también salga del thread
+            // del llamador. serialized() vuelve a pedir el mismo dispatcher, que es
+            // un no-op cuando el contexto ya es el correcto.
+            concurrency.serialized(BridgeConcurrency.Category.EFFECTS) {
                 JniMetrics.measured("getEffectChainSnapshot") {
                     val effects = mutableListOf<NativeEffectSnapshot>()
                     val chainSize = nativeGetEffectChainSize()
@@ -1439,44 +1341,39 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     }
 
     override suspend fun getEffectParameters(index: Int): Map<Int, Float> =
-        withContext(Dispatchers.Default) {
-            effectsMutex.withLock {
-                val chainSize = nativeGetEffectChainSize()
-                if (index < 0 || index >= chainSize) {
-                    throw NativeBridgeException.InvalidEffectIndex(index, chainSize)
-                }
-
-                val typeId = nativeGetEffectType(index)
-                getEffectParametersSync(index, typeId)
+        concurrency.serialized(BridgeConcurrency.Category.EFFECTS) {
+            val chainSize = nativeGetEffectChainSize()
+            if (index < 0 || index >= chainSize) {
+                throw NativeBridgeException.InvalidEffectIndex(index, chainSize)
             }
+
+            val typeId = nativeGetEffectType(index)
+            getEffectParametersSync(index, typeId)
         }
 
-    override suspend fun isEffectBypassed(index: Int): Boolean = withContext(Dispatchers.Default) {
-        effectsMutex.withLock {
+    override suspend fun isEffectBypassed(index: Int): Boolean =
+        concurrency.serialized(BridgeConcurrency.Category.EFFECTS) {
             val chainSize = nativeGetEffectChainSize()
             if (index < 0 || index >= chainSize) {
                 throw NativeBridgeException.InvalidEffectIndex(index, chainSize)
             }
             nativeIsEffectBypassed(index)
         }
-    }
 
-    override suspend fun getEffectCount(): Int = withContext(Dispatchers.Default) {
-        effectsMutex.withLock {
+    override suspend fun getEffectCount(): Int =
+        concurrency.serialized(BridgeConcurrency.Category.EFFECTS) {
             nativeGetEffectChainSize()
         }
-    }
 
-    override suspend fun getEffectType(index: Int): EffectType? = withContext(Dispatchers.Default) {
-        effectsMutex.withLock {
+    override suspend fun getEffectType(index: Int): EffectType? =
+        concurrency.serialized(BridgeConcurrency.Category.EFFECTS) {
             val chainSize = nativeGetEffectChainSize()
             if (index < 0 || index >= chainSize) {
-                return@withContext null
+                return@serialized null
             }
             val typeId = nativeGetEffectType(index)
             EffectType.fromId(typeId)
         }
-    }
 
     /**
      * Checks if state has changed since last snapshot.
@@ -1493,22 +1390,15 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @param mode 0=CHAOS_PAD, 1=INPUT_FX, 2=MIX
      */
-    override suspend fun setAudioMode(mode: Int): Result<Unit> = withContext(Dispatchers.Default) {
-        modeMutex.withLock {
-            try {
-                if (mode !in 0..2) {
-                    return@withContext Result.failure(
-                        IllegalArgumentException("Invalid mode: $mode")
-                    )
-                }
-                nativeSetAudioMode(mode)
-                Log.d(TAG, "setAudioMode: mode=$mode")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "setAudioMode failed", e)
-                Result.failure(e)
-            }
+    override suspend fun setAudioMode(mode: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.MODE, "setAudioMode") {
+        if (mode !in 0..2) {
+            return@guarded Result.failure(
+                IllegalArgumentException("Invalid mode: $mode")
+            )
         }
+        nativeSetAudioMode(mode)
+        Log.d(TAG, "setAudioMode: mode=$mode")
+        Result.success(Unit)
     }
 
     /**
@@ -1541,17 +1431,10 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Start input stream for mic/line input.
      */
-    suspend fun startInputStream(): Result<Boolean> = withContext(Dispatchers.Default) {
-        inputMutex.withLock {
-            try {
-                val success = nativeStartInputStream()
-                Log.d(TAG, "startInputStream: success=$success")
-                Result.success(success)
-            } catch (e: Exception) {
-                Log.e(TAG, "startInputStream failed", e)
-                Result.failure(e)
-            }
-        }
+    suspend fun startInputStream(): Result<Boolean> = concurrency.guarded(BridgeConcurrency.Category.INPUT, "startInputStream") {
+        val success = nativeStartInputStream()
+        Log.d(TAG, "startInputStream: success=$success")
+        Result.success(success)
     }
 
     /**
@@ -1563,17 +1446,10 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Stop input stream.
      */
-    suspend fun stopInputStream(): Result<Unit> = withContext(Dispatchers.Default) {
-        inputMutex.withLock {
-            try {
-                nativeStopInputStream()
-                Log.d(TAG, "stopInputStream: success")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "stopInputStream failed", e)
-                Result.failure(e)
-            }
-        }
+    suspend fun stopInputStream(): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.INPUT, "stopInputStream") {
+        nativeStopInputStream()
+        Log.d(TAG, "stopInputStream: success")
+        Result.success(Unit)
     }
 
     /**
@@ -1589,16 +1465,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Set input source.
      */
-    suspend fun setInputSource(source: Int): Result<Unit> = withContext(Dispatchers.Default) {
-        inputMutex.withLock {
-            try {
-                nativeSetInputSource(source)
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "setInputSource failed", e)
-                Result.failure(e)
-            }
-        }
+    suspend fun setInputSource(source: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.INPUT, "setInputSource") {
+        nativeSetInputSource(source)
+        Result.success(Unit)
     }
 
     /**
@@ -1681,16 +1550,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Release input node resources.
      */
-    suspend fun releaseInputNode(): Result<Unit> = withContext(Dispatchers.Default) {
-        inputMutex.withLock {
-            try {
-                nativeReleaseInputNode()
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "releaseInputNode failed", e)
-                Result.failure(e)
-            }
-        }
+    suspend fun releaseInputNode(): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.INPUT, "releaseInputNode") {
+        nativeReleaseInputNode()
+        Result.success(Unit)
     }
 
     /**
@@ -1703,17 +1565,10 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Enable/disable monitoring.
      */
-    suspend fun setMonitoringEnabled(enabled: Boolean): Result<Unit> = withContext(Dispatchers.Default) {
-        inputMutex.withLock {
-            try {
-                nativeSetMonitoringEnabled(enabled)
-                Log.d(TAG, "setMonitoringEnabled: enabled=$enabled")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Log.e(TAG, "setMonitoringEnabled failed", e)
-                Result.failure(e)
-            }
-        }
+    suspend fun setMonitoringEnabled(enabled: Boolean): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.INPUT, "setMonitoringEnabled") {
+        nativeSetMonitoringEnabled(enabled)
+        Log.d(TAG, "setMonitoringEnabled: enabled=$enabled")
+        Result.success(Unit)
     }
 
     /**
