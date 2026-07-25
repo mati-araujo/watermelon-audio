@@ -13,37 +13,13 @@
 
 // Apple (iOS / macOS) implementation of the platform layer (WA-2.2).
 //
-// The arm64 FPCR denormal-flush block below is byte-for-byte the one in
-// PlatformAndroid.cpp: FPCR is part of the ARM64 ISA, not anything
-// Android-specific, so Apple Silicon uses the exact same instructions. Factoring
-// the shared block into a PlatformArm64.inc is WA-1.6; kept inline here to keep
-// this change self-contained.
+// flushDenormals() and the SIMD capability flags are ISA-level and shared with
+// Android — see PlatformIsa.inc (WA-1.6). Only the scheduler call below is
+// genuinely Apple-specific.
+#define WMA_PLATFORM_LABEL "Apple"
+#include "PlatformIsa.inc"
 
 namespace wma { namespace platform {
-
-void flushDenormals() {
-#if defined(__aarch64__) && defined(USE_NEON)
-    // ARM64: Set FPCR.FZ (Flush-to-Zero) and FPCR.DN (Default NaN) bits.
-    uint64_t fpcr;
-    asm volatile("mrs %0, fpcr" : "=r"(fpcr));
-    fpcr |= (1ULL << 24);  // FZ bit - flush denormals to zero
-    fpcr |= (1ULL << 25);  // DN bit - default NaN mode
-    asm volatile("msr fpcr, %0" : : "r"(fpcr));
-    WMA_LOGI("ARM64 (Apple): Denormal flush enabled (FPCR.FZ=1, FPCR.DN=1)");
-
-#elif defined(__x86_64__)
-    // Intel Macs / simulator on Intel hosts: MXCSR FZ (bit 15) + DAZ (bit 6).
-    unsigned int mxcsr;
-    asm volatile("stmxcsr %0" : "=m"(mxcsr));
-    mxcsr |= (1 << 15);  // FZ - Flush to Zero
-    mxcsr |= (1 << 6);   // DAZ - Denormals Are Zero
-    asm volatile("ldmxcsr %0" : : "m"(mxcsr));
-    WMA_LOGI("x86_64 (Apple): Denormal flush enabled (MXCSR.FZ=1, MXCSR.DAZ=1)");
-
-#else
-    WMA_LOGW("No denormal flush available for this architecture");
-#endif
-}
 
 void setAudioThreadPriority() {
 #if defined(__APPLE__)
@@ -74,22 +50,6 @@ void setAudioThreadPriority() {
     } else {
         WMA_LOGI("Audio thread priority set to THREAD_TIME_CONSTRAINT_POLICY");
     }
-#endif
-}
-
-bool hasNeonSupport() {
-#if defined(USE_NEON)
-    return true;
-#else
-    return false;
-#endif
-}
-
-bool hasSseSupport() {
-#if defined(USE_SSE)
-    return true;
-#else
-    return false;
 #endif
 }
 
