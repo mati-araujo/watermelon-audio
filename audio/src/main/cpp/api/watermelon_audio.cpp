@@ -90,10 +90,15 @@ void wma_engine_destroy(WmaEngine* engine) {
     delete engine;
 }
 
+// The branch is on `>= 0`, not `> 0`: an explicit 0 is a real request (cut, no
+// ramp) and has to reach startWithFade/stopWithFade, which is what the JNI has
+// always done. Only WMA_FADE_DEFAULT falls through to the engine's own default.
+// Branching on `> 0` made fade_time_ms = 0 mean "default" and lost the cut.
+
 WmaResult wma_engine_start(WmaEngine* engine, int fade_time_ms) {
     WMA_CHECK(engine);
     bool ok;
-    if (fade_time_ms > 0) {
+    if (fade_time_ms >= 0) {
         ok = engine->engine->startWithFade(fade_time_ms);
     } else {
         ok = engine->engine->start();
@@ -103,7 +108,7 @@ WmaResult wma_engine_start(WmaEngine* engine, int fade_time_ms) {
 
 WmaResult wma_engine_stop(WmaEngine* engine, int fade_time_ms) {
     WMA_CHECK(engine);
-    if (fade_time_ms > 0) {
+    if (fade_time_ms >= 0) {
         engine->engine->stopWithFade(fade_time_ms);
     } else {
         engine->engine->stop();

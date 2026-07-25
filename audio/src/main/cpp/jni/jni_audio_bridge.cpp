@@ -14,6 +14,7 @@
  */
 
 #include "jni_common.h"
+#include "../api/watermelon_audio.h"
 #include "../core/AudioEngine.h"
 #include "../core/AudioMode.h"
 #include "../core/ModeConfigurations.h"
@@ -37,6 +38,16 @@ extern "C" float getUsbInputVolumeInternal();
 extern "C" {
 
 // ==================== Lifecycle Functions ====================
+//
+// WA-2.6, category `lifecycle`: these entry points go through the C API rather
+// than touching AudioEngine directly, so Android and iOS run the same code
+// instead of two parallel transcriptions of it.
+//
+// The null checks are gone because every wma_* function already rejects a null
+// handle and returns the same value this file used to return by hand — see the
+// WMA_CHECK macros in api/watermelon_audio.cpp. The ensureEngine() calls stay:
+// they are the opposite, a side effect (create the engine on first use) that
+// the C API deliberately does not have.
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartEngine(
@@ -45,15 +56,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartE
         LOGE("AudioNativeBridge.startEngine: Failed to create engine");
         return;
     }
-    g_jniState.engine->start();
+    wma_engine_start(g_wmaEngine, WMA_FADE_DEFAULT);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStopEngine(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine) {
-        g_jniState.engine->stop();
-    }
+    wma_engine_stop(g_wmaEngine, WMA_FADE_DEFAULT);
 }
 
 JNIEXPORT void JNICALL
@@ -63,31 +72,26 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartE
         LOGE("AudioNativeBridge.startEngineWithFade: Failed to create engine");
         return;
     }
-    g_jniState.engine->startWithFade(fadeTimeMs);
+    // Kotlin already coerces to >= 0, so this never means WMA_FADE_DEFAULT.
+    wma_engine_start(g_wmaEngine, fadeTimeMs);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStopEngineWithFade(
     JNIEnv* env, jobject thiz, jint fadeTimeMs) {
-    if (g_jniState.engine) {
-        g_jniState.engine->stopWithFade(fadeTimeMs);
-    }
+    wma_engine_stop(g_wmaEngine, fadeTimeMs);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativePauseEngineWithFade(
     JNIEnv* env, jobject thiz, jint fadeTimeMs) {
-    if (g_jniState.engine) {
-        g_jniState.engine->pauseWithFade(fadeTimeMs);
-    }
+    wma_engine_pause(g_wmaEngine, fadeTimeMs);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeResumeEngineWithFade(
     JNIEnv* env, jobject thiz, jint fadeTimeMs) {
-    if (g_jniState.engine) {
-        g_jniState.engine->resumeWithFade(fadeTimeMs);
-    }
+    wma_engine_resume(g_wmaEngine, fadeTimeMs);
 }
 
 // ==================== State Functions ====================
@@ -95,81 +99,63 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeResume
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetEngineState(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return 0;
-    }
-    return static_cast<jint>(g_jniState.engine->getEngineState());
+    return static_cast<jint>(wma_get_engine_state(g_wmaEngine));
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetIsPaused(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return JNI_FALSE;
-    }
-    return g_jniState.engine->getIsPaused() ? JNI_TRUE : JNI_FALSE;
+    return wma_is_paused(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetStateVersion(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return 0;
-    }
-    return static_cast<jlong>(g_jniState.engine->getStateVersion());
+    return static_cast<jlong>(wma_get_state_version(g_wmaEngine));
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeHasStreamError(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return JNI_FALSE;
-    }
-    return g_jniState.engine->hasStreamError() ? JNI_TRUE : JNI_FALSE;
+    return wma_has_error(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetLastStreamErrorCode(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return 0;
-    }
-    return g_jniState.engine->getLastStreamErrorCode();
+    return wma_get_last_error_code(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeClearStreamError(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine) {
-        g_jniState.engine->clearStreamError();
-    }
+    wma_clear_error(g_wmaEngine);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeHasInitializationFailed(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return JNI_FALSE;
-    }
-    return g_jniState.engine->hasInitializationFailed() ? JNI_TRUE : JNI_FALSE;
+    return wma_has_init_failed(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsEngineInitialized(
     JNIEnv* env, jobject thiz) {
-    return (g_jniState.engine != nullptr) ? JNI_TRUE : JNI_FALSE;
+    return wma_is_initialized(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsingReducedBuffers(
+    JNIEnv* env, jobject thiz) {
+    return wma_is_using_reduced_buffers(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jfloatArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetStreamInfo(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return nullptr;
-    }
-    int32_t sampleRate, bufferSize;
-    double latencyMillis;
-    bool hasStream = g_jniState.engine->getStreamInfo(sampleRate, bufferSize, latencyMillis);
-    if (!hasStream) {
+    int sampleRate = 0, bufferSize = 0;
+    float latencyMillis = 0.0f;
+    if (!wma_get_stream_info(g_wmaEngine, &sampleRate, &bufferSize, &latencyMillis)) {
         return nullptr;
     }
     jfloatArray result = env->NewFloatArray(3);
@@ -177,7 +163,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetStr
         float data[3] = {
             static_cast<float>(sampleRate),
             static_cast<float>(bufferSize),
-            static_cast<float>(latencyMillis)
+            latencyMillis
         };
         env->SetFloatArrayRegion(result, 0, 3, data);
     }
@@ -192,44 +178,38 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMas
     if (!ensureEngine()) {
         return;
     }
-    volume = clampFloat(volume, 0.0f, 1.0f);
-    g_jniState.engine->setMasterVolume(volume);
+    // wma_set_master_volume clamps to [0, 1] itself.
+    wma_set_master_volume(g_wmaEngine, volume);
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetMasterVolume(
+    JNIEnv* env, jobject thiz) {
+    return wma_get_master_volume(g_wmaEngine);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetCurrentFadeVolume(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return 0.0f;
-    }
-    return g_jniState.engine->getCurrentFadeVolume();
+    return wma_get_fade_volume(g_wmaEngine);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetTargetFadeVolume(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return 0.0f;
-    }
-    return g_jniState.engine->getTargetFadeVolume();
+    return wma_get_target_fade_volume(g_wmaEngine);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetIsFading(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return JNI_FALSE;
-    }
-    return g_jniState.engine->getIsFading() ? JNI_TRUE : JNI_FALSE;
+    return wma_is_fading(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetFadeProgress(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return 0.0f;
-    }
-    return g_jniState.engine->getFadeProgress();
+    return wma_get_fade_progress(g_wmaEngine);
 }
 
 // ==================== Real-time Functions ====================
@@ -1501,15 +1481,9 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeConfig
 }
 
 // ==================== Memory/Resource Functions ====================
-
-JNIEXPORT jboolean JNICALL
-Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsingReducedBuffers(
-    JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return JNI_FALSE;
-    }
-    return g_jniState.engine->isUsingReducedBuffers() ? JNI_TRUE : JNI_FALSE;
-}
+//
+// nativeIsUsingReducedBuffers moved up to the State block with the rest of
+// section 2 of the C API (WA-2.6, category `lifecycle`).
 
 // ==================== Automation Functions ====================
 
@@ -2057,14 +2031,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetCur
 
 // ==================== Output Level Metering Functions (Phase 1 - Gain Staging) ====================
 
-JNIEXPORT jfloat JNICALL
-Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetMasterVolume(
-    JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return 1.0f;
-    }
-    return g_jniState.engine->getMasterVolume();
-}
+// nativeGetMasterVolume moved up to the Volume block with the rest of
+// section 3 of the C API (WA-2.6, category `lifecycle`).
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetOutputPeakLevel(

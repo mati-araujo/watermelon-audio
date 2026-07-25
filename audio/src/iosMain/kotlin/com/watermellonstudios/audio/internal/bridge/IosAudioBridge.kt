@@ -76,14 +76,30 @@ internal class IosAudioBridge : IAudioNativeBridge {
 
     // ==================== LIFECYCLE ====================
 
+    /**
+     * `WMA_FADE_DEFAULT` — pedirle al motor su fade propio, que NO es lo mismo
+     * que pedir 0 ms.
+     *
+     * `startEngine()` y `startEngineWithFade(0)` son dos operaciones distintas:
+     * la primera toma el default del motor (una rampa de 10 ms), la segunda
+     * corta de una. Android siempre las distinguió porque son dos funciones JNI
+     * distintas; acá las dos pasaban `0` y las dos terminaban en el default, así
+     * que la misma llamada hacía cosas distintas según la plataforma. La C API
+     * ahora tiene cómo decirlo y esto lo dice (WA-2.6, categoría `lifecycle`).
+     *
+     * El valor viene del header por cinterop, no copiado a mano: si el `#define`
+     * cambiara, esto deja de compilar en vez de divergir en silencio.
+     */
+    private val fadeDefault: Int = WMA_FADE_DEFAULT
+
     override suspend fun startEngine(): Result<Unit> =
         concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "startEngine") {
-            wma_engine_start(engine, 0).asUnitResult("startEngine")
+            wma_engine_start(engine, fadeDefault).asUnitResult("startEngine")
         }
 
     override suspend fun stopEngine(): Result<Unit> =
         concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "stopEngine") {
-            wma_engine_stop(engine, 0).asUnitResult("stopEngine")
+            wma_engine_stop(engine, fadeDefault).asUnitResult("stopEngine")
         }
 
     override suspend fun startEngineWithFade(fadeTimeMs: Int): Result<Unit> =
@@ -127,7 +143,8 @@ internal class IosAudioBridge : IAudioNativeBridge {
     }
 
     override fun stopEngineSync() {
-        wma_engine_stop(engine, 0)
+        // La contraparte de nativeStopEngine(): sin rampa, no una rampa de 0 ms.
+        wma_engine_stop(engine, fadeDefault)
     }
 
     // ==================== STATE QUERIES ====================

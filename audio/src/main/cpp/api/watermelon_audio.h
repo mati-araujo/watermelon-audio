@@ -105,6 +105,19 @@ typedef void (*WmaLogCallback)(WmaLogLevel level, const char* tag, const char* m
  * ================================================================ */
 
 /**
+ * Fade duration meaning "whatever the engine picks by itself" — as opposed to
+ * an explicit ramp length, which 0 also is (0 = cut, no ramp at all).
+ *
+ * Those are two different operations and the caller has to be able to say which
+ * one it wants. Passing 0 to mean "no preference" silently collapsed them: the
+ * JNI has always exposed both (`startEngine()` takes the engine default, a 10 ms
+ * ramp; `startEngineWithFade(0)` cuts in instantly and cancels any fade already
+ * running), while the iOS bridge mapped both onto fade_time_ms = 0 and got the
+ * default for both. Same call, two platforms, two behaviours.
+ */
+#define WMA_FADE_DEFAULT (-1)
+
+/**
  * Create a new audio engine instance.
  * @return Engine handle, or NULL on failure. Caller owns the handle.
  */
@@ -119,7 +132,8 @@ WMA_API void wma_engine_destroy(WmaEngine* engine);
 /**
  * Start the audio stream.
  * @param engine        Engine handle
- * @param fade_time_ms  Fade-in duration in ms (0 = instant)
+ * @param fade_time_ms  Explicit fade-in duration in ms (0 = instant), or
+ *                      WMA_FADE_DEFAULT for the engine's own default ramp.
  * @return WMA_OK on success
  */
 WMA_API WmaResult wma_engine_start(WmaEngine* engine, int fade_time_ms);
@@ -127,7 +141,8 @@ WMA_API WmaResult wma_engine_start(WmaEngine* engine, int fade_time_ms);
 /**
  * Stop the audio stream (blocking — waits for callbacks to finish).
  * @param engine        Engine handle
- * @param fade_time_ms  Fade-out duration in ms (0 = instant)
+ * @param fade_time_ms  Explicit fade-out duration in ms (0 = instant), or
+ *                      WMA_FADE_DEFAULT to stop without arming a ramp.
  * @return WMA_OK on success
  */
 WMA_API WmaResult wma_engine_stop(WmaEngine* engine, int fade_time_ms);
