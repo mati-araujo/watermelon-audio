@@ -427,8 +427,8 @@ Sigue valiendo la regla de siempre: el logger **no es RT-safe** y no va en el ho
 | ID | Requerimiento | Detalle | Criterio de aceptación | Prio | Esf |
 |---|---|---|---|---|---|
 | WA-3.1 | cinterop | `watermelon_audio.def` sobre `watermelon_audio.h`; link estático de los `.a` por target; verificación de que los 191 símbolos resuelven | Kotlin/Native llama la C API desde un test de simulador | P0 | M | ✅ **HECHO** 2026-07-25 — ver nota de cierre |
-| WA-3.2 | `IosAudioBridge` | Implementación de `IAudioNativeBridge` en iosMain sobre cinterop: mismos contratos `Result<T>`, mismos mutexes por categoría (reutiliza `BridgeConcurrency` de WA-1.4), mapeo error-code→excepción idéntico. Los métodos RT (`setXY`, `setFrequencyAndAmplitude`) llaman la función C directa sin suspend ni locks | Suite commonTest de bridge (WA-1.5) pasa contra el bridge iOS en simulador | P0 | L |
-| WA-3.3 | actuals iOS | `NativeLibraryLoader` (no-op, link estático), `AudioBridgeProvider` (retorna `IosAudioBridge`), `DeviceCapabilities` (ProcessInfo/UIDevice) | `AudioEngineFactory.create()` funciona en iOS | P0 | S |
+| WA-3.2 | `IosAudioBridge` | Implementación de `IAudioNativeBridge` en iosMain sobre cinterop: mismos contratos `Result<T>`, mismos mutexes por categoría (reutiliza `BridgeConcurrency` de WA-1.4), mapeo error-code→excepción idéntico. Los métodos RT (`setXY`, `setFrequencyAndAmplitude`) llaman la función C directa sin suspend ni locks | Suite commonTest de bridge (WA-1.5) pasa contra el bridge iOS en simulador | P0 | L | ✅ **HECHO** 2026-07-25 — 87 de 88 miembros sobre la C API; 13 tests en `iosTest`. Ver nota |
+| WA-3.3 | actuals iOS | `NativeLibraryLoader` (no-op, link estático), `AudioBridgeProvider` (retorna `IosAudioBridge`), `DeviceCapabilities` (ProcessInfo/UIDevice) | `AudioEngineFactory.create()` funciona en iOS | P0 | S | 🟡 **PARCIAL** 2026-07-25 — `NativeLibraryLoader` ✅ y `AudioBridgeProvider` ✅ (ya no lanza `NotImplementedError`). Falta `DeviceCapabilities` (WA-1.2) |
 | WA-3.4 | `AudioSessionManager` | Helper iosMain para AVAudioSession: categoría `playAndRecord`, `preferredIOBufferDuration`/`preferredSampleRate`, notificaciones de interrupción y route change expuestas como Flow para que el consumidor (NoisyPad) las mapee a start/stop | Interrupción por llamada entrante pausa y reanuda el engine en sample app | P0 | M |
 | WA-3.5 | Transcoder abstracto | `Mp4AacTranscoder` (MediaCodec) → interfaz `IAudioTranscoder` en commonMain; actual Android existente; actual iOS con `AVAssetWriter` (diferible: el export WAV no lo necesita) | Interfaz común; iOS actual puede llegar después | P2 | M |
 | WA-3.6 | Regla RT documentada | Documentar y hacer cumplir D6: ningún callback del thread RT entra a Kotlin; estado via polling/colas. Incluir en el README de contribución | Doc + revisión de que ningún path actual lo viola | P1 | S | Parcial — la regla ya está en `CLAUDE.md` §portabilidad; falta la revisión de paths |
@@ -475,6 +475,46 @@ que pueden divergir de versión — el modo de falla que ya mordió con 1.8.0.
 **Prerrequisito de entorno resuelto:** el bloqueo de §11 (`iosSimulatorArm64Test` se colgaba
 esperando privilegios de admin) **ya no existe** — `xcodebuild -checkFirstLaunchStatus`
 devuelve 0 y hay simuladores disponibles. Los tests K/N corren local.
+
+
+### Nota de cierre — WA-3.2 / WA-3.3 parcial (2026-07-25)
+
+**`getAudioBridge()` ya no lanza `NotImplementedError`.** `iosMain` tiene
+`IosAudioBridge`, un `IAudioNativeBridge` completo sobre los bindings de WA-3.1, y
+13 tests propios en `iosTest` corriendo en el simulador (**62 tests iOS en total,
+0 fallas**).
+
+**El gap de la C API no bloqueaba nada, y eso no era obvio.** El riesgo razonable
+era que las ~110 funciones faltantes de WA-0.1 impidieran implementar el bridge. Se
+mapearon los **88 miembros** de `IAudioNativeBridge` (+ `IEffectStateProvider` /
+`IEffectStateWriter`) contra las 191 `wma_*`: **87 tienen contraparte**. La interfaz
+excluye deliberadamente looper, USB, arpegiador, SoundFont y benchmark — que es
+exactamente donde vive el gap (39 del looper, 14 de input/monitor, 9 de metrónomo).
+
+**El único hueco real: `createSplitBackend`.** No hay una sola mención de "split" en
+`watermelon_audio.h`. `SplitBackend` compone un backend de entrada con otro de
+salida — en Android, USB-in + Oboe-out. En iOS no existe ninguna de las dos mitades
+(no hay USB por D4, y `InputNode` todavía no tiene adapter de captura CoreAudio), así
+que devuelve `false`. Junto con `isUsbBackendAvailable()` (`false`) y
+`setUsbLatencyProfile()` (`Result.failure`), la regla es la misma: **fallar
+explícito antes que fingir**. Un consumidor que cree tener un split y no lo tiene es
+peor que uno que sabe que no pudo.
+
+**Dos decisiones de diseño que conviene tener a mano:**
+
+1. **`setXY(coalesce)` ignora el flag en iOS.** El coalescer de Android existe para
+   amortizar el costo de cruzar JNI en cada frame de gesto; una llamada de cinterop
+   no tiene ese costo, así que bufferear sólo agregaría latencia de control. Si
+   WA-4.3 mide lo contrario, el lugar del coalescer es ese método.
+2. **`setMultipleEffectParameters` itera, pero bajo un solo lock.** La C API no tiene
+   una operación que abarque varios efectos; lo que le da semántica de lote es que la
+   cadena no cambia entre updates, no que sea una sola llamada C.
+
+**Detalle de cinterop que sorprendió:** `WmaResult` **no** se mapea a un `enum class`
+sino a `typealias WmaResult = Int`, y el handle opaco vive en
+`cnames.structs.WmaEngine`, no en el paquete del `.def`. Se descubrió leyendo el klib
+con `klib dump-metadata`, que es la forma confiable de saber qué generó cinterop en
+vez de suponerlo.
 
 ---
 
@@ -612,7 +652,7 @@ hay tipos, no hay audio. Es deliberado y hay que comunicarlo para que no se lea 
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 avanzó ambas) · **falta WA-1.2 y WA-1.3** |
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · WA-2.4 output ✅ · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3), input path iOS, y el bloque grande: WA-2.5 + WA-2.6 |
-| **Fase 3** — Kotlin iosMain | 🟢 **WA-3.1 ✅** — Kotlin/Native llama al motor en el simulador (41 tests, 0 fallas). **Próximo: WA-1.4 → WA-3.2 (`IosAudioBridge`) → WA-3.3** |
+| **Fase 3** — Kotlin iosMain | 🟢 **WA-3.1 ✅ · WA-3.2 ✅ · WA-3.3 parcial** — `getAudioBridge()` devuelve un bridge real (62 tests iOS, 0 fallas). Falta `AudioSessionManager` (WA-3.4) y `DeviceCapabilities` |
 | **Fase 4** — Empaquetado y publicación | 🟡 Iniciada de hecho — el pipeline **ya publica metadata KMP + klibs iOS** desde 1.8.0; falta validar el consumo desde NoisyPad (G1) y el XCFramework (WA-4.1) |
 
 **Próximo paso recomendado:** **WA-3.2** (`IosAudioBridge`). Ya tiene sus tres
