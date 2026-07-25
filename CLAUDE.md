@@ -10,29 +10,39 @@ Motor de sintesis en tiempo real con efectos DSP profesionales. C++20 + Oboe + K
 
 ```
 audio/src/
-  commonMain/kotlin/    52 files — pure Kotlin, zero Android deps
+  commonMain/kotlin/    64 files — pure Kotlin, zero Android deps
     api/                AudioEngine interface, IAudioNativeBridge, IEffectManager,
                         factories (AudioEngine, EffectManager, StateSynchronizer)
     domain/             Effect types, oscillators, scales, modes, USB types, errors
     callback/           AudioLogger, AudioAnalyticsListener (dependency inversion)
     internal/           AudioEngineImpl, EffectManagerImpl, StateSynchronizer,
-                        ScaleQuantizer, ChordGenerator
+                        ScaleQuantizer, ChordGenerator, util/Format, util/Time
                         expect: AudioBridgeProvider, NativeLibraryLoader
-  androidMain/kotlin/   18 files — JNI bridge, USB, platform-specific
-    internal/bridge/    AudioNativeBridge (2,619 LOC, 222 JNI external funs)
+  androidMain/kotlin/   21 files — JNI bridge, USB, platform-specific
+    internal/bridge/    AudioNativeBridge (3,352 LOC, 289 external funs)
     internal/usb/       USB audio driver (DataStore, BroadcastReceiver)
     internal/mode/      ModeTransitionManagerImpl, NativeModeStateWriter
+  iosMain/kotlin/       2 files — actual de NativeLibraryLoader (no-op, link estatico)
+                        y AudioBridgeProvider (lanza NotImplementedError hasta WA-3.2)
+  commonTest/kotlin/    5 suites
   main/cpp/             C++20 engine
-    api/                C API — watermelon_audio.h (181 functions, pure C)
+    api/                C API — watermelon_audio.h (191 functions, pure C)
     dsp/                watermelon-dsp sub-library (30 files, zero deps)
-    effects/            watermelon-effects sub-library (53 files, 20 effects + EffectRegistry)
-    engines/            watermelon-engines sub-library (9 files, 7 synth engines)
+    effects/            watermelon-effects sub-library (59 files, 23 efectos + EffectRegistry)
+    engines/            watermelon-engines sub-library (SynthEngine + 6 engines
+                        header-only, SoundFontManager)
     voice/              watermelon-voice sub-library (10 files, VoiceManager, VoicePool)
-    looper/             watermelon-looper sub-library (3 files, header-only)
-    core/               AudioEngine facade + 7 subsystems
-    backends/           IAudioBackend, OboeBackend, LibusbBackend, BackendManager
-    jni/                jni_audio_bridge.cpp (unified JNI)
-    platform/           Logger.h, Platform.h (abstraction layer)
+    looper/             watermelon-looper sub-library (16 files, header-only salvo
+                        LooperExporter.cpp)
+    core/               AudioEngine facade + subsistemas (22 files)
+    backends/           IAudioBackend, BackendManager, SplitBackend, DriftResampler,
+                        OboeBackend + LibusbBackend (Android), CoreAudioBackend.mm (iOS),
+                        PlatformBackends.cpp (unico punto que nombra backends concretos)
+    jni/                5 files — jni_audio_bridge.cpp (278 JNIEXPORT), jni_engine,
+                        jni_usb, jni_benchmark, jni_common.h
+    platform/           Logger.h/.cpp (logcat / os_log / stderr), Platform.h,
+                        PlatformAndroid.cpp, PlatformApple.cpp, PlatformIsa.inc (ISA comun)
+    ios/                CMakeLists.txt del build iOS (separado del que maneja AGP)
 ```
 
 ---
@@ -41,15 +51,18 @@ audio/src/
 
 | Componente | Version |
 |------------|---------|
-| Kotlin | 2.3.20  |
+| Kotlin | 2.4.0   |
 | AGP | 9.2.1   |
 | Oboe | 1.10.0  |
 | C++ | C++20   |
 | CMake | 3.22.1  |
 | Min SDK | 29      |
 | Compile SDK | 36      |
-| kotlinx-coroutines | 1.10.2  |
+| kotlinx-coroutines | 1.11.0  |
 | TinySoundFont | 0.9     |
+| iOS deployment target | 15.0    |
+
+Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 
 ---
 
@@ -61,6 +74,17 @@ audio/src/
 - `incrementStateVersion()` despues de modificar estado observable
 - Parametros con smoothing para evitar zipper noise
 - Logging via `platform/Logger.h` — NOT RT-safe, solo fuera del hot path
+
+### C++ portabilidad (iOS)
+- Todo el motor cross-compila para iOS **salvo** `jni/`, `usb/`, `OboeBackend`,
+  `LibusbBackend` y `PlatformAndroid.cpp`
+- Prohibido `#include <jni.h>` / `<android/...>` fuera de esas capas —
+  `scripts/check-cpp-portability.sh` lo hace fallar en CI (WA-0.4)
+- Codigo especifico de plataforma: detras de `IAudioBackend` o de `wma::platform`
+  (`platform/Platform.h`). Lo que depende solo del ISA va en `platform/PlatformIsa.inc`
+- Un solo punto nombra backends concretos: `backends/PlatformBackends.cpp`
+- El thread RT **jamas** entra a Kotlin (el GC de Kotlin/Native no es RT-safe):
+  el estado sale por polling o colas lock-free
 
 ### JNI
 - Todas las funciones nuevas en `jni/jni_audio_bridge.cpp` + `AudioNativeBridge.kt`
@@ -87,7 +111,21 @@ audio/src/
 ./gradlew :audio:assembleRelease                                   # Build release
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
+
+bash scripts/run-cpp-tests.sh              # Suite C++ de host (517 tests, googletest)
+bash scripts/check-cpp-portability.sh      # Guardrail WA-0.4 (jni.h / android/)
+bash scripts/build-ios.sh                  # libwatermelon_audio.a — ambos slices + link check
+python3 scripts/c-api-gap.py               # Regenera docs/kmp/c_api_coverage.md
+
+./gradlew :audio:compileKotlinIosArm64     # Compilar Kotlin para iOS
+./gradlew :audio:iosSimulatorArm64Test     # Tests K/N en simulador (requiere Xcode
+                                           # con first-launch hecho, ver docs/kmp)
 ```
+
+> El build de iOS vive en `audio/src/main/cpp/ios/CMakeLists.txt`, **separado** del que
+> maneja AGP: ese es Android-specific de punta a punta (Oboe, libusb, JNI,
+> PlatformAndroid, flags de linker GNU que Apple ld rechaza). Separarlos deja el build
+> que shippea en riesgo cero.
 
 ---
 
