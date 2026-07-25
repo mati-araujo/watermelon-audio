@@ -4,12 +4,18 @@
 # WA-2.1.
 #
 # Produces one merged static archive per slice:
-#   audio/src/main/cpp/ios/build/iphoneos/libwatermelon-audio-ios.a
-#   audio/src/main/cpp/ios/build/iphonesimulator/libwatermelon-audio-ios.a
+#   audio/src/main/cpp/ios/build/iphoneos/libwatermelon_audio.a
+#   audio/src/main/cpp/ios/build/iphonesimulator/libwatermelon_audio.a
 #
-# SCOPE: the portable DSP sub-libraries only. core/, nodes/, api/ and the
-# backends are NOT included — they are still coupled to Oboe. See
-# audio/src/main/cpp/ios/CMakeLists.txt for the details.
+# SCOPE: the whole engine — core/, nodes/, api/, backends/, platform/ and the
+# portable DSP sub-libraries. See audio/src/main/cpp/ios/CMakeLists.txt for what
+# is excluded and why.
+#
+# Each slice is then link-checked: a trivial main() is linked against the merged
+# archive with -force_load, which pulls in EVERY member and so forces every
+# symbol any member references to resolve. That is the check that matters for
+# WA-3.1 — a STATIC target happily builds with dangling references, and `nm -u`
+# can only guess at which undefined symbols the system will provide.
 #
 # Usage:
 #   scripts/build-ios.sh                  # both slices, Debug
@@ -67,15 +73,40 @@ for SDK in iphoneos iphonesimulator; do
     cmake --build "$BUILD_DIR" -- -k 0
 
     # CMake will not merge static archives; libtool does.
-    MERGED="$BUILD_DIR/libwatermelon-audio-ios.a"
+    MERGED="$BUILD_DIR/libwatermelon_audio.a"
     # shellcheck disable=SC2046  # word splitting is what we want here
-    libtool -static -o "$MERGED" $(find "$BUILD_DIR" -name '*.a' ! -name 'libwatermelon-audio-ios.a')
+    libtool -static -o "$MERGED" $(find "$BUILD_DIR" -name '*.a' ! -name 'libwatermelon_audio.a')
 
     echo "  -> $MERGED"
     echo "     archs:   $(lipo -archs "$MERGED")"
     echo "     size:    $(du -h "$MERGED" | cut -f1)"
     echo "     symbols: $(nm -gU "$MERGED" 2>/dev/null | grep -c ' T ' || true)"
+
+    # --- link check -------------------------------------------------------
+    # The simulator triple needs the -simulator suffix; without it clang builds
+    # for a device and the sysroot mismatches.
+    if [[ "$SDK" == "iphonesimulator" ]]; then
+        TRIPLE="arm64-apple-ios${DEPLOYMENT_TARGET}-simulator"
+    else
+        TRIPLE="arm64-apple-ios${DEPLOYMENT_TARGET}"
+    fi
+
+    PROBE_SRC="$BUILD_DIR/link_probe.cpp"
+    echo 'int main(void) { return 0; }' > "$PROBE_SRC"
+
+    echo "  link check ($TRIPLE) ..."
+    xcrun --sdk "$SDK" clang++ -std=c++20 \
+        -target "$TRIPLE" \
+        -isysroot "$(xcrun --sdk "$SDK" --show-sdk-path)" \
+        "$PROBE_SRC" \
+        -Wl,-force_load,"$MERGED" \
+        -framework AVFoundation \
+        -framework AudioToolbox \
+        -framework CoreAudio \
+        -framework Foundation \
+        -o "$BUILD_DIR/link_probe"
+    echo "     OK — every symbol in the archive resolves."
 done
 
 echo
-echo "OK — both slices built."
+echo "OK — both slices built and link-checked."

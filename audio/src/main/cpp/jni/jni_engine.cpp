@@ -49,23 +49,41 @@ bool ensureEngine() {
 }
 
 bool ensureInputNode() {
-    if (!g_jniState.inputNode) {
-        LOGI("Creating InputNode instance");
-        try {
-            g_jniState.inputNode = std::make_shared<InputNode>();
-            if (g_jniState.inputNode) {
-                // Prepare with 48kHz and generous block size for Oboe callbacks
-                // Will be reconfigured if engine restarts at a different rate
-                g_jniState.inputNode->prepare(48000, 4096);
-                LOGI("InputNode prepared with sampleRate=48000, maxBlockSize=4096");
-            }
-            return g_jniState.inputNode != nullptr;
-        } catch (const std::exception& e) {
-            LOGE("Failed to create InputNode: %s", e.what());
-            return false;
-        }
+    if (g_jniState.inputNode) {
+        return true;
     }
-    return true;
+    // The node is OWNED by the WmaEngine, exactly like the AudioEngine above:
+    // g_jniState.inputNode is a shared_ptr to the same instance, not a second one.
+    //
+    // Until this was unified the JNI built its own InputNode and attached it to
+    // the same AudioEngine, so every wma_input_* function in the C API drove a
+    // node the shipping Android path never touched. It never broke on Android
+    // because only one of the two paths was ever exercised — and iOS was about to
+    // become the first real user of the other one.
+    if (!ensureEngine()) {
+        LOGE("Cannot create InputNode: engine unavailable");
+        return false;
+    }
+    if (!wmaEnsureInputNode(g_wmaEngine)) {
+        LOGE("Failed to create InputNode");
+        return false;
+    }
+    g_jniState.inputNode = g_wmaEngine->inputNode;
+    LOGI("InputNode ready (shared with the C API), sampleRate=48000, maxBlockSize=4096");
+    return g_jniState.inputNode != nullptr;
+}
+
+void releaseInputNode() {
+    // Both handles have to drop together: leaving the engine's copy alive would
+    // recreate the split this function exists to prevent.
+    if (g_jniState.inputNode) {
+        g_jniState.inputNode->stopInputStream();
+        g_jniState.inputNode.reset();
+    }
+    if (g_wmaEngine) {
+        std::lock_guard<std::mutex> lock(g_wmaEngine->inputNodeMutex);
+        g_wmaEngine->inputNode.reset();
+    }
 }
 
 // ==================== JniCache Implementation ====================
@@ -122,11 +140,8 @@ JNIEXPORT void JNI_OnUnload(JavaVM* vm, void* reserved) {
 
     std::lock_guard<std::mutex> lock(g_jniState.engineMutex);
 
-    // Stop and release InputNode first
-    if (g_jniState.inputNode) {
-        g_jniState.inputNode->stopInputStream();
-        g_jniState.inputNode.reset();
-    }
+    // Stop and release InputNode first (drops both handles — see releaseInputNode)
+    releaseInputNode();
 
     // Clear raw pointer before destroying owner
     g_jniState.engine = nullptr;

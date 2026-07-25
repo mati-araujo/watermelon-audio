@@ -8,39 +8,15 @@
 #include <unistd.h>
 #include <sys/resource.h>
 
+// Android implementation of the platform layer.
+//
+// flushDenormals() and the SIMD capability flags are ISA-level and shared with
+// Apple — see PlatformIsa.inc (WA-1.6). Only the scheduler call below is
+// genuinely Android-specific.
+#define WMA_PLATFORM_LABEL "Android"
+#include "PlatformIsa.inc"
+
 namespace wma { namespace platform {
-
-void flushDenormals() {
-#if defined(__aarch64__) && defined(USE_NEON)
-    // ARM64: Set FPCR.FZ (Flush-to-Zero) and FPCR.DN (Default NaN) bits
-    uint64_t fpcr;
-    asm volatile("mrs %0, fpcr" : "=r"(fpcr));
-    fpcr |= (1ULL << 24);  // FZ bit - flush denormals to zero
-    fpcr |= (1ULL << 25);  // DN bit - default NaN mode
-    asm volatile("msr fpcr, %0" : : "r"(fpcr));
-    WMA_LOGI("ARM64: Denormal flush enabled (FPCR.FZ=1, FPCR.DN=1)");
-
-#elif defined(__arm__) && defined(USE_NEON)
-    // ARMv7: Set FPSCR.FZ bit
-    uint32_t fpscr;
-    asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
-    fpscr |= (1 << 24);  // FZ bit
-    asm volatile("vmsr fpscr, %0" : : "r"(fpscr));
-    WMA_LOGI("ARMv7: Denormal flush enabled (FPSCR.FZ=1)");
-
-#elif defined(__x86_64__) || defined(_M_X64)
-    // x86_64: Set MXCSR FZ (bit 15) and DAZ (bit 6)
-    unsigned int mxcsr;
-    asm volatile("stmxcsr %0" : "=m"(mxcsr));
-    mxcsr |= (1 << 15);  // FZ - Flush to Zero
-    mxcsr |= (1 << 6);   // DAZ - Denormals Are Zero
-    asm volatile("ldmxcsr %0" : : "m"(mxcsr));
-    WMA_LOGI("x86_64: Denormal flush enabled (MXCSR.FZ=1, MXCSR.DAZ=1)");
-
-#else
-    WMA_LOGW("No denormal flush available for this architecture");
-#endif
-}
 
 void setAudioThreadPriority() {
 #if defined(__ANDROID__)
@@ -55,22 +31,6 @@ void setAudioThreadPriority() {
     } else {
         WMA_LOGI("Audio thread priority set to SCHED_FIFO");
     }
-#endif
-}
-
-bool hasNeonSupport() {
-#if defined(USE_NEON)
-    return true;
-#else
-    return false;
-#endif
-}
-
-bool hasSseSupport() {
-#if defined(USE_SSE)
-    return true;
-#else
-    return false;
 #endif
 }
 

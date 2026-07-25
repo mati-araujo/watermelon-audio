@@ -6,23 +6,25 @@
 # linker flags). Keeping the iOS build here means zero regression risk for the
 # shipping Android build.
 #
-# SHIPPED TARGET — portable DSP only:
-#     watermelon-dsp / -effects / -engines / -voice / -looper + tinysoundfont
+# SHIPPED TARGET — the full engine:
+#     watermelon-core (core/, nodes/, api/, backends/, platform/, analysis/)
+#     + watermelon-dsp / -effects / -engines / -voice / -looper + tinysoundfont
 #
-# core/, nodes/, api/ and backends/ DO compile for iOS since WA-2.0 and WA-2.7,
-# but they are still behind WMA_IOS_PROBE_CORE rather than in the shipped
-# target, because two gaps remain before the archive is usable:
+# The core used to sit behind a WMA_IOS_PROBE_CORE option because two gaps made
+# the archive unusable: InputNode.cpp had no non-Oboe path, and there was no
+# iOS backend to open a stream with. WA-2.2 and WA-2.4 closed both, so the probe
+# was promoted here — this is now the real libwatermelon_audio.a, and it is what
+# cinterop links against (WA-3.1).
 #
-#   - nodes/InputNode.cpp — its Oboe adapter is Android-only, so it leaves ~22
-#     undefined symbols. iOS needs its own input path.
-#   - CoreAudioBackend (WA-2.4) — createSystemAudioBackend() returns nullptr on
-#     iOS today, so the manager constructs but cannot open a stream.
+# A STATIC target does NOT fail on undefined symbols, so "it builds" proves
+# nothing about linkability. The real check is `nm -u` on the merged archive —
+# see scripts/build-ios.sh, which fails the build if a project symbol is left
+# unresolved.
 #
-# Note a STATIC target would NOT fail on those undefined symbols, which is why
-# the probe is checked with `nm -u` rather than by whether it builds.
-#
-# Once WA-2.4 lands, promote the probe sources into watermelon_audio_ios and
-# this becomes the real libwatermelon_audio.a.
+# Still missing on iOS, and NOT a link gap: audio capture. InputNode's
+# createInputStream()/startInputStream() return false on any platform without
+# Oboe, so the node exists and processes but never has a live input stream.
+# Full-duplex / guitar FX on iOS needs a CoreAudio capture adapter at that seam.
 #
 # Excluded by design (D4 / platform): jni/, usb/, OboeBackend, LibusbBackend,
 # PlatformAndroid.cpp.
@@ -63,28 +65,15 @@ endif()
 
 include(${WMA_CPP_ROOT}/thirdparty/tinysoundfont.cmake)
 
-# WA-2.0 probe: how much of the core compiles without Oboe. Not part of the
-# shipped target yet — see the aggregate target at the bottom.
-option(WMA_IOS_PROBE_CORE "Also try to compile core/nodes/api for iOS" OFF)
-
 add_subdirectory(${WMA_CPP_ROOT}/dsp     ${CMAKE_BINARY_DIR}/dsp)
 add_subdirectory(${WMA_CPP_ROOT}/effects ${CMAKE_BINARY_DIR}/effects)
 add_subdirectory(${WMA_CPP_ROOT}/engines ${CMAKE_BINARY_DIR}/engines)
 add_subdirectory(${WMA_CPP_ROOT}/looper  ${CMAKE_BINARY_DIR}/looper)
 add_subdirectory(${WMA_CPP_ROOT}/voice   ${CMAKE_BINARY_DIR}/voice)
 
-# Aggregate target so the slice has a single thing to build and depend on.
-# CMake does not merge static archives, so the actual merge into one .a is done
-# by scripts/build-ios.sh with libtool.
-add_custom_target(watermelon_audio_ios ALL
-    DEPENDS watermelon-dsp watermelon-effects watermelon-engines watermelon-voice tinysoundfont
-)
-
-if(WMA_IOS_PROBE_CORE)
-    # The full engine as it builds for iOS. InputNode.cpp and PlatformApple.cpp
-    # (WA-2.2 / WA-3) closed the last two link gaps — this archive now has no
-    # unresolved project symbols, which is what cinterop needs to link against.
-    add_library(watermelon-core-probe STATIC
+# The full engine as it builds for iOS. Everything the C API needs to stand up
+# an AudioEngine, minus the Android-only I/O (see the exclusions at the top).
+add_library(watermelon-core STATIC
         ${WMA_CPP_ROOT}/core/AudioEngine.cpp
         ${WMA_CPP_ROOT}/core/SynthEngineDispatcher.cpp
         ${WMA_CPP_ROOT}/core/OutputStage.cpp
@@ -108,27 +97,37 @@ if(WMA_IOS_PROBE_CORE)
         ${WMA_CPP_ROOT}/backends/DriftResampler.cpp
         ${WMA_CPP_ROOT}/backends/CoreAudioBackend.mm
         ${WMA_CPP_ROOT}/api/watermelon_audio.cpp
-    )
-    target_include_directories(watermelon-core-probe PRIVATE ${WMA_CPP_ROOT})
+)
+target_include_directories(watermelon-core PRIVATE ${WMA_CPP_ROOT})
 
-    # CoreAudioBackend.mm is Objective-C++ (clang detects .mm automatically) and
-    # relies on ARC for the AVAudioEngine object lifetime — enable it per-file.
-    set_source_files_properties(
-        ${WMA_CPP_ROOT}/backends/CoreAudioBackend.mm
-        PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
-    )
+# CoreAudioBackend.mm is Objective-C++ (clang detects .mm automatically) and
+# relies on ARC for the AVAudioEngine object lifetime — enable it per-file.
+set_source_files_properties(
+    ${WMA_CPP_ROOT}/backends/CoreAudioBackend.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
+)
 
-    # Apple audio frameworks. CoreAudio is iOS/macOS; AVFoundation + AudioToolbox
-    # + Foundation carry AVAudioEngine and the AudioBufferList types.
-    find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
-    find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox REQUIRED)
-    find_library(COREAUDIO_FRAMEWORK    CoreAudio    REQUIRED)
-    find_library(FOUNDATION_FRAMEWORK   Foundation   REQUIRED)
+# Apple audio frameworks. CoreAudio is iOS/macOS; AVFoundation + AudioToolbox
+# + Foundation carry AVAudioEngine and the AudioBufferList types.
+#
+# These are usage requirements only: a STATIC archive links nothing. Whoever
+# consumes the .a has to link them too — for Kotlin/Native that means
+# `-framework AVFoundation …` in the cinterop .def (WA-3.1).
+find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
+find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox REQUIRED)
+find_library(COREAUDIO_FRAMEWORK    CoreAudio    REQUIRED)
+find_library(FOUNDATION_FRAMEWORK   Foundation   REQUIRED)
 
-    target_link_libraries(watermelon-core-probe
-        PUBLIC watermelon-voice watermelon-looper watermelon-engines
-               watermelon-effects watermelon-dsp tinysoundfont
-        PRIVATE ${AVFOUNDATION_FRAMEWORK} ${AUDIOTOOLBOX_FRAMEWORK}
-                ${COREAUDIO_FRAMEWORK} ${FOUNDATION_FRAMEWORK}
-    )
-endif()
+target_link_libraries(watermelon-core
+    PUBLIC watermelon-voice watermelon-looper watermelon-engines
+           watermelon-effects watermelon-dsp tinysoundfont
+    PRIVATE ${AVFOUNDATION_FRAMEWORK} ${AUDIOTOOLBOX_FRAMEWORK}
+            ${COREAUDIO_FRAMEWORK} ${FOUNDATION_FRAMEWORK}
+)
+
+# Aggregate target so the slice has a single thing to build and depend on.
+# watermelon-core links the sub-libraries PUBLIC, so depending on it pulls the
+# whole set. CMake does not merge static archives — scripts/build-ios.sh does
+# that with libtool.
+add_custom_target(watermelon_audio_ios ALL)
+add_dependencies(watermelon_audio_ios watermelon-core)

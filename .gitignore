@@ -22,6 +22,7 @@ out/
 **/cpp/tests/.deps
 **/cpp/tests/.bench-build
 .kotlin/
-.claude/settings.local.json
+# Configuracion y tooling agentico: es local de la maquina, no del proyecto.
+.claude/
 # Host sanitizer build dir (run-cpp-tests.sh SANITIZE=...)
 **/cpp/tests/build-san
