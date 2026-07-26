@@ -127,7 +127,12 @@ python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2
 
 ./gradlew :audio:assembleWatermelonXCFramework   # XCFramework (device + simulador)
 
-./gradlew :audio:compileKotlinIosArm64     # Compilar Kotlin para iOS
+./gradlew :audio:compileKotlinIosArm64     # Compilar Kotlin para iOS (por target)
+./gradlew :audio:compileIosMainKotlinMetadata  # El source set COMPARTIDO iosMain.
+                                           # Los gates por target no lo cubren, y es
+                                           # lo que compila un consumidor KMP con
+                                           # targets iOS. Necesita
+                                           # enableCInteropCommonization.
 ./gradlew :audio:iosSimulatorArm64Test     # Tests K/N en simulador (requiere Xcode
                                            # con first-launch hecho, ver docs/kmp)
 ```

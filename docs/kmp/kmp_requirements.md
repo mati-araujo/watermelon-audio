@@ -1233,6 +1233,51 @@ del ticket deja de ser abierta — corresponde **retirarlo**, no implementarlo.
 site del fade y pasa un valor positivo, así que `WMA_FADE_DEFAULT` no lo toca: 300 ≥ 0
 sigue yendo a `stopWithFade(300)` igual que antes.
 
+### Nota de cierre — el smoke encontró un bloqueo de G1 (2026-07-26)
+
+El smoke manual no se pudo hacer (no hay device ni AVD), pero **compilar NoisyPad contra
+la branch sí, y encontró algo que ninguno de los 7 gates veía**.
+
+> [!CAUTION]
+> **`:audio:compileIosMainKotlinMetadata` estaba roto en esta branch: 109 referencias sin
+> resolver en `IosAudioBridge.kt`.** Bloqueaba G1.
+>
+> Los bindings de cinterop llegaban a las compilaciones **por target** (`iosArm64`,
+> `iosSimulatorArm64`) pero no al source set **compartido** `iosMain`, que es donde vive
+> `IosAudioBridge.kt`. O sea: compilaba perfecto por target —que es lo único que corrían
+> los gates— y fallaba al compilar la metadata común.
+>
+> **Se rompió con WA-3.2** (`IosAudioBridge.kt` no existe en `master`) y estuvo invisible
+> desde entonces, porque ningún gate corre esa tarea y nadie había consumido la librería
+> desde un módulo KMP con targets iOS.
+>
+> Arreglo: `kotlin.mpp.enableCInteropCommonization=true` en `gradle.properties`. 109
+> errores → 0. `compileIosMainKotlinMetadata` entra al set de gates.
+
+**Cómo apareció, que es la parte reutilizable:** el `core-domain` de NoisyPad es KMP con
+targets iOS y consume la coordenada raíz `com.watermellonstudios:audio`. Consumir desde ahí
+dispara la compilación de metadata. Ningún gate nuestro lo hacía.
+
+**Ojo con el `includeBuild` de NoisyPad:** el bloque comentado en su `settings.gradle.kts`
+sustituye **sólo** `audio-android`. Pero `core-domain` usa `libs.audio` (la raíz KMP) y el
+resto usa `libs.audio.android`. Descomentarlo tal cual deja un build **mixto** —
+`core-domain` contra el artefacto publicado y todo lo demás contra el código local. Hay que
+agregar la segunda sustitución.
+
+**Resultado del smoke automatizable, con el arreglo puesto:** `:core-domain:assemble` y
+`:core-data:assemble` de NoisyPad compilan contra la branch, 0 errores. Cubre la superficie
+Kotlin de la librería en sus dos coordenadas.
+
+**Lo que NO cubre y sigue pendiente:** el `:app:assembleDebug` completo no se pudo correr —
+la branch `feature/f4-e4-catalogo` de NoisyPad tiene su propio breakage pre-existente en
+`core-ui` (están migrando de `androidMain` a `commonMain` y `rememberHaptics` quedó a mitad
+de camino). Se verificó que es de ellos: los mismos 31 errores aparecen **sin** el
+`includeBuild`. Y sobre todo: **sigue sin correrse una sola línea del JNI migrado en un
+device.**
+
+**El árbol de NoisyPad quedó intacto** — `settings.gradle.kts` restaurado y verificado por
+hash.
+
 ### Dónde retomar (2026-07-26)
 
 **Branch:** `feature/wa-3-2-ios-audio-bridge`, **15 commits sobre `master`**. La branch
@@ -1269,13 +1314,19 @@ bloqueo de Xcode de §11 ya no existe):
 
 ```bash
 bash scripts/check-cpp-portability.sh          # guardrail WA-0.4
-bash scripts/run-cpp-tests.sh                  # 527 tests C++
+bash scripts/run-cpp-tests.sh                  # 596 tests C++
 bash scripts/build-ios.sh                      # ambos slices + link check
 ./gradlew :audio:iosSimulatorArm64Test         # 87 tests iOS
 ./gradlew :audio:testDebugUnitTest             # 50 tests JVM
 ./gradlew :audio:assembleDebug                 # Android, 4 ABIs
 ./gradlew :audio:assembleWatermelonXCFramework # XCFramework (sólo macOS)
+./gradlew :audio:compileIosMainKotlinMetadata  # el source set iOS compartido
 ```
+
+> [!IMPORTANT]
+> **`compileIosMainKotlinMetadata` es nuevo en la lista y no es decorativo.** Los otros
+> gates compilan iOS **por target**, y ninguno compila el source set compartido `iosMain`.
+> Eso dejó un break invisible durante toda la fase 3 — ver la nota de abajo.
 
 **Deuda de verificación que conviene saldar temprano — la lista del smoke manual en
 NoisyPad Android**, que ya tiene tres cosas encima:
