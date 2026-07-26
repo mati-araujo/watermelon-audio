@@ -404,28 +404,28 @@ JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfNoteOn(
     JNIEnv* env, jobject thiz, jint touchId, jint midiNote, jfloat velocity) {
     if (!ensureEngine()) return;
-    g_jniState.engine->sfNoteOn(touchId, midiNote, velocity);
+    wma_sf_note_on(g_wmaEngine, touchId, midiNote, velocity);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfNoteOff(
     JNIEnv* env, jobject thiz, jint touchId) {
     if (!ensureEngine()) return;
-    g_jniState.engine->sfNoteOff(touchId);
+    wma_sf_note_off(g_wmaEngine, touchId);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfNoteOffAll(
     JNIEnv* env, jobject thiz) {
     if (!ensureEngine()) return;
-    g_jniState.engine->sfNoteOffAll();
+    wma_sf_note_off_all(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfNoteOffAllExcept(
     JNIEnv* env, jobject thiz, jint keepTouchId) {
     if (!ensureEngine()) return;
-    g_jniState.engine->sfNoteOffAllExcept(keepTouchId);
+    wma_sf_note_off_all_except(g_wmaEngine, keepTouchId);
 }
 
 // ========== VOICE FILTER (Phase 6) ==========
@@ -434,28 +434,28 @@ JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVoiceFilterEnabled(
     JNIEnv* env, jobject thiz, jboolean enabled) {
     if (!ensureEngine()) return;
-    g_jniState.engine->setVoiceFilterEnabled(enabled);
+    wma_voice_filter_set_enabled(g_wmaEngine, enabled == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVoiceFilterCutoff(
     JNIEnv* env, jobject thiz, jfloat hz) {
     if (!ensureEngine()) return;
-    g_jniState.engine->setVoiceFilterCutoff(hz);
+    wma_voice_filter_set_cutoff(g_wmaEngine, hz);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVoiceFilterResonance(
     JNIEnv* env, jobject thiz, jfloat q) {
     if (!ensureEngine()) return;
-    g_jniState.engine->setVoiceFilterResonance(q);
+    wma_voice_filter_set_resonance(g_wmaEngine, q);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVoiceFilterMode(
     JNIEnv* env, jobject thiz, jint mode) {
     if (!ensureEngine()) return;
-    g_jniState.engine->setVoiceFilterMode(mode);
+    wma_voice_filter_set_mode(g_wmaEngine, mode);
 }
 
 JNIEXPORT jint JNICALL
@@ -1046,9 +1046,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetMon
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetDualTouchMode(
     JNIEnv* env, jobject thiz, jboolean enabled) {
-    if (g_jniState.engine) {
-        g_jniState.engine->setDualTouchMode(enabled);
-    }
+    wma_set_dual_touch_mode(g_wmaEngine, enabled == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL
@@ -1057,21 +1055,17 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetDua
     jfloat x1, jfloat y1, jfloat freq1, jfloat amp1, jfloat pressure1,
     jfloat x2, jfloat y2, jfloat freq2, jfloat amp2, jfloat pressure2,
     jfloat distance, jfloat angle) {
-    if (g_jniState.engine) {
-        g_jniState.engine->updateDualTouch(
-            x1, y1, freq1, amp1, pressure1,
-            x2, y2, freq2, amp2, pressure2,
-            distance, angle
-        );
-    }
+    wma_set_dual_touch(g_wmaEngine,
+                       x1, y1, freq1, amp1, pressure1,
+                       x2, y2, freq2, amp2, pressure2,
+                       distance, angle);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetDualTouchMixMode(
     JNIEnv* env, jobject thiz, jint modeId) {
-    if (g_jniState.engine && modeId >= 0 && modeId <= 5) {
-        g_jniState.engine->setDualTouchMixMode(static_cast<DualTouchMixMode>(modeId));
-    }
+    // The 0–5 range check lives in wma_set_dual_touch_mix_mode now.
+    wma_set_dual_touch_mix_mode(g_wmaEngine, modeId);
 }
 
 JNIEXPORT void JNICALL
@@ -1085,10 +1079,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetSec
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetDualTouchMode(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return JNI_FALSE;
-    }
-    return g_jniState.engine->getDualTouchMode() ? JNI_TRUE : JNI_FALSE;
+    return wma_get_dual_touch_mode(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 // ==================== Voice System Functions ====================
@@ -1096,29 +1087,20 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetDua
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeEnableVoiceSystem(
     JNIEnv* env, jobject thiz, jboolean enable) {
-    if (g_jniState.engine) {
-        g_jniState.engine->enableVoiceSystem(enable);
-    }
+    wma_voice_enable(g_wmaEngine, enable == JNI_TRUE);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsVoiceSystemEnabled(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return JNI_FALSE;
-    }
-    return g_jniState.engine->isVoiceSystemEnabled() ? JNI_TRUE : JNI_FALSE;
+    return wma_voice_is_enabled(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUpdateMultiTouch(
     JNIEnv* env, jobject thiz, jint count, jfloatArray touchData) {
-    if (!g_jniState.engine) {
-        return;
-    }
-
     if (count <= 0 || touchData == nullptr) {
-        g_jniState.engine->updateMultiTouch(nullptr, 0);
+        wma_voice_update_multi_touch(g_wmaEngine, nullptr, 0);
         return;
     }
 
@@ -1127,48 +1109,47 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUpdate
         return;
     }
 
-    // BUG FIX: Match Kotlin's floatsPerTouch = 6: [x, y, freq, amp, pressure, pointerId]
+    // OUT-OF-BOUNDS READ, fixed here.
+    //
+    // `count` arrives as its own parameter, independent of how long the array
+    // actually is, and nothing used to cross-check the two. The unpack reads
+    // count * 6 floats (capped at 4 touches = 24), so a caller passing count=4
+    // with a two-touch array read 12 floats past the end of the heap buffer —
+    // garbage touch data at best.
+    //
+    // The check belongs here rather than in the C API: wma_* takes a bare
+    // pointer and cannot know the length. Same reason the effect batch keeps
+    // its array-length check on this side.
     const int TOUCH_STRIDE = 6;
-    int maxTouches = std::min(static_cast<int>(count), 4);
-
-    std::vector<voice::TouchData> touches(maxTouches);
-    for (int i = 0; i < maxTouches; i++) {
-        int offset = i * TOUCH_STRIDE;
-        touches[i].x = data.get()[offset + 0];
-        touches[i].y = data.get()[offset + 1];
-        touches[i].frequency = data.get()[offset + 2];
-        touches[i].amplitude = data.get()[offset + 3];
-        touches[i].pressure = data.get()[offset + 4];
-        touches[i].pointerId = static_cast<int>(data.get()[offset + 5]);  // Use actual pointer ID
-        touches[i].active = true;  // Mark touch as active for voice activation
+    const int touchesInArray = data.size() / TOUCH_STRIDE;
+    const int maxTouches = std::min({static_cast<int>(count), touchesInArray, 4});
+    if (maxTouches <= 0) {
+        wma_voice_update_multi_touch(g_wmaEngine, nullptr, 0);
+        return;
     }
 
-    g_jniState.engine->updateMultiTouch(touches.data(), maxTouches);
+    // Layout matches Kotlin's floatsPerTouch = 6:
+    // [x, y, freq, amp, pressure, pointerId]. The unpacking itself lives in
+    // wma_voice_update_multi_touch, so iOS gets the same stride by construction.
+    wma_voice_update_multi_touch(g_wmaEngine, data.get(), maxTouches);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetActiveVoiceCount(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return 0;
-    }
-    return g_jniState.engine->getActiveVoiceCount();
+    return wma_voice_get_active_count(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMaxVoices(
     JNIEnv* env, jobject thiz, jint maxVoices) {
-    if (g_jniState.engine) {
-        g_jniState.engine->setMaxVoices(maxVoices);
-    }
+    wma_voice_set_max(g_wmaEngine, maxVoices);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVoiceStealingStrategy(
     JNIEnv* env, jobject thiz, jint strategy) {
-    if (g_jniState.engine) {
-        g_jniState.engine->setVoiceStealingStrategy(strategy);
-    }
+    wma_voice_set_stealing_strategy(g_wmaEngine, strategy);
 }
 
 // ==================== Chord Functions (Phase 9C) ====================
@@ -1176,39 +1157,32 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVoi
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTriggerChordNotes(
     JNIEnv* env, jobject thiz, jfloatArray frequencies, jfloat amplitude, jint oscillatorType) {
-    if (!g_jniState.engine || frequencies == nullptr) return;
+    // Unlike multi-touch, the count here IS the array length, so there is
+    // nothing to cross-check.
+    if (frequencies == nullptr) return;
 
-    jint count = env->GetArrayLength(frequencies);
-    if (count <= 0) return;
+    ScopedFloatArrayRW freqs(env, frequencies);
+    if (!freqs.isValid()) return;
 
-    jfloat* freqs = env->GetFloatArrayElements(frequencies, nullptr);
-    if (!freqs) return;
-
-    g_jniState.engine->triggerChordNotes(freqs, count, amplitude, oscillatorType);
-    env->ReleaseFloatArrayElements(frequencies, freqs, JNI_ABORT);
+    wma_voice_trigger_chord(g_wmaEngine, freqs.get(), freqs.size(),
+                            amplitude, oscillatorType);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUpdateChordNotes(
     JNIEnv* env, jobject thiz, jfloatArray frequencies, jfloat amplitude) {
-    if (!g_jniState.engine || frequencies == nullptr) return;
+    if (frequencies == nullptr) return;
 
-    jint count = env->GetArrayLength(frequencies);
-    if (count <= 0) return;
+    ScopedFloatArrayRW freqs(env, frequencies);
+    if (!freqs.isValid()) return;
 
-    jfloat* freqs = env->GetFloatArrayElements(frequencies, nullptr);
-    if (!freqs) return;
-
-    g_jniState.engine->updateChordNotes(freqs, count, amplitude);
-    env->ReleaseFloatArrayElements(frequencies, freqs, JNI_ABORT);
+    wma_voice_update_chord(g_wmaEngine, freqs.get(), freqs.size(), amplitude);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReleaseChordNotes(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine) {
-        g_jniState.engine->releaseChordNotes();
-    }
+    wma_voice_release_chord(g_wmaEngine);
 }
 
 // ==================== Vocoder Functions ====================

@@ -26,8 +26,6 @@
 
 #include "support/CApiFixture.h"
 
-#include <vector>
-
 #include <gtest/gtest.h>
 
 namespace wma_test {
@@ -37,31 +35,12 @@ namespace {
 constexpr int kStateStopped = 0;
 constexpr int kStateRunning = 2;
 
-// BackendType::OBOE — the fake registers itself as the system backend.
-constexpr int kBackendOboe = 1;
-
 // AudioEngine::start() declares `int fadeTimeMs = 10`. That default is the
 // whole point of WMA_FADE_DEFAULT: it is a real ramp, not an instant start.
 constexpr int kEngineDefaultFadeMs = 10;
 
-class CApiLifecycleTest : public CApiFixture {
-protected:
-    /// Bring the engine up over the fake backend with the given fade argument.
-    void startAt(int negotiatedSampleRate, int fadeTimeMs) {
-        mBackend->setNegotiatedSampleRate(negotiatedSampleRate);
-        wma_set_use_backend_manager(mWma, true);
-        ASSERT_TRUE(wma_select_backend(kBackendOboe));
-        ASSERT_EQ(wma_engine_start(mWma, fadeTimeMs), WMA_OK);
-    }
-
-    /// Render @p blocks callbacks of @p framesPerBlock frames through the engine.
-    void render(int blocks, int framesPerBlock) {
-        std::vector<float> buffer(static_cast<size_t>(framesPerBlock) * 2, 0.0f);
-        for (int i = 0; i < blocks; ++i) {
-            mWma->engine->onAudioReady(buffer.data(), nullptr, framesPerBlock);
-        }
-    }
-};
+// startAt() and render() live in CApiFixture — three suites need them now.
+using CApiLifecycleTest = CApiFixture;
 
 // ===========================================================================
 // WMA_FADE_DEFAULT vs an explicit fade length

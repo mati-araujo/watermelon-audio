@@ -21,6 +21,8 @@
 #include "api/watermelon_audio_internal.h"
 #include "platform/Logger.h"
 
+#include <vector>
+
 #include <gtest/gtest.h>
 
 namespace wma_test {
@@ -48,6 +50,31 @@ protected:
         mWma = nullptr;
         mBackend = nullptr;
         wma::setLogCallback(nullptr);
+    }
+
+    /// Bring the engine up over the fake backend with the given fade argument.
+    void startAt(int negotiatedSampleRate, int fadeTimeMs) {
+        mBackend->setNegotiatedSampleRate(negotiatedSampleRate);
+        wma_set_use_backend_manager(mWma, true);
+        // BackendType::OBOE — the fake registers itself as the system backend.
+        ASSERT_TRUE(wma_select_backend(1));
+        ASSERT_EQ(wma_engine_start(mWma, fadeTimeMs), WMA_OK);
+    }
+
+    /**
+     * Render @p blocks callbacks of @p framesPerBlock frames through the engine.
+     *
+     * More than a way to advance a fade: this is the only way several
+     * subsystems make progress at all. Voice allocation, for one, happens in
+     * VoiceManager::processSourceEvents() on the audio thread — updateMultiTouch
+     * only hands the touches to the trigger source, so the active-voice count
+     * does not move until a block has been rendered.
+     */
+    void render(int blocks, int framesPerBlock) {
+        std::vector<float> buffer(static_cast<size_t>(framesPerBlock) * 2, 0.0f);
+        for (int i = 0; i < blocks; ++i) {
+            mWma->engine->onAudioReady(buffer.data(), nullptr, framesPerBlock);
+        }
     }
 
     WmaEngine* mWma = nullptr;

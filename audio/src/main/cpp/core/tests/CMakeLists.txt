@@ -112,6 +112,7 @@ add_executable(core_tests
     test_c_api_input.cpp
     test_c_api_effects.cpp
     test_c_api_synth.cpp
+    test_c_api_voice.cpp
     support/test_platform_backends.cpp
     support/test_input_node_stub.cpp
     ${CORE_TESTED_SOURCES}
