@@ -1,7 +1,8 @@
 # Cobertura C API vs JNI — WA-0.1
 
 **Requerimiento:** `docs/kmp/kmp_requirements.md` § 5, WA-0.1
-**Generado:** 2026-07-22 · **Reproducible con:** `python3 scripts/c-api-gap.py`
+**Actualizado:** 2026-07-26 (al cerrar `oscillator/synth`) · **Reproducible con:**
+`python3 scripts/c-api-gap.py`
 
 ---
 
@@ -21,9 +22,15 @@ de bug por construcción; hasta entonces, esta tabla es el contrato.
 
 El matching es por **conjunto de tokens**: las dos superficies usan convenciones
 distintas (`nativeStartEngine` vs `wma_engine_start`) sobre el mismo vocabulario.
-Se pasa a minúsculas, se parte en tokens, se descarta el prefijo `wma` y se
-unifican algunos plurales. `get`/`set`/`is`/`has` **se conservan**: distinguen un
-getter de un setter, que son funciones distintas.
+Se pasa a minúsculas, se parte en tokens, se descarta el prefijo `wma` y el
+conector `from`, y se unifican algunos plurales. `get`/`set`/`is`/`has` **se
+conservan**: distinguen un getter de un setter, que son funciones distintas.
+
+También se pliegan las **abreviaturas** que la C API usa donde el JNI escribe la
+palabra entera (`SoundFont` → `sf`). Sin eso las 10 funciones de SoundFont
+figuraban como gap permanente —`LoadSoundFontFromPath` vs `wma_sf_load_path`,
+existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
+`oscillator/synth` (2026-07-26).
 
 - **Cubierta** = igualdad exacta de conjuntos de tokens. Alta confianza.
 - **Gap** = todo lo demás.
@@ -32,42 +39,47 @@ getter de un setter, que son funciones distintas.
 
 > [!IMPORTANT]
 > Los números de abajo son una **cota, no un censo exacto**. El gap portable real
-> está entre **79** (si todos los near-match resultan ser la misma función) y
-> **110** (si ninguno lo es). La estimación original del requerimiento (~89) cae
-> dentro de ese rango y se confirma como razonable para planificar.
+> está entre **61** (si todos los near-match resultan ser la misma función) y
+> **98** (si ninguno lo es).
 >
 > Un near-match como `SetNoiseGateEnabled ~ wma_input_set_noise_gate` es
 > plausible (un solo setter con dos parámetros), pero
 > `LooperGetArmedTrack ~ wma_looper_get_track_peak` es claramente un falso
 > positivo. Hay que revisarlos uno por uno al encarar cada categoría en WA-2.5.
+>
+> **La experiencia de las cuatro categorías cerradas dice que el extremo bajo es
+> el realista, y por abajo.** En `lifecycle` los 8 "faltantes" eran 0 reales; en
+> `input/monitor`, 14 nominales fueron 8; en `effects`, 6 fueron 1; en
+> `oscillator/synth`, 4 fueron 1. Sumado: **32 de gap nominal, 10 de trabajo
+> real.** Para dimensionar, mirar §4b, no esta tabla.
 
 ## 3. Resumen
 
 | Métrica | Valor |
 |---|---|
 | JNIEXPORT (entry points) | 278 |
-| Funciones `wma_*` | 187 |
-| Cubiertas (match exacto) | 136 |
-| **Gap total** | **142** |
+| Funciones `wma_*` | 197 |
+| Cubiertas (match exacto) | 148 |
+| **Gap total** | **130** |
 | — USB, no se porta (D4) | 32 |
-| — **Gap portable** | **110** |
-| — con near-match (revisar) | 31 |
-| — **neto a implementar** | **~79** |
+| — **Gap portable** | **98** |
+| — con near-match (revisar) | 37 |
+| — **neto a implementar** | **~61** |
 
 ### Gap portable por categoría
 
 | Categoría | Funciones |
 |---|---|
 | Looper | 39 |
-| Input / monitor | 14 |
-| Otros | 13 |
+| Input / monitor | 12 |
+| Otros | 9 |
 | Metronome | 9 |
 | Engine / lifecycle | 8 |
 | Voice / polyphony | 6 |
-| Effects | 6 |
-| Analysis | 6 |
+| Analysis | 5 |
 | Benchmark / diagnostics | 4 |
 | Oscillator / synth | 4 |
+| Effects | 1 |
 | Mode transitions | 1 |
 
 ---
@@ -116,24 +128,22 @@ getter de un setter, que son funciones distintas.
 - `nativeLooperTrimTrack`
 - `nativeLooperUnregisterStateListener`
 
-### Input / monitor (14)
+### Input / monitor (12)
 
-- `nativeGetInputLatencyMs`
-- `nativeGetInputLevelLinear`
-- `nativeGetMonitoringVolume`
+- `nativeGetMonitoringVolume` — near-match: `wma_input_get_monitoring_volume` (0.75)
 - `nativeIsInputStreamRunning` — near-match: `wma_input_is_running` (0.75)
-- `nativeIsMonitoringEnabled`
+- `nativeIsMonitoringEnabled` — near-match: `wma_input_is_monitoring_enabled` (0.75)
 - `nativeIsNoiseGateEnabled` — near-match: `wma_input_is_noise_gate_enabled` (0.80)
-- `nativeIsNoiseGateOpen`
+- `nativeIsNoiseGateOpen` — near-match: `wma_input_is_noise_gate_open` (0.80)
 - `nativeReleaseInputNode` — near-match: `wma_input_release` (0.67)
 - `nativeSetMonitoringEnabled`
-- `nativeSetMonitoringVolume`
+- `nativeSetMonitoringVolume` — near-match: `wma_input_set_monitoring_volume` (0.75)
 - `nativeSetNoiseGateEnabled` — near-match: `wma_input_set_noise_gate` (0.60)
-- `nativeSetNoiseGateThreshold` — near-match: `wma_input_set_noise_gate` (0.60)
+- `nativeSetNoiseGateThreshold` — near-match: `wma_input_set_noise_gate_threshold` (0.80)
 - `nativeStartInputStream` — near-match: `wma_input_start` (0.67)
 - `nativeStopInputStream` — near-match: `wma_input_stop` (0.67)
 
-### Otros (13)
+### Otros (9)
 
 - `nativeClearStreamError` — near-match: `wma_clear_error` (0.67)
 - `nativeCreateSplitBackend`
@@ -142,12 +152,8 @@ getter de un setter, que son funciones distintas.
 - `nativeGetIsFading` — near-match: `wma_is_fading` (0.67)
 - `nativeGetLastStreamErrorCode` — near-match: `wma_get_last_error_code` (0.80)
 - `nativeHasStreamError` — near-match: `wma_has_error` (0.67)
-- `nativeIsSoundFontLoaded`
-- `nativeLoadSoundFont`
-- `nativeLoadSoundFontFromFd`
-- `nativeLoadSoundFontFromPath`
+- `nativeLoadSoundFont` — near-match: `wma_sf_load_data` (0.67)
 - `nativeTransportFramesPerBar`
-- `nativeUnloadSoundFont`
 
 ### Metronome (9)
 
@@ -181,23 +187,13 @@ getter de un setter, que son funciones distintas.
 - `nativeUpdateChordNotes`
 - `nativeUpdateMultiTouch` — near-match: `wma_voice_update_multi_touch` (0.75)
 
-### Effects (6)
+### Analysis (5)
 
-- `nativeGetEffectChainSize` — near-match: `wma_effect_chain_size` (0.75)
-- `nativeGetSoundFontPresetBankProgram`
-- `nativeGetSoundFontPresetCount`
-- `nativeGetSoundFontPresetKeyRange`
-- `nativeGetSoundFontPresetName`
-- `nativeSetSoundFontPreset`
-
-### Analysis (6)
-
-- `nativeGetInputMeteringSnapshot`
 - `nativeGetOutputPeakLevel` — near-match: `wma_get_output_peak` (0.75)
 - `nativeGetOutputPeakLevelDb` — near-match: `wma_get_output_peak_db` (0.80)
 - `nativeGetOutputRmsLevel` — near-match: `wma_get_output_rms` (0.75)
 - `nativeGetOutputRmsLevelDb` — near-match: `wma_get_output_rms_db` (0.80)
-- `nativeSetMultipleEffectParameters`
+- `nativeSetMultipleEffectParameters` — near-match: `wma_effect_set_params_multi` (0.60)
 
 ### Benchmark / diagnostics (4)
 
@@ -213,9 +209,14 @@ getter de un setter, que son funciones distintas.
 - `nativeSetFrequencyAndAmplitude` — near-match: `wma_set_frequency_amplitude` (0.75)
 - `nativeSetVocoderCarrierFrequency` — near-match: `wma_vocoder_set_carrier_freq` (0.60)
 
+### Effects (1)
+
+- `nativeGetEffectChainSize` — near-match: `wma_effect_chain_size` (0.75)
+
 ### Mode transitions (1)
 
 - `nativeGetModeName`
+
 ---
 
 ## 4b. Delegación del JNI (WA-2.6)
@@ -234,24 +235,28 @@ eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
 función JNI.
 
 ```
-WA-2.6 — JNI delegando: 57/278
+WA-2.6 — JNI delegando: 98/278
 ```
 
 | Categoría (heurística del script) | Delegan |
 |---|---|
-| Input / monitor | 19/21 |
-| Engine / lifecycle | 12/14 |
-| Effects | 10/16 |
-| Otros | 8/27 |
-| Analysis | 5/13 |
+| Input / monitor | 21/21 |
+| Oscillator / synth | 21/21 |
+| Effects | 16/16 |
+| Otros | 15/27 |
+| Engine / lifecycle | 14/14 |
+| Analysis | 6/13 |
 | Benchmark / diagnostics | 2/6 |
 | Mixer / Regions | 1/1 |
+| Modulation | 1/3 |
+| Voice / polyphony | 1/18 |
 | el resto | 0 |
 
-**Las 57 son tres categorías cerradas**: 22 de `lifecycle`, 21 de
-`input/monitor` y 14 de `effects`. **Ninguna coincide con su fila de la tabla**,
-porque la heurística del script clasifica por keyword del nombre y no por la
-sección real de la C API:
+**Las 98 son cuatro categorías cerradas**: 22 de `lifecycle`, 21 de
+`input/monitor`, 14 de `effects` y 40 de `oscillator/synth` (secciones 4, 5, 6,
+15 y 18 juntas). **Ninguna coincide con su fila de la tabla**, porque la
+heurística del script clasifica por keyword del nombre y no por la sección real
+de la C API:
 
 - `lifecycle` = secciones 1 (Lifecycle), 2 (State) y 3 (Volume & Fade). Se
   reparte en tres filas: `nativeGetStateVersion` cae en "Benchmark" por `stat`,
@@ -264,12 +269,18 @@ sección real de la C API:
   `nativeSetArpGateLength`, que son del arpegiador y entraron por `gate`.
 - `effects` = sección 8 (Effects), 14 funciones: las 10 de la fila "Effects" más
   las 4 de parámetros, que caen en "Analysis" porque **`parameter` contiene
-  `meter`**. Los 6 pendientes de la fila "Effects" son los 5 `SoundFontPreset*`
-  (entran por `preset`, pero son el motor SoundFont, sección 6) y
-  `nativeHasVocoderEffect` (sección 15).
+  `meter`**.
+- `oscillator/synth` = secciones 4, 5, 6, 15 y 18 juntas, 40 funciones. Es la que
+  más se desparrama: el arpegiador y los osciladores caen en su fila, pero los
+  5 `SoundFontPreset*` y `nativeHasVocoderEffect` estaban en "Effects" (por
+  `preset` y `effect`), `nativeGetEngineType`/`SetEngineType` en
+  "Engine / lifecycle" (por `engine`), los `LoadSoundFont*` en "Otros", y
+  `nativeSetSecondaryOscillatorType` vive en el bloque de dual-touch del JNI, que
+  es por dónde casi se escapa.
 
-Dicho de otra forma: de las 57, **13 están en filas que no llevan el nombre de
-su categoría**. La tabla sirve para ver por dónde va la cosa, no para planificar.
+Dicho de otra forma: de las 98, **una buena parte está en filas que no llevan el
+nombre de su categoría**. La tabla sirve para ver por dónde va la cosa, no para
+planificar.
 
 > [!IMPORTANT]
 > Lección para las categorías que siguen: **el gap no dimensiona WA-2.6**. Antes
@@ -279,23 +290,28 @@ su categoría**. La tabla sirve para ver por dónde va la cosa, no para planific
 
 ## 5. Lecturas del análisis
 
-**El looper es el 35% del gap portable** (39 de 110) — es, por lejos, la
-categoría más pesada y la que más va a costar en WA-2.5. Conviene atacarla
-primero o, si el cronograma aprieta, evaluar si NoisyPad iOS v1 necesita el
-looper completo o un subconjunto.
+**El looper es el 40% del gap portable** (39 de 98) y **no se movió ni una
+función** en cuatro categorías: es un bloque intacto y, por decisión de producto,
+entra completo. Va último a propósito, para llegar con el mecanismo rodado.
 
 **USB son 32 funciones que no se portan** (D4: iOS no permite acceso USB
-genérico sin DriverKit + entitlements). Sacarlas del cálculo baja el gap de 142
-a 110 — vale la pena tenerlo presente para no sobredimensionar WA-2.5.
+genérico sin DriverKit + entitlements). Sacarlas del cálculo baja el gap de 130
+a 98 — vale la pena tenerlo presente para no sobredimensionar WA-2.5.
 
-**53 funciones `wma_*` no se alcanzan desde el JNI.** No son un problema: la C
+**51 funciones `wma_*` no se alcanzan desde el JNI.** No son un problema: la C
 API ya cubre terreno que el JNI resuelve de otra forma (por ejemplo
 `wma_engine_create`/`wma_engine_destroy`, que del lado Android son manejo de
-ciclo de vida implícito). Pero conviene revisarlas al hacer WA-2.6: si el JNI va
-a pasar a ser un wrapper de la C API, algunas de estas pueden quedar como el
-camino canónico.
+ciclo de vida implícito). Al migrar cada categoría conviene mirarlas: algunas
+son el camino canónico que el JNI todavía no usa.
 
-**"Otros" (13) hay que clasificarlo a mano.** La heurística de categorías del
+**El gap sobrestima el trabajo, sistemáticamente y por mucho.** En las cuatro
+categorías cerradas el gap nominal fue 32 y el trabajo real 10 funciones nuevas.
+La causa es siempre la misma —la C API abrevia (`sf`, `param`, `freq`) donde el
+JNI escribe entero— y cada categoría destapa una abreviatura nueva. Antes de
+dimensionar una categoría, **abrir su sección de `watermelon_audio.h` y contar a
+mano**; el gap sirve para saber dónde mirar, no cuánto falta.
+
+**"Otros" (9) hay que clasificarlo a mano.** La heurística de categorías del
 script es por keywords y no acierta siempre; ese cajón es el residuo.
 
 ## 6. Cómo actualizar este documento

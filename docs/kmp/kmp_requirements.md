@@ -1084,10 +1084,61 @@ de verdad importa (batch ≡ individual salvo en la cuenta de bumps) y es inmune
 (sección 6) y `nativeHasVocoderEffect` (sección 15). Caen en el bucket "Effects" del script
 por las keywords `preset` y `effect`.
 
+### Nota de cierre — WA-2.5/2.6, categoría `oscillator/synth` (2026-07-26)
+
+**Cuarta categoría cerrada, y la más grande hasta ahora: 40 funciones.** Cubre las
+secciones 4 (XY/Oscilador), 5 (Engine synth), 6 (SoundFont), 15 (Vocoder) y 18
+(Arpeggiador) — todo lo que hace sonido antes de la cadena de efectos.
+Delegación: **98/278**.
+
+**Se buscó el bug de divergencia a propósito y no está.** El patrón venía 3 de 3;
+ahora es 3 de 4. El arpegiador es 19/19 idéntico entre JNI y C API, guards y valores
+por defecto incluidos; vocoder 4/4; secciones 4 y 5 iguales. La única función que
+faltaba de verdad era **`wma_sf_get_preset_bank_program`**.
+
+La única asimetría es a favor de la C API y es benigna: `wma_sf_load_fd` valida
+`fd`/`offset`/`length` antes de llamar, cosa que `nativeLoadSoundFontFromFd` no hacía.
+Los dos caminos terminan en `false`, así que es un no más barato, no una respuesta
+distinta.
+
+**Casi se escapa una función.** `nativeSetSecondaryOscillatorType` es sección 4 pero
+vive en el bloque de dual-touch del JNI, lejos del resto de los osciladores. La
+encontró la métrica de delegación al quedar en 20/21, no la lectura del diff. Es el
+argumento más concreto a favor de esa métrica.
+
+**Verificación — `test_c_api_synth.cpp`, 13 tests (580 en total).** Cubre el
+round-trip del tipo de motor, el flag del arpegiador, los guards de argumentos de
+SoundFont y el contrato de handle nulo de las 40.
+
+**Dos límites quedaron escritos en el archivo en vez de tapados:**
+
+- **El range check del tipo de oscilador y la validación de frequency range no se
+  pueden testear**: los dos se movieron del JNI a la C API, y ninguno tiene getter,
+  así que un valor rechazado es indistinguible de uno aceptado desde afuera. Agregar
+  getters sólo para testear sería inventar API; dejar un test que no puede fallar
+  sería peor.
+- **El guard de `fd` de `wma_sf_load_fd` tampoco.** Se comprobó mutando: borrarlo
+  **no** hace fallar ningún test, porque el dispatcher rechaza esos valores igual.
+  El test quedó, renombrado a `BadLoaderArgumentsFailAndLoadNothing`, porque el
+  contrato sí vale — pero dice explícitamente que no prueba dónde se aplica. Los
+  checks de null sí son suyos: sin ellos un path nulo llega a tsf y eso es un crash,
+  no un `false`.
+
+Lo que sí muerde, comprobado por mutación: `wma_sf_get_preset_bank_program` debe
+dejar los out-params intactos cuando falla. Escribirlos igual hace fallar el test —
+y importa, porque banco 0 / programa 0 es un preset real (suele ser el piano), así
+que un caller que lea después de un `false` se lleva un valor plausible y falso.
+
+**Se corrigió el matcher de `c-api-gap.py`.** Las 10 funciones de SoundFont figuraban
+como gap permanente: el JNI dice `LoadSoundFontFromPath`, la C API `wma_sf_load_path`,
+y existen desde siempre. Ahora el script pliega abreviaturas (`SoundFont` → `sf`) y
+descarta `from`. **El neto bajó de ~71 a ~61 sin escribir una línea de motor** —
+9 de las 10 ahora machean, y se auditó que no entraran falsos positivos.
+
 ### Dónde retomar (2026-07-26)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **11 commits sobre `master`**. La branch
-existe en `origin` pero está **ahead 8** — sólo los 3 primeros están pusheados.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **13 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 10** — sólo los 3 primeros están pusheados.
 `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
@@ -1096,9 +1147,9 @@ existe en `origin` pero está **ahead 8** — sólo los 3 primeros están pushea
 > su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
 > si alguien corrió los gates y lo dijo.
 
-Verificación local al cerrar `effects`: portabilidad OK (315 archivos), **567 tests C++**,
-ambos slices de iOS con link check, 87 tests de simulador, 50 JVM, `assembleDebug` y
-XCFramework. Todo en verde.
+Verificación local al cerrar `oscillator/synth`: portabilidad OK (316 archivos),
+**580 tests C++**, ambos slices de iOS con link check, 87 tests de simulador, 50 JVM,
+`assembleDebug` y XCFramework. Todo en verde.
 
 ```
 ce2a105 feat(build): XCFramework en el pipeline (WA-4.1) + publish.yml a macOS
@@ -1150,13 +1201,12 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅ y `effects` ✅ cerradas** (delegación 57/278, gap neto 79 → 71) |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅, `effects` ✅ y `oscillator/synth` ✅ cerradas** (delegación 98/278, gap neto 79 → 61) |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso: WA-2.5 + WA-2.6, categoría `oscillator/synth`** (21 entry points, 0
-delegan hoy). Arrastra además los 6 que quedaron sueltos de `effects`: los 5
-`SoundFontPreset*` (sección 6) y `nativeHasVocoderEffect` (sección 15). Es lo único grande
+**Próximo paso: WA-2.5 + WA-2.6, categoría `voice`** (18 entry points, 1 delega hoy;
+sección 14 Voice System más la 7 Voice Filter y los `SfNote*` de la 6). Es lo único grande
 que queda sin bloqueo — todo lo demás del camino iOS necesita hardware o está del lado de
 NoisyPad.
 
@@ -1186,15 +1236,23 @@ re-litigarlo):
 6. Actualizar `c_api_coverage.md` y el estado acá.
 
 **Orden de categorías:** ~~lifecycle~~ ✅ → ~~input/monitor~~ ✅ → ~~effects~~ ✅ →
-**oscillator/synth** → voice → **mode** → análisis → metronome → benchmark → **looper**.
+~~oscillator/synth~~ ✅ → **voice** → **mode** → análisis → metronome → benchmark →
+**looper**.
 
 > [!TIP]
-> **Las tres categorías cerradas encontraron un bug de divergencia cada una**, y las tres
-> veces fue el mismo patrón: la C API se escribió transcribiendo el JNI función por
-> función, y en alguna se transcribió *la función equivocada* o *de menos*.
-> `wma_engine_start` colapsó dos operaciones en una; `wma_input_*` traía de más;
-> `wma_effect_set_params_batch` copió el setter individual en vez del batch. **Buscarlo a
-> propósito en cada categoría nueva** — no aparece solo, y el compilador no lo ve.
+> **Tres de las cuatro categorías cerradas encontraron un bug de divergencia**, siempre
+> por el mismo mecanismo: la C API se escribió transcribiendo el JNI función por función,
+> y en alguna se transcribió *la función equivocada* o *de menos*. `wma_engine_start`
+> colapsó dos operaciones en una; `wma_input_*` traía de más;
+> `wma_effect_set_params_batch` copió el setter individual en vez del batch.
+> `oscillator/synth` salió limpia. **Buscarlo a propósito en cada categoría nueva** — no
+> aparece solo, y el compilador no lo ve.
+
+> [!TIP]
+> **El gap sobrestima el trabajo, y por mucho.** En las cuatro categorías cerradas el gap
+> nominal fue **32** y el trabajo real **10 funciones nuevas**. La causa es siempre que la
+> C API abrevia donde el JNI escribe entero, y cada categoría destapa una abreviatura
+> nueva. Antes de dimensionar, abrir la sección de `watermelon_audio.h` y contar a mano.
 
 - **`mode` no es una más**: ahí desaparece por construcción la duplicación de
   `currentMode` / `modeTransitionInProgress` / `modeTransitionProgress` entre
