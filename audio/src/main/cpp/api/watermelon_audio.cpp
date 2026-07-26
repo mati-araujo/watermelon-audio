@@ -736,8 +736,21 @@ bool wma_input_is_running(const WmaEngine* engine) {
 
 void wma_input_set_source(WmaEngine* engine, int source) {
     if (!engine || !engine->inputNode) return;
-    if (source < 0 || source > 2) return;
-    engine->inputNode->setInputSource(static_cast<InputSource>(source));
+    if (source < 0 || source > 2) {
+        WMA_LOGE("wma_input_set_source: invalid source %d", source);
+        return;
+    }
+    // Switching source tears the stream down and brings it back up, so this is
+    // the one input setter that can throw. The guard used to live in the JNI;
+    // it belongs here instead, because a C++ exception unwinding into
+    // Kotlin/Native is not a caught error, it is a dead process.
+    try {
+        engine->inputNode->setInputSource(static_cast<InputSource>(source));
+    } catch (const std::exception& e) {
+        WMA_LOGE("wma_input_set_source: exception: %s", e.what());
+    } catch (...) {
+        WMA_LOGE("wma_input_set_source: unknown exception");
+    }
 }
 
 int wma_input_get_source(const WmaEngine* engine) {
@@ -765,9 +778,25 @@ bool wma_input_is_noise_gate_enabled(const WmaEngine* engine) {
     return engine->inputNode->isNoiseGateEnabled();
 }
 
+void wma_input_set_noise_gate_threshold(WmaEngine* engine, float threshold_db) {
+    if (!engine || !engine->inputNode) return;
+    engine->inputNode->setNoiseGateThreshold(threshold_db);
+}
+
+bool wma_input_is_noise_gate_open(const WmaEngine* engine) {
+    if (!engine || !engine->inputNode) return false;
+    return engine->inputNode->isNoiseGateOpen();
+}
+
 float wma_input_get_level(const WmaEngine* engine, int channel) {
+    // -100 dB, not 0: with no node there is no signal, and 0 dB is full scale.
     if (!engine || !engine->inputNode) return -100.0f;
     return engine->inputNode->getInputLevel(channel);
+}
+
+float wma_input_get_level_linear(const WmaEngine* engine, int channel) {
+    if (!engine || !engine->inputNode) return 0.0f;
+    return engine->inputNode->getInputLevelLinear(channel);
 }
 
 bool wma_input_is_clipping(const WmaEngine* engine) {
@@ -775,13 +804,52 @@ bool wma_input_is_clipping(const WmaEngine* engine) {
     return engine->inputNode->isClipping();
 }
 
+float wma_input_get_latency_ms(const WmaEngine* engine) {
+    if (!engine || !engine->inputNode) return 0.0f;
+    return engine->inputNode->getInputLatencyMs();
+}
+
+bool wma_input_get_metering_snapshot(const WmaEngine* engine, float* out_values) {
+    if (!engine || !engine->inputNode || !out_values) return false;
+    const auto& node = *engine->inputNode;
+    // Order is contractual — see the header, and InputStateManager on the Kotlin
+    // side, which indexes into this.
+    out_values[0] = node.getInputLevel(0);
+    out_values[1] = node.getInputLevel(1);
+    out_values[2] = node.getInputLevelLinear(0);
+    out_values[3] = node.getInputLevelLinear(1);
+    out_values[4] = node.isClipping() ? 1.0f : 0.0f;
+    out_values[5] = node.isNoiseGateOpen() ? 1.0f : 0.0f;
+    out_values[6] = node.getInputLatencyMs();
+    return true;
+}
+
 void wma_input_set_monitoring(WmaEngine* engine, bool enabled) {
     if (!engine || !engine->inputNode) return;
     engine->inputNode->setMonitoringEnabled(enabled);
 }
 
+bool wma_input_is_monitoring_enabled(const WmaEngine* engine) {
+    if (!engine || !engine->inputNode) return false;
+    return engine->inputNode->isMonitoringEnabled();
+}
+
+void wma_input_set_monitoring_volume(WmaEngine* engine, float volume) {
+    if (!engine || !engine->inputNode) return;
+    engine->inputNode->setMonitoringVolume(std::clamp(volume, 0.0f, 1.0f));
+}
+
+float wma_input_get_monitoring_volume(const WmaEngine* engine) {
+    if (!engine || !engine->inputNode) return 0.0f;
+    return engine->inputNode->getMonitoringVolume();
+}
+
 void wma_input_release(WmaEngine* engine) {
     if (!engine) return;
+    // Under the mutex, like wmaEnsureInputNode: creating and destroying the node
+    // race against each other, and the JNI's releaseInputNode() (which used to
+    // take this lock itself) now delegates here.
+    std::lock_guard<std::mutex> lock(engine->inputNodeMutex);
     if (engine->inputNode) {
         engine->inputNode->stopInputStream();
         engine->inputNode.reset();

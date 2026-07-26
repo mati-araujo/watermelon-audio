@@ -76,14 +76,14 @@ bool ensureInputNode() {
 void releaseInputNode() {
     // Both handles have to drop together: leaving the engine's copy alive would
     // recreate the split this function exists to prevent.
-    if (g_jniState.inputNode) {
-        g_jniState.inputNode->stopInputStream();
-        g_jniState.inputNode.reset();
-    }
-    if (g_wmaEngine) {
-        std::lock_guard<std::mutex> lock(g_wmaEngine->inputNodeMutex);
-        g_wmaEngine->inputNode.reset();
-    }
+    //
+    // The stream stop and the engine-side drop are wma_input_release()'s job
+    // (it takes inputNodeMutex). What stays here is the half the C API cannot
+    // know about: the JNI's own mirror of the shared_ptr. Note the node itself
+    // survives until this second handle drops — which is why the stop happens
+    // first, inside the C API, rather than being left to the destructor.
+    wma_input_release(g_wmaEngine);
+    g_jniState.inputNode.reset();
 }
 
 // ==================== JniCache Implementation ====================

@@ -986,181 +986,156 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeModeRe
 }
 
 // ==================== Input Functions ====================
+//
+// WA-2.6, category `input/monitor`. Same shape as the lifecycle block: the null
+// checks and the default returns live in api/watermelon_audio.cpp now.
+//
+// Two things do NOT move, and both are about the JNI's own mirror of the node:
+//
+//   - ensureInputNode() (jni_engine.cpp) still runs before wma_input_start().
+//     The C API creates the node on demand too, but it has no way to know about
+//     g_jniState.inputNode, so calling it alone would leave the mirror empty.
+//
+//   - releaseInputNode() still wraps wma_input_release(), because the same
+//     mirror has to drop with it.
+//
+// THIS CHANGES BEHAVIOUR ON ANDROID, in two spots, both because the C API does
+// more than the JNI used to — see the notes on the individual functions.
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartInputStream(
     JNIEnv* env, jobject thiz) {
+    // ANDROID BEHAVIOUR CHANGE: when InputNode::startInputStream() fails, this
+    // used to just report false. wma_input_start() then asks BackendManager for
+    // capture on the existing output stream, which may reopen it. Only the
+    // failure path is affected — a successful mic open returns before that — and
+    // requestCapture() falls back to reopening without capture, so the worst
+    // case is a stream restart instead of a silent false. Needs the device smoke.
     if (!ensureInputNode()) {
         return JNI_FALSE;
     }
-    return g_jniState.inputNode->startInputStream() ? JNI_TRUE : JNI_FALSE;
+    return wma_input_start(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStopInputStream(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.inputNode) {
-        g_jniState.inputNode->stopInputStream();
-    }
+    // Also withdraws the capture request, which the JNI never did. Verified not
+    // to trigger a reopen: BackendManager::requestCapture returns early when the
+    // request is being dropped rather than raised.
+    wma_input_stop(g_wmaEngine);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsInputStreamRunning(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.inputNode) {
-        return JNI_FALSE;
-    }
-    return g_jniState.inputNode->isInputStreamRunning() ? JNI_TRUE : JNI_FALSE;
+    // ANDROID BEHAVIOUR CHANGE: wma_input_is_running() also reports true when
+    // the backend itself carries capture (full-duplex) without a separate node
+    // stream. On Android that is the USB/split path, which used to read as "not
+    // running" here even while input was flowing. Needs the device smoke.
+    return wma_input_is_running(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetInputSource(
     JNIEnv* env, jobject thiz, jint source) {
-    if (!g_jniState.inputNode) {
-        return;
-    }
-    if (source < 0 || source > 2) {
-        LOGE("AudioNativeBridge.setInputSource: invalid source %d", source);
-        return;
-    }
-    try {
-        g_jniState.inputNode->setInputSource(static_cast<InputSource>(source));
-    } catch (const std::exception& e) {
-        LOGE("AudioNativeBridge.setInputSource: exception: %s", e.what());
-    }
+    // The range check and the try/catch moved into wma_input_set_source.
+    wma_input_set_source(g_wmaEngine, source);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInputSource(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.inputNode) {
-        return 0;
-    }
-    return static_cast<jint>(g_jniState.inputNode->getInputSource());
+    return static_cast<jint>(wma_input_get_source(g_wmaEngine));
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetInputGain(
     JNIEnv* env, jobject thiz, jfloat gainDb) {
-    if (g_jniState.inputNode) {
-        g_jniState.inputNode->setInputGain(gainDb);
-    }
+    wma_input_set_gain(g_wmaEngine, gainDb);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInputGain(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.inputNode) {
-        return 0.0f;
-    }
-    return g_jniState.inputNode->getInputGain();
+    return wma_input_get_gain(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetNoiseGateEnabled(
     JNIEnv* env, jobject thiz, jboolean enabled) {
-    if (g_jniState.inputNode) {
-        g_jniState.inputNode->setNoiseGateEnabled(enabled);
-    }
+    wma_input_set_noise_gate(g_wmaEngine, enabled);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsNoiseGateEnabled(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.inputNode) {
-        return JNI_FALSE;
-    }
-    return g_jniState.inputNode->isNoiseGateEnabled() ? JNI_TRUE : JNI_FALSE;
+    return wma_input_is_noise_gate_enabled(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetNoiseGateThreshold(
     JNIEnv* env, jobject thiz, jfloat thresholdDb) {
-    if (g_jniState.inputNode) {
-        g_jniState.inputNode->setNoiseGateThreshold(thresholdDb);
-    }
+    wma_input_set_noise_gate_threshold(g_wmaEngine, thresholdDb);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInputLevel(
     JNIEnv* env, jobject thiz, jint channel) {
-    if (!g_jniState.inputNode) {
-        return -100.0f;
-    }
-    return g_jniState.inputNode->getInputLevel(channel);
+    return wma_input_get_level(g_wmaEngine, channel);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInputLevelLinear(
     JNIEnv* env, jobject thiz, jint channel) {
-    if (!g_jniState.inputNode) {
-        return 0.0f;
-    }
-    return g_jniState.inputNode->getInputLevelLinear(channel);
+    return wma_input_get_level_linear(g_wmaEngine, channel);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsInputClipping(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.inputNode) {
-        return JNI_FALSE;
-    }
-    return g_jniState.inputNode->isClipping() ? JNI_TRUE : JNI_FALSE;
+    return wma_input_is_clipping(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsNoiseGateOpen(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.inputNode) {
-        return JNI_FALSE;
-    }
-    return g_jniState.inputNode->isNoiseGateOpen() ? JNI_TRUE : JNI_FALSE;
+    return wma_input_is_noise_gate_open(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInputLatencyMs(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.inputNode) {
-        return 0.0f;
-    }
-    return g_jniState.inputNode->getInputLatencyMs();
+    return wma_input_get_latency_ms(g_wmaEngine);
 }
 
-// Batched input metering: returns the 7 values a UI meter polls per frame in a
-// single JNI crossing (was 7 separate getters + a running-state check = 8
-// crossings/tick at 60 fps ≈ 480/s). Layout MUST stay in sync with the Kotlin
-// consumer (InputStateManager):
-//   [0] level dB ch0    [1] level dB ch1
-//   [2] level linear ch0 [3] level linear ch1
-//   [4] clipping (1/0)  [5] noise gate open (1/0)  [6] latency ms
+// Batched input metering: the 7 values a UI meter polls per frame in a single
+// JNI crossing (was 7 separate getters + a running-state check = 8 crossings per
+// tick at 60 fps ≈ 480/s). The layout is the C API's contract now — see
+// wma_input_get_metering_snapshot — and MUST stay in sync with the Kotlin
+// consumer (InputStateManager).
+//
 // Returns null when there is no input node so the caller can fall back to the
 // individual getters (older library / no active stream).
 JNIEXPORT jfloatArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInputMeteringSnapshot(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.inputNode) {
+    float values[WMA_INPUT_METERING_VALUES];
+    if (!wma_input_get_metering_snapshot(g_wmaEngine, values)) {
         return nullptr;
     }
-    jfloat values[7] = {
-        g_jniState.inputNode->getInputLevel(0),
-        g_jniState.inputNode->getInputLevel(1),
-        g_jniState.inputNode->getInputLevelLinear(0),
-        g_jniState.inputNode->getInputLevelLinear(1),
-        g_jniState.inputNode->isClipping() ? 1.0f : 0.0f,
-        g_jniState.inputNode->isNoiseGateOpen() ? 1.0f : 0.0f,
-        g_jniState.inputNode->getInputLatencyMs(),
-    };
-    jfloatArray result = env->NewFloatArray(7);
+    jfloatArray result = env->NewFloatArray(WMA_INPUT_METERING_VALUES);
     if (result == nullptr) {
         return nullptr;
     }
-    env->SetFloatArrayRegion(result, 0, 7, values);
+    env->SetFloatArrayRegion(result, 0, WMA_INPUT_METERING_VALUES, values);
     return result;
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReleaseInputNode(
     JNIEnv* env, jobject thiz) {
+    // Not wma_input_release() directly: the JNI's mirror handle has to drop too.
     releaseInputNode();
 }
 
@@ -1169,36 +1144,26 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReleas
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMonitoringEnabled(
     JNIEnv* env, jobject thiz, jboolean enabled) {
-    if (g_jniState.inputNode) {
-        g_jniState.inputNode->setMonitoringEnabled(enabled);
-    }
+    wma_input_set_monitoring(g_wmaEngine, enabled);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsMonitoringEnabled(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.inputNode) {
-        return JNI_FALSE;
-    }
-    return g_jniState.inputNode->isMonitoringEnabled() ? JNI_TRUE : JNI_FALSE;
+    return wma_input_is_monitoring_enabled(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMonitoringVolume(
     JNIEnv* env, jobject thiz, jfloat volume) {
-    if (g_jniState.inputNode) {
-        volume = clampFloat(volume, 0.0f, 1.0f);
-        g_jniState.inputNode->setMonitoringVolume(volume);
-    }
+    // wma_input_set_monitoring_volume clamps to [0, 1] itself.
+    wma_input_set_monitoring_volume(g_wmaEngine, volume);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetMonitoringVolume(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.inputNode) {
-        return 0.0f;
-    }
-    return g_jniState.inputNode->getMonitoringVolume();
+    return wma_input_get_monitoring_volume(g_wmaEngine);
 }
 
 // ==================== Dual Touch Functions ====================

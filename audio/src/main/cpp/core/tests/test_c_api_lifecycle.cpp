@@ -24,11 +24,7 @@
  * header: the C API has no "render a block" function and should not grow one.
  */
 
-#include "support/FakeAudioBackend.h"
-
-#include "api/watermelon_audio.h"
-#include "api/watermelon_audio_internal.h"
-#include "platform/Logger.h"
+#include "support/CApiFixture.h"
 
 #include <vector>
 
@@ -48,33 +44,8 @@ constexpr int kBackendOboe = 1;
 // whole point of WMA_FADE_DEFAULT: it is a real ramp, not an instant start.
 constexpr int kEngineDefaultFadeMs = 10;
 
-class CApiLifecycleTest : public ::testing::Test {
+class CApiLifecycleTest : public CApiFixture {
 protected:
-    void SetUp() override {
-        wma::setLogCallback([](wma::LogLevel, const char*, const char*) {});
-
-        resetLastCreatedSystemBackend();
-        // wma_engine_create() builds its own BackendManager and registers it as
-        // the global instance, so — unlike BackendPathFixture — the fixture
-        // must not build one itself. The manager's constructor is what reaches
-        // the substituted platform registration point and gets the fake.
-        mWma = wma_engine_create();
-        ASSERT_NE(mWma, nullptr);
-
-        mBackend = lastCreatedSystemBackend();
-        ASSERT_NE(mBackend, nullptr)
-            << "the test platform registration point did not hand the manager a fake";
-    }
-
-    void TearDown() override {
-        // Destroys the engine and clears the global manager pointer, in that
-        // order. AudioEngine's destructor reclaims any stop-fade worker.
-        wma_engine_destroy(mWma);
-        mWma = nullptr;
-        mBackend = nullptr;
-        wma::setLogCallback(nullptr);
-    }
-
     /// Bring the engine up over the fake backend with the given fade argument.
     void startAt(int negotiatedSampleRate, int fadeTimeMs) {
         mBackend->setNegotiatedSampleRate(negotiatedSampleRate);
@@ -90,9 +61,6 @@ protected:
             mWma->engine->onAudioReady(buffer.data(), nullptr, framesPerBlock);
         }
     }
-
-    WmaEngine* mWma = nullptr;
-    FakeAudioBackend* mBackend = nullptr;
 };
 
 // ===========================================================================

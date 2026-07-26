@@ -505,14 +505,56 @@ WMA_API void wma_input_set_noise_gate(WmaEngine* engine, bool enabled);
 /** Check if noise gate is enabled. */
 WMA_API bool wma_input_is_noise_gate_enabled(const WmaEngine* engine);
 
-/** Get input level for a channel (dB). */
+/** Set the noise gate threshold in dB. */
+WMA_API void wma_input_set_noise_gate_threshold(WmaEngine* engine, float threshold_db);
+
+/** Check if the noise gate is currently open (letting signal through). */
+WMA_API bool wma_input_is_noise_gate_open(const WmaEngine* engine);
+
+/** Get input level for a channel (dB, -120 to 0). Returns -100 with no input. */
 WMA_API float wma_input_get_level(const WmaEngine* engine, int channel);
+
+/** Get input level for a channel, linear (0 to 1). */
+WMA_API float wma_input_get_level_linear(const WmaEngine* engine, int channel);
 
 /** Check if input is clipping. */
 WMA_API bool wma_input_is_clipping(const WmaEngine* engine);
 
+/** Get the input latency in milliseconds. */
+WMA_API float wma_input_get_latency_ms(const WmaEngine* engine);
+
+/** Number of floats wma_input_get_metering_snapshot() writes. */
+#define WMA_INPUT_METERING_VALUES 7
+
+/**
+ * Read the whole input meter in one call.
+ *
+ * A UI meter polls these seven values every frame, and going through the
+ * getters one by one costs a language-boundary crossing each (eight per tick at
+ * 60 fps ≈ 480/s on the JNI side). This exists so that stays one crossing.
+ *
+ * @param[out] out_values  WMA_INPUT_METERING_VALUES floats, in this order:
+ *                         [0] level dB ch0     [1] level dB ch1
+ *                         [2] level linear ch0 [3] level linear ch1
+ *                         [4] clipping (1/0)   [5] noise gate open (1/0)
+ *                         [6] latency ms
+ * @return false if there is no input node, or out_values is NULL. The buffer is
+ *         left untouched in that case — the caller is meant to fall back to the
+ *         individual getters rather than read zeros as real measurements.
+ */
+WMA_API bool wma_input_get_metering_snapshot(const WmaEngine* engine, float* out_values);
+
 /** Enable/disable input monitoring. */
 WMA_API void wma_input_set_monitoring(WmaEngine* engine, bool enabled);
+
+/** Check if input monitoring is enabled. */
+WMA_API bool wma_input_is_monitoring_enabled(const WmaEngine* engine);
+
+/** Set the monitoring volume. Clamped to 0.0 – 1.0. */
+WMA_API void wma_input_set_monitoring_volume(WmaEngine* engine, float volume);
+
+/** Get the monitoring volume (0.0 – 1.0). */
+WMA_API float wma_input_get_monitoring_volume(const WmaEngine* engine);
 
 /** Release the input node entirely. */
 WMA_API void wma_input_release(WmaEngine* engine);
