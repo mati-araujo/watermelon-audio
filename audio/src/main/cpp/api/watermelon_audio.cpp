@@ -456,11 +456,35 @@ WmaResult wma_effect_set_params_batch(WmaEngine* engine, int index,
     }
     if (!param_ids || !values || count <= 0) return WMA_OK;
     try {
-        for (int i = 0; i < count; ++i) {
-            if (std::isfinite(values[i])) {
-                engine->engine->setParameter(static_cast<size_t>(index), param_ids[i], values[i]);
-            }
-        }
+        // NOT a loop over setParameter: that bumps the state version once per
+        // parameter, and the Kotlin synchronizer emits on every bump — a scene
+        // load would be observed as N partial states. This is AUD-6, which the
+        // JNI fixed years ago and this function quietly kept, because it was
+        // written as a transcription of the individual setter rather than of
+        // the batch one. setParametersBatch bumps exactly once, at the end.
+        std::vector<int> effectIndices(static_cast<size_t>(count), index);
+        engine->engine->setParametersBatch(effectIndices.data(), param_ids, values,
+                                           static_cast<size_t>(count));
+        return WMA_OK;
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
+WmaResult wma_effect_set_params_multi(WmaEngine* engine,
+                                       const int* effect_indices,
+                                       const int* param_ids,
+                                       const float* values,
+                                       int count) {
+    WMA_CHECK(engine);
+    if (!effect_indices || !param_ids || !values || count <= 0) return WMA_OK;
+    try {
+        // No index guard here on purpose: setParametersBatch skips out-of-range
+        // effects itself. Rejecting the whole call because one entry in a scene
+        // points at an effect that is no longer in the chain would lose the
+        // other N-1 updates.
+        engine->engine->setParametersBatch(effect_indices, param_ids, values,
+                                           static_cast<size_t>(count));
         return WMA_OK;
     } catch (...) {
         return WMA_ERROR_UNKNOWN;

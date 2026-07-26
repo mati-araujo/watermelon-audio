@@ -508,92 +508,52 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMod
 }
 
 // ==================== Effect Functions ====================
-// These delegate to the same implementations as NativeAudioBridge
+//
+// WA-2.6, category `effects` — section 8 of watermelon_audio.h.
+//
+// The C API already returned this file's exact error codes (WmaResult mirrors
+// the JniError namespace value for value), so these are the most mechanical
+// wrappers of the three categories migrated so far: the index guards, the
+// EFFECT_TYPE_COUNT check and the try/catch blocks all live there now.
+//
+// What stays here is the JNI-only work: pinning the Java arrays
+// (ScopedIntArrayRW / ScopedFloatArrayRW) and checking their lengths agree,
+// which is not something a C API taking plain pointers can do for us.
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeAddEffect(
     JNIEnv* env, jobject thiz, jint typeId) {
-    if (!g_jniState.engine) {
-        return JniError::ENGINE_NOT_INITIALIZED;
-    }
-    if (typeId < 0 || typeId >= static_cast<int>(EFFECT_TYPE_COUNT)) {
-        return JniError::INVALID_EFFECT_TYPE;
-    }
-    try {
-        bool success = g_jniState.engine->addEffect(static_cast<EffectType>(typeId));
-        if (!success) {
-            return JniError::EFFECT_CHAIN_FULL;
-        }
-        return static_cast<int>(g_jniState.engine->getNumEffects()) - 1;
-    } catch (const std::bad_alloc&) {
-        return JniError::MEMORY_ALLOCATION_FAILED;
-    } catch (...) {
-        return JniError::UNKNOWN_ERROR;
-    }
+    // Returns the new effect's index on success, a negative WmaResult on error.
+    return wma_effect_add(g_wmaEngine, typeId);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeRemoveEffect(
     JNIEnv* env, jobject thiz, jint index) {
-    if (!g_jniState.engine) {
-        return JniError::ENGINE_NOT_INITIALIZED;
-    }
-    if (index < 0 || static_cast<size_t>(index) >= g_jniState.engine->getNumEffects()) {
-        return JniError::INVALID_EFFECT_INDEX;
-    }
-    try {
-        g_jniState.engine->removeEffect(static_cast<size_t>(index));
-        return JniError::SUCCESS;
-    } catch (...) {
-        return JniError::UNKNOWN_ERROR;
-    }
+    return wma_effect_remove(g_wmaEngine, index);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeClearAllEffects(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return JniError::ENGINE_NOT_INITIALIZED;
-    }
-    try {
-        g_jniState.engine->clearAllEffects();
-        return JniError::SUCCESS;
-    } catch (...) {
-        return JniError::UNKNOWN_ERROR;
-    }
+    return wma_effect_clear_all(g_wmaEngine);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEffectParameter(
     JNIEnv* env, jobject thiz, jint index, jint paramId, jfloat value) {
-    if (!g_jniState.engine) {
-        return JniError::ENGINE_NOT_INITIALIZED;
-    }
-    if (index < 0 || static_cast<size_t>(index) >= g_jniState.engine->getNumEffects()) {
-        return JniError::INVALID_EFFECT_INDEX;
-    }
-    if (paramId < 0) {
-        return JniError::INVALID_PARAMETER_ID;
-    }
-    if (!std::isfinite(value)) {
-        return JniError::PARAMETER_OUT_OF_RANGE;
-    }
-    try {
-        g_jniState.engine->setParameter(static_cast<size_t>(index), paramId, value);
-        return JniError::SUCCESS;
-    } catch (...) {
-        return JniError::UNKNOWN_ERROR;
-    }
+    return wma_effect_set_param(g_wmaEngine, index, paramId, value);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEffectParametersBatch(
     JNIEnv* env, jobject thiz, jint index, jintArray paramIds, jfloatArray values) {
-    if (!g_jniState.engine) {
+    // Kept ahead of the array work so a missing engine still outranks an empty
+    // batch, which is the precedence this entry point has always had. It is the
+    // one null check in this block, and it is about error ordering, not safety —
+    // wma_effect_set_params_batch rejects a null handle by itself.
+    if (!wma_is_initialized(g_wmaEngine)) {
         return JniError::ENGINE_NOT_INITIALIZED;
-    }
-    if (index < 0 || static_cast<size_t>(index) >= g_jniState.engine->getNumEffects()) {
-        return JniError::INVALID_EFFECT_INDEX;
     }
 
     jsize length = env->GetArrayLength(paramIds);
@@ -608,21 +568,11 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEff
         return JniError::MEMORY_ALLOCATION_FAILED;
     }
 
-    try {
-        // Single-effect batch: build a stack-allocated effectIndices array and
-        // route through setParametersBatch so we get one state-version bump
-        // for the whole batch instead of N.
-        std::vector<int> effectIndices(static_cast<size_t>(length), index);
-        g_jniState.engine->setParametersBatch(
-            effectIndices.data(),
-            ids.get(),
-            vals.get(),
-            static_cast<size_t>(length)
-        );
-        return JniError::SUCCESS;
-    } catch (...) {
-        return JniError::UNKNOWN_ERROR;
-    }
+    // One state-version bump for the whole batch, not N — see AUD-6 in the
+    // header. The C API used to loop over the individual setter here, so iOS
+    // still had the bug this path exists to avoid.
+    return wma_effect_set_params_batch(g_wmaEngine, index, ids.get(), vals.get(),
+                                       static_cast<int>(length));
 }
 
 // Phase 4.1: Multi-effect batch parameter update
@@ -633,7 +583,9 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMul
     jintArray paramIds,
     jfloatArray values) {
 
-    if (!g_jniState.engine) {
+    // Same reason as the single-effect batch above: a missing engine outranks a
+    // size mismatch, which is the order this has always reported.
+    if (!wma_is_initialized(g_wmaEngine)) {
         return JniError::ENGINE_NOT_INITIALIZED;
     }
 
@@ -651,140 +603,60 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMul
         return JniError::INVALID_OPERATION;
     }
 
-    if (length == 0) {
-        return JniError::SUCCESS;
-    }
-
-    try {
-        // Single state-version bump at the end (AUD-6): scene loads previously
-        // produced N version bumps for N parameters, causing the Kotlin
-        // synchronizer to potentially observe partial states between updates.
-        g_jniState.engine->setParametersBatch(
-            indices.get(),
-            params.get(),
-            vals.get(),
-            static_cast<size_t>(length)
-        );
+    jint result = wma_effect_set_params_multi(g_wmaEngine, indices.get(), params.get(),
+                                              vals.get(), static_cast<int>(length));
+    if (result == JniError::SUCCESS && length > 0) {
         LOGI("nativeSetMultipleEffectParameters: applied %d updates", static_cast<int>(length));
-        return JniError::SUCCESS;
-    } catch (const std::exception& e) {
-        LOGE("nativeSetMultipleEffectParameters: exception: %s", e.what());
-        return JniError::UNKNOWN_ERROR;
     }
+    return result;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEffectBypass(
     JNIEnv* env, jobject thiz, jint index, jboolean bypass) {
-    if (!g_jniState.engine) {
-        return JniError::ENGINE_NOT_INITIALIZED;
-    }
-    if (index < 0 || static_cast<size_t>(index) >= g_jniState.engine->getNumEffects()) {
-        return JniError::INVALID_EFFECT_INDEX;
-    }
-    try {
-        g_jniState.engine->setBypass(static_cast<size_t>(index), bypass);
-        return JniError::SUCCESS;
-    } catch (...) {
-        return JniError::UNKNOWN_ERROR;
-    }
+    return wma_effect_set_bypass(g_wmaEngine, index, bypass == JNI_TRUE);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReorderEffects(
     JNIEnv* env, jobject thiz, jint fromIndex, jint toIndex) {
-    if (!g_jniState.engine) {
-        return JniError::ENGINE_NOT_INITIALIZED;
-    }
-    size_t chainSize = g_jniState.engine->getNumEffects();
-    if (fromIndex < 0 || static_cast<size_t>(fromIndex) >= chainSize ||
-        toIndex < 0 || static_cast<size_t>(toIndex) >= chainSize) {
-        return JniError::INVALID_EFFECT_INDEX;
-    }
-    try {
-        g_jniState.engine->reorderEffects(static_cast<size_t>(fromIndex), static_cast<size_t>(toIndex));
-        return JniError::SUCCESS;
-    } catch (...) {
-        return JniError::UNKNOWN_ERROR;
-    }
+    return wma_effect_reorder(g_wmaEngine, fromIndex, toIndex);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetEffectChainSize(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return 0;
-    }
-    return static_cast<jint>(g_jniState.engine->getNumEffects());
+    return static_cast<jint>(wma_effect_chain_size(g_wmaEngine));
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetEffectType(
     JNIEnv* env, jobject thiz, jint index) {
-    if (!g_jniState.engine || index < 0 ||
-        static_cast<size_t>(index) >= g_jniState.engine->getNumEffects()) {
-        return -1;
-    }
-    try {
-        return static_cast<jint>(g_jniState.engine->getEffectType(static_cast<size_t>(index)));
-    } catch (...) {
-        return -1;
-    }
+    return static_cast<jint>(wma_effect_get_type(g_wmaEngine, index));
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetEffectParameter(
     JNIEnv* env, jobject thiz, jint index, jint paramId) {
-    if (!g_jniState.engine || index < 0 ||
-        static_cast<size_t>(index) >= g_jniState.engine->getNumEffects()) {
-        return 0.0f;
-    }
-    try {
-        return g_jniState.engine->getParameter(static_cast<size_t>(index), paramId);
-    } catch (...) {
-        return 0.0f;
-    }
+    return wma_effect_get_param(g_wmaEngine, index, paramId);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsEffectBypassed(
     JNIEnv* env, jobject thiz, jint index) {
-    if (!g_jniState.engine || index < 0 ||
-        static_cast<size_t>(index) >= g_jniState.engine->getNumEffects()) {
-        return JNI_FALSE;
-    }
-    try {
-        return g_jniState.engine->isBypassed(static_cast<size_t>(index)) ? JNI_TRUE : JNI_FALSE;
-    } catch (...) {
-        return JNI_FALSE;
-    }
+    return wma_effect_is_bypassed(g_wmaEngine, index) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEffectsBypass(
     JNIEnv* env, jobject thiz, jboolean bypass) {
-    if (!g_jniState.engine) {
-        return JniError::ENGINE_NOT_INITIALIZED;
-    }
-    try {
-        g_jniState.engine->setEffectsBypass(bypass == JNI_TRUE);
-        return JniError::SUCCESS;
-    } catch (...) {
-        return JniError::UNKNOWN_ERROR;
-    }
+    return wma_effect_set_global_bypass(g_wmaEngine, bypass == JNI_TRUE);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsEffectsBypassed(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) {
-        return JNI_FALSE;
-    }
-    try {
-        return g_jniState.engine->isEffectsBypassed() ? JNI_TRUE : JNI_FALSE;
-    } catch (...) {
-        return JNI_FALSE;
-    }
+    return wma_effect_is_global_bypassed(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 // ==================== Global BPM ====================

@@ -110,6 +110,7 @@ add_executable(core_tests
     test_capture_requests.cpp
     test_c_api_lifecycle.cpp
     test_c_api_input.cpp
+    test_c_api_effects.cpp
     support/test_platform_backends.cpp
     support/test_input_node_stub.cpp
     ${CORE_TESTED_SOURCES}

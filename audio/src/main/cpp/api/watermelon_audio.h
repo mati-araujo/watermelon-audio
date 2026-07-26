@@ -380,13 +380,42 @@ WMA_API WmaResult wma_effect_set_param(WmaEngine* engine, int index, int param_i
 WMA_API float wma_effect_get_param(const WmaEngine* engine, int index, int param_id);
 
 /**
- * Batch-set parameters on a single effect.
+ * Batch-set parameters on a single effect, with ONE state-version bump.
+ *
+ * The single bump is the whole point, not an optimisation. Setting N parameters
+ * one at a time bumps the version N times, and the Kotlin-side StateSynchronizer
+ * emits on every bump — so a scene load is observed as a sequence of partial
+ * states rather than one coherent one. That is AUD-6.
+ *
  * @param param_ids  Array of parameter IDs
  * @param values     Array of parameter values
  * @param count      Number of elements
+ * @return WMA_OK also when count is 0 or an array is NULL — nothing to do is
+ *         not an error.
  */
 WMA_API WmaResult wma_effect_set_params_batch(WmaEngine* engine, int index,
                                                const int* param_ids, const float* values,
+                                               int count);
+
+/**
+ * Batch-set parameters across SEVERAL effects, with one state-version bump.
+ *
+ * The scene-load path: a scene touches many effects at once, and doing it with
+ * one wma_effect_set_params_batch() call per effect brings the partial states
+ * back, one per effect.
+ *
+ * @param effect_indices  Array of effect indices, parallel to the other two
+ * @param param_ids       Array of parameter IDs
+ * @param values          Array of parameter values
+ * @param count           Number of elements in each array
+ * @return WMA_OK also when count is 0 or an array is NULL. Out-of-range effect
+ *         indices and non-finite values are skipped silently rather than
+ *         failing the whole batch.
+ */
+WMA_API WmaResult wma_effect_set_params_multi(WmaEngine* engine,
+                                               const int* effect_indices,
+                                               const int* param_ids,
+                                               const float* values,
                                                int count);
 
 /** Set bypass state of an effect. */
