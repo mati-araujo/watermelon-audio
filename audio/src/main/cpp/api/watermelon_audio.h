@@ -321,6 +321,20 @@ WMA_API bool wma_sf_is_loaded(const WmaEngine* engine);
 WMA_API bool wma_sf_get_preset_key_range(const WmaEngine* engine, int preset_index,
                                           int* out_min_key, int* out_max_key);
 
+/**
+ * Get the MIDI bank and program of a SoundFont preset.
+ *
+ * Bank/program is how a preset is addressed from outside the file — a saved
+ * scene stores those two numbers rather than the preset index, which shifts
+ * when a different SoundFont is loaded.
+ *
+ * @param[out] out_bank     MIDI bank number
+ * @param[out] out_program  MIDI program number
+ * @return true if the preset exists; the out params are untouched otherwise
+ */
+WMA_API bool wma_sf_get_preset_bank_program(const WmaEngine* engine, int preset_index,
+                                             int* out_bank, int* out_program);
+
 /** Start/update a SoundFont note. */  /* RT-safe */
 WMA_API void wma_sf_note_on(WmaEngine* engine, int touch_id, int midi_note, float velocity);
 

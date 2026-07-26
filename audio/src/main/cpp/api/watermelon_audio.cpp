@@ -333,6 +333,21 @@ bool wma_sf_get_preset_key_range(const WmaEngine* engine, int preset_index,
     return ok;
 }
 
+bool wma_sf_get_preset_bank_program(const WmaEngine* engine, int preset_index,
+                                     int* out_bank, int* out_program) {
+    WMA_CHECK_VAL(engine, false);
+    // -1 rather than 0: bank 0 / program 0 is a real preset (usually the piano),
+    // so a caller reading the out params after a false return would take the
+    // default for an answer. Mirrors what the JNI does before building its array.
+    int bank = -1, program = -1;
+    bool ok = engine->engine->getSoundFontPresetBankProgram(preset_index, bank, program);
+    if (ok) {
+        if (out_bank)    *out_bank = bank;
+        if (out_program) *out_program = program;
+    }
+    return ok;
+}
+
 void wma_sf_note_on(WmaEngine* engine, int touch_id, int midi_note, float velocity) {
     WMA_CHECK_VOID(engine);
     engine->engine->sfNoteOn(touch_id, midi_note, velocity);
