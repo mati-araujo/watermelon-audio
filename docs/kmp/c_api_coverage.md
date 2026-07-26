@@ -234,28 +234,39 @@ eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
 función JNI.
 
 ```
-WA-2.6 — JNI delegando: 22/278
+WA-2.6 — JNI delegando: 43/278
 ```
 
 | Categoría (heurística del script) | Delegan |
 |---|---|
+| Input / monitor | 19/21 |
 | Engine / lifecycle | 12/14 |
 | Otros | 8/27 |
 | Benchmark / diagnostics | 2/6 |
+| Analysis | 1/13 |
+| Mixer / Regions | 1/1 |
 | el resto | 0 |
 
-Las 22 son el bloque `lifecycle` cerrado: secciones 1 (Lifecycle), 2 (State) y
-3 (Volume & Fade) de `watermelon_audio.h`. Se reparten entre tres categorías del
-script porque la heurística clasifica por keyword del nombre
-(`nativeGetStateVersion` cae en "Benchmark" por `stat`), no por la sección real
-de la C API. Los dos pendientes de "Engine / lifecycle" son
-`nativeGetEngineType` / `nativeSetEngineType`, que son el *synth engine*, no el
-ciclo de vida: van con `oscillator/synth`.
+**Las 43 son dos categorías cerradas**, 22 de `lifecycle` y 21 de
+`input/monitor`. Ninguna de las dos coincide con su fila de la tabla, porque la
+heurística del script clasifica por keyword del nombre y no por la sección real
+de la C API:
+
+- `lifecycle` = secciones 1 (Lifecycle), 2 (State) y 3 (Volume & Fade). Se
+  reparte en tres filas: `nativeGetStateVersion` cae en "Benchmark" por `stat`,
+  `nativeHasStreamError` en "Otros". Los dos pendientes de "Engine / lifecycle"
+  son `nativeGetEngineType` / `nativeSetEngineType`, que son el *synth engine*,
+  no el ciclo de vida: van con `oscillator/synth`.
+- `input/monitor` = sección 12 (Input). `nativeGetInputMeteringSnapshot` cae en
+  "Analysis" por `meter` y `nativeIsInputClipping` en "Mixer / Regions" por
+  `clip`. Los dos pendientes de la fila son `nativeIsArpGateOpen` y
+  `nativeSetArpGateLength`, que son del arpegiador y entraron por `gate`.
 
 > [!IMPORTANT]
 > Lección para las categorías que siguen: **el gap no dimensiona WA-2.6**. Antes
 > de dar una categoría por barata porque su gap es chico, hay que mirar cuántos
-> de sus entry points delegan.
+> de sus entry points delegan. Y las filas de esta tabla son un mapa aproximado,
+> no la unidad de trabajo: la unidad es la sección de `watermelon_audio.h`.
 
 ## 5. Lecturas del análisis
 

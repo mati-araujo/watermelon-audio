@@ -980,11 +980,71 @@ no regresión.
 **Lo que sigue sin tests:** las 22 funciones JNI en sí. Necesitan device. El gate fue el
 compilador más el hecho de que ahora el cuerpo es una línea sobre código sí cubierto.
 
-### Dónde retomar (2026-07-25)
+### Nota de cierre — WA-2.5/2.6, categoría `input/monitor` (2026-07-26)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **7 commits sobre `master` + el trabajo de
-`lifecycle` sin commitear**. `master` está en el merge del PR #58, con CI verde en los 5
-jobs.
+**Segunda categoría cerrada.** Las 21 funciones JNI de input y monitoring pasan por la
+C API. Delegación: **43/278**. Gap portable neto: 79 → **72**.
+
+A diferencia de `lifecycle`, acá **sí había C API que escribir**: 8 funciones nuevas —
+`wma_input_set_noise_gate_threshold`, `wma_input_is_noise_gate_open`,
+`wma_input_get_level_linear`, `wma_input_get_latency_ms`,
+`wma_input_is_monitoring_enabled`, `wma_input_set/get_monitoring_volume` y
+`wma_input_get_metering_snapshot` (el batcheado de 7 valores, con
+`WMA_INPUT_METERING_VALUES` para que el layout no se copie a mano en ninguno de los dos
+lados).
+
+> [!WARNING]
+> **Esto cambia comportamiento en Android, en dos lugares.** No es un descuido: la C API
+> hacía **más** que el JNI en estas tres funciones, porque se escribió con el camino de
+> captura del `BackendManager` (WA-2.4, etapa 2) adentro. Unificar significa que Android
+> pasa a recorrerlo también.
+>
+> 1. **`nativeStartInputStream`** — cuando `InputNode::startInputStream()` falla, antes
+>    devolvía `false` y listo. Ahora `wma_input_start()` le pide captura al
+>    `BackendManager`, lo que puede reabrir el stream de salida en full-duplex. **Sólo
+>    afecta el camino de falla**; un mic que abre bien retorna antes. Y si el reopen
+>    falla, `requestCapture` reabre sin captura, así que el peor caso es un reinicio de
+>    stream en vez de un `false` silencioso.
+> 2. **`nativeIsInputStreamRunning`** — ahora también da `true` cuando el backend lleva
+>    la captura sin un stream de nodo aparte. En Android eso es el camino USB/split, que
+>    hasta hoy leía "no está corriendo" mientras el input fluía.
+>
+> **Va a la lista del smoke manual en NoisyPad Android**, junto con lo de WA-1.4 y WA-1.2.
+>
+> Un tercer cambio se verificó que **no** tiene efecto: `nativeStopInputStream` ahora
+> retira el pedido de captura. `BackendManager::requestCapture` retorna temprano cuando el
+> pedido se baja en vez de subirse (`if (!effective) return false;`), así que no reabre.
+
+**Dos guards se mudaron al lugar correcto:** el rango de `setInputSource` y su `try/catch`
+ahora viven en `wma_input_set_source`. El `catch` importa más del lado C que del lado JNI:
+una excepción de C++ desarmando la pila hacia Kotlin/Native no es un error atrapado, es el
+proceso muerto.
+
+**Verificación — `test_c_api_input.cpp`, 12 tests.** Con un límite explícito: `core/tests`
+sustituye `InputNode.cpp` por un stub sin comportamiento, así que no se afirma nada sobre
+niveles ni gating. Lo que sí se cubre es el contrato de "todavía no hay nodo" (lo que el
+JNI resolvía a mano y ya no), que cada función llegue al método que dice, y la forma del
+snapshot. La sonda útil es el nivel: sin nodo da −100 dB y el stub da −120, así que los
+dos estados se distinguen en vez de leerse los dos como silencio.
+
+Se probaron mutando el código: sacar el guard de rango y hacer que el snapshot devuelva
+ceros en vez de `false` **hace fallar exactamente 2 tests**. El clamp del monitoring volume
+**no** se testea y está dicho en el archivo: `InputNode` ya clampea, en producción y en el
+stub, así que una assertion ahí pasaría con o sin clamp en la C API — sería teatro.
+
+**Lo que esto NO habilita todavía:** iOS sigue sin poder usar el input desde Kotlin.
+`IAudioNativeBridge` (commonMain) no expone la superficie de input — hoy es sólo de
+`AudioNativeBridge` en Android. La C API ya la tiene entera; falta subirla a la interfaz
+común. Es un ticket aparte, no parte de WA-2.5/2.6.
+
+### Dónde retomar (2026-07-26)
+
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **9 commits sobre `master`, sin pushear**.
+`master` está en el merge del PR #58, con CI verde en los 5 jobs.
+
+Verificación local al cerrar `input/monitor`: portabilidad OK (314 archivos), **552 tests
+C++**, ambos slices de iOS con link check, 87 tests de simulador, 50 JVM,
+`assembleDebug` y XCFramework.
 
 ```
 ce2a105 feat(build): XCFramework en el pipeline (WA-4.1) + publish.yml a macOS
@@ -1014,10 +1074,16 @@ bash scripts/build-ios.sh                      # ambos slices + link check
 ./gradlew :audio:assembleWatermelonXCFramework # XCFramework (sólo macOS)
 ```
 
-**Deuda de verificación que conviene saldar temprano:** los métodos de
-`AudioNativeBridge` **no tienen tests** (necesitan JNI y device), así que la migración a
-`BridgeConcurrency` (WA-1.4, 26 call sites) se verificó con el compilador y revisión de
-diff. Antes de publicar una versión con eso, un smoke manual en NoisyPad Android.
+**Deuda de verificación que conviene saldar temprano — la lista del smoke manual en
+NoisyPad Android**, que ya tiene tres cosas encima:
+
+1. **WA-1.4**, la migración a `BridgeConcurrency` (26 call sites), verificada con el
+   compilador y revisión de diff porque los métodos de `AudioNativeBridge` **no tienen
+   tests** (necesitan JNI y device).
+2. **WA-1.2**, `AudioEngineFactory.create()` sin argumentos (ver abajo).
+3. **WA-2.6 `input/monitor`**, los dos cambios de comportamiento en el camino de input —
+   el fallback de reopen de `startInputStream` y el `isInputStreamRunning` que ahora ve la
+   captura del backend. Ver la nota de cierre de esa categoría.
 
 **En el mismo smoke conviene mirar WA-1.2:** `AudioEngineFactory.create()` sin argumentos
 ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
@@ -1030,13 +1096,13 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅ cerrada** (delegación 22/278) |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅ y `input/monitor` ✅ cerradas** (delegación 43/278, gap neto 79 → 72) |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso: WA-2.5 + WA-2.6, categoría `input/monitor`** (21 entry points, 0 delegan
-hoy). Es lo único grande que queda sin bloqueo — todo lo demás del camino iOS necesita
-hardware o está del lado de NoisyPad.
+**Próximo paso: WA-2.5 + WA-2.6, categoría `effects`** (16 entry points, 0 delegan hoy;
+gap nominal 6). Es lo único grande que queda sin bloqueo — todo lo demás del camino iOS
+necesita hardware o está del lado de NoisyPad.
 
 **Arranque concreto para la próxima sesión** (el método ya está decidido, ver abajo — no
 re-litigarlo):
@@ -1046,19 +1112,25 @@ re-litigarlo):
    al día (imprime; el doc se actualiza a mano con esa salida).
 2. **No dimensionar la categoría por su gap.** `lifecycle` tenía gap 8 sobre el papel, gap
    real 0, y 22 funciones para migrar igual. El número que importa para WA-2.6 es el de
-   delegación.
-3. En el **mismo PR**: agregar las `wma_*` que falten de verdad **y** migrar las `Java_…`
+   delegación. **La unidad de trabajo es la sección de `watermelon_audio.h`, no la fila de
+   la tabla** — las categorías del script son keywords y desparraman (el snapshot de
+   metering cae en "Analysis", `isInputClipping` en "Mixer / Regions").
+3. **Diffear la semántica antes de migrar, en las dos direcciones.** En `input/monitor` la
+   C API hacía *más* que el JNI en tres funciones, y migrar trajo ese comportamiento a
+   Android. Donde no coincidan, decidir a conciencia y **anotarlo para el smoke**; no
+   descubrirlo después.
+4. En el **mismo PR**: agregar las `wma_*` que falten de verdad **y** migrar las `Java_…`
    de esa categoría a llamarlas.
-4. Donde el comportamiento sea observable desde la C API, sumar tests a
-   `core/tests/test_c_api_*.cpp` — `api/watermelon_audio.cpp` ya está en ese target. Y
-   correrlos contra la implementación vieja antes de darlos por buenos.
-5. Actualizar `c_api_coverage.md` y el estado acá.
+5. Donde el comportamiento sea observable desde la C API, sumar tests a
+   `core/tests/test_c_api_*.cpp` — `api/watermelon_audio.cpp` ya está en ese target y hay
+   una `support/CApiFixture.h` que arma el motor por `wma_engine_create()`. **Mutar el
+   código y ver fallar el test** antes de darlo por bueno; y si algo no se puede cubrir
+   (el stub de `InputNode` no tiene comportamiento), decirlo en el archivo en vez de
+   escribir una assertion que pasa siempre.
+6. Actualizar `c_api_coverage.md` y el estado acá.
 
-`input/monitor` tiene una ventaja para arrancar: el `InputNode` ya está unificado entre el
-JNI y la C API (ver hallazgos abajo), así que la migración no arrastra el split que había.
-
-**Orden de categorías:** ~~lifecycle~~ ✅ → **input/monitor** → effects → oscillator/synth →
-voice → **mode** → análisis → metronome → benchmark → **looper**.
+**Orden de categorías:** ~~lifecycle~~ ✅ → ~~input/monitor~~ ✅ → **effects** →
+oscillator/synth → voice → **mode** → análisis → metronome → benchmark → **looper**.
 
 - **`mode` no es una más**: ahí desaparece por construcción la duplicación de
   `currentMode` / `modeTransitionInProgress` / `modeTransitionProgress` entre
