@@ -234,23 +234,24 @@ eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
 función JNI.
 
 ```
-WA-2.6 — JNI delegando: 43/278
+WA-2.6 — JNI delegando: 57/278
 ```
 
 | Categoría (heurística del script) | Delegan |
 |---|---|
 | Input / monitor | 19/21 |
 | Engine / lifecycle | 12/14 |
+| Effects | 10/16 |
 | Otros | 8/27 |
+| Analysis | 5/13 |
 | Benchmark / diagnostics | 2/6 |
-| Analysis | 1/13 |
 | Mixer / Regions | 1/1 |
 | el resto | 0 |
 
-**Las 43 son dos categorías cerradas**, 22 de `lifecycle` y 21 de
-`input/monitor`. Ninguna de las dos coincide con su fila de la tabla, porque la
-heurística del script clasifica por keyword del nombre y no por la sección real
-de la C API:
+**Las 57 son tres categorías cerradas**: 22 de `lifecycle`, 21 de
+`input/monitor` y 14 de `effects`. **Ninguna coincide con su fila de la tabla**,
+porque la heurística del script clasifica por keyword del nombre y no por la
+sección real de la C API:
 
 - `lifecycle` = secciones 1 (Lifecycle), 2 (State) y 3 (Volume & Fade). Se
   reparte en tres filas: `nativeGetStateVersion` cae en "Benchmark" por `stat`,
@@ -261,6 +262,14 @@ de la C API:
   "Analysis" por `meter` y `nativeIsInputClipping` en "Mixer / Regions" por
   `clip`. Los dos pendientes de la fila son `nativeIsArpGateOpen` y
   `nativeSetArpGateLength`, que son del arpegiador y entraron por `gate`.
+- `effects` = sección 8 (Effects), 14 funciones: las 10 de la fila "Effects" más
+  las 4 de parámetros, que caen en "Analysis" porque **`parameter` contiene
+  `meter`**. Los 6 pendientes de la fila "Effects" son los 5 `SoundFontPreset*`
+  (entran por `preset`, pero son el motor SoundFont, sección 6) y
+  `nativeHasVocoderEffect` (sección 15).
+
+Dicho de otra forma: de las 57, **13 están en filas que no llevan el nombre de
+su categoría**. La tabla sirve para ver por dónde va la cosa, no para planificar.
 
 > [!IMPORTANT]
 > Lección para las categorías que siguen: **el gap no dimensiona WA-2.6**. Antes

@@ -1037,14 +1037,68 @@ stub, así que una assertion ahí pasaría con o sin clamp en la C API — serí
 `AudioNativeBridge` en Android. La C API ya la tiene entera; falta subirla a la interfaz
 común. Es un ticket aparte, no parte de WA-2.5/2.6.
 
+### Nota de cierre — WA-2.5/2.6, categoría `effects` (2026-07-26)
+
+**Tercera categoría cerrada.** Las 14 funciones JNI de la sección 8 pasan por la C API.
+Delegación: **57/278**. Gap portable neto: 72 → **71**.
+
+La migración en sí fue la más mecánica de las tres: la sección 8 ya replicaba los códigos
+de `JniError` valor por valor, los guards de índice y los `try/catch`. Lo único que quedó
+del lado JNI es lo que un API de punteros no puede hacer: pinear los arrays de Java
+(`ScopedIntArrayRW`) y chequear que los largos coincidan.
+
+> [!WARNING]
+> **Apareció AUD-6 reintroducido en el camino de la C API — el bug que el JNI arregló hace
+> años y que iOS tenía igual.**
+>
+> `AudioEngine::setParameter` bumpea la versión de estado en **cada** llamada, y el
+> `StateSynchronizer` de Kotlin emite en cada bump. Por eso el JNI rutea los batch por
+> `setParametersBatch`, que bumpea **una sola vez al final**: sin eso, un scene load se
+> observa como N estados parciales en vez de uno coherente.
+>
+> `wma_effect_set_params_batch` estaba escrita como transcripción del setter **individual**,
+> no del batch: un loop de `setParameter`, N bumps. Cualquier consumidor de la C API —hoy
+> iOS— tenía el bug.
+>
+> Arreglado: ahora rutea por `setParametersBatch`. Y se agregó
+> **`wma_effect_set_params_multi`**, la contraparte de `nativeSetMultipleEffectParameters`,
+> que no existía en la C API — sin ella un scene load multi-efecto habría necesitado una
+> llamada por efecto, trayendo los estados parciales de vuelta por la otra puerta.
+
+**Verificación — `test_c_api_effects.cpp`, 15 tests.** Acá, a diferencia de `input`, el
+`EffectChain` es **real** en el host, así que se testea comportamiento: add/remove/reorder
+cambian la cadena de verdad, y los códigos de error salen del motor.
+
+El test que importa es `TheBatchSetterBumpsTheStateVersionExactlyOnce`: cuenta bumps de
+`wma_get_state_version`. Es la **única** forma de ver este bug — los dos caminos dejan cada
+parámetro con el valor correcto, sólo difieren en cuántas veces avisan. Revertido el fix,
+falla ese test y sólo ese.
+
+**Dos tests estaban mal escritos y el motor los corrigió:** afirmaban
+`get_param(...) == 0.25f` después de un batch, pero el parámetro 0 de un `FILTER` es una
+frecuencia de corte y el efecto clampea 0.25 a 20 Hz. Reescritos para comparar **contra lo
+que produce el setter individual** con la misma entrada — que además es el invariante que
+de verdad importa (batch ≡ individual salvo en la cuenta de bumps) y es inmune al clamp.
+
+**Quedaron afuera a propósito**, para su propia sección: los 5 `SoundFontPreset*`
+(sección 6) y `nativeHasVocoderEffect` (sección 15). Caen en el bucket "Effects" del script
+por las keywords `preset` y `effect`.
+
 ### Dónde retomar (2026-07-26)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **9 commits sobre `master`, sin pushear**.
-`master` está en el merge del PR #58, con CI verde en los 5 jobs.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **11 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 8** — sólo los 3 primeros están pusheados.
+`master` está en el merge del PR #58.
 
-Verificación local al cerrar `input/monitor`: portabilidad OK (314 archivos), **552 tests
-C++**, ambos slices de iOS con link check, 87 tests de simulador, 50 JVM,
-`assembleDebug` y XCFramework.
+> [!IMPORTANT]
+> **El CI de GitHub está caído por falta de pago (2026-07-26).** Mientras dure, el gate es
+> la verificación local completa —los 7 comandos de arriba— y hay que dejar constancia de
+> su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
+> si alguien corrió los gates y lo dijo.
+
+Verificación local al cerrar `effects`: portabilidad OK (315 archivos), **567 tests C++**,
+ambos slices de iOS con link check, 87 tests de simulador, 50 JVM, `assembleDebug` y
+XCFramework. Todo en verde.
 
 ```
 ce2a105 feat(build): XCFramework en el pipeline (WA-4.1) + publish.yml a macOS
@@ -1096,13 +1150,15 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅ y `input/monitor` ✅ cerradas** (delegación 43/278, gap neto 79 → 72) |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅ y `effects` ✅ cerradas** (delegación 57/278, gap neto 79 → 71) |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso: WA-2.5 + WA-2.6, categoría `effects`** (16 entry points, 0 delegan hoy;
-gap nominal 6). Es lo único grande que queda sin bloqueo — todo lo demás del camino iOS
-necesita hardware o está del lado de NoisyPad.
+**Próximo paso: WA-2.5 + WA-2.6, categoría `oscillator/synth`** (21 entry points, 0
+delegan hoy). Arrastra además los 6 que quedaron sueltos de `effects`: los 5
+`SoundFontPreset*` (sección 6) y `nativeHasVocoderEffect` (sección 15). Es lo único grande
+que queda sin bloqueo — todo lo demás del camino iOS necesita hardware o está del lado de
+NoisyPad.
 
 **Arranque concreto para la próxima sesión** (el método ya está decidido, ver abajo — no
 re-litigarlo):
@@ -1129,8 +1185,16 @@ re-litigarlo):
    escribir una assertion que pasa siempre.
 6. Actualizar `c_api_coverage.md` y el estado acá.
 
-**Orden de categorías:** ~~lifecycle~~ ✅ → ~~input/monitor~~ ✅ → **effects** →
-oscillator/synth → voice → **mode** → análisis → metronome → benchmark → **looper**.
+**Orden de categorías:** ~~lifecycle~~ ✅ → ~~input/monitor~~ ✅ → ~~effects~~ ✅ →
+**oscillator/synth** → voice → **mode** → análisis → metronome → benchmark → **looper**.
+
+> [!TIP]
+> **Las tres categorías cerradas encontraron un bug de divergencia cada una**, y las tres
+> veces fue el mismo patrón: la C API se escribió transcribiendo el JNI función por
+> función, y en alguna se transcribió *la función equivocada* o *de menos*.
+> `wma_engine_start` colapsó dos operaciones en una; `wma_input_*` traía de más;
+> `wma_effect_set_params_batch` copió el setter individual en vez del batch. **Buscarlo a
+> propósito en cada categoría nueva** — no aparece solo, y el compilador no lo ve.
 
 - **`mode` no es una más**: ahí desaparece por construcción la duplicación de
   `currentMode` / `modeTransitionInProgress` / `modeTransitionProgress` entre
