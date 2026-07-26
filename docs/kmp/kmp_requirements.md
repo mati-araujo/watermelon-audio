@@ -1187,6 +1187,52 @@ de 4, y que apagar el sistema libere lo que sonaba.
 Los helpers `startAt()` y `render()` subieron de la suite de lifecycle a
 `support/CApiFixture.h`: es la tercera suite que los necesita.
 
+### Análisis estático del smoke de Android (2026-07-26)
+
+**No hay device ni AVD en la máquina** (`adb devices` vacío, `emulator -list-avds` sin
+resultados), así que el smoke manual sigue pendiente. Lo que sí se hizo es leer los call
+sites reales de NoisyPad (`../NoisyPad`, branch `feature/f4-e4-catalogo`) contra los dos
+cambios de comportamiento de `input/monitor`. Cambia la evaluación de riesgo.
+
+> [!CAUTION]
+> **`startInputStream` tiene una regresión plausible en el caso de permiso denegado, y es
+> el caso de falla más común.**
+>
+> El call site es `InputStateManager.startInputStream()`
+> (`feature-usb/.../InputStateManager.kt:130`): usa el booleano para decidir entre
+> `InputEvent.StreamStarted` + arrancar el polling, o `InputEvent.StreamError`.
+>
+> Antes: si `InputNode::startInputStream()` fallaba —típicamente porque el usuario negó
+> `RECORD_AUDIO`— volvía `false` de una y NoisyPad mostraba el error. Sin costo.
+>
+> Ahora: se le pide captura al `BackendManager`, que **reabre el stream de salida**. Sin
+> permiso esa reapertura tampoco consigue captura, así que `requestCapture` cae a reabrir
+> *sin* captura. Resultado: **un corte audible en la reproducción, y después el mismo
+> error**. Estrictamente peor que antes en ese camino.
+>
+> No se mitigó porque no hay forma barata de distinguir "falló por permiso" de "falló por
+> otra cosa" —`startInputStream()` devuelve un `bool` pelado— y las alternativas
+> reintroducen divergencia de plataforma, que es lo que WA-2.6 viene a sacar. **Es una
+> decisión de producto sobre un camino de falla: hay que mirarla en el smoke antes de
+> publicar.** Reproducción: negar el permiso de micrófono, poner audio a sonar, y darle a
+> "Start input" en la pantalla de input test.
+
+**El otro cambio, en cambio, parece un arreglo.** `isInputStreamRunning` ahora también
+reporta `true` cuando el backend lleva la captura sin stream de nodo aparte — el camino
+USB/split. Sus call sites son `pollLevels()` (early return) y `refreshState()`
+(`InputStateManager.kt:235` y `:270`), que además arranca el polling. Con el cambio, la
+entrada por USB pasa a reportar "corriendo" y a mostrar niveles, cosa que antes no hacía
+aunque el audio estuviera fluyendo — los medidores del `InputNode` sí se actualizan por
+ese camino, porque `onAudioReady` rutea `inputData` a `feedExternalInput()`. **Igual hay
+que verificarlo con la placa USB conectada.**
+
+**`setMaxVoices` no lo llama nadie.** Grep sobre NoisyPad: cero hits. Con eso la decisión
+del ticket deja de ser abierta — corresponde **retirarlo**, no implementarlo.
+
+**`stopEngineWithFadeSync(fadeTimeMs = 300)`** (`MainActivity.kt:379`) es el único call
+site del fade y pasa un valor positivo, así que `WMA_FADE_DEFAULT` no lo toca: 300 ≥ 0
+sigue yendo a `stopWithFade(300)` igual que antes.
+
 ### Dónde retomar (2026-07-26)
 
 **Branch:** `feature/wa-3-2-ios-audio-bridge`, **15 commits sobre `master`**. La branch
@@ -1238,9 +1284,11 @@ NoisyPad Android**, que ya tiene tres cosas encima:
    compilador y revisión de diff porque los métodos de `AudioNativeBridge` **no tienen
    tests** (necesitan JNI y device).
 2. **WA-1.2**, `AudioEngineFactory.create()` sin argumentos (ver abajo).
-3. **WA-2.6 `input/monitor`**, los dos cambios de comportamiento en el camino de input —
-   el fallback de reopen de `startInputStream` y el `isInputStreamRunning` que ahora ve la
-   captura del backend. Ver la nota de cierre de esa categoría.
+3. **WA-2.6 `input/monitor`**, los dos cambios de comportamiento en el camino de input.
+   **Prioridad alta**: el análisis estático de abajo encontró una regresión plausible en
+   `startInputStream` con el permiso denegado. Reproducción concreta en esa nota.
+4. **WA-2.6 en general**: 119 entry points JNI reescritos, 0 validados en device. La suite
+   de host cubre la C API, no el JNI.
 
 **En el mismo smoke conviene mirar WA-1.2:** `AudioEngineFactory.create()` sin argumentos
 ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
