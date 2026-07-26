@@ -1135,10 +1135,62 @@ y existen desde siempre. Ahora el script pliega abreviaturas (`SoundFont` → `s
 descarta `from`. **El neto bajó de ~71 a ~61 sin escribir una línea de motor** —
 9 de las 10 ahora machean, y se auditó que no entraran falsos positivos.
 
+### Nota de cierre — WA-2.5/2.6, categoría `voice` (2026-07-26)
+
+**Quinta categoría cerrada: 21 funciones**, secciones 7 (Voice Filter), 13 (Dual Touch)
+y 14 (Voice System), más los cuatro `SfNote*` de la 6 que se me habían pasado en la
+categoría anterior (el grep buscaba `SoundFont`, no `SfNote`). Delegación: **119/278**.
+
+**Cero funciones nuevas de C API.** Es la primera categoría que no necesitó ninguna: las
+21 ya existían, varias con nombres que el matcher no puede aparear
+(`nativeTriggerChordNotes` ↔ `wma_voice_trigger_chord`). Gap nominal 6, trabajo real 0.
+
+> [!WARNING]
+> **Se encontró y arregló una lectura fuera de rango en `nativeUpdateMultiTouch`.**
+>
+> `count` llega como parámetro propio, independiente del largo real del array, y **nada
+> cruzaba los dos**. El desempaquetado lee `count * 6` floats (tope 4 toques = 24), así
+> que un caller que pasara `count=4` con un array de dos toques leía **12 floats pasados
+> del final** del buffer del heap.
+>
+> El arreglo va en el JNI, no en la C API: `wma_*` recibe un puntero pelado y no puede
+> conocer el largo. Es el mismo reparto que ya tenía el batch de efectos.
+>
+> No lo encontró el compilador ni la migración mecánica — apareció al leer la función
+> para migrarla.
+
+**Otro hallazgo, no arreglado a propósito: `VoiceManager::setMaxVoices` es un no-op.**
+Clampea el argumento, loguea *"requires recreation of VoicePool to take effect"* y vuelve
+sin tocar nada. O sea que `wma_voice_set_max` y `nativeSetMaxVoices` son un setter público
+que no hace nada — y encima bumpea la state version, notificando un cambio que no ocurrió.
+Arreglarlo es cirugía de asignación de voces (recrear el pool con el thread de audio
+leyéndolo) y no entra en un PR de migración. **Queda un test de caracterización que
+documenta el estado actual y falla si alguien lo implementa**, más un ticket propio.
+Conviene chequear si NoisyPad lo llama creyendo que limita la polifonía.
+
+**Verificación — `test_c_api_voice.cpp`, 16 tests (596 en total).** Acá `VoiceManager` es
+real en el host, así que se testea comportamiento de verdad: un toque = una voz, el tope
+de 4, y que apagar el sistema libere lo que sonaba.
+
+**El motor corrigió tres tests míos**, y las tres correcciones enseñaron algo:
+
+1. `updateMultiTouch` **no asigna voces**: sólo entrega los toques al trigger source. La
+   asignación ocurre en `processSourceEvents()`, en el thread de audio, así que el conteo
+   no se mueve hasta renderizar un bloque. Sin eso el test leía 0 para siempre y parecía
+   un API roto.
+2. **Una voz soltada sigue contando como activa** mientras corre su cola de release, que
+   es correcto: todavía suena. El test pasó a afirmar que *eventualmente* se libera, con
+   una cota holgada, en vez de fijar el largo de la envolvente.
+3. El tope de voces sólo se puede observar si se fija **antes** de que suene algo — y de
+   ahí salió el hallazgo del no-op.
+
+Los helpers `startAt()` y `render()` subieron de la suite de lifecycle a
+`support/CApiFixture.h`: es la tercera suite que los necesita.
+
 ### Dónde retomar (2026-07-26)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **13 commits sobre `master`**. La branch
-existe en `origin` pero está **ahead 10** — sólo los 3 primeros están pusheados.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **15 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 12** — sólo los 3 primeros están pusheados.
 `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
@@ -1147,9 +1199,9 @@ existe en `origin` pero está **ahead 10** — sólo los 3 primeros están pushe
 > su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
 > si alguien corrió los gates y lo dijo.
 
-Verificación local al cerrar `oscillator/synth`: portabilidad OK (316 archivos),
-**580 tests C++**, ambos slices de iOS con link check, 87 tests de simulador, 50 JVM,
-`assembleDebug` y XCFramework. Todo en verde.
+Verificación local al cerrar `voice`: portabilidad OK (317 archivos), **596 tests C++**,
+ambos slices de iOS con link check, 87 tests de simulador, 50 JVM, `assembleDebug` y
+XCFramework. Todo en verde.
 
 ```
 ce2a105 feat(build): XCFramework en el pipeline (WA-4.1) + publish.yml a macOS
@@ -1201,14 +1253,15 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅, `effects` ✅ y `oscillator/synth` ✅ cerradas** (delegación 98/278, gap neto 79 → 61) |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅, `effects` ✅, `oscillator/synth` ✅ y `voice` ✅ cerradas** (delegación 119/278, gap neto 79 → 61) |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso: WA-2.5 + WA-2.6, categoría `voice`** (18 entry points, 1 delega hoy;
-sección 14 Voice System más la 7 Voice Filter y los `SfNote*` de la 6). Es lo único grande
-que queda sin bloqueo — todo lo demás del camino iOS necesita hardware o está del lado de
-NoisyPad.
+**Próximo paso: WA-2.5 + WA-2.6, categoría `mode`** (sección 11 Audio Mode, 8 entry points
+sin delegar). **No es una más:** ahí desaparece por construcción la duplicación de
+`currentMode` / `modeTransitionInProgress` / `modeTransitionProgress` entre
+`JniGlobalState` y `WmaEngine` — ver los hallazgos de auditoría abajo. Es lo único grande
+que queda sin bloqueo.
 
 **Arranque concreto para la próxima sesión** (el método ya está decidido, ver abajo — no
 re-litigarlo):
@@ -1236,17 +1289,18 @@ re-litigarlo):
 6. Actualizar `c_api_coverage.md` y el estado acá.
 
 **Orden de categorías:** ~~lifecycle~~ ✅ → ~~input/monitor~~ ✅ → ~~effects~~ ✅ →
-~~oscillator/synth~~ ✅ → **voice** → **mode** → análisis → metronome → benchmark →
+~~oscillator/synth~~ ✅ → ~~voice~~ ✅ → **mode** → análisis → metronome → benchmark →
 **looper**.
 
 > [!TIP]
-> **Tres de las cuatro categorías cerradas encontraron un bug de divergencia**, siempre
-> por el mismo mecanismo: la C API se escribió transcribiendo el JNI función por función,
+> **Cuatro de las cinco categorías cerradas encontraron un bug**, casi siempre por el
+> mismo mecanismo: la C API se escribió transcribiendo el JNI función por función,
 > y en alguna se transcribió *la función equivocada* o *de menos*. `wma_engine_start`
 > colapsó dos operaciones en una; `wma_input_*` traía de más;
 > `wma_effect_set_params_batch` copió el setter individual en vez del batch.
-> `oscillator/synth` salió limpia. **Buscarlo a propósito en cada categoría nueva** — no
-> aparece solo, y el compilador no lo ve.
+> `oscillator/synth` salió limpia. En `voice` el bug no era de divergencia sino una lectura
+> fuera de rango que llevaba años ahí, y apareció igual: **leer la función entera antes de
+> migrarla es lo que los encuentra**. No aparecen solos, y el compilador no los ve.
 
 > [!TIP]
 > **El gap sobrestima el trabajo, y por mucho.** En las cuatro categorías cerradas el gap

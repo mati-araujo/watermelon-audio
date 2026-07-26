@@ -1,7 +1,7 @@
 # Cobertura C API vs JNI — WA-0.1
 
 **Requerimiento:** `docs/kmp/kmp_requirements.md` § 5, WA-0.1
-**Actualizado:** 2026-07-26 (al cerrar `oscillator/synth`) · **Reproducible con:**
+**Actualizado:** 2026-07-26 (al cerrar `voice`) · **Reproducible con:**
 `python3 scripts/c-api-gap.py`
 
 ---
@@ -47,11 +47,11 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 > `LooperGetArmedTrack ~ wma_looper_get_track_peak` es claramente un falso
 > positivo. Hay que revisarlos uno por uno al encarar cada categoría en WA-2.5.
 >
-> **La experiencia de las cuatro categorías cerradas dice que el extremo bajo es
+> **La experiencia de las cinco categorías cerradas dice que el extremo bajo es
 > el realista, y por abajo.** En `lifecycle` los 8 "faltantes" eran 0 reales; en
 > `input/monitor`, 14 nominales fueron 8; en `effects`, 6 fueron 1; en
-> `oscillator/synth`, 4 fueron 1. Sumado: **32 de gap nominal, 10 de trabajo
-> real.** Para dimensionar, mirar §4b, no esta tabla.
+> `oscillator/synth`, 4 fueron 1; en `voice`, 6 fueron **0**. Sumado: **38 de gap
+> nominal, 10 de trabajo real.** Para dimensionar, mirar §4b, no esta tabla.
 
 ## 3. Resumen
 
@@ -235,28 +235,28 @@ eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
 función JNI.
 
 ```
-WA-2.6 — JNI delegando: 98/278
+WA-2.6 — JNI delegando: 119/278
 ```
 
 | Categoría (heurística del script) | Delegan |
 |---|---|
 | Input / monitor | 21/21 |
 | Oscillator / synth | 21/21 |
+| Voice / polyphony | 18/18 |
 | Effects | 16/16 |
 | Otros | 15/27 |
 | Engine / lifecycle | 14/14 |
 | Analysis | 6/13 |
+| Mode transitions | 4/12 |
 | Benchmark / diagnostics | 2/6 |
 | Mixer / Regions | 1/1 |
 | Modulation | 1/3 |
-| Voice / polyphony | 1/18 |
 | el resto | 0 |
 
-**Las 98 son cuatro categorías cerradas**: 22 de `lifecycle`, 21 de
-`input/monitor`, 14 de `effects` y 40 de `oscillator/synth` (secciones 4, 5, 6,
-15 y 18 juntas). **Ninguna coincide con su fila de la tabla**, porque la
-heurística del script clasifica por keyword del nombre y no por la sección real
-de la C API:
+**Las 119 son cinco categorías cerradas**: 22 de `lifecycle`, 21 de
+`input/monitor`, 14 de `effects`, 40 de `oscillator/synth` y 21 de `voice`.
+**Ninguna coincide con su fila de la tabla**, porque la heurística del script
+clasifica por keyword del nombre y no por la sección real de la C API:
 
 - `lifecycle` = secciones 1 (Lifecycle), 2 (State) y 3 (Volume & Fade). Se
   reparte en tres filas: `nativeGetStateVersion` cae en "Benchmark" por `stat`,
@@ -278,7 +278,12 @@ de la C API:
   `nativeSetSecondaryOscillatorType` vive en el bloque de dual-touch del JNI, que
   es por dónde casi se escapa.
 
-Dicho de otra forma: de las 98, **una buena parte está en filas que no llevan el
+- `voice` = secciones 7 (Voice Filter), 13 (Dual Touch) y 14 (Voice System), más
+  los cuatro `SfNote*` de la 6. Las de dual touch caen en "Mode transitions"
+  porque su nombre lleva `mode`, y por eso esa fila pasó de 0 a 4 sin que se
+  tocara una sola transición de modo.
+
+Dicho de otra forma: de las 119, **una buena parte está en filas que no llevan el
 nombre de su categoría**. La tabla sirve para ver por dónde va la cosa, no para
 planificar.
 
@@ -304,8 +309,9 @@ API ya cubre terreno que el JNI resuelve de otra forma (por ejemplo
 ciclo de vida implícito). Al migrar cada categoría conviene mirarlas: algunas
 son el camino canónico que el JNI todavía no usa.
 
-**El gap sobrestima el trabajo, sistemáticamente y por mucho.** En las cuatro
-categorías cerradas el gap nominal fue 32 y el trabajo real 10 funciones nuevas.
+**El gap sobrestima el trabajo, sistemáticamente y por mucho.** En las cinco
+categorías cerradas el gap nominal fue 38 y el trabajo real 10 funciones nuevas
+— `voice` necesitó **cero**, con 6 de gap nominal.
 La causa es siempre la misma —la C API abrevia (`sf`, `param`, `freq`) donde el
 JNI escribe entero— y cada categoría destapa una abreviatura nueva. Antes de
 dimensionar una categoría, **abrir su sección de `watermelon_audio.h` y contar a
