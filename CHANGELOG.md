@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.8.1...v1.9.0) (2026-07-27)
+
+
+### Features
+
+* **ios:** el input path de iOS captura — Fase 3, WA-2.5/2.6, WA-4.1 y el harness WA-5.5 ([#59](https://github.com/mati-araujo/watermelon-audio/issues/59)) ([5dd73bb](https://github.com/mati-araujo/watermelon-audio/commit/5dd73bb44b1b704d188af99177c2c22bcc0424b7))
+
 ## [1.8.1](https://github.com/mati-araujo/watermelon-audio/compare/v1.8.0...v1.8.1) (2026-07-23)
 
 
