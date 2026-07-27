@@ -1376,8 +1376,8 @@ arriba.
 
 ### Dónde retomar (2026-07-26)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **24 commits sobre `master`**. La branch
-existe en `origin` pero está **ahead 21** — sólo los 3 primeros están pusheados.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **22 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 16** — sólo los 6 primeros están pusheados.
 `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
