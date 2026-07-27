@@ -131,26 +131,12 @@ target_include_directories(core_tests PRIVATE
     ${WMA_CPP_ROOT}
 )
 
-# ----------------------------------------------------------------------------
-# Pre-existing dead code, demoted for THIS TARGET ONLY.
-#
-# core/ and nodes/ had never been compiled on the host, so the -Werror gate in
-# ../../tests/CMakeLists.txt meets them here for the first time and stops the
-# build on three vestigial declarations that predate this suite:
-#
-#   core/MusicalScale.cpp:131        int rootNote — loaded, never read
-#   modulators/BurstModulator.h:52   normalizedPos — computed, never read
-#   core/AudioEngine.h:1027          mLastBpm — superseded by EffectChain::mLastBpm
-#
-# All three are unread values, not behaviour. Removing them belongs in its own
-# change, not in the commit that introduces the tests, so they are demoted here
-# rather than edited. Drop this block once they are cleaned up — the gate should
-# apply to core/ in full.
-target_compile_options(core_tests PRIVATE -Wno-unused-variable)
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    # GCC has no such warning and rejects unknown -Wno-* once anything else fires.
-    target_compile_options(core_tests PRIVATE -Wno-unused-private-field)
-endif()
+# El bloque que demotaba -Wunused-variable / -Wunused-private-field para este
+# target se fue: las tres declaraciones muertas que lo justificaban —el
+# `rootNote` de MusicalScale, el `normalizedPos` de BurstModulator y el
+# `mLastBpm` de AudioEngine— estan borradas, asi que el -Werror de
+# ../../tests/CMakeLists.txt aplica a core/ en full, que es lo que ese comentario
+# pedia. Si vuelve a hacer falta demotarlo, el valor a mirar es por que.
 
 find_package(Threads REQUIRED)
 target_link_libraries(core_tests PRIVATE

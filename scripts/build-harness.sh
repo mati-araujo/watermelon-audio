@@ -13,19 +13,44 @@
 # En Linux la parte de iOS se saltea con un mensaje claro, igual que
 # buildIosNativeLib.
 #
-# Uso:  bash scripts/build-harness.sh
+# Uso:  bash scripts/build-harness.sh                 # las dos mitades (el gate local)
+#       bash scripts/build-harness.sh --android-only  # solo el APK
+#       bash scripts/build-harness.sh --ios-only      # solo iOS (requiere macOS)
+#
+# Las dos mitades se pueden pedir por separado porque en CI viven en runners
+# distintos: `:harness:assembleDebug` arrastra el build NDK de :audio para las 4
+# ABIs, y el job de ubuntu ya lo tiene hecho por `:audio:assembleDebug`, mientras
+# que en el runner de macOS era un build frio a 10x el precio del minuto —era
+# solo el 50% del job de iOS. Sin flag corre todo, que es lo que hace el gate
+# local: nadie tiene que acordarse de nada.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+do_android=1
+do_ios=1
+case "${1:-}" in
+    --android-only) do_ios=0 ;;
+    --ios-only)     do_android=0 ;;
+    "")             ;;
+    *)  printf 'uso: %s [--android-only|--ios-only]\n' "$0" >&2; exit 2 ;;
+esac
 
 # Piso deliberadamente bajo. La cuenta exacta se mueve con cada wma_* que se
 # agrega; lo que este numero detecta es la diferencia entre "el archivo entro"
 # (cientos) y "no entro" (cero). ci.yml usa el mismo piso para el XCFramework.
 readonly MIN_WMA_SYMBOLS=100
 
-printf '=== :harness — Android ===\n'
-./gradlew :harness:assembleDebug
+if (( do_android )); then
+    printf '=== :harness — Android ===\n'
+    ./gradlew :harness:assembleDebug
+fi
+
+if (( ! do_ios )); then
+    printf '\nOK — Android construido (--android-only).\n'
+    exit 0
+fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
     printf '\n=== :harness — iOS: se saltea (requiere macOS) ===\n'
@@ -168,5 +193,10 @@ fi
 xcrun simctl terminate "$device" "$BUNDLE_ID" >/dev/null 2>&1 || true
 printf '  arranca y sobrevive los primeros 3s (pid %s)\n' "$pid"
 
-printf '\nOK — :harness construye en las dos plataformas, el framework trae el\n'
-printf '     motor, y la app de iOS arranca sin morirse.\n'
+if (( do_android )); then
+    printf '\nOK — :harness construye en las dos plataformas, el framework trae el\n'
+    printf '     motor, y la app de iOS arranca sin morirse.\n'
+else
+    printf '\nOK — el framework de iOS trae el motor y la app arranca sin morirse\n'
+    printf '     (--ios-only; el APK lo construye el job de ubuntu).\n'
+fi

@@ -2839,6 +2839,26 @@ publicación sin bindings. El job de publish de `release-please.yml` **sí** est
 es que `getAudioBridge()` resuelva desde iOS. Hoy no se puede: NoisyPad todavía no lo llama, y
 por eso el linker se comió toda la superficie nativa por dead-code elimination.
 
+> [!TIP]
+> **CERRADO el mismo día (2026-07-27).** Pasó todo: PR #59 mergeado, release-please cortó la
+> **1.9.0** y el `publish` salió en verde **desde macOS**, con los tasks de cinterop corriendo
+> para los dos targets. Con `watermellonAudio = "1.9.0"` en el catálogo, NoisyPad compila para
+> `iosArm64` e `iosSimulatorArm64` (forzado, 2m4s) y **linkea** `NoisyPadShell.framework`
+> desde cero (13m31s).
+>
+> **La prueba es el binario, no el "BUILD SUCCESSFUL":**
+>
+> | | contra 1.8.0 | contra 1.9.0 |
+> |---|---|---|
+> | `wma_*` definidos (`nm -g \| grep ' T _wma_'`) | **0** | **251** |
+> | `IosAudioBridge` en el binario | ausente | **presente** |
+>
+> 251 es la misma cuenta que `HarnessKit.framework`. Y los klibs de cinterop bajaron del
+> registry remoto a la caché de Gradle —`audio-ios{Arm64,SimulatorArm64}Cinterop-watermelonAudioMain-1.9.0.klib`,
+> ~5 MB cada uno, declarados en el `.module` publicado—, no de `mavenLocal`: el bloque de
+> repos de NoisyPad no lo incluye, así que el footgun de las dos `1.8.1` no aplica acá.
+> **G1 / WA-4.2 ✅.**
+
 
 ### Dónde retomar (2026-07-27)
 
@@ -3175,19 +3195,38 @@ Trabajo paralelo, sin bloquear WA-3:
   `CoreAudioBackend`; confirma qué rama del ABL (interleaved vs planar) toma el OS y mide
   latencia. Necesita hardware.
 
-**Deuda técnica registrada al cerrar WA-2.0/2.7 (candidatos a ticket propio):**
-- `stopWithFade` detacha un `std::thread` que captura `this` y duerme `fadeMs + 50` antes
-  de `stop()`. Si el motor se destruye en esa ventana es use-after-free; el destructor
-  cancela el fade pero no tiene handle sobre ese thread.
-  **Ya hay precedente de cómo cerrarlo** (2026-07-27): el worker del reopen de captura en
-  `BackendManager` es el mismo problema resuelto — thread joinable como miembro, flag
-  `mShuttingDown`, y destructor que corta → joinea → recién ahí para. Copiar esa forma.
-- Tres declaraciones muertas expuestas al pasar `core/`/`nodes/` por `-Werror` por primera
-  vez (`MusicalScale.cpp:131`, `BurstModulator.h:52`, `AudioEngine.h:1027`), hoy tapadas
-  por un `-Wno-unused-variable` acotado en `core/tests/` con comentario que las nombra.
-- Bug 3 de WA-2.0 (SoundFont al rate negociado): los 3 `loadSoundFont*` siguen sin test
-  directo — necesitan un fixture SF2. `currentSampleRate()`, el mecanismo compartido, sí
-  está cubierto.
+**Deuda técnica registrada al cerrar WA-2.0/2.7 — revisada el 2026-07-27:**
+
+- ~~**`stopWithFade` detacha un `std::thread`**~~ ✅ **YA ESTABA ARREGLADO.** El entry de
+  deuda estaba desactualizado: hoy el worker es un `mStopFadeThread` **propio**
+  (`AudioEngine.h:953`), con `mStopFadeCancel`, sleep troceado, supersede-and-join al
+  re-entrar (`AudioEngine.cpp:1823-1826`) y el destructor que cancela y joinea
+  (`AudioEngine.cpp:295-298`) — exactamente la forma que el propio entry decía copiar del
+  worker del reopen. **No se tocó nada; se verificó y se corrigió el doc.**
+- ~~**Tres declaraciones muertas**~~ ✅ **LIMPIADAS** (2026-07-27): el `rootNote` de
+  `MusicalScale.cpp` (cargado y nunca leído), el `normalizedPos` de `BurstModulator.h`
+  (calculado y nunca leído) y el `mLastBpm` de `AudioEngine.h` (el vivo es
+  `EffectChain::mLastBpm`, `EffectChain.cpp:412`). Con eso **se borró el
+  `-Wno-unused-variable` / `-Wno-unused-private-field` acotado** de `core/tests/`, así que
+  el `-Werror` aplica a `core/` en full — que es lo que ese comentario pedía.
+  > [!TIP]
+  > **Eran cuatro, no tres.** Sacar la supresión destapó un `kBlockFrames` sin usar en
+  > `test_c_api_mode.cpp:42` que el comentario no listaba. Una supresión acotada tapa lo que
+  > dice **y lo que se acumuló después**: mientras estuvo puesta, nada impedía que entrara
+  > una quinta. Es el argumento para sacarla, no para ampliarla.
+  > [!CAUTION]
+  > **El doc apuntaba a `AudioEngine.h:1027` y hoy esa línea es `mInputBuffer`, que se usa
+  > en 8 lugares.** Los números de línea se corrieron; el nombre real (`mLastBpm`) estaba
+  > sólo en el comentario del `CMakeLists`. Borrar por número de línea habría roto el build.
+  > **En este doc, las referencias `archivo:línea` envejecen — buscar por nombre.**
+- **Bug 3 de WA-2.0 (SoundFont al rate negociado): sigue abierto, y a propósito.** Los tres
+  `loadSoundFont*` necesitan un fixture SF2 para cubrir el camino de éxito, que es el único
+  donde se observa el rate. Los caminos negativos **ya están cubiertos y bien**
+  (`test_c_api_synth.cpp`, `BadLoaderArgumentsFailAndLoadNothing`: path/buffer nulos, fd
+  inválido, offsets y tamaños negativos, más la assertion de que nada quedó cargado), y el
+  propio archivo declara en su encabezado qué queda afuera y por qué. Agregar otro test
+  negativo sería inflar la cuenta del gate sin afirmar nada nuevo. `currentSampleRate()`, el
+  mecanismo compartido, sí está cubierto. **Lo que falta es el fixture, no un test más.**
 
 **Hallazgos de la auditoría 2026-07-25 (candidatos a ticket propio):**
 

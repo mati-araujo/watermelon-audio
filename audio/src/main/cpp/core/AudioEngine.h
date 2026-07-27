@@ -1030,7 +1030,9 @@ private:
 
     // ========== GLOBAL BPM (KORG FX) ==========
     std::atomic<float> mBpm{120.0f};           ///< Global BPM for tempo-synced effects
-    float mLastBpm{120.0f};                    ///< Last BPM propagated to effects (avoids redundant updates)
+    // El "ultimo BPM propagado" vive en EffectChain::mLastBpm, que es quien de
+    // verdad decide si hay que reenviar (EffectChain.cpp:412). La copia que
+    // habia aca no se leia ni se escribia desde ningun lado.
 
     // ========== ARPEGGIATOR (Phase 7) ==========
     ArpSequencer mArpSequencer;

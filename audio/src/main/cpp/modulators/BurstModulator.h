@@ -48,8 +48,9 @@ public:
             float gate = 0.0f;
 
             if (phaseTime < gateOnTime) {
-                // Signal is on
-                const float normalizedPos = phaseTime / std::max(gateOnTime, 0.001f);
+                // Signal is on. El shaping de abajo trabaja con `phaseTime` y
+                // `fadeTime` directamente; la posicion normalizada se calculaba
+                // y no se leia.
 
                 // Apply shaping
                 if (shape < 0.01f) {
