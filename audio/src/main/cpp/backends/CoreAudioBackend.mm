@@ -106,11 +106,7 @@ void CoreAudioBackend::setFullDuplexEnabled(bool enable) {
     //    and detaching the sink node at runtime would mean reconfiguring the
     //    audio session — an audible glitch on the output path. So capture keeps
     //    running and only the handoff to the callback flips.
-    {
-        std::lock_guard<std::mutex> lock(mStreamMutex);
-        mFullDuplexRequested = enable;
-    }
-
+    mFullDuplexRequested.store(enable, std::memory_order_release);
     mDeliverInput.store(enable, std::memory_order_release);
 
     if (enable && !mCaptureActive.load(std::memory_order_acquire) &&
@@ -258,7 +254,7 @@ StreamInfo CoreAudioBackend::getStreamInfo() const {
     info.outputLatencyMs = 0.0f;
     // Before start() this is the *request*, not a fact — whether a capture stream
     // actually opens depends on microphone access, which is only known at start().
-    info.isFullDuplex    = mFullDuplexRequested;
+    info.isFullDuplex    = mFullDuplexRequested.load(std::memory_order_acquire);
     info.backendType     = BackendType::COREAUDIO;
     info.deviceName      = "Core Audio";
     return info;
@@ -270,7 +266,7 @@ StreamInfo CoreAudioBackend::getStreamInfo() const {
 
 BackendResult CoreAudioBackend::openEngineLocked() {
     // ---- 1. Negotiate the session (iOS only; macOS has no AVAudioSession) ----
-    const bool wantCapture = mFullDuplexRequested;
+    const bool wantCapture = mFullDuplexRequested.load(std::memory_order_acquire);
 
     double negotiatedSampleRate = mRequestedSampleRate > 0 ? mRequestedSampleRate : 48000;
     double ioBufferDuration     = 0.0;   // seconds

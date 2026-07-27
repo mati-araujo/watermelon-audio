@@ -2499,9 +2499,49 @@ sin decir "no". El harness muestra tres estados donde antes había dos.
 `stopWithFade` —un thread que captura `this` y sobrevive al objeto— y el destructor lo cierra
 por construcción: cortar con `mShuttingDown`, joinear, y recién ahí `stop()`.
 
-**Residual conocido y anotado en el código:** pedir captura *durante* un reopen sí bloquea, porque
-anotar el pedido necesita `mMutex`. Sacarlo pide que `start()`/`stop()` dejen de tenerlo tomado
-alrededor de la llamada al backend — reestructurar la concurrencia del manager, su propio ticket.
+#### El residual también salió: `mOpMutex` (2026-07-27)
+
+Quedaba que pedir captura *durante* una reapertura bloqueara al que llama, porque anotar el
+pedido necesita `mMutex`. El fix de raíz no era tocar `requestCapture`: era que **`start()` y
+`stop()` dejaran de tener `mMutex` tomado alrededor de la llamada lenta al backend**.
+
+Ahora hay dos locks con orden fijo —**`mOpMutex` → `mMutex`, nunca al revés**—:
+
+- **`mOpMutex`** serializa ciclo de vida (start / stop / selectBackend) y es el único que se
+  sostiene sobre la llamada lenta. Lo único que espera ahí es otra operación de ciclo de vida,
+  que es correcto: son mutuamente excluyentes por naturaleza.
+- **`mMutex`** protege estado, en secciones cortas, y **jamás** alrededor de algo que bloquee.
+
+Con eso **los espejos y el `try_lock` desaparecieron**: los lectores vuelven a un `lock_guard`
+normal y a leer **en vivo**, que además es lo correcto —un device puede renegociar sin que el
+motor reinicie—. El código quedó más simple que antes de empezar.
+
+**Dos backends bloqueaban un escalón más abajo** y no se veía desde el manager:
+`CoreAudioBackend::setFullDuplexEnabled` tomaba `mStreamMutex` —retenido toda la apertura— y
+`SplitBackend` su `mLifecycleMutex`. Los dos flags pasaron a atómicos. Sin eso, el bloqueo sólo
+se mudaba de capa.
+
+**Y salió un bug de reporte que el test destapó:** a mitad de la reapertura el stream está
+caído, así que un segundo `wma_input_start()` leía "no hay captura" y devolvía `NOT_LIVE` — que
+río abajo el harness muestra como **"permiso denegado"**. Con una reapertura en vuelo la
+respuesta honesta es `PENDING`, y ahora lo es. Eso además hizo **determinista** la rama de la
+generación, que hasta entonces no tenía test.
+
+**Un corte audible de más, encontrado al escribir ese test:** el worker daba otra pasada ante
+cualquier pedido nuevo, incluso si la pasada en curso ya lo había dejado cumplido — el doble tap
+sobre "capturar" reabría dos veces. Ahora se corta si el objetivo ya está.
+
+**762 tests C++ (760 → 762) y 6 mutantes, 6 detectados** — incluidos los dos que antes
+sobrevivían por el lado de la generación. TSan limpio sobre las suites tocadas.
+
+> [!NOTE]
+> **Lo que queda esperando, y es correcto que espere:** cambiar de backend con una reapertura en
+> curso. `selectBackend()` toma `mOpMutex` como cualquier otra operación de ciclo de vida. No se
+> puede reconfigurar el stream a mitad de una reconfiguración del stream.
+
+**Verificado en el simulador con el esquema nuevo:** `Capture: off` → `Reopening the stream to
+add a capture path` → `Capture: active`, **cero `inputData=0x0` después del reopen** y el main
+thread en `mach_msg`, idle en el runloop.
 
 **5 tests nuevos (755 → 760) y 5 mutantes.** Tres detectados; **dos sobrevivieron y quedaron
 escritos como lo que son**:
@@ -2509,10 +2549,12 @@ escritos como lo que son**:
 | Mutante | Resultado |
 |---|---|
 | reopen sincrónico otra vez | **detectado** — se cuelga, que es el freeze reproducido |
-| lectores con `lock` en vez de `try_lock` | **detectado** — se cuelga |
+| `mMutex` de vuelta alrededor de la llamada lenta | **detectado** — se cuelga |
 | `PENDING` reportado como `LIVE` | **detectado** — 4 tests fallan |
-| destructor `detach()` en vez de `join()` | **NO detectado**, ni bajo TSan: el `stop()` del destructor toma el mismo `mMutex` y provee casi la misma barrera. Eso es justo lo que hace peligroso al detach —la corrección quedaría apoyada en una coincidencia— y está dicho en el test |
-| no subir la generación de reintento | **NO detectado**: la rama sólo es alcanzable si el pedido tardío gana una carrera que el residual de `mMutex` le hace perder casi siempre. Se deja porque sin ella ese caso pierde el pedido en silencio, y está dicho en el header |
+| no reportar `PENDING` con una reapertura en vuelo | **detectado** |
+| no subir la generación de reintento | **detectado** (lo era sólo después de arreglar el reporte de `PENDING`) |
+| sin el atajo de "ya cumplido" | **detectado** — el doble tap costaba dos reaperturas |
+| destructor `detach()` en vez de `join()` | **NO detectado**, ni bajo TSan: el `stop()` del destructor toma el mismo lock y provee casi la misma barrera. Eso es justo lo que hace peligroso al detach —la corrección quedaría apoyada en una coincidencia— y está dicho en el test |
 
 > [!NOTE]
 > **TSan encontró una carrera de verdad en el camino — en el fake.** El test que mueve
@@ -2648,7 +2690,7 @@ PR #58.
 > si alguien corrió los gates y lo dijo.
 
 **Última verificación local completa (2026-07-27, con el reopen asincrónico):** portabilidad
-OK (**325 archivos**), **760 tests C++**, ambos slices de iOS con
+OK (**325 archivos**), **762 tests C++**, ambos slices de iOS con
 link check, **105 tests de simulador** (101 + los 4 de captura de logs), **64 JVM**,
 `assembleDebug`, XCFramework, `compileIosMainKotlinMetadata`, los dos guardrails de WA-5.5 y el
 harness **arrancando en el simulador**. Todo en verde, con las tasks de test forzadas
@@ -2778,10 +2820,8 @@ del llamador". Lo que queda de esa línea es de otra naturaleza:
 1. **Sonido real y latencia medida, en device (G2).** El simulador prueba que los frames
    llegan; no prueba cómo suena ni cuánto tarda el round-trip. Instruments sobre el render
    block de `CoreAudioBackend` (cero allocs, cero locks) sigue siendo de device.
-2. **El residual de `mMutex`**: pedir captura *durante* un reopen todavía bloquea al que llama,
-   porque anotar el pedido necesita el mutex del manager. Sacarlo pide que `start()`/`stop()`
-   dejen de tenerlo tomado alrededor de la llamada al backend. Ticket propio, anotado en
-   `BackendManager::requestCapture`.
+2. ~~El residual de `mMutex`~~ ✅ **SACADO** — `mOpMutex` serializa el ciclo de vida y
+   `mMutex` volvió a ser corto. Ver §10.
 
 **Lo tercero: el smoke manual en NoisyPad Android**, cuya lista sigue creciendo (abajo). Tres de
 sus ítems —7, 8 y 9, los tres retornos del looper— **ya están verificados desde iOS** por el

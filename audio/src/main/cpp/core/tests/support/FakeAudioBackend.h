@@ -49,7 +49,8 @@ public:
         // the moment it arrived would make the reopen logic untestable, because
         // the case that needs a reopen would never occur.
         mInfo.isFullDuplex =
-            mFullDuplexRequested && mCaptureAvailable.load(std::memory_order_acquire);
+            mFullDuplexRequested.load(std::memory_order_acquire) &&
+            mCaptureAvailable.load(std::memory_order_acquire);
         mRunning.store(true, std::memory_order_release);
         return watermelon_audio::BackendResult::OK;
     }
@@ -74,7 +75,9 @@ public:
         mInfo.framesPerBuffer = framesPerBuffer;
     }
 
-    void setFullDuplexEnabled(bool enable) override { mFullDuplexRequested = enable; }
+    void setFullDuplexEnabled(bool enable) override {
+        mFullDuplexRequested.store(enable, std::memory_order_release);
+    }
 
     watermelon_audio::StreamInfo getStreamInfo() const override { return mInfo; }
 
@@ -135,7 +138,9 @@ public:
     }
 
     /// The capture request currently pending for the next start().
-    bool fullDuplexRequested() const { return mFullDuplexRequested; }
+    bool fullDuplexRequested() const {
+        return mFullDuplexRequested.load(std::memory_order_acquire);
+    }
 
     /// How many times start() has been called — a reopen shows up as +1.
     int startCount() const { return mStartCount; }
@@ -157,7 +162,9 @@ private:
     bool mStartEntered = false;
     bool mPaused = false;
     int mRequestedSampleRate = 0;
-    bool mFullDuplexRequested = false;
+    // Atomic: con el reopen asincronico, requestCapture() lo escribe desde el
+    // thread del llamador mientras el worker lo lee adentro de start().
+    std::atomic<bool> mFullDuplexRequested{false};
     // Atomic: los tests del reopen asincronico lo mueven desde otro thread
     // mientras el worker esta adentro de start(). TSan lo agarro.
     std::atomic<bool> mCaptureAvailable{true};

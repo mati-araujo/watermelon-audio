@@ -224,21 +224,13 @@ public:
      * cualquier app con UI, el **main thread**: bloquearlo ahí son cientos de ms
      * en el mejor caso y un watchdog kill en el peor.
      *
-     * ## Residual conocido: pedir captura DURANTE un reopen sí bloquea
+     * ## Nada de esto bloquea al que llama
      *
-     * El worker retiene `mMutex` toda la reapertura, y la primera parte de esta
-     * función lo necesita para anotar el pedido. O sea que un segundo
-     * `wma_input_start()` / `wma_input_stop()` mientras hay un reopen en curso se
-     * bloquea hasta que termine.
-     *
-     * **Lo que NO bloquea, que es lo que la UI hace en cada frame:**
-     * `isRunning()`, `getStreamInfo()` e `isCaptureLive()` usan `try_lock` y
-     * caen al último valor publicado. Sin eso, mover el reopen a un thread no
-     * habría servido de nada.
-     *
-     * Sacar también este residual pide que `start()`/`stop()` dejen de tener
-     * `mMutex` tomado alrededor de la llamada al backend, que es una
-     * reestructuración de la concurrencia del manager y va en su propio ticket.
+     * Ni siquiera un segundo `wma_input_start()` / `wma_input_stop()` con una
+     * reapertura en curso: anotar el pedido sólo necesita `mMutex`, que es corto
+     * por construcción (ver `mOpMutex`). Los setters del backend que se tocan acá
+     * tampoco bloquean — el flag de full-duplex es atómico en CoreAudio y en
+     * Split justamente por esto.
      */
     CaptureOutcome requestCapture(CaptureRequester who, bool want, bool allowRestart);
 
@@ -353,7 +345,28 @@ public:
     }
 
 private:
-    // Mutex for thread-safe operations
+    /**
+     * Serializa las operaciones de ciclo de vida —start, stop, selectBackend— y
+     * es el único que se sostiene **alrededor de la llamada lenta al backend**.
+     *
+     * Existe porque `mMutex` no puede hacerlo. Abrir un stream habla por IPC con
+     * el servidor de audio del sistema y puede tardar cientos de ms; retener ahí
+     * el mutex que necesita cualquier lectura de estado congela a todo el que
+     * pregunte, que en una app con UI es el main thread en cada frame. Con los
+     * dos separados, una reapertura no le bloquea la mano a nadie: ni a los
+     * lectores, ni a un `wma_input_stop()` que llegue en el medio.
+     *
+     * **Orden de lock, sin excepciones: mOpMutex → mMutex.** Nunca al revés, y
+     * nunca `mMutex` tomado alrededor de algo que pueda bloquear.
+     *
+     * Lo único que sí espera acá es otra operación de ciclo de vida —cambiar de
+     * backend a mitad de una reapertura, por ejemplo—, y eso es correcto: son
+     * mutuamente excluyentes por naturaleza.
+     */
+    std::mutex mOpMutex;
+
+    /// Estado. Secciones críticas cortas y **jamás** alrededor de una llamada
+    /// que pueda bloquear.
     mutable std::mutex mMutex;
 
     // Backend instances. Held as IAudioBackend so this header stays free of
@@ -406,7 +419,10 @@ private:
     mutable std::mutex mReopenMutex;
     std::condition_variable mReopenDone;
     std::thread mReopenThread;
-    bool mReopenInFlight = false;
+
+    /// Atomic para poder consultarse **sin ningún lock** desde requestCapture();
+    /// se escribe bajo mReopenMutex porque además es el predicado del condvar.
+    std::atomic<bool> mReopenInFlight{false};
 
     /**
      * Sube cada vez que una petición **autoriza un reopen** (INPUT_NODE + want +
@@ -438,36 +454,6 @@ private:
      * destruyendo.
      */
     std::atomic<bool> mShuttingDown{false};
-
-    // ---- Último estado conocido, para lecturas que no pueden bloquearse ------
-    //
-    // **El worker retiene mMutex durante TODO el reopen** — `BackendManager::start()`
-    // lo toma y adentro llama al `start()` del backend, que en iOS habla por IPC con
-    // el servidor de audio. Sin esto, mover el reopen a un thread propio no serviría
-    // de nada: la UI pollea `getStreamInfo()` e `isRunning()` en cada frame y se
-    // quedaría colgada en el mutex igual que antes, sólo que en otra llamada.
-    //
-    // Los tres lectores usan `try_lock`, y el orden importa:
-    //
-    //   - **mutex libre → respuesta en vivo**, leída del backend. Esto no es un
-    //     detalle: un device puede renegociar el sample rate sin que el motor
-    //     reinicie, y `currentSampleRate()` tiene que verlo. Un snapshot puro
-    //     rompe esa invariante — la pinchó `FollowsTheBackendAcrossARenegotiation`.
-    //   - **mutex tomado → hay un reopen en curso → último valor publicado.** Es
-    //     lo mejor que existe en ese momento y además es fiel: durante la
-    //     reapertura el stream está de verdad caído, y eso es lo que dice.
-    //
-    // Son `mutable` porque los lectores son const y refrescan de paso.
-    mutable std::atomic<bool> mRunningMirror{false};
-    mutable std::atomic<bool> mCaptureLiveMirror{false};
-
-    /// Mutex propio y **jamás** tomado alrededor de una llamada al backend: lo único
-    /// que protege es la copia del struct, que son nanosegundos.
-    mutable std::mutex mStreamInfoMutex;
-    mutable StreamInfo mStreamInfoMirror{};
-
-    /// Refresca los tres espejos desde el backend activo. Con mMutex tomado.
-    void publishBackendState();
 
     /// Cuerpo del worker: pasadas hasta converger, con tope.
     void runCaptureReopen();

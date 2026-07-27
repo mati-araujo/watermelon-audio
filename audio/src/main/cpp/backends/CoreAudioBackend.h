@@ -123,9 +123,14 @@ private:
     // Capture (full duplex).
     // -------------------------------------------------------------------------
 
-    // Requested by setFullDuplexEnabled(). Read under mStreamMutex at open time;
-    // like OboeBackend, a change only takes effect on the next start().
-    bool mFullDuplexRequested = false;
+    // Requested by setFullDuplexEnabled(). Like OboeBackend, a change only takes
+    // effect on the next start().
+    //
+    // **Atomic y NO bajo mStreamMutex, a proposito.** start() retiene mStreamMutex
+    // toda la apertura, asi que un setter que lo pidiera bloquearia al que llama
+    // durante una reapertura entera — que es justo lo que se saco de
+    // BackendManager. El flag es un bool: un atomic alcanza y no bloquea a nadie.
+    std::atomic<bool> mFullDuplexRequested{false};
 
     // A capture stream is open and the sink block is running.
     std::atomic<bool> mCaptureActive{false};

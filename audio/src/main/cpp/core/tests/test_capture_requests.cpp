@@ -246,43 +246,80 @@ TEST_F(CaptureRequestTest, StateReadsDoNotBlockWhileTheStreamIsBeingReopened) {
     EXPECT_TRUE(mManager->isRunning());
 }
 
-TEST_F(CaptureRequestTest, ARequestThatLandsMidReopenStillEndsUpWithCaptureLive) {
-    // Lo que este test pincha es la **convergencia**, que es la garantía que ve
-    // el usuario: si el micrófono aparece recién después de que arrancó la
-    // primera pasada, la captura tiene que terminar viva igual.
+TEST_F(CaptureRequestTest, RequestingCaptureAgainMidReopenDoesNotBlockTheCaller) {
+    // **La primera versión de este test deadlockeaba**, y por eso existe.
+    // `BackendManager::start()` retenía `mMutex` toda la reapertura, así que un
+    // segundo `wma_input_start()` / `wma_input_stop()` desde el main thread se
+    // quedaba esperando el reopen entero. Mover el reopen a un worker no lo
+    // arreglaba: sólo cambiaba de lugar el freeze.
     //
-    // > [!NOTE]
-    // > **Lo que NO cubre, y conviene decirlo en vez de aparentar que sí.** Hay
-    // > dos caminos que convergen y este test no elige cuál toma: si el pedido
-    // > tardío llega con `mReopenInFlight` todavía en true, lo salva la
-    // > generación (el worker da otra pasada); si llega después, agenda un worker
-    // > nuevo. **La rama de la generación no es alcanzable de forma determinista
-    // > desde un test**, porque el pedido tardío se bloquea en `mMutex` hasta que
-    // > el worker está por terminar — el residual documentado en requestCapture().
-    // > Mutar `++mCaptureRestartGeneration` a un no-op deja este test en verde.
-    // > La rama existe porque sin ella ese caso pierde el pedido en silencio, y
-    // > eso es peor que una rama sin test.
-    //
-    // El segundo pedido va desde OTRO thread a propósito: desde el thread del
-    // llamador bloquearía hasta que el reopen termine.
+    // Ahora la reapertura corre bajo `mOpMutex` y anotar el pedido sólo necesita
+    // `mMutex`, que es corto por construcción. Si alguien vuelve a poner una
+    // llamada lenta bajo `mMutex`, este test **se cuelga**.
     runWithoutCapture();
-    mBackend->setCaptureAvailable(false);
     mBackend->blockStart();
 
     mManager->requestCapture(Requester::INPUT_NODE, true, true);
-    mBackend->waitUntilStartEntered();
+    mBackend->waitUntilStartEntered();  // el worker está adentro de start()
 
-    std::thread late([this] {
-        mBackend->setCaptureAvailable(true);
-        mManager->requestCapture(Requester::INPUT_NODE, true, true);
-    });
+    // Las dos direcciones, que son las dos que la UI puede disparar con un tap.
+    EXPECT_EQ(mManager->requestCapture(Requester::INPUT_NODE, true, true), Outcome::PENDING);
+    mManager->requestCapture(Requester::INPUT_NODE, false, false);
+    mManager->setFullDuplexEnabled(true);
 
     mBackend->releaseStart();
-    late.join();
     mManager->waitForCaptureRequest();
 
-    EXPECT_TRUE(mManager->isCaptureLive())
-        << "el pedido que llegó a mitad del reopen se perdió: falta la segunda pasada";
+    SUCCEED() << "ninguna de las tres llamadas se quedó esperando la reapertura";
+}
+
+TEST_F(CaptureRequestTest, ARequestThatLandsMidReopenGetsItsOwnPass) {
+    // Sin la generación, un pedido que llega mientras el worker ya pasó el punto
+    // donde start() lee el flag se pierde en silencio: el worker termina, ve su
+    // trabajo hecho, y nadie vuelve a intentar.
+    //
+    // Se mide en **pasadas** y no en "quedó viva", y por eso el micrófono está
+    // denegado todo el test: con la captura consiguiéndose en la primera pasada,
+    // el atajo de "ya está cumplido" corta la segunda —correctamente— y el
+    // mutante de la generación sobrevive sin que se note. Con el permiso
+    // denegado no hay atajo posible y la única razón para una segunda pasada es
+    // el pedido nuevo.
+    runWithoutCapture();
+    mBackend->setCaptureAvailable(false);
+    mBackend->blockStart();
+    const int startsBefore = mBackend->startCount();
+
+    mManager->requestCapture(Requester::INPUT_NODE, true, true);
+    mBackend->waitUntilStartEntered();  // el worker está adentro de start()
+
+    // Acá está lo determinista: el pedido llega con el reopen en vuelo.
+    ASSERT_EQ(mManager->requestCapture(Requester::INPUT_NODE, true, true), Outcome::PENDING);
+
+    mBackend->releaseStart();
+    mManager->waitForCaptureRequest();
+
+    EXPECT_EQ(mBackend->startCount(), startsBefore + 2)
+        << "el pedido que llegó a mitad del reopen no se llevó su propia pasada";
+}
+
+TEST_F(CaptureRequestTest, ASecondRequestAlreadySatisfiedDoesNotCostAnExtraGap) {
+    // El doble tap sobre "capturar" con el micrófono disponible: el segundo
+    // pedido llega en vuelo y sube la generación, pero la pasada que ya estaba
+    // corriendo lo deja cumplido. Otra reapertura sería un corte audible gratis.
+    runWithoutCapture();
+    mBackend->blockStart();
+    const int startsBefore = mBackend->startCount();
+
+    mManager->requestCapture(Requester::INPUT_NODE, true, true);
+    mBackend->waitUntilStartEntered();
+    mManager->requestCapture(Requester::INPUT_NODE, true, true);
+
+    mBackend->releaseStart();
+    mManager->waitForCaptureRequest();
+
+    EXPECT_TRUE(mManager->isCaptureLive());
+    EXPECT_EQ(mBackend->startCount(), startsBefore + 1)
+        << "se reabrió de nuevo con la captura ya viva: un corte audible por nada";
 }
 
 TEST_F(CaptureRequestTest, ADeniedMicrophoneIsNotRetriedInALoop) {
