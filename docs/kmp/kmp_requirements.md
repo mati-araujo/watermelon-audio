@@ -2679,21 +2679,25 @@ misma razón que la clave del micrófono en iOS: el caso que más importa probar
 
 ### Dónde retomar (2026-07-27)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **50 commits sobre `master`** y **44 sin
-pushear**. `master` está en el merge del PR #58.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **51 commits sobre `master`**, **pusheada** y con
+**PR abierto: [#59](https://github.com/mati-araujo/watermelon-audio/pull/59)** (90 archivos,
++16354/-1583). `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
 > **El CI de GitHub está caído por falta de pago (2026-07-26).** Mientras dure, el gate es
 > la verificación local completa —los **10** comandos de abajo— y hay que dejar constancia de
 > su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
-> si alguien corrió los gates y lo dijo.
+> si alguien corrió los gates y lo dijo. **El PR #59 lleva esa constancia en el cuerpo**, con
+> los números de la corrida de abajo.
 
-**Última verificación local completa (2026-07-27, con el reopen asincrónico):** portabilidad
-OK (**325 archivos**), **762 tests C++**, ambos slices de iOS con
-link check, **105 tests de simulador** (101 + los 4 de captura de logs), **64 JVM**,
-`assembleDebug`, XCFramework, `compileIosMainKotlinMetadata`, los dos guardrails de WA-5.5 y el
-harness **arrancando en el simulador**. Todo en verde, con las tasks de test forzadas
-(`--rerun-tasks`) y las cuentas leídas de los XML.
+**Última verificación local completa (2026-07-27, sobre `92a0089`, la que respalda el PR #59):**
+portabilidad OK (**325 archivos**), **762/762 tests C++** en 48.15 s, ambos slices de iOS con
+link check (19 MB / 15293 símbolos c/u), **105 tests de simulador** (12 XML, 0 fallas), **64
+JVM** (8 XML, 0 fallas), `assembleDebug` con las 4 ABIs, XCFramework, `compileIosMainKotlinMetadata`,
+los dos guardrails de WA-5.5 y el harness **arrancando en el simulador** (251 símbolos `wma_*`
+en `HarnessKit.framework`, la app sobrevive los primeros 3 s). Todo en verde, con las tasks de
+test forzadas (`--rerun-tasks`, borrando `audio/build/test-results/` antes) y las cuentas leídas
+de los XML.
 
 > [!IMPORTANT]
 > **Ese verde vale más que antes, y por un motivo concreto.** Hasta el bug 3 de §10, un cambio
@@ -2817,9 +2821,11 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 iOS captura (§10). Lo que queda ya no es "¿anda?", es cerrar y validar. En orden de lo que
 desbloquea más:
 
-**1 · Pushear la branch y abrir el PR con constancia del gate.** 50 commits sobre `master`, **44
-sin pushear**, y el CI caído. Es el riesgo más barato de eliminar y el que más crece con el
-tiempo: todo lo de estas dos sesiones vive sólo en local.
+**1 · ~~Pushear la branch y abrir el PR con constancia del gate.~~** ✅ **HECHO 2026-07-27.**
+Los 45 commits que vivían sólo en local están en `origin`, y el
+**[PR #59](https://github.com/mati-araujo/watermelon-audio/pull/59)** lleva la salida de los 10
+comandos en el cuerpo — que con el CI caído es la única forma de que el merge sea verificado.
+Push fast-forward, sin `--force`.
 
 **2 · G1 / WA-4.2 — el consumo desde NoisyPad.** Del lado de NoisyPad: declarar la coordenada
 raíz, verificar que resuelve para los dos targets iOS y confirmar el lockstep de Kotlin (D8:
