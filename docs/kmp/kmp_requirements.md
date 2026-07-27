@@ -828,7 +828,7 @@ cinturón sobre los tirantes.
 | WA-5.2 | Latency benchmark iOS | Port de `LatencyBenchmarkRunner` (hoy androidMain) sobre la infraestructura de WA-4.3 | P2 |
 | WA-5.3 | AUv3 | Empaquetar el motor como Audio Unit v3 (extensión) — habilitaría NoisyPad como plugin en GarageBand/Logic/AUM. Análisis de arquitectura propio | P3 |
 | WA-5.4 | CoreMIDI | Si el roadmap de NoisyPad incorpora MIDI-in en iOS | P3 |
-| WA-5.5 | **Harness de UI multiplataforma + design system** | App de prueba en este repo que corra en Android e iOS contra la librería, con un design system propio y los componentes genéricos que valga la pena traer de NoisyPad. **Propuesta, sin aprobar** — análisis abajo | P1 |
+| WA-5.5 | **Harness de UI multiplataforma + design system** | App de prueba en este repo que corra en Android e iOS contra la librería, con un design system propio y los componentes genéricos que valga la pena traer de NoisyPad. **APROBADA y EN CURSO** — controles 1 y 2 hechos; análisis y decisiones abajo | P1 |
 
 ### Análisis — WA-5.5, harness de UI y design system (propuesta 2026-07-27)
 
@@ -2223,9 +2223,54 @@ indistinguible de "no captura", que es justo lo que hay que distinguir.
 el panel (el fix con `sudo` de arriba) o una persona. **La barra moviéndose es la respuesta que
 falta**, y ahora hay dónde leerla.
 
-**Faltan los 6 controles restantes:** pad XY + depth, rack de efectos + routing, tira de looper,
-metrónomo y panel de diagnóstico con la vista de logs — que además necesita subir
-`wma_log_capture_*` al bridge, igual que se hizo acá con §12.
+#### Control 2 de 7 — pad XY y oscilador
+
+El único control que ejercita el **camino de tiempo real**. `setXY` corre una vez por frame de
+gesto y es la única llamada del programa con una nota explícita sobre su costo por plataforma:
+Android tiene un coalescer que junta updates para amortizar JNI, iOS no lo tiene porque
+cinterop no cobra lo mismo, y el comentario en `IosAudioBridge` dice textual que si una
+medición muestra lo contrario, el lugar del coalescer es ahí. **Este pad es cómo se hace esa
+medición.**
+
+**Sin slider de depth, y no por olvido:** `setDepthValue` no existe en `commonMain` en ninguna
+forma. Ponerlo habría requerido subir al bridge común una función que ya sabemos que es un dead
+store en las cuatro capas — dejar escrito un control muerto en la API multiplataforma. El ítem
+11 del smoke se mira desde NoisyPad en Android, que es donde el caller existe.
+
+
+### Decisión — cómo llegan al harness los 5 controles que faltan (aprobada 2026-07-27)
+
+> [!IMPORTANT]
+> **4 de los 5 controles restantes están bloqueados por exactamente lo mismo que el monitor de
+> entrada: la superficie no llega a `commonMain`.**
+>
+> | Control | Qué falta |
+> |---|---|
+> | 3 · rack de efectos | efectos ✅ vía `AudioEngine`; **routing mode** sólo en `IAudioNativeBridge` |
+> | 4 · looper | **nada** en commonMain salvo `LooperStateListener` — son 79 funciones en el JNI |
+> | 5 · metrónomo | **BPM** sólo en el bridge, no en `AudioEngine` |
+> | 6 · diagnóstico | device caps ✅; **backend y captura de logs** no llegan |
+>
+> **Decisión: (b) — anotación de opt-in, NO ensanchar la API pública.**
+>
+> El harness recibe acceso al bridge detrás de una anotación tipo
+> `@RequiresOptIn`/`@InternalWatermelonApi`, y `getAudioBridge()` deja de ser `internal` bajo
+> ese opt-in. Con eso los cuatro se desbloquean **sin que la API publicada crezca**.
+>
+> **El porqué, que importa más que la decisión:** el input **sí** merecía API pública —un
+> cliente real va a querer capturar, y por eso `AudioInput` es una interfaz de primera clase—.
+> Routing, looper, BPM y logs son **superficie de diagnóstico**: el harness es tooling, no un
+> consumidor. Ensanchar `AudioEngine` para cuatro subsistemas por conveniencia de una app de
+> prueba es exactamente cómo una API pública termina llena de cosas que nadie puede sacar.
+>
+> La regla que queda: **algo entra a la API pública porque un consumidor real lo necesita, no
+> porque el harness lo necesite.** Si mañana NoisyPad pide el looper desde `commonMain`, eso es
+> un ticket con su propia justificación — y este opt-in no lo estorba.
+
+**Ojo con lo que el opt-in NO resuelve:** `wma_log_capture_*` existe en la C API desde
+2026-07-27 pero **el bridge no la tiene en ninguna plataforma** — ni Android ni iOS. La vista
+de logs del control 7 necesita ese cableado igual, opt-in o no. Es el mismo trabajo mecánico
+que se hizo con §12: agregar al bridge, implementar en las dos, listo.
 
 El permiso de Android (`RECORD_AUDIO`) ya está en el manifest desde el primer commit por la
 misma razón que la clave del micrófono en iOS: el caso que más importa probar es el del permiso
@@ -2234,19 +2279,20 @@ misma razón que la clave del micrófono en iOS: el caso que más importa probar
 
 ### Dónde retomar (2026-07-27)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **33 commits sobre `master`**. La branch
-existe en `origin` pero está **ahead 27** — sólo los 6 primeros están pusheados.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **40 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 34** — sólo los 6 primeros están pusheados.
 `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
 > **El CI de GitHub está caído por falta de pago (2026-07-26).** Mientras dure, el gate es
-> la verificación local completa —los **8** comandos de abajo— y hay que dejar constancia de
+> la verificación local completa —los **10** comandos de abajo— y hay que dejar constancia de
 > su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
 > si alguien corrió los gates y lo dijo.
 
-Verificación local al cerrar el `looper` (2026-07-27): portabilidad OK
-(322 archivos), **724 tests C++**, ambos slices de iOS con link check, **87 tests de simulador**, **50 JVM**,
-`assembleDebug`, XCFramework y **`compileIosMainKotlinMetadata`**. Todo en verde.
+**Última verificación local completa (2026-07-27, con los controles 1 y 2):** portabilidad OK
+(324 archivos), **749 tests C++**, ambos slices de iOS con link check, **101 tests de
+simulador**, **64 JVM**, `assembleDebug`, XCFramework, `compileIosMainKotlinMetadata`, el
+guardrail de UI y el harness **arrancando en el simulador**. Todo en verde.
 
 > [!TIP]
 > **Ojo con el verde de Gradle que llega en 400 ms.** Las tasks de test se reportan
@@ -2255,20 +2301,20 @@ Verificación local al cerrar el `looper` (2026-07-27): portabilidad OK
 > `audio/build/test-results/*/**.xml`. Al abrir esta sesión los cinco gates de Gradle daban
 > verde en 9s/1s/484ms sin ejecutar nada.
 
+Los últimos commits de la branch:
+
 ```
-ce2a105 feat(build): XCFramework en el pipeline (WA-4.1) + publish.yml a macOS
-4fc0484 feat(ios): armado de la captura — input path etapa 2
-9876b08 feat(ios): captura full-duplex en CoreAudioBackend — input path etapa 1
-7f1d284 feat(kmp): DeviceCapabilities comun — cierra WA-1.2 y WA-3.3 (Fase 3)
-cfc0794 docs(kmp): estado de cierre de sesion y ruta para retomar
-de1a79e feat(ios): AudioSessionManager (WA-3.4)
-b9017c1 feat(ios): IosAudioBridge sobre cinterop (WA-3.2, WA-3.3 parcial)
+64a11f7 feat(harness): pad XY + selector de oscilador (control 2/7)
+1fe1a42 feat(input): el camino de entrada llega a commonMain + monitor (control 1/7)
+9152f95 feat(harness): shell de Xcode — la app corre en el simulador de iOS (WA-5.5)
+2eac1de feat(harness): :harness multiplataforma (WA-5.5) + el gate que lo aisla
+01edce6 docs(kmp): WA-5.5 — propuesta concreta (aislamiento, Xcode, 7 controles)
+bc91f25 feat(kmp): la cola de 15 — WA-2.5/2.6 cerrada, complemento 49 y nada sin clasificar
 ```
 
-**Se cerró la Fase 3 entera** (WA-1.2 cerró WA-3.3), **el input path de iOS** (etapas 1 y 2)
-y **WA-4.1**. Con eso **ya no queda nada grande que se pueda hacer sin hardware** en el
-camino iOS: lo que sigue necesita un iPhone (WA-4.3) o está del lado de NoisyPad (G1).
-El trabajo sin bloqueo es **WA-2.5 + WA-2.6**, del que ya cayó `lifecycle`.
+**Estado:** Fase 3 cerrada, input path de iOS escrito, WA-4.1 hecho, **WA-2.5/2.6 CERRADA**
+(complemento 49, nada sin clasificar) y **WA-5.5 en curso**: existe `:harness`, corre en el
+simulador de iOS, y están los controles 1 (monitor de entrada) y 2 (pad XY).
 
 **Cómo verificar que todo sigue en pie antes de tocar nada** (todo corre local; el
 bloqueo de Xcode de §11 ya no existe):
@@ -2277,8 +2323,8 @@ bloqueo de Xcode de §11 ya no existe):
 bash scripts/check-cpp-portability.sh          # guardrail WA-0.4
 bash scripts/run-cpp-tests.sh                  # 749 tests C++
 bash scripts/build-ios.sh                      # ambos slices + link check
-./gradlew :audio:iosSimulatorArm64Test         # 87 tests iOS
-./gradlew :audio:testDebugUnitTest             # 50 tests JVM
+./gradlew :audio:iosSimulatorArm64Test         # 101 tests iOS  (--rerun-tasks!)
+./gradlew :audio:testDebugUnitTest             # 64 tests JVM   (--rerun-tasks!)
 ./gradlew :audio:assembleDebug                 # Android, 4 ABIs
 ./gradlew :audio:assembleWatermelonXCFramework # XCFramework (sólo macOS)
 ./gradlew :audio:compileIosMainKotlinMetadata  # el source set iOS compartido
@@ -2345,11 +2391,36 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3). **WA-2.5 + WA-2.6 ✅ CERRADA** — las 10 categorías más la cola de 15; delegación **237/278** por el script, **240/289** real. Los 49 que no delegan son **todos deliberados y con el porqué escrito en el código** (40 USB/D4, 5 Oboe/stubs, 2 listeners, 2 de backend que sólo tienen caminos USB): **cero sin clasificar**. **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
-| **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
+| **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2). **WA-4.3 primera mitad la subsume WA-5.5**, que ya corre en el simulador |
+| **Fase 5** — Harness (WA-5.5) | 🟡 **EN CURSO** — `:harness` compila en las dos plataformas y **la app corre en el simulador de iOS**. Gate de 8 a **10 comandos**. Controles **1/7** (monitor de entrada, que requirió subir §12 Input a `commonMain`) y **2/7** (pad XY). Faltan 5, desbloqueados por el opt-in decidido en §10 |
 
-**Próximo paso: decidir WA-5.5 (§10) antes de tocar WA-4.3**, porque lo subsume. Ya no queda
-trabajo de C API pendiente: **WA-2.5/2.6 está cerrada** y la superficie quedó quieta, que era
-justo la precondición que la recomendación de WA-5.5 pedía para construir el harness encima.
+**Próximo paso: el opt-in `@InternalWatermelonApi` y los 5 controles que faltan** — la
+decisión ya está tomada (§10, "cómo llegan al harness los 5 controles que faltan"): **NO se
+ensancha la API pública**; el harness recibe acceso al bridge detrás de una anotación de
+opt-in. Ya no queda trabajo de C API pendiente: WA-2.5/2.6 está cerrada.
+
+**Arranque concreto de esa sesión, en orden:**
+
+1. **`@InternalWatermelonApi`** (`@RequiresOptIn`, nivel ERROR) en `commonMain`, y
+   `getAudioBridge()` deja de ser `internal` bajo ese opt-in. Esto solo desbloquea routing,
+   BPM y backend.
+2. **Cablear `wma_log_capture_*` al bridge** — es lo único que el opt-in **no** resuelve: la
+   C API existe desde 2026-07-27 pero **ninguna plataforma la expone**. Mismo trabajo mecánico
+   que §12: agregar al bridge, implementar en las dos. Ojo con la forma del `WmaLogBatch` desde
+   cinterop (handle opaco, `count`/`line`/`free`).
+3. **Controles 3 a 7**: rack de efectos + routing · tira de looper · metrónomo · diagnóstico
+   con vista de logs. **El looper es el grande** (79 funciones en el JNI, cero en commonMain):
+   conviene llegar con los otros ya rodados, igual que en WA-2.5/2.6.
+4. **Y lo que de verdad importa: apretar "capturar" y ver la barra.** El control 1 está en
+   pantalla y nunca se tocó. Necesita el fix de `sudo xcode-select -s
+   /Applications/Xcode.app/Contents/Developer` (falta el symlink `/var/db/xcode_select_link`)
+   para que levante el panel del simulador, o una persona.
+
+> [!TIP]
+> **La regla que dejó esta decisión:** algo entra a la API pública porque **un consumidor real
+> lo necesita**, no porque el harness lo necesite. El input sí la merecía —un cliente va a
+> querer capturar, por eso `AudioInput` es interfaz de primera clase—; routing, looper, BPM y
+> logs son superficie de diagnóstico.
 
 Lo que no delega y no se hace, con el porqué: **40 USB** (D4, 37 en `jni_audio_bridge.cpp` +
 3 en `jni_usb.cpp`), **5 de `jni_benchmark.cpp`** que son Oboe puro o stubs deprecados,
@@ -2357,8 +2428,8 @@ Lo que no delega y no se hace, con el porqué: **40 USB** (D4, 37 en `jni_audio_
 a diseñar) y **2 de backend** — `CreateSplitBackend` y `FallbackToOboeBackend`, cuyos únicos
 caminos alcanzables requieren el backend USB.
 
-**Arranque concreto para la próxima sesión** (el método ya está decidido, ver abajo — no
-re-litigarlo):
+**Método de WA-2.5/2.6 — cerrado, se deja como referencia** (sirvió para diez categorías más
+la cola; si aparece otra superficie C API para migrar, es esta receta):
 
 1. Leer `docs/kmp/c_api_coverage.md` — §4 para el gap de la categoría y **§4b para cuántos
    de sus entry points ya delegan**. Correr `python3 scripts/c-api-gap.py` para los números
