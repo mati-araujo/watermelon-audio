@@ -19,7 +19,11 @@
 > | Fase 4 | 🟢 WA-4.1 ✅ · **G1/WA-4.2 ✅ CERRADO** — NoisyPad linkea la 1.9.0 con 251 símbolos `wma_*` adentro |
 > | Fase 5 | 🟢 WA-5.5 con sus **7 controles** corriendo en el simulador |
 > | **Lo único grande abierto** | **G2 — validación en device. Necesita un iPhone.** Sonido real, latencia round-trip, Instruments sobre el render block |
-> | Otros pendientes | el smoke manual de Android (12 ítems, ninguno en device) · WA-1.3 · el design system |
+> | Otros pendientes | release 1.9.1 (PR #62, abierto) · los 2 stubs que mienten · el design system · el smoke de Android · WA-1.3 |
+>
+> ⚠️ **Hoy sólo se puede validar en SIMULADOR**: no hay iPhone, y del lado de Android no hay
+> device **ni un solo AVD**. §16 ordena lo que queda por eso: primero lo que no necesita
+> hardware nuevo.
 >
 > **El gate local son 12 comandos**, no 10 — los dos últimos son los sanitizers, y el CI
 > **funciona** (estuvo caído sólo el 26/07). Ver §16.
@@ -3026,7 +3030,7 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3). **WA-2.5 + WA-2.6 ✅ CERRADA** — las 10 categorías más la cola de 15; delegación **237/278** por el script, **240/289** real. Los 49 que no delegan son **todos deliberados y con el porqué escrito en el código** (40 USB/D4, 5 Oboe/stubs, 2 listeners, 2 de backend que sólo tienen caminos USB): **cero sin clasificar**. **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
-| **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2). **WA-4.3 primera mitad la subsume WA-5.5**, que ya corre en el simulador |
+| **Fase 4** — Empaquetado y publicación | 🟢 **WA-4.1 ✅ · G1/WA-4.2 ✅ CERRADO** (2026-07-27) — el pipeline publica metadata KMP + klibs iOS **con los bindings de cinterop adentro desde la 1.9.0** (las 1.8.x son anteriores a cinterop y NO los traen), y ensambla el XCFramework en CI. NoisyPad consume la coordenada raíz, resuelve por target y **linkea `NoisyPadShell.framework` con 251 símbolos `wma_*` y `IosAudioBridge` adentro** — contra 1.8.0 eran 0. **WA-4.3 primera mitad la subsume WA-5.5**, que ya corre en el simulador. Falta sólo **WA-4.3 segunda mitad = G2**, que necesita un iPhone |
 | **Fase 5** — Harness (WA-5.5) | 🟢 **LOS 7 CONTROLES HECHOS · EL INPUT PATH DE iOS CAPTURA** — `:harness` corre en el simulador de iOS y ya encontró **6 bugs de arranque, todos arreglados**; el motor abre un stream real (48 kHz / **480 frames** / 10.10 ms) y ahora **lo reporta bien**. Gate de 8 a **10 comandos**. Controles 1–7 completos: transporte, pad XY, rack+routing, monitor de entrada, tira de looper, metrónomo y diagnóstico con vista de logs. Existe `@InternalWatermelonApi` y el looper/transporte llegan a `commonMain` (11+10 funciones, con caller). **Lo único abierto: que el medidor se mueva** — bloqueado por el cuelgue de `playAndRecord` del simulador, que NO es del motor |
 
 > [!IMPORTANT]
@@ -3041,49 +3045,57 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 > ser `0x0` y `inputPeak` trae señal real del micrófono. **El input path de iOS captura** — la
 > pregunta abierta más grande del programa, contestada.
 
-**El programa cambió de eje: la pregunta que lo justificaba está contestada.** El input path de
-iOS captura (§10). Lo que queda ya no es "¿anda?", es cerrar y validar. En orden de lo que
-desbloquea más:
+**El programa cambió de eje, y después cerró el eje nuevo.** El input path de iOS captura (§10)
+y **G1/WA-4.2 quedó cerrado** el mismo día: NoisyPad linkea la 1.9.0 con 251 símbolos `wma_*`
+adentro. Lo que sigue ya no es "¿anda?" ni "¿se consume?".
 
-**1 · ~~Pushear la branch y abrir el PR con constancia del gate.~~** ✅ **HECHO 2026-07-27.**
-Los 45 commits que vivían sólo en local están en `origin`, y el
-**[PR #59](https://github.com/mati-araujo/watermelon-audio/pull/59)** lleva la salida de los 10
-comandos en el cuerpo — que con el CI caído es la única forma de que el merge sea verificado.
-Push fast-forward, sin `--force`.
+> [!CAUTION]
+> **La restricción que ordena todo lo de abajo: hoy sólo se puede validar en SIMULADOR.**
+> No hay iPhone, y del lado de Android no hay device conectado **ni un solo AVD configurado**
+> (`adb` existe; `adb devices` vuelve vacío). Cualquier plan que empiece por "probar en device"
+> está bloqueado por hardware, no por trabajo. La lista está ordenada por **lo que se puede
+> hacer sin hardware nuevo**.
 
-**2 · G1 / WA-4.2 — el consumo desde NoisyPad.** 🟡 **Mitad hecho, mitad bloqueado por un
-release** (2026-07-27, ver la nota arriba). Lo verificable ya se verificó contra la 1.8.0: el
-lockstep de Kotlin cierra (2.4.0 los dos), la coordenada raíz **ya estaba declarada** allá, y
-resuelve para `iosArm64` e `iosSimulatorArm64` **y linkea** en `NoisyPadShell.framework`.
-Lo que **no** se puede verificar todavía es el bridge, porque **ninguna versión publicada trae
-los bindings**: `v1.8.0`/`v1.8.1` son del 07-23 y cinterop entró a `master` el 07-25.
-**Lo que falta es cortar un release, no arreglar algo** — y antes de cortarlo, mergear este PR,
-que es el que mueve `publish.yml` a `macos-latest` (en `master` sigue en Linux, y con cinterop
-adentro eso publica sin bindings sin dar error).
+**1 · Decidir el release 1.9.1 — [PR #62](https://github.com/mati-araujo/watermelon-audio/pull/62), abierto.**
+Lo abrió release-please solo, a partir del `perf` de #61. Es barato y es **el vehículo de
+cualquier cosa que tenga que llegar a NoisyPad**.
+> [!WARNING]
+> **Mirarlo antes de mergear:** ese commit **borra dos typealias públicos**
+> (`CompatibilityStatus`, `CompatibilityResult`). Se verificó que no los usa este repo **ni
+> NoisyPad**, pero es técnicamente *source-breaking* y entra como **patch**. Si importa la
+> semántica estricta del versionado, es acá donde se corrige.
 
-**3 · El smoke manual en NoisyPad Android** (la lista de abajo, 11 ítems). Tres ya no están del
-todo a ciegas: **7, 8 y 9 —los tres retornos del looper— quedaron verificados desde iOS** por el
-control 5 del harness. Lo que falta ahí es Android, donde el camino es el JNI y no la C API.
-Prioridad alta sigue teniendo el ítem 3 (`startInputStream` con permiso denegado).
+**2 · Los dos stubs que devuelven mentiras** (ítems 11 y 12 del smoke). `setDepthValue` no hace
+nada y nunca hizo nada; `nativeGetAdaptiveBufferStats` devuelve diez ceros, siempre. **No
+necesitan hardware**: la decisión es implementar o borrar, y lo que la desbloquea es *mirar qué
+llama NoisyPad*. Los dos repos están montados en esta máquina.
 
-**4 · WA-4.3 segunda mitad, en device (G2).** Ya no es "probar que captura" — eso está. Es
-**sonido real**, latencia round-trip medida, Instruments sobre el render block de
-`CoreAudioBackend` (cero allocs, cero locks) y la interrupción por llamada entrante que cierra
-el criterio original de WA-3.4. **Necesita un iPhone.**
+**3 · Design system (WA-5.5, fase final).** Tiene su precondición cumplida —**existe un
+consumidor real con siete controles**, así que ya no hay que adivinar qué componentes hacen
+falta— y **corre entero en simulador**. Sigue necesitando una decisión explícita: si se comparte
+con NoisyPad, este repo pasa a shippear Compose.
 
-**5 · Design system (WA-5.5, fase final).** Va último a propósito y ahora sí tiene su
-precondición: **existe un consumidor real con siete controles**. Recién ahora se sabe qué
-componentes hacen falta en vez de adivinarlos. Sigue necesitando la decisión explícita de si se
-comparte con NoisyPad — eso implica que este repo pase a shippear Compose.
+**4 · El smoke manual de Android — hoy bloqueado, pero parcialmente desbloqueable.** 12 ítems,
+ninguno corrido en device. **Crear un AVD alcanza para varios**, incluido el de prioridad alta
+(ítem 3, `startInputStream` con el permiso **denegado**, que es exactamente el caso que un
+emulador sí puede reproducir). Lo que un AVD **no** cubre es USB. Los ítems 7, 8 y 9 —los tres
+retornos del looper— ya están verificados desde iOS por el control 5; lo que falta ahí es el
+camino JNI.
 
-**6 · WA-1.3**, lo único que falta de Fase 1.
+**5 · WA-1.3**, lo único que falta de Fase 1. Y el fixture SF2 (§ deuda técnica), que es lo
+único que le falta al bug 3 de WA-2.0.
 
-**Lo tercero: el smoke manual en NoisyPad Android**, cuya lista sigue creciendo (abajo). Tres de
-sus ítems —7, 8 y 9, los tres retornos del looper— **ya están verificados desde iOS** por el
-control 5; lo que falta ahí es Android.
+**6 · WA-3.5 (P2, diferido) y la revisión de paths de WA-3.6.**
 
-**Lo que ya NO está pendiente:** el opt-in, el cableado de `wma_log_capture_*` y los 7
-controles. Ver §10.
+**Parqueado por hardware — no por trabajo:**
+
+**G2 · WA-4.3 segunda mitad, en device.** Ya no es "probar que captura" — eso está. Es **sonido
+real**, latencia round-trip medida, Instruments sobre el render block de `CoreAudioBackend`
+(cero allocs, cero locks) y la interrupción por llamada entrante, que cierra el criterio
+original de WA-3.4. **Necesita un iPhone.** Es lo único grande que queda abierto del programa.
+
+**Lo que ya NO está pendiente:** el opt-in, el cableado de `wma_log_capture_*`, los 7 controles,
+**G1/WA-4.2**, y las dos primeras entradas de deuda técnica. Ver §10 y la sección de deuda.
 
 > [!TIP]
 > **La regla que dejó esta decisión:** algo entra a la API pública porque **un consumidor real
