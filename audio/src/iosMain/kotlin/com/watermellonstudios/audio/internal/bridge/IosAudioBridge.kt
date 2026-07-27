@@ -354,6 +354,7 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun startInputStreamSync(): Boolean = wma_input_start(engine)
     override fun stopInputStreamSync() = wma_input_stop(engine)
     override fun isInputStreamRunning(): Boolean = wma_input_is_running(engine)
+    override fun isInputStarting(): Boolean = wma_input_is_starting(engine)
 
     override fun setInputSourceSync(source: Int) = wma_input_set_source(engine, source)
     override fun getInputSource(): Int = wma_input_get_source(engine)

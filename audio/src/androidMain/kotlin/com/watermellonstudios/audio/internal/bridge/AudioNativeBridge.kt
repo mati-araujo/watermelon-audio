@@ -1461,6 +1461,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Check if input stream is running.
      */
     override fun isInputStreamRunning(): Boolean = nativeIsInputStreamRunning()
+    override fun isInputStarting(): Boolean = nativeIsInputStarting()
 
     /**
      * Set input source.
@@ -1872,6 +1873,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeStartInputStream(): Boolean
     private external fun nativeStopInputStream()
     private external fun nativeIsInputStreamRunning(): Boolean
+    private external fun nativeIsInputStarting(): Boolean
     private external fun nativeSetInputSource(source: Int)
     private external fun nativeGetInputSource(): Int
     private external fun nativeSetInputGain(gainDb: Float)

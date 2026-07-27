@@ -30,6 +30,20 @@ interface IInputBridge {
     fun stopInputStreamSync()
     fun isInputStreamRunning(): Boolean
 
+    /**
+     * Si un start pedido por [startInputStreamSync] todavía está abriendo el stream.
+     *
+     * El camino donde el backend carga la entrada (Apple, USB) tiene que **reabrir**
+     * el stream, y eso corre en un thread propio para no congelar al que llamó — en
+     * iOS reabrir puede tardar cientos de ms o colgarse. O sea que hay un rato en el
+     * que la entrada no arrancó **todavía** y tampoco falló.
+     *
+     * **Mientras esto sea true, un [isInputStreamRunning] en false no es una
+     * negativa**, y tratarlo como tal es mostrar "permiso denegado" sobre un stream
+     * que todavía está abriendo.
+     */
+    fun isInputStarting(): Boolean
+
     fun setInputSourceSync(source: Int)
     fun getInputSource(): Int
 

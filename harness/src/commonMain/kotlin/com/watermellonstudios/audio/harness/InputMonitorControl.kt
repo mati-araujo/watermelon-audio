@@ -34,6 +34,7 @@ import com.watermellonstudios.audio.api.AudioInput
 import com.watermellonstudios.audio.api.AudioInputFactory
 import com.watermellonstudios.audio.domain.input.InputMetering
 import com.watermellonstudios.audio.domain.input.InputSource
+import kotlinx.coroutines.delay
 
 /**
  * Control 1 de 7 — **el que justifica el proyecto entero**.
@@ -83,12 +84,27 @@ fun InputMonitorControl(modifier: Modifier = Modifier) {
     }
 
     var running by remember { mutableStateOf(input.isRunning) }
+    var starting by remember { mutableStateOf(false) }
     var lastStartFailed by remember { mutableStateOf(false) }
     var monitoring by remember { mutableStateOf(input.monitoringEnabled) }
     var monitorVolume by remember { mutableStateOf(input.monitoringVolume) }
     var gainDb by remember { mutableStateOf(input.gainDb) }
     var source by remember { mutableStateOf(input.source) }
     var metering by remember { mutableStateOf<InputMetering?>(null) }
+
+    // Mientras el stream se abre, `isRunning` es false y NO es una negativa: el
+    // reopen corre en un thread propio. Sin este poll el harness mostraría el
+    // error de "permiso denegado" sobre un stream que todavía está abriendo —
+    // exactamente lo que el doc de AudioInput.start() advierte.
+    LaunchedEffect(starting) {
+        while (starting) {
+            delay(80)
+            starting = input.isStarting
+            running = input.isRunning
+            // Se abrió y no quedó viva: ahí sí es una negativa.
+            if (!starting && !running) lastStartFailed = true
+        }
+    }
 
     // Un solo cruce de frontera por tick, vía el snapshot. Sólo mientras corre:
     // preguntar con el stream cerrado gasta cruces para leer null.
@@ -111,7 +127,14 @@ fun InputMonitorControl(modifier: Modifier = Modifier) {
 
             Text(
                 text = when (val m = metering) {
-                    null -> if (running) "sin medición (no hay nodo de entrada)" else "detenido"
+                    null -> when {
+                        // Tres estados y no dos: "abriendo" no es ni silencio ni
+                        // negativa, y colapsarlo en cualquiera de los dos manda a
+                        // buscar el bug al lugar equivocado.
+                        starting -> "abriendo el stream…"
+                        running -> "sin medición (no hay nodo de entrada)"
+                        else -> "detenido"
+                    }
                     else -> "L ${m.levelDbLeft.oneDecimal()} dB · " +
                         "R ${m.levelDbRight.oneDecimal()} dB · " +
                         "${m.latencyMs.oneDecimal()} ms" +
@@ -131,10 +154,12 @@ fun InputMonitorControl(modifier: Modifier = Modifier) {
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
-                    enabled = !running,
+                    enabled = !running && !starting,
                     onClick = {
-                        val ok = input.start()
-                        lastStartFailed = !ok
+                        // false acá es un rechazo de entrada, no "no hay señal".
+                        val accepted = input.start()
+                        lastStartFailed = !accepted
+                        starting = input.isStarting
                         running = input.isRunning
                     },
                 ) { Text("capturar") }
@@ -144,6 +169,7 @@ fun InputMonitorControl(modifier: Modifier = Modifier) {
                     onClick = {
                         input.stop()
                         running = input.isRunning
+                        starting = false
                         lastStartFailed = false
                     },
                 ) { Text("detener") }

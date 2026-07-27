@@ -25,6 +25,7 @@ internal class AudioInputImpl(
     override fun stop() = bridge.stopInputStreamSync()
 
     override val isRunning: Boolean get() = bridge.isInputStreamRunning()
+    override val isStarting: Boolean get() = bridge.isInputStarting()
 
     override var source: InputSource
         get() = InputSource.fromId(bridge.getInputSource())

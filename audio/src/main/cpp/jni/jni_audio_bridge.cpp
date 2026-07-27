@@ -812,6 +812,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsInpu
     return wma_input_is_running(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsInputStarting(
+    JNIEnv* env, jobject thiz) {
+    // La mitad que falta para distinguir "todavia no" de "no": mientras esto sea
+    // true, que nativeIsInputStreamRunning() diga false no es una negativa. En el
+    // camino Oboe directo de Android es siempre false —ese start es sincronico—;
+    // en el camino USB/split, no.
+    return wma_input_is_starting(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetInputSource(
     JNIEnv* env, jobject thiz, jint source) {

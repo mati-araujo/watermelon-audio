@@ -18,6 +18,8 @@
 #include "backends/IAudioBackend.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 
 namespace wma_test {
 
@@ -26,6 +28,17 @@ public:
     // ---- IAudioBackend ----------------------------------------------------
 
     watermelon_audio::BackendResult start() override {
+        // Freno opcional. Existe porque el reopen de la captura pasó a correr en
+        // un thread propio, y "no bloquea al llamador" no se puede afirmar contra
+        // un start() instantáneo: el worker terminaría antes de que el test mire.
+        // Con esto el test decide cuándo destrabar y la carrera desaparece.
+        {
+            std::unique_lock<std::mutex> lock(mStartGateMutex);
+            mStartEntered = true;
+            mStartEnteredCv.notify_all();
+            mStartGateCv.wait(lock, [this] { return !mStartBlocked; });
+        }
+
         ++mStartCount;
         if (mStartResult != watermelon_audio::BackendResult::OK) {
             return mStartResult;
@@ -35,7 +48,8 @@ public:
         // attaches its sink node while opening). A fake that honored the request
         // the moment it arrived would make the reopen logic untestable, because
         // the case that needs a reopen would never occur.
-        mInfo.isFullDuplex = mFullDuplexRequested && mCaptureAvailable;
+        mInfo.isFullDuplex =
+            mFullDuplexRequested && mCaptureAvailable.load(std::memory_order_acquire);
         mRunning.store(true, std::memory_order_release);
         return watermelon_audio::BackendResult::OK;
     }
@@ -93,7 +107,32 @@ public:
      * is accepted, the stream opens, and capture still never goes live. That gap
      * is the whole reason isCaptureLive() exists separately from the request.
      */
-    void setCaptureAvailable(bool available) { mCaptureAvailable = available; }
+    void setCaptureAvailable(bool available) {
+        mCaptureAvailable.store(available, std::memory_order_release);
+    }
+
+    // ---- Freno de start(), para los tests del reopen asincrónico -------------
+
+    /// A partir de acá, todo start() se queda esperando en releaseStart().
+    void blockStart() {
+        std::lock_guard<std::mutex> lock(mStartGateMutex);
+        mStartBlocked = true;
+        mStartEntered = false;
+    }
+
+    /// Espera a que un start() haya llegado de verdad al freno.
+    void waitUntilStartEntered() {
+        std::unique_lock<std::mutex> lock(mStartGateMutex);
+        mStartEnteredCv.wait(lock, [this] { return mStartEntered; });
+    }
+
+    void releaseStart() {
+        {
+            std::lock_guard<std::mutex> lock(mStartGateMutex);
+            mStartBlocked = false;
+        }
+        mStartGateCv.notify_all();
+    }
 
     /// The capture request currently pending for the next start().
     bool fullDuplexRequested() const { return mFullDuplexRequested; }
@@ -109,10 +148,19 @@ private:
     watermelon_audio::IAudioCallback* mCallback = nullptr;
     watermelon_audio::BackendResult mStartResult = watermelon_audio::BackendResult::OK;
     std::atomic<bool> mRunning{false};
+
+    // Freno de start(). mutable no hace falta: sólo lo tocan métodos no-const.
+    std::mutex mStartGateMutex;
+    std::condition_variable mStartGateCv;
+    std::condition_variable mStartEnteredCv;
+    bool mStartBlocked = false;
+    bool mStartEntered = false;
     bool mPaused = false;
     int mRequestedSampleRate = 0;
     bool mFullDuplexRequested = false;
-    bool mCaptureAvailable = true;
+    // Atomic: los tests del reopen asincronico lo mueven desde otro thread
+    // mientras el worker esta adentro de start(). TSan lo agarro.
+    std::atomic<bool> mCaptureAvailable{true};
     int mStartCount = 0;
 };
 

@@ -59,6 +59,10 @@ class AudioInputTest {
 
         override fun stopInputStreamSync() { running = false }
         override fun isInputStreamRunning(): Boolean = running
+
+        /** El fake abre sincronicamente, asi que nunca queda "abriendo". */
+        var starting = false
+        override fun isInputStarting(): Boolean = starting
         override fun setInputSourceSync(source: Int) { sourceId = source }
         override fun getInputSource(): Int = sourceId
         override fun setInputGain(gainDb: Float) { gain = gainDb }

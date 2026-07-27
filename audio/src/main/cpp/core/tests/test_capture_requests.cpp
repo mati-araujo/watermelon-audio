@@ -22,13 +22,32 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+
 namespace wma_test {
 namespace {
 
 using Requester = watermelon_audio::BackendManager::CaptureRequester;
+using Outcome   = watermelon_audio::BackendManager::CaptureOutcome;
 
 class CaptureRequestTest : public BackendPathFixture {
 protected:
+    /**
+     * Pedir captura y esperar a que el reopen termine.
+     *
+     * El reopen dejó de correr en el thread del llamador (bloquearlo era un
+     * freeze del main thread en iOS), así que un test que afirme sobre el
+     * resultado tiene que esperarlo. Lo que NO se esconde acá es el valor
+     * devuelto: los tests de más abajo afirman que es PENDING y no LIVE.
+     */
+    Outcome requestCaptureAndSettle(Requester who, bool want, bool allowRestart) {
+        const Outcome outcome = mManager->requestCapture(who, want, allowRestart);
+        mManager->waitForCaptureRequest();
+        return outcome;
+    }
+
     /// A running stream with no capture path, which is where every case starts.
     void runWithoutCapture() {
         ASSERT_TRUE(mManager->selectBackend(watermelon_audio::BackendType::OBOE));
@@ -46,7 +65,8 @@ TEST_F(CaptureRequestTest, LeavingInputFxDoesNotKillAnExplicitlyStartedCapture) 
     // on purpose, the mode system independently turns INPUT_FX off, and with a
     // single shared bool the capture died with it.
     runWithoutCapture();
-    ASSERT_TRUE(mManager->requestCapture(Requester::INPUT_NODE, true, true));
+    ASSERT_EQ(requestCaptureAndSettle(Requester::INPUT_NODE, true, true), Outcome::PENDING);
+    ASSERT_TRUE(mManager->isCaptureLive());
 
     mManager->setFullDuplexEnabled(false);  // the MODE requester withdrawing
 
@@ -59,7 +79,7 @@ TEST_F(CaptureRequestTest, StoppingInputDoesNotKillCaptureTheModeStillNeeds) {
     // mode's need for capture has to survive.
     runWithoutCapture();
     mManager->setFullDuplexEnabled(true);
-    ASSERT_TRUE(mManager->requestCapture(Requester::INPUT_NODE, true, true));
+    requestCaptureAndSettle(Requester::INPUT_NODE, true, true);
     ASSERT_TRUE(mManager->isCaptureLive());
 
     mManager->requestCapture(Requester::INPUT_NODE, false, false);
@@ -103,7 +123,7 @@ TEST_F(CaptureRequestTest, AnExplicitInputStartReopensAndCapturesForReal) {
     runWithoutCapture();
     const int startsBefore = mBackend->startCount();
 
-    EXPECT_TRUE(mManager->requestCapture(Requester::INPUT_NODE, true, true));
+    EXPECT_EQ(requestCaptureAndSettle(Requester::INPUT_NODE, true, true), Outcome::PENDING);
 
     EXPECT_EQ(mBackend->startCount(), startsBefore + 1);
     EXPECT_TRUE(mManager->isCaptureLive());
@@ -113,7 +133,7 @@ TEST_F(CaptureRequestTest, WithdrawingCaptureNeverReopensTheStream) {
     // Turning capture off is not worth a gap: the backend simply stops handing
     // the frames over.
     runWithoutCapture();
-    ASSERT_TRUE(mManager->requestCapture(Requester::INPUT_NODE, true, true));
+    requestCaptureAndSettle(Requester::INPUT_NODE, true, true);
     const int startsBefore = mBackend->startCount();
 
     mManager->requestCapture(Requester::INPUT_NODE, false, true);
@@ -123,10 +143,10 @@ TEST_F(CaptureRequestTest, WithdrawingCaptureNeverReopensTheStream) {
 
 TEST_F(CaptureRequestTest, RequestingCaptureTwiceReopensOnlyOnce) {
     runWithoutCapture();
-    ASSERT_TRUE(mManager->requestCapture(Requester::INPUT_NODE, true, true));
+    requestCaptureAndSettle(Requester::INPUT_NODE, true, true);
     const int startsAfterFirst = mBackend->startCount();
 
-    EXPECT_TRUE(mManager->requestCapture(Requester::INPUT_NODE, true, true));
+    EXPECT_EQ(requestCaptureAndSettle(Requester::INPUT_NODE, true, true), Outcome::LIVE);
 
     EXPECT_EQ(mBackend->startCount(), startsAfterFirst)
         << "capture was already live; there was nothing to reopen for";
@@ -141,7 +161,7 @@ TEST_F(CaptureRequestTest, ADeniedMicrophoneIsReportedAsFalseNotAsSuccess) {
     runWithoutCapture();
     mBackend->setCaptureAvailable(false);
 
-    EXPECT_FALSE(mManager->requestCapture(Requester::INPUT_NODE, true, true));
+    EXPECT_EQ(requestCaptureAndSettle(Requester::INPUT_NODE, true, true), Outcome::PENDING);
 
     EXPECT_FALSE(mManager->isCaptureLive());
     EXPECT_TRUE(mManager->isRunning()) << "output must survive a denied microphone";
@@ -163,11 +183,172 @@ TEST_F(CaptureRequestTest, AFailedReopenFallsBackToStreamingWithoutCapture) {
     runWithoutCapture();
     mBackend->setStartResult(watermelon_audio::BackendResult::ERROR_STREAM_FAILED);
 
-    EXPECT_FALSE(mManager->requestCapture(Requester::INPUT_NODE, true, true));
+    requestCaptureAndSettle(Requester::INPUT_NODE, true, true);
 
     EXPECT_FALSE(mBackend->fullDuplexRequested())
         << "the request that could not be honored must be dropped, or the next "
            "reopen would fail the same way";
+}
+
+// --- El reopen no corre en el thread del llamador ---------------------------
+//
+// Estos cuatro existen porque el reopen sincrónico congelaba el main thread: en
+// iOS `[AVAudioSession setActive:]` se colgaba adentro de la HAL de CoreAudio y
+// la app quedaba muerta con el dedo todavía en el botón. Que "no bloquea" no se
+// puede afirmar contra un start() instantáneo, así que el fake trae un freno.
+
+TEST_F(CaptureRequestTest, RequestingCaptureReturnsBeforeTheReopenFinishes) {
+    runWithoutCapture();
+    mBackend->blockStart();
+
+    const Outcome outcome = mManager->requestCapture(Requester::INPUT_NODE, true, true);
+
+    // La afirmación que importa: volvimos, y el reopen todavía no pasó por
+    // start(). Con el reopen sincrónico esta línea no se alcanzaba nunca.
+    EXPECT_EQ(outcome, Outcome::PENDING)
+        << "un reopen agendado no puede reportarse como LIVE ni como NOT_LIVE";
+    EXPECT_TRUE(mManager->isCaptureRequestPending());
+    EXPECT_FALSE(mManager->isCaptureLive()) << "todavía no hay captura, y hay que decirlo";
+
+    mBackend->waitUntilStartEntered();
+    mBackend->releaseStart();
+    mManager->waitForCaptureRequest();
+
+    EXPECT_FALSE(mManager->isCaptureRequestPending());
+    EXPECT_TRUE(mManager->isCaptureLive());
+}
+
+TEST_F(CaptureRequestTest, StateReadsDoNotBlockWhileTheStreamIsBeingReopened) {
+    // **El test que de verdad pincha el requisito.** Mover el reopen a un thread
+    // propio no alcanza por sí solo: `BackendManager::start()` toma mMutex y
+    // adentro llama al start() del backend, así que el worker lo retiene durante
+    // TODA la reapertura. Sin los espejos sin lock, estas tres lecturas —que son
+    // las que la UI pollea en cada frame— se cuelgan en el mutex y el main thread
+    // queda congelado igual que antes, sólo que en otra llamada.
+    //
+    // Si los espejos desaparecen, este test no falla: se **cuelga**, y lo agarra
+    // el timeout de ctest.
+    runWithoutCapture();
+    mBackend->blockStart();
+
+    mManager->requestCapture(Requester::INPUT_NODE, true, true);
+    mBackend->waitUntilStartEntered();  // el worker está adentro de start(), con mMutex
+
+    EXPECT_TRUE(mManager->isCaptureRequestPending());
+    EXPECT_FALSE(mManager->isCaptureLive()) << "todavía no hay captura";
+    EXPECT_FALSE(mManager->isRunning()) << "el stream está cerrado a mitad del reopen";
+    (void)mManager->getStreamInfo();  // no puede colgarse
+
+    mBackend->releaseStart();
+    mManager->waitForCaptureRequest();
+
+    EXPECT_TRUE(mManager->isCaptureLive());
+    EXPECT_TRUE(mManager->isRunning());
+}
+
+TEST_F(CaptureRequestTest, ARequestThatLandsMidReopenStillEndsUpWithCaptureLive) {
+    // Lo que este test pincha es la **convergencia**, que es la garantía que ve
+    // el usuario: si el micrófono aparece recién después de que arrancó la
+    // primera pasada, la captura tiene que terminar viva igual.
+    //
+    // > [!NOTE]
+    // > **Lo que NO cubre, y conviene decirlo en vez de aparentar que sí.** Hay
+    // > dos caminos que convergen y este test no elige cuál toma: si el pedido
+    // > tardío llega con `mReopenInFlight` todavía en true, lo salva la
+    // > generación (el worker da otra pasada); si llega después, agenda un worker
+    // > nuevo. **La rama de la generación no es alcanzable de forma determinista
+    // > desde un test**, porque el pedido tardío se bloquea en `mMutex` hasta que
+    // > el worker está por terminar — el residual documentado en requestCapture().
+    // > Mutar `++mCaptureRestartGeneration` a un no-op deja este test en verde.
+    // > La rama existe porque sin ella ese caso pierde el pedido en silencio, y
+    // > eso es peor que una rama sin test.
+    //
+    // El segundo pedido va desde OTRO thread a propósito: desde el thread del
+    // llamador bloquearía hasta que el reopen termine.
+    runWithoutCapture();
+    mBackend->setCaptureAvailable(false);
+    mBackend->blockStart();
+
+    mManager->requestCapture(Requester::INPUT_NODE, true, true);
+    mBackend->waitUntilStartEntered();
+
+    std::thread late([this] {
+        mBackend->setCaptureAvailable(true);
+        mManager->requestCapture(Requester::INPUT_NODE, true, true);
+    });
+
+    mBackend->releaseStart();
+    late.join();
+    mManager->waitForCaptureRequest();
+
+    EXPECT_TRUE(mManager->isCaptureLive())
+        << "el pedido que llegó a mitad del reopen se perdió: falta la segunda pasada";
+}
+
+TEST_F(CaptureRequestTest, ADeniedMicrophoneIsNotRetriedInALoop) {
+    // El tope de pasadas existe para pedidos nuevos, no para insistir contra un
+    // permiso. Un micrófono denegado no sube la generación, así que se reabre una
+    // sola vez: cada reintento sería otro corte audible por nada.
+    runWithoutCapture();
+    mBackend->setCaptureAvailable(false);
+    const int startsBefore = mBackend->startCount();
+
+    requestCaptureAndSettle(Requester::INPUT_NODE, true, true);
+
+    EXPECT_EQ(mBackend->startCount(), startsBefore + 1)
+        << "se reintentó contra un micrófono denegado";
+    EXPECT_FALSE(mManager->isCaptureLive());
+}
+
+TEST_F(CaptureRequestTest, DestroyingTheManagerMidReopenDoesNotLeaveAThreadBehind) {
+    // Destruir el manager con un reopen en curso no puede colgarse ni crashear.
+    //
+    // > [!NOTE]
+    // > **Lo que este test NO distingue, y por qué se deja igual.** Mutar el
+    // > `join()` del destructor a `detach()` **no lo hace fallar**, ni siquiera
+    // > bajo TSan: después del detach, `stop()` toma `mMutex` y el worker lo
+    // > tiene mientras está adentro de `start()`, así que el destructor termina
+    // > esperando lo mismo por otro camino.
+    // >
+    // > Eso es justamente lo que hace peligroso al detach: **la corrección
+    // > quedaría apoyada en que `stop()` incidentalmente tome el mismo mutex**,
+    // > no en una garantía. Queda una ventana real —el worker todavía usa
+    // > `mReopenMutex` y `mReopenDone` después de su última toma de `mMutex`—
+    // > que es de unas pocas instrucciones y no se reproduce a pedido. El join
+    // > la cierra por construcción; el test cubre el resto.
+    auto manager = std::make_unique<watermelon_audio::BackendManager>();
+    auto* backend = lastCreatedSystemBackend();
+    ASSERT_NE(backend, nullptr);
+
+    ASSERT_TRUE(manager->selectBackend(watermelon_audio::BackendType::OBOE));
+    manager->setCallback(mEngine.get());
+    ASSERT_EQ(manager->start(), watermelon_audio::BackendResult::OK);
+
+    backend->blockStart();
+    manager->requestCapture(Requester::INPUT_NODE, true, true);
+    backend->waitUntilStartEntered();
+
+    // El destrabe llega DESPUÉS de que empiece la destrucción, y ahí está la
+    // gracia: si el destructor joinea, no puede volver hasta que esto corra; si
+    // detacha, vuelve enseguida y `released` todavía es false.
+    //
+    // Soltar el freno antes de destruir —que es lo que hacía la primera versión
+    // de este test— deja al worker ya terminado y `joinable()` en false, así que
+    // el mutante del detach sobrevivía sin que se notara.
+    std::atomic<bool> released{false};
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        released.store(true, std::memory_order_release);
+        backend->releaseStart();
+    });
+
+    manager.reset();
+
+    EXPECT_TRUE(released.load(std::memory_order_acquire))
+        << "el destructor volvió con el worker todavía adentro de start(): "
+           "no joineó, y ese thread sigue usando un manager liberado";
+
+    releaser.join();
 }
 
 }  // namespace

@@ -49,12 +49,24 @@ import kotlinx.coroutines.flow.Flow
 interface AudioInput {
 
     /**
-     * Abre el stream de entrada.
+     * Abre el stream de entrada. **No bloquea.**
      *
-     * @return `false` si no se pudo abrir. **El caso que más importa es el
-     *   permiso de micrófono denegado**, y en las dos plataformas se ve así:
-     *   sin excepción, sin crash, un `false`. Un consumidor que ignore este
-     *   valor va a mostrar un medidor plano y culpar al motor.
+     * En el camino donde el backend carga la entrada (Apple, USB) hay que reabrir
+     * el stream, y eso corre en un thread propio: reabrir puede tardar cientos de
+     * ms y en iOS se midió colgándose adentro de `AVAudioSession`. Bloquear al que
+     * llama —que en una app con UI es el main thread— es un freeze o un watchdog
+     * kill.
+     *
+     * @return `false` **sólo si el pedido se rechazó de entrada**. `true` quiere
+     *   decir "está viva o se está abriendo", que no es lo mismo:
+     *
+     *   - [isRunning] — está entregando frames
+     *   - [isStarting] — todavía se está abriendo
+     *
+     * **El caso que más importa sigue siendo el permiso de micrófono denegado**, y
+     * ahora se ve así: [isStarting] pasa a false y [isRunning] se queda en false.
+     * Sin excepción y sin crash. Un consumidor que concluya "denegado" con
+     * [isStarting] todavía en true va a acusar al motor de algo que no pasó.
      */
     fun start(): Boolean
 
@@ -62,6 +74,14 @@ interface AudioInput {
     fun stop()
 
     val isRunning: Boolean
+
+    /**
+     * Si un [start] todavía está abriendo el stream.
+     *
+     * Es la mitad que falta para distinguir "todavía no" de "no". Mientras sea
+     * true, un [isRunning] en false no es una negativa.
+     */
+    val isStarting: Boolean
 
     /**
      * De dónde toma audio. **No todas las fuentes existen en todas las

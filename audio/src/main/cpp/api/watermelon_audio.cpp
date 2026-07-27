@@ -798,10 +798,22 @@ bool wma_input_start(WmaEngine* engine) {
     // The caller explicitly asked for the microphone, so a stream reopen is
     // authorized: every backend decides on capture when it opens. The mode path
     // does NOT get this permission — see BackendManager::requestCapture.
-    return engine->backendManager->requestCapture(
+    //
+    // PENDING cuenta como éxito: el reopen quedó agendado y corre en su propio
+    // thread. Devolver false ahí sería reportar un fallo que no pasó, y es
+    // exactamente lo que el harness mostraría como "permiso denegado".
+    const auto outcome = engine->backendManager->requestCapture(
         watermelon_audio::BackendManager::CaptureRequester::INPUT_NODE,
         /*want=*/true,
         /*allowRestart=*/true);
+
+    using Outcome = watermelon_audio::BackendManager::CaptureOutcome;
+    return outcome == Outcome::LIVE || outcome == Outcome::PENDING;
+}
+
+bool wma_input_is_starting(const WmaEngine* engine) {
+    if (!engine || !engine->backendManager) return false;
+    return engine->backendManager->isCaptureRequestPending();
 }
 
 void wma_input_stop(WmaEngine* engine) {

@@ -52,6 +52,27 @@ BackendManager::BackendManager() {
 }
 
 BackendManager::~BackendManager() {
+    // El orden importa y es la diferencia entre esto y el use-after-free que ya
+    // tiene anotado `stopWithFade`: aquel **detacha** un thread que captura
+    // `this` y el destructor no tiene handle sobre él.
+    //
+    //   1. cortar, para que un worker en su segunda pasada no reabra un stream
+    //      sobre un manager que se está muriendo;
+    //   2. joinear, que es lo que garantiza que nadie use `this` después;
+    //   3. recién ahí stop(), porque un worker vivo podría estar arrancándolo.
+    //
+    // Dos cosas que NO hay que hacer acá, cada una un deadlock:
+    //
+    //   - tomar mReopenMutex para joinear: el worker necesita ese mismo mutex
+    //     para limpiar su flag antes de salir. No hace falta tomarlo — destruir
+    //     un objeto mientras otro thread lo usa ya es UB, así que el destructor
+    //     es el único que puede tocar el handle;
+    //   - joinear con mMutex tomado: el worker lo pide adentro de stop()/start().
+    mShuttingDown.store(true, std::memory_order_release);
+    if (mReopenThread.joinable()) {
+        mReopenThread.join();
+    }
+
     stop();
     LOGI("BackendManager destroyed");
 }
@@ -132,6 +153,8 @@ bool BackendManager::selectBackend(BackendType type) {
 
     LOGI("Backend selected: %s", backendTypeToString(type));
 
+    publishBackendState();
+
     // Notify listeners
     notifyBackendChanged(oldType, type);
 
@@ -139,6 +162,7 @@ bool BackendManager::selectBackend(BackendType type) {
     if (mWasRunning && mActiveBackend) {
         LOGI("Restarting backend after switch");
         BackendResult result = mActiveBackend->start();
+        publishBackendState();
         if (result != BackendResult::OK) {
             LOGE("Failed to restart backend: %s", backendResultToString(result));
             return false;
@@ -196,6 +220,7 @@ BackendResult BackendManager::start() {
         LOGI("Backend started: %s", backendTypeToString(mCurrentType.load()));
     }
 
+    publishBackendState();
     return result;
 }
 
@@ -206,21 +231,44 @@ void BackendManager::stop() {
         mActiveBackend->stop();
         LOGI("Backend stopped");
     }
+
+    publishBackendState();
 }
 
 bool BackendManager::isRunning() const {
-    std::lock_guard<std::mutex> lock(mMutex);
-    return mActiveBackend && mActiveBackend->isRunning();
+    std::unique_lock<std::mutex> lock(mMutex, std::try_to_lock);
+    if (lock.owns_lock()) {
+        const bool running = mActiveBackend && mActiveBackend->isRunning();
+        mRunningMirror.store(running, std::memory_order_release);
+        return running;
+    }
+    return mRunningMirror.load(std::memory_order_acquire);
 }
 
 StreamInfo BackendManager::getStreamInfo() const {
-    std::lock_guard<std::mutex> lock(mMutex);
-
-    if (mActiveBackend) {
-        return mActiveBackend->getStreamInfo();
+    std::unique_lock<std::mutex> lock(mMutex, std::try_to_lock);
+    if (lock.owns_lock()) {
+        StreamInfo info = mActiveBackend ? mActiveBackend->getStreamInfo() : StreamInfo{};
+        std::lock_guard<std::mutex> mirror(mStreamInfoMutex);
+        mStreamInfoMirror = info;
+        return info;
     }
+    std::lock_guard<std::mutex> mirror(mStreamInfoMutex);
+    return mStreamInfoMirror;
+}
 
-    return StreamInfo{};
+void BackendManager::publishBackendState() {
+    // Con mMutex tomado. Se lee del backend una sola vez y se reparte a los tres
+    // espejos, así no pueden contarse historias distintas entre sí.
+    const bool running = mActiveBackend && mActiveBackend->isRunning();
+    StreamInfo info = mActiveBackend ? mActiveBackend->getStreamInfo() : StreamInfo{};
+
+    {
+        std::lock_guard<std::mutex> lock(mStreamInfoMutex);
+        mStreamInfoMirror = info;
+    }
+    mCaptureLiveMirror.store(running && info.isFullDuplex, std::memory_order_release);
+    mRunningMirror.store(running, std::memory_order_release);
 }
 
 // =============================================================================
@@ -254,12 +302,19 @@ void BackendManager::setFullDuplexEnabled(bool enable) {
 }
 
 bool BackendManager::isCaptureLive() const {
-    std::lock_guard<std::mutex> lock(mMutex);
-    return mActiveBackend && mActiveBackend->isRunning() &&
-           mActiveBackend->getStreamInfo().isFullDuplex;
+    std::unique_lock<std::mutex> lock(mMutex, std::try_to_lock);
+    if (lock.owns_lock()) {
+        const bool live = mActiveBackend && mActiveBackend->isRunning() &&
+                          mActiveBackend->getStreamInfo().isFullDuplex;
+        mCaptureLiveMirror.store(live, std::memory_order_release);
+        return live;
+    }
+    return mCaptureLiveMirror.load(std::memory_order_acquire);
 }
 
-bool BackendManager::requestCapture(CaptureRequester who, bool want, bool allowRestart) {
+BackendManager::CaptureOutcome BackendManager::requestCapture(CaptureRequester who,
+                                                              bool want,
+                                                              bool allowRestart) {
     // Every path that does NOT need a reopen returns from inside this block, so
     // reaching the code after it *is* the decision to reopen.
     {
@@ -275,7 +330,7 @@ bool BackendManager::requestCapture(CaptureRequester who, bool want, bool allowR
         mFullDuplexEnabled = effective;
 
         if (!mActiveBackend) {
-            return false;
+            return CaptureOutcome::NOT_LIVE;
         }
 
         // Always push the request: it is what the backend reads at its next
@@ -285,13 +340,13 @@ bool BackendManager::requestCapture(CaptureRequester who, bool want, bool allowR
         mActiveBackend->setFullDuplexEnabled(effective);
 
         if (!mActiveBackend->isRunning()) {
-            return false;
+            return CaptureOutcome::NOT_LIVE;
         }
 
         const bool live = mActiveBackend->getStreamInfo().isFullDuplex;
 
         if (live == effective) {
-            return live;
+            return live ? CaptureOutcome::LIVE : CaptureOutcome::NOT_LIVE;
         }
 
         if (!effective) {
@@ -299,28 +354,115 @@ bool BackendManager::requestCapture(CaptureRequester who, bool want, bool allowR
             // worth a restart: the backend has already stopped delivering it, so
             // the only cost is some capture work nobody consumes. Trading that
             // for an audible gap would be a bad deal.
-            return false;
+            return CaptureOutcome::NOT_LIVE;
         }
 
         if (!allowRestart) {
             LOGW("Capture requested on a running stream that has none — takes "
                  "effect on the next start()");
-            return false;
+            return CaptureOutcome::NOT_LIVE;
+        }
+
+        // Autorizado a reabrir. La generación sube ACÁ, bajo mMutex, porque es
+        // lo que le dice a un worker ya corriendo que llegó un pedido nuevo
+        // después de que él leyera el flag. Ver mCaptureRestartGeneration.
+        ++mCaptureRestartGeneration;
+    }
+
+    if (mShuttingDown.load(std::memory_order_acquire)) {
+        return CaptureOutcome::NOT_LIVE;
+    }
+
+    // Agendar FUERA de mMutex y en un thread propio. El reopen entero —stop()
+    // esperando a que drenen los callbacks de RT, start() hablando por IPC con
+    // el servidor de audio— se lo come el worker; este thread vuelve ya.
+    std::lock_guard<std::mutex> schedule(mReopenMutex);
+
+    if (mReopenInFlight) {
+        // Ya hay uno corriendo y la generación que acabamos de subir es
+        // justamente cómo se entera. No se agenda un segundo.
+        return CaptureOutcome::PENDING;
+    }
+
+    // Cosechar el worker anterior, que ya terminó (mReopenInFlight es false).
+    // Sin esto, std::thread::operator= sobre un thread joinable llama a
+    // std::terminate. Es seguro joinear con mReopenMutex tomado: el worker
+    // suelta este mutex ANTES de salir y no lo vuelve a necesitar.
+    if (mReopenThread.joinable()) {
+        mReopenThread.join();
+    }
+
+    mReopenInFlight = true;
+    mReopenThread = std::thread([this] { runCaptureReopen(); });
+
+    return CaptureOutcome::PENDING;
+}
+
+bool BackendManager::isCaptureRequestPending() const {
+    std::lock_guard<std::mutex> lock(mReopenMutex);
+    return mReopenInFlight;
+}
+
+void BackendManager::waitForCaptureRequest() {
+    std::unique_lock<std::mutex> lock(mReopenMutex);
+    mReopenDone.wait(lock, [this] { return !mReopenInFlight; });
+}
+
+void BackendManager::runCaptureReopen() {
+    // Tope de pasadas. Cada pasada es un corte audible, así que esto no es una
+    // formalidad: es lo que impide que dos botones peleándose dejen al usuario
+    // con el audio entrecortado. Si se agota, se dice en el log — un tope que
+    // recorta en silencio se lee como "convergió".
+    constexpr int kMaxPasses = 3;
+
+    for (int pass = 1; !mShuttingDown.load(std::memory_order_acquire); ++pass) {
+        uint64_t generationBefore;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            generationBefore = mCaptureRestartGeneration;
+        }
+
+        reopenOnce();
+
+        uint64_t generationAfter;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            generationAfter = mCaptureRestartGeneration;
+        }
+
+        // Nadie pidió nada nuevo mientras reabríamos: lo que quedó es la
+        // respuesta, sea captura viva o micrófono denegado. NO se reintenta por
+        // "no quedó viva" — un permiso denegado no cambia por insistir, y cada
+        // reintento sería otro corte.
+        if (generationAfter == generationBefore) {
+            break;
+        }
+
+        if (pass >= kMaxPasses) {
+            LOGW("Capture reopen gave up after %d passes — a newer request "
+                 "arrived each time; the last one may not be honored",
+                 pass);
+            break;
         }
     }
 
-    // Reopen OUTSIDE the lock: start()/stop() take mMutex themselves, and stop()
-    // additionally blocks until in-flight RT callbacks drain.
+    {
+        std::lock_guard<std::mutex> lock(mReopenMutex);
+        mReopenInFlight = false;
+    }
+    mReopenDone.notify_all();
+}
+
+void BackendManager::reopenOnce() {
     LOGI("Reopening the stream to add a capture path");
     stop();
 
     if (start() == BackendResult::OK) {
-        const bool live = isCaptureLive();
-        if (!live) {
+        if (!isCaptureLive()) {
             LOGW("Stream reopened but capture is still not live — most likely "
                  "microphone access was denied");
         }
-        return live;
+        return;
     }
 
     // The reopen failed with capture on. Falling back to no capture is the only
@@ -337,7 +479,6 @@ bool BackendManager::requestCapture(CaptureRequester who, bool want, bool allowR
     if (start() != BackendResult::OK) {
         LOGE("Fallback start failed too — the stream is down");
     }
-    return false;
 }
 
 void BackendManager::setLatencyProfile(usb::UsbLatencyProfile profile) {

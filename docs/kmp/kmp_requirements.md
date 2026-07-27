@@ -2430,17 +2430,26 @@ cambiar de categoría** (`closeEngineLocked()` ya hacía `setActive:NO`); y **no
 `Simulator.app`** (con la GUI arriba, igual). `tccd` no registra **nada** en todo el episodio:
 el pedido de micrófono no llega siquiera a macOS.
 
-**Conclusión: "el medidor se mueve" no se puede contestar en este simulador.** El puente de
-audio de entrada del simulador hacia el host no responde en esta máquina — con un OBSBOT USB a
-32 kHz como entrada por defecto. La pregunta pasa a **device (WA-4.3 segunda mitad, G2)**, o a
-un host con la entrada del simulador funcionando.
+**Conclusión de ese momento —que resultó EQUIVOCADA en el punto que importaba—:** se dio por
+sentado que el puente de audio del simulador no respondía y que la pregunta pasaba a device.
 
-> [!IMPORTANT]
-> **Lo que sí queda como deuda de diseño, y es del motor:** `wma_input_start()` hace un
-> **stop + start sincrónico del stream entero en el thread del que llama** — que en cualquier
-> app con UI es el main thread. Acá eso se vio como un freeze total de la app. En un device es,
-> en el mejor caso, cientos de ms de main thread bloqueado, y en el peor un watchdog kill.
-> El reopen es correcto; **falta que sea seguro**. Es decisión propia, no arreglo al paso.
+> [!CAUTION]
+> **No era del simulador: era el main thread.** Lo que todos los descartes tenían en común, y
+> que no se vio hasta hacer el reopen asincrónico, es que **todas las pruebas activaban
+> `playAndRecord` desde el thread principal**. El stack lo decía y se leyó como ruido: el
+> `setActive:` despacha una `DeviceAggregateNotification` que normalmente corre en la serial
+> queue `DefaultDeviceAggregate`, y ejecutarla re-entrante desde el main thread es lo que la
+> trababa. Movida a un thread propio, **la misma llamada abre la captura sin chistar**.
+>
+> El experimento de `wantCapture=true` en el primer open era correcto como experimento y su
+> conclusión era la equivocada: probaba que el reopen no tenía la culpa, no que la tuviera el
+> simulador. La variable que quedaba constante era el thread.
+
+> [!TIP]
+> **RESUELTO, y resolverlo contestó la pregunta abierta más grande del programa.** Ver la nota
+> "el reopen dejó de correr en el thread del llamador" más abajo: `wma_input_start()` ya no
+> bloquea, y con eso **el input path de iOS captura de verdad** — `inputData` dejó de ser
+> `0x0` y `inputPeak` trae señal real del micrófono.
 
 > [!NOTE]
 > **Este arreglo no tiene test automático, y el intento de escribirlo es la parte que enseña.**
@@ -2453,6 +2462,63 @@ un host con la entrada del simulador funcionando.
 > doc comment, confirmada. Se borró en vez de dejarlo: un test que siempre pasa infla la cuenta
 > del gate y le saca significado. **El gate de este arreglo es la corrida del harness**, con los
 > números de arriba.
+
+
+### El reopen dejó de correr en el thread del llamador — y ahí SÍ capturó (2026-07-27)
+
+> [!TIP]
+> **`inputData=0x10ce38000` · `inputPeak=0.21724` · `Capture: active`.**
+> Cero callbacks con `inputData=0x0` después del reopen. **El input path de iOS captura de
+> verdad**, que era la pregunta abierta más grande del programa y la razón por la que existe
+> el harness.
+
+**El cambio pedido era de seguridad, no de funcionalidad**, y terminó siendo las dos cosas.
+`wma_input_start()` hacía un stop + start sincrónico del stream entero **en el thread del que
+llama** — el main thread en cualquier app con UI. Ahora agenda el reopen en un worker y vuelve
+enseguida.
+
+**Lo que devuelve deja de ser un bool disfrazado.** Un reopen agendado no está vivo ni muerto,
+así que `requestCapture()` pasa a devolver `CaptureOutcome{LIVE, NOT_LIVE, PENDING}`: colapsar
+PENDING en NOT_LIVE haría indistinguible "todavía abriendo" de "el usuario negó el micrófono",
+que es *la* distinción para la que existe todo el camino de entrada. Río abajo: `wma_input_start`
+devuelve false sólo si el pedido se rechazó de entrada, y aparece `wma_input_is_starting()`
+—cableada al JNI, a `IInputBridge` y a `AudioInput.isStarting`— para poder decir "todavía no"
+sin decir "no". El harness muestra tres estados donde antes había dos.
+
+> [!CAUTION]
+> **Mandar el reopen a un thread no alcanzaba, y el test lo destapó colgándose.**
+> `BackendManager::start()` toma `mMutex` y adentro llama al `start()` del backend, así que el
+> worker lo retiene **toda la reapertura**. `getStreamInfo()`, `isRunning()` e `isCaptureLive()`
+> —lo que la UI pollea en cada frame— se bloqueaban igual: el freeze se mudaba de llamada, no
+> desaparecía. Los tres pasaron a `try_lock`: con el mutex libre leen **en vivo** (un device
+> puede renegociar sin que el motor reinicie, y romper eso lo agarró
+> `FollowsTheBackendAcrossARenegotiation`), y con el mutex tomado devuelven el último valor
+> publicado, que además es fiel — durante el reopen el stream está de verdad caído.
+
+**El worker se joinea, no se detacha.** Es el mismo use-after-free que ya tiene anotado
+`stopWithFade` —un thread que captura `this` y sobrevive al objeto— y el destructor lo cierra
+por construcción: cortar con `mShuttingDown`, joinear, y recién ahí `stop()`.
+
+**Residual conocido y anotado en el código:** pedir captura *durante* un reopen sí bloquea, porque
+anotar el pedido necesita `mMutex`. Sacarlo pide que `start()`/`stop()` dejen de tenerlo tomado
+alrededor de la llamada al backend — reestructurar la concurrencia del manager, su propio ticket.
+
+**5 tests nuevos (755 → 760) y 5 mutantes.** Tres detectados; **dos sobrevivieron y quedaron
+escritos como lo que son**:
+
+| Mutante | Resultado |
+|---|---|
+| reopen sincrónico otra vez | **detectado** — se cuelga, que es el freeze reproducido |
+| lectores con `lock` en vez de `try_lock` | **detectado** — se cuelga |
+| `PENDING` reportado como `LIVE` | **detectado** — 4 tests fallan |
+| destructor `detach()` en vez de `join()` | **NO detectado**, ni bajo TSan: el `stop()` del destructor toma el mismo `mMutex` y provee casi la misma barrera. Eso es justo lo que hace peligroso al detach —la corrección quedaría apoyada en una coincidencia— y está dicho en el test |
+| no subir la generación de reintento | **NO detectado**: la rama sólo es alcanzable si el pedido tardío gana una carrera que el residual de `mMutex` le hace perder casi siempre. Se deja porque sin ella ese caso pierde el pedido en silencio, y está dicho en el header |
+
+> [!NOTE]
+> **TSan encontró una carrera de verdad en el camino — en el fake.** El test que mueve
+> `setCaptureAvailable` desde otro thread mientras el worker está en `start()` la disparó; el
+> knob pasó a ser atómico. La carrera era del test, no del motor, pero sin correr TSan sobre
+> los tests nuevos habría quedado ahí.
 
 
 ### Decisión — cómo llegan al harness los 5 controles que faltan (aprobada 2026-07-27)
@@ -2571,7 +2637,7 @@ misma razón que la clave del micrófono en iOS: el caso que más importa probar
 
 ### Dónde retomar (2026-07-27)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **47 commits sobre `master`**. La branch
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **48 commits sobre `master`**. La branch
 existe en `origin` pero sólo los 6 primeros están pusheados. `master` está en el merge del
 PR #58.
 
@@ -2581,8 +2647,8 @@ PR #58.
 > su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
 > si alguien corrió los gates y lo dijo.
 
-**Última verificación local completa (2026-07-27, con los 7 controles y el sexto bug
-arreglado):** portabilidad OK (**325 archivos**), **755 tests C++**, ambos slices de iOS con
+**Última verificación local completa (2026-07-27, con el reopen asincrónico):** portabilidad
+OK (**325 archivos**), **760 tests C++**, ambos slices de iOS con
 link check, **105 tests de simulador** (101 + los 4 de captura de logs), **64 JVM**,
 `assembleDebug`, XCFramework, `compileIosMainKotlinMetadata`, los dos guardrails de WA-5.5 y el
 harness **arrancando en el simulador**. Todo en verde, con las tasks de test forzadas
@@ -2692,7 +2758,7 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3). **WA-2.5 + WA-2.6 ✅ CERRADA** — las 10 categorías más la cola de 15; delegación **237/278** por el script, **240/289** real. Los 49 que no delegan son **todos deliberados y con el porqué escrito en el código** (40 USB/D4, 5 Oboe/stubs, 2 listeners, 2 de backend que sólo tienen caminos USB): **cero sin clasificar**. **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2). **WA-4.3 primera mitad la subsume WA-5.5**, que ya corre en el simulador |
-| **Fase 5** — Harness (WA-5.5) | 🟢 **LOS 7 CONTROLES HECHOS** — `:harness` corre en el simulador de iOS y ya encontró **6 bugs de arranque, todos arreglados**; el motor abre un stream real (48 kHz / **480 frames** / 10.10 ms) y ahora **lo reporta bien**. Gate de 8 a **10 comandos**. Controles 1–7 completos: transporte, pad XY, rack+routing, monitor de entrada, tira de looper, metrónomo y diagnóstico con vista de logs. Existe `@InternalWatermelonApi` y el looper/transporte llegan a `commonMain` (11+10 funciones, con caller). **Lo único abierto: que el medidor se mueva** — bloqueado por el cuelgue de `playAndRecord` del simulador, que NO es del motor |
+| **Fase 5** — Harness (WA-5.5) | 🟢 **LOS 7 CONTROLES HECHOS · EL INPUT PATH DE iOS CAPTURA** — `:harness` corre en el simulador de iOS y ya encontró **6 bugs de arranque, todos arreglados**; el motor abre un stream real (48 kHz / **480 frames** / 10.10 ms) y ahora **lo reporta bien**. Gate de 8 a **10 comandos**. Controles 1–7 completos: transporte, pad XY, rack+routing, monitor de entrada, tira de looper, metrónomo y diagnóstico con vista de logs. Existe `@InternalWatermelonApi` y el looper/transporte llegan a `commonMain` (11+10 funciones, con caller). **Lo único abierto: que el medidor se mueva** — bloqueado por el cuelgue de `playAndRecord` del simulador, que NO es del motor |
 
 > [!IMPORTANT]
 > **Seis bugs de arranque de iOS, todos arreglados** (§10). El sexto es el que explicaba por
@@ -2701,33 +2767,21 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 > `getStreamInfo()` devolvía el *pedido* — y `isFullDuplex` con él. Arreglado, la UI reporta
 > `480 frames / 10.10 ms` en vez de `256 / 0.0`, y el reopen **se dispara por primera vez**.
 >
-> **Lo que falta sigue siendo que el medidor se mueva, y ya no depende del motor.** Cualquier
-> activación de `playAndRecord` en este simulador cuelga a CoreAudio en su propio RPC al
-> servidor de audio del host (`Initialize: RPC timeout. Apparently deadlocked.`), reproducido
-> **también en el primer open, sin reopen de por medio**. Es de device (G2) o de un host con la
-> entrada del simulador andando.
+> **Y el medidor se mueve.** Lo que trababa `playAndRecord` no era el simulador: era hacerlo
+> desde el **main thread**. Con el reopen en un worker, `Capture: active`, `inputData` deja de
+> ser `0x0` y `inputPeak` trae señal real del micrófono. **El input path de iOS captura** — la
+> pregunta abierta más grande del programa, contestada.
 
-**Lo primero: que la captura entregue frames, y eso ya no es código del motor.** El reopen
-funciona: `BackendManager: Reopening the stream to add a capture path` aparece en el log y el
-stream se cierra bien. Lo que cuelga es `[AVAudioSession setActive:YES]` con `playAndRecord`,
-adentro de la HAL de CoreAudio, en el **thread principal**. Reproducido en el primer open sin
-reopen; descartados con experimento la carrera con el teardown, el permiso de micrófono, la
-sesión activa al cambiar de categoría y la falta de `Simulator.app`. Ver §10, "el sexto bug".
+**Lo primero ya no es la captura: captura.** Ver §10, "el reopen dejó de correr en el thread
+del llamador". Lo que queda de esa línea es de otra naturaleza:
 
-Dos caminos, y son independientes:
-
-1. **Device (G2)** — es lo que de verdad contesta la pregunta. Ya no hay nada del motor entre
-   el harness y la respuesta.
-2. **Host con la entrada del simulador andando** — en esta máquina la entrada por defecto es
-   un OBSBOT USB a 32 kHz y el puente de audio del simulador no responde. Con otra entrada por
-   defecto, o con permiso de micrófono concedido a `Simulator.app` en macOS, puede alcanzar.
-
-**Lo segundo, y esto sí es del motor: `wma_input_start()` bloquea el thread que lo llama.**
-Hace un stop + start sincrónico del stream entero, y para cualquier app con UI ese thread es el
-main thread. Acá se vio como un freeze total; en un device es main thread bloqueado por
-cientos de ms en el mejor caso y un watchdog kill en el peor. **El reopen es correcto; falta que
-sea seguro.** Es una decisión de diseño con su propio ticket —hacerlo asincrónico y reportar el
-resultado— no un arreglo al paso.
+1. **Sonido real y latencia medida, en device (G2).** El simulador prueba que los frames
+   llegan; no prueba cómo suena ni cuánto tarda el round-trip. Instruments sobre el render
+   block de `CoreAudioBackend` (cero allocs, cero locks) sigue siendo de device.
+2. **El residual de `mMutex`**: pedir captura *durante* un reopen todavía bloquea al que llama,
+   porque anotar el pedido necesita el mutex del manager. Sacarlo pide que `start()`/`stop()`
+   dejen de tenerlo tomado alrededor de la llamada al backend. Ticket propio, anotado en
+   `BackendManager::requestCapture`.
 
 **Lo tercero: el smoke manual en NoisyPad Android**, cuya lista sigue creciendo (abajo). Tres de
 sus ítems —7, 8 y 9, los tres retornos del looper— **ya están verificados desde iOS** por el

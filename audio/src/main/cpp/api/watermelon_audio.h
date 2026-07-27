@@ -540,9 +540,34 @@ WMA_API bool wma_mode_requires_input(int mode);
 
 /**
  * Start the input stream (microphone).
- * @return true on success
+ *
+ * **No bloquea.** En el camino donde el backend carga la entrada (Apple, USB) hay
+ * que reabrir el stream, y eso corre en un thread propio: esta función vuelve
+ * enseguida. El llamador típico es el main thread de una app con UI y reabrir un
+ * stream puede tardar cientos de ms — o colgarse, como se midió en iOS adentro de
+ * `[AVAudioSession setActive:]`.
+ *
+ * @return `false` **sólo si el pedido se rechazó de entrada** (sin motor, sin
+ *         nodo de entrada, sin backend). `true` significa "la entrada está viva o
+ *         se está abriendo", que son dos cosas distintas:
+ *
+ *         - wma_input_is_running()  — está entregando frames
+ *         - wma_input_is_starting() — todavía se está abriendo
+ *
+ * Un consumidor que trate `true` como "ya hay señal" va a leer el medidor un
+ * instante antes de tiempo. Uno que trate el `false` de wma_input_is_running()
+ * como error va a mostrar "permiso denegado" mientras el stream todavía abre:
+ * **hay que preguntar por wma_input_is_starting() antes de concluir que falló.**
  */
 WMA_API bool wma_input_start(WmaEngine* engine);
+
+/**
+ * Whether a start requested by wma_input_start() is still opening the stream.
+ *
+ * Es la mitad que falta para distinguir "todavía no" de "no": mientras esto sea
+ * true, que wma_input_is_running() diga false no es una negativa.
+ */
+WMA_API bool wma_input_is_starting(const WmaEngine* engine);
 
 /** Stop the input stream. */
 WMA_API void wma_input_stop(WmaEngine* engine);
