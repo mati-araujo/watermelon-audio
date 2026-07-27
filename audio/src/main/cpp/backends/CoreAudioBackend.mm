@@ -354,12 +354,32 @@ BackendResult CoreAudioBackend::openEngineLocked() {
     mCapturePrimed.store(false, std::memory_order_release);
     mCaptureActive.store(false, std::memory_order_release);
 
-    // ---- 3. Build the interleaved stereo float format ----
+    // ---- 3. Build the stereo float format for the graph connection ----
+    //
+    // NO interleaveado, y se decidió con evidencia.
+    //
+    // La versión original pedía `interleaved:YES`, y el render block traía las
+    // dos ramas —una por layout de ABL— con el comentario "the engine honored
+    // our format" en la interleaveada. Qué rama toma el OS estaba anotado como
+    // pregunta de WA-4.3, para contestar en device.
+    //
+    // La contestó el harness de WA-5.5 en el simulador, y la respuesta es que no
+    // toma ninguna: `[engine connect:sourceNode to:mixer format:format]` con un
+    // formato interleaveado **tira NSException con -10868** (format not
+    // supported) antes de renderizar un solo bloque. Los nodos de AVAudioEngine
+    // se conectan entre sí en float deinterleaveado.
+    //
+    // Con esto la conexión pasa y el render entra por la rama planar, que ya
+    // estaba escrita y con su scratch pre-alocado.
+    //
+    // Lo que esto NO verifica: cómo SUENA. Que el grafo conecte y el stream abra
+    // se comprobó en el simulador; la calidad por la rama planar necesita oídos
+    // y, para latencia, un device (WA-4.3 / G2).
     AVAudioFormat* format =
         [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
                                          sampleRate:negotiatedSampleRate
                                            channels:2
-                                        interleaved:YES];
+                                        interleaved:NO];
     if (format == nil) {
         LOGE("Failed to build AVAudioFormat");
         return BackendResult::ERROR_INVALID_CONFIG;
@@ -460,11 +480,30 @@ BackendResult CoreAudioBackend::openEngineLocked() {
     mImpl->engine     = engine;
     mImpl->sourceNode = sourceNode;
 
-    [engine attachNode:sourceNode];
-    // Touching mainMixerNode instantiates it and lazily connects it to
-    // outputNode. Connect the source into it with our interleaved format.
-    AVAudioMixerNode* mixer = engine.mainMixerNode;
-    [engine connect:sourceNode to:mixer format:format];
+    // The @try here is the same lesson as the capture branch below, learned the
+    // hard way: these three calls raise NSExceptions, they do not return errors.
+    // An ObjC exception crossing back into Kotlin/Native hits its terminate
+    // handler and **takes the process down** — no error, no false, a SIGABRT.
+    //
+    // That is exactly what happened the first time the WA-5.5 harness got this
+    // far: `connect:` threw `-10868` (format not supported) and the app died
+    // mid-tap. The capture branch had a guard since the input path was written;
+    // the output branch never did, because until now nothing had ever reached it
+    // on iOS.
+    @try {
+        [engine attachNode:sourceNode];
+        // Touching mainMixerNode instantiates it and lazily connects it to
+        // outputNode. Connect the source into it with our format.
+        AVAudioMixerNode* mixer = engine.mainMixerNode;
+        [engine connect:sourceNode to:mixer format:format];
+    } @catch (NSException* e) {
+        LOGE("Failed to wire the output graph: %s — %s",
+             e.name ? e.name.UTF8String : "unknown",
+             e.reason ? e.reason.UTF8String : "unknown");
+        mImpl->engine     = nil;
+        mImpl->sourceNode = nil;
+        return BackendResult::ERROR_STREAM_FAILED;
+    }
 
     // ---- 5b. Capture branch (full duplex) ----
     // Failure here is never fatal: an app whose user denied the microphone, or a

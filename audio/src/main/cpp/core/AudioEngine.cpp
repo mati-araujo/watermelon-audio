@@ -315,6 +315,41 @@ AudioEngine::~AudioEngine() {
     LOGI("AudioEngine destroyed");
 }
 
+void AudioEngine::rollbackFailedStart() {
+    // Un start que ya pasó por Running y falló DESPUÉS.
+    //
+    // start() transiciona a Running *antes* de arrancar el backend, y eso es
+    // deliberado: es el fix PHASE 7.1 contra la carrera en la que el thread DSP
+    // empieza a llamar onAudioReady() con el estado todavía en Starting y
+    // devuelve silencio. No hay que deshacerlo.
+    //
+    // Lo que estaba mal era el rollback. Hacía `transitionToState(Stopped)`
+    // directo, y la tabla de transiciones sólo admite Running -> Stopping. La
+    // transición se descartaba con un `Invalid state transition: 2 -> 0` en el
+    // log y **el motor quedaba en Running sin stream**: `getEngineState()`
+    // devolvía Running, y el siguiente start() veía "ya corre" y no hacía nada,
+    // así que un fallo transitorio dejaba el motor inservible hasta reiniciar
+    // el proceso.
+    //
+    // Pasar por Stopping no es un rodeo burocrático: es el mismo camino que usa
+    // stop(), y deja el estado siguiendo a la realidad en vez de al revés.
+    transitionToState(EngineState::Stopping);
+    transitionToState(EngineState::Stopped);
+
+    // El fade se arrancó antes de tocar el backend, para que los primeros
+    // callbacks vieran una rampa válida. Si el arranque no prosperó, esa rampa
+    // no la va a consumir nadie: dejarla viva hace que isFading() informe una
+    // transición en curso sobre un motor detenido.
+    //
+    // Hacen falta las dos llamadas y no alcanza con cancel(). `cancel()` mata el
+    // worker del stop-fade y setea su flag, pero **no toca
+    // mFadeRemainingFrames**, que es justo lo que lee isFading(). El reset de
+    // los contadores se hace con un fade de largo cero — es el mismo idiom que
+    // ya usa la ruta de reset del motor, no una invención de acá.
+    mFadeCtrl.cancel();
+    mFadeCtrl.startFade(0.0f, 0.0f, 48000, 0);
+}
+
 bool AudioEngine::transitionToState(EngineState newState) {
     EngineState currentState = mState.load(std::memory_order_acquire);
 
@@ -385,6 +420,44 @@ bool AudioEngine::start(int fadeTimeMs) {
 
         // Ensure callback is set
         manager.setCallback(this);
+
+        // ====================================================================
+        // Nobody may have chosen a backend, and without one start() can only
+        // fail. BackendManager builds the platform's system backend in its
+        // constructor but never selects it: selectBackend() is called only from
+        // wma_select_backend() and AudioEngineImpl.setAudioBackend(), both at
+        // the consumer's request. Nothing in the public API requires that call,
+        // and AudioEngine.start() (Kotlin) does not make it.
+        //
+        // On Android this never showed because mUseBackendManager is false
+        // there — the direct Oboe path does not come through here at all. Off
+        // Android the flag defaults to true and this IS the only way to open a
+        // stream, so the engine could never start: "BackendManager: No backend
+        // selected". Found by the WA-5.5 harness on the first tap, with the ten
+        // gate commands green; the host suite missed it because CApiFixture
+        // calls wma_select_backend(1) by hand.
+        //
+        // A default is the right shape rather than making every consumer pick:
+        // asking for a stream without naming a backend can only mean "the one
+        // this platform has". An explicit choice still wins — the check is for
+        // NONE, so this never overrides a caller who did decide.
+        //
+        // It goes here and NOT inside BackendManager::start(): that method holds
+        // mMutex, selectBackend() takes the same non-recursive mutex, and the
+        // two together deadlock.
+        // ====================================================================
+        if (manager.getCurrentType() == watermelon_audio::BackendType::NONE) {
+            LOGI("No backend selected — defaulting to the system backend");
+            // OBOE is the system-backend slot in this enum on every platform:
+            // resolveBackendForSplit() maps it to mSystemBackend, which is
+            // CoreAudioBackend on iOS and the fake in the host suite. The name
+            // is Android's history, not a claim about which backend this is.
+            if (!manager.selectBackend(watermelon_audio::BackendType::OBOE)) {
+                LOGE("Cannot start: no system backend available on this platform");
+                transitionToState(EngineState::Stopped);
+                return false;
+            }
+        }
 
         // Push preferred sample rate to BackendManager BEFORE starting so
         // the device negotiates to it during start().
@@ -459,7 +532,7 @@ bool AudioEngine::start(int fadeTimeMs) {
             wma::logMessage(wma::LogLevel::ERROR, "WMA_AUDIT",
                 "[START] manager.start() FAILED: %s",
                 watermelon_audio::backendResultToString(result));
-            transitionToState(EngineState::Stopped);
+            rollbackFailedStart();
             return false;
         }
         wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",

@@ -2298,9 +2298,62 @@ captura?**— sigue sin contestar, y ahora se sabe qué la estaba tapando.
 > historia completa. Vale anotarlo: en iOS, para ver el motor hay que filtrar por subsystem,
 > no por proceso.
 
-**Estado: encontrados y documentados, sin arreglar.** Los dos son de `core/AudioEngine.cpp` y
-tocan el arranque, que es de lo más sensible del motor; van con su propia sesión, sus tests de
-caracterización y su mutación.
+#### Arreglados (2026-07-27) — y arreglarlos destapó tres más
+
+**Bug 1** — `AudioEngine::start()` selecciona el backend de sistema cuando nadie eligió. El
+guard es `== NONE`, así que una elección explícita sigue mandando. **No va dentro de
+`BackendManager::start()`**: ese método tiene tomado `mMutex` y `selectBackend()` toma el mismo
+mutex no recursivo — juntos, deadlock.
+
+**Bug 2** — el rollback pasa por `Stopping`, que es la única salida válida desde `Running`, y
+además cancela el fade. `cancel()` **no alcanza**: mata el worker del stop-fade pero no toca
+`mFadeRemainingFrames`, que es lo que lee `isFading()`; el reset va con un fade de largo cero,
+el mismo idiom que ya usaba el motor.
+
+**6 tests de caracterización** en `test_c_api_start_without_select.cpp`, que **no usan
+`startAt()`** — usarlo los haría pasar por el `wma_select_backend(1)` del fixture, que es justo
+lo que tapaba el bug. **4 mutantes, 3 detectados**; el cuarto destapó que uno de mis tests
+mentía en el nombre (ver el archivo: el default no se puede distinguir de incondicional en el
+host, y por qué el guard igual es load-bearing).
+
+> [!CAUTION]
+> **Bug 3 — un cambio en C++ no llegaba a iOS, y el gate daba OK igual.**
+> Se encontró verificando el fix: el `.a` recién compilado **tenía** el símbolo nuevo y el
+> framework, 24 minutos más viejo, **no**. El convention plugin enganchaba cinterop al `.a` con
+> `dependsOn`, que **sólo ordena**: no declara que el contenido del `.a` importe. Sin
+> `inputs.files`, cinterop quedaba UP-TO-DATE, el klib seguía con el archivo viejo embebido
+> (`staticLibraries` del `.def`) y el framework no se re-linkeaba. **Toda verificación de C++
+> en iOS —tests de simulador incluidos— podía estar mirando binarios viejos.** Arreglado
+> declarando el `.a` como input.
+
+> [!CAUTION]
+> **Bug 4 — el armado del grafo de salida no estaba bajo `@try`, y una NSException mataba el
+> proceso.** La rama de captura tenía guarda desde que se escribió el input path; la de salida
+> nunca, porque **nada había llegado hasta ahí en iOS**. `connect:` tiró `-10868` y el proceso
+> murió con SIGABRT en pleno tap. Ahora devuelve `ERROR_STREAM_FAILED`, que es lo que el
+> harness puede mostrar.
+
+> [!CAUTION]
+> **Bug 5 — el formato del grafo era interleaveado y AVAudioEngine lo rechaza.** Los nodos de
+> AVAudioEngine se conectan en float **deinterleaveado**. "Qué rama del ABL toma el OS" estaba
+> anotado como pregunta de WA-4.3 para contestar en device; la contestó el simulador y la
+> respuesta es que **no toma ninguna**: falla al conectar, antes de renderizar un bloque. El
+> render block ya tenía la rama planar escrita y con scratch pre-alocado. **Lo que esto NO
+> verifica es cómo suena** — eso necesita oídos y, para latencia, un device.
+
+> [!TIP]
+> **Con los cinco, el motor abre un stream real en iOS por primera vez:**
+> `StreamInfo(sampleRate=48000, bufferSizeInFrames=256, channelCount=2, isLowLatency=true)`,
+> 480 frames por buffer y 10.10 ms de latencia de salida reportada. Y el monitor de entrada
+> **mide**: `L -120.0 dB · R -120.0 dB`, o sea silencio medido — distinto de "sin medición",
+> que es exactamente la distinción para la que se diseñó.
+
+**Lo que queda abierto, con el log que lo dice:** el stream de salida abre con
+`Capture: off`, y cuando `wma_input_start` pide captura el backend responde *"Full duplex
+requested while running without a capture stream — takes effect on the next start()"*. O sea
+que **difiere en vez de reabrir**, aunque `wma_input_start` llame a `requestCapture` con
+`allowRestart=true`. El render lo confirma: `inputData=0x0` en cada callback. **Ese es el
+último eslabón entre "el medidor mide" y "el medidor se mueve", y es la próxima sesión.**
 
 
 ### Decisión — cómo llegan al harness los 5 controles que faltan (aprobada 2026-07-27)
