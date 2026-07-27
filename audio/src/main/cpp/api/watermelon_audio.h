@@ -496,19 +496,39 @@ WMA_API WmaResult wma_set_modulator_param(WmaEngine* engine, int param_id, float
  * Set audio mode.
  * 0=CHAOS_PAD (oscillator), 1=INPUT_FX (microphone), 2=MIX (both).
  *
- * NOTE: This is a simplified version. Full mode transitions (InputNode
- * management, vocoder config, USB path) should be handled by the platform
- * layer — this function only stores the mode and configures the oscillator.
+ * Does the whole transition: oscillator, vocoder routing, InputNode lifecycle,
+ * the USB path, and the effect-chain reset that keeps chaos_pad's reverb tail
+ * out of the first blocks of microphone audio.
+ *
+ * This used to be documented as "a simplified version" whose full behaviour
+ * "should be handled by the platform layer". That is what it means for two
+ * platforms to drift: the JNI grew the real transition and this one kept the
+ * sketch, so iOS got a mode switch missing pieces nobody had written down as
+ * missing. WA-2.6 moved the real one here.
  */
 WMA_API void wma_set_audio_mode(WmaEngine* engine, int mode);
 
 /** Get current audio mode. */
 WMA_API int wma_get_audio_mode(const WmaEngine* engine);
 
-/** Check if a mode transition is in progress. */
+/**
+ * Human-readable name of a mode ("ChaosPad", "Input FX", "Mix").
+ * @return Pointer to a static string; never NULL — an unknown id gives
+ *         "Unknown" rather than nothing, which the JNI relies on because it
+ *         feeds the result straight into NewStringUTF.
+ */
+WMA_API const char* wma_get_mode_name(int mode);
+
+/**
+ * Check if a mode transition is in progress.
+ *
+ * WARNING: always false today. Nothing writes the flag — the class that owns
+ * the real transition state (core/ModeManager) is not wired into AudioEngine.
+ * Kept because the JNI has always exposed it; see the note in §16.
+ */
 WMA_API bool wma_is_in_mode_transition(const WmaEngine* engine);
 
-/** Get mode transition progress (0.0–1.0). */
+/** Get mode transition progress (0.0–1.0). Always 0 — see the warning above. */
 WMA_API float wma_get_mode_transition_progress(const WmaEngine* engine);
 
 /** Check if a given mode requires audio input. */

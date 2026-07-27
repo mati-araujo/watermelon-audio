@@ -21,6 +21,8 @@
 #include "api/watermelon_audio_internal.h"
 #include "platform/Logger.h"
 
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -75,6 +77,18 @@ protected:
         for (int i = 0; i < blocks; ++i) {
             mWma->engine->onAudioReady(buffer.data(), nullptr, framesPerBlock);
         }
+    }
+
+    /// Render one block and return the loudest sample in it, as a magnitude.
+    /// For the tests that are about what the user would actually hear.
+    float renderBlockPeak(int framesPerBlock) {
+        std::vector<float> buffer(static_cast<size_t>(framesPerBlock) * 2, 0.0f);
+        mWma->engine->onAudioReady(buffer.data(), nullptr, framesPerBlock);
+        float peak = 0.0f;
+        for (float sample : buffer) {
+            peak = std::max(peak, std::abs(sample));
+        }
+        return peak;
     }
 
     WmaEngine* mWma = nullptr;

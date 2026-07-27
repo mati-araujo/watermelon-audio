@@ -641,50 +641,106 @@ WmaResult wma_set_modulator_param(WmaEngine* engine, int param_id, float value) 
  * 11. Audio Mode
  * ================================================================ */
 
+namespace {
+
+/**
+ * Bring the InputNode up for a mode that needs microphone audio.
+ *
+ * The USB branch is not Android-specific by accident of where it was written —
+ * it is backend-specific, and asking the BackendManager keeps it that way. On a
+ * backend that delivers input through the render callback (LibusbBackend today)
+ * there must be NO separate node-level stream: the data already arrives via
+ * IAudioCallback::onAudioReady(inputData), and a second stream would fight it.
+ * On iOS getCurrentType() is never LIBUSB, so this reads as "start the stream"
+ * without a single #ifdef.
+ */
+void wmaAttachInputForMode(WmaEngine* engine) {
+    if (!ensureInputNode(engine) || !engine->inputNode) {
+        WMA_LOGW("wma_set_audio_mode: no input node — input will be silent");
+        return;
+    }
+
+    const auto backendType = watermelon_audio::BackendManager::getInstance().getCurrentType();
+    const bool backendDeliversInput =
+        (backendType == watermelon_audio::BackendType::LIBUSB);
+
+    if (backendDeliversInput) {
+        if (engine->inputNode->isInputStreamRunning()) {
+            engine->inputNode->stopInputStream();
+        }
+    } else if (!engine->inputNode->isInputStreamRunning()) {
+        engine->inputNode->startInputStream();
+    }
+
+    engine->inputNode->setMonitoringEnabled(true);
+    engine->engine->setInputNode(engine->inputNode);
+
+    // Kept from the JNI: on a device this line is how you tell "the mic is not
+    // working" apart from "the mode never attached it", and the smoke reads it
+    // out of logcat.
+    wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+        "SET_MODE_INPUT_ATTACHED: backendType=%d, backendDeliversInput=%d, "
+        "monEnabled=%d, inputStreamRunning=%d",
+        static_cast<int>(backendType),
+        backendDeliversInput,
+        engine->inputNode->isMonitoringEnabled(),
+        engine->inputNode->isInputStreamRunning());
+}
+
+}  // namespace
+
 void wma_set_audio_mode(WmaEngine* engine, int mode) {
     WMA_CHECK_VOID(engine);
-    if (mode < 0 || mode > 2) return;
+    if (mode < 0 || mode > 2) {
+        WMA_LOGE("wma_set_audio_mode: invalid mode %d", mode);
+        return;
+    }
 
     auto audioMode = static_cast<watermelon_audio::AudioMode>(mode);
 
-    switch (audioMode) {
-        case watermelon_audio::AudioMode::CHAOS_PAD:
-            engine->engine->setOscillatorEnabled(true);
-            engine->engine->setVocoderCarrierSource(false);
-            engine->engine->setVocoderModulatorSource(engine->inputNode != nullptr);
-            if (engine->inputNode) {
-                engine->inputNode->setMonitoringEnabled(false);
-            }
-            break;
-
-        case watermelon_audio::AudioMode::INPUT_FX:
-            engine->engine->setOscillatorEnabled(false);
-            engine->engine->setVocoderCarrierSource(true);
-            ensureInputNode(engine);
-            if (engine->inputNode) {
-                if (!engine->inputNode->isInputStreamRunning()) {
-                    engine->inputNode->startInputStream();
+    try {
+        switch (audioMode) {
+            case watermelon_audio::AudioMode::CHAOS_PAD:
+                engine->engine->setOscillatorEnabled(true);
+                engine->engine->setVocoderCarrierSource(false);
+                engine->engine->setVocoderModulatorSource(engine->inputNode != nullptr);
+                if (engine->inputNode) {
+                    engine->inputNode->setMonitoringEnabled(false);
                 }
-                engine->inputNode->setMonitoringEnabled(true);
-                engine->engine->setInputNode(engine->inputNode);
-            }
-            break;
+                break;
 
-        case watermelon_audio::AudioMode::MIX:
-            engine->engine->setOscillatorEnabled(true);
-            engine->engine->setVocoderCarrierSource(true);
-            ensureInputNode(engine);
-            if (engine->inputNode) {
-                if (!engine->inputNode->isInputStreamRunning()) {
-                    engine->inputNode->startInputStream();
-                }
-                engine->inputNode->setMonitoringEnabled(true);
-                engine->engine->setInputNode(engine->inputNode);
-            }
-            break;
+            case watermelon_audio::AudioMode::INPUT_FX:
+                // BEFORE flipping oscillatorEnabled, and this ordering is the
+                // point: the audio thread services the request at the top of the
+                // next onAudioReady(), zero-filling the chain's scratch and
+                // feedback buffers and resetting every effect. Without it,
+                // chaos_pad's reverb tail and delay feedback bleed into the first
+                // blocks of microphone processing as a burst — and the longer the
+                // user stayed in chaos_pad, the louder it is.
+                engine->engine->requestResetEffectChain();
+                engine->engine->setOscillatorEnabled(false);
+                engine->engine->setVocoderCarrierSource(true);
+                wmaAttachInputForMode(engine);
+                break;
+
+            case watermelon_audio::AudioMode::MIX:
+                engine->engine->setOscillatorEnabled(true);
+                engine->engine->setVocoderCarrierSource(true);
+                wmaAttachInputForMode(engine);
+                break;
+        }
+
+        engine->currentMode.store(static_cast<int>(audioMode), std::memory_order_release);
+    } catch (const std::exception& e) {
+        WMA_LOGE("wma_set_audio_mode: exception: %s", e.what());
+    } catch (...) {
+        WMA_LOGE("wma_set_audio_mode: unknown exception");
     }
+}
 
-    engine->currentMode.store(static_cast<int>(audioMode), std::memory_order_release);
+const char* wma_get_mode_name(int mode) {
+    return watermelon_audio::ModeUtils::getModeName(
+        static_cast<watermelon_audio::AudioMode>(mode));
 }
 
 int wma_get_audio_mode(const WmaEngine* engine) {

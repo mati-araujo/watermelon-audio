@@ -1,7 +1,7 @@
 # Cobertura C API vs JNI — WA-0.1
 
 **Requerimiento:** `docs/kmp/kmp_requirements.md` § 5, WA-0.1
-**Actualizado:** 2026-07-26 (al cerrar `voice`) · **Reproducible con:**
+**Actualizado:** 2026-07-26 (al cerrar `mode`) · **Reproducible con:**
 `python3 scripts/c-api-gap.py`
 
 ---
@@ -235,7 +235,7 @@ eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
 función JNI.
 
 ```
-WA-2.6 — JNI delegando: 119/278
+WA-2.6 — JNI delegando: 125/278
 ```
 
 | Categoría (heurística del script) | Delegan |
@@ -247,14 +247,14 @@ WA-2.6 — JNI delegando: 119/278
 | Otros | 15/27 |
 | Engine / lifecycle | 14/14 |
 | Analysis | 6/13 |
-| Mode transitions | 4/12 |
+| Mode transitions | 10/12 |
 | Benchmark / diagnostics | 2/6 |
 | Mixer / Regions | 1/1 |
 | Modulation | 1/3 |
 | el resto | 0 |
 
-**Las 119 son cinco categorías cerradas**: 22 de `lifecycle`, 21 de
-`input/monitor`, 14 de `effects`, 40 de `oscillator/synth` y 21 de `voice`.
+**Las 125 son seis categorías cerradas**: 22 de `lifecycle`, 21 de `input/monitor`,
+14 de `effects`, 40 de `oscillator/synth`, 21 de `voice` y 8 de `mode`.
 **Ninguna coincide con su fila de la tabla**, porque la heurística del script
 clasifica por keyword del nombre y no por la sección real de la C API:
 

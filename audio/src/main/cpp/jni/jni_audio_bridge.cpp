@@ -711,10 +711,21 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetFee
 
 // ==================== Mode Functions ====================
 
+// WA-2.6, category `mode` — section 11 of watermelon_audio.h.
+//
+// THIS IS THE CATEGORY THAT KILLS THE DUPLICATED MODE STATE. JniGlobalState used
+// to carry its own currentMode / modeTransitionInProgress /
+// modeTransitionProgress alongside WmaEngine's, as independent copies; the JNI
+// wrote and read one set, the C API the other. Both are gone from jni_common.h
+// now — there is one copy, in WmaEngine, and these functions read it.
+//
+// The transition logic moved too, and it moved UP: wma_set_audio_mode used to be
+// documented as "a simplified version" of what lives here, missing the effect
+// chain reset and the USB path. Now it is the real one and this is a wrapper.
+
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAudioMode(
     JNIEnv* env, jobject thiz, jint mode) {
-
     LOGI("AudioNativeBridge.setAudioMode: ENTER mode=%d", mode);
 
     if (!ensureEngine()) {
@@ -722,142 +733,49 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAud
         return;
     }
 
-    if (mode < 0 || mode > 2) {
-        LOGE("AudioNativeBridge.setAudioMode: invalid mode %d", mode);
-        return;
+    // wma_set_audio_mode creates the InputNode itself for the modes that need
+    // one, but it has no way to know about the JNI's mirror of that shared_ptr.
+    // Creating it here first — through the JNI helper, which syncs the mirror —
+    // leaves both handles on the same node, and the C API's own ensureInputNode
+    // then finds it already there.
+    if (wma_mode_requires_input(mode)) {
+        ensureInputNode();
     }
 
-    try {
-        auto audioMode = static_cast<watermelon_audio::AudioMode>(mode);
-
-        switch (audioMode) {
-            case watermelon_audio::AudioMode::CHAOS_PAD:
-                LOGI("AudioNativeBridge.setAudioMode: configuring CHAOS_PAD");
-                g_jniState.engine->setOscillatorEnabled(true);
-                g_jniState.engine->setVocoderCarrierSource(false);
-                g_jniState.engine->setVocoderModulatorSource(g_jniState.inputNode != nullptr);
-                if (g_jniState.inputNode) {
-                    g_jniState.inputNode->setMonitoringEnabled(false);
-                }
-                break;
-
-            case watermelon_audio::AudioMode::INPUT_FX: {
-                LOGI("AudioNativeBridge.setAudioMode: configuring INPUT_FX");
-                // Request an effect chain state reset BEFORE flipping
-                // oscillatorEnabled. On the next audio callback the
-                // audio thread will zero-fill the chain's scratch and
-                // feedback buffers and call reset() on every effect,
-                // stopping stale reverb tails / delay feedback cooked
-                // by chaos_pad from bleeding into the first blocks of
-                // mic processing as a loud burst. Without this, the
-                // longer the user stays in chaos_pad, the louder the
-                // residual when entering INPUT_FX.
-                g_jniState.engine->requestResetEffectChain();
-                g_jniState.engine->setOscillatorEnabled(false);
-                g_jniState.engine->setVocoderCarrierSource(true);
-
-                // Ensure InputNode exists (may not have been created yet)
-                ensureInputNode();
-
-                auto& backendManager = watermelon_audio::BackendManager::getInstance();
-                auto backendType = backendManager.getCurrentType();
-                bool isUsbActive = (backendType == watermelon_audio::BackendType::LIBUSB);
-                wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-                    "SET_MODE_INPUT_FX: inputNode=%p, backendType=%d, isUsbActive=%d",
-                    static_cast<void*>(g_jniState.inputNode.get()),
-                    static_cast<int>(backendType),
-                    isUsbActive);
-
-                if (g_jniState.inputNode) {
-                    if (isUsbActive) {
-                        LOGI("AudioNativeBridge.setAudioMode: USB active, stopping Oboe input");
-                        if (g_jniState.inputNode->isInputStreamRunning()) {
-                            g_jniState.inputNode->stopInputStream();
-                        }
-                        // USB INPUT_FX: data arrives via IAudioCallback::onAudioReady(inputData)
-                        // No Oboe input stream needed — LibusbBackend provides input directly
-                    } else {
-                        if (!g_jniState.inputNode->isInputStreamRunning()) {
-                            LOGI("AudioNativeBridge.setAudioMode: starting Oboe input stream");
-                            g_jniState.inputNode->startInputStream();
-                        }
-                    }
-                    g_jniState.inputNode->setMonitoringEnabled(true);
-                    g_jniState.engine->setInputNode(g_jniState.inputNode);
-
-                    wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-                        "SET_MODE_INPUT_FX_DONE: monEnabled=%d, inputStreamRunning=%d",
-                        g_jniState.inputNode->isMonitoringEnabled(),
-                        g_jniState.inputNode->isInputStreamRunning());
-                } else {
-                    wma::logMessage(wma::LogLevel::WARN, "WMA_AUDIT",
-                        "SET_MODE_INPUT_FX: NO INPUT NODE! Input will be silent.");
-                }
-                break;
-            }
-
-            case watermelon_audio::AudioMode::MIX:
-                LOGI("AudioNativeBridge.setAudioMode: configuring MIX");
-                g_jniState.engine->setOscillatorEnabled(true);
-                g_jniState.engine->setVocoderCarrierSource(true);
-                // Ensure InputNode exists for MIX mode
-                ensureInputNode();
-                if (g_jniState.inputNode) {
-                    auto& backendManager = watermelon_audio::BackendManager::getInstance();
-                    bool isUsbActive = (backendManager.getCurrentType() == watermelon_audio::BackendType::LIBUSB);
-
-                    if (isUsbActive) {
-                        if (g_jniState.inputNode->isInputStreamRunning()) {
-                            g_jniState.inputNode->stopInputStream();
-                        }
-                    } else {
-                        if (!g_jniState.inputNode->isInputStreamRunning()) {
-                            g_jniState.inputNode->startInputStream();
-                        }
-                    }
-                    g_jniState.inputNode->setMonitoringEnabled(true);
-                    g_jniState.engine->setInputNode(g_jniState.inputNode);
-                }
-                break;
-        }
-
-        g_jniState.currentMode.store(static_cast<int>(audioMode), std::memory_order_release);
-        LOGI("AudioNativeBridge.setAudioMode: SUCCESS mode set to %d", mode);
-
-    } catch (const std::exception& e) {
-        LOGE("AudioNativeBridge.setAudioMode: exception: %s", e.what());
-    }
+    wma_set_audio_mode(g_wmaEngine, mode);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetAudioMode(
     JNIEnv* env, jobject thiz) {
-    return static_cast<jint>(g_jniState.currentMode.load(std::memory_order_acquire));
+    return static_cast<jint>(wma_get_audio_mode(g_wmaEngine));
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsInModeTransition(
     JNIEnv* env, jobject thiz) {
-    return g_jniState.modeTransitionInProgress.load(std::memory_order_relaxed) ? JNI_TRUE : JNI_FALSE;
+    // Always false. Nothing writes the flag on either side — see the warning on
+    // wma_is_in_mode_transition. Migrating it does not change that; it just puts
+    // the dead state in one place instead of two.
+    return wma_is_in_mode_transition(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetModeTransitionProgress(
     JNIEnv* env, jobject thiz) {
-    return g_jniState.modeTransitionProgress.load(std::memory_order_relaxed);
+    return wma_get_mode_transition_progress(g_wmaEngine);
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetModeName(
     JNIEnv* env, jobject thiz, jint mode) {
-    const char* name = watermelon_audio::ModeUtils::getModeName(static_cast<watermelon_audio::AudioMode>(mode));
-    return env->NewStringUTF(name);
+    return env->NewStringUTF(wma_get_mode_name(mode));
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeModeRequiresInput(
     JNIEnv* env, jobject thiz, jint mode) {
-    return watermelon_audio::ModeUtils::requiresInput(static_cast<watermelon_audio::AudioMode>(mode)) ? JNI_TRUE : JNI_FALSE;
+    return wma_mode_requires_input(mode) ? JNI_TRUE : JNI_FALSE;
 }
 
 // ==================== Input Functions ====================

@@ -1278,10 +1278,67 @@ device.**
 **El árbol de NoisyPad quedó intacto** — `settings.gradle.kts` restaurado y verificado por
 hash.
 
+### Nota de cierre — WA-2.5/2.6, categoría `mode` (2026-07-26)
+
+**Sexta categoría cerrada: 8 funciones de la sección 11.** Delegación: **125/278**. Y es la
+que más cosas destapó de todas.
+
+> [!IMPORTANT]
+> **Murió la duplicación de estado de modo**, el hallazgo de auditoría que quedó abierto
+> desde que se unificó el `InputNode`. `JniGlobalState` tenía sus propios `currentMode`,
+> `modeTransitionInProgress` y `modeTransitionProgress` al lado de los de `WmaEngine`, como
+> copias independientes: el JNI escribía y leía las suyas, la C API las suyas, y nada las
+> mantenía en sincronía. Ya no existen — hay una sola copia, en `WmaEngine`.
+
+> [!CAUTION]
+> **La C API hacía MENOS que el JNI, y lo decía en su propio doc comment:** *"This is a
+> simplified version. Full mode transitions (InputNode management, vocoder config, USB
+> path) should be handled by the platform layer"*. O sea que la divergencia estaba
+> **documentada como diseño** — pero el JNI creció la transición de verdad y esta se quedó
+> con el boceto. Faltaban dos cosas, y la primera es audible:
+>
+> 1. **`requestResetEffectChain()` al entrar a INPUT_FX.** Va *antes* de apagar el
+>    oscilador; el thread de audio lo atiende arriba del siguiente `onAudioReady()` y
+>    vacía los buffers de scratch y feedback de la cadena. Sin eso, la cola de reverb y el
+>    feedback del delay que dejó chaos_pad entran arriba de los primeros bloques del
+>    micrófono como un estallido — **y cuanto más tiempo estuvo el usuario en el pad, más
+>    fuerte**. iOS no lo tenía.
+> 2. **La rama USB.** En un backend que entrega la entrada por el render callback
+>    (`LibusbBackend`) no puede haber además un stream a nivel de nodo. La C API siempre
+>    arrancaba el stream.
+>
+> Las dos se portaron a `wma_set_audio_mode`, que ahora es la implementación real y el JNI
+> su wrapper. La rama USB quedó **sin `#ifdef`**: pregunta el tipo de backend al
+> `BackendManager`, y en iOS ese nunca es `LIBUSB`, así que se lee como "arrancá el
+> stream" por construcción.
+
+También se agregó `wma_get_mode_name`, la única función que faltaba de verdad.
+
+**Verificación — `test_c_api_mode.cpp`, 12 tests (610 en total).** El modo sí es observable
+en el host: `isOscillatorEnabled()` distingue "tocando el pad" de "procesando el micrófono",
+y se testea que INPUT_FX lo apague, que MIX lo devuelva, que sólo los modos con micrófono
+creen el `InputNode`, y que salir de INPUT_FX corte el monitoring.
+
+**Un test que casi queda mintiendo.** Escribí `EnteringInputFxResetsTheEffectChain` y al
+mutar —borrar la llamada a `requestResetEffectChain`— **no falló**. Lo medí: la salida
+después del switch da `0.000000` exacto, porque en el host la cola de reverb **nunca llega
+a la salida** cuando el oscilador se apaga; el harness no modela ese camino. Quedó
+renombrado a `SwitchingToInputFxLeavesNoResidueOnTheOutput`, que es lo que de verdad
+afirma, con el límite escrito adentro: **el reset en sí va al smoke de device**, no está
+testeado acá. Pinchar el test antes de creerle sigue siendo lo que separa cobertura de
+decorado.
+
+**Tercer hallazgo, con ticket propio: los flags de transición están muertos.**
+`isInModeTransition` y `getModeTransitionProgress` devuelven siempre `false` y `0` — nadie
+escribe ese estado. Y existe `core/ModeManager`, que tiene la maquinaria real con
+crossfade, **desconectado de `AudioEngine`**: cero referencias. Migrarlos no lo cambió;
+movió estado muerto de dos copias a una. Queda test de caracterización que falla si alguien
+lo arregla.
+
 ### Dónde retomar (2026-07-26)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **15 commits sobre `master`**. La branch
-existe en `origin` pero está **ahead 12** — sólo los 3 primeros están pusheados.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **22 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 19** — sólo los 3 primeros están pusheados.
 `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
@@ -1290,9 +1347,9 @@ existe en `origin` pero está **ahead 12** — sólo los 3 primeros están pushe
 > su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
 > si alguien corrió los gates y lo dijo.
 
-Verificación local al cerrar `voice`: portabilidad OK (317 archivos), **596 tests C++**,
-ambos slices de iOS con link check, 87 tests de simulador, 50 JVM, `assembleDebug` y
-XCFramework. Todo en verde.
+Verificación local al cerrar `mode`: portabilidad OK, **610 tests C++**, ambos slices de
+iOS con link check, 87 tests de simulador, 50 JVM, `assembleDebug`, XCFramework y
+**`compileIosMainKotlinMetadata`**. Todo en verde.
 
 ```
 ce2a105 feat(build): XCFramework en el pipeline (WA-4.1) + publish.yml a macOS
@@ -1352,15 +1409,13 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅, `effects` ✅, `oscillator/synth` ✅ y `voice` ✅ cerradas** (delegación 119/278, gap neto 79 → 61) |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅, `effects` ✅, `oscillator/synth` ✅, `voice` ✅ y `mode` ✅ cerradas** (delegación 125/278). **Murió la duplicación de estado de modo** |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso: WA-2.5 + WA-2.6, categoría `mode`** (sección 11 Audio Mode, 8 entry points
-sin delegar). **No es una más:** ahí desaparece por construcción la duplicación de
-`currentMode` / `modeTransitionInProgress` / `modeTransitionProgress` entre
-`JniGlobalState` y `WmaEngine` — ver los hallazgos de auditoría abajo. Es lo único grande
-que queda sin bloqueo.
+**Próximo paso: WA-2.5 + WA-2.6, categoría `análisis`** (13 entry points, 6 delegan por
+arrastre de effects; quedan los medidores de salida y el waveform). Después metronome,
+benchmark y el **looper**, que es el 40% del gap y va último.
 
 **Arranque concreto para la próxima sesión** (el método ya está decidido, ver abajo — no
 re-litigarlo):
@@ -1388,12 +1443,12 @@ re-litigarlo):
 6. Actualizar `c_api_coverage.md` y el estado acá.
 
 **Orden de categorías:** ~~lifecycle~~ ✅ → ~~input/monitor~~ ✅ → ~~effects~~ ✅ →
-~~oscillator/synth~~ ✅ → ~~voice~~ ✅ → **mode** → análisis → metronome → benchmark →
+~~oscillator/synth~~ ✅ → ~~voice~~ ✅ → ~~mode~~ ✅ → **análisis** → metronome → benchmark →
 **looper**.
 
 > [!TIP]
-> **Cuatro de las cinco categorías cerradas encontraron un bug**, casi siempre por el
-> mismo mecanismo: la C API se escribió transcribiendo el JNI función por función,
+> **Cinco de las seis categorías cerradas encontraron un bug**, casi siempre por el mismo
+> mecanismo: la C API se escribió transcribiendo el JNI función por función,
 > y en alguna se transcribió *la función equivocada* o *de menos*. `wma_engine_start`
 > colapsó dos operaciones en una; `wma_input_*` traía de más;
 > `wma_effect_set_params_batch` copió el setter individual en vez del batch.
