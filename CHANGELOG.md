@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1](https://github.com/mati-araujo/watermelon-audio/compare/v1.9.0...v1.9.1) (2026-07-27)
+
+
+### Performance Improvements
+
+* **ci:** −33% el job de iOS, y una ronda de deuda técnica, unificación y limpieza ([#61](https://github.com/mati-araujo/watermelon-audio/issues/61)) ([efea45f](https://github.com/mati-araujo/watermelon-audio/commit/efea45f99d3d8b7905c11a370147ba0a465f39c8))
+
 ## [1.9.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.8.1...v1.9.0) (2026-07-27)
 
 
