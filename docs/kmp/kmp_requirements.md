@@ -1550,10 +1550,12 @@ y `AudioEngine` la loguea al arrancar) y el reporte la tiraba, así que un repor
 latencia tomado en el camino USB no decía nada de USB. También distingue "no hay stream
 que medir" de omitir las tres líneas en silencio, que se leía como latencia cero.
 
-### Nota de progreso — WA-2.5/2.6, categoría `looper`, tandas 1–3 de 4 (2026-07-27)
+### Nota de cierre — WA-2.5/2.6, categoría `looper`, las 4 tandas (2026-07-27)
 
-**Falta una tanda.** Delegación **214/278**, looper **67/79**. Quedan **12 entry points**,
-que son exactamente el bloque de export/import más el state listener (detalle abajo). Se hace por tandas
+**El looper está cerrado: 77/79.** Delegación **224/278** por el script, **228/290** real.
+Los 2 que no delegan no lo hacen a propósito, y está escrito en el archivo (abajo).
+**Pero WA-2.5/2.6 NO está cerrada** — al contar el final apareció un agujero en la propia
+lista de categorías, ver la nota que sigue a ésta. Se hace por tandas
 porque son 79 funciones: cada tanda es un commit con su gate completo, no un WIP.
 
 **Tanda 1 — las 40 que ya tenían contraparte** (commit `6cbda84`). Cero funciones nuevas.
@@ -1659,22 +1661,92 @@ cuando **no** hay capacidad sobrante (el helper grababa exactamente lo reservado
 había nada que trimear), y `clearTrack` **libera el buffer**, así que un track limpiado no se
 puede volver a grabar sin prepararlo de nuevo.
 
-**Lo que queda — 12 entry points, tanda 4:**
+**Tanda 4 — export/import** (commit `413f25b`), 10 funciones nuevas.
 
-1. **Export / import (10):** `ExportMixV2` (36 líneas), `ExportStems` (20), `CaptureTrack`,
-   `GetExportProgress`, `CancelExport`, `SetExportSampleRate`, `IsExportInProgress`,
-   `GetExportsCompleted`, `GetExportsFailed`, `GetStemsWritten`. Es el bloque con las
-   funciones más grandes del looper. `CaptureTrack` mapea un `bitDepth` de Java a
-   `wav::BitDepth` (16/24/32) — otro encoding que conviene mirar de qué lado queda.
-3. **State listener (2):** `RegisterStateListener` (65 líneas) y `UnregisterStateListener`.
-   **Probablemente no portan**: son registro de un listener con `JNIEnv`/`jobject` y global
-   refs, y el thread RT jamás entra a Kotlin. Hay que decidirlo leyéndolas, y si se quedan,
-   decirlo en el archivo como se hizo con `benchmark`.
+**Primer struct del header: `WmaExportOptions`.** La alternativa era una función de **diez**
+argumentos, duplicada entre mix y stems, seis de ellos ints del mismo tipo — la forma exacta
+en la que un caller transpone dos y nadie se queja. Un campo con nombre no se transpone en
+silencio, y cinterop lo mapea a un tipo Kotlin con nombre en vez de diez posicionales. Viene
+con `wma_looper_export_options_default()`, y **hay un test que verifica que esa copia a mano
+coincide con los member initializers de `wm::ExportOptions`** — es el precio de que un struct
+de C no pueda heredarlos. El mapeo `16/24/32 → wav::BitDepth` estaba escrito **tres veces**
+en el JNI (capture, mix, stems); ahora está en uno.
+
+> [!CAUTION]
+> **Una excepción de C++ cruzaba la frontera de la C API.** `LooperExporter` dimensiona su
+> mix buffer desde el largo pedido (`std::vector<float>(totalFrames * 2)`) **sin techo**, así
+> que un count-in absurdo tira `std::length_error` en vez de devolver `false`. El JNI **no
+> puede propagar** una excepción de C++ —sale como `abort`, no como excepción de Java— y
+> cinterop no tiene noción de ellas. Las **seis** funciones de I/O de archivo quedan
+> envueltas, con la misma convención que ya usaba `wma_effect_add()`.
+>
+> Lo encontró un test que primero decía sólo `SUCCEED()` y murió con
+> `C++ exception with description "vector"`. **Un test que no afirma nada igual puede
+> encontrar algo, pero sólo si uno mira por qué murió** en vez de bajarle la vara.
+
+**Cuarto problema de ancho:** `countInBeats * framesPerBeat()` era aritmética `int` y a 24000
+frames por beat desborda arriba de ~89k beats. En `int64` y clampeado.
+
+> [!NOTE]
+> **Las dos que no delegan, y por qué.** `RegisterStateListener` y `UnregisterStateListener`
+> son maquinaria JNI de punta a punta: global refs, `GetObjectClass`, `GetMethodID` con firmas
+> Java como `"(IF)V"`, y el probing de métodos opcionales que deja registrar un listener viejo
+> sin los callbacks de QW-5 y F3.4. Nada de eso significa algo fuera de la JVM.
+>
+> La única pieza portable es `setSink()`, y el sink llama a Kotlin por `JNIEnv`. **iOS va a
+> querer su propio callback de eventos** —un `wma_looper_set_event_callback` con un puntero a
+> función de C y `user_data`— pero eso es una **superficie nueva para diseñar, no una
+> migración**: no hay comportamiento existente que levantar, porque el comportamiento
+> existente es "llamá a estos métodos Java". Queda como follow-up, escrito en el archivo, en
+> vez de medio inventado. Es también la razón por la que
+> `wma_looper_get_dropped_events()` lee el dispatcher y no el looper.
+
+**Verificación — 57 tests en el archivo (724 en total).** El export es lo más verificable del
+looper porque **escribe archivos**: se chequea que el motor pueda **importar de vuelta su
+propio export**, que el count-in crezca el archivo en los frames que dice el Transport, que
+24 y 32 bits den archivos más grandes que 16, que un `bit_depth` inválido caiga a 16, y que
+el BPM 0 se resuelva a la tasa del Transport —leyendo el `BPM=140` que queda en el chunk
+ICMT, que es la única forma de observarlo sin un lector de metadata—.
+
+**Total de la categoría: 22 mutantes, 19 detectados.** Los 3 restantes eran equivalentes o
+guards redundantes, y los dos redundantes quedaron anotados: `repeat_loops <= 0 → 1` ya lo
+hace `LooperExporter` con `std::max(1, ...)` en sus dos use sites, y el budget de
+`setCapabilities` ya lo defaultea `AudioLooper`. Los tests se quedan porque pinchan el
+contrato observable independientemente de qué capa lo sostenga — pero decir **cuál** capa lo
+sostiene evita que el próximo lector lea el bloque entero como uniformemente necesario.
+
+### Hallazgo al contar el final — WA-2.5/2.6 tiene una cola de 15 (2026-07-27)
+
+> [!IMPORTANT]
+> **Las 10 categorías están cerradas, pero la lista de categorías tenía un agujero.** Al
+> contar los 62 entry points que no delegan salieron **46 deliberados** (39 USB por D4, 5 de
+> Oboe/stubs en `benchmark`, 2 del state listener) y **16 sin clasificar**. Uno es
+> `nativeGetAdaptiveBufferStats`, que ya está documentado como USB. **Los otros 15 son
+> superficies que la secuencia de categorías nunca nombró:**
+>
+> | Superficie | Entry points | ¿Existe la `wma_*`? |
+> |---|---|---|
+> | Routing | `GetRoutingMode`, `SetRoutingMode`, `SetParallelMix`, `SetDepthValue`, `SetFeedbackAmount` | **Sí** — §9 y §17 |
+> | Backend | `SelectBackend`, `GetCurrentBackendType`, `SetUseBackendManager` | **Sí** — §16 |
+> | Backend Android-only | `CreateSplitBackend`, `FallbackToOboeBackend` | revisar: probablemente no portan |
+> | XY Mapping | `SetMappingConfig`, `ClearMappingConfig` | **Sí** — §17 |
+> | Captura de logs | `DrainCapturedLogs`, `GetLogCaptureDropped`, `SetLogCaptureEnabled` | **No** — decidir si porta |
+>
+> **12 de los 15 ya tienen contraparte**, así que es migración mecánica del tipo más barato
+> —la tanda 1 del looper— más 3 de log capture para decidir y 2 de backend para revisar.
+>
+> **Es el mismo error, una capa más arriba.** Todo el método insistía en que las filas del
+> script no son las categorías… y la lista de categorías se armó igual mirando esas filas.
+> Estos 15 vivían en la fila "Otros" (17/27) y nadie los enumeró hasta contar el final.
+> **Moraleja para la próxima descomposición: enumerar el complemento, no la lista.** La
+> pregunta que lo destapa no es "¿cerré todas las categorías?" sino "¿qué queda afuera, y
+> está afuera a propósito?".
+
 
 ### Dónde retomar (2026-07-27)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **28 commits sobre `master`**. La branch
-existe en `origin` pero está **ahead 22** — sólo los 6 primeros están pusheados.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **30 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 24** — sólo los 6 primeros están pusheados.
 `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
@@ -1683,8 +1755,8 @@ existe en `origin` pero está **ahead 22** — sólo los 6 primeros están pushe
 > su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
 > si alguien corrió los gates y lo dijo.
 
-Verificación local al cerrar la tanda 3 del `looper` (2026-07-27): portabilidad OK
-(322 archivos), **711 tests C++**, ambos slices de iOS con link check, **87 tests de simulador**, **50 JVM**,
+Verificación local al cerrar el `looper` (2026-07-27): portabilidad OK
+(322 archivos), **724 tests C++**, ambos slices de iOS con link check, **87 tests de simulador**, **50 JVM**,
 `assembleDebug`, XCFramework y **`compileIosMainKotlinMetadata`**. Todo en verde.
 
 > [!TIP]
@@ -1714,7 +1786,7 @@ bloqueo de Xcode de §11 ya no existe):
 
 ```bash
 bash scripts/check-cpp-portability.sh          # guardrail WA-0.4
-bash scripts/run-cpp-tests.sh                  # 711 tests C++
+bash scripts/run-cpp-tests.sh                  # 724 tests C++
 bash scripts/build-ios.sh                      # ambos slices + link check
 ./gradlew :audio:iosSimulatorArm64Test         # 87 tests iOS
 ./gradlew :audio:testDebugUnitTest             # 50 tests JVM
@@ -1740,6 +1812,8 @@ NoisyPad Android**, que ya tiene tres cosas encima:
    `startInputStream` con el permiso denegado. Reproducción concreta en esa nota.
 4. **WA-2.6 en general**: 135 entry points JNI reescritos, 0 validados en device. La suite
    de host cubre la C API, no el JNI.
+9. **Las seis funciones de I/O de archivo del looper devuelven `false`/-1 en vez de dejar
+   escapar una excepción** (`looper` tanda 4). Antes un export imposible abortaba el proceso.
 8. **`prepareTrackBars` rechaza un `bars` que desborda int32** (`looper` tanda 3) en vez de
    alocar un track envuelto. Sólo se ve con conteos de barras absurdos.
 7. **`armAtNextBar` / `armInFrames` ahora devuelven -1 cuando el arm no prende**
@@ -1764,13 +1838,13 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con 9 categorías cerradas y el `looper` 🟡 en 67/79 (tandas 1–3 de 4)** — delegación **214/278** por el script, 218/290 real (sólo lee `jni_audio_bridge.cpp`). **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con las 10 categorías ✅ cerradas (looper 77/79) pero una cola de 15 entry points sin migrar** — delegación **224/278** por el script, **228/290** real. De los 62 que no delegan, 46 son deliberados (39 USB/D4, 5 Oboe, 2 listener) y **15 son la cola**. **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso: la tanda 4, que cierra el `looper` y con él WA-2.5/2.6** — quedan **12
-entry points**: export/import (10) y el state listener (2). El detalle y las trampas
-identificadas están en la nota de progreso de arriba.
+**Próximo paso: la cola de 15 que cierra WA-2.5/2.6 de verdad** — routing (5), backend (3
++ 2 a revisar), XY mapping (2) y captura de logs (3). **12 ya tienen su `wma_*`**, así que es
+la clase de trabajo más barata; el detalle está en la nota "Hallazgo al contar el final".
 
 Lo que queda fuera del looper y no se hace: **USB son 35 entry points que no portan**
 (D4, 32 en `jni_audio_bridge.cpp` + 3 en `jni_usb.cpp`) y las 5 de `jni_benchmark.cpp`
@@ -1803,7 +1877,8 @@ re-litigarlo):
 
 **Orden de categorías:** ~~lifecycle~~ ✅ → ~~input/monitor~~ ✅ → ~~effects~~ ✅ →
 ~~oscillator/synth~~ ✅ → ~~voice~~ ✅ → ~~mode~~ ✅ → ~~análisis~~ ✅ →
-~~metronome~~ ✅ → ~~benchmark~~ ✅ → **looper 🟡 3 de 4 tandas** (67/79).
+~~metronome~~ ✅ → ~~benchmark~~ ✅ → ~~looper~~ ✅ (77/79, 2 no portan). **Las 10
+categorías cerradas — pero queda una cola de 15 que la lista nunca nombró.**
 
 > [!TIP]
 > **Ocho de las nueve categorías cerradas encontraron un bug**, y hay dos mecanismos

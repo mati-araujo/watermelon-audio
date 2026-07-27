@@ -58,22 +58,22 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 | Métrica | Valor |
 |---|---|
 | JNIEXPORT (entry points) | 278 |
-| Funciones `wma_*` | 211 |
-| Cubiertas (match exacto) | 159 |
-| **Gap total** | **119** |
+| Funciones `wma_*` | 245 |
+| Cubiertas (match exacto) | 191 |
+| **Gap total** | **87** |
 | — USB, no se porta (D4) | 32 |
-| — **Gap portable** | **87** |
-| — con near-match (revisar) | 37 |
-| — **neto a implementar** | **~50** |
+| — **Gap portable** | **55** |
+| — con near-match (revisar) | 36 |
+| — **neto a implementar** | **~19** |
 
 ### Gap portable por categoría
 
 | Categoría | Funciones |
 |---|---|
-| Looper | 39 |
 | Input / monitor | 12 |
 | Otros | 8 |
 | Engine / lifecycle | 8 |
+| Looper | 7 |
 | Voice / polyphony | 6 |
 | Analysis | 5 |
 | Benchmark / diagnostics | 4 |
@@ -83,48 +83,6 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 ---
 
 ## 4. Detalle del gap portable
-
-### Looper (39)
-
-- `nativeLooperAbortRecording`
-- `nativeLooperArmAtNextBar`
-- `nativeLooperArmInFrames`
-- `nativeLooperArmSyncedToLoop`
-- `nativeLooperArmSyncedToLoopQuantized`
-- `nativeLooperCancelArm`
-- `nativeLooperCancelExport`
-- `nativeLooperCaptureTrack`
-- `nativeLooperDetectOnsets`
-- `nativeLooperExportMixV2`
-- `nativeLooperExportStems`
-- `nativeLooperFinalizeFreeLoop`
-- `nativeLooperFindContentBounds`
-- `nativeLooperGetArmedTrack` — near-match: `wma_looper_get_track_peak` (0.60)
-- `nativeLooperGetArmedTriggered`
-- `nativeLooperGetDroppedEvents`
-- `nativeLooperGetExportProgress`
-- `nativeLooperGetExportsCompleted`
-- `nativeLooperGetExportsFailed`
-- `nativeLooperGetFramesDropped`
-- `nativeLooperGetInputPeak` — near-match: `wma_looper_get_track_peak` (0.60)
-- `nativeLooperGetStemsWritten`
-- `nativeLooperGetTailMs`
-- `nativeLooperGetTrackPeakLevel` — near-match: `wma_looper_get_track_peak` (0.80)
-- `nativeLooperIsExportInProgress`
-- `nativeLooperIsTrackPercussionMode`
-- `nativeLooperPrepareTrackBars`
-- `nativeLooperRegisterStateListener`
-- `nativeLooperResetTelemetry`
-- `nativeLooperResetTrackPlayHead`
-- `nativeLooperSaveUndoSnapshot` — near-match: `wma_looper_save_undo` (0.75)
-- `nativeLooperSetCapabilities`
-- `nativeLooperSetExportSampleRate`
-- `nativeLooperSetTailMs`
-- `nativeLooperSetTrackPercussionMode`
-- `nativeLooperSetTrackPlayCount`
-- `nativeLooperStartRecordingWithPreRoll`
-- `nativeLooperTrimTrack`
-- `nativeLooperUnregisterStateListener`
 
 ### Input / monitor (12)
 
@@ -162,6 +120,16 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 - `nativeResumeEngineWithFade`
 - `nativeStartEngineWithFade`
 - `nativeStopEngineWithFade`
+
+### Looper (7)
+
+- `nativeLooperExportMixV2`
+- `nativeLooperGetInputPeak` — near-match: `wma_looper_get_track_peak` (0.60)
+- `nativeLooperGetTrackPeakLevel` — near-match: `wma_looper_get_track_peak` (0.80)
+- `nativeLooperRegisterStateListener`
+- `nativeLooperResetTrackPlayHead`
+- `nativeLooperSaveUndoSnapshot` — near-match: `wma_looper_save_undo` (0.75)
+- `nativeLooperUnregisterStateListener`
 
 ### Voice / polyphony (6)
 
@@ -214,7 +182,7 @@ eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
 función JNI.
 
 ```
-WA-2.6 — JNI delegando: 148/278
+WA-2.6 — JNI delegando: 224/278      (228/290 contando los 4 archivos JNI)
 ```
 
 | Categoría (heurística del script) | Delegan |
@@ -234,10 +202,18 @@ WA-2.6 — JNI delegando: 148/278
 | Mixer / Regions | 1/1 |
 | el resto | 0 |
 
-**Las 148 son nueve categorías cerradas**: 22 de `lifecycle`, 21 de `input/monitor`,
-14 de `effects`, 40 de `oscillator/synth`, 21 de `voice`, 8 de `mode`, 10 de `análisis`
-y 13 de `metronome`. Las 3 de `benchmark` **no están contadas ahí** — viven en
-`jni_benchmark.cpp`, que el script no lee (ver el aviso de abajo).
+**Las 224 son las diez categorías cerradas**: 22 de `lifecycle`, 21 de `input/monitor`,
+14 de `effects`, 40 de `oscillator/synth`, 21 de `voice`, 8 de `mode`, 10 de `análisis`,
+13 de `metronome` y **77 del `looper`**. Las 3 de `benchmark` **no están contadas ahí** —
+viven en `jni_benchmark.cpp`, que el script no lee (ver el aviso de abajo).
+
+> [!IMPORTANT]
+> **Cerrar las diez categorías no cerró WA-2.6.** De los 62 entry points que no delegan,
+> **46 son deliberados** (39 USB por D4, 5 de Oboe/stubs en `benchmark`, 2 del state listener
+> del looper) y **15 son una cola que la lista de categorías nunca nombró**: routing (5),
+> backend (3 + 2 a revisar), XY mapping (2) y captura de logs (3). **12 ya tienen su `wma_*`.**
+> Vivían en la fila "Otros" y aparecieron sólo al enumerar el complemento en vez de la lista.
+> Detalle en `kmp_requirements.md` §16, "Hallazgo al contar el final".
 **Ninguna coincide con su fila de la tabla**, porque la heurística del script
 clasifica por keyword del nombre y no por la sección real de la C API:
 
