@@ -2679,9 +2679,8 @@ misma razón que la clave del micrófono en iOS: el caso que más importa probar
 
 ### Dónde retomar (2026-07-27)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **48 commits sobre `master`**. La branch
-existe en `origin` pero sólo los 6 primeros están pusheados. `master` está en el merge del
-PR #58.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **50 commits sobre `master`** y **44 sin
+pushear**. `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
 > **El CI de GitHub está caído por falta de pago (2026-07-26).** Mientras dure, el gate es
@@ -2712,26 +2711,26 @@ harness **arrancando en el simulador**. Todo en verde, con las tasks de test for
 Los últimos commits de la branch:
 
 ```
-64a11f7 feat(harness): pad XY + selector de oscilador (control 2/7)
-1fe1a42 feat(input): el camino de entrada llega a commonMain + monitor (control 1/7)
-9152f95 feat(harness): shell de Xcode — la app corre en el simulador de iOS (WA-5.5)
-2eac1de feat(harness): :harness multiplataforma (WA-5.5) + el gate que lo aisla
-01edce6 docs(kmp): WA-5.5 — propuesta concreta (aislamiento, Xcode, 7 controles)
-bc91f25 feat(kmp): la cola de 15 — WA-2.5/2.6 cerrada, complemento 49 y nada sin clasificar
+9272623 fix(backends): mOpMutex — el residual tambien sale, y con el los espejos
+79144cb fix(ios): el reopen de captura sale del main thread — y ahi SI capturo
+a160bb0 docs(kmp): estado tras el sexto bug, el opt-in y los 7 controles
+a3fd7d1 feat(harness): controles 3, 5, 6 y 7 — WA-5.5 tiene sus siete
+4b5dd30 feat(kmp): @InternalWatermelonApi + wma_log_capture_* llega a commonMain
+f9b15fe fix(ios): el reopen de captura se disparaba nunca — el motor tiraba lo que medía
 ```
 
-**Estado:** Fase 3 cerrada, input path de iOS escrito, WA-4.1 hecho, **WA-2.5/2.6 CERRADA**
-(complemento 49, nada sin clasificar) y **WA-5.5 en curso**: existe `:harness`, corre en el
-simulador de iOS, y están los controles 1 (monitor de entrada) y 2 (pad XY).
+**Estado:** Fase 3 cerrada, WA-4.1 hecho, **WA-2.5/2.6 CERRADA**, **WA-5.5 con sus 7 controles**
+y —lo grande— **el input path de iOS captura de verdad**. Existe `@InternalWatermelonApi`, y el
+looper y el transporte llegan a `commonMain` con caller.
 
 **Cómo verificar que todo sigue en pie antes de tocar nada** (todo corre local; el
 bloqueo de Xcode de §11 ya no existe):
 
 ```bash
 bash scripts/check-cpp-portability.sh          # guardrail WA-0.4
-bash scripts/run-cpp-tests.sh                  # 755 tests C++
+bash scripts/run-cpp-tests.sh                  # 762 tests C++
 bash scripts/build-ios.sh                      # ambos slices + link check
-./gradlew :audio:iosSimulatorArm64Test         # 101 tests iOS  (--rerun-tasks!)
+./gradlew :audio:iosSimulatorArm64Test         # 105 tests iOS  (--rerun-tasks!)
 ./gradlew :audio:testDebugUnitTest             # 64 tests JVM   (--rerun-tasks!)
 ./gradlew :audio:assembleDebug                 # Android, 4 ABIs
 ./gradlew :audio:assembleWatermelonXCFramework # XCFramework (sólo macOS)
@@ -2814,14 +2813,35 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 > ser `0x0` y `inputPeak` trae señal real del micrófono. **El input path de iOS captura** — la
 > pregunta abierta más grande del programa, contestada.
 
-**Lo primero ya no es la captura: captura.** Ver §10, "el reopen dejó de correr en el thread
-del llamador". Lo que queda de esa línea es de otra naturaleza:
+**El programa cambió de eje: la pregunta que lo justificaba está contestada.** El input path de
+iOS captura (§10). Lo que queda ya no es "¿anda?", es cerrar y validar. En orden de lo que
+desbloquea más:
 
-1. **Sonido real y latencia medida, en device (G2).** El simulador prueba que los frames
-   llegan; no prueba cómo suena ni cuánto tarda el round-trip. Instruments sobre el render
-   block de `CoreAudioBackend` (cero allocs, cero locks) sigue siendo de device.
-2. ~~El residual de `mMutex`~~ ✅ **SACADO** — `mOpMutex` serializa el ciclo de vida y
-   `mMutex` volvió a ser corto. Ver §10.
+**1 · Pushear la branch y abrir el PR con constancia del gate.** 50 commits sobre `master`, **44
+sin pushear**, y el CI caído. Es el riesgo más barato de eliminar y el que más crece con el
+tiempo: todo lo de estas dos sesiones vive sólo en local.
+
+**2 · G1 / WA-4.2 — el consumo desde NoisyPad.** Del lado de NoisyPad: declarar la coordenada
+raíz, verificar que resuelve para los dos targets iOS y confirmar el lockstep de Kotlin (D8:
+este repo está en 2.4.0). El pipeline ya publica metadata KMP + klibs con los bindings adentro.
+**Necesita una sesión con los dos repos montados.**
+
+**3 · El smoke manual en NoisyPad Android** (la lista de abajo, 11 ítems). Tres ya no están del
+todo a ciegas: **7, 8 y 9 —los tres retornos del looper— quedaron verificados desde iOS** por el
+control 5 del harness. Lo que falta ahí es Android, donde el camino es el JNI y no la C API.
+Prioridad alta sigue teniendo el ítem 3 (`startInputStream` con permiso denegado).
+
+**4 · WA-4.3 segunda mitad, en device (G2).** Ya no es "probar que captura" — eso está. Es
+**sonido real**, latencia round-trip medida, Instruments sobre el render block de
+`CoreAudioBackend` (cero allocs, cero locks) y la interrupción por llamada entrante que cierra
+el criterio original de WA-3.4. **Necesita un iPhone.**
+
+**5 · Design system (WA-5.5, fase final).** Va último a propósito y ahora sí tiene su
+precondición: **existe un consumidor real con siete controles**. Recién ahora se sabe qué
+componentes hacen falta en vez de adivinarlos. Sigue necesitando la decisión explícita de si se
+comparte con NoisyPad — eso implica que este repo pase a shippear Compose.
+
+**6 · WA-1.3**, lo único que falta de Fase 1.
 
 **Lo tercero: el smoke manual en NoisyPad Android**, cuya lista sigue creciendo (abajo). Tres de
 sus ítems —7, 8 y 9, los tres retornos del looper— **ya están verificados desde iOS** por el
@@ -2967,6 +2987,9 @@ Trabajo paralelo, sin bloquear WA-3:
 - `stopWithFade` detacha un `std::thread` que captura `this` y duerme `fadeMs + 50` antes
   de `stop()`. Si el motor se destruye en esa ventana es use-after-free; el destructor
   cancela el fade pero no tiene handle sobre ese thread.
+  **Ya hay precedente de cómo cerrarlo** (2026-07-27): el worker del reopen de captura en
+  `BackendManager` es el mismo problema resuelto — thread joinable como miembro, flag
+  `mShuttingDown`, y destructor que corta → joinea → recién ahí para. Copiar esa forma.
 - Tres declaraciones muertas expuestas al pasar `core/`/`nodes/` por `-Werror` por primera
   vez (`MusicalScale.cpp:131`, `BurstModulator.h:52`, `AudioEngine.h:1027`), hoy tapadas
   por un `-Wno-unused-variable` acotado en `core/tests/` con comentario que las nombra.
