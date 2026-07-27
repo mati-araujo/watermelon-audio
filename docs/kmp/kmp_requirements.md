@@ -897,6 +897,112 @@ cuánto de ella es genérica de verdad y no específica del pad.
 
 ---
 
+### Propuesta concreta — WA-5.5 (2026-07-27, sin aprobar)
+
+El paso 1 de la recomendación de arriba **ya está hecho**: WA-2.5/2.6 cerró, así que la
+superficie contra la que se construiría el harness está quieta.
+
+#### A. Cómo se estructura para que la UI no pueda entrar al artefacto publicado
+
+Cinco capas, y la primera ya existe sin que nadie la haya diseñado para esto:
+
+1. **El pipeline de publicación es path-qualified y no puede alcanzar otro módulo.** Los dos
+   workflows dicen literalmente `./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository`
+   (`publish.yml:90`, `release-please.yml:116`), nunca la variante de raíz. **Un módulo nuevo
+   no es publicable por el pipeline actual aunque aplique `maven-publish`.**
+2. **El harness no aplica `maven-publish`.** KMP crea publicaciones sólo cuando el plugin
+   está aplicado; sin él no hay nada que publicar ni siquiera con un publish de raíz.
+3. **La dependencia va en una sola dirección**: `:harness → :audio`, jamás al revés.
+4. **El gate mecánico, que es la pieza que falta.** Este repo ya convirtió un "no hagas eso"
+   en una regla estructural una vez —WA-0.4 y `check-cpp-portability.sh`, que barre 324
+   archivos buscando `jni.h`/`android/` y voltea el build—. La misma receta:
+   `scripts/check-no-ui-in-library.sh`, **como noveno comando del gate**, afirmando dos cosas:
+   - el conjunto de proyectos con publicaciones es exactamente `{:audio}`;
+   - el classpath resuelto de `:audio`, **para cada target**, tiene cero coordenadas
+     `org.jetbrains.compose`, `androidx.compose` y `androidx.activity`.
+
+   La segunda es la que agarra el modo de falla realista. Nadie va a publicar el harness por
+   accidente; lo que pasa de verdad es que alguien agrega una dependencia de Compose a
+   `:audio` "para un helper de preview". Un check de publicaciones no ve eso; el de classpath sí.
+5. **El plugin de Compose se declara sólo en el build file del harness**, nunca en la raíz ni
+   en `watermelon.kmp.native`. Como `:audio` toma su configuración de ese convention plugin,
+   si el plugin nunca nombra Compose, `:audio` no puede heredarlo.
+
+> [!NOTE]
+> El catálogo de versiones **sí** va a tener entradas de Compose, y eso está bien: el catálogo
+> declara versiones disponibles, no dependencias efectivas. Confundir las dos cosas lleva a
+> gimnasia inútil. Lo que importa es el classpath resuelto, que es lo que el gate mide.
+
+#### B. Qué se necesita del lado de Xcode
+
+> [!CAUTION]
+> **La propuesta original se equivocaba acá, y en la dirección cara.** Decía que "el
+> XCFramework ya existe por WA-4.1, así que esa parte está". **Un harness Compose
+> Multiplatform no consume el XCFramework.** El comentario del propio convention plugin lo
+> dice de las dos vías de consumo: *son alternativas, no complementarias — usar las dos en la
+> misma app duplicaría el motor*. El harness consume `:audio` como dependencia KMP (vía klib),
+> y **produce su propio framework**, que es lo que Xcode embebe. El XCFramework de WA-4.1
+> sigue siendo lo que es: la salida para un consumidor Swift que **no** es KMP.
+
+Con eso claro, la lista es corta:
+
+1. **`binaries.framework` en el módulo del harness** (p.ej. `baseName = "HarnessKit"`),
+   exponiendo el `UIViewController` de Compose. Adentro viajan Compose + el klib de `:audio` +
+   `libwatermelon_audio.a`, que ya va embebido en el klib por `staticLibraries` del `.def`.
+2. **Un proyecto Xcode** en `harness/iosApp/`, deployment target **15.0** para no quedar por
+   debajo del de la librería.
+3. **Build phase que corra la task de Gradle** del framework antes de linkear. La cadena hacia
+   el `.a` **ya está resuelta**: el convention plugin engancha `cinteropWatermelonAudio*` a
+   `buildIosNativeLib`, así que `scripts/build-ios.sh` corre solo por depender de `:audio`.
+4. **`NSMicrophoneUsageDescription` en el `Info.plist`.** Sin esa clave iOS mata la app en el
+   primer intento de captura — y la captura es *exactamente* la pregunta que el harness existe
+   para responder. Es la forma más probable de perder una tarde.
+5. **Firma:** un team personal gratis alcanza para el simulador, que es la mitad que WA-4.3
+   apuntaba y donde ya se puede contestar lo de la captura — **el simulador de iOS usa el
+   micrófono del Mac**. El device (G2) necesita team real y queda para después.
+6. **Decidir `isStatic` del framework del harness.** No es libre: el motor ya viaja estático
+   adentro del klib.
+7. **`AVAudioSession` no hay que escribirla**: `AudioSessionManager` (WA-3.4) ya elige
+   `PlayAndRecord` cuando hace falta. Lo que falta es que el harness la maneje y muestre lo
+   que reporta.
+
+#### C. Los controles mínimos — 7, y qué drena cada uno
+
+| # | Control | Ítems del smoke que drena |
+|---|---|---|
+| 1 | **Transporte**: start/stop/pause/resume con fade + lectura del `AudioState` | 1 (BridgeConcurrency), 4 |
+| 2 | **Pad XY + selector de oscilador + slider de depth** | 4, **11 (`setDepthValue` muerto)** |
+| 3 | **Rack de efectos**: add/remove/reorder, bypass, params, selector de routing mode | 4, 2 (agregar >6 efectos para ver el tope), y todo lo que se migró hoy |
+| 4 | **Monitor de entrada**: enable, source, **medidor de nivel en vivo + indicador de clipping** | 3, **y la pregunta abierta más grande del programa** |
+| 5 | **Tira de looper**: prepare(bars), arm at next bar **mostrando el valor devuelto**, record, play, export a archivo | 5, 7, 8, 9 |
+| 6 | **Metrónomo/clock**: BPM, click, count-in | 5 (junto con el 5) |
+| 7 | **Panel de diagnóstico**: device caps, backend actual **+ selector**, recommended buffer size, latency report, y **la vista de logs nativos** | 2, 6, **10 (`selectBackend` que miente)** |
+
+**El control 4 es el que justifica el proyecto entero.** Es lo único que contesta si el input
+path de iOS captura de verdad, y no hay forma de contestarlo con tests de host: el stub de
+`InputNode` de `core/tests/` no tiene comportamiento, y por eso el medidor tiene que ser de
+nivel *audible*, no un booleano de "arrancó".
+
+**El control 5 tiene que mostrar el valor devuelto por el arm, no sólo armar.** El bug de la
+tanda 2 era justamente que devolvía un trigger frame para una grabación que nunca arrancaba;
+un botón que sólo dice "armado" no lo habría visto nunca.
+
+> [!NOTE]
+> **La vista de logs del control 7 se volvió construible hoy.** `wma_log_capture_*` no existía
+> a la mañana: la captura de logs era el único pedazo de la cola sin contraparte en C. Falta un
+> paso, y conviene decirlo en vez de darlo por hecho: **el bridge de Kotlin todavía no la
+> expone** — `IAudioNativeBridge`/`IosAudioBridge` no tienen `drainCapturedLogs`. Es trabajo
+> chico y con caller (el harness), que es justo la condición que faltaba para agregarlo.
+
+#### D. Lo que esta propuesta NO decide
+
+El design system. Sigue yendo al final, con el harness como primer consumidor, y la cosecha
+desde NoisyPad sigue necesitando una sesión con los dos repos montados. **Una UI mínima y fea
+es un requisito de esta etapa, no una concesión**: si el harness espera al design system, la
+pregunta de la captura se sigue sin contestar mientras tanto.
+
+---
+
 ## 11. Testing
 
 | ID | Requerimiento | Detalle | Prio | Estado |
