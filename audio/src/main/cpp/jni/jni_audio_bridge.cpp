@@ -2531,17 +2531,11 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperCaptureTrack(
     JNIEnv* env, jobject thiz, jint trackIndex, jstring filePath, jint bitDepth) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    wav::BitDepth depth;
-    switch (bitDepth) {
-        case 24: depth = wav::BitDepth::PCM_24; break;
-        case 32: depth = wav::BitDepth::FLOAT_32; break;
-        default: depth = wav::BitDepth::PCM_16; break;
-    }
-    const char* path = env->GetStringUTFChars(filePath, nullptr);
-    bool ok = g_jniState.engine->getAudioLooper().captureTrack(trackIndex, path, depth);
-    env->ReleaseStringUTFChars(filePath, path);
-    return ok ? JNI_TRUE : JNI_FALSE;
+    // The 16/24/32 -> wav::BitDepth mapping used to be written out here, and in
+    // the two export functions below. It lives in the C API now.
+    ScopedUtfChars path(env, filePath);
+    return wma_looper_capture_track(g_wmaEngine, trackIndex, path.c_str(), bitDepth)
+        ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
@@ -2563,41 +2557,26 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     jstring filePath, jint bitDepth, jint repeatLoops,
     jint countInBeats, jboolean applyLimiter,
     jstring projectName, jstring artist, jstring comment, jint bpm) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    AudioLooper::ExportOptions opts;
-    switch (bitDepth) {
-        case 24: opts.bitDepth = wav::BitDepth::PCM_24; break;
-        case 32: opts.bitDepth = wav::BitDepth::FLOAT_32; break;
-        default: opts.bitDepth = wav::BitDepth::PCM_16; break;
-    }
-    opts.repeatLoops = (repeatLoops > 0) ? repeatLoops : 1;
-    opts.applyLimiter = (applyLimiter == JNI_TRUE);
+    WmaExportOptions opts = wma_looper_export_options_default();
+    opts.bit_depth = bitDepth;
+    opts.repeat_loops = repeatLoops;
+    opts.count_in_beats = countInBeats;
+    opts.apply_limiter = (applyLimiter == JNI_TRUE);
+    opts.bpm = bpm;
 
-    // Translate count-in beats to frames using the Transport.
-    auto& transport = g_jniState.engine->getTransport();
-    opts.countInFrames = (countInBeats > 0)
-        ? countInBeats * transport.framesPerBeat()
-        : 0;
+    // The jstrings have to outlive the call, so the scoped holders live here and
+    // the struct only borrows. A nullptr means "leave the metadata field empty",
+    // which is the same thing the old pickStr lambda did by not assigning.
+    ScopedUtfChars project(env, projectName);
+    ScopedUtfChars artistChars(env, artist);
+    ScopedUtfChars commentChars(env, comment);
+    opts.project_name = project.c_str();
+    opts.artist = artistChars.c_str();
+    opts.comment = commentChars.c_str();
 
-    // Resolve metadata BPM: if caller passed 0, use Transport BPM.
-    opts.metadata.bpm = (bpm > 0) ? bpm : static_cast<int>(transport.getBpm());
-
-    auto pickStr = [env](jstring js, std::string& out) {
-        if (!js) return;
-        const char* c = env->GetStringUTFChars(js, nullptr);
-        if (c) {
-            out = c;
-            env->ReleaseStringUTFChars(js, c);
-        }
-    };
-    pickStr(projectName, opts.metadata.projectName);
-    pickStr(artist, opts.metadata.artist);
-    pickStr(comment, opts.metadata.comment);
-
-    const char* path = env->GetStringUTFChars(filePath, nullptr);
-    bool ok = g_jniState.engine->getAudioLooper().exportMix(path, opts);
-    env->ReleaseStringUTFChars(filePath, path);
-    return ok ? JNI_TRUE : JNI_FALSE;
+    ScopedUtfChars path(env, filePath);
+    return wma_looper_export_mix_v2(g_wmaEngine, path.c_str(), &opts)
+        ? JNI_TRUE : JNI_FALSE;
 }
 
 // Export each active track as a separate WAV file in `directory`.
@@ -2607,53 +2586,39 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     JNIEnv* env, jobject thiz,
     jstring directory, jint bitDepth, jint repeatLoops,
     jint countInBeats, jboolean applyLimiter, jint bpm) {
-    if (!g_jniState.engine) return -1;
-    AudioLooper::ExportOptions opts;
-    switch (bitDepth) {
-        case 24: opts.bitDepth = wav::BitDepth::PCM_24; break;
-        case 32: opts.bitDepth = wav::BitDepth::FLOAT_32; break;
-        default: opts.bitDepth = wav::BitDepth::PCM_16; break;
-    }
-    opts.repeatLoops = (repeatLoops > 0) ? repeatLoops : 1;
-    opts.applyLimiter = (applyLimiter == JNI_TRUE);
-    auto& transport = g_jniState.engine->getTransport();
-    opts.countInFrames = (countInBeats > 0)
-        ? countInBeats * transport.framesPerBeat()
-        : 0;
-    opts.metadata.bpm = (bpm > 0) ? bpm : static_cast<int>(transport.getBpm());
+    WmaExportOptions opts = wma_looper_export_options_default();
+    opts.bit_depth = bitDepth;
+    opts.repeat_loops = repeatLoops;
+    opts.count_in_beats = countInBeats;
+    opts.apply_limiter = (applyLimiter == JNI_TRUE);
+    opts.bpm = bpm;
 
-    const char* dir = env->GetStringUTFChars(directory, nullptr);
-    int n = g_jniState.engine->getAudioLooper().exportStems(dir, opts);
-    env->ReleaseStringUTFChars(directory, dir);
-    return n;
+    ScopedUtfChars dir(env, directory);
+    return wma_looper_export_stems(g_wmaEngine, dir.c_str(), &opts);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetExportProgress(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0.0f;
-    return g_jniState.engine->getAudioLooper().getExportProgress();
+    return wma_looper_get_export_progress(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperCancelExport(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().cancelExport();
+    wma_looper_cancel_export(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetExportSampleRate(
     JNIEnv* env, jobject thiz, jint sampleRate) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().setExportSampleRate(sampleRate);
+    wma_looper_set_export_sample_rate(g_wmaEngine, sampleRate);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperIsExportInProgress(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getAudioLooper().isExportInProgress() ? JNI_TRUE : JNI_FALSE;
+    return wma_looper_is_export_in_progress(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 // ========== TELEMETRY (lock-free counters for observability) ==========
@@ -2666,20 +2631,17 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetExportsCompleted(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getAudioLooper().getExportsCompleted();
+    return wma_looper_get_exports_completed(g_wmaEngine);
 }
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetExportsFailed(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getAudioLooper().getExportsFailed();
+    return wma_looper_get_exports_failed(g_wmaEngine);
 }
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetStemsWritten(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getAudioLooper().getStemsWritten();
+    return wma_looper_get_stems_written(g_wmaEngine);
 }
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetArmedTriggered(
@@ -2781,6 +2743,30 @@ void dispatchLooperEvent(const wm::LooperEvent& ev) {
 }
 
 }  // namespace
+
+// ============================================================================
+// The two looper entry points that do NOT delegate to the C API, and why.
+//
+// WA-2.6 closed the looper at 77/79. These two are the remainder, and they stay
+// here on purpose rather than as unfinished work:
+//
+// Everything below is JNI machinery with no portable question inside it — global
+// refs, GetObjectClass, GetMethodID with Java type signatures like "(IF)V", and
+// the optional-method probing that lets an older LooperStateListener register
+// without the callbacks added in QW-5 and F3.4. None of that means anything off
+// the JVM.
+//
+// The one portable piece is `getLooperEventDispatcher().setSink(...)`, and the
+// sink it installs is a C++ function that calls into Kotlin through JNIEnv. iOS
+// will eventually want its own event callback — a `wma_looper_set_event_callback`
+// taking a plain C function pointer and a user_data — but that is a NEW surface
+// to design, not this migration: there is no existing behaviour to lift, because
+// the existing behaviour is "call these Java methods". Left as a follow-up rather
+// than half-invented here.
+//
+// Note also that these are the reason wma_looper_get_dropped_events() reads the
+// dispatcher rather than the looper: the counter belongs to this queue.
+// ============================================================================
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperRegisterStateListener(

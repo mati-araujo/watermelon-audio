@@ -33,8 +33,15 @@
 
 #include "support/CApiFixture.h"
 
+#include "looper/LooperExportTypes.h"
+
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -57,6 +64,44 @@ protected:
     /// zero length. A loop region only exists on a track that has something to
     /// loop, which is worth knowing before writing a test that assumes
     /// otherwise.
+    /// A scratch directory that is removed when the test finishes.
+    std::string tempDir() {
+        if (mTempDir.empty()) {
+            mTempDir = (std::filesystem::temp_directory_path()
+                        / ("wma-looper-" + std::to_string(
+                               ::testing::UnitTest::GetInstance()
+                                   ->current_test_info()->line()))).string();
+            std::filesystem::remove_all(mTempDir);
+            std::filesystem::create_directories(mTempDir);
+        }
+        return mTempDir;
+    }
+
+    std::string tempPath(const std::string& name) {
+        return (std::filesystem::path(tempDir()) / name).string();
+    }
+
+    /// Raw bytes of a written file, for looking at what actually landed in it.
+    static std::string fileBytes(const std::string& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in),
+                           std::istreambuf_iterator<char>());
+    }
+
+    static long fileSize(const std::string& path) {
+        std::error_code ec;
+        const auto size = std::filesystem::file_size(path, ec);
+        return ec ? -1 : static_cast<long>(size);
+    }
+
+    void TearDown() override {
+        if (!mTempDir.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(mTempDir, ec);
+        }
+        CApiFixture::TearDown();
+    }
+
     void recordTrack(int track, int blocks = 4, int capacityBlocks = 0) {
         if (capacityBlocks <= 0) capacityBlocks = blocks;
         wma_looper_set_enabled(mWma, true);
@@ -71,6 +116,8 @@ protected:
         wma_set_frequency_amplitude(mWma, 440.0f, 0.0f);
         ASSERT_GT(wma_looper_get_track_length_frames(mWma, track), 0);
     }
+
+    std::string mTempDir;
 };
 
 // ===========================================================================
@@ -243,6 +290,263 @@ TEST_F(CApiLooperTest, TheWaveformHonoursTheBufferItWasGiven) {
         EXPECT_FLOAT_EQ(bins[static_cast<size_t>(i)], -12345.0f)
             << "wrote past max_bins at index " << i;
     }
+}
+
+// ===========================================================================
+// Export / import — batch 4
+// ===========================================================================
+
+TEST_F(CApiLooperTest, TheDefaultOptionsMatchTheEngineSideDefaults) {
+    // wma_looper_export_options_default() hand-copies wm::ExportOptions' member
+    // initialisers, because a C struct cannot inherit them. This is the assertion
+    // that keeps the copy honest.
+    const WmaExportOptions opts = wma_looper_export_options_default();
+    const wm::ExportOptions reference;
+
+    EXPECT_EQ(opts.repeat_loops, reference.repeatLoops);
+    EXPECT_EQ(opts.apply_limiter, reference.applyLimiter);
+    EXPECT_EQ(opts.count_in_beats, 0);
+    EXPECT_EQ(reference.countInFrames, 0);
+    EXPECT_EQ(opts.bit_depth, 16);
+    EXPECT_EQ(reference.bitDepth, wav::BitDepth::PCM_16);
+    EXPECT_EQ(opts.bpm, 0) << "0 means 'ask the Transport', not 0 BPM";
+    EXPECT_EQ(opts.project_name, nullptr);
+}
+
+TEST_F(CApiLooperTest, ExportingAMixWritesAFileThatCanBeImportedBack) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/16);
+
+    const std::string path = tempPath("mix.wav");
+    WmaExportOptions opts = wma_looper_export_options_default();
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, path.c_str(), &opts)) << path;
+    EXPECT_GT(fileSize(path), 44) << "a WAV header alone is 44 bytes; nothing was written";
+
+    // The strongest thing this suite can say about an export: the engine can read
+    // its own output back into a track.
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 1, 64 * kBlockFrames, kSampleRate), WMA_OK);
+    EXPECT_TRUE(wma_looper_import_track(mWma, 1, path.c_str(), kSampleRate));
+    EXPECT_GT(wma_looper_get_track_length_frames(mWma, 1), 0);
+}
+
+TEST_F(CApiLooperTest, NullOptionsMeanTheDefaults) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/8);
+
+    const std::string withNull = tempPath("null-opts.wav");
+    const std::string withDefaults = tempPath("explicit-defaults.wav");
+    WmaExportOptions opts = wma_looper_export_options_default();
+
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, withNull.c_str(), nullptr));
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, withDefaults.c_str(), &opts));
+
+    EXPECT_EQ(fileSize(withNull), fileSize(withDefaults))
+        << "passing NULL must be the same request as passing the defaults";
+}
+
+TEST_F(CApiLooperTest, TheCountInIsResolvedThroughTheTransport) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/8);
+
+    const std::string plain = tempPath("no-countin.wav");
+    const std::string withCountIn = tempPath("countin.wav");
+
+    WmaExportOptions opts = wma_looper_export_options_default();
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, plain.c_str(), &opts));
+
+    // Four beats of leading silence at 24000 frames/beat is 96000 frames, so the
+    // file has to grow by that much times 2 channels times the sample size. The
+    // conversion is the Transport's, which is the composition this batch moved.
+    opts.count_in_beats = 4;
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, withCountIn.c_str(), &opts));
+
+    const long grew = fileSize(withCountIn) - fileSize(plain);
+    const long expected = 4L * wma_transport_frames_per_beat(mWma) * 2 * 2;  // 16-bit stereo
+    EXPECT_NEAR(static_cast<double>(grew), static_cast<double>(expected),
+                static_cast<double>(expected) * 0.02)
+        << "grew by " << grew << ", expected about " << expected;
+}
+
+TEST_F(CApiLooperTest, AnAbsurdCountInIsClampedInsteadOfOverflowing) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/8);
+
+    // Fourth width problem of the category: `countInBeats * framesPerBeat()` was
+    // int arithmetic in the JNI, and at 24000 frames/beat it overflows past ~89k
+    // beats — a negative or wrapped countInFrames handed to the exporter. Now
+    // computed in int64 and clamped, so the worst case is a refusal or a huge
+    // file, never a wrapped length.
+    WmaExportOptions opts = wma_looper_export_options_default();
+    opts.count_in_beats = 1000000;
+
+    // And the request is REFUSED, not attempted: LooperExporter sizes its mix
+    // buffer from the requested length with no ceiling, so INT32_MAX frames of
+    // silence throws std::length_error. That exception must not cross the C API —
+    // the JNI would turn it into an abort and cinterop has no notion of it — so
+    // the boundary catches it and returns the false it already documents.
+    //
+    // This is the assertion that found that hole: the first version only said
+    // SUCCEED() and the test died with "C++ exception with description \"vector\"".
+    EXPECT_FALSE(wma_looper_export_mix_v2(mWma, tempPath("huge-countin.wav").c_str(),
+                                         &opts));
+
+    // Still usable afterwards — a refused export must not leave the looper broken.
+    opts.count_in_beats = 0;
+    EXPECT_TRUE(wma_looper_export_mix_v2(mWma, tempPath("after-refusal.wav").c_str(),
+                                        &opts));
+}
+
+TEST_F(CApiLooperTest, ABpmOfZeroMeansAskTheTransport) {
+    startAt(kSampleRate, 0);
+    wma_set_bpm(mWma, 140.0f);
+    recordTrack(0, /*blocks=*/8);
+
+    // The BPM lands in the WAV's ICMT comment as "BPM=<n>", which is how this is
+    // observable at all without a metadata reader.
+    WmaExportOptions opts = wma_looper_export_options_default();
+    ASSERT_EQ(opts.bpm, 0);
+    const std::string fromTransport = tempPath("bpm-transport.wav");
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, fromTransport.c_str(), &opts));
+    EXPECT_NE(fileBytes(fromTransport).find("BPM=140"), std::string::npos)
+        << "a bpm of 0 should have been resolved to the Transport's 140";
+
+    // And an explicit value overrides it rather than being ignored.
+    opts.bpm = 90;
+    const std::string explicitBpm = tempPath("bpm-explicit.wav");
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, explicitBpm.c_str(), &opts));
+    const std::string bytes = fileBytes(explicitBpm);
+    EXPECT_NE(bytes.find("BPM=90"), std::string::npos);
+    EXPECT_EQ(bytes.find("BPM=140"), std::string::npos);
+}
+
+TEST_F(CApiLooperTest, RepeatLoopsOfZeroMeansOneIteration) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/8);
+
+    WmaExportOptions opts = wma_looper_export_options_default();
+    const std::string once = tempPath("once.wav");
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, once.c_str(), &opts));
+
+    // 0 and -3 both mean "one iteration", not "zero iterations" and not a
+    // negative buffer length.
+    //
+    // Where that is ENFORCED is worth knowing: LooperExporter already does
+    // std::max(1, opts.repeatLoops) at both of its use sites, so the C API's own
+    // `(repeat_loops > 0) ? ... : 1` is belt-and-braces — mutating it away leaves
+    // this test green. Second redundant guard found this way, after the memory
+    // budget in wma_looper_set_capabilities(). The test still earns its place: it
+    // pins the observable contract regardless of which layer happens to hold it
+    // up, which is what a caller actually depends on.
+    for (int repeats : {0, -3}) {
+        opts.repeat_loops = repeats;
+        const std::string path = tempPath("repeat" + std::to_string(repeats) + ".wav");
+        ASSERT_TRUE(wma_looper_export_mix_v2(mWma, path.c_str(), &opts)) << repeats;
+        EXPECT_EQ(fileSize(path), fileSize(once)) << "repeat_loops=" << repeats;
+    }
+
+    // And a real repeat count does grow the file, so the field is not simply
+    // being ignored.
+    opts.repeat_loops = 3;
+    const std::string thrice = tempPath("thrice.wav");
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, thrice.c_str(), &opts));
+    EXPECT_GT(fileSize(thrice), fileSize(once));
+}
+
+TEST_F(CApiLooperTest, BitDepthPicksTheFormatAndFallsBackToSixteen) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/8);
+
+    WmaExportOptions opts = wma_looper_export_options_default();
+    const auto sizeAt = [&](int bits) {
+        opts.bit_depth = bits;
+        const std::string path = tempPath("depth-" + std::to_string(bits) + ".wav");
+        EXPECT_TRUE(wma_looper_export_mix_v2(mWma, path.c_str(), &opts));
+        return fileSize(path);
+    };
+
+    const long at16 = sizeAt(16);
+    const long at24 = sizeAt(24);
+    const long at32 = sizeAt(32);
+    EXPECT_GT(at24, at16) << "24-bit samples are wider than 16-bit ones";
+    EXPECT_GT(at32, at24);
+
+    // Anything that is not 24 or 32 is 16 — the JNI's default arm, now in one
+    // place instead of three.
+    EXPECT_EQ(sizeAt(99), at16);
+    EXPECT_EQ(sizeAt(0), at16);
+}
+
+TEST_F(CApiLooperTest, CapturingATrackWritesItsWholeBufferAtTheGivenDepth) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/16);
+    // A loop region over part of the take: capture must ignore it and write the
+    // whole buffer, which is what makes it "session capture" and not an export.
+    wma_looper_set_track_loop_region(mWma, 0, 0, 2048);
+
+    const std::string path = tempPath("capture.wav");
+    ASSERT_TRUE(wma_looper_capture_track(mWma, 0, path.c_str(), /*bit_depth=*/32));
+
+    const long expectedSamples =
+        static_cast<long>(wma_looper_get_track_length_frames(mWma, 0)) * 2 * 4;  // float32
+    EXPECT_GT(fileSize(path), expectedSamples / 2)
+        << "the capture looks like it honoured the 2048-frame loop region";
+}
+
+TEST_F(CApiLooperTest, ExportingStemsWritesOnePerActiveTrack) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/8);
+    recordTrack(1, /*blocks=*/8);
+
+    const std::string dir = tempDir();
+    WmaExportOptions opts = wma_looper_export_options_default();
+    const int written = wma_looper_export_stems(mWma, dir.c_str(), &opts);
+
+    EXPECT_EQ(written, 2) << "two active tracks should produce two stems";
+    EXPECT_EQ(wma_looper_get_stems_written(mWma), 2);
+}
+
+TEST_F(CApiLooperTest, ExportTelemetryCountsWhatHappened) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/8);
+    ASSERT_EQ(wma_looper_get_exports_completed(mWma), 0);
+
+    WmaExportOptions opts = wma_looper_export_options_default();
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, tempPath("counted.wav").c_str(), &opts));
+    EXPECT_EQ(wma_looper_get_exports_completed(mWma), 1);
+    EXPECT_EQ(wma_looper_get_exports_failed(mWma), 0);
+
+    // A path that cannot be written counts as a failure, not a success.
+    EXPECT_FALSE(wma_looper_export_mix_v2(
+        mWma, "/this/directory/does/not/exist/nope.wav", &opts));
+    EXPECT_EQ(wma_looper_get_exports_failed(mWma), 1);
+    EXPECT_EQ(wma_looper_get_exports_completed(mWma), 1);
+}
+
+TEST_F(CApiLooperTest, NothingIsExportingWhenIdle) {
+    startAt(kSampleRate, 0);
+    EXPECT_FALSE(wma_looper_is_export_in_progress(mWma));
+    EXPECT_FLOAT_EQ(wma_looper_get_export_progress(mWma), 0.0f);
+
+    // Cancelling with nothing in flight is a no-op, not an error.
+    wma_looper_cancel_export(mWma);
+    EXPECT_FALSE(wma_looper_is_export_in_progress(mWma));
+}
+
+TEST_F(CApiLooperTest, TheExportSampleRateIsHonoured) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/8);
+
+    WmaExportOptions opts = wma_looper_export_options_default();
+    const std::string at48 = tempPath("at48.wav");
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, at48.c_str(), &opts));
+
+    // Half the rate, same take: about half the samples.
+    wma_looper_set_export_sample_rate(mWma, 24000);
+    const std::string at24 = tempPath("at24.wav");
+    ASSERT_TRUE(wma_looper_export_mix_v2(mWma, at24.c_str(), &opts));
+
+    EXPECT_LT(fileSize(at24), fileSize(at48))
+        << "exporting at 24 kHz produced a file no smaller than 48 kHz";
 }
 
 // ===========================================================================
@@ -759,6 +1063,17 @@ TEST(CApiLooperNullHandle, EveryQueryReturnsTheValueTheJniUsedToReturnByHand) {
     EXPECT_EQ(wma_looper_get_tail_ms(nullptr), 0);
     int onset = 0;
     EXPECT_EQ(wma_looper_detect_onsets(nullptr, 0, &onset, 1, 256, 0.5f), 0);
+
+    // Batch 4.
+    WmaExportOptions opts = wma_looper_export_options_default();
+    EXPECT_FALSE(wma_looper_export_mix_v2(nullptr, "/tmp/nope.wav", &opts));
+    EXPECT_EQ(wma_looper_export_stems(nullptr, "/tmp", &opts), -1);
+    EXPECT_FALSE(wma_looper_capture_track(nullptr, 0, "/tmp/nope.wav", 16));
+    EXPECT_FLOAT_EQ(wma_looper_get_export_progress(nullptr), 0.0f);
+    EXPECT_FALSE(wma_looper_is_export_in_progress(nullptr));
+    EXPECT_EQ(wma_looper_get_exports_completed(nullptr), 0);
+    EXPECT_EQ(wma_looper_get_exports_failed(nullptr), 0);
+    EXPECT_EQ(wma_looper_get_stems_written(nullptr), 0);
 }
 
 TEST(CApiLooperNullHandle, ANullPathIsRefusedRatherThanDereferenced) {
@@ -767,6 +1082,11 @@ TEST(CApiLooperNullHandle, ANullPathIsRefusedRatherThanDereferenced) {
     EXPECT_FALSE(wma_looper_export_mix(nullptr, nullptr));
     EXPECT_FALSE(wma_looper_export_track(nullptr, 0, nullptr));
     EXPECT_FALSE(wma_looper_import_track(nullptr, 0, nullptr, 48000));
+
+    WmaExportOptions opts = wma_looper_export_options_default();
+    EXPECT_FALSE(wma_looper_export_mix_v2(nullptr, nullptr, &opts));
+    EXPECT_EQ(wma_looper_export_stems(nullptr, nullptr, &opts), -1);
+    EXPECT_FALSE(wma_looper_capture_track(nullptr, 0, nullptr, 16));
 }
 
 TEST(CApiLooperNullHandle, EveryMutatorIsANoOpRatherThanACrash) {
@@ -799,6 +1119,8 @@ TEST(CApiLooperNullHandle, EveryMutatorIsANoOpRatherThanACrash) {
     wma_looper_set_track_percussion_mode(nullptr, 0, true);
     wma_looper_set_tail_ms(nullptr, 50);
     wma_looper_set_capabilities(nullptr, 1024, 2, 30);
+    wma_looper_cancel_export(nullptr);
+    wma_looper_set_export_sample_rate(nullptr, 48000);
     SUCCEED();
 }
 

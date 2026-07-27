@@ -1505,6 +1505,153 @@ void wma_looper_trigger_click(WmaEngine* engine, bool is_downbeat) {
     engine->engine->getAudioLooper().triggerClick(is_downbeat);
 }
 
+/* ---------------- Export / import ---------------- */
+
+namespace {
+
+/// 16 / 24 / 32 -> wav::BitDepth, with 16 as the fallback. Was written out three
+/// times in the JNI (capture, mix, stems); one place now.
+wav::BitDepth toBitDepth(int bits) {
+    switch (bits) {
+        case 24: return wav::BitDepth::PCM_24;
+        case 32: return wav::BitDepth::FLOAT_32;
+        default: return wav::BitDepth::PCM_16;
+    }
+}
+
+/// Build the engine-side options, resolving everything that needs the Transport.
+AudioLooper::ExportOptions toExportOptions(const AudioEngine& engine,
+                                           const WmaExportOptions* in) {
+    const WmaExportOptions defaults = wma_looper_export_options_default();
+    if (!in) in = &defaults;
+
+    AudioLooper::ExportOptions out;
+    out.bitDepth = toBitDepth(in->bit_depth);
+    out.repeatLoops = (in->repeat_loops > 0) ? in->repeat_loops : 1;
+    out.applyLimiter = in->apply_limiter;
+
+    // count-in beats -> frames, through the Transport so the export and the
+    // metronome cannot disagree about how long a beat is.
+    //
+    // In int64 and clamped: `countInBeats * framesPerBeat()` was int arithmetic in
+    // the JNI, and at 24000 frames per beat it overflows past ~89k beats. Fourth
+    // width problem of this category, and the cheapest one to close.
+    if (in->count_in_beats > 0) {
+        const int64_t frames = static_cast<int64_t>(in->count_in_beats)
+                             * static_cast<int64_t>(engine.getTransport().framesPerBeat());
+        out.countInFrames = static_cast<int>(std::min<int64_t>(frames, INT32_MAX));
+    } else {
+        out.countInFrames = 0;
+    }
+
+    out.metadata.bpm = (in->bpm > 0) ? in->bpm
+                                     : static_cast<int>(engine.getTransport().getBpm());
+    if (in->project_name) out.metadata.projectName = in->project_name;
+    if (in->artist) out.metadata.artist = in->artist;
+    if (in->comment) out.metadata.comment = in->comment;
+    return out;
+}
+
+}  // namespace
+
+WmaExportOptions wma_looper_export_options_default(void) {
+    // Mirrors wm::ExportOptions' member initialisers. Kept in sync by
+    // test_c_api_looper.cpp, which asserts the two agree.
+    WmaExportOptions opts;
+    opts.bit_depth = 16;
+    opts.repeat_loops = 1;
+    opts.count_in_beats = 0;
+    opts.apply_limiter = true;
+    opts.bpm = 0;
+    opts.project_name = nullptr;
+    opts.artist = nullptr;
+    opts.comment = nullptr;
+    return opts;
+}
+
+/*
+ * Every entry point below that writes or reads a file is wrapped, and not as
+ * belt-and-braces: LooperExporter sizes its mix buffer from the requested length
+ * (`std::vector<float>(totalFrames * 2)`) with no ceiling, so an unreasonable
+ * count-in or repeat count throws std::length_error rather than returning false.
+ *
+ * A C++ exception must not cross this boundary. The JNI cannot propagate one —
+ * it would come out as an abort, not a Java exception — and cinterop has no
+ * notion of it at all. The `catch (...)` is what turns "the request was too big"
+ * into the false these functions already document. Same convention as
+ * wma_effect_add() above.
+ */
+bool wma_looper_export_mix_v2(WmaEngine* engine, const char* file_path,
+                              const WmaExportOptions* options) {
+    WMA_CHECK_VAL(engine, false);
+    if (!file_path) return false;
+    try {
+        const auto opts = toExportOptions(*engine->engine, options);
+        return engine->engine->getAudioLooper().exportMix(file_path, opts);
+    } catch (...) {
+        return false;
+    }
+}
+
+int wma_looper_export_stems(WmaEngine* engine, const char* directory,
+                            const WmaExportOptions* options) {
+    WMA_CHECK_VAL(engine, -1);
+    if (!directory) return -1;
+    try {
+        const auto opts = toExportOptions(*engine->engine, options);
+        return engine->engine->getAudioLooper().exportStems(directory, opts);
+    } catch (...) {
+        return -1;
+    }
+}
+
+bool wma_looper_capture_track(WmaEngine* engine, int track_index,
+                              const char* file_path, int bit_depth) {
+    WMA_CHECK_VAL(engine, false);
+    if (!file_path) return false;
+    try {
+        return engine->engine->getAudioLooper().captureTrack(track_index, file_path,
+                                                            toBitDepth(bit_depth));
+    } catch (...) {
+        return false;
+    }
+}
+
+float wma_looper_get_export_progress(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0.0f);
+    return engine->engine->getAudioLooper().getExportProgress();
+}
+
+void wma_looper_cancel_export(WmaEngine* engine) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().cancelExport();
+}
+
+void wma_looper_set_export_sample_rate(WmaEngine* engine, int sample_rate) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().setExportSampleRate(sample_rate);
+}
+
+bool wma_looper_is_export_in_progress(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getAudioLooper().isExportInProgress();
+}
+
+int64_t wma_looper_get_exports_completed(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getExportsCompleted();
+}
+
+int64_t wma_looper_get_exports_failed(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getExportsFailed();
+}
+
+int64_t wma_looper_get_stems_written(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getStemsWritten();
+}
+
 /* ---------------- Track editing & analysis ---------------- */
 
 void wma_looper_abort_recording(WmaEngine* engine) {
@@ -1735,20 +1882,33 @@ void wma_looper_reset_telemetry(WmaEngine* engine) {
 bool wma_looper_export_mix(WmaEngine* engine, const char* file_path) {
     WMA_CHECK_VAL(engine, false);
     if (!file_path) return false;
-    return engine->engine->getAudioLooper().exportMix(file_path);
+    try {
+        return engine->engine->getAudioLooper().exportMix(file_path);
+    } catch (...) {
+        return false;
+    }
 }
 
 bool wma_looper_export_track(WmaEngine* engine, int track_index, const char* file_path) {
     WMA_CHECK_VAL(engine, false);
     if (!file_path) return false;
-    return engine->engine->getAudioLooper().exportTrack(track_index, file_path);
+    try {
+        return engine->engine->getAudioLooper().exportTrack(track_index, file_path);
+    } catch (...) {
+        return false;
+    }
 }
 
 bool wma_looper_import_track(WmaEngine* engine, int track_index,
                               const char* file_path, int sample_rate) {
     WMA_CHECK_VAL(engine, false);
     if (!file_path) return false;
-    return engine->engine->getAudioLooper().importTrack(track_index, file_path, sample_rate);
+    try {
+        return engine->engine->getAudioLooper().importTrack(track_index, file_path,
+                                                           sample_rate);
+    } catch (...) {
+        return false;
+    }
 }
 
 /* ================================================================

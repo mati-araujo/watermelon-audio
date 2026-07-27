@@ -905,6 +905,85 @@ WMA_API int wma_looper_get_track_loop_end(const WmaEngine* engine, int track_ind
 /** Trigger a metronome click (downbeat vs subdivision). */
 WMA_API void wma_looper_trigger_click(WmaEngine* engine, bool is_downbeat);
 
+/* ---------------- Export / import ----------------
+ *
+ * Bit depth is an int here —16, 24, or 32 for float— because wav::BitDepth is a
+ * C++ enum and this header is C. Anything else is treated as 16, which is what
+ * the JNI did. The mapping used to be written out three times up in the JNI; it
+ * lives in one place now.
+ */
+
+/**
+ * Options for a mix or stem export.
+ *
+ * The first struct in this header, and worth a word on why. The alternative was
+ * a ten-argument function, duplicated across mix and stems, six of whose
+ * arguments are same-typed ints — the shape where a caller transposes two and
+ * nothing complains. A named field cannot be transposed silently, and cinterop
+ * turns this into a named Kotlin type rather than ten positional arguments.
+ *
+ * Zero-initialising this struct is NOT the same as the defaults: pass it to
+ * wma_looper_export_options_default() first, or set every field. The "<= 0 means
+ * use the default" rules below exist so a caller can leave what it does not care
+ * about alone, the same contract wma_looper_set_capabilities() uses.
+ */
+typedef struct WmaExportOptions {
+    /** 16, 24, or 32 (float). Anything else is treated as 16. */
+    int bit_depth;
+    /** Iterations of the loop to write. <= 0 means 1. */
+    int repeat_loops;
+    /** Leading silence, in beats. Converted through the Transport. <= 0 = none. */
+    int count_in_beats;
+    /** True-peak limiter instead of a tanh soft-clip. */
+    bool apply_limiter;
+    /** BPM tag for the file. <= 0 means "use the Transport's current BPM". */
+    int bpm;
+    /** WAV metadata. NULL leaves the field empty. Ignored by stem export. */
+    const char* project_name;
+    const char* artist;
+    const char* comment;
+} WmaExportOptions;
+
+/** The documented defaults: 16-bit, one iteration, no count-in, limiter on. */
+WMA_API WmaExportOptions wma_looper_export_options_default(void);
+
+/**
+ * Export the mix to a WAV file, with options and metadata. NOT RT-safe.
+ * Passing NULL for @p options uses the defaults.
+ */
+WMA_API bool wma_looper_export_mix_v2(WmaEngine* engine, const char* file_path,
+                                      const WmaExportOptions* options);
+
+/**
+ * Export every active track as its own WAV file into @p directory. NOT RT-safe.
+ * @return number of stems written, or -1 on failure.
+ */
+WMA_API int wma_looper_export_stems(WmaEngine* engine, const char* directory,
+                                     const WmaExportOptions* options);
+
+/**
+ * Session capture: write a track's FULL buffer, ignoring the loop region, at the
+ * given bit depth. 32 (float) is a lossless round-trip.
+ */
+WMA_API bool wma_looper_capture_track(WmaEngine* engine, int track_index,
+                                       const char* file_path, int bit_depth);
+
+/** Progress of the export in flight, 0..1. */
+WMA_API float wma_looper_get_export_progress(const WmaEngine* engine);
+
+/** Ask the export in flight to stop. */
+WMA_API void wma_looper_cancel_export(WmaEngine* engine);
+
+/** Sample rate to write exports at. */
+WMA_API void wma_looper_set_export_sample_rate(WmaEngine* engine, int sample_rate);
+
+WMA_API bool wma_looper_is_export_in_progress(const WmaEngine* engine);
+
+/* Export telemetry. */
+WMA_API int64_t wma_looper_get_exports_completed(const WmaEngine* engine);
+WMA_API int64_t wma_looper_get_exports_failed(const WmaEngine* engine);
+WMA_API int64_t wma_looper_get_stems_written(const WmaEngine* engine);
+
 /* ---------------- Track editing & analysis ---------------- */
 
 /** Abort the recording in progress, discarding the take. */
