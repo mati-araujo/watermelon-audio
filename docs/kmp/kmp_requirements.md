@@ -828,6 +828,72 @@ cinturón sobre los tirantes.
 | WA-5.2 | Latency benchmark iOS | Port de `LatencyBenchmarkRunner` (hoy androidMain) sobre la infraestructura de WA-4.3 | P2 |
 | WA-5.3 | AUv3 | Empaquetar el motor como Audio Unit v3 (extensión) — habilitaría NoisyPad como plugin en GarageBand/Logic/AUM. Análisis de arquitectura propio | P3 |
 | WA-5.4 | CoreMIDI | Si el roadmap de NoisyPad incorpora MIDI-in en iOS | P3 |
+| WA-5.5 | **Harness de UI multiplataforma + design system** | App de prueba en este repo que corra en Android e iOS contra la librería, con un design system propio y los componentes genéricos que valga la pena traer de NoisyPad. **Propuesta, sin aprobar** — análisis abajo | P1 |
+
+### Análisis — WA-5.5, harness de UI y design system (propuesta 2026-07-27)
+
+**El problema que resuelve, que es real y está creciendo.** Hoy la validación de esta
+librería depende de dos cosas que no controlamos desde acá:
+
+1. **La lista del smoke de Android son 9 ítems** y no se puede correr sin **NoisyPad** más un
+   dispositivo. Nada de eso vive en este repo, así que cada categoría de WA-2.6 agrega deuda
+   que nadie puede saldar desde acá.
+2. **El input path de iOS se escribió a ciegas** y sigue sin que nada pruebe que captura audio
+   de verdad. Es el riesgo no validado más grande del programa.
+
+**WA-4.3 primera mitad ya apuntaba a esto** (sample app SwiftUI sobre el XCFramework), pero
+cubre **sólo iOS** y sólo el camino Swift → framework. Un harness en Compose Multiplatform
+cubriría **las dos plataformas** y ejercitaría `commonMain`, que es la superficie que de
+verdad consume un cliente. **WA-5.5 subsume WA-4.3 primera mitad** si se aprueba.
+
+**Lo que cuesta, medido y no estimado a ojo.** Hoy el repo es **un solo módulo** (`:audio`),
+sin `samples/`, y el catálogo de versiones **no tiene una sola dependencia de UI** — ni
+Compose, ni Activity, ni Material. La librería es deliberadamente libre de UI y `commonMain`
+tiene cero imports de `android.*`. Entonces el harness implica:
+
+- un módulo Gradle nuevo, **que no se publica** (ver el riesgo de abajo);
+- **Compose Multiplatform como eje de dependencias nuevo** para este repo (plugin + runtime +
+  el catálogo);
+- del lado iOS, un shell de Xcode sobre el `UIViewController` de Compose — el XCFramework ya
+  existe por WA-4.1, así que esa parte está;
+- del lado Android, un módulo de app con su Activity.
+
+> [!CAUTION]
+> **El riesgo de diseño principal: que la UI se filtre al artefacto publicado.** Este repo
+> publica `com.watermellonstudios:audio`, y su valor es justamente que no arrastra UI. El
+> harness tiene que ser **estructuralmente incapaz** de entrar ahí: módulo aparte, sin
+> `publishing`, y sin que `:audio` lo declare como dependencia en ninguna dirección.
+>
+> Y el design system merece una **decisión explícita, no llegar de rebote**: si va a ser
+> compartido con NoisyPad tiene que ser un artefacto publicable propio (o su propio repo), con
+> lo que eso implica de versionado y de que *este* repo pase a shippear Compose. Que aparezca
+> como efecto secundario de construir un harness de test es la forma equivocada de tomar esa
+> decisión.
+
+**Cuándo — recomendación.** Ordenado así, y el porqué del orden importa más que el orden:
+
+1. **Primero la cola de 15** que cierra WA-2.5/2.6. Es corta y deja la C API **completa**, así
+   que el harness se construye contra una superficie quieta en vez de una que se mueve abajo.
+2. **Después el harness, con UI mínima y fea.** Su valor es *validar*, y validar no puede
+   esperar a que exista un design system. Acá se drena el smoke de 9 ítems y se prueba por fin
+   si el input path de iOS captura.
+3. **El design system al final**, con el harness como primer consumidor real y NoisyPad como
+   fuente de cosecha.
+
+**El paso 3 va último a propósito.** Construir el design system primero es invertir en
+componentes antes de saber cuáles el harness necesita, y un design system sin un consumidor
+real es especulación con buena letra. Al revés, el harness te dice exactamente qué componentes
+se repiten y cuáles eran de un solo uso — que es la única información que hace que la cosecha
+desde NoisyPad no sea copiar por copiar.
+
+**Si la prioridad es el design system como entregable de producto** (porque NoisyPad iOS lo va
+a necesitar igual), el orden se puede invertir — pero eso es una decisión de producto y
+conviene tomarla como tal, no dejarla implícita en "hagamos las cosas bien".
+
+**Lo que no se puede decidir desde este repo:** qué componentes de NoisyPad valen la pena.
+NoisyPad es un repo privado aparte y no está montado acá, así que la cosecha necesita una
+sesión con acceso a los dos. Antes de eso conviene saber si su UI es Compose (probable) y
+cuánto de ella es genérica de verdad y no específica del pad.
 
 ---
 
@@ -1920,6 +1986,9 @@ la etapa 2 del input path— conviene hacerlo: es la diferencia entre verificar 
 
 - **WA-4.3 primera mitad** (sample app en simulador) — **aprobada, sin empezar**. No necesita
   iPhone; ver la decisión en §9. Es lo que probaría que el input path realmente captura.
+  **Ojo: la propuesta WA-5.5 (§10) la subsume** — un harness Compose Multiplatform cubre las
+  dos plataformas en vez de sólo iOS. Conviene decidir WA-5.5 antes de empezar ésta, para no
+  escribir la app de iOS dos veces.
 - **WA-4.3 segunda mitad, en device** (M). **Necesita un iPhone.** Sonido real, Instruments
   sobre el render block de `CoreAudioBackend` (cero allocs, cero locks), latencia
   round-trip medida, y la interrupción por llamada entrante que cierra el criterio
