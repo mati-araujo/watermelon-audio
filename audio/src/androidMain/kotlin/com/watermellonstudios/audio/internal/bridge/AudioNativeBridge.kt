@@ -2476,13 +2476,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // ==================== Native Log Capture (App V §3.2) ====================
 
     /** Enable/disable the native in-memory log capture (second sink). */
-    fun setLogCaptureEnabled(enabled: Boolean) = nativeSetLogCaptureEnabled(enabled)
+    override fun setLogCaptureEnabled(enabled: Boolean) = nativeSetLogCaptureEnabled(enabled)
 
     /** Drain captured native log lines since the last call ("L/TAG: message"). */
-    fun drainCapturedLogs(): Array<String> = nativeDrainCapturedLogs() ?: emptyArray()
+    override fun drainCapturedLogs(): Array<String> = nativeDrainCapturedLogs() ?: emptyArray()
 
     /** Count of lines dropped because the capture ring overflowed. */
-    fun getLogCaptureDropped(): Int = nativeGetLogCaptureDropped()
+    override fun getLogCaptureDropped(): Int = nativeGetLogCaptureDropped()
 
     // ==================== Native Methods: Latency Benchmark ====================
 

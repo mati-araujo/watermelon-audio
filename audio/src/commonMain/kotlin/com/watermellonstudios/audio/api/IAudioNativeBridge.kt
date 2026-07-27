@@ -150,4 +150,40 @@ interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter, IInputB
     fun setUsbLatencyProfile(
         profile: com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
     ): Result<Unit>
+
+    // ==================== LOG CAPTURE ====================
+
+    /**
+     * Captura de logs del motor — un anillo de 4000 líneas que se lee tirando, no
+     * empujando.
+     *
+     * Es distinto de `AudioLogger`, que es push y entrega cada línea en el momento.
+     * Esto existe para que una UI pueda mostrar las últimas N líneas **cuando el
+     * usuario las pide**, sin dejar un callback vivo todo el tiempo. Deshabilitada
+     * cuesta un load relajado.
+     *
+     * Global al proceso, no por motor: la C API detrás (`wma_log_capture_*`) no
+     * toma `WmaEngine*`, porque el logger tampoco.
+     */
+    fun setLogCaptureEnabled(enabled: Boolean)
+
+    /**
+     * Vacía lo capturado desde la llamada anterior, en formato `"L/TAG: mensaje"`.
+     *
+     * **Es destructivo**: las líneas se van del anillo. Devuelve un array propio y
+     * no un handle a propósito — la C API entrega un `WmaLogBatch*` que hay que
+     * liberar, y dejar ese handle cruzar a Kotlin sería regalar un leak a cada
+     * llamador. El batch nace y muere dentro de la implementación.
+     *
+     * Vacío es una respuesta normal, no un error: quiere decir que no pasó nada
+     * desde la última vez.
+     */
+    fun drainCapturedLogs(): Array<String>
+
+    /**
+     * Líneas perdidas por desborde del anillo. **No se resetea al vaciar**, así que
+     * es un acumulado: si crece entre dos lecturas, la UI está mirando menos de lo
+     * que pasó y conviene que lo diga.
+     */
+    fun getLogCaptureDropped(): Int
 }

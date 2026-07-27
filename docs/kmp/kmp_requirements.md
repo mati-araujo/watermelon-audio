@@ -2489,6 +2489,45 @@ un host con la entrada del simulador funcionando.
 de logs del control 7 necesita ese cableado igual, opt-in o no. Es el mismo trabajo mecánico
 que se hizo con §12: agregar al bridge, implementar en las dos, listo.
 
+#### Hecho (2026-07-27) — y la premisa estaba media equivocada
+
+**`@InternalWatermelonApi`** existe, con `@RequiresOptIn` nivel **ERROR**. Marca
+**`getAudioBridge()`** y nada más: la anotación va en la *puerta*, no en
+`IAudioNativeBridge`. Anotar la interfaz habría obligado a salpicar `@OptIn` por todo el motor
+—la implementan y la reciben `AudioInputImpl`, `EffectManagerImpl`, `StateSynchronizer`— sin
+agregar una sola garantía, porque sin la función no hay forma de conseguir un puente. Los seis
+usos internos del motor llevan su `@OptIn` explícito.
+
+> [!NOTE]
+> **`getAudioBridge()` no era `internal`: ya era público.** La decisión decía "deja de ser
+> `internal` bajo ese opt-in" y eso no era exacto — la `expect fun` nunca tuvo modificador, así
+> que el harness siempre pudo llamarla. O sea que el trabajo no fue *abrir* nada: fue **cerrar**
+> lo que estaba abierto de hecho y sin decirlo. La decisión de fondo no cambia y el resultado es
+> el mismo que buscaba, pero conviene anotarlo: la superficie de diagnóstico llevaba tiempo
+> alcanzable por cualquier consumidor, sin marca y sin opt-in.
+
+Verificado en las dos direcciones con una sonda en `:harness`: sin `@OptIn` **no compila**
+(el error trae el mensaje de la anotación); con `@OptIn` compila y `getRoutingMode()` responde.
+
+**`wma_log_capture_*` cableado.** Acá la premisa también estaba media equivocada: **Android ya
+lo tenía entero** —`setLogCaptureEnabled` / `drainCapturedLogs` / `getLogCaptureDropped` sobre
+tres funciones JNI, incluido el detalle de buscar `java/lang/String` *antes* de drenar porque
+el drain es destructivo—. Lo que faltaba era que estuviera en **`IAudioNativeBridge`**, que es
+lo que `commonMain` puede ver, y el lado iOS. Ahora los tres están en la interfaz, Android los
+`override`, y iOS los implementa sobre cinterop.
+
+**El `WmaLogBatch` no cruza la frontera**, y es deliberado: la C API entrega un handle que hay
+que liberar, y dejarlo llegar a Kotlin sería regalarle un leak a cada llamador. El batch nace y
+muere dentro de `drainCapturedLogs()`, con el `try/finally` envolviendo también la lectura de
+`count`, y las líneas se copian a `String` ahí mismo porque los punteros valen sólo hasta el
+`free`.
+
+**4 tests nuevos en el simulador (101 → 105), 3 mutantes, 3 detectados.** Esto **sí** se puede
+probar donde el camino de audio no: el anillo de logs es memoria del proceso, sin audio ni
+permisos de por medio. Y cada test se ganó el lugar — el mutante que ignora el *disable*
+(`set_enabled(true)` siempre) lo agarra **sólo** `disabledCaptureCollectsNothing`; los otros dos
+mutantes (drain vacío, enable no-op) los agarran los otros dos tests y ese no.
+
 El permiso de Android (`RECORD_AUDIO`) ya está en el manifest desde el primer commit por la
 misma razón que la clave del micrófono en iOS: el caso que más importa probar es el del permiso
 **negado**, y agregarlo después obligaría a reinstalar para reproducirlo.

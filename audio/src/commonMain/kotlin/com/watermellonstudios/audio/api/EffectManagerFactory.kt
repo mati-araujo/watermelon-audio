@@ -78,6 +78,9 @@ object EffectManagerFactory {
      * @param effectConfig Configuration for effect manager behavior
      * @return New [IEffectManager] instance
      */
+    // El motor es el implementador del puente, no un consumidor: las factories
+    // publicas se construyen encima de el. Ver [InternalWatermelonApi].
+    @OptIn(InternalWatermelonApi::class)
     fun create(
         scope: CoroutineScope,
         syncConfig: SyncConfig,
@@ -114,6 +117,9 @@ object EffectManagerFactory {
      * @param effectConfig Configuration for effect manager behavior
      * @return New [IEffectManager] instance using the shared synchronizer
      */
+    // El motor es el implementador del puente, no un consumidor: las factories
+    // publicas se construyen encima de el. Ver [InternalWatermelonApi].
+    @OptIn(InternalWatermelonApi::class)
     fun createWithSynchronizer(
         scope: CoroutineScope,
         synchronizer: StateSynchronizer,

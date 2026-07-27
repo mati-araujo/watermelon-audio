@@ -1,5 +1,6 @@
 package com.watermellonstudios.audio.internal.effect
 
+import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.api.EffectNotFoundException
 import com.watermellonstudios.audio.api.EffectParameterUpdate
 import com.watermellonstudios.audio.api.EffectPreset
@@ -458,6 +459,9 @@ internal class EffectManagerImpl(
     // ROUTING MODE (lock-free, non-suspend)
     // =========================================================================
 
+    // El motor es el implementador del puente, no un consumidor: las factories
+    // publicas se construyen encima de el. Ver [InternalWatermelonApi].
+    @OptIn(InternalWatermelonApi::class)
     private val bridge by lazy(LazyThreadSafetyMode.NONE) { getAudioBridge() }
 
     override fun setRoutingMode(mode: Int) {

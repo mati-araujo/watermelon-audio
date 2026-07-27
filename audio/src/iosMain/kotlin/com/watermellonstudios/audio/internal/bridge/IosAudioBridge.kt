@@ -21,6 +21,7 @@ import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.get
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
+import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
 
@@ -616,4 +617,37 @@ internal class IosAudioBridge : IAudioNativeBridge {
         } else {
             Result.failure(NativeBridgeException.fromCode(this, operation))
         }
+
+    // ==================== LOG CAPTURE ====================
+
+    override fun setLogCaptureEnabled(enabled: Boolean) = wma_log_capture_set_enabled(enabled)
+
+    override fun getLogCaptureDropped(): Int = wma_log_capture_dropped()
+
+    /**
+     * El batch no sale de acá. `wma_log_capture_drain()` devuelve un handle propio
+     * que **hay que liberar**, y el drain es destructivo: si se pierde el handle se
+     * pierden las líneas y se filtra la memoria de una vez.
+     *
+     * Por eso el `try/finally` envuelve **todo** el uso, incluida la lectura de
+     * `count`. Y por eso se copia a `String` acá: `wma_log_batch_line()` documenta
+     * que el puntero vale hasta que el batch se libera, así que un `List<CPointer>`
+     * quedaría con punteros colgando apenas retorna esta función.
+     *
+     * Un `null` del drain es "no se pudo alocar", no "no había nada" — la C API es
+     * explícita en que vacío se entrega igual como batch. Devolver el array vacío
+     * es lo correcto en los dos casos para el llamador, pero no son lo mismo.
+     */
+    override fun drainCapturedLogs(): Array<String> {
+        val batch = wma_log_capture_drain() ?: return emptyArray()
+        try {
+            val count = wma_log_batch_count(batch)
+            if (count <= 0) return emptyArray()
+            return Array(count) { i ->
+                wma_log_batch_line(batch, i)?.toKString() ?: ""
+            }
+        } finally {
+            wma_log_batch_free(batch)
+        }
+    }
 }

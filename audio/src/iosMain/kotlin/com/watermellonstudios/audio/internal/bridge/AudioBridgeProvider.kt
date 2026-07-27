@@ -1,6 +1,7 @@
 package com.watermellonstudios.audio.internal.bridge
 
 import com.watermellonstudios.audio.api.IAudioNativeBridge
+import com.watermellonstudios.audio.api.InternalWatermelonApi
 
 /**
  * iOS actual — [IosAudioBridge] sobre cinterop (WA-3.2 / WA-3.3).
@@ -20,4 +21,5 @@ import com.watermellonstudios.audio.api.IAudioNativeBridge
  */
 private val bridge: IAudioNativeBridge by lazy { IosAudioBridge() }
 
+@InternalWatermelonApi
 actual fun getAudioBridge(): IAudioNativeBridge = bridge

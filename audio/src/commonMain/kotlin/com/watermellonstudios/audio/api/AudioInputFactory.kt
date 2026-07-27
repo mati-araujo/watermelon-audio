@@ -25,5 +25,8 @@ object AudioInputFactory {
      * vistas del mismo camino, no dos entradas — que es lo que corresponde,
      * porque el device de captura es uno solo.
      */
+    // El motor es el implementador del puente, no un consumidor: las factories
+    // publicas se construyen encima de el. Ver [InternalWatermelonApi].
+    @OptIn(InternalWatermelonApi::class)
     fun create(): AudioInput = AudioInputImpl(getAudioBridge())
 }

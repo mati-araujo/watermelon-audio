@@ -185,4 +185,82 @@ class IosAudioBridgeTest {
 
         assertTrue(written <= buffer.size, "escribió $written en un buffer de ${buffer.size}")
     }
+
+    // ==================== LOG CAPTURE ====================
+    //
+    // A diferencia de todo lo que toca el stream, esto SÍ se puede probar acá: el
+    // anillo de logs es memoria del proceso y no necesita ni audio ni permisos.
+
+    /**
+     * El camino entero: prender, generar líneas, vaciarlas y que lleguen como
+     * `String` de Kotlin.
+     *
+     * Se apoya en que el motor loguea al agregar un efecto — cualquier operación
+     * que registre sirve; lo que se afirma es el **transporte**, no qué dice cada
+     * línea. Por eso la assertion es sobre "llegó algo no vacío", que es
+     * exactamente lo que se rompería si el `WmaLogBatch` se leyera mal.
+     */
+    @Test
+    fun capturedLogsCrossTheBoundaryAsStrings() = runTest {
+        bridge.setLogCaptureEnabled(true)
+        try {
+            bridge.drainCapturedLogs()  // arranca de cero: el drain es destructivo
+
+            bridge.addEffect(EffectType.REVERB)
+
+            val lines = bridge.drainCapturedLogs()
+
+            assertTrue(lines.isNotEmpty(), "el motor logueó al agregar un efecto y no llegó nada")
+            assertTrue(
+                lines.all { it.isNotEmpty() },
+                "alguna línea llegó vacía: el puntero del batch se leyó mal o se liberó antes",
+            )
+        } finally {
+            bridge.setLogCaptureEnabled(false)
+        }
+    }
+
+    /** Vaciar dos veces seguidas: la segunda no puede devolver lo mismo que la primera. */
+    @Test
+    fun drainingIsDestructive() = runTest {
+        bridge.setLogCaptureEnabled(true)
+        try {
+            bridge.addEffect(EffectType.REVERB)
+            val first = bridge.drainCapturedLogs()
+            assertTrue(first.isNotEmpty(), "el primer drain debería traer algo")
+
+            val second = bridge.drainCapturedLogs()
+
+            assertTrue(
+                second.size < first.size,
+                "el segundo drain trajo ${second.size} sobre ${first.size}: las líneas no se " +
+                    "fueron del anillo",
+            )
+        } finally {
+            bridge.setLogCaptureEnabled(false)
+        }
+    }
+
+    /**
+     * Deshabilitada, la captura no junta nada.
+     *
+     * Es la mitad que un test de "prende y anda" no cubre, y la que importa para el
+     * costo: si el flag no se respetara, toda app que nunca pide logs estaría
+     * llenando un anillo de 4000 líneas igual.
+     */
+    @Test
+    fun disabledCaptureCollectsNothing() = runTest {
+        bridge.setLogCaptureEnabled(false)
+        bridge.drainCapturedLogs()
+
+        bridge.addEffect(EffectType.REVERB)
+
+        assertEquals(0, bridge.drainCapturedLogs().size, "capturó con la captura apagada")
+    }
+
+    /** El contador de descartes es acumulado y no se resetea al vaciar. */
+    @Test
+    fun theDroppedCounterIsReadableAndNonNegative() {
+        assertTrue(bridge.getLogCaptureDropped() >= 0, "el contador de descartes no puede ser negativo")
+    }
 }

@@ -1,5 +1,6 @@
 package com.watermellonstudios.audio.internal.engine
 
+import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.api.AudioEngine
 import com.watermellonstudios.audio.api.DualTouchParams
 import com.watermellonstudios.audio.api.MultiTouchPoint
@@ -45,6 +46,9 @@ internal class AudioEngineImpl(
         private const val TAG = "AudioEngine"
     }
 
+    // El motor es el implementador del puente, no un consumidor: las factories
+    // publicas se construyen encima de el. Ver [InternalWatermelonApi].
+    @OptIn(InternalWatermelonApi::class)
     private val bridge = getAudioBridge()
 
     private val logger: AudioLogger = config.logger
