@@ -1,13 +1,31 @@
 # Requerimiento: KMP/iOS Readiness — watermelon-audio
 
-**Proyecto:** watermelon-audio (v1.8.1). Coordenada **KMP**: `com.watermellonstudios:audio`
+**Proyecto:** watermelon-audio (**v1.9.0**). Coordenada **KMP**: `com.watermellonstudios:audio`
 — `:audio-android` es el módulo Android suelto, **no** el que debe usar un consumidor KMP
 **Documento hermano:** `NoisyPad/docs/kmp/kmp_requirements.md` (consumidor)
-**Estado:** EN CURSO — **Fases 0 y 3 esencialmente cerradas**: Kotlin/Native ejecuta el motor C++ en el simulador (75 tests iOS, 0 fallas). Queda `DeviceCapabilities`, el input path de iOS, el XCFramework, y la validación en device (G2)
-**Fecha:** 2026-07-05 · **Última actualización:** 2026-07-25 (cerrados: WA-0.1/0.2/0.3/0.4,
-WA-1.4, WA-1.6, WA-2.0, **WA-2.1 completo**, WA-2.2, WA-2.3, WA-2.4 output, WA-2.7,
-**WA-3.1, WA-3.2, WA-3.4**, WA-3.3 parcial, WA-T.1/T.3; `InputNode` unificado JNI↔C API)
+**Fecha:** 2026-07-05 · **Última actualización:** 2026-07-27
 **Objetivo estratégico:** que la librería de audio compile y funcione en iOS con el mismo motor C++ y la misma API Kotlin (`commonMain`) que hoy consume NoisyPad Android, habilitando la versión iOS de NoisyPad.
+
+> [!IMPORTANT]
+> ## Estado en una pantalla (2026-07-27)
+>
+> **Este documento tiene 3.200+ líneas y crece por sesión. Esto es lo que hay que saber sin
+> scrollear; el detalle vive en §16 "Dónde retomar" y en las notas de §10.**
+>
+> | | |
+> |---|---|
+> | **La pregunta que justificaba el programa** | **Contestada: el input path de iOS CAPTURA.** `inputData` deja de ser `0x0`, `inputPeak` trae señal real |
+> | Fases 0, 2, 3 | ✅ cerradas · **WA-2.5/2.6 cerrada** (JNI→C API, las 10 categorías + la cola) |
+> | Fase 4 | 🟢 WA-4.1 ✅ · **G1/WA-4.2 ✅ CERRADO** — NoisyPad linkea la 1.9.0 con 251 símbolos `wma_*` adentro |
+> | Fase 5 | 🟢 WA-5.5 con sus **7 controles** corriendo en el simulador |
+> | **Lo único grande abierto** | **G2 — validación en device. Necesita un iPhone.** Sonido real, latencia round-trip, Instruments sobre el render block |
+> | Otros pendientes | el smoke manual de Android (12 ítems, ninguno en device) · WA-1.3 · el design system |
+>
+> **El gate local son 12 comandos**, no 10 — los dos últimos son los sanitizers, y el CI
+> **funciona** (estuvo caído sólo el 26/07). Ver §16.
+>
+> ⚠️ **Las referencias `archivo:línea` de este documento envejecen.** Ya pasó que un entry de
+> deuda apuntara a una línea que hoy es otra cosa. **Buscar por nombre, no por número.**
 
 ---
 
@@ -2967,6 +2985,11 @@ NoisyPad Android**, que ya tiene tres cosas encima:
    `startInputStream` con el permiso denegado. Reproducción concreta en esa nota.
 4. **WA-2.6 en general**: 135 entry points JNI reescritos, 0 validados en device. La suite
    de host cubre la C API, no el JNI.
+12. **`nativeGetAdaptiveBufferStats` devuelve diez ceros, siempre** (ronda de unificación,
+   2026-07-27). `jni_audio_bridge.cpp:1715` declara `jfloat stats[10] = {0}`, **nunca lo
+   llena** y lo devuelve así. Si NoisyPad muestra esas estadísticas, está mostrando ceros —
+   no "el buffer está en cero", sino que nadie las calculó nunca. Misma clase que el ítem 11.
+   **Mirar si NoisyPad lo llama** antes de decidir si se implementa o se borra.
 11. **`setDepthValue` no hace nada, y nunca hizo nada** (la cola, 2026-07-27). No es una
    regresión de esta serie: `mDepthValue` se escribe y nadie lo lee, en las cuatro capas.
    Si un slider de depth en NoisyPad llama sólo a `setDepthValue`, mover ese slider no

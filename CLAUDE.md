@@ -10,7 +10,7 @@ Motor de sintesis en tiempo real con efectos DSP profesionales. C++20 + Oboe + K
 
 ```
 audio/src/
-  commonMain/kotlin/    67 files — pure Kotlin, zero Android deps
+  commonMain/kotlin/    74 files — pure Kotlin, zero Android deps
     api/                AudioEngine interface, IAudioNativeBridge, IEffectManager,
                         IInputBridge + AudioInput (camino de entrada, WA-5.5),
                         factories (AudioEngine, EffectManager, AudioInput,
@@ -25,16 +25,16 @@ audio/src/
     domain/device/      DeviceCapabilities (interfaz de hechos) + Snapshot
     domain/input/       InputSource + InputMetering (snapshot de 7 valores)
   androidMain/kotlin/   23 files — JNI bridge, USB, platform-specific
-    internal/bridge/    AudioNativeBridge (3,352 LOC, 289 external funs)
+    internal/bridge/    AudioNativeBridge (3,209 LOC, 290 external funs)
     internal/usb/       USB audio driver (DataStore, BroadcastReceiver)
     internal/mode/      ModeTransitionManagerImpl, NativeModeStateWriter
   iosMain/kotlin/       5 files — IosAudioBridge (sobre cinterop), AudioBridgeProvider,
                         AudioSessionManager (AVAudioSession como Flow),
                         NativeLibraryLoader (no-op, link estatico),
                         DeviceCapabilitiesProvider (NSProcessInfo)
-  commonTest/kotlin/    7 suites  ·  iosTest/kotlin/ 4 suites
+  commonTest/kotlin/    8 suites  ·  iosTest/kotlin/ 4 suites
   main/cpp/             C++20 engine
-    api/                C API — watermelon_audio.h (187 functions, pure C)
+    api/                C API — watermelon_audio.h (251 functions, pure C)
     dsp/                watermelon-dsp sub-library (30 files, zero deps)
     effects/            watermelon-effects sub-library (59 files, 23 efectos + EffectRegistry)
     engines/            watermelon-engines sub-library (SynthEngine + 6 engines
@@ -47,7 +47,7 @@ audio/src/
                         OboeBackend + LibusbBackend (Android),
                         CoreAudioBackend.mm (iOS, output + captura full-duplex),
                         PlatformBackends.cpp (unico punto que nombra backends concretos)
-    jni/                5 files — jni_audio_bridge.cpp (278 JNIEXPORT), jni_engine,
+    jni/                5 files — jni_audio_bridge.cpp (279 JNIEXPORT), jni_engine,
                         jni_usb, jni_benchmark, jni_common.h
     platform/           Logger.h/.cpp (logcat / os_log / stderr), Platform.h,
                         PlatformAndroid.cpp, PlatformApple.cpp, PlatformIsa.inc (ISA comun)
@@ -63,6 +63,18 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
                         CADisableMinimumFrameDurationOnPhone (sin esta ultima
                         Compose aborta al arrancar)
 ```
+
+> Los conteos de arriba son orientativos y **driftean**: al 2026-07-27 estaban mal
+> commonMain (67→74), la C API (187→251, la movio WA-2.5/2.6), AudioNativeBridge
+> (3352→3209 LOC, 289→290 funs), los JNIEXPORT (278→279) y los tests (749→762,
+> 101→105). Re-medir es barato, asi que **medir antes de citar**:
+>
+> ```bash
+> find audio/src/commonMain -name '*.kt' | wc -l          # archivos por source set
+> grep -c 'external fun' audio/src/androidMain/kotlin/com/watermellonstudios/audio/internal/bridge/AudioNativeBridge.kt
+> grep -c JNIEXPORT audio/src/main/cpp/jni/jni_audio_bridge.cpp
+> python3 scripts/c-api-gap.py                            # C API + delegacion (§4b)
+> ```
 
 ---
 
@@ -131,8 +143,20 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # Suite C++ de host (749 tests, googletest)
-                                           # Kotlin: 101 iOS sim / 64 JVM
+bash scripts/run-cpp-tests.sh              # Suite C++ de host (762 tests, googletest)
+                                           # Kotlin: 105 iOS sim / 64 JVM
+
+# Los mismos 762 bajo sanitizers. NO son opcionales: el CI tiene un job para
+# cada uno y encontraron dos bugs reales que el resto del gate no ve.
+# OJO: `detect_leaks=1` (lo que usa ci.yml) NO existe en macOS y aborta el
+# discovery de gtest — en esta maquina va sin el.
+ASAN_OPTIONS=abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  SANITIZE=address,undefined bash scripts/run-cpp-tests.sh --timeout 180
+TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
+  SANITIZE=thread bash scripts/run-cpp-tests.sh --timeout 180
+# El TSan local (libc++) es MAS DEBIL que el del CI (libstdc++): una carrera
+# real sobrevivio 15 corridas aca y fue roja a la primera alla. Para carreras
+# el CI es la autoridad.
 bash scripts/check-cpp-portability.sh      # Guardrail WA-0.4 (jni.h / android/)
 bash scripts/build-harness.sh              # :harness: Android + framework iOS +
                                            # símbolos + shell de Xcode + ARRANQUE

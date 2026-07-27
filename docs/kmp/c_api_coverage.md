@@ -1,8 +1,8 @@
 # Cobertura C API vs JNI — WA-0.1
 
 **Requerimiento:** `docs/kmp/kmp_requirements.md` § 5, WA-0.1
-**Actualizado:** 2026-07-26 (al cerrar `análisis`) · **Reproducible con:**
-`python3 scripts/c-api-gap.py`
+**Actualizado:** 2026-07-27 (ronda de unificación: se recontó todo contra el árbol, no contra
+la corrida anterior) · **Reproducible con:** `python3 scripts/c-api-gap.py`
 
 ---
 
@@ -57,13 +57,13 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 
 | Métrica | Valor |
 |---|---|
-| JNIEXPORT (entry points) | 278 |
-| Funciones `wma_*` | 245 |
-| Cubiertas (match exacto) | 191 |
-| **Gap total** | **87** |
+| JNIEXPORT (entry points) | 279 |
+| Funciones `wma_*` | 252 |
+| Cubiertas (match exacto) | 193 |
+| **Gap total** | **86** |
 | — USB, no se porta (D4) | 32 |
-| — **Gap portable** | **55** |
-| — con near-match (revisar) | 36 |
+| — **Gap portable** | **54** |
+| — con near-match (revisar) | 37 |
 | — **neto a implementar** | **~19** |
 
 ### Gap portable por categoría
@@ -209,16 +209,24 @@ simplemente porque `SetRoutingMode` lleva `mode` en el nombre y `DrainCapturedLo
 entra por `log`. Es el mismo desparramo de keywords descrito abajo.
 
 > [!IMPORTANT]
-> **WA-2.5/2.6 está cerrada: el complemento es 49 y no queda nada sin clasificar.**
-> De los 289 entry points reales delegan **240**; los 49 restantes se reparten en cuatro
-> baldes, todos deliberados y todos con el porqué escrito en el código:
+> **WA-2.5/2.6 está cerrada: el complemento es 50 y no queda nada sin clasificar.**
+> Recontado a mano el **2026-07-27** sobre los cuatro archivos JNI (no sobre el script,
+> que lee uno solo): **292 `JNIEXPORT`**, de los que delegan **242**. Los 50 restantes:
 >
 > | No delega | Cuántos | Por qué |
 > |---|---|---|
-> | USB | 40 | D4 — USB es Android-only (37 en el bridge + 3 en `jni_usb.cpp`) |
+> | USB | 40 | D4 — USB es Android-only (36 en el bridge + 3 en `jni_usb.cpp` + `nativeGetAdaptiveBufferStats`, ver abajo) |
 > | `benchmark` | 5 | Oboe puro o stubs deprecados, en `jni_benchmark.cpp` |
 > | `LooperRegister/UnregisterStateListener` | 2 | maquinaria JNI de punta a punta; iOS necesita un callback propio, que es superficie nueva a diseñar |
 > | `CreateSplitBackend`, `FallbackToOboeBackend` | 2 | compilan en iOS pero **todo camino suyo requiere el backend USB** — ver abajo |
+> | `JNI_OnLoad` / `JNI_OnUnload` | 1 | **no son entry points de Java**: son hooks de la VM en `jni_engine.cpp`. Los cuenta el `grep JNIEXPORT` y no deberían estar en el denominador |
+>
+> [!CAUTION]
+> **`nativeGetAdaptiveBufferStats` devuelve diez ceros, siempre** (`jni_audio_bridge.cpp:1715`).
+> Declara `jfloat stats[10] = {0}`, nunca lo llena, y devuelve eso. Está gateada por
+> `getLibusbBackend()`, así que cae en el balde USB por dependencia — pero no es "no porta",
+> es **un stub que reporta datos falsos**. Misma familia que `setDepthValue`. Ver la lista del
+> smoke en `kmp_requirements.md` §16.
 >
 > Los dos de backend eran los que la cola dejó "a revisar". **No portan, y no por falta
 > de cuerpo portable:** `resolveBackendForSplit()` sólo resuelve dos endpoints, OBOE (el

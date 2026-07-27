@@ -117,7 +117,7 @@ internal class ModeTransitionManagerImpl(
             // Phase 1: Prepare
             updateProgress(fromMode, mode, TransitionPhase.PREPARING)
             send(TransitionPhase.PREPARING.progress)
-            prepareTransition(fromMode, mode)
+            prepareTransition()
 
             // Phase 2: Fade out
             updateProgress(fromMode, mode, TransitionPhase.FADING_OUT)
@@ -180,15 +180,20 @@ internal class ModeTransitionManagerImpl(
     // =========================================================================
 
     /**
-     * Prepares for mode transition.
-     * @param fromMode Current mode (reserved for future permission checks)
-     * @param toMode Target mode (reserved for future resource preloading)
+     * Deja que el estado de UI se propague antes de arrancar la transición.
+     *
+     * Tenía dos parámetros (`fromMode`, `toMode`) que no leía, con un
+     * `@Suppress("UNUSED_PARAMETER")` y el comentario "reserved for future use".
+     * Se fueron en la limpieza del 2026-07-27: es privada y su único llamador está
+     * doce líneas más arriba, así que agregarlos de vuelta el día que hagan falta
+     * cuesta lo mismo que hoy — y mientras tanto la firma decía algo que no era.
+     *
+     * Lo que sí valía la pena conservar es la intención: cuando esto crezca, acá van
+     * la validación de permisos según `toMode.requiresInput` y la precarga de
+     * recursos del modo destino.
      */
-    @Suppress("UNUSED_PARAMETER") // Parameters reserved for future use
-    private suspend fun prepareTransition(fromMode: AudioMode, toMode: AudioMode) {
-        // Future: Validate permissions based on toMode.requiresInput
-        // Future: Preload resources needed by toMode
-        delay(50) // Allow UI state to propagate
+    private suspend fun prepareTransition() {
+        delay(50)
     }
 
     /**
