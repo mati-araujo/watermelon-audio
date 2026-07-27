@@ -7,6 +7,7 @@ import com.watermellonstudios.audio.api.NativeEffectSnapshot
 import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
+import com.watermellonstudios.audio.domain.input.InputMetering
 import com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
 import cnames.structs.WmaEngine
 import com.watermellonstudios.audio.internal.cinterop.*
@@ -16,6 +17,8 @@ import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.FloatVar
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.alloc
+import kotlinx.cinterop.allocArray
+import kotlinx.cinterop.get
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.usePinned
@@ -335,6 +338,71 @@ internal class IosAudioBridge : IAudioNativeBridge {
 
     override fun getAudioMode(): Int = wma_get_audio_mode(engine)
     override fun isInModeTransition(): Boolean = wma_is_in_mode_transition(engine)
+
+    // ==================== INPUT (sección 12) ====================
+    //
+    // El primer usuario real de `wma_input_*` desde Kotlin en iOS. Hasta acá el
+    // bloque existía en la C API y en el JNI, y este lado estaba vacío: el
+    // camino de captura de `CoreAudioBackend` se escribió a ciegas y nada lo
+    // había tocado desde arriba.
+    //
+    // Todas son wrappers de una línea a propósito. La composición —qué
+    // significa "el medidor", cuándo re-preguntar, qué hacer si no hay nodo—
+    // vive en commonMain, que es donde sirve para las dos plataformas.
+
+    override fun startInputStreamSync(): Boolean = wma_input_start(engine)
+    override fun stopInputStreamSync() = wma_input_stop(engine)
+    override fun isInputStreamRunning(): Boolean = wma_input_is_running(engine)
+
+    override fun setInputSourceSync(source: Int) = wma_input_set_source(engine, source)
+    override fun getInputSource(): Int = wma_input_get_source(engine)
+
+    override fun setInputGain(gainDb: Float) = wma_input_set_gain(engine, gainDb)
+    override fun getInputGain(): Float = wma_input_get_gain(engine)
+
+    override fun setNoiseGateEnabled(enabled: Boolean) =
+        wma_input_set_noise_gate(engine, enabled)
+
+    override fun isNoiseGateEnabled(): Boolean = wma_input_is_noise_gate_enabled(engine)
+
+    override fun setNoiseGateThreshold(thresholdDb: Float) =
+        wma_input_set_noise_gate_threshold(engine, thresholdDb)
+
+    override fun isNoiseGateOpen(): Boolean = wma_input_is_noise_gate_open(engine)
+
+    override fun getInputLevel(channel: Int): Float = wma_input_get_level(engine, channel)
+
+    override fun getInputLevelLinear(channel: Int): Float =
+        wma_input_get_level_linear(engine, channel)
+
+    override fun isInputClipping(): Boolean = wma_input_is_clipping(engine)
+    override fun getInputLatencyMs(): Float = wma_input_get_latency_ms(engine)
+
+    /**
+     * @return null si no hay nodo de entrada, que es **distinto** de "todo en
+     *   cero". `wma_input_get_metering_snapshot` deja el buffer intacto cuando
+     *   falla, justamente para que nadie lea ceros como una medición; devolver
+     *   null preserva esa distinción hasta arriba de todo.
+     */
+    override fun getInputMeteringSnapshot(): FloatArray? = memScoped {
+        val values = allocArray<FloatVar>(InputMetering.VALUE_COUNT)
+        if (!wma_input_get_metering_snapshot(engine, values)) {
+            return@memScoped null
+        }
+        FloatArray(InputMetering.VALUE_COUNT) { values[it] }
+    }
+
+    override fun setMonitoringEnabledSync(enabled: Boolean) =
+        wma_input_set_monitoring(engine, enabled)
+
+    override fun isMonitoringEnabled(): Boolean = wma_input_is_monitoring_enabled(engine)
+
+    override fun setMonitoringVolume(volume: Float) =
+        wma_input_set_monitoring_volume(engine, volume.coerceIn(0f, 1f))
+
+    override fun getMonitoringVolume(): Float = wma_input_get_monitoring_volume(engine)
+
+    override fun releaseInputNodeSync() = wma_input_release(engine)
 
     // ==================== BACKEND ====================
 

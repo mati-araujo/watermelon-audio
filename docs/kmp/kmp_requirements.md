@@ -2166,10 +2166,70 @@ necesita una persona.
 abre un stream de CoreAudio y volvería flaky el test—. Así que *nada* ha ejecutado todavía
 `start()` en iOS. Eso es el control 1, y ahora hay dónde apretarlo.
 
-**Lo que sigue:** los siete controles, empezando por el **monitor de entrada**, que es el que
-justifica todo. El permiso de Android (`RECORD_AUDIO`) ya está en el manifest desde el primer
-commit por la misma razón que la clave del micrófono en iOS: el caso que más importa probar es
-el del permiso **negado**, y agregarlo después obligaría a reinstalar para reproducirlo.
+#### Control 1 de 7 — monitor de entrada, y lo que hizo falta antes
+
+> [!IMPORTANT]
+> **El control no se podía escribir: el camino de entrada no llegaba a `commonMain`.**
+> `AudioEngine` no tiene un solo método de input y `IAudioNativeBridge` tampoco tenía ninguno.
+> La superficie existía **entera** en la C API (§12, 21 funciones) y **entera** en
+> `AudioNativeBridge` (Android, 21/21 delegando desde WA-2.6) — y el medio estaba vacío. iOS no
+> tenía forma de tocar la entrada desde Kotlin **aunque `CoreAudioBackend` capture desde la
+> etapa 2 del input path**. Estaba anotado como "ticket aparte"; resultó ser el camino crítico.
+
+Lo que se agregó, de abajo hacia arriba:
+
+1. **`IInputBridge`** — §12 como contrato propio, y `IAudioNativeBridge` pasa a extenderlo.
+   Es el mismo patrón que ya tenían `IEffectStateProvider` / `IEffectStateWriter`, y no es
+   cosmético: con los 21 métodos adentro de una interfaz de más de cien, escribir un fake para
+   testear la lógica de entrada obliga a implementar los cien. **Esa fricción es por la que la
+   lógica se queda sin test.** Partida, el fake son 21 métodos y el archivo de tests existe.
+2. **`IosAudioBridge`** implementa los 21 sobre cinterop — **el primer usuario real de
+   `wma_input_*` desde Kotlin en iOS**. Android sólo necesitó `override` en 21 firmas, porque
+   los nombres se eligieron para eso.
+3. **`InputSource` / `InputMetering`** en el dominio. El snapshot de 7 valores es un tipo y no
+   siete getters porque leídos de a uno **no son coherentes entre sí**: el thread de audio
+   corre entre lectura y lectura, así que un medidor podría mostrar el pico de un bloque y el
+   flag de clipping de otro. Aparte de eso, un cruce de frontera por frame en vez de siete.
+4. **`AudioInput` + `AudioInputFactory`** — la puerta pública, espejando `IEffectManager` /
+   `EffectManagerFactory`.
+
+> [!CAUTION]
+> **"No hay medición" y "medición en cero" no son lo mismo, y la mitad de los tests nuevos
+> existen para que esa distinción no se pierda.** La C API deja el buffer intacto cuando no hay
+> nodo de entrada —con un comentario que dice por qué: para que nadie lea ceros como si alguien
+> los hubiera medido—. Si esa intención se aplana en cualquiera de las capas de arriba, el
+> síntoma es **un medidor plano y convincente**: exactamente el modo de falla más caro para un
+> harness cuyo trabajo es contestar "¿esto captura?". Por eso `metering()` devuelve `null`, el
+> flujo **no emite** mientras no haya nada que medir, y la barra dibuja el "no sé" con otro
+> color que el silencio.
+
+**`setNoiseGateThresholdDb` es función y no propiedad** porque **no se puede leer**: no hay
+getter en ninguna capa, ni en la C API. Un `var` tendría que inventar el valor de vuelta o
+cachear el último escrito y mentir en cuanto algo más lo cambie.
+
+**Verificación — 14 tests nuevos (101 en el simulador, 64 en JVM).** 4 mutantes, 4 detectados:
+rellenar el snapshot corto con ceros, leer los flags como `== 1f` en vez de `!= 0f` (un backend
+que escriba `2.0` apagaría el indicador de clipping justo cuando importa), devolver `SILENT` en
+vez de `null`, y sacar el clamp del volumen de monitoreo.
+
+**El medidor es de nivel y no un booleano a propósito.** "El stream arrancó" y "está entrando
+señal" son dos afirmaciones distintas, y la primera se cumple perfectamente con silencio: un
+indicador de encendido habría dado verde durante todo el desarrollo del input path sin probar
+nada. Lo que prueba algo es una barra que se mueve cuando hablás. Y va escalada **en dB**,
+porque en lineal todo lo que uno mide hablándole a un teléfono queda apretado contra el cero —
+indistinguible de "no captura", que es justo lo que hay que distinguir.
+
+**Sigue sin apretarse.** El control está en pantalla en el simulador; tocar "capturar" necesita
+el panel (el fix con `sudo` de arriba) o una persona. **La barra moviéndose es la respuesta que
+falta**, y ahora hay dónde leerla.
+
+**Faltan los 6 controles restantes:** pad XY + depth, rack de efectos + routing, tira de looper,
+metrónomo y panel de diagnóstico con la vista de logs — que además necesita subir
+`wma_log_capture_*` al bridge, igual que se hizo acá con §12.
+
+El permiso de Android (`RECORD_AUDIO`) ya está en el manifest desde el primer commit por la
+misma razón que la clave del micrófono en iOS: el caso que más importa probar es el del permiso
+**negado**, y agregarlo después obligaría a reinstalar para reproducirlo.
 
 
 ### Dónde retomar (2026-07-27)

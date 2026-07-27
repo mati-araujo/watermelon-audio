@@ -11,7 +11,7 @@ package com.watermellonstudios.audio.api
  *
  * Android implementation: [com.watermellonstudios.audio.internal.bridge.AudioNativeBridge]
  */
-interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter {
+interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter, IInputBridge {
 
     // ==================== LIFECYCLE ====================
 

@@ -1441,7 +1441,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Start input stream synchronously (for legacy callers).
      * @return true if started successfully
      */
-    fun startInputStreamSync(): Boolean = nativeStartInputStream()
+    override fun startInputStreamSync(): Boolean = nativeStartInputStream()
 
     /**
      * Stop input stream.
@@ -1455,12 +1455,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Stop input stream synchronously (for legacy callers).
      */
-    fun stopInputStreamSync() = nativeStopInputStream()
+    override fun stopInputStreamSync() = nativeStopInputStream()
 
     /**
      * Check if input stream is running.
      */
-    fun isInputStreamRunning(): Boolean = nativeIsInputStreamRunning()
+    override fun isInputStreamRunning(): Boolean = nativeIsInputStreamRunning()
 
     /**
      * Set input source.
@@ -1473,17 +1473,17 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Set input source synchronously (for legacy callers).
      */
-    fun setInputSourceSync(source: Int) = nativeSetInputSource(source)
+    override fun setInputSourceSync(source: Int) = nativeSetInputSource(source)
 
     /**
      * Get current input source.
      */
-    fun getInputSource(): Int = nativeGetInputSource()
+    override fun getInputSource(): Int = nativeGetInputSource()
 
     /**
      * Set input gain in dB.
      */
-    fun setInputGain(gainDb: Float) {
+    override fun setInputGain(gainDb: Float) {
         if (!gainDb.isFinite()) return
         nativeSetInputGain(gainDb)
     }
@@ -1491,22 +1491,22 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Get current input gain.
      */
-    fun getInputGain(): Float = nativeGetInputGain()
+    override fun getInputGain(): Float = nativeGetInputGain()
 
     /**
      * Set noise gate enabled.
      */
-    fun setNoiseGateEnabled(enabled: Boolean) = nativeSetNoiseGateEnabled(enabled)
+    override fun setNoiseGateEnabled(enabled: Boolean) = nativeSetNoiseGateEnabled(enabled)
 
     /**
      * Check if noise gate is enabled.
      */
-    fun isNoiseGateEnabled(): Boolean = nativeIsNoiseGateEnabled()
+    override fun isNoiseGateEnabled(): Boolean = nativeIsNoiseGateEnabled()
 
     /**
      * Set noise gate threshold in dB.
      */
-    fun setNoiseGateThreshold(thresholdDb: Float) {
+    override fun setNoiseGateThreshold(thresholdDb: Float) {
         if (!thresholdDb.isFinite()) return
         nativeSetNoiseGateThreshold(thresholdDb)
     }
@@ -1514,27 +1514,27 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Get input level in dB for a channel.
      */
-    fun getInputLevel(channel: Int): Float = nativeGetInputLevel(channel)
+    override fun getInputLevel(channel: Int): Float = nativeGetInputLevel(channel)
 
     /**
      * Get input level (linear) for a channel.
      */
-    fun getInputLevelLinear(channel: Int): Float = nativeGetInputLevelLinear(channel)
+    override fun getInputLevelLinear(channel: Int): Float = nativeGetInputLevelLinear(channel)
 
     /**
      * Check if input is clipping.
      */
-    fun isInputClipping(): Boolean = nativeIsInputClipping()
+    override fun isInputClipping(): Boolean = nativeIsInputClipping()
 
     /**
      * Check if noise gate is open.
      */
-    fun isNoiseGateOpen(): Boolean = nativeIsNoiseGateOpen()
+    override fun isNoiseGateOpen(): Boolean = nativeIsNoiseGateOpen()
 
     /**
      * Get input latency in milliseconds.
      */
-    fun getInputLatencyMs(): Float = nativeGetInputLatencyMs()
+    override fun getInputLatencyMs(): Float = nativeGetInputLatencyMs()
 
     /**
      * Batched input metering snapshot in a single JNI crossing. Returns 7
@@ -1545,7 +1545,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Layout: [0]=levelDb ch0, [1]=levelDb ch1, [2]=levelLinear ch0,
      * [3]=levelLinear ch1, [4]=clipping(1/0), [5]=noiseGateOpen(1/0), [6]=latencyMs.
      */
-    fun getInputMeteringSnapshot(): FloatArray? = nativeGetInputMeteringSnapshot()
+    override fun getInputMeteringSnapshot(): FloatArray? = nativeGetInputMeteringSnapshot()
 
     /**
      * Release input node resources.
@@ -1558,7 +1558,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Release input node resources synchronously (for legacy callers).
      */
-    fun releaseInputNodeSync() = nativeReleaseInputNode()
+    override fun releaseInputNodeSync() = nativeReleaseInputNode()
 
     // ==================== Monitoring Operations ====================
 
@@ -1574,17 +1574,17 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Enable/disable monitoring synchronously (for legacy callers).
      */
-    fun setMonitoringEnabledSync(enabled: Boolean) = nativeSetMonitoringEnabled(enabled)
+    override fun setMonitoringEnabledSync(enabled: Boolean) = nativeSetMonitoringEnabled(enabled)
 
     /**
      * Check if monitoring is enabled.
      */
-    fun isMonitoringEnabled(): Boolean = nativeIsMonitoringEnabled()
+    override fun isMonitoringEnabled(): Boolean = nativeIsMonitoringEnabled()
 
     /**
      * Set monitoring volume.
      */
-    fun setMonitoringVolume(volume: Float) {
+    override fun setMonitoringVolume(volume: Float) {
         if (!volume.isFinite()) return
         nativeSetMonitoringVolume(volume.coerceIn(0f, 1f))
     }
@@ -1592,7 +1592,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Get monitoring volume.
      */
-    fun getMonitoringVolume(): Float = nativeGetMonitoringVolume()
+    override fun getMonitoringVolume(): Float = nativeGetMonitoringVolume()
 
     // ==================== Dual Touch Operations ====================
 

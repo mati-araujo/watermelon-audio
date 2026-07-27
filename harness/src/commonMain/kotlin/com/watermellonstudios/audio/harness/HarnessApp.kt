@@ -78,6 +78,11 @@ fun HarnessApp() {
                     Button(onClick = { scope.launch { engine.pause() } }) { Text("pause") }
                     Button(onClick = { scope.launch { engine.resume() } }) { Text("resume") }
                 }
+
+                // Control 1 de 7 — el que justifica el proyecto. Va primero
+                // porque es la unica pregunta abierta que no puede contestar
+                // ningun test: si el input path de iOS captura de verdad.
+                InputMonitorControl()
             }
         }
     }

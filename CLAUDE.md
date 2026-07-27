@@ -12,7 +12,9 @@ Motor de sintesis en tiempo real con efectos DSP profesionales. C++20 + Oboe + K
 audio/src/
   commonMain/kotlin/    67 files — pure Kotlin, zero Android deps
     api/                AudioEngine interface, IAudioNativeBridge, IEffectManager,
-                        factories (AudioEngine, EffectManager, StateSynchronizer)
+                        IInputBridge + AudioInput (camino de entrada, WA-5.5),
+                        factories (AudioEngine, EffectManager, AudioInput,
+                        StateSynchronizer)
     domain/             Effect types, oscillators, scales, modes, USB types, errors
     callback/           AudioLogger, AudioAnalyticsListener (dependency inversion)
     internal/           AudioEngineImpl, EffectManagerImpl, StateSynchronizer,
@@ -21,6 +23,7 @@ audio/src/
                         expect: AudioBridgeProvider, NativeLibraryLoader,
                                 currentDeviceCapabilities
     domain/device/      DeviceCapabilities (interfaz de hechos) + Snapshot
+    domain/input/       InputSource + InputMetering (snapshot de 7 valores)
   androidMain/kotlin/   23 files — JNI bridge, USB, platform-specific
     internal/bridge/    AudioNativeBridge (3,352 LOC, 289 external funs)
     internal/usb/       USB audio driver (DataStore, BroadcastReceiver)
@@ -129,6 +132,7 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
 bash scripts/run-cpp-tests.sh              # Suite C++ de host (749 tests, googletest)
+                                           # Kotlin: 101 iOS sim / 64 JVM
 bash scripts/check-cpp-portability.sh      # Guardrail WA-0.4 (jni.h / android/)
 bash scripts/build-harness.sh              # :harness: Android + framework iOS +
                                            # símbolos + shell de Xcode + ARRANQUE
