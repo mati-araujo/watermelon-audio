@@ -2738,7 +2738,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * BPM/beats-per-bar/sample rate. Returns the actual loop length in frames,
      * or -1 if preparation failed (memory budget, invalid bars, transport not ready).
      */
-    fun looperPrepareTrackBars(trackIndex: Int, bars: Int, sampleRate: Int): Int =
+    override fun looperPrepareTrackBars(trackIndex: Int, bars: Int, sampleRate: Int): Int =
         nativeLooperPrepareTrackBars(trackIndex, bars, sampleRate)
 
     /**
@@ -2746,7 +2746,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Used to keep multi-track recordings phase-aligned. Returns the absolute
      * trigger frame (Transport playFrame), or -1 on failure.
      */
-    fun looperArmAtNextBar(trackIndex: Int): Long = nativeLooperArmAtNextBar(trackIndex)
+    override fun looperArmAtNextBar(trackIndex: Int): Long = nativeLooperArmAtNextBar(trackIndex)
 
     /**
      * Arm a track to start recording `offsetFrames` after the current Transport
@@ -2810,8 +2810,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun looperStartRecordingWithPreRoll(trackIndex: Int, preRollMs: Int) =
         nativeLooperStartRecordingWithPreRoll(trackIndex, preRollMs)
 
-    fun looperStartRecording(trackIndex: Int) = nativeLooperStartRecording(trackIndex)
-    fun looperStopRecording() = nativeLooperStopRecording()
+    override fun looperStartRecording(trackIndex: Int) = nativeLooperStartRecording(trackIndex)
+    override fun looperStopRecording() = nativeLooperStopRecording()
 
     /**
      * Abort the in-progress recording WITHOUT committing it.
@@ -2824,14 +2824,14 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun looperAbortRecording() = nativeLooperAbortRecording()
 
     fun looperStartOverdub(trackIndex: Int) = nativeLooperStartOverdub(trackIndex)
-    fun looperStopAll() = nativeLooperStopAll()
+    override fun looperStopAll() = nativeLooperStopAll()
     fun looperPause() = nativeLooperPause()
     fun looperResume() = nativeLooperResume()
     /** Target sample rate for subsequent WAV/stems exports (0 = engine rate). */
     fun looperSetExportSampleRate(sampleRate: Int) = nativeLooperSetExportSampleRate(sampleRate)
     fun looperSetFreeLength(freeLength: Boolean) = nativeLooperSetFreeLength(freeLength)
     fun looperClearTrack(trackIndex: Int) = nativeLooperClearTrack(trackIndex)
-    fun looperClearAll() = nativeLooperClearAll()
+    override fun looperClearAll() = nativeLooperClearAll()
 
     /**
      * Trim a track's buffer down to its recorded length, freeing unused capacity.
@@ -2855,9 +2855,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         level = DeprecationLevel.WARNING,
     )
     fun looperGetTrackPeakLevel(trackIndex: Int): Float = nativeLooperGetTrackPeakLevel(trackIndex)
-    fun looperIsTrackActive(trackIndex: Int): Boolean = nativeLooperIsTrackActive(trackIndex)
-    fun looperIsPlaying(): Boolean = nativeLooperIsPlaying()
-    fun looperIsRecording(): Boolean = nativeLooperIsRecording()
+    override fun looperIsTrackActive(trackIndex: Int): Boolean = nativeLooperIsTrackActive(trackIndex)
+    override fun looperIsPlaying(): Boolean = nativeLooperIsPlaying()
+    override fun looperIsRecording(): Boolean = nativeLooperIsRecording()
     fun looperGetMasterLoopFrames(): Int = nativeLooperGetMasterLoopFrames()
     fun looperGetRecordProgress(): Float = nativeLooperGetRecordProgress()
 
@@ -2870,7 +2870,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         "Will be removed in WP-1.",
         level = DeprecationLevel.WARNING,
     )
-    fun looperIsTrackPlaying(trackIndex: Int): Boolean = nativeLooperIsTrackPlaying(trackIndex)
+    override fun looperIsTrackPlaying(trackIndex: Int): Boolean = nativeLooperIsTrackPlaying(trackIndex)
     @Deprecated(
         "Polling per-track progress at 30 fps is the main lag source (audit COR-1). " +
         "Use setLooperStateListener() and react to onTrackProgress. " +
@@ -3020,30 +3020,30 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     //   val frames = transportFramesPerBar(2)  // 2-bar loop
     //   looperPrepareTrack(idx, frames, sr)
 
-    fun transportSetBeatsPerBar(beatsPerBar: Int) =
+    override fun transportSetBeatsPerBar(beatsPerBar: Int) =
         nativeTransportSetBeatsPerBar(beatsPerBar)
-    fun transportGetBeatsPerBar(): Int = nativeTransportGetBeatsPerBar()
-    fun transportFramesPerBeat(): Int = nativeTransportFramesPerBeat()
-    fun transportFramesPerBar(bars: Int): Int = nativeTransportFramesPerBar(bars)
-    fun transportStartMetronome(
+    override fun transportGetBeatsPerBar(): Int = nativeTransportGetBeatsPerBar()
+    override fun transportFramesPerBeat(): Int = nativeTransportFramesPerBeat()
+    override fun transportFramesPerBar(bars: Int): Int = nativeTransportFramesPerBar(bars)
+    override fun transportStartMetronome(
         beats: Int,
-        firstIsDownbeat: Boolean = true,
-        everyBeatPattern: Boolean = true
+        firstIsDownbeat: Boolean,
+        everyBeatPattern: Boolean
     ) = nativeTransportStartMetronome(beats, firstIsDownbeat, everyBeatPattern)
     /**
      * Run the metronome continuously (as an in-take reference click) until
      * [transportStopMetronome] is called. NoisyPad wires this to a user-facing
      * "metronome during recording" toggle.
      */
-    fun transportStartMetronomeContinuous(everyBeatPattern: Boolean = true) =
+    override fun transportStartMetronomeContinuous(everyBeatPattern: Boolean) =
         nativeTransportStartMetronomeContinuous(everyBeatPattern)
-    fun transportStopMetronome() = nativeTransportStopMetronome()
-    fun transportIsMetronomeRunning(): Boolean = nativeTransportIsMetronomeRunning()
-    fun transportIsMetronomeContinuous(): Boolean = nativeTransportIsMetronomeContinuous()
-    fun transportGetRemainingBeats(): Int = nativeTransportGetRemainingBeats()
+    override fun transportStopMetronome() = nativeTransportStopMetronome()
+    override fun transportIsMetronomeRunning(): Boolean = nativeTransportIsMetronomeRunning()
+    override fun transportIsMetronomeContinuous(): Boolean = nativeTransportIsMetronomeContinuous()
+    override fun transportGetRemainingBeats(): Int = nativeTransportGetRemainingBeats()
 
     // Export / Import (call from IO thread)
-    fun looperExportMix(filePath: String): Boolean = nativeLooperExportMix(filePath)
+    override fun looperExportMix(filePath: String): Boolean = nativeLooperExportMix(filePath)
     fun looperExportTrack(trackIndex: Int, filePath: String): Boolean = nativeLooperExportTrack(trackIndex, filePath)
 
     /**

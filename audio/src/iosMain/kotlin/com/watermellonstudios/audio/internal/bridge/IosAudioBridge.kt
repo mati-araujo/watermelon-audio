@@ -618,6 +618,63 @@ internal class IosAudioBridge : IAudioNativeBridge {
             Result.failure(NativeBridgeException.fromCode(this, operation))
         }
 
+    // ==================== TRANSPORT (reloj musical + metrónomo) ====================
+    //
+    // Sin locks, igual que Android: del otro lado el scheduler es RT-safe y el
+    // estado que se lee son atomics. Un mutex acá sólo agregaría costo.
+
+    override fun transportSetBeatsPerBar(beatsPerBar: Int) =
+        wma_transport_set_beats_per_bar(engine, beatsPerBar)
+
+    override fun transportGetBeatsPerBar(): Int = wma_transport_get_beats_per_bar(engine)
+    override fun transportFramesPerBeat(): Int = wma_transport_frames_per_beat(engine)
+    override fun transportFramesPerBar(bars: Int): Int = wma_transport_frames_per_bar(engine, bars)
+
+    override fun transportStartMetronome(
+        beats: Int,
+        firstIsDownbeat: Boolean,
+        everyBeatPattern: Boolean,
+    ) = wma_transport_start_metronome(engine, beats, firstIsDownbeat, everyBeatPattern)
+
+    override fun transportStartMetronomeContinuous(everyBeatPattern: Boolean) =
+        wma_transport_start_metronome_continuous(engine, everyBeatPattern)
+
+    override fun transportStopMetronome() = wma_transport_stop_metronome(engine)
+    override fun transportIsMetronomeRunning(): Boolean = wma_transport_is_metronome_running(engine)
+    override fun transportIsMetronomeContinuous(): Boolean =
+        wma_transport_is_metronome_continuous(engine)
+
+    override fun transportGetRemainingBeats(): Int = wma_transport_get_remaining_beats(engine)
+
+    // ==================== LOOPER (el subconjunto de la tira) ====================
+    //
+    // Primer código de looper que existe en iOS. Las 79 del JNI no se suben en
+    // bloque: estas 11 tienen caller (la tira del harness) y las otras no todavía.
+
+    override fun looperPrepareTrackBars(trackIndex: Int, bars: Int, sampleRate: Int): Int =
+        wma_looper_prepare_track_bars(engine, trackIndex, bars, sampleRate)
+
+    override fun looperArmAtNextBar(trackIndex: Int): Long =
+        wma_looper_arm_at_next_bar(engine, trackIndex)
+
+    override fun looperStartRecording(trackIndex: Int) =
+        wma_looper_start_recording(engine, trackIndex)
+
+    override fun looperStopRecording() = wma_looper_stop_recording(engine)
+    override fun looperStopAll() = wma_looper_stop_all(engine)
+    override fun looperClearAll() = wma_looper_clear_all(engine)
+    override fun looperIsRecording(): Boolean = wma_looper_is_recording(engine)
+    override fun looperIsPlaying(): Boolean = wma_looper_is_playing(engine)
+
+    override fun looperIsTrackActive(trackIndex: Int): Boolean =
+        wma_looper_is_track_active(engine, trackIndex)
+
+    override fun looperIsTrackPlaying(trackIndex: Int): Boolean =
+        wma_looper_is_track_playing(engine, trackIndex)
+
+    override fun looperExportMix(filePath: String): Boolean =
+        wma_looper_export_mix(engine, filePath)
+
     // ==================== LOG CAPTURE ====================
 
     override fun setLogCaptureEnabled(enabled: Boolean) = wma_log_capture_set_enabled(enabled)

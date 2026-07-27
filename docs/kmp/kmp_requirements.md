@@ -2528,6 +2528,42 @@ permisos de por medio. Y cada test se ganó el lugar — el mutante que ignora e
 (`set_enabled(true)` siempre) lo agarra **sólo** `disabledCaptureCollectsNothing`; los otros dos
 mutantes (drain vacío, enable no-op) los agarran los otros dos tests y ese no.
 
+
+### Los 7 controles, completos (2026-07-27)
+
+Con los controles **3** (rack de efectos + routing), **5** (tira de looper), **6** (metrónomo) y
+**7** (diagnóstico), WA-5.5 tiene sus siete. Todos corriendo en el simulador de iOS.
+
+**El looper subió 11 funciones, no 79.** El JNI tiene 79; a `commonMain` subieron las que la
+tira necesita: preparar en compases, armar, grabar, parar, limpiar, leer estado y exportar. Que
+sea un subconjunto es la misma regla del opt-in aplicada de nuevo — **algo entra porque un
+consumidor lo necesita**, y el consumidor de hoy es el harness. Subir las 79 "por completitud"
+sería fabricar superficie sin caller. Es también el **primer código de looper que existe en
+iOS**. El transporte subió 10 más, por el mismo criterio.
+
+> [!NOTE]
+> **Los defaults de `transportStartMetronome` se movieron a la interfaz.** La clase concreta de
+> Android los tenía (`firstIsDownbeat = true, everyBeatPattern = true`); un `override` no puede
+> repetirlos, así que dejarlos ahí habría roto en *fuente* a cualquier consumidor —NoisyPad—
+> que llamara `transportStartMetronome(4)`. Puestos en la declaración de la interfaz, los dos
+> tipos siguen compilando igual.
+
+**Lo que los controles encontraron apenas se los tocó**, todo en la primera corrida:
+
+| Control | Qué mostró |
+|---|---|
+| 7 · diagnóstico | **Ítem 10 reproducido en pantalla**: pedir `USB Direct` sin USB da `selectBackend() = true` y el motor queda en `Oboe (System)`. El control muestra pedido y realidad juntos, que es la única forma de verlo |
+| 7 · logs | `I/BackendManager: Backend selected: Oboe` — una línea de C++ cruzando el anillo, cinterop y Compose. **Items 2 y 3 probados en la app, no sólo en tests** |
+| 5 · looper | `prepareTrackBars(0, 2000000) = -1` (ítem 8) · `exportMix(ruta imposible) = false` sin tirar (ítem 9) · `armAtNextBar(0) = 0` con su frame de disparo (ítem 7). **Tres arreglos de WA-2.6 verificados por primera vez desde iOS**, no sólo por la suite de host |
+| 6 · metrónomo | `frames/beat: 24000 · frames/bar: 96000` a 120 BPM / 48 kHz — el reloj que cuantiza los loops, cruzado contra el control 5 |
+| 7 · device caps | `IOS · API 26 · 16384 MB · 10 cores · low latency: true · gama baja: false`, de `NSProcessInfo` |
+
+**Lo que la tira de looper NO puede probar en este simulador**, y conviene decirlo: no reproduce
+ni exporta audio de verdad, porque para eso hace falta llenar una pista — y eso pasa por la
+captura, que está bloqueada por el cuelgue de `playAndRecord` de arriba. Lo que sí ejercita, y
+no dependía de nada de eso, es **el contrato de los valores de retorno**, que es exactamente
+donde estaban los tres bugs.
+
 El permiso de Android (`RECORD_AUDIO`) ya está en el manifest desde el primer commit por la
 misma razón que la clave del micrófono en iOS: el caso que más importa probar es el del permiso
 **negado**, y agregarlo después obligaría a reinstalar para reproducirlo.

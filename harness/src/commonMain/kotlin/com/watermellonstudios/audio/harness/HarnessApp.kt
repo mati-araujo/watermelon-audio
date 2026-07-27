@@ -86,6 +86,25 @@ fun HarnessApp() {
 
                 // Control 2 de 7 — el unico camino de tiempo real del programa.
                 XYPadControl(engine)
+
+                // Control 3 de 7 — rack de efectos. Mezcla API publica (efectos)
+                // con superficie de diagnostico (routing), que es exactamente lo
+                // que valida la decision del opt-in.
+                EffectRackControl(engine)
+
+                // Control 5 de 7 — tira de looper. Muestra los VALORES DEVUELTOS
+                // (arm, prepare, export), que es donde estaban los tres bugs de
+                // WA-2.6 que un boton de "listo" no habria visto nunca.
+                LooperStripControl()
+
+                // Control 6 de 7 — metronomo. Existe sobre todo por el item 5 del
+                // smoke: el off-by-one del click es el unico cambio de WA-2.6 que
+                // altera algo que ya sonaba bien, y eso hay que escucharlo.
+                MetronomeControl()
+
+                // Control 7 de 7 — diagnostico. Primer usuario real de
+                // @InternalWatermelonApi y de la captura de logs.
+                DiagnosticsControl()
             }
         }
     }
