@@ -905,6 +905,77 @@ WMA_API int wma_looper_get_track_loop_end(const WmaEngine* engine, int track_ind
 /** Trigger a metronome click (downbeat vs subdivision). */
 WMA_API void wma_looper_trigger_click(WmaEngine* engine, bool is_downbeat);
 
+/* ---------------- Armed recording ----------------
+ *
+ * These are not thin wrappers over AudioLooper: they read the Transport play
+ * position and hand it to the looper in one go. That composition used to live in
+ * the JNI, and it matters where it happens — reading the anchor here means the
+ * trigger frame is sampled atomically on the calling thread, so UI-thread jitter
+ * between "what time is it" and "arm at that time" cannot leak into the trigger.
+ */
+
+/**
+ * Arm @p track_index to start recording at the next bar boundary.
+ * @return the absolute trigger frame (>= 0), or -1 if nothing was armed.
+ */
+WMA_API int64_t wma_looper_arm_at_next_bar(WmaEngine* engine, int track_index);
+
+/**
+ * Arm @p track_index to start recording `offset_frames` after the current
+ * Transport position. This is the latency-compensated entry point: pass
+ * (count_in_frames + round_trip_latency_frames) so capture begins exactly that
+ * far ahead, putting the player's first downbeat at loop frame 0.
+ *
+ * A negative offset is treated as 0.
+ * @return the absolute trigger frame (>= 0), or -1 if nothing was armed.
+ */
+WMA_API int64_t wma_looper_arm_in_frames(WmaEngine* engine, int track_index,
+                                          int64_t offset_frames);
+
+/**
+ * Sync-armed overdub: phase-lock a new layer to the loop already playing. Arms
+ * at the reference track's next boundary plus `latency_frames`, and tags the
+ * take so finalizing cancels the round-trip latency.
+ *
+ * @return the trigger frame, or -1 if no reference track is playing — the
+ *         caller is expected to fall back to wma_looper_arm_in_frames().
+ */
+WMA_API int64_t wma_looper_arm_synced_to_loop(WmaEngine* engine, int track_index,
+                                              int64_t latency_frames);
+
+/**
+ * Quantized sync-arm: start at the next multiple of `quantum_frames` within the
+ * reference cycle instead of waiting out the rest of the loop, so a punch-in is
+ * not stuck behind three spare bars. The rotated start offset is cancelled when
+ * the take is finalized, so playback still phase-locks to the reference.
+ *
+ * `quantum_frames <= 0` behaves exactly like wma_looper_arm_synced_to_loop().
+ */
+WMA_API int64_t wma_looper_arm_synced_to_loop_quantized(WmaEngine* engine,
+                                                         int track_index,
+                                                         int64_t latency_frames,
+                                                         int quantum_frames);
+
+/** Cancel a pending armed recording. No-op if nothing is armed. */
+WMA_API void wma_looper_cancel_arm(WmaEngine* engine);
+
+/** Track index waiting on its trigger, or -1 if none. */
+WMA_API int wma_looper_get_armed_track(const WmaEngine* engine);
+
+/* ---------------- Telemetry (lock-free counters) ---------------- */
+
+/** How many armed recordings have fired since the last reset. */
+WMA_API int64_t wma_looper_get_armed_triggered(const WmaEngine* engine);
+
+/** Frames the looper had to drop rather than block the audio thread. */
+WMA_API int64_t wma_looper_get_frames_dropped(const WmaEngine* engine);
+
+/** State-change events dropped because the dispatcher queue was full. */
+WMA_API int64_t wma_looper_get_dropped_events(const WmaEngine* engine);
+
+/** Zero every telemetry counter above. */
+WMA_API void wma_looper_reset_telemetry(WmaEngine* engine);
+
 /**
  * Export looper mix to a WAV file. NOT RT-safe.
  * @param file_path  Absolute path for the output WAV file

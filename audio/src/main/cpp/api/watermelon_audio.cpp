@@ -1505,6 +1505,99 @@ void wma_looper_trigger_click(WmaEngine* engine, bool is_downbeat) {
     engine->engine->getAudioLooper().triggerClick(is_downbeat);
 }
 
+/* ---------------- Armed recording ---------------- */
+
+namespace {
+
+/**
+ * Arm @p track at @p trigger and report whether it took.
+ *
+ * AudioLooper::armRecording is void and no-ops on a bad index or a track with no
+ * capacity, so the JNI versions of arm_at_next_bar / arm_in_frames returned a
+ * positive trigger frame for a recording that was never armed — while their own
+ * doc comment promised "-1 on failure". A caller showing a count-in would count
+ * down to nothing. Reading the armed track back is how we keep the promise.
+ */
+int64_t armAndConfirm(WmaEngine* engine, int track, int64_t trigger) {
+    // `track >= 0` is not redundant with the comparison below: getArmedTrack()
+    // reports -1 for "nothing armed", so arming track -1 would confirm itself.
+    // A test caught exactly that.
+    if (track < 0) return -1;
+    auto& looper = engine->engine->getAudioLooper();
+    looper.armRecording(track, trigger);
+    return looper.getArmedTrack() == track ? trigger : -1;
+}
+
+}  // namespace
+
+int64_t wma_looper_arm_at_next_bar(WmaEngine* engine, int track_index) {
+    WMA_CHECK_VAL(engine, -1);
+    auto& transport = engine->engine->getTransport();
+    const int64_t trigger = transport.nextBarBoundary(transport.getPlayFrame());
+    return armAndConfirm(engine, track_index, trigger);
+}
+
+int64_t wma_looper_arm_in_frames(WmaEngine* engine, int track_index,
+                                  int64_t offset_frames) {
+    WMA_CHECK_VAL(engine, -1);
+    if (offset_frames < 0) offset_frames = 0;
+    const int64_t trigger = engine->engine->getTransport().getPlayFrame() + offset_frames;
+    return armAndConfirm(engine, track_index, trigger);
+}
+
+int64_t wma_looper_arm_synced_to_loop(WmaEngine* engine, int track_index,
+                                      int64_t latency_frames) {
+    return wma_looper_arm_synced_to_loop_quantized(engine, track_index, latency_frames, 0);
+}
+
+int64_t wma_looper_arm_synced_to_loop_quantized(WmaEngine* engine, int track_index,
+                                                 int64_t latency_frames,
+                                                 int quantum_frames) {
+    WMA_CHECK_VAL(engine, -1);
+    if (latency_frames < 0) latency_frames = 0;
+    // armSyncedToLoop takes latency as an int. The clamp above plus this cast
+    // mirror what the JNI did; a latency that overflowed an int would be hours,
+    // not a round trip.
+    const int64_t playFrame = engine->engine->getTransport().getPlayFrame();
+    return engine->engine->getAudioLooper().armSyncedToLoop(
+        track_index, playFrame, static_cast<int>(latency_frames), quantum_frames);
+}
+
+void wma_looper_cancel_arm(WmaEngine* engine) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().cancelArm();
+}
+
+int wma_looper_get_armed_track(const WmaEngine* engine) {
+    // -1, not 0: track 0 is a real track, so "none" needs its own value.
+    WMA_CHECK_VAL(engine, -1);
+    return engine->engine->getAudioLooper().getArmedTrack();
+}
+
+/* ---------------- Telemetry ---------------- */
+
+int64_t wma_looper_get_armed_triggered(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getArmedTriggered();
+}
+
+int64_t wma_looper_get_frames_dropped(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getFramesDropped();
+}
+
+int64_t wma_looper_get_dropped_events(const WmaEngine* engine) {
+    // The dispatcher, not the looper — this counter is about the event queue
+    // overflowing, not about audio.
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getLooperEventDispatcher().getDroppedEvents();
+}
+
+void wma_looper_reset_telemetry(WmaEngine* engine) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().resetTelemetry();
+}
+
 bool wma_looper_export_mix(WmaEngine* engine, const char* file_path) {
     WMA_CHECK_VAL(engine, false);
     if (!file_path) return false;

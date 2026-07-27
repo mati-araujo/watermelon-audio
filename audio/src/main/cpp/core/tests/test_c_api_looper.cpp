@@ -244,6 +244,162 @@ TEST_F(CApiLooperTest, TheWaveformHonoursTheBufferItWasGiven) {
 }
 
 // ===========================================================================
+// Armed recording — batch 2
+// ===========================================================================
+
+TEST_F(CApiLooperTest, NothingIsArmedToStartWith) {
+    startAt(kSampleRate, 0);
+    EXPECT_EQ(wma_looper_get_armed_track(mWma), -1);
+}
+
+TEST_F(CApiLooperTest, ArmingInFramesReportsTheTriggerAndArmsTheTrack) {
+    startAt(kSampleRate, 0);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 1, 8 * kBlockFrames, kSampleRate), WMA_OK);
+
+    const int64_t trigger = wma_looper_arm_in_frames(mWma, 1, 5000);
+    EXPECT_GE(trigger, 5000) << "the trigger is the play position plus the offset";
+    EXPECT_EQ(wma_looper_get_armed_track(mWma), 1);
+}
+
+TEST_F(CApiLooperTest, ANegativeOffsetIsTreatedAsNow) {
+    startAt(kSampleRate, 0);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 8 * kBlockFrames, kSampleRate), WMA_OK);
+
+    const int64_t trigger = wma_looper_arm_in_frames(mWma, 0, -1000);
+    EXPECT_GE(trigger, 0) << "a negative offset must not produce a trigger in the past";
+    EXPECT_EQ(wma_looper_get_armed_track(mWma), 0);
+}
+
+TEST_F(CApiLooperTest, ArmingAnUnpreparedTrackReportsFailureInsteadOfATrigger) {
+    startAt(kSampleRate, 0);
+
+    // THE behaviour change of this batch. AudioLooper::armRecording is void and
+    // no-ops on a track with no capacity, so the JNI happily returned a positive
+    // trigger frame for a recording that was never armed — while its own doc
+    // comment promised "-1 on failure". A UI counting down to that frame would
+    // count down to nothing at all.
+    EXPECT_EQ(wma_looper_arm_in_frames(mWma, 0, 5000), -1)
+        << "an unprepared track cannot be armed, and must say so";
+    EXPECT_EQ(wma_looper_arm_at_next_bar(mWma, 0), -1);
+    EXPECT_EQ(wma_looper_get_armed_track(mWma), -1);
+
+    // Out-of-range indices go the same way.
+    EXPECT_EQ(wma_looper_arm_in_frames(mWma, 99, 5000), -1);
+    EXPECT_EQ(wma_looper_arm_in_frames(mWma, -1, 5000), -1);
+}
+
+TEST_F(CApiLooperTest, ArmingAtTheNextBarLandsOnABarBoundary) {
+    startAt(kSampleRate, 0);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 8 * kBlockFrames, kSampleRate), WMA_OK);
+    wma_transport_set_beats_per_bar(mWma, 4);
+
+    const int64_t trigger = wma_looper_arm_at_next_bar(mWma, 0);
+    ASSERT_GE(trigger, 0);
+
+    // This is the composition the C API took over from the JNI: the Transport's
+    // bar grid decides the frame, the looper gets armed at it.
+    const int64_t framesPerBar = wma_transport_frames_per_bar(mWma, 1);
+    ASSERT_GT(framesPerBar, 0);
+    EXPECT_EQ(trigger % framesPerBar, 0) << "trigger " << trigger << " is not on a barline";
+}
+
+TEST_F(CApiLooperTest, TheArmedTriggerFiresAndTurnsIntoARecording) {
+    startAt(kSampleRate, 0);
+    wma_looper_set_enabled(mWma, true);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 64 * kBlockFrames, kSampleRate), WMA_OK);
+    wma_set_frequency_amplitude(mWma, 440.0f, 1.0f);
+
+    // Two blocks out, so it fires while we are still rendering.
+    ASSERT_GE(wma_looper_arm_in_frames(mWma, 0, 2 * kBlockFrames), 0);
+    ASSERT_EQ(wma_looper_get_armed_track(mWma), 0);
+    ASSERT_FALSE(wma_looper_is_recording(mWma));
+
+    render(6, kBlockFrames);
+
+    EXPECT_TRUE(wma_looper_is_recording(mWma)) << "the armed trigger never fired";
+    EXPECT_EQ(wma_looper_get_armed_track(mWma), -1) << "the arm should be consumed";
+    EXPECT_GE(wma_looper_get_armed_triggered(mWma), 1) << "telemetry did not count the fire";
+}
+
+TEST_F(CApiLooperTest, CancellingAnArmKeepsTheTriggerFromFiring) {
+    startAt(kSampleRate, 0);
+    wma_looper_set_enabled(mWma, true);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 64 * kBlockFrames, kSampleRate), WMA_OK);
+
+    ASSERT_GE(wma_looper_arm_in_frames(mWma, 0, 2 * kBlockFrames), 0);
+    wma_looper_cancel_arm(mWma);
+    EXPECT_EQ(wma_looper_get_armed_track(mWma), -1);
+
+    render(8, kBlockFrames);
+    EXPECT_FALSE(wma_looper_is_recording(mWma)) << "a cancelled arm still fired";
+}
+
+TEST_F(CApiLooperTest, SyncArmingWithNoReferenceLoopSaysSoRatherThanGuessing) {
+    startAt(kSampleRate, 0);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 8 * kBlockFrames, kSampleRate), WMA_OK);
+
+    // Documented contract: -1 when there is no reference track playing, so the
+    // caller can fall back to a plain latency-armed start.
+    EXPECT_EQ(wma_looper_arm_synced_to_loop(mWma, 0, 480), -1);
+    EXPECT_EQ(wma_looper_arm_synced_to_loop_quantized(mWma, 0, 480, 12000), -1);
+}
+
+TEST_F(CApiLooperTest, SyncArmingPhaseLocksToATrackThatIsPlaying) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/16);
+    ASSERT_TRUE(wma_looper_is_track_playing(mWma, 0));
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 1, 64 * kBlockFrames, kSampleRate), WMA_OK);
+
+    const int64_t trigger = wma_looper_arm_synced_to_loop(mWma, 1, 480);
+    EXPECT_GE(trigger, 0) << "track 0 is playing, so there is a reference to lock to";
+    EXPECT_EQ(wma_looper_get_armed_track(mWma), 1);
+}
+
+TEST_F(CApiLooperTest, ANegativeSyncLatencyIsTreatedAsZero) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/16);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 1, 64 * kBlockFrames, kSampleRate), WMA_OK);
+
+    const int64_t withNegative = wma_looper_arm_synced_to_loop(mWma, 1, -5000);
+    wma_looper_cancel_arm(mWma);
+    const int64_t withZero = wma_looper_arm_synced_to_loop(mWma, 1, 0);
+
+    EXPECT_EQ(withNegative, withZero);
+}
+
+// ===========================================================================
+// Telemetry — batch 2
+// ===========================================================================
+
+TEST_F(CApiLooperTest, TelemetryStartsAtZeroAndResets) {
+    startAt(kSampleRate, 0);
+    EXPECT_EQ(wma_looper_get_armed_triggered(mWma), 0);
+    EXPECT_EQ(wma_looper_get_frames_dropped(mWma), 0);
+    EXPECT_EQ(wma_looper_get_dropped_events(mWma), 0);
+
+    wma_looper_set_enabled(mWma, true);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 64 * kBlockFrames, kSampleRate), WMA_OK);
+    ASSERT_GE(wma_looper_arm_in_frames(mWma, 0, kBlockFrames), 0);
+    render(4, kBlockFrames);
+    ASSERT_GE(wma_looper_get_armed_triggered(mWma), 1);
+
+    wma_looper_reset_telemetry(mWma);
+    EXPECT_EQ(wma_looper_get_armed_triggered(mWma), 0) << "reset did not clear the counter";
+}
+
+TEST_F(CApiLooperTest, DroppedEventsComesFromTheDispatcherNotTheLooper) {
+    startAt(kSampleRate, 0);
+
+    // Two different objects behind one section of the API: this counter is about
+    // the event queue overflowing, not about audio. resetTelemetry() belongs to
+    // the looper and does NOT clear it — pinned here so nobody "tidies" that up
+    // into a single reset and quietly loses the distinction.
+    EXPECT_EQ(wma_looper_get_dropped_events(mWma), 0);
+    wma_looper_reset_telemetry(mWma);
+    EXPECT_EQ(wma_looper_get_dropped_events(mWma), 0);
+}
+
+// ===========================================================================
 // Null handle — every value the JNI used to return by hand
 // ===========================================================================
 //
@@ -284,6 +440,17 @@ TEST(CApiLooperNullHandle, EveryQueryReturnsTheValueTheJniUsedToReturnByHand) {
 
     float bins[4];
     EXPECT_EQ(wma_looper_get_track_waveform(nullptr, 0, bins, 4), 0);
+
+    // Batch 2. -1 for the arm calls and for the armed track, 0 for counters.
+    EXPECT_EQ(wma_looper_arm_at_next_bar(nullptr, 0), -1);
+    EXPECT_EQ(wma_looper_arm_in_frames(nullptr, 0, 1000), -1);
+    EXPECT_EQ(wma_looper_arm_synced_to_loop(nullptr, 0, 480), -1);
+    EXPECT_EQ(wma_looper_arm_synced_to_loop_quantized(nullptr, 0, 480, 1200), -1);
+    EXPECT_EQ(wma_looper_get_armed_track(nullptr), -1);
+
+    EXPECT_EQ(wma_looper_get_armed_triggered(nullptr), 0);
+    EXPECT_EQ(wma_looper_get_frames_dropped(nullptr), 0);
+    EXPECT_EQ(wma_looper_get_dropped_events(nullptr), 0);
 }
 
 TEST(CApiLooperNullHandle, ANullPathIsRefusedRatherThanDereferenced) {
@@ -316,6 +483,8 @@ TEST(CApiLooperNullHandle, EveryMutatorIsANoOpRatherThanACrash) {
     wma_looper_reset_track_loop_region(nullptr, 0);
     wma_looper_reset_track_playhead(nullptr, 0);
     wma_looper_trigger_click(nullptr, true);
+    wma_looper_cancel_arm(nullptr);
+    wma_looper_reset_telemetry(nullptr);
     SUCCEED();
 }
 

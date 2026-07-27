@@ -2353,9 +2353,11 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetInputPeak(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.inputNode) return 0.0f;
-    float l = g_jniState.inputNode->getInputLevelLinear(0);
-    float r = g_jniState.inputNode->getInputLevelLinear(1);
+    // Two existing C API calls plus the max, rather than a third way to ask
+    // the same question. The 'peak' here is a decision (loudest of L/R), not
+    // plumbing, and it is one line.
+    const float l = wma_input_get_level_linear(g_wmaEngine, 0);
+    const float r = wma_input_get_level_linear(g_wmaEngine, 1);
     return l > r ? l : r;
 }
 
@@ -2411,12 +2413,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperArmAtNextBar(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return -1;
-    auto& transport = g_jniState.engine->getTransport();
-    int64_t now = transport.getPlayFrame();
-    int64_t triggerFrame = transport.nextBarBoundary(now);
-    g_jniState.engine->getAudioLooper().armRecording(trackIndex, triggerFrame);
-    return triggerFrame;
+    return wma_looper_arm_at_next_bar(g_wmaEngine, trackIndex);
 }
 
 // Armed recording with an explicit frame offset from the current Transport play
@@ -2429,12 +2426,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperArmInFrames(
     JNIEnv* env, jobject thiz, jint trackIndex, jlong offsetFrames) {
-    if (!g_jniState.engine) return -1;
-    if (offsetFrames < 0) offsetFrames = 0;
-    auto& transport = g_jniState.engine->getTransport();
-    int64_t triggerFrame = transport.getPlayFrame() + offsetFrames;
-    g_jniState.engine->getAudioLooper().armRecording(trackIndex, triggerFrame);
-    return triggerFrame;
+    return wma_looper_arm_in_frames(g_wmaEngine, trackIndex, offsetFrames);
 }
 
 // Sync-armed overdub: phase-lock a new layer to the existing loop. Arms `track`
@@ -2445,11 +2437,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperArmSyncedToLoop(
     JNIEnv* env, jobject thiz, jint trackIndex, jlong latencyFrames) {
-    if (!g_jniState.engine) return -1;
-    if (latencyFrames < 0) latencyFrames = 0;
-    const int64_t playFrame = g_jniState.engine->getTransport().getPlayFrame();
-    return g_jniState.engine->getAudioLooper().armSyncedToLoop(
-        trackIndex, playFrame, static_cast<int>(latencyFrames));
+    return wma_looper_arm_synced_to_loop(g_wmaEngine, trackIndex, latencyFrames);
 }
 
 // Quantized variant: capture starts at the next multiple of `quantumFrames`
@@ -2460,25 +2448,20 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperArmSyncedToLoopQuantized(
     JNIEnv* env, jobject thiz, jint trackIndex, jlong latencyFrames, jint quantumFrames) {
-    if (!g_jniState.engine) return -1;
-    if (latencyFrames < 0) latencyFrames = 0;
-    const int64_t playFrame = g_jniState.engine->getTransport().getPlayFrame();
-    return g_jniState.engine->getAudioLooper().armSyncedToLoop(
-        trackIndex, playFrame, static_cast<int>(latencyFrames), quantumFrames);
+    return wma_looper_arm_synced_to_loop_quantized(g_wmaEngine, trackIndex,
+                                                  latencyFrames, quantumFrames);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperCancelArm(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().cancelArm();
+    wma_looper_cancel_arm(g_wmaEngine);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetArmedTrack(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return -1;
-    return g_jniState.engine->getAudioLooper().getArmedTrack();
+    return wma_looper_get_armed_track(g_wmaEngine);
 }
 
 // Loop quantization: prepare a track sized to N bars at current BPM/SR.
@@ -2712,8 +2695,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetFramesDropped(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getAudioLooper().getFramesDropped();
+    return wma_looper_get_frames_dropped(g_wmaEngine);
 }
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetExportsCompleted(
@@ -2736,14 +2718,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetArmedTriggered(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getAudioLooper().getArmedTriggered();
+    return wma_looper_get_armed_triggered(g_wmaEngine);
 }
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperResetTelemetry(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().resetTelemetry();
+    wma_looper_reset_telemetry(g_wmaEngine);
 }
 
 // ============================================================================
@@ -2930,8 +2910,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetDroppedEvents(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getLooperEventDispatcher().getDroppedEvents();
+    return wma_looper_get_dropped_events(g_wmaEngine);
 }
 
 // ==================== USB Round-Trip Loopback Test (Fase 5) ====================
