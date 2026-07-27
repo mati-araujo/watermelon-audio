@@ -26,3 +26,11 @@ out/
 .claude/
 # Host sanitizer build dir (run-cpp-tests.sh SANITIZE=...)
 **/cpp/tests/build-san
+__pycache__/
+
+# Xcode — estado por usuario del shell de :harness (WA-5.5). El .pbxproj y el
+# contents.xcworkspacedata SI se versionan: son el proyecto. Lo de abajo es
+# preferencia local (breakpoints, esquemas, ventanas abiertas) y genera ruido de
+# diff en cada sesion.
+**/xcuserdata/
+**/*.xcuserdatad

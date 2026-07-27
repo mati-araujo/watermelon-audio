@@ -81,10 +81,16 @@ struct JniGlobalState {
     std::shared_ptr<InputNode> inputNode;
     std::mutex engineMutex;
 
-    // Mode system
-    std::atomic<int> currentMode{0};
-    std::atomic<bool> modeTransitionInProgress{false};
-    std::atomic<float> modeTransitionProgress{0.0f};
+    // The mode system used to live here too — currentMode,
+    // modeTransitionInProgress and modeTransitionProgress, as INDEPENDENT copies
+    // of the ones in WmaEngine. The JNI wrote and read its set, the C API its
+    // own, and nothing kept them in step: exactly the split that had already
+    // been found and fixed for InputNode.
+    //
+    // It never broke on Android because only one of the two paths was ever
+    // exercised. WA-2.6's `mode` category removed the split by construction —
+    // the JNI now calls wma_set_audio_mode / wma_get_audio_mode, so there is one
+    // copy and it lives in WmaEngine.
 };
 
 extern JniGlobalState g_jniState;

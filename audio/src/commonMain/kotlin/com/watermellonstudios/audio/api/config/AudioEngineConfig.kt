@@ -4,6 +4,7 @@ import com.watermellonstudios.audio.callback.AudioAnalyticsListener
 import com.watermellonstudios.audio.callback.AudioLogger
 import com.watermellonstudios.audio.callback.NoOpAudioAnalytics
 import com.watermellonstudios.audio.callback.NoOpAudioLogger
+import com.watermellonstudios.audio.domain.device.DeviceCapabilities
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.oscillator.OscillatorType
 
@@ -87,5 +88,44 @@ data class AudioEngineConfig(
 
         /** Builder for convenient construction */
         fun builder() = Builder()
+
+        /**
+         * Cadena de efectos recortada para un dispositivo de gama baja.
+         *
+         * El valor viene del `DeviceCapabilities` de androidMain, que ya aplicaba este
+         * recorte desde antes de WA-1.2.
+         */
+        const val LOW_END_MAX_EFFECTS = 6
+
+        /**
+         * Ajusta [base] a lo que el dispositivo puede sostener (WA-1.2).
+         *
+         * Acá vive la **política**; [DeviceCapabilities] sólo tiene los hechos. La
+         * separación importa porque el umbral de "gama baja" es una heurística por
+         * plataforma que va a cambiar, y no debería arrastrar consigo la detección.
+         *
+         * Sólo toca lo que el dispositivo puede desmentir:
+         * - [maxEffects] se **recorta** —nunca se sube— a [LOW_END_MAX_EFFECTS] en gama
+         *   baja. Recortar, y no fijar, es lo que hace que un consumidor que pidió 4
+         *   efectos siga teniendo 4 y no 6.
+         * - [enableLowLatency] se apaga si la plataforma no ofrece el path. Hoy ninguna
+         *   de las dos lo niega (AAudio desde API 26, Core Audio siempre), así que en la
+         *   práctica esto no cambia nada — está para que el día que aparezca un target
+         *   que sí lo niegue, el motor no pida algo que no existe.
+         *
+         * Todo lo demás de [base] se respeta tal cual: el logger, los efectos por
+         * defecto y el sample rate son decisiones del consumidor, no del hardware.
+         */
+        fun tunedFor(
+            capabilities: DeviceCapabilities,
+            base: AudioEngineConfig = DEFAULT,
+        ): AudioEngineConfig = base.copy(
+            maxEffects = if (capabilities.isLowEndDevice) {
+                minOf(base.maxEffects, LOW_END_MAX_EFFECTS)
+            } else {
+                base.maxEffects
+            },
+            enableLowLatency = base.enableLowLatency && capabilities.supportsLowLatencyAudio,
+        )
     }
 }

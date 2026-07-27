@@ -18,6 +18,8 @@
 #include "backends/IAudioBackend.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 
 namespace wma_test {
 
@@ -26,14 +28,38 @@ public:
     // ---- IAudioBackend ----------------------------------------------------
 
     watermelon_audio::BackendResult start() override {
+        // Freno opcional. Existe porque el reopen de la captura pasó a correr en
+        // un thread propio, y "no bloquea al llamador" no se puede afirmar contra
+        // un start() instantáneo: el worker terminaría antes de que el test mire.
+        // Con esto el test decide cuándo destrabar y la carrera desaparece.
+        {
+            std::unique_lock<std::mutex> lock(mStartGateMutex);
+            mStartEntered = true;
+            mStartEnteredCv.notify_all();
+            mStartGateCv.wait(lock, [this] { return !mStartBlocked; });
+        }
+
+        ++mStartCount;
         if (mStartResult != watermelon_audio::BackendResult::OK) {
             return mStartResult;
         }
+        // Capture is decided HERE, not when it was requested — the same as every
+        // real backend (OboeBackend.cpp:63 reads its flag in start(); CoreAudio
+        // attaches its sink node while opening). A fake that honored the request
+        // the moment it arrived would make the reopen logic untestable, because
+        // the case that needs a reopen would never occur.
+        mInfo.isFullDuplex =
+            mFullDuplexRequested.load(std::memory_order_acquire) &&
+            mCaptureAvailable.load(std::memory_order_acquire);
         mRunning.store(true, std::memory_order_release);
         return watermelon_audio::BackendResult::OK;
     }
 
-    void stop() override { mRunning.store(false, std::memory_order_release); }
+    void stop() override {
+        mRunning.store(false, std::memory_order_release);
+        // No stream, no capture.
+        mInfo.isFullDuplex = false;
+    }
     void pause() override { mPaused = true; }
     void resume() override { mPaused = false; }
 
@@ -49,7 +75,9 @@ public:
         mInfo.framesPerBuffer = framesPerBuffer;
     }
 
-    void setFullDuplexEnabled(bool enable) override { mInfo.isFullDuplex = enable; }
+    void setFullDuplexEnabled(bool enable) override {
+        mFullDuplexRequested.store(enable, std::memory_order_release);
+    }
 
     watermelon_audio::StreamInfo getStreamInfo() const override { return mInfo; }
 
@@ -75,6 +103,60 @@ public:
     /// Make start() fail, so the manager never reports isRunning().
     void setStartResult(watermelon_audio::BackendResult result) { mStartResult = result; }
 
+    /**
+     * Whether the "device" will actually grant capture when asked.
+     *
+     * False models a denied microphone or a machine with no input: the request
+     * is accepted, the stream opens, and capture still never goes live. That gap
+     * is the whole reason isCaptureLive() exists separately from the request.
+     */
+    void setCaptureAvailable(bool available) {
+        mCaptureAvailable.store(available, std::memory_order_release);
+    }
+
+    // ---- Freno de start(), para los tests del reopen asincrónico -------------
+
+    /// A partir de acá, todo start() se queda esperando en releaseStart().
+    void blockStart() {
+        std::lock_guard<std::mutex> lock(mStartGateMutex);
+        mStartBlocked = true;
+        mStartEntered = false;
+    }
+
+    /// Espera a que un start() haya llegado de verdad al freno.
+    void waitUntilStartEntered() {
+        std::unique_lock<std::mutex> lock(mStartGateMutex);
+        mStartEnteredCv.wait(lock, [this] { return mStartEntered; });
+    }
+
+    // El notify va DENTRO del lock, y no es estilo: es lo que evita que este
+    // objeto se destruya abajo del notify.
+    //
+    // `DestroyingTheManagerMidReopenDoesNotLeaveAThreadBehind` destraba desde un
+    // thread aparte y destruye el manager —y con él este fake— apenas el worker
+    // sale. Notificando afuera del lock, la secuencia posible era: el worker
+    // despierta, termina, el destructor joinea y destruye `mStartGateCv`
+    // mientras el que destrabó sigue adentro de `notify_all()`. TSan lo reportó
+    // como carrera entre `pthread_cond_broadcast` y `pthread_cond_destroy`.
+    //
+    // Adentro del lock la secuencia queda imposible: el worker sólo puede volver
+    // de `wait()` reaquiriendo el mutex, y para eso este método ya tiene que
+    // haber salido del `notify_all()` y soltado el lock. Es el mismo patrón que
+    // ya usa `start()` con `mStartEnteredCv` unas líneas más arriba.
+    void releaseStart() {
+        std::lock_guard<std::mutex> lock(mStartGateMutex);
+        mStartBlocked = false;
+        mStartGateCv.notify_all();
+    }
+
+    /// The capture request currently pending for the next start().
+    bool fullDuplexRequested() const {
+        return mFullDuplexRequested.load(std::memory_order_acquire);
+    }
+
+    /// How many times start() has been called — a reopen shows up as +1.
+    int startCount() const { return mStartCount; }
+
     watermelon_audio::IAudioCallback* callback() const { return mCallback; }
     bool isPaused() const { return mPaused; }
 
@@ -83,8 +165,22 @@ private:
     watermelon_audio::IAudioCallback* mCallback = nullptr;
     watermelon_audio::BackendResult mStartResult = watermelon_audio::BackendResult::OK;
     std::atomic<bool> mRunning{false};
+
+    // Freno de start(). mutable no hace falta: sólo lo tocan métodos no-const.
+    std::mutex mStartGateMutex;
+    std::condition_variable mStartGateCv;
+    std::condition_variable mStartEnteredCv;
+    bool mStartBlocked = false;
+    bool mStartEntered = false;
     bool mPaused = false;
     int mRequestedSampleRate = 0;
+    // Atomic: con el reopen asincronico, requestCapture() lo escribe desde el
+    // thread del llamador mientras el worker lo lee adentro de start().
+    std::atomic<bool> mFullDuplexRequested{false};
+    // Atomic: los tests del reopen asincronico lo mueven desde otro thread
+    // mientras el worker esta adentro de start(). TSan lo agarro.
+    std::atomic<bool> mCaptureAvailable{true};
+    int mStartCount = 0;
 };
 
 /**

@@ -69,9 +69,16 @@ if(NOT TARGET tinysoundfont)
 endif()
 
 # The slice of the engine AudioEngine.cpp needs to link. Mirrors the
-# watermelon-core target in ios/CMakeLists.txt minus api/, which the tests do
-# not exercise, and with the two substitutions described in the header above.
+# watermelon-core target in ios/CMakeLists.txt, with the two substitutions
+# described in the header above.
+#
+# api/ joined the target in WA-2.6 (category `lifecycle`): once the JNI became a
+# one-line wrapper over the C API, the behaviour the JNI used to own — the value
+# a query returns with no engine, the difference between the engine's default
+# fade and an explicit one — lives in watermelon_audio.cpp. Testing AudioEngine
+# alone would no longer cover it. See test_c_api_lifecycle.cpp.
 set(CORE_TESTED_SOURCES
+    ${WMA_CPP_ROOT}/api/watermelon_audio.cpp
     ${WMA_CPP_ROOT}/core/AudioEngine.cpp
     ${WMA_CPP_ROOT}/core/SynthEngineDispatcher.cpp
     ${WMA_CPP_ROOT}/core/OutputStage.cpp
@@ -100,6 +107,20 @@ set(CORE_TESTED_SOURCES
 add_executable(core_tests
     test_current_sample_rate.cpp
     test_fade_lifecycle.cpp
+    test_capture_requests.cpp
+    test_c_api_lifecycle.cpp
+    test_c_api_input.cpp
+    test_c_api_effects.cpp
+    test_c_api_synth.cpp
+    test_c_api_voice.cpp
+    test_c_api_mode.cpp
+    test_c_api_analysis.cpp
+    test_c_api_transport.cpp
+    test_c_api_diagnostics.cpp
+    test_c_api_looper.cpp
+    test_c_api_routing.cpp
+    test_c_api_logcapture.cpp
+    test_c_api_start_without_select.cpp
     support/test_platform_backends.cpp
     support/test_input_node_stub.cpp
     ${CORE_TESTED_SOURCES}

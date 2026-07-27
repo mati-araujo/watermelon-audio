@@ -38,6 +38,9 @@ object StateSynchronizerFactory {
      * @param config Configuration for polling interval and reconciliation strategy (default: SyncConfig.DEFAULT)
      * @return New instance of StateSynchronizer ready to be started
      */
+    // El motor es el implementador del puente, no un consumidor: las factories
+    // publicas se construyen encima de el. Ver [InternalWatermelonApi].
+    @OptIn(InternalWatermelonApi::class)
     fun create(
         scope: CoroutineScope,
         config: SyncConfig = SyncConfig.DEFAULT

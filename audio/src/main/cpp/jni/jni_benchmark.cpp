@@ -9,12 +9,33 @@
  * - AAudio availability check
  *
  * Legacy NativeBridge_ functions removed in Phase E.3.
+ *
+ * WA-2.6, category `benchmark`: this file only PARTLY delegates to the C API,
+ * and that is the honest outcome rather than a half-finished migration. What
+ * stays here, and why:
+ *
+ *   - runLatencyOptimizationTest() and isAAudioAvailable() open an
+ *     oboe::AudioStreamBuilder to probe the device. There is no portable
+ *     question being asked — "did I get AAudio in exclusive mode" is an Oboe
+ *     concept — so there is nothing to lift.
+ *   - The tail of getDetailedLatencyInfo() and of getLatencyReport(): the
+ *     audio API, sharing mode and performance mode of an oboe::AudioStream.
+ *     Same reason. Their portable halves DID move.
+ *   - startRoundTripTest / getRoundTripResult / cancelRoundTripTest are
+ *     deprecated stubs that never touch the engine. Migrating a stub that
+ *     returns a constant would add a C API function with no behaviour.
+ *   - getAdaptiveBufferStats() (in jni_audio_bridge.cpp) reads the
+ *     LibusbBackend directly — Android-only by D4, like the rest of USB.
+ *
+ * See docs/kmp/c_api_coverage.md §4b.
  */
 
 #include "jni_common.h"
+#include "../api/watermelon_audio.h"
 #include "../core/AudioEngine.h"
 #include "../nodes/InputNode.h"
 #include <oboe/Oboe.h>
+#include <algorithm>
 #include <string>
 #include <thread>
 #include <chrono>
@@ -31,6 +52,11 @@ extern "C" {
 
 // ==================== AudioNativeBridge Bindings ====================
 
+// The portable head ([0..3]) comes from the C API; the Oboe tail ([4..7])
+// describes an oboe::AudioStream and has no counterpart off Android, so it is
+// filled here. Note the tail is all zeros whenever BackendManager owns the
+// stream (getOutputStream() returns nullptr there by design) — that is the USB
+// path today and every path on iOS.
 JNIEXPORT jfloatArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetDetailedLatencyInfo(
         JNIEnv* env, jobject thiz) {
@@ -41,31 +67,29 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetDet
 
     float values[8] = {-1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
+    int sampleRate = 0, bufferSize = 0;
+    float latencyMillis = 0.0f;
+    if (wma_get_stream_info(g_wmaEngine, &sampleRate, &bufferSize, &latencyMillis)) {
+        values[0] = latencyMillis;
+        values[2] = static_cast<float>(sampleRate);
+        values[3] = static_cast<float>(bufferSize);
+    }
+
+    // Outside the getStreamInfo() branch on purpose: the input path can be up
+    // with no output stream to report, and the old code already read it
+    // unconditionally. Its -1 default comes from the initializer.
+    const float inputLatency = wma_input_get_latency_ms(g_wmaEngine);
+    if (inputLatency > 0) {
+        values[1] = inputLatency;
+    }
+
     if (g_jniState.engine) {
-        int32_t sampleRate = 0;
-        int32_t bufferSize = 0;
-        double latencyMillis = 0.0;
-
-        if (g_jniState.engine->getStreamInfo(sampleRate, bufferSize, latencyMillis)) {
-            values[0] = static_cast<float>(latencyMillis);
-            values[1] = -1.0f;
-            values[2] = static_cast<float>(sampleRate);
-            values[3] = static_cast<float>(bufferSize);
-
-            auto* stream = g_jniState.engine->getOutputStream();
-            if (stream) {
-                values[4] = static_cast<float>(stream->getBufferCapacityInFrames());
-                values[5] = (stream->getAudioApi() == oboe::AudioApi::AAudio) ? 1.0f : 0.0f;
-                values[6] = (stream->getSharingMode() == oboe::SharingMode::Exclusive) ? 1.0f : 0.0f;
-                values[7] = (stream->getPerformanceMode() == oboe::PerformanceMode::LowLatency) ? 1.0f : 0.0f;
-            }
-        }
-
-        if (g_jniState.inputNode) {
-            float inputLatency = g_jniState.inputNode->getInputLatencyMs();
-            if (inputLatency > 0) {
-                values[1] = inputLatency;
-            }
+        auto* stream = g_jniState.engine->getOutputStream();
+        if (stream) {
+            values[4] = static_cast<float>(stream->getBufferCapacityInFrames());
+            values[5] = (stream->getAudioApi() == oboe::AudioApi::AAudio) ? 1.0f : 0.0f;
+            values[6] = (stream->getSharingMode() == oboe::SharingMode::Exclusive) ? 1.0f : 0.0f;
+            values[7] = (stream->getPerformanceMode() == oboe::PerformanceMode::LowLatency) ? 1.0f : 0.0f;
         }
     }
 
@@ -163,25 +187,10 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeCancel
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetRecommendedBufferSize(
         JNIEnv* env, jobject thiz, jfloat targetLatencyMs) {
-    if (targetLatencyMs <= 0) {
-        return -1;
-    }
-
-    int sampleRate = 48000;
-    if (g_jniState.engine) {
-        int32_t sr = 0, bs = 0;
-        double lat = 0;
-        if (g_jniState.engine->getStreamInfo(sr, bs, lat)) {
-            sampleRate = sr;
-        }
-    }
-
-    int targetFrames = static_cast<int>((targetLatencyMs / 1000.0f) * sampleRate);
-    int bufferSize = 64;
-    while (bufferSize < targetFrames && bufferSize < 2048) {
-        bufferSize *= 2;
-    }
-    return std::max(64, bufferSize);
+    // Behaviour change, on purpose: the sample rate now resolves through
+    // currentSampleRate() (running stream -> preferred -> 48000) instead of
+    // falling straight to 48000 when no stream is up. See the C API.
+    return wma_get_recommended_buffer_size(g_wmaEngine, targetLatencyMs);
 }
 
 JNIEXPORT jboolean JNICALL
@@ -201,22 +210,24 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsAAud
     return JNI_FALSE;
 }
 
+// Portable body from the C API, Oboe-specific tail appended here — the same
+// split as nativeGetDetailedLatencyInfo. The C API version also names the
+// backend, which this report never did.
 JNIEXPORT jstring JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetLatencyReport(
         JNIEnv* env, jobject thiz) {
-    std::string report = "NoisyPad Latency Report\n";
-    report += "========================\n\n";
+    // Ask for the length first rather than guessing at a buffer: the report
+    // grows with the backend name and the optional input-latency line.
+    const int needed = wma_get_latency_report(g_wmaEngine, nullptr, 0);
+    std::string report;
+    if (needed > 0) {
+        report.resize(static_cast<size_t>(needed) + 1);
+        const int written = wma_get_latency_report(g_wmaEngine, report.data(),
+                                                   static_cast<int>(report.size()));
+        report.resize(static_cast<size_t>(std::min(written, needed)));
+    }
 
     if (g_jniState.engine) {
-        int32_t sampleRate = 0, bufferSize = 0;
-        double latencyMillis = 0;
-
-        if (g_jniState.engine->getStreamInfo(sampleRate, bufferSize, latencyMillis)) {
-            report += "Sample Rate: " + std::to_string(sampleRate) + " Hz\n";
-            report += "Buffer Size: " + std::to_string(bufferSize) + " frames\n";
-            report += "Output Latency: " + std::to_string(latencyMillis) + " ms\n";
-        }
-
         auto* stream = g_jniState.engine->getOutputStream();
         if (stream) {
             report += "Audio API: ";
@@ -229,8 +240,6 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetLat
             report += (stream->getPerformanceMode() == oboe::PerformanceMode::LowLatency) ? "LowLatency" : "Normal";
             report += "\n";
         }
-    } else {
-        report += "Engine not initialized\n";
     }
 
     return env->NewStringUTF(report.c_str());

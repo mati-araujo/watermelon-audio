@@ -10,23 +10,31 @@ Motor de sintesis en tiempo real con efectos DSP profesionales. C++20 + Oboe + K
 
 ```
 audio/src/
-  commonMain/kotlin/    64 files — pure Kotlin, zero Android deps
+  commonMain/kotlin/    67 files — pure Kotlin, zero Android deps
     api/                AudioEngine interface, IAudioNativeBridge, IEffectManager,
-                        factories (AudioEngine, EffectManager, StateSynchronizer)
+                        IInputBridge + AudioInput (camino de entrada, WA-5.5),
+                        factories (AudioEngine, EffectManager, AudioInput,
+                        StateSynchronizer)
     domain/             Effect types, oscillators, scales, modes, USB types, errors
     callback/           AudioLogger, AudioAnalyticsListener (dependency inversion)
     internal/           AudioEngineImpl, EffectManagerImpl, StateSynchronizer,
-                        ScaleQuantizer, ChordGenerator, util/Format, util/Time
-                        expect: AudioBridgeProvider, NativeLibraryLoader
-  androidMain/kotlin/   21 files — JNI bridge, USB, platform-specific
+                        ScaleQuantizer, ChordGenerator, BridgeConcurrency,
+                        util/Format, util/Time
+                        expect: AudioBridgeProvider, NativeLibraryLoader,
+                                currentDeviceCapabilities
+    domain/device/      DeviceCapabilities (interfaz de hechos) + Snapshot
+    domain/input/       InputSource + InputMetering (snapshot de 7 valores)
+  androidMain/kotlin/   23 files — JNI bridge, USB, platform-specific
     internal/bridge/    AudioNativeBridge (3,352 LOC, 289 external funs)
     internal/usb/       USB audio driver (DataStore, BroadcastReceiver)
     internal/mode/      ModeTransitionManagerImpl, NativeModeStateWriter
-  iosMain/kotlin/       2 files — actual de NativeLibraryLoader (no-op, link estatico)
-                        y AudioBridgeProvider (lanza NotImplementedError hasta WA-3.2)
-  commonTest/kotlin/    5 suites
+  iosMain/kotlin/       5 files — IosAudioBridge (sobre cinterop), AudioBridgeProvider,
+                        AudioSessionManager (AVAudioSession como Flow),
+                        NativeLibraryLoader (no-op, link estatico),
+                        DeviceCapabilitiesProvider (NSProcessInfo)
+  commonTest/kotlin/    7 suites  ·  iosTest/kotlin/ 4 suites
   main/cpp/             C++20 engine
-    api/                C API — watermelon_audio.h (191 functions, pure C)
+    api/                C API — watermelon_audio.h (187 functions, pure C)
     dsp/                watermelon-dsp sub-library (30 files, zero deps)
     effects/            watermelon-effects sub-library (59 files, 23 efectos + EffectRegistry)
     engines/            watermelon-engines sub-library (SynthEngine + 6 engines
@@ -36,13 +44,24 @@ audio/src/
                         LooperExporter.cpp)
     core/               AudioEngine facade + subsistemas (22 files)
     backends/           IAudioBackend, BackendManager, SplitBackend, DriftResampler,
-                        OboeBackend + LibusbBackend (Android), CoreAudioBackend.mm (iOS),
+                        OboeBackend + LibusbBackend (Android),
+                        CoreAudioBackend.mm (iOS, output + captura full-duplex),
                         PlatformBackends.cpp (unico punto que nombra backends concretos)
     jni/                5 files — jni_audio_bridge.cpp (278 JNIEXPORT), jni_engine,
                         jni_usb, jni_benchmark, jni_common.h
     platform/           Logger.h/.cpp (logcat / os_log / stderr), Platform.h,
                         PlatformAndroid.cpp, PlatformApple.cpp, PlatformIsa.inc (ISA comun)
     ios/                CMakeLists.txt del build iOS (separado del que maneja AGP)
+
+harness/src/            :harness — app de prueba multiplataforma (WA-5.5). NO se publica
+  commonMain/kotlin/    HarnessApp — la UI entera (Compose Multiplatform)
+  androidMain/kotlin/   MainActivity (shell) + AndroidManifest (RECORD_AUDIO)
+  iosMain/kotlin/       MainViewController (shell)
+harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO el
+                        XCFramework de WA-4.1 (usar los dos duplica el motor).
+                        Info.plist: NSMicrophoneUsageDescription +
+                        CADisableMinimumFrameDurationOnPhone (sin esta ultima
+                        Compose aborta al arrancar)
 ```
 
 ---
@@ -112,15 +131,43 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # Suite C++ de host (517 tests, googletest)
+bash scripts/run-cpp-tests.sh              # Suite C++ de host (749 tests, googletest)
+                                           # Kotlin: 101 iOS sim / 64 JVM
 bash scripts/check-cpp-portability.sh      # Guardrail WA-0.4 (jni.h / android/)
+bash scripts/build-harness.sh              # :harness: Android + framework iOS +
+                                           # símbolos + shell de Xcode + ARRANQUE
+                                           # de la app (lo único que agarra un
+                                           # Info.plist incompleto: Compose aborta
+                                           # el proceso desde PlistSanityCheck)
+bash scripts/check-no-ui-in-library.sh     # Guardrail WA-5.5: la UI de :harness no
+                                           # puede entrar al artefacto publicado.
+                                           # Lo que de verdad mide es el classpath
+                                           # resuelto de :audio.
 bash scripts/build-ios.sh                  # libwatermelon_audio.a — ambos slices + link check
-python3 scripts/c-api-gap.py               # Regenera docs/kmp/c_api_coverage.md
+python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2.6).
+                                           # Imprime; docs/kmp/c_api_coverage.md
+                                           # se actualiza a mano con esa salida
 
-./gradlew :audio:compileKotlinIosArm64     # Compilar Kotlin para iOS
+./gradlew :audio:assembleWatermelonXCFramework   # XCFramework (device + simulador)
+
+./gradlew :audio:compileKotlinIosArm64     # Compilar Kotlin para iOS (por target)
+./gradlew :audio:compileIosMainKotlinMetadata  # El source set COMPARTIDO iosMain.
+                                           # Los gates por target no lo cubren, y es
+                                           # lo que compila un consumidor KMP con
+                                           # targets iOS. Necesita
+                                           # enableCInteropCommonization.
 ./gradlew :audio:iosSimulatorArm64Test     # Tests K/N en simulador (requiere Xcode
                                            # con first-launch hecho, ver docs/kmp)
+
+./gradlew :harness:assembleDebug           # APK del harness de UI (WA-5.5)
+./gradlew :harness:linkDebugFrameworkIosSimulatorArm64   # HarnessKit.framework
 ```
+
+> `:harness` es la app de prueba multiplataforma (WA-5.5). **No se publica**, y eso es
+> estructural: no aplica `maven-publish`, los workflows publican con `:audio:publishAll...`
+> path-qualified, y `check-no-ui-in-library.sh` lo hace fallar si Compose aparece en el
+> classpath de `:audio`. Su framework de iOS **no es** el XCFramework de WA-4.1 — las dos
+> vías de consumo son alternativas y usar ambas duplicaría el motor.
 
 > El build de iOS vive en `audio/src/main/cpp/ios/CMakeLists.txt`, **separado** del que
 > maneja AGP: ese es Android-specific de punta a punta (Oboe, libusb, JNI,

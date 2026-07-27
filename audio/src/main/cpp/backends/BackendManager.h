@@ -26,9 +26,12 @@
 
 #include "IAudioBackend.h"
 #include "../usb/LatencyProfile.h"
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
-#include <atomic>
+#include <thread>
 #include <functional>
 
 namespace watermelon_audio {
@@ -164,10 +167,100 @@ public:
     void setBufferSize(int framesPerBuffer);
 
     /**
-     * Enable/disable full-duplex mode.
-     * Must be called before start().
+     * Who is asking for capture.
+     *
+     * Two independent callers want input, and they must not overwrite each
+     * other: the mode system (INPUT_FX needs input) and an explicit
+     * wma_input_start(). A single bool would make the last writer win — turning
+     * the mode off would kill a capture the app had started on purpose. The
+     * effective request is the OR of both bits.
+     */
+    enum class CaptureRequester {
+        MODE,        ///< The mode system: setFullDuplexEnabled()
+        INPUT_NODE,  ///< An explicit wma_input_start() / wma_input_stop()
+    };
+
+    /**
+     * What a capture request achieved, as of the moment it returned.
+     *
+     * Three values and not a bool because a reopen no longer finishes before the
+     * call does — see [requestCapture]. Collapsing PENDING into NOT_LIVE would
+     * make "still opening" indistinguishable from "the user denied the
+     * microphone", which is the one distinction the whole input path exists to
+     * report.
+     */
+    enum class CaptureOutcome {
+        LIVE,      ///< capture is delivering frames right now
+        NOT_LIVE,  ///< it is not, and nothing is in flight to change that
+        PENDING,   ///< a reopen is running; poll isCaptureLive()
+    };
+
+    /**
+     * Register (or withdraw) one requester's need for captured input.
+     *
+     * @param who          which requester is speaking
+     * @param want         whether that requester needs capture
+     * @param allowRestart permission to restart a RUNNING stream in order to
+     *                     honor the request. Every backend reads its full-duplex
+     *                     flag at start() — Oboe at OboeBackend.cpp:63, CoreAudio
+     *                     when it attaches the sink node — so a stream already
+     *                     running cannot grow a capture path without reopening.
+     *                     Restarting is audible, so it is opt-in: the mode path
+     *                     passes false (it must never punch a gap into playback),
+     *                     an explicit input-start passes true (the caller asked
+     *                     for the microphone and a brief gap is the price).
+     *
+     * @return LIVE / NOT_LIVE when the answer was known without reopening.
+     *         **PENDING when a reopen was scheduled**: the stream is being torn
+     *         down and reopened on a worker thread, and the caller's thread
+     *         returns immediately.
+     *
+     * ## Por qué el reopen no corre en el thread del llamador
+     *
+     * Reabrir un stream es caro y **puede colgarse**: `stop()` espera a que
+     * drenen los callbacks de RT, y `start()` hace IPC al servidor de audio del
+     * sistema. En iOS eso se midió colgando indefinidamente adentro de
+     * `[AVAudioSession setActive:]`. El llamador de `wma_input_start()` es, en
+     * cualquier app con UI, el **main thread**: bloquearlo ahí son cientos de ms
+     * en el mejor caso y un watchdog kill en el peor.
+     *
+     * ## Nada de esto bloquea al que llama
+     *
+     * Ni siquiera un segundo `wma_input_start()` / `wma_input_stop()` con una
+     * reapertura en curso: anotar el pedido sólo necesita `mMutex`, que es corto
+     * por construcción (ver `mOpMutex`). Los setters del backend que se tocan acá
+     * tampoco bloquean — el flag de full-duplex es atómico en CoreAudio y en
+     * Split justamente por esto.
+     */
+    CaptureOutcome requestCapture(CaptureRequester who, bool want, bool allowRestart);
+
+    /** Whether a scheduled reopen is still running. */
+    bool isCaptureRequestPending() const;
+
+    /**
+     * Block until any scheduled reopen has finished.
+     *
+     * **Nunca desde el thread de audio ni desde el de UI** — es justo el bloqueo
+     * que [requestCapture] existe para no hacer. Está para los tests y para un
+     * llamador que ya esté en un thread de fondo y prefiera esperar.
+     */
+    void waitForCaptureRequest();
+
+    /**
+     * Enable/disable full-duplex mode — the [CaptureRequester::MODE] requester.
+     *
+     * Applies at the next start(); never restarts a running stream. See
+     * requestCapture() for why.
      */
     void setFullDuplexEnabled(bool enable);
+
+    /**
+     * Whether the active backend is actually delivering captured frames.
+     *
+     * Distinct from the request: capture can be asked for and not happen (no
+     * microphone permission, no input device).
+     */
+    bool isCaptureLive() const;
 
     /**
      * Select the USB latency profile (Fase 1). Persisted on the manager so it
@@ -252,7 +345,28 @@ public:
     }
 
 private:
-    // Mutex for thread-safe operations
+    /**
+     * Serializa las operaciones de ciclo de vida —start, stop, selectBackend— y
+     * es el único que se sostiene **alrededor de la llamada lenta al backend**.
+     *
+     * Existe porque `mMutex` no puede hacerlo. Abrir un stream habla por IPC con
+     * el servidor de audio del sistema y puede tardar cientos de ms; retener ahí
+     * el mutex que necesita cualquier lectura de estado congela a todo el que
+     * pregunte, que en una app con UI es el main thread en cada frame. Con los
+     * dos separados, una reapertura no le bloquea la mano a nadie: ni a los
+     * lectores, ni a un `wma_input_stop()` que llegue en el medio.
+     *
+     * **Orden de lock, sin excepciones: mOpMutex → mMutex.** Nunca al revés, y
+     * nunca `mMutex` tomado alrededor de algo que pueda bloquear.
+     *
+     * Lo único que sí espera acá es otra operación de ciclo de vida —cambiar de
+     * backend a mitad de una reapertura, por ejemplo—, y eso es correcto: son
+     * mutuamente excluyentes por naturaleza.
+     */
+    std::mutex mOpMutex;
+
+    /// Estado. Secciones críticas cortas y **jamás** alrededor de una llamada
+    /// que pueda bloquear.
     mutable std::mutex mMutex;
 
     // Backend instances. Held as IAudioBackend so this header stays free of
@@ -277,7 +391,12 @@ private:
     IAudioCallback* mCallback = nullptr;
     int mSampleRate = 0;
     int mBufferSize = 0;
+    // Effective capture request — the OR of the two requesters below. Kept as a
+    // member (rather than recomputed) because applyConfigToBackend() replays it
+    // onto a backend that was created or swapped later.
     bool mFullDuplexEnabled = false;
+    bool mCaptureRequestedByMode = false;
+    bool mCaptureRequestedByInputNode = false;
     usb::UsbLatencyProfile mLatencyProfile = usb::UsbLatencyProfile::SAFE;
 
     // USB state
@@ -289,6 +408,58 @@ private:
 
     // Was running before backend switch?
     bool mWasRunning = false;
+
+    // ---- Reopen asincrónico de la captura -----------------------------------
+    //
+    // Mutex propio, deliberadamente separado de mMutex: el worker toma mMutex
+    // para stop()/start(), así que compartirlo sería un deadlock inmediato.
+    //
+    // **Regla de orden: nunca tomar mMutex teniéndo mReopenMutex, ni al revés.**
+    // Los dos se usan secuencialmente, nunca anidados.
+    mutable std::mutex mReopenMutex;
+    std::condition_variable mReopenDone;
+    std::thread mReopenThread;
+
+    /// Atomic para poder consultarse **sin ningún lock** desde requestCapture();
+    /// se escribe bajo mReopenMutex porque además es el predicado del condvar.
+    std::atomic<bool> mReopenInFlight{false};
+
+    /**
+     * Sube cada vez que una petición **autoriza un reopen** (INPUT_NODE + want +
+     * allowRestart). El worker la mira antes y después de cada pasada: si cambió,
+     * es que llegó un pedido mientras él ya estaba pasado del punto donde
+     * `start()` lee el flag, y hay que dar otra vuelta.
+     *
+     * Sube **sólo** en ese caso, no en cualquier cambio de estado. Un retiro no
+     * autoriza reabrir —eso metería el gap audible que el diseño evita— y un
+     * micrófono denegado no cambia la generación, así que no se reintenta en
+     * bucle contra un permiso que nunca va a llegar.
+     *
+     * Vive bajo mMutex.
+     *
+     * > [!NOTE]
+     * > **Sin test determinista, y con el porqué.** Para ejercitar esta rama el
+     * > pedido nuevo tiene que llegar con mReopenInFlight todavía en true, y un
+     * > llamador que pide captura durante un reopen se queda bloqueado en mMutex
+     * > hasta que el worker está por terminar (ver el residual de abajo). Casi
+     * > siempre gana el worker y el pedido termina agendando uno nuevo, que
+     * > converge por otro camino. La rama se queda igual: sin ella, el caso en
+     * > que sí gana el pedido pierde la petición en silencio.
+     */
+    uint64_t mCaptureRestartGeneration = 0;
+
+    /**
+     * Cortado en el destructor **antes** de joinear. Sin esto, un worker en su
+     * segunda pasada podría reabrir un stream sobre un manager que se está
+     * destruyendo.
+     */
+    std::atomic<bool> mShuttingDown{false};
+
+    /// Cuerpo del worker: pasadas hasta converger, con tope.
+    void runCaptureReopen();
+
+    /// Una pasada: stop + start, con el fallback a "sin captura" si falla.
+    void reopenOnce();
 
     // Internal helpers
     void notifyBackendChanged(BackendType oldType, BackendType newType);

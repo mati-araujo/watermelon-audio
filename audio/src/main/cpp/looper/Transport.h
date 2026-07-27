@@ -209,7 +209,16 @@ public:
         // loop — at most 1 iteration in practice (numFrames <= ~1024, fpb >= 1600).
         // In continuous mode we don't decrement beatsLeft so the scheduler fires
         // forever until stopMetronome() flips the flag.
-        while (next <= 0 && beatsLeft > 0) {
+        //
+        // `next < 0`, not `<= 0`. After the subtraction above, `next` is the
+        // frames remaining once THIS block has been consumed, so next == 0 means
+        // the beat lands on the first sample of the NEXT block — it has not
+        // happened yet. Firing on `<= 0` emitted it one block early and, because
+        // the countdown then restarts from that early instant, shifted the whole
+        // click train by one block for good. It only bites when framesPerBeat is
+        // an exact multiple of the callback size, which is not exotic: 120 BPM at
+        // 48 kHz is 24000 frames, and 24000 / 192 (a common Oboe burst) = 125.
+        while (next < 0 && beatsLeft > 0) {
             const bool isDown = (patternMode == 1)
                 ? (idx % beatsPerBar) == 0
                 : (idx == 0 && firstDown);

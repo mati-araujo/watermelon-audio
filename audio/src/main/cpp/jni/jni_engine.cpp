@@ -76,14 +76,14 @@ bool ensureInputNode() {
 void releaseInputNode() {
     // Both handles have to drop together: leaving the engine's copy alive would
     // recreate the split this function exists to prevent.
-    if (g_jniState.inputNode) {
-        g_jniState.inputNode->stopInputStream();
-        g_jniState.inputNode.reset();
-    }
-    if (g_wmaEngine) {
-        std::lock_guard<std::mutex> lock(g_wmaEngine->inputNodeMutex);
-        g_wmaEngine->inputNode.reset();
-    }
+    //
+    // The stream stop and the engine-side drop are wma_input_release()'s job
+    // (it takes inputNodeMutex). What stays here is the half the C API cannot
+    // know about: the JNI's own mirror of the shared_ptr. Note the node itself
+    // survives until this second handle drops — which is why the stop happens
+    // first, inside the C API, rather than being left to the destructor.
+    wma_input_release(g_wmaEngine);
+    g_jniState.inputNode.reset();
 }
 
 // ==================== JniCache Implementation ====================
@@ -140,16 +140,23 @@ JNIEXPORT void JNI_OnUnload(JavaVM* vm, void* reserved) {
 
     std::lock_guard<std::mutex> lock(g_jniState.engineMutex);
 
-    // Stop and release InputNode first (drops both handles — see releaseInputNode)
+    // Stop and release InputNode first (drops both handles — see releaseInputNode).
+    // Must run before g_wmaEngine is cleared: it reaches through it.
     releaseInputNode();
 
-    // Clear raw pointer before destroying owner
+    // Both pointers are cleared BEFORE the owner is destroyed, not after.
+    // Since WA-2.6 the lifecycle entry points read g_wmaEngine rather than
+    // g_jniState.engine, so it needs the same treatment the raw pointer already
+    // had: leaving it published across wma_engine_destroy() would widen the
+    // window in which a concurrent call can reach a half-destroyed engine.
+    // Neither read is synchronised against this, so the ordering is all there is.
+    WmaEngine* engine = g_wmaEngine;
+    g_wmaEngine = nullptr;
     g_jniState.engine = nullptr;
 
-    // Destroy WmaEngine (which owns AudioEngine + BackendManager)
-    if (g_wmaEngine) {
-        wma_engine_destroy(g_wmaEngine);
-        g_wmaEngine = nullptr;
+    // Destroys AudioEngine + BackendManager.
+    if (engine) {
+        wma_engine_destroy(engine);
     }
 
     g_jniCache.release(env);

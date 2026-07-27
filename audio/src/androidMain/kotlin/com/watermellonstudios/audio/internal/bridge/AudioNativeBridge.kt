@@ -1441,7 +1441,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Start input stream synchronously (for legacy callers).
      * @return true if started successfully
      */
-    fun startInputStreamSync(): Boolean = nativeStartInputStream()
+    override fun startInputStreamSync(): Boolean = nativeStartInputStream()
 
     /**
      * Stop input stream.
@@ -1455,12 +1455,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Stop input stream synchronously (for legacy callers).
      */
-    fun stopInputStreamSync() = nativeStopInputStream()
+    override fun stopInputStreamSync() = nativeStopInputStream()
 
     /**
      * Check if input stream is running.
      */
-    fun isInputStreamRunning(): Boolean = nativeIsInputStreamRunning()
+    override fun isInputStreamRunning(): Boolean = nativeIsInputStreamRunning()
+    override fun isInputStarting(): Boolean = nativeIsInputStarting()
 
     /**
      * Set input source.
@@ -1473,17 +1474,17 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Set input source synchronously (for legacy callers).
      */
-    fun setInputSourceSync(source: Int) = nativeSetInputSource(source)
+    override fun setInputSourceSync(source: Int) = nativeSetInputSource(source)
 
     /**
      * Get current input source.
      */
-    fun getInputSource(): Int = nativeGetInputSource()
+    override fun getInputSource(): Int = nativeGetInputSource()
 
     /**
      * Set input gain in dB.
      */
-    fun setInputGain(gainDb: Float) {
+    override fun setInputGain(gainDb: Float) {
         if (!gainDb.isFinite()) return
         nativeSetInputGain(gainDb)
     }
@@ -1491,22 +1492,22 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Get current input gain.
      */
-    fun getInputGain(): Float = nativeGetInputGain()
+    override fun getInputGain(): Float = nativeGetInputGain()
 
     /**
      * Set noise gate enabled.
      */
-    fun setNoiseGateEnabled(enabled: Boolean) = nativeSetNoiseGateEnabled(enabled)
+    override fun setNoiseGateEnabled(enabled: Boolean) = nativeSetNoiseGateEnabled(enabled)
 
     /**
      * Check if noise gate is enabled.
      */
-    fun isNoiseGateEnabled(): Boolean = nativeIsNoiseGateEnabled()
+    override fun isNoiseGateEnabled(): Boolean = nativeIsNoiseGateEnabled()
 
     /**
      * Set noise gate threshold in dB.
      */
-    fun setNoiseGateThreshold(thresholdDb: Float) {
+    override fun setNoiseGateThreshold(thresholdDb: Float) {
         if (!thresholdDb.isFinite()) return
         nativeSetNoiseGateThreshold(thresholdDb)
     }
@@ -1514,27 +1515,27 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Get input level in dB for a channel.
      */
-    fun getInputLevel(channel: Int): Float = nativeGetInputLevel(channel)
+    override fun getInputLevel(channel: Int): Float = nativeGetInputLevel(channel)
 
     /**
      * Get input level (linear) for a channel.
      */
-    fun getInputLevelLinear(channel: Int): Float = nativeGetInputLevelLinear(channel)
+    override fun getInputLevelLinear(channel: Int): Float = nativeGetInputLevelLinear(channel)
 
     /**
      * Check if input is clipping.
      */
-    fun isInputClipping(): Boolean = nativeIsInputClipping()
+    override fun isInputClipping(): Boolean = nativeIsInputClipping()
 
     /**
      * Check if noise gate is open.
      */
-    fun isNoiseGateOpen(): Boolean = nativeIsNoiseGateOpen()
+    override fun isNoiseGateOpen(): Boolean = nativeIsNoiseGateOpen()
 
     /**
      * Get input latency in milliseconds.
      */
-    fun getInputLatencyMs(): Float = nativeGetInputLatencyMs()
+    override fun getInputLatencyMs(): Float = nativeGetInputLatencyMs()
 
     /**
      * Batched input metering snapshot in a single JNI crossing. Returns 7
@@ -1545,7 +1546,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Layout: [0]=levelDb ch0, [1]=levelDb ch1, [2]=levelLinear ch0,
      * [3]=levelLinear ch1, [4]=clipping(1/0), [5]=noiseGateOpen(1/0), [6]=latencyMs.
      */
-    fun getInputMeteringSnapshot(): FloatArray? = nativeGetInputMeteringSnapshot()
+    override fun getInputMeteringSnapshot(): FloatArray? = nativeGetInputMeteringSnapshot()
 
     /**
      * Release input node resources.
@@ -1558,7 +1559,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Release input node resources synchronously (for legacy callers).
      */
-    fun releaseInputNodeSync() = nativeReleaseInputNode()
+    override fun releaseInputNodeSync() = nativeReleaseInputNode()
 
     // ==================== Monitoring Operations ====================
 
@@ -1574,17 +1575,17 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Enable/disable monitoring synchronously (for legacy callers).
      */
-    fun setMonitoringEnabledSync(enabled: Boolean) = nativeSetMonitoringEnabled(enabled)
+    override fun setMonitoringEnabledSync(enabled: Boolean) = nativeSetMonitoringEnabled(enabled)
 
     /**
      * Check if monitoring is enabled.
      */
-    fun isMonitoringEnabled(): Boolean = nativeIsMonitoringEnabled()
+    override fun isMonitoringEnabled(): Boolean = nativeIsMonitoringEnabled()
 
     /**
      * Set monitoring volume.
      */
-    fun setMonitoringVolume(volume: Float) {
+    override fun setMonitoringVolume(volume: Float) {
         if (!volume.isFinite()) return
         nativeSetMonitoringVolume(volume.coerceIn(0f, 1f))
     }
@@ -1592,7 +1593,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Get monitoring volume.
      */
-    fun getMonitoringVolume(): Float = nativeGetMonitoringVolume()
+    override fun getMonitoringVolume(): Float = nativeGetMonitoringVolume()
 
     // ==================== Dual Touch Operations ====================
 
@@ -1872,6 +1873,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeStartInputStream(): Boolean
     private external fun nativeStopInputStream()
     private external fun nativeIsInputStreamRunning(): Boolean
+    private external fun nativeIsInputStarting(): Boolean
     private external fun nativeSetInputSource(source: Int)
     private external fun nativeGetInputSource(): Int
     private external fun nativeSetInputGain(gainDb: Float)
@@ -2476,13 +2478,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // ==================== Native Log Capture (App V §3.2) ====================
 
     /** Enable/disable the native in-memory log capture (second sink). */
-    fun setLogCaptureEnabled(enabled: Boolean) = nativeSetLogCaptureEnabled(enabled)
+    override fun setLogCaptureEnabled(enabled: Boolean) = nativeSetLogCaptureEnabled(enabled)
 
     /** Drain captured native log lines since the last call ("L/TAG: message"). */
-    fun drainCapturedLogs(): Array<String> = nativeDrainCapturedLogs() ?: emptyArray()
+    override fun drainCapturedLogs(): Array<String> = nativeDrainCapturedLogs() ?: emptyArray()
 
     /** Count of lines dropped because the capture ring overflowed. */
-    fun getLogCaptureDropped(): Int = nativeGetLogCaptureDropped()
+    override fun getLogCaptureDropped(): Int = nativeGetLogCaptureDropped()
 
     // ==================== Native Methods: Latency Benchmark ====================
 
@@ -2738,7 +2740,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * BPM/beats-per-bar/sample rate. Returns the actual loop length in frames,
      * or -1 if preparation failed (memory budget, invalid bars, transport not ready).
      */
-    fun looperPrepareTrackBars(trackIndex: Int, bars: Int, sampleRate: Int): Int =
+    override fun looperPrepareTrackBars(trackIndex: Int, bars: Int, sampleRate: Int): Int =
         nativeLooperPrepareTrackBars(trackIndex, bars, sampleRate)
 
     /**
@@ -2746,7 +2748,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Used to keep multi-track recordings phase-aligned. Returns the absolute
      * trigger frame (Transport playFrame), or -1 on failure.
      */
-    fun looperArmAtNextBar(trackIndex: Int): Long = nativeLooperArmAtNextBar(trackIndex)
+    override fun looperArmAtNextBar(trackIndex: Int): Long = nativeLooperArmAtNextBar(trackIndex)
 
     /**
      * Arm a track to start recording `offsetFrames` after the current Transport
@@ -2810,8 +2812,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun looperStartRecordingWithPreRoll(trackIndex: Int, preRollMs: Int) =
         nativeLooperStartRecordingWithPreRoll(trackIndex, preRollMs)
 
-    fun looperStartRecording(trackIndex: Int) = nativeLooperStartRecording(trackIndex)
-    fun looperStopRecording() = nativeLooperStopRecording()
+    override fun looperStartRecording(trackIndex: Int) = nativeLooperStartRecording(trackIndex)
+    override fun looperStopRecording() = nativeLooperStopRecording()
 
     /**
      * Abort the in-progress recording WITHOUT committing it.
@@ -2824,14 +2826,14 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun looperAbortRecording() = nativeLooperAbortRecording()
 
     fun looperStartOverdub(trackIndex: Int) = nativeLooperStartOverdub(trackIndex)
-    fun looperStopAll() = nativeLooperStopAll()
+    override fun looperStopAll() = nativeLooperStopAll()
     fun looperPause() = nativeLooperPause()
     fun looperResume() = nativeLooperResume()
     /** Target sample rate for subsequent WAV/stems exports (0 = engine rate). */
     fun looperSetExportSampleRate(sampleRate: Int) = nativeLooperSetExportSampleRate(sampleRate)
     fun looperSetFreeLength(freeLength: Boolean) = nativeLooperSetFreeLength(freeLength)
     fun looperClearTrack(trackIndex: Int) = nativeLooperClearTrack(trackIndex)
-    fun looperClearAll() = nativeLooperClearAll()
+    override fun looperClearAll() = nativeLooperClearAll()
 
     /**
      * Trim a track's buffer down to its recorded length, freeing unused capacity.
@@ -2855,9 +2857,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         level = DeprecationLevel.WARNING,
     )
     fun looperGetTrackPeakLevel(trackIndex: Int): Float = nativeLooperGetTrackPeakLevel(trackIndex)
-    fun looperIsTrackActive(trackIndex: Int): Boolean = nativeLooperIsTrackActive(trackIndex)
-    fun looperIsPlaying(): Boolean = nativeLooperIsPlaying()
-    fun looperIsRecording(): Boolean = nativeLooperIsRecording()
+    override fun looperIsTrackActive(trackIndex: Int): Boolean = nativeLooperIsTrackActive(trackIndex)
+    override fun looperIsPlaying(): Boolean = nativeLooperIsPlaying()
+    override fun looperIsRecording(): Boolean = nativeLooperIsRecording()
     fun looperGetMasterLoopFrames(): Int = nativeLooperGetMasterLoopFrames()
     fun looperGetRecordProgress(): Float = nativeLooperGetRecordProgress()
 
@@ -2870,7 +2872,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         "Will be removed in WP-1.",
         level = DeprecationLevel.WARNING,
     )
-    fun looperIsTrackPlaying(trackIndex: Int): Boolean = nativeLooperIsTrackPlaying(trackIndex)
+    override fun looperIsTrackPlaying(trackIndex: Int): Boolean = nativeLooperIsTrackPlaying(trackIndex)
     @Deprecated(
         "Polling per-track progress at 30 fps is the main lag source (audit COR-1). " +
         "Use setLooperStateListener() and react to onTrackProgress. " +
@@ -3020,30 +3022,30 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     //   val frames = transportFramesPerBar(2)  // 2-bar loop
     //   looperPrepareTrack(idx, frames, sr)
 
-    fun transportSetBeatsPerBar(beatsPerBar: Int) =
+    override fun transportSetBeatsPerBar(beatsPerBar: Int) =
         nativeTransportSetBeatsPerBar(beatsPerBar)
-    fun transportGetBeatsPerBar(): Int = nativeTransportGetBeatsPerBar()
-    fun transportFramesPerBeat(): Int = nativeTransportFramesPerBeat()
-    fun transportFramesPerBar(bars: Int): Int = nativeTransportFramesPerBar(bars)
-    fun transportStartMetronome(
+    override fun transportGetBeatsPerBar(): Int = nativeTransportGetBeatsPerBar()
+    override fun transportFramesPerBeat(): Int = nativeTransportFramesPerBeat()
+    override fun transportFramesPerBar(bars: Int): Int = nativeTransportFramesPerBar(bars)
+    override fun transportStartMetronome(
         beats: Int,
-        firstIsDownbeat: Boolean = true,
-        everyBeatPattern: Boolean = true
+        firstIsDownbeat: Boolean,
+        everyBeatPattern: Boolean
     ) = nativeTransportStartMetronome(beats, firstIsDownbeat, everyBeatPattern)
     /**
      * Run the metronome continuously (as an in-take reference click) until
      * [transportStopMetronome] is called. NoisyPad wires this to a user-facing
      * "metronome during recording" toggle.
      */
-    fun transportStartMetronomeContinuous(everyBeatPattern: Boolean = true) =
+    override fun transportStartMetronomeContinuous(everyBeatPattern: Boolean) =
         nativeTransportStartMetronomeContinuous(everyBeatPattern)
-    fun transportStopMetronome() = nativeTransportStopMetronome()
-    fun transportIsMetronomeRunning(): Boolean = nativeTransportIsMetronomeRunning()
-    fun transportIsMetronomeContinuous(): Boolean = nativeTransportIsMetronomeContinuous()
-    fun transportGetRemainingBeats(): Int = nativeTransportGetRemainingBeats()
+    override fun transportStopMetronome() = nativeTransportStopMetronome()
+    override fun transportIsMetronomeRunning(): Boolean = nativeTransportIsMetronomeRunning()
+    override fun transportIsMetronomeContinuous(): Boolean = nativeTransportIsMetronomeContinuous()
+    override fun transportGetRemainingBeats(): Int = nativeTransportGetRemainingBeats()
 
     // Export / Import (call from IO thread)
-    fun looperExportMix(filePath: String): Boolean = nativeLooperExportMix(filePath)
+    override fun looperExportMix(filePath: String): Boolean = nativeLooperExportMix(filePath)
     fun looperExportTrack(trackIndex: Int, filePath: String): Boolean = nativeLooperExportTrack(trackIndex, filePath)
 
     /**

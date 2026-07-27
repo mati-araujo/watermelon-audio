@@ -80,7 +80,8 @@ private:
 
     int mSampleRate = kDefaultSampleRate;
     int mFramesPerBuffer = kDefaultFramesPerBuffer;
-    bool mFullDuplexEnabled = true;
+    // Atomic: el setter no puede tomar mLifecycleMutex (ver el .cpp).
+    std::atomic<bool> mFullDuplexEnabled{true};
 
     std::unique_ptr<LockFreeRingBuffer> mInputBridge;
     std::vector<float> mUserInputBuffer;

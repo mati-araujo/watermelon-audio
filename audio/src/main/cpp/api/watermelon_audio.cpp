@@ -14,9 +14,12 @@
 #include "../core/ModeConfigurations.h"
 #include "../voice/VoiceTypes.h"
 #include "../platform/Logger.h"
+#include "../platform/LogCaptureBuffer.h"
 
-#include <cmath>
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <string>
 #include <vector>
 
 /* ================================================================
@@ -90,10 +93,15 @@ void wma_engine_destroy(WmaEngine* engine) {
     delete engine;
 }
 
+// The branch is on `>= 0`, not `> 0`: an explicit 0 is a real request (cut, no
+// ramp) and has to reach startWithFade/stopWithFade, which is what the JNI has
+// always done. Only WMA_FADE_DEFAULT falls through to the engine's own default.
+// Branching on `> 0` made fade_time_ms = 0 mean "default" and lost the cut.
+
 WmaResult wma_engine_start(WmaEngine* engine, int fade_time_ms) {
     WMA_CHECK(engine);
     bool ok;
-    if (fade_time_ms > 0) {
+    if (fade_time_ms >= 0) {
         ok = engine->engine->startWithFade(fade_time_ms);
     } else {
         ok = engine->engine->start();
@@ -103,7 +111,7 @@ WmaResult wma_engine_start(WmaEngine* engine, int fade_time_ms) {
 
 WmaResult wma_engine_stop(WmaEngine* engine, int fade_time_ms) {
     WMA_CHECK(engine);
-    if (fade_time_ms > 0) {
+    if (fade_time_ms >= 0) {
         engine->engine->stopWithFade(fade_time_ms);
     } else {
         engine->engine->stop();
@@ -328,6 +336,21 @@ bool wma_sf_get_preset_key_range(const WmaEngine* engine, int preset_index,
     return ok;
 }
 
+bool wma_sf_get_preset_bank_program(const WmaEngine* engine, int preset_index,
+                                     int* out_bank, int* out_program) {
+    WMA_CHECK_VAL(engine, false);
+    // -1 rather than 0: bank 0 / program 0 is a real preset (usually the piano),
+    // so a caller reading the out params after a false return would take the
+    // default for an answer. Mirrors what the JNI does before building its array.
+    int bank = -1, program = -1;
+    bool ok = engine->engine->getSoundFontPresetBankProgram(preset_index, bank, program);
+    if (ok) {
+        if (out_bank)    *out_bank = bank;
+        if (out_program) *out_program = program;
+    }
+    return ok;
+}
+
 void wma_sf_note_on(WmaEngine* engine, int touch_id, int midi_note, float velocity) {
     WMA_CHECK_VOID(engine);
     engine->engine->sfNoteOn(touch_id, midi_note, velocity);
@@ -451,11 +474,35 @@ WmaResult wma_effect_set_params_batch(WmaEngine* engine, int index,
     }
     if (!param_ids || !values || count <= 0) return WMA_OK;
     try {
-        for (int i = 0; i < count; ++i) {
-            if (std::isfinite(values[i])) {
-                engine->engine->setParameter(static_cast<size_t>(index), param_ids[i], values[i]);
-            }
-        }
+        // NOT a loop over setParameter: that bumps the state version once per
+        // parameter, and the Kotlin synchronizer emits on every bump — a scene
+        // load would be observed as N partial states. This is AUD-6, which the
+        // JNI fixed years ago and this function quietly kept, because it was
+        // written as a transcription of the individual setter rather than of
+        // the batch one. setParametersBatch bumps exactly once, at the end.
+        std::vector<int> effectIndices(static_cast<size_t>(count), index);
+        engine->engine->setParametersBatch(effectIndices.data(), param_ids, values,
+                                           static_cast<size_t>(count));
+        return WMA_OK;
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
+WmaResult wma_effect_set_params_multi(WmaEngine* engine,
+                                       const int* effect_indices,
+                                       const int* param_ids,
+                                       const float* values,
+                                       int count) {
+    WMA_CHECK(engine);
+    if (!effect_indices || !param_ids || !values || count <= 0) return WMA_OK;
+    try {
+        // No index guard here on purpose: setParametersBatch skips out-of-range
+        // effects itself. Rejecting the whole call because one entry in a scene
+        // points at an effect that is no longer in the chain would lose the
+        // other N-1 updates.
+        engine->engine->setParametersBatch(effect_indices, param_ids, values,
+                                           static_cast<size_t>(count));
         return WMA_OK;
     } catch (...) {
         return WMA_ERROR_UNKNOWN;
@@ -597,50 +644,106 @@ WmaResult wma_set_modulator_param(WmaEngine* engine, int param_id, float value) 
  * 11. Audio Mode
  * ================================================================ */
 
+namespace {
+
+/**
+ * Bring the InputNode up for a mode that needs microphone audio.
+ *
+ * The USB branch is not Android-specific by accident of where it was written —
+ * it is backend-specific, and asking the BackendManager keeps it that way. On a
+ * backend that delivers input through the render callback (LibusbBackend today)
+ * there must be NO separate node-level stream: the data already arrives via
+ * IAudioCallback::onAudioReady(inputData), and a second stream would fight it.
+ * On iOS getCurrentType() is never LIBUSB, so this reads as "start the stream"
+ * without a single #ifdef.
+ */
+void wmaAttachInputForMode(WmaEngine* engine) {
+    if (!ensureInputNode(engine) || !engine->inputNode) {
+        WMA_LOGW("wma_set_audio_mode: no input node — input will be silent");
+        return;
+    }
+
+    const auto backendType = watermelon_audio::BackendManager::getInstance().getCurrentType();
+    const bool backendDeliversInput =
+        (backendType == watermelon_audio::BackendType::LIBUSB);
+
+    if (backendDeliversInput) {
+        if (engine->inputNode->isInputStreamRunning()) {
+            engine->inputNode->stopInputStream();
+        }
+    } else if (!engine->inputNode->isInputStreamRunning()) {
+        engine->inputNode->startInputStream();
+    }
+
+    engine->inputNode->setMonitoringEnabled(true);
+    engine->engine->setInputNode(engine->inputNode);
+
+    // Kept from the JNI: on a device this line is how you tell "the mic is not
+    // working" apart from "the mode never attached it", and the smoke reads it
+    // out of logcat.
+    wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
+        "SET_MODE_INPUT_ATTACHED: backendType=%d, backendDeliversInput=%d, "
+        "monEnabled=%d, inputStreamRunning=%d",
+        static_cast<int>(backendType),
+        backendDeliversInput,
+        engine->inputNode->isMonitoringEnabled(),
+        engine->inputNode->isInputStreamRunning());
+}
+
+}  // namespace
+
 void wma_set_audio_mode(WmaEngine* engine, int mode) {
     WMA_CHECK_VOID(engine);
-    if (mode < 0 || mode > 2) return;
+    if (mode < 0 || mode > 2) {
+        WMA_LOGE("wma_set_audio_mode: invalid mode %d", mode);
+        return;
+    }
 
     auto audioMode = static_cast<watermelon_audio::AudioMode>(mode);
 
-    switch (audioMode) {
-        case watermelon_audio::AudioMode::CHAOS_PAD:
-            engine->engine->setOscillatorEnabled(true);
-            engine->engine->setVocoderCarrierSource(false);
-            engine->engine->setVocoderModulatorSource(engine->inputNode != nullptr);
-            if (engine->inputNode) {
-                engine->inputNode->setMonitoringEnabled(false);
-            }
-            break;
-
-        case watermelon_audio::AudioMode::INPUT_FX:
-            engine->engine->setOscillatorEnabled(false);
-            engine->engine->setVocoderCarrierSource(true);
-            ensureInputNode(engine);
-            if (engine->inputNode) {
-                if (!engine->inputNode->isInputStreamRunning()) {
-                    engine->inputNode->startInputStream();
+    try {
+        switch (audioMode) {
+            case watermelon_audio::AudioMode::CHAOS_PAD:
+                engine->engine->setOscillatorEnabled(true);
+                engine->engine->setVocoderCarrierSource(false);
+                engine->engine->setVocoderModulatorSource(engine->inputNode != nullptr);
+                if (engine->inputNode) {
+                    engine->inputNode->setMonitoringEnabled(false);
                 }
-                engine->inputNode->setMonitoringEnabled(true);
-                engine->engine->setInputNode(engine->inputNode);
-            }
-            break;
+                break;
 
-        case watermelon_audio::AudioMode::MIX:
-            engine->engine->setOscillatorEnabled(true);
-            engine->engine->setVocoderCarrierSource(true);
-            ensureInputNode(engine);
-            if (engine->inputNode) {
-                if (!engine->inputNode->isInputStreamRunning()) {
-                    engine->inputNode->startInputStream();
-                }
-                engine->inputNode->setMonitoringEnabled(true);
-                engine->engine->setInputNode(engine->inputNode);
-            }
-            break;
+            case watermelon_audio::AudioMode::INPUT_FX:
+                // BEFORE flipping oscillatorEnabled, and this ordering is the
+                // point: the audio thread services the request at the top of the
+                // next onAudioReady(), zero-filling the chain's scratch and
+                // feedback buffers and resetting every effect. Without it,
+                // chaos_pad's reverb tail and delay feedback bleed into the first
+                // blocks of microphone processing as a burst — and the longer the
+                // user stayed in chaos_pad, the louder it is.
+                engine->engine->requestResetEffectChain();
+                engine->engine->setOscillatorEnabled(false);
+                engine->engine->setVocoderCarrierSource(true);
+                wmaAttachInputForMode(engine);
+                break;
+
+            case watermelon_audio::AudioMode::MIX:
+                engine->engine->setOscillatorEnabled(true);
+                engine->engine->setVocoderCarrierSource(true);
+                wmaAttachInputForMode(engine);
+                break;
+        }
+
+        engine->currentMode.store(static_cast<int>(audioMode), std::memory_order_release);
+    } catch (const std::exception& e) {
+        WMA_LOGE("wma_set_audio_mode: exception: %s", e.what());
+    } catch (...) {
+        WMA_LOGE("wma_set_audio_mode: unknown exception");
     }
+}
 
-    engine->currentMode.store(static_cast<int>(audioMode), std::memory_order_release);
+const char* wma_get_mode_name(int mode) {
+    return watermelon_audio::ModeUtils::getModeName(
+        static_cast<watermelon_audio::AudioMode>(mode));
 }
 
 int wma_get_audio_mode(const WmaEngine* engine) {
@@ -666,26 +769,98 @@ bool wma_mode_requires_input(int mode) {
  * 12. Input
  * ================================================================ */
 
+/*
+ * Two ways for audio to get in, tried in order — and no platform #if anywhere,
+ * because the fallthrough itself is the platform test.
+ *
+ *   1. InputNode's own capture backend. Oboe on Android: it opens a dedicated
+ *      input stream and returns true, so Android stops right here and behaves
+ *      exactly as it always has.
+ *
+ *   2. The audio backend carrying input through onAudioReady's inputData. That
+ *      is the Apple path (CoreAudioBackend's AVAudioSinkNode) and the USB one.
+ *      InputNode has no capture backend there, so step 1 returns false and the
+ *      request falls through to here.
+ *
+ * AudioEngine already routes a non-null inputData to direct INPUT_FX or to
+ * InputNode::feedExternalInput(), so both roads end in the same DSP.
+ */
 bool wma_input_start(WmaEngine* engine) {
     if (!engine) return false;
     if (!ensureInputNode(engine)) return false;
-    return engine->inputNode->startInputStream();
+
+    if (engine->inputNode->startInputStream()) {
+        return true;
+    }
+
+    if (!engine->backendManager) return false;
+
+    // The caller explicitly asked for the microphone, so a stream reopen is
+    // authorized: every backend decides on capture when it opens. The mode path
+    // does NOT get this permission — see BackendManager::requestCapture.
+    //
+    // PENDING cuenta como éxito: el reopen quedó agendado y corre en su propio
+    // thread. Devolver false ahí sería reportar un fallo que no pasó, y es
+    // exactamente lo que el harness mostraría como "permiso denegado".
+    const auto outcome = engine->backendManager->requestCapture(
+        watermelon_audio::BackendManager::CaptureRequester::INPUT_NODE,
+        /*want=*/true,
+        /*allowRestart=*/true);
+
+    using Outcome = watermelon_audio::BackendManager::CaptureOutcome;
+    return outcome == Outcome::LIVE || outcome == Outcome::PENDING;
+}
+
+bool wma_input_is_starting(const WmaEngine* engine) {
+    if (!engine || !engine->backendManager) return false;
+    return engine->backendManager->isCaptureRequestPending();
 }
 
 void wma_input_stop(WmaEngine* engine) {
-    if (!engine || !engine->inputNode) return;
-    engine->inputNode->stopInputStream();
+    if (!engine) return;
+
+    if (engine->inputNode) {
+        engine->inputNode->stopInputStream();
+    }
+
+    // Withdraw the request either way: on the backend-capture path there is no
+    // node-level stream to stop, and leaving the request standing would make the
+    // next reopen turn the microphone back on by itself.
+    if (engine->backendManager) {
+        engine->backendManager->requestCapture(
+            watermelon_audio::BackendManager::CaptureRequester::INPUT_NODE,
+            /*want=*/false,
+            /*allowRestart=*/false);
+    }
 }
 
 bool wma_input_is_running(const WmaEngine* engine) {
-    if (!engine || !engine->inputNode) return false;
-    return engine->inputNode->isInputStreamRunning();
+    if (!engine) return false;
+
+    if (engine->inputNode && engine->inputNode->isInputStreamRunning()) {
+        return true;
+    }
+
+    return engine->backendManager && engine->backendManager->isCaptureLive();
 }
 
 void wma_input_set_source(WmaEngine* engine, int source) {
     if (!engine || !engine->inputNode) return;
-    if (source < 0 || source > 2) return;
-    engine->inputNode->setInputSource(static_cast<InputSource>(source));
+    if (source < 0 || source > 2) {
+        WMA_LOGE("wma_input_set_source: invalid source %d", source);
+        return;
+    }
+    // Switching source tears the stream down and brings it back up, so this is
+    // the one input setter that can throw. The guard used to live in the JNI;
+    // it belongs here instead, because a C++ exception unwinding into
+    // Kotlin/Native is not a caught error, it is a dead process.
+    try {
+        engine->inputNode->setInputSource(static_cast<InputSource>(source));
+    } catch (const std::exception& e) {
+        WMA_LOGE("wma_input_set_source: exception: %s", e.what());
+    } catch (...) {
+        WMA_LOGE("wma_input_set_source: unknown exception");
+    }
 }
 
 int wma_input_get_source(const WmaEngine* engine) {
@@ -713,9 +888,25 @@ bool wma_input_is_noise_gate_enabled(const WmaEngine* engine) {
     return engine->inputNode->isNoiseGateEnabled();
 }
 
+void wma_input_set_noise_gate_threshold(WmaEngine* engine, float threshold_db) {
+    if (!engine || !engine->inputNode) return;
+    engine->inputNode->setNoiseGateThreshold(threshold_db);
+}
+
+bool wma_input_is_noise_gate_open(const WmaEngine* engine) {
+    if (!engine || !engine->inputNode) return false;
+    return engine->inputNode->isNoiseGateOpen();
+}
+
 float wma_input_get_level(const WmaEngine* engine, int channel) {
+    // -100 dB, not 0: with no node there is no signal, and 0 dB is full scale.
     if (!engine || !engine->inputNode) return -100.0f;
     return engine->inputNode->getInputLevel(channel);
+}
+
+float wma_input_get_level_linear(const WmaEngine* engine, int channel) {
+    if (!engine || !engine->inputNode) return 0.0f;
+    return engine->inputNode->getInputLevelLinear(channel);
 }
 
 bool wma_input_is_clipping(const WmaEngine* engine) {
@@ -723,13 +914,52 @@ bool wma_input_is_clipping(const WmaEngine* engine) {
     return engine->inputNode->isClipping();
 }
 
+float wma_input_get_latency_ms(const WmaEngine* engine) {
+    if (!engine || !engine->inputNode) return 0.0f;
+    return engine->inputNode->getInputLatencyMs();
+}
+
+bool wma_input_get_metering_snapshot(const WmaEngine* engine, float* out_values) {
+    if (!engine || !engine->inputNode || !out_values) return false;
+    const auto& node = *engine->inputNode;
+    // Order is contractual — see the header, and InputStateManager on the Kotlin
+    // side, which indexes into this.
+    out_values[0] = node.getInputLevel(0);
+    out_values[1] = node.getInputLevel(1);
+    out_values[2] = node.getInputLevelLinear(0);
+    out_values[3] = node.getInputLevelLinear(1);
+    out_values[4] = node.isClipping() ? 1.0f : 0.0f;
+    out_values[5] = node.isNoiseGateOpen() ? 1.0f : 0.0f;
+    out_values[6] = node.getInputLatencyMs();
+    return true;
+}
+
 void wma_input_set_monitoring(WmaEngine* engine, bool enabled) {
     if (!engine || !engine->inputNode) return;
     engine->inputNode->setMonitoringEnabled(enabled);
 }
 
+bool wma_input_is_monitoring_enabled(const WmaEngine* engine) {
+    if (!engine || !engine->inputNode) return false;
+    return engine->inputNode->isMonitoringEnabled();
+}
+
+void wma_input_set_monitoring_volume(WmaEngine* engine, float volume) {
+    if (!engine || !engine->inputNode) return;
+    engine->inputNode->setMonitoringVolume(std::clamp(volume, 0.0f, 1.0f));
+}
+
+float wma_input_get_monitoring_volume(const WmaEngine* engine) {
+    if (!engine || !engine->inputNode) return 0.0f;
+    return engine->inputNode->getMonitoringVolume();
+}
+
 void wma_input_release(WmaEngine* engine) {
     if (!engine) return;
+    // Under the mutex, like wmaEnsureInputNode: creating and destroying the node
+    // race against each other, and the JNI's releaseInputNode() (which used to
+    // take this lock itself) now delegates here.
+    std::lock_guard<std::mutex> lock(engine->inputNodeMutex);
     if (engine->inputNode) {
         engine->inputNode->stopInputStream();
         engine->inputNode.reset();
@@ -1263,7 +1493,7 @@ float wma_looper_get_master_volume(const WmaEngine* engine) {
 }
 
 void wma_looper_set_track_loop_region(WmaEngine* engine, int track_index,
-                                       int start_frame, int end_frame) {
+                                       int64_t start_frame, int64_t end_frame) {
     WMA_CHECK_VOID(engine);
     engine->engine->getAudioLooper().setTrackLoopRegion(track_index, start_frame, end_frame);
 }
@@ -1288,27 +1518,544 @@ void wma_looper_trigger_click(WmaEngine* engine, bool is_downbeat) {
     engine->engine->getAudioLooper().triggerClick(is_downbeat);
 }
 
+/* ---------------- Export / import ---------------- */
+
+namespace {
+
+/// 16 / 24 / 32 -> wav::BitDepth, with 16 as the fallback. Was written out three
+/// times in the JNI (capture, mix, stems); one place now.
+wav::BitDepth toBitDepth(int bits) {
+    switch (bits) {
+        case 24: return wav::BitDepth::PCM_24;
+        case 32: return wav::BitDepth::FLOAT_32;
+        default: return wav::BitDepth::PCM_16;
+    }
+}
+
+/// Build the engine-side options, resolving everything that needs the Transport.
+AudioLooper::ExportOptions toExportOptions(const AudioEngine& engine,
+                                           const WmaExportOptions* in) {
+    const WmaExportOptions defaults = wma_looper_export_options_default();
+    if (!in) in = &defaults;
+
+    AudioLooper::ExportOptions out;
+    out.bitDepth = toBitDepth(in->bit_depth);
+    out.repeatLoops = (in->repeat_loops > 0) ? in->repeat_loops : 1;
+    out.applyLimiter = in->apply_limiter;
+
+    // count-in beats -> frames, through the Transport so the export and the
+    // metronome cannot disagree about how long a beat is.
+    //
+    // In int64 and clamped: `countInBeats * framesPerBeat()` was int arithmetic in
+    // the JNI, and at 24000 frames per beat it overflows past ~89k beats. Fourth
+    // width problem of this category, and the cheapest one to close.
+    if (in->count_in_beats > 0) {
+        const int64_t frames = static_cast<int64_t>(in->count_in_beats)
+                             * static_cast<int64_t>(engine.getTransport().framesPerBeat());
+        out.countInFrames = static_cast<int>(std::min<int64_t>(frames, INT32_MAX));
+    } else {
+        out.countInFrames = 0;
+    }
+
+    out.metadata.bpm = (in->bpm > 0) ? in->bpm
+                                     : static_cast<int>(engine.getTransport().getBpm());
+    if (in->project_name) out.metadata.projectName = in->project_name;
+    if (in->artist) out.metadata.artist = in->artist;
+    if (in->comment) out.metadata.comment = in->comment;
+    return out;
+}
+
+}  // namespace
+
+WmaExportOptions wma_looper_export_options_default(void) {
+    // Mirrors wm::ExportOptions' member initialisers. Kept in sync by
+    // test_c_api_looper.cpp, which asserts the two agree.
+    WmaExportOptions opts;
+    opts.bit_depth = 16;
+    opts.repeat_loops = 1;
+    opts.count_in_beats = 0;
+    opts.apply_limiter = true;
+    opts.bpm = 0;
+    opts.project_name = nullptr;
+    opts.artist = nullptr;
+    opts.comment = nullptr;
+    return opts;
+}
+
+/*
+ * Every entry point below that writes or reads a file is wrapped, and not as
+ * belt-and-braces: LooperExporter sizes its mix buffer from the requested length
+ * (`std::vector<float>(totalFrames * 2)`) with no ceiling, so an unreasonable
+ * count-in or repeat count throws std::length_error rather than returning false.
+ *
+ * A C++ exception must not cross this boundary. The JNI cannot propagate one —
+ * it would come out as an abort, not a Java exception — and cinterop has no
+ * notion of it at all. The `catch (...)` is what turns "the request was too big"
+ * into the false these functions already document. Same convention as
+ * wma_effect_add() above.
+ */
+bool wma_looper_export_mix_v2(WmaEngine* engine, const char* file_path,
+                              const WmaExportOptions* options) {
+    WMA_CHECK_VAL(engine, false);
+    if (!file_path) return false;
+    try {
+        const auto opts = toExportOptions(*engine->engine, options);
+        return engine->engine->getAudioLooper().exportMix(file_path, opts);
+    } catch (...) {
+        return false;
+    }
+}
+
+int wma_looper_export_stems(WmaEngine* engine, const char* directory,
+                            const WmaExportOptions* options) {
+    WMA_CHECK_VAL(engine, -1);
+    if (!directory) return -1;
+    try {
+        const auto opts = toExportOptions(*engine->engine, options);
+        return engine->engine->getAudioLooper().exportStems(directory, opts);
+    } catch (...) {
+        return -1;
+    }
+}
+
+bool wma_looper_capture_track(WmaEngine* engine, int track_index,
+                              const char* file_path, int bit_depth) {
+    WMA_CHECK_VAL(engine, false);
+    if (!file_path) return false;
+    try {
+        return engine->engine->getAudioLooper().captureTrack(track_index, file_path,
+                                                            toBitDepth(bit_depth));
+    } catch (...) {
+        return false;
+    }
+}
+
+float wma_looper_get_export_progress(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0.0f);
+    return engine->engine->getAudioLooper().getExportProgress();
+}
+
+void wma_looper_cancel_export(WmaEngine* engine) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().cancelExport();
+}
+
+void wma_looper_set_export_sample_rate(WmaEngine* engine, int sample_rate) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().setExportSampleRate(sample_rate);
+}
+
+bool wma_looper_is_export_in_progress(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getAudioLooper().isExportInProgress();
+}
+
+int64_t wma_looper_get_exports_completed(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getExportsCompleted();
+}
+
+int64_t wma_looper_get_exports_failed(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getExportsFailed();
+}
+
+int64_t wma_looper_get_stems_written(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getStemsWritten();
+}
+
+/* ---------------- Track editing & analysis ---------------- */
+
+void wma_looper_abort_recording(WmaEngine* engine) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().abortRecording();
+}
+
+void wma_looper_start_recording_with_pre_roll(WmaEngine* engine, int track_index,
+                                               int pre_roll_ms) {
+    WMA_CHECK_VOID(engine);
+    auto& looper = engine->engine->getAudioLooper();
+
+    // 1 s is what the pre-roll ring holds; asking for more would read past it.
+    if (pre_roll_ms < 0) pre_roll_ms = 0;
+    if (pre_roll_ms > 1000) pre_roll_ms = 1000;
+    if (pre_roll_ms == 0) {
+        looper.startRecording(track_index);
+        return;
+    }
+
+    const int sampleRate = looper.getSampleRate();
+    const int preRollFrames = (pre_roll_ms * sampleRate) / 1000;
+    if (preRollFrames <= 0) {
+        looper.startRecording(track_index);
+        return;
+    }
+
+    // Allocation on the calling thread, which is the control thread — never the
+    // audio thread. Same as the JNI did, and said so.
+    std::vector<float> preRoll(static_cast<size_t>(preRollFrames) * 2, 0.0f);
+    engine->engine->getPreRollRing().snapshot(preRoll.data(), preRollFrames);
+    looper.startRecordingWithPreRoll(track_index, preRoll.data(), preRollFrames);
+}
+
+int wma_looper_prepare_track_bars(WmaEngine* engine, int track_index, int bars,
+                                   int sample_rate) {
+    WMA_CHECK_VAL(engine, -1);
+    const int framesPerBar = engine->engine->getTransport().framesPerBar(1);
+    if (framesPerBar <= 0 || bars <= 0) return -1;
+
+    // `bars * framesPerBar` is int arithmetic in AudioLooper too, and prepareTrack
+    // only rejects a NON-POSITIVE length — so a bar count large enough to wrap
+    // into a small positive would allocate a tiny track and report the wrapped
+    // length as success. Third width problem in this category; caught here rather
+    // than propagated.
+    const int64_t lengthFrames =
+        static_cast<int64_t>(bars) * static_cast<int64_t>(framesPerBar);
+    if (lengthFrames > INT32_MAX) return -1;
+
+    const bool ok = engine->engine->getAudioLooper()
+                        .prepareTrackBars(track_index, bars, framesPerBar, sample_rate);
+    return ok ? static_cast<int>(lengthFrames) : -1;
+}
+
+bool wma_looper_trim_track(WmaEngine* engine, int track_index) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getAudioLooper().trimTrack(track_index);
+}
+
+bool wma_looper_finalize_free_loop(WmaEngine* engine, int track_index,
+                                    int loop_start, int loop_end, int tail_frames) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getAudioLooper().finalizeFreeLoop(
+        track_index, loop_start, loop_end, tail_frames);
+}
+
+bool wma_looper_find_content_bounds(const WmaEngine* engine, int track_index,
+                                    float threshold_ratio,
+                                    int* out_first, int* out_last) {
+    WMA_CHECK_VAL(engine, false);
+    if (!out_first || !out_last) return false;
+
+    // AudioLooper packs the pair into an int64 for the JNI's benefit; unpack it
+    // here so the C API can hand back two plain ints. The low half is masked as
+    // unsigned on the way in, so it has to come back out the same way or a frame
+    // index with the top bit set would arrive negative.
+    const int64_t packed =
+        engine->engine->getAudioLooper().findTrackContentBounds(track_index, threshold_ratio);
+    *out_first = static_cast<int>(packed >> 32);
+    *out_last = static_cast<int>(static_cast<uint32_t>(packed & 0xFFFFFFFF));
+    return true;
+}
+
+int wma_looper_detect_onsets(const WmaEngine* engine, int track_index,
+                              int* out_onsets, int max_onsets,
+                              int hop_frames, float sensitivity) {
+    WMA_CHECK_VAL(engine, 0);
+    if (!out_onsets || max_onsets <= 0) return 0;
+    const int written = engine->engine->getAudioLooper().detectTrackOnsets(
+        track_index, out_onsets, max_onsets, hop_frames, sensitivity);
+    return written < 0 ? 0 : written;
+}
+
+/* ---------------- Per-track playback modes ---------------- */
+
+void wma_looper_set_track_play_count(WmaEngine* engine, int track_index, int plays) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().setTrackPlayCount(track_index, plays);
+}
+
+void wma_looper_set_track_percussion_mode(WmaEngine* engine, int track_index,
+                                           bool percussion) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().setTrackPercussionMode(track_index, percussion);
+}
+
+bool wma_looper_is_track_percussion_mode(const WmaEngine* engine, int track_index) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getAudioLooper().isTrackPercussionMode(track_index);
+}
+
+void wma_looper_set_tail_ms(WmaEngine* engine, int ms) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().setTailMs(ms);
+}
+
+int wma_looper_get_tail_ms(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getTailMs();
+}
+
+void wma_looper_set_capabilities(WmaEngine* engine, int64_t budget_bytes,
+                                  int max_tracks, int max_free_seconds) {
+    WMA_CHECK_VOID(engine);
+    // Defaults reproduce the historical behaviour; each field is only overridden
+    // when the caller passes a positive value. That "0 means leave it alone"
+    // contract is the whole reason this takes three arguments instead of a struct.
+    AudioLooper::LooperCapabilities caps;
+    if (budget_bytes > 0) caps.memoryBudgetBytes = static_cast<size_t>(budget_bytes);
+    if (max_tracks > 0) caps.maxActiveTracks = max_tracks;
+    if (max_free_seconds > 0) caps.maxFreeSeconds = max_free_seconds;
+    engine->engine->getAudioLooper().setCapabilities(caps);
+}
+
+/* ---------------- Armed recording ---------------- */
+
+namespace {
+
+/**
+ * Arm @p track at @p trigger and report whether it took.
+ *
+ * AudioLooper::armRecording is void and no-ops on a bad index or a track with no
+ * capacity, so the JNI versions of arm_at_next_bar / arm_in_frames returned a
+ * positive trigger frame for a recording that was never armed — while their own
+ * doc comment promised "-1 on failure". A caller showing a count-in would count
+ * down to nothing. Reading the armed track back is how we keep the promise.
+ */
+int64_t armAndConfirm(WmaEngine* engine, int track, int64_t trigger) {
+    // `track >= 0` is not redundant with the comparison below: getArmedTrack()
+    // reports -1 for "nothing armed", so arming track -1 would confirm itself.
+    // A test caught exactly that.
+    if (track < 0) return -1;
+    auto& looper = engine->engine->getAudioLooper();
+    looper.armRecording(track, trigger);
+    return looper.getArmedTrack() == track ? trigger : -1;
+}
+
+}  // namespace
+
+int64_t wma_looper_arm_at_next_bar(WmaEngine* engine, int track_index) {
+    WMA_CHECK_VAL(engine, -1);
+    auto& transport = engine->engine->getTransport();
+    const int64_t trigger = transport.nextBarBoundary(transport.getPlayFrame());
+    return armAndConfirm(engine, track_index, trigger);
+}
+
+int64_t wma_looper_arm_in_frames(WmaEngine* engine, int track_index,
+                                  int64_t offset_frames) {
+    WMA_CHECK_VAL(engine, -1);
+    if (offset_frames < 0) offset_frames = 0;
+    const int64_t trigger = engine->engine->getTransport().getPlayFrame() + offset_frames;
+    return armAndConfirm(engine, track_index, trigger);
+}
+
+int64_t wma_looper_arm_synced_to_loop(WmaEngine* engine, int track_index,
+                                      int64_t latency_frames) {
+    return wma_looper_arm_synced_to_loop_quantized(engine, track_index, latency_frames, 0);
+}
+
+int64_t wma_looper_arm_synced_to_loop_quantized(WmaEngine* engine, int track_index,
+                                                 int64_t latency_frames,
+                                                 int quantum_frames) {
+    WMA_CHECK_VAL(engine, -1);
+    if (latency_frames < 0) latency_frames = 0;
+    // armSyncedToLoop takes latency as an int. The clamp above plus this cast
+    // mirror what the JNI did; a latency that overflowed an int would be hours,
+    // not a round trip.
+    const int64_t playFrame = engine->engine->getTransport().getPlayFrame();
+    return engine->engine->getAudioLooper().armSyncedToLoop(
+        track_index, playFrame, static_cast<int>(latency_frames), quantum_frames);
+}
+
+void wma_looper_cancel_arm(WmaEngine* engine) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().cancelArm();
+}
+
+int wma_looper_get_armed_track(const WmaEngine* engine) {
+    // -1, not 0: track 0 is a real track, so "none" needs its own value.
+    WMA_CHECK_VAL(engine, -1);
+    return engine->engine->getAudioLooper().getArmedTrack();
+}
+
+/* ---------------- Telemetry ---------------- */
+
+int64_t wma_looper_get_armed_triggered(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getArmedTriggered();
+}
+
+int64_t wma_looper_get_frames_dropped(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getFramesDropped();
+}
+
+int64_t wma_looper_get_dropped_events(const WmaEngine* engine) {
+    // The dispatcher, not the looper — this counter is about the event queue
+    // overflowing, not about audio.
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getLooperEventDispatcher().getDroppedEvents();
+}
+
+void wma_looper_reset_telemetry(WmaEngine* engine) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().resetTelemetry();
+}
+
 bool wma_looper_export_mix(WmaEngine* engine, const char* file_path) {
     WMA_CHECK_VAL(engine, false);
     if (!file_path) return false;
-    return engine->engine->getAudioLooper().exportMix(file_path);
+    try {
+        return engine->engine->getAudioLooper().exportMix(file_path);
+    } catch (...) {
+        return false;
+    }
 }
 
 bool wma_looper_export_track(WmaEngine* engine, int track_index, const char* file_path) {
     WMA_CHECK_VAL(engine, false);
     if (!file_path) return false;
-    return engine->engine->getAudioLooper().exportTrack(track_index, file_path);
+    try {
+        return engine->engine->getAudioLooper().exportTrack(track_index, file_path);
+    } catch (...) {
+        return false;
+    }
 }
 
 bool wma_looper_import_track(WmaEngine* engine, int track_index,
                               const char* file_path, int sample_rate) {
     WMA_CHECK_VAL(engine, false);
     if (!file_path) return false;
-    return engine->engine->getAudioLooper().importTrack(track_index, file_path, sample_rate);
+    try {
+        return engine->engine->getAudioLooper().importTrack(track_index, file_path,
+                                                           sample_rate);
+    } catch (...) {
+        return false;
+    }
 }
 
 /* ================================================================
- * 20. Waveform & Metering
+ * 20. Transport (musical clock & metronome)
+ * ================================================================ */
+
+void wma_transport_set_beats_per_bar(WmaEngine* engine, int beats_per_bar) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getTransport().setBeatsPerBar(beats_per_bar);
+}
+
+int wma_transport_get_beats_per_bar(const WmaEngine* engine) {
+    // 4 rather than 0: the default meter, which is also what the Transport
+    // would report. A caller dividing by this must not get a zero.
+    WMA_CHECK_VAL(engine, 4);
+    return engine->engine->getTransport().getBeatsPerBar();
+}
+
+int wma_transport_frames_per_beat(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getTransport().framesPerBeat();
+}
+
+int wma_transport_frames_per_bar(const WmaEngine* engine, int bars) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getTransport().framesPerBar(bars);
+}
+
+void wma_transport_start_metronome(WmaEngine* engine, int beats,
+                                    bool first_is_downbeat,
+                                    bool every_beat_pattern) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getTransport().startMetronome(beats, first_is_downbeat,
+                                                  every_beat_pattern);
+}
+
+void wma_transport_start_metronome_continuous(WmaEngine* engine,
+                                               bool every_beat_pattern) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getTransport().startMetronomeContinuous(every_beat_pattern);
+}
+
+void wma_transport_stop_metronome(WmaEngine* engine) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getTransport().stopMetronome();
+}
+
+bool wma_transport_is_metronome_running(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getTransport().isMetronomeRunning();
+}
+
+bool wma_transport_is_metronome_continuous(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getTransport().isMetronomeContinuous();
+}
+
+int wma_transport_get_remaining_beats(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getTransport().getRemainingBeats();
+}
+
+/* ================================================================
+ * 21. Diagnostics & Latency
+ * ================================================================ */
+
+int wma_get_recommended_buffer_size(const WmaEngine* engine, float target_latency_ms) {
+    if (!(target_latency_ms > 0.0f)) return -1;  // also rejects NaN
+
+    // currentSampleRate() rather than "getStreamInfo() or else 48000": it
+    // resolves running stream -> preferred rate -> 48000 and never returns <= 0.
+    // The hand-rolled version skipped the preferred rate, so a device configured
+    // for 44.1 kHz that had not started yet got a size computed for 48 kHz.
+    // That shortcut is exactly what AudioEngine.h warns about above
+    // currentSampleRate(), and what put SoundFonts on the wrong rate in WA-2.0.
+    const int sampleRate = engine && engine->engine
+                               ? engine->engine->currentSampleRate()
+                               : 48000;
+
+    const double targetFrames =
+        static_cast<double>(target_latency_ms) / 1000.0 * static_cast<double>(sampleRate);
+
+    int bufferSize = 64;
+    while (bufferSize < targetFrames && bufferSize < 2048) {
+        bufferSize *= 2;
+    }
+    return bufferSize;
+}
+
+int wma_get_latency_report(const WmaEngine* engine, char* buffer, int buffer_size) {
+    std::string report = "NoisyPad Latency Report\n";
+    report += "========================\n\n";
+
+    if (!engine || !engine->engine) {
+        report += "Engine not initialized\n";
+    } else {
+        int32_t sampleRate = 0, bufferFrames = 0;
+        double latencyMillis = 0.0;
+        if (engine->engine->getStreamInfo(sampleRate, bufferFrames, latencyMillis)) {
+            report += "Sample Rate: " + std::to_string(sampleRate) + " Hz\n";
+            report += "Buffer Size: " + std::to_string(bufferFrames) + " frames\n";
+            report += "Output Latency: " + std::to_string(latencyMillis) + " ms\n";
+        } else {
+            // The old report just omitted these three lines, which reads as
+            // "zero latency" rather than "no stream to measure".
+            report += "No stream running — nothing to measure.\n";
+        }
+
+        const float inputLatency = wma_input_get_latency_ms(engine);
+        if (inputLatency > 0.0f) {
+            report += "Input Latency: " + std::to_string(inputLatency) + " ms\n";
+        }
+
+        // The backend was available all along —BackendManager::getStreamInfo()
+        // carries it and AudioEngine logs it at start— and the report threw it
+        // away. On the USB path that left a latency report with no mention of
+        // USB, which is the first thing you would want to know.
+        auto& manager = watermelon_audio::BackendManager::getInstance();
+        report += "Backend: ";
+        report += watermelon_audio::backendTypeToString(manager.getCurrentType());
+        report += "\n";
+    }
+
+    const int fullLength = static_cast<int>(report.size());
+    if (buffer && buffer_size > 0) {
+        const int copyLength = std::min(fullLength, buffer_size - 1);
+        std::memcpy(buffer, report.data(), static_cast<size_t>(copyLength));
+        buffer[copyLength] = '\0';
+    }
+    return fullLength;
+}
+
+/* ================================================================
+ * 22. Waveform & Metering
  * ================================================================ */
 
 int wma_get_waveform_samples(WmaEngine* engine, float* buffer, int max_size) {
@@ -1349,7 +2096,7 @@ void wma_get_output_levels(const WmaEngine* engine, float* out_levels) {
 }
 
 /* ================================================================
- * 21. Configuration / Logging
+ * 23. Configuration / Logging
  * ================================================================ */
 
 /* Static storage for C callback — bridged to C++ LogCallback. */
@@ -1365,6 +2112,50 @@ static void wmaLogBridge(wma::LogLevel level, const char* tag, const char* msg) 
 void wma_set_log_callback(WmaLogCallback callback) {
     g_cLogCallback = callback;
     wma::setLogCallback(callback ? wmaLogBridge : nullptr);
+}
+
+/* ---------------- Log capture (App V §3.2) ---------------- */
+
+// The batch owns the drained strings so wma_log_batch_line() can hand out
+// pointers that stay valid until the caller frees it.
+struct WmaLogBatch {
+    std::vector<std::string> lines;
+};
+
+void wma_log_capture_set_enabled(bool enabled) {
+    wma::LogCaptureBuffer::instance().setEnabled(enabled);
+}
+
+int wma_log_capture_dropped(void) {
+    return wma::LogCaptureBuffer::instance().droppedCount();
+}
+
+WmaLogBatch* wma_log_capture_drain(void) {
+    // drain() empties the ring, so a throw here would lose the lines with no
+    // way to get them back. Build the batch from the returned vector and hand
+    // back NULL only if even that fails.
+    try {
+        auto* batch = new WmaLogBatch{wma::LogCaptureBuffer::instance().drain()};
+        return batch;
+    } catch (const std::exception& e) {
+        WMA_LOGE("wma_log_capture_drain: %s", e.what());
+        return nullptr;
+    }
+}
+
+int wma_log_batch_count(const WmaLogBatch* batch) {
+    if (!batch) return 0;
+    return static_cast<int>(batch->lines.size());
+}
+
+const char* wma_log_batch_line(const WmaLogBatch* batch, int index) {
+    if (!batch) return nullptr;
+    if (index < 0 || static_cast<size_t>(index) >= batch->lines.size()) return nullptr;
+    return batch->lines[static_cast<size_t>(index)].c_str();
+}
+
+void wma_log_batch_free(WmaLogBatch* batch) {
+    delete batch;
 }
 
 const char* wma_get_version(void) {

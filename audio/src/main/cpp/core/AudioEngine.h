@@ -1067,6 +1067,15 @@ private:
     bool transitionToState(EngineState newState);
 
     /**
+     * Deshace un start que ya había pasado a Running y falló después.
+     *
+     * Existe porque `Running -> Stopped` NO es una transición válida —desde
+     * Running la tabla sólo admite Stopping—, así que el rollback directo se
+     * descartaba en silencio y dejaba el motor informando Running sin stream.
+     */
+    void rollbackFailedStart();
+
+    /**
      * @brief Calcula el volumen actual considerando fade y master volume
      * @return Volumen final a aplicar (0.0 - 1.0)
      */

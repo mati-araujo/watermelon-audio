@@ -107,8 +107,10 @@ void SplitBackend::setBufferSize(int framesPerBuffer) {
 }
 
 void SplitBackend::setFullDuplexEnabled(bool enable) {
-    std::lock_guard<std::mutex> lock(mLifecycleMutex);
-    mFullDuplexEnabled = enable;
+    // Sin mLifecycleMutex: start() lo retiene mientras arranca los dos
+    // sub-backends, y este setter no puede quedarse esperando eso. Ver el
+    // comentario equivalente en CoreAudioBackend.
+    mFullDuplexEnabled.store(enable, std::memory_order_release);
 }
 
 StreamInfo SplitBackend::getStreamInfo() const {
