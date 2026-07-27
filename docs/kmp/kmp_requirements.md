@@ -2397,8 +2397,8 @@ misma razón que la clave del micrófono en iOS: el caso que más importa probar
 
 ### Dónde retomar (2026-07-27)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **40 commits sobre `master`**. La branch
-existe en `origin` pero está **ahead 34** — sólo los 6 primeros están pusheados.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **43 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 37** — sólo los 6 primeros están pusheados.
 `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
@@ -2407,10 +2407,17 @@ existe en `origin` pero está **ahead 34** — sólo los 6 primeros están pushe
 > su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
 > si alguien corrió los gates y lo dijo.
 
-**Última verificación local completa (2026-07-27, con los controles 1 y 2):** portabilidad OK
-(324 archivos), **749 tests C++**, ambos slices de iOS con link check, **101 tests de
-simulador**, **64 JVM**, `assembleDebug`, XCFramework, `compileIosMainKotlinMetadata`, el
-guardrail de UI y el harness **arrancando en el simulador**. Todo en verde.
+**Última verificación local completa (2026-07-27, con los cinco bugs de iOS arreglados):**
+portabilidad OK (324 archivos), **755 tests C++**, ambos slices de iOS con link check,
+**101 tests de simulador**, **64 JVM**, `assembleDebug`, XCFramework,
+`compileIosMainKotlinMetadata`, el guardrail de UI y el harness **arrancando en el
+simulador**. Todo en verde.
+
+> [!IMPORTANT]
+> **Ese verde vale más que antes, y por un motivo concreto.** Hasta el bug 3 de §10, un cambio
+> en C++ podía no llegar al framework de iOS y el gate igual daba OK — o sea que los tests de
+> simulador podían estar corriendo sobre un `.a` viejo. Ya no: el `.a` es input declarado de
+> cinterop.
 
 > [!TIP]
 > **Ojo con el verde de Gradle que llega en 400 ms.** Las tasks de test se reportan
@@ -2439,7 +2446,7 @@ bloqueo de Xcode de §11 ya no existe):
 
 ```bash
 bash scripts/check-cpp-portability.sh          # guardrail WA-0.4
-bash scripts/run-cpp-tests.sh                  # 749 tests C++
+bash scripts/run-cpp-tests.sh                  # 755 tests C++
 bash scripts/build-ios.sh                      # ambos slices + link check
 ./gradlew :audio:iosSimulatorArm64Test         # 101 tests iOS  (--rerun-tasks!)
 ./gradlew :audio:testDebugUnitTest             # 64 tests JVM   (--rerun-tasks!)
@@ -2510,14 +2517,20 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3). **WA-2.5 + WA-2.6 ✅ CERRADA** — las 10 categorías más la cola de 15; delegación **237/278** por el script, **240/289** real. Los 49 que no delegan son **todos deliberados y con el porqué escrito en el código** (40 USB/D4, 5 Oboe/stubs, 2 listeners, 2 de backend que sólo tienen caminos USB): **cero sin clasificar**. **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2). **WA-4.3 primera mitad la subsume WA-5.5**, que ya corre en el simulador |
-| **Fase 5** — Harness (WA-5.5) | 🟡 **EN CURSO** — `:harness` compila en las dos plataformas y **la app corre en el simulador de iOS**. Gate de 8 a **10 comandos**. Controles **1/7** (monitor de entrada, que requirió subir §12 Input a `commonMain`) y **2/7** (pad XY). Faltan 5, desbloqueados por el opt-in decidido en §10 |
+| **Fase 5** — Harness (WA-5.5) | 🟡 **EN CURSO** — `:harness` corre en el simulador de iOS y **encontró 5 bugs de arranque, todos arreglados**: el motor abre un stream real por primera vez (48 kHz / 256 frames / 10.10 ms). Gate de 8 a **10 comandos**. Controles **1/7** (monitor de entrada, que requirió subir §12 Input a `commonMain`) y **2/7** (pad XY). Falta el reopen de captura, y 5 controles desbloqueados por el opt-in de §10 |
 
-> [!CAUTION]
-> **Antes que nada: los dos bugs que encontró el harness al apretar "capturar"** (§10, "el
-> harness apretó capturar"). **En iOS nadie selecciona un backend, así que el motor no puede
-> abrir un stream**, y un start fallido lo deja reportando `RUNNING` para siempre porque la
-> tabla de transiciones rechaza el rollback. Los diez comandos del gate estaban en verde.
-> Arreglar eso va **antes** que los controles: sin stream no hay nada que medir.
+> [!IMPORTANT]
+> **Los cinco bugs de arranque de iOS están ARREGLADOS** (§10, "el harness apretó capturar").
+> El motor abre un stream real en el simulador —48 kHz, 256 frames, 10.10 ms— y el monitor de
+> entrada **mide**. Lo que falta es que el medidor **se mueva**.
+
+**Lo primero: cerrar el último eslabón de la captura.** El stream de salida abre con
+`Capture: off`, y ante `wma_input_start` el backend responde *"Full duplex requested while
+running without a capture stream — takes effect on the next start()"*: **difiere en vez de
+reabrir**, aunque `wma_input_start` llame a `requestCapture` con `allowRestart=true`. El render
+lo confirma con `inputData=0x0` en cada callback. Empezar por `BackendManager::requestCapture`
+y `CoreAudioBackend`: por qué el permiso de reabrir no se está ejerciendo. **Es lo único entre
+"el medidor mide" y "el medidor se mueve", que es la pregunta abierta más grande del programa.**
 
 **Después: el opt-in `@InternalWatermelonApi` y los 5 controles que faltan** — la
 decisión ya está tomada (§10, "cómo llegan al harness los 5 controles que faltan"): **NO se
@@ -2536,10 +2549,9 @@ opt-in. Ya no queda trabajo de C API pendiente: WA-2.5/2.6 está cerrada.
 3. **Controles 3 a 7**: rack de efectos + routing · tira de looper · metrónomo · diagnóstico
    con vista de logs. **El looper es el grande** (79 funciones en el JNI, cero en commonMain):
    conviene llegar con los otros ya rodados, igual que en WA-2.5/2.6.
-4. **Y lo que de verdad importa: apretar "capturar" y ver la barra.** El control 1 está en
-   pantalla y nunca se tocó. Necesita el fix de `sudo xcode-select -s
-   /Applications/Xcode.app/Contents/Developer` (falta el symlink `/var/db/xcode_select_link`)
-   para que levante el panel del simulador, o una persona.
+4. **El panel del simulador ya funciona** (el symlink `/var/db/xcode_select_link` se creó con
+   `sudo xcode-select -s ...`). Se puede manejar la UI desde la sesión: `attach`, `tap`,
+   `screenshot`. Es lo que encontró los cinco bugs.
 
 > [!TIP]
 > **La regla que dejó esta decisión:** algo entra a la API pública porque **un consumidor real
