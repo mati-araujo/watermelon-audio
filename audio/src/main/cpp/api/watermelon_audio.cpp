@@ -14,6 +14,7 @@
 #include "../core/ModeConfigurations.h"
 #include "../voice/VoiceTypes.h"
 #include "../platform/Logger.h"
+#include "../platform/LogCaptureBuffer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -2099,6 +2100,50 @@ static void wmaLogBridge(wma::LogLevel level, const char* tag, const char* msg) 
 void wma_set_log_callback(WmaLogCallback callback) {
     g_cLogCallback = callback;
     wma::setLogCallback(callback ? wmaLogBridge : nullptr);
+}
+
+/* ---------------- Log capture (App V §3.2) ---------------- */
+
+// The batch owns the drained strings so wma_log_batch_line() can hand out
+// pointers that stay valid until the caller frees it.
+struct WmaLogBatch {
+    std::vector<std::string> lines;
+};
+
+void wma_log_capture_set_enabled(bool enabled) {
+    wma::LogCaptureBuffer::instance().setEnabled(enabled);
+}
+
+int wma_log_capture_dropped(void) {
+    return wma::LogCaptureBuffer::instance().droppedCount();
+}
+
+WmaLogBatch* wma_log_capture_drain(void) {
+    // drain() empties the ring, so a throw here would lose the lines with no
+    // way to get them back. Build the batch from the returned vector and hand
+    // back NULL only if even that fails.
+    try {
+        auto* batch = new WmaLogBatch{wma::LogCaptureBuffer::instance().drain()};
+        return batch;
+    } catch (const std::exception& e) {
+        WMA_LOGE("wma_log_capture_drain: %s", e.what());
+        return nullptr;
+    }
+}
+
+int wma_log_batch_count(const WmaLogBatch* batch) {
+    if (!batch) return 0;
+    return static_cast<int>(batch->lines.size());
+}
+
+const char* wma_log_batch_line(const WmaLogBatch* batch, int index) {
+    if (!batch) return nullptr;
+    if (index < 0 || static_cast<size_t>(index) >= batch->lines.size()) return nullptr;
+    return batch->lines[static_cast<size_t>(index)].c_str();
+}
+
+void wma_log_batch_free(WmaLogBatch* batch) {
+    delete batch;
 }
 
 const char* wma_get_version(void) {

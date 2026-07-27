@@ -26,3 +26,4 @@ out/
 .claude/
 # Host sanitizer build dir (run-cpp-tests.sh SANITIZE=...)
 **/cpp/tests/build-san
+__pycache__/

@@ -1809,6 +1809,106 @@ sostiene evita que el próximo lector lea el bloque entero como uniformemente ne
 > está afuera a propósito?".
 
 
+### Nota de cierre — la cola de 15, y con eso WA-2.5/2.6 (2026-07-27)
+
+**Cerrada. Delegación 237/278 por el script, 240/289 real.** Los 49 que no delegan se
+reparten en cuatro baldes, **todos deliberados y todos con el porqué escrito en el código**:
+40 USB (D4), 5 de `benchmark` (Oboe/stubs), 2 listeners del looper y 2 de backend. **Cero
+sin clasificar** — que era exactamente lo que faltaba para poder decir que está cerrada.
+
+**Primero se enumeró el complemento, y esta vez cerró.** Antes de tocar nada se listaron
+los 54 entry points que no delegaban dentro del alcance del script y los 11 que viven fuera
+de él (`jni_benchmark.cpp`, `jni_usb.cpp`): 62 en total, que descomponen exacto en 40 + 5 +
+2 + 15. **No había un ítem 16 escondido.** También apareció que el "290 real" del conteo
+anterior era uno de más: el `grep` crudo contaba una línea que no es un entry point. Son
+**289**.
+
+**Migración mecánica: 10, no 12.** La tabla de la nota anterior decía "12 de los 15 ya
+tienen contraparte" contando como tales los 2 de backend que estaban marcados "a revisar".
+Los que tenían `wma_*` eran 10: routing 4 (§9), XY mapping 2 + `SetDepthValue` (§17, no §9
+— las categorías desparraman una vez más) y backend 3 (§16). Los 10 se diffearon en las dos
+direcciones: **transcripciones fieles, cero divergencia.** Es la primera categoría de la
+serie sin un solo bug de divergencia — y también la primera cuyo trabajo real fue escribir
+los tests, no arreglar el código.
+
+**El ancho de los tipos no tenía nada que buscar acá, y eso también se verifica.** Las cuatro
+capas son `Int`/`Float`/`Boolean` → `jint`/`jfloat`/`jboolean` → `int`/`float`/`bool` →
+`int`/`float`/`bool`. Ni un `jlong`, ni aritmética de frames. Los cuatro casos del looper
+salieron todos de esas dos señales; su ausencia es la razón por la que no hay un quinto.
+
+> [!CAUTION]
+> **`setDepthValue` es un dead store en las cuatro capas.** Kotlin hace `coerceIn(0f,1f)`,
+> el JNI clampea, la C API clampea, `EffectChain::setDepthValue` guarda en
+> `std::atomic<float> mDepthValue`… y **nadie lee `mDepthValue`**: un grep sobre el motor
+> entero encuentra la declaración, el único store, y nada más. No tiene getter y no llega al
+> render path. Mientras tanto su doc comment en Kotlin promete *"Set depth axis value.
+> Lock-free real-time path."*
+>
+> El eje depth **sí** funciona, por otro lado: es el eje 2 del mapping, manejado por
+> `applyAutomation`. `setDepthValue` es un escalar huérfano al lado.
+>
+> **Se migró fiel en vez de arreglarlo, a propósito.** Cablear `mDepthValue` al audio
+> inventaría comportamiento que ningún caller escuchó nunca, y eso es una decisión de
+> producto, no una migración. **Va a la lista del smoke**: si un slider de depth en NoisyPad
+> llama sólo a `setDepthValue`, no hace nada — y no es una regresión de esta serie, es así
+> desde siempre.
+
+> [!CAUTION]
+> **`wma_select_backend` miente por omisión, y iOS es donde se nota.**
+> `BackendManager::selectBackend(LIBUSB)` sin backend USB **no falla**: reescribe el tipo a
+> OBOE, apunta al backend de sistema y devuelve `true`. En iOS `createUsbAudioBackend()`
+> siempre devuelve null (D4), así que un caller que pide USB en iOS **recibe éxito** y sólo
+> `wma_get_backend_type()` revela que no lo consiguió. El valor de retorno no significa
+> "conseguiste lo que pediste"; la query es la fuente de verdad. Está pinchado con un test
+> que lo dice en el nombre.
+>
+> Lo encontró un test escrito al revés —afirmaba que seleccionar un backend inexistente
+> falla— y el fallo importó más que el test. **Van cuatro categorías donde el test que
+> falló por la razón equivocada valía más que el que pasó.**
+
+**Los 3 de captura de logs eran superficie nueva, no migración.** El buffer
+(`LogCaptureBuffer`, ring de 4000 líneas) ya era portable y ya tenía tests propios; lo que
+no existía era la forma en C. `setEnabled` y `droppedCount` son directos. `drain` no:
+**es destructivo**, así que la forma obvia en C —buffer del caller + capacidad— convierte un
+buffer chico en líneas descartadas en silencio que ya no están en el ring. Se resolvió con
+`WmaLogBatch`, un handle opaco que entrega las líneas enteras y que el caller libera; es
+además la forma que el JNI necesita, porque `NewObjectArray` pide el conteo por adelantado.
+**No se expuso `clear()`**, aunque existe en el buffer: el JNI nunca lo expuso, y agregar
+superficie sin caller es cómo un header termina lleno de funciones que nadie sabe explicar.
+
+> [!NOTE]
+> **Una excepción más que cruzaba la frontera, misma familia que la tanda 4 del looper.**
+> `drain()` devuelve un `std::vector<std::string>` por valor: un `bad_alloc` ahí salía del
+> JNI como `abort`, no como excepción de Java. Queda envuelta en `wma_log_capture_drain()`.
+> Y de paso el `FindClass` del JNI ahora pasa **antes** del drain: fallar después de drenar
+> tiraba las líneas a la basura.
+
+**Verificación — 26 tests nuevos (749 en total)**, en `test_c_api_routing.cpp` y
+`test_c_api_logcapture.cpp`. Esta superficie tenía **cobertura cero** antes: una sola llamada
+a `wma_select_backend` dentro de `CApiFixture` era todo. De los cuatro guards que se movieron
+del JNI a la C API, **dos son load-bearing y dos son decoración**, y el archivo dice cuál es
+cuál: el rango 0..5 de routing lo es (`EffectChain::setRoutingMode` guarda lo que le den) y el
+`isfinite` de las cotas del mapping también (nada lo re-chequea aguas abajo, y una cota NaN se
+vuelve un parámetro NaN); el guard de eje y los de curve/polarity son redundantes con el
+`default:` de `getMappingForAxis` y de `applyMappingCurve`.
+
+**11 mutantes, 9 detectados.** Los 2 restantes son justamente los que el archivo predice: el
+clamp de `setDepthValue` (no se puede observar un dead store) y el guard de eje (redundante).
+**La mutación no verificó sólo los tests: verificó las etiquetas.**
+
+**Y otros dos tests fallaron primero por la razón equivocada, los dos por el harness.** El de
+mapping usaba el rango [0.25, 0.75] suponiendo que un parámetro de efecto es normalizado: el
+parámetro 0 de un filtro es cutoff en Hz y `setCutoff` clampea a [20, 20000], así que los tres
+valores mapeados llegaban como 20. **Un rango de mapping tiene que vivir dentro del rango del
+parámetro destino** — conviene saberlo antes de cablear un pad XY a algo. El otro es el de
+backend de arriba.
+
+**Ojo con leer la tabla del script como progreso por categoría.** Migrar la cola movió filas
+que nadie tocó: `Mode transitions` pasó de 10/12 a 12/12 y `Benchmark / diagnostics` de 2/6 a
+5/6, porque `SetRoutingMode` lleva `mode` en el nombre y `DrainCapturedLogs` entra por `log`.
+Es el mismo desparramo de keywords de siempre, ahora visible en el signo contrario.
+
+
 ### Dónde retomar (2026-07-27)
 
 **Branch:** `feature/wa-3-2-ios-audio-bridge`, **33 commits sobre `master`**. La branch
@@ -1878,6 +1978,14 @@ NoisyPad Android**, que ya tiene tres cosas encima:
    `startInputStream` con el permiso denegado. Reproducción concreta en esa nota.
 4. **WA-2.6 en general**: 135 entry points JNI reescritos, 0 validados en device. La suite
    de host cubre la C API, no el JNI.
+11. **`setDepthValue` no hace nada, y nunca hizo nada** (la cola, 2026-07-27). No es una
+   regresión de esta serie: `mDepthValue` se escribe y nadie lo lee, en las cuatro capas.
+   Si un slider de depth en NoisyPad llama sólo a `setDepthValue`, mover ese slider no
+   cambia el audio. El eje depth real es `applyAutomation(axis=2, …)`. **Mirar qué llama
+   NoisyPad** antes de decidir si esto se arregla o se borra.
+10. **`selectBackend` devuelve `true` aunque no consiga el backend pedido** (la cola,
+   2026-07-27). Pedir LIBUSB sin USB presente cae al backend de sistema y reporta éxito;
+   sólo `getCurrentBackendType()` lo delata. Comportamiento viejo, ahora pinchado con test.
 9. **Las seis funciones de I/O de archivo del looper devuelven `false`/-1 en vez de dejar
    escapar una excepción** (`looper` tanda 4). Antes un export imposible abortaba el proceso.
 8. **`prepareTrackBars` rechaza un `bars` que desborda int32** (`looper` tanda 3) en vez de
@@ -1904,17 +2012,19 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con las 10 categorías ✅ cerradas (looper 77/79) pero una cola de 15 entry points sin migrar** — delegación **224/278** por el script, **228/290** real. De los 62 que no delegan, 46 son deliberados (39 USB/D4, 5 Oboe, 2 listener) y **15 son la cola**. **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3). **WA-2.5 + WA-2.6 ✅ CERRADA** — las 10 categorías más la cola de 15; delegación **237/278** por el script, **240/289** real. Los 49 que no delegan son **todos deliberados y con el porqué escrito en el código** (40 USB/D4, 5 Oboe/stubs, 2 listeners, 2 de backend que sólo tienen caminos USB): **cero sin clasificar**. **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso: la cola de 15 que cierra WA-2.5/2.6 de verdad** — routing (5), backend (3
-+ 2 a revisar), XY mapping (2) y captura de logs (3). **12 ya tienen su `wma_*`**, así que es
-la clase de trabajo más barata; el detalle está en la nota "Hallazgo al contar el final".
+**Próximo paso: decidir WA-5.5 (§10) antes de tocar WA-4.3**, porque lo subsume. Ya no queda
+trabajo de C API pendiente: **WA-2.5/2.6 está cerrada** y la superficie quedó quieta, que era
+justo la precondición que la recomendación de WA-5.5 pedía para construir el harness encima.
 
-Lo que queda fuera del looper y no se hace: **USB son 35 entry points que no portan**
-(D4, 32 en `jni_audio_bridge.cpp` + 3 en `jni_usb.cpp`) y las 5 de `jni_benchmark.cpp`
-que son Oboe puro o stubs deprecados.
+Lo que no delega y no se hace, con el porqué: **40 USB** (D4, 37 en `jni_audio_bridge.cpp` +
+3 en `jni_usb.cpp`), **5 de `jni_benchmark.cpp`** que son Oboe puro o stubs deprecados,
+**2 listeners del looper** (maquinaria JNI; iOS necesita un callback propio, superficie nueva
+a diseñar) y **2 de backend** — `CreateSplitBackend` y `FallbackToOboeBackend`, cuyos únicos
+caminos alcanzables requieren el backend USB.
 
 **Arranque concreto para la próxima sesión** (el método ya está decidido, ver abajo — no
 re-litigarlo):
@@ -1943,8 +2053,9 @@ re-litigarlo):
 
 **Orden de categorías:** ~~lifecycle~~ ✅ → ~~input/monitor~~ ✅ → ~~effects~~ ✅ →
 ~~oscillator/synth~~ ✅ → ~~voice~~ ✅ → ~~mode~~ ✅ → ~~análisis~~ ✅ →
-~~metronome~~ ✅ → ~~benchmark~~ ✅ → ~~looper~~ ✅ (77/79, 2 no portan). **Las 10
-categorías cerradas — pero queda una cola de 15 que la lista nunca nombró.**
+~~metronome~~ ✅ → ~~benchmark~~ ✅ → ~~looper~~ ✅ (77/79, 2 no portan) →
+~~**la cola de 15**~~ ✅ (routing, backend, XY mapping, captura de logs). **Las 10 categorías
+más la cola: WA-2.5/2.6 CERRADA, complemento 49 y cero sin clasificar.**
 
 > [!TIP]
 > **Ocho de las nueve categorías cerradas encontraron un bug**, y hay dos mecanismos

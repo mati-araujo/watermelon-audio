@@ -1322,6 +1322,49 @@ WMA_API void wma_get_output_levels(const WmaEngine* engine, float* out_levels);
  */
 WMA_API void wma_set_log_callback(WmaLogCallback callback);
 
+/**
+ * Log capture — a pull-based ring of recent log lines (App V §3.2).
+ *
+ * Distinct from wma_set_log_callback(), which is push-based and delivers each
+ * line as it happens. Capture exists so a UI can show the last N lines on
+ * demand without keeping a live callback installed; the ring holds 4000 lines
+ * and drops the oldest when full.
+ */
+
+/** Enable or disable log capture. Disabled capture costs one relaxed load. */
+WMA_API void wma_log_capture_set_enabled(bool enabled);
+
+/** Lines dropped because the ring was full. Not reset by a drain. */
+WMA_API int wma_log_capture_dropped(void);
+
+/**
+ * An owned batch of drained log lines.
+ *
+ * Draining is destructive — the lines leave the ring — so the batch exists to
+ * hand them over whole rather than into a caller buffer that might be too
+ * small. Every batch must be released with wma_log_batch_free().
+ */
+typedef struct WmaLogBatch WmaLogBatch;
+
+/**
+ * Drain everything captured since the last call.
+ * @return A batch the caller owns, or NULL if allocation failed. Never NULL
+ *         merely because there was nothing to drain — that is an empty batch.
+ */
+WMA_API WmaLogBatch* wma_log_capture_drain(void);
+
+/** Number of lines in the batch. 0 for NULL. */
+WMA_API int wma_log_batch_count(const WmaLogBatch* batch);
+
+/**
+ * Line at `index`, valid until the batch is freed.
+ * @return NULL if the batch is NULL or the index is out of range.
+ */
+WMA_API const char* wma_log_batch_line(const WmaLogBatch* batch, int index);
+
+/** Release a batch. NULL is a no-op. */
+WMA_API void wma_log_batch_free(WmaLogBatch* batch);
+
 /** Get version string (e.g., "0.1.0"). */
 WMA_API const char* wma_get_version(void);
 

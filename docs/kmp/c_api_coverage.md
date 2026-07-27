@@ -182,37 +182,53 @@ eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
 función JNI.
 
 ```
-WA-2.6 — JNI delegando: 224/278      (228/290 contando los 4 archivos JNI)
+WA-2.6 — JNI delegando: 237/278      (240/289 contando los 4 archivos JNI)
 ```
 
 | Categoría (heurística del script) | Delegan |
 |---|---|
+| Looper | 77/79 |
+| Otros | 25/27 |
 | Input / monitor | 21/21 |
 | Oscillator / synth | 21/21 |
 | Voice / polyphony | 18/18 |
-| Otros | 17/27 |
 | Effects | 16/16 |
 | Engine / lifecycle | 14/14 |
 | Analysis | 13/13 |
+| Mode transitions | 12/12 |
 | Metronome | 11/11 |
-| Mode transitions | 10/12 |
+| Benchmark / diagnostics | 5/6 |
 | Modulation | 3/3 |
-| Benchmark / diagnostics | 2/6 |
-| Looper | 1/79 |
 | Mixer / Regions | 1/1 |
-| el resto | 0 |
+| USB (Android-only) | 0/36 |
 
-**Las 224 son las diez categorías cerradas**: 22 de `lifecycle`, 21 de `input/monitor`,
-14 de `effects`, 40 de `oscillator/synth`, 21 de `voice`, 8 de `mode`, 10 de `análisis`,
-13 de `metronome` y **77 del `looper`**. Las 3 de `benchmark` **no están contadas ahí** —
-viven en `jni_benchmark.cpp`, que el script no lee (ver el aviso de abajo).
+**Las 237 son las diez categorías más la cola de 15.** Ojo con leer esta tabla como
+progreso por categoría: migrar la cola movió filas que nadie tocó —
+`Mode transitions` pasó de 10/12 a 12/12 y `Benchmark / diagnostics` de 2/6 a 5/6—
+simplemente porque `SetRoutingMode` lleva `mode` en el nombre y `DrainCapturedLogs`
+entra por `log`. Es el mismo desparramo de keywords descrito abajo.
 
 > [!IMPORTANT]
-> **Cerrar las diez categorías no cerró WA-2.6.** De los 62 entry points que no delegan,
-> **46 son deliberados** (39 USB por D4, 5 de Oboe/stubs en `benchmark`, 2 del state listener
-> del looper) y **15 son una cola que la lista de categorías nunca nombró**: routing (5),
-> backend (3 + 2 a revisar), XY mapping (2) y captura de logs (3). **12 ya tienen su `wma_*`.**
-> Vivían en la fila "Otros" y aparecieron sólo al enumerar el complemento en vez de la lista.
+> **WA-2.5/2.6 está cerrada: el complemento es 49 y no queda nada sin clasificar.**
+> De los 289 entry points reales delegan **240**; los 49 restantes se reparten en cuatro
+> baldes, todos deliberados y todos con el porqué escrito en el código:
+>
+> | No delega | Cuántos | Por qué |
+> |---|---|---|
+> | USB | 40 | D4 — USB es Android-only (37 en el bridge + 3 en `jni_usb.cpp`) |
+> | `benchmark` | 5 | Oboe puro o stubs deprecados, en `jni_benchmark.cpp` |
+> | `LooperRegister/UnregisterStateListener` | 2 | maquinaria JNI de punta a punta; iOS necesita un callback propio, que es superficie nueva a diseñar |
+> | `CreateSplitBackend`, `FallbackToOboeBackend` | 2 | compilan en iOS pero **todo camino suyo requiere el backend USB** — ver abajo |
+>
+> Los dos de backend eran los que la cola dejó "a revisar". **No portan, y no por falta
+> de cuerpo portable:** `resolveBackendForSplit()` sólo resuelve dos endpoints, OBOE (el
+> backend de sistema) y LIBUSB. En iOS `createUsbAudioBackend()` devuelve null por D4, así
+> que el endpoint LIBUSB siempre es null y la única llamada que queda es sistema+sistema,
+> que el guard `input == output` rechaza: **todo camino devuelve false**. `fallbackToOboe()`
+> *es* la recuperación por desconexión de USB — sin USB no hay de qué volver. Migrarlos
+> exportaría un no-op.
+>
+> Cómo se encontró la cola, y la moraleja: enumerar el **complemento**, no la lista.
 > Detalle en `kmp_requirements.md` §16, "Hallazgo al contar el final".
 **Ninguna coincide con su fila de la tabla**, porque la heurística del script
 clasifica por keyword del nombre y no por la sección real de la C API:

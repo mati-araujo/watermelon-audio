@@ -24,7 +24,6 @@
 #include "../looper/LooperEventDispatcher.h"
 #include "../usb/UsbSnapshotCodec.h"
 #include "../usb/RoundTripMeasurer.h"
-#include "../platform/LogCaptureBuffer.h"
 #include "../voice/VoiceTypes.h"
 #include <cmath>
 #include <algorithm>
@@ -670,30 +669,27 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetBpm
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetRoutingMode(
     JNIEnv* env, jobject thiz, jint mode) {
-    if (!g_jniState.engine) return;
-    if (mode < 0 || mode > 5) return;  // RoutingMode range validation
-    g_jniState.engine->setRoutingMode(static_cast<RoutingMode>(mode));
+    // The 0..5 RoutingMode range check lives in wma_set_routing_mode now.
+    wma_set_routing_mode(g_wmaEngine, mode);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetRoutingMode(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getRoutingMode();
+    // The no-engine default of 0 (SERIAL) lives in the C API.
+    return wma_get_routing_mode(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetParallelMix(
     JNIEnv* env, jobject thiz, jfloat mix) {
-    if (!g_jniState.engine) return;
-    g_jniState.engine->setParallelMix(mix);
+    wma_set_parallel_mix(g_wmaEngine, mix);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetFeedbackAmount(
     JNIEnv* env, jobject thiz, jfloat amount) {
-    if (!g_jniState.engine) return;
-    g_jniState.engine->setFeedbackAmount(amount);
+    wma_set_feedback_amount(g_wmaEngine, amount);
 }
 
 // ==================== Mode Functions ====================
@@ -1131,11 +1127,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsbB
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUseBackendManager(
     JNIEnv* env, jobject thiz, jboolean use) {
-    if (g_jniState.engine) {
-        g_jniState.engine->setUseBackendManager(use);
-    }
+    wma_set_use_backend_manager(g_wmaEngine, use);
 }
 
+// Android-only, and not for want of a portable body: createSplitBackend() itself
+// compiles for iOS, but resolveBackendForSplit() only resolves two endpoints —
+// OBOE (the system backend) and LIBUSB. On iOS createUsbAudioBackend() returns
+// null by D4, so the LIBUSB endpoint is always null and the only remaining call
+// is system+system, which the `input == output` guard rejects. Every path
+// returns false. Splitting input from output is a USB feature; there is no
+// behavior here to lift into the C API.
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeCreateSplitBackend(
     JNIEnv* env, jobject thiz, jint inputBackendId, jint outputBackendId) {
@@ -1148,16 +1149,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeCreate
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelectBackend(
     JNIEnv* env, jobject thiz, jint backendId) {
-    auto& backendManager = watermelon_audio::BackendManager::getInstance();
-    auto backendType = static_cast<watermelon_audio::BackendType>(backendId);
-    return backendManager.selectBackend(backendType) ? JNI_TRUE : JNI_FALSE;
+    return wma_select_backend(backendId) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetCurrentBackendType(
     JNIEnv* env, jobject thiz) {
-    auto& backendManager = watermelon_audio::BackendManager::getInstance();
-    return static_cast<jint>(backendManager.getCurrentType());
+    return static_cast<jint>(wma_get_backend_type());
 }
 
 JNIEXPORT void JNICALL
@@ -1213,33 +1211,25 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMap
     jint axis, jint effectIndex, jint paramId,
     jint curve, jint polarity,
     jfloat mapMin, jfloat mapMax, jboolean inverted) {
-    if (!g_jniState.engine) return;
-    if (axis < 0 || axis > 2) return;
-    if (curve < 0 || curve > 3) return;
-    if (polarity < 0 || polarity > 1) return;
-    if (!std::isfinite(mapMin) || !std::isfinite(mapMax)) return;
-
-    g_jniState.engine->setMappingConfig(
-        axis, effectIndex, paramId,
-        curve, polarity,
-        mapMin, mapMax, static_cast<bool>(inverted));
+    // The axis/curve/polarity range checks and the isfinite() guard on the
+    // mapping bounds all live in wma_set_mapping_config now.
+    wma_set_mapping_config(g_wmaEngine, axis, effectIndex, paramId,
+                           curve, polarity,
+                           mapMin, mapMax, static_cast<bool>(inverted));
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeClearMappingConfig(
     JNIEnv* env, jobject thiz, jint axis) {
-    if (!g_jniState.engine) return;
-    if (axis < 0 || axis > 2) return;
-
-    g_jniState.engine->clearMappingConfig(axis);
+    // The 0..2 axis check lives in wma_clear_mapping_config now.
+    wma_clear_mapping_config(g_wmaEngine, axis);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetDepthValue(
     JNIEnv* env, jobject thiz, jfloat value) {
-    if (!g_jniState.engine) return;
-
-    g_jniState.engine->setDepthValue(std::clamp(value, 0.0f, 1.0f));
+    // The 0..1 clamp lives in wma_set_depth_value now.
+    wma_set_depth_value(g_wmaEngine, value);
 }
 
 JNIEXPORT void JNICALL
@@ -1698,6 +1688,11 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     return result;
 }
 
+// Android-only for the same reason as createSplitBackend: the body compiles for
+// iOS, but fallbackToOboe() *is* the USB-disconnect recovery path — it clears
+// mUsbBackendAvailable, selects the system backend and tears down the USB and
+// split backends. With no USB backend on iOS (D4) there is nothing to fall back
+// *from*, and nothing calls it. Migrating it would export a no-op.
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeFallbackToOboeBackend(
     JNIEnv* env, jobject thiz) {
@@ -3022,7 +3017,7 @@ JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetLogCaptureEnabled(
         JNIEnv* env, jobject thiz, jboolean enabled) {
     (void)env; (void)thiz;
-    wma::LogCaptureBuffer::instance().setEnabled(enabled == JNI_TRUE);
+    wma_log_capture_set_enabled(enabled == JNI_TRUE);
 }
 
 // Drain the captured lines since the last call (each "L/TAG: message").
@@ -3030,17 +3025,23 @@ JNIEXPORT jobjectArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeDrainCapturedLogs(
         JNIEnv* env, jobject thiz) {
     (void)thiz;
-    const std::vector<std::string> lines = wma::LogCaptureBuffer::instance().drain();
     jclass stringClass = env->FindClass("java/lang/String");
     if (!stringClass) return nullptr;
-    jobjectArray arr = env->NewObjectArray(
-        static_cast<jsize>(lines.size()), stringClass, nullptr);
-    if (!arr) return nullptr;
-    for (jsize i = 0; i < static_cast<jsize>(lines.size()); ++i) {
-        jstring s = env->NewStringUTF(lines[static_cast<size_t>(i)].c_str());
-        env->SetObjectArrayElement(arr, i, s);
-        env->DeleteLocalRef(s);  // avoid overflowing the local ref table on big drains
+
+    // Look the class up *before* draining: the drain is destructive, so failing
+    // after it would throw the lines away. The old code drained first.
+    WmaLogBatch* batch = wma_log_capture_drain();
+    const jsize count = static_cast<jsize>(wma_log_batch_count(batch));
+
+    jobjectArray arr = env->NewObjectArray(count, stringClass, nullptr);
+    if (arr) {
+        for (jsize i = 0; i < count; ++i) {
+            jstring s = env->NewStringUTF(wma_log_batch_line(batch, i));
+            env->SetObjectArrayElement(arr, i, s);
+            env->DeleteLocalRef(s);  // avoid overflowing the local ref table on big drains
+        }
     }
+    wma_log_batch_free(batch);
     return arr;
 }
 
@@ -3048,7 +3049,7 @@ JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetLogCaptureDropped(
         JNIEnv* env, jobject thiz) {
     (void)env; (void)thiz;
-    return static_cast<jint>(wma::LogCaptureBuffer::instance().droppedCount());
+    return static_cast<jint>(wma_log_capture_dropped());
 }
 
 } // extern "C"
