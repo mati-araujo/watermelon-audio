@@ -654,15 +654,15 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsEffe
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetBpm(
     JNIEnv* env, jobject thiz, jfloat bpm) {
-    if (!g_jniState.engine) return;
-    g_jniState.engine->setBpm(bpm);
+    // Fans out to the tempo-synced effects AND the Transport — see §20.
+    wma_set_bpm(g_wmaEngine, bpm);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetBpm(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 120.0f;
-    return g_jniState.engine->getBpm();
+    // The no-engine default of 120 BPM lives in the C API.
+    return wma_get_bpm(g_wmaEngine);
 }
 
 // ==================== Effect Routing Mode ====================
@@ -2401,8 +2401,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperTriggerClick(
     JNIEnv* env, jobject thiz, jboolean isDownbeat) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().triggerClick(isDownbeat == JNI_TRUE);
+    wma_looper_trigger_click(g_wmaEngine, isDownbeat == JNI_TRUE);
 }
 
 // Input metering (lock-free) — peak level of the input stream, useful as a
@@ -2558,73 +2557,66 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportSetBeatsPerBar(
     JNIEnv* env, jobject thiz, jint beatsPerBar) {
-    if (g_jniState.engine)
-        g_jniState.engine->getTransport().setBeatsPerBar(beatsPerBar);
+    wma_transport_set_beats_per_bar(g_wmaEngine, beatsPerBar);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportGetBeatsPerBar(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 4;
-    return g_jniState.engine->getTransport().getBeatsPerBar();
+    // The no-engine default of 4 lives in the C API.
+    return wma_transport_get_beats_per_bar(g_wmaEngine);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportFramesPerBeat(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getTransport().framesPerBeat();
+    return wma_transport_frames_per_beat(g_wmaEngine);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportFramesPerBar(
     JNIEnv* env, jobject thiz, jint bars) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getTransport().framesPerBar(bars);
+    return wma_transport_frames_per_bar(g_wmaEngine, bars);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportStartMetronome(
     JNIEnv* env, jobject thiz, jint beats, jboolean firstIsDownbeat,
     jboolean everyBeatPattern) {
-    if (g_jniState.engine)
-        g_jniState.engine->getTransport().startMetronome(
-            beats, firstIsDownbeat == JNI_TRUE, everyBeatPattern == JNI_TRUE);
+    wma_transport_start_metronome(g_wmaEngine, beats,
+                                  firstIsDownbeat == JNI_TRUE,
+                                  everyBeatPattern == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportStartMetronomeContinuous(
     JNIEnv* env, jobject thiz, jboolean everyBeatPattern) {
-    if (g_jniState.engine)
-        g_jniState.engine->getTransport().startMetronomeContinuous(everyBeatPattern == JNI_TRUE);
+    wma_transport_start_metronome_continuous(g_wmaEngine,
+                                             everyBeatPattern == JNI_TRUE);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportIsMetronomeContinuous(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getTransport().isMetronomeContinuous() ? JNI_TRUE : JNI_FALSE;
+    return wma_transport_is_metronome_continuous(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportStopMetronome(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine)
-        g_jniState.engine->getTransport().stopMetronome();
+    wma_transport_stop_metronome(g_wmaEngine);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportIsMetronomeRunning(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getTransport().isMetronomeRunning() ? JNI_TRUE : JNI_FALSE;
+    return wma_transport_is_metronome_running(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportGetRemainingBeats(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getTransport().getRemainingBeats();
+    return wma_transport_get_remaining_beats(g_wmaEngine);
 }
 
 // Export / Import (NOT RT-safe — call from IO thread)

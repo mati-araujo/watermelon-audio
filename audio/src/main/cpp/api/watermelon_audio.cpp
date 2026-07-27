@@ -1523,7 +1523,67 @@ bool wma_looper_import_track(WmaEngine* engine, int track_index,
 }
 
 /* ================================================================
- * 20. Waveform & Metering
+ * 20. Transport (musical clock & metronome)
+ * ================================================================ */
+
+void wma_transport_set_beats_per_bar(WmaEngine* engine, int beats_per_bar) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getTransport().setBeatsPerBar(beats_per_bar);
+}
+
+int wma_transport_get_beats_per_bar(const WmaEngine* engine) {
+    // 4 rather than 0: the default meter, which is also what the Transport
+    // would report. A caller dividing by this must not get a zero.
+    WMA_CHECK_VAL(engine, 4);
+    return engine->engine->getTransport().getBeatsPerBar();
+}
+
+int wma_transport_frames_per_beat(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getTransport().framesPerBeat();
+}
+
+int wma_transport_frames_per_bar(const WmaEngine* engine, int bars) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getTransport().framesPerBar(bars);
+}
+
+void wma_transport_start_metronome(WmaEngine* engine, int beats,
+                                    bool first_is_downbeat,
+                                    bool every_beat_pattern) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getTransport().startMetronome(beats, first_is_downbeat,
+                                                  every_beat_pattern);
+}
+
+void wma_transport_start_metronome_continuous(WmaEngine* engine,
+                                               bool every_beat_pattern) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getTransport().startMetronomeContinuous(every_beat_pattern);
+}
+
+void wma_transport_stop_metronome(WmaEngine* engine) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getTransport().stopMetronome();
+}
+
+bool wma_transport_is_metronome_running(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getTransport().isMetronomeRunning();
+}
+
+bool wma_transport_is_metronome_continuous(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getTransport().isMetronomeContinuous();
+}
+
+int wma_transport_get_remaining_beats(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getTransport().getRemainingBeats();
+}
+
+/* ================================================================
+ * 21. Waveform & Metering
  * ================================================================ */
 
 int wma_get_waveform_samples(WmaEngine* engine, float* buffer, int max_size) {
@@ -1564,7 +1624,7 @@ void wma_get_output_levels(const WmaEngine* engine, float* out_levels) {
 }
 
 /* ================================================================
- * 21. Configuration / Logging
+ * 22. Configuration / Logging
  * ================================================================ */
 
 /* Static storage for C callback — bridged to C++ LogCallback. */

@@ -58,13 +58,13 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 | Métrica | Valor |
 |---|---|
 | JNIEXPORT (entry points) | 278 |
-| Funciones `wma_*` | 197 |
-| Cubiertas (match exacto) | 148 |
-| **Gap total** | **130** |
+| Funciones `wma_*` | 208 |
+| Cubiertas (match exacto) | 159 |
+| **Gap total** | **119** |
 | — USB, no se porta (D4) | 32 |
-| — **Gap portable** | **98** |
+| — **Gap portable** | **87** |
 | — con near-match (revisar) | 37 |
-| — **neto a implementar** | **~61** |
+| — **neto a implementar** | **~50** |
 
 ### Gap portable por categoría
 
@@ -72,15 +72,13 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 |---|---|
 | Looper | 39 |
 | Input / monitor | 12 |
-| Otros | 9 |
-| Metronome | 9 |
+| Otros | 8 |
 | Engine / lifecycle | 8 |
 | Voice / polyphony | 6 |
 | Analysis | 5 |
 | Benchmark / diagnostics | 4 |
 | Oscillator / synth | 4 |
 | Effects | 1 |
-| Mode transitions | 1 |
 
 ---
 
@@ -143,7 +141,7 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 - `nativeStartInputStream` — near-match: `wma_input_start` (0.67)
 - `nativeStopInputStream` — near-match: `wma_input_stop` (0.67)
 
-### Otros (9)
+### Otros (8)
 
 - `nativeClearStreamError` — near-match: `wma_clear_error` (0.67)
 - `nativeCreateSplitBackend`
@@ -153,19 +151,6 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 - `nativeGetLastStreamErrorCode` — near-match: `wma_get_last_error_code` (0.80)
 - `nativeHasStreamError` — near-match: `wma_has_error` (0.67)
 - `nativeLoadSoundFont` — near-match: `wma_sf_load_data` (0.67)
-- `nativeTransportFramesPerBar`
-
-### Metronome (9)
-
-- `nativeTransportFramesPerBeat`
-- `nativeTransportGetBeatsPerBar`
-- `nativeTransportGetRemainingBeats`
-- `nativeTransportIsMetronomeContinuous`
-- `nativeTransportIsMetronomeRunning`
-- `nativeTransportSetBeatsPerBar`
-- `nativeTransportStartMetronome`
-- `nativeTransportStartMetronomeContinuous`
-- `nativeTransportStopMetronome`
 
 ### Engine / lifecycle (8)
 
@@ -213,12 +198,6 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 
 - `nativeGetEffectChainSize` — near-match: `wma_effect_chain_size` (0.75)
 
-### Mode transitions (1)
-
-- `nativeGetModeName`
-
----
-
 ## 4b. Delegación del JNI (WA-2.6)
 
 El gap de arriba responde la pregunta de **WA-2.5**: ¿existe una `wma_*` con
@@ -235,7 +214,7 @@ eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
 función JNI.
 
 ```
-WA-2.6 — JNI delegando: 135/278
+WA-2.6 — JNI delegando: 148/278
 ```
 
 | Categoría (heurística del script) | Delegan |
@@ -243,18 +222,21 @@ WA-2.6 — JNI delegando: 135/278
 | Input / monitor | 21/21 |
 | Oscillator / synth | 21/21 |
 | Voice / polyphony | 18/18 |
+| Otros | 17/27 |
 | Effects | 16/16 |
-| Otros | 15/27 |
 | Engine / lifecycle | 14/14 |
 | Analysis | 13/13 |
+| Metronome | 11/11 |
 | Mode transitions | 10/12 |
-| Benchmark / diagnostics | 2/6 |
-| Mixer / Regions | 1/1 |
 | Modulation | 3/3 |
+| Benchmark / diagnostics | 2/6 |
+| Looper | 1/79 |
+| Mixer / Regions | 1/1 |
 | el resto | 0 |
 
-**Las 135 son siete categorías cerradas**: 22 de `lifecycle`, 21 de `input/monitor`,
-14 de `effects`, 40 de `oscillator/synth`, 21 de `voice`, 8 de `mode` y 10 de `análisis`.
+**Las 148 son ocho categorías cerradas**: 22 de `lifecycle`, 21 de `input/monitor`,
+14 de `effects`, 40 de `oscillator/synth`, 21 de `voice`, 8 de `mode`, 10 de `análisis`
+y 13 de `metronome`.
 **Ninguna coincide con su fila de la tabla**, porque la heurística del script
 clasifica por keyword del nombre y no por la sección real de la C API:
 
@@ -282,10 +264,18 @@ clasifica por keyword del nombre y no por la sección real de la C API:
   los cuatro `SfNote*` de la 6. Las de dual touch caen en "Mode transitions"
   porque su nombre lleva `mode`, y por eso esa fila pasó de 0 a 4 sin que se
   tocara una sola transición de modo.
+- `metronome` = **la sección 20 no existía**. Fue la primera categoría sin sección
+  propia en `watermelon_audio.h`: la numeración saltaba de 19 (Looper) a 20
+  (Waveform), y las 10 `nativeTransport*` no tenían contraparte ninguna. Se creó
+  la 20 (Transport) y las de abajo corrieron un número. La fila del script dice
+  11 pero la categoría son **13**: `nativeTransportFramesPerBar` cae en
+  "Mixer / Regions" (por `bar`) y `nativeLooperTriggerClick` en "Looper" — y por
+  eso esa fila arranca en 1/79 sin que se haya tocado el looper. `nativeSetBpm` /
+  `nativeGetBpm` sí estaban en la fila, y su C API ya existía en la sección 3.
 
-Dicho de otra forma: de las 119, **una buena parte está en filas que no llevan el
-nombre de su categoría**. La tabla sirve para ver por dónde va la cosa, no para
-planificar.
+Dicho de otra forma: de las 130 que no delegan, **una buena parte está en filas que
+no llevan el nombre de su categoría**. La tabla sirve para ver por dónde va la
+cosa, no para planificar.
 
 > [!IMPORTANT]
 > Lección para las categorías que siguen: **el gap no dimensiona WA-2.6**. Antes
@@ -295,13 +285,13 @@ planificar.
 
 ## 5. Lecturas del análisis
 
-**El looper es el 40% del gap portable** (39 de 98) y **no se movió ni una
-función** en cuatro categorías: es un bloque intacto y, por decisión de producto,
+**El looper es el 45% del gap portable** (39 de 87) y **no se movió ni una
+función** en ocho categorías: es un bloque intacto y, por decisión de producto,
 entra completo. Va último a propósito, para llegar con el mecanismo rodado.
 
 **USB son 32 funciones que no se portan** (D4: iOS no permite acceso USB
-genérico sin DriverKit + entitlements). Sacarlas del cálculo baja el gap de 130
-a 98 — vale la pena tenerlo presente para no sobredimensionar WA-2.5.
+genérico sin DriverKit + entitlements). Sacarlas del cálculo baja el gap de 119
+a 87 — vale la pena tenerlo presente para no sobredimensionar WA-2.5.
 
 **51 funciones `wma_*` no se alcanzan desde el JNI.** No son un problema: la C
 API ya cubre terreno que el JNI resuelve de otra forma (por ejemplo
@@ -309,13 +299,17 @@ API ya cubre terreno que el JNI resuelve de otra forma (por ejemplo
 ciclo de vida implícito). Al migrar cada categoría conviene mirarlas: algunas
 son el camino canónico que el JNI todavía no usa.
 
-**El gap sobrestima el trabajo, sistemáticamente y por mucho.** En las cinco
-categorías cerradas el gap nominal fue 38 y el trabajo real 10 funciones nuevas
-— `voice` necesitó **cero**, con 6 de gap nominal.
-La causa es siempre la misma —la C API abrevia (`sf`, `param`, `freq`) donde el
-JNI escribe entero— y cada categoría destapa una abreviatura nueva. Antes de
-dimensionar una categoría, **abrir su sección de `watermelon_audio.h` y contar a
-mano**; el gap sirve para saber dónde mirar, no cuánto falta.
+**El gap sobrestima el trabajo — salvo cuando lo subestima.** En las siete
+primeras categorías cerradas el gap nominal fue 39 y el trabajo real 11 funciones
+nuevas; `voice` necesitó **cero**, con 6 de gap nominal. La causa es siempre la
+misma —la C API abrevia (`sf`, `param`, `freq`) donde el JNI escribe entero— y
+cada categoría destapa una abreviatura nueva.
+
+**`metronome` rompió la regla y fue en la otra dirección**: gap nominal 9,
+trabajo real **10**, porque su sección de `watermelon_audio.h` no existía y no
+había ni una abreviatura que descontar. Es el caso opuesto y confirma la misma
+receta: antes de dimensionar, **abrir la sección y contar a mano**. Cuando no hay
+sección que abrir, el gap es el piso, no el techo.
 
 **"Otros" (9) hay que clasificarlo a mano.** La heurística de categorías del
 script es por keywords y no acierta siempre; ese cajón es el residuo.

@@ -917,7 +917,79 @@ WMA_API bool wma_looper_import_track(WmaEngine* engine, int track_index,
                                       const char* file_path, int sample_rate);
 
 /* ================================================================
- * 20. Waveform & Metering
+ * 20. Transport (musical clock & metronome)
+ * ================================================================
+ *
+ * The Transport owns the musical clock: BPM, beats-per-bar and the sample
+ * rate, plus an RT-safe metronome scheduler. The UI arms a schedule once and
+ * the audio thread emits the clicks from the render callback, which is what
+ * removes the "the click sometimes plays and sometimes doesn't" jank of a
+ * UI-driven timer.
+ *
+ * Two neighbours of this section, deliberately left where they are:
+ *   - BPM is set through wma_set_bpm() (§3). It fans out to the tempo-synced
+ *     effects AND to the Transport, so there is no separate transport BPM
+ *     setter — adding one would let the two drift apart.
+ *   - wma_looper_trigger_click() (§19) fires a single click immediately,
+ *     bypassing the scheduler. It keeps its wma_looper_ name because the click
+ *     generator belongs to the looper and the name is already shipped.
+ */
+
+/** Set beats per bar (clamped to 1..16). */
+WMA_API void wma_transport_set_beats_per_bar(WmaEngine* engine, int beats_per_bar);
+
+/** Get beats per bar. Returns 4 (the default meter) with no engine. */
+WMA_API int wma_transport_get_beats_per_bar(const WmaEngine* engine);
+
+/** Frames per beat at the current BPM and sample rate. 0 with no engine. */
+WMA_API int wma_transport_frames_per_beat(const WmaEngine* engine);
+
+/**
+ * Frames in `bars` complete bars at the current BPM / sample rate / meter.
+ * Returns 0 for bars <= 0 and 0 with no engine. Used to quantize loop lengths.
+ */
+WMA_API int wma_transport_frames_per_bar(const WmaEngine* engine, int bars);
+
+/**
+ * Schedule `beats` clicks at beat intervals, starting on the next audio block.
+ *
+ * @param beats               Number of clicks (e.g. 4 for a one-bar pre-count).
+ *                            <= 0 stops the metronome instead of starting it.
+ * @param first_is_downbeat   First click is a downbeat (higher, louder).
+ * @param every_beat_pattern  Clicks where index % beats_per_bar == 0 are
+ *                            downbeats. Overrides first_is_downbeat.
+ */
+WMA_API void wma_transport_start_metronome(WmaEngine* engine, int beats,
+                                            bool first_is_downbeat,
+                                            bool every_beat_pattern);
+
+/**
+ * Run the metronome until wma_transport_stop_metronome() — the "click as a
+ * reference while recording" mode. The scheduler does not count down.
+ */
+WMA_API void wma_transport_start_metronome_continuous(WmaEngine* engine,
+                                                       bool every_beat_pattern);
+
+/** Cancel any in-flight schedule. A click already sounding decays naturally. */
+WMA_API void wma_transport_stop_metronome(WmaEngine* engine);
+
+/** True while a schedule is armed, counted or continuous. */
+WMA_API bool wma_transport_is_metronome_running(const WmaEngine* engine);
+
+/** True while the metronome is in continuous mode. */
+WMA_API bool wma_transport_is_metronome_continuous(const WmaEngine* engine);
+
+/**
+ * Clicks left in a counted schedule. 0 when idle.
+ *
+ * In CONTINUOUS mode this returns the scheduler's arming sentinel (1), not a
+ * count of anything — a continuous schedule has no remaining beats. Gate on
+ * wma_transport_is_metronome_continuous() before reading it.
+ */
+WMA_API int wma_transport_get_remaining_beats(const WmaEngine* engine);
+
+/* ================================================================
+ * 21. Waveform & Metering
  * ================================================================ */
 
 /**
@@ -947,7 +1019,7 @@ WMA_API float wma_get_output_rms_db(const WmaEngine* engine, int channel);
 WMA_API void wma_get_output_levels(const WmaEngine* engine, float* out_levels);
 
 /* ================================================================
- * 21. Configuration / Logging
+ * 22. Configuration / Logging
  * ================================================================ */
 
 /**

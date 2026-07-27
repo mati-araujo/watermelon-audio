@@ -1374,21 +1374,133 @@ pelado— así que queda del lado JNI, igual que el cross-check del batch de efe
 multi-touch. Es el mismo patrón por tercera vez: lo que sabe de largos de array se queda
 arriba.
 
-### Dónde retomar (2026-07-26)
+### Nota de cierre — WA-2.5/2.6, categoría `metronome` (2026-07-27)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **22 commits sobre `master`**. La branch
-existe en `origin` pero está **ahead 16** — sólo los 6 primeros están pusheados.
+**Octava categoría cerrada: 13 entry points, 10 funciones nuevas de C API.**
+Delegación: **148/278**. Es la primera categoría que **no tenía sección** en
+`watermelon_audio.h`, la primera cuyo gap quedó **corto** en vez de largo, y la
+primera cuyo comportamiento se puede escuchar entero en la suite de host.
+
+**La sección no existía.** La numeración del header saltaba de 19 (Looper) a 20
+(Waveform & Metering): las 10 `nativeTransport*` no tenían contraparte ninguna.
+Se creó la **§20 Transport** y las dos de abajo corrieron un número (Waveform
+20→21, Configuration 21→22). Dos vecinas se dejaron donde estaban a propósito:
+`wma_set_bpm` sigue en la §3 —fanea a los efectos tempo-sync *y* al Transport, y
+un setter aparte los dejaría divergir— y `wma_looper_trigger_click` conserva su
+nombre `looper_` en la §19 porque el generador de click es del looper y el
+nombre ya está shippeado.
+
+**13 entry points, no 11.** La fila del script dice 11: `nativeTransportFramesPerBar`
+cae en "Mixer / Regions" por `bar` y `nativeLooperTriggerClick` en "Looper" —por
+eso esa fila arranca en 1/79 sin que se haya tocado el looper. Tercera vez que la
+tabla desparrama una categoría; la unidad sigue siendo la sección.
+
+> [!CAUTION]
+> **El metrónomo adelanta un bloque de audio, en las dos plataformas, y el gap no
+> tenía nada que ver.** `Transport::tick()` disparaba el click con `next <= 0`,
+> donde `next` es —después de restar `numFrames`— los frames que faltan *una vez
+> consumido este bloque*. `next == 0` significa que el beat cae en la primera
+> muestra del bloque **siguiente**: todavía no pasó. Al dispararlo igual, el click
+> salía un bloque antes y, como la cuenta regresiva se reinicia desde ese instante
+> adelantado, **el tren entero de clicks queda corrido un bloque para siempre**.
+>
+> Sólo muerde cuando `framesPerBeat` es múltiplo exacto del tamaño del callback, y
+> eso no es exótico: 120 BPM a 48 kHz son 24000 frames, y **24000 / 192 = 125**
+> — 192 es un burst de Oboe de los comunes. Con 256 no pasa (93.75) y el bug queda
+> latente, que es por qué nadie lo vio.
+>
+> Arreglado a `next < 0`. El propio doc comment de la clase ya decía cuál era la
+> intención: *"subsequent clicks fire in the callback block where the next beat
+> falls"*. El `<= 0` no cumplía su propio contrato.
+>
+> **Lo encontró un test, no el compilador ni la migración.** Es un bug de
+> producción preexistente, del mismo tipo que el de `voice`: no es divergencia
+> entre las dos superficies, es una función que estaba mal desde antes y aparece
+> porque para migrarla hay que leerla entera y escribirle un test que la mida.
+
+**Verificación — `test_c_api_transport.cpp`, 26 tests (650 en total).** Ésta es la
+primera categoría **audible de punta a punta en el host**: `Transport::tick()` corre
+dentro de `AudioEngine::onAudioReady` y el click que agenda lo renderiza
+`AudioLooper::process` unas líneas después, sobre el mismo buffer. Así que "¿sonó
+el metrónomo?" se responde mirando las muestras. Las dos anteriores no podían:
+`mode` tuvo que conformarse con "la salida no trae residuo" y `análisis` descubrió
+que los medidores leen un nodo que nadie corre.
+
+Lo que eso habilita: el intervalo entre clicks se mide en bloques y se compara con
+`framesPerBeat` (que es lo que destapó el off-by-one), el downbeat se distingue del
+off-beat por amplitud (0.35 contra 0.25), y el patrón `every_beat` se verifica
+contra el compás. Detalle del harness que hace exactos los índices: el limiter de
+lookahead de `OutputStage` atrasa todo 5 ms fijos, así que con bloques de 1000
+frames un click de 10 ms ocupa `[240, 720)` de su bloque y nunca cruza al siguiente.
+
+**Un test de caracterización, no de aprobación.** `RemainingBeatsIsASentinelInContinuousMode`:
+el modo continuo arma el scheduler guardando un `1` en el mismo contador que la
+cuenta regresiva decrementa, y nunca lo baja. `wma_transport_get_remaining_beats`
+devuelve `1` para siempre, que no es una cantidad de nada. Queda documentado en el
+header —hay que preguntar por `is_metronome_continuous()` primero— y pinchado por
+un test que falla si alguien cambia el mecanismo.
+
+**Mutación: 10 mutantes, 9 detectados.** Los tres tests de intervalo ya habían
+fallado contra el código sin arreglar, así que ésos vinieron con los dientes
+probados. De los otros: matar `stopMetronome`, apagar el modo continuo, igualar
+las ganancias de downbeat y off-beat, romper el patrón `every_beat`, sacarle al
+Transport el sample rate negociado, hacer que `startMetronome(0)` arme en vez de
+parar, cambiar el default de 4 sin engine, y sacarle el compás a `framesPerBar`
+— los ocho hacen fallar tests. **El décimo no se detectó y estaba bien así:**
+sacar el guard de `if (!continuous) beatsLeft--` no cambia nada porque el *store*
+de vuelta también está guardado, así que el decremento local se descarta. Es un
+mutante equivalente, no un agujero de cobertura.
+
+> [!WARNING]
+> **El harness de mutación tendió una trampa que casi pasa por verde.** Restauraba
+> el archivo con `mv fichero.bak fichero`, y eso le devuelve la mtime del momento
+> del backup —**anterior** a la compilación del mutante—. ninja veía el fuente más
+> viejo que el `.o`, decía "no work to do", y el binario se quedaba con la última
+> mutación adentro. El fuente estaba limpio y `git diff` no mostraba nada: lo
+> único que lo delató fue correr **la suite entera** después y ver fallar un test
+> que ya había pasado. Moraleja para la próxima: al mutar hay que `touch` el
+> archivo al restaurarlo, y correr el gate completo después de mutar, no sólo el
+> filtro.
+
+**Lo que NO se cubre, y se dice acá en vez de fingirlo:** el fast path de USB
+(`LibusbBackend`) tiene su **propia** llamada a `mTransport.tick()`, y el backend
+falso reporta OBOE, así que la suite sólo recorre el camino principal. Los dos
+call sites se diffearon a mano y hacen lo mismo, pero una divergencia entre ellos
+no haría fallar estos tests.
+
+**Para el smoke de device**, encima de lo que ya había: el fix del off-by-one
+cambia el timing del metrónomo en Android. Escuchar un count-in de 4 contra una
+grabación armada al compás — antes de esto el click iba ~4 ms adelantado del grid
+al que el looper alinea la grabación (`nextBarBoundary` sobre `mPlayFrameCounter`),
+y ahora deberían coincidir.
+
+**Nota de alcance:** `IAudioNativeBridge` (commonMain) hoy sólo expone
+`setBpm`/`getBpm`; toda la superficie `transport*` es del wrapper de Android. Esta
+categoría deja las `wma_transport_*` listas para que iOS las tenga, pero **subirlas
+a la interfaz común es otra decisión** — arrastra al looper, que va último.
+
+### Dónde retomar (2026-07-27)
+
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **23 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 17** — sólo los 6 primeros están pusheados.
 `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
 > **El CI de GitHub está caído por falta de pago (2026-07-26).** Mientras dure, el gate es
-> la verificación local completa —los 7 comandos de arriba— y hay que dejar constancia de
+> la verificación local completa —los **8** comandos de abajo— y hay que dejar constancia de
 > su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
 > si alguien corrió los gates y lo dijo.
 
-Verificación local al cerrar `análisis`: portabilidad OK, **624 tests C++**, ambos slices
-de iOS con link check, 87 tests de simulador, 50 JVM, `assembleDebug`, XCFramework y
-**`compileIosMainKotlinMetadata`**. Todo en verde.
+Verificación local al cerrar `metronome` (2026-07-27): portabilidad OK (320 archivos),
+**650 tests C++**, ambos slices de iOS con link check, **87 tests de simulador**, **50 JVM**,
+`assembleDebug`, XCFramework y **`compileIosMainKotlinMetadata`**. Todo en verde.
+
+> [!TIP]
+> **Ojo con el verde de Gradle que llega en 400 ms.** Las tasks de test se reportan
+> `BUILD SUCCESSFUL` estando `UP-TO-DATE`, sin correr un solo test. Para que el gate valga
+> hay que forzarlas (`--rerun-tasks`) o contar los tests en
+> `audio/build/test-results/*/**.xml`. Al abrir esta sesión los cinco gates de Gradle daban
+> verde en 9s/1s/484ms sin ejecutar nada.
 
 ```
 ce2a105 feat(build): XCFramework en el pipeline (WA-4.1) + publish.yml a macOS
@@ -1410,7 +1522,7 @@ bloqueo de Xcode de §11 ya no existe):
 
 ```bash
 bash scripts/check-cpp-portability.sh          # guardrail WA-0.4
-bash scripts/run-cpp-tests.sh                  # 596 tests C++
+bash scripts/run-cpp-tests.sh                  # 650 tests C++
 bash scripts/build-ios.sh                      # ambos slices + link check
 ./gradlew :audio:iosSimulatorArm64Test         # 87 tests iOS
 ./gradlew :audio:testDebugUnitTest             # 50 tests JVM
@@ -1434,8 +1546,12 @@ NoisyPad Android**, que ya tiene tres cosas encima:
 3. **WA-2.6 `input/monitor`**, los dos cambios de comportamiento en el camino de input.
    **Prioridad alta**: el análisis estático de abajo encontró una regresión plausible en
    `startInputStream` con el permiso denegado. Reproducción concreta en esa nota.
-4. **WA-2.6 en general**: 119 entry points JNI reescritos, 0 validados en device. La suite
+4. **WA-2.6 en general**: 132 entry points JNI reescritos, 0 validados en device. La suite
    de host cubre la C API, no el JNI.
+5. **El fix del off-by-one del metrónomo** (`metronome`, 2026-07-27) cambia el timing del
+   click en Android. Es el único cambio de la serie que altera algo que ya sonaba bien —
+   o casi bien: iba ~4 ms adelantado. Escuchar un count-in contra una grabación armada al
+   compás.
 
 **En el mismo smoke conviene mirar WA-1.2:** `AudioEngineFactory.create()` sin argumentos
 ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
@@ -1448,14 +1564,15 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅, `effects` ✅, `oscillator/synth` ✅, `voice` ✅, `mode` ✅ y `análisis` ✅ cerradas** (delegación 135/278). **Murió la duplicación de estado de modo** |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅, `effects` ✅, `oscillator/synth` ✅, `voice` ✅, `mode` ✅, `análisis` ✅ y `metronome` ✅ cerradas** (delegación 148/278). **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso: WA-2.5 + WA-2.6, categoría `metronome`** (11 entry points, 0 delegan; toda
-la superficie `nativeTransport*`, con gap nominal 9 — el más alto que queda fuera del
-looper, así que conviene contar a mano antes de dimensionar). Después benchmark y el
-**looper**, que es el 40% del gap y va último.
+**Próximo paso: WA-2.5 + WA-2.6, categoría `benchmark`** (la fila dice 2/6, gap nominal 4).
+Es la última chica antes del **looper**, que es el 45% del gap portable (39 de 87) y va
+último. Como siempre: la fila del script no es la categoría — hay que abrir la sección del
+header y contar a mano. Ojo que `benchmark/diagnostics` es la fila donde cae
+`nativeGetStateVersion` (por `stat`), que ya delega desde `lifecycle`.
 
 **Arranque concreto para la próxima sesión** (el método ya está decidido, ver abajo — no
 re-litigarlo):
@@ -1483,24 +1600,30 @@ re-litigarlo):
 6. Actualizar `c_api_coverage.md` y el estado acá.
 
 **Orden de categorías:** ~~lifecycle~~ ✅ → ~~input/monitor~~ ✅ → ~~effects~~ ✅ →
-~~oscillator/synth~~ ✅ → ~~voice~~ ✅ → ~~mode~~ ✅ → ~~análisis~~ ✅ → **metronome** →
-benchmark → **looper**.
+~~oscillator/synth~~ ✅ → ~~voice~~ ✅ → ~~mode~~ ✅ → ~~análisis~~ ✅ →
+~~metronome~~ ✅ → benchmark → **looper**.
 
 > [!TIP]
-> **Cinco de las seis categorías cerradas encontraron un bug**, casi siempre por el mismo
-> mecanismo: la C API se escribió transcribiendo el JNI función por función,
-> y en alguna se transcribió *la función equivocada* o *de menos*. `wma_engine_start`
-> colapsó dos operaciones en una; `wma_input_*` traía de más;
-> `wma_effect_set_params_batch` copió el setter individual en vez del batch.
-> `oscillator/synth` salió limpia. En `voice` el bug no era de divergencia sino una lectura
-> fuera de rango que llevaba años ahí, y apareció igual: **leer la función entera antes de
-> migrarla es lo que los encuentra**. No aparecen solos, y el compilador no los ve.
+> **Siete de las ocho categorías cerradas encontraron un bug**, y hay dos mecanismos
+> distintos. El primero es divergencia: la C API se escribió transcribiendo el JNI función
+> por función, y en alguna se transcribió *la función equivocada* o *de menos*.
+> `wma_engine_start` colapsó dos operaciones en una; `wma_input_*` traía de más;
+> `wma_effect_set_params_batch` copió el setter individual en vez del batch; `mode` era un
+> boceto que decía serlo en su propio doc comment.
+>
+> El segundo no tiene nada que ver con las dos superficies: es un bug de producción viejo
+> que aparece porque **migrar obliga a leer la función entera y a escribirle un test**. Así
+> salieron la lectura fuera de rango de `voice`, los medidores de salida muertos de
+> `análisis` y el off-by-one del metrónomo. `oscillator/synth` fue la única limpia.
+> El compilador no ve ninguno de los dos tipos.
 
 > [!TIP]
-> **El gap sobrestima el trabajo, y por mucho.** En las cuatro categorías cerradas el gap
-> nominal fue **32** y el trabajo real **10 funciones nuevas**. La causa es siempre que la
-> C API abrevia donde el JNI escribe entero, y cada categoría destapa una abreviatura
-> nueva. Antes de dimensionar, abrir la sección de `watermelon_audio.h` y contar a mano.
+> **El gap sobrestima el trabajo — salvo cuando no hay sección que abrir.** En las siete
+> primeras categorías el gap nominal fue **39** y el trabajo real **11 funciones nuevas**,
+> porque la C API abrevia donde el JNI escribe entero. **`metronome` invirtió el signo**:
+> gap 9, trabajo real 10, porque su sección de `watermelon_audio.h` no existía y no había
+> abreviatura que descontar. La receta no cambia —abrir la sección y contar a mano— pero
+> si la sección **no existe**, el gap es el piso y no el techo.
 
 - **`mode` no es una más**: ahí desaparece por construcción la duplicación de
   `currentMode` / `modeTransitionInProgress` / `modeTransitionProgress` entre
