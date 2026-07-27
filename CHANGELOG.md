@@ -12,6 +12,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **ci:** −33% el job de iOS, y una ronda de deuda técnica, unificación y limpieza ([#61](https://github.com/mati-araujo/watermelon-audio/issues/61)) ([efea45f](https://github.com/mati-araujo/watermelon-audio/commit/efea45f99d3d8b7905c11a370147ba0a465f39c8))
 
+### Nota agregada a mano — una remoción de API viajó dentro de ese `perf`
+
+El commit de arriba **borra dos typealias públicos**, `UsbDeviceCompatibility.CompatibilityStatus`
+y `UsbDeviceCompatibility.CompatibilityResult`. Como el tipo de commit era `perf`, release-please
+calculó un **patch**, y la remoción no aparece en ningún lado de este changelog. Se deja escrito
+acá en vez de re-cortar la versión, porque la ruptura es inobservable: los dos símbolos ya venían
+`@Deprecated` con `ReplaceWith`, estaban anidados dentro del `object` (o sea que su nombre
+calificado era `UsbDeviceCompatibility.CompatibilityStatus`, no un alias de nivel superior), y no
+los importa ni este repo ni NoisyPad — que usa los tipos reales, `UsbCompatibilityStatus` y
+`UsbCompatibilityResult`.
+
+**La moraleja, que es lo que vale para la próxima:** el número de versión fue un síntoma. El
+defecto real es que una remoción de API pública viaje dentro de un commit `perf(ci):`, porque ahí
+el versionado automático no tiene forma de enterarse.
+
 ## [1.9.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.8.1...v1.9.0) (2026-07-27)
 
 

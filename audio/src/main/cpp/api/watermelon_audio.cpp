@@ -1196,11 +1196,6 @@ void wma_clear_mapping_config(WmaEngine* engine, int axis) {
     engine->engine->clearMappingConfig(axis);
 }
 
-void wma_set_depth_value(WmaEngine* engine, float value) {
-    WMA_CHECK_VOID(engine);
-    engine->engine->setDepthValue(std::clamp(value, 0.0f, 1.0f));
-}
-
 void wma_apply_automation(WmaEngine* engine, int axis, float normalized_value) {
     WMA_CHECK_VOID(engine);
     if (axis < 0 || axis > 2) return;

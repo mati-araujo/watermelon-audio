@@ -33,7 +33,7 @@
  *                 switch has a `default:` arm, and polarity is compared against
  *                 BIPOLAR with everything else falling through to unipolar.
  *
- * NOT COVERED — wma_set_depth_value(). See the note at the bottom of the file.
+ * DELETED — wma_set_depth_value(). See the note at the bottom of the file.
  *
  * TWO TESTS FAILED FIRST FOR THE WRONG REASON, and both were the harness:
  *
@@ -209,8 +209,8 @@ TEST_F(CApiRoutingTest, AnOutOfRangeAxisTouchesNothing) {
 }
 
 TEST_F(CApiRoutingTest, TheDepthAxisIsAMappingAxisLikeTheOthers) {
-    // Worth its own test only because wma_set_depth_value() shares the word
-    // "depth" and does something entirely different — see the closing note.
+    // Since wma_set_depth_value() was deleted (see the closing note), this is the
+    // only depth surface left — which is the whole point of having deleted it.
     ASSERT_EQ(wma_effect_add(mWma, kFilter), 0);
 
     wma_set_mapping_config(mWma, kAxisDepth, 0, 0, kLinear, kUnipolar,
@@ -247,7 +247,6 @@ TEST_F(CApiRoutingTest, EveryEntryPointSurvivesANullEngine) {
     wma_set_routing_mode(nullptr, kParallel);
     wma_set_parallel_mix(nullptr, 0.5f);
     wma_set_feedback_amount(nullptr, 0.5f);
-    wma_set_depth_value(nullptr, 0.5f);
     wma_set_mapping_config(nullptr, kAxisX, 0, 0, kLinear, kUnipolar, 0.0f, 1.0f, false);
     wma_clear_mapping_config(nullptr, kAxisX);
     wma_apply_automation(nullptr, kAxisX, 0.5f);
@@ -321,25 +320,24 @@ TEST_F(CApiRoutingTest, TheBackendManagerToggleSurvivesBothStates) {
 
 /*
  * ===========================================================================
- * NOT COVERED, and why — wma_set_depth_value()
+ * GONE, and why — wma_set_depth_value()
  * ===========================================================================
  *
- * There is no test for it because there is nothing to observe. The value goes
- * Kotlin (coerceIn 0..1) -> JNI -> wma_set_depth_value (clamp 0..1) ->
- * AudioEngine::setDepthValue -> EffectChain::setDepthValue -> mDepthValue, and
- * mDepthValue is read by NOBODY: a grep over the whole engine finds the atomic's
- * declaration, its one store, and nothing else. It has no getter and never
- * reaches the render path.
+ * This block used to explain why wma_set_depth_value() had no test: there was
+ * nothing to observe. The value went Kotlin (coerceIn 0..1) -> JNI ->
+ * wma_set_depth_value (clamp 0..1) -> AudioEngine::setDepthValue ->
+ * EffectChain::setDepthValue -> mDepthValue, and mDepthValue was read by NOBODY —
+ * a grep over the engine found the atomic's declaration, its one store, and
+ * nothing else. No getter, never reached the render path.
  *
- * So the function is a dead store across all four layers, while its Kotlin doc
- * comment advertises "Set depth axis value. Lock-free real-time path." The real
- * depth axis is mapping axis 2, driven by wma_apply_automation — which is what
- * TheDepthAxisIsAMappingAxisLikeTheOthers above covers.
+ * On 2026-07-27 the whole chain was deleted rather than wired up, in all six
+ * layers plus its one caller. Wiring it would have invented behaviour no caller
+ * had ever heard; keeping it meant shipping a control that silently does nothing
+ * behind a doc comment claiming "Lock-free real-time path".
  *
- * It is migrated faithfully rather than fixed, deliberately: wiring mDepthValue
- * into the audio path would invent behaviour that no caller has ever heard, and
- * that is a product decision, not a migration. Writing an assertion here that
- * "passes" would be worse than saying this.
+ * The depth axis is, and always was, mapping axis 2 — driven by
+ * wma_apply_automation, which TheDepthAxisIsAMappingAxisLikeTheOthers above
+ * covers. That test is now the only depth surface, which is the point.
  */
 
 }  // namespace

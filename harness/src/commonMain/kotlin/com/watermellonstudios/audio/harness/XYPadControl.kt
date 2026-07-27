@@ -47,15 +47,18 @@ import com.watermellonstudios.audio.domain.oscillator.OscillatorType
  *
  * ## Lo que NO tiene, y por qué
  *
- * **No hay slider de depth.** El eje depth de la propuesta era para observar el
- * ítem 11 del smoke —`setDepthValue` es un dead store en las cuatro capas— pero
- * no se puede: `setDepthValue` no existe en `commonMain` en ninguna forma, ni en
- * `AudioEngine` ni en `IAudioNativeBridge`. Es Android-only.
+ * **No hay slider de depth**, y el motivo dejó de ser "no se puede" para pasar a
+ * ser "no hay qué llamar". El eje depth de la propuesta era para observar el ítem
+ * 11 del smoke —`setDepthValue` era un dead store en las cuatro capas—; el
+ * 2026-07-27 esa cadena **se borró entera de este repo** en vez de cablearse.
+ * Nunca llegó a `commonMain`, y ya no existe acá. (Queda pendiente sacar su
+ * llamada redundante del lado de NoisyPad, que la hacía al lado del
+ * `applyAutomation` que sí funciona.)
  *
- * Poner el slider igual habría requerido subir al bridge común una función que
- * **ya sabemos que no hace nada**, y eso es peor que no tenerla: dejaría escrito
- * en la API multiplataforma un control muerto. El ítem se mira desde NoisyPad en
- * Android, que es donde el caller existe.
+ * La decisión que quedó escrita: subir al bridge común una función que **ya
+ * sabíamos que no hacía nada** habría sido peor que no tenerla, porque dejaba un
+ * control muerto en la API multiplataforma. El eje depth real es la mapping axis
+ * 2 — `applyAutomation(2, value)`, igual que X e Y.
  */
 @Composable
 fun XYPadControl(engine: AudioEngine, modifier: Modifier = Modifier) {

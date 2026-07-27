@@ -19,7 +19,7 @@
 > | Fase 4 | 🟢 WA-4.1 ✅ · **G1/WA-4.2 ✅ CERRADO** — NoisyPad linkea la 1.9.0 con 251 símbolos `wma_*` adentro |
 > | Fase 5 | 🟢 WA-5.5 con sus **7 controles** corriendo en el simulador |
 > | **Lo único grande abierto** | **G2 — validación en device. Necesita un iPhone.** Sonido real, latencia round-trip, Instruments sobre el render block |
-> | Otros pendientes | release 1.9.1 (PR #62, abierto) · los 2 stubs que mienten · el design system · el smoke de Android · WA-1.3 |
+> | Otros pendientes | **1.9.1 publicada** ✅ · **los 2 stubs que mentían: resueltos** ✅ · el design system (la premisa cambió, ver §16) · el smoke de Android (bloqueado por descargas, no por trabajo) · WA-1.3 |
 >
 > ⚠️ **Hoy sólo se puede validar en SIMULADOR**: no hay iPhone, y del lado de Android no hay
 > device **ni un solo AVD**. §16 ordena lo que queda por eso: primero lo que no necesita
@@ -2882,6 +2882,74 @@ por eso el linker se comió toda la superficie nativa por dead-code elimination.
 > **G1 / WA-4.2 ✅.**
 
 
+### Nota de cierre — los dos stubs que mentían (2026-07-27)
+
+Los ítems 11 y 12 del smoke, cerrados **sin hardware**. Lo que los desbloqueaba no era un device
+sino mirar quién los llama — y ahí **los dos ítems de esta lista estaban mal, cada uno para su
+lado**. Vale más la moraleja que el arreglo.
+
+**Ítem 11 — `setDepthValue`: el ítem sobreestimaba el daño.** Decía "si un slider de depth en
+NoisyPad llama sólo a `setDepthValue`, mover ese slider no cambia el audio". Llama, pero **no
+sólo**: tres líneas más abajo, `EffectsViewModel.handleSetDepthValue` llama también a
+`applyAutomation(MappingAxis.DEPTH, value)`, que es el eje real y sí funciona. O sea que **el
+slider nunca estuvo roto**; lo que había era una llamada redundante a una función muerta.
+
+Se **borró** en vez de cablearse, en las seis capas: `EffectChain`, `AudioEngine`, la C API
+(`.cpp` y `.h`), el JNI y `AudioNativeBridge`. Verificado antes de borrar que `applyAutomation()`
+usa su argumento `normalizedValue` y **jamás lee `mDepthValue`**, así que el eje depth ya andaba
+entero por la mapping axis 2. Cablearlo habría inventado comportamiento que ningún caller escuchó
+nunca — decisión de producto, no migración.
+
+**Ítem 12 — `nativeGetAdaptiveBufferStats`: el ítem subestimaba el daño y mandaba a buscar el
+caller al repo equivocado.** Decía "mirar si **NoisyPad** lo llama". NoisyPad no lo llama: **el
+caller está en este repo**, en `UsbAudioManagerImpl.getTransferStats`. Y los diez ceros no eran
+inocuos, que es lo que el ítem no vio:
+
+> [!CAUTION]
+> **Un array de ceros no es dato ausente: es dato que dice cero.** El caller lee esos campos
+> detrás de fallbacks elvis que un array **no-nulo** anula en silencio —
+> `adaptiveStats?.getOrNull(0)` devuelve `0f`, nunca `null`, así que
+> `?: getCurrentUsbBufferMs()` y `?: 100f` **no dispararon nunca**. Resultado: `bufferMs = 0` y
+> `healthScore = 0f`. Y como NoisyPad gatea toda su tarjeta Buffer/Health/Adjustments con
+> `if (stats.bufferMs > 0)` (`UsbAudioScreen.kt`, comentada *"Adaptive buffer stats (if
+> available)"*), **esa tarjeta no se renderizó nunca, en ninguna sesión USB, desde la extracción
+> inicial `d66ac4d`**. Un stub que devuelve ceros derrotó los tres defaults que su propio caller
+> había escrito para protegerse de él.
+
+Ahora devuelve `nullptr` — reporta *ausencia*, que es exactamente para lo que esos defaults
+estaban escritos (5 ms, 100 %, 0). **No se implementó** contra `AdaptiveBufferController` a
+propósito: es el camino legacy deprecado, y aunque sus contadores de underrun/overrun siguen
+alimentándose, **`updateFromProfiler()` no tiene un solo caller**, así que el health quedaría
+congelado en su default de 100.0 igual. Telemetría real = repuntar a jitter budget (Etapa D).
+
+**Tres conteos independientes coinciden en que se fue exactamente una función de la C API:**
+el header 251 → **250**, el `.a` de iOS 15293 → **15290** símbolos (los tres borrados, exactos) y
+`HarnessKit.framework` 251 → **250** símbolos `wma_*`.
+
+> [!TIP]
+> **Se verificó el `.so` equivocado la primera vez, y el error es instructivo.** Un
+> `find -name libwatermelon_audio.so` devolvió primero un artefacto **release de una build
+> anterior**, que todavía tenía `nativeSetDepthValue` — "el símbolo sigue ahí" era un binario
+> viejo, no un borrado incompleto. El `.so` de **debug** recién construido no lo tiene, con
+> `nativeApplyAutomation` presente como control. **Mirar la fecha del artefacto antes de creerle
+> a `nm`.**
+
+> [!WARNING]
+> **Lo que NO quedó cubierto por test, dicho explícitamente.** El ítem 12 no tiene test y no lo
+> va a tener sin refactor: `UsbAudioManagerImpl` fija `AudioNativeBridge.getInstance()` en el
+> constructor —no es inyectable— y **no existe source set `androidUnitTest`** en este repo
+> (hay `commonTest` e `iosTest`, nada más). El gate acá fue el compilador y leer el caller. Si
+> alguna vez se quiere pinchar esta clase de bug con un test, lo que hace falta primero es poder
+> inyectar el bridge.
+
+**Queda pendiente el lado de NoisyPad**, que todavía tiene la llamada redundante a
+`setDepthValue` en 4 lugares (`EffectsViewModel`, `IAutomationController`,
+`EffectsInterfaceAdapters`, `AudioEngineStateManager`; un solo implementer de la interfaz, cero
+tests). Hay que sacarla **antes** de que NoisyPad consuma la versión que la borra — mientras siga
+en 1.9.x no rompe nada.
+
+---
+
 ### Dónde retomar (2026-07-27)
 
 **Branch:** `feature/wa-3-2-ios-audio-bridge`, **51 commits sobre `master`**, **pusheada** y con
@@ -2989,16 +3057,10 @@ NoisyPad Android**, que ya tiene tres cosas encima:
    `startInputStream` con el permiso denegado. Reproducción concreta en esa nota.
 4. **WA-2.6 en general**: 135 entry points JNI reescritos, 0 validados en device. La suite
    de host cubre la C API, no el JNI.
-12. **`nativeGetAdaptiveBufferStats` devuelve diez ceros, siempre** (ronda de unificación,
-   2026-07-27). `jni_audio_bridge.cpp:1715` declara `jfloat stats[10] = {0}`, **nunca lo
-   llena** y lo devuelve así. Si NoisyPad muestra esas estadísticas, está mostrando ceros —
-   no "el buffer está en cero", sino que nadie las calculó nunca. Misma clase que el ítem 11.
-   **Mirar si NoisyPad lo llama** antes de decidir si se implementa o se borra.
-11. **`setDepthValue` no hace nada, y nunca hizo nada** (la cola, 2026-07-27). No es una
-   regresión de esta serie: `mDepthValue` se escribe y nadie lo lee, en las cuatro capas.
-   Si un slider de depth en NoisyPad llama sólo a `setDepthValue`, mover ese slider no
-   cambia el audio. El eje depth real es `applyAutomation(axis=2, …)`. **Mirar qué llama
-   NoisyPad** antes de decidir si esto se arregla o se borra.
+12. ~~**`nativeGetAdaptiveBufferStats` devuelve diez ceros, siempre**~~ ✅ **RESUELTO
+   2026-07-27 — y era peor de lo que decía este ítem.** Ver la nota de cierre abajo.
+11. ~~**`setDepthValue` no hace nada, y nunca hizo nada**~~ ✅ **RESUELTO 2026-07-27:
+   borrado en las seis capas.** Ver la nota de cierre abajo.
 10. **`selectBackend` devuelve `true` aunque no consiga el backend pedido** (la cola,
    2026-07-27). Pedir LIBUSB sin USB presente cae al backend de sistema y reporta éxito;
    sólo `getCurrentBackendType()` lo delata. Comportamiento viejo, ahora pinchado con test.
@@ -3056,31 +3118,50 @@ adentro. Lo que sigue ya no es "¿anda?" ni "¿se consume?".
 > está bloqueado por hardware, no por trabajo. La lista está ordenada por **lo que se puede
 > hacer sin hardware nuevo**.
 
-**1 · Decidir el release 1.9.1 — [PR #62](https://github.com/mati-araujo/watermelon-audio/pull/62), abierto.**
-Lo abrió release-please solo, a partir del `perf` de #61. Es barato y es **el vehículo de
-cualquier cosa que tenga que llegar a NoisyPad**.
-> [!WARNING]
-> **Mirarlo antes de mergear:** ese commit **borra dos typealias públicos**
-> (`CompatibilityStatus`, `CompatibilityResult`). Se verificó que no los usa este repo **ni
-> NoisyPad**, pero es técnicamente *source-breaking* y entra como **patch**. Si importa la
-> semántica estricta del versionado, es acá donde se corrige.
+**1 · ~~Decidir el release 1.9.1~~ ✅ HECHO.** [PR #62](https://github.com/mati-araujo/watermelon-audio/pull/62)
+mergeado y **v1.9.1 publicada** (2026-07-27 22:57). Se decidió **mergear como patch** en vez de
+re-cortar: los dos typealias que borra (`UsbDeviceCompatibility.CompatibilityStatus` /
+`CompatibilityResult`) ya venían `@Deprecated` con `ReplaceWith`, estaban **anidados dentro del
+`object`** —o sea que nunca fueron alias de nivel superior— y no los importa ni este repo ni
+NoisyPad, que usa los tipos reales. El ciclo de deprecación ya estaba servido.
+> [!TIP]
+> **Lo que sí se corrigió fue la señal, no el número** (nota a mano en el `CHANGELOG.md` bajo la
+> entrada 1.9.1). El defecto real nunca fue el `patch`: fue que **una remoción de API pública
+> viajara dentro de un commit `perf(ci):`**, donde el versionado automático no tiene forma de
+> enterarse. El número era el síntoma.
 
-**2 · Los dos stubs que devuelven mentiras** (ítems 11 y 12 del smoke). `setDepthValue` no hace
-nada y nunca hizo nada; `nativeGetAdaptiveBufferStats` devuelve diez ceros, siempre. **No
-necesitan hardware**: la decisión es implementar o borrar, y lo que la desbloquea es *mirar qué
-llama NoisyPad*. Los dos repos están montados en esta máquina.
+**2 · ~~Los dos stubs que devuelven mentiras~~ ✅ RESUELTOS** (2026-07-27). Ver la nota de cierre
+abajo. Los dos docs apuntaban mal, **cada uno para su lado**: el ítem 11 sobreestimaba el daño
+(el slider de NoisyPad nunca estuvo roto) y el ítem 12 lo subestimaba **y además mandaba a
+buscar el caller al repo equivocado**.
 
-**3 · Design system (WA-5.5, fase final).** Tiene su precondición cumplida —**existe un
-consumidor real con siete controles**, así que ya no hay que adivinar qué componentes hacen
-falta— y **corre entero en simulador**. Sigue necesitando una decisión explícita: si se comparte
-con NoisyPad, este repo pasa a shippear Compose.
+**3 · Design system (WA-5.5, fase final) — la premisa del plan cambió, hay que replantearlo.**
+Este doc decía que *"NoisyPad es un repo privado aparte y no está montado acá"* y por eso lo
+trataba como **fuente de cosecha**. Ya está montado (`~/Documents/GitHub/NoisyPad`), y medido:
+> [!IMPORTANT]
+> **No hay nada que cosechar — el design system ya existe y está terminado.** `core-ui` de
+> NoisyPad ya es **Compose Multiplatform** (convention plugin `noisypad.kmp.library.compose`),
+> con **63 `.kt` en `commonMain`** (4 androidMain, 1 iosMain), un paquete `designsystem/` de
+> **12 archivos de tokens + 4 de foundation**, un módulo `core-ui-catalog` aparte, un pipeline
+> de tokens web (`design-system-web`) y una **ADR aceptada el 2026-07-25**
+> (`docs/adr/0002-core-ui-compose-multiplatform.md`, CMP 1.11.1, con spike descartable previo).
+>
+> Lo que queda por decidir no es *qué construir* sino **la dirección de la dependencia**, y ahí
+> hay algo que el plan original no contemplaba: **NoisyPad ya depende de watermelon-audio**. Que
+> el harness de acá consuma `core-ui` de allá cierra un ciclo a nivel repo — tolerable sólo
+> porque `:harness` no se publica, pero es justo el tipo de decisión que no conviene tomar de
+> rebote.
 
-**4 · El smoke manual de Android — hoy bloqueado, pero parcialmente desbloqueable.** 12 ítems,
-ninguno corrido en device. **Crear un AVD alcanza para varios**, incluido el de prioridad alta
-(ítem 3, `startInputStream` con el permiso **denegado**, que es exactamente el caso que un
-emulador sí puede reproducir). Lo que un AVD **no** cubre es USB. Los ítems 7, 8 y 9 —los tres
-retornos del looper— ya están verificados desde iOS por el control 5; lo que falta ahí es el
-camino JNI.
+**4 · El smoke manual de Android — bloqueado por DESCARGAS, no por trabajo.** 12 ítems, ninguno
+corrido. El plan decía "crear un AVD alcanza para varios", incluido el de prioridad alta (ítem 3,
+`startInputStream` con el permiso **denegado**). Sigue siendo cierto, pero **crear el AVD no es
+gratis en esta máquina**: medido el 2026-07-27, `~/Library/Android/sdk` tiene `emulator`, `ndk`,
+`platform-tools` y `platforms`, pero **no tiene `cmdline-tools`** —o sea, ni `sdkmanager` ni
+`avdmanager`— y **no hay una sola system image instalada** (`~/.android/avd` está vacío).
+Habilitarlo implica bajar cmdline-tools más una imagen de sistema (~1.5 GB) de Google y aceptar
+licencias. Android Studio está instalado y lo resuelve desde Device Manager. Lo que un AVD **no**
+cubre es USB. Los ítems 7, 8 y 9 —los tres retornos del looper— ya están verificados desde iOS
+por el control 5; lo que falta ahí es el camino JNI.
 
 **5 · WA-1.3**, lo único que falta de Fase 1. Y el fixture SF2 (§ deuda técnica), que es lo
 único que le falta al bug 3 de WA-2.0.

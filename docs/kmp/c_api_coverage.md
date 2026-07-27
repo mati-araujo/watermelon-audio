@@ -221,12 +221,28 @@ entra por `log`. Es el mismo desparramo de keywords descrito abajo.
 > | `CreateSplitBackend`, `FallbackToOboeBackend` | 2 | compilan en iOS pero **todo camino suyo requiere el backend USB** — ver abajo |
 > | `JNI_OnLoad` / `JNI_OnUnload` | 1 | **no son entry points de Java**: son hooks de la VM en `jni_engine.cpp`. Los cuenta el `grep JNIEXPORT` y no deberían estar en el denominador |
 >
-> [!CAUTION]
-> **`nativeGetAdaptiveBufferStats` devuelve diez ceros, siempre** (`jni_audio_bridge.cpp:1715`).
-> Declara `jfloat stats[10] = {0}`, nunca lo llena, y devuelve eso. Está gateada por
-> `getLibusbBackend()`, así que cae en el balde USB por dependencia — pero no es "no porta",
-> es **un stub que reporta datos falsos**. Misma familia que `setDepthValue`. Ver la lista del
-> smoke en `kmp_requirements.md` §16.
+> [!NOTE]
+> **Los dos stubs que mentían — resueltos el 2026-07-27, cada uno para su lado.**
+>
+> **`nativeGetAdaptiveBufferStats` devolvía diez ceros, siempre.** Declaraba
+> `jfloat stats[10] = {0}`, nunca lo llenaba, y devolvía eso — desde la extracción inicial
+> (`d66ac4d`). No era inocuo: el único caller (`UsbAudioManagerImpl.getTransferStats`) lee
+> esos campos detrás de fallbacks elvis que **un array no-nulo anula** — `getOrNull(0)`
+> devuelve `0f`, no `null`, así que `?: getCurrentUsbBufferMs()` y `?: 100f` nunca
+> disparaban. Resultado: `bufferMs = 0`, `healthScore = 0f`, y como NoisyPad gatea toda su
+> tarjeta Buffer/Health/Adjustments con `if (stats.bufferMs > 0)`, **esa tarjeta no se
+> renderizó nunca, en ninguna sesión USB**. Ahora devuelve `nullptr`: reporta *ausencia*, que
+> es para lo que los defaults del caller estaban escritos (5 ms, 100 %, 0). No se implementó
+> contra `AdaptiveBufferController` a propósito — es el camino legacy deprecado y
+> `updateFromProfiler()` no tiene caller, así que el health quedaría congelado en 100.0
+> igual. Telemetría real = repuntar a jitter budget (Etapa D).
+>
+> **`setDepthValue` se borró entero**, en las seis capas de este repo. Era un dead store: el
+> valor llegaba a un atómico que nadie leía y ningún render path veía. El eje depth es la
+> mapping axis 2 — `wma_apply_automation(engine, 2, value)`. Con eso la C API pasa de **251 a
+> 250** funciones y el `.a` de iOS de 15293 a 15290 símbolos (los tres borrados, exactos).
+> Falta su remoción del lado de NoisyPad, que lo llamaba de forma redundante al lado del
+> `applyAutomation` que sí funciona.
 >
 > Los dos de backend eran los que la cola dejó "a revisar". **No portan, y no por falta
 > de cuerpo portable:** `resolveBackendForSplit()` sólo resuelve dos endpoints, OBOE (el
