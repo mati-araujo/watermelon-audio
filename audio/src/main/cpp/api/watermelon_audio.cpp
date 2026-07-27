@@ -1505,6 +1505,140 @@ void wma_looper_trigger_click(WmaEngine* engine, bool is_downbeat) {
     engine->engine->getAudioLooper().triggerClick(is_downbeat);
 }
 
+/* ---------------- Track editing & analysis ---------------- */
+
+void wma_looper_abort_recording(WmaEngine* engine) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().abortRecording();
+}
+
+void wma_looper_start_recording_with_pre_roll(WmaEngine* engine, int track_index,
+                                               int pre_roll_ms) {
+    WMA_CHECK_VOID(engine);
+    auto& looper = engine->engine->getAudioLooper();
+
+    // 1 s is what the pre-roll ring holds; asking for more would read past it.
+    if (pre_roll_ms < 0) pre_roll_ms = 0;
+    if (pre_roll_ms > 1000) pre_roll_ms = 1000;
+    if (pre_roll_ms == 0) {
+        looper.startRecording(track_index);
+        return;
+    }
+
+    const int sampleRate = looper.getSampleRate();
+    const int preRollFrames = (pre_roll_ms * sampleRate) / 1000;
+    if (preRollFrames <= 0) {
+        looper.startRecording(track_index);
+        return;
+    }
+
+    // Allocation on the calling thread, which is the control thread — never the
+    // audio thread. Same as the JNI did, and said so.
+    std::vector<float> preRoll(static_cast<size_t>(preRollFrames) * 2, 0.0f);
+    engine->engine->getPreRollRing().snapshot(preRoll.data(), preRollFrames);
+    looper.startRecordingWithPreRoll(track_index, preRoll.data(), preRollFrames);
+}
+
+int wma_looper_prepare_track_bars(WmaEngine* engine, int track_index, int bars,
+                                   int sample_rate) {
+    WMA_CHECK_VAL(engine, -1);
+    const int framesPerBar = engine->engine->getTransport().framesPerBar(1);
+    if (framesPerBar <= 0 || bars <= 0) return -1;
+
+    // `bars * framesPerBar` is int arithmetic in AudioLooper too, and prepareTrack
+    // only rejects a NON-POSITIVE length — so a bar count large enough to wrap
+    // into a small positive would allocate a tiny track and report the wrapped
+    // length as success. Third width problem in this category; caught here rather
+    // than propagated.
+    const int64_t lengthFrames =
+        static_cast<int64_t>(bars) * static_cast<int64_t>(framesPerBar);
+    if (lengthFrames > INT32_MAX) return -1;
+
+    const bool ok = engine->engine->getAudioLooper()
+                        .prepareTrackBars(track_index, bars, framesPerBar, sample_rate);
+    return ok ? static_cast<int>(lengthFrames) : -1;
+}
+
+bool wma_looper_trim_track(WmaEngine* engine, int track_index) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getAudioLooper().trimTrack(track_index);
+}
+
+bool wma_looper_finalize_free_loop(WmaEngine* engine, int track_index,
+                                    int loop_start, int loop_end, int tail_frames) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getAudioLooper().finalizeFreeLoop(
+        track_index, loop_start, loop_end, tail_frames);
+}
+
+bool wma_looper_find_content_bounds(const WmaEngine* engine, int track_index,
+                                    float threshold_ratio,
+                                    int* out_first, int* out_last) {
+    WMA_CHECK_VAL(engine, false);
+    if (!out_first || !out_last) return false;
+
+    // AudioLooper packs the pair into an int64 for the JNI's benefit; unpack it
+    // here so the C API can hand back two plain ints. The low half is masked as
+    // unsigned on the way in, so it has to come back out the same way or a frame
+    // index with the top bit set would arrive negative.
+    const int64_t packed =
+        engine->engine->getAudioLooper().findTrackContentBounds(track_index, threshold_ratio);
+    *out_first = static_cast<int>(packed >> 32);
+    *out_last = static_cast<int>(static_cast<uint32_t>(packed & 0xFFFFFFFF));
+    return true;
+}
+
+int wma_looper_detect_onsets(const WmaEngine* engine, int track_index,
+                              int* out_onsets, int max_onsets,
+                              int hop_frames, float sensitivity) {
+    WMA_CHECK_VAL(engine, 0);
+    if (!out_onsets || max_onsets <= 0) return 0;
+    const int written = engine->engine->getAudioLooper().detectTrackOnsets(
+        track_index, out_onsets, max_onsets, hop_frames, sensitivity);
+    return written < 0 ? 0 : written;
+}
+
+/* ---------------- Per-track playback modes ---------------- */
+
+void wma_looper_set_track_play_count(WmaEngine* engine, int track_index, int plays) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().setTrackPlayCount(track_index, plays);
+}
+
+void wma_looper_set_track_percussion_mode(WmaEngine* engine, int track_index,
+                                           bool percussion) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().setTrackPercussionMode(track_index, percussion);
+}
+
+bool wma_looper_is_track_percussion_mode(const WmaEngine* engine, int track_index) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getAudioLooper().isTrackPercussionMode(track_index);
+}
+
+void wma_looper_set_tail_ms(WmaEngine* engine, int ms) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().setTailMs(ms);
+}
+
+int wma_looper_get_tail_ms(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().getTailMs();
+}
+
+void wma_looper_set_capabilities(WmaEngine* engine, int64_t budget_bytes,
+                                  int max_tracks, int max_free_seconds) {
+    WMA_CHECK_VOID(engine);
+    // Defaults reproduce the historical behaviour; each field is only overridden
+    // when the caller passes a positive value. That "0 means leave it alone"
+    // contract is the whole reason this takes three arguments instead of a struct.
+    AudioLooper::LooperCapabilities caps;
+    if (budget_bytes > 0) caps.memoryBudgetBytes = static_cast<size_t>(budget_bytes);
+    if (max_tracks > 0) caps.maxActiveTracks = max_tracks;
+    if (max_free_seconds > 0) caps.maxFreeSeconds = max_free_seconds;
+    engine->engine->getAudioLooper().setCapabilities(caps);
+}
+
 /* ---------------- Armed recording ---------------- */
 
 namespace {

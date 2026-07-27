@@ -57,9 +57,11 @@ protected:
     /// zero length. A loop region only exists on a track that has something to
     /// loop, which is worth knowing before writing a test that assumes
     /// otherwise.
-    void recordTrack(int track, int blocks = 4) {
+    void recordTrack(int track, int blocks = 4, int capacityBlocks = 0) {
+        if (capacityBlocks <= 0) capacityBlocks = blocks;
         wma_looper_set_enabled(mWma, true);
-        ASSERT_EQ(wma_looper_prepare_track(mWma, track, blocks * kBlockFrames, kSampleRate),
+        ASSERT_EQ(wma_looper_prepare_track(mWma, track, capacityBlocks * kBlockFrames,
+                                           kSampleRate),
                   WMA_OK);
         wma_set_frequency_amplitude(mWma, 440.0f, 1.0f);
         render(4, kBlockFrames);
@@ -241,6 +243,303 @@ TEST_F(CApiLooperTest, TheWaveformHonoursTheBufferItWasGiven) {
         EXPECT_FLOAT_EQ(bins[static_cast<size_t>(i)], -12345.0f)
             << "wrote past max_bins at index " << i;
     }
+}
+
+// ===========================================================================
+// Track editing & analysis — batch 3
+// ===========================================================================
+
+TEST_F(CApiLooperTest, PreparingByBarsReturnsTheLengthTheTransportImplies) {
+    startAt(kSampleRate, 0);
+    wma_transport_set_beats_per_bar(mWma, 4);   // 4 beats x 24000 = 96000 frames/bar
+
+    const int frames = wma_looper_prepare_track_bars(mWma, 0, /*bars=*/2, kSampleRate);
+    const int framesPerBar = wma_transport_frames_per_bar(mWma, 1);
+    ASSERT_GT(framesPerBar, 0);
+
+    EXPECT_EQ(frames, 2 * framesPerBar)
+        << "the reported length has to be what the Transport says two bars are";
+    EXPECT_GE(wma_looper_get_track_length_frames(mWma, 0), 0);
+}
+
+TEST_F(CApiLooperTest, PreparingByBarsRefusesNonsenseInsteadOfWrapping) {
+    startAt(kSampleRate, 0);
+
+    EXPECT_EQ(wma_looper_prepare_track_bars(mWma, 0, /*bars=*/0, kSampleRate), -1);
+    EXPECT_EQ(wma_looper_prepare_track_bars(mWma, 0, /*bars=*/-4, kSampleRate), -1);
+
+    // Third width problem of this category. `bars * framesPerBar` is int
+    // arithmetic in AudioLooper too, and prepareTrack only rejects a NON-POSITIVE
+    // length — so a bar count big enough to wrap into a SMALL POSITIVE allocates a
+    // tiny track and reports the wrapped number as the length.
+    //
+    // 44740 is the value that isolates this. At 96000 frames/bar the product is
+    // 4,295,040,000, which wraps to 72,704 — small, positive, and allocatable, so
+    // the buggy version happily answers "72704 frames" to a 44740-bar request.
+    // The first version of this test used 100000 bars, whose product wraps to
+    // 1,010,065,408; that is positive too, but the ~8 GB allocation fails and the
+    // test passed on the allocation failure rather than on the guard. Verified by
+    // mutating the guard away: with 100000 the test stayed green.
+    EXPECT_EQ(wma_looper_prepare_track_bars(mWma, 0, /*bars=*/44740, kSampleRate), -1)
+        << "a bar count that overflows int32 must be refused, not wrapped";
+    EXPECT_EQ(wma_looper_prepare_track_bars(mWma, 0, /*bars=*/100000, kSampleRate), -1);
+}
+
+TEST_F(CApiLooperTest, ContentBoundsComeBackAsTwoPlainInts) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/16);
+
+    int first = -1, last = -1;
+    ASSERT_TRUE(wma_looper_find_content_bounds(mWma, 0, 0.01f, &first, &last));
+
+    // The JNI packs these into one jlong because a JNI call cannot return two
+    // ints. The C API does not have that problem and should not inherit the
+    // encoding — least of all a sign-sensitive one.
+    EXPECT_GE(first, 0);
+    EXPECT_GT(last, first) << "a recorded track should have audible content";
+    EXPECT_LE(last, wma_looper_get_track_length_frames(mWma, 0));
+}
+
+TEST_F(CApiLooperTest, ContentBoundsRefusesRatherThanWritingGarbage) {
+    startAt(kSampleRate, 0);
+    int first = -7, last = -7;
+
+    EXPECT_FALSE(wma_looper_find_content_bounds(nullptr, 0, 0.01f, &first, &last));
+    EXPECT_EQ(first, -7) << "the out-params must be left alone on failure";
+    EXPECT_EQ(last, -7);
+
+    EXPECT_FALSE(wma_looper_find_content_bounds(mWma, 0, 0.01f, nullptr, &last));
+    EXPECT_FALSE(wma_looper_find_content_bounds(mWma, 0, 0.01f, &first, nullptr));
+}
+
+TEST_F(CApiLooperTest, OnsetDetectionHonoursTheBufferAndNeverReportsNegative) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/16);
+
+    constexpr int kMax = 8;
+    std::vector<int> onsets(kMax + 4, -999);
+    const int n = wma_looper_detect_onsets(mWma, 0, onsets.data(), kMax,
+                                           /*hop_frames=*/256, /*sensitivity=*/0.5f);
+
+    // NOT covered, and said so rather than dressed up: the C API clamps a negative
+    // count to 0, carried over from the JNI, but TrackBuffer::detectOnsets cannot
+    // produce one — every early exit is `return 0` and the counting path only ever
+    // increments. Mutating the clamp away leaves this suite green, which is how
+    // that was established. The assertion below is real, it just cannot fail for
+    // the reason the clamp exists.
+    EXPECT_GE(n, 0);
+    EXPECT_LE(n, kMax);
+    for (int i = kMax; i < kMax + 4; ++i) {
+        EXPECT_EQ(onsets[static_cast<size_t>(i)], -999) << "wrote past max_onsets at " << i;
+    }
+}
+
+TEST_F(CApiLooperTest, OnsetDetectionRefusesAnEmptyRequest) {
+    startAt(kSampleRate, 0);
+    int one = 0;
+    EXPECT_EQ(wma_looper_detect_onsets(mWma, 0, &one, 0, 256, 0.5f), 0);
+    EXPECT_EQ(wma_looper_detect_onsets(mWma, 0, nullptr, 8, 256, 0.5f), 0);
+}
+
+TEST_F(CApiLooperTest, TrimmingFreesSpareCapacityWithoutTouchingTheRecording) {
+    startAt(kSampleRate, 0);
+    // Reserve 64 blocks, record 8: 56 blocks of spare capacity for trim to free.
+    // A track recorded right up to its capacity has nothing to trim and trim
+    // reports false for it — see the test below. Learned by writing this one the
+    // other way round first.
+    recordTrack(0, /*blocks=*/8, /*capacityBlocks=*/64);
+    const int lengthBefore = wma_looper_get_track_length_frames(mWma, 0);
+
+    EXPECT_TRUE(wma_looper_trim_track(mWma, 0));
+    EXPECT_TRUE(wma_looper_is_track_active(mWma, 0)) << "trimming must not clear the track";
+    EXPECT_EQ(wma_looper_get_track_length_frames(mWma, 0), lengthBefore)
+        << "trim frees spare capacity, it does not shorten the recording";
+}
+
+TEST_F(CApiLooperTest, TrimmingATrackWithNothingSpareReportsFalse) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/16);   // recorded right up to capacity
+
+    // "Returns true if trimmed" — not "true if the call was valid". Worth pinning
+    // because false here reads like an error and is not one.
+    EXPECT_FALSE(wma_looper_trim_track(mWma, 0));
+    EXPECT_TRUE(wma_looper_is_track_active(mWma, 0));
+}
+
+TEST_F(CApiLooperTest, TrimmingRefusesWhileRecordingIntoTheSameTrack) {
+    startAt(kSampleRate, 0);
+    wma_looper_set_enabled(mWma, true);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 64 * kBlockFrames, kSampleRate), WMA_OK);
+    wma_set_frequency_amplitude(mWma, 440.0f, 1.0f);
+    wma_looper_start_recording(mWma, 0);
+    render(4, kBlockFrames);
+
+    EXPECT_FALSE(wma_looper_trim_track(mWma, 0))
+        << "freeing the buffer under the writer would be a use-after-free";
+}
+
+TEST_F(CApiLooperTest, FinalizingAFreeLoopSetsTheRegion) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/32);
+
+    ASSERT_TRUE(wma_looper_finalize_free_loop(mWma, 0, /*start=*/0, /*end=*/4096,
+                                              /*tail=*/0));
+    EXPECT_EQ(wma_looper_get_track_loop_start(mWma, 0), 0);
+    EXPECT_EQ(wma_looper_get_track_loop_end(mWma, 0), 4096);
+}
+
+TEST_F(CApiLooperTest, FinalizingRefusesWhileRecordingIntoTheSameTrack) {
+    startAt(kSampleRate, 0);
+    wma_looper_set_enabled(mWma, true);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 64 * kBlockFrames, kSampleRate), WMA_OK);
+    wma_set_frequency_amplitude(mWma, 440.0f, 1.0f);
+    wma_looper_start_recording(mWma, 0);
+    render(4, kBlockFrames);
+
+    EXPECT_FALSE(wma_looper_finalize_free_loop(mWma, 0, 0, 4096, 0))
+        << "rewriting a track's loop region mid-take would race the writer";
+}
+
+TEST_F(CApiLooperTest, PercussionModeRoundTrips) {
+    startAt(kSampleRate, 0);
+    recordTrack(0);
+
+    EXPECT_FALSE(wma_looper_is_track_percussion_mode(mWma, 0));
+    wma_looper_set_track_percussion_mode(mWma, 0, true);
+    EXPECT_TRUE(wma_looper_is_track_percussion_mode(mWma, 0));
+    wma_looper_set_track_percussion_mode(mWma, 0, false);
+    EXPECT_FALSE(wma_looper_is_track_percussion_mode(mWma, 0));
+}
+
+TEST_F(CApiLooperTest, TheTailWindowRoundTrips) {
+    startAt(kSampleRate, 0);
+    const int original = wma_looper_get_tail_ms(mWma);
+
+    wma_looper_set_tail_ms(mWma, original + 50);
+    EXPECT_EQ(wma_looper_get_tail_ms(mWma), original + 50);
+}
+
+TEST_F(CApiLooperTest, CapabilitiesLeaveAloneWhateverIsNotAskedFor) {
+    startAt(kSampleRate, 0);
+
+    // The ceiling is observable: track 2 is beyond a limit of 2, so preparing it
+    // must fail while track 0 still works.
+    wma_looper_set_capabilities(mWma, /*budget=*/0, /*max_tracks=*/2, /*max_free_s=*/0);
+    EXPECT_EQ(wma_looper_prepare_track(mWma, 2, 4 * kBlockFrames, kSampleRate),
+              WMA_ERROR_MEMORY);
+    EXPECT_EQ(wma_looper_prepare_track(mWma, 0, 4 * kBlockFrames, kSampleRate), WMA_OK);
+}
+
+TEST_F(CApiLooperTest, SettingOnlyTheBudgetLeavesTheTrackCeilingAlone) {
+    startAt(kSampleRate, 0);
+
+    // The load-bearing half of "0 means leave it alone". AudioLooper::setCapabilities
+    // clamps maxActiveTracks into [1, 16], so passing the struct through with a
+    // zero would silently cut the device down to ONE usable track. The default
+    // lives in LooperCapabilities' member initialiser, and only overriding when
+    // the caller asked for something is what preserves it.
+    wma_looper_set_capabilities(mWma, /*budget=*/8 * 1024 * 1024, /*max_tracks=*/0,
+                                /*max_free_s=*/0);
+
+    EXPECT_EQ(wma_looper_prepare_track(mWma, 1, 4 * kBlockFrames, kSampleRate), WMA_OK)
+        << "asking only for a memory budget collapsed the track ceiling";
+    EXPECT_EQ(wma_looper_prepare_track(mWma, 2, 4 * kBlockFrames, kSampleRate), WMA_OK);
+}
+
+TEST_F(CApiLooperTest, AZeroBudgetIsAlreadyHandledDownstream) {
+    startAt(kSampleRate, 0);
+
+    // Characterization of a REDUNDANT guard, so the next reader does not take the
+    // whole "0 means leave alone" block as uniformly load-bearing: for the memory
+    // budget specifically, AudioLooper::setCapabilities already substitutes
+    // DEFAULT_MEMORY_BUDGET_BYTES when it receives a zero. Removing the C API's
+    // `if (budget_bytes > 0)` changes nothing observable — established by mutating
+    // it away and watching this suite stay green. It is kept for symmetry with the
+    // other two fields, where the guard IS what preserves the default.
+    wma_looper_set_capabilities(mWma, /*budget=*/0, /*max_tracks=*/0, /*max_free_s=*/0);
+    EXPECT_EQ(wma_looper_prepare_track(mWma, 0, 4 * kBlockFrames, kSampleRate), WMA_OK);
+}
+
+TEST_F(CApiLooperTest, AbortingARecordingDiscardsTheTake) {
+    startAt(kSampleRate, 0);
+    wma_looper_set_enabled(mWma, true);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 64 * kBlockFrames, kSampleRate), WMA_OK);
+    wma_set_frequency_amplitude(mWma, 440.0f, 1.0f);
+
+    wma_looper_start_recording(mWma, 0);
+    render(4, kBlockFrames);
+    ASSERT_TRUE(wma_looper_is_recording(mWma));
+
+    wma_looper_abort_recording(mWma);
+    EXPECT_FALSE(wma_looper_is_recording(mWma));
+    EXPECT_FALSE(wma_looper_is_track_active(mWma, 0))
+        << "abort throws the take away; stop would have kept it";
+}
+
+TEST_F(CApiLooperTest, PreRollSeedsTheTakeWithAudioFromBeforeTheButton) {
+    startAt(kSampleRate, 0);
+    wma_looper_set_enabled(mWma, true);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 128 * kBlockFrames, kSampleRate), WMA_OK);
+
+    // Fill the pre-roll ring with audible output, then start recording with a
+    // pre-roll while the engine is SILENT. Anything in the track can only have
+    // come from the ring.
+    wma_set_frequency_amplitude(mWma, 440.0f, 1.0f);
+    render(60, kBlockFrames);
+    wma_set_frequency_amplitude(mWma, 440.0f, 0.0f);
+    render(60, kBlockFrames);
+    ASSERT_LT(renderBlockPeak(kBlockFrames), kAudible);
+
+    wma_looper_start_recording_with_pre_roll(mWma, 0, /*pre_roll_ms=*/100);
+    render(2, kBlockFrames);
+    wma_looper_stop_recording(mWma);
+
+    ASSERT_TRUE(wma_looper_is_track_active(mWma, 0));
+    // 100 ms at 48 kHz is 4800 frames of seed, so the take is far longer than the
+    // two blocks that were actually rendered while recording.
+    EXPECT_GT(wma_looper_get_track_length_frames(mWma, 0), 4000)
+        << "the pre-roll seed did not make it into the take";
+}
+
+TEST_F(CApiLooperTest, PreRollOfZeroIsAPlainStart) {
+    startAt(kSampleRate, 0);
+    wma_looper_set_enabled(mWma, true);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 128 * kBlockFrames, kSampleRate), WMA_OK);
+    wma_set_frequency_amplitude(mWma, 440.0f, 1.0f);
+    render(60, kBlockFrames);
+
+    wma_looper_start_recording_with_pre_roll(mWma, 0, 0);
+    EXPECT_TRUE(wma_looper_is_recording(mWma));
+    render(2, kBlockFrames);
+    wma_looper_stop_recording(mWma);
+
+    // No seed: the take is only what was rendered while recording.
+    EXPECT_LT(wma_looper_get_track_length_frames(mWma, 0), 4000);
+}
+
+TEST_F(CApiLooperTest, PreRollIsClampedToWhatTheRingHolds) {
+    startAt(kSampleRate, 0);
+    wma_looper_set_enabled(mWma, true);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 256 * kBlockFrames, kSampleRate), WMA_OK);
+    wma_set_frequency_amplitude(mWma, 440.0f, 1.0f);
+    render(60, kBlockFrames);
+
+    // The ring holds 1 s. Asking for an hour must not read past it.
+    wma_looper_start_recording_with_pre_roll(mWma, 0, /*pre_roll_ms=*/3600000);
+    render(2, kBlockFrames);
+    wma_looper_stop_recording(mWma);
+
+    EXPECT_LE(wma_looper_get_track_length_frames(mWma, 0), kSampleRate + 4 * kBlockFrames)
+        << "the seed exceeded one second of pre-roll";
+
+    // And a negative request is a plain start, not a huge unsigned one. A fresh
+    // track rather than clearing this one: clearTrack() releases the buffer, so a
+    // cleared track cannot be recorded into again without preparing it.
+    wma_looper_stop_recording(mWma);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 1, 64 * kBlockFrames, kSampleRate), WMA_OK);
+    wma_looper_start_recording_with_pre_roll(mWma, 1, -5000);
+    EXPECT_TRUE(wma_looper_is_recording(mWma));
+    wma_looper_abort_recording(mWma);
 }
 
 // ===========================================================================
@@ -451,6 +750,15 @@ TEST(CApiLooperNullHandle, EveryQueryReturnsTheValueTheJniUsedToReturnByHand) {
     EXPECT_EQ(wma_looper_get_armed_triggered(nullptr), 0);
     EXPECT_EQ(wma_looper_get_frames_dropped(nullptr), 0);
     EXPECT_EQ(wma_looper_get_dropped_events(nullptr), 0);
+
+    // Batch 3.
+    EXPECT_EQ(wma_looper_prepare_track_bars(nullptr, 0, 2, 48000), -1);
+    EXPECT_FALSE(wma_looper_trim_track(nullptr, 0));
+    EXPECT_FALSE(wma_looper_finalize_free_loop(nullptr, 0, 0, 1000, 0));
+    EXPECT_FALSE(wma_looper_is_track_percussion_mode(nullptr, 0));
+    EXPECT_EQ(wma_looper_get_tail_ms(nullptr), 0);
+    int onset = 0;
+    EXPECT_EQ(wma_looper_detect_onsets(nullptr, 0, &onset, 1, 256, 0.5f), 0);
 }
 
 TEST(CApiLooperNullHandle, ANullPathIsRefusedRatherThanDereferenced) {
@@ -485,6 +793,12 @@ TEST(CApiLooperNullHandle, EveryMutatorIsANoOpRatherThanACrash) {
     wma_looper_trigger_click(nullptr, true);
     wma_looper_cancel_arm(nullptr);
     wma_looper_reset_telemetry(nullptr);
+    wma_looper_abort_recording(nullptr);
+    wma_looper_start_recording_with_pre_roll(nullptr, 0, 100);
+    wma_looper_set_track_play_count(nullptr, 0, 2);
+    wma_looper_set_track_percussion_mode(nullptr, 0, true);
+    wma_looper_set_tail_ms(nullptr, 50);
+    wma_looper_set_capabilities(nullptr, 1024, 2, 30);
     SUCCEED();
 }
 

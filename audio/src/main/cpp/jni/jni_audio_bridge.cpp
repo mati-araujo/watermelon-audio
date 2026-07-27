@@ -2014,9 +2014,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperAbortRecording(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().abortRecording();
-    }
+    wma_looper_abort_recording(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
@@ -2090,9 +2088,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperTrimTrack(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getAudioLooper().trimTrack(trackIndex)
-        ? JNI_TRUE : JNI_FALSE;
+    return wma_looper_trim_track(g_wmaEngine, trackIndex) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
@@ -2228,20 +2224,14 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetCapabilities(
     JNIEnv* env, jobject thiz, jlong budgetBytes, jint maxTracks, jint maxFreeSeconds) {
-    if (!g_jniState.engine) return;
-    AudioLooper::LooperCapabilities caps;
-    if (budgetBytes > 0) caps.memoryBudgetBytes = static_cast<size_t>(budgetBytes);
-    if (maxTracks > 0)   caps.maxActiveTracks = maxTracks;
-    if (maxFreeSeconds > 0) caps.maxFreeSeconds = maxFreeSeconds;
-    g_jniState.engine->getAudioLooper().setCapabilities(caps);
+    wma_looper_set_capabilities(g_wmaEngine, budgetBytes, maxTracks, maxFreeSeconds);
 }
 
 // Loop N times then auto-stop + emit onTrackCompleted (F3.4). plays <= 0 = infinite.
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackPlayCount(
     JNIEnv* env, jobject thiz, jint trackIndex, jint plays) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().setTrackPlayCount(trackIndex, plays);
+    wma_looper_set_track_play_count(g_wmaEngine, trackIndex, plays);
 }
 
 JNIEXPORT jfloat JNICALL
@@ -2255,17 +2245,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackPercussionMode(
     JNIEnv* env, jobject thiz, jint trackIndex, jboolean percussion) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().setTrackPercussionMode(
-            trackIndex, percussion == JNI_TRUE);
+    wma_looper_set_track_percussion_mode(g_wmaEngine, trackIndex, percussion == JNI_TRUE);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperIsTrackPercussionMode(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getAudioLooper().isTrackPercussionMode(trackIndex)
-        ? JNI_TRUE : JNI_FALSE;
+    return wma_looper_is_track_percussion_mode(g_wmaEngine, trackIndex) ? JNI_TRUE : JNI_FALSE;
 }
 
 // Master volume (lock-free)
@@ -2305,8 +2291,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jlong JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperFindContentBounds(
     JNIEnv* env, jobject thiz, jint trackIndex, jfloat thresholdRatio) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getAudioLooper().findTrackContentBounds(trackIndex, thresholdRatio);
+    // The packed (first << 32) | last encoding stays HERE: it exists because a
+    // JNI call cannot hand back two ints, and it is this side's problem. The C
+    // API deals in two out-params.
+    int first = 0, last = 0;
+    if (!wma_looper_find_content_bounds(g_wmaEngine, trackIndex, thresholdRatio,
+                                       &first, &last)) {
+        return 0;
+    }
+    return (static_cast<jlong>(first) << 32)
+         | static_cast<jlong>(static_cast<uint32_t>(last));
 }
 
 // Onset detection for tempo derivation (free auto-loop, phase B). Returns an
@@ -2315,11 +2309,14 @@ JNIEXPORT jintArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperDetectOnsets(
     JNIEnv* env, jobject thiz, jint trackIndex, jint maxOnsets,
     jint hopFrames, jfloat sensitivity) {
-    if (!g_jniState.engine || maxOnsets <= 0) return env->NewIntArray(0);
+    // Sizing the Java array to the ACTUAL count stays here too — same family as
+    // the waveform clamp: what knows about Java array lengths lives up top.
+    if (maxOnsets <= 0) return env->NewIntArray(0);
     std::vector<jint> onsets(static_cast<size_t>(maxOnsets), 0);
-    int n = g_jniState.engine->getAudioLooper().detectTrackOnsets(
-        trackIndex, onsets.data(), maxOnsets, hopFrames, sensitivity);
-    if (n < 0) n = 0;
+    static_assert(sizeof(jint) == sizeof(int), "onset buffer is reinterpreted as int*");
+    const int n = wma_looper_detect_onsets(g_wmaEngine, trackIndex,
+                                          reinterpret_cast<int*>(onsets.data()),
+                                          maxOnsets, hopFrames, sensitivity);
     jintArray result = env->NewIntArray(n);
     if (result && n > 0) env->SetIntArrayRegion(result, 0, n, onsets.data());
     return result;
@@ -2329,9 +2326,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperFinalizeFreeLoop(
     JNIEnv* env, jobject thiz, jint trackIndex, jint loopStart, jint loopEnd, jint tailFrames) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getAudioLooper().finalizeFreeLoop(
-        trackIndex, loopStart, loopEnd, tailFrames) ? JNI_TRUE : JNI_FALSE;
+    return wma_looper_finalize_free_loop(g_wmaEngine, trackIndex, loopStart, loopEnd,
+                                        tailFrames) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
@@ -2367,29 +2363,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperStartRecordingWithPreRoll(
     JNIEnv* env, jobject thiz, jint trackIndex, jint preRollMs) {
-    if (!g_jniState.engine) return;
-    if (preRollMs < 0) preRollMs = 0;
-    if (preRollMs > 1000) preRollMs = 1000;
-
-    auto& engine = *g_jniState.engine;
-    auto& looper = engine.getAudioLooper();
-
-    if (preRollMs == 0) {
-        looper.startRecording(trackIndex);
-        return;
-    }
-
-    const int sr = looper.getSampleRate();
-    const int preRollFrames = (preRollMs * sr) / 1000;
-    if (preRollFrames <= 0) {
-        looper.startRecording(trackIndex);
-        return;
-    }
-
-    // UI thread allocation — acceptable (not the audio thread).
-    std::vector<float> preRoll(static_cast<size_t>(preRollFrames) * 2, 0.0f);
-    engine.getPreRollRing().snapshot(preRoll.data(), preRollFrames);
-    looper.startRecordingWithPreRoll(trackIndex, preRoll.data(), preRollFrames);
+    wma_looper_start_recording_with_pre_roll(g_wmaEngine, trackIndex, preRollMs);
 }
 
 // Tail capture configuration (preserves sustain at loop seam).
@@ -2397,15 +2371,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTailMs(
     JNIEnv* env, jobject thiz, jint ms) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().setTailMs(ms);
+    wma_looper_set_tail_ms(g_wmaEngine, ms);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetTailMs(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getAudioLooper().getTailMs();
+    return wma_looper_get_tail_ms(g_wmaEngine);
 }
 
 // Armed recording: schedule recording to start at the next bar boundary.
@@ -2469,13 +2441,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperPrepareTrackBars(
     JNIEnv* env, jobject thiz, jint trackIndex, jint bars, jint sampleRate) {
-    if (!g_jniState.engine) return -1;
-    auto& transport = g_jniState.engine->getTransport();
-    int framesPerBar1 = transport.framesPerBar(1);
-    if (framesPerBar1 <= 0) return -1;
-    bool ok = g_jniState.engine->getAudioLooper()
-                  .prepareTrackBars(trackIndex, bars, framesPerBar1, sampleRate);
-    return ok ? bars * framesPerBar1 : -1;
+    return wma_looper_prepare_track_bars(g_wmaEngine, trackIndex, bars, sampleRate);
 }
 
 // ========== TRANSPORT (BPM, beats, RT-safe metronome scheduler) ==========

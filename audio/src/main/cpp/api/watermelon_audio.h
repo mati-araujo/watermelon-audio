@@ -905,6 +905,97 @@ WMA_API int wma_looper_get_track_loop_end(const WmaEngine* engine, int track_ind
 /** Trigger a metronome click (downbeat vs subdivision). */
 WMA_API void wma_looper_trigger_click(WmaEngine* engine, bool is_downbeat);
 
+/* ---------------- Track editing & analysis ---------------- */
+
+/** Abort the recording in progress, discarding the take. */
+WMA_API void wma_looper_abort_recording(WmaEngine* engine);
+
+/**
+ * Start recording on @p track_index, seeded with the last `pre_roll_ms` of
+ * post-FX output so the take does not begin at the user's reaction time.
+ *
+ * Clamped to 0..1000 ms — 1 s is what the pre-roll ring holds. 0 is a plain
+ * start. Allocates on the calling thread; never call from the audio thread.
+ */
+WMA_API void wma_looper_start_recording_with_pre_roll(WmaEngine* engine,
+                                                       int track_index,
+                                                       int pre_roll_ms);
+
+/**
+ * Allocate a track quantized to @p bars musical bars at the Transport's current
+ * tempo and meter. Like the arming calls, this composes Transport and looper so
+ * the two cannot disagree about how long a bar is.
+ *
+ * @return the allocated length in frames, or -1 on failure (no tempo yet, a bad
+ *         bar count, or the allocation itself failing).
+ */
+WMA_API int wma_looper_prepare_track_bars(WmaEngine* engine, int track_index,
+                                           int bars, int sample_rate);
+
+/** Trim a track's buffer to its recorded length. No-op while recording. */
+WMA_API bool wma_looper_trim_track(WmaEngine* engine, int track_index);
+
+/**
+ * Bar-snap and seam-bake a free take's loop region. Pads with silence if
+ * `loop_end` runs past the recording and bakes the wrap-mix when
+ * `tail_frames > 0`. No-op while recording into or exporting this track.
+ */
+WMA_API bool wma_looper_finalize_free_loop(WmaEngine* engine, int track_index,
+                                            int loop_start, int loop_end,
+                                            int tail_frames);
+
+/**
+ * First and last audible frame of a track, for trimming the silence around a
+ * free take. `out_last` is exclusive.
+ *
+ * Two out-params rather than the packed int64 the JNI returns: that encoding
+ * exists because a JNI call cannot hand back two ints, and pushing it into the C
+ * API would make every caller unpack a sign-sensitive bitfield for no reason.
+ * The JNI still packs, on its own side.
+ *
+ * @return false if the track index is invalid; out-params are untouched then.
+ */
+WMA_API bool wma_looper_find_content_bounds(const WmaEngine* engine, int track_index,
+                                             float threshold_ratio,
+                                             int* out_first, int* out_last);
+
+/**
+ * Detect onsets in a track, for deriving a tempo from a free take.
+ *
+ * @param out_onsets   Frame index of each onset
+ * @param max_onsets   Capacity of out_onsets; nothing is written past it
+ * @return number of onsets written, never negative
+ */
+WMA_API int wma_looper_detect_onsets(const WmaEngine* engine, int track_index,
+                                      int* out_onsets, int max_onsets,
+                                      int hop_frames, float sensitivity);
+
+/* ---------------- Per-track playback modes ---------------- */
+
+/** How many times a track plays before stopping. 0 = loop forever. */
+WMA_API void wma_looper_set_track_play_count(WmaEngine* engine, int track_index,
+                                              int plays);
+
+/** Percussion mode: retrigger from the top instead of pitch-shifting on speed. */
+WMA_API void wma_looper_set_track_percussion_mode(WmaEngine* engine, int track_index,
+                                                   bool percussion);
+WMA_API bool wma_looper_is_track_percussion_mode(const WmaEngine* engine,
+                                                  int track_index);
+
+/** Wrap-mix tail window in ms, used when baking a free take's seam. */
+WMA_API void wma_looper_set_tail_ms(WmaEngine* engine, int ms);
+WMA_API int  wma_looper_get_tail_ms(const WmaEngine* engine);
+
+/**
+ * Configure runtime capabilities for the device tier.
+ *
+ * Each argument is "leave the current value alone" when <= 0, which is what lets
+ * a caller set only the one it cares about. `budget_bytes` is 64-bit: a memory
+ * budget is exactly the kind of number that outgrows an int.
+ */
+WMA_API void wma_looper_set_capabilities(WmaEngine* engine, int64_t budget_bytes,
+                                          int max_tracks, int max_free_seconds);
+
 /* ---------------- Armed recording ----------------
  *
  * These are not thin wrappers over AudioLooper: they read the Transport play
