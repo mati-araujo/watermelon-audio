@@ -1811,8 +1811,8 @@ sostiene evita que el próximo lector lea el bloque entero como uniformemente ne
 
 ### Dónde retomar (2026-07-27)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **30 commits sobre `master`**. La branch
-existe en `origin` pero está **ahead 24** — sólo los 6 primeros están pusheados.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **33 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 27** — sólo los 6 primeros están pusheados.
 `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
