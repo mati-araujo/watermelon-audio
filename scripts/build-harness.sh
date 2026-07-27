@@ -83,4 +83,90 @@ if (( entry_count == 0 )); then
 fi
 printf '  MainViewController(): UIViewController — exportado\n'
 
-printf '\nOK — :harness construye en las dos plataformas y el framework trae el motor.\n'
+# ---------------------------------------------------------------------------
+# El shell de Xcode: compilar, instalar y VER SI SOBREVIVE.
+#
+# Los dos pasos son distintos y el segundo es el que gana su lugar.
+#
+# `xcodebuild` agarra lo de siempre: el proyecto no parsea, el framework no
+# linkea, Swift no compila contra el header generado. Todo eso es valioso y
+# barato.
+#
+# Lo que NO agarra —ni el, ni Gradle, ni el link check, ni nada de lo que ya
+# habia en el gate— es un Info.plist incompleto. Compose Multiplatform corre
+# `PlistSanityCheck` AL ARRANCAR y aborta el proceso: sin
+# CADisableMinimumFrameDurationOnPhone la app moria con SIGABRT antes de dibujar
+# un pixel, mientras los ocho comandos del gate daban verde. Es exactamente la
+# clase de falla silenciosa que este repo persigue, y la unica forma de verla es
+# lanzarla y preguntar si sigue viva.
+#
+# Se saltea con un mensaje claro si no hay simulador; no se saltea en silencio.
+# ---------------------------------------------------------------------------
+readonly XCODE_PROJECT="harness/iosApp/iosApp.xcodeproj"
+readonly BUNDLE_ID="com.watermellonstudios.audio.harness"
+
+printf '\n=== :harness — shell de Xcode ===\n'
+xcodebuild -project "$XCODE_PROJECT" -scheme iosApp -configuration Debug \
+    -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+    -derivedDataPath harness/iosApp/build/DerivedData \
+    build > /tmp/wma-harness-xcodebuild.log 2>&1 || {
+        printf '\nFAIL — no compila el shell de Xcode. Ultimas lineas:\n' >&2
+        grep -E 'error:|BUILD FAILED' /tmp/wma-harness-xcodebuild.log | head -15 >&2
+        exit 1
+    }
+printf '  xcodebuild: OK\n'
+
+readonly APP="harness/iosApp/build/DerivedData/Build/Products/Debug-iphonesimulator/iosApp.app"
+
+# Un simulador ya booteado, o el primer iPhone disponible.
+device="$(xcrun simctl list devices booted -j 2>/dev/null \
+    | python3 -c 'import json,sys;d=json.load(sys.stdin)["devices"];print(next((x["udid"] for v in d.values() for x in v),""))' 2>/dev/null || true)"
+
+if [[ -z "$device" ]]; then
+    printf '  no hay simulador booteado — se saltea el chequeo de arranque.\n'
+    printf '    (booteá uno con `xcrun simctl boot <udid>` para que corra)\n'
+    printf '\nOK — :harness construye en las dos plataformas, el framework trae el\n'
+    printf '     motor, y el shell de Xcode compila. Arranque NO verificado.\n'
+    exit 0
+fi
+
+xcrun simctl terminate "$device" "$BUNDLE_ID" >/dev/null 2>&1 || true
+xcrun simctl install "$device" "$APP" >/dev/null 2>&1 || {
+    printf '\nFAIL — no se pudo instalar la app en el simulador.\n' >&2
+    exit 1
+}
+
+pid="$(xcrun simctl launch "$device" "$BUNDLE_ID" 2>/dev/null | awk -F': ' '{print $2}')"
+if [[ -z "$pid" ]]; then
+    printf '\nFAIL — la app no arranco.\n' >&2
+    exit 1
+fi
+
+# Tres segundos alcanzan: PlistSanityCheck corre en el primer frame, y un
+# SIGABRT de arranque llega mucho antes de eso.
+sleep 3
+
+# `ps -p` sobre el PID que devolvio simctl, y no `simctl spawn ... launchctl
+# list | grep`, por dos razones. La primera es que pregunta exactamente lo que
+# importa —¿sigue vivo ESTE proceso?— en vez de si algun listado menciona el
+# bundle. La segunda es que no hay pipeline: la version con `| grep -q` daba
+# FAIL con la app corriendo, porque grep -q corta al primer match y bajo
+# `set -o pipefail` el SIGPIPE del productor hunde el pipeline entero.
+#
+# Es la SEGUNDA vez que ese mismo error aparece en este archivo — ya estaba
+# arreglado quince lineas mas arriba, para `nm`, y volvi a escribirlo igual.
+# Regla para este repo: `grep -q` no va en un pipeline bajo pipefail. Nunca.
+# Los procesos del simulador son procesos del host, asi que `ps -p` los ve.
+if ! ps -p "$pid" > /dev/null 2>&1; then
+    printf '\nFAIL — la app arranco (pid %s) y MURIO en los primeros 3 segundos.\n' "$pid" >&2
+    printf '       Compilar no alcanza: mira el crash report mas nuevo en\n' >&2
+    printf '       ~/Library/Logs/DiagnosticReports/iosApp-*.ips\n' >&2
+    printf '       Sospechoso numero uno: una clave que falta en el Info.plist —\n' >&2
+    printf '       Compose aborta el proceso desde PlistSanityCheck.\n' >&2
+    exit 1
+fi
+xcrun simctl terminate "$device" "$BUNDLE_ID" >/dev/null 2>&1 || true
+printf '  arranca y sobrevive los primeros 3s (pid %s)\n' "$pid"
+
+printf '\nOK — :harness construye en las dos plataformas, el framework trae el\n'
+printf '     motor, y la app de iOS arranca sin morirse.\n'

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+
+	<!--
+	  WA-5.5 — SIN esta clave iOS mata la app en el primer intento de captura, y
+	  la captura es exactamente la pregunta que este harness existe para
+	  responder. Va desde el primer commit por eso; agregarla despues es la forma
+	  mas facil de perder una tarde persiguiendo un crash que no es del motor.
+
+	  El caso que MAS importa probar es el del permiso NEGADO: es el unico
+	  disparador del @try de CoreAudioBackend, y el item 3 del smoke (la
+	  regresion plausible en startInputStream) sale por ahi.
+	-->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>El harness necesita el microfono para probar el camino de captura del motor de audio.</string>
+
+	<!--
+	  NO ES OPCIONAL: Compose Multiplatform corre `PlistSanityCheck` al arrancar y
+	  ABORTA el proceso si esta clave falta o es `false`. La primera version de
+	  este proyecto no la tenia y la app moria con SIGABRT antes de dibujar nada
+	  — el stack no menciona el motor de audio por ningun lado, asi que sin el
+	  mensaje de la excepcion es facil salir a buscar el bug donde no esta.
+
+	  Que hace: sin ella, iOS limita la app a 60 fps en pantallas ProMotion.
+	  La alternativa que ofrece Compose es apagar el chequeo
+	  (`enforceStrictPlistSanityCheck = false`), que es silenciar el aviso en vez
+	  de arreglar la causa.
+	-->
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>armv7</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+
+	<!--
+	  El audio tiene que seguir sonando con la pantalla bloqueada o la app en
+	  background: sin esto, un test de latencia o una grabacion larga se cortan al
+	  bloquear el telefono y parece un bug del motor.
+	-->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+</dict>
+</plist>

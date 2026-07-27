@@ -54,6 +54,11 @@ harness/src/            :harness — app de prueba multiplataforma (WA-5.5). NO 
   commonMain/kotlin/    HarnessApp — la UI entera (Compose Multiplatform)
   androidMain/kotlin/   MainActivity (shell) + AndroidManifest (RECORD_AUDIO)
   iosMain/kotlin/       MainViewController (shell)
+harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO el
+                        XCFramework de WA-4.1 (usar los dos duplica el motor).
+                        Info.plist: NSMicrophoneUsageDescription +
+                        CADisableMinimumFrameDurationOnPhone (sin esta ultima
+                        Compose aborta al arrancar)
 ```
 
 ---
@@ -125,7 +130,11 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 
 bash scripts/run-cpp-tests.sh              # Suite C++ de host (749 tests, googletest)
 bash scripts/check-cpp-portability.sh      # Guardrail WA-0.4 (jni.h / android/)
-bash scripts/build-harness.sh              # :harness, ambas plataformas + símbolos
+bash scripts/build-harness.sh              # :harness: Android + framework iOS +
+                                           # símbolos + shell de Xcode + ARRANQUE
+                                           # de la app (lo único que agarra un
+                                           # Info.plist incompleto: Compose aborta
+                                           # el proceso desde PlistSanityCheck)
 bash scripts/check-no-ui-in-library.sh     # Guardrail WA-5.5: la UI de :harness no
                                            # puede entrar al artefacto publicado.
                                            # Lo que de verdad mide es el classpath

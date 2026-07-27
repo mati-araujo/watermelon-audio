@@ -189,10 +189,23 @@ jobs:
             fi
           done
 
+      # El chequeo de arranque de build-harness.sh necesita un simulador
+      # booteado, y se saltea (con aviso) si no lo hay. Se lo bootea aca a
+      # proposito: ese chequeo es lo UNICO que agarra un Info.plist incompleto
+      # —Compose aborta el proceso desde PlistSanityCheck— y un gate que se
+      # saltea siempre no es un gate.
+      - name: Boot a simulator for the harness launch check — WA-5.5
+        run: |
+          UDID="$(xcrun simctl list devices available -j \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin)["devices"];print(next(x["udid"] for v in d.values() for x in v if "iPhone" in x["name"]))')"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+
       # WA-5.5. Este job ya monta el SDK de Android arriba, asi que el script
-      # cubre las dos plataformas de una. Y verifica lo mismo que el paso de
-      # arriba verifica para el XCFramework: que el framework traiga el motor,
-      # que es una afirmacion distinta de que linkeo.
+      # cubre las dos plataformas de una. Verifica tres cosas que nada mas
+      # verifica: que el framework TRAIGA el motor (distinto de que linkeo, igual
+      # que el paso del XCFramework de arriba), que el shell de Xcode compile, y
+      # que la app ARRANQUE SIN MORIRSE.
       #
       # Sin este paso el harness se pudre en silencio — ningun otro job lo compila.
       - name: Build the UI harness, both platforms — WA-5.5

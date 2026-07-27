@@ -2115,11 +2115,61 @@ este comando el harness se pudre en silencio: nada más lo compila.
 > corta al primer match y `nm` se come un SIGPIPE. Falla del lado seguro, pero falla igual.
 > `grep -c` lee toda la entrada y no tiene el problema.
 
-**Lo que sigue, en orden:** el proyecto de Xcode (con `NSMicrophoneUsageDescription` desde el
-primer commit), y después los seis controles restantes empezando por el **monitor de entrada**,
-que es el que justifica todo. El permiso de Android (`RECORD_AUDIO`) ya está en el manifest
-desde el primer commit, por la misma razón: el caso que más importa probar es el del permiso
-**negado**, y agregarlo después obligaría a reinstalar para reproducirlo.
+#### El shell de Xcode — hecho, y **la app corre en el simulador**
+
+`harness/iosApp/` con `.pbxproj` escrito a mano (no hay xcodegen en la máquina). Compila,
+instala, arranca y **Compose dibuja el estado real del motor**. Es la primera vez en todo el
+programa que la librería se ve corriendo en iOS fuera de un test.
+
+Tres cosas que la propuesta no había previsto, y las tres se resolvieron del mismo lado —el de
+Xcode— para no tocar la configuración de la librería:
+
+1. **`EXCLUDED_ARCHS[sdk=iphonesimulator*] = x86_64`.** Xcode pide `ios_x64` y el repo declara
+   sólo `iosSimulatorArm64`. La otra salida que ofrece el error es agregarle el target a
+   Gradle: eso le cambiaría el set de targets a **lo que se publica**, por un harness.
+2. **Sin firma para el simulador** (`CODE_SIGNING_ALLOWED = NO`), que es donde vive la primera
+   mitad de WA-4.3. El device (G2) necesita team real.
+3. **`NSMicrophoneUsageDescription`** desde el primer commit, como estaba planeado.
+
+> [!CAUTION]
+> **`CADisableMinimumFrameDurationOnPhone` no es opcional, y esto costó la tarde.** Compose
+> Multiplatform corre `PlistSanityCheck` al arrancar y **aborta el proceso** si esa clave falta
+> o es `false`. La app moría con **SIGABRT antes de dibujar un pixel**, y el stack no menciona
+> el motor de audio por ningún lado.
+>
+> **Ningún gate lo agarraba.** Gradle compilaba, el framework tenía sus 250 símbolos,
+> `xcodebuild` daba `BUILD SUCCEEDED`. Los ocho comandos en verde con la app muerta. Lo único
+> que lo encuentra es **lanzarla y preguntar si sigue viva** — y el mensaje real de la
+> excepción hubo que sacarlo del binario a mano, porque las strings de Kotlin son UTF-16 y
+> `strings` no las ve.
+>
+> Por eso `build-harness.sh` ahora **lanza la app y verifica que sobreviva 3 segundos**. Está
+> mutado: sacar la clave da `xcodebuild: OK` seguido de `FAIL — arrancó y MURIÓ`.
+
+> [!WARNING]
+> **`grep -q` en un pipeline bajo `set -o pipefail` volvió a morder, en el mismo archivo.**
+> Ya estaba arreglado quince líneas más arriba para `nm`, y el chequeo de arranque salió
+> escrito igual (`simctl spawn … launchctl list | grep -q`): reportaba que la app había muerto
+> **con la app corriendo**. Ahora usa `ps -p "$pid"`, que además pregunta exactamente lo que
+> importa —¿sigue vivo *este* proceso?— en vez de si algún listado menciona el bundle.
+> **Regla para el repo: `grep -q` no va en un pipeline bajo pipefail.** Van cuatro apariciones
+> de esta familia de bugs de bash en dos sesiones, todas en gates, ninguna en el build.
+
+**No se pudo tocar "start".** El panel del simulador no levanta: el MCP reporta que Xcode no
+está seleccionado y, efectivamente, **falta el symlink `/var/db/xcode_select_link`** —
+`xcode-select -p` responde bien igual porque cae a un default. El fix necesita `sudo`
+(`sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`). Sin eso, manejar la UI
+necesita una persona.
+
+**Vale la pena saber qué queda sin verificar, porque es preciso:** `CinteropSmokeTest`
+**deliberadamente no arranca el motor** —lo dice en su propio doc comment: `wma_engine_start()`
+abre un stream de CoreAudio y volvería flaky el test—. Así que *nada* ha ejecutado todavía
+`start()` en iOS. Eso es el control 1, y ahora hay dónde apretarlo.
+
+**Lo que sigue:** los siete controles, empezando por el **monitor de entrada**, que es el que
+justifica todo. El permiso de Android (`RECORD_AUDIO`) ya está en el manifest desde el primer
+commit por la misma razón que la clave del micrófono en iOS: el caso que más importa probar es
+el del permiso **negado**, y agregarlo después obligaría a reinstalar para reproducirlo.
 
 
 ### Dónde retomar (2026-07-27)
