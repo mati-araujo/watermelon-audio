@@ -140,6 +140,15 @@ BackendResult CoreAudioBackend::start() {
         return BackendResult::ERROR_NOT_INITIALIZED;
     }
 
+    // Drop the previous stream's facts BEFORE opening, never after:
+    // openEngineLocked() publishes the negotiated ones on its way out, and
+    // invalidating them afterwards throws away exactly what it just measured.
+    // getStreamInfo() would then fall back to reporting the *request*, and
+    // "requested" and "negotiated" disagreeing is the whole reason this cache
+    // exists — it is what told BackendManager::requestCapture() that capture
+    // was already live on a stream that had none, so the reopen never happened.
+    mStreamInfoValid.store(false);
+
     BackendResult result = openEngineLocked();
     if (result != BackendResult::OK) {
         closeEngineLocked();
@@ -149,7 +158,6 @@ BackendResult CoreAudioBackend::start() {
     mStopping.store(false);
     mIsPaused.store(false);
     mIsRunning.store(true);
-    mStreamInfoValid.store(false);
 
     LOGI("CoreAudioBackend started");
     return BackendResult::OK;

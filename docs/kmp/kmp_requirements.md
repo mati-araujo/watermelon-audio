@@ -2356,6 +2356,105 @@ que **difiere en vez de reabrir**, aunque `wma_input_start` llame a `requestCapt
 último eslabón entre "el medidor mide" y "el medidor se mueve", y es la próxima sesión.**
 
 
+### El sexto bug — por qué difería en vez de reabrir (2026-07-27)
+
+> [!CAUTION]
+> **`CoreAudioBackend::start()` tiraba los valores negociados apenas los medía.**
+>
+> `openEngineLocked()` publica el stream info real —tasa, frames, latencia, y si la captura
+> quedó viva— y termina con `mStreamInfoValid = true`. Cinco líneas después, ya de vuelta en
+> `start()`, había un `mStreamInfoValid.store(false)`. El cache moría en el mismo start que
+> lo llenaba.
+>
+> Con el cache inválido, `getStreamInfo()` cae a su rama de "todavía no abrí", que devuelve
+> **el pedido**. Y `isFullDuplex` viaja en ese mismo struct, valiendo ahí `mFullDuplexRequested`.
+> De ahí sale el comportamiento entero:
+>
+> ```
+> requestCapture(INPUT_NODE, want=true, allowRestart=true)
+>   → mActiveBackend->setFullDuplexEnabled(true)   // el pedido queda en true
+>   → live = getStreamInfo().isFullDuplex          // lee EL PEDIDO → true
+>   → if (live == effective) return live;          // "ya hay captura" → sale
+> ```
+>
+> El `allowRestart=true` nunca se llegaba a mirar: la función se iba tres líneas antes,
+> convencida de que la captura ya estaba viva sobre un stream que no tenía ninguna. No era
+> que el permiso de reabrir no se ejerciera — era que nadie llegaba a pedirlo.
+
+**Cómo se confirmó antes de tocar nada.** Los dos números que el motor imprime en el mismo
+start, con 0.3 ms de diferencia:
+
+```
+CoreAudioBackend:   Frames/buffer:    480          ← lo que openEngineLocked() midió
+CoreAudioBackend:   Output latency:   10.10 ms
+AudioEngine:        Output latency:   0.0 ms       ← lo que getStreamInfo() devolvió
+```
+
+Y la UI mostrando `bufferSizeInFrames=256, latencyMillis=0.0` — que es, literalmente, la rama
+del pedido: `mRequestedBufferSize` y un `outputLatencyMs = 0.0f` hardcodeado. Después del
+arreglo la UI muestra `480` y `10.100000381469727`, iguales al log.
+
+**El arreglo** es invalidar **antes** de abrir, no después: el cache viejo muere cuando empieza
+el open nuevo, y lo que `openEngineLocked()` publica sobrevive. Con eso el reopen **se dispara
+por primera vez** — `BackendManager: Reopening the stream to add a capture path`, una línea que
+no había aparecido nunca.
+
+#### Y detrás apareció un bloqueo que no es del motor
+
+El reopen llega hasta `[AVAudioSession setActive:YES]` con `playAndRecord` y **se cuelga ahí**,
+en el thread principal:
+
+```
+wma_input_start → requestCapture → BackendManager::start → CoreAudioBackend::openEngineLocked
+  → -[AVAudioSession privateSetActive:withOptions:error:core:]
+    → AQMEIO_HAL::HandleDefaultDeviceChange → SelectDevice → DeviceCreateIOProcID
+      → HALC_ProxyIOContext::_TellServerAboutStreamUsage → HALC_ProxyObject::SetPropertyData
+```
+
+1581 de 1584 muestras en el mismo frame. **No es del reopen, y hay experimento que lo prueba:**
+forzando `wantCapture = true` en el *primer* open —sin stop/start de por medio, sin cambio de
+categoría sobre una sesión viva— pasa lo mismo, y CoreAudio lo dice con todas las letras antes
+de matar el proceso:
+
+```
+HALC_ProxyObject::SetPropertyData ('guse','inpt'): got an error from the server, 0x10004003
+HALC_ProxyObject::SetPropertyData ('guse','outp'): got an error from the server, 0x10004003
+Initialize: RPC timeout. Apparently deadlocked. Aborting now.
+```
+
+Dos RPC al servidor de audio del host que expiran a los 30 s exactos. Descartados en el camino,
+cada uno con su prueba: **no es carrera con el teardown** (500 ms de espera entre `stop()` y
+`start()` no cambian nada, y el stack queda idéntico); **no es el permiso de micrófono**
+(concedido con `simctl privacy grant microphone`, mismo cuelgue); **no es la sesión activa al
+cambiar de categoría** (`closeEngineLocked()` ya hacía `setActive:NO`); y **no es que falte
+`Simulator.app`** (con la GUI arriba, igual). `tccd` no registra **nada** en todo el episodio:
+el pedido de micrófono no llega siquiera a macOS.
+
+**Conclusión: "el medidor se mueve" no se puede contestar en este simulador.** El puente de
+audio de entrada del simulador hacia el host no responde en esta máquina — con un OBSBOT USB a
+32 kHz como entrada por defecto. La pregunta pasa a **device (WA-4.3 segunda mitad, G2)**, o a
+un host con la entrada del simulador funcionando.
+
+> [!IMPORTANT]
+> **Lo que sí queda como deuda de diseño, y es del motor:** `wma_input_start()` hace un
+> **stop + start sincrónico del stream entero en el thread del que llama** — que en cualquier
+> app con UI es el main thread. Acá eso se vio como un freeze total de la app. En un device es,
+> en el mejor caso, cientos de ms de main thread bloqueado, y en el peor un watchdog kill.
+> El reopen es correcto; **falta que sea seguro**. Es decisión propia, no arreglo al paso.
+
+> [!NOTE]
+> **Este arreglo no tiene test automático, y el intento de escribirlo es la parte que enseña.**
+> `CoreAudioBackend.mm` sólo se compila en el build de iOS (`ios/CMakeLists.txt`), así que la
+> suite C++ de host no lo ve. Se escribió entonces un test de simulador que arrancaba el motor
+> y afirmaba `latency_ms > 0` —la latencia es el discriminador correcto: la rama del pedido la
+> hardcodea en `0.0f`, y el buffer size podría coincidir de casualidad—. **Dio verde sin afirmar
+> nada:** `wma_engine_start()` falla en 8 ms dentro del binario de test de Kotlin/Native, que no
+> es una app con bundle. Es exactamente la flakiness que `CinteropSmokeTest` declara evitar en su
+> doc comment, confirmada. Se borró en vez de dejarlo: un test que siempre pasa infla la cuenta
+> del gate y le saca significado. **El gate de este arreglo es la corrida del harness**, con los
+> números de arriba.
+
+
 ### Decisión — cómo llegan al harness los 5 controles que faltan (aprobada 2026-07-27)
 
 > [!IMPORTANT]
