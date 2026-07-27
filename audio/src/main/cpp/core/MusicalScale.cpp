@@ -127,8 +127,9 @@ void MusicalScale::rebuildScale() {
         }
     }
 
-    // Get parameters
-    int rootNote = mRootNote.load(std::memory_order_relaxed);
+    // Get parameters. La tabla se construye desde la FRECUENCIA de la raiz;
+    // `mRootNote` no entra en esta cuenta y se cargaba en una local que nadie
+    // leia.
     float rootFreq = mRootFrequency.load(std::memory_order_relaxed);
     int octaveRange = mOctaveRange.load(std::memory_order_relaxed);
 

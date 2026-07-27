@@ -39,8 +39,6 @@ constexpr int kChaosPad = 0;
 constexpr int kInputFx = 1;
 constexpr int kMix = 2;
 
-constexpr int kBlockFrames = 256;
-
 using CApiModeTest = CApiFixture;
 
 // ===========================================================================

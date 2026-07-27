@@ -1,13 +1,31 @@
 # Requerimiento: KMP/iOS Readiness — watermelon-audio
 
-**Proyecto:** watermelon-audio (v1.8.1). Coordenada **KMP**: `com.watermellonstudios:audio`
+**Proyecto:** watermelon-audio (**v1.9.0**). Coordenada **KMP**: `com.watermellonstudios:audio`
 — `:audio-android` es el módulo Android suelto, **no** el que debe usar un consumidor KMP
 **Documento hermano:** `NoisyPad/docs/kmp/kmp_requirements.md` (consumidor)
-**Estado:** EN CURSO — **Fases 0 y 3 esencialmente cerradas**: Kotlin/Native ejecuta el motor C++ en el simulador (75 tests iOS, 0 fallas). Queda `DeviceCapabilities`, el input path de iOS, el XCFramework, y la validación en device (G2)
-**Fecha:** 2026-07-05 · **Última actualización:** 2026-07-25 (cerrados: WA-0.1/0.2/0.3/0.4,
-WA-1.4, WA-1.6, WA-2.0, **WA-2.1 completo**, WA-2.2, WA-2.3, WA-2.4 output, WA-2.7,
-**WA-3.1, WA-3.2, WA-3.4**, WA-3.3 parcial, WA-T.1/T.3; `InputNode` unificado JNI↔C API)
+**Fecha:** 2026-07-05 · **Última actualización:** 2026-07-27
 **Objetivo estratégico:** que la librería de audio compile y funcione en iOS con el mismo motor C++ y la misma API Kotlin (`commonMain`) que hoy consume NoisyPad Android, habilitando la versión iOS de NoisyPad.
+
+> [!IMPORTANT]
+> ## Estado en una pantalla (2026-07-27)
+>
+> **Este documento tiene 3.200+ líneas y crece por sesión. Esto es lo que hay que saber sin
+> scrollear; el detalle vive en §16 "Dónde retomar" y en las notas de §10.**
+>
+> | | |
+> |---|---|
+> | **La pregunta que justificaba el programa** | **Contestada: el input path de iOS CAPTURA.** `inputData` deja de ser `0x0`, `inputPeak` trae señal real |
+> | Fases 0, 2, 3 | ✅ cerradas · **WA-2.5/2.6 cerrada** (JNI→C API, las 10 categorías + la cola) |
+> | Fase 4 | 🟢 WA-4.1 ✅ · **G1/WA-4.2 ✅ CERRADO** — NoisyPad linkea la 1.9.0 con 251 símbolos `wma_*` adentro |
+> | Fase 5 | 🟢 WA-5.5 con sus **7 controles** corriendo en el simulador |
+> | **Lo único grande abierto** | **G2 — validación en device. Necesita un iPhone.** Sonido real, latencia round-trip, Instruments sobre el render block |
+> | Otros pendientes | el smoke manual de Android (12 ítems, ninguno en device) · WA-1.3 · el design system |
+>
+> **El gate local son 12 comandos**, no 10 — los dos últimos son los sanitizers, y el CI
+> **funciona** (estuvo caído sólo el 26/07). Ver §16.
+>
+> ⚠️ **Las referencias `archivo:línea` de este documento envejecen.** Ya pasó que un entry de
+> deuda apuntara a una línea que hoy es otra cosa. **Buscar por nombre, no por número.**
 
 ---
 
@@ -2839,6 +2857,26 @@ publicación sin bindings. El job de publish de `release-please.yml` **sí** est
 es que `getAudioBridge()` resuelva desde iOS. Hoy no se puede: NoisyPad todavía no lo llama, y
 por eso el linker se comió toda la superficie nativa por dead-code elimination.
 
+> [!TIP]
+> **CERRADO el mismo día (2026-07-27).** Pasó todo: PR #59 mergeado, release-please cortó la
+> **1.9.0** y el `publish` salió en verde **desde macOS**, con los tasks de cinterop corriendo
+> para los dos targets. Con `watermellonAudio = "1.9.0"` en el catálogo, NoisyPad compila para
+> `iosArm64` e `iosSimulatorArm64` (forzado, 2m4s) y **linkea** `NoisyPadShell.framework`
+> desde cero (13m31s).
+>
+> **La prueba es el binario, no el "BUILD SUCCESSFUL":**
+>
+> | | contra 1.8.0 | contra 1.9.0 |
+> |---|---|---|
+> | `wma_*` definidos (`nm -g \| grep ' T _wma_'`) | **0** | **251** |
+> | `IosAudioBridge` en el binario | ausente | **presente** |
+>
+> 251 es la misma cuenta que `HarnessKit.framework`. Y los klibs de cinterop bajaron del
+> registry remoto a la caché de Gradle —`audio-ios{Arm64,SimulatorArm64}Cinterop-watermelonAudioMain-1.9.0.klib`,
+> ~5 MB cada uno, declarados en el `.module` publicado—, no de `mavenLocal`: el bloque de
+> repos de NoisyPad no lo incluye, así que el footgun de las dos `1.8.1` no aplica acá.
+> **G1 / WA-4.2 ✅.**
+
 
 ### Dónde retomar (2026-07-27)
 
@@ -2947,6 +2985,11 @@ NoisyPad Android**, que ya tiene tres cosas encima:
    `startInputStream` con el permiso denegado. Reproducción concreta en esa nota.
 4. **WA-2.6 en general**: 135 entry points JNI reescritos, 0 validados en device. La suite
    de host cubre la C API, no el JNI.
+12. **`nativeGetAdaptiveBufferStats` devuelve diez ceros, siempre** (ronda de unificación,
+   2026-07-27). `jni_audio_bridge.cpp:1715` declara `jfloat stats[10] = {0}`, **nunca lo
+   llena** y lo devuelve así. Si NoisyPad muestra esas estadísticas, está mostrando ceros —
+   no "el buffer está en cero", sino que nadie las calculó nunca. Misma clase que el ítem 11.
+   **Mirar si NoisyPad lo llama** antes de decidir si se implementa o se borra.
 11. **`setDepthValue` no hace nada, y nunca hizo nada** (la cola, 2026-07-27). No es una
    regresión de esta serie: `mDepthValue` se escribe y nadie lo lee, en las cuatro capas.
    Si un slider de depth en NoisyPad llama sólo a `setDepthValue`, mover ese slider no
@@ -3175,19 +3218,38 @@ Trabajo paralelo, sin bloquear WA-3:
   `CoreAudioBackend`; confirma qué rama del ABL (interleaved vs planar) toma el OS y mide
   latencia. Necesita hardware.
 
-**Deuda técnica registrada al cerrar WA-2.0/2.7 (candidatos a ticket propio):**
-- `stopWithFade` detacha un `std::thread` que captura `this` y duerme `fadeMs + 50` antes
-  de `stop()`. Si el motor se destruye en esa ventana es use-after-free; el destructor
-  cancela el fade pero no tiene handle sobre ese thread.
-  **Ya hay precedente de cómo cerrarlo** (2026-07-27): el worker del reopen de captura en
-  `BackendManager` es el mismo problema resuelto — thread joinable como miembro, flag
-  `mShuttingDown`, y destructor que corta → joinea → recién ahí para. Copiar esa forma.
-- Tres declaraciones muertas expuestas al pasar `core/`/`nodes/` por `-Werror` por primera
-  vez (`MusicalScale.cpp:131`, `BurstModulator.h:52`, `AudioEngine.h:1027`), hoy tapadas
-  por un `-Wno-unused-variable` acotado en `core/tests/` con comentario que las nombra.
-- Bug 3 de WA-2.0 (SoundFont al rate negociado): los 3 `loadSoundFont*` siguen sin test
-  directo — necesitan un fixture SF2. `currentSampleRate()`, el mecanismo compartido, sí
-  está cubierto.
+**Deuda técnica registrada al cerrar WA-2.0/2.7 — revisada el 2026-07-27:**
+
+- ~~**`stopWithFade` detacha un `std::thread`**~~ ✅ **YA ESTABA ARREGLADO.** El entry de
+  deuda estaba desactualizado: hoy el worker es un `mStopFadeThread` **propio**
+  (`AudioEngine.h:953`), con `mStopFadeCancel`, sleep troceado, supersede-and-join al
+  re-entrar (`AudioEngine.cpp:1823-1826`) y el destructor que cancela y joinea
+  (`AudioEngine.cpp:295-298`) — exactamente la forma que el propio entry decía copiar del
+  worker del reopen. **No se tocó nada; se verificó y se corrigió el doc.**
+- ~~**Tres declaraciones muertas**~~ ✅ **LIMPIADAS** (2026-07-27): el `rootNote` de
+  `MusicalScale.cpp` (cargado y nunca leído), el `normalizedPos` de `BurstModulator.h`
+  (calculado y nunca leído) y el `mLastBpm` de `AudioEngine.h` (el vivo es
+  `EffectChain::mLastBpm`, `EffectChain.cpp:412`). Con eso **se borró el
+  `-Wno-unused-variable` / `-Wno-unused-private-field` acotado** de `core/tests/`, así que
+  el `-Werror` aplica a `core/` en full — que es lo que ese comentario pedía.
+  > [!TIP]
+  > **Eran cuatro, no tres.** Sacar la supresión destapó un `kBlockFrames` sin usar en
+  > `test_c_api_mode.cpp:42` que el comentario no listaba. Una supresión acotada tapa lo que
+  > dice **y lo que se acumuló después**: mientras estuvo puesta, nada impedía que entrara
+  > una quinta. Es el argumento para sacarla, no para ampliarla.
+  > [!CAUTION]
+  > **El doc apuntaba a `AudioEngine.h:1027` y hoy esa línea es `mInputBuffer`, que se usa
+  > en 8 lugares.** Los números de línea se corrieron; el nombre real (`mLastBpm`) estaba
+  > sólo en el comentario del `CMakeLists`. Borrar por número de línea habría roto el build.
+  > **En este doc, las referencias `archivo:línea` envejecen — buscar por nombre.**
+- **Bug 3 de WA-2.0 (SoundFont al rate negociado): sigue abierto, y a propósito.** Los tres
+  `loadSoundFont*` necesitan un fixture SF2 para cubrir el camino de éxito, que es el único
+  donde se observa el rate. Los caminos negativos **ya están cubiertos y bien**
+  (`test_c_api_synth.cpp`, `BadLoaderArgumentsFailAndLoadNothing`: path/buffer nulos, fd
+  inválido, offsets y tamaños negativos, más la assertion de que nada quedó cargado), y el
+  propio archivo declara en su encabezado qué queda afuera y por qué. Agregar otro test
+  negativo sería inflar la cuenta del gate sin afirmar nada nuevo. `currentSampleRate()`, el
+  mecanismo compartido, sí está cubierto. **Lo que falta es el fixture, no un test más.**
 
 **Hallazgos de la auditoría 2026-07-25 (candidatos a ticket propio):**
 

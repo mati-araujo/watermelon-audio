@@ -79,6 +79,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # El boot del simulador tarda ~3m30s y NO depende de nada de lo que sigue,
+      # asi que se dispara primero y se espera recien al final (paso "Wait for
+      # the simulator"). Antes era un paso bloqueante justo antes del harness y
+      # esos 3m30s se sumaban enteros al job.
+      #
+      # `simctl boot` vuelve enseguida —el arranque sigue de fondo— y el UDID se
+      # publica en el env para el paso que espera. Si no hubiera ningun iPhone
+      # disponible, esto falla ACA y no veinte minutos despues.
+      - name: Start booting a simulator — WA-5.5
+        run: |
+          UDID="$(xcrun simctl list devices available -j \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin)["devices"];print(next(x["udid"] for v in d.values() for x in v if "iPhone" in x["name"]))')"
+          xcrun simctl boot "$UDID"
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+
       # C++ first: it needs no JDK/SDK/Gradle, so a portability break fails
       # before we pay for the toolchain setup below.
       # The runner image normally ships both; install only what is missing so a
@@ -189,27 +204,26 @@ jobs:
             fi
           done
 
-      # El chequeo de arranque de build-harness.sh necesita un simulador
-      # booteado, y se saltea (con aviso) si no lo hay. Se lo bootea aca a
-      # proposito: ese chequeo es lo UNICO que agarra un Info.plist incompleto
-      # —Compose aborta el proceso desde PlistSanityCheck— y un gate que se
-      # saltea siempre no es un gate.
-      - name: Boot a simulator for the harness launch check — WA-5.5
-        run: |
-          UDID="$(xcrun simctl list devices available -j \
-            | python3 -c 'import json,sys;d=json.load(sys.stdin)["devices"];print(next(x["udid"] for v in d.values() for x in v if "iPhone" in x["name"]))')"
-          xcrun simctl boot "$UDID"
-          xcrun simctl bootstatus "$UDID" -b
+      # Aca solo se ESPERA al simulador. El boot se disparo al principio del job
+      # (paso "Start booting a simulator"), asi que sus ~3m30s corrieron en
+      # paralelo con el C++, cinterop y el XCFramework en vez de sumarse. El
+      # chequeo de arranque de build-harness.sh se saltea con aviso si no hay
+      # simulador, y un gate que se saltea siempre no es un gate: es lo UNICO
+      # que agarra un Info.plist incompleto —Compose aborta el proceso desde
+      # PlistSanityCheck—, asi que la espera es obligatoria y sin `|| true`.
+      - name: Wait for the simulator to finish booting — WA-5.5
+        run: xcrun simctl bootstatus "$SIM_UDID" -b
 
-      # WA-5.5. Este job ya monta el SDK de Android arriba, asi que el script
-      # cubre las dos plataformas de una. Verifica tres cosas que nada mas
-      # verifica: que el framework TRAIGA el motor (distinto de que linkeo, igual
-      # que el paso del XCFramework de arriba), que el shell de Xcode compile, y
-      # que la app ARRANQUE SIN MORIRSE.
+      # WA-5.5, mitad iOS. La mitad Android se mudo al job `build` de ubuntu:
+      # arrastraba el build NDK de :audio para las 4 ABIs y aca era un build
+      # frio a 10x el minuto — 13m56s de un job de 27m.
       #
-      # Sin este paso el harness se pudre en silencio — ningun otro job lo compila.
-      - name: Build the UI harness, both platforms — WA-5.5
-        run: bash scripts/build-harness.sh
+      # Lo que queda es lo que SOLO puede afirmar macOS: que el framework TRAIGA
+      # el motor (distinto de que linkeo, igual que el paso del XCFramework de
+      # arriba), que el shell de Xcode compile, y que la app ARRANQUE SIN
+      # MORIRSE. Sin este paso el harness se pudre en silencio.
+      - name: Build the UI harness, iOS half — WA-5.5
+        run: bash scripts/build-harness.sh --ios-only
 
   build:
     runs-on: ubuntu-latest
@@ -251,6 +265,19 @@ jobs:
 
       - name: Build debug
         run: ./gradlew :audio:assembleDebug
+
+      # WA-5.5 — la mitad Android del harness vive aca y no en el job de macOS.
+      # `:harness:assembleDebug` arrastra el build NDK de :audio para las 4 ABIs;
+      # aca eso ya lo hizo `Build debug` una linea mas arriba, asi que el paso
+      # cuesta el Kotlin/Compose y el empaquetado y nada mas. En el runner de
+      # macOS era un build frio a 10x el precio del minuto y se comia la mitad
+      # del job de iOS (13m56s de 27m). No se pierde cobertura: lo que la mitad
+      # Android afirma —que el harness sigue compilando para Android— lo dice
+      # igual de rojo Linux. Lo que SOLO puede decir macOS (que el framework
+      # traiga el motor, que el shell de Xcode compile, que la app arranque)
+      # sigue en el job de iOS con --ios-only.
+      - name: Build the UI harness, Android half — WA-5.5
+        run: bash scripts/build-harness.sh --android-only
 
       - name: Build release
         run: ./gradlew :audio:assembleRelease

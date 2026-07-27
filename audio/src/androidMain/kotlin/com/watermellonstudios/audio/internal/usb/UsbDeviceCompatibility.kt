@@ -35,13 +35,11 @@ object UsbDeviceCompatibility {
         val vidPid: String get() = String.format("%04X:%04X", vendorId, productId)
     }
 
-    // Type aliases for backwards compatibility — actual types in commonMain UsbCompatibilityTypes.kt
-    @Suppress("unused")
-    @Deprecated("Use UsbCompatibilityStatus directly", ReplaceWith("UsbCompatibilityStatus"))
-    typealias CompatibilityStatus = UsbCompatibilityStatus
-    @Suppress("unused")
-    @Deprecated("Use UsbCompatibilityResult directly", ReplaceWith("UsbCompatibilityResult"))
-    typealias CompatibilityResult = UsbCompatibilityResult
+    // Los typealias `CompatibilityStatus` / `CompatibilityResult` se borraron en la
+    // ronda de limpieza del 2026-07-27: estaban @Deprecated con ReplaceWith y no los
+    // usaba NADIE — ni este repo ni NoisyPad, que ya nombra `UsbCompatibilityResult` y
+    // `UsbCompatibilityStatus` directo (UsbAudioScreen.kt:919-924). Los tipos reales
+    // viven en commonMain, `UsbCompatibilityTypes.kt`.
 
     // ==================== COMPATIBLE DEVICES ALLOWLIST ====================
     // Add tested devices here with their VID:PID
