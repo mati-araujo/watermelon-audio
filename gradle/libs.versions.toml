@@ -3,6 +3,14 @@
 compileSdk = "36"
 minSdk = "29"
 
+# compileSdk propio de :harness (WA-5.5). Compose Multiplatform arrastra
+# androidx.lifecycle:lifecycle-runtime-compose 2.11.0, que exige compilar contra
+# 37 o mas. Se le da uno propio en vez de mover el de la libreria: el harness NO
+# puede arrastrar la configuracion de lo que se publica, que es el punto entero
+# de tenerlo en un modulo aparte. Subir el de :audio es una decision de la
+# libreria, a tomar por sus propios motivos.
+harnessCompileSdk = "37"
+
 # Build Tools
 agp = "9.2.1"
 kotlin = "2.4.0"
@@ -15,6 +23,13 @@ oboe = "1.10.0"
 coreKtx = "1.18.0"
 lifecycleRuntimeKtx = "2.11.0"
 datastore = "1.2.1"
+
+# UI — SOLO para :harness (WA-5.5). La libreria publicada no las ve, y
+# scripts/check-no-ui-in-library.sh lo hace fallar si algun dia las ve.
+# Declarar una version en el catalogo NO es depender de ella: el catalogo dice
+# que existe, el classpath dice quien la usa. El gate mide el classpath.
+composeMultiplatform = "1.11.1"
+activityCompose = "1.13.0"
 
 # Testing
 junit = "4.13.2"
@@ -32,6 +47,9 @@ androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = 
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
 
+# UI — solo :harness (ver la nota en [versions])
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+
 # Gradle Plugins (for build-logic)
 android-gradlePlugin = { group = "com.android.tools.build", name = "gradle", version.ref = "agp" }
 kotlin-gradlePlugin = { group = "org.jetbrains.kotlin", name = "kotlin-gradle-plugin", version.ref = "kotlin" }
@@ -43,3 +61,10 @@ androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "j
 [plugins]
 android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+
+# UI — SOLO para :harness (WA-5.5). Deliberadamente NO se aplican en
+# KmpNativeConventionPlugin: :audio toma su configuracion de ahi, asi que si el
+# convention plugin nunca nombra Compose, :audio no puede heredarlo.
+android-application = { id = "com.android.application", version.ref = "agp" }
+compose-multiplatform = { id = "org.jetbrains.compose", version.ref = "composeMultiplatform" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

@@ -189,6 +189,15 @@ jobs:
             fi
           done
 
+      # WA-5.5. Este job ya monta el SDK de Android arriba, asi que el script
+      # cubre las dos plataformas de una. Y verifica lo mismo que el paso de
+      # arriba verifica para el XCFramework: que el framework traiga el motor,
+      # que es una afirmacion distinta de que linkeo.
+      #
+      # Sin este paso el harness se pudre en silencio — ningun otro job lo compila.
+      - name: Build the UI harness, both platforms — WA-5.5
+        run: bash scripts/build-harness.sh
+
   build:
     runs-on: ubuntu-latest
 
@@ -213,6 +222,16 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+
+      # WA-5.5 — la UI del harness no puede entrar al artefacto publicado.
+      # Corre aca y no en el job de macOS porque solo necesita que Gradle
+      # configure y resuelva: los minutos de macOS cuestan 10x, y un Compose
+      # colado en :audio es igual de rojo dicho por Linux.
+      #
+      # Va ANTES de los builds: si :audio arrastra UI, lo que se publicaria esta
+      # mal aunque compile perfecto.
+      - name: UI guardrail — WA-5.5
+        run: bash scripts/check-no-ui-in-library.sh
 
       - name: Kotlin unit tests (commonTest)
         run: ./gradlew :audio:testDebugUnitTest

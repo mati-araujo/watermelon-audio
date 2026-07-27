@@ -2015,6 +2015,113 @@ que nadie tocó: `Mode transitions` pasó de 10/12 a 12/12 y `Benchmark / diagno
 Es el mismo desparramo de keywords de siempre, ahora visible en el signo contrario.
 
 
+### Nota de cierre — WA-5.5, el módulo del harness y su gate (2026-07-27)
+
+**Existe `:harness` y compila en las dos plataformas.** APK de Android y
+`HarnessKit.framework` de iOS (245 MB debug, **250 símbolos `wma_*` adentro**, con
+`MainViewController` exportado). Es el esqueleto: transporte y lectura de estado, que es lo
+mínimo que prueba que la cadena entera está viva —Compose → `commonMain` → bridge → C API →
+C++— en Android e iOS. Los otros seis controles van encima de este mismo andamio.
+
+**El harness vive entero en `commonMain`**, y eso salió gratis: `AudioEngineFactory.create()`
+no pide `Context` ni nada de plataforma. Los shells son dos archivos de ~10 líneas
+(`MainActivity`, `MainViewController`). Es también la razón por la que el harness ejercita
+**la misma superficie que consume un cliente KMP**, en vez de una parecida.
+
+**Se confirmó lo del XCFramework, y por el mejor camino: funcionando.** El link del framework
+del harness disparó `:audio:buildIosNativeLib` solo, porque el convention plugin ya engancha
+`cinteropWatermelonAudio*` a esa task. **No se tocó nada del lado de WA-4.1** — el harness
+produce su propio framework y el XCFramework sigue siendo la salida para un consumidor Swift
+no-KMP, exactamente como decía la propuesta.
+
+**Dos cosas que la propuesta no había anticipado:**
+
+1. **AGP y KGP ya están en el classpath del build** por `includeBuild("build-logic")`, así que
+   el harness los aplica **sin versión** — Gradle rechaza que se les vuelva a declarar una.
+   Compose sí lleva versión, porque **no** está en ese classpath: eso es justamente lo que lo
+   mantiene fuera del alcance de `:audio`.
+2. **Compose Multiplatform 1.11.1 arrastra `lifecycle-runtime-compose 2.11.0`, que exige
+   compilar contra API 37**, y el repo está en 36. **`:harness` tiene su propio `compileSdk`
+   (37) en vez de mover el de la librería.** Subir el de `:audio` es una decisión de la
+   librería, a tomar por sus motivos — no un efecto colateral de agregar una app de prueba.
+   Que el harness no arrastre la configuración de lo que se publica **es el punto entero** de
+   tenerlo aparte.
+
+#### El gate — `scripts/check-no-ui-in-library.sh`, noveno comando
+
+Tres assertions: (1) toda task de publicación pertenece a `:audio`; (2) **el classpath
+resuelto de `:audio` no tiene una sola coordenada de Compose**; (3) `:audio` no depende de
+`:harness`.
+
+**La 2 es la única que agarra el modo de falla realista.** Nadie va a publicar el harness por
+accidente — los workflows dicen `:audio:publishAll...`, path-qualified, y el harness ni
+siquiera aplica `maven-publish`. Lo que pasa de verdad es que alguien le agrega Compose a
+`:audio` "para un helper de preview", y las otras dos no ven eso.
+
+**El catálogo de versiones sí tiene entradas de Compose y no es una violación.** El catálogo
+declara versiones *disponibles*, no dependencias efectivas. Confundirlas lleva a gimnasia
+inútil; lo que decide es el classpath, que es lo que el gate mide.
+
+> [!TIP]
+> **Se mutó el gate tres veces, y las tres fallas enseñaron algo distinto.**
+> - **`maven-publish` en `:harness`** → falla el check 1. Limpio.
+> - **Compose en `:audio`** → falla el check 2, nombrando la coordenada culpable. Es el
+>   mutante que justifica el script.
+> - **`:audio → :harness`** → falla… **por la razón equivocada**. Como `:harness` depende de
+>   `:audio`, esa arista es un **ciclo**, y Gradle muere en la configuración antes de que el
+>   check 3 llegue a correr: lo agarra el check 1. **El check 3 hoy no puede dispararse**, y
+>   eso está escrito en el script en vez de dejar creer que él sostiene esa invariante — hoy
+>   la sostiene el grafo de tareas. Se queda porque deja de ser cierto en cuanto exista un
+>   segundo módulo de UI que no dependa de `:audio` (un design system, por ejemplo).
+>
+> **Y el tercer mutante destapó dos bugs míos en el script, no en el build.** El primero:
+> mandaba `stderr` a `/dev/null`, así que reportaba "no se encontró ninguna task de
+> publicación" mientras Gradle decía, textual, *"Circular dependency between the following
+> tasks"* — el gate acertaba y el mensaje mentía. El segundo, al arreglar el primero: guardaba
+> el error en una variable global seteada dentro de `$( … | grep | sort )`, o sea **en un
+> subshell**, así que nunca volvía al padre y seguía imprimiendo "(sin detalle)". Va a archivo.
+> **Van tres veces en dos sesiones que el mutante apunta al harness y no a lo que se probaba.**
+
+**El gate pasa a 10 comandos:** los 8 de siempre, más `check-no-ui-in-library.sh` y
+`build-harness.sh`. El segundo no es sólo "que compile" — **verifica que el framework traiga
+el motor adentro**, que es una afirmación distinta de que linkeó. Es el mismo modo de falla
+que `ci.yml` ya cubría para el XCFramework de WA-4.1, con el mismo piso de 100 símbolos. Y sin
+este comando el harness se pudre en silencio: nada más lo compila.
+
+> [!TIP]
+> **`build-harness.sh` también se mutó, y ahí las mutaciones enseñaron más que el resultado.**
+>
+> **Los dos primeros mutantes no se detectaron, y la culpa era del método.** Se habían mutado
+> las **salidas** —vaciar el binario del framework, renombrar el símbolo dentro del Mach-O— y
+> Gradle detecta que el output cambió y **re-linkea antes de que el check corra**. La mutación
+> se deshacía sola. A las salidas de un build no se las muta: se mutan las **entradas**.
+>
+> **Y con las entradas apareció que una de las dos assertions no afirmaba lo que decía.**
+> Renombrar `fun MainViewController` a otra cosa **seguía pasando**, porque Kotlin/Native
+> nombra la clase ObjC por el **archivo** (`MainViewController.kt` →
+> `HarnessKitMainViewControllerKt`), no por la función: el check estaba afirmando "el archivo
+> existe", no "el punto de entrada existe". Ahora afirma contra el **header generado**, con
+> tipo de retorno incluido (`+ (UIViewController *)MainViewController`), que es además
+> exactamente lo que compila Swift. Con eso, el mutante falla y encima lista qué declara el
+> header de verdad.
+>
+> **El check de símbolos sí puede dispararse, y por la razón real.** Comentar
+> `staticLibraries` en el `.def` produce un framework que **linkea perfecto con 0 símbolos
+> `wma_*`**: el linker no dice nada. Ese es exactamente el fallo silencioso para el que existe
+> el check — a diferencia del check 3 del otro script, éste no es un backstop teórico.
+>
+> **Un tercer bug de bash, de la misma familia que el del subshell:** `nm … | grep -q` bajo
+> `set -o pipefail` da distinto de cero **aunque encuentre** el símbolo, porque `grep -q`
+> corta al primer match y `nm` se come un SIGPIPE. Falla del lado seguro, pero falla igual.
+> `grep -c` lee toda la entrada y no tiene el problema.
+
+**Lo que sigue, en orden:** el proyecto de Xcode (con `NSMicrophoneUsageDescription` desde el
+primer commit), y después los seis controles restantes empezando por el **monitor de entrada**,
+que es el que justifica todo. El permiso de Android (`RECORD_AUDIO`) ya está en el manifest
+desde el primer commit, por la misma razón: el caso que más importa probar es el del permiso
+**negado**, y agregarlo después obligaría a reinstalar para reproducirlo.
+
+
 ### Dónde retomar (2026-07-27)
 
 **Branch:** `feature/wa-3-2-ios-audio-bridge`, **33 commits sobre `master`**. La branch
@@ -2058,14 +2165,22 @@ bloqueo de Xcode de §11 ya no existe):
 
 ```bash
 bash scripts/check-cpp-portability.sh          # guardrail WA-0.4
-bash scripts/run-cpp-tests.sh                  # 724 tests C++
+bash scripts/run-cpp-tests.sh                  # 749 tests C++
 bash scripts/build-ios.sh                      # ambos slices + link check
 ./gradlew :audio:iosSimulatorArm64Test         # 87 tests iOS
 ./gradlew :audio:testDebugUnitTest             # 50 tests JVM
 ./gradlew :audio:assembleDebug                 # Android, 4 ABIs
 ./gradlew :audio:assembleWatermelonXCFramework # XCFramework (sólo macOS)
 ./gradlew :audio:compileIosMainKotlinMetadata  # el source set iOS compartido
+bash scripts/check-no-ui-in-library.sh         # guardrail WA-5.5
+bash scripts/build-harness.sh                  # :harness, ambas plataformas + símbolos
 ```
+
+> [!NOTE]
+> **Los dos últimos son de WA-5.5 y no son decorativos.** El guardrail afirma que la UI del
+> harness no puede entrar al artefacto publicado — su assertion útil es la del **classpath
+> resuelto de `:audio`**, no la de publicaciones. Y sin el build del harness en el gate, el
+> harness se pudre en silencio: **nada más lo compila**.
 
 > [!IMPORTANT]
 > **`compileIosMainKotlinMetadata` es nuevo en la lista y no es decorativo.** Los otros

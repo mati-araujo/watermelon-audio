@@ -49,6 +49,11 @@ audio/src/
     platform/           Logger.h/.cpp (logcat / os_log / stderr), Platform.h,
                         PlatformAndroid.cpp, PlatformApple.cpp, PlatformIsa.inc (ISA comun)
     ios/                CMakeLists.txt del build iOS (separado del que maneja AGP)
+
+harness/src/            :harness — app de prueba multiplataforma (WA-5.5). NO se publica
+  commonMain/kotlin/    HarnessApp — la UI entera (Compose Multiplatform)
+  androidMain/kotlin/   MainActivity (shell) + AndroidManifest (RECORD_AUDIO)
+  iosMain/kotlin/       MainViewController (shell)
 ```
 
 ---
@@ -118,8 +123,13 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # Suite C++ de host (527 tests, googletest)
+bash scripts/run-cpp-tests.sh              # Suite C++ de host (749 tests, googletest)
 bash scripts/check-cpp-portability.sh      # Guardrail WA-0.4 (jni.h / android/)
+bash scripts/build-harness.sh              # :harness, ambas plataformas + símbolos
+bash scripts/check-no-ui-in-library.sh     # Guardrail WA-5.5: la UI de :harness no
+                                           # puede entrar al artefacto publicado.
+                                           # Lo que de verdad mide es el classpath
+                                           # resuelto de :audio.
 bash scripts/build-ios.sh                  # libwatermelon_audio.a — ambos slices + link check
 python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2.6).
                                            # Imprime; docs/kmp/c_api_coverage.md
@@ -135,7 +145,16 @@ python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2
                                            # enableCInteropCommonization.
 ./gradlew :audio:iosSimulatorArm64Test     # Tests K/N en simulador (requiere Xcode
                                            # con first-launch hecho, ver docs/kmp)
+
+./gradlew :harness:assembleDebug           # APK del harness de UI (WA-5.5)
+./gradlew :harness:linkDebugFrameworkIosSimulatorArm64   # HarnessKit.framework
 ```
+
+> `:harness` es la app de prueba multiplataforma (WA-5.5). **No se publica**, y eso es
+> estructural: no aplica `maven-publish`, los workflows publican con `:audio:publishAll...`
+> path-qualified, y `check-no-ui-in-library.sh` lo hace fallar si Compose aparece en el
+> classpath de `:audio`. Su framework de iOS **no es** el XCFramework de WA-4.1 — las dos
+> vías de consumo son alternativas y usar ambas duplicaría el motor.
 
 > El build de iOS vive en `audio/src/main/cpp/ios/CMakeLists.txt`, **separado** del que
 > maneja AGP: ese es Android-specific de punta a punta (Oboe, libusb, JNI,
