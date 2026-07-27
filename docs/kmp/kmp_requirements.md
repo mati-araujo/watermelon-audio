@@ -2238,6 +2238,71 @@ store en las cuatro capas — dejar escrito un control muerto en la API multipla
 11 del smoke se mira desde NoisyPad en Android, que es donde el caller existe.
 
 
+### El harness apretó "capturar" y encontró dos bugs de producción (2026-07-27)
+
+> [!CAUTION]
+> **En el primer tap. Y ninguno de los dos lo veía ningún test.**
+>
+> El resultado visible fue `start() devolvió false` y —lo más raro—
+> **`lifecycle: RUNNING` con `stream: —`**: el motor decía estar corriendo sin un stream
+> abierto. Los logs del motor lo explican entero:
+>
+> ```
+> WMA_AUDIT: [START] calling manager.start()...
+> BackendManager: No backend selected
+> AudioEngine: Failed to start via BackendManager: Not initialized
+> WMA_AUDIT: [START] manager.start() FAILED: Not initialized
+> AudioEngine: Invalid state transition: 2 -> 0
+> ```
+
+**Bug 1 — en iOS nadie selecciona un backend, así que el motor NUNCA puede abrir un stream.**
+
+`mUseBackendManager` es `false` en Android (camino Oboe directo, el que shippea) y **`true` en
+todo lo demás**, con un comentario que dice por qué: fuera de Android ese camino directo no
+existe y `BackendManager` es la única forma de abrir un stream. Pero `selectBackend()` **no lo
+llama nadie en el arranque**: sus dos únicos callers son `wma_select_backend()` —la entrada de
+la C API— y `AudioEngineImpl.setAudioBackend()`, que sólo corre si el consumidor lo pide
+explícitamente. Con `mActiveBackend` en null, `manager.start()` falla siempre.
+
+**Por qué nunca se vio:** en Android el flag es `false` y el camino directo no pasa por acá. Y
+en la suite de host **`CApiFixture` llama `wma_select_backend(1)` a mano** — o sea que los
+tests seleccionan el backend y producción en iOS no. El fixture estaba compensando, sin querer,
+exactamente el paso que falta.
+
+**Bug 2 — un start fallido deja el motor mintiendo que está RUNNING, para siempre.**
+
+`AudioEngine::start()` transiciona a `Running` **antes** de llamar a `manager.start()`. Cuando
+eso falla intenta volver a `Stopped`, y la tabla de transiciones lo rechaza: desde `Running`
+la única salida válida es `Stopping`. Resultado: la transición se descarta, el motor queda en
+`Running`, y `isRunning` devuelve `true` sobre un motor que no tiene stream. **La UI mostró
+exactamente eso**, y es lo que hizo obvio que había un segundo problema debajo del primero.
+
+Es la misma familia que los hallazgos de WA-2.6: un valor que se reporta bien mientras la
+realidad es otra. Acá el arreglo correcto es no transicionar a `Running` hasta que el backend
+haya arrancado de verdad — que el estado siga a la realidad, no al revés.
+
+**Qué NO es:** no es el permiso de micrófono. No apareció diálogo porque nunca se llegó a
+pedirlo: el stream de salida ni siquiera abrió. La pregunta original —**¿el input path de iOS
+captura?**— sigue sin contestar, y ahora se sabe qué la estaba tapando.
+
+> [!TIP]
+> **Esto es exactamente para lo que se construyó el harness, y lo encontró en el primer tap.**
+> Los diez comandos del gate estaban en verde: 749 tests C++, 101 de simulador, 64 JVM, ambos
+> slices linkeando, el framework con sus 250 símbolos. Ninguno de esos ejercita
+> `wma_engine_start()` en iOS — `CinteropSmokeTest` **deliberadamente** no lo hace, y lo dice en
+> su doc comment. Verde completo y el motor no podía abrir un stream.
+>
+> También vale cómo se encontró: el filtro de logs por proceso no mostraba nada del motor,
+> porque `Logger.cpp` en Apple escribe al **subsystem** `com.watermellonstudios.audio`. Con el
+> predicado correcto (`--info --debug --predicate 'subsystem == "…"'`) los logs contaban la
+> historia completa. Vale anotarlo: en iOS, para ver el motor hay que filtrar por subsystem,
+> no por proceso.
+
+**Estado: encontrados y documentados, sin arreglar.** Los dos son de `core/AudioEngine.cpp` y
+tocan el arranque, que es de lo más sensible del motor; van con su propia sesión, sus tests de
+caracterización y su mutación.
+
+
 ### Decisión — cómo llegan al harness los 5 controles que faltan (aprobada 2026-07-27)
 
 > [!IMPORTANT]
@@ -2394,7 +2459,14 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2). **WA-4.3 primera mitad la subsume WA-5.5**, que ya corre en el simulador |
 | **Fase 5** — Harness (WA-5.5) | 🟡 **EN CURSO** — `:harness` compila en las dos plataformas y **la app corre en el simulador de iOS**. Gate de 8 a **10 comandos**. Controles **1/7** (monitor de entrada, que requirió subir §12 Input a `commonMain`) y **2/7** (pad XY). Faltan 5, desbloqueados por el opt-in decidido en §10 |
 
-**Próximo paso: el opt-in `@InternalWatermelonApi` y los 5 controles que faltan** — la
+> [!CAUTION]
+> **Antes que nada: los dos bugs que encontró el harness al apretar "capturar"** (§10, "el
+> harness apretó capturar"). **En iOS nadie selecciona un backend, así que el motor no puede
+> abrir un stream**, y un start fallido lo deja reportando `RUNNING` para siempre porque la
+> tabla de transiciones rechaza el rollback. Los diez comandos del gate estaban en verde.
+> Arreglar eso va **antes** que los controles: sin stream no hay nada que medir.
+
+**Después: el opt-in `@InternalWatermelonApi` y los 5 controles que faltan** — la
 decisión ya está tomada (§10, "cómo llegan al harness los 5 controles que faltan"): **NO se
 ensancha la API pública**; el harness recibe acceso al bridge detrás de una anotación de
 opt-in. Ya no queda trabajo de C API pendiente: WA-2.5/2.6 está cerrada.
