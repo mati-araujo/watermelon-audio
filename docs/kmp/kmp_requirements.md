@@ -1335,10 +1335,49 @@ crossfade, **desconectado de `AudioEngine`**: cero referencias. Migrarlos no lo 
 movió estado muerto de dos copias a una. Queda test de caracterización que falla si alguien
 lo arregla.
 
+### Nota de cierre — WA-2.5/2.6, categoría `análisis` (2026-07-26)
+
+**Séptima categoría cerrada: 10 funciones.** Metering de salida (5), waveform, modulador (2)
+y automatización (2). Delegación: **135/278**. Las tres filas del script quedan completas:
+`Analysis` 13/13, `Modulation` 3/3.
+
+**La migración fue mecánica y sin sorpresas** — cero funciones nuevas de C API, cero
+divergencias entre las dos superficies. Pero escribir los tests destapó otra cosa.
+
+> [!CAUTION]
+> **Los medidores de salida no funcionan, en ninguna de las dos plataformas, y se ve en
+> pantalla.**
+>
+> `AudioEngine::getOutputPeakLevel` / `getOutputRMSLevel` leen de `mOutputNode`, y
+> **`OutputNode::process()` no lo llama nadie**: el nodo se aloca, se `prepare()`a y se
+> queda ahí. Tampoco está en el `AudioGraph`. Así que peak y RMS son 0 permanente mientras
+> suena audio.
+>
+> **Verificado del lado de NoisyPad:** `GuitarModeViewModel.startMetering()` postea
+> `getOutputLevels()` en un loop y muestra el resultado. **Ese medidor nunca se movió.** El
+> de input al lado sí anda, porque `InputNode` sí se maneja — probablemente por eso nadie
+> lo notó.
+>
+> Lo encontró un test que escribí esperando que el medidor siguiera al audio. Falló, y en
+> vez de bajarle la vara lo seguí hasta el origen. Queda test de caracterización que
+> **falla el día que alguien lo arregle**, más ticket propio.
+
+**Verificación — `test_c_api_analysis.cpp`, 14 tests (624 en total).** Lo que sí se cubre y
+sigue valiendo: el piso de **−100 dB** para el silencio (0 dB sería fondo de escala, la
+lectura opuesta), que los getters en dB sean el log de los lineales, que el batch de 4
+coincida con los individuales —donde se escondería una transposición—, los rangos del
+modulador (tipo 0–7, paramId, no-finitos) y los ejes de automatización.
+
+**Un detalle del waveform que se preservó:** `nativeGetWaveformSamples` recorta el pedido
+al largo real del array de Java. Eso **no se puede mover a la C API** —recibe un puntero
+pelado— así que queda del lado JNI, igual que el cross-check del batch de efectos y el del
+multi-touch. Es el mismo patrón por tercera vez: lo que sabe de largos de array se queda
+arriba.
+
 ### Dónde retomar (2026-07-26)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **22 commits sobre `master`**. La branch
-existe en `origin` pero está **ahead 19** — sólo los 3 primeros están pusheados.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **24 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 21** — sólo los 3 primeros están pusheados.
 `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
@@ -1347,8 +1386,8 @@ existe en `origin` pero está **ahead 19** — sólo los 3 primeros están pushe
 > su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
 > si alguien corrió los gates y lo dijo.
 
-Verificación local al cerrar `mode`: portabilidad OK, **610 tests C++**, ambos slices de
-iOS con link check, 87 tests de simulador, 50 JVM, `assembleDebug`, XCFramework y
+Verificación local al cerrar `análisis`: portabilidad OK, **624 tests C++**, ambos slices
+de iOS con link check, 87 tests de simulador, 50 JVM, `assembleDebug`, XCFramework y
 **`compileIosMainKotlinMetadata`**. Todo en verde.
 
 ```
@@ -1409,13 +1448,14 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅, `effects` ✅, `oscillator/synth` ✅, `voice` ✅ y `mode` ✅ cerradas** (delegación 125/278). **Murió la duplicación de estado de modo** |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅, `effects` ✅, `oscillator/synth` ✅, `voice` ✅, `mode` ✅ y `análisis` ✅ cerradas** (delegación 135/278). **Murió la duplicación de estado de modo** |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso: WA-2.5 + WA-2.6, categoría `análisis`** (13 entry points, 6 delegan por
-arrastre de effects; quedan los medidores de salida y el waveform). Después metronome,
-benchmark y el **looper**, que es el 40% del gap y va último.
+**Próximo paso: WA-2.5 + WA-2.6, categoría `metronome`** (11 entry points, 0 delegan; toda
+la superficie `nativeTransport*`, con gap nominal 9 — el más alto que queda fuera del
+looper, así que conviene contar a mano antes de dimensionar). Después benchmark y el
+**looper**, que es el 40% del gap y va último.
 
 **Arranque concreto para la próxima sesión** (el método ya está decidido, ver abajo — no
 re-litigarlo):
@@ -1443,8 +1483,8 @@ re-litigarlo):
 6. Actualizar `c_api_coverage.md` y el estado acá.
 
 **Orden de categorías:** ~~lifecycle~~ ✅ → ~~input/monitor~~ ✅ → ~~effects~~ ✅ →
-~~oscillator/synth~~ ✅ → ~~voice~~ ✅ → ~~mode~~ ✅ → **análisis** → metronome → benchmark →
-**looper**.
+~~oscillator/synth~~ ✅ → ~~voice~~ ✅ → ~~mode~~ ✅ → ~~análisis~~ ✅ → **metronome** →
+benchmark → **looper**.
 
 > [!TIP]
 > **Cinco de las seis categorías cerradas encontraron un bug**, casi siempre por el mismo

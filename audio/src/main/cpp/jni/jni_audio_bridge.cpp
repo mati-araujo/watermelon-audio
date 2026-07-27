@@ -461,19 +461,20 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVoi
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetWaveformSamples(
     JNIEnv* env, jobject thiz, jfloatArray buffer, jint size) {
-    if (!g_jniState.engine || buffer == nullptr || size <= 0) {
+    if (buffer == nullptr || size <= 0) {
         return 0;
     }
 
-    jsize bufferSize = env->GetArrayLength(buffer);
-    int samplesToGet = std::min(static_cast<int>(bufferSize), static_cast<int>(size));
-
+    // The array length still has to be honoured here: wma_* takes a bare
+    // pointer and cannot know how big the Java array is, so asking for more
+    // than it holds would write past the end.
     ScopedFloatArrayRW samples(env, buffer);
     if (!samples.isValid()) {
         return 0;
     }
+    const int samplesToGet = std::min(static_cast<int>(samples.size()), static_cast<int>(size));
 
-    return g_jniState.engine->getWaveformSamples(samples.get(), samplesToGet);
+    return wma_get_waveform_samples(g_wmaEngine, samples.get(), samplesToGet);
 }
 
 // ==================== Modulator Functions ====================
@@ -484,12 +485,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMod
     if (!ensureEngine()) {
         return JniError::ENGINE_NOT_INITIALIZED;
     }
-    if (type < 0 || type > 7) {
-        LOGE("Invalid modulator type: %d (valid range: 0-7)", type);
-        return JniError::INVALID_PARAMETER_ID;
-    }
-    g_jniState.engine->setModulatorType(type);
-    return JniError::SUCCESS;
+    return wma_set_modulator_type(g_wmaEngine, type);
 }
 
 JNIEXPORT jint JNICALL
@@ -498,16 +494,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMod
     if (!ensureEngine()) {
         return JniError::ENGINE_NOT_INITIALIZED;
     }
-    if (paramId < 0) {
-        LOGE("Invalid modulator paramId: %d", paramId);
-        return JniError::INVALID_PARAMETER_ID;
-    }
-    if (!isValidFloat(value)) {
-        LOGE("Invalid modulator parameter value: %f (not finite)", value);
-        return JniError::PARAMETER_OUT_OF_RANGE;
-    }
-    g_jniState.engine->setModulatorParameter(paramId, value);
-    return JniError::SUCCESS;
+    return wma_set_modulator_param(g_wmaEngine, paramId, value);
 }
 
 // ==================== Effect Functions ====================
@@ -1215,17 +1202,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeConfig
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetAutomationParameter(
     JNIEnv* env, jobject thiz, jint effectIndex, jint paramId, jfloat xyValue) {
-    if (!g_jniState.engine) {
-        return;
-    }
-
-    size_t chainSize = g_jniState.engine->getNumEffects();
-    if (effectIndex < 0 || static_cast<size_t>(effectIndex) >= chainSize) {
-        return;
-    }
-
-    // XY value is already normalized 0-1, delegate to setParameter
-    g_jniState.engine->setParameter(static_cast<size_t>(effectIndex), paramId, xyValue);
+    wma_set_automation_param(g_wmaEngine, effectIndex, paramId, xyValue);
 }
 
 // ==================== XY Mapping Config Functions (Phase 4) ====================
@@ -1268,10 +1245,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetDep
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeApplyAutomation(
     JNIEnv* env, jobject thiz, jint axis, jfloat normalizedValue) {
-    if (!g_jniState.engine) return;
-    if (axis < 0 || axis > 2) return;
-
-    g_jniState.engine->applyAutomation(axis, std::clamp(normalizedValue, 0.0f, 1.0f));
+    // The 0..2 axis check and the clamp live in wma_apply_automation now.
+    wma_apply_automation(g_wmaEngine, axis, normalizedValue);
 }
 
 // ==================== USB Device Functions ====================
@@ -1762,64 +1737,42 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetCur
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetOutputPeakLevel(
     JNIEnv* env, jobject thiz, jint channel) {
-    if (!g_jniState.engine) {
-        return 0.0f;
-    }
-    return g_jniState.engine->getOutputPeakLevel(channel);
+    return wma_get_output_peak(g_wmaEngine, channel);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetOutputRmsLevel(
     JNIEnv* env, jobject thiz, jint channel) {
-    if (!g_jniState.engine) {
-        return 0.0f;
-    }
-    return g_jniState.engine->getOutputRMSLevel(channel);
+    return wma_get_output_rms(g_wmaEngine, channel);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetOutputPeakLevelDb(
     JNIEnv* env, jobject thiz, jint channel) {
-    if (!g_jniState.engine) {
-        return -100.0f;
-    }
-    float linear = g_jniState.engine->getOutputPeakLevel(channel);
-    if (linear <= 0.0f) {
-        return -100.0f;
-    }
-    return 20.0f * std::log10(linear);
+    // The -100 dB floor for a silent or absent signal lives in the C API.
+    return wma_get_output_peak_db(g_wmaEngine, channel);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetOutputRmsLevelDb(
     JNIEnv* env, jobject thiz, jint channel) {
-    if (!g_jniState.engine) {
-        return -100.0f;
-    }
-    float linear = g_jniState.engine->getOutputRMSLevel(channel);
-    if (linear <= 0.0f) {
-        return -100.0f;
-    }
-    return 20.0f * std::log10(linear);
+    return wma_get_output_rms_db(g_wmaEngine, channel);
 }
 
 JNIEXPORT jfloatArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetOutputLevels(
     JNIEnv* env, jobject thiz) {
-    // Returns [peakL, peakR, rmsL, rmsR] for efficient single-call metering
+    // Returns [peakL, peakR, rmsL, rmsR] for efficient single-call metering.
+    // Pre-zeroed because wma_get_output_levels leaves the buffer untouched
+    // when there is no engine, and this entry point has always answered with
+    // an array of zeros rather than null in that case.
+    jfloat levels[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    wma_get_output_levels(g_wmaEngine, levels);
+
     jfloatArray result = env->NewFloatArray(4);
     if (!result) {
         return nullptr;
     }
-
-    jfloat levels[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    if (g_jniState.engine) {
-        levels[0] = g_jniState.engine->getOutputPeakLevel(0);
-        levels[1] = g_jniState.engine->getOutputPeakLevel(1);
-        levels[2] = g_jniState.engine->getOutputRMSLevel(0);
-        levels[3] = g_jniState.engine->getOutputRMSLevel(1);
-    }
-
     env->SetFloatArrayRegion(result, 0, 4, levels);
     return result;
 }

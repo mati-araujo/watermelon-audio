@@ -114,6 +114,7 @@ add_executable(core_tests
     test_c_api_synth.cpp
     test_c_api_voice.cpp
     test_c_api_mode.cpp
+    test_c_api_analysis.cpp
     support/test_platform_backends.cpp
     support/test_input_node_stub.cpp
     ${CORE_TESTED_SOURCES}
