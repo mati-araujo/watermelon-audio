@@ -2677,6 +2677,169 @@ misma razón que la clave del micrófono en iOS: el caso que más importa probar
 **negado**, y agregarlo después obligaría a reinstalar para reproducirlo.
 
 
+### El CI no estaba caído, y encontró dos cosas que el gate de 10 no ve (2026-07-27)
+
+> [!CAUTION]
+> **El gate local de 10 comandos no corre sanitizers, y el CI sí.** `scripts/run-cpp-tests.sh`
+> soporta `SANITIZE=address,undefined` y `SANITIZE=thread` desde siempre —está documentado en
+> su propio encabezado— pero ninguno de los 10 comandos los usa. El CI tiene un job para cada
+> uno. Resultado: el gate dio **10/10 en verde** y el PR #59 llegó igual con dos fallas
+> reales. **El gate pasa a 12 comandos.**
+
+Y de paso: **el CI volvía a andar**. §16 lo daba por caído por falta de pago desde el
+2026-07-26; al pushear, el run arrancó solo. `build` y `cpp-tests` pasaron, `ios` también, y
+los dos jobs de sanitizer fallaron.
+
+#### 1 · UBSan — un overflow con signo, y un test que pasaba *por* él
+
+```
+audio/src/main/cpp/looper/LooperExporter.cpp:119:15: runtime error:
+signed integer overflow: 2147483647 + 2048 cannot be represented in type 'int'
+→ CApiLooperTest.AnAbsurdCountInIsClampedInsteadOfOverflowing
+```
+
+Lo que enseña es dónde terminó el arreglo anterior. La cola de 15 de WA-2.6 clampeó
+`countInBeats * framesPerBeat()` a `INT32_MAX` en la C API (`watermelon_audio.cpp:1555`) para
+que no envolviera. Correcto — pero **el overflow se mudó una capa abajo**: el exporter recibía
+`countInFrames = INT32_MAX` y hacía `snap.frames * repeats + countIn` en `int`.
+
+Y el test verde lo tapaba. El wrap negativo daba un `size_t` enorme, la alocación tiraba
+`length_error`, el borde de la C API lo convertía en el `false` que el test esperaba. **El test
+pasaba por el camino del UB.** Peor: ese camino dependía del ancho de `size_t` — en las ABIs de
+32 bits de Android truncaba en vez de tirar.
+
+**El arreglo** es la cuenta en `int64_t` y rechazo explícito de lo que no entra en int32 — la
+misma forma que ya usa `wma_looper_*:1715`. Mismo `false` para el llamador, misma telemetría
+(el `catch` del borde tampoco la tocaba), sin UB y sin intentar una alocación de 17 GB.
+El mismo desborde estaba en `exportStems`; se arregló también, aunque ningún test lo acuse.
+
+> [!NOTE]
+> **La propiedad que ese test cubría de más no se perdió.** El comentario viejo decía que la
+> assertion existía para probar que una excepción no cruce la C API. Eso lo cubre
+> `ExportTelemetryCountsWhatHappened`, que exporta a una ruta imposible y espera `false` sin que
+> nada escape — se verificó antes de cambiar el mecanismo, no después.
+
+#### 2 · TSan — otra carrera en el fake, y otra vez en el teardown
+
+```
+SUMMARY: ThreadSanitizer: data race in wma_test::FakeAudioBackend::~FakeAudioBackend()
+  write: pthread_cond_destroy   ← main, destruyendo el manager
+  read:  pthread_cond_broadcast ← T3, todavía adentro de releaseStart()
+→ CaptureRequestTest.DestroyingTheManagerMidReopenDoesNotLeaveAThreadBehind
+```
+
+`releaseStart()` hacía `notify_all()` **afuera** del lock. Secuencia posible: el worker
+despierta, termina; el destructor joinea y destruye el `condition_variable`; el thread que
+destrabó sigue adentro de `notify_all()`, tocando un objeto liberado.
+
+**El arreglo** es notificar **adentro** del lock. Ahí la secuencia se vuelve imposible por
+construcción: el worker sólo puede volver de `wait()` reaquiriendo el mutex, y para eso
+`releaseStart()` ya tiene que haber salido del `notify_all()`. Es el mismo patrón que `start()`
+ya usaba con `mStartEnteredCv` doce líneas más arriba — o sea que el archivo se contradecía a
+sí mismo.
+
+> [!TIP]
+> **Es la segunda carrera del mismo fake, y las dos fueron del test, no del motor.** La primera
+> fue `setCaptureAvailable` (se hizo atómico). Vale como patrón: los tests que ejercitan
+> teardown concurrente son los que más fácil introducen carreras propias, y sin TSan ninguna de
+> las dos se ve. El motor salió limpio las dos veces.
+
+#### Los dos arreglos, mutados y mirados fallar
+
+Con las tres suites en verde (762/762 cada una, **cero diagnósticos de sanitizer** en todo el
+log), se mutó cada arreglo para ver si el gate nuevo tiene dientes. El resultado **no fue
+simétrico**, y eso es lo que hay que saber:
+
+| Mutante | Local (macOS) | CI (Linux) |
+|---|---|---|
+| `totalFrames` de vuelta en `int` | **detectado** — `runtime error: signed integer overflow: 2048 + 2147483647`, rc=8 | detectado |
+| `notify_all()` de vuelta afuera del lock | **NO detectado** — 15 corridas con `--repeat until-fail`, todas verdes | detectado a la primera |
+
+**La conclusión operativa:** el UBSan local vale como gate; el TSan local **no reemplaza al job
+del CI**. La diferencia es de plataforma (libc++ contra libstdc++), no de flakiness — quince
+corridas no son ruido. Para carreras, el CI es la autoridad, y ésa es una razón concreta para
+no volver a tratarlo como opcional.
+
+
+### G1 / WA-4.2 — la mitad que se podía verificar está verificada, y la otra estaba mal descrita (2026-07-27)
+
+> [!CAUTION]
+> **Ninguna versión publicada tiene los bindings de iOS.** §16 decía que "el pipeline ya
+> publica metadata KMP + klibs iOS **con los bindings adentro**". Eso es falso sobre lo que
+> hay publicado: `v1.8.0` y `v1.8.1` se taggearon las dos el **2026-07-23**, y el
+> `watermelon_audio.def` entró a `master` el **2026-07-25** con el PR #58. Los tags son
+> anteriores a que cinterop existiera. **No se cortó ningún release desde entonces.**
+
+**Lo que sí quedó verificado, contra la 1.8.0 de GitHub Packages:**
+
+- **Lockstep de Kotlin (D8): cierra.** NoisyPad está en Kotlin **2.4.0** y AGP **9.2.1**, los
+  mismos que este repo.
+- **La coordenada raíz ya estaba declarada del lado de NoisyPad** — `audio = { module =
+  "com.watermellonstudios:audio" }` en el catálogo, y `:core-domain` hace `api(libs.audio)`
+  desde `commonMain`, con el porqué escrito al lado. El convention plugin
+  `noisypad.kmp.library` ya declara `iosArm64()` y `iosSimulatorArm64()`.
+- **Resuelve para los dos targets.** `dependencyInsight` sobre
+  `iosArm64CompileKlibraries` e `iosSimulatorArm64CompileKlibraries`:
+
+  ```
+  com.watermellonstudios:audio:1.8.0
+  \--- com.watermellonstudios:audio-iosarm64:1.8.0
+       org.jetbrains.kotlin.native.target: ios_arm64 (provided) == ios_arm64 (requested)
+
+  com.watermellonstudios:audio:1.8.0
+  \--- com.watermellonstudios:audio-iossimulatorarm64:1.8.0
+       org.jetbrains.kotlin.native.target: ios_simulator_arm64 == ios_simulator_arm64
+  ```
+
+- **Y linkea de verdad en el framework de iOS de NoisyPad**, no sólo compila:
+  `:ios-shell:linkDebugFrameworkIosSimulatorArm64` produce `NoisyPadShell.framework`
+  (estático, 368 MB) y adentro están `AudioEngineImpl` y `EffectManagerImpl`. El klib
+  publicado se consume.
+
+> [!TIP]
+> **El primer verde no valía nada, y es el mismo modo de falla que el de las tasks de test.**
+> `compileKotlinIosArm64` + `compileKotlinIosSimulatorArm64` dieron `BUILD SUCCESSFUL in 6s`
+> con las dos tasks **`UP-TO-DATE`**: no compilaron nada. Forzadas con `--rerun-tasks` tardan
+> 25 s. Para el link hubo que borrar `ios-shell/build/bin` — si no, misma trampa.
+
+**Cómo se vio que faltaban los bindings.** El framework linkeado tiene **cero símbolos `wma_*`**
+—ni definidos ni indefinidos— y ningún `IosAudioBridge`, aunque sí tiene las clases de
+`commonMain`. Y el manifest del klib publicado lo confirma: sus `depends` son
+`atomicfu`, `atomicfu-cinterop-interop`, `kotlinx-coroutines-core` y `stdlib` — está el klib de
+cinterop **de atomicfu** y no hay ninguno de watermelon. El `.module` remoto de
+`audio-iossimulatorarm64:1.8.0` declara **un solo** klib en `iosSimulatorArm64ApiElements`.
+
+**El mecanismo de publicación está bien; lo que falta es cortar un release.** Un
+`:audio:publishToMavenLocal` desde esta branch declara **dos** klibs en la misma variante:
+
+```
+iosSimulatorArm64ApiElements-published
+     audio-iosSimulatorArm64Main-1.8.1.klib
+     audio-iosSimulatorArm64Cinterop-watermelonAudioMain-1.8.1.klib
+```
+
+O sea: no hay nada que arreglar en el empaquetado. G1 está **bloqueado por un release**, no por
+un bug.
+
+> [!CAUTION]
+> **Footgun de mavenLocal: hay dos `1.8.1` distintas con el mismo número.** La de GitHub
+> Packages se construyó el 07-23 **sin** cinterop; la de `~/.m2` se construyó el 07-25 **con**
+> cinterop. Si alguien agrega `mavenLocal()` a los repositorios de NoisyPad para "probar G1",
+> va a resolver la local, ver los bindings y concluir que lo remoto anda. **No anda.**
+
+**Lo que hay que hacer antes de cortar ese release**, y es un blocker concreto:
+`publish.yml` sigue en `ubuntu-latest` **en `master`** — PR #59 lo mueve a `macos-latest`, pero
+todavía no está mergeado. Con cinterop ya en `master` desde el PR #58, publicar por esa vía
+desde Linux es justo el modo de falla que anticipa la nota de §16: no un error claro, sino una
+publicación sin bindings. El job de publish de `release-please.yml` **sí** está en
+`macos-latest` en las dos ramas.
+
+**Orden que queda para cerrar G1:** mergear el PR #59 → cortar release (1.9.0) → subir
+`watermellonAudio` en el catálogo de NoisyPad → y recién ahí verificar lo único que falta, que
+es que `getAudioBridge()` resuelva desde iOS. Hoy no se puede: NoisyPad todavía no lo llama, y
+por eso el linker se comió toda la superficie nativa por dead-code elimination.
+
+
 ### Dónde retomar (2026-07-27)
 
 **Branch:** `feature/wa-3-2-ios-audio-bridge`, **51 commits sobre `master`**, **pusheada** y con
@@ -2684,11 +2847,12 @@ misma razón que la clave del micrófono en iOS: el caso que más importa probar
 +16354/-1583). `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
-> **El CI de GitHub está caído por falta de pago (2026-07-26).** Mientras dure, el gate es
-> la verificación local completa —los **10** comandos de abajo— y hay que dejar constancia de
-> su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
-> si alguien corrió los gates y lo dijo. **El PR #59 lleva esa constancia en el cuerpo**, con
-> los números de la corrida de abajo.
+> **El CI volvió a andar** (2026-07-27) — §16 lo daba por caído por falta de pago desde el
+> 26/07, y al pushear el PR #59 el run arrancó solo. Sigue valiendo dejar constancia del gate
+> local en el PR, pero ya no es la única red.
+>
+> **Y el gate pasó de 10 a 12 comandos**, porque el CI encontró dos fallas reales que los 10
+> no veían: **ninguno corría sanitizers**. Ver la nota "El CI no estaba caído" arriba.
 
 **Última verificación local completa (2026-07-27, sobre `92a0089`, la que respalda el PR #59):**
 portabilidad OK (**325 archivos**), **762/762 tests C++** en 48.15 s, ambos slices de iOS con
@@ -2741,7 +2905,24 @@ bash scripts/build-ios.sh                      # ambos slices + link check
 ./gradlew :audio:compileIosMainKotlinMetadata  # el source set iOS compartido
 bash scripts/check-no-ui-in-library.sh         # guardrail WA-5.5
 bash scripts/build-harness.sh                  # :harness, ambas plataformas + símbolos
+
+# Los dos que faltaban, y que el CI sí corría (2026-07-27).
+# OJO: NO se copian las variables de ci.yml tal cual — `detect_leaks=1` NO
+# EXISTE en macOS y aborta el discovery de gtest, o sea que el build falla
+# antes de correr un test. Acá va sin él.
+ASAN_OPTIONS=abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  SANITIZE=address,undefined bash scripts/run-cpp-tests.sh --timeout 180
+TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
+  SANITIZE=thread bash scripts/run-cpp-tests.sh --timeout 180
 ```
+
+> [!CAUTION]
+> **El TSan local (macOS/libc++) es MÁS DÉBIL que el del CI (Linux/libstdc++), y está medido.**
+> Se muto el arreglo del `notify_all()` de vuelta a como estaba y se corrió el test **15 veces
+> con `--repeat until-fail`: cero detecciones**. El mismo mutante en CI es rojo a la primera.
+> O sea: agregar TSan al gate local suma, pero **no reemplaza al job del CI** — para carreras,
+> el CI sigue siendo la autoridad. El de UBSan sí reproduce: el mutante del overflow falla
+> local con el mismo diagnóstico.
 
 > [!NOTE]
 > **Los dos últimos son de WA-5.5 y no son decorativos.** El guardrail afirma que la UI del

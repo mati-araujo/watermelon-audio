@@ -379,14 +379,19 @@ TEST_F(CApiLooperTest, AnAbsurdCountInIsClampedInsteadOfOverflowing) {
     WmaExportOptions opts = wma_looper_export_options_default();
     opts.count_in_beats = 1000000;
 
-    // And the request is REFUSED, not attempted: LooperExporter sizes its mix
-    // buffer from the requested length with no ceiling, so INT32_MAX frames of
-    // silence throws std::length_error. That exception must not cross the C API —
-    // the JNI would turn it into an abort and cinterop has no notion of it — so
-    // the boundary catches it and returns the false it already documents.
+    // And the request is REFUSED, not attempted. Ojo con POR QUÉ, que cambió:
+    // este test pasaba apoyado en UB. `LooperExporter` sumaba
+    // `frames * repeats + countIn` en int, y con `countInFrames` ya clampeado a
+    // INT32_MAX eso es overflow con signo; el wrap negativo hacía tirar a la
+    // alocación y el borde de la C API devolvía false. Verde en un build normal,
+    // y UBSan en CI lo destapó (LooperExporter.cpp:119, "signed integer overflow:
+    // 2147483647 + 2048"). Ahora la cuenta va en int64 y el exporter rechaza
+    // explícitamente lo que no entra en int32 — mismo false, sin UB, y sin
+    // depender del ancho de `size_t` (en las ABIs de 32 bits truncaba).
     //
-    // This is the assertion that found that hole: the first version only said
-    // SUCCEED() and the test died with "C++ exception with description \"vector\"".
+    // La otra propiedad que este test cubría —que una excepción no cruce la C
+    // API— no se pierde: la cubre `ExportTelemetryCountsWhatHappened`, que
+    // exporta a una ruta imposible y espera false sin que nada escape.
     EXPECT_FALSE(wma_looper_export_mix_v2(mWma, tempPath("huge-countin.wav").c_str(),
                                          &opts));
 

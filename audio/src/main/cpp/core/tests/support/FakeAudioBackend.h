@@ -129,11 +129,23 @@ public:
         mStartEnteredCv.wait(lock, [this] { return mStartEntered; });
     }
 
+    // El notify va DENTRO del lock, y no es estilo: es lo que evita que este
+    // objeto se destruya abajo del notify.
+    //
+    // `DestroyingTheManagerMidReopenDoesNotLeaveAThreadBehind` destraba desde un
+    // thread aparte y destruye el manager —y con él este fake— apenas el worker
+    // sale. Notificando afuera del lock, la secuencia posible era: el worker
+    // despierta, termina, el destructor joinea y destruye `mStartGateCv`
+    // mientras el que destrabó sigue adentro de `notify_all()`. TSan lo reportó
+    // como carrera entre `pthread_cond_broadcast` y `pthread_cond_destroy`.
+    //
+    // Adentro del lock la secuencia queda imposible: el worker sólo puede volver
+    // de `wait()` reaquiriendo el mutex, y para eso este método ya tiene que
+    // haber salido del `notify_all()` y soltado el lock. Es el mismo patrón que
+    // ya usa `start()` con `mStartEnteredCv` unas líneas más arriba.
     void releaseStart() {
-        {
-            std::lock_guard<std::mutex> lock(mStartGateMutex);
-            mStartBlocked = false;
-        }
+        std::lock_guard<std::mutex> lock(mStartGateMutex);
+        mStartBlocked = false;
         mStartGateCv.notify_all();
     }
 

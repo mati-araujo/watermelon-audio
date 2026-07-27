@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -116,7 +117,16 @@ bool LooperExporter::exportMixInternal(const char* filePath, const ExportOptions
 
     const int repeats = std::max(1, opts.repeatLoops);
     const int countIn = std::max(0, opts.countInFrames);
-    const int totalFrames = snap.frames * repeats + countIn;
+    // En int64 y con rechazo explícito. En int esta cuenta desbordaba: el clamp
+    // de `wma_looper_*` deja `countInFrames` en INT32_MAX, y sumarle un solo
+    // frame ya es overflow con signo — UB. Daba verde en un build normal porque
+    // el wrap negativo hacía tirar a la alocación y el borde de la C API lo
+    // convertía en el `false` documentado, o sea que el test pasaba *por* el UB.
+    // Ahora se refuta antes, que además no depende del ancho de `size_t` (en las
+    // ABIs de 32 bits el mismo camino truncaba en vez de tirar).
+    const int64_t total64 = static_cast<int64_t>(snap.frames) * repeats + countIn;
+    if (total64 > INT32_MAX) return false;
+    const int totalFrames = static_cast<int>(total64);
     const int sr = (snap.sampleRate > 0) ? snap.sampleRate : 48000;
 
     std::vector<float> mixBuffer(static_cast<size_t>(totalFrames) * 2, 0.0f);
@@ -188,8 +198,14 @@ int LooperExporter::exportStems(const char* directory, const ExportOptions& opts
     const ExportSnapshot snap = takeSnapshot();
     if (snap.frames <= 0) return -1;
 
-    const int totalFrames = snap.frames * std::max(1, opts.repeatLoops)
+    // Mismo desborde que en exportMixInternal, misma forma de rechazarlo. No lo
+    // acusó ningún test —el de UBSan entra por exportMix— pero es el mismo bug:
+    // arreglar uno solo dejaría el otro esperando a que alguien lo llame.
+    const int64_t total64 = static_cast<int64_t>(snap.frames)
+                              * std::max(1, opts.repeatLoops)
                           + std::max(0, opts.countInFrames);
+    if (total64 > INT32_MAX) return -1;
+    const int totalFrames = static_cast<int>(total64);
     const int sr = (snap.sampleRate > 0) ? snap.sampleRate : 48000;
 
     std::string base = directory;
