@@ -262,14 +262,14 @@ private fun LabeledSlider(
 }
 
 /** Formateo mínimo — Kotlin común no tiene `String.format`. */
-private fun Float.oneDecimal(): String {
+internal fun Float.oneDecimal(): String {
     if (isNaN()) return "NaN"
     if (this < -1000f) return "-inf"
     val scaled = (this * 10f).toInt()
     return "${scaled / 10}.${(if (scaled < 0) -scaled else scaled) % 10}"
 }
 
-private fun Float.twoDecimals(): String {
+internal fun Float.twoDecimals(): String {
     val scaled = (this * 100f).toInt()
     val whole = scaled / 100
     val frac = (if (scaled < 0) -scaled else scaled) % 100

@@ -83,6 +83,9 @@ fun HarnessApp() {
                 // porque es la unica pregunta abierta que no puede contestar
                 // ningun test: si el input path de iOS captura de verdad.
                 InputMonitorControl()
+
+                // Control 2 de 7 — el unico camino de tiempo real del programa.
+                XYPadControl(engine)
             }
         }
     }
