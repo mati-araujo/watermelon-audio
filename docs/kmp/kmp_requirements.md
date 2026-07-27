@@ -3008,10 +3008,15 @@ Los 45 commits que vivían sólo en local están en `origin`, y el
 comandos en el cuerpo — que con el CI caído es la única forma de que el merge sea verificado.
 Push fast-forward, sin `--force`.
 
-**2 · G1 / WA-4.2 — el consumo desde NoisyPad.** Del lado de NoisyPad: declarar la coordenada
-raíz, verificar que resuelve para los dos targets iOS y confirmar el lockstep de Kotlin (D8:
-este repo está en 2.4.0). El pipeline ya publica metadata KMP + klibs con los bindings adentro.
-**Necesita una sesión con los dos repos montados.**
+**2 · G1 / WA-4.2 — el consumo desde NoisyPad.** 🟡 **Mitad hecho, mitad bloqueado por un
+release** (2026-07-27, ver la nota arriba). Lo verificable ya se verificó contra la 1.8.0: el
+lockstep de Kotlin cierra (2.4.0 los dos), la coordenada raíz **ya estaba declarada** allá, y
+resuelve para `iosArm64` e `iosSimulatorArm64` **y linkea** en `NoisyPadShell.framework`.
+Lo que **no** se puede verificar todavía es el bridge, porque **ninguna versión publicada trae
+los bindings**: `v1.8.0`/`v1.8.1` son del 07-23 y cinterop entró a `master` el 07-25.
+**Lo que falta es cortar un release, no arreglar algo** — y antes de cortarlo, mergear este PR,
+que es el que mueve `publish.yml` a `macos-latest` (en `master` sigue en Linux, y con cinterop
+adentro eso publica sin bindings sin dar error).
 
 **3 · El smoke manual en NoisyPad Android** (la lista de abajo, 11 ítems). Tres ya no están del
 todo a ciegas: **7, 8 y 9 —los tres retornos del looper— quedaron verificados desde iOS** por el

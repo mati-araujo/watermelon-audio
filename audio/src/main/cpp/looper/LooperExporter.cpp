@@ -122,7 +122,7 @@ bool LooperExporter::exportMixInternal(const char* filePath, const ExportOptions
     // frame ya es overflow con signo — UB. Daba verde en un build normal porque
     // el wrap negativo hacía tirar a la alocación y el borde de la C API lo
     // convertía en el `false` documentado, o sea que el test pasaba *por* el UB.
-    // Ahora se refuta antes, que además no depende del ancho de `size_t` (en las
+    // Ahora se rechaza antes, que además no depende del ancho de `size_t` (en las
     // ABIs de 32 bits el mismo camino truncaba en vez de tirar).
     const int64_t total64 = static_cast<int64_t>(snap.frames) * repeats + countIn;
     if (total64 > INT32_MAX) return false;
