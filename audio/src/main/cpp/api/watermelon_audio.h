@@ -989,7 +989,50 @@ WMA_API bool wma_transport_is_metronome_continuous(const WmaEngine* engine);
 WMA_API int wma_transport_get_remaining_beats(const WmaEngine* engine);
 
 /* ================================================================
- * 21. Waveform & Metering
+ * 21. Diagnostics & Latency
+ * ================================================================
+ *
+ * The portable half of the latency diagnostics. The rest of what the Android
+ * bridge reports —AAudio vs OpenSL ES, exclusive vs shared, low-latency vs
+ * normal— are properties of an `oboe::AudioStream` and have no counterpart
+ * anywhere else, so they stay in the JNI, appended to what these return.
+ *
+ * There is deliberately no wma_get_latency_info() batch here. The numbers a
+ * caller wants are already reachable as wma_get_stream_info() (§2) and
+ * wma_input_get_latency_ms() (§12); a third function returning the same values
+ * packed into an array would be one more thing to keep in agreement for no
+ * gain. Metering has such a batch because a UI polls it every frame — nobody
+ * polls latency.
+ */
+
+/**
+ * Recommended buffer size in frames for a target output latency: the smallest
+ * power of two whose duration is at or above `target_latency_ms`, clamped to
+ * [64, 2048].
+ *
+ * Resolved against the sample rate actually in effect — the running stream if
+ * there is one, otherwise the preferred rate, otherwise 48000. It never
+ * silently assumes 48 kHz on a device configured for 44.1.
+ *
+ * @return frames, or -1 for a non-positive target.
+ */
+WMA_API int wma_get_recommended_buffer_size(const WmaEngine* engine,
+                                             float target_latency_ms);
+
+/**
+ * Write a human-readable latency report into `buffer`.
+ *
+ * Always NUL-terminates when buffer_size > 0, and truncates rather than
+ * overflowing.
+ *
+ * @return the length the full report would have, excluding the NUL — the
+ *         snprintf convention. A value >= buffer_size means it was truncated.
+ */
+WMA_API int wma_get_latency_report(const WmaEngine* engine,
+                                    char* buffer, int buffer_size);
+
+/* ================================================================
+ * 22. Waveform & Metering
  * ================================================================ */
 
 /**
@@ -1019,7 +1062,7 @@ WMA_API float wma_get_output_rms_db(const WmaEngine* engine, int channel);
 WMA_API void wma_get_output_levels(const WmaEngine* engine, float* out_levels);
 
 /* ================================================================
- * 22. Configuration / Logging
+ * 23. Configuration / Logging
  * ================================================================ */
 
 /**

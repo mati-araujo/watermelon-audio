@@ -15,8 +15,10 @@
 #include "../voice/VoiceTypes.h"
 #include "../platform/Logger.h"
 
-#include <cmath>
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <string>
 #include <vector>
 
 /* ================================================================
@@ -1583,7 +1585,77 @@ int wma_transport_get_remaining_beats(const WmaEngine* engine) {
 }
 
 /* ================================================================
- * 21. Waveform & Metering
+ * 21. Diagnostics & Latency
+ * ================================================================ */
+
+int wma_get_recommended_buffer_size(const WmaEngine* engine, float target_latency_ms) {
+    if (!(target_latency_ms > 0.0f)) return -1;  // also rejects NaN
+
+    // currentSampleRate() rather than "getStreamInfo() or else 48000": it
+    // resolves running stream -> preferred rate -> 48000 and never returns <= 0.
+    // The hand-rolled version skipped the preferred rate, so a device configured
+    // for 44.1 kHz that had not started yet got a size computed for 48 kHz.
+    // That shortcut is exactly what AudioEngine.h warns about above
+    // currentSampleRate(), and what put SoundFonts on the wrong rate in WA-2.0.
+    const int sampleRate = engine && engine->engine
+                               ? engine->engine->currentSampleRate()
+                               : 48000;
+
+    const double targetFrames =
+        static_cast<double>(target_latency_ms) / 1000.0 * static_cast<double>(sampleRate);
+
+    int bufferSize = 64;
+    while (bufferSize < targetFrames && bufferSize < 2048) {
+        bufferSize *= 2;
+    }
+    return bufferSize;
+}
+
+int wma_get_latency_report(const WmaEngine* engine, char* buffer, int buffer_size) {
+    std::string report = "NoisyPad Latency Report\n";
+    report += "========================\n\n";
+
+    if (!engine || !engine->engine) {
+        report += "Engine not initialized\n";
+    } else {
+        int32_t sampleRate = 0, bufferFrames = 0;
+        double latencyMillis = 0.0;
+        if (engine->engine->getStreamInfo(sampleRate, bufferFrames, latencyMillis)) {
+            report += "Sample Rate: " + std::to_string(sampleRate) + " Hz\n";
+            report += "Buffer Size: " + std::to_string(bufferFrames) + " frames\n";
+            report += "Output Latency: " + std::to_string(latencyMillis) + " ms\n";
+        } else {
+            // The old report just omitted these three lines, which reads as
+            // "zero latency" rather than "no stream to measure".
+            report += "No stream running — nothing to measure.\n";
+        }
+
+        const float inputLatency = wma_input_get_latency_ms(engine);
+        if (inputLatency > 0.0f) {
+            report += "Input Latency: " + std::to_string(inputLatency) + " ms\n";
+        }
+
+        // The backend was available all along —BackendManager::getStreamInfo()
+        // carries it and AudioEngine logs it at start— and the report threw it
+        // away. On the USB path that left a latency report with no mention of
+        // USB, which is the first thing you would want to know.
+        auto& manager = watermelon_audio::BackendManager::getInstance();
+        report += "Backend: ";
+        report += watermelon_audio::backendTypeToString(manager.getCurrentType());
+        report += "\n";
+    }
+
+    const int fullLength = static_cast<int>(report.size());
+    if (buffer && buffer_size > 0) {
+        const int copyLength = std::min(fullLength, buffer_size - 1);
+        std::memcpy(buffer, report.data(), static_cast<size_t>(copyLength));
+        buffer[copyLength] = '\0';
+    }
+    return fullLength;
+}
+
+/* ================================================================
+ * 22. Waveform & Metering
  * ================================================================ */
 
 int wma_get_waveform_samples(WmaEngine* engine, float* buffer, int max_size) {
@@ -1624,7 +1696,7 @@ void wma_get_output_levels(const WmaEngine* engine, float* out_levels) {
 }
 
 /* ================================================================
- * 22. Configuration / Logging
+ * 23. Configuration / Logging
  * ================================================================ */
 
 /* Static storage for C callback — bridged to C++ LogCallback. */

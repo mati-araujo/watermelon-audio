@@ -1479,10 +1479,81 @@ y ahora deberían coincidir.
 categoría deja las `wma_transport_*` listas para que iOS las tenga, pero **subirlas
 a la interfaz común es otra decisión** — arrastra al looper, que va último.
 
+### Nota de cierre — WA-2.5/2.6, categoría `benchmark` (2026-07-27)
+
+**Novena categoría cerrada, y la primera que migra a medias a propósito.** 3 entry
+points delegan, **5 se quedan en el JNI con el porqué escrito**, y 2 funciones nuevas
+de C API contra un gap nominal de 4. Sección **21 (Diagnostics & Latency)**, nueva;
+Waveform y Configuration corren un número otra vez.
+
+**Lo que no porta, y no se forzó.** `runLatencyOptimizationTest` e `isAAudioAvailable`
+abren un `oboe::AudioStreamBuilder` para preguntar algo que **sólo existe en Android**
+("¿me dieron AAudio en modo exclusivo?"). Las colas de `getDetailedLatencyInfo` ([4..7])
+y del reporte describen un `oboe::AudioStream`. Tres son stubs deprecados que no tocan
+el motor. Y `getAdaptiveBufferStats` lee el `LibusbBackend` (D4). Migrar cualquiera de
+esas habría sido inventar una función de C API sin comportamiento del otro lado. El
+encabezado de `jni_benchmark.cpp` las lista una por una.
+
+**Las dos que sí:** `wma_get_recommended_buffer_size` y `wma_get_latency_report`.
+**No se agregó un `wma_get_latency_info` batch** aunque el JNI arma un array de 8: sus
+números ya son `wma_get_stream_info` (§2) + `wma_input_get_latency_ms` (§12), las dos
+existentes y ya testeadas. El metering tiene batch porque una UI lo polea por frame;
+nadie polea la latencia.
+
+> [!CAUTION]
+> **La métrica de delegación tiene un punto ciego y esta categoría lo destapó.**
+> `scripts/c-api-gap.py` lee **un solo archivo**, `jni/jni_audio_bridge.cpp`. Se
+> migraron 3 funciones y **el número no se movió ni uno**, porque viven en
+> `jni_benchmark.cpp`. Son 13 entry points invisibles entre `jni_benchmark.cpp` (8),
+> `jni_usb.cpp` (3) y `jni_engine.cpp`.
+>
+> Medido a mano sobre los cuatro archivos: **152/290**, contra el **148/278** que
+> imprime el script. Al cerrar una categoría, **preguntarse primero en qué archivo
+> vive** antes de creerle al delta.
+
+**Dos cambios de comportamiento, los dos deliberados y los dos con test que falla
+contra la versión vieja:**
+
+1. **`wma_get_recommended_buffer_size` resuelve el sample rate por
+   `currentSampleRate()`** en vez de "`getStreamInfo()` o si no 48000". El atajo viejo
+   se saltaba la tasa preferida, así que un equipo configurado a 44.1 kHz que todavía
+   no había arrancado stream recibía un tamaño calculado para 48. Es **exactamente** el
+   anti-patrón contra el que advierte el comentario de `currentSampleRate()` en
+   `AudioEngine.h`, y el que puso los SoundFonts a la tasa equivocada en WA-2.0.
+2. **Dejó de truncar el requerimiento a `int` antes de comparar.** Truncar redondea el
+   requerimiento **para abajo**, así que un target que necesitaba 128.6 frames se
+   respondía con 128 — un buffer **más corto que la latencia pedida**, que es la única
+   dirección en la que esta función no puede redondear.
+
+**Verificación — `test_c_api_diagnostics.cpp`, 17 tests (667 en total).** Además de los
+dos cambios de arriba, el contrato del buffer del reporte: convención snprintf, truncado
+con NUL, y un centinela detrás del buffer. **6 mutantes, 6 detectados.**
+
+> [!WARNING]
+> **Segunda trampa del harness de mutación, después de la mtime.** El mutante que copia
+> `fullLength` sin clampear —el overflow clásico— dio **"no detectado"**. Era mentira:
+> el test **crashea el proceso** (rc=133), y mi harness sólo grepeaba las líneas `FAILED`
+> de gtest, que un proceso muerto nunca imprime. **Un crash es la detección más fuerte
+> que hay y estaba puntuando como la más débil.** Arreglado a mirar el exit code. Vale
+> la pena la moraleja general: cuando una herramienta de verificación dice "no detectado",
+> el primer sospechoso es la herramienta.
+
+**Lo que NO se cubre:** todo lo que necesita un `oboe::AudioStream` real. Los 4 floats
+de la cola de `getDetailedLatencyInfo` y las 3 líneas de Oboe del reporte salen de
+`getOutputStream()`, que devuelve `nullptr` bajo BackendManager —el backend falso
+incluido—, así que **ningún test de host los toca**. El split se verificó leyendo los
+dos call sites.
+
+**Un detalle del reporte que cambió para mejor:** ahora **nombra el backend**. La
+información estaba disponible desde siempre (`BackendManager::getStreamInfo()` la trae
+y `AudioEngine` la loguea al arrancar) y el reporte la tiraba, así que un reporte de
+latencia tomado en el camino USB no decía nada de USB. También distingue "no hay stream
+que medir" de omitir las tres líneas en silencio, que se leía como latencia cero.
+
 ### Dónde retomar (2026-07-27)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **23 commits sobre `master`**. La branch
-existe en `origin` pero está **ahead 17** — sólo los 6 primeros están pusheados.
+**Branch:** `feature/wa-3-2-ios-audio-bridge`, **24 commits sobre `master`**. La branch
+existe en `origin` pero está **ahead 18** — sólo los 6 primeros están pusheados.
 `master` está en el merge del PR #58.
 
 > [!IMPORTANT]
@@ -1491,8 +1562,8 @@ existe en `origin` pero está **ahead 17** — sólo los 6 primeros están pushe
 > su salida en el PR. Un merge sin CI **no** es un merge verificado por defecto: lo es sólo
 > si alguien corrió los gates y lo dijo.
 
-Verificación local al cerrar `metronome` (2026-07-27): portabilidad OK (320 archivos),
-**650 tests C++**, ambos slices de iOS con link check, **87 tests de simulador**, **50 JVM**,
+Verificación local al cerrar `benchmark` (2026-07-27): portabilidad OK (321 archivos),
+**667 tests C++**, ambos slices de iOS con link check, **87 tests de simulador**, **50 JVM**,
 `assembleDebug`, XCFramework y **`compileIosMainKotlinMetadata`**. Todo en verde.
 
 > [!TIP]
@@ -1522,7 +1593,7 @@ bloqueo de Xcode de §11 ya no existe):
 
 ```bash
 bash scripts/check-cpp-portability.sh          # guardrail WA-0.4
-bash scripts/run-cpp-tests.sh                  # 650 tests C++
+bash scripts/run-cpp-tests.sh                  # 667 tests C++
 bash scripts/build-ios.sh                      # ambos slices + link check
 ./gradlew :audio:iosSimulatorArm64Test         # 87 tests iOS
 ./gradlew :audio:testDebugUnitTest             # 50 tests JVM
@@ -1546,8 +1617,11 @@ NoisyPad Android**, que ya tiene tres cosas encima:
 3. **WA-2.6 `input/monitor`**, los dos cambios de comportamiento en el camino de input.
    **Prioridad alta**: el análisis estático de abajo encontró una regresión plausible en
    `startInputStream` con el permiso denegado. Reproducción concreta en esa nota.
-4. **WA-2.6 en general**: 132 entry points JNI reescritos, 0 validados en device. La suite
+4. **WA-2.6 en general**: 135 entry points JNI reescritos, 0 validados en device. La suite
    de host cubre la C API, no el JNI.
+6. **`getRecommendedBufferSize` cambia de respuesta** (`benchmark`, 2026-07-27) en dos
+   casos: cuando no hay stream corriendo pero sí una tasa preferida distinta de 48 kHz, y
+   cuando el target cae entre dos potencias de dos. Sólo lo usa el tooling de latencia.
 5. **El fix del off-by-one del metrónomo** (`metronome`, 2026-07-27) cambia el timing del
    click en Android. Es el único cambio de la serie que altera algo que ya sonaba bien —
    o casi bien: iba ~4 ms adelantado. Escuchar un count-in contra una grabación armada al
@@ -1564,15 +1638,18 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
 | **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
-| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅, `effects` ✅, `oscillator/synth` ✅, `voice` ✅, `mode` ✅, `análisis` ✅ y `metronome` ✅ cerradas** (delegación 148/278). **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
+| **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3) y el bloque grande: **WA-2.5 + WA-2.6, con `lifecycle` ✅, `input/monitor` ✅, `effects` ✅, `oscillator/synth` ✅, `voice` ✅, `mode` ✅, `análisis` ✅, `metronome` ✅ y `benchmark` ✅ cerradas — falta sólo el `looper`** (delegación real 152/290; el script dice 148/278 porque sólo lee `jni_audio_bridge.cpp`). **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟡 **WA-4.1 ✅** — el pipeline ya publica metadata KMP + klibs iOS desde 1.8.0 y ahora ensambla el XCFramework en CI. Falta validar el consumo desde NoisyPad (G1, WA-4.2) y la sample app (WA-4.3) |
 
-**Próximo paso: WA-2.5 + WA-2.6, categoría `benchmark`** (la fila dice 2/6, gap nominal 4).
-Es la última chica antes del **looper**, que es el 45% del gap portable (39 de 87) y va
-último. Como siempre: la fila del script no es la categoría — hay que abrir la sección del
-header y contar a mano. Ojo que `benchmark/diagnostics` es la fila donde cae
-`nativeGetStateVersion` (por `stat`), que ya delega desde `lifecycle`.
+**Próximo paso: el `looper`** — lo único que queda de WA-2.5/2.6. Son **39 funciones**,
+el 45% del gap portable (39 de 87), y por decisión de producto entra completo. Conviene
+sesión dedicada y contexto fresco: es el bloque más grande de todos y ya llega con el
+mecanismo rodado nueve veces.
+
+Lo que queda fuera del looper y no se hace: **USB son 35 entry points que no portan**
+(D4, 32 en `jni_audio_bridge.cpp` + 3 en `jni_usb.cpp`) y las 5 de `jni_benchmark.cpp`
+que son Oboe puro o stubs deprecados.
 
 **Arranque concreto para la próxima sesión** (el método ya está decidido, ver abajo — no
 re-litigarlo):
@@ -1601,10 +1678,10 @@ re-litigarlo):
 
 **Orden de categorías:** ~~lifecycle~~ ✅ → ~~input/monitor~~ ✅ → ~~effects~~ ✅ →
 ~~oscillator/synth~~ ✅ → ~~voice~~ ✅ → ~~mode~~ ✅ → ~~análisis~~ ✅ →
-~~metronome~~ ✅ → benchmark → **looper**.
+~~metronome~~ ✅ → ~~benchmark~~ ✅ → **looper** (lo único que queda).
 
 > [!TIP]
-> **Siete de las ocho categorías cerradas encontraron un bug**, y hay dos mecanismos
+> **Ocho de las nueve categorías cerradas encontraron un bug**, y hay dos mecanismos
 > distintos. El primero es divergencia: la C API se escribió transcribiendo el JNI función
 > por función, y en alguna se transcribió *la función equivocada* o *de menos*.
 > `wma_engine_start` colapsó dos operaciones en una; `wma_input_*` traía de más;
@@ -1614,7 +1691,8 @@ re-litigarlo):
 > El segundo no tiene nada que ver con las dos superficies: es un bug de producción viejo
 > que aparece porque **migrar obliga a leer la función entera y a escribirle un test**. Así
 > salieron la lectura fuera de rango de `voice`, los medidores de salida muertos de
-> `análisis` y el off-by-one del metrónomo. `oscillator/synth` fue la única limpia.
+> `análisis`, el off-by-one del metrónomo y los dos redondeos de `benchmark`.
+> `oscillator/synth` fue la única limpia.
 > El compilador no ve ninguno de los dos tipos.
 
 > [!TIP]
@@ -1622,8 +1700,10 @@ re-litigarlo):
 > primeras categorías el gap nominal fue **39** y el trabajo real **11 funciones nuevas**,
 > porque la C API abrevia donde el JNI escribe entero. **`metronome` invirtió el signo**:
 > gap 9, trabajo real 10, porque su sección de `watermelon_audio.h` no existía y no había
-> abreviatura que descontar. La receta no cambia —abrir la sección y contar a mano— pero
-> si la sección **no existe**, el gap es el piso y no el techo.
+> abreviatura que descontar. `benchmark` volvió a sobrestimar por el motivo opuesto —gap 4,
+> trabajo real 2— porque **la mitad de la categoría no porta**. La receta no cambia: abrir
+> la sección y contar a mano. Si la sección **no existe**, el gap es el piso; si la
+> categoría toca Oboe, es el techo y sobra.
 
 - **`mode` no es una más**: ahí desaparece por construcción la duplicación de
   `currentMode` / `modeTransitionInProgress` / `modeTransitionProgress` entre

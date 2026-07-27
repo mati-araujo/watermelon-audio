@@ -58,7 +58,7 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 | Métrica | Valor |
 |---|---|
 | JNIEXPORT (entry points) | 278 |
-| Funciones `wma_*` | 208 |
+| Funciones `wma_*` | 211 |
 | Cubiertas (match exacto) | 159 |
 | **Gap total** | **119** |
 | — USB, no se porta (D4) | 32 |
@@ -234,9 +234,10 @@ WA-2.6 — JNI delegando: 148/278
 | Mixer / Regions | 1/1 |
 | el resto | 0 |
 
-**Las 148 son ocho categorías cerradas**: 22 de `lifecycle`, 21 de `input/monitor`,
+**Las 148 son nueve categorías cerradas**: 22 de `lifecycle`, 21 de `input/monitor`,
 14 de `effects`, 40 de `oscillator/synth`, 21 de `voice`, 8 de `mode`, 10 de `análisis`
-y 13 de `metronome`.
+y 13 de `metronome`. Las 3 de `benchmark` **no están contadas ahí** — viven en
+`jni_benchmark.cpp`, que el script no lee (ver el aviso de abajo).
 **Ninguna coincide con su fila de la tabla**, porque la heurística del script
 clasifica por keyword del nombre y no por la sección real de la C API:
 
@@ -264,6 +265,32 @@ clasifica por keyword del nombre y no por la sección real de la C API:
   los cuatro `SfNote*` de la 6. Las de dual touch caen en "Mode transitions"
   porque su nombre lleva `mode`, y por eso esa fila pasó de 0 a 4 sin que se
   tocara una sola transición de modo.
+> [!CAUTION]
+> **La métrica de delegación tiene un punto ciego: el script lee UN solo archivo.**
+> `JNI_SRC` es `jni/jni_audio_bridge.cpp` y nada más, así que el denominador 278 deja
+> afuera los otros tres archivos JNI — `jni_benchmark.cpp` (8 entry points),
+> `jni_usb.cpp` (3) y `jni_engine.cpp`. Son **13 entry points invisibles** a la métrica.
+>
+> Lo destapó la categoría `benchmark`, que vive casi entera en `jni_benchmark.cpp`:
+> se migraron 3 funciones y **el número no se movió ni uno**. Medido a mano sobre los
+> cuatro archivos da **152/290**, contra el 148/278 que imprime el script.
+>
+> No está mal que el script mire un archivo —ahí está el 96% de la superficie— pero
+> **al cerrar una categoría hay que preguntarse en qué archivo vive** antes de creerle
+> al delta. Los 5 de `jni_benchmark.cpp` que siguen sin delegar son a propósito y están
+> justificados en el encabezado de ese archivo; los 3 de `jni_usb.cpp` son D4.
+
+- `benchmark` = **sección 21 (Diagnostics & Latency), nueva.** Sólo **2 funciones** de C
+  API, contra un gap nominal de 4: `wma_get_recommended_buffer_size` y
+  `wma_get_latency_report`. El resto de la categoría **no porta y no se forzó**:
+  `runLatencyOptimizationTest` e `isAAudioAvailable` abren un `oboe::AudioStreamBuilder`
+  para preguntar algo que sólo existe en Android; las colas de `getDetailedLatencyInfo`
+  ([4..7]) y del reporte describen un `oboe::AudioStream`; tres son stubs deprecados que
+  no tocan el motor; y `getAdaptiveBufferStats` lee el `LibusbBackend` (D4).
+  **Es la primera categoría que migra a medias a propósito**, con el porqué escrito en el
+  encabezado de `jni_benchmark.cpp`. No se agregó un `wma_get_latency_info` batch: sus
+  números ya son `wma_get_stream_info` (§2) + `wma_input_get_latency_ms` (§12), y nadie
+  polea la latencia por frame como sí se polea el metering.
 - `metronome` = **la sección 20 no existía**. Fue la primera categoría sin sección
   propia en `watermelon_audio.h`: la numeración saltaba de 19 (Looper) a 20
   (Waveform), y las 10 `nativeTransport*` no tenían contraparte ninguna. Se creó
