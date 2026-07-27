@@ -117,6 +117,7 @@ add_executable(core_tests
     test_c_api_analysis.cpp
     test_c_api_transport.cpp
     test_c_api_diagnostics.cpp
+    test_c_api_looper.cpp
     support/test_platform_backends.cpp
     support/test_input_node_stub.cpp
     ${CORE_TESTED_SOURCES}

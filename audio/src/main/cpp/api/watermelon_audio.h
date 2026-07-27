@@ -882,9 +882,19 @@ WMA_API int wma_looper_get_track_waveform(const WmaEngine* engine, int track_ind
 WMA_API void  wma_looper_set_master_volume(WmaEngine* engine, float volume);
 WMA_API float wma_looper_get_master_volume(const WmaEngine* engine);
 
-/** Set loop region for a track (start/end in frames). */
+/**
+ * Set loop region for a track (start/end in frames).
+ *
+ * 64-bit on purpose, and it has to stay that way: AudioLooper::setTrackLoopRegion
+ * takes int64_t and saturates into int32 itself, because TrackBuffer still stores
+ * frames as int32 while the API has to survive a high-tier device recording for
+ * hours. This declaration used to say `int`, which made the C API the one narrow
+ * link in a chain that is 64-bit from Kotlin (Long) all the way down — the
+ * saturation could never run, because the value was already truncated by the
+ * time it arrived.
+ */
 WMA_API void wma_looper_set_track_loop_region(WmaEngine* engine, int track_index,
-                                               int start_frame, int end_frame);
+                                               int64_t start_frame, int64_t end_frame);
 
 /** Reset loop region to full track length. */
 WMA_API void wma_looper_reset_track_loop_region(WmaEngine* engine, int track_index);

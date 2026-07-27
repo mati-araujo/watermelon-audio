@@ -1480,7 +1480,7 @@ float wma_looper_get_master_volume(const WmaEngine* engine) {
 }
 
 void wma_looper_set_track_loop_region(WmaEngine* engine, int track_index,
-                                       int start_frame, int end_frame) {
+                                       int64_t start_frame, int64_t end_frame) {
     WMA_CHECK_VOID(engine);
     engine->engine->getAudioLooper().setTrackLoopRegion(track_index, start_frame, end_frame);
 }

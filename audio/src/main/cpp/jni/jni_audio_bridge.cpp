@@ -1996,27 +1996,19 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsArpG
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperPrepareTrack(
     JNIEnv* env, jobject thiz, jint trackIndex, jint lengthFrames, jint sampleRate) {
-    if (!g_jniState.engine) return JniError::ENGINE_NOT_INITIALIZED;
-    bool ok = g_jniState.engine->getAudioLooper().prepareTrack(trackIndex, lengthFrames, sampleRate);
-    return ok ? JniError::SUCCESS : JniError::MEMORY_ALLOCATION_FAILED;
+    return wma_looper_prepare_track(g_wmaEngine, trackIndex, lengthFrames, sampleRate);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperStartRecording(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().startRecording(trackIndex);
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_start_recording(g_wmaEngine, trackIndex);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperStopRecording(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().stopRecording();
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_stop_recording(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
@@ -2030,94 +2022,67 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperStartOverdub(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().startOverdub(trackIndex);
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_start_overdub(g_wmaEngine, trackIndex);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperStopAll(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().stopAll();
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_stop_all(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperPause(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().pause();
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_pause(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperResume(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().resume();
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_resume(g_wmaEngine);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetRecordProgress(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0.0f;
-    return g_jniState.engine->getAudioLooper().getRecordProgress();
+    return wma_looper_get_record_progress(g_wmaEngine);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetFreeLength(
     JNIEnv* env, jobject thiz, jboolean freeLength) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().setFreeLength(freeLength == JNI_TRUE);
-    }
+    wma_looper_set_free_length(g_wmaEngine, freeLength == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackMuted(
     JNIEnv* env, jobject thiz, jint trackIndex, jboolean muted) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().setTrackMuted(trackIndex, muted == JNI_TRUE);
-    }
+    wma_looper_set_track_muted(g_wmaEngine, trackIndex, muted == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackPan(
     JNIEnv* env, jobject thiz, jint trackIndex, jfloat pan) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().setTrackPan(trackIndex, pan);
-    }
+    wma_looper_set_track_pan(g_wmaEngine, trackIndex, pan);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackVolume(
     JNIEnv* env, jobject thiz, jint trackIndex, jfloat volume) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().setTrackVolume(trackIndex, volume);
-    }
+    wma_looper_set_track_volume(g_wmaEngine, trackIndex, volume);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperClearTrack(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().clearTrack(trackIndex);
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_clear_track(g_wmaEngine, trackIndex);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperClearAll(
     JNIEnv* env, jobject thiz) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().clearAll();
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_clear_all(g_wmaEngine);
 }
 
 // Trim a track's buffer to its recorded length (frees unused capacity). UI/IO
@@ -2133,10 +2098,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetEnabled(
     JNIEnv* env, jobject thiz, jboolean enabled) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().setEnabled(enabled == JNI_TRUE);
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_set_enabled(g_wmaEngine, enabled == JNI_TRUE);
 }
 
 // Lock-free queries (metering)
@@ -2144,132 +2106,120 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetProgress(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0.0f;
-    return g_jniState.engine->getAudioLooper().getProgress();
+    return wma_looper_get_progress(g_wmaEngine);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetTrackPeakLevel(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return 0.0f;
-    return g_jniState.engine->getAudioLooper().getTrackPeakLevel(trackIndex);
+    return wma_looper_get_track_peak(g_wmaEngine, trackIndex);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperIsTrackActive(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getAudioLooper().isTrackActive(trackIndex) ? JNI_TRUE : JNI_FALSE;
+    return wma_looper_is_track_active(g_wmaEngine, trackIndex) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperIsPlaying(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getAudioLooper().isPlaying() ? JNI_TRUE : JNI_FALSE;
+    return wma_looper_is_playing(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperIsRecording(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getAudioLooper().isRecording() ? JNI_TRUE : JNI_FALSE;
+    return wma_looper_is_recording(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetMasterLoopFrames(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getAudioLooper().getMasterLoopFrames();
+    return wma_looper_get_master_loop_frames(g_wmaEngine);
 }
 
 // Per-track playback control
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperPauseTrack(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().pauseTrack(trackIndex);
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_pause_track(g_wmaEngine, trackIndex);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperResumeTrack(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().resumeTrack(trackIndex);
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_resume_track(g_wmaEngine, trackIndex);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperIsTrackPlaying(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getAudioLooper().isTrackPlaying(trackIndex) ? JNI_TRUE : JNI_FALSE;
+    return wma_looper_is_track_playing(g_wmaEngine, trackIndex) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetTrackProgress(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return 0.0f;
-    return g_jniState.engine->getAudioLooper().getTrackProgress(trackIndex);
+    return wma_looper_get_track_progress(g_wmaEngine, trackIndex);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetTrackLengthFrames(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getAudioLooper().getTrackLengthFrames(trackIndex);
+    return wma_looper_get_track_length_frames(g_wmaEngine, trackIndex);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperResetTrackPlayHead(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (g_jniState.engine) {
-        g_jniState.engine->getAudioLooper().resetTrackPlayHead(trackIndex);
-        // Looper state is polled independently at 30fps via LooperViewModel
-    }
+    wma_looper_reset_track_playhead(g_wmaEngine, trackIndex);
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSaveUndoSnapshot(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getAudioLooper().saveUndoSnapshot(trackIndex) ? JNI_TRUE : JNI_FALSE;
+    return wma_looper_save_undo(g_wmaEngine, trackIndex) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperRestoreUndo(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getAudioLooper().restoreUndo(trackIndex) ? JNI_TRUE : JNI_FALSE;
+    return wma_looper_restore_undo(g_wmaEngine, trackIndex) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperHasUndo(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    return g_jniState.engine->getAudioLooper().hasUndo(trackIndex) ? JNI_TRUE : JNI_FALSE;
+    return wma_looper_has_undo(g_wmaEngine, trackIndex) ? JNI_TRUE : JNI_FALSE;
 }
 
 // Track waveform summary
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetTrackWaveform(
     JNIEnv* env, jobject thiz, jint trackIndex, jfloatArray outBins, jint numBins) {
-    if (!g_jniState.engine) return 0;
-    jfloat* bins = env->GetFloatArrayElements(outBins, nullptr);
-    int written = g_jniState.engine->getAudioLooper().getTrackWaveform(trackIndex, bins, numBins);
-    env->ReleaseFloatArrayElements(outBins, bins, 0);
-    return written;
+    if (outBins == nullptr || numBins <= 0) {
+        return 0;
+    }
+
+    // Same reason as nativeGetWaveformSamples: wma_* takes a bare pointer and
+    // cannot know how big the Java array is, so a numBins larger than the array
+    // would write past the end. Its only caller allocates FloatArray(numBins)
+    // and passes the same number, so nothing is broken today — this keeps the
+    // two from having to stay in sync by convention.
+    ScopedFloatArrayRW bins(env, outBins);
+    if (!bins.isValid()) {
+        return 0;
+    }
+    const int binsToFill = std::min(static_cast<int>(bins.size()), static_cast<int>(numBins));
+    return wma_looper_get_track_waveform(g_wmaEngine, trackIndex, bins.get(), binsToFill);
 }
 
 // Track speed control
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackSpeed(
     JNIEnv* env, jobject thiz, jint trackIndex, jfloat speed) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().setTrackSpeed(trackIndex, speed);
+    wma_looper_set_track_speed(g_wmaEngine, trackIndex, speed);
 }
 
 // Runtime capabilities (F3.2). budgetBytes uses jlong (64-bit) so a high tier
@@ -2297,8 +2247,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetTrackSpeed(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return 1.0f;
-    return g_jniState.engine->getAudioLooper().getTrackSpeed(trackIndex);
+    return wma_looper_get_track_speed(g_wmaEngine, trackIndex);
 }
 
 // Per-track loop-seam profile: true = percussion (hard declick cut, no tail
@@ -2323,37 +2272,32 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetMasterVolume(
     JNIEnv* env, jobject thiz, jfloat volume) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().setMasterVolume(volume);
+    wma_looper_set_master_volume(g_wmaEngine, volume);
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetMasterVolume(
     JNIEnv* env, jobject thiz) {
-    if (!g_jniState.engine) return 1.0f;
-    return g_jniState.engine->getAudioLooper().getMasterVolume();
+    return wma_looper_get_master_volume(g_wmaEngine);
 }
 
 // Loop Region (lock-free)
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackLoopRegion(
     JNIEnv* env, jobject thiz, jint trackIndex, jlong startFrame, jlong endFrame) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().setTrackLoopRegion(trackIndex, startFrame, endFrame);
+    wma_looper_set_track_loop_region(g_wmaEngine, trackIndex, startFrame, endFrame);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperResetTrackLoopRegion(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (g_jniState.engine)
-        g_jniState.engine->getAudioLooper().resetTrackLoopRegion(trackIndex);
+    wma_looper_reset_track_loop_region(g_wmaEngine, trackIndex);
 }
 
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetTrackLoopStart(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getAudioLooper().getTrackLoopStart(trackIndex);
+    return wma_looper_get_track_loop_start(g_wmaEngine, trackIndex);
 }
 
 // Onset bounds for trimming a free take's leading/trailing silence.
@@ -2393,8 +2337,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetTrackLoopEnd(
     JNIEnv* env, jobject thiz, jint trackIndex) {
-    if (!g_jniState.engine) return 0;
-    return g_jniState.engine->getAudioLooper().getTrackLoopEnd(trackIndex);
+    return wma_looper_get_track_loop_end(g_wmaEngine, trackIndex);
 }
 
 // Metronome click (lock-free trigger)
@@ -2623,21 +2566,15 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransp
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperExportMix(
     JNIEnv* env, jobject thiz, jstring filePath) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    const char* path = env->GetStringUTFChars(filePath, nullptr);
-    bool ok = g_jniState.engine->getAudioLooper().exportMix(path);
-    env->ReleaseStringUTFChars(filePath, path);
-    return ok ? JNI_TRUE : JNI_FALSE;
+    ScopedUtfChars path(env, filePath);
+    return wma_looper_export_mix(g_wmaEngine, path.c_str()) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperExportTrack(
     JNIEnv* env, jobject thiz, jint trackIndex, jstring filePath) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    const char* path = env->GetStringUTFChars(filePath, nullptr);
-    bool ok = g_jniState.engine->getAudioLooper().exportTrack(trackIndex, path);
-    env->ReleaseStringUTFChars(filePath, path);
-    return ok ? JNI_TRUE : JNI_FALSE;
+    ScopedUtfChars path(env, filePath);
+    return wma_looper_export_track(g_wmaEngine, trackIndex, path.c_str()) ? JNI_TRUE : JNI_FALSE;
 }
 
 // Session capture: write the FULL track buffer (ignoring loop region) at the
@@ -2661,11 +2598,9 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperImportTrack(
     JNIEnv* env, jobject thiz, jint trackIndex, jstring filePath, jint sampleRate) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    const char* path = env->GetStringUTFChars(filePath, nullptr);
-    bool ok = g_jniState.engine->getAudioLooper().importTrack(trackIndex, path, sampleRate);
-    env->ReleaseStringUTFChars(filePath, path);
-    return ok ? JNI_TRUE : JNI_FALSE;
+    ScopedUtfChars path(env, filePath);
+    return wma_looper_import_track(g_wmaEngine, trackIndex, path.c_str(), sampleRate)
+        ? JNI_TRUE : JNI_FALSE;
 }
 
 // Export with options. bitDepth: 16, 24, 32 (32 = float).
