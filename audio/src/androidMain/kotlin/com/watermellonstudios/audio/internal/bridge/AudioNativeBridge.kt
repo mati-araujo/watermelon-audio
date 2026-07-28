@@ -2524,67 +2524,67 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * When enabled, the arp overrides oscillator frequency/amplitude with
      * rhythmic note patterns synced to BPM.
      */
-    fun setArpEnabled(enabled: Boolean) {
+    override fun setArpEnabled(enabled: Boolean) {
         nativeSetArpEnabled(enabled)
         Log.d(TAG, "Arp enabled: $enabled")
     }
 
     /** Check if arpeggiator is currently enabled */
-    fun isArpEnabled(): Boolean = nativeIsArpEnabled()
+    override fun isArpEnabled(): Boolean = nativeIsArpEnabled()
 
     /** Set arp pattern (matches ArpPattern.id from core-domain) */
-    fun setArpPattern(patternId: Int) = nativeSetArpPattern(patternId)
+    override fun setArpPattern(patternId: Int) = nativeSetArpPattern(patternId)
 
     /** Set arp rate as beats per step (e.g., 0.5 = 1/8 note, 0.25 = 1/16 note) */
-    fun setArpSubdivision(beatsPerStep: Float) = nativeSetArpSubdivision(beatsPerStep)
+    override fun setArpSubdivision(beatsPerStep: Float) = nativeSetArpSubdivision(beatsPerStep)
 
     /** Set arp octave range (1-4) */
-    fun setArpOctaveRange(octaves: Int) = nativeSetArpOctaveRange(octaves)
+    override fun setArpOctaveRange(octaves: Int) = nativeSetArpOctaveRange(octaves)
 
     /** Set gate length (0.05 staccato - 1.0 legato) */
-    fun setArpGateLength(gate: Float) = nativeSetArpGateLength(gate)
+    override fun setArpGateLength(gate: Float) = nativeSetArpGateLength(gate)
 
     /** Set swing amount (0.5 straight - 0.75 hard swing) */
-    fun setArpSwing(swing: Float) = nativeSetArpSwing(swing)
+    override fun setArpSwing(swing: Float) = nativeSetArpSwing(swing)
 
     /** Enable/disable latch mode (arp continues after releasing touch) */
-    fun setArpLatch(latch: Boolean) = nativeSetArpLatch(latch)
+    override fun setArpLatch(latch: Boolean) = nativeSetArpLatch(latch)
 
     /** Set base velocity (0.0-1.0) */
-    fun setArpVelocity(velocity: Float) = nativeSetArpVelocity(velocity)
+    override fun setArpVelocity(velocity: Float) = nativeSetArpVelocity(velocity)
 
     /** Set velocity random variation amount (0.0-0.5) */
-    fun setArpVelocityVariation(variation: Float) = nativeSetArpVelocityVariation(variation)
+    override fun setArpVelocityVariation(variation: Float) = nativeSetArpVelocityVariation(variation)
 
     /** Set per-step trigger probability (0.0-1.0, 1.0 = all steps play) */
-    fun setArpProbability(probability: Float) = nativeSetArpProbability(probability)
+    override fun setArpProbability(probability: Float) = nativeSetArpProbability(probability)
 
     /**
      * Set the scale intervals for arp note generation.
      * @param intervals Semitone offsets (e.g., [0,2,4,5,7,9,11] for major scale)
      */
-    fun setArpScaleIntervals(intervals: IntArray) = nativeSetArpScaleIntervals(intervals)
+    override fun setArpScaleIntervals(intervals: IntArray) = nativeSetArpScaleIntervals(intervals)
 
     /** Notify arp that touch is active/inactive (drives gate) */
-    fun setArpTouchActive(active: Boolean) = nativeSetArpTouchActive(active)
+    override fun setArpTouchActive(active: Boolean) = nativeSetArpTouchActive(active)
 
     /** Set the base frequency from XY pad (arp patterns are relative to this) */
-    fun setArpBaseFrequency(frequency: Float) = nativeSetArpBaseFrequency(frequency)
+    override fun setArpBaseFrequency(frequency: Float) = nativeSetArpBaseFrequency(frequency)
 
     /** Get current step index (for UI step visualizer) */
-    fun getArpCurrentStep(): Int = nativeGetArpCurrentStep()
+    override fun getArpCurrentStep(): Int = nativeGetArpCurrentStep()
 
     /** Get total steps in current pattern (for UI step visualizer) */
-    fun getArpTotalSteps(): Int = nativeGetArpTotalSteps()
+    override fun getArpTotalSteps(): Int = nativeGetArpTotalSteps()
 
     /** Ratchet: momentary double-time while held */
-    fun setArpRatchet(active: Boolean) = nativeSetArpRatchet(active)
+    override fun setArpRatchet(active: Boolean) = nativeSetArpRatchet(active)
 
     /** Regenerate pattern for Random/Stochastic/Walk */
-    fun regenerateArpPattern() = nativeRegenerateArpPattern()
+    override fun regenerateArpPattern() = nativeRegenerateArpPattern()
 
     /** Check if arp gate is currently open (for visual pulse indicator) */
-    fun isArpGateOpen(): Boolean = nativeIsArpGateOpen()
+    override fun isArpGateOpen(): Boolean = nativeIsArpGateOpen()
 
     // ==================== Native Methods: Arpeggiator ====================
 

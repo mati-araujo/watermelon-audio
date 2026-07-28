@@ -676,6 +676,75 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun looperExportMix(filePath: String): Boolean =
         wma_looper_export_mix(engine, filePath)
 
+    // ==================== ARPEGIADOR ====================
+    //
+    // Ninguno toma lock, y es la misma regla que aplica Android: el header marca
+    // `RT-safe` a todos salvo `set_scale_intervals`, o sea que del otro lado hay
+    // `std::atomic`. Un mutex por gesto acá costaría más que lo que protege.
+    //
+    // Los tres getters son polling y no callback por la regla RT (D6): el thread de
+    // audio no entra a Kotlin, así que el paso actual se pregunta.
+
+    override fun setArpEnabled(enabled: Boolean) = wma_arp_set_enabled(engine, enabled)
+
+    override fun isArpEnabled(): Boolean = wma_arp_is_enabled(engine)
+
+    override fun regenerateArpPattern() = wma_arp_regenerate(engine)
+
+    override fun setArpPattern(patternId: Int) = wma_arp_set_pattern(engine, patternId)
+
+    override fun setArpSubdivision(beatsPerStep: Float) =
+        wma_arp_set_subdivision(engine, beatsPerStep)
+
+    override fun setArpOctaveRange(octaves: Int) = wma_arp_set_octave_range(engine, octaves)
+
+    /**
+     * El único que copia memoria, y el único que no es RT-safe.
+     *
+     * `usePinned` fija el array durante la llamada para que C lo lea directo, sin
+     * una copia intermedia — el mismo patrón que [getWaveformSamples] y
+     * [updateMultiTouch]. La C API declara el puntero `const`, así que no escribe
+     * sobre él; el `count` va aparte porque un array de C no lo lleva encima.
+     *
+     * Un array vacío es válido y significa "sin escala": pasar `addressOf(0)` sobre
+     * un `IntArray` de largo cero no está definido, así que se corta antes.
+     */
+    override fun setArpScaleIntervals(intervals: IntArray) {
+        if (intervals.isEmpty()) {
+            wma_arp_set_scale_intervals(engine, null, 0)
+            return
+        }
+        intervals.usePinned { pinned ->
+            wma_arp_set_scale_intervals(engine, pinned.addressOf(0), intervals.size)
+        }
+    }
+
+    override fun setArpGateLength(gate: Float) = wma_arp_set_gate_length(engine, gate)
+
+    override fun setArpSwing(swing: Float) = wma_arp_set_swing(engine, swing)
+
+    override fun setArpLatch(latch: Boolean) = wma_arp_set_latch(engine, latch)
+
+    override fun setArpVelocity(velocity: Float) = wma_arp_set_velocity(engine, velocity)
+
+    override fun setArpVelocityVariation(variation: Float) =
+        wma_arp_set_velocity_variation(engine, variation)
+
+    override fun setArpProbability(probability: Float) =
+        wma_arp_set_probability(engine, probability)
+
+    override fun setArpRatchet(active: Boolean) = wma_arp_set_ratchet(engine, active)
+
+    override fun setArpTouchActive(active: Boolean) = wma_arp_set_touch_active(engine, active)
+
+    override fun setArpBaseFrequency(frequency: Float) = wma_arp_set_base_freq(engine, frequency)
+
+    override fun getArpCurrentStep(): Int = wma_arp_get_current_step(engine)
+
+    override fun getArpTotalSteps(): Int = wma_arp_get_total_steps(engine)
+
+    override fun isArpGateOpen(): Boolean = wma_arp_is_gate_open(engine)
+
     // ==================== LOG CAPTURE ====================
 
     override fun setLogCaptureEnabled(enabled: Boolean) = wma_log_capture_set_enabled(enabled)
