@@ -3288,7 +3288,55 @@ fin de sesión.
 
 ---
 
-### El fixture SF2 — el ítem de deuda apunta a la mitad del problema (2026-07-28)
+### Nota de cierre — el fixture SF2, y lo que destapó de paso (2026-07-28)
+
+**Hecho.** `support/MinimalSoundFont.h` genera **en memoria** el `.sf2` más chico que
+TinySoundFont acepta —**572 bytes**— y `test_soundfont_load.cpp` lo usa para cubrir el camino
+de éxito de los tres loaders. La suite pasó de **762 a 768**.
+
+**Se genera, no se commitea un binario.** Un `.sf2` en el repo no dice por qué tiene la forma
+que tiene, y nadie sabe regenerarlo cuando cambian los requisitos. Acá cada chunk está por un
+motivo leído de `tsf_load`, **no del spec SF2** — que es lo que importa, porque el loader es
+más exigente en un punto y más laxo en otro:
+
+| | |
+|---|---|
+| Exige los **nueve** chunks de la hydra en `pdta` | `phdr pbag pmod pgen inst ibag imod igen shdr`. Falta **uno solo** y aborta |
+| …y que cada uno mida múltiplo exacto de su registro | 38/4/10/4/22/4/10/4/46. Si no, lo saltea como desconocido y queda igual de nulo |
+| Exige `sdta/smpl` de al menos un `short` | |
+| **NO exige `ifil`** | lo saltea. Se incluye igual: un `.sf2` sin versión es inválido para cualquier otra herramienta |
+
+> [!TIP]
+> **El fixture se verificó mutándolo a él, no sólo al código.** Se rompió el fourCC de cada uno
+> de los 12 chunks, uno por vez: **los 12 hacen fallar la carga.** Cero decorativos — o sea que
+> es mínimo de verdad, y no "carga de casualidad" por algo que el parser ignora.
+
+**Los dos mutantes del código, que es lo que hace que el test valga:**
+
+1. **Hardcodear `tsf_set_output(..., 48000, ...)`** — el bug 3 exacto. Lo detectan **5 de 6**.
+2. **Perder el `dataDelta` del mmap** (leer desde el borde de página en vez del `.sf2`) — lo
+   detecta **sólo el test de `loadFromFd`**, y ése es el hallazgo: `test_soundfont_fd_region.cpp`
+   cubre `computeSoundFontMmapRegion` como **aritmética pura** y no puede ver un bug en *usar*
+   la región que calculó. El camino del `fd` con offset no alineado —el caso real de un asset
+   embebido en un APK— **nunca se había recorrido de punta a punta**.
+
+> [!CAUTION]
+> **Un test mío pasó el primer mutante y estaba mal escrito.**
+> `TheOutputRateIsNotTheSampleRateFromTheFile` pedía 48000, justo el valor que el mutante
+> hardcodea, así que sobrevivía. **48000 es el default de medio mundo: usarlo en una assertion
+> de "aplicó lo que le pedí" es elegir el único número que no distingue.** Cambiado a 44100,
+> pasa a detectarlo. La regla no es nueva, pero el modo de falla sí: no fue un test que no
+> afirmaba nada, fue uno que afirmaba contra la constante equivocada.
+
+**Lo que la suite afirma y lo que no**, dicho en el encabezado del archivo: afirma que
+`SoundFontManager` **aplica la tasa que le pasan** por los tres caminos, que esa tasa es la de
+**salida** y no la del sample que trae el `shdr` (confundirlas es el bug 3 con otra ropa), y que
+**recargar a otra tasa reemplaza la vieja** —el caso del device que renegocia sin reiniciar—.
+No afirma que `AudioEngine` le pase `currentSampleRate()`: ese eslabón sigue sin observable.
+
+---
+
+### El fixture SF2 — el análisis previo, que apuntaba a la mitad del problema (2026-07-28)
 
 El entry decía: *"Lo que falta es el fixture, no un test más."* **Medido: falta el fixture y falta
 un observable**, y sin el segundo el primero no cierra nada.
@@ -3774,14 +3822,12 @@ Trabajo paralelo, sin bloquear WA-3:
   > en 8 lugares.** Los números de línea se corrieron; el nombre real (`mLastBpm`) estaba
   > sólo en el comentario del `CMakeLists`. Borrar por número de línea habría roto el build.
   > **En este doc, las referencias `archivo:línea` envejecen — buscar por nombre.**
-- **Bug 3 de WA-2.0 (SoundFont al rate negociado): sigue abierto, y a propósito.** Los tres
-  `loadSoundFont*` necesitan un fixture SF2 para cubrir el camino de éxito, que es el único
-  donde se observa el rate. Los caminos negativos **ya están cubiertos y bien**
-  (`test_c_api_synth.cpp`, `BadLoaderArgumentsFailAndLoadNothing`: path/buffer nulos, fd
-  inválido, offsets y tamaños negativos, más la assertion de que nada quedó cargado), y el
-  propio archivo declara en su encabezado qué queda afuera y por qué. Agregar otro test
-  negativo sería inflar la cuenta del gate sin afirmar nada nuevo. `currentSampleRate()`, el
-  mecanismo compartido, sí está cubierto. **Lo que falta es el fixture, no un test más.**
+- **Bug 3 de WA-2.0 (SoundFont al rate negociado): el fixture existe y cubre los tres
+  loaders** (2026-07-28). Ver la nota de cierre abajo. **Queda un eslabón, y está acotado:**
+  que `AudioEngine::loadSoundFont*` le pase `currentSampleRate()` al manager no es observable
+  desde afuera —`SoundFontManager::getSampleRate()` existe pero `AudioEngine` no expone el
+  `SynthEngineDispatcher`— y son tres líneas (`AudioEngine.cpp:1066-1078`). Hoy lo sostienen
+  la suite de `currentSampleRate()` y la revisión del diff.
 
 **Hallazgos de la auditoría 2026-07-25 (candidatos a ticket propio):**
 
