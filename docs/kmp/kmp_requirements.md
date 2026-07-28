@@ -16,14 +16,14 @@
 > |---|---|
 > | **La pregunta que justificaba el programa** | **Contestada: el input path de iOS CAPTURA.** `inputData` deja de ser `0x0`, `inputPeak` trae señal real |
 > | Fases 0, 2, 3 | ✅ cerradas · **WA-2.5/2.6 cerrada** (JNI→C API, las 10 categorías + la cola) |
-> | Fase 4 | ✅ WA-4.1 · **G1/WA-4.2 CERRADO**. **Publicada la 1.10.0** con las **4 publicaciones** (`kotlinMultiplatform`, `androidRelease`, `iosArm64`, `iosSimulatorArm64`) |
+> | Fase 4 | ✅ WA-4.1 · **G1/WA-4.2 CERRADO**. **Publicada la 1.11.0** con las **4 publicaciones** (`kotlinMultiplatform`, `androidRelease`, `iosArm64`, `iosSimulatorArm64`), verificadas contra el registro |
 > | Fase 5 | ✅ **WA-5.5 CERRADA ENTERA** — 7 controles, y la fase final cerró **sin design system compartido**: se midió el harness y da **cero reutilización entre archivos** |
 > | **Lo único grande abierto** | **G2 — validación en device. Necesita un iPhone.** Sonido real, latencia round-trip, Instruments sobre el render block |
 > | Smoke de Android | **7 de 12 corridos** (3, 7, 8, 9 + **1, 2 y 6**). **El ítem 2 refutó a WA-1.2 y encontró un bug real, ya arreglado.** Lo que falta necesita **USB físico** o **poder escuchar** |
 > | Fase 1 | ✅ **CERRADA** — **WA-1.3 hecho** (2026-07-28): `AudioBackendType` mudado a `domain/`, con typealias `@Deprecated` para no romper a NoisyPad |
-> | Otros pendientes | el fixture SF2 (**y su observable**, ver la nota) · **WA-3.5 (P2, diferido pero con consumidor real medido)** · ~~la revisión de paths de WA-3.6~~ ✅ hecha |
+> | Otros pendientes | ~~el fixture SF2~~ ✅ **hecho** (768 tests; queda su eslabón `AudioEngine`→manager, 3 líneas) · **WA-3.5 (P2, diferido pero con consumidor real medido)** · ~~la revisión de paths de WA-3.6~~ ✅ hecha |
 >
-> **`master` = `7af4275` · versión publicada 1.10.0 · cero PRs abiertos.**
+> **`master` = `bd0214c` · versión publicada 1.11.0 · cero PRs abiertos.**
 >
 > ⚠️ **Lo que se puede validar hoy, y lo que no.** Hay **AVD** (`wa-smoke-api36`) y hay
 > **simulador de iOS**. **No hay iPhone ni Android físico**, y el emulador **no tiene salida
@@ -3372,29 +3372,46 @@ manager (`AudioEngine.cpp:1066-1078`)— también.
 
 ### Dónde retomar (2026-07-28)
 
-**No hay nada a medio hacer.** `master` = **`7af4275`**, árbol limpio, **cero PRs abiertos** en
-watermelon-audio, **1.10.0 publicada** con sus 4 publicaciones. Del lado de NoisyPad, `master` =
-`7cb2256` (ya no llama a `setDepthValue`); su PR #107 es trabajo tuyo de F4-E4, ajeno a esto.
+**No hay nada a medio hacer.** `master` = **`bd0214c`**, árbol limpio, **cero PRs abiertos**,
+**1.11.0 publicada** con sus 4 publicaciones —verificadas contra el registro de GitHub Packages,
+no contra un `BUILD SUCCESSFUL`—. Del lado de NoisyPad, `master` = `7cb2256`.
 
-**Lo que la sesión del 2026-07-28 cerró:** los dos stubs que mentían (ítems 11 y 12), WA-5.5
-entera, el release 1.10.0, el AVD, y los ítems **3, 7, 8 y 9** del smoke. Cada uno tiene su nota
-de cierre más abajo.
+> [!TIP]
+> **Una rama viva que NO hay que borrar:** `feature/wa-facade-kotlin-ios`, trabajo de otra
+> sesión (fachada de looper/SoundFont/arpegiador a `commonMain`, 6 commits) que se pusheó para
+> que dejara de tener copia única. Y `claude/fervent-neumann-32c304` sigue con su worktree y
+> **trabajo sin commitear sobre `ModeManager`**: sus commits están en `master`, su árbol de
+> trabajo no.
+
+**Lo que la sesión del 2026-07-28 cerró:** los dos stubs que mentían, WA-5.5 entera, los
+releases **1.10.0 y 1.11.0**, el AVD, los ítems **3, 7, 8, 9 y 1, 2, 6** del smoke, **WA-1.3**
+(y con eso **Fase 1**), la **revisión de paths de WA-3.6**, la **evaluación de WA-3.5** y el
+**fixture SF2**. Y limpió el remoto: doce ramas viejas borradas, todas verificadas antes.
 
 > [!IMPORTANT]
-> **Lo que queda está frenado por hardware o es chico, en ese orden:**
+> **Lo que queda, en orden de impacto real:**
 >
-> 1. **G2 — device iOS.** Lo único grande. Necesita un iPhone.
-> 2. **Smoke: lo que falta necesita USB físico** (mitad del ítem 3, el 4, el 10, y ahora también
->    el 6) **o poder escuchar** (el 5, el timing del metrónomo). El emulador no sirve para lo
->    segundo. Los ítems **1, 2 y 6 ya corrieron** (2026-07-28).
-> 3. **Sin bloqueo de hardware, lo que queda:** el **fixture SF2** —que primero necesita decidir
->    su **observable**, ver la nota—, **WA-3.5** (P2, con consumidor real medido), **la mitad
->    `EffectManagerConfig` del tope de efectos** (decisión de API) y **exponer `setAudioMode` en
->    el harness** para cerrar el call site 26 de WA-1.4.
+> 1. **La mitad `EffectManagerConfig` del tope de efectos.** *Es la única con impacto en
+>    producción hoy*: el camino que usa NoisyPad —`EffectManagerFactory.create(scope)` →
+>    `EffectManagerConfig.DEFAULT` (12)— **no recorta en gama baja**. Unificarlo con
+>    `AudioEngineConfig` es cambio de API pública; es una decisión, no un bug.
+> 2. **G2 — device iOS.** Lo único grande. Necesita un iPhone.
+> 3. **Smoke: lo que falta necesita USB físico** (mitad del ítem 3, el 4, el 10, y también el 6)
+>    **o poder escuchar** (el 5, el timing del metrónomo). El emulador no sirve para lo segundo.
+> 4. **Chicos y sin bloqueo:** **WA-3.5** (P2, con consumidor real medido: `exportMixCompressed`
+>    ya está en el `commonMain` de NoisyPad), **exponer `setAudioMode` en el harness** para el
+>    call site 26 de WA-1.4, y **el eslabón `AudioEngine`→`SoundFontManager`** — tres líneas sin
+>    observable (`AudioEngine.cpp:1066-1078`).
 
 > [!NOTE]
-> **Última verificación local 12/12: 2026-07-28**, sobre los cambios de esta sesión (WA-1.2 /
-> WA-1.3, sólo Kotlin — `git diff --name-only` no toca un solo `.cpp`/`.h`). Portabilidad **325
+> **Última verificación local 12/12: 2026-07-28**, sobre el fixture SF2 (PR #71, ya mergeado).
+> Portabilidad **327 archivos**, **768/768** C++ en 54.68 s, **768/768 bajo ASan+UBSan** (234 s)
+> y **768/768 bajo TSan** (563 s), ambos slices de iOS con link check, **105** de simulador
+> (**12 XML**) y **64** JVM (**8 XML**) forzados y contados de los XML, `assembleDebug`,
+> XCFramework, `compileIosMainKotlinMetadata`, los dos guardrails y el harness arrancando en el
+> simulador. **Los 768 son 762 + los 6 del fixture SF2.**
+>
+> Antes, sobre WA-1.2 / WA-1.3 (sólo Kotlin): portabilidad **325
 > archivos**, **762/762** C++ en 46.71 s, **762/762 bajo ASan+UBSan** (154 s) y **762/762 bajo
 > TSan** (550 s), ambos slices de iOS con link check, **105** tests de simulador (**12 XML**) y
 > **64** JVM (**8 XML**) —ambos con `--rerun-tasks` y borrando `audio/build/test-results/` antes,
