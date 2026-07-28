@@ -44,6 +44,10 @@
 #include <string>
 #include <vector>
 
+#include <chrono>
+#include <mutex>
+#include <thread>
+
 #include <gtest/gtest.h>
 
 namespace wma_test {
@@ -1126,6 +1130,147 @@ TEST(CApiLooperNullHandle, EveryMutatorIsANoOpRatherThanACrash) {
     wma_looper_set_capabilities(nullptr, 1024, 2, 30);
     wma_looper_cancel_export(nullptr);
     wma_looper_set_export_sample_rate(nullptr, 48000);
+    SUCCEED();
+}
+
+
+// ===========================================================================
+// State events (push) — wma_looper_set_event_callback
+//
+// La única superficie de la C API por la que el motor llama HACIA AFUERA, y por
+// eso la que más necesita un test: el resto se puede verificar preguntando.
+//
+// La cadena que se ejercita acá es la real y completa: `render()` empuja bloques
+// por `onAudioReady`, o sea el thread de audio, que hace `pushFromRT()` a la cola
+// lock-free; el worker del despachador la drena cada ~15 ms y desde ese hilo
+// —NO el de audio, y NO el del test— invoca el callback. Un test que llamara al
+// sink a mano no probaría nada de eso.
+// ===========================================================================
+
+/// Junta lo que llega, con candado: el callback corre en el worker, no acá.
+struct EventCollector {
+    struct Received {
+        int type;
+        int trackIndex;
+        float value;
+    };
+
+    std::mutex mutex;
+    std::vector<Received> events;
+
+    static void callback(int type, int trackIndex, float value, void* userData) {
+        auto* self = static_cast<EventCollector*>(userData);
+        std::lock_guard<std::mutex> lk(self->mutex);
+        self->events.push_back({type, trackIndex, value});
+    }
+
+    size_t size() {
+        std::lock_guard<std::mutex> lk(mutex);
+        return events.size();
+    }
+
+    std::vector<Received> snapshot() {
+        std::lock_guard<std::mutex> lk(mutex);
+        return events;
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lk(mutex);
+        events.clear();
+    }
+};
+
+/// Le da al worker (poll de 15 ms) tiempo de sobra para vaciar la cola.
+void letTheWorkerDrain() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+}
+
+TEST_F(CApiLooperTest, StateEventsReachTheCallbackFromTheWorkerThread) {
+    EventCollector collector;
+    startAt(kSampleRate, 0);
+    wma_looper_set_event_callback(mWma, &EventCollector::callback, &collector);
+
+    recordTrack(0, /*blocks=*/32);
+    render(64, kBlockFrames);
+    letTheWorkerDrain();
+
+    const auto received = collector.snapshot();
+    ASSERT_FALSE(received.empty())
+        << "el motor no entregó un solo evento — la cadena RT→cola→worker→callback "
+           "está cortada en alguna parte";
+
+    for (const auto& ev : received) {
+        EXPECT_GE(ev.type, WMA_LOOPER_EVENT_PROGRESS);
+        EXPECT_LE(ev.type, WMA_LOOPER_EVENT_TRACK_COMPLETED);
+        EXPECT_GE(ev.trackIndex, 0);
+        EXPECT_LT(ev.trackIndex, 16);
+    }
+}
+
+TEST_F(CApiLooperTest, TheUserDataPointerArrivesUntouched) {
+    EventCollector collector;
+    startAt(kSampleRate, 0);
+    wma_looper_set_event_callback(mWma, &EventCollector::callback, &collector);
+
+    recordTrack(0, /*blocks=*/32);
+    render(64, kBlockFrames);
+    letTheWorkerDrain();
+
+    // Que `collector` tenga algo YA prueba que el puntero llegó entero: el
+    // callback es estático y sin ese `user_data` no tendría dónde escribir.
+    EXPECT_GT(collector.size(), 0u);
+}
+
+TEST_F(CApiLooperTest, ClearingTheCallbackStopsTheEvents) {
+    EventCollector collector;
+    startAt(kSampleRate, 0);
+    wma_looper_set_event_callback(mWma, &EventCollector::callback, &collector);
+
+    recordTrack(0, /*blocks=*/32);
+    render(64, kBlockFrames);
+    letTheWorkerDrain();
+    ASSERT_GT(collector.size(), 0u) << "precondición: los eventos llegaban";
+
+    wma_looper_set_event_callback(mWma, nullptr, nullptr);
+
+    // La espera ANTES de limpiar el contador no es cortesía: el despachador
+    // documenta que un evento levantado justo antes del clear todavía llega. Se le
+    // da tiempo a lo que ya estaba en vuelo y RECIÉN ahí se cuenta desde cero, que
+    // es exactamente la disciplina que el KDoc le exige a un llamador.
+    letTheWorkerDrain();
+    collector.clear();
+
+    render(64, kBlockFrames);
+    letTheWorkerDrain();
+
+    EXPECT_EQ(collector.size(), 0u) << "siguieron llegando eventos después del clear";
+}
+
+TEST_F(CApiLooperTest, RegisteringAgainReplacesThePreviousCallback) {
+    EventCollector first;
+    EventCollector second;
+    startAt(kSampleRate, 0);
+
+    wma_looper_set_event_callback(mWma, &EventCollector::callback, &first);
+    recordTrack(0, /*blocks=*/32);
+    render(32, kBlockFrames);
+    letTheWorkerDrain();
+    ASSERT_GT(first.size(), 0u) << "precondición: el primero recibía";
+
+    wma_looper_set_event_callback(mWma, &EventCollector::callback, &second);
+    letTheWorkerDrain();
+    first.clear();
+
+    render(64, kBlockFrames);
+    letTheWorkerDrain();
+
+    EXPECT_GT(second.size(), 0u) << "el segundo callback no quedó instalado";
+    EXPECT_EQ(first.size(), 0u) << "el primero siguió recibiendo después de ser reemplazado";
+}
+
+TEST_F(CApiLooperTest, ANullEngineIsIgnoredRatherThanCrashing) {
+    EventCollector collector;
+    wma_looper_set_event_callback(nullptr, &EventCollector::callback, &collector);
     SUCCEED();
 }
 

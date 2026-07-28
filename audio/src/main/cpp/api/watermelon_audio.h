@@ -1175,6 +1175,69 @@ WMA_API int64_t wma_looper_get_dropped_events(const WmaEngine* engine);
 /** Zero every telemetry counter above. */
 WMA_API void wma_looper_reset_telemetry(WmaEngine* engine);
 
+/* ---------------- State events (push) ---------------- */
+
+/**
+ * Kind of looper state event. Mirrors the internal `LooperEvent::Type`; the
+ * numbers are part of the ABI and must not be reordered.
+ */
+typedef enum WmaLooperEventType {
+    /** `value` = normalized playhead position, 0..1. */
+    WMA_LOOPER_EVENT_PROGRESS        = 0,
+    /** `value` = 1.0 playing, 0.0 stopped. Fires only on transitions. */
+    WMA_LOOPER_EVENT_PLAYING_CHANGED = 1,
+    /** `value` = linear peak level, 0..1. */
+    WMA_LOOPER_EVENT_PEAK_CHANGED    = 2,
+    /** `value` = record progress 0..1, or **< 0** when the recording ENDED. */
+    WMA_LOOPER_EVENT_RECORD_PROGRESS = 3,
+    /** The track finished its finite play count. `value` unused. */
+    WMA_LOOPER_EVENT_TRACK_COMPLETED = 4
+} WmaLooperEventType;
+
+/**
+ * Sink for looper state events.
+ *
+ * ## Threading — read this before implementing one
+ *
+ * Invoked on the engine's **event worker thread**, not the audio thread and not
+ * the caller's thread. That is the whole point of the dispatcher: the audio
+ * thread pushes to a lock-free queue and never calls out. So a callback may
+ * block or allocate without breaking real-time safety — but it must be
+ * thread-safe with respect to whatever it touches, and it must marshal to the
+ * UI thread itself.
+ *
+ * @param type        A [WmaLooperEventType].
+ * @param track_index 0..15.
+ * @param user_data   Exactly the pointer handed to wma_looper_set_event_callback.
+ */
+typedef void (*WmaLooperEventCallback)(int type, int track_index, float value,
+                                       void* user_data);
+
+/**
+ * Install (or clear) the looper state event sink. NOT RT-safe; call from the UI
+ * thread.
+ *
+ * Passing NULL for @p callback clears it; the dispatcher then drains and
+ * discards, so the queue never back-pressures the audio thread.
+ *
+ * ## The lifetime rule, and it is not optional
+ *
+ * Clearing the callback does **not** guarantee that no invocation is in flight:
+ * the worker snapshots the sink once per drain pass, so an event picked up just
+ * before the clear still reaches the old callback. Therefore **@p user_data must
+ * stay valid after the clear**. Freeing it right after clearing is a
+ * use-after-free, not a race you can win by ordering the calls.
+ *
+ * The JNI side handles this with a mutex inside its own sink; a caller that owns
+ * @p user_data should either keep it alive for the life of the engine or apply
+ * the same discipline.
+ *
+ * Only one callback is installed at a time — a second call replaces the first.
+ */
+WMA_API void wma_looper_set_event_callback(WmaEngine* engine,
+                                            WmaLooperEventCallback callback,
+                                            void* user_data);
+
 /**
  * Export looper mix to a WAV file. NOT RT-safe.
  * @param file_path  Absolute path for the output WAV file

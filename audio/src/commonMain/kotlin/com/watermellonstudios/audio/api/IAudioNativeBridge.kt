@@ -6,12 +6,29 @@ package com.watermellonstudios.audio.api
  * Extends [IEffectStateProvider] and [IEffectStateWriter] for effect chain operations.
  * Covers lifecycle, state queries, real-time params, voice system, mode, and backend.
  *
- * Platform-specific operations (USB device management, looper, arpeggiator, SoundFont,
- * latency benchmark) are NOT included — their consumers remain platform-specific.
+ * El arpegiador vive en [IArpeggiatorBridge], el motor de SoundFont en
+ * [ISoundFontBridge] y el looper en [ILooperBridge], partidos por el mismo motivo que
+ * [IInputBridge] y las dos de efectos: son dominios con consumidores propios y un fake
+ * no debería tener que implementar cien métodos para cubrir uno.
+ *
+ * El looper **estaba** acá, recortado a 11 de sus 79 funciones y con una nota que decía
+ * que subir el resto necesitaba su propia justificación. La justificación llegó — ver
+ * el KDoc de [ILooperBridge] — así que las 11 se mudaron allá. Nadie que las llame se
+ * entera: siguen expuestas por herencia.
+ *
+ * Lo que sigue **sin** estar acá, y por qué: la gestión de dispositivos USB (D4 —
+ * iOS no la tiene) y el benchmark de latencia detallada, cuyo JNI vive en
+ * `jni_benchmark.cpp` y no tiene contraparte en la C API.
  *
  * Android implementation: [com.watermellonstudios.audio.internal.bridge.AudioNativeBridge]
  */
-interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter, IInputBridge {
+interface IAudioNativeBridge :
+    IEffectStateProvider,
+    IEffectStateWriter,
+    IInputBridge,
+    IArpeggiatorBridge,
+    ISoundFontBridge,
+    ILooperBridge {
 
     // ==================== LIFECYCLE ====================
 
@@ -40,6 +57,14 @@ interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter, IInputB
     fun isEngineInitialized(): Boolean
     fun hasInitializationFailed(): Boolean
     fun getStreamInfoArray(): FloatArray?
+
+    /**
+     * Si el motor recortó el tamaño de buffer por presión de recursos.
+     *
+     * Es diagnóstico: no cambia nada, explica por qué la latencia medida no coincide
+     * con la pedida.
+     */
+    fun isUsingReducedBuffers(): Boolean
     fun getMasterVolume(): Float
 
     // ==================== FADE ====================
@@ -76,6 +101,16 @@ interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter, IInputB
     fun isEffectsBypassedSync(): Boolean
     fun reorderEffectsSync(fromIndex: Int, toIndex: Int)
 
+    /**
+     * Cuántos efectos tiene la cadena, sin suspender.
+     *
+     * No es un duplicado de `IEffectStateProvider.getEffectCount()`: aquélla es
+     * `suspend` y toma el mutex de efectos porque va con el resto del snapshot. Ésta es
+     * la variante lock-free, para los mismos contextos no-suspend que consumen el resto
+     * de los `*Sync`.
+     */
+    fun getEffectChainSize(): Int
+
     // ==================== EFFECT ROUTING ====================
 
     fun setRoutingMode(mode: Int)
@@ -95,6 +130,27 @@ interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter, IInputB
     fun getActiveVoiceCount(): Int
     fun setMaxVoices(maxVoices: Int)
     fun setVoiceStealingStrategy(strategyId: Int)
+
+    // ==================== FILTRO DE VOZ ====================
+    //
+    // Los cuatro son `RT-safe`. Sus rangos son CONTRATO y no defensa: hasta ahora los
+    // recortes vivían sólo dentro de la implementación de Android, que es la forma
+    // conocida de que dos implementaciones del mismo contrato diverjan en silencio.
+    // Fuera de rango **no hace nada**, en vez de recortar al borde: recortar convertiría
+    // un error de unidades del llamador (mandar 0.5 creyendo que es un porcentaje) en un
+    // filtro a 20 Hz que sí suena, y por lo tanto en un bug de audio en vez de un no-op
+    // visible.
+
+    fun setVoiceFilterEnabled(enabled: Boolean)
+
+    /** Frecuencia de corte en Hz. **Ignora lo que no sea finito o caiga fuera de 20..20000.** */
+    fun setVoiceFilterCutoff(hz: Float)
+
+    /** Resonancia. **Ignora lo que no sea finito o caiga fuera de 0..1.** */
+    fun setVoiceFilterResonance(q: Float)
+
+    /** 0 = paso bajo, 1 = paso alto, 2 = paso banda. **Ignora cualquier otro valor.** */
+    fun setVoiceFilterMode(mode: Int)
 
     // ==================== DUAL TOUCH ====================
 
@@ -124,6 +180,51 @@ interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter, IInputB
     /** Libera todas las voces del acorde. */
     fun releaseChordNotes()
 
+    // ==================== AUTOMATIZACIÓN Y MAPEO XY ====================
+    //
+    // Cómo un eje del pad mueve un parámetro de un efecto. El mapeo se configura una vez
+    // y después [applyAutomation] corre por frame de gesto, así que es lock-free.
+    //
+    // Los guards vuelven a ser contrato: un valor no finito **se descarta** y uno fuera
+    // de 0..1 **se recorta**. Y acá el recorte sí corresponde, al revés que en el filtro
+    // de voz: estos parámetros son normalizados por definición, así que un 1.2 es ruido
+    // numérico de la UI y no una unidad equivocada.
+
+    /**
+     * Configura qué parámetro mueve un eje.
+     *
+     * @param axis      0 = X, 1 = Y, 2 = profundidad.
+     * @param curve     0 = lineal, 1 = exponencial, 2 = logarítmica, 3 = curva en S.
+     * @param polarity  0 = unipolar, 1 = bipolar.
+     */
+    fun setMappingConfig(
+        axis: Int,
+        effectIndex: Int,
+        paramId: Int,
+        curve: Int,
+        polarity: Int,
+        mapMin: Float,
+        mapMax: Float,
+        inverted: Boolean,
+    )
+
+    /** Desconecta el eje. */
+    fun clearMappingConfig(axis: Int)
+
+    /**
+     * Mueve el eje. Se llama por frame de gesto.
+     *
+     * [normalizedValue] se recorta a 0..1; si no es finito, no hace nada.
+     */
+    fun applyAutomation(axis: Int, normalizedValue: Float)
+
+    /**
+     * Escribe directo sobre un parámetro automatizado, sin pasar por un eje.
+     *
+     * [xyValue] se recorta a 0..1; si no es finito, no hace nada.
+     */
+    fun setAutomationParameter(effectIndex: Int, paramId: Int, xyValue: Float)
+
     // ==================== MODE ====================
 
     suspend fun setAudioMode(mode: Int): Result<Unit>
@@ -137,6 +238,29 @@ interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter, IInputB
     fun selectBackend(backendId: Int): Boolean
     fun getCurrentBackendType(): Int
     fun isUsbBackendAvailable(): Boolean
+
+    /**
+     * **El nombre dice USB; el efecto no es de USB, y eso importa en iOS.**
+     *
+     * Detrás, `wma_configure_usb_backend` llama a `BackendManager::setSampleRate()` — el
+     * manager compartido, no un backend USB. `channels` y `bitDepth` son informativos:
+     * el formato real lo elige el backend. O sea que **en iOS esto configura el sample
+     * rate de verdad**, y hacerlo un no-op "porque iOS no tiene USB" (D4) descartaría en
+     * silencio la única parte que sí tiene efecto.
+     *
+     * Es distinto de [isUsbBackendAvailable], que **reporta una capacidad** y por eso sí
+     * miente si no dice `false`. Éste sólo transporta un pedido.
+     */
+    fun configureUsbBackend(sampleRate: Int, channels: Int, bitDepth: Int)
+
+    /**
+     * 0 = sólo reproducción, 1 = sólo captura, 2 = full-duplex.
+     *
+     * Misma historia que [configureUsbBackend]: detrás es
+     * `BackendManager::setFullDuplexEnabled(mode == 2)`, y el full-duplex es exactamente
+     * lo que hace `CoreAudioBackend` en iOS. El nombre quedó del origen Android.
+     */
+    fun setUsbStreamingMode(modeId: Int)
 
     /**
      * Select the USB latency profile (Fase 1). Re-parametrizes the USB
@@ -204,55 +328,6 @@ interface IAudioNativeBridge : IEffectStateProvider, IEffectStateWriter, IInputB
      * [transportIsMetronomeContinuous] antes de leer esto.
      */
     fun transportGetRemainingBeats(): Int
-
-    // ==================== LOOPER (el subconjunto de la tira) ====================
-    //
-    // **Esto NO es el looper entero.** El JNI tiene 79 funciones; acá hay 11, que
-    // son exactamente las que necesita la tira del harness (control 5): preparar en
-    // compases, armar, grabar, parar, limpiar, leer estado y exportar.
-    //
-    // Que sea un subconjunto es deliberado y sigue la regla del opt-in: **algo entra
-    // porque un consumidor lo necesita**, y el consumidor de hoy es el harness. Subir
-    // las 79 "por completitud" sería fabricar superficie sin caller — justo lo que la
-    // decisión de 2026-07-27 quiso evitar. Si NoisyPad pide el looper completo desde
-    // commonMain, eso es un ticket con su propia justificación.
-
-    /**
-     * Prepara la pista con un largo de `bars` compases al reloj actual.
-     *
-     * @return frames reservados, o **-1** si `bars` desborda int32 al pasarlo a
-     *         frames. Ese -1 es de la tanda 3 de WA-2.6: antes alocaba una pista con
-     *         el largo envuelto.
-     */
-    fun looperPrepareTrackBars(trackIndex: Int, bars: Int, sampleRate: Int): Int
-
-    /**
-     * Arma la pista para empezar a grabar en el próximo límite de compás.
-     *
-     * @return el frame absoluto del disparo (`>= 0`), o **-1 si no se armó nada**.
-     *
-     * **El -1 hay que mostrarlo.** El bug de la tanda 2 de WA-2.6 era exactamente
-     * esto: devolvía un trigger frame para una grabación que nunca arrancaba. Un
-     * botón que sólo diga "armado" no lo vuelve a ver.
-     */
-    fun looperArmAtNextBar(trackIndex: Int): Long
-
-    fun looperStartRecording(trackIndex: Int)
-    fun looperStopRecording()
-    fun looperStopAll()
-    fun looperClearAll()
-    fun looperIsRecording(): Boolean
-    fun looperIsPlaying(): Boolean
-    fun looperIsTrackActive(trackIndex: Int): Boolean
-    fun looperIsTrackPlaying(trackIndex: Int): Boolean
-
-    /**
-     * Exporta la mezcla a un archivo. **Sincrónico — llamar fuera del main thread.**
-     *
-     * Devuelve `false` en vez de dejar escapar una excepción (tanda 4 de WA-2.6):
-     * antes, un export imposible abortaba el proceso.
-     */
-    fun looperExportMix(filePath: String): Boolean
 
     // ==================== LOG CAPTURE ====================
 

@@ -1,7 +1,8 @@
 package com.watermellonstudios.audio.internal.mode
 
-import android.util.Log
 import com.watermellonstudios.audio.api.IEffectManager
+import com.watermellonstudios.audio.callback.AudioLogger
+import com.watermellonstudios.audio.callback.platformDefaultAudioLogger
 import com.watermellonstudios.audio.api.IModeStateWriter
 import com.watermellonstudios.audio.api.IModeTransitionHandler
 import com.watermellonstudios.audio.api.ModeTransitionConfig
@@ -53,7 +54,13 @@ internal class ModeTransitionManagerImpl(
     private val stateWriter: IModeStateWriter,
     private val effectManager: IEffectManager?,
     private val scope: CoroutineScope,
-    private val config: ModeTransitionConfig
+    private val config: ModeTransitionConfig,
+    /**
+     * Por defecto, el de la plataforma: en Android esto seguía saliendo por logcat con
+     * `android.util.Log` y bajar la clase a común con un no-op lo habría apagado sin
+     * ruido. Ver `platformDefaultAudioLogger`.
+     */
+    private val logger: AudioLogger = platformDefaultAudioLogger,
 ) : IModeTransitionHandler {
 
     companion object {
@@ -111,7 +118,7 @@ internal class ModeTransitionManagerImpl(
             return@channelFlow
         }
 
-        Log.d(TAG, "Starting transition: $fromMode -> $mode")
+        logger.debug(TAG, "Starting transition: $fromMode -> $mode")
 
         try {
             // Phase 1: Prepare
@@ -154,15 +161,15 @@ internal class ModeTransitionManagerImpl(
             updateModeProperties(mode)
             lastFailedTransition = null
 
-            Log.d(TAG, "Transition complete: $fromMode -> $mode")
+            logger.debug(TAG, "Transition complete: $fromMode -> $mode")
 
         } catch (e: CancellationException) {
-            Log.d(TAG, "Transition cancelled")
+            logger.debug(TAG, "Transition cancelled")
             attemptRollback(fromMode)
             throw e
 
         } catch (e: Exception) {
-            Log.e(TAG, "Transition failed", e)
+            logger.error(TAG, "Transition failed", e)
             lastFailedTransition = fromMode to mode
             _transitionState.value = ModeTransitionState.Failed(
                 fromMode = fromMode,
@@ -236,17 +243,17 @@ internal class ModeTransitionManagerImpl(
                 AudioMode.INPUT_FX -> {
                     // INPUT_FX: effects process microphone input
                     // Vocoder uses internal oscillator as carrier
-                    Log.d(TAG, "Configuring effects for INPUT_FX mode")
+                    logger.debug(TAG, "Configuring effects for INPUT_FX mode")
                 }
 
                 AudioMode.CHAOS_PAD -> {
                     // CHAOS_PAD: effects process XY oscillator
-                    Log.d(TAG, "Configuring effects for CHAOS_PAD mode")
+                    logger.debug(TAG, "Configuring effects for CHAOS_PAD mode")
                 }
 
                 AudioMode.MIX -> {
                     // MIX: effects process mixed signal
-                    Log.d(TAG, "Configuring effects for MIX mode")
+                    logger.debug(TAG, "Configuring effects for MIX mode")
                 }
             }
         }
@@ -280,11 +287,11 @@ internal class ModeTransitionManagerImpl(
 
     private suspend fun attemptRollback(originalMode: AudioMode) {
         try {
-            Log.d(TAG, "Attempting rollback to $originalMode")
+            logger.debug(TAG, "Attempting rollback to $originalMode")
             stateWriter.setAudioMode(originalMode)
             _transitionState.value = ModeTransitionState.Idle(originalMode)
         } catch (e: Exception) {
-            Log.e(TAG, "Rollback failed", e)
+            logger.error(TAG, "Rollback failed", e)
             // State remains in Failed, user must intervene
         }
     }
@@ -336,7 +343,11 @@ internal class ModeTransitionManagerImpl(
 
         // Update native layer asynchronously using the manager's scope
         // NOTE (Phase 4 Fix): Changed from GlobalScope to scope to prevent memory leaks
-        scope.launch(Dispatchers.IO) {
+        // `Dispatchers.Default` y no `IO`: en Kotlin/Native ese dispatcher no se puede
+        // nombrar (un miembro `internal` eclipsa la extensión pública). No es una
+        // concesión — `setCrossfadePosition` no hace I/O ni toca el motor todavía, así
+        // que el `IO` de antes ya protegía algo que no lo necesitaba.
+        scope.launch(Dispatchers.Default) {
             stateWriter.setCrossfadePosition(clampedPosition)
         }
 
@@ -358,6 +369,6 @@ internal class ModeTransitionManagerImpl(
 
     override fun dispose() {
         transitionJob?.cancel()
-        Log.d(TAG, "ModeTransitionManager disposed")
+        logger.debug(TAG, "ModeTransitionManager disposed")
     }
 }

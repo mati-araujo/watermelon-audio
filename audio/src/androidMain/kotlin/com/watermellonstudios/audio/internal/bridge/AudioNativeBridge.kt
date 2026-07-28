@@ -9,6 +9,7 @@ import com.watermellonstudios.audio.api.NativeEffectSnapshot
 import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
+import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import com.watermellonstudios.audio.domain.usb.StreamPreference
 import com.watermellonstudios.audio.export.Mp4AacTranscoder
 import com.watermellonstudios.audio.internal.native.NativeLibraryLoader
@@ -684,7 +685,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param data Raw SF2 file content
      * @return true if loading succeeded
      */
-    fun loadSoundFont(data: ByteArray): Boolean {
+    override fun loadSoundFont(data: ByteArray): Boolean {
         if (data.isEmpty()) {
             Log.w(TAG, "loadSoundFont: empty data")
             return false
@@ -700,7 +701,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param path Absolute path to .sf2 file
      * @return true if loading succeeded
      */
-    fun loadSoundFontFromPath(path: String): Boolean {
+    override fun loadSoundFontFromPath(path: String): Boolean {
         if (path.isBlank()) {
             Log.w(TAG, "loadSoundFontFromPath: empty path")
             return false
@@ -755,7 +756,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Unload the current SoundFont.
      */
-    fun unloadSoundFont() {
+    override fun unloadSoundFont() {
         nativeUnloadSoundFont()
     }
 
@@ -764,7 +765,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @param presetIndex Preset index (0 to presetCount-1)
      */
-    fun setSoundFontPreset(presetIndex: Int) {
+    override fun setSoundFontPreset(presetIndex: Int) {
         if (presetIndex < 0) {
             Log.w(TAG, "setSoundFontPreset: invalid index $presetIndex")
             return
@@ -775,7 +776,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Get number of presets in loaded SoundFont.
      */
-    fun getSoundFontPresetCount(): Int {
+    override fun getSoundFontPresetCount(): Int {
         return nativeGetSoundFontPresetCount()
     }
 
@@ -784,14 +785,14 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @return Preset name, or null if invalid
      */
-    fun getSoundFontPresetName(presetIndex: Int): String? {
+    override fun getSoundFontPresetName(presetIndex: Int): String? {
         return nativeGetSoundFontPresetName(presetIndex)
     }
 
     /**
      * Check if a SoundFont is loaded.
      */
-    fun isSoundFontLoaded(): Boolean {
+    override fun isSoundFontLoaded(): Boolean {
         return nativeIsSoundFontLoaded()
     }
 
@@ -800,7 +801,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param presetIndex Preset index (0-based)
      * @return IntArray [minKey, maxKey] or null if preset has no regions
      */
-    fun getSoundFontPresetKeyRange(presetIndex: Int): IntArray? {
+    override fun getSoundFontPresetKeyRange(presetIndex: Int): IntArray? {
         return nativeGetSoundFontPresetKeyRange(presetIndex)
     }
 
@@ -809,7 +810,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param presetIndex Preset index (0-based)
      * @return IntArray [bank, program] (bank 128 = GM percussion kit) or null if invalid
      */
-    fun getSoundFontPresetBankProgram(presetIndex: Int): IntArray? {
+    override fun getSoundFontPresetBankProgram(presetIndex: Int): IntArray? {
         return nativeGetSoundFontPresetBankProgram(presetIndex)
     }
 
@@ -819,21 +820,21 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Start/update a SoundFont note for a touch point.
      * Lock-free — safe to call at touch rate.
      */
-    fun sfNoteOn(touchId: Int, midiNote: Int, velocity: Float) {
+    override fun sfNoteOn(touchId: Int, midiNote: Int, velocity: Float) {
         nativeSfNoteOn(touchId, midiNote, velocity)
     }
 
     /**
      * Release a SoundFont note for a touch point.
      */
-    fun sfNoteOff(touchId: Int) {
+    override fun sfNoteOff(touchId: Int) {
         nativeSfNoteOff(touchId)
     }
 
     /**
      * Release all SoundFont notes.
      */
-    fun sfNoteOffAll() {
+    override fun sfNoteOffAll() {
         nativeSfNoteOffAll()
     }
 
@@ -845,7 +846,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * `sfNoteOff(i)` over the remaining slots — the touch-state scan
      * happens on the audio thread.
      */
-    fun sfNoteOffAllExcept(keepTouchId: Int) {
+    override fun sfNoteOffAllExcept(keepTouchId: Int) {
         nativeSfNoteOffAllExcept(keepTouchId)
     }
 
@@ -884,21 +885,21 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     // ==================== Voice Filter Operations (Phase 6) ====================
 
-    fun setVoiceFilterEnabled(enabled: Boolean) {
+    override fun setVoiceFilterEnabled(enabled: Boolean) {
         nativeSetVoiceFilterEnabled(enabled)
     }
 
-    fun setVoiceFilterCutoff(hz: Float) {
+    override fun setVoiceFilterCutoff(hz: Float) {
         if (!hz.isFinite() || hz < 20f || hz > 20000f) return
         nativeSetVoiceFilterCutoff(hz)
     }
 
-    fun setVoiceFilterResonance(q: Float) {
+    override fun setVoiceFilterResonance(q: Float) {
         if (!q.isFinite() || q < 0f || q > 1f) return
         nativeSetVoiceFilterResonance(q)
     }
 
-    fun setVoiceFilterMode(mode: Int) {
+    override fun setVoiceFilterMode(mode: Int) {
         if (mode < 0 || mode > 2) return
         nativeSetVoiceFilterMode(mode)
     }
@@ -1962,12 +1963,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @param modeId Mode ID (0=PLAYBACK_ONLY, 1=CAPTURE_ONLY, 2=FULL_DUPLEX)
      */
-    fun setUsbStreamingMode(modeId: Int) = nativeSetUsbStreamingMode(modeId)
+    override fun setUsbStreamingMode(modeId: Int) = nativeSetUsbStreamingMode(modeId)
 
     /**
      * Configure USB backend parameters.
      */
-    fun configureUsbBackend(sampleRate: Int, channels: Int, bitDepth: Int) =
+    override fun configureUsbBackend(sampleRate: Int, channels: Int, bitDepth: Int) =
         nativeConfigureUsbBackend(sampleRate, channels, bitDepth)
 
     // ==================== Memory / Resource Operations ====================
@@ -1975,7 +1976,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Check if using reduced buffers due to low memory.
      */
-    fun isUsingReducedBuffers(): Boolean = nativeIsUsingReducedBuffers()
+    override fun isUsingReducedBuffers(): Boolean = nativeIsUsingReducedBuffers()
 
     // ==================== Automation Operations ====================
 
@@ -1983,7 +1984,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Set automation parameter from XY pad.
      * This is used when mapping XY values to effect parameters.
      */
-    fun setAutomationParameter(effectIndex: Int, paramId: Int, xyValue: Float) {
+    override fun setAutomationParameter(effectIndex: Int, paramId: Int, xyValue: Float) {
         if (!xyValue.isFinite()) return
         nativeSetAutomationParameter(effectIndex, paramId, xyValue.coerceIn(0f, 1f))
     }
@@ -1994,7 +1995,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Configure mapping for an axis.
      * @param axis 0=X, 1=Y, 2=DEPTH
      */
-    fun setMappingConfig(
+    override fun setMappingConfig(
         axis: Int, effectIndex: Int, paramId: Int,
         curve: Int, polarity: Int,
         mapMin: Float, mapMax: Float, inverted: Boolean
@@ -2006,7 +2007,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Clear mapping for an axis (disables automation for that axis).
      */
-    fun clearMappingConfig(axis: Int) {
+    override fun clearMappingConfig(axis: Int) {
         nativeClearMappingConfig(axis)
     }
 
@@ -2014,7 +2015,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Apply automation for an axis using stored mapping config.
      * Lock-free real-time path — called at ~60Hz from XY updates.
      */
-    fun applyAutomation(axis: Int, normalizedValue: Float) {
+    override fun applyAutomation(axis: Int, normalizedValue: Float) {
         if (!normalizedValue.isFinite()) return
         nativeApplyAutomation(axis, normalizedValue.coerceIn(0f, 1f))
     }
@@ -2025,7 +2026,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Get current effect chain size.
      * This is a public version for callers outside the effects system.
      */
-    fun getEffectChainSize(): Int = nativeGetEffectChainSize()
+    override fun getEffectChainSize(): Int = nativeGetEffectChainSize()
 
     // ==================== Native Methods: Vocoder ====================
 
@@ -2524,67 +2525,67 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * When enabled, the arp overrides oscillator frequency/amplitude with
      * rhythmic note patterns synced to BPM.
      */
-    fun setArpEnabled(enabled: Boolean) {
+    override fun setArpEnabled(enabled: Boolean) {
         nativeSetArpEnabled(enabled)
         Log.d(TAG, "Arp enabled: $enabled")
     }
 
     /** Check if arpeggiator is currently enabled */
-    fun isArpEnabled(): Boolean = nativeIsArpEnabled()
+    override fun isArpEnabled(): Boolean = nativeIsArpEnabled()
 
     /** Set arp pattern (matches ArpPattern.id from core-domain) */
-    fun setArpPattern(patternId: Int) = nativeSetArpPattern(patternId)
+    override fun setArpPattern(patternId: Int) = nativeSetArpPattern(patternId)
 
     /** Set arp rate as beats per step (e.g., 0.5 = 1/8 note, 0.25 = 1/16 note) */
-    fun setArpSubdivision(beatsPerStep: Float) = nativeSetArpSubdivision(beatsPerStep)
+    override fun setArpSubdivision(beatsPerStep: Float) = nativeSetArpSubdivision(beatsPerStep)
 
     /** Set arp octave range (1-4) */
-    fun setArpOctaveRange(octaves: Int) = nativeSetArpOctaveRange(octaves)
+    override fun setArpOctaveRange(octaves: Int) = nativeSetArpOctaveRange(octaves)
 
     /** Set gate length (0.05 staccato - 1.0 legato) */
-    fun setArpGateLength(gate: Float) = nativeSetArpGateLength(gate)
+    override fun setArpGateLength(gate: Float) = nativeSetArpGateLength(gate)
 
     /** Set swing amount (0.5 straight - 0.75 hard swing) */
-    fun setArpSwing(swing: Float) = nativeSetArpSwing(swing)
+    override fun setArpSwing(swing: Float) = nativeSetArpSwing(swing)
 
     /** Enable/disable latch mode (arp continues after releasing touch) */
-    fun setArpLatch(latch: Boolean) = nativeSetArpLatch(latch)
+    override fun setArpLatch(latch: Boolean) = nativeSetArpLatch(latch)
 
     /** Set base velocity (0.0-1.0) */
-    fun setArpVelocity(velocity: Float) = nativeSetArpVelocity(velocity)
+    override fun setArpVelocity(velocity: Float) = nativeSetArpVelocity(velocity)
 
     /** Set velocity random variation amount (0.0-0.5) */
-    fun setArpVelocityVariation(variation: Float) = nativeSetArpVelocityVariation(variation)
+    override fun setArpVelocityVariation(variation: Float) = nativeSetArpVelocityVariation(variation)
 
     /** Set per-step trigger probability (0.0-1.0, 1.0 = all steps play) */
-    fun setArpProbability(probability: Float) = nativeSetArpProbability(probability)
+    override fun setArpProbability(probability: Float) = nativeSetArpProbability(probability)
 
     /**
      * Set the scale intervals for arp note generation.
      * @param intervals Semitone offsets (e.g., [0,2,4,5,7,9,11] for major scale)
      */
-    fun setArpScaleIntervals(intervals: IntArray) = nativeSetArpScaleIntervals(intervals)
+    override fun setArpScaleIntervals(intervals: IntArray) = nativeSetArpScaleIntervals(intervals)
 
     /** Notify arp that touch is active/inactive (drives gate) */
-    fun setArpTouchActive(active: Boolean) = nativeSetArpTouchActive(active)
+    override fun setArpTouchActive(active: Boolean) = nativeSetArpTouchActive(active)
 
     /** Set the base frequency from XY pad (arp patterns are relative to this) */
-    fun setArpBaseFrequency(frequency: Float) = nativeSetArpBaseFrequency(frequency)
+    override fun setArpBaseFrequency(frequency: Float) = nativeSetArpBaseFrequency(frequency)
 
     /** Get current step index (for UI step visualizer) */
-    fun getArpCurrentStep(): Int = nativeGetArpCurrentStep()
+    override fun getArpCurrentStep(): Int = nativeGetArpCurrentStep()
 
     /** Get total steps in current pattern (for UI step visualizer) */
-    fun getArpTotalSteps(): Int = nativeGetArpTotalSteps()
+    override fun getArpTotalSteps(): Int = nativeGetArpTotalSteps()
 
     /** Ratchet: momentary double-time while held */
-    fun setArpRatchet(active: Boolean) = nativeSetArpRatchet(active)
+    override fun setArpRatchet(active: Boolean) = nativeSetArpRatchet(active)
 
     /** Regenerate pattern for Random/Stochastic/Walk */
-    fun regenerateArpPattern() = nativeRegenerateArpPattern()
+    override fun regenerateArpPattern() = nativeRegenerateArpPattern()
 
     /** Check if arp gate is currently open (for visual pulse indicator) */
-    fun isArpGateOpen(): Boolean = nativeIsArpGateOpen()
+    override fun isArpGateOpen(): Boolean = nativeIsArpGateOpen()
 
     // ==================== Native Methods: Arpeggiator ====================
 
@@ -2731,7 +2732,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     // Public Looper API
 
-    fun looperPrepareTrack(trackIndex: Int, lengthFrames: Int, sampleRate: Int): Boolean {
+    override fun looperPrepareTrack(trackIndex: Int, lengthFrames: Int, sampleRate: Int): Boolean {
         val result = nativeLooperPrepareTrack(trackIndex, lengthFrames, sampleRate)
         return result >= 0
     }
@@ -2760,7 +2761,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * read natively, so no UI-thread jitter leaks into the trigger.
      * Returns the absolute trigger frame (>=0), or -1 on failure.
      */
-    fun looperArmInFrames(trackIndex: Int, offsetFrames: Long): Long =
+    override fun looperArmInFrames(trackIndex: Int, offsetFrames: Long): Long =
         nativeLooperArmInFrames(trackIndex, offsetFrames)
 
     /**
@@ -2772,7 +2773,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @return the trigger frame, or -1 if no reference track is playing (caller
      *         should fall back to [looperArmInFrames]).
      */
-    fun looperArmSyncedToLoop(trackIndex: Int, latencyFrames: Long): Long =
+    override fun looperArmSyncedToLoop(trackIndex: Int, latencyFrames: Long): Long =
         nativeLooperArmSyncedToLoop(trackIndex, latencyFrames)
 
     /**
@@ -2789,7 +2790,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         nativeLooperArmSyncedToLoopQuantized(trackIndex, latencyFrames, quantumFrames)
 
     /** Cancel a pending armed recording (does not affect a recording in progress). */
-    fun looperCancelArm() = nativeLooperCancelArm()
+    override fun looperCancelArm() = nativeLooperCancelArm()
 
     /** Returns the armed track index, or -1 if no track is armed. */
     fun looperGetArmedTrack(): Int = nativeLooperGetArmedTrack()
@@ -2824,16 +2825,16 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * fade-out + FX transition + fade-in.
      * Safe to call when no recording is in progress (no-op).
      */
-    fun looperAbortRecording() = nativeLooperAbortRecording()
+    override fun looperAbortRecording() = nativeLooperAbortRecording()
 
-    fun looperStartOverdub(trackIndex: Int) = nativeLooperStartOverdub(trackIndex)
+    override fun looperStartOverdub(trackIndex: Int) = nativeLooperStartOverdub(trackIndex)
     override fun looperStopAll() = nativeLooperStopAll()
-    fun looperPause() = nativeLooperPause()
-    fun looperResume() = nativeLooperResume()
+    override fun looperPause() = nativeLooperPause()
+    override fun looperResume() = nativeLooperResume()
     /** Target sample rate for subsequent WAV/stems exports (0 = engine rate). */
-    fun looperSetExportSampleRate(sampleRate: Int) = nativeLooperSetExportSampleRate(sampleRate)
-    fun looperSetFreeLength(freeLength: Boolean) = nativeLooperSetFreeLength(freeLength)
-    fun looperClearTrack(trackIndex: Int) = nativeLooperClearTrack(trackIndex)
+    override fun looperSetExportSampleRate(sampleRate: Int) = nativeLooperSetExportSampleRate(sampleRate)
+    override fun looperSetFreeLength(freeLength: Boolean) = nativeLooperSetFreeLength(freeLength)
+    override fun looperClearTrack(trackIndex: Int) = nativeLooperClearTrack(trackIndex)
     override fun looperClearAll() = nativeLooperClearAll()
 
     /**
@@ -2841,16 +2842,16 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * UI/IO thread; safe no-op while recording/exporting. Returns true if trimmed.
      * Primarily used after a free-length take to release its pre-sized buffer.
      */
-    fun looperTrimTrack(trackIndex: Int): Boolean = nativeLooperTrimTrack(trackIndex)
-    fun looperSetEnabled(enabled: Boolean) = nativeLooperSetEnabled(enabled)
+    override fun looperTrimTrack(trackIndex: Int): Boolean = nativeLooperTrimTrack(trackIndex)
+    override fun looperSetEnabled(enabled: Boolean) = nativeLooperSetEnabled(enabled)
 
     // Real-time params (lock-free, no suspend)
-    fun looperSetTrackMuted(trackIndex: Int, muted: Boolean) = nativeLooperSetTrackMuted(trackIndex, muted)
-    fun looperSetTrackVolume(trackIndex: Int, volume: Float) = nativeLooperSetTrackVolume(trackIndex, volume)
-    fun looperSetTrackPan(trackIndex: Int, pan: Float) = nativeLooperSetTrackPan(trackIndex, pan)
+    override fun looperSetTrackMuted(trackIndex: Int, muted: Boolean) = nativeLooperSetTrackMuted(trackIndex, muted)
+    override fun looperSetTrackVolume(trackIndex: Int, volume: Float) = nativeLooperSetTrackVolume(trackIndex, volume)
+    override fun looperSetTrackPan(trackIndex: Int, pan: Float) = nativeLooperSetTrackPan(trackIndex, pan)
 
     // Metering queries (lock-free)
-    fun looperGetProgress(): Float = nativeLooperGetProgress()
+    override fun looperGetProgress(): Float = nativeLooperGetProgress()
     @Deprecated(
         "Polling the per-track peak is the lag source identified in audit AUD-1. " +
         "Use setLooperStateListener() and react to onTrackPeakChanged. " +
@@ -2861,12 +2862,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override fun looperIsTrackActive(trackIndex: Int): Boolean = nativeLooperIsTrackActive(trackIndex)
     override fun looperIsPlaying(): Boolean = nativeLooperIsPlaying()
     override fun looperIsRecording(): Boolean = nativeLooperIsRecording()
-    fun looperGetMasterLoopFrames(): Int = nativeLooperGetMasterLoopFrames()
-    fun looperGetRecordProgress(): Float = nativeLooperGetRecordProgress()
+    override fun looperGetMasterLoopFrames(): Int = nativeLooperGetMasterLoopFrames()
+    override fun looperGetRecordProgress(): Float = nativeLooperGetRecordProgress()
 
     // Per-track playback control
-    fun looperPauseTrack(trackIndex: Int) = nativeLooperPauseTrack(trackIndex)
-    fun looperResumeTrack(trackIndex: Int) = nativeLooperResumeTrack(trackIndex)
+    override fun looperPauseTrack(trackIndex: Int) = nativeLooperPauseTrack(trackIndex)
+    override fun looperResumeTrack(trackIndex: Int) = nativeLooperResumeTrack(trackIndex)
     @Deprecated(
         "Polling per-track play state contributes to the ~800 JNI calls/sec hot path " +
         "(audit COR-1). Use setLooperStateListener() and react to onTrackPlayingChanged. " +
@@ -2881,22 +2882,22 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         level = DeprecationLevel.WARNING,
     )
     fun looperGetTrackProgress(trackIndex: Int): Float = nativeLooperGetTrackProgress(trackIndex)
-    fun looperGetTrackLengthFrames(trackIndex: Int): Int = nativeLooperGetTrackLengthFrames(trackIndex)
-    fun looperResetTrackPlayHead(trackIndex: Int) = nativeLooperResetTrackPlayHead(trackIndex)
-    fun looperSaveUndoSnapshot(trackIndex: Int): Boolean = nativeLooperSaveUndoSnapshot(trackIndex)
-    fun looperRestoreUndo(trackIndex: Int): Boolean = nativeLooperRestoreUndo(trackIndex)
-    fun looperHasUndo(trackIndex: Int): Boolean = nativeLooperHasUndo(trackIndex)
+    override fun looperGetTrackLengthFrames(trackIndex: Int): Int = nativeLooperGetTrackLengthFrames(trackIndex)
+    override fun looperResetTrackPlayHead(trackIndex: Int) = nativeLooperResetTrackPlayHead(trackIndex)
+    override fun looperSaveUndoSnapshot(trackIndex: Int): Boolean = nativeLooperSaveUndoSnapshot(trackIndex)
+    override fun looperRestoreUndo(trackIndex: Int): Boolean = nativeLooperRestoreUndo(trackIndex)
+    override fun looperHasUndo(trackIndex: Int): Boolean = nativeLooperHasUndo(trackIndex)
 
     // Track waveform
-    fun looperGetTrackWaveform(trackIndex: Int, numBins: Int = 24): FloatArray {
+    override fun looperGetTrackWaveform(trackIndex: Int, numBins: Int): FloatArray {
         val bins = FloatArray(numBins)
         nativeLooperGetTrackWaveform(trackIndex, bins, numBins)
         return bins
     }
 
     // Track speed
-    fun looperSetTrackSpeed(trackIndex: Int, speed: Float) = nativeLooperSetTrackSpeed(trackIndex, speed)
-    fun looperGetTrackSpeed(trackIndex: Int): Float = nativeLooperGetTrackSpeed(trackIndex)
+    override fun looperSetTrackSpeed(trackIndex: Int, speed: Float) = nativeLooperSetTrackSpeed(trackIndex, speed)
+    override fun looperGetTrackSpeed(trackIndex: Int): Float = nativeLooperGetTrackSpeed(trackIndex)
 
     /**
      * Configure runtime looper capabilities for the device tier (F3.2). Defaults
@@ -2904,7 +2905,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * unchanged. `budgetBytes` is 64-bit; `maxTracks` is clamped to the hardware
      * ceiling (16) and never lowers an already-active track.
      */
-    fun looperSetCapabilities(budgetBytes: Long, maxTracks: Int, maxFreeSeconds: Int) =
+    override fun looperSetCapabilities(budgetBytes: Long, maxTracks: Int, maxFreeSeconds: Int) =
         nativeLooperSetCapabilities(budgetBytes, maxTracks, maxFreeSeconds)
 
     /**
@@ -2912,7 +2913,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * [com.watermellonstudios.audio.api.LooperStateListener.onTrackCompleted]
      * (F3.4). `plays <= 0` = infinite (default).
      */
-    fun looperSetTrackPlayCount(trackIndex: Int, plays: Int) =
+    override fun looperSetTrackPlayCount(trackIndex: Int, plays: Int) =
         nativeLooperSetTrackPlayCount(trackIndex, plays)
 
     /**
@@ -2920,7 +2921,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * tail bleed — preserves rhythmic transients at the seam); false = sustained
      * (long 50 ms crossfade + tail mixing for pads/reverbs). Live & RT-safe.
      */
-    fun looperSetTrackPercussionMode(trackIndex: Int, percussion: Boolean) =
+    override fun looperSetTrackPercussionMode(trackIndex: Int, percussion: Boolean) =
         nativeLooperSetTrackPercussionMode(trackIndex, percussion)
     fun looperIsTrackPercussionMode(trackIndex: Int): Boolean =
         nativeLooperIsTrackPercussionMode(trackIndex)
@@ -2935,7 +2936,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * Returns `true` if registration succeeded (or unregister was performed).
      */
-    fun setLooperStateListener(listener: com.watermellonstudios.audio.api.LooperStateListener?): Boolean {
+    override fun setLooperStateListener(listener: com.watermellonstudios.audio.api.LooperStateListener?): Boolean {
         return if (listener == null) {
             nativeLooperUnregisterStateListener()
             true
@@ -2952,15 +2953,15 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun looperGetDroppedEvents(): Long = nativeLooperGetDroppedEvents()
 
     // Master volume (lock-free)
-    fun looperSetMasterVolume(volume: Float) = nativeLooperSetMasterVolume(volume)
-    fun looperGetMasterVolume(): Float = nativeLooperGetMasterVolume()
+    override fun looperSetMasterVolume(volume: Float) = nativeLooperSetMasterVolume(volume)
+    override fun looperGetMasterVolume(): Float = nativeLooperGetMasterVolume()
 
     // Loop region (lock-free)
-    fun looperSetTrackLoopRegion(trackIndex: Int, startFrame: Long, endFrame: Long) =
+    override fun looperSetTrackLoopRegion(trackIndex: Int, startFrame: Long, endFrame: Long) =
         nativeLooperSetTrackLoopRegion(trackIndex, startFrame, endFrame)
-    fun looperResetTrackLoopRegion(trackIndex: Int) = nativeLooperResetTrackLoopRegion(trackIndex)
-    fun looperGetTrackLoopStart(trackIndex: Int): Int = nativeLooperGetTrackLoopStart(trackIndex)
-    fun looperGetTrackLoopEnd(trackIndex: Int): Int = nativeLooperGetTrackLoopEnd(trackIndex)
+    override fun looperResetTrackLoopRegion(trackIndex: Int) = nativeLooperResetTrackLoopRegion(trackIndex)
+    override fun looperGetTrackLoopStart(trackIndex: Int): Int = nativeLooperGetTrackLoopStart(trackIndex)
+    override fun looperGetTrackLoopEnd(trackIndex: Int): Int = nativeLooperGetTrackLoopEnd(trackIndex)
 
     /**
      * Onset bounds (first/last audible frame) of a track, for trimming a free
@@ -2968,7 +2969,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * track's peak that counts as content (e.g. 0.03). Returns (first, lastExclusive);
      * (0, 0) if silent/invalid.
      */
-    fun looperFindContentBounds(trackIndex: Int, thresholdRatio: Float): Pair<Int, Int> {
+    override fun looperFindContentBounds(trackIndex: Int, thresholdRatio: Float): Pair<Int, Int> {
         val packed = nativeLooperFindContentBounds(trackIndex, thresholdRatio)
         val first = (packed shr 32).toInt()
         val last = (packed and 0xFFFFFFFFL).toInt()
@@ -2981,11 +2982,11 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * UI/IO thread only — call after recording has stopped.
      * @param hopFrames analysis window (256 ≈ 5.3ms@48k); [sensitivity] >1 = more onsets.
      */
-    fun looperDetectOnsets(
+    override fun looperDetectOnsets(
         trackIndex: Int,
-        maxOnsets: Int = 512,
-        hopFrames: Int = 256,
-        sensitivity: Float = 1.0f
+        maxOnsets: Int,
+        hopFrames: Int,
+        sensitivity: Float
     ): IntArray = nativeLooperDetectOnsets(trackIndex, maxOnsets, hopFrames, sensitivity)
 
     /**
@@ -2994,11 +2995,11 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * wrap-mix when [tailFrames] > 0, and sets the loop region to [loopStart, loopEnd).
      * UI/IO thread only. Returns true on success.
      */
-    fun looperFinalizeFreeLoop(trackIndex: Int, loopStart: Int, loopEnd: Int, tailFrames: Int): Boolean =
+    override fun looperFinalizeFreeLoop(trackIndex: Int, loopStart: Int, loopEnd: Int, tailFrames: Int): Boolean =
         nativeLooperFinalizeFreeLoop(trackIndex, loopStart, loopEnd, tailFrames)
 
     // Metronome click (lock-free)
-    fun looperTriggerClick(isDownbeat: Boolean) = nativeLooperTriggerClick(isDownbeat)
+    override fun looperTriggerClick(isDownbeat: Boolean) = nativeLooperTriggerClick(isDownbeat)
 
     /**
      * Linear input peak [0..1], max of L/R channels. Useful for pre-record level
@@ -3047,16 +3048,16 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     // Export / Import (call from IO thread)
     override fun looperExportMix(filePath: String): Boolean = nativeLooperExportMix(filePath)
-    fun looperExportTrack(trackIndex: Int, filePath: String): Boolean = nativeLooperExportTrack(trackIndex, filePath)
+    override fun looperExportTrack(trackIndex: Int, filePath: String): Boolean = nativeLooperExportTrack(trackIndex, filePath)
 
     /**
      * Session capture: write the FULL track buffer (ignoring loop region) at
      * [bitDepth] (16/24 = PCM, 32 = IEEE float). Use 32 for a lossless save/
      * restore round-trip. Synchronous — call off the main thread.
      */
-    fun looperCaptureTrack(trackIndex: Int, filePath: String, bitDepth: Int): Boolean =
+    override fun looperCaptureTrack(trackIndex: Int, filePath: String, bitDepth: Int): Boolean =
         nativeLooperCaptureTrack(trackIndex, filePath, bitDepth)
-    fun looperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean = nativeLooperImportTrack(trackIndex, filePath, sampleRate)
+    override fun looperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean = nativeLooperImportTrack(trackIndex, filePath, sampleRate)
 
     // ========== EXPORT V2 (suspend wrappers, professional) ==========
     //
@@ -3070,18 +3071,17 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // applyLimiter: true-peak limiter (-1 dBFS, 5 ms lookahead).
     // bpm=0 → engine uses the current Transport BPM in metadata.
 
-    enum class ExportBitDepth(val raw: Int) { PCM_16(16), PCM_24(24), FLOAT_32(32) }
 
-    suspend fun looperExportMixPro(
+    override suspend fun looperExportMixPro(
         filePath: String,
-        bitDepth: ExportBitDepth = ExportBitDepth.PCM_16,
-        repeatLoops: Int = 1,
-        countInBeats: Int = 0,
-        applyLimiter: Boolean = true,
-        projectName: String? = null,
-        artist: String? = null,
-        comment: String? = null,
-        bpm: Int = 0
+        bitDepth: ExportBitDepth,
+        repeatLoops: Int,
+        countInBeats: Int,
+        applyLimiter: Boolean,
+        projectName: String?,
+        artist: String?,
+        comment: String?,
+        bpm: Int
     ): Boolean = withContext(Dispatchers.IO) {
         nativeLooperExportMixV2(
             filePath, bitDepth.raw, repeatLoops, countInBeats,
@@ -3094,13 +3094,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * shares the same length and bit depth so they can be loaded into a DAW.
      * @return number of stems written, or -1 on failure.
      */
-    suspend fun looperExportStems(
+    override suspend fun looperExportStems(
         directory: String,
-        bitDepth: ExportBitDepth = ExportBitDepth.PCM_16,
-        repeatLoops: Int = 1,
-        countInBeats: Int = 0,
-        applyLimiter: Boolean = true,
-        bpm: Int = 0
+        bitDepth: ExportBitDepth,
+        repeatLoops: Int,
+        countInBeats: Int,
+        applyLimiter: Boolean,
+        bpm: Int
     ): Int = withContext(Dispatchers.IO) {
         nativeLooperExportStems(
             directory, bitDepth.raw, repeatLoops, countInBeats, applyLimiter, bpm
@@ -3177,12 +3177,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     }
 
     /** Polled by UI to render a progress bar. [0..1]. */
-    fun looperGetExportProgress(): Float = nativeLooperGetExportProgress()
+    override fun looperGetExportProgress(): Float = nativeLooperGetExportProgress()
 
     /** Request cancellation of the current export. The export bails at the next iteration. */
-    fun looperCancelExport() = nativeLooperCancelExport()
+    override fun looperCancelExport() = nativeLooperCancelExport()
 
-    fun looperIsExportInProgress(): Boolean = nativeLooperIsExportInProgress()
+    override fun looperIsExportInProgress(): Boolean = nativeLooperIsExportInProgress()
 
     // ========== TELEMETRY ==========
     //
