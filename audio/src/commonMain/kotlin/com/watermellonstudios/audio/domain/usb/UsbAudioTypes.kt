@@ -92,17 +92,22 @@ enum class UsbSyncMode(val id: Int, val displayName: String) {
 }
 
 /**
- * USB Audio backend type.
+ * Se mudó a `com.watermellonstudios.audio.domain` (WA-1.3): de sus tres valores
+ * uno solo es USB, y lo consume `AudioEngine`, que es API central.
+ *
+ * El alias queda para no romper a los consumidores que ya lo importan de acá;
+ * sirve tanto para el tipo como para sus entries (`AudioBackendType.LIBUSB`) y su
+ * companion (`AudioBackendType.fromId(...)`).
  */
-enum class AudioBackendType(val id: Int, val displayName: String) {
-    NONE(0, "None"),
-    OBOE(1, "Oboe (System)"),
-    LIBUSB(2, "USB Direct");
-
-    companion object {
-        fun fromId(id: Int): AudioBackendType = entries.find { it.id == id } ?: NONE
-    }
-}
+@Deprecated(
+    message = "Se mudó a com.watermellonstudios.audio.domain.AudioBackendType — " +
+        "no es un tipo USB (WA-1.3).",
+    replaceWith = ReplaceWith(
+        "AudioBackendType",
+        "com.watermellonstudios.audio.domain.AudioBackendType",
+    ),
+)
+typealias AudioBackendType = com.watermellonstudios.audio.domain.AudioBackendType
 
 /**
  * USB device connection state.

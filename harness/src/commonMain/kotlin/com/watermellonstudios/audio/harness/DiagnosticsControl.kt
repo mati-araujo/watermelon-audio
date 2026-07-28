@@ -29,7 +29,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.api.currentDeviceCapabilities
-import com.watermellonstudios.audio.domain.usb.AudioBackendType
+import com.watermellonstudios.audio.domain.AudioBackendType
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
 
 /**
