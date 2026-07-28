@@ -28,16 +28,16 @@ import com.watermellonstudios.audio.domain.looper.ExportBitDepth
  * `looperIsTrackPercussionMode`. La regla de opt-in no cambió: entran cuando aparezca
  * quien los use.
  *
- * ## Los dos que NO PUEDEN estar acá
+ * ## El único que NO PUEDE estar acá
  *
- * - **`looperExportMixCompressed`** renderiza un WAV y lo transcodifica a AAC con
- *   `MediaCodec`. No es que falte declararlo: en iOS el equivalente es `AVAssetWriter`,
- *   o sea una implementación nueva, no una firma. Se queda en `androidMain` hasta que
- *   alguien escriba la mitad de Apple.
- * - **`setLooperStateListener`** no tiene contraparte en la C API —el registro del
- *   callback existe **sólo** en el JNI— y además choca de frente con la regla RT (D6):
- *   el thread de audio no entra a Kotlin. Necesita una decisión de diseño (¿polling?
- *   ¿una cola que drene la UI?), no una declaración.
+ * **`looperExportMixCompressed`** renderiza un WAV y lo transcodifica a AAC con
+ * `MediaCodec`. No es que falte declararlo: en iOS el equivalente es `AVAssetWriter`, o
+ * sea una implementación nueva, no una firma. Se queda en `androidMain` hasta que
+ * alguien escriba la mitad de Apple.
+ *
+ * `setLooperStateListener` **también** estaba afuera y ya no lo está: necesitaba una
+ * superficie nueva en la C API (`wma_looper_set_event_callback`), que ahora existe. Ver
+ * [setLooperStateListener].
  *
  * ## Sobre los dos `suspend`
  *
@@ -179,9 +179,9 @@ interface ILooperBridge {
 
     // ==================== LECTURA PARA LA UI ====================
     //
-    // Todo por polling, nunca por callback: la regla RT (D6) dice que el thread de
-    // audio no entra a Kotlin. Es la misma razón por la que `setLooperStateListener`
-    // no está en esta interfaz.
+    // Todo esto es polling. El único camino de push del looper es
+    // [setLooperStateListener], y llega por un worker del motor, no por el thread de
+    // audio — ver su KDoc para por qué eso no contradice a D6.
 
     /** Avance del loop maestro, 0..1. */
     fun looperGetProgress(): Float
@@ -294,4 +294,40 @@ interface ILooperBridge {
 
     /** Le pide al export en vuelo que pare. No es instantáneo. */
     fun looperCancelExport()
+
+    // ==================== EVENTOS DE ESTADO (push) ====================
+
+    /**
+     * Instala (o quita, con `null`) el receptor de eventos de estado del looper.
+     *
+     * ## Esto es push, y NO contradice la regla RT
+     *
+     * El thread de audio **no** llama a [listener]: empuja a una cola lock-free y sigue.
+     * Un worker propio del motor la drena cada ~15 ms y desde ahí llama acá. O sea que
+     * D6 —"el thread de audio jamás entra a Kotlin"— se sigue cumpliendo, y por eso este
+     * es el único lugar de toda la fachada donde el motor llama hacia arriba en vez de
+     * ser preguntado.
+     *
+     * Existe porque lo contrario se midió y era caro: el consumidor sondeaba progreso,
+     * estado y pico de 8 pistas cada 33 ms —unas 800 llamadas por segundo— y la UI se
+     * notaba. El motor además coalesce (progreso cada ≥ 2048 frames, pico cada ≥ 0,5 dB,
+     * `playing` sólo en transiciones), que es lo que un sondeo no puede hacer.
+     *
+     * ## Los callbacks NO llegan en el hilo de UI
+     *
+     * Llegan en ese worker. Quien implemente [LooperStateListener] tiene que saltar al
+     * hilo de UI por su cuenta y ser thread-safe con lo que toque.
+     *
+     * ## Quitar el listener no corta los eventos en vuelo
+     *
+     * El worker toma una copia del sink una vez por pasada, así que un evento levantado
+     * justo antes de un `setLooperStateListener(null)` **todavía llega**. No es una
+     * carrera que se gane ordenando las llamadas: es el contrato del despachador. Una
+     * implementación no puede liberar nada que el callback necesite apenas lo quita.
+     *
+     * Sólo hay un listener a la vez: registrar reemplaza al anterior.
+     *
+     * @return `false` si no se pudo instalar. Quitarlo siempre devuelve `true`.
+     */
+    fun setLooperStateListener(listener: LooperStateListener?): Boolean
 }

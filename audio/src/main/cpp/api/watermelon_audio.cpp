@@ -1882,6 +1882,29 @@ int64_t wma_looper_get_dropped_events(const WmaEngine* engine) {
     return engine->engine->getLooperEventDispatcher().getDroppedEvents();
 }
 
+void wma_looper_set_event_callback(WmaEngine* engine, WmaLooperEventCallback callback,
+                                   void* user_data) {
+    WMA_CHECK_VOID(engine);
+    auto& dispatcher = engine->engine->getLooperEventDispatcher();
+
+    if (!callback) {
+        dispatcher.setSink(nullptr);
+        return;
+    }
+
+    // The lambda copies the two words it needs and nothing else: the sink is
+    // stored in a std::function that the worker thread copies once per drain
+    // pass, so capturing anything with a non-trivial copy would put that cost on
+    // every pass.
+    //
+    // `ev.type` is cast to int rather than passed through: the C surface must not
+    // expose the internal enum's type, and the numeric values are pinned as ABI
+    // in WmaLooperEventType.
+    dispatcher.setSink([callback, user_data](const wm::LooperEvent& ev) {
+        callback(static_cast<int>(ev.type), ev.trackIndex, ev.value, user_data);
+    });
+}
+
 void wma_looper_reset_telemetry(WmaEngine* engine) {
     WMA_CHECK_VOID(engine);
     engine->engine->getAudioLooper().resetTelemetry();

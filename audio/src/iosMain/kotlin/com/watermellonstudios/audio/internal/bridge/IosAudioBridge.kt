@@ -3,6 +3,8 @@ package com.watermellonstudios.audio.internal.bridge
 import com.watermellonstudios.audio.api.EffectChainSnapshot
 import com.watermellonstudios.audio.api.EffectParameterUpdate
 import com.watermellonstudios.audio.api.IAudioNativeBridge
+import com.watermellonstudios.audio.api.ILooperBridge
+import com.watermellonstudios.audio.api.LooperStateListener
 import com.watermellonstudios.audio.api.NativeEffectSnapshot
 import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
@@ -12,7 +14,11 @@ import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
 import cnames.structs.WmaEngine
 import com.watermellonstudios.audio.internal.cinterop.*
+import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.StableRef
+import kotlinx.cinterop.asStableRef
+import kotlinx.cinterop.staticCFunction
 import kotlinx.cinterop.MemScope
 import kotlinx.cinterop.cstr
 import kotlinx.cinterop.ExperimentalForeignApi
@@ -66,6 +72,83 @@ import kotlinx.coroutines.withContext
  * siempre `false`, y [createSplitBackend] y [setUsbLatencyProfile] fallan de forma
  * explícita en vez de fingir que hicieron algo.
  */
+/**
+ * Lo que el puntero `user_data` del callback de C apunta, y lo que hace segura toda
+ * esta sección.
+ *
+ * El despachador del motor **no** garantiza que no haya un evento en vuelo después de
+ * quitar el sink: toma una copia del sink una vez por pasada, así que un evento
+ * levantado justo antes del `null` todavía llega. O sea que liberar el `StableRef`
+ * apenas se desregistra es un use-after-free, no una carrera que se gane ordenando las
+ * llamadas.
+ *
+ * La salida es no liberarlo nunca. El `StableRef` apunta a este holder —uno por bridge,
+ * y el bridge vive lo que vive el proceso— y lo que se pone y se saca es [listener].
+ * Un evento en vuelo encuentra el holder vivo y el campo en `null`, y no hace nada.
+ * Cuesta un objeto por bridge; la alternativa cuesta un crash intermitente.
+ */
+private class LooperListenerHolder {
+    /**
+     * Lo escribe el hilo de UI y lo lee el worker del motor: sin `@Volatile` el lector
+     * puede no ver nunca la escritura.
+     */
+    @kotlin.concurrent.Volatile
+    var listener: LooperStateListener? = null
+}
+
+/**
+ * El puente de C a Kotlin. Es `staticCFunction`, así que **no puede capturar nada** —
+ * por eso el holder viaja por `user_data` y esto vive a nivel de archivo y no adentro
+ * de la clase.
+ *
+ * Corre en el worker del motor, no en el thread de audio (ver
+ * [ILooperBridge.setLooperStateListener]) y no en el hilo de UI. Kotlin/Native adjunta
+ * solo el hilo foráneo, así que llamar a Kotlin desde acá es legal; lo que NO es legal
+ * es tocar nada que espere estar en el hilo principal, y por eso el contrato le pide al
+ * consumidor que marshalee él.
+ *
+ * Un `type` desconocido se ignora en vez de romper: el enum de C puede crecer, y una
+ * versión vieja de esta fachada tiene que sobrevivir a un motor más nuevo.
+ */
+/**
+ * El reparto de un evento a su método, **afuera** del `staticCFunction` a propósito.
+ *
+ * Adentro sería intestable: un `staticCFunction` privado no se puede llamar desde un
+ * test, y el único camino para llegar a él es el thread de audio del motor. Y este
+ * `when` es justo donde vive el bug silencioso de esta sección — cruzar progreso con
+ * pico no rompe nada, sólo hace que la UI muestre lo que no es.
+ *
+ * Un `type` desconocido se ignora en vez de romper: el enum de C puede crecer, y una
+ * versión vieja de esta fachada tiene que sobrevivir a un motor más nuevo.
+ */
+@OptIn(ExperimentalForeignApi::class)
+internal fun dispatchLooperEvent(
+    listener: LooperStateListener,
+    type: Int,
+    trackIndex: Int,
+    value: Float,
+) {
+    when (type) {
+        WMA_LOOPER_EVENT_PROGRESS.toInt() -> listener.onTrackProgress(trackIndex, value)
+        WMA_LOOPER_EVENT_PLAYING_CHANGED.toInt() ->
+            listener.onTrackPlayingChanged(trackIndex, value != 0f)
+        WMA_LOOPER_EVENT_PEAK_CHANGED.toInt() -> listener.onTrackPeakChanged(trackIndex, value)
+        WMA_LOOPER_EVENT_RECORD_PROGRESS.toInt() ->
+            listener.onTrackRecordProgress(trackIndex, value)
+        WMA_LOOPER_EVENT_TRACK_COMPLETED.toInt() -> listener.onTrackCompleted(trackIndex)
+        else -> Unit
+    }
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private val looperEventTrampoline = staticCFunction<Int, Int, Float, COpaquePointer?, Unit> {
+        type, trackIndex, value, userData ->
+    val listener = userData?.asStableRef<LooperListenerHolder>()?.get()?.listener
+    if (listener != null) {
+        dispatchLooperEvent(listener, type, trackIndex, value)
+    }
+}
+
 @OptIn(ExperimentalForeignApi::class)
 internal class IosAudioBridge : IAudioNativeBridge {
 
@@ -732,6 +815,15 @@ internal class IosAudioBridge : IAudioNativeBridge {
         wma_set_automation_param(engine, effectIndex, paramId, xyValue.coerceIn(0f, 1f))
     }
 
+    /**
+     * Vive lo que vive el bridge y **su `StableRef` no se libera nunca**, a propósito.
+     * Ver [LooperListenerHolder].
+     */
+    private val looperListenerHolder = LooperListenerHolder()
+    private val looperListenerRef: StableRef<LooperListenerHolder> by lazy {
+        StableRef.create(looperListenerHolder)
+    }
+
     // ==================== LOOPER ====================
     //
     // Empezó siendo el subconjunto de 11 que necesitaba la tira del harness; ahora es
@@ -1017,6 +1109,26 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun looperGetExportProgress(): Float = wma_looper_get_export_progress(engine)
     override fun looperIsExportInProgress(): Boolean = wma_looper_is_export_in_progress(engine)
     override fun looperCancelExport() = wma_looper_cancel_export(engine)
+
+    /**
+     * Instalar y quitar es sólo mover [LooperListenerHolder.listener]; el callback de C
+     * se instala una sola vez y no se quita.
+     *
+     * Podría quitarse pasando `null` a `wma_looper_set_event_callback`, y **a propósito
+     * no se hace**: dejarlo puesto significa que el despachador drena y descarta contra
+     * un holder cuyo `listener` es `null`, que es exactamente lo que hace de todos modos
+     * cuando no hay sink. Quitarlo agregaría un segundo estado que puede desincronizarse
+     * con el campo, sin ahorrar nada — el worker corre igual, porque lo arranca el
+     * constructor del motor.
+     *
+     * Siempre `true`: no hay forma de que falle. Devuelve `Boolean` porque Android sí
+     * puede fallar, ahí el registro busca métodos por JNI.
+     */
+    override fun setLooperStateListener(listener: LooperStateListener?): Boolean {
+        looperListenerHolder.listener = listener
+        wma_looper_set_event_callback(engine, looperEventTrampoline, looperListenerRef.asCPointer())
+        return true
+    }
 
     /**
      * Arma un [WmaExportOptions] dentro del scope que lo va a liberar.

@@ -2936,7 +2936,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * Returns `true` if registration succeeded (or unregister was performed).
      */
-    fun setLooperStateListener(listener: com.watermellonstudios.audio.api.LooperStateListener?): Boolean {
+    override fun setLooperStateListener(listener: com.watermellonstudios.audio.api.LooperStateListener?): Boolean {
         return if (listener == null) {
             nativeLooperUnregisterStateListener()
             true
