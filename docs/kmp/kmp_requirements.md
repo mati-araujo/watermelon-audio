@@ -18,6 +18,7 @@
 > | Fases 0, 2, 3 | ✅ cerradas · **WA-2.5/2.6 cerrada** (JNI→C API, las 10 categorías + la cola) |
 > | Fase 4 | 🟢 WA-4.1 ✅ · **G1/WA-4.2 ✅ CERRADO** — NoisyPad linkea la 1.9.0 con 251 símbolos `wma_*` adentro |
 > | Fase 5 | ✅ **WA-5.5 CERRADA** — 7 controles en el simulador, y la fase final cerró **sin design system compartido**: se midió el harness y da **cero reutilización entre archivos** (§16) |
+> | **La fachada Kotlin** | ✅ **CERRADA (2026-07-28, rama `feature/wa-facade-kotlin-ios`, 7 commits sin pushear).** Los 96 miembros que NoisyPad usaba y sólo existían en `androidMain` ya están en `commonMain` — ver §17 |
 > | **Lo único grande abierto** | **G2 — validación en device. Necesita un iPhone.** Sonido real, latencia round-trip, Instruments sobre el render block |
 > | Otros pendientes | **1.9.1 publicada** ✅ · **los 2 stubs que mentían: resueltos** ✅ · **design system: cerrado sin compartir** ✅ · release **1.10.0 esperando billing de Actions** (PR #65) · el smoke de Android (bloqueado por descargas) · WA-1.3 |
 >
@@ -3507,3 +3508,114 @@ Las 39 funciones de looper del gap portable entran en WA-2.5 sin recortar. Es el
 más grande y va **último** en la secuencia de categorías, para llegar con el mecanismo ya
 rodado. Esto refuerza la fusión WA-2.5/2.6: el looper es justo donde escribir cada función
 dos veces más cuesta.
+
+---
+
+## 17. La fachada Kotlin del bridge (2026-07-28)
+
+**El hueco que nadie había medido.** WA-4.1 y G1/WA-4.2 cerraron y NoisyPad seguía sin
+poder tener motor en iOS. El bloqueante no era el empaquetado ni el C++: era que **la
+fachada de Kotlin sólo existía del lado JNI**.
+
+Medido con script sobre `AudioEngineStateManager` + `LooperControllerAdapter` +
+`WaveformProviderAdapter` de NoisyPad, contra `IAudioNativeBridge` + `IInputBridge` +
+`IEffectState*`:
+
+| | |
+|---|---|
+| superficie común de partida | 123 miembros |
+| miembros del bridge que NoisyPad usa | **148** |
+| presentes en común | 52 |
+| **ausentes en común Y en `IosAudioBridge`** | **96** |
+
+Repartidos: looper 55, arpegiador 18, SoundFont 13, filtro de voz 4,
+automatización/mapeo 4, "usb" 2. **El C++ ya los tenía todos** —275 `wma_*` en el header,
+81 de looper— y el `.def` de cinterop toma el header entero, así que los bindings ya se
+generaban. De los 96, **93 eran fachada mecánica**.
+
+### Lo que se hizo, por commit
+
+| commit | qué |
+|---|---|
+| `0d8cb9b` | `IArpeggiatorBridge` (19) |
+| `0a2fb03` | `ISoundFontBridge` (13), con los guards de Android izados a contrato |
+| `603df78` | `ILooperBridge` (61) — las 11 que estaban en `IAudioNativeBridge` se MUDARON, no se duplicaron — y `ExportBitDepth` fuera del bridge |
+| `d9cd894` | los 12 sueltos |
+| `09e1292` | `setLooperStateListener` + **C API nueva** `wma_looper_set_event_callback` |
+| `3684f87` | `ModeTransitionFactory` a `commonMain` + `platformDefaultAudioLogger` |
+
+`IAudioNativeBridge` quedó componiendo por dominio —`IEffectStateProvider`,
+`IEffectStateWriter`, `IInputBridge`, `IArpeggiatorBridge`, `ISoundFontBridge`,
+`ILooperBridge`— y **la regla de opt-in no se relajó**: quedan afuera 23 miembros del
+looper y `loadSoundFontFromFd`, todos sin un solo llamador. La única entrada sin
+consumidor de producción es `isArpEnabled`, y su justificación está abajo.
+
+### Correcciones a lo que este mismo documento afirmaba
+
+1. **`setLooperStateListener` NO choca con D6.** Se dijo que sí. El KDoc de
+   `LooperStateListener` siempre dijo lo contrario: los callbacks llegan en un **worker
+   del motor**, no en el thread de audio. Lo que faltaba era superficie de C API, y el
+   comentario de `jni_audio_bridge.cpp` ya había propuesto su forma exacta.
+2. **El bloque comentado del `includeBuild` de NoisyPad estaba incompleto** desde F4:
+   sustituía sólo `audio-android` y no la coordenada raíz. Corregido de ese lado.
+
+### Lo que se aprendió midiendo, y no se deduce del código
+
+- **`addressOf(0)` sobre un array vacío tira `ArrayIndexOutOfBoundsException`** —
+  Kotlin/Native chequea límites. No es comportamiento indefinido.
+- **Las dos funciones "de USB" no son de USB**: `wma_set_usb_streaming_mode` es
+  `BackendManager::setFullDuplexEnabled` y `wma_configure_usb_backend` es
+  `setSampleRate`. Los dos símbolos linkean en el `.a` de iOS. Un no-op "por D4" habría
+  descartado en silencio lo único que hacen.
+- **`std::clamp(NaN, 0, 1)` devuelve `NaN`**, así que el `isFinite()` de Kotlin en
+  `applyAutomation` es lo único que frena un `NaN` antes del parámetro de un efecto.
+- **`looperPrepareTrack` devuelve `true` y la pista no queda activa ni con largo**: la
+  reserva se completa en el render.
+- **`applyAutomation(0f)` con `mapMin = 0` deja el parámetro en 0.1**, no en 0: el motor
+  recorta al rango propio del parámetro después del mapeo.
+- **`isArpEnabled` entra al contrato aunque no tenga consumidor de producción**: es la
+  única lectura del arpegiador que no depende del thread de audio, o sea la única forma
+  de demostrar que sus 18 bindings llegan al motor. El consumidor es el test.
+- **El despachador no garantiza que no haya un evento en vuelo tras quitar el sink** —
+  toma una copia por pasada de drenado. Para Kotlin/Native eso significa que liberar el
+  `StableRef` al desregistrar es un use-after-free. La salida es **no liberarlo nunca**:
+  apunta a un holder con un campo `@Volatile` que se pone y se saca.
+
+### Bug latente ENCONTRADO Y NO ARREGLADO
+
+`ModeTransitionState.Failed` es **inalcanzable desde afuera**. `transitionTo` lo publica y
+enseguida `attemptRollback()` lo pisa con `Idle(origen)`; el `catch` que lo dejaría en pie
+sólo corre si `setAudioMode` **tira**, y nunca tira — devuelve `Result.failure`. Un
+consumidor no puede distinguir una transición fallida de un no-op.
+`retryLastTransition()` sí funciona, así que la recuperación existe y la señal no. No se
+arregló porque la etapa que lo encontró **mudaba código de source set y no cambiaba
+comportamiento**; el test `aRejectedModeChangeRollsBackToTheOriginalMode` fija el
+comportamiento actual y va a fallar cuando se corrija, con el porqué en su KDoc.
+
+### Verificación
+
+| Gate | Resultado |
+|---|---|
+| `run-cpp-tests.sh` | 767 tests, 100% (762 + 5) |
+| TSan · ASan+UBSan | 767, 100%, limpios |
+| `iosSimulatorArm64Test` | 19 suites, **150 tests**, 0 fallas (105 + 45) |
+| `testDebugUnitTest` | 9 suites, **70 tests**, 0 fallas (64 + 6) |
+| `check-cpp-portability` · `check-no-ui-in-library` · `build-ios` · `build-harness` | verdes |
+| **Mutaciones de control** | **11**, todas en rojo con exit 1 |
+
+Reparto de fuentes: `commonMain` 74→82, `androidMain` 23→21, `iosMain` 5→6.
+
+### Lo que queda
+
+- **Publicar.** La rama no está pusheada y no hay versión publicada con estos cambios. Las
+  credenciales de GPR **no están donde el build las busca** (`project.findProperty` o env):
+  el `local.properties` de este repo sólo tiene `sdk.dir`. Hace falta
+  `gpr.user`/`gpr.key` en `~/.gradle/gradle.properties` con scope `write:packages`.
+  Ojo: publicar a mano saltea a release-please, que es quien maneja el versionado.
+- **Dos huecos de implementación, ninguno de diseño:** `looperExportMixCompressed`
+  (MediaCodec → iOS necesita `AVAssetWriter`) y `getDetailedLatencyInfo` (su JNI vive en
+  `jni_benchmark.cpp` y responde preguntas que sólo existen en Android).
+- **Hueco de diagnóstico:** `platformDefaultAudioLogger` en iOS es el no-op. Escribir un
+  `AudioLogger` sobre `os_log` es chico y no tiene consumidor todavía.
+- El callback de looper **no está probado end-to-end desde Kotlin**: la cadena de C sí,
+  pero que el trampolín sobreviva a un hilo foráneo se cierra en device (WA-4.3).
