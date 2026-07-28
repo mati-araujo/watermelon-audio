@@ -59,8 +59,32 @@ import kotlin.test.assertTrue
  *
  * Con `WMA_ERROR_STREAM`, el log del proceso muestra la causa de CoreAudio —típicamente
  * `AQMEIO … finding/initializing Default-InputOutput` precedido de
- * `HALDefaultDevice: Could not find default device for dOut`—, y eso distingue "el
- * simulador no tiene salida" de un problema del backend.
+ * `HALDefaultDevice: Could not find default device for dOut`.
+ *
+ * ## ⚠️ EL VEREDICTO ES SOBRE EL PROCESO DE TEST, NO SOBRE LA APP
+ *
+ * **Esto se descubrió usándolo, y es la corrección más importante de este KDoc.** Un
+ * `WMA_ERROR_STREAM` acá **NO prueba que la app no vaya a sonar en ese mismo simulador**.
+ *
+ * Medido: en el mismo simulador y en el mismo momento, NoisyPad instalada abría el stream
+ * sin un solo fallo mientras este test seguía reportando `WMA_ERROR_STREAM` y el
+ * `AVAudioEngine` pelado seguía fallando con `-10851`.
+ *
+ * La diferencia plausible es cómo corre cada uno: el runner de Kotlin/Native lanza el
+ * binario de tests con `simctl spawn`, o sea **un proceso pelado sin bundle de app**,
+ * mientras que la app corre instalada. CoreAudio en el simulador no le da la misma salida a
+ * los dos. No está probado que sea exactamente eso; lo que sí está medido es que **los dos
+ * entornos difieren**.
+ *
+ * Consecuencia práctica, y la razón de esta nota: la tabla de atribución de
+ * [unAVAudioEnginePeladoArrancaOnNo] discrimina entre "bug del backend" y "el entorno **de
+ * este runner** no tiene salida" — que es útil, porque un backend que devolviera un código
+ * inventado se vería igual—, pero **no sirve para concluir nada sobre la app**. Para eso hay
+ * que correr la app y mirar su log.
+ *
+ * Lo que este archivo sigue probando sin asteriscos son los otros dos: que el código de
+ * retorno pertenece al contrato y que un arranque fallido no deja el motor colgado. Esos no
+ * dependen del entorno y valen en cualquier máquina.
  */
 @OptIn(ExperimentalForeignApi::class)
 class CoreAudioBackendStartTest {
@@ -125,8 +149,11 @@ class CoreAudioBackendStartTest {
      * | pelado | `CoreAudioBackend` | conclusión |
      * |---|---|---|
      * | arranca | falla | **bug del backend** — hay que mirar `CoreAudioBackend.mm` |
-     * | falla | falla | el entorno no tiene salida de audio; el backend no tiene la culpa |
-     * | arranca | arranca | todo bien, hay sonido |
+     * | falla | falla | el runner de tests no tiene salida de audio; el backend no tiene la culpa |
+     * | arranca | arranca | el stream abre también acá |
+     *
+     * **La segunda fila NO dice nada sobre la app** — ver el aviso del KDoc de la clase: se
+     * midió a la app abriendo el stream en el mismo simulador donde este test decía que no.
      *
      * Tampoco afirma que arranque, por lo mismo que el otro: imprime.
      */
