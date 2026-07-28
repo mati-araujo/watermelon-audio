@@ -105,6 +105,12 @@ fun HarnessApp() {
                 // Control 7 de 7 — diagnostico. Primer usuario real de
                 // @InternalWatermelonApi y de la captura de logs.
                 DiagnosticsControl()
+
+                // Control 8 — modos. No estaba en la propuesta original de los 7;
+                // lo pidio el smoke: `Category.MODE` de WA-1.4 tiene UN solo call
+                // site (`setAudioMode`) y era el unico de los 26 que ninguna
+                // pantalla podia alcanzar. Ya encontro una divergencia iOS/Android.
+                ModeControl()
             }
         }
     }

@@ -2,6 +2,7 @@ package com.watermellonstudios.audio.internal.bridge
 
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
+import com.watermellonstudios.audio.domain.mode.AudioMode
 import com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
 import kotlinx.coroutines.test.runTest
 import kotlin.test.AfterTest
@@ -262,5 +263,41 @@ class IosAudioBridgeTest {
     @Test
     fun theDroppedCounterIsReadableAndNonNegative() {
         assertTrue(bridge.getLogCaptureDropped() >= 0, "el contador de descartes no puede ser negativo")
+    }
+
+    /**
+     * Un modo fuera de rango tiene que **fallar**, no reportar éxito.
+     *
+     * Lo destapó el control de modo del harness (WA-1.4, call site 26): Android valida
+     * `mode !in 0..2` en el puente y devuelve `IllegalArgumentException`; iOS no
+     * validaba nada y devolvía `Result.success` habiendo hecho **cero**, porque
+     * `wma_set_audio_mode` sí rechaza el valor y vuelve sin tocar el motor.
+     *
+     * El motor nunca estuvo en riesgo — la divergencia es la **respuesta**. Un
+     * consumidor KMP que escribe `setAudioMode(x).onFailure { … }` en `commonMain`
+     * recibía dos contratos distintos según la plataforma, que es exactamente la clase
+     * de bug que WA-2.5/2.6 salió a buscar.
+     */
+    @Test
+    fun anOutOfRangeModeFailsTheSameWayItDoesOnAndroid() = runTest {
+        val before = bridge.getAudioMode()
+
+        val failure = bridge.setAudioMode(7)
+
+        assertTrue(failure.isFailure, "un modo fuera de rango no puede reportar éxito")
+        assertIs<IllegalArgumentException>(
+            failure.exceptionOrNull(),
+            "Android tira IllegalArgumentException para el mismo valor",
+        )
+        assertEquals(before, bridge.getAudioMode(), "el rechazo no debería mover el modo")
+    }
+
+    /** Y el rango válido sigue pasando: el guard no puede comerse los tres modos reales. */
+    @Test
+    fun theThreeRealModesStillRoundTrip() = runTest {
+        AudioMode.entries.forEach { mode ->
+            assertTrue(bridge.setAudioMode(mode.id).isSuccess, "${mode.displayName} debería aceptarse")
+            assertEquals(mode.id, bridge.getAudioMode(), "el motor no quedó en ${mode.displayName}")
+        }
     }
 }
