@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.9.1...v1.10.0) (2026-07-28)
+
+
+### Features
+
+* los dos stubs que mentían — uno se borra, el otro dice la verdad ([#64](https://github.com/mati-araujo/watermelon-audio/issues/64)) ([a932f12](https://github.com/mati-araujo/watermelon-audio/commit/a932f129b84a6b521a31e5a20ec6086cd2a4a8f5))
+
 ## [1.9.1](https://github.com/mati-araujo/watermelon-audio/compare/v1.9.0...v1.9.1) (2026-07-27)
 
 
