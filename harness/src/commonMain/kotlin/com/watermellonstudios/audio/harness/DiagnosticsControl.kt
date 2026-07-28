@@ -25,7 +25,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.watermellonstudios.audio.api.InternalWatermelonApi
@@ -187,14 +186,14 @@ fun DiagnosticsControl(modifier: Modifier = Modifier) {
                     .fillMaxWidth()
                     .heightIn(min = 48.dp, max = 220.dp)
                     .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0xFF1E1E1E))
+                    .background(HarnessTokens.InsetSurface)
                     .padding(6.dp)
                     .verticalScroll(rememberScrollState()),
             ) {
                 if (logLines.isEmpty()) {
                     Text(
                         if (logsEnabled) "sin líneas — apretá \"vaciar\"" else "captura apagada",
-                        color = Color(0xFF888888),
+                        color = HarnessTokens.LogMeta,
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                     )
@@ -202,7 +201,7 @@ fun DiagnosticsControl(modifier: Modifier = Modifier) {
                     logLines.forEach { line ->
                         Text(
                             line,
-                            color = Color(0xFFCCCCCC),
+                            color = HarnessTokens.LogText,
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
                         )

@@ -17,9 +17,9 @@
 > | **La pregunta que justificaba el programa** | **Contestada: el input path de iOS CAPTURA.** `inputData` deja de ser `0x0`, `inputPeak` trae señal real |
 > | Fases 0, 2, 3 | ✅ cerradas · **WA-2.5/2.6 cerrada** (JNI→C API, las 10 categorías + la cola) |
 > | Fase 4 | 🟢 WA-4.1 ✅ · **G1/WA-4.2 ✅ CERRADO** — NoisyPad linkea la 1.9.0 con 251 símbolos `wma_*` adentro |
-> | Fase 5 | 🟢 WA-5.5 con sus **7 controles** corriendo en el simulador |
+> | Fase 5 | ✅ **WA-5.5 CERRADA** — 7 controles en el simulador, y la fase final cerró **sin design system compartido**: se midió el harness y da **cero reutilización entre archivos** (§16) |
 > | **Lo único grande abierto** | **G2 — validación en device. Necesita un iPhone.** Sonido real, latencia round-trip, Instruments sobre el render block |
-> | Otros pendientes | **1.9.1 publicada** ✅ · **los 2 stubs que mentían: resueltos** ✅ · el design system (la premisa cambió, ver §16) · el smoke de Android (bloqueado por descargas, no por trabajo) · WA-1.3 |
+> | Otros pendientes | **1.9.1 publicada** ✅ · **los 2 stubs que mentían: resueltos** ✅ · **design system: cerrado sin compartir** ✅ · release **1.10.0 esperando billing de Actions** (PR #65) · el smoke de Android (bloqueado por descargas) · WA-1.3 |
 >
 > ⚠️ **Hoy sólo se puede validar en SIMULADOR**: no hay iPhone, y del lado de Android no hay
 > device **ni un solo AVD**. §16 ordena lo que queda por eso: primero lo que no necesita
@@ -2882,6 +2882,59 @@ por eso el linker se comió toda la superficie nativa por dead-code elimination.
 > **G1 / WA-4.2 ✅.**
 
 
+### Nota de cierre — WA-5.5 cierra SIN design system compartido (2026-07-28)
+
+**El plan dejó esta etapa para el final con un argumento explícito y correcto:** *"el harness te
+dice exactamente qué componentes se repiten y cuáles eran de un solo uso — que es la única
+información que hace que la cosecha desde NoisyPad no sea copiar por copiar."* Los 7 controles
+existen, así que por primera vez se pudo **preguntar** en vez de estimar.
+
+**La respuesta fue que no se repite nada.** Medido sobre los 7 controles, 1409 LOC:
+
+| | |
+|---|---|
+| Colores hardcodeados | **9 usos, 6 distintos** |
+| Composables extraídos como reutilizables | **2** — `LabeledSlider`, `MeterBar` |
+| …usados fuera de su propio archivo | **0** — los dos viven enteros en `InputMonitorControl.kt` |
+| Material3 crudo | 74 `Text`, 30 `Button`, 7 `Slider`, 6 `Card`, 3 `Switch` |
+
+**Cero reutilización entre archivos.** El consumidor real que se construyó para revelar qué
+componentes hacían falta reveló que no hacía falta ninguno.
+
+**Y del otro lado, el design system de producto ya existe y está terminado** — ver la nota del
+punto 3 anterior: `core-ui` de NoisyPad es Compose Multiplatform, con tokens, catálogo, pipeline
+de tokens web y ADR propia (`0002`, aceptada 2026-07-25). La motivación de producto —"NoisyPad
+iOS lo va a necesitar igual"— **ya está satisfecha, en la app, que es donde corresponde**.
+
+> [!IMPORTANT]
+> **Lo que se hizo en cambio:** `harness/…/HarnessTokens.kt`, ~50 líneas, `internal`, sólo
+> colores. Mata los 6 hexes repartidos en 4 archivos (`0xFF1E1E1E` aparecía tres veces). **No
+> es un design system y el archivo lo dice**: no se comparte, no se publica y no pretende
+> crecer. Sin tokens de espaciado ni de tipografía **porque no se midió repetición de eso**;
+> inventarlos sería la misma especulación que esta decisión rechaza.
+>
+> **El umbral para reabrir la discusión, escrito en el archivo:** *dos consumidores reales
+> necesitando el mismo componente*, no *parece reutilizable*.
+
+**Los tres costos que hacían cara la alternativa**, y el tercero es nuevo:
+
+1. Este repo pasaría a **shippear Compose**, y su valor es justamente no arrastrar UI.
+2. **Ciclo de dependencia**: NoisyPad ya depende de watermelon-audio, así que el harness
+   consumiendo `core-ui` cierra el círculo. Evitarlo pide un tercer artefacto con versionado y
+   pipeline propios — trabajo grande para un consumidor que no lo necesita.
+3. **Más superficie es más CI, y el CI acá es un recurso escaso**: el job de iOS corre en
+   `macos-latest`, que factura **×10**, y el 2026-07-27 agotó el límite de la cuenta a mitad de
+   sesión. Esto el plan original no podía saberlo.
+
+> [!TIP]
+> **La lección de método, que es lo transferible:** el plan mandó construir el consumidor real
+> *antes* de decidir el design system, y esa secuencia es lo que evitó el trabajo. Al revés
+> —design system primero— se habrían escrito componentes "reutilizables" que ningún segundo
+> archivo iba a usar, y nada en el código habría delatado el error. **La etapa se cerró con
+> una medición que dijo "no", que es un resultado tan válido como un "sí".**
+
+---
+
 ### Nota de cierre — los dos stubs que mentían (2026-07-27)
 
 Los ítems 11 y 12 del smoke, cerrados **sin hardware**. Lo que los desbloqueaba no era un device
@@ -3135,22 +3188,9 @@ abajo. Los dos docs apuntaban mal, **cada uno para su lado**: el ítem 11 sobree
 (el slider de NoisyPad nunca estuvo roto) y el ítem 12 lo subestimaba **y además mandaba a
 buscar el caller al repo equivocado**.
 
-**3 · Design system (WA-5.5, fase final) — la premisa del plan cambió, hay que replantearlo.**
-Este doc decía que *"NoisyPad es un repo privado aparte y no está montado acá"* y por eso lo
-trataba como **fuente de cosecha**. Ya está montado (`~/Documents/GitHub/NoisyPad`), y medido:
-> [!IMPORTANT]
-> **No hay nada que cosechar — el design system ya existe y está terminado.** `core-ui` de
-> NoisyPad ya es **Compose Multiplatform** (convention plugin `noisypad.kmp.library.compose`),
-> con **63 `.kt` en `commonMain`** (4 androidMain, 1 iosMain), un paquete `designsystem/` de
-> **12 archivos de tokens + 4 de foundation**, un módulo `core-ui-catalog` aparte, un pipeline
-> de tokens web (`design-system-web`) y una **ADR aceptada el 2026-07-25**
-> (`docs/adr/0002-core-ui-compose-multiplatform.md`, CMP 1.11.1, con spike descartable previo).
->
-> Lo que queda por decidir no es *qué construir* sino **la dirección de la dependencia**, y ahí
-> hay algo que el plan original no contemplaba: **NoisyPad ya depende de watermelon-audio**. Que
-> el harness de acá consuma `core-ui` de allá cierra un ciclo a nivel repo — tolerable sólo
-> porque `:harness` no se publica, pero es justo el tipo de decisión que no conviene tomar de
-> rebote.
+**3 · ~~Design system (WA-5.5, fase final)~~ ✅ CERRADO SIN DESIGN SYSTEM COMPARTIDO**
+(2026-07-28). **WA-5.5 queda cerrada entera.** Ver la nota de cierre abajo — la decisión la tomó
+una medición, no una preferencia.
 
 **4 · El smoke manual de Android — bloqueado por DESCARGAS, no por trabajo.** 12 ítems, ninguno
 corrido. El plan decía "crear un AVD alcanza para varios", incluido el de prioridad alta (ítem 3,
