@@ -1,5 +1,7 @@
 package com.watermellonstudios.audio.domain.usb
 
+import com.watermellonstudios.audio.domain.AudioBackendType
+
 /**
  * USB Audio events for reactive streams.
  */
