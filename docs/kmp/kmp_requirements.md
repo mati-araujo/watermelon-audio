@@ -1388,6 +1388,49 @@ resultados), así que el smoke manual sigue pendiente. Lo que sí se hizo es lee
 sites reales de NoisyPad (`../NoisyPad`, branch `feature/f4-e4-catalogo`) contra los dos
 cambios de comportamiento de `input/monitor`. Cambia la evaluación de riesgo.
 
+> [!NOTE]
+> ## ✅ CORRIDO EN EMULADOR (2026-07-28) — **la regresión NO se reproduce en Android, y no puede**
+>
+> El pronóstico de abajo era razonable y resultó **equivocado para Android**. `wma_input_start()`
+> sí cae a `requestCapture()` cuando el mic falla, pero ahí se choca con el primer guard:
+> `if (!mActiveBackend) return CaptureOutcome::NOT_LIVE;` (`BackendManager.cpp:331`). **En
+> Android ese puntero es siempre nulo**, porque `mUseBackendManager` arranca en `false`
+> (`AudioEngine.h`, `#if defined(__ANDROID__)`), así que `AudioEngine::start()` nunca pasa por
+> el BackendManager y **nadie llama nunca a `selectBackend()`**. Lo dice el propio comentario
+> del motor: *"On Android this never showed because `mUseBackendManager` is false there — the
+> direct Oboe path does not come through here at all."*
+>
+> **Resultado: mismo comportamiento que antes de WA-2.6** — un `false` inmediato, sin
+> reapertura y sin corte. Lo que se midió, con el permiso denegado y el oscilador sonando:
+>
+> ```
+> InputNode:   Failed to open input stream: ErrorInternal
+> AudioEngine: ENGINE CALLBACK: state=2, xruns=0      ← la salida NO se interrumpió
+> ```
+>
+> - **Cero líneas de `BackendManager`** en logcat. En particular **no aparece** el
+>   `LOGW("Capture requested on a running stream that has none…")`, que es la única otra rama
+>   `NOT_LIVE` que loguea — o sea que salió por el primer guard, no por otro.
+> - El `StreamInfo` de la UI es **idéntico antes y después** (`sampleRate=48000`,
+>   `bufferSizeInFrames=960`), y `error: —`.
+> - La UI muestra el error honesto: *"start() devolvió false — permiso denegado o sin device
+>   de entrada"*.
+>
+> > [!WARNING]
+> > **Esto NO absuelve al camino en iOS.** Ahí `mUseBackendManager` es `true` y el
+> > BackendManager **es** la única vía, así que el reopen sí ocurre — pero ahí es el diseño
+> > buscado, no una regresión: el usuario pidió el micrófono explícitamente. Lo que se cierra
+> > es el riesgo **para NoisyPad Android**, que es a quien apuntaba este ítem.
+>
+> **Lo que el emulador no puede contestar:** si el corte sería audible. Su HAL de audio escupe
+> `pcm_writei failed … I/O error` en loop, así que no hay salida real que escuchar. Da igual:
+> las señales objetivas —sin reopen, `xruns=0`, `StreamInfo` intacto— son evidencia más fuerte
+> que el oído.
+>
+> ---
+>
+> **El pronóstico original, que se deja para que se entienda por qué se creyó:**
+
 > [!CAUTION]
 > **`startInputStream` tiene una regresión plausible en el caso de permiso denegado, y es
 > el caso de falla más común.**
@@ -3105,9 +3148,11 @@ NoisyPad Android**, que ya tiene tres cosas encima:
    compilador y revisión de diff porque los métodos de `AudioNativeBridge` **no tienen
    tests** (necesitan JNI y device).
 2. **WA-1.2**, `AudioEngineFactory.create()` sin argumentos (ver abajo).
-3. **WA-2.6 `input/monitor`**, los dos cambios de comportamiento en el camino de input.
-   **Prioridad alta**: el análisis estático de abajo encontró una regresión plausible en
-   `startInputStream` con el permiso denegado. Reproducción concreta en esa nota.
+3. ~~**WA-2.6 `input/monitor`**, el permiso denegado~~ ✅ **CORRIDO EN EMULADOR 2026-07-28 —
+   la regresión NO se reproduce y es estructuralmente inalcanzable en Android** (`mActiveBackend`
+   es siempre nulo ahí). Ver la nota del análisis estático, corregida con la medición. **Queda
+   la mitad USB de este ítem** (`isInputStreamRunning` por el camino USB/split), que necesita la
+   placa y un AVD no cubre.
 4. **WA-2.6 en general**: 135 entry points JNI reescritos, 0 validados en device. La suite
    de host cubre la C API, no el JNI.
 12. ~~**`nativeGetAdaptiveBufferStats` devuelve diez ceros, siempre**~~ ✅ **RESUELTO
@@ -3192,16 +3237,36 @@ buscar el caller al repo equivocado**.
 (2026-07-28). **WA-5.5 queda cerrada entera.** Ver la nota de cierre abajo — la decisión la tomó
 una medición, no una preferencia.
 
-**4 · El smoke manual de Android — bloqueado por DESCARGAS, no por trabajo.** 12 ítems, ninguno
-corrido. El plan decía "crear un AVD alcanza para varios", incluido el de prioridad alta (ítem 3,
-`startInputStream` con el permiso **denegado**). Sigue siendo cierto, pero **crear el AVD no es
-gratis en esta máquina**: medido el 2026-07-27, `~/Library/Android/sdk` tiene `emulator`, `ndk`,
-`platform-tools` y `platforms`, pero **no tiene `cmdline-tools`** —o sea, ni `sdkmanager` ni
-`avdmanager`— y **no hay una sola system image instalada** (`~/.android/avd` está vacío).
-Habilitarlo implica bajar cmdline-tools más una imagen de sistema (~1.5 GB) de Google y aceptar
-licencias. Android Studio está instalado y lo resuelve desde Device Manager. Lo que un AVD **no**
-cubre es USB. Los ítems 7, 8 y 9 —los tres retornos del looper— ya están verificados desde iOS
-por el control 5; lo que falta ahí es el camino JNI.
+**4 · El smoke manual de Android — ✅ HAY AVD, y el ítem de prioridad alta ya corrió.**
+
+> [!TIP]
+> **El AVD existe: `wa-smoke-api36`** (2026-07-28). Pixel 7 · API 36 / Android 16 ·
+> `google_apis` · `arm64-v8a`. `adb devices` devuelve `emulator-5554`. Se eligió `google_apis`
+> sobre `default` (trae servicios de Google, más parecido a un device real) y sobre
+> `playstore` (que bloquea `adb root`).
+>
+> **Lo que costó, para que no sorprenda de nuevo:** hubo que instalar `cmdline-tools` (149 MB,
+> verificado por SHA-1 contra el manifiesto oficial) **y la imagen de sistema pesó 4.3 GB**, no
+> los ~1.5 GB que decía la estimación anterior de este doc. Ojo también: **`sdkmanager` quedó
+> deprecado** en cmdline-tools 22.0 — avisa que el reemplazo es un CLI `android` nuevo.
+>
+> ```bash
+> export ANDROID_HOME="$HOME/Library/Android/sdk"
+> "$ANDROID_HOME/emulator/emulator" -avd wa-smoke-api36
+> ```
+
+**El ítem 3 —prioridad alta— ya corrió y salió distinto de lo previsto**: la regresión no se
+reproduce y es estructuralmente inalcanzable en Android. Ver la nota del análisis estático.
+
+De los 12, **un AVD no cubre USB**, que es lo que necesitan la mitad USB del ítem 3, el ítem 4 y
+el 10. Los ítems 7, 8 y 9 —los tres retornos del looper— ya están verificados desde iOS por el
+control 5; lo que falta ahí es el camino JNI, que el emulador **sí** puede correr.
+
+> [!CAUTION]
+> **El emulador no sirve para juzgar audio audible.** Su HAL escupe
+> `pcm_writei failed … I/O error` en loop: no hay salida real. Sirve para permisos, para el
+> camino JNI y para observar el comportamiento del motor por logs — no para escuchar. Para eso
+> hace falta device (G2).
 
 **5 · WA-1.3**, lo único que falta de Fase 1. Y el fixture SF2 (§ deuda técnica), que es lo
 único que le falta al bug 3 de WA-2.0.
