@@ -25,7 +25,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontFamily
@@ -88,7 +87,7 @@ fun XYPadControl(engine: AudioEngine, modifier: Modifier = Modifier) {
                     .fillMaxWidth()
                     .aspectRatio(1.6f)
                     .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xFF1E1E1E))
+                    .background(HarnessTokens.InsetSurface)
                     .onSizeChanged { size = it }
                     .pointerInput(Unit) {
                         detectTapGestures(
@@ -107,7 +106,7 @@ fun XYPadControl(engine: AudioEngine, modifier: Modifier = Modifier) {
                         .fillMaxWidth(0.04f)
                         .aspectRatio(1f)
                         .padding(0.dp)
-                        .background(Color(0xFF43A047), RoundedCornerShape(50)),
+                        .background(HarnessTokens.Signal, RoundedCornerShape(50)),
                 )
             }
 

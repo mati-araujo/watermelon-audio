@@ -27,7 +27,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.watermellonstudios.audio.api.AudioInput
@@ -259,7 +258,7 @@ private fun MeterBar(metering: InputMetering?) {
             // Sin medición el fondo es distinto: la barra vacía y el "no sé"
             // no pueden verse igual.
             .background(
-                if (metering == null) Color(0xFF3A3A3A) else Color(0xFF1E1E1E)
+                if (metering == null) HarnessTokens.InsetSurfaceNoSignal else HarnessTokens.InsetSurface
             ),
     ) {
         if (metering != null) {
@@ -267,7 +266,7 @@ private fun MeterBar(metering: InputMetering?) {
                 modifier = Modifier
                     .fillMaxWidth(fraction)
                     .height(24.dp)
-                    .background(if (metering.isClipping) Color(0xFFE53935) else Color(0xFF43A047)),
+                    .background(if (metering.isClipping) HarnessTokens.Clipping else HarnessTokens.Signal),
             )
         }
     }
