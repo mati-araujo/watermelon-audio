@@ -5,15 +5,26 @@ import com.watermellonstudios.audio.internal.mode.NativeModeStateWriter
 import kotlinx.coroutines.CoroutineScope
 
 /**
- * Factory for creating [IModeTransitionHandler] instances.
+ * Construye [IModeTransitionHandler].
  *
- * Example usage:
  * ```kotlin
  * val modeHandler = ModeTransitionFactory.create(
  *     scope = viewModelScope,
- *     effectManager = effectManager  // Optional, for effect reconfiguration
+ *     effectManager = effectManager  // opcional, para reconfigurar efectos
  * )
  * ```
+ *
+ * ## Estaba en `androidMain` y no tenía por qué
+ *
+ * [IModeTransitionHandler] siempre fue común; lo que vivía del lado Android era **cómo
+ * se construye**, y eso obligaba a inyectar la función constructora
+ * `(CoroutineScope) -> IModeTransitionHandler` desde afuera para que un ViewModel común
+ * pudiera usarla. De las 442 líneas que se mudaron, lo que las ataba a Android eran tres
+ * cosas y ninguna de fondo: `android.util.Log`, el `AudioNativeBridge` concreto de
+ * Android y dos `Dispatchers.IO` que envolvían código que no hace I/O.
+ *
+ * **La API pública no cambió** — misma firma, mismos defaults, mismo comportamiento en
+ * Android, logcat incluido. Lo que cambió es que ahora también existe en iOS.
  */
 object ModeTransitionFactory {
 
