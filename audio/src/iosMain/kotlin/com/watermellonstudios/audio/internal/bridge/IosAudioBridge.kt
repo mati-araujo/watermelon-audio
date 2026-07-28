@@ -424,8 +424,20 @@ internal class IosAudioBridge : IAudioNativeBridge {
 
     // ==================== MODE ====================
 
+    /**
+     * El guard de rango es el mismo que el de Android, y no es redundante con el de la
+     * C API: `wma_set_audio_mode` rechaza el valor y **vuelve sin decirlo**, porque
+     * retorna `void`. Sin este chequeo iOS devolvía `Result.success` habiendo hecho
+     * cero, mientras Android devolvía `IllegalArgumentException` — mismo `commonMain`,
+     * dos contratos.
+     *
+     * Lo destapó el control de modo del harness (WA-1.4, call site 26).
+     */
     override suspend fun setAudioMode(mode: Int): Result<Unit> =
         concurrency.guarded(BridgeConcurrency.Category.MODE, "setAudioMode") {
+            if (mode !in 0..2) {
+                return@guarded Result.failure(IllegalArgumentException("Invalid mode: $mode"))
+            }
             wma_set_audio_mode(engine, mode)
             Result.success(Unit)
         }

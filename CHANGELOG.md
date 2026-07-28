@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.11.0...v1.12.0) (2026-07-28)
+
+
+### Features
+
+* **kmp:** el tope de efectos que SÍ usa NoisyPad, WA-1.4 a 26/26, y el SoundFont clavado a su tasa ([#73](https://github.com/mati-araujo/watermelon-audio/issues/73)) ([e75f009](https://github.com/mati-araujo/watermelon-audio/commit/e75f00967823fc5a0f6997f6f93b4f6222dc8986))
+
+## [1.11.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.10.0...v1.11.0) (2026-07-28)
+
+
+### Features
+
+* **kmp:** WA-1.3, el smoke 1/2/6 y WA-3.6 — el ítem 2 destapó que el recorte de maxEffects no tenía lector ([#69](https://github.com/mati-araujo/watermelon-audio/issues/69)) ([bb5fee6](https://github.com/mati-araujo/watermelon-audio/commit/bb5fee68f96fd62f4d25a3ffbc7f4c58570a296a))
+
 ## [1.10.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.9.1...v1.10.0) (2026-07-28)
 
 

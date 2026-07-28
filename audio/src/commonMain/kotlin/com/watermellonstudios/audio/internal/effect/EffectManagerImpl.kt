@@ -9,8 +9,10 @@ import com.watermellonstudios.audio.api.IEffectStateWriter
 import com.watermellonstudios.audio.api.MaxEffectsReachedException
 import com.watermellonstudios.audio.api.PresetTypeMismatchException
 import com.watermellonstudios.audio.api.SyncTimeoutException
+import com.watermellonstudios.audio.api.config.AudioEngineConfig
 import com.watermellonstudios.audio.callback.AudioLogger
 import com.watermellonstudios.audio.callback.NoOpAudioLogger
+import com.watermellonstudios.audio.domain.device.DeviceCapabilities
 import com.watermellonstudios.audio.domain.effect.EffectState
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
@@ -497,5 +499,33 @@ data class EffectManagerConfig(
 
         /** Configuration for testing with short timeout */
         val TEST = EffectManagerConfig(syncTimeoutMs = 100L)
+
+        /**
+         * Ajusta [base] a lo que el dispositivo puede sostener.
+         *
+         * Es la contraparte de [AudioEngineConfig.tunedFor] para el **otro** camino del
+         * tope de efectos, y existe porque son caminos independientes, no dos mitades de
+         * uno: un consumidor puede usar `EffectManagerFactory` sin tocar nunca
+         * `AudioEngineFactory` —es exactamente lo que hace NoisyPad— y entonces el recorte
+         * de WA-1.2 no lo alcanzaba.
+         *
+         * **El umbral no se copia**: sale de [AudioEngineConfig.LOW_END_MAX_EFFECTS], que
+         * es donde vive la política. Duplicar el 6 acá sería garantizar que los dos
+         * caminos vuelvan a divergir en la próxima edición.
+         *
+         * Sólo toca [maxEffects], y sólo hacia abajo: un consumidor que pidió 4 sigue
+         * teniendo 4. [syncTimeoutMs] no se toca — la gama del dispositivo no dice nada
+         * sobre cuánto tarda el puente, y para eso ya está [SLOW_DEVICE].
+         */
+        fun tunedFor(
+            capabilities: DeviceCapabilities,
+            base: EffectManagerConfig = DEFAULT,
+        ): EffectManagerConfig = base.copy(
+            maxEffects = if (capabilities.isLowEndDevice) {
+                minOf(base.maxEffects, AudioEngineConfig.LOW_END_MAX_EFFECTS)
+            } else {
+                base.maxEffects
+            },
+        )
     }
 }

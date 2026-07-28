@@ -5,7 +5,7 @@ import com.watermellonstudios.audio.domain.modulator.ModulatorType
 import com.watermellonstudios.audio.domain.oscillator.OscillatorType
 import com.watermellonstudios.audio.domain.scale.ScaleMode
 import com.watermellonstudios.audio.domain.state.AudioState
-import com.watermellonstudios.audio.domain.usb.AudioBackendType
+import com.watermellonstudios.audio.domain.AudioBackendType
 import kotlinx.coroutines.flow.StateFlow
 
 /**

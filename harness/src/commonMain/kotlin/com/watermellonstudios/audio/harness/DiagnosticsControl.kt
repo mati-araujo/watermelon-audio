@@ -21,16 +21,19 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.watermellonstudios.audio.api.EffectManagerFactory
 import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.api.currentDeviceCapabilities
-import com.watermellonstudios.audio.domain.usb.AudioBackendType
+import com.watermellonstudios.audio.domain.AudioBackendType
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
+import kotlinx.coroutines.launch
 
 /**
  * Control 7 de 7 — panel de diagnóstico.
@@ -64,6 +67,9 @@ fun DiagnosticsControl(modifier: Modifier = Modifier) {
     var selectReturned by remember { mutableStateOf<Boolean?>(null) }
     var actualBackend by remember { mutableStateOf(AudioBackendType.fromId(bridge.getCurrentBackendType())) }
 
+    val scope = rememberCoroutineScope()
+    var effectCap by remember { mutableStateOf<String?>(null) }
+
     var logsEnabled by remember { mutableStateOf(false) }
     var logLines by remember { mutableStateOf<List<String>>(emptyList()) }
     var dropped by remember { mutableStateOf(0) }
@@ -94,6 +100,32 @@ fun DiagnosticsControl(modifier: Modifier = Modifier) {
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
             )
+
+            // ---- El tope de efectos que la factory DECIDE, al lado del hecho que lo decide ----
+            //
+            // Es la mitad que los tests no pueden cubrir. `EffectManagerConfig.tunedFor`
+            // se prueba en commonTest con capabilities inyectadas, pero que
+            // `EffectManagerFactory.create(scope)` la USE pasa por `getAudioBridge()`,
+            // que no existe en el host — y en el simulador de iOS el dispositivo no es
+            // de gama baja, así que la assertion no distinguiría nada. Acá sí: este AVD
+            // se reporta gama baja, así que el número de abajo es la prueba.
+            //
+            // Va detrás de un botón y no en el arranque porque crear un EffectManager
+            // **limpia la cadena** (`clearAllEffects` en su `init`), y eso se llevaría
+            // puestos los efectos que el rack de arriba haya agregado.
+            Text(
+                text = "tope de efectos (EffectManagerFactory): ${effectCap ?: "—"}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+            Button(onClick = {
+                scope.launch {
+                    val manager = EffectManagerFactory.create(scope)
+                    effectCap = "${manager.maxEffects}" +
+                        if (caps.isLowEndDevice) "  ← gama baja, debería recortar" else ""
+                    manager.dispose()
+                }
+            }) { Text("medir tope (limpia la cadena)") }
 
             // ---- Backend: el pedido y la realidad, uno al lado del otro ----
             Text("Backend", style = MaterialTheme.typography.labelLarge)

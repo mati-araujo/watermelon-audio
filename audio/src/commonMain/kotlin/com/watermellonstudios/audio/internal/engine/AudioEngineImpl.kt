@@ -17,7 +17,7 @@ import com.watermellonstudios.audio.domain.state.AudioError
 import com.watermellonstudios.audio.domain.state.AudioState
 import com.watermellonstudios.audio.domain.state.EngineLifecycle
 import com.watermellonstudios.audio.domain.state.StreamInfo
-import com.watermellonstudios.audio.domain.usb.AudioBackendType
+import com.watermellonstudios.audio.domain.AudioBackendType
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
 import com.watermellonstudios.audio.internal.util.ScaleQuantizer
 import com.watermellonstudios.audio.internal.util.epochMillis
@@ -58,8 +58,14 @@ internal class AudioEngineImpl(
     private var pollingJob: Job? = null
     private var sessionStartTime: Long = 0
 
+    // `maxEffects` se siembra desde la config, y no es cosmético: [addEffect] decide
+    // con `effectChain.canAddEffect`, que compara contra ESTE número. Mientras no se
+    // sembró, `EffectChainState` se quedaba con su default de 12 y el recorte a 6 de
+    // `AudioEngineConfig.tunedFor()` (WA-1.2) no llegaba a aplicarse nunca: medido en
+    // el AVD el 2026-07-28 con `gama baja: true`, la cadena aceptó 7 efectos.
     private val _state = MutableStateFlow(AudioState(
-        oscillator = config.defaultOscillator
+        oscillator = config.defaultOscillator,
+        effectChain = EffectChainState(maxEffects = config.maxEffects),
     ))
     override val state: StateFlow<AudioState> = _state.asStateFlow()
 
@@ -467,7 +473,11 @@ internal class AudioEngineImpl(
             AudioBackendType.fromId(bridge.getCurrentBackendType())
         } catch (e: Exception) {
             logger.error(TAG, "Exception getting backend type", e)
-            AudioBackendType.OBOE
+            // NONE, no OBOE: si la consulta falló no sabemos qué backend hay, y
+            // OBOE es una respuesta concreta —además de una que en iOS nombra un
+            // backend que no existe—. Es el mismo criterio que ya usa `fromId`
+            // para un id desconocido: ausencia, no un valor plausible.
+            AudioBackendType.NONE
         }
     }
 
