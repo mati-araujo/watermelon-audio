@@ -3162,13 +3162,15 @@ NoisyPad Android**, que ya tiene tres cosas encima:
 10. **`selectBackend` devuelve `true` aunque no consiga el backend pedido** (la cola,
    2026-07-27). Pedir LIBUSB sin USB presente cae al backend de sistema y reporta éxito;
    sólo `getCurrentBackendType()` lo delata. Comportamiento viejo, ahora pinchado con test.
-9. **Las seis funciones de I/O de archivo del looper devuelven `false`/-1 en vez de dejar
-   escapar una excepción** (`looper` tanda 4). Antes un export imposible abortaba el proceso.
-8. **`prepareTrackBars` rechaza un `bars` que desborda int32** (`looper` tanda 3) en vez de
-   alocar un track envuelto. Sólo se ve con conteos de barras absurdos.
-7. **`armAtNextBar` / `armInFrames` ahora devuelven -1 cuando el arm no prende**
-   (`looper` tanda 2, 2026-07-27) en vez de un trigger frame para una grabación que nunca
-   arranca. Si NoisyPad usa el valor para una cuenta regresiva, ahí se ve.
+9. ~~**Las seis funciones de I/O de archivo del looper devuelven `false`/-1**~~ ✅ **VERIFICADO
+   POR JNI 2026-07-28** — `exportMix(ruta no escribible) = false`, **y el proceso sobrevivió**
+   (mismo pid antes y después, cero `FATAL`/`abort`/`SIGABRT` en logcat). Antes esto abortaba.
+8. ~~**`prepareTrackBars` rechaza un `bars` que desborda int32**~~ ✅ **VERIFICADO POR JNI
+   2026-07-28** — `prepareTrackBars(0, 2000000) = -1`, rechazado en vez de alocar un track
+   con el largo envuelto.
+7. ~~**`armAtNextBar` / `armInFrames` devuelven -1 cuando el arm no prende**~~ ✅ **VERIFICADO
+   POR JNI 2026-07-28** — `armAtNextBar(0) = -1` con el metrónomo parado, en vez de un frame
+   de disparo para una grabación que nunca arranca.
 6. **`getRecommendedBufferSize` cambia de respuesta** (`benchmark`, 2026-07-27) en dos
    casos: cuando no hay stream corriendo pero sí una tasa preferida distinta de 48 kHz, y
    cuando el target cae entre dos potencias de dos. Sólo lo usa el tooling de latencia.
@@ -3258,9 +3260,26 @@ una medición, no una preferencia.
 **El ítem 3 —prioridad alta— ya corrió y salió distinto de lo previsto**: la regresión no se
 reproduce y es estructuralmente inalcanzable en Android. Ver la nota del análisis estático.
 
+**Y los ítems 7, 8 y 9 —los tres retornos del looper— ya corrieron por JNI** (2026-07-28), que
+era lo único que les faltaba: estaban verificados desde iOS por el control 5, no por el camino
+Android. Los tres pasan, con el control 5 del harness en el emulador:
+
+```
+prepareTrackBars(0, 2000000) = -1        ← rechazado, como debe (ítem 8)
+armAtNextBar(0) = -1                     ← no se armó nada (ítem 7)
+exportMix(ruta no escribible) = false    ← devolvió false sin tirar (ítem 9)
+```
+
+> [!TIP]
+> **En el ítem 9 el valor de retorno es la mitad de la prueba; la otra mitad es el pid.** Antes
+> del arreglo de la tanda 4, un export imposible dejaba escapar `std::length_error` a través de
+> la C API y el JNI lo convertía en `abort` — o sea que el síntoma no era `false`, era que la
+> app desaparecía. Se verificó **mismo pid antes y después** y **cero `FATAL`/`abort`/`SIGABRT`**
+> en logcat. Un test que sólo mirara el booleano no distinguiría "devolvió false" de "no llegó
+> a devolver nada".
+
 De los 12, **un AVD no cubre USB**, que es lo que necesitan la mitad USB del ítem 3, el ítem 4 y
-el 10. Los ítems 7, 8 y 9 —los tres retornos del looper— ya están verificados desde iOS por el
-control 5; lo que falta ahí es el camino JNI, que el emulador **sí** puede correr.
+el 10.
 
 > [!CAUTION]
 > **El emulador no sirve para juzgar audio audible.** Su HAL escupe
