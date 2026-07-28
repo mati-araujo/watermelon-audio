@@ -684,7 +684,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param data Raw SF2 file content
      * @return true if loading succeeded
      */
-    fun loadSoundFont(data: ByteArray): Boolean {
+    override fun loadSoundFont(data: ByteArray): Boolean {
         if (data.isEmpty()) {
             Log.w(TAG, "loadSoundFont: empty data")
             return false
@@ -700,7 +700,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param path Absolute path to .sf2 file
      * @return true if loading succeeded
      */
-    fun loadSoundFontFromPath(path: String): Boolean {
+    override fun loadSoundFontFromPath(path: String): Boolean {
         if (path.isBlank()) {
             Log.w(TAG, "loadSoundFontFromPath: empty path")
             return false
@@ -755,7 +755,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Unload the current SoundFont.
      */
-    fun unloadSoundFont() {
+    override fun unloadSoundFont() {
         nativeUnloadSoundFont()
     }
 
@@ -764,7 +764,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @param presetIndex Preset index (0 to presetCount-1)
      */
-    fun setSoundFontPreset(presetIndex: Int) {
+    override fun setSoundFontPreset(presetIndex: Int) {
         if (presetIndex < 0) {
             Log.w(TAG, "setSoundFontPreset: invalid index $presetIndex")
             return
@@ -775,7 +775,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Get number of presets in loaded SoundFont.
      */
-    fun getSoundFontPresetCount(): Int {
+    override fun getSoundFontPresetCount(): Int {
         return nativeGetSoundFontPresetCount()
     }
 
@@ -784,14 +784,14 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @return Preset name, or null if invalid
      */
-    fun getSoundFontPresetName(presetIndex: Int): String? {
+    override fun getSoundFontPresetName(presetIndex: Int): String? {
         return nativeGetSoundFontPresetName(presetIndex)
     }
 
     /**
      * Check if a SoundFont is loaded.
      */
-    fun isSoundFontLoaded(): Boolean {
+    override fun isSoundFontLoaded(): Boolean {
         return nativeIsSoundFontLoaded()
     }
 
@@ -800,7 +800,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param presetIndex Preset index (0-based)
      * @return IntArray [minKey, maxKey] or null if preset has no regions
      */
-    fun getSoundFontPresetKeyRange(presetIndex: Int): IntArray? {
+    override fun getSoundFontPresetKeyRange(presetIndex: Int): IntArray? {
         return nativeGetSoundFontPresetKeyRange(presetIndex)
     }
 
@@ -809,7 +809,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param presetIndex Preset index (0-based)
      * @return IntArray [bank, program] (bank 128 = GM percussion kit) or null if invalid
      */
-    fun getSoundFontPresetBankProgram(presetIndex: Int): IntArray? {
+    override fun getSoundFontPresetBankProgram(presetIndex: Int): IntArray? {
         return nativeGetSoundFontPresetBankProgram(presetIndex)
     }
 
@@ -819,21 +819,21 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Start/update a SoundFont note for a touch point.
      * Lock-free — safe to call at touch rate.
      */
-    fun sfNoteOn(touchId: Int, midiNote: Int, velocity: Float) {
+    override fun sfNoteOn(touchId: Int, midiNote: Int, velocity: Float) {
         nativeSfNoteOn(touchId, midiNote, velocity)
     }
 
     /**
      * Release a SoundFont note for a touch point.
      */
-    fun sfNoteOff(touchId: Int) {
+    override fun sfNoteOff(touchId: Int) {
         nativeSfNoteOff(touchId)
     }
 
     /**
      * Release all SoundFont notes.
      */
-    fun sfNoteOffAll() {
+    override fun sfNoteOffAll() {
         nativeSfNoteOffAll()
     }
 
@@ -845,7 +845,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * `sfNoteOff(i)` over the remaining slots — the touch-state scan
      * happens on the audio thread.
      */
-    fun sfNoteOffAllExcept(keepTouchId: Int) {
+    override fun sfNoteOffAllExcept(keepTouchId: Int) {
         nativeSfNoteOffAllExcept(keepTouchId)
     }
 

@@ -706,8 +706,9 @@ internal class IosAudioBridge : IAudioNativeBridge {
      * [updateMultiTouch]. La C API declara el puntero `const`, así que no escribe
      * sobre él; el `count` va aparte porque un array de C no lo lleva encima.
      *
-     * Un array vacío es válido y significa "sin escala": pasar `addressOf(0)` sobre
-     * un `IntArray` de largo cero no está definido, así que se corta antes.
+     * Un array vacío es válido y significa "sin escala", pero `addressOf(0)` sobre un
+     * `IntArray` de largo cero tira `ArrayIndexOutOfBoundsException` (medido en el
+     * caso gemelo de `loadSoundFont`), así que se corta antes.
      */
     override fun setArpScaleIntervals(intervals: IntArray) {
         if (intervals.isEmpty()) {
@@ -744,6 +745,85 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun getArpTotalSteps(): Int = wma_arp_get_total_steps(engine)
 
     override fun isArpGateOpen(): Boolean = wma_arp_is_gate_open(engine)
+
+    // ==================== SOUNDFONT ====================
+    //
+    // Las cuatro de polifonía son `RT-safe` y no toman lock, igual que en Android.
+    // Las de carga NO son RT-safe —parsean el archivo— pero tampoco toman el mutex:
+    // el motor serializa adentro y quien carga un `.sf2` no está en el camino de un
+    // gesto.
+
+    /**
+     * Los bytes se fijan con `usePinned` para que C los lea directo, sin una copia
+     * intermedia — el mismo patrón que [setArpScaleIntervals].
+     *
+     * **El guard del array vacío no es defensivo, es necesario**: sin él, `addressOf(0)`
+     * sobre el array de largo cero tira `ArrayIndexOutOfBoundsException` — medido,
+     * sacándolo. Del lado Android el mismo caso llega hasta C y vuelve `false`; acá
+     * tiene que cortarse antes. El contrato es el mismo (ver
+     * [ISoundFontBridge.loadSoundFont]), el motivo no.
+     */
+    override fun loadSoundFont(data: ByteArray): Boolean {
+        if (data.isEmpty()) return false
+        return data.usePinned { pinned ->
+            wma_sf_load_data(engine, pinned.addressOf(0), data.size)
+        }
+    }
+
+    override fun loadSoundFontFromPath(path: String): Boolean {
+        if (path.isBlank()) return false
+        return wma_sf_load_path(engine, path)
+    }
+
+    override fun unloadSoundFont() = wma_sf_unload(engine)
+
+    override fun isSoundFontLoaded(): Boolean = wma_sf_is_loaded(engine)
+
+    override fun setSoundFontPreset(presetIndex: Int) {
+        if (presetIndex < 0) return
+        wma_sf_set_preset(engine, presetIndex)
+    }
+
+    override fun getSoundFontPresetCount(): Int = wma_sf_get_preset_count(engine)
+
+    /**
+     * `toKString()` **copia**, y ahí está el punto: la C API documenta que el puntero
+     * vale hasta que se descargue el SoundFont, así que devolver algo que lo envuelva
+     * dejaría al llamador con memoria colgando después de [unloadSoundFont]. Es la
+     * misma razón por la que [drainCapturedLogs] no deja salir su batch.
+     */
+    override fun getSoundFontPresetName(presetIndex: Int): String? =
+        wma_sf_get_preset_name(engine, presetIndex)?.toKString()
+
+    override fun getSoundFontPresetKeyRange(presetIndex: Int): IntArray? = memScoped {
+        val minKey = alloc<IntVar>()
+        val maxKey = alloc<IntVar>()
+
+        if (!wma_sf_get_preset_key_range(engine, presetIndex, minKey.ptr, maxKey.ptr)) {
+            return@memScoped null
+        }
+        intArrayOf(minKey.value, maxKey.value)
+    }
+
+    override fun getSoundFontPresetBankProgram(presetIndex: Int): IntArray? = memScoped {
+        val bank = alloc<IntVar>()
+        val program = alloc<IntVar>()
+
+        if (!wma_sf_get_preset_bank_program(engine, presetIndex, bank.ptr, program.ptr)) {
+            return@memScoped null
+        }
+        intArrayOf(bank.value, program.value)
+    }
+
+    override fun sfNoteOn(touchId: Int, midiNote: Int, velocity: Float) =
+        wma_sf_note_on(engine, touchId, midiNote, velocity)
+
+    override fun sfNoteOff(touchId: Int) = wma_sf_note_off(engine, touchId)
+
+    override fun sfNoteOffAll() = wma_sf_note_off_all(engine)
+
+    override fun sfNoteOffAllExcept(keepTouchId: Int) =
+        wma_sf_note_off_all_except(engine, keepTouchId)
 
     // ==================== LOG CAPTURE ====================
 

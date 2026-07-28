@@ -112,12 +112,13 @@ class IosArpeggiatorBridgeTest {
      * Un `IntArray` vacío es válido y significa "sin escala".
      *
      * Importa porque el borde se maneja en Kotlin, no en C: `addressOf(0)` sobre un
-     * array de largo cero no está definido, así que [IosAudioBridge] corta antes y
-     * pasa `null`. Del otro lado `wma_arp_set_scale_intervals` tiene el guard
+     * array de largo cero tira `ArrayIndexOutOfBoundsException`, así que
+     * [IosAudioBridge] corta antes y pasa `null`. Del otro lado
+     * `wma_arp_set_scale_intervals` tiene el guard
      * `if (!intervals || count <= 0) return;`, o sea que el resultado es el mismo
      * no-op que ve Android — que llega ahí por el camino del JNI.
      *
-     * Sin esta rama, esta llamada sería una lectura fuera de rango.
+     * Sin esa rama, esta llamada tira la excepción en vez de ser un no-op.
      */
     @Test
     fun anEmptyScaleIsANoOpAndNotACrash() {

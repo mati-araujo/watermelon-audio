@@ -6,9 +6,10 @@ package com.watermellonstudios.audio.api
  * Extends [IEffectStateProvider] and [IEffectStateWriter] for effect chain operations.
  * Covers lifecycle, state queries, real-time params, voice system, mode, and backend.
  *
- * El arpegiador vive en [IArpeggiatorBridge], partido por el mismo motivo que
- * [IInputBridge] y las dos de efectos: son dominios con consumidores propios y un
- * fake no debería tener que implementar cien métodos para cubrir uno.
+ * El arpegiador vive en [IArpeggiatorBridge] y el motor de SoundFont en
+ * [ISoundFontBridge], partidos por el mismo motivo que [IInputBridge] y las dos de
+ * efectos: son dominios con consumidores propios y un fake no debería tener que
+ * implementar cien métodos para cubrir uno.
  *
  * Lo que sigue **sin** estar acá, y por qué: la gestión de dispositivos USB (D4 —
  * iOS no la tiene) y el benchmark de latencia detallada, cuyo JNI vive en
@@ -20,7 +21,8 @@ interface IAudioNativeBridge :
     IEffectStateProvider,
     IEffectStateWriter,
     IInputBridge,
-    IArpeggiatorBridge {
+    IArpeggiatorBridge,
+    ISoundFontBridge {
 
     // ==================== LIFECYCLE ====================
 
