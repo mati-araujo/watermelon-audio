@@ -3533,6 +3533,16 @@ automatización/mapeo 4, "usb" 2. **El C++ ya los tenía todos** —275 `wma_*` 
 81 de looper— y el `.def` de cinterop toma el header entero, así que los bindings ya se
 generaban. De los 96, **93 eran fachada mecánica**.
 
+> ⚠️ **EL CONJUNTO MEDIDO ESTABA INCOMPLETO** (detectado desde NoisyPad el 2026-07-28, ver
+> corrección 3 abajo). Esos tres archivos no son todos los consumidores del bridge que tiene
+> NoisyPad: faltaban **`AudioStateStore`** y **`AudioCommandPipeline`**. El de
+> `AudioCommandPipeline` salió gratis —sus 20 miembros resultaron ser un subconjunto de los
+> que ya aportaba `AudioEngineStateManager`—, pero el de `AudioStateStore` costó: se llevó
+> dos miembros afuera de la medición y por lo tanto afuera de la conclusión "la fachada
+> está cerrada para NoisyPad". **Lección para la próxima medición de superficie: la semilla
+> se arma buscando quién IMPORTA el bridge, no listando a mano los consumidores que uno
+> recuerda.**
+
 ### Lo que se hizo, por commit
 
 | commit | qué |
@@ -3558,6 +3568,34 @@ consumidor de producción es `isArpEnabled`, y su justificación está abajo.
    comentario de `jni_audio_bridge.cpp` ya había propuesto su forma exacta.
 2. **El bloque comentado del `includeBuild` de NoisyPad estaba incompleto** desde F4:
    sustituía sólo `audio-android` y no la coordenada raíz. Corregido de ese lado.
+3. **"La fachada está cerrada para NoisyPad" era casi cierto: faltaban 2 miembros, y el
+   conjunto medido tenía un hueco** (encontrado desde NoisyPad el 2026-07-28, compilando el
+   flip completo a `commonMain` contra esta misma rama vía `includeBuild` al worktree).
+
+   `AudioStateStore` —que no estaba entre los tres archivos medidos— llama
+   **`bridge.isFading()`** y **`bridge.isPaused()`**. Esos dos nombres **no existen en
+   `IAudioNativeBridge`**: el contrato común los declara como `getIsFading()` y
+   `getIsPaused()`. Un script que hubiera incluido ese archivo los habría contado como
+   ausentes en común, y serían 98 en vez de 96.
+
+   **No es un hueco de capacidad, es de nombres, y el KDoc lo tiene al revés.**
+   `AudioNativeBridge` declara las dos formas y las dos delegan en el mismo `nativeGetIs*`
+   (`isPaused()` en la 370 y `override fun getIsPaused()` en la 375; `isFading()` en la 458
+   y su `override` en la 463). El KDoc llama **"legacy alias"** justamente a las `getIs*`,
+   que son las que llevan el `override` y las únicas que están en el contrato común. La
+   etiqueta quedó invertida cuando la interfaz se volvió la fuente de verdad.
+
+   **Y las `is*` no tienen un solo consumidor:** cero adentro de la librería, y desde el
+   2026-07-28 cero en NoisyPad (que pasó a llamar las `getIs*` — mismo `nativeGetIs*`, así
+   que fue rename y no cambio de conducta; el artefacto **publicado 1.9.0 ya expone las
+   `getIs*`**, verificado con `javap` sobre el `.aar`, así que ese arreglo no esperó a
+   publicar nada).
+
+   **Qué conviene hacer de este lado**, en orden de menos a más invasivo: (a) arreglar el
+   KDoc, que hoy induce al error —el "legacy alias" es el contrato—; (b) evaluar borrar
+   `isPaused()`/`isFading()`, que ya no tienen consumidores; (c) si se borran, es un
+   **breaking change de la API pública de `AudioNativeBridge`** aunque nadie las use, así
+   que va con su nota de release.
 
 ### Lo que se aprendió midiendo, y no se deduce del código
 
@@ -3607,10 +3645,26 @@ Reparto de fuentes: `commonMain` 74→82, `androidMain` 23→21, `iosMain` 5→6
 
 ### Lo que queda
 
-- **Publicar.** La rama no está pusheada y no hay versión publicada con estos cambios. Las
-  credenciales de GPR **no están donde el build las busca** (`project.findProperty` o env):
-  el `local.properties` de este repo sólo tiene `sdk.dir`. Hace falta
-  `gpr.user`/`gpr.key` en `~/.gradle/gradle.properties` con scope `write:packages`.
+- **Publicar. Es lo ÚNICO que falta, y ahora está demostrado.** El consumidor ya está listo
+  del otro lado: NoisyPad sacó `AudioEngineStateManager` y sus adapters de `:app` a un
+  módulo KMP nuevo (`:core-audio-engine`, sus F5-E23/E24) y **compiló el flip completo a
+  `commonMain` contra esta rama** vía `includeBuild` al worktree —
+  **`BUILD SUCCESSFUL`, 0 errores, para `iosSimulatorArm64` y `iosArm64`**. O sea que la
+  fachada de esta rama alcanza: no falta superficie. Cuando se publique, del lado de
+  NoisyPad queda un `git mv` y cambiar `AudioNativeBridge.getInstance()` por
+  `getAudioBridge()` en 4 archivos.
+
+  **Corrección al estado que decía esta misma línea:** la rama **sí está pusheada** —
+  `origin/feature/wa-facade-kotlin-ios` tiene 6 de los 7 commits; el que falta subir es el
+  de estas docs.
+
+  Lo que sigue trabado son las credenciales: **no están donde el build las busca**
+  (`project.findProperty` o env). El `local.properties` de este repo sólo tiene `sdk.dir`, y
+  `~/.gradle/gradle.properties` **existe pero con placeholders** (`gpr.user` de 10
+  caracteres y `gpr.key` de 8 — un PAT no mide 8; chequeo barato:
+  `awk -F= '{print $1, length($2)}' ~/.gradle/gradle.properties`). El token del `gh` CLI es
+  real pero sus scopes son `gist, read:org, repo, workflow`, **sin `write:packages`**. Hace
+  falta un PAT con `write:packages` en `~/.gradle/gradle.properties`.
   Ojo: publicar a mano saltea a release-please, que es quien maneja el versionado.
 - **Dos huecos de implementación, ninguno de diseño:** `looperExportMixCompressed`
   (MediaCodec → iOS necesita `AVAssetWriter`) y `getDetailedLatencyInfo` (su JNI vive en
