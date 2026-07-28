@@ -143,13 +143,19 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # Suite C++ de host (762 tests, googletest)
-                                           # Kotlin: 105 iOS sim / 64 JVM
+bash scripts/run-cpp-tests.sh              # Suite C++ de host (774 tests, googletest)
+                                           # Kotlin: 112 iOS sim / 69 JVM
 
-# Los mismos 762 bajo sanitizers. NO son opcionales: el CI tiene un job para
+# Los mismos 774 bajo sanitizers. NO son opcionales: el CI tiene un job para
 # cada uno y encontraron dos bugs reales que el resto del gate no ve.
-# OJO: `detect_leaks=1` (lo que usa ci.yml) NO existe en macOS y aborta el
+# OJO: `detect_leaks=1` (lo que usa ci.yml) NO existe en macOS y rompe el
 # discovery de gtest — en esta maquina va sin el.
+#
+# Desde el cambio a `DISCOVERY_MODE PRE_TEST` eso ya NO rompe el build: el
+# listado de tests pasó de tiempo de build a tiempo de ctest, asi que el
+# sintoma es `discover_tests failed to run command` con exit 8 de ctest, en
+# vez de un `ninja: build stopped` que no menciona ningun test. Sigue siendo
+# un error — pero ahora dice donde.
 ASAN_OPTIONS=abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   SANITIZE=address,undefined bash scripts/run-cpp-tests.sh --timeout 180
 TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \

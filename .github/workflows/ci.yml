@@ -3,6 +3,23 @@ name: CI
 on:
   pull_request:
     branches: [master]
+    # Un PR que SÓLO toca prosa no compila nada distinto, y hasta acá corría los
+    # cinco jobs igual — incluidos ~20 min de macOS, que cuesta 10x. De los 20
+    # commits previos a este cambio, NUEVE eran `docs(kmp):` o `chore: release`.
+    # El caso extremo fue el PR #75: un archivo, `CHANGELOG.md`, cinco jobs, y
+    # encima flakeó el de iOS.
+    #
+    # `paths-ignore` saltea sólo si TODOS los archivos del PR machean, así que un
+    # PR que mezcla código y docs sigue corriendo entero. Es lo que se quiere.
+    #
+    # OJO SI ALGÚN DÍA SE MARCAN ESTOS CHECKS COMO *REQUIRED*: un job salteado
+    # queda `pending` para siempre y bloquea el merge. Ahí hay que cambiar a
+    # `dorny/paths-filter` con un job "dummy" que reporte pass, no a esto.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
   workflow_dispatch:
 
 concurrency:
