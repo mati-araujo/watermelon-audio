@@ -885,21 +885,21 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     // ==================== Voice Filter Operations (Phase 6) ====================
 
-    fun setVoiceFilterEnabled(enabled: Boolean) {
+    override fun setVoiceFilterEnabled(enabled: Boolean) {
         nativeSetVoiceFilterEnabled(enabled)
     }
 
-    fun setVoiceFilterCutoff(hz: Float) {
+    override fun setVoiceFilterCutoff(hz: Float) {
         if (!hz.isFinite() || hz < 20f || hz > 20000f) return
         nativeSetVoiceFilterCutoff(hz)
     }
 
-    fun setVoiceFilterResonance(q: Float) {
+    override fun setVoiceFilterResonance(q: Float) {
         if (!q.isFinite() || q < 0f || q > 1f) return
         nativeSetVoiceFilterResonance(q)
     }
 
-    fun setVoiceFilterMode(mode: Int) {
+    override fun setVoiceFilterMode(mode: Int) {
         if (mode < 0 || mode > 2) return
         nativeSetVoiceFilterMode(mode)
     }
@@ -1963,12 +1963,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @param modeId Mode ID (0=PLAYBACK_ONLY, 1=CAPTURE_ONLY, 2=FULL_DUPLEX)
      */
-    fun setUsbStreamingMode(modeId: Int) = nativeSetUsbStreamingMode(modeId)
+    override fun setUsbStreamingMode(modeId: Int) = nativeSetUsbStreamingMode(modeId)
 
     /**
      * Configure USB backend parameters.
      */
-    fun configureUsbBackend(sampleRate: Int, channels: Int, bitDepth: Int) =
+    override fun configureUsbBackend(sampleRate: Int, channels: Int, bitDepth: Int) =
         nativeConfigureUsbBackend(sampleRate, channels, bitDepth)
 
     // ==================== Memory / Resource Operations ====================
@@ -1976,7 +1976,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Check if using reduced buffers due to low memory.
      */
-    fun isUsingReducedBuffers(): Boolean = nativeIsUsingReducedBuffers()
+    override fun isUsingReducedBuffers(): Boolean = nativeIsUsingReducedBuffers()
 
     // ==================== Automation Operations ====================
 
@@ -1984,7 +1984,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Set automation parameter from XY pad.
      * This is used when mapping XY values to effect parameters.
      */
-    fun setAutomationParameter(effectIndex: Int, paramId: Int, xyValue: Float) {
+    override fun setAutomationParameter(effectIndex: Int, paramId: Int, xyValue: Float) {
         if (!xyValue.isFinite()) return
         nativeSetAutomationParameter(effectIndex, paramId, xyValue.coerceIn(0f, 1f))
     }
@@ -1995,7 +1995,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Configure mapping for an axis.
      * @param axis 0=X, 1=Y, 2=DEPTH
      */
-    fun setMappingConfig(
+    override fun setMappingConfig(
         axis: Int, effectIndex: Int, paramId: Int,
         curve: Int, polarity: Int,
         mapMin: Float, mapMax: Float, inverted: Boolean
@@ -2007,7 +2007,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Clear mapping for an axis (disables automation for that axis).
      */
-    fun clearMappingConfig(axis: Int) {
+    override fun clearMappingConfig(axis: Int) {
         nativeClearMappingConfig(axis)
     }
 
@@ -2015,7 +2015,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Apply automation for an axis using stored mapping config.
      * Lock-free real-time path — called at ~60Hz from XY updates.
      */
-    fun applyAutomation(axis: Int, normalizedValue: Float) {
+    override fun applyAutomation(axis: Int, normalizedValue: Float) {
         if (!normalizedValue.isFinite()) return
         nativeApplyAutomation(axis, normalizedValue.coerceIn(0f, 1f))
     }
@@ -2026,7 +2026,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Get current effect chain size.
      * This is a public version for callers outside the effects system.
      */
-    fun getEffectChainSize(): Int = nativeGetEffectChainSize()
+    override fun getEffectChainSize(): Int = nativeGetEffectChainSize()
 
     // ==================== Native Methods: Vocoder ====================
 

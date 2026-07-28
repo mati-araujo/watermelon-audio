@@ -168,6 +168,11 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun hasInitializationFailed(): Boolean = wma_has_init_failed(engine)
     override fun getMasterVolume(): Float = wma_get_master_volume(engine)
 
+    /** La variante lock-free del conteo de efectos. Ver el KDoc en la interfaz. */
+    override fun getEffectChainSize(): Int = wma_effect_chain_size(engine)
+
+    override fun isUsingReducedBuffers(): Boolean = wma_is_using_reduced_buffers(engine)
+
     /**
      * `[sampleRate, bufferSize, latencyMs]`, o `null` si el motor no puede
      * informarlos todavía (típicamente porque no hay stream abierto).
@@ -426,6 +431,23 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun isUsbBackendAvailable(): Boolean = false
 
     /**
+     * **Se llama de verdad, y no es un descuido de D4.**
+     *
+     * `wma_configure_usb_backend` termina en `BackendManager::setSampleRate()`, el
+     * manager compartido — no toca ningún backend USB. En iOS el símbolo linkea (está
+     * en el `.a` del simulador, verificado con `nm`) y el sample rate se aplica. Un
+     * no-op acá descartaría en silencio lo único que esta llamada hace.
+     *
+     * Contrasta a propósito con [isUsbBackendAvailable], que reporta una capacidad y por
+     * eso sí tiene que decir `false`.
+     */
+    override fun configureUsbBackend(sampleRate: Int, channels: Int, bitDepth: Int) =
+        wma_configure_usb_backend(sampleRate, channels, bitDepth)
+
+    /** Ídem: detrás es `BackendManager::setFullDuplexEnabled`, que en iOS sí aplica. */
+    override fun setUsbStreamingMode(modeId: Int) = wma_set_usb_streaming_mode(modeId)
+
+    /**
      * No soportado en iOS. `SplitBackend` compone un backend de entrada con otro
      * de salida —en Android, USB-in + Oboe-out— y ninguna de las dos mitades
      * existe acá: no hay USB (D4) y el camino de captura de `InputNode` todavía
@@ -651,6 +673,64 @@ internal class IosAudioBridge : IAudioNativeBridge {
         wma_transport_is_metronome_continuous(engine)
 
     override fun transportGetRemainingBeats(): Int = wma_transport_get_remaining_beats(engine)
+
+    // ==================== FILTRO DE VOZ ====================
+    //
+    // Los rangos se repiten acá y en Android a propósito: son contrato declarado en
+    // [IAudioNativeBridge], y quien lo implemente tiene que cumplirlo. Fuera de rango
+    // NO se recorta — ver el porqué en la interfaz.
+
+    override fun setVoiceFilterEnabled(enabled: Boolean) =
+        wma_voice_filter_set_enabled(engine, enabled)
+
+    override fun setVoiceFilterCutoff(hz: Float) {
+        if (!hz.isFinite() || hz < MIN_FILTER_HZ || hz > MAX_FILTER_HZ) return
+        wma_voice_filter_set_cutoff(engine, hz)
+    }
+
+    override fun setVoiceFilterResonance(q: Float) {
+        if (!q.isFinite() || q < 0f || q > 1f) return
+        wma_voice_filter_set_resonance(engine, q)
+    }
+
+    override fun setVoiceFilterMode(mode: Int) {
+        if (mode < 0 || mode > MAX_FILTER_MODE) return
+        wma_voice_filter_set_mode(engine, mode)
+    }
+
+    // ==================== AUTOMATIZACIÓN Y MAPEO XY ====================
+    //
+    // Acá el contrato SÍ manda recortar en vez de descartar: son valores normalizados
+    // por definición. Lo que se descarta es lo no finito, que no tiene borde al que
+    // recortar — `NaN.coerceIn(0f, 1f)` sigue siendo `NaN` y llegaría al motor.
+
+    override fun setMappingConfig(
+        axis: Int,
+        effectIndex: Int,
+        paramId: Int,
+        curve: Int,
+        polarity: Int,
+        mapMin: Float,
+        mapMax: Float,
+        inverted: Boolean,
+    ) {
+        if (!mapMin.isFinite() || !mapMax.isFinite()) return
+        wma_set_mapping_config(
+            engine, axis, effectIndex, paramId, curve, polarity, mapMin, mapMax, inverted,
+        )
+    }
+
+    override fun clearMappingConfig(axis: Int) = wma_clear_mapping_config(engine, axis)
+
+    override fun applyAutomation(axis: Int, normalizedValue: Float) {
+        if (!normalizedValue.isFinite()) return
+        wma_apply_automation(engine, axis, normalizedValue.coerceIn(0f, 1f))
+    }
+
+    override fun setAutomationParameter(effectIndex: Int, paramId: Int, xyValue: Float) {
+        if (!xyValue.isFinite()) return
+        wma_set_automation_param(engine, effectIndex, paramId, xyValue.coerceIn(0f, 1f))
+    }
 
     // ==================== LOOPER ====================
     //
@@ -1149,5 +1229,14 @@ internal class IosAudioBridge : IAudioNativeBridge {
         } finally {
             wma_log_batch_free(batch)
         }
+    }
+
+    private companion object {
+        /** Los bordes del filtro de voz que declara [IAudioNativeBridge]. */
+        const val MIN_FILTER_HZ = 20f
+        const val MAX_FILTER_HZ = 20_000f
+
+        /** 0 = paso bajo, 1 = paso alto, 2 = paso banda. */
+        const val MAX_FILTER_MODE = 2
     }
 }

@@ -57,6 +57,14 @@ interface IAudioNativeBridge :
     fun isEngineInitialized(): Boolean
     fun hasInitializationFailed(): Boolean
     fun getStreamInfoArray(): FloatArray?
+
+    /**
+     * Si el motor recortó el tamaño de buffer por presión de recursos.
+     *
+     * Es diagnóstico: no cambia nada, explica por qué la latencia medida no coincide
+     * con la pedida.
+     */
+    fun isUsingReducedBuffers(): Boolean
     fun getMasterVolume(): Float
 
     // ==================== FADE ====================
@@ -93,6 +101,16 @@ interface IAudioNativeBridge :
     fun isEffectsBypassedSync(): Boolean
     fun reorderEffectsSync(fromIndex: Int, toIndex: Int)
 
+    /**
+     * Cuántos efectos tiene la cadena, sin suspender.
+     *
+     * No es un duplicado de `IEffectStateProvider.getEffectCount()`: aquélla es
+     * `suspend` y toma el mutex de efectos porque va con el resto del snapshot. Ésta es
+     * la variante lock-free, para los mismos contextos no-suspend que consumen el resto
+     * de los `*Sync`.
+     */
+    fun getEffectChainSize(): Int
+
     // ==================== EFFECT ROUTING ====================
 
     fun setRoutingMode(mode: Int)
@@ -112,6 +130,27 @@ interface IAudioNativeBridge :
     fun getActiveVoiceCount(): Int
     fun setMaxVoices(maxVoices: Int)
     fun setVoiceStealingStrategy(strategyId: Int)
+
+    // ==================== FILTRO DE VOZ ====================
+    //
+    // Los cuatro son `RT-safe`. Sus rangos son CONTRATO y no defensa: hasta ahora los
+    // recortes vivían sólo dentro de la implementación de Android, que es la forma
+    // conocida de que dos implementaciones del mismo contrato diverjan en silencio.
+    // Fuera de rango **no hace nada**, en vez de recortar al borde: recortar convertiría
+    // un error de unidades del llamador (mandar 0.5 creyendo que es un porcentaje) en un
+    // filtro a 20 Hz que sí suena, y por lo tanto en un bug de audio en vez de un no-op
+    // visible.
+
+    fun setVoiceFilterEnabled(enabled: Boolean)
+
+    /** Frecuencia de corte en Hz. **Ignora lo que no sea finito o caiga fuera de 20..20000.** */
+    fun setVoiceFilterCutoff(hz: Float)
+
+    /** Resonancia. **Ignora lo que no sea finito o caiga fuera de 0..1.** */
+    fun setVoiceFilterResonance(q: Float)
+
+    /** 0 = paso bajo, 1 = paso alto, 2 = paso banda. **Ignora cualquier otro valor.** */
+    fun setVoiceFilterMode(mode: Int)
 
     // ==================== DUAL TOUCH ====================
 
@@ -141,6 +180,51 @@ interface IAudioNativeBridge :
     /** Libera todas las voces del acorde. */
     fun releaseChordNotes()
 
+    // ==================== AUTOMATIZACIÓN Y MAPEO XY ====================
+    //
+    // Cómo un eje del pad mueve un parámetro de un efecto. El mapeo se configura una vez
+    // y después [applyAutomation] corre por frame de gesto, así que es lock-free.
+    //
+    // Los guards vuelven a ser contrato: un valor no finito **se descarta** y uno fuera
+    // de 0..1 **se recorta**. Y acá el recorte sí corresponde, al revés que en el filtro
+    // de voz: estos parámetros son normalizados por definición, así que un 1.2 es ruido
+    // numérico de la UI y no una unidad equivocada.
+
+    /**
+     * Configura qué parámetro mueve un eje.
+     *
+     * @param axis      0 = X, 1 = Y, 2 = profundidad.
+     * @param curve     0 = lineal, 1 = exponencial, 2 = logarítmica, 3 = curva en S.
+     * @param polarity  0 = unipolar, 1 = bipolar.
+     */
+    fun setMappingConfig(
+        axis: Int,
+        effectIndex: Int,
+        paramId: Int,
+        curve: Int,
+        polarity: Int,
+        mapMin: Float,
+        mapMax: Float,
+        inverted: Boolean,
+    )
+
+    /** Desconecta el eje. */
+    fun clearMappingConfig(axis: Int)
+
+    /**
+     * Mueve el eje. Se llama por frame de gesto.
+     *
+     * [normalizedValue] se recorta a 0..1; si no es finito, no hace nada.
+     */
+    fun applyAutomation(axis: Int, normalizedValue: Float)
+
+    /**
+     * Escribe directo sobre un parámetro automatizado, sin pasar por un eje.
+     *
+     * [xyValue] se recorta a 0..1; si no es finito, no hace nada.
+     */
+    fun setAutomationParameter(effectIndex: Int, paramId: Int, xyValue: Float)
+
     // ==================== MODE ====================
 
     suspend fun setAudioMode(mode: Int): Result<Unit>
@@ -154,6 +238,29 @@ interface IAudioNativeBridge :
     fun selectBackend(backendId: Int): Boolean
     fun getCurrentBackendType(): Int
     fun isUsbBackendAvailable(): Boolean
+
+    /**
+     * **El nombre dice USB; el efecto no es de USB, y eso importa en iOS.**
+     *
+     * Detrás, `wma_configure_usb_backend` llama a `BackendManager::setSampleRate()` — el
+     * manager compartido, no un backend USB. `channels` y `bitDepth` son informativos:
+     * el formato real lo elige el backend. O sea que **en iOS esto configura el sample
+     * rate de verdad**, y hacerlo un no-op "porque iOS no tiene USB" (D4) descartaría en
+     * silencio la única parte que sí tiene efecto.
+     *
+     * Es distinto de [isUsbBackendAvailable], que **reporta una capacidad** y por eso sí
+     * miente si no dice `false`. Éste sólo transporta un pedido.
+     */
+    fun configureUsbBackend(sampleRate: Int, channels: Int, bitDepth: Int)
+
+    /**
+     * 0 = sólo reproducción, 1 = sólo captura, 2 = full-duplex.
+     *
+     * Misma historia que [configureUsbBackend]: detrás es
+     * `BackendManager::setFullDuplexEnabled(mode == 2)`, y el full-duplex es exactamente
+     * lo que hace `CoreAudioBackend` en iOS. El nombre quedó del origen Android.
+     */
+    fun setUsbStreamingMode(modeId: Int)
 
     /**
      * Select the USB latency profile (Fase 1). Re-parametrizes the USB
