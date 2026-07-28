@@ -12,6 +12,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **kmp:** el tope de efectos que SÍ usa NoisyPad, WA-1.4 a 26/26, y el SoundFont clavado a su tasa ([#73](https://github.com/mati-araujo/watermelon-audio/issues/73)) ([e75f009](https://github.com/mati-araujo/watermelon-audio/commit/e75f00967823fc5a0f6997f6f93b4f6222dc8986))
 
+### Nota agregada a mano — el tope de efectos CAMBIA de comportamiento en gama baja
+
+> Se agregó **después** de cortar el tag: el intento de meterla en el PR de release corrió
+> carrera con el merge y el squash tomó el head sin ella. O sea que **las release notes de
+> `v1.12.0` en GitHub no la traen** — sólo este archivo. Si hace falta que también estén allá,
+> hay que editar la release a mano.
+
+El `feat` de arriba no lo dice, y es lo que un consumidor necesita saber antes de subir de
+versión: **`EffectManagerFactory.create(scope)` ahora recorta `maxEffects` de 12 a 6 en un
+dispositivo de gama baja.** No hay que cambiar ninguna línea para que ocurra — pasa solo, al
+actualizar la dependencia.
+
+**Por qué se hizo así.** Es el camino que usa NoisyPad, y era el único tope vivo en producción:
+`AudioEngineFactory.create()` ya ajustaba al dispositivo desde WA-1.2, pero NoisyPad **no usa
+`AudioEngineFactory` en ninguna parte**. Recortar sólo en la entrada sin config explícita es lo
+único que arregla producción sin obligar al consumidor a tocar código.
+
+**Qué NO cambia:**
+
+- Un consumidor que pasa su propia `EffectManagerConfig` —el `create` de tres argumentos— se
+  respeta tal cual. El ajuste sólo aplica a las entradas sin config.
+- Los dispositivos que no son de gama baja siguen en 12.
+- El tope **nunca sube**: quien pidió 4 sigue teniendo 4.
+
+**Lo que hay que mirar si esto molesta:** `IEffectManager.maxEffects` es visible en la UI de
+NoisyPad (el `"n / 12"` del browser de efectos pasa a `"n / 6"`), y una escena de usuario con 7+
+efectos guardada antes carga **parcial** en un equipo de gama baja — `loadScene` loguea cada
+`addEffect` fallido y sigue, no rompe. Las 40 escenas de fábrica no se ven afectadas: la más
+cargada tiene 6 efectos, medido antes de tomar la decisión.
+
+**La moraleja, que es la misma que la de la 1.9.1 al revés:** un cambio de *comportamiento* sin
+cambio de *firma* no lo detecta ningún versionado automático. El `minor` acá es correcto, pero
+lo es por el tipo de commit, no porque release-please haya entendido lo que cambia. Por eso la
+nota.
+
 ## [1.11.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.10.0...v1.11.0) (2026-07-28)
 
 
