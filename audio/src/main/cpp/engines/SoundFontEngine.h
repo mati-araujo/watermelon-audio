@@ -41,8 +41,26 @@ public:
 
     // ========== Lifecycle ==========
 
+    /**
+     * @brief Prepare for a stream at [sampleRate].
+     *
+     * Además de lo del engine base, **re-configura la tasa de salida del
+     * SoundFont**. El font se configura a la tasa de salida cuando se carga, y
+     * el stream puede abrir —o reabrir— a otra: sin esto el font se quedaba con
+     * la tasa vieja y sonaba desafinado en silencio. Ver
+     * `SoundFontManager::setOutputSampleRate()` para por qué reemplaza en vez
+     * de mutar, y para la nota de que no swapea si la tasa no cambió.
+     *
+     * NOT RT-safe: `setOutputSampleRate()` aloca. Es correcto porque `prepare()`
+     * corre en el hilo de control —`AudioEngine::start()` y
+     * `configureComponentsWithSampleRate()`, vía `SynthEngineDispatcher`—, nunca
+     * desde el callback de audio.
+     */
     void prepare(int32_t sampleRate, int32_t maxBlockSize) override {
         SynthEngine::prepare(sampleRate, maxBlockSize);
+        if (mSFManager) {
+            mSFManager->setOutputSampleRate(sampleRate);
+        }
     }
 
     void reset() override {

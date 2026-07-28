@@ -29,13 +29,25 @@
  * ## Actualización 2026-07-28 — mirar esas tres líneas destapó algo más grande
  *
  * La pregunta era si valía exponer la tasa para poder testear el eslabón. Al ir a
- * contestarla apareció que **la tasa del SoundFont se fija en la carga y nada la
- * vuelve a tocar**: `tsf_set_output` tiene un único call site y `prepare()` no
- * llega hasta el manager. O sea que el eslabón sin observable no era el problema
- * — el problema es que *cualquier* divergencia posterior queda muda.
+ * contestarla apareció que **la tasa del SoundFont se fijaba en la carga y nada la
+ * volvía a tocar**: `tsf_set_output` tenía un único call site y `prepare()` no
+ * llegaba hasta el manager. O sea que el eslabón sin observable no era el problema
+ * — el problema era que *cualquier* divergencia posterior quedaba muda.
  *
- * Está pinchado abajo, en `PreparingTheEngineAtANewRateDoesNotReRateTheFont`, como
- * test de **caracterización**: pasa hoy y tiene que fallar cuando se arregle.
+ * **Arreglado el mismo día.** `SoundFontEngine::prepare()` ahora re-configura vía
+ * `SoundFontManager::setOutputSampleRate()`, con la misma disciplina de swap que
+ * la carga. Los tests viven en la sección "RE-RATE" de abajo, y el de
+ * caracterización que documentaba el defecto se borró en vez de relajarse.
+ *
+ * ## Y renderizar por primera vez destapó un fixture inválido
+ *
+ * Esta suite cargaba y leía metadata; ninguno de sus tests había RENDERIZADO. El
+ * primero que tocó una nota se llevó un `heap-buffer-overflow` de ASan en
+ * `tsf_voice_render`. No era del motor: al fixture le faltaban los **46 sample
+ * points en cero** que el spec de SF2 exige después de cada sample, y la
+ * interpolación de tsf lee `pos + 1`. Se comprobó que no dependía del re-rate
+ * —con la misma tasa, sin copia ni swap, desbordaba igual— y se arregló en
+ * `support/MinimalSoundFont.h`, que además dejó de generar puro silencio.
  */
 
 #include "support/MinimalSoundFont.h"
@@ -45,8 +57,12 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <atomic>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -186,36 +202,30 @@ TEST_F(SoundFontLoadTest, ReloadingAtANewRateReplacesTheOldOne) {
 }
 
 // ===========================================================================
-// CARACTERIZACIÓN — la tasa queda clavada en la carga, y nada la re-configura
+// RE-RATE — el stream puede cambiar de tasa DESPUÉS de la carga
 // ===========================================================================
+//
+// Hasta 2026-07-28 esta sección era un test de caracterización: `tsf_set_output()`
+// se llamaba en un solo lugar (`configurAndSwap`, o sea sólo al cargar) y
+// `SoundFontEngine::prepare()` no llegaba al manager, así que la tasa del
+// SoundFont quedaba clavada en la de la carga. Si el stream abría o REABRÍA a
+// otra tasa, el font quedaba desafinado en silencio — ni error, ni log.
+//
+// Los dos caminos que lo alcanzaban:
+//
+//  1. Cargar antes de arrancar. `AudioEngine::currentSampleRate()` cae a 48000 sin
+//     stream abierto; en un equipo que después negocia 44100 el font renderiza a
+//     48000 dentro de un stream de 44100 — ~1.5 semitonos alto, para siempre.
+//  2. Reabrir el stream a otra tasa. `AudioEngine::start()` ya tiene el caso
+//     explícito ("Device coerced sample rate X -> Y, re-configuring components"),
+//     y en iOS pedir captura reabre la sesión, que con un manos libres Bluetooth
+//     puede caer a HFP (16 kHz).
+//
+// Ahora `prepare()` sí re-configura, con la MISMA disciplina de swap que la carga:
+// nunca se muta el `tsf` desde el que está renderizando el hilo de audio.
 
-/**
- * **Esto documenta un defecto latente, no un contrato deseable.**
- *
- * `tsf_set_output()` se llama en **un solo lugar** de todo el motor:
- * `SoundFontManager::configurAndSwap`, o sea únicamente al cargar. Y
- * `SoundFontEngine::prepare()` —que es lo que corre cuando se abre o se REABRE el
- * stream— sólo delega en `SynthEngine::prepare` y **no toca el manager**. O sea que
- * la tasa a la que renderiza el SoundFont se fija en el instante de la carga y no
- * vuelve a moverse nunca.
- *
- * Consecuencia: si la tasa del stream difiere de la que valía al cargar, el
- * SoundFont queda desafinado **en silencio** — ni error, ni log, ni forma de verlo
- * desde afuera. Dos caminos concretos, medidos por lectura:
- *
- * 1. **Cargar antes de arrancar.** `AudioEngine::currentSampleRate()` cae a 48000
- *    cuando no hay stream (`AudioEngine.cpp`, el fallback final). En un dispositivo
- *    que después negocia 44100, el font renderiza 48000 dentro de un stream de
- *    44100: ~1.5 semitonos alto, para siempre.
- * 2. **Reabrir el stream a otra tasa.** Es el caso serio en iOS: pedir captura
- *    reabre la sesión (WA-2.6), y `AVAudioSession` puede caer a HFP —16 kHz— al
- *    conectar un manos libres Bluetooth. `prepare()` re-configura todos los demás
- *    engines con la tasa nueva; el SoundFont se queda con la vieja.
- *
- * **Este test pasa hoy y tiene que FALLAR el día que alguien lo arregle.** Cuando
- * eso pase, borrarlo y poner el inverso — no relajarlo.
- */
-TEST_F(SoundFontLoadTest, PreparingTheEngineAtANewRateDoesNotReRateTheFont) {
+/** La tasa nueva llega al font por el mismo camino que usa el motor. */
+TEST_F(SoundFontLoadTest, PreparingTheEngineAtANewRateReRatesTheFont) {
     ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 48000));
     ASSERT_EQ(mManager.getSampleRate(), 48000);
 
@@ -224,9 +234,148 @@ TEST_F(SoundFontLoadTest, PreparingTheEngineAtANewRateDoesNotReRateTheFont) {
     engine.setSoundFontManager(&mManager);
     engine.prepare(44100, 256);
 
-    EXPECT_EQ(mManager.getSampleRate(), 48000)
-        << "Si esto ahora da 44100, el re-rate se implementó: borrar este test de "
-           "caracterización y afirmar el comportamiento nuevo.";
+    EXPECT_EQ(mManager.getSampleRate(), 44100);
+}
+
+/**
+ * **El font se reemplaza, no se muta.**
+ *
+ * Es la mitad de seguridad del arreglo, y la única forma de verla desde afuera es
+ * el puntero: `render()` toma `getActiveSF()` UNA vez por bloque, así que cambiar
+ * de puntero entre bloques es seguro y escribirle encima al que el hilo de audio
+ * está usando es una carrera. Si este test viera el mismo puntero con otra tasa,
+ * el arreglo estaría mutando en vivo.
+ */
+TEST_F(SoundFontLoadTest, ReRatingSwapsTheFontInsteadOfMutatingTheLiveOne) {
+    ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 48000));
+    tsf* before = mManager.getActiveSF();
+    ASSERT_NE(before, nullptr);
+
+    SoundFontEngine engine;
+    engine.setSoundFontManager(&mManager);
+    engine.prepare(44100, 256);
+
+    EXPECT_NE(mManager.getActiveSF(), before)
+        << "la tasa cambió sobre el mismo tsf: eso es mutar lo que el hilo de audio lee";
+}
+
+/**
+ * **Preparar a la MISMA tasa no puede swapear.**
+ *
+ * No es una optimización: `prepare()` corre en cada `start()`, y todo swap tira las
+ * voces que estuvieran sonando (el `tsf_copy` viene sin voces). Swapear cuando no
+ * cambió nada convertiría cada arranque en un corte. El comentario de
+ * `AudioEngine::start()` ya declara que reconfigurar es idempotente para tasas
+ * iguales; esto lo sostiene.
+ */
+TEST_F(SoundFontLoadTest, PreparingAtTheSameRateIsANoOp) {
+    ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 48000));
+    tsf* before = mManager.getActiveSF();
+
+    SoundFontEngine engine;
+    engine.setSoundFontManager(&mManager);
+    engine.prepare(48000, 256);
+
+    EXPECT_EQ(mManager.getActiveSF(), before) << "swapeó sin que la tasa cambiara";
+    EXPECT_EQ(mManager.getSampleRate(), 48000);
+}
+
+/**
+ * **El font re-rateado todavía SUENA.**
+ *
+ * `tsf_copy()` devuelve la copia con `voices = NULL` y `voiceNum = 0`: comparte
+ * presets y muestras, pero no las voces. Un arreglo que se olvide de re-hacer
+ * `tsf_set_max_voices()` deja un SoundFont que carga, reporta sus presets y la
+ * tasa correcta... y renderiza silencio. Ninguno de los tests de arriba lo vería.
+ *
+ * Por eso acá se toca una nota y se mide que salga señal.
+ */
+TEST_F(SoundFontLoadTest, TheReRatedFontStillProducesAudio) {
+    ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 48000));
+
+    SoundFontEngine engine;
+    engine.setSoundFontManager(&mManager);
+    engine.prepare(44100, 256);
+
+    tsf* sf = mManager.getActiveSF();
+    ASSERT_NE(sf, nullptr);
+    ASSERT_EQ(tsf_get_presetcount(sf), 1) << "la copia perdió los presets";
+
+    tsf_note_on(sf, 0, 60, 1.0f);
+
+    std::vector<float> block(256 * 2, 0.0f);
+    tsf_render_float(sf, block.data(), 256, 0);
+
+    float peak = 0.0f;
+    for (float s : block) peak = std::max(peak, std::fabs(s));
+    EXPECT_GT(peak, 0.0f) << "el font re-rateado no renderiza: la copia se quedó sin voces";
+}
+
+/**
+ * **Re-ratear MIENTRAS el hilo de audio renderiza.**
+ *
+ * Es el único test de esta suite que corre dos hilos, y existe porque la
+ * afirmación "reemplaza en vez de mutar" es una afirmación de concurrencia: los
+ * tests de puntero de arriba la miran desde un solo hilo y no pueden verla
+ * fallar. El hilo lector hace exactamente lo que hace `SoundFontEngine::render()`
+ * —`getActiveSF()` una vez, después renderiza con ese puntero— así que un
+ * `tsf_set_output()` sobre el font vivo aparece acá como carrera sobre
+ * `outSampleRate`, y un retiro mal hecho como use-after-free.
+ *
+ * **Vale poco sin sanitizers y mucho con ellos**: en una corrida normal esto casi
+ * siempre pasa aunque haya una carrera. Los jobs `cpp-tests-asan` y
+ * `cpp-tests-tsan` son los que le dan sentido.
+ *
+ * La cadencia es deliberadamente realista: se renderiza un bloque entre cambios
+ * de tasa. En producción un cambio de tasa exige reabrir el stream, así que dos
+ * seguidos dentro del mismo bloque de audio no ocurren.
+ */
+TEST_F(SoundFontLoadTest, ReRatingWhileTheAudioThreadRendersIsSafe) {
+    ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 48000));
+
+    SoundFontEngine engine;
+    engine.setSoundFontManager(&mManager);
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> blocks{0};
+
+    std::thread audio([&] {
+        std::vector<float> buf(128 * 2, 0.0f);
+        while (!stop.load(std::memory_order_acquire)) {
+            // Igual que render(): UNA lectura del puntero, y después se usa.
+            tsf* sf = mManager.getActiveSF();
+            if (sf) {
+                tsf_render_float(sf, buf.data(), 128, 0);
+                blocks.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    });
+
+    // Esperar a que el lector esté de verdad adentro antes de empezar a swapear.
+    while (blocks.load(std::memory_order_relaxed) < 10) { /* spin */ }
+
+    for (int i = 0; i < 20; ++i) {
+        engine.prepare(i % 2 == 0 ? 44100 : 48000, 128);
+        const int seen = blocks.load(std::memory_order_relaxed);
+        while (blocks.load(std::memory_order_relaxed) < seen + 2) { /* un bloque entero */ }
+    }
+
+    stop.store(true, std::memory_order_release);
+    audio.join();
+
+    EXPECT_TRUE(mManager.isLoaded());
+    EXPECT_GT(blocks.load(std::memory_order_relaxed), 0);
+}
+
+/** Sin font cargado no hay nada que re-ratear, y no puede explotar. */
+TEST_F(SoundFontLoadTest, PreparingWithNoFontLoadedIsHarmless) {
+    SoundFontEngine engine;
+    engine.setSoundFontManager(&mManager);
+
+    engine.prepare(44100, 256);
+
+    EXPECT_FALSE(mManager.isLoaded());
+    EXPECT_EQ(mManager.getActiveSF(), nullptr);
 }
 
 }  // namespace
