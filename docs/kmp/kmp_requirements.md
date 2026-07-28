@@ -7,26 +7,36 @@
 **Objetivo estratégico:** que la librería de audio compile y funcione en iOS con el mismo motor C++ y la misma API Kotlin (`commonMain`) que hoy consume NoisyPad Android, habilitando la versión iOS de NoisyPad.
 
 > [!IMPORTANT]
-> ## Estado en una pantalla (2026-07-27)
+> ## Estado en una pantalla (2026-07-28)
 >
-> **Este documento tiene 3.200+ líneas y crece por sesión. Esto es lo que hay que saber sin
+> **Este documento tiene 3.300+ líneas y crece por sesión. Esto es lo que hay que saber sin
 > scrollear; el detalle vive en §16 "Dónde retomar" y en las notas de §10.**
 >
 > | | |
 > |---|---|
 > | **La pregunta que justificaba el programa** | **Contestada: el input path de iOS CAPTURA.** `inputData` deja de ser `0x0`, `inputPeak` trae señal real |
 > | Fases 0, 2, 3 | ✅ cerradas · **WA-2.5/2.6 cerrada** (JNI→C API, las 10 categorías + la cola) |
-> | Fase 4 | 🟢 WA-4.1 ✅ · **G1/WA-4.2 ✅ CERRADO** — NoisyPad linkea la 1.9.0 con 251 símbolos `wma_*` adentro |
-> | Fase 5 | ✅ **WA-5.5 CERRADA** — 7 controles en el simulador, y la fase final cerró **sin design system compartido**: se midió el harness y da **cero reutilización entre archivos** (§16) |
+> | Fase 4 | ✅ WA-4.1 · **G1/WA-4.2 CERRADO**. **Publicada la 1.10.0** con las **4 publicaciones** (`kotlinMultiplatform`, `androidRelease`, `iosArm64`, `iosSimulatorArm64`) |
+> | Fase 5 | ✅ **WA-5.5 CERRADA ENTERA** — 7 controles, y la fase final cerró **sin design system compartido**: se midió el harness y da **cero reutilización entre archivos** |
 > | **Lo único grande abierto** | **G2 — validación en device. Necesita un iPhone.** Sonido real, latencia round-trip, Instruments sobre el render block |
-> | Otros pendientes | **1.9.1 publicada** ✅ · **los 2 stubs que mentían: resueltos** ✅ · **design system: cerrado sin compartir** ✅ · release **1.10.0 esperando billing de Actions** (PR #65) · el smoke de Android (bloqueado por descargas) · WA-1.3 |
+> | Smoke de Android | **4 de 12 corridos** (ítems 3, 7, 8 y 9) — hay AVD. Lo que falta necesita **USB físico** o **poder escuchar** |
+> | Otros pendientes | **WA-1.3** · el fixture SF2 · WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 >
-> ⚠️ **Hoy sólo se puede validar en SIMULADOR**: no hay iPhone, y del lado de Android no hay
-> device **ni un solo AVD**. §16 ordena lo que queda por eso: primero lo que no necesita
-> hardware nuevo.
+> **`master` = `7af4275` · versión publicada 1.10.0 · cero PRs abiertos.**
+>
+> ⚠️ **Lo que se puede validar hoy, y lo que no.** Hay **AVD** (`wa-smoke-api36`) y hay
+> **simulador de iOS**. **No hay iPhone ni Android físico**, y el emulador **no tiene salida
+> de audio real** (su HAL escupe `pcm_writei failed … I/O error`), así que nada que dependa de
+> *escuchar* se puede cerrar acá. Tampoco hay USB.
 >
 > **El gate local son 12 comandos**, no 10 — los dos últimos son los sanitizers, y el CI
-> **funciona** (estuvo caído sólo el 26/07). Ver §16.
+> **funciona**. Ver §16.
+>
+> ⚠️ **El billing de GitHub Actions se agotó a mitad de la sesión del 27/07 y volvió solo.** Su
+> firma: los jobs aparecen con **cero jobs** en el run (watermelon-audio) o con una anotación
+> explícita de pago (NoisyPad). Si vuelve a pasar, `gh run rerun <id>` revalida sin tocar la
+> rama — y **no mergear el PR de release con Actions caído**: el publish corre ahí, así que
+> quedaría una versión tageada y sin publicar.
 >
 > ⚠️ **Las referencias `archivo:línea` de este documento envejecen.** Ya pasó que un entry de
 > deuda apuntara a una línea que hoy es otra cosa. **Buscar por nombre, no por número.**
@@ -2925,6 +2935,46 @@ por eso el linker se comió toda la superficie nativa por dead-code elimination.
 > **G1 / WA-4.2 ✅.**
 
 
+### Cierre de sesión 2026-07-28 — cuatro reglas que la sesión repitió lo suficiente
+
+Se cerraron los dos stubs, WA-5.5 entera, el release 1.10.0, el AVD y cuatro ítems del smoke.
+El detalle de cada uno está en su nota. Lo que sigue es lo que **no** es específico de esos
+trabajos y conviene no volver a aprender:
+
+**1 · Un ítem de deuda escrito en otra sesión es una hipótesis, no un hecho.** Tres de tres
+apuntaron mal, en direcciones distintas: el ítem 11 **sobreestimaba** el daño (el slider de
+NoisyPad nunca estuvo roto), el 12 lo **subestimaba** y además mandaba a buscar el caller al
+repo equivocado, y el 3 pronosticaba una regresión **inalcanzable** por leer el camino nuevo sin
+cruzarlo con un flag de plataforma. Releer el caller real antes de actuar sale más barato que
+cualquiera de los tres.
+
+**2 · Un valor "neutro" es más peligroso que un error.** Un array de ceros **pasa** los chequeos
+de nulidad de sus callers y desactiva sus defaults — así fue como una tarjeta de diagnóstico
+entera no se renderizó nunca. Y un `false` puede significar "devolvió false" o "no llegó a
+devolver nada": en el ítem 9 sólo el **pid** distingue las dos. Si no tenés el dato, devolvé
+ausencia, no un cero.
+
+**3 · Verificar el artefacto, no el comando.** En una sola sesión: se miró un `.so` **release
+viejo** y parecía que un símbolo no se había borrado; un `| tail` devolvió **exit 0 sobre un
+BUILD FAILED**; y un regex sin dígitos hizo parecer que **faltaban dos publicaciones** de iOS.
+Las tres veces el resumen decía una cosa y el binario otra. Mirar fecha, exit code real
+(`PIPESTATUS`/redirección) y usar un control que *sí* deba aparecer.
+
+**4 · Medir antes de construir puede devolver "no", y eso es un resultado.** WA-5.5 mandó
+construir el consumidor real **antes** de decidir el design system. Se midió: **cero
+reutilización entre archivos**. Al revés se habrían escrito componentes "reutilizables" que
+ningún segundo archivo iba a usar, y **nada en el código lo habría delatado** — habría
+compilado, pasado los 12 comandos y parecido prolijo.
+
+> [!TIP]
+> **Bonus operativo — el versionado tiene tres superficies, no una.** Para que release-please
+> corte lo que querés hay que controlar el `!` del subject, **el footer `BREAKING CHANGE:` (que
+> fuerza major por sí solo)** y **el título del PR** (que en squash-merge es el subject que
+> queda en `master`, y es lo que release-please lee). Lo seguro es
+> `gh pr merge --squash --subject … --body-file …` en vez del default de GitHub.
+
+---
+
 ### Nota de cierre — WA-5.5 cierra SIN design system compartido (2026-07-28)
 
 **El plan dejó esta etapa para el final con un argumento explícito y correcto:** *"el harness te
@@ -3046,21 +3096,26 @@ en 1.9.x no rompe nada.
 
 ---
 
-### Dónde retomar (2026-07-27)
+### Dónde retomar (2026-07-28)
 
-**Branch:** `feature/wa-3-2-ios-audio-bridge`, **51 commits sobre `master`**, **pusheada** y con
-**PR abierto: [#59](https://github.com/mati-araujo/watermelon-audio/pull/59)** (90 archivos,
-+16354/-1583). `master` está en el merge del PR #58.
+**No hay nada a medio hacer.** `master` = **`7af4275`**, árbol limpio, **cero PRs abiertos** en
+watermelon-audio, **1.10.0 publicada** con sus 4 publicaciones. Del lado de NoisyPad, `master` =
+`7cb2256` (ya no llama a `setDepthValue`); su PR #107 es trabajo tuyo de F4-E4, ajeno a esto.
+
+**Lo que la sesión del 2026-07-28 cerró:** los dos stubs que mentían (ítems 11 y 12), WA-5.5
+entera, el release 1.10.0, el AVD, y los ítems **3, 7, 8 y 9** del smoke. Cada uno tiene su nota
+de cierre más abajo.
 
 > [!IMPORTANT]
-> **El CI volvió a andar** (2026-07-27) — §16 lo daba por caído por falta de pago desde el
-> 26/07, y al pushear el PR #59 el run arrancó solo. Sigue valiendo dejar constancia del gate
-> local en el PR, pero ya no es la única red.
+> **Lo que queda está frenado por hardware o es chico, en ese orden:**
 >
-> **Y el gate pasó de 10 a 12 comandos**, porque el CI encontró dos fallas reales que los 10
-> no veían: **ninguno corría sanitizers**. Ver la nota "El CI no estaba caído" arriba.
+> 1. **G2 — device iOS.** Lo único grande. Necesita un iPhone.
+> 2. **Smoke: lo que falta necesita USB físico** (mitad del ítem 3, el 4, el 10) **o poder
+>    escuchar** (el 5, el timing del metrónomo). El emulador no sirve para lo segundo.
+> 3. **Sin bloqueo de hardware:** los ítems **1, 2 y 6** del smoke, **WA-1.3**, el **fixture
+>    SF2**, y WA-3.5 / la revisión de paths de WA-3.6.
 
-**Última verificación local completa (2026-07-27, sobre `92a0089`, la que respalda el PR #59):**
+**Referencia — la última verificación local completa de 12/12 fue el 2026-07-27 sobre `92a0089`:**
 portabilidad OK (**325 archivos**), **762/762 tests C++** en 48.15 s, ambos slices de iOS con
 link check (19 MB / 15293 símbolos c/u), **105 tests de simulador** (12 XML, 0 fallas), **64
 JVM** (8 XML, 0 fallas), `assembleDebug` con las 4 ABIs, XCFramework, `compileIosMainKotlinMetadata`,
@@ -3212,11 +3267,15 @@ y **G1/WA-4.2 quedó cerrado** el mismo día: NoisyPad linkea la 1.9.0 con 251 s
 adentro. Lo que sigue ya no es "¿anda?" ni "¿se consume?".
 
 > [!CAUTION]
-> **La restricción que ordena todo lo de abajo: hoy sólo se puede validar en SIMULADOR.**
-> No hay iPhone, y del lado de Android no hay device conectado **ni un solo AVD configurado**
-> (`adb` existe; `adb devices` vuelve vacío). Cualquier plan que empiece por "probar en device"
-> está bloqueado por hardware, no por trabajo. La lista está ordenada por **lo que se puede
-> hacer sin hardware nuevo**.
+> **La restricción que ordena todo lo de abajo, al 2026-07-28.** Hay **simulador de iOS** y hay
+> **AVD** (`wa-smoke-api36`). **No hay iPhone, ni Android físico, ni USB**, y el emulador **no
+> tiene salida de audio real**. O sea: se puede validar *comportamiento* (permisos, retornos,
+> caminos JNI, logs del motor) pero **no se puede validar sonido**. Cualquier plan que empiece
+> por "escuchar" o por "conectar la placa" está bloqueado por hardware, no por trabajo.
+>
+> **Los puntos 1 a 4 de esta lista quedaron cerrados en la sesión del 27–28/07** y se dejan con
+> su porqué escrito, porque varios se cerraron con un resultado distinto del que el plan
+> esperaba. Lo vivo es el 5 y el 6, más lo que la lista de arriba marca como no bloqueado.
 
 **1 · ~~Decidir el release 1.9.1~~ ✅ HECHO.** [PR #62](https://github.com/mati-araujo/watermelon-audio/pull/62)
 mergeado y **v1.9.1 publicada** (2026-07-27 22:57). Se decidió **mergear como patch** en vez de
@@ -3288,9 +3347,14 @@ el 10.
 > hace falta device (G2).
 
 **5 · WA-1.3**, lo único que falta de Fase 1. Y el fixture SF2 (§ deuda técnica), que es lo
-único que le falta al bug 3 de WA-2.0.
+único que le falta al bug 3 de WA-2.0. **← vivo, sin bloqueo de hardware**
 
-**6 · WA-3.5 (P2, diferido) y la revisión de paths de WA-3.6.**
+**6 · WA-3.5 (P2, diferido) y la revisión de paths de WA-3.6.** **← vivo, sin bloqueo**
+
+**7 · Los ítems 1, 2 y 6 del smoke**, que el AVD puede correr y todavía nadie corrió: WA-1.4
+(los 26 call sites de `BridgeConcurrency`), WA-1.2 (`AudioEngineFactory.create()` recortando
+`maxEffects` en gama baja — y **el emulador reporta `gama baja: true`**, así que el camino se
+ejercita) y `getRecommendedBufferSize`. **← vivo, hay con qué**
 
 **Parqueado por hardware — no por trabajo:**
 
