@@ -25,10 +25,22 @@
  * deja dicho acá en vez de escribir una assertion que no lo cubra: hoy ese
  * eslabón lo sostienen la suite de `currentSampleRate()` y la revisión del
  * diff, y son tres líneas en `AudioEngine.cpp`.
+ *
+ * ## Actualización 2026-07-28 — mirar esas tres líneas destapó algo más grande
+ *
+ * La pregunta era si valía exponer la tasa para poder testear el eslabón. Al ir a
+ * contestarla apareció que **la tasa del SoundFont se fija en la carga y nada la
+ * vuelve a tocar**: `tsf_set_output` tiene un único call site y `prepare()` no
+ * llega hasta el manager. O sea que el eslabón sin observable no era el problema
+ * — el problema es que *cualquier* divergencia posterior queda muda.
+ *
+ * Está pinchado abajo, en `PreparingTheEngineAtANewRateDoesNotReRateTheFont`, como
+ * test de **caracterización**: pasa hoy y tiene que fallar cuando se arregle.
  */
 
 #include "support/MinimalSoundFont.h"
 
+#include "engines/SoundFontEngine.h"
 #include "engines/SoundFontManager.h"
 
 #include <gtest/gtest.h>
@@ -171,6 +183,50 @@ TEST_F(SoundFontLoadTest, ReloadingAtANewRateReplacesTheOldOne) {
     ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 44100));
 
     EXPECT_EQ(mManager.getSampleRate(), 44100);
+}
+
+// ===========================================================================
+// CARACTERIZACIÓN — la tasa queda clavada en la carga, y nada la re-configura
+// ===========================================================================
+
+/**
+ * **Esto documenta un defecto latente, no un contrato deseable.**
+ *
+ * `tsf_set_output()` se llama en **un solo lugar** de todo el motor:
+ * `SoundFontManager::configurAndSwap`, o sea únicamente al cargar. Y
+ * `SoundFontEngine::prepare()` —que es lo que corre cuando se abre o se REABRE el
+ * stream— sólo delega en `SynthEngine::prepare` y **no toca el manager**. O sea que
+ * la tasa a la que renderiza el SoundFont se fija en el instante de la carga y no
+ * vuelve a moverse nunca.
+ *
+ * Consecuencia: si la tasa del stream difiere de la que valía al cargar, el
+ * SoundFont queda desafinado **en silencio** — ni error, ni log, ni forma de verlo
+ * desde afuera. Dos caminos concretos, medidos por lectura:
+ *
+ * 1. **Cargar antes de arrancar.** `AudioEngine::currentSampleRate()` cae a 48000
+ *    cuando no hay stream (`AudioEngine.cpp`, el fallback final). En un dispositivo
+ *    que después negocia 44100, el font renderiza 48000 dentro de un stream de
+ *    44100: ~1.5 semitonos alto, para siempre.
+ * 2. **Reabrir el stream a otra tasa.** Es el caso serio en iOS: pedir captura
+ *    reabre la sesión (WA-2.6), y `AVAudioSession` puede caer a HFP —16 kHz— al
+ *    conectar un manos libres Bluetooth. `prepare()` re-configura todos los demás
+ *    engines con la tasa nueva; el SoundFont se queda con la vieja.
+ *
+ * **Este test pasa hoy y tiene que FALLAR el día que alguien lo arregle.** Cuando
+ * eso pase, borrarlo y poner el inverso — no relajarlo.
+ */
+TEST_F(SoundFontLoadTest, PreparingTheEngineAtANewRateDoesNotReRateTheFont) {
+    ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 48000));
+    ASSERT_EQ(mManager.getSampleRate(), 48000);
+
+    // Exactamente lo que hace el motor cuando el stream abre o reabre a otra tasa.
+    SoundFontEngine engine;
+    engine.setSoundFontManager(&mManager);
+    engine.prepare(44100, 256);
+
+    EXPECT_EQ(mManager.getSampleRate(), 48000)
+        << "Si esto ahora da 44100, el re-rate se implementó: borrar este test de "
+           "caracterización y afirmar el comportamiento nuevo.";
 }
 
 }  // namespace

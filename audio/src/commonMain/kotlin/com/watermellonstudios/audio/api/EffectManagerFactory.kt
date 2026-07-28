@@ -1,5 +1,7 @@
 package com.watermellonstudios.audio.api
 
+import com.watermellonstudios.audio.api.config.AudioEngineConfig
+import com.watermellonstudios.audio.domain.device.DeviceCapabilities
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
 import com.watermellonstudios.audio.internal.effect.EffectManagerConfig
 import com.watermellonstudios.audio.internal.effect.EffectManagerImpl
@@ -53,7 +55,19 @@ object EffectManagerFactory {
      * The returned manager uses:
      * - Default sync polling interval (50ms)
      * - Default sync timeout (500ms)
-     * - Maximum 3 effects
+     * - `maxEffects` = 12, **recortado a [AudioEngineConfig.LOW_END_MAX_EFFECTS] en un
+     *   dispositivo de gama baja** — ver la nota de abajo.
+     *
+     * ## El tope de efectos se ajusta al dispositivo
+     *
+     * Igual que [AudioEngineFactory.create], esta entrada pasa su config por
+     * [EffectManagerConfig.tunedFor] con [currentDeviceCapabilities]. Antes no lo hacía,
+     * y como este es el camino que usa un consumidor que no toca [AudioEngineFactory],
+     * el recorte de WA-1.2 no llegaba a producción por ningún lado.
+     *
+     * Sólo **recorta**: nunca sube el tope. Y sólo aplica a las entradas que no reciben
+     * una config explícita — si el consumidor pasa la suya
+     * ([create] de tres argumentos), se respeta tal cual.
      *
      * @param scope CoroutineScope for StateFlow operations and synchronization.
      *              Typically viewModelScope or a dedicated lifecycle-aware scope.
@@ -63,9 +77,22 @@ object EffectManagerFactory {
         return create(
             scope = scope,
             syncConfig = SyncConfig.DEFAULT,
-            effectConfig = EffectManagerConfig.DEFAULT
+            effectConfig = tunedDefault()
         )
     }
+
+    /**
+     * La config por defecto ya ajustada al dispositivo.
+     *
+     * Existe como función y no como constante porque [currentDeviceCapabilities] es una
+     * consulta al sistema (cacheada en las dos plataformas, así que llamarla por cada
+     * `create` no cuesta I/O), y porque una constante de nivel superior se evaluaría al
+     * cargar la clase, antes de que el consumidor pueda hacer nada al respecto.
+     */
+    internal fun tunedDefault(
+        base: EffectManagerConfig = EffectManagerConfig.DEFAULT,
+        capabilities: DeviceCapabilities = currentDeviceCapabilities(),
+    ) = EffectManagerConfig.tunedFor(capabilities, base)
 
     /**
      * Creates an [IEffectManager] with custom configuration.
@@ -123,7 +150,7 @@ object EffectManagerFactory {
     fun createWithSynchronizer(
         scope: CoroutineScope,
         synchronizer: StateSynchronizer,
-        effectConfig: EffectManagerConfig = EffectManagerConfig.DEFAULT
+        effectConfig: EffectManagerConfig = tunedDefault()
     ): IEffectManager {
         val nativeBridge = getAudioBridge()
 
@@ -148,7 +175,7 @@ object EffectManagerFactory {
         return create(
             scope = scope,
             syncConfig = SyncConfig.BATTERY_SAVER,
-            effectConfig = EffectManagerConfig.DEFAULT
+            effectConfig = tunedDefault()
         )
     }
 
@@ -165,7 +192,7 @@ object EffectManagerFactory {
         return create(
             scope = scope,
             syncConfig = SyncConfig.AGGRESSIVE,
-            effectConfig = EffectManagerConfig.DEFAULT
+            effectConfig = tunedDefault()
         )
     }
 
@@ -175,6 +202,10 @@ object EffectManagerFactory {
      * Uses longer timeouts to accommodate slower devices while maintaining
      * reliability.
      *
+     * "Lento" y "gama baja" son dos ejes distintos —el timeout habla del puente, el
+     * tope de efectos del CPU— así que esta entrada pasa igual por [tunedDefault]:
+     * si además resulta ser de gama baja, recorta.
+     *
      * @param scope CoroutineScope for StateFlow operations
      * @return New [IEffectManager] instance with slow device config
      */
@@ -182,7 +213,7 @@ object EffectManagerFactory {
         return create(
             scope = scope,
             syncConfig = SyncConfig.DEFAULT,
-            effectConfig = EffectManagerConfig.SLOW_DEVICE
+            effectConfig = tunedDefault(EffectManagerConfig.SLOW_DEVICE)
         )
     }
 }
