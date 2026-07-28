@@ -74,8 +74,29 @@ for SDK in iphoneos iphonesimulator; do
 
     # CMake will not merge static archives; libtool does.
     MERGED="$BUILD_DIR/libwatermelon_audio.a"
+    #
+    # -D = determinista: cero timestamps, uid y gid en las cabeceras de los
+    # miembros. NO es cosmetico, y no es por reproducibilidad "de principio".
+    #
+    # Sin -D este archivo sale DISTINTO en cada corrida aunque el fuente no haya
+    # cambiado. Medido por capas con builds limpios consecutivos: los 66 objetos
+    # salen identicos, los 6 .a intermedios que arma `ar` salen identicos, y
+    # solo el merge de libtool difiere. (El orden de `find` NO es la causa: se
+    # probo ascendente vs descendente y da el mismo hash. Y ojo con la trampa
+    # de medirlo mal: dos corridas dentro del MISMO segundo coinciden, asi que
+    # hay que separarlas en el tiempo para ver la diferencia.)
+    #
+    # Por que importa: este .a es INPUT DECLARADO del cinterop — se hizo asi a
+    # proposito al arreglar el bug 3, para que un cambio en C++ no pudiera
+    # dejar de llegar al framework de iOS. El efecto colateral es que si el .a
+    # cambia en cada corrida, cambia la clave de cache de TODA la cadena
+    # Kotlin/Native de abajo: cinterop, klibs, compilaciones por target,
+    # XCFramework y el framework del harness. La cache de Gradle se restauraba
+    # bien en CI (`Cache hit for: gradle-build-cache-v1-...`) y despues no
+    # servia para nada.
+    #
     # shellcheck disable=SC2046  # word splitting is what we want here
-    libtool -static -o "$MERGED" $(find "$BUILD_DIR" -name '*.a' ! -name 'libwatermelon_audio.a')
+    libtool -D -static -o "$MERGED" $(find "$BUILD_DIR" -name '*.a' ! -name 'libwatermelon_audio.a' | sort)
 
     echo "  -> $MERGED"
     echo "     archs:   $(lipo -archs "$MERGED")"

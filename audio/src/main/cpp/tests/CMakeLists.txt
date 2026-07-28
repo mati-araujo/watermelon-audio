@@ -36,6 +36,34 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 enable_testing()
 
 # ----------------------------------------------------------------------------
+# Descubrimiento de tests en tiempo de TEST, no de BUILD.
+#
+# `gtest_discover_tests()` por defecto usa POST_BUILD: apenas linkea un binario
+# lo EJECUTA con --gtest_list_tests y parsea su salida. Si esa invocación no
+# devuelve nada —el binario no arranca, o el runner se queda sin recursos con
+# ocho descubrimientos en paralelo— CMake no lo reporta como "no pude listar":
+# lo reporta como ERROR DE BUILD, con un `string sub-command JSON failed
+# parsing json string` que no menciona ningún test.
+#
+# Eso ya pasó dos veces en el job de macOS (2026-07-27 y 2026-07-28), las dos
+# sobre `looper_tests`/`looper_tests_dense`, en PRs que no tocaban una línea de
+# C++. Es la mitad de todas las fallas históricas de ese job.
+#
+# PRE_TEST mueve el listado a tiempo de `ctest`, así que el build deja de
+# depender de ejecutar binarios. Una falla real de arranque sigue apareciendo
+# —como falla de TEST, que es lo que es— en vez de disfrazarse de build roto.
+#
+# Es el mismo eslabón que ya tenía documentado su otra forma: con
+# `detect_leaks=1` en macOS el discovery aborta y el build falla antes de
+# correr un solo test (ver CLAUDE.md).
+#
+# OJO: se setea acá, en el raíz, y hereda a los ocho `gtest_discover_tests()`
+# de los subdirectorios. Un subdirectorio configurado STANDALONE (que sigue
+# siendo posible, ver el encabezado) no lo hereda y vuelve a POST_BUILD.
+# ----------------------------------------------------------------------------
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
+
+# ----------------------------------------------------------------------------
 # Sanitizers — host test build ONLY (never the NDK/production build). Enable
 # with -DWMA_TESTS_SANITIZE=address,undefined  or  =thread. Placed BEFORE the
 # googletest fetch so the whole graph (gtest + the watermelon libs + the tests)

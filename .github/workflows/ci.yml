@@ -3,6 +3,51 @@ name: CI
 on:
   pull_request:
     branches: [master]
+    # Un PR que SÓLO toca prosa no compila nada distinto, y hasta acá corría los
+    # cinco jobs igual — incluidos ~20 min de macOS, que cuesta 10x. De los 20
+    # commits previos a este cambio, NUEVE eran `docs(kmp):` o `chore: release`.
+    # El caso extremo fue el PR #75: un archivo, `CHANGELOG.md`, cinco jobs, y
+    # encima flakeó el de iOS.
+    #
+    # `paths-ignore` saltea sólo si TODOS los archivos del PR machean, así que un
+    # PR que mezcla código y docs sigue corriendo entero. Es lo que se quiere.
+    #
+    # OJO SI ALGÚN DÍA SE MARCAN ESTOS CHECKS COMO *REQUIRED*: un job salteado
+    # queda `pending` para siempre y bloquea el merge. Ahí hay que cambiar a
+    # `dorny/paths-filter` con un job "dummy" que reporte pass, no a esto.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
+
+  # Correr en master NO es redundante con el PR, y arregla dos cosas distintas.
+  #
+  # 1. ES EL UNICO ESCRITOR DE LA CACHE DE GRADLE. `gradle/actions/setup-gradle`
+  #    escribe la cache SOLO desde la rama por defecto; en un PR se pone en
+  #    `cache-read-only: true` (esta en el log del job). Como hasta acá el CI
+  #    corria unicamente `on: pull_request`, el unico escritor era el workflow de
+  #    publish — la clave que se restauraba era `...publish[...]-d0aa525`, o sea
+  #    el release 1.11.0. La cache estaba tan fresca como el ultimo release.
+  #
+  #    Esto es lo que hace rendir el `libtool -D` de scripts/build-ios.sh: sin un
+  #    .a reproducible la cache igual fallaba siempre, y sin un escritor no hay
+  #    cache que acertar.
+  #
+  # 2. Hasta acá NADA validaba master. El squash produce un commit que ningun
+  #    job vio: el CI corre sobre el head del PR, no sobre el resultado del
+  #    merge. Con esto, master queda verificado despues de cada merge.
+  #
+  # El costo es una corrida extra por merge, ~20 min de macOS. No bloquea a
+  # nadie (corre despues del merge) y compra las dos cosas de arriba.
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
+
   workflow_dispatch:
 
 concurrency:
@@ -181,8 +226,14 @@ jobs:
       # WA-4.1. Linkea de verdad ambos slices y los empaqueta, que es lo unico que
       # prueba que el archivo estatico embebido en el klib resuelve al linkear un
       # binario — el link check de build-ios.sh valida el archivo, no el framework.
+      # `assembleWatermelonXCFramework` es, textual en `gradlew tasks`, "Assemble
+      # ALL TYPES of registered 'Watermelon' XCFramework": construye Debug Y
+      # Release, o sea cuatro links de framework. El paso de verificacion de
+      # abajo mira solo `XCFrameworks/release/`, y los frameworks Debug los
+      # vuelve a construir el paso del harness. La mitad del trabajo de este
+      # paso no la miraba nadie.
       - name: Assemble XCFramework — WA-4.1
-        run: ./gradlew :audio:assembleWatermelonXCFramework
+        run: ./gradlew :audio:assembleWatermelonReleaseXCFramework
 
       # Un XCFramework que "se construyo" pero no trae el motor adentro pasaria el
       # paso anterior sin chistar. Esto falla si falta un slice o si los simbolos
