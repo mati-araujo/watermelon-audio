@@ -425,9 +425,6 @@ public:
     void clearMappingConfig(int axis) {
         mEffectChain.clearMappingConfig(axis);
     }
-    void setDepthValue(float value) {
-        mEffectChain.setDepthValue(value);
-    }
     void applyAutomation(int axis, float normalizedValue) {
         mEffectChain.applyAutomation(axis, normalizedValue);
     }

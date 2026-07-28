@@ -203,12 +203,6 @@ public:
     void clearMappingConfig(int axis);
 
     /**
-     * @brief Set depth axis value (0.0 to 1.0, from slider or dual-touch)
-     * Lock-free: atomic store
-     */
-    void setDepthValue(float value) { mDepthValue.store(value, std::memory_order_relaxed); }
-
-    /**
      * @brief Apply automation for an axis using stored mapping config
      * Lock-free: reads atomic config, calls setParam on target effect
      * @param axis 0=X, 1=Y, 2=DEPTH
@@ -318,7 +312,9 @@ private:
     AtomicMappingConfig mXMapping;
     AtomicMappingConfig mYMapping;
     AtomicMappingConfig mDepthMapping;
-    std::atomic<float> mDepthValue{0.0f};
+    // No mDepthValue here on purpose: the depth axis is driven end-to-end by the
+    // normalizedValue argument of applyAutomation(axis=2), like X and Y. The old
+    // atomic was a dead store across all four layers (removed 2026-07-27).
 
     /**
      * @brief Get mapping config pointer for axis index

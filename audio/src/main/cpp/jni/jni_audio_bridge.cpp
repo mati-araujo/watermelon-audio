@@ -1235,12 +1235,9 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeClearM
     wma_clear_mapping_config(g_wmaEngine, axis);
 }
 
-JNIEXPORT void JNICALL
-Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetDepthValue(
-    JNIEnv* env, jobject thiz, jfloat value) {
-    // The 0..1 clamp lives in wma_set_depth_value now.
-    wma_set_depth_value(g_wmaEngine, value);
-}
+// nativeSetDepthValue was removed on 2026-07-27 together with wma_set_depth_value:
+// it was a dead store in all four layers. Depth is mapping axis 2 —
+// nativeApplyAutomation(2, value).
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeApplyAutomation(
@@ -1711,21 +1708,37 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeFallba
     manager.fallbackToOboe();
 }
 
+// Returns null unconditionally, deliberately — and that IS the fix, not a gutting.
+//
+// This has handed back ten zeros since the initial extraction (d66ac4d): it
+// declared `jfloat stats[10] = {0}` and returned it without ever filling it.
+// The zeros were not harmless, because the only caller reads them through elvis
+// fallbacks that a *non-null* array silently defeats — an all-zero array is not
+// absent data, it is data that says zero (UsbAudioManagerImpl.getTransferStats):
+//
+//     val currentBufferMs = adaptiveStats?.getOrNull(0)?.toInt()  // 0f, never null
+//         ?: nativeBridge.getCurrentUsbBufferMs()                 // so: never consulted
+//     val healthScore     = adaptiveStats?.getOrNull(6) ?: 100f   // 0f, not 100f
+//     val bufferAdjustments = adaptiveStats?.getOrNull(8)?.toInt() ?: 0
+//
+// So bufferMs came out 0 and healthScore 0, and NoisyPad gates its entire
+// Buffer/Health/Adjustments card on `if (stats.bufferMs > 0)` (UsbAudioScreen.kt,
+// "Adaptive buffer stats (if available)"). Net effect: that card has never
+// rendered, on any USB streaming session, since the extraction. Returning null is
+// precisely what the caller's own defaults were written for — 5 ms, 100 %, 0.
+//
+// NOT implemented from AdaptiveBufferController on purpose. That controller is the
+// DEPRECATED legacy ring-capacity path (see "Adaptive Buffer Reconfiguration" in
+// UsbTransferManager.cpp); its underrun/overrun/transfer counters are still fed,
+// but updateFromProfiler() has no caller anywhere, so healthScore would be frozen
+// at its 100.0 construction default regardless. Reporting real telemetry means
+// repointing this at the jitter-budget numbers — App plan Etapa D — which is a
+// product decision, not a migration. Inventing figures here that no one can
+// validate without USB hardware would just be a nicer-looking lie.
 JNIEXPORT jfloatArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetAdaptiveBufferStats(
     JNIEnv* env, jobject thiz) {
-    auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    if (!backend) return nullptr;
-
-    constexpr int SIZE = 10;
-    jfloat stats[SIZE] = {0};
-
-    jfloatArray result = env->NewFloatArray(SIZE);
-    if (result) {
-        env->SetFloatArrayRegion(result, 0, SIZE, stats);
-    }
-    return result;
+    return nullptr;
 }
 
 JNIEXPORT jint JNICALL

@@ -811,8 +811,12 @@ WMA_API void wma_set_mapping_config(WmaEngine* engine, int axis,
 /** Clear mapping configuration for an axis. */
 WMA_API void wma_clear_mapping_config(WmaEngine* engine, int axis);
 
-/** Set depth control value (0.0–1.0). */
-WMA_API void wma_set_depth_value(WmaEngine* engine, float value);
+/*
+ * wma_set_depth_value() was removed on 2026-07-27. It was a dead store in every
+ * layer it touched — the value reached an atomic that nothing ever read, and no
+ * render path saw it. The depth axis is axis 2 of the mapping system: drive it
+ * with wma_apply_automation(engine, 2, value), exactly like X and Y.
+ */
 
 /** Apply automation for an axis with a normalized value. */
 WMA_API void wma_apply_automation(WmaEngine* engine, int axis, float normalized_value);

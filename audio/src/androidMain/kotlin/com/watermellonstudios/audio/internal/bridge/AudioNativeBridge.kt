@@ -2011,14 +2011,6 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     }
 
     /**
-     * Set depth axis value. Lock-free real-time path.
-     */
-    fun setDepthValue(value: Float) {
-        if (!value.isFinite()) return
-        nativeSetDepthValue(value.coerceIn(0f, 1f))
-    }
-
-    /**
      * Apply automation for an axis using stored mapping config.
      * Lock-free real-time path — called at ~60Hz from XY updates.
      */
@@ -2068,7 +2060,6 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         mapMin: Float, mapMax: Float, inverted: Boolean
     )
     private external fun nativeClearMappingConfig(axis: Int)
-    private external fun nativeSetDepthValue(value: Float)
     private external fun nativeApplyAutomation(axis: Int, normalizedValue: Float)
 
     // ==================== USB Device Operations ====================
@@ -2232,7 +2223,17 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     fun fallbackToOboeBackend() = nativeFallbackToOboeBackend()
 
     /**
-     * Get adaptive buffer statistics.
+     * Adaptive buffer statistics — **always null today, and that is on purpose.**
+     *
+     * The native side has no real telemetry to report: the legacy adaptive
+     * controller was superseded by the jitter budget, and repointing this at the
+     * jitter-budget numbers is App plan Etapa D. Until then it reports *absence*
+     * rather than a zero-filled array, because callers distinguish the two —
+     * `?: 100f` fires on null and does not fire on `0f`.
+     *
+     * Callers must keep a real fallback for every field they read; see
+     * `UsbAudioManagerImpl.getTransferStats`, whose defaults (5 ms, 100 %, 0) are
+     * the intended values while this returns null.
      */
     fun getAdaptiveBufferStats(): FloatArray? = nativeGetAdaptiveBufferStats()
 
