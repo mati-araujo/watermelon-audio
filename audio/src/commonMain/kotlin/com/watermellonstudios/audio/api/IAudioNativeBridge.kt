@@ -6,10 +6,15 @@ package com.watermellonstudios.audio.api
  * Extends [IEffectStateProvider] and [IEffectStateWriter] for effect chain operations.
  * Covers lifecycle, state queries, real-time params, voice system, mode, and backend.
  *
- * El arpegiador vive en [IArpeggiatorBridge] y el motor de SoundFont en
- * [ISoundFontBridge], partidos por el mismo motivo que [IInputBridge] y las dos de
- * efectos: son dominios con consumidores propios y un fake no debería tener que
- * implementar cien métodos para cubrir uno.
+ * El arpegiador vive en [IArpeggiatorBridge], el motor de SoundFont en
+ * [ISoundFontBridge] y el looper en [ILooperBridge], partidos por el mismo motivo que
+ * [IInputBridge] y las dos de efectos: son dominios con consumidores propios y un fake
+ * no debería tener que implementar cien métodos para cubrir uno.
+ *
+ * El looper **estaba** acá, recortado a 11 de sus 79 funciones y con una nota que decía
+ * que subir el resto necesitaba su propia justificación. La justificación llegó — ver
+ * el KDoc de [ILooperBridge] — así que las 11 se mudaron allá. Nadie que las llame se
+ * entera: siguen expuestas por herencia.
  *
  * Lo que sigue **sin** estar acá, y por qué: la gestión de dispositivos USB (D4 —
  * iOS no la tiene) y el benchmark de latencia detallada, cuyo JNI vive en
@@ -22,7 +27,8 @@ interface IAudioNativeBridge :
     IEffectStateWriter,
     IInputBridge,
     IArpeggiatorBridge,
-    ISoundFontBridge {
+    ISoundFontBridge,
+    ILooperBridge {
 
     // ==================== LIFECYCLE ====================
 
@@ -215,55 +221,6 @@ interface IAudioNativeBridge :
      * [transportIsMetronomeContinuous] antes de leer esto.
      */
     fun transportGetRemainingBeats(): Int
-
-    // ==================== LOOPER (el subconjunto de la tira) ====================
-    //
-    // **Esto NO es el looper entero.** El JNI tiene 79 funciones; acá hay 11, que
-    // son exactamente las que necesita la tira del harness (control 5): preparar en
-    // compases, armar, grabar, parar, limpiar, leer estado y exportar.
-    //
-    // Que sea un subconjunto es deliberado y sigue la regla del opt-in: **algo entra
-    // porque un consumidor lo necesita**, y el consumidor de hoy es el harness. Subir
-    // las 79 "por completitud" sería fabricar superficie sin caller — justo lo que la
-    // decisión de 2026-07-27 quiso evitar. Si NoisyPad pide el looper completo desde
-    // commonMain, eso es un ticket con su propia justificación.
-
-    /**
-     * Prepara la pista con un largo de `bars` compases al reloj actual.
-     *
-     * @return frames reservados, o **-1** si `bars` desborda int32 al pasarlo a
-     *         frames. Ese -1 es de la tanda 3 de WA-2.6: antes alocaba una pista con
-     *         el largo envuelto.
-     */
-    fun looperPrepareTrackBars(trackIndex: Int, bars: Int, sampleRate: Int): Int
-
-    /**
-     * Arma la pista para empezar a grabar en el próximo límite de compás.
-     *
-     * @return el frame absoluto del disparo (`>= 0`), o **-1 si no se armó nada**.
-     *
-     * **El -1 hay que mostrarlo.** El bug de la tanda 2 de WA-2.6 era exactamente
-     * esto: devolvía un trigger frame para una grabación que nunca arrancaba. Un
-     * botón que sólo diga "armado" no lo vuelve a ver.
-     */
-    fun looperArmAtNextBar(trackIndex: Int): Long
-
-    fun looperStartRecording(trackIndex: Int)
-    fun looperStopRecording()
-    fun looperStopAll()
-    fun looperClearAll()
-    fun looperIsRecording(): Boolean
-    fun looperIsPlaying(): Boolean
-    fun looperIsTrackActive(trackIndex: Int): Boolean
-    fun looperIsTrackPlaying(trackIndex: Int): Boolean
-
-    /**
-     * Exporta la mezcla a un archivo. **Sincrónico — llamar fuera del main thread.**
-     *
-     * Devuelve `false` en vez de dejar escapar una excepción (tanda 4 de WA-2.6):
-     * antes, un export imposible abortaba el proceso.
-     */
-    fun looperExportMix(filePath: String): Boolean
 
     // ==================== LOG CAPTURE ====================
 

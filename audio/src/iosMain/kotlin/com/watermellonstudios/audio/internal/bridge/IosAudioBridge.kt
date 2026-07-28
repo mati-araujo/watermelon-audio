@@ -8,10 +8,13 @@ import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.input.InputMetering
+import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
 import cnames.structs.WmaEngine
 import com.watermellonstudios.audio.internal.cinterop.*
 import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.MemScope
+import kotlinx.cinterop.cstr
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.FloatVar
@@ -24,6 +27,8 @@ import kotlinx.cinterop.ptr
 import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Implementación de [IAudioNativeBridge] para iOS sobre los bindings de cinterop
@@ -647,10 +652,15 @@ internal class IosAudioBridge : IAudioNativeBridge {
 
     override fun transportGetRemainingBeats(): Int = wma_transport_get_remaining_beats(engine)
 
-    // ==================== LOOPER (el subconjunto de la tira) ====================
+    // ==================== LOOPER ====================
     //
-    // Primer código de looper que existe en iOS. Las 79 del JNI no se suben en
-    // bloque: estas 11 tienen caller (la tira del harness) y las otras no todavía.
+    // Empezó siendo el subconjunto de 11 que necesitaba la tira del harness; ahora es
+    // [ILooperBridge] entera — 61 miembros, los que NoisyPad realmente llama. Las que
+    // siguen sin subir (telemetría, picos, tail, pre-roll) siguen sin caller.
+    //
+    // Nada de esto toma lock. El looper serializa adentro y estas llamadas vienen de la
+    // UI o de una coroutine, nunca del render: la regla RT (D6) sigue valiendo, y por
+    // eso todo lo que la UI necesita saber se lee por polling y no llega por callback.
 
     override fun looperPrepareTrackBars(trackIndex: Int, bars: Int, sampleRate: Int): Int =
         wma_looper_prepare_track_bars(engine, trackIndex, bars, sampleRate)
@@ -675,6 +685,289 @@ internal class IosAudioBridge : IAudioNativeBridge {
 
     override fun looperExportMix(filePath: String): Boolean =
         wma_looper_export_mix(engine, filePath)
+
+
+    // ---------- habilitación y transporte ----------
+
+    override fun looperSetEnabled(enabled: Boolean) = wma_looper_set_enabled(engine, enabled)
+
+    override fun looperPause() = wma_looper_pause(engine)
+    override fun looperResume() = wma_looper_resume(engine)
+
+    override fun looperTriggerClick(isDownbeat: Boolean) =
+        wma_looper_trigger_click(engine, isDownbeat)
+
+    // ---------- preparar pistas ----------
+
+    /**
+     * `wma_looper_prepare_track` devuelve `WmaResult`, no un booleano.
+     *
+     * Android compara `>= 0` contra el `int` que le pasa el JNI; acá el tipo es el enum
+     * y la comparación correcta es contra [WMA_OK]. Da lo mismo hoy —todos los errores
+     * son negativos— pero si alguna vez se agrega un código de éxito distinto de 0, el
+     * `>= 0` sigue andando por casualidad y esto sigue andando por definición.
+     */
+    override fun looperPrepareTrack(trackIndex: Int, lengthFrames: Int, sampleRate: Int): Boolean =
+        wma_looper_prepare_track(engine, trackIndex, lengthFrames, sampleRate) == WMA_OK
+
+    override fun looperSetFreeLength(freeLength: Boolean) =
+        wma_looper_set_free_length(engine, freeLength)
+
+    override fun looperFinalizeFreeLoop(
+        trackIndex: Int,
+        loopStart: Int,
+        loopEnd: Int,
+        tailFrames: Int,
+    ): Boolean = wma_looper_finalize_free_loop(engine, trackIndex, loopStart, loopEnd, tailFrames)
+
+    override fun looperSetCapabilities(budgetBytes: Long, maxTracks: Int, maxFreeSeconds: Int) =
+        wma_looper_set_capabilities(engine, budgetBytes, maxTracks, maxFreeSeconds)
+
+    // ---------- armado y grabación ----------
+
+    override fun looperArmInFrames(trackIndex: Int, offsetFrames: Long): Long =
+        wma_looper_arm_in_frames(engine, trackIndex, offsetFrames)
+
+    override fun looperArmSyncedToLoop(trackIndex: Int, latencyFrames: Long): Long =
+        wma_looper_arm_synced_to_loop(engine, trackIndex, latencyFrames)
+
+    override fun looperCancelArm() = wma_looper_cancel_arm(engine)
+    override fun looperAbortRecording() = wma_looper_abort_recording(engine)
+
+    override fun looperStartOverdub(trackIndex: Int) = wma_looper_start_overdub(engine, trackIndex)
+
+    // ---------- pistas ----------
+
+    override fun looperClearTrack(trackIndex: Int) = wma_looper_clear_track(engine, trackIndex)
+    override fun looperPauseTrack(trackIndex: Int) = wma_looper_pause_track(engine, trackIndex)
+    override fun looperResumeTrack(trackIndex: Int) = wma_looper_resume_track(engine, trackIndex)
+
+    override fun looperResetTrackPlayHead(trackIndex: Int) =
+        wma_looper_reset_track_playhead(engine, trackIndex)
+
+    override fun looperTrimTrack(trackIndex: Int): Boolean = wma_looper_trim_track(engine, trackIndex)
+
+    // ---------- mezcla ----------
+
+    override fun looperSetMasterVolume(volume: Float) = wma_looper_set_master_volume(engine, volume)
+    override fun looperGetMasterVolume(): Float = wma_looper_get_master_volume(engine)
+
+    override fun looperSetTrackVolume(trackIndex: Int, volume: Float) =
+        wma_looper_set_track_volume(engine, trackIndex, volume)
+
+    override fun looperSetTrackPan(trackIndex: Int, pan: Float) =
+        wma_looper_set_track_pan(engine, trackIndex, pan)
+
+    override fun looperSetTrackMuted(trackIndex: Int, muted: Boolean) =
+        wma_looper_set_track_muted(engine, trackIndex, muted)
+
+    override fun looperSetTrackSpeed(trackIndex: Int, speed: Float) =
+        wma_looper_set_track_speed(engine, trackIndex, speed)
+
+    override fun looperGetTrackSpeed(trackIndex: Int): Float =
+        wma_looper_get_track_speed(engine, trackIndex)
+
+    override fun looperSetTrackPlayCount(trackIndex: Int, plays: Int) =
+        wma_looper_set_track_play_count(engine, trackIndex, plays)
+
+    override fun looperSetTrackPercussionMode(trackIndex: Int, percussion: Boolean) =
+        wma_looper_set_track_percussion_mode(engine, trackIndex, percussion)
+
+    // ---------- región de loop ----------
+
+    override fun looperSetTrackLoopRegion(trackIndex: Int, startFrame: Long, endFrame: Long) =
+        wma_looper_set_track_loop_region(engine, trackIndex, startFrame, endFrame)
+
+    override fun looperResetTrackLoopRegion(trackIndex: Int) =
+        wma_looper_reset_track_loop_region(engine, trackIndex)
+
+    override fun looperGetTrackLoopStart(trackIndex: Int): Int =
+        wma_looper_get_track_loop_start(engine, trackIndex)
+
+    override fun looperGetTrackLoopEnd(trackIndex: Int): Int =
+        wma_looper_get_track_loop_end(engine, trackIndex)
+
+    // ---------- lectura para la UI ----------
+
+    override fun looperGetProgress(): Float = wma_looper_get_progress(engine)
+    override fun looperGetRecordProgress(): Float = wma_looper_get_record_progress(engine)
+    override fun looperGetMasterLoopFrames(): Int = wma_looper_get_master_loop_frames(engine)
+
+    override fun looperGetTrackLengthFrames(trackIndex: Int): Int =
+        wma_looper_get_track_length_frames(engine, trackIndex)
+
+    /**
+     * El array se aloca acá y C lo llena en el lugar, con `usePinned` — sin copia
+     * intermedia, igual que [getWaveformSamples].
+     *
+     * **Se devuelve el array entero aunque C haya escrito menos bins**, que es lo que
+     * hace Android: el retorno de `wma_looper_get_track_waveform` se ignora en las dos
+     * plataformas y los bins que sobran quedan en 0. No es descuido — un array de largo
+     * variable obligaría a cada llamador de UI a reescalar su dibujo.
+     */
+    override fun looperGetTrackWaveform(trackIndex: Int, numBins: Int): FloatArray {
+        val bins = FloatArray(numBins)
+        if (numBins <= 0) return bins
+        bins.usePinned { pinned ->
+            wma_looper_get_track_waveform(engine, trackIndex, pinned.addressOf(0), numBins)
+        }
+        return bins
+    }
+
+    // ---------- undo ----------
+
+    override fun looperSaveUndoSnapshot(trackIndex: Int): Boolean =
+        wma_looper_save_undo(engine, trackIndex)
+
+    override fun looperRestoreUndo(trackIndex: Int): Boolean =
+        wma_looper_restore_undo(engine, trackIndex)
+
+    override fun looperHasUndo(trackIndex: Int): Boolean = wma_looper_has_undo(engine, trackIndex)
+
+    // ---------- análisis ----------
+
+    /**
+     * `(0, 0)` cuando C dice que no hay contenido, que es el mismo par que devuelve
+     * Android — allá sale de desempaquetar el `long` en 0 que entrega el JNI.
+     */
+    override fun looperFindContentBounds(trackIndex: Int, thresholdRatio: Float): Pair<Int, Int> =
+        memScoped {
+            val first = alloc<IntVar>()
+            val last = alloc<IntVar>()
+
+            if (!wma_looper_find_content_bounds(
+                    engine, trackIndex, thresholdRatio, first.ptr, last.ptr,
+                )
+            ) {
+                return@memScoped 0 to 0
+            }
+            first.value to last.value
+        }
+
+    /**
+     * El buffer se dimensiona con [maxOnsets] y **el array que sale tiene el largo real**,
+     * no el reservado: acá sí importa, porque cada elemento es una posición de onset y un
+     * cero de relleno sería un transitorio en el frame 0 — o sea un dato inventado. Es la
+     * diferencia con [looperGetTrackWaveform], donde el relleno es silencio y no miente.
+     */
+    override fun looperDetectOnsets(
+        trackIndex: Int,
+        maxOnsets: Int,
+        hopFrames: Int,
+        sensitivity: Float,
+    ): IntArray {
+        if (maxOnsets <= 0) return IntArray(0)
+        return memScoped {
+            val out = allocArray<IntVar>(maxOnsets)
+            val count = wma_looper_detect_onsets(
+                engine, trackIndex, out, maxOnsets, hopFrames, sensitivity,
+            )
+            if (count <= 0) IntArray(0) else IntArray(count) { out[it] }
+        }
+    }
+
+    // ---------- importar y capturar ----------
+
+    override fun looperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean =
+        wma_looper_import_track(engine, trackIndex, filePath, sampleRate)
+
+    override fun looperCaptureTrack(trackIndex: Int, filePath: String, bitDepth: Int): Boolean =
+        wma_looper_capture_track(engine, trackIndex, filePath, bitDepth)
+
+    // ---------- exportar ----------
+
+    /**
+     * **`Dispatchers.Default` y no `Dispatchers.IO`, y no es una preferencia.**
+     *
+     * Android usa `IO`. En Kotlin/Native ese dispatcher **no se puede nombrar**: en
+     * `nativeMain` conviven un miembro `internal val Dispatchers.IO` y una extensión
+     * pública `actual`, y en Kotlin el miembro le gana a la extensión, así que desde
+     * afuera de kotlinx-coroutines el nombre resuelve al `internal` y no compila.
+     *
+     * `Default` es un pool dimensionado para CPU, así que un export largo le ocupa un
+     * hilo al resto. Se acepta porque un export es una acción del usuario, una por vez y
+     * con la UI mostrando su progreso — pero queda anotado: si alguna vez hay más de un
+     * trabajo pesado concurrente, la salida es un dispatcher propio, no otra constante.
+     */
+    override suspend fun looperExportMixPro(
+        filePath: String,
+        bitDepth: ExportBitDepth,
+        repeatLoops: Int,
+        countInBeats: Int,
+        applyLimiter: Boolean,
+        projectName: String?,
+        artist: String?,
+        comment: String?,
+        bpm: Int,
+    ): Boolean = withContext(Dispatchers.Default) {
+        memScoped {
+            val options = allocExportOptions(
+                bitDepth, repeatLoops, countInBeats, applyLimiter, bpm,
+                projectName, artist, comment,
+            )
+            wma_looper_export_mix_v2(engine, filePath, options.ptr)
+        }
+    }
+
+    override suspend fun looperExportStems(
+        directory: String,
+        bitDepth: ExportBitDepth,
+        repeatLoops: Int,
+        countInBeats: Int,
+        applyLimiter: Boolean,
+        bpm: Int,
+    ): Int = withContext(Dispatchers.Default) {
+        memScoped {
+            // Los tres metadatos van en null: la C API documenta que el export de stems
+            // los ignora, y pasarlos igual haría creer que se escriben.
+            val options = allocExportOptions(
+                bitDepth, repeatLoops, countInBeats, applyLimiter, bpm,
+                projectName = null, artist = null, comment = null,
+            )
+            wma_looper_export_stems(engine, directory, options.ptr)
+        }
+    }
+
+    override fun looperExportTrack(trackIndex: Int, filePath: String): Boolean =
+        wma_looper_export_track(engine, trackIndex, filePath)
+
+    override fun looperSetExportSampleRate(sampleRate: Int) =
+        wma_looper_set_export_sample_rate(engine, sampleRate)
+
+    override fun looperGetExportProgress(): Float = wma_looper_get_export_progress(engine)
+    override fun looperIsExportInProgress(): Boolean = wma_looper_is_export_in_progress(engine)
+    override fun looperCancelExport() = wma_looper_cancel_export(engine)
+
+    /**
+     * Arma un [WmaExportOptions] dentro del scope que lo va a liberar.
+     *
+     * **Los tres `const char*` salen de `getPointer(this)` y no de `.ptr`**, y ésa es la
+     * parte que importa: las cadenas quedan alocadas en el `memScoped` del llamador, o
+     * sea que viven exactamente lo que dura la llamada a C. Un puntero a un `cstr`
+     * temporal sería memoria liberada antes de que el export la lea.
+     *
+     * `null` en un campo de texto significa "dejalo vacío", que es lo que documenta la
+     * C API — no "poné la cadena vacía".
+     */
+    private fun MemScope.allocExportOptions(
+        bitDepth: ExportBitDepth,
+        repeatLoops: Int,
+        countInBeats: Int,
+        applyLimiter: Boolean,
+        bpm: Int,
+        projectName: String?,
+        artist: String?,
+        comment: String?,
+    ): WmaExportOptions = alloc<WmaExportOptions>().apply {
+        bit_depth = bitDepth.raw
+        repeat_loops = repeatLoops
+        count_in_beats = countInBeats
+        apply_limiter = applyLimiter
+        this.bpm = bpm
+        project_name = projectName?.cstr?.getPointer(this@allocExportOptions)
+        this.artist = artist?.cstr?.getPointer(this@allocExportOptions)
+        this.comment = comment?.cstr?.getPointer(this@allocExportOptions)
+    }
 
     // ==================== ARPEGIADOR ====================
     //
