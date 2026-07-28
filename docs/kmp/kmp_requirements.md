@@ -19,8 +19,9 @@
 > | Fase 4 | ✅ WA-4.1 · **G1/WA-4.2 CERRADO**. **Publicada la 1.10.0** con las **4 publicaciones** (`kotlinMultiplatform`, `androidRelease`, `iosArm64`, `iosSimulatorArm64`) |
 > | Fase 5 | ✅ **WA-5.5 CERRADA ENTERA** — 7 controles, y la fase final cerró **sin design system compartido**: se midió el harness y da **cero reutilización entre archivos** |
 > | **Lo único grande abierto** | **G2 — validación en device. Necesita un iPhone.** Sonido real, latencia round-trip, Instruments sobre el render block |
-> | Smoke de Android | **4 de 12 corridos** (ítems 3, 7, 8 y 9) — hay AVD. Lo que falta necesita **USB físico** o **poder escuchar** |
-> | Otros pendientes | **WA-1.3** · el fixture SF2 · WA-3.5 (P2) y la revisión de paths de WA-3.6 |
+> | Smoke de Android | **7 de 12 corridos** (3, 7, 8, 9 + **1, 2 y 6**). **El ítem 2 refutó a WA-1.2 y encontró un bug real, ya arreglado.** Lo que falta necesita **USB físico** o **poder escuchar** |
+> | Fase 1 | ✅ **CERRADA** — **WA-1.3 hecho** (2026-07-28): `AudioBackendType` mudado a `domain/`, con typealias `@Deprecated` para no romper a NoisyPad |
+> | Otros pendientes | el fixture SF2 (**y su observable**, ver la nota) · **WA-3.5 (P2, diferido pero con consumidor real medido)** · ~~la revisión de paths de WA-3.6~~ ✅ hecha |
 >
 > **`master` = `7af4275` · versión publicada 1.10.0 · cero PRs abiertos.**
 >
@@ -3096,6 +3097,231 @@ en 1.9.x no rompe nada.
 
 ---
 
+### Los ítems 1, 2 y 6 del smoke — y el 2 encontró que WA-1.2 no hacía nada (2026-07-28)
+
+Los tres que el AVD podía correr y nadie había corrido. **El 2 es el que importa**: no confirmó
+el comportamiento, lo **refutó**.
+
+#### Ítem 2 — `AudioEngineConfig.maxEffects` no tenía ni un lector
+
+El ítem decía: *"`AudioEngineFactory.create()` sin argumentos ahora recorta `maxEffects` a 6 en
+un dispositivo de gama baja"*. Se midió en el emulador, que **sí** cumple la premisa
+(`ANDROID · API 36 · 2472 MB · 4 cores` → `low latency: true · gama baja: true`):
+
+```
+Effect added: type=0, total=1 … total=6
+Effect added: type=1, total=7      ← el séptimo ENTRÓ
+```
+
+El recorte no se aplicaba. Buscando el lector aparece que **no había ninguno**:
+
+| Dónde se decide el tope | Contra qué número | ¿Lo alimenta `tunedFor()`? |
+|---|---|---|
+| `AudioEngineImpl.addEffect` → `effectChain.canAddEffect` | `EffectChainState.maxEffects` | **No** — `_state` se construía sin sembrarlo, así que quedaba en su default de 12 |
+| `EffectManagerImpl.addEffect` | `EffectManagerConfig.maxEffects` | **No** — es **otro tipo de config**, con su propio default de 12 |
+| `AndroidDeviceCapabilities` (androidMain) | su propio `maxEffects = 6` | mecanismo paralelo, anterior |
+
+`grep maxEffects` sobre `commonMain` lo confirma: `AudioEngineConfig.maxEffects` se **escribe**
+(builder), se **recorta** (`tunedFor`) y **no se lee nunca**.
+
+> [!CAUTION]
+> **Por qué los tests no lo vieron, y es la parte transferible.** `DeviceCapabilitiesTest` tiene
+> cuatro tests de `tunedFor` y **todos pasan**: afirman que la *política* devuelve 6. Ninguno
+> afirma que **algo obedezca** ese 6. Un test que verifica que una función devuelve el valor
+> correcto no verifica que ese valor llegue a alguna parte — y acá no llegaba a ninguna. Es el
+> mismo error de forma que un mutante que sobrevive: el test espeja el cálculo en vez de medir el
+> comportamiento observable.
+
+**Arreglado** sembrando `EffectChainState(maxEffects = config.maxEffects)` en `AudioEngineImpl`.
+Verificado en el mismo emulador, mismo camino:
+
+```
+Effect added: total=1 … total=6     ← seis, y ahí frena
+addEffect(Reverb) = false  ← tope de la cadena
+(cero `Effect added` en C++ para el séptimo)
+```
+
+Los dos hechos importan: devuelve `false` **y el motor no se entera**, o sea que el tope corta
+antes del salto JNI, que es donde tiene que cortar.
+
+> [!WARNING]
+> **La otra mitad queda abierta y es una decisión, no un bug.** El camino que usa NoisyPad **no
+> es** `AudioEngine.addEffect` sino `EffectManagerFactory.create(viewModelScope)`
+> (`MainViewModel.kt:98`), que arma un `EffectManagerConfig.DEFAULT` — 12, sin relación con la
+> `AudioEngineConfig` del motor. **Así que para NoisyPad el recorte de gama baja sigue sin
+> aplicarse.** Unificar las dos configs es un cambio de API pública (la factory hoy ni siquiera
+> recibe una `AudioEngineConfig`) y no se hizo por decisión propia: corresponde decidirlo.
+
+#### Ítem 1 — WA-1.4, los 26 call sites de `BridgeConcurrency`
+
+Dos mitades, porque el riesgo real no es el que el ítem sugería.
+
+**Estático — lo que el compilador no ve.** `kotlinx.coroutines.sync.Mutex` **no es reentrante**:
+si una función guardada llama a otra de su misma categoría, no da error, **cuelga para siempre**.
+Se barrieron los 26 cuerpos contra los nombres guardados de su propia categoría: **cero
+reentrancias**. El reparto real es `EFFECTS 14 · LIFECYCLE 6 · INPUT 5 · MODE 1` (26, coincide).
+
+**Dinámico — en el AVD.** LIFECYCLE completo (`STOPPED → RUNNING → paused → RUNNING → STOPPED`,
+con sus `State transition` en logcat), EFFECTS (alta ×7, más las lecturas que corren en cada
+refresh) e INPUT (`=== INPUT STREAM OPENED ===`, `RAW INPUT` corriendo, `Input stream closed`
+limpio). **Mismo pid de punta a punta, cero ANR, cero `FATAL`, cero líneas de `BridgeConcurrency`
+en error.**
+
+**25 de 26.** El que falta es MODE: `setAudioMode` es su único call site y **el harness no lo
+expone**. Es la superficie que habría que agregar si se quiere cerrar el ítem entero.
+
+#### Ítem 6 — `getRecommendedBufferSize`: el AVD es el instrumento equivocado
+
+No es que falte correrlo: **el emulador no puede discriminarlo**, y por la misma clase de razón
+estructural que hizo inalcanzable al ítem 3.
+
+- Los dos casos que cambiaron ya están cubiertos por la suite de host, con tests que **sí**
+  distinguen (`test_c_api_diagnostics.cpp`: `TheRunningStreamRateWins`,
+  `WithNoStreamRunningThePreferredRateIsUsed`, `TheBufferIsNeverShorterThanTheLatencyAsked`).
+- El caso nuevo —"sin stream corriendo pero con tasa preferida ≠ 48 kHz"— necesita que alguien
+  llame a `setPreferredSampleRate`, y el **único** camino que lo hace es la preferencia de
+  dispositivo **USB** (`AudioNativeBridge.kt:2313` ← `UsbAudioManagerImpl`). Sin placa no hay
+  tasa preferida, y el emulador negocia 48 kHz, que es justo la rama donde el código viejo y el
+  nuevo **coinciden**.
+- Y el riesgo de consumidor es cero, medido: `getRecommendedBufferSize` tiene **cero callers en
+  NoisyPad y cero en este repo** — `LatencyAnalyzer.getRecommendedBufferSize` no lo llama nadie.
+  Misma situación que `setMaxVoices`.
+
+> [!TIP]
+> **Nota de método, del lado del instrumento.** Tres veces en esta sesión la pantalla dijo una
+> cosa y el motor otra: `addEffect(Filter) = true` siete veces cuando logcat mostraba **un solo**
+> `Effect added` (el matcher de UI estaba tapeando la etiqueta de la cadena en vez del botón); y
+> un `addEffect(...) = false` rotulado *"← tope de la cadena"* que en realidad era el motor
+> parado, porque el harness rotula **cualquier** `false` con la misma causa. **El contador de
+> `EffectChain` en logcat es el artefacto; el texto de la UI es un resumen que puede estar
+> viejo o adivinar la causa.**
+
+---
+
+### Nota de cierre — WA-1.3, y el criterio ya estaba cumplido (2026-07-28)
+
+**Lo primero que hay que decir es que el criterio de aceptación del ticket —*"un consumidor sin
+USB compila para iOS sin stubs USB"*— ya se cumplía**, y no por segregación sino porque WA-0.2
+portó `domain/usb/` entero a `commonMain`. Así que lo que quedaba abierto no era compilar: era
+que la API central mandara a buscar un tipo suyo a un paquete `usb`.
+
+De los **tres** puntos de acoplamiento que el ticket había medido, sólo **uno** era real:
+
+| | Veredicto |
+|---|---|
+| (a) `AudioBackendType` en `domain/usb/UsbAudioTypes.kt` | **Real.** Su doc comment decía *"USB Audio backend type"* y de sus tres valores **uno solo** es USB. Lo consumen `AudioEngine.getAudioBackend/setAudioBackend`, que no tienen nada de USB. **Mudado a `domain/`.** |
+| (b) `IAudioNativeBridge.isUsbBackendAvailable()` | **No es acoplamiento espurio:** es USB de verdad, vive en el SPI del puente (no en `AudioEngine`), y iOS ya responde `false` honestamente citando D4 |
+| (c) `IAudioNativeBridge.setUsbLatencyProfile()` | Igual que (b): iOS devuelve un `Result.failure` que **nombra el motivo**, y `IosAudioBridgeTest` lo pinchó |
+
+> [!IMPORTANT]
+> **La mudanza no rompe a nadie, y eso fue deliberado.** NoisyPad importa `AudioBackendType` en
+> **8 archivos de 4 módulos** —incluido `core-domain/commonMain`— más un `domain.usb.*` con
+> asterisco. Mudar el enum a secas es una remoción de API pública: mayor, y una migración
+> coordinada por un import mal ubicado. Queda un `typealias` **top-level** `@Deprecated` con
+> `ReplaceWith` en el lugar viejo, que sirve tanto para el tipo como para sus entries
+> (`AudioBackendType.LIBUSB`) y su companion (`fromId`). El consumidor migra cuando quiera.
+>
+> Ojo con el precedente de la 1.9.1: **aquellos** dos typealias se pudieron borrar en un patch
+> porque estaban **anidados dentro de un `object`** y nunca fueron alias de nivel superior. Éste
+> sí lo es, así que su remoción futura sí es un breaking change de verdad.
+
+**Y de paso salió un caso de la regla 2** (un valor neutro que miente). `getAudioBackend()`
+devolvía `AudioBackendType.OBOE` en su `catch` — o sea que "no pude averiguarlo" y "es el backend
+del sistema" daban la misma respuesta, y **en iOS eso nombra un backend que no existe**. Ahora
+devuelve `NONE`, que es el mismo criterio que `fromId` ya usaba para un id desconocido: ausencia,
+no un valor plausible. Nadie distingue `OBOE` de `NONE` en un camino de error (verificado en los
+dos repos), así que el cambio es observable sólo donde antes mentía.
+
+---
+
+### Nota de cierre — WA-3.6, la revisión de paths (2026-07-28)
+
+Lo que faltaba de WA-3.6 era la revisión, no el doc: la regla D6 —*el thread RT jamás entra a
+Kotlin*— ya estaba escrita en `CLAUDE.md`. **Revisada, y se sostiene en las dos plataformas por
+construcción, no por disciplina.**
+
+**Android.** Hay **exactamente un** camino C++→Kotlin en todo el JNI: el listener del looper
+(`jni_audio_bridge.cpp`, `dispatchLooperEvent`). Y no lo corre el thread de audio:
+
+- el thread RT sólo llama `LooperEventDispatcher::pushFromRT()` — lock-free, `noexcept`, sin
+  asignar;
+- un **worker propio** (`workerLoop`, espera con timeout de ~15 ms) drena la cola e invoca el
+  sink, y es **ahí** donde ocurre el `AttachCurrentThreadAsDaemon` y los `CallVoidMethod`.
+
+O sea que la única llamada a la JVM está separada del thread RT por una cola. Fuera de eso, los
+`NewGlobalRef`/`GetEnv` del JNI son de `JNI_OnLoad` y del registro del listener, ambos en el
+thread de UI.
+
+**iOS.** **Cero `staticCFunction` en `iosMain`**: ningún puntero a función Kotlin cruza a C, así
+que el render block de `CoreAudioBackend` **no tiene por dónde** entrar a Kotlin ni aunque
+alguien quisiera. El estado sale por polling (`StateSynchronizer`) y por lecturas de cinterop.
+
+> [!TIP]
+> **El único hueco posible está identificado y cerrado:** `wma_set_log_callback` es un registro
+> de puntero a función C — es *el* lugar por donde Kotlin podría quedar colgado de un callback
+> nativo. **Nadie en Kotlin lo registra** (cero hits en `commonMain`/`iosMain`/`androidMain`/el
+> harness): la captura de logs de WA-2.5/2.6 es **pull** (`drainCapturedLogs` sobre un anillo),
+> no push. Esa elección, que en su momento se justificó por otra cosa, es también lo que
+> mantiene D6 intacto — conviene no revertirla sin mirar esto.
+
+---
+
+### WA-3.5 — evaluado, y NO es un caso de "medir y que diga que no" (2026-07-28)
+
+Se le aplicó la misma pregunta que cerró WA-5.5 sin design system —*¿hay un consumidor real?*— y
+acá la respuesta es **sí**, al revés que en aquel caso:
+
+- `Mp4AacTranscoder` (MediaCodec, androidMain) no es código muerto: lo usa
+  `AudioNativeBridge.exportMixCompressed`.
+- Y NoisyPad **ya declaró el contrato en código compartido**: `ILooperController
+  .exportMixCompressed` vive en `core-domain/src/commonMain`, con un `ExportFormat` que ofrece
+  `AAC_128/192/256`. Hoy lo implementa sólo el adapter de Android.
+
+O sea que en cuanto NoisyPad iOS exista, ese `commonMain` tiene un método que **una sola
+plataforma puede honrar**. Eso es exactamente el umbral que el repo se puso ("algo entra a la API
+pública porque un consumidor real lo necesita"), y lo cumple.
+
+**Sigue siendo P2 y sigue diferido** —el export WAV no lo necesita, y G2 bloquea el release de
+iOS igual—, pero ahora con el porqué medido en vez de estimado. El trabajo real es
+`IAudioTranscoder` en `commonMain` + el `actual` de iOS con `AVAssetWriter`; no es un remate de
+fin de sesión.
+
+---
+
+### El fixture SF2 — el ítem de deuda apunta a la mitad del problema (2026-07-28)
+
+El entry decía: *"Lo que falta es el fixture, no un test más."* **Medido: falta el fixture y falta
+un observable**, y sin el segundo el primero no cierra nada.
+
+Lo bueno, que corrige una creencia que estaba escrita: **la suite de host sí puede cargar un SF2
+real.** El comentario de `test_soundfont_fd_region.cpp` dice que `SoundFontManager` no compila
+en el host, pero eso vale para `engines/tests`, **no** para `core/tests` — que linkea
+`watermelon-engines` y `tinysoundfont`, y sustituye sólo `PlatformBackends.cpp` e `InputNode.cpp`.
+Y `CApiFixture::startAt(negotiatedSampleRate, …)` ya permite levantar el motor a 44.1 kHz, que es
+lo que hace falta para distinguir el rate negociado del default.
+
+Lo que falta y no estaba anotado: **el rate configurado no es observable desde afuera.**
+`SoundFontManager::getSampleRate()` existe y `configurAndSwap` lo setea, pero `AudioEngine` no
+expone el dispatcher y la C API no expone el rate del SoundFont — sólo
+`wma_sf_get_preset_count`, que prueba que **cargó**, no **a qué tasa**. Y el propio
+`test_c_api_synth.cpp` ya dejó escrita la regla que aplica acá: *"Adding getters just to test
+them would be inventing API; leaving a test that cannot fail would be worse."*
+
+**Entonces la decisión previa a escribir el fixture es cuál de estas tres**, y no es una decisión
+que convenga tomar de apuro:
+
+1. Exponer el rate (`wma_sf_get_sample_rate` o un accesor en `AudioEngine`) — choca de frente con
+   la regla citada, salvo que se argumente que es diagnóstico legítimo y no andamio de test.
+2. Observarlo indirectamente por el audio renderizado — frágil y mide otra cosa.
+3. Cubrir sólo el éxito de carga (`preset_count > 0`) y **decir en el archivo** que el rate queda
+   afuera — honesto, pero deja el bug 3 igual de abierto que hoy.
+
+Los caminos negativos siguen cubiertos y bien (`BadLoaderArgumentsFailAndLoadNothing`), y
+`currentSampleRate()` —el mecanismo compartido, y lo que los tres `loadSoundFont*` le pasan al
+manager (`AudioEngine.cpp:1066-1078`)— también.
+
+---
+
 ### Dónde retomar (2026-07-28)
 
 **No hay nada a medio hacer.** `master` = **`7af4275`**, árbol limpio, **cero PRs abiertos** en
@@ -3110,12 +3336,28 @@ de cierre más abajo.
 > **Lo que queda está frenado por hardware o es chico, en ese orden:**
 >
 > 1. **G2 — device iOS.** Lo único grande. Necesita un iPhone.
-> 2. **Smoke: lo que falta necesita USB físico** (mitad del ítem 3, el 4, el 10) **o poder
->    escuchar** (el 5, el timing del metrónomo). El emulador no sirve para lo segundo.
-> 3. **Sin bloqueo de hardware:** los ítems **1, 2 y 6** del smoke, **WA-1.3**, el **fixture
->    SF2**, y WA-3.5 / la revisión de paths de WA-3.6.
+> 2. **Smoke: lo que falta necesita USB físico** (mitad del ítem 3, el 4, el 10, y ahora también
+>    el 6) **o poder escuchar** (el 5, el timing del metrónomo). El emulador no sirve para lo
+>    segundo. Los ítems **1, 2 y 6 ya corrieron** (2026-07-28).
+> 3. **Sin bloqueo de hardware, lo que queda:** el **fixture SF2** —que primero necesita decidir
+>    su **observable**, ver la nota—, **WA-3.5** (P2, con consumidor real medido), **la mitad
+>    `EffectManagerConfig` del tope de efectos** (decisión de API) y **exponer `setAudioMode` en
+>    el harness** para cerrar el call site 26 de WA-1.4.
 
-**Referencia — la última verificación local completa de 12/12 fue el 2026-07-27 sobre `92a0089`:**
+> [!NOTE]
+> **Última verificación local 12/12: 2026-07-28**, sobre los cambios de esta sesión (WA-1.2 /
+> WA-1.3, sólo Kotlin — `git diff --name-only` no toca un solo `.cpp`/`.h`). Portabilidad **325
+> archivos**, **762/762** C++ en 46.71 s, **762/762 bajo ASan+UBSan** (154 s) y **762/762 bajo
+> TSan** (550 s), ambos slices de iOS con link check, **105** tests de simulador (**12 XML**) y
+> **64** JVM (**8 XML**) —ambos con `--rerun-tasks` y borrando `audio/build/test-results/` antes,
+> y las cuentas leídas de los XML, no del "BUILD SUCCESSFUL"—, `assembleDebug`, XCFramework,
+> `compileIosMainKotlinMetadata`, los dos guardrails y el harness arrancando en el simulador.
+>
+> **Un detalle que confirma por qué se cuentan los XML:** el `EXIT=${PIPESTATUS[0]}` que se había
+> puesto para capturar el exit code de Gradle salió **vacío** las dos veces. Si se hubiera
+> confiado en él, el gate habría "pasado" sin evidencia.
+
+**Referencia — la anterior verificación local completa de 12/12 fue el 2026-07-27 sobre `92a0089`:**
 portabilidad OK (**325 archivos**), **762/762 tests C++** en 48.15 s, ambos slices de iOS con
 link check (19 MB / 15293 símbolos c/u), **105 tests de simulador** (12 XML, 0 fallas), **64
 JVM** (8 XML, 0 fallas), `assembleDebug` con las 4 ABIs, XCFramework, `compileIosMainKotlinMetadata`,
@@ -3199,10 +3441,16 @@ TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
 **Deuda de verificación que conviene saldar temprano — la lista del smoke manual en
 NoisyPad Android**, que ya tiene tres cosas encima:
 
-1. **WA-1.4**, la migración a `BridgeConcurrency` (26 call sites), verificada con el
-   compilador y revisión de diff porque los métodos de `AudioNativeBridge` **no tienen
-   tests** (necesitan JNI y device).
-2. **WA-1.2**, `AudioEngineFactory.create()` sin argumentos (ver abajo).
+1. ~~**WA-1.4**, la migración a `BridgeConcurrency` (26 call sites)~~ ✅ **CORRIDO EN EMULADOR
+   2026-07-28 — 25 de 26.** Cero reentrancias en el barrido estático (un `Mutex` de corrutinas
+   no es reentrante: reentrar **cuelga**, no falla), y LIFECYCLE/EFFECTS/INPUT ejercitados con
+   mismo pid, cero ANR y cero `BridgeConcurrency` en error. **Falta MODE**: su único call site
+   es `setAudioMode` y el harness no lo expone.
+2. ~~**WA-1.2**, `AudioEngineFactory.create()` sin argumentos~~ ✅ **CORRIDO 2026-07-28 — y el
+   recorte NO se aplicaba.** `AudioEngineConfig.maxEffects` no tenía **ningún** lector; el
+   emulador aceptó 7 efectos con `gama baja: true`. Arreglado y re-verificado (6, y el 7º
+   rebota sin llegar al motor). **Queda abierto el camino de `EffectManagerConfig`, que es el
+   que usa NoisyPad** — es una decisión de API, ver la nota de cierre.
 3. ~~**WA-2.6 `input/monitor`**, el permiso denegado~~ ✅ **CORRIDO EN EMULADOR 2026-07-28 —
    la regresión NO se reproduce y es estructuralmente inalcanzable en Android** (`mActiveBackend`
    es siempre nulo ahí). Ver la nota del análisis estático, corregida con la medición. **Queda
@@ -3226,9 +3474,12 @@ NoisyPad Android**, que ya tiene tres cosas encima:
 7. ~~**`armAtNextBar` / `armInFrames` devuelven -1 cuando el arm no prende**~~ ✅ **VERIFICADO
    POR JNI 2026-07-28** — `armAtNextBar(0) = -1` con el metrónomo parado, en vez de un frame
    de disparo para una grabación que nunca arranca.
-6. **`getRecommendedBufferSize` cambia de respuesta** (`benchmark`, 2026-07-27) en dos
-   casos: cuando no hay stream corriendo pero sí una tasa preferida distinta de 48 kHz, y
-   cuando el target cae entre dos potencias de dos. Sólo lo usa el tooling de latencia.
+6. ~~**`getRecommendedBufferSize` cambia de respuesta**~~ ✅ **CERRADO POR MEDICIÓN 2026-07-28,
+   sin el AVD — que es el instrumento equivocado.** La rama nueva sólo se alcanza vía
+   `setPreferredSampleRate`, cuyo **único** llamador es la preferencia de dispositivo **USB**;
+   el emulador negocia 48 kHz, justo donde el código viejo y el nuevo coinciden. Los dos casos
+   ya están cubiertos por `test_c_api_diagnostics.cpp` con tests que sí distinguen 44.1 de 48.
+   Y el riesgo de consumidor es **cero**: no lo llama nadie, ni en NoisyPad ni acá.
 5. **El fix del off-by-one del metrónomo** (`metronome`, 2026-07-27) cambia el timing del
    click en Android. Es el único cambio de la serie que altera algo que ya sonaba bien —
    o casi bien: iba ~4 ms adelantado. Escuchar un count-in contra una grabación armada al
@@ -3244,7 +3495,7 @@ ahora recorta `maxEffects` a 6 en un dispositivo de gama baja, y ni el parseo de
 | Fase | Estado |
 |---|---|
 | **Fase 0** — Análisis y fundaciones | ✅ **CERRADA** — WA-0.1 ✅ · WA-0.2 ✅ · WA-0.3 ✅ (+WA-T.1) · WA-0.4 ✅ |
-| **Fase 1** — Quick wins | 🟡 **WA-1.2 ✅** · **WA-1.4 ✅** · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales (WA-1.4 y WA-1.2 avanzaron ambas) · **falta sólo WA-1.3** |
+| **Fase 1** — Quick wins | ✅ **CERRADA** 2026-07-28 — **WA-1.2 ✅** (y su recorte **por fin se aplica**: no tenía lector) · **WA-1.3 ✅** (`AudioBackendType` mudado a `domain/` con typealias `@Deprecated`) · **WA-1.4 ✅** (25/26 call sites corridos en AVD; MODE sin exponer) · **WA-1.6 ✅** · WA-1.1 y WA-1.5 parciales |
 | **Fase 2** — C++ multiplataforma | 🟢 Prácticamente completa — **WA-2.1 ✅ completo** · WA-2.0 ✅ · WA-2.7 ✅ · **WA-2.4 output ✅ + captura ✅** · WA-2.2 ✅ · **WA-2.3 ✅**. **`libwatermelon_audio.a` linkea de verdad** (link check con `-force_load`, ambos slices). Falta validación en device (WA-4.3). **WA-2.5 + WA-2.6 ✅ CERRADA** — las 10 categorías más la cola de 15; delegación **237/278** por el script, **240/289** real. Los 49 que no delegan son **todos deliberados y con el porqué escrito en el código** (40 USB/D4, 5 Oboe/stubs, 2 listeners, 2 de backend que sólo tienen caminos USB): **cero sin clasificar**. **Murió la duplicación de estado de modo**; el metrónomo dejó de adelantar un bloque |
 | **Fase 3** — Kotlin iosMain | ✅ **CERRADA** 2026-07-25 — WA-3.1 ✅ · WA-3.2 ✅ · **WA-3.3 ✅** (lo cerró WA-1.2) · WA-3.4 ✅. `AudioEngineFactory.create()` funciona en iOS; 87 tests en el simulador, 0 fallas. Quedan diferidos WA-3.5 (P2) y la revisión de paths de WA-3.6 |
 | **Fase 4** — Empaquetado y publicación | 🟢 **WA-4.1 ✅ · G1/WA-4.2 ✅ CERRADO** (2026-07-27) — el pipeline publica metadata KMP + klibs iOS **con los bindings de cinterop adentro desde la 1.9.0** (las 1.8.x son anteriores a cinterop y NO los traen), y ensambla el XCFramework en CI. NoisyPad consume la coordenada raíz, resuelve por target y **linkea `NoisyPadShell.framework` con 251 símbolos `wma_*` y `IosAudioBridge` adentro** — contra 1.8.0 eran 0. **WA-4.3 primera mitad la subsume WA-5.5**, que ya corre en el simulador. Falta sólo **WA-4.3 segunda mitad = G2**, que necesita un iPhone |
