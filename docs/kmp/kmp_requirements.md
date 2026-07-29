@@ -3619,7 +3619,56 @@ billing agotado— tiene que existir una salida manual.
 `changes` es el sexto y no es decorativo: si fallara y no estuviera en la lista, los otros
 cinco quedarían `skipped` y el PR sería mergeable **sin ningún gate**.
 
-### Dónde retomar (2026-07-28)
+### Dónde retomar (2026-07-29)
+
+**No hay nada a medio hacer.** `master` = **`1bd24e6`**, árbol limpio, **cero PRs abiertos**,
+**1.13.1 publicada**. El CI de `master` está **verde** (los cinco jobs, `cpp-tests-tsan`
+incluido) y ahora hay **protección de rama**: 6 checks requeridos, `strict: true`, sin
+force-push ni borrado. `enforce_admins` quedó en `false` a propósito — si el CI se cae hace
+falta una salida manual.
+
+**Lo que cerró la sesión del 2026-07-29:**
+
+| | |
+|---|---|
+| **Tope de efectos, entero** | La mitad `EffectManagerConfig`, que es **la única viva**: NoisyPad no usa `AudioEngineFactory` en ninguna parte. Medido en el AVD: **12 antes, 6 después** |
+| **WA-1.4 → 26/26** | Control 8 del harness (modos). Destapó que `setAudioMode` devolvía `success` en iOS habiendo hecho **cero** |
+| **El SoundFont ya no queda clavado a su tasa** | Y el arreglo destapó un **use-after-free** en el retiro de fonts, preexistente. Resuelto con hazard pointer |
+| **El fixture SF2 pasó a ser válido** | Le faltaban los 46 sample points del spec, y era **todo silencio** |
+| **CI de iOS: 18–28 min → 12m57s** | El `.a` no era reproducible (`libtool` sin `-D`) y tiraba la caché de Gradle entera |
+| **Protección de rama** | No existía. Era la causa raíz de dos merges que entraron sin esperar checks |
+
+> [!CAUTION]
+> **Tres cosas de esta sesión que conviene leer antes de tocar el motor de audio.**
+>
+> 1. **El TSan del CI (Linux) es la ÚNICA autoridad para carreras.** Afirmé que un hazard "no
+>    se alcanzaba" respaldándome en ASan — que **no detecta carreras**, sólo caza un UAF si el
+>    `free` precede al uso en tiempo real. El TSan del CI lo tiró abajo. Y el TSan de macOS
+>    tampoco lo veía: se comprobó mutando el arreglo.
+> 2. **Antes de escribir "esto no se alcanza", preguntarse qué instrumento lo probaría.** Si
+>    el que se corrió no puede ver eso, no está probado.
+> 3. **Un fixture puede estar mal en una dimensión que ningún test toca.** El SF2 generado era
+>    correcto para cargar y leer presets, e inválido para **sonar**. Lo destapó el primer test
+>    que renderizó.
+
+> [!IMPORTANT]
+> **Lo que queda, en orden de impacto real:**
+>
+> 1. **G2 — device iOS.** Lo único grande. Necesita un iPhone.
+> 2. **Smoke: lo que falta necesita USB físico** (mitad del ítem 3, el 4, el 10, y también el 6)
+>    **o poder escuchar** (el 5, el timing del metrónomo). El emulador no sirve para lo segundo.
+> 3. **CI, lo que quedó sin hacer y está medido:** `ccache` (apunta a los ~400–650 s de
+>    compilación C++), partir la suite de Apple clang a un job paralelo (−5 a −8 min de reloj a
+>    cambio de duplicar minutos de macOS), y el **gate de warnings en el build de iOS** — este
+>    último **cambia cobertura**, así que es decisión del líder. Verificado que el CMakeLists de
+>    iOS **no** tiene `-Wall -Wextra -Werror`, o sea que hoy `build-ios.sh` no sustituye a la
+>    suite de host.
+> 4. **Chicos y sin bloqueo:** **WA-3.5** (P2, con consumidor real medido: `exportMixCompressed`
+>    ya está en el `commonMain` de NoisyPad).
+
+---
+
+### Dónde retomar (2026-07-28 — historia)
 
 **No hay nada a medio hacer.** `master` = **`bd0214c`**, árbol limpio, **cero PRs abiertos**,
 **1.11.0 publicada** con sus 4 publicaciones —verificadas contra el registro de GitHub Packages,
