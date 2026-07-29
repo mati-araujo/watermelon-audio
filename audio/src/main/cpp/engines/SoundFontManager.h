@@ -65,9 +65,18 @@ public:
 
     SoundFontManager() = default;
 
+    /**
+     * Destruir el manager exige que el hilo de audio YA no esté corriendo — es
+     * el mismo contrato de siempre, y el motor lo cumple parando el stream
+     * antes. Por eso acá se libera todo lo retirado **sin mirar el hazard
+     * pointer**: si quedara algo marcado en uso a esta altura, respetarlo sería
+     * filtrarlo para siempre, y el problema real estaría en el orden de apagado.
+     */
     ~SoundFontManager() {
         unload();
-        cleanupPending();
+        std::lock_guard<std::mutex> lock(mLoadMutex);
+        for (tsf* p : mRetired) tsf_close(p);
+        mRetired.clear();
     }
 
     /**
@@ -255,35 +264,77 @@ public:
      */
     void unload() {
         std::lock_guard<std::mutex> lock(mLoadMutex);
-        tsf* old = mActiveSF.exchange(nullptr, std::memory_order_release);
         mPresetCache.reset();
-        if (old) {
-            tsf* expected = nullptr;
-            if (!mPendingDelete.compare_exchange_strong(expected, old,
-                    std::memory_order_release)) {
-                tsf_close(expected);
-                mPendingDelete.store(old, std::memory_order_release);
-            }
-        }
+        publishAndRetire(nullptr);
     }
 
     /**
-     * @brief Get the active SoundFont for audio rendering
-     * RT-safe: lock-free atomic load.
+     * @brief Publica el `tsf` que se va a usar y lo devuelve. RT-safe.
+     *
+     * **Es lo que debe llamar el hilo de audio**, no [getActiveSF]. La diferencia
+     * no es cosmética: entre leer el puntero y usarlo, el hilo de control puede
+     * retirarlo y liberarlo. Acá se publica en [mInUse] y se **re-verifica** que
+     * siga siendo el activo; recién entonces el reclamador tiene prohibido
+     * liberarlo.
+     *
+     * ## Por qué `seq_cst` y no acquire/release
+     *
+     * El reclamador hace lo simétrico: cambia [mActiveSF] y después lee
+     * [mInUse]. Con acquire/release, el store de un lado y el load del otro se
+     * pueden reordenar y **los dos se pierden mutuamente** (store buffering):
+     * el lector no ve el swap y el reclamador no ve el hazard → libera algo en
+     * uso. Es el mismo requisito que en el algoritmo de Peterson. Son dos
+     * operaciones por bloque de audio, no por muestra.
+     *
+     * ## Reintentos acotados
+     *
+     * Un swap entre el load y el re-chequeo obliga a reintentar. Se acota a
+     * [kAcquireAttempts] y ante el peor caso se devuelve `nullptr`, o sea **un
+     * bloque de silencio**, en vez de spinear sin techo en el hilo de audio. Es
+     * aceptable: para que haya swap tuvo que haber una carga o una reapertura de
+     * stream, que ya cortan el sonido. En la práctica no reintenta nunca: los
+     * swaps son cosa del hilo de control y son rarísimos.
+     *
+     * Emparejar SIEMPRE con [releaseActive].
+     */
+    tsf* acquireActive() {
+        for (int attempt = 0; attempt < kAcquireAttempts; ++attempt) {
+            tsf* p = mActiveSF.load(std::memory_order_seq_cst);
+            mInUse.store(p, std::memory_order_seq_cst);
+            if (!p) return nullptr;
+            if (mActiveSF.load(std::memory_order_seq_cst) == p) return p;
+        }
+        mInUse.store(nullptr, std::memory_order_seq_cst);
+        return nullptr;
+    }
+
+    /** Baja el hazard pointer. RT-safe. Ver [acquireActive]. */
+    void releaseActive() {
+        mInUse.store(nullptr, std::memory_order_seq_cst);
+    }
+
+    /**
+     * @brief El `tsf` activo, **para diagnóstico y tests**.
+     *
+     * NO usar desde el hilo de audio: devuelve un puntero sin protegerlo, así
+     * que el reclamador puede liberarlo mientras se lo usa. Para renderizar está
+     * [acquireActive]. Sirve para observar *cuál* es el activo (por ejemplo, que
+     * un re-rate haya swapeado), no para desreferenciarlo bajo concurrencia.
      */
     tsf* getActiveSF() const {
         return mActiveSF.load(std::memory_order_acquire);
     }
 
     /**
-     * @brief Clean up any pending-delete SoundFont
+     * @brief Libera los fonts retirados que ya nadie esté usando.
+     *
+     * Se puede llamar en cualquier momento desde el hilo de control; los que
+     * sigan en uso quedan para la próxima. La reclamación también ocurre sola en
+     * cada retiro, así que llamarla es una optimización, no una obligación.
      */
     void cleanupPending() {
-        tsf* pending = mPendingDelete.exchange(nullptr, std::memory_order_acquire);
-        if (pending) {
-            tsf_close(pending);
-            SFM_LOGI("[SF8] Cleaned up pending SF2");
-        }
+        std::lock_guard<std::mutex> lock(mLoadMutex);
+        reclaimRetired();
     }
 
     bool isLoaded() const {
@@ -470,13 +521,31 @@ private:
      * Llamar SIEMPRE con [mLoadMutex] tomado.
      */
     void publishAndRetire(tsf* newSF) {
-        tsf* old = mActiveSF.exchange(newSF, std::memory_order_release);
-        if (old) {
-            tsf* expected = nullptr;
-            if (!mPendingDelete.compare_exchange_strong(expected, old,
-                    std::memory_order_release)) {
-                tsf_close(expected);
-                mPendingDelete.store(old, std::memory_order_release);
+        // seq_cst y no release: es la mitad escritora del hazard pointer. Ver
+        // [acquireActive] para por qué acquire/release no alcanza.
+        tsf* old = mActiveSF.exchange(newSF, std::memory_order_seq_cst);
+        if (old) mRetired.push_back(old);
+        reclaimRetired();
+    }
+
+    /**
+     * @brief Cierra los retirados que el hilo de audio no esté usando.
+     *
+     * Llamar SIEMPRE con [mLoadMutex] tomado.
+     *
+     * Un solo hilo de audio ⇒ un solo hazard pointer que consultar. Si algún día
+     * hubiera más de un lector, esto necesita un hazard por lector; está dicho
+     * acá porque el error sería silencioso.
+     */
+    void reclaimRetired() {
+        tsf* held = mInUse.load(std::memory_order_seq_cst);
+        auto it = mRetired.begin();
+        while (it != mRetired.end()) {
+            if (*it == held) {
+                ++it;  // en uso: la próxima vez
+            } else {
+                tsf_close(*it);
+                it = mRetired.erase(it);
             }
         }
     }
@@ -489,8 +558,42 @@ private:
     static std::shared_ptr<const std::vector<PresetInfo>> buildPresetCache(
         tsf* sf, int presetCount);
 
+    /**
+     * Techo de reintentos de [acquireActive]. Un swap entre el load y el
+     * re-chequeo obliga a reintentar; 4 es holgadísimo porque los swaps sólo los
+     * produce el hilo de control (cargar, descargar, re-ratear) y son rarísimos.
+     * Existe para que el hilo de audio no pueda spinear sin techo, nunca porque
+     * se espere agotarlo.
+     */
+    static constexpr int kAcquireAttempts = 4;
+
     std::atomic<tsf*> mActiveSF{nullptr};
-    std::atomic<tsf*> mPendingDelete{nullptr};
+
+    /**
+     * @brief Hazard pointer: el `tsf` que el hilo de audio está usando AHORA.
+     *
+     * Lo publica [acquireActive] antes de renderizar y lo limpia
+     * [releaseActive]. El hilo de control no libera jamás un `tsf` que figure
+     * acá. Es lo único que hace segura la reclamación sin que el hilo de audio
+     * tome un lock.
+     */
+    std::atomic<tsf*> mInUse{nullptr};
+
+    /**
+     * @brief Fonts retirados, esperando a que nadie los esté usando.
+     *
+     * Sustituye a la ranura única `mPendingDelete`, que era un
+     * **use-after-free**: al tercer swap cerraba en el acto el font retirado dos
+     * swaps atrás, sin ninguna garantía de que el hilo de audio ya lo hubiera
+     * soltado. Lo destapó el TSan del CI (Linux) con
+     * `ReRatingWhileTheAudioThreadRendersIsSafe`; el TSan de macOS no lo veía.
+     *
+     * Sólo lo tocan el hilo de control y siempre bajo [mLoadMutex], así que un
+     * `std::vector` es adecuado — el `push_back` puede alocar y eso ahí está
+     * permitido.
+     */
+    std::vector<tsf*> mRetired;
+
     mutable std::mutex mLoadMutex;
     // Immutable post-load preset metadata. Replaced wholesale on load/unload
     // while [mLoadMutex] is held. Reads on JNI thread take the mutex briefly
