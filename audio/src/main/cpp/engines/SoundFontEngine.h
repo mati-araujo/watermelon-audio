@@ -115,7 +115,16 @@ public:
      * AUDIO THREAD ONLY. Drains the event queue first, then renders.
      */
     void render(float* buffer, int32_t numFrames) {
-        tsf* sf = mSFManager ? mSFManager->getActiveSF() : nullptr;
+        // El hazard pointer se baja SIEMPRE, por cualquier salida. Mientras esté
+        // arriba, el hilo de control tiene prohibido liberar este `tsf`; si se
+        // quedara arriba, el font no se liberaría nunca. Ver
+        // SoundFontManager::acquireActive().
+        struct ActiveGuard {
+            SoundFontManager* mgr;
+            ~ActiveGuard() { if (mgr) mgr->releaseActive(); }
+        } guard{mSFManager};
+
+        tsf* sf = mSFManager ? mSFManager->acquireActive() : nullptr;
         if (!sf) {
             std::fill_n(buffer, numFrames * 2, 0.0f);
             return;

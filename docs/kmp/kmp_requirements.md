@@ -3552,18 +3552,39 @@ toma locks— y por eso el camino correcto es el swap, no el lock.
 > con lo cual cualquier test de render habría medido "salió silencio" tanto si el motor
 > andaba como si no.
 
-> [!NOTE]
-> **Deuda adyacente, encontrada y NO tocada: el retiro sólo tiene una ranura.**
-> `publishAndRetire` guarda el `tsf` viejo en `mPendingDelete`, y si ya había uno lo cierra
-> **en el acto**. `cleanupPending()` no lo llama nadie salvo el destructor. O sea que tres
-> swaps seguidos cierran el font retirado dos swaps atrás, que el hilo de audio podría estar
-> usando si los tres cayeron dentro del mismo bloque.
+> [!CAUTION]
+> **El retiro de una sola ranura era un use-after-free, y hubo que arreglarlo.**
 >
-> **Es preexistente** (el camino de carga ya lo tenía) y el re-rate **no lo alcanza**: para
-> que la tasa cambie hay que reabrir el stream, lo que toma mucho más que un bloque. El test
-> concurrente lo respalda: 20 re-rates con un bloque de por medio, limpio bajo ASan. Se deja
-> escrito en vez de arreglarlo de contrabando — el arreglo de verdad es una lista de retiro
-> con un punto de reclamación seguro, y eso es su propio cambio.
+> **La primera versión de esta nota decía lo contrario** —que el hazard existía pero que el
+> re-rate "no lo alcanza", respaldado por 20 re-rates limpios bajo ASan— y estaba **mal por
+> dos motivos**, los dos instructivos:
+>
+> 1. **ASan no detecta carreras.** Sólo caza un use-after-free si el `free` precede al uso en
+>    tiempo real; con dos hilos el orden es no determinista. El instrumento correcto era
+>    TSan, y el de macOS es más débil que el de Linux — exactamente lo que este documento ya
+>    advertía en otra sección, y que igual me comí.
+> 2. **"Un bloque de por medio alcanza" es falso.** El lector puede latchar el puntero y
+>    quedar desprogramado; el contador de bloques se incrementa *después* de renderizar, así
+>    que no cerca la adquisición **siguiente**.
+>
+> Lo destapó **el TSan del CI** con el mismo test concurrente:
+> `free` dentro de `tsf_close` desde `publishAndRetire` contra `tsf_render_float` en el hilo
+> lector. Reachable en producción: cargar un font, que `start()` fuerce otra tasa (swap 1) y
+> una reapertura posterior (swap 2) cierra el font retirado en el swap 1.
+>
+> **Arreglado con un hazard pointer** (un solo lector): el hilo de audio publica en un atómico
+> el `tsf` que va a usar y **re-verifica** que siga siendo el activo; el hilo de control
+> mantiene una lista de retirados y libera sólo los que no figuren en uso. Las operaciones son
+> `seq_cst` a propósito: con acquire/release, el store de un lado y el load del otro se
+> reordenan y **los dos se pierden mutuamente** (store buffering), que es el mismo requisito
+> del algoritmo de Peterson. Son dos operaciones atómicas por bloque de audio, no por muestra,
+> y cumplen la regla RT de `CLAUDE.md` (lock-free, sin `new`/`malloc`).
+>
+> Los reintentos de adquisición están **acotados** (`kAcquireAttempts`): en el peor caso se
+> devuelve un bloque de silencio en vez de spinear sin techo en el hilo de audio.
+>
+> **Esto arregla también el camino de CARGA**, que tenía el mismo defecto desde antes: dos
+> cargas mientras suena algo podían liberar un font en uso.
 
 ### Dónde retomar (2026-07-28)
 

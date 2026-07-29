@@ -342,12 +342,16 @@ TEST_F(SoundFontLoadTest, ReRatingWhileTheAudioThreadRendersIsSafe) {
     std::thread audio([&] {
         std::vector<float> buf(128 * 2, 0.0f);
         while (!stop.load(std::memory_order_acquire)) {
-            // Igual que render(): UNA lectura del puntero, y después se usa.
-            tsf* sf = mManager.getActiveSF();
+            // Igual que render(): adquirir con el hazard pointer, usar, soltar.
+            // Usar `getActiveSF()` acá sería modelar mal el motor — y de hecho
+            // fue así como este test destapó el use-after-free del esquema de
+            // retiro viejo, en el TSan de Linux.
+            tsf* sf = mManager.acquireActive();
             if (sf) {
                 tsf_render_float(sf, buf.data(), 128, 0);
                 blocks.fetch_add(1, std::memory_order_relaxed);
             }
+            mManager.releaseActive();
         }
     });
 
