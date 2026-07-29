@@ -104,7 +104,8 @@ public:
     }
 
     void setPattern(int patternId) {
-        int old = mPattern.load(std::memory_order_acquire);
+        // [[maybe_unused]]: sólo lo lee el ARP_LOGI de abajo, que es ((void)0) con NDEBUG.
+        [[maybe_unused]] const int old = mPattern.load(std::memory_order_acquire);
         mPattern.store(patternId, std::memory_order_release);
         mNeedsPatternRebuild.store(true, std::memory_order_release);
         ARP_LOGI("Pattern changed: %d -> %d", old, patternId);
@@ -313,7 +314,8 @@ public:
         mSampleCounter += numFrames;
         while (mSampleCounter >= static_cast<int64_t>(currentStepSamples)) {
             mSampleCounter -= static_cast<int64_t>(currentStepSamples);
-            int prevStep = mCurrentStep;
+            // [[maybe_unused]]: sólo lo lee el ARP_DIAG de abajo, que es ((void)0) con NDEBUG.
+            [[maybe_unused]] const int prevStep = mCurrentStep;
             mCurrentStep = (mCurrentStep + 1) % mPatternLength;
             newStep = true;
 

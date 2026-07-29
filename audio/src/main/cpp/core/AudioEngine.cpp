@@ -2323,7 +2323,8 @@ void AudioEngine::setDualTouchMode(bool enabled) {
     mDualTouch.setEnabled(enabled);
 
     if (enabled) {
-        int oscIdx = mOscBank.getOscillatorType();
+        // [[maybe_unused]]: sólo lo lee el LOGI de abajo, que es ((void)0) con NDEBUG.
+        [[maybe_unused]] const int oscIdx = mOscBank.getOscillatorType();
         LOGI("Dual touch using oscillator: %d", oscIdx);
     }
 
