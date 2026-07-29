@@ -1,5 +1,16 @@
 name: Publish
 
+# Camino de publicacion MANUAL / de emergencia. El automatico —el que corre en
+# cada release— es el job `publish` de release-please.yml, y ESE si espera a que
+# el CI del commit este verde (scripts/wait-for-ci.sh).
+#
+# Este NO espera al CI a proposito: es el override humano para cuando el
+# automatico fallo (fue como se rescato v1.8.0). Quien lo dispara se hace cargo.
+# El trigger `push: tags` es en la practica letra muerta para los releases: el
+# tag lo crea el GITHUB_TOKEN de release-please y GitHub no encadena workflows,
+# asi que este workflow solo corre por `workflow_dispatch`. Si algun dia se
+# quiere gatear tambien esta via, agregar el paso de wait-for-ci como en
+# release-please.yml (necesita `actions: read` en permissions).
 on:
   push:
     tags: ["v*"]
