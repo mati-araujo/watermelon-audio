@@ -320,6 +320,79 @@ public:
     int32_t getSampleRate() const { return mSampleRate; }
 
     /**
+     * @brief Re-configure the OUTPUT rate of the already-loaded SoundFont.
+     *
+     * La tasa de salida se fija con `tsf_set_output()`, y hasta 2026-07-28 eso
+     * ocurría en un solo lugar: la carga. Si el stream abría —o REABRÍA— a otra
+     * tasa, el font seguía renderizando a la vieja y sonaba desafinado **en
+     * silencio**: ni error, ni log. Los dos caminos reales son
+     * `AudioEngine::start()` cuando el device fuerza otra tasa que la pedida, y
+     * en iOS la reapertura de sesión al pedir captura (que con un manos libres
+     * Bluetooth puede caer a HFP, 16 kHz).
+     *
+     * ## Reemplaza, no muta — y no es una preferencia de estilo
+     *
+     * El hilo de audio hace `getActiveSF()` una vez por bloque y renderiza con
+     * ese puntero hasta el final del bloque. Escribirle `outSampleRate` encima
+     * mientras tanto es una carrera sobre un `float` que `tsf_render_float` lee
+     * para el pitch de cada voz. Por eso esto usa **la misma disciplina que la
+     * carga**: construir aparte, publicar con un swap atómico, y retirar el
+     * viejo a `mPendingDelete`.
+     *
+     * `tsf_copy()` es barato y correcto para esto: comparte presets y muestras
+     * por refcount —no re-parsea el .sf2— y `tsf_close()` sólo libera cuando el
+     * último se va. Pero devuelve la copia **sin voces** (`voices = NULL`), así
+     * que hay que rehacer `tsf_set_max_voices()`; olvidarlo deja un font que
+     * carga, reporta presets y tasa correcta, y renderiza silencio.
+     *
+     * ## Consecuencia aceptada
+     *
+     * Un cambio de tasa **corta las notas que estuvieran sonando**: la copia
+     * viene con las voces en reposo. Es inevitable y no molesta, porque para que
+     * la tasa cambie el stream tuvo que reabrirse, cosa que ya interrumpe el
+     * audio. Por eso mismo el caso "misma tasa" retorna temprano SIN swapear:
+     * `prepare()` corre en cada `start()`, y swapear de gusto convertiría cada
+     * arranque en un corte.
+     *
+     * @param sampleRate nueva tasa de salida, en Hz.
+     * @return `false` sólo ante un error real (tasa inválida, fallo de
+     *         asignación). Sin SoundFont cargado no hay nada que re-ratear y
+     *         retorna `true`: la próxima carga fija la tasa explícitamente.
+     *
+     * NOT RT-safe — aloca. Llamar desde el hilo de control (lo hace
+     * `SoundFontEngine::prepare()`), nunca desde el callback de audio.
+     */
+    bool setOutputSampleRate(int32_t sampleRate) {
+        if (sampleRate < 1) {
+            SFM_LOGE("[SF8] setOutputSampleRate: tasa invalida (%d)", sampleRate);
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(mLoadMutex);
+
+        tsf* active = mActiveSF.load(std::memory_order_acquire);
+        if (!active) return true;              // nada cargado, nada que re-ratear
+        if (mSampleRate == sampleRate) return true;  // idempotente: NO swapear
+
+        tsf* reRated = tsf_copy(active);
+        if (!reRated) {
+            SFM_LOGE("[SF8] setOutputSampleRate: tsf_copy fallo");
+            return false;
+        }
+        tsf_set_output(reRated, TSF_STEREO_INTERLEAVED, sampleRate, 0.0f);
+        if (!tsf_set_max_voices(reRated, 64)) {
+            SFM_LOGE("[SF8] setOutputSampleRate: tsf_set_max_voices fallo");
+            tsf_close(reRated);
+            return false;
+        }
+
+        SFM_LOGI("[SF8] Re-rate del SoundFont: %d -> %d Hz", mSampleRate, sampleRate);
+        publishAndRetire(reRated);
+        mSampleRate = sampleRate;
+        return true;
+    }
+
+    /**
      * @brief Effective MIDI key range for a preset, from the cache (AUD-4).
      *
      * Pre-computed at load time using the same heuristic as before. Thread
@@ -376,8 +449,28 @@ private:
         auto cache = buildPresetCache(newSF, presetCount);
 
         // Atomic swap to audio thread
-        tsf* old = mActiveSF.exchange(newSF, std::memory_order_release);
         mPresetCache = std::move(cache);
+        publishAndRetire(newSF);
+
+        mSampleRate = sampleRate;
+        return true;
+    }
+
+    /**
+     * @brief Publish [newSF] to the audio thread and retire the previous one.
+     *
+     * El swap atómico y el baile de `mPendingDelete`, en un solo lugar. Lo
+     * comparten la carga y [setOutputSampleRate]: es la parte delicada y tener
+     * dos copias es pedir que diverjan.
+     *
+     * El viejo NO se cierra acá — el hilo de audio puede estar renderizando el
+     * bloque en curso con ese puntero. Se pasa a `mPendingDelete` y lo libera
+     * `cleanupPending()` desde el hilo de control.
+     *
+     * Llamar SIEMPRE con [mLoadMutex] tomado.
+     */
+    void publishAndRetire(tsf* newSF) {
+        tsf* old = mActiveSF.exchange(newSF, std::memory_order_release);
         if (old) {
             tsf* expected = nullptr;
             if (!mPendingDelete.compare_exchange_strong(expected, old,
@@ -386,9 +479,6 @@ private:
                 mPendingDelete.store(old, std::memory_order_release);
             }
         }
-
-        mSampleRate = sampleRate;
-        return true;
     }
 
     /**

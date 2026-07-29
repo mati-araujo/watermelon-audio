@@ -96,9 +96,34 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
 
     // ---- sdta: 64 samples de 16 bits. tsf pide >= un short; 64 deja lugar a
     // que el shdr declare un loop interno sin salirse del buffer.
+    // El contenido NO es silencio, y eso importa: mientras las 64 muestras
+    // fueron ceros, cualquier test que renderizara media "salio silencio" tanto
+    // si el motor andaba como si no. Una onda cuadrada de amplitud media hace
+    // que "sono algo" sea una afirmacion con contenido.
     constexpr uint32_t kSampleCount = 64;
+    constexpr int16_t kAmplitude = 16384;
     std::vector<uint8_t> smpl;
-    for (uint32_t i = 0; i < kSampleCount; ++i) put16(smpl, 0);
+    for (uint32_t i = 0; i < kSampleCount; ++i) {
+        put16(smpl, static_cast<uint16_t>((i % 16 < 8) ? kAmplitude : -kAmplitude));
+    }
+
+    // ---- Los 46 sample points en cero que el spec de SF2 exige DESPUES de cada
+    // sample (§6.1: "followed by a minimum of forty-six zero valued sample data
+    // points"). No es ceremonia: el render de tsf interpola leyendo `pos + 1`,
+    // asi que con `end` en el ultimo sample real la ultima interpolacion cae
+    // justo afuera del buffer.
+    //
+    // Faltaban desde que se creo el fixture y NADIE lo noto, porque hasta
+    // 2026-07-28 ningun test RENDERIZABA desde el: todos cargaban y leian
+    // metadata. El primero que toco una nota lo destapo, y lo destapo ASan —
+    // `heap-buffer-overflow ... READ of size 4` en `tsf_voice_render`, leyendo
+    // 0 bytes despues de la region de 256 bytes de `fontSamples`.
+    //
+    // Se comprobo que NO dependia del re-rate: con la misma tasa, sin copia ni
+    // swap de por medio, desbordaba igual. O sea que el defecto era del fixture,
+    // no del codigo que se estaba probando.
+    constexpr uint32_t kTrailingZeroPoints = 46;
+    for (uint32_t i = 0; i < kTrailingZeroPoints; ++i) put16(smpl, 0);
 
     std::vector<uint8_t> sdta;
     putFourCC(sdta, "sdta");

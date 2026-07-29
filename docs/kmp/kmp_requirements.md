@@ -3488,18 +3488,82 @@ Dos caminos concretos, por lectura del código:
    libres Bluetooth. `prepare()` re-configura todos los demás engines con la tasa nueva; el
    SoundFont se queda con la vieja.
 
-**Lo que se hizo, y lo que deliberadamente no.** Se dejó pinchado con un test de
-caracterización —`PreparingTheEngineAtANewRateDoesNotReRateTheFont`, el mismo patrón que el
-no-op de `VoiceManager::setMaxVoices`— que **pasa hoy y tiene que fallar el día que se
-arregle**. Verificado por mutación del fixture: cargar a 44100 en vez de 48000 lo hace
-fallar, así que la assertion lee el estado real del manager y no una constante.
+### Nota de cierre — el SoundFont ya no queda clavado a su tasa (2026-07-28)
 
-**No se implementó el arreglo**, y no por falta de tiempo: re-configurar el `tsf` mientras
-el thread de audio renderiza desde él es una carrera, y `configurAndSwap` existe justamente
-porque el camino seguro es construir y **swapear**, no mutar en su lugar. Eso es cirugía de
-asignación, no un PR de deuda. **La decisión de exponer la tasa quedó subsumida**: hoy vale
-más que antes —sería lo único capaz de mostrar el desajuste— pero exponerla sola no arregla
-nada, así que conviene decidirla junto con el arreglo y no antes.
+**Arreglado.** `SoundFontEngine::prepare()` —que es lo que corre cuando el stream abre o
+reabre— ahora llama a `SoundFontManager::setOutputSampleRate()`. El test de caracterización
+se **borró**, no se relajó, y en su lugar quedó la sección "RE-RATE" de
+`test_soundfont_load.cpp`.
+
+**Reemplaza, no muta, y eso no es preferencia de estilo.** El hilo de audio hace
+`getActiveSF()` **una vez por bloque** y renderiza con ese puntero hasta el final; escribirle
+`outSampleRate` encima mientras tanto es una carrera sobre un `float` que `tsf_render_float`
+lee para el pitch de cada voz. Por eso el arreglo usa **la misma disciplina que la carga**:
+construir aparte, publicar con swap atómico, retirar el viejo. El swap se extrajo a
+`publishAndRetire()` para que carga y re-rate no tengan dos copias de la parte delicada.
+
+`tsf_copy()` es la primitiva correcta: comparte presets y muestras por refcount —no re-parsea
+el `.sf2`— y `tsf_close()` sólo libera cuando se va el último. **Pero devuelve la copia sin
+voces** (`voices = NULL`), así que hay que rehacer `tsf_set_max_voices()`; olvidarlo deja un
+font que carga, reporta presets y tasa correcta… y renderiza silencio.
+
+Consecuencia aceptada: un cambio de tasa **corta las notas que estuvieran sonando**. Es
+inevitable —para que la tasa cambie el stream tuvo que reabrirse, cosa que ya interrumpe el
+audio— y por eso mismo el caso "misma tasa" retorna temprano **sin swapear**: `prepare()`
+corre en cada `start()`, y swapear de gusto convertiría cada arranque en un corte.
+
+**Verificación — tres mutantes, uno por test:**
+
+| mutante | falla |
+|---|---|
+| sin `tsf_set_max_voices` (copia sin voces) | `TheReRatedFontStillProducesAudio` |
+| mutar en vivo en vez de copiar+swapear | `ReRatingSwapsTheFontInsteadOfMutatingTheLiveOne` |
+| sin el corto de idempotencia | `PreparingAtTheSameRateIsANoOp` |
+
+Más `ReRatingWhileTheAudioThreadRendersIsSafe`, el único test de la suite con dos hilos: el
+lector hace exactamente lo que hace `render()`. **Vale poco sin sanitizers y mucho con
+ellos** — en una corrida normal pasaría igual habiendo una carrera.
+
+**Y no es decorativo: se comprobó que DETECTA la violación.** Con el mutante de "mutar en
+vivo" y TSan, sale rojo con el diagnóstico exacto:
+
+```
+WARNING: ThreadSanitizer: data race
+  Write of size 4 by main thread (mutexes: write M0):
+    #0 tsf_set_output tsf.h:1530
+    #1 SoundFontManager::setOutputSampleRate(int)
+    #2 SoundFontEngine::prepare(int, int)
+```
+
+Es decir: el mutex de carga **no** protege nada contra el hilo de audio —que por diseño no
+toma locks— y por eso el camino correcto es el swap, no el lock.
+
+> [!WARNING]
+> **Y renderizar por primera vez destapó que el fixture era inválido.** Esta suite cargaba y
+> leía metadata; **ningún test había renderizado nunca**. El primero que tocó una nota se
+> llevó un `heap-buffer-overflow` de ASan en `tsf_voice_render`.
+>
+> No era del motor ni del arreglo: se comprobó que **con la misma tasa, sin copia ni swap,
+> desbordaba igual**. Al fixture le faltaban los **46 sample points en cero** que el spec de
+> SF2 exige después de cada sample (§6.1) — la interpolación de tsf lee `pos + 1`, así que
+> con `end` en el último sample real la última interpolación cae justo afuera.
+>
+> Se arregló, y de paso el fixture **dejó de ser silencio**: sus 64 muestras eran todas cero,
+> con lo cual cualquier test de render habría medido "salió silencio" tanto si el motor
+> andaba como si no.
+
+> [!NOTE]
+> **Deuda adyacente, encontrada y NO tocada: el retiro sólo tiene una ranura.**
+> `publishAndRetire` guarda el `tsf` viejo en `mPendingDelete`, y si ya había uno lo cierra
+> **en el acto**. `cleanupPending()` no lo llama nadie salvo el destructor. O sea que tres
+> swaps seguidos cierran el font retirado dos swaps atrás, que el hilo de audio podría estar
+> usando si los tres cayeron dentro del mismo bloque.
+>
+> **Es preexistente** (el camino de carga ya lo tenía) y el re-rate **no lo alcanza**: para
+> que la tasa cambie hay que reabrir el stream, lo que toma mucho más que un bloque. El test
+> concurrente lo respalda: 20 re-rates con un bloque de por medio, limpio bajo ASan. Se deja
+> escrito en vez de arreglarlo de contrabando — el arreglo de verdad es una lista de retiro
+> con un punto de reclamación seguro, y eso es su propio cambio.
 
 ### Dónde retomar (2026-07-28)
 
