@@ -3586,6 +3586,39 @@ toma locks— y por eso el camino correcto es el swap, no el lock.
 > **Esto arregla también el camino de CARGA**, que tenía el mismo defecto desde antes: dos
 > cargas mientras suena algo podían liberar un font en uso.
 
+### Nota de cierre — `master` no tenía protección de rama (2026-07-29)
+
+**Los dos merges que entraron sin esperar nada tenían una sola causa**, y no era el
+`--auto`: `gh api .../branches/master/protection` devolvía **404**. Sin checks requeridos,
+el auto-merge del PR #73 no tenía nada que esperar, y el PR #82 pudo entrar con
+`cpp-tests-tsan` en **rojo** — dejando en `master` un use-after-free en el hilo de audio
+durante ~40 minutos, hasta que lo cerró el PR #84.
+
+**Marcar los checks como required no se podía hacer solo.** `paths-ignore` es incompatible
+con checks requeridos: un workflow salteado por filtro de paths **nunca reporta**, el check
+queda `pending` para siempre y el PR no se puede mergear jamás. Estaba escrito como
+advertencia en el propio workflow desde que se agregó el `paths-ignore`, y fue exactamente
+lo que pasó a cobrar.
+
+Por eso van juntos:
+
+| | antes | ahora |
+|---|---|---|
+| filtro | `paths-ignore` en los dos triggers | job **`changes`**, que corre siempre |
+| PR de prosa | el workflow no corre ⇒ el check no existe | los 5 jobs se saltean por `if:` ⇒ reportan `skipped` |
+| efecto con protección | **bloquea el merge para siempre** | `skipped` satisface el check requerido |
+
+El ahorro es el mismo —un PR de prosa no gasta un minuto de macOS— a cambio de un job de
+ubuntu de ~3 s.
+
+**La protección quedó así:** 6 checks requeridos (`changes` + los cinco), `strict: true` (la
+rama tiene que estar al día con `master` antes de mergear), sin force-push y sin borrado de
+la rama. `enforce_admins` quedó en **false** a propósito: si el CI se cae —ya pasó, con el
+billing agotado— tiene que existir una salida manual.
+
+`changes` es el sexto y no es decorativo: si fallara y no estuviera en la lista, los otros
+cinco quedarían `skipped` y el PR sería mergeable **sin ningún gate**.
+
 ### Dónde retomar (2026-07-28)
 
 **No hay nada a medio hacer.** `master` = **`bd0214c`**, árbol limpio, **cero PRs abiertos**,
