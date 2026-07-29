@@ -152,17 +152,76 @@ jobs:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: bash scripts/run-cpp-tests.sh
 
+  # WA-T.1 — la suite C++ bajo Apple clang, en un runner PARA ELLA SOLA.
+  #
+  # Vivio adentro del job `ios` hasta el 2026-07-29 y salio de ahi por una razon
+  # medida, no por prolijidad: el job `ios` bootea un simulador en su segundo
+  # paso, y arrancar un simulador en un runner de 3 nucleos es una tormenta de
+  # spawns que le cobra ~1.5s de trabajo ajeno por cada segundo que se ahorra.
+  #
+  # Lo mas facil de ver es el `Configuring done (Ns)` que imprime el propio CMake,
+  # misma imagen de runner (macos-26-arm64 20260720.0258.1) a los dos lados:
+  #
+  #   sin simulador booteando al lado (3 corridas)    5.8s   7.9s   9.5s
+  #   con simulador booteando al lado (8 corridas)  119.4s ...  222.6s
+  #
+  # El paso entero: 328s dentro del job `ios`, ~117s sin el simulador al lado.
+  #
+  # Mover el boot NO lo arregla — se probo y esta medido en el PR #88: puesto al
+  # lado del XCFramework, ESE paso se fue de 105s a 359s; puesto en serie al
+  # final, el harness se fue de 127s a 325s porque un simulador recien booteado
+  # todavia esta acomodandose cuando `bootstatus` ya volvio. La tormenta cae sobre
+  # lo que tenga al lado; la unica salida es no tener nada al lado.
+  #
+  # Por eso este job existe: aca la suite corre en un runner limpio Y sale del
+  # camino critico, mientras el job `ios` conserva lo que le conviene — bootear
+  # primero, para que el simulador llegue asentado al harness.
+  #
+  # Lo que este job afirma y ningun otro puede: los tests bajo Apple clang +
+  # libc++. Los jobs de ubuntu corren los mismos 779 con g++ + libstdc++, y el
+  # gate de warnings de ios/CMakeLists.txt cubre los diagnosticos del motor pero
+  # NO ejecuta nada ni ve los ~78 archivos de test, usb/ ni PlatformAndroid.cpp.
+  #
+  # No lleva el guardrail de portabilidad (WA-0.4): ya corre en `cpp-tests`, sobre
+  # ubuntu, y un include prohibido es igual de rojo dicho por Linux.
+  cpp-tests-macos:
+    runs-on: macos-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      # La imagen normalmente trae los dos; se instala solo lo que falte, para que
+      # un cambio de imagen no rompa el job y una corrida normal cueste ~0s.
+      # Necesita un cmake de sistema: el "cmake;3.22.1" del SDK de Android no esta
+      # en PATH y es para AGP.
+      - name: Install C++ build tools
+        run: |
+          for tool in cmake ninja; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "$tool already present: $(command -v "$tool")"
+            else
+              echo "Installing $tool ..."
+              brew install "$tool"
+            fi
+          done
+
+      - name: Build & run C++ test suite (Apple clang) — WA-T.1
+        run: bash scripts/run-cpp-tests.sh
+
   # WA-0.3 — macOS / iOS job.
   #
-  # Two things no other job can catch:
-  #   1. The C++ suite under Apple clang (WA-T.1) — the ubuntu jobs use g++ and
-  #      the Windows wrapper uses MinGW, so clang-apple diagnostics only surface
-  #      here. This is the early-warning system for the iOS C++ build (WA-2.1).
-  #   2. That commonMain still compiles for Kotlin/Native. commonMain is only
-  #      ever type-checked against the JVM classpath elsewhere, which is exactly
-  #      how it silently accumulated 34 JVM-only references before WA-0.2
+  # Lo que ningun otro job puede cazar:
+  #   1. Que commonMain siga compilando para Kotlin/Native. En todos los demas
+  #      lados commonMain se type-checkea solo contra el classpath de la JVM, que
+  #      es exactamente como acumulo 34 referencias JVM-only antes de WA-0.2
   #      (String.format, System.currentTimeMillis, @Volatile, java.* reflection).
-  #      Without this job that debt comes straight back.
+  #      Sin este job esa deuda vuelve derecho.
+  #   2. Que el motor cross-compile para iOS (build-ios.sh), que el XCFramework
+  #      TRAIGA el motor adentro, y que la app del harness ARRANQUE sin morirse.
+  #
+  # La suite C++ bajo Apple clang salio de aca al job `cpp-tests-macos`; el porque
+  # esta en el comentario de ese job y no es una mudanza cosmetica.
   #
   # Must stay on an arm64 runner: iosSimulatorArm64 tests cannot execute on x86.
   ios:
@@ -188,12 +247,10 @@ jobs:
           xcrun simctl boot "$UDID"
           echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
 
-      # C++ first: it needs no JDK/SDK/Gradle, so a portability break fails
-      # before we pay for the toolchain setup below.
-      # The runner image normally ships both; install only what is missing so a
-      # future image change cannot break this job, and a normal run costs ~0s.
-      # Note this needs a system cmake — the "cmake;3.22.1" installed into the
-      # Android SDK further down is not on PATH and is for AGP, not for this.
+      # Sigue haciendo falta para build-ios.sh, que es el primer paso pesado del
+      # job ahora que la suite se mudo. La imagen normalmente trae los dos; se
+      # instala solo lo que falte. Necesita un cmake de sistema: el
+      # "cmake;3.22.1" del SDK de Android no esta en PATH y es para AGP.
       - name: Install C++ build tools
         run: |
           for tool in cmake ninja; do
@@ -204,9 +261,6 @@ jobs:
               brew install "$tool"
             fi
           done
-
-      - name: Build & run C++ test suite (Apple clang) — WA-T.1
-        run: bash scripts/run-cpp-tests.sh
 
       # WA-2.1 / WA-2.4 — cross-compiles the WHOLE engine (core, nodes, api,
       # backends including CoreAudioBackend.mm, plus the portable DSP) for
