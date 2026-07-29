@@ -79,13 +79,13 @@ esac
 # --- infraestructura -------------------------------------------------------
 
 START_EPOCH="$(date +%s)"
-STEP_FILE="$(mktemp -t wma-gate)"
+STEP_FILE="$(mktemp "${TMPDIR:-/tmp}/wma-gate.XXXXXX")"
 HEARTBEAT_PID=""
 SIM_UDID=""
 FAILED_STEP=""
 
 # Un archivo por gate con "label<TAB>segundos<TAB>rc".
-RESULTS="$(mktemp -t wma-gate-results)"
+RESULTS="$(mktemp "${TMPDIR:-/tmp}/wma-gate-results.XXXXXX")"
 
 cleanup() {
     [ -n "$HEARTBEAT_PID" ] && kill "$HEARTBEAT_PID" 2>/dev/null

@@ -16,7 +16,12 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="$(mktemp -d -t wma-attest-test)"
+# `mktemp -d -t NOMBRE` es un macOS-ismo: GNU coreutils exige un template con
+# al menos tres X y falla. Este script corre en ubuntu, asi que va la forma que
+# entienden los dos. Y se verifica: sin esta guarda, un $WORK vacio manda todo
+# a la raiz y el test reporta 14 fallos por el motivo equivocado.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/wma-attest-test.XXXXXX")"
+[ -n "$WORK" ] && [ -d "$WORK" ] || { echo "no se pudo crear el directorio de trabajo" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT
 
 PASS=0
