@@ -3619,7 +3619,61 @@ billing agotado— tiene que existir una salida manual.
 `changes` es el sexto y no es decorativo: si fallara y no estuviera en la lista, los otros
 cinco quedarían `skipped` y el PR sería mergeable **sin ningún gate**.
 
-### Dónde retomar (2026-07-29)
+### Dónde retomar (2026-07-29, sesión local-first CI)
+
+**No hay nada a medio hacer.** `master` = **`637eb4e`**, árbol limpio, **cero PRs abiertos**,
+**1.14.0 publicada** (release no-draft; el paso "Publish to GitHub Packages" cerró en
+`success`). La **protección de rama tiene 7 checks y `strict` está ahora en `false`** — se
+apagó a propósito (ver abajo); **no reactivar sin entender que rompe el camino rápido del gate
+local**.
+
+**Lo que cerró esta sesión — el CI pasó a local-first, y el release lo estrena:**
+
+| PR | qué |
+|---|---|
+| **#94** | El gate corre en la máquina (`scripts/gate.sh`) y deja `.github/local-gate.json`; el CI **verifica la prueba dentro de cada job** (ios/build/cpp-tests-macos) y saltea el trabajo si el digest matchea. En el PR: **ios 1048→10 s, build 368→5 s, cpp-tests-macos 165→8 s** |
+| **#96** | El `publish` de release-please **espera al CI verde del commit** antes de publicar (`scripts/wait-for-ci.sh`, fail-closed). Cierra que hasta acá publish y CI corrían en paralelo sin depender |
+| **#95** | **1.14.0** — estrenó el candado (el publish **esperó 18 min** al CI, medido) y llevó el `fix(usb)` de la carrera de `RoundTripMeasurer` (#91) que había quedado varado al cerrarse #92 |
+| **#97** | Guardia contra la deriva del filtro de prosa (`gate-digest.py --check-sync`): el `PROSE` del digest y el `grep` del job `changes` no pueden divergir en silencio |
+
+El diseño con los porqués y lo descartado está en **`docs/ci/local_first.md` §7**. La atestación
+vale **sólo en `pull_request`**; en `push: master` el CI corre **siempre** completo, sin honrar
+nada — por eso `strict` sobra y el commit tageado queda verificado con el mismo toolchain que
+construye el artefacto.
+
+> [!CAUTION]
+> **Tres cosas de esta sesión que conviene leer antes de tocar la maquinaria del gate.**
+>
+> 1. **Una guardia que no se probó contra el modo de falla real cubre lo que imaginaste, no lo
+>    que pasa.** `gate.sh` envolvía sus llamadas a `simctl` con timeout, pero `build-harness.sh`
+>    hace las suyas por dentro: se colgó **29 min en `simctl launch` con el timeout puesto y sin
+>    efecto**. La cura fue timeout **por paso** + reset de CoreSimulator + un reintento.
+> 2. **Un mutante que no cambia el binario no prueba nada sobre staleness.** Perdí dos
+>    mediciones mutando un comentario y un `-D` sin usar: el `.a` salió byte-idéntico. Lo que da
+>    la garantía no son los inputs declarados de Gradle sino que el `.a` es determinista
+>    (`libtool -D`) y que `cinterop` declara su **contenido** como input.
+> 3. **Los scripts se prueban, no se leen.** Tres bugs propios salieron sólo corriéndolos: un
+>    `mktemp -t` (macOS-ism) que explotó en ubuntu, una variable seteada dentro de un subshell,
+>    y un parser que mentía "todavía corriendo" sobre un CI ya verde. Y `test-attestation.sh`
+>    afirma el **motivo** del rechazo, no sólo el rechazo — cazó 3 casos que pasaban por la
+>    razón equivocada.
+
+> [!IMPORTANT]
+> **Lo que queda, en orden de impacto real:**
+>
+> 1. **Soak del gate.** El esquema aterrizó hoy y no tiene rodaje. Los próximos PRs son la
+>    evidencia de si el digest da algún falso verde en uso real. Es vigilar, no construir. El
+>    esquema no tiene deuda conocida.
+> 2. **G2 — device iOS.** Necesita un iPhone. Sin cambios.
+> 3. **Smoke: lo que falta necesita USB físico o poder escuchar.** Sin cambios.
+> 4. **NoisyPad local-first** se maneja en sus propias sesiones (GATE 0 medido: la tesis de acá
+>    NO mapea igual —no hay job macOS caro en el camino crítico ni autoridad Linux
+>    irreemplazable—; se eligió slice mínimo + cobertura por suite completa). No es trabajo de
+>    este repo.
+
+---
+
+### Dónde retomar (2026-07-29, sesión anterior — historia)
 
 **No hay nada a medio hacer.** `master` = **`1bd24e6`**, árbol limpio, **cero PRs abiertos**,
 **1.13.1 publicada**. El CI de `master` está **verde** (los cinco jobs, `cpp-tests-tsan`
