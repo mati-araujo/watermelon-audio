@@ -123,6 +123,10 @@ private:
     std::atomic<int>   mErrorCode{static_cast<int>(Error::NONE)};
     std::atomic<float> mProgressPct{0.0f};
     std::atomic<int>   mCurrentBurst{0};
+    // El tercero del trío de progreso, y el que faltaba. `poll()` publica
+    // "ráfaga N de M" mientras la medición corre, así que M se lee SIN el guard
+    // de fase — y `mResult` no es atómico. Ver la nota de `mResult` abajo.
+    std::atomic<int>   mTotalBursts{0};
     std::atomic<bool>  mWorkerStop{false};
     std::atomic<bool>  mStreamLost{false};
 
@@ -152,7 +156,13 @@ private:
     std::vector<float> mCapture;      // absolute-indexed mono input capture
     std::vector<int64_t> mEmitSample; // per-burst emit sample offset
 
-    Result mResult;                   // start()-seeded; stats published by the worker
+    // start()-seeded; stats publicados por el worker con `mResult = res` ANTES del
+    // `setPhase()`, que es un store release. O sea que sólo es legal leerlo detrás
+    // de un load acquire de la fase que ya dio terminal — que es lo que hace
+    // `poll()`. No es atómico y no puede leerse fuera de ese guard: el worker
+    // reescribe la estructura ENTERA, incluidos los campos que no cambió.
+    Result mResult;
+
     std::thread mWorker;
 };
 
