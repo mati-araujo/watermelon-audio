@@ -65,6 +65,35 @@ endif()
 
 include(${WMA_CPP_ROOT}/thirdparty/tinysoundfont.cmake)
 
+# ----------------------------------------------------------------------------
+# Gate de warnings.
+#
+# Colocado DESPUES de tinysoundfont —para no atar al third-party a nuestras
+# reglas— y ANTES de los add_subdirectory y del target de abajo, para que herede
+# a todo lo propio. Misma politica, mismas banderas y mismo `-Wno-unused-parameter`
+# que tests/CMakeLists.txt, con la misma razon: este motor tiene muchos stubs de
+# interfaz que ignoran parametros legitimamente, y marcarlos es ruido.
+#
+# Lo que compra, y es la unica razon por la que esta: los cuatro archivos que el
+# build de iOS compila y la suite de host NO —CoreAudioBackend.mm, PlatformApple.cpp,
+# PlatformBackends.cpp y el InputNode real (la suite le pone stubs)— no pasaban por
+# ningun gate de warnings bajo ningun compilador. El CMakeLists que maneja AGP
+# tampoco tiene banderas. Era el codigo mas nuevo del repo y el unico Objective-C++,
+# sin diagnostico.
+#
+# Lo que NO compra: no reemplaza a la suite de host de macOS. Esa compila 84
+# archivos que este build nunca ve (los ~78 de test, usb/, PlatformAndroid.cpp) y,
+# sobre todo, EJECUTA los 779 tests bajo Apple clang + libc++; un archivo estatico
+# cross-compilado no ejecuta nada. Son complementarios, no sustitutos.
+#
+# Verificado al introducirlo: los dos slices, en Debug y en Release, compilan con
+# CERO warnings — o sea que el gate entra sin deuda que pagar.
+option(WMA_IOS_WERROR "Treat iOS build warnings as errors" ON)
+add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+if(WMA_IOS_WERROR)
+    add_compile_options(-Werror)
+endif()
+
 add_subdirectory(${WMA_CPP_ROOT}/dsp     ${CMAKE_BINARY_DIR}/dsp)
 add_subdirectory(${WMA_CPP_ROOT}/effects ${CMAKE_BINARY_DIR}/effects)
 add_subdirectory(${WMA_CPP_ROOT}/engines ${CMAKE_BINARY_DIR}/engines)

@@ -258,7 +258,8 @@ bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCo
 
     // Handle mono input by duplicating to stereo
     // mTempBuffer is pre-allocated in prepare() to maxBlockSize * 2.
-    size_t requiredSize = static_cast<size_t>(numFrames * 2);
+    // [[maybe_unused]]: sólo la lee el assert de abajo, que desaparece con NDEBUG.
+    [[maybe_unused]] const size_t requiredSize = static_cast<size_t>(numFrames * 2);
     assert(mTempBuffer.size() >= requiredSize &&
            "Temp buffer too small — prepare() should allocate maxBlockSize * 2");
 
