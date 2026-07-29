@@ -1,25 +1,13 @@
 name: CI
 
 on:
+  # NO usar `paths-ignore` acá. Lo tuvo entre el 2026-07-28 y el 2026-07-29, y es
+  # incompatible con marcar estos checks como *required*: un workflow salteado por
+  # filtro de paths NUNCA reporta, el check queda `pending` para siempre y el PR
+  # no se puede mergear jamás. El ahorro para PRs de prosa ahora lo da el job
+  # `changes` de abajo, que sí reporta.
   pull_request:
     branches: [master]
-    # Un PR que SÓLO toca prosa no compila nada distinto, y hasta acá corría los
-    # cinco jobs igual — incluidos ~20 min de macOS, que cuesta 10x. De los 20
-    # commits previos a este cambio, NUEVE eran `docs(kmp):` o `chore: release`.
-    # El caso extremo fue el PR #75: un archivo, `CHANGELOG.md`, cinco jobs, y
-    # encima flakeó el de iOS.
-    #
-    # `paths-ignore` saltea sólo si TODOS los archivos del PR machean, así que un
-    # PR que mezcla código y docs sigue corriendo entero. Es lo que se quiere.
-    #
-    # OJO SI ALGÚN DÍA SE MARCAN ESTOS CHECKS COMO *REQUIRED*: un job salteado
-    # queda `pending` para siempre y bloquea el merge. Ahí hay que cambiar a
-    # `dorny/paths-filter` con un job "dummy" que reporte pass, no a esto.
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.gitignore'
-      - 'LICENSE'
 
   # Correr en master NO es redundante con el PR, y arregla dos cosas distintas.
   #
@@ -42,11 +30,6 @@ on:
   # nadie (corre despues del merge) y compra las dos cosas de arriba.
   push:
     branches: [master]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.gitignore'
-      - 'LICENSE'
 
   workflow_dispatch:
 
@@ -55,11 +38,71 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ¿El cambio toca algo que se compile? Es el reemplazo de `paths-ignore`, y la
+  # diferencia que importa es que ESTE JOB SÍ CORRE SIEMPRE: los cinco de abajo se
+  # saltean por `if:`, y un job salteado reporta conclusión `skipped`, que la
+  # protección de rama acepta. Un workflow salteado por filtro de paths, en
+  # cambio, no reporta nada y deja el check colgado para siempre.
+  #
+  # El ahorro es el mismo que antes —un PR de prosa no gasta un minuto de macOS—
+  # a cambio de un job de ubuntu de ~15 s.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: filter
+        name: ¿Hay archivos que no sean prosa?
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+          fi
+
+          # Ante cualquier duda sobre el rango —primer push a una rama, historia
+          # incompleta, base desaparecida— se corre TODO. El default seguro es
+          # gastar de más, nunca saltear un gate.
+          if ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "base $BASE inalcanzable — se corre el gate completo"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANGED="$(git diff --name-only "$BASE" "$HEAD")"
+          echo "--- archivos cambiados ---"
+          echo "$CHANGED"
+
+          if [ -z "$CHANGED" ]; then
+            echo "sin cambios: no hay nada que compilar"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # `grep -v` acá contesta "¿hay ALGUNA línea que NO sea prosa?". Con que
+          # haya una, corre todo — igual que el `paths-ignore` de antes, que sólo
+          # salteaba si TODOS los archivos macheaban.
+          if printf '%s\n' "$CHANGED" | grep -qvE '(\.md$|^docs/|^\.gitignore$|^LICENSE$)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sólo prosa: se saltean los cinco jobs de build"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Fast host C++ unit tests (dsp + effects + looper + usb) via googletest.
   # No Android SDK / NDK / device needed — pure x86_64. Single configure +
   # build + ctest pass driven by scripts/run-cpp-tests.sh.
   cpp-tests:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
 
@@ -80,6 +123,8 @@ jobs:
   # teardown path — the highest-risk code as the driver plan gains new logic.
   cpp-tests-asan:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
       - name: Install build tools
@@ -95,6 +140,8 @@ jobs:
   # handoff are the #1 candidates for latent data races.
   cpp-tests-tsan:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
       - name: Install build tools
@@ -120,6 +167,8 @@ jobs:
   # Must stay on an arm64 runner: iosSimulatorArm64 tests cannot execute on x86.
   ios:
     runs-on: macos-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v7
@@ -278,6 +327,8 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
 
     steps:
       - uses: actions/checkout@v7
