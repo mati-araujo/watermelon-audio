@@ -83,7 +83,7 @@ bool RoundTripMeasurer::start(const StartParams& params) {
     mCalibPhase = 0.0;
 
     mResult = Result{};
-    mResult.totalBursts = burstCount;
+    mResult.totalBursts = burstCount;   // para el Snapshot completo, detrás del guard
     mResult.sampleRate = sr;
     mResult.profile = params.profile;
     mResult.jitterBudgetMs = params.jitterBudgetMs;
@@ -91,6 +91,7 @@ bool RoundTripMeasurer::start(const StartParams& params) {
     mErrorCode.store(static_cast<int>(Error::NONE), std::memory_order_relaxed);
     mProgressPct.store(0.0f, std::memory_order_relaxed);
     mCurrentBurst.store(0, std::memory_order_relaxed);
+    mTotalBursts.store(burstCount, std::memory_order_relaxed);  // el que poll() lee sin guard
     mStreamLost.store(false, std::memory_order_relaxed);
     mSwOutSum.store(0.0f, std::memory_order_relaxed);
     mSwInSum.store(0.0f, std::memory_order_relaxed);
@@ -126,7 +127,11 @@ RoundTripMeasurer::Snapshot RoundTripMeasurer::poll() const {
     s.phase = phase();  // acquire
     s.progressPct = mProgressPct.load(std::memory_order_relaxed);
     s.currentBurst = mCurrentBurst.load(std::memory_order_relaxed);
-    s.totalBursts = mResult.totalBursts;
+    // Del atómico, NO de mResult: este campo se lee mientras la medición corre,
+    // o sea fuera del guard de fase de abajo, y el worker reescribe la estructura
+    // entera en runAnalysis(). Que reescriba `totalBursts` con el MISMO valor no
+    // salva nada: sigue siendo una carrera, y el TSan del CI la reportó.
+    s.totalBursts = mTotalBursts.load(std::memory_order_relaxed);
     if (s.phase == Phase::COMPLETE || s.phase == Phase::ERROR) {
         s.result = mResult;  // published-before-release by the worker (or start())
         // Single source of truth for the terminal error: the atomic. mResult.error
