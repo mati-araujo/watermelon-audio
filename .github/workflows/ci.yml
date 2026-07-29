@@ -271,51 +271,6 @@ jobs:
       - name: Run commonTest + cinterop smoke on iOS simulator — WA-T.3
         run: ./gradlew :audio:iosSimulatorArm64Test
 
-      # EL BOOT VA ACA, Y NO AL PRINCIPIO DEL JOB. Entre el 2026-07-27 y el
-      # 2026-07-29 se disparaba como segundo paso, con el argumento de que sus
-      # ~2m45s "no dependen de nada" y salian gratis en paralelo. No salian
-      # gratis: el runner de macOS tiene 3 nucleos y el arranque de un simulador
-      # es una tormenta de spawns que el resto del job paga.
-      #
-      # Medido sobre el `Configuring done (Ns)` que imprime el propio CMake en el
-      # paso "Build & run C++ test suite (Apple clang)", misma imagen de runner
-      # (macos-26-arm64 20260720.0258.1) a los dos lados:
-      #
-      #   boot al final (3 corridas, 07-23/07-25/07-27)   5.8s   7.9s   9.5s
-      #   boot al principio (8 corridas, 07-28/07-29)     119.4s ... 222.6s
-      #
-      # No se solapan ni de cerca: el minimo de la serie contaminada es 12x el
-      # maximo de la limpia. El mismo paso, entero, paso de 112s a 328s — y el
-      # boot que se queria esconder cuesta ~164s. Era plata perdida.
-      #
-      # Va DESPUES del test de simulador a proposito: `iosSimulatorArm64Test`
-      # maneja su propio device, y hoy lo unico verificado es que convive con uno
-      # YA booteado ("Device already booted, nothing to do." en el log). Un device
-      # a medio bootear debajo de ese paso es una variable que nadie midio.
-      #
-      # Lo que queda para solapar es el XCFramework (~105s) mas su verificacion,
-      # asi que el paso de espera de abajo sigue costando algo — bastante menos
-      # que los ~157s que devuelve.
-      - name: Boot the simulator — WA-5.5
-        run: |
-          # `simctl boot` sobre un device YA booteado devuelve error, no exito, y
-          # correr despues de `iosSimulatorArm64Test` —que administra su propio
-          # device— hace ese caso posible. Se lo distingue del resto en vez de
-          # taparlo con un `|| true`, que se tragaria tambien un boot que fallo
-          # de verdad.
-          if xcrun simctl boot "$SIM_UDID"; then
-            echo "boot disparado sobre $SIM_UDID"
-            exit 0
-          fi
-          STATE="$(xcrun simctl list devices -j | python3 -c \
-            "import json,sys;d=json.load(sys.stdin)['devices'];print(next((x['state'] for v in d.values() for x in v if x['udid']=='$SIM_UDID'),'DESCONOCIDO'))")"
-          if [ "$STATE" = "Booted" ]; then
-            echo "ya estaba booteado — lo dejo iosSimulatorArm64Test, nada que hacer"
-          else
-            echo "simctl boot fallo y el device quedo en estado: $STATE" >&2
-            exit 1
-          fi
-
       # WA-4.1. Linkea de verdad ambos slices y los empaqueta, que es lo unico que
       # prueba que el archivo estatico embebido en el klib resuelve al linkear un
       # binario — el link check de build-ios.sh valida el archivo, no el framework.
@@ -348,16 +303,61 @@ jobs:
             fi
           done
 
-      # Aca solo se ESPERA al simulador; el boot se disparo despues del test de
-      # simulador (paso "Boot the simulator"), asi que se solapa con el
-      # XCFramework en vez de sumarse entero.
+      # EL BOOT VA ACA, SOLO, Y SIN SOLAPARSE CON NADA. Es contraintuitivo, asi
+      # que va medido.
+      #
+      # Entre el 2026-07-27 y el 2026-07-29 se disparaba como segundo paso del
+      # job, con el argumento de que sus ~164s "no dependen de nada" y salen
+      # gratis en paralelo. El runner de macOS tiene 3 nucleos y arrancar un
+      # simulador es una tormenta de spawns: no sale gratis, se la cobra al paso
+      # de al lado. Y se la cobra CON INTERES.
+      #
+      # Solapado contra el configure de CMake, medido sobre el `Configuring done
+      # (Ns)` que imprime el propio CMake, misma imagen de runner
+      # (macos-26-arm64 20260720.0258.1) a los dos lados:
+      #
+      #   boot al final (3 corridas, 07-23/07-25/07-27)   5.8s   7.9s   9.5s
+      #   boot al principio (8 corridas, 07-28/07-29)     119.4s ... 222.6s
+      #
+      # El paso entero paso de 112s a 328s: +216s para esconder 164s.
+      #
+      # Mover el boot mas abajo NO alcanza — se comprobo, y el resultado es el
+      # motivo de este comentario. Puesto a solaparse con el XCFramework, ESE
+      # paso paso de 105s a 359s: +254s para esconder los mismos 164s. La
+      # contencion no se arregla cambiandola de vecino; se arregla no teniendo
+      # vecino.
+      #
+      # Por eso boot y espera son UN paso, al final, en serie. Cuesta los 164s
+      # enteros y sigue siendo la opcion mas barata de las tres medidas.
+      #
+      # Lo que NO se movio: el paso que resuelve el UDID sigue siendo el segundo
+      # del job, asi que si no hay ningun iPhone disponible el job falla ahi y no
+      # veinte minutos despues. Resolver el UDID no cuesta CPU.
       #
       # El chequeo de arranque de build-harness.sh se saltea con aviso si no hay
       # simulador, y un gate que se saltea siempre no es un gate: es lo UNICO
       # que agarra un Info.plist incompleto —Compose aborta el proceso desde
       # PlistSanityCheck—, asi que la espera es obligatoria y sin `|| true`.
-      - name: Wait for the simulator to finish booting — WA-5.5
-        run: xcrun simctl bootstatus "$SIM_UDID" -b
+      - name: Boot the simulator and wait for it — WA-5.5
+        run: |
+          # `simctl boot` sobre un device YA booteado devuelve error, no exito
+          # (exit 149, "Unable to boot device in current state: Booted"), y
+          # `iosSimulatorArm64Test` administra su propio device mas arriba. Se
+          # distingue ese caso leyendo el estado, en vez de taparlo con un
+          # `|| true` que se tragaria tambien un boot roto de verdad.
+          if xcrun simctl boot "$SIM_UDID"; then
+            echo "boot disparado sobre $SIM_UDID"
+          else
+            STATE="$(xcrun simctl list devices -j | python3 -c \
+              "import json,sys;d=json.load(sys.stdin)['devices'];print(next((x['state'] for v in d.values() for x in v if x['udid']=='$SIM_UDID'),'DESCONOCIDO'))")"
+            if [ "$STATE" = "Booted" ]; then
+              echo "ya estaba booteado — nada que hacer"
+            else
+              echo "simctl boot fallo y el device quedo en estado: $STATE" >&2
+              exit 1
+            fi
+          fi
+          xcrun simctl bootstatus "$SIM_UDID" -b
 
       # WA-5.5, mitad iOS. La mitad Android se mudo al job `build` de ubuntu:
       # arrastraba el build NDK de :audio para las 4 ABIs y aca era un build
