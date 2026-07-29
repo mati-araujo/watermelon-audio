@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.13.2...v1.14.0) (2026-07-29)
+
+
+### Features
+
+* **ci:** el gate corre local y el CI verifica la prueba en vez de repetir el trabajo ([#94](https://github.com/mati-araujo/watermelon-audio/issues/94)) ([b4cd09d](https://github.com/mati-araujo/watermelon-audio/commit/b4cd09de21e693bb8b6c673601b82642ffba16c5))
+* **ci:** el publish espera al CI verde del commit antes de publicar ([#96](https://github.com/mati-araujo/watermelon-audio/issues/96)) ([f802098](https://github.com/mati-araujo/watermelon-audio/commit/f802098e75e4e0b0a1292e11c6821d409e0a14a8))
+
+
+### Bug Fixes
+
+* **usb:** carrera en RoundTripMeasurer::poll() — totalBursts se leia fuera del guard de fase ([#91](https://github.com/mati-araujo/watermelon-audio/issues/91)) ([5ceb247](https://github.com/mati-araujo/watermelon-audio/commit/5ceb2479078d4710874f077bf0db669ec537b266))
+
+
+### Performance Improvements
+
+* **ci:** la suite C++ de Apple clang sale a un job propio — por latencia de feedback, no por camino crítico ([#90](https://github.com/mati-araujo/watermelon-audio/issues/90)) ([6bd3d4e](https://github.com/mati-araujo/watermelon-audio/commit/6bd3d4e26b8222dc4ff16ea27b54e5def596370d))
+
 ## [1.13.2](https://github.com/mati-araujo/watermelon-audio/compare/v1.13.1...v1.13.2) (2026-07-29)
 
 
