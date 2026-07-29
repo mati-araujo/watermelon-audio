@@ -137,13 +137,50 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 
 ## Comandos
 
+### El gate — un solo comando antes de cada PR
+
 ```bash
-./gradlew :audio:assembleDebug                                     # Build debug (4 ABIs)
-./gradlew :audio:assembleRelease                                   # Build release
+bash scripts/gate.sh          # corre TODO lo que el CI iba a correr en los jobs
+                              # `ios`, `build` y `cpp-tests-macos`, y si da verde
+                              # deja la atestacion en .github/local-gate.json
+```
+
+El CI verifica esa atestacion y **saltea esos tres jobs en el PR** en vez de repetir
+el trabajo: ~6 min local contra ~17,5 min de camino critico. En `push: master` el CI
+paga su costo entero **siempre**, sin excepcion. Diseño y numeros: `docs/ci/local_first.md`.
+
+> 🔴 **`.github/local-gate.json` lo escribe `gate.sh` y NADIE MAS.** Escribirlo o
+> editarlo a mano —incluido "regenerarlo" para acallar un CI rojo— no es un atajo:
+> es fabricar la prueba de que corrio algo que no corrio. **Esto aplica igual a los
+> agentes.** Si el gate no pasa, se arregla el codigo. El unico costo de no tener
+> atestacion es que el CI corre entero, que es exactamente lo que pasaba antes.
+
+```bash
+bash scripts/gate.sh --only ios          # un gate solo, para iterar. NO atesta
+bash scripts/gate.sh --with-sanitizers   # + ASan/UBSan local (opt-in, no se atesta)
+bash scripts/test-attestation.sh         # el verificador contra arboles mutados (~10 s)
+```
+
+**Lo que `gate.sh` NO corre, a proposito:** los tres jobs de ubuntu (`cpp-tests`,
+`cpp-tests-asan`, `cpp-tests-tsan`). Nunca se atestan y siempre corren en el CI.
+Suman 695 s de runner, van en paralelo y jamas estan en el camino critico, asi que
+correrlos aca no ahorra nada — y el TSan local tarda **865 s contra 295 s** del CI y
+encima es **mas debil**: una carrera sobrevivio 15 corridas locales y otra dio 0/60,
+y las dos fueron rojas a la primera alla. **El TSan de Linux es la unica autoridad
+sobre carreras.**
+
+### Los comandos sueltos
+
+Siguen haciendo falta para iterar, y varios cargan advertencias medidas que costaron
+sesiones enteras. Los marcados **[gate]** ya los corre `scripts/gate.sh`.
+
+```bash
+./gradlew :audio:assembleDebug                                     # [gate] Build debug (4 ABIs)
+./gradlew :audio:assembleRelease                                   # [gate] Build release
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # Suite C++ de host (774 tests, googletest)
+bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (774 tests, googletest)
                                            # Kotlin: 112 iOS sim / 69 JVM
 
 # Los mismos 774 bajo sanitizers. NO son opcionales: el CI tiene un job para
@@ -163,22 +200,25 @@ TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
 # El TSan local (libc++) es MAS DEBIL que el del CI (libstdc++): una carrera
 # real sobrevivio 15 corridas aca y fue roja a la primera alla. Para carreras
 # el CI es la autoridad.
-bash scripts/check-cpp-portability.sh      # Guardrail WA-0.4 (jni.h / android/)
-bash scripts/build-harness.sh              # :harness: Android + framework iOS +
+bash scripts/check-cpp-portability.sh      # [gate] Guardrail WA-0.4 (jni.h / android/)
+bash scripts/build-harness.sh              # [gate] :harness: Android + framework iOS +
                                            # símbolos + shell de Xcode + ARRANQUE
                                            # de la app (lo único que agarra un
                                            # Info.plist incompleto: Compose aborta
                                            # el proceso desde PlistSanityCheck)
-bash scripts/check-no-ui-in-library.sh     # Guardrail WA-5.5: la UI de :harness no
+bash scripts/check-no-ui-in-library.sh     # [gate] Guardrail WA-5.5: la UI de :harness no
                                            # puede entrar al artefacto publicado.
                                            # Lo que de verdad mide es el classpath
                                            # resuelto de :audio.
-bash scripts/build-ios.sh                  # libwatermelon_audio.a — ambos slices + link check
+bash scripts/build-ios.sh                  # [gate] libwatermelon_audio.a — ambos slices + link
+                                           # check. gate.sh lo corre SUELTO y ANTES de
+                                           # Gradle, y no es redundante: ver el comentario
+                                           # en KmpNativeConventionPlugin.kt
 python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2.6).
                                            # Imprime; docs/kmp/c_api_coverage.md
                                            # se actualiza a mano con esa salida
 
-./gradlew :audio:assembleWatermelonXCFramework   # XCFramework (device + simulador)
+./gradlew :audio:assembleWatermelonXCFramework   # [gate] XCFramework (device + simulador)
 
 ./gradlew :audio:compileKotlinIosArm64     # Compilar Kotlin para iOS (por target)
 ./gradlew :audio:compileIosMainKotlinMetadata  # El source set COMPARTIDO iosMain.
@@ -186,7 +226,7 @@ python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2
                                            # lo que compila un consumidor KMP con
                                            # targets iOS. Necesita
                                            # enableCInteropCommonization.
-./gradlew :audio:iosSimulatorArm64Test     # Tests K/N en simulador (requiere Xcode
+./gradlew :audio:iosSimulatorArm64Test     # [gate] Tests K/N en simulador (requiere Xcode
                                            # con first-launch hecho, ver docs/kmp)
 
 ./gradlew :harness:assembleDebug           # APK del harness de UI (WA-5.5)
