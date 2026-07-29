@@ -188,11 +188,16 @@ independiente y con el mismo toolchain que después construye el artefacto.
 > #92 llegó a tener cero checks reportados sobre su head. Un release gateado por un workflow
 > que no reporta el 40% de las veces no es un gate.
 
-> **Hallazgo colateral, todavía abierto:** hoy el publish **no espera al CI**.
-> `release-please.yml` corre `on: push: master` y su job `publish` sólo tiene
-> `needs: release-please`; `ci.yml` corre sobre el mismo push, en paralelo. Que master
-> siempre pague el CI completo hace que el commit publicado esté verificado, pero no hace
-> que el publish *espere*. Cerrarlo es trabajo aparte.
+> **Hallazgo colateral, CERRADO el 2026-07-29 (PR posterior a #94).** Hasta ahí el publish
+> **no esperaba al CI**: `release-please.yml` y `ci.yml` corrían sobre el mismo push en
+> paralelo, y un CI rojo —o un flake de red— no impedía publicar. Ahora el job `publish`
+> tiene como primer paso `scripts/wait-for-ci.sh "${{ github.sha }}"`, que bloquea hasta que
+> la corrida `push` de CI para ese commit termine en `success` y es **fail-closed**: si no
+> cierra verde a tiempo (o falla, o se cancela, o no aparece), el paso falla y el artefacto
+> no se publica. Eso convierte "el CI paga su costo entero antes de un release" de
+> coincidencia temporal en garantía. Requirió `actions: read` en los permisos del workflow
+> (un bloque `permissions:` explícito pone en `none` todo scope no listado). El camino manual
+> `publish.yml` NO espera a propósito: es el override humano de emergencia.
 
 ### 7.2 Dónde vive la prueba: `.github/local-gate.json`, commiteado
 

@@ -8,6 +8,12 @@ permissions:
   contents: write
   pull-requests: write
   packages: write
+  # Necesario para que el job `publish` pueda LEER el estado de la corrida de CI
+  # de este commit (scripts/wait-for-ci.sh). OJO: al declarar un bloque
+  # `permissions:` explicito, todo scope no listado queda en `none` — sin esta
+  # linea, `gh api .../actions/runs` devuelve 403 y la espera fallaria siempre
+  # (fail-closed: no publicaria, pero por el motivo equivocado).
+  actions: read
 
 jobs:
   release-please:
@@ -51,6 +57,22 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
+
+      # Hasta el 2026-07-29 este job corria en PARALELO con el CI sobre el mismo
+      # push, sin depender de él: "el CI paga su costo antes de un release" era
+      # una coincidencia temporal, no una garantia. Un CI rojo —o un flake de red
+      # como el handshake de CMake que se vio ese dia— no impedia publicar.
+      #
+      # Ahora el publish ESPERA a que el CI de este commit termine verde. En
+      # master el CI no honra atestaciones (evento push), asi que ese verde son
+      # los 7 jobs corridos de verdad. Fail-closed: si el CI no cierra verde a
+      # tiempo, este paso falla y el artefacto no se publica — no publicar es el
+      # default seguro, se re-dispara. `github.sha` es el commit del push, que es
+      # el que el tag apunta y sobre el que corrio el CI.
+      - name: Esperar a que el CI de este commit esté verde
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/wait-for-ci.sh "${{ github.sha }}"
 
       - name: Extract version from tag
         id: version
