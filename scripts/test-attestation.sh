@@ -112,6 +112,21 @@ make_attestation
 git -c user.email=t@t -c user.name=t add -A >/dev/null
 git -c user.email=t@t -c user.name=t commit -qm "atestacion de prueba" >/dev/null
 
+# El filtro de prosa vive en dos lugares (el PROSE de gate-digest.py y el
+# `grep -qvE` del job `changes` de ci.yml). Si divergen en la dirección
+# peligrosa, un cambio de código queda fuera del digest y el gate lo atesta sin
+# cubrirlo — el falso verde que todo esto existe para evitar. Nada estructural
+# los sincroniza, así que se chequea acá, donde ya corre la maquinaria.
+printf '\n== sincronía del filtro de prosa (ci.yml ⇄ gate-digest.py) ==\n'
+if python3 scripts/gate-digest.py --check-sync > "$WORK/sync.log" 2>&1; then
+    printf '  ok    %s\n' "$(cat "$WORK/sync.log")"
+    PASS=$(( PASS + 1 ))
+else
+    printf '  FALLO filtro de prosa divergió\n'
+    sed 's/^/        /' "$WORK/sync.log"
+    FAIL=$(( FAIL + 1 ))
+fi
+
 printf '\n== caso positivo ==\n'
 for gate in ios build cpp-tests-macos; do
     expect true "$(verify "$BASE" "$gate")" "atestacion valida, gate $gate" "$(logpath "$BASE" "$gate")"
