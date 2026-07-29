@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.3](https://github.com/mati-araujo/watermelon-audio/compare/v1.13.2...v1.13.3) (2026-07-29)
+
+
+### Bug Fixes
+
+* **usb:** carrera en RoundTripMeasurer::poll() — totalBursts se leia fuera del guard de fase ([#91](https://github.com/mati-araujo/watermelon-audio/issues/91)) ([5ceb247](https://github.com/mati-araujo/watermelon-audio/commit/5ceb2479078d4710874f077bf0db669ec537b266))
+
+
+### Performance Improvements
+
+* **ci:** la suite C++ de Apple clang sale a un job propio — por latencia de feedback, no por camino crítico ([#90](https://github.com/mati-araujo/watermelon-audio/issues/90)) ([6bd3d4e](https://github.com/mati-araujo/watermelon-audio/commit/6bd3d4e26b8222dc4ff16ea27b54e5def596370d))
+
 ## [1.13.2](https://github.com/mati-araujo/watermelon-audio/compare/v1.13.1...v1.13.2) (2026-07-29)
 
 
