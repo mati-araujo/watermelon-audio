@@ -1,0 +1,31 @@
+{
+  "_comment": "Prueba de que el gate local corrio sobre ESTE contenido. La escribe scripts/gate.sh y nadie mas; el CI la verifica con scripts/verify-attestation.sh. Editarla a mano fabrica una prueba falsa.",
+  "schema": 1,
+  "digest": "2ed7a76ab307499e5ab13d85d284228bebcb5e09597cea4cd40d6829ce2826cc",
+  "gates": {
+    "cpp-tests-macos": {
+      "status": "pass",
+      "seconds": 77
+    },
+    "ios": {
+      "status": "pass",
+      "seconds": 387
+    },
+    "build": {
+      "status": "pass",
+      "seconds": 26
+    }
+  },
+  "versions": {
+    "xcode": "26.6 (17F113)",
+    "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+    "ios_sdk": "26.5",
+    "simulator_runtime": "26.5",
+    "cmake": "4.4.1",
+    "ninja": "1.13.2",
+    "launcher_jvm": "17.0.19"
+  },
+  "total_seconds": 528,
+  "created_utc": "2026-07-29T18:48:27Z",
+  "head": "569d2618e9dedb7534755fe5861b1dd5d92786dd"
+}

@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "Las versiones de herramienta que la MAQUINA aporta y el arbol no declara.",
+    "",
+    "Sirven para UNA sola cosa: validar una atestacion local (.github/local-gate.json)",
+    "antes de que el CI acepte saltear un gate. NUNCA restringen al CI — si no hay",
+    "atestacion valida, el CI corre el gate con el toolchain que tenga, como siempre.",
+    "",
+    "Lo que NO va aca porque ya viaja en el arbol, y por lo tanto ya lo cubre el digest:",
+    "  Kotlin y AGP        -> gradle/libs.versions.toml",
+    "  Gradle              -> gradle/wrapper/gradle-wrapper.properties",
+    "  JVM del daemon      -> gradle/gradle-daemon-jvm.properties",
+    "  NDK y CMake de AGP  -> .github/workflows/ci.yml",
+    "",
+    "Bumpear este archivo cambia el digest y fuerza UNA corrida completa en CI. Eso es",
+    "el comportamiento correcto: un cambio de toolchain es una decision, no una deriva.",
+    "Un verde con Xcode 26.6 no dice nada sobre Xcode 27."
+  ],
+  "xcode": "26.6 (17F113)",
+  "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+  "ios_sdk": "26.5",
+  "simulator_runtime": "26.5",
+  "cmake": "4.4.1",
+  "ninja": "1.13.2",
+  "launcher_jvm": "17.0.19"
+}

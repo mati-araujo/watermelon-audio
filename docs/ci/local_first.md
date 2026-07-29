@@ -165,24 +165,200 @@ terminado y esperado antes de arrancar**.
 el mismo simulador cuesta proporcionalmente mucho menos. Es una de las razones por las que el
 gate local es más rápido que el job que reemplaza, y no sólo por el hardware bruto.
 
-## 7. Preguntas abiertas para la sesión de diseño
+## 7. El diseño, y por qué cada pieza es así
 
-1. **¿Qué gates se atestan y cuáles corren siempre?** La propuesta que sale de §2 y §3 es:
-   atestar `ios`, `cpp-tests-macos` y `build`; **nunca** atestar los tres de ubuntu.
-2. **¿Dónde vive la prueba?** Archivo commiteado en el PR, comentario del PR vía `gh`, trailer
-   del commit, o check-run posteado por API. Cada uno tiene un modo de falla distinto frente
-   al squash-merge, que este repo usa siempre.
-3. **¿Cuál es exactamente el conjunto de inputs de cada gate?** Sin eso el digest o cubre de
-   menos (falso verde) o de más (nunca acierta). Hay que enumerarlo, no aproximarlo.
-4. **¿Cómo se prueba que el verificador no miente?** Mutar un byte de un archivo cubierto y
-   confirmar que el CI **rechaza la atestación y corre el gate**. Sin ese experimento el
-   esquema no está verificado, sólo escrito.
-5. **¿Qué pasa antes de un release?** El usuario ya fijó el criterio: el CI paga su costo
-   entero ahí. Falta decidir el disparador (¿el PR de release-please? ¿un tag? ¿una etiqueta?)
-   y que ese camino **ignore toda atestación**.
-6. **¿Un solo `scripts/gate.sh`?** Hoy son 12 comandos que hay que recordar y correr en orden.
-   Un único entry point que corra todo, falle rápido y emita la atestación es prerequisito
-   práctico de todo lo demás.
+Las seis preguntas abiertas de la sesión de análisis se cerraron el 2026-07-29. Esto es el
+resultado, con lo que se descartó y por qué — que es la parte que no se puede reconstruir
+leyendo el código.
+
+### 7.1 El reparto: qué se atesta y qué no
+
+`ios`, `build` y `cpp-tests-macos` se atestan. Los tres de ubuntu **nunca**, por §2 y §3.
+
+Y la atestación vale **sólo en `pull_request`**. En `push: master` el CI paga su costo entero,
+siempre. Eso resuelve de un plumazo la pregunta 5 —el disparador del camino "release"— porque
+todo commit tageable **es** un commit de master, así que ya está verificado de forma
+independiente y con el mismo toolchain que después construye el artefacto.
+
+> **Lo que se descartó:** anclar la corrida completa al PR de release-please
+> (`head_ref == 'release-please--branches--master'`). Ahorraba más —~68 de 76 minutos-runner
+> por PR en vez de ~38— pero apoyaba la única corrida completa del ciclo en el eslabón más
+> débil que tiene el repo: **2 de las últimas 5 corridas de esa rama terminaron en
+> `action_required`**, esperando una aprobación manual que nadie dio, y el 2026-07-29 el PR
+> #92 llegó a tener cero checks reportados sobre su head. Un release gateado por un workflow
+> que no reporta el 40% de las veces no es un gate.
+
+> **Hallazgo colateral, todavía abierto:** hoy el publish **no espera al CI**.
+> `release-please.yml` corre `on: push: master` y su job `publish` sólo tiene
+> `needs: release-please`; `ci.yml` corre sobre el mismo push, en paralelo. Que master
+> siempre pague el CI completo hace que el commit publicado esté verificado, pero no hace
+> que el publish *espere*. Cerrarlo es trabajo aparte.
+
+### 7.2 Dónde vive la prueba: `.github/local-gate.json`, commiteado
+
+Un archivo en el árbol, dentro del push. **Lo que decide la pregunta 2 no es el squash-merge**
+—que deja de importar apenas master no honra atestaciones— sino esto:
+
+> Toda prueba que viva **fuera del contenido pusheado** corre carrera con su propio CI. Un
+> comentario de PR, un commit status o un check-run se postean sobre un SHA que ya tiene que
+> existir en el remoto: o sea *después* del push, cuando la corrida de CI ya arrancó. El
+> verificador tendría que esperar a que aparezca algo que quizás no aparece, que es
+> exactamente el modo de falla de §4.1.
+
+Contra un trailer de commit: transportar versiones de toolchain más resultado por gate lo
+vuelve ilegible, y un rebase distraído lo pierde (fail-closed, pero silencioso).
+
+El archivo se **excluye de su propio digest** (§4.4). `gate.sh` lo escribe y hace
+`git commit --amend`: el amend agrega sólo el archivo excluido, así que el digest recién
+calculado sigue siendo correcto.
+
+### 7.3 El conjunto de inputs: no se enumera
+
+La pregunta 3 decía "hay que enumerarlo, no aproximarlo". **Se resolvió no necesitando la
+enumeración.** Un solo digest sha256 sobre los **685 archivos trackeados no-prosa** — el
+complemento exacto del filtro que ya usa el job `changes`.
+
+El replanteo que lo habilita: **el digest no es una clave de caché, es una prueba de
+frescura.** No sirve para reusar resultados entre árboles distintos; sirve para probar "esto
+que corrí es exactamente lo que estás por compilar vos". Con eso, sub-cubrir —el único error
+que produce falso verde— se vuelve imposible por construcción: no hay lista que mantener ni
+archivo que olvidar. Sobre-cubrir cuesta re-correr un gate que ibas a correr igual.
+
+Los hashes salen del **índice de git** (`git ls-files -s`), no de leer el disco: es exactamente
+el contenido que el CI va a checkoutear, y no depende de que el runner tenga `sha256sum` o
+`shasum`. Implementación única en `scripts/gate-digest.py`, usada por el emisor y por el
+verificador — si hubiera dos, el día que diverjan el CI acepta una atestación que no
+corresponde y nadie se entera.
+
+**Propiedad que sale gratis:** como `gate-digest.py` y `verify-attestation.sh` están *dentro*
+de los 685, cambiar el algoritmo del digest invalida automáticamente toda atestación vieja.
+No hace falta versionar el formato a mano.
+
+### 7.4 Los pins de toolchain
+
+`.github/toolchain-pins.json`, match exacto. Sólo cubre **lo que aporta la máquina**: Xcode,
+clang, SDK de iOS, runtime del simulador, cmake, ninja y la JVM lanzadora. Kotlin, AGP, Gradle,
+la JVM del daemon y el NDK ya viajan en el árbol, así que **ya los cubre el digest**.
+
+Los pins **nunca restringen al CI**: sin atestación válida, el CI corre con el toolchain que
+tenga, como siempre. Bumpear el archivo cambia el digest y fuerza una corrida completa, que es
+el comportamiento correcto ante un cambio de toolchain.
+
+### 7.5 El verificador vive DENTRO de cada job
+
+Los jobs `ios`, `build` y `cpp-tests-macos` conservan su nombre y ganan un paso justo después
+del checkout. Si valida, los pasos siguientes se saltean por `if:` y el job termina en
+**`success`** en segundos. **Cero cambios en la protección de rama**, así que la trampa de
+§4.2 no aplica.
+
+> **Lo que se descartó:** un job `attest` separado que saltee a los tres. Ahorraba la
+> asignación del runner de macOS, pero pone la lógica fail-closed en expresiones `if:` con
+> `always()` y `needs.*.result` — y **un fallo del job verificador saltearía los tres jobs**,
+> que es un falso verde. Adentro del job, cualquier cosa inesperada hace que el gate CORRA, y
+> si el código está mal el gate lo pone rojo. El rojo lo pone el trabajo real, no el
+> verificador.
+
+El contrato de `verify-attestation.sh` es corto y no se negocia: **siempre sale 0**, y emite
+`valid=true` únicamente si todo cerró. Hay **una sola escritura** del output, hecha por un trap
+de EXIT — deliberadamente no se escribe `false` al principio y `true` al final, porque eso
+dependería de que Actions se quede con la última escritura de una misma clave, y todo el
+esquema cuelga de ese valor.
+
+### 7.6 `strict: true` se apagó
+
+Con un digest de contenido, cada movimiento de master mataba la atestación: el "Update branch"
+cambia el árbol. Mirando el ritmo real de merges de este repo —varios PRs por hora— el camino
+rápido habría servido sólo cuando master está quieto.
+
+Lo que `strict` protegía —el conflicto semántico entre dos PRs— lo caza igual el `push: master`,
+que ahora corre el CI completo siempre. Queda un reparto limpio: **PR = rápido con prueba
+local, master = verificación independiente completa**.
+
+### 7.7 El modelo de confianza, sin maquillaje
+
+Sin criptografía. La amenaza real no es un atacante: es que el archivo lo escriba algo que no
+corrió el gate —vos apurado, o una sesión de agente "resolviendo" un CI rojo regenerando el
+JSON—. **Contra eso un HMAC no sirve**: `gate.sh` necesita la clave en el entorno para firmar,
+así que cualquier cosa que pueda correr `gate.sh` puede firmar sin correrlo.
+
+Lo que sí hace el trabajo: (1) el digest caza el accidente, que es el 99% de los casos reales;
+(2) la regla escrita en `CLAUDE.md` —el archivo lo escribe sólo `gate.sh`, a mano es fraude—
+que es lo que leen los agentes; (3) `push: master` lo destapa un merge después.
+
+### 7.8 El gate local: qué corre y qué no
+
+`gate.sh` corre exactamente lo que el CI va a saltear, más los dos guardrails que cuestan
+segundos, en orden fail-fast. Los sanitizers quedan **opt-in** (`--with-sanitizers`): nunca
+están en el camino crítico, el TSan local tarda 865 s contra 295 s del CI **y es más débil**.
+
+Dos requisitos duros, los dos aprendidos midiendo:
+
+1. **`bash scripts/build-ios.sh` va suelto y ANTES de cualquier task de Gradle.** Parece
+   redundante y no lo es: los inputs declarados de `buildIosNativeLib` eran sólo el árbol de
+   C++, así que un cambio en `build-ios.sh` sin cambios en C++ dejaba la task `UP-TO-DATE` con
+   el `.a` viejo. Se agregó el script a los inputs declarados para que la garantía no dependa
+   del orden de pasos de nadie.
+2. **Higiene de simulador y timeouts sobre `simctl`.** El 2026-07-29, en esta máquina, tres
+   operaciones de `simctl` se colgaron seguidas sobre un simulador ya booteado: `bootstatus`
+   8 min, `terminate` 37 min, `install` 46 min. **Un runner del CI nunca lo sufre porque
+   arranca limpio siempre; una máquina de desarrollo acumula estado entre sesiones.** Tras
+   `simctl shutdown all` + matar el `CoreSimulatorService`, el boot entero tarda **15,8 s** —
+   contra los ~3m30s del runner.
+
+Los timeouts **no** se calibraron con medianas por paso, a propósito: un timeout es un detector
+de cuelgues, no un presupuesto de performance, y calibrarlo sobre una sola medición invita
+falsos rojos (§5). El riesgo está concentrado en `simctl` —ninja, gradle, xcodebuild y clang
+terminan o fallan—, así que van 90 s ahí, un techo global de 45 min, y un **heartbeat cada
+30 s**: lo que dolió no fue la duración, fue el silencio.
+
+> **Y hay un timeout POR PASO además del de `simctl`, que no es redundante.** La primera
+> corrida de `gate.sh` se colgó **29 minutos en `simctl launch`, con el timeout de 90 s puesto
+> y sin ningún efecto**: el wrapper sólo alcanza las llamadas que hace `gate.sh`, y
+> `build-harness.sh` hace sus propios `terminate`/`install`/`launch` por dentro. Envolver el
+> *paso* entero es lo único que cubre un `simctl` metido en otro script. El paso que se pasa
+> del techo dispara un reset de CoreSimulator y **un** reintento; si vuelve a colgarse, el gate
+> es rojo y el CI corre entero.
+>
+> La lección general: **una guardia que no se probó contra el modo de falla real cubre lo que
+> el autor imaginó, no lo que pasa.** El diseño decía "timeouts sobre simctl" y era correcto;
+> la implementación cubría la mitad, y la mitad que faltaba era exactamente donde ya había
+> fallado el día anterior.
+
+### 7.9 Cómo se probó que no miente
+
+**El experimento manual**, sobre el propio PR (los PRs del mismo repo corren `ci.yml` en la
+versión de su rama, así que no hay problema de bootstrap): un positivo y cuatro negativos
+—byte mutado, atestación borrada, digest corrompido, pin bumpeado—, y los cuatro tienen que
+terminar con los tres jobs corriendo el gate entero.
+
+**Y `scripts/test-attestation.sh`**, que es lo que sigue vivo después: arma 11 árboles mutados
+en un clon descartable y afirma que el verificador los rechaza. Vive en el job `cpp-tests` de
+ubuntu —el único que nunca se atesta— porque si viviera en un job atestable se saltearía justo
+cuando el camino rápido está activo.
+
+> **El test afirma el MOTIVO del rechazo, no sólo el rechazo**, y no es paranoia: la primera
+> versión tenía tres casos que pasaban **por el motivo equivocado** —rechazaban por digest en
+> vez de por la rama que querían probar— porque el propio harness dejaba archivos dentro del
+> árbol verificado. Un test que verifica un fail-closed puede pasar por accidente con una
+> facilidad incómoda.
+
+### 7.10 Qué NO cambió, y una predicción que salió mal
+
+Se midió si el gate local podía dar verde apoyado en trabajo viejo de Gradle (§4.5). **No hay
+hueco.** Con un mutante que cambia el binario —un símbolo exportado nuevo— el `.a` cambia de
+hash y la cascada se dispara entera: 7 de 12 tasks re-ejecutadas, `iosSimulatorArm64Test` pasa
+de 2,4 s (`UP-TO-DATE`) a **58,6 s**, y el XCFramework se reconstruye trayendo el símbolo.
+
+La predicción que salió mal fue mía: supuse que el peligro era que `scripts/build-ios.sh` no
+estuviera entre los inputs declarados. **El mecanismo que da la garantía es otro** — que el
+`.a` es determinista (`libtool -D`) y que `cinterop` declara su **contenido** como input
+(`KmpNativeConventionPlugin.kt`, el fix que ya se había hecho una vez). Dos mutantes que no
+alteran el código generado —un comentario, un `-D` sin usar— dejaron el `.a` byte a byte
+idéntico y correctamente no invalidaron nada.
+
+**Un comentario no es un mutante.** Si el mutante no cambia el binario, el experimento no
+prueba nada sobre staleness: prueba que el pipeline es correcto respecto del contenido, que es
+otra cosa.
 
 ---
 

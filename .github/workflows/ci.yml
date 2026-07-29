@@ -112,6 +112,18 @@ jobs:
       - name: Portability guardrail (WA-0.4)
         run: bash scripts/check-cpp-portability.sh
 
+      # El verificador de atestaciones, contra arboles mutados. Corre ACA —en el
+      # unico job que nunca se atesta— por dos razones: no necesita toolchain
+      # (git y python3 y nada mas, ~10 s), y si viviera en un job atestable se
+      # saltearia justo cuando la atestacion es valida, o sea siempre que el
+      # camino rapido esta activo.
+      #
+      # Lo que cubre no lo cubre nada mas: que un refactor futuro convierta
+      # verify-attestation.sh en un pasa-todo. El experimento manual de #94
+      # probo el cableado UNA VEZ; esto es lo que sigue vivo despues.
+      - name: El verificador de atestaciones no da falsos verdes
+        run: bash scripts/test-attestation.sh
+
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build cmake g++
 
@@ -191,11 +203,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # ¿Ya corrió el gate local sobre este contenido exacto? Si sí, los
+      # pasos de abajo se saltean y este job termina en verde en segundos.
+      # Ante CUALQUIER duda el script emite valid=false y el gate corre
+      # entero: es un camino rápido, no una excepción. Ver
+      # docs/ci/local_first.md y scripts/verify-attestation.sh.
+      - id: attest
+        name: Verificar la atestación local
+        run: bash scripts/verify-attestation.sh cpp-tests-macos
+
       # La imagen normalmente trae los dos; se instala solo lo que falte, para que
       # un cambio de imagen no rompa el job y una corrida normal cueste ~0s.
       # Necesita un cmake de sistema: el "cmake;3.22.1" del SDK de Android no esta
       # en PATH y es para AGP.
       - name: Install C++ build tools
+        if: steps.attest.outputs.valid != 'true'
         run: |
           for tool in cmake ninja; do
             if command -v "$tool" >/dev/null 2>&1; then
@@ -207,6 +229,7 @@ jobs:
           done
 
       - name: Build & run C++ test suite (Apple clang) — WA-T.1
+        if: steps.attest.outputs.valid != 'true'
         run: bash scripts/run-cpp-tests.sh
 
   # WA-0.3 — macOS / iOS job.
@@ -232,6 +255,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # ¿Ya corrió el gate local sobre este contenido exacto? Si sí, los
+      # pasos de abajo se saltean y este job termina en verde en segundos.
+      # Ante CUALQUIER duda el script emite valid=false y el gate corre
+      # entero: es un camino rápido, no una excepción. Ver
+      # docs/ci/local_first.md y scripts/verify-attestation.sh.
+      - id: attest
+        name: Verificar la atestación local
+        run: bash scripts/verify-attestation.sh ios
+
       # El boot del simulador tarda ~3m30s y NO depende de nada de lo que sigue,
       # asi que se dispara primero y se espera recien al final (paso "Wait for
       # the simulator"). Antes era un paso bloqueante justo antes del harness y
@@ -241,6 +273,7 @@ jobs:
       # publica en el env para el paso que espera. Si no hubiera ningun iPhone
       # disponible, esto falla ACA y no veinte minutos despues.
       - name: Start booting a simulator — WA-5.5
+        if: steps.attest.outputs.valid != 'true'
         run: |
           UDID="$(xcrun simctl list devices available -j \
             | python3 -c 'import json,sys;d=json.load(sys.stdin)["devices"];print(next(x["udid"] for v in d.values() for x in v if "iPhone" in x["name"]))')"
@@ -252,6 +285,7 @@ jobs:
       # instala solo lo que falte. Necesita un cmake de sistema: el
       # "cmake;3.22.1" del SDK de Android no esta en PATH y es para AGP.
       - name: Install C++ build tools
+        if: steps.attest.outputs.valid != 'true'
         run: |
           for tool in cmake ninja; do
             if command -v "$tool" >/dev/null 2>&1; then
@@ -276,9 +310,11 @@ jobs:
       # WA-2.2 and WA-2.4 closed the link gaps that kept the core out of the
       # shipped target, so the probe was promoted and the steps collapsed.
       - name: Build & link-check C++ for iOS (device + simulator) — WA-2.1/2.4
+        if: steps.attest.outputs.valid != 'true'
         run: bash scripts/build-ios.sh
 
       - name: Set up JDK 17
+        if: steps.attest.outputs.valid != 'true'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -288,12 +324,14 @@ jobs:
       # applies com.android.library, so AGP needs an SDK to configure the
       # project at all — without it Gradle fails before reaching any iOS task.
       - name: Set up Android SDK
+        if: steps.attest.outputs.valid != 'true'
         uses: android-actions/setup-android@v4
 
       # AGP resolves (and silently auto-downloads) the NDK even for iOS-only
       # tasks. Installing it explicitly keeps that ~1 GB download visible in the
       # log and pinned to the catalog version instead of happening implicitly.
       - name: Install NDK and CMake
+        if: steps.attest.outputs.valid != 'true'
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1
           sdkmanager --install \
@@ -302,6 +340,7 @@ jobs:
 
       # The Kotlin/Native toolchain is a ~1 GB download per run otherwise.
       - name: Cache Kotlin/Native toolchain
+        if: steps.attest.outputs.valid != 'true'
         uses: actions/cache@v6
         with:
           path: ~/.konan
@@ -309,6 +348,7 @@ jobs:
           restore-keys: konan-${{ runner.os }}-
 
       - name: Set up Gradle
+        if: steps.attest.outputs.valid != 'true'
         uses: gradle/actions/setup-gradle@v6
 
       # Since WA-3.1 these also run cinterop, which re-invokes build-ios.sh through
@@ -317,6 +357,7 @@ jobs:
       # the re-run costs seconds. The standalone step stays because it fails BEFORE
       # the JDK/SDK/Gradle setup below, which is the expensive part.
       - name: Compile iOS targets (incl. cinterop) — WA-3.1
+        if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:compileKotlinIosArm64 :audio:compileKotlinIosSimulatorArm64
 
       # The only place the shared Kotlin is executed — not merely compiled — under
@@ -324,6 +365,7 @@ jobs:
       # is the only check that the wma_* symbols actually resolve from Kotlin and
       # that each type family survives the boundary.
       - name: Run commonTest + cinterop smoke on iOS simulator — WA-T.3
+        if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:iosSimulatorArm64Test
 
       # WA-4.1. Linkea de verdad ambos slices y los empaqueta, que es lo unico que
@@ -336,12 +378,14 @@ jobs:
       # vuelve a construir el paso del harness. La mitad del trabajo de este
       # paso no la miraba nadie.
       - name: Assemble XCFramework — WA-4.1
+        if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:assembleWatermelonReleaseXCFramework
 
       # Un XCFramework que "se construyo" pero no trae el motor adentro pasaria el
       # paso anterior sin chistar. Esto falla si falta un slice o si los simbolos
       # wma_* no viajaron.
       - name: Verify the XCFramework carries the engine — WA-4.1
+        if: steps.attest.outputs.valid != 'true'
         run: |
           XCF=audio/build/XCFrameworks/release/Watermelon.xcframework
           for slice in ios-arm64 ios-arm64-simulator; do
@@ -366,6 +410,7 @@ jobs:
       # que agarra un Info.plist incompleto —Compose aborta el proceso desde
       # PlistSanityCheck—, asi que la espera es obligatoria y sin `|| true`.
       - name: Wait for the simulator to finish booting — WA-5.5
+        if: steps.attest.outputs.valid != 'true'
         run: xcrun simctl bootstatus "$SIM_UDID" -b
 
       # WA-5.5, mitad iOS. La mitad Android se mudo al job `build` de ubuntu:
@@ -377,6 +422,7 @@ jobs:
       # arriba), que el shell de Xcode compile, y que la app ARRANQUE SIN
       # MORIRSE. Sin este paso el harness se pudre en silencio.
       - name: Build the UI harness, iOS half — WA-5.5
+        if: steps.attest.outputs.valid != 'true'
         run: bash scripts/build-harness.sh --ios-only
 
   build:
@@ -387,16 +433,28 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # ¿Ya corrió el gate local sobre este contenido exacto? Si sí, los
+      # pasos de abajo se saltean y este job termina en verde en segundos.
+      # Ante CUALQUIER duda el script emite valid=false y el gate corre
+      # entero: es un camino rápido, no una excepción. Ver
+      # docs/ci/local_first.md y scripts/verify-attestation.sh.
+      - id: attest
+        name: Verificar la atestación local
+        run: bash scripts/verify-attestation.sh build
+
       - name: Set up JDK 17
+        if: steps.attest.outputs.valid != 'true'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
 
       - name: Set up Android SDK
+        if: steps.attest.outputs.valid != 'true'
         uses: android-actions/setup-android@v4
 
       - name: Install NDK and CMake
+        if: steps.attest.outputs.valid != 'true'
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1
           sdkmanager --install \
@@ -404,6 +462,7 @@ jobs:
             "cmake;3.22.1"
 
       - name: Set up Gradle
+        if: steps.attest.outputs.valid != 'true'
         uses: gradle/actions/setup-gradle@v6
 
       # WA-5.5 — la UI del harness no puede entrar al artefacto publicado.
@@ -414,12 +473,15 @@ jobs:
       # Va ANTES de los builds: si :audio arrastra UI, lo que se publicaria esta
       # mal aunque compile perfecto.
       - name: UI guardrail — WA-5.5
+        if: steps.attest.outputs.valid != 'true'
         run: bash scripts/check-no-ui-in-library.sh
 
       - name: Kotlin unit tests (commonTest)
+        if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:testDebugUnitTest
 
       - name: Build debug
+        if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:assembleDebug
 
       # WA-5.5 — la mitad Android del harness vive aca y no en el job de macOS.
@@ -433,7 +495,9 @@ jobs:
       # traiga el motor, que el shell de Xcode compile, que la app arranque)
       # sigue en el job de iOS con --ios-only.
       - name: Build the UI harness, Android half — WA-5.5
+        if: steps.attest.outputs.valid != 'true'
         run: bash scripts/build-harness.sh --android-only
 
       - name: Build release
+        if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:assembleRelease

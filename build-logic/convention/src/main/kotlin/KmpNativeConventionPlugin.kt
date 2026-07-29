@@ -87,6 +87,17 @@ class KmpNativeConventionPlugin : Plugin<Project> {
                         exclude("ios/build/**", "**/.deps/**", "**/build/**", "**/build-san/**")
                     }
                 )
+
+                // Y el script que la task EJECUTA, que hasta el 2026-07-29 no estaba
+                // declarado. Cambiarle los flags de compilacion sin tocar C++ dejaba
+                // esta task UP-TO-DATE y el .a viejo sobrevivia.
+                //
+                // En el CI eso nunca mordio —cada corrida arranca de un checkout
+                // frio— pero con el gate local-first el arbol persiste entre
+                // corridas y ahi si muerde. En la practica ademas lo tapaba que
+                // ci.yml y gate.sh corren build-ios.sh SUELTO antes de Gradle; esta
+                // linea hace que la garantia no dependa del orden de pasos de nadie.
+                inputs.file(rootProject.file("scripts/build-ios.sh"))
                 outputs.files(
                     file("src/main/cpp/ios/build/iphoneos/libwatermelon_audio.a"),
                     file("src/main/cpp/ios/build/iphonesimulator/libwatermelon_audio.a"),
