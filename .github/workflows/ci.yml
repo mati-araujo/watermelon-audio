@@ -232,44 +232,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # EL BOOT SE ESPERA ACA MISMO, EN SERIE, Y EL RUNNER NO HACE NADA MIENTRAS.
-      # Es la opcion que parece mas tonta de las cuatro y es la unica que gana.
+      # El boot del simulador tarda ~3m30s y NO depende de nada de lo que sigue,
+      # asi que se dispara primero y se espera recien al final (paso "Wait for
+      # the simulator"). Antes era un paso bloqueante justo antes del harness y
+      # esos 3m30s se sumaban enteros al job.
       #
-      # El arranque de un simulador en un runner de 3 nucleos es una tormenta de
-      # spawns, y le cobra ~250-300s a lo que este corriendo al lado. Eso no
-      # depende de QUE este al lado — se probaron cuatro vecinos distintos y los
-      # cuatro pagaron (job `ios` completo entre parentesis):
-      #
-      #   suite C++ al lado del boot     112s ->  328s   (759s)
-      #   XCFramework al lado del boot   105s ->  359s   (750s)
-      #   boot en serie pero AL FINAL    harness 127s -> 325s   (1030s)
-      #   build-ios.sh al lado del boot   36s ->  343s   (735s)
-      #
-      # El cuarto es el que cierra el argumento: al sacar la suite C++ a su propio
-      # job, el peaje no desaparecio — se lo comio el paso siguiente. No se puede
-      # esconder un boot detras de trabajo util; solo se elige quien lo paga.
-      #
-      # Y el tercero explica por que la espera va ACA y no al final: `bootstatus`
-      # vuelve antes de que el simulador este realmente tranquilo, asi que el
-      # harness necesita que el boot haya terminado hace rato. Booteando primero
-      # tiene todo el job para asentarse.
-      #
-      # O sea: en serie (se pagan los ~164s enteros y ni uno mas) y al principio
-      # (el harness lo encuentra asentado). Las dos propiedades a la vez, que es
-      # lo que ninguna de las otras tres configuraciones lograba.
-      #
-      # Si no hubiera ningun iPhone disponible, esto falla ACA y no veinte minutos
-      # despues.
-      - name: Boot a simulator and wait for it — WA-5.5
+      # `simctl boot` vuelve enseguida —el arranque sigue de fondo— y el UDID se
+      # publica en el env para el paso que espera. Si no hubiera ningun iPhone
+      # disponible, esto falla ACA y no veinte minutos despues.
+      - name: Start booting a simulator — WA-5.5
         run: |
           UDID="$(xcrun simctl list devices available -j \
             | python3 -c 'import json,sys;d=json.load(sys.stdin)["devices"];print(next(x["udid"] for v in d.values() for x in v if "iPhone" in x["name"]))')"
           xcrun simctl boot "$UDID"
-          xcrun simctl bootstatus "$UDID" -b
-          # No se publica el UDID: ya no queda ningun paso que lo necesite.
-          # build-harness.sh resuelve solo el primer device booteado
-          # (`simctl list devices booted`), y el paso de espera que lo consumia
-          # desaparecio al volverse bloqueante este.
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
 
       # Sigue haciendo falta para build-ios.sh, que es el primer paso pesado del
       # job ahora que la suite se mudo. La imagen normalmente trae los dos; se
@@ -382,15 +358,15 @@ jobs:
             fi
           done
 
-      # Ya no hay paso de espera: el boot del principio es bloqueante, asi que
-      # cuando se llega aca el simulador lleva todo el job asentandose. Esa es la
-      # mitad del motivo de haberlo puesto en serie — la otra es no contaminar a
-      # los pasos de al lado. Ver el comentario del paso de boot.
-      #
-      # El chequeo de arranque de build-harness.sh se saltea con aviso si no hay
-      # simulador, y un gate que se saltea siempre no es un gate: es lo UNICO que
-      # agarra un Info.plist incompleto —Compose aborta el proceso desde
-      # PlistSanityCheck—, asi que el boot de arriba es obligatorio y sin `|| true`.
+      # Aca solo se ESPERA al simulador. El boot se disparo al principio del job
+      # (paso "Start booting a simulator"), asi que sus ~3m30s corrieron en
+      # paralelo con el C++, cinterop y el XCFramework en vez de sumarse. El
+      # chequeo de arranque de build-harness.sh se saltea con aviso si no hay
+      # simulador, y un gate que se saltea siempre no es un gate: es lo UNICO
+      # que agarra un Info.plist incompleto —Compose aborta el proceso desde
+      # PlistSanityCheck—, asi que la espera es obligatoria y sin `|| true`.
+      - name: Wait for the simulator to finish booting — WA-5.5
+        run: xcrun simctl bootstatus "$SIM_UDID" -b
 
       # WA-5.5, mitad iOS. La mitad Android se mudo al job `build` de ubuntu:
       # arrastraba el build NDK de :audio para las 4 ABIs y aca era un build
