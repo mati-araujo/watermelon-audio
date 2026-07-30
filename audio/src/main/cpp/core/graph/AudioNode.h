@@ -1,5 +1,19 @@
 #pragma once
 
+// OJO CON EL DIRECTORIO: `core/graph/` ya NO contiene un grafo. La clase
+// AudioGraph se borro (era inalcanzable por construccion y nunca se uso); lo
+// que queda aca son las dos primitivas, que SI estan vivas:
+//
+//   AudioNode.h    clase base de MixerNode, OscillatorNode, EffectChainNode e
+//                  InputNode, que el motor maneja DIRECTAMENTE desde sus
+//                  metodos de render — no hay grafo que los recorra.
+//   AudioBuffer.h  buffer multi-canal, usado por esos nodos y tambien por el
+//                  looper (ChunkedAudioBuffer, TrackStorage).
+//
+// El nombre del directorio quedo por historia. No se movieron los archivos para
+// no mezclar un movimiento con el borrado; donde deberia vivir AudioBuffer —que
+// el looper tambien usa— es una pregunta propia.
+
 #include "AudioBuffer.h"
 #include <atomic>
 #include <string>
@@ -7,7 +21,10 @@
 
 /**
  * @enum NodeType
- * @brief Tipos de nodos en el Audio Graph
+ * @brief Tipos de nodos de audio.
+ *
+ * Sobrevive al borrado del grafo: los nodos siguen existiendo y declarando su
+ * tipo, lo que ya no existe es algo que los conecte entre si.
  */
 enum class NodeType {
     INPUT,          ///< Nodo de entrada (micrófono, audio file)

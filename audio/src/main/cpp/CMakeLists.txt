@@ -133,10 +133,8 @@ add_subdirectory(voice)
 
 # Archivos del Audio Graph (Etapa 1)
 set(GRAPH_SOURCES
-        core/graph/AudioGraph.cpp
         nodes/OscillatorNode.cpp
         nodes/EffectChainNode.cpp
-        nodes/OutputNode.cpp
 )
 
 # Archivos de Input (Etapa 2)

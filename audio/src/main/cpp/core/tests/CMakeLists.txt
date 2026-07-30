@@ -86,10 +86,8 @@ set(CORE_TESTED_SOURCES
     ${WMA_CPP_ROOT}/core/MusicalScale.cpp
     ${WMA_CPP_ROOT}/core/XYMapper.cpp
     ${WMA_CPP_ROOT}/core/ModeManager.cpp
-    ${WMA_CPP_ROOT}/core/graph/AudioGraph.cpp
     ${WMA_CPP_ROOT}/nodes/OscillatorNode.cpp
     ${WMA_CPP_ROOT}/nodes/EffectChainNode.cpp
-    ${WMA_CPP_ROOT}/nodes/OutputNode.cpp
     ${WMA_CPP_ROOT}/nodes/MixerNode.cpp
     ${WMA_CPP_ROOT}/analysis/SpectrumAnalyzer.cpp
     ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
