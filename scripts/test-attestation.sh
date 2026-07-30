@@ -127,6 +127,65 @@ else
     FAIL=$(( FAIL + 1 ))
 fi
 
+# El otro lado del mismo trato. La atestacion es segura porque `push: master`
+# corre el gate entero — es la segunda linea que respalda al camino rapido. Pero
+# eso sólo vale si el CI de master no se puede cancelar, y con el grupo de
+# concurrencia derivado del ref se cancelaba el 21% de las veces (ver el
+# comentario del bloque `concurrency:` en ci.yml, que trae la medición).
+#
+# ALCANCE, y hay que leerlo literal: esto detecta la DERIVA —que alguien
+# simplifique el grupo y le saque el SHA— y NADA MAS. No dice que la expresión
+# resuelva bien: eso no es verificable desde un job, sólo conductualmente (dos
+# runs de grupos distintos que tienen que sobrevivir juntos). Un verde acá NO es
+# "el esquema anda"; es "nadie borró la pieza".
+printf '\n== el CI de master no puede cancelarse (ci.yml) ==\n'
+if python3 - <<'PY' > "$WORK/concurrency.log" 2>&1
+import re, sys
+
+text = open(".github/workflows/ci.yml", encoding="utf-8").read()
+
+# El bloque de nivel superior, no el de un job. Fail-closed si no hay
+# exactamente uno: 0 → el bloque se movió y este chequeo quedó ciego; >1 →
+# ambiguo. En los dos casos se falla, no se adivina.
+blocks = re.findall(r"^concurrency:\n((?:[ \t]+\S.*\n|[ \t]*\n)+)", text, re.M)
+if len(blocks) != 1:
+    sys.exit(f"esperaba exactamente un bloque `concurrency:` de nivel superior, hay {len(blocks)}")
+
+body = blocks[0]
+group = re.search(r"^\s*group:\s*(.+?)\s*$", body, re.M)
+cancel = re.search(r"^\s*cancel-in-progress:\s*(.+?)\s*$", body, re.M)
+if not group or not cancel:
+    sys.exit(f"el bloque `concurrency:` no trae group/cancel-in-progress:\n{body}")
+
+g = group.group(1)
+faltan = [t for t in ("github.event_name == 'push'", "github.sha") if t not in g]
+if faltan:
+    sys.exit(
+        "el grupo de concurrencia ya no deriva del SHA en `push`; falta "
+        + ", ".join(repr(t) for t in faltan)
+        + f"\n  group: {g}\n"
+        "  Con el mismo grupo para todo master, cada merge cancela el CI del\n"
+        "  merge anterior — y desde local-first ese es el unico lugar donde\n"
+        "  ios/build/cpp-tests-macos se ejecutan de verdad."
+    )
+
+# Si esto dejara de ser `true`, los PRs pararian de cancelar sus runs viejos: no
+# es inseguro, pero es un cambio de comportamiento que nadie pidio y que este
+# archivo es el unico lugar donde se afirma.
+if cancel.group(1) != "true":
+    sys.exit(f"cancel-in-progress dejo de ser `true` (es {cancel.group(1)!r}): los PRs ya no cancelan runs viejos")
+
+print(f"grupo por SHA en push: {g}")
+PY
+then
+    printf '  ok    %s\n' "$(cat "$WORK/concurrency.log")"
+    PASS=$(( PASS + 1 ))
+else
+    printf '  FALLO el grupo de concurrencia derivó\n'
+    sed 's/^/        /' "$WORK/concurrency.log"
+    FAIL=$(( FAIL + 1 ))
+fi
+
 printf '\n== caso positivo ==\n'
 for gate in ios build cpp-tests-macos; do
     expect true "$(verify "$BASE" "$gate")" "atestacion valida, gate $gate" "$(logpath "$BASE" "$gate")"

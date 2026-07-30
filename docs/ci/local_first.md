@@ -365,6 +365,51 @@ idéntico y correctamente no invalidaron nada.
 prueba nada sobre staleness: prueba que el pipeline es correcto respecto del contenido, que es
 otra cosa.
 
+### 7.11 Lo que encontró el soak: master sí se podía cancelar
+
+El esquema aterrizó sin rodaje, así que se auditaron los PRs que corrieron con él ya en
+`master`. **El camino rápido no falló:** los dos PRs que lo usaron (#96, #97) fueron legítimos
+—digest recomputado de forma independiente, con `git ls-tree` en vez de `git ls-files`, sobre
+los cuatro árboles: match exacto, 691 archivos—. El único delta entre el commit donde se creó
+la atestación y el head pusheado fue `.github/local-gate.json`, que el digest excluye por
+diseño. Y el candado del publish funcionó: `wait-for-ci.sh` esperó **18m24s** sobre `9763bda6`
+antes de dejar publicar 1.14.0.
+
+**Lo que falló fue la segunda línea.** El bloque `concurrency:` agrupaba por
+`github.ref`, así que todos los commits de `master` compartían grupo y **cada merge cancelaba
+el CI del merge anterior**. Medido sobre las 19 corridas `push: master` del régimen de PRs:
+**4 canceladas (21%)**, y el job `ios` fue la víctima en **4 de 4**, por ser el más largo. En
+`637eb4ed` murió en el paso 17 de 17 (`Build the UI harness, iOS half`), 34 s después de que
+entrara el push de `80abfa06`.
+
+**La config era vieja e inofensiva; local-first la volvió load-bearing.** Antes, la corrida del
+PR ya había ejecutado `ios`/`build`/`cpp-tests-macos` de verdad y perder la de master costaba
+sólo verificar el squash. Desde el camino rápido, el push a master es el **único** lugar del CI
+donde esos tres se ejecutan.
+
+> **No fue un falso verde**: la corrida figura `cancelled`, no `success`, y `wait-for-ci.sh` la
+> habría rechazado. Lo que era falso es la **invariante escrita** —"en `push: master` el CI paga
+> su costo entero siempre, sin excepción"— que aparece en `CLAUDE.md` y en el encabezado de
+> `verify-attestation.sh`. Era falsa el 21% de las veces y nada avisaba.
+
+El arreglo es un grupo por SHA en `push` (ver el comentario del bloque en `ci.yml`).
+`cancel-in-progress: false` **no** alcanzaba: deja sobrevivir al run en curso, pero GitHub
+cancela el run *pending* cuando llega uno nuevo del mismo grupo — o sea que un commit
+intermedio puede no correr nunca y el del release puede morir esperando.
+
+**La verificación es de dos fases, y la primera tiene una trampa.** El chequeo obvio —dos
+pushes rápidos al PR, ver que el primero se cancela— **no discrimina**: pasa igual si la
+expresión colapsara a la constante `ci-`. El discriminador es al revés, dos runs que **no** se
+tienen que cancelar: un `pull_request` y un `workflow_dispatch` sobre la misma rama, que bajo
+la expresión correcta caen en grupos distintos y sobreviven los dos. La rama de `push` de la
+expresión **no es alcanzable pre-merge** (`ci.yml` sólo dispara en `push` sobre `master`), así
+que esa mitad se confirma recién con el primer par de merges solapados; su modo de falla es
+que el arreglo sea inocuo, no que empeore nada.
+
+**El guardián** vive en `scripts/test-attestation.sh` y cubre **deriva, no corrección
+semántica**: detecta que alguien le saque el SHA al grupo, y nada más. Está escrito al lado del
+assert para que un verde ahí no se lea como más de lo que es.
+
 ---
 
 ## Apéndice — el gate local, cronometrado
