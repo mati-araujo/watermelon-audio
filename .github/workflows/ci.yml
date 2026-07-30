@@ -33,8 +33,41 @@ on:
 
   workflow_dispatch:
 
+# El grupo deriva del SHA en `push` y del ref en todo lo demas. NO simplificar a
+# `ci-${{ github.ref }}`: esa forma parece mas limpia y reintroduce un agujero
+# medido.
+#
+# Con el ref, TODOS los commits de master caen en el mismo grupo, asi que cada
+# merge cancela el CI del merge anterior. Medido sobre las 19 corridas
+# `push: master` del regimen de PRs (2026-07-28 21:58 → 2026-07-29 23:11):
+# 4 canceladas, 21%, y el job `ios` fue la victima en las 4 — es el mas largo
+# (8m44s-18m15s), asi que siempre es el que queda expuesto.
+#
+# Hasta el esquema local-first eso costaba poco: la corrida del PR ya habia
+# ejecutado ios/build/cpp-tests-macos de verdad, y perder la de master costaba
+# solo verificar el resultado del squash. Desde que el PR los saltea por
+# atestacion, el push a master es el UNICO lugar del CI donde esos tres gates se
+# ejecutan. Cancelarlo deja el contenido sin ninguna corrida de CI. Una config
+# vieja e inofensiva paso a ser load-bearing el dia que aterrizo el camino
+# rapido; lo encontro el soak, no el diseño.
+#
+# Y muerde el release: release-please tagea y crea el Release, y DESPUES el
+# publish espera al CI (wait-for-ci.sh). Si un merge entra durante esos ~18 min,
+# el CI del commit de release se cancela, la espera sale 1 (fail-closed, bien) y
+# queda tag + Release publicados con CERO artefacto en Packages — el modo de
+# falla exacto de v1.8.0. Con 1.14.0 no paso por 26 min de margen, no por diseño.
+#
+# `cancel-in-progress: false` NO alcanza como arreglo, y es contraintuitivo: lo
+# que hace es que el run en curso sobreviva, pero GitHub CANCELA el run pending
+# anterior cuando llega uno nuevo del mismo grupo. O sea, un commit intermedio
+# puede no correr nunca, y el run del commit de release puede morir mientras
+# espera. Un grupo por SHA es lo unico que garantiza que cada commit de master
+# corra entero.
+#
+# En `pull_request` el grupo sigue siendo el ref, que es lo que se quiere
+# conservar: un push nuevo al PR debe matar el run viejo.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
