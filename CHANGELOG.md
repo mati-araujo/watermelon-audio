@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.1](https://github.com/mati-araujo/watermelon-audio/compare/v1.14.0...v1.14.1) (2026-07-30)
+
+
+### Bug Fixes
+
+* **core:** los medidores de salida estaban muertos — pasan a OutputStage ([#104](https://github.com/mati-araujo/watermelon-audio/issues/104)) ([bea50ce](https://github.com/mati-araujo/watermelon-audio/commit/bea50ce8fd40a90156bfe72b9419d3e567954738))
+
 ## [1.14.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.13.2...v1.14.0) (2026-07-29)
 
 
