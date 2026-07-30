@@ -1612,6 +1612,54 @@ divergencias entre las dos superficies. Pero escribir los tests destapó otra co
 > vez de bajarle la vara lo seguí hasta el origen. Queda test de caracterización que
 > **falla el día que alguien lo arregle**, más ticket propio.
 
+> [!NOTE]
+> ✅ **ARREGLADO el 2026-07-30.** Los medidores viven ahora en `OutputStage`, el único punto
+> por donde pasan los tres caminos de salida (`processOutput`, `processOutputNoClip`,
+> `processOutputLightweight` son cada uno lo **último** que toca el buffer). El test de
+> caracterización se reemplazó por uno que afirma **acuerdo con `renderBlockPeak()`** —que
+> mide el buffer por su cuenta, en la misma llamada que actualiza el medidor— y no mera
+> no-nulidad.
+>
+> **Al moverlo apareció un segundo bug que nadie podía ver**, porque el medidor entero estaba
+> muerto: `mRmsCoeff` es un coeficiente **por muestra** y `OutputNode` lo aplicaba **una vez
+> por bloque**. A 48 kHz con bloques de 256 frames, la integración de 300 ms que promete el
+> comentario era en realidad de **~77 segundos** — un RMS clavado cerca de cero. Se eleva a
+> `numFrames`, igual que ya hacía el peak. Hay test que fija la constante de tiempo.
+>
+> **Cobertura parcial a propósito:** el camino USB directo necesita el backend USB y no es
+> alcanzable desde un test de host. Está escrito en el archivo de test.
+
+### Deuda destapada al arreglar los medidores: la ruta `AudioGraph` es un motor muerto
+
+Al medir el radio para borrar `OutputNode` resultó que **no está huérfano**, y lo que hay
+detrás es más grande que el medidor.
+
+`OutputNode` es uno de los **cuatro** nodos de la ruta `AudioGraph` (Phase 5.2). `AudioEngine`
+aloca un juego completo en paralelo —`OscillatorNode`, `MixerNode`, `EffectChainNode`,
+`OutputNode`—, los conecta, y **los `prepare()`a en cada apertura de stream**
+(`AudioEngine.cpp` ~735-758 y ~2015-2021). Duplican a los nodos sueltos que sí usa el camino
+vivo.
+
+**Y nunca se usa.** La rama está detrás de `mUseAudioGraph`, que:
+
+- se inicializa en `false`,
+- sólo lo escribe `setUseAudioGraph()`, que **no tiene un solo llamador en el repo**,
+- **no está expuesto ni en la C API ni en el JNI** — o sea que ningún consumidor puede
+  encenderlo aunque quiera.
+
+Así que es inalcanzable por construcción, y cuesta alocación y `prepare()` en cada start.
+
+**Qué habría que decidir, y por qué no se hizo acá:** o se conecta (y entonces hay que
+resolver que duplica el camino vivo) o se borra el cluster entero —los cuatro nodos, el grafo,
+los handles, `setUseAudioGraph`/`isUsingAudioGraph` y la rama del callback—. Es una decisión
+de producto sobre una arquitectura, no un arreglo de bug: meterla dentro de un `fix(core):`
+sería el mismo defecto de señal de #62, donde una remoción de API viajó adentro de un
+`perf(ci):`.
+
+> **Ojo con el orden al tomarlo:** revisar primero si `AudioGraph` tiene tests propios, y
+> acordarse de que `core/ModeManager` —que tampoco está conectado— guarda un `OutputNode*` que
+> asigna y nunca lee. Los tres pedazos de deuda son el mismo cluster.
+
 **Verificación — `test_c_api_analysis.cpp`, 14 tests (624 en total).** Lo que sí se cubre y
 sigue valiendo: el piso de **−100 dB** para el silencio (0 dB sería fondo de escala, la
 lectura opuesta), que los getters en dB sean el log de los lineales, que el batch de 4
