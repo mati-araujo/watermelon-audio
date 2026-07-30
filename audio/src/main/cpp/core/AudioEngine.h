@@ -734,19 +734,31 @@ public:
     }
 
     /**
-     * @brief Get peak level from OutputNode (for UI meters)
+     * @brief Get output peak level (for UI meters)
      * @param channel 0 = left, 1 = right
+     *
+     * Reads OutputStage, which is where the signal actually ends up. These used
+     * to read mOutputNode, whose process() nobody calls — so both returned 0
+     * forever while audio played, and NoisyPad's guitar-mode level meter never
+     * moved. See the note on OutputStage for why the meters live there now.
+     *
+     * mOutputNode itself is left alone on purpose: it is one of four nodes of
+     * the AudioGraph path (Phase 5.2), which is allocated and prepared on every
+     * start and then never used, because mUseAudioGraph is false and nothing can
+     * set it — setUseAudioGraph() has no callers and neither the C API nor the
+     * JNI expose it. That whole dead cluster is its own item; it is deliberately
+     * NOT unpicked inside a meter fix.
      */
     float getOutputPeakLevel(int channel) const {
-        return mOutputNode ? mOutputNode->getPeakLevel(channel) : 0.0f;
+        return mOutputStage.getPeakLevel(channel);
     }
 
     /**
-     * @brief Get RMS level from OutputNode (for UI meters)
+     * @brief Get output RMS level (for UI meters)
      * @param channel 0 = left, 1 = right
      */
     float getOutputRMSLevel(int channel) const {
-        return mOutputNode ? mOutputNode->getRMSLevel(channel) : 0.0f;
+        return mOutputStage.getRMSLevel(channel);
     }
 
     /**

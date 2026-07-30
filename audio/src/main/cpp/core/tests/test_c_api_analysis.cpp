@@ -8,15 +8,25 @@
  * functions and no divergence between them. So the migration was mechanical —
  * but writing the tests turned up something else.
  *
- * THE OUTPUT METERS DO NOT WORK, ON EITHER PLATFORM. AudioEngine reads them off
- * OutputNode, and OutputNode::process() is never called from anywhere; the node
- * is allocated, prepare()d, and left alone. So peak and RMS are permanently 0
- * while audio plays. NoisyPad's guitar mode polls them for an on-screen level
- * meter, which means that meter has never moved.
+ * THE OUTPUT METERS USED TO BE DEAD, ON BOTH PLATFORMS. AudioEngine read them
+ * off OutputNode, whose process() is never called from anywhere — the node is
+ * allocated, prepare()d and left alone — so peak and RMS were permanently 0
+ * while audio played. NoisyPad's guitar mode polls them for an on-screen level
+ * meter, so that meter had never moved. The input meter beside it worked, which
+ * is probably why nobody noticed.
  *
- * That is documented by TheOutputMetersStayAtZeroEvenWithAudioPlaying below,
- * which asserts the wrong-looking thing on purpose and fails the day someone
- * fixes it. The rest of the metering tests pin what still holds regardless: the
+ * They now live on OutputStage, the one place all three output paths converge
+ * (processOutput / processOutputNoClip / processOutputLightweight are each the
+ * LAST thing to touch the buffer). TheOutputMetersFollowTheSignal below is what
+ * replaced the characterization test, and it asserts agreement with an
+ * independent measurement of the same block rather than mere non-zeroness — a
+ * meter reporting a fixed number, or reading the wrong buffer, has to fail it.
+ *
+ * COVERAGE IS PARTIAL ON PURPOSE: these exercise the main path. The USB direct
+ * path (processOutputLightweight) needs the USB backend and is not reachable
+ * from a host test, so it is metered by construction and not by assertion.
+ *
+ * The rest of the metering tests pin what held before and still holds: the
  * -100 dB floor for silence (0 dB would be full scale, the opposite reading),
  * and agreement between the individual getters and the batched one.
  */
@@ -24,6 +34,8 @@
 #include "support/CApiFixture.h"
 
 #include <gtest/gtest.h>
+
+#include <cmath>
 
 namespace wma_test {
 namespace {
@@ -49,34 +61,70 @@ TEST_F(CApiAnalysisTest, TheMetersReadSilenceBeforeAnythingIsRendered) {
     EXPECT_FLOAT_EQ(wma_get_output_rms_db(mWma, 0), kSilenceDb);
 }
 
-TEST_F(CApiAnalysisTest, TheOutputMetersStayAtZeroEvenWithAudioPlaying) {
-    // NOT the behaviour these should have, and this one is visible to users.
+TEST_F(CApiAnalysisTest, TheOutputMetersFollowTheSignal) {
+    // Replaces TheOutputMetersStayAtZeroEvenWithAudioPlaying, which pinned the
+    // broken behaviour on purpose.
     //
-    // AudioEngine::getOutputPeakLevel reads OutputNode, and OutputNode::process()
-    // is NEVER CALLED — not from AudioEngine, not from the AudioGraph, not from
-    // anywhere. The node is allocated and prepare()d and then left alone, so its
-    // peak/RMS atomics keep their initial 0.
+    // The assertion is AGREEMENT, not non-zeroness. renderBlockPeak() renders a
+    // block through onAudioReady and measures the resulting output buffer
+    // itself — and that is the very call that updates the meter, so the two are
+    // measuring the same samples by different routes. A meter that returned a
+    // fixed number, or metered the wrong buffer, or metered before the limiter,
+    // would sail through an EXPECT_GT(.., 0) and has to fail this.
+    startAt(48000, 0);
+    wma_set_frequency_amplitude(mWma, 440.0f, 1.0f);
+    render(20, kBlockFrames);  // let the start fade and the limiter settle
+
+    const float blockPeak = renderBlockPeak(kBlockFrames);
+    ASSERT_GT(blockPeak, 0.01f) << "no signal — the rest of this test proves nothing";
+
+    // Steady tone, so the decaying hold and the current block agree closely.
+    EXPECT_NEAR(wma_get_output_peak(mWma, 0), blockPeak, 0.05f);
+    EXPECT_NEAR(wma_get_output_peak(mWma, 1), blockPeak, 0.05f);
+}
+
+TEST_F(CApiAnalysisTest, TheRmsConvergesOnTheRmsOfTheSignal) {
+    // This is the one that pins the RMS integration time, and it exists because
+    // the smoothing was wrong in the code the meters came from: the coefficient
+    // is per SAMPLE and OutputNode applied it once per BLOCK, which at 48 kHz
+    // and 256-frame blocks turned a 300 ms average into a ~77 SECOND one. The
+    // RMS would sit near zero for a minute. Nothing caught it because the whole
+    // meter was dead.
     //
-    // NoisyPad's guitar mode polls getOutputLevels() in a loop and feeds the
-    // result to an output level meter (GuitarModeViewModel.startMetering). That
-    // meter has never moved. The input meter beside it works, because InputNode
-    // IS driven — which is probably why nobody noticed.
-    //
-    // The assertion below is deliberately the wrong-looking one: audio IS
-    // playing, and the meters still read silence. Registered as its own item; if
-    // someone wires OutputNode into the render path, this test fails and that is
-    // how they will find out to update it.
+    // A sine's RMS is its peak over sqrt(2). After ~1 s with a 300 ms time
+    // constant the average is >95% converged, so the target is reachable — but
+    // only if the coefficient is raised to the block size. With the old
+    // per-block application this reads ~1% of the target and fails loudly.
+    startAt(48000, 0);
+    wma_set_frequency_amplitude(mWma, 440.0f, 1.0f);
+    render(200, kBlockFrames);  // ~1.07 s at 48 kHz
+
+    const float peak = wma_get_output_peak(mWma, 0);
+    ASSERT_GT(peak, 0.01f);
+
+    const float expectedRms = peak / std::sqrt(2.0f);
+    EXPECT_NEAR(wma_get_output_rms(mWma, 0), expectedRms, 0.1f);
+}
+
+TEST_F(CApiAnalysisTest, ThePeakDecaysOnceTheSignalStops) {
+    // The peak is a decaying hold, not an instantaneous reading — a transient
+    // has to stay visible long enough to see. So it must come down on silence,
+    // and it must not come down instantly.
     startAt(48000, 0);
     wma_set_frequency_amplitude(mWma, 440.0f, 1.0f);
     render(20, kBlockFrames);
 
-    // There IS signal — the same render that leaves these meters at zero.
-    ASSERT_GT(renderBlockPeak(kBlockFrames), 0.01f);
+    const float loud = wma_get_output_peak(mWma, 0);
+    ASSERT_GT(loud, 0.01f);
 
-    EXPECT_FLOAT_EQ(wma_get_output_peak(mWma, 0), 0.0f)
-        << "if this is now non-zero, OutputNode got wired up — update this test";
-    EXPECT_FLOAT_EQ(wma_get_output_rms(mWma, 0), 0.0f);
-    EXPECT_FLOAT_EQ(wma_get_output_peak_db(mWma, 0), kSilenceDb);
+    wma_set_frequency_amplitude(mWma, 440.0f, 0.0f);
+    render(2, kBlockFrames);
+    const float justAfter = wma_get_output_peak(mWma, 0);
+    EXPECT_LT(justAfter, loud) << "the hold never decays — a transient would stick forever";
+    EXPECT_GT(justAfter, 0.0f) << "the hold collapsed in two blocks — nothing to see on screen";
+
+    render(400, kBlockFrames);  // ~2 s of silence
+    EXPECT_LT(wma_get_output_peak(mWma, 0), loud * 0.1f);
 }
 
 TEST_F(CApiAnalysisTest, TheDbGettersAgreeWithTheLinearOnesWhateverTheyRead) {
