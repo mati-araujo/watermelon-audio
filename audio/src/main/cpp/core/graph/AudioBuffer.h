@@ -6,7 +6,11 @@
 
 /**
  * @class AudioBuffer
- * @brief Buffer de audio multi-canal para el sistema de Audio Graph
+ * @brief Buffer de audio multi-canal.
+ *
+ * Vive en `core/graph/` por historia: ese directorio ya no contiene un grafo
+ * (ver la nota al principio de AudioNode.h). Lo usan los nodos y tambien el
+ * looper (ChunkedAudioBuffer, TrackStorage), asi que no es una clase "de grafo".
  *
  * Soporta tanto formato por canales separados como interleaved (para Oboe).
  * Diseñado para ser RT-safe: sin allocations en hot path después de prepare().

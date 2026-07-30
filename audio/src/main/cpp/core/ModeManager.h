@@ -13,7 +13,6 @@ class OscillatorNode;
 class InputNode;
 class MixerNode;
 class EffectChainNode;
-class OutputNode;
 
 /**
  * @file ModeManager.h
@@ -29,9 +28,6 @@ class OutputNode;
  */
 
 namespace watermelon_audio {
-
-// Forward declarations for watermelon_audio namespace
-class AudioGraph;
 
 /**
  * @brief Callback for mode change notifications.
@@ -71,11 +67,6 @@ public:
     ModeManager& operator=(const ModeManager&) = delete;
 
     /**
-     * @brief Set reference to audio graph (optional).
-     */
-    void setAudioGraph(AudioGraph* graph) { mGraph = graph; }
-
-    /**
      * @brief Set reference to XY mapper.
      */
     void setXYMapper(XYMapper* mapper) { mXYMapper = mapper; }
@@ -84,8 +75,7 @@ public:
      * @brief Set references to all audio nodes.
      */
     void setNodes(OscillatorNode* osc, InputNode* input,
-                  MixerNode* mixer, EffectChainNode* effects,
-                  OutputNode* output);
+                  MixerNode* mixer, EffectChainNode* effects);
 
     /**
      * @brief Prepare the mode manager for audio processing.
@@ -191,7 +181,11 @@ private:
     void applyConfiguration(const ModeConfiguration& config, bool immediate);
 
     /**
-     * @brief Configure graph routing for mode.
+     * @brief Activate/deactivate nodes for a mode.
+     *
+     * Despite the name it never touched the AudioGraph — it only flips
+     * setActive() on the oscillator and input nodes and the mixer crossfade.
+     * Kept as-is when the graph was deleted; the name is the leftover.
      */
     void configureGraphForMode(AudioMode mode);
 
@@ -239,13 +233,11 @@ private:
     std::atomic<float> mCurrentInputLevel{0.0f};
 
     // Node references
-    AudioGraph* mGraph = nullptr;
     XYMapper* mXYMapper = nullptr;
     OscillatorNode* mOscillatorNode = nullptr;
     InputNode* mInputNode = nullptr;
     MixerNode* mMixerNode = nullptr;
     EffectChainNode* mEffectChainNode = nullptr;
-    OutputNode* mOutputNode = nullptr;
 
     // Callback
     ModeChangeCallback mModeChangeCallback;

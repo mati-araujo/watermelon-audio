@@ -20,9 +20,7 @@ namespace oboe { class AudioStream; }
 #include "../nodes/MixerNode.h"
 #include "../nodes/OscillatorNode.h"
 #include "../nodes/EffectChainNode.h"
-#include "../nodes/OutputNode.h"
 #include "graph/AudioBuffer.h"
-// AudioGraph forward-declared; full include in AudioEngine.cpp
 #include "../voice/VoiceManager.h"
 // TouchTriggerSource.h only needed in AudioEngine.cpp
 #include "SynthEngineDispatcher.h"
@@ -35,7 +33,6 @@ namespace oboe { class AudioStream; }
 
 // Forward declarations (full includes in AudioEngine.cpp)
 class InputNode;
-class AudioGraph;
 
 // Include for shared_ptr atomic operations
 #include <memory>
@@ -726,28 +723,15 @@ public:
     // ========== OUTPUT NODE CONTROL (Phase 4.1) ==========
 
     /**
-     * @brief Get the OutputNode for direct access
-     * @return Pointer to OutputNode, or nullptr if not available
-     */
-    OutputNode* getOutputNode() {
-        return mOutputNode.get();
-    }
-
-    /**
      * @brief Get output peak level (for UI meters)
      * @param channel 0 = left, 1 = right
      *
      * Reads OutputStage, which is where the signal actually ends up. These used
-     * to read mOutputNode, whose process() nobody calls — so both returned 0
+     * to read an OutputNode whose process() nobody called — so both returned 0
      * forever while audio played, and NoisyPad's guitar-mode level meter never
      * moved. See the note on OutputStage for why the meters live there now.
-     *
-     * mOutputNode itself is left alone on purpose: it is one of four nodes of
-     * the AudioGraph path (Phase 5.2), which is allocated and prepared on every
-     * start and then never used, because mUseAudioGraph is false and nothing can
-     * set it — setUseAudioGraph() has no callers and neither the C API nor the
-     * JNI expose it. That whole dead cluster is its own item; it is deliberately
-     * NOT unpicked inside a meter fix.
+     * That node, and the dead AudioGraph path that was its only other user, are
+     * gone.
      */
     float getOutputPeakLevel(int channel) const {
         return mOutputStage.getPeakLevel(channel);
@@ -759,48 +743,6 @@ public:
      */
     float getOutputRMSLevel(int channel) const {
         return mOutputStage.getRMSLevel(channel);
-    }
-
-    /**
-     * @brief Enable/disable output limiter
-     */
-    void setOutputLimiterEnabled(bool enabled) {
-        if (mOutputNode) {
-            mOutputNode->setLimiterEnabled(enabled);
-            incrementStateVersion();
-        }
-    }
-
-    /**
-     * @brief Check if output limiter is enabled
-     */
-    bool isOutputLimiterEnabled() const {
-        return mOutputNode ? mOutputNode->isLimiterEnabled() : true;
-    }
-
-    // ========== AUDIO GRAPH CONTROL (Phase 5.2) ==========
-
-    /**
-     * @brief Enable/disable AudioGraph processing (feature flag)
-     * When enabled, audio processing is delegated to the AudioGraph
-     * When disabled, legacy inline processing is used
-     */
-    void setUseAudioGraph(bool enabled) {
-        mUseAudioGraph.store(enabled, std::memory_order_release);
-    }
-
-    /**
-     * @brief Check if AudioGraph processing is enabled
-     */
-    bool isUsingAudioGraph() const {
-        return mUseAudioGraph.load(std::memory_order_acquire);
-    }
-
-    /**
-     * @brief Get the AudioGraph for direct access (advanced use)
-     */
-    AudioGraph* getAudioGraph() {
-        return mAudioGraph.get();
     }
 
     // ========== BACKEND MANAGER CONTROL (USB Audio Phase 1) ==========
@@ -861,9 +803,6 @@ private:
 
     /** Handle audio output when engine is not in Running state */
     watermelon_audio::IAudioCallback::Result handleNotRunning(float* output, int32_t numFrames, InputNode* inputNode);
-
-    /** Render via AudioGraph when enabled */
-    watermelon_audio::IAudioCallback::Result renderViaGraph(float* output, int32_t numFrames);
 
     /** Render INPUT_FX mode: input through effect chain */
     void renderInputFx(float* output, int32_t numFrames, InputNode* inputNode);
@@ -992,25 +931,15 @@ private:
     std::unique_ptr<MixerNode> mMixerNode;
 
     // ========== OSCILLATOR NODE (Phase 3.2) ==========
-    // OscillatorNode wraps oscillator + modulator system as AudioNode
-    // Used for node-based processing (will be primary in AudioGraph)
+    // OscillatorNode wraps oscillator + modulator system as AudioNode.
+    // Driven directly from the render methods — the AudioGraph it was once
+    // meant to feed is gone.
     std::unique_ptr<OscillatorNode> mOscillatorNode;
 
     // ========== EFFECT CHAIN NODE (Phase 3.3) ==========
-    // EffectChainNode wraps EffectChain as AudioNode with wet/dry mix
-    // Provides node-based interface for future AudioGraph integration
+    // EffectChainNode wraps EffectChain as AudioNode with wet/dry mix.
+    // Same as above: driven directly, not through a graph.
     std::unique_ptr<EffectChainNode> mEffectChainNode;
-
-    // ========== OUTPUT NODE (Phase 4.1) ==========
-    // OutputNode handles final output protection: DC blocking, soft clip,
-    // dithering, master volume, fade, and level metering
-    std::unique_ptr<OutputNode> mOutputNode;
-
-    // ========== AUDIO GRAPH (Phase 5.2) ==========
-    // AudioGraph manages node-based processing with automatic routing
-    // Feature flag allows gradual migration from legacy processing
-    std::unique_ptr<AudioGraph> mAudioGraph;
-    std::atomic<bool> mUseAudioGraph{false};  // Feature flag for gradual migration
 
     // ========== BACKEND MANAGER (USB Audio Phase 1) ==========
     // Feature flag to use BackendManager instead of direct Oboe stream
@@ -1024,12 +953,6 @@ private:
 #else
     std::atomic<bool> mUseBackendManager{true};
 #endif
-
-    // Node handles for quick access to graph nodes
-    NodeHandle mGraphOscillatorHandle{INVALID_NODE_HANDLE};
-    NodeHandle mGraphMixerHandle{INVALID_NODE_HANDLE};
-    NodeHandle mGraphEffectChainHandle{INVALID_NODE_HANDLE};
-    NodeHandle mGraphOutputHandle{INVALID_NODE_HANDLE};
 
     // Pre-allocated AudioBuffers for node-based processing
     AudioBuffer mOscillatorBuffer;  // Oscillator output (non-interleaved)

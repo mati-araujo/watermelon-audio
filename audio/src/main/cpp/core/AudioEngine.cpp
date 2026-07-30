@@ -20,7 +20,6 @@
 #include "../platform/Logger.h"
 #include "../platform/Platform.h"
 #include "../voice/TouchTriggerSource.h"
-#include "graph/AudioGraph.h"
 #include <thread>
 #include <chrono>
 
@@ -238,26 +237,6 @@ AudioEngine::AudioEngine() {
                 LOGE("Failed to allocate EffectChainNode: %s", e.what());
                 mEffectChainNode.reset();
                 // Not fatal - will use legacy mEffectChain
-            }
-
-            // ========== OUTPUT NODE (Phase 4.1) ==========
-            try {
-                mOutputNode = std::make_unique<OutputNode>();
-                LOGI("OutputNode allocated successfully");
-            } catch (const std::bad_alloc& e) {
-                LOGE("Failed to allocate OutputNode: %s", e.what());
-                mOutputNode.reset();
-                // Not fatal - will use legacy output processing
-            }
-
-            // ========== AUDIO GRAPH (Phase 5.2) ==========
-            try {
-                mAudioGraph = std::make_unique<AudioGraph>();
-                LOGI("AudioGraph allocated successfully");
-            } catch (const std::bad_alloc& e) {
-                LOGE("Failed to allocate AudioGraph: %s", e.what());
-                mAudioGraph.reset();
-                // Not fatal - will use legacy processing
             }
 
             // ========== VOICE SYSTEM (Phase 2 - Polyphonic Voices) ==========
@@ -732,48 +711,6 @@ bool AudioEngine::start(int fadeTimeMs) {
         mEffectOutputBuffer.setSize(2, maxBlockSize);
 
         LOGI("EffectChainNode prepared with sampleRate=%d, maxBlockSize=%d", sampleRate, maxBlockSize);
-    }
-
-    // ========== OUTPUT NODE PREPARATION (Phase 4.1) ==========
-    if (mOutputNode) {
-        int framesPerBurst = mStream->getFramesPerBurst();
-        int maxBlockSize = std::max(framesPerBurst * 4, 4096);
-
-        mOutputNode->prepare(sampleRate, maxBlockSize);
-        LOGI("OutputNode prepared with sampleRate=%d, maxBlockSize=%d", sampleRate, maxBlockSize);
-    }
-
-    // ========== AUDIO GRAPH CONFIGURATION (Phase 5.2) ==========
-    if (mAudioGraph) {
-        int framesPerBurst = mStream->getFramesPerBurst();
-        int maxBlockSize = std::max(framesPerBurst * 4, 4096);
-
-        // Create and add nodes to the graph
-        // Note: Graph takes ownership, these are separate from the standalone nodes
-        auto graphOscillator = std::make_unique<OscillatorNode>();
-        auto graphMixer = std::make_unique<MixerNode>();
-        auto graphEffectChain = std::make_unique<EffectChainNode>();
-        auto graphOutput = std::make_unique<OutputNode>();
-
-        mGraphOscillatorHandle = mAudioGraph->addNode(std::move(graphOscillator));
-        mGraphMixerHandle = mAudioGraph->addNode(std::move(graphMixer));
-        mGraphEffectChainHandle = mAudioGraph->addNode(std::move(graphEffectChain));
-        mGraphOutputHandle = mAudioGraph->addNode(std::move(graphOutput));
-
-        // Connect nodes: Oscillator -> Mixer -> EffectChain -> Output
-        // Channel 0 = Left, Channel 1 = Right
-        mAudioGraph->connect(mGraphOscillatorHandle, 0, mGraphMixerHandle, 0);
-        mAudioGraph->connect(mGraphOscillatorHandle, 1, mGraphMixerHandle, 1);
-        mAudioGraph->connect(mGraphMixerHandle, 0, mGraphEffectChainHandle, 0);
-        mAudioGraph->connect(mGraphMixerHandle, 1, mGraphEffectChainHandle, 1);
-        mAudioGraph->connect(mGraphEffectChainHandle, 0, mGraphOutputHandle, 0);
-        mAudioGraph->connect(mGraphEffectChainHandle, 1, mGraphOutputHandle, 1);
-
-        // Prepare the graph (prepares all nodes)
-        mAudioGraph->prepare(sampleRate, maxBlockSize);
-
-        LOGI("AudioGraph configured with %d nodes, sampleRate=%d, maxBlockSize=%d",
-             mAudioGraph->getNodeCount(), sampleRate, maxBlockSize);
     }
 
     // ========== VOICE MANAGER PREPARATION (Phase 2 - Polyphonic Voices) ==========
@@ -1298,38 +1235,6 @@ watermelon_audio::IAudioCallback::Result AudioEngine::handleNotRunning(
     return watermelon_audio::IAudioCallback::Result::CONTINUE;
 }
 
-watermelon_audio::IAudioCallback::Result AudioEngine::renderViaGraph(
-    float* output, int32_t numFrames) {
-    // Sync oscillator parameters from legacy oscillators to graph
-    if (mGraphOscillatorHandle != INVALID_NODE_HANDLE && mOscBank.getPrimaryOscillator(0)) {
-        OscillatorNode* oscNode = mAudioGraph->getNodeAs<OscillatorNode>(mGraphOscillatorHandle);
-        if (oscNode) {
-            float freq = mOscBank.getPrimaryOscillator(0)->getFrequency();
-            float amp = mOscBank.getPrimaryOscillator(0)->getAmplitude();
-            oscNode->setFrequencyAndAmplitude(freq, amp);
-        }
-    }
-
-    // Process the entire graph
-    mAudioGraph->process(numFrames);
-
-    // Get output from OutputNode and copy to buffer
-    if (mGraphOutputHandle != INVALID_NODE_HANDLE) {
-        OutputNode* outNode = mAudioGraph->getNodeAs<OutputNode>(mGraphOutputHandle);
-        if (outNode) {
-            const float* graphOutput = outNode->getFinalOutputBuffer();
-            int framesToCopy = std::min(numFrames, outNode->getFinalOutputNumFrames());
-            std::copy(graphOutput, graphOutput + framesToCopy * 2, output);
-        }
-    }
-
-    // Audio Looper + Waveform capture
-    mAudioLooper.process(output, numFrames);
-    mWaveformCapture.write(output, numFrames);
-
-    return watermelon_audio::IAudioCallback::Result::CONTINUE;
-}
-
 void AudioEngine::renderInputFx(float* output, int32_t numFrames, InputNode* inputNode) {
     const int32_t totalSamples = numFrames * 2;
 
@@ -1710,11 +1615,6 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
             return watermelon_audio::IAudioCallback::Result::CONTINUE;
         }
 
-        // AudioGraph path
-        if (mUseAudioGraph.load(std::memory_order_acquire) && mAudioGraph) {
-            return renderViaGraph(outputData, numFrames);
-        }
-
         // Mode detection: cache state once per callback
         const auto dualTouchState = mDualTouch.snapshot();
         bool oscillatorEnabled = mOscillatorEnabled.load(std::memory_order_acquire);
@@ -2027,39 +1927,6 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate) {
         mEffectChainNode->prepare(sampleRate, maxBlockSize);
         mEffectOutputBuffer.setSize(2, maxBlockSize);
         LOGI("EffectChainNode prepared");
-    }
-
-    // Configure OutputNode
-    if (mOutputNode) {
-        mOutputNode->prepare(sampleRate, maxBlockSize);
-        LOGI("OutputNode prepared");
-    }
-
-    // Configure AudioGraph
-    if (mAudioGraph) {
-        if (mGraphOscillatorHandle == INVALID_NODE_HANDLE) {
-            // First time setup - create nodes
-            auto graphOscillator = std::make_unique<OscillatorNode>();
-            auto graphMixer = std::make_unique<MixerNode>();
-            auto graphEffectChain = std::make_unique<EffectChainNode>();
-            auto graphOutput = std::make_unique<OutputNode>();
-
-            mGraphOscillatorHandle = mAudioGraph->addNode(std::move(graphOscillator));
-            mGraphMixerHandle = mAudioGraph->addNode(std::move(graphMixer));
-            mGraphEffectChainHandle = mAudioGraph->addNode(std::move(graphEffectChain));
-            mGraphOutputHandle = mAudioGraph->addNode(std::move(graphOutput));
-
-            // Connect nodes
-            mAudioGraph->connect(mGraphOscillatorHandle, 0, mGraphMixerHandle, 0);
-            mAudioGraph->connect(mGraphOscillatorHandle, 1, mGraphMixerHandle, 1);
-            mAudioGraph->connect(mGraphMixerHandle, 0, mGraphEffectChainHandle, 0);
-            mAudioGraph->connect(mGraphMixerHandle, 1, mGraphEffectChainHandle, 1);
-            mAudioGraph->connect(mGraphEffectChainHandle, 0, mGraphOutputHandle, 0);
-            mAudioGraph->connect(mGraphEffectChainHandle, 1, mGraphOutputHandle, 1);
-        }
-
-        mAudioGraph->prepare(sampleRate, maxBlockSize);
-        LOGI("AudioGraph prepared with %d nodes", mAudioGraph->getNodeCount());
     }
 
     // Configure VoiceManager

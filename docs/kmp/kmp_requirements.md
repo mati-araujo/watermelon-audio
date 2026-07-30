@@ -1649,16 +1649,34 @@ vivo.
 
 Así que es inalcanzable por construcción, y cuesta alocación y `prepare()` en cada start.
 
-**Qué habría que decidir, y por qué no se hizo acá:** o se conecta (y entonces hay que
-resolver que duplica el camino vivo) o se borra el cluster entero —los cuatro nodos, el grafo,
-los handles, `setUseAudioGraph`/`isUsingAudioGraph` y la rama del callback—. Es una decisión
-de producto sobre una arquitectura, no un arreglo de bug: meterla dentro de un `fix(core):`
-sería el mismo defecto de señal de #62, donde una remoción de API viajó adentro de un
-`perf(ci):`.
+> [!NOTE]
+> ✅ **RESUELTO el 2026-07-30: se borró.** "Conectarlo" nunca fue una rama real — el grafo
+> implementa `osc → mixer → fx → output` con **un** oscilador, y el motor vivo tiene cinco modos
+> de procesamiento. Encenderlo hoy habría perdido los 6 synth engines, la polifonía, el
+> SoundFont, el fade, el dual touch, el arp, la armonía **y `OutputStage`** — o sea la
+> protección de salida y los medidores que se acababan de arreglar. No era una arquitectura
+> alternativa: era un prototipo que el motor dejó atrás.
+>
+> Se fueron 878 líneas de archivos (`AudioGraph.{h,cpp}` + `OutputNode.{h,cpp}`), sus 6 entradas
+> de CMake y 48 referencias en `AudioEngine`. `ModeManager` **queda** —su muerte es
+> independiente y su crossfade es decisión aparte—; sólo perdió `setAudioGraph`, `mGraph` y el
+> `OutputNode*`.
+>
+> **Lo que NO se tocó:** `AudioNode.h` y `AudioBuffer.h`, que están vivos (base de los cuatro
+> nodos restantes; el buffer lo usan 14 archivos, incluido el looper). El directorio
+> `core/graph/` quedó sin grafo y **con una nota arriba que lo dice**, para que el nombre no
+> engañe al próximo.
 
-> **Ojo con el orden al tomarlo:** revisar primero si `AudioGraph` tiene tests propios, y
-> acordarse de que `core/ModeManager` —que tampoco está conectado— guarda un `OutputNode*` que
-> asigna y nunca lee. Los tres pedazos de deuda son el mismo cluster.
+> [!TIP]
+> **La mutación inversa se pagó sola, y corrigió mi mapa.** Antes de borrar puse un `abort()`
+> en el bloque de construcción del grafo esperando que la suite abortara. **No abortó**: ese
+> sitio está en el camino **legacy de Oboe directo**, que los tests no toman. El que sí se
+> alcanza es el de `configureComponentsWithSampleRate()`, en el camino del `BackendManager`
+> (tests, iOS, USB) — ahí el `abort()` voló la suite entera.
+>
+> La sustancia se sostenía —el grafo se construía en el camino vivo— pero **por el sitio que no
+> era**, y ningún grep iba a mostrarlo. **Afirmar que el código que decís que corre, corre, es
+> más barato y más discriminante que intentar probar una ausencia.**
 
 **Verificación — `test_c_api_analysis.cpp`, 14 tests (624 en total).** Lo que sí se cubre y
 sigue valiendo: el piso de **−100 dB** para el silencio (0 dB sería fondo de escala, la

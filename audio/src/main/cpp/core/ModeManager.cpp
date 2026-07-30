@@ -1,10 +1,8 @@
 #include "ModeManager.h"
-#include "graph/AudioGraph.h"
 #include "../nodes/OscillatorNode.h"
 #include "../nodes/InputNode.h"
 #include "../nodes/MixerNode.h"
 #include "../nodes/EffectChainNode.h"
-#include "../nodes/OutputNode.h"
 #include "../backends/BackendManager.h"
 
 namespace watermelon_audio {
@@ -50,13 +48,11 @@ void ModeManager::updateSnapshot() {
 }
 
 void ModeManager::setNodes(OscillatorNode* osc, InputNode* input,
-                            MixerNode* mixer, EffectChainNode* effects,
-                            OutputNode* output) {
+                            MixerNode* mixer, EffectChainNode* effects) {
     mOscillatorNode = osc;
     mInputNode = input;
     mMixerNode = mixer;
     mEffectChainNode = effects;
-    mOutputNode = output;
 }
 
 void ModeManager::prepare(int sampleRate) {
