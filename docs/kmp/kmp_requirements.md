@@ -3711,12 +3711,36 @@ el paso `Build the UI harness, iOS half` que había muerto cancelado en `637eb4e
 > **El CI no tiene deuda conocida.** El soak que quedaba pendiente de la sesión anterior está
 > hecho y cerrado; lo que resta es hardware.
 >
-> Dos cosas menores para mirar de paso, ninguna bloqueante:
-> - **La atestación local quedó rancia** tras los bumps (`a245e04e…` contra `4678e86e…`). Es el
->   comportamiento correcto; el próximo PR necesita un `gate.sh` fresco.
-> - **El `ios` del push de `93d0f98` tardó 1645 s** contra los 871–1135 s habituales.
->   Probablemente el bump de Kotlin invalidó las caches de `~/.konan`/Gradle — **no verificado**,
->   y debería bajar solo. Si no baja en las próximas corridas, ahí sí hay algo que mirar.
+> Una sola cosa menor, no bloqueante: **la atestación local quedó rancia** tras los bumps
+> (`a245e04e…` contra `4678e86e…`). Es el comportamiento correcto; el próximo PR necesita un
+> `gate.sh` fresco.
+
+#### El `ios` de 1645 s: verificado y cerrado, era el bump de Kotlin
+
+Se anotó como sospecha y **se comprobó en la misma sesión** — queda escrito porque va a volver a
+pasar con cada bump de Kotlin, y sin esto parece una regresión.
+
+El `ios` del push de `93d0f98` tardó **1645 s** contra un piso de ruido documentado de
+**759–1143 s** para ese job: no era ruido, estaba ~500 s por encima de la banda entera. La
+corrida siguiente que ejecutó el job de verdad (dispatch sobre `8d4aaf8`) dio **957 s**, adentro
+de la banda.
+
+**La cadena, con la evidencia de cada eslabón en los logs:**
+
+1. La cache vive en `konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}`
+   (`ci.yml`), así que **el bump de Kotlin cambia la clave**.
+2. En la corrida lenta el hit exacto falló y cayó al `restore-keys: konan-macOS-`, restaurando
+   la cache **vieja** — que no trae el toolchain nativo de 2.4.10, así que Kotlin/Native lo baja.
+3. Esa misma corrida **guardó 714 MB** bajo la clave nueva (`konan-macOS-d6102a8a…`).
+4. La corrida siguiente tuvo **`Cache hit for: konan-macOS-d6102a8a…`** — hit exacto, no
+   fallback.
+
+> **El tiempo solo no alcanzaba para concluir esto.** Un 957 s es compatible con "la cache lo
+> arregló" y con "bajó por cualquier otra razón, dentro del ruido". Lo que separa las dos
+> hipótesis es el **tipo de hit** en el log: exacto contra `restore-key`. Cuando una explicación
+> es sobre un mecanismo, medí el mecanismo, no sólo su efecto.
+
+**Costo real de un bump de Kotlin: una corrida lenta, una sola vez.** No hay nada que arreglar.
 
 ---
 
