@@ -3685,15 +3685,58 @@ billing agotado— tiene que existir una salida manual.
 `changes` es el sexto y no es decorativo: si fallara y no estuviera en la lista, los otros
 cinco quedarían `skipped` y el PR sería mergeable **sin ningún gate**.
 
-### Dónde retomar (2026-07-30, sesión de soak del CI local-first)
+### Dónde retomar (2026-07-30, sesión de soak del CI + la deuda que destapó)
 
-**No hay nada a medio hacer.** `master` = **`93d0f98`**, árbol limpio, **cero PRs abiertos**,
-**1.14.0 sigue siendo el último release** — ni `ci:` ni `build(deps):` cortan versión, y se
-verificó (no se abrió PR de release-please y `gradle.properties` quedó en `1.14.0`).
+**No hay nada a medio hacer.** `master` = **`4516fe4`**, árbol limpio, **cero PRs abiertos**,
+CI de master verde, **1.14.1 publicada**.
 
-Sesión de **auditoría**, no de construcción: el esquema local-first había aterrizado sin rodaje
-y el objetivo era ver si aguantaba en uso real. Aguantó donde importaba y falló una capa al
-lado.
+Empezó como sesión de **auditoría** —el esquema local-first había aterrizado sin rodaje— y el
+soak la llevó sola hasta el motor. Lo que entró, en orden:
+
+| PR | qué |
+|---|---|
+| **#101** | El grupo de concurrencia deriva del SHA en `push`: cada merge cancelaba el CI del merge anterior (**4 de 19, 21%**, `ios` en 4 de 4) |
+| **#99, #100** | AGP 9.2.1 → 9.3.1 y Kotlin 2.4.0 → 2.4.10 |
+| **#102, #103** | Cierre del soak, y el `ios` de 1645 s verificado como el bump de Kotlin |
+| **#104** → **1.14.1** | **Los medidores de salida estaban muertos**, y su RMS tenía una integración de ~77 s en vez de 300 ms |
+| **#106** | Borrada la ruta `AudioGraph`: un motor paralelo de 4 nodos, inalcanzable por construcción, 878 líneas |
+
+**Los dos hallazgos de motor salieron de auditar el CI, no de buscarlos.** El del `concurrency`
+apareció mirando por qué un job de master figuraba `cancelled`; el de los medidores, midiendo el
+radio de una deuda vieja antes de tocarla; y el del `AudioGraph`, al descubrir que ese radio
+estaba mal medido.
+
+> [!CAUTION]
+> **Las tres lecciones de método de la sesión, y son lo que más se transfiere.**
+>
+> 1. **Al vaciar una capa de trabajo, auditá con el criterio nuevo lo que quedó sosteniendo la
+>    garantía.** El bloque `concurrency:` era viejo e inofensivo; el camino rápido lo volvió
+>    load-bearing sin que nadie lo tocara.
+> 2. **Afirmá que el código que decís que corre, corre.** La *mutación inversa* —un `abort()`
+>    donde afirmás que se pasa— corrigió mi mapa del `AudioGraph` antes de que llegara al PR:
+>    el sitio que yo señalaba está en el camino legacy de Oboe, que los tests no toman. Probar
+>    una presencia es más barato y más discriminante que probar una ausencia, y ningún grep lo
+>    mostraba.
+> 3. **Cuando la explicación es sobre un mecanismo, medí el mecanismo y no sólo su efecto.** Los
+>    957 s del `ios` eran compatibles con "lo arregló la cache" y con "bajó dentro del ruido";
+>    lo que separó las hipótesis fue el **tipo de hit** en el log.
+>
+> Y un cuarto, más incómodo: **me equivoqué dos veces afirmando "esto no tiene consumidores"**,
+> las dos por grepear mal (filtrar por rangos de línea, grepear el método en vez de la clase).
+> Las dos las agarró el método antes de mergear. El patrón a vigilar es el mío.
+
+> [!TIP]
+> **El techo global de 45 min de `gate.sh` mató DOS gates sanos hoy**, con todos los pasos en
+> `rc=0`: tras los bumps de toolchain (`xcframework` 772 s) y tras un cambio en `AudioEngine.h`
+> (**2097 s**, contra 6 s con el build caliente). El techo está calibrado para corridas
+> incrementales, y cualquier cosa que invalide el build nativo lo pasa. **No se tocó** —es un
+> guardián real— pero queda medido: la opción es subirlo, hacerlo por paso en vez de global, o
+> documentar que la primera corrida tras invalidar el nativo va con `--only`.
+>
+> Otras dos cosas señaladas y no hechas, a propósito: **`configureGraphForMode` quedó con un
+> nombre que miente** (nunca tocó el grafo; se le puso la aclaración al lado en vez de
+> renombrarlo), y **no se pudo verificar 1.14.1 contra el registro de Packages** porque el token
+> no tiene scope `read:packages` (403) — se verificó hasta las 4 tareas de publicación en el log.
 
 **El veredicto del soak: el digest no dio un solo falso verde.**
 
@@ -3770,16 +3813,26 @@ el paso `Build the UI harness, iOS half` que había muerto cancelado en `637eb4e
 > [!IMPORTANT]
 > **Lo que queda, en orden de impacto real:**
 >
-> 1. **G2 — device iOS.** Necesita un iPhone. Sin cambios.
-> 2. **Smoke: lo que falta necesita USB físico o poder escuchar.** Sin cambios.
-> 3. **NoisyPad local-first** se maneja en sus propias sesiones. No es trabajo de este repo.
+> 1. **El cluster `ModeManager`** — la continuación natural de lo podado en #106, y lo único
+>    grande que NO necesita hardware. Nadie lo instancia; `isInModeTransition` y
+>    `getModeTransitionProgress` devuelven siempre `false`/`0`, con test de caracterización.
+>    **Es decisión de producto** —conectar el crossfade o tirarlo—, no un fix; el análisis del
+>    `AudioGraph` es el molde a seguir: medir el radio ANTES, y con mutación inversa.
+> 2. **`VoiceManager::setMaxVoices` es un no-op literal.** Clampea a una variable local, loguea
+>    *"requires recreation of VoicePool"* y vuelve; encima bumpea la state version. Mismo defecto
+>    de clase que los medidores: un setter público que miente. **Chequear primero si NoisyPad lo
+>    llama creyendo que limita la polifonía.**
+> 3. **WA-1.5 / WA-T.2** — tests de `commonMain`: falta lo central (`StateSynchronizer`,
+>    `AudioEngineImpl`, mapeo de errores). Sin device, sin JNI.
+> 4. **G2 — device iOS.** Necesita un iPhone. Sin cambios.
+> 5. **Smoke: lo que falta necesita USB físico o poder escuchar.** Sin cambios.
+> 6. **NoisyPad local-first** se maneja en sus propias sesiones. No es trabajo de este repo.
 >
-> **El CI no tiene deuda conocida.** El soak que quedaba pendiente de la sesión anterior está
-> hecho y cerrado; lo que resta es hardware.
+> **El CI no tiene deuda conocida** salvo el techo del gate, medido arriba. Lo que resta es
+> deuda de motor (1–3) o hardware (4–5).
 >
-> Una sola cosa menor, no bloqueante: **la atestación local quedó rancia** tras los bumps
-> (`a245e04e…` contra `4678e86e…`). Es el comportamiento correcto; el próximo PR necesita un
-> `gate.sh` fresco.
+> Menor y esperable: **la atestación local queda rancia** después de cualquier bump o de tocar
+> un header del motor. Es el comportamiento correcto; el próximo PR corre `gate.sh` de nuevo.
 
 #### El `ios` de 1645 s: verificado y cerrado, era el bump de Kotlin
 
