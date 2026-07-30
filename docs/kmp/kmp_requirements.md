@@ -3619,7 +3619,108 @@ billing agotado— tiene que existir una salida manual.
 `changes` es el sexto y no es decorativo: si fallara y no estuviera en la lista, los otros
 cinco quedarían `skipped` y el PR sería mergeable **sin ningún gate**.
 
-### Dónde retomar (2026-07-29, sesión local-first CI)
+### Dónde retomar (2026-07-30, sesión de soak del CI local-first)
+
+**No hay nada a medio hacer.** `master` = **`93d0f98`**, árbol limpio, **cero PRs abiertos**,
+**1.14.0 sigue siendo el último release** — ni `ci:` ni `build(deps):` cortan versión, y se
+verificó (no se abrió PR de release-please y `gradle.properties` quedó en `1.14.0`).
+
+Sesión de **auditoría**, no de construcción: el esquema local-first había aterrizado sin rodaje
+y el objetivo era ver si aguantaba en uso real. Aguantó donde importaba y falló una capa al
+lado.
+
+**El veredicto del soak: el digest no dio un solo falso verde.**
+
+- Los dos PRs que usaron el camino rápido (#96, #97) fueron **legítimos**. El digest se
+  recomputó de forma **independiente** —con `git ls-tree`, no con el `git ls-files` de
+  `gate-digest.py`, para no auditar el script con el script— sobre los cuatro árboles: match
+  exacto, 691 archivos. En los dos, la atestación se había creado sobre un commit **distinto**
+  del pusheado, y el delta era **sólo `.github/local-gate.json`**, que el digest excluye por
+  diseño.
+- El candado del publish funcionó, verificado **por log y no por conclusión**:
+  `wait-for-ci.sh` esperó **18m24s** sobre `9763bda6` antes de dejar publicar 1.14.0.
+- Los dos PRs de dependabot (#99 AGP, #100 Kotlin) **rechazaron el camino rápido por el motivo
+  correcto** —digest `c13733c1…` atestado contra `bb38e3fb…` real— y corrieron el CI entero. El
+  bump vive en `gradle/libs.versions.toml`, que es no-prosa y por lo tanto está en el digest.
+
+**Lo que sí falló: el bloque `concurrency:`, y es el hallazgo de la sesión.**
+
+| PR | qué |
+|---|---|
+| **#101** | El grupo de concurrencia deriva del **SHA** en `push`. Con `ci-${{ github.ref }}` todos los commits de master compartían grupo y **cada merge cancelaba el CI del merge anterior**: **4 de 19 corridas `push: master` del régimen de PRs, 21%**, y el job `ios` fue la víctima en **4 de 4** por ser el más largo. Trae además el guardián de deriva en `test-attestation.sh` y `docs/ci/local_first.md` §7.11 |
+| **#99** | AGP 9.2.1 → 9.3.1 |
+| **#100** | Kotlin 2.4.0 → 2.4.10, rebaseado sobre master con AGP ya adentro |
+
+**La config era preexistente (`0c33a7f`) y era inofensiva.** Hasta local-first, la corrida del
+PR ya había ejecutado `ios`/`build`/`cpp-tests-macos` de verdad, y perder la de master costaba
+sólo verificar el resultado del squash. Desde el camino rápido, **el push a master es el único
+lugar del CI donde esos tres gates se ejecutan.** Una config vieja pasó a ser load-bearing el
+día que aterrizó #94, sin que nadie la tocara.
+
+**No era un falso verde** —la corrida figura `cancelled`, y `wait-for-ci.sh` la rechaza— sino
+una **invariante escrita que era falsa**: "en `push: master` el CI paga su costo entero siempre,
+sin excepción" estaba en `CLAUDE.md` y en el encabezado de `verify-attestation.sh`, y era falsa
+el 21% de las veces sin que nada avisara. **Y muerde el release:** si un merge entra durante el
+CI del commit de release, la espera sale 1 y queda tag + Release con cero artefacto en Packages
+— el modo de falla de v1.8.0. Con 1.14.0 no pasó por 26 min de margen, no por diseño.
+
+**El agujero heredado se cerró:** el `ios` del push de `405474c` corrió entero (871 s), incluido
+el paso `Build the UI harness, iOS half` que había muerto cancelado en `637eb4ed`.
+
+> [!CAUTION]
+> **Tres cosas de método que esta sesión dejó, y son las que más se transfieren.**
+>
+> 1. **Al vaciar una capa de trabajo, auditá con el criterio nuevo lo que quedó sosteniendo la
+>    garantía.** El defecto no estaba en lo que se construyó; estaba en lo que dejó de ser
+>    redundante. Preguntá explícitamente: ¿quién da ahora la garantía que daba la capa que
+>    optimicé?
+> 2. **`cancel-in-progress: false` no es "no cancelar".** GitHub deja vivo el run *en curso*
+>    pero **cancela el run pending** cuando llega uno nuevo del mismo grupo: un commit intermedio
+>    puede no correr nunca, y el del release puede morir esperando. Para garantizar que cada
+>    commit corra hay que darle **su propio grupo**.
+> 3. **El test obvio de un cambio de concurrencia es un falso verde.** "Dos pushes rápidos al PR
+>    y el primero se cancela" pasa igual si la expresión colapsara a la constante `ci-` — que
+>    sería *peor* que el estado original. El discriminador es al revés: **dos runs que NO se
+>    tienen que cancelar**. Se corrió dos veces, y las dos con el mismo SHA en los dos runs para
+>    que lo único distinto fuera el grupo: `pull_request` vs `workflow_dispatch` sobre
+>    `853803e0` (pre-merge, descarta el colapso) y `push` vs `workflow_dispatch` sobre
+>    `5903adba` (post-merge, confirma que la rama de `push` resuelve al SHA y no al ref).
+
+> [!TIP]
+> **Los dos bumps de dependabot tocan líneas ADYACENTES de `gradle/libs.versions.toml` (15 y
+> 16), así que el segundo conflictúa apenas se mergea el primero** — caen en el mismo hunk con
+> contexto. Se destraba con `@dependabot rebase`, y sale ganando: el PR rebaseado prueba la
+> **combinación** en vez de cada bump contra la misma base vieja.
+>
+> **No hay que tocar `.github/toolchain-pins.json` por un bump de Kotlin/AGP**, y el propio
+> archivo lo explica: quedan fuera **a propósito** porque viajan en `gradle/libs.versions.toml`,
+> que el digest ya cubre. El bump sólo invalida la atestación local, y `gate.sh` la regenera.
+>
+> **Y una herramienta puede mentir con una lista vacía:** `gh pr list --state open` devolvió
+> `[]` con los dos PRs de dependabot abiertos, y minutos después los listó bien. La primera
+> versión del reporte de esta sesión afirmó "cero PRs abiertos" sobre esa base y estaba mal. Si
+> importa, cruzá contra otra fuente — los runs de Actions sí los mostraban.
+
+> [!IMPORTANT]
+> **Lo que queda, en orden de impacto real:**
+>
+> 1. **G2 — device iOS.** Necesita un iPhone. Sin cambios.
+> 2. **Smoke: lo que falta necesita USB físico o poder escuchar.** Sin cambios.
+> 3. **NoisyPad local-first** se maneja en sus propias sesiones. No es trabajo de este repo.
+>
+> **El CI no tiene deuda conocida.** El soak que quedaba pendiente de la sesión anterior está
+> hecho y cerrado; lo que resta es hardware.
+>
+> Dos cosas menores para mirar de paso, ninguna bloqueante:
+> - **La atestación local quedó rancia** tras los bumps (`a245e04e…` contra `4678e86e…`). Es el
+>   comportamiento correcto; el próximo PR necesita un `gate.sh` fresco.
+> - **El `ios` del push de `93d0f98` tardó 1645 s** contra los 871–1135 s habituales.
+>   Probablemente el bump de Kotlin invalidó las caches de `~/.konan`/Gradle — **no verificado**,
+>   y debería bajar solo. Si no baja en las próximas corridas, ahí sí hay algo que mirar.
+
+---
+
+### Dónde retomar (2026-07-29, sesión local-first CI — historia)
 
 **No hay nada a medio hacer.** `master` = **`637eb4e`**, árbol limpio, **cero PRs abiertos**,
 **1.14.0 publicada** (release no-draft; el paso "Publish to GitHub Packages" cerró en
