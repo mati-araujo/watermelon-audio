@@ -95,12 +95,33 @@ trap cleanup EXIT
 
 say() { printf '\n\033[1m=== %s\033[0m\n' "$*"; }
 
+# Dormir en tajadas de 1 s, y NO en un `sleep` largo. La diferencia importa
+# porque estos watchers se matan cuando el gate termina:
+#
+#   `kill` sobre la subshell NO mata a su `sleep` hijo. El hijo queda huerfano
+#   y ademas HEREDA EL STDOUT del script, asi que sigue sosteniendo el pipe
+#   hasta que vence. Con `sleep 2700` eso son 45 minutos DESPUES de que el gate
+#   ya salio verde: medido, un `--only ios` que termino en 2m37s con los 6 pasos
+#   en rc=0 dejo colgado el pipeline 45m02s exactos — o sea GLOBAL_TIMEOUT.
+#   Redirigir a archivo lo esquivaba; cualquiera que pipeara `gate.sh` se comia
+#   los 45 min creyendo que el gate seguia corriendo.
+#
+# Durmiendo de a 1 s el huerfano vive <= 1 s. Es la misma forma que ya usaba
+# `run_with_timeout` mas abajo, que por eso nunca tuvo el problema.
+nap() {
+    local left="$1"
+    while [ "$left" -gt 0 ]; do
+        sleep 1
+        left=$(( left - 1 ))
+    done
+}
+
 # El heartbeat: imprime cada 30 s en que paso esta y hace cuanto. Sin esto, un
 # cuelgue es 37 minutos de pantalla vacia.
 start_heartbeat() {
     (
         while :; do
-            sleep "$HEARTBEAT"
+            nap "$HEARTBEAT"
             [ -f "$STEP_FILE" ] || exit 0
             printf '    ... [%s] %s\n' "$(fmt_elapsed $(( $(date +%s) - START_EPOCH )))" "$(cat "$STEP_FILE" 2>/dev/null)"
         done
@@ -345,7 +366,12 @@ start_heartbeat
 
 # El techo global. Si el gate entero se pasa de 45 min, algo se colgo de una
 # forma que los timeouts de simctl no cubren.
-( sleep "$GLOBAL_TIMEOUT"; printf '\n!! el gate supero el techo global de %ss — abortando\n' "$GLOBAL_TIMEOUT" >&2; kill -9 $$ 2>/dev/null ) &
+#
+# `nap` y no `sleep`, por lo explicado alla arriba: era ESTE watcher el que
+# dejaba el huerfano de 45 min sosteniendo el stdout del gate. Y `>/dev/null`
+# porque no escribe una sola linea a stdout —su aviso va a stderr—, asi que
+# ademas le sacamos la posibilidad estructural de retener el pipe.
+( nap "$GLOBAL_TIMEOUT"; printf '\n!! el gate supero el techo global de %ss — abortando\n' "$GLOBAL_TIMEOUT" >&2; kill -9 $$ 2>/dev/null ) >/dev/null &
 GLOBAL_WATCHER=$!
 
 sim_hygiene
