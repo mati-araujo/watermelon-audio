@@ -109,7 +109,6 @@ add_library(watermelon-core STATIC
         ${WMA_CPP_ROOT}/core/OscillatorBank.cpp
         ${WMA_CPP_ROOT}/core/MusicalScale.cpp
         ${WMA_CPP_ROOT}/core/XYMapper.cpp
-        ${WMA_CPP_ROOT}/core/ModeManager.cpp
         ${WMA_CPP_ROOT}/nodes/OscillatorNode.cpp
         ${WMA_CPP_ROOT}/nodes/EffectChainNode.cpp
         ${WMA_CPP_ROOT}/nodes/MixerNode.cpp

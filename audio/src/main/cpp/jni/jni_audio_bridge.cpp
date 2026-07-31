@@ -17,7 +17,6 @@
 #include "../api/watermelon_audio.h"
 #include "../core/AudioEngine.h"
 #include "../core/AudioMode.h"
-#include "../core/ModeConfigurations.h"
 #include "../nodes/InputNode.h"
 #include "../backends/BackendManager.h"
 #include "../backends/LibusbBackend.h"

@@ -137,25 +137,6 @@ struct XYMappingConfig {
 };
 
 /**
- * @brief Complete mode configuration.
- */
-struct ModeConfiguration {
-    AudioMode mode = AudioMode::CHAOS_PAD;
-
-    // Signal routing
-    bool oscillatorActive = true;
-    bool inputActive = false;
-    float oscillatorLevel = 1.0f;
-    float inputLevel = 0.0f;
-
-    // XY mapping
-    XYMappingConfig xyMapping;
-
-    // Transition timing
-    float transitionTimeMs = 100.0f;
-};
-
-/**
  * @brief Helper functions for mode system.
  */
 namespace ModeUtils {

@@ -522,9 +522,24 @@ WMA_API const char* wma_get_mode_name(int mode);
 /**
  * Check if a mode transition is in progress.
  *
- * WARNING: always false today. Nothing writes the flag — the class that owns
- * the real transition state (core/ModeManager) is not wired into AudioEngine.
- * Kept because the JNI has always exposed it; see the note in §16.
+ * WARNING: always false, and now permanently so. Nothing writes the flag.
+ *
+ * It used to say the writer existed but was "not wired into AudioEngine" —
+ * core/ModeManager, which owned a crossfade and a transition ramp. That class
+ * was deleted: no translation unit ever named it, so nothing could construct
+ * it, and its effectors were inert anyway (the setActive() calls gated
+ * process() methods the engine never invokes). The mode switch that does run
+ * is wma_set_audio_mode() above, and it is instantaneous by construction.
+ *
+ * The transition that consumers actually observe is implemented in Kotlin, in
+ * ModeTransitionManagerImpl (commonMain): a six-phase state machine with its
+ * own progress, which drives setAudioMode() and polls wma_get_audio_mode() for
+ * confirmation. It never reads this flag. So this pair is not a stub waiting to
+ * be filled in — it is a second answer to a question that already has one.
+ *
+ * Kept, rather than removed, because it sits in the published C API and in
+ * IAudioNativeBridge: dropping it is a breaking change for no gain while it
+ * costs four lines. Pinned by TheTransitionFlagsAreAlwaysInactive.
  */
 WMA_API bool wma_is_in_mode_transition(const WmaEngine* engine);
 
