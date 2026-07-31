@@ -50,19 +50,6 @@ void XYMapper::updateConfigSnapshot() {
     mUsingConfigSnapshot1.store(!usingSnapshot1, std::memory_order_release);
 }
 
-void XYMapper::setConfiguration(const XYMappingConfig& config) {
-    std::lock_guard<std::mutex> lock(mConfigMutex);
-    mConfig = config;
-
-    // Update RT-safe snapshot
-    updateConfigSnapshot();
-}
-
-XYMappingConfig XYMapper::getConfiguration() const {
-    std::lock_guard<std::mutex> lock(mConfigMutex);
-    return mConfig;
-}
-
 void XYMapper::processXY(float x, float y) {
     // ========== RT-SAFE: Lock-free read from atomic snapshot ==========
     // This function can be called from the audio thread.

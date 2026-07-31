@@ -146,7 +146,6 @@ set(INPUT_SOURCES
 set(MODE_SOURCES
         nodes/MixerNode.cpp
         core/XYMapper.cpp
-        core/ModeManager.cpp
 )
 
 # Voice System now in watermelon-voice sub-library (Phase 1D)

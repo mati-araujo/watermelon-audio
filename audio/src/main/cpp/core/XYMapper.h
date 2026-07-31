@@ -84,19 +84,6 @@ public:
     void setEffectChainNode(EffectChainNode* node) { mEffectChainNode = node; }
 
     /**
-     * @brief Set the XY mapping configuration.
-     * @param config New mapping configuration
-     *
-     * Thread-safe: protected by mutex.
-     */
-    void setConfiguration(const XYMappingConfig& config);
-
-    /**
-     * @brief Get current mapping configuration.
-     */
-    XYMappingConfig getConfiguration() const;
-
-    /**
      * @brief Process XY coordinates and apply to targets.
      * @param x X coordinate (0.0 to 1.0)
      * @param y Y coordinate (0.0 to 1.0)
@@ -165,7 +152,16 @@ private:
      */
     void applyToTarget(XYTarget target, float value);
 
-    // Configuration (mutex-protected for UI thread writes)
+    // Configuration. Fixed at its defaults for the whole life of the mapper:
+    // the primary X axis is FREQUENCY and Y is AMPLITUDE, always.
+    //
+    // It had a setConfiguration()/getConfiguration() pair, and the only caller
+    // of the setter was ModeManager, applying the per-mode XY mapping out of
+    // ModeConfigurations — the route that let MIX put an axis on the mixer
+    // crossfade. That whole route was never wired into the engine and was
+    // deleted; the getter never had a caller at all. Remapping that IS
+    // reachable goes through the secondary mappings below, which do have
+    // setters and do reach the snapshot.
     XYMappingConfig mConfig;
     mutable std::mutex mConfigMutex;
 

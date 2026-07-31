@@ -11,7 +11,6 @@
 #include "watermelon_audio_internal.h"
 
 #include "../core/AudioMode.h"
-#include "../core/ModeConfigurations.h"
 #include "../voice/VoiceTypes.h"
 #include "../platform/Logger.h"
 #include "../platform/LogCaptureBuffer.h"

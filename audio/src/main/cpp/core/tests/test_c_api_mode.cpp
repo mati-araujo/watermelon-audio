@@ -210,21 +210,29 @@ TEST(CApiModeStatics, OnlyTheMicModesRequireInput) {
 // ===========================================================================
 
 TEST_F(CApiModeTest, TheTransitionFlagsAreAlwaysInactive) {
-    // NOT the behaviour these should have. Nothing writes either one: the class
-    // that owns real transition state, core/ModeManager, is not wired into
-    // AudioEngine at all. So nativeIsInModeTransition has always answered
-    // "false" and nativeGetModeTransitionProgress "0", on both platforms.
+    // Nothing writes either one, and after the deletion of core/ModeManager
+    // nothing is left that ever could. That class was the documented "real"
+    // writer; it was never constructed by any translation unit, and most of
+    // what it drove was inert regardless — its setActive() calls gated
+    // OscillatorNode::process()/InputNode::process(), which the engine never
+    // invokes. So the flags have always answered "false" and "0" on both
+    // platforms, and now that is a property of the code rather than an
+    // accident of wiring.
     //
-    // Migrating the pair did not change that — it moved dead state from two
-    // copies to one. This test says so out loud, and fails if someone wires the
-    // real thing up, which is the right way to find out.
+    // This is deliberately NOT a stub waiting to be implemented. The mode
+    // transition consumers actually see is ModeTransitionManagerImpl in
+    // commonMain, which computes its own progress and never reads these.
+    // Before making either of them true, read the note on
+    // wma_is_in_mode_transition in watermelon_audio.h: the question is not
+    // "how do we fill this in" but "why would there be two answers".
     EXPECT_FALSE(wma_is_in_mode_transition(mWma));
     EXPECT_FLOAT_EQ(wma_get_mode_transition_progress(mWma), 0.0f);
 
     wma_set_audio_mode(mWma, kInputFx);
 
     EXPECT_FALSE(wma_is_in_mode_transition(mWma))
-        << "if this is now true, ModeManager got wired up — update this test";
+        << "someone started writing this flag — that is a design decision, not "
+           "a fix; see the note in watermelon_audio.h before updating this test";
     EXPECT_FLOAT_EQ(wma_get_mode_transition_progress(mWma), 0.0f);
 }
 

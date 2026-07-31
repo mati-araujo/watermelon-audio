@@ -3685,6 +3685,79 @@ billing agotado— tiene que existir una salida manual.
 `changes` es el sexto y no es decorativo: si fallara y no estuviera en la lista, los otros
 cinco quedarían `skipped` y el PR sería mergeable **sin ningún gate**.
 
+### Nota de cierre — el cluster `ModeManager` no era un cluster (2026-07-31)
+
+**El ticket estaba mal planteado, y medirlo fue lo que lo mostró.** "El cluster `ModeManager`"
+nombraba **tres capas que comparten el nombre y nada más**, con estados opuestos:
+
+| Capa | LOC | ¿Viva? | Consumidores **medidos** |
+|---|---|---|---|
+| **A** — C++ `core/ModeManager` + `ModeConfigurations.h` | **835** | ❌ nunca se construye | **0** — ningún TU nombra el tipo |
+| **B** — `wma_is_in_mode_transition` / `..._progress` (C API + JNI + 3 bridges) | ~40 | ❌ `false`/`0` siempre | **1**: el harness (`ModeControl.kt:83`). NoisyPad: **0** |
+| **C** — Kotlin `ModeTransition*` (`commonMain`) | **669** + 336 test | ✅ **shippeada y consumida** | **NoisyPad, producción, Android + iOS** |
+
+**La capa C es el hallazgo que rompe el marco.** `ModeTransitionFactory` / `IModeTransitionHandler`
+/ `ModeTransitionState` entran por `import` en `MainViewModel.kt`, `ChaosPadViewModel.kt`,
+`ChaosPadViewModelModule.kt` y `NoisyPadIosGraph.kt`. **La transición de modo ya está
+implementada, en Kotlin**: `ModeTransitionManagerImpl` corre una máquina de 6 fases con su
+propio progreso, llama `setAudioMode()` y poolea `wma_get_audio_mode()`. **Nunca lee los flags
+nativos.** O sea que la capa A no era "el crossfade que falta conectar" sino **una segunda
+respuesta, más vieja, a una pregunta que ya tenía una**.
+
+**Lo decidido:** se borró la capa A (835 LOC); la capa B **queda documentada como muerta**, con
+el porqué escrito en `watermelon_audio.h` y en el test de caracterización — sacarla es breaking
+en la C API y en `IAudioNativeBridge` por cero ganancia.
+
+> [!CAUTION]
+> **Lo que la mutación inversa corrigió, otra vez.** Tres mutantes sobre 781 tests:
+> **M1** `abort()` en la rama MIX de `wma_set_audio_mode` → **4 tests abortan**: el camino vivo
+> es la C API, probado por presencia. **M2** `abort()` en `ModeManager::ModeManager()` →
+> **781/781 pasan**. **M3** `abort()` en `MixerNode::process()` → **781/781 pasan**, y esto **NO
+> prueba que esté muerto**: la suite de host no maneja el callback en condiciones de MIX. Lo que
+> dice es que **el crossfade no tiene un solo test**. Una ausencia en la suite no es una ausencia
+> en producción, y confundirlas es el error que M3 estuvo a punto de inducir.
+>
+> **Y la prueba fuerte de A no fue la suite** —eso es una ausencia— sino que **ningún otro
+> translation unit nombra el tipo**: nadie *puede* construirlo.
+
+**Los efectores, que es donde estaba la sorpresa.** Casi nada de lo que tocaba A llegaba al
+audio: **la única llamada a `->process()` sobre un nodo en todo el motor es
+`mMixerNode->process()`** (`AudioEngine.cpp`). `InputNode::process` y `OscillatorNode::process`
+**no los invoca nadie** — el motor lee la entrada por `getMonitoringSamples()`. Así que los 6
+`setActive()` de `configureGraphForMode` eran inertes por **dos razones independientes**.
+
+> [!IMPORTANT]
+> **El crossfade de MIX está muerto en las CINCO capas, y quedó SIN DECIDIR.** Es lo único vivo
+> que salió de este análisis:
+> 1. Ninguna UI de NoisyPad emite `ChaosPadIntent.SetCrossfadePosition` (declarada, handleada,
+>    nunca disparada).
+> 2. `NativeModeStateWriter.setCrossfadePosition` es `Result.success(Unit)` — **no-op literal**.
+> 3. **No hay `wma_*` ni JNI para el mixer.** `AudioEngine::setMixerCrossfade` no tiene un caller.
+> 4. `XYTarget::CROSSFADE` sólo se asignaba en `ModeConfigurations::getMix()` → murió con A.
+> 5. `mCrossfadeEnabled{false}` por default y nadie lo prende: en MIX, `MixerNode::process` corre
+>    con la rama equal-power apagada.
+>
+> **Si se quiere, NO se consigue conectando A**: se consigue con ~4 funciones
+> (`wma_set_mixer_crossfade` + JNI + bridge + iOS) hacia `AudioEngine::setMixerCrossfade`, que ya
+> existe. `MixerNode` ya tiene la matemática equal-power y el smoothing; lo que falta es un
+> **escritor**.
+
+**Efecto colateral registrado, no tapado:** al morir A, `XYMapper::setConfiguration` se quedó sin
+caller (`getConfiguration` nunca tuvo uno). Se borraron las dos, y **`mConfig` queda fijo en sus
+defaults**: el eje X primario es `FREQUENCY` y el Y `AMPLITUDE`, siempre. El remapeo que **sí**
+es alcanzable va por las secondary mappings. Está escrito al lado del miembro en `XYMapper.h`.
+
+> [!TIP]
+> **Defecto nuevo de `gate.sh`, y no es el techo de 45 min.** Su watchdog del techo global deja
+> un `sleep` huérfano que mantiene abierto el **stdout** después de que el gate sale: una corrida
+> de `--only ios` que terminó en **2m37s con los 6 pasos en `rc=0`** dejó colgado el pipeline
+> **45m02s** — exactamente `GLOBAL_TIMEOUT`. **Cualquier invocación que pipee la salida de
+> `gate.sh` se cuelga los 45 minutos aunque haya salido bien.** Se evita redirigiendo a archivo
+> en vez de pipear. El techo **no se tocó**.
+>
+> **Y `gate.sh` se niega a correr con el árbol sucio, devolviendo el shell en `EXIT=0`.** Es
+> correcto (el digest sale del índice), pero el `0` no dice que corrió: hay que leer la salida.
+
 ### Dónde retomar (2026-07-30, sesión de soak del CI + la deuda que destapó)
 
 **No hay nada a medio hacer.** `master` = **`4516fe4`**, árbol limpio, **cero PRs abiertos**,
@@ -3813,15 +3886,15 @@ el paso `Build the UI harness, iOS half` que había muerto cancelado en `637eb4e
 > [!IMPORTANT]
 > **Lo que queda, en orden de impacto real:**
 >
-> 1. **El cluster `ModeManager`** — la continuación natural de lo podado en #106, y lo único
->    grande que NO necesita hardware. Nadie lo instancia; `isInModeTransition` y
->    `getModeTransitionProgress` devuelven siempre `false`/`0`, con test de caracterización.
->    **Es decisión de producto** —conectar el crossfade o tirarlo—, no un fix; el análisis del
->    `AudioGraph` es el molde a seguir: medir el radio ANTES, y con mutación inversa.
+> 1. ~~**El cluster `ModeManager`**~~ ✅ **CERRADO 2026-07-31** — ver la nota de cierre abajo.
+>    Se borró la capa C++; los flags de la C API quedan documentados como muertos, a decisión
+>    explícita. **El crossfade de MIX quedó sin decidir** y es lo único vivo que salió de ahí.
 > 2. **`VoiceManager::setMaxVoices` es un no-op literal.** Clampea a una variable local, loguea
 >    *"requires recreation of VoicePool"* y vuelve; encima bumpea la state version. Mismo defecto
->    de clase que los medidores: un setter público que miente. **Chequear primero si NoisyPad lo
->    llama creyendo que limita la polifonía.**
+>    de clase que los medidores: un setter público que miente. ✅ **La precondición ya está
+>    medida (2026-07-31): NoisyPad NO lo llama** — cero hits de `setMaxVoices`/`maxVoices` en
+>    todo el repo, así que nadie cree hoy que limita la polifonía. Queda la decisión de si se
+>    implementa o se borra, sin la urgencia de un consumidor engañado.
 > 3. **WA-1.5 / WA-T.2** — tests de `commonMain`: falta lo central (`StateSynchronizer`,
 >    `AudioEngineImpl`, mapeo de errores). Sin device, sin JNI.
 > 4. **G2 — device iOS.** Necesita un iPhone. Sin cambios.
