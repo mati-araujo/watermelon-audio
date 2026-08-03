@@ -216,6 +216,27 @@ WMA_API void wma_set_master_volume(WmaEngine* engine, float volume);
 /** Get master volume. */  /* RT-safe */
 WMA_API float wma_get_master_volume(const WmaEngine* engine);
 
+/**
+ * Set the instrument level (0.0 – 1.0). RT-safe.
+ *
+ * Scales synth + FX and NOT the loops: it is applied before AudioLooper mixes
+ * playback in, sharing the fade's position for exactly that reason. Master
+ * volume, by contrast, scales the combined synth + FX + loops bus.
+ *
+ * The looper's recording tap reads the signal AFTER this gain, so a take
+ * captures whatever level you were hearing. Changing it mid-recording bakes the
+ * change into the loop.
+ *
+ * This is the instrument half of the instrument/input balance; the input half
+ * is wma_input_set_monitoring_volume (level) and wma_input_set_gain (dB, for
+ * hardware calibration). They are deliberately orthogonal — no equal-power
+ * linkage in the engine, because that curve is a UI choice.
+ */
+WMA_API void wma_set_synth_volume(WmaEngine* engine, float volume);
+
+/** Get the instrument level. */  /* RT-safe */
+WMA_API float wma_get_synth_volume(const WmaEngine* engine);
+
 /** Get current fade volume multiplier. */
 WMA_API float wma_get_fade_volume(const WmaEngine* engine);
 

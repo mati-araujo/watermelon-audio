@@ -71,22 +71,6 @@ internal class NativeModeStateWriter @OptIn(InternalWatermelonApi::class) constr
         }
     }
 
-    /**
-     * **El `withContext(Dispatchers.IO)` que envolvía esto se fue, y no cambia nada.**
-     *
-     * El cuerpo no toca el motor: el crossfade se resuelve del lado de Kotlin y acá no
-     * queda más que devolver éxito. O sea que el salto de dispatcher protegía un cuerpo
-     * vacío. Sacarlo era además obligatorio: `Dispatchers.IO` no se puede nombrar en
-     * Kotlin/Native.
-     *
-     * Sigue siendo `suspend` porque lo es en [IModeStateWriter] y porque el día que
-     * llegue el ruteo del mixer, esto sí va a llamar al motor.
-     */
-    override suspend fun setCrossfadePosition(position: Float): Result<Unit> {
-        logger.debug(TAG, "setCrossfadePosition: position=$position")
-        return Result.success(Unit)
-    }
-
     override fun isEngineRunning(): Boolean {
         // Engine state: 0=Stopped, 1=Starting, 2=Running, 3=Stopping
         val state = bridge.getEngineState()

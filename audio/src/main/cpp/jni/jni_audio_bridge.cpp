@@ -186,6 +186,22 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetMas
     return wma_get_master_volume(g_wmaEngine);
 }
 
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetSynthVolume(
+    JNIEnv* env, jobject thiz, jfloat volume) {
+    if (!ensureEngine()) {
+        return;
+    }
+    // wma_set_synth_volume clamps to [0, 1] itself.
+    wma_set_synth_volume(g_wmaEngine, volume);
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetSynthVolume(
+    JNIEnv* env, jobject thiz) {
+    return wma_get_synth_volume(g_wmaEngine);
+}
+
 JNIEXPORT jfloat JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetCurrentFadeVolume(
     JNIEnv* env, jobject thiz) {

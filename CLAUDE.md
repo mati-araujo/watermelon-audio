@@ -10,7 +10,7 @@ Motor de sintesis en tiempo real con efectos DSP profesionales. C++20 + Oboe + K
 
 ```
 audio/src/
-  commonMain/kotlin/    74 files — pure Kotlin, zero Android deps
+  commonMain/kotlin/    83 files — pure Kotlin, zero Android deps
     api/                AudioEngine interface, IAudioNativeBridge, IEffectManager,
                         IInputBridge + AudioInput (camino de entrada, WA-5.5),
                         factories (AudioEngine, EffectManager, AudioInput,
@@ -25,7 +25,7 @@ audio/src/
     domain/device/      DeviceCapabilities (interfaz de hechos) + Snapshot
     domain/input/       InputSource + InputMetering (snapshot de 7 valores)
   androidMain/kotlin/   23 files — JNI bridge, USB, platform-specific
-    internal/bridge/    AudioNativeBridge (3,209 LOC, 290 external funs)
+    internal/bridge/    AudioNativeBridge (3229 LOC, 291 external funs)
     internal/usb/       USB audio driver (DataStore, BroadcastReceiver)
     internal/mode/      ModeTransitionManagerImpl, NativeModeStateWriter
   iosMain/kotlin/       5 files — IosAudioBridge (sobre cinterop), AudioBridgeProvider,
@@ -34,7 +34,7 @@ audio/src/
                         DeviceCapabilitiesProvider (NSProcessInfo)
   commonTest/kotlin/    8 suites  ·  iosTest/kotlin/ 4 suites
   main/cpp/             C++20 engine
-    api/                C API — watermelon_audio.h (251 functions, pure C)
+    api/                C API — watermelon_audio.h (253 functions, pure C)
     dsp/                watermelon-dsp sub-library (30 files, zero deps)
     effects/            watermelon-effects sub-library (59 files, 23 efectos + EffectRegistry)
     engines/            watermelon-engines sub-library (SynthEngine + 6 engines
@@ -47,7 +47,7 @@ audio/src/
                         OboeBackend + LibusbBackend (Android),
                         CoreAudioBackend.mm (iOS, output + captura full-duplex),
                         PlatformBackends.cpp (unico punto que nombra backends concretos)
-    jni/                5 files — jni_audio_bridge.cpp (279 JNIEXPORT), jni_engine,
+    jni/                5 files — jni_audio_bridge.cpp (280 JNIEXPORT), jni_engine,
                         jni_usb, jni_benchmark, jni_common.h
     platform/           Logger.h/.cpp (logcat / os_log / stderr), Platform.h,
                         PlatformAndroid.cpp, PlatformApple.cpp, PlatformIsa.inc (ISA comun)

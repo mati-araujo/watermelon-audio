@@ -117,6 +117,21 @@ public:
     void setMasterVolume(float volume);
 
     /**
+     * @brief Nivel del instrumento (0.0 – 1.0). RT-safe, lock-free.
+     *
+     * Escala synth + FX y NO los loops, porque se aplica antes de que
+     * AudioLooper mezcle la reproducción. Ese punto es también el del fade, y la
+     * posición es deliberada: el tap de grabación del looper lee la señal
+     * DESPUÉS de este gain, así que se graba lo que se escucha. Mover esto
+     * mientras hay una toma en curso queda horneado en el loop.
+     *
+     * Es independiente del monitoring de entrada: junto con
+     * wma_input_set_monitoring_volume forma el balance instrumento/entrada como
+     * dos controles ortogonales. El motor no los linkea.
+     */
+    void setSynthVolume(float volume);
+
+    /**
      * @brief Inicia el motor con fade in
      * @param fadeTimeMs Duración del fade in en milisegundos
      */
@@ -630,61 +645,23 @@ public:
     }
 
     // ========== MIXER NODE CONTROL (Phase 3.1) ==========
-    // NOTE: All setters call incrementStateVersion() for future-proof state synchronization
-
-    /**
-     * @brief Set crossfade position (0.0 = oscillator only, 1.0 = input only)
-     */
-    void setMixerCrossfade(float position) {
-        if (mMixerNode) {
-            mMixerNode->setCrossfade(position);
-            incrementStateVersion();
-        }
-    }
-
-    /**
-     * @brief Enable/disable crossfade mode
-     */
-    void setMixerCrossfadeEnabled(bool enabled) {
-        if (mMixerNode) {
-            mMixerNode->setCrossfadeEnabled(enabled);
-            incrementStateVersion();
-        }
-    }
-
-    /**
-     * @brief Set oscillator level in mixer (0.0 to 2.0)
-     */
-    void setMixerOscillatorLevel(float level) {
-        if (mMixerNode) {
-            mMixerNode->setInputLevel(MixerNode::INPUT_OSCILLATOR, level);
-            incrementStateVersion();
-        }
-    }
-
-    /**
-     * @brief Set input level in mixer (0.0 to 2.0)
-     */
-    void setMixerInputLevel(float level) {
-        if (mMixerNode) {
-            mMixerNode->setInputLevel(MixerNode::INPUT_EXTERNAL, level);
-            incrementStateVersion();
-        }
-    }
-
-    /**
-     * @brief Get mixer crossfade position
-     */
-    float getMixerCrossfade() const {
-        return mMixerNode ? mMixerNode->getCrossfade() : 0.5f;
-    }
-
-    /**
-     * @brief Check if mixer crossfade is enabled
-     */
-    bool isMixerCrossfadeEnabled() const {
-        return mMixerNode ? mMixerNode->isCrossfadeEnabled() : false;
-    }
+    //
+    // There used to be six setters/getters here — setMixerCrossfade,
+    // setMixerCrossfadeEnabled, setMixerOscillatorLevel, setMixerInputLevel and
+    // the two getters — and not one of them had a caller, in any layer.
+    //
+    // They are gone rather than exposed, and the name is why:
+    // "setMixerOscillatorLevel" wrote MixerNode input 0, which is not the
+    // oscillator. handleMixMonitoring runs after applyEffectsAndOutput, so
+    // input 0 carries the finished master bus — synth + FX + LOOPS, already
+    // scaled by master volume. Exposing it would have shipped a control that
+    // silently ducked the user's loops.
+    //
+    // The instrument-side level is setSynthVolume(), which is applied beside
+    // the fade in applyEffectsAndOutput: upstream of the looper, downstream of
+    // nothing that would make it configuration-dependent. It works in every
+    // mode, with or without input monitoring, which is exactly what these six
+    // could not do.
 
     // ========== EFFECT CHAIN NODE CONTROL (Phase 3.3) ==========
 
@@ -881,6 +858,18 @@ private:
 
     // Gestión de volumen y fade
     std::atomic<float> mMasterVolume{1.0f};
+
+    // Nivel del instrumento: synth + FX, NO los loops. Se aplica junto al ramp
+    // del fade en applyEffectsAndOutput, que es el único punto de la cadena con
+    // esa semántica ya establecida y documentada.
+    //
+    // `mSynthVolumePrev` es estado del thread de audio y de nadie más: guarda el
+    // valor del bloque anterior para rampear entre bloques en vez de saltar, que
+    // es lo que evita el zipper noise. No es atómico a propósito — sólo lo toca
+    // applyEffectsAndOutput.
+    std::atomic<float> mSynthVolume{1.0f};
+    float mSynthVolumePrev{1.0f};
+
     FadeController mFadeCtrl;  // Phase 1E: Extracted fade/pause management
 
     // IMPROVED: Contador de errores en callback (Fase 1.4)
@@ -1059,6 +1048,13 @@ public:
      */
     float getMasterVolume() const {
         return mMasterVolume.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Obtiene el nivel del instrumento (synth + FX, sin loops).
+     */
+    float getSynthVolume() const {
+        return mSynthVolume.load(std::memory_order_acquire);
     }
 
     /**

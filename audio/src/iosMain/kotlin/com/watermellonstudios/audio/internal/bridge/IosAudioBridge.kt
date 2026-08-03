@@ -250,6 +250,7 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun isEngineInitialized(): Boolean = wma_is_initialized(engine)
     override fun hasInitializationFailed(): Boolean = wma_has_init_failed(engine)
     override fun getMasterVolume(): Float = wma_get_master_volume(engine)
+    override fun getSynthVolume(): Float = wma_get_synth_volume(engine)
 
     /** La variante lock-free del conteo de efectos. Ver el KDoc en la interfaz. */
     override fun getEffectChainSize(): Int = wma_effect_chain_size(engine)
@@ -305,6 +306,14 @@ internal class IosAudioBridge : IAudioNativeBridge {
 
     override fun setMasterVolume(volume: Float) {
         wma_set_master_volume(engine, volume.coerceIn(0f, 1f))
+    }
+
+    override fun setSynthVolume(volume: Float) {
+        // `takeIf { it.isFinite() }` y no un `coerceIn` a secas: NaN atraviesa
+        // coerceIn sin recortarse, y del otro lado multiplica el buffer. Mismo
+        // guard que el lado de Android.
+        val safe = volume.takeIf { it.isFinite() } ?: return
+        wma_set_synth_volume(engine, safe.coerceIn(0f, 1f))
     }
 
     override fun setOscillatorType(type: Int) = wma_set_oscillator_type(engine, type)

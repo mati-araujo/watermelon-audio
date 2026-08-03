@@ -104,13 +104,19 @@ interface IModeTransitionHandler {
      */
     suspend fun retryLastTransition(): Result<Unit>
 
-    /**
-     * Sets the crossfade position in MIX mode.
-     *
-     * @param position 0.0 = full oscillator, 1.0 = full input
-     * @return Result.success if set, Result.failure if not in MIX mode
-     */
-    fun setCrossfadePosition(position: Float): Result<Unit>
+    // BREAKING (2.0.0): setCrossfadePosition() was removed.
+    //
+    // It never reached the engine. It updated modeProperties in Kotlin and then
+    // called through to a writer whose body was `Result.success(Unit)` — no C
+    // API for the mixer existed to call. Every layer under it reported success
+    // for a value nothing consumed.
+    //
+    // For the instrument/input balance, use two independent controls instead of
+    // one linked position: AudioInput.monitoringVolume (or inputGain, for
+    // hardware calibration) on the input side, and the new synthVolume on the
+    // instrument side. They are orthogonal on purpose — if a UI wants a single
+    // equal-power knob, it composes them, because that curve is a presentation
+    // choice and not something the engine should decide.
 
     /**
      * Disposes the handler and releases resources.

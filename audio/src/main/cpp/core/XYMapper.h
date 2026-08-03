@@ -159,9 +159,14 @@ private:
     // of the setter was ModeManager, applying the per-mode XY mapping out of
     // ModeConfigurations — the route that let MIX put an axis on the mixer
     // crossfade. That whole route was never wired into the engine and was
-    // deleted; the getter never had a caller at all. Remapping that IS
-    // reachable goes through the secondary mappings below, which do have
-    // setters and do reach the snapshot.
+    // deleted; the getter never had a caller at all.
+    //
+    // CORRECTION to what this comment said when the pair was removed: it
+    // claimed the reachable remapping route was the secondary mappings below.
+    // That is wrong — addSecondaryMapping() and setParameterCallback() have no
+    // callers either, in any layer. Nothing outside this class can change what
+    // the axes do. If a caller ever needs to, the honest fix is to expose it
+    // through the C API, not to assume one of these already works.
     XYMappingConfig mConfig;
     mutable std::mutex mConfigMutex;
 

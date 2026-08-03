@@ -36,10 +36,12 @@ enum class XYTarget : uint8_t {
     // Input targets (10-19)
     INPUT_GAIN = 10,
 
-    // Mixer targets (20-29)
-    CROSSFADE = 20,
-    OSCILLATOR_LEVEL = 21,
-    INPUT_LEVEL = 22,
+    // Mixer targets (20-29) — CROSSFADE, OSCILLATOR_LEVEL and INPUT_LEVEL lived
+    // here and were removed. They wrote MixerNode, which only runs when input
+    // monitoring is on, and their only assignment site was the per-mode XY config
+    // in ModeConfigurations, deleted with ModeManager. The ids stay burned: these
+    // values never crossed the C API or the JNI, but reusing 20-22 for something
+    // else would silently repoint any stale persisted mapping.
 
     // Generic effect targets (30-39)
     EFFECT_PARAM_1 = 30,
@@ -161,7 +163,6 @@ inline const char* getTargetName(XYTarget target) {
         case XYTarget::FREQUENCY: return "Frequency";
         case XYTarget::AMPLITUDE: return "Amplitude";
         case XYTarget::INPUT_GAIN: return "Input Gain";
-        case XYTarget::CROSSFADE: return "Crossfade";
         case XYTarget::FILTER_CUTOFF: return "Filter Cutoff";
         case XYTarget::FILTER_RESONANCE: return "Filter Resonance";
         case XYTarget::EFFECT_WET_DRY: return "Wet/Dry";

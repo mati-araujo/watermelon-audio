@@ -46,12 +46,17 @@ sealed class ModeTransitionState {
 }
 
 /**
- * Additional mode state properties for crossfade control.
+ * Additional mode state properties.
  *
- * Used in MIX mode to control the balance between oscillator and input.
+ * These are the levels a mode implies, published so a UI can reflect them.
+ * They are descriptive, not a control surface: writing them changes nothing in
+ * the engine.
+ *
+ * BREAKING (2.0.0): `crossfadePosition` was removed along with
+ * `setCrossfadePosition()`. It described a crossfade that no layer could
+ * actually apply — see the note in [com.watermellonstudios.audio.api.IModeTransitionHandler].
  */
 data class ModeProperties(
     val oscillatorLevel: Float = 1.0f,
-    val inputLevel: Float = 0.0f,
-    val crossfadePosition: Float = 0.5f
+    val inputLevel: Float = 0.0f
 )

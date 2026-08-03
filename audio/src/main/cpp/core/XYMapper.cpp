@@ -191,25 +191,6 @@ void XYMapper::applyToTarget(XYTarget target, float value) {
             }
             break;
 
-        // ========== Mixer targets ==========
-        case XYTarget::CROSSFADE:
-            if (mMixerNode) {
-                mMixerNode->setCrossfade(value);
-            }
-            break;
-
-        case XYTarget::OSCILLATOR_LEVEL:
-            if (mMixerNode) {
-                mMixerNode->setInputLevel(MixerNode::INPUT_OSCILLATOR, value);
-            }
-            break;
-
-        case XYTarget::INPUT_LEVEL:
-            if (mMixerNode) {
-                mMixerNode->setInputLevel(MixerNode::INPUT_EXTERNAL, value);
-            }
-            break;
-
         // ========== Effect targets ==========
         case XYTarget::EFFECT_PARAM_1:
         case XYTarget::FILTER_CUTOFF:

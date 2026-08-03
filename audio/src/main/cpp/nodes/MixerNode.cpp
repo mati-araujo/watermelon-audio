@@ -14,7 +14,6 @@ MixerNode::MixerNode() {
         channel.levelSmoother.setCoefficient(0.995f);
         channel.panSmoother.setCoefficient(0.995f);
     }
-    mCrossfadeSmoother.setCoefficient(0.99f);
     mMasterSmoother.setCoefficient(0.995f);
 }
 
@@ -24,14 +23,12 @@ void MixerNode::prepare(int sampleRate, int maxBlockSize) {
     // Set smoothing times based on sample rate
     const float levelSmoothTimeMs = 10.0f;
     const float panSmoothTimeMs = 10.0f;
-    const float crossfadeSmoothTimeMs = 20.0f;
     const float masterSmoothTimeMs = 10.0f;
 
     for (auto& channel : mInputChannels) {
         channel.levelSmoother.setSmoothingTime(levelSmoothTimeMs, static_cast<float>(sampleRate));
         channel.panSmoother.setSmoothingTime(panSmoothTimeMs, static_cast<float>(sampleRate));
     }
-    mCrossfadeSmoother.setSmoothingTime(crossfadeSmoothTimeMs, static_cast<float>(sampleRate));
     mMasterSmoother.setSmoothingTime(masterSmoothTimeMs, static_cast<float>(sampleRate));
 
     // Pre-allocate temp buffer
@@ -45,7 +42,6 @@ void MixerNode::reset() {
         channel.levelSmoother.reset(channel.level.load());
         channel.panSmoother.reset(channel.pan.load());
     }
-    mCrossfadeSmoother.reset(mCrossfade.load());
     mMasterSmoother.reset(mMasterLevel.load());
 }
 
@@ -62,8 +58,6 @@ void MixerNode::process(AudioBuffer& inputBuffer, int numFrames) {
     float* outRight = mBuffer.getWritePointer(1);
 
     const bool anySolo = mAnySolo.load(std::memory_order_acquire);
-    const bool crossfadeEnabled = mCrossfadeEnabled.load(std::memory_order_acquire);
-    const float targetCrossfade = mCrossfade.load(std::memory_order_acquire);
 
     // Process each input channel
     for (int inputIdx = 0; inputIdx < MAX_INPUTS; ++inputIdx) {
@@ -83,21 +77,6 @@ void MixerNode::process(AudioBuffer& inputBuffer, int numFrames) {
 
         float targetLevel = channel.level.load(std::memory_order_acquire);
         const float targetPan = channel.pan.load(std::memory_order_acquire);
-
-        // Apply crossfade if enabled and this is input 0 or 1
-        if (crossfadeEnabled) {
-            if (inputIdx == INPUT_OSCILLATOR) {
-                // Input 0: level decreases as crossfade increases
-                // Use equal-power curve: cos(crossfade * pi/2)
-                const float smoothedCrossfade = mCrossfadeSmoother.process(targetCrossfade);
-                targetLevel *= std::cos(smoothedCrossfade * static_cast<float>(M_PI) * 0.5f);
-            } else if (inputIdx == INPUT_EXTERNAL) {
-                // Input 1: level increases as crossfade increases
-                // Use equal-power curve: sin(crossfade * pi/2)
-                const float smoothedCrossfade = mCrossfadeSmoother.process(targetCrossfade);
-                targetLevel *= std::sin(smoothedCrossfade * static_cast<float>(M_PI) * 0.5f);
-            }
-        }
 
         // Process sample by sample with smoothing
         for (int i = 0; i < numFrames; ++i) {
@@ -191,22 +170,6 @@ bool MixerNode::isInputSoloed(int inputIndex) const {
         return mInputChannels[inputIndex].solo.load(std::memory_order_acquire);
     }
     return false;
-}
-
-void MixerNode::setCrossfade(float position) {
-    mCrossfade.store(std::clamp(position, 0.0f, 1.0f), std::memory_order_release);
-}
-
-float MixerNode::getCrossfade() const {
-    return mCrossfade.load(std::memory_order_acquire);
-}
-
-void MixerNode::setCrossfadeEnabled(bool enabled) {
-    mCrossfadeEnabled.store(enabled, std::memory_order_release);
-}
-
-bool MixerNode::isCrossfadeEnabled() const {
-    return mCrossfadeEnabled.load(std::memory_order_acquire);
 }
 
 void MixerNode::setMasterLevel(float level) {

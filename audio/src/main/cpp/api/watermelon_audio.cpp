@@ -207,6 +207,19 @@ float wma_get_master_volume(const WmaEngine* engine) {
     return engine->engine->getMasterVolume();
 }
 
+void wma_set_synth_volume(WmaEngine* engine, float volume) {
+    WMA_CHECK_VOID(engine);
+    volume = std::clamp(volume, 0.0f, 1.0f);
+    engine->engine->setSynthVolume(volume);
+}
+
+float wma_get_synth_volume(const WmaEngine* engine) {
+    // 1.0f sin motor, igual que el master: es el valor por defecto, así que un
+    // caller sin engine lee "sin atenuación" en vez de un silencio inventado.
+    WMA_CHECK_VAL(engine, 1.0f);
+    return engine->engine->getSynthVolume();
+}
+
 float wma_get_fade_volume(const WmaEngine* engine) {
     WMA_CHECK_VAL(engine, 0.0f);
     return engine->engine->getCurrentFadeVolume();

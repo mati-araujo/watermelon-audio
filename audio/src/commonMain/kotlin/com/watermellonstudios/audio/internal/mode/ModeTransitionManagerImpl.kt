@@ -264,18 +264,15 @@ internal class ModeTransitionManagerImpl(
             when (mode) {
                 AudioMode.CHAOS_PAD -> ModeProperties(
                     oscillatorLevel = 1.0f,
-                    inputLevel = 0.0f,
-                    crossfadePosition = 0.0f
+                    inputLevel = 0.0f
                 )
                 AudioMode.INPUT_FX -> ModeProperties(
                     oscillatorLevel = 0.0f,
-                    inputLevel = 1.0f,
-                    crossfadePosition = 1.0f
+                    inputLevel = 1.0f
                 )
                 AudioMode.MIX -> ModeProperties(
                     oscillatorLevel = 0.5f,
-                    inputLevel = 0.5f,
-                    crossfadePosition = 0.5f
+                    inputLevel = 0.5f
                 )
             }
         }
@@ -324,34 +321,6 @@ internal class ModeTransitionManagerImpl(
     override fun canTransitionTo(mode: AudioMode): Boolean {
         val current = _transitionState.value
         return current is ModeTransitionState.Idle && current.currentMode != mode
-    }
-
-    override fun setCrossfadePosition(position: Float): Result<Unit> {
-        val current = _transitionState.value
-        if (current !is ModeTransitionState.Idle || current.currentMode != AudioMode.MIX) {
-            return Result.failure(IllegalStateException("Crossfade only available in MIX mode"))
-        }
-
-        val clampedPosition = position.coerceIn(0f, 1f)
-        _modeProperties.update {
-            it.copy(
-                crossfadePosition = clampedPosition,
-                oscillatorLevel = 1f - clampedPosition,
-                inputLevel = clampedPosition
-            )
-        }
-
-        // Update native layer asynchronously using the manager's scope
-        // NOTE (Phase 4 Fix): Changed from GlobalScope to scope to prevent memory leaks
-        // `Dispatchers.Default` y no `IO`: en Kotlin/Native ese dispatcher no se puede
-        // nombrar (un miembro `internal` eclipsa la extensión pública). No es una
-        // concesión — `setCrossfadePosition` no hace I/O ni toca el motor todavía, así
-        // que el `IO` de antes ya protegía algo que no lo necesitaba.
-        scope.launch(Dispatchers.Default) {
-            stateWriter.setCrossfadePosition(clampedPosition)
-        }
-
-        return Result.success(Unit)
     }
 
     private fun updateProgress(

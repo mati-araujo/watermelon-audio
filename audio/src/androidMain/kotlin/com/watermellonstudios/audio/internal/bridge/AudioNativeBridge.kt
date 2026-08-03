@@ -443,6 +443,20 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     }
 
     /**
+     * Set the instrument level (synth + FX, not the loops).
+     *
+     * El guard de `isFinite` no es decorativo: un NaN atraviesa `coerceIn` sin
+     * recortarse y del otro lado multiplica el buffer entero, o sea silencio
+     * permanente. Es el mismo motivo por el que lo tiene `setMasterVolume`.
+     *
+     * @param volume Nivel (0.0 a 1.0)
+     */
+    override fun setSynthVolume(volume: Float) {
+        if (!volume.isFinite()) return
+        nativeSetSynthVolume(volume.coerceIn(0f, 1f))
+    }
+
+    /**
      * Get current fade volume.
      */
     override fun getCurrentFadeVolume(): Float = nativeGetCurrentFadeVolume()
@@ -475,6 +489,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @return Volume level (0.0 to 1.0)
      */
     override fun getMasterVolume(): Float = nativeGetMasterVolume()
+
+    /** Instrument level (synth + FX, not the loops). */
+    override fun getSynthVolume(): Float = nativeGetSynthVolume()
 
     /**
      * Get output peak level for a channel (linear).
@@ -1789,6 +1806,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // ==================== Native Methods: Output Level Metering ====================
 
     private external fun nativeGetMasterVolume(): Float
+    private external fun nativeSetSynthVolume(volume: Float)
+    private external fun nativeGetSynthVolume(): Float
     private external fun nativeGetOutputPeakLevel(channel: Int): Float
     private external fun nativeGetOutputRmsLevel(channel: Int): Float
     private external fun nativeGetOutputPeakLevelDb(channel: Int): Float

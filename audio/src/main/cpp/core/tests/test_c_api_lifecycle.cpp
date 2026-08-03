@@ -152,6 +152,72 @@ TEST_F(CApiLifecycleTest, MasterVolumeIsClampedToTheUnitRange) {
     EXPECT_FLOAT_EQ(wma_get_master_volume(mWma), 0.25f);
 }
 
+// ===========================================================================
+// Synth volume — the instrument level (synth + FX, not the loops)
+// ===========================================================================
+
+TEST_F(CApiLifecycleTest, SynthVolumeDefaultsToUnityAndIsClamped) {
+    // The default matters more than it looks. This gain multiplies the fade ramp
+    // on every block of every mode, so anything other than 1.0 here quietly
+    // changes how the engine has always sounded. If this ever fails, the sound
+    // of the product changed — that is the finding, not the number.
+    EXPECT_FLOAT_EQ(wma_get_synth_volume(mWma), 1.0f);
+
+    wma_set_synth_volume(mWma, 1.5f);
+    EXPECT_FLOAT_EQ(wma_get_synth_volume(mWma), 1.0f);
+
+    wma_set_synth_volume(mWma, -0.5f);
+    EXPECT_FLOAT_EQ(wma_get_synth_volume(mWma), 0.0f);
+
+    wma_set_synth_volume(mWma, 0.25f);
+    EXPECT_FLOAT_EQ(wma_get_synth_volume(mWma), 0.25f);
+}
+
+TEST_F(CApiLifecycleTest, SynthVolumeActuallyScalesTheAudibleOutput) {
+    // The point of this one is that it reads the BUFFER, not the setter. A
+    // get/set round-trip would pass just as happily with the gain never applied
+    // — which is exactly how setMaxVoices and the output meters stayed "green"
+    // while doing nothing.
+    constexpr int kFrames = 256;
+
+    auto peakOver = [&](int blocks) {
+        float peak = 0.0f;
+        for (int i = 0; i < blocks; ++i) {
+            peak = std::max(peak, renderBlockPeak(kFrames));
+        }
+        return peak;
+    };
+
+    startAt(48000, 0);
+
+    // 0.3 and not 1.0, and this is the whole reason the first version of this
+    // test failed. OutputStage::processOutput runs a lookahead limiter and a
+    // soft clipper, so near full scale the chain is deliberately NON-LINEAR: at
+    // amplitude 1.0 the block peaked at 0.84 and halving the gain gave 0.47, a
+    // ratio of 0.56. Nothing was wrong with the gain — the test was measuring
+    // the limiter. Staying well under the threshold keeps the path linear, which
+    // is the only regime where "half in, half out" is a true statement.
+    wma_set_frequency_amplitude(mWma, 440.0f, 0.3f);
+
+    // Settle past the start ramp so the fade is out of the picture and the only
+    // thing scaling the block is the synth volume.
+    render(20, kFrames);
+    const float atUnity = peakOver(8);
+    ASSERT_GT(atUnity, 0.01f)
+        << "the oscillator has to be audible for the ratio below to mean anything";
+
+    wma_set_synth_volume(mWma, 0.5f);
+    render(4, kFrames);  // let the inter-block ramp reach the new value
+    const float atHalf = peakOver(8);
+
+    EXPECT_NEAR(atHalf, atUnity * 0.5f, atUnity * 0.05f)
+        << "halving the instrument level should halve what comes out";
+
+    wma_set_synth_volume(mWma, 0.0f);
+    render(4, kFrames);
+    EXPECT_LT(peakOver(4), 0.001f) << "zero has to be silence";
+}
+
 TEST_F(CApiLifecycleTest, StreamInfoReportsTheNegotiatedRateAndFillsEveryOutParam) {
     startAt(44100, 0);
 
@@ -204,8 +270,10 @@ TEST(CApiNullHandle, EveryQueryReturnsTheValueTheJniUsedToReturnByHand) {
     EXPECT_FLOAT_EQ(wma_get_fade_progress(nullptr), 0.0f);
 
     // nativeGetMasterVolume returned 1.0f, not 0.0f — a missing engine is not
-    // the same as a muted one.
+    // the same as a muted one. Same reasoning for the synth level.
     EXPECT_FLOAT_EQ(wma_get_master_volume(nullptr), 1.0f);
+    EXPECT_FLOAT_EQ(wma_get_synth_volume(nullptr), 1.0f);
+    wma_set_synth_volume(nullptr, 0.5f);  // must not crash
 
     int sampleRate = -1, bufferSize = -1;
     float latencyMs = -1.0f;
