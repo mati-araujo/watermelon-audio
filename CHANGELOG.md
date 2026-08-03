@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.14.1...v2.0.0) (2026-08-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** se borran IModeTransitionHandler.setCrossfadePosition, IModeStateWriter.setCrossfadePosition y ModeProperties.crossfadePosition. NoisyPad los usa en 5 call sites y no compilara hasta que los saque; pinea 1.13.2, asi que no se rompe hasta que bumpee. El reemplazo no es uno a uno: el balance instrumento/entrada ahora son dos controles ortogonales, synthVolume y monitoringVolume, sin linkeo equal-power en el motor porque esa curva es decision de UI.
+
+### Features
+
+* **core:** nivel de instrumento, y borrar el crossfade de MIX ([#111](https://github.com/mati-araujo/watermelon-audio/issues/111)) ([9d8d982](https://github.com/mati-araujo/watermelon-audio/commit/9d8d982600d34f0a8ae7d8027d5de7c3e98ea26b))
+
+
+### Bug Fixes
+
+* **ci:** el watchdog de gate.sh retenia el stdout 45 min despues de salir verde ([#109](https://github.com/mati-araujo/watermelon-audio/issues/109)) ([d48cbde](https://github.com/mati-araujo/watermelon-audio/commit/d48cbde3ac031e43a666b7989fcdba073c659d11))
+
 ## [1.14.1](https://github.com/mati-araujo/watermelon-audio/compare/v1.14.0...v1.14.1) (2026-07-30)
 
 
