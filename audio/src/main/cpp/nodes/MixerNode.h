@@ -8,7 +8,7 @@
 
 /**
  * @file MixerNode.h
- * @brief Audio mixing node with level control and crossfade.
+ * @brief Audio mixing node with level control.
  *
  * Part of Stage 3: Mode System implementation.
  *
@@ -16,8 +16,20 @@
  * - Per-input level control with smoothing
  * - Per-input panning (equal power)
  * - Per-input mute/solo
- * - Global crossfade between inputs 0 and 1
  * - Master output level
+ *
+ * @warning INPUT_OSCILLATOR is NOT the oscillator. The only caller of this node
+ * is AudioEngine::handleMixMonitoring, which runs AFTER applyEffectsAndOutput,
+ * so what it copies into input 0 is the finished master bus: synth + FX + LOOPS,
+ * already scaled by master volume. Anything applied to input 0 scales the loops
+ * too. This bit us once already: a "setMixerOscillatorLevel" existed on
+ * AudioEngine and would have done exactly that had anyone exposed it.
+ *
+ * It also had an equal-power crossfade between inputs 0 and 1, removed because
+ * it was unreachable in all five layers and nothing could ever enable it
+ * (mCrossfadeEnabled defaulted to false and had no reachable writer). The
+ * instrument-side level lives where it always applies instead — see
+ * AudioEngine::setSynthVolume, applied next to the fade, upstream of the looper.
  *
  * Thread Safety:
  * - All parameters use std::atomic for lock-free updates
@@ -74,24 +86,6 @@ public:
     void setInputSolo(int inputIndex, bool solo);
     bool isInputSoloed(int inputIndex) const;
 
-    /**
-     * @brief Set crossfade position between input 0 and input 1.
-     * @param position 0.0 = full input 0, 1.0 = full input 1
-     *
-     * Uses equal-power crossfade curve for smooth transitions.
-     */
-    void setCrossfade(float position);
-    float getCrossfade() const;
-
-    /**
-     * @brief Enable/disable crossfade mode.
-     *
-     * When enabled, crossfade position affects inputs 0 and 1.
-     * When disabled, both inputs are mixed at their individual levels.
-     */
-    void setCrossfadeEnabled(bool enabled);
-    bool isCrossfadeEnabled() const;
-
     // Master output level (0.0 to 2.0, default 1.0)
     void setMasterLevel(float level);
     float getMasterLevel() const;
@@ -123,11 +117,6 @@ private:
     };
 
     std::array<InputChannel, MAX_INPUTS> mInputChannels;
-
-    // Crossfade control
-    std::atomic<float> mCrossfade{0.5f};
-    std::atomic<bool> mCrossfadeEnabled{false};
-    ParameterSmoother mCrossfadeSmoother{0.99f};
 
     // Master output
     std::atomic<float> mMasterLevel{1.0f};

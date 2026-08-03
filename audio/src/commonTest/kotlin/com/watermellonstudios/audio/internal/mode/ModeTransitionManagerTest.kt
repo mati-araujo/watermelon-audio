@@ -71,11 +71,6 @@ class ModeTransitionManagerTest {
             return Result.success(Unit)
         }
 
-        override suspend fun setCrossfadePosition(position: Float): Result<Unit> {
-            calls += "setCrossfadePosition($position)"
-            return Result.success(Unit)
-        }
-
         override fun isEngineRunning(): Boolean = engineRunning
     }
 
@@ -190,36 +185,32 @@ class ModeTransitionManagerTest {
         assertTrue(manager.canTransitionTo(AudioMode.MIX))
     }
 
-    /** El crossfade sólo existe en MIX; pedirlo en otro modo es un fallo explícito. */
-    @Test
-    fun theCrossfadeIsRejectedOutsideMixMode() {
-        val manager = managerOver(FakeStateWriter())
-
-        val result = manager.setCrossfadePosition(0.5f)
-
-        assertTrue(result.isFailure, "el crossfade no debería aceptarse fuera de MIX")
-    }
+    // Acá vivían theCrossfadeIsRejectedOutsideMixMode y
+    // inMixModeTheCrossfadeClampsAndDrivesBothLevels. Se fueron con
+    // setCrossfadePosition en la 2.0.0, y vale decir POR QUÉ no se reemplazaron
+    // por su equivalente: los dos ejercitaban el recorte y la complementariedad
+    // de tres campos de un data class de Kotlin. Ninguno tocaba el motor, porque
+    // no había con qué — el writer devolvía Result.success sobre un cuerpo vacío.
+    // Eran verdes y no afirmaban nada sobre el audio.
+    //
+    // El nivel del instrumento se prueba donde sí se puede observar: en la suite
+    // de C++, contra el gain que se aplica en applyEffectsAndOutput.
 
     /**
-     * En MIX, la posición se recorta a 0..1 y los tres valores derivados quedan
-     * coherentes: lo que sube en la entrada baja en el oscilador.
+     * Los niveles que publica el modo siguen siendo coherentes sin el campo de
+     * crossfade: MIX reparte, y los modos de una sola fuente van a los extremos.
      */
     @Test
-    fun inMixModeTheCrossfadeClampsAndDrivesBothLevels() = runTest {
-        val writer = FakeStateWriter()
-        val manager = managerOver(writer)
+    fun theModeLevelsStayCoherentWithoutTheCrossfadeField() = runTest {
+        val manager = managerOver(FakeStateWriter())
+
         manager.transitionTo(AudioMode.MIX).toList()
+        assertEquals(0.5f, manager.modeProperties.value.oscillatorLevel)
+        assertEquals(0.5f, manager.modeProperties.value.inputLevel)
 
-        assertTrue(manager.setCrossfadePosition(2.0f).isSuccess, "debería aceptarse en MIX")
-
-        val properties = manager.modeProperties.value
-        assertEquals(1.0f, properties.crossfadePosition, "no recortó por arriba")
-        assertEquals(1.0f, properties.inputLevel)
-        assertEquals(0.0f, properties.oscillatorLevel, "los dos niveles tienen que ser complementarios")
-
-        manager.setCrossfadePosition(-1.0f)
-        assertEquals(0.0f, manager.modeProperties.value.crossfadePosition, "no recortó por abajo")
-        assertEquals(1.0f, manager.modeProperties.value.oscillatorLevel)
+        manager.transitionTo(AudioMode.INPUT_FX).toList()
+        assertEquals(0.0f, manager.modeProperties.value.oscillatorLevel)
+        assertEquals(1.0f, manager.modeProperties.value.inputLevel)
     }
 
     private companion object {

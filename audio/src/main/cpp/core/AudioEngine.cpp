@@ -1154,6 +1154,21 @@ void AudioEngine::applyEffectsAndOutput(float* output, int32_t numFrames) {
     float fadeStart, fadeEnd;
     mFadeCtrl.processFadeBlock(numFrames, fadeStart, fadeEnd);
     if (mFadeCtrl.isPaused()) { fadeStart = 0.0f; fadeEnd = 0.0f; }
+
+    // ---- SYNTH VOLUME ----
+    // El nivel del instrumento comparte posición y semántica con el fade
+    // (synth + FX, sin loops), así que viaja DENTRO del mismo ramp en vez de
+    // pedir una segunda pasada sobre el buffer: cuesta dos multiplicaciones por
+    // bloque en lugar de 2*numFrames.
+    //
+    // El ramp va del valor del bloque anterior al actual, que es lo que evita el
+    // zipper noise cuando el usuario arrastra el control. Sin eso, un salto de
+    // 1.0 a 0.2 entre bloques es un escalón en la forma de onda.
+    const float synthVol = mSynthVolume.load(std::memory_order_acquire);
+    fadeStart *= mSynthVolumePrev;
+    fadeEnd *= synthVol;
+    mSynthVolumePrev = synthVol;
+
     simd::applyStereoGainRamp(output, numFrames, fadeStart, fadeEnd);
 
     // ---- LOOPER TAP + PLAYBACK MIX ----
@@ -1542,9 +1557,8 @@ void AudioEngine::handleMixMonitoring(float* output, int32_t numFrames,
             // DEBUG: Log mix periodically
             static int mixerMixCount = 0;
             if (++mixerMixCount >= 100) {
-                LOGI("MIX MODE (MixerNode): framesRead=%d, crossfade=%.2f, oscLevel=%.2f, inputLevel=%.2f",
+                LOGI("MIX MODE (MixerNode): framesRead=%d, busLevel=%.2f, inputLevel=%.2f",
                      framesRead,
-                     mMixerNode->getCrossfade(),
                      mMixerNode->getInputLevel(MixerNode::INPUT_OSCILLATOR),
                      mMixerNode->getInputLevel(MixerNode::INPUT_EXTERNAL));
                 mixerMixCount = 0;
@@ -1684,6 +1698,15 @@ void AudioEngine::setMasterVolume(float volume) {
     float clampedVolume = std::max(0.0f, std::min(1.0f, volume));
     mMasterVolume.store(clampedVolume, std::memory_order_release);
     LOGI("Master volume set to: %.2f", clampedVolume);
+}
+
+void AudioEngine::setSynthVolume(float volume) {
+    // Sin log: a diferencia del master, se espera que esto lo arrastre un slider
+    // y loguear por cada valor inundaría logcat. El estado se lee con
+    // getSynthVolume().
+    float clampedVolume = std::max(0.0f, std::min(1.0f, volume));
+    mSynthVolume.store(clampedVolume, std::memory_order_release);
+    incrementStateVersion();
 }
 
 float AudioEngine::calculateCurrentVolume() {

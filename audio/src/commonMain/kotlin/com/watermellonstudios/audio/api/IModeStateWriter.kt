@@ -49,13 +49,9 @@ interface IModeStateWriter {
      */
     suspend fun resumeWithFade(fadeTimeMs: Int): Result<Unit>
 
-    /**
-     * Sets the crossfade position for MIX mode.
-     *
-     * @param position 0.0 = full oscillator, 1.0 = full input
-     * @return Result.success if set, or failure with exception
-     */
-    suspend fun setCrossfadePosition(position: Float): Result<Unit>
+    // BREAKING (2.0.0): setCrossfadePosition() was removed. Its only
+    // implementation returned Result.success(Unit) without touching the engine,
+    // because no wma_* entry point for the mixer ever existed to call.
 
     /**
      * Checks if the engine is currently running.

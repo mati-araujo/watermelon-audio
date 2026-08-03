@@ -3685,6 +3685,72 @@ billing agotado— tiene que existir una salida manual.
 `changes` es el sexto y no es decorativo: si fallara y no estuviera en la lista, los otros
 cinco quedarían `skipped` y el PR sería mergeable **sin ningún gate**.
 
+### Nota de cierre — el crossfade de MIX, y por qué la pregunta estaba mal (2026-07-31)
+
+**La pregunta "¿conectamos el crossfade de MIX?" tenía una premisa falsa, y la destapó una
+pregunta del usuario: "¿a qué llamás el mix?".** Estaba usando una palabra para tres cosas.
+
+| Lo que llamaba "mix" | Qué es en realidad |
+|---|---|
+| `AudioMode::MIX` (id 2) | un nombre para tres flags. **Oculto de la UI de NoisyPad** (`DEFAULT_VISIBLE_MODES = [CHAOS_PAD, GUITAR_FX]`, sin overrides) |
+| El sumador de `MixerNode` | **NO está gateado por MIX.** Corre con `if (oscillatorEnabled && hasInputMonitoring)`, dos booleanos independientes |
+| El bus master | donde se mezcla el **looper**, que no pasa por `MixerNode` en absoluto |
+
+> [!CAUTION]
+> **El error que esto corrigió.** Yo había concluido "MIX está retirado ⇒ el crossfade es
+> intención muerta ⇒ se borra". Pero `wma_input_set_monitoring()` es C API pública, está en el
+> JNI, está en `IInputBridge`, y **NoisyPad la llama desde un toggle de UI**
+> (`InputTestScreen.kt` → `InputStateManager.setMonitoringEnabled`). O sea que **en CHAOS_PAD +
+> monitoring el sumador corre**, sin pasar nunca por MIX. Esconder el modo no vuelve inalcanzable
+> al código.
+>
+> **La lección: cuando una decisión depende de "¿esto es alcanzable?", buscá el gate REAL en el
+> render, no el nombre del modo que creés que lo controla.** El gate era una conjunción de dos
+> flags con setters públicos independientes.
+
+**El segundo hallazgo, que hizo que la opción elegida fuera la correcta por una razón más fuerte
+de la que yo había dado:** `handleMixMonitoring` corre **después** de `applyEffectsAndOutput`, así
+que lo que copia a `MixerNode::INPUT_OSCILLATOR` **no es el oscilador**: es el bus master
+terminado — synth + FX + **loops**, ya escalado por master volume. `setMixerOscillatorLevel`
+existía en `AudioEngine` y, de haberse expuesto, **le habría bajado el volumen a los loops del
+usuario**.
+
+**Lo decidido y hecho:**
+
+- **Borrado** el crossfade de `MixerNode` (con su `mCrossfadeSmoother` y la rama equal-power), los
+  **6 setters/getters de mixer** de `AudioEngine` —ninguno con callers—, los 3 `XYTarget` de mixer
+  (ids **quemados**, no reutilizar), y en Kotlin `setCrossfadePosition` de las dos interfaces más
+  `ModeProperties.crossfadePosition`. **Breaking: 2.0.0.** NoisyPad tiene 5 call sites y no
+  compilará hasta que su sesión los saque; pinea 1.13.2, así que no se rompe hasta que bumpee.
+- **Agregado** `wma_set_synth_volume` / `wma_get_synth_volume` en las 5 capas: el nivel del
+  instrumento (synth + FX, **sin** loops), lineal `[0,1]`, default 1.0. Se aplica **fusionado con
+  el ramp del fade** — misma posición, misma semántica, dos multiplicaciones por bloque en vez de
+  una segunda pasada, y el ramp entre bloques da el anti-zipper gratis.
+- El balance queda como **dos controles ortogonales** (`synthVolume` / `monitoringVolume`), sin
+  linkeo equal-power en el motor: esa curva es decisión de UI.
+
+> [!TIP]
+> **El test que falló dos veces y las dos veces tenía razón el código.** `SynthVolumeActuallyScales`
+> afirmaba "mitad de gain ⇒ mitad de salida" y daba 0.56. No era ruido de medición (el pico era
+> idéntico con 1 bloque y con 8): **`OutputStage::processOutput` corre un limitador lookahead y un
+> soft clipper**, así que cerca de fondo de escala la cadena es NO LINEAL a propósito. El test
+> estaba midiendo el limitador. Se arregló bajando la amplitud a 0.3 para quedar en zona lineal,
+> **no aflojando la tolerancia** — que era la salida fácil y habría dejado un test que no mide lo
+> que dice. Mutante: sacar la aplicación del gain lo pone en rojo; el test de clamp sigue verde,
+> que es la diferencia entre probar el contrato y probar el audio.
+
+> [!CAUTION]
+> **Deuda ANOTADA y NO tocada, a decisión explícita: el master volume no atenúa la entrada
+> monitoreada.** Se aplica en `applyEffectsAndOutput`, y el input se suma después, en
+> `handleMixMonitoring`. O sea que hoy, en CHAOS_PAD + monitoring, **bajás el master y el micrófono
+> sigue igual de fuerte**. Es preexistente y audible. No viajó en este PR porque ya es breaking por
+> otra cosa y un cambio de comportamiento audible merece su propia decisión.
+
+> **También medido de paso:** `addSecondaryMapping` y `setParameterCallback` de `XYMapper` **no
+> tienen callers**, así que la corrección que dejé en #108 —"el remapeo alcanzable va por las
+> secondary mappings"— **era falsa** y quedó corregida en el header. Hoy `XYMapper` hace
+> X→`FREQUENCY`, Y→`AMPLITUDE` y no hay forma de cambiarlo desde afuera.
+
 ### Nota de cierre — el cluster `ModeManager` no era un cluster (2026-07-31)
 
 **El ticket estaba mal planteado, y medirlo fue lo que lo mostró.** "El cluster `ModeManager`"
@@ -3886,9 +3952,11 @@ el paso `Build the UI harness, iOS half` que había muerto cancelado en `637eb4e
 > [!IMPORTANT]
 > **Lo que queda, en orden de impacto real:**
 >
-> 1. ~~**El cluster `ModeManager`**~~ ✅ **CERRADO 2026-07-31** — ver la nota de cierre abajo.
->    Se borró la capa C++; los flags de la C API quedan documentados como muertos, a decisión
->    explícita. **El crossfade de MIX quedó sin decidir** y es lo único vivo que salió de ahí.
+> 1. ~~**El cluster `ModeManager`**~~ ✅ **CERRADO 2026-07-31**, y con él ~~**el crossfade de
+>    MIX**~~ — ver las dos notas de cierre abajo. Se borró la capa C++ y el crossfade entero
+>    (breaking, **2.0.0**); los flags de la C API quedan documentados como muertos. En su lugar
+>    entró `wma_set_synth_volume`. **Queda anotado y sin tocar: el master volume no atenúa la
+>    entrada monitoreada.**
 > 2. **`VoiceManager::setMaxVoices` es un no-op literal.** Clampea a una variable local, loguea
 >    *"requires recreation of VoicePool"* y vuelve; encima bumpea la state version. Mismo defecto
 >    de clase que los medidores: un setter público que miente. ✅ **La precondición ya está

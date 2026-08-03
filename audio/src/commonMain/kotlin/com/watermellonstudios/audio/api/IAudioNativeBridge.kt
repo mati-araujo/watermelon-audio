@@ -67,6 +67,16 @@ interface IAudioNativeBridge :
     fun isUsingReducedBuffers(): Boolean
     fun getMasterVolume(): Float
 
+    /**
+     * Nivel del instrumento (synth + FX), **sin** los loops.
+     *
+     * Es la mitad "instrumento" del balance contra la entrada; la otra mitad es
+     * [IInputBridge.setMonitoringVolume]. A diferencia de [getMasterVolume], que
+     * escala el bus entero —synth + FX + loops—, esto se aplica antes de que el
+     * looper mezcle su reproducción.
+     */
+    fun getSynthVolume(): Float
+
     // ==================== FADE ====================
 
     fun getCurrentFadeVolume(): Float
@@ -80,6 +90,15 @@ interface IAudioNativeBridge :
     fun setFrequencyAndAmplitude(frequency: Float, amplitude: Float)
     fun setFrequencyRange(minHz: Float, maxHz: Float)
     fun setMasterVolume(volume: Float)
+
+    /**
+     * Nivel del instrumento (0.0–1.0), recortado. Lock-free.
+     *
+     * El tap de grabación del looper lee la señal **después** de este gain, así
+     * que se graba lo que se escucha: moverlo durante una toma queda horneado
+     * en el loop.
+     */
+    fun setSynthVolume(volume: Float)
     fun setOscillatorType(type: Int)
     fun setSecondaryOscillatorType(type: Int)
     fun setEngineType(type: Int)
