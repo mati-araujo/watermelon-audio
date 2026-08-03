@@ -3955,22 +3955,54 @@ el paso `Build the UI harness, iOS half` que había muerto cancelado en `637eb4e
 > 1. ~~**El cluster `ModeManager`**~~ ✅ **CERRADO 2026-07-31**, y con él ~~**el crossfade de
 >    MIX**~~ — ver las dos notas de cierre abajo. Se borró la capa C++ y el crossfade entero
 >    (breaking, **2.0.0**); los flags de la C API quedan documentados como muertos. En su lugar
->    entró `wma_set_synth_volume`. **Queda anotado y sin tocar: el master volume no atenúa la
->    entrada monitoreada.**
-> 2. **`VoiceManager::setMaxVoices` es un no-op literal.** Clampea a una variable local, loguea
+>    entró `wma_set_synth_volume`.
+>
+> 2. 🎫 **TICKET NUEVO (2026-08-03): el master volume NO atenúa la entrada monitoreada.**
+>
+>    **El síntoma, que es de usuario:** en CHAOS_PAD con el monitoring prendido, **bajás el master
+>    y el micrófono sigue sonando igual de fuerte**. A cero de master, el instrumento se calla y
+>    la entrada no.
+>
+>    **La causa, medida:** el master se aplica en `applyEffectsAndOutput`
+>    (`AudioEngine.cpp:1180-1185`), y la entrada se suma **después**, en `handleMixMonitoring`,
+>    que `processAudioBlock` llama en la línea **1663** — o sea después de que todos los `render*`
+>    ya terminaron su `applyEffectsAndOutput`. El input llega escalado sólo por
+>    `monitoringVolume`; el master nunca lo toca.
+>
+>    **Por qué no viajó en el PR que lo encontró (#111):** ese PR ya era breaking por otra cosa, y
+>    esto es un **cambio de comportamiento audible en un camino que shippea**. Mezclarlo habría
+>    hecho imposible atribuir un reporte de "me cambió el sonido".
+>
+>    **Lo que hay que decidir antes de tocar nada** — y es decisión de producto, no un fix obvio:
+>    - ¿El master es "volumen de todo lo que sale" (entonces es un bug y hay que moverlo después
+>      del sumado) o "volumen del instrumento" (entonces el nombre miente y el arreglo es
+>      documentarlo)?
+>    - Ojo con el orden: mover el master después de `handleMixMonitoring` lo pone **después** del
+>      tap del looper, así que dejaría de quedar grabado en los loops. Eso puede ser lo correcto
+>      —hoy el master SÍ se hornea en las tomas— pero es un segundo cambio de comportamiento,
+>      no un efecto colateral que se pueda ignorar.
+>    - Verificar con el patrón de #111: leer el **buffer**, no el setter, y en zona **lineal**
+>      (amplitud ~0.3), porque `OutputStage::processOutput` tiene limitador + soft clipper y cerca
+>      de fondo de escala una razón de niveles no significa lo que parece.
+>
+>    **Alcance estimado:** una línea de motor y su test; el riesgo está entero en la decisión, no
+>    en la implementación. No necesita hardware.
+>
+> 3. **`VoiceManager::setMaxVoices` es un no-op literal.** Clampea a una variable local, loguea
 >    *"requires recreation of VoicePool"* y vuelve; encima bumpea la state version. Mismo defecto
 >    de clase que los medidores: un setter público que miente. ✅ **La precondición ya está
 >    medida (2026-07-31): NoisyPad NO lo llama** — cero hits de `setMaxVoices`/`maxVoices` en
 >    todo el repo, así que nadie cree hoy que limita la polifonía. Queda la decisión de si se
 >    implementa o se borra, sin la urgencia de un consumidor engañado.
-> 3. **WA-1.5 / WA-T.2** — tests de `commonMain`: falta lo central (`StateSynchronizer`,
+> 4. **WA-1.5 / WA-T.2** — tests de `commonMain`: falta lo central (`StateSynchronizer`,
 >    `AudioEngineImpl`, mapeo de errores). Sin device, sin JNI.
-> 4. **G2 — device iOS.** Necesita un iPhone. Sin cambios.
-> 5. **Smoke: lo que falta necesita USB físico o poder escuchar.** Sin cambios.
-> 6. **NoisyPad local-first** se maneja en sus propias sesiones. No es trabajo de este repo.
+> 5. **G2 — device iOS.** Necesita un iPhone. Sin cambios.
+> 6. **Smoke: lo que falta necesita USB físico o poder escuchar.** Sin cambios.
+> 7. **NoisyPad local-first** se maneja en sus propias sesiones. No es trabajo de este repo.
 >
-> **El CI no tiene deuda conocida** salvo el techo del gate, medido arriba. Lo que resta es
-> deuda de motor (1–3) o hardware (4–5).
+> **El CI no tiene deuda conocida**: el defecto del watchdog de `gate.sh` se arregló en #109 y el
+> techo de 45 min sigue sin tocarse a propósito. Lo que resta es deuda de motor (**2–4**) o
+> hardware (**5–6**), y **el 2 es el único con síntoma de usuario**.
 >
 > Menor y esperable: **la atestación local queda rancia** después de cualquier bump o de tocar
 > un header del motor. Es el comportamiento correcto; el próximo PR corre `gate.sh` de nuevo.
