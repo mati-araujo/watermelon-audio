@@ -1180,6 +1180,19 @@ void AudioEngine::applyEffectsAndOutput(float* output, int32_t numFrames) {
     // ---- MASTER VOLUME (whole mix, no fade) ----
     // Applied AFTER the looper mix so master volume scales the combined
     // synth + FX + loops bus uniformly.
+    //
+    // KNOWN DEFECT, ticket 2 in §16 of docs/kmp/kmp_requirements.md — deliberately
+    // NOT fixed here. "Whole mix" is not true when input monitoring is on: the
+    // monitored input is summed later, in handleMixMonitoring(), which
+    // processAudioBlock() calls after every render path has already finished
+    // this function. So in CHAOS_PAD with monitoring on, turning the master down
+    // leaves the microphone at full level, and at zero the instrument goes quiet
+    // while the input does not.
+    //
+    // Moving it after the sum is one line, but it is an audible behaviour change
+    // on a shipped path AND it would move the master past the looper's recording
+    // tap — today it IS baked into takes. Both are product decisions; read the
+    // ticket before touching this.
     const float masterVol = mMasterVolume.load(std::memory_order_acquire);
     if (masterVol != 1.0f) {
         simd::applyStereoGain(output, numFrames, masterVol);
