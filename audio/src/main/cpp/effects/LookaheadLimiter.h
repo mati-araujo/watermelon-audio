@@ -44,6 +44,17 @@ public:
     void process(float* input, float* output, int numFrames) override;
 
     /**
+     * @brief Clear the lookahead delay line and the gain envelope.
+     *
+     * This is the case Effect::reset() names in its own documentation — a delay
+     * line that carries audio across a context change — and it was the one that
+     * never implemented it. The line holds 5 ms, so without this a mode switch
+     * or a stop/start hands the first block of the new context a tail of the
+     * previous one.
+     */
+    void reset() override;
+
+    /**
      * @brief Set a parameter
      * @param paramId Parameter ID (0: threshold, 1: attack, 2: release, 3: lookahead)
      * @param value Parameter value

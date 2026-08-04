@@ -9,7 +9,7 @@
  * pause and resume snapped the volume instead of ramping it. Only the legacy
  * Oboe path ever got a fade.
  *
- * The fade ramp is advanced by the render callback (applyEffectsAndOutput
+ * The fade ramp is advanced by the render callback (applyEffectsAndLooper
  * pulls one block off FadeController), so these tests start the engine over a
  * fake backend and drive onAudioReady() by hand. That makes the assertions
  * about the *shape* of the ramp, not just about a flag having been set —
@@ -243,7 +243,7 @@ TEST_F(FadeLifecycleTest, PauseSilencesTheRenderedBlock) {
     render(4, kBlockFrames);
 
     // A paused engine renders silence wherever the ramp happened to stop:
-    // applyEffectsAndOutput pins both ends of the gain ramp to zero.
+    // applyEffectsAndLooper pins both ends of the gain ramp to zero.
     mEngine->pauseWithFade(0);
     ASSERT_TRUE(mEngine->getIsPaused());
 

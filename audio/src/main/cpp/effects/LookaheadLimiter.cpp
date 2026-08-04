@@ -23,6 +23,13 @@ void LookaheadLimiter::prepare(int32_t sampleRate) {
     updateCoefficients();
 }
 
+void LookaheadLimiter::reset() {
+    std::fill(mDelayBuffer.begin(), mDelayBuffer.end(), 0.0f);
+    mWritePos = 0;
+    mGain = 1.0f;
+    mCurrentGainReduction.store(0.0f, std::memory_order_relaxed);
+}
+
 void LookaheadLimiter::updateCoefficients() {
     // Convert threshold to linear
     mThresholdLinear = dbToLinear(mThresholdDb.load(std::memory_order_relaxed));

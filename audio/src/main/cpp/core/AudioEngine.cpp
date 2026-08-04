@@ -181,6 +181,8 @@ AudioEngine::AudioEngine() {
             // Pre-alocar buffer para monitoring (Full-Duplex)
             try {
                 mMonitoringBuffer.resize(8192);  // 4096 frames * 2 channels
+                // Mono, so half: one sample per frame of the buffer above.
+                mVocoderMonoBuffer.resize(4096);
                 LOGI("Monitoring buffer allocated successfully");
             } catch (const std::bad_alloc& e) {
                 LOGE("Failed to allocate monitoring buffer: %s", e.what());
@@ -1124,7 +1126,7 @@ int AudioEngine::getWaveformSamples(float* buffer, int size) {
 
 // ========== RENDER SUB-METHODS (Step 8 decomposition) ==========
 
-void AudioEngine::applyEffectsAndOutput(float* output, int32_t numFrames) {
+void AudioEngine::applyEffectsAndLooper(float* output, int32_t numFrames) {
     // DC block + effects
     mOutputStage.dcBlock(mOutputStage.getTempBuffer(), numFrames);
     mEffectChain.process(mOutputStage.getTempBuffer(), output, numFrames);
@@ -1177,88 +1179,114 @@ void AudioEngine::applyEffectsAndOutput(float* output, int32_t numFrames) {
     // the engine fade so loops remain audible during scene changes.
     mAudioLooper.process(output, numFrames, playFrameAtBlockStart);
 
-    // ---- MASTER VOLUME (whole mix, no fade) ----
-    // Applied AFTER the looper mix so master volume scales the combined
-    // synth + FX + loops bus uniformly.
+    // The master volume and the output protection chain used to live here, and
+    // that is exactly what made the master miss the monitored input: this
+    // function runs per render path, while the input is summed once, afterwards.
+    // Both moved to applyMasterAndProtectOutput(), which processAudioBlock()
+    // calls at the tail of the block. See ticket 2 in §16 of
+    // docs/kmp/kmp_requirements.md.
     //
-    // KNOWN DEFECT, ticket 2 in §16 of docs/kmp/kmp_requirements.md — deliberately
-    // NOT fixed here. "Whole mix" is not true when input monitoring is on: the
-    // monitored input is summed later, in handleMixMonitoring(), which
-    // processAudioBlock() calls after every render path has already finished
-    // this function. So in CHAOS_PAD with monitoring on, turning the master down
-    // leaves the microphone at full level, and at zero the instrument goes quiet
-    // while the input does not.
-    //
-    // Moving it after the sum is one line, but it is an audible behaviour change
-    // on a shipped path AND it would move the master past the looper's recording
-    // tap — today it IS baked into takes. Both are product decisions; read the
-    // ticket before touching this.
-    const float masterVol = mMasterVolume.load(std::memory_order_acquire);
-    if (masterVol != 1.0f) {
-        simd::applyStereoGain(output, numFrames, masterVol);
-    }
-
-    // Output stage protection
-    mOutputStage.processOutput(output, numFrames);
+    // Note what did NOT move: the looper's recording tap above still runs
+    // upstream of the master, so the master is not baked into takes — it never
+    // was, whatever the ticket said.
 }
 
-void AudioEngine::feedVocoderModulator(InputNode* inputNode, int32_t numFrames, bool hasInputMonitoring) {
+void AudioEngine::captureMonitoringBlock(InputNode* inputNode, int32_t numFrames,
+                                         bool hasInputMonitoring) {
+    mMonitoringFramesRead = 0;
+
     const int32_t totalSamples = numFrames * 2;
-    if (hasInputMonitoring && mMonitoringBuffer.size() >= static_cast<size_t>(totalSamples)) {
-        int framesRead = inputNode->getMonitoringSamples(mMonitoringBuffer.data(), numFrames);
-        if (framesRead > 0) {
-            // Convert stereo mic input to mono for vocoder
-            for (int i = 0; i < framesRead; ++i) {
-                mMonitoringBuffer[i] = (mMonitoringBuffer[i * 2] + mMonitoringBuffer[i * 2 + 1]) * 0.5f;
-            }
-            mEffectChain.setVocoderModulatorBuffer(mMonitoringBuffer.data(), framesRead);
+    if (!hasInputMonitoring || inputNode == nullptr) return;
+    if (mMonitoringBuffer.size() < static_cast<size_t>(totalSamples)) return;
+
+    mMonitoringFramesRead = inputNode->getMonitoringSamples(mMonitoringBuffer.data(), numFrames);
+
+    // DEBUG: monitoring status, periodically. The rate mismatch below is the one
+    // the device smoke reads out of logcat to tell "the mic is glitching" from
+    // "the mic is not attached".
+    static int monitorCheckCount = 0;
+    if (++monitorCheckCount >= 500) {
+        const int outputSampleRate = currentSampleRate();
+        const int inputSampleRate = inputNode->getStreamSampleRate();
+        LOGI("ENGINE MONITOR CHECK: inputNode=%p, framesRead=%d, outputSR=%d, inputSR=%d, mixerNode=%p",
+             inputNode, mMonitoringFramesRead, outputSampleRate, inputSampleRate,
+             mMixerNode.get());
+
+        if (inputSampleRate > 0 && outputSampleRate > 0 && inputSampleRate != outputSampleRate) {
+            LOGW("SAMPLE RATE MISMATCH! Input=%d, Output=%d - THIS CAUSES GLITCHES!",
+                 inputSampleRate, outputSampleRate);
         }
+        monitorCheckCount = 0;
     }
+}
+
+void AudioEngine::feedVocoderModulator() {
+    if (mMonitoringFramesRead <= 0) return;
+
+    const size_t needed = static_cast<size_t>(mMonitoringFramesRead);
+    if (mVocoderMonoBuffer.size() < needed) return;
+
+    // Downmix into a buffer of its own. Writing the mono signal back over
+    // mMonitoringBuffer — which is what this used to do — corrupted the stereo
+    // frames that the MIX sum reads out of the same buffer.
+    for (size_t i = 0; i < needed; ++i) {
+        mVocoderMonoBuffer[i] =
+            (mMonitoringBuffer[i * 2] + mMonitoringBuffer[i * 2 + 1]) * 0.5f;
+    }
+    mEffectChain.setVocoderModulatorBuffer(mVocoderMonoBuffer.data(), mMonitoringFramesRead);
 }
 
 watermelon_audio::IAudioCallback::Result AudioEngine::handleNotRunning(
-    float* output, int32_t numFrames, InputNode* inputNode) {
+    float* output, int32_t numFrames) {
     const int32_t totalSamples = numFrames * 2;
     // Silence the synth output but allow monitoring
     std::fill(output, output + totalSamples, 0.0f);
 
     static int notRunningCheckCount = 0;
     if (++notRunningCheckCount >= 200) {
-        LOGI_CALLBACK("ENGINE (not running): inputNode=%p, monEnabled=%d, bufSize=%zu, totalSamples=%d",
-             inputNode,
-             inputNode ? inputNode->isMonitoringEnabled() : false,
+        LOGI_CALLBACK("ENGINE (not running): framesRead=%d, bufSize=%zu, totalSamples=%d",
+             mMonitoringFramesRead,
              mMonitoringBuffer.size(),
              totalSamples);
         notRunningCheckCount = 0;
     }
 
-    if (inputNode && inputNode->isMonitoringEnabled()) {
-        if (mMonitoringBuffer.size() >= static_cast<size_t>(totalSamples)) {
-            int framesRead = inputNode->getMonitoringSamples(mMonitoringBuffer.data(), numFrames);
-
-            static int notRunningMixCount = 0;
-            if (++notRunningMixCount >= 100) {
-                float maxSample = 0.0f;
-                for (int i = 0; i < std::min(framesRead * 2, 100); ++i) {
-                    if (std::abs(mMonitoringBuffer[i]) > maxSample) {
-                        maxSample = std::abs(mMonitoringBuffer[i]);
-                    }
-                }
-                LOGI_CALLBACK("ENGINE MONITOR (not running): framesRead=%d, maxSample=%.4f, numFrames=%d",
-                     framesRead, maxSample, numFrames);
-                notRunningMixCount = 0;
-            }
-
-            if (framesRead > 0) {
-                int32_t samplesToMix = framesRead * 2;
-                for (int32_t i = 0; i < samplesToMix && i < totalSamples; ++i) {
-                    output[i] = mMonitoringBuffer[i];
-                }
-                for (int32_t i = samplesToMix; i < totalSamples; ++i) {
-                    output[i] = 0.0f;
+    if (mMonitoringFramesRead > 0) {
+        static int notRunningMixCount = 0;
+        if (++notRunningMixCount >= 100) {
+            float maxSample = 0.0f;
+            for (int i = 0; i < std::min(mMonitoringFramesRead * 2, 100); ++i) {
+                if (std::abs(mMonitoringBuffer[i]) > maxSample) {
+                    maxSample = std::abs(mMonitoringBuffer[i]);
                 }
             }
+            LOGI_CALLBACK("ENGINE MONITOR (not running): framesRead=%d, maxSample=%.4f, numFrames=%d",
+                 mMonitoringFramesRead, maxSample, numFrames);
+            notRunningMixCount = 0;
         }
+
+        const int32_t samplesToMix = std::min(mMonitoringFramesRead * 2, totalSamples);
+        for (int32_t i = 0; i < samplesToMix; ++i) {
+            output[i] = mMonitoringBuffer[i];
+        }
+        for (int32_t i = samplesToMix; i < totalSamples; ++i) {
+            output[i] = 0.0f;
+        }
+
+        // A stopped engine is still an output path, and it used to be the only
+        // one that handed the microphone to the device raw: no master, and no
+        // protection at all, with the default +12 dB of input gain in front of
+        // it. The master applies here for the same reason it applies below —
+        // it is the level of everything that leaves.
+        //
+        // Lightweight and not the full chain on purpose: the lookahead limiter
+        // is only sized by OutputStage::prepare(), which runs on start(), and
+        // this path is reachable before the engine has ever been started.
+        const float masterVol = mMasterVolume.load(std::memory_order_acquire);
+        if (masterVol != 1.0f) {
+            simd::applyStereoGain(output, numFrames, masterVol);
+        }
+        mOutputStage.processOutputLightweight(output, numFrames);
     }
     return watermelon_audio::IAudioCallback::Result::CONTINUE;
 }
@@ -1304,7 +1332,7 @@ void AudioEngine::renderInputFx(float* output, int32_t numFrames, InputNode* inp
             }
 
             // DC block + effects + fade + output
-            applyEffectsAndOutput(output, numFrames);
+            applyEffectsAndLooper(output, numFrames);
         } else {
             std::fill_n(output, totalSamples, 0.0f);
         }
@@ -1341,7 +1369,7 @@ void AudioEngine::renderSoundFont(float* output, int32_t numFrames) {
     }
 
     sfEngine->render(mOutputStage.getTempBuffer(), numFrames);
-    applyEffectsAndOutput(output, numFrames);
+    applyEffectsAndLooper(output, numFrames);
 }
 
 void AudioEngine::renderVoiceSystem(float* output, int32_t numFrames) {
@@ -1352,16 +1380,14 @@ void AudioEngine::renderVoiceSystem(float* output, int32_t numFrames) {
     mOscBank.applyModulation(mOutputStage.getTempBuffer(), numFrames);
 
     // 3. DC block + effects + fade + output
-    applyEffectsAndOutput(output, numFrames);
+    applyEffectsAndLooper(output, numFrames);
 }
 
 void AudioEngine::renderSingleTouch(float* output, int32_t numFrames,
                                      int cachedEngineType, size_t cachedOscIndex,
-                                     bool cachedHasActiveModulator, size_t cachedModIndex,
-                                     InputNode* inputNode) {
+                                     bool cachedHasActiveModulator, size_t cachedModIndex) {
     const int32_t totalSamples = numFrames * 2;
     bool oscillatorEnabled = mOscillatorEnabled.load(std::memory_order_acquire);
-    bool hasInputMonitoring = inputNode && inputNode->isMonitoringEnabled();
 
     if (oscillatorEnabled) {
         // ========== ARPEGGIATOR (Phase 7) ==========
@@ -1420,10 +1446,10 @@ void AudioEngine::renderSingleTouch(float* output, int32_t numFrames,
         mOscBank.applyModulation(mOutputStage.getTempBuffer(), numFrames);
 
         // 3.5. Pass mic buffer to vocoder as modulator
-        feedVocoderModulator(inputNode, numFrames, hasInputMonitoring);
+        feedVocoderModulator();
 
         // 4-6. DC block + effects + fade + output
-        applyEffectsAndOutput(output, numFrames);
+        applyEffectsAndLooper(output, numFrames);
 
     } else {
         std::fill_n(output, totalSamples, 0.0f);
@@ -1433,11 +1459,9 @@ void AudioEngine::renderSingleTouch(float* output, int32_t numFrames,
 void AudioEngine::renderDualTouch(float* output, int32_t numFrames,
                                    const TouchState& dualTouchState,
                                    int cachedEngineType, size_t cachedOscIndex,
-                                   bool cachedHasActiveModulator, size_t cachedModIndex,
-                                   InputNode* inputNode) {
+                                   bool cachedHasActiveModulator, size_t cachedModIndex) {
     const int32_t totalSamples = numFrames * 2;
     bool oscillatorEnabled = mOscillatorEnabled.load(std::memory_order_acquire);
-    bool hasInputMonitoring = inputNode && inputNode->isMonitoringEnabled();
 
     // Get engine pointers for non-classic dispatch
     SynthEngine* engine1 = (cachedEngineType > 0) ? mEngineDispatcher.getEngine(cachedEngineType) : nullptr;
@@ -1500,10 +1524,10 @@ void AudioEngine::renderDualTouch(float* output, int32_t numFrames,
         mOscBank.applyModulation(mOutputStage.getTempBuffer(), numFrames);
 
         // Pass mic buffer to vocoder as modulator
-        feedVocoderModulator(inputNode, numFrames, hasInputMonitoring);
+        feedVocoderModulator();
 
         // DC block + effects + fade + output
-        applyEffectsAndOutput(output, numFrames);
+        applyEffectsAndLooper(output, numFrames);
 
     } else {
         std::fill_n(output, totalSamples, 0.0f);
@@ -1511,84 +1535,84 @@ void AudioEngine::renderDualTouch(float* output, int32_t numFrames,
 }
 
 void AudioEngine::handleMixMonitoring(float* output, int32_t numFrames,
-                                       InputNode* inputNode,
                                        bool oscillatorEnabled, bool hasInputMonitoring) {
-    const int32_t totalSamples = numFrames * 2;
-
-    // DEBUG: Log monitoring status periodically with sample rate info
-    static int monitorCheckCount = 0;
-    if (++monitorCheckCount >= 500) {
-        int outputSampleRate = currentSampleRate();
-        int inputSampleRate = inputNode ? inputNode->getStreamSampleRate() : 0;
-        LOGI("ENGINE MONITOR CHECK: inputNode=%p, monitoringEnabled=%d, oscEnabled=%d, outputSR=%d, inputSR=%d, mixerNode=%p",
-             inputNode,
-             hasInputMonitoring,
-             oscillatorEnabled,
-             outputSampleRate,
-             inputSampleRate,
-             mMixerNode.get());
-
-        if (inputSampleRate > 0 && outputSampleRate > 0 && inputSampleRate != outputSampleRate) {
-            LOGW("SAMPLE RATE MISMATCH! Input=%d, Output=%d - THIS CAUSES GLITCHES!",
-                 inputSampleRate, outputSampleRate);
-        }
-        monitorCheckCount = 0;
-    }
-
     // DIAGNOSTIC: Log MIX mode conditions periodically
     static int mixConditionLogCount = 0;
     if (++mixConditionLogCount >= 500) {
-        LOGI("MIX CHECK: oscEnabled=%d, hasInputMonitoring=%d, inputNode=%p, mixerNode=%p",
-             oscillatorEnabled, hasInputMonitoring, inputNode, mMixerNode.get());
+        LOGI("MIX CHECK: oscEnabled=%d, hasInputMonitoring=%d, framesRead=%d, mixerNode=%p",
+             oscillatorEnabled, hasInputMonitoring, mMonitoringFramesRead, mMixerNode.get());
         mixConditionLogCount = 0;
     }
 
     // Only mix input in MIX mode (oscillator enabled + input monitoring enabled)
-    if (oscillatorEnabled && hasInputMonitoring) {
-        if (mMixerNode && mMonitoringBuffer.size() >= static_cast<size_t>(totalSamples)) {
-            // 1. Copy oscillator output to mOscillatorBuffer (non-interleaved)
-            mOscillatorBuffer.copyFromInterleaved(output, numFrames);
+    if (!oscillatorEnabled || !hasInputMonitoring) return;
 
-            // 2. Read input samples and convert to non-interleaved
-            int framesRead = inputNode->getMonitoringSamples(mMonitoringBuffer.data(), numFrames);
+    if (mMixerNode) {
+        // 1. Copy the instrument bus to mOscillatorBuffer (non-interleaved).
+        //    NOT the oscillator, despite the name: by this point `output` is the
+        //    finished bus — synth + FX + loops.
+        mOscillatorBuffer.copyFromInterleaved(output, numFrames);
 
-            mInputBuffer.clear();
-            if (framesRead > 0) {
-                mInputBuffer.copyFromInterleaved(mMonitoringBuffer.data(), framesRead);
-            }
-
-            // 3. Process through MixerNode
-            AudioBuffer dummyInput;
-            mMixerNode->process(dummyInput, numFrames);
-
-            // 4. Copy MixerNode output back to interleaved outputData
-            mMixerNode->getOutputBuffer().copyToInterleaved(output, numFrames);
-
-            // 5. Output protection
-            mOutputStage.processOutputNoClip(output, numFrames);
-
-            // DEBUG: Log mix periodically
-            static int mixerMixCount = 0;
-            if (++mixerMixCount >= 100) {
-                LOGI("MIX MODE (MixerNode): framesRead=%d, busLevel=%.2f, inputLevel=%.2f",
-                     framesRead,
-                     mMixerNode->getInputLevel(MixerNode::INPUT_OSCILLATOR),
-                     mMixerNode->getInputLevel(MixerNode::INPUT_EXTERNAL));
-                mixerMixCount = 0;
-            }
-        } else {
-            // Fallback to simple mixing if MixerNode not available
-            if (mMonitoringBuffer.size() >= static_cast<size_t>(totalSamples)) {
-                int framesRead = inputNode->getMonitoringSamples(mMonitoringBuffer.data(), numFrames);
-
-                if (framesRead > 0) {
-                    simd::addStereoBuffers(output, output, mMonitoringBuffer.data(),
-                                           framesRead, true);
-                    simd::hardLimitStereo(output, framesRead);
-                }
-            }
+        // 2. This block's monitored input, captured once by
+        //    captureMonitoringBlock(), converted to non-interleaved.
+        mInputBuffer.clear();
+        if (mMonitoringFramesRead > 0) {
+            mInputBuffer.copyFromInterleaved(mMonitoringBuffer.data(), mMonitoringFramesRead);
         }
+
+        // 3. Process through MixerNode
+        AudioBuffer dummyInput;
+        mMixerNode->process(dummyInput, numFrames);
+
+        // 4. Copy MixerNode output back to interleaved outputData
+        mMixerNode->getOutputBuffer().copyToInterleaved(output, numFrames);
+
+        // No output protection here, and that is the fix, not an omission. This
+        // used to run processOutputNoClip() on top of the processOutput() that
+        // applyEffectsAndLooper had already run on the same block: the same
+        // stateful lookahead limiter advanced twice per block, the soft clipper
+        // ran twice, and the meters were updated twice — the second time over a
+        // reading the first had already taken of the PRE-mix bus. The protection
+        // now runs once, at the tail, in applyMasterAndProtectOutput().
+
+        // DEBUG: Log mix periodically
+        static int mixerMixCount = 0;
+        if (++mixerMixCount >= 100) {
+            LOGI("MIX MODE (MixerNode): framesRead=%d, busLevel=%.2f, inputLevel=%.2f",
+                 mMonitoringFramesRead,
+                 mMixerNode->getInputLevel(MixerNode::INPUT_OSCILLATOR),
+                 mMixerNode->getInputLevel(MixerNode::INPUT_EXTERNAL));
+            mixerMixCount = 0;
+        }
+    } else if (mMonitoringFramesRead > 0) {
+        // Fallback to simple mixing if MixerNode could not be allocated. The
+        // hard limit that used to be here went the same way as the chain above:
+        // the tail protects this sum too.
+        simd::addStereoBuffers(output, output, mMonitoringBuffer.data(),
+                               mMonitoringFramesRead, true);
     }
+}
+
+void AudioEngine::applyMasterAndProtectOutput(float* output, int32_t numFrames) {
+    // ---- MASTER VOLUME ----
+    // The level of everything that leaves: instrument, effects, loops AND the
+    // monitored input, which is why this runs here and not inside
+    // applyEffectsAndLooper. "The instrument" is a separate control with its own
+    // position in the chain — see setSynthVolume().
+    //
+    // Upstream of this, and deliberately: the looper's recording tap. The master
+    // is a monitoring level, not part of the take.
+    const float masterVol = mMasterVolume.load(std::memory_order_acquire);
+    if (masterVol != 1.0f) {
+        simd::applyStereoGain(output, numFrames, masterVol);
+    }
+
+    // ---- OUTPUT PROTECTION ----
+    // Exactly once per block, on the signal that actually leaves. OutputStage's
+    // own contract says every path converges here last; MIX used to break that
+    // by running the chain a second time over a buffer this one had already
+    // metered.
+    mOutputStage.processOutput(output, numFrames);
 }
 
 // ========== DECOMPOSED processAudioBlock ==========
@@ -1629,9 +1653,15 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
         float* outputData = audioData;
         const int32_t totalSamples = numFrames * 2;
 
+        // This block's monitored input, read ONCE. Both consumers — the vocoder
+        // modulator and the MIX sum — take their samples from the snapshot; the
+        // stopped path below does too.
+        const bool monitoringEnabled = inputNode && inputNode->isMonitoringEnabled();
+        captureMonitoringBlock(inputNode, numFrames, monitoringEnabled);
+
         // Not-Running: silence + monitoring
         if (state != EngineState::Running) {
-            return handleNotRunning(outputData, numFrames, inputNode);
+            return handleNotRunning(outputData, numFrames);
         }
 
         // Buffer validation
@@ -1645,7 +1675,7 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
         // Mode detection: cache state once per callback
         const auto dualTouchState = mDualTouch.snapshot();
         bool oscillatorEnabled = mOscillatorEnabled.load(std::memory_order_acquire);
-        bool hasInputMonitoring = inputNode && inputNode->isMonitoringEnabled();
+        const bool hasInputMonitoring = monitoringEnabled;
         const size_t cachedOscIndex = static_cast<size_t>(mOscBank.getOscillatorType());
         const size_t cachedModIndex = static_cast<size_t>(mOscBank.getModulatorType());
         const bool cachedHasActiveModulator = mOscBank.hasActiveModulator();
@@ -1665,19 +1695,23 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
 
         } else if (!dualTouchState.active) {
             renderSingleTouch(outputData, numFrames, cachedEngineType, cachedOscIndex,
-                              cachedHasActiveModulator, cachedModIndex, inputNode);
+                              cachedHasActiveModulator, cachedModIndex);
 
         } else {
             renderDualTouch(outputData, numFrames, dualTouchState, cachedEngineType,
-                            cachedOscIndex, cachedHasActiveModulator, cachedModIndex, inputNode);
+                            cachedOscIndex, cachedHasActiveModulator, cachedModIndex);
         }
 
         // MIX mode monitoring (post-render)
-        handleMixMonitoring(outputData, numFrames, inputNode, oscillatorEnabled, hasInputMonitoring);
+        handleMixMonitoring(outputData, numFrames, oscillatorEnabled, hasInputMonitoring);
 
-        // Waveform capture (final post-master output for visualization).
-        // Looper tap moved INTO applyEffectsAndOutput (post-FX, pre-master-vol)
-        // so it captures the dry instrument signal independent of master volume.
+        // Master volume + output protection, once, over the finished mix.
+        applyMasterAndProtectOutput(outputData, numFrames);
+
+        // Waveform capture: the final output, exactly what the device gets.
+        // The looper's tap is elsewhere on purpose — it sits inside
+        // applyEffectsAndLooper, upstream of the master, so a take is not
+        // scaled by the monitoring level.
         mWaveformCapture.write(outputData, numFrames);
 
         mCallbackErrorCount.store(0, std::memory_order_relaxed);
@@ -2025,6 +2059,12 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
     if (mResetEffectChainPending.compare_exchange_strong(
             expected, false, std::memory_order_acq_rel)) {
         mEffectChain.reset();
+
+        // The output stage carries audio across the transition too: its
+        // lookahead limiter holds 5 ms. Resetting the chain but not this left
+        // the first block of INPUT_FX with a tail of the pad — the same bleed
+        // the chain reset exists to prevent, one stage further downstream.
+        mOutputStage.reset();
     }
 
     // ========== DIRECT USB INPUT_FX MODE ==========
@@ -2088,7 +2128,7 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
         // 3. Process through effect chain (INPUT → EFFECTS → OUTPUT)
         mEffectChain.process(mOutputStage.getTempBuffer(), outputData, numFrames);
 
-        // 3b. Looper integration (post-FX, pre-master). Mirrors applyEffectsAndOutput.
+        // 3b. Looper integration (post-FX, pre-master). Mirrors applyEffectsAndLooper.
         // Without this the USB direct INPUT_FX fast-path bypasses the looper entirely:
         // no recording, no playback of existing tracks, no transport advance.
         mPreRollRing.write(outputData, numFrames);

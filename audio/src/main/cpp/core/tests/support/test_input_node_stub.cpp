@@ -6,11 +6,24 @@
  * Android-only. Without these definitions the core test binary fails to link on
  * the ~2 dozen InputNode symbols that AudioEngine references.
  *
- * NOT a behavioural double. Every method here is the cheapest thing that
- * satisfies its signature. The suite in this directory never attaches an
- * InputNode to the engine, so none of this is reached — which is the point: if
- * a future test needs real input behaviour, it must build a proper fake rather
- * than trusting these bodies.
+ * Almost NOT a behavioural double: every method here is the cheapest thing that
+ * satisfies its signature, with ONE exception, called out below. If a test needs
+ * real input behaviour beyond that exception, it must extend this double
+ * deliberately rather than trust these bodies.
+ *
+ * THE EXCEPTION — the monitoring ring is real (feedExternalInput /
+ * getMonitoringSamples). It had to become real because with getMonitoringSamples
+ * returning 0 the sum in AudioEngine::handleMixMonitoring() never runs, so
+ * nothing about MIX-mode monitoring is observable from the host suite at all —
+ * and that blind spot is what let a shipped defect (master volume not reaching
+ * the monitored input) live undetected. The two bodies carry the least behaviour
+ * that makes the sum happen.
+ *
+ * Deliberately NOT modelled, so a future test does not read a level off this and
+ * believe it: input gain, the noise gate, the DC blocker, and the partial-read
+ * bookkeeping of the production node. Monitoring volume IS applied, because it
+ * is the one gain a MIX test needs to hold at a known value to read a ratio off
+ * the output buffer.
  *
  * The header is Oboe-free by design (WA-2.0), so the class definition below is
  * the production one; only the implementation is swapped.
@@ -19,6 +32,8 @@
 #include "nodes/InputNode.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <vector>
 
 void InputNode::BackendAdapterDeleter::operator()(void* p) const {
     // The stub never creates an adapter, so there is nothing to delete. Deleting
@@ -122,14 +137,50 @@ float InputNode::getMonitoringVolume() const {
 }
 
 int InputNode::getMonitoringSamples(float* outputBuffer, int numFrames) {
-    (void)outputBuffer;
-    (void)numFrames;
-    return 0;
+    if (outputBuffer == nullptr || numFrames <= 0) return 0;
+
+    const size_t requested = static_cast<size_t>(numFrames) * 2;
+
+    if (!mMonitoringEnabled.load(std::memory_order_acquire)) {
+        std::fill_n(outputBuffer, requested, 0.0f);
+        return 0;
+    }
+
+    // Whole stereo frames only: handing back an odd sample count would put the
+    // caller's channels out of phase for the rest of the block.
+    size_t toRead = std::min(mMonitoringBuffer.availableToRead(), requested);
+    toRead -= toRead % 2;
+
+    if (toRead == 0 || !mMonitoringBuffer.read(outputBuffer, toRead)) {
+        std::fill_n(outputBuffer, requested, 0.0f);
+        return 0;
+    }
+
+    std::fill_n(outputBuffer + toRead, requested - toRead, 0.0f);
+    return static_cast<int>(toRead / 2);
 }
 
 void InputNode::feedExternalInput(const float* inputData, int numFrames) {
-    (void)inputData;
-    (void)numFrames;
+    if (inputData == nullptr || numFrames <= 0) return;
+    if (!mMonitoringEnabled.load(std::memory_order_acquire)) return;
+
+    const size_t needed = static_cast<size_t>(numFrames) * 2;
+    if (mMonitoringBuffer.availableToWrite() < needed) return;
+
+    const float monitorVolume = mMonitoringVolume.load(std::memory_order_acquire);
+    if (monitorVolume == 1.0f) {
+        mMonitoringBuffer.write(inputData, needed);
+        return;
+    }
+
+    // A heap buffer on what production treats as the audio thread. Allowed here
+    // and nowhere else: this file never ships, and sizing a member from prepare()
+    // would make the double carry lifecycle state it otherwise does not have.
+    std::vector<float> scaled(needed);
+    for (size_t i = 0; i < needed; ++i) {
+        scaled[i] = inputData[i] * monitorVolume;
+    }
+    mMonitoringBuffer.write(scaled.data(), needed);
 }
 
 bool InputNode::createInputStream() { return false; }
