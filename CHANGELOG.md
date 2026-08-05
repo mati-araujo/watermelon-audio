@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.0.0...v2.0.1) (2026-08-05)
+
+
+### Bug Fixes
+
+* **ci:** la precondición de árbol limpio de gate.sh valía para un instante ([#115](https://github.com/mati-araujo/watermelon-audio/issues/115)) ([5df6a5c](https://github.com/mati-araujo/watermelon-audio/commit/5df6a5c94b5338e1d35e667db2781f7ca54f9ab7))
+* **core:** el master volume no atenuaba la entrada monitoreada ([#113](https://github.com/mati-araujo/watermelon-audio/issues/113)) ([702dac1](https://github.com/mati-araujo/watermelon-audio/commit/702dac1b13d441b052dfdfd33c39b8c4d731f61a))
+
 ## [2.0.0](https://github.com/mati-araujo/watermelon-audio/compare/v1.14.1...v2.0.0) (2026-08-03)
 
 
