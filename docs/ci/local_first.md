@@ -410,6 +410,63 @@ que el arreglo sea inocuo, no que empeore nada.
 semántica**: detecta que alguien le saque el SHA al grupo, y nada más. Está escrito al lado del
 assert para que un verde ahí no se lea como más de lo que es.
 
+### 7.12 Lo que encontró el segundo soak: la precondición valía para un instante
+
+Segunda auditoría, ventana `405474c..702dac1` — **12 PRs y dos releases**, el régimen entero
+funcionando. **El camino rápido volvió a no fallar.** Los 7 PRs que lo usaron (#104, #106,
+#108, #109, #111, #112, #113) fueron legítimos, verificados recomputando el digest con una
+implementación distinta (`git ls-tree -r` sobre el commit de merge que el log dice que se
+chequeó, contra el `git ls-files -s` del script): match con el digest que imprimió el CI **y**
+con el atestado. Y la cadena cierra hasta `master`: la base del CI == el padre del squash en
+los 7, y el digest del árbol mergeado == el del commit que quedó. **Lo verificado es lo que
+aterrizó.** Los dos releases esperaron CI verde (833 s y 859 s) y ninguna corrida de `master`
+se canceló — el arreglo de §7.11 aguantó las 15.
+
+**El agujero estaba en el lado que el verificador no puede ver: el emisor.**
+
+`gate.sh` chequeaba el árbol limpio **antes** de correr los gates y computaba el digest
+**después**, sin nada en el medio. Entre las dos cosas hay entre 2 y 25 minutos. Cualquier cosa
+que entrara al índice en esa ventana —vos que seguís trabajando, otra terminal, un agente
+aplicando un fix— quedaba **atestada sin que ningún gate la hubiera visto**.
+
+> **Y el CI la honra**, que es lo que lo hace peligroso: recomputa el digest sobre el árbol
+> pusheado y **coincide**, porque el digest atestado y el real son los dos el contenido nuevo.
+> El verificador no está roto; es estructuralmente incapaz de ver este modo de falla. Compara
+> la prueba contra el árbol, y lo que no coincide es la prueba contra **lo que se ejecutó**.
+
+Reproducido en tres comandos sobre un clon: precondición limpia → digest `8108d7b5…` (el real
+de #113) → `git add` de un cambio en `AudioEngine.cpp` → digest `28090fb0…`. Se atesta el
+segundo.
+
+**No se disparó en esta ventana.** Los 7 fast-path cierran contra el árbol pusheado, así que no
+hubo nada que revertir: era un agujero **latente**, y la distinción importa para no inventar una
+regresión que no existió.
+
+**El arreglo** re-chequea, justo antes de emitir la atestación, las dos cosas que la
+precondición garantizaba: el digest (que es lo que el CI compara) y el árbol limpio (que es lo
+que hace que los gates hayan corrido sobre el índice). Falla cualquiera → **gate verde, sin
+atestación**, la misma forma que ya tenían los pins. Fail-closed sobre la prueba, nunca sobre el
+gate.
+
+Dos cosas que el arreglo tuvo que medir antes de existir, y no suponer:
+
+1. **Ningún gate ensucia un archivo trackeado.** Una corrida completa deja el árbol con
+   exactamente un archivo modificado, `.github/local-gate.json`, y lo escribe el propio
+   `gate.sh` unas líneas después. Por eso el re-chequeo va **antes** de esa escritura. Si esto
+   no se hubiera medido, el chequeo estricto habría fallado en todas las corridas y el arreglo
+   habría sido inservible.
+2. **Un cambio de prosa mueve el árbol y no el digest, y se rechaza igual.** Enumerar qué prosa
+   puede o no influir en un gate es probar una ausencia; sale más caro que la corrida de CI que
+   cuesta equivocarse.
+
+> **La regla transferible, y es la misma que ya había mordido con `concurrency:`: una
+> precondición al inicio no cubre una ventana de minutos.** La prueba y lo probado tienen que
+> muestrearse en el mismo instante, o probás una cosa y firmás otra.
+
+**El guardián**, otra vez en `scripts/test-attestation.sh` y con el mismo alcance literal:
+detecta que alguien **borre** el re-chequeo, y nada más. Que la ventana esté cerrada sólo se ve
+corriendo el gate con una mutación en el medio, que es como se verificó a mano.
+
 ---
 
 ## Apéndice — el gate local, cronometrado

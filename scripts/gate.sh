@@ -200,6 +200,12 @@ EOF
     exit 1
 fi
 
+# El digest de ARRANQUE. Se captura en el mismo instante que la precondicion de
+# arriba —y por eso vive pegado a ella— porque es contra esto que se re-chequea
+# al final, antes de atestar. El porque entero esta en el bloque "atestacion".
+DIGEST_T0=""
+[ -z "$ONLY" ] && DIGEST_T0="$(python3 scripts/gate-digest.py 2>/dev/null)"
+
 # Versiones de herramienta observadas. Se comparan contra los pins ANTES de
 # gastar un minuto: si el toolchain derivo, el gate corre igual pero no atesta,
 # y es mejor saberlo ahora que en 6 minutos.
@@ -419,7 +425,64 @@ fi
 
 say "atestacion"
 
+# LA PRECONDICION DE ARBOL LIMPIO VALE PARA UN INSTANTE: el de su propia
+# ejecucion. Los gates tardan entre 2 y 25 minutos y el digest se computa ACA,
+# al final — asi que sin re-chequear, cualquier cosa que entre al indice en el
+# medio (vos que seguis trabajando, otra terminal, un agente que aplica un fix)
+# queda atestada sin que ningun gate la haya visto. Y el CI la honra igual: el
+# digest atestado y el real coinciden, porque los dos son el contenido NUEVO.
+# Es un falso verde que no deja rastro en ningun log.
+#
+# Auditado el 2026-08-05 sobre los 12 PRs de 405474c..702dac1: nunca se disparo.
+# El agujero era latente, no observado — pero es reproducible en tres comandos.
+# Ver docs/ci/local_first.md §7.12.
+#
+# Se re-chequean las DOS cosas que la precondicion garantizaba, porque prueban
+# cosas distintas: el DIGEST es lo que el CI compara, y el ARBOL LIMPIO es lo
+# que hace que los gates hayan corrido sobre el indice y no sobre otra cosa. Un
+# cambio de prosa mueve el segundo y no el primero, y se rechaza igual: enumerar
+# que prosa puede o no influir en un gate es probar una ausencia, y sale mas
+# caro que la corrida de CI que cuesta equivocarse.
+#
+# Va ANTES de escribir la atestacion, y eso es load-bearing: medido el
+# 2026-08-05, una corrida completa deja el arbol con EXACTAMENTE un archivo
+# modificado —.github/local-gate.json— y lo escribe este script unas lineas mas
+# abajo. Aca todavia esta limpio; ningun gate toca un archivo trackeado.
+#
+# Falla cualquiera de los dos → GATE VERDE, SIN atestacion, igual que con los
+# pins. Fail-closed sobre la PRUEBA, nunca sobre el gate: el unico costo es que
+# el CI corra los tres enteros, que es exactamente lo que pasaba antes de que
+# existiera el camino rapido.
 DIGEST="$(python3 scripts/gate-digest.py)"
+DIRT="$(git status --porcelain --untracked-files=normal)"
+
+DRIFT=""
+if [ -z "$DIGEST_T0" ]; then
+    DRIFT="no se pudo computar el digest al arrancar"
+elif [ -z "$DIGEST" ]; then
+    DRIFT="no se pudo recomputar el digest"
+elif [ "$DIGEST" != "$DIGEST_T0" ]; then
+    DRIFT="el contenido cambio MIENTRAS corrian los gates"
+elif [ -n "$DIRT" ]; then
+    DRIFT="el arbol de trabajo se ensucio MIENTRAS corrian los gates"
+fi
+
+if [ -n "$DRIFT" ]; then
+    printf '\n\033[1mGATE VERDE, pero SIN atestacion\033[0m: %s.\n' "$DRIFT" >&2
+    if [ -n "$DIGEST_T0" ] && [ -n "$DIGEST" ] && [ "$DIGEST" != "$DIGEST_T0" ]; then
+        printf '  al arrancar : %s\n' "$DIGEST_T0" >&2
+        printf '  ahora       : %s\n' "$DIGEST" >&2
+    fi
+    [ -n "$DIRT" ] && git status --short >&2
+    cat >&2 <<'EOF'
+
+Los gates corrieron sobre el contenido que habia al arrancar, asi que atestar el
+de ahora seria firmar algo que no se verifico. El CI va a correr los tres gates
+enteros. Si el cambio es intencional, volve a correr el gate.
+EOF
+    exit 0
+fi
+
 python3 - "$ATTESTATION" "$DIGEST" "$RESULTS" "$TOTAL" \
          "$XCODE_V" "$CLANG_V" "$IOS_SDK_V" "$SIM_RUNTIME_V" "$CMAKE_V" "$NINJA_V" "$JVM_V" <<'PY'
 import json, subprocess, sys, time

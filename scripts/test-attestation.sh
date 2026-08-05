@@ -186,6 +186,78 @@ else
     FAIL=$(( FAIL + 1 ))
 fi
 
+# La tercera pieza del mismo trato, y la que cubre el lado EMISOR. El verificador
+# de abajo es incapaz de ver este modo de falla: compara el digest atestado
+# contra el arbol pusheado y los dos coinciden. Lo que no coincide es lo que los
+# gates realmente ejecutaron.
+#
+# `gate.sh` chequea que el arbol este limpio ANTES de correr los gates y computa
+# el digest DESPUES. Entre las dos cosas hay entre 2 y 25 minutos, y todo lo que
+# entre al indice en esa ventana se atesta sin haber corrido por ningun gate.
+# Auditado el 2026-08-05 sobre 12 PRs: nunca se disparo. El arreglo es
+# re-chequear digest y arbol antes de emitir la atestacion.
+#
+# ALCANCE, literal, igual que el guardian de arriba: esto detecta que alguien
+# BORRE el re-chequeo, y nada mas. No prueba que la ventana este cerrada —eso
+# solo se ve corriendo el gate con una mutacion en el medio—. Un verde aca es
+# "nadie saco la pieza", no "el esquema anda".
+printf '\n== gate.sh no atesta lo que los gates no corrieron ==\n'
+if python3 - <<'PY' > "$WORK/toctou.log" 2>&1
+import sys
+
+text = open("scripts/gate.sh", encoding="utf-8").read()
+lines = text.splitlines()
+
+def first(pred, desc):
+    for i, ln in enumerate(lines):
+        if pred(ln):
+            return i
+    sys.exit(f"no se encontro {desc} en scripts/gate.sh")
+
+# El digest de arranque tiene que existir y salir de gate-digest.py: sin el, no
+# hay contra que comparar y el re-chequeo de abajo seria decorativo.
+t0 = first(
+    lambda ln: "DIGEST_T0=" in ln and "gate-digest.py" in ln,
+    "la captura del digest de arranque (`DIGEST_T0=...gate-digest.py`)",
+)
+
+# El punto de no retorno: la linea que escribe la atestacion. Todo chequeo tiene
+# que estar ANTES; uno posterior no evita nada.
+write = first(
+    lambda ln: 'python3 - "$ATTESTATION"' in ln,
+    "la escritura de la atestacion (`python3 - \"$ATTESTATION\"`)",
+)
+
+cmp_ = [i for i, ln in enumerate(lines) if '"$DIGEST_T0"' in ln and '"$DIGEST"' in ln]
+if not cmp_:
+    sys.exit(
+        "gate.sh ya no compara el digest de arranque contra el final.\n"
+        "  Sin esa comparacion, un `git add` durante los gates queda atestado sin\n"
+        "  que ningun gate lo haya visto, y el CI lo honra: el digest atestado y el\n"
+        "  real coinciden, porque los dos son el contenido nuevo."
+    )
+if min(cmp_) > write:
+    sys.exit("la comparacion de digests quedo DESPUES de escribir la atestacion: no evita nada")
+
+# Y el arbol: un cambio de prosa no mueve el digest, asi que el digest solo no
+# alcanza para afirmar que los gates corrieron sobre lo que hay ahora.
+dirt = [i for i, ln in enumerate(lines) if "git status --porcelain" in ln]
+if len(dirt) < 2:
+    sys.exit("gate.sh dejo de re-chequear el arbol antes de atestar (falta el segundo `git status --porcelain`)")
+if not any(t0 < i < write for i in dirt):
+    sys.exit("el re-chequeo del arbol no esta entre la captura del digest y la escritura de la atestacion")
+
+print(f"re-chequeo presente: digest en linea {min(cmp_) + 1}, arbol antes de la linea {write + 1}")
+PY
+then
+    printf '  ok    %s\n' "$(cat "$WORK/toctou.log")"
+    PASS=$(( PASS + 1 ))
+else
+    printf '  FALLO gate.sh puede atestar contenido que no corrio\n'
+    sed 's/^/        /' "$WORK/toctou.log"
+    FAIL=$(( FAIL + 1 ))
+fi
+
 printf '\n== caso positivo ==\n'
 for gate in ios build cpp-tests-macos; do
     expect true "$(verify "$BASE" "$gate")" "atestacion valida, gate $gate" "$(logpath "$BASE" "$gate")"
