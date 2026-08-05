@@ -15,9 +15,9 @@
  * meter, so that meter had never moved. The input meter beside it worked, which
  * is probably why nobody noticed.
  *
- * They now live on OutputStage, the one place all three output paths converge
- * (processOutput / processOutputNoClip / processOutputLightweight are each the
- * LAST thing to touch the buffer). TheOutputMetersFollowTheSignal below is what
+ * They now live on OutputStage, the one place the output paths converge
+ * (processOutput / processOutputLightweight are each the LAST thing to touch the
+ * buffer, once per block). TheOutputMetersFollowTheSignal below is what
  * replaced the characterization test, and it asserts agreement with an
  * independent measurement of the same block rather than mere non-zeroness — a
  * meter reporting a fixed number, or reading the wrong buffer, has to fail it.

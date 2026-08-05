@@ -652,13 +652,13 @@ public:
     //
     // They are gone rather than exposed, and the name is why:
     // "setMixerOscillatorLevel" wrote MixerNode input 0, which is not the
-    // oscillator. handleMixMonitoring runs after applyEffectsAndOutput, so
+    // oscillator. handleMixMonitoring runs after applyEffectsAndLooper, so
     // input 0 carries the finished master bus — synth + FX + LOOPS, already
     // scaled by master volume. Exposing it would have shipped a control that
     // silently ducked the user's loops.
     //
     // The instrument-side level is setSynthVolume(), which is applied beside
-    // the fade in applyEffectsAndOutput: upstream of the looper, downstream of
+    // the fade in applyEffectsAndLooper: upstream of the looper, downstream of
     // nothing that would make it configuration-dependent. It works in every
     // mode, with or without input monitoring, which is exactly what these six
     // could not do.
@@ -779,7 +779,7 @@ private:
     // ========== RENDER SUB-METHODS (Step 8 decomposition) ==========
 
     /** Handle audio output when engine is not in Running state */
-    watermelon_audio::IAudioCallback::Result handleNotRunning(float* output, int32_t numFrames, InputNode* inputNode);
+    watermelon_audio::IAudioCallback::Result handleNotRunning(float* output, int32_t numFrames);
 
     /** Render INPUT_FX mode: input through effect chain */
     void renderInputFx(float* output, int32_t numFrames, InputNode* inputNode);
@@ -793,25 +793,48 @@ private:
     /** Render SINGLE_TOUCH mode: oscillator/engine + arp + effects */
     void renderSingleTouch(float* output, int32_t numFrames,
                            int cachedEngineType, size_t cachedOscIndex,
-                           bool cachedHasActiveModulator, size_t cachedModIndex,
-                           InputNode* inputNode);
+                           bool cachedHasActiveModulator, size_t cachedModIndex);
 
     /** Render DUAL_TOUCH mode: two oscillators + mix + effects */
     void renderDualTouch(float* output, int32_t numFrames,
                          const TouchState& dualTouchState,
                          int cachedEngineType, size_t cachedOscIndex,
-                         bool cachedHasActiveModulator, size_t cachedModIndex,
-                         InputNode* inputNode);
+                         bool cachedHasActiveModulator, size_t cachedModIndex);
+
+    /**
+     * Read this block's monitored input ONCE, into mMonitoringBuffer.
+     *
+     * There are two consumers — the vocoder modulator and the MIX sum — and the
+     * monitoring ring is single-consumer. While each read for itself, whichever
+     * ran second got whatever the first had left, so MIX monitoring was starved
+     * by the vocoder feed on every block that had exactly one block of input
+     * queued. One read, one snapshot, both consumers off it.
+     */
+    void captureMonitoringBlock(InputNode* inputNode, int32_t numFrames,
+                                bool hasInputMonitoring);
 
     /** Handle MIX mode monitoring: mix input with oscillator output */
-    void handleMixMonitoring(float* output, int32_t numFrames, InputNode* inputNode,
+    void handleMixMonitoring(float* output, int32_t numFrames,
                              bool oscillatorEnabled, bool hasInputMonitoring);
 
-    /** Common post-processing: DC block + effects + fade + master volume + output protection */
-    void applyEffectsAndOutput(float* output, int32_t numFrames);
+    /**
+     * Instrument bus: DC block + effects + fade + synth volume + looper.
+     *
+     * Deliberately NOT the master volume and NOT the output protection: both of
+     * those belong to the whole mix, which does not exist yet at this point —
+     * the monitored input is summed after every render path has returned. See
+     * applyMasterAndProtectOutput().
+     */
+    void applyEffectsAndLooper(float* output, int32_t numFrames);
 
-    /** Pass mic buffer to vocoder modulator if available */
-    void feedVocoderModulator(InputNode* inputNode, int32_t numFrames, bool hasInputMonitoring);
+    /**
+     * The tail of every block: master volume, then the output protection chain,
+     * each exactly once and on the signal that actually leaves.
+     */
+    void applyMasterAndProtectOutput(float* output, int32_t numFrames);
+
+    /** Pass this block's monitored input to the vocoder as its modulator */
+    void feedVocoderModulator();
 
     // Legacy Oboe stream (shared_ptr for safe lifetime management)
     // Only used when mUseBackendManager is false (direct Oboe path)
@@ -860,13 +883,13 @@ private:
     std::atomic<float> mMasterVolume{1.0f};
 
     // Nivel del instrumento: synth + FX, NO los loops. Se aplica junto al ramp
-    // del fade en applyEffectsAndOutput, que es el único punto de la cadena con
+    // del fade en applyEffectsAndLooper, que es el único punto de la cadena con
     // esa semántica ya establecida y documentada.
     //
     // `mSynthVolumePrev` es estado del thread de audio y de nadie más: guarda el
     // valor del bloque anterior para rampear entre bloques en vez de saltar, que
     // es lo que evita el zipper noise. No es atómico a propósito — sólo lo toca
-    // applyEffectsAndOutput.
+    // applyEffectsAndLooper.
     std::atomic<float> mSynthVolume{1.0f};
     float mSynthVolumePrev{1.0f};
 
@@ -904,8 +927,20 @@ private:
     std::shared_ptr<InputNode> mInputNode;
     mutable std::mutex mInputNodeMutex;
 
-    // Buffer pre-alocado para monitoring (RT-safe)
+    // Buffer pre-alocado para monitoring (RT-safe). Lo llena
+    // captureMonitoringBlock() una vez por callback, y de ahí leen sus DOS
+    // consumidores: el modulador del vocoder y la suma de MIX.
     std::vector<float> mMonitoringBuffer;
+
+    // Frames válidos que dejó captureMonitoringBlock() en mMonitoringBuffer para
+    // este bloque. Sólo lo tocan el callback y sus submétodos, así que no
+    // necesita ser atómico.
+    int mMonitoringFramesRead{0};
+
+    // Downmix mono de mMonitoringBuffer para el vocoder. Vive aparte porque el
+    // downmix se escribía ENCIMA del buffer compartido, y ahora ese buffer tiene
+    // un segundo consumidor que necesita los datos estéreo intactos.
+    std::vector<float> mVocoderMonoBuffer;
 
     // Sample rate preferido para el output stream (0 = auto)
     std::atomic<int> mPreferredSampleRate{0};

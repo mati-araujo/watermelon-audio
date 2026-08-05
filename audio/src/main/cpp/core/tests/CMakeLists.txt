@@ -106,6 +106,7 @@ add_executable(core_tests
     test_fade_lifecycle.cpp
     test_capture_requests.cpp
     test_c_api_lifecycle.cpp
+    test_c_api_master_bus.cpp
     test_c_api_input.cpp
     test_c_api_effects.cpp
     test_c_api_synth.cpp

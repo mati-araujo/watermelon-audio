@@ -32,6 +32,11 @@ void OutputStage::reset() {
     mDCBlocker.reset();
     mDitherer.reset();
 
+    // The limiter holds 5 ms of audio in its lookahead line. Leaving it across a
+    // context change hands the first block of the new context a tail of the old
+    // one — audible as a blip of the pad on the first block of INPUT_FX.
+    mLookaheadLimiter.reset();
+
     // The meters reset with the stream. Leaving a stale peak across a stop/start
     // would show the UI a level that belongs to audio nobody is playing.
     mPeakL.store(0.0f, std::memory_order_release);
@@ -53,13 +58,6 @@ void OutputStage::processOutput(float* stereoData, int numFrames) {
 }
 
 void OutputStage::processOutputLightweight(float* stereoData, int numFrames) {
-    mSoftClipper.processStereo(stereoData, numFrames);
-    simd::hardLimitStereo(stereoData, numFrames);
-    updateMeters(stereoData, numFrames);
-}
-
-void OutputStage::processOutputNoClip(float* stereoData, int numFrames) {
-    mLookaheadLimiter.process(stereoData, stereoData, numFrames);
     mSoftClipper.processStereo(stereoData, numFrames);
     simd::hardLimitStereo(stereoData, numFrames);
     updateMeters(stereoData, numFrames);

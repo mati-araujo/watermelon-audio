@@ -91,6 +91,44 @@ protected:
         return peak;
     }
 
+    /**
+     * Render @p blocks callbacks with the BACKEND delivering input, the way
+     * CoreAudioBackend and the USB backend do — inputData non-null on
+     * onAudioReady().
+     *
+     * This is the only road to MIX-mode monitoring from the host suite. With the
+     * oscillator enabled the engine hands those frames to
+     * InputNode::feedExternalInput(), and the InputNode double moves them
+     * through the real monitoring ring so handleMixMonitoring() has something to
+     * sum. See test_input_node_stub.cpp for what that double does and does not
+     * model.
+     *
+     * @param inputSample constant value written to every input sample. DC is
+     *        fine and deliberate: the monitored signal never meets the DC
+     *        blocker (that one runs on the instrument bus, upstream), so a
+     *        constant is the easiest thing to read a level off.
+     */
+    void renderWithInput(int blocks, int framesPerBlock, float inputSample) {
+        std::vector<float> out(static_cast<size_t>(framesPerBlock) * 2, 0.0f);
+        std::vector<float> in(static_cast<size_t>(framesPerBlock) * 2, inputSample);
+        for (int i = 0; i < blocks; ++i) {
+            std::fill(out.begin(), out.end(), 0.0f);
+            mWma->engine->onAudioReady(out.data(), in.data(), framesPerBlock);
+        }
+    }
+
+    /// renderWithInput() for one block, returning the loudest OUTPUT sample.
+    float renderBlockPeakWithInput(int framesPerBlock, float inputSample) {
+        std::vector<float> out(static_cast<size_t>(framesPerBlock) * 2, 0.0f);
+        std::vector<float> in(static_cast<size_t>(framesPerBlock) * 2, inputSample);
+        mWma->engine->onAudioReady(out.data(), in.data(), framesPerBlock);
+        float peak = 0.0f;
+        for (float sample : out) {
+            peak = std::max(peak, std::abs(sample));
+        }
+        return peak;
+    }
+
     WmaEngine* mWma = nullptr;
     FakeAudioBackend* mBackend = nullptr;
 };

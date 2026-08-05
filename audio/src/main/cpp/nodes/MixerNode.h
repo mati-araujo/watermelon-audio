@@ -19,7 +19,7 @@
  * - Master output level
  *
  * @warning INPUT_OSCILLATOR is NOT the oscillator. The only caller of this node
- * is AudioEngine::handleMixMonitoring, which runs AFTER applyEffectsAndOutput,
+ * is AudioEngine::handleMixMonitoring, which runs AFTER applyEffectsAndLooper,
  * so what it copies into input 0 is the finished master bus: synth + FX + LOOPS,
  * already scaled by master volume. Anything applied to input 0 scales the loops
  * too. This bit us once already: a "setMixerOscillatorLevel" existed on

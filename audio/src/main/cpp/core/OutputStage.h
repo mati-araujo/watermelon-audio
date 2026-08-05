@@ -20,11 +20,20 @@
  * WHY THE METERS LIVE HERE. They used to live on OutputNode, whose process()
  * was never called from anywhere — so peak and RMS were permanently 0 while
  * audio played, and NoisyPad's guitar-mode level meter never moved. This class
- * is the one place the three output paths converge: processOutput,
- * processOutputNoClip and processOutputLightweight are each the LAST thing to
- * touch the buffer before it goes to the device. Metering at the tail of all
- * three means the reading is "what the engine handed over", identically on
- * every path — and a fourth path has to come through here to exist at all.
+ * is the one place the output paths converge: processOutput and
+ * processOutputLightweight are each the LAST thing to touch the buffer before it
+ * goes to the device. Metering at the tail of both means the reading is "what
+ * the engine handed over", identically on every path — and a third path has to
+ * come through here to exist at all.
+ *
+ * That invariant held only as long as each block goes through exactly ONE of
+ * them, exactly once. It did not: MIX ran processOutput at the tail of the
+ * instrument bus and then a second full pass over the summed buffer, so the same
+ * stateful lookahead limiter advanced twice per block and the meter's second
+ * reading landed on top of one it had already taken of the PRE-mix signal —
+ * which made it settle at about half the true level. The second variant that
+ * existed for that pass (processOutputNoClip) is gone with it; the master bus is
+ * protected once, at the tail of the callback.
  */
 class OutputStage {
 public:
@@ -44,9 +53,6 @@ public:
 
     /// Lightweight output protection (no limiter, no dither — USB direct path).
     void processOutputLightweight(float* stereoData, int numFrames);
-
-    /// Partial output: limiter + soft clip + hard limit (no dither — mixer mix path).
-    void processOutputNoClip(float* stereoData, int numFrames);
 
     // -- Scratch buffer access (pre-allocated) --
     float* getTempBuffer() { return mTempBuffer.data(); }

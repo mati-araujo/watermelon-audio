@@ -3685,6 +3685,84 @@ billing agotado— tiene que existir una salida manual.
 `changes` es el sexto y no es decorativo: si fallara y no estuviera en la lista, los otros
 cinco quedarían `skipped` y el PR sería mergeable **sin ningún gate**.
 
+### Nota de cierre — el master vs. la entrada monitoreada (ticket 2), y los tres que salieron con él (2026-08-04)
+
+**El síntoma del ticket era cierto y está arreglado: el master ahora atenúa la entrada
+monitoreada.** El master y la protección de salida salieron de `applyEffectsAndOutput` —
+renombrada a **`applyEffectsAndLooper`**, porque ya no hace el output— y viven en
+`applyMasterAndProtectOutput()`, que `processAudioBlock` llama **una vez**, al final del bloque,
+sobre la mezcla terminada.
+
+> [!CAUTION]
+> **De las dos decisiones que el ticket pedía resolver, UNA se apoyaba en una premisa falsa, y
+> medirla la tiró.** El ticket decía que mover el master después de la suma lo pondría también
+> después del tap del looper, *"donde hoy sí se hornea"*. **Nunca se horneó.** El tap corre en la
+> `1178` y el master corría en la `1196`: misma función, secuencial. El camino USB igual (tap
+> `2097`, master `2103`). Y el repo **ya lo decía** en `processAudioBlock`: *"Looper tap moved
+> INTO applyEffectsAndOutput (post-FX, pre-master-vol) so it captures the dry instrument signal
+> independent of master volume"*. Dos comentarios del mismo archivo se contradecían, y
+> `git log -L` muestra que la frase falsa **entró en #112**, el PR que escribió el ticket: era una
+> afirmación del ticket, no una medición.
+>
+> Así que el ticket eran **dos** cambios audibles sólo en el papel. Quedó **uno**, y la decisión
+> de producto se resolvió a favor de "el master es todo lo que sale": desde #111 existe
+> `wma_set_synth_volume` para "el instrumento", y dos controles con la misma semántica serían
+> redundantes. `MasterVolumeNeverReachesWhatTheLooperRecords` deja la premisa corregida clavada
+> en la suite — y **discrimina**: con el master movido antes del tap, es el único de los 790 que
+> se pone rojo.
+
+**Lo que NO estaba en el ticket y salió de auditar alrededor. Los tres eran necesarios, no
+alcance de más:**
+
+1. **El ring de monitoring tenía DOS consumidores por bloque, y es lo que hacía el ticket 2
+   imposible de medir.** `feedVocoderModulator` leía `getMonitoringSamples()` para su downmix y
+   `handleMixMonitoring` volvía a leer para la suma — sobre un ring **single-consumer**. El
+   segundo se quedaba con lo que dejara el primero. En el test la suma daba `2.75e-05` con la
+   entrada a 0.2. Ahora `captureMonitoringBlock()` lee **una vez** por callback y los dos
+   consumidores salen del mismo snapshot; el downmix mono dejó de escribirse **encima** del
+   buffer compartido y tiene el suyo.
+
+2. **En MIX la cadena de protección corría DOS veces por bloque**, sobre el mismo
+   `mLookaheadLimiter` con estado: `processOutput` al final del bus de instrumento y
+   `processOutputNoClip` sobre el buffer ya sumado. La línea de retardo avanzaba `2×numFrames`
+   por bloque, el soft clip se aplicaba dos veces, y **los medidores se actualizaban dos veces —
+   la primera sobre el bus PRE-mezcla**. Con el instrumento en silencio eso deja el medidor en
+   `X/(1+c)`, o sea **la mitad** del nivel real, en el mismo medidor que #104 acababa de
+   resucitar. `processOutputNoClip` se borró: no le quedaban llamadores, y su nombre además
+   mentía (hacía soft clip *y* hard limit).
+
+3. **El motor parado era el único camino que entregaba el micrófono crudo.** `handleNotRunning`
+   copiaba el monitoring al device sin master y **sin ninguna protección**, con los +12 dB de
+   input gain por defecto adelante: una entrada a 2.0 salía a 2.0. Ahora aplica master y
+   `processOutputLightweight` — la variante liviana a propósito, porque el limitador sólo lo
+   dimensiona `OutputStage::prepare()` en `start()`, y este camino es alcanzable antes del primer
+   start.
+
+> [!TIP]
+> **El único test que se rompió por el cambio tenía razón, y arreglarlo destapó un cuarto
+> defecto.** `SwitchingToInputFxLeavesNoResidueOnTheOutput` se puso rojo (0.54 contra un techo de
+> 0.055) porque con la protección corriendo una vez al final, la cola del limitador ahora **se
+> vacía** en vez de descartarse en la rama de silencio. La respuesta no era volver atrás:
+> **`LookaheadLimiter` nunca implementó `reset()`** — siendo exactamente el caso que
+> `Effect::reset()` nombra en su propia documentación, *"delay lines ... let stale state bleed
+> through"*. Sus 5 ms sobrevivían a todo cambio de contexto. Ahora `OutputStage::reset()` lo
+> limpia, y el motor lo dispara junto al reset de la cadena, que existe **precisamente** para que
+> el pad no sangre en el primer bloque de INPUT_FX.
+
+**Verificación:** **790/790** (783 + 7 nuevos). Los 7 viven en `test_c_api_master_bus.cpp` y
+**6 fallaban antes del cambio**; el séptimo es el de la premisa corregida y se validó por
+mutación inversa. Todos leen el **buffer**, no el setter — el único test de master que existía era
+un round-trip get/set, la forma que ya falló tres veces en este repo.
+
+> [!NOTE]
+> **El doble de `InputNode` dejó de ser inerte, y hacía falta.** `getMonitoringSamples` devolvía
+> 0, así que la suma de MIX **no era observable desde la suite de host en absoluto** — por eso el
+> defecto pudo shippear. El doble ahora mueve el ring de monitoring de verdad; el input gain, el
+> noise gate y el DC blocker siguen sin modelarse, y está dicho en el archivo para que nadie lea
+> un nivel de ahí y le crea.
+
+---
+
 ### Nota de cierre — el crossfade de MIX, y por qué la pregunta estaba mal (2026-07-31)
 
 **La pregunta "¿conectamos el crossfade de MIX?" tenía una premisa falsa, y la destapó una
@@ -3957,52 +4035,38 @@ el paso `Build the UI harness, iOS half` que había muerto cancelado en `637eb4e
 >    (breaking, **2.0.0**); los flags de la C API quedan documentados como muertos. En su lugar
 >    entró `wma_set_synth_volume`.
 >
-> 2. 🎫 **TICKET NUEVO (2026-08-03): el master volume NO atenúa la entrada monitoreada.**
->
->    **El síntoma, que es de usuario:** en CHAOS_PAD con el monitoring prendido, **bajás el master
->    y el micrófono sigue sonando igual de fuerte**. A cero de master, el instrumento se calla y
->    la entrada no.
->
->    **La causa, medida:** el master se aplica en `applyEffectsAndOutput`
->    (`AudioEngine.cpp:1180-1185`), y la entrada se suma **después**, en `handleMixMonitoring`,
->    que `processAudioBlock` llama en la línea **1663** — o sea después de que todos los `render*`
->    ya terminaron su `applyEffectsAndOutput`. El input llega escalado sólo por
->    `monitoringVolume`; el master nunca lo toca.
->
->    **Por qué no viajó en el PR que lo encontró (#111):** ese PR ya era breaking por otra cosa, y
->    esto es un **cambio de comportamiento audible en un camino que shippea**. Mezclarlo habría
->    hecho imposible atribuir un reporte de "me cambió el sonido".
->
->    **Lo que hay que decidir antes de tocar nada** — y es decisión de producto, no un fix obvio:
->    - ¿El master es "volumen de todo lo que sale" (entonces es un bug y hay que moverlo después
->      del sumado) o "volumen del instrumento" (entonces el nombre miente y el arreglo es
->      documentarlo)?
->    - Ojo con el orden: mover el master después de `handleMixMonitoring` lo pone **después** del
->      tap del looper, así que dejaría de quedar grabado en los loops. Eso puede ser lo correcto
->      —hoy el master SÍ se hornea en las tomas— pero es un segundo cambio de comportamiento,
->      no un efecto colateral que se pueda ignorar.
->    - Verificar con el patrón de #111: leer el **buffer**, no el setter, y en zona **lineal**
->      (amplitud ~0.3), porque `OutputStage::processOutput` tiene limitador + soft clipper y cerca
->      de fondo de escala una razón de niveles no significa lo que parece.
->
->    **Alcance estimado:** una línea de motor y su test; el riesgo está entero en la decisión, no
->    en la implementación. No necesita hardware.
+> 2. ~~**El master volume no atenúa la entrada monitoreada**~~ ✅ **CERRADO 2026-08-04** — ver la
+>    nota de cierre abajo. Con él salieron tres defectos que no estaban en esta lista: el ring de
+>    monitoring tenía **dos consumidores** por bloque (y eso hacía el ticket imposible de medir),
+>    en MIX la **protección de salida corría dos veces** sobre el mismo limitador con estado, y el
+>    motor parado entregaba el micrófono **sin master y sin protección**. Y una de las dos
+>    "decisiones de producto" del ticket se apoyaba en una premisa falsa: el master **nunca** se
+>    horneó en las tomas.
 >
 > 3. **`VoiceManager::setMaxVoices` es un no-op literal.** Clampea a una variable local, loguea
 >    *"requires recreation of VoicePool"* y vuelve; encima bumpea la state version. Mismo defecto
 >    de clase que los medidores: un setter público que miente. ✅ **La precondición ya está
 >    medida (2026-07-31): NoisyPad NO lo llama** — cero hits de `setMaxVoices`/`maxVoices` en
 >    todo el repo, así que nadie cree hoy que limita la polifonía. Queda la decisión de si se
->    implementa o se borra, sin la urgencia de un consumidor engañado.
+>    implementa o se borra, sin la urgencia de un consumidor engañado. **Es el único ítem de
+>    motor que queda sin hardware.**
 > 4. **WA-1.5 / WA-T.2** — tests de `commonMain`: falta lo central (`StateSynchronizer`,
->    `AudioEngineImpl`, mapeo de errores). Sin device, sin JNI.
+>    `AudioEngineImpl`, mapeo de errores). Sin device, sin JNI. Medido el 2026-08-04: las 10
+>    suites de `commonTest` no tocan ninguno de los tres.
 > 5. **G2 — device iOS.** Necesita un iPhone. Sin cambios.
 > 6. **Smoke: lo que falta necesita USB físico o poder escuchar.** Sin cambios.
 > 7. **NoisyPad local-first** se maneja en sus propias sesiones. No es trabajo de este repo.
 >
+> **Menores, medidos el 2026-08-04 y sin ticket propio porque no tienen síntoma:**
+> `AudioEngine::calculateCurrentVolume()` no tiene **ningún** llamador · `XYMapper` sólo recibe
+> `FREQUENCY` y `AMPLITUDE` (`AudioMode.h:127/134`), así que **8 de las 10 ramas de su switch son
+> inalcanzables**, incluida `INPUT_GAIN` · `setMasterVolume` sigue logueando por llamada mientras
+> `setSynthVolume` lo sacó a propósito por inundar logcat, y el master también lo arrastra un
+> slider.
+>
 > **El CI no tiene deuda conocida**: el defecto del watchdog de `gate.sh` se arregló en #109 y el
-> techo de 45 min sigue sin tocarse a propósito. Lo que resta es deuda de motor (**2–4**) o
-> hardware (**5–6**), y **el 2 es el único con síntoma de usuario**.
+> techo de 45 min sigue sin tocarse a propósito. Lo que resta es deuda de motor (**3–4**) o
+> hardware (**5–6**), y **ninguno tiene ya síntoma de usuario**.
 >
 > Menor y esperable: **la atestación local queda rancia** después de cualquier bump o de tocar
 > un header del motor. Es el comportamiento correcto; el próximo PR corre `gate.sh` de nuevo.
