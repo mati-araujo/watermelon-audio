@@ -309,8 +309,32 @@ gate_ios() {
     boot_simulator || return 1
     sim_step ios sim-test         ./gradlew :audio:iosSimulatorArm64Test || return 1
 
-    step ios xcframework          ./gradlew :audio:assembleWatermelonReleaseXCFramework || return 1
-    step ios xcframework-symbols  verify_xcframework || return 1
+    # EL XCFRAMEWORK NO VA ACA, y es deliberado (2026-08-05). En `ci.yml` sus dos
+    # pasos corren SOLO fuera de `pull_request`, asi que el gate tampoco los
+    # corre: el contrato de este script es reproducir lo que el CI iba a correr
+    # en el PR, no mas.
+    #
+    # Por que se lo saco del camino caliente, medido:
+    #   - CERO consumidores. Ni NoisyPad (consume la coordenada Gradle KMP), ni
+    #     :harness (embebe su propio HarnessKit.framework), ni nada afuera. Y no
+    #     se distribuye: los releases no llevan assets y a Packages sube el
+    #     artefacto KMP, no el XCFramework.
+    #   - Su justificacion unica —"es lo unico que prueba que el .a embebido en
+    #     el klib resuelve al linkear un binario"— ya la cubre el harness:
+    #     HarnessKit.framework lleva los MISMOS 253 simbolos wma_*, y ademas
+    #     arranca la app.
+    #   - Costaba 138 s de los 637 s del job `ios`, y aca era el paso que hizo
+    #     saltar DOS VECES el techo global de 45 min: 2 s con el build caliente,
+    #     772 s tras un bump de toolchain, 2097 s tras tocar AudioEngine.h.
+    #
+    # Lo que se pierde pre-merge es UNA cosa y esta acotada: el link del
+    # framework para el slice de DEVICE (ios-arm64). El simulador lo cubre el
+    # harness y el .a de device lo cubre build-ios.sh; una rotura de ese link
+    # ahora aparece como master rojo, no como PR rojo. Cada merge a master lo
+    # sigue verificando, asi que nunca se convierte en sorpresa de release.
+    #
+    # `scripts/test-attestation.sh` tiene el guardian de paridad: si el paso
+    # vuelve al camino de PR de ci.yml sin volver aca, falla.
     sim_step ios harness          bash scripts/build-harness.sh --ios-only || return 1
 }
 
@@ -332,21 +356,6 @@ sim_step() {
     sleep 5
     boot_simulator || return 1
     step "$gate" "$label-retry" run_with_timeout "$SIM_STEP_TIMEOUT" "$@"
-}
-
-# Mismo chequeo que el paso "Verify the XCFramework carries the engine" de
-# ci.yml: un XCFramework que se construyo pero no trae el motor adentro pasaria
-# el paso anterior sin chistar.
-verify_xcframework() {
-    local xcf=audio/build/XCFrameworks/release/Watermelon.xcframework
-    local slice bin count
-    for slice in ios-arm64 ios-arm64-simulator; do
-        bin="$xcf/$slice/Watermelon.framework/Watermelon"
-        [ -f "$bin" ] || { echo "falta el slice: $slice" >&2; return 1; }
-        count="$(nm -gU "$bin" 2>/dev/null | grep -c ' T _wma_' || true)"
-        echo "$slice: $count simbolos wma_*"
-        [ "$count" -ge 100 ] || { echo "$slice no trae la C API" >&2; return 1; }
-    done
 }
 
 gate_build() {

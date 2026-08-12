@@ -258,6 +258,85 @@ else
     FAIL=$(( FAIL + 1 ))
 fi
 
+# La paridad ci.yml ⇄ gate.sh, que es de lo que cuelga que la atestacion
+# signifique algo. `gate.sh` promete correr en local lo que el CI iba a correr en
+# el PR; si los dos se separan, el gate atesta un `ios` que no cubre lo que el CI
+# si ejecuta, y eso es un falso verde con todos los logs en orden.
+#
+# Se agrega al congelar el XCFramework (2026-08-05): sus dos pasos salieron del
+# camino de PR en ci.yml Y del gate, juntos y a proposito. Lo que este guardian
+# vigila es que sigan juntos — que nadie reponga uno sin el otro.
+#
+# ALCANCE, literal como los otros dos: detecta la DERIVA entre los dos archivos.
+# No dice que la decision siga siendo correcta, ni que el XCFramework este sano.
+printf '\n== paridad ci.yml ⇄ gate.sh (el XCFramework fuera del PR) ==\n'
+if python3 - <<'PY' > "$WORK/parity.log" 2>&1
+import re, sys
+
+ci = open(".github/workflows/ci.yml", encoding="utf-8").read()
+gate = open("scripts/gate.sh", encoding="utf-8").read()
+
+TASK = "assembleWatermelonReleaseXCFramework"
+XCF_PATH = "XCFrameworks/release/Watermelon.xcframework"
+
+# --- lado ci.yml: los pasos que tocan el XCFramework y su `if:` --------------
+# Se parte el YAML en bloques de paso por `- name:`; alcanza y sobra para leer
+# el `if:` de cada uno, y no depende de tener un parser de YAML en el runner.
+steps = re.split(r"\n(?=\s*- name:)", ci)
+touching = [s for s in steps if TASK in s or XCF_PATH in s]
+if len(touching) != 2:
+    sys.exit(
+        f"esperaba exactamente 2 pasos de ci.yml tocando el XCFramework, hay {len(touching)}.\n"
+        "  El guardian quedo ciego: o se agrego/saco un paso, o cambio su forma."
+    )
+
+ci_runs_on_pr = []
+for s in touching:
+    name = re.search(r"- name:\s*(.+)", s)
+    cond = re.search(r"^\s*if:\s*(.+?)\s*$", s, re.M)
+    if not cond:
+        # Sin `if:` corre siempre, incluido pull_request.
+        ci_runs_on_pr.append((name.group(1).strip() if name else "?", "<sin if>"))
+        continue
+    expr = cond.group(1)
+    if "github.event_name != 'pull_request'" not in expr:
+        ci_runs_on_pr.append((name.group(1).strip() if name else "?", expr))
+
+# --- lado gate.sh: ¿lo corre? (ignorando comentarios) ------------------------
+gate_code = "\n".join(
+    ln for ln in gate.splitlines() if not ln.lstrip().startswith("#")
+)
+gate_runs = TASK in gate_code or "verify_xcframework" in gate_code
+
+# --- la invariante ----------------------------------------------------------
+if bool(ci_runs_on_pr) != gate_runs:
+    if ci_runs_on_pr:
+        detalle = "\n".join(f"    - {n}  →  if: {c}" for n, c in ci_runs_on_pr)
+        sys.exit(
+            "ci.yml volvio a correr el XCFramework en `pull_request`, pero gate.sh NO lo corre:\n"
+            f"{detalle}\n"
+            "  El gate atestaria un `ios` que no cubre lo que el CI ejecuta en el PR.\n"
+            "  Reponelo tambien en scripts/gate.sh, o volve a excluir el PR con\n"
+            "  `if: github.event_name != 'pull_request'`."
+        )
+    sys.exit(
+        "gate.sh corre el XCFramework pero ci.yml lo excluye del `pull_request`:\n"
+        "  el gate gasta tiempo local en algo que el CI del PR no iba a correr.\n"
+        "  Sacalo de gate.sh, o volve a habilitarlo en ci.yml."
+    )
+
+estado = "ambos lo corren en el PR" if gate_runs else "ninguno lo corre en el PR (congelado)"
+print(f"paridad ok: {estado}")
+PY
+then
+    printf '  ok    %s\n' "$(cat "$WORK/parity.log")"
+    PASS=$(( PASS + 1 ))
+else
+    printf '  FALLO ci.yml y gate.sh se separaron\n'
+    sed 's/^/        /' "$WORK/parity.log"
+    FAIL=$(( FAIL + 1 ))
+fi
+
 printf '\n== caso positivo ==\n'
 for gate in ios build cpp-tests-macos; do
     expect true "$(verify "$BASE" "$gate")" "atestacion valida, gate $gate" "$(logpath "$BASE" "$gate")"
