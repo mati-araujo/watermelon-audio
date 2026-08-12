@@ -218,7 +218,17 @@ python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2
                                            # Imprime; docs/kmp/c_api_coverage.md
                                            # se actualiza a mano con esa salida
 
-./gradlew :audio:assembleWatermelonXCFramework   # [gate] XCFramework (device + simulador)
+./gradlew :audio:assembleWatermelonXCFramework   # XCFramework (device + simulador).
+                                           # YA NO es [gate] ni corre en el CI del PR: desde
+                                           # el 2026-08-05 sus dos pasos de ci.yml llevan
+                                           # `if: github.event_name != 'pull_request'`, asi
+                                           # que se verifica en cada push a master y nada mas.
+                                           # No tiene consumidores —NoisyPad usa la coordenada
+                                           # Gradle KMP y :harness embebe su propio
+                                           # HarnessKit.framework— y no se distribuye. Lo que
+                                           # probaba lo cubre el harness: su framework lleva
+                                           # los mismos simbolos wma_*. Paridad vigilada por
+                                           # scripts/test-attestation.sh
 
 ./gradlew :audio:compileKotlinIosArm64     # Compilar Kotlin para iOS (por target)
 ./gradlew :audio:compileIosMainKotlinMetadata  # El source set COMPARTIDO iosMain.

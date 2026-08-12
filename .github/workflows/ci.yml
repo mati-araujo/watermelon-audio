@@ -401,24 +401,47 @@ jobs:
         if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:iosSimulatorArm64Test
 
-      # WA-4.1. Linkea de verdad ambos slices y los empaqueta, que es lo unico que
-      # prueba que el archivo estatico embebido en el klib resuelve al linkear un
-      # binario — el link check de build-ios.sh valida el archivo, no el framework.
+      # WA-4.1. FUERA DEL CAMINO CALIENTE desde 2026-08-05: los dos pasos de
+      # abajo NO corren en `pull_request`. La condicion es `!= 'pull_request'` y
+      # no `== 'push'` a proposito, para no dejar afuera un `workflow_dispatch`,
+      # que hoy si los corre.
+      #
+      # El XCFramework tiene CERO consumidores y no se distribuye, medido: ni
+      # NoisyPad (consume la coordenada Gradle KMP `com.watermellonstudios:audio`
+      # y embebe su propio framework con `:ios-shell:embedAndSignAppleFrameworkForXcode`),
+      # ni :harness (embebe HarnessKit.framework), ni nadie afuera; y los
+      # releases no llevan assets, asi que a Packages sube el artefacto KMP y no
+      # esto. Se ensamblaba, se le verificaban los simbolos, y se tiraba.
+      #
+      # Su justificacion unica era ser "lo unico que prueba que el archivo
+      # estatico embebido en el klib resuelve al linkear un binario". Ya no lo
+      # es: HarnessKit.framework lleva los MISMOS 253 simbolos wma_*, y encima
+      # el harness arranca la app. Lo que queda sin cubrir en el PR es UNA cosa,
+      # el link del framework para el slice de DEVICE (ios-arm64) — el simulador
+      # lo cubre el harness y el .a de device lo cubre build-ios.sh.
+      #
+      # Costaba 138 s de los 637 s de este job, y en el gate local era el paso
+      # que hizo saltar dos veces el techo global de 45 min (2 s en caliente,
+      # 772 s tras un bump de toolchain, 2097 s tras tocar AudioEngine.h).
+      #
+      # Como corre en CADA push a master, una rotura aparece un merge despues y
+      # nunca se convierte en sorpresa de release. `scripts/gate.sh` NO lo corre,
+      # y `scripts/test-attestation.sh` tiene el guardian que falla si los dos
+      # archivos se separan.
+      #
       # `assembleWatermelonXCFramework` es, textual en `gradlew tasks`, "Assemble
       # ALL TYPES of registered 'Watermelon' XCFramework": construye Debug Y
-      # Release, o sea cuatro links de framework. El paso de verificacion de
-      # abajo mira solo `XCFrameworks/release/`, y los frameworks Debug los
-      # vuelve a construir el paso del harness. La mitad del trabajo de este
-      # paso no la miraba nadie.
+      # Release, o sea cuatro links de framework. Por eso se pide la variante
+      # Release, que es la unica que mira el paso de verificacion.
       - name: Assemble XCFramework — WA-4.1
-        if: steps.attest.outputs.valid != 'true'
+        if: github.event_name != 'pull_request'
         run: ./gradlew :audio:assembleWatermelonReleaseXCFramework
 
       # Un XCFramework que "se construyo" pero no trae el motor adentro pasaria el
       # paso anterior sin chistar. Esto falla si falta un slice o si los simbolos
       # wma_* no viajaron.
       - name: Verify the XCFramework carries the engine — WA-4.1
-        if: steps.attest.outputs.valid != 'true'
+        if: github.event_name != 'pull_request'
         run: |
           XCF=audio/build/XCFrameworks/release/Watermelon.xcframework
           for slice in ios-arm64 ios-arm64-simulator; do
