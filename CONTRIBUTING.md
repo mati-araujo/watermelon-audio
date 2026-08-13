@@ -136,3 +136,12 @@ GitHub Packages auth goes in `~/.gradle/gradle.properties` (NOT in the project):
 gpr.user=<github-username>
 gpr.key=<personal-access-token-with-write:packages>
 ```
+
+Un `local.properties` gitignoreado del consumidor también sirve, y es donde está
+hoy en la máquina de desarrollo.
+
+**Ese PAT es el único que puede consultar el registro.** El token de `gh auth
+login` es un OAuth propio de la CLI y no trae scope de packages, así que
+`gh api user/packages` devuelve 403 por más que estés logueado. Para verificar un
+release contra el registro —que no es lo mismo que ver el publish en verde— ver
+`docs/release.md`.
