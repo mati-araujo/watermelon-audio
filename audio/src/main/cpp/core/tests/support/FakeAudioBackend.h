@@ -48,9 +48,12 @@ public:
         // attaches its sink node while opening). A fake that honored the request
         // the moment it arrived would make the reopen logic untestable, because
         // the case that needs a reopen would never occur.
-        mInfo.isFullDuplex =
-            mFullDuplexRequested.load(std::memory_order_acquire) &&
-            mCaptureAvailable.load(std::memory_order_acquire);
+        {
+            std::lock_guard<std::mutex> lock(mInfoMutex);
+            mInfo.isFullDuplex =
+                mFullDuplexRequested.load(std::memory_order_acquire) &&
+                mCaptureAvailable.load(std::memory_order_acquire);
+        }
         mRunning.store(true, std::memory_order_release);
         return watermelon_audio::BackendResult::OK;
     }
@@ -58,6 +61,7 @@ public:
     void stop() override {
         mRunning.store(false, std::memory_order_release);
         // No stream, no capture.
+        std::lock_guard<std::mutex> lock(mInfoMutex);
         mInfo.isFullDuplex = false;
     }
     void pause() override { mPaused = true; }
@@ -72,6 +76,7 @@ public:
     void setSampleRate(int sampleRate) override { mRequestedSampleRate = sampleRate; }
 
     void setBufferSize(int framesPerBuffer) override {
+        std::lock_guard<std::mutex> lock(mInfoMutex);
         mInfo.framesPerBuffer = framesPerBuffer;
     }
 
@@ -79,12 +84,25 @@ public:
         mFullDuplexRequested.store(enable, std::memory_order_release);
     }
 
-    watermelon_audio::StreamInfo getStreamInfo() const override { return mInfo; }
+    // Los tres de abajo son los que `BackendManager` expone como lectores en
+    // vivo, y la UI los pollea por frame mientras el stream se puede estar
+    // reabriendo en otro thread. Van bajo `mInfoMutex` por el contrato nuevo de
+    // IAudioBackend: seguros contra un start()/stop() concurrente.
+    watermelon_audio::StreamInfo getStreamInfo() const override {
+        std::lock_guard<std::mutex> lock(mInfoMutex);
+        return mInfo;
+    }
 
     bool isRunning() const override { return mRunning.load(std::memory_order_acquire); }
 
-    float getOutputLatencyMs() const override { return mInfo.outputLatencyMs; }
-    float getInputLatencyMs() const override { return mInfo.inputLatencyMs; }
+    float getOutputLatencyMs() const override {
+        std::lock_guard<std::mutex> lock(mInfoMutex);
+        return mInfo.outputLatencyMs;
+    }
+    float getInputLatencyMs() const override {
+        std::lock_guard<std::mutex> lock(mInfoMutex);
+        return mInfo.inputLatencyMs;
+    }
 
     watermelon_audio::BackendType getType() const override {
         return watermelon_audio::BackendType::OBOE;
@@ -95,7 +113,10 @@ public:
     // ---- Test knobs -------------------------------------------------------
 
     /// The rate the "device" settled on, reported through getStreamInfo().
-    void setNegotiatedSampleRate(int sampleRate) { mInfo.sampleRate = sampleRate; }
+    void setNegotiatedSampleRate(int sampleRate) {
+        std::lock_guard<std::mutex> lock(mInfoMutex);
+        mInfo.sampleRate = sampleRate;
+    }
 
     /// The rate the engine asked for, as recorded by setSampleRate().
     int requestedSampleRate() const { return mRequestedSampleRate; }
@@ -161,6 +182,15 @@ public:
     bool isPaused() const { return mPaused; }
 
 private:
+    // `mInfo` lo escriben start()/stop()/setBufferSize() y lo leen los getters
+    // en vivo, desde threads distintos: el worker del reopen escribe mientras la
+    // UI lee. Era una carrera real —la agarró el TSan del CI el 2026-08-12, y
+    // `ReadingStateWhileTheStreamIsBeingReopenedIsNotADataRace` la reproduce— y
+    // no un artefacto del doble: los backends reales tienen el mismo estado
+    // mutable detrás de los mismos getters.
+    //
+    // `mutable` porque tres de los lectores son `const`.
+    mutable std::mutex mInfoMutex;
     watermelon_audio::StreamInfo mInfo{};
     watermelon_audio::IAudioCallback* mCallback = nullptr;
     watermelon_audio::BackendResult mStartResult = watermelon_audio::BackendResult::OK;
