@@ -143,7 +143,11 @@ BackendResult CoreAudioBackend::start() {
     // "requested" and "negotiated" disagreeing is the whole reason this cache
     // exists — it is what told BackendManager::requestCapture() that capture
     // was already live on a stream that had none, so the reopen never happened.
-    mStreamInfoValid.store(false);
+    {
+        std::lock_guard<std::mutex> lock(mStreamInfoMutex);
+        mStreamInfoValid.store(false);
+        mCachedStreamInfo = StreamInfo{};
+    }
 
     BackendResult result = openEngineLocked();
     if (result != BackendResult::OK) {
@@ -189,7 +193,11 @@ void CoreAudioBackend::stop() {
 
     mIsRunning.store(false);
     mIsPaused.store(false);
-    mStreamInfoValid.store(false);
+    {
+        std::lock_guard<std::mutex> lock(mStreamInfoMutex);
+        mStreamInfoValid.store(false);
+        mCachedStreamInfo = StreamInfo{};
+    }
 
     LOGI("CoreAudioBackend stopped");
 }
@@ -241,9 +249,18 @@ float CoreAudioBackend::getOutputLatencyMs() const {
     return mOutputLatencyMs.load(std::memory_order_acquire);
 }
 
+// Contrato de IAudioBackend: seguro contra un start()/stop() concurrente. El
+// lock es un copy de struct y no envuelve ninguna llamada que pueda bloquear.
+// Acá el cache ya se publicaba al abrir el stream —no perezosamente, como hacía
+// Oboe— así que lo único que faltaba era sincronizarlo. Sin eso, el poller de la
+// UI leía `mCachedStreamInfo` mientras la reapertura lo reescribía: es la carrera
+// que el TSan del CI encontró el 2026-08-12, del lado del backend real.
 StreamInfo CoreAudioBackend::getStreamInfo() const {
-    if (mStreamInfoValid.load()) {
-        return mCachedStreamInfo;
+    {
+        std::lock_guard<std::mutex> lock(mStreamInfoMutex);
+        if (mStreamInfoValid.load()) {
+            return mCachedStreamInfo;
+        }
     }
     // Before start() (or after stop()) report the requested configuration.
     StreamInfo info;
@@ -642,16 +659,19 @@ BackendResult CoreAudioBackend::openEngineLocked() {
         : 0.0f;
     mInputLatencyMs.store(inLatencyMs, std::memory_order_release);
 
-    mCachedStreamInfo.sampleRate      = (int)std::lround(negotiatedSampleRate);
-    mCachedStreamInfo.channelCount    = 2;
-    mCachedStreamInfo.framesPerBuffer = negotiatedFrames;
-    mCachedStreamInfo.format          = AudioFormat::FLOAT_32;
-    mCachedStreamInfo.outputLatencyMs = outLatencyMs;
-    mCachedStreamInfo.inputLatencyMs  = inLatencyMs;
-    mCachedStreamInfo.isFullDuplex    = captureLive;
-    mCachedStreamInfo.backendType     = BackendType::COREAUDIO;
-    mCachedStreamInfo.deviceName      = "Core Audio";
-    mStreamInfoValid.store(true);
+    {
+        std::lock_guard<std::mutex> lock(mStreamInfoMutex);
+        mCachedStreamInfo.sampleRate      = (int)std::lround(negotiatedSampleRate);
+        mCachedStreamInfo.channelCount    = 2;
+        mCachedStreamInfo.framesPerBuffer = negotiatedFrames;
+        mCachedStreamInfo.format          = AudioFormat::FLOAT_32;
+        mCachedStreamInfo.outputLatencyMs = outLatencyMs;
+        mCachedStreamInfo.inputLatencyMs  = inLatencyMs;
+        mCachedStreamInfo.isFullDuplex    = captureLive;
+        mCachedStreamInfo.backendType     = BackendType::COREAUDIO;
+        mCachedStreamInfo.deviceName      = "Core Audio";
+        mStreamInfoValid.store(true);
+    }
 
     LOGI("=== CoreAudio STREAM OPENED ===");
     LOGI("  Sample rate:      %d Hz", mCachedStreamInfo.sampleRate);

@@ -370,11 +370,29 @@ public:
      *
      * Contains actual (not requested) values for sample rate, buffer size, etc.
      * Only valid after start() returns OK.
+     *
+     * @warning **Tiene que ser seguro llamarlo mientras otro thread está adentro
+     *          de start() o stop().** No es una cortesía: `BackendManager` expone
+     *          esto como lector en vivo y la UI lo pollea en cada frame, mientras
+     *          una reapertura de captura corre en un worker propio. El manager
+     *          NO puede protegerlo desde afuera — un lock alrededor congelaría el
+     *          poller durante los cientos de ms que tarda abrir un stream, y un
+     *          snapshot dejaría de reflejar una renegociación de sample rate.
+     *          Sincronizar el estado propio es responsabilidad de cada
+     *          implementación.
+     *
+     *          Escrito después de que el TSan del CI encontrara la carrera el
+     *          2026-08-12: el estado quedaba sin sincronizar y sólo asomaba una
+     *          vez cada nueve merges. La reproduce
+     *          `CaptureRequestTest.ReadingStateWhileTheStreamIsBeingReopenedIsNotADataRace`.
      */
     virtual StreamInfo getStreamInfo() const = 0;
 
     /**
      * Check if the stream is currently running.
+     *
+     * @warning Mismo contrato que getStreamInfo(): seguro contra un start() o
+     *          stop() concurrente.
      */
     virtual bool isRunning() const = 0;
 

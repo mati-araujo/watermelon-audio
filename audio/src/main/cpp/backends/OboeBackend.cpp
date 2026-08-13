@@ -89,7 +89,20 @@ BackendResult OboeBackend::start() {
     mIsRunning.store(true);
     mIsPaused.store(false);
     mStreamError.store(false);
-    mStreamInfoValid.store(false);
+
+    // El cache se llena ACA y no perezosamente en getStreamInfo(). El motivo es
+    // el contrato nuevo de IAudioBackend: getStreamInfo() lo pollea la UI por
+    // frame mientras stop() puede estar corriendo, y la versión perezosa entraba
+    // a `mOutputStream->...` justo cuando closeStreams() lo estaba cerrando y
+    // reseteando — no una carrera sobre el struct, sino uso de un stream que se
+    // está destruyendo. Llenándolo al abrir, el lector NUNCA toca el stream.
+    //
+    // No se pierde nada: un stream de Oboe fija su tasa al abrirse, así que no
+    // hay nada que releer entre start() y stop().
+    {
+        std::lock_guard<std::mutex> lock(mStreamInfoMutex);
+        updateStreamInfo();
+    }
 
     LOGI("OboeBackend started successfully");
     return BackendResult::OK;
@@ -127,7 +140,11 @@ void OboeBackend::stop() {
 
     mIsRunning.store(false);
     mIsPaused.store(false);
-    mStreamInfoValid.store(false);
+    {
+        std::lock_guard<std::mutex> lock(mStreamInfoMutex);
+        mStreamInfoValid.store(false);
+        mCachedStreamInfo = StreamInfo{};
+    }
 
     LOGI("OboeBackend stopped");
 }
@@ -184,18 +201,17 @@ void OboeBackend::setFullDuplexEnabled(bool enable) {
     mFullDuplexEnabled = enable;
 }
 
+// Cumple el contrato de IAudioBackend: seguro contra un start()/stop()
+// concurrente. Devuelve SÓLO el cache, que llenó start() — no toca el stream, no
+// llama a nada que pueda bloquear, y el lock es un copy de struct.
+//
+// Antes leía perezosamente del stream con un `mStreamInfoValid` atómico que
+// protegía el flag y no el struct. Eso era la carrera que el TSan del CI encontró
+// el 2026-08-12 y, peor, dejaba al poller de la UI entrando al stream mientras
+// closeStreams() lo cerraba.
 StreamInfo OboeBackend::getStreamInfo() const {
-    if (mStreamInfoValid.load()) {
-        return mCachedStreamInfo;
-    }
-
-    if (!mOutputStream) {
-        return StreamInfo{};
-    }
-
-    // Update cache
-    const_cast<OboeBackend*>(this)->updateStreamInfo();
-    return mCachedStreamInfo;
+    std::lock_guard<std::mutex> lock(mStreamInfoMutex);
+    return mStreamInfoValid.load() ? mCachedStreamInfo : StreamInfo{};
 }
 
 bool OboeBackend::isRunning() const {

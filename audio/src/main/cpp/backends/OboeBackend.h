@@ -161,6 +161,12 @@ private:
     std::atomic<int> mLastErrorCode{0};
 
     // Stream info cache
+    // Lo llena start() y lo vacía stop(); getStreamInfo() sólo lo copia. El mutex
+    // es el que cumple el contrato de IAudioBackend —seguro contra un
+    // start()/stop() concurrente— y el atómico quedó porque distingue "todavía no
+    // hay stream" de "hay uno con valores por defecto". Ver los tres sitios en
+    // OboeBackend.cpp.
+    mutable std::mutex mStreamInfoMutex;
     mutable StreamInfo mCachedStreamInfo;
     mutable std::atomic<bool> mStreamInfoValid{false};
 

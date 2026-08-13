@@ -163,6 +163,10 @@ private:
     std::condition_variable mStopCondition;
 
     // Negotiated stream values, published after start().
+    // Lo publica la apertura del stream y lo vacía stop(); getStreamInfo() sólo
+    // lo copia. El mutex es lo que cumple el contrato de IAudioBackend: seguro
+    // contra un start()/stop() concurrente. Ver los tres sitios en el .mm.
+    mutable std::mutex mStreamInfoMutex;
     mutable StreamInfo mCachedStreamInfo;
     mutable std::atomic<bool> mStreamInfoValid{false};
     std::atomic<float> mOutputLatencyMs{0.0f};
