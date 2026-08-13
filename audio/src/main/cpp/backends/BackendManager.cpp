@@ -264,6 +264,21 @@ void BackendManager::stop() {
 // En vivo y no un snapshot, además, porque un device puede renegociar el sample
 // rate sin que el motor reinicie y `currentSampleRate()` tiene que verlo — lo
 // pincha FollowsTheBackendAcrossARenegotiation.
+//
+// Que esto sea seguro NO lo da este archivo: lo da el contrato de IAudioBackend,
+// que desde #117 obliga a cada implementación a sincronizar su propio estado
+// contra un start()/stop() concurrente. Aquí no se puede resolver — un lock
+// alrededor congelaría al poller durante los cientos de ms de una reapertura, y
+// un snapshot dejaría de ser en vivo. Ver el comentario de getStreamInfo() en
+// IAudioBackend.h.
+//
+// 🎫 Y LA INVARIANTE ESTÁ A MEDIAS A PROPÓSITO. #117 cerró las LECTURAS. Quedan
+// 11 sitios de este archivo que entran al backend con `mMutex` tomado: los tres
+// de requestCapture (no pueden usar el mismo patrón: ya corren CON mMutex, así
+// que invertirían el orden de locks) y las cinco escrituras, que necesitan
+// exclusión real y chocan con el contrato de requestCapture de no bloquear.
+// Arreglarlo pide rediseñar requestCapture. El ticket, con los 11 enumerados,
+// está en docs/kmp/kmp_requirements.md, "Dónde retomar (2026-08-13)".
 
 bool BackendManager::isRunning() const {
     std::lock_guard<std::mutex> lock(mMutex);

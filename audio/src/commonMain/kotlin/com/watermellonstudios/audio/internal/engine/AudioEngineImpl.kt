@@ -1,5 +1,6 @@
 package com.watermellonstudios.audio.internal.engine
 
+import com.watermellonstudios.audio.api.IAudioNativeBridge
 import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.api.AudioEngine
 import com.watermellonstudios.audio.api.DualTouchParams
@@ -38,18 +39,25 @@ import kotlinx.coroutines.launch
  *
  * This class is internal. Use [com.watermellonstudios.audio.api.AudioEngineFactory] to create instances.
  */
-internal class AudioEngineImpl(
-    private val config: AudioEngineConfig
+internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
+    private val config: AudioEngineConfig,
+    // El puente entra por parametro con `getAudioBridge()` como default, que es
+    // el mismo idiom que ya usa [NativeModeStateWriter]. NO es un cambio de
+    // comportamiento: un default se evalua al construir, igual que la asignacion
+    // que habia antes, y al ser default no toca un solo call site.
+    //
+    // Lo que habilita es testear esta clase, que hasta 2026-08-13 tenia CERO
+    // cobertura en `commonTest` — y no por olvido: `getAudioBridge()` es
+    // `expect`, y su actual de JVM es `AudioNativeBridge.getInstance()`, que
+    // necesita la lib nativa. Con el puente cableado adentro la clase no se
+    // podia ni construir en un test. La ausencia de tests era una imposibilidad,
+    // no una deuda de disciplina.
+    private val bridge: IAudioNativeBridge = getAudioBridge()
 ) : AudioEngine {
 
     companion object {
         private const val TAG = "AudioEngine"
     }
-
-    // El motor es el implementador del puente, no un consumidor: las factories
-    // publicas se construyen encima de el. Ver [InternalWatermelonApi].
-    @OptIn(InternalWatermelonApi::class)
-    private val bridge = getAudioBridge()
 
     private val logger: AudioLogger = config.logger
     private val analytics = config.analyticsListener
