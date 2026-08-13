@@ -803,8 +803,9 @@ consumible** desde Swift, no sólo si se construye.
   XCFramework.
 - Controles: start/stop, sine, agregar un efecto, looper record/play, toggle de input con
   medidor de nivel.
-- `NSMicrophoneUsageDescription` en el `Info.plist`. **Negar el permiso a propósito es un
-  caso a probar**, no un accidente: es el único disparador del `@try` de `CoreAudioBackend`.
+- `NSMicrophoneUsageDescription` en el `Info.plist`. ~~**Negar el permiso a propósito es un
+  caso a probar**, no un accidente: es el único disparador del `@try` de `CoreAudioBackend`.~~
+  ⚠️ **MEDIDO FALSO el 2026-08-13 — el simulador NO puede disparar ese `@try`.** Ver abajo.
 
 ### Nota de cierre — WA-4.1 (2026-07-25)
 
@@ -3980,8 +3981,40 @@ sin llamadores · 8 de las 10 ramas del switch de `XYMapper` inalcanzables · WA
 `androidMain` con `android.util.Log`, que **CLAUDE.md permite ahí**: es prolijidad, no bloqueo).
 
 **Y un camino que nunca se ejercitó:** el `@try` de `CoreAudioBackend` ante permiso de micrófono
-denegado. Es su único disparador y el harness podría hacerlo en el simulador. Queda anotado como
-observación, no como ticket.
+denegado. **Se intentó el 2026-08-13 y NO se pudo: el simulador no reproduce la condición.** Pasa
+a ser parte de **G2**, no un ítem sin hardware.
+
+#### El `@try` del permiso denegado: medido, y NO se puede ejercitar acá
+
+El contrato afirmaba que negar el micrófono era **un caso a probar en el simulador**, por ser el
+único disparador del `@try` de `CoreAudioBackend`. **Se probó el 2026-08-13 y la afirmación es
+falsa.**
+
+Procedimiento: `xcrun simctl privacy <udid> revoke microphone com.watermellonstudios.audio.harness`
+—que la propia ayuda de `simctl` define como *"denying all use of the service"*—, relanzar el
+harness, `start` y `capturar`. Lo que dijo el motor:
+
+```
+CoreAudioBackend: Full duplex requested while running without a capture stream
+BackendManager:   Reopening the stream to add a capture path
+CoreAudioBackend:   Capture:          active          ← con el micrófono DENEGADO
+WMA_AUDIT: inputData=0x10b610000 ... inputPeak=0.00000
+```
+
+**`AVAudioEngine` abrió el stream de captura igual y no levantó ninguna excepción**, así que el
+`@try` no llegó a ejecutarse. La app sobrevivió, sí — pero **por el motivo equivocado: nada tiró.**
+Eso no es una verificación de la guarda; es la medición de que este instrumento no la alcanza.
+
+**Consecuencia:** el `@try` de la rama de captura sigue **sin ejercitarse nunca**, y sólo se puede
+ejercitar en device, donde TCC bloquea de verdad. **Se mueve a G2.** El de la rama de *salida* sí
+está ejercitado: lo disparó el harness en WA-5.5 con el `-10868`.
+
+> [!TIP]
+> **Y una trampa de método que casi arruina la medición:** el primer tap a `capturar` no hizo nada
+> —`start` había corrido la UI hacia abajo y el tap cayó al vacío— pero el proceso *seguía vivo*,
+> así que "sobrevivió" se leía como éxito. **Lo delató el log: cero rastro de la rama de captura.**
+> Antes de concluir de un smoke manual, verificá que el camino se haya INTENTADO, no sólo que la
+> app siga en pie.
 
 #### Lo que sigue bloqueado y en quién
 
