@@ -273,6 +273,52 @@ TEST_F(CaptureRequestTest, RequestingCaptureAgainMidReopenDoesNotBlockTheCaller)
     SUCCEED() << "ninguna de las tres llamadas se quedó esperando la reapertura";
 }
 
+TEST_F(CaptureRequestTest, ReadingStateWhileTheStreamIsBeingReopenedIsNotADataRace) {
+    // **Este test no afirma: REPRODUCE.** Sin el arreglo pasa igual en un build
+    // normal; lo que hace es que la carrera sea determinista para el sanitizer.
+    //
+    // El TSan del CI la encontró el 2026-08-12 sobre
+    // `RequestingCaptureReturnsBeforeTheReopenFinishes`, y la encontró UNA vez
+    // en nueve pushes a master: el resto pasaron. Una carrera que asoma el 11%
+    // de las veces no es un gate, es una lotería — y el TSan local es todavía
+    // más débil que el del CI (una carrera de este repo sobrevivió 15 corridas
+    // acá y fue roja a la primera allá). De ahí este reproductor: un lector
+    // dedicado martillando las tres lecturas mientras el stream se reabre 50
+    // veces, que es exactamente lo que hace la UI polleando por frame mientras
+    // el usuario toca el toggle de input.
+    //
+    // Lo que se rompía: los tres lectores entran al backend sosteniendo
+    // `mMutex`, mientras `stop()` escribe el estado del backend sosteniendo sólo
+    // `mOpMutex`. Dos mutexes distintos, cero exclusión. El arreglo NO está acá
+    // —`BackendManager` ya hace lo correcto— sino adentro de cada backend, que
+    // es donde ese estado vive.
+    //
+    // Si alguien vuelve a exponer estado del backend sin sincronizar, este test
+    // lo destapa en el primer TSan en vez de dentro de nueve merges.
+    runWithoutCapture();
+
+    std::atomic<bool> done{false};
+    std::thread reader([&] {
+        while (!done.load(std::memory_order_acquire)) {
+            (void)mManager->isRunning();
+            (void)mManager->getStreamInfo();
+            (void)mManager->isCaptureLive();
+        }
+    });
+
+    // Alternar el pedido es lo que fuerza el reopen: el backend decide la
+    // captura al abrir, así que prenderla y apagarla cierra y reabre el stream.
+    for (int i = 0; i < 50; ++i) {
+        mManager->requestCapture(Requester::INPUT_NODE, (i % 2) == 0, /*allowRestart=*/true);
+        mManager->waitForCaptureRequest();
+    }
+
+    done.store(true, std::memory_order_release);
+    reader.join();
+
+    SUCCEED() << "50 reaperturas con un lector concurrente y ni un reporte del sanitizer";
+}
+
 TEST_F(CaptureRequestTest, ARequestThatLandsMidReopenGetsItsOwnPass) {
     // Sin la generación, un pedido que llega mientras el worker ya pasó el punto
     // donde start() lee el flag se pierde en silencio: el worker termina, ve su
