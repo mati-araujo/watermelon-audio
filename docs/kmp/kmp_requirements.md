@@ -316,9 +316,9 @@ Mejoras de valor inmediato para el mantenimiento Android actual, que además des
 |---|---|---|---|---|---|---|
 | WA-1.1 | Logging unificado en Kotlin | `AudioNativeBridge.kt` usa `android.util.Log` directo; migrar a la interfaz `AudioLogger` ya existente en `commonMain/callback/`. **Quedan 10 archivos en androidMain** (`AudioNativeBridge`, `NativeLibraryLoader`, `ModeTransitionManagerImpl`, `NativeModeStateWriter`, `DeviceCapabilities`, USB ×3, `LatencyBenchmarkRunner`, `Mp4AacTranscoder`) — nótese que en androidMain `android.util.Log` está permitido por CLAUDE.md, así que esto es prolijidad, no bloqueo | Cero `android.util.Log` fuera de un actual Android de `AudioLogger` | P1 | S | Parcial — `ScaleQuantizer` (commonMain) migrado en WA-0.2 |
 | WA-1.2 | `DeviceCapabilities` común | Definir interfaz/expect en commonMain (RAM, low-latency hint, API level abstracto); actual Android actual queda como está; deja el hueco para el actual iOS | `AudioEngineFactory` consume la abstracción | P1 | S | ✅ **HECHO** 2026-07-25 — `domain/device/DeviceCapabilities.kt` + `expect fun currentDeviceCapabilities()`, actuals Android e iOS, `AudioEngineConfig.tunedFor()`. 12 tests nuevos. Ver nota |
-| WA-1.3 | API USB segregada | Asegurar que los tipos/factories USB (`IUsbAudioManager`, `UsbAudioManagerFactory`) no sean requeridos para usar el resto de la API (interface segregation). Mover a androidMain lo que no necesite estar en common, o documentar como android-only.<br>**Acoplamiento real medido (2026-07-22): sólo 3 puntos.** (a) `AudioBackendType` vive en `domain/usb/UsbAudioTypes.kt` pero **no es un tipo USB** — lo consumen `AudioEngine` y `AudioEngineImpl`; debería mudarse a `domain/`. (b) `IAudioNativeBridge.isUsbBackendAvailable()`. (c) `IAudioNativeBridge.setUsbLatencyProfile()`. Nada más de commonMain depende de `domain/usb/` | Un consumidor sin USB compila para iOS sin stubs USB | P1 | M | Pendiente — **decisión 2026-07-22:** en WA-0.2 se optó por portar `domain/usb/` en su lugar (sigue en commonMain) para no mezclar un cambio de API pública dentro de WA-0.2 |
+| WA-1.3 | API USB segregada | Asegurar que los tipos/factories USB (`IUsbAudioManager`, `UsbAudioManagerFactory`) no sean requeridos para usar el resto de la API (interface segregation). Mover a androidMain lo que no necesite estar en common, o documentar como android-only.<br>**Acoplamiento real medido (2026-07-22): sólo 3 puntos.** (a) `AudioBackendType` vive en `domain/usb/UsbAudioTypes.kt` pero **no es un tipo USB** — lo consumen `AudioEngine` y `AudioEngineImpl`; debería mudarse a `domain/`. (b) `IAudioNativeBridge.isUsbBackendAvailable()`. (c) `IAudioNativeBridge.setUsbLatencyProfile()`. Nada más de commonMain depende de `domain/usb/` | Un consumidor sin USB compila para iOS sin stubs USB | P1 | M | ✅ **HECHO** 2026-07-28 — ver la nota de cierre. La fila decía *Pendiente* hasta el 2026-08-13 **contradiciendo su propia nota**; el criterio ya se cumplía por WA-0.2 y lo que faltaba era mover `AudioBackendType` fuera de `domain/usb/` |
 | WA-1.4 | Extraer `BridgeConcurrency` | Los mutexes por categoría (lifecycle/effects/mode/input) y el mapeo error-code→excepción de `AudioNativeBridge` (**3.352 LOC**) se extraen a commonMain para reutilizarlos en `IosAudioBridge` sin duplicar | AudioNativeBridge delega en la clase común; tests Android verdes | P1 | M | ✅ **HECHO** 2026-07-25 — `internal/bridge/BridgeConcurrency.kt` + 8 tests en commonTest. Los 26 call sites migrados. Ver nota |
-| WA-1.5 | Tests Kotlin de commonMain | ~~hoy: cero tests Kotlin~~ → **hoy hay 5 suites / 34 tests** (`ChordGenerator`, `ScaleQuantizerFlow`, `EffectManagerBatch`, + `Format` y `Time` de WA-0.2). **Falta lo central:** `StateSynchronizer`, `AudioEngineImpl`, mapeo de errores | Suite commonTest corriendo en JVM en CI | P1 | M | Parcial |
+| WA-1.5 | Tests Kotlin de commonMain | ~~hoy: cero tests Kotlin~~ → **hoy hay 5 suites / 34 tests** (`ChordGenerator`, `ScaleQuantizerFlow`, `EffectManagerBatch`, + `Format` y `Time` de WA-0.2). **Falta lo central:** `StateSynchronizer`, `AudioEngineImpl`, mapeo de errores | Suite commonTest corriendo en JVM en CI | P1 | M | 🟡 **Lo central, HECHO 2026-08-13**: `AudioEngineImpl` pasó de **0 tests a 3** (hubo que inyectarle el puente: era **intesteable por construcción**, no un olvido) y el mapeo de errores tiene 5. `StateSynchronizer` se ejercita indirecto desde los tests de `EffectManager`. **Queda fuera** el camino feliz de `start()`: arranca el polling sobre `Dispatchers.Default` y afirmarlo pide inyectar el dispatcher, que es otro cambio de producción |
 | WA-1.6 | Factorizar denormals ARM64 | El código FPCR de `PlatformAndroid.cpp` para arm64 es idéntico al que necesitará Apple Silicon → extraer a `PlatformArm64.inc` compartido | PlatformAndroid compila igual; código listo para PlatformApple | P2 | S | ✅ **HECHO** 2026-07-25 — `platform/PlatformIsa.inc`. **La duplicación era más ancha que el FPCR:** el bloque x86_64 (MXCSR) y **las dos funciones de SIMD caps** también eran byte-for-byte idénticas. De ahí el nombre más amplio que el `PlatformArm64.inc` del ticket. En los `.cpp` queda sólo `setAudioThreadPriority()`, que es lo único que difiere de verdad |
 
 ### Nota de cierre — WA-1.2 (2026-07-25)
@@ -633,7 +633,7 @@ Sigue valiendo la regla de siempre: el logger **no es RT-safe** y no va en el ho
 | WA-3.3 | actuals iOS | `NativeLibraryLoader` (no-op, link estático), `AudioBridgeProvider` (retorna `IosAudioBridge`), `DeviceCapabilities` (ProcessInfo/UIDevice) | `AudioEngineFactory.create()` funciona en iOS | P0 | S | ✅ **HECHO** 2026-07-25 — `NativeLibraryLoader` ✅, `AudioBridgeProvider` ✅, `DeviceCapabilities` ✅ (WA-1.2). **Cierra la Fase 3** |
 | WA-3.4 | `AudioSessionManager` | Helper iosMain para AVAudioSession: categoría `playAndRecord`, `preferredIOBufferDuration`/`preferredSampleRate`, notificaciones de interrupción y route change expuestas como Flow para que el consumidor (NoisyPad) las mapee a start/stop | Interrupción por llamada entrante pausa y reanuda el engine en sample app | P0 | M | ✅ **HECHO** 2026-07-25 — `internal/audio/AudioSessionManager.kt` + 13 tests. La validación con llamada entrante real queda para WA-4.3 (device) |
 | WA-3.5 | Transcoder abstracto | `Mp4AacTranscoder` (MediaCodec) → interfaz `IAudioTranscoder` en commonMain; actual Android existente; actual iOS con `AVAssetWriter` (diferible: el export WAV no lo necesita) | Interfaz común; iOS actual puede llegar después | P2 | M |
-| WA-3.6 | Regla RT documentada | Documentar y hacer cumplir D6: ningún callback del thread RT entra a Kotlin; estado via polling/colas. Incluir en el README de contribución | Doc + revisión de que ningún path actual lo viola | P1 | S | Parcial — la regla ya está en `CLAUDE.md` §portabilidad; falta la revisión de paths |
+| WA-3.6 | Regla RT documentada | Documentar y hacer cumplir D6: ningún callback del thread RT entra a Kotlin; estado via polling/colas. Incluir en el README de contribución | Doc + revisión de que ningún path actual lo viola | P1 | S | ✅ **HECHO** 2026-07-28 — la revisión de paths está en su nota de cierre: hay **exactamente un** camino C++→Kotlin (el listener del looper) y no lo corre el thread de audio. La fila decía *Parcial* hasta el 2026-08-13, contradiciendo su nota |
 
 ### Nota de cierre — WA-3.1 (2026-07-25)
 
@@ -767,9 +767,9 @@ pausando y reanudando el motor. Eso necesita hardware y va con WA-4.3.
 
 | ID | Requerimiento | Detalle | Criterio de aceptación | Prio | Esf |
 |---|---|---|---|---|---|
-| WA-4.1 | XCFramework en el pipeline | Task Gradle que ensambla el XCFramework (device+simulator) y lo integra al klib/publicación; cache para no recompilar C++ sin cambios | `./gradlew :audio:assembleWatermelonXCFramework` reproducible en CI | P0 | M | ✅ **HECHO** 2026-07-25 — `XCFramework("Watermelon")` en el convention plugin, framework estático, wired al job `ios` de CI con verificación de símbolos. Ver nota |
+| WA-4.1 | XCFramework en el pipeline | Task Gradle que ensambla el XCFramework (device+simulator) y lo integra al klib/publicación; cache para no recompilar C++ sin cambios | `./gradlew :audio:assembleWatermelonXCFramework` reproducible en CI | P0 | M | ✅ **HECHO** 2026-07-25 — `XCFramework("Watermelon")` en el convention plugin, framework estático, con verificación de símbolos. ⚠️ **Desde el 2026-08-13 está FUERA del camino caliente** (#116): sus dos pasos llevan `if: github.event_name != 'pull_request'` y salieron de `gate.sh`. Medido: **cero consumidores** —NoisyPad usa la coordenada Gradle KMP y `:harness` embebe su propio framework— y **no se distribuye** (los releases no llevan assets). Lo que probaba lo cubre el harness: `HarnessKit.framework` lleva los mismos 253 símbolos `wma_*`. Se verifica en cada push a master |
 | WA-4.2 | Publicación KMP | Publicar a GitHub Packages el artefacto KMP completo (metadata común + AAR Android + klibs iOS). Release Please sigue gobernando la versión. Validar consumo desde un proyecto de prueba iOS y desde NoisyPad Android (sin cambios para el consumidor Android actual) | NoisyPad resuelve la misma coordenada para ambos targets — **desbloquea gate G1 de NoisyPad** | P0 | M |
-| WA-4.3 | Sample app iOS | Mini app (puede vivir en el repo) que haga smoke de la librería: start engine, sine, un efecto, looper record/play, medición de latencia round-trip | Smoke manual documentado; latencia medida y registrada | P1 | M | 🟡 **Partido en dos, primera mitad APROBADA 2026-07-25** (sin empezar). Ver decisión abajo |
+| WA-4.3 | Sample app iOS | Mini app (puede vivir en el repo) que haga smoke de la librería: start engine, sine, un efecto, looper record/play, medición de latencia round-trip | Smoke manual documentado; latencia medida y registrada | P1 | M | 🟡 **Primera mitad CERRADA POR SUPERADA 2026-08-13** (WA-5.5 la cubre; ver la nota). La segunda mitad —device, Instruments, latencia round-trip, interrupción por llamada— **sigue bloqueada por hardware** y es lo único grande abierto del programa |
 
 ### Decisión — WA-4.3 se parte en dos (aprobada 2026-07-25, sin empezar)
 
@@ -3902,7 +3902,95 @@ es alcanzable va por las secondary mappings. Está escrito al lado del miembro e
 > **Y `gate.sh` se niega a correr con el árbol sucio, devolviendo el shell en `EXIT=0`.** Es
 > correcto (el digest sale del índice), pero el `0` no dice que corrió: hay que leer la salida.
 
-### Dónde retomar (2026-07-30, sesión de soak del CI + la deuda que destapó)
+### Dónde retomar (2026-08-13 — el programa está funcionalmente completo)
+
+**El requerimiento KMP/iOS está cerrado salvo hardware.** El motor cross-compila, la C API está
+completa, `IosAudioBridge` cubre la superficie sobre cinterop, el XCFramework se ensambla y **el
+artefacto KMP se publica y NoisyPad lo consume**. Lo único grande abierto es **G2 / WA-4.3
+segunda mitad**: sonido en device, Instruments, latencia round-trip e interrupción por llamada.
+
+**Medido el 2026-08-13, no citado** (los conteos del encabezado driftean, re-medir es barato):
+
+| | |
+|---|---|
+| Kotlin `commonMain` / `androidMain` / `iosMain` | **83 / 21 / 6** |
+| `external fun` · `JNIEXPORT` · `wma_*` | **291 · 280 · 255** |
+| Delegación JNI→C API (WA-2.6) | **239/280** — los 41 restantes son deliberados: 36 USB (D4), 2 looper, 2 backend, 1 benchmark |
+| Suites `commonTest` / `iosTest` | **10 / 11** · JVM **82 tests** · C++ host **791** |
+
+#### Lo que entró desde el 30/07
+
+| PR | qué |
+|---|---|
+| #108, #109, #111 | borrar `ModeManager`, el watchdog de `gate.sh`, y el nivel de instrumento + borrar el crossfade de MIX |
+| **#110 → 2.0.0** | major, cortado solo por el `feat(core)!` + footer `BREAKING CHANGE:` |
+| #112, #113 | el ticket del master volume, y su arreglo — que eran **cuatro** defectos, no uno |
+| **#114 → 2.0.1** | |
+| **#115** | `gate.sh` atestaba una ventana que no verificaba (TOCTOU). Ver `docs/ci/local_first.md` §7.12 |
+| **#116** | el XCFramework sale del camino caliente |
+| **#117** | **la carrera entre los lectores de estado y el reopen** — abajo |
+
+#### La carrera de `BackendManager`, y por qué el arreglo NO fue donde parecía
+
+El TSan del CI puso master en rojo el 12/08. Los tres lectores en vivo entraban al backend
+sosteniendo `mMutex`, mientras `stop()` lo tocaba sosteniendo sólo `mOpMutex`: dos mutexes
+distintos, cero exclusión. Preexistente desde #59 y **asomaba 1 de cada 9 merges**.
+
+> [!CAUTION]
+> **Se diseñó mal el arreglo DOS veces, y las dos veces la respuesta estaba en un test que no se
+> había leído.** Un snapshot publicado en `start()/stop()` lo rompe
+> `FollowsTheBackendAcrossARenegotiation` (un device renegocia sin reiniciar: hay que leer **en
+> vivo**). Un `try_lock` con caché lo rompe `StateReadsDoNotBlockWhileTheStreamIsBeingReopened`,
+> que exige el **estado real a mitad del reopen**.
+>
+> **La regla que se transfiere: antes de diseñar sobre una función, leé los tests HERMANOS.** Los
+> requisitos no estaban en la función ni en sus comentarios — estaban en los asserts de al lado.
+
+Los cuatro requisitos juntos —en vivo, no bloquear, estado real, sin carrera— obligan a leer el
+estado verdadero sin lock, así que el único lugar posible es **adentro de cada `IAudioBackend`**,
+que ahora lo promete por escrito. De paso salió algo peor: `OboeBackend::getStreamInfo()`
+actualizaba su cache **perezosamente** y podía entrar a `mOutputStream->...` mientras
+`closeStreams()` lo destruía.
+
+> [!TIP]
+> **El TSan local es CIEGO a esta carrera, medido: 0 reportes en 20 corridas** del mismo test que
+> el CI puso rojo. Así que la mutación inversa se corrió **en el CI**, en dos pushes del mismo PR:
+> reproductor sin arreglo → `cpp-tests-tsan` **rojo**; arreglo → **verde**. Sin ese rojo previo un
+> verde no distingue "arreglado" de "no asomó esta vez".
+
+#### 🎫 TICKET ABIERTO — la invariante de `BackendManager` quedó a medias, a propósito
+
+`#117` cerró **las lecturas**. Quedan **11 sitios** que entran al backend con `mMutex` tomado, y
+no se tocaron por dos razones distintas:
+
+| sitios | por qué no |
+|---|---|
+| `requestCapture` (L339, 353, 359) | corren **con `mMutex` tomado**, así que un `try_lock` de `mOpMutex` ahí adentro **invertiría el orden de locks** que el header declara sin excepciones |
+| las 5 escrituras: `setCallback` (L197), `setSampleRate` (L288), `setBufferSize` (L298), `setFullDuplexEnabled` (L339, L502) | un snapshot no las toca; necesitan exclusión real, y tomar `mOpMutex` choca con el contrato de `requestCapture` de **no bloquear** hasta que termine el reopen — que es literalmente el nombre de un test |
+| `createSplitBackend` (L594–605) | sin auditar; probablemente ya bajo `mOpMutex` vía `selectBackend` |
+
+**Arreglarlo pide rediseñar `requestCapture`, no aplicar el mismo patrón.** El comentario en
+`BackendManager.cpp` dice exactamente esto al lado del código, para que nadie lea el arreglo
+parcial como completo.
+
+#### Deuda menor, sin síntoma de usuario
+
+`setMaxVoices` sigue siendo un no-op literal (`VoiceManager.cpp:277`) · `calculateCurrentVolume()`
+sin llamadores · 8 de las 10 ramas del switch de `XYMapper` inalcanzables · WA-1.1 (10 archivos de
+`androidMain` con `android.util.Log`, que **CLAUDE.md permite ahí**: es prolijidad, no bloqueo).
+
+**Y un camino que nunca se ejercitó:** el `@try` de `CoreAudioBackend` ante permiso de micrófono
+denegado. Es su único disparador y el harness podría hacerlo en el simulador. Queda anotado como
+observación, no como ticket.
+
+#### Lo que sigue bloqueado y en quién
+
+- **Hardware:** G2 / WA-4.3 device, el smoke de USB, y el ítem 5 del smoke (timing del metrónomo,
+  hay que oírlo). El emulador **no sirve** para juzgar audio audible.
+- **El usuario:** el token de `gh` no tiene scope `read:packages`, así que "publicada" se sigue
+  verificando por log y no contra el registro. Arrastrado desde la 1.14.0.
+
+### Dónde retomar (2026-07-30 — historia, sesión de soak del CI + la deuda que destapó)
 
 **No hay nada a medio hacer.** `master` = **`4516fe4`**, árbol limpio, **cero PRs abiertos**,
 CI de master verde, **1.14.1 publicada**.
