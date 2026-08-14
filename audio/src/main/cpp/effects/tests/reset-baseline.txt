@@ -1,0 +1,85 @@
+# Efectos que HOY no cumplen el contrato de `Effect::reset()`, medido por
+# `EffectProperties.ResetMakesEveryEffectReproduceItsOutputExactly` (WD-2.2).
+#
+# La propiedad: ensuciar el efecto con audio fuerte, `reset()`, correr una señal,
+# `reset()`, correr LA MISMA señal — y obtener el mismo audio muestra a muestra.
+# Un efecto que falla arrastra estado a traves del reset, que es exactamente el
+# residual del pad que se filtraba al primer bloque de INPUT_FX.
+#
+# 15 de 23 efectos fallan. Ninguna prueba lo decia antes de esta.
+#
+# ESTO ES UN TRINQUETE, NO UNA LISTA DE EXCEPCIONES. El test falla si:
+#   - un efecto que NO esta aca empieza a fallar  (deuda nueva), y TAMBIEN
+#   - un efecto que SI esta aca deja de fallar    (deuda pagada: borrar la linea)
+#
+# Es el mismo mecanismo que `scripts/rt-safety-baseline.txt`, y por el mismo
+# motivo: un baseline que no se puede quedar mintiendo sobre su propia deuda.
+#
+# ARREGLARLO ES WD-3.2, NO WD-2.2. Esta tanda construye el detector; el
+# requerimiento que cierra el contrato de Effect es la Fase 3.
+#
+# ---------------------------------------------------------------------------
+# LA CLASE, QUE ES MAS UTIL QUE LOS QUINCE CASOS
+#
+# El grupo B de abajo NO son seis defectos sueltos. Los seis `reset()` limpian
+# LOS BUFFERS GRANDES —lineas de delay, combs, allpass, FDN— y se olvidan del
+# ESTADO ESCALAR CHICO: los `ParameterSmoother`, la fase de los LFO y la memoria
+# de los biquads. Es el mismo error seis veces, y se entiende: al escribir un
+# reset uno piensa "hay que borrar la cola", y la cola son los buffers.
+#
+# Cinco de los seis se olvidan EXACTAMENTE de sus ParameterSmoother.
+#
+# Vale la pena mirar tambien el smoothing muerto de FilterEffect que encontro la
+# primera tanda: `ParameterSmoother` aparece en los dos hallazgos.
+# ---------------------------------------------------------------------------
+#
+# Formato:  <EFFECT_TYPE> | <estado de reset()> | <que sobrevive>
+#
+# ---------------------------------------------------------------------------
+# GRUPO A — nunca sobrescribieron reset(). El default de la clase base es un
+# no-op, asi que SOBREVIVE TODO su estado. Compilan perfecto: nada avisa.
+# ---------------------------------------------------------------------------
+FILTER        | ausente | todo — p.ej. x1/x2/y1/y2 de los dos canales
+VOCODER       | ausente | todo
+COMPRESSOR    | ausente | todo — p.ej. mEnvelope y mMakeupSmoother
+AMP_SIM       | ausente | todo
+DECI_HPF      | ausente | todo
+AUTO_PAN      | ausente | todo
+COMPLEX_TREM  | ausente | todo
+RANDOM_RESO   | ausente | todo
+BEAT_GRAIN    | ausente | todo (diverge recien en el frame 3808)
+
+# ---------------------------------------------------------------------------
+# GRUPO B — SI tienen reset(), y NO alcanza. Es el grupo peor: parece hecho.
+# Un reset() incompleto no se distingue de uno completo leyendo la firma, y es
+# justo lo que hace que nadie vuelva a mirar. Lo que sobrevive esta VERIFICADO
+# leyendo el cuerpo de cada reset() contra los miembros de estado de su header.
+# ---------------------------------------------------------------------------
+REVERB          | incompleto | lowCutFilter/highCutFilter (z1/z2) y modulationLFOs[4]
+
+CHORUS          | incompleto | mLfoPhase[4] y mMixSmoother
+PHASER          | incompleto | mFeedbackSmoother y mMixSmoother
+HALL_REVERB     | incompleto | los CINCO ParameterSmoother (decay, size, preDelay, diffusion, mix)
+PLATE_REVERB    | incompleto | mMixSmooth y mPreDelaySmooth
+SHIMMER_REVERB  | incompleto | mMixSmooth y mShimmerSmooth
+
+# ---------------------------------------------------------------------------
+# GRUPO C — el caso INVERSO, y por eso vale la pena separarlo: aca reset() esta
+# BIEN y el que esta mal es el CONSTRUCTOR.
+#
+# `DistortionEffect::reset()` siembra sus tres ParameterSmoother con el valor
+# vigente del parametro (`mDriveSmoother.reset(mDrive.load())`, etc). El
+# constructor NO: los deja en el 0.0f con el que arranca ParameterSmoother,
+# mientras los parametros valen drive=0.5, level=0.7, mix=1.0.
+#
+# O sea: un DistortionEffect RECIEN CREADO sube drive, level y mix desde cero a
+# lo largo de ~10 ms. Es un fade-in audible en el primer bloque despues de
+# agregar el efecto a la cadena, y no lo pidio nadie.
+#
+# `FilterEffect` si siembra su smoother en el constructor. Los dos criterios
+# conviven en la misma libreria.
+#
+# Arreglar esto es tocar el CONSTRUCTOR, no reset(). Por eso va aparte: quien
+# tome la linea de arriba y busque que le falta a reset() no va a encontrar nada.
+# ---------------------------------------------------------------------------
+DISTORTION      | correcto, falla el constructor | los tres ParameterSmoother arrancan en 0 en vez de en su parametro

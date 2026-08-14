@@ -622,6 +622,66 @@ testdata/
 > **Falta de esta tanda:** THD+N, curva de transferencia, RT60 y el
 > property-based de `reset()`. Y el resto de los efectos.
 
+> ✅ **SEGUNDA TANDA — property-based sobre los 23, y curva de transferencia de la
+> dinámica. Encontró que 16 de 23 efectos no cumplen el contrato de `reset()`.**
+>
+> `test_golden_properties.cpp` barre el catálogo entero con tres propiedades que
+> no dependen de qué hace cada efecto: salida **finita**, salida **acotada**, y
+> `reset()` **deja el efecto como recién construido**.
+> `test_golden_dynamics.cpp` mide la curva estática del compresor y el contrato
+> del limiter.
+>
+> **El hallazgo, y es grande: 16 de 23 efectos arrastran estado a través de
+> `reset()`.** Declarados en `effects/tests/reset-baseline.txt`, que es un
+> **trinquete** con la misma semántica que `scripts/rt-safety-baseline.txt`:
+> falla si aparece deuda nueva **y también** si una entrada declarada ya no se
+> reproduce. Se reparten en tres grupos:
+>
+> - **9 nunca sobrescribieron `reset()`.** El default de la clase base es un
+>   no-op, así que sobrevive todo su estado, y compilan perfecto.
+> - **6 lo tienen y no alcanza** — el grupo peor, porque parece hecho.
+> - **1 al revés: `DISTORTION` tiene el `reset()` bien y el CONSTRUCTOR mal.**
+>   `reset()` siembra sus tres `ParameterSmoother` con el valor vigente del
+>   parámetro; el constructor los deja en 0 mientras drive vale 0,5, level 0,7 y
+>   mix 1,0. **Un distortion recién creado sube esos tres desde cero durante
+>   ~10 ms**: un fade-in audible en el primer bloque después de agregarlo a la
+>   cadena. `FilterEffect` sí siembra el suyo — los dos criterios conviven.
+>
+> **Los seis del grupo B no son seis defectos, son uno seis veces.** Todos
+> limpian los buffers grandes —delay, combs, allpass, FDN— y se olvidan del
+> estado escalar chico. **Cinco de los seis se olvidan exactamente de sus
+> `ParameterSmoother`.** Contando el smoothing muerto de `FilterEffect` de la
+> primera tanda y el constructor de `DISTORTION`, `ParameterSmoother` aparece en
+> **tres** hallazgos independientes de este programa.
+>
+> **Se arregló una sola cosa acá, y es una declaración, no audio:**
+> `LookaheadLimiter::getLatencySamples()` devolvía el 0 del default de `Effect`
+> teniendo 5 ms de lookahead que **sí** retrasan la señal directa (la salida es
+> el buffer demorado por la ganancia). Hoy no rompe nada porque vive en el bus
+> master, pero es falso, y WD-3.1 existe para que no lo sea. El test mide el
+> onset además de leer la declaración, en 44,1 / 48 / 96 kHz.
+>
+> **Un método que falló y hubo que corregir, otra vez.** La primera versión del
+> test de `reset()` comparaba dos pasadas del mismo efecto. Sonaba equivalente a
+> compararlo contra uno nuevo y **no lo era**: cada formulación caza un efecto
+> que la otra no —contra-nuevo es la única que ve a `DISTORTION`, contra-sí-mismo
+> la única que ve a `BEAT_GRAIN`— así que el test toma la **unión** de las dos.
+>
+> Y un mutante volvió a ser el defectuoso: borrar los `std::fill` de
+> `DelayEffect::reset()` sobrevivía. Medido con un probe descartable: sucio **sin**
+> reset difiere del nuevo en 0,418, pero sucio **con** ese reset mutado da
+> diferencia **exactamente cero** — o sea que `writePos.store(0)` más resetear el
+> smoother ya alcanzan, y los `fill` no son observables en ese escenario. **El
+> mutante era inerte**, no el test ciego. La dirección quedó validada con
+> regresiones reales sobre `CabinetSimulator`, incluida la fina (olvidar sólo los
+> cuatro escalares de estado de filtro).
+>
+> Validación: 7 mutantes en la dinámica y 4 en el property-based, todos muertos;
+> los 11 tests de la tanda muertos por al menos uno.
+>
+> **Falta de WD-2.2:** THD+N, RT60, y los golden por efecto del resto del
+> catálogo.
+
 **Esfuerzo** 3 sem · **Riesgo** bajo · **Depende de** WD-1.2, WD-2.1
 
 ---
