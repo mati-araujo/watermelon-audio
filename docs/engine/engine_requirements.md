@@ -286,12 +286,33 @@ deadline.
 
 **Criterio de aceptación.**
 1. El callback lee un `std::atomic<InputNode*>` crudo. Cero operaciones de refcount en el path RT.
-2. La reclamación del nodo ocurre en el thread de control, detrás de una barrera de drenaje — el
-   mismo mecanismo que `CoreAudioBackend::stop()` ya implementa con `mActiveCallbacks`.
-3. Existe un test que hace `setInputNode(nullptr)` mientras el `FakeAudioBackend` bombea
-   callbacks, y TSan/ASan quedan verdes sobre 1.000 iteraciones.
+2. La reclamación del nodo ocurre en el thread de control, detrás de una barrera de drenaje.
+3. Existe un test que hace `setInputNode(nullptr)` mientras un thread bombea callbacks, y
+   TSan/ASan quedan verdes.
 
-**Esfuerzo** 2 d · **Riesgo** medio (toca el ciclo de vida del input) · **Depende de** —
+> ⚠️ **Y de paso apareció que la barrera no cubría todo lo que decía cubrir.** El `CallbackGuard`
+> vivía adentro de `processAudioBlock()`, y el fast-path de USB de `onAudioReady()` retorna
+> **antes** de llegar ahí. Esos bloques no contaban como callback en vuelo, así que ni el
+> drenaje de `stop()` ni el del retiro los veían. Subirlo al punto de entrada arregló `stop()`
+> gratis.
+
+> 🔴 **La lección que más vale de este WD no es el arreglo, es el test.**
+>
+> Los primeros tres tests que escribí verificaban el contrato nuevo y pasaban. Los mutê
+> —restauré el `shared_ptr` en el callback y quité el drenaje— y **pasaron igual, quince
+> corridas**. No detectaban el bug. La ventana de la carrera dura microsegundos y bombear
+> callbacks a ciegas no la pega.
+>
+> El test que sirve necesita **una compuerta en el doble**: atrapar al callback adentro, con el
+> nodo en uso, y recién ahí retirar desde otro thread. Ahí el código viejo falla determinísticamente
+> y el nuevo pasa.
+>
+> Generalizable al resto del programa: **para un bug de concurrencia, un test que no bloquea
+> deliberadamente la ventana casi nunca la pega.** Y si no se muta, no hay forma de saberlo —
+> se ve verde igual.
+
+**Esfuerzo** 2 d estimados · **real ~1 d** · **Riesgo** medio · **Verificado** por mutación en
+las dos direcciones, más ASan y TSan
 
 ---
 
@@ -365,10 +386,21 @@ del incremento no atómico, son **globales de proceso**: dos instancias de `Audi
 comparten, así que el comportamiento del callback depende de cuántos motores existan.
 
 **Criterio de aceptación.** Ningún `static` local de función en el call-graph del callback; todos
-pasan a miembros. El lint de WD-1.1 lo verifica. Test: dos motores concurrentes no interfieren en
-el comportamiento periódico del otro.
+pasan a miembros.
 
-**Esfuerzo** 1 d · **Riesgo** bajo · **Depende de** WD-1.1 (el lint es el mismo)
+> **Salió mucho más barato que lo estimado: quedaban 3, no "6 o más".** Los demás se cayeron
+> solos con los bloques de log que los envolvían, en WD-1.1 — un `static int` que gatea un
+> `LOGI` no sobrevive a que se borre el `LOGI`.
+>
+> De los 3, dos eran del path RT y se arreglaron (`monitorXRuns`, `updateMultiTouch`). El
+> tercero —`static bool initialized` en `getGlobalRegistry()`, `EffectChain.cpp`— **no está en
+> el call-graph del callback**, así que queda fuera de alcance por definición del propio WD.
+> Pero es una carrera de datos real: `static EffectRegistry reg` sí tiene inicialización
+> thread-safe por el estándar, `initialized` no, y dos threads que llamen `getNumParams()` a la
+> vez pueden ambos ver `false` y registrar los efectos dos veces. Queda señalado acá para que
+> no se pierda; el arreglo son 3 líneas.
+
+**Esfuerzo** 1 d estimado · **real ~1 h** · **Riesgo** bajo
 
 ---
 
