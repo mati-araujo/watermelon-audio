@@ -631,6 +631,47 @@ tonal audible y reproducible que ningún test detecta porque ninguno mide respue
 **Nota de compatibilidad.** `Effect` **no es público** — los efectos se crean vía `EffectRegistry`
 desde un enum. Esto es source-breaking sólo adentro. No requiere versión mayor.
 
+> ✅ **HECHO. Y el fundamento del requerimiento era falso, además de que me equivoqué dos veces
+> más al implementarlo.**
+>
+> **1. El comb-filtering NO era alcanzable hoy.** La auditoría dio como defecto vivo poner "un
+> limiter en una rama y un filtro en la otra". `LookaheadLimiter` **no está registrado en
+> `EffectRegistry`**: vive sólo en `OutputStage`, en el bus master, donde no hay ramas que
+> sumar. El requerimiento sigue valiendo, pero por otra razón: que las declaraciones dejen de
+> ser una promesa antes de que entre el primer efecto latente.
+>
+> **2. Dos efectos sí tenían latencia, contra mi lectura del código.** Escribí en el test que
+> los 23 daban cero. La medición dijo:
+>
+> | Efecto | Medido | Causa |
+> |---|---|---|
+> | `CABINET` | 1 sample | La convolución **sí** es causal. El retardo viene del **dato**: el IR arranca con un tap en cero |
+> | `DECI_HPF` | 3 (default) … **479** (máx.) | El hold no entrega su primer valor hasta alcanzar `step = fs/target`, que **depende del parámetro** |
+>
+> Los dos se **calculan**, no se hardcodean.
+>
+> **3. Publicar las latencias en el snapshot estaba mal, y lo encontró el test.** Era lo
+> natural — `updateSnapshot()` ya publica el índice del vocoder — pero corre sólo en cambios
+> **estructurales**. Con `DECI_HPF` yendo de 0 a 479 según un parámetro, mover ese parámetro
+> dejaba la compensación desalineada sin que nada lo notara. Ahora se releen **por bloque**: son
+> 12 llamadas virtuales cada ~2,7 ms, y no pueden quedar stale.
+>
+> **4. Un sample-and-hold no tiene latencia fija.** `DECI_HPF` es variante en el tiempo: su
+> retardo instantáneo depende de la fase de su contador y va de 0 a `step`. Lo declarado es la
+> **cota**, que es lo correcto para compensar — alinear contra el peor caso nunca desalinea de
+> más. El test lo afirma como cota, no como igualdad, y dice por qué.
+>
+> **La compensación** (`compensateBranch`) alinea cada rama contra la más lenta antes de sumar,
+> en `PARALLEL`, `SERIAL_PARALLEL`, `PARALLEL_SERIAL` y `SPLIT_2X2`. Tope de 512 frames, que
+> cubre el peor caso real (479) con margen; pasarse acota y **cuenta** en vez de alocar en el
+> thread de audio. `FEEDBACK` queda afuera a propósito: es una topología de lazo, donde
+> compensar tiene otra semántica.
+>
+> Verificado por mutación en los dos mecanismos: apagar la compensación mata
+> `TheFastBranchIsDelayedToMeetTheSlowOne`; hacer que la cadena sume en vez de tomar el máximo
+> mata `TheChainReportsTheSlowestBranchNotTheSumInParallelModes`. **La primera versión de esos
+> tests no mataba a ninguno** — con un solo efecto latente, suma y máximo dan el mismo número.
+
 **Esfuerzo** 1 sem · **Riesgo** medio · **Depende de** WD-2.2, WD-2.3
 
 ---

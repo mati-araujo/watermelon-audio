@@ -57,6 +57,10 @@ EffectChain::EffectChain() {
     mGlobalBypassSmooth.reset(0.0f);
     mGlobalBypassTarget.store(0.0f, std::memory_order_relaxed);
 
+    // WD-3.1 — lineas de compensacion, alocadas UNA vez. El callback nunca
+    // las redimensiona.
+    for (auto& d : mBranchDelays) d.prepare();
+
     // Inicializar snapshot vacío
     mActiveSnapshot.store(&mSnapshot1, std::memory_order_release);
 
@@ -288,6 +292,10 @@ void EffectChain::reset() {
     mCrossfadeCounter = 0;
     mFeedbackHighEnergyFrames = 0;
 
+    // WD-3.1 — las lineas de compensacion tambien cargan audio del contexto
+    // anterior: son delays. Es el mismo caso que Effect.h nombra para reset().
+    for (auto& d : mBranchDelays) d.clear();
+
     // WD-1.1 — sin log. reset() lo despacha onAudioReady desde el thread de
     // audio (ver Effect.h): es RT, aunque no lo parezca por el nombre.
 }
@@ -381,6 +389,17 @@ void EffectChain::process(float* input, float* output, int numFrames) {
         const int totalSamples = numFrames * 2;
         std::copy(input, input + totalSamples, output);
         return;
+    }
+
+    // WD-3.1 — releer las latencias declaradas, por bloque. Ver la nota del
+    // header sobre por que no se publican en el snapshot.
+    mRtMaxLatency = 0;
+    for (size_t i = 0; i < MAX_EFFECTS; ++i) {
+        const int l = (i < snapshot->size && snapshot->effects[i])
+                          ? snapshot->effects[i]->getLatencySamples()
+                          : 0;
+        mRtEffectLatency[i] = l;
+        if (l > mRtMaxLatency) mRtMaxLatency = l;
     }
 
     // Verificar si todos los efectos están completamente bypassed
@@ -580,6 +599,13 @@ void EffectChain::processParallel(EffectSnapshot* snapshot, const float* input,
         processOneEffect(snapshot->effects[i], i, snapshot->bypassed[i],
                          input, mBranchBufferA.data(), numFrames);
 
+        // WD-3.1 — idem processParallel: alinear antes de acumular.
+        compensateBranch(i, mRtEffectLatency[i], mBranchBufferA.data(), numFrames);
+
+        // WD-3.1 — alinear esta rama contra la mas lenta ANTES de sumarla.
+        // Sumar ramas con distinta latencia es un filtro peine.
+        compensateBranch(i, mRtEffectLatency[i], mBranchBufferA.data(), numFrames);
+
         activeCount++;
 
         // Accumulate
@@ -629,6 +655,22 @@ void EffectChain::processSplit2x2(EffectSnapshot* snapshot, const float* input,
     // Branch B: effects[splitPoint..n-1] in serial
     processSerialRange(snapshot, splitPoint, n, input, mBranchBufferB.data(), numFrames);
 
+    // WD-3.1 — aca las ramas son RANGOS seriales, asi que la latencia de cada
+    // una es la suma de la de sus efectos. Se alinean entre si, no contra el
+    // maximo global: son las dos unicas que se suman en este modo.
+    {
+        int latA = 0, latB = 0;
+        for (size_t i = 0; i < splitPoint && i < MAX_EFFECTS; ++i) latA += mRtEffectLatency[i];
+        for (size_t i = splitPoint; i < n && i < MAX_EFFECTS; ++i) latB += mRtEffectLatency[i];
+        const int target = std::max(latA, latB);
+        if (target > latA) {
+            mBranchDelays[SPLIT_BRANCH_A].process(mBranchBufferA.data(), numFrames, target - latA);
+        }
+        if (target > latB) {
+            mBranchDelays[SPLIT_BRANCH_B].process(mBranchBufferB.data(), numFrames, target - latB);
+        }
+    }
+
     // Mix branches: A * (1-mix) + B * mix
     for (int s = 0; s < totalSamples; ++s) {
         output[s] = mBranchBufferA[s] * (1.0f - mix) + mBranchBufferB[s] * mix;
@@ -663,6 +705,9 @@ void EffectChain::processSerialParallel(EffectSnapshot* snapshot, const float* i
 
         processOneEffect(snapshot->effects[i], i, snapshot->bypassed[i],
                          serialOut, mBranchBufferA.data(), numFrames);
+
+        // WD-3.1 — idem processParallel: alinear antes de acumular.
+        compensateBranch(i, mRtEffectLatency[i], mBranchBufferA.data(), numFrames);
         activeCount++;
 
         for (int s = 0; s < totalSamples; ++s) {
@@ -1238,6 +1283,50 @@ EffectType EffectChain::getEffectType(size_t index) const {
         return EffectType::FILTER; // Default fallback
     }
     return effectTypes[index];
+}
+
+
+// ========== COMPENSACION DE LATENCIA ENTRE RAMAS (WD-3.1) ==========
+
+bool BranchDelay::process(float* io, int numFrames, int delayFrames) {
+    if (delayFrames <= 0) return true;
+
+    bool ok = true;
+    if (delayFrames > MAX_DELAY_FRAMES) {
+        delayFrames = MAX_DELAY_FRAMES;
+        ok = false;
+    }
+
+    const int cap = MAX_DELAY_FRAMES;
+    for (int f = 0; f < numFrames; ++f) {
+        const int readPos = (writePos - delayFrames + cap) % cap;
+
+        const float inL = io[f * 2];
+        const float inR = io[f * 2 + 1];
+
+        io[f * 2]     = buffer[static_cast<size_t>(readPos) * 2];
+        io[f * 2 + 1] = buffer[static_cast<size_t>(readPos) * 2 + 1];
+
+        buffer[static_cast<size_t>(writePos) * 2]     = inL;
+        buffer[static_cast<size_t>(writePos) * 2 + 1] = inR;
+        writePos = (writePos + 1) % cap;
+    }
+    return ok;
+}
+
+void EffectChain::compensateBranch(size_t slot, int branchLatency,
+                                   float* branch, int numFrames) {
+    if (slot >= mBranchDelays.size()) return;
+
+    const int delay = mRtMaxLatency - branchLatency;
+    if (delay <= 0) return;  // esta rama YA es la mas lenta: nada que alinear
+
+    if (!mBranchDelays[slot].process(branch, numFrames, delay)) {
+        // Se pidio mas compensacion que la que entra en la linea. Se aplico el
+        // maximo y se cuenta: alinear de menos suena mejor que alocar en el
+        // thread de audio, y el contador deja el hecho visible.
+        mLatencyClampedBlocks.bump();
+    }
 }
 
 // ========== LATENCIA DECLARADA (WD-3.1) ==========

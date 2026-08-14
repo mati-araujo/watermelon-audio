@@ -42,6 +42,43 @@ struct AtomicMappingConfig {
  * Este snapshot se crea cuando hay cambios estructurales y se lee atómicamente
  * desde el thread de audio sin necesidad de locks.
  */
+/**
+ * @struct BranchDelay
+ * @brief Linea de retardo entera para alinear una rama contra la mas lenta (WD-3.1).
+ *
+ * Compensacion de latencia: cuando dos ramas de un modo paralelo se suman, la
+ * que tiene menos latencia hay que retrasarla la diferencia. Sin eso la suma es
+ * un filtro peine — con DECI_HPF al maximo de reduccion son 479 samples, cuyo
+ * primer notch cae en 50 Hz.
+ *
+ * Buffer fijo, alocado una vez. `process()` es RT-safe.
+ */
+struct BranchDelay {
+    /// Tope de compensacion, en frames. 512 cubre el peor caso actual
+    /// (DECI_HPF a 100 Hz de target: 479 samples) con margen. Una rama que pida
+    /// mas se acota y se cuenta, en vez de alocar en el thread de audio.
+    static constexpr int MAX_DELAY_FRAMES = 512;
+
+    std::vector<float> buffer;  // interleaved estereo
+    int writePos = 0;
+
+    void prepare() {
+        buffer.assign(static_cast<size_t>(MAX_DELAY_FRAMES) * 2, 0.0f);
+        writePos = 0;
+    }
+
+    void clear() {
+        std::fill(buffer.begin(), buffer.end(), 0.0f);
+        writePos = 0;
+    }
+
+    /**
+     * @brief Retrasa `io` en `delayFrames` frames, in-place. RT-safe.
+     * @return true si se aplico el retardo pedido; false si hubo que acotarlo.
+     */
+    bool process(float* io, int numFrames, int delayFrames);
+};
+
 struct EffectSnapshot {
     std::vector<Effect*> effects;      // Raw pointers (no ownership)
     std::vector<bool> bypassed;
@@ -316,6 +353,33 @@ private:
     wma::RtCounter mNonFiniteBlocks;    ///< bloques con NaN/Inf saneados
     wma::RtCounter mOverflowBlocks;     ///< numFrames excedio el scratch pre-alocado
     wma::RtCounter mSilentOutputBlocks; ///< entrada con senal y salida en silencio
+    wma::RtCounter mLatencyClampedBlocks; ///< una rama pidio mas compensacion que MAX_DELAY_FRAMES
+
+    // WD-3.1 — compensacion de latencia entre ramas.
+    //
+    // Una linea por slot de efecto (los modos que suman ponen un efecto por
+    // rama) mas dos para las ramas de SPLIT_2X2, que son rangos seriales.
+    // Se alocan en el constructor: nunca se redimensionan en el callback.
+    static constexpr size_t SPLIT_BRANCH_A = MAX_EFFECTS;
+    static constexpr size_t SPLIT_BRANCH_B = MAX_EFFECTS + 1;
+    std::array<BranchDelay, MAX_EFFECTS + 2> mBranchDelays;
+
+    // Latencia de cada efecto y el maximo, RELEIDAS EN CADA BLOQUE desde
+    // process(), no publicadas por updateSnapshot().
+    //
+    // Publicarlas en el snapshot era lo natural y estaba MAL: updateSnapshot()
+    // corre solo en cambios ESTRUCTURALES (add/remove/reorder), y hay efectos
+    // cuya latencia depende de un PARAMETRO — DECI_HPF va de 0 a 479 samples
+    // segun su target de sample rate. Con las latencias congeladas al momento
+    // de agregar el efecto, mover ese parametro dejaba la compensacion
+    // desalineada sin que nada lo notara. Lo encontro el test de esta misma
+    // tanda.
+    //
+    // Releerlas por bloque son 12 llamadas virtuales cada ~2,7 ms: despreciable,
+    // y no puede quedar stale. Sin atomicos: las escribe y las lee el MISMO
+    // thread de audio.
+    std::array<int, MAX_EFFECTS> mRtEffectLatency{};
+    int mRtMaxLatency = 0;
     EffectSnapshot mSnapshot1;
     EffectSnapshot mSnapshot2;
     std::atomic<bool> mUsingSnapshot1{true};
@@ -382,6 +446,17 @@ private:
     void updateSnapshot();
 
     // ========== ROUTING PROCESS STRATEGIES (RT-safe) ==========
+
+    /**
+     * @brief Alinea una rama contra la mas lenta de la cadena (WD-3.1).
+     *
+     * Retrasa `branch` en (maxLatencia - latenciaDeEstaRama) frames. Si la rama
+     * ya es la mas lenta el retardo es cero y no se toca nada.
+     *
+     * RT-safe. `slot` indexa mBranchDelays: los indices [0, MAX_EFFECTS) son
+     * los slots de efecto, SPLIT_BRANCH_A/B las dos ramas de SPLIT_2X2.
+     */
+    void compensateBranch(size_t slot, int branchLatency, float* branch, int numFrames);
 
     /** @brief El vocoder activo leido del snapshot, o nullptr. Lock-free (WD-1.6). */
     Effect* vocoderFromSnapshot() const;

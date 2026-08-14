@@ -40,6 +40,7 @@
 #include "../EffectChain.h"
 #include "../EffectRegistry.h"
 #include "../EffectTypes.h"
+#include "../DeciHpfEffect.h"
 
 #include <gtest/gtest.h>
 
@@ -208,4 +209,200 @@ TEST(EffectLatency, TheChainReportsTheSumOfItsEffects) {
         expected += chain.getEffectLatencySamples(i);
     }
     EXPECT_EQ(chain.getLatencySamples(), expected);
+}
+
+// ===========================================================================
+// LA COMPENSACIÓN (segunda mitad de WD-3.1)
+//
+// Los efectos reales tienen latencias de 0 a 3 samples con sus defaults, así
+// que con ellos el peine no se ve. Para probar la compensación hace falta un
+// efecto que SÍ retrase — y construirlo es legítimo: es exactamente lo que va a
+// entrar el día que alguien agregue un limiter con lookahead, que es el caso
+// para el que existe todo este mecanismo.
+// ===========================================================================
+
+namespace {
+
+/// Retrasa la señal N samples y declara ese retraso. Nada más.
+class DelayingEffect : public Effect {
+public:
+    explicit DelayingEffect(int latency) : mLatency(latency), mLine(static_cast<size_t>(latency) * 2 + 2, 0.0f) {}
+
+    void process(float* input, float* output, int numFrames) override {
+        if (mLatency <= 0) {
+            std::copy(input, input + numFrames * 2, output);
+            return;
+        }
+        const int cap = mLatency;
+        for (int f = 0; f < numFrames; ++f) {
+            const float l = input[f * 2], r = input[f * 2 + 1];
+            output[f * 2]     = mLine[static_cast<size_t>(mPos) * 2];
+            output[f * 2 + 1] = mLine[static_cast<size_t>(mPos) * 2 + 1];
+            mLine[static_cast<size_t>(mPos) * 2]     = l;
+            mLine[static_cast<size_t>(mPos) * 2 + 1] = r;
+            mPos = (mPos + 1) % cap;
+        }
+    }
+    void setParam(int, float) override {}
+    float getParam(int) override { return 0.0f; }
+    void setSampleRate(int) override {}
+    void reset() override { std::fill(mLine.begin(), mLine.end(), 0.0f); mPos = 0; }
+    int getLatencySamples() const override { return mLatency; }
+
+private:
+    int mLatency;
+    std::vector<float> mLine;
+    int mPos = 0;
+};
+
+/// Suma dos ramas —una retrasada `latency`, la otra no— con y sin alinear, y
+/// devuelve la energía de cada resultado. Si la compensación funciona, la suma
+/// alineada conserva la energía y la desalineada la pierde en los notches.
+struct CombEnergy { double aligned; double unaligned; };
+
+CombEnergy sumTwoBranches(int latency, int numFrames) {
+    // Ruido determinista: banda ancha, que es donde un peine se nota.
+    std::vector<float> in(static_cast<size_t>(numFrames) * 2);
+    uint32_t seed = 12345u;
+    for (auto& v : in) {
+        seed = seed * 1664525u + 1013904223u;
+        v = (static_cast<float>(seed >> 8) / 8388608.0f) - 1.0f;
+    }
+
+    DelayingEffect slow(latency);
+    std::vector<float> slowOut(in.size(), 0.0f);
+    slow.process(in.data(), slowOut.data(), numFrames);
+
+    double unaligned = 0.0, aligned = 0.0;
+    // Sin alinear: rama directa + rama retrasada.
+    for (size_t i = 0; i < in.size(); ++i) {
+        const double v = static_cast<double>(in[i]) + slowOut[i];
+        unaligned += v * v;
+    }
+    // Alineada: la rama directa retrasada lo mismo → las dos en fase.
+    DelayingEffect align(latency);
+    std::vector<float> fastAligned(in.size(), 0.0f);
+    align.process(in.data(), fastAligned.data(), numFrames);
+    for (size_t i = 0; i < in.size(); ++i) {
+        const double v = static_cast<double>(fastAligned[i]) + slowOut[i];
+        aligned += v * v;
+    }
+    return {aligned, unaligned};
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// El peine existe, y es grande. Esto establece POR QUÉ hace falta compensar:
+// sumar dos ramas desalineadas pierde energía en los notches.
+// ---------------------------------------------------------------------------
+TEST(EffectLatency, SummingMisalignedBranchesIsAComb) {
+    // 479 samples: el peor caso real medido, DECI_HPF con reducción al máximo.
+    const auto e = sumTwoBranches(479, 8192);
+
+    ASSERT_GT(e.aligned, 0.0);
+    const double ratio = e.unaligned / e.aligned;
+
+    EXPECT_LT(ratio, 0.75)
+        << "sumar dos ramas con 479 samples de desalineación dio " << ratio
+        << " de la energía de la suma alineada. Si esto se acerca a 1, el "
+        << "montaje del test no está produciendo el peine que la compensación "
+        << "existe para evitar, y los tests de abajo no prueban nada.";
+}
+
+// ---------------------------------------------------------------------------
+// Suma vs máximo. Con un solo efecto latente los dos dan el MISMO número, así
+// que hacen falta DOS — si no, el test no distingue una implementación de la
+// otra. (Se comprobó por mutación: con FILTER + DECI_HPF el mutante que siempre
+// suma pasaba.)
+// ---------------------------------------------------------------------------
+TEST(EffectLatency, TheChainReportsTheSlowestBranchNotTheSumInParallelModes) {
+    EffectChain chain;
+    chain.setSampleRate(kSampleRate);
+    ASSERT_TRUE(chain.addEffect(DECI_HPF));
+    ASSERT_TRUE(chain.addEffect(DECI_HPF));
+
+    const int one = chain.getEffectLatencySamples(0);
+    ASSERT_GT(one, 0) << "DECI_HPF dejó de declarar latencia; el test perdió su caso";
+    ASSERT_EQ(chain.getEffectLatencySamples(1), one);
+
+    chain.setRoutingMode(RoutingMode::SERIAL);
+    EXPECT_EQ(chain.getLatencySamples(), one * 2)
+        << "en SERIAL la señal atraviesa los dos: se suman";
+
+    chain.setRoutingMode(RoutingMode::PARALLEL);
+    EXPECT_EQ(chain.getLatencySamples(), one)
+        << "en PARALLEL las ramas se alinean contra la más lenta, así que la "
+        << "cadena retrasa lo que retrasa esa — NO la suma. Si esto da " << (one * 2)
+        << ", getLatencySamples() está sumando en un modo que no suma.";
+}
+
+// ---------------------------------------------------------------------------
+// EL QUE PRUEBA QUE LA COMPENSACIÓN SE APLICA.
+//
+// Un impulso a una cadena en PARALLEL con dos ramas de latencia distinta:
+//
+//   con compensación   la rama rápida se retrasa hasta la lenta, así que la
+//                      PRIMERA energía de la suma sale recién en `maxLatencia`.
+//   sin compensación   la rama rápida sale en el sample 0 y la lenta después:
+//                      dos frentes de onda, el primero en 0.
+//
+// El onset es el discriminador, y es directo de medir.
+// ---------------------------------------------------------------------------
+TEST(EffectLatency, TheFastBranchIsDelayedToMeetTheSlowOne) {
+    EffectChain chain;
+    chain.setSampleRate(kSampleRate);
+
+    ASSERT_TRUE(chain.addEffect(FILTER));     // rama rápida: 0 samples
+    ASSERT_TRUE(chain.addEffect(DECI_HPF));   // rama lenta
+
+    // Bajar el target de sample rate sube la latencia del hold: step = fs/target.
+    // Con 1000 Hz son 48 samples — suficiente para medirlo sin ambigüedad y muy
+    // por debajo del tope de compensación (512).
+    chain.setParameter(1, DeciHpfEffect::PARAM_SAMPLE_RATE, 1000.0f);
+    chain.setRoutingMode(RoutingMode::PARALLEL);
+
+    const int declared = chain.getLatencySamples();
+    ASSERT_GT(declared, 8) << "la rama lenta no quedó suficientemente lenta para medir";
+
+    std::vector<float> in(static_cast<size_t>(kFrames) * 2, 0.0f);
+    std::vector<float> out(static_cast<size_t>(kFrames) * 2, 0.0f);
+    in[0] = 1.0f;
+    in[1] = 1.0f;
+
+    // Dos pasadas: la primera deja los suavizadores de bypass asentados, para
+    // que el frente de onda que se mide sea el del audio y no el de una rampa.
+    chain.process(in.data(), out.data(), kFrames);
+    std::fill(out.begin(), out.end(), 0.0f);
+    std::fill(in.begin(), in.end(), 0.0f);
+    in[0] = 1.0f;
+    in[1] = 1.0f;
+    chain.process(in.data(), out.data(), kFrames);
+
+    int onset = -1;
+    for (int f = 0; f < kFrames; ++f) {
+        if (std::max(std::abs(out[f * 2]), std::abs(out[f * 2 + 1])) > kOnset) {
+            onset = f;
+            break;
+        }
+    }
+    ASSERT_GE(onset, 0) << "la cadena no produjo salida; el test no midió nada";
+
+    // La cota es `declared / 2` y no `declared`, y la razón importa:
+    // DECI_HPF es un SAMPLE-AND-HOLD, o sea un sistema variante en el tiempo,
+    // no LTI. Su retardo instantáneo depende de la fase en que esté su contador
+    // cuando llega el impulso, y va de 0 a `step`. El valor declarado es la
+    // COTA de ese rango, que es lo correcto para compensar — alinear contra el
+    // peor caso nunca desalinea de más.
+    //
+    // Lo que este test discrimina es otra cosa, y es binaria: con compensación
+    // la rama rápida sale recién cerca de `declared`; sin ella sale en el
+    // sample 0. Un onset de 0 es la firma exacta del defecto.
+    EXPECT_GT(onset, declared / 2)
+        << "la primera energía salió en el frame " << onset << " y la cadena "
+        << "declara " << declared << " samples.\n"
+        << "Un onset cerca de 0 significa que la rama RÁPIDA llegó sin alinear: "
+        << "se suma contra la lenta con hasta " << declared << " samples de "
+        << "desfase, que es el filtro peine que compensateBranch() existe para "
+        << "evitar. Primer notch en " << (kSampleRate / (2.0 * declared)) << " Hz.";
 }
