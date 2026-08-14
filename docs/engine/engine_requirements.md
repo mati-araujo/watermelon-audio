@@ -561,6 +561,67 @@ testdata/
 
 > ⚠️ **El baseline se captura después de WD-1.2.** Ver la restricción de orden #1 de §3.
 
+> ✅ **PRIMERA TANDA HECHA — filtros y EQ. Y encontró que el smoothing de
+> `FilterEffect` nunca se ejecutó.**
+>
+> El andamio vive en `effects/tests/GoldenHarness.h` y la tanda en
+> `test_golden_filter_eq.cpp`: 21 tests, `bash scripts/regen-golden.sh` para
+> recapturar.
+>
+> **Tres capas, porque una sola no alcanza.** Las propiedades analíticas
+> (−3,0103 dB en el cutoff, pico del BPF = Q, peaking = su ganancia exacta) son
+> las únicas que pueden decir que el DSP está **mal** y no sólo que **cambió** —
+> y sobreviven a una recaptura de golden. Encima van los `.resp` (curva en 31
+> puntos, texto, diff legible en el PR) y los `.f32` (muestra a muestra).
+>
+> **Los dos golden no son redundantes, cubren riesgos distintos.** Medido: una
+> ganancia extra de **+0,0087 dB** mata los tres `.f32` de filtro y **no toca**
+> ningún `.resp`. El `.f32` es la red fina; el `.resp` es la que sobrevive al
+> cambio de plataforma, porque |H(f)| es una función suave de los coeficientes y
+> no acumula el error que un IIR sí acumula muestra a muestra entre una libm y
+> otra.
+>
+> **La medición no le pregunta al código por sus coeficientes.** Sale por DFT de
+> un bin sobre la IR que `process()` realmente produjo. `BiquadFilter::
+> getFrequencyResponse()` existe y hubiera sido cómodo: usarlo habría dejado el
+> test verde ante cualquier error en el cálculo de coeficientes, porque el error
+> aparece idéntico de los dos lados.
+>
+> **Validado por mutación, en dos rondas y con una corrección en el medio.** 17
+> mutantes, los 21 tests muertos por al menos uno. La primera ronda dejó dos
+> conclusiones falsas que la segunda desarmó:
+>
+> - El mutante "LPF de un polo" **no** mataba el test de pendiente — y tenía
+>   razón: poner `b1 = b2 = 0` deja el denominador de segundo orden intacto, así
+>   que la asíntota sigue siendo −12 dB/oct. El mutante estaba mal, no el test.
+> - El mutante "smoothing vivo" **no** mataba el test de invariancia de bloque.
+>   Motivo real: con la guarda abierta, `process()` escribe el valor suavizado
+>   **en el propio parámetro**, así que el smoother persigue lo que él mismo
+>   acaba de escribir y se clava después de una sola llamada. No es un mutante
+>   de estado-por-bloque: es uno de parámetro corrompido. Hizo falta uno que
+>   rampee de verdad (y otro que resetee el estado del EQ por buffer) para
+>   validar los dos tests de invariancia.
+>
+> **El hallazgo: el smoothing de cutoff y resonancia de `FilterEffect` es código
+> muerto.** La guarda compara `smoothedCutoff` contra `cutoffSmoother.
+> getCurrent()`, pero `process()` **escribe** ese valor en el smoother antes de
+> devolverlo: la diferencia es cero idéntico, la guarda nunca se abre y los
+> coeficientes nunca se recalculan desde el valor suavizado. Lo único que aplica
+> un cambio de cutoff es `setCutoff()`, que llama a `updateCoefficients()` de
+> una. **Consecuencia real: un barrido de cutoff desde el pad XY —la interacción
+> central de NoisyPad— salta escalón por escalón**, que es exactamente el zipper
+> noise que el smoother decía prevenir.
+>
+> **No se arregló acá, a propósito.** Arreglarlo cambia el sonido, y cambiarlo
+> antes de que existan los golden es hacerlo a ciegas: es el orden que fija este
+> programa y la razón por la que la Fase 2 va antes que la 3. Queda un test de
+> caracterización, `FilterSmoothingIsDeadCode_CutoffJumpsInstantly`, que **se va
+> a poner rojo el día que se arregle** — y ese rojo es la señal de recapturar
+> los golden conscientemente y borrarlo.
+>
+> **Falta de esta tanda:** THD+N, curva de transferencia, RT60 y el
+> property-based de `reset()`. Y el resto de los efectos.
+
 **Esfuerzo** 3 sem · **Riesgo** bajo · **Depende de** WD-1.2, WD-2.1
 
 ---
