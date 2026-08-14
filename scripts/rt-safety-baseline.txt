@@ -1,0 +1,14 @@
+# Violaciones de RT-safety aceptadas POR AHORA, cada una con el WD que la saca.
+#
+# Esto es un TRINQUETE, no una lista de excepciones. `check-rt-safety.py` falla
+# si aparece una violacion que no esta aca, y TAMBIEN si una entrada de aca ya
+# no se reproduce — para que el archivo no pueda quedar mintiendo sobre la deuda.
+#
+# Una violacion que se sabe INOFENSIVA no va aca: va marcada en el codigo con
+# `// RT-SAFE-ALLOW: <razon>`. Este archivo es para lo que SI es un problema y
+# todavia no esta arreglado.
+#
+# Formato:  <archivo>::<funcion>::<motivo> | <dueno>
+#
+audio/src/main/cpp/core/AudioEngine.cpp::AudioEngine::processAudioBlock::shared_ptr (refcount + posible free en el thread RT) | WD-1.3 — reemplazar por atomic<InputNode*> + reclamacion en el thread de control
+audio/src/main/cpp/core/AudioEngine.cpp::AudioEngine::onAudioReady::shared_ptr (refcount + posible free en el thread RT) | WD-1.3 — idem, es el mismo patron en el segundo call site
