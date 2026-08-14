@@ -71,23 +71,29 @@ public:
 private:
     void monitorXRuns(oboe::AudioStream* oboeStream) {
         if (!oboeStream) return;
-        static int checkCount = 0;
-        if (++checkCount < 500) return;
-        checkCount = 0;
+        // WD-1.5 — era un `static int`, o sea GLOBAL DE PROCESO: dos instancias
+        // del motor compartian el contador y el muestreo dependia de cuantos
+        // motores existieran. Ahora es del adapter, que es lo que mide.
+        if (++mXRunCheckCount < 500) return;
+        mXRunCheckCount = 0;
 
+        // WD-1.1 — era un logMessage directo desde el thread de audio, y en el
+        // peor caso posible: se dispara justo cuando el motor NO llega a tiempo,
+        // asi que el log agregaba un syscall encima de un underrun. El conteo
+        // ahora se publica al motor, que ya lo expone al thread de control.
         auto xrunResult = oboeStream->getXRunCount();
         if (xrunResult) {
             int32_t count = xrunResult.value();
             if (count > mLastXRunCount) {
-                wma::logMessage(wma::LogLevel::WARN, "OboeAdapter",
-                    "XRUN DETECTED! Count: %d (was %d)", count, mLastXRunCount);
                 mLastXRunCount = count;
+                if (mEngine) mEngine->publishXRunCount(count);
             }
         }
     }
 
     AudioEngine* mEngine;
     int32_t mLastXRunCount = 0;
+    int mXRunCheckCount = 0;
 };
 
 // Custom deleter for opaque OboeCallbackAdapter pointer
@@ -293,6 +299,16 @@ AudioEngine::~AudioEngine() {
         mRecoveryThread->join();
     }
 
+    // WD-1.3 — despublicar el InputNode antes de que se destruya con el objeto.
+    //
+    // stop() ya cerro el stream, asi que no deberia quedar ningun callback; esto
+    // es el cinturon del tirante. Sin el, mInputNodeRt queda apuntando a un
+    // objeto que el destructor de mInputNode esta por liberar, y basta un
+    // callback tardio de un backend que no respetara su propio stop() para
+    // convertirlo en un UAF.
+    mInputNodeRt.store(nullptr, std::memory_order_release);
+    waitForCallbackDrain(std::chrono::milliseconds(250));
+
     LOGI("AudioEngine destroyed");
 }
 
@@ -370,7 +386,11 @@ bool AudioEngine::transitionToState(EngineState newState) {
 bool AudioEngine::start(int fadeTimeMs) {
     std::lock_guard<std::mutex> lock(mStateMutex);
 
-    // Flush denormals to zero to prevent CPU performance degradation (10-100x slowdown)
+    // WD-1.2 — esto NO configura el thread de audio, y ahora el comentario lo
+    // dice. Es el diagnostico de arranque: deja una linea de log con la rama de
+    // ISA que se compilo, para que un build no pueda perder de vista con que
+    // implementacion quedo. El flush que SI le sirve al thread RT esta al
+    // principio de onAudioReady().
     wma::platform::flushDenormals();
 
     // IMPROVED (Fase 2.2.3): Verificar que la inicialización fue exitosa
@@ -1201,23 +1221,19 @@ void AudioEngine::captureMonitoringBlock(InputNode* inputNode, int32_t numFrames
 
     mMonitoringFramesRead = inputNode->getMonitoringSamples(mMonitoringBuffer.data(), numFrames);
 
-    // DEBUG: monitoring status, periodically. The rate mismatch below is the one
-    // the device smoke reads out of logcat to tell "the mic is glitching" from
-    // "the mic is not attached".
-    static int monitorCheckCount = 0;
-    if (++monitorCheckCount >= 500) {
-        const int outputSampleRate = currentSampleRate();
-        const int inputSampleRate = inputNode->getStreamSampleRate();
-        LOGI("ENGINE MONITOR CHECK: inputNode=%p, framesRead=%d, outputSR=%d, inputSR=%d, mixerNode=%p",
-             inputNode, mMonitoringFramesRead, outputSampleRate, inputSampleRate,
-             mMixerNode.get());
-
-        if (inputSampleRate > 0 && outputSampleRate > 0 && inputSampleRate != outputSampleRate) {
-            LOGW("SAMPLE RATE MISMATCH! Input=%d, Output=%d - THIS CAUSES GLITCHES!",
-                 inputSampleRate, outputSampleRate);
-        }
-        monitorCheckCount = 0;
-    }
+    // WD-1.1 — esto era un LOGI/LOGW periodico desde el thread de audio.
+    //
+    // El log del mismatch de sample rate NO era ruido: el smoke de device lo
+    // leia de logcat para distinguir "el mic glitchea" de "el mic no esta
+    // conectado". Por eso se reemplaza en vez de borrarse — y el flag es mejor
+    // que el log, porque no depende de un build de debug ni de que el texto no
+    // cambie. Son dos stores relajados, sin formateo y sin syscall.
+    const int outputSampleRate = currentSampleRate();
+    const int inputSampleRate = inputNode->getStreamSampleRate();
+    mLastInputSampleRate.store(inputSampleRate, std::memory_order_relaxed);
+    mSampleRateMismatch.store(
+        inputSampleRate > 0 && outputSampleRate > 0 && inputSampleRate != outputSampleRate,
+        std::memory_order_relaxed);
 }
 
 void AudioEngine::feedVocoderModulator() {
@@ -1242,29 +1258,11 @@ watermelon_audio::IAudioCallback::Result AudioEngine::handleNotRunning(
     // Silence the synth output but allow monitoring
     std::fill(output, output + totalSamples, 0.0f);
 
-    static int notRunningCheckCount = 0;
-    if (++notRunningCheckCount >= 200) {
-        LOGI_CALLBACK("ENGINE (not running): framesRead=%d, bufSize=%zu, totalSamples=%d",
-             mMonitoringFramesRead,
-             mMonitoringBuffer.size(),
-             totalSamples);
-        notRunningCheckCount = 0;
-    }
+    // WD-1.1 — dos LOGI_CALLBACK periodicos borrados. El contador dice lo mismo
+    // que decian ("el callback esta corriendo con el motor parado") sin costo.
+    mNotRunningBlocks.bump();
 
     if (mMonitoringFramesRead > 0) {
-        static int notRunningMixCount = 0;
-        if (++notRunningMixCount >= 100) {
-            float maxSample = 0.0f;
-            for (int i = 0; i < std::min(mMonitoringFramesRead * 2, 100); ++i) {
-                if (std::abs(mMonitoringBuffer[i]) > maxSample) {
-                    maxSample = std::abs(mMonitoringBuffer[i]);
-                }
-            }
-            LOGI_CALLBACK("ENGINE MONITOR (not running): framesRead=%d, maxSample=%.4f, numFrames=%d",
-                 mMonitoringFramesRead, maxSample, numFrames);
-            notRunningMixCount = 0;
-        }
-
         const int32_t samplesToMix = std::min(mMonitoringFramesRead * 2, totalSamples);
         for (int32_t i = 0; i < samplesToMix; ++i) {
             output[i] = mMonitoringBuffer[i];
@@ -1294,34 +1292,14 @@ watermelon_audio::IAudioCallback::Result AudioEngine::handleNotRunning(
 void AudioEngine::renderInputFx(float* output, int32_t numFrames, InputNode* inputNode) {
     const int32_t totalSamples = numFrames * 2;
 
-    // DIAGNOSTIC: Oboe INPUT_FX path
-    static int oboeInputFxLogCount = 0;
-    if (++oboeInputFxLogCount >= 300) {
-        bool inputRunning = inputNode ? inputNode->isInputStreamRunning() : false;
-        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-            "OBOE_INPUT_FX: inputNode=%p, monEnabled=%d, inputStreamRunning=%d",
-            inputNode, inputNode ? inputNode->isMonitoringEnabled() : 0, inputRunning);
-        oboeInputFxLogCount = 0;
-    }
+    // WD-1.1 — aca vivian DOS `wma::logMessage` directos mas, que la auditoria
+    // del 2026-08-13 no habia encontrado: los hallo el lint. Mismo patron que
+    // los bloques de onAudioReady —llamada directa, saltea los macros, sobrevive
+    // a NDEBUG— y en un path que corre por bloque en modo INPUT_FX de Oboe.
 
     // 1. Read input samples into temp buffer
     if (mOutputStage.getTempBufferSize() >= static_cast<size_t>(totalSamples)) {
         int framesRead = inputNode->getMonitoringSamples(mOutputStage.getTempBuffer(), numFrames);
-
-        // DIAGNOSTIC: Log frames read
-        static int framesReadLogCount = 0;
-        if (++framesReadLogCount >= 300) {
-            float monPeak = 0.0f;
-            int samples = std::min(framesRead * 2, 64);
-            for (int i = 0; i < samples; ++i) {
-                float abs = std::abs(mOutputStage.getTempBuffer()[i]);
-                if (abs > monPeak) monPeak = abs;
-            }
-            wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-                "OBOE_INPUT_FX_READ: framesRead=%d/%d, monPeak=%.5f",
-                framesRead, numFrames, monPeak);
-            framesReadLogCount = 0;
-        }
 
         if (framesRead > 0) {
             // Zero-pad if fewer frames than requested
@@ -1536,13 +1514,7 @@ void AudioEngine::renderDualTouch(float* output, int32_t numFrames,
 
 void AudioEngine::handleMixMonitoring(float* output, int32_t numFrames,
                                        bool oscillatorEnabled, bool hasInputMonitoring) {
-    // DIAGNOSTIC: Log MIX mode conditions periodically
-    static int mixConditionLogCount = 0;
-    if (++mixConditionLogCount >= 500) {
-        LOGI("MIX CHECK: oscEnabled=%d, hasInputMonitoring=%d, framesRead=%d, mixerNode=%p",
-             oscillatorEnabled, hasInputMonitoring, mMonitoringFramesRead, mMixerNode.get());
-        mixConditionLogCount = 0;
-    }
+    // WD-1.1 — LOGI periodico borrado.
 
     // Only mix input in MIX mode (oscillator enabled + input monitoring enabled)
     if (!oscillatorEnabled || !hasInputMonitoring) return;
@@ -1575,15 +1547,7 @@ void AudioEngine::handleMixMonitoring(float* output, int32_t numFrames,
         // reading the first had already taken of the PRE-mix bus. The protection
         // now runs once, at the tail, in applyMasterAndProtectOutput().
 
-        // DEBUG: Log mix periodically
-        static int mixerMixCount = 0;
-        if (++mixerMixCount >= 100) {
-            LOGI("MIX MODE (MixerNode): framesRead=%d, busLevel=%.2f, inputLevel=%.2f",
-                 mMonitoringFramesRead,
-                 mMixerNode->getInputLevel(MixerNode::INPUT_OSCILLATOR),
-                 mMixerNode->getInputLevel(MixerNode::INPUT_EXTERNAL));
-            mixerMixCount = 0;
-        }
+        // WD-1.1 — LOGI periodico borrado.
     } else if (mMonitoringFramesRead > 0) {
         // Fallback to simple mixing if MixerNode could not be allocated. The
         // hard limit that used to be here went the same way as the chain above:
@@ -1619,36 +1583,23 @@ void AudioEngine::applyMasterAndProtectOutput(float* output, int32_t numFrames) 
 
 watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
     float* audioData, int32_t numFrames) {
-    // RAII callback guard
-    mActiveCallbacks.fetch_add(1, std::memory_order_acquire);
-    struct CallbackGuard {
-        std::atomic<int>& counter;
-        std::condition_variable& cv;
-        CallbackGuard(std::atomic<int>& c, std::condition_variable& condition)
-            : counter(c), cv(condition) {}
-        ~CallbackGuard() {
-            int remaining = counter.fetch_sub(1, std::memory_order_release) - 1;
-            if (remaining == 0) cv.notify_all();
-        }
-    } guard(mActiveCallbacks, mStopCondition);
+    // WD-1.3 — el CallbackGuard se movio a onAudioReady().
+    //
+    // Aca cubria solo esta funcion, y el fast-path de USB de onAudioReady
+    // retorna ANTES de llegar: esos bloques no contaban como callback en vuelo,
+    // asi que ni el drenaje de stop() ni el del retiro del InputNode los veian.
+    // Subirlo al punto de entrada cubre las dos ramas y cualquier otra futura.
 
     try {
-        // RT-safe InputNode access (try_lock, never blocks)
-        std::shared_ptr<InputNode> inputNodePtr;
-        if (mInputNodeMutex.try_lock()) {
-            inputNodePtr = mInputNode;
-            mInputNodeMutex.unlock();
-        }
-        InputNode* inputNode = inputNodePtr.get();
+        // WD-1.3 — un load atomico. Sin lock, sin refcount, sin posibilidad de
+        // que el destructor del nodo corra en este thread.
+        InputNode* inputNode = mInputNodeRt.load(std::memory_order_acquire);
 
-        // State check + periodic logging
+        // WD-1.1 — el LOGI_CALLBACK periodico de estado/xruns lo reemplaza el
+        // contador de bloques: el estado y el conteo de xruns ya son
+        // consultables desde el thread de control.
         EngineState state = mState.load(std::memory_order_acquire);
-        static int xrunCheckCount = 0;
-        if (++xrunCheckCount >= 500) {
-            xrunCheckCount = 0;
-            LOGI_CALLBACK("ENGINE CALLBACK: state=%d, xruns=%d",
-                 static_cast<int>(state), mLastXRunCount.load(std::memory_order_relaxed));
-        }
+        mCallbackBlocks.bump();
 
         float* outputData = audioData;
         const int32_t totalSamples = numFrames * 2;
@@ -1666,8 +1617,11 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
 
         // Buffer validation
         if (totalSamples > static_cast<int32_t>(mOutputStage.getTempBufferSize())) {
-            LOGE("Buffer overflow prevented: %d samples requested, %zu available",
-                 totalSamples, mOutputStage.getTempBufferSize());
+            // WD-1.1 — era un LOGE, y es justo el caso peor para loguear: si
+            // esto dispara, dispara en TODOS los bloques hasta que alguien
+            // reconfigure. El contador lo hace visible sin realimentar el
+            // problema con un syscall por callback.
+            mBufferOverflowBlocks.bump();
             std::fill(outputData, outputData + totalSamples, 0.0f);
             return watermelon_audio::IAudioCallback::Result::CONTINUE;
         }
@@ -1717,22 +1671,27 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
         mCallbackErrorCount.store(0, std::memory_order_relaxed);
         return watermelon_audio::IAudioCallback::Result::CONTINUE;
 
-    } catch (const std::exception& e) {
-        LOGE("CRITICAL: Exception in audio callback: %s", e.what());
+    // WD-1.1 — los cuatro LOGE de estos handlers borrados.
+    //
+    // Loguear desde el handler de una excepcion en el thread de audio es el
+    // peor momento posible: si el motor esta tirando excepciones por bloque, el
+    // log las convierte en una tormenta de syscalls encima de un motor que ya
+    // esta fallando. El contador conserva el hecho, y `mCallbackErrorCount`
+    // —que ya existia— conserva la cuenta que decide el STOP.
+    } catch (const std::exception&) {
+        mCallbackExceptions.bump();
         std::fill(audioData, audioData + numFrames * 2, 0.0f);
         int errorCount = mCallbackErrorCount.fetch_add(1, std::memory_order_relaxed) + 1;
         if (errorCount > 100) {
-            LOGE("CRITICAL: Too many callback errors (%d), requesting stop", errorCount);
             return watermelon_audio::IAudioCallback::Result::STOP;
         }
         return watermelon_audio::IAudioCallback::Result::CONTINUE;
 
     } catch (...) {
-        LOGE("CRITICAL: Unknown exception in audio callback");
+        mCallbackExceptions.bump();
         std::fill(audioData, audioData + numFrames * 2, 0.0f);
         int errorCount = mCallbackErrorCount.fetch_add(1, std::memory_order_relaxed) + 1;
         if (errorCount > 100) {
-            LOGE("CRITICAL: Too many callback errors (%d), requesting stop", errorCount);
             return watermelon_audio::IAudioCallback::Result::STOP;
         }
         return watermelon_audio::IAudioCallback::Result::CONTINUE;
@@ -2047,6 +2006,44 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
     const float* inputData,
     int32_t numFrames) {
 
+    // WD-1.2 — flush-to-zero, en ESTE thread.
+    //
+    // Es lo primero del callback y va sin guarda. FPCR/MXCSR son estado por
+    // thread: hasta WD-1.2 los unicos call sites corrian en el thread del
+    // llamador (AudioEngine::start, OboeBackend::start) y CoreAudioBackend no
+    // llamaba a ninguno, asi que el thread RT corria con denormales habilitados
+    // en las tres plataformas. Este es el unico punto por el que pasan TODOS
+    // los backends —Oboe, Core Audio, libusb y Split entran todos por
+    // IAudioCallback::onAudioReady— asi que ponerlo aca cubre tambien a
+    // cualquier backend futuro sin que nadie se acuerde de agregarlo.
+    //
+    // Sin `thread_local`: ver la nota de Platform.h. La guarda costaba mas
+    // riesgo (posible malloc de TLS en la primera llamada) que el read-modify-
+    // write de un registro de control que ahorra.
+    wma::platform::flushDenormalsRtSafe();
+
+    // WD-1.3 — la barrera de callbacks, en el punto de entrada.
+    //
+    // Vivia adentro de processAudioBlock(), que el fast-path de USB de mas
+    // abajo NO alcanza: esos bloques quedaban invisibles para el drenaje de
+    // stop() y para el del retiro del InputNode. Aca cubre las dos ramas, y las
+    // salidas tempranas las maneja el RAII.
+    mActiveCallbacks.fetch_add(1, std::memory_order_acquire);
+    struct CallbackGuard {
+        std::atomic<int>& counter;
+        // RT-SAFE-ALLOW: es una REFERENCIA a la condition variable, no una espera.
+        // El destructor solo hace notify_all(), que no bloquea. La espera vive en
+        // stop() y en waitForCallbackDrain(), del lado del thread de control.
+        std::condition_variable& cv;
+        // RT-SAFE-ALLOW: idem — parametro del constructor, no una espera.
+        CallbackGuard(std::atomic<int>& c, std::condition_variable& condition)
+            : counter(c), cv(condition) {}
+        ~CallbackGuard() {
+            int remaining = counter.fetch_sub(1, std::memory_order_release) - 1;
+            if (remaining == 0) cv.notify_all();
+        }
+    } callbackGuard(mActiveCallbacks, mStopCondition);
+
     // Service a pending EffectChain reset before doing ANY audio work
     // this block. The UI / JNI thread sets the flag via
     // requestResetEffectChain() when the audio context changes in a
@@ -2074,41 +2071,15 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
     bool oscillatorEnabled = mOscillatorEnabled.load(std::memory_order_acquire);
     bool isUsbInputFxMode = (inputData != nullptr) && !oscillatorEnabled && (numFrames > 0);
 
-    // ========== DIAGNOSTIC: Log USB callback state (periodic) ==========
-    static int diagLogCount = 0;
-    if (++diagLogCount >= 300) {
-        float fadeVol = mFadeCtrl.getCurrentFadeVolume();
-        float masterVol = mMasterVolume.load(std::memory_order_acquire);
-        bool paused = mFadeCtrl.isPaused();
-        EngineState state = mState.load(std::memory_order_acquire);
-
-        // Compute input peak level
-        float inputPeak = 0.0f;
-        if (inputData != nullptr && numFrames > 0) {
-            int samples = std::min(numFrames * 2, 64);
-            for (int i = 0; i < samples; ++i) {
-                float abs = std::abs(inputData[i]);
-                if (abs > inputPeak) inputPeak = abs;
-            }
-        }
-
-        wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-            "USB_CB: inputData=%p, oscEnabled=%d, isUsbInputFxMode=%d, "
-            "outputData=%p, numFrames=%d, state=%d, paused=%d, "
-            "fadeVol=%.3f, masterVol=%.3f, inputPeak=%.5f",
-            inputData, oscillatorEnabled, isUsbInputFxMode,
-            outputData, numFrames, static_cast<int>(state), paused,
-            fadeVol, masterVol, inputPeak);
-        diagLogCount = 0;
-    }
+    // WD-1.1 — aca vivia un bloque `WMA_AUDIT` que cada 300 callbacks
+    // formateaba once argumentos y hacia un syscall de logging, adentro de un
+    // deadline de 2,7 ms. Salteaba los macros LOGI/LOGW —que si se compilan a
+    // ((void)0) bajo NDEBUG— llamando a wma::logMessage directo, asi que
+    // SOBREVIVIA A RELEASE. Lo que medía (peak de entrada, estado, fade) lo
+    // cubren los contadores de WD-5.1 sin salir del thread.
 
     if (isUsbInputFxMode && outputData != nullptr) {
-        // Debug logging (periodic)
-        static int directUsbLogCount = 0;
-        if (++directUsbLogCount >= 500) {
-            LOGI("USB DIRECT INPUT_FX: Processing %d frames directly (no InputNode buffering)", numFrames);
-            directUsbLogCount = 0;
-        }
+        mUsbDirectBlocks.bump();
 
         int totalSamples = numFrames * 2;  // Stereo
 
@@ -2154,22 +2125,8 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
         //    to avoid stale delay buffer glitches and minimize latency)
         mOutputStage.processOutputLightweight(outputData, numFrames);
 
-        // ========== DIAGNOSTIC: Output level after processing ==========
-        static int directOutLogCount = 0;
-        if (++directOutLogCount >= 300) {
-            float outPeak = 0.0f;
-            int samples = std::min(numFrames * 2, 64);
-            for (int i = 0; i < samples; ++i) {
-                float abs = std::abs(outputData[i]);
-                if (abs > outPeak) outPeak = abs;
-            }
-            wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-                "USB_DIRECT_OUT: gainStart=%.3f, gainEnd=%.3f, fadeStart=%.3f, "
-                "fadeEnd=%.3f, masterVol=%.3f, outPeak=%.5f, effects=%d",
-                gainStart, gainEnd, fadeStart, fadeEnd, masterVol, outPeak,
-                static_cast<int>(mEffectChain.getNumEffects()));
-            directOutLogCount = 0;
-        }
+        // WD-1.1 — segundo bloque `WMA_AUDIT` borrado, mismo caso que el de
+        // arriba: wma::logMessage directo, sobrevivia a NDEBUG.
 
         return watermelon_audio::IAudioCallback::Result::CONTINUE;
     }
@@ -2177,23 +2134,15 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
     // ========== NON-INPUT_FX MODES (MIX, CHAOS_PAD, etc.) ==========
     // For modes that need InputNode (vocoder, MIX mode), feed USB input to InputNode
     if (inputData != nullptr && numFrames > 0 && oscillatorEnabled) {
-        // Try to get InputNode for feeding USB input (vocoder modulator, MIX mode)
-        std::shared_ptr<InputNode> inputNodePtr;
-        if (mInputNodeMutex.try_lock()) {
-            inputNodePtr = mInputNode;
-            mInputNodeMutex.unlock();
-        }
-
-        if (inputNodePtr) {
+        // WD-1.3 — un load atomico, igual que en processAudioBlock. El nodo no
+        // puede desaparecer mientras estamos adentro: el CallbackGuard de arriba
+        // mantiene el contador en 1, y setInputNode() no suelta la referencia
+        // vieja hasta ver ese contador en 0.
+        if (InputNode* inputNode = mInputNodeRt.load(std::memory_order_acquire)) {
             // Feed USB input samples to InputNode's ring buffer
             // This is needed for vocoder modulator and MIX mode
-            inputNodePtr->feedExternalInput(inputData, numFrames);
-
-            static int usbMixLogCount = 0;
-            if (++usbMixLogCount >= 500) {
-                LOGI("USB MIX/VOCODER: Fed %d frames to InputNode", numFrames);
-                usbMixLogCount = 0;
-            }
+            inputNode->feedExternalInput(inputData, numFrames);
+            mUsbFedBlocks.bump();
         }
     }
 
@@ -2278,16 +2227,66 @@ void AudioEngine::setDualTouchMode(bool enabled) {
 
 // ========== INPUT NODE INTEGRATION (Full-Duplex Monitoring) ==========
 
+// WD-1.3 — publicar y retirar el InputNode sin que el thread de audio toque un
+// refcount ni, mucho menos, un destructor.
+//
+// El orden importa y es el mismo de siempre en publicación/reclamación:
+//
+//   1. Publicar el puntero nuevo. Desde acá ningún callback NUEVO puede ver el
+//      viejo.
+//   2. Esperar a que termine el que pueda estar adentro AHORA. La barrera ya
+//      existía para stop(); acá se reusa.
+//   3. Recién entonces soltar la referencia vieja — en ESTE thread.
+//
+// Saltearse el paso 2 es la versión "obvia" del arreglo y es la que sigue
+// rompiendo: un callback que cargó el puntero antes del store lo sigue usando
+// mientras el thread de control destruye el objeto.
 void AudioEngine::setInputNode(std::shared_ptr<InputNode> inputNode) {
+    // 250 ms: un bloque son ~2,7 ms. Si el thread de audio no cerró uno en cien
+    // bloques, no está lento — está trabado, y el audio ya se rompió.
+    constexpr auto kRetireTimeout = std::chrono::milliseconds(250);
+
+    std::shared_ptr<InputNode> previous;
     {
         std::lock_guard<std::mutex> lock(mInputNodeMutex);
-        mInputNode = inputNode;
+        previous = std::move(mInputNode);
+        mInputNode = std::move(inputNode);
+        // 1. Publicar. release: el objeto está completamente construido antes.
+        mInputNodeRt.store(mInputNode.get(), std::memory_order_release);
     }
-    if (inputNode) {
-        LOGI("InputNode connected to AudioEngine for monitoring (shared_ptr)");
-    } else {
-        LOGI("InputNode disconnected from AudioEngine");
+
+    if (previous) {
+        // 2. Drenar.
+        if (!waitForCallbackDrain(kRetireTimeout)) {
+            LOGE("InputNode retire: no se pudo confirmar el drenaje de callbacks "
+                 "en %lldms — se filtra el nodo en vez de arriesgar un UAF",
+                 static_cast<long long>(kRetireTimeout.count()));
+            std::lock_guard<std::mutex> lock(mInputNodeMutex);
+            mUndrainedInputNodes.push_back(std::move(previous));
+        }
     }
+
+    // 3. `previous` se destruye acá, al salir del scope, en el thread de control.
+    LOGI("InputNode %s", mInputNodeRt.load(std::memory_order_relaxed)
+                             ? "connected to AudioEngine for monitoring"
+                             : "disconnected from AudioEngine");
+}
+
+bool AudioEngine::waitForCallbackDrain(std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::unique_lock<std::mutex> lock(mStateMutex);
+
+    // Espera acotada en vez de un solo wait_for con predicado: el notify_all del
+    // CallbackGuard se hace SIN el mutex tomado, así que un wakeup se puede
+    // perder entre que el waiter evalúa el predicado y se duerme. Re-chequear
+    // cada 5 ms lo cubre sin depender de que el notify llegue.
+    while (mActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        mStopCondition.wait_for(lock, std::chrono::milliseconds(5));
+    }
+    return true;
 }
 
 void AudioEngine::setPreferredSampleRate(int sampleRate) {
@@ -2316,22 +2315,10 @@ void AudioEngine::updateMultiTouch(const voice::TouchData* touches, int count) {
         return;
     }
 
-    // DEBUG: Log on count transitions only
-    static int lastCount = -1;
-    if (count != lastCount) {
-        LOGI("updateMultiTouch: count %d -> %d, voiceSystem=%d, oscEnabled=%d, activeVoices=%d",
-             lastCount, count,
-             mUseVoiceSystem.load(std::memory_order_acquire),
-             mOscillatorEnabled.load(std::memory_order_acquire),
-             mVoiceManager->getActiveVoiceCount());
-        for (int i = 0; i < count; i++) {
-            LOGI("  touch[%d]: active=%d, pointerId=%d, freq=%.1f, amp=%.3f, x=%.3f, y=%.3f",
-                 i, touches[i].active, touches[i].pointerId,
-                 touches[i].frequency, touches[i].amplitude,
-                 touches[i].x, touches[i].y);
-        }
-        lastCount = count;
-    }
+    // WD-1.5 — aca habia un `static int lastCount` gateando un bloque de LOGI.
+    // No es RT (esto lo llama el thread de control), pero era global de proceso
+    // igual, y el log recorria el array de touches en cada transicion de conteo.
+    // El conteo de voces activas ya es consultable por getActiveVoiceCount().
 
     // Forward touch data to the touch source
     touchSource->updateTouches(touches, count);

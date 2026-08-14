@@ -285,6 +285,11 @@ gate_guardrails() {
     say "guardrails (segundos, y fallan rapido)"
     step guardrails portability   bash scripts/check-cpp-portability.sh || return 1
     step guardrails no-ui         bash scripts/check-no-ui-in-library.sh || return 1
+    # WD-1.1 — el --self-test va PRIMERO y no es ceremonia: si el parser se
+    # rompe, el lint queda en verde permanente, que es el peor estado posible
+    # para un guardrail. Verificarlo cuesta 2 s.
+    step guardrails rt-safety-self python3 scripts/check-rt-safety.py --self-test || return 1
+    step guardrails rt-safety     python3 scripts/check-rt-safety.py || return 1
 }
 
 gate_cpp_tests_macos() {

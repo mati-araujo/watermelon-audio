@@ -79,10 +79,6 @@ void VoicePool::reset() {
 // ==================== VOICE ALLOCATION ====================
 
 int VoicePool::allocateVoice(const VoiceParams& params, uint64_t startTime) {
-#ifndef NDEBUG
-    LOGI("allocateVoice: noteId=%d, freq=%.1f, amp=%.2f, sourceId=%d",
-         params.noteId, params.frequency, params.amplitude, params.sourceId);
-#endif
 
     // First, try to find an available voice
     int voiceIndex = findAvailableVoice(params);
@@ -101,11 +97,7 @@ int VoicePool::allocateVoice(const VoiceParams& params, uint64_t startTime) {
     // If we found a voice, trigger noteOn
     if (voiceIndex >= 0 && voiceIndex < static_cast<int>(mVoices.size())) {
         mVoices[voiceIndex]->noteOn(params, startTime);
-#ifndef NDEBUG
-        LOGI("  Voice %d activated, activeCount now: %d", voiceIndex, getActiveVoiceCount());
-#endif
     } else {
-        LOGW("  Failed to allocate voice!");
     }
 
     return voiceIndex;

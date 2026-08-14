@@ -459,7 +459,7 @@ private:
 
         if (noteCount == 0) {
             mPatternLength = 0;
-            ARP_LOGI("Pattern rebuild: 0 notes (empty)");
+            // WD-1.1 — sin log: rebuildPattern() corre en el thread de audio.
             return;
         }
 
@@ -488,8 +488,10 @@ private:
             mCurrentStep = 0;
         }
 
-        ARP_LOGI("Pattern rebuild: pattern=%d, notes=%d, steps=%d, octaves=%d",
-                 pattern, noteCount, mPatternLength, octaves);
+        // WD-1.1 — sin log: rebuildPattern() corre en el thread de audio, y
+        // ARP_LOGI solo se compilaba a nada en release. En debug logueaba en
+        // cada cambio de acorde, que es exactamente cuando el motor tiene mas
+        // trabajo por bloque.
     }
 
     // --- Pattern implementations ---

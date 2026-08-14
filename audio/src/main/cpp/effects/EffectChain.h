@@ -5,6 +5,7 @@
 #include "EffectTypes.h"
 #include "EffectRegistry.h"
 #include "../dsp/ParameterSmoother.h"
+#include "../platform/RtCounter.h"
 #include <vector>
 #include <memory>
 #include <atomic>
@@ -233,6 +234,11 @@ public:
     /**
      * @brief Find the index of the first vocoder in the chain
      * @return Index of vocoder, or -1 if not found
+     *
+     * LOCK-FREE (WD-1.6). Lee un atomico que publica updateSnapshot() bajo
+     * `chainMutex`. Antes tomaba el mutex, y como los cuatro setters del
+     * vocoder lo llaman desde el thread de audio, eso ponia al callback a
+     * esperar al thread que agrega efectos — que aloca con el lock tomado.
      */
     int findVocoderIndex() const;
 
@@ -287,6 +293,15 @@ private:
 
     // Snapshot para RT thread (atomic pointer swap)
     std::atomic<EffectSnapshot*> mActiveSnapshot{nullptr};
+
+    // WD-1.6 — indice del vocoder, publicado por updateSnapshot() junto con el
+    // snapshot. -1 = no hay vocoder en la cadena.
+    std::atomic<int> mVocoderIndex{-1};
+
+    // WD-1.1 — contadores que reemplazan a los logs que vivian en process().
+    wma::RtCounter mNonFiniteBlocks;    ///< bloques con NaN/Inf saneados
+    wma::RtCounter mOverflowBlocks;     ///< numFrames excedio el scratch pre-alocado
+    wma::RtCounter mSilentOutputBlocks; ///< entrada con senal y salida en silencio
     EffectSnapshot mSnapshot1;
     EffectSnapshot mSnapshot2;
     std::atomic<bool> mUsingSnapshot1{true};
@@ -353,6 +368,9 @@ private:
     void updateSnapshot();
 
     // ========== ROUTING PROCESS STRATEGIES (RT-safe) ==========
+
+    /** @brief El vocoder activo leido del snapshot, o nullptr. Lock-free (WD-1.6). */
+    Effect* vocoderFromSnapshot() const;
 
     /** @brief Process single effect with bypass smoothing and auto-gain */
     void processOneEffect(Effect* effect, size_t slotIndex, bool isBypassed,

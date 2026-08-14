@@ -32,8 +32,32 @@
 #include "nodes/InputNode.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
+#include <thread>
 #include <vector>
+
+// WD-1.3 — SEGUNDA extension deliberada del doble (la primera es el ring de
+// monitoring, documentado arriba). El contrato de WD-1.3 es "el InputNode se
+// destruye en el thread de CONTROL, nunca en el de audio", y eso no se puede
+// observar desde afuera del destructor. Estas dos variables lo hacen
+// observable, y nada mas: no cambian ningun comportamiento.
+std::atomic<int> gInputNodeDtorCount{0};
+std::atomic<std::thread::id> gInputNodeDtorThread{};
+
+// Y una COMPUERTA, para volver determinista la ventana de la carrera.
+//
+// El bug de WD-1.3 necesita que el thread de audio este ADENTRO del callback,
+// con el nodo en uso, justo cuando el thread de control lo retira. Esa ventana
+// dura microsegundos y bombear callbacks a ciegas no la pega: se probo con 40
+// retiros por corrida y 15 corridas, y el codigo BUGGEADO paso siempre. Un test
+// que no distingue la version rota de la arreglada no prueba nada.
+//
+// isMonitoringEnabled() es el primer metodo que el callback llama sobre el
+// nodo — y, con el codigo viejo, se llamaba DESPUES de copiar el shared_ptr.
+// Bloquear aca deja al callback atrapado exactamente en el estado que importa.
+std::atomic<bool> gInputNodeHoldInCallback{false};
+std::atomic<bool> gInputNodeIsInCallback{false};
 
 void InputNode::BackendAdapterDeleter::operator()(void* p) const {
     // The stub never creates an adapter, so there is nothing to delete. Deleting
@@ -48,7 +72,10 @@ InputNode::InputNode()
     mNumOutputChannels = 2;
 }
 
-InputNode::~InputNode() = default;
+InputNode::~InputNode() {
+    gInputNodeDtorThread.store(std::this_thread::get_id(), std::memory_order_release);
+    gInputNodeDtorCount.fetch_add(1, std::memory_order_release);
+}
 
 void InputNode::prepare(int sampleRate, int maxBlockSize) {
     AudioNode::prepare(sampleRate, maxBlockSize);
@@ -125,6 +152,13 @@ void InputNode::setMonitoringEnabled(bool enabled) {
 }
 
 bool InputNode::isMonitoringEnabled() const {
+    if (gInputNodeHoldInCallback.load(std::memory_order_acquire)) {
+        gInputNodeIsInCallback.store(true, std::memory_order_release);
+        while (gInputNodeHoldInCallback.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        gInputNodeIsInCallback.store(false, std::memory_order_release);
+    }
     return mMonitoringEnabled.load(std::memory_order_acquire);
 }
 

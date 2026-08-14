@@ -91,6 +91,18 @@ void EffectChain::updateSnapshot() {
 
     inactiveSnapshot->size = effects.size();
 
+    // WD-1.6 — publicar el indice del vocoder junto con el snapshot.
+    // Se computa aca, bajo chainMutex, y es lo que deja a los cuatro setters
+    // del vocoder leer sin tomar el lock desde el thread de audio.
+    int vocoderIndex = -1;
+    for (size_t i = 0; i < effectTypes.size(); ++i) {
+        if (effectTypes[i] == VOCODER) {
+            vocoderIndex = static_cast<int>(i);
+            break;
+        }
+    }
+    mVocoderIndex.store(vocoderIndex, std::memory_order_release);
+
     // Swap atómico del snapshot activo
     mActiveSnapshot.store(inactiveSnapshot, std::memory_order_release);
     mUsingSnapshot1.store(!usingSnapshot1, std::memory_order_release);
@@ -276,7 +288,8 @@ void EffectChain::reset() {
     mCrossfadeCounter = 0;
     mFeedbackHighEnergyFrames = 0;
 
-    LOGI("EffectChain state reset");
+    // WD-1.1 — sin log. reset() lo despacha onAudioReady desde el thread de
+    // audio (ver Effect.h): es RT, aunque no lo parezca por el nombre.
 }
 
 // ========== ROUTING MODE SETTERS ==========
@@ -327,7 +340,11 @@ void EffectChain::processOneEffect(Effect* effect, size_t slotIndex, bool isBypa
         }
     }
     if (hadBadSample) {
-        LOGE("NaN/Inf detected in effect slot %zu, sanitized to 0", slotIndex);
+        // WD-1.1 — era un LOGE, y `LOGE` en este archivo NO es condicional:
+        // sobrevivia a release. Peor, una tormenta de NaN dispara por bloque,
+        // asi que el log realimentaba el problema con un syscall cada 2,7 ms.
+        // El contador conserva el hecho; WD-5.1 lo expone.
+        mNonFiniteBlocks.bump();
     }
 
     if (bypassLevel > 0.001f) {
@@ -402,7 +419,7 @@ void EffectChain::process(float* input, float* output, int numFrames) {
 
     // Validar que no excedemos buffers pre-alocados
     if (totalSamples > static_cast<int>(tempBuffer1.size())) {
-        LOGE("Buffer overflow in process: %d samples, max %zu", totalSamples, tempBuffer1.size());
+        mOverflowBlocks.bump();  // WD-1.1 — era un LOGE incondicional
         std::fill(output, output + totalSamples, 0.0f);
         return;
     }
@@ -469,38 +486,17 @@ void EffectChain::process(float* input, float* output, int numFrames) {
             if (ao > outputPeakCheck) outputPeakCheck = ao;
         }
         if (inputPeakCheck > 0.001f && outputPeakCheck < 0.0001f) {
-            LOGE("SILENCE DETECTED: input=%.4f output=%.4f mode=%d effects=%zu crossfade=%d",
-                 inputPeakCheck, outputPeakCheck,
-                 static_cast<int>(mCurrentProcessingMode), snapshot->size, mCrossfadeCounter);
+            mSilentOutputBlocks.bump();  // WD-1.1 — era un LOGE incondicional
         }
     }
 
-    // AUDIO_DIAG: Periodic diagnostic logging (every ~1000 callbacks)
-    if (AUDIO_DIAG_ENABLED) {
-        static int diagCounter = 0;
-        if (++diagCounter >= 1000) {
-            diagCounter = 0;
-            int activeCount = 0;
-            int bypassedCount = 0;
-            for (size_t i = 0; i < snapshot->size; ++i) {
-                float bypassLevel = (i < MAX_BYPASS_SLOTS) ?
-                    mBypassSmooth[i].getCurrent() : (snapshot->bypassed[i] ? 1.0f : 0.0f);
-                if (bypassLevel < 0.5f) activeCount++;
-                else bypassedCount++;
-            }
-            float inputPeak = 0.0f, outputPeak = 0.0f;
-            for (int s = 0; s < std::min(totalSamples, 512); ++s) {
-                float absIn = std::abs(input[s]);
-                float absOut = std::abs(output[s]);
-                if (absIn > inputPeak) inputPeak = absIn;
-                if (absOut > outputPeak) outputPeak = absOut;
-            }
-            wma::logMessage(wma::LogLevel::INFO, AUDIO_DIAG_TAG,
-                "process: effects=%zu active=%d bypassed=%d mode=%d inputPeak=%.4f outputPeak=%.4f",
-                snapshot->size, activeCount, bypassedCount,
-                static_cast<int>(mCurrentProcessingMode), inputPeak, outputPeak);
-        }
-    }
+    // WD-1.1 — el bloque AUDIO_DIAG periodico se borro. Compilaba a nada bajo
+    // NDEBUG (AUDIO_DIAG_ENABLED es constexpr false), asi que no era el bug de
+    // release — pero SI logueaba desde el thread de audio en debug, y ademas
+    // llevaba un `static int` de funcion, o sea global de proceso: dos motores
+    // se pisaban el contador (WD-1.5). Lo que medía —cuantos efectos activos,
+    // peak de entrada y de salida— es exactamente lo que WD-5.1 expone sin
+    // salir del thread.
 }
 
 // ========== ROUTING MODE DISPATCHER ==========
@@ -1246,75 +1242,73 @@ EffectType EffectChain::getEffectType(size_t index) const {
 
 // ========== VOCODER-SPECIFIC METHODS ==========
 
+// WD-1.6 — el vocoder tomaba el mutex de la cadena DESDE EL THREAD DE AUDIO.
+//
+// Esto lo encontro el lint de WD-1.1, no la auditoria. La cadena era:
+//
+//   AudioEngine::feedVocoderModulator()        [thread de audio, por bloque]
+//     -> EffectChain::setVocoderModulatorBuffer()
+//        -> findVocoderIndex()
+//           -> std::lock_guard<std::mutex> lock(chainMutex)   <-- BLOQUEA
+//
+// `chainMutex` es el mismo que sostienen addEffect(), removeEffect() y
+// clearAllEffects() — y este ultimo lo sostiene mientras construye y destruye
+// efectos, o sea mientras aloca. Agregar un efecto con el vocoder corriendo
+// ponia al thread de audio a esperar a un thread de UI que estaba en el
+// allocator: inversion de prioridad de manual, y un dropout garantizado.
+//
+// Y ademas era una carrera: despues de soltar el lock, los cuatro callers
+// indexaban `effects` —el vector PROPIO, no el snapshot— confiando en un
+// comentario que decia "effects vector is stable once added". Es falso:
+// removeEffect() hace effects.erase(), que desplaza y puede realocar.
+//
+// El arreglo publica el indice en un atomico, mantenido bajo el mutex por
+// updateSnapshot() (que ya corre en el thread de control en cada cambio
+// estructural), y lee el PUNTERO del snapshot activo, que es la vista que ya
+// existia justamente para que el thread de audio no toque `effects`.
+
 int EffectChain::findVocoderIndex() const {
-    std::lock_guard<std::mutex> lock(chainMutex);
-    for (size_t i = 0; i < effectTypes.size(); ++i) {
-        if (effectTypes[i] == VOCODER) {
-            return static_cast<int>(i);
-        }
-    }
-    return -1;  // Not found
+    // Lock-free: el indice lo publica updateSnapshot() bajo chainMutex.
+    return mVocoderIndex.load(std::memory_order_acquire);
+}
+
+Effect* EffectChain::vocoderFromSnapshot() const {
+    const int index = mVocoderIndex.load(std::memory_order_acquire);
+    if (index < 0) return nullptr;
+
+    EffectSnapshot* snapshot = mActiveSnapshot.load(std::memory_order_acquire);
+    if (snapshot == nullptr) return nullptr;
+    if (static_cast<size_t>(index) >= snapshot->size) return nullptr;
+
+    return snapshot->effects[index];
 }
 
 void EffectChain::setVocoderModulatorBuffer(const float* buffer, int numSamples) {
     if (buffer == nullptr || numSamples <= 0) {
         return;
     }
-
-    // Find vocoder without holding lock during processing
-    int vocoderIndex = findVocoderIndex();
-    if (vocoderIndex < 0) {
-        return;  // No vocoder in chain
-    }
-
-    // Access effect directly (effects vector is stable once added)
-    // VocoderEffect::setModulatorBuffer is thread-safe (copies buffer internally)
-    if (static_cast<size_t>(vocoderIndex) < effects.size()) {
-        VocoderEffect* vocoder = static_cast<VocoderEffect*>(effects[vocoderIndex].get());
-        if (vocoder) {
-            vocoder->setModulatorBuffer(buffer, numSamples);
-        }
+    // VocoderEffect::setModulatorBuffer es thread-safe (copia internamente).
+    if (Effect* v = vocoderFromSnapshot()) {
+        static_cast<VocoderEffect*>(v)->setModulatorBuffer(buffer, numSamples);
     }
 }
 
 void EffectChain::setVocoderCarrierFrequency(float frequency) {
-    int vocoderIndex = findVocoderIndex();
-    if (vocoderIndex < 0) {
-        return;  // No vocoder in chain
-    }
-
-    // Set CARRIER_FREQ parameter (paramId = 8 in VocoderEffect)
-    if (static_cast<size_t>(vocoderIndex) < effects.size()) {
-        effects[vocoderIndex]->setParam(VocoderEffect::CARRIER_FREQ, frequency);
+    if (Effect* v = vocoderFromSnapshot()) {
+        v->setParam(VocoderEffect::CARRIER_FREQ, frequency);
     }
 }
 
 void EffectChain::setVocoderCarrierSource(bool useInternalCarrier) {
-    int vocoderIndex = findVocoderIndex();
-    if (vocoderIndex < 0) {
-        return;  // No vocoder in chain
-    }
-
-    // Set CARRIER_SOURCE parameter (paramId = 7 in VocoderEffect)
     // 0 = input signal as carrier, 1 = internal oscillator as carrier
-    float value = useInternalCarrier ? 1.0f : 0.0f;
-    if (static_cast<size_t>(vocoderIndex) < effects.size()) {
-        effects[vocoderIndex]->setParam(VocoderEffect::CARRIER_SOURCE, value);
-        LOGI("Vocoder carrier source set to: %s", useInternalCarrier ? "internal" : "input");
+    if (Effect* v = vocoderFromSnapshot()) {
+        v->setParam(VocoderEffect::CARRIER_SOURCE, useInternalCarrier ? 1.0f : 0.0f);
     }
 }
 
 void EffectChain::setVocoderModulatorSource(bool useExternalMod) {
-    int vocoderIndex = findVocoderIndex();
-    if (vocoderIndex < 0) {
-        return;  // No vocoder in chain
-    }
-
-    // Set MOD_SOURCE parameter (paramId = 6 in VocoderEffect)
     // 0 = self-vocoding, 1 = external modulator (mic)
-    float value = useExternalMod ? 1.0f : 0.0f;
-    if (static_cast<size_t>(vocoderIndex) < effects.size()) {
-        effects[vocoderIndex]->setParam(VocoderEffect::MOD_SOURCE, value);
-        LOGI("Vocoder modulator source set to: %s", useExternalMod ? "external" : "self");
+    if (Effect* v = vocoderFromSnapshot()) {
+        v->setParam(VocoderEffect::MOD_SOURCE, useExternalMod ? 1.0f : 0.0f);
     }
 }

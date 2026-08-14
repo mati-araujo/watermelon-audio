@@ -30,28 +30,38 @@
 
 namespace wma { namespace platform {
 
-void flushDenormals() {
-#if defined(__aarch64__) && defined(USE_NEON)
+// La escritura del registro y nada mas. Sin log, sin TLS, sin guarda: es lo que
+// el callback de audio llama en cada bloque (WD-1.2). Ver Platform.h para por
+// que no lleva `thread_local`.
+void flushDenormalsRtSafe() {
+#if defined(__aarch64__)
     // ARM64: set FPCR.FZ (flush-to-zero) and FPCR.DN (default NaN). FPCR is part
     // of the ARM64 ISA, so these are the same instructions on Apple Silicon and
     // on an Android phone — which is the whole reason this block is shared.
+    //
+    // WD-1.2 — esta rama pedia ADEMAS `defined(USE_NEON)`, y eso estaba mal.
+    // FPCR es del ISA base de ARM64, no de NEON: no hay ningun arm64 sin FPCR.
+    // Atarlo a un define de capacidad SIMD hacia que cualquier build que no lo
+    // seteara se quedara sin flush EN SILENCIO — y el build de los tests de
+    // host es exactamente uno de esos, asi que toda la suite (y los sanitizers)
+    // venia corriendo con denormales habilitados sin que nadie pudiera notarlo.
+    // Lo destapo el test de WD-1.2, que fallo en las cuatro aserciones.
     uint64_t fpcr;
     asm volatile("mrs %0, fpcr" : "=r"(fpcr));
     fpcr |= (1ULL << 24);  // FZ bit - flush denormals to zero
     fpcr |= (1ULL << 25);  // DN bit - default NaN mode
     asm volatile("msr fpcr, %0" : : "r"(fpcr));
-    WMA_LOGI("ARM64 (" WMA_PLATFORM_LABEL "): Denormal flush enabled "
-             "(FPCR.FZ=1, FPCR.DN=1)");
 
-#elif defined(__arm__) && defined(USE_NEON)
+#elif defined(__arm__) && (defined(__ARM_FP) || defined(USE_NEON))
     // ARMv7: FPSCR.FZ. Reachable on Android's armeabi-v7a ABI only; Apple has
     // shipped no 32-bit ARM target for years, but the branch costs nothing.
+    //
+    // WD-1.2 — gateado por __ARM_FP (la FPU, que es la que tiene el registro) y
+    // no por USE_NEON: mismo error que tenia la rama de arm64.
     uint32_t fpscr;
     asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
     fpscr |= (1 << 24);  // FZ bit
     asm volatile("vmsr fpscr, %0" : : "r"(fpscr));
-    WMA_LOGI("ARMv7 (" WMA_PLATFORM_LABEL "): Denormal flush enabled "
-             "(FPSCR.FZ=1)");
 
 #elif defined(__x86_64__) || defined(_M_X64)
     // x86_64: MXCSR FZ (bit 15) + DAZ (bit 6). Android emulator ABIs, Intel
@@ -61,9 +71,24 @@ void flushDenormals() {
     mxcsr |= (1 << 15);  // FZ - Flush to Zero
     mxcsr |= (1 << 6);   // DAZ - Denormals Are Zero
     asm volatile("ldmxcsr %0" : : "m"(mxcsr));
+
+#endif
+}
+
+// La misma escritura, mas el diagnostico de que rama de ISA se compilo. NO es
+// RT-safe: loguea. Es el call site de arranque, en el thread de control.
+void flushDenormals() {
+    flushDenormalsRtSafe();
+
+#if defined(__aarch64__)
+    WMA_LOGI("ARM64 (" WMA_PLATFORM_LABEL "): Denormal flush enabled "
+             "(FPCR.FZ=1, FPCR.DN=1)");
+#elif defined(__arm__) && (defined(__ARM_FP) || defined(USE_NEON))
+    WMA_LOGI("ARMv7 (" WMA_PLATFORM_LABEL "): Denormal flush enabled "
+             "(FPSCR.FZ=1)");
+#elif defined(__x86_64__) || defined(_M_X64)
     WMA_LOGI("x86_64 (" WMA_PLATFORM_LABEL "): Denormal flush enabled "
              "(MXCSR.FZ=1, MXCSR.DAZ=1)");
-
 #else
     WMA_LOGW("No denormal flush available for this architecture "
              "(" WMA_PLATFORM_LABEL ")");

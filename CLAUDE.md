@@ -106,6 +106,27 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 - Parametros con smoothing para evitar zipper noise
 - Logging via `platform/Logger.h` — NOT RT-safe, solo fuera del hot path
 
+> 🔴 **Estas reglas ya NO son solo prosa: las verifica `scripts/check-rt-safety.py`** (WD-1.1),
+> que corre en `gate.sh` y en el CI. Antes de WD-1.1 el callback las violaba en **65 lugares**,
+> y dos de los peores sobrevivian a `NDEBUG` porque llamaban a `wma::logMessage` directo en vez
+> de pasar por los macros `LOGI/LOGW`. Lo que hay que saber para no reintroducirlas:
+>
+> - **NO loguees adentro del callback.** Ni "periodicamente", ni "solo en debug". Los bloques
+>   `WMA_AUDIT` que habia eran un DEFECTO CONOCIDO, no un precedente. Si necesitas saber que
+>   pasa adentro, agrega un `wma::RtCounter` (`platform/RtCounter.h`) — cuesta un `fetch_add`
+>   relajado y se lee desde el thread de control.
+> - **`reset()` es RT.** `EffectChain::reset()` y `Effect::reset()` los despacha `onAudioReady`
+>   (ver `Effect.h`), aunque el nombre no lo sugiera.
+> - **Los handlers de voces son RT.** `VoiceManager::handleNoteOn/Off/ParamChange` los despacha
+>   la cola lock-free desde el thread de audio.
+> - **La captura es un SEGUNDO thread RT.** `InputNode::processInputBlock` corre en el thread
+>   del stream de entrada de Oboe, con su propio DSP. Lo que vale para el callback de salida
+>   vale ahi.
+> - **`try_lock` si, `lock()` no.** Y ojo con lo que parece un getter: `findVocoderIndex()`
+>   tomaba `chainMutex` y lo llamaban cuatro setters desde el thread de audio (WD-1.6).
+> - **El flush de denormales es POR THREAD.** `flushDenormalsRtSafe()` va al principio de cada
+>   callback; `flushDenormals()` loguea y es solo para el arranque, en el thread de control.
+
 ### C++ portabilidad (iOS)
 - Todo el motor cross-compila para iOS **salvo** `jni/`, `usb/`, `OboeBackend`,
   `LibusbBackend` y `PlatformAndroid.cpp`
@@ -201,6 +222,19 @@ TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
 # real sobrevivio 15 corridas aca y fue roja a la primera alla. Para carreras
 # el CI es la autoridad.
 bash scripts/check-cpp-portability.sh      # [gate] Guardrail WA-0.4 (jni.h / android/)
+python3 scripts/check-rt-safety.py         # [gate] Guardrail WD-1.1. Camina el call-graph
+                                           # del callback de audio y falla si aparece
+                                           # logging, allocation, lock que bloquee o
+                                           # shared_ptr. --graph imprime lo alcanzado;
+                                           # --self-test verifica que el lint puede fallar
+                                           # (corre ANTES del lint en gate.sh y en el CI:
+                                           # si el parser se rompe queda en verde para
+                                           # siempre). Excepciones: `// RT-SAFE-ALLOW: razon`
+                                           # en el codigo para lo INOFENSIVO;
+                                           # scripts/rt-safety-baseline.txt para la deuda
+                                           # con dueno declarado — y ese archivo es un
+                                           # TRINQUETE: falla tambien si una entrada suya
+                                           # ya no se reproduce
 bash scripts/build-harness.sh              # [gate] :harness: Android + framework iOS +
                                            # símbolos + shell de Xcode + ARRANQUE
                                            # de la app (lo único que agarra un
