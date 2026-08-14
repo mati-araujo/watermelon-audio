@@ -139,6 +139,53 @@ public:
     bool startWithFade(int fadeTimeMs);
 
     /**
+     * @brief Arranca el motor SIN abrir ningun dispositivo de audio (WD-2.1).
+     *
+     * El llamador pasa a ser dueno del reloj: nada suena hasta que alguien
+     * llame a renderBlock(), y cada llamada avanza el motor exactamente ese
+     * numero de frames. No hay thread de audio, no hay backend, no hay device.
+     *
+     * TRES CONSUMIDORES, UN MECANISMO — y por eso este metodo existe:
+     *
+     *  - La suite golden (WD-2.2) necesita renderizar determinicticamente sin
+     *    hardware. Hoy los tests lo esquivan llamando a onAudioReady() por
+     *    fuera del contrato; esto lo vuelve el contrato.
+     *  - El desktop (WD-9.1) necesita testear el motor en un runner de CI que
+     *    no tiene tarjeta de sonido.
+     *  - Un plugin de DAW, si algun dia se compromete, NO ABRE UN DISPOSITIVO:
+     *    el host le pasa un buffer y le pide un bloque. Esto es exactamente eso.
+     *
+     * @param sampleRate      Hz. Se publica como preferido, que es de donde
+     *                        currentSampleRate() lo lee cuando no hay backend.
+     * @param maxBlockFrames  El bloque mas grande que el llamador va a pedir.
+     *                        Tope duro 4096: los scratch de EffectChain se
+     *                        alocan a 8192 samples (4096 frames estereo) en su
+     *                        constructor, y pasarse activa su guarda de
+     *                        overflow, que devuelve SILENCIO. Preferible
+     *                        rechazarlo aca, donde se puede decir por que.
+     * @return false si el motor no estaba detenido, o si los parametros no son
+     *         validos.
+     */
+    bool startOffline(int sampleRate, int maxBlockFrames);
+
+    /**
+     * @brief Renderiza un bloque. El llamador es dueno de los buffers (WD-2.1).
+     *
+     * Es el mismo camino de DSP que recorre un callback real — no una ruta
+     * paralela que pueda divergir. Esa identidad es el punto: un golden
+     * capturado aca vale para el audio que sale por el parlante.
+     *
+     * @param output  interleaved estereo, frames*2 floats. Se sobreescribe.
+     * @param input   interleaved estereo o nullptr. nullptr significa "sin
+     *                entrada", que el motor lee como "no estoy en INPUT_FX".
+     * @param frames  <= maxBlockFrames declarado en startOffline().
+     */
+    bool renderBlock(float* output, const float* input, int frames);
+
+    /// true si el motor arranco con startOffline() (WD-2.1).
+    bool isOffline() const { return mOfflineMode.load(std::memory_order_acquire); }
+
+    /**
      * @brief Detiene el motor con fade out
      * @param fadeTimeMs Duración del fade out en milisegundos
      */
@@ -916,6 +963,10 @@ private:
 
     // IMPROVED: Manejo de memoria insuficiente (Fase 2.2.3)
     std::atomic<bool> mInitializationFailed{false};
+
+    // WD-2.1 — arrancado sin backend: el llamador es dueno del reloj.
+    std::atomic<bool> mOfflineMode{false};
+    std::atomic<int> mOfflineMaxBlockFrames{0};
     bool mUsingReducedBuffers{false};
 
     // ========== DIAGNOSTICO RT (WD-1.1) ==========
@@ -1109,7 +1160,7 @@ private:
      * Called during start() to configure oscillators, modulators, effects,
      * nodes, and other components with the stream's sample rate.
      */
-    void configureComponentsWithSampleRate(int sampleRate);
+    void configureComponentsWithSampleRate(int sampleRate, int maxBlockSize = 4096);
 
 public:
     // ========== GETTERS DE ESTADO PARA JNI ==========

@@ -500,6 +500,29 @@ programa, y es la razón por la que va primero.
    latencia declarada de la cadena. **Este test es el que destapa efectos con estado que depende
    del tamaño de bloque** — un defecto que hoy sería invisible.
 
+> ✅ **HECHO — y el test de invariancia encontró un defecto en su primera corrida.**
+>
+> −16,6 dB de error entre bloques de 64 y de 1024 frames, con la energía total sin coincidir.
+> No era redondeo: era señal distinta. El perfil por ventanas mostró que **divergía sólo durante
+> el primer bloque** y después el audio era bit-idéntico — o sea, un transitorio de arranque
+> cuya duración era la del bloque.
+>
+> **La causa: un fade de largo cero no era instantáneo, era "de un bloque".**
+> `startFade(from, to, sr, 0)` dejaba `current = from` con `remaining = 0`, y
+> `processFadeBlock()` resolvía eso devolviendo `fadeStart = from, fadeEnd = to` — así que el
+> bloque siguiente recibía igual una rampa lineal completa, de la duración del bloque.
+>
+> **El defecto no es del camino offline: pega más fuerte en el device**, que es donde los
+> buffers son grandes. El mismo llamado da 1,3 ms con 64 frames, 21 ms con 1024, y **93 ms con
+> 4096 a 44,1 kHz**. Un `wma_engine_start(engine, 0)` —documentado como "instant"— hacía un fade
+> de casi una décima de segundo en un device con buffer grande.
+>
+> Es de la misma familia que el bug de `WMA_FADE_DEFAULT` que el repo ya había registrado: la
+> semántica de fade tiene tres significados posibles (default, cero-con-rampa, cero-real) y sólo
+> dos estaban modelados.
+>
+> Verificado por mutación: revertir el arreglo hace fallar el test en los cuatro tamaños.
+
 **Esfuerzo** 1 sem · **Riesgo** bajo (aditivo) · **Depende de** —
 
 ---

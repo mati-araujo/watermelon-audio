@@ -790,6 +790,23 @@ bool AudioEngine::start(int fadeTimeMs) {
 void AudioEngine::stop() {
     std::unique_lock<std::mutex> lock(mStateMutex);
 
+    // WD-2.1 — un motor offline no tiene backend que cerrar. Sale por el camino
+    // corto: transicion de estado y nada mas. Sin esto se le pediria a
+    // BackendManager que pare algo que nunca arranco.
+    if (mOfflineMode.load(std::memory_order_acquire)) {
+        EngineState offlineState = mState.load(std::memory_order_acquire);
+        if (offlineState == EngineState::Stopped || offlineState == EngineState::Stopping) {
+            return;
+        }
+        transitionToState(EngineState::Stopping);
+        mFadeCtrl.cancel();
+        mOfflineMode.store(false, std::memory_order_release);
+        mOfflineMaxBlockFrames.store(0, std::memory_order_release);
+        transitionToState(EngineState::Stopped);
+        LOGI("Motor offline detenido");
+        return;
+    }
+
     // Verificar estado actual
     EngineState currentState = mState.load(std::memory_order_acquire);
     if (currentState == EngineState::Stopped || currentState == EngineState::Stopping) {
@@ -1890,11 +1907,96 @@ oboe::AudioStream* AudioEngine::getOutputStream() const {
     return mStream.get();
 }
 
-void AudioEngine::configureComponentsWithSampleRate(int sampleRate) {
-    LOGI("Configuring audio components with sample rate: %d Hz", sampleRate);
 
-    // Default max block size (used when we don't have framesPerBurst)
-    int maxBlockSize = 4096;
+// ========== MOTOR SIN DEVICE (WD-2.1) ==========
+
+bool AudioEngine::startOffline(int sampleRate, int maxBlockFrames) {
+    std::lock_guard<std::mutex> lock(mStateMutex);
+
+    // Mismo flush que hace start(): deja el diagnostico de que rama de ISA se
+    // compilo. El que le sirve al render lo hace renderBlock() en su thread.
+    wma::platform::flushDenormals();
+
+    if (mInitializationFailed.load(std::memory_order_acquire)) {
+        LOGE("startOffline: la inicializacion habia fallado");
+        return false;
+    }
+    if (sampleRate <= 0) {
+        LOGE("startOffline: sampleRate invalido (%d)", sampleRate);
+        return false;
+    }
+    // El tope no es arbitrario: EffectChain aloca sus scratch a 8192 samples
+    // (4096 frames estereo) en el constructor, y pasarse activa su guarda de
+    // overflow — que rellena de SILENCIO y sigue. Un render que devuelve
+    // silencio sin decir por que es la peor forma de fallar, asi que se rechaza
+    // aca, donde se puede explicar.
+    constexpr int kMaxSupportedBlockFrames = 4096;
+    if (maxBlockFrames <= 0 || maxBlockFrames > kMaxSupportedBlockFrames) {
+        LOGE("startOffline: maxBlockFrames %d fuera de rango (1..%d)",
+             maxBlockFrames, kMaxSupportedBlockFrames);
+        return false;
+    }
+
+    EngineState currentState = mState.load(std::memory_order_acquire);
+    if (currentState != EngineState::Stopped) {
+        LOGE("startOffline: el motor no esta detenido (estado %d)",
+             static_cast<int>(currentState));
+        return false;
+    }
+    if (!transitionToState(EngineState::Starting)) {
+        return false;
+    }
+
+    // currentSampleRate() consulta al backend y, si no hay, cae al preferido.
+    // Publicarlo aca es lo que hace que TODO el motor vea el rate correcto sin
+    // tocar una sola linea mas: no hay backend al que preguntarle.
+    mPreferredSampleRate.store(sampleRate, std::memory_order_release);
+    mOfflineMaxBlockFrames.store(maxBlockFrames, std::memory_order_release);
+    mOfflineMode.store(true, std::memory_order_release);
+
+    configureComponentsWithSampleRate(sampleRate, maxBlockFrames);
+
+    // Fade de largo cero: un render offline tiene que ser determinista desde el
+    // primer sample. Una rampa de arranque haria que el bloque 0 no sea
+    // comparable con el bloque 0 de la corrida siguiente.
+    mFadeCtrl.startFade(0.0f, 1.0f, sampleRate, 0);
+    mFadeCtrl.setPaused(false);
+
+    if (!transitionToState(EngineState::Running)) {
+        mOfflineMode.store(false, std::memory_order_release);
+        transitionToState(EngineState::Stopped);
+        return false;
+    }
+
+    LOGI("startOffline: %d Hz, bloques de hasta %d frames, sin device",
+         sampleRate, maxBlockFrames);
+    return true;
+}
+
+bool AudioEngine::renderBlock(float* output, const float* input, int frames) {
+    if (output == nullptr || frames <= 0) {
+        return false;
+    }
+    if (!mOfflineMode.load(std::memory_order_acquire)) {
+        LOGE("renderBlock: el motor no arranco con startOffline()");
+        return false;
+    }
+    if (frames > mOfflineMaxBlockFrames.load(std::memory_order_acquire)) {
+        LOGE("renderBlock: %d frames excede el maximo declarado (%d)",
+             frames, mOfflineMaxBlockFrames.load(std::memory_order_acquire));
+        return false;
+    }
+
+    // El MISMO camino que recorre un callback real. No una ruta paralela: si
+    // divergieran, un golden capturado aca dejaria de valer para el audio que
+    // sale por el parlante, que es exactamente lo que este metodo existe para
+    // garantizar.
+    onAudioReady(output, input, frames);
+    return true;
+}
+
+void AudioEngine::configureComponentsWithSampleRate(int sampleRate, int maxBlockSize) {
+    LOGI("Configuring audio components with sample rate: %d Hz", sampleRate);
 
     // Configure oscillators and modulators (Phase 1E — delegated to OscillatorBank)
     mOscBank.prepare(sampleRate);

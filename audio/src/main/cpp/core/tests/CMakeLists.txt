@@ -105,6 +105,7 @@ add_executable(core_tests
     test_current_sample_rate.cpp
     test_denormal_flush.cpp
     test_input_node_retire.cpp
+    test_offline_render.cpp
     test_fade_lifecycle.cpp
     test_capture_requests.cpp
     test_c_api_lifecycle.cpp
