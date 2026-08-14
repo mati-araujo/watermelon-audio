@@ -945,8 +945,38 @@ private:
 
     // shared_ptr al InputNode para monitoring (puede ser nullptr)
     // Uses mutex for safe access from UI thread, audio callback makes local copy
+    // WD-1.3 — el DUEÑO, y sólo lo toca el thread de control.
+    //
+    // Antes el callback copiaba este shared_ptr bajo try_lock. El try_lock era
+    // defendible; la copia no. `IAudioBackend.h:186` la prohíbe explícitamente,
+    // y el costo del refcount es lo de menos: si el thread de UI llamaba
+    // setInputNode(nullptr) y soltaba su referencia mientras el thread de audio
+    // tenía la última, **el destructor del InputNode corría en el thread de
+    // audio** — liberando dos LockFreeRingBuffer de 96.000 floats cada uno, dos
+    // std::vector, y cerrando el stream de captura por BackendAdapterDeleter.
+    // Un free() más un teardown de dispositivo adentro del deadline.
     std::shared_ptr<InputNode> mInputNode;
     mutable std::mutex mInputNodeMutex;
+
+    // Lo que lee el thread de audio: un puntero crudo, sin lock y sin refcount.
+    // Lo publica setInputNode() bajo mInputNodeMutex; apunta adentro de
+    // mInputNode, que lo mantiene vivo.
+    std::atomic<InputNode*> mInputNodeRt{nullptr};
+
+    // Nodos cuyo drenaje no se pudo confirmar. Se FILTRAN a propósito: llegar
+    // acá significa que el thread de audio lleva cientos de ms sin cerrar un
+    // bloque, o sea que el audio ya está roto. Filtrar unos KB es estrictamente
+    // preferible a un use-after-free sobre una llamada virtual.
+    std::vector<std::shared_ptr<InputNode>> mUndrainedInputNodes;
+
+    /**
+     * @brief Espera a que no quede ningún callback de audio en vuelo.
+     * @return false si venció el timeout (el thread de audio no cerró un bloque).
+     *
+     * Thread de control. Es la misma barrera que usa stop(); se factoriza acá
+     * porque el retiro del InputNode necesita exactamente la misma garantía.
+     */
+    bool waitForCallbackDrain(std::chrono::milliseconds timeout);
 
     // Buffer pre-alocado para monitoring (RT-safe). Lo llena
     // captureMonitoringBlock() una vez por callback, y de ahí leen sus DOS
@@ -1255,6 +1285,18 @@ public:
     }
     int getLastInputSampleRate() const {
         return mLastInputSampleRate.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Nodos de entrada cuyo drenaje no se pudo confirmar y se filtraron.
+     *
+     * Distinto de cero significa que un retiro venció su timeout: el thread de
+     * audio pasó 250 ms sin cerrar un bloque. Es un síntoma, no un contador de
+     * uso — en operación normal esto es cero siempre (WD-1.3).
+     */
+    size_t getUndrainedInputNodeCount() const {
+        std::lock_guard<std::mutex> lock(mInputNodeMutex);
+        return mUndrainedInputNodes.size();
     }
 
     // ========== VOICE SYSTEM (Phase 2 - Polyphonic Voices) ==========

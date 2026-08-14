@@ -10,5 +10,12 @@
 #
 # Formato:  <archivo>::<funcion>::<motivo> | <dueno>
 #
-audio/src/main/cpp/core/AudioEngine.cpp::AudioEngine::processAudioBlock::shared_ptr (refcount + posible free en el thread RT) | WD-1.3 — reemplazar por atomic<InputNode*> + reclamacion en el thread de control
-audio/src/main/cpp/core/AudioEngine.cpp::AudioEngine::onAudioReady::shared_ptr (refcount + posible free en el thread RT) | WD-1.3 — idem, es el mismo patron en el segundo call site
+# ---------------------------------------------------------------------------
+# VACIO desde WD-1.3 (2026-08-13). Las dos unicas entradas que tuvo fueron los
+# dos shared_ptr del callback, y al arreglarlos el trinquete las marco como
+# muertas — que es exactamente para lo que esta.
+#
+# Un baseline vacio es un estado cualitativamente distinto de uno con deuda
+# heredada: a partir de aca, cualquier entrada nueva es una decision consciente
+# de alguien, con nombre y fecha en el blame.
+# ---------------------------------------------------------------------------
