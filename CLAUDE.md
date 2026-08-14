@@ -204,6 +204,12 @@ sesiones enteras. Los marcados **[gate]** ya los corre `scripts/gate.sh`.
 bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (774 tests, googletest)
                                            # Kotlin: 112 iOS sim / 69 JVM
 
+# audio/src/main/cpp/effects/tests/reset-baseline.txt — WD-2.2. Los 16 de 23
+# efectos que HOY arrastran estado a traves de reset(). Es un TRINQUETE, igual
+# que scripts/rt-safety-baseline.txt: el test falla si aparece deuda nueva Y
+# TAMBIEN si una entrada declarada ya no se reproduce. Si arreglaste un efecto,
+# borra su linea. Arreglarlos es WD-3.2.
+
 bash scripts/regen-golden.sh               # WD-2.2: RECAPTURAR los golden de DSP.
                                            # Es una tarea explicita y aparte a
                                            # proposito: recapturar no puede ser un

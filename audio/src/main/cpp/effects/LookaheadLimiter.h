@@ -55,6 +55,24 @@ public:
     void reset() override;
 
     /**
+     * @brief El lookahead ES latencia sobre la señal directa (WD-3.1).
+     *
+     * `process()` saca el buffer DEMORADO multiplicado por la ganancia, no la
+     * entrada: lo que entra en el sample n sale en el n + mLookaheadSamples.
+     * Son 5 ms — 240 samples a 48 kHz, 480 a 96 kHz.
+     *
+     * Hasta WD-2.2 esto devolvia el 0 del default de `Effect`, y no rompia nada
+     * porque el limiter vive en `OutputStage`, en el bus master, donde no hay
+     * ramas que sumar (el razonamiento entero esta en `test_effect_latency.cpp`,
+     * que por eso mismo NO lo alcanza: no esta en `EffectRegistry`).
+     *
+     * Pero era una declaracion falsa, y el contrato de WD-3.1 es que lo
+     * declarado sea lo que se tiene. El dia que alguien lo registre como efecto
+     * de cadena, la compensacion de ramas alinearia contra ese cero.
+     */
+    int getLatencySamples() const override { return mLookaheadSamples; }
+
+    /**
      * @brief Set a parameter
      * @param paramId Parameter ID (0: threshold, 1: attack, 2: release, 3: lookahead)
      * @param value Parameter value
