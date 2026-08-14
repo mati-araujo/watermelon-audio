@@ -29,6 +29,7 @@ add_executable(effects_tests
     test_distortion_gate.cpp
     test_modulation.cpp
     test_misc_effects.cpp
+    test_effect_latency.cpp
     test_logger_stub.cpp
 )
 

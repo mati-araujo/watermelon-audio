@@ -131,6 +131,20 @@ float CabinetSimulator::processFirSample(float input,
     return output;
 }
 
+int CabinetSimulator::getLatencySamples() const {
+    const int irIndex = mActiveIRBuffer.load(std::memory_order_acquire);
+    if (irIndex < 0 || static_cast<size_t>(irIndex) >= mIRBuffers.size()) return 0;
+    const auto& ir = mIRBuffers[static_cast<size_t>(irIndex)];
+
+    // Umbral y no != 0.0f: un IR medido trae ruido de fondo, y contar como
+    // "frente de onda" un tap de 1e-9 daria latencia cero siempre.
+    constexpr float kLeadingSilence = 1.0e-6f;
+    for (size_t i = 0; i < ir.size(); ++i) {
+        if (std::abs(ir[i]) > kLeadingSilence) return static_cast<int>(i);
+    }
+    return 0;  // IR todo en cero: no hay senal que alinear
+}
+
 void CabinetSimulator::reset() {
     std::fill(mDelayLineL.begin(), mDelayLineL.end(), 0.0f);
     std::fill(mDelayLineR.begin(), mDelayLineR.end(), 0.0f);

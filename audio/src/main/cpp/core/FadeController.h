@@ -93,7 +93,25 @@ public:
         int64_t fadeFramesLong = (static_cast<int64_t>(sampleRate) * fadeTimeMs) / 1000;
         int fadeFrames = static_cast<int>(std::min(fadeFramesLong, static_cast<int64_t>(INT_MAX)));
 
-        mCurrentFadeVolume.store(from, std::memory_order_release);
+        // Un fade de largo CERO es instantaneo, y arranca ya en el destino.
+        //
+        // Antes arrancaba en `from` con `remaining == 0`, y processFadeBlock
+        // resolvia eso devolviendo fadeStart=from, fadeEnd=to. O sea que el
+        // bloque siguiente recibia igual una rampa lineal de `from` a `to` —
+        // **de la duracion del bloque**. "Instantaneo" era en realidad "en un
+        // bloque", y cuanto duraba eso dependia del tamano de buffer que
+        // negociara el device: 1,3 ms con 64 frames, 21 ms con 1024, 93 ms con
+        // 4096 a 44,1 kHz. El mismo llamado, tres comportamientos.
+        //
+        // Lo encontro el test de invariancia de bloque de WD-2.1 (era el unico
+        // lugar donde divergian dos renders del mismo audio), pero el defecto no
+        // es del camino offline: pega mas fuerte en el device, que es donde los
+        // buffers son grandes.
+        if (fadeFrames <= 0) {
+            mCurrentFadeVolume.store(to, std::memory_order_release);
+        } else {
+            mCurrentFadeVolume.store(from, std::memory_order_release);
+        }
         mTargetFadeVolume.store(to, std::memory_order_release);
         mFadeTotalFrames.store(fadeFrames, std::memory_order_release);
         mFadeRemainingFrames.store(fadeFrames, std::memory_order_release);

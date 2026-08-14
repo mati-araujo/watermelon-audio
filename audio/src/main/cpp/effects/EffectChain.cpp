@@ -1240,6 +1240,37 @@ EffectType EffectChain::getEffectType(size_t index) const {
     return effectTypes[index];
 }
 
+// ========== LATENCIA DECLARADA (WD-3.1) ==========
+
+int EffectChain::getLatencySamples() const {
+    EffectSnapshot* snapshot = mActiveSnapshot.load(std::memory_order_acquire);
+    if (snapshot == nullptr || snapshot->size == 0) return 0;
+
+    const RoutingMode mode = mRoutingMode.load(std::memory_order_relaxed);
+
+    int total = 0;
+    int branchMax = 0;
+    for (size_t i = 0; i < snapshot->size; ++i) {
+        Effect* e = snapshot->effects[i];
+        if (e == nullptr) continue;
+        const int l = e->getLatencySamples();
+        total += l;
+        if (l > branchMax) branchMax = l;
+    }
+
+    // En SERIAL la senal atraviesa todos: se suman. En los modos que dividen en
+    // ramas y despues suman, la cadena entera retrasa lo que retrasa la rama mas
+    // lenta — las otras se alinean contra ella.
+    return (mode == RoutingMode::SERIAL) ? total : branchMax;
+}
+
+int EffectChain::getEffectLatencySamples(size_t index) const {
+    EffectSnapshot* snapshot = mActiveSnapshot.load(std::memory_order_acquire);
+    if (snapshot == nullptr || index >= snapshot->size) return 0;
+    Effect* e = snapshot->effects[index];
+    return e ? e->getLatencySamples() : 0;
+}
+
 // ========== VOCODER-SPECIFIC METHODS ==========
 
 // WD-1.6 — el vocoder tomaba el mutex de la cadena DESDE EL THREAD DE AUDIO.

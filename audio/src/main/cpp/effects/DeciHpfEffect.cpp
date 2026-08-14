@@ -1,10 +1,21 @@
 #include "DeciHpfEffect.h"
+#include <cmath>
 
 DeciHpfEffect::DeciHpfEffect() {
     mBitDepthSmooth.reset(12.0f);
     mCutoffSmooth.reset(300.0f);
     mSRSmooth.reset(12000.0f);
     mMixSmooth.reset(1.0f);
+}
+
+
+int DeciHpfEffect::getLatencySamples() const {
+    // Mismo calculo que hace process(): step = sampleRate / targetSR, y el hold
+    // no entrega su primer valor nuevo hasta que el contador lo alcanza.
+    const float targetSR = mTargetSR.load(std::memory_order_relaxed);
+    const float step = static_cast<float>(mSampleRate) / std::max(targetSR, 100.0f);
+    if (!(step > 1.0f)) return 0;  // sin diezmado no hay hold que esperar
+    return static_cast<int>(std::ceil(step)) - 1;
 }
 
 void DeciHpfEffect::setSampleRate(int sampleRate) {

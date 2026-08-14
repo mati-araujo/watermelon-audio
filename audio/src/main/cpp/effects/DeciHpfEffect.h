@@ -25,6 +25,21 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /**
+     * @brief Latencia = los samples que el zero-order hold retiene (WD-3.1).
+     *
+     * La reduccion de sample rate es un sample-and-hold: `mHoldCounter` arranca
+     * en cero y el valor retenido no se actualiza hasta alcanzar `step`, asi que
+     * los primeros `step` samples salen con el hold inicial. Ese corrimiento ES
+     * latencia del camino directo.
+     *
+     * **Depende del parametro**, y por eso se calcula en vez de declararse una
+     * constante: `step = sampleRate / targetSR`. Es el caso que el contrato de
+     * Effect::getLatencySamples() nombra — un efecto cuyo retardo cambia con sus
+     * parametros devuelve el valor vigente.
+     */
+    int getLatencySamples() const override;
+
     // Parameter IDs
     static constexpr int PARAM_BIT_DEPTH = 0;     // 1-24 bits (XY: X)
     static constexpr int PARAM_HPF_CUTOFF = 1;    // 20-8000 Hz (XY: Y)
