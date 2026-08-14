@@ -204,6 +204,18 @@ sesiones enteras. Los marcados **[gate]** ya los corre `scripts/gate.sh`.
 bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (774 tests, googletest)
                                            # Kotlin: 112 iOS sim / 69 JVM
 
+bash scripts/regen-golden.sh               # WD-2.2: RECAPTURAR los golden de DSP.
+                                           # Es una tarea explicita y aparte a
+                                           # proposito: recapturar no puede ser un
+                                           # efecto colateral de correr los tests.
+                                           # En modo regeneracion los tests quedan
+                                           # SKIPPED, no PASSED — una corrida que
+                                           # ESCRIBE no puede pasar por una que
+                                           # VERIFICA (misma regla que local-gate.json).
+                                           # Los .resp son texto: SU DIFF ES LA REVISION.
+                                           # Si aparece un preset que el cambio no
+                                           # tocaba, eso es el hallazgo.
+
 # Los mismos 774 bajo sanitizers. NO son opcionales: el CI tiene un job para
 # cada uno y encontraron dos bugs reales que el resto del gate no ve.
 # OJO: `detect_leaks=1` (lo que usa ci.yml) NO existe en macOS y rompe el

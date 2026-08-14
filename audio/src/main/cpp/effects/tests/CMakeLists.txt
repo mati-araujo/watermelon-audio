@@ -30,6 +30,7 @@ add_executable(effects_tests
     test_modulation.cpp
     test_misc_effects.cpp
     test_effect_latency.cpp
+    test_golden_filter_eq.cpp
     test_logger_stub.cpp
 )
 
@@ -37,6 +38,14 @@ target_include_directories(effects_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
+)
+
+# WD-2.2 — los golden se leen del ARBOL DE FUENTES, no de un copiado al build.
+# Que el binario apunte al original es lo que hace que `WMA_GOLDEN_REGEN=1`
+# reescriba el archivo que despues se commitea, en vez de una copia que se
+# pierde con el build dir.
+target_compile_definitions(effects_tests PRIVATE
+    WMA_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata/golden"
 )
 
 target_link_libraries(effects_tests PRIVATE watermelon-effects GTest::gtest_main)
