@@ -54,6 +54,21 @@ public:
     void setSampleRate(int sampleRate) override;
     void reset() override;
 
+    /**
+     * @brief Latencia = indice del primer tap NO NULO del IR activo (WD-3.1).
+     *
+     * La convolucion en si es causal y de forma directa: `output[n]` incluye
+     * `input[n] * ir[0]`, asi que el algoritmo no agrega retardo. Lo que si lo
+     * agrega es el DATO: si el IR arranca con ceros, la senal directa aparece
+     * corrida por esa cantidad de samples.
+     *
+     * Se calcula en vez de hardcodearse justamente por eso — es propiedad del
+     * IR, no del efecto, y agregar un cabinet nuevo con otro frente de onda
+     * cambiaria el numero sin que nadie se acuerde de tocarlo. Lo midio el test
+     * de WD-3.1: yo habia leido el codigo y concluido que era cero.
+     */
+    int getLatencySamples() const override;
+
 private:
     int mSampleRate{48000};
 

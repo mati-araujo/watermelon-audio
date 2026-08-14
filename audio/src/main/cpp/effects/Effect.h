@@ -50,6 +50,39 @@ public:
     virtual void setBpm(float bpm) { (void)bpm; }
 
     /**
+     * @brief Retardo que el efecto le agrega a la senal DIRECTA, en samples (WD-3.1).
+     *
+     * QUE ES Y QUE NO ES
+     * ------------------
+     * Es el corrimiento en el tiempo del camino SECO: cuantos samples tarda en
+     * salir lo que entro. NO es el largo del eco de un delay, ni el pre-delay de
+     * un reverb, ni la cola de una convolucion — todo eso es el SONIDO del
+     * efecto y sale ademas de la senal directa, no en lugar de ella.
+     *
+     * La prueba practica: meta un impulso y busque donde aparece la PRIMERA
+     * energia a la salida. Un delay con mix 50% la pone en el sample 0 (el
+     * directo) y el eco despues: latencia 0. Un lookahead limiter la pone recien
+     * en el sample 240: latencia 240.
+     *
+     * POR QUE HAY QUE DECLARARLO SI HOY TODOS DAN CERO
+     * -----------------------------------------------
+     * Porque el dia que alguien agregue un limiter con lookahead, un EQ de fase
+     * lineal o una convolucion particionada, los modos de routing PARALLEL,
+     * SPLIT_2X2, SERIAL_PARALLEL, PARALLEL_SERIAL y FEEDBACK van a sumar ramas
+     * desalineadas — y eso es un filtro peine, audible y reproducible, que
+     * ningun test de los que hay detectaria.
+     *
+     * Retrofitear el contrato despues cuesta tocar los 23 efectos. Declararlo
+     * ahora, con todos en cero, cuesta una linea y deja el mecanismo puesto.
+     * Y no queda como promesa: `test_effect_latency.cpp` MIDE la respuesta al
+     * impulso de cada efecto y falla si lo declarado no coincide.
+     *
+     * Un efecto cuyo retardo dependa de sus parametros debe devolver el valor
+     * vigente, y `EffectChain` re-consulta en cada cambio estructural.
+     */
+    virtual int getLatencySamples() const { return 0; }
+
+    /**
      * @brief Clear all internal DSP state without destroying the effect.
      *
      * Default is a no-op — override in effects that carry state across

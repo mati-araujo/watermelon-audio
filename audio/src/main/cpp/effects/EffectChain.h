@@ -222,6 +222,20 @@ public:
     size_t getNumEffects() const;
 
     /**
+     * @brief Latencia total que la cadena le agrega a la senal directa (WD-3.1).
+     *
+     * Suma de los efectos activos en modo SERIAL. En los modos que suman ramas
+     * es el MAXIMO de las ramas, porque processWithMode() alinea la mas corta
+     * contra la mas larga — que es de lo que se trata la compensacion.
+     *
+     * Lock-free: lee el snapshot activo. Llamable desde el thread de control.
+     */
+    int getLatencySamples() const;
+
+    /// Latencia declarada por el efecto en `index`, o 0 si el indice no existe.
+    int getEffectLatencySamples(size_t index) const;
+
+    /**
      * @brief Gets the type of effect at given index
      * Thread-safe: Uses mutex internally
      * @param index Effect index in chain
