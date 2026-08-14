@@ -8,6 +8,7 @@
 #include <atomic>
 #include <array>
 #include <mutex>
+#include "../platform/RtCounter.h"
 
 namespace voice {
 
@@ -219,6 +220,15 @@ private:
     int mMaxBlockSize = 4096;
 
     std::atomic<uint64_t> mSampleTime{0};
+
+    // WD-1.1 — reemplazan a los LOGW de handleNoteOn/handleParamChange, que
+    // corren en el thread de audio (los despacha la cola lock-free de eventos).
+    wma::RtCounter mVoiceAllocFailures;   ///< no habia voz libre para un note-on
+    wma::RtCounter mParamChangeMisses;    ///< param change para un noteId desconocido
+
+public:
+    uint64_t getVoiceAllocFailures() const { return mVoiceAllocFailures.get(); }
+    uint64_t getParamChangeMisses() const { return mParamChangeMisses.get(); }
 
     // Pre-allocated output buffer
     std::vector<float> mOutputBuffer;

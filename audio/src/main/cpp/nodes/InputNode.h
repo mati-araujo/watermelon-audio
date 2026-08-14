@@ -5,6 +5,7 @@
 #include "../dsp/NoiseGate.h"
 #include "../dsp/LevelMeter.h"
 #include "../dsp/DCBlocker.h"
+#include "../platform/RtCounter.h"
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -157,4 +158,24 @@ private:
 
     // Separate ring buffer for monitoring output (so input processing doesn't affect monitoring)
     LockFreeRingBuffer mMonitoringBuffer;
+
+    // ========== DIAGNOSTICO RT (WD-1.1) ==========
+    //
+    // Este archivo definia LOGI/LOGW/LOGE SIN condicional de NDEBUG, asi que
+    // sus trece logs del path de captura llegaban a release. Y son justo los
+    // que peor se comportan: un overflow de monitoring se repite en cada
+    // bloque mientras dure, o sea que el log realimentaba el problema con un
+    // syscall cada 2,7 ms sobre un thread que ya no llegaba a tiempo.
+    wma::RtCounter mMonitorOverflowBlocks;  ///< no habia lugar en el ring de monitoring
+    wma::RtCounter mMonitorPartialReads;    ///< se leyo menos de lo pedido
+    wma::RtCounter mMonitorReadFailures;    ///< la lectura del ring fallo
+    wma::RtCounter mUsbFeedDrops;           ///< bloque de USB descartado, ring lleno
+    wma::RtCounter mFeedClampedBlocks;      ///< numFrames recortado al temp buffer
+
+public:
+    uint64_t getMonitorOverflowBlocks() const { return mMonitorOverflowBlocks.get(); }
+    uint64_t getMonitorPartialReads() const { return mMonitorPartialReads.get(); }
+    uint64_t getMonitorReadFailures() const { return mMonitorReadFailures.get(); }
+    uint64_t getUsbFeedDrops() const { return mUsbFeedDrops.get(); }
+    uint64_t getFeedClampedBlocks() const { return mFeedClampedBlocks.get(); }
 };

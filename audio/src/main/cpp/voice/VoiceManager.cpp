@@ -365,13 +365,8 @@ void VoiceManager::handleNoteOn(const VoiceTriggerEvent& event, int sourceId, in
     if (voiceIndex >= 0) {
         // Store mapping for later lookup (audio-thread-only, no lock needed)
         noteMapInsert(event.noteId, voiceIndex);
-#ifndef NDEBUG
-        LOGI("NOTE_ON: noteId=%d -> voice %d, freq=%.1f, amp=%.3f, mapSize=%d",
-             event.noteId, voiceIndex, event.frequency, event.amplitude,
-             noteMapSize());
-#endif
     } else {
-        LOGW("NOTE_ON: Failed to allocate voice for noteId=%d", event.noteId);
+        mVoiceAllocFailures.bump();  // WD-1.1 — era un LOGW en el thread de audio
     }
 }
 
@@ -384,18 +379,9 @@ void VoiceManager::handleNoteOff(const VoiceTriggerEvent& event) {
         int voiceIndex = mNoteMap[idx].voiceIndex;
         mVoicePool->releaseVoice(voiceIndex);
         noteMapErase(event.noteId);
-#ifndef NDEBUG
-        LOGI("NOTE_OFF: noteId=%d -> voice %d released, mapSize=%d, activeVoices=%d",
-             event.noteId, voiceIndex, noteMapSize(),
-             mVoicePool->getActiveVoiceCount());
-#endif
     } else {
         // Fallback: try to release by noteId through pool
         mVoicePool->releaseByNoteId(event.noteId);
-#ifndef NDEBUG
-        LOGI("NOTE_OFF: noteId=%d (fallback - not in map!), mapSize=%d",
-             event.noteId, noteMapSize());
-#endif
     }
 }
 
@@ -413,7 +399,7 @@ void VoiceManager::handleParamChange(const VoiceTriggerEvent& event) {
             voice->setPan(event.pan);
             voice->setPressure(event.pressure);
         } else {
-            LOGW("PARAM_CHANGE: noteId=%d -> voice %d is NULL!", event.noteId, voiceIndex);
+            mParamChangeMisses.bump();  // WD-1.1
         }
     } else {
         // Fallback: find voice by noteId in pool
@@ -429,7 +415,7 @@ void VoiceManager::handleParamChange(const VoiceTriggerEvent& event) {
             // Update mapping (audio-thread-only)
             noteMapInsert(event.noteId, voiceIndex);
         } else {
-            LOGW("PARAM_CHANGE: noteId=%d not found in map or pool", event.noteId);
+            mParamChangeMisses.bump();  // WD-1.1
         }
     }
 }

@@ -1,5 +1,6 @@
 #include "InputNode.h"
 #include "../platform/Logger.h"
+#include "../platform/Platform.h"  // WD-1.2 — flushDenormalsRtSafe()
 
 // Oboe is Android-only. The input *capture* path (opening a mic/line stream)
 // lives entirely behind this guard; the rest of InputNode — DSP, gain, noise
@@ -250,6 +251,12 @@ bool InputNode::isInputStreamRunning() const {
 }
 
 bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCount) {
+    // WD-1.2 — este es el SEGUNDO thread RT del motor: en Android la captura
+    // corre en su propio stream de Oboe, con su propio thread y su propio DSP
+    // (DC blocker, noise gate, level meter). FPCR/MXCSR son por thread, asi que
+    // setearlos en el thread de salida no hace nada por este.
+    wma::platform::flushDenormalsRtSafe();
+
     if (!mInputStreamRunning.load()) {
         return false;
     }
@@ -276,19 +283,9 @@ bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCo
         processBuffer = mTempBuffer.data();
     }
 
-    // DEBUG: Check raw input level BEFORE any processing
-    static int rawInputLogCount = 0;
-    if (++rawInputLogCount >= 100) {
-        float maxRawSample = 0.0f;
-        for (int i = 0; i < numFrames * 2 && i < 100; ++i) {
-            if (std::abs(processBuffer[i]) > maxRawSample) {
-                maxRawSample = std::abs(processBuffer[i]);
-            }
-        }
-        LOGI("RAW INPUT: maxSample=%.6f, numFrames=%d, channels=%d",
-             maxRawSample, numFrames, channelCount);
-        rawInputLogCount = 0;
-    }
+    // WD-1.1 — log periodico borrado. El nivel de entrada ya lo publica
+    // mLevelMeter, que es consultable desde el thread de control por
+    // getInputLevel(); el log era una segunda medicion de lo mismo, con syscall.
 
     // Apply input gain
     float gain = mInputGainLinear.load(std::memory_order_relaxed);
@@ -309,21 +306,8 @@ bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCo
     // Level metering - updates atomic values that can be read by UI thread
     mLevelMeter.process(processBuffer, numFrames);
 
-    // DEBUG: Check processed level AFTER DSP
-    static int processedLogCount = 0;
-    if (++processedLogCount >= 100) {
-        float maxProcessedSample = 0.0f;
-        for (int i = 0; i < numFrames * 2 && i < 100; ++i) {
-            if (std::abs(processBuffer[i]) > maxProcessedSample) {
-                maxProcessedSample = std::abs(processBuffer[i]);
-            }
-        }
-        LOGI("PROCESSED: maxSample=%.6f, noiseGate=%d, gateOpen=%d",
-             maxProcessedSample,
-             mNoiseGateEnabled.load(),
-             mNoiseGate.isOpen());
-        processedLogCount = 0;
-    }
+    // WD-1.1 — idem: nivel y estado del gate ya son consultables
+    // (getInputLevel / isNoiseGateOpen).
 
     // Write to ring buffer for potential future audio graph integration
     // Only write if there's space to avoid overflow spam
@@ -337,13 +321,7 @@ bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCo
     if (mMonitoringEnabled.load(std::memory_order_relaxed)) {
         float monitorVolume = mMonitoringVolume.load(std::memory_order_relaxed);
 
-        // DEBUG: Log monitoring write periodically (every ~1 second)
-        static int monitorWriteCount = 0;
-        if (++monitorWriteCount >= 100) {  // ~100 callbacks = ~1 second
-            LOGI("MONITOR WRITE: volume=%.2f, frames=%d, bufferAvailable=%zu",
-                 monitorVolume, numFrames, mMonitoringBuffer.availableToWrite());
-            monitorWriteCount = 0;
-        }
+        // WD-1.1 — log periodico borrado.
 
         // Apply monitoring volume before writing
         if (std::abs(monitorVolume - 1.0f) > 0.001f) {
@@ -359,12 +337,11 @@ bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCo
             if (monitorAvailable >= needed) {
                 mMonitoringBuffer.write(mMonitorTempBuffer.data(), needed);
             } else {
-                // DEBUG: Buffer full
-                static int overflowCount = 0;
-                if (++overflowCount >= 100) {
-                    LOGW("MONITOR OVERFLOW: available=%zu, needed=%zu", monitorAvailable, needed);
-                    overflowCount = 0;
-                }
+                // WD-1.1 — era un LOGW, y los macros de este archivo NO son
+                // condicionales: sobrevivia a release. Ademas un overflow de
+                // monitoring se repite por bloque mientras dure, asi que el log
+                // realimentaba el problema.
+                mMonitorOverflowBlocks.bump();
             }
         } else {
             // Volume is 1.0, write directly
@@ -372,12 +349,11 @@ bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCo
             if (monitorAvailable >= needed) {
                 mMonitoringBuffer.write(processBuffer, needed);
             } else {
-                // DEBUG: Buffer full
-                static int overflowCount = 0;
-                if (++overflowCount >= 100) {
-                    LOGW("MONITOR OVERFLOW: available=%zu, needed=%zu", monitorAvailable, needed);
-                    overflowCount = 0;
-                }
+                // WD-1.1 — era un LOGW, y los macros de este archivo NO son
+                // condicionales: sobrevivia a release. Ademas un overflow de
+                // monitoring se repite por bloque mientras dure, asi que el log
+                // realimentaba el problema.
+                mMonitorOverflowBlocks.bump();
             }
         }
     }
@@ -558,12 +534,7 @@ int InputNode::getMonitoringSamples(float* outputBuffer, int numFrames) {
     size_t available = mMonitoringBuffer.availableToRead();
 
     // DEBUG: Log read attempts periodically
-    static int readAttemptCount = 0;
-    if (++readAttemptCount >= 100) {
-        LOGI("MONITOR READ: requested=%d frames (%zu samples), available=%zu samples",
-             numFrames, samplesToRead, available);
-        readAttemptCount = 0;
-    }
+    // WD-1.1 — log periodico borrado (macros no condicionales en este archivo).
 
     // If not enough data, read what's available instead of returning silence
     size_t actualSamplesToRead = samplesToRead;
@@ -576,11 +547,7 @@ int InputNode::getMonitoringSamples(float* outputBuffer, int numFrames) {
             actualFrames = static_cast<int>(actualSamplesToRead / 2);
 
             // DEBUG: Log partial read
-            static int partialCount = 0;
-            if (++partialCount >= 50) {
-                LOGW("MONITOR PARTIAL: reading %zu of %zu samples", actualSamplesToRead, samplesToRead);
-                partialCount = 0;
-            }
+            mMonitorPartialReads.bump();  // WD-1.1 — era un LOGW incondicional
         } else {
             // Really nothing available
             std::memset(outputBuffer, 0, numFrames * 2 * sizeof(float));
@@ -592,7 +559,7 @@ int InputNode::getMonitoringSamples(float* outputBuffer, int numFrames) {
     bool success = mMonitoringBuffer.read(outputBuffer, actualSamplesToRead);
     if (!success) {
         std::memset(outputBuffer, 0, numFrames * 2 * sizeof(float));
-        LOGE("MONITOR READ FAILED");
+        mMonitorReadFailures.bump();  // WD-1.1 — era un LOGE incondicional
         return 0;
     }
 
@@ -603,17 +570,7 @@ int InputNode::getMonitoringSamples(float* outputBuffer, int numFrames) {
     }
 
     // DEBUG: Log sample values occasionally
-    static int sampleValueCount = 0;
-    if (++sampleValueCount >= 100) {
-        float maxSample = 0.0f;
-        for (size_t i = 0; i < actualSamplesToRead && i < 100; ++i) {
-            if (std::abs(outputBuffer[i]) > maxSample) {
-                maxSample = std::abs(outputBuffer[i]);
-            }
-        }
-        LOGI("MONITOR SAMPLES: actualFrames=%d, maxSample=%.4f", actualFrames, maxSample);
-        sampleValueCount = 0;
-    }
+    // WD-1.1 — log periodico borrado.
 
     return actualFrames;
 }
@@ -630,7 +587,7 @@ void InputNode::feedExternalInput(const float* inputData, int numFrames) {
     assert(mTempBuffer.size() >= numSamples &&
            "Temp buffer too small — prepare() should allocate maxBlockSize * 2");
     if (mTempBuffer.size() < numSamples) {
-        LOGW("feedExternalInput: temp buffer too small, clamping frames");
+        mFeedClampedBlocks.bump();  // WD-1.1 — era un LOGW incondicional
         numFrames = static_cast<int>(mTempBuffer.size()) / 2;
     }
 
@@ -682,12 +639,7 @@ void InputNode::feedExternalInput(const float* inputData, int numFrames) {
                 mMonitoringBuffer.write(mMonitorTempBuffer.data(), numSamples);
             } else {
                 // DIAGNOSTIC: Log when data is dropped due to full buffer
-                static int dropCount = 0;
-                if (++dropCount >= 100) {
-                    LOGW("USB FEED DROP: monitorBuffer full! available=%zu, needed=%zu",
-                         monitorAvailable, numSamples);
-                    dropCount = 0;
-                }
+                mUsbFeedDrops.bump();  // WD-1.1 — era un LOGW incondicional
             }
         } else {
             size_t monitorAvailable = mMonitoringBuffer.availableToWrite();
@@ -695,28 +647,11 @@ void InputNode::feedExternalInput(const float* inputData, int numFrames) {
                 mMonitoringBuffer.write(processBuffer, numSamples);
             } else {
                 // DIAGNOSTIC: Log when data is dropped due to full buffer
-                static int dropCount2 = 0;
-                if (++dropCount2 >= 100) {
-                    LOGW("USB FEED DROP: monitorBuffer full! available=%zu, needed=%zu",
-                         monitorAvailable, numSamples);
-                    dropCount2 = 0;
-                }
+                mUsbFeedDrops.bump();  // WD-1.1 — era un LOGW incondicional
             }
         }
     }
 
     // Debug logging (periodic) - Enhanced for MIX mode diagnostics
-    static int feedLogCount = 0;
-    if (++feedLogCount >= 500) {
-        float maxSample = 0.0f;
-        for (size_t i = 0; i < numSamples && i < 100; ++i) {
-            if (std::abs(processBuffer[i]) > maxSample) {
-                maxSample = std::abs(processBuffer[i]);
-            }
-        }
-        LOGI("USB FEED: %d frames, maxSample=%.4f, ringAvail=%zu, monitorEnabled=%d, monitorAvail=%zu",
-             numFrames, maxSample, mRingBuffer.availableToRead(),
-             monitoringEnabled, mMonitoringBuffer.availableToRead());
-        feedLogCount = 0;
-    }
+    // WD-1.1 — log periodico borrado.
 }

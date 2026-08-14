@@ -15,6 +15,7 @@
 #include <cstring>
 #include <string>
 #include "../platform/Logger.h"
+#include "../platform/RtCounter.h"
 
 #define LOOPER_LOG_TAG "Looper"
 #define LOOPER_LOGD(...) wma::logMessage(wma::LogLevel::DEBUG, LOOPER_LOG_TAG, __VA_ARGS__)
@@ -297,9 +298,14 @@ public:
             // UI thread. Reaching here means a callback exceeded the pre-sized max
             // (or prepareMixBuffer was never called) — a real-time alloc we can't
             // avoid without dropping audio. Log at ERROR so it surfaces.
+            // RT-SAFE-ALLOW: fallback deliberado y documentado. La alternativa
+            // es descartar el bloque; se eligio alocar. Queda contado, no
+            // logueado — WD-1.1: si esto dispara, dispara en TODOS los bloques
+            // hasta que alguien reconfigure, y el LOOPER_LOGE que habia aca
+            // convertia un problema de tamano en una tormenta de syscalls
+            // encima de un thread que ya estaba en falta.
             mLooperMixBuf.resize(needed);
-            LOOPER_LOGE("mix buffer grown ON AUDIO THREAD to %d frames — prepareMixBuffer "
-                        "under-sized; RT alloc occurred", numFrames);
+            mMixBufGrownOnRt.bump();
         }
         std::memset(mLooperMixBuf.data(), 0, sizeof(float) * needed);
 
@@ -1355,6 +1361,11 @@ private:
 
     // Sample rate (kept in sync with engine via setSampleRate()).
     std::atomic<int> mSampleRate{48000};
+
+    // WD-1.1 — cuenta los crecimientos del mix buffer en el thread de audio.
+    // Reemplaza al LOOPER_LOGE que habia junto al resize. Se lee con
+    // getMixBufGrownOnRt() desde el thread de control.
+    wma::RtCounter mMixBufGrownOnRt;
 
     // Metronome / count-in click generator (self-contained, RT-safe).
     wm::MetronomeClick mClick;

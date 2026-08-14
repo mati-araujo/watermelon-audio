@@ -13,6 +13,7 @@ namespace oboe { class AudioStream; }
 #include <thread>
 #include "../backends/IAudioBackend.h"
 #include "../effects/EffectChain.h"
+#include "../platform/RtCounter.h"
 #include "WaveformCapture.h"
 #include "OutputStage.h"
 #include "DualTouchManager.h"
@@ -917,6 +918,26 @@ private:
     std::atomic<bool> mInitializationFailed{false};
     bool mUsingReducedBuffers{false};
 
+    // ========== DIAGNOSTICO RT (WD-1.1) ==========
+    //
+    // Reemplazan a los logs que vivian adentro del callback. Cada uno conserva
+    // la informacion que su log daba, al costo de un fetch_add relajado. Los
+    // lee WD-5.1 para armar el WmaDiagnostics de la C API; hasta entonces se
+    // leen desde un test o un debugger.
+    wma::RtCounter mCallbackBlocks;        ///< bloques procesados, total
+    wma::RtCounter mUsbDirectBlocks;       ///< bloques por el fast-path USB INPUT_FX
+    wma::RtCounter mUsbFedBlocks;          ///< bloques de USB empujados al InputNode
+    wma::RtCounter mNotRunningBlocks;      ///< callbacks con el motor no-Running
+    wma::RtCounter mBufferOverflowBlocks;  ///< numFrames excedio el scratch pre-alocado
+    wma::RtCounter mCallbackExceptions;    ///< excepciones atrapadas en el callback
+
+    // El smoke de device leia el "SAMPLE RATE MISMATCH!" de logcat para
+    // distinguir "el mic glitchea" de "el mic no esta conectado". Un flag
+    // consultable es estrictamente mejor que grepear un log: no depende de un
+    // build de debug ni de que el mensaje no cambie de texto.
+    std::atomic<bool> mSampleRateMismatch{false};
+    std::atomic<int> mLastInputSampleRate{0};
+
     // ========== DUAL TOUCH SUPPORT (Phase 1E — delegated to DualTouchManager) ==========
     DualTouchManager mDualTouch;
 
@@ -1202,6 +1223,38 @@ public:
      */
     bool isUsingReducedBuffers() const {
         return mUsingReducedBuffers;
+    }
+
+    // ========== DIAGNOSTICO RT (WD-1.1) ==========
+    //
+    // Lo que antes salia por logcat desde adentro del callback. Se lee desde el
+    // thread de control. WD-5.1 los agrega en el WmaDiagnostics de la C API.
+
+    uint64_t getCallbackBlocks() const { return mCallbackBlocks.get(); }
+    uint64_t getUsbDirectBlocks() const { return mUsbDirectBlocks.get(); }
+    uint64_t getUsbFedBlocks() const { return mUsbFedBlocks.get(); }
+    uint64_t getNotRunningBlocks() const { return mNotRunningBlocks.get(); }
+    uint64_t getBufferOverflowBlocks() const { return mBufferOverflowBlocks.get(); }
+    uint64_t getCallbackExceptions() const { return mCallbackExceptions.get(); }
+
+    /// Conteo de xruns reportado por el backend. RT-safe: un store relajado.
+    void publishXRunCount(int count) {
+        mLastXRunCount.store(count, std::memory_order_relaxed);
+    }
+    int getXRunCount() const { return mLastXRunCount.load(std::memory_order_relaxed); }
+
+    /**
+     * @brief El sample rate del stream de entrada no coincide con el de salida.
+     *
+     * Reemplaza al log "SAMPLE RATE MISMATCH!" que el smoke de device leia de
+     * logcat. Es la misma senal, consultable, y sin depender de un build de
+     * debug ni de que el texto del mensaje no cambie.
+     */
+    bool hasSampleRateMismatch() const {
+        return mSampleRateMismatch.load(std::memory_order_relaxed);
+    }
+    int getLastInputSampleRate() const {
+        return mLastInputSampleRate.load(std::memory_order_relaxed);
     }
 
     // ========== VOICE SYSTEM (Phase 2 - Polyphonic Voices) ==========
