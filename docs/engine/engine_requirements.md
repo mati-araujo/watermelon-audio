@@ -25,8 +25,60 @@ verificación del DSP— sin convertir la librería en un SDK de terceros.
 > | **D2 — Orden vs. validación en device (G2)** | **Arreglar el thread RT primero, device después** | La sesión de hardware se gasta una vez, sobre código arreglado. Validar 2.0.2 mediría los bugs, no el motor — y el arreglo de FTZ es justo lo que cambia el costo de CPU que Instruments iba a medir |
 > | **D3 — libusb LGPL-2.1 en artefacto MIT** | **Separar el artefacto ahora** | 3 días. Cierra la exposición antes de que exista un tercer consumidor, achica el AAR por defecto y saca libusb de los builds iOS/desktop donde no hace nada |
 >
-> **El lema de D1: no construyas el SDK, pero no lo cierres.** Cada cosa diferida en §7 lleva
+> **El lema de D1: no construyas el SDK, pero no lo cierres.** Cada cosa diferida en §10 lleva
 > un **disparador explícito** — la condición que la reabre. Diferir no es descartar.
+
+---
+
+> [!WARNING]
+> ## D1-bis — la decisión de arriba caducó a los tres días, y la caducó el roadmap de producto
+>
+> **2026-08-13, después de cerrar la Fase 1.** Al plantear hacia dónde va NoisyPad aparecieron
+> cuatro vectores: **versión desktop**, **latencia profesional por USB para guitar mode**,
+> **integración con DAWs** (Ableton, FL Studio) y **el teléfono conectado a la PC sin cable para
+> grabar en vivo**.
+>
+> Los cuatro son, los cuatro, *"existe un segundo consumidor"* — que es el disparador textual de
+> nueve de los diez ítems diferidos en §10. Y uno es peor que un segundo consumidor: **un host
+> DAW no acepta tu API, te dicta la suya.**
+>
+> ### Lo decidido
+>
+> | | |
+> |---|---|
+> | **El plugin de DAW** | **Exploratorio, NO comprometido.** No se rehace el programa alrededor de él |
+> | **El criterio de corte** | **Relación costo/beneficio, por encima de la forma estricta** |
+> | **La regla que reemplaza al lema de D1** | *No construyas el plugin, pero que cada paso que des sea uno que el plugin habría necesitado* |
+>
+> ### Lo que cambia, concretamente
+>
+> 1. **WD-2.1 deja de ser un seam de test y pasa a ser una capacidad del producto.** Un plugin no
+>    abre un dispositivo: el host le pasa un buffer. "Motor sin device" es exactamente eso, y
+>    además es lo que hace posible la suite golden y testear el desktop. Es el ítem de mayor
+>    palanca del programa entero.
+> 2. **La Fase 7 (`AudioBufferView`) arranca en paralelo desde temprano**, no al final. No porque
+>    el plugin esté comprometido, sino porque es **el único ítem cuyo costo crece con cada efecto
+>    que se agrega**, y es el bloqueante duro si algún día se compromete. Con un requisito nuevo:
+>    **soporte planar de verdad**, no sólo el tipo — VST3 entrega `float**` y AU entrega buffers
+>    separados; ningún host de DAW te da interleaved.
+> 3. **Entran tres vectores de producto** como fases propias (§13): latencia profesional, desktop
+>    y superficie de control remota. Los tres dan producto vendible **sin tocar el modelo de
+>    buffer**.
+> 4. **Sigue afuera:** el split `:wma-instrument`, BCV, la doc de usuario completa, MIDI in,
+>    automatización con offset de muestra y serialización de estado versionada. Todos con el
+>    disparador actualizado en §10: **"se compromete el plugin"**.
+>
+> ### Una corrección sobre el vector inalámbrico
+>
+> Lo que se descarta es **el audio por red**, no la conexión inalámbrica. Streamear audio del
+> teléfono a la PC es jitter de WiFi de 5–30 ms, dos dominios de reloj y buffer adaptativo:
+> 20–50 ms de latencia realista, y con eso no se toca en vivo. Es un producto aparte.
+>
+> **El concepto sobrevive entero con el teléfono como superficie de control**: por el WiFi viajan
+> los toques y el XY, el audio se genera en la PC en un solo dominio de reloj, y la latencia de
+> control tolera 10–20 ms sin que se note — la misma tolerancia que cualquier controlador
+> inalámbrico. Y la C API ya **es** un control remoto del motor: son 253 funciones que hacen
+> exactamente eso. Ver WD-10.1.
 
 ---
 
@@ -419,7 +471,7 @@ pasan a miembros.
 
 ---
 
-### WD-2.1 — Path de render offline (seam de test, no feature pública)
+### WD-2.1 — Motor sin device (el ítem de mayor palanca del programa)
 
 **Problema.** No hay forma de renderizar audio sin un dispositivo. Los tests actuales lo esquivan
 con `FakeAudioBackend` y `test_platform_backends.cpp` — es un buen workaround, pero es un
@@ -427,9 +479,17 @@ workaround: la cadena completa (chain → looper → output stage) sólo es alca
 `AudioEngine`, que posee un backend. Ninguna de las 253 funciones `wma_*` toma un buffer de
 entrada y un frame count.
 
-**Decisión de alcance (consecuencia de D1).** Esto se construye como **seam de test interno**, no
-como API pública. Vive detrás de `@InternalWatermelonApi` del lado Kotlin y no se documenta como
-capacidad de la librería. Es lo que hace posible WD-2.2 y WD-2.3; no es el primer paso hacia un SDK.
+**Decisión de alcance — REVISADA por D1-bis.** Se construía como seam de test interno. **Pasa a ser
+una capacidad del producto**, y por tres motivos que se acumulan sobre el mismo mecanismo:
+
+| Quién lo necesita | Para qué |
+|---|---|
+| La suite golden (WD-2.2) | Renderizar determinísticamente sin dispositivo |
+| El desktop (WD-9.x) | Testear el motor en CI sin un device de audio en el runner |
+| El plugin, si algún día se compromete | **Un plugin no abre un dispositivo: el host le pasa un buffer.** Esto *es* el núcleo del plugin |
+
+Tres consumidores sobre un mecanismo de una semana. Es la mejor relación costo/beneficio del
+programa, y es la razón por la que va primero.
 
 **Criterio de aceptación.**
 1. Existe un modo de construir el motor sin backend, alimentarlo con un buffer y leer la salida,
@@ -845,12 +905,16 @@ Diferir no es descartar. Cada ítem lleva el disparador que lo vuelve a poner en
 
 | Diferido | Hallazgo | Disparador |
 |---|---|---|
-| Split `:wma-instrument` / API pública de terceros | R9 | Existe un segundo consumidor real, o intención comercial concreta de licenciar el motor |
-| BCV + `explicitApi()` + api dump | R7 | **El mismo disparador.** Con un solo consumidor el valor es bajo; con dos es obligatorio, y hay que hacerlo *antes* del segundo, no después |
+| Split `:wma-instrument` / API pública de terceros | R9 | **Se compromete el plugin de DAW** (D1-bis). Un host es un consumidor que dicta la API, no que acepta la tuya |
+| BCV + `explicitApi()` + api dump | R7 | **El mismo disparador**, y con la misma advertencia: hay que hacerlo *antes* del segundo consumidor, no después |
 | Documentación de usuario (los 9 documentos) | R18 | Ídem. **Excepción hecha ahora:** corregir el README, que afirma que la librería es sólo Android |
 | Refactor del god object `AudioEngine` | R22 | Un cambio de la Fase 3 o 7 resulta impracticable por el acoplamiento. Es un síntoma medible, no una opinión |
 | Grafo de audio / `Processor` multi-entrada | §16 | Se necesita un resampler como etapa, AEC, o una topología dinámica en runtime. **El `AudioGraph` anterior se borró por inalcanzable — no reconstruirlo por teoría** |
-| Backend de macOS | §7 | Hay una app de escritorio en el horizonte. Costo estimado: 1 semana, y es la prueba más barata de que el seam de plataforma aguanta |
+| MIDI in (eventos con timestamp de muestra) | nuevo | Se compromete el plugin. **Hoy no existe nada**: `midiNote` es sólo un número para SoundFont, no hay entrada de eventos ni cola ni timestamps. Un plugin sin MIDI in es un procesador de audio, no un instrumento |
+| Automatización de parámetros con offset de muestra | nuevo | Ídem. Hoy los parámetros son atómicos sin tiempo: el cambio se aplica al bloque entero, que en automatización es audible |
+| Serialización de estado versionada | nuevo | Ídem. Hay presets internos, no un blob que el host guarde con el proyecto |
+| Streaming de audio por red (teléfono → PC) | nuevo | **Descartado, no diferido.** 20–50 ms con jitter de WiFi y dos dominios de reloj. El concepto se cubre con WD-10.1 a 1/5 del costo |
+| ~~Backend de macOS~~ | §7 | ✅ **DISPARADO** por D1-bis — NoisyPad desktop. Pasa a ser WD-9.1 |
 | Builds reproducibles + SBOM | R25 | Distribución a terceros, o requisito de diligencia |
 | Path Swift verificado (sample app en CI) | §26 | Un consumidor iOS nativo que no sea KMP. Hoy el XCFramework **no tiene consumidores** y sus pasos de CI no corren en PRs |
 | No auto-recuperar y dejar decidir al host | WD-5.2 | Apertura a terceros. Para una app propia, auto-recuperar es lo correcto |
@@ -908,3 +972,109 @@ Las fases 4, 5 y 6 son paralelizables entre sí y con la 2. El camino crítico r
 **Si hay que recortar:** las fases 1, 2 y 3 son el núcleo — arreglan bugs vivos y hacen que el
 resto sea demostrable. La 6 son tres días y cierra un tema legal. La 7 es la única cuyo costo
 crece si se pospone. Las fases 4 y 5 son las que se pueden diferir sin que nada empeore.
+
+---
+
+## 13. Vectores de producto (D1-bis)
+
+Las fases 1–7 arreglan el motor. Estas tres lo convierten en producto, y las tres dan valor
+**sin tocar el modelo de buffer** — que es exactamente lo que las hace defendibles bajo un
+criterio de costo/beneficio.
+
+---
+
+### WD-8.1 — Que la latencia que reportás sea verdad
+
+**Problema.** Para vender "latencia profesional" el número tiene que ser cierto, y hoy es falso
+por construcción. `IAudioBackend::getRoundTripLatencyMs()` devuelve `input + output`: omite el
+lookahead limiter de 5 ms, los rings de captura, el `DriftResampler` y el pre-roll del looper.
+
+Peor: hay **dos latencias de salida distintas y ninguna se reporta**. `processOutput()` incluye
+el `LookaheadLimiter` (5 ms); el fast-path de USB usa `processOutputLightweight()`, que lo
+saltea. El mismo motor tiene dos números según por qué rama entró el bloque.
+
+**Lo que ya tenés y es bueno.** `RoundTripMeasurer` mide latencia analógica real OUT→cable→IN
+con chirps Hann y correlación cruzada, en dos planos estrictamente separados, y es
+backend-agnostic. Es infraestructura de medición seria y no hay que rehacerla — hay que
+*conectarla* a un presupuesto declarado.
+
+**Criterio de aceptación.**
+1. `wma_engine_get_latency_report()` devuelve el desglose real: device in, ring de captura,
+   bloque, latencia algorítmica de la cadena (de WD-3.1), protección de salida, device out.
+2. **El limiter de salida es opcional.** Para un presupuesto de 10 ms de guitarra, 5 ms de
+   lookahead es la mitad. Que esté siempre puesto es una decisión que hoy nadie puede revertir.
+3. El número declarado se valida contra el medido por `RoundTripMeasurer` en el lazo físico, y
+   la discrepancia entra en el reporte.
+
+**Depende de** WD-3.1 (sin latencia por efecto no hay suma que reportar) · **Esfuerzo** ~2 sem
+
+---
+
+### WD-9.1 — Backend de macOS y enumeración de dispositivos
+
+**Problema.** `CoreAudioBackend` ya compila para Apple; lo específico de iOS es `AVAudioSession`.
+Lo que no existe en ninguna plataforma es **enumerar dispositivos**: en móvil no hace falta
+porque hay uno solo, en desktop es la primera pantalla que ve el usuario.
+
+**Criterio de aceptación.** Backend de macOS sobre el mismo `IAudioBackend`; enumeración de
+dispositivos de entrada y salida en la C API; el motor arranca contra un device elegido por el
+host y no contra "el default".
+
+> **Es además la prueba más barata de que el seam de plataforma aguanta**, y ese seam es lo mejor
+> que tiene esta arquitectura. Si macOS cuesta más de dos semanas, el diagnóstico de la auditoría
+> estaba mal y conviene saberlo antes de Windows.
+
+**Riesgo aparte para Windows:** MSVC **nunca** compiló este código. Esperar GCC/Clang-ismos.
+
+**Esfuerzo** ~2 sem (macOS) · Windows y Linux quedan fuera de este WD
+
+---
+
+### WD-10.1 — El teléfono como superficie de control
+
+**Problema, y por qué esta forma y no la otra.** El concepto es "conectá el teléfono a la PC sin
+cable y grabá en vivo tocando con NoisyPad". Hay dos formas y sólo una cierra:
+
+| | Qué viaja por WiFi | Latencia realista | Costo |
+|---|---|---|---|
+| Audio en red | el audio | **20–50 ms**, más drift entre dos relojes y buffer adaptativo | un producto aparte |
+| **Superficie de control** | toques, XY, acordes | **10–20 ms de control**, audio en un solo dominio de reloj | ~1 sem |
+
+Con 20–50 ms no se toca en vivo: es el doble del umbral donde un instrumentista siente el
+retardo. La segunda forma da el mismo concepto con latencia de instrumento real.
+
+**Y ya está casi hecho.** La C API son 253 funciones que ya son un control remoto del motor:
+`wma_set_xy`, `wma_trigger_chord`, `wma_effect_set_param`. Falta el transporte, no la superficie.
+
+**Criterio de aceptación.**
+1. Transporte OSC/UDP sobre la C API, con descubrimiento en la LAN.
+2. **El transporte no entra en el thread de audio.** Los mensajes se aplican desde el thread de
+   control, igual que hoy hace el JNI. Una latencia de red variable no puede transformarse en
+   jitter del callback.
+3. Reconexión sin cortar el audio: perder el teléfono deja el motor sonando, no lo mata.
+
+**Depende de** WD-9.1 (sin desktop no hay a qué conectarse) · **Esfuerzo** ~1 sem
+
+---
+
+## 14. El orden, bajo D1-bis
+
+```
+  ya    Fase 1 — thread RT ................... CERRADA salvo WD-1.4 (post-G2)
+
+   0    WD-2.1  motor sin device .............. 1 sem   ← 3 consumidores, 1 mecanismo
+   0    Fase 2  verificabilidad ............... 5 sem
+   1    WD-3.1  latencia declarada ............ 2 sem   ← guitar mode Y plugin
+   2    WD-8.1  presupuesto de latencia real .. 2 sem   ← PRODUCTO
+   3    WD-9.1  backend macOS + devices ....... 2 sem   ← PRODUCTO
+   5    WD-10.1 teléfono como control ......... 1 sem   ← PRODUCTO
+  ---
+   4    Fase 7  AudioBufferView + planar ...... 5 sem   ← EN PARALELO desde el paso 1
+```
+
+**Los pasos 0–3 y 5 dan producto en ~13 semanas sin tocar el modelo de buffer.** El paso 4 es el
+único largo, es el único que se encarece cada mes, y va en paralelo justamente por eso.
+
+**Lo que NO está en esta lista y es deliberado:** MIDI in, automatización con offset de muestra,
+serialización de estado versionada, el split `:wma-instrument`, BCV y el wrapper CLAP/VST3. Todos
+tienen el mismo disparador ahora: **se compromete el plugin**. Ver §10.
