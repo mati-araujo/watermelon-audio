@@ -161,6 +161,98 @@ TEST(EffectLatency, EveryEffectDeclaresTheLatencyItActuallyHas) {
 }
 
 // ---------------------------------------------------------------------------
+// WD-2.3.1 — el mismo contrato, a los TRES sample rates del requerimiento.
+//
+// El test de arriba mide a 48 kHz y nada más, y eso deja un hueco con nombre:
+// **la latencia de un efecto no tiene por qué ser la misma cantidad de muestras
+// a otro rate**. `DECI_HPF` es el caso vivo — su retardo es el paso de su
+// sample-and-hold, `fs / target`, así que a 96 kHz declara el doble de muestras
+// que a 48. Un `getLatencySamples()` que devolviera una constante coincidiría
+// con lo medido a 48 kHz y mentiría en los otros dos, y hoy nada lo notaría.
+//
+// Lo que se afirma sigue siendo lo mismo —declarado == medido— sólo que ahora
+// una vez por rate. Es la mitad de WD-2.3 que faltaba: el criterio 1.
+// ---------------------------------------------------------------------------
+TEST(EffectLatency, TheDeclaredLatencyHoldsAtEverySampleRate) {
+    EffectRegistry registry;
+    registerBuiltinEffects(registry);
+
+    constexpr int kRates[3] = {44100, 48000, 96000};
+    int measured = 0;
+
+    for (int rate : kRates) {
+        for (int id = 0; id < EFFECT_TYPE_COUNT; ++id) {
+            const auto type = static_cast<EffectType>(id);
+            std::unique_ptr<Effect> effect = registry.createEffect(type);
+            ASSERT_NE(effect, nullptr) << nameOf(type) << " no está registrado";
+
+            effect->setSampleRate(rate);
+
+            const int declared = effect->getLatencySamples();
+            EXPECT_GE(declared, 0)
+                << nameOf(type) << " a " << rate << " Hz: una latencia negativa no existe";
+
+            const int onset = measureOnsetFrame(*effect);
+            if (onset < 0) continue;  // sin salida con sus defaults; ya lo cuenta el test de arriba
+            ++measured;
+
+            EXPECT_EQ(onset, declared)
+                << nameOf(type) << " a " << rate << " Hz: declara " << declared
+                << " samples y la primera energía sale en el frame " << onset << ".\n"
+                << "  Que a 48 kHz coincida no alcanza: la latencia se declara en "
+                << "MUESTRAS y la cantidad de muestras que tarda un efecto puede "
+                << "depender del rate. Este es el rate donde se rompió.";
+        }
+    }
+
+    EXPECT_GT(measured, 45) << "se midieron sólo " << measured << " combinaciones "
+                            << "efecto×rate de las " << (EFFECT_TYPE_COUNT * 3)
+                            << " posibles; el test perdió cobertura";
+}
+
+// ---------------------------------------------------------------------------
+// Y el caso que le da sentido al test de arriba: un efecto cuya latencia SÍ
+// cambia con el rate. Sin al menos uno, aquel barrido no distingue una
+// implementación correcta de una que devuelve una constante.
+// ---------------------------------------------------------------------------
+TEST(EffectLatency, DeciHpfDeclaresMoreSamplesAtAHigherRate) {
+    EffectRegistry registry;
+    registerBuiltinEffects(registry);
+
+    auto latencyAt = [&](int rate) {
+        auto fx = registry.createEffect(DECI_HPF);
+        fx->setSampleRate(rate);
+        // Target fijo en Hz: el paso del sample-and-hold es fs/target, así que
+        // con el target quieto la latencia tiene que escalar con el rate.
+        fx->setParam(DeciHpfEffect::PARAM_SAMPLE_RATE, 1000.0f);
+        return fx->getLatencySamples();
+    };
+
+    const int at48 = latencyAt(48000);
+    const int at96 = latencyAt(96000);
+
+    ASSERT_GT(at48, 0) << "DECI_HPF dejó de declarar latencia; el test perdió su caso";
+
+    // Lo que escala es el PASO del hold, no la latencia: `getLatencySamples()`
+    // devuelve `ceil(step) - 1`, porque el hold ya entrega su primer valor en el
+    // frame 0 y sólo los `step - 1` siguientes salen con el valor viejo.
+    //
+    // Es un detalle de una unidad y aun así importa: la primera versión de este
+    // test afirmó `at96 == at48 * 2`, midió 95 contra 94 y se puso roja. **El
+    // defectuoso era el test.** 47 y 95 son exactamente 48-1 y 96-1, o sea el
+    // comportamiento correcto — y afirmar el doble exacto habría obligado a
+    // "arreglar" un efecto que no tenía nada.
+    EXPECT_EQ(at96 + 1, (at48 + 1) * 2)
+        << "DECI_HPF declara " << at48 << " samples a 48 kHz y " << at96
+        << " a 96 (pasos de " << (at48 + 1) << " y " << (at96 + 1) << ").\n"
+        << "  Su latencia es el paso del sample-and-hold menos uno, y el paso es "
+        << "fs/target: con el target fijo en 1 kHz, duplicar el rate tiene que "
+        << "duplicar el paso. Si devuelve lo mismo a los dos, "
+        << "getLatencySamples() está ignorando el sample rate — y entonces "
+        << "TheDeclaredLatencyHoldsAtEverySampleRate pasa a no probar nada.";
+}
+
+// ---------------------------------------------------------------------------
 // Un delay NO tiene latencia. Es el malentendido más fácil de cometer al
 // implementar getLatencySamples(), y el que rompería la compensación: declarar
 // 250 ms haría que la cadena entera se retrase un cuarto de segundo.
