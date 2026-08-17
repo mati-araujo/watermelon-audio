@@ -965,9 +965,32 @@ A 96 kHz el crossfade de routing dura 15 ms; a 44,1 kHz, 32,6 ms.~~
    dependiente del rate. Se audita con un grep de `48000` sobre las 242 ocurrencias no-test y se
    clasifica cada una: constante legítima, default, o bug.
 2. `mCrossfadeSamples` se recalcula en `setSampleRate()`.
-3. Test de WD-2.3.2 verde: fundamental medida por FFT no se corre entre 44,1 / 48 / 96 kHz.
+3. ~~Test de WD-2.3.2 verde: fundamental medida por FFT no se corre entre 44,1 / 48 / 96 kHz.~~
+
+> 🔴 **El criterio 3 estaba mal escrito y se puede cumplir dejando el defecto (2026-08-17).**
+> Exigía sólo **invarianza** entre rates, y el desafine de Karplus-Strong es **absoluto**: el
+> lazo mide `fs/f + D` con `D` constante de 6,79 a 7,36 muestras (retardo de grupo del filtro
+> del lazo más el del interpolador, sin descontar). A 440 Hz sobre 44,1 kHz eso es
+> **−118 cents, un semitono entero**, y a 48 kHz siguen siendo −108. Se puede compensar hasta
+> dejar el error *constante* entre los tres rates y pasar este criterio con el instrumento
+> **un semitono bajo**.
+>
+> **Criterio 3 (reescrito).** La fundamental medida por FFT cae en la nota pedida dentro de una
+> tolerancia declarada en **cents**, a 44,1 / 48 / 96 kHz. La invarianza entre rates es
+> consecuencia, no el objetivo: `D · f / fs` produce los dos síntomas —error absoluto y deriva
+> con el rate— y **compensar `D` arregla los dos de una**.
+>
+> El instrumento ya está commiteado desde WD-2.3:
+> `EnginePitch.TheKarplusLoopIsLongerThanItAsksFor` **mide `D`**, que es exactamente lo que hay
+> que descontar. FM / SUPERSAW / WAVETABLE / GRANULAR **no se midieron** — el baseline lo dice
+> como tarea pendiente, no como afirmación de que estén bien.
 
 **Esfuerzo** 3 d · **Riesgo** medio (toca el ciclo de vida de dieciséis engines) · **Depende de** WD-2.3
+
+> **Nota de partición (2026-08-17).** Son dos trabajos de costo muy distinto y conviene tomarlos
+> por separado: **compensar `D`** (barato, instrumento ya commiteado, síntoma de usuario
+> audible) y **re-preparar el dispatcher** (el grueso de los 3 días, dieciséis engines). El
+> primero cierra el criterio 3; el segundo, el 1.
 
 ---
 
@@ -1110,6 +1133,47 @@ estable sólo en 0, y ya crece con 0,10; **DECAY** (rango 0,4–5, defecto 2,2) 
    de WD-3.5, **este cambio sí cambia el sonido**, y a todos los rates.
 
 **Esfuerzo** 1 d · **Riesgo** medio (cambia el sonido de un efecto) · **Depende de** —
+
+> ✅ **HECHO (2026-08-17).** `loop-stability-baseline.txt` **vacío**.
+>
+> **El arreglo:** el lazo se reparte un **presupuesto** de ganancia en vez de que cada camino
+> traiga la suya. `loopGain` sigue siendo el mapeo original del decay, los taps se dividen por
+> su propia suma (1,49) y **el drip descuenta del mismo presupuesto** en vez de sumarse por
+> afuera. Queda acotado **por construcción**, no por un clamp al final.
+>
+> **Medido sobre las 126 combinaciones de las tres perillas (decay × drip × tension): cero
+> crecen**, y la peor razón es 0,5734. El RT60 va de 1,0 s en el mínimo del decay a 3,0 s en el
+> tope — la perilla conserva su recorrido, que es lo que separa esto del arreglo trivial de
+> bajar el feedback hasta que no explote.
+>
+> **El borde se predijo antes de medirlo y cayó exacto**: con el drip en 0, la ganancia cruza 1
+> en `decay = (1/1,49 − 0,45) / 0,11 = 2,010`; medido, estable en 2,01 (0,952) e inestable en
+> 2,05 (1,004). El borde del **drip**, en cambio, **discrepó** — el drip contribuye menos que su
+> módulo porque lee a 7 y 9 ms contra los 17–181 ms de los taps, y esas fases no se alinean. Por
+> eso lo que se acota es la **suma de módulos**: es cota superior a cualquier frecuencia, y una
+> cota que depende de la frecuencia no es una cota. El arreglo es conservador a propósito.
+>
+> **El criterio 3 quedó sin objeto, y eso es un hallazgo, no un trámite: `SPRING_REVERB` nunca
+> tuvo golden.** Los doce archivos capturados son los seis casos de filtro y EQ de la primera
+> tanda de WD-2.2. Es coherente — **un efecto que diverge no es capturable**; ahora que es
+> estable, sí lo es. Queda como tarea de WD-2.2, que ya declaraba pendientes "los golden por
+> efecto del resto".
+>
+> **La exclusión de `SPRING_REVERB` en el barrido de Nyquist se fue con su motivo.** Una
+> exclusión que sobrevive a la deuda que la justificaba es un punto ciego permanente.
+>
+> **Y el instrumento tenía un agujero que sólo apareció al arreglar el efecto.** La razón de
+> crecimiento promediaba razones **locales** entre ventanas; cuando la cola decae hasta el
+> silencio numérico todas valen cero, la razón queda indefinida y el veredicto salía "no
+> medible" — que es justo lo que un efecto **sano** no debería recibir, y peor: el barrido de
+> deuda nueva **saltea** lo no medible. Se pasó a medir punta a punta con piso de silencio.
+>
+> Campaña de mutación: 5 mutantes, 4 muertos y **uno sobrevivió** — acotar con un clamp al final
+> escalando el total resultó ser un **diseño alternativo válido**, no un defecto: estable y
+> monótono. Verificado con un probe aparte antes de tocar nada (mueve el RT60 de 2,50 a 3,50 s,
+> factor 1,4, contra 1,00–3,00 del presupuesto repartido, factor 3,0). De ahí salió una
+> afirmación nueva sobre el **rango útil** de la perilla, que es lo único que los distingue.
+> Séptima vez en este programa que el defectuoso es el mutante y no el test.
 
 ---
 

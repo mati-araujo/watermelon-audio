@@ -16,31 +16,30 @@
 # Formato:  <EFFECT_TYPE> | <razon de crecimiento por ventana de 0,5 s> | <por que>
 #
 # ---------------------------------------------------------------------------
-# DUEÑO DE ESTA DEUDA: **WD-3.6 — la ganancia de lazo de SPRING_REVERB**.
+# VACIO DESDE WD-3.6. Tuvo una sola entrada, `SPRING_REVERB`, y se pago.
 #
-# Como se encontro: no lo encontro este test, lo encontro el diagnostico de
-# WD-3.5. SPRING figuraba en `nyquist-baseline.txt` como "diverge a 8.000 Hz", y
-# la medicion mostro que diverge a los SIETE rates probados —8.000, 11.025,
-# 16.000, 22.050, 32.000, 44.100, 48.000 y 96.000— con el mismo tiempo hasta la
-# cota (0,96 a 1,22 s). Aparecia solo en el rate mas bajo porque la ventana del
-# test iba en BLOQUES: 32 bloques de 512 son 2,0 s a 8 kHz y 0,34 s a 48 kHz.
+# QUE ERA: el camino cruzado del tanque multiplicaba `feedback` por una suma de
+# taps que ya valia 1,49 (0,55 + 0,42 + 0,30 + 0,22), y el drip sumaba
+# 0,45 * drip MAS, por afuera del feedback. Con el decay por defecto (2,2 ->
+# feedback 0,692) la ganancia daba 1,031 antes de contar el drip: **el efecto era
+# inestable con los valores de fabrica**, a todo sample rate.
 #
-# EL SINTOMA DE USUARIO, medido con un seno de 220 Hz a nivel de instrumento
-# (0,30) y TODO por defecto, a 48 kHz: la salida crece desde el segundo ~6, pasa
-# por 1e34 a los 35 s y a los ~38 s el tanque se va a no-finito. Ahi el scrub de
-# `if (!isfinite) wet = 0` corta la señal humeda y **el reverb queda mudo para
-# siempre**. El auto-gain por bloque de `EffectChain::processOneEffect` no lo
-# evita: clava la salida en 1,5 (un muro comprimido) y el tanque explota igual.
+# COMO SE PAGO: el lazo pasa a repartirse un PRESUPUESTO de ganancia en vez de
+# que cada camino traiga la suya, y el drip descuenta de ese mismo presupuesto.
+# Acotado por construccion, no por un clamp al final. Medido sobre las 126
+# combinaciones de las tres perillas (decay x drip x tension): **cero crecen**,
+# y la peor razon es 0,5734. El RT60 sigue siendo monotono en el recorrido del
+# decay —1,0 s en el minimo, 3,0 s en el maximo— que es lo que separa este
+# arreglo del arreglo trivial de bajar el feedback hasta que no explote.
 #
-# ORDEN QUE ESTO IMPONE: **WD-3.3 no puede ir antes que WD-3.6.** WD-3.3 saca
-# ese auto-gain, que hoy es lo unico que acota la salida de este efecto.
+# DE DONDE SALIO: no lo encontro este test, lo encontro el diagnostico de
+# WD-3.5. `SPRING_REVERB` figuraba en `nyquist-baseline.txt` como "diverge a
+# 8.000 Hz", y la medicion mostro que divergia a los OCHO rates probados con el
+# mismo tiempo. Aparecia solo en el mas bajo porque la ventana del test iba en
+# BLOQUES: 32 bloques de 512 son 2,0 s a 8 kHz y 0,34 s a 48 kHz.
+# **Un baseline indexado por sample rate atribuye al sample rate.**
 #
-# Los dos parametros que lo disparan, medidos por separado a 48 kHz:
-#   - DRIP (rango 0..1, defecto 0,35): estable solo en 0. Con 0,10 ya crece.
-#   - DECAY (rango 0,4..5, defecto 2,2): estable hasta 1,0 (fb 0,560);
-#     inestable desde 2,2 (fb 0,692), aun con drip en 0.
-# Los taps del tanque suman 1,49 de ganancia y el lazo los multiplica por el
-# feedback, asi que con el feedback por encima de 1/1,49 = 0,67 el lazo se va.
+# La regla, para el proximo que agregue una entrada a CUALQUIERA de estos
+# archivos: corre el repro FUERA del eje que el baseline indexa. Si tambien
+# falla ahi, no es de ese archivo.
 # ---------------------------------------------------------------------------
-
-SPRING_REVERB | 3,15 | lazo cruzado L/R: los 4 taps suman 1,49 y el feedback por defecto es 0,692

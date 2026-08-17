@@ -341,13 +341,11 @@ TEST(NyquistLimits, NoNewDivergenceAppearsBelowFortyKilohertz) {
         const auto type = static_cast<EffectType>(id);
         if (baseline.count(nameOf(type)) > 0) continue;
 
-        // SPRING_REVERB queda afuera de ESTE barrido y solo de este: su
-        // divergencia no es de Nyquist —ocurre igual a 96 kHz— y meterla aca la
-        // volveria a atribuir al sample rate, que es el error que este archivo
-        // acaba de corregir. La exclusion no es un comentario: esta MEDIDA por
-        // `LoopStability.EveryDeclaredCaseStillReproduces`, y el dia que WD-3.6
-        // la pague, ese test se pone rojo.
-        if (type == SPRING_REVERB) continue;
+        // Aca hubo una exclusion de SPRING_REVERB mientras su lazo era
+        // inestable: su divergencia no era de Nyquist —ocurria igual a 96 kHz—
+        // y dejarla en este barrido la habria vuelto a atribuir al sample rate.
+        // WD-3.6 pago esa deuda, asi que la exclusion se fue con ella. Una
+        // exclusion que sobrevive a su motivo es un punto ciego permanente.
 
         for (int p = 0; p < 3; ++p) {
             for (float v : {0.0f, 20.0f, 20000.0f}) {

@@ -79,21 +79,65 @@ void SpringReverbEffect::process(float* input, float* output, int numFrames) {
         float inL = mInputHpfL.process(dryL);
         float inR = mInputHpfR.process(dryR);
 
+        // WD-3.6 — los pesos de los taps salen a constantes con nombre porque
+        // `kTapSum` (abajo) tiene que ser SU SUMA, y un 1,49 escrito a mano se
+        // vuelve mentira la primera vez que alguien toca uno de los cuatro.
+        // Derivarla los mantiene atados sin que nadie tenga que acordarse.
+        constexpr float kTap0 = 0.55f;
+        constexpr float kTap1 = 0.42f;
+        constexpr float kTap2 = 0.30f;
+        constexpr float kTap3 = 0.22f;
+
         float stretch = 0.75f + tension * 0.45f;
         float tapL =
-            mTankL.readMs(23.0f * stretch) * 0.55f +
-            mTankL.readMs(47.0f * stretch) * 0.42f +
-            mTankL.readMs(89.0f * stretch) * 0.30f +
-            mTankL.readMs(151.0f * stretch) * 0.22f;
+            mTankL.readMs(23.0f * stretch) * kTap0 +
+            mTankL.readMs(47.0f * stretch) * kTap1 +
+            mTankL.readMs(89.0f * stretch) * kTap2 +
+            mTankL.readMs(151.0f * stretch) * kTap3;
         float tapR =
-            mTankR.readMs(29.0f * stretch) * 0.55f +
-            mTankR.readMs(53.0f * stretch) * 0.42f +
-            mTankR.readMs(97.0f * stretch) * 0.30f +
-            mTankR.readMs(167.0f * stretch) * 0.22f;
+            mTankR.readMs(29.0f * stretch) * kTap0 +
+            mTankR.readMs(53.0f * stretch) * kTap1 +
+            mTankR.readMs(97.0f * stretch) * kTap2 +
+            mTankR.readMs(167.0f * stretch) * kTap3;
 
-        float feedback = std::clamp(0.45f + decay * 0.11f, 0.0f, 0.92f);
-        float dripClickL = mTankL.readMs(7.0f) * drip * 0.45f;
-        float dripClickR = mTankR.readMs(9.0f) * drip * 0.45f;
+        // WD-3.6 — el lazo se reparte un PRESUPUESTO de ganancia, en vez de que
+        // cada camino traiga la suya.
+        //
+        // Antes, `feedback` multiplicaba a `tapR`, que ya venia con la suma de
+        // los cuatro coeficientes de arriba: 0,55 + 0,42 + 0,30 + 0,22 = 1,49.
+        // Con el decay por defecto (2,2 -> feedback 0,692) la ganancia del
+        // camino cruzado daba 1,49 * 0,692 = 1,031, y el drip sumaba 0,45 * 0,35
+        // MAS, porque entra al tanque contrario sin pasar por `feedback`.
+        // O sea: **el efecto era inestable con los valores de fabrica**, a todo
+        // sample rate. La cola crecia, a los ~35 s pasaba 1e34 y a los ~38 s el
+        // tanque se iba a no-finito; ahi el scrub de la salida lo convertia en
+        // silencio y el reverb quedaba MUDO para siempre.
+        //
+        // El borde se predijo antes de medirlo y cayo exacto: con el drip en 0,
+        // la ganancia cruza 1 en decay = (1/1,49 - 0,45) / 0,11 = **2,010**, y
+        // medido es estable en 2,01 (0,952) e inestable en 2,05 (1,004).
+        //
+        // Lo que se acota es la SUMA DE MODULOS, que es cota superior de la
+        // ganancia a cualquier frecuencia y por eso alcanza para garantizar
+        // estabilidad en todo el rango de las dos perillas — no solo en los
+        // defaults, que es lo que pide el criterio. Es conservadora a proposito:
+        // el borde real del drip esta mas arriba que su modulo (lee a 7 y 9 ms
+        // contra los 17 a 181 de los taps, y esas fases no se alinean), pero una
+        // cota que depende de la frecuencia no es una cota.
+        //
+        // El drip DESCUENTA del mismo presupuesto en vez de sumarse por afuera:
+        // asi subir el drip cambia el CARACTER —mas click, menos taps— sin tocar
+        // el largo de la cola ni poder desestabilizar. Y `loopGain` sigue siendo
+        // el mapeo original del decay, asi que la perilla conserva su monotonia
+        // en todo el recorrido.
+        constexpr float kTapSum = kTap0 + kTap1 + kTap2 + kTap3;  // = 1,49
+        constexpr float kMaxLoopGain = 0.92f;  // el mismo techo que ya tenia
+        const float loopGain = std::clamp(0.45f + decay * 0.11f, 0.0f, kMaxLoopGain);
+        const float dripGain = drip * 0.45f;
+        const float feedback = std::max(0.0f, loopGain - dripGain) / kTapSum;
+
+        float dripClickL = mTankL.readMs(7.0f) * dripGain;
+        float dripClickR = mTankR.readMs(9.0f) * dripGain;
 
         mTankL.write(inL + tapR * feedback + dripClickR);
         mTankR.write(inR + tapL * feedback + dripClickL);
