@@ -62,7 +62,17 @@ using wma::catalog::nameOf;
 constexpr int kRate = 48000;
 constexpr int kFrames = 512;
 constexpr double kWindowSeconds = 0.5;
-constexpr double kTotalSeconds = 8.0;
+
+/// Cola que se mide. Ocho ventanas: seis es el minimo que `tailGrowthRatio`
+/// necesita, y el margen restante paga el transitorio del impulso.
+///
+/// Bajo de 8 s a 4 s en WD-3.6 por presupuesto de TSan, y la rebaja esta MEDIDA:
+/// el defecto original crecia 3,15x por ventana, o sea 3,15^7 = 3.000x entre la
+/// primera y la ultima. Sobra margen. Lo que una cola mas corta pierde es
+/// sensibilidad a inestabilidades APENAS por encima de 1 — por eso el barrido de
+/// arriba incluye explicitamente el borde medido (2,01 estable / 2,05
+/// inestable), que es el caso mas marginal que se conoce para este efecto.
+constexpr double kTotalSeconds = 4.0;
 
 /// Por encima de esto se llama crecimiento. No es una tolerancia elegida: la
 /// medicion separo dos poblaciones sin zona gris — los efectos sanos decaen
@@ -208,14 +218,36 @@ TEST(LoopStability, TheSpringStaysBoundedAcrossEveryCombinationOfItsKnobs) {
     // defecto original era estable en el tercio inferior del decay y por eso
     // sobrevivio a todos los barridos que probaban un solo punto.
     //
-    // 126 combinaciones. El costo es de segundos porque la cola de un impulso
-    // se mide en 8 s de audio y no hace falta señal sostenida.
+    // POR QUE ESTOS PUNTOS Y NO UN BARRIDO UNIFORME. La primera version media
+    // 126 combinaciones con 8 s de cola cada una: 44 s en el build normal y
+    // **timeout bajo TSan**, que corre unas catorce veces mas lento. Un test que
+    // no entra en el presupuesto de los sanitizers no protege nada, porque los
+    // sanitizers son justamente donde el CI encuentra lo que el resto no ve.
+    //
+    // El barrido uniforme ademas era el instrumento equivocado: la ganancia de
+    // lazo es **monotona** en las dos perillas —`loopGain` crece con el decay y
+    // `dripGain` con el drip—, asi que su maximo esta en un VERTICE del cubo, no
+    // en el interior. Muestrear el interior uniformemente paga por puntos que no
+    // pueden ser el peor caso.
+    //
+    // Lo que queda son los vertices (que acotan por monotonia), los defaults
+    // (donde vivia el defecto) y los dos valores del BORDE medido: 2,01 era
+    // estable y 2,05 inestable, o sea el par mas exigente que existe para esta
+    // propiedad. Verificado por mutacion que sigue cazando el defecto original.
+    //
+    // COSTO MEDIDO, para que nadie lo infle sin darse cuenta: 30 puntos con 4 s
+    // de cola son ~9 s en el build normal y **108 s bajo TSan** en un M-series,
+    // contra el `--timeout 180` que usa el CI. El TSan del CI corre unas tres
+    // veces mas rapido que esta maquina (295 s contra 865 s para la suite
+    // entera, medido en WD-1.x), asi que alla ronda los 40 s. Si alguien agrega
+    // puntos o alarga la cola, este es el numero contra el que hay que medir —
+    // y el limite que importa no es el del build normal.
     EffectRegistry registry;
     registerBuiltinEffects(registry);
 
-    for (float decay : {0.4f, 1.0f, 2.0f, 2.2f, 3.0f, 4.0f, 5.0f}) {
-        for (float drip : {0.0f, 0.25f, 0.35f, 0.5f, 0.75f, 1.0f}) {
-            for (float tension : {0.0f, 0.5f, 1.0f}) {
+    for (float decay : {0.4f, 2.01f, 2.05f, 2.2f, 5.0f}) {
+        for (float drip : {0.0f, 0.35f, 1.0f}) {
+            for (float tension : {0.0f, 1.0f}) {
                 std::unique_ptr<Effect> fx = registry.createEffect(SPRING_REVERB);
                 fx->setSampleRate(kRate);
                 fx->setParam(0, decay);
