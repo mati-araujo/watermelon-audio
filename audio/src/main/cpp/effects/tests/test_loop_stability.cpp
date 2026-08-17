@@ -62,7 +62,17 @@ using wma::catalog::nameOf;
 constexpr int kRate = 48000;
 constexpr int kFrames = 512;
 constexpr double kWindowSeconds = 0.5;
-constexpr double kTotalSeconds = 8.0;
+
+/// Cola que se mide. Ocho ventanas: seis es el minimo que `tailGrowthRatio`
+/// necesita, y el margen restante paga el transitorio del impulso.
+///
+/// Bajo de 8 s a 4 s en WD-3.6 por presupuesto de TSan, y la rebaja esta MEDIDA:
+/// el defecto original crecia 3,15x por ventana, o sea 3,15^7 = 3.000x entre la
+/// primera y la ultima. Sobra margen. Lo que una cola mas corta pierde es
+/// sensibilidad a inestabilidades APENAS por encima de 1 — por eso el barrido de
+/// arriba incluye explicitamente el borde medido (2,01 estable / 2,05
+/// inestable), que es el caso mas marginal que se conoce para este efecto.
+constexpr double kTotalSeconds = 4.0;
 
 /// Por encima de esto se llama crecimiento. No es una tolerancia elegida: la
 /// medicion separo dos poblaciones sin zona gris — los efectos sanos decaen
@@ -108,20 +118,35 @@ std::vector<double> impulseTailEnvelope(Effect& fx) {
     return env;
 }
 
-/// Razon media (geometrica) entre ventanas consecutivas de la SEGUNDA MITAD de
-/// la cola. La primera mitad todavia tiene el transitorio del impulso.
-/// Devuelve -1 si la cola es demasiado corta o cayo a silencio numerico.
+/// Razon geometrica de crecimiento por ventana, medida de punta a punta de la
+/// cola: de la ventana 1 (la primera despues del impulso directo) a la ultima.
+/// Devuelve -1 solo si no hay cola que medir.
+///
+/// Se mide punta a punta y no promediando razones LOCALES por una razon que
+/// destapo el propio arreglo de WD-3.6: cuando la cola decae hasta el silencio
+/// numerico, todas las ventanas del final valen cero, cada razon local queda
+/// indefinida, y el promedio de razones se vuelve "no medible" — que es
+/// exactamente el veredicto que un efecto SANO no deberia recibir. Peor: el
+/// barrido de deuda nueva saltea lo no medible, asi que el instrumento se
+/// quedaba mudo justo sobre los efectos que mas rapido decaen.
+///
+/// Con el piso de abajo, una cola que se apaga da una razon cercana a cero —que
+/// es decaimiento, y es lo que hay que afirmar— y una que crece la da mayor
+/// que 1. El caso "no medible" queda reservado para lo que de verdad no tiene
+/// cola.
 double tailGrowthRatio(const std::vector<double>& env) {
     if (env.size() < 6) return -1.0;
-    double logSum = 0.0;
-    int n = 0;
-    for (size_t i = env.size() / 2 + 1; i < env.size(); ++i) {
-        if (env[i - 1] > 1e-12 && env[i] > 1e-12) {
-            logSum += std::log(env[i] / env[i - 1]);
-            ++n;
-        }
-    }
-    return n > 0 ? std::exp(logSum / n) : -1.0;
+
+    /// Piso de silencio. Por debajo de esto la cola ya se apago: lo que importa
+    /// es que llego hasta aca, no cuanto mas baja.
+    constexpr double kFloor = 1e-9;
+
+    const double first = std::max(env[1], kFloor);
+    const double last = std::max(env.back(), kFloor);
+    if (env[1] <= kFloor) return -1.0;  // nunca hubo cola: nada que afirmar
+
+    const double steps = static_cast<double>(env.size() - 2);
+    return std::pow(last / first, 1.0 / steps);
 }
 
 /// La cola de un efecto con los parametros DE FABRICA. Que sea con los defaults
@@ -187,36 +212,137 @@ TEST(LoopStability, TheInstrumentSaysDecayForReverbsThatAreKnownToDecay) {
     }
 }
 
-TEST(LoopStability, TheInstrumentSeparatesAStableSpringFromAnUnstableOne) {
-    // El mismo efecto, con un solo parametro cambiado, tiene que cruzar la
-    // frontera. Esto es lo que descarta que el veredicto sobre SPRING venga de
-    // algo estructural del efecto (su cola, sus taps, su tanque) en vez de de la
-    // ganancia del lazo — la unica variable que se toca aca es el decay, y el
-    // decay es literalmente el que fija el feedback.
+TEST(LoopStability, TheSpringStaysBoundedAcrossEveryCombinationOfItsKnobs) {
+    // WD-3.6. El criterio pedia la ganancia por debajo de 1 **en todo el rango
+    // de las perillas, no solo en los defaults**, y eso no es retorica: el
+    // defecto original era estable en el tercio inferior del decay y por eso
+    // sobrevivio a todos los barridos que probaban un solo punto.
+    //
+    // POR QUE ESTOS PUNTOS Y NO UN BARRIDO UNIFORME. La primera version media
+    // 126 combinaciones con 8 s de cola cada una: 44 s en el build normal y
+    // **timeout bajo TSan**, que corre unas catorce veces mas lento. Un test que
+    // no entra en el presupuesto de los sanitizers no protege nada, porque los
+    // sanitizers son justamente donde el CI encuentra lo que el resto no ve.
+    //
+    // El barrido uniforme ademas era el instrumento equivocado: la ganancia de
+    // lazo es **monotona** en las dos perillas —`loopGain` crece con el decay y
+    // `dripGain` con el drip—, asi que su maximo esta en un VERTICE del cubo, no
+    // en el interior. Muestrear el interior uniformemente paga por puntos que no
+    // pueden ser el peor caso.
+    //
+    // Lo que queda son los vertices (que acotan por monotonia), los defaults
+    // (donde vivia el defecto) y los dos valores del BORDE medido: 2,01 era
+    // estable y 2,05 inestable, o sea el par mas exigente que existe para esta
+    // propiedad. Verificado por mutacion que sigue cazando el defecto original.
+    //
+    // COSTO MEDIDO, para que nadie lo infle sin darse cuenta: 30 puntos con 4 s
+    // de cola son ~9 s en el build normal y **108 s bajo TSan** en un M-series,
+    // contra el `--timeout 180` que usa el CI. El TSan del CI corre unas tres
+    // veces mas rapido que esta maquina (295 s contra 865 s para la suite
+    // entera, medido en WD-1.x), asi que alla ronda los 40 s. Si alguien agrega
+    // puntos o alarga la cola, este es el numero contra el que hay que medir —
+    // y el limite que importa no es el del build normal.
     EffectRegistry registry;
     registerBuiltinEffects(registry);
 
-    auto growthWithDecay = [&](float decay) {
+    for (float decay : {0.4f, 2.01f, 2.05f, 2.2f, 5.0f}) {
+        for (float drip : {0.0f, 0.35f, 1.0f}) {
+            for (float tension : {0.0f, 1.0f}) {
+                std::unique_ptr<Effect> fx = registry.createEffect(SPRING_REVERB);
+                fx->setSampleRate(kRate);
+                fx->setParam(0, decay);
+                fx->setParam(2, drip);
+                fx->setParam(3, tension);
+
+                const std::vector<double> env = impulseTailEnvelope(*fx);
+                ASSERT_FALSE(env.empty())
+                    << "la cola se fue a no-finito con decay " << decay
+                    << ", drip " << drip << ", tension " << tension;
+
+                const double ratio = tailGrowthRatio(env);
+                EXPECT_LT(ratio, kGrowthThreshold)
+                    << "la cola CRECE (razon " << ratio << ") con decay "
+                    << decay << ", drip " << drip << ", tension " << tension
+                    << ".\n  El presupuesto de ganancia de lazo de WD-3.6 dejo "
+                    << "de acotar. `kTapSum` se deriva de los cuatro pesos, asi "
+                    << "que no puede haber quedado stale: mira si aparecio un "
+                    << "camino de realimentacion NUEVO que no descuenta del "
+                    << "presupuesto — que es exactamente lo que hacia el drip "
+                    << "antes de este requerimiento.";
+            }
+        }
+    }
+}
+
+TEST(LoopStability, TheDecayKnobStillHasRangeAfterBeingBounded) {
+    // La otra mitad, y la que hace que el arreglo sea un arreglo: acotar la
+    // ganancia de lazo tiene un fix trivial —bajar el feedback hasta que no
+    // explote— que pasa el test de arriba y **destruye el efecto**. Aplanar la
+    // mitad superior del recorrido es la version suave del mismo error.
+    //
+    // Se mide el RT60 y se exige que crezca con la perilla y que tenga rango
+    // real. Los numeros salen de la medicion, no de un deseo: 1,0 s en el
+    // minimo y 3,0 s en el maximo.
+    EffectRegistry registry;
+    registerBuiltinEffects(registry);
+
+    auto rt60 = [&](float decay) {
         std::unique_ptr<Effect> fx = registry.createEffect(SPRING_REVERB);
         fx->setSampleRate(kRate);
-        fx->setParam(2, 0.0f);      // DRIP en 0: aislar el decay
-        fx->setParam(0, decay);     // DECAY -> feedback = 0,45 + decay * 0,11
+        fx->setParam(0, decay);
         const std::vector<double> env = impulseTailEnvelope(*fx);
-        return env.empty() ? 1e9 : tailGrowthRatio(env);
+        if (env.size() < 3 || env[1] <= 0.0) return -1.0;
+        for (size_t i = 2; i < env.size(); ++i) {
+            if (env[i] > 0.0 && 20.0 * std::log10(env[i] / env[1]) <= -60.0) {
+                return static_cast<double>(i) * kWindowSeconds;
+            }
+        }
+        return -1.0;  // no llego a -60 dB en la ventana: cola demasiado larga
     };
 
-    const double stable = growthWithDecay(1.0f);    // feedback 0,560
-    const double unstable = growthWithDecay(3.0f);  // feedback 0,780
+    const double atMin = rt60(0.4f);
+    const double atDefault = rt60(2.2f);
+    const double atMax = rt60(5.0f);
 
-    EXPECT_LT(stable, 1.0)
-        << "con el decay en 1,0 (feedback 0,560) la cola ya crece (razon "
-        << stable << "). El lazo empeoro por debajo del punto donde estaba "
-        << "medido, o el instrumento dejo de discriminar.";
-    EXPECT_GT(unstable, kGrowthThreshold)
-        << "con el decay en 3,0 (feedback 0,780) la cola NO crece (razon "
-        << unstable << "). Si es porque WD-3.6 acoto la ganancia de lazo, este "
-        << "test hay que reescribirlo contra el contrato nuevo; si no, el "
-        << "instrumento dejo de ver lo que este archivo existe para ver.";
+    EXPECT_GT(atMin, 0.0) << "el decay minimo no deja cola medible";
+
+    // Se miden TRES puntos y no dos a proposito. Con solo el minimo y el tope,
+    // un clamp aplicado al final —en vez de un presupuesto repartido— pasa
+    // igual: aplana la mitad SUPERIOR del recorrido y deja el extremo inferior
+    // intacto, asi que la comparacion min-contra-max sigue dando bien. El punto
+    // del medio es el que lo caza.
+    EXPECT_GT(atDefault, atMin)
+        << "el RT60 con el decay por defecto (" << atDefault << " s) no supera "
+        << "al del minimo (" << atMin << " s).";
+    EXPECT_GT(atMax, atDefault)
+        << "el RT60 en el tope del decay (" << atMax << " s) no supera al del "
+        << "defecto (" << atDefault << " s): la mitad de arriba del recorrido "
+        << "quedo aplanada.\n"
+        << "  Casi siempre significa que la ganancia se acoto con un clamp al "
+        << "final en vez de repartiendo un presupuesto — el clamp satura, y "
+        << "todo lo que este por encima del techo suena igual.";
+    EXPECT_GE(atMax, 2.5)
+        << "el RT60 maximo bajo a " << atMax << " s. El presupuesto de ganancia "
+        << "se apreto de mas y el spring perdio su cola larga, que es la razon "
+        << "por la que alguien elige un spring.";
+
+    // Y el RANGO util, que es lo ultimo que separa una perilla de un adorno.
+    //
+    // Esta afirmacion se agrego por un mutante que SOBREVIVIO: acotar con un
+    // clamp al final, escalando el total, es estable y ademas conserva la
+    // monotonia — o sea que no es un defecto, es un DISEÑO ALTERNATIVO valido, y
+    // por eso ninguna de las afirmaciones de arriba podia matarlo. Lo unico que
+    // lo separa del elegido es esto: sobre el recorrido completo mueve el RT60
+    // de 2,50 a 3,50 s (un factor de 1,4) contra 1,00 a 3,00 del presupuesto
+    // repartido (un factor de 3,0).
+    //
+    // El corte va en 2,0 y no en 3,0 justamente para no atar el test a UNA
+    // implementacion: lo que se defiende es que una perilla con recorrido 0,4 a
+    // 5,0 —un factor de 12,5— no puede mover la cola apenas un 40 %.
+    EXPECT_GE(atMax / atMin, 2.0)
+        << "el recorrido completo del decay mueve el RT60 de " << atMin << " s a "
+        << atMax << " s, un factor de " << (atMax / atMin) << ". La perilla "
+        << "quedo casi inerte: su rango nominal es 0,4 a 5,0, un factor de 12,5.";
 }
 
 // ===========================================================================
