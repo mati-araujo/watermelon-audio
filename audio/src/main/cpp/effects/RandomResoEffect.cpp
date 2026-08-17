@@ -23,6 +23,17 @@ void RandomResoEffect::setSampleRate(int sampleRate) {
     mMixSmooth.setSmoothingTime(5.0f, sr);
 }
 
+void RandomResoEffect::reset() {
+    mFilterL.reset();
+    mFilterR.reset();
+
+    // El LFO de random-smooth lleva su valor actual y su fase: sin resetearlo,
+    // el sweep del contexto nuevo arranca donde lo dejo el anterior.
+    mRandomLfo.reset();
+
+    mMixSmooth.reset(mMix.load(std::memory_order_relaxed));
+}
+
 void RandomResoEffect::setParam(int paramId, float value) {
     switch (paramId) {
         case PARAM_CENTER_FREQ:

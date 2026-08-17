@@ -180,6 +180,19 @@ void ParametricEQ::setHighShelf(float frequency, float gainDb) {
     updateBand(HIGH);
 }
 
+void ParametricEQ::reset() {
+    // Seis biquads: tres bandas por dos canales. No se tocan frecuencias,
+    // ganancias ni bypass — eso es configuracion, no estado.
+    //
+    // ParametricEQ NO esta en EffectRegistry, asi que el barrido property-based
+    // de WD-2.2 no lo alcanza; entra por el virtual puro, que es justamente el
+    // punto de haberlo hecho virtual puro.
+    for (int i = 0; i < NUM_BANDS; ++i) {
+        mFiltersL[i].reset();
+        mFiltersR[i].reset();
+    }
+}
+
 void ParametricEQ::setBandBypass(Band band, bool bypass) {
     if (band < NUM_BANDS) {
         mBypassed[band].store(bypass, std::memory_order_relaxed);

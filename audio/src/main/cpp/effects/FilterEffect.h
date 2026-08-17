@@ -100,6 +100,14 @@ public:
      */
     void setSampleRate(int sampleRate) override;
 
+    /**
+     * @brief Limpia la memoria del biquad y re-siembra los smoothers (WD-3.2).
+     *
+     * No toca cutoff, resonance ni type: eso es configuracion del usuario, no
+     * estado. Tampoco los coeficientes, que se derivan de esos parametros.
+     */
+    void reset() override;
+
 private:
     int mSampleRate = 48000;  /**< Current sample rate */
     std::atomic<float> cutoff{1000.0f}; /**< Frecuencia de corte atómica para thread-safety */

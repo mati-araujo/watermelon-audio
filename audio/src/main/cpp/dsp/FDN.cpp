@@ -121,6 +121,17 @@ void FDN::process(float inputL, float inputR, float& outputL, float& outputR) {
 void FDN::reset() {
     for (int i = 0; i < FDN_CHANNELS; ++i) {
         mDelays[i].clear();
+
+        // WD-3.2 — lo que faltaba, y es el mismo error una capa mas abajo:
+        // limpiar las lineas de delay es limpiar la COLA, pero cada canal tiene
+        // ademas dos biquads de damping (con su z1/z2) y un LFO de modulacion
+        // (con su fase). Sin esto, tres reverbs distintos —hall, plate y
+        // shimmer— seguian arrastrando estado a traves del reset aunque los
+        // tres hubieran arreglado el suyo: la deuda estaba en el primitivo que
+        // comparten, no en ellos.
+        mLpf[i].reset();
+        mHpf[i].reset();
+        mModLfo[i].reset();
     }
     // No tail survives a reset, so there is nothing to glide for: snap to the
     // target and let the next note start at the size the user actually set.

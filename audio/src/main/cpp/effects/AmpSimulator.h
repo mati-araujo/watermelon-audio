@@ -76,6 +76,9 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /// Limpia los cuatro biquads por canal, el sag y los smoothers (WD-3.2).
+    void reset() override;
+
 private:
     int mSampleRate{48000};
 

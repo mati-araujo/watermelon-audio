@@ -85,6 +85,10 @@ public:
      */
     void setSampleRate(int sampleRate) override;
 
+    /// Limpia el banco, las envolventes de banda, la fase de la portadora, los
+    /// filtros de entrada/salida y el modulador externo pendiente (WD-3.2).
+    void reset() override;
+
     /**
      * @brief Set external modulator buffer (from microphone)
      * @param modulator Mono modulator signal

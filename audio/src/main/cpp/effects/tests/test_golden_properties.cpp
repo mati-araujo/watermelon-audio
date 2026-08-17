@@ -11,14 +11,19 @@
  *      parametros que el efecto acepte.
  *   2. La salida es ACOTADA. Un efecto puede amplificar; lo que no puede es
  *      divergir.
- *   3. `reset()` DEJA EL EFECTO COMO ESTABA. Procesar, resetear y volver a
- *      procesar la misma señal tiene que dar el mismo audio, muestra a muestra.
+ *   3. `reset()` DEJA EL EFECTO COMO RECIEN CONSTRUIDO, muestra a muestra.
+ *   4. Y despues de un `reset()`, con silencio a la entrada NO QUEDA RESIDUO.
  *
  * La tercera es la que el requerimiento nombra como "la que habria cachado el
- * hueco de reset() de WD-3.2". `Effect::reset()` es virtual con default vacio:
- * un efecto con estado que no la sobrescriba compila perfecto, y su cola vieja
- * se filtra al contexto nuevo — que es exactamente el bug del residual del pad
- * que aparecia en el primer bloque de INPUT_FX.
+ * hueco de reset() de WD-3.2", y al correrla por primera vez **16 de los 23
+ * efectos no la cumplian**. WD-3.2 los arreglo y `Effect::reset()` paso a
+ * virtual pura, asi que el default vacio que dejaba pasar todo eso ya no
+ * existe: ahora el compilador obliga a cada efecto a decidir.
+ *
+ * La cuarta es mas debil pero cubre lo que la tercera no puede: no depende de
+ * que el efecto sea determinista, asi que alcanza tambien a `RANDOM_RESO`. Y es
+ * la que escribe la propiedad de PRODUCTO — el residual del pad que se filtraba
+ * al primer bloque de INPUT_FX es literalmente esto.
  *
  * POR QUE PARAMETROS ALEATORIOS Y NO UNA LISTA
  * --------------------------------------------
@@ -134,6 +139,29 @@ std::vector<float> runNoise(Effect& fx, std::mt19937& rng, float amp) {
         all.insert(all.end(), out.begin(), out.end());
     }
     return all;
+}
+
+/**
+ * Efectos que NO pueden cumplir la reproducibilidad bit a bit, y no por deuda.
+ *
+ * `RandomResoEffect` barre un filtro resonante con un LFO de forma
+ * RANDOM_SMOOTH, y `LFO::randomFloat()` saca sus valores de un `std::mt19937`
+ * sembrado con `std::random_device`. Sortean tanto el constructor del LFO como
+ * su `reset()`: **dos instancias recien construidas ya suenan distinto entre
+ * si**, sin que reset() intervenga en nada.
+ *
+ * Por eso NO va al `reset-baseline.txt`: ese archivo es deuda con dueño, y esto
+ * no es deuda, es lo que el efecto es. Anotarlo ahi diria que alguien tiene que
+ * arreglarlo, y no hay nada que arreglar.
+ *
+ * Pero una exclusion sin cobertura es un punto ciego, asi que esta acotada por
+ * dos tests: `RandomResoIsNonDeterministicByConstructionNotByReset` **mide** que
+ * la causa es la construccion y no el reset, y `ResetSilencesEveryEffect` le
+ * exige lo que si es exigible — que despues de un reset no quede residuo.
+ */
+const std::set<std::string>& nonDeterministicByDesign() {
+    static const std::set<std::string> kNames = {"RANDOM_RESO"};
+    return kNames;
 }
 
 /// Lee `reset-baseline.txt` y devuelve los nombres de efecto declarados.
@@ -258,6 +286,7 @@ TEST(EffectProperties, ResetMakesEveryEffectReproduceItsOutputExactly) {
 
     for (int id = 0; id < EFFECT_TYPE_COUNT; ++id) {
         const auto type = static_cast<EffectType>(id);
+        if (nonDeterministicByDesign().count(nameOf(type)) > 0) continue;
 
         std::unique_ptr<Effect> fx = registry.createEffect(type);
         ASSERT_NE(fx, nullptr);
@@ -343,4 +372,93 @@ TEST(EffectProperties, ResetMakesEveryEffectReproduceItsOutputExactly) {
     EXPECT_EQ(failing.size(), baseline.size())
         << "fallan " << failing.size() << " efectos de " << EFFECT_TYPE_COUNT
         << "; el baseline declara " << baseline.size();
+}
+
+// ===========================================================================
+// La exclusion de RANDOM_RESO, MEDIDA en vez de afirmada
+// ===========================================================================
+
+TEST(EffectProperties, RandomResoIsNonDeterministicByConstructionNotByReset) {
+    // Una exclusion que se justifica con un comentario es una afirmacion sin
+    // respaldo. Esta se justifica con una medicion: si DOS INSTANCIAS RECIEN
+    // CONSTRUIDAS —sin que reset() participe— ya producen audio distinto,
+    // entonces la reproducibilidad bit a bit no le aplica al efecto, y no hay
+    // nada que reset() pueda hacer al respecto.
+    //
+    // Si algun dia RandomResoEffect se vuelve determinista, este test se pone
+    // rojo y avisa que hay que sacarlo de nonDeterministicByDesign().
+    EffectRegistry registry;
+    registerBuiltinEffects(registry);
+
+    auto runOnce = [&](unsigned seed) {
+        auto fx = registry.createEffect(RANDOM_RESO);
+        fx->setSampleRate(kSampleRate);
+        std::mt19937 rng(seed);
+        return runNoise(*fx, rng, 0.5f);
+    };
+
+    // La MISMA señal de entrada para las dos: la unica fuente de diferencia
+    // posible es el estado interno del efecto.
+    const std::vector<float> a = runOnce(0xABCDu);
+    const std::vector<float> b = runOnce(0xABCDu);
+
+    ASSERT_EQ(a.size(), b.size());
+    bool differs = false;
+    for (size_t i = 0; i < a.size() && !differs; ++i) {
+        if (a[i] != b[i]) differs = true;
+    }
+
+    EXPECT_TRUE(differs)
+        << "dos RandomResoEffect recien construidos dieron el MISMO audio.\n"
+        << "  Si el efecto se volvio determinista, sacalo de "
+        << "nonDeterministicByDesign() y dejalo entrar al test bit a bit — que "
+        << "es mas fuerte que la exclusion.";
+}
+
+// ===========================================================================
+// Lo que SI se le puede exigir a los 23, incluido el no-determinista
+// ===========================================================================
+
+TEST(EffectProperties, ResetSilencesEveryEffect) {
+    // ESTA ES LA PROPIEDAD DE PRODUCTO, y la razon por la que reset() existe:
+    // despues de un reset, un efecto no puede seguir sonando. Es el residual
+    // del pad que se filtraba al primer bloque de INPUT_FX, escrito como test.
+    //
+    // Es mas debil que la reproducibilidad bit a bit —no dice que la salida sea
+    // la misma, solo que no haya cola— pero tiene una virtud que la otra no:
+    // NO DEPENDE DE QUE EL EFECTO SEA DETERMINISTA. Por eso cubre tambien a
+    // RANDOM_RESO, que queda afuera del test bit a bit, y por eso no hay ningun
+    // efecto sin cobertura de reset.
+    EffectRegistry registry;
+    registerBuiltinEffects(registry);
+
+    for (int id = 0; id < EFFECT_TYPE_COUNT; ++id) {
+        const auto type = static_cast<EffectType>(id);
+
+        std::unique_ptr<Effect> fx = registry.createEffect(type);
+        ASSERT_NE(fx, nullptr);
+        fx->setSampleRate(kSampleRate);
+
+        // Ensuciar fuerte: colas de reverb, lineas de delay, envolventes.
+        std::mt19937 dirt(0xB10Cu + static_cast<unsigned>(id));
+        runNoise(*fx, dirt, 0.9f);
+
+        fx->reset();
+
+        // Y ahora silencio. Lo que salga es residuo del audio anterior.
+        std::vector<float> silence(static_cast<size_t>(kBlock) * 2, 0.0f);
+        std::vector<float> out(static_cast<size_t>(kBlock) * 2, 0.0f);
+        float worst = 0.0f;
+        for (int b = 0; b < kBlocks; ++b) {
+            fx->process(silence.data(), out.data(), kBlock);
+            for (float v : out) {
+                if (std::isfinite(v)) worst = std::max(worst, std::abs(v));
+            }
+        }
+
+        EXPECT_LT(worst, 1e-6f)
+            << nameOf(type) << " sigue sonando despues de reset(): pico "
+            << worst << " con la entrada en silencio.\n"
+            << "  Es exactamente el residual que reset() existe para cortar.";
+    }
 }

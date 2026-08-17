@@ -28,6 +28,9 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /// Limpia los filtros y el LFO de random, y re-siembra el mix (WD-3.2).
+    void reset() override;
+
     // Parameter IDs
     static constexpr int PARAM_CENTER_FREQ = 0;   // 80-12000 Hz (XY: X)
     static constexpr int PARAM_RESONANCE = 1;      // 0.5-30 (XY: Y)

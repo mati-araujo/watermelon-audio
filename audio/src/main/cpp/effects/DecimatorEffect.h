@@ -25,6 +25,9 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /// Limpia el zero-order hold y re-siembra los smoothers (WD-3.2).
+    void reset() override;
+
     // Parameter IDs
     static constexpr int PARAM_BIT_DEPTH = 0;     // 1-24 bits
     static constexpr int PARAM_SAMPLE_RATE = 1;    // 100-48000 Hz

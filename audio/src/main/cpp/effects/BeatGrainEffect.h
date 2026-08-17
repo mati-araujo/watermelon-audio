@@ -39,6 +39,9 @@ public:
     void setParam(int paramId, float value) override;
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
+
+    /// Limpia los granos en vuelo y el scheduler (WD-3.2).
+    void reset() override;
     void setBpm(float bpm) override;
 
 private:

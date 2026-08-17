@@ -10,6 +10,14 @@ void HallReverbEffect::reset() {
     mEarlyL.clear();
     mEarlyR.clear();
     mFdn.reset();
+
+    // WD-3.2 — los CINCO ParameterSmoother, que este reset() no tocaba. Es el
+    // que mas se olvidaba de los seis del grupo B.
+    mDecaySmooth.reset(mDecayTime.load(std::memory_order_relaxed));
+    mSizeSmooth.reset(mSize.load(std::memory_order_relaxed));
+    mPreDelaySmooth.reset(mPreDelay.load(std::memory_order_relaxed));
+    mDiffusionSmooth.reset(mDiffusion.load(std::memory_order_relaxed));
+    mMixSmooth.reset(mMix.load(std::memory_order_relaxed));
 }
 
 HallReverbEffect::HallReverbEffect()

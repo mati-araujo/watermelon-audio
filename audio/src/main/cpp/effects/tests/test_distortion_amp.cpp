@@ -69,7 +69,19 @@ void expectDryNull(Effect& fx, int mixParam, float dryValue) {
     fx.setParam(mixParam, dryValue);
     auto in = stereoTone(kFrames, 330.0f, 0.4f);
     std::vector<float> out(in.size(), 0.0f);
-    fx.process(in.data(), out.data(), kFrames);          // warm-up (settle mix smoother)
+    // Tres pasadas de warm-up, no una. El smoother de mix es exponencial: con
+    // target 0 se acerca a cero pero nunca llega, y lo que queda se multiplica
+    // por la señal WET. Hasta WD-3.2 una pasada alcanzaba por un motivo que no
+    // era el que parecia — el constructor de DistortionEffect no sembraba sus
+    // ParameterSmoother, asi que el drive arrancaba en 0 y la rama wet estaba
+    // practicamente en silencio durante todo el test. Con el drive en su valor
+    // real desde el primer bloque, la misma cola de mix deja 7,6e-5 de residuo.
+    //
+    // Medido: con una pasada 7,6e-5, con tres 2,3e-23. No hay piso, es cola —
+    // por eso se agregan pasadas en vez de aflojar la tolerancia.
+    for (int warmUp = 0; warmUp < 3; ++warmUp) {
+        fx.process(in.data(), out.data(), kFrames);
+    }
     fx.process(in.data(), out.data(), kFrames);          // settled pass must be dry
     for (size_t i = 0; i < in.size(); ++i) EXPECT_NEAR(out[i], in[i], 1e-5f);
 }

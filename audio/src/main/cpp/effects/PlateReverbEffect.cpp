@@ -132,4 +132,8 @@ void PlateReverbEffect::reset() {
     mLowCutR.reset();
     mHighCutL.reset();
     mHighCutR.reset();
+
+    // WD-3.2 — los dos smoothers que faltaban.
+    mMixSmooth.reset(mMix.load(std::memory_order_relaxed));
+    mPreDelaySmooth.reset(mPreDelay.load(std::memory_order_relaxed));
 }

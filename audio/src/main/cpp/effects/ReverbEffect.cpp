@@ -456,11 +456,27 @@ void ReverbEffect::reset() {
         allpassPos[i].store(0, std::memory_order_relaxed);
     }
 
-    // Note: sub-component state (preDelayLine, lowCut/highCutFilter,
-    // stereoProcessor, earlyReflections, modulationLFOs) is NOT reset
-    // here. Their internal memory is short (single-sample filter taps
-    // or pre-delay < 100 ms) and reaches steady state within a few
-    // blocks of audio — well before the user would notice anything.
-    // If a future audit shows those components bleeding state, add
-    // reset() methods to them and call through here.
+    // WD-3.2 — ACA ESTABA LA NOTA QUE DECIA QUE ESTO NO HACIA FALTA.
+    //
+    // Decia que el estado de los sub-componentes (pre-delay, los biquads de
+    // cut, las reflexiones tempranas, los LFO de modulacion) es corto, llega a
+    // regimen en pocos bloques y el usuario no lo notaria — y terminaba
+    // invitando: "si una auditoria futura muestra que esos componentes filtran
+    // estado, agrega reset() y llamalos desde aca".
+    //
+    // Esa auditoria fue el barrido property-based de WD-2.2, y el razonamiento
+    // de la nota NO era falso: hablaba de AUDIBILIDAD, y es cierto que son
+    // colas cortas. Lo que cambio es el contrato. WD-3.2 pide algo mas fuerte y
+    // verificable —que un efecto reseteado sea indistinguible de uno recien
+    // construido, muestra a muestra— y con esa vara el estado corto tambien
+    // cuenta. Una propiedad que se puede medir vale mas que una estimacion de
+    // lo que se notaria, justamente porque no depende de quien estime.
+    preDelayLine.clear();
+    lowCutFilter.reset();
+    highCutFilter.reset();
+    earlyReflections.reset();
+    stereoProcessor.reset();
+    for (auto& lfo : modulationLFOs) {
+        lfo.reset();
+    }
 }

@@ -57,6 +57,30 @@ void VocoderEffect::setSampleRate(int sampleRate) {
     LOGI("VocoderEffect sample rate set to %d", sampleRate);
 }
 
+void VocoderEffect::reset() {
+    mVocoderBank.reset();
+    mBandEnvelopes.fill(0.0f);
+
+    // La fase de la portadora interna es estado: sin esto el oscilador del
+    // contexto nuevo arranca donde lo dejo el anterior.
+    mCarrierPhase = 0.0f;
+
+    mInputHPF_L.reset();
+    mInputHPF_R.reset();
+    mOutputLPF_L.reset();
+    mOutputLPF_R.reset();
+
+    // El modulador externo pendiente es audio del contexto ANTERIOR: dejarlo
+    // es exactamente el residual que reset() existe para cortar.
+    std::fill(mModulatorBuffer.begin(), mModulatorBuffer.end(), 0.0f);
+    std::fill(mCarrierMono.begin(), mCarrierMono.end(), 0.0f);
+    std::fill(mModulatorMono.begin(), mModulatorMono.end(), 0.0f);
+    std::fill(mOutputMono.begin(), mOutputMono.end(), 0.0f);
+    std::fill(mInternalCarrier.begin(), mInternalCarrier.end(), 0.0f);
+    mHasExternalMod.store(false, std::memory_order_relaxed);
+    mModulatorSamples.store(0, std::memory_order_relaxed);
+}
+
 void VocoderEffect::setParam(int paramId, float value) {
     switch (paramId) {
         case BAND_COUNT: {

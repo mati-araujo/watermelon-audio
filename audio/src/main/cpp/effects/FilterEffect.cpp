@@ -123,6 +123,18 @@ void FilterEffect::setSampleRate(int sampleRate) {
     updateCoefficients();
 }
 
+void FilterEffect::reset() {
+    // Memoria del biquad, los dos canales.
+    x1_l = x2_l = y1_l = y2_l = 0.0f;
+    x1_r = x2_r = y1_r = y2_r = 0.0f;
+
+    // Los smoothers vuelven al valor VIGENTE del parametro, no a cero: dejarlos
+    // en cero haria que el cutoff subiera desde 0 Hz durante el smoothing.
+    // Es lo mismo que hace el constructor, y tiene que seguir siendolo.
+    cutoffSmoother.reset(cutoff.load());
+    resonanceSmoother.reset(resonance.load());
+}
+
 void FilterEffect::updateCoefficients() {
     // FIXED: Escribir en el buffer NO-actual, luego hacer swap atómico
     int currentIdx = currentCoeffsIndex.load(std::memory_order_relaxed);

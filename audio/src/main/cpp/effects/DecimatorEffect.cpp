@@ -14,6 +14,19 @@ void DecimatorEffect::setSampleRate(int sampleRate) {
     mMixSmooth.setSmoothingTime(5.0f, sr);
 }
 
+void DecimatorEffect::reset() {
+    // El hold guarda la ultima muestra retenida y su contador fraccionario:
+    // sin limpiarlo, el primer bloque del contexto nuevo arranca repitiendo una
+    // muestra del anterior.
+    mHoldL = 0.0f;
+    mHoldR = 0.0f;
+    mHoldCounter = 0.0f;
+
+    mBitDepthSmooth.reset(mBitDepth.load(std::memory_order_relaxed));
+    mSampleRateSmooth.reset(mTargetSampleRate.load(std::memory_order_relaxed));
+    mMixSmooth.reset(mMix.load(std::memory_order_relaxed));
+}
+
 void DecimatorEffect::setParam(int paramId, float value) {
     switch (paramId) {
         case PARAM_BIT_DEPTH:

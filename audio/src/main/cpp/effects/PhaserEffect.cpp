@@ -89,6 +89,13 @@ void PhaserEffect::reset() {
     mLfoPhase = 0.0f;
     mFeedbackL = 0.0f;
     mFeedbackR = 0.0f;
+
+    // WD-3.2 — este reset() limpiaba TODO el estado de audio y aun asi fallaba:
+    // le faltaban los dos ParameterSmoother. Es el caso que mejor muestra por
+    // que un reset() incompleto es peor que uno ausente — leyendo la lista de
+    // arriba parece exhaustiva.
+    mFeedbackSmoother.reset(mFeedback.load(std::memory_order_relaxed) / 100.0f);
+    mMixSmoother.reset(mMix.load(std::memory_order_relaxed) / 100.0f);
 }
 
 void PhaserEffect::setParam(int paramId, float value) {

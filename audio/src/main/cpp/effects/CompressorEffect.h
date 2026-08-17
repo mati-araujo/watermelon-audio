@@ -48,6 +48,9 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /// Limpia la envolvente y re-siembra el smoother de makeup (WD-3.2).
+    void reset() override;
+
     /**
      * @brief Get current gain reduction for metering
      * @return Gain reduction in dB (negative value)

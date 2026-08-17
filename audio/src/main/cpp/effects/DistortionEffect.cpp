@@ -71,6 +71,22 @@ DistortionEffect::DistortionEffect()
     updateGateCoefficients();
     updateFilters();
 
+    // WD-3.2 — EL GRUPO C DEL BASELINE, Y EL UNICO CASO INVERSO.
+    //
+    // Aca `reset()` estaba BIEN y el constructor MAL: reset() siembra sus tres
+    // ParameterSmoother con el valor vigente del parametro, y el constructor los
+    // dejaba en el 0.0f con el que arranca ParameterSmoother — mientras drive
+    // vale 0,5, level 0,7 y mix 1,0.
+    //
+    // O sea que un DistortionEffect RECIEN CREADO subia esos tres desde cero a
+    // lo largo de ~10 ms: un fade-in audible en el primer bloque despues de
+    // agregarlo a la cadena, que no pidio nadie. Lo encontro el barrido
+    // property-based de WD-2.2 comparando reset contra recien-construido.
+    //
+    // Terminar el constructor con reset() lo cierra POR CONSTRUCCION, que es
+    // mejor que duplicar el sembrado: no puede volver a desincronizarse.
+    reset();
+
     LOGI("DistortionEffect created with professional pedal emulations");
 }
 
