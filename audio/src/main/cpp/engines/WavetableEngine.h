@@ -53,8 +53,8 @@ public:
     void process(float* buffer, int32_t numFrames,
                  float frequency, float amplitude) override {
         // Read parameters with smoothing (prevents zipper noise)
-        const float position = smoothParam(PARAM_POSITION);
-        const float morph = smoothParam(PARAM_MORPH);
+        const float position = smoothParam(PARAM_POSITION, numFrames);
+        const float morph = smoothParam(PARAM_MORPH, numFrames);
 
         // Map position to frame index (fractional for interpolation)
         const float framePos = position * static_cast<float>(NUM_FRAMES - 1);

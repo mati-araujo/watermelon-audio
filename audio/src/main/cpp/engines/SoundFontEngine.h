@@ -145,7 +145,7 @@ public:
         tsf_render_float(sf, buffer, numFrames, 0);
 
         // 4. Apply expression gain
-        float gain = smoothParam(PARAM_EXPRESSION);
+        float gain = smoothParam(PARAM_EXPRESSION, numFrames);
         if (gain < 0.999f) {
             for (int i = 0; i < numFrames * 2; ++i) {
                 buffer[i] *= gain;

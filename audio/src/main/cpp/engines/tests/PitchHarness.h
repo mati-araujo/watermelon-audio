@@ -100,6 +100,27 @@ inline std::vector<float> pluck(double hz, int rate, double seconds) {
     return x;
 }
 
+/**
+ * Senoide de frecuencia EXACTA que cae 60 dB en `t60` segundos.
+ *
+ * Existe para validar el estimador en el regimen que usa el barrido de brillo
+ * de Karplus-Strong: con la cuerda oscura el tono se muere en ~100 ms, y una
+ * autocorrelacion sobre una señal que decae asi PODRIA sesgarse. Medido: no lo
+ * hace — 0,04 cents en el peor caso. Sin este control, los ~10 cents que
+ * quedan ahi no se podrian atribuir ni al motor ni al instrumento.
+ */
+inline std::vector<float> damped(double hz, int rate, double t60, double seconds) {
+    const int n = static_cast<int>(seconds * rate);
+    std::vector<float> x(static_cast<size_t>(n));
+    const double alpha = std::log(1000.0) / t60;
+    for (int i = 0; i < n; ++i) {
+        const double t = static_cast<double>(i) / rate;
+        x[static_cast<size_t>(i)] =
+            static_cast<float>(std::exp(-alpha * t) * std::sin(2.0 * kPi * hz * t));
+    }
+    return x;
+}
+
 // ---------------------------------------------------------------------------
 // El estimador
 // ---------------------------------------------------------------------------

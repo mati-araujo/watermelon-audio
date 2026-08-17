@@ -11,6 +11,14 @@
 static constexpr int MAX_ENGINE_PARAMS = 6;
 
 /**
+ * @brief Tiempo de suavizado de los parametros de engine, en milisegundos
+ *
+ * Declarado aca para que el test de caracterizacion pueda medirlo contra el
+ * mismo numero que usa `prepare()`, en vez de repetirlo.
+ */
+static constexpr float kParamSmoothingMs = 5.0f;
+
+/**
  * @brief Metadata for a single engine parameter
  *
  * Used by UI to auto-generate controls for each engine.
@@ -74,9 +82,20 @@ public:
     virtual void prepare(int32_t sampleRate, int32_t maxBlockSize) {
         mSampleRate = sampleRate;
         mMaxBlockSize = maxBlockSize;
-        // Configure parameter smoothers: 5ms smoothing time
-        for (auto& smoother : mParamSmoothers) {
-            smoother.setSmoothingTime(5.0f, static_cast<float>(sampleRate));
+        // Configure parameter smoothers: 5ms smoothing time.
+        // El coeficiente es POR MUESTRA; `smoothParam()` avanza el smoother el
+        // bloque entero con `processBlock()`, asi que estos 5 ms son 5 ms de
+        // verdad y no dependen del tamaño del bloque.
+        for (int i = 0; i < MAX_ENGINE_PARAMS; ++i) {
+            mParamSmoothers[i].setSmoothingTime(kParamSmoothingMs,
+                                                static_cast<float>(sampleRate));
+            // SEMBRAR el smoother en su valor actual. Sin esto todo parametro
+            // arranca en CERO y trepa hacia su default, sin importar cual sea:
+            // el `expression` de SoundFont (default 1,0) hacia que el engine
+            // entrara con un fade-in que nadie pidio, y el `brightness` de
+            // Karplus-Strong (default 0,5) dejaba la cuerda casi muda y
+            // DESAFINADA durante los primeros segundos.
+            mParamSmoothers[i].reset(mParams[i].load(std::memory_order_relaxed));
         }
     }
 
@@ -173,15 +192,22 @@ protected:
     std::array<ParameterSmoother, MAX_ENGINE_PARAMS> mParamSmoothers;
 
     /**
-     * @brief Read a parameter with smoothing applied
+     * @brief Read a parameter with smoothing applied, once per block
      * @param paramId Parameter index
-     * @return Smoothed value (call once per sample for best results, or once per block)
+     * @param numFrames Frames que cubre este bloque — el mismo `numFrames` que
+     *                  recibio `process()`
+     * @return Smoothed value al final del bloque
      *
      * RT-safe. Use this instead of direct mParams[].load() for per-block reads.
+     *
+     * `numFrames` NO es opcional a proposito. Omitirlo era el defecto: el
+     * smoother avanzaba una sola muestra por bloque y los 5 ms declarados salian
+     * multiplicados por el tamaño del bloque (2,56 s con bloques de 512). Ver el
+     * comentario de `ParameterSmoother::processBlock()`.
      */
-    float smoothParam(int paramId) {
+    float smoothParam(int paramId, int32_t numFrames) {
         float target = mParams[paramId].load(std::memory_order_relaxed);
-        return mParamSmoothers[paramId].process(target);
+        return mParamSmoothers[paramId].processBlock(target, static_cast<int>(numFrames));
     }
 
     /// Global BPM for tempo sync
