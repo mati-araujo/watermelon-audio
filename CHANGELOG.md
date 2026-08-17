@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.1.0...v2.1.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* **dsp:** clamp contra Nyquist que sobrevive al cambio de rate (WD-3.5) ([#132](https://github.com/mati-araujo/watermelon-audio/issues/132)) ([c83d8e6](https://github.com/mati-araujo/watermelon-audio/commit/c83d8e694e5c702f59e65393b1257a1f699e021a))
+* **effects:** la ganancia de lazo de SPRING_REVERB deja de pasar de 1 (WD-3.6) ([#133](https://github.com/mati-araujo/watermelon-audio/issues/133)) ([0ae3331](https://github.com/mati-araujo/watermelon-audio/commit/0ae333165d83a7bd51fc3b7d76fabc240ab1ac83))
+
 ## [2.1.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.0.2...v2.1.0) (2026-08-17)
 
 
