@@ -1,12 +1,6 @@
 # Efectos que DIVERGEN a sample rates por debajo de 44,1 kHz, medido por
 # `NyquistLimits.EveryDeclaredCaseStillReproduces`.
 #
-# La causa CONOCIDA —la de FILTER, la unica verificada— es una frecuencia acotada
-# contra una CONSTANTE (20 kHz) y despues convertida a omega contra el sample
-# rate VIGENTE. Cuando el rate baja, omega pasa de pi, sin(omega) se vuelve
-# negativo, el alpha del cookbook RBJ cambia de signo y los polos salen del
-# circulo unitario. Los otros seis casos NO estan diagnosticados: ver abajo.
-#
 # ESTO ES UN TRINQUETE, NO UNA LISTA DE EXCEPCIONES. El test falla si:
 #   - un efecto que NO esta aca empieza a divergir  (deuda nueva), y TAMBIEN
 #   - un efecto que SI esta aca deja de divergir    (deuda pagada: borrar linea)
@@ -16,48 +10,55 @@
 # Formato:  <EFFECT_TYPE> | <rates que reproducen> | <por que>
 #
 # ---------------------------------------------------------------------------
-# DUEÑO DE TODA ESTA DEUDA: **WD-3.5 — clamp de coeficientes contra Nyquist**.
-# Poner `min(valor, 0,45 * fs)` donde falta retira las DOS entradas de FILTER, y
-# nada mas: verificado por mutacion. Vaciar este archivo es mas trabajo que una
-# linea, y por eso WD-3.5 quedo con el esfuerzo a re-estimar.
+# VACIO DESDE WD-3.5. Tuvo SIETE efectos y las siete causas quedaron
+# localizadas; ver `test_nyquist_limits.cpp` para el diagnostico de cada una.
+# Resumen de lo que se pago y por que, porque el "por que" es lo unico que
+# impide que vuelva:
 #
-# UNA CORRECCION AL REQUERIMIENTO, MEDIDA: WD-3.5 dice que el escenario de falla
-# es "cutoff a 20 kHz en un device a 44,1 kHz". **No reproduce.** A 44,1 kHz el
-# omega queda en 0,907 pi con sin(omega) = +0,288 y la salida se mantiene en
-# 1,088 de pico. El disparador real es cualquier rate por debajo de 40 kHz —
-# entre ellos 32.000, que es un rate estandar de Android, y 16.000, que es el de
-# un headset Bluetooth SCO. O sea: mas alcanzable que lo que decia el ticket, no
-# menos.
+#   FILTER                      `setCutoff` acotaba contra la CONSTANTE de
+#                               20 kHz y `updateCoefficients` derivaba omega
+#                               contra el rate vigente. Unica de las siete que
+#                               ya tenia la causa verificada.
+#
+#   VOCODER · HPF_DELAY ·       las CUATRO por la MISMA linea, y en ninguna se
+#   PLATE_REVERB ·              veia desde el efecto: los cuatro configuran sus
+#   SHIMMER_REVERB              filtros en el constructor (a 48 kHz) llamando a
+#                               un setter que SI clampea, y despues cambian el
+#                               rate. `BiquadFilter::setSampleRate()` recalculaba
+#                               los coeficientes sin volver a aplicar
+#                               `clampFrequency()`. La deuda estaba en el
+#                               primitivo que comparten — igual que en WD-3.2,
+#                               donde tres reverbs fallaban por `FDN::reset()`.
+#                               El borde de cada uno cae EXACTO en el doble de su
+#                               frecuencia fija: 24.000 (LPF de 12 kHz de VOCODER
+#                               y HPF_DELAY), 18.000 (9 kHz de PLATE) y 21.000
+#                               (10,5 kHz de SHIMMER). Predicho antes de medir.
+#
+#   PHASER                      su all-pass de primer orden no pasa por
+#                               `BiquadFilter`: el coeficiente sale de
+#                               (tan(wc)-1)/(tan(wc)+1) y |coef| pasa de 1 en
+#                               cuanto modFreq supera fs/2. Borde medido: 8.560
+#                               Hz EXACTOS = 2 x 4.280, que es el tope del
+#                               barrido del LFO con el depth por defecto.
+#
+# Y LO QUE NO ERA DE ACA, que es el hallazgo que mas importa de los siete:
+#
+#   SPRING_REVERB               **NO era deuda de Nyquist y estaba mal
+#                               clasificado en este archivo.** Su lazo tiene
+#                               ganancia > 1 con los valores DE FABRICA, y
+#                               diverge a los SIETE rates medidos —44,1, 48 y 96
+#                               incluidos— en el mismo tiempo (~2 s con señal de
+#                               tortura, ~35 s con un seno a nivel de
+#                               instrumento). Aparecia solo a 8.000 Hz por un
+#                               artefacto del instrumento: la ventana del test
+#                               iba en BLOQUES, y 32 bloques de 512 son 2,0 s a
+#                               8 kHz y 0,34 s a 48 kHz. El unico rate que
+#                               llegaba a la cota era el mas bajo.
+#                               Dueño: WD-3.6. Repro y sintoma de usuario en
+#                               `test_spring_stability.cpp`.
+#
+# La leccion, para el proximo que agregue una entrada aca: **un baseline
+# indexado por sample rate atribuye al sample rate.** Antes de anotar un efecto
+# en este archivo, corre su repro a un rate ALTO con la ventana expresada en
+# segundos. Si tambien falla ahi, no es de este archivo.
 # ---------------------------------------------------------------------------
-
-# CAUSA VERIFICADA — el mecanismo lo aisla un test propio
-# (`TheFilterSurvivesExactlyWhileTheCutoffStaysBelowHalfTheRate`).
-FILTER         | 22.050 · 32.000 | `setCutoff` acota a [20, 20000] sin mirar el rate; `updateCoefficients` hace omega = 2*pi*c/fs
-
-# CAUSA NO LOCALIZADA — lo que hay es el repro, no el diagnostico. Ponerlos como
-# "mismo problema que FILTER" seria una suposicion: los cinco tienen filtros
-# adentro, pero cuatro de ellos divergen con el parametro en CERO, que no es el
-# perfil de un omega pasado de pi. Localizarlos es parte de WD-3.5, y hasta
-# entonces esta columna dice lo que se midio y nada mas.
-VOCODER        | 16.000 · 22.050 | banco de filtros; p0=0 alcanza, NaN en el primer bloque
-PHASER         |  8.000          | cadena de all-pass; p0=0 alcanza, NaN en el primer bloque
-HPF_DELAY      | 16.000 · 22.050 | el HPF del lazo de realimentacion diverge y el delay lo reinyecta
-PLATE_REVERB   | 16.000          | pico 5,1e37 sin llegar a NaN: el lazo del FDN diverge exponencialmente
-SHIMMER_REVERB | 16.000          | comparte el FDN con plate, y el mismo lazo
-SPRING_REVERB  |  8.000          | el mas lento: 25 bloques de 512 hasta pasar la cota de 1.000
-
-# NO estan aca, y por que:
-#
-#   AMP_SIM — sus tres helpers de biquad calculan omega contra el rate sin
-#   acotar, igual que FilterEffect. No aparece en el barrido porque sus
-#   frecuencias son fijas de tone stack (100–4.000 Hz) y necesitaria fs < 8.000
-#   para romperse. Le falta el mismo clamp; no tiene repro, asi que no entra al
-#   trinquete — un baseline con entradas que no se pueden reproducir deja de
-#   poder decir cuando la deuda se pago.
-#
-# Y UNA ADVERTENCIA SOBRE LA COLUMNA DE ARRIBA: el diagnostico de FILTER NO se
-# extiende al resto por analogia. `VocoderBank` SI acota a 0,45 * fs y VOCODER
-# igual diverge; cuatro de los siete casos disparan con el parametro en CERO,
-# que no es el perfil de un omega pasado de pi. Hay al menos una segunda causa
-# sin identificar. Aplicar el clamp de WD-3.5 retira las dos entradas de FILTER
-# —verificado por mutacion— y no toca las otras cinco.

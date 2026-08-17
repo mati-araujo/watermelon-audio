@@ -1,71 +1,61 @@
 /**
- * WD-2.3.3 — estabilidad numerica en los limites, y el clamp contra Nyquist
- * que HOY NO EXISTE (WD-3.5).
+ * WD-2.3.3 / WD-3.5 — estabilidad numerica en los limites, y el clamp contra
+ * Nyquist que AHORA SI EXISTE.
  *
- * LO QUE ESTA SUITE MIDE, Y LA CORRECCION QUE TRAE
- * -----------------------------------------------
- * El requerimiento de WD-3.5 describe asi el escenario de falla: "cutoff a
- * 20 kHz en un device a 44,1 kHz... la salida auto-oscila o produce NaN".
+ * QUE MIDE ESTA SUITE
+ * -------------------
+ * Que ningun efecto se escape del circulo unitario cuando el device negocia un
+ * sample rate por debajo de 44,1 kHz. **32.000 Hz es un rate estandar de
+ * Android** y 16.000 el de un headset Bluetooth SCO, que es exactamente el
+ * hardware del camino de entrada: esto no es teorico.
  *
- * **Eso no se reproduce.** Medido: a 44,1 kHz con el cutoff en el tope,
- * omega/pi = 0,907, sin(omega) = +0,288, y la salida se queda en 1,088 de pico,
- * finita y acotada. Los tres rates que nombra WD-2.3 —44,1 / 48 / 96— estan
- * limpios, y el barrido de parametros a los extremos en esos tres esta en
- * `test_rate_invariance.cpp`, verde.
+ * LA CONDICION, QUE NO ES "omega < pi"
+ * ------------------------------------
+ * Es `sin(omega) < 0`. El aliasing devuelve omega a semiciclos de seno positivo
+ * —a 8.000 Hz un cutoff de 20 kHz da omega = 5 pi y sobrevive— asi que la
+ * magnitud del angulo no alcanza para decidir; el signo del seno si. Con el
+ * clamp puesto las dos formulaciones coinciden, y por eso los tests de abajo
+ * pueden escribirse de la forma simple.
  *
- * El defecto es REAL pero el disparador es otro, y es peor: **cualquier sample
- * rate por debajo de 40 kHz**. La condicion exacta es sin(omega) < 0, o sea
- * cutoff > fs/2, y ahi el alpha del cookbook RBJ se vuelve NEGATIVO, a0 = 1 +
- * alpha se acerca a cero o cambia de signo, y los polos salen del circulo
- * unitario. Barrido de rates con el cutoff en 20 kHz:
- *
- *      8.000 -> finito   (omega = 5,00 pi, sin = 0)
- *     11.025 -> NaN      (omega = 3,63 pi, sin = -0,92)
- *     16.000 -> finito   (omega = 2,50 pi, sin = +1,00)
- *     22.050 -> NaN      (omega = 1,81 pi, sin = -0,55)
- *     32.000 -> NaN      (omega = 1,25 pi, sin = -0,71)
- *     39.000 -> NaN      (omega = 1,03 pi, sin = -0,08)
- *     40.000 -> finito   (omega = 1,00 pi, sin = 0)
- *     44.100 -> finito   (omega = 0,91 pi, sin = +0,29)
- *
- * Los "finitos" de 8.000 y 16.000 no son suerte de diseño: son aliasing que
- * devuelve omega a un semiciclo con seno positivo. Un clamp los cubriria a los
- * dos igual, y sin el, el que la salida sobreviva depende de en que vuelta de
- * 2*pi cayo el cutoff — que no es una propiedad sobre la que se pueda razonar.
- *
- * **32.000 Hz es un sample rate estandar de Android**, y 16.000 el de un
- * headset Bluetooth SCO — que es exactamente el hardware del camino de entrada.
- * O sea que esto no es teorico: es alcanzable con el hardware que ya se
- * soporta, y por eso vale mas que la historia de los 44,1.
- *
- * EL IDIOMA QUE FALTA YA EXISTE CINCO VECES
+ * LAS SIETE CAUSAS, QUE RESULTARON SER TRES
  * -----------------------------------------
- * `BiquadFilter` (0,49 * fs), `StateVariableFilter` (0,49), `VocoderBank`
- * (0,45), `FDN` (0,45) y `Oversampler` (0,45) SI acotan. Lo que WD-3.5 tiene
- * que hacer no es inventar el clamp: es aplicarlo donde falta.
+ * `nyquist-baseline.txt` declaraba siete efectos y una sola causa verificada.
+ * Diagnosticadas las otras seis, quedaron tres mecanismos:
  *
- * Donde falta, medido con un grep de omega contra `mSampleRate` sobre effects/
- * y dsp/, son dos lugares: `FilterEffect::updateCoefficients()` —el unico con
- * repro— y los tres helpers de biquad de `AmpSimulator`, que usan frecuencias
- * fijas de tone stack (100–4.000 Hz) y necesitarian fs < 8.000 para romperse.
+ *   1. FILTER — `setCutoff` acota contra la CONSTANTE de 20 kHz y
+ *      `updateCoefficients` deriva omega contra el rate vigente.
  *
- * OJO CON LEER ESA LISTA COMO UN DIAGNOSTICO COMPLETO. Siete efectos divergen
- * por debajo de 44,1 kHz y solo uno —FILTER— tiene la causa verificada por un
- * test propio. VOCODER esta entre los que fallan **aunque `VocoderBank` si
- * clampee**, y cuatro de los siete divergen con el parametro en CERO, que no es
- * el perfil de un omega pasado de pi. O sea que hay al menos una segunda causa
- * sin identificar, y ponerlos a todos bajo el mismo diagnostico seria inventar
- * lo que no se midio. `nyquist-baseline.txt` separa las dos columnas.
+ *   2. VOCODER, HPF_DELAY, PLATE_REVERB y SHIMMER_REVERB — los CUATRO por la
+ *      misma linea, y en ninguno se veia desde el efecto: los cuatro llaman a un
+ *      setter de `BiquadFilter` que SI clampea, en el constructor, a 48 kHz, y
+ *      despues cambian el rate. `setSampleRate()` recalculaba los coeficientes
+ *      sin volver a aplicar `clampFrequency()`. **La deuda estaba en el
+ *      primitivo que comparten**, igual que en WD-3.2 con `FDN::reset()`.
+ *      El contrato del primitivo lo cubre `dsp/tests/test_biquad_filter.cpp`.
  *
- * EL BASELINE ES UN TRINQUETE
- * ---------------------------
- * `nyquist-baseline.txt` declara los efectos que hoy divergen por debajo de
- * 44,1 kHz. Falla si aparece deuda nueva Y TAMBIEN si una entrada declarada
- * deja de reproducirse — misma semantica que `reset-baseline.txt` y que
- * `scripts/rt-safety-baseline.txt`. El clamp de WD-3.5 retira las dos entradas
- * de FILTER (verificado por mutacion: aplicar `min(valor, 0,45 * fs)` las marca
- * a las dos como deuda pagada). Las otras cinco necesitan diagnostico antes de
- * que nadie pueda decir que las arreglo.
+ *   3. PHASER — su all-pass de primer orden no pasa por `BiquadFilter`: el
+ *      coeficiente sale de (tan(wc) - 1) / (tan(wc) + 1) y |coef| pasa de 1 en
+ *      cuanto modFreq supera fs/2.
+ *
+ * Los bordes se PREDIJERON antes de medirlos, y cayeron exactos: 24.000 para
+ * VOCODER y HPF_DELAY (LPF de 12 kHz), 18.000 para PLATE (9 kHz), 21.000 para
+ * SHIMMER (10,5 kHz) y 8.560 para PHASER (2 x 4.280, el tope del barrido del
+ * LFO con el depth por defecto). Un borde que cae donde la hipotesis dijo es lo
+ * que separa una causa localizada de una coincidencia.
+ *
+ * Y LA SEPTIMA NO ERA DE ACA
+ * --------------------------
+ * `SPRING_REVERB` diverge a los SIETE rates medidos, 44,1 / 48 / 96 incluidos,
+ * y en el mismo tiempo. Aparecia solo a 8.000 Hz porque la ventana del test iba
+ * en BLOQUES: 32 bloques de 512 son 2,0 s a 8 kHz y 0,34 s a 48 kHz, asi que el
+ * unico rate que llegaba a la cota era el mas bajo. **Un baseline indexado por
+ * sample rate atribuye al sample rate.** Vive en `test_spring_stability.cpp`.
+ *
+ * EL BASELINE SIGUE SIENDO UN TRINQUETE
+ * -------------------------------------
+ * `nyquist-baseline.txt` esta VACIO desde WD-3.5, y vacio hace mas trabajo que
+ * lleno: falla si aparece deuda nueva. Misma semantica que `reset-baseline.txt`
+ * y que `scripts/rt-safety-baseline.txt`.
  */
 
 #include "EffectCatalog.h"
@@ -142,40 +132,21 @@ struct Case {
 };
 
 /**
- * Los casos MEDIDOS, con el repro minimo de cada uno.
+ * Los casos medidos que TODAVIA reproducen.
  *
- * No es un barrido: es una tabla, y eso es deliberado. El barrido que descubrio
- * estos casos —4 rates bajos x 6 parametros x 7 valores, con el presupuesto de
- * muestras que los reverbs necesitan para que su divergencia se vea— tardo
- * **297 s** en el build de debug. La tabla corre en 70 ms y ademas DICE cual es
- * el caso, que es lo que le hace falta a quien vaya a arreglarlo.
+ * VACIO DESDE WD-3.5, y la lista sigue existiendo por lo mismo que
+ * `reset-baseline.txt` sigue existiendo vacio: el trinquete tiene dos mitades, y
+ * la que dice "deuda pagada" no puede funcionar si la estructura se borra al
+ * quedarse sin entradas. La proxima entrada que aparezca aca viene con su rate,
+ * su parametro y su repro MINIMO en bloques — no con un numero redondo.
  *
- * Cada `blocks`/`frames` es el repro MINIMO medido, no un numero redondo: por
- * eso van de 2 bloques (FILTER, que rompe en el primero) a 32 (SPRING_REVERB,
- * que necesita 25). Bajarlos no ahorra nada y subirlos tapa una mejora.
- *
- * El precio de la tabla es que no descubre deuda nueva en otro efecto. Eso lo
- * paga `NoNewDivergenceAppearsBelowFortyKilohertz`, que si barre el catalogo.
+ * Lo que tenia, para que se entienda que se borro: diez casos sobre siete
+ * efectos, de 2 bloques (FILTER, que rompia en el primero) a 32
+ * (SPRING_REVERB). Los nueve de Nyquist se pagaron en WD-3.5; el decimo era
+ * SPRING, que nunca fue de Nyquist.
  */
 const std::vector<Case>& measuredCases() {
-    static const std::vector<Case> kCases = {
-        {FILTER, 22050, 0, 20000.0f, 2, 512,
-         "cutoff 20 kHz sobre 22.050: omega = 1,81 pi, alpha < 0, polos afuera"},
-        {FILTER, 32000, 0, 20000.0f, 2, 512,
-         "32 kHz es un rate estandar de Android: omega = 1,25 pi"},
-        {VOCODER, 16000, 0, 0.0f, 2, 512, "banco de filtros; causa sin localizar"},
-        {VOCODER, 22050, 0, 0.0f, 2, 512, "idem, al rate donde tambien cae FILTER"},
-        {PHASER, 8000, 0, 0.0f, 2, 512, "cadena de all-pass; causa sin localizar"},
-        {HPF_DELAY, 16000, 1, 0.0f, 4, 512,
-         "HPF dentro de un lazo de realimentacion; causa sin localizar"},
-        {HPF_DELAY, 22050, 1, 0.0f, 4, 512, "el mismo caso, al otro rate"},
-        {SPRING_REVERB, 8000, 2, 1.0f, 32, 512,
-         "el mas lento de todos: 25 bloques hasta pasar la cota"},
-        {PLATE_REVERB, 16000, 1, 0.0f, 2, 512,
-         "diverge sin llegar a NaN: medido, alcanza 5,1e37; causa sin localizar"},
-        {SHIMMER_REVERB, 16000, 0, 0.0f, 2, 512,
-         "comparte el FDN con plate y falla al mismo rate; causa sin localizar"},
-    };
+    static const std::vector<Case> kCases = {};
     return kCases;
 }
 
@@ -226,49 +197,81 @@ TEST(NyquistLimits, TheFilterSurvivesExactlyWhileTheCutoffStaysBelowHalfTheRate)
         fx.setParam(0, 20000.0f);
         fx.setParam(1, 0.707f);
 
-        const double omega = 2.0 * wma::golden::kPi * 20000.0 / rate;
-        const bool alphaIsPositive = std::sin(omega) > 0.0;
+        // El omega que SALDRIA sin clamp, para que el mensaje de error diga
+        // cuanto margen habia. Con el clamp puesto, el que se usa es otro.
+        const double omegaUnclamped = 2.0 * wma::golden::kPi * 20000.0 / rate;
         const Verdict v = hammer(fx, 8, 512);
 
-        if (alphaIsPositive) {
-            EXPECT_FALSE(v.diverged)
-                << "a " << rate << " Hz el seno de omega es "
-                << std::sin(omega) << " (positivo, alpha > 0) y aun asi el "
-                << "filtro divergio: pico " << v.peak << ", finito=" << v.finite
-                << ".\n  Si esto falla, la causa NO es la que documenta esta "
-                << "suite y hay que volver a medir.";
-        }
+        // WD-3.5 dio vuelta la afirmacion. Antes decia "si sin(omega) > 0
+        // entonces no diverge", que dejaba SIN AFIRMAR justo los rates donde
+        // estaba la deuda — un condicional cuyo antecedente era falso
+        // exactamente en los casos rotos. Ahora se afirma sin condicion, para
+        // todos los rates, que es lo que el clamp hace cierto.
+        EXPECT_FALSE(v.diverged)
+            << "el filtro diverge a " << rate << " Hz con el cutoff pedido en "
+            << "20 kHz (pico " << v.peak << ", finito=" << v.finite << ").\n"
+            << "  Sin el clamp de WD-3.5, omega valdria " << (omegaUnclamped / wma::golden::kPi)
+            << " pi con sin(omega) = " << std::sin(omegaUnclamped) << ": el alpha "
+            << "del cookbook RBJ cambia de signo cuando ese seno es negativo y "
+            << "los polos salen del circulo unitario.\n"
+            << "  `FilterEffect::updateCoefficients()` dejo de acotar el cutoff "
+            << "contra 0,45 * fs, y eso reabre las dos entradas de FILTER de "
+            << "nyquist-baseline.txt.";
     }
 }
 
-TEST(NyquistLimits, TheCutoffIsClampedToTwentyKilohertzNoMatterTheRate) {
-    // La causa raiz, escrita como propiedad de la interfaz y no del audio:
-    // `setCutoff` acota contra una constante, no contra el rate vigente. Es UNA
-    // linea de FilterEffect.cpp, y es toda la deuda de WD-3.5 en este efecto.
+TEST(NyquistLimits, TheRequestedCutoffIsRememberedButTheEffectiveOneStaysBelowNyquist) {
+    // Este test estaba escrito al reves porque el defecto todavia existia: decia
+    // "el tope es la constante de 20 kHz" y "ese tope supera a Nyquist", y
+    // pedia explicitamente darlo vuelta al arreglarlo. Esto es el vuelta.
     //
-    // Cuando WD-3.5 ponga `min(valor, 0,45 * fs)`, este test se pone rojo — y
-    // eso es lo correcto: el que lo arregle tiene que venir aca y darlo vuelta.
-    constexpr int kRate = 22050;
+    // Las dos mitades del contrato de WD-3.5 en este efecto, y la segunda es la
+    // que decide el diseño:
+    //
+    //   1. La frecuencia EFECTIVA —la que arma los coeficientes— nunca pasa de
+    //      0,45 * fs, a ningun rate.
+    //   2. La PEDIDA se recuerda igual. El clamp se aplica a lo que se usa, no a
+    //      lo que se guardo: acotar en su lugar dejaria la perilla degradada
+    //      para siempre despues de que el device pase una vez por 16 kHz.
+    //
+    // Las dos se miden por comportamiento (el codo de -3 dB de la respuesta) y
+    // no leyendo un miembro. `getParam` es la unica excepcion, y justamente
+    // porque lo que ahi se afirma ES la interfaz.
+    constexpr int kLowRate = 22050;
+
     FilterEffect fx;
-    fx.setSampleRate(kRate);
+    fx.setSampleRate(kLowRate);
+    fx.setParam(0, 20000.0f);
+    fx.setParam(1, 0.707f);
+    fx.setParam(2, 0.0f);  // LPF
 
-    // Un valor absurdo para que lo que quede sea EL TOPE, no lo que se pidio.
-    fx.setParam(0, 1.0e9f);
-    const float ceiling = fx.getParam(0);
+    // (1) El codo se planta en el techo, no en lo que se pidio.
+    const double cornerLow =
+        cornerFrequency(wma::golden::captureImpulseResponse(fx, 16384), kLowRate, false);
+    EXPECT_LT(cornerLow, kLowRate * 0.5)
+        << "con el cutoff pedido en 20 kHz y el rate en " << kLowRate << ", el "
+        << "codo de -3 dB quedo en " << cornerLow << " Hz, POR ENCIMA de "
+        << "Nyquist (" << (kLowRate * 0.5) << "). El clamp de "
+        << "`updateCoefficients()` dejo de aplicarse.";
 
-    EXPECT_FLOAT_EQ(ceiling, 20000.0f)
-        << "el tope del cutoff dejo de ser la constante de 20 kHz (quedo en "
-        << ceiling << " Hz). Si es WD-3.5, invertir este test: el tope tiene que "
-        << "ser <= 0,45 * fs = " << (kRate * 0.45f) << " Hz, y "
-        << "`nyquist-baseline.txt` tiene que quedar vacio.";
+    // (2) Y la perilla no se toco: sigue diciendo lo que el usuario pidio.
+    EXPECT_FLOAT_EQ(fx.getParam(0), 20000.0f)
+        << "el cutoff pedido dejo de recordarse (quedo en " << fx.getParam(0)
+        << " Hz). Si el clamp se volvio destructivo, un device que negocie "
+        << "16 kHz una sola vez deja el filtro degradado para siempre, y el "
+        << "usuario no tiene forma de recuperar lo que ya habia pedido.";
 
-    // Y la consecuencia, leida del efecto y no de un literal del test: ese tope
-    // esta POR ENCIMA de Nyquist, que es toda la deuda en una linea.
-    EXPECT_GT(ceiling, kRate * 0.5f)
-        << "el tope del cutoff (" << ceiling << " Hz) ya no supera a Nyquist a "
-        << kRate << " Hz. Sea porque se puso el clamp o porque cambio el rango "
-        << "de la perilla, el defecto que documenta esta suite dejo de existir "
-        << "por este camino — hay que volver a medir antes de tocar nada.";
+    // (3) La consecuencia observable de (2): volver a un rate alto RECUPERA el
+    // filtro. Es lo unico que distingue "acoto lo que usa" de "acoto lo que
+    // guarda", y sin esta parte las dos implementaciones pasan igual.
+    fx.setSampleRate(96000);
+    const double cornerHigh =
+        cornerFrequency(wma::golden::captureImpulseResponse(fx, 16384), 96000, false);
+    EXPECT_GT(cornerHigh, 18000.0)
+        << "despues de volver a 96 kHz el codo quedo en " << cornerHigh
+        << " Hz en vez de cerca de los 20.000 que se habian pedido. El filtro "
+        << "no se recupero del paso por " << kLowRate << " Hz: el clamp esta "
+        << "pisando el valor guardado.";
 }
 
 // ===========================================================================
@@ -313,23 +316,38 @@ TEST(NyquistLimits, EveryDeclaredCaseStillReproduces) {
 // ===========================================================================
 
 TEST(NyquistLimits, NoNewDivergenceAppearsBelowFortyKilohertz) {
-    // Barrido acotado a proposito: un solo rate representativo (22.050, donde
-    // dos de los efectos declarados ya fallan) y los tres primeros parametros.
-    // Cubrir los cuatro rates y los ocho parametros cuesta mas de un minuto en
-    // debug y encuentra lo mismo que la tabla de arriba ya declara.
+    // Antes de WD-3.5 este barrido corria a UN solo rate (22.050) porque los
+    // otros los tapaban los siete efectos declarados. Pagada esa deuda, cubre
+    // los cuatro rates bajos que importan: 8.000 y 16.000 son los de un headset
+    // Bluetooth SCO, 22.050 la mitad de CD y 32.000 un rate estandar de Android.
     //
-    // Lo que este test agrega es lo que la tabla no puede: si alguien registra
-    // un efecto NUEVO que calcula omega contra el rate sin acotar, aparece aca
-    // sin que nadie se acuerde de agregarlo a ninguna lista.
+    // La ventana se queda corta A PROPOSITO, y ahora se sabe por que alcanza:
+    // una divergencia por omega pasado de pi aparece en el PRIMER bloque —
+    // medido, entre 0,03 y 0,06 s en los seis casos que habia. Lo que una
+    // ventana corta NO ve es la otra clase de divergencia, la del lazo con
+    // ganancia > 1, que tarda segundos y no depende del rate; esa la caza
+    // `test_loop_stability.cpp`, que por eso mide en segundos y no en bloques.
+    //
+    // Lo que este test agrega y la tabla no puede: si alguien registra un efecto
+    // NUEVO que calcula omega contra el rate sin acotar, aparece aca sin que
+    // nadie se acuerde de agregarlo a ninguna lista.
     EffectRegistry registry;
     registerBuiltinEffects(registry);
 
     const std::set<std::string> baseline = readBaseline(WMA_NYQUIST_BASELINE);
-    constexpr int kRate = 22050;
 
+    for (int kRate : {8000, 16000, 22050, 32000}) {
     for (int id = 0; id < EFFECT_TYPE_COUNT; ++id) {
         const auto type = static_cast<EffectType>(id);
         if (baseline.count(nameOf(type)) > 0) continue;
+
+        // SPRING_REVERB queda afuera de ESTE barrido y solo de este: su
+        // divergencia no es de Nyquist —ocurre igual a 96 kHz— y meterla aca la
+        // volveria a atribuir al sample rate, que es el error que este archivo
+        // acaba de corregir. La exclusion no es un comentario: esta MEDIDA por
+        // `LoopStability.EveryDeclaredCaseStillReproduces`, y el dia que WD-3.6
+        // la pague, ese test se pone rojo.
+        if (type == SPRING_REVERB) continue;
 
         for (int p = 0; p < 3; ++p) {
             for (float v : {0.0f, 20.0f, 20000.0f}) {
@@ -346,10 +364,14 @@ TEST(NyquistLimits, NoNewDivergenceAppearsBelowFortyKilohertz) {
                     << "esta declarado en nyquist-baseline.txt.\n"
                     << "  Casi siempre es lo mismo: un omega calculado contra el "
                     << "sample rate a partir de una frecuencia acotada contra "
-                    << "una CONSTANTE. El idioma que falta ya existe en cinco "
-                    << "lugares de la libreria: min(valor, 0,45 * fs).";
+                    << "una CONSTANTE. El idioma que falta ya existe en seis "
+                    << "lugares de la libreria: min(valor, 0,45 * fs) — y desde "
+                    << "WD-3.5, tambien en `BiquadFilter::setSampleRate()`, que "
+                    << "es el que cubre a cualquiera que configure sus filtros "
+                    << "en el constructor.";
             }
         }
+    }
     }
 }
 

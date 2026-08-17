@@ -229,6 +229,13 @@ void AmpSimulator::getToneStackFrequencies(ToneStackType type, float& bassFreq, 
 
 void AmpSimulator::calculateLowShelf(int index, float freq, float gainDb, float q) {
     float A = std::pow(10.0f, gainDb / 40.0f);
+    // WD-3.5 — los tres helpers de esta clase calculaban w0 contra el rate sin
+    // acotar la frecuencia. Las del tone stack son fijas (100–4.000 Hz), asi que
+    // hace falta fs < 8.000 para pasar de Nyquist y por eso AMP_SIM nunca aparecio
+    // en el barrido de `nyquist-baseline.txt`: no tiene repro, le falta el clamp.
+    // Que la deuda no se pueda reproducir no la vuelve inexistente — la vuelve
+    // inelegible para el trinquete, que es otra cosa.
+    freq = std::min(freq, 0.45f * static_cast<float>(mSampleRate));
     float w0 = 2.0f * static_cast<float>(M_PI) * freq / static_cast<float>(mSampleRate);
     float cosW0 = std::cos(w0);
     float sinW0 = std::sin(w0);
@@ -245,6 +252,7 @@ void AmpSimulator::calculateLowShelf(int index, float freq, float gainDb, float 
 
 void AmpSimulator::calculatePeaking(int index, float freq, float gainDb, float q) {
     float A = std::pow(10.0f, gainDb / 40.0f);
+    freq = std::min(freq, 0.45f * static_cast<float>(mSampleRate));  // WD-3.5, ver calculateLowShelf
     float w0 = 2.0f * static_cast<float>(M_PI) * freq / static_cast<float>(mSampleRate);
     float cosW0 = std::cos(w0);
     float sinW0 = std::sin(w0);
@@ -260,6 +268,7 @@ void AmpSimulator::calculatePeaking(int index, float freq, float gainDb, float q
 
 void AmpSimulator::calculateHighShelf(int index, float freq, float gainDb, float q) {
     float A = std::pow(10.0f, gainDb / 40.0f);
+    freq = std::min(freq, 0.45f * static_cast<float>(mSampleRate));  // WD-3.5, ver calculateLowShelf
     float w0 = 2.0f * static_cast<float>(M_PI) * freq / static_cast<float>(mSampleRate);
     float cosW0 = std::cos(w0);
     float sinW0 = std::sin(w0);
