@@ -701,6 +701,26 @@ que hacen que WD-3.1 y WD-3.4 no se degraden con el tiempo.
 3. **Estabilidad numérica:** barrer parámetros a los límites de rango en los tres sample rates y
    afirmar salida finita y acotada. Esto es lo que habría cachado WD-3.5.
 
+> **Estado al 2026-08-17 — criterios 2 y 3 cerrados** (`effects/tests/test_rate_invariance.cpp`,
+> `test_nyquist_limits.cpp`, `RateHarness.h`, y dos trinquetes:
+> `rate-invariance-baseline.txt` y `nyquist-baseline.txt`). El **criterio 1** ya lo cubría
+> `test_effect_latency.cpp` desde WD-3.1, a 48 kHz — falta extenderlo a los tres rates.
+>
+> Tres cosas que la medición dejó, y que el criterio tal como está escrito no anticipaba:
+>
+> - **No se puede exigir que |H(f)| coincida entre rates.** Un biquad bilineal comprime el eje
+>   cerca de Nyquist: un LPF a 1 kHz difiere **18,5 dB a 19 kHz** entre 44,1 y 96, y eso es el
+>   método de diseño, no un defecto. Lo invariante es el **landmark** (el −3 dB cae en 1997,36 /
+>   1997,36 / 1997,34 Hz). La decisión está medida por dos tests que se ponen rojos si algún día
+>   deja de ser cierta.
+> - **El criterio 3 tal como está escrito da verde y no encuentra nada.** Los tres rates que
+>   nombra están limpios. La deuda vive por debajo de 40 kHz — ver la corrección en WD-3.5.
+> - **Cinco efectos entregan hasta 5,87 dB de diferencia de nivel según el rate**
+>   (`DECI_HPF`, `SHIMMER_REVERB`, `PLATE_REVERB`, `HALL_REVERB`, `CABINET`). Es la deuda de la
+>   clase de WD-3.4 en la capa de efectos, y está declarada en `rate-invariance-baseline.txt`.
+>   La medición separó dos poblaciones sin zona gris: 18 de 21 por debajo de 0,25 dB, y estos
+>   cinco arrancando en 0,94.
+
 **Esfuerzo** 1 sem · **Riesgo** bajo · **Depende de** WD-2.2
 
 ---
@@ -931,9 +951,14 @@ La protección va una vez, al final, en `OutputStage`.
 Una cuerda de Karplus-Strong afinada por longitud de línea de retardo queda **8,8% sharp** — 1,5
 semitonos. 44,1 kHz es el rate nativo de una fracción grande de dispositivos Bluetooth y USB.
 
-Un segundo caso, más chico: `EffectChain.cpp:50` computa
+~~Un segundo caso, más chico: `EffectChain.cpp:50` computa
 `mCrossfadeSamples = 48000 * 0.030f` en el constructor y nunca lo recalcula en `setSampleRate()`.
-A 96 kHz el crossfade de routing dura 15 ms; a 44,1 kHz, 32,6 ms.
+A 96 kHz el crossfade de routing dura 15 ms; a 44,1 kHz, 32,6 ms.~~
+
+> 🔴 **FALSO, verificado en WD-2.3 (2026-08-17).** `EffectChain::setSampleRate()` **sí** recalcula
+> `mCrossfadeSamples = sr * 0.030f` (línea 1265), y `git log -S` dice que lo hace **desde la
+> extracción inicial** (`d66ac4d`): no es que se haya arreglado después, es que el ítem nunca fue
+> cierto. La auditoría leyó el constructor y no el setter.
 
 **Criterio de aceptación.**
 1. `onStreamConfigChanged` re-prepara los engines del dispatcher, y todo lo demás que tenga estado
@@ -954,16 +979,44 @@ A 96 kHz el crossfade de routing dura 15 ms; a 44,1 kHz, 32,6 ms.
 coeficientes de un biquad RBJ se vuelven inestables cuando ω₀ → π. Nada en C++ vuelve a acotar
 contra el rate real.
 
-**Escenario de falla.** Cutoff a 20 kHz en un device a 44,1 kHz. `tan(π · 20000/44100)` cae en la
-región donde el warping de la transformada bilineal explota. La salida auto-oscila o produce NaN
-— que el scrubber convierte en silencio, así que el usuario escucha que el filtro "deja de
-funcionar" sin que aparezca un error en ningún lado.
+**Escenario de falla.** ~~Cutoff a 20 kHz en un device a 44,1 kHz. `tan(π · 20000/44100)` cae en
+la región donde el warping de la transformada bilineal explota.~~
+
+> 🔴 **CORREGIDO POR MEDICIÓN (WD-2.3, 2026-08-17). El escenario de arriba NO reproduce.** A
+> 44,1 kHz con el cutoff en el tope, ω/π = 0,907 y sin(ω) = **+0,288**: la salida se queda en
+> 1,088 de pico, finita y acotada. Los tres rates que nombra WD-2.3 —44,1 / 48 / 96— están
+> limpios, y eso está medido sobre los 23 efectos en
+> `RateInvariance.EveryEffectStaysFiniteAndBoundedAtEveryRate`.
+>
+> El defecto **es real** y el disparador es **peor** que el del ticket: cualquier rate por
+> debajo de 40 kHz. La condición exacta es `sin(ω) < 0`, o sea cutoff > fs/2 — ahí el `alpha`
+> del cookbook RBJ cambia de signo y los polos salen del círculo unitario. **32.000 Hz es un
+> rate estándar de Android** y 16.000 el de un headset Bluetooth SCO, que es justo el hardware
+> del camino de entrada.
+>
+> Y el alcance es más grande que un efecto: **siete** divergen por debajo de 44,1 kHz —
+> `FILTER`, `VOCODER`, `PHASER`, `HPF_DELAY`, `SPRING_REVERB`, `PLATE_REVERB`,
+> `SHIMMER_REVERB`— declarados en `effects/tests/nyquist-baseline.txt`. **Sólo el de `FILTER`
+> tiene la causa verificada.** `VocoderBank` **sí** acota a 0,45·fs y `VOCODER` igual falla, y
+> cuatro de los siete disparan con el parámetro en **cero**: hay al menos una segunda causa sin
+> identificar, y el clamp por sí solo no la cubre.
+>
+> `BiquadFilter` y `StateVariableFilter` **ya acotan** (0,49·fs los dos). Los que calculan ω
+> contra el rate sin acotar son `FilterEffect::updateCoefficients()` y los tres helpers de
+> biquad de `AmpSimulator`.
 
 **Criterio de aceptación.**
-1. `BiquadFilter::setCoefficients` y `StateVariableFilter` acotan a `min(valor, 0.45 · fs)`.
-2. Test de WD-2.3.3 verde: barrido de cutoff hasta el límite a 44,1 kHz, salida finita y acotada.
+1. ~~`BiquadFilter::setCoefficients` y `StateVariableFilter` acotan~~ → **`FilterEffect::setCutoff`
+   y los helpers de `AmpSimulator`** acotan a `min(valor, 0.45 · fs)`. Los dos primitivos que
+   nombraba el ticket ya lo hacían.
+2. Diagnosticar las otras seis entradas del baseline. No son "lo mismo que FILTER": eso está
+   medido, no supuesto.
+3. `nyquist-baseline.txt` vacío. El trinquete marca cada entrada al pagarse — verificado por
+   mutación: aplicar el clamp retira las dos de `FILTER` y no toca las otras cinco.
 
-**Esfuerzo** 1 d · **Riesgo** bajo · **Depende de** WD-2.3
+**Esfuerzo** ~~1 d~~ · **Riesgo** ~~bajo~~ — a re-estimar: el ticket asumía un clamp en dos
+primitivos que ya lo tenían, y lo que hay son siete efectos con al menos dos causas distintas
+· **Depende de** WD-2.3 ✅
 
 ---
 

@@ -33,6 +33,8 @@ add_executable(effects_tests
     test_golden_filter_eq.cpp
     test_golden_properties.cpp
     test_golden_dynamics.cpp
+    test_rate_invariance.cpp
+    test_nyquist_limits.cpp
     test_logger_stub.cpp
 )
 
@@ -49,6 +51,8 @@ target_include_directories(effects_tests PRIVATE
 target_compile_definitions(effects_tests PRIVATE
     WMA_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata/golden"
     WMA_RESET_BASELINE="${CMAKE_CURRENT_SOURCE_DIR}/reset-baseline.txt"
+    WMA_RATE_BASELINE="${CMAKE_CURRENT_SOURCE_DIR}/rate-invariance-baseline.txt"
+    WMA_NYQUIST_BASELINE="${CMAKE_CURRENT_SOURCE_DIR}/nyquist-baseline.txt"
 )
 
 target_link_libraries(effects_tests PRIVATE watermelon-effects GTest::gtest_main)

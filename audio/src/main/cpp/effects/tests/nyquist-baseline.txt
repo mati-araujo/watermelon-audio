@@ -1,0 +1,63 @@
+# Efectos que DIVERGEN a sample rates por debajo de 44,1 kHz, medido por
+# `NyquistLimits.EveryDeclaredCaseStillReproduces`.
+#
+# La causa CONOCIDA —la de FILTER, la unica verificada— es una frecuencia acotada
+# contra una CONSTANTE (20 kHz) y despues convertida a omega contra el sample
+# rate VIGENTE. Cuando el rate baja, omega pasa de pi, sin(omega) se vuelve
+# negativo, el alpha del cookbook RBJ cambia de signo y los polos salen del
+# circulo unitario. Los otros seis casos NO estan diagnosticados: ver abajo.
+#
+# ESTO ES UN TRINQUETE, NO UNA LISTA DE EXCEPCIONES. El test falla si:
+#   - un efecto que NO esta aca empieza a divergir  (deuda nueva), y TAMBIEN
+#   - un efecto que SI esta aca deja de divergir    (deuda pagada: borrar linea)
+#
+# Misma semantica que `reset-baseline.txt` y `scripts/rt-safety-baseline.txt`.
+#
+# Formato:  <EFFECT_TYPE> | <rates que reproducen> | <por que>
+#
+# ---------------------------------------------------------------------------
+# DUEÑO DE TODA ESTA DEUDA: **WD-3.5 — clamp de coeficientes contra Nyquist**.
+# Poner `min(valor, 0,45 * fs)` donde falta retira las DOS entradas de FILTER, y
+# nada mas: verificado por mutacion. Vaciar este archivo es mas trabajo que una
+# linea, y por eso WD-3.5 quedo con el esfuerzo a re-estimar.
+#
+# UNA CORRECCION AL REQUERIMIENTO, MEDIDA: WD-3.5 dice que el escenario de falla
+# es "cutoff a 20 kHz en un device a 44,1 kHz". **No reproduce.** A 44,1 kHz el
+# omega queda en 0,907 pi con sin(omega) = +0,288 y la salida se mantiene en
+# 1,088 de pico. El disparador real es cualquier rate por debajo de 40 kHz —
+# entre ellos 32.000, que es un rate estandar de Android, y 16.000, que es el de
+# un headset Bluetooth SCO. O sea: mas alcanzable que lo que decia el ticket, no
+# menos.
+# ---------------------------------------------------------------------------
+
+# CAUSA VERIFICADA — el mecanismo lo aisla un test propio
+# (`TheFilterSurvivesExactlyWhileTheCutoffStaysBelowHalfTheRate`).
+FILTER         | 22.050 · 32.000 | `setCutoff` acota a [20, 20000] sin mirar el rate; `updateCoefficients` hace omega = 2*pi*c/fs
+
+# CAUSA NO LOCALIZADA — lo que hay es el repro, no el diagnostico. Ponerlos como
+# "mismo problema que FILTER" seria una suposicion: los cinco tienen filtros
+# adentro, pero cuatro de ellos divergen con el parametro en CERO, que no es el
+# perfil de un omega pasado de pi. Localizarlos es parte de WD-3.5, y hasta
+# entonces esta columna dice lo que se midio y nada mas.
+VOCODER        | 16.000 · 22.050 | banco de filtros; p0=0 alcanza, NaN en el primer bloque
+PHASER         |  8.000          | cadena de all-pass; p0=0 alcanza, NaN en el primer bloque
+HPF_DELAY      | 16.000 · 22.050 | el HPF del lazo de realimentacion diverge y el delay lo reinyecta
+PLATE_REVERB   | 16.000          | pico 5,1e37 sin llegar a NaN: el lazo del FDN diverge exponencialmente
+SHIMMER_REVERB | 16.000          | comparte el FDN con plate, y el mismo lazo
+SPRING_REVERB  |  8.000          | el mas lento: 25 bloques de 512 hasta pasar la cota de 1.000
+
+# NO estan aca, y por que:
+#
+#   AMP_SIM — sus tres helpers de biquad calculan omega contra el rate sin
+#   acotar, igual que FilterEffect. No aparece en el barrido porque sus
+#   frecuencias son fijas de tone stack (100–4.000 Hz) y necesitaria fs < 8.000
+#   para romperse. Le falta el mismo clamp; no tiene repro, asi que no entra al
+#   trinquete — un baseline con entradas que no se pueden reproducir deja de
+#   poder decir cuando la deuda se pago.
+#
+# Y UNA ADVERTENCIA SOBRE LA COLUMNA DE ARRIBA: el diagnostico de FILTER NO se
+# extiende al resto por analogia. `VocoderBank` SI acota a 0,45 * fs y VOCODER
+# igual diverge; cuatro de los siete casos disparan con el parametro en CERO,
+# que no es el perfil de un omega pasado de pi. Hay al menos una segunda causa
+# sin identificar. Aplicar el clamp de WD-3.5 retira las dos entradas de FILTER
+# —verificado por mutacion— y no toca las otras cinco.

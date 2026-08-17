@@ -1,0 +1,48 @@
+# Efectos que entregan NIVELES DISTINTOS segun el sample rate, medido por
+# `RateInvariance.EveryEffectDeliversTheSameLevelAtEveryRate`.
+#
+# La propiedad: el mismo seno de 440 Hz a 44,1 / 48 / 96 kHz tiene que salir con
+# el mismo RMS, dentro de 0,5 dB. Es una propiedad DEBIL a proposito —dice que
+# suena igual de fuerte, no que suene igual— pero es la unica que aplica a los
+# 23 efectos, porque un reverb no tiene "cutoff" que medir.
+#
+# ESTO ES UN TRINQUETE, NO UNA LISTA DE EXCEPCIONES. El test falla si:
+#   - un efecto que NO esta aca empieza a fallar  (deuda nueva), y TAMBIEN
+#   - un efecto que SI esta aca deja de fallar    (deuda pagada: borrar linea)
+#
+# Formato:  <EFFECT_TYPE> | <desviacion medida> | <de donde sale>
+#
+# ---------------------------------------------------------------------------
+# LA MEDICION SEPARO DOS POBLACIONES, NO UN GRADIENTE. De los 21 efectos
+# medibles, 16 quedaron por debajo de 0,02 dB y 18 por debajo de 0,25. Los cinco
+# de abajo arrancan en 0,94. No hay nada entre 0,25 y 0,94, asi que el corte en
+# 0,5 dB no es una eleccion de tolerancia: es donde la propia medicion partio.
+#
+# ESTA ES LA DEUDA DE LA CLASE DE WD-3.4 EN LA CAPA DE EFECTOS. WD-3.4 mira
+# `SynthEngineDispatcher`, que prepara dieciseis engines con `prepare(48000,
+# 4096)` literal. Lo de aca es el mismo error escrito de otra forma: estado
+# interno dimensionado en SAMPLES contra un rate que no es el vigente.
+# ---------------------------------------------------------------------------
+
+DECI_HPF       | 5,87 dB | el `step = fs / target` del sample-and-hold cambia con el rate, y con el la cantidad de aliasing que entra
+SHIMMER_REVERB | 5,20 dB | el desplazador de pitch trabaja sobre una ventana en samples
+PLATE_REVERB   | 3,53 dB | largos de la red FDN dimensionados en samples
+HALL_REVERB    | 1,97 dB | misma FDN que plate, mismo origen, menos severo
+CABINET        | 0,94 dB | la IR del gabinete es una tabla de N muestras; a 96 kHz representa la mitad del tiempo, o sea el doble de frecuencia
+
+# NO estan aca, y por que:
+#
+#   RANDOM_RESO y TAPE_ECHO — no son medibles, no son deuda. Los dos sortean un
+#   LFO `RANDOM_SMOOTH`, y `LFO::randomFloat()` siembra con `std::random_device`.
+#   Medido: RANDOM_RESO dispersa 28,9 dB entre corridas al MISMO rate, y
+#   TAPE_ECHO 0,113 dB — mas que los 0,096 dB que separan sus rates. O sea que
+#   el instrumento no puede resolver lo que se le pediria afirmar.
+#
+#   La exclusion esta MEDIDA por `TapeEchoIsNonDeterministicByDesign`, no
+#   justificada por este comentario. Si alguno se vuelve determinista, ese test
+#   se pone rojo y avisa que hay que dejarlo entrar al barrido.
+#
+#   TAPE_ECHO no estaba en la lista de no-deterministas de WD-3.2, y no fue un
+#   descuido de aquel test: su ventana de 4.096 frames es mas corta que su
+#   propio delay de 350 ms, asi que alli solo se medía el camino directo, donde
+#   el flutter no llega. Con la ventana de 2 s de esta suite, aparece.
