@@ -142,6 +142,21 @@ void FilterEffect::updateCoefficients() {
 
     float c = cutoff.load();
     float r = resonance.load();
+
+    // WD-3.5 — acotar contra el rate VIGENTE. `setCutoff` acota contra la
+    // constante de 20 kHz, que es independiente del rate: a cualquier fs por
+    // debajo de 40.000 ese tope queda POR ENCIMA de Nyquist, sinf(omega) se
+    // vuelve negativo, alpha con el, y a0 = 1 + alpha cruza el cero. Es la unica
+    // de las siete entradas de `nyquist-baseline.txt` que ya tenia la causa
+    // verificada, y la mitad que faltaba era esta linea.
+    //
+    // Se acota ACA y no en `setCutoff` a proposito, por lo mismo que en
+    // `BiquadFilter::setSampleRate`: `cutoff` guarda lo que PIDIO el usuario, y
+    // un clamp destructivo dejaria la perilla degradada para siempre despues de
+    // pasar por un device a 16 kHz. `getParam(0)` sigue devolviendo el pedido;
+    // lo que se acota es lo que entra al diseño del biquad.
+    c = std::min(c, 0.45f * static_cast<float>(mSampleRate));
+
     // IMPROVED: Use dynamic sample rate instead of constant
     float omega = 2.0f * kPi * c / mSampleRate;
     float alpha = sinf(omega) / (2.0f * r);

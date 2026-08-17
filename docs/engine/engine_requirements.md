@@ -1018,6 +1018,99 @@ la región donde el warping de la transformada bilineal explota.~~
 primitivos que ya lo tenían, y lo que hay son siete efectos con al menos dos causas distintas
 · **Depende de** WD-2.3 ✅
 
+> ✅ **HECHO (2026-08-17). Las siete causas quedaron localizadas, y resultaron ser TRES —
+> y una de las siete no era de este requerimiento.**
+>
+> **`nyquist-baseline.txt` está vacío.** Los tres mecanismos:
+>
+> 1. **`FILTER`** — la única que ya tenía causa verificada. `setCutoff` acota contra la
+>    constante de 20 kHz y `updateCoefficients()` deriva ω contra el rate vigente.
+>
+> 2. **`VOCODER`, `HPF_DELAY`, `PLATE_REVERB` y `SHIMMER_REVERB` — las cuatro por UNA sola
+>    línea, y desde ninguno de los cuatro se veía.** Los cuatro configuran sus filtros en el
+>    constructor, a 48 kHz, llamando a un setter de `BiquadFilter` que **sí** clampea; después
+>    cambian el rate. `BiquadFilter::setSampleRate()` recalculaba los coeficientes **sin volver
+>    a aplicar `clampFrequency()`**. La deuda estaba en el primitivo que comparten — el mismo
+>    patrón que en WD-3.2, donde tres reverbs fallaban por `FDN::reset()`.
+>
+>    Por eso la analogía con `FILTER` fallaba y por eso cuatro disparaban con el parámetro en
+>    cero: **el parámetro nunca fue el disparador**; el filtro culpable era uno fijo del
+>    constructor. Y por eso `VocoderBank` clampeando no salvaba a `VOCODER`: el que rompía era
+>    su LPF de salida, no el banco.
+>
+> 3. **`PHASER`** — su all-pass de primer orden no pasa por `BiquadFilter`: el coeficiente sale
+>    de `(tan(wc) − 1) / (tan(wc) + 1)` y `|coef|` pasa de 1 en cuanto `modFreq` supera fs/2.
+>
+> **Los cuatro bordes se predijeron antes de medirlos y cayeron exactos al Hz:** 24.000 para
+> `VOCODER` y `HPF_DELAY` (su LPF fijo de 12 kHz), 18.000 para `PLATE` (9 kHz), 21.000 para
+> `SHIMMER` (10,5 kHz) y 8.560 para `PHASER` (2 × 4.280, el tope del barrido del LFO con el
+> depth por defecto). Un borde que cae donde la hipótesis dijo es lo que separa una causa
+> localizada de una coincidencia.
+>
+> **Cero cambio de sonido a 44,1 / 48 / 96 kHz**, y no por argumento sino medido: los picos de
+> los cuatro efectos son idénticos dígito a dígito antes y después (`VOCODER` 0,14123,
+> `HPF_DELAY` 1,27229, `PLATE` 0,72146). El clamp sólo actúa donde antes había NaN.
+>
+> **Decisión de diseño que el criterio no anticipaba: el clamp NO es destructivo.** Se acota lo
+> que se USA, no lo que se guarda — `BiquadFilter` recuerda la frecuencia pedida y `FilterEffect`
+> deja `cutoff` intacto. Clampear en su lugar dejaría la perilla degradada para siempre después
+> de que el device pase una vez por 16 kHz (Bluetooth SCO). Dos tests miden justamente eso, y son
+> los únicos que distinguen las dos implementaciones.
+>
+> **`AmpSimulator` también recibió el clamp** aunque no tiene repro (sus frecuencias de tone
+> stack son fijas, 100–4.000 Hz, y necesitaría fs < 8.000). No entra al trinquete: un baseline
+> con entradas que no se pueden reproducir deja de poder decir cuándo la deuda se pagó.
+>
+> 🔴 **Y `SPRING_REVERB` NO ERA DE ACÁ.** Ver WD-3.6. Estaba en `nyquist-baseline.txt` por un
+> artefacto del instrumento, y su defecto es peor que cualquiera de los seis anteriores.
+>
+> Campaña de mutación: **7 mutantes, 7 muertos, y el patrón de muertes coincidió con la
+> predicción en los 7** — incluidos dos que existen sólo para verificar que el clamp no se
+> volvió destructivo, y uno inverso (arreglar `SPRING`) que valida la mitad "deuda pagada" del
+> trinquete nuevo.
+
+---
+
+### WD-3.6 — La ganancia de lazo de `SpringReverbEffect`
+
+**De dónde sale.** Del diagnóstico de WD-3.5, no de la auditoría original. `SPRING_REVERB`
+figuraba en `nyquist-baseline.txt` como "diverge a 8.000 Hz, el más lento: 25 bloques".
+
+**Problema.** No es un defecto de sample rate. El lazo tiene ganancia mayor que 1 **con los
+valores de fábrica**: los cuatro taps del tanque suman 1,49 de ganancia y el feedback por
+defecto es 0,692 (`0,45 + decay · 0,11` con `decay = 2,2`). Diverge a los **ocho rates medidos**
+—8.000, 11.025, 16.000, 22.050, 32.000, 44.100, 48.000 y 96.000— y en el mismo tiempo:
+0,96 a 1,22 s hasta pasar la cota.
+
+**Por qué ningún test lo vio.** Porque la ventana de los barridos iba en **bloques**: 32 bloques
+de 512 muestras son 2,0 s a 8 kHz y 0,34 s a 48 kHz. El único rate cuya ventana llegaba a la
+cota era el más bajo, así que el defecto se le atribuyó al único eje que el test variaba.
+**Un baseline indexado por sample rate atribuye al sample rate.**
+
+**Escenario de falla — medido, con un seno de 220 Hz a nivel de instrumento (0,30), a 48 kHz y
+todo por defecto.** La salida crece desde el segundo ~6, pasa por 1e34 a los 35 s, y a los ~38 s
+el tanque se va a no-finito: ahí el scrub de `if (!isfinite) wet = 0` corta la señal húmeda y
+**el reverb queda mudo para siempre**. El auto-gain por bloque de `EffectChain::processOneEffect`
+no lo evita — clava la salida en 1,5 (un muro comprimido) y el tanque explota igual.
+
+Los dos parámetros que lo disparan, medidos por separado: **DRIP** (rango 0–1, defecto 0,35) es
+estable sólo en 0, y ya crece con 0,10; **DECAY** (rango 0,4–5, defecto 2,2) es estable hasta 1,0
+(fb 0,560) e inestable desde 2,2 (fb 0,692), aun con el drip en cero.
+
+🔴 **Restricción de orden: WD-3.3 no puede ir antes que esto.** WD-3.3 saca el auto-gain de
+`processOneEffect`, que hoy es lo único que acota la salida de este efecto.
+
+**Criterio de aceptación.**
+1. La ganancia de lazo queda por debajo de 1 en **todo** el rango de las dos perillas, no sólo
+   en los defaults. La normalización va sobre los taps, que es donde está el 1,49.
+2. `loop-stability-baseline.txt` vacío. El trinquete ya está puesto y verde
+   (`test_loop_stability.cpp`), con su instrumento validado contra cinco efectos de
+   comportamiento conocido.
+3. Los golden de WD-2.2 se re-capturan **conscientemente**, con el diff revisado: a diferencia
+   de WD-3.5, **este cambio sí cambia el sonido**, y a todos los rates.
+
+**Esfuerzo** 1 d · **Riesgo** medio (cambia el sonido de un efecto) · **Depende de** —
+
 ---
 
 ## 7. Fase 4 — Puentes generados y modelo de error (C7)

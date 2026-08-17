@@ -56,6 +56,7 @@ public:
         , mSampleRate(other.mSampleRate)
         , mType(other.mType)
         , mFrequency(other.mFrequency)
+        , mRequestedFrequency(other.mRequestedFrequency)
         , mQ(other.mQ)
         , mGainDb(other.mGainDb) {}
 
@@ -73,6 +74,7 @@ public:
         , mSampleRate(other.mSampleRate)
         , mType(other.mType)
         , mFrequency(other.mFrequency)
+        , mRequestedFrequency(other.mRequestedFrequency)
         , mQ(other.mQ)
         , mGainDb(other.mGainDb) {
         other.z1 = 0.0f;
@@ -94,6 +96,7 @@ public:
             mSampleRate = other.mSampleRate;
             mType = other.mType;
             mFrequency = other.mFrequency;
+            mRequestedFrequency = other.mRequestedFrequency;
             mQ = other.mQ;
             mGainDb = other.mGainDb;
         }
@@ -115,6 +118,7 @@ public:
             mSampleRate = other.mSampleRate;
             mType = other.mType;
             mFrequency = other.mFrequency;
+            mRequestedFrequency = other.mRequestedFrequency;
             mQ = other.mQ;
             mGainDb = other.mGainDb;
             other.z1 = 0.0f;
@@ -242,7 +246,19 @@ private:
     // Configuration
     float mSampleRate{48000.0f};
     Type mType{Type::LPF};
-    float mFrequency{1000.0f};
+    float mFrequency{1000.0f};  ///< La EFECTIVA: ya acotada contra el rate vigente.
+
+    /// WD-3.5 — la frecuencia tal como la PIDIO quien llamo al setter, sin
+    /// acotar. `setSampleRate()` re-deriva `mFrequency` desde aca, asi que un
+    /// filtro que paso por un rate bajo recupera lo que le habian pedido cuando
+    /// el rate vuelve a subir. Guardar solo la efectiva haria el clamp
+    /// destructivo y un paso por 16 kHz dejaria el filtro degradado para siempre.
+    ///
+    /// Va pegado a `mFrequency` y no al final: las listas de inicializacion de
+    /// los cuatro constructores de copia/movimiento siguen el orden de
+    /// declaracion, y separarlos las pone a advertir (o a fallar con -Werror).
+    float mRequestedFrequency{1000.0f};
+
     float mQ{0.707f};
     float mGainDb{0.0f};
 

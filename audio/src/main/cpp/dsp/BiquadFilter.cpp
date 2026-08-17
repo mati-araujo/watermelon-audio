@@ -12,11 +12,33 @@ void BiquadFilter::setSampleRate(float sampleRate) {
     }
 
     mSampleRate = sampleRate;
+
+    // WD-3.5 — el clamp contra Nyquist tiene que volver a aplicarse ACA.
+    //
+    // Antes de esto, `clampFrequency()` vivia solo en los setters, asi que
+    // acotaba contra el rate VIGENTE EN ESE MOMENTO y despues nadie lo revisaba.
+    // El idioma que eso rompe es el que usa medio repo: configurar los filtros
+    // en el constructor (a 48 kHz) y llamar a `setSampleRate()` cuando el
+    // backend negocia otro rate. Un LPF de 12 kHz configurado a 48 y llevado a
+    // 16 quedaba con omega = 1,5 pi, sin(omega) < 0, el alpha del cookbook RBJ
+    // negativo y los polos afuera del circulo unitario: NaN en el primer bloque.
+    //
+    // Era la causa de CUATRO de las siete entradas de nyquist-baseline.txt
+    // —VOCODER, HPF_DELAY, PLATE_REVERB y SHIMMER_REVERB—, y de ninguna se veia
+    // desde el efecto: los cuatro llaman a un setter que SI clampea. La deuda
+    // estaba en el primitivo que comparten.
+    //
+    // Se re-clampea desde `mRequestedFrequency` y no desde `mFrequency` para que
+    // bajar y volver a subir el rate RECUPERE lo que se habia pedido. Clampear
+    // en su lugar seria destructivo: un device que pasa por 16 kHz dejaria el
+    // filtro en 7.840 Hz para siempre.
+    mFrequency = clampFrequency(mRequestedFrequency);
     updateCoefficients();
 }
 
 void BiquadFilter::setLowpass(float frequency, float Q) {
     mType = Type::LPF;
+    mRequestedFrequency = frequency;
     mFrequency = clampFrequency(frequency);
     mQ = std::max(0.01f, Q);  // Prevent Q = 0
     mGainDb = 0.0f;
@@ -25,6 +47,7 @@ void BiquadFilter::setLowpass(float frequency, float Q) {
 
 void BiquadFilter::setHighpass(float frequency, float Q) {
     mType = Type::HPF;
+    mRequestedFrequency = frequency;
     mFrequency = clampFrequency(frequency);
     mQ = std::max(0.01f, Q);
     mGainDb = 0.0f;
@@ -33,6 +56,7 @@ void BiquadFilter::setHighpass(float frequency, float Q) {
 
 void BiquadFilter::setBandpass(float frequency, float Q) {
     mType = Type::BPF;
+    mRequestedFrequency = frequency;
     mFrequency = clampFrequency(frequency);
     mQ = std::max(0.01f, Q);
     mGainDb = 0.0f;
@@ -41,6 +65,7 @@ void BiquadFilter::setBandpass(float frequency, float Q) {
 
 void BiquadFilter::setNotch(float frequency, float Q) {
     mType = Type::NOTCH;
+    mRequestedFrequency = frequency;
     mFrequency = clampFrequency(frequency);
     mQ = std::max(0.01f, Q);
     mGainDb = 0.0f;
@@ -49,6 +74,7 @@ void BiquadFilter::setNotch(float frequency, float Q) {
 
 void BiquadFilter::setPeaking(float frequency, float Q, float gainDb) {
     mType = Type::PEAK;
+    mRequestedFrequency = frequency;
     mFrequency = clampFrequency(frequency);
     mQ = std::max(0.01f, Q);
     mGainDb = std::clamp(gainDb, -40.0f, 40.0f);
@@ -57,6 +83,7 @@ void BiquadFilter::setPeaking(float frequency, float Q, float gainDb) {
 
 void BiquadFilter::setLowShelf(float frequency, float Q, float gainDb) {
     mType = Type::LOW_SHELF;
+    mRequestedFrequency = frequency;
     mFrequency = clampFrequency(frequency);
     mQ = std::max(0.01f, Q);
     mGainDb = std::clamp(gainDb, -40.0f, 40.0f);
@@ -65,6 +92,7 @@ void BiquadFilter::setLowShelf(float frequency, float Q, float gainDb) {
 
 void BiquadFilter::setHighShelf(float frequency, float Q, float gainDb) {
     mType = Type::HIGH_SHELF;
+    mRequestedFrequency = frequency;
     mFrequency = clampFrequency(frequency);
     mQ = std::max(0.01f, Q);
     mGainDb = std::clamp(gainDb, -40.0f, 40.0f);

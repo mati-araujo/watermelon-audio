@@ -35,6 +35,20 @@ void PhaserEffect::process(float* input, float* output, int numFrames) {
         float centerFreq = MIN_FREQ + (MAX_FREQ - MIN_FREQ) / 2.0f;
         float modFreq = centerFreq + lfoValue * freqRange / 2.0f;
 
+        // WD-3.5 — acotar contra el rate VIGENTE, no contra MAX_FREQ.
+        //
+        // El all-pass de abajo no es un biquad y no pasa por `BiquadFilter`, asi
+        // que el clamp del primitivo no lo cubre: su coeficiente sale de
+        // (tan(wc) - 1) / (tan(wc) + 1), y en cuanto modFreq supera fs/2 el
+        // tangente se vuelve NEGATIVO, |coeficiente| pasa de 1 y el polo del
+        // all-pass sale del circulo unitario. Medido: con el depth por defecto
+        // (70 %) el barrido llega a 4.280 Hz, y el borde de la divergencia cae
+        // en 8.560 Hz EXACTOS — 2 x 4.280. A 8.500 hay NaN; a 8.560 no.
+        //
+        // A 44,1 / 48 / 96 kHz esto no cambia una sola muestra: 4.280 esta muy
+        // por debajo de 0,45 * fs en los tres. Solo actua donde hoy hay NaN.
+        modFreq = std::min(modFreq, 0.45f * sampleRate);
+
         // Calculate all-pass coefficient from frequency
         // Using bilinear transform approximation
         float wc = static_cast<float>(M_PI) * modFreq / sampleRate;
