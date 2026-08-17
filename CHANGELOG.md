@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.0.2...v2.1.0) (2026-08-17)
+
+
+### Features
+
+* **effects:** compensacion de latencia entre ramas (WD-3.1, completo) ([#126](https://github.com/mati-araujo/watermelon-audio/issues/126)) ([0e5a3b9](https://github.com/mati-araujo/watermelon-audio/commit/0e5a3b9a6ceae8630fd860474d2c37e092c6fb4d))
+* **engine:** motor sin device y contrato de latencia — pasos 0 y 1 de D1-bis ([#125](https://github.com/mati-araujo/watermelon-audio/issues/125)) ([6407b7f](https://github.com/mati-araujo/watermelon-audio/commit/6407b7f181d934abf27198e8e175b4f2798b6ebd))
+
+
+### Bug Fixes
+
+* **effects:** reset() pasa a virtual pura y se paga la deuda de los 16 (WD-3.2) ([#129](https://github.com/mati-araujo/watermelon-audio/issues/129)) ([578d2cd](https://github.com/mati-araujo/watermelon-audio/commit/578d2cd285243df1be1f8c89f705618c6d43a195))
+* **rt:** el thread de audio no cumplía sus propias reglas — Fase 1 del programa WD ([#123](https://github.com/mati-araujo/watermelon-audio/issues/123)) ([dffcda1](https://github.com/mati-araujo/watermelon-audio/commit/dffcda114fd4c50853cf856d4ba60a1e67947194))
+
 ## [2.0.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.0.1...v2.0.2) (2026-08-13)
 
 
