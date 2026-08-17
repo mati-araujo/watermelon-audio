@@ -25,6 +25,9 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /// Limpia el HPF, el hold y re-siembra los smoothers (WD-3.2).
+    void reset() override;
+
     /**
      * @brief Latencia = los samples que el zero-order hold retiene (WD-3.1).
      *

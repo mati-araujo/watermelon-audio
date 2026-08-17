@@ -25,6 +25,9 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
 
+    /// Limpia la fase del LFO y re-siembra los smoothers (WD-3.2).
+    void reset() override;
+
     // Parameter IDs
     static constexpr int PARAM_RATE = 0;           // 0.1-20 Hz (XY: X)
     static constexpr int PARAM_DEPTH = 1;          // 0-1 (XY: Y)

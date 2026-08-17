@@ -816,6 +816,70 @@ virtual relevante para seguridad es el default equivocado.
 2. El test property-based de WD-2.2 pasa para los 26: procesar → `reset()` → procesar la misma
    entrada da salida idéntica.
 
+> ✅ **HECHO. El baseline de 16 efectos quedó VACÍO, y `reset()` es virtual pura.**
+>
+> La cifra del enunciado de arriba (11 de 26) era del relevamiento del 13/08 y
+> se quedaba corta: **la medición fueron 16 de los 23 registrados**, y en tres
+> formas distintas.
+>
+> **Lo que hizo falta, por grupo:**
+>
+> - **9 escribieron su `reset()` por primera vez.** Grupo A: nunca lo habían
+>   overrideado, así que sobrevivía todo su estado.
+> - **6 completaron el que ya tenían.** Grupo B, el peor: *parecía hecho*.
+> - **1 arregló el CONSTRUCTOR, no `reset()`.** `DISTORTION` — ver la segunda
+>   tanda de WD-2.2.
+> - **Y 3 de los 6 del grupo B no se arreglaban desde el efecto.** Hall, plate y
+>   shimmer seguían fallando después de completar los suyos: la deuda estaba en
+>   **`FDN::reset()`**, el primitivo que comparten, que limpiaba las líneas de
+>   delay y no los biquads de damping ni los LFO de modulación. **El mismo error,
+>   una capa más abajo.**
+>
+> **`Effect::reset()` pasó a `= 0`.** El compilador enumeró exactamente las 10
+> clases que faltaban — no hizo falta buscarlas. Un efecto nuevo ya no puede
+> olvidarse, y uno sin estado tiene que escribir un `{}` explícito con su razón,
+> que es una afirmación revisable en vez de un silencio.
+>
+> **Un comentario del código quedó invalidado, y vale contar cómo.**
+> `ReverbEffect::reset()` tenía una nota diciendo que no hacía falta resetear sus
+> sub-componentes porque su memoria es corta y llega a régimen en pocos bloques —
+> y terminaba invitando: *"si una auditoría futura muestra que filtran estado,
+> agregá `reset()` y llamalos desde acá"*. Esa auditoría fue WD-2.2. **El
+> razonamiento de la nota no era falso**: hablaba de audibilidad, y es cierto que
+> son colas cortas. Lo que cambió es la vara — una propiedad medible
+> (indistinguible de recién construido) vale más que una estimación de lo que se
+> notaría, justamente porque no depende de quién estime.
+>
+> **`RANDOM_RESO` queda afuera del test bit a bit, y no por deuda.** Su LFO
+> sortea desde un `std::random_device`, así que **dos instancias recién
+> construidas ya suenan distinto** — no hay nada que `reset()` pueda hacer. No va
+> al baseline (eso es deuda con dueño); va a `nonDeterministicByDesign()`, y la
+> exclusión está **medida** por `RandomResoIsNonDeterministicByConstructionNotByReset`,
+> que se pondrá rojo si el efecto alguna vez se vuelve determinista.
+>
+> Para que no quede sin cobertura, se agregó **`ResetSilencesEveryEffect`**: tras
+> ensuciar y resetear, con silencio a la entrada no puede quedar residuo. Es más
+> débil que la reproducibilidad bit a bit, pero no depende del determinismo — y
+> es la que escribe la propiedad de producto, el residual del pad que se filtraba
+> al primer bloque de INPUT_FX.
+>
+> **Un test existente se puso rojo, y era información.**
+> `DistortionAmpDryNull.DistortionMixZeroIsDry` pasaba porque el constructor **no**
+> sembraba los smoothers: el drive arrancaba en 0 y la rama wet estaba casi en
+> silencio durante todo el test. Con el drive en su valor real desde el primer
+> bloque, la cola del smoother de mix deja 7,6e-5 de residuo. Medido: con una
+> pasada de warm-up 7,6e-5, con tres 2,3e-23 — **es cola, no piso**, así que se
+> agregaron pasadas en vez de aflojar la tolerancia.
+>
+> **Validación:** 846/846 · 7 mutantes, 6 muertos; el séptimo resultó inerte
+> porque el constructor del chorus quedó duplicando lo que ahora hace `reset()`
+> — redundancia introducida en este mismo cambio, y removida.
+>
+> **Queda anotado, no arreglado:** `LFO::randomFloat()` construye su generador
+> con `std::random_device` de forma perezosa y se lo llama **desde el thread de
+> audio** (por `process()`, no por este cambio). `check-rt-safety.py` no lo ve
+> porque la inicialización de un `static thread_local` no está en su lista.
+
 **Esfuerzo** 2 d · **Riesgo** bajo (forzado por el compilador) · **Depende de** WD-2.2
 
 ---

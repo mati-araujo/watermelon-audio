@@ -15,6 +15,16 @@ void AutoPanEffect::setSampleRate(int sampleRate) {
     mMixSmooth.setSmoothingTime(5.0f, sr);
 }
 
+void AutoPanEffect::reset() {
+    // La fase del LFO ES estado: sin esto, dos instancias con la misma historia
+    // de audio quedan panneando en puntos distintos del ciclo.
+    mLfo.reset();
+
+    mRateSmooth.reset(mRate.load(std::memory_order_relaxed));
+    mDepthSmooth.reset(mDepth.load(std::memory_order_relaxed));
+    mMixSmooth.reset(mMix.load(std::memory_order_relaxed));
+}
+
 void AutoPanEffect::setParam(int paramId, float value) {
     switch (paramId) {
         case PARAM_RATE:

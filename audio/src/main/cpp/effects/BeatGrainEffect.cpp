@@ -75,6 +75,14 @@ void BeatGrainEffect::process(float* input, float* output, int numFrames) {
     }
 }
 
+void BeatGrainEffect::reset() {
+    // El motor de granos guarda el buffer circular Y los granos en vuelo.
+    mGrainEngine.reset();
+    mSchedulerCounter = 0.0f;
+
+    mMixSmooth.reset(mMix.load(std::memory_order_relaxed));
+}
+
 void BeatGrainEffect::setParam(int paramId, float value) {
     switch (paramId) {
         case PARAM_GRAIN_SIZE:

@@ -204,11 +204,14 @@ sesiones enteras. Los marcados **[gate]** ya los corre `scripts/gate.sh`.
 bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (774 tests, googletest)
                                            # Kotlin: 112 iOS sim / 69 JVM
 
-# audio/src/main/cpp/effects/tests/reset-baseline.txt — WD-2.2. Los 16 de 23
-# efectos que HOY arrastran estado a traves de reset(). Es un TRINQUETE, igual
-# que scripts/rt-safety-baseline.txt: el test falla si aparece deuda nueva Y
-# TAMBIEN si una entrada declarada ya no se reproduce. Si arreglaste un efecto,
-# borra su linea. Arreglarlos es WD-3.2.
+# audio/src/main/cpp/effects/tests/reset-baseline.txt — TRINQUETE del contrato
+# de reset(), igual que scripts/rt-safety-baseline.txt: el test falla si aparece
+# deuda nueva Y TAMBIEN si una entrada declarada ya no se reproduce.
+# VACIO desde WD-3.2: tuvo 16 de 23 y se pagaron todas. Ademas Effect::reset()
+# es VIRTUAL PURA, asi que un efecto nuevo no puede olvidarse — el compilador lo
+# para, y uno sin estado escribe un `{}` explicito con su razon.
+# Lo que es no-determinista POR DISEÑO no va aca: va a nonDeterministicByDesign()
+# en test_golden_properties.cpp, y la exclusion esta MEDIDA por su propio test.
 
 bash scripts/regen-golden.sh               # WD-2.2: RECAPTURAR los golden de DSP.
                                            # Es una tarea explicita y aparte a

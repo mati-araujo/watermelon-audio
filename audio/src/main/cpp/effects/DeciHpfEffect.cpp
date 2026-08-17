@@ -32,6 +32,24 @@ void DeciHpfEffect::setSampleRate(int sampleRate) {
     mLastCutoff = 300.0f;
 }
 
+void DeciHpfEffect::reset() {
+    mHpfL.reset();
+    mHpfR.reset();
+
+    mHoldL = 0.0f;
+    mHoldR = 0.0f;
+    mHoldCounter = 0.0f;
+
+    // mLastCutoff vuelve a 0 para que el proximo bloque recalcule los
+    // coeficientes, igual que hace un efecto recien construido.
+    mLastCutoff = 0.0f;
+
+    mBitDepthSmooth.reset(mBitDepth.load(std::memory_order_relaxed));
+    mCutoffSmooth.reset(mHpfCutoff.load(std::memory_order_relaxed));
+    mSRSmooth.reset(mTargetSR.load(std::memory_order_relaxed));
+    mMixSmooth.reset(mMix.load(std::memory_order_relaxed));
+}
+
 void DeciHpfEffect::setParam(int paramId, float value) {
     switch (paramId) {
         case PARAM_BIT_DEPTH:

@@ -71,6 +71,9 @@ public:
      */
     void setSampleRate(int sampleRate) override;
 
+    /// Limpia la memoria de los seis biquads (WD-3.2).
+    void reset() override;
+
     // ============== Band-specific setters ==============
 
     /**

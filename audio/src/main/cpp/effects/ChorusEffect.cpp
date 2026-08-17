@@ -10,12 +10,11 @@
 #endif
 
 ChorusEffect::ChorusEffect() {
+    // El escalonado de las fases de LFO por voz lo hace reset(), que este
+    // constructor ya llama. Antes estaba duplicado aca abajo, y esa duplicacion
+    // era justo el tipo de cosa que se desincroniza: dos lugares que tienen que
+    // coincidir para que reset() deje el efecto como recien construido.
     reset();
-
-    // Initialize LFO phases with spread
-    for (int v = 0; v < MAX_VOICES; ++v) {
-        mLfoPhase[v] = static_cast<float>(v) / MAX_VOICES;
-    }
 
     LOGI("ChorusEffect created");
 }
@@ -94,6 +93,18 @@ void ChorusEffect::reset() {
     mDelayLineL.fill(0.0f);
     mDelayLineR.fill(0.0f);
     mWriteIndex = 0;
+
+    // WD-3.2 — lo que faltaba. Limpiar las lineas de delay era la mitad: la
+    // fase de los LFO y el smoother de mix tambien son estado, y sin ellos dos
+    // instancias con la misma historia quedan modulando en puntos distintos.
+    //
+    // Ojo: NO van a cero. El constructor las escalona por voz, y ese
+    // escalonamiento es lo que hace que las cuatro voces suenen como un coro y
+    // no como una sola.
+    for (int v = 0; v < MAX_VOICES; ++v) {
+        mLfoPhase[v] = static_cast<float>(v) / MAX_VOICES;
+    }
+    mMixSmoother.reset(mMix.load(std::memory_order_relaxed) / 100.0f);
 }
 
 void ChorusEffect::setParam(int paramId, float value) {

@@ -33,6 +33,19 @@ void ComplexTremEffect::setSampleRate(int sampleRate) {
     mLastStereoPhase = mStereoPhase.load(std::memory_order_relaxed);
 }
 
+void ComplexTremEffect::reset() {
+    mLfo1L.reset();
+    mLfo2L.reset();
+    mLfo1R.reset();
+    mLfo2R.reset();
+    mLastStereoPhase = 0.0f;
+
+    mRate1Smooth.reset(mRate1.load(std::memory_order_relaxed));
+    mRate2Smooth.reset(mRate2.load(std::memory_order_relaxed));
+    mDepthSmooth.reset(mDepth.load(std::memory_order_relaxed));
+    mMixSmooth.reset(mMix.load(std::memory_order_relaxed));
+}
+
 void ComplexTremEffect::setParam(int paramId, float value) {
     switch (paramId) {
         case PARAM_RATE1:

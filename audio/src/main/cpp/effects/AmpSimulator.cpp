@@ -26,6 +26,13 @@ AmpSimulator::AmpSimulator() {
     mSagReleaseCoeff = std::exp(-1.0f / (sagReleaseSec * static_cast<float>(mSampleRate)));
 
     updateFilterCoefficients();
+
+    // Termina con reset() a proposito (WD-3.2): sus dos ParameterSmoother NO se
+    // sembraban aca, asi que un AmpSimulator recien creado subia gain y master
+    // desde cero durante el smoothing. Es el mismo defecto que tenia
+    // DistortionEffect, y asi no puede volver: el estado inicial es POR
+    // CONSTRUCCION el mismo que despues de un reset.
+    reset();
     LOGI("AmpSimulator created");
 }
 
@@ -265,6 +272,18 @@ void AmpSimulator::calculateHighShelf(int index, float freq, float gainDb, float
     mFilterCoeffs[index].b2 = (A * ((A + 1.0f) + (A - 1.0f) * cosW0 - 2.0f * sqrtA * alpha)) / a0;
     mFilterCoeffs[index].a1 = (2.0f * ((A - 1.0f) - (A + 1.0f) * cosW0)) / a0;
     mFilterCoeffs[index].a2 = ((A + 1.0f) - (A - 1.0f) * cosW0 - 2.0f * sqrtA * alpha) / a0;
+}
+
+void AmpSimulator::reset() {
+    for (auto& state : mFilterStateL) state = BiQuadState{};
+    for (auto& state : mFilterStateR) state = BiQuadState{};
+
+    // La envolvente de sag es un seguidor: arrastra el nivel del audio viejo.
+    mSagEnvelope = 0.0f;
+
+    // Mismos targets que usa process(): gain y master vienen en 0..100.
+    mGainSmoother.reset(mGain.load(std::memory_order_relaxed) / 100.0f);
+    mMasterSmoother.reset(mMaster.load(std::memory_order_relaxed) / 100.0f);
 }
 
 void AmpSimulator::setParam(int paramId, float value) {

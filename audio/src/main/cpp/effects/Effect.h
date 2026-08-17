@@ -85,9 +85,39 @@ public:
     /**
      * @brief Clear all internal DSP state without destroying the effect.
      *
-     * Default is a no-op — override in effects that carry state across
-     * process() calls (delay lines, comb/allpass buffers, reverb tails,
-     * filter memory, envelope followers, etc.).
+     * ES VIRTUAL PURA A PROPOSITO (WD-3.2). Antes tenia default `{}`, y ese
+     * default era el equivocado: un efecto con estado que se olvidara de
+     * overridearla compilaba perfecto y filtraba su cola vieja al contexto
+     * nuevo, sin que nada avisara. El barrido property-based de WD-2.2 midio el
+     * resultado de ese default: **16 de los 23 efectos registrados** no cumplian
+     * el contrato.
+     *
+     * Ahora el compilador obliga a decidir. Un efecto SIN estado escribe un
+     * `{}` explicito y un comentario que diga por que — que es una afirmacion
+     * revisable, a diferencia de un silencio.
+     *
+     * COMO SE ESCRIBE UNA QUE ANDE
+     * ----------------------------
+     * Limpiar los buffers grandes NO alcanza, y ese fue el error mas comun de
+     * los que ya existian: cinco de seis `reset()` incompletos limpiaban delay
+     * lines, combs y FDN, y se olvidaban del estado escalar chico. Hay que
+     * enumerar TODO lo que `process()` escribe:
+     *
+     *   - buffers (delay, comb, allpass, granos) y sus indices de escritura
+     *   - memoria de filtros: `z1/z2`, `x1/x2/y1/y2`, estados de one-pole
+     *   - envolventes y seguidores de nivel
+     *   - fase de los LFO
+     *   - **los `ParameterSmoother`** — este es el que se olvida siempre
+     *
+     * Lo que NO se toca son los PARAMETROS (lo que escribe `setParam`). Un
+     * `reset()` que vuelva el cutoff a su default no limpia estado: cambia la
+     * configuracion del usuario.
+     *
+     * Un smoother se resetea al VALOR VIGENTE de su parametro
+     * (`mSmoother.reset(mParam.load())`), no a cero: dejarlo en cero hace que el
+     * parametro suba desde cero durante el tiempo de smoothing, que es un
+     * fade-in audible. El constructor tiene la misma obligacion — `DISTORTION`
+     * hacia bien lo primero y mal lo segundo.
      *
      * Called when the audio context changes in a way that would otherwise
      * let stale state bleed through — e.g. transitioning from OSCILLATOR
@@ -104,7 +134,7 @@ public:
      * pending). Effect state is owned by the audio thread so this is
      * race-free with respect to process().
      */
-    virtual void reset() {}
+    virtual void reset() = 0;
 };
 
 #endif // EFFECT_H

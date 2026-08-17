@@ -7,7 +7,22 @@
 
 CompressorEffect::CompressorEffect() {
     updateCoefficients();
+    // El constructor termina llamando a reset() a proposito (WD-3.2): asi el
+    // estado inicial es POR CONSTRUCCION el mismo que despues de un reset, y no
+    // puede aparecer el desfasaje que tenia DistortionEffect —reset() sembraba
+    // sus smoothers y el constructor no— que se oia como un fade-in de ~10 ms
+    // en el primer bloque.
+    reset();
     LOGI("CompressorEffect created");
+}
+
+void CompressorEffect::reset() {
+    mEnvelope = 0.0f;
+    mGainReductionDb.store(0.0f, std::memory_order_relaxed);
+
+    // Mismo target que usa process(): el makeup en lineal.
+    mMakeupSmoother.reset(
+        std::pow(10.0f, mMakeupDb.load(std::memory_order_relaxed) / 20.0f));
 }
 
 void CompressorEffect::process(float* input, float* output, int numFrames) {

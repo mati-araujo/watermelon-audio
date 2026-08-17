@@ -131,4 +131,8 @@ void ShimmerReverbEffect::reset() {
     mFeedbackL = 0.0f;
     mFeedbackR = 0.0f;
     mGrainCounter = 0;
+
+    // WD-3.2 — los dos smoothers que faltaban.
+    mMixSmooth.reset(mMix.load(std::memory_order_relaxed));
+    mShimmerSmooth.reset(mShimmerAmount.load(std::memory_order_relaxed));
 }
