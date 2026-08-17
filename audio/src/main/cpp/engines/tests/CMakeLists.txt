@@ -36,6 +36,7 @@ endif()
 add_executable(engine_tests
     test_engines.cpp
     test_soundfont_fd_region.cpp
+    test_engine_pitch.cpp
 )
 
 target_include_directories(engine_tests PRIVATE
@@ -43,8 +44,12 @@ target_include_directories(engine_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
 )
 
+target_compile_definitions(engine_tests PRIVATE
+    _USE_MATH_DEFINES
+    WMA_PITCH_BASELINE="${CMAKE_CURRENT_SOURCE_DIR}/pitch-baseline.txt"
+)
+
 target_link_libraries(engine_tests PRIVATE watermelon-dsp GTest::gtest_main)
-target_compile_definitions(engine_tests PRIVATE _USE_MATH_DEFINES)
 
 include(GoogleTest)
 gtest_discover_tests(engine_tests)
