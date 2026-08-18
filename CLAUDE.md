@@ -183,12 +183,18 @@ bash scripts/test-attestation.sh         # el verificador contra arboles mutados
 ```
 
 **Lo que `gate.sh` NO corre, a proposito:** los tres jobs de ubuntu (`cpp-tests`,
-`cpp-tests-asan`, `cpp-tests-tsan`). Nunca se atestan y siempre corren en el CI.
-Suman 695 s de runner, van en paralelo y jamas estan en el camino critico, asi que
-correrlos aca no ahorra nada — y el TSan local tarda **865 s contra 295 s** del CI y
-encima es **mas debil**: una carrera sobrevivio 15 corridas locales y otra dio 0/60,
-y las dos fueron rojas a la primera alla. **El TSan de Linux es la unica autoridad
-sobre carreras.**
+`cpp-tests-asan`, `cpp-tests-tsan`). Nunca se atestan y siempre corren en el CI,
+porque el TSan local (libc++) es **mas debil** que el del CI (libstdc++): una carrera
+sobrevivio 15 corridas locales y otra dio 0/60, y las dos fueron rojas a la primera
+alla. **El TSan de Linux es la unica autoridad sobre carreras**, y por eso ninguna
+atestacion local puede reemplazarlo — seria cambiar un chequeo fuerte por uno flojo y
+registrarlo como prueba.
+
+> 🔴 **Ojo con la razon que este parrafo daba antes.** Decia tambien que esos tres
+> "jamas estan en el camino critico". Eso valia mientras `ios` costaba ~1000 s; con
+> `ios` atestandose en 9 s, los tres de ubuntu **SON** el camino critico entero de un
+> PR atestado. La conclusion no cambio, pero ahora se apoya en una sola pata. Detalle
+> en `docs/ci/local_first.md` §2.
 
 ### Los comandos sueltos
 
@@ -201,7 +207,9 @@ sesiones enteras. Los marcados **[gate]** ya los corre `scripts/gate.sh`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (774 tests, googletest)
+bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (883 tests, googletest).
+                                           # ctest corre en PARALELO desde el 18/08: 149,7 s -> 20,4 s.
+                                           # `CTEST_JOBS=n` lo baja si hace falta
                                            # Kotlin: 112 iOS sim / 69 JVM
 
 # audio/src/main/cpp/effects/tests/reset-baseline.txt — TRINQUETE del contrato
@@ -242,6 +250,13 @@ TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
 # El TSan local (libc++) es MAS DEBIL que el del CI (libstdc++): una carrera
 # real sobrevivio 15 corridas aca y fue roja a la primera alla. Para carreras
 # el CI es la autoridad.
+#
+# Con ctest en paralelo (18/08): ASan 599 s -> 55 s, TSan 1344 s -> 192 s.
+# OJO con el `--timeout 180`: bajo contencion
+# `NyquistLimits.NoNewDivergenceAppearsBelowFortyKilohertz` pasa de 105 s a
+# 165 s, o sea el 92 % del techo. Si alguna vez da timeout, la salida es
+# `CTEST_JOBS=4`, NO subir el techo — el presupuesto que importa es el de los
+# sanitizers. El CI no pasa --timeout, asi que esto es un riesgo solo local.
 bash scripts/check-cpp-portability.sh      # [gate] Guardrail WA-0.4 (jni.h / android/)
 python3 scripts/check-rt-safety.py         # [gate] Guardrail WD-1.1. Camina el call-graph
                                            # del callback de audio y falla si aparece

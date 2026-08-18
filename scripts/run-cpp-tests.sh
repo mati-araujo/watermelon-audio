@@ -51,6 +51,19 @@ cmake -S "$SRC_DIR" -B "$BUILD_DIR" "${GEN_ARGS[@]+"${GEN_ARGS[@]}"}" \
     -DFETCHCONTENT_BASE_DIR="$DEPS_DIR" \
     "${SAN_ARGS[@]+"${SAN_ARGS[@]}"}"
 
-cmake --build "$BUILD_DIR" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
-ctest --test-dir "$BUILD_DIR" --output-on-failure "$@"
+cmake --build "$BUILD_DIR" -j"$JOBS"
+
+# ctest corria EN SERIE, y era el 85 % del job mas caro del CI: bajo TSan son
+# 539 s de ctest contra 95 s de build. Medido en esta suite, con los 883 tests:
+# 177 s en serie contra 24,6 s con -j8, y el `user` time casi igual (107 s
+# contra 116 s) — o sea paralelismo puro, no un efecto de cache.
+#
+# Los tests son aislables por construccion: cada uno que escribe usa un nombre
+# de archivo propio. Los dos nombres que se repiten (`/tmp/nope.wav`, `x.wav`)
+# estan en aserciones de camino negativo que nunca escriben.
+#
+# CTEST_JOBS lo baja quien lo necesite —un runner con poca RAM bajo TSan, o
+# depurar un flake— y un `-j` en "$@" tambien gana, porque va despues.
+ctest --test-dir "$BUILD_DIR" --output-on-failure -j "${CTEST_JOBS:-$JOBS}" "$@"

@@ -68,8 +68,28 @@ Linux-only:             cpp-tests (162s) + asan (238s) + tsan (295s)         =  
 ```
 
 > **Lo caro es lo que la máquina local hace mejor. Lo irreemplazable es barato y corre en
-> paralelo.** Los tres jobs de ubuntu suman 695 s de minutos-runner, corren en paralelo entre
-> sí (máx. 295 s de reloj) y **nunca están en el camino crítico**.
+> paralelo.** Los tres jobs de ubuntu suman 695 s de minutos-runner y corren en paralelo entre
+> sí (máx. 295 s de reloj).
+
+> 🔴 **CORRECCIÓN, 2026-08-18 — la mitad de este argumento caducó, y hay que leerlo sabiendo
+> cuál.** Este párrafo decía además que los tres de ubuntu *"nunca están en el camino
+> crítico"*. Eso era cierto **mientras `ios` costaba 1048 s**. Con `ios` atestándose en 9 s,
+> los tres de ubuntu **SON** el camino crítico entero de un PR atestado — medido el 18/08:
+> `cpp-tests-tsan` **634 s**, `cpp-tests-asan` 370 s, `cpp-tests` 227 s. O sea que el propio
+> éxito del camino rápido invirtió esta premisa. Es el mismo patrón que el `concurrency` de
+> §7.12: al vaciar una capa, hay que re-auditar con el criterio nuevo lo que quedó
+> sosteniendo la garantía.
+>
+> **La conclusión de §7.1 —los tres de ubuntu no se atestan— NO cambia, pero ahora se apoya
+> en una sola pata: la de arriba.** El TSan de Linux/libstdc++ es irreemplazable *porque es
+> otro sanitizer*, no porque sea barato. Atestarlos sería cambiar un chequeo fuerte por uno
+> más débil y registrarlo como prueba, que es exactamente lo que `verify-attestation.sh`
+> declara no ser. La única forma en que tendría sentido es que la corrida local fuera la
+> **misma toolchain** (los sanitizers en un contenedor con la imagen del CI), no los mismos
+> tests — y en un Mac ARM eso obliga a emular x86 o a cambiar de arquitectura respecto del
+> runner, con lo que la equivalencia se rompe de nuevo.
+>
+> **La palanca correcta era abaratar el chequeo, no saltearlo:** ver §7.13.
 
 ## 3. Dónde estuvieron los defectos que el CI encontró
 
@@ -290,11 +310,61 @@ Lo que sí hace el trabajo: (1) el digest caza el accidente, que es el 99% de lo
 (2) la regla escrita en `CLAUDE.md` —el archivo lo escribe sólo `gate.sh`, a mano es fraude—
 que es lo que leen los agentes; (3) `push: master` lo destapa un merge después.
 
+### 7.13 `ctest -j`: abaratar el chequeo en vez de saltearlo (18/08)
+
+Cuando el camino rápido dejó a los tres jobs de ubuntu como camino crítico entero (ver la
+corrección de §2), la pregunta obvia fue atestarlos. La respuesta es no —§2 explica por
+qué— y la salida fue atacar el costo: **`ctest` corría en serie en todos lados**, y bajo
+TSan eso era el 85 % del job (539 s de ctest contra 95 s de build).
+
+Medido en esta máquina (10 núcleos), los 883 tests, con `--timeout 180`:
+
+| corrida | serie | `-j` | factor |
+|---|---|---|---|
+| suite normal | 149,7 s | **20,4 s** | 7,4× |
+| ASan + UBSan | 599,0 s | **55,0 s** | 10,9× |
+| TSan | 1344,4 s | **191,8 s** | 7,0× |
+
+`user` time casi idéntico entre las dos (107,5 s contra 116,0 s): paralelismo, no caché.
+883/883 en las tres, y cuatro corridas seguidas de la suite normal sin un solo flake.
+
+**Los tests son aislables por construcción**, y eso se auditó antes de tocar nada: cada test
+que escribe usa un nombre de archivo propio. Los dos nombres que se repiten
+(`/tmp/nope.wav` ×5, `x.wav` ×2) están en aserciones de camino negativo que nunca escriben.
+
+#### Lo que el cambio destapó, y que ahora es el techo
+
+**Un solo test es el 86 % del tiempo paralelo de TSan.**
+`NyquistLimits.NoNewDivergenceAppearsBelowFortyKilohertz`:
+
+| | tiempo | % del techo local de 180 s |
+|---|---|---|
+| CI, en serie | 57,7 s | 32 % |
+| local, solo | 104,9 s | 58 % |
+| local, con `-j8` | **164,7 s** | **92 %** |
+
+Dos consecuencias que conviene tener escritas:
+
+1. **El paralelismo ya no es la palanca de TSan: ese test lo es.** Por Amdahl, ningún `-j`
+   puede bajar el total por debajo de él. Lo que sigue es abaratar el barrido — y si la
+   propiedad es monótona en sus ejes, los vértices acotan y el barrido uniforme es relleno.
+2. **El riesgo del techo es LOCAL, no del CI.** El CI **no pasa `--timeout`** (default de
+   ctest: 1500 s); los 180 s son una convención de `CLAUDE.md` para la corrida local. Con
+   `-j8` ese test queda al 92 % de ese número, así que si aparece un timeout local la salida
+   es **bajar `CTEST_JOBS`**, nunca subir el techo: el presupuesto que importa es el de los
+   sanitizers.
+
 ### 7.8 El gate local: qué corre y qué no
 
 `gate.sh` corre exactamente lo que el CI va a saltear, más los dos guardrails que cuestan
-segundos, en orden fail-fast. Los sanitizers quedan **opt-in** (`--with-sanitizers`): nunca
-están en el camino crítico, el TSan local tarda 865 s contra 295 s del CI **y es más débil**.
+segundos, en orden fail-fast. Los sanitizers quedan **opt-in** (`--with-sanitizers`): el TSan
+local es **más débil** que el del CI, que es la razón que manda.
+
+> ⚠️ **Los otros dos motivos de esta línea envejecieron (18/08).** "Nunca están en el camino
+> crítico" ya no es cierto — ver la corrección de §2. Y "865 s contra 295 s" quedó viejo por
+> los dos lados: con `ctest -j` (§7.13) el TSan local mide **191,8 s** y el del CI 634 s
+> antes del cambio. Lo que no cambió, y es lo único que sostiene el opt-in, es que un
+> sanitizer de libc++ no sustituye a uno de libstdc++.
 
 Dos requisitos duros, los dos aprendidos midiendo:
 
