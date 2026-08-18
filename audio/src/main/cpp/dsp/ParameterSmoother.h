@@ -91,6 +91,25 @@ public:
             return process(target);
         }
         float current = mCurrent.load(std::memory_order_relaxed);
+        // YA LLEGO: n aplicaciones de `c*x + (1-c)*x` dejan `x` donde estaba, asi
+        // que no hay nada que calcular. Salir aca no es una optimizacion
+        // oportunista: es lo unico que mantiene el resultado EXACTO.
+        //
+        // La identidad `d*x + (1-d)*x == x` vale en los reales y NO en float, y
+        // como `d = powf(coeff, frames)` depende del tamaño del bloque, el
+        // ultimo bit del resultado terminaba dependiendo de el. Medido: con
+        // `target` 0,3 a 44,1 kHz, n=512 daba 0x3e99999b contra 0x3e99999a del
+        // resto; con 0,1 a 48 kHz salian tres valores distintos para cuatro
+        // tamaños. Un ulp alcanza — FMEngine lo amplifica por su lazo de
+        // realimentacion y GranularEngine por la planificacion de granos, y los
+        // dos dejaban de sonar igual segun el bloque que negociara el device.
+        //
+        // Karplus-Strong no lo mostraba porque sus defaults son 0,5: potencia de
+        // dos, donde la identidad SI es exacta en float. Un test que solo lo
+        // mirara a el habria dado verde.
+        if (current == target) {
+            return current;
+        }
         float coeff = mCoefficient.load(std::memory_order_relaxed);
         float decay = std::pow(coeff, static_cast<float>(frames));
         float newCurrent = decay * current + (1.0f - decay) * target;

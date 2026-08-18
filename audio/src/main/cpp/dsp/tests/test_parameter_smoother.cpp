@@ -166,3 +166,60 @@ TEST(ParameterSmoother, ABlockOfZeroOrOneFrameIsHandledWithoutMoving) {
     twin.reset(0.4f);
     EXPECT_FLOAT_EQ(s.processBlock(1.0f, 1), twin.process(1.0f));
 }
+
+TEST(ParameterSmoother, AtRestTheResultDoesNotDependOnTheBlockSize) {
+    // El defecto que este test cierra es de UN ULP, y aun asi cambiaba el sonido.
+    //
+    // `processBlock` calcula `d = powf(coeff, frames)` y devuelve
+    // `d*x + (1-d)*t`. Con el parametro EN REPOSO (`x == t`) eso vale `x` en los
+    // reales... y no siempre en float. Como `d` depende de `frames`, el ultimo
+    // bit del resultado dependia del tamaño del bloque.
+    //
+    // Un ulp alcanza: `FMEngine` lo amplifica por su lazo de realimentacion y
+    // `GranularEngine` por la planificacion de granos, y los dos dejaban de
+    // sonar identicos segun el bloque que negociara el device (medido: 9.796 de
+    // 13.230 muestras distintas en FM a 44,1 kHz).
+    //
+    // LOS VALORES DE PRUEBA IMPORTAN. Con 0,5 —potencia de dos— la identidad SI
+    // es exacta en float y el defecto es invisible; los defaults de
+    // Karplus-Strong son justo 0,5, asi que un test que solo lo mirara a el
+    // habria dado verde. Por eso aca hay valores que NO son representables.
+    for (float value : {0.3f, 0.1f, 0.7f, 0.35f, 0.5f}) {
+        for (int rate : {44100, 48000, 96000}) {
+            float reference = 0.0f;
+            bool first = true;
+            for (int frames : {1, 16, 64, 128, 512, 1024}) {
+                ParameterSmoother s;
+                s.setSmoothingTime(5.0f, static_cast<float>(rate));
+                s.reset(value);
+                const float got = s.processBlock(value, frames);
+
+                EXPECT_FLOAT_EQ(got, value)
+                    << "en reposo (" << value << " a " << rate << " Hz, bloque "
+                    << frames << ") el smoother se movio a " << got;
+                if (first) { reference = got; first = false; }
+                EXPECT_EQ(got, reference)
+                    << "el valor en reposo depende del tamaño del bloque: con "
+                    << frames << " frames da " << got << " y con el primero dio "
+                    << reference << " (target " << value << ", rate " << rate << ").\n"
+                    << "  Es una diferencia de un ulp, y alcanza para que FM y "
+                    << "GRANULAR suenen distinto segun el device.";
+            }
+        }
+    }
+}
+
+TEST(ParameterSmoother, AtRestItDoesNotBurnAPowf) {
+    // Corolario del test de arriba, y la razon por la que la salida temprana no
+    // es solo una guarda de exactitud: en el thread de audio los parametros
+    // estan QUIETOS casi siempre, asi que el camino comun ya no paga `powf`.
+    // Se verifica por comportamiento observable — el smoother no se mueve — que
+    // es lo unico que un test puede afirmar sin mirar la implementacion.
+    ParameterSmoother s;
+    s.setSmoothingTime(5.0f, 48000.0f);
+    s.reset(0.3f);
+    for (int i = 0; i < 1000; ++i) {
+        EXPECT_FLOAT_EQ(s.processBlock(0.3f, 512), 0.3f);
+    }
+    EXPECT_FLOAT_EQ(s.getCurrent(), 0.3f);
+}

@@ -243,20 +243,31 @@ bash scripts/regen-golden.sh               # WD-2.2: RECAPTURAR los golden de DS
 # sintoma es `discover_tests failed to run command` con exit 8 de ctest, en
 # vez de un `ninja: build stopped` que no menciona ningun test. Sigue siendo
 # un error — pero ahora dice donde.
-ASAN_OPTIONS=abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+CTEST_JOBS=4 ASAN_OPTIONS=abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   SANITIZE=address,undefined bash scripts/run-cpp-tests.sh --timeout 180
-TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
+CTEST_JOBS=4 TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
   SANITIZE=thread bash scripts/run-cpp-tests.sh --timeout 180
 # El TSan local (libc++) es MAS DEBIL que el del CI (libstdc++): una carrera
 # real sobrevivio 15 corridas aca y fue roja a la primera alla. Para carreras
 # el CI es la autoridad.
 #
-# Con ctest en paralelo (18/08): ASan 599 s -> 55 s, TSan 1344 s -> 192 s.
-# OJO con el `--timeout 180`: bajo contencion
-# `NyquistLimits.NoNewDivergenceAppearsBelowFortyKilohertz` pasa de 105 s a
-# 165 s, o sea el 92 % del techo. Si alguna vez da timeout, la salida es
-# `CTEST_JOBS=4`, NO subir el techo — el presupuesto que importa es el de los
-# sanitizers. El CI no pasa --timeout, asi que esto es un riesgo solo local.
+# 🔴 LOS SANITIZERS LOCALES VAN CON `CTEST_JOBS=4`, y no es opcional.
+# Con ctest en paralelo a full (18/08) TSan bajaba a 192 s pero DABA TIMEOUT en
+# `RateInvariance.EveryEffectStaysFiniteAndBoundedAtEveryRate` y en
+# `NyquistLimits.NoNewDivergenceAppearsBelowFortyKilohertz`: con 10 procesos de
+# TSan compitiendo por el ancho de banda de memoria, esos barridos pasan de
+# ~105 s a mas de 180. Con `CTEST_JOBS=4` quedan en 114 s y 86 s (63 % y 48 %
+# del techo) y la corrida entera tarda 361 s — todavia 3,7x mejor que los
+# 1344 s en serie.
+#
+# La salida correcta cuando esto da timeout es BAJAR `CTEST_JOBS`, nunca subir
+# el techo: bajo paralelismo "cuanto tarda este test" deja de ser una propiedad
+# del test y pasa a incluir la contencion, y subir el techo taparia el
+# crecimiento real. El presupuesto que importa es el de los sanitizers.
+#
+# NO es el default del script a proposito: el CI no pasa `--timeout` y ahi el
+# `-j` completo mide 45 % mejor. Poner 4 por defecto pesimizaria el CI para
+# resolver una restriccion de esta maquina.
 bash scripts/check-cpp-portability.sh      # [gate] Guardrail WA-0.4 (jni.h / android/)
 python3 scripts/check-rt-safety.py         # [gate] Guardrail WD-1.1. Camina el call-graph
                                            # del callback de audio y falla si aparece
