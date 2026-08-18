@@ -76,9 +76,9 @@ public:
     void process(float* buffer, int32_t numFrames,
                  float frequency, float amplitude) override {
         // Read parameters with smoothing (prevents zipper noise)
-        const float grainSizeNorm = smoothParam(PARAM_GRAIN_SIZE);
-        const float scatter = smoothParam(PARAM_SCATTER);
-        const float densityNorm = smoothParam(PARAM_DENSITY);
+        const float grainSizeNorm = smoothParam(PARAM_GRAIN_SIZE, numFrames);
+        const float scatter = smoothParam(PARAM_SCATTER, numFrames);
+        const float densityNorm = smoothParam(PARAM_DENSITY, numFrames);
 
         // Map params
         // Grain size: 5ms to 100ms

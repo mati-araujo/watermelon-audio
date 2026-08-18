@@ -15,37 +15,28 @@
 # Formato:  <ENGINE> | <corrimiento medido> | <causa>
 #
 # ---------------------------------------------------------------------------
-# UNA SOLA CAUSA, Y ESTA MEDIDA. El lazo de Karplus-Strong deberia medir `fs/f`
-# muestras y mide `fs/f + D`, con D CONSTANTE — 6,8 / 7,07 / 7,13 muestras para
-# 110 / 220 / 440 Hz. Son el retardo de grupo del filtro de un polo del lazo mas
-# el del interpolador de la linea de retardo, y nadie los descuenta.
+# VACIO. La unica entrada que tuvo —KARPLUS_STRONG, hasta 61 cents entre 44,1 y
+# 96 kHz— se pago junto con el sintoma absoluto (118 cents bajo a 440 Hz sobre
+# 44,1 kHz). Spread medido despues del arreglo: 0,07 a 0,39 cents sobre cinco
+# notas y los tres rates.
 #
-# De ahi salen los DOS sintomas, que son el mismo:
+# LA CAUSA DECLARADA ACA ERA FALSA, Y CONVIENE SABER POR QUE. Este archivo
+# decia que el lazo sobraba `D ~= 7` muestras de "retardo de grupo del filtro
+# del lazo mas el del interpolador". La cuenta no daba: el one-pole aporta 0,905
+# muestras con el brillo por defecto y el interpolador lineal aporta CERO. De
+# las 7 medidas, ~6 no eran del lazo — eran `smoothParam()` avanzando el
+# suavizado UNA MUESTRA POR BLOQUE, que dejaba `brightness` en ~0,02 en vez de
+# 0,5 durante todo el primer medio segundo.
 #
-#   1. LA CUERDA ESTA DESAFINADA BAJA en terminos absolutos, y tanto mas cuanto
-#      mas aguda la nota, porque el error relativo es D*f/fs:
+# La firma que lo delata, y que ahora tiene test propio: el error dependia del
+# TAMAÑO DEL BLOQUE (22,9 cents con bloques de 16, 126,3 con 1024). Un retardo
+# de lazo no puede hacer eso.
 #
-#          pedido      44,1 kHz     48 kHz      96 kHz
-#          110 Hz      -29 cents    -27         -14
-#          220 Hz      -61          -56         -28
-#          440 Hz      -118         -108        -57
-#
-#      A 440 Hz sobre 44,1 kHz eso es UN SEMITONO ENTERO. No hace falta ningun
-#      instrumento para oirlo.
-#
-#   2. Y por el mismo D*f/fs, el error BAJA con el sample rate — o sea que la
-#      misma nota suena distinto segun el device. Eso es lo que declara este
-#      archivo.
-#
-# COMPENSAR D ARREGLA LOS DOS DE UNA. `EnginePitch.TheKarplusLoopIsLongerThanIt
-# AsksFor` mide D directamente y es el test que le sirve a quien lo arregle: no
-# dice "esta desafinado", dice cuanto sobra.
-#
-# OJO: el sintoma 1 —el absoluto— NO esta declarado aca, porque este trinquete
-# es sobre invariancia de rate. Vive en el limite de 8 muestras de ese otro test.
+# El 0,905 que si era del lazo se compensa con el retardo de FASE del filtro a
+# la frecuencia pedida, no con el de grupo en DC — los dos coinciden cerca del
+# default y se separan con la cuerda oscura, donde descontar el de DC dejaba la
+# nota 16 cents ALTA.
 # ---------------------------------------------------------------------------
-
-KARPLUS_STRONG | hasta 61 cents entre 44,1 y 96 kHz a 440 Hz | D ~= 7 muestras de sobra en el lazo, sin compensar
 
 # NO estan aca, y por que:
 #

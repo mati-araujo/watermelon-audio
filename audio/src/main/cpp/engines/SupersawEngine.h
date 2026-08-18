@@ -66,9 +66,9 @@ public:
     void process(float* buffer, int32_t numFrames,
                  float frequency, float amplitude) override {
         // Read parameters with smoothing (prevents zipper noise)
-        const float detuneNorm = smoothParam(PARAM_DETUNE);
-        const float voicesNorm = smoothParam(PARAM_VOICES);
-        const float spreadNorm = smoothParam(PARAM_SPREAD);
+        const float detuneNorm = smoothParam(PARAM_DETUNE, numFrames);
+        const float voicesNorm = smoothParam(PARAM_VOICES, numFrames);
+        const float spreadNorm = smoothParam(PARAM_SPREAD, numFrames);
 
         // Map params
         // Detune: 0-1 → 0-50 cents

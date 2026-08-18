@@ -66,15 +66,15 @@ public:
     void process(float* buffer, int32_t numFrames,
                  float frequency, float amplitude) override {
         // Read parameters with smoothing (prevents zipper noise)
-        const float brightness = smoothParam(PARAM_BRIGHTNESS);
-        const float decay = smoothParam(PARAM_DECAY);
-        const float excitation = smoothParam(PARAM_EXCITATION);
+        const float brightness = smoothParam(PARAM_BRIGHTNESS, numFrames);
+        const float decay = smoothParam(PARAM_DECAY, numFrames);
+        const float excitation = smoothParam(PARAM_EXCITATION, numFrames);
 
         // Clamp frequency to valid range
         frequency = std::clamp(frequency, 20.0f, 20000.0f);
 
-        // Delay length in fractional samples
-        const float delaySamples = static_cast<float>(mSampleRate) / frequency;
+        // El periodo musical pedido, en muestras.
+        const float periodSamples = static_cast<float>(mSampleRate) / frequency;
 
         // Feedback coefficient: maps decay [0,1] → [0.9, 0.999]
         const float feedbackCoeff = 0.9f + decay * 0.099f;
@@ -83,23 +83,45 @@ public:
         // Lower = darker (more filtering), Higher = brighter
         const float lpCoeff = 0.1f + brightness * 0.85f;
 
+        // COMPENSACION DEL RETARDO DEL LAZO
+        // ---------------------------------
+        // El lazo no es solo la linea de retardo: el filtro de un polo tambien
+        // retarda. Si no se descuenta, el lazo entero mide mas que `fs/f` y la
+        // cuerda suena BAJA, tanto mas cuanto mas aguda la nota y tanto menos
+        // cuanto mas alto el sample rate — que ademas rompe el criterio de
+        // invariancia de rate de WD-2.3.2.
+        //
+        // Lo que hay que descontar es el retardo de FASE del filtro a la
+        // frecuencia que se pide, NO su retardo de grupo en DC. Los dos valen
+        // `(1-a)/a` en el limite de frecuencia cero y por eso la cuenta de DC
+        // parece suficiente con `brightness` en su default (0,905 contra 0,902
+        // a 440 Hz, 0,1 cents). Deja de serlo con la cuerda OSCURA, donde el
+        // polo pesa: con `brightness` en 0 el retardo de grupo dice 9,0
+        // muestras y el de fase 8,06, y descontar 9 dejaba la nota **16 cents
+        // ALTA** a 440 Hz — medido, no estimado.
+        //
+        // El interpolador lineal NO aporta nada que descontar: su retardo es
+        // exactamente `delaySamples`. Medido por centroide de la respuesta al
+        // impulso del lazo abierto, el unico sobrante es el del filtro.
+        //
+        // El piso de 2 muestras acota el lazo. Medido sobre todo el dominio de
+        // (rate, frecuencia, brightness): NUNCA muerde por debajo de Nyquist —
+        // el minimo de `periodSamples - filterDelay` es exactamente 2,0, y se
+        // toca en f = fs/2, porque el retardo de fase tiende a 0 cuando omega
+        // tiende a pi. Solo actua ARRIBA de Nyquist, y ahi hay otra cosa mal:
+        // `frequency` se acota contra la constante 20 kHz y no contra fs/2, que
+        // es el mismo defecto que WD-3.5 arreglo en los efectos. En ese rincon
+        // el engine ya sale mudo por una tercera razon (la rafaga de excitacion
+        // dura `(int)periodSamples` muestras, o sea CERO), asi que sacar este
+        // piso hoy no cambia nada observable — es un guard, no una correccion.
+        const float omega = 2.0f * static_cast<float>(M_PI) / periodSamples;
+        const float pole = 1.0f - lpCoeff;
+        const float filterDelay =
+            std::atan2(pole * std::sin(omega), 1.0f - pole * std::cos(omega)) / omega;
+        const float loopDelay = std::max(2.0f, periodSamples - filterDelay);
+
         // Check if we need a new excitation burst
         bool needsExcitation = mNeedsExcitation.load(std::memory_order_acquire);
-
-        // Auto-retrigger: when energy in delay line drops below threshold
-        // This gives continuous sound while touching the XY pad (bowed string feel)
-        if (!needsExcitation && mExcitationRemaining <= 0) {
-            mEnergyAccumulator += std::abs(mFilterStateL);
-            mEnergySampleCount++;
-            if (mEnergySampleCount >= mSampleRate / 20) { // Check every ~50ms
-                float avgEnergy = mEnergyAccumulator / static_cast<float>(mEnergySampleCount);
-                if (avgEnergy < 0.001f) {
-                    needsExcitation = true; // Signal too quiet, re-trigger
-                }
-                mEnergyAccumulator = 0.0f;
-                mEnergySampleCount = 0;
-            }
-        }
 
         // Retrigger on significant frequency change (user moved finger)
         if (mPrevFrequency > 0.0f && std::abs(frequency - mPrevFrequency) > mPrevFrequency * 0.05f) {
@@ -109,19 +131,40 @@ public:
 
         if (needsExcitation) {
             mNeedsExcitation.store(false, std::memory_order_release);
-            mExcitationRemaining = static_cast<int>(delaySamples);
-            mExcitationPhase = 0.0f;
-            mEnergyAccumulator = 0.0f;
-            mEnergySampleCount = 0;
+            startExcitation(periodSamples);
         }
 
         for (int32_t i = 0; i < numFrames; ++i) {
             // Read from delay line (fractional for pitch accuracy)
-            float delayed = mDelayLine.readInterpolated(delaySamples, DelayLine::Interpolation::LINEAR);
+            float delayed = mDelayLine.readInterpolated(loopDelay, DelayLine::Interpolation::LINEAR);
 
             // One-pole lowpass filter (string damping)
             // y[n] = coeff * x[n] + (1-coeff) * y[n-1]
             mFilterStateL = lpCoeff * delayed + (1.0f - lpCoeff) * mFilterStateL;
+
+            // Auto-retrigger: when energy in delay line drops below threshold.
+            // This gives continuous sound while touching the XY pad (bowed
+            // string feel).
+            //
+            // VA ADENTRO DEL LOOP DE MUESTRAS, y esa es la unica forma de que
+            // "cada ~50 ms" sea cierto: cuando el contador vivia afuera contaba
+            // BLOQUES, asi que el chequeo caia cada `mSampleRate/20` bloques —
+            // 25,6 s con bloques de 512 a 44,1 kHz. La cuerda de 440 Hz se
+            // apagaba a los ~0,4 s y no volvia nunca, y el periodo del defecto
+            // escalaba con el tamaño del bloque.
+            if (mExcitationRemaining <= 0) {
+                mEnergyAccumulator += std::abs(mFilterStateL);
+                mEnergySampleCount++;
+                if (mEnergySampleCount >= mSampleRate / 20) { // Check every ~50ms
+                    float avgEnergy = mEnergyAccumulator / static_cast<float>(mEnergySampleCount);
+                    if (avgEnergy < 0.001f) {
+                        startExcitation(periodSamples); // Signal too quiet, re-trigger
+                    } else {
+                        mEnergyAccumulator = 0.0f;
+                        mEnergySampleCount = 0;
+                    }
+                }
+            }
 
             // Generate excitation if in burst phase
             float exc = 0.0f;
@@ -183,6 +226,17 @@ private:
 
     // Fast deterministic RNG (xorshift32) — RT-safe, no syscalls
     uint32_t mRngState = 12345;
+
+    /// Arranca una rafaga de excitacion de ~un periodo y reinicia el medidor de
+    /// energia. La longitud va en el periodo MUSICAL, no en el largo del lazo:
+    /// el lazo lleva descontado el retardo del filtro y esa correccion no tiene
+    /// nada que ver con cuanto tiene que durar el pluck.
+    void startExcitation(float periodSamples) {
+        mExcitationRemaining = static_cast<int>(periodSamples);
+        mExcitationPhase = 0.0f;
+        mEnergyAccumulator = 0.0f;
+        mEnergySampleCount = 0;
+    }
 
     float fastRandom() {
         mRngState ^= mRngState << 13;

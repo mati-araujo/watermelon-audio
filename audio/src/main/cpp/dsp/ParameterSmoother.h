@@ -55,6 +55,50 @@ public:
     }
 
     /**
+     * @brief Advance the smoother by `frames` samples in a single call
+     * @param target Target value to reach (constant over the whole block)
+     * @param frames Number of samples the block covers
+     * @return Smoothed value after those `frames` samples
+     *
+     * RT-SAFE: one powf per call, no allocation, no locks.
+     *
+     * POR QUE ESTO EXISTE, Y QUE DEFECTO CIERRA
+     * -----------------------------------------
+     * `setSmoothingTime()` calcula el coeficiente para llamadas POR MUESTRA.
+     * Quien lee un parametro UNA VEZ POR BLOQUE y llama a `process()` avanza el
+     * smoother una sola muestra por bloque, asi que el tiempo de suavizado real
+     * queda multiplicado por el tamaño del bloque: los 5 ms declarados por
+     * `SynthEngine` eran **2,56 s** con bloques de 512, y el numero cambiaba con
+     * el bloque.
+     *
+     * Eso no era un detalle cosmetico. En Karplus-Strong dejaba `brightness` en
+     * ~0,02 durante el primer medio segundo (en vez de 0,5), el filtro del lazo
+     * aportaba 7,5 muestras de retardo de grupo en vez de 0,9, y la cuerda
+     * sonaba **118 cents baja** a 440 Hz sobre 44,1 kHz. El sintoma dependia del
+     * TAMAÑO DE BLOQUE — 1,3 muestras con bloques de 16, 7,6 con bloques de 1024
+     * — que es la firma de este defecto y no la de un retardo del lazo.
+     *
+     * `coeff^frames` es EXACTO, no una aproximacion: aplicar n veces
+     * `c*x + (1-c)*t` con `t` constante da `c^n*x + (1-c^n)*t`. O sea que esto
+     * entrega el mismo valor que suavizar por muestra, muestreado en el borde
+     * del bloque, y el resultado deja de depender del tamaño del bloque.
+     */
+    inline float processBlock(float target, int frames) {
+        if (frames <= 0) {
+            return mCurrent.load(std::memory_order_relaxed);
+        }
+        if (frames == 1) {
+            return process(target);
+        }
+        float current = mCurrent.load(std::memory_order_relaxed);
+        float coeff = mCoefficient.load(std::memory_order_relaxed);
+        float decay = std::pow(coeff, static_cast<float>(frames));
+        float newCurrent = decay * current + (1.0f - decay) * target;
+        mCurrent.store(newCurrent, std::memory_order_relaxed);
+        return newCurrent;
+    }
+
+    /**
      * @brief Reset the smoother to a specific value (no smoothing)
      * @param value Value to reset to
      *

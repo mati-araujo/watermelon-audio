@@ -64,9 +64,9 @@ public:
     void process(float* buffer, int32_t numFrames,
                  float frequency, float amplitude) override {
         // Read parameters with smoothing (prevents zipper noise)
-        const float modIndexNorm = smoothParam(PARAM_MOD_INDEX);
-        const float ratioNorm = smoothParam(PARAM_RATIO);
-        const float feedbackNorm = smoothParam(PARAM_FEEDBACK);
+        const float modIndexNorm = smoothParam(PARAM_MOD_INDEX, numFrames);
+        const float ratioNorm = smoothParam(PARAM_RATIO, numFrames);
+        const float feedbackNorm = smoothParam(PARAM_FEEDBACK, numFrames);
 
         // Map normalized params to musical ranges
         // Mod index: 0-1 → 0-10 (musical range for 2-op FM)
