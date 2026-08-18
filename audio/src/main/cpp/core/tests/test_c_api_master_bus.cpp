@@ -201,16 +201,24 @@ TEST_F(CApiMasterBusTest, TheOutputMeterReadsTheSignalThatActuallyLeaves) {
     //      toward zero and then toward the real level. The settled reading was
     //      X/(1+c) — about half of what was truly leaving.
     //
-    // For a constant input the output is constant too, so its RMS and its peak
-    // are the same number, and the meter can be checked against the buffer with
-    // no model of the chain in between.
+    // El medidor publica RMS, asi que se lo compara contra el RMS del buffer.
+    // Antes se lo comparaba contra el PICO, y eso solo funcionaba porque el
+    // estimulo era DC: para una senal constante RMS y pico son el mismo numero.
+    // Con el `InputNode` real ese estimulo dejo de ser valido —su DC blocker lo
+    // borra— y la comparacion vieja fallaba por 1/raiz(2), que es geometria del
+    // seno y no un defecto del motor. Comparar RMS contra RMS no necesita
+    // ningun modelo de la cadena del medio y vale para cualquier senal.
+    //
+    // El defecto que este test existe para cachar seguia siendo visible: la
+    // doble pasada dejaba el medidor en la MITAD, y media es 50 % de desvio
+    // contra una tolerancia de 5 %.
     startMixWithSilentInstrument();
 
     // ~1.1 s at 48 kHz — several times the 300 ms integration, so the meter is
     // settled and not still climbing.
     renderWithInput(200, kBlockFrames, kInputLevel);
 
-    const float inTheBuffer = renderBlockPeakWithInput(kBlockFrames, kInputLevel);
+    const float inTheBuffer = renderBlockRmsWithInput(kBlockFrames, kInputLevel);
     ASSERT_GT(inTheBuffer, kAudible);
 
     const float onTheMeterL = wma_get_output_rms(mWma, 0);

@@ -20,6 +20,51 @@
 #include <cassert>
 #include <cstring>
 
+// ===========================================================================
+// GANCHOS DE TEST (WMA_TEST_HOOKS)
+// ===========================================================================
+//
+// Los define UNICAMENTE `core/tests/CMakeLists.txt`. En el binario que shippea
+// —Android e iOS— `WMA_TEST_HOOKS` no esta definido y todo esto compila a nada:
+// ni una variable, ni una rama.
+//
+// POR QUE VIVEN EN EL ARCHIVO DE PRODUCCION Y NO EN UN DOBLE
+// ----------------------------------------------------------
+// Hasta hoy la suite de host sustituia este archivo entero por
+// `support/test_input_node_stub.cpp`, asi que `InputNode.cpp` **no lo compilaba
+// nadie fuera de Android e iOS**. Eso ya se cobro un bug: una llamada a
+// `wma::platform::flushDenormalsRtSafe()` sin el include de `Platform.h` paso
+// los 795 tests en verde —normal, ASan y TSan— y la agarro recien el build de
+// iOS. Y el doble no era inerte: se lo habia extendido dos veces para poder
+// observar cosas que desde afuera no se ven.
+//
+// Lo que se observa aca es exactamente eso, y nada mas:
+//
+//   1. EN QUE THREAD CORRE EL DESTRUCTOR. El contrato de WD-1.3 es que el nodo
+//      se destruye en el thread de CONTROL y nunca en el de audio, y eso no es
+//      observable desde afuera del destructor: para cuando el test podria
+//      mirar, el objeto ya no existe.
+//
+//   2. UNA COMPUERTA que vuelve determinista la ventana de la carrera. El bug
+//      de WD-1.3 necesita que el thread de audio este ADENTRO del callback, con
+//      el nodo en uso, justo cuando el de control lo retira. Esa ventana dura
+//      microsegundos: se probo con 40 retiros por corrida y 15 corridas, y el
+//      codigo BUGGEADO paso siempre. `isMonitoringEnabled()` es el primer
+//      metodo que el callback llama sobre el nodo (`AudioEngine.cpp`, en
+//      `onAudioReady`), asi que bloquear ahi lo deja atrapado exactamente en el
+//      estado que importa.
+//
+// Ninguno de los dos cambia comportamiento: uno registra, el otro espera a que
+// el test lo suelte.
+#if defined(WMA_TEST_HOOKS)
+#include <thread>
+
+std::atomic<int> gInputNodeDtorCount{0};
+std::atomic<std::thread::id> gInputNodeDtorThread{};
+std::atomic<bool> gInputNodeHoldInCallback{false};
+std::atomic<bool> gInputNodeIsInCallback{false};
+#endif
+
 #define LOG_TAG "InputNode"
 #define LOGI(...) wma::logMessage(wma::LogLevel::INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) wma::logMessage(wma::LogLevel::WARN, LOG_TAG, __VA_ARGS__)
@@ -99,11 +144,24 @@ InputNode::InputNode()
 {
     mNumInputChannels = 0;  // No inputs from other nodes (this is a source)
     mNumOutputChannels = 2;
+    // Los DOS buffers de trabajo, no uno. El constructor dimensionaba solo
+    // `mTempBuffer` y dejaba `mMonitorTempBuffer` VACIO, asi que un nodo al que
+    // se le da de comer antes de `prepare()` escribia en un buffer de tamano 0
+    // en cuanto el volumen de monitoreo no fuera 1,0 — protegido nada mas que
+    // por un `assert`, o sea por nada en release. Dimensionarlos juntos es lo
+    // que hace que `clampToWorkBuffers()` mida algo coherente.
     mTempBuffer.resize(8192);
+    mMonitorTempBuffer.resize(8192);
 }
 
 InputNode::~InputNode() {
     stopInputStream();
+#if defined(WMA_TEST_HOOKS)
+    // WD-1.3 — ver la nota de los ganchos arriba. Va DESPUES de stopInputStream()
+    // para que el registro cubra la destruccion entera, no solo su comienzo.
+    gInputNodeDtorThread.store(std::this_thread::get_id(), std::memory_order_release);
+    gInputNodeDtorCount.fetch_add(1, std::memory_order_release);
+#endif
 }
 
 void InputNode::prepare(int sampleRate, int maxBlockSize) {
@@ -250,114 +308,103 @@ bool InputNode::isInputStreamRunning() const {
     return mInputStreamRunning.load();
 }
 
+int InputNode::clampToWorkBuffers(int numFrames) {
+    if (numFrames <= 0) return 0;
+    const size_t needed = static_cast<size_t>(numFrames) * 2;
+    const size_t room = std::min(mTempBuffer.size(), mMonitorTempBuffer.size());
+    if (needed <= room) return numFrames;
+    mFeedClampedBlocks.bump();  // WD-1.1 — era un LOGW incondicional
+    return static_cast<int>(room / 2);
+}
+
+void InputNode::processCapturedBlock(float* stereo, int numFrames,
+                                     wma::RtCounter& monitorOverflowCounter) {
+    const size_t numSamples = static_cast<size_t>(numFrames) * 2;
+
+    // Ganancia de entrada
+    const float gain = mInputGainLinear.load(std::memory_order_relaxed);
+    if (std::abs(gain - 1.0f) > 0.001f) {
+        for (size_t i = 0; i < numSamples; ++i) {
+            stereo[i] *= gain;
+        }
+    }
+
+    // DC blocking — el camino de entrada tiene el SUYO, distinto del que corre
+    // sobre el bus del instrumento. Que sean dos no es redundancia: son dos
+    // senales que llegan por caminos distintos.
+    mDCBlocker.process(stereo, numFrames);
+
+    if (mNoiseGateEnabled.load(std::memory_order_relaxed)) {
+        mNoiseGate.process(stereo, numFrames);
+    }
+
+    // Medicion de nivel — publica atomicos que lee el thread de control
+    // (getInputLevel / isNoiseGateOpen). WD-1.1: era ademas un log periodico.
+    mLevelMeter.process(stereo, numFrames);
+
+    // Ring de captura, para el grafo de audio.
+    if (mRingBuffer.availableToWrite() >= numSamples) {
+        mRingBuffer.write(stereo, numSamples);
+    }
+
+    // Ring de monitoreo.
+    if (!mMonitoringEnabled.load(std::memory_order_relaxed)) {
+        return;
+    }
+    const float monitorVolume = mMonitoringVolume.load(std::memory_order_relaxed);
+    const float* toWrite = stereo;
+    if (std::abs(monitorVolume - 1.0f) > 0.001f) {
+        for (size_t i = 0; i < numSamples; ++i) {
+            mMonitorTempBuffer[i] = stereo[i] * monitorVolume;
+        }
+        toWrite = mMonitorTempBuffer.data();
+    }
+    if (mMonitoringBuffer.availableToWrite() >= numSamples) {
+        mMonitoringBuffer.write(toWrite, numSamples);
+    } else {
+        // WD-1.1 — era un LOGW, y los macros de este archivo NO son
+        // condicionales: sobrevivia a release. Ademas un overflow de monitoring
+        // se repite por bloque mientras dure, asi que el log realimentaba el
+        // problema. El contador lo dice el llamador: cual camino descarto es
+        // justo lo que hay que saber.
+        monitorOverflowCounter.bump();
+    }
+}
+
 bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCount) {
     // WD-1.2 — este es el SEGUNDO thread RT del motor: en Android la captura
-    // corre en su propio stream de Oboe, con su propio thread y su propio DSP
-    // (DC blocker, noise gate, level meter). FPCR/MXCSR son por thread, asi que
-    // setearlos en el thread de salida no hace nada por este.
+    // corre en su propio stream de Oboe, con su propio thread y su propio DSP.
+    // FPCR/MXCSR son por thread, asi que setearlos en el thread de salida no
+    // hace nada por este. `feedExternalInput` NO lo repite, y es correcto: a esa
+    // la llama `AudioEngine::onAudioReady`, que ya flusheo en su propio thread.
     wma::platform::flushDenormalsRtSafe();
 
     if (!mInputStreamRunning.load()) {
         return false;
     }
 
+    numFrames = clampToWorkBuffers(numFrames);
+    if (numFrames <= 0) {
+        return true;
+    }
+
     float* processBuffer = audioData;
 
-    // Handle mono input by duplicating to stereo
-    // mTempBuffer is pre-allocated in prepare() to maxBlockSize * 2.
-    // [[maybe_unused]]: sólo la lee el assert de abajo, que desaparece con NDEBUG.
-    [[maybe_unused]] const size_t requiredSize = static_cast<size_t>(numFrames * 2);
-    assert(mTempBuffer.size() >= requiredSize &&
-           "Temp buffer too small — prepare() should allocate maxBlockSize * 2");
-
+    // Mono llega como un canal y sale como dos. Solo pasa por aca: el camino de
+    // USB recibe estereo intercalado del backend.
     if (channelCount == 1) {
-        // Convert mono to stereo in temp buffer
         for (int i = numFrames - 1; i >= 0; --i) {
-            mTempBuffer[i * 2] = audioData[i];
-            mTempBuffer[i * 2 + 1] = audioData[i];
+            mTempBuffer[static_cast<size_t>(i) * 2] = audioData[i];
+            mTempBuffer[static_cast<size_t>(i) * 2 + 1] = audioData[i];
         }
         processBuffer = mTempBuffer.data();
     } else if (channelCount == 2) {
-        // For stereo, copy to temp buffer so we can process without modifying original
-        std::copy(audioData, audioData + numFrames * 2, mTempBuffer.begin());
+        std::copy(audioData, audioData + static_cast<size_t>(numFrames) * 2,
+                  mTempBuffer.begin());
         processBuffer = mTempBuffer.data();
     }
 
-    // WD-1.1 — log periodico borrado. El nivel de entrada ya lo publica
-    // mLevelMeter, que es consultable desde el thread de control por
-    // getInputLevel(); el log era una segunda medicion de lo mismo, con syscall.
-
-    // Apply input gain
-    float gain = mInputGainLinear.load(std::memory_order_relaxed);
-    if (std::abs(gain - 1.0f) > 0.001f) {
-        for (int i = 0; i < numFrames * 2; ++i) {
-            processBuffer[i] *= gain;
-        }
-    }
-
-    // DC Blocking - process directly in callback for immediate metering
-    mDCBlocker.process(processBuffer, numFrames);
-
-    // Noise Gate (if enabled)
-    if (mNoiseGateEnabled.load(std::memory_order_relaxed)) {
-        mNoiseGate.process(processBuffer, numFrames);
-    }
-
-    // Level metering - updates atomic values that can be read by UI thread
-    mLevelMeter.process(processBuffer, numFrames);
-
-    // WD-1.1 — idem: nivel y estado del gate ya son consultables
-    // (getInputLevel / isNoiseGateOpen).
-
-    // Write to ring buffer for potential future audio graph integration
-    // Only write if there's space to avoid overflow spam
-    size_t available = mRingBuffer.availableToWrite();
-    size_t needed = static_cast<size_t>(numFrames * 2);
-    if (available >= needed) {
-        mRingBuffer.write(processBuffer, numFrames * 2);
-    }
-
-    // Write to monitoring buffer if monitoring is enabled
-    if (mMonitoringEnabled.load(std::memory_order_relaxed)) {
-        float monitorVolume = mMonitoringVolume.load(std::memory_order_relaxed);
-
-        // WD-1.1 — log periodico borrado.
-
-        // Apply monitoring volume before writing
-        if (std::abs(monitorVolume - 1.0f) > 0.001f) {
-            // Use pre-allocated monitoring buffer (avoids RT allocations)
-            assert(mMonitorTempBuffer.size() >= needed &&
-                   "Monitor temp buffer too small — prepare() should allocate maxBlockSize * 2");
-
-            for (size_t i = 0; i < needed; ++i) {
-                mMonitorTempBuffer[i] = processBuffer[i] * monitorVolume;
-            }
-
-            size_t monitorAvailable = mMonitoringBuffer.availableToWrite();
-            if (monitorAvailable >= needed) {
-                mMonitoringBuffer.write(mMonitorTempBuffer.data(), needed);
-            } else {
-                // WD-1.1 — era un LOGW, y los macros de este archivo NO son
-                // condicionales: sobrevivia a release. Ademas un overflow de
-                // monitoring se repite por bloque mientras dure, asi que el log
-                // realimentaba el problema.
-                mMonitorOverflowBlocks.bump();
-            }
-        } else {
-            // Volume is 1.0, write directly
-            size_t monitorAvailable = mMonitoringBuffer.availableToWrite();
-            if (monitorAvailable >= needed) {
-                mMonitoringBuffer.write(processBuffer, needed);
-            } else {
-                // WD-1.1 — era un LOGW, y los macros de este archivo NO son
-                // condicionales: sobrevivia a release. Ademas un overflow de
-                // monitoring se repite por bloque mientras dure, asi que el log
-                // realimentaba el problema.
-                mMonitorOverflowBlocks.bump();
-            }
-        }
-    }
-
+    processCapturedBlock(processBuffer, numFrames, mMonitorOverflowBlocks);
     return true;
 }
 
@@ -510,6 +557,16 @@ void InputNode::setMonitoringEnabled(bool enabled) {
 }
 
 bool InputNode::isMonitoringEnabled() const {
+#if defined(WMA_TEST_HOOKS)
+    // WD-1.3 — la compuerta. Ver la nota de los ganchos arriba.
+    if (gInputNodeHoldInCallback.load(std::memory_order_acquire)) {
+        gInputNodeIsInCallback.store(true, std::memory_order_release);
+        while (gInputNodeHoldInCallback.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        gInputNodeIsInCallback.store(false, std::memory_order_release);
+    }
+#endif
     return mMonitoringEnabled.load(std::memory_order_relaxed);
 }
 
@@ -581,77 +638,16 @@ void InputNode::feedExternalInput(const float* inputData, int numFrames) {
         return;
     }
 
-    const size_t numSamples = static_cast<size_t>(numFrames * 2);  // Stereo
-
-    // Use the temp buffer for processing (pre-allocated in prepare())
-    assert(mTempBuffer.size() >= numSamples &&
-           "Temp buffer too small — prepare() should allocate maxBlockSize * 2");
-    if (mTempBuffer.size() < numSamples) {
-        mFeedClampedBlocks.bump();  // WD-1.1 — era un LOGW incondicional
-        numFrames = static_cast<int>(mTempBuffer.size()) / 2;
+    // El recorte va ANTES de la copia y su resultado lo usa TODO lo de abajo.
+    // Antes no: `numSamples` se calculaba antes de recortar y quedaba `const`,
+    // asi que el `std::copy` escribia el largo original en un buffer mas chico.
+    // Ver la nota de clampToWorkBuffers() en el header.
+    numFrames = clampToWorkBuffers(numFrames);
+    if (numFrames <= 0) {
+        return;
     }
+    const size_t numSamples = static_cast<size_t>(numFrames) * 2;
 
-    // Copy input data to temp buffer for processing
     std::copy(inputData, inputData + numSamples, mTempBuffer.data());
-    float* processBuffer = mTempBuffer.data();
-
-    // Apply input gain
-    float gainLinear = mInputGainLinear.load(std::memory_order_relaxed);
-    if (std::abs(gainLinear - 1.0f) > 0.001f) {
-        for (size_t i = 0; i < numSamples; ++i) {
-            processBuffer[i] *= gainLinear;
-        }
-    }
-
-    // DC Blocking
-    mDCBlocker.process(processBuffer, numFrames);
-
-    // Noise Gate (if enabled)
-    if (mNoiseGateEnabled.load(std::memory_order_relaxed)) {
-        mNoiseGate.process(processBuffer, numFrames);
-    }
-
-    // Level metering
-    mLevelMeter.process(processBuffer, numFrames);
-
-    // Write to ring buffer
-    size_t available = mRingBuffer.availableToWrite();
-    if (available >= numSamples) {
-        mRingBuffer.write(processBuffer, numSamples);
-    }
-
-    // Write to monitoring buffer if monitoring is enabled
-    bool monitoringEnabled = mMonitoringEnabled.load(std::memory_order_relaxed);
-    if (monitoringEnabled) {
-        float monitorVolume = mMonitoringVolume.load(std::memory_order_relaxed);
-
-        if (std::abs(monitorVolume - 1.0f) > 0.001f) {
-            // Use pre-allocated monitoring buffer (avoids RT allocations)
-            assert(mMonitorTempBuffer.size() >= numSamples &&
-                   "Monitor temp buffer too small — prepare() should allocate maxBlockSize * 2");
-
-            for (size_t i = 0; i < numSamples; ++i) {
-                mMonitorTempBuffer[i] = processBuffer[i] * monitorVolume;
-            }
-
-            size_t monitorAvailable = mMonitoringBuffer.availableToWrite();
-            if (monitorAvailable >= numSamples) {
-                mMonitoringBuffer.write(mMonitorTempBuffer.data(), numSamples);
-            } else {
-                // DIAGNOSTIC: Log when data is dropped due to full buffer
-                mUsbFeedDrops.bump();  // WD-1.1 — era un LOGW incondicional
-            }
-        } else {
-            size_t monitorAvailable = mMonitoringBuffer.availableToWrite();
-            if (monitorAvailable >= numSamples) {
-                mMonitoringBuffer.write(processBuffer, numSamples);
-            } else {
-                // DIAGNOSTIC: Log when data is dropped due to full buffer
-                mUsbFeedDrops.bump();  // WD-1.1 — era un LOGW incondicional
-            }
-        }
-    }
-
-    // Debug logging (periodic) - Enhanced for MIX mode diagnostics
-    // WD-1.1 — log periodico borrado.
+    processCapturedBlock(mTempBuffer.data(), numFrames, mUsbFeedDrops);
 }
