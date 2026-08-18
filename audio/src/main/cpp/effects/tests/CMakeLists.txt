@@ -36,6 +36,7 @@ add_executable(effects_tests
     test_rate_invariance.cpp
     test_nyquist_limits.cpp
     test_loop_stability.cpp
+    test_chain_gain.cpp
     test_logger_stub.cpp
 )
 

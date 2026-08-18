@@ -338,8 +338,9 @@ void EffectChain::processOneEffect(Effect* effect, size_t slotIndex, bool isBypa
     // Process effect (note: Effect::process takes non-const input, but doesn't modify it)
     effect->process(const_cast<float*>(input), output, numFrames);
 
-    // Sanitize NaN/Inf to prevent silent propagation through the chain.
-    // NaN comparisons always return false, so auto-gain won't catch them.
+    // Saneo de NaN/Inf, para que no se propaguen callados por la cadena.
+    // WD-3.3 — es la UNICA pasada extra que queda sobre el buffer. Antes habia
+    // una segunda, la del pico del auto-gain, que ya no existe.
     bool hadBadSample = false;
     for (int s = 0; s < totalSamples; ++s) {
         if (!std::isfinite(output[s])) {
@@ -362,19 +363,30 @@ void EffectChain::processOneEffect(Effect* effect, size_t slotIndex, bool isBypa
         }
     }
 
-    // Auto-gain compensation
-    constexpr float GAIN_CEILING = 1.5f;
-    float peak = 0.0f;
-    for (int s = 0; s < totalSamples; ++s) {
-        float absVal = std::abs(output[s]);
-        if (absVal > peak) peak = absVal;
-    }
-    if (peak > GAIN_CEILING) {
-        float gain = GAIN_CEILING / peak;
-        for (int s = 0; s < totalSamples; ++s) {
-            output[s] *= gain;
-        }
-    }
+    // WD-3.3 — ACA HABIA UN AUTO-GAIN, Y NO VUELVE.
+    //
+    // Escaneaba el pico del bloque y, si pasaba 1,5, multiplicaba el buffer
+    // entero por `1,5 / pico`. Constante adentro del bloque y distinta en el
+    // siguiente: eso es un ESCALON de ganancia en cada borde de bloque, o sea
+    // un limiter sin ataque, sin release y sin lookahead — la definicion del
+    // artefacto que presumiblemente venia a evitar.
+    //
+    // Medido antes de sacarlo (transitorio que decae de 3,0, bloques de 256 @
+    // 48 kHz): las ganancias por bloque salieron 0,521 / 0,616 / 0,727 / 0,859
+    // / 1,0. No es un click: es uno POR BLOQUE mientras el transitorio este
+    // arriba del techo, y por CADA efecto de la cadena. En el peor borde el
+    // salto midio 0,231 contra 0,038 de la pendiente maxima de la propia onda.
+    //
+    // Y no hacia falta buscarlo con perillas raras: con una nota sola a 0,9 y
+    // valores de fabrica no dispara NINGUNO de los 23, pero el disparador real
+    // es el nivel de entrada de la cadena. `VoicePool::mixToOutput` reparte
+    // headroom con `1/sqrt(n)`, asi que un acorde de n voces entrega `sqrt(n)`
+    // veces la amplitud por voz: 4 voces son 2,0 y 8 son 2,83. Ahi disparaban
+    // 20 de los 23, en 14 a 37 de cada 40 bloques.
+    //
+    // El control de nivel va UNA vez, al final, en `OutputStage`: lookahead
+    // limiter (240 samples) -> soft clip -> dither -> hard limit. La propiedad
+    // esta medida en `effects/tests/test_chain_gain.cpp`.
 }
 
 // ========== MAIN PROCESS ==========
