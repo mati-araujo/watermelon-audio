@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.3](https://github.com/mati-araujo/watermelon-audio/compare/v2.1.2...v2.1.3) (2026-08-18)
+
+
+### Performance Improvements
+
+* **ci:** ctest en paralelo, que corria en serie en todos lados ([#138](https://github.com/mati-araujo/watermelon-audio/issues/138)) ([a8cd4e3](https://github.com/mati-araujo/watermelon-audio/commit/a8cd4e372e90f818bc6bcde029e0d473403ff553))
+
 ## [2.1.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.1.1...v2.1.2) (2026-08-18)
 
 
