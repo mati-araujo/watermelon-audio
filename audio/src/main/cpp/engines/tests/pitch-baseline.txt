@@ -40,15 +40,28 @@
 
 # NO estan aca, y por que:
 #
-#   FM / SUPERSAW / WAVETABLE — no se midieron todavia. Son osciladores de fase
-#   acumulada, donde el incremento se calcula contra el rate vigente en cada
-#   bloque, asi que el modo de falla de Karplus-Strong (un LARGO en muestras que
-#   se fija una sola vez) no les aplica por construccion. Medirlos es trabajo de
-#   la proxima tanda; hasta entonces, esta ausencia es una TAREA PENDIENTE y no
-#   una afirmacion de que esten bien.
+#   FM / SUPERSAW / WAVETABLE / GRANULAR — YA SE MIDIERON (2026-08-18), y por eso
+#   no estan aca: los cuatro mantienen su fundamental entre los tres rates.
+#   Spread medido sobre 110 / 220 / 440 Hz:
 #
-#   GRANULAR — tiene ventanas dimensionadas en muestras y es el candidato mas
-#   probable a tener el mismo defecto. Mismo estado: sin medir.
+#       FM 0,07  ·  SUPERSAW 0,76  ·  WAVETABLE 0,01  ·  GRANULAR 1,14  cents
+#
+#   La prediccion que traia escrita este archivo era correcta y la razon tambien:
+#   los cuatro derivan su incremento de fase contra el rate vigente en cada
+#   bloque, asi que el modo de falla de Karplus-Strong —un LARGO en muestras
+#   fijado una sola vez— no les aplica por construccion. GRANULAR, que era "el
+#   candidato mas probable", tambien dimensiona sus granos contra el rate vigente.
+#
+#   PERO la medicion no salio gratis: destapo que FM y GRANULAR NO eran
+#   bit-exactos entre tamaños de bloque, por un ulp que metia
+#   `ParameterSmoother::processBlock()` con el parametro en reposo. Karplus no lo
+#   mostraba porque sus defaults son 0,5 (potencia de dos, exacta en float).
+#   Medir los que "seguro estaban bien" es lo que encontro el defecto.
+#
+#   SUPERSAW mide entre -2,6 y -3,6 cents respecto de la nota pedida, y eso NO es
+#   deuda: son cuatro sierras desafinadas 15 cents por diseño, y la fundamental
+#   agregada de un ensamble desafinado no tiene por que caer en el centro. Lo que
+#   este archivo declara es invariancia entre rates, que si cumple.
 #
 #   SOUNDFONT — fuera del alcance del host: `SoundFontEngine` arrastra
 #   tinysoundfont, que no compila en esta suite (ver el CMakeLists de este

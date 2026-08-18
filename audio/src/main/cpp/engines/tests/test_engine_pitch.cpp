@@ -51,11 +51,16 @@
 
 #include "PitchHarness.h"
 
+#include "../FMEngine.h"
+#include "../GranularEngine.h"
 #include "../KarplusStrongEngine.h"
+#include "../SupersawEngine.h"
+#include "../WavetableEngine.h"
 
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -110,6 +115,35 @@ double karplusFundamental(int prepareRate, int playbackRate, float targetHz,
     const size_t from = static_cast<size_t>(0.1 * playbackRate);
     const size_t len = static_cast<size_t>(0.4 * playbackRate);
     return fundamentalHz(x, from, len, playbackRate, targetHz);
+}
+
+/// Los engines que esta suite mide. `SOUNDFONT` queda afuera del host: arrastra
+/// tinysoundfont, que no compila aca (ver el CMakeLists de este directorio).
+struct EngineUnderTest {
+    const char* name;
+    std::unique_ptr<SynthEngine> (*make)();
+    float decay;  ///< sólo lo usa Karplus-Strong; ver kLongTail
+};
+
+const EngineUnderTest kEngines[] = {
+    {"KARPLUS_STRONG", [] () -> std::unique_ptr<SynthEngine> {
+        auto e = std::make_unique<KarplusStrongEngine>();
+        e->setParameter(KarplusStrongEngine::PARAM_DECAY, kLongTail);
+        return e;
+    }, kLongTail},
+    {"FM",        [] () -> std::unique_ptr<SynthEngine> { return std::make_unique<FMEngine>(); }, 0.0f},
+    {"SUPERSAW",  [] () -> std::unique_ptr<SynthEngine> { return std::make_unique<SupersawEngine>(); }, 0.0f},
+    {"WAVETABLE", [] () -> std::unique_ptr<SynthEngine> { return std::make_unique<WavetableEngine>(); }, 0.0f},
+    {"GRANULAR",  [] () -> std::unique_ptr<SynthEngine> { return std::make_unique<GranularEngine>(); }, 0.0f},
+};
+
+/// Renderiza cualquiera de los engines de arriba, recién preparado.
+std::vector<float> renderEngine(const EngineUnderTest& u, int rate, double seconds,
+                                float hz, int block = kBlock) {
+    std::unique_ptr<SynthEngine> e = u.make();
+    e->prepare(rate, block);
+    e->reset();
+    return renderLeft(*e, rate, seconds, hz, block);
 }
 
 /// Cuanto tarda el lazo en caer 60 dB, en segundos, calculado — no medido — a
@@ -448,12 +482,78 @@ TEST(EnginePitch, TheStringKeepsSoundingInsteadOfGoingSilent) {
     }
 }
 
+TEST(EnginePitch, NoEngineOutputDependsOnTheBlockSize) {
+    // La misma propiedad que `TheTuningDoesNotDependOnTheBlockSize`, pero sobre
+    // los CINCO engines — porque el defecto que la rompio la segunda vez sólo
+    // era visible en dos de ellos, y en ninguno de los dos que ya tenían test.
+    //
+    // `ParameterSmoother::processBlock()` devolvía `d*x + (1-d)*t` con
+    // `d = powf(coeff, frames)`. Con el parametro EN REPOSO eso vale `x` en los
+    // reales y no siempre en float, asi que el ultimo bit dependia del bloque.
+    // Un ulp: `FM` lo amplifica por su lazo de realimentacion y `GRANULAR` por
+    // la planificacion de granos — 9.796 de 13.230 muestras distintas en FM a
+    // 44,1 kHz. Karplus-Strong NO lo mostraba, porque sus defaults son 0,5 y ahi
+    // la identidad si es exacta.
+    //
+    // De ahi la leccion que este test encarna: **la propiedad hay que pedirsela
+    // a todos los engines, no al que la descubrio**.
+    for (const EngineUnderTest& u : kEngines) {
+        for (int rate : kRates) {
+            for (float target : {110.0f, 440.0f}) {
+                const std::vector<float> reference =
+                    renderEngine(u, rate, 0.3, target, kBlock);
+                for (int block : {16, 64, 1024}) {
+                    const std::vector<float> got = renderEngine(u, rate, 0.3, target, block);
+                    ASSERT_EQ(reference.size(), got.size());
+                    size_t differing = 0;
+                    for (size_t i = 0; i < reference.size(); ++i) {
+                        if (reference[i] != got[i]) ++differing;
+                    }
+                    EXPECT_EQ(differing, 0u)
+                        << u.name << " a " << rate << " Hz, " << target << " Hz suena "
+                        << "distinto con bloques de " << block << " que con " << kBlock
+                        << " (" << differing << " de " << reference.size()
+                        << " muestras).\n"
+                        << "  El tamaño del bloque lo negocia el device: si el sonido "
+                        << "depende de el, depende del telefono.";
+                }
+            }
+        }
+    }
+}
+
 TEST(EnginePitch, TheFundamentalDoesNotShiftBetweenSampleRates) {
-    // EL CRITERIO DE WD-2.3.2, literal.
+    // EL CRITERIO DE WD-2.3.2, literal, sobre los cinco engines del host.
     const std::set<std::string> baseline = readBaseline(WMA_PITCH_BASELINE);
     std::set<std::string> failing;
 
-    for (float target : {82.41f, 110.0f, 220.0f, 440.0f, 880.0f}) {
+    for (const EngineUnderTest& u : kEngines) {
+        for (float target : {110.0f, 220.0f, 440.0f}) {
+            double f[3];
+            bool measurable = true;
+            for (int i = 0; i < 3; ++i) {
+                const std::vector<float> x = renderEngine(u, kRates[i], 1.0, target);
+                f[i] = fundamentalHz(x, static_cast<size_t>(0.1 * kRates[i]),
+                                     static_cast<size_t>(0.4 * kRates[i]), kRates[i], target);
+                if (f[i] <= 0.0) measurable = false;
+            }
+            ASSERT_TRUE(measurable)
+                << u.name << " no entrega una fundamental medible en " << target
+                << " Hz. Un engine que no se puede medir es un punto ciego, no un "
+                << "engine sano: hay que entender por que antes de excluirlo.";
+            double worst = 0.0;
+            for (int a = 0; a < 3; ++a) {
+                for (int b = a + 1; b < 3; ++b) {
+                    worst = std::max(worst, std::abs(cents(f[a], f[b])));
+                }
+            }
+            // Medido el 18/08: FM <= 0,07 · SUPERSAW <= 0,76 · WAVETABLE <= 0,01
+            // · GRANULAR <= 1,14 · KARPLUS_STRONG <= 0,39 cents.
+            if (worst > 5.0) failing.insert(u.name);
+        }
+    }
+
+    for (float target : {82.41f, 880.0f}) {
         double f[3];
         for (int i = 0; i < 3; ++i) {
             f[i] = karplusFundamental(kRates[i], kRates[i], target);

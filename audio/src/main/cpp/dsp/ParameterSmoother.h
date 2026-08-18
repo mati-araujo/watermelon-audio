@@ -46,6 +46,15 @@ public:
      * RT-SAFE: Uses relaxed memory ordering for minimal overhead.
      * Can be called from audio thread without blocking.
      */
+    /// ⚠️ EN REPOSO ESTE CAMINO NO ES EXACTO, y se deja asi a proposito.
+    /// `c*x + (1-c)*x` vale `x` en los reales y no siempre en float: medido, gcc
+    /// del CI devuelve `x` + 1 ulp para 0,7 y 0,35, y Apple clang devuelve `x`.
+    /// `processBlock()` lo evita con una salida temprana; aca NO se hace lo
+    /// mismo porque este es el camino POR MUESTRA de los efectos y cambiarlo
+    /// altera su salida bit a bit en las plataformas donde hoy oscila — o sea
+    /// que rompe los golden `.f32`, que se re-capturan CONSCIENTEMENTE y en su
+    /// propia tanda (misma regla que WD-3.3). Medido: con la salida temprana
+    /// agregada aca, los 886 tests pasan en macOS; falta la evidencia de Linux.
     inline float process(float target) {
         float current = mCurrent.load(std::memory_order_relaxed);
         float coeff = mCoefficient.load(std::memory_order_relaxed);
@@ -87,10 +96,37 @@ public:
         if (frames <= 0) {
             return mCurrent.load(std::memory_order_relaxed);
         }
+        float current = mCurrent.load(std::memory_order_relaxed);
+        // YA LLEGO: n aplicaciones de `c*x + (1-c)*x` dejan `x` donde estaba, asi
+        // que no hay nada que calcular. Salir aca no es una optimizacion
+        // oportunista: es lo unico que mantiene el resultado EXACTO.
+        //
+        // La identidad `d*x + (1-d)*x == x` vale en los reales y NO en float, y
+        // como `d = powf(coeff, frames)` depende del tamaño del bloque, el
+        // ultimo bit del resultado terminaba dependiendo de el. Medido: con
+        // `target` 0,3 a 44,1 kHz, n=512 daba 0x3e99999b contra 0x3e99999a del
+        // resto; con 0,1 a 48 kHz salian tres valores distintos para cuatro
+        // tamaños. Un ulp alcanza — FMEngine lo amplifica por su lazo de
+        // realimentacion y GranularEngine por la planificacion de granos, y los
+        // dos dejaban de sonar igual segun el bloque que negociara el device.
+        //
+        // Karplus-Strong no lo mostraba porque sus defaults son 0,5: potencia de
+        // dos, donde la identidad SI es exacta en float. Un test que solo lo
+        // mirara a el habria dado verde.
+        //
+        // OJO CON EL ORDEN: esta salida va ANTES de delegar `frames == 1` en
+        // `process()`, y no es cosmetico. `process()` recalcula
+        // `c*x + (1-c)*x`, que en reposo tampoco es exacto en float — y el
+        // resultado depende del COMPILADOR: en Apple clang/arm64 da `x` exacto
+        // y en gcc/x86 del CI da `x` + 1 ulp. Delegar el caso de un frame hacia
+        // ahi hacia que `processBlock` fuera exacto para todo n MENOS n=1, y
+        // sólo en Linux. El gate local daba verde y el CI rojo.
+        if (current == target) {
+            return current;
+        }
         if (frames == 1) {
             return process(target);
         }
-        float current = mCurrent.load(std::memory_order_relaxed);
         float coeff = mCoefficient.load(std::memory_order_relaxed);
         float decay = std::pow(coeff, static_cast<float>(frames));
         float newCurrent = decay * current + (1.0f - decay) * target;
