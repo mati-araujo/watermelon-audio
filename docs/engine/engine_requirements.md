@@ -939,6 +939,58 @@ La protección va una vez, al final, en `OutputStage`.
 
 **Esfuerzo** 1 d · **Riesgo** bajo · **Depende de** WD-2.2
 
+> ✅ **HECHO (2026-08-18).** El auto-gain salio de `processOneEffect`. La proteccion de nivel
+> queda una sola, al final, en `OutputStage`.
+>
+> **El sintoma se reprodujo antes de tocar nada, y el escenario escrito se queda CORTO.** Con el
+> instrumento exacto (un DELAY con `wet = 0`, que es identidad bit a bit, asi que toda desviacion
+> la puso la cadena) y el transitorio que el ticket describe, las ganancias por bloque salieron
+> **0,521 → 0,616 → 0,727 → 0,859 → 1,0**. No es "un escalon de ×0,5 a ×1,0": es **uno por
+> bloque** mientras el transitorio este arriba del techo — cuatro clicks donde el ticket
+> anunciaba uno. En el peor borde el salto midio **0,231** contra **0,038** de la pendiente
+> maxima de la propia onda.
+>
+> **Y el disparador no es el que uno supondria.** Con una nota sola a 0,9 y parametros de fabrica
+> **ninguno** de los 23 efectos llega al techo; barrer las perillas tampoco (solo
+> `SHIMMER_REVERB`). El eje que importa es el **nivel de entrada de la cadena**, que recibe el bus
+> del sinte sumado: `VoicePool::mixToOutput` reparte headroom con `1/sqrt(n)`, asi que un acorde
+> de n voces entrega `sqrt(n)` veces la amplitud por voz — 4 voces son 2,0 y 8 son 2,83. En ese
+> rango disparaban **20 de los 23**, en **14 a 37 de cada 40 bloques**. O sea que no era un
+> artefacto de transitorio: era un escalon por bloque durante todo un pasaje fuerte.
+>
+> **Criterio 2:** el saneo de NaN/Inf se conserva y ya es la unica pasada extra del helper. Y
+> **no tenia ningun test**: borrar el bucle entero sobrevivia los 890 de la suite. Ahora lo mide
+> `ChainGain.ANonFiniteSampleNeverLeavesTheChain`. El contador `mNonFiniteBlocks` que el criterio
+> nombra no se afirma: sigue **sin lector** en el arbol, y exponerlo es WD-5.1.
+>
+> **Criterio 3 — la re-captura se hizo y el diff salio VACIO, y esa es la parte informativa.**
+> `scripts/regen-golden.sh` reescribio los 6 presets (mtimes lo confirman) y salieron byte a byte
+> identicos. El motivo es estructural: `GoldenHarness::captureImpulseResponse` toma un `Effect&` y
+> llama a `fx.process()` **directo** — el camino golden no pasa por `EffectChain` en ningun punto.
+> Asi que **no hay ningun golden que cubra la cadena**, y el cambio de sonido de este
+> requerimiento es invisible para la suite de WD-2.2. Es el mismo desenlace que el criterio 3 de
+> WD-3.6 y por otra razon; las dos veces el "tramite" resulto ser un hueco de cobertura.
+>
+> 🔴 **Lo que la mutacion destapo, y es lo mas importante de esta tanda.** Desactivar
+> `OutputStage::processOutput` ENTERO —limiter, soft clip, dither y hard limit— **sobrevivia los
+> 891 tests**. Este requerimiento vacia la capa de arriba apoyandose en esa, asi que dejarla sin
+> vigilar seria cambiar una proteccion mala por ninguna. Se agrego
+> `core/tests/test_output_stage_protection.cpp`, y su tercer test es el que da sentido a la
+> mudanza: `OutputStage` acota **sin** dejar escalon de borde, medido con el mismo instrumento.
+>
+> **Hallazgo al pasar, medido y NO arreglado (no es este mecanismo):** el saneo limpia el BUFFER,
+> no el ESTADO del efecto. Con un solo sample no finito en la entrada de la cadena, 40 bloques
+> despues quedan **mudos para siempre 3 de 23** (solo NaN: `REVERB`, `VOCODER`, `AMP_SIM`) y
+> **11 de 23** con NaN + ±Inf. El saneo no cura: **esconde** — la salida queda finita y el unico
+> rastro es `mSilentOutputBlocks`, que tampoco tiene lector. Documentado en el test.
+>
+> Verificacion: **894/894** (886 → 894) · ASan/UBSan · TSan · `gate.sh` atestado. Mutacion **5/5**,
+> con el patron de muertes = prediccion: M1 (auto-gain tal cual) muere en los tres tests de la
+> cadena y no en el de FEEDBACK; **M2 (el auto-gain SUAVIZADO, o sea la alternativa que este
+> ticket considera y descarta) muere solo en los dos de exactitud y NO en el del borde** — que es
+> exactamente la distincion entre "sin click" y "sin ganancia"; M4 (sin proteccion de salida) y
+> M5 (hard clip a lo bruto, sin lookahead) mueren cada uno en su unico test.
+
 ---
 
 ### WD-3.4 — El sample rate se propaga a todo lo que lo necesita

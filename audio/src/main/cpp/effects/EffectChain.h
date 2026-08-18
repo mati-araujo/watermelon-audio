@@ -461,7 +461,13 @@ private:
     /** @brief El vocoder activo leido del snapshot, o nullptr. Lock-free (WD-1.6). */
     Effect* vocoderFromSnapshot() const;
 
-    /** @brief Process single effect with bypass smoothing and auto-gain */
+    /**
+     * @brief Procesa un efecto con suavizado de bypass y saneo de NaN/Inf.
+     *
+     * NO aplica ganancia. El auto-gain por efecto y por bloque que habia aca
+     * salio en WD-3.3 — ver la nota en el .cpp. La proteccion de nivel es una
+     * sola, al final, en `OutputStage`.
+     */
     void processOneEffect(Effect* effect, size_t slotIndex, bool isBypassed,
                           const float* input, float* output, int numFrames);
 
