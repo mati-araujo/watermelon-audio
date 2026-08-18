@@ -169,12 +169,33 @@ jobs:
       - name: El verificador de atestaciones no da falsos verdes
         run: bash scripts/test-attestation.sh
 
+      # Instala SOLO lo que falte. La imagen de ubuntu-latest ya trae varias de
+      # estas herramientas, y `apt-get update` es la linea mas fragil de todo el
+      # CI: si no hace falta, no se corre.
+      #
+      # Y SIN REINTENTOS, a proposito. Los tenia (`Acquire::Retries=3`) y fueron
+      # CONTRAPRODUCENTES: la mirrorlist del runner lista azure.archive.ubuntu.com
+      # primero y archive.ubuntu.com como respaldo. Cuando el de Azure se cae,
+      # cada reintento retrasa llegar al respaldo que SI funciona — medido el
+      # 18/08, cuatro repos x cuatro intentos x 30 s de timeout se comieron los
+      # 10 minutos del paso y lo mataron. Fallar rapido hacia el respaldo es
+      # exactamente lo que hay que hacer con un mirror muerto.
       - name: Install build tools
         timeout-minutes: 10
         run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
-            install -y ninja-build cmake g++
+          need=""
+          command -v cmake >/dev/null 2>&1 || need="$need cmake"
+          command -v ninja >/dev/null 2>&1 || need="$need ninja-build"
+          command -v g++   >/dev/null 2>&1 || need="$need g++"
+          if [ -z "$need" ]; then
+            echo "cmake/ninja/g++ ya vienen en la imagen — nada que instalar"
+            cmake --version | head -1; ninja --version; g++ --version | head -1
+            exit 0
+          fi
+          echo "falta instalar:$need"
+          sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 \
+            install -y $need
 
       - name: Build & run C++ test suite
         run: bash scripts/run-cpp-tests.sh
@@ -189,12 +210,33 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
+      # Instala SOLO lo que falte. La imagen de ubuntu-latest ya trae varias de
+      # estas herramientas, y `apt-get update` es la linea mas fragil de todo el
+      # CI: si no hace falta, no se corre.
+      #
+      # Y SIN REINTENTOS, a proposito. Los tenia (`Acquire::Retries=3`) y fueron
+      # CONTRAPRODUCENTES: la mirrorlist del runner lista azure.archive.ubuntu.com
+      # primero y archive.ubuntu.com como respaldo. Cuando el de Azure se cae,
+      # cada reintento retrasa llegar al respaldo que SI funciona — medido el
+      # 18/08, cuatro repos x cuatro intentos x 30 s de timeout se comieron los
+      # 10 minutos del paso y lo mataron. Fallar rapido hacia el respaldo es
+      # exactamente lo que hay que hacer con un mirror muerto.
       - name: Install build tools
         timeout-minutes: 10
         run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
-            install -y ninja-build cmake g++
+          need=""
+          command -v cmake >/dev/null 2>&1 || need="$need cmake"
+          command -v ninja >/dev/null 2>&1 || need="$need ninja-build"
+          command -v g++   >/dev/null 2>&1 || need="$need g++"
+          if [ -z "$need" ]; then
+            echo "cmake/ninja/g++ ya vienen en la imagen — nada que instalar"
+            cmake --version | head -1; ninja --version; g++ --version | head -1
+            exit 0
+          fi
+          echo "falta instalar:$need"
+          sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 \
+            install -y $need
       - name: Build & run C++ test suite (ASan+UBSan)
         env:
           SANITIZE: address,undefined
@@ -211,12 +253,33 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v7
+      # Instala SOLO lo que falte. La imagen de ubuntu-latest ya trae varias de
+      # estas herramientas, y `apt-get update` es la linea mas fragil de todo el
+      # CI: si no hace falta, no se corre.
+      #
+      # Y SIN REINTENTOS, a proposito. Los tenia (`Acquire::Retries=3`) y fueron
+      # CONTRAPRODUCENTES: la mirrorlist del runner lista azure.archive.ubuntu.com
+      # primero y archive.ubuntu.com como respaldo. Cuando el de Azure se cae,
+      # cada reintento retrasa llegar al respaldo que SI funciona — medido el
+      # 18/08, cuatro repos x cuatro intentos x 30 s de timeout se comieron los
+      # 10 minutos del paso y lo mataron. Fallar rapido hacia el respaldo es
+      # exactamente lo que hay que hacer con un mirror muerto.
       - name: Install build tools
         timeout-minutes: 10
         run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
-            install -y ninja-build cmake g++
+          need=""
+          command -v cmake >/dev/null 2>&1 || need="$need cmake"
+          command -v ninja >/dev/null 2>&1 || need="$need ninja-build"
+          command -v g++   >/dev/null 2>&1 || need="$need g++"
+          if [ -z "$need" ]; then
+            echo "cmake/ninja/g++ ya vienen en la imagen — nada que instalar"
+            cmake --version | head -1; ninja --version; g++ --version | head -1
+            exit 0
+          fi
+          echo "falta instalar:$need"
+          sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 \
+            install -y $need
       - name: Build & run C++ test suite (TSan)
         env:
           SANITIZE: thread
