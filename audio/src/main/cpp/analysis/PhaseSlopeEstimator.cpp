@@ -118,7 +118,6 @@ void PhaseSlopeEstimator::closeWindow() {
     }
 
     const double raw = std::atan2(imag, real);
-    mWrappedPhase = raw;
 
     if (!mHavePrevPhase) {
         mUnwrapped = raw;
@@ -140,6 +139,17 @@ void PhaseSlopeEstimator::closeWindow() {
         mUnwrapped += d;
         mLastRawPhase = raw;
     }
+
+    // El angulo que consume el strobe es la fase de la DESAFINACION acumulada,
+    // envuelta a ±π — no la fase cruda del Goertzel.
+    //
+    // Publicar `raw` fue un defecto, y lo encontro 2.11c: `raw` lleva adentro el
+    // giro del PROPIO objetivo, que a 110 Hz avanza 2,43 rad por ventana contra
+    // los 0,034 que produce 1 cent de desafinacion. Un disco girando a eso no
+    // representa nada: gira rapido y en un sentido que depende de donde cayo el
+    // alias de la frecuencia objetivo contra la ventana, no de si la cuerda esta
+    // alta o baja.
+    mWrappedPhase = std::remainder(mUnwrapped, 2.0 * M_PI);
 
     // --- ventana deslizante de fases ----------------------------------------
     if (mCount < kMaxWindows) {

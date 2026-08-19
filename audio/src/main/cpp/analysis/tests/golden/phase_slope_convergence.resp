@@ -1,0 +1,25 @@
+# watermelon-audio golden — analysis/phase_slope_convergence (REQ-001 S2)
+# sampleRate=48000  window=4096  rows=21
+# El signo es el del afinador: senal por encima del objetivo = POSITIVO.
+# caso	segundos	cents	incertidumbreCents
+A0_plus1	1.00	1.003725	0.023395
+A0_plus1	2.00	1.004315	0.007154
+A0_plus1	3.00	1.000345	0.003744
+E2_plus1	1.00	1.000176	0.000041
+E2_plus1	2.00	1.000015	0.000021
+E2_plus1	3.00	1.000000	0.000011
+E2_minus1	1.00	-0.999928	0.000035
+E2_minus1	2.00	-0.999986	0.000019
+E2_minus1	3.00	-0.999976	0.000010
+A4_plus1	1.00	1.000000	0.000000
+A4_plus1	2.00	1.000000	0.000000
+A4_plus1	3.00	1.000000	0.000000
+C7_plus1	1.00	1.000000	0.000000
+C7_plus1	2.00	1.000000	0.000000
+C7_plus1	3.00	1.000000	0.000000
+E2_resolution	1.00	0.063133	0.000040
+E2_resolution	2.00	0.063000	0.000020
+E2_resolution	3.00	0.063009	0.000011
+E2_string_B5e4	1.00	0.432908	0.000089
+E2_string_B5e4	2.00	0.432920	0.000044
+E2_string_B5e4	3.00	0.432720	0.000031

@@ -444,5 +444,121 @@ TEST(PhaseSlope, AnAbruptNoteChangeRaisesTheUncertaintyBeforeTheErrorSettles) {
         << est.uncertaintyCents() << "): la app no tiene como ver la transicion";
 }
 
+// ---------------------------------------------------------------------------
+// 2.11c — el angulo del strobe (AC-001.22, cuyo dueño es S6)
+// ---------------------------------------------------------------------------
+
+/**
+ * TAREA 2.11c. El angulo publicado es CONTINUO entre ventanas consecutivas —sin
+ * saltos salvo el envolvimiento en ±π— y gira a la velocidad de la desafinacion.
+ *
+ * VINO DE S1 COMO 1.13b Y SE MOVIO ACA, porque en S1 no habia estimador que
+ * produjera el angulo: el test habria medido un placeholder.
+ *
+ * Lo que el AC promete es que **la app no tenga que integrar nada**: si tuviera
+ * que derivar la rotacion de la velocidad, un frame perdido le correria la fase
+ * para siempre. Por eso el angulo se publica ya acumulado, y por eso este test
+ * mira los INCREMENTOS: son ellos los que tienen que ser chicos y parejos.
+ *
+ * La cota no es arbitraria. Con la señal a `Δcents` del objetivo, el angulo
+ * avanza `2π·Δf·N/fs` por ventana; para 1 cent en A2 son 0,034 rad. Se exige que
+ * ningun incremento se pase de 3x eso: un salto mas grande significa que el
+ * angulo publicado lleva adentro algo que no es la desafinacion.
+ */
+TEST(PhaseSlope, ThePublishedAngleAdvancesSmoothlyAtTheDetuningRate) {
+    const double target = 110.0;
+    const double probe = 1.0;
+
+    PhaseSlopeEstimator est;
+    est.prepare(kRate);
+    est.setTarget(target);
+
+    const auto sig = pureSine(detune(target, probe), kRate, 4 * kRate);
+
+    // El avance TEORICO por ventana, del que sale la cota.
+    const double deltaHz = detune(target, probe) - target;
+    const double expectedStep =
+        2.0 * M_PI * deltaHz * PhaseSlopeEstimator::kWindowFrames / kRate;
+
+    std::vector<double> angles;
+    int i = 0;
+    const int n = static_cast<int>(sig.size());
+    while (i < n) {
+        const int take = std::min(512, n - i);
+        if (est.process(sig.data() + i, take)) {
+            if (est.hasSignal()) angles.push_back(est.phaseAngle());
+        }
+        i += take;
+    }
+
+    ASSERT_GE(angles.size(), 10u) << "no hubo suficientes ventanas para mirar la continuidad";
+
+    double worst = 0.0;
+    for (size_t k = 1; k < angles.size(); ++k) {
+        // El envolvimiento en ±π es legitimo: se descuenta antes de mirar el salto.
+        double d = angles[k] - angles[k - 1];
+        while (d > M_PI) d -= 2.0 * M_PI;
+        while (d < -M_PI) d += 2.0 * M_PI;
+        worst = std::max(worst, std::abs(d));
+    }
+    RecordProperty("worst_angle_step_rad", std::to_string(worst));
+    RecordProperty("expected_step_rad", std::to_string(expectedStep));
+
+    EXPECT_LE(worst, 3.0 * std::abs(expectedStep))
+        << "el angulo salta hasta " << worst << " rad entre ventanas, cuando la "
+           "desafinacion de " << probe << " cent solo justifica " << expectedStep
+        << ": lo que se publica no es la fase de la desafinacion";
+
+    // Y la otra mitad: que se MUEVA. Un angulo clavado tambien es "continuo".
+    EXPECT_GT(worst, 0.1 * std::abs(expectedStep))
+        << "el angulo no se movio: un disco quieto no es un strobe";
+}
+
+/**
+ * Y el angulo gira en el sentido del signo: sostenido y bemol dan rotaciones
+ * opuestas.
+ *
+ * Es el insumo directo de S6 · 6.5. Se verifica acá, en la primitiva, porque acá
+ * es donde el signo nace — alla ya seria heredado.
+ */
+TEST(PhaseSlope, TheAngleTurnsOppositeWaysForSharpAndFlat) {
+    const double target = 110.0;
+
+    auto netRotation = [&](double cents) {
+        PhaseSlopeEstimator est;
+        est.prepare(kRate);
+        est.setTarget(target);
+        const auto sig = pureSine(detune(target, cents), kRate, 2 * kRate);
+
+        double prev = 0.0;
+        bool havePrev = false;
+        double net = 0.0;
+        int i = 0;
+        const int n = static_cast<int>(sig.size());
+        while (i < n) {
+            const int take = std::min(512, n - i);
+            if (est.process(sig.data() + i, take) && est.hasSignal()) {
+                const double a = est.phaseAngle();
+                if (havePrev) {
+                    double d = a - prev;
+                    while (d > M_PI) d -= 2.0 * M_PI;
+                    while (d < -M_PI) d += 2.0 * M_PI;
+                    net += d;
+                }
+                prev = a;
+                havePrev = true;
+            }
+            i += take;
+        }
+        return net;
+    };
+
+    const double sharp = netRotation(+2.0);
+    const double flat  = netRotation(-2.0);
+
+    EXPECT_GT(sharp, 0.0) << "sostenido tiene que girar en el sentido positivo";
+    EXPECT_LT(flat, 0.0)  << "bemol tiene que girar al reves";
+}
+
 }  // namespace
 }  // namespace wma_test
