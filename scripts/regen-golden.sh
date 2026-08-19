@@ -21,19 +21,25 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GOLDEN_DIR="$REPO_ROOT/audio/src/main/cpp/effects/tests/testdata/golden"
+# REQ-001 S2 (2.12): la curva de convergencia del afinador. Vive aparte porque
+# `analysis/` no depende de la libreria de efectos y no puede compartir su
+# harness — pero comparte las reglas, que es lo que importa.
+ANALYSIS_GOLDEN_DIR="$REPO_ROOT/audio/src/main/cpp/analysis/tests/golden"
 
-mkdir -p "$GOLDEN_DIR"
+mkdir -p "$GOLDEN_DIR" "$ANALYSIS_GOLDEN_DIR"
 
-echo "==> Regenerando golden en $GOLDEN_DIR"
+echo "==> Regenerando golden en:"
+echo "      $GOLDEN_DIR"
+echo "      $ANALYSIS_GOLDEN_DIR"
 echo
 
 # Los tests de golden se marcan SKIPPED en modo regeneracion, a proposito: una
 # corrida que ESCRIBE no puede pasar por una corrida que VERIFICA.
-WMA_GOLDEN_REGEN=1 bash "$REPO_ROOT/scripts/run-cpp-tests.sh" -R 'GoldenPresets' "$@"
+WMA_GOLDEN_REGEN=1 bash "$REPO_ROOT/scripts/run-cpp-tests.sh" -R 'GoldenPresets|GoldenPhaseSlope' "$@"
 
 echo
 echo "==> Diff de los golden de respuesta (texto, revisable):"
-git -C "$REPO_ROOT" --no-pager diff --stat -- "$GOLDEN_DIR" || true
+git -C "$REPO_ROOT" --no-pager diff --stat -- "$GOLDEN_DIR" "$ANALYSIS_GOLDEN_DIR" || true
 echo
 echo "==> Ahora VERIFICA que el diff sea el esperado, y recien despues commitealo."
 echo "    Para comprobar que los nuevos golden pasan:"

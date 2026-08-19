@@ -23,11 +23,19 @@ endif()
 add_executable(analysis_tests
     test_analysis_ring.cpp
     test_analysis_thread.cpp
+    test_phase_slope.cpp
+    test_phase_slope_golden.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisThread.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseSlopeEstimator.cpp
 )
 
-target_compile_definitions(analysis_tests PRIVATE WMA_TEST_HOOKS=1)
+target_compile_definitions(analysis_tests PRIVATE
+    WMA_TEST_HOOKS=1
+    # Los golden viven al lado de los tests, no en el build: se commitean, y su
+    # diff es la revision de una recaptura (REQ-001 S2 · 2.12).
+    WMA_ANALYSIS_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden"
+)
 target_include_directories(analysis_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
