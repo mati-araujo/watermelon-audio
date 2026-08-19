@@ -131,6 +131,10 @@ add_subdirectory(looper)
 # Voice system sub-library (Phase 1D: audio lib extraction)
 add_subdirectory(voice)
 
+# watermelon-analysis — el camino del afinador (REQ-001 S1). Depende solo de
+# watermelon-dsp; el motor no sabe que existe un afinador.
+add_subdirectory(analysis)
+
 # Archivos del Audio Graph (Etapa 1)
 set(GRAPH_SOURCES
         nodes/OscillatorNode.cpp
@@ -223,6 +227,7 @@ target_include_directories(watermelon_audio PRIVATE
 
 target_link_libraries(watermelon_audio
         watermelon-voice
+        watermelon-analysis
         watermelon-looper
         watermelon-engines
         watermelon-effects

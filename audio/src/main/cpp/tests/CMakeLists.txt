@@ -11,6 +11,7 @@
 #   looper_tests   — audio/src/main/cpp/looper/tests
 #   usb_tests      — audio/src/main/cpp/usb/tests
 #   core_tests     — audio/src/main/cpp/core/tests
+#   analysis_tests — audio/src/main/cpp/analysis/tests
 #
 # Prefer the wrapper scripts, which locate a host toolchain (MinGW g++ +
 # Ninja) for you:
@@ -146,3 +147,4 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../voice/tests   voice_tests)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../looper/tests  looper_tests)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../usb/tests     usb_tests)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../core/tests    core_tests)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../analysis/tests analysis_tests)

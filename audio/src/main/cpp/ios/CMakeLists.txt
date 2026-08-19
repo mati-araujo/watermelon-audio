@@ -99,6 +99,7 @@ add_subdirectory(${WMA_CPP_ROOT}/effects ${CMAKE_BINARY_DIR}/effects)
 add_subdirectory(${WMA_CPP_ROOT}/engines ${CMAKE_BINARY_DIR}/engines)
 add_subdirectory(${WMA_CPP_ROOT}/looper  ${CMAKE_BINARY_DIR}/looper)
 add_subdirectory(${WMA_CPP_ROOT}/voice   ${CMAKE_BINARY_DIR}/voice)
+add_subdirectory(${WMA_CPP_ROOT}/analysis ${CMAKE_BINARY_DIR}/analysis)
 
 # The full engine as it builds for iOS. Everything the C API needs to stand up
 # an AudioEngine, minus the Android-only I/O (see the exclusions at the top).
@@ -144,7 +145,7 @@ find_library(COREAUDIO_FRAMEWORK    CoreAudio    REQUIRED)
 find_library(FOUNDATION_FRAMEWORK   Foundation   REQUIRED)
 
 target_link_libraries(watermelon-core
-    PUBLIC watermelon-voice watermelon-looper watermelon-engines
+    PUBLIC watermelon-voice watermelon-looper watermelon-engines watermelon-analysis
            watermelon-effects watermelon-dsp tinysoundfont
     PRIVATE ${AVFOUNDATION_FRAMEWORK} ${AUDIOTOOLBOX_FRAMEWORK}
             ${COREAUDIO_FRAMEWORK} ${FOUNDATION_FRAMEWORK}
