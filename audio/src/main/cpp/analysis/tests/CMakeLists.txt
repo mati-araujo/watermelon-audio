@@ -23,8 +23,10 @@ endif()
 add_executable(analysis_tests
     test_analysis_ring.cpp
     test_analysis_thread.cpp
+    test_phase_slope.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisThread.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseSlopeEstimator.cpp
 )
 
 target_compile_definitions(analysis_tests PRIVATE WMA_TEST_HOOKS=1)
