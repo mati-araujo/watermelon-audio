@@ -139,11 +139,17 @@ void McLeodPitch::analyzeWindow() {
     // esta en la ladera del lobulo de τ=0 — o sea justo el candidato que este criterio existe
     // para descartar. A0 volvia a no detectarse.
     double prevValue = 2.0;
-    // LOS DOS arrancan en el centinela, y eso no es redundante: `prevValue` toma el valor de
-    // `pendingValue` en la primera vuelta, asi que inicializar solo uno destruye el centinela
-    // antes de que sirva. Medido: con `pendingValue = 0`, el primer lag muestreado —que en una
-    // nota grave esta en la ladera del lobulo de τ=0— entraba como candidato con NSDF 0,998 y
-    // se lo elegia por ser el primero. A0, B0 y E2 no se detectaban.
+    // EL CENTINELA QUE IMPORTA ES ESTE, no el de arriba. Medido con mutacion (T-AGENT-4,
+    // 2026-08-19): `pendingValue = 0` mata cuatro tests —el primer lag muestreado, que en una
+    // nota grave esta en la ladera del lobulo de τ=0, entra como candidato con NSDF 0,998 y se
+    // lo elige por ser el primero: A0, B0 y E2 no se detectaban—, mientras que `prevValue = 0`
+    // NO mata ninguno.
+    //
+    // Y esa asimetria tiene razon: en la primera vuelta el `if` corta en `pendingLag >= 0`
+    // (vale -1) ANTES de leer `prevValue`, y acto seguido `prevValue` se pisa con
+    // `pendingValue`. O sea que el inicializador de `prevValue` no se lee nunca: quien sostiene
+    // la promesa es el corto-circuito, y el 2.0 de arriba es simetria legible, no defensa.
+    // Se deja —cuesta cero y documenta la intencion— pero NO se lo cuente como guarda.
     double pendingValue = 2.0;
     int pendingLag = -1;
 
