@@ -54,6 +54,7 @@ void AnalysisThread::drainLoop() {
             // es el ultimo lugar donde se podia volver a perder — justo al
             // usarlo.
             mEstimator.prepare(rate);
+            mDetector.prepare(rate);
             mPreparedRate = rate;
             mAppliedTarget = 0.0;      // `prepare()` reinicia: hay que re-aplicar
         }
@@ -89,6 +90,11 @@ void AnalysisThread::drainLoop() {
         // arriba se comparan contra lo ultimo aplicado.
         if (measuring) {
             mEstimator.process(mScratch.data(), got);
+        }
+        // La deteccion gruesa corre SIEMPRE que haya rate, con objetivo o sin el: su trabajo
+        // es justamente decir que nota hay cuando nadie lo sabe todavia.
+        if (mPreparedRate > 0) {
+            mDetector.process(mScratch.data(), got);
         }
 
         float values[kSnapshotValueCount];
@@ -131,6 +137,11 @@ void AnalysisThread::drainLoop() {
                         : kStateMeasuring;
         }
         values[kSnapState] = static_cast<float>(state);
+
+        values[kSnapDetectedHz] = mDetector.hasPitch()
+                                      ? static_cast<float>(mDetector.frequencyHz())
+                                      : 0.0f;
+        values[kSnapDetectionClarity] = static_cast<float>(mDetector.clarity());
 
         mSnapshot.publish(values);
     }

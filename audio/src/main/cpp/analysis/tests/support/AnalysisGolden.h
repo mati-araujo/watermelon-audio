@@ -60,16 +60,29 @@ inline std::string goldenPath(const std::string& name) {
     return std::string(WMA_ANALYSIS_GOLDEN_DIR) + "/" + name + ".resp";
 }
 
+/**
+ * Nombres de las columnas. Se parametrizan porque el mismo formato sirve para dos medidas
+ * distintas —la curva de convergencia (cents/incertidumbre) y la deteccion gruesa
+ * (Hz/claridad)— y un encabezado fijo estaria MINTIENDO en uno de los dos. Un artefacto
+ * commiteado que se lee en un PR no puede tener las columnas cambiadas.
+ */
+struct ColumnNames {
+    const char* x = "segundos";
+    const char* y = "cents";
+    const char* z = "incertidumbreCents";
+};
+
 inline bool writeGolden(const std::string& path, const std::string& name,
                         int sampleRate, int windowFrames,
-                        const std::vector<Sample>& rows) {
+                        const std::vector<Sample>& rows,
+                        const ColumnNames& cols = {}) {
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (f == nullptr) return false;
     std::fprintf(f, "# watermelon-audio golden — analysis/%s (REQ-001 S2)\n", name.c_str());
     std::fprintf(f, "# sampleRate=%d  window=%d  rows=%zu\n",
                  sampleRate, windowFrames, rows.size());
     std::fprintf(f, "# El signo es el del afinador: senal por encima del objetivo = POSITIVO.\n");
-    std::fprintf(f, "# caso\tsegundos\tcents\tincertidumbreCents\n");
+    std::fprintf(f, "# caso\t%s\t%s\t%s\n", cols.x, cols.y, cols.z);
     for (const auto& r : rows) {
         std::fprintf(f, "%s\t%.2f\t%.6f\t%.6f\n",
                      r.label.c_str(), r.seconds, r.cents, r.uncertainty);
@@ -101,11 +114,11 @@ inline bool readGolden(const std::string& path, std::vector<Sample>& rows) {
  * dice "cambio" obliga a reconstruir el diff a mano, y entonces no se lee.
  */
 inline void checkOrRegen(const std::string& name, int sampleRate, int windowFrames,
-                         const std::vector<Sample>& rows) {
+                         const std::vector<Sample>& rows, const ColumnNames& cols = {}) {
     const std::string path = goldenPath(name);
 
     if (regenRequested()) {
-        ASSERT_TRUE(writeGolden(path, name, sampleRate, windowFrames, rows))
+        ASSERT_TRUE(writeGolden(path, name, sampleRate, windowFrames, rows, cols))
             << "No pude escribir " << path;
         GTEST_SKIP() << "REGENERADO (no verificado): " << path;
     }

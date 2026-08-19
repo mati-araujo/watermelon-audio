@@ -28,6 +28,7 @@
 #include "AnalysisRing.h"
 #include "AnalysisSnapshot.h"
 #include "PhaseSlopeEstimator.h"
+#include "../dsp/McLeodPitch.h"
 
 #include <atomic>
 #include <thread>
@@ -131,6 +132,10 @@ private:
     /// El estimador vive ACA y no en el thread de audio: integra fase a lo largo de segundos
     /// y hace regresion, nada de lo cual entra en un deadline de 2,7 ms.
     PhaseSlopeEstimator mEstimator;
+
+    /// Deteccion gruesa: encuentra la altura SIN objetivo. Corre en el mismo thread y no
+    /// depende del estimador — de hecho es al reves: es quien puede darle un objetivo.
+    wma::dsp::McLeodPitch mDetector;
     std::atomic<double> mTargetHz{0.0};
     /// Lo ultimo con lo que se configuro el estimador, para no re-prepararlo por tick:
     /// `prepare()` asigna y `setTarget()` reinicia la integracion.

@@ -688,7 +688,7 @@ WMA_API void wma_input_release(WmaEngine* engine);
  * ================================================================ */
 
 /** Number of floats wma_tuner_get_snapshot() writes. */
-#define WMA_TUNER_SNAPSHOT_VALUES 8
+#define WMA_TUNER_SNAPSHOT_VALUES 10
 
 /**
  * Start the analysis seam: the capture thread begins feeding a lock-free ring,
@@ -756,11 +756,18 @@ WMA_API float wma_tuner_get_target(const WmaEngine* engine);
  *                             3 converged
  *                         [5] cents against target      (NaN until REQ-001 S2)
  *                         [6] phase angle, rad, wrapped (NaN until REQ-001 S2)
- *                         [7] uncertainty               (NaN until REQ-001 S2)
+ *                         [7] uncertainty
+ *                         [8] detected pitch in Hz (0 = no note found)
+ *                         [9] detection clarity, 0..1
  *
- *                         [5]-[7] are NaN and not 0 while no estimator fills
- *                         them: 0.0 cents is a PLAUSIBLE reading (perfectly in
- *                         tune) and a consumer would display it as a measurement.
+ *                         [5]-[7] are NaN — not 0 — whenever there is no target
+ *                         or no measurement yet: 0.0 cents is a PLAUSIBLE reading
+ *                         (perfectly in tune) and a consumer would display it as
+ *                         a measurement.
+ *
+ *                         [8] and [9] come from coarse detection, which needs NO
+ *                         target: that is how a consumer learns which note is
+ *                         being played and picks the target to push back.
  * @return false if there is no analysis seam, if nothing has been published yet,
  *         or if out_values is NULL. The buffer is left UNTOUCHED in that case —
  *         zeros would be a measurement nobody made.

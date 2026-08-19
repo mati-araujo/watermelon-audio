@@ -129,6 +129,9 @@ audio/src/main/cpp/dsp/LFO.cpp::LFO::updatePhaseIncrement
 audio/src/main/cpp/dsp/LevelMeter.h::LevelMeter::process
 audio/src/main/cpp/dsp/LockFreeEventQueue.h::LockFreeEventQueue::pop
 audio/src/main/cpp/dsp/LockFreeEventQueue.h::LockFreeEventQueue::push
+audio/src/main/cpp/dsp/McLeodPitch.cpp::McLeodPitch::analyzeWindow
+audio/src/main/cpp/dsp/McLeodPitch.cpp::McLeodPitch::nsdfAt
+audio/src/main/cpp/dsp/McLeodPitch.cpp::McLeodPitch::process
 audio/src/main/cpp/dsp/NoiseGate.h::NoiseGate::process
 audio/src/main/cpp/dsp/Oversampler.cpp::Oversampler::downsample
 audio/src/main/cpp/dsp/Oversampler.cpp::Oversampler::upsample
@@ -335,8 +338,8 @@ audio/src/main/cpp/nodes/MixerNode.cpp::MixerNode::calculatePanGainRight
 audio/src/main/cpp/nodes/MixerNode.cpp::MixerNode::process
 audio/src/main/cpp/nodes/OscillatorNode.cpp::OscillatorNode::process
 audio/src/main/cpp/oscillators/Oscillators.h::BandLimitedNoiseGenerator::render
-audio/src/main/cpp/oscillators/Oscillators.h::BiquadFilter::process
 audio/src/main/cpp/oscillators/Oscillators.h::NoiseGenerator::render
+audio/src/main/cpp/oscillators/Oscillators.h::OscillatorToneFilter::process
 audio/src/main/cpp/oscillators/Oscillators.h::SawtoothOscillator::render
 audio/src/main/cpp/oscillators/Oscillators.h::SineOscillator::render
 audio/src/main/cpp/oscillators/Oscillators.h::SquareOscillator::render

@@ -16,6 +16,9 @@ add_library(watermelon-dsp STATIC
     # EnvelopeFollower.h — header-only
     # DCBlocker.h — header-only
 
+    # Deteccion de altura (REQ-001 S4)
+    McLeodPitch.cpp
+
     # Delay
     DelayLine.cpp
     StereoTools.cpp

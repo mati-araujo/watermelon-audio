@@ -274,10 +274,20 @@ private:
  *
  * Implementa diferentes tipos de filtros usando la estructura biquad estándar.
  * Thread-safe cuando se usa en un solo thread de audio.
+ *
+ * 🔴 SE LLAMABA `BiquadFilter`, IGUAL QUE `dsp/BiquadFilter.h`, Y LOS DOS EN EL ESPACIO
+ * GLOBAL (renombrado 2026-08-19). Eran dos clases DISTINTAS con el mismo nombre, y no
+ * chocaban sólo porque ninguna unidad de compilación incluía las dos. La primera que lo hizo
+ * —`McLeodPitch`, que usa la de `dsp/`, llegando hasta los tests de la C API— falló a
+ * compilar con "redefinition of 'BiquadFilter'".
+ *
+ * Esta se usa **únicamente dentro de este archivo** (dos miembros, más abajo), así que el
+ * nombre descriptivo cuesta nada y saca la mina del camino. Los efectos, que sí usan la de
+ * `dsp/`, la incluyen explícitamente y no se ven afectados.
  */
-class BiquadFilter {
+class OscillatorToneFilter {
 public:
-    BiquadFilter() : b0(1.0f), b1(0.0f), b2(0.0f), a1(0.0f), a2(0.0f),
+    OscillatorToneFilter() : b0(1.0f), b1(0.0f), b2(0.0f), a1(0.0f), a2(0.0f),
                      z1(0.0f), z2(0.0f) {}
 
     /**
@@ -452,7 +462,7 @@ private:
     uint32_t mRngState;  // Estado del RNG thread-local
     ParameterSmoother mAmpSmoother;
     ParameterSmoother mCenterFreqSmoother;
-    BiquadFilter mFilterL;  // Filtro para canal izquierdo
-    BiquadFilter mFilterR;  // Filtro para canal derecho
+    OscillatorToneFilter mFilterL;  // Filtro para canal izquierdo
+    OscillatorToneFilter mFilterR;  // Filtro para canal derecho
     float mCurrentCenterFreq = 1000.0f;
 };

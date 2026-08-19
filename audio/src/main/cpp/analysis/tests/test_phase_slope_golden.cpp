@@ -21,6 +21,7 @@
 #include "support/SyntheticSignal.h"
 
 #include "PhaseSlopeEstimator.h"
+#include "McLeodPitch.h"
 
 #include <gtest/gtest.h>
 
@@ -109,6 +110,41 @@ TEST(GoldenPhaseSlope, TheConvergenceCurveMatchesItsGolden) {
     ASSERT_EQ(rows.size(), cases().size() * checkpoints().size());
     golden::checkOrRegen("phase_slope_convergence", kRate,
                          PhaseSlopeEstimator::kWindowFrames, rows);
+}
+
+/**
+ * TAREA 4.13. La deteccion gruesa, congelada.
+ *
+ * Un golden de deteccion no mira la exactitud —para eso estan los tests de propiedad, con su
+ * presupuesto de 50 cents— sino la ESTABILIDAD: que un cambio de DSP que mueva la altura
+ * detectada o la claridad se vea en un diff de texto. La claridad es la mas sensible de las
+ * dos y la que primero acusa un cambio en la seleccion de picos.
+ */
+TEST(GoldenPhaseSlope, TheCoarseDetectionMatchesItsGolden) {
+    std::vector<golden::Sample> rows;
+    struct Case { const char* label; double hz; };
+    const Case kCases[] = {
+        {"A0", 27.500}, {"B0", 30.868}, {"E2", 82.407}, {"A2", 110.000},
+        {"D3", 146.832}, {"A4", 440.000}, {"E5", 659.255}, {"C7", 2093.005},
+    };
+
+    for (const auto& c : kCases) {
+        wma::dsp::McLeodPitch mpm;
+        mpm.prepare(kRate);
+        const auto sig = pureSine(c.hz, kRate, kRate);
+        int i = 0;
+        while (i < static_cast<int>(sig.size())) {
+            const int take = std::min(512, static_cast<int>(sig.size()) - i);
+            mpm.process(sig.data() + i, take);
+            i += take;
+        }
+        // `seconds` se reusa como "la frecuencia verdadera", que es lo que hace legible el
+        // diff: cada fila dice contra que se comparo.
+        rows.push_back({std::string(c.label), c.hz, mpm.frequencyHz(), mpm.clarity()});
+    }
+
+    golden::checkOrRegen("coarse_detection", kRate, wma::dsp::McLeodPitch::kWindowFrames, rows,
+                         {"verdaderaHz", "detectadaHz", "claridad"});
 }
 
 // ---------------------------------------------------------------------------
