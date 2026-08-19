@@ -77,6 +77,12 @@ private:
      * `VocoderBank::analyze` durante meses, sacado a la luz al borrarlo en la
      * tanda anterior de esta misma etapa. Ahi lo causaba codigo muerto; aca lo
      * habria causado codigo nuevo.
+     *
+     * Desde entonces eso ya no queda en silencio: `scripts/rt-coverage-baseline.txt`
+     * declara que funciones alcanza el walker y el lint falla si el conjunto
+     * cambia. Renombrar esto a `run` lo pone rojo — verificado con este mismo
+     * archivo. El nombre sigue siendo load-bearing igual: el trinquete avisa,
+     * no arregla.
      */
     void drainLoop(int captureSampleRate);
 
