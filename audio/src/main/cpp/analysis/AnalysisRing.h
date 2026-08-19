@@ -133,6 +133,32 @@ public:
      */
     int read(float* out, int maxFrames) noexcept;
 
+    /**
+     * @brief Estampa el rate al que se esta capturando. RT-SAFE (un store).
+     *
+     * EL RATE VIAJA CON LOS DATOS, Y NO ES CEREMONIA
+     * ----------------------------------------------
+     * El drenador recibia el rate UNA vez, al arrancar, y lo publicaba en cada
+     * snapshot. Eso alcanza mientras nada cambie — pero un cambio de
+     * configuracion de stream (auricular BT que entra, interfaz USB que se
+     * enchufa, Android que baja a 32 kHz) mueve el rate de captura EN CALIENTE,
+     * y el afinador seguiria publicando el viejo. Es la misma clase de defecto
+     * que las tareas 1.16-1.18 sacaron del motor —un rate asumido en vez de
+     * medido— reintroducido un piso mas arriba.
+     *
+     * Estampandolo aca, lo escribe el mismo thread que escribe las muestras, en
+     * el mismo bloque: el rate no puede describir a otras muestras que las que
+     * lo acompañan.
+     */
+    void setCaptureRate(int hz) noexcept {
+        mCaptureRate.store(hz, std::memory_order_relaxed);
+    }
+
+    /// El ultimo rate estampado por el escritor, o 0 si nunca se estampo.
+    int captureRate() const noexcept {
+        return mCaptureRate.load(std::memory_order_relaxed);
+    }
+
     /// Frames que el analisis nunca vio porque el escritor los piso.
     uint64_t droppedFrames() const noexcept { return mDropped.get(); }
 
@@ -187,6 +213,9 @@ private:
     std::unique_ptr<std::atomic<float>[]> mBuffer;
 
     /// La escribe SOLO el thread de captura.
+    /// Ver setCaptureRate(). 0 = nadie lo estampo todavia.
+    std::atomic<int> mCaptureRate{0};
+
     std::atomic<uint64_t> mWritten{0};
     /// La escribe SOLO el thread de analisis.
     std::atomic<uint64_t> mRead{0};

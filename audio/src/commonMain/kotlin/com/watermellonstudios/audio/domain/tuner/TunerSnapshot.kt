@@ -1,0 +1,108 @@
+package com.watermellonstudios.audio.domain.tuner
+
+/**
+ * Una lectura completa del afinador, tomada de una sola vez (REQ-001 S1).
+ *
+ * **Por qué un snapshot y no getters.** Igual que [com.watermellonstudios.audio.domain.input.InputMetering],
+ * por costo de frontera — pero acá hay una razón más fuerte, y es de correctitud:
+ * el motor publica estos valores con un seqlock, así que los ocho salen del
+ * **mismo** tick. Leídos de a uno podrían mezclarse dos mediciones distintas, y
+ * dibujar los cents de un tick con el ángulo de fase del siguiente hace saltar
+ * el disco del strobe.
+ *
+ * **NaN no llega hasta acá.** El motor publica NaN —y no 0— en los campos que
+ * todavía no tienen estimador detrás, porque `0.0` cents es un valor plausible
+ * (afinado exacto) y se dibujaría como una medición. En Kotlin eso se representa
+ * con `null`, que el compilador obliga a considerar. Un consumidor no puede
+ * mostrar una ausencia por descuido.
+ *
+ * @property captureSampleRate Rate al que se CAPTURÓ, medido y no asumido. 0 si
+ *   todavía no hay stream de entrada. Un consumidor que asuma 48000 se equivoca
+ *   hasta por 1902 cents en un stream de 16 kHz.
+ * @property levelRms  RMS lineal de lo analizado en el tick.
+ * @property framesAnalyzed  Frames analizados desde el arranque.
+ * @property droppedFrames   Frames que el análisis nunca vio porque el ring los
+ *   pisó. Si sube sostenidamente, el análisis no llega.
+ * @property state    Ver [TunerState].
+ * @property cents        Desviación contra el objetivo, o null si no hay dato.
+ * @property phaseAngle   Ángulo de fase acumulado en radianes, envuelto a ±π, o
+ *   null. Lo publica el motor ya integrado a propósito: si la app tuviera que
+ *   integrarlo, un frame perdido correría la fase para siempre.
+ * @property uncertainty  Incertidumbre de la medición, o null si no hay dato.
+ */
+data class TunerSnapshot(
+    val captureSampleRate: Int,
+    val levelRms: Float,
+    val framesAnalyzed: Long,
+    val droppedFrames: Long,
+    val state: TunerState,
+    val cents: Float?,
+    val phaseAngle: Float?,
+    val uncertainty: Float?,
+) {
+    companion object {
+        /** Cantidad de floats del snapshot nativo. Espeja `WMA_TUNER_SNAPSHOT_VALUES`. */
+        const val VALUE_COUNT: Int = 8
+
+        /**
+         * Arma el snapshot desde los floats nativos, en el orden que documenta
+         * `wma_tuner_get_snapshot`.
+         *
+         * @return null si el array viene corto — un contrato roto con la capa
+         *   nativa, donde devolver datos a medias sería peor que no devolver nada.
+         */
+        fun fromNative(values: FloatArray): TunerSnapshot? {
+            if (values.size < VALUE_COUNT) return null
+            return TunerSnapshot(
+                captureSampleRate = values[0].toInt(),
+                levelRms = values[1],
+                framesAnalyzed = values[2].toLong(),
+                droppedFrames = values[3].toLong(),
+                state = TunerState.fromNative(values[4]),
+                cents = values[5].takeIf { !it.isNaN() },
+                phaseAngle = values[6].takeIf { !it.isNaN() },
+                uncertainty = values[7].takeIf { !it.isNaN() },
+            )
+        }
+    }
+}
+
+/**
+ * En qué punto está la medición. Espeja `wma::analysis::SnapshotState`.
+ *
+ * Los cuatro estados son distintos para el usuario: "no llega señal" pide
+ * revisar el cable, "no engancha" pide tocar más fuerte o más limpio, y
+ * "midiendo" es un spinner, no un error.
+ */
+enum class TunerState {
+    /** No llega nada por encima del piso de ruido. */
+    NO_SIGNAL,
+
+    /** Hay señal, pero el estimador no enganchó una altura. */
+    NO_LOCK,
+
+    /** Midiendo, todavía sin converger. */
+    MEASURING,
+
+    /** La incertidumbre bajó del umbral declarado. */
+    CONVERGED,
+
+    /**
+     * El motor publicó un estado que esta versión de la librería no conoce.
+     *
+     * No se colapsa a `NO_SIGNAL`: un valor desconocido no es la ausencia de
+     * señal, y taparlo con el estado más benigno haría que una versión nueva del
+     * motor se vea como un afinador roto sin decir por qué.
+     */
+    UNKNOWN;
+
+    companion object {
+        fun fromNative(value: Float): TunerState = when (value.toInt()) {
+            0 -> NO_SIGNAL
+            1 -> NO_LOCK
+            2 -> MEASURING
+            3 -> CONVERGED
+            else -> UNKNOWN
+        }
+    }
+}

@@ -11,6 +11,7 @@ import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.input.InputMetering
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
+import com.watermellonstudios.audio.domain.tuner.TunerSnapshot
 import com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
 import cnames.structs.WmaEngine
 import com.watermellonstudios.audio.internal.cinterop.*
@@ -519,6 +520,28 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun getMonitoringVolume(): Float = wma_input_get_monitoring_volume(engine)
 
     override fun releaseInputNodeSync() = wma_input_release(engine)
+
+    // ==================== TUNER (REQ-001 S1) ====================
+
+    override fun startTunerSync(): Boolean = wma_tuner_start(engine)
+
+    override fun stopTunerSync() = wma_tuner_stop(engine)
+
+    override fun isTunerRunning(): Boolean = wma_tuner_is_running(engine)
+
+    /**
+     * @return null si no hay análisis o si todavía no se publicó nada, que es
+     *   **distinto** de "todo en cero". `wma_tuner_get_snapshot` deja el buffer
+     *   intacto cuando falla, justamente para que nadie lea ceros como una
+     *   medición; devolver null preserva esa distinción hasta arriba de todo.
+     */
+    override fun getTunerSnapshot(): FloatArray? = memScoped {
+        val values = allocArray<FloatVar>(TunerSnapshot.VALUE_COUNT)
+        if (!wma_tuner_get_snapshot(engine, values)) {
+            return@memScoped null
+        }
+        FloatArray(TunerSnapshot.VALUE_COUNT) { values[it] }
+    }
 
     // ==================== BACKEND ====================
 

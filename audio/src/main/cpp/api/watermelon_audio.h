@@ -684,6 +684,66 @@ WMA_API float wma_input_get_monitoring_volume(const WmaEngine* engine);
 WMA_API void wma_input_release(WmaEngine* engine);
 
 /* ================================================================
+ * 12b. Tuner analysis (REQ-001 S1)
+ * ================================================================ */
+
+/** Number of floats wma_tuner_get_snapshot() writes. */
+#define WMA_TUNER_SNAPSHOT_VALUES 8
+
+/**
+ * Start the analysis seam: the capture thread begins feeding a lock-free ring,
+ * and a thread of its own drains it and publishes snapshots.
+ *
+ * Idempotent. Creates the input node if it does not exist yet, because there is
+ * nothing to analyse without one.
+ *
+ * @return false if the seam could not be created or there is no engine. This
+ *         returns bool rather than void on purpose: a void here would make a
+ *         failure indistinguishable from success on the other side of the
+ *         language boundary, which this codebase has already shipped once.
+ */
+WMA_API bool wma_tuner_start(WmaEngine* engine);
+
+/**
+ * Stop draining. The capture thread stops being handed work immediately; the
+ * ring and the last snapshot stay alive and readable.
+ */
+WMA_API void wma_tuner_stop(WmaEngine* engine);
+
+/** True while the drain thread is running. */
+WMA_API bool wma_tuner_is_running(const WmaEngine* engine);
+
+/**
+ * Read the whole analysis result in one call.
+ *
+ * One boundary crossing per tick, like wma_input_get_metering_snapshot() — but
+ * with a guarantee that one does not make: these values are all from the SAME
+ * publish. The metering snapshot reads seven independent atomics, so its values
+ * can come from different moments; for a level meter that is fine, for a tuner
+ * it is not (showing this tick's cents with next tick's phase angle makes the
+ * strobe disc jump).
+ *
+ * @param[out] out_values  WMA_TUNER_SNAPSHOT_VALUES floats, in this order:
+ *                         [0] capture sample rate (Hz, as measured)
+ *                         [1] RMS level of the analysed block, linear
+ *                         [2] frames analysed since start
+ *                         [3] frames dropped (the ring overwrote them)
+ *                         [4] state: 0 no signal, 1 no lock, 2 measuring,
+ *                             3 converged
+ *                         [5] cents against target      (NaN until REQ-001 S2)
+ *                         [6] phase angle, rad, wrapped (NaN until REQ-001 S2)
+ *                         [7] uncertainty               (NaN until REQ-001 S2)
+ *
+ *                         [5]-[7] are NaN and not 0 while no estimator fills
+ *                         them: 0.0 cents is a PLAUSIBLE reading (perfectly in
+ *                         tune) and a consumer would display it as a measurement.
+ * @return false if there is no analysis seam, if nothing has been published yet,
+ *         or if out_values is NULL. The buffer is left UNTOUCHED in that case —
+ *         zeros would be a measurement nobody made.
+ */
+WMA_API bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values);
+
+/* ================================================================
  * 13. Dual Touch
  * ================================================================ */
 

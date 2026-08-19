@@ -44,12 +44,20 @@
 
 #if defined(WMA_TEST_HOOKS)
 #include <thread>
-/// Definidas en AnalysisThread.cpp. Ver la compuerta en publish().
-extern std::atomic<bool> gSnapshotHoldMidPublish;
-extern std::atomic<bool> gSnapshotIsMidPublish;
+/**
+ * Las compuertas de los tests. Ver publish() y read().
+ *
+ * `inline` y NO definidas en un .cpp: el codigo que las usa vive en este header,
+ * asi que entra en cualquier TU que se compile con `WMA_TEST_HOOKS` — incluida
+ * `watermelon_audio.cpp` en `core_tests`, que no linkea el .cpp del thread.
+ * Con las definiciones del otro lado, ese target no linkeaba: el header traia
+ * las referencias y el archivo que las definia estaba compilado SIN hooks.
+ */
+inline std::atomic<bool> gSnapshotHoldMidPublish{false};
+inline std::atomic<bool> gSnapshotIsMidPublish{false};
 /// La segunda compuerta, del lado del LECTOR. Ver la nota en read().
-extern std::atomic<bool> gSnapshotHoldMidRead;
-extern std::atomic<bool> gSnapshotIsMidRead;
+inline std::atomic<bool> gSnapshotHoldMidRead{false};
+inline std::atomic<bool> gSnapshotIsMidRead{false};
 #endif
 
 namespace wma::analysis {

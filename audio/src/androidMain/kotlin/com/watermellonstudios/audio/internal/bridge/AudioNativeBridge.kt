@@ -1566,6 +1566,50 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override fun getInputMeteringSnapshot(): FloatArray? = nativeGetInputMeteringSnapshot()
 
+    // ==================== Tuner analysis (REQ-001 S1) ====================
+
+    /**
+     * Arranca el análisis del afinador. Idempotente, y NO enciende el monitoreo.
+     *
+     * @return false si no se pudo — sin motor o sin nodo de entrada.
+     */
+    override fun startTunerSync(): Boolean = nativeStartTuner()
+
+    /** Para de analizar. El último snapshot sigue siendo legible. */
+    override fun stopTunerSync() = nativeStopTuner()
+
+    override fun isTunerRunning(): Boolean = nativeIsTunerRunning()
+
+    /**
+     * Los ocho valores del snapshot, todos del mismo tick.
+     *
+     * @return null si no hay análisis o si no se publicó nada todavía. **Null no
+     *   es "todo en cero"**: la C API deja el buffer intacto cuando falla para
+     *   que nadie lea ceros como una medición, y esta firma preserva la
+     *   distinción hasta arriba.
+     */
+    override fun getTunerSnapshot(): FloatArray? = nativeGetTunerSnapshot()
+
+    /**
+     * Variante suspend, bajo la categoría INPUT — la misma que el resto del
+     * camino de captura, porque arrancar el afinador puede abrir el stream de
+     * entrada y eso no puede correr en paralelo con quien lo esté cerrando.
+     */
+    suspend fun startTuner(): Result<Unit> =
+        concurrency.guarded(BridgeConcurrency.Category.INPUT, "startTuner") {
+            if (nativeStartTuner()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(IllegalStateException("no se pudo arrancar el analisis del afinador"))
+            }
+        }
+
+    suspend fun stopTuner(): Result<Unit> =
+        concurrency.guarded(BridgeConcurrency.Category.INPUT, "stopTuner") {
+            nativeStopTuner()
+            Result.success(Unit)
+        }
+
     /**
      * Release input node resources.
      */
@@ -1907,6 +1951,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeIsNoiseGateOpen(): Boolean
     private external fun nativeGetInputLatencyMs(): Float
     private external fun nativeGetInputMeteringSnapshot(): FloatArray?
+
+    // ==================== Native Methods: Tuner (REQ-001 S1) ====================
+
+    private external fun nativeStartTuner(): Boolean
+    private external fun nativeStopTuner()
+    private external fun nativeIsTunerRunning(): Boolean
+    private external fun nativeGetTunerSnapshot(): FloatArray?
     private external fun nativeReleaseInputNode()
 
     // ==================== Native Methods: Monitoring ====================

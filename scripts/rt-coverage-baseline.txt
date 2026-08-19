@@ -25,6 +25,7 @@
 # Formato:  <archivo>::<funcion>[ x<N>]   (N = definiciones alcanzadas, si >1)
 # ---------------------------------------------------------------------------
 
+audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::setCaptureRate
 audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::writeStereo
 audio/src/main/cpp/backends/DriftResampler.cpp::DriftResampler::process
 audio/src/main/cpp/backends/OboeBackend.cpp::OboeBackend::onAudioReady

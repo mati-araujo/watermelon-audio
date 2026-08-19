@@ -72,6 +72,61 @@ TEST_F(CaptureSampleRateTest, AStreamConfigChangeReachesTheInputNode) {
 }
 
 /**
+ * 1.16, el caso que faltaba: un nodo que se engancha DESPUES del cambio.
+ *
+ * `onStreamConfigChanged` le avisa al nodo que estaba puesto en ese momento, y
+ * el aviso no se repite. El afinador engancha el suyo cuando el usuario abre el
+ * afinador —minutos despues de que el stream se negocio— asi que por ese camino
+ * nacia sin rate y publicaba `0` en cada snapshot. Salio midiendo el cruce de la
+ * C API, no leyendo: por eso la fixture de arriba no lo veia.
+ */
+TEST_F(CaptureSampleRateTest, ANodeAttachedAfterTheConfigChangeStillLearnsTheRate) {
+    watermelon_audio::StreamInfo info{};
+    info.sampleRate = kNegotiated;
+    info.channelCount = 2;
+    mEngine->onStreamConfigChanged(info);      // todavia no hay nodo enganchado
+
+    auto late = std::make_shared<InputNode>();
+    late->prepare(48000, 4096);
+    ASSERT_EQ(late->getCaptureSampleRate(), 0) << "punto de partida";
+
+    mEngine->setInputNode(late);
+
+    EXPECT_EQ(late->getCaptureSampleRate(), kNegotiated)
+        << "el nodo se engancho despues del aviso y nadie se lo repitio: "
+           "todo lo que mida queda escalado por 48000/" << kNegotiated;
+
+    mEngine->setInputNode(nullptr);
+}
+
+/**
+ * Y el motor NO le pisa el rate a un nodo que ya sabe uno.
+ *
+ * El nodo de USB lo recibe del driver, directo, y ahi el nodo sabe mas que el
+ * motor. Sin esta mitad, el test de arriba se cumpliria con un `setInputNode()`
+ * que sobrescribe siempre — y eso romperia justo el caso principal del
+ * afinador, la guitarra por interfaz USB.
+ */
+TEST_F(CaptureSampleRateTest, AttachingDoesNotOverwriteARateTheNodeAlreadyKnows) {
+    watermelon_audio::StreamInfo info{};
+    info.sampleRate = kNegotiated;
+    info.channelCount = 2;
+    mEngine->onStreamConfigChanged(info);
+
+    constexpr int kUsbRate = 96000;            // ni 48000 ni el negociado
+    auto usb = std::make_shared<InputNode>();
+    usb->prepare(48000, 4096);
+    usb->setCaptureSampleRate(kUsbRate);       // el driver ya le dijo la verdad
+
+    mEngine->setInputNode(usb);
+
+    EXPECT_EQ(usb->getCaptureSampleRate(), kUsbRate)
+        << "el motor le piso al nodo un rate que el nodo conocia mejor";
+
+    mEngine->setInputNode(nullptr);
+}
+
+/**
  * 1.17 — el accesor tiene que decir la verdad, o no llamarse asi.
  *
  * `getStreamSampleRate()` devolvia `mSampleRate`, o sea el rate con el que se

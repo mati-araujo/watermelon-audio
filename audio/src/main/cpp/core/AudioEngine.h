@@ -1003,6 +1003,16 @@ private:
     std::atomic<bool> mHasInputStreamConfig{false};
     std::atomic<int> mLastInputSampleRate{0};
 
+    /// El rate de captura que informo el backend, guardado POR EL MOTOR y no
+    /// solo empujado al nodo.
+    ///
+    /// Hace falta porque el nodo puede llegar DESPUES del cambio de config: el
+    /// afinador engancha el suyo cuando el usuario abre el afinador, que es
+    /// mucho despues de que el stream se negocio. Sin esto, ese nodo nace
+    /// diciendo "no se a que rate capturo" y no hay nada que se lo diga hasta
+    /// el proximo cambio de configuracion — que puede no llegar nunca.
+    std::atomic<int> mCaptureStreamSampleRate{0};
+
     // ========== DUAL TOUCH SUPPORT (Phase 1E — delegated to DualTouchManager) ==========
     DualTouchManager mDualTouch;
 

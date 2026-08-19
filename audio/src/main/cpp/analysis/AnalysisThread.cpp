@@ -4,13 +4,6 @@
 #include <cmath>
 #include <limits>
 
-#if defined(WMA_TEST_HOOKS)
-std::atomic<bool> gSnapshotHoldMidPublish{false};
-std::atomic<bool> gSnapshotIsMidPublish{false};
-std::atomic<bool> gSnapshotHoldMidRead{false};
-std::atomic<bool> gSnapshotIsMidRead{false};
-#endif
-
 namespace wma::analysis {
 
 namespace {
@@ -25,7 +18,14 @@ void AnalysisThread::start(int captureSampleRate) {
     if (mRunning.exchange(true, std::memory_order_acq_rel)) {
         return;   // ya estaba corriendo
     }
-    mThread = std::thread([this, captureSampleRate] { drainLoop(captureSampleRate); });
+    // El rate que llega aca es la SEMILLA: describe lo que se sabia al
+    // arrancar. La fuente viva es el estampado del escritor, que viaja con las
+    // muestras (ver AnalysisRing::setCaptureRate). Sembrar el ring en vez de
+    // guardar una copia propia deja UNA sola fuente de verdad.
+    if (captureSampleRate > 0 && mRing.captureRate() <= 0) {
+        mRing.setCaptureRate(captureSampleRate);
+    }
+    mThread = std::thread([this] { drainLoop(); });
 }
 
 void AnalysisThread::stop() {
@@ -36,8 +36,7 @@ void AnalysisThread::stop() {
     if (mThread.joinable()) mThread.join();
 }
 
-void AnalysisThread::drainLoop(int captureSampleRate) {
-    const float rate = static_cast<float>(captureSampleRate);
+void AnalysisThread::drainLoop() {
     const float nan = std::numeric_limits<float>::quiet_NaN();
 
     while (mRunning.load(std::memory_order_acquire)) {
@@ -57,8 +56,10 @@ void AnalysisThread::drainLoop(int captureSampleRate) {
         const float rms = static_cast<float>(std::sqrt(sumSq / got));
         mFramesAnalyzed += static_cast<uint64_t>(got);
 
+        // Se lee POR TICK, no una vez: es lo unico que hace que un cambio de
+        // rate en caliente aparezca en el snapshot siguiente.
         float values[kSnapshotValueCount];
-        values[kSnapCaptureSampleRate] = rate;
+        values[kSnapCaptureSampleRate] = static_cast<float>(mRing.captureRate());
         values[kSnapLevelRms]          = rms;
         values[kSnapFramesAnalyzed]    = static_cast<float>(mFramesAnalyzed);
         values[kSnapDroppedFrames]     = static_cast<float>(mRing.droppedFrames());

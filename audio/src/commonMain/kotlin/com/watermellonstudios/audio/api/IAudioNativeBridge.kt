@@ -26,6 +26,7 @@ interface IAudioNativeBridge :
     IEffectStateProvider,
     IEffectStateWriter,
     IInputBridge,
+    ITunerBridge,
     IArpeggiatorBridge,
     ISoundFontBridge,
     ILooperBridge {

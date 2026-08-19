@@ -49,6 +49,11 @@ public:
     AnalysisThread& operator=(const AnalysisThread&) = delete;
 
     /// Arranca. Idempotente: llamarlo dos veces no crea dos threads.
+    ///
+    /// `captureSampleRate` es una SEMILLA para el caso en que todavia no haya
+    /// entrado un bloque: el rate que se publica sale del estampado del
+    /// escritor (`AnalysisRing::setCaptureRate`), que viaja con las muestras y
+    /// por eso sigue los cambios de configuracion en caliente.
     void start(int captureSampleRate);
 
     /// Para y JUNTA el thread. Idempotente, y llamable desde el destructor.
@@ -84,7 +89,7 @@ private:
      * archivo. El nombre sigue siendo load-bearing igual: el trinquete avisa,
      * no arregla.
      */
-    void drainLoop(int captureSampleRate);
+    void drainLoop();
 
     AnalysisRing& mRing;
     AnalysisSnapshot& mSnapshot;

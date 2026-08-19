@@ -1,8 +1,8 @@
 # Cobertura C API vs JNI — WA-0.1
 
 **Requerimiento:** `docs/kmp/kmp_requirements.md` § 5, WA-0.1
-**Actualizado:** 2026-07-27 (ronda de unificación: se recontó todo contra el árbol, no contra
-la corrida anterior) · **Reproducible con:** `python3 scripts/c-api-gap.py`
+**Actualizado:** 2026-08-19 (REQ-001 S1: entran las 4 del afinador, `wma_tuner_*`, y se
+recuenta contra el árbol) · **Reproducible con:** `python3 scripts/c-api-gap.py`
 
 ---
 
@@ -57,14 +57,14 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 
 | Métrica | Valor |
 |---|---|
-| JNIEXPORT (entry points) | 279 |
-| Funciones `wma_*` | 252 |
-| Cubiertas (match exacto) | 193 |
+| JNIEXPORT (entry points) | 284 |
+| Funciones `wma_*` | 259 |
+| Cubiertas (match exacto) | 198 |
 | **Gap total** | **86** |
 | — USB, no se porta (D4) | 32 |
 | — **Gap portable** | **54** |
 | — con near-match (revisar) | 37 |
-| — **neto a implementar** | **~19** |
+| — **neto a implementar** | **~17** |
 
 ### Gap portable por categoría
 
@@ -182,18 +182,18 @@ eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
 función JNI.
 
 ```
-WA-2.6 — JNI delegando: 237/278      (240/289 contando los 4 archivos JNI)
+WA-2.6 — JNI delegando: 243/284
 ```
 
 | Categoría (heurística del script) | Delegan |
 |---|---|
 | Looper | 77/79 |
-| Otros | 25/27 |
+| Otros | 28/30 |
 | Input / monitor | 21/21 |
 | Oscillator / synth | 21/21 |
 | Voice / polyphony | 18/18 |
 | Effects | 16/16 |
-| Engine / lifecycle | 14/14 |
+| Engine / lifecycle | 16/16 |
 | Analysis | 13/13 |
 | Mode transitions | 12/12 |
 | Metronome | 11/11 |
@@ -202,7 +202,7 @@ WA-2.6 — JNI delegando: 237/278      (240/289 contando los 4 archivos JNI)
 | Mixer / Regions | 1/1 |
 | USB (Android-only) | 0/36 |
 
-**Las 237 son las diez categorías más la cola de 15.** Ojo con leer esta tabla como
+**Las 243 son las diez categorías más la cola.** Ojo con leer esta tabla como
 progreso por categoría: migrar la cola movió filas que nadie tocó —
 `Mode transitions` pasó de 10/12 a 12/12 y `Benchmark / diagnostics` de 2/6 a 5/6—
 simplemente porque `SetRoutingMode` lleva `mode` en el nombre y `DrainCapturedLogs`

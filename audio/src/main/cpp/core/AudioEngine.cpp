@@ -2320,6 +2320,7 @@ void AudioEngine::onStreamConfigChanged(const watermelon_audio::StreamInfo& newI
     // Solo si NADIE informo la config del stream de entrada. En un backend
     // partido el de entrada manda, y este `sampleRate` es el de SALIDA.
     if (!mHasInputStreamConfig.load(std::memory_order_acquire)) {
+        mCaptureStreamSampleRate.store(sampleRate, std::memory_order_relaxed);
         std::lock_guard<std::mutex> lock(mInputNodeMutex);
         if (mInputNode) mInputNode->setCaptureSampleRate(sampleRate);
     }
@@ -2334,6 +2335,7 @@ void AudioEngine::onInputStreamConfigChanged(const watermelon_audio::StreamInfo&
          newInfo.sampleRate, newInfo.channelCount);
 
     mHasInputStreamConfig.store(true, std::memory_order_release);
+    mCaptureStreamSampleRate.store(newInfo.sampleRate, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(mInputNodeMutex);
         if (mInputNode) mInputNode->setCaptureSampleRate(newInfo.sampleRate);
@@ -2381,6 +2383,16 @@ void AudioEngine::setInputNode(std::shared_ptr<InputNode> inputNode) {
         std::lock_guard<std::mutex> lock(mInputNodeMutex);
         previous = std::move(mInputNode);
         mInputNode = std::move(inputNode);
+        // Un nodo que se engancha DESPUES del cambio de config se perdio el
+        // aviso, y nadie se lo repite: `onStreamConfigChanged` solo toca al que
+        // estaba puesto en ese momento. Es el caso normal del afinador, que
+        // engancha el suyo cuando el usuario lo abre. Se le dice aca, y solo si
+        // no sabia — un nodo que ya tiene rate (USB, que lo recibe directo del
+        // driver) sabe mas que el motor.
+        const int known = mCaptureStreamSampleRate.load(std::memory_order_relaxed);
+        if (mInputNode && known > 0 && mInputNode->getCaptureSampleRate() <= 0) {
+            mInputNode->setCaptureSampleRate(known);
+        }
         // 1. Publicar. release: el objeto está completamente construido antes.
         mInputNodeRt.store(mInputNode.get(), std::memory_order_release);
     }

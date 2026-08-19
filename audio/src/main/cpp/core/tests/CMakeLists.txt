@@ -141,6 +141,7 @@ add_executable(core_tests
     test_c_api_voice.cpp
     test_c_api_mode.cpp
     test_c_api_analysis.cpp
+    test_c_api_tuner.cpp
     test_c_api_transport.cpp
     test_c_api_diagnostics.cpp
     test_c_api_looper.cpp
