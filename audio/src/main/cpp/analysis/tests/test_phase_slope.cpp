@@ -444,6 +444,46 @@ TEST(PhaseSlope, AnAbruptNoteChangeRaisesTheUncertaintyBeforeTheErrorSettles) {
         << est.uncertaintyCents() << "): la app no tiene como ver la transicion";
 }
 
+/**
+ * Despues de un SILENCIO, el estimador vuelve a medir de cero — no arrastra la
+ * fase ni los puntos de regresion de antes del silencio.
+ *
+ * ES EL CICLO NORMAL DE UN AFINADOR: se pulsa, la nota se apaga, se vuelve a
+ * pulsar. Si el hilo de fase no se corta, la ventana de regresion queda con
+ * puntos de los dos lados de un hueco temporal —donde la fase no significaba
+ * nada— y la recta que salga de ahi no describe a ninguna de las dos notas.
+ *
+ * ESTE TEST EXISTE PORQUE UN MUTANTE SOBREVIVIO. Al borrar el corte
+ * (`mHavePrevPhase = false; mCount = 0;`) los 15 tests seguian verdes: nada
+ * cubria la recuperacion. Se probaba que el estimador DETECTA el silencio, no
+ * que se recupera de el.
+ */
+TEST(PhaseSlope, ItStartsOverAfterASilenceInsteadOfBridgingAcrossIt) {
+    const double target = 110.0;
+
+    PhaseSlopeEstimator est;
+    est.prepare(kRate);
+    est.setTarget(target);
+
+    // Primera nota: +1 cent, dos segundos.
+    feed(est, pureSine(detune(target, +1.0), kRate, 2 * kRate), 512);
+    ASSERT_TRUE(est.hasMeasurement());
+    ASSERT_NEAR(est.cents(), +1.0, kToleranceCents);
+
+    // Se apaga. Un segundo entero por debajo del piso.
+    const std::vector<float> silence(static_cast<size_t>(kRate), 0.0f);
+    feed(est, silence, 512);
+    ASSERT_FALSE(est.hasSignal());
+
+    // Se vuelve a pulsar, y ahora la cuerda esta al OTRO lado del objetivo.
+    feed(est, pureSine(detune(target, -2.0), kRate, 3 * kRate), 512);
+
+    ASSERT_TRUE(est.hasMeasurement()) << "no volvio a medir despues del silencio";
+    EXPECT_NEAR(est.cents(), -2.0, kToleranceCents)
+        << "tras el silencio leyo " << est.cents()
+        << " en vez de -2: quedaron puntos de la nota anterior en la regresion";
+}
+
 // ---------------------------------------------------------------------------
 // 2.11c — el angulo del strobe (AC-001.22, cuyo dueño es S6)
 // ---------------------------------------------------------------------------
