@@ -96,31 +96,54 @@ protected:
      * CoreAudioBackend and the USB backend do — inputData non-null on
      * onAudioReady().
      *
-     * This is the only road to MIX-mode monitoring from the host suite. With the
-     * oscillator enabled the engine hands those frames to
-     * InputNode::feedExternalInput(), and the InputNode double moves them
-     * through the real monitoring ring so handleMixMonitoring() has something to
-     * sum. See test_input_node_stub.cpp for what that double does and does not
-     * model.
+     * This is the only road to MIX-mode monitoring from the host suite: the
+     * engine hands those frames to InputNode::feedExternalInput(), which runs
+     * the real input DSP and fills the monitoring ring that
+     * handleMixMonitoring() sums.
      *
-     * @param inputSample constant value written to every input sample. DC is
-     *        fine and deliberate: the monitored signal never meets the DC
-     *        blocker (that one runs on the instrument bus, upstream), so a
-     *        constant is the easiest thing to read a level off.
+     * EL ESTIMULO ES UN SENO, Y ANTES ERA DC — LA RAZON IMPORTA
+     * ---------------------------------------------------------
+     * Esta fixture llenaba el buffer de entrada con un valor CONSTANTE, y lo
+     * justificaba asi: *"DC is fine and deliberate: the monitored signal never
+     * meets the DC blocker (that one runs on the instrument bus, upstream)"*.
+     *
+     * Eso es FALSO y ahora esta medido. `InputNode::processInputBlock` corre su
+     * PROPIO `mDCBlocker` sobre la senal monitoreada — hay dos DC blockers en el
+     * motor, no uno. Con el `InputNode` real, 20 bloques de DC a 0,2 salen del
+     * ring en **0,0083 y bajando**; el mismo nivel como seno sale en **0,2002**.
+     * O sea que el estimulo viejo medía una senal que en un device no puede
+     * existir.
+     *
+     * No se notaba porque la suite sustituia `InputNode.cpp` por un doble que
+     * copiaba el buffer sin DSP: el doble devolvia lo conveniente y la creencia
+     * falsa quedo escrita como justificacion.
+     *
+     * POR QUE 187,5 Hz Y NO UNA FRECUENCIA CUALQUIERA
+     * -----------------------------------------------
+     * A 48 kHz entra EXACTAMENTE un ciclo en un bloque de 256 frames, y la
+     * muestra 64 cae justo en el pico. Con eso el pico por bloque es igual a la
+     * amplitud pedida, identico en todos los bloques, y las razones de nivel que
+     * miden los tests no dependen de donde cayo el corte del buffer. Con una
+     * frecuencia arbitraria el pico bailaria unos puntos porcentuales por
+     * alineacion de fase — ruido que no dice nada sobre el master bus.
+     *
+     * @param inputAmplitude amplitud del seno, no el valor de la muestra.
      */
-    void renderWithInput(int blocks, int framesPerBlock, float inputSample) {
+    void renderWithInput(int blocks, int framesPerBlock, float inputAmplitude) {
         std::vector<float> out(static_cast<size_t>(framesPerBlock) * 2, 0.0f);
-        std::vector<float> in(static_cast<size_t>(framesPerBlock) * 2, inputSample);
+        std::vector<float> in(static_cast<size_t>(framesPerBlock) * 2, 0.0f);
         for (int i = 0; i < blocks; ++i) {
+            fillInput(in, framesPerBlock, inputAmplitude);
             std::fill(out.begin(), out.end(), 0.0f);
             mWma->engine->onAudioReady(out.data(), in.data(), framesPerBlock);
         }
     }
 
     /// renderWithInput() for one block, returning the loudest OUTPUT sample.
-    float renderBlockPeakWithInput(int framesPerBlock, float inputSample) {
+    float renderBlockPeakWithInput(int framesPerBlock, float inputAmplitude) {
         std::vector<float> out(static_cast<size_t>(framesPerBlock) * 2, 0.0f);
-        std::vector<float> in(static_cast<size_t>(framesPerBlock) * 2, inputSample);
+        std::vector<float> in(static_cast<size_t>(framesPerBlock) * 2, 0.0f);
+        fillInput(in, framesPerBlock, inputAmplitude);
         mWma->engine->onAudioReady(out.data(), in.data(), framesPerBlock);
         float peak = 0.0f;
         for (float sample : out) {
@@ -129,6 +152,41 @@ protected:
         return peak;
     }
 
+    /// renderWithInput() para un bloque, devolviendo el RMS del canal L de la
+    /// SALIDA. Existe porque el medidor del motor publica RMS: comparar RMS
+    /// contra PICO solo da lo mismo si la senal es constante, y dejo de serlo.
+    float renderBlockRmsWithInput(int framesPerBlock, float inputAmplitude) {
+        std::vector<float> out(static_cast<size_t>(framesPerBlock) * 2, 0.0f);
+        std::vector<float> in(static_cast<size_t>(framesPerBlock) * 2, 0.0f);
+        fillInput(in, framesPerBlock, inputAmplitude);
+        mWma->engine->onAudioReady(out.data(), in.data(), framesPerBlock);
+        double sum = 0.0;
+        for (int f = 0; f < framesPerBlock; ++f) {
+            const double v = out[static_cast<size_t>(f) * 2];
+            sum += v * v;
+        }
+        return static_cast<float>(std::sqrt(sum / framesPerBlock));
+    }
+
+private:
+    /// Seno de kInputToneHz, con la fase CONTINUA entre bloques: un salto de
+    /// fase en el borde seria un transitorio que el DSP de entrada veria como
+    /// senal, y es justo el artefacto que este archivo acaba de dejar de tener.
+    void fillInput(std::vector<float>& in, int framesPerBlock, float amplitude) {
+        for (int f = 0; f < framesPerBlock; ++f) {
+            const float v = static_cast<float>(amplitude * std::sin(mInputPhase));
+            mInputPhase += 2.0 * M_PI * kInputToneHz / kInputToneRate;
+            if (mInputPhase >= 2.0 * M_PI) mInputPhase -= 2.0 * M_PI;
+            in[static_cast<size_t>(f) * 2] = v;
+            in[static_cast<size_t>(f) * 2 + 1] = v;
+        }
+    }
+
+    static constexpr double kInputToneHz = 187.5;
+    static constexpr double kInputToneRate = 48000.0;
+    double mInputPhase = 0.0;
+
+protected:
     WmaEngine* mWma = nullptr;
     FakeAudioBackend* mBackend = nullptr;
 };

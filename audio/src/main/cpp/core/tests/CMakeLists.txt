@@ -10,15 +10,33 @@
 # will use on iOS. The legacy direct-Oboe path is Android-only by construction
 # (WMA_HAS_OBOE) and stays out of host scope.
 #
-# TWO SOURCES ARE SUBSTITUTED, both under support/ and both marked as stubs:
+# ONE SOURCE IS SUBSTITUTED, under support/ and marked as a stub:
 #
 #   backends/PlatformBackends.cpp -> support/test_platform_backends.cpp
 #       Hands BackendManager a FakeAudioBackend. The real file returns nullptr
 #       off Android, which leaves nothing able to report a running stream.
 #
-#   nodes/InputNode.cpp           -> support/test_input_node_stub.cpp
-#       Does not compile on the host (its capture adapter inherits from
-#       oboe::AudioStreamDataCallback). Link-time bodies only, no behaviour.
+# `nodes/InputNode.cpp` USED TO BE THE SECOND, and is not anymore.
+#
+# The comment that justified it said the file "does not compile on the host (its
+# capture adapter inherits from oboe::AudioStreamDataCallback)". That stopped
+# being true in WA-2.0 / WA-2.2 (`0ba3d25`, `cdd75e4`), which moved every Oboe
+# dependency behind `#if defined(__ANDROID__)` — the file compiles clean on the
+# host and has for months. The same comment also called the double "link-time
+# bodies only, no behaviour", and that was stale in the OPPOSITE direction: the
+# double had been deliberately extended twice, once with a real monitoring ring
+# and once with the WD-1.3 observability hooks.
+#
+# Keeping the substitution had a measured cost. `InputNode.cpp` was compiled by
+# nobody but Android and iOS, so a call to `wma::platform::flushDenormalsRtSafe()`
+# written without the `Platform.h` include passed the whole host suite — normal,
+# ASan and TSan — and was caught only by the iOS build. REQ-001 S1 edits
+# `InputNode::processInputBlock` directly (it writes the analysis ring), so that
+# blind spot sits right on top of the next requirement.
+#
+# What the double did that the real file does not, moved with it: the two WD-1.3
+# hooks now live in `InputNode.cpp` behind `WMA_TEST_HOOKS`, defined below and
+# nowhere else. See the long note at the top of that file.
 #
 # Build & run standalone:
 #   cd audio/src/main/cpp/core/tests
@@ -80,6 +98,7 @@ endif()
 set(CORE_TESTED_SOURCES
     ${WMA_CPP_ROOT}/api/watermelon_audio.cpp
     ${WMA_CPP_ROOT}/core/AudioEngine.cpp
+    ${WMA_CPP_ROOT}/nodes/InputNode.cpp
     ${WMA_CPP_ROOT}/core/SynthEngineDispatcher.cpp
     ${WMA_CPP_ROOT}/core/OutputStage.cpp
     ${WMA_CPP_ROOT}/core/OscillatorBank.cpp
@@ -106,6 +125,7 @@ add_executable(core_tests
     test_output_stage_protection.cpp
     test_denormal_flush.cpp
     test_input_node_retire.cpp
+    test_input_node_dsp.cpp
     test_offline_render.cpp
     test_fade_lifecycle.cpp
     test_capture_requests.cpp
@@ -125,9 +145,14 @@ add_executable(core_tests
     test_c_api_logcapture.cpp
     test_c_api_start_without_select.cpp
     support/test_platform_backends.cpp
-    support/test_input_node_stub.cpp
     ${CORE_TESTED_SOURCES}
 )
+
+# Activa los dos ganchos de observabilidad de WD-1.3 dentro de InputNode.cpp.
+# Se define AQUI Y EN NINGUN OTRO LADO: el build de Android (AGP) y el de iOS
+# (cpp/ios/CMakeLists.txt) no lo pasan, asi que en el binario que shippea esos
+# bloques compilan a nada. Ver la nota al tope de nodes/InputNode.cpp.
+target_compile_definitions(core_tests PRIVATE WMA_TEST_HOOKS=1)
 
 target_include_directories(core_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

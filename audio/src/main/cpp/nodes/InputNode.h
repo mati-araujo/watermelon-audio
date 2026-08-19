@@ -63,6 +63,62 @@ public:
     // from a stream object) so no backend type leaks into this header.
     bool processInputBlock(float* audioData, int numFrames, int channelCount);
 
+private:
+    /**
+     * @brief El DSP de entrada, COMPARTIDO por los dos caminos de captura.
+     *
+     * `stereo` es estereo intercalado y se procesa IN PLACE: ganancia de
+     * entrada, DC blocker, noise gate, medidor, y las escrituras al ring de
+     * captura y al de monitoreo.
+     *
+     * POR QUE EXISTE (2026-08-18)
+     * ---------------------------
+     * Esto estaba escrito DOS VECES —una en `processInputBlock` (el camino de
+     * Oboe) y otra en `feedExternalInput` (el de USB y el unico que el host y
+     * iOS pueden manejar)— y las dos copias ya habian driftado en tres puntos:
+     * el flush de denormales y la conversion mono->estereo existian solo en la
+     * primera, y el desborde del ring de monitoreo contaba en contadores
+     * distintos.
+     *
+     * Ese tercer punto es la unica diferencia que se conserva, y a proposito:
+     * saber CUAL camino descarto es informacion, no ruido. Por eso el contador
+     * entra por parametro en vez de estar cableado adentro.
+     *
+     * Importa mas alla de la prolijidad: `processInputBlock` tiene UN solo
+     * llamador en todo el arbol, el adaptador de Oboe, adentro de
+     * `#if WMA_HAS_OBOE` — o sea que en host y en iOS es inalcanzable. Mientras
+     * el DSP estuvo duplicado, ningun test de host podia tocar el codigo que
+     * corre el camino del microfono. Ahora los dos caminos corren ESTE metodo,
+     * asi que `core/tests/test_input_node_dsp.cpp` los cubre a los dos.
+     *
+     * RT-safe: sin asignar, sin loguear, sin locks.
+     */
+    void processCapturedBlock(float* stereo, int numFrames,
+                              wma::RtCounter& monitorOverflowCounter);
+
+    /**
+     * @brief Recorta `numFrames` a lo que entra en los buffers de trabajo.
+     *
+     * Devuelve el valor recortado (0 si no entra nada) y cuenta el recorte.
+     *
+     * NO ES COSMETICO. Antes cada camino se defendia por su cuenta y los dos lo
+     * hacian mal:
+     *
+     *   - `feedExternalInput` calculaba `numSamples` ANTES de recortar y lo
+     *     dejaba `const`, asi que el recorte bajaba `numFrames` pero el
+     *     `std::copy` seguia escribiendo el largo original. Medido con ASan
+     *     bajo `-DNDEBUG`: `container-overflow`, WRITE de 8192 bytes. En debug
+     *     no se veia porque un `assert` disparaba antes — y `assert` desaparece
+     *     justo en el build que shippea.
+     *   - `processInputBlock` solo tenia el `assert`, sin recorte ninguno.
+     *
+     * Un solo lugar que recorte, y que devuelva el valor que TODO lo de abajo
+     * usa, es lo que hace que las dos mitades no puedan volver a discrepar.
+     */
+    int clampToWorkBuffers(int numFrames);
+
+public:
+
     // Stream management
     bool startInputStream();
     void stopInputStream();
