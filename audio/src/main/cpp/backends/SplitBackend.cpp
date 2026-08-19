@@ -256,7 +256,14 @@ void SplitBackend::InputCallback::onBackendError(BackendError error) {
 }
 
 void SplitBackend::InputCallback::onStreamConfigChanged(const StreamInfo& newInfo) {
-    (void)newInfo;
+    // REQ-001 S1 (1.16). Esto era `(void)newInfo;` — la configuracion del stream
+    // de CAPTURA se descartaba aca y nada aguas abajo podia enterarse de a que
+    // rate estaba entrando el audio. Se reenvia por el hook de entrada, no por
+    // `onStreamConfigChanged`, porque en un backend partido ese ya transporta el
+    // rate de SALIDA y son dos numeros distintos.
+    if (mParent.mUserCallback) {
+        mParent.mUserCallback->onInputStreamConfigChanged(newInfo);
+    }
 }
 
 IAudioCallback::Result SplitBackend::OutputCallback::onAudioReady(

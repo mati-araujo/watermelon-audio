@@ -244,6 +244,27 @@ public:
      * @param newInfo  The new stream configuration.
      */
     virtual void onStreamConfigChanged(const StreamInfo& newInfo) {}
+
+    /**
+     * @brief Como el de arriba, pero del stream de ENTRADA (REQ-001 S1, 1.16).
+     *
+     * Existe porque en un backend partido —`SplitBackend`, o sea entrada y
+     * salida en streams distintos, que es para lo que existe `DriftResampler`—
+     * los dos lados pueden negociar rates DISTINTOS, y `onStreamConfigChanged`
+     * solo transporta el de salida.
+     *
+     * Antes de esto, `SplitBackend::InputCallback::onStreamConfigChanged` era
+     * literalmente `(void)newInfo;`: la configuracion del stream de captura se
+     * descartaba en el seam y nada aguas abajo podia enterarse. Para un afinador
+     * conectado por interfaz USB —el caso principal— eso significa medir con el
+     * rate equivocado.
+     *
+     * Default no-op: un backend duplex no lo llama, y ahi el rate de captura es
+     * el mismo que el de salida.
+     *
+     * NO se llama desde el thread RT.
+     */
+    virtual void onInputStreamConfigChanged(const StreamInfo& newInfo) {}
 };
 
 // =============================================================================

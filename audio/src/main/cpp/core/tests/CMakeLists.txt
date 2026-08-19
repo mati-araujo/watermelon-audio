@@ -79,6 +79,9 @@ endif()
 if(NOT TARGET watermelon-voice)
     add_subdirectory(${WMA_CPP_ROOT}/voice   ${CMAKE_BINARY_DIR}/voice)
 endif()
+if(NOT TARGET watermelon-analysis)
+    add_subdirectory(${WMA_CPP_ROOT}/analysis ${CMAKE_BINARY_DIR}/analysis)
+endif()
 if(NOT TARGET watermelon-looper)
     add_subdirectory(${WMA_CPP_ROOT}/looper  ${CMAKE_BINARY_DIR}/looper)
 endif()
@@ -125,6 +128,7 @@ add_executable(core_tests
     test_denormal_flush.cpp
     test_input_node_retire.cpp
     test_input_node_dsp.cpp
+    test_capture_sample_rate.cpp
     test_offline_render.cpp
     test_fade_lifecycle.cpp
     test_capture_requests.cpp
@@ -167,6 +171,7 @@ target_include_directories(core_tests PRIVATE
 
 find_package(Threads REQUIRED)
 target_link_libraries(core_tests PRIVATE
+    watermelon-analysis
     watermelon-voice
     watermelon-looper
     watermelon-engines

@@ -26,6 +26,7 @@
  */
 
 #include "../../nodes/InputNode.h"
+#include "../../analysis/AnalysisRing.h"
 
 #include <gtest/gtest.h>
 
@@ -250,4 +251,64 @@ TEST(InputNodeDsp, FeedingBeforePrepareIsSafeAndStillCarriesAudio) {
         peak = std::fmax(peak, std::fabs(out[i]));
     }
     EXPECT_GT(peak, 0.0f);
+}
+
+/**
+ * 1.11 — lo que el camino de captura procesa llega al ring del afinador.
+ *
+ * Dos cosas se afirman juntas y las dos importan:
+ *
+ *  1. Llega. Sin esto el afinador no tiene senal.
+ *  2. Llega DESPUES del DSP de entrada, no antes. El afinador tiene que
+ *     analizar lo mismo que el usuario escucha —con la ganancia de entrada
+ *     aplicada— y no la senal cruda del conversor. Se distingue poniendo una
+ *     ganancia que no sea 0 dB y midiendo cual de las dos amplitudes aparece.
+ *
+ * Y el ring recibe con el monitoreo APAGADO, que es el caso normal de un
+ * afinador: nadie quiere escuchar su propia guitarra por los parlantes mientras
+ * afina.
+ */
+TEST(InputNodeDsp, WhatTheCapturePathProcessedReachesTheAnalysisRing) {
+    wma::analysis::AnalysisRing ring;
+    InputNode node;
+    node.prepare(kSampleRate, kBlockFrames);
+    node.setMonitoringEnabled(false);          // el afinador no necesita monitoreo
+    node.setInputGain(6.1f);                   // != 0 dB, y no una potencia de dos
+    node.setAnalysisRing(&ring);
+
+    const float gain = std::pow(10.0f, 6.1f / 20.0f);
+
+    std::vector<float> in(static_cast<size_t>(kBlockFrames) * 2);
+    for (int f = 0; f < kBlockFrames; ++f) {
+        const float v = static_cast<float>(
+            kAmp * std::sin(2.0 * M_PI * kToneHz * f / kSampleRate));
+        in[static_cast<size_t>(f) * 2] = v;
+        in[static_cast<size_t>(f) * 2 + 1] = v;
+    }
+    // Cuatro bloques y se mide el ULTIMO. El DSP de entrada lleva un DC blocker,
+    // y su transitorio de arranque le suma un 2 % al primer bloque — medido.
+    // Estrechar la ventana al regimen establecido es mas honesto que aflojar la
+    // tolerancia hasta que el transitorio quepa.
+    const int kBlocks = 4;
+    for (int b = 0; b < kBlocks; ++b) node.feedExternalInput(in.data(), kBlockFrames);
+
+    std::vector<float> out(static_cast<size_t>(kBlockFrames) * kBlocks, 0.0f);
+    const int got = ring.read(out.data(), kBlockFrames * kBlocks);
+    ASSERT_EQ(got, kBlockFrames * kBlocks) << "el ring no recibio los bloques";
+
+    float peak = 0.0f;
+    for (int i = kBlockFrames * (kBlocks - 1); i < got; ++i) {
+        peak = std::fmax(peak, std::fabs(out[i]));
+    }
+    EXPECT_NEAR(peak, kAmp * gain, kAmp * gain * 0.02f)
+        << "el ring recibio " << peak << "; con la ganancia aplicada seria "
+        << (kAmp * gain) << " y sin aplicar " << kAmp;
+
+    // Y desconectar lo desconecta: no puede quedar escribiendo en un ring que
+    // el dueño ya considera retirado.
+    node.setAnalysisRing(nullptr);
+    node.feedExternalInput(in.data(), kBlockFrames);
+    EXPECT_EQ(ring.read(out.data(), kBlockFrames), 0)
+        << "siguio escribiendo despues de desconectarlo";
+    (void)kBlocks;
 }

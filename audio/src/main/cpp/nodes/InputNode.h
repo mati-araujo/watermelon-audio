@@ -5,6 +5,7 @@
 #include "../dsp/NoiseGate.h"
 #include "../dsp/LevelMeter.h"
 #include "../dsp/DCBlocker.h"
+#include "../analysis/AnalysisRing.h"
 #include "../platform/RtCounter.h"
 #include <atomic>
 #include <cstdint>
@@ -147,7 +148,68 @@ public:
     void updateLatency();  // Call periodically to refresh latency
 
     // Sample rate (returns the actual sample rate of the input stream)
-    int getStreamSampleRate() const { return mSampleRate; }
+    /**
+     * @brief El rate al que corre la CAPTURA. 0 = nadie lo dijo todavia.
+     *
+     * REEMPLAZA A `getStreamSampleRate()`, QUE MENTIA POR NOMBRE. Aquel
+     * devolvia `mSampleRate` —el rate con el que se PREPARO el nodo— asi que un
+     * nodo recien construido ya respondia 48000, el default de `AudioNode`, sin
+     * que existiera stream ninguno. Y como el unico `prepare()` que el motor le
+     * hace es el `prepare(48000, 4096)` LITERAL de `wmaEnsureInputNode`, el
+     * camino de captura reportaba 48000 corriera a lo que corriera.
+     *
+     * Para el afinador de REQ-001 eso no es cosmetico: la conversion de
+     * muestras a Hz usa este numero, y creerle 48000 a una captura de 44,1 kHz
+     * escala TODAS las frecuencias por 1,0884. Ver
+     * `core/tests/test_capture_sample_rate.cpp`.
+     *
+     * **Cero significa desconocido, y por eso no es 48000.** Un default
+     * plausible es peor que la ausencia: el consumidor no puede distinguirlo de
+     * una medicion.
+     */
+    int getCaptureSampleRate() const noexcept {
+        return mCaptureSampleRate.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Publica el rate de la captura. Thread de control.
+     *
+     * Es un `store` atomico y NADA MAS, a proposito. Lo tentador seria llamar a
+     * `prepare()` para que el DSP de entrada se re-configure — y seria un
+     * use-after-free: `prepare()` hace `resize()` de los dos rings y de los dos
+     * buffers de trabajo, y el thread de captura puede estar adentro de
+     * `processCapturedBlock()` usandolos. Es exactamente la clase de defecto
+     * que WD-1.3 saco del retiro del nodo.
+     *
+     * ⚠️ Consecuencia CONOCIDA y no resuelta aca: el DC blocker, el noise gate
+     * y el medidor se quedan con los coeficientes del rate con el que se
+     * prepararon. Sus constantes de tiempo quedan corridas en la misma
+     * proporcion (8,8 % entre 48 y 44,1 kHz). Es un defecto real y MENOR que el
+     * de frecuencia —afecta tiempos de ataque, no la altura medida— y
+     * arreglarlo pide re-preparar el nodo con el protocolo de publicacion y
+     * retiro de WD-1.3, que es un item propio.
+     */
+    /**
+     * @brief Conecta (o desconecta con `nullptr`) el ring del afinador.
+     *
+     * REQ-001 S1, tarea 1.11. El thread de captura le deja cada bloque ya
+     * procesado; el analisis lo drena desde su propio thread.
+     *
+     * ⚠️ **El ring tiene que sobrevivir al nodo.** Aca solo se guarda un
+     * puntero: publicarlo es un store atomico, pero DESTRUIR el ring mientras
+     * el thread de captura esta adentro de `processCapturedBlock()` es un
+     * use-after-free. El dueño del ring lo retira con la misma barrera con la
+     * que el motor retira el nodo (WD-1.3): poner `nullptr`, esperar a que no
+     * queden callbacks en vuelo, y recien entonces destruir.
+     */
+    void setAnalysisRing(wma::analysis::AnalysisRing* ring) noexcept {
+        mAnalysisRing.store(ring, std::memory_order_release);
+    }
+
+    void setCaptureSampleRate(int sampleRate) noexcept {
+        mCaptureSampleRate.store(sampleRate > 0 ? sampleRate : 0,
+                                 std::memory_order_release);
+    }
 
     // Monitoring (pass-through to output)
     void setMonitoringEnabled(bool enabled);
@@ -196,6 +258,12 @@ private:
     NoiseGate mNoiseGate;
     // Off by default: a -60 dB gate after +12 dB input gain cuts audible
     // guitar decay tails. Opt-in from the UI (InputTestScreen / Gain Staging).
+    /// El ring del afinador, o nullptr. Ver setAnalysisRing().
+    std::atomic<wma::analysis::AnalysisRing*> mAnalysisRing{nullptr};
+
+    /// 0 = desconocido. Ver getCaptureSampleRate().
+    std::atomic<int> mCaptureSampleRate{0};
+
     std::atomic<bool> mNoiseGateEnabled{false};
     LevelMeter mLevelMeter;
 

@@ -1246,7 +1246,7 @@ void AudioEngine::captureMonitoringBlock(InputNode* inputNode, int32_t numFrames
     // que el log, porque no depende de un build de debug ni de que el texto no
     // cambie. Son dos stores relajados, sin formateo y sin syscall.
     const int outputSampleRate = currentSampleRate();
-    const int inputSampleRate = inputNode->getStreamSampleRate();
+    const int inputSampleRate = inputNode->getCaptureSampleRate();
     mLastInputSampleRate.store(inputSampleRate, std::memory_order_relaxed);
     mSampleRateMismatch.store(
         inputSampleRate > 0 && outputSampleRate > 0 && inputSampleRate != outputSampleRate,
@@ -2308,10 +2308,38 @@ void AudioEngine::onStreamConfigChanged(const watermelon_audio::StreamInfo& newI
     mEffectChain.setSampleRate(sampleRate);
     mOutputStage.prepare(sampleRate, 0);
 
+    // REQ-001 S1 (1.16) — y al InputNode NO lo tocaba nadie. Su unico
+    // `prepare()` en todo el arbol es el `prepare(48000, 4096)` literal de
+    // `wmaEnsureInputNode`, asi que el camino de captura reportaba 48000
+    // corriera el device a lo que corriera. Para el afinador eso escala todas
+    // las frecuencias medidas.
+    //
+    // Se publica el rate y NADA MAS: llamar a `prepare()` aca haria `resize()`
+    // de los rings del nodo con el thread de captura adentro. Ver la nota de
+    // `InputNode::setCaptureSampleRate()`.
+    // Solo si NADIE informo la config del stream de entrada. En un backend
+    // partido el de entrada manda, y este `sampleRate` es el de SALIDA.
+    if (!mHasInputStreamConfig.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(mInputNodeMutex);
+        if (mInputNode) mInputNode->setCaptureSampleRate(sampleRate);
+    }
+
     incrementStateVersion();
 }
 
 // ========== DUAL TOUCH METHODS (Phase 1E — delegated to DualTouchManager) ==========
+
+void AudioEngine::onInputStreamConfigChanged(const watermelon_audio::StreamInfo& newInfo) {
+    LOGI("Input stream config changed: %dHz, %d channels",
+         newInfo.sampleRate, newInfo.channelCount);
+
+    mHasInputStreamConfig.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(mInputNodeMutex);
+        if (mInputNode) mInputNode->setCaptureSampleRate(newInfo.sampleRate);
+    }
+    incrementStateVersion();
+}
 
 void AudioEngine::setDualTouchMode(bool enabled) {
     mDualTouch.setEnabled(enabled);

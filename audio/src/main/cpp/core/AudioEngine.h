@@ -816,6 +816,15 @@ public:
      */
     void onStreamConfigChanged(const watermelon_audio::StreamInfo& newInfo) override;
 
+    /**
+     * @brief El stream de ENTRADA renegocio (REQ-001 S1, 1.16).
+     *
+     * Solo lo llama un backend partido. Cuando llega, **manda sobre el rate de
+     * captura**: en ese modo `onStreamConfigChanged` transporta el de salida, y
+     * usarlo para la entrada seria publicar un numero de otro stream.
+     */
+    void onInputStreamConfigChanged(const watermelon_audio::StreamInfo& newInfo) override;
+
 private:
     /**
      * @brief Core audio processing — called by onAudioReady (IAudioCallback).
@@ -987,6 +996,11 @@ private:
     // consultable es estrictamente mejor que grepear un log: no depende de un
     // build de debug ni de que el mensaje no cambie de texto.
     std::atomic<bool> mSampleRateMismatch{false};
+
+    /// true en cuanto un backend informa la config del stream de ENTRADA. Desde
+    /// ahi, los cambios del de SALIDA dejan de tocar el rate de captura: son dos
+    /// streams distintos y el de entrada es el que manda sobre la entrada.
+    std::atomic<bool> mHasInputStreamConfig{false};
     std::atomic<int> mLastInputSampleRate{0};
 
     // ========== DUAL TOUCH SUPPORT (Phase 1E — delegated to DualTouchManager) ==========
