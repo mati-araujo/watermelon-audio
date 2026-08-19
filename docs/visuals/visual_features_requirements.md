@@ -26,7 +26,6 @@ Proveer al sistema visual de NoisyPad (Phase 17) los datos de audio que necesita
 | Peak level por pista, ya computado en C++ y polleado a 33 ms (mixer Phase 13C) | Base de WV-1 (falta onset y push) |
 | `Transport::getPlayFrame()` / grilla de bars; frame de trigger real en `armRecording` | Timestamps de performance (WV-4) |
 | `TrackBuffer::detectOnsets` (energy-flux, calibrado y verificado en device) y `findContentBounds` | Envelopes/onsets offline (WV-3.1) |
-| `SpectrumAnalyzer` (FFT propia, magnitudes/smoothed/peak-hold) | Bandas del mix si hiciera falta server-side (el bus Kotlin en vivo ya lo resuelve app-side) |
 | `getTrackWaveform` (bins por pista) | Renderer de samples (app) |
 | Export render-once con repeat + metadata BPM | Audio del video (WV-5) |
 | **Compartidos con Phase 16:** WL-1.4 (beat/bar en el push), WL-5.1 (PitchDetector YIN), WL-8.3 (loudness por pista), WL-8.2 (tempo de archivos) | Referenciados, no duplicados |

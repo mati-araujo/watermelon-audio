@@ -107,7 +107,6 @@ set(CORE_TESTED_SOURCES
     ${WMA_CPP_ROOT}/nodes/OscillatorNode.cpp
     ${WMA_CPP_ROOT}/nodes/EffectChainNode.cpp
     ${WMA_CPP_ROOT}/nodes/MixerNode.cpp
-    ${WMA_CPP_ROOT}/analysis/SpectrumAnalyzer.cpp
     ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
     ${WMA_CPP_ROOT}/platform/Logger.cpp
     # Despite the name, this file is plain POSIX + inline asm with the only

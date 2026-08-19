@@ -27,7 +27,7 @@ dos opciones malas y una razonable.
 
 Seguir TODAS las definiciones de un nombre ambiguo sobre-aproxima tanto que el
 lint se vuelve ruido: `prepare(` tiene veinte definiciones en el arbol y
-arrastra `SpectrumAnalyzer::prepare` a un grafo donde no esta. Un guardrail con
+arrastra `OutputStage::prepare` a un grafo donde no esta. Un guardrail con
 150 falsos positivos no se lee, se silencia.
 
 Asi que se siguen solo las llamadas que resuelven a UNA definicion, mas un mapa

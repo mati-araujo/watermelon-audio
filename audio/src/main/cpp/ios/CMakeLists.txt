@@ -113,7 +113,6 @@ add_library(watermelon-core STATIC
         ${WMA_CPP_ROOT}/nodes/EffectChainNode.cpp
         ${WMA_CPP_ROOT}/nodes/MixerNode.cpp
         ${WMA_CPP_ROOT}/nodes/InputNode.cpp
-        ${WMA_CPP_ROOT}/analysis/SpectrumAnalyzer.cpp
         ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
         ${WMA_CPP_ROOT}/platform/Logger.cpp
         ${WMA_CPP_ROOT}/platform/PlatformApple.cpp

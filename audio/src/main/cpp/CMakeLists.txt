@@ -212,7 +212,6 @@ add_library(watermelon_audio SHARED
         ${USB_SOURCES}
         # Pro Features (Phase 5)
         core/MusicalScale.cpp
-        analysis/SpectrumAnalyzer.cpp
         # Engines now in watermelon-engines sub-library (Phase 1C)
 )
 

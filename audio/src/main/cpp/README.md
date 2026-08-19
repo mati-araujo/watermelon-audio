@@ -56,7 +56,7 @@ cpp/
   usb/            USB audio driver (descriptors, transfers, volume, format)
   oscillators/    Classic oscillators (legacy, used by OscillatorBank)
   modulators/     AM, FM, Ring, PWM, Burst, Envelope, Gate
-  analysis/       SpectrumAnalyzer (FFT)
+  analysis/       watermelon-analysis (REQ-001) — la FFT muerta que habia aca se borro
   utils/          MemoryUtils, ThreadUtils, LatencyBenchmark
   thirdparty/     TinySoundFont (tsf.h)
 ```
