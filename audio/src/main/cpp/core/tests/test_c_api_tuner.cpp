@@ -314,9 +314,25 @@ TEST_F(TunerApiTest, StoppingDetachesTheWriterFromTheRing) {
     ASSERT_TRUE(wma_tuner_start(mWma));
     for (int i = 0; i < 20; ++i) renderWithInput(1, kBlockFrames, 0.2f);
 
+    // 🔴 LA LINEA DE BASE SE TOMA DESPUES DE PARAR, Y ESO NO ES ESTILO.
+    //
+    // Este test tomaba `atStop` ANTES de `wma_tuner_stop()`, con el thread de
+    // analisis todavia vivo — asi que entre esa lectura y el stop el drenador
+    // seguia consumiendo y la base quedaba vieja. Medido bajo TSan, que ensancha
+    // esa ventana: 2560 frames en la base contra 4608 despues. El test fallaba
+    // acusando al motor de "seguir consumiendo con el afinador parado", cuando
+    // lo que estaba mal era CUANDO se miraba.
+    //
+    // Despues de `stop()` la base es estable POR CONSTRUCCION: `AnalysisThread::
+    // stop()` junta el thread, asi que cuando vuelve no queda nadie que pueda
+    // publicar. La propiedad que se quiere afirmar no cambio; cambio el momento
+    // desde el que se la mira.
     auto atStop = sentinelBuffer();
-    ASSERT_TRUE(waitForSnapshot(mWma, atStop));
+    ASSERT_TRUE(waitForSnapshot(mWma, atStop));   // hubo analisis de verdad
     wma_tuner_stop(mWma);
+
+    // Y RECIEN ACA se toma la base, con el thread ya juntado.
+    ASSERT_TRUE(wma_tuner_get_snapshot(mWma, atStop.data()));
 
     // El ring queda desenganchado: estos bloques no tienen a donde ir.
     for (int i = 0; i < 40; ++i) renderWithInput(1, kBlockFrames, 0.2f);
