@@ -159,6 +159,23 @@ public:
         return mCaptureRate.load(std::memory_order_relaxed);
     }
 
+    /**
+     * @brief Descarta lo que haya sin leer y se para en lo mas nuevo.
+     *
+     * Lo llama el LECTOR cuando lo viejo dejo de significar algo — hoy, cuando cambia el
+     * objetivo del afinador. Al pasar de una cuerda a otra, el ring todavia tiene hasta
+     * ~170 ms de la nota ANTERIOR, y esas muestras integradas contra el objetivo nuevo no
+     * son ruido: son una nota distinta, tipicamente fuera del rango de captura. Medido: la
+     * lectura salia 4,55 cents contra 2,0 reales.
+     *
+     * **No cuenta como frames perdidos**, y la distincion importa: `droppedFrames` significa
+     * "el analisis no llego" y sirve para diagnosticar. Esto es una decision del lector, no
+     * un atraso.
+     */
+    void skipToNewest() noexcept {
+        mRead.store(mWritten.load(std::memory_order_acquire), std::memory_order_relaxed);
+    }
+
     /// Frames que el analisis nunca vio porque el escritor los piso.
     uint64_t droppedFrames() const noexcept { return mDropped.get(); }
 

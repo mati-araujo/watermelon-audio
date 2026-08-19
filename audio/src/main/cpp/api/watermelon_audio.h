@@ -714,6 +714,30 @@ WMA_API void wma_tuner_stop(WmaEngine* engine);
 WMA_API bool wma_tuner_is_running(const WmaEngine* engine);
 
 /**
+ * Set the frequency the tuner measures against, in Hz. 0 clears it.
+ *
+ * THE CALLER SUPPLIES THE TARGET, AND THAT IS NOT A STOPGAP
+ * ---------------------------------------------------------
+ * The phase estimator refines AROUND a target, it does not search for one: its capture range
+ * is a few cents wide in the treble. So something has to say what to measure against, and
+ * until coarse detection exists that something is the consumer — which is exactly what
+ * ITuner declares as an implementer's obligation.
+ *
+ * With no target the snapshot keeps publishing NaN for cents and reports "no lock". It does
+ * NOT guess: publishing the pitch of whatever happens to be sounding would be a measurement
+ * nobody asked for.
+ *
+ * Changing the target RESTARTS the integration — phase accumulated against the old target
+ * says nothing about the new one — so do not call this every frame with the same value.
+ *
+ * @return false if there is no engine or the analysis seam could not be created.
+ */
+WMA_API bool wma_tuner_set_target(WmaEngine* engine, float hz);
+
+/** The current target in Hz, or 0 if none is set. */
+WMA_API float wma_tuner_get_target(const WmaEngine* engine);
+
+/**
  * Read the whole analysis result in one call.
  *
  * One boundary crossing per tick, like wma_input_get_metering_snapshot() — but

@@ -1580,6 +1580,11 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     override fun isTunerRunning(): Boolean = nativeIsTunerRunning()
 
+    /** Ver [ITunerBridge.setTunerTargetHz]: cambiarlo reinicia la integración. */
+    override fun setTunerTargetHz(hz: Float): Boolean = nativeSetTunerTarget(hz)
+
+    override fun getTunerTargetHz(): Float = nativeGetTunerTarget()
+
     /**
      * Los ocho valores del snapshot, todos del mismo tick.
      *
@@ -1957,6 +1962,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeStartTuner(): Boolean
     private external fun nativeStopTuner()
     private external fun nativeIsTunerRunning(): Boolean
+    private external fun nativeSetTunerTarget(hz: Float): Boolean
+    private external fun nativeGetTunerTarget(): Float
     private external fun nativeGetTunerSnapshot(): FloatArray?
     private external fun nativeReleaseInputNode()
 

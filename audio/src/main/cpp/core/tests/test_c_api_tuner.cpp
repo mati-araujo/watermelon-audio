@@ -30,6 +30,7 @@
 #include "api/watermelon_audio.h"
 #include "api/watermelon_audio_internal.h"
 #include "analysis/AnalysisSnapshot.h"
+#include "analysis/AnalysisThread.h"
 
 #include <gtest/gtest.h>
 
@@ -109,6 +110,20 @@ bool waitForValue(WmaEngine* e, int index, float expected,
         if (wma_tuner_get_snapshot(e, out.data()) && out[static_cast<size_t>(index)] == expected) {
             return true;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+}
+
+/// Igual que `waitForSnapshot`, pero espera a que haya una MEDICION de altura —o sea, a
+/// que `cents` deje de ser NaN. Sin esto un test leeria el primer snapshot publicado, que
+/// sale antes de que la integracion tenga de donde sacar una pendiente.
+bool waitForMeasurement(WmaEngine* e, std::array<float, WMA_TUNER_SNAPSHOT_VALUES>& out,
+                        int timeoutMs = 3000) {
+    const auto deadline = std::chrono::steady_clock::now()
+                          + std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (wma_tuner_get_snapshot(e, out.data()) && !std::isnan(out[kSnapCents])) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return false;
@@ -202,14 +217,18 @@ TEST_F(TunerApiTest, TheSnapshotCarriesWhatTheCapturePathActuallyMeasured) {
 }
 
 /**
- * Los tres campos que llena S2 valen NaN, no 0.
+ * Los tres campos de afinacion cruzan como NaN cuando NO HAY OBJETIVO, no como 0.
  *
- * Se verifica DESDE LA C API y no solo en el thread porque es aca donde el valor
- * cruza a un consumidor: `0.0` cents es "afinado exacto" y se dibujaria como una
- * medicion. Este test es lo que impide que S2 arranque con un placeholder que
- * miente.
+ * ⚠️ Este test se llamaba `TheFieldsStageTwoWillFillCrossTheBoundaryAsNaN` y el nombre quedo
+ * mintiendo: S2 ya esta cableada, asi que esos campos SI se llenan — cuando hay contra que
+ * medir. Lo que los deja en NaN hoy es la ausencia de objetivo, que es una decision y no una
+ * etapa pendiente. Un test cuyo nombre describe un estado que ya no existe manda al proximo
+ * lector a buscar trabajo que ya esta hecho.
+ *
+ * Se verifica DESDE LA C API y no solo en el thread porque es aca donde el valor cruza a un
+ * consumidor: `0.0` cents es "afinado exacto" y se dibujaria como una medicion.
  */
-TEST_F(TunerApiTest, TheFieldsStageTwoWillFillCrossTheBoundaryAsNaN) {
+TEST_F(TunerApiTest, WithNoTargetTheTuningFieldsCrossTheBoundaryAsNaN) {
     startAt(kFirstRate, 0);
     negotiateCaptureRate(mWma, kFirstRate);
     ASSERT_TRUE(wma_tuner_start(mWma));
@@ -255,6 +274,133 @@ TEST_F(TunerApiTest, ARateChangeMidSessionReachesTheSnapshotWithoutARestart) {
         << "el snapshot se quedo en " << buf[kSnapCaptureSampleRate]
         << " Hz con la captura a " << kSecondRate
         << ": todo lo que mida queda escalado por " << kFirstRate << "/" << kSecondRate;
+
+    wma_tuner_stop(mWma);
+}
+
+// ---------------------------------------------------------------------------
+// 4.0 — EL CABLEADO: el afinador mide de verdad
+// ---------------------------------------------------------------------------
+
+/// Un seno de `hz` alimentado por el camino de captura, en bloques.
+void feedTone(WmaEngine* engine, double hz, int rate, int blocks, int blockFrames);
+
+/**
+ * TAREA 4.0.1. Con objetivo empujado, el snapshot publica **cents reales**.
+ *
+ * Es el test que separa "las piezas existen" de "el producto mide". Antes de esta tarea,
+ * S1 + S2 + S3 estaban cerradas y verdes y el snapshot devolvia NaN: el seam transportaba,
+ * el estimador medía, y nadie los conectaba.
+ */
+TEST_F(TunerApiTest, WithATargetTheSnapshotPublishesRealCents) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+
+    // El objetivo ANTES de arrancar: es el orden natural de un consumidor.
+    const double target = 110.0;
+    ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(target)));
+    ASSERT_TRUE(wma_tuner_start(mWma));
+
+    // Un tono un cent por encima del objetivo. 1 cent es DIEZ VECES el presupuesto,
+    // asi que un estimador que devolviera 0 no pasaria.
+    const double detuned = target * std::pow(2.0, 1.0 / 1200.0);
+    feedTone(mWma, detuned, kFirstRate, 160, kBlockFrames);
+
+    auto buf = sentinelBuffer();
+    ASSERT_TRUE(waitForMeasurement(mWma, buf))
+        << "con objetivo y señal, el snapshot sigue sin publicar altura";
+
+    EXPECT_EQ(buf[kSnapDroppedFrames], 0.0f)
+        << "el ring piso frames: la señal que vio el estimador tiene huecos y la medicion "
+           "no significa nada. Es del ritmo de alimentacion del test, no del motor.";
+    EXPECT_FALSE(std::isnan(buf[kSnapCents])) << "cents siguio en NaN con el cableado puesto";
+    EXPECT_NEAR(buf[kSnapCents], 1.0f, 0.1f)
+        << "midio " << buf[kSnapCents] << " cents contra 1,0 real";
+    EXPECT_FALSE(std::isnan(buf[kSnapPhaseAngle]));
+    EXPECT_FALSE(std::isnan(buf[kSnapUncertainty]));
+
+    wma_tuner_stop(mWma);
+}
+
+/**
+ * TAREA 4.0.2. **Sin** objetivo no se inventa uno: cents sigue en NaN y el estado dice
+ * "sin enganche".
+ *
+ * Publicar la altura de lo que sea que este sonando seria una medicion que nadie pidio — y
+ * peor, una que el usuario leeria como la de su cuerda.
+ */
+TEST_F(TunerApiTest, WithoutATargetItReportsNoLockInsteadOfGuessing) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_start(mWma));            // sin set_target
+
+    feedTone(mWma, 110.0, kFirstRate, 200, kBlockFrames);
+
+    auto buf = sentinelBuffer();
+    ASSERT_TRUE(waitForSnapshot(mWma, buf));
+    EXPECT_TRUE(std::isnan(buf[kSnapCents]))
+        << "sin objetivo publico " << buf[kSnapCents] << " cents: adivino";
+    EXPECT_EQ(buf[kSnapState], static_cast<float>(wma::analysis::kStateNoLock));
+    EXPECT_EQ(wma_tuner_get_target(mWma), 0.0f);
+
+    wma_tuner_stop(mWma);
+}
+
+/**
+ * TAREA 4.0.3. Cambiar el objetivo **reinicia la integracion**.
+ *
+ * Sin esto, la fase acumulada contra la cuerda anterior se mezcla con la nueva y la pendiente
+ * resultante no describe a ninguna de las dos. Es el caso normal de un afinador: se pasa de
+ * cuerda en cuerda.
+ */
+TEST_F(TunerApiTest, ChangingTheTargetRestartsTheIntegration) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_set_target(mWma, 110.0f));
+    ASSERT_TRUE(wma_tuner_start(mWma));
+
+    feedTone(mWma, 110.0 * std::pow(2.0, 1.0 / 1200.0), kFirstRate, 160, kBlockFrames);
+    auto first = sentinelBuffer();
+    ASSERT_TRUE(waitForMeasurement(mWma, first));
+    ASSERT_NEAR(first[kSnapCents], 1.0f, 0.1f);
+
+    // Otra cuerda: A2 -> D3, y el tono nuevo esta 2 cents por encima de ESE objetivo.
+    const double second = 146.832;
+    ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(second)));
+    feedTone(mWma, second * std::pow(2.0, 2.0 / 1200.0), kFirstRate, 160, kBlockFrames);
+
+    auto buf = sentinelBuffer();
+    ASSERT_TRUE(waitForMeasurement(mWma, buf));
+    EXPECT_NEAR(buf[kSnapCents], 2.0f, 0.1f)
+        << "tras cambiar de objetivo midio " << buf[kSnapCents]
+        << ": quedo fase de la nota anterior en la regresion";
+
+    wma_tuner_stop(mWma);
+}
+
+/**
+ * TAREA 4.0.4. El estimador se prepara con el rate **medido**, no con 48000.
+ *
+ * Es el ultimo lugar donde el rate de S1 se podia perder: llega vivo hasta el snapshot y se
+ * usaria mal justo al medir. Con captura a 44,1 kHz y el estimador preparado a 48 k, la
+ * lectura se corre **+146,7 cents** — mas de un semitono.
+ */
+TEST_F(TunerApiTest, TheEstimatorIsPreparedWithTheMeasuredRateNotWithAConstant) {
+    startAt(kSecondRate, 0);                       // 32000: ni 48000 ni 44100
+    negotiateCaptureRate(mWma, kSecondRate);
+
+    const double target = 220.0;
+    ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(target)));
+    ASSERT_TRUE(wma_tuner_start(mWma));
+
+    feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kSecondRate, 160, kBlockFrames);
+
+    auto buf = sentinelBuffer();
+    ASSERT_TRUE(waitForMeasurement(mWma, buf));
+    EXPECT_EQ(buf[kSnapCaptureSampleRate], static_cast<float>(kSecondRate));
+    EXPECT_NEAR(buf[kSnapCents], 1.0f, 0.2f)
+        << "con captura a " << kSecondRate << " midio " << buf[kSnapCents]
+        << " cents contra 1,0 real: el estimador se preparo con otro rate";
 
     wma_tuner_stop(mWma);
 }
@@ -342,6 +488,72 @@ TEST_F(TunerApiTest, StoppingDetachesTheWriterFromTheRing) {
     ASSERT_TRUE(wma_tuner_get_snapshot(mWma, later.data()));
     EXPECT_EQ(later[kSnapFramesAnalyzed], atStop[kSnapFramesAnalyzed])
         << "con el afinador parado el analisis sigue consumiendo captura";
+}
+
+/**
+ * Alimenta un seno por el camino REAL de captura: `onAudioReady` con `inputData`, que es como
+ * lo entrega un backend. La fase se acumula entre bloques —un salto de fase en el borde seria
+ * un transitorio que el DSP de entrada veria como señal.
+ *
+ * 🔴 SE AUTORREGULA CONTRA EL DRENADOR, Y ESO NO ES OPCIONAL
+ * ----------------------------------------------------------
+ * En un device la captura llega EN TIEMPO REAL y el ring —8192 frames, ~170 ms— le sobra al
+ * drenador. Un test que empuje todo lo rapido que puede el CPU invierte esa relacion: el ring
+ * se llena, pisa lo mas viejo (que es su contrato: no bloquear jamas al escritor) y el
+ * estimador recibe una señal CON HUECOS. La fase salta en cada hueco y la pendiente que sale
+ * de ahi no mide nada.
+ *
+ * Medido antes de arreglarlo: 13,94 cents contra 1,0 real. El sintoma parecia del estimador y
+ * era del ritmo de alimentacion.
+ *
+ * Por eso despues de cada tanda se ESPERA a que el analisis la haya consumido, en vez de
+ * dormir un rato fijo: una compuerta contra el estado real aguanta una maquina cargada o una
+ * corrida bajo sanitizers, y un sleep elegido a ojo no.
+ */
+void feedTone(WmaEngine* engine, double hz, int rate, int blocks, int blockFrames) {
+    std::vector<float> out(static_cast<size_t>(blockFrames) * 2, 0.0f);
+    std::vector<float> in(static_cast<size_t>(blockFrames) * 2, 0.0f);
+    std::array<float, WMA_TUNER_SNAPSHOT_VALUES> probe{};
+    double phase = 0.0;
+    const double dp = 2.0 * M_PI * hz / static_cast<double>(rate);
+
+    // Un cuarto del ring por tanda: deja al drenador tres cuartos de margen.
+    const int blocksPerChunk = std::max(1, 2048 / blockFrames);
+    long long fed = 0;
+
+    // 🔴 LA BASE ES LO YA ANALIZADO, NO CERO. `framesAnalyzed` es ACUMULADO desde que
+    // arranco el afinador, asi que comparar contra un contador local que empieza en cero
+    // hace que la compuerta se satisfaga sola a partir de la segunda llamada — y entonces
+    // esta funcion vuelve a inundar el ring sin que nada lo diga. Medido: el primer test
+    // pasaba y el segundo media 20 cents contra 2 reales.
+    float baseline = 0.0f;
+    if (wma_tuner_get_snapshot(engine, probe.data())) baseline = probe[kSnapFramesAnalyzed];
+
+    for (int b = 0; b < blocks; ++b) {
+        for (int f = 0; f < blockFrames; ++f) {
+            const float v = static_cast<float>(0.3 * std::sin(phase));
+            phase += dp;
+            if (phase >= 2.0 * M_PI) phase -= 2.0 * M_PI;
+            in[static_cast<size_t>(f) * 2] = v;
+            in[static_cast<size_t>(f) * 2 + 1] = v;
+        }
+        std::fill(out.begin(), out.end(), 0.0f);
+        engine->engine->onAudioReady(out.data(), in.data(), blockFrames);
+        fed += blockFrames;
+
+        if ((b + 1) % blocksPerChunk == 0) {
+            // Espera a que el analisis se ponga al dia, con techo para no colgar el test.
+            const auto deadline = std::chrono::steady_clock::now()
+                                  + std::chrono::milliseconds(500);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (wma_tuner_get_snapshot(engine, probe.data())
+                    && probe[kSnapFramesAnalyzed] - baseline >= static_cast<float>(fed - 4096)) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+        }
+    }
 }
 
 }  // namespace
