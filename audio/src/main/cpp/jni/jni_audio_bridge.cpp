@@ -933,6 +933,50 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInp
     return result;
 }
 
+// ==================== Tuner analysis (REQ-001 S1) ====================
+//
+// Same batched shape as the input metering above, and for a stronger reason:
+// the C API publishes these eight values under a seqlock, so they all come from
+// the SAME tick. Reading them one by one would let the UI pair this tick's cents
+// with the next tick's phase angle, which is what makes a strobe disc jump.
+//
+// Returns null when there is no analysis seam or nothing has been published yet
+// — null is NOT the same as all-zeros, and flattening it would hand the Kotlin
+// side a plausible reading nobody measured.
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartTuner(
+    JNIEnv* env, jobject thiz) {
+    return wma_tuner_start(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStopTuner(
+    JNIEnv* env, jobject thiz) {
+    wma_tuner_stop(g_wmaEngine);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsTunerRunning(
+    JNIEnv* env, jobject thiz) {
+    return wma_tuner_is_running(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jfloatArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetTunerSnapshot(
+    JNIEnv* env, jobject thiz) {
+    float values[WMA_TUNER_SNAPSHOT_VALUES];
+    if (!wma_tuner_get_snapshot(g_wmaEngine, values)) {
+        return nullptr;
+    }
+    jfloatArray result = env->NewFloatArray(WMA_TUNER_SNAPSHOT_VALUES);
+    if (result == nullptr) {
+        return nullptr;
+    }
+    env->SetFloatArrayRegion(result, 0, WMA_TUNER_SNAPSHOT_VALUES, values);
+    return result;
+}
+
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReleaseInputNode(
     JNIEnv* env, jobject thiz) {

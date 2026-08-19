@@ -1246,7 +1246,7 @@ void AudioEngine::captureMonitoringBlock(InputNode* inputNode, int32_t numFrames
     // que el log, porque no depende de un build de debug ni de que el texto no
     // cambie. Son dos stores relajados, sin formateo y sin syscall.
     const int outputSampleRate = currentSampleRate();
-    const int inputSampleRate = inputNode->getStreamSampleRate();
+    const int inputSampleRate = inputNode->getCaptureSampleRate();
     mLastInputSampleRate.store(inputSampleRate, std::memory_order_relaxed);
     mSampleRateMismatch.store(
         inputSampleRate > 0 && outputSampleRate > 0 && inputSampleRate != outputSampleRate,
@@ -2308,10 +2308,40 @@ void AudioEngine::onStreamConfigChanged(const watermelon_audio::StreamInfo& newI
     mEffectChain.setSampleRate(sampleRate);
     mOutputStage.prepare(sampleRate, 0);
 
+    // REQ-001 S1 (1.16) — y al InputNode NO lo tocaba nadie. Su unico
+    // `prepare()` en todo el arbol es el `prepare(48000, 4096)` literal de
+    // `wmaEnsureInputNode`, asi que el camino de captura reportaba 48000
+    // corriera el device a lo que corriera. Para el afinador eso escala todas
+    // las frecuencias medidas.
+    //
+    // Se publica el rate y NADA MAS: llamar a `prepare()` aca haria `resize()`
+    // de los rings del nodo con el thread de captura adentro. Ver la nota de
+    // `InputNode::setCaptureSampleRate()`.
+    // Solo si NADIE informo la config del stream de entrada. En un backend
+    // partido el de entrada manda, y este `sampleRate` es el de SALIDA.
+    if (!mHasInputStreamConfig.load(std::memory_order_acquire)) {
+        mCaptureStreamSampleRate.store(sampleRate, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(mInputNodeMutex);
+        if (mInputNode) mInputNode->setCaptureSampleRate(sampleRate);
+    }
+
     incrementStateVersion();
 }
 
 // ========== DUAL TOUCH METHODS (Phase 1E — delegated to DualTouchManager) ==========
+
+void AudioEngine::onInputStreamConfigChanged(const watermelon_audio::StreamInfo& newInfo) {
+    LOGI("Input stream config changed: %dHz, %d channels",
+         newInfo.sampleRate, newInfo.channelCount);
+
+    mHasInputStreamConfig.store(true, std::memory_order_release);
+    mCaptureStreamSampleRate.store(newInfo.sampleRate, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(mInputNodeMutex);
+        if (mInputNode) mInputNode->setCaptureSampleRate(newInfo.sampleRate);
+    }
+    incrementStateVersion();
+}
 
 void AudioEngine::setDualTouchMode(bool enabled) {
     mDualTouch.setEnabled(enabled);
@@ -2353,6 +2383,16 @@ void AudioEngine::setInputNode(std::shared_ptr<InputNode> inputNode) {
         std::lock_guard<std::mutex> lock(mInputNodeMutex);
         previous = std::move(mInputNode);
         mInputNode = std::move(inputNode);
+        // Un nodo que se engancha DESPUES del cambio de config se perdio el
+        // aviso, y nadie se lo repite: `onStreamConfigChanged` solo toca al que
+        // estaba puesto en ese momento. Es el caso normal del afinador, que
+        // engancha el suyo cuando el usuario lo abre. Se le dice aca, y solo si
+        // no sabia — un nodo que ya tiene rate (USB, que lo recibe directo del
+        // driver) sabe mas que el motor.
+        const int known = mCaptureStreamSampleRate.load(std::memory_order_relaxed);
+        if (mInputNode && known > 0 && mInputNode->getCaptureSampleRate() <= 0) {
+            mInputNode->setCaptureSampleRate(known);
+        }
         // 1. Publicar. release: el objeto está completamente construido antes.
         mInputNodeRt.store(mInputNode.get(), std::memory_order_release);
     }

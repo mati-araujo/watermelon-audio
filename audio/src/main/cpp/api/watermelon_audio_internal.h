@@ -12,6 +12,9 @@
 #include "../core/AudioEngine.h"
 #include "../nodes/InputNode.h"
 #include "../backends/BackendManager.h"
+#include "../analysis/AnalysisRing.h"
+#include "../analysis/AnalysisSnapshot.h"
+#include "../analysis/AnalysisThread.h"
 
 #include <memory>
 #include <atomic>
@@ -24,6 +27,23 @@ struct WmaEngine {
     std::unique_ptr<AudioEngine> engine;
     std::shared_ptr<InputNode> inputNode;
     std::mutex inputNodeMutex;
+
+    /* Analisis / afinador (REQ-001 S1).
+     *
+     * El ring y el snapshot viven mientras vive el motor, y eso NO es descuido:
+     * el thread de captura carga el puntero al ring de un atomico y despues
+     * escribe. Si `wma_tuner_stop()` liberara el ring, un callback que ya cargo
+     * el puntero escribiria en memoria muerta. Parar el afinador desengancha el
+     * puntero (el escritor deja de recibir trabajo) pero no libera nada; lo
+     * unico que arranca y para de verdad es el thread que drena.
+     *
+     * Se liberan en `wma_engine_destroy()`, DESPUES de parar el stream de
+     * entrada, que es el unico momento en que se sabe que no queda un callback
+     * de captura en vuelo. */
+    std::unique_ptr<wma::analysis::AnalysisRing> analysisRing;
+    std::unique_ptr<wma::analysis::AnalysisSnapshot> analysisSnapshot;
+    std::unique_ptr<wma::analysis::AnalysisThread> analysisThread;
+    std::mutex analysisMutex;
 
     /* Mode system */
     std::atomic<int> currentMode{0};
@@ -45,3 +65,22 @@ struct WmaEngine {
  * @return false if the node could not be created.
  */
 bool wmaEnsureInputNode(WmaEngine* engine);
+
+/**
+ * Lazily create the engine's analysis seam: ring, snapshot and drain thread.
+ *
+ * Exposed for the same reason as wmaEnsureInputNode(): the JNI bridge has to
+ * share the SAME ring the C API uses. Two rings would mean the capture thread
+ * feeds one of them and the reader polls the other — a tuner that never moves,
+ * which is exactly the class of defect that made every wma_input_* function
+ * operate on a node the Android path never touched.
+ *
+ * Does NOT start the thread and does NOT attach the ring to the input node:
+ * that is wma_tuner_start()'s job, so that an engine nobody tunes with pays
+ * nothing on the capture thread.
+ *
+ * Thread-safe: takes the engine's analysisMutex.
+ *
+ * @return false if the seam could not be created.
+ */
+bool wmaEnsureAnalysis(WmaEngine* engine);

@@ -76,8 +76,21 @@ WmaEngine* wma_engine_create(void) {
 
 void wma_engine_destroy(WmaEngine* engine) {
     if (!engine) return;
+    // El orden importa y es el unico correcto: primero se para el stream de
+    // captura, y recien ahi se puede liberar el ring. Al reves, un callback de
+    // captura en vuelo escribiria en memoria liberada. `stopInputStream()`
+    // junta el thread del stream, asi que despues de esa linea no queda ninguno.
     if (engine->inputNode) {
         engine->inputNode->stopInputStream();
+        engine->inputNode->setAnalysisRing(nullptr);
+    }
+    if (engine->analysisThread) {
+        engine->analysisThread->stop();
+        engine->analysisThread.reset();
+    }
+    engine->analysisSnapshot.reset();
+    engine->analysisRing.reset();
+    if (engine->inputNode) {
         engine->inputNode.reset();
     }
     if (engine->engine) {
@@ -944,6 +957,112 @@ bool wma_input_get_metering_snapshot(const WmaEngine* engine, float* out_values)
     out_values[5] = node.isNoiseGateOpen() ? 1.0f : 0.0f;
     out_values[6] = node.getInputLatencyMs();
     return true;
+}
+
+/* ================================================================
+ * 12b. Tuner analysis (REQ-001 S1)
+ * ================================================================ */
+
+// Los dos lados de la frontera tienen que declarar el MISMO tamaño. Si S2
+// agrega un valor al snapshot y nadie toca el #define, el consumidor pasa un
+// array corto y `read()` escribe fuera de el. Que lo pare el compilador.
+static_assert(WMA_TUNER_SNAPSHOT_VALUES == wma::analysis::kSnapshotValueCount,
+              "WMA_TUNER_SNAPSHOT_VALUES quedo desincronizado de kSnapshotValueCount");
+
+bool wmaEnsureAnalysis(WmaEngine* e) {
+    if (!e) return false;
+    std::lock_guard<std::mutex> lock(e->analysisMutex);
+    if (e->analysisThread) return true;
+    try {
+        e->analysisRing = std::make_unique<wma::analysis::AnalysisRing>();
+        e->analysisSnapshot = std::make_unique<wma::analysis::AnalysisSnapshot>();
+        e->analysisThread = std::make_unique<wma::analysis::AnalysisThread>(
+            *e->analysisRing, *e->analysisSnapshot);
+        return true;
+    } catch (...) {
+        // Fail closed y COMPLETO: dejar el ring construido y el thread no
+        // dejaria un motor que escribe a un ring que nadie drena, y el snapshot
+        // seguiria diciendo "no hay dato" para siempre sin que nada lo explique.
+        e->analysisThread.reset();
+        e->analysisSnapshot.reset();
+        e->analysisRing.reset();
+        return false;
+    }
+}
+
+bool wma_tuner_start(WmaEngine* engine) {
+    if (!engine || !engine->engine) return false;
+    if (!wmaEnsureInputNode(engine)) return false;   // sin captura no hay que analizar
+    if (!wmaEnsureAnalysis(engine)) return false;
+
+    // ENGANCHAR EL NODO AL MOTOR, Y NO DAR POR SENTADO QUE YA LO ESTA.
+    //
+    // Hasta aca, el unico camino que llamaba a `setInputNode()` era
+    // `wmaAttachInputForMode()`, o sea entrar a un modo de audio. Un consumidor
+    // que solo quiere afinar no tiene por que pasar por ahi, y si no lo hace el
+    // motor no tiene nodo de entrada: `onAudioReady()` recibe el buffer de
+    // captura y no se lo entrega a nadie. El afinador quedaria en silencio
+    // permanente sin un solo error — que es exactamente la forma en que este
+    // repo ya perdio los `wma_input_*` sobre un nodo que Android nunca tocaba.
+    //
+    // Lo que NO se toca es el monitoreo: afinar no es escucharse. Encenderlo
+    // aca cambiaria lo que sale por los parlantes como efecto colateral de
+    // pedir un afinador.
+    engine->engine->setInputNode(engine->inputNode);
+
+    // Cuando el backend NO entrega la captura por `onAudioReady` (o sea todo lo
+    // que no es USB), la entrada llega por un stream propio del nodo y hay que
+    // abrirlo. En el host devuelve false y no pasa nada: ahi la captura entra
+    // por el callback, que es justo el otro brazo de este if.
+    const auto backendType = watermelon_audio::BackendManager::getInstance().getCurrentType();
+    const bool backendDeliversInput =
+        (backendType == watermelon_audio::BackendType::LIBUSB);
+    if (!backendDeliversInput && !engine->inputNode->isInputStreamRunning()) {
+        engine->inputNode->startInputStream();
+    }
+
+    std::lock_guard<std::mutex> lock(engine->analysisMutex);
+    if (!engine->analysisThread || !engine->analysisRing) return false;
+
+    // El rate MEDIDO, no el que se preparo: `getCaptureSampleRate()` devuelve 0
+    // mientras no haya stream de entrada abierto, y ese 0 tiene que llegar tal
+    // cual al snapshot. Sustituirlo aca por 48000 seria reintroducir a mano la
+    // constante que las tareas 1.16-1.18 sacaron del camino.
+    const int rate = engine->inputNode ? engine->inputNode->getCaptureSampleRate() : 0;
+
+    // El orden es: primero el drenador, despues el escritor. Al reves, el ring
+    // se llena y descarta frames durante la ventana en que nadie lo lee, y el
+    // primer snapshot arrancaria con un contador de dropped que no significa
+    // nada sobre el sistema.
+    engine->analysisThread->start(rate);
+    if (engine->inputNode) {
+        engine->inputNode->setAnalysisRing(engine->analysisRing.get());
+    }
+    return engine->analysisThread->isRunning();
+}
+
+void wma_tuner_stop(WmaEngine* engine) {
+    if (!engine) return;
+    // Desenganchar PRIMERO: el escritor deja de recibir trabajo antes de que el
+    // lector se vaya. Al reves habria una ventana en que la captura sigue
+    // llenando un ring que ya nadie drena.
+    if (engine->inputNode) engine->inputNode->setAnalysisRing(nullptr);
+    std::lock_guard<std::mutex> lock(engine->analysisMutex);
+    if (engine->analysisThread) engine->analysisThread->stop();
+    // El ring y el snapshot NO se liberan: ver la nota en watermelon_audio_internal.h.
+}
+
+bool wma_tuner_is_running(const WmaEngine* engine) {
+    if (!engine || !engine->analysisThread) return false;
+    return engine->analysisThread->isRunning();
+}
+
+bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values) {
+    if (!engine || !engine->analysisSnapshot || !out_values) return false;
+    // `read()` deja `out_values` intacto si nunca se publico nada o si la copia
+    // salio desgarrada. Devolver ceros seria devolver una medicion que nadie
+    // hizo — la leccion de los dos stubs que mentian.
+    return engine->analysisSnapshot->read(out_values);
 }
 
 void wma_input_set_monitoring(WmaEngine* engine, bool enabled) {

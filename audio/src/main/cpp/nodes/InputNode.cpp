@@ -292,6 +292,9 @@ bool InputNode::startInputStream() {
     }
 
     mInputStreamRunning.store(true);
+    // El stream de Oboe SI sabe a que rate quedo, y es la fuente mas confiable
+    // que hay para el camino de captura.
+    setCaptureSampleRate(adapter->stream->getSampleRate());
     LOGI("Input stream started");
     return true;
 #endif  // WMA_HAS_OBOE
@@ -345,6 +348,22 @@ void InputNode::processCapturedBlock(float* stereo, int numFrames,
     // Ring de captura, para el grafo de audio.
     if (mRingBuffer.availableToWrite() >= numSamples) {
         mRingBuffer.write(stereo, numSamples);
+    }
+
+    // REQ-001 S1 (1.11) — el ring del afinador. Va DESPUES del DSP de entrada
+    // (ganancia, DC blocker, gate) porque el afinador tiene que analizar lo
+    // mismo que el usuario escucha, no la senal cruda del conversor.
+    //
+    // `writeStereo` es lock-free, no asigna y no loguea: la sobrecarga la cuenta
+    // un `wma::RtCounter` adentro del ring, nunca un log. Y no depende del
+    // monitoreo — se afina con el monitoreo apagado, que es el caso normal.
+    if (auto* ring = mAnalysisRing.load(std::memory_order_acquire)) {
+        // El rate va JUNTO con las muestras y no una sola vez al arrancar: un
+        // cambio de configuracion de stream lo mueve en caliente, y un snapshot
+        // que publique el rate viejo escala todo lo que mida. Ver
+        // AnalysisRing::setCaptureRate().
+        ring->setCaptureRate(mCaptureSampleRate.load(std::memory_order_relaxed));
+        ring->writeStereo(stereo, numFrames);
     }
 
     // Ring de monitoreo.

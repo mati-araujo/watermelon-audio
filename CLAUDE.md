@@ -126,6 +126,12 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 >   tomaba `chainMutex` y lo llamaban cuatro setters desde el thread de audio (WD-1.6).
 > - **El flush de denormales es POR THREAD.** `flushDenormalsRtSafe()` va al principio de cada
 >   callback; `flushDenormals()` loguea y es solo para el arranque, en el thread de control.
+> - **Un metodo nuevo con un nombre comun puede APAGAR parte del lint.** El walker sigue solo
+>   las llamadas que resuelven a UNA definicion, asi que un segundo `run`/`analyze`/`read` en
+>   CUALQUIER parte del arbol vuelve ambigua una llamada y le saca cobertura — con el lint en
+>   verde. Paso dos veces el 2026-08-19. Por eso `scripts/rt-coverage-baseline.txt` declara
+>   que funciones se alcanzan y el lint falla si el conjunto cambia: si te sale en rojo una
+>   funcion que no tocaste, la salida es **renombrar tu metodo**, no redeclarar la cobertura.
 
 ### C++ portabilidad (iOS)
 - Todo el motor cross-compila para iOS **salvo** `jni/`, `usb/`, `OboeBackend`,
@@ -281,7 +287,19 @@ python3 scripts/check-rt-safety.py         # [gate] Guardrail WD-1.1. Camina el 
                                            # scripts/rt-safety-baseline.txt para la deuda
                                            # con dueno declarado — y ese archivo es un
                                            # TRINQUETE: falla tambien si una entrada suya
-                                           # ya no se reproduce
+                                           # ya no se reproduce.
+                                           # SEGUNDO TRINQUETE, sobre la COBERTURA:
+                                           # scripts/rt-coverage-baseline.txt declara QUE
+                                           # funciones alcanza el walker, y el lint falla
+                                           # si el conjunto cambia en cualquier direccion.
+                                           # Existe porque la cobertura se encoge SOLA: el
+                                           # walker sigue solo lo que resuelve a UNA
+                                           # definicion, asi que un metodo nuevo con un
+                                           # nombre comun (`run`, `analyze`, `read`...) en
+                                           # CUALQUIER parte del arbol vuelve ambigua una
+                                           # llamada y el lint queda verde revisando menos.
+                                           # Se redeclara con --update-coverage, y SU DIFF
+                                           # ES LA REVISION
 bash scripts/build-harness.sh              # [gate] :harness: Android + framework iOS +
                                            # símbolos + shell de Xcode + ARRANQUE
                                            # de la app (lo único que agarra un

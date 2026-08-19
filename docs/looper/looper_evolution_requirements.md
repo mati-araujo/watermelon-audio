@@ -26,7 +26,6 @@ Proveer las primitivas DSP y de motor que hacen posible el looping "mágico" par
 | Latencias medidas: `outputLatencyMs` (Oboe), `mInputLatencyFrames` (InputNode) | backends / `nodes/InputNode.cpp` |
 | Metrónomo: `MetronomeClick` (sine burst 1200/900 Hz, 10 ms, RT) | `looper/MetronomeClick.h` |
 | Resampler Catmull-Rom (import) y playhead fraccional Catmull-Rom (speed 0.5–2x, varispeed) | `looper/LooperExporter.cpp`, `TrackBuffer::mixInto` |
-| FFT propia Cooley-Tukey (256–2048), magnitudes/smoothed/peak-hold | `analysis/SpectrumAnalyzer.h` |
 | VocoderEffect (bandas, formant shift, carrier int/ext) + 24 efectos más | `effects/` |
 | Suites gtest host-compilables (225+ tests) | `looper/tests/`, etc. |
 

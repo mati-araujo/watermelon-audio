@@ -27,7 +27,7 @@ dos opciones malas y una razonable.
 
 Seguir TODAS las definiciones de un nombre ambiguo sobre-aproxima tanto que el
 lint se vuelve ruido: `prepare(` tiene veinte definiciones en el arbol y
-arrastra `SpectrumAnalyzer::prepare` a un grafo donde no esta. Un guardrail con
+arrastra `OutputStage::prepare` a un grafo donde no esta. Un guardrail con
 150 falsos positivos no se lee, se silencia.
 
 Asi que se siguen solo las llamadas que resuelven a UNA definicion, mas un mapa
@@ -36,10 +36,35 @@ explicito de los puntos de despacho virtual que SI estan en el path RT
 vista y se revisa: agregar un `Effect` nuevo no lo toca, pero agregar una
 jerarquia virtual nueva al callback si.
 
-El error queda del lado de la SUB-aproximacion, y se compensa con dos cosas:
+El error queda del lado de la SUB-aproximacion, y se compensa con tres cosas:
 las raices se declaran generosamente (`EffectChain::process` y `OutputStage`
-son raices propias aunque el motor ya las llame), y `--graph` imprime lo
-alcanzado para que un hueco se pueda ver.
+son raices propias aunque el motor ya las llame), `--graph` imprime lo
+alcanzado para que un hueco se pueda ver, y el TRINQUETE DE COBERTURA de abajo
+hace que un hueco nuevo no pueda abrirse en silencio.
+
+EL TRINQUETE DE COBERTURA
+-------------------------
+La sub-aproximacion tiene un efecto de segundo orden que es peor que ella: la
+cobertura se ENCOGE sola. Basta que alguien agregue en cualquier parte del
+arbol un metodo con un nombre comun (`run`, `read`, `analyze`, `process`...)
+para que una llamada que antes resolvia a UNA definicion pase a ser ambigua y
+el walker deje de seguirla. El lint queda verde revisando menos codigo, y nada
+lo dice. Medido dos veces el 2026-08-19:
+
+  - Borrar `analysis/SpectrumAnalyzer` hizo CRECER el grafo de 366 a 367. La
+    ganada fue `VocoderBank::analyze`, que corre en el callback via
+    `VocoderEffect::process`: mientras existio esa FFT muerta habia dos
+    `::analyze` en el arbol y `VocoderBank::analyze` nunca fue revisada.
+  - Agregar `AnalysisThread::run()` lo hizo BAJAR de 367 a 365: se perdieron
+    `TrackStorage::run` y `ChunkedAudioBuffer::contiguousRun`, que cuelga de
+    ella. Se resolvio renombrando el metodo a `drainLoop` — pero nada aviso.
+
+Por eso `scripts/rt-coverage-baseline.txt` declara QUE funciones alcanza el
+walker, y el lint falla si el conjunto no es exactamente ese: si sale una es
+cobertura perdida, y si entra una es cobertura nueva sin declarar. Es un
+conjunto y no un numero a proposito — un rename que pierde una funcion y gana
+otra deja el conteo igual. `--update-coverage` lo reescribe, y SU DIFF ES LA
+REVISION: si aparece una linea que el cambio no tocaba, eso es el hallazgo.
 
 ESCAPE HATCH
 ------------
@@ -51,9 +76,12 @@ Uso:
     python3 scripts/check-rt-safety.py            # falla con exit 1 si hay violaciones
     python3 scripts/check-rt-safety.py --graph    # imprime el call-graph alcanzado
     python3 scripts/check-rt-safety.py --self-test  # se verifica a si mismo (ver abajo)
+    python3 scripts/check-rt-safety.py --update-coverage  # redeclara la cobertura
 
 El --self-test inyecta una violacion sintetica en un cuerpo alcanzable y afirma
-que el script la encuentra. Un lint que nunca se vio fallar no es un lint.
+que el script la encuentra, y saca una funcion del conjunto alcanzado para
+afirmar que el trinquete de cobertura la extraña. Un lint que nunca se vio
+fallar no es un lint.
 """
 
 from __future__ import annotations
@@ -140,6 +168,7 @@ FORBIDDEN = [
 FORBIDDEN = [(re.compile(p), why) for p, why in FORBIDDEN]
 
 BASELINE_PATH = REPO / "scripts/rt-safety-baseline.txt"
+COVERAGE_PATH = REPO / "scripts/rt-coverage-baseline.txt"
 
 ALLOW_RE = re.compile(r"//\s*RT-SAFE-ALLOW:\s*(?P<reason>\S.*)$")
 ALLOW_BARE_RE = re.compile(r"//\s*RT-SAFE-ALLOW\b")
@@ -431,10 +460,120 @@ def load_baseline() -> dict[str, str]:
     return entries
 
 
+# ---------------------------------------------------------------------------
+# Trinquete de cobertura. Ver "EL TRINQUETE DE COBERTURA" en el docstring.
+# ---------------------------------------------------------------------------
+COVERAGE_HEADER = """\
+# Las funciones que el walker de `check-rt-safety.py` alcanza desde las raices
+# RT. O sea: EXACTAMENTE el codigo que el guardrail esta revisando.
+#
+# ESTO ES UN TRINQUETE, NO UN INVENTARIO. El lint falla si:
+#   - una funcion de aca ya no se alcanza  (COBERTURA PERDIDA), y TAMBIEN
+#   - se alcanza una que no esta aca       (cobertura nueva sin declarar)
+#
+# Mismo mecanismo que `scripts/rt-safety-baseline.txt` y que
+# `audio/src/main/cpp/effects/tests/reset-baseline.txt`, y por un motivo propio:
+# la cobertura de este lint puede ENCOGERSE SOLA, sin que nadie toque el path
+# RT. El walker sigue solo las llamadas que resuelven a UNA definicion, asi que
+# alcanza con que aparezca en cualquier parte del arbol un segundo metodo con un
+# nombre comun (`run`, `read`, `analyze`, `process`, `prepare`...) para que una
+# llamada se vuelva ambigua y el walker deje de seguirla — con el lint en verde.
+# Paso dos veces el 2026-08-19; los dos casos estan contados en el docstring del
+# script.
+#
+# Es un CONJUNTO y no un conteo a proposito: un rename que pierde una funcion y
+# gana otra deja el numero igual.
+#
+# Para redeclararlo:  python3 scripts/check-rt-safety.py --update-coverage
+# y SU DIFF ES LA REVISION. Si sale una linea que tu cambio no tocaba, eso es el
+# hallazgo — no lo commitees sin entender por que se fue.
+#
+# Formato:  <archivo>::<funcion>[ x<N>]   (N = definiciones alcanzadas, si >1)
+# ---------------------------------------------------------------------------
+"""
+
+COVERAGE_ENTRY_RE = re.compile(r"^(?P<key>.+?)(?:\s+x(?P<count>\d+))?$")
+
+
+def coverage_key(fn: Function) -> str:
+    return f"{fn.path.relative_to(REPO).as_posix()}::{fn.qname}"
+
+
+def coverage_counts(functions: list[Function]) -> dict[str, int]:
+    """Multiset de lo alcanzado. La multiplicidad cuenta: un `qname` con dos
+    definiciones en el mismo archivo (overloads) son dos cuerpos revisados, y
+    perder uno es perder cobertura igual que perder la funcion entera."""
+    counts: dict[str, int] = {}
+    for fn in functions:
+        key = coverage_key(fn)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def load_coverage() -> dict[str, int] | None:
+    """`None` = el archivo no esta. Eso es rojo, no 'sin trinquete': borrarlo
+    seria la forma mas facil de apagar esto sin que se note."""
+    if not COVERAGE_PATH.exists():
+        return None
+    entries: dict[str, int] = {}
+    for raw in COVERAGE_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = COVERAGE_ENTRY_RE.match(line)
+        key = m.group("key").strip()
+        entries[key] = int(m.group("count") or 1)
+    return entries
+
+
+def render_coverage(counts: dict[str, int]) -> str:
+    # El header se preserva del archivo que ya esta: lo que dice ahi es prosa
+    # revisada, y un --update-coverage no tiene por que pisarla.
+    header = COVERAGE_HEADER
+    if COVERAGE_PATH.exists():
+        kept = []
+        for line in COVERAGE_PATH.read_text(encoding="utf-8").splitlines():
+            if line.strip() and not line.lstrip().startswith("#"):
+                break
+            kept.append(line)
+        while kept and not kept[-1].strip():
+            kept.pop()
+        if kept:
+            header = "\n".join(kept) + "\n"
+    body = "".join(
+        f"{key}\n" if n == 1 else f"{key} x{n}\n"
+        for key, n in sorted(counts.items())
+    )
+    return f"{header}\n{body}"
+
+
+def check_coverage(functions: list[Function]) -> tuple[list[str], list[str], bool]:
+    """-> (perdidas, nuevas, falta_el_archivo). Cada elemento lleva la
+    multiplicidad cuando cambio sin desaparecer."""
+    now = coverage_counts(functions)
+    declared = load_coverage()
+    if declared is None:
+        return [], [], True
+
+    lost, gained = [], []
+    for key in sorted(set(declared) | set(now)):
+        before, after = declared.get(key, 0), now.get(key, 0)
+        if before == after:
+            continue
+        label = key if max(before, after) == 1 else f"{key}  (declaradas {before}, alcanzadas {after})"
+        (lost if after < before else gained).append(label)
+    return lost, gained, False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="WD-1.1 — guardrail de RT-safety")
     ap.add_argument("--graph", action="store_true", help="imprimir el call-graph alcanzado")
     ap.add_argument("--self-test", action="store_true", help="verificar que el lint detecta")
+    ap.add_argument(
+        "--update-coverage",
+        action="store_true",
+        help="reescribir scripts/rt-coverage-baseline.txt con lo que se alcanza HOY",
+    )
     args = ap.parse_args()
 
     files = collect_sources()
@@ -454,6 +593,16 @@ def main() -> int:
             print(f"  {fn.qname:<55} {fn.path.relative_to(REPO)}:{fn.line}")
         return 0
 
+    if args.update_coverage:
+        before = load_coverage()
+        COVERAGE_PATH.write_text(render_coverage(coverage_counts(functions)), encoding="utf-8")
+        n_before = sum(before.values()) if before else 0
+        print(
+            f"{COVERAGE_PATH.relative_to(REPO)}: {len(functions)} funciones alcanzadas "
+            f"(antes {n_before}). Revisa el diff ANTES de commitear."
+        )
+        return 0
+
     if args.self_test:
         # Inyecta una violacion sintetica en un cuerpo alcanzable y afirma que
         # el escaneo la ve. Sin esto, un cambio que rompa el parser dejaria el
@@ -464,7 +613,28 @@ def main() -> int:
         if not found:
             print("SELF-TEST FALLO: el lint no detecto una violacion inyectada.", file=sys.stderr)
             return 1
-        print(f"self-test OK — violacion inyectada detectada en {target.qname}")
+        # Y la otra mitad: que el trinquete de cobertura extrañe lo que se fue.
+        # Sin esto, el dia que `check_coverage` se rompa el archivo queda como
+        # decoracion y la cobertura vuelve a poder encogerse en silencio.
+        retired = functions[-1]
+        lost, gained, absent = check_coverage(functions[:-1])
+        if absent:
+            print(
+                f"SELF-TEST FALLO: falta {COVERAGE_PATH.relative_to(REPO)}.",
+                file=sys.stderr,
+            )
+            return 1
+        if not any(k.startswith(coverage_key(retired)) for k in lost):
+            print(
+                "SELF-TEST FALLO: el trinquete de cobertura no vio una funcion "
+                f"retirada del grafo ({retired.qname}).",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"self-test OK — violacion inyectada detectada en {target.qname}; "
+            f"cobertura perdida detectada en {retired.qname}"
+        )
         return 0
 
     violations, bad_allows = scan(functions, raw)
@@ -478,7 +648,12 @@ def main() -> int:
     violations = [v for v in violations if key_of(v) not in baseline]
     stale = sorted(set(baseline) - seen_keys)
 
-    print(f"RT-safety — {len(functions)} funciones alcanzables desde {len(RT_ROOTS)} raices RT")
+    lost, gained, no_coverage_file = check_coverage(functions)
+
+    print(
+        f"RT-safety — {len(functions)} funciones alcanzables desde {len(RT_ROOTS)} raices RT",
+        flush=True,
+    )
     if baselined:
         print(f"  {len(baselined)} violaciones en el baseline (deuda con dueno declarado):")
         for v in baselined:
@@ -496,6 +671,48 @@ def main() -> int:
             "\nUn baseline con entradas muertas deja de decir la verdad sobre la deuda.",
             file=sys.stderr,
         )
+
+    if no_coverage_file:
+        print(
+            f"\nFALTA {COVERAGE_PATH.relative_to(REPO)} — sin ese archivo este lint no\n"
+            "sabe cuanto codigo revisaba ayer, y su cobertura puede encogerse sin que\n"
+            "nadie se entere. Generalo con:\n"
+            "  python3 scripts/check-rt-safety.py --update-coverage",
+            file=sys.stderr,
+        )
+    else:
+        if lost:
+            print(
+                f"\nCOBERTURA PERDIDA ({len(lost)}): esto lo revisaba el lint y ya no se\n"
+                "alcanza desde las raices RT:",
+                file=sys.stderr,
+            )
+            for k in lost:
+                print(f"  - {k}", file=sys.stderr)
+            print(
+                "\nSi las borraste o dejaron de llamarse desde el path RT, redeclara la\n"
+                "cobertura. Pero si no tocaste nada de eso, lo mas probable es que hayas\n"
+                "agregado en cualquier parte del arbol un metodo con el MISMO nombre\n"
+                "simple, y que eso haya vuelto AMBIGUA la llamada: el walker sigue solo\n"
+                "lo que resuelve a una definicion, asi que dejo de entrar ahi. La salida\n"
+                "en ese caso es renombrar el metodo nuevo, no redeclarar la cobertura.",
+                file=sys.stderr,
+            )
+        if gained:
+            print(
+                f"\nCOBERTURA NUEVA SIN DECLARAR ({len(gained)}): el walker alcanza esto y no\n"
+                f"figura en {COVERAGE_PATH.relative_to(REPO)}:",
+                file=sys.stderr,
+            )
+            for k in gained:
+                print(f"  + {k}", file=sys.stderr)
+        if lost or gained:
+            print(
+                "\nRedeclarar la cobertura:\n"
+                "  python3 scripts/check-rt-safety.py --update-coverage\n"
+                "y REVISAR EL DIFF: una linea que tu cambio no explica es el hallazgo.",
+                file=sys.stderr,
+            )
 
     if bad_allows:
         print("\nRT-SAFE-ALLOW sin razon (la razon es obligatoria):", file=sys.stderr)
@@ -515,10 +732,10 @@ def main() -> int:
         )
         return 1
 
-    if bad_allows or stale:
+    if bad_allows or stale or lost or gained or no_coverage_file:
         return 1
 
-    print("sin violaciones nuevas")
+    print("sin violaciones nuevas — cobertura igual a la declarada")
     return 0
 
 

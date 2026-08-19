@@ -79,6 +79,9 @@ endif()
 if(NOT TARGET watermelon-voice)
     add_subdirectory(${WMA_CPP_ROOT}/voice   ${CMAKE_BINARY_DIR}/voice)
 endif()
+if(NOT TARGET watermelon-analysis)
+    add_subdirectory(${WMA_CPP_ROOT}/analysis ${CMAKE_BINARY_DIR}/analysis)
+endif()
 if(NOT TARGET watermelon-looper)
     add_subdirectory(${WMA_CPP_ROOT}/looper  ${CMAKE_BINARY_DIR}/looper)
 endif()
@@ -107,7 +110,6 @@ set(CORE_TESTED_SOURCES
     ${WMA_CPP_ROOT}/nodes/OscillatorNode.cpp
     ${WMA_CPP_ROOT}/nodes/EffectChainNode.cpp
     ${WMA_CPP_ROOT}/nodes/MixerNode.cpp
-    ${WMA_CPP_ROOT}/analysis/SpectrumAnalyzer.cpp
     ${WMA_CPP_ROOT}/looper/LooperExporter.cpp
     ${WMA_CPP_ROOT}/platform/Logger.cpp
     # Despite the name, this file is plain POSIX + inline asm with the only
@@ -126,6 +128,7 @@ add_executable(core_tests
     test_denormal_flush.cpp
     test_input_node_retire.cpp
     test_input_node_dsp.cpp
+    test_capture_sample_rate.cpp
     test_offline_render.cpp
     test_fade_lifecycle.cpp
     test_capture_requests.cpp
@@ -138,6 +141,7 @@ add_executable(core_tests
     test_c_api_voice.cpp
     test_c_api_mode.cpp
     test_c_api_analysis.cpp
+    test_c_api_tuner.cpp
     test_c_api_transport.cpp
     test_c_api_diagnostics.cpp
     test_c_api_looper.cpp
@@ -168,6 +172,7 @@ target_include_directories(core_tests PRIVATE
 
 find_package(Threads REQUIRED)
 target_link_libraries(core_tests PRIVATE
+    watermelon-analysis
     watermelon-voice
     watermelon-looper
     watermelon-engines
