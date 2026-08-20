@@ -29,6 +29,21 @@
 #include <string>
 #include <vector>
 
+// La deteccion va en #if ANIDADOS y no en una sola expresion, y eso no es estilo:
+// GCC no define `__has_feature`, y en una linea `#if` el preprocesador evalua el
+// token igual aunque el `defined(...)` de al lado sea falso — no hay cortocircuito
+// que valga. Sale `error: missing binary operator before token "("`, que es
+// exactamente como se cayo el job de ubuntu la primera vez que escribi esto.
+// Apple clang lo aceptaba, asi que verificarlo local no alcanzaba.
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+#    define WMA_TEST_UNDER_SANITIZER 1
+#elif defined(__has_feature)
+#    if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer) \
+        || __has_feature(memory_sanitizer)
+#        define WMA_TEST_UNDER_SANITIZER 1
+#    endif
+#endif
+
 namespace wma_test {
 namespace {
 
@@ -251,6 +266,24 @@ TEST(McLeodPitchTest, TheResultIsBitIdenticalRegardlessOfTheCallersBlockSize) {
  * un guardrail que falla por ruido se termina silenciando.
  */
 TEST(McLeodPitchCost, TheDetectorCostsAFractionOfRealTimeAndTheNumberIsRecorded) {
+#ifdef WMA_TEST_UNDER_SANITIZER
+    // 🔴 MEDIR PERFORMANCE CON EL CODIGO INSTRUMENTADO NO MIDE NADA.
+    //
+    // El comentario de arriba dice que el techo es flojo porque "un techo
+    // ajustado falla cuando la maquina esta cargada". Preveia la CARGA; no
+    // preveia el SANITIZER, que multiplica el costo por un factor de 5 a 10 y
+    // deja sin sentido a cualquier techo razonable.
+    //
+    // Medido el 2026-08-20 en el gate local bajo TSan: 0,404 contra el techo de
+    // 0,25 — y con CERO carreras reportadas por TSan. Un rojo que no es un
+    // defecto es exactamente lo que termina haciendo que alguien silencie el
+    // guardrail entero, asi que el que se saltea es este test y no el job.
+    //
+    // El numero de costo sigue saliendo de la corrida normal, que es donde
+    // significa algo.
+    GTEST_SKIP() << "el costo no se mide bajo sanitizers: la instrumentacion "
+                    "domina la medicion";
+#endif
     McLeodPitch mpm;
     mpm.prepare(kRate);
     const int frames = 10 * kRate;
