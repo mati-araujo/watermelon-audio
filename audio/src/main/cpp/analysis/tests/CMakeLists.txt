@@ -28,6 +28,7 @@ add_executable(analysis_tests
     test_mcleod_pitch.cpp
     test_strobe_tracker.cpp
     test_inharmonicity.cpp
+    test_intonation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp
