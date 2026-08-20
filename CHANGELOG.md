@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.2.0...v2.3.0) (2026-08-20)
+
+
+### Features
+
+* **docs:** contrato de exactitud que no puede quedar stale ([#154](https://github.com/mati-araujo/watermelon-audio/issues/154)) ([b93dca8](https://github.com/mati-araujo/watermelon-audio/commit/b93dca803b4eaed61d181eba75c963cd94e749ab))
+
+
+### Bug Fixes
+
+* el afinador esperaba mal, y el helper alimentaba peor ([#159](https://github.com/mati-araujo/watermelon-audio/issues/159)) ([4124698](https://github.com/mati-araujo/watermelon-audio/commit/4124698a59ed2bef72e5b2ec80622caff8a029b9))
+
 ## [2.2.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.1.2...v2.2.0) (2026-08-19)
 
 
