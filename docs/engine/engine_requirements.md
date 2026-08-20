@@ -999,9 +999,34 @@ La protección va una vez, al final, en `OutputStage`.
 `prepare(48000, 4096)` literal. `onStreamConfigChanged` llama a `mOscBank.prepare`,
 `mEffectChain.setSampleRate` y `mOutputStage.prepare` — **no al dispatcher**.
 
-**Escenario de falla.** En un device que negocia 44,1 kHz, los engines quedan preparados para 48.
+~~**Escenario de falla.** En un device que negocia 44,1 kHz, los engines quedan preparados para 48.
 Una cuerda de Karplus-Strong afinada por longitud de línea de retardo queda **8,8% sharp** — 1,5
-semitonos. 44,1 kHz es el rate nativo de una fracción grande de dispositivos Bluetooth y USB.
+semitonos.~~
+
+> 🔴 **EL ESCENARIO NO REPRODUCE, y la dirección estaba invertida. Medido el 2026-08-20 sobre
+> `d3559a5`.** Este ítem está **cerrado por [[REQ-006]]**; lo de abajo se conserva como quedó
+> escrito, tachado.
+>
+> **1. El síntoma no existe.** Con el motor entero arrancado a 44,1 kHz por el camino de coerción
+> real, la cuerda sale **+2,86 cents (220 Hz) y +5,41 (440 Hz)** — no 1,5 semitonos.
+> `AudioEngine::start()` **sí** prepara el dispatcher con el rate real
+> (`configureComponentsWithSampleRate`, `AudioEngine.cpp:568` y `:2035`). Que
+> `onStreamConfigChanged` no lo mencione es cierto y era irrelevante: el rate le llegaba por otro
+> lado.
+>
+> Verificado con **control positivo**, porque "no reproduce" es indistinguible de "el
+> instrumento no mide lo que creo": forzando `prepare(48000, …)` el mismo test da
+> **−143,89 / −140,68 cents**.
+>
+> **2. La dirección está al revés.** Sale **BAJA**, no sharp. El lazo se dimensiona en muestras
+> como `fs_preparado / f`; con un `fs_preparado` mayor que el real el lazo tiene más muestras,
+> tarda más en dar la vuelta, y un período más largo es una frecuencia más baja.
+>
+> **3. El defecto real era otro, y peor.** Esa misma línea `:568` re-prepara los 91 engines
+> **después de `manager.start()`**, o sea con el backend entregando callbacks: reasigna la
+> `DelayLine` de Karplus-Strong y hace `resize()` en Granular mientras `process()` las lee.
+> **4 carreras y abort bajo TSan.** Y el arreglo que este ítem proponía —llamar `prepare()` desde
+> `onStreamConfigChanged`— **era la fuente de la carrera**: 23 warnings al medirlo.
 
 ~~Un segundo caso, más chico: `EffectChain.cpp:50` computa
 `mCrossfadeSamples = 48000 * 0.030f` en el constructor y nunca lo recalcula en `setSampleRate()`.
@@ -1013,10 +1038,20 @@ A 96 kHz el crossfade de routing dura 15 ms; a 44,1 kHz, 32,6 ms.~~
 > cierto. La auditoría leyó el constructor y no el setter.
 
 **Criterio de aceptación.**
-1. `onStreamConfigChanged` re-prepara los engines del dispatcher, y todo lo demás que tenga estado
+1. ~~`onStreamConfigChanged` re-prepara los engines del dispatcher, y todo lo demás que tenga estado
    dependiente del rate. Se audita con un grep de `48000` sobre las 242 ocurrencias no-test y se
-   clasifica cada una: constante legítima, default, o bug.
-2. `mCrossfadeSamples` se recalcula en `setSampleRate()`.
+   clasifica cada una: constante legítima, default, o bug.~~ ✅ **Cerrado por REQ-006** (etapas 1,
+   2 y 3). Dos correcciones sobre cómo estaba escrito:
+   - Las ocurrencias no eran 242 sino **250** — el conteo drifteó, y por eso el trinquete cuenta
+     **llamadas** y no ocurrencias del número.
+   - **232 de las 250 no son clasificables como "bug" ni en principio**: son comentarios,
+     constantes de diseño e inicializaciones de miembro en constructores, y **un constructor no
+     tiene el rate**, así que ahí el literal es la única opción honesta. Lo que separa un default
+     legítimo de un bug no es el archivo sino **si en ese punto el rate real estaba disponible**.
+     Las 18 llamadas que sí lo estaban quedan declaradas y clasificadas en
+     `scripts/literal-rate-baseline.txt`, con `scripts/check-literal-rate.py` como trinquete
+     bidireccional.
+2. ~~`mCrossfadeSamples` se recalcula en `setSampleRate()`.~~ Ya era falso (ver arriba).
 3. ~~Test de WD-2.3.2 verde: fundamental medida por FFT no se corre entre 44,1 / 48 / 96 kHz.~~
 
 > 🔴 **El criterio 3 estaba mal escrito y se puede cumplir dejando el defecto (2026-08-17).**
@@ -1037,7 +1072,17 @@ A 96 kHz el crossfade de routing dura 15 ms; a 44,1 kHz, 32,6 ms.~~
 > que descontar. FM / SUPERSAW / WAVETABLE / GRANULAR **no se midieron** — el baseline lo dice
 > como tarea pendiente, no como afirmación de que estén bien.
 
-**Esfuerzo** 3 d · **Riesgo** medio (toca el ciclo de vida de dieciséis engines) · **Depende de** WD-2.3
+~~**Esfuerzo** 3 d · **Riesgo** medio (toca el ciclo de vida de dieciséis engines) · **Depende de** WD-2.3~~
+
+> ✅ **WD-3.4 CERRADO por REQ-006 (2026-08-20).** El criterio 2 era falso desde siempre, el 3 se
+> pagó en #135/#140, y el 1 resultó ser **dos defectos distintos del que este ítem describía**:
+> una carrera al re-preparar con el audio adentro (REQ-006.1) y un hook que mantenía una lista
+> propia que había drifteado (REQ-006.2). El inventario y el trinquete son REQ-006.3.
+>
+> **La lección, que ya es la tercera de esta clase en el programa WD**: el escenario de falla
+> escrito en un ítem es una hipótesis, no un dato. Reproducirlo **con control positivo** antes de
+> escribir el arreglo es lo que separó "arreglar lo que decía el ticket" de "arreglar lo que
+> estaba roto" — y acá el arreglo que el ticket proponía era la fuente de un defecto nuevo.
 
 > **Nota de partición (2026-08-17).** Son dos trabajos de costo muy distinto y conviene tomarlos
 > por separado: **compensar `D`** (barato, instrumento ya commiteado, síntoma de usuario

@@ -296,6 +296,14 @@ gate_guardrails() {
     # mayoria NO eran defectos: 13 polling y 8 estimulo. Clasificar era el trabajo.
     step guardrails waits-self    python3 scripts/check-test-waits.py --self-test || return 1
     step guardrails waits         python3 scripts/check-test-waits.py || return 1
+
+    # REQ-006.4 — que un subsistema no vuelva a prepararse con un rate LITERAL.
+    # No persigue el numero: persigue las LLAMADAS a preparar, que es donde el
+    # rate real casi siempre esta disponible. El self-test va primero por la
+    # misma razon que los otros dos: si el parser se rompe, el lint queda verde
+    # para siempre.
+    step guardrails rate-self     python3 scripts/check-literal-rate.py --self-test || return 1
+    step guardrails literal-rate  python3 scripts/check-literal-rate.py || return 1
 }
 
 gate_cpp_tests_macos() {

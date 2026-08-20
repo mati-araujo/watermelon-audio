@@ -1,0 +1,48 @@
+# Llamadas que preparan un subsistema con un sample rate LITERAL.
+#
+# TRINQUETE BIDIRECCIONAL: `check-literal-rate.py` falla si aparece una que no
+# esta aca, y TAMBIEN si una de aca ya no se reproduce.
+#
+# Estar declarada NO significa "esta bien": significa "se miro y se decidio".
+#
+# QUE MIRA ESTE ARCHIVO, Y QUE NO
+# -------------------------------
+# NO persigue el numero 48000. De las 250 ocurrencias fuera de tests, 232 son
+# comentarios, constantes de diseño e inicializaciones de miembro en
+# constructores — y un constructor NO TIENE el rate, asi que ahi el literal es
+# la unica opcion honesta.
+#
+# Persigue las LLAMADAS a preparar un subsistema, que es donde el rate real casi
+# siempre esta disponible y no se uso.
+#
+# LA LECCION DE WD-3.4, QUE ES POR QUE ESTE ARCHIVO NO ES MAS GRANDE
+# ------------------------------------------------------------------
+# WD-3.4 acusaba a las 16 lineas del dispatcher de dejar la cuerda 1,4
+# semitonos baja. Medido: el sintoma NO REPRODUCIA — el rate si les llegaba.
+# Lo que faltaba era el CAMINO, no la constante, y eso lo pagaron REQ-006.1
+# (la carrera al re-preparar con el audio adentro) y REQ-006.2 (el hook que
+# mantenia una lista propia que habia drifteado).
+#
+# Por eso un literal en un constructor se declara y se deja: el arreglo no es
+# cambiar el numero, es que exista un camino que lo corrija.
+#
+# Formato:  <archivo>::<linea> | <clasificacion>
+
+audio/src/main/cpp/api/watermelon_audio.cpp::45 | DEUDA CON DUEÑO — default con mitigacion (setInputNode() le informa el rate), pero prepare() dimensiona los rings: a 96 kHz quedarian cortos. Tocarlo es cambiar el ciclo de vida del InputNode (REQ-001 S1)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::25 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::29 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::33 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::37 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::41 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::45 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::47 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::49 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::51 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::53 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::58 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::60 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::62 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::64 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::66 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/core/SynthEngineDispatcher.cpp::73 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
+audio/src/main/cpp/effects/ShimmerReverbEffect.cpp::8 | default de construccion — ShimmerReverbEffect::setSampleRate() lo propaga a mPitchGrains (linea 21). NO es la causa de su entrada en rate-invariance-baseline

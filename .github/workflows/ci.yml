@@ -226,6 +226,12 @@ jobs:
       - name: Toda espera cruda en un test esta clasificada
         run: python3 scripts/check-test-waits.py
 
+      - name: Ningun subsistema se prepara con un rate literal — self-test
+        run: python3 scripts/check-literal-rate.py --self-test
+
+      - name: Ningun subsistema se prepara con un rate literal — REQ-006.4
+        run: python3 scripts/check-literal-rate.py
+
   # Same suite under AddressSanitizer + UndefinedBehaviorSanitizer. Catches
   # heap/stack overflows, use-after-free and UB in the lock-free rings and the
   # teardown path — the highest-risk code as the driver plan gains new logic.
