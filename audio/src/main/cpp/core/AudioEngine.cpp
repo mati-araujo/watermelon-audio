@@ -1996,6 +1996,39 @@ bool AudioEngine::renderBlock(float* output, const float* input, int frames) {
 }
 
 void AudioEngine::configureComponentsWithSampleRate(int sampleRate, int maxBlockSize) {
+    // REQ-006.1 — QUIESCE. Nada de lo que sigue es seguro con el thread de audio
+    // adentro.
+    //
+    // No es teorico y no es solo el dispatcher: esta funcion reasigna la
+    // `DelayLine` de Karplus-Strong, hace `resize()` del buffer de Granular,
+    // `setSize()` de cuatro buffers de nodo, y re-prepara looper, pre-roll,
+    // VoiceManager y MixerNode. Medido el 2026-08-20 con TSan sobre el camino de
+    // coercion de `start()`: `SynthEngineDispatcher::prepare` ->
+    // `KarplusStrongEngine::prepare` contra `onAudioReady` ->
+    // `renderSingleTouch` -> `KarplusStrongEngine::process`.
+    //
+    // Y el camino de coercion CORRE CON AUDIO: `start()` lo ejecuta despues de
+    // `manager.start()` (`:568`). El comentario de `:480-495` ya habia declarado
+    // el invariante —"configure components BEFORE starting the backend"— y ese
+    // arreglo cubrio el pre-configure y dejo afuera justo esta rama.
+    //
+    // 250 ms: un bloque son ~2,7 ms. Es el mismo techo que usa el retiro del
+    // InputNode, por la misma razon (ver `setInputNode`).
+    ReconfigureQuiesce quiesce(*this, std::chrono::milliseconds(250));
+    if (!quiesce.drained()) {
+        // NO se prepara. Se conserva el rate viejo.
+        //
+        // Un motor afinado al rate anterior es un defecto audible y ACOTADO;
+        // preparar sobre un callback vivo es un use-after-free. Es la misma
+        // jerarquia que toma `setInputNode()`, que prefiere filtrar un nodo
+        // antes que arriesgar un UAF.
+        LOGE("configureComponentsWithSampleRate(%d): el thread de audio no cerro "
+             "su bloque en 250ms — se conserva la configuracion anterior en vez "
+             "de re-preparar por abajo de un callback vivo",
+             sampleRate);
+        return;
+    }
+
     LOGI("Configuring audio components with sample rate: %d Hz", sampleRate);
 
     // Configure oscillators and modulators (Phase 1E — delegated to OscillatorBank)
@@ -2145,6 +2178,23 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
             if (remaining == 0) cv.notify_all();
         }
     } callbackGuard(mActiveCallbacks, mStopCondition);
+
+    // REQ-006.1 — la compuerta del quiesce.
+    //
+    // Va ACA, en el punto de entrada, por la misma razon que la barrera de
+    // WD-1.3 unas lineas arriba: el fast-path de USB de mas abajo NO pasa por
+    // processAudioBlock(), y una compuerta puesta ahi dejaria descubierta justo
+    // la rama que corre en el caso USB — que es donde el device coerce el rate.
+    //
+    // El bloque sale en SILENCIO y sin tocar engines ni buffers de nodo, que es
+    // lo que el thread de control esta re-preparando en este instante. Dura unos
+    // pocos bloques y solo en un cambio de sample rate.
+    if (mEnginesReconfiguring.load(std::memory_order_acquire)) {
+        if (outputData != nullptr) {
+            std::memset(outputData, 0, static_cast<size_t>(numFrames) * 2 * sizeof(float));
+        }
+        return watermelon_audio::IAudioCallback::Result::CONTINUE;
+    }
 
     // Service a pending EffectChain reset before doing ANY audio work
     // this block. The UI / JNI thread sets the flag via
@@ -2429,6 +2479,40 @@ bool AudioEngine::waitForCallbackDrain(std::chrono::milliseconds timeout) {
         mStopCondition.wait_for(lock, std::chrono::milliseconds(5));
     }
     return true;
+}
+
+bool AudioEngine::spinForCallbackDrain(std::chrono::milliseconds timeout) {
+    // REQ-006.1. Ver la nota del header: no puede tomar `mStateMutex` porque
+    // `start()` ya lo tiene cuando llama a configureComponentsWithSampleRate().
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (mActiveCallbacks.load(std::memory_order_acquire) != 0) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        // Polling con deadline. 200 us es ~1/13 de un bloque de 2,7 ms: corto
+        // para no alargar el silencio, largo para no quemar el core.
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    return true;
+}
+
+AudioEngine::ReconfigureQuiesce::ReconfigureQuiesce(AudioEngine& engine,
+                                                    std::chrono::milliseconds timeout)
+    : mEngine(engine), mDrained(false) {
+    // 1. Cerrar la compuerta. Desde aca ningun callback NUEVO toca los engines.
+    mEngine.mEnginesReconfiguring.store(true, std::memory_order_release);
+    // 2. Drenar el que pueda estar adentro AHORA.
+    //
+    // Hacen falta LOS DOS pasos. La compuerta sola deja adentro al callback que
+    // ya la habia leido en false; el drenaje solo no impide que entre uno nuevo.
+    // `setInputNode()` puede drenar sin compuerta porque publica un puntero
+    // nuevo primero — aca los engines son LOS MISMOS OBJETOS, asi que no hay
+    // nada que publicar.
+    mDrained = mEngine.spinForCallbackDrain(timeout);
+}
+
+AudioEngine::ReconfigureQuiesce::~ReconfigureQuiesce() {
+    mEngine.mEnginesReconfiguring.store(false, std::memory_order_release);
 }
 
 void AudioEngine::setPreferredSampleRate(int sampleRate) {

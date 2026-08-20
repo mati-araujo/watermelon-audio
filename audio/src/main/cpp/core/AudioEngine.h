@@ -914,6 +914,18 @@ private:
     // Contador de callbacks activos (para sincronización en stop)
     std::atomic<int> mActiveCallbacks{0};
 
+    // REQ-006.1 — la compuerta del quiesce de re-configuración.
+    //
+    // `configureComponentsWithSampleRate()` re-prepara medio motor —engines,
+    // buffers de los nodos, ring de pre-roll, looper— y eso ALOCA: reasigna la
+    // `DelayLine` de Karplus-Strong, hace `resize()` del buffer de Granular y
+    // `setSize()` de cuatro buffers de nodo. El thread de audio lee esas mismas
+    // estructuras.
+    //
+    // Mientras está en `true` el callback sale temprano y en silencio SIN tocar
+    // nada de eso. La lee el thread de audio; la escribe el de control.
+    std::atomic<bool> mEnginesReconfiguring{false};
+
     // ========== OSCILLATOR BANK (Phase 1E) ==========
     // Owns classic oscillators (primary + dual-touch) and signal modulators
     OscillatorBank mOscBank;
@@ -1052,6 +1064,42 @@ private:
      * porque el retiro del InputNode necesita exactamente la misma garantía.
      */
     bool waitForCallbackDrain(std::chrono::milliseconds timeout);
+
+    /**
+     * @brief Como el de arriba, pero SIN tomar `mStateMutex`.
+     *
+     * REQ-006.1. Existe porque `configureComponentsWithSampleRate()` necesita
+     * drenar y a veces se la llama con `mStateMutex` YA TOMADO: `start()` lo
+     * agarra en su primera línea. Usar `waitForCallbackDrain()` ahí es un
+     * deadlock directo — el thread de control se esperaría a sí mismo.
+     *
+     * El precio es polling en vez de la condition variable. Es aceptable: sólo
+     * corre en un cambio de sample rate, que es un evento raro, y el bucle tiene
+     * deadline.
+     */
+    bool spinForCallbackDrain(std::chrono::milliseconds timeout);
+
+    /**
+     * @brief RAII del quiesce: cierra la compuerta, drena, y la abre al salir.
+     *
+     * Va por RAII y no por dos llamadas sueltas porque
+     * `configureComponentsWithSampleRate()` tiene salidas tempranas: dejar la
+     * compuerta cerrada por una de ellas enmudecería el motor para siempre.
+     */
+    class ReconfigureQuiesce {
+    public:
+        ReconfigureQuiesce(AudioEngine& engine, std::chrono::milliseconds timeout);
+        ~ReconfigureQuiesce();
+        ReconfigureQuiesce(const ReconfigureQuiesce&) = delete;
+        ReconfigureQuiesce& operator=(const ReconfigureQuiesce&) = delete;
+
+        /// false = el thread de audio no cerró su bloque a tiempo.
+        bool drained() const { return mDrained; }
+
+    private:
+        AudioEngine& mEngine;
+        bool mDrained;
+    };
 
     // Buffer pre-alocado para monitoring (RT-safe). Lo llena
     // captureMonitoringBlock() una vez por callback, y de ahí leen sus DOS
