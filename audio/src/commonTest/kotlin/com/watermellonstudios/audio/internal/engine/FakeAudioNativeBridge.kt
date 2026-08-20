@@ -200,6 +200,10 @@ internal class FakeAudioNativeBridge(
     override fun setTunerTargetHz(hz: Float): Boolean = notModeled("setTunerTargetHz")
     override fun getTunerTargetHz(): Float = notModeled("getTunerTargetHz")
     override fun getTunerSnapshot(): FloatArray? = notModeled("getTunerSnapshot")
+    override fun captureIntonation(slot: Int): Boolean = notModeled("captureIntonation")
+    override fun resetIntonation() { notModeled("resetIntonation") }
+    override fun intonationState(): Int = notModeled("intonationState")
+    override fun intonationDifferenceCents(): Float = notModeled("intonationDifferenceCents")
     override fun setMonitoringEnabledSync(enabled: Boolean) { notModeled("setMonitoringEnabledSync") }
     override fun isMonitoringEnabled(): Boolean = notModeled("isMonitoringEnabled")
     override fun setMonitoringVolume(volume: Float) { notModeled("setMonitoringVolume") }

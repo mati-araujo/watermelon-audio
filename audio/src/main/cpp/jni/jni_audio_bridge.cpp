@@ -974,6 +974,34 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetTun
     return wma_tuner_get_target(g_wmaEngine);
 }
 
+// ---- Modo intonacion (REQ-001 S9) ------------------------------------------
+// Sin mutex propio: la C API ya serializa con `analysisMutex`, y agregar uno aca
+// seria una segunda cerradura sobre la misma puerta.
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIntonationCapture(
+    JNIEnv* env, jobject thiz, jint slot) {
+    return wma_intonation_capture(g_wmaEngine, slot) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIntonationReset(
+    JNIEnv* env, jobject thiz) {
+    wma_intonation_reset(g_wmaEngine);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIntonationState(
+    JNIEnv* env, jobject thiz) {
+    return wma_intonation_state(g_wmaEngine);
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIntonationDifferenceCents(
+    JNIEnv* env, jobject thiz) {
+    return wma_intonation_difference_cents(g_wmaEngine);
+}
+
 JNIEXPORT jfloatArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetTunerSnapshot(
     JNIEnv* env, jobject thiz) {

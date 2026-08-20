@@ -1069,6 +1069,38 @@ bool wma_tuner_set_target(WmaEngine* engine, float hz) {
     return true;
 }
 
+bool wma_intonation_capture(WmaEngine* engine, int slot) {
+    if (!engine) return false;
+    if (slot != WMA_INTONATION_HARMONIC && slot != WMA_INTONATION_FRETTED) return false;
+    std::lock_guard<std::mutex> lock(engine->analysisMutex);
+    if (!engine->analysisThread) return false;
+    return engine->analysisThread->captureIntonation(
+        static_cast<wma::analysis::IntonationMode::Slot>(slot));
+}
+
+void wma_intonation_reset(WmaEngine* engine) {
+    if (!engine) return;
+    std::lock_guard<std::mutex> lock(engine->analysisMutex);
+    if (!engine->analysisThread) return;
+    engine->analysisThread->resetIntonation();
+}
+
+int wma_intonation_state(const WmaEngine* engine) {
+    if (!engine) return WMA_INTONATION_NEED_HARMONIC;
+    auto* e = const_cast<WmaEngine*>(engine);
+    std::lock_guard<std::mutex> lock(e->analysisMutex);
+    if (!e->analysisThread) return WMA_INTONATION_NEED_HARMONIC;
+    return static_cast<int>(e->analysisThread->intonation().state());
+}
+
+float wma_intonation_difference_cents(const WmaEngine* engine) {
+    if (!engine) return std::nanf("");
+    auto* e = const_cast<WmaEngine*>(engine);
+    std::lock_guard<std::mutex> lock(e->analysisMutex);
+    if (!e->analysisThread) return std::nanf("");
+    return static_cast<float>(e->analysisThread->intonation().differenceCents());
+}
+
 float wma_tuner_get_target(const WmaEngine* engine) {
     if (!engine || !engine->analysisThread) return 0.0f;
     return static_cast<float>(engine->analysisThread->targetHz());
