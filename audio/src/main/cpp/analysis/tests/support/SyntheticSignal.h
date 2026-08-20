@@ -71,14 +71,16 @@ inline std::vector<float> pureSine(double hz, int sampleRate, int numFrames,
  * cuerda pulsada para que el test signifique algo, y lo suficientemente simple
  * para que el numero verdadero siga siendo exacto.
  */
-inline std::vector<float> inharmonicString(double f0, double B, int numPartials,
-                                           int sampleRate, int numFrames,
-                                           double amp = 0.5) {
+inline std::vector<float> partialsWithAmplitudes(double f0, double B,
+                                                 const std::vector<double>& amps,
+                                                 int sampleRate, int numFrames) {
     std::vector<float> out(static_cast<size_t>(numFrames), 0.0f);
-    for (int n = 1; n <= numPartials; ++n) {
+    for (size_t k = 0; k < amps.size(); ++k) {
+        const int n = static_cast<int>(k) + 1;
         const double fn = n * f0 * std::sqrt(1.0 + B * n * n);
         if (fn >= 0.5 * sampleRate) break;               // nada por encima de Nyquist
-        const double a = amp / n;
+        const double a = amps[k];
+        if (a == 0.0) continue;
         const double dp = 2.0 * M_PI * fn / static_cast<double>(sampleRate);
         double p = 0.0;
         for (int i = 0; i < numFrames; ++i) {
@@ -88,6 +90,36 @@ inline std::vector<float> inharmonicString(double f0, double B, int numPartials,
         }
     }
     return out;
+}
+
+/**
+ * El caso que justifica rastrear armonicos (REQ-001 S6 · 6.3): el fundamental
+ * `dB` por debajo del SEGUNDO parcial, que es lo que pasa en una bordona grave.
+ * Los parciales 2..n mantienen el decaimiento 1/n; solo el fundamental se hunde.
+ */
+inline std::vector<float> stringWithWeakFundamental(double f0, double B, int numPartials,
+                                                    int sampleRate, int numFrames,
+                                                    double dbBelowSecond, double amp = 0.5) {
+    std::vector<double> amps;
+    amps.reserve(static_cast<size_t>(numPartials));
+    for (int n = 1; n <= numPartials; ++n) amps.push_back(amp / n);
+    // El 2do parcial vale amp/2; el fundamental queda `dbBelowSecond` por debajo DE EL.
+    amps[0] = (amp / 2.0) * std::pow(10.0, -dbBelowSecond / 20.0);
+    return partialsWithAmplitudes(f0, B, amps, sampleRate, numFrames);
+}
+
+/**
+ * Cuerda con parciales INARMONICOS, amplitudes 1/n. DELEGA en
+ * `partialsWithAmplitudes` — dos generadores de la misma señal serian dos fuentes
+ * de verdad, y la que se usa menos es la que se desincroniza.
+ */
+inline std::vector<float> inharmonicString(double f0, double B, int numPartials,
+                                           int sampleRate, int numFrames,
+                                           double amp = 0.5) {
+    std::vector<double> amps;
+    amps.reserve(static_cast<size_t>(numPartials));
+    for (int n = 1; n <= numPartials; ++n) amps.push_back(amp / n);
+    return partialsWithAmplitudes(f0, B, amps, sampleRate, numFrames);
 }
 
 /// Decaimiento exponencial en el lugar, con `tau` en segundos. Modela que una
