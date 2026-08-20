@@ -1,0 +1,7 @@
+# watermelon-audio golden — analysis/fast_mode_sweep (REQ-001 S5)
+# sampleRate=48000  window=4096  rows=3
+# El signo es el del afinador: senal por encima del objetivo = POSITIVO.
+# caso	desdeHz	cuerdaEsperada	saltos
+E2 desde floja	60.00	0.000000	0.000000
+D3 cruzando A2	100.00	2.000000	0.000000
+G3 cruzando D3	130.00	3.000000	0.000000

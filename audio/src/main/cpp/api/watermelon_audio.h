@@ -688,7 +688,7 @@ WMA_API void wma_input_release(WmaEngine* engine);
  * ================================================================ */
 
 /** Number of floats wma_tuner_get_snapshot() writes. */
-#define WMA_TUNER_SNAPSHOT_VALUES 12
+#define WMA_TUNER_SNAPSHOT_VALUES 14
 
 /**
  * Start the analysis seam: the capture thread begins feeding a lock-free ring,
@@ -774,6 +774,32 @@ WMA_API float wma_tuner_get_target(const WmaEngine* engine);
  * @return false if there is no engine/analysis, the slot is out of range, or the
  *         strobe has not converged yet.
  */
+/**
+ * The strings of the instrument, in Hz, IN STRING ORDER (not pitch order).
+ *
+ * With candidates set the engine PICKS THE TARGET ITSELF from the coarse
+ * detection — which is what was missing for the tuner to work without a consumer
+ * pushing a target by hand. Pass count = 0 to go back to the manual target of
+ * wma_tuner_set_target().
+ *
+ * String order matters and is not a formality: on a high-G ukulele string 1 is
+ * higher than string 3, so sorting by pitch would report the wrong string number.
+ *
+ * @return false if there is no engine or the analysis seam could not be created.
+ */
+WMA_API bool wma_tuner_set_candidates(WmaEngine* engine, const float* hz, int count);
+
+/**
+ * Lock to a string by index, the way a player picks which one to tune. -1 releases.
+ *
+ * Needed because the automatic lock goes by proximity — and has to, or there
+ * could be no chromatic fallback when nothing is in range. A SLACK string is far
+ * from everything: at 60 Hz there are 548 cents to E2. Without this, "tune a new
+ * string up from slack" would not be expressible, which is the very case the mode
+ * exists to serve.
+ */
+WMA_API bool wma_tuner_lock_string(WmaEngine* engine, int index);
+
 WMA_API bool wma_intonation_capture(WmaEngine* engine, int slot);
 
 /**
@@ -835,6 +861,14 @@ WMA_API float wma_intonation_difference_cents(const WmaEngine* engine);
  *                              must fall back to the physics-derived default.
  *                              This is a separate field and not a sentinel inside
  *                              [10] precisely because AC-001.11 asks for both.
+ *
+ *                         [12] index of the LOCKED STRING, or -1. It is a string
+ *                              index, not a pitch-order one: on a high-G ukulele
+ *                              string 1 is higher than string 3, and reporting
+ *                              "nearest in Hz" as a string number is the exact
+ *                              bug AC-001.15 exists to prevent.
+ *                         [13] fast-mode state: 0 no signal, 1 searching,
+ *                              2 locked, 3 no lock (chromatic).
  *
  *                         B comes free with REQ-001 S6: four tracked partials
  *                         that disagree ARE the string's stiffness, so nothing

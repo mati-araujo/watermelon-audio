@@ -40,8 +40,11 @@ class TunerSnapshotTest {
         clarity: Float = 0.97f,
         inharmonicityB: Float = 1.37e-4f,
         inharmonicityMeasured: Float = 1f,
+        lockedString: Float = 2f,
+        fastModeState: Float = 2f,
     ) = floatArrayOf(rate, rms, frames, dropped, state, cents, phase, uncertainty,
-                     detectedHz, clarity, inharmonicityB, inharmonicityMeasured)
+                     detectedHz, clarity, inharmonicityB, inharmonicityMeasured,
+                     lockedString, fastModeState)
 
     @Test
     fun elOrdenDeLosValoresEsElDelContratoNativo() {
@@ -139,7 +142,7 @@ class TunerSnapshotTest {
         // Si esto cambia sin que cambie WMA_TUNER_SNAPSHOT_VALUES, el consumidor
         // pasa un array de otro tamaño que el que la C API va a llenar. Del lado
         // de C++ lo para un static_assert; de este lado, esta línea.
-        assertEquals(12, TunerSnapshot.VALUE_COUNT)
+        assertEquals(14, TunerSnapshot.VALUE_COUNT)
         assertEquals(TunerSnapshot.VALUE_COUNT, nativeValues().size)
     }
 
@@ -170,5 +173,17 @@ class TunerSnapshotTest {
             0f, snap.inharmonicityB,
             "una cuerda ideal medida da B=0, y eso ES una medición: no puede llegar como null"
         )
+    }
+
+    /**
+     * REQ-001 S5. `-1` significa "ninguna cuerda enganchada" y tiene que llegar
+     * como `null`, no como el número -1: un índice negativo indexando un array de
+     * cuerdas es un crash esperando.
+     */
+    @Test
+    fun sinCuerdaEnganchadaLlegaNullYNoMenosUno() {
+        val snap = TunerSnapshot.fromNative(nativeValues(lockedString = -1f))
+        assertNotNull(snap)
+        assertNull(snap.lockedString)
     }
 }

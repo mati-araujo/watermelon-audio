@@ -85,4 +85,19 @@ interface ITunerBridge {
      * sería "intonación perfecta".
      */
     fun intonationDifferenceCents(): Float
+
+    // ---- Modo rápido (REQ-001 S5) ------------------------------------------
+
+    /**
+     * Las cuerdas del instrumento en Hz, **en orden de cuerda**.
+     *
+     * Con candidatos puestos el motor **elige el objetivo solo** desde la
+     * detección gruesa — que es lo que faltaba para que el afinador funcione sin
+     * que el consumidor empuje un objetivo a mano. Lista vacía = vuelve al
+     * objetivo manual de [setTunerTargetHz].
+     */
+    fun setTunerCandidates(hz: FloatArray): Boolean
+
+    /** Engancha a mano a una cuerda por índice, como cuando el músico la elige. -1 suelta. */
+    fun lockTunerString(index: Int): Boolean
 }

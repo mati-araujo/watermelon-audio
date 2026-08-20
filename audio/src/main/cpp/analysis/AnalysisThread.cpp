@@ -45,7 +45,20 @@ void AnalysisThread::drainLoop() {
         // El orden no es cosmetico: al cambiar el objetivo hay que descartar lo
         // que quedo en el ring, y eso sólo sirve si se hace antes de leerlo.
         const int rate = mRing.captureRate();
-        const double target = mTargetHz.load(std::memory_order_acquire);
+
+        // --- candidatos y enganche a mano, del thread de control -------------
+        //
+        // El lazo NO toma `mCandidateMutex` en el caso normal: mira una bandera
+        // atomica y solo entra al lock cuando de verdad cambiaron, que es una vez
+        // por instrumento y no una vez por tick.
+        if (mCandidatesDirty.exchange(false, std::memory_order_acq_rel)) {
+            std::lock_guard<std::mutex> lock(mCandidateMutex);
+            mFastMode.setCandidates(mPendingCandidates, mPendingCount);
+        }
+        const int wantLock = mPendingLock.exchange(-2, std::memory_order_acq_rel);
+        if (wantLock != -2) mFastMode.lockTo(wantLock);
+
+        double target = mTargetHz.load(std::memory_order_acquire);
 
         if (rate > 0 && rate != mPreparedRate) {
             // EL RATE MEDIDO, NO 48000. Preparar el estimador con un rate
@@ -95,6 +108,23 @@ void AnalysisThread::drainLoop() {
         // es justamente decir que nota hay cuando nadie lo sabe todavia.
         if (mPreparedRate > 0) {
             mDetector.process(mScratch.data(), got);
+        }
+
+        // --- el modo rapido elige el objetivo, si hay candidatos --------------
+        //
+        // Aca se cierra el hueco que quedaba desde S4: el motor publicaba que
+        // nota suena, pero convertir eso en "la cuerda que el musico quiso" y
+        // empujarla como objetivo lo tenia que hacer el consumidor. Con la lista
+        // de cuerdas puesta, lo hace el motor.
+        if (mPreparedRate > 0 && mFastMode.candidateCount() > 0) {
+            mFastMode.update(mDetector.hasPitch() ? mDetector.frequencyHz() : 0.0,
+                             mDetector.clarity());
+            const double picked = mFastMode.lockedTargetHz();
+            if (picked > 0.0 && picked != mAppliedTarget) {
+                mStrobe.setTarget(picked);
+                mAppliedTarget = picked;
+                mRing.skipToNewest();
+            }
         }
 
         float values[kSnapshotValueCount];
@@ -148,6 +178,9 @@ void AnalysisThread::drainLoop() {
         const bool haveB = haveReading && mInharmonicity.estimateFrom(mStrobe);
         values[kSnapInharmonicityB] = haveB ? static_cast<float>(mInharmonicity.b()) : nan;
         values[kSnapInharmonicityMeasured] = haveB ? 1.0f : 0.0f;
+
+        values[kSnapLockedString]  = static_cast<float>(mFastMode.lockedIndex());
+        values[kSnapFastModeState] = static_cast<float>(mFastMode.state());
 
         mSnapshot.publish(values);
     }

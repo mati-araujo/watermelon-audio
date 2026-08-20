@@ -31,9 +31,11 @@
 #include "StrobeTracker.h"
 #include "InharmonicityEstimator.h"
 #include "IntonationMode.h"
+#include "FastModeTracker.h"
 #include "../dsp/McLeodPitch.h"
 
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -119,6 +121,33 @@ public:
     const IntonationMode& intonation() const noexcept { return mIntonation; }
 
     /**
+     * @brief Las cuerdas del instrumento, EN ORDEN DE CUERDA (S5 · 5.12).
+     *
+     * Con candidatos puestos, el motor **elige el objetivo solo** desde la
+     * deteccion gruesa de S4 — que es lo que faltaba para que el afinador
+     * funcione sin que el consumidor empuje un objetivo a mano. Con la lista
+     * vacia se vuelve al comportamiento anterior: manda `setTargetHz()`.
+     *
+     * Lo llama el thread de control. El lazo NO toma este mutex: levanta una
+     * bandera atomica y copia una sola vez por tick.
+     */
+    void setCandidates(const double* hz, int count) noexcept {
+        std::lock_guard<std::mutex> lock(mCandidateMutex);
+        mPendingCount = 0;
+        if (hz != nullptr) {
+            for (int i = 0; i < count && i < FastModeTracker::kMaxCandidates; ++i) {
+                if (hz[i] > 0.0) mPendingCandidates[mPendingCount++] = hz[i];
+            }
+        }
+        mCandidatesDirty.store(true, std::memory_order_release);
+    }
+
+    /// Engancha a mano a una cuerda (el musico la elige). -1 suelta.
+    void lockString(int index) noexcept {
+        mPendingLock.store(index, std::memory_order_release);
+    }
+
+    /**
      * @brief La frecuencia contra la que se mide. 0 = ninguna.
      *
      * EL OBJETIVO LO PONE EL CONSUMIDOR, Y NO ES PROVISORIO
@@ -191,6 +220,16 @@ private:
 
     /// S9. No lo toca `drainLoop`: lo maneja el thread de control.
     IntonationMode mIntonation;
+
+    /// S5. Lo actualiza el lazo con la deteccion gruesa; los candidatos los pone
+    /// el thread de control (protegidos por `mCandidateMutex`, que el lazo NO
+    /// toma: copia una vez por tick a `mActiveCandidates`).
+    FastModeTracker mFastMode;
+    std::mutex mCandidateMutex;
+    double mPendingCandidates[FastModeTracker::kMaxCandidates]{};
+    int mPendingCount{0};
+    std::atomic<bool> mCandidatesDirty{false};
+    std::atomic<int> mPendingLock{-2};   // -2 = nada pedido
 
     /// Deteccion gruesa: encuentra la altura SIN objetivo. Corre en el mismo thread y no
     /// depende del estimador — de hecho es al reves: es quien puede darle un objetivo.
