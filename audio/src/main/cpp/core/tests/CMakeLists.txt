@@ -145,6 +145,7 @@ add_executable(core_tests
     test_c_api_transport.cpp
     test_c_api_diagnostics.cpp
     test_c_api_looper.cpp
+    test_time_dependence_probe.cpp
     test_c_api_routing.cpp
     test_c_api_logcapture.cpp
     test_c_api_start_without_select.cpp
