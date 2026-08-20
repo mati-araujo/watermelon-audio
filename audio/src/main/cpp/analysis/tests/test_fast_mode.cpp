@@ -247,6 +247,36 @@ TEST(FastModeTest, OnAReentrantInstrumentItLocksByStringIndexNotByPitchOrder) {
 }
 
 // ---------------------------------------------------------------------------
+// La cercania se mide en CENTS, no en Hz
+// ---------------------------------------------------------------------------
+/**
+ * 🔴 ESTE TEST LO PIDIO LA MUTACION. Cambiar `|cents(hz, cand)|` por
+ * `|hz - cand|` sobrevivia a toda la suite: en las cuerdas del catalogo los dos
+ * criterios casi siempre eligen lo mismo, y "casi siempre" es justo lo que
+ * ningun test agarraba.
+ *
+ * Importa porque la distancia en Hz **no es musical**: es asimetrica alrededor de
+ * un objetivo —un semitono arriba de 440 son 26 Hz y un semitono abajo son 25—, y
+ * el sesgo crece con la frecuencia. Un afinador que ordene por Hz le va a errar
+ * mas seguido en la zona aguda, que es donde los intervalos estan mas juntos en
+ * Hz y mas separados en cents.
+ *
+ * El caso lo da un ukelele a 359,5 Hz: por cents gana G4 (a -149,8, dentro del
+ * rango de enganche) y por Hz gana E4. Es el punto donde los dos criterios se
+ * contradicen sin que ninguno sea absurdo.
+ */
+TEST(FastModeTest, ProximityIsMeasuredInCentsNotInHertz) {
+    auto t = withCandidates(ukuleleHighG());
+    hold(t, 359.5, 4);
+
+    ASSERT_EQ(t.state(), FastModeTracker::kLocked)
+        << "359,5 Hz esta a 149,8 cents de G4, o sea dentro del rango de enganche";
+    EXPECT_EQ(t.lockedIndex(), 0)
+        << "engancho a E4 (indice 2) en vez de a G4 (indice 0): esta ordenando "
+           "por distancia en Hz, que no es musical";
+}
+
+// ---------------------------------------------------------------------------
 // Una lectura sin señal suelta no puede soltar el enganche
 // ---------------------------------------------------------------------------
 TEST(FastModeTest, ASingleQuietReadingDoesNotDropTheLock) {

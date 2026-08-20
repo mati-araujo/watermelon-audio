@@ -106,7 +106,14 @@ enum SnapshotValue : int {
     /// dentro suyo: es exactamente lo que pide AC-001.11.
     kSnapInharmonicityMeasured = 11,
 
-    kSnapshotValueCount    = 12,
+    // ---- Modo rapido (REQ-001 S5). Al final, otra vez.
+    /// Indice de la CUERDA enganchada, o -1. Es indice de cuerda y no de
+    /// frecuencia: en un ukelele high-G la cuerda 1 es mas aguda que la 3.
+    kSnapLockedString      = 12,
+    /// 0 sin señal · 1 buscando · 2 enganchado · 3 sin enganche (cromatico).
+    kSnapFastModeState     = 13,
+
+    kSnapshotValueCount    = 14,
 };
 
 enum SnapshotState : int {

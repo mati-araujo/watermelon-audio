@@ -25,6 +25,7 @@ import kotlinx.cinterop.cstr
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.FloatVar
+import kotlinx.cinterop.set
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.allocArray
@@ -549,6 +550,16 @@ internal class IosAudioBridge : IAudioNativeBridge {
 
     // ---- Modo intonación (REQ-001 S9). Van directo a la C API: en iOS no hay
     //      JNI de por medio, la cinterop ES el puente.
+    override fun setTunerCandidates(hz: FloatArray): Boolean = memScoped {
+        // Con la lista vacía se manda un buffer de tamaño 0 en vez de un puntero
+        // nulo: la C API acepta las dos formas, y así no hay dos caminos.
+        val buf = allocArray<FloatVar>(maxOf(1, hz.size))
+        hz.forEachIndexed { i, v -> buf[i] = v }
+        wma_tuner_set_candidates(engine, buf, hz.size)
+    }
+
+    override fun lockTunerString(index: Int): Boolean = wma_tuner_lock_string(engine, index)
+
     override fun captureIntonation(slot: Int): Boolean =
         wma_intonation_capture(engine, slot)
 

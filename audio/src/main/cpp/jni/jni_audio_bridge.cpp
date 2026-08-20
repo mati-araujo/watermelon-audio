@@ -974,6 +974,26 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetTun
     return wma_tuner_get_target(g_wmaEngine);
 }
 
+// ---- Modo rapido (REQ-001 S5) ----------------------------------------------
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetTunerCandidates(
+    JNIEnv* env, jobject thiz, jfloatArray hz) {
+    if (hz == nullptr) return wma_tuner_set_candidates(g_wmaEngine, nullptr, 0) ? JNI_TRUE : JNI_FALSE;
+    const jsize n = env->GetArrayLength(hz);
+    jfloat* data = env->GetFloatArrayElements(hz, nullptr);
+    if (data == nullptr) return JNI_FALSE;
+    const bool ok = wma_tuner_set_candidates(g_wmaEngine, data, static_cast<int>(n));
+    env->ReleaseFloatArrayElements(hz, data, JNI_ABORT);   // no lo modificamos
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLockTunerString(
+    JNIEnv* env, jobject thiz, jint index) {
+    return wma_tuner_lock_string(g_wmaEngine, index) ? JNI_TRUE : JNI_FALSE;
+}
+
 // ---- Modo intonacion (REQ-001 S9) ------------------------------------------
 // Sin mutex propio: la C API ya serializa con `analysisMutex`, y agregar uno aca
 // seria una segunda cerradura sobre la misma puerta.

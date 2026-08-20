@@ -60,10 +60,20 @@ data class TunerSnapshot(
      * un valor plausible.
      */
     val inharmonicityB: Float?,
+    /**
+     * Índice de la **cuerda** enganchada, o `null` si no hay enganche.
+     *
+     * Es índice de cuerda, no de frecuencia: en un ukelele high-G la cuerda 1 es
+     * más aguda que la 3, y devolver "la más cercana en Hz" como número de cuerda
+     * es el bug exacto que AC-001.15 existe para evitar.
+     */
+    val lockedString: Int?,
+    /** 0 sin señal · 1 buscando · 2 enganchado · 3 sin enganche (cromático). */
+    val fastModeState: Int,
 ) {
     companion object {
         /** Cantidad de floats del snapshot nativo. Espeja `WMA_TUNER_SNAPSHOT_VALUES`. */
-        const val VALUE_COUNT: Int = 12
+        const val VALUE_COUNT: Int = 14
 
         /**
          * Arma el snapshot desde los floats nativos, en el orden que documenta
@@ -88,6 +98,8 @@ data class TunerSnapshot(
                 // El índice 11 es la marca de "medido": sin ella, un B de 0 no se
                 // distingue de "no hubo medición" (AC-001.11).
                 inharmonicityB = values[10].takeIf { values[11] >= 0.5f && !it.isNaN() },
+                lockedString = values[12].toInt().takeIf { it >= 0 },
+                fastModeState = values[13].toInt(),
             )
         }
     }

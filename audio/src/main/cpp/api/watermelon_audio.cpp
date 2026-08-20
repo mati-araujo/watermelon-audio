@@ -1069,6 +1069,30 @@ bool wma_tuner_set_target(WmaEngine* engine, float hz) {
     return true;
 }
 
+bool wma_tuner_set_candidates(WmaEngine* engine, const float* hz, int count) {
+    if (!engine) return false;
+    if (!wmaEnsureAnalysis(engine)) return false;
+    std::lock_guard<std::mutex> lock(engine->analysisMutex);
+    if (!engine->analysisThread) return false;
+    double buf[wma::analysis::FastModeTracker::kMaxCandidates];
+    int n = 0;
+    if (hz != nullptr) {
+        for (int i = 0; i < count && n < wma::analysis::FastModeTracker::kMaxCandidates; ++i) {
+            if (hz[i] > 0.0f) buf[n++] = static_cast<double>(hz[i]);
+        }
+    }
+    engine->analysisThread->setCandidates(buf, n);
+    return true;
+}
+
+bool wma_tuner_lock_string(WmaEngine* engine, int index) {
+    if (!engine) return false;
+    std::lock_guard<std::mutex> lock(engine->analysisMutex);
+    if (!engine->analysisThread) return false;
+    engine->analysisThread->lockString(index);
+    return true;
+}
+
 bool wma_intonation_capture(WmaEngine* engine, int slot) {
     if (!engine) return false;
     if (slot != WMA_INTONATION_HARMONIC && slot != WMA_INTONATION_FRETTED) return false;

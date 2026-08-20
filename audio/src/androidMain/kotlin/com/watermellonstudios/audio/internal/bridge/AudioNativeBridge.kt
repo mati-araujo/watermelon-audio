@@ -1588,6 +1588,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // ---- Modo intonación (REQ-001 S9). Sin mutex propio: la C API ya serializa
     //      con `analysisMutex`, y otro acá sería una segunda cerradura sobre la
     //      misma puerta.
+    override fun setTunerCandidates(hz: FloatArray): Boolean = nativeSetTunerCandidates(hz)
+    override fun lockTunerString(index: Int): Boolean = nativeLockTunerString(index)
+
     override fun captureIntonation(slot: Int): Boolean = nativeIntonationCapture(slot)
     override fun resetIntonation() = nativeIntonationReset()
     override fun intonationState(): Int = nativeIntonationState()
@@ -1973,6 +1976,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeSetTunerTarget(hz: Float): Boolean
     private external fun nativeGetTunerTarget(): Float
     private external fun nativeGetTunerSnapshot(): FloatArray?
+    private external fun nativeSetTunerCandidates(hz: FloatArray): Boolean
+    private external fun nativeLockTunerString(index: Int): Boolean
     private external fun nativeIntonationCapture(slot: Int): Boolean
     private external fun nativeIntonationReset()
     private external fun nativeIntonationState(): Int
