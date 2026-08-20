@@ -123,6 +123,7 @@ set(CORE_TESTED_SOURCES
 )
 
 add_executable(core_tests
+    test_rate_reconfiguration.cpp
     test_current_sample_rate.cpp
     test_output_stage_protection.cpp
     test_denormal_flush.cpp
