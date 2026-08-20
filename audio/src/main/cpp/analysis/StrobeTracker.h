@@ -67,12 +67,23 @@ public:
      * Cuanto puede disentir un parcial de la mediana antes de considerarlo
      * "no esta midiendo la nota", en cents.
      *
-     * El numero sale de la fisica, no del gusto: la inarmonicidad corre el
-     * parcial n en `600·log2(1 + B·n²)`, y aun con el `B ≈ 5e-4` de una bordona
-     * gruesa el 4to parcial se corre **~7 cents**. Cincuenta deja pasar con
-     * holgura toda cuerda real —incluido lo que S7 va a medir— y descarta la
-     * fuga espectral, que en el caso medido daba **-256 cents**. Entre 7 y 256
-     * hay lugar de sobra para un umbral que no sea un ajuste fino.
+     * El piso sale de la fisica: la inarmonicidad corre el parcial n en
+     * `600·log2(1 + B·n²)`, y aun con el `B ≈ 5e-4` de una bordona gruesa el 4to
+     * parcial se corre **~7 cents**. Cincuenta deja pasar con holgura toda
+     * cuerda real, incluido lo que S7 va a medir.
+     *
+     * 🔴 EL TECHO ES MUCHO MAS AJUSTADO DE LO QUE PARECE, Y POR ESO EXISTE LA
+     * REGLA DEL MEJOR PARCIAL. Cuando un solo parcial tiene energia, la mediana
+     * la fijan los tres que ven FUGA, y esa mediana se aleja tanto mas cuanto mas
+     * ancho es el rango de captura — o sea en los graves. Barrido de 32 casos
+     * degenerados (4 cuerdas x 4 "solo el parcial k"): en las medias-altas la
+     * desviacion del mejor parcial no pasa de 12 cents, pero **en E1 con solo el
+     * 4to parcial llega a 40,46**. Contra un umbral de 50 eso es 1,2x de margen,
+     * no un orden de magnitud.
+     *
+     * Subir el umbral no es la salida —lo acercaria a los 256 de la fuga que hay
+     * que descartar—. La salida es que al parcial MEJOR MEDIDO no se lo descarte
+     * nunca, y entonces el margen fino deja de decidir nada.
      */
     static constexpr double kMaxPartialDisagreementCents = 50.0;
 

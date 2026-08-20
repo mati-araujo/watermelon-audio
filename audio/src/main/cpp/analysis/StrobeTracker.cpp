@@ -97,9 +97,41 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         const double median = (valid % 2 == 1)
                                   ? sorted[valid / 2]
                                   : 0.5 * (sorted[valid / 2 - 1] + sorted[valid / 2]);
+        // 🔴 AL PARCIAL MEJOR MEDIDO NO SE LO DESCARTA NUNCA, Y ESO NO ES UNA
+        // EXCEPCION COMODA: es lo que hace que la regla funcione en LOS DOS
+        // casos degenerados, que son opuestos entre si.
+        //
+        //  · Fundamental AUSENTE (bajo por parlante chico): p0 es fuga y da
+        //    -256 cents con σ=0,081; los otros tres dan +1,00 con σ≈0,007. La
+        //    mediana vale +1,00, p0 se va, y p0 NO era el de menor σ. Se descarta.
+        //  · Tono PURO (diapason, flauta, referencia electronica): el unico
+        //    parcial con energia es p0 —+1,0000 con σ=0,000011— y los otros tres
+        //    son fuga: -35,5, +14,2, -7,1. La mediana vale -3,07, o sea que el
+        //    CONSENSO es de los que no estan midiendo nada. Sin esta regla, un
+        //    umbral mas ajustado tiraria justamente el unico dato bueno.
+        //
+        // La mediana dice cual es el consenso; σ dice quien midio de verdad. Y
+        // cuando se contradicen, manda σ: tres parciales de acuerdo en basura
+        // siguen siendo basura.
+        //
+        // ⚠️ HONESTIDAD SOBRE ESTA LINEA: **ningun test la ejercita**. Se mutó
+        // —quitando `i != best`— y la suite entera queda VERDE, incluido el
+        // barrido de 16 casos degenerados. Se conserva igual, y la razon es un
+        // numero medido, no una corazonada: en ese barrido la desviacion del
+        // mejor parcial respecto de la mediana llega a **40,46 cents** (E1 con
+        // solo el 4to parcial) contra un umbral de 50. O sea que el peor caso
+        // conocido usa el **81 %** del margen. Un respaldo que cuesta una
+        // comparacion, para un peligro medido a esa distancia, se paga solo.
+        // Si algun dia un caso lo cruza, este bloque es lo que evita que el
+        // afinador tire el unico dato bueno que tenia.
+        int best = 0;
+        for (int i = 1; i < valid; ++i) {
+            if (sigmas[i] < sigmas[best]) best = i;
+        }
         int kept = 0;
         for (int i = 0; i < valid; ++i) {
-            if (std::abs(vals[i] - median) > kMaxPartialDisagreementCents) continue;
+            if (i != best &&
+                std::abs(vals[i] - median) > kMaxPartialDisagreementCents) continue;
             vals[kept] = vals[i];
             sigmas[kept] = sigmas[i];
             ++kept;

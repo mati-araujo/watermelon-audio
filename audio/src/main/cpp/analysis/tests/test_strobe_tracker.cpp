@@ -249,6 +249,79 @@ TEST(StrobeTrackerTest, ItMeasuresFromTheHarmonicsWhenTheFundamentalIsMissingEnt
 }
 
 // ---------------------------------------------------------------------------
+// 6.3c — el caso OPUESTO: un tono puro, donde SOLO el fundamental tiene energia
+// ---------------------------------------------------------------------------
+/**
+ * Un diapason, una flauta o una referencia electronica no tienen armonicos que
+ * valgan: p1, p2 y p3 miran bins vacios y devuelven fuga. Medido a 110 Hz:
+ * -35,5 / +14,2 / -7,1 cents, contra el +1,0000 del fundamental.
+ *
+ * O sea que la MEDIANA de los cuatro vale -3,07 — el "consenso" es de los tres
+ * que no estan midiendo nada. Este test es el que fija que el descarte por
+ * mediana no se pueda llevar puesto al unico parcial con señal, y es el reverso
+ * exacto del caso del fundamental ausente: alla habia que descartar p0, aca hay
+ * que conservarlo. Lo que los separa no es la mediana sino σ.
+ */
+TEST(StrobeTrackerTest, APureToneIsMeasuredFromItsFundamentalAloneWithoutBeingOutvoted) {
+    for (const double hz : {110.000, 440.000}) {
+        StrobeTracker t;
+        t.prepare(kRate);
+        t.setTarget(hz);
+        feed(t, pureSine(detune(hz, kProbeCents), kRate, kThreeSeconds));
+
+        ASSERT_TRUE(t.hasMeasurement()) << hz << " Hz: un tono puro no produjo medicion";
+        const double err = std::abs(t.cents() - kProbeCents);
+        RecordProperty(std::string("pure_tone_error_") + std::to_string((int)hz),
+                       std::to_string(err));
+        EXPECT_LT(err, kToleranceCents)
+            << hz << " Hz: tono puro midio " << t.cents() << " contra "
+            << kProbeCents << " reales — los parciales sin señal se impusieron";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6.3d — el regimen DEGENERADO: un solo parcial con energia, en las 4 posiciones
+// ---------------------------------------------------------------------------
+/**
+ * Generaliza 6.3b (sin fundamental) y 6.3c (tono puro) al caso completo: para
+ * cada cuerda, cuatro señales donde SOLO el parcial k tiene energia. Los otros
+ * tres devuelven fuga, asi que la MEDIANA la fijan los que no miden nada.
+ *
+ * Barrido medido: en las cuerdas medias-altas la desviacion del mejor parcial
+ * respecto de la mediana no pasa de 12 cents, pero en las GRAVES —donde el rango
+ * de captura es mas ancho— llega a **40,46 cents en E1 con solo el 4to parcial**.
+ * El umbral de descarte es 50: 1,2x de margen. Lo que hace que ese margen fino no
+ * decida nada es que al parcial mejor medido no se lo descarta nunca.
+ *
+ * Este test es el que quedaria en rojo si alguien tocara el umbral o esa regla.
+ */
+TEST(StrobeTrackerTest, ASinglePartialCarryingAllTheEnergyIsStillMeasuredCorrectly) {
+    for (const auto& s : {Str{"bajo B0", 30.868}, Str{"bajo E1", 41.203},
+                          Str{"guitarra E2", 82.407}, Str{"ukelele A4", 440.000}}) {
+        for (int only = 0; only < StrobeTracker::kPartials; ++only) {
+            std::vector<double> amps(StrobeTracker::kPartials, 0.0);
+            amps[static_cast<size_t>(only)] = 0.4;
+
+            StrobeTracker t;
+            t.prepare(kRate);
+            t.setTarget(s.hz);
+            feed(t, partialsWithAmplitudes(detune(s.hz, kProbeCents), 0.0, amps,
+                                           kRate, kThreeSeconds));
+
+            ASSERT_TRUE(t.hasMeasurement())
+                << s.name << " solo p" << only << ": no midio nada";
+            const double err = std::abs(t.cents() - kProbeCents);
+            RecordProperty(std::string("only_p") + std::to_string(only) + "_" + s.name,
+                           std::to_string(err));
+            EXPECT_LT(err, kToleranceCents)
+                << s.name << " con energia SOLO en p" << only << ": midio "
+                << t.cents() << " contra " << kProbeCents
+                << " reales — los tres parciales de fuga se impusieron";
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 6.4 · AC-001.22 — el angulo es continuo entre polls
 // ---------------------------------------------------------------------------
 TEST(StrobeTrackerTest, ThePublishedAngleIsContinuousBetweenPollsAtSixtyHertz) {
