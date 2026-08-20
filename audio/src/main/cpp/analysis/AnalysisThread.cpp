@@ -143,6 +143,12 @@ void AnalysisThread::drainLoop() {
                                       : 0.0f;
         values[kSnapDetectionClarity] = static_cast<float>(mDetector.clarity());
 
+        // La inarmonicidad se lee de lo que el strobe YA calculo: cuatro fases
+        // que discrepan entre si son, literalmente, la rigidez de la cuerda.
+        const bool haveB = haveReading && mInharmonicity.estimateFrom(mStrobe);
+        values[kSnapInharmonicityB] = haveB ? static_cast<float>(mInharmonicity.b()) : nan;
+        values[kSnapInharmonicityMeasured] = haveB ? 1.0f : 0.0f;
+
         mSnapshot.publish(values);
     }
 }

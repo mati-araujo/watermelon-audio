@@ -688,7 +688,7 @@ WMA_API void wma_input_release(WmaEngine* engine);
  * ================================================================ */
 
 /** Number of floats wma_tuner_get_snapshot() writes. */
-#define WMA_TUNER_SNAPSHOT_VALUES 10
+#define WMA_TUNER_SNAPSHOT_VALUES 12
 
 /**
  * Start the analysis seam: the capture thread begins feeding a lock-free ring,
@@ -775,6 +775,22 @@ WMA_API float wma_tuner_get_target(const WmaEngine* engine);
  *                         Sharp turns positive, flat turns negative.
  *                         [8] detected pitch in Hz (0 = no note found)
  *                         [9] detection clarity, 0..1
+ *                         [10] inharmonicity B of the sounding string, from
+ *                              f_n = n*f0*sqrt(1 + B*n^2). NaN when it could not
+ *                              be measured — not 0, because 0 is a PLAUSIBLE
+ *                              value (an ideal string).
+ *                         [11] 1 if [10] was actually measured, 0 if the consumer
+ *                              must fall back to the physics-derived default.
+ *                              This is a separate field and not a sentinel inside
+ *                              [10] precisely because AC-001.11 asks for both.
+ *
+ *                         B comes free with REQ-001 S6: four tracked partials
+ *                         that disagree ARE the string's stiffness, so nothing
+ *                         re-analyses the signal to get it. The perceptual
+ *                         correction itself is NOT published here — it is a
+ *                         property of the whole SET of strings, not of the one
+ *                         that happens to be sounding, so it is computed where
+ *                         the tuning is known.
  *
  *                         [5]-[7] are NaN — not 0 — whenever there is no target
  *                         or no measurement yet: 0.0 cents is a PLAUSIBLE reading

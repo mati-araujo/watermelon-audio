@@ -36,6 +36,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <stdexcept>
 
 #include <gtest/gtest.h>
 
@@ -97,20 +98,50 @@ inline bool writeGolden(const std::string& path, const std::string& name,
     return true;
 }
 
+/**
+ * 🔴 SE PARTE POR TABS, Y UNA LINEA QUE NO PARSEA ES UN ERROR, NO UN SALTEO.
+ *
+ * Esto usaba `sscanf(line, "%127s %lf %lf %lf", …)`, y `%s` CORTA EN EL PRIMER
+ * ESPACIO. Con etiquetas de una sola palabra —las unicas que habia— andaba; el
+ * primer golden con una etiqueta como "guitarra E2" devolvio **cero filas**, en
+ * silencio. Y el sintoma no apuntaba al parser: el test fallaba diciendo "el
+ * conjunto de casos cambio", que manda a revisar los casos en vez del lector.
+ *
+ * El writer separa los campos con TAB, asi que el lector se parte por tab. Y una
+ * linea que no parsea **falla**: saltearla es lo que convirtio un bug de parseo
+ * en un mensaje engañoso.
+ */
 inline bool readGolden(const std::string& path, std::vector<Sample>& rows) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) return false;
     char line[512];
+    bool ok = true;
     while (std::fgets(line, sizeof(line), f) != nullptr) {
-        if (line[0] == '#' || line[0] == '\n') continue;
-        char label[128] = {0};
-        double sec = 0.0, cents = 0.0, unc = 0.0;
-        if (std::sscanf(line, "%127s %lf %lf %lf", label, &sec, &cents, &unc) == 4) {
-            rows.push_back({label, sec, cents, unc});
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r' || line[0] == '\0') continue;
+
+        std::string text(line);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+        if (text.empty()) continue;
+
+        std::string field[4];
+        int n = 0;
+        size_t start = 0;
+        for (size_t i = 0; i <= text.size() && n < 4; ++i) {
+            if (i == text.size() || text[i] == '\t') {
+                field[n++] = text.substr(start, i - start);
+                start = i + 1;
+            }
+        }
+        if (n != 4) { ok = false; continue; }
+        try {
+            rows.push_back({field[0], std::stod(field[1]), std::stod(field[2]),
+                            std::stod(field[3])});
+        } catch (const std::exception&) {
+            ok = false;
         }
     }
     std::fclose(f);
-    return true;
+    return ok;
 }
 
 /**

@@ -50,10 +50,20 @@ data class TunerSnapshot(
     val detectedHz: Float?,
     /** Confianza de [detectedHz], 0..1. Por debajo de ~0,5 no hay nota creíble. */
     val detectionClarity: Float,
+    /**
+     * Coeficiente de inarmonicidad **B** de la cuerda que suena, de
+     * `f_n = n·f₀·√(1 + B·n²)`, o `null` si no se pudo medir.
+     *
+     * Sale gratis del strobe: cuatro parciales que discrepan **son** la rigidez de
+     * la cuerda. Valores típicos: ~10⁻⁵ en una prima de guitarra, ~10⁻⁴ en una
+     * bordona. `null` no es lo mismo que `0f` — cero es una cuerda ideal, que es
+     * un valor plausible.
+     */
+    val inharmonicityB: Float?,
 ) {
     companion object {
         /** Cantidad de floats del snapshot nativo. Espeja `WMA_TUNER_SNAPSHOT_VALUES`. */
-        const val VALUE_COUNT: Int = 10
+        const val VALUE_COUNT: Int = 12
 
         /**
          * Arma el snapshot desde los floats nativos, en el orden que documenta
@@ -75,6 +85,9 @@ data class TunerSnapshot(
                 uncertainty = values[7].takeIf { !it.isNaN() },
                 detectedHz = values[8].takeIf { it > 0f && !it.isNaN() },
                 detectionClarity = values[9],
+                // El índice 11 es la marca de "medido": sin ella, un B de 0 no se
+                // distingue de "no hubo medición" (AC-001.11).
+                inharmonicityB = values[10].takeIf { values[11] >= 0.5f && !it.isNaN() },
             )
         }
     }

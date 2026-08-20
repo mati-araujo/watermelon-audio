@@ -94,6 +94,7 @@ class FakeTuner(
             state: TunerState = TunerState.NO_LOCK,
             detectedHz: Float? = null,
             detectionClarity: Float = 0f,
+            inharmonicityB: Float? = null,
         ) = TunerSnapshot(
             captureSampleRate = captureSampleRate,
             levelRms = levelRms,
@@ -105,6 +106,7 @@ class FakeTuner(
             uncertainty = null,
             detectedHz = detectedHz,
             detectionClarity = detectionClarity,
+            inharmonicityB = inharmonicityB,
         )
 
         /** Un snapshot con medición, para los tests que necesitan un número. */
@@ -114,6 +116,7 @@ class FakeTuner(
             uncertainty: Float = 0.01f,
             detectedHz: Float? = 440f,
             detectionClarity: Float = 0.99f,
+            inharmonicityB: Float? = null,
         ) = TunerSnapshot(
             captureSampleRate = 48000,
             levelRms = 0.2f,
@@ -125,6 +128,7 @@ class FakeTuner(
             uncertainty = uncertainty,
             detectedHz = detectedHz,
             detectionClarity = detectionClarity,
+            inharmonicityB = inharmonicityB,
         )
     }
 }
