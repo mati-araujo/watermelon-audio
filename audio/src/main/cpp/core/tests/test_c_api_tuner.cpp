@@ -591,4 +591,129 @@ TEST_F(TunerApiTest, IntonationSurvivesHavingNoEngineAtAll) {
     EXPECT_TRUE(std::isnan(wma_intonation_difference_cents(nullptr)));
     wma_intonation_reset(nullptr);   // no debe explotar
 }
+
+// ===========================================================================
+// REQ-001 S8 — fuentes de entrada
+// ===========================================================================
+/**
+ * El modo de falla que esta seccion evita es SILENCIOSO: si el ring conserva
+ * frames de la fuente vieja mientras el estimador sigue integrando, la lectura
+ * sale de **mezclar dos señales** y no se ve como un error — se ve como un
+ * numero perfectamente formado.
+ */
+
+/// 8.4 · AC-001.17 — la fuente activa es consultable y es la real.
+TEST_F(TunerApiTest, TheActiveInputSourceIsQueryableAndMatchesWhatWasSet) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_start(mWma));
+
+    for (int src : {0, 1, 2, 0}) {
+        wma_input_set_source(mWma, src);
+        EXPECT_EQ(wma_input_get_source(mWma), src)
+            << "se pidio la fuente " << src << " y reporta otra";
+    }
+
+    // Una fuente que no existe no puede cambiar la activa.
+    wma_input_set_source(mWma, 0);
+    wma_input_set_source(mWma, 99);
+    EXPECT_EQ(wma_input_get_source(mWma), 0)
+        << "una fuente invalida movio la activa";
+}
+
+/// 8.2 y 8.3 · AC-001.18 — conmutar tira lo integrado; nada se hereda.
+TEST_F(TunerApiTest, SwitchingSourceThrowsAwayEverythingThatWasIntegrating) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    ASSERT_TRUE(wma_tuner_set_target(mWma, 440.0f));
+
+    for (int i = 0; i < 40; ++i) renderWithInput(1, kBlockFrames, 0.2f);
+    auto before = sentinelBuffer();
+    ASSERT_TRUE(waitForSnapshot(mWma, before));
+    const float framesBefore = before[kSnapFramesAnalyzed];
+    ASSERT_GT(framesBefore, 0.0f) << "no llego a analizar nada antes de conmutar";
+
+    wma_input_set_source(mWma, 2);          // a USB
+
+    // El primer snapshot despues de conmutar NO puede traer una lectura
+    // convergida heredada del microfono.
+    auto after = sentinelBuffer();
+    bool sawInherited = false;
+    for (int i = 0; i < 10; ++i) {
+        renderWithInput(1, kBlockFrames, 0.0f);   // silencio de la fuente nueva
+        if (wma_tuner_get_snapshot(mWma, after.data())) {
+            if (static_cast<int>(after[kSnapState]) == 3) sawInherited = true;
+        }
+    }
+    EXPECT_FALSE(sawInherited)
+        << "entrego un valor CONVERGIDO despues de conmutar de fuente, sin haber "
+           "integrado un solo frame de la fuente nueva";
+}
+
+/**
+ * 8.5 — conmutar MIENTRAS el thread de analisis integra no produce carrera.
+ *
+ * Con COMPUERTA y no con iteraciones: un test de concurrencia que solo repite
+ * mucho no pega la ventana, y este repo ya se comio esa leccion. Los dos hilos
+ * esperan la misma señal de largada, asi que el cambio de fuente cae adentro del
+ * drenaje y no antes ni despues.
+ */
+TEST_F(TunerApiTest, SwitchingSourceWhileTheAnalysisIntegratesDoesNotRace) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    ASSERT_TRUE(wma_tuner_set_target(mWma, 440.0f));
+
+    std::atomic<bool> go{false};
+    std::atomic<bool> stop{false};
+
+    std::thread switcher([&] {
+        while (!go.load(std::memory_order_acquire)) { /* compuerta */ }
+        for (int i = 0; i < 200 && !stop.load(std::memory_order_acquire); ++i) {
+            wma_input_set_source(mWma, i % 3);
+        }
+    });
+
+    go.store(true, std::memory_order_release);
+    for (int i = 0; i < 200; ++i) {
+        renderWithInput(1, kBlockFrames, 0.2f);
+        auto buf = sentinelBuffer();
+        wma_tuner_get_snapshot(mWma, buf.data());   // el lector, en paralelo
+    }
+    stop.store(true, std::memory_order_release);
+    switcher.join();
+
+    // Lo que se afirma no es un valor: es que el motor sigue entero y coherente.
+    auto buf = sentinelBuffer();
+    ASSERT_TRUE(waitForSnapshot(mWma, buf));
+    EXPECT_GE(buf[kSnapFramesAnalyzed], 0.0f);
+    EXPECT_TRUE(wma_tuner_is_running(mWma));
+}
+
+/**
+ * 8.7 — el objetivo se recomputa contra la tasa REAL del stream.
+ *
+ * Es el modo de falla mas grosero de la etapa y el mas facil de introducir:
+ * asumir 48 k midiendo a 44,1 k corre la lectura **+147 cents**, un semitono y
+ * medio. Un afinador que se equivoca por mas de un semitono no es un afinador
+ * desafinado: es uno roto.
+ */
+TEST_F(TunerApiTest, ADifferentCaptureRateDoesNotShiftTheCalibration) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, 44100);
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    for (int i = 0; i < 20; ++i) renderWithInput(1, kBlockFrames, 0.2f);
+
+    auto buf = sentinelBuffer();
+    ASSERT_TRUE(waitForSnapshot(mWma, buf));
+    EXPECT_EQ(buf[kSnapCaptureSampleRate], 44100.0f)
+        << "publico 48000 con el stream a 44100: la calibracion entera cuelga de "
+           "este numero, y errarle son +147 cents";
+
+    // Y en caliente: cambiar la tasa tiene que verse en el snapshot siguiente.
+    negotiateCaptureRate(mWma, 48000);
+    for (int i = 0; i < 20; ++i) renderWithInput(1, kBlockFrames, 0.2f);
+    ASSERT_TRUE(waitForValue(mWma, kSnapCaptureSampleRate, 48000.0f, buf));
+}
 }  // namespace wma_test

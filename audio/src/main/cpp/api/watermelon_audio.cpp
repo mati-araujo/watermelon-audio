@@ -871,6 +871,12 @@ bool wma_input_is_running(const WmaEngine* engine) {
 
 void wma_input_set_source(WmaEngine* engine, int source) {
     if (!engine || !engine->inputNode) return;
+    // REQ-001 S8: el analisis tiene que enterarse ANTES de que entre un frame de
+    // la fuente nueva, o mezcla dos señales en la misma integracion.
+    {
+        std::lock_guard<std::mutex> lock(engine->analysisMutex);
+        if (engine->analysisThread) engine->analysisThread->onSourceChanged();
+    }
     if (source < 0 || source > 2) {
         WMA_LOGE("wma_input_set_source: invalid source %d", source);
         return;

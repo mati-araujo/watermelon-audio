@@ -58,6 +58,25 @@ void AnalysisThread::drainLoop() {
         const int wantLock = mPendingLock.exchange(-2, std::memory_order_acq_rel);
         if (wantLock != -2) mFastMode.lockTo(wantLock);
 
+        // --- cambio de fuente: nada de lo integrado sobrevive (S8) -----------
+        //
+        // Se descarta el ring ANTES de leerlo, porque lo que quedo adentro es de
+        // la fuente vieja. Y se reinicia todo lo que integra: un strobe que
+        // siguiera acumulando fase entre dos señales distintas publicaria un
+        // numero perfectamente formado que no mide nada.
+        if (mSourceChanged.exchange(false, std::memory_order_acq_rel)) {
+            mRing.skipToNewest();
+            mStrobe.reset();
+            mDetector.reset();
+            mFastMode.reset();
+            mInharmonicity.reset();
+            mIntonation.reset();
+            // `mAppliedTarget` vuelve a 0 para que el objetivo se re-aplique: si
+            // no, el strobe recien reseteado se quedaria sin objetivo y el modo
+            // no volveria a medir nunca.
+            mAppliedTarget = 0.0;
+        }
+
         double target = mTargetHz.load(std::memory_order_acquire);
 
         if (rate > 0 && rate != mPreparedRate) {

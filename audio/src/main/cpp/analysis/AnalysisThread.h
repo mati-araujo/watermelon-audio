@@ -142,6 +142,22 @@ public:
         mCandidatesDirty.store(true, std::memory_order_release);
     }
 
+    /**
+     * @brief La fuente de entrada cambio: TODO lo integrado deja de valer (S8).
+     *
+     * El modo de falla que esto evita es SILENCIOSO. Si el ring conserva frames
+     * de la fuente vieja mientras el estimador sigue integrando, la lectura sale
+     * de **mezclar dos señales**, con una fase que no significa nada — y no se ve
+     * como un error, se ve como un numero.
+     *
+     * Lo llama el thread de control, y **no toca nada**: levanta una bandera y el
+     * lazo hace el reinicio. Tocar el strobe desde aca es exactamente la carrera
+     * que TSan encontro en S9.
+     */
+    void onSourceChanged() noexcept {
+        mSourceChanged.store(true, std::memory_order_release);
+    }
+
     /// Engancha a mano a una cuerda (el musico la elige). -1 suelta.
     void lockString(int index) noexcept {
         mPendingLock.store(index, std::memory_order_release);
@@ -230,6 +246,9 @@ private:
     int mPendingCount{0};
     std::atomic<bool> mCandidatesDirty{false};
     std::atomic<int> mPendingLock{-2};   // -2 = nada pedido
+
+    /// S8. La pone el thread de control; la consume el lazo.
+    std::atomic<bool> mSourceChanged{false};
 
     /// Deteccion gruesa: encuentra la altura SIN objetivo. Corre en el mismo thread y no
     /// depende del estimador — de hecho es al reves: es quien puede darle un objetivo.
