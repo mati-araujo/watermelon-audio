@@ -165,6 +165,35 @@ TEST(InharmonicityTest, WhenBCannotBeMeasuredItSaysSoInsteadOfReportingZero) {
 }
 
 // ---------------------------------------------------------------------------
+// Un B NEGATIVO no existe, y no puede pasar por medición
+// ---------------------------------------------------------------------------
+/**
+ * 🔴 ESTE TEST LO PIDIO LA MUTACION. Quitar la guarda de `b < 0` sobrevivia a la
+ * suite entera: nada probaba que una cuerda con los parciales COMPRIMIDOS —que la
+ * fisica no permite, porque la rigidez los estira— fuera rechazada.
+ *
+ * Importa porque el modo de falla es silencioso: un B negativo entra en
+ * `600·log2(1 + p²·B)` sin explotar, sale una correccion con el signo cambiado, y
+ * el afinador manda a mover la cuerda para el lado contrario con cara de que
+ * midio algo. Devolver "no medido" hace que el consumidor caiga al respaldo de
+ * fisica, que es lo peor que puede pasar y es correcto.
+ */
+TEST(InharmonicityTest, CompressedPartialsAreRejectedInsteadOfReportedAsNegativeB) {
+    StrobeTracker s;
+    s.prepare(kRate);
+    s.setTarget(110.0);
+    // B negativo en el generador = parciales COMPRIMIDOS: f_n = n·f0·√(1 − |B|n²).
+    feed(s, inharmonicString(110.0, -2.0e-4, 4, kRate, kThreeSeconds));
+
+    InharmonicityEstimator e;
+    const bool ok = e.estimateFrom(s);
+
+    EXPECT_FALSE(ok) << "acepto parciales comprimidos como una medicion valida";
+    EXPECT_FALSE(e.measured());
+    EXPECT_GE(e.b(), 0.0) << "publico un B negativo, que la fisica no permite";
+}
+
+// ---------------------------------------------------------------------------
 // 7.6 — un B absurdo no puede mover el objetivo a otra nota
 // ---------------------------------------------------------------------------
 TEST(InharmonicityTest, AnAbsurdBIsSaturatedAndNeverReachesTheNeighbouringNote) {
