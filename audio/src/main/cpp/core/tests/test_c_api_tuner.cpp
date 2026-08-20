@@ -48,6 +48,7 @@ using wma::analysis::kSnapFramesAnalyzed;
 using wma::analysis::kSnapLevelRms;
 using wma::analysis::kSnapState;
 using wma::analysis::kSnapCents;
+using wma::analysis::kSnapLockedString;
 using wma::analysis::kSnapPhaseAngle;
 using wma::analysis::kSnapUncertainty;
 
@@ -590,5 +591,161 @@ TEST_F(TunerApiTest, IntonationSurvivesHavingNoEngineAtAll) {
     EXPECT_EQ(wma_intonation_state(nullptr), WMA_INTONATION_NEED_HARMONIC);
     EXPECT_TRUE(std::isnan(wma_intonation_difference_cents(nullptr)));
     wma_intonation_reset(nullptr);   // no debe explotar
+}
+
+// ===========================================================================
+// REQ-001 S8 — fuentes de entrada
+// ===========================================================================
+/**
+ * El modo de falla que esta seccion evita es SILENCIOSO: si el ring conserva
+ * frames de la fuente vieja mientras el estimador sigue integrando, la lectura
+ * sale de **mezclar dos señales** y no se ve como un error — se ve como un
+ * numero perfectamente formado.
+ */
+
+/// 8.4 · AC-001.17 — la fuente activa es consultable y es la real.
+TEST_F(TunerApiTest, TheActiveInputSourceIsQueryableAndMatchesWhatWasSet) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_start(mWma));
+
+    for (int src : {0, 1, 2, 0}) {
+        wma_input_set_source(mWma, src);
+        EXPECT_EQ(wma_input_get_source(mWma), src)
+            << "se pidio la fuente " << src << " y reporta otra";
+    }
+
+    // Una fuente que no existe no puede cambiar la activa.
+    wma_input_set_source(mWma, 0);
+    wma_input_set_source(mWma, 99);
+    EXPECT_EQ(wma_input_get_source(mWma), 0)
+        << "una fuente invalida movio la activa";
+}
+
+/// 8.2 y 8.3 · AC-001.18 — conmutar tira lo integrado; nada se hereda.
+TEST_F(TunerApiTest, SwitchingSourceThrowsAwayEverythingThatWasIntegrating) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    const double target = 110.0;
+    ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(target)));
+
+    // 🔴 EL OBSERVABLE ES LA MEDICION, Y COSTO DOS INTENTOS ENCONTRARLO.
+    //
+    // Primero afirme que el estado no quedara "convergido" alimentando silencio.
+    // Sobrevivia al mutante que quita el reinicio entero: con silencio el estado
+    // va a "sin señal" igual, se haya reiniciado algo o no.
+    //
+    // Despues use el ENGANCHE del modo rapido. Tampoco sirve, y por una razon
+    // que es comportamiento correcto: el enganche se cae con el reinicio y se
+    // vuelve a establecer en el mismo tick, porque el musico sigue afinando la
+    // misma cuerda. Un testigo que se restaura solo no es un testigo.
+    //
+    // Lo que de verdad promete AC-001.18 es que **la integracion se tiro**: la
+    // fase acumulada sobre el microfono no puede seguir contando cuando los
+    // frames vienen de USB. Y eso se ve en que los cents vuelven a NaN — el
+    // estimador quedo sin medicion y tiene que juntar ventanas de nuevo.
+    // `feedTone` se autorregula contra `framesAnalyzed`: alimentar mas rapido que
+    // el tiempo real le daria al estimador una señal CON HUECOS, porque el ring
+    // pisa lo viejo por diseño.
+    feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kFirstRate, 160, kBlockFrames);
+    auto before = sentinelBuffer();
+    ASSERT_TRUE(waitForMeasurement(mWma, before))
+        << "no llego a producir una medicion antes de conmutar: el test no puede "
+           "probar que se tira, porque nunca hubo nada";
+    ASSERT_FALSE(std::isnan(before[kSnapCents]));
+
+    wma_input_set_source(mWma, 2);          // a USB
+
+    // 🔴 SE SIGUE ALIMENTANDO EL MISMO TONO, Y ESO ES LO QUE HACE DISCRIMINAR AL
+    // TEST. Con silencio los cents darian NaN igual —`hasSignal()` seria falso—
+    // aunque el estimador conservara su medicion: es el agujero de la primera
+    // version. Con el tono puesto, la unica forma de que salga NaN es que la
+    // integracion se haya TIRADO y el estimador tenga que juntar ventanas de nuevo.
+    auto after = sentinelBuffer();
+    bool wentBlank = false;
+    for (int round = 0; round < 30 && !wentBlank; ++round) {
+        feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kFirstRate, 2, kBlockFrames);
+        // Se sondea un rato: el drenaje es asincrono, y leer justo despues de
+        // empujar puede devolver el snapshot ANTERIOR al reinicio.
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(30);
+        while (std::chrono::steady_clock::now() < until) {
+            if (wma_tuner_get_snapshot(mWma, after.data()) && std::isnan(after[kSnapCents])) {
+                wentBlank = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    EXPECT_TRUE(wentBlank)
+        << "siguio publicando una desviacion despues de conmutar de fuente: la "
+           "fase acumulada sobre el microfono se esta mezclando con frames de USB, "
+           "y eso no se ve como un error — se ve como un numero";
+}
+
+/**
+ * 8.5 — conmutar MIENTRAS el thread de analisis integra no produce carrera.
+ *
+ * Con COMPUERTA y no con iteraciones: un test de concurrencia que solo repite
+ * mucho no pega la ventana, y este repo ya se comio esa leccion. Los dos hilos
+ * esperan la misma señal de largada, asi que el cambio de fuente cae adentro del
+ * drenaje y no antes ni despues.
+ */
+TEST_F(TunerApiTest, SwitchingSourceWhileTheAnalysisIntegratesDoesNotRace) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    ASSERT_TRUE(wma_tuner_set_target(mWma, 440.0f));
+
+    std::atomic<bool> go{false};
+    std::atomic<bool> stop{false};
+
+    std::thread switcher([&] {
+        while (!go.load(std::memory_order_acquire)) { /* compuerta */ }
+        for (int i = 0; i < 200 && !stop.load(std::memory_order_acquire); ++i) {
+            wma_input_set_source(mWma, i % 3);
+        }
+    });
+
+    go.store(true, std::memory_order_release);
+    for (int i = 0; i < 200; ++i) {
+        renderWithInput(1, kBlockFrames, 0.2f);
+        auto buf = sentinelBuffer();
+        wma_tuner_get_snapshot(mWma, buf.data());   // el lector, en paralelo
+    }
+    stop.store(true, std::memory_order_release);
+    switcher.join();
+
+    // Lo que se afirma no es un valor: es que el motor sigue entero y coherente.
+    auto buf = sentinelBuffer();
+    ASSERT_TRUE(waitForSnapshot(mWma, buf));
+    EXPECT_GE(buf[kSnapFramesAnalyzed], 0.0f);
+    EXPECT_TRUE(wma_tuner_is_running(mWma));
+}
+
+/**
+ * 8.7 — el objetivo se recomputa contra la tasa REAL del stream.
+ *
+ * Es el modo de falla mas grosero de la etapa y el mas facil de introducir:
+ * asumir 48 k midiendo a 44,1 k corre la lectura **+147 cents**, un semitono y
+ * medio. Un afinador que se equivoca por mas de un semitono no es un afinador
+ * desafinado: es uno roto.
+ */
+TEST_F(TunerApiTest, ADifferentCaptureRateDoesNotShiftTheCalibration) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, 44100);
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    for (int i = 0; i < 20; ++i) renderWithInput(1, kBlockFrames, 0.2f);
+
+    auto buf = sentinelBuffer();
+    ASSERT_TRUE(waitForSnapshot(mWma, buf));
+    EXPECT_EQ(buf[kSnapCaptureSampleRate], 44100.0f)
+        << "publico 48000 con el stream a 44100: la calibracion entera cuelga de "
+           "este numero, y errarle son +147 cents";
+
+    // Y en caliente: cambiar la tasa tiene que verse en el snapshot siguiente.
+    negotiateCaptureRate(mWma, 48000);
+    for (int i = 0; i < 20; ++i) renderWithInput(1, kBlockFrames, 0.2f);
+    ASSERT_TRUE(waitForValue(mWma, kSnapCaptureSampleRate, 48000.0f, buf));
 }
 }  // namespace wma_test

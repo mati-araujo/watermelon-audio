@@ -875,6 +875,16 @@ void wma_input_set_source(WmaEngine* engine, int source) {
         WMA_LOGE("wma_input_set_source: invalid source %d", source);
         return;
     }
+    // REQ-001 S8: el analisis tiene que enterarse ANTES de que entre un frame de
+    // la fuente nueva, o mezcla dos señales en la misma integracion.
+    //
+    // Va DESPUES de validar, y no antes: una fuente invalida no cambia nada, asi
+    // que tirar la integracion por ella seria castigar al musico por un bug del
+    // llamador. (Lo tuve al reves un rato.)
+    {
+        std::lock_guard<std::mutex> lock(engine->analysisMutex);
+        if (engine->analysisThread) engine->analysisThread->onSourceChanged();
+    }
     // Switching source tears the stream down and brings it back up, so this is
     // the one input setter that can throw. The guard used to live in the JNI;
     // it belongs here instead, because a C++ exception unwinding into
