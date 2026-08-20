@@ -168,3 +168,111 @@ TEST_F(BackendPathFixture, CoercedRateStillPlaysTheStringInTune) {
 
     mEngine->stop();
 }
+
+// ---------------------------------------------------------------------------
+// REQ-006.2 — el hueco de onStreamConfigChanged
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Renderiza `seconds` de audio por el motor y devuelve el canal izquierdo.
+/// `renderRate` es el rate al que se INTERPRETA lo rendido, que es lo que hace
+/// observable si los engines quedaron preparados a otro.
+std::vector<float> renderMono(AudioEngine& engine, int renderRate, double seconds) {
+    constexpr int kFrames = 512;
+    const int blocks = static_cast<int>(seconds * renderRate) / kFrames;
+    std::vector<float> mono;
+    std::vector<float> buffer(kFrames * 2, 0.0f);
+    for (int b = 0; b < blocks; ++b) {
+        std::fill(buffer.begin(), buffer.end(), 0.0f);
+        engine.onAudioReady(buffer.data(), nullptr, kFrames);
+        for (int i = 0; i < kFrames; ++i) {
+            mono.push_back(buffer[static_cast<size_t>(i) * 2]);
+        }
+    }
+    return mono;
+}
+
+} // namespace
+
+/**
+ * AC-006.3 — WHEN `onStreamConfigChanged` transporta un sample rate distinto del
+ * que los engines tienen preparado, THE SYSTEM SHALL propagarselo.
+ *
+ * COMO SE HACE OBSERVABLE
+ * -----------------------
+ * El motor arranca a 44,1 kHz y el device pasa a 48. Desde ese momento el stream
+ * ENTREGA bloques que se reproducen a 48 kHz, asi que la salida se mide a 48.
+ * Si los engines quedaron preparados a 44,1, el lazo de Karplus tiene menos
+ * muestras de las que corresponden para ese rate: da la vuelta mas rapido y la
+ * nota sale ALTA, por el ratio 48000/44100 = +147 cents.
+ *
+ * Es el mismo mecanismo que `AStaleSampleRatePlaysTheStringFlatNotSharp` mide en
+ * la otra direccion, y por eso el signo es el contrario: alla el rate preparado
+ * era MAS ALTO que el real (lazo largo, nota baja); aca es mas BAJO.
+ *
+ * El +-15 cents es el mismo umbral de AC-006.2, y por la misma razon: separa las
+ * dos poblaciones medidas, que no tienen nada en el medio.
+ */
+TEST_F(BackendPathFixture, AConfigChangeReachesTheSynthEngines) {
+    startEngineAt(kNegotiatedRate);          // 44100
+    mEngine->setEngineType(kKarplusStrong);
+
+    // El device se va a 48 kHz — hot-plug de USB, cambio de ruteo.
+    watermelon_audio::StreamInfo info{};
+    info.sampleRate = kRequestedRate;        // 48000
+    info.channelCount = 2;
+    mEngine->onStreamConfigChanged(info);
+
+    for (float target : {220.0f, 440.0f}) {
+        mEngine->setFrequencyAndAmplitude(target, 0.8f);
+        const std::vector<float> mono = renderMono(*mEngine, kRequestedRate, 1.0);
+
+        const size_t from = static_cast<size_t>(0.1 * kRequestedRate);
+        const size_t len = static_cast<size_t>(0.4 * kRequestedRate);
+        ASSERT_GE(mono.size(), from + len);
+        const double f = wma::pitch::fundamentalHz(mono, from, len, kRequestedRate, target);
+        ASSERT_GT(f, 0.0) << "no se pudo medir la fundamental de " << target << " Hz";
+
+        const double offCents = 1200.0 * std::log2(f / static_cast<double>(target));
+        EXPECT_LT(std::abs(offCents), 15.0)
+            << "el motor paso a " << kRequestedRate << " Hz y la nota de " << target
+            << " Hz salio en " << f << " Hz (" << offCents << " cents).\n"
+            << "  Cerca de +147 significa que onStreamConfigChanged no le llevo el rate nuevo a "
+            << "los engines: siguen preparados a " << kNegotiatedRate << ".";
+    }
+
+    mEngine->stop();
+}
+
+/**
+ * AC-006.1, en el segundo call site. El quiesce que S1 puso adentro de
+ * `configureComponentsWithSampleRate()` deberia cubrir tambien este camino
+ * "gratis" — pero eso hay que MEDIRLO, no suponerlo. El veredicto lo da TSan.
+ */
+TEST_F(BackendPathFixture, AConfigChangeReconfiguresWithoutRacingTheAudioThread) {
+    startEngineAt(kNegotiatedRate);
+    mEngine->setEngineType(kKarplusStrong);
+    mEngine->setFrequencyAndAmplitude(440.0f, 0.8f);
+
+    std::atomic<bool> stopRender{false};
+    std::thread audio([&] {
+        constexpr int kBlock = 512;   // ver la nota de tamaño de bloque mas arriba
+        std::vector<float> buffer(kBlock * 2, 0.0f);
+        while (!stopRender.load(std::memory_order_relaxed)) {
+            mEngine->onAudioReady(buffer.data(), nullptr, kBlock);
+        }
+    });
+
+    // Varios cambios seguidos, como un hot-plug repetido.
+    for (int i = 0; i < 6; ++i) {
+        watermelon_audio::StreamInfo info{};
+        info.sampleRate = (i % 2 == 0) ? kRequestedRate : kNegotiatedRate;
+        info.channelCount = 2;
+        mEngine->onStreamConfigChanged(info);
+    }
+
+    stopRender.store(true, std::memory_order_relaxed);
+    audio.join();
+    mEngine->stop();
+}
