@@ -2352,11 +2352,24 @@ void AudioEngine::onStreamConfigChanged(const watermelon_audio::StreamInfo& newI
     // Update sample rate in all components
     int sampleRate = newInfo.sampleRate;
 
-    // Configure oscillators and modulators (Phase 1E — delegated to OscillatorBank)
-    mOscBank.prepare(sampleRate);
-
-    mEffectChain.setSampleRate(sampleRate);
-    mOutputStage.prepare(sampleRate, 0);
+    // REQ-006.2 — se DELEGA en vez de mantener una lista propia.
+    //
+    // Aca vivian tres lineas —`mOscBank.prepare`, `mEffectChain.setSampleRate`,
+    // `mOutputStage.prepare`— y nada mas. `configureComponentsWithSampleRate()`
+    // hace esas TRES Y OTRAS NUEVE: looper, transport, pre-roll, arpegiador, el
+    // dispatcher de engines, mixer node, oscillator node, effect chain node,
+    // voice manager y chord harmony.
+    //
+    // O sea esta no era una lista mas chica a proposito: era una lista que
+    // DRIFTEO. El sintoma medible es el dispatcher —un cambio de rate no le
+    // llegaba, asi que la cuerda de Karplus seguia dimensionada para el rate
+    // viejo— pero agregar aca una linea para el dispatcher habria dejado las dos
+    // listas drifteando con una entrada menos de diferencia.
+    //
+    // Delegar deja UN SOLO lugar que sabe que se re-prepara ante un cambio de
+    // rate, que es la condicion para que el trinquete de REQ-006.3 signifique
+    // algo. Y trae el quiesce de REQ-006.1 sin repetirlo.
+    configureComponentsWithSampleRate(sampleRate);
 
     // REQ-001 S1 (1.16) — y al InputNode NO lo tocaba nadie. Su unico
     // `prepare()` en todo el arbol es el `prepare(48000, 4096)` literal de
