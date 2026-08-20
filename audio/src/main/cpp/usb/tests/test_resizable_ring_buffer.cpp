@@ -56,7 +56,9 @@ TEST(ResizableRingBufferTest, StressWriterReaderAndRepeatedResize) {
             if (ring.write(chunk.data(), chunk.size())) {
                 nextValue += chunk.size();
                 writes.fetch_add(1, std::memory_order_relaxed);
-                std::this_thread::sleep_for(std::chrono::microseconds(10));
+                // ESTIMULO: marca el paso del escritor para que el lector y el
+            // resize se crucen. La duracion es el experimento.
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
             } else {
                 std::this_thread::yield();
             }

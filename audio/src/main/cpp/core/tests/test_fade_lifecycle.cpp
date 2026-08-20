@@ -17,6 +17,7 @@
  * negotiated rather than the rate the app asked for.
  */
 
+#include "tests/support/TestWait.h"
 #include "support/BackendPathFixture.h"
 
 #include <algorithm>
@@ -115,7 +116,8 @@ TEST_F(FadeLifecycleTest, StopWithFadeEventuallyStopsTheEngine) {
     mEngine->stopWithFade(kFadeMs);
     ASSERT_EQ(mEngine->getEngineState(), kStateRunning) << "the stop must trail the fade";
 
-    awaitDetachedStop(kFadeMs);
+    EXPECT_TRUE(awaitEngineStopped(kFadeMs))
+        << "el stop diferido nunca llego a parar el motor";
 
     EXPECT_EQ(mEngine->getEngineState(), kStateStopped);
 }
@@ -151,11 +153,11 @@ TEST_F(FadeLifecycleTest, PauseWithFadeLandsOnPausedAfterTheRamp) {
     mEngine->pauseWithFade(kFadeMs);
     ASSERT_FALSE(mEngine->getIsPaused());
 
-    // FadeController arms the pause for fadeTimeMs + 50; the margin here is for
-    // scheduling, not for the fade.
-    std::this_thread::sleep_for(std::chrono::milliseconds(kFadeMs + 400));
-
-    EXPECT_TRUE(mEngine->getIsPaused());
+    // PRESENCIA: se espera a que la pausa SE ARME, no a que pase un rato. El
+    // margen viejo (`kFadeMs + 400`) era para el scheduling, y un margen para el
+    // scheduling es exactamente lo que se queda corto en un runner cargado.
+    EXPECT_TRUE(wma_test::waitUntil([&]() -> bool { return mEngine->getIsPaused(); }))
+        << "el fade de pausa no llego a armarse";
 }
 
 TEST_F(FadeLifecycleTest, PauseWithFadePausesImmediatelyWhenNoFadeTimeIsGiven) {
@@ -226,9 +228,15 @@ TEST_F(FadeLifecycleTest, ResumeWithFadeCancelsAPendingPause) {
     mEngine->pauseWithFade(kPauseFadeMs);
     mEngine->resumeWithFade(kPauseFadeMs);
 
-    // The pause was armed on a timer. If resume did not cancel it, it would
-    // fire behind the resume and leave the engine silently paused.
-    std::this_thread::sleep_for(std::chrono::milliseconds(kPauseFadeMs + 400));
+    // AUSENCIA, y por eso ESTA espera se queda. El timer de pausa o dispara o no
+    // dispara; una no-ocurrencia no se puede esperar por condicion, solo se le
+    // puede dar la ventana en la que HABRIA ocurrido. Que esa ventana alcanza lo
+    // demuestra su test hermano —`PauseWithFadeEventuallyPauses`, que espera a que
+    // el MISMO timer dispare— y por eso el numero no es arbitrario.
+    //
+    // Va por `sleepFixed` para que el instrumento de REQ-002 la vea en vez de que
+    // quede escondida en un `sleep_for` crudo.
+    wma_test::sleepFixed(std::chrono::milliseconds(kPauseFadeMs + 400));
 
     EXPECT_FALSE(mEngine->getIsPaused());
 }

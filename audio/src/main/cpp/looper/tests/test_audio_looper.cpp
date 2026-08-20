@@ -10,6 +10,7 @@
 // Host-side (x86) — AudioLooper.h is header-only; WavFile does real file IO,
 // which works on the host. No Oboe / JNI / device needed.
 // ============================================================================
+#include "tests/support/TestWait.h"
 #include <gtest/gtest.h>
 #include "AudioLooper.h"
 
@@ -211,11 +212,14 @@ TEST(AudioLooper, PlayCountEmitsTrackCompleted) {
     EXPECT_FALSE(looper.isTrackPlaying(0));
     EXPECT_EQ(looper.getTrackRemainingPlays(0), 0);
 
-    // Let the dispatcher worker drain the queue.
-    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    // PRESENCIA: se espera a que el worker DESPACHE, no a que pasen 60 ms. Un rato
+    // fijo contra un worker que polea cada 15 alcanza en una maquina ociosa y se
+    // queda corto en un runner cargado — la clase de REQ-002.
+    const bool arrived = wma_test::waitUntil([&] { return completed.load() >= 1; });
     looper.setEventDispatcher(nullptr);
     dispatcher.stop();
 
+    EXPECT_TRUE(arrived) << "el evento de track completado nunca llego al worker";
     EXPECT_GE(completed.load(), 1);
     EXPECT_EQ(completedTrack.load(), 0);
 }

@@ -87,7 +87,8 @@ Phase driveToTerminal(LoopbackHarness& h, int maxBlocks = 20000) {
         h.step();
         // Give the worker thread a chance once we've stopped feeding.
         if (h.m.poll().phase == Phase::ANALYZING) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            // ESTIMULO: simula el intervalo real entre transferencias USB.
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
     // Final settle for the worker.

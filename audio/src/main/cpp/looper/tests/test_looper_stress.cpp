@@ -99,6 +99,7 @@ TEST(LooperStress, PlaybackVsControlNoCrash) {
                 if (len > 2048) looper.setTrackLoopRegion(tk, 0, len);
             } break;
         }
+        // ESTIMULO: jitter deliberado para variar el interleaving entre hilos.
         if ((i & 63) == 0) std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
 

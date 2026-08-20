@@ -24,6 +24,7 @@
  * callback podia quedarse con la ultima referencia.
  */
 
+#include "tests/support/TestWait.h"
 #include "../AudioEngine.h"
 #include "../../nodes/InputNode.h"
 
@@ -65,6 +66,9 @@ public:
                                      mWithInput ? mInput.data() : nullptr,
                                      kBlockFrames);
                 mBlocks.fetch_add(1, std::memory_order_relaxed);
+                // ESTIMULO, no sincronizacion: es el intervalo entre callbacks de
+                // audio que este bombeo esta imitando. La duracion ES el
+                // experimento, asi que no se convierte ni se escala.
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
             }
         });
@@ -235,7 +239,16 @@ TEST(InputNodeRetire, TheCallbackNeverEndsUpHoldingTheLastReference) {
     });
 
     // 3. Dejar que el retiro llegue a su punto de espera (o termine, si no espera).
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    //
+    // AUSENCIA: lo que se afirma abajo es que `retireReturned` sigue en false, o
+    // sea que el retiro NO volvio. No hay condicion que esperar — esperar a que
+    // algo no pase es esperar.
+    //
+    // 🔴 Y el modo de falla de esta espera es un falso VERDE, no un falso rojo:
+    // si 50 ms no alcanzan porque la maquina esta cargada, `retireReturned` sale
+    // false por lentitud y el test pasa sin haber probado nada. Anclarlo pediria
+    // un observable de "el retiro entro a esperar", que hoy no existe.
+    wma_test::sleepFixed(std::chrono::milliseconds(50));
 
     const bool returnedWhileCallbackWasInside =
         retireReturned.load(std::memory_order_acquire);
