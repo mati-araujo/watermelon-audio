@@ -34,8 +34,6 @@
  */
 #pragma once
 
-#include "StrobeTracker.h"
-
 #include <cmath>
 
 namespace wma::analysis {
@@ -62,22 +60,38 @@ public:
     }
 
     /**
-     * Toma la medida del slot desde el strobe.
+     * Toma una medida ya publicada.
      *
-     * La ACEPTA solo si el strobe converged(): una medida a medio integrar no
-     * entra al calculo ni siquiera marcada, porque el unico uso posible de un
-     * dato asi es restarlo por accidente.
+     * 🔴 RECIBE VALORES, NO EL TRACKER, Y ESO NO ES ESTILO — ES LA CORRECCION DE
+     * UNA CARRERA REAL. La primera version tomaba un `const StrobeTracker&` y le
+     * preguntaba `converged()`/`cents()`. Pero el strobe lo escribe el THREAD DE
+     * ANALISIS y capturar lo pide el de CONTROL, asi que eso es leer los miembros
+     * de otro thread sin sincronizacion. TSan lo reporto en el primer gate:
+     * *write* de `StrobeTracker::prepare` desde el thread del drenaje contra
+     * *read* de `converged()` desde `wma_intonation_capture`.
      *
-     * @return true si se guardo.
+     * Y el `analysisMutex` de la C API **no cubria nada de eso**: serializa a los
+     * llamadores de control entre si, pero el thread de analisis nunca lo toma.
+     * Es otra puerta, no la misma.
+     *
+     * La salida no es agregar un lock que el drenaje tenga que tomar, sino no
+     * cruzar el hilo: el thread de analisis **publica** y el de control lee el
+     * snapshot, que es el seam que S1 construyo justamente para esto. Este tipo
+     * ya no puede alcanzar a otro thread ni por accidente, porque no tiene con
+     * que.
+     *
+     * La ACEPTA solo si `converged`: una medida a medio integrar no entra ni
+     * siquiera marcada, porque el unico uso posible de un dato asi es restarlo
+     * por accidente.
      */
-    bool capture(Slot slot, const StrobeTracker& strobe) noexcept {
+    bool capture(Slot slot, double cents, double targetHz, bool converged) noexcept {
         if (slot < 0 || slot >= kSlotCount) return false;
-        if (!strobe.converged()) return false;
-        const double target = strobe.targetHz();
-        if (!(target > 0.0)) return false;
+        if (!converged) return false;
+        if (!(targetHz > 0.0)) return false;
+        if (!std::isfinite(cents)) return false;
 
-        mCents[slot] = strobe.cents();
-        mTargetHz[slot] = target;
+        mCents[slot] = cents;
+        mTargetHz[slot] = targetHz;
         mHas[slot] = true;
         return true;
     }

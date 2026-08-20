@@ -95,7 +95,25 @@ public:
      * ya serializa lo demas.
      */
     bool captureIntonation(IntonationMode::Slot slot) noexcept {
-        return mIntonation.capture(slot, mStrobe);
+        // 🔴 SE LEE EL SNAPSHOT PUBLICADO, NO `mStrobe`.
+        //
+        // `mStrobe` lo escribe el thread de analisis; esto corre en el de
+        // control. La primera version preguntaba `mStrobe.converged()` y TSan
+        // reporto la carrera en el primer gate. El `analysisMutex` de la C API no
+        // la cubria: serializa a los llamadores de control entre si, y el thread
+        // de analisis nunca lo toma.
+        //
+        // El snapshot es el seam que S1 construyo para exactamente esto, y ademas
+        // da una garantia que leer los miembros sueltos no daria: los tres
+        // valores salen del MISMO publish, asi que no se puede mezclar el estado
+        // de un tick con los cents de otro.
+        float values[kSnapshotValueCount];
+        if (!mSnapshot.read(values)) return false;
+
+        const bool converged =
+            static_cast<int>(values[kSnapState]) == kStateConverged;
+        return mIntonation.capture(slot, static_cast<double>(values[kSnapCents]),
+                                   targetHz(), converged);
     }
     void resetIntonation() noexcept { mIntonation.reset(); }
     const IntonationMode& intonation() const noexcept { return mIntonation; }

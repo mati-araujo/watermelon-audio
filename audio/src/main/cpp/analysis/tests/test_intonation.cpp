@@ -50,6 +50,19 @@ StrobeTracker measured(double targetHz, double cents, double scale = 1.0,
     return t;
 }
 
+/**
+ * Mete en el modo lo que el strobe midio, por la MISMA puerta que usa el motor:
+ * valores sueltos, no el tracker.
+ *
+ * `IntonationMode` ya no puede recibir un `StrobeTracker` — eso era una carrera,
+ * porque el strobe lo escribe otro thread— asi que el test tampoco se lo pasa. Un
+ * helper de test que use una puerta que produccion no tiene deja de probar
+ * produccion.
+ */
+bool put(IntonationMode& m, IntonationMode::Slot slot, const StrobeTracker& t) {
+    return m.capture(slot, t.cents(), t.targetHz(), t.converged());
+}
+
 // ---------------------------------------------------------------------------
 // 9.1 · AC-001.16 — la diferencia es exacta
 // ---------------------------------------------------------------------------
@@ -66,9 +79,9 @@ TEST(IntonationTest, TheReportedDifferenceMatchesTheTwoKnownDeviations) {
 
     for (const auto& c : kCases) {
         IntonationMode m;
-        ASSERT_TRUE(m.capture(IntonationMode::kHarmonic, measured(target, c.harmonic)))
+        ASSERT_TRUE(put(m, IntonationMode::kHarmonic, measured(target, c.harmonic)))
             << c.name;
-        ASSERT_TRUE(m.capture(IntonationMode::kFretted, measured(target, c.fretted)))
+        ASSERT_TRUE(put(m, IntonationMode::kFretted, measured(target, c.fretted)))
             << c.name;
 
         ASSERT_TRUE(m.hasResult()) << c.name;
@@ -95,18 +108,18 @@ TEST(IntonationTest, ThereIsNoReadingUntilBothMeasurementsHaveConverged) {
     // Una señal corta NO converge, y por lo tanto NO se acepta.
     StrobeTracker tooShort = measured(target, 2.0, 1.0, kRate / 20);
     ASSERT_FALSE(tooShort.converged()) << "el fixture no representa lo que dice";
-    EXPECT_FALSE(m.capture(IntonationMode::kHarmonic, tooShort))
+    EXPECT_FALSE(put(m, IntonationMode::kHarmonic, tooShort))
         << "acepto una medida sin converger";
     EXPECT_EQ(m.state(), IntonationMode::kNeedHarmonic);
 
     // Con la primera buena, sigue sin haber resultado.
-    ASSERT_TRUE(m.capture(IntonationMode::kHarmonic, measured(target, -1.0)));
+    ASSERT_TRUE(put(m, IntonationMode::kHarmonic, measured(target, -1.0)));
     EXPECT_EQ(m.state(), IntonationMode::kNeedFretted);
     EXPECT_FALSE(m.hasResult());
     EXPECT_TRUE(std::isnan(m.differenceCents()))
         << "con una sola medida ya entregaba un numero";
 
-    ASSERT_TRUE(m.capture(IntonationMode::kFretted, measured(target, +2.0)));
+    ASSERT_TRUE(put(m, IntonationMode::kFretted, measured(target, +2.0)));
     EXPECT_EQ(m.state(), IntonationMode::kReady);
     EXPECT_FALSE(std::isnan(m.differenceCents()));
 }
@@ -117,8 +130,8 @@ TEST(IntonationTest, ThereIsNoReadingUntilBothMeasurementsHaveConverged) {
 TEST(IntonationTest, LosingASignalExpiresTheResultInsteadOfShowingTheLastGoodOne) {
     const double target = 2.0 * 110.0;
     IntonationMode m;
-    ASSERT_TRUE(m.capture(IntonationMode::kHarmonic, measured(target, -1.0)));
-    ASSERT_TRUE(m.capture(IntonationMode::kFretted, measured(target, +2.0)));
+    ASSERT_TRUE(put(m, IntonationMode::kHarmonic, measured(target, -1.0)));
+    ASSERT_TRUE(put(m, IntonationMode::kFretted, measured(target, +2.0)));
     ASSERT_TRUE(m.hasResult());
 
     m.invalidate();
@@ -136,8 +149,8 @@ TEST(IntonationTest, LosingASignalExpiresTheResultInsteadOfShowingTheLastGoodOne
 // ---------------------------------------------------------------------------
 TEST(IntonationTest, TwoDifferentStringsAreReportedInsteadOfSubtracted) {
     IntonationMode m;
-    ASSERT_TRUE(m.capture(IntonationMode::kHarmonic, measured(2.0 * 82.407, -1.0)));
-    ASSERT_TRUE(m.capture(IntonationMode::kFretted,  measured(2.0 * 110.000, +2.0)));
+    ASSERT_TRUE(put(m, IntonationMode::kHarmonic, measured(2.0 * 82.407, -1.0)));
+    ASSERT_TRUE(put(m, IntonationMode::kFretted, measured(2.0 * 110.000, +2.0)));
 
     EXPECT_FALSE(m.sameString());
     EXPECT_EQ(m.state(), IntonationMode::kStringMismatch)
@@ -162,15 +175,13 @@ TEST(IntonationTest, ACommonClockErrorCancelsOutOfTheDifference) {
     const double kFiftyPpm = 1.0 + 50.0e-6;
 
     IntonationMode plain;
-    ASSERT_TRUE(plain.capture(IntonationMode::kHarmonic, measured(target, -1.0)));
-    ASSERT_TRUE(plain.capture(IntonationMode::kFretted,  measured(target, +2.0)));
+    ASSERT_TRUE(put(plain, IntonationMode::kHarmonic, measured(target, -1.0)));
+    ASSERT_TRUE(put(plain, IntonationMode::kFretted, measured(target, +2.0)));
     ASSERT_TRUE(plain.hasResult());
 
     IntonationMode skewed;
-    ASSERT_TRUE(skewed.capture(IntonationMode::kHarmonic,
-                               measured(target, -1.0, kFiftyPpm)));
-    ASSERT_TRUE(skewed.capture(IntonationMode::kFretted,
-                               measured(target, +2.0, kFiftyPpm)));
+    ASSERT_TRUE(put(skewed, IntonationMode::kHarmonic, measured(target, -1.0, kFiftyPpm)));
+    ASSERT_TRUE(put(skewed, IntonationMode::kFretted, measured(target, +2.0, kFiftyPpm)));
     ASSERT_TRUE(skewed.hasResult());
 
     const double drift = std::abs(skewed.differenceCents() - plain.differenceCents());
@@ -207,8 +218,8 @@ TEST(IntonationTest, ACommonClockErrorCancelsOutOfTheDifference) {
 TEST(IntonationTest, AnyPerStringCorrectionCancelsBecauseBothSlotsShareTheString) {
     const double target = 2.0 * 82.407;
     IntonationMode m;
-    ASSERT_TRUE(m.capture(IntonationMode::kHarmonic, measured(target, -1.0)));
-    ASSERT_TRUE(m.capture(IntonationMode::kFretted,  measured(target, +2.0)));
+    ASSERT_TRUE(put(m, IntonationMode::kHarmonic, measured(target, -1.0)));
+    ASSERT_TRUE(put(m, IntonationMode::kFretted, measured(target, +2.0)));
     ASSERT_TRUE(m.hasResult());
 
     // Las dos medidas comparten el objetivo: cualquier funcion del objetivo les
@@ -242,8 +253,8 @@ TEST(GoldenIntonation, TheFullTwoMeasurementCycleMatchesItsGolden) {
     for (const auto& c : kCases) {
         const double target = 2.0 * c.openHz;
         IntonationMode m;
-        m.capture(IntonationMode::kHarmonic, measured(target, c.harmonic));
-        m.capture(IntonationMode::kFretted,  measured(target, c.fretted));
+        put(m, IntonationMode::kHarmonic, measured(target, c.harmonic));
+        put(m, IntonationMode::kFretted, measured(target, c.fretted));
         ASSERT_TRUE(m.hasResult()) << c.name;
         rows.push_back({std::string(c.name), target,
                         m.differenceCents(), m.capturedCents(IntonationMode::kHarmonic)});
