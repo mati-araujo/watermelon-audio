@@ -25,6 +25,7 @@
  * propagacion pase por coincidencia.
  */
 
+#include "tests/support/TestWait.h"
 #include "support/CApiFixture.h"
 
 #include "api/watermelon_audio.h"
@@ -67,7 +68,38 @@ constexpr int kBlockFrames = 256;
 constexpr int kFirstRate  = 44100;
 constexpr int kSecondRate = 32000;
 
-using TunerApiTest = CApiFixture;
+/**
+ * El fixture del afinador. Deriva en vez de ser un alias porque necesita UNA cosa
+ * que `CApiFixture` no puede dar: esperar un snapshot **alimentando audio**.
+ */
+class TunerApiTest : public CApiFixture {
+protected:
+    /**
+     * Espera a que haya un snapshot publicado, ALIMENTANDO AUDIO mientras espera.
+     *
+     * POR QUE `waitForSnapshot` NO ALCANZA, Y NO ES UN MATIZ
+     * ------------------------------------------------------
+     * `waitForSnapshot` sondea y duerme, pero no empuja nada al ring. Si la
+     * integracion se reinicio —por ejemplo porque cambio la fuente de entrada— el
+     * thread de analisis se queda **sin nada que analizar**, y entonces no hay
+     * ningun snapshot que esperar: la espera se agota POR CONSTRUCCION, no por
+     * lentitud. Ninguna cantidad de paciencia arregla eso.
+     *
+     * Fue el fallo de `4c7fdfb` y `b93dca8` en master, y es de OTRA CLASE que las
+     * esperas ciegas de este REQ: comprimir el tiempo no lo reproduce (medido,
+     * 0/10 en las dos escalas). Lo que lo reproduce es forzar el ORDEN — que el
+     * ultimo cambio de fuente caiga despues del ultimo render — y con eso sale
+     * **9/10** contra 0/10 sin la compuerta.
+     */
+    bool waitForSnapshotWhileFeeding(std::array<float, WMA_TUNER_SNAPSHOT_VALUES>& out,
+                                     int maxBlocks = 400) {
+        for (int i = 0; i < maxBlocks; ++i) {
+            renderWithInput(1, kBlockFrames, 0.2f);
+            if (wma_tuner_get_snapshot(mWma, out.data())) return true;
+        }
+        return false;
+    }
+};
 
 std::array<float, WMA_TUNER_SNAPSHOT_VALUES> sentinelBuffer() {
     std::array<float, WMA_TUNER_SNAPSHOT_VALUES> buf{};
@@ -483,7 +515,10 @@ TEST_F(TunerApiTest, StoppingDetachesTheWriterFromTheRing) {
 
     // El ring queda desenganchado: estos bloques no tienen a donde ir.
     for (int i = 0; i < 40; ++i) renderWithInput(1, kBlockFrames, 0.2f);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // AUSENCIA, igual que en `test_analysis_thread`: con `stop()` joineando esto
+    // vale por construccion, y la ventana existe para atrapar un `stop()` que
+    // dejara al escritor enganchado al ring.
+    wma_test::sleepFixed(std::chrono::milliseconds(20));
 
     auto later = sentinelBuffer();
     ASSERT_TRUE(wma_tuner_get_snapshot(mWma, later.data()));
@@ -700,11 +735,18 @@ TEST_F(TunerApiTest, SwitchingSourceWhileTheAnalysisIntegratesDoesNotRace) {
     std::atomic<bool> go{false};
     std::atomic<bool> stop{false};
 
+    std::atomic<bool> renderDone{false};
+
     std::thread switcher([&] {
         while (!go.load(std::memory_order_acquire)) { /* compuerta */ }
         for (int i = 0; i < 200 && !stop.load(std::memory_order_acquire); ++i) {
             wma_input_set_source(mWma, i % 3);
         }
+        // SEGUNDA COMPUERTA: el ULTIMO cambio de fuente cae DESPUES del ultimo
+        // render, a proposito. Ese es el orden con el que esto murio en el CI, y
+        // repetir mucho no lo pega: hay que forzarlo.
+        while (!renderDone.load(std::memory_order_acquire)) { /* compuerta */ }
+        wma_input_set_source(mWma, 1);
     });
 
     go.store(true, std::memory_order_release);
@@ -714,11 +756,19 @@ TEST_F(TunerApiTest, SwitchingSourceWhileTheAnalysisIntegratesDoesNotRace) {
         wma_tuner_get_snapshot(mWma, buf.data());   // el lector, en paralelo
     }
     stop.store(true, std::memory_order_release);
+    renderDone.store(true, std::memory_order_release);
     switcher.join();
 
     // Lo que se afirma no es un valor: es que el motor sigue entero y coherente.
+    //
+    // 🔴 SE ESPERA ALIMENTANDO AUDIO. La version anterior usaba `waitForSnapshot`,
+    // que sondea sin empujar nada al ring: con la fuente recien conmutada la
+    // integracion arranca de cero y el thread de analisis no tiene de donde sacar
+    // un snapshot, asi que la espera se agotaba SIN QUE HUBIERA NADA ROTO.
     auto buf = sentinelBuffer();
-    ASSERT_TRUE(waitForSnapshot(mWma, buf));
+    ASSERT_TRUE(waitForSnapshotWhileFeeding(buf))
+        << "el motor dejo de publicar despues de conmutar de fuente aun con audio "
+           "entrando: eso ya no es el test esperando de gusto, es el afinador mudo";
     EXPECT_GE(buf[kSnapFramesAnalyzed], 0.0f);
     EXPECT_TRUE(wma_tuner_is_running(mWma));
 }

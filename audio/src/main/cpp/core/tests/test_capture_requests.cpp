@@ -420,6 +420,9 @@ TEST_F(CaptureRequestTest, DestroyingTheManagerMidReopenDoesNotLeaveAThreadBehin
     // el mutante del detach sobrevivía sin que se notara.
     std::atomic<bool> released{false};
     std::thread releaser([&] {
+        // ESTIMULO, no sincronizacion: el retardo existe para que el destrabe
+        // llegue DESPUES de que empiece la destruccion, que es el orden que el
+        // test necesita provocar. Acortarlo destruye el experimento.
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         released.store(true, std::memory_order_release);
         backend->releaseStart();

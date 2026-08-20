@@ -5,6 +5,7 @@
  * captura) y 1.5 (el snapshot nunca entrega un estado a medio escribir).
  */
 
+#include "tests/support/TestWait.h"
 #include "../AnalysisRing.h"
 #include "../AnalysisSnapshot.h"
 #include "../AnalysisThread.h"
@@ -79,8 +80,13 @@ TEST(AnalysisThread, StartsStopsAndRestartsWithoutLeakingOrHanging) {
         EXPECT_FALSE(th.isRunning()) << "ciclo " << cycle;
 
         // Y despues de parar, para de verdad: el contador deja de moverse.
+        //
+        // AUSENCIA. `stop()` joinea, asi que con el codigo sano la propiedad vale
+        // POR CONSTRUCCION y la espera no aporta; lo que la espera compra es
+        // detectar un `stop()` que dejara el thread vivo — ahi el contador SI se
+        // moveria, y sin ventana no habria con que verlo.
         const uint64_t after = th.ticks();
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        wma_test::sleepFixed(std::chrono::milliseconds(25));
         EXPECT_EQ(th.ticks(), after) << "sigue girando despues de stop()";
     }
 
@@ -124,12 +130,16 @@ TEST(AnalysisThread, TheCaptureWriterIsNeverBlockedWhileTheThreadChurns) {
                 worstMicros.store(us, std::memory_order_relaxed);
             }
             writes.fetch_add(1, std::memory_order_relaxed);
+            // ESTIMULO: marca el paso del escritor RT. La duracion es el experimento.
             std::this_thread::sleep_for(std::chrono::microseconds(200));
         }
     });
 
     for (int cycle = 0; cycle < 10; ++cycle) {
         th.start(kRate);
+        // ESTIMULO: le da al thread un rato de vida antes de pararlo, que es lo que
+        // ejercita el ciclo start/stop. No sincroniza nada — lo que se afirma
+        // despues son los contadores, no que este sleep haya alcanzado.
         std::this_thread::sleep_for(std::chrono::milliseconds(3));
         th.stop();
     }
