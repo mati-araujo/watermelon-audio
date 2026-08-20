@@ -29,6 +29,7 @@ add_executable(analysis_tests
     test_strobe_tracker.cpp
     test_inharmonicity.cpp
     test_intonation.cpp
+    test_fast_mode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp
@@ -36,6 +37,7 @@ add_executable(analysis_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseSlopeEstimator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../StrobeTracker.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../InharmonicityEstimator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../FastModeTracker.cpp
 )
 
 target_compile_definitions(analysis_tests PRIVATE
