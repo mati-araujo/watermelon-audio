@@ -30,6 +30,8 @@ add_executable(analysis_tests
     test_inharmonicity.cpp
     test_intonation.cpp
     test_fast_mode.cpp
+    test_accuracy_contract.cpp
+    test_corpus_gate.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp
@@ -45,6 +47,9 @@ target_compile_definitions(analysis_tests PRIVATE
     # Los golden viven al lado de los tests, no en el build: se commitean, y su
     # diff es la revision de una recaptura (REQ-001 S2 · 2.12).
     WMA_ANALYSIS_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden"
+    # 10.9: el contrato se verifica contra los golden, asi que el test tiene que
+    # poder leerlo. Es un artefacto commiteado, igual que ellos.
+    WMA_TUNER_CONTRACT_MD="${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../docs/tuner/accuracy_contract.md"
 )
 target_include_directories(analysis_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
