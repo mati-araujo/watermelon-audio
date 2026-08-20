@@ -16,6 +16,7 @@ add_library(watermelon-analysis STATIC
     AnalysisRing.cpp
     AnalysisThread.cpp
     PhaseSlopeEstimator.cpp
+    StrobeTracker.cpp
 )
 
 target_include_directories(watermelon-analysis PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

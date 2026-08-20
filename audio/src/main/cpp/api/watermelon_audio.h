@@ -719,9 +719,15 @@ WMA_API bool wma_tuner_is_running(const WmaEngine* engine);
  * THE CALLER SUPPLIES THE TARGET, AND THAT IS NOT A STOPGAP
  * ---------------------------------------------------------
  * The phase estimator refines AROUND a target, it does not search for one: its capture range
- * is a few cents wide in the treble. So something has to say what to measure against, and
- * until coarse detection exists that something is the consumer — which is exactly what
- * ITuner declares as an implementer's obligation.
+ * is a few cents wide in the treble, and NARROWER STILL for the harmonics the strobe tracks
+ * (partial n drifts n times as far in Hz for the same drift in cents). So something has to say
+ * what to measure against — which is exactly what ITuner declares as an implementer's
+ * obligation.
+ *
+ * Since REQ-001 S4 the engine DOES know what note is sounding — see [8] below — but it does
+ * not promote that guess to a target on its own: turning a detected pitch into "the string the
+ * musician meant" needs the temperament, tuning and capo, and those live in the Kotlin musical
+ * model. The consumer joins the two halves.
  *
  * With no target the snapshot keeps publishing NaN for cents and reports "no lock". It does
  * NOT guess: publishing the pitch of whatever happens to be sounding would be a measurement
@@ -754,9 +760,19 @@ WMA_API float wma_tuner_get_target(const WmaEngine* engine);
  *                         [3] frames dropped (the ring overwrote them)
  *                         [4] state: 0 no signal, 1 no lock, 2 measuring,
  *                             3 converged
- *                         [5] cents against target      (NaN until REQ-001 S2)
- *                         [6] phase angle, rad, wrapped (NaN until REQ-001 S2)
- *                         [7] uncertainty
+ *                         [5] cents against target      (NaN when there is no reading)
+ *                         [6] phase angle, rad, wrapped (NaN when there is no reading)
+ *                         [7] uncertainty in cents, 1 sigma (NaN when there is no reading)
+ *
+ *                         Since REQ-001 S6 these three come from the STROBE: the
+ *                         fundamental plus the first 3 harmonics, combined by
+ *                         inverse variance. That combination cannot be worse than
+ *                         the fundamental alone, so the numbers only improved —
+ *                         measured across 14 strings, strictly better everywhere.
+ *                         The angle is the fundamental's, so it turns at a rate
+ *                         proportional to the deviation in cents, and it FREEZES
+ *                         when the signal is lost rather than snapping to zero.
+ *                         Sharp turns positive, flat turns negative.
  *                         [8] detected pitch in Hz (0 = no note found)
  *                         [9] detection clarity, 0..1
  *

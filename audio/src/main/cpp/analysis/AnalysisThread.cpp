@@ -53,13 +53,13 @@ void AnalysisThread::drainLoop() {
             // mismo defecto que las tareas 1.16-1.19 sacaron del camino, y este
             // es el ultimo lugar donde se podia volver a perder — justo al
             // usarlo.
-            mEstimator.prepare(rate);
+            mStrobe.prepare(rate);
             mDetector.prepare(rate);
             mPreparedRate = rate;
             mAppliedTarget = 0.0;      // `prepare()` reinicia: hay que re-aplicar
         }
         if (target != mAppliedTarget && mPreparedRate > 0) {
-            mEstimator.setTarget(target);
+            mStrobe.setTarget(target);
             mAppliedTarget = target;
             // Lo que quedo en el ring es de la cuerda ANTERIOR. Ver
             // AnalysisRing::skipToNewest().
@@ -89,7 +89,7 @@ void AnalysisThread::drainLoop() {
         // llamarlos por tick tiraria la medicion antes de que converja: por eso
         // arriba se comparan contra lo ultimo aplicado.
         if (measuring) {
-            mEstimator.process(mScratch.data(), got);
+            mStrobe.process(mScratch.data(), got);
         }
         // La deteccion gruesa corre SIEMPRE que haya rate, con objetivo o sin el: su trabajo
         // es justamente decir que nota hay cuando nadie lo sabe todavia.
@@ -104,12 +104,12 @@ void AnalysisThread::drainLoop() {
         values[kSnapDroppedFrames]     = static_cast<float>(mRing.droppedFrames());
 
         const bool haveReading =
-            measuring && mEstimator.hasSignal() && mEstimator.hasMeasurement();
+            measuring && mStrobe.hasSignal() && mStrobe.hasMeasurement();
 
         if (haveReading) {
-            values[kSnapCents]       = static_cast<float>(mEstimator.cents());
-            values[kSnapPhaseAngle]  = static_cast<float>(mEstimator.phaseAngle());
-            values[kSnapUncertainty] = static_cast<float>(mEstimator.uncertaintyCents());
+            values[kSnapCents]       = static_cast<float>(mStrobe.cents());
+            values[kSnapPhaseAngle]  = static_cast<float>(mStrobe.phaseAngle());
+            values[kSnapUncertainty] = static_cast<float>(mStrobe.uncertaintyCents());
         } else {
             // NaN, no cero. `0.0` cents es un valor PLAUSIBLE —afinado exacto— y
             // un consumidor lo mostraria como medicion. Sin objetivo, o antes de
@@ -132,7 +132,7 @@ void AnalysisThread::drainLoop() {
         } else if (!haveReading) {
             state = kStateMeasuring;       // integrando, todavia sin pendiente
         } else {
-            state = mEstimator.uncertaintyCents() <= kConvergedUncertaintyCents
+            state = mStrobe.uncertaintyCents() <= kConvergedUncertaintyCents
                         ? kStateConverged
                         : kStateMeasuring;
         }

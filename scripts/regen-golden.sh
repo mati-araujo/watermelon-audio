@@ -35,7 +35,10 @@ echo
 
 # Los tests de golden se marcan SKIPPED en modo regeneracion, a proposito: una
 # corrida que ESCRIBE no puede pasar por una corrida que VERIFICA.
-WMA_GOLDEN_REGEN=1 bash "$REPO_ROOT/scripts/run-cpp-tests.sh" -R 'GoldenPresets|GoldenPhaseSlope' "$@"
+# El filtro es una LISTA de suites que escriben golden, y una suite nueva que
+# escriba uno tiene que entrar aca o su golden no se recaptura nunca. El sintoma
+# es visible —el test falla con "Falta el golden"— pero cuesta una vuelta.
+WMA_GOLDEN_REGEN=1 bash "$REPO_ROOT/scripts/run-cpp-tests.sh" -R 'GoldenPresets|GoldenPhaseSlope|GoldenStrobe' "$@"
 
 echo
 echo "==> Diff de los golden de respuesta (texto, revisable):"

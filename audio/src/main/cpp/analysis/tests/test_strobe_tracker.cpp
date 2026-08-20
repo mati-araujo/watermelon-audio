@@ -16,6 +16,8 @@
 
 #include "support/SyntheticSignal.h"
 
+#include "support/AnalysisGolden.h"
+
 #include "StrobeTracker.h"
 
 #include <gtest/gtest.h>
@@ -498,6 +500,53 @@ TEST(StrobeTrackerTest, ResetMakesItIndistinguishableFromFreshlyPrepared) {
     ASSERT_TRUE(fresh.hasMeasurement());
     EXPECT_DOUBLE_EQ(used.cents(), fresh.cents());
     EXPECT_DOUBLE_EQ(used.uncertaintyCents(), fresh.uncertaintyCents());
+}
+
+// ---------------------------------------------------------------------------
+// 6.14 — el golden de la convergencia: la curva de σ contra tiempo
+// ---------------------------------------------------------------------------
+/**
+ * Lo que congela este golden NO es la exactitud —para eso estan 6.1 y 6.3, con su
+ * presupuesto— sino la FORMA de la curva de convergencia: cuanto baja la
+ * incertidumbre por segundo integrado. Es la magnitud que decide cuando el
+ * afinador puede decir "convergido", asi que un cambio de DSP que la mueva tiene
+ * que verse en un diff de texto y no descubrirse en un device.
+ *
+ * Se eligen las dos cuerdas que estresan los dos extremos —la mas grave del
+ * catalogo y la mas aguda— porque el ancho de ventana en periodos, que es lo que
+ * gobierna la convergencia, cambia por un factor de 14 entre ellas.
+ */
+TEST(GoldenStrobe, TheConvergenceCurveMatchesItsGolden) {
+    std::vector<golden::Sample> rows;
+    struct Case { const char* label; double hz; };
+    const Case kCases[] = {{"B0", 30.868}, {"E2", 82.407}, {"A4", 440.000}};
+    const double kCheckpoints[] = {0.5, 1.0, 2.0, 3.0};
+
+    for (const auto& c : kCases) {
+        StrobeTracker t;
+        t.prepare(kRate);
+        t.setTarget(c.hz);
+        const auto sig = string4(c.hz, kProbeCents, 3 * kRate);
+
+        int i = 0, next = 0;
+        const int n = static_cast<int>(sig.size());
+        while (i < n && next < 4) {
+            const int take = std::min(512, n - i);
+            t.process(sig.data() + i, take);
+            i += take;
+            if (i >= static_cast<int>(kCheckpoints[next] * kRate)) {
+                rows.push_back({std::string(c.label) + "@" +
+                                    std::to_string(kCheckpoints[next]).substr(0, 3),
+                                kCheckpoints[next], t.cents(), t.uncertaintyCents()});
+                ++next;
+            }
+        }
+    }
+
+    ASSERT_EQ(rows.size(), 3u * 4u);
+    golden::checkOrRegen("strobe_convergence", kRate,
+                         wma::analysis::PhaseSlopeEstimator::kWindowFrames, rows,
+                         {}, "REQ-001 S6");
 }
 
 }  // namespace

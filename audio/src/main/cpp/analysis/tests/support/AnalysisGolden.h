@@ -72,13 +72,19 @@ struct ColumnNames {
     const char* z = "incertidumbreCents";
 };
 
+/**
+ * La ETAPA va como parametro por la misma razon que las columnas: estaba fija en
+ * "REQ-001 S2" y el golden de la deteccion gruesa —que es de S4— se declaraba de
+ * S2. Con S6 agregando un tercero, un sello fijo mentiria en dos de tres.
+ */
 inline bool writeGolden(const std::string& path, const std::string& name,
                         int sampleRate, int windowFrames,
                         const std::vector<Sample>& rows,
-                        const ColumnNames& cols = {}) {
+                        const ColumnNames& cols = {},
+                        const char* stage = "REQ-001") {
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (f == nullptr) return false;
-    std::fprintf(f, "# watermelon-audio golden — analysis/%s (REQ-001 S2)\n", name.c_str());
+    std::fprintf(f, "# watermelon-audio golden — analysis/%s (%s)\n", name.c_str(), stage);
     std::fprintf(f, "# sampleRate=%d  window=%d  rows=%zu\n",
                  sampleRate, windowFrames, rows.size());
     std::fprintf(f, "# El signo es el del afinador: senal por encima del objetivo = POSITIVO.\n");
@@ -114,11 +120,12 @@ inline bool readGolden(const std::string& path, std::vector<Sample>& rows) {
  * dice "cambio" obliga a reconstruir el diff a mano, y entonces no se lee.
  */
 inline void checkOrRegen(const std::string& name, int sampleRate, int windowFrames,
-                         const std::vector<Sample>& rows, const ColumnNames& cols = {}) {
+                         const std::vector<Sample>& rows, const ColumnNames& cols = {},
+                         const char* stage = "REQ-001") {
     const std::string path = goldenPath(name);
 
     if (regenRequested()) {
-        ASSERT_TRUE(writeGolden(path, name, sampleRate, windowFrames, rows, cols))
+        ASSERT_TRUE(writeGolden(path, name, sampleRate, windowFrames, rows, cols, stage))
             << "No pude escribir " << path;
         GTEST_SKIP() << "REGENERADO (no verificado): " << path;
     }
