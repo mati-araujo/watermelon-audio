@@ -1,0 +1,21 @@
+# Manifiesto del corpus grabado — REQ-001 · NFR-8
+#
+# Una linea por archivo:   nombre  sha256  hz_verdadero  descripcion
+#
+# 🔴 ESTE MANIFIESTO ESTA VACIO A PROPOSITO, Y ESO NO ES UN PENDIENTE OLVIDADO.
+#
+# El corpus grabado todavia NO EXISTE. Lo que existe —y es lo que esta etapa
+# tenia que dejar— es el MECANISMO: como se baja, como se verifica, y sobre todo
+# que pasa cuando no esta. Los tests de robustez que dependen de el salen
+# **SKIPPED**, nunca PASSED: una corrida que no verifico no puede leerse como
+# cobertura, que es la misma regla que gobierna `regen-golden.sh` y la atestacion
+# del gate local.
+#
+# Para agregar un archivo:
+#   1. subirlo a un lugar estable y anotar su URL en `scripts/fetch-corpus.sh`
+#   2. `shasum -a 256 archivo.wav` y pegar el hash aca
+#   3. anotar la frecuencia verdadera, que es contra lo que se compara
+#
+# El checksum no es burocracia: un archivo corrupto que se baja a medias produce
+# un resultado RARO en vez de un error, y un afinador que falla raro es peor que
+# uno que falla fuerte.

@@ -10,7 +10,7 @@ Motor de sintesis en tiempo real con efectos DSP profesionales. C++20 + Oboe + K
 
 ```
 audio/src/
-  commonMain/kotlin/    83 files — pure Kotlin, zero Android deps
+  commonMain/kotlin/    91 files — pure Kotlin, zero Android deps
     api/                AudioEngine interface, IAudioNativeBridge, IEffectManager,
                         IInputBridge + AudioInput (camino de entrada, WA-5.5),
                         factories (AudioEngine, EffectManager, AudioInput,
@@ -24,17 +24,17 @@ audio/src/
                                 currentDeviceCapabilities
     domain/device/      DeviceCapabilities (interfaz de hechos) + Snapshot
     domain/input/       InputSource + InputMetering (snapshot de 7 valores)
-  androidMain/kotlin/   23 files — JNI bridge, USB, platform-specific
-    internal/bridge/    AudioNativeBridge (3229 LOC, 291 external funs)
+  androidMain/kotlin/   21 files — JNI bridge, USB, platform-specific
+    internal/bridge/    AudioNativeBridge (3304 LOC, 303 external funs)
     internal/usb/       USB audio driver (DataStore, BroadcastReceiver)
     internal/mode/      ModeTransitionManagerImpl, NativeModeStateWriter
-  iosMain/kotlin/       5 files — IosAudioBridge (sobre cinterop), AudioBridgeProvider,
+  iosMain/kotlin/       6 files — IosAudioBridge (sobre cinterop), AudioBridgeProvider,
                         AudioSessionManager (AVAudioSession como Flow),
                         NativeLibraryLoader (no-op, link estatico),
                         DeviceCapabilitiesProvider (NSProcessInfo)
   commonTest/kotlin/    8 suites  ·  iosTest/kotlin/ 4 suites
   main/cpp/             C++20 engine
-    api/                C API — watermelon_audio.h (253 functions, pure C)
+    api/                C API — watermelon_audio.h (269 declaraciones WMA_API, pure C)
     dsp/                watermelon-dsp sub-library (30 files, zero deps)
     effects/            watermelon-effects sub-library (59 files, 23 efectos + EffectRegistry)
     engines/            watermelon-engines sub-library (SynthEngine + 6 engines
@@ -42,12 +42,17 @@ audio/src/
     voice/              watermelon-voice sub-library (10 files, VoiceManager, VoicePool)
     looper/             watermelon-looper sub-library (16 files, header-only salvo
                         LooperExporter.cpp)
+    analysis/           watermelon-analysis (14 files) — el afinador de REQ-001:
+                        ring lock-free + thread de analisis + snapshot atomico,
+                        PhaseSlopeEstimator (S2), StrobeTracker (S6),
+                        InharmonicityEstimator (S7), FastModeTracker (S5),
+                        IntonationMode (S9)
     core/               AudioEngine facade + subsistemas (22 files)
     backends/           IAudioBackend, BackendManager, SplitBackend, DriftResampler,
                         OboeBackend + LibusbBackend (Android),
                         CoreAudioBackend.mm (iOS, output + captura full-duplex),
                         PlatformBackends.cpp (unico punto que nombra backends concretos)
-    jni/                5 files — jni_audio_bridge.cpp (280 JNIEXPORT), jni_engine,
+    jni/                5 files — jni_audio_bridge.cpp (292 JNIEXPORT), jni_engine,
                         jni_usb, jni_benchmark, jni_common.h
     platform/           Logger.h/.cpp (logcat / os_log / stderr), Platform.h,
                         PlatformAndroid.cpp, PlatformApple.cpp, PlatformIsa.inc (ISA comun)
@@ -64,10 +69,11 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
                         Compose aborta al arrancar)
 ```
 
-> Los conteos de arriba son orientativos y **driftean**: al 2026-07-27 estaban mal
-> commonMain (67→74), la C API (187→251, la movio WA-2.5/2.6), AudioNativeBridge
-> (3352→3209 LOC, 289→290 funs), los JNIEXPORT (278→279) y los tests (749→762,
-> 101→105). Re-medir es barato, asi que **medir antes de citar**:
+> Los conteos de arriba son orientativos y **driftean**. Re-medidos el 2026-08-20 al cerrar
+> REQ-001 S10: commonMain 83→**91**, androidMain 23→**21**, iosMain 5→**6**,
+> AudioNativeBridge 3229→**3304** LOC y 291→**303** funs, JNIEXPORT 280→**292**,
+> C API 253→**269**, suite de host 883→**1011** tests. El afinador entero (REQ-001)
+> agregó `cpp/analysis/` con 14 archivos. Re-medir es barato, asi que **medir antes de citar**:
 >
 > ```bash
 > find audio/src/commonMain -name '*.kt' | wc -l          # archivos por source set
@@ -213,7 +219,7 @@ sesiones enteras. Los marcados **[gate]** ya los corre `scripts/gate.sh`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (883 tests, googletest).
+bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (1011 tests, googletest).
                                            # ctest corre en PARALELO desde el 18/08: 149,7 s -> 20,4 s.
                                            # `CTEST_JOBS=n` lo baja si hace falta
                                            # Kotlin: 112 iOS sim / 69 JVM
@@ -313,6 +319,16 @@ bash scripts/build-ios.sh                  # [gate] libwatermelon_audio.a — am
                                            # check. gate.sh lo corre SUELTO y ANTES de
                                            # Gradle, y no es redundante: ver el comentario
                                            # en KmpNativeConventionPlugin.kt
+bash scripts/fetch-corpus.sh                # REQ-001 S10: baja el corpus grabado y
+                                           # VERIFICA su checksum contra
+                                           # analysis/tests/corpus-manifest.txt.
+                                           # Hoy el manifiesto esta VACIO a proposito:
+                                           # el corpus no existe todavia. Los tests de
+                                           # robustez que dependen de el salen SKIPPED
+                                           # y NUNCA passed — una corrida que no
+                                           # verifico no se puede leer como cobertura,
+                                           # que es la misma regla de regen-golden.sh.
+
 python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2.6).
                                            # Imprime; docs/kmp/c_api_coverage.md
                                            # se actualiza a mano con esa salida
