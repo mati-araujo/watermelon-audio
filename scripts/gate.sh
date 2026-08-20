@@ -290,6 +290,12 @@ gate_guardrails() {
     # para un guardrail. Verificarlo cuesta 2 s.
     step guardrails rt-safety-self python3 scripts/check-rt-safety.py --self-test || return 1
     step guardrails rt-safety     python3 scripts/check-rt-safety.py || return 1
+    # REQ-002 · S4 — misma disciplina que arriba: el self-test PRIMERO.
+    # Este lint no busca "esperas sospechosas" por su forma —eso se evade sin
+    # querer— sino que toda espera cruda en un test este CLASIFICADA. De 28, la
+    # mayoria NO eran defectos: 13 polling y 8 estimulo. Clasificar era el trabajo.
+    step guardrails waits-self    python3 scripts/check-test-waits.py --self-test || return 1
+    step guardrails waits         python3 scripts/check-test-waits.py || return 1
 }
 
 gate_cpp_tests_macos() {

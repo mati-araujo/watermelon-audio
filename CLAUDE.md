@@ -139,6 +139,24 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 >   que funciones se alcanzan y el lint falla si el conjunto cambia: si te sale en rojo una
 >   funcion que no tocaste, la salida es **renombrar tu metodo**, no redeclarar la cobertura.
 
+### Tests — como se espera (REQ-002)
+
+- **Nunca sincronices con una duracion y afirmes despues.** Da verde en una maquina
+  ociosa y rojo en un runner con siete jobs: asi se cayo `master` tres veces el
+  2026-08-20, y la release 2.3.0 quedo esperando.
+- `wma_test::waitUntil(pred, techo)` para esperar a que algo **ocurra**.
+  `wma_test::sleepFixed` para las esperas de **ausencia**, que no se pueden esperar por
+  condicion. Las dos en `cpp/tests/support/TestWait.h`.
+- Un `sleep_for` crudo tiene que decir que es (`// WAIT-OK: razon`) o el gate falla.
+  El polling dentro de un bucle con deadline se reconoce solo.
+- **Un receptor registrado en el motor tiene que vivir MAS que el motor.** Declararlo
+  local en el cuerpo de un test es un use-after-free con abort, no un detalle de estilo
+  — medido 5/5. La regla la declara el KDoc de `wma_looper_set_event_callback`, y la
+  violaban cuatro tests.
+- 🔴 **Sacar una espera ciega no es el arreglo; poner una condicion en su lugar lo es.**
+  Al quitar un `sleep` sin reemplazarlo por una condicion, un test de este repo dejo de
+  detectar el mutante que antes mataba 20 contra 0 — y pasaba en las dos escalas.
+
 ### C++ portabilidad (iOS)
 - Todo el motor cross-compila para iOS **salvo** `jni/`, `usb/`, `OboeBackend`,
   `LibusbBackend` y `PlatformAndroid.cpp`
@@ -280,6 +298,42 @@ CTEST_JOBS=4 TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
 # NO es el default del script a proposito: el CI no pasa `--timeout` y ahi el
 # `-j` completo mide 45 % mejor. Poner 4 por defecto pesimizaria el CI para
 # resolver una restriccion de esta maquina.
+python3 scripts/check-test-waits.py        # [gate] Guardrail REQ-002. Toda espera cruda en
+                                           # un test tiene que estar CLASIFICADA. No busca
+                                           # "esperas sospechosas" por su forma —eso se evade
+                                           # sin querer— sino que cada `sleep_for` diga cual de
+                                           # las cuatro cosas es:
+                                           #   polling    bucle con deadline. Lo reconoce SOLO.
+                                           #   estimulo   la duracion ES el experimento
+                                           #              (jitter, intervalo entre callbacks,
+                                           #              forzar un orden). `// WAIT-OK: razon`
+                                           #   presencia  espera y afirma -> wma_test::waitUntil
+                                           #   ausencia   espera a que NO pase ->
+                                           #              wma_test::sleepFixed
+                                           # --self-test verifica que puede fallar, y corre
+                                           # ANTES del lint (misma razon que check-rt-safety).
+                                           # 🔴 Si es PRESENCIA, agrandar el sleep NO lo
+                                           # arregla: alcanza en tu maquina y se queda corto en
+                                           # el runner. Eso fue REQ-002.
+
+bash scripts/check-time-dependence.sh      # Corre la suite con las esperas CIEGAS colapsadas y
+                                           # dice que test cambia de veredicto. Lo corre el CI
+                                           # en el job `cpp-tests` (ubuntu, que nunca se
+                                           # saltea), NO gate.sh: cuesta una corrida entera.
+                                           # 🔴 NO carga la maquina, y no es un descuido:
+                                           # esta MEDIDO que la contencion no reproduce esta
+                                           # clase — 40 quemadores sobre 10 nucleos dan 0/10,
+                                           # `taskpolicy -c background` + carga da 1/10 (y ese
+                                           # uno es un timeout). Un `sleep_for(120ms)` es
+                                           # tiempo ABSOLUTO: ahogar la maquina no achica la
+                                           # ventana, y encima el render tarda mas, o sea que
+                                           # le da MAS margen. Colapsar la espera: 10/10 en 2 s.
+                                           # Cubre UNA clase (espera ciega insuficiente). NO ve
+                                           # la otra que REQ-002 encontro —una espera POR
+                                           # CONDICION cuya condicion se vuelve inalcanzable— ni
+                                           # las esperas de AUSENCIA, cuyo modo de falla es un
+                                           # falso VERDE. El script lo imprime el mismo.
+
 bash scripts/check-cpp-portability.sh      # [gate] Guardrail WA-0.4 (jni.h / android/)
 python3 scripts/check-rt-safety.py         # [gate] Guardrail WD-1.1. Camina el call-graph
                                            # del callback de audio y falla si aparece

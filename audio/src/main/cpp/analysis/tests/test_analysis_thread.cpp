@@ -140,6 +140,8 @@ TEST(AnalysisThread, TheCaptureWriterIsNeverBlockedWhileTheThreadChurns) {
         // ESTIMULO: le da al thread un rato de vida antes de pararlo, que es lo que
         // ejercita el ciclo start/stop. No sincroniza nada — lo que se afirma
         // despues son los contadores, no que este sleep haya alcanzado.
+        // WAIT-OK: estimulo — le da vida al thread antes de pararlo; es lo que
+        //          ejercita el ciclo start/stop, no sincroniza una asercion.
         std::this_thread::sleep_for(std::chrono::milliseconds(3));
         th.stop();
     }

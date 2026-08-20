@@ -37,6 +37,7 @@ class LateWorker {
 public:
     void start(std::chrono::milliseconds after) {
         mThread = std::thread([this, after] {
+            // WAIT-OK: estimulo — ES el retardo que este doble existe para simular.
             std::this_thread::sleep_for(after);
             mDone.store(true, std::memory_order_release);
         });

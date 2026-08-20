@@ -100,6 +100,7 @@ TEST(LooperStress, PlaybackVsControlNoCrash) {
             } break;
         }
         // ESTIMULO: jitter deliberado para variar el interleaving entre hilos.
+        // WAIT-OK: estimulo — jitter deliberado para variar el interleaving.
         if ((i & 63) == 0) std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
 
@@ -148,9 +149,13 @@ TEST(LooperStress, ClearVsPlaybackNoUseAfterFree) {
 
     for (int i = 0; i < 120; ++i) {
         looper.clearTrack(0);                 // frees the buffer (render-idle guarded)
+        // WAIT-OK: estimulo — deja que el render agarre el buffer recien liberado;
+        //          es la ventana que este stress existe para abrir.
         std::this_thread::sleep_for(std::chrono::microseconds(50));
         looper.importTrack(0, wav.string().c_str(), kSR);  // re-seed on this (UI) thread
         looper.resumeTrack(0);
+        // WAIT-OK: estimulo — deja que el render agarre el buffer recien liberado;
+        //          es la ventana que este stress existe para abrir.
         std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
 

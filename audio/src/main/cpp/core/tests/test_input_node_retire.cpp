@@ -69,12 +69,17 @@ public:
                 // ESTIMULO, no sincronizacion: es el intervalo entre callbacks de
                 // audio que este bombeo esta imitando. La duracion ES el
                 // experimento, asi que no se convierte ni se escala.
+                // WAIT-OK: estimulo — es el intervalo entre callbacks de audio que este
+                //          bombeo imita.
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
             }
         });
         // No seguir hasta que el bombeo este realmente en marcha: si el retiro
         // corriera antes del primer callback, el test no probaria la carrera.
         while (mBlocks.load(std::memory_order_relaxed) < 3) {
+            // WAIT-OK: polling — espera por CONDICION (que el bombeo arranque).
+            //          🔴 Sin techo: si el bombeo nunca arranca esto se cuelga en vez
+            //          de fallar. Se cuelga es una deteccion, pero una cara.
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }

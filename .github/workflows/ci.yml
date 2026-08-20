@@ -200,6 +200,32 @@ jobs:
       - name: Build & run C++ test suite
         run: bash scripts/run-cpp-tests.sh
 
+      # ---------------------------------------------------------------------
+      # REQ-002 · S4 — la clase se ejercita ANTES del merge, y aca.
+      #
+      # Los tres jobs que la atestacion local hace saltear en el PR (`ios`,
+      # `build`, `cpp-tests-macos`) solo corren enteros en `push: master`. Por eso
+      # los tests que sincronizan con el reloj de pared tumbaron master tres veces
+      # el 2026-08-20 sin que ningun PR se enterara: eran invisibles antes del
+      # merge POR CONSTRUCCION.
+      #
+      # Este job (`cpp-tests`) NUNCA se saltea y ya tiene la suite construida, asi
+      # que cerrar el agujero cuesta una corrida extra y ningun build.
+      #
+      # OJO CON LO QUE NO HACE: no carga la maquina. Se midio en S1 que la
+      # contencion NO reproduce esta clase —40 quemadores sobre 10 nucleos dieron
+      # 0/10— porque un `sleep_for(120ms)` es tiempo ABSOLUTO y ahogar la maquina
+      # no achica esa ventana. Lo que reproduce es COLAPSARLA: 10/10 en 2 segundos.
+      # ---------------------------------------------------------------------
+      - name: Ningun test depende del reloj de pared — REQ-002
+        run: bash scripts/check-time-dependence.sh
+
+      - name: Toda espera cruda en un test esta clasificada — self-test
+        run: python3 scripts/check-test-waits.py --self-test
+
+      - name: Toda espera cruda en un test esta clasificada
+        run: python3 scripts/check-test-waits.py
+
   # Same suite under AddressSanitizer + UndefinedBehaviorSanitizer. Catches
   # heap/stack overflows, use-after-free and UB in the lock-free rings and the
   # teardown path — the highest-risk code as the driver plan gains new logic.
