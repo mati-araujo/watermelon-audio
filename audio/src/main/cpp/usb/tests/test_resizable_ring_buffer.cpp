@@ -58,6 +58,7 @@ TEST(ResizableRingBufferTest, StressWriterReaderAndRepeatedResize) {
                 writes.fetch_add(1, std::memory_order_relaxed);
                 // ESTIMULO: marca el paso del escritor para que el lector y el
             // resize se crucen. La duracion es el experimento.
+            // WAIT-OK: estimulo — marca el paso del escritor para cruzarlo con el resize.
             std::this_thread::sleep_for(std::chrono::microseconds(10));
             } else {
                 std::this_thread::yield();

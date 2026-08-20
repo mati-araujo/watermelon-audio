@@ -95,6 +95,8 @@ Phase driveToTerminal(LoopbackHarness& h, int maxBlocks = 20000) {
     for (int i = 0; i < 200; ++i) {
         Phase p = h.m.poll().phase;
         if (p == Phase::COMPLETE || p == Phase::ERROR) return p;
+        // WAIT-OK: polling — bucle con techo por iteraciones (200), con salida
+        //          temprana. El lint solo reconoce los techos por deadline.
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     return h.m.poll().phase;
@@ -167,6 +169,8 @@ TEST(RoundTripMeasurer, SoftwareLatencyBreakdown) {
         h.step();
     }
     for (int i = 0; i < 200 && m.poll().phase == Phase::ANALYZING; ++i)
+        // WAIT-OK: polling — bucle con techo por iteraciones (200), con salida
+        //          temprana. El lint solo reconoce los techos por deadline.
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     auto r = m.poll().result;
     ASSERT_EQ(m.poll().phase, Phase::COMPLETE);
