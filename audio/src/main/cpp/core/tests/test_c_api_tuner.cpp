@@ -96,6 +96,25 @@ protected:
         for (int i = 0; i < maxBlocks; ++i) {
             renderWithInput(1, kBlockFrames, 0.2f);
             if (wma_tuner_get_snapshot(mWma, out.data())) return true;
+            // 🔴 SE AUTORREGULA CONTRA EL DRENADOR, IGUAL QUE `feedTone`, Y POR LA
+            // MISMA RAZON — que ya estaba escrita en este archivo y yo pase por alto.
+            //
+            // La primera version de este helper empujaba los 400 bloques tan rapido
+            // como el CPU permitiera. En un device la captura llega EN TIEMPO REAL y
+            // al drenador le sobra el ring de 8192 frames; un escritor a toda
+            // velocidad invierte esa relacion, llena el ring, pisa lo mas viejo (su
+            // contrato es no bloquear jamas al escritor) y el estimador nunca junta
+            // una ventana coherente.
+            //
+            // Pasaba 10/10 en esta maquina y fallaba en el runner, donde el thread de
+            // analisis compite con otros seis jobs. Un bloque de 256 frames son 5,8 ms
+            // de audio a 44,1 kHz; ceder 0,5 ms deja el ritmo en ~11x tiempo real, que
+            // es rapido para el test y sostenible para el drenador.
+            //
+            // WAIT-OK: estimulo — es el RITMO de alimentacion, no una sincronizacion:
+            //          imita que la captura llega en tiempo real. Acortarlo devuelve
+            //          el defecto.
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
         }
         return false;
     }
@@ -737,9 +756,20 @@ TEST_F(TunerApiTest, SwitchingSourceWhileTheAnalysisIntegratesDoesNotRace) {
 
     std::atomic<bool> renderDone{false};
 
+    std::atomic<int> rendered{0};
+
     std::thread switcher([&] {
         while (!go.load(std::memory_order_acquire)) { /* compuerta */ }
+        // ENTRELAZADO CON LOS RENDERS, no a toda velocidad. Un switcher que
+        // dispara sus 200 cambios en microsegundos termina antes del primer
+        // render y le deja al analisis el bucle entero libre — que es por que
+        // esto pasaba aca y fallaba en el runner, donde la escasez de CPU
+        // intercala las dos cosas de verdad.
+        int seen = 0;
         for (int i = 0; i < 200 && !stop.load(std::memory_order_acquire); ++i) {
+            while (rendered.load(std::memory_order_acquire) <= seen
+                   && !stop.load(std::memory_order_acquire)) { /* compuerta */ }
+            seen = rendered.load(std::memory_order_acquire);
             wma_input_set_source(mWma, i % 3);
         }
         // SEGUNDA COMPUERTA: el ULTIMO cambio de fuente cae DESPUES del ultimo
@@ -752,6 +782,7 @@ TEST_F(TunerApiTest, SwitchingSourceWhileTheAnalysisIntegratesDoesNotRace) {
     go.store(true, std::memory_order_release);
     for (int i = 0; i < 200; ++i) {
         renderWithInput(1, kBlockFrames, 0.2f);
+        rendered.fetch_add(1, std::memory_order_release);
         auto buf = sentinelBuffer();
         wma_tuner_get_snapshot(mWma, buf.data());   // el lector, en paralelo
     }
@@ -767,8 +798,11 @@ TEST_F(TunerApiTest, SwitchingSourceWhileTheAnalysisIntegratesDoesNotRace) {
     // un snapshot, asi que la espera se agotaba SIN QUE HUBIERA NADA ROTO.
     auto buf = sentinelBuffer();
     ASSERT_TRUE(waitForSnapshotWhileFeeding(buf))
-        << "el motor dejo de publicar despues de conmutar de fuente aun con audio "
-           "entrando: eso ya no es el test esperando de gusto, es el afinador mudo";
+        << "el motor no publico un snapshot en 400 bloques con audio entrando.\n"
+           "Antes de acusar al afinador, descartá la causa que ya costo una vuelta:\n"
+           "que el helper este alimentando MAS RAPIDO de lo que el analisis drena.\n"
+           "El ring no bloquea al escritor — pisa lo viejo — y el estimador nunca\n"
+           "junta una ventana. Si el ritmo es sano, entonces si es el afinador.";
     EXPECT_GE(buf[kSnapFramesAnalyzed], 0.0f);
     EXPECT_TRUE(wma_tuner_is_running(mWma));
 }
