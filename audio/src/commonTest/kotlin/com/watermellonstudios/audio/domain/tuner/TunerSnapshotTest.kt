@@ -38,8 +38,10 @@ class TunerSnapshotTest {
         uncertainty: Float = Float.NaN,
         detectedHz: Float = 82.41f,
         clarity: Float = 0.97f,
+        inharmonicityB: Float = 1.37e-4f,
+        inharmonicityMeasured: Float = 1f,
     ) = floatArrayOf(rate, rms, frames, dropped, state, cents, phase, uncertainty,
-                     detectedHz, clarity)
+                     detectedHz, clarity, inharmonicityB, inharmonicityMeasured)
 
     @Test
     fun elOrdenDeLosValoresEsElDelContratoNativo() {
@@ -137,7 +139,36 @@ class TunerSnapshotTest {
         // Si esto cambia sin que cambie WMA_TUNER_SNAPSHOT_VALUES, el consumidor
         // pasa un array de otro tamaño que el que la C API va a llenar. Del lado
         // de C++ lo para un static_assert; de este lado, esta línea.
-        assertEquals(10, TunerSnapshot.VALUE_COUNT)
+        assertEquals(12, TunerSnapshot.VALUE_COUNT)
         assertEquals(TunerSnapshot.VALUE_COUNT, nativeValues().size)
+    }
+
+    /**
+     * REQ-001 S7. La marca de "medido" va APARTE del valor, y por eso hay dos
+     * casos que un centinela dentro del número no podría distinguir: un B de 0
+     * medido de verdad (cuerda ideal) y un B ausente.
+     */
+    @Test
+    fun unBSinMedirLlegaComoNullAunqueTraigaUnNumero() {
+        val snap = TunerSnapshot.fromNative(
+            nativeValues(inharmonicityB = 1.37e-4f, inharmonicityMeasured = 0f)
+        )
+        assertNotNull(snap)
+        assertNull(
+            snap.inharmonicityB,
+            "el motor mandó un B con la marca en 0: sin medición no puede pasar por medición"
+        )
+    }
+
+    @Test
+    fun unBDeCeroMedidoDeVerdadNoSeConfundeConAusencia() {
+        val snap = TunerSnapshot.fromNative(
+            nativeValues(inharmonicityB = 0f, inharmonicityMeasured = 1f)
+        )
+        assertNotNull(snap)
+        assertEquals(
+            0f, snap.inharmonicityB,
+            "una cuerda ideal medida da B=0, y eso ES una medición: no puede llegar como null"
+        )
     }
 }
