@@ -557,4 +557,38 @@ void feedTone(WmaEngine* engine, double hz, int rate, int blocks, int blockFrame
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// REQ-001 S9 · 9.9 — el modo intonacion, desde la C API
+// ---------------------------------------------------------------------------
+/**
+ * Lo que se verifica ACA y no en los tests del modo es lo que sólo la frontera
+ * puede romper: que sin motor no explote, que un slot fuera de rango se rechace,
+ * y que la diferencia cruce como NaN —y no como 0— cuando no hay resultado.
+ */
+TEST_F(TunerApiTest, IntonationRefusesToCaptureBeforeAnythingConverged) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_start(mWma));
+
+    EXPECT_EQ(wma_intonation_state(mWma), WMA_INTONATION_NEED_HARMONIC);
+    EXPECT_FALSE(wma_intonation_capture(mWma, WMA_INTONATION_HARMONIC))
+        << "capturo sin que el strobe hubiera convergido";
+
+    // Un slot que no existe no puede pasar por una captura valida.
+    EXPECT_FALSE(wma_intonation_capture(mWma, 7));
+    EXPECT_FALSE(wma_intonation_capture(mWma, -1));
+
+    const float diff = wma_intonation_difference_cents(mWma);
+    EXPECT_TRUE(std::isnan(diff))
+        << "sin resultado devolvio " << diff << "; 0 seria 'intonacion perfecta'";
+}
+
+TEST_F(TunerApiTest, IntonationSurvivesHavingNoEngineAtAll) {
+    // La C API tiene que aguantar un puntero nulo sin romperse: es la frontera.
+    EXPECT_FALSE(wma_intonation_capture(nullptr, WMA_INTONATION_HARMONIC));
+    EXPECT_EQ(wma_intonation_state(nullptr), WMA_INTONATION_NEED_HARMONIC);
+    EXPECT_TRUE(std::isnan(wma_intonation_difference_cents(nullptr)));
+    wma_intonation_reset(nullptr);   // no debe explotar
+}
 }  // namespace wma_test

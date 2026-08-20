@@ -547,6 +547,20 @@ internal class IosAudioBridge : IAudioNativeBridge {
         FloatArray(TunerSnapshot.VALUE_COUNT) { values[it] }
     }
 
+    // ---- Modo intonación (REQ-001 S9). Van directo a la C API: en iOS no hay
+    //      JNI de por medio, la cinterop ES el puente.
+    override fun captureIntonation(slot: Int): Boolean =
+        wma_intonation_capture(engine, slot)
+
+    override fun resetIntonation() {
+        wma_intonation_reset(engine)
+    }
+
+    override fun intonationState(): Int = wma_intonation_state(engine)
+
+    override fun intonationDifferenceCents(): Float =
+        wma_intonation_difference_cents(engine)
+
     // ==================== BACKEND ====================
 
     override fun setUseBackendManager(useBackendManager: Boolean) =

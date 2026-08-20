@@ -30,6 +30,7 @@
 #include "PhaseSlopeEstimator.h"
 #include "StrobeTracker.h"
 #include "InharmonicityEstimator.h"
+#include "IntonationMode.h"
 #include "../dsp/McLeodPitch.h"
 
 #include <atomic>
@@ -84,6 +85,20 @@ public:
 
     /// La inarmonicidad estimada de la cuerda que suena (S7).
     const InharmonicityEstimator& inharmonicity() const noexcept { return mInharmonicity; }
+
+    /**
+     * @brief El modo intonacion (S9). Lo maneja el THREAD DE CONTROL, no el lazo.
+     *
+     * Capturar es un acto del usuario ("ahora toca el armonico"), no algo que el
+     * drenaje decida: por eso vive aca afuera y el lazo no lo toca. Y por eso
+     * `captureIntonation()` lee el strobe bajo el mismo mutex con el que la C API
+     * ya serializa lo demas.
+     */
+    bool captureIntonation(IntonationMode::Slot slot) noexcept {
+        return mIntonation.capture(slot, mStrobe);
+    }
+    void resetIntonation() noexcept { mIntonation.reset(); }
+    const IntonationMode& intonation() const noexcept { return mIntonation; }
 
     /**
      * @brief La frecuencia contra la que se mide. 0 = ninguna.
@@ -155,6 +170,9 @@ private:
 
     /// Lee las 4 fases del strobe; no vuelve a analizar la señal (S7 · 7.9).
     InharmonicityEstimator mInharmonicity;
+
+    /// S9. No lo toca `drainLoop`: lo maneja el thread de control.
+    IntonationMode mIntonation;
 
     /// Deteccion gruesa: encuentra la altura SIN objetivo. Corre en el mismo thread y no
     /// depende del estimador — de hecho es al reves: es quien puede darle un objetivo.

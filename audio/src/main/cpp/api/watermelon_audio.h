@@ -743,6 +743,58 @@ WMA_API bool wma_tuner_set_target(WmaEngine* engine, float hz);
 /** The current target in Hz, or 0 if none is set. */
 WMA_API float wma_tuner_get_target(const WmaEngine* engine);
 
+/* ---- Intonation mode (REQ-001 S9) ------------------------------------------
+ *
+ * The 12th-fret check: measure the harmonic, then the fretted note on the SAME
+ * string, and report the difference. That difference is what a saddle gets
+ * adjusted against.
+ *
+ * Both measurements run against the same target (the 12th fret is the octave),
+ * which buys two things for free: a skewed ADC clock shifts both readings
+ * equally and cancels in the subtraction, and so does any per-string correction.
+ * This is the mode where the relative accuracy of the strobe survives intact.
+ */
+
+/** Slots. The harmonic is the reference: it does not depend on finger pressure. */
+#define WMA_INTONATION_HARMONIC 0
+#define WMA_INTONATION_FRETTED  1
+
+/** States of wma_intonation_state(). */
+#define WMA_INTONATION_NEED_HARMONIC   0
+#define WMA_INTONATION_NEED_FRETTED    1
+#define WMA_INTONATION_READY           2
+#define WMA_INTONATION_STRING_MISMATCH 3
+
+/**
+ * Capture the current strobe reading into a slot.
+ *
+ * REFUSES a reading that has not converged — storing one flagged would only ever
+ * lead to subtracting it by accident.
+ *
+ * @return false if there is no engine/analysis, the slot is out of range, or the
+ *         strobe has not converged yet.
+ */
+WMA_API bool wma_intonation_capture(WmaEngine* engine, int slot);
+
+/**
+ * Drop both measurements. Call it when the signal is gone or the player moved to
+ * another string: a stale reading shown as current is worse than none, because a
+ * saddle gets moved with it.
+ */
+WMA_API void wma_intonation_reset(WmaEngine* engine);
+
+/** One of the WMA_INTONATION_* states. NEED_HARMONIC when there is no engine. */
+WMA_API int wma_intonation_state(const WmaEngine* engine);
+
+/**
+ * How far the fretted note sits from the harmonic, in cents. Positive means the
+ * fretted note is sharp, so the string needs lengthening.
+ *
+ * NaN — not 0 — whenever there is no result: 0.0 is a PLAUSIBLE reading (perfect
+ * intonation) and a consumer would display it as a measurement.
+ */
+WMA_API float wma_intonation_difference_cents(const WmaEngine* engine);
+
 /**
  * Read the whole analysis result in one call.
  *

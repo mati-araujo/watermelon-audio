@@ -60,4 +60,29 @@ interface ITunerBridge {
      *   Ver [com.watermellonstudios.audio.domain.tuner.TunerSnapshot.fromNative].
      */
     fun getTunerSnapshot(): FloatArray?
+
+    // ---- Modo intonación (REQ-001 S9) --------------------------------------
+
+    /**
+     * Guarda la lectura actual del strobe en un slot: 0 = armónico del 12º
+     * traste, 1 = nota pisada.
+     *
+     * Devuelve `false` si todavía no convergió. **No guarda una medida a medio
+     * integrar ni siquiera marcada**: el único uso posible de un dato así es
+     * restarlo por accidente.
+     */
+    fun captureIntonation(slot: Int): Boolean
+
+    /** Descarta las dos medidas: la señal se fue, o se cambió de cuerda. */
+    fun resetIntonation()
+
+    /** 0 falta el armónico · 1 falta la pisada · 2 listo · 3 cuerdas distintas. */
+    fun intonationState(): Int
+
+    /**
+     * Cuánto está la nota pisada respecto del armónico, en cents. Positivo = hay
+     * que alargar la cuerda. `NaN` mientras no haya resultado — y no `0`, que
+     * sería "intonación perfecta".
+     */
+    fun intonationDifferenceCents(): Float
 }
