@@ -1,0 +1,16 @@
+# watermelon-audio golden — analysis/strobe_convergence (REQ-001 S6)
+# sampleRate=48000  window=4096  rows=12
+# El signo es el del afinador: senal por encima del objetivo = POSITIVO.
+# caso	segundos	cents	incertidumbreCents
+B0@0.5	0.50	0.918074	0.100212
+B0@1.0	1.00	0.973760	0.025998
+B0@2.0	2.00	0.998760	0.008699
+B0@3.0	3.00	0.998908	0.004472
+E2@0.5	0.50	1.000252	0.000029
+E2@1.0	1.00	1.000004	0.000025
+E2@2.0	2.00	0.999969	0.000008
+E2@3.0	3.00	0.999995	0.000007
+A4@0.5	0.50	0.999998	0.000002
+A4@1.0	1.00	1.000000	0.000001
+A4@2.0	2.00	1.000000	0.000000
+A4@3.0	3.00	1.000000	0.000000

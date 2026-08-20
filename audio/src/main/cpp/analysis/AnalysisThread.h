@@ -28,6 +28,7 @@
 #include "AnalysisRing.h"
 #include "AnalysisSnapshot.h"
 #include "PhaseSlopeEstimator.h"
+#include "StrobeTracker.h"
 #include "../dsp/McLeodPitch.h"
 
 #include <atomic>
@@ -69,6 +70,16 @@ public:
     /// Vueltas completas del lazo. Lo lee el test para saber que arranco de
     /// verdad, en vez de dormir un rato y suponer.
     uint64_t ticks() const noexcept { return mTicks.load(std::memory_order_relaxed); }
+
+    /**
+     * @brief Las cuatro fases del strobe, para que S7 lea la inarmonicidad sin
+     *        volver a analizar la señal (tarea 6.12).
+     *
+     * Lo consume el MISMO thread de analisis, que es quien lo escribe: no cruza
+     * la frontera y por eso no necesita atomicos. Un consumidor de otro thread
+     * tiene que ir por el snapshot.
+     */
+    const StrobeTracker& strobe() const noexcept { return mStrobe; }
 
     /**
      * @brief La frecuencia contra la que se mide. 0 = ninguna.
@@ -129,9 +140,14 @@ private:
     AnalysisSnapshot& mSnapshot;
     std::vector<float> mScratch;
 
-    /// El estimador vive ACA y no en el thread de audio: integra fase a lo largo de segundos
+    /// El tracker vive ACA y no en el thread de audio: integra fase a lo largo de segundos
     /// y hace regresion, nada de lo cual entra en un deadline de 2,7 ms.
-    PhaseSlopeEstimator mEstimator;
+    ///
+    /// Desde S6 es el STROBE —fundamental + 3 armonicos, combinados por 1/σ²— y ya no un
+    /// `PhaseSlopeEstimator` suelto. La lectura combinada no puede ser peor que la del
+    /// fundamental solo (es la combinacion de minima varianza), asi que el cambio no puede
+    /// empeorar lo que S4 publicaba: medido sobre 14 cuerdas, es estrictamente mejor.
+    StrobeTracker mStrobe;
 
     /// Deteccion gruesa: encuentra la altura SIN objetivo. Corre en el mismo thread y no
     /// depende del estimador — de hecho es al reves: es quien puede darle un objetivo.

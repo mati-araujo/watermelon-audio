@@ -109,7 +109,7 @@ TEST(GoldenPhaseSlope, TheConvergenceCurveMatchesItsGolden) {
 
     ASSERT_EQ(rows.size(), cases().size() * checkpoints().size());
     golden::checkOrRegen("phase_slope_convergence", kRate,
-                         PhaseSlopeEstimator::kWindowFrames, rows);
+                         PhaseSlopeEstimator::kWindowFrames, rows, {}, "REQ-001 S2");
 }
 
 /**
@@ -144,7 +144,7 @@ TEST(GoldenPhaseSlope, TheCoarseDetectionMatchesItsGolden) {
     }
 
     golden::checkOrRegen("coarse_detection", kRate, wma::dsp::McLeodPitch::kWindowFrames, rows,
-                         {"verdaderaHz", "detectadaHz", "claridad"});
+                         {"verdaderaHz", "detectadaHz", "claridad"}, "REQ-001 S4");
 }
 
 // ---------------------------------------------------------------------------
