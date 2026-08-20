@@ -48,6 +48,7 @@ using wma::analysis::kSnapFramesAnalyzed;
 using wma::analysis::kSnapLevelRms;
 using wma::analysis::kSnapState;
 using wma::analysis::kSnapCents;
+using wma::analysis::kSnapLockedString;
 using wma::analysis::kSnapPhaseAngle;
 using wma::analysis::kSnapUncertainty;
 
@@ -626,29 +627,60 @@ TEST_F(TunerApiTest, SwitchingSourceThrowsAwayEverythingThatWasIntegrating) {
     startAt(kFirstRate, 0);
     negotiateCaptureRate(mWma, kFirstRate);
     ASSERT_TRUE(wma_tuner_start(mWma));
-    ASSERT_TRUE(wma_tuner_set_target(mWma, 440.0f));
+    const double target = 110.0;
+    ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(target)));
 
-    for (int i = 0; i < 40; ++i) renderWithInput(1, kBlockFrames, 0.2f);
+    // 🔴 EL OBSERVABLE ES LA MEDICION, Y COSTO DOS INTENTOS ENCONTRARLO.
+    //
+    // Primero afirme que el estado no quedara "convergido" alimentando silencio.
+    // Sobrevivia al mutante que quita el reinicio entero: con silencio el estado
+    // va a "sin señal" igual, se haya reiniciado algo o no.
+    //
+    // Despues use el ENGANCHE del modo rapido. Tampoco sirve, y por una razon
+    // que es comportamiento correcto: el enganche se cae con el reinicio y se
+    // vuelve a establecer en el mismo tick, porque el musico sigue afinando la
+    // misma cuerda. Un testigo que se restaura solo no es un testigo.
+    //
+    // Lo que de verdad promete AC-001.18 es que **la integracion se tiro**: la
+    // fase acumulada sobre el microfono no puede seguir contando cuando los
+    // frames vienen de USB. Y eso se ve en que los cents vuelven a NaN — el
+    // estimador quedo sin medicion y tiene que juntar ventanas de nuevo.
+    // `feedTone` se autorregula contra `framesAnalyzed`: alimentar mas rapido que
+    // el tiempo real le daria al estimador una señal CON HUECOS, porque el ring
+    // pisa lo viejo por diseño.
+    feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kFirstRate, 160, kBlockFrames);
     auto before = sentinelBuffer();
-    ASSERT_TRUE(waitForSnapshot(mWma, before));
-    const float framesBefore = before[kSnapFramesAnalyzed];
-    ASSERT_GT(framesBefore, 0.0f) << "no llego a analizar nada antes de conmutar";
+    ASSERT_TRUE(waitForMeasurement(mWma, before))
+        << "no llego a producir una medicion antes de conmutar: el test no puede "
+           "probar que se tira, porque nunca hubo nada";
+    ASSERT_FALSE(std::isnan(before[kSnapCents]));
 
     wma_input_set_source(mWma, 2);          // a USB
 
-    // El primer snapshot despues de conmutar NO puede traer una lectura
-    // convergida heredada del microfono.
+    // 🔴 SE SIGUE ALIMENTANDO EL MISMO TONO, Y ESO ES LO QUE HACE DISCRIMINAR AL
+    // TEST. Con silencio los cents darian NaN igual —`hasSignal()` seria falso—
+    // aunque el estimador conservara su medicion: es el agujero de la primera
+    // version. Con el tono puesto, la unica forma de que salga NaN es que la
+    // integracion se haya TIRADO y el estimador tenga que juntar ventanas de nuevo.
     auto after = sentinelBuffer();
-    bool sawInherited = false;
-    for (int i = 0; i < 10; ++i) {
-        renderWithInput(1, kBlockFrames, 0.0f);   // silencio de la fuente nueva
-        if (wma_tuner_get_snapshot(mWma, after.data())) {
-            if (static_cast<int>(after[kSnapState]) == 3) sawInherited = true;
+    bool wentBlank = false;
+    for (int round = 0; round < 30 && !wentBlank; ++round) {
+        feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kFirstRate, 2, kBlockFrames);
+        // Se sondea un rato: el drenaje es asincrono, y leer justo despues de
+        // empujar puede devolver el snapshot ANTERIOR al reinicio.
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(30);
+        while (std::chrono::steady_clock::now() < until) {
+            if (wma_tuner_get_snapshot(mWma, after.data()) && std::isnan(after[kSnapCents])) {
+                wentBlank = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
-    EXPECT_FALSE(sawInherited)
-        << "entrego un valor CONVERGIDO despues de conmutar de fuente, sin haber "
-           "integrado un solo frame de la fuente nueva";
+    EXPECT_TRUE(wentBlank)
+        << "siguio publicando una desviacion despues de conmutar de fuente: la "
+           "fase acumulada sobre el microfono se esta mezclando con frames de USB, "
+           "y eso no se ve como un error — se ve como un numero";
 }
 
 /**
