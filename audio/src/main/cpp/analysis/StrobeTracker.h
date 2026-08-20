@@ -63,6 +63,19 @@ public:
     /// cents. Es el presupuesto del producto; `AnalysisThread` usa el mismo.
     static constexpr double kConvergedUncertaintyCents = 0.1;
 
+    /**
+     * Cuanto puede disentir un parcial de la mediana antes de considerarlo
+     * "no esta midiendo la nota", en cents.
+     *
+     * El numero sale de la fisica, no del gusto: la inarmonicidad corre el
+     * parcial n en `600·log2(1 + B·n²)`, y aun con el `B ≈ 5e-4` de una bordona
+     * gruesa el 4to parcial se corre **~7 cents**. Cincuenta deja pasar con
+     * holgura toda cuerda real —incluido lo que S7 va a medir— y descarta la
+     * fuga espectral, que en el caso medido daba **-256 cents**. Entre 7 y 256
+     * hay lugar de sobra para un umbral que no sea un ajuste fino.
+     */
+    static constexpr double kMaxPartialDisagreementCents = 50.0;
+
     void prepare(int sampleRate);
 
     /**

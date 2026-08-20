@@ -206,6 +206,49 @@ TEST(StrobeTrackerTest, ItStillMeetsTheBudgetWithTheFundamentalTwentyDbDown) {
 }
 
 // ---------------------------------------------------------------------------
+// 6.3b — el fundamental AUSENTE: la prueba de que los armonicos hacen el trabajo
+// ---------------------------------------------------------------------------
+/**
+ * 🔴 ESTE TEST EXISTE PORQUE 6.3 NO ALCANZABA.
+ *
+ * Con el fundamental 20 dB abajo, un tracker que apuntara sus CUATRO estimadores
+ * al fundamental —en vez de a f0, 2f0, 3f0, 4f0— seguia pasando: 20 dB debilita
+ * el fundamental pero no lo borra, asi que cuatro copias de una lectura mediocre
+ * daban el numero igual. Medido con mutacion: apuntar los 4 parciales a f0
+ * SOBREVIVIA a toda la suite, o sea que nada probaba que los armonicos se
+ * estuvieran usando.
+ *
+ * El fundamental AUSENTE si lo prueba, y ademas es un caso real: es el
+ * "fundamental faltante" de un bajo por un parlante chico, donde la altura que se
+ * percibe sale enteramente de los parciales superiores.
+ */
+TEST(StrobeTrackerTest, ItMeasuresFromTheHarmonicsWhenTheFundamentalIsMissingEntirely) {
+    for (const auto& s : {Str{"bajo B0", 30.868}, Str{"bajo E1", 41.203}}) {
+        StrobeTracker t;
+        t.prepare(kRate);
+        t.setTarget(s.hz);
+        // Parciales 2, 3 y 4 con su decaimiento 1/n; el fundamental en CERO.
+        const auto sig = partialsWithAmplitudes(
+            detune(s.hz, kProbeCents), 0.0,
+            {0.0, 0.5 / 2.0, 0.5 / 3.0, 0.5 / 4.0}, kRate, kThreeSeconds);
+        feed(t, sig);
+
+        ASSERT_TRUE(t.hasMeasurement()) << s.name << ": sin fundamental no midio nada";
+        for (int i = 0; i < StrobeTracker::kPartials; ++i) {
+            RecordProperty(std::string("p") + std::to_string(i) + "_cents_" + s.name,
+                           std::to_string(t.partialCents(i)));
+            RecordProperty(std::string("p") + std::to_string(i) + "_sigma_" + s.name,
+                           std::to_string(t.partialUncertaintyCents(i)));
+        }
+        const double err = std::abs(t.cents() - kProbeCents);
+        RecordProperty(std::string("no_fund_error_") + s.name, std::to_string(err));
+        EXPECT_LT(err, kToleranceCents)
+            << s.name << ": sin fundamental midio " << t.cents()
+            << " cents contra " << kProbeCents << " reales";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 6.4 · AC-001.22 — el angulo es continuo entre polls
 // ---------------------------------------------------------------------------
 TEST(StrobeTrackerTest, ThePublishedAngleIsContinuousBetweenPollsAtSixtyHertz) {
@@ -249,9 +292,22 @@ TEST(StrobeTrackerTest, TheAngleTurnsOneWayWhenSharpAndTheOtherWhenFlat) {
 
     EXPECT_GT(std::abs(turnSharp), 1.0) << "sostenido: el disco practicamente no giro";
     EXPECT_GT(std::abs(turnFlat), 1.0) << "bemol: el disco practicamente no giro";
-    EXPECT_LT(turnSharp * turnFlat, 0.0)
-        << "sostenido y bemol giraron para el MISMO lado (" << turnSharp
-        << " y " << turnFlat << ") — el disco no dice si hay que subir o bajar";
+
+    // 🔴 EL SENTIDO SE EXIGE EN ABSOLUTO, NO SOLO QUE DIFIERAN.
+    //
+    // Este test decia `turnSharp * turnFlat < 0` —"giraron para lados
+    // distintos"— y con eso INVERTIR EL SIGNO DE LOS DOS lo pasaba: el producto
+    // no cambia. Medido con mutacion: `phaseAngle()` devolviendo el negativo
+    // sobrevivia, y el doc de la etapa pedia explicitamente que ese mutante
+    // muriera. Un disco que gira al reves manda a aflojar la cuerda que hay que
+    // apretar, asi que "difieren" no es la propiedad: la propiedad es CUAL.
+    //
+    // La convencion es la del afinador, la misma que ya declara el golden de S2:
+    // señal POR ENCIMA del objetivo ⇒ POSITIVO.
+    EXPECT_GT(turnSharp, 0.0)
+        << "una cuerda SOSTENIDA hizo girar el disco en negativo (" << turnSharp << ")";
+    EXPECT_LT(turnFlat, 0.0)
+        << "una cuerda BEMOL hizo girar el disco en positivo (" << turnFlat << ")";
 }
 
 // ---------------------------------------------------------------------------
