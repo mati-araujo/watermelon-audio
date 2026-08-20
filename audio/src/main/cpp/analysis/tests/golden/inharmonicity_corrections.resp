@@ -1,0 +1,17 @@
+# watermelon-audio golden — analysis/inharmonicity_corrections (REQ-001 S7)
+# sampleRate=48000  window=0  rows=13
+# El signo es el del afinador: senal por encima del objetivo = POSITIVO.
+# caso	cuerdaHz	B_x1e6	correccionCents
+guitarra E2	82.41	105.187029	0.000000
+guitarra A2	110.00	51.677128	1.053103
+guitarra D3	146.83	24.921454	1.574398
+guitarra G3	196.00	12.018448	1.825863
+guitarra B3	246.94	86.940832	0.882626
+guitarra E4	329.63	12.018448	1.992283
+bajo E1	41.20	136.828130	0.000000
+bajo A1	55.00	81.604033	1.257474
+bajo D2	73.42	45.069181	2.035899
+bajo G2	98.00	24.653210	2.467836
+ukelele C4	261.63	71.048449	0.000000
+ukelele E4	329.63	38.711549	1.000171
+ukelele A4	440.00	27.496240	1.321970

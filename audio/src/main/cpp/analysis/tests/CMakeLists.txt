@@ -27,12 +27,14 @@ add_executable(analysis_tests
     test_phase_slope_golden.cpp
     test_mcleod_pitch.cpp
     test_strobe_tracker.cpp
+    test_inharmonicity.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisThread.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseSlopeEstimator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../StrobeTracker.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../InharmonicityEstimator.cpp
 )
 
 target_compile_definitions(analysis_tests PRIVATE

@@ -29,6 +29,7 @@
 #include "AnalysisSnapshot.h"
 #include "PhaseSlopeEstimator.h"
 #include "StrobeTracker.h"
+#include "InharmonicityEstimator.h"
 #include "../dsp/McLeodPitch.h"
 
 #include <atomic>
@@ -80,6 +81,9 @@ public:
      * tiene que ir por el snapshot.
      */
     const StrobeTracker& strobe() const noexcept { return mStrobe; }
+
+    /// La inarmonicidad estimada de la cuerda que suena (S7).
+    const InharmonicityEstimator& inharmonicity() const noexcept { return mInharmonicity; }
 
     /**
      * @brief La frecuencia contra la que se mide. 0 = ninguna.
@@ -148,6 +152,9 @@ private:
     /// fundamental solo (es la combinacion de minima varianza), asi que el cambio no puede
     /// empeorar lo que S4 publicaba: medido sobre 14 cuerdas, es estrictamente mejor.
     StrobeTracker mStrobe;
+
+    /// Lee las 4 fases del strobe; no vuelve a analizar la señal (S7 · 7.9).
+    InharmonicityEstimator mInharmonicity;
 
     /// Deteccion gruesa: encuentra la altura SIN objetivo. Corre en el mismo thread y no
     /// depende del estimador — de hecho es al reves: es quien puede darle un objetivo.

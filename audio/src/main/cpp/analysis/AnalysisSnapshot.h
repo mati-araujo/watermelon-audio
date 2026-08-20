@@ -96,7 +96,17 @@ enum SnapshotValue : int {
     /// Confianza de esa deteccion, 0..1 (el valor de la NSDF en el pico elegido).
     kSnapDetectionClarity  = 9,
 
-    kSnapshotValueCount    = 10,
+    // ---- Inarmonicidad (REQ-001 S7). Al final, otra vez.
+    /// Coeficiente B de la cuerda que suena, de `f_n = n·f₀·√(1+B·n²)`.
+    /// NaN cuando no se pudo medir — y NO cero, porque cero es un valor
+    /// PLAUSIBLE (cuerda ideal) que un consumidor mostraria como medicion.
+    kSnapInharmonicityB    = 10,
+    /// 1 si `kSnapInharmonicityB` se MIDIO, 0 si el consumidor tiene que caer al
+    /// respaldo derivado de fisica. Va aparte del valor y no como un centinela
+    /// dentro suyo: es exactamente lo que pide AC-001.11.
+    kSnapInharmonicityMeasured = 11,
+
+    kSnapshotValueCount    = 12,
 };
 
 enum SnapshotState : int {
