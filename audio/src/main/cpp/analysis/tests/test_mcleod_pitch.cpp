@@ -29,6 +29,21 @@
 #include <string>
 #include <vector>
 
+// La deteccion va en #if ANIDADOS y no en una sola expresion, y eso no es estilo:
+// GCC no define `__has_feature`, y en una linea `#if` el preprocesador evalua el
+// token igual aunque el `defined(...)` de al lado sea falso — no hay cortocircuito
+// que valga. Sale `error: missing binary operator before token "("`, que es
+// exactamente como se cayo el job de ubuntu la primera vez que escribi esto.
+// Apple clang lo aceptaba, asi que verificarlo local no alcanzaba.
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+#    define WMA_TEST_UNDER_SANITIZER 1
+#elif defined(__has_feature)
+#    if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer) \
+        || __has_feature(memory_sanitizer)
+#        define WMA_TEST_UNDER_SANITIZER 1
+#    endif
+#endif
+
 namespace wma_test {
 namespace {
 
@@ -251,10 +266,7 @@ TEST(McLeodPitchTest, TheResultIsBitIdenticalRegardlessOfTheCallersBlockSize) {
  * un guardrail que falla por ruido se termina silenciando.
  */
 TEST(McLeodPitchCost, TheDetectorCostsAFractionOfRealTimeAndTheNumberIsRecorded) {
-#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__) \
-    || (defined(__has_feature) && (__has_feature(thread_sanitizer)      \
-                                   || __has_feature(address_sanitizer)  \
-                                   || __has_feature(memory_sanitizer)))
+#ifdef WMA_TEST_UNDER_SANITIZER
     // 🔴 MEDIR PERFORMANCE CON EL CODIGO INSTRUMENTADO NO MIDE NADA.
     //
     // El comentario de arriba dice que el techo es flojo porque "un techo
