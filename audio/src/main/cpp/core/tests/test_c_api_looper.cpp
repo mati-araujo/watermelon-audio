@@ -32,10 +32,12 @@
  */
 
 #include "support/CApiFixture.h"
+#include "tests/support/TestWait.h"
 
 #include "looper/LooperExportTypes.h"
 
 #include <algorithm>
+#include <deque>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -58,6 +60,38 @@ constexpr int kSampleRate = 48000;
 
 /// Anything above this is the engine making sound rather than the dither floor.
 constexpr float kAudible = 0.01f;
+
+/// Junta lo que llega, con candado: el callback corre en el worker, no acá.
+///
+/// 🔴 **Su vida la maneja el fixture, y no es un detalle de estilo.** Ver
+/// `installCollector()` — declarar uno local en el cuerpo de un test es un
+/// use-after-free con abort, medido.
+struct EventCollector {
+    struct Received {
+        int type;
+        int trackIndex;
+        float value;
+    };
+
+    std::mutex mutex;
+    std::vector<Received> events;
+
+    static void callback(int type, int trackIndex, float value, void* userData) {
+        auto* self = static_cast<EventCollector*>(userData);
+        std::lock_guard<std::mutex> lk(self->mutex);
+        self->events.push_back({type, trackIndex, value});
+    }
+
+    size_t size() {
+        std::lock_guard<std::mutex> lk(mutex);
+        return events.size();
+    }
+
+    std::vector<Received> snapshot() {
+        std::lock_guard<std::mutex> lk(mutex);
+        return events;
+    }
+};
 
 class CApiLooperTest : public CApiFixture {
 protected:
@@ -106,6 +140,87 @@ protected:
         CApiFixture::TearDown();
     }
 
+    /**
+     * Instala un receptor de eventos **del que el fixture es dueño**, y devuelve
+     * la referencia.
+     *
+     * POR QUE NO SE DECLARA UNO LOCAL EN EL CUERPO DEL TEST
+     * -----------------------------------------------------
+     * Porque el motor le sobrevive. Las variables del cuerpo se destruyen al
+     * salir de el, y `TearDown()` —que es quien llama a `wma_engine_destroy`—
+     * corre DESPUES: en esa ventana el worker despacha sobre un `std::mutex` ya
+     * destruido y el proceso se cae con
+     *
+     *     libc++abi: terminating due to uncaught exception of type
+     *     std::__1::system_error: mutex lock failed: Invalid argument
+     *
+     * que es exactamente el mensaje con el que murio `cpp-tests-macos` en master
+     * el 2026-08-20 (`bc44b27`). Reproducido 5/5 con un probe deliberado.
+     *
+     * **El motor no tiene la culpa y no hay nada que arreglarle.** La regla esta
+     * escrita en `watermelon_audio.h`, en el KDoc de
+     * `wma_looper_set_event_callback`: *"user_data must stay valid after the
+     * clear... freeing it right after clearing is a use-after-free, not a race
+     * you can win by ordering the calls"*. El que la violaba era este archivo,
+     * en sus cuatro tests de eventos.
+     *
+     * Al ser MIEMBRO del fixture, el receptor se destruye cuando se destruye el
+     * objeto del fixture — o sea despues de `TearDown()`, con el motor ya muerto
+     * y el worker ya frenado. La disciplina deja de depender de acordarse.
+     *
+     * `std::deque` y no `vector` porque las referencias que ya se entregaron no
+     * se pueden invalidar cuando se pide un segundo receptor.
+     */
+    EventCollector& installCollector() {
+        mCollectors.emplace_back();
+        EventCollector& c = mCollectors.back();
+        wma_looper_set_event_callback(mWma, &EventCollector::callback, &c);
+        return c;
+    }
+
+    /// Espera a que @p c haya juntado al menos @p minCount eventos. Por
+    /// CONDICION y con techo: el veredicto no puede depender de cuanto tarda el
+    /// worker en conseguir un turno, que es como se rompia antes.
+    static bool waitForEvents(EventCollector& c, size_t minCount = 1) {
+        return waitUntil([&] { return c.size() >= minCount; });
+    }
+
+    /**
+     * Espera a que @p c DEJE DE CRECER y devuelve el tamanio ya asentado.
+     *
+     * Existe para los eventos que estaban EN VUELO cuando se cambio el sink: el
+     * header declara que todavia aterrizan en el receptor viejo, y el dispatcher
+     * no expone contador de despachados (`LooperEventDispatcher` solo lleva
+     * `mDropped`, que cuenta desbordes de cola), asi que no hay un observable al
+     * que preguntarle "ya terminaste".
+     *
+     * **No es un sleep disfrazado, y la diferencia es la que separa este REQ de
+     * su defecto:** si el worker va lento, la quietud se detecta MAS TARDE pero se
+     * detecta igual; un `sleep_for` fijo simplemente se queda corto y afirma sobre
+     * un estado a medio formar. Por eso `quiet` no se escala — es parte de la
+     * condicion, no una espera ciega.
+     */
+    static size_t waitUntilQuiet(EventCollector& c,
+                                 std::chrono::milliseconds quiet
+                                     = std::chrono::milliseconds(120),
+                                 std::chrono::milliseconds timeout
+                                     = std::chrono::milliseconds(3000)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        size_t last = c.size();
+        auto lastChange = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            const size_t now = c.size();
+            if (now != last) {
+                last = now;
+                lastChange = std::chrono::steady_clock::now();
+                continue;
+            }
+            if (std::chrono::steady_clock::now() - lastChange >= quiet) return last;
+        }
+        return c.size();
+    }
+
     void recordTrack(int track, int blocks = 4, int capacityBlocks = 0) {
         if (capacityBlocks <= 0) capacityBlocks = blocks;
         wma_looper_set_enabled(mWma, true);
@@ -122,6 +237,9 @@ protected:
     }
 
     std::string mTempDir;
+
+    /// Los receptores viven ACA para sobrevivir al motor. Ver installCollector().
+    std::deque<EventCollector> mCollectors;
 };
 
 // ===========================================================================
@@ -1147,59 +1265,18 @@ TEST(CApiLooperNullHandle, EveryMutatorIsANoOpRatherThanACrash) {
 // sink a mano no probaría nada de eso.
 // ===========================================================================
 
-/// Junta lo que llega, con candado: el callback corre en el worker, no acá.
-struct EventCollector {
-    struct Received {
-        int type;
-        int trackIndex;
-        float value;
-    };
-
-    std::mutex mutex;
-    std::vector<Received> events;
-
-    static void callback(int type, int trackIndex, float value, void* userData) {
-        auto* self = static_cast<EventCollector*>(userData);
-        std::lock_guard<std::mutex> lk(self->mutex);
-        self->events.push_back({type, trackIndex, value});
-    }
-
-    size_t size() {
-        std::lock_guard<std::mutex> lk(mutex);
-        return events.size();
-    }
-
-    std::vector<Received> snapshot() {
-        std::lock_guard<std::mutex> lk(mutex);
-        return events;
-    }
-
-    void clear() {
-        std::lock_guard<std::mutex> lk(mutex);
-        events.clear();
-    }
-};
-
-/// Le da al worker (poll de 15 ms) tiempo de sobra para vaciar la cola.
-void letTheWorkerDrain() {
-    std::this_thread::sleep_for(std::chrono::milliseconds(120));
-}
-
 TEST_F(CApiLooperTest, StateEventsReachTheCallbackFromTheWorkerThread) {
-    EventCollector collector;
     startAt(kSampleRate, 0);
-    wma_looper_set_event_callback(mWma, &EventCollector::callback, &collector);
+    EventCollector& collector = installCollector();
 
     recordTrack(0, /*blocks=*/32);
     render(64, kBlockFrames);
-    letTheWorkerDrain();
 
-    const auto received = collector.snapshot();
-    ASSERT_FALSE(received.empty())
+    ASSERT_TRUE(waitForEvents(collector))
         << "el motor no entregó un solo evento — la cadena RT→cola→worker→callback "
            "está cortada en alguna parte";
 
-    for (const auto& ev : received) {
+    for (const auto& ev : collector.snapshot()) {
         EXPECT_GE(ev.type, WMA_LOOPER_EVENT_PROGRESS);
         EXPECT_LE(ev.type, WMA_LOOPER_EVENT_TRACK_COMPLETED);
         EXPECT_GE(ev.trackIndex, 0);
@@ -1208,67 +1285,118 @@ TEST_F(CApiLooperTest, StateEventsReachTheCallbackFromTheWorkerThread) {
 }
 
 TEST_F(CApiLooperTest, TheUserDataPointerArrivesUntouched) {
-    EventCollector collector;
     startAt(kSampleRate, 0);
-    wma_looper_set_event_callback(mWma, &EventCollector::callback, &collector);
+    EventCollector& collector = installCollector();
 
     recordTrack(0, /*blocks=*/32);
     render(64, kBlockFrames);
-    letTheWorkerDrain();
 
     // Que `collector` tenga algo YA prueba que el puntero llegó entero: el
     // callback es estático y sin ese `user_data` no tendría dónde escribir.
-    EXPECT_GT(collector.size(), 0u);
+    EXPECT_TRUE(waitForEvents(collector));
 }
 
+/**
+ * El clear detiene los eventos — y la AUSENCIA se afirma contra evidencia de que
+ * el worker corrió, no contra el paso del tiempo (AC-002.4).
+ *
+ * POR QUE HACE FALTA UN CENTINELA, Y POR QUE VA DESPUES
+ * -----------------------------------------------------
+ * Una no-ocurrencia no se puede esperar. La version anterior dormia 120 ms y
+ * afirmaba `size() == 0`, lo que da verde por las dos razones opuestas: porque
+ * el clear funciona, o **porque el worker no llego a correr nunca**. Bajo carga
+ * la segunda es real, y era indistinguible de la primera.
+ *
+ * El centinela las separa. Se reinstala un receptor DESPUES de la tanda que no
+ * debe llegar, y se espera a que reciba: el worker drena EN ORDEN, asi que si el
+ * centinela ve un evento posterior, la tanda anterior **ya paso por el worker** y
+ * su destino ya se decidio. Recien ahi `victima.size()` significa algo.
+ *
+ * Y LOS EVENTOS EN VUELO NO SE ESPERAN "UN RATO"
+ * ----------------------------------------------
+ * Al momento del clear puede haber eventos ya levantados que todavia aterrizan en
+ * el receptor viejo: el header lo declara como propiedad del disenio —*"an event
+ * picked up just before the clear still reaches the old callback"*— y el
+ * dispatcher **no expone contador de despachados** (`LooperEventDispatcher` solo
+ * lleva `mDropped`, que cuenta desbordes de cola).
+ *
+ * Sin observable al que preguntarle, la primera version de esta etapa dormia un
+ * rato fijo. **Eso seguia siendo la clase que el REQ persigue**, aunque pasara:
+ * un rato fijo alcanza en una maquina ociosa y se queda corto donde importa. Se
+ * espera a que el receptor DEJE DE CRECER (`waitUntilQuiet`), que si es una
+ * condicion — si el worker va lento, la quietud se detecta mas tarde, pero se
+ * detecta.
+ *
+ * Resultado: en este archivo no queda ninguna espera ciega.
+ */
 TEST_F(CApiLooperTest, ClearingTheCallbackStopsTheEvents) {
-    EventCollector collector;
     startAt(kSampleRate, 0);
-    wma_looper_set_event_callback(mWma, &EventCollector::callback, &collector);
+    EventCollector& victim = installCollector();
 
     recordTrack(0, /*blocks=*/32);
     render(64, kBlockFrames);
-    letTheWorkerDrain();
-    ASSERT_GT(collector.size(), 0u) << "precondición: los eventos llegaban";
+    ASSERT_TRUE(waitForEvents(victim)) << "precondición: los eventos llegaban";
 
     wma_looper_set_event_callback(mWma, nullptr, nullptr);
 
-    // La espera ANTES de limpiar el contador no es cortesía: el despachador
-    // documenta que un evento levantado justo antes del clear todavía llega. Se le
-    // da tiempo a lo que ya estaba en vuelo y RECIÉN ahí se cuenta desde cero, que
-    // es exactamente la disciplina que el KDoc le exige a un llamador.
-    letTheWorkerDrain();
-    collector.clear();
+    // Lo que estaba en vuelo al momento del clear todavía puede aterrizar en
+    // `victim`, y es contractual. Se espera a que DEJE DE CRECER —no un rato fijo—
+    // y ese es el numero contra el que se compara despues.
+    const size_t settled = waitUntilQuiet(victim);
 
+    // La tanda que no tiene que llegarle a nadie: el sink está en nullptr.
     render(64, kBlockFrames);
-    letTheWorkerDrain();
 
-    EXPECT_EQ(collector.size(), 0u) << "siguieron llegando eventos después del clear";
+    // 🔴 SE ESPERA A QUE `victim` SE ASIENTE **ANTES** DE TOCAR EL SINK, Y EL ORDEN
+    // ES LA MITAD DEL TEST. Instalar el centinela primero cambia el sink, y los
+    // eventos de la tanda de arriba que el worker todavía no drenó le llegarían a
+    // ÉL en vez de a `victim` — comportamiento correcto del producto que deja al
+    // test sin nada que observar. Medido: con esa versión el mutante que rompe el
+    // clear SOBREVIVE, mientras que el test viejo (que dormía entre generar y
+    // afirmar) lo mataba 20 contra 0. Sacar la espera sin poner una condición en
+    // su lugar no arregló el test: lo dejó ciego.
+    const size_t afterBatch = waitUntilQuiet(victim);
+
+    // Y el centinela, DESPUÉS: prueba de que el worker está vivo. Sin él, un
+    // `victim` quieto no distingue "el clear anduvo" de "el worker nunca corrió",
+    // que es el falso verde que AC-002.4 persigue.
+    EventCollector& sentinel = installCollector();
+    render(16, kBlockFrames);
+    ASSERT_TRUE(waitForEvents(sentinel))
+        << "el centinela no recibió nada, así que no hay forma de saber si el "
+           "worker llegó a correr — sin eso, lo de abajo no prueba nada";
+
+    EXPECT_EQ(afterBatch, settled)
+        << "siguieron llegando eventos después del clear";
 }
 
+/**
+ * Registrar de nuevo reemplaza al anterior. La AUSENCIA en el primero se ancla a
+ * la PRESENCIA en el segundo (AC-002.4), que es evidencia directa de que el
+ * worker despachó.
+ */
 TEST_F(CApiLooperTest, RegisteringAgainReplacesThePreviousCallback) {
-    EventCollector first;
-    EventCollector second;
     startAt(kSampleRate, 0);
+    EventCollector& first = installCollector();
 
-    wma_looper_set_event_callback(mWma, &EventCollector::callback, &first);
     recordTrack(0, /*blocks=*/32);
     render(32, kBlockFrames);
-    letTheWorkerDrain();
-    ASSERT_GT(first.size(), 0u) << "precondición: el primero recibía";
+    ASSERT_TRUE(waitForEvents(first)) << "precondición: el primero recibía";
 
-    wma_looper_set_event_callback(mWma, &EventCollector::callback, &second);
-    letTheWorkerDrain();
-    first.clear();
+    EventCollector& second = installCollector();
+    const size_t firstSettled = waitUntilQuiet(first);   // lo en vuelo, igual que arriba
 
     render(64, kBlockFrames);
-    letTheWorkerDrain();
 
-    EXPECT_GT(second.size(), 0u) << "el segundo callback no quedó instalado";
-    EXPECT_EQ(first.size(), 0u) << "el primero siguió recibiendo después de ser reemplazado";
+    ASSERT_TRUE(waitForEvents(second))
+        << "el segundo callback no quedó instalado";
+    EXPECT_EQ(first.size(), firstSettled)
+        << "el primero siguió recibiendo después de ser reemplazado";
 }
 
 TEST_F(CApiLooperTest, ANullEngineIsIgnoredRatherThanCrashing) {
+    // Local a proposito y sin riesgo: con `engine == nullptr` la llamada rebota en
+    // WMA_CHECK_VOID y no queda ningun sink apuntando aca.
     EventCollector collector;
     wma_looper_set_event_callback(nullptr, &EventCollector::callback, &collector);
     SUCCEED();
