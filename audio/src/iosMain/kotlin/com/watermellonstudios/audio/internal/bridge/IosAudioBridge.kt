@@ -529,6 +529,10 @@ internal class IosAudioBridge : IAudioNativeBridge {
 
     override fun isTunerRunning(): Boolean = wma_tuner_is_running(engine)
 
+    override fun setTunerTargetHz(hz: Float): Boolean = wma_tuner_set_target(engine, hz)
+
+    override fun getTunerTargetHz(): Float = wma_tuner_get_target(engine)
+
     /**
      * @return null si no hay análisis o si todavía no se publicó nada, que es
      *   **distinto** de "todo en cero". `wma_tuner_get_snapshot` deja el buffer

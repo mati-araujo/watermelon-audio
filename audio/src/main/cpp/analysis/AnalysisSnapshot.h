@@ -81,12 +81,22 @@ enum SnapshotValue : int {
     /// Ver `SnapshotState`.
     kSnapState             = 4,
 
-    // ---- Lo que llena S2. Hasta entonces valen NaN, ver la nota de publish().
+    /// Desviacion contra el objetivo. NaN si no hay objetivo o no hay medicion.
     kSnapCents             = 5,
+    /// Angulo de la desafinacion acumulada, rad, envuelto a ±π. Lo consume el strobe.
     kSnapPhaseAngle        = 6,
     kSnapUncertainty       = 7,
 
-    kSnapshotValueCount    = 8,
+    // ---- Deteccion gruesa (REQ-001 S4). AGREGADOS AL FINAL, que es el contrato:
+    //      el orden lo indexa el consumidor del otro lado de la frontera, asi que
+    //      agregar va SIEMPRE al final y nunca se reordena. Es la mitigacion que
+    //      declara `plan.md` para este seam compartido.
+    /// Altura detectada SIN saberla de antemano, en Hz. 0 = no hay nota.
+    kSnapDetectedHz        = 8,
+    /// Confianza de esa deteccion, 0..1 (el valor de la NSDF en el pico elegido).
+    kSnapDetectionClarity  = 9,
+
+    kSnapshotValueCount    = 10,
 };
 
 enum SnapshotState : int {

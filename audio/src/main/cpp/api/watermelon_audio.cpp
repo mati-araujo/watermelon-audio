@@ -1057,6 +1057,23 @@ bool wma_tuner_is_running(const WmaEngine* engine) {
     return engine->analysisThread->isRunning();
 }
 
+bool wma_tuner_set_target(WmaEngine* engine, float hz) {
+    if (!engine) return false;
+    // Se crea el seam si hace falta: poner el objetivo ANTES de arrancar es el
+    // orden natural para un consumidor —elegis la cuerda y despues afinas— y
+    // fallar por eso seria una sorpresa gratuita.
+    if (!wmaEnsureAnalysis(engine)) return false;
+    std::lock_guard<std::mutex> lock(engine->analysisMutex);
+    if (!engine->analysisThread) return false;
+    engine->analysisThread->setTargetHz(static_cast<double>(hz));
+    return true;
+}
+
+float wma_tuner_get_target(const WmaEngine* engine) {
+    if (!engine || !engine->analysisThread) return 0.0f;
+    return static_cast<float>(engine->analysisThread->targetHz());
+}
+
 bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values) {
     if (!engine || !engine->analysisSnapshot || !out_values) return false;
     // `read()` deja `out_values` intacto si nunca se publico nada o si la copia

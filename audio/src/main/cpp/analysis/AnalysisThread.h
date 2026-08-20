@@ -27,6 +27,8 @@
 
 #include "AnalysisRing.h"
 #include "AnalysisSnapshot.h"
+#include "PhaseSlopeEstimator.h"
+#include "../dsp/McLeodPitch.h"
 
 #include <atomic>
 #include <thread>
@@ -68,6 +70,38 @@ public:
     /// verdad, en vez de dormir un rato y suponer.
     uint64_t ticks() const noexcept { return mTicks.load(std::memory_order_relaxed); }
 
+    /**
+     * @brief La frecuencia contra la que se mide. 0 = ninguna.
+     *
+     * EL OBJETIVO LO PONE EL CONSUMIDOR, Y NO ES PROVISORIO
+     * -----------------------------------------------------
+     * El estimador de fase **afina alrededor de un objetivo, no lo busca**: su rango de
+     * captura es de unos pocos cents en la zona aguda. Asi que alguien tiene que decirle
+     * contra que medir, y hasta que exista la deteccion gruesa ese alguien es el consumidor
+     * —que es exactamente lo que `ITuner` declara como obligacion del implementador.
+     *
+     * **Sin objetivo NO se inventa uno.** El snapshot sigue publicando NaN en cents y el
+     * estado queda en "sin enganche": es honesto, y es distinto de publicar la altura de
+     * cualquier cosa que este sonando.
+     *
+     * La llama el thread de control. Cambiarla **reinicia la integracion**: la fase acumulada
+     * contra el objetivo viejo no dice nada del nuevo.
+     */
+    void setTargetHz(double hz) noexcept {
+        mTargetHz.store(hz > 0.0 ? hz : 0.0, std::memory_order_release);
+    }
+
+    double targetHz() const noexcept { return mTargetHz.load(std::memory_order_acquire); }
+
+    /**
+     * Incertidumbre por debajo de la cual la lectura se declara **convergida**, en cents.
+     *
+     * 0,1 es el presupuesto del producto: por debajo de eso, la medicion ya no es lo que
+     * limita. El numero esta acá y no disperso porque S6 lo va a mirar y S10 lo va a escribir
+     * en el contrato de exactitud.
+     */
+    static constexpr double kConvergedUncertaintyCents = 0.1;
+
 private:
     /**
      * El lazo. Se llama `drainLoop` y NO `run`, y el nombre es load-bearing:
@@ -94,6 +128,19 @@ private:
     AnalysisRing& mRing;
     AnalysisSnapshot& mSnapshot;
     std::vector<float> mScratch;
+
+    /// El estimador vive ACA y no en el thread de audio: integra fase a lo largo de segundos
+    /// y hace regresion, nada de lo cual entra en un deadline de 2,7 ms.
+    PhaseSlopeEstimator mEstimator;
+
+    /// Deteccion gruesa: encuentra la altura SIN objetivo. Corre en el mismo thread y no
+    /// depende del estimador — de hecho es al reves: es quien puede darle un objetivo.
+    wma::dsp::McLeodPitch mDetector;
+    std::atomic<double> mTargetHz{0.0};
+    /// Lo ultimo con lo que se configuro el estimador, para no re-prepararlo por tick:
+    /// `prepare()` asigna y `setTarget()` reinicia la integracion.
+    int mPreparedRate{0};
+    double mAppliedTarget{0.0};
 
     std::thread mThread;
     std::atomic<bool> mRunning{false};

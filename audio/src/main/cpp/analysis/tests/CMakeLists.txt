@@ -25,6 +25,9 @@ add_executable(analysis_tests
     test_analysis_thread.cpp
     test_phase_slope.cpp
     test_phase_slope_golden.cpp
+    test_mcleod_pitch.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisThread.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseSlopeEstimator.cpp
@@ -39,6 +42,7 @@ target_compile_definitions(analysis_tests PRIVATE
 target_include_directories(analysis_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp
 )
 target_link_libraries(analysis_tests PRIVATE GTest::gtest_main)
 

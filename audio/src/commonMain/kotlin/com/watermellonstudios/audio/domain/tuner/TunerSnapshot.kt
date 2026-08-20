@@ -39,10 +39,21 @@ data class TunerSnapshot(
     val cents: Float?,
     val phaseAngle: Float?,
     val uncertainty: Float?,
+    /**
+     * Altura detectada **sin objetivo**, en Hz, o `null` si no se encontró nota.
+     *
+     * Es lo que le permite a la app saber qué cuerda está sonando para después empujar el
+     * objetivo. No confundir con [cents]: esto dice *qué nota es*, con error de decenas de
+     * cents; aquello dice *cuán desafinada está*, con error de milicents — y sólo existe si
+     * alguien puso un objetivo.
+     */
+    val detectedHz: Float?,
+    /** Confianza de [detectedHz], 0..1. Por debajo de ~0,5 no hay nota creíble. */
+    val detectionClarity: Float,
 ) {
     companion object {
         /** Cantidad de floats del snapshot nativo. Espeja `WMA_TUNER_SNAPSHOT_VALUES`. */
-        const val VALUE_COUNT: Int = 8
+        const val VALUE_COUNT: Int = 10
 
         /**
          * Arma el snapshot desde los floats nativos, en el orden que documenta
@@ -62,6 +73,8 @@ data class TunerSnapshot(
                 cents = values[5].takeIf { !it.isNaN() },
                 phaseAngle = values[6].takeIf { !it.isNaN() },
                 uncertainty = values[7].takeIf { !it.isNaN() },
+                detectedHz = values[8].takeIf { it > 0f && !it.isNaN() },
+                detectionClarity = values[9],
             )
         }
     }

@@ -1,0 +1,12 @@
+# watermelon-audio golden — analysis/coarse_detection (REQ-001 S2)
+# sampleRate=48000  window=2048  rows=8
+# El signo es el del afinador: senal por encima del objetivo = POSITIVO.
+# caso	verdaderaHz	detectadaHz	claridad
+A0	27.50	27.499997	0.999998
+B0	30.87	30.867998	0.999992
+E2	82.41	82.407065	0.999987
+A2	110.00	110.000150	0.999986
+D3	146.83	146.832144	0.999850
+A4	440.00	439.997861	0.998627
+E5	659.25	659.260980	0.997570
+C7	2093.01	2093.266797	0.967426

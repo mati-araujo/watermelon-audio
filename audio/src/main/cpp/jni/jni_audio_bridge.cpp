@@ -962,6 +962,18 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsTune
     return wma_tuner_is_running(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetTunerTarget(
+    JNIEnv* env, jobject thiz, jfloat hz) {
+    return wma_tuner_set_target(g_wmaEngine, hz) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetTunerTarget(
+    JNIEnv* env, jobject thiz) {
+    return wma_tuner_get_target(g_wmaEngine);
+}
+
 JNIEXPORT jfloatArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetTunerSnapshot(
     JNIEnv* env, jobject thiz) {

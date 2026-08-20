@@ -40,6 +40,33 @@ void AnalysisThread::drainLoop() {
     const float nan = std::numeric_limits<float>::quiet_NaN();
 
     while (mRunning.load(std::memory_order_acquire)) {
+        // --- la configuracion se mira ANTES de drenar ------------------------
+        //
+        // El orden no es cosmetico: al cambiar el objetivo hay que descartar lo
+        // que quedo en el ring, y eso sólo sirve si se hace antes de leerlo.
+        const int rate = mRing.captureRate();
+        const double target = mTargetHz.load(std::memory_order_acquire);
+
+        if (rate > 0 && rate != mPreparedRate) {
+            // EL RATE MEDIDO, NO 48000. Preparar el estimador con un rate
+            // asumido escala todo lo que mida: a 32 kHz son +702 cents. Es el
+            // mismo defecto que las tareas 1.16-1.19 sacaron del camino, y este
+            // es el ultimo lugar donde se podia volver a perder — justo al
+            // usarlo.
+            mEstimator.prepare(rate);
+            mDetector.prepare(rate);
+            mPreparedRate = rate;
+            mAppliedTarget = 0.0;      // `prepare()` reinicia: hay que re-aplicar
+        }
+        if (target != mAppliedTarget && mPreparedRate > 0) {
+            mEstimator.setTarget(target);
+            mAppliedTarget = target;
+            // Lo que quedo en el ring es de la cuerda ANTERIOR. Ver
+            // AnalysisRing::skipToNewest().
+            mRing.skipToNewest();
+        }
+        const bool measuring = mPreparedRate > 0 && mAppliedTarget > 0.0;
+
         const int got = mRing.read(mScratch.data(), kDrainFrames);
         mTicks.fetch_add(1, std::memory_order_relaxed);
 
@@ -58,20 +85,63 @@ void AnalysisThread::drainLoop() {
 
         // Se lee POR TICK, no una vez: es lo unico que hace que un cambio de
         // rate en caliente aparezca en el snapshot siguiente.
+        // `prepare()` asigna y `setTarget()` reinicia la integracion, asi que
+        // llamarlos por tick tiraria la medicion antes de que converja: por eso
+        // arriba se comparan contra lo ultimo aplicado.
+        if (measuring) {
+            mEstimator.process(mScratch.data(), got);
+        }
+        // La deteccion gruesa corre SIEMPRE que haya rate, con objetivo o sin el: su trabajo
+        // es justamente decir que nota hay cuando nadie lo sabe todavia.
+        if (mPreparedRate > 0) {
+            mDetector.process(mScratch.data(), got);
+        }
+
         float values[kSnapshotValueCount];
-        values[kSnapCaptureSampleRate] = static_cast<float>(mRing.captureRate());
+        values[kSnapCaptureSampleRate] = static_cast<float>(rate);
         values[kSnapLevelRms]          = rms;
         values[kSnapFramesAnalyzed]    = static_cast<float>(mFramesAnalyzed);
         values[kSnapDroppedFrames]     = static_cast<float>(mRing.droppedFrames());
-        values[kSnapState] = static_cast<float>(
-            rms < kSilenceFloor ? kStateNoSignal : kStateNoLock);
 
-        // NaN, no cero. `0.0` cents es un valor PLAUSIBLE —afinado exacto— y un
-        // consumidor lo mostraria como medicion. Estos tres los llena S2; hasta
-        // entonces la ausencia tiene que ser inconfundible.
-        values[kSnapCents]         = nan;
-        values[kSnapPhaseAngle]    = nan;
-        values[kSnapUncertainty]   = nan;
+        const bool haveReading =
+            measuring && mEstimator.hasSignal() && mEstimator.hasMeasurement();
+
+        if (haveReading) {
+            values[kSnapCents]       = static_cast<float>(mEstimator.cents());
+            values[kSnapPhaseAngle]  = static_cast<float>(mEstimator.phaseAngle());
+            values[kSnapUncertainty] = static_cast<float>(mEstimator.uncertaintyCents());
+        } else {
+            // NaN, no cero. `0.0` cents es un valor PLAUSIBLE —afinado exacto— y
+            // un consumidor lo mostraria como medicion. Sin objetivo, o antes de
+            // que la integracion tenga de donde sacar una pendiente, la ausencia
+            // tiene que ser inconfundible.
+            values[kSnapCents]       = nan;
+            values[kSnapPhaseAngle]  = nan;
+            values[kSnapUncertainty] = nan;
+        }
+
+        // El estado dice EN QUE PUNTO esta la medicion, y los cuatro casos son
+        // distintos para el usuario: "sin señal" pide revisar el cable, "sin
+        // enganche" pide elegir una cuerda o tocar mas limpio, "midiendo" es un
+        // spinner y no un error.
+        int state;
+        if (rms < kSilenceFloor) {
+            state = kStateNoSignal;
+        } else if (!measuring) {
+            state = kStateNoLock;          // hay señal, pero nadie dijo contra que medir
+        } else if (!haveReading) {
+            state = kStateMeasuring;       // integrando, todavia sin pendiente
+        } else {
+            state = mEstimator.uncertaintyCents() <= kConvergedUncertaintyCents
+                        ? kStateConverged
+                        : kStateMeasuring;
+        }
+        values[kSnapState] = static_cast<float>(state);
+
+        values[kSnapDetectedHz] = mDetector.hasPitch()
+                                      ? static_cast<float>(mDetector.frequencyHz())
+                                      : 0.0f;
+        values[kSnapDetectionClarity] = static_cast<float>(mDetector.clarity());
 
         mSnapshot.publish(values);
     }

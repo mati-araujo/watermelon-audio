@@ -36,10 +36,13 @@ class TunerSnapshotTest {
         cents: Float = Float.NaN,
         phase: Float = Float.NaN,
         uncertainty: Float = Float.NaN,
-    ) = floatArrayOf(rate, rms, frames, dropped, state, cents, phase, uncertainty)
+        detectedHz: Float = 82.41f,
+        clarity: Float = 0.97f,
+    ) = floatArrayOf(rate, rms, frames, dropped, state, cents, phase, uncertainty,
+                     detectedHz, clarity)
 
     @Test
-    fun elOrdenDeLosOchoValoresEsElDelContratoNativo() {
+    fun elOrdenDeLosValoresEsElDelContratoNativo() {
         val snap = assertNotNull(TunerSnapshot.fromNative(nativeValues()))
 
         assertEquals(44100, snap.captureSampleRate)
@@ -47,6 +50,32 @@ class TunerSnapshotTest {
         assertEquals(96000L, snap.framesAnalyzed)
         assertEquals(3L, snap.droppedFrames)
         assertEquals(TunerState.MEASURING, snap.state)
+
+        // Los dos que agregó la detección gruesa, AL FINAL del layout.
+        assertEquals(82.41f, snap.detectedHz)
+        assertEquals(0.97f, snap.detectionClarity)
+    }
+
+    /**
+     * La detección **sin objetivo** es un dato distinto de la desviación.
+     *
+     * `detectedHz` dice *qué nota es* —con error de decenas de cents— y existe aunque nadie
+     * haya puesto un objetivo; `cents` dice *cuán desafinada está* y sólo existe si hay uno.
+     * Confundirlos haría que la app muestre "afinado" sobre una cuerda que ni siquiera es la
+     * que el usuario eligió.
+     */
+    @Test
+    fun laDeteccionExisteAunqueNoHayaMedicionDeDesviacion() {
+        val snap = assertNotNull(TunerSnapshot.fromNative(nativeValues()))
+        assertNull(snap.cents, "sin objetivo no hay desviación")
+        assertEquals(82.41f, assertNotNull(snap.detectedHz), "pero SÍ hay nota detectada")
+    }
+
+    /** Sin nota, el motor publica 0 Hz y eso llega como `null` — no como "0 hercios". */
+    @Test
+    fun sinNotaDetectadaLlegaNullYNoCero() {
+        val snap = assertNotNull(TunerSnapshot.fromNative(nativeValues(detectedHz = 0f)))
+        assertNull(snap.detectedHz, "0 Hz no es una nota: es la ausencia de una")
     }
 
     /**
@@ -97,6 +126,9 @@ class TunerSnapshotTest {
     @Test
     fun unArrayCortoNoProduceUnSnapshotAMedias() {
         assertNull(TunerSnapshot.fromNative(floatArrayOf(44100f, 0.1f, 10f)))
+        // Y un array del tamaño VIEJO (8): es exactamente el caso de una app compilada
+        // contra la versión anterior del contrato, y tiene que rechazarse entero.
+        assertNull(TunerSnapshot.fromNative(FloatArray(8) { 1f }))
         assertNull(TunerSnapshot.fromNative(floatArrayOf()))
     }
 
@@ -105,7 +137,7 @@ class TunerSnapshotTest {
         // Si esto cambia sin que cambie WMA_TUNER_SNAPSHOT_VALUES, el consumidor
         // pasa un array de otro tamaño que el que la C API va a llenar. Del lado
         // de C++ lo para un static_assert; de este lado, esta línea.
-        assertEquals(8, TunerSnapshot.VALUE_COUNT)
+        assertEquals(10, TunerSnapshot.VALUE_COUNT)
         assertEquals(TunerSnapshot.VALUE_COUNT, nativeValues().size)
     }
 }

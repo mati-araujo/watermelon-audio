@@ -35,6 +35,23 @@ interface ITunerBridge {
     fun isTunerRunning(): Boolean
 
     /**
+     * La frecuencia contra la que se mide, en Hz. `0` la borra.
+     *
+     * **El objetivo lo pone el consumidor, y no es provisorio.** El estimador afina
+     * *alrededor* de un objetivo, no lo busca: su rango de captura es de unos pocos cents en
+     * la zona aguda. Sin objetivo, el snapshot sigue devolviendo `null` en cents y el estado
+     * es "sin enganche" — el motor **no adivina**.
+     *
+     * Cambiarlo **reinicia la integración**, así que no llamarlo por frame con el mismo valor.
+     *
+     * @return false si no hay motor o no se pudo crear el camino de análisis.
+     */
+    fun setTunerTargetHz(hz: Float): Boolean
+
+    /** El objetivo actual en Hz, o 0 si no hay ninguno. */
+    fun getTunerTargetHz(): Float
+
+    /**
      * Los ocho valores del snapshot de una sola vez, todos del mismo tick.
      *
      * @return null si no hay análisis o si todavía no se publicó nada. **Null y

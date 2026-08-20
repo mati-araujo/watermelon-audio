@@ -688,7 +688,7 @@ WMA_API void wma_input_release(WmaEngine* engine);
  * ================================================================ */
 
 /** Number of floats wma_tuner_get_snapshot() writes. */
-#define WMA_TUNER_SNAPSHOT_VALUES 8
+#define WMA_TUNER_SNAPSHOT_VALUES 10
 
 /**
  * Start the analysis seam: the capture thread begins feeding a lock-free ring,
@@ -714,6 +714,30 @@ WMA_API void wma_tuner_stop(WmaEngine* engine);
 WMA_API bool wma_tuner_is_running(const WmaEngine* engine);
 
 /**
+ * Set the frequency the tuner measures against, in Hz. 0 clears it.
+ *
+ * THE CALLER SUPPLIES THE TARGET, AND THAT IS NOT A STOPGAP
+ * ---------------------------------------------------------
+ * The phase estimator refines AROUND a target, it does not search for one: its capture range
+ * is a few cents wide in the treble. So something has to say what to measure against, and
+ * until coarse detection exists that something is the consumer — which is exactly what
+ * ITuner declares as an implementer's obligation.
+ *
+ * With no target the snapshot keeps publishing NaN for cents and reports "no lock". It does
+ * NOT guess: publishing the pitch of whatever happens to be sounding would be a measurement
+ * nobody asked for.
+ *
+ * Changing the target RESTARTS the integration — phase accumulated against the old target
+ * says nothing about the new one — so do not call this every frame with the same value.
+ *
+ * @return false if there is no engine or the analysis seam could not be created.
+ */
+WMA_API bool wma_tuner_set_target(WmaEngine* engine, float hz);
+
+/** The current target in Hz, or 0 if none is set. */
+WMA_API float wma_tuner_get_target(const WmaEngine* engine);
+
+/**
  * Read the whole analysis result in one call.
  *
  * One boundary crossing per tick, like wma_input_get_metering_snapshot() — but
@@ -732,11 +756,18 @@ WMA_API bool wma_tuner_is_running(const WmaEngine* engine);
  *                             3 converged
  *                         [5] cents against target      (NaN until REQ-001 S2)
  *                         [6] phase angle, rad, wrapped (NaN until REQ-001 S2)
- *                         [7] uncertainty               (NaN until REQ-001 S2)
+ *                         [7] uncertainty
+ *                         [8] detected pitch in Hz (0 = no note found)
+ *                         [9] detection clarity, 0..1
  *
- *                         [5]-[7] are NaN and not 0 while no estimator fills
- *                         them: 0.0 cents is a PLAUSIBLE reading (perfectly in
- *                         tune) and a consumer would display it as a measurement.
+ *                         [5]-[7] are NaN — not 0 — whenever there is no target
+ *                         or no measurement yet: 0.0 cents is a PLAUSIBLE reading
+ *                         (perfectly in tune) and a consumer would display it as
+ *                         a measurement.
+ *
+ *                         [8] and [9] come from coarse detection, which needs NO
+ *                         target: that is how a consumer learns which note is
+ *                         being played and picks the target to push back.
  * @return false if there is no analysis seam, if nothing has been published yet,
  *         or if out_values is NULL. The buffer is left UNTOUCHED in that case —
  *         zeros would be a measurement nobody made.
