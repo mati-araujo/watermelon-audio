@@ -30,7 +30,10 @@ audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::writeStereo
 audio/src/main/cpp/analysis/PhaseSlopeEstimator.cpp::PhaseSlopeEstimator::closeWindow
 audio/src/main/cpp/analysis/PhaseSlopeEstimator.cpp::PhaseSlopeEstimator::process
 audio/src/main/cpp/analysis/PhaseSlopeEstimator.cpp::slopeToHz
+audio/src/main/cpp/analysis/PhaseSlopeEstimator.h::PhaseSlopeEstimator::canMeasureDeviation
+audio/src/main/cpp/analysis/PhaseSlopeEstimator.h::PhaseSlopeEstimator::captureRangeCents
 audio/src/main/cpp/analysis/StrobeTracker.cpp::StrobeTracker::process
+audio/src/main/cpp/analysis/StrobeTracker.h::StrobeTracker::coarseDeviationCents
 audio/src/main/cpp/backends/DriftResampler.cpp::DriftResampler::process
 audio/src/main/cpp/backends/OboeBackend.cpp::OboeBackend::onAudioReady
 audio/src/main/cpp/backends/SplitBackend.cpp::SplitBackend::InputCallback::onAudioReady
