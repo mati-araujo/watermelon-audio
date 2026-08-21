@@ -99,6 +99,25 @@ bool waitFor(Pred pred, std::chrono::milliseconds cap = std::chrono::seconds(5))
 
 
 /**
+ * Espera a que el ring tenga lugar para `frames` **sin pisar nada sin leer**.
+ *
+ * Es una CONDICIÓN, no una duración: no depende de la velocidad de la máquina,
+ * así que no se puede quedar corta en un runner cargado. El techo sólo existe
+ * para que un consumidor muerto se vea como aserción y no como test colgado.
+ *
+ * Está separada de `feedAtAnalysisPace` para que se pueda probar sola contra un
+ * consumidor lento — ver `TheFeederNeverOverrunsTheRingWithASlowConsumer`, que
+ * es lo que impide que esta compuerta se vuelva decorativa.
+ */
+inline bool waitForRoom(AnalysisRing& ring, int frames,
+                        std::chrono::milliseconds cap = std::chrono::seconds(5)) {
+    return waitFor([&] {
+        return ring.availableFrames() + static_cast<uint32_t>(frames)
+               <= AnalysisRing::kCapacityFrames;
+    }, cap);
+}
+
+/**
  * Alimenta el ring **al ritmo del ANÁLISIS**, no al del reloj.
  *
  * 🔴 ESTO NO ES UN DETALLE DE ESTILO, Y COSTÓ UN ROJO EN EL TSAN DEL CI.
@@ -114,8 +133,17 @@ bool waitFor(Pred pred, std::chrono::milliseconds cap = std::chrono::seconds(5))
  * análisis consuma** antes de escribir el bloque siguiente, que no depende de
  * ninguna velocidad.
  *
- * Devuelve false si el análisis dejó de avanzar dentro del techo — así una falla
- * se ve como aserción y no como test colgado.
+ * 🔴 **REQ-005 S3: la primera versión de ese arreglo todavía tenía escapatoria.**
+ * Esperaba hasta 200 ms y, si el análisis no había avanzado, **escribía igual** —
+ * o sea que bajo un consumidor lento seguía pisando el ring, sólo que más tarde.
+ * La condición de ahora es que el ring **tenga lugar**, que no es una duración y
+ * no se puede quedar corta en una máquina más lenta.
+ *
+ * Devuelve false en los dos casos en que **la muestra salió corta** —nunca hubo
+ * lugar, o no se llegó a la meta dentro del techo— y nunca escribiendo audio no
+ * contiguo. Que el llamador no pueda emitir un veredicto de exactitud sobre una
+ * muestra corta es justamente AC-005.4: "la muestra salió corta" y "el sistema
+ * cambió" son dos fallas distintas y tienen que verse distintas.
  */
 template <typename MakeBlock>
 bool feedAtAnalysisPace(AnalysisRing& ring, AnalysisSnapshot& snap,
@@ -129,15 +157,31 @@ bool feedAtAnalysisPace(AnalysisRing& ring, AnalysisSnapshot& snap,
 
     int written = 0;
     while (analysed() < goal && std::chrono::steady_clock::now() < deadline) {
-        const double before = analysed();
+        // 🔴 SE ESPERA LUGAR EN EL RING, Y ESO NO ES UNA DURACIÓN (REQ-005 S3).
+        //
+        // La versión anterior esperaba HASTA 200 ms a que el análisis avanzara y
+        // después **escribía igual**. Esa escapatoria convierte "el consumidor
+        // viene lento" en "el estimador integra fase sobre muestras no
+        // contiguas", y eso no da un rojo honesto: da un número BIEN FORMADO Y
+        // EQUIVOCADO que el motor encima declara CONVERGIDO.
+        //
+        // Medido (REQ-005 S3, tarea 3.1): con un hueco sostenido de 64 frames la
+        // lectura sale a 1,75 cents del valor real —35x el presupuesto de 0,1—
+        // y σ publica 0,076, POR DEBAJO del umbral de convergencia. La
+        // incertidumbre no ve la discontinuidad, así que ninguna guarda basada
+        // en σ puede atajar esto.
+        //
+        // La condición correcta no tiene techo adivinado: es que el ring TENGA
+        // LUGAR para el bloque siguiente. Con el consumidor al día se cumple
+        // siempre y no cuesta nada; con el consumidor lento se espera en vez de
+        // pisar. El único techo es el de 30 s de abajo, que es "el análisis se
+        // murió", no "todavía no llegó".
+        if (!waitForRoom(ring, frames)) {
+            return false;   // la muestra salió corta: nunca hubo lugar
+        }
         const auto blk = makeBlock(written * frames);
         ring.writeStereo(blk.data(), frames);
         ++written;
-        // Espera CORTA y que NO falla si este bloque no produjo avance: el
-        // primer tick del thread aplica el objetivo y hace `skipToNewest()`, o
-        // sea que descarta lo que haya en el ring. Exigirle avance a cada bloque
-        // colgaba el helper en la primera iteración — medido.
-        waitFor([&] { return analysed() > before; }, std::chrono::milliseconds(200));
     }
     return analysed() >= goal;
 }
@@ -146,6 +190,63 @@ bool feedAtAnalysisPace(AnalysisRing& ring, AnalysisSnapshot& snap,
 // ---------------------------------------------------------------------------
 // 1.4 — ciclo de vida
 // ---------------------------------------------------------------------------
+
+/**
+ * REQ-005 S3 — **la compuerta de capacidad no puede ser decorativa**.
+ *
+ * `feedAtAnalysisPace` existe para que el test nunca alimente al estimador con
+ * audio no contiguo. La versión anterior esperaba 200 ms y **escribía igual**;
+ * ésta espera a que haya lugar. La diferencia sólo se ve con un consumidor
+ * LENTO, que en la suite normal nunca aparece — así que se fabrica uno.
+ *
+ * 🔴 POR QUÉ ESTO IMPORTA MÁS QUE UN DROP CONTADO. Medido en la tarea 3.1: con
+ * un hueco sostenido de 64 frames la lectura sale a 1,75 cents del valor real
+ * —35x el presupuesto— y σ publica 0,076, **por debajo** del umbral de
+ * convergencia. O sea que el motor lo declara CONVERGIDO y ninguna guarda
+ * basada en σ lo puede atajar. La única defensa es no producir el hueco.
+ *
+ * EL MUTANTE QUE ESTE TEST MATA: volver la compuerta al techo de 200 ms que
+ * escribe igual. Con este consumidor, esa versión pisa el ring y `droppedFrames`
+ * se va a miles.
+ */
+TEST(AnalysisThread, TheFeederNeverOverrunsTheRingWithASlowConsumer) {
+    AnalysisRing ring;
+    std::atomic<bool> draining{true};
+    std::atomic<uint64_t> consumed{0};
+
+    // Un consumidor MUCHO más lento que el productor: 256 frames por vuelta con
+    // una pausa, contra bloques de 1024 que el alimentador querría meter sin
+    // parar. Es el runner cargado, sin depender de que el runner esté cargado.
+    std::thread slow([&] {
+        std::vector<float> scratch(AnalysisRing::kCapacityFrames, 0.0f);
+        while (draining.load(std::memory_order_acquire)) {
+            const int got = ring.read(scratch.data(), 256);
+            if (got > 0) consumed.fetch_add(static_cast<uint64_t>(got));
+            // WAIT-OK: estimulo — la lentitud del consumidor ES el experimento.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+
+    const auto tone = toneBlock(1024, 0.3f);
+    int written = 0;
+    for (int i = 0; i < 60; ++i) {
+        ASSERT_TRUE(waitForRoom(ring, 1024))
+            << "no hubo lugar en 5 s con el consumidor drenando: la muestra "
+               "salio corta (bloque " << i << ")";
+        ring.writeStereo(tone.data(), 1024);
+        ++written;
+    }
+
+    draining.store(false, std::memory_order_release);
+    slow.join();
+
+    EXPECT_EQ(ring.droppedFrames(), 0u)
+        << "el alimentador piso " << ring.droppedFrames() << " frames con un "
+           "consumidor lento. El estimador integraria fase sobre muestras no "
+           "contiguas y publicaria un numero bien formado y equivocado — que "
+           "ademas declararia CONVERGIDO, porque sigma no ve la discontinuidad.";
+    EXPECT_EQ(written, 60) << "el alimentador no llego a escribir todo";
+}
 
 TEST(AnalysisThread, StartsStopsAndRestartsWithoutLeakingOrHanging) {
     AnalysisRing ring;
@@ -515,30 +616,50 @@ TEST(AnalysisThread, WithoutACoarseDetectionNoFineReadingIsPublished) {
 TEST(AnalysisThread, ThePublishedRangePredictsWhereTheFineReadingExists) {
     constexpr double kTarget = 440.0;
 
-    auto runAt = [&](double detuneCents) {
+    // 🔴 DEVUELVE bool Y NO EL SNAPSHOT, Y ESO ES AC-005.4 (REQ-005 S3).
+    //
+    // Antes esto era `EXPECT_TRUE(feedAtAnalysisPace(...))` adentro de un lambda
+    // que devolvía el snapshot igual. Un `EXPECT` no corta: con la alimentación
+    // corta, el test seguía y emitía un veredicto de EXACTITUD sobre una muestra
+    // que nunca se completó — y entonces las dos fallas se veían iguales.
+    //
+    // Ahora "la muestra salió corta" sale por el valor de retorno y el llamador
+    // lo ASSERTea, así que la comparación de exactitud NO LLEGA A CORRERSE.
+    // Lo que quede en rojo después de eso significa una sola cosa: el sistema
+    // cambió.
+    auto runAt = [&](double detuneCents,
+                     std::array<float, kSnapshotValueCount>& out) -> bool {
         AnalysisRing ring;
         AnalysisSnapshot snap;
         AnalysisThread th(ring, snap);
         const double real = kTarget * std::pow(2.0, detuneCents / 1200.0);
         th.setTargetHz(kTarget);
         th.start(kRate);
-        EXPECT_TRUE(feedAtAnalysisPace(ring, snap,
-            [&](int off) { return stringBlock(real, 1024, off); }, 200))
-            << "el analisis dejo de consumir";
+        if (!feedAtAnalysisPace(ring, snap,
+                [&](int off) { return stringBlock(real, 1024, off); }, 200)) {
+            th.stop();
+            return false;
+        }
         waitFor([&] {
             float o[kSnapshotValueCount];
             return snap.read(o) && o[kSnapDetectedHz] > 0.0f;
         });
         th.stop();
-        std::array<float, kSnapshotValueCount> out{};
-        EXPECT_TRUE(snap.read(out.data()));
-        return out;
+        return snap.read(out.data());
     };
 
     // 1. El rango se publica y es un numero util.
-    const auto inside = runAt(-5.0);
+    std::array<float, kSnapshotValueCount> inside{};
+    ASSERT_TRUE(runAt(-5.0, inside))
+        << "LA MUESTRA SALIO CORTA: el analisis nunca hizo lugar en el ring o no "
+           "llego a la meta. No es un veredicto sobre el motor — no se midio nada.";
     // Si el ring pisó frames, la integración de fase vio muestras no contiguas y
     // cualquier veredicto de exactitud de abajo mide ESO. Se afirma explícito.
+    //
+    // Con la compuerta de capacidad de `feedAtAnalysisPace` esto ya no debería
+    // poder dispararse desde el test; se deja porque también cubre un drop de
+    // origen distinto —el motor descartando por su cuenta— y esa sí sería una
+    // señal real.
     ASSERT_FLOAT_EQ(inside[kSnapDroppedFrames], 0.0f)
         << "el ring pisó frames: el test estaría midiendo el drop, no el rango";
 
@@ -560,14 +681,16 @@ TEST(AnalysisThread, ThePublishedRangePredictsWhereTheFineReadingExists) {
     // inventado, siete veces el real— pasaba los 8 tests. Lo que lo mata es
     // exigir que CERCA DEL BORDE INTERIOR la lectura todavia exista: con 150
     // inventado, a 135 cents no hay ninguna.
-    const auto nearEdge = runAt(-0.90 * range);
+    std::array<float, kSnapshotValueCount> nearEdge{};
+    ASSERT_TRUE(runAt(-0.90 * range, nearEdge)) << "LA MUESTRA SALIO CORTA en el borde interior";
     EXPECT_FALSE(std::isnan(nearEdge[kSnapCents]))
         << "el rango dice " << range << " y a " << (-0.90 * range)
         << " cents —adentro— no publico nada: el rango publicado es mas grande "
            "que el real";
 
     // 3. FUERA del rango publicado: ausente. Se toma 1,5x para no medir el borde.
-    const auto outside = runAt(-1.5 * range);
+    std::array<float, kSnapshotValueCount> outside{};
+    ASSERT_TRUE(runAt(-1.5 * range, outside)) << "LA MUESTRA SALIO CORTA fuera del rango";
     EXPECT_TRUE(std::isnan(outside[kSnapCents]))
         << "el rango dice " << range << " y a " << (-1.5 * range)
         << " cents igual publico " << outside[kSnapCents];
