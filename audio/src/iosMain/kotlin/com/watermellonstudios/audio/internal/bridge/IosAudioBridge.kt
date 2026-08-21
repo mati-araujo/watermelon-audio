@@ -1018,6 +1018,12 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun looperSetTrackPercussionMode(trackIndex: Int, percussion: Boolean) =
         wma_looper_set_track_percussion_mode(engine, trackIndex, percussion)
 
+    override fun looperSetTrackSendToFx(trackIndex: Int, sendToFx: Boolean) =
+        wma_looper_set_track_send_to_fx(engine, trackIndex, sendToFx)
+
+    override fun looperIsTrackSendToFx(trackIndex: Int): Boolean =
+        wma_looper_is_track_send_to_fx(engine, trackIndex)
+
     // ---------- región de loop ----------
 
     override fun looperSetTrackLoopRegion(trackIndex: Int, startFrame: Long, endFrame: Long) =

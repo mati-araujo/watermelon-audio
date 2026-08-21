@@ -2758,6 +2758,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperGetTrackSpeed(trackIndex: Int): Float
     private external fun nativeLooperSetTrackPercussionMode(trackIndex: Int, percussion: Boolean)
     private external fun nativeLooperIsTrackPercussionMode(trackIndex: Int): Boolean
+    private external fun nativeLooperSetTrackSendToFx(trackIndex: Int, sendToFx: Boolean)
+    private external fun nativeLooperIsTrackSendToFx(trackIndex: Int): Boolean
     private external fun nativeLooperSetCapabilities(budgetBytes: Long, maxTracks: Int, maxFreeSeconds: Int)
     private external fun nativeLooperSetTrackPlayCount(trackIndex: Int, plays: Int)
 
@@ -3019,6 +3021,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         nativeLooperSetTrackPercussionMode(trackIndex, percussion)
     fun looperIsTrackPercussionMode(trackIndex: Int): Boolean =
         nativeLooperIsTrackPercussionMode(trackIndex)
+
+    /** REQ-007 — ver [ILooperBridge.looperSetTrackSendToFx] para las dos contrapartidas. */
+    override fun looperSetTrackSendToFx(trackIndex: Int, sendToFx: Boolean) =
+        nativeLooperSetTrackSendToFx(trackIndex, sendToFx)
+    override fun looperIsTrackSendToFx(trackIndex: Int): Boolean =
+        nativeLooperIsTrackSendToFx(trackIndex)
 
     /**
      * Install a [com.watermellonstudios.audio.api.LooperStateListener] to

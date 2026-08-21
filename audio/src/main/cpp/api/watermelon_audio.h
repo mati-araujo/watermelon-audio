@@ -1362,6 +1362,32 @@ WMA_API void wma_looper_set_track_percussion_mode(WmaEngine* engine, int track_i
 WMA_API bool wma_looper_is_track_percussion_mode(const WmaEngine* engine,
                                                   int track_index);
 
+/**
+ * Rutear una pista POR la cadena de efectos (REQ-007). Default: false.
+ *
+ * Con `false` la pista se mezcla donde siempre, downstream de la cadena, y ni el
+ * fade de pausa ni los efectos la tocan. Con `true` se suma a la ENTRADA de la
+ * cadena, o sea entra al bus del instrumento, con dos contrapartidas que NO son
+ * efectos colaterales sino el precio del ruteo:
+ *
+ *   - **recibe el fade** de pausa y de cambio de escena: deja de valer para ella
+ *     el invariante "los loops sobreviven a la transicion";
+ *   - **entra al tap de grabacion**: grabar mientras suena la mete en la toma.
+ *     No es evitable — el tap lee la salida aguas abajo de la cadena, donde la
+ *     pista ya es inseparable del synth.
+ *
+ * El exportador NO ve este flag: `wma_looper_export_*` lee los buffers de pista
+ * directo, asi que una pista marcada se exporta SECA. Es deliberado (la toma es
+ * lo que se grabo), pero es una asimetria con lo que se oye.
+ *
+ * Indice fuera de rango: sin efecto y sin crash, igual que el resto de la
+ * familia `wma_looper_set_track_*`.
+ */
+WMA_API void wma_looper_set_track_send_to_fx(WmaEngine* engine, int track_index,
+                                              bool send_to_fx);
+WMA_API bool wma_looper_is_track_send_to_fx(const WmaEngine* engine,
+                                             int track_index);
+
 /** Wrap-mix tail window in ms, used when baking a free take's seam. */
 WMA_API void wma_looper_set_tail_ms(WmaEngine* engine, int ms);
 WMA_API int  wma_looper_get_tail_ms(const WmaEngine* engine);

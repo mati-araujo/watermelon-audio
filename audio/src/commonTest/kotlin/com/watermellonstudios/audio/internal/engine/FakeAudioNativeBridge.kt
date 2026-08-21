@@ -280,6 +280,8 @@ internal class FakeAudioNativeBridge(
     override fun looperGetTrackSpeed(trackIndex: Int): Float = notModeled("looperGetTrackSpeed")
     override fun looperSetTrackPlayCount(trackIndex: Int,  plays: Int) { notModeled("looperSetTrackPlayCount") }
     override fun looperSetTrackPercussionMode(trackIndex: Int,  percussion: Boolean) { notModeled("looperSetTrackPercussionMode") }
+    override fun looperSetTrackSendToFx(trackIndex: Int,  sendToFx: Boolean) { notModeled("looperSetTrackSendToFx") }
+    override fun looperIsTrackSendToFx(trackIndex: Int): Boolean = notModeled("looperIsTrackSendToFx")
     override fun looperSetTrackLoopRegion(trackIndex: Int,  startFrame: Long,  endFrame: Long) { notModeled("looperSetTrackLoopRegion") }
     override fun looperResetTrackLoopRegion(trackIndex: Int) { notModeled("looperResetTrackLoopRegion") }
     override fun looperGetTrackLoopStart(trackIndex: Int): Int = notModeled("looperGetTrackLoopStart")

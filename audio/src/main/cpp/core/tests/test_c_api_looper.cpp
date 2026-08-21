@@ -1403,4 +1403,87 @@ TEST_F(CApiLooperTest, ANullEngineIsIgnoredRatherThanCrashing) {
 }
 
 }  // namespace
+
+// ===========================================================================
+// REQ-007.2 — el ruteo de una pista a la cadena, desde la C-API (AC-007.7)
+//
+// El criterio de muerte del REQ apunta justo a lo que estos tests NO pueden ser:
+// un `set` seguido de un `get`. Asi murio `touch.velocity` en SoundFontEngine,
+// escrita durante meses sin que nadie la leyera, con un round-trip que habria
+// dado verde. Por eso el par se verifica con AUDIO —la pista suena distinta al
+// pasar por la cadena— y el round-trip queda como lo que es: el chequeo barato
+// de que el getter no miente, no la prueba de que el flag hace algo.
+// ===========================================================================
+
+TEST_F(CApiLooperTest, TheSendToFxFlagRoundTripsThroughTheCApi) {
+    startAt(kSampleRate, /*fadeTimeMs=*/0);
+    recordTrack(0);
+
+    EXPECT_FALSE(wma_looper_is_track_send_to_fx(mWma, 0))
+        << "el default es NO rutear: es el comportamiento de siempre";
+
+    wma_looper_set_track_send_to_fx(mWma, 0, true);
+    EXPECT_TRUE(wma_looper_is_track_send_to_fx(mWma, 0));
+
+    wma_looper_set_track_send_to_fx(mWma, 0, false);
+    EXPECT_FALSE(wma_looper_is_track_send_to_fx(mWma, 0));
+}
+
+TEST_F(CApiLooperTest, TheSendToFxFlagActuallyRoutesTheAudioThroughTheChain) {
+    // EL EFECTO ELEGIDO IMPORTA, Y ESTA ES LA TERCERA FORMA DE ESTE TEST.
+    //
+    // Con DISTORTION no se podia concluir: comparar "antes" contra "despues"
+    // dentro de un mismo motor compara tramos distintos de un loop en movimiento,
+    // asi que la fase sola producia diferencias del orden de la del efecto. Una
+    // version paso incluso con el setter NEUTRALIZADO. Y dos motores en paralelo
+    // no se pueden: el fixture registra el backend falso en un GLOBAL.
+    //
+    // Un LPF a 20 Hz sobre un seno de 440 lo aniquila, asi que la pregunta deja
+    // de ser "cambio un poco" y pasa a ser "desaparecio": una pista ruteada se
+    // cae a silencio y una no ruteada no se entera. Sin baseline, sin umbral
+    // inventado y sin sensibilidad a la fase.
+    startAt(kSampleRate, /*fadeTimeMs=*/0);
+    recordTrack(0);
+
+    ASSERT_GE(wma_effect_add(mWma, 0 /*FILTER*/), 0);
+    ASSERT_EQ(wma_effect_set_param(mWma, 0, 2, 0.0f), WMA_OK);      // type = LPF
+    ASSERT_EQ(wma_effect_set_param(mWma, 0, 0, 20.0f), WMA_OK);     // cutoff = 20 Hz
+    ASSERT_EQ(wma_effect_set_param(mWma, 0, 1, 0.7f), WMA_OK);      // sin resonancia
+
+    render(8, kBlockFrames);                       // que el filtro se asiente
+    const float sinRutear = renderBlockPeak(kBlockFrames);
+    ASSERT_GT(sinRutear, kAudible)
+        << "sin rutear la pista se mezcla downstream: el filtro no la ve. "
+        << "Si esto es silencio, el test no mide nada.";
+
+    wma_looper_set_track_send_to_fx(mWma, 0, true);
+    render(8, kBlockFrames);                       // el filtro ataca la pista
+    const float ruteada = renderBlockPeak(kBlockFrames);
+
+    EXPECT_LT(ruteada, sinRutear * 0.2f)
+        << "prendido el flag por la C-API, el LPF a 20 Hz tiene que comerse la "
+        << "pista. sin rutear=" << sinRutear << " ruteada=" << ruteada;
+}
+
+TEST_F(CApiLooperTest, AnOutOfRangeTrackIndexIsIgnoredInsteadOfCrashing) {
+    startAt(kSampleRate, /*fadeTimeMs=*/0);
+
+    // Mismo criterio que el resto de la familia `wma_looper_set_track_*`: se
+    // ignora en silencio. No se inventa un codigo de error para un caso que sus
+    // hermanas ya tratan asi.
+    wma_looper_set_track_send_to_fx(mWma, -1, true);
+    wma_looper_set_track_send_to_fx(mWma, 9999, true);
+
+    EXPECT_FALSE(wma_looper_is_track_send_to_fx(mWma, -1));
+    EXPECT_FALSE(wma_looper_is_track_send_to_fx(mWma, 9999));
+    EXPECT_FALSE(wma_looper_is_track_send_to_fx(mWma, 0))
+        << "una pista valida no puede quedar marcada por un indice invalido";
+}
+
+TEST_F(CApiLooperTest, ANullEngineIsSurvivedByBothHalvesOfThePair) {
+    // El par entero pasa por WMA_CHECK_*: un motor nulo no puede tirar.
+    wma_looper_set_track_send_to_fx(nullptr, 0, true);
+    EXPECT_FALSE(wma_looper_is_track_send_to_fx(nullptr, 0));
+}
+
 }  // namespace wma_test
