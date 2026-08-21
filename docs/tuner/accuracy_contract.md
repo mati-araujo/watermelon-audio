@@ -36,7 +36,7 @@ es la clase de mentira que un usuario con un Peterson al lado descubre en treint
 
 | Modo | Métrica | Medido | Presupuesto |
 |---|---|---|---|
-| **Strobe** (S6) | error contra objetivo, 3 s, peor de 14 cuerdas | **0,0011 cents** | 0,1 |
+| **Strobe** (S6) | error contra objetivo, 3 s, peor de 14 cuerdas, **dentro del rango útil** | **0,0011 cents** | 0,1 |
 | **Strobe** | incertidumbre (1σ) a 3 s, peor caso (B0 del bajo) | **0,0045 cents** | — |
 | **Detección gruesa** (S4) | error de identificación, peor caso (C7) | **0,21 cents** | 50 |
 | **Detección gruesa** | claridad mínima sobre el rango A0–C7 | **0,967** | — |
@@ -48,6 +48,25 @@ es la clase de mentira que un usuario con un Peterson al lado descubre en treint
 | **Inarmonicidad** | corrección perceptual máxima del catálogo | **2,47 cents** | 35 (techo) |
 
 **Rango soportado:** A0 (27,5 Hz) a C7 (2093 Hz), medido por los dos extremos.
+
+**Rango útil de la lectura fina (REQ-003).** El strobe no mide cualquier desajuste: el
+desenvuelto de fase acota la captura a `|Δf| < fs/(2N)`, así que el rango **depende del objetivo
+y del sample rate** y se deriva —no se tabula, porque una tabla queda stale con el primer cambio
+de rate:
+
+    rango_cents(f0) = 1200 · log2(1 + fs / (2·N·f0))          N = 4096
+
+A 48 kHz eso da ±118,9 cents en E2, ±51,0 en G3, ±30,5 en E4 y ±22,9 en A4: **cuanto más aguda
+la cuerda, más angosto**. Fuera de ese rango el motor publica **ausencia** —NaN— en vez de un
+número, porque la lectura aliasada no sale mal de forma visible: sale mal con σ ≈ 0 y estado
+`CONVERGIDO`. La detección gruesa se sigue publicando, así que el usuario conserva "qué nota es"
+cuando pierde "cuánto exactamente".
+
+Verificado por `StrobeRange.*` sobre las 14 cuerdas del catálogo, en los dos signos.
+
+⚠️ **Lo que esto le dice a un consumidor que dibuja un medidor de ±50 cents:** existe en E2, A2,
+D3 y G3, y **no** en B3, E4 ni A4. Ensancharlo exige bajar `N`, que mueve el presupuesto de
+exactitud entero y no está en este REQ.
 
 **Latencias por modo:** detección gruesa ≤ 100 ms desde el onset; conmutación de cuerda en modo
 rápido 85,3 ms; el strobe declara convergencia cuando 1σ ≤ 0,1 cents, lo que en la cuerda más
