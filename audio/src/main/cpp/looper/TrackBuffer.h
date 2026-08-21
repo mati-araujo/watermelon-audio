@@ -646,6 +646,28 @@ public:
     }
     bool isPercussionMode() const { return !mTailEnabled.load(std::memory_order_acquire); }
 
+    /**
+     * @brief Rutear esta pista POR la cadena de efectos (REQ-007).
+     *
+     * Con el flag en `false` —el default— la pista se mezcla donde siempre:
+     * downstream de `EffectChain`, y ni el fade de pausa ni los efectos la tocan.
+     * Con el flag en `true` la pista se suma a la ENTRADA de la cadena, o sea
+     * entra al bus del instrumento, con dos contrapartidas explícitas:
+     *
+     *   - **recibe el fade** de pausa y de cambio de escena (AC-007.5): deja de
+     *     valer para ella el invariante "los loops sobreviven a la transición";
+     *   - **entra al tap de grabación** (AC-007.6): grabar mientras suena la mete
+     *     en la toma. No es evitable — el tap lee la salida aguas abajo de la
+     *     cadena, donde la pista ya es inseparable del synth.
+     *
+     * RT-safe. Se lee UNA vez por bloque, antes de elegir destino, así que un
+     * cambio a mitad de bloque se aplica en el siguiente y no clickea.
+     */
+    void setSendToFx(bool sendToFx) {
+        mSendToFx.store(sendToFx, std::memory_order_release);
+    }
+    bool sendsToFx() const { return mSendToFx.load(std::memory_order_acquire); }
+
     // ========== State queries (lock-free) ==========
 
     bool isActive() const { return mActive.load(std::memory_order_acquire); }
@@ -1051,6 +1073,7 @@ private:
     std::atomic<int> mTailFrames{0};           // Captured tail length (decay region)
     std::atomic<int> mSeamCrossfadeFrames{128}; // Equal-power crossfade window @ loop seam
     std::atomic<bool> mTailEnabled{true};      // Tail-into-seam mixing (off = percussion)
+    std::atomic<bool> mSendToFx{false};        // REQ-007: mezclar ANTES de EffectChain
 
     // State (atomic for cross-thread access)
     std::atomic<int> mLengthFrames{0};

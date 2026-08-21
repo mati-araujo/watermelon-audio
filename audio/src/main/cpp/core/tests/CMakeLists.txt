@@ -131,6 +131,7 @@ add_executable(core_tests
     test_input_node_dsp.cpp
     test_capture_sample_rate.cpp
     test_offline_render.cpp
+    test_fx_track_routing.cpp
     test_fade_lifecycle.cpp
     test_capture_requests.cpp
     test_c_api_lifecycle.cpp
