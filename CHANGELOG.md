@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.3.2...v2.4.0) (2026-08-20)
+
+
+### Features
+
+* **chord:** el acorde se puede generar sobre un buffer del llamador (REQ-004.1) ([#166](https://github.com/mati-araujo/watermelon-audio/issues/166)) ([80e87b9](https://github.com/mati-araujo/watermelon-audio/commit/80e87b92745d73374bb9f2d30b06db35f73afa36))
+
 ## [2.3.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.3.1...v2.3.2) (2026-08-20)
 
 
