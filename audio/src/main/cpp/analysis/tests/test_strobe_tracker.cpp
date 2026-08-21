@@ -549,5 +549,226 @@ TEST(GoldenStrobe, TheConvergenceCurveMatchesItsGolden) {
                          {}, "REQ-001 S6");
 }
 
+
+// ===========================================================================
+// REQ-003 S1 — el barrido del RANGO DE USO.
+//
+// POR QUE ESTOS TESTS NO EXISTIAN, QUE ES EL PUNTO DE TODO EL REQ
+// ---------------------------------------------------------------
+// Los 13 tests de arriba desafinan `kProbeCents` = **1 cent**. A 1 cent no
+// aliasa nada, asi que la suite entera puede estar verde con el motor
+// publicando `CONVERGIDO` sobre lecturas equivocadas por 60 cents. La ventana
+// del test era mas chica que el regimen de uso: el modo rapido engancha hasta
+// `kLockCents` = 150, o sea que el usuario pasa por TODO ese rango cada vez que
+// afina una cuerda.
+//
+// EL LIMITE ES DERIVADO, NO UNA TABLA (tarea 1.2)
+// -----------------------------------------------
+//     limite_cents(f0, n) = 1200 · log2(1 + fs / (2·N·n·f0))
+//
+// Sale del desenvuelto de `PhaseSlopeEstimator` —que pliega la diferencia de
+// fase entre ventanas a (-π, π], o sea |Δf| < fs/(2N)— y de que el parcial n se
+// desvia n veces mas en Hz para la misma desviacion en cents. Es FISICA del
+// estimador expresada con sus constantes publicas, no una copia de su
+// implementacion: una tabla de constantes medidas quedaria stale con el primer
+// cambio de rate, que es exactamente lo que este repo ya se comio.
+// ===========================================================================
+
+/// El rango en cents que el parcial `n` puede medir sobre un objetivo `f0`.
+double captureRangeCents(double f0, int partial, int rate = kRate) {
+    const double dfMax = static_cast<double>(rate)
+                       / (2.0 * static_cast<double>(
+                              wma::analysis::PhaseSlopeEstimator::kWindowFrames));
+    return 1200.0 * std::log2(1.0 + dfMax / (f0 * partial));
+}
+
+/// Hasta donde engancha el modo rapido, o sea el regimen que el usuario recorre.
+constexpr double kUseRangeCents = 150.0;
+
+/**
+ * El peor error de la deteccion gruesa sobre A0-C7, en cents (contrato de S4).
+ *
+ * El control se simula CON ese error y no perfecto, a proposito: un test que le
+ * pasara la frecuencia exacta estaria probando la guarda contra un oraculo que
+ * en produccion no existe, y taparia justamente los fallos de borde. Se aplica
+ * en la direccion que ACERCA la lectura al limite, que es la desfavorable.
+ */
+constexpr double kCoarseWorstCaseCents = 0.21;
+
+/// Mide con el control externo puesto, como lo cablea `AnalysisThread`.
+StrobeTracker measureWithCoarse(double f0, double cents,
+                                int frames = kThreeSeconds) {
+    StrobeTracker t;
+    t.prepare(kRate);
+    t.setTarget(f0);
+    // La gruesa ve la frecuencia real, con su error de peor caso empujando
+    // hacia el objetivo (o sea hacia adentro del dominio: el caso hostil).
+    const double seen = detune(f0, cents - (cents > 0 ? kCoarseWorstCaseCents
+                                                      : -kCoarseWorstCaseCents));
+    t.setCoarseFrequencyHz(seen);
+    feed(t, string4(f0, cents, frames));
+    return t;
+}
+
+/**
+ * AC-003.1 + AC-003.2 — **publicar o callar**.
+ *
+ * La propiedad no es "el motor mide en todo el rango de uso": eso seria exigir
+ * un rango de captura que la fisica no da. Es la mas debil y la que de verdad
+ * importa: **si publica una lectura, esa lectura no puede estar equivocada**.
+ * Un afinador que dice "no se" es utilizable; uno que dice +25,7 cuando la
+ * cuerda esta 100 abajo, no.
+ *
+ * Por eso el test afirma sobre `hasMeasurement()`, y no sobre el error a secas:
+ * un motor que callara siempre lo pasaria — y ESE agujero lo tapa
+ * `TheUsableRangeReachesTheFundamentalLimit`, que exige que no calle de mas.
+ * Los dos juntos acotan por arriba y por abajo.
+ */
+TEST(StrobeRange, APublishedReadingIsNeverWrongAcrossTheWholeUseRange) {
+    struct Bad { std::string label; double detune; double published; double err; };
+    std::vector<Bad> bad;
+
+    for (const auto& s : strings()) {
+        // Fracciones del limite del FUNDAMENTAL: cubren de bien adentro a muy
+        // afuera con pocos puntos, y se adaptan solas a cada cuerda. Se barren
+        // los DOS signos porque el modo de falla medido invierte el signo.
+        const double lim1 = captureRangeCents(s.hz, 1);
+        for (double frac : {0.30, 0.70, 0.95, 1.10, 2.00, 4.00}) {
+            for (double sign : {-1.0, 1.0}) {
+                const double d = sign * frac * lim1;
+                if (std::fabs(d) > kUseRangeCents) continue;   // fuera del regimen real
+                const StrobeTracker t = measureWithCoarse(s.hz, d, kThreeSeconds);
+                if (!t.hasMeasurement()) continue;             // callar es legal
+                const double err = std::fabs(t.cents() - d);
+                if (err > kToleranceCents) {
+                    bad.push_back({std::string(s.name), d, t.cents(), err});
+                }
+            }
+        }
+    }
+
+    if (!bad.empty()) {
+        std::string msg = "\nlecturas PUBLICADAS y equivocadas (" +
+                          std::to_string(bad.size()) + "):\n";
+        for (const auto& b : bad) {
+            char line[192];
+            std::snprintf(line, sizeof(line),
+                          "  %-14s real %+8.2f c -> publica %+8.2f c  (error %7.2f)\n",
+                          b.label.c_str(), b.detune, b.published, b.err);
+            msg += line;
+        }
+        FAIL() << msg;
+    }
+}
+
+/**
+ * AC-003.6 — el rango util llega al limite del FUNDAMENTAL.
+ *
+ * La otra mitad de la tenaza: sin esto, callar siempre pasaria el test de
+ * arriba. Y ademas es lo que fija la ampliacion de alcance del REQ — que un
+ * parcial fuera de su dominio se descarte en vez de contaminar la combinacion.
+ *
+ * Se afirma a 0,70 del limite del fundamental, no en el borde: el borde es donde
+ * vive la histeresis y no es lo que este test mide.
+ */
+TEST(StrobeRange, TheUsableRangeReachesTheFundamentalLimit) {
+    struct Miss { std::string label; double detune; bool published; double err; };
+    std::vector<Miss> miss;
+
+    for (const auto& s : strings()) {
+        const double d = -0.70 * captureRangeCents(s.hz, 1);
+        if (std::fabs(d) > kUseRangeCents) continue;
+        const StrobeTracker t = measureWithCoarse(s.hz, d, kThreeSeconds);
+        const double err = std::fabs(t.cents() - d);
+        if (!t.hasMeasurement() || err > kToleranceCents) {
+            miss.push_back({std::string(s.name), d, t.hasMeasurement(), err});
+        }
+    }
+
+    if (!miss.empty()) {
+        std::string msg = "\nel rango util NO llega al limite del fundamental (" +
+                          std::to_string(miss.size()) + " cuerdas):\n";
+        for (const auto& m : miss) {
+            char line[192];
+            std::snprintf(line, sizeof(line),
+                          "  %-14s a %+8.2f c  publica=%d  error %8.2f\n",
+                          m.label.c_str(), m.detune, m.published ? 1 : 0, m.err);
+            msg += line;
+        }
+        FAIL() << msg;
+    }
+}
+
+/**
+ * Tarea 1.3 — **σ no distingue dentro de fuera de rango**, y hay que dejarlo
+ * escrito ANTES de que alguien escriba la guarda barata.
+ *
+ * La pendiente aliasada sigue siendo lineal, asi que los residuos de la
+ * regresion quedan en cero y la incertidumbre no se entera. Este test AFIRMA la
+ * limitacion: si algun dia σ empezara a avisar, va a salir rojo y el hallazgo es
+ * ese. No es un test de un defecto; es un test de que la salida barata no
+ * existe.
+ */
+TEST(StrobeRange, UncertaintyCannotTellInsideFromOutsideTheCaptureRange) {
+    // E4: limite del fundamental 30,5 c. Bien afuera, con la lectura rota.
+    const double f0 = 329.628;
+    // SIN control: es el escenario en el que la guarda no puede intervenir, que
+    // es donde se ve si σ sola distingue algo. Con control la lectura ni se
+    // publicaria, y el test no mediria lo que dice medir.
+    const StrobeTracker outside = measure(f0, -2.0 * captureRangeCents(f0, 1),
+                                          kThreeSeconds);
+    ASSERT_TRUE(outside.hasMeasurement());
+
+    const double err = std::fabs(outside.cents() - (-2.0 * captureRangeCents(f0, 1)));
+    ASSERT_GT(err, 10.0) << "el caso elegido ya no esta roto: revisar el test, no el motor";
+
+    EXPECT_LE(outside.uncertaintyCents(), StrobeTracker::kConvergedUncertaintyCents)
+        << "σ = " << outside.uncertaintyCents()
+        << " — si esto falla, σ EMPEZO a avisar y la guarda puede simplificarse";
+}
+
+
+/**
+ * AC-003.8 — sin control, la lectura sale **sin verificar**, y quien publica
+ * tiene con que saberlo.
+ *
+ * Este test vive al nivel de la primitiva: afirma que el tracker DECLARA que no
+ * pudo verificar, que es lo que `AnalysisThread` usa para publicar ausencia.
+ * El extremo a extremo —que el snapshot salga NaN sin nota gruesa— necesita
+ * `test_analysis_thread.cpp`, que NO pertenece a esta etapa (ver Notas de S1).
+ */
+TEST(StrobeRange, WithoutAnExternalControlTheReadingIsNotDomainVerified) {
+    const double f0 = 329.628;
+
+    const StrobeTracker blind = measure(f0, -2.0 * captureRangeCents(f0, 1),
+                                        kThreeSeconds);
+    EXPECT_FALSE(blind.domainVerified())
+        << "sin control no hay forma de saber si los parciales estan en dominio";
+
+    const StrobeTracker guided = measureWithCoarse(f0, -0.30 * captureRangeCents(f0, 1),
+                                                   kThreeSeconds);
+    EXPECT_TRUE(guided.domainVerified());
+    EXPECT_GT(guided.partialsUsed(), 0);
+}
+
+/**
+ * El descarte tiene que ser SELECTIVO, no un apagado.
+ *
+ * Un mutante que "arregle" el defecto tirando los cuatro parciales apenas uno
+ * sale de dominio pasaria el barrido de arriba (no publicaria nada equivocado)
+ * y destruiria el rango util. Este test lo mata: a 0,70 del limite del
+ * fundamental en E4 estan fuera p2, p3 y p4, y **p1 tiene que seguir midiendo**.
+ */
+TEST(StrobeRange, PartialsAreDroppedOneByOneInsteadOfShuttingTheReadingDown) {
+    const double f0 = 329.628;                       // E4: limite del fundamental 30,5 c
+    const double d = -0.70 * captureRangeCents(f0, 1);
+
+    const StrobeTracker t = measureWithCoarse(f0, d, kThreeSeconds);
+
+    ASSERT_TRUE(t.hasMeasurement());
+    EXPECT_EQ(t.partialsUsed(), 1) << "a 0,70 del limite del fundamental solo p1 puede medir";
+    EXPECT_NEAR(t.cents(), d, kToleranceCents);
+}
+
 }  // namespace
 }  // namespace wma_test

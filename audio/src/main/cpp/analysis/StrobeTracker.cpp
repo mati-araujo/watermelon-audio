@@ -53,6 +53,29 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     // positivo. Un σ de cero no es "certeza infinita" sino una ventana que
     // todavia no tiene de donde sacar dispersion, y meterlo como 1/0 haria
     // colapsar la combinacion sobre ese unico parcial.
+    // --- REQ-003: DESCARTE POR DOMINIO, antes de cualquier otra cosa --------
+    //
+    // Un parcial cuya desviacion cae fuera de SU rango de captura no esta
+    // midiendo de menos: esta midiendo MAL, con σ ≈ 0 porque la pendiente
+    // aliasada sigue siendo lineal. Meterlo en la combinacion la envenena.
+    //
+    // 🔴 EL FILTRO DE DESACUERDO DE ABAJO NO ALCANZA, Y ESA ERA LA CAUSA RAIZ.
+    // `kMaxPartialDisagreementCents` = 50 esta pensado para basura evidente
+    // (fuga espectral, fundamental ausente). Un parcial RECIEN salido de dominio
+    // no es basura evidente: cerca del borde el pliegue es chico, asi que
+    // disiente POCO y pasa el filtro. Medido el 2026-08-21 en E4 a −8 cents: el
+    // parcial 4 devuelve +7,39, disiente 15 cents de la mediana —bien por debajo
+    // de 50— y arrastra la combinada a −4,767. En E2 a −32 el mismo parcial
+    // disiente 61 y SI se descarta, y por eso E2 parecia sano. La diferencia
+    // entre las dos cuerdas no era el aliasing: era si el filtro lo agarraba.
+    //
+    // Descartando por dominio la lectura queda exacta hasta el rango del
+    // FUNDAMENTAL —~4x mas ancho que el del parcial 4— con error 0,0003 cents y
+    // σ ≤ 3e-4 en las 14 cuerdas del catalogo, incluso cuando queda UN solo
+    // parcial vivo.
+    const double coarse = coarseDeviationCents();
+    mDomainVerified = std::isfinite(coarse);
+
     double vals[kPartials];
     double sigmas[kPartials];
     int valid = 0;
@@ -61,6 +84,12 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         const double sigma = p.uncertaintyCents();
         if (!(sigma > 0.0) || !std::isfinite(sigma)) continue;
         if (!std::isfinite(p.cents())) continue;
+        // Sin control no se descarta nada: no se PUEDE saber quien esta en
+        // dominio, y adivinarlo con la propia fase es el auto-engaño que
+        // documenta `setCoarseFrequencyHz`. Lo que corresponde entonces es que
+        // la lectura salga sin verificar —`domainVerified()` en false— y que
+        // quien publica decida; aca no se inventa un veredicto.
+        if (mDomainVerified && !p.canMeasureDeviation(coarse)) continue;
         vals[valid] = p.cents();
         sigmas[valid] = sigma;
         ++valid;
@@ -147,6 +176,8 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         sumWeights += w;
         sumWeighted += w * vals[i];
     }
+
+    mPartialsUsed = valid;
 
     if (sumWeights > 0.0) {
         mCents = sumWeighted / sumWeights;

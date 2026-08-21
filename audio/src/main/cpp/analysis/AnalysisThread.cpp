@@ -120,13 +120,23 @@ void AnalysisThread::drainLoop() {
         // `prepare()` asigna y `setTarget()` reinicia la integracion, asi que
         // llamarlos por tick tiraria la medicion antes de que converja: por eso
         // arriba se comparan contra lo ultimo aplicado.
-        if (measuring) {
-            mStrobe.process(mScratch.data(), got);
-        }
-        // La deteccion gruesa corre SIEMPRE que haya rate, con objetivo o sin el: su trabajo
-        // es justamente decir que nota hay cuando nadie lo sabe todavia.
+        // 🔴 LA GRUESA VA PRIMERO, Y EL ORDEN ES PARTE DEL ARREGLO (REQ-003).
+        //
+        // El strobe necesita un control INDEPENDIENTE DE LA FASE para saber que
+        // parciales estan dentro de su dominio de captura (AC-003.7), y ese
+        // control es esta deteccion. Corriendola despues, el strobe combinaria
+        // con el control del tick ANTERIOR — que es justo lo que no sirve
+        // cuando el objetivo acaba de cambiar.
+        //
+        // No agrega analisis: la gruesa ya corria siempre. Agrega una
+        // comparacion, que es lo que el no-funcional de la spec permite.
         if (mPreparedRate > 0) {
             mDetector.process(mScratch.data(), got);
+        }
+        if (measuring) {
+            mStrobe.setCoarseFrequencyHz(
+                mDetector.hasPitch() ? mDetector.frequencyHz() : 0.0);
+            mStrobe.process(mScratch.data(), got);
         }
 
         // --- el modo rapido elige el objetivo, si hay candidatos --------------
@@ -152,8 +162,19 @@ void AnalysisThread::drainLoop() {
         values[kSnapFramesAnalyzed]    = static_cast<float>(mFramesAnalyzed);
         values[kSnapDroppedFrames]     = static_cast<float>(mRing.droppedFrames());
 
-        const bool haveReading =
-            measuring && mStrobe.hasSignal() && mStrobe.hasMeasurement();
+        // REQ-003 AC-003.8 — sin control no se publica lectura fina.
+        //
+        // `domainVerified()` es false cuando la deteccion gruesa no tiene nota:
+        // ahi NO se puede saber si los parciales estan en su dominio, y publicar
+        // sin verificar es exactamente por donde reentra el defecto que este REQ
+        // cierra. Un afinador que dice "no se" es utilizable; uno que publica
+        // +25,7 cuando la cuerda esta 100 cents abajo, no.
+        //
+        // El costo esta acotado y es el correcto: la gruesa mide 0,21 cents peor
+        // caso sobre A0-C7, asi que "no tiene nota" significa que tampoco hay
+        // señal utilizable para el strobe.
+        const bool haveReading = measuring && mStrobe.hasSignal() &&
+                                 mStrobe.hasMeasurement() && mStrobe.domainVerified();
 
         if (haveReading) {
             values[kSnapCents]       = static_cast<float>(mStrobe.cents());

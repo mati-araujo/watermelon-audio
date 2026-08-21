@@ -51,6 +51,7 @@
 #include "PhaseSlopeEstimator.h"
 
 #include <cmath>
+#include <limits>
 
 namespace wma::analysis {
 
@@ -115,6 +116,57 @@ public:
     /// en cents, y al perder la señal se CONGELA en vez de saltar a cero.
     double phaseAngle() const noexcept { return mPartials[0].phaseAngle(); }
 
+    /**
+     * REQ-003 (AC-003.7) — EL CONTROL, que tiene que ser INDEPENDIENTE DE LA FASE.
+     *
+     * `hz` es la frecuencia que midio la deteccion gruesa. 0 = no hay control.
+     * Con el se decide QUE PARCIALES estan dentro de su dominio; sin el, esa
+     * pregunta no se puede contestar y `domainVerified()` queda en false.
+     *
+     * 🔴 POR QUE NO SE DERIVA DEL PROPIO ESTIMADOR, QUE ERA LO OBVIO. El parcial
+     * 1 tiene el dominio 4x mas ancho que el 4, asi que parece el arbitro
+     * natural. **Medido el 2026-08-21: se auto-engaña.** Con E4 (dominio del
+     * fundamental 30,50 c) y la señal real a −31,5 c, el parcial 1 publica
+     * **+30,07** —aliasado, signo invertido— y como |30,07| < 30,50 se declara
+     * EN DOMINIO, 12 corridas de 12.
+     *
+     * Un control que vive en la primitiva que se quiere acotar no puede
+     * acotarla: al cruzar su propio borde, su valor vuelve a caer adentro del
+     * dominio declarado. Por eso el control entra DESDE AFUERA.
+     */
+    void setCoarseFrequencyHz(double hz) noexcept {
+        mCoarseHz = hz > 0.0 ? hz : 0.0;
+    }
+
+    /// La desviacion que ve el control, en cents contra el objetivo. NaN si no
+    /// hay control o no hay objetivo.
+    double coarseDeviationCents() const noexcept {
+        if (mCoarseHz <= 0.0 || mTargetHz <= 0.0) {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        return 1200.0 * std::log2(mCoarseHz / mTargetHz);
+    }
+
+    /**
+     * `true` si esta lectura se pudo verificar contra un control externo.
+     *
+     * Sin control **no se sabe** si los parciales estan en su dominio, y lo que
+     * corresponde publicar entonces es ausencia (AC-003.8) — no la lectura sin
+     * verificar, que es por donde reentra el defecto entero.
+     */
+    bool domainVerified() const noexcept { return mDomainVerified; }
+
+    /// Cuantos parciales entraron en la ultima combinacion. 0 = ninguno pudo
+    /// medir esta desviacion.
+    int partialsUsed() const noexcept { return mPartialsUsed; }
+
+    /**
+     * El dominio de la lectura COMBINADA, en cents: el del parcial de orden mas
+     * bajo, que es el mas ancho. Es lo que un consumidor necesita para dibujar
+     * hasta donde vale la aguja (lo publica S2, AC-003.4).
+     */
+    double usableRangeCents() const noexcept { return mPartials[0].captureRangeCents(); }
+
     bool hasSignal() const noexcept { return mHasSignal; }
     bool hasMeasurement() const noexcept { return mHasMeasurement; }
     bool converged() const noexcept {
@@ -139,8 +191,11 @@ private:
     double mTargetHz{0.0};
     double mCents{0.0};
     double mUncertaintyCents{0.0};
+    double mCoarseHz{0.0};
     bool mHasSignal{false};
     bool mHasMeasurement{false};
+    bool mDomainVerified{false};
+    int mPartialsUsed{0};
 };
 
 }  // namespace wma::analysis

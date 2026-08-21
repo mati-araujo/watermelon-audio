@@ -42,6 +42,37 @@ std::vector<float> toneBlock(int frames, float amp) {
     return b;
 }
 
+
+/// Cuerda de 4 parciales armonicos a `f0`, en estereo, para alimentar el ring.
+/// REQ-003: hace falta contenido armonico real — un seno puro no ejercita el
+/// descarte por dominio, que es una decision POR PARCIAL.
+std::vector<float> stringBlock(double f0, int frames, float amp = 0.5f) {
+    std::vector<float> b(static_cast<size_t>(frames) * 2, 0.0f);
+    for (int i = 0; i < frames; ++i) {
+        double s = 0.0;
+        for (int n = 1; n <= 4; ++n) {
+            s += (amp / n) * std::sin(2.0 * M_PI * f0 * n * i / kRate);
+        }
+        b[static_cast<size_t>(i) * 2]     = static_cast<float>(s);
+        b[static_cast<size_t>(i) * 2 + 1] = static_cast<float>(s);
+    }
+    return b;
+}
+
+/// Ruido audible SIN altura: la gruesa no engancha, asi que el strobe se queda
+/// sin control. Determinista a proposito (LCG propio, no `random_device`).
+std::vector<float> noiseBlock(int frames, float amp = 0.4f) {
+    std::vector<float> b(static_cast<size_t>(frames) * 2, 0.0f);
+    unsigned st = 12345u;
+    for (int i = 0; i < frames; ++i) {
+        st = st * 1664525u + 1013904223u;
+        const float v = amp * (static_cast<float>(st >> 8) / 8388608.0f - 1.0f);
+        b[static_cast<size_t>(i) * 2]     = v;
+        b[static_cast<size_t>(i) * 2 + 1] = v;
+    }
+    return b;
+}
+
 /// Espera a que `pred` se cumpla, con techo. Devuelve false si se agoto — asi
 /// una falla se ve como una asercion y no como un test colgado.
 template <typename Pred>
@@ -325,4 +356,92 @@ TEST(AnalysisThread, TheFieldsStageTwoWillFillAreNaNNotZero) {
     EXPECT_TRUE(std::isnan(out[kSnapCents]))       << "cents salio " << out[kSnapCents];
     EXPECT_TRUE(std::isnan(out[kSnapPhaseAngle]))  << "angulo salio " << out[kSnapPhaseAngle];
     EXPECT_TRUE(std::isnan(out[kSnapUncertainty])) << "incert. salio " << out[kSnapUncertainty];
+}
+
+// ---------------------------------------------------------------------------
+// REQ-003 S1 — lo que se publica cuando la lectura fina no se puede sostener
+// ---------------------------------------------------------------------------
+
+/**
+ * AC-003.3 — con la fina ausente, **la gruesa se sigue publicando**.
+ *
+ * Es lo que le deja al usuario "que nota es y de que lado estoy" cuando pierde
+ * "cuanto exactamente". Un afinador que se apaga entero al salirse del rango
+ * fino es peor que uno que degrada: el que degrada todavia sirve para llegar.
+ *
+ * Se verifica ACA y no sobre la primitiva a proposito: la propiedad es del
+ * SNAPSHOT —de lo que el consumidor recibe— y a nivel de `StrobeTracker` no
+ * existe la deteccion gruesa con la que compararla.
+ */
+TEST(AnalysisThread, WithTheFineReadingAbsentTheCoarseDetectionIsStillPublished) {
+    AnalysisRing ring;
+    AnalysisSnapshot snap;
+    AnalysisThread th(ring, snap);
+
+    // A4 con el objetivo puesto en A4, pero la cuerda 80 cents abajo: bien
+    // afuera del rango de captura del fundamental a 44,1 kHz (~21 cents).
+    constexpr double kTarget = 440.0;
+    const double real = kTarget * std::pow(2.0, -80.0 / 1200.0);
+
+    th.setTargetHz(kTarget);
+    th.start(kRate);
+    for (int i = 0; i < 200; ++i) {
+        const auto blk = stringBlock(real, 1024);
+        ring.writeStereo(blk.data(), 1024);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));  // WAIT-OK: alimenta el ring al ritmo de captura, no espera un veredicto
+    }
+    ASSERT_TRUE(waitFor([&] {
+        float o[kSnapshotValueCount];
+        return snap.read(o) && o[kSnapDetectedHz] > 0.0f;
+    }));
+    th.stop();
+
+    float out[kSnapshotValueCount];
+    ASSERT_TRUE(snap.read(out));
+
+    EXPECT_TRUE(std::isnan(out[kSnapCents]))
+        << "publico una lectura fina fuera de rango: " << out[kSnapCents];
+    EXPECT_GT(out[kSnapDetectedHz], 0.0f) << "se llevo puesta la deteccion gruesa";
+    EXPECT_NEAR(out[kSnapDetectedHz], real, 5.0);
+    EXPECT_NE(static_cast<int>(out[kSnapState]), kStateConverged)
+        << "no puede declarar CONVERGIDO sin lectura fina";
+}
+
+/**
+ * AC-003.8 — **sin control no se publica lectura fina**.
+ *
+ * Con ruido audible la deteccion gruesa no engancha, asi que no hay con que
+ * verificar si los parciales estan en su dominio. Publicar igual es exactamente
+ * por donde reentra el defecto que este REQ cierra: el estimador de fase
+ * devuelve un numero con sigma ~ 0 tambien cuando lo alimentan con basura.
+ *
+ * El nivel esta MUY por encima del piso de silencio a proposito: si el test
+ * pasara por quedarse sin señal, estaria midiendo otra cosa.
+ */
+TEST(AnalysisThread, WithoutACoarseDetectionNoFineReadingIsPublished) {
+    AnalysisRing ring;
+    AnalysisSnapshot snap;
+    AnalysisThread th(ring, snap);
+
+    th.setTargetHz(440.0);
+    th.start(kRate);
+    for (int i = 0; i < 200; ++i) {
+        const auto blk = noiseBlock(1024);
+        ring.writeStereo(blk.data(), 1024);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));  // WAIT-OK: alimenta el ring al ritmo de captura, no espera un veredicto
+    }
+    ASSERT_TRUE(waitFor([&] {
+        float o[kSnapshotValueCount];
+        return snap.read(o) && o[kSnapFramesAnalyzed] > 0.0f;
+    }));
+    th.stop();
+
+    float out[kSnapshotValueCount];
+    ASSERT_TRUE(snap.read(out));
+
+    ASSERT_GT(out[kSnapLevelRms], 0.01f)
+        << "el test se quedo sin señal: estaria pasando por la razon equivocada";
+    EXPECT_TRUE(std::isnan(out[kSnapCents]))
+        << "publico una lectura fina sin control: " << out[kSnapCents];
+    EXPECT_NE(static_cast<int>(out[kSnapState]), kStateConverged);
 }

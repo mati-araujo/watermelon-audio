@@ -46,6 +46,7 @@
  * con varios objetivos a la vez.
  */
 
+#include <cmath>
 #include <cstddef>
 #include <vector>
 
@@ -94,6 +95,35 @@ public:
      * @return true si esta ventana produjo una medida nueva.
      */
     bool process(const float* mono, int numFrames);
+
+    /**
+     * REQ-003 — EL DOMINIO DE VALIDEZ, EN CENTS, DE ESTE ESTIMADOR.
+     *
+     * El desenvuelto de `process()` pliega la diferencia de fase entre ventanas
+     * a (-π, π], asi que sobre |Δf| >= fs/(2N) el resultado **aliasa**: no sale
+     * NaN, sale MAL, y con σ ≈ 0 porque la pendiente aliasada sigue siendo
+     * lineal. Fuera de este rango `cents()` no significa nada.
+     *
+     * Vive ACA y no en el que combina, a proposito (REQ-003 S1 · 1.5): el que
+     * sabe hasta donde puede medir es el que mide. Un `if` del lado del
+     * consumidor se lo olvida el proximo que agregue un campo.
+     *
+     * Devuelve 0 si no hay rate o no hay objetivo — sin ellos no hay dominio que
+     * declarar, y un llamador no puede leer "0" como "todo vale".
+     */
+    double captureRangeCents() const noexcept {
+        if (mSampleRate <= 0 || mTargetHz <= 0.0) return 0.0;
+        const double dfMax = static_cast<double>(mSampleRate)
+                           / (2.0 * static_cast<double>(kWindowFrames));
+        return 1200.0 * std::log2(1.0 + dfMax / mTargetHz);
+    }
+
+    /// `true` si una desviacion de `cents` contra el objetivo cae dentro del
+    /// dominio en el que este estimador puede medirla.
+    bool canMeasureDeviation(double cents) const noexcept {
+        const double range = captureRangeCents();
+        return range > 0.0 && std::fabs(cents) < range;
+    }
 
     /// Desviacion contra el objetivo. **Positivo = señal por encima**.
     /// Sin dato mientras `hasSignal()` sea false o falten ventanas.
