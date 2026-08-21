@@ -70,10 +70,33 @@ data class TunerSnapshot(
     val lockedString: Int?,
     /** 0 sin señal · 1 buscando · 2 enganchado · 3 sin enganche (cromático). */
     val fastModeState: Int,
+    /**
+     * Hasta dónde vale [cents], en **cents** contra el objetivo, o `null` si no
+     * hay objetivo (REQ-003).
+     *
+     * Es la mitad que vuelve explicable la ausencia de [cents]: sin esto la app
+     * ve desaparecer la aguja y no tiene con qué decir por qué ni hasta dónde.
+     * Con esto puede dibujar el tramo en el que el número de al lado es
+     * confiable — y advertir en el resto en vez de quedarse muda.
+     *
+     * **En cents y no en Hz** porque la ventana del estimador es fija en Hz, así
+     * que su alcance en cents cambia con el registro: ~±119 en un E2 grave
+     * contra ~±23 en A4. Y **depende del sample rate**, así que se lee por
+     * snapshot y no se hornea en una constante: un device que negocia 44,1 kHz
+     * da un rango más angosto que uno a 48.
+     */
+    val usableRangeCents: Float?,
 ) {
     companion object {
-        /** Cantidad de floats del snapshot nativo. Espeja `WMA_TUNER_SNAPSHOT_VALUES`. */
-        const val VALUE_COUNT: Int = 14
+        /**
+         * Cantidad de floats del snapshot nativo. Espeja `WMA_TUNER_SNAPSHOT_VALUES`.
+         *
+         * **Append-only**: crece, y lo nuevo va al final. Por eso [fromNative]
+         * exige `size >= VALUE_COUNT` y no `==`: un motor MÁS NUEVO que esta
+         * librería manda un array más largo y se lee el prefijo conocido, que es
+         * exactamente la compatibilidad que el orden append-only compra.
+         */
+        const val VALUE_COUNT: Int = 15
 
         /**
          * Arma el snapshot desde los floats nativos, en el orden que documenta
@@ -100,6 +123,7 @@ data class TunerSnapshot(
                 inharmonicityB = values[10].takeIf { values[11] >= 0.5f && !it.isNaN() },
                 lockedString = values[12].toInt().takeIf { it >= 0 },
                 fastModeState = values[13].toInt(),
+                usableRangeCents = values[14].takeIf { !it.isNaN() },
             )
         }
     }

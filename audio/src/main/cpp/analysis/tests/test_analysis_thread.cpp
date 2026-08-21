@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -43,15 +44,26 @@ std::vector<float> toneBlock(int frames, float amp) {
 }
 
 
-/// Cuerda de 4 parciales armonicos a `f0`, en estereo, para alimentar el ring.
-/// REQ-003: hace falta contenido armonico real — un seno puro no ejercita el
-/// descarte por dominio, que es una decision POR PARCIAL.
-std::vector<float> stringBlock(double f0, int frames, float amp = 0.5f) {
+/**
+ * Cuerda de 4 parciales armonicos a `f0`, en estereo, para alimentar el ring.
+ * REQ-003: hace falta contenido armonico real — un seno puro no ejercita el
+ * descarte por dominio, que es una decision POR PARCIAL.
+ *
+ * 🔴 `startFrame` NO ES OPCIONAL, Y COSTO UN FALSO ROJO. El estimador integra
+ * FASE a lo largo de ventanas de 4096 frames. Si cada bloque se genera
+ * arrancando en fase 0, la señal lleva una discontinuidad artificial cada
+ * `frames` muestras y el estimador mide ESO: medido, publicaba +5,62 cents con
+ * la cuerda 5 cents ABAJO, y el defecto era del test, no del motor. El llamador
+ * tiene que ir corriendo el offset.
+ */
+std::vector<float> stringBlock(double f0, int frames, int startFrame = 0,
+                               float amp = 0.5f) {
     std::vector<float> b(static_cast<size_t>(frames) * 2, 0.0f);
     for (int i = 0; i < frames; ++i) {
         double s = 0.0;
+        const double tIdx = static_cast<double>(startFrame + i);
         for (int n = 1; n <= 4; ++n) {
-            s += (amp / n) * std::sin(2.0 * M_PI * f0 * n * i / kRate);
+            s += (amp / n) * std::sin(2.0 * M_PI * f0 * n * tIdx / kRate);
         }
         b[static_cast<size_t>(i) * 2]     = static_cast<float>(s);
         b[static_cast<size_t>(i) * 2 + 1] = static_cast<float>(s);
@@ -386,7 +398,7 @@ TEST(AnalysisThread, WithTheFineReadingAbsentTheCoarseDetectionIsStillPublished)
     th.setTargetHz(kTarget);
     th.start(kRate);
     for (int i = 0; i < 200; ++i) {
-        const auto blk = stringBlock(real, 1024);
+        const auto blk = stringBlock(real, 1024, i * 1024);
         ring.writeStereo(blk.data(), 1024);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));  // WAIT-OK: alimenta el ring al ritmo de captura, no espera un veredicto
     }
@@ -444,4 +456,103 @@ TEST(AnalysisThread, WithoutACoarseDetectionNoFineReadingIsPublished) {
     EXPECT_TRUE(std::isnan(out[kSnapCents]))
         << "publico una lectura fina sin control: " << out[kSnapCents];
     EXPECT_NE(static_cast<int>(out[kSnapState]), kStateConverged);
+}
+
+// ---------------------------------------------------------------------------
+// REQ-003 S2 — el rango publicado, en la unidad en la que se dibuja
+// ---------------------------------------------------------------------------
+
+/**
+ * AC-003.4 — el rango se publica **en cents**, contra el objetivo y el rate
+ * vigentes.
+ *
+ * 🔑 EL TEST AFIRMA LA PROPIEDAD, NO EL NUMERO (tarea 2.5). Comprobar que el
+ * indice 14 vale "30,5" seria fijar una constante y no un contrato: se
+ * mantendria verde con la guarda apuntando a otro lado. Lo que se afirma es la
+ * relacion entre las DOS etapas — **dentro del rango publicado la lectura fina
+ * existe y cumple el presupuesto; fuera esta ausente** —, que es lo unico que
+ * impide que S1 y S2 diverjan en silencio.
+ *
+ * Se prueba en los dos lados del borde con la MISMA cuerda, para que la unica
+ * variable sea el desajuste.
+ */
+TEST(AnalysisThread, ThePublishedRangePredictsWhereTheFineReadingExists) {
+    constexpr double kTarget = 440.0;
+
+    auto runAt = [&](double detuneCents) {
+        AnalysisRing ring;
+        AnalysisSnapshot snap;
+        AnalysisThread th(ring, snap);
+        const double real = kTarget * std::pow(2.0, detuneCents / 1200.0);
+        th.setTargetHz(kTarget);
+        th.start(kRate);
+        for (int i = 0; i < 200; ++i) {
+            const auto blk = stringBlock(real, 1024, i * 1024);
+            ring.writeStereo(blk.data(), 1024);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));  // WAIT-OK: alimenta el ring al ritmo de captura, no espera un veredicto
+        }
+        waitFor([&] {
+            float o[kSnapshotValueCount];
+            return snap.read(o) && o[kSnapDetectedHz] > 0.0f;
+        });
+        th.stop();
+        std::array<float, kSnapshotValueCount> out{};
+        EXPECT_TRUE(snap.read(out.data()));
+        return out;
+    };
+
+    // 1. El rango se publica y es un numero util.
+    const auto inside = runAt(-5.0);
+    const float range = inside[kSnapUsableRangeCents];
+    ASSERT_FALSE(std::isnan(range)) << "no publico el rango teniendo objetivo";
+    ASSERT_GT(range, 0.0f);
+
+    // 2. DENTRO del rango publicado: la lectura existe y cumple el presupuesto.
+    ASSERT_LT(5.0f, range) << "el caso 'adentro' quedo fuera: revisar el test";
+    EXPECT_FALSE(std::isnan(inside[kSnapCents]))
+        << "el rango dice " << range << " y a -5 cents no publico lectura";
+    EXPECT_NEAR(inside[kSnapCents], -5.0f, 0.1f);
+
+    // 2b. 🔴 EL BORDE INTERIOR, y sin esto el test NO SIRVE.
+    //
+    // Los puntos de afuera se calculan DESDE el rango publicado, asi que un
+    // rango INFLADO los empuja mas lejos y sigue cumpliendo "afuera esta
+    // ausente". Medido: un mutante que publicaba `150.0f` fijo —un rango
+    // inventado, siete veces el real— pasaba los 8 tests. Lo que lo mata es
+    // exigir que CERCA DEL BORDE INTERIOR la lectura todavia exista: con 150
+    // inventado, a 135 cents no hay ninguna.
+    const auto nearEdge = runAt(-0.90 * range);
+    EXPECT_FALSE(std::isnan(nearEdge[kSnapCents]))
+        << "el rango dice " << range << " y a " << (-0.90 * range)
+        << " cents —adentro— no publico nada: el rango publicado es mas grande "
+           "que el real";
+
+    // 3. FUERA del rango publicado: ausente. Se toma 1,5x para no medir el borde.
+    const auto outside = runAt(-1.5 * range);
+    EXPECT_TRUE(std::isnan(outside[kSnapCents]))
+        << "el rango dice " << range << " y a " << (-1.5 * range)
+        << " cents igual publico " << outside[kSnapCents];
+}
+
+/**
+ * 2.2 — **sin objetivo no hay rango**, y se dice con NaN.
+ *
+ * Cero seria un rango plausible (nulo) y un consumidor lo dibujaria como "nunca
+ * confies", que es una afirmacion distinta de "no hay contra que medir".
+ */
+TEST(AnalysisThread, WithoutATargetTheRangeIsAbsentInsteadOfZero) {
+    AnalysisRing ring;
+    AnalysisSnapshot snap;
+    AnalysisThread th(ring, snap);
+
+    const auto tone = toneBlock(1024, 0.37f);
+    ring.writeStereo(tone.data(), 1024);
+    th.start(kRate);                       // sin setTargetHz()
+    ASSERT_TRUE(waitFor([&] { return snap.hasData(); }));
+    th.stop();
+
+    float out[kSnapshotValueCount];
+    ASSERT_TRUE(snap.read(out));
+    EXPECT_TRUE(std::isnan(out[kSnapUsableRangeCents]))
+        << "sin objetivo publico un rango: " << out[kSnapUsableRangeCents];
 }

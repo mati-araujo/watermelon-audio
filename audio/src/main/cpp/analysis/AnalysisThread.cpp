@@ -208,6 +208,19 @@ void AnalysisThread::drainLoop() {
         }
         values[kSnapState] = static_cast<float>(state);
 
+        // REQ-003 S2 (AC-003.4) — hasta donde vale la lectura fina, EN CENTS.
+        //
+        // Sale del propio estimador (`usableRangeCents()` -> el dominio del
+        // parcial 1) y no de una constante replicada acá: si S1 mueve la guarda,
+        // esto la sigue sola. Que las dos etapas no puedan divergir es
+        // exactamente lo que verifica
+        // `ThePublishedRangePredictsWhereTheFineReadingExists`.
+        //
+        // NaN sin objetivo, no 0: un rango de cero es plausible —"nunca confíes"—
+        // y dice algo distinto de "no hay contra qué medir".
+        values[kSnapUsableRangeCents] =
+            measuring ? static_cast<float>(mStrobe.usableRangeCents()) : nan;
+
         values[kSnapDetectedHz] = mDetector.hasPitch()
                                       ? static_cast<float>(mDetector.frequencyHz())
                                       : 0.0f;

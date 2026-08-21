@@ -113,7 +113,25 @@ enum SnapshotValue : int {
     /// 0 sin señal · 1 buscando · 2 enganchado · 3 sin enganche (cromatico).
     kSnapFastModeState     = 13,
 
-    kSnapshotValueCount    = 14,
+    // ---- Rango de validez de la lectura fina (REQ-003 S2). Al final, otra vez.
+    /**
+     * Hasta donde vale `kSnapCents`, en CENTS contra el objetivo vigente.
+     *
+     * Es la mitad que le da sentido a la ausencia: sin esto el consumidor ve
+     * desaparecer la aguja y no tiene con que explicar por que ni hasta donde.
+     *
+     * **En cents y no en Hz** porque la ventana del estimador es fija en Hz, asi
+     * que su rango en cents cambia por registro —±119 en E2 contra ±23 en A4— y
+     * cents es la unidad en la que se dibuja un medidor. Publicar Hz obligaria a
+     * cada consumidor a rehacer la conversion contra el objetivo y el rate.
+     *
+     * **NaN si no hay objetivo**, no 0: cero es un rango PLAUSIBLE —nulo— y se
+     * dibujaria como "nunca confies", que es distinto de "no hay contra que
+     * medir". Misma razon que los indices 5-7.
+     */
+    kSnapUsableRangeCents  = 14,
+
+    kSnapshotValueCount    = 15,
 };
 
 enum SnapshotState : int {
