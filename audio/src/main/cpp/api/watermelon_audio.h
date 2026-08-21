@@ -687,8 +687,15 @@ WMA_API void wma_input_release(WmaEngine* engine);
  * 12b. Tuner analysis (REQ-001 S1)
  * ================================================================ */
 
-/** Number of floats wma_tuner_get_snapshot() writes. */
-#define WMA_TUNER_SNAPSHOT_VALUES 14
+/**
+ * Number of floats wma_tuner_get_snapshot() writes.
+ *
+ * APPEND-ONLY: this grows, and every new field goes at the END. A consumer
+ * built against an older, smaller count keeps working — it reads the prefix it
+ * knows and ignores the tail. Reordering or repurposing an existing index would
+ * silently change what an already-shipped consumer displays.
+ */
+#define WMA_TUNER_SNAPSHOT_VALUES 15
 
 /**
  * Start the analysis seam: the capture thread begins feeding a lock-free ring,
@@ -869,6 +876,26 @@ WMA_API float wma_intonation_difference_cents(const WmaEngine* engine);
  *                              bug AC-001.15 exists to prevent.
  *                         [13] fast-mode state: 0 no signal, 1 searching,
  *                              2 locked, 3 no lock (chromatic).
+ *
+ *                         [14] how far [5] is valid, in CENTS against the current
+ *                              target (REQ-003). NaN when there is no target.
+ *
+ *                              This is the half that makes the ABSENCE of [5]
+ *                              explainable: without it a consumer sees the needle
+ *                              vanish with nothing to say why or up to where.
+ *
+ *                              In CENTS and not Hz because the estimator's window
+ *                              is fixed in Hz, so its reach in cents changes with
+ *                              register — about +-119 on a low E2 against +-23 on
+ *                              A4 — and cents is the unit a meter is drawn in.
+ *                              Publishing Hz would make every consumer redo the
+ *                              conversion against the target and the rate.
+ *
+ *                              It DEPENDS ON THE SAMPLE RATE, so it is computed
+ *                              per snapshot rather than baked into a constant:
+ *                              a device that negotiates 44.1 kHz gets a narrower
+ *                              range than one at 48, and the consumer must not
+ *                              have to know that to draw it.
  *
  *                         B comes free with REQ-001 S6: four tracked partials
  *                         that disagree ARE the string's stiffness, so nothing

@@ -42,9 +42,10 @@ class TunerSnapshotTest {
         inharmonicityMeasured: Float = 1f,
         lockedString: Float = 2f,
         fastModeState: Float = 2f,
+        usableRangeCents: Float = 118.9f,
     ) = floatArrayOf(rate, rms, frames, dropped, state, cents, phase, uncertainty,
                      detectedHz, clarity, inharmonicityB, inharmonicityMeasured,
-                     lockedString, fastModeState)
+                     lockedString, fastModeState, usableRangeCents)
 
     @Test
     fun elOrdenDeLosValoresEsElDelContratoNativo() {
@@ -142,8 +143,43 @@ class TunerSnapshotTest {
         // Si esto cambia sin que cambie WMA_TUNER_SNAPSHOT_VALUES, el consumidor
         // pasa un array de otro tamaño que el que la C API va a llenar. Del lado
         // de C++ lo para un static_assert; de este lado, esta línea.
-        assertEquals(14, TunerSnapshot.VALUE_COUNT)
+        assertEquals(15, TunerSnapshot.VALUE_COUNT)
         assertEquals(TunerSnapshot.VALUE_COUNT, nativeValues().size)
+    }
+
+    /**
+     * REQ-003 · 2.3 — **la promesa del append-only, ejercitada**.
+     *
+     * El orden crece por el final para que un motor MÁS NUEVO que esta librería
+     * siga sirviendo: manda un array más largo y se lee el prefijo conocido.
+     * Hasta acá eso era una promesa escrita en un comentario y **nunca probada**.
+     *
+     * El caso inverso —motor viejo, librería nueva— NO se acepta a propósito, y
+     * la asimetría es deliberada: leer un índice que el motor no llenó daría
+     * basura con cara de medición, que es justo lo que este REQ existe para
+     * sacar del producto.
+     */
+    @Test
+    fun unMotorMasNuevoQueEstaLibreriaSigueSiendoLegible() {
+        val delFuturo = nativeValues() + floatArrayOf(7f, 8f, 9f)
+        val snap = assertNotNull(TunerSnapshot.fromNative(delFuturo))
+
+        assertEquals(44100, snap.captureSampleRate)
+        assertEquals(118.9f, snap.usableRangeCents)
+    }
+
+    /**
+     * REQ-003 · 2.2 — sin objetivo el rango llega como `null`, no como 0.
+     *
+     * Cero es un rango PLAUSIBLE —nulo— y una app lo dibujaría como "nunca
+     * confíes", que dice algo distinto de "no hay contra qué medir".
+     */
+    @Test
+    fun sinObjetivoElRangoLlegaComoNullYNoComoCero() {
+        val snap = assertNotNull(
+            TunerSnapshot.fromNative(nativeValues(usableRangeCents = Float.NaN))
+        )
+        assertNull(snap.usableRangeCents)
     }
 
     /**

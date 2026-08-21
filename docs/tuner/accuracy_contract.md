@@ -64,6 +64,13 @@ cuando pierde "cuánto exactamente".
 
 Verificado por `StrobeRange.*` sobre las 14 cuerdas del catálogo, en los dos signos.
 
+**El motor lo publica**, en el índice 14 del snapshot y en cents, computado contra el objetivo y
+el rate vigentes (`usableRangeCents` en Kotlin, `null` sin objetivo). Un consumidor no tiene que
+conocer `N` ni rehacer la conversión: dibuja el tramo donde la aguja es confiable y advierte en
+el resto. Que ese número y la guarda no puedan divergir lo verifica
+`AnalysisThread.ThePublishedRangePredictsWhereTheFineReadingExists`, que falla tanto si el rango
+publicado se **infla** como si se **achica**.
+
 ⚠️ **Lo que esto le dice a un consumidor que dibuja un medidor de ±50 cents:** existe en E2, A2,
 D3 y G3, y **no** en B3, E4 ni A4. Ensancharlo exige bajar `N`, que mueve el presupuesto de
 exactitud entero y no está en este REQ.
