@@ -52,7 +52,11 @@ interface ITunerBridge {
     fun getTunerTargetHz(): Float
 
     /**
-     * Los ocho valores del snapshot de una sola vez, todos del mismo tick.
+     * Los [com.watermellonstudios.audio.domain.tuner.TunerSnapshot.VALUE_COUNT]
+     * valores del snapshot de una sola vez, todos del mismo tick.
+     *
+     * 🔴 El número va por la constante y no escrito acá: este KDoc decía "ocho"
+     * mientras el snapshot ya tenía quince, y un consumidor diseñó contra esa cifra.
      *
      * @return null si no hay análisis o si todavía no se publicó nada. **Null y
      *   "todo en cero" no son lo mismo**: la C API deja el buffer intacto cuando

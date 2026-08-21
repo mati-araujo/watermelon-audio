@@ -11,7 +11,7 @@ import kotlin.test.assertNull
  *
  * Acá no hay análisis: eso vive en C++ y lo miden los tests de host. Lo que vive
  * en commonMain, y es donde se pierde o se conserva la verdad, es **el mapeo**:
- * el orden de los ocho valores, el enum de estado, y sobre todo la frontera
+ * el orden de los valores, el enum de estado, y sobre todo la frontera
  * entre "no hay dato" y "el dato es cero".
  *
  * POR QUE ESTO NO ES CEREMONIA
