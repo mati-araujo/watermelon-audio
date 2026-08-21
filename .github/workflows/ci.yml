@@ -681,3 +681,16 @@ jobs:
       - name: Build release
         if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:assembleRelease
+
+      # MINI-001 — toda `external fun` del bridge tiene su simbolo JNI en el .so.
+      # Un nombre que no coincide compila limpio de los DOS lados y falla en
+      # runtime, en el device. Va aca y no entre los lints porque necesita el
+      # .so que acaba de dejar el paso de arriba. El self-test primero: un
+      # chequeo que no sabe fallar da verde para siempre.
+      - name: JNI symbols — self-test
+        if: steps.attest.outputs.valid != 'true'
+        run: python3 scripts/check-jni-symbols.py --self-test
+
+      - name: JNI symbols — declaradas vs exportadas
+        if: steps.attest.outputs.valid != 'true'
+        run: python3 scripts/check-jni-symbols.py

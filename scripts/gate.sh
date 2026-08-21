@@ -383,6 +383,19 @@ gate_build() {
     step build assemble-debug     ./gradlew :audio:assembleDebug || return 1
     step build harness-android    bash scripts/build-harness.sh --android-only || return 1
     step build assemble-release   ./gradlew :audio:assembleRelease || return 1
+
+    # MINI-001 — toda `external fun` del bridge tiene su simbolo JNI en el .so.
+    #
+    # VA ACA Y NO EN guardrails, y no es acomodo: necesita el .so, que recien
+    # existe despues de assemble-release. Los guardrails corren en segundos y
+    # ANTES de construir nada.
+    #
+    # El self-test va PRIMERO, con la misma disciplina que rt-safety y waits: un
+    # chequeo que no sabe fallar da verde para siempre y se ve identico a uno que
+    # anda. Y el chequeo real FALLA si no pudo chequear (sin .so, sin nm, cero
+    # declaraciones): "no pude mirar" nunca es un pase.
+    step build jni-symbols-self   python3 scripts/check-jni-symbols.py --self-test || return 1
+    step build jni-symbols        python3 scripts/check-jni-symbols.py || return 1
 }
 
 gate_sanitizers() {
