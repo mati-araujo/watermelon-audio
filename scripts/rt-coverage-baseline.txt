@@ -287,6 +287,9 @@ audio/src/main/cpp/engines/SupersawEngine.h::SupersawEngine::process
 audio/src/main/cpp/engines/SynthEngine.h::SynthEngine::smoothParam
 audio/src/main/cpp/engines/WavetableEngine.h::WavetableEngine::process
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::finalizeLoopStartPlayback
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::masterRampFor
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::mixFxTracks
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::mixTracksInto
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::process
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::startRecording
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::triggerClick
@@ -313,6 +316,7 @@ audio/src/main/cpp/looper/TrackBuffer.h::TrackBuffer::isPercussionMode
 audio/src/main/cpp/looper/TrackBuffer.h::TrackBuffer::mixInto
 audio/src/main/cpp/looper/TrackBuffer.h::TrackBuffer::overdubFrame
 audio/src/main/cpp/looper/TrackBuffer.h::TrackBuffer::resetPlayHead
+audio/src/main/cpp/looper/TrackBuffer.h::TrackBuffer::sendsToFx
 audio/src/main/cpp/looper/TrackBuffer.h::TrackBuffer::setPlayHeadF
 audio/src/main/cpp/looper/TrackBuffer.h::TrackBuffer::setPlaying
 audio/src/main/cpp/looper/TrackBuffer.h::TrackBuffer::tanhClip
