@@ -97,6 +97,50 @@ bool waitFor(Pred pred, std::chrono::milliseconds cap = std::chrono::seconds(5))
     return pred();
 }
 
+
+/**
+ * Alimenta el ring **al ritmo del ANÁLISIS**, no al del reloj.
+ *
+ * 🔴 ESTO NO ES UN DETALLE DE ESTILO, Y COSTÓ UN ROJO EN EL TSAN DEL CI.
+ * La versión anterior escribía N bloques con un `sleep` fijo entre medio. Con
+ * el thread de análisis a velocidad normal alcanzaba; **bajo TSan, que lo hace
+ * ~10x más lento, el productor le gana al consumidor y el ring PISA frames**.
+ * El estimador entonces integra fase sobre muestras no contiguas, la fase salta,
+ * y la lectura sale fuera de presupuesto: `EXPECT_NEAR(cents, -5, 0.1)` en rojo.
+ * Verde en esta máquina, rojo en el runner — el defecto que REQ-002 persigue.
+ *
+ * Y agrandar el sleep NO lo arregla: sigue siendo una duración adivinada contra
+ * una máquina de velocidad desconocida. Lo que lo arregla es **esperar a que el
+ * análisis consuma** antes de escribir el bloque siguiente, que no depende de
+ * ninguna velocidad.
+ *
+ * Devuelve false si el análisis dejó de avanzar dentro del techo — así una falla
+ * se ve como aserción y no como test colgado.
+ */
+template <typename MakeBlock>
+bool feedAtAnalysisPace(AnalysisRing& ring, AnalysisSnapshot& snap,
+                        MakeBlock makeBlock, int blocks, int frames = 1024) {
+    auto analysed = [&]() -> double {
+        float o[kSnapshotValueCount];
+        return snap.read(o) ? static_cast<double>(o[kSnapFramesAnalyzed]) : 0.0;
+    };
+    const double goal = static_cast<double>(blocks) * frames;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+
+    int written = 0;
+    while (analysed() < goal && std::chrono::steady_clock::now() < deadline) {
+        const double before = analysed();
+        const auto blk = makeBlock(written * frames);
+        ring.writeStereo(blk.data(), frames);
+        ++written;
+        // Espera CORTA y que NO falla si este bloque no produjo avance: el
+        // primer tick del thread aplica el objetivo y hace `skipToNewest()`, o
+        // sea que descarta lo que haya en el ring. Exigirle avance a cada bloque
+        // colgaba el helper en la primera iteración — medido.
+        waitFor([&] { return analysed() > before; }, std::chrono::milliseconds(200));
+    }
+    return analysed() >= goal;
+}
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -397,11 +441,9 @@ TEST(AnalysisThread, WithTheFineReadingAbsentTheCoarseDetectionIsStillPublished)
 
     th.setTargetHz(kTarget);
     th.start(kRate);
-    for (int i = 0; i < 200; ++i) {
-        const auto blk = stringBlock(real, 1024, i * 1024);
-        ring.writeStereo(blk.data(), 1024);
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));  // WAIT-OK: alimenta el ring al ritmo de captura, no espera un veredicto
-    }
+    ASSERT_TRUE(feedAtAnalysisPace(ring, snap,
+        [&](int off) { return stringBlock(real, 1024, off); }, 200))
+        << "el analisis dejo de consumir";
     ASSERT_TRUE(waitFor([&] {
         float o[kSnapshotValueCount];
         return snap.read(o) && o[kSnapDetectedHz] > 0.0f;
@@ -437,15 +479,9 @@ TEST(AnalysisThread, WithoutACoarseDetectionNoFineReadingIsPublished) {
 
     th.setTargetHz(440.0);
     th.start(kRate);
-    for (int i = 0; i < 200; ++i) {
-        const auto blk = noiseBlock(1024);
-        ring.writeStereo(blk.data(), 1024);
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));  // WAIT-OK: alimenta el ring al ritmo de captura, no espera un veredicto
-    }
-    ASSERT_TRUE(waitFor([&] {
-        float o[kSnapshotValueCount];
-        return snap.read(o) && o[kSnapFramesAnalyzed] > 0.0f;
-    }));
+    ASSERT_TRUE(feedAtAnalysisPace(ring, snap,
+        [&](int) { return noiseBlock(1024); }, 200))
+        << "el analisis dejo de consumir";
     th.stop();
 
     float out[kSnapshotValueCount];
@@ -486,11 +522,9 @@ TEST(AnalysisThread, ThePublishedRangePredictsWhereTheFineReadingExists) {
         const double real = kTarget * std::pow(2.0, detuneCents / 1200.0);
         th.setTargetHz(kTarget);
         th.start(kRate);
-        for (int i = 0; i < 200; ++i) {
-            const auto blk = stringBlock(real, 1024, i * 1024);
-            ring.writeStereo(blk.data(), 1024);
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));  // WAIT-OK: alimenta el ring al ritmo de captura, no espera un veredicto
-        }
+        EXPECT_TRUE(feedAtAnalysisPace(ring, snap,
+            [&](int off) { return stringBlock(real, 1024, off); }, 200))
+            << "el analisis dejo de consumir";
         waitFor([&] {
             float o[kSnapshotValueCount];
             return snap.read(o) && o[kSnapDetectedHz] > 0.0f;
@@ -503,6 +537,11 @@ TEST(AnalysisThread, ThePublishedRangePredictsWhereTheFineReadingExists) {
 
     // 1. El rango se publica y es un numero util.
     const auto inside = runAt(-5.0);
+    // Si el ring pisó frames, la integración de fase vio muestras no contiguas y
+    // cualquier veredicto de exactitud de abajo mide ESO. Se afirma explícito.
+    ASSERT_FLOAT_EQ(inside[kSnapDroppedFrames], 0.0f)
+        << "el ring pisó frames: el test estaría midiendo el drop, no el rango";
+
     const float range = inside[kSnapUsableRangeCents];
     ASSERT_FALSE(std::isnan(range)) << "no publico el rango teniendo objetivo";
     ASSERT_GT(range, 0.0f);
