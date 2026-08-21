@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.4.1...v2.5.0) (2026-08-21)
+
+
+### Features
+
+* **looper:** una pista marcada pasa por la cadena de efectos (REQ-007.1) ([#172](https://github.com/mati-araujo/watermelon-audio/issues/172)) ([31961c1](https://github.com/mati-araujo/watermelon-audio/commit/31961c1a7177ecef7294e55098499a9cf9cd1182))
+* **tuner:** publicar hasta donde vale la lectura fina, en cents (REQ-003.2) ([#170](https://github.com/mati-araujo/watermelon-audio/issues/170)) ([69873b9](https://github.com/mati-araujo/watermelon-audio/commit/69873b908995f931e89ed88d5f6011170bf2c7c4))
+
 ## [2.4.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.4.0...v2.4.1) (2026-08-21)
 
 
