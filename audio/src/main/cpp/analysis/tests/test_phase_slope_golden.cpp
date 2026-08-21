@@ -19,6 +19,7 @@
 
 #include "support/AnalysisGolden.h"
 #include "support/SyntheticSignal.h"
+#include "tests/support/TestSanitizer.h"
 
 #include "PhaseSlopeEstimator.h"
 #include "McLeodPitch.h"
@@ -170,8 +171,16 @@ TEST(GoldenPhaseSlope, TheCoarseDetectionMatchesItsGolden) {
  * maquina esta cargada —este repo ya se comio cuatro timeouts de TSan que eran
  * de la maquina y no del codigo— y un guardrail que falla por ruido se termina
  * silenciando. El numero medido se reporta igual, siempre.
+ *
+ * 🔴 Y AUN ASI EL TECHO FLOJO NO ALCANZA (REQ-005 S2). Su hermano
+ * `McLeodPitchCost` ya se habia puesto rojo bajo TSan —0,404 contra 0,25, con
+ * CERO carreras reportadas— y recibio la guarda en REQ-002. Este nacio sin ella
+ * y pasaba por HOLGURA, no por proteccion: medido bajo TSan el 2026-08-21, 0,09 s.
+ * Que hoy sobre margen no es una razon para no tener la guarda; es la razon por
+ * la que nadie se dio cuenta de que faltaba.
  */
 TEST(PhaseSlopeCost, OneTargetCostsAFractionOfRealTimeAndTheNumberIsRecorded) {
+    WMA_SKIP_IF_SANITIZED();
     const double target = 82.407;
     const int frames = 10 * kRate;                 // 10 s de audio
     const auto sig = pureSine(detune(target, 1.0), kRate, frames);
