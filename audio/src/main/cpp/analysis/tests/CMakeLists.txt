@@ -32,6 +32,7 @@ add_executable(analysis_tests
     test_fast_mode.cpp
     test_accuracy_contract.cpp
     test_corpus_gate.cpp
+    test_non_contiguous.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp
