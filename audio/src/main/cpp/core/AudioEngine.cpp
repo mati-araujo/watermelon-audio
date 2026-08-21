@@ -2267,6 +2267,13 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
         // 2. Apply DC blocking
         mOutputStage.dcBlock(mOutputStage.getTempBuffer(), numFrames);
 
+        // 2b. Pistas ruteadas a la cadena (REQ-007). VA ACÁ, y no es decorativo:
+        // este camino rápido tiene su propio `mAudioLooper.process()` más abajo,
+        // y esa pasada SALTEA las pistas marcadas. Sin esta llamada, una pista
+        // marcada no la mezclaría nadie y quedaría MUDA con USB INPUT_FX activo
+        // — un modo entero donde el flag apagaría la pista en vez de rutearla.
+        mAudioLooper.mixFxTracks(mOutputStage.getTempBuffer(), numFrames);
+
         // 3. Process through effect chain (INPUT → EFFECTS → OUTPUT)
         mEffectChain.process(mOutputStage.getTempBuffer(), outputData, numFrames);
 

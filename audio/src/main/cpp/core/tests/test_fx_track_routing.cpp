@@ -343,3 +343,45 @@ TEST(FxTrackRouting, TheRecordingTapDoesCaptureAFlaggedTrack) {
     EXPECT_GT(rms(soloLaGrabada), kAudible)
         << "documentado: grabar con una pista marcada sonando la mete en la toma";
 }
+
+// ---------------------------------------------------------------------------
+// AC-007.2 (el otro camino) — el fast-path de USB INPUT_FX también rutea.
+//
+// `processAudioBlock` tiene DOS caminos que mezclan el looper: el normal y el
+// directo de USB, que se activa con entrada presente y el oscilador apagado.
+// El de USB tiene su propio `mAudioLooper.process()`, que ahora saltea las
+// pistas marcadas — así que sin su propia llamada a `mixFxTracks` una pista
+// marcada no la mezclaría NADIE y quedaría muda en ese modo entero.
+//
+// Se llega con `renderBlock(output, input, n)`: no es una ruta paralela de test,
+// es la que recorre un callback real (renderBlock entra por `onAudioReady`).
+// ---------------------------------------------------------------------------
+TEST(FxTrackRouting, TheUsbDirectPathRoutesFlaggedTracksToo) {
+    auto renderUsb = [](bool sendToFx) {
+        AudioEngine engine;
+        EXPECT_TRUE(engine.startOffline(kSampleRate, kMaxBlock));
+        engine.setMasterVolume(1.0f);
+        engine.setOscillatorEnabled(true);          // para poder grabar la pista
+        engine.setFrequencyAndAmplitude(440.0f, 0.0f);
+        recordConstantTrack(engine, kFxTrack, 0.5f);
+        engine.getAudioLooper().setTrackSendToFx(kFxTrack, sendToFx);
+
+        // Y AHORA el modo directo: entrada presente + oscilador apagado.
+        engine.setOscillatorEnabled(false);
+        const std::vector<float> entrada(static_cast<size_t>(kMaxBlock) * 2, 0.0f);
+        std::vector<float> out(static_cast<size_t>(kMaxBlock) * 2, 0.0f);
+        std::vector<float> todo;
+        for (int b = 0; b < 4; ++b) {
+            std::fill(out.begin(), out.end(), 0.0f);
+            EXPECT_TRUE(engine.renderBlock(out.data(), entrada.data(), kMaxBlock));
+            todo.insert(todo.end(), out.begin(), out.end());
+        }
+        engine.stop();
+        return rms(todo);
+    };
+
+    const double sinMarcar = renderUsb(false);
+    ASSERT_GT(sinMarcar, kAudible) << "por el camino de USB la pista tiene que sonar";
+    EXPECT_GT(renderUsb(true), kAudible)
+        << "marcada tiene que seguir sonando: si queda muda, este camino no la mezcla";
+}
