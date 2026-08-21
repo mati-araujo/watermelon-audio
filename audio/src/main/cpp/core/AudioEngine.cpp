@@ -1164,8 +1164,21 @@ int AudioEngine::getWaveformSamples(float* buffer, int size) {
 // ========== RENDER SUB-METHODS (Step 8 decomposition) ==========
 
 void AudioEngine::applyEffectsAndLooper(float* output, int32_t numFrames) {
-    // DC block + effects
+    // DC block
     mOutputStage.dcBlock(mOutputStage.getTempBuffer(), numFrames);
+
+    // ---- PISTAS RUTEADAS A LA CADENA (REQ-007) ----
+    // Las pistas marcadas se suman a la ENTRADA de la cadena, no a su salida. Es
+    // el único punto del bloque donde se las mezcla: `AudioLooper::process()`, más
+    // abajo, atiende el conjunto complementario, así que cada pista se mezcla
+    // exactamente una vez por bloque.
+    //
+    // Sin ninguna pista marcada —el caso por defecto y el que corre hoy para todo
+    // el mundo— `mixFxTracks` no toca el buffer y esto cuesta una comparación por
+    // pista, sin una sola pasada extra sobre las muestras.
+    mAudioLooper.mixFxTracks(mOutputStage.getTempBuffer(), numFrames);
+
+    // Effects
     mEffectChain.process(mOutputStage.getTempBuffer(), output, numFrames);
 
     // ---- PRE-ROLL CAPTURE ----
@@ -1185,7 +1198,13 @@ void AudioEngine::applyEffectsAndLooper(float* output, int32_t numFrames) {
     // ---- FADE (applied to synth + FX only — NOT to loops) ----
     // The pause/scene-change fade mutes the instrument signal but must let
     // existing loops keep playing through the transition. We apply the fade
-    // BEFORE the looper mixes its playback into `output`. The looper's
+    // BEFORE the looper mixes its playback into `output`.
+    //
+    // REQ-007 — la excepción, y es deliberada: una pista MARCADA ya se sumó
+    // arriba, a la entrada de la cadena, así que para ella el fade SÍ aplica.
+    // Es la contrapartida de entrar al bus del instrumento (AC-007.5): deja de
+    // valer el invariante de este comentario, que sigue rigiendo para todas las
+    // demás. The looper's
     // recording tap reads `output` here, so an in-progress recording would
     // capture the fade-out + transition + fade-in; callers that care about
     // clean takes must abort recording before triggering the fade (handled

@@ -78,6 +78,7 @@ public:
 
     AudioLooper() {
         mLooperMixBuf.resize(static_cast<size_t>(INITIAL_MIX_CAPACITY_FRAMES) * 2, 0.0f);
+        mFxBusBuf.resize(static_cast<size_t>(INITIAL_MIX_CAPACITY_FRAMES) * 2, 0.0f);
     }
     ~AudioLooper() = default;
 
@@ -140,6 +141,12 @@ public:
             mLooperMixBuf.resize(needed, 0.0f);
             LOOPER_LOGI("mix buffer pre-sized to %d frames (UI thread)", maxBlockFrames);
         }
+        // REQ-007: el bus de efectos se dimensiona con el MISMO criterio y en el
+        // mismo momento. Dejarlo fuera de acá lo condenaría a crecer en RT la
+        // primera vez que alguien marque una pista.
+        if (mFxBusBuf.size() < needed) {
+            mFxBusBuf.resize(needed, 0.0f);
+        }
     }
 
     // ========== Audio thread (RT-safe) ==========
@@ -150,6 +157,50 @@ public:
      *        used to fire armed recordings exactly at the requested trigger
      *        frame (downbeat-aligned).
      */
+    /**
+     * @brief Mezcla SÓLO las pistas marcadas para efectos, aguas arriba de la
+     *        cadena (REQ-007). AUDIO THREAD.
+     *
+     * La llama `AudioEngine::applyEffectsAndLooper()` **antes** de
+     * `mEffectChain.process()`, con el mismo `numFrames` que después le pasa a
+     * `process()`. Entre las dos cubren el conjunto entero de pistas, y son
+     * disjuntas por construcción: cada pista se mezcla exactamente una vez por
+     * bloque, en un destino o en el otro.
+     *
+     * Acumula sobre `audioData` (no lo pisa), con el master del looper ya
+     * aplicado — si no, una pista marcada ignoraría el fader general y el ruteo
+     * cambiaría dos cosas en vez de una (AC-007.4).
+     *
+     * @return true si mezcló al menos una pista. El llamador lo usa para saltearse
+     *         la suma cuando no hay ninguna marcada, que es el caso por defecto.
+     */
+    bool mixFxTracks(float* audioData, int numFrames) {
+        if (!mEnabled.load(std::memory_order_acquire)) return false;
+        if (numFrames <= 0) return false;
+
+        const size_t needed = static_cast<size_t>(numFrames) * 2;
+        if (mFxBusBuf.capacity() < needed) {
+            // Mismo criterio que mLooperMixBuf: prepareMixBuffer() lo pre-dimensiona
+            // desde el hilo de UI, y llegar acá es un alloc en RT que se CUENTA en
+            // vez de loguearse (WD-1.1) — si dispara, dispara en todos los bloques.
+            // RT-SAFE-ALLOW: fallback deliberado y documentado.
+            mFxBusBuf.resize(needed);
+            mFxBusGrownOnRt.bump();
+        }
+        std::memset(mFxBusBuf.data(), 0, sizeof(float) * needed);
+
+        if (!mixTracksInto(mFxBusBuf.data(), numFrames, /*wantSendToFx=*/true)) {
+            return false;   // ninguna pista marcada: ni ramp ni suma
+        }
+
+        float gainStart = 0.0f, gainEnd = 0.0f;
+        masterRampFor(numFrames, gainStart, gainEnd);
+        simd::applyStereoGainRamp(mFxBusBuf.data(), numFrames, gainStart, gainEnd);
+        simd::addStereoBuffers(audioData, audioData, mFxBusBuf.data(), numFrames,
+                               /*applyHeadroom=*/false);
+        return true;
+    }
+
     void process(float* audioData, int numFrames, int64_t playFrame = -1) {
         if (!mEnabled.load(std::memory_order_acquire)) {
             mClick.render(audioData, numFrames);
@@ -312,10 +363,13 @@ public:
         // Only iterate up to the active-track limit — saves CPU on low tiers, and
         // the limit is never below the highest active track (setCapabilities keeps
         // that invariant), so no active track is ever skipped.
-        const int maxActive = mMaxActiveTracks.load(std::memory_order_relaxed);
-        for (int t = 0; t < maxActive; ++t) {
-            mTracks[t].mixInto(mLooperMixBuf.data(), numFrames);
-        }
+        //
+        // REQ-007: las pistas marcadas NO se mezclan acá — ya las mezcló
+        // mixFxTracks(), aguas arriba de EffectChain. Es UN SOLO bucle que elige
+        // conjunto, no dos bucles con condiciones complementarias, porque
+        // `mixInto` avanza el playhead y los tres smoothers: mezclar una pista
+        // dos veces por bloque no duplica su audio, le corre el tiempo al doble.
+        mixTracksInto(mLooperMixBuf.data(), numFrames, /*wantSendToFx=*/false);
 
         // Apply master volume + accumulate into main output.
         // We replace the per-sample smoothing+accumulate scalar loop with two
@@ -327,14 +381,13 @@ public:
         // We compute gainStart from the previous block's smoother state and
         // gainEnd by simulating the smoother across `numFrames` samples,
         // preserving the smoother's continuity across audio blocks.
-        float masterVolStart = mMasterVolSmoother.load(std::memory_order_relaxed);
-        const float targetMaster = mMasterVolume.load(std::memory_order_acquire);
-        constexpr float kSmooth = 0.995f;
-        // Closed-form per-block end value of the one-pole smoother:
-        //   y_n = α^n * y_0 + (1-α^n) * target
-        const float alphaPow = std::pow(kSmooth, static_cast<float>(numFrames));
-        const float masterVolEnd = alphaPow * masterVolStart
-                                 + (1.0f - alphaPow) * targetMaster;
+        //
+        // REQ-007: el ramp lo calcula `masterRampFor`, que es PURO — no avanza el
+        // smoother. Así `mixFxTracks()` puede pedir el MISMO ramp para este bloque
+        // sin que el smoother corra dos veces, y el único que lo avanza es este
+        // punto, igual que antes.
+        float masterVolStart = 0.0f, masterVolEnd = 0.0f;
+        masterRampFor(numFrames, masterVolStart, masterVolEnd);
 
         // Apply linear ramp to the mix buffer in-place (SIMD).
         simd::applyStereoGainRamp(mLooperMixBuf.data(), numFrames,
@@ -951,6 +1004,25 @@ public:
     void setTrackPercussionMode(int index, bool percussion) {
         if (index >= 0 && index < MAX_TRACKS) mTracks[index].setPercussionMode(percussion);
     }
+
+    /**
+     * @brief Rutear una pista POR la cadena de efectos (REQ-007). UI thread, RT-safe.
+     *
+     * Con `true` la pista se mezcla aguas ARRIBA de `EffectChain`, o sea entra al
+     * bus del instrumento. Dos contrapartidas, documentadas y verificadas:
+     * **recibe el fade** de pausa y cambio de escena (AC-007.5), y **entra al tap
+     * de grabación** (AC-007.6) — grabar mientras suena la mete en la toma.
+     *
+     * Índice fuera de rango: sin efecto y sin crash, igual que el resto de la
+     * familia `setTrack*`.
+     */
+    void setTrackSendToFx(int index, bool sendToFx) {
+        if (index >= 0 && index < MAX_TRACKS) mTracks[index].setSendToFx(sendToFx);
+    }
+    bool isTrackSendToFx(int index) const {
+        if (index < 0 || index >= MAX_TRACKS) return false;
+        return mTracks[index].sendsToFx();
+    }
     bool isTrackPercussionMode(int index) const {
         if (index < 0 || index >= MAX_TRACKS) return false;
         return mTracks[index].isPercussionMode();
@@ -1357,7 +1429,48 @@ private:
     // Pre-allocated mixing buffer (heap, grows on demand from audio thread).
     // Sized at construction to INITIAL_MIX_CAPACITY_FRAMES, only grows if a callback
     // ever exceeds it (one-shot allocation, then steady-state).
+    /**
+     * @brief Mezcla el subconjunto de pistas cuyo flag de envío a efectos coincide
+     *        con `wantSendToFx`. AUDIO THREAD. @return true si mezcló alguna.
+     *
+     * Es UNA función y no dos bucles: la invariante "cada pista se mezcla una vez
+     * por bloque" queda garantizada porque los dos llamadores piden conjuntos
+     * complementarios del mismo recorrido, no porque dos condiciones escritas por
+     * separado resulten complementarias.
+     *
+     * El flag se lee UNA vez por pista y por bloque, acá: un cambio a mitad de
+     * bloque se aplica en el siguiente, que es lo que evita el clic (AC-007.3).
+     */
+    bool mixTracksInto(float* dst, int numFrames, bool wantSendToFx) {
+        const int maxActive = mMaxActiveTracks.load(std::memory_order_relaxed);
+        bool any = false;
+        for (int t = 0; t < maxActive; ++t) {
+            if (mTracks[t].sendsToFx() != wantSendToFx) continue;
+            mTracks[t].mixInto(dst, numFrames);
+            any = true;
+        }
+        return any;
+    }
+
+    /**
+     * @brief El ramp del master para ESTE bloque, sin avanzar el smoother.
+     *
+     * Puro a propósito: `mixFxTracks()` y `process()` corren en el mismo bloque y
+     * los dos necesitan el mismo ramp. Si cada uno avanzara el smoother, el master
+     * llegaría a su destino al doble de velocidad — la misma clase de defecto que
+     * mezclar una pista dos veces. El smoother lo avanza un solo punto: `process()`.
+     */
+    void masterRampFor(int numFrames, float& gainStart, float& gainEnd) const {
+        gainStart = mMasterVolSmoother.load(std::memory_order_relaxed);
+        const float target = mMasterVolume.load(std::memory_order_acquire);
+        constexpr float kSmooth = 0.995f;
+        // Cerrada del one-pole tras numFrames pasos: y_n = α^n·y_0 + (1-α^n)·target
+        const float alphaPow = std::pow(kSmooth, static_cast<float>(numFrames));
+        gainEnd = alphaPow * gainStart + (1.0f - alphaPow) * target;
+    }
+
     std::vector<float> mLooperMixBuf;
+    std::vector<float> mFxBusBuf;      // REQ-007: bus de las pistas ruteadas a la cadena
 
     // Sample rate (kept in sync with engine via setSampleRate()).
     std::atomic<int> mSampleRate{48000};
@@ -1366,6 +1479,7 @@ private:
     // Reemplaza al LOOPER_LOGE que habia junto al resize. Se lee con
     // getMixBufGrownOnRt() desde el thread de control.
     wma::RtCounter mMixBufGrownOnRt;
+    wma::RtCounter mFxBusGrownOnRt;      // REQ-007: idem, para el bus de efectos
 
     // Metronome / count-in click generator (self-contained, RT-safe).
     wm::MetronomeClick mClick;
