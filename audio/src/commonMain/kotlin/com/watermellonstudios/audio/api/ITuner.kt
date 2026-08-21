@@ -15,7 +15,13 @@ import com.watermellonstudios.audio.domain.tuning.TuningConfiguration
  *   - **Qué DEBERÍA sonar** — [TuningConfiguration]: instrumento, afinación, temperamento,
  *     referencia y capo. Es Kotlin puro, se testea en milisegundos y no toca audio.
  *   - **Qué ESTÁ sonando** — [TunerSnapshot]: lo que el motor midió. Vive en C++, cruza la
- *     frontera como ocho floats coherentes entre sí.
+ *     frontera como [TunerSnapshot.VALUE_COUNT] floats coherentes entre sí.
+ *
+ * 🔴 EL NÚMERO NO SE ESCRIBE EN PROSA, Y NO ES ESTILO. Este KDoc decía "ocho floats" mientras
+ * el snapshot ya tenía **quince**: creció con S4, S5, S7 y REQ-003.2, y la prosa se quedó donde
+ * estaba. Un consumidor congeló esa forma y diseñó pedidos contra ella — **lo append-only
+ * protege su CÓDIGO, no su modelo mental**. Referenciar la constante hace que no pueda volver
+ * a desfasarse.
  *
  * `ITuner` es el punto donde se juntan, y **nada más**: no calcula temperamentos ni analiza
  * audio. Que la unión sea una capa delgada es lo que permite que las dos mitades evolucionen

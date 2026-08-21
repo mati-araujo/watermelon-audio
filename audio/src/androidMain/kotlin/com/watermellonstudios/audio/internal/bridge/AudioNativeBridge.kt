@@ -1597,7 +1597,11 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override fun intonationDifferenceCents(): Float = nativeIntonationDifferenceCents()
 
     /**
-     * Los ocho valores del snapshot, todos del mismo tick.
+     * Los [com.watermellonstudios.audio.domain.tuner.TunerSnapshot.VALUE_COUNT]
+     * valores del snapshot, todos del mismo tick.
+     *
+     * 🔴 El número va por la constante y no escrito acá: decía "ocho" mientras el
+     * snapshot ya tenía quince (MINI-002).
      *
      * @return null si no hay análisis o si no se publicó nada todavía. **Null no
      *   es "todo en cero"**: la C API deja el buffer intacto cuando falla para
