@@ -1985,6 +1985,17 @@ bool wma_looper_is_track_percussion_mode(const WmaEngine* engine, int track_inde
     return engine->engine->getAudioLooper().isTrackPercussionMode(track_index);
 }
 
+void wma_looper_set_track_send_to_fx(WmaEngine* engine, int track_index,
+                                      bool send_to_fx) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->getAudioLooper().setTrackSendToFx(track_index, send_to_fx);
+}
+
+bool wma_looper_is_track_send_to_fx(const WmaEngine* engine, int track_index) {
+    WMA_CHECK_VAL(engine, false);
+    return engine->engine->getAudioLooper().isTrackSendToFx(track_index);
+}
+
 void wma_looper_set_tail_ms(WmaEngine* engine, int ms) {
     WMA_CHECK_VOID(engine);
     engine->engine->getAudioLooper().setTailMs(ms);

@@ -2391,6 +2391,20 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     return wma_looper_is_track_percussion_mode(g_wmaEngine, trackIndex) ? JNI_TRUE : JNI_FALSE;
 }
 
+// REQ-007 — rutear la pista por la cadena de efectos. La pista marcada recibe el
+// fade y entra al tap de grabacion; ver watermelon_audio.h. Live & RT-safe.
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackSendToFx(
+    JNIEnv* env, jobject thiz, jint trackIndex, jboolean sendToFx) {
+    wma_looper_set_track_send_to_fx(g_wmaEngine, trackIndex, sendToFx == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperIsTrackSendToFx(
+    JNIEnv* env, jobject thiz, jint trackIndex) {
+    return wma_looper_is_track_send_to_fx(g_wmaEngine, trackIndex) ? JNI_TRUE : JNI_FALSE;
+}
+
 // Master volume (lock-free)
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetMasterVolume(
