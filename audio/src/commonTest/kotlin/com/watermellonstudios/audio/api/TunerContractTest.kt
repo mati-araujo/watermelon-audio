@@ -13,38 +13,81 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * REQ-001 S3 · 3.16–3.17 — el contrato de [ITuner], ejercitado con un doble que **usa el
- * modelo de verdad**.
+ * REQ-001 S3 · 3.16–3.17 — el contrato de [ITuner], ejercido contra **todas** sus
+ * implementaciones (MINI-004).
  *
- * Lo que estos tests prueban no es el doble: es que la unión de las dos mitades —lo que
- * debería sonar y lo que suena— conserva las propiedades que cada mitad garantiza por
- * separado. Es el único lugar donde se ve si el pegamento las traiciona.
+ * Lo que estos tests prueban no es una implementación: es que la unión de las dos mitades
+ * —lo que debería sonar y lo que suena— conserva las propiedades que cada mitad garantiza
+ * por separado. Es el único lugar donde se ve si el pegamento las traiciona.
+ *
+ * ## Qué cambió, y por qué importa
+ *
+ * Hasta MINI-004 este archivo se llamaba **contrato** y su único constructor de sujeto
+ * devolvía `FakeTuner` siempre — el doble que lo cumple **por construcción**. Un contrato
+ * verificado sólo contra eso no dice nada sobre un implementador real. Era inevitable
+ * mientras no hubiera otro; con `TunerImpl` (REQ-010 S1) dejó de serlo.
+ *
+ * Cada caso itera [tunerSubjects] y **nombra el sujeto en cada mensaje de fallo**: sin eso,
+ * un rojo obliga a adivinar cuál de las dos implementaciones falló. Ver [TunerSubjects.kt]
+ * para el porqué de la forma.
  */
 class TunerContractTest {
 
-    private fun tuner(
-        tuning: Tuning = Tuning.GUITAR_STANDARD,
-        config: TuningConfiguration = TuningConfiguration(tuning),
-    ) = FakeTuner(config)
+    private fun sujetos(tuning: Tuning = Tuning.GUITAR_STANDARD) =
+        tunerSubjects(TuningConfiguration(tuning))
+
+    // =======================================================================
+    // AC-004.3 — el contrato ejerce TODA implementación, o falla
+    // =======================================================================
+
+    /**
+     * El criterio de muerte de MINI-004 hecho test, en su mitad barata.
+     *
+     * La mitad cara —descubrir implementaciones nuevas en el fuente— la hace
+     * `scripts/check-ituner-implementations.sh`, porque Kotlin/Native **no tiene
+     * reflection** y ningún test en runtime puede enumerar las implementaciones del módulo.
+     * Este test sólo ata la lista declarada a los sujetos que realmente se ejercen: sin él,
+     * la lista podría decir tres y el contrato ejercer dos.
+     */
+    @Test
+    fun elContratoEjerceExactamenteLasImplementacionesDeclaradas() {
+        assertEquals(
+            IMPLEMENTACIONES_EJERCIDAS,
+            sujetos().map { it.name },
+            "la lista declarada y los sujetos que el contrato ejerce se separaron. El guard " +
+                "de fuente compara ESA lista contra el árbol, así que si acá sobra o falta " +
+                "uno, el guard queda vigilando algo que no se corre.",
+        )
+    }
+
+    // =======================================================================
+    // Los objetivos salen del modelo
+    // =======================================================================
 
     @Test
     fun losObjetivosSalenDelModeloYNoDeUnaTablaInerte() {
-        val t = tuner()
+        sujetos().forEach { s ->
+            val t = s.tuner
 
-        assertEquals(6, t.targets.size)
-        assertEquals("E2", t.targets[5].note.name)
-        assertTrue(abs(t.targets[5].frequency.hz - 82.407) < 0.001)
+            assertEquals(6, t.targets.size, "$s: una guitarra tiene 6 cuerdas")
+            assertEquals("E2", t.targets[5].note.name, "$s: la cuerda 6 es el mi grave")
+            assertTrue(abs(t.targets[5].frequency.hz - 82.407) < 0.001, "$s: E2 son 82,407 Hz")
 
-        // Y responden a la configuración: si fueran una tabla fija, esto no se movería.
-        t.configuration = t.configuration.copy(reference = TuningReference.BAROQUE)
-        assertTrue(
-            abs(t.targets[5].frequency.hz - 82.407 * 415.0 / 440.0) < 0.001,
-            "cambiar la referencia no movió los objetivos: el doble está inerte",
-        )
+            // Y responden a la configuración: si fueran una tabla fija, esto no se movería.
+            t.configuration = t.configuration.copy(reference = TuningReference.BAROQUE)
+            assertTrue(
+                abs(t.targets[5].frequency.hz - 82.407 * 415.0 / 440.0) < 0.001,
+                "$s: cambiar la referencia no movió los objetivos — está inerte",
+            )
 
-        t.configuration = t.configuration.copy(capo = Semitones(2))
-        assertEquals("F#2", t.targets[5].note.name)
+            t.configuration = t.configuration.copy(capo = Semitones(2))
+            assertEquals("F#2", t.targets[5].note.name, "$s: el capo transpone")
+        }
     }
+
+    // =======================================================================
+    // AC-004.2 — la obligación de empuje, SUS DOS MITADES
+    // =======================================================================
 
     /**
      * La obligación que la interfaz declara en prosa: **cambiar la configuración o la cuerda
@@ -56,35 +99,97 @@ class TunerContractTest {
      */
     @Test
     fun cambiarLaCuerdaOLaConfiguracionEmpujaElObjetivoAlMotor() {
-        val t = tuner()
-        assertTrue(t.pushedTargets.isEmpty(), "sin cuerda elegida no hay nada que empujar")
+        sujetos().forEach { s ->
+            val t = s.tuner
+            assertTrue(
+                s.pushedTargets.isEmpty(),
+                "$s: sin cuerda elegida no hay nada que empujar, y empujó ${s.pushedTargets}",
+            )
 
-        t.selectedString = 6
-        assertEquals(1, t.pushedTargets.size)
-        assertTrue(abs(t.pushedTargets.last() - 82.407) < 0.001)
+            t.selectedString = 6
+            assertEquals(1, s.pushedTargets.size, "$s: elegir cuerda empuja una vez")
+            assertTrue(
+                abs(s.pushedTargets.last() - 82.407) < 0.01,
+                "$s: empujó ${s.pushedTargets.last()} Hz y la cuerda 6 es E2 (82,407)",
+            )
 
-        t.selectedString = 1
-        assertTrue(abs(t.pushedTargets.last() - 329.628) < 0.001)
+            t.selectedString = 1
+            assertTrue(
+                abs(s.pushedTargets.last() - 329.628) < 0.01,
+                "$s: empujó ${s.pushedTargets.last()} Hz y la cuerda 1 es E4 (329,628)",
+            )
 
-        // Y la configuración también: el objetivo de la MISMA cuerda cambió de frecuencia.
-        val before = t.pushedTargets.size
-        t.configuration = t.configuration.copy(reference = TuningReference.BAROQUE)
-        assertEquals(before + 1, t.pushedTargets.size,
-            "cambiar la referencia movió el objetivo y no se re-empujó")
-        assertTrue(abs(t.pushedTargets.last() - 329.628 * 415.0 / 440.0) < 0.01)
+            // Y la configuración también: el objetivo de la MISMA cuerda cambió de frecuencia.
+            val before = s.pushedTargets.size
+            t.configuration = t.configuration.copy(reference = TuningReference.BAROQUE)
+            assertEquals(
+                before + 1,
+                s.pushedTargets.size,
+                "$s: cambiar la referencia movió el objetivo y no se re-empujó",
+            )
+            assertTrue(
+                abs(s.pushedTargets.last() - 329.628 * 415.0 / 440.0) < 0.01,
+                "$s: el re-empuje no usó la referencia nueva",
+            )
+        }
     }
 
     /**
-     * Sin lectura no hay lectura: `null` y **no** un cero que se lea como "afinado".
+     * 🔴 **La mitad que se olvida, y la cara.**
+     *
+     * `ITunerBridge.setTunerTargetHz` *"reinicia la integración"*, así que re-empujar el
+     * mismo objetivo deja un afinador que **nunca converge** — y desde afuera eso es
+     * indistinguible de no empujar nunca: los dos se ven como un DSP roto.
+     *
+     * Este caso no existía en el contrato hasta MINI-004, y su ausencia era el punto ciego
+     * exacto: `pushedTargets` permitía exigir que alguien empujara, y **nadie miraba al que
+     * empujaba de más**. `FakeTuner` empujaba en cada asignación, o sea que la única
+     * implementación existente incumplía la obligación que este mismo contrato dice vigilar.
      */
     @Test
-    fun sinDatosLaLecturaEsNullYNoUnCeroQueParezcaAfinado() {
-        val t = tuner()
-        t.selectedString = 6
-        assertNull(t.reading(), "no se publicó nada todavía")
+    fun reasignarElMismoObjetivoNoVuelveAEmpujar() {
+        sujetos().forEach { s ->
+            val t = s.tuner
 
-        t.start()
-        assertNull(t.reading(), "arrancar no inventa una medición")
+            t.selectedString = 3
+            t.selectedString = 3
+            t.selectedString = 3
+
+            assertEquals(
+                1,
+                s.pushedTargets.size,
+                "$s: reasignar el MISMO valor volvió a empujar. Cada empuje reinicia la " +
+                    "integración del estimador, así que esto es un afinador que nunca " +
+                    "converge. Empujes vistos: ${s.pushedTargets}",
+            )
+
+            // Y la configuración que NO mueve el objetivo tampoco puede empujar: "cambió" se
+            // mide sobre los Hz efectivos, no sobre la identidad del objeto de config.
+            t.configuration = t.configuration.copy(reference = TuningReference.STANDARD)
+            assertEquals(
+                1,
+                s.pushedTargets.size,
+                "$s: reasignar la MISMA referencia (440 Hz) movió cero y empujó igual. " +
+                    "Empujes vistos: ${s.pushedTargets}",
+            )
+        }
+    }
+
+    // =======================================================================
+    // La lectura
+    // =======================================================================
+
+    /** Sin lectura no hay lectura: `null` y **no** un cero que se lea como "afinado". */
+    @Test
+    fun sinDatosLaLecturaEsNullYNoUnCeroQueParezcaAfinado() {
+        sujetos().forEach { s ->
+            val t = s.tuner
+            t.selectedString = 6
+            assertNull(t.reading(), "$s: no se publicó nada todavía")
+
+            t.start()
+            assertNull(t.reading(), "$s: arrancar no inventa una medición")
+        }
     }
 
     /**
@@ -92,35 +197,39 @@ class TunerContractTest {
      * estimador todavía no está cableado al thread de análisis.
      *
      * Este test existe para que ese estado sea visible en la suite y no una sorpresa en la
-     * app: la lectura tiene objetivo, tiene nivel y tiene estado, pero **no tiene cents**. Una
-     * UI que asuma un número acá se rompe hoy, no dentro de tres meses.
+     * app: la lectura tiene objetivo, tiene nivel y tiene estado, pero **no tiene cents**.
+     * Una UI que asuma un número acá se rompe hoy, no dentro de tres meses.
      */
     @Test
     fun unSnapshotSinPitchDaLecturaConObjetivoPeroSinCents() {
-        val t = tuner()
-        t.selectedString = 6
-        t.scriptedSnapshots.addLast(FakeTuner.snapshotWithoutPitch())
-        t.start()
+        sujetos().forEach { s ->
+            val t = s.tuner
+            t.selectedString = 6
+            s.publicar(nativoSinPitch())
+            t.start()
 
-        val reading = assertNotNull(t.reading())
-        assertNotNull(reading.target, "el objetivo sale del modelo y siempre está")
-        assertEquals("E2", reading.target.note.name)
-        assertNull(reading.cents, "el motor todavía no mide altura: cents es ausencia, no cero")
-        assertTrue(!reading.isConverged, "sin cents no se puede declarar convergido")
-        assertEquals(48000, reading.snapshot.captureSampleRate)
+            val reading = assertNotNull(t.reading(), "$s: había un snapshot publicado")
+            assertNotNull(reading.target, "$s: el objetivo sale del modelo y siempre está")
+            assertEquals("E2", reading.target.note.name, "$s: la cuerda 6 es E2")
+            assertNull(reading.cents, "$s: cents es ausencia, no cero")
+            assertTrue(!reading.isConverged, "$s: sin cents no se puede declarar convergido")
+            assertEquals(48000, reading.snapshot.captureSampleRate, "$s: el sample rate cruzó")
+        }
     }
 
     @Test
     fun conPitchLaLecturaJuntaObjetivoYMedicion() {
-        val t = tuner()
-        t.selectedString = 5                      // A2
-        t.scriptedSnapshots.addLast(FakeTuner.snapshotWithPitch(cents = +3.2f))
-        t.start()
+        sujetos().forEach { s ->
+            val t = s.tuner
+            t.selectedString = 5                      // A2
+            s.publicar(nativoConPitch(cents = 3.2f))
+            t.start()
 
-        val reading = assertNotNull(t.reading())
-        assertEquals("A2", assertNotNull(reading.target).note.name)
-        assertEquals(3.2f, assertNotNull(reading.cents))
-        assertTrue(reading.isConverged)
+            val reading = assertNotNull(t.reading(), "$s: había un snapshot publicado")
+            assertEquals("A2", assertNotNull(reading.target).note.name, "$s: la cuerda 5 es A2")
+            assertEquals(3.2f, assertNotNull(reading.cents), "$s: los cents cruzaron")
+            assertTrue(reading.isConverged, "$s: hay objetivo, medición y estado convergido")
+        }
     }
 
     /**
@@ -129,17 +238,23 @@ class TunerContractTest {
      */
     @Test
     fun convergidoExigeObjetivoMedicionYEstado() {
-        val t = tuner()
-        t.scriptedSnapshots.addLast(FakeTuner.snapshotWithPitch(cents = 0.1f))
-        t.start()
-        // Sin cuerda elegida: hay medición pero no hay contra qué.
-        assertTrue(!assertNotNull(t.reading()).isConverged, "sin objetivo no hay convergencia")
+        sujetos().forEach { s ->
+            val t = s.tuner
+            s.publicar(nativoConPitch(cents = 0.1f))
+            t.start()
+            // Sin cuerda elegida: hay medición pero no hay contra qué.
+            assertTrue(
+                !assertNotNull(t.reading(), "$s: hay snapshot").isConverged,
+                "$s: sin objetivo no hay convergencia",
+            )
 
-        t.selectedString = 5
-        t.scriptedSnapshots.addLast(
-            FakeTuner.snapshotWithPitch(cents = 0.1f, state = TunerState.MEASURING),
-        )
-        assertTrue(!assertNotNull(t.reading()).isConverged, "midiendo todavía no es convergido")
+            t.selectedString = 5
+            s.publicar(nativoConPitch(cents = 0.1f, state = TunerState.MEASURING))
+            assertTrue(
+                !assertNotNull(t.reading(), "$s: hay snapshot").isConverged,
+                "$s: midiendo todavía no es convergido",
+            )
+        }
     }
 
     /**
@@ -151,28 +266,85 @@ class TunerContractTest {
      */
     @Test
     fun elInvarianteReentranteSobreviveALaInterfaz() {
-        val t = tuner(Tuning.UKULELE_HIGH_G)
+        sujetos(Tuning.UKULELE_HIGH_G).forEach { s ->
+            val t = s.tuner
 
-        t.selectedString = 4
-        assertEquals("G4", assertNotNull(t.targets.getOrNull(3)).note.name)
-        assertTrue(abs(t.pushedTargets.last() - 392.0) < 0.1,
-            "empujó ${t.pushedTargets.last()} Hz: la cuerda 4 del high-G es G4, no G3")
+            t.selectedString = 4
+            assertEquals(
+                "G4",
+                assertNotNull(t.targets.getOrNull(3)).note.name,
+                "$s: la cuerda 4 del high-G es G4",
+            )
+            assertTrue(
+                abs(s.pushedTargets.last() - 392.0) < 0.1,
+                "$s: empujó ${s.pushedTargets.last()} Hz — la cuerda 4 del high-G es G4, no G3",
+            )
 
-        t.selectedString = 3
-        assertTrue(t.pushedTargets.last() < 300.0, "la cuerda 3 (C4) es MÁS GRAVE que la 4")
+            t.selectedString = 3
+            assertTrue(
+                s.pushedTargets.last() < 300.0,
+                "$s: la cuerda 3 (C4) es MÁS GRAVE que la 4, y empujó ${s.pushedTargets.last()}",
+            )
+        }
     }
 
+    /**
+     * Parar no borra la última medición — y **no** porque el envoltorio la cachee.
+     *
+     * El motor lee de un buffer publicado y `wma_tuner_stop` no libera ni el ring ni el
+     * snapshot, así que la garantía es de abajo. Un caché en el envoltorio sobreviviría
+     * también a la destrucción del subsistema, convirtiendo *"no sé"* en *"sigue igual"*.
+     * Ver MINI-003.
+     */
     @Test
     fun pararNoBorraLaUltimaLectura() {
-        val t = tuner()
-        t.selectedString = 6
-        t.scriptedSnapshots.addLast(FakeTuner.snapshotWithPitch(cents = -1.5f))
-        t.start()
-        assertNotNull(t.reading())
+        sujetos().forEach { s ->
+            val t = s.tuner
+            t.selectedString = 6
+            s.publicar(nativoConPitch(cents = -1.5f))
+            t.start()
+            assertNotNull(t.reading(), "$s: hay una lectura antes de parar")
 
-        t.stop()
-        assertTrue(!t.isRunning)
-        val after = assertNotNull(t.reading(), "parar no puede borrar la última medición")
-        assertEquals(-1.5f, assertNotNull(after.cents))
+            t.stop()
+            assertTrue(!t.isRunning, "$s: paró")
+            val after = assertNotNull(t.reading(), "$s: parar no puede borrar la última medición")
+            assertEquals(-1.5f, assertNotNull(after.cents), "$s: y es la MISMA medición")
+        }
     }
+
+    // =======================================================================
+    // Los guiones, en forma nativa
+    // =======================================================================
+
+    /**
+     * Los [com.watermellonstudios.audio.domain.tuner.TunerSnapshot.VALUE_COUNT] floats en el
+     * orden que documenta `wma_tuner_get_snapshot`.
+     *
+     * `NaN` y no `0f` para lo ausente: es lo que hace el motor, y por el mismo motivo —0,0
+     * cents es una lectura **plausible** (afinado exacto) que una UI dibujaría como medición.
+     */
+    private fun nativo(cents: Float, state: Float): FloatArray = floatArrayOf(
+        48000f, 0.2f, 48000f, 0f, state,
+        cents, 0.3f, 0.01f,
+        440f, 0.99f,
+        Float.NaN, 0f,
+        0f, 2f, 21f,
+    )
+
+    private fun nativoSinPitch(): FloatArray =
+        nativo(cents = Float.NaN, state = 1f)          // NO_LOCK
+
+    private fun nativoConPitch(
+        cents: Float,
+        state: TunerState = TunerState.CONVERGED,
+    ): FloatArray = nativo(
+        cents = cents,
+        state = when (state) {
+            TunerState.NO_SIGNAL -> 0f
+            TunerState.NO_LOCK -> 1f
+            TunerState.MEASURING -> 2f
+            TunerState.CONVERGED -> 3f
+            TunerState.UNKNOWN -> 9f
+        },
+    )
 }

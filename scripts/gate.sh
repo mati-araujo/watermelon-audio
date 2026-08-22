@@ -304,6 +304,15 @@ gate_guardrails() {
     # para siempre.
     step guardrails rate-self     python3 scripts/check-literal-rate.py --self-test || return 1
     step guardrails literal-rate  python3 scripts/check-literal-rate.py || return 1
+
+    # MINI-004 — que el contrato de ITuner ejerza TODA implementacion del modulo.
+    # Kotlin/Native no tiene reflection, asi que las implementaciones se descubren
+    # LEYENDO EL FUENTE y se comparan contra la lista de TunerSubjects.kt en las dos
+    # direcciones. Sin esto la parametrizacion seria cosmetica: el tercer implementador
+    # entra, nadie lo suma a la lista, y el contrato vuelve a probar dos — verde, y
+    # todavia llamandose "contrato".
+    step guardrails ituner-self   python3 scripts/check-ituner-implementations.py --self-test || return 1
+    step guardrails ituner-impls  python3 scripts/check-ituner-implementations.py || return 1
 }
 
 gate_cpp_tests_macos() {
