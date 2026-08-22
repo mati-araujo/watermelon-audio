@@ -356,3 +356,9 @@ void SynthEngineDispatcher::sfNoteOffAllExcept(int keepTouchId) {
         mSoundFontEngine->noteOffAllExcept(keepTouchId);
     }
 }
+
+void SynthEngineDispatcher::sfSetTouchExpression(int touchId, float expression) {
+    if (mSoundFontEngine) {
+        mSoundFontEngine->setTouchExpression(touchId, expression);
+    }
+}

@@ -868,6 +868,18 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     }
 
     /**
+     * REQ-008 — change the level of a touch that is already sounding, without
+     * re-attacking it. Multiplier, neutral at 1.0.
+     *
+     * Out-of-range and inactive touches are absorbed on the C side, which is why
+     * there is no guard here: the same call over JNI comes back as the no-op the
+     * contract promises.
+     */
+    override fun sfSetTouchExpression(touchId: Int, expression: Float) {
+        nativeSfSetTouchExpression(touchId, expression)
+    }
+
+    /**
      * Get waveform samples for visualization.
      *
      * @param buffer Buffer to fill with samples
@@ -1903,6 +1915,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeSfNoteOff(touchId: Int)
     private external fun nativeSfNoteOffAll()
     private external fun nativeSfNoteOffAllExcept(keepTouchId: Int)
+    private external fun nativeSfSetTouchExpression(touchId: Int, expression: Float)
     private external fun nativeSetVoiceFilterEnabled(enabled: Boolean)
     private external fun nativeSetVoiceFilterCutoff(hz: Float)
     private external fun nativeSetVoiceFilterResonance(q: Float)

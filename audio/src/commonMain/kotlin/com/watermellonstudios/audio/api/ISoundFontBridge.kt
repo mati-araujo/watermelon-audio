@@ -124,4 +124,24 @@ interface ISoundFontBridge {
      * de un solo dedo sobre el XY pad, donde el bucle se pagaba por frame.
      */
     fun sfNoteOffAllExcept(keepTouchId: Int)
+
+    // ==================== EXPRESIÓN POR TOQUE ====================
+
+    /**
+     * Cambia el nivel de un toque que **ya está sonando**, sin volver a atacarlo. `RT-safe`.
+     *
+     * Multiplicador con neutro en `1.0`. Multiplica contra la expresión global, que no
+     * cambia de significado: son dos perillas distintas y se componen.
+     *
+     * **Un toque fuera de rango o inactivo se ignora**: sin efecto y sin excepción — guard
+     * de contrato, ver el KDoc de la interfaz. No se guarda "para cuando ataque", porque el
+     * note-on reinicia la expresión a `1.0` de todos modos.
+     *
+     * 🔑 **La velocity del note-on es el ATAQUE y no se cambia después.** Esto es lo otro:
+     * el nivel de una nota viva. Si el gesto arranca desde la Y del dedo, hay que mandar un
+     * valor **relativo al punto donde aterrizó**, o el ataque queda atenuado dos veces —por
+     * la velocity y por la expresión—. Es el error que este método existe para hacer posible
+     * evitar, no uno que pueda impedir por su cuenta.
+     */
+    fun sfSetTouchExpression(touchId: Int, expression: Float)
 }

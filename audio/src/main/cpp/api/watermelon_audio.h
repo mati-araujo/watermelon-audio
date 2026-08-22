@@ -373,6 +373,26 @@ WMA_API void wma_sf_note_off_all(WmaEngine* engine);
 /* RT-safe */
 WMA_API void wma_sf_note_off_all_except(WmaEngine* engine, int keep_touch_id);
 
+/**
+ * REQ-008 — set the expression of a touch that is ALREADY sounding.
+ *
+ * Changes the level of a live note without re-attacking it: there is no note-on
+ * on this path. Multiplier, neutral at 1.0, applied per touch and multiplied
+ * against the global expression parameter, whose meaning is unchanged.
+ *
+ * An out-of-range or inactive touch is ignored: no effect, no crash.
+ *
+ * The attack itself is NOT reachable from here — the velocity of the note-on is
+ * the attack and stays fixed for the life of the note. A consumer that starts
+ * the gesture from the finger's own Y must send a value RELATIVE to where the
+ * finger landed, or the attack is attenuated twice.
+ *
+ * @param touch_id    Touch index; out of range is ignored
+ * @param expression  Level multiplier, neutral at 1.0
+ */
+/* RT-safe */
+WMA_API void wma_sf_set_touch_expression(WmaEngine* engine, int touch_id, float expression);
+
 /* ================================================================
  * 7. Voice Filter
  * ================================================================ */

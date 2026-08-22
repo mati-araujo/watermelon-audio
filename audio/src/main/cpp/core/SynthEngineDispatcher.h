@@ -158,6 +158,7 @@ public:
     void sfNoteOff(int touchId);
     void sfNoteOffAll();
     void sfNoteOffAllExcept(int keepTouchId);
+    void sfSetTouchExpression(int touchId, float expression);
 
     /** @brief Direct access to SoundFontEngine (for processAudioBlock rendering) */
     SoundFontEngine* getSoundFontEngine() const { return mSoundFontEngine.get(); }

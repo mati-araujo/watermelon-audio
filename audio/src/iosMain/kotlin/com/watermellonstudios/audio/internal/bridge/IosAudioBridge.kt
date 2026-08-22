@@ -1389,6 +1389,9 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun sfNoteOffAllExcept(keepTouchId: Int) =
         wma_sf_note_off_all_except(engine, keepTouchId)
 
+    override fun sfSetTouchExpression(touchId: Int, expression: Float) =
+        wma_sf_set_touch_expression(engine, touchId, expression)
+
     // ==================== LOG CAPTURE ====================
 
     override fun setLogCaptureEnabled(enabled: Boolean) = wma_log_capture_set_enabled(enabled)

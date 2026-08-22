@@ -376,6 +376,24 @@ public:
     void sfNoteOffAllExcept(int keepTouchId);
 
     /**
+     * @brief REQ-008 — cambia el nivel de un toque que YA esta sonando.
+     *
+     * Multiplicador con neutro en `1.0`, por toque, sin volver a atacar la nota.
+     * Multiplica contra la expresion global (`PARAM_EXPRESSION`), que no cambia de
+     * semantica. Un toque inactivo se ignora sin efecto (AC-008.5).
+     *
+     * 🔴 NO LA INTERCEPTA EL ARPEGIADOR, y eso es deliberado. `sfNoteOn` desvia el
+     * toque 0 al `ArpSequencer` cuando esta habilitado, asi que en ese estado el slot
+     * 0 del SoundFontEngine no tiene voces y este llamado no hace nada. El arpegiador
+     * no tiene hoy un concepto de expresion por toque al que reenviar: darle uno es
+     * otro REQ, y fingir aca que lo tiene seria peor que el no-op.
+     *
+     * @param touchId Indice de toque (0 a MAX_TOUCHES-1); fuera de rango se ignora
+     * @param expression Multiplicador de nivel, neutro en 1.0
+     */
+    void sfSetTouchExpression(int touchId, float expression);
+
+    /**
      * @brief Cambia el tipo de modulador activo
      * @param typeId Tipo de modulador (0=NONE, 1=BURST, 2=AM, 3=FM, 4=PWM, 5=ENV, 6=RING, 7=GATE)
      * Lock-free: Seguro llamar desde cualquier thread
