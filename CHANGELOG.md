@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.6.0...v2.7.0) (2026-08-21)
+
+
+### Features
+
+* **tuner:** TunerImpl sobre el puente, con la disciplina de empuje ([#179](https://github.com/mati-araujo/watermelon-audio/issues/179)) ([d0ec61c](https://github.com/mati-araujo/watermelon-audio/commit/d0ec61c1f6003c450471665f02a1d6ca70c8b88c))
+
 ## [2.6.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.5.0...v2.6.0) (2026-08-21)
 
 
