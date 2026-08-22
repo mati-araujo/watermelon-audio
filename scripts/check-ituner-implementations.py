@@ -46,13 +46,31 @@ REGISTRY = os.path.join(
     'audio', 'api', 'TunerSubjects.kt',
 )
 
-# Una declaracion. Se recuerda la ULTIMA vista para poder nombrar al implementador cuando la
-# lista de supertipos aparece varias lineas mas abajo:
+# Una declaracion, CON SU PALABRA CLAVE. Se recuerda la ULTIMA vista, por dos motivos:
 #
-#     internal class TunerImpl(
-#         private val bridge: ITunerBridge,
-#     ) : ITuner {
-DECL = re.compile(r'\b(?:class|object)\s+([A-Za-z_][A-Za-z0-9_]*)')
+#   1. para nombrar al implementador cuando la lista de supertipos aparece varias lineas
+#      mas abajo:
+#
+#          internal class TunerImpl(
+#              private val bridge: ITunerBridge,
+#          ) : ITuner {
+#
+#   2. 🔴 para distinguir un SUPERTIPO de un TIPO DE RETORNO, que es la misma forma:
+#
+#          fun create(configuration: TuningConfiguration): ITuner = ...
+#                                                        ^^^^^^^^ NO es un supertipo
+#
+#      Sin esto, `TunerFactory` —la puerta publica, que DEVUELVE un ITuner— se reporta como
+#      implementacion. Medido: el guard se ponia rojo contra el master que trae REQ-010 S2.
+#      La palabra clave desempata: si la ultima declaracion abierta es `fun`, lo que sigue a
+#      los dos puntos es lo que la funcion devuelve; si es `class`/`object`, es de quien
+#      hereda. Y funciona igual con la firma partida en varias lineas, porque el `fun` queda
+#      recordado desde su propia linea.
+DECL_KINDS = ('class', 'object')
+TOKEN = re.compile(
+    r'\b(?P<kind>class|object|fun)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)'
+    r'|(?P<super>[:,]\s*ITuner(?![A-Za-z0-9_]))'
+)
 
 # `ITuner` detras de `:` o `,`, y seguido de algo que NO continua el identificador. Ese
 # `(?![A-Za-z0-9_])` es lo unico que separa `ITuner` de `ITunerBridge`, y quitarlo hace que
@@ -84,23 +102,36 @@ def scan_implementations(root):
             path = os.path.join(dirpath, name)
             with open(path, encoding='utf-8') as fh:
                 text = _strip_block_comments(fh.read())
-            last_decl = None
+            last_kind = None
+            last_name = None
             depth = 0
             for lineno, raw in enumerate(text.splitlines(), start=1):
                 line = LINE_COMMENT.sub('', raw)
-                decl = DECL.search(line)
-                if decl:
-                    last_decl = decl.group(1)
-                # Se recorre la linea llevando la profundidad, porque `) : ITuner {` cierra y
-                # declara en el mismo renglon: mirar la profundidad al final de la linea
-                # perderia ese caso, que es justo la forma que usan TunerImpl y FakeTuner.
+
+                # La profundidad EN CADA POSICION, no al final de la linea: `) : ITuner {`
+                # cierra el constructor y declara el supertipo en el mismo renglon, que es
+                # justo la forma que usan TunerImpl y FakeTuner. depths[i] es la profundidad
+                # ANTES de consumir el caracter i.
+                depths = []
+                d = depth
                 for ch in line:
+                    depths.append(d)
                     if ch == '(':
-                        depth += 1
+                        d += 1
                     elif ch == ')':
-                        depth = max(0, depth - 1)
-                if depth == 0 and SUPERTYPE.search(line) and last_decl:
-                    found[last_decl] = (os.path.relpath(path, root), lineno)
+                        d = max(0, d - 1)
+                depth = d
+
+                # En ORDEN de aparicion, para que la palabra clave que manda sea la que
+                # precede a los dos puntos y no la ultima de la linea.
+                for m in TOKEN.finditer(line):
+                    if m.group('super') is not None:
+                        i = m.start('super')
+                        if depths[i] == 0 and last_kind in DECL_KINDS and last_name:
+                            found[last_name] = (os.path.relpath(path, root), lineno)
+                    else:
+                        last_kind = m.group('kind')
+                        last_name = m.group('name')
     return found
 
 
@@ -145,6 +176,23 @@ def self_test():
                      '    val tuner: ITuner,\n'
                      '    val otro: Int,\n'
                      ') {\n}\n')
+        # 🔴 Negativo 4: DEVOLVER un ITuner no es SER un ITuner.
+        #
+        # Este es el caso que se llevo puesto al guard de verdad, y aparecio recien al
+        # rebasar sobre el master que trae `TunerFactory` — o sea DESPUES de que el gate
+        # pasara en verde sobre una base que todavia no la tenia. Un tipo de retorno tiene
+        # exactamente la forma de un supertipo (`): ITuner`), asi que la fabrica publica se
+        # reportaba como implementacion. Las dos formas, la de una linea y la partida.
+        with open(os.path.join(tmp, 'f.kt'), 'w', encoding='utf-8') as fh:
+            fh.write('object FabricaDeUnaLinea {\n'
+                     '    fun create(c: Config): ITuner = TODO()\n'
+                     '}\n')
+        with open(os.path.join(tmp, 'g.kt'), 'w', encoding='utf-8') as fh:
+            fh.write('object FabricaPartida {\n'
+                     '    fun create(\n'
+                     '        c: Config,\n'
+                     '    ): ITuner = TODO()\n'
+                     '}\n')
 
         found = scan_implementations(tmp)
 
@@ -158,6 +206,8 @@ def self_test():
             ('PuenteDePlataforma', 'ITunerBridge contiene la cadena ITuner'),
             ('SoloLaMenciona', 'un KDoc que la nombra no la implementa'),
             ('SoloLoRecibe', 'un parametro tipado ITuner no es un supertipo'),
+            ('FabricaDeUnaLinea', 'un TIPO DE RETORNO no es un supertipo'),
+            ('FabricaPartida', 'idem, con la firma partida en varias lineas'),
         ):
             if prohibido in found:
                 print('  ROTO: reporto {} ({})'.format(prohibido, motivo), file=sys.stderr)
