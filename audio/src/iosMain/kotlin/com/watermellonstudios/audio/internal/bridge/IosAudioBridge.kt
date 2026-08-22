@@ -535,10 +535,13 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun getTunerTargetHz(): Float = wma_tuner_get_target(engine)
 
     /**
-     * @return null si no hay análisis o si todavía no se publicó nada, que es
-     *   **distinto** de "todo en cero". `wma_tuner_get_snapshot` deja el buffer
-     *   intacto cuando falla, justamente para que nadie lea ceros como una
-     *   medición; devolver null preserva esa distinción hasta arriba de todo.
+     * @return null si **no existe la costura de análisis** (`analysis seam` — que no
+     *   es lo mismo que "el afinador está parado": parar deja la costura en pie y la
+     *   última lectura sigue disponible), si todavía no se publicó nada, o si la copia
+     *   salió desgarrada. Los tres son **distintos** de "todo en cero":
+     *   `wma_tuner_get_snapshot` deja el buffer intacto cuando falla, justamente para
+     *   que nadie lea ceros como una medición; devolver null preserva esa distinción
+     *   hasta arriba de todo. Ver el KDoc de [ITunerBridge.getTunerSnapshot] (MINI-003).
      */
     override fun getTunerSnapshot(): FloatArray? = memScoped {
         val values = allocArray<FloatVar>(TunerSnapshot.VALUE_COUNT)

@@ -1603,10 +1603,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * 🔴 El número va por la constante y no escrito acá: decía "ocho" mientras el
      * snapshot ya tenía quince (MINI-002).
      *
-     * @return null si no hay análisis o si no se publicó nada todavía. **Null no
-     *   es "todo en cero"**: la C API deja el buffer intacto cuando falla para
-     *   que nadie lea ceros como una medición, y esta firma preserva la
-     *   distinción hasta arriba.
+     * @return null si **no existe la costura de análisis** (`analysis seam` — que no
+     *   es lo mismo que "el afinador está parado": parar deja la costura en pie y la
+     *   última lectura sigue disponible), si no se publicó nada todavía, o si la copia
+     *   salió desgarrada. **Null no es "todo en cero"**: la C API deja el buffer
+     *   intacto cuando falla para que nadie lea ceros como una medición, y esta firma
+     *   preserva la distinción hasta arriba. Ver el KDoc de
+     *   [com.watermellonstudios.audio.api.ITunerBridge.getTunerSnapshot] (MINI-003).
      */
     override fun getTunerSnapshot(): FloatArray? = nativeGetTunerSnapshot()
 

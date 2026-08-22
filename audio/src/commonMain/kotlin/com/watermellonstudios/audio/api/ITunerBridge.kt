@@ -58,10 +58,32 @@ interface ITunerBridge {
      * 🔴 El número va por la constante y no escrito acá: este KDoc decía "ocho"
      * mientras el snapshot ya tenía quince, y un consumidor diseñó contra esa cifra.
      *
-     * @return null si no hay análisis o si todavía no se publicó nada. **Null y
-     *   "todo en cero" no son lo mismo**: la C API deja el buffer intacto cuando
-     *   falla, justamente para que nadie lea ceros como si fueran una medición.
-     *   Ver [com.watermellonstudios.audio.domain.tuner.TunerSnapshot.fromNative].
+     * 🔴 **`stop()` NO borra la última lectura, y eso es una garantía del motor.**
+     * Esta función lee de un buffer **publicado**, no del hilo de análisis corriendo,
+     * y `wma_tuner_stop` no libera ni el ring ni el snapshot —está dicho explícito
+     * en `watermelon_audio.cpp`—. Así que después de [stopTunerSync] la última
+     * medición sigue disponible, y un envoltorio **no tiene nada que cachear**: un
+     * caché propio sobreviviría también a la destrucción del subsistema, y ahí
+     * convertiría *"no sé"* en *"sigue igual"*.
+     *
+     * @return null en **tres** casos distintos, y conviene no colapsarlos:
+     *   1. **no existe la costura de análisis** (`analysis seam`) — el subsistema no
+     *      está construido. NO es lo mismo que "el afinador está parado": parar deja
+     *      la costura en pie, ver arriba.
+     *   2. **todavía no se publicó nada** — la costura existe y aún no hubo un tick.
+     *   3. la copia salió desgarrada / el buffer de salida es nulo.
+     *
+     *   **Null y "todo en cero" no son lo mismo**: la C API deja el buffer intacto
+     *   cuando falla, justamente para que nadie lea ceros como si fueran una
+     *   medición. Ver [com.watermellonstudios.audio.domain.tuner.TunerSnapshot.fromNative].
+     *
+     * ⚠️ Este KDoc decía *"null si no hay análisis"* a secas, y esa frase se lee como
+     * *"si el afinador está parado"*. La ambigüedad hizo que un criterio de aceptación
+     * de REQ-010 S1 se escribiera **mal dos veces** —primero prohibiendo conservar la
+     * última lectura, después exigiendo un caché que el motor ya hacía innecesario— y
+     * el desempate salió de leer el C++, que es justo lo que un consumidor de esta
+     * interfaz no debería tener que hacer. La fuente autoritativa (`watermelon_audio.h`)
+     * siempre dijo **"analysis seam"**; la precisión se perdió al traducir. (MINI-003)
      */
     fun getTunerSnapshot(): FloatArray?
 
