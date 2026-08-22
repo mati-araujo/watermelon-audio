@@ -97,23 +97,27 @@ std::vector<float> filterIr(int rate, int typeId, float cutoffHz, float q) {
 /**
  * Efectos cuyo nivel de salida NO se puede medir de forma reproducible.
  *
- * Los dos sortean un LFO `RANDOM_SMOOTH`, y `LFO::randomFloat()` siembra su
+ * `RANDOM_RESO` sortea un LFO `RANDOM_SMOOTH`, y `LFO::randomFloat()` siembra su
  * generador con `std::random_device`: dos instancias recien construidas ya
- * difieren, sin que nada las haya tocado.
+ * difieren, sin que nada las haya tocado. Ya estaba excluido del test bit a bit
+ * de WD-3.2 por lo mismo.
  *
- * `RANDOM_RESO` ya estaba excluido del test bit a bit de WD-3.2 por lo mismo.
- * `TAPE_ECHO` NO lo estaba, y no por descuido de aquel test sino porque su
- * ventana de 4.096 frames es MAS CORTA que su propio delay de 350 ms: alli solo
- * se mide el camino directo, donde el flutter no llega. Aca la ventana son 2 s
- * y el eco vuelve, asi que la no-determinacion aparece.
+ * 🔴 EL CRITERIO ES CONTRA LA TOLERANCIA DEL BARRIDO, NO CONTRA LA DIFERENCIA
+ * ENTRE RATES. Un efecto queda fuera cuando su dispersion corrida-a-corrida es
+ * comparable a los 0,5 dB que este barrido tolera — no cuando es comparable a su
+ * propio movimiento entre rates.
  *
- * La exclusion esta MEDIDA por `TapeEchoIsNonDeterministicByDesign`, que
- * comprueba que su dispersion corrida-a-corrida se come su propia diferencia
- * entre rates — o sea que el instrumento no puede resolver lo que se le pediria
- * afirmar.
+ * La distincion no es academica: `TAPE_ECHO` estuvo excluido de aca por el
+ * criterio equivocado (REQ-005 S1). La premisa escrita era CIERTA —su dispersion
+ * de 0,0515 dB se come los 0,0517 dB que separan sus rates— pero el barrido no
+ * pide RESOLVER esa diferencia: pide que el nivel no se mueva mas de 0,5 dB, y
+ * eso se contesta con 15,3 sigma de margen. Era un criterio de resolucion
+ * aplicado a un test de umbral, y dejaba fuera del catalogo a un efecto que si
+ * se podia medir. `RANDOM_RESO` se queda afuera con el mismo criterio nuevo, y
+ * el numero es holgado: 16,0 dB contra 0,5.
  */
 const std::set<std::string>& nonDeterministicLevel() {
-    static const std::set<std::string> kNames = {"RANDOM_RESO", "TAPE_ECHO"};
+    static const std::set<std::string> kNames = {"RANDOM_RESO"};
     return kNames;
 }
 
@@ -376,43 +380,6 @@ TEST(RateInvariance, EveryEffectDeliversTheSameLevelAtEveryRate) {
     EXPECT_EQ(failing.size(), baseline.size())
         << "fallan " << failing.size() << " efectos; el baseline declara "
         << baseline.size();
-}
-
-TEST(RateInvariance, TapeEchoIsNonDeterministicByDesign) {
-    // La exclusion de TAPE_ECHO, medida en vez de afirmada — el mismo criterio
-    // que `RandomResoIsNonDeterministicByConstructionNotByReset`.
-    //
-    // Lo que se comprueba no es "es aleatorio", que seria vago, sino algo
-    // operativo: su dispersion ENTRE CORRIDAS AL MISMO RATE es del orden de su
-    // diferencia entre rates. O sea que el instrumento no puede resolver lo que
-    // el test de arriba le pediria afirmar, y meterlo igual convertiria esa
-    // suite en un generador de fallas intermitentes.
-    EffectRegistry registry;
-    registerBuiltinEffects(registry);
-
-    constexpr int kReps = 5;
-    double lo = 1e9;
-    double hi = 0.0;
-    for (int k = 0; k < kReps; ++k) {
-        std::unique_ptr<Effect> fx = registry.createEffect(TAPE_ECHO);
-        ASSERT_NE(fx, nullptr);
-        fx->setSampleRate(kRates[1]);
-        const double rms =
-            rmsLeft(runBlocks(*fx, sineStereo(440.0, 2.0, kRates[1], 0.5f)), kRates[1], 0.5);
-        ASSERT_GT(rms, 0.0);
-        lo = std::min(lo, rms);
-        hi = std::max(hi, rms);
-    }
-    const double runToRunDb = 20.0 * std::log10(hi / lo);
-
-    EXPECT_GT(runToRunDb, 0.01)
-        << "cinco TAPE_ECHO identicos, mismo rate y misma señal, dieron el "
-        << "mismo nivel (dispersion " << runToRunDb << " dB).\n"
-        << "  Su LFO de flutter es RANDOM_SMOOTH y LFO::randomFloat() siembra "
-        << "con std::random_device, asi que esto deberia dispersar.\n"
-        << "  Si el efecto se volvio determinista, sacalo de "
-        << "nonDeterministicLevel() y dejalo entrar al barrido del catalogo, "
-        << "que es mas fuerte que la exclusion.";
 }
 
 // ===========================================================================

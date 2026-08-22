@@ -32,17 +32,26 @@ CABINET        | 0,94 dB | la IR del gabinete es una tabla de N muestras; a 96 k
 
 # NO estan aca, y por que:
 #
-#   RANDOM_RESO y TAPE_ECHO — no son medibles, no son deuda. Los dos sortean un
-#   LFO `RANDOM_SMOOTH`, y `LFO::randomFloat()` siembra con `std::random_device`.
-#   Medido: RANDOM_RESO dispersa 28,9 dB entre corridas al MISMO rate, y
-#   TAPE_ECHO 0,113 dB — mas que los 0,096 dB que separan sus rates. O sea que
-#   el instrumento no puede resolver lo que se le pediria afirmar.
+#   RANDOM_RESO — no es medible, no es deuda. Sortea un LFO `RANDOM_SMOOTH` y
+#   `LFO::randomFloat()` siembra con `std::random_device`, asi que dos instancias
+#   recien construidas ya difieren. Medido: dispersa 28,9 dB entre corridas al
+#   MISMO rate, contra los 0,5 dB que este barrido tolera. El instrumento no
+#   puede resolver lo que se le pediria afirmar, y por 32 veces.
 #
-#   La exclusion esta MEDIDA por `TapeEchoIsNonDeterministicByDesign`, no
-#   justificada por este comentario. Si alguno se vuelve determinista, ese test
-#   se pone rojo y avisa que hay que dejarlo entrar al barrido.
+#   EL CRITERIO DE EXCLUSION, ESCRITO PARA QUE NO SE VUELVA A APLICAR MAL:
+#   un efecto queda fuera cuando su dispersion corrida-a-corrida es comparable a
+#   la TOLERANCIA DEL BARRIDO (0,5 dB) — NO cuando es comparable a su propia
+#   diferencia entre rates. Son dos preguntas distintas y sonaban igual.
 #
-#   TAPE_ECHO no estaba en la lista de no-deterministas de WD-3.2, y no fue un
-#   descuido de aquel test: su ventana de 4.096 frames es mas corta que su
-#   propio delay de 350 ms, asi que alli solo se medía el camino directo, donde
-#   el flutter no llega. Con la ventana de 2 s de esta suite, aparece.
+#   TAPE_ECHO estuvo excluido de aca por la segunda, que es la equivocada
+#   (REQ-005 S1). Su premisa era CIERTA y hasta conservadora: 500 muestras por
+#   rate dan 0,0515 dB de dispersion corrida-a-corrida contra 0,0517 dB entre
+#   rates, o sea que efectivamente NO se puede resolver esa diferencia. Pero el
+#   barrido nunca pidio resolverla: pide que el nivel no se mueva mas de 0,5 dB,
+#   y contra ese umbral el margen es de 15,3 sigma. Un criterio de RESOLUCION
+#   aplicado a un test de UMBRAL deja fuera del catalogo a un efecto que si se
+#   podia medir — y encima lo reemplazaba por un test intermitente que fallaba 1
+#   de cada 2.800 corridas.
+#
+#   Verificado al dejarlo entrar: 200 corridas del barrido, cero fallos (la
+#   prediccion es P < 5e-7; una sola corrida verde no la distingue de P = 0,1).
