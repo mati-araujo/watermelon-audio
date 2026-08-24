@@ -47,6 +47,7 @@ namespace sf2 {
 /** Generadores SF2 que se usan acá (`tsf.h`, enum de genOper). */
 enum : uint16_t {
     kGenInstrument = 41,  ///< zona de preset -> índice de instrumento
+    kGenSampleModes = 54, ///< zona de instrumento -> modo de loop (0 = one-shot, 1 = loop)
     kGenSampleId = 53,    ///< zona de instrumento -> índice de sample
 };
 
@@ -85,13 +86,18 @@ inline void putChunk(std::vector<uint8_t>& out, const char* id,
 /**
  * @brief Un SoundFont válido con **un** preset, **un** instrumento y **un** sample.
  *
+ * @param looping si el sample se reproduce EN LOOP (generador `sampleModes` = 1) en vez de
+ *   una sola vez. Default `false`, que es como estaba antes de REQ-008: los tests que sólo
+ *   cargan y leen metadata no cambian en nada. Lo necesita cualquier test que mida NIVEL,
+ *   porque el one-shot dura 4 ms y no le da tiempo a converger a ningún suavizado.
  * @param sampleRateInHeader la tasa que va en el `shdr`. Es la del SAMPLE, y es
  *   deliberadamente distinta de la tasa de salida que el motor le pasa a
  *   `tsf_set_output`: confundir las dos es justo el error que el bug 3 hacía
  *   fácil de cometer. Un test que quiera distinguirlas puede mover ésta sin
  *   tocar la otra.
  */
-inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 22050) {
+inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 22050,
+                                                bool looping = false) {
     using namespace sf2;
 
     // ---- sdta: 64 samples de 16 bits. tsf pide >= un short; 64 deja lugar a
@@ -160,12 +166,27 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
 
     std::vector<uint8_t> ibag;
     put16(ibag, 0); put16(ibag, 0);
-    put16(ibag, 1); put16(ibag, 0);  // terminal
+    // El terminal dice DONDE TERMINAN los generadores de la zona 0, asi que tiene que contar
+    // los que realmente se escribieron. Con `looping` son dos (`sampleModes` + `sampleID`) y
+    // con el terminal en 1 el `sampleID` quedaba FUERA de la zona: el instrumento se quedaba
+    // sin sample y el render daba silencio absoluto — no un sonido distinto, silencio.
+    put16(ibag, looping ? 2 : 1); put16(ibag, 0);  // terminal
 
     std::vector<uint8_t> imod;
     for (int i = 0; i < 5; ++i) put16(imod, 0);  // terminal
 
     std::vector<uint8_t> igen;
+    // `sampleModes` va ANTES que `sampleID`: el spec de SF2 (§7.5) exige que sampleID sea el
+    // ULTIMO generador de una zona de instrumento, y tsf recorre la lista en orden.
+    //
+    // Sin este generador el default es 0 = one-shot, y el `shdr` de abajo declara sus puntos
+    // de loop para nadie: la nota dura las 64 muestras del sample y se apaga. Medido: ~200
+    // frames a 48 kHz, o sea 4 ms — MENOS que los 240 frames que tarda en converger el
+    // suavizador de parametros del engine, asi que ningun test de NIVEL es posible sobre el
+    // one-shot. De ahi que exista esta opcion.
+    if (looping) {
+        put16(igen, kGenSampleModes); put16(igen, 1);
+    }
     put16(igen, kGenSampleId); put16(igen, 0);  // -> sample 0
     put16(igen, 0); put16(igen, 0);             // terminal
 

@@ -396,6 +396,11 @@ void wma_sf_note_off_all_except(WmaEngine* engine, int keep_touch_id) {
     engine->engine->sfNoteOffAllExcept(keep_touch_id);
 }
 
+void wma_sf_set_touch_expression(WmaEngine* engine, int touch_id, float expression) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->sfSetTouchExpression(touch_id, expression);
+}
+
 /* ================================================================
  * 7. Voice Filter
  * ================================================================ */

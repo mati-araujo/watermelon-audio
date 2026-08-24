@@ -114,7 +114,8 @@ class IosSoundFontBridgeTest {
     // ==================== Lo que se puede llamar sin font ====================
 
     /**
-     * Los cuatro de polifonía y el selector de preset son llamables sin font cargado.
+     * Los de polifonía, la expresión por toque y el selector de preset son llamables sin
+     * font cargado.
      *
      * No es una hipótesis: es el orden real en el que ocurren las cosas — un `noteOff`
      * de limpieza puede llegar después de un [unloadSoundFont]. Lo que se verifica es
@@ -129,6 +130,7 @@ class IosSoundFontBridgeTest {
         bridge.sfNoteOff(touchId = 0)
         bridge.sfNoteOffAll()
         bridge.sfNoteOffAllExcept(keepTouchId = 0)
+        bridge.sfSetTouchExpression(touchId = 0, expression = 0.5f)
         bridge.unloadSoundFont()
 
         assertFalse(bridge.isSoundFontLoaded(), "el motor quedó inconsistente")

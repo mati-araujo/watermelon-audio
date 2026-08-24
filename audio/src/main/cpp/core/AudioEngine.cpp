@@ -1113,6 +1113,10 @@ void AudioEngine::sfNoteOffAllExcept(int keepTouchId) {
     mEngineDispatcher.sfNoteOffAllExcept(keepTouchId);
 }
 
+void AudioEngine::sfSetTouchExpression(int touchId, float expression) {
+    mEngineDispatcher.sfSetTouchExpression(touchId, expression);
+}
+
 void AudioEngine::setOscillatorType(int typeId) {
     mOscBank.setOscillatorType(typeId);
 

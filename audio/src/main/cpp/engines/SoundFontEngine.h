@@ -58,6 +58,10 @@ public:
      */
     void prepare(int32_t sampleRate, int32_t maxBlockSize) override {
         SynthEngine::prepare(sampleRate, maxBlockSize);
+        for (auto& sm : mTouchExprSmoothers) {
+            sm.setSmoothingTime(kParamSmoothingMs, static_cast<float>(sampleRate));
+            sm.reset(1.0f);   // el neutro, sembrado — ver el KDoc de mTouchExprSmoothers
+        }
         if (mSFManager) {
             mSFManager->setOutputSampleRate(sampleRate);
         }
@@ -110,6 +114,28 @@ public:
     }
 
     /**
+     * @brief REQ-008 — expresion continua de un toque que YA esta sonando.
+     *
+     * Cambia el nivel de la nota **sin volver a atacarla**: no hay `tsf_*note_on` en este
+     * camino. Multiplicador con neutro en `1.0`; multiplica contra [PARAM_EXPRESSION], que
+     * sigue siendo la perilla global del usuario.
+     *
+     * Un toque INACTIVO se ignora sin efecto (AC-008.5). No se guarda "para cuando ataque":
+     * el `NOTE_ON` reinicia la expresion a 1,0 igual (AC-008.3), asi que guardarla seria
+     * estado que nadie va a leer.
+     *
+     * 🔑 Nota para el consumidor: si el gesto arranca desde la Y del dedo, mandar el primer
+     * valor absoluto ATENUA EL ATAQUE DOS VECES —por la velocity y por esto—. La expresion
+     * tiene que ser **relativa al punto donde aterrizo el dedo**. Ver la spec de REQ-008.
+     *
+     * Thread-safe y lock-free, como `noteOn`/`noteOff`.
+     */
+    void setTouchExpression(int touchId, float expression) {
+        if (touchId < 0 || touchId >= MAX_TOUCHES) return;
+        pushEvent(NoteEvent::makeSetExpression(touchId, expression));
+    }
+
+    /**
      * @brief Render audio for all active notes into buffer
      *
      * AUDIO THREAD ONLY. Drains the event queue first, then renders.
@@ -132,14 +158,49 @@ public:
 
         // 1. Check for preset change (atomic, deferred from setPreset)
         int newPreset = mPendingPreset.load(std::memory_order_acquire);
-        if (newPreset != mActivePreset) {
-            tsf_note_off_all(sf);
-            for (auto& t : mTouches) t.active = false;
-            mActivePreset = newPreset;
+        const bool presetChanged = (newPreset != mActivePreset);
+        // REQ-008 — con el API por canal el preset vive EN CADA CANAL, no en el llamado a
+        // `tsf_note_on`. Hay que (re)configurar los 16 en tres casos, y los tres importan:
+        //   · el preset cambio;
+        //   · es el primer render (arranca en 0 y `presetChanged` seria false, asi que sin
+        //     esto los canales nunca se configuran y NO SUENA NADA);
+        //   · cambio la fuente — `mSFManager` puede swapear el `tsf*`, y la config de
+        //     canales vive adentro de esa instancia, asi que se va con ella.
+        if (presetChanged || sf != mConfiguredFor) {
+            if (presetChanged) {
+                tsf_note_off_all(sf);
+                for (auto& t : mTouches) t.active = false;
+                mActivePreset = newPreset;
+            }
+            for (int ch = 0; ch < MAX_TOUCHES; ++ch) {
+                tsf_channel_set_presetindex(sf, ch, mActivePreset);
+                // El canal arranca en el neutro, y el estado espejado con el.
+                tsf_channel_set_volume(sf, ch, 1.0f);
+                mTouches[ch].expression = 1.0f;
+                mTouchExprSmoothers[ch].reset(1.0f);
+            }
+            mConfiguredFor = sf;
         }
 
         // 2. Drain event queue — all tsf calls happen HERE on audio thread
         drainEvents(sf);
+
+        // 2b. REQ-008 — la expresion por toque, suavizada POR BLOQUE.
+        //
+        // Va aca y no en el evento porque el suavizado tiene que existir aunque no llegue
+        // ningun evento: el smoother sigue caminando hacia su objetivo bloque a bloque.
+        // `processBlock` avanza el coeficiente POR MUESTRA (`numFrames` de una vez), asi
+        // que los 5 ms son 5 ms de verdad con cualquier tamaño de bloque — que es lo que
+        // pide AC-008.7 y lo que el propio `smoothParam` ya garantiza.
+        for (int tid = 0; tid < MAX_TOUCHES; ++tid) {
+            auto& touch = mTouches[tid];
+            if (!touch.active) continue;
+            const float smoothed =
+                mTouchExprSmoothers[tid].processBlock(touch.expression, static_cast<int>(numFrames));
+            // `tsf_channel_set_volume` early-returna si el valor no cambio (tsf.h:1877),
+            // asi que el toque quieto no paga nada.
+            tsf_channel_set_volume(sf, tid, smoothed);
+        }
 
         // 3. Render all active tsf voices
         tsf_render_float(sf, buffer, numFrames, 0);
@@ -206,7 +267,8 @@ private:
         NOTE_ON,
         NOTE_OFF,
         NOTE_OFF_ALL,
-        NOTE_OFF_ALL_EXCEPT
+        NOTE_OFF_ALL_EXCEPT,
+        SET_EXPRESSION      // REQ-008
     };
 
     struct NoteEvent {
@@ -228,6 +290,10 @@ private:
         static NoteEvent makeNoteOffAllExcept(int keepTouchId) {
             return {EventType::NOTE_OFF_ALL_EXCEPT,
                     static_cast<int8_t>(keepTouchId), 0, 0.0f};
+        }
+        /// REQ-008 — el escalar viaja en `velocity`, que en este evento ES el valor.
+        static NoteEvent makeSetExpression(int touchId, float expression) {
+            return {EventType::SET_EXPRESSION, static_cast<int8_t>(touchId), 0, expression};
         }
     };
 
@@ -261,11 +327,23 @@ private:
                         auto& touch = mTouches[tid];
                         // Release previous note if different
                         if (touch.active && touch.midiNote != note) {
-                            tsf_note_off(sf, mActivePreset, touch.midiNote);
+                            tsf_channel_note_off(sf, tid, touch.midiNote);
                         }
+                        // REQ-008 (AC-008.3) — la expresion vuelve al neutro, y tiene que ser
+                        // ANTES del note-on: `tsf_channel_set_volume` le suma el delta a las
+                        // voces VIVAS y guarda el gain del canal, que las voces nuevas recogen
+                        // al nacer (tsf.h:1752/1880). Al reves, la nota nueva nacia con el
+                        // nivel del gesto anterior y el reset llegaba tarde.
+                        touch.expression = 1.0f;
+                        // `reset` y no `processBlock`: el neutro tiene que valer YA. Si el
+                        // smoother rampeara, la nota nueva arrancaria en el nivel del gesto
+                        // anterior y treparia hasta 1,0 — que es exactamente lo que AC-008.3
+                        // prohibe, sonando ademas como un fade-in que nadie pidio.
+                        mTouchExprSmoothers[tid].reset(1.0f);
+                        tsf_channel_set_volume(sf, tid, 1.0f);
                         // Start new note
                         if (!touch.active || touch.midiNote != note) {
-                            tsf_note_on(sf, mActivePreset, note, event.velocity);
+                            tsf_channel_note_on(sf, tid, note, event.velocity);
                         }
                         touch.active = true;
                         touch.midiNote = note;
@@ -278,7 +356,7 @@ private:
                     if (tid >= 0 && tid < MAX_TOUCHES) {
                         auto& touch = mTouches[tid];
                         if (touch.active) {
-                            tsf_note_off(sf, mActivePreset, touch.midiNote);
+                            tsf_channel_note_off(sf, tid, touch.midiNote);
                             touch.active = false;
                         }
                     }
@@ -295,8 +373,22 @@ private:
                         if (i == keep) continue;
                         auto& touch = mTouches[i];
                         if (touch.active) {
-                            tsf_note_off(sf, mActivePreset, touch.midiNote);
+                            tsf_channel_note_off(sf, i, touch.midiNote);
                             touch.active = false;
+                        }
+                    }
+                    break;
+                }
+                case EventType::SET_EXPRESSION: {
+                    int tid = event.touchId;
+                    if (tid >= 0 && tid < MAX_TOUCHES) {
+                        auto& touch = mTouches[tid];
+                        // AC-008.5 — un toque inactivo se ignora sin efecto.
+                        if (touch.active) {
+                            // Solo se guarda el OBJETIVO. Aplicarlo es del render, que lo
+                            // pasa por el smoother: hacerlo aca seria un escalon, y un salto
+                            // grande de un gesto brusco si clickea (AC-008.2).
+                            touch.expression = event.velocity;
                         }
                     }
                     break;
@@ -315,6 +407,15 @@ private:
         bool active = false;
         int midiNote = -1;
         float velocity = 0.0f;
+        /**
+         * REQ-008 — expresion continua de ESTE toque, multiplicador con neutro en 1,0.
+         *
+         * Ortogonal a [PARAM_EXPRESSION]: aquella es global al engine y es la perilla del
+         * usuario; esta es del dedo. Se componen porque entran por caminos distintos —esta
+         * como ganancia de canal ANTES del render, aquella sobre el buffer DESPUES—, asi
+         * que el producto sale solo y en el neutro el camino es exactamente el de antes.
+         */
+        float expression = 1.0f;
     };
 
     SoundFontManager* mSFManager = nullptr;
@@ -322,6 +423,25 @@ private:
     // Preset: written from any thread, consumed on audio thread in render()
     std::atomic<int> mPendingPreset{0};
     int mActivePreset = 0; // Audio-thread-only shadow
+
+    /**
+     * REQ-008 — para que instancia de `tsf` se configuraron los canales.
+     *
+     * Audio-thread-only. Se compara por PUNTERO y no se desreferencia: sirve para detectar
+     * que `SoundFontManager` swapeo la fuente (cambio de font o de tasa de salida), porque
+     * la configuracion de canales vive dentro de la instancia y se va con ella.
+     */
+    tsf* mConfiguredFor = nullptr;
+
+    /**
+     * REQ-008 — un suavizador por toque, el MISMO `ParameterSmoother` que usan los
+     * parametros del engine. Audio-thread-only.
+     *
+     * Se SIEMBRA en 1,0 (el neutro) por el mismo motivo que documenta `SynthEngine::prepare`
+     * para los de parametros: sin sembrar arrancan en CERO y trepan hacia su valor, o sea que
+     * el primer toque entraria con un fade-in que nadie pidio.
+     */
+    std::array<ParameterSmoother, MAX_TOUCHES> mTouchExprSmoothers;
 
     // Touch state: audio-thread-only (modified in drainEvents)
     std::array<TouchState, MAX_TOUCHES> mTouches{};

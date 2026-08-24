@@ -282,6 +282,27 @@ TEST_F(CApiVoiceTest, TheSoundFontNoteCallsAreSurvivableWithNoSoundFontLoaded) {
     EXPECT_TRUE(wma_is_initialized(mWma));
 }
 
+TEST_F(CApiVoiceTest, TheTouchExpressionCallAbsorbsEveryTouchIdItCanBeGiven) {
+    // Test de CONTRATO, no de DSP, que es lo que esta capa puede afirmar: sin
+    // render offline en la C-API (decision vieja del repo, ver el encabezado de
+    // test_c_api_synth.cpp) no hay muestras que comparar desde aca.
+    //
+    // 🔴 Lo que este test NO prueba, y conviene decirlo: que el touch_id llegue
+    // bien al motor. Sin font cargado no hay voces, asi que una capa que perdiera
+    // el touch_id dejaria esto igual de verde. De eso se ocupa
+    // test_touch_expression_surface.cpp, que renderiza por AudioEngine y compara
+    // muestras. Aca se prueba lo unico que esta capa decide: que ningun touch_id
+    // —ni el absurdo— tumbe el motor.
+    ASSERT_FALSE(wma_sf_is_loaded(mWma));
+
+    wma_sf_set_touch_expression(mWma, 0, 0.5f);      // valido, pero sin voces
+    wma_sf_set_touch_expression(mWma, -1, 0.5f);     // negativo
+    wma_sf_set_touch_expression(mWma, 9999, 0.5f);   // muy fuera de rango
+    wma_sf_set_touch_expression(mWma, 0, 1.0f);      // el neutro
+
+    EXPECT_TRUE(wma_is_initialized(mWma));
+}
+
 // ===========================================================================
 // Null handle
 // ===========================================================================
@@ -318,6 +339,7 @@ TEST(CApiVoiceNullHandle, EveryMutatorIsANoOpRatherThanACrash) {
     wma_sf_note_off(nullptr, 0);
     wma_sf_note_off_all(nullptr);
     wma_sf_note_off_all_except(nullptr, 1);
+    wma_sf_set_touch_expression(nullptr, 0, 0.5f);
     SUCCEED();
 }
 
