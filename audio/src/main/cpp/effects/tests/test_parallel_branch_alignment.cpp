@@ -4,7 +4,8 @@
  * ## Que se mide
  *
  * `Effect.h` declara que sumar ramas con distinta latencia es un filtro peine, y
- * `EffectChain::compensateBranch` existe para evitarlo. Esto lo MIDE, en los modos que suman.
+ * `EffectChain::accumulateBranch` —que alinea Y suma en una sola operacion— existe para
+ * evitarlo. Esto lo MIDE, en los modos que suman.
  *
  * En vez de comparar contra una o dos candidatas fijas, se BARRE el retardo aplicado a la rama
  * rapida y se reporta cual explica mejor la salida real. El test se autodiagnostica:
@@ -293,7 +294,7 @@ TEST(BranchAlignment, EveryBranchSummingModeAlignsBeforeSumming) {
 // AC-011.4 — una cadena SIN latencias no puede cambiar de sonido.
 //
 // Es la red que protege a la enorme mayoria de las cadenas reales, donde todos los
-// efectos declaran cero y `compensateBranch` sale por su guarda. Si el arreglo de la
+// efectos declaran cero y el retardo pedido es cero, asi que no se toca nada. Si el arreglo de la
 // alineacion le cambiara el audio a estas, seria una regresion que ningun otro test
 // de este archivo veria: los de arriba SOLO miran montajes con latencias distintas.
 //
