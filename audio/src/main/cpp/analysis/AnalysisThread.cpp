@@ -102,6 +102,60 @@ void AnalysisThread::drainLoop() {
         const int got = mRing.read(mScratch.data(), kDrainFrames);
         mTicks.fetch_add(1, std::memory_order_relaxed);
 
+        // --- REQ-009 S2 · LA GUARDA: el Δ de frames pisados, no el acumulado ---
+        //
+        // Si el ring desbordo, lo que acabo de leer NO es contiguo con lo que le
+        // di al estimador la vuelta pasada: entre los dos trozos falta un pedazo
+        // de señal que nadie vio. Integrar fase a traves de ese hueco da una
+        // pendiente que mezcla dos mediciones — y sale PLAUSIBLE, con σ chica,
+        // que es el hallazgo entero de REQ-009: medido, el motor publicaba
+        // CONVERGIDO con la lectura a 1,04 cents del valor real (10x el
+        // presupuesto) y σ en 0,024, muy por debajo del umbral de 0,1.
+        //
+        // 🔴 EL Δ, Y NO `droppedFrames() > 0`. El contador es acumulado y
+        // monotono: con el acumulado, el primer desborde apagaria CONVERGIDO
+        // para el resto de la sesion — el fallo que AC-009.2 prohibe
+        // explicitamente. El Δ dice "entre la vuelta pasada y esta se perdio
+        // señal", que es la pregunta que corresponde.
+        //
+        // 🔴 SE MUESTREA DESPUES DE `read()`, Y NO ES UN DETALLE DE ORDEN: ES LA
+        // MITAD QUE HACE FUNCIONAR LA GUARDA. Los DOS `mDropped.bump()` de
+        // `AnalysisRing` estan adentro de `read()` — el escritor no toca ese
+        // contador NUNCA (pisa lo viejo y sigue; es su contrato). O sea que el
+        // desborde lo descubre y lo cuenta el LECTOR, en la misma llamada que
+        // devuelve el bloque que viene despues del hueco. Muestrear antes de
+        // `read()` no es "un tick de corrimiento": es preguntar por un dato que
+        // todavia no existe, y garantiza alimentar el salto y desmentirlo recien
+        // en la vuelta siguiente — cuando la lectura equivocada ya se publico.
+        //
+        // Medido, 20 corridas de cada variante, peor error entre las lecturas
+        // que el motor declaro CONVERGIDAS mientras el ring desbordaba:
+        //     muestreo DESPUES (esto)  ->  3,8e-6 cents
+        //     muestreo ANTES           ->  0,1875 cents  (4x el presupuesto)
+        // Lo cubre `ABurstOverrunIsNeverPublishedAsConverged`, que fuerza el
+        // caso en vez de esperar a que aparezca: la variante de "antes" cruzaba
+        // el presupuesto en 1 de 20 corridas, o sea que un test que solo mire
+        // desbordes sostenidos la deja pasar 19 veces de 20.
+        const uint64_t dropped = mRing.droppedFrames();
+        const uint64_t droppedDelta = dropped - mLastDroppedFrames;
+        mLastDroppedFrames = dropped;
+        if (droppedDelta > 0) {
+            // El thread DETECTA; el estimador se HACE CARGO. Este lado es el
+            // unico que ve el ring; el otro es el unico que sabe cuando su
+            // integracion vuelve a ser confiable, porque es el que tiene la
+            // ventana.
+            //
+            // El bloque de esta vuelta SI se alimenta, y eso no es descuido: el
+            // ring nunca entrega una copia desgarrada —la re-chequea, la cuenta
+            // en `mTorn` y devuelve 0—, asi que lo que llega aca es contiguo por
+            // adentro. Lo unico roto era su union con el bloque anterior, y de
+            // eso se encarga el reinicio. (Se probo tambien descartarlo: mueve
+            // el peor error de 9,5e-6 a 3,8e-6 cents, o sea nada frente a un
+            // presupuesto de 0,1, y ningun test lo puede matar. Codigo que no se
+            // puede verificar y no cambia el resultado no se queda.)
+            mStrobe.noteInputDiscontinuity();
+        }
+
         if (got <= 0) {
             std::this_thread::sleep_for(kIdleNap);
             continue;
@@ -160,6 +214,14 @@ void AnalysisThread::drainLoop() {
         values[kSnapCaptureSampleRate] = static_cast<float>(rate);
         values[kSnapLevelRms]          = rms;
         values[kSnapFramesAnalyzed]    = static_cast<float>(mFramesAnalyzed);
+        // 🔴 SE RELEE, NO SE REUSA `dropped`. Publicar la muestra que juzgo la
+        // guarda parecia mas coherente y **oculta justamente el tick que
+        // importa**: en la variante rota —muestrear antes de `read()`— la
+        // muestra vale 0 en la vuelta que se come el hueco, asi que el snapshot
+        // negaria el desborde que el ring acababa de contar. Un test que espere
+        // "hasta que el contador suba" se saltearia esa vuelta y veria la
+        // siguiente, ya recuperada. Medido: con la muestra reusada, el mutante
+        // del orden sobrevivia; releyendo, muere.
         values[kSnapDroppedFrames]     = static_cast<float>(mRing.droppedFrames());
 
         // REQ-003 AC-003.8 — sin control no se publica lectura fina.
@@ -234,6 +296,16 @@ void AnalysisThread::drainLoop() {
 
         values[kSnapLockedString]  = static_cast<float>(mFastMode.lockedIndex());
         values[kSnapFastModeState] = static_cast<float>(mFastMode.state());
+
+        // REQ-009 S2 (AC-009.3) — por que este estado NO es "todavia no".
+        //
+        // Sale del estimador y no de `droppedDelta`, y la diferencia no es de
+        // estilo: `droppedDelta` describe UN TICK, y lo que el consumidor
+        // necesita saber es si LA LECTURA QUE ESTA MIRANDO arrastra un hueco.
+        // Eso lo sabe el que tiene la ventana — se levanta con el hueco y se
+        // baja sola cuando la integracion vuelve a tener una medicion propia.
+        values[kSnapInputDiscontinuity] =
+            mStrobe.sawInputDiscontinuity() ? 1.0f : 0.0f;
 
         mSnapshot.publish(values);
     }

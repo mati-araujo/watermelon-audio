@@ -718,3 +718,431 @@ TEST(AnalysisThread, WithoutATargetTheRangeIsAbsentInsteadOfZero) {
     EXPECT_TRUE(std::isnan(out[kSnapUsableRangeCents]))
         << "sin objetivo publico un rango: " << out[kSnapUsableRangeCents];
 }
+
+// ---------------------------------------------------------------------------
+// REQ-009 S2 — el motor deja de decir CONVERGIDO sobre una ventana que perdio
+// frames. Los tests van EN PAR a proposito: uno afirma "no mientas" y el otro
+// "no calles de mas". Sin el segundo, un apagado total pasa.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr double kReq009Target = 440.0;
+constexpr double kReq009RealCents = -5.0;
+const double kReq009Real = kReq009Target * std::pow(2.0, kReq009RealCents / 1200.0);
+
+/**
+ * Lo que se vio publicado MIENTRAS el ring se estaba pisando.
+ *
+ * 🔴 POR QUE SE OBSERVA DURANTE Y NO AL FINAL, QUE ERA LA PRIMERA VERSION.
+ * Leer el snapshot DESPUES de dejar de desbordar mide otra cosa: cuando el
+ * escritor para, el ring todavia tiene ~`kCapacityFrames` de audio CONTIGUO, el
+ * analisis lo drena sin perder un frame y el estimador vuelve a tener medicion
+ * — o sea que la marca se baja y la lectura converge, que es la recuperacion
+ * que `TheMarkClears...` exige mas abajo. **Medido**: esa version paso sola y
+ * fallo dentro de la suite completa, con `dropped = 497.664` y la marca en 0.
+ * El veredicto dependia de si el lector llegaba antes que la recuperacion, o sea
+ * del scheduler — el defecto que REQ-002 persigue.
+ *
+ * 🔴 Y POR QUE NO SE EXIGE "NUNCA CONVERGE MIENTRAS PISA", que era la segunda
+ * version. **Tambien esta medido que eso es falso, y ademas seria incorrecto
+ * pedirlo**: el desbordador escribe a rafagas, y entre rafaga y rafaga el
+ * analisis se pone al dia con audio contiguo. En esos tramos converger es lo
+ * CORRECTO, y prohibirlo chocaria de frente con AC-009.2. Todas las muestras
+ * convergidas que se observaron tenian `Δdropped = 0`, o sea que eran
+ * recuperaciones legitimas.
+ *
+ * Lo que si vale, y es lo que estos tests afirman: **todo lo que el motor
+ * declare convergido tiene que estarlo de verdad**.
+ */
+struct OverrunObservation {
+    int samples = 0;              ///< vueltas en las que el ring ya habia pisado
+    int convergedSamples = 0;     ///< de esas, cuantas publicaron CONVERGIDO
+    int markUpSamples = 0;        ///< cuantas traian la marca de hueco levantada
+    int markedAndConverged = 0;   ///< CONVERGIDO **y** marcado: contradiccion pura
+    double worstCents = 0.0;      ///< peor error entre las convergidas
+    double sigmaThere = 0.0;      ///< y la σ que lo acompañaba
+    double dropped = 0.0;         ///< acumulado al terminar
+    int blocksWritten = 0;
+};
+
+/**
+ * Desborda el ring a proposito: escribe `k` bloques por cada tick de analisis,
+ * SIN esperar lugar. Es lo contrario de `feedAtAnalysisPace`, y reproduce el
+ * mecanismo que la spec de REQ-009 declara real.
+ */
+OverrunObservation feedOverrunning(AnalysisRing& ring, AnalysisSnapshot& snap,
+                                   double f0, int k, int iterations) {
+    OverrunObservation obs;
+    auto analysed = [&]() -> double {
+        float o[kSnapshotValueCount];
+        return snap.read(o) ? static_cast<double>(o[kSnapFramesAnalyzed]) : 0.0;
+    };
+    for (int i = 0; i < iterations; ++i) {
+        const double before = analysed();
+        for (int j = 0; j < k; ++j) {
+            const auto blk = stringBlock(f0, 1024, obs.blocksWritten * 1024);
+            ring.writeStereo(blk.data(), 1024);
+            ++obs.blocksWritten;
+        }
+        waitFor([&] { return analysed() > before; }, std::chrono::milliseconds(500));
+
+        float o[kSnapshotValueCount];
+        if (!snap.read(o)) continue;
+        // Solo cuentan las vueltas en las que el ring YA piso algo: antes del
+        // primer desborde no hay nada que juzgar, y contarlas dejaria el
+        // veredicto a merced de cuanto tarda el ring en llenarse.
+        if (!(o[kSnapDroppedFrames] > 0.0f)) continue;
+        ++obs.samples;
+        obs.dropped = o[kSnapDroppedFrames];
+
+        const bool marked = o[kSnapInputDiscontinuity] >= 0.5f;
+        const bool converged = static_cast<int>(o[kSnapState]) == kStateConverged;
+        if (marked) ++obs.markUpSamples;
+        if (marked && converged) ++obs.markedAndConverged;
+        if (converged) {
+            ++obs.convergedSamples;
+            const double err =
+                std::fabs(static_cast<double>(o[kSnapCents]) - kReq009RealCents);
+            if (err > obs.worstCents) {
+                obs.worstCents = err;
+                obs.sigmaThere = o[kSnapUncertainty];
+            }
+        }
+    }
+    return obs;
+}
+
+/**
+ * Alimenta audio CONTIGUO al ritmo del analisis, con una meta RELATIVA a lo ya
+ * analizado.
+ *
+ * `feedAtAnalysisPace` mide contra el acumulado desde el arranque, asi que
+ * despues de una tanda previa su meta ya esta cumplida y devuelve sin escribir
+ * un solo bloque. Un test de RECUPERACION que la usara tal cual mediria el
+ * estado viejo y saldria verde sin haber alimentado nada.
+ */
+bool feedContiguousMore(AnalysisRing& ring, AnalysisSnapshot& snap, double f0,
+                        int blocks, int startBlock) {
+    auto analysed = [&]() -> double {
+        float o[kSnapshotValueCount];
+        return snap.read(o) ? static_cast<double>(o[kSnapFramesAnalyzed]) : 0.0;
+    };
+    const double goal = analysed() + static_cast<double>(blocks) * 1024.0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+
+    int written = startBlock;
+    while (analysed() < goal && std::chrono::steady_clock::now() < deadline) {
+        if (!waitForRoom(ring, 1024)) return false;
+        const auto blk = stringBlock(f0, 1024, written * 1024);
+        ring.writeStereo(blk.data(), 1024);
+        ++written;
+    }
+    return analysed() >= goal;
+}
+
+}  // namespace
+
+/**
+ * AC-009.1 — con el ring pisando, lo que el motor declara CONVERGIDO lo esta.
+ *
+ * 🔴 MEDIDO ANTES DE LA GUARDA, con este mismo arnes: el motor publicaba
+ * CONVERGIDO con la lectura a **1,04 cents** del valor real —10x el presupuesto
+ * de 0,1— y σ en **0,024**, muy por debajo del umbral. Mirar σ no alcanza, y ese
+ * es el hallazgo entero de REQ-009.
+ *
+ * DESPUES de la guarda, sobre 20 corridas de 150 vueltas: el peor error entre
+ * TODAS las muestras convergidas es de **3,8·10⁻⁶ cents**. Las que sobreviven son
+ * recuperaciones legitimas —tramos con `Δdropped = 0` entre rafagas— y converger
+ * ahi es lo correcto.
+ *
+ * EL GEMELO DE ESTE TEST VIVE APARTE: `HealthyContiguousAudioStillConverges`.
+ * Sin el, un motor que no convergiera NUNCA pasaria este por vacio.
+ */
+TEST(AnalysisThreadReq009, WhatIsPublishedAsConvergedWhileTheRingOverrunsActuallyIs) {
+    AnalysisRing ring;
+    AnalysisSnapshot snap;
+    AnalysisThread th(ring, snap);
+    th.setTargetHz(kReq009Target);
+    th.start(kRate);
+
+    const OverrunObservation obs = feedOverrunning(ring, snap, kReq009Real, 8, 150);
+    th.stop();
+
+    ASSERT_GT(obs.samples, 0)
+        << "el test no reprodujo su propia premisa: el ring no piso NI UN frame en "
+           "ninguna vuelta, asi que no hay ventana rota que juzgar. Si esto salta, el "
+           "desbordador dejo de desbordar (crecio kCapacityFrames? bajo kDrainFrames?) "
+           "y los EXPECT de abajo serian verdes por vacio.";
+
+    EXPECT_LE(obs.worstCents, AnalysisThread::kConvergedUncertaintyCents)
+        << "el motor declaro CONVERGIDA una lectura que esta a " << obs.worstCents
+        << " cents del valor real, con sigma=" << obs.sigmaThere << " — o sea POR "
+        << "DEBAJO del umbral de " << AnalysisThread::kConvergedUncertaintyCents
+        << ". Pasó en " << obs.convergedSamples << " de " << obs.samples
+        << " vueltas con el ring pisando (acumulado " << obs.dropped << " frames).\n"
+        << "  🔴 Mirar sigma no alcanza: ESE es REQ-009. La guarda tiene que tirar la "
+           "integracion que cruzo el hueco — y consultar la perdida DESPUES de leer del "
+           "ring, que es donde el lector la cuenta. Lo especifico lo cubre "
+           "`ABurstOverrunIsNeverPublishedAsConverged`.";
+
+    EXPECT_EQ(obs.markedAndConverged, 0)
+        << "el motor publico CONVERGIDO y la marca de hueco A LA VEZ, en "
+        << obs.markedAndConverged << " vueltas. Son mutuamente excluyentes por "
+           "construccion: la marca solo se baja cuando hay medicion propia.";
+}
+
+/**
+ * AC-009.2 — EL GEMELO, y es el que se olvida.
+ *
+ * Sin este, un apagado total del estado pasa el test de arriba: no mentir es
+ * trivial si no decis nada. Este exige que el motor SIGA publicando CONVERGIDO
+ * con senial contigua y limpia.
+ */
+TEST(AnalysisThreadReq009, HealthyContiguousAudioStillConverges) {
+    AnalysisRing ring;
+    AnalysisSnapshot snap;
+    AnalysisThread th(ring, snap);
+    th.setTargetHz(kReq009Target);
+    th.start(kRate);
+
+    const bool fed = feedAtAnalysisPace(
+        ring, snap,
+        [&](int startFrame) { return stringBlock(kReq009Real, 1024, startFrame); }, 150);
+
+    float o[kSnapshotValueCount];
+    ASSERT_TRUE(snap.read(o));
+    const int state = static_cast<int>(o[kSnapState]);
+    const double dropped = o[kSnapDroppedFrames];
+    const double cents = o[kSnapCents];
+    th.stop();
+
+    ASSERT_TRUE(fed) << "la muestra salio corta: el analisis no consumio lo pedido";
+    ASSERT_EQ(dropped, 0.0)
+        << "premisa rota: alimentando al ritmo del analisis no se puede pisar un solo "
+        << "frame. Con " << dropped << " pisados este test dejo de medir el caso SANO.";
+
+    EXPECT_EQ(state, kStateConverged)
+        << "la guarda de REQ-009 apago CONVERGIDO en regimen SANO, que es lo que "
+           "AC-009.2 prohibe. Una guarda que nunca deja converger cumple AC-009.1 sin "
+           "resolver nada: la aguja no se dibuja nunca.";
+    EXPECT_NEAR(cents, kReq009RealCents, AnalysisThread::kConvergedUncertaintyCents)
+        << "con audio contiguo la lectura tiene que caer dentro de presupuesto";
+}
+
+/**
+ * AC-009.3 — el consumidor distingue "todavia no" de "la entrada llego rota".
+ *
+ * Las dos situaciones publican el MISMO estado (`kStateMeasuring`) y piden del
+ * usuario acciones OPUESTAS: una se resuelve esperando y la otra revisando el
+ * cable. Sin el slot, la unica salida del consumidor es esperar — que frente a
+ * un problema que no se arregla solo es la peor de las dos.
+ *
+ * Este test no vuelve a preguntar si converge (eso es el de arriba): pregunta si
+ * la marca **discrimina**, y por eso afirma los dos lados con la misma medicion.
+ */
+TEST(AnalysisThreadReq009, AGapIsDistinguishableFromNotConvergedYet) {
+    // --- lado roto: se observa MIENTRAS pisa -------------------------------
+    OverrunObservation broken;
+    {
+        AnalysisRing ring;
+        AnalysisSnapshot snap;
+        AnalysisThread th(ring, snap);
+        th.setTargetHz(kReq009Target);
+        th.start(kRate);
+        broken = feedOverrunning(ring, snap, kReq009Real, 8, 150);
+        th.stop();
+    }
+
+    // --- lado sano ---------------------------------------------------------
+    float healthy[kSnapshotValueCount];
+    {
+        AnalysisRing ring;
+        AnalysisSnapshot snap;
+        AnalysisThread th(ring, snap);
+        th.setTargetHz(kReq009Target);
+        th.start(kRate);
+        ASSERT_TRUE(feedAtAnalysisPace(
+            ring, snap,
+            [&](int startFrame) { return stringBlock(kReq009Real, 1024, startFrame); },
+            150));
+        ASSERT_TRUE(snap.read(healthy));
+        th.stop();
+    }
+
+    ASSERT_GT(broken.samples, 0)
+        << "premisa rota: el desbordador no desbordo, asi que no hay lado ROTO";
+    ASSERT_FLOAT_EQ(healthy[kSnapDroppedFrames], 0.0f)
+        << "premisa rota: el lado SANO piso frames, asi que los dos lados son el mismo";
+
+    EXPECT_GT(broken.markUpSamples, 0)
+        << "el ring piso " << broken.dropped << " frames a lo largo de "
+        << broken.samples << " vueltas y el snapshot no lo dijo NUNCA: el consumidor "
+           "ve un spinner y espera a que se arregle algo que no se arregla solo.";
+    EXPECT_FLOAT_EQ(healthy[kSnapInputDiscontinuity], 0.0f)
+        << "con la entrada intacta el motor acusa un hueco. Una marca que este "
+           "siempre prendida no distingue nada: es lo mismo que no publicarla — y es "
+           "exactamente como se comporta el acumulado `droppedFrames`.";
+}
+
+/**
+ * AC-009.2 + AC-009.3 — LA MARCA SE BAJA SOLA cuando la entrada vuelve a estar
+ * entera, y este es el gemelo de la marca (no el de la guarda).
+ *
+ * 🔴 Sin este test, la marca podria quedarse prendida PARA SIEMPRE despues del
+ * primer hueco y los tres de arriba seguirian verdes — que es exactamente el
+ * fallo que la spec le imputa al acumulado `droppedFrames`. Un afinador que dice
+ * "revisa el cable" el resto de la sesion es tan inutil como uno que nunca lo
+ * dice.
+ */
+TEST(AnalysisThreadReq009, TheMarkClearsAndTheReadingConvergesOnceTheInputIsWholeAgain) {
+    AnalysisRing ring;
+    AnalysisSnapshot snap;
+    AnalysisThread th(ring, snap);
+    th.setTargetHz(kReq009Target);
+    th.start(kRate);
+
+    const OverrunObservation obs = feedOverrunning(ring, snap, kReq009Real, 8, 150);
+    ASSERT_GT(obs.samples, 0) << "el desbordador no desbordo";
+    ASSERT_GT(obs.markUpSamples, 0)
+        << "la premisa de este test es que la marca llego a estar ARRIBA mientras se "
+           "pisaba; si no, no hay nada que ver bajar.";
+
+    // Se deja de pisar y se sigue alimentando CONTIGUO desde donde quedo.
+    ASSERT_TRUE(feedContiguousMore(ring, snap, kReq009Real, 200, obs.blocksWritten))
+        << "la muestra de recuperacion salio corta";
+
+    float after[kSnapshotValueCount];
+    ASSERT_TRUE(snap.read(after));
+    const double dropped = after[kSnapDroppedFrames];
+    th.stop();
+
+    EXPECT_GT(dropped, 0.0)
+        << "el acumulado tendria que seguir contando los frames que SI se perdieron: "
+           "la marca describe la lectura viva, no borra la historia.";
+    EXPECT_FLOAT_EQ(after[kSnapInputDiscontinuity], 0.0f)
+        << "la entrada volvio a estar entera y la marca sigue arriba. Asi se comporta "
+           "el ACUMULADO `droppedFrames` (" << dropped << ", monotono), que es justo "
+           "lo que este slot existe para no ser.";
+    EXPECT_EQ(static_cast<int>(after[kSnapState]), kStateConverged)
+        << "despues de recuperarse la aguja no vuelve nunca: la guarda se traba, que "
+           "es el fallo que AC-009.2 prohibe.";
+    EXPECT_NEAR(after[kSnapCents], kReq009RealCents,
+                AnalysisThread::kConvergedUncertaintyCents)
+        << "convergio, pero sobre una integracion que todavia arrastra el hueco";
+}
+
+/**
+ * AC-009.1 — EL CASO SE FUERZA, NO SE ESPERA. Un desborde de UNA rafaga sobre
+ * una lectura que YA estaba convergida.
+ *
+ * 🔴 POR QUE HACE FALTA ADEMAS DEL DE DESBORDE SOSTENIDO. Aquel mira si algo
+ * malo *aparece*, y eso deja el veredicto a merced del azar: la variante rota
+ * —muestrear `droppedFrames()` ANTES de `read()`— cruzaba el presupuesto en
+ * **1 de 20 corridas**, o sea que ese test la dejaba pasar 19 veces de 20. Es la
+ * leccion que este repo ya pago: contra una ventana angosta no se agregan
+ * iteraciones, se ARMA la situacion.
+ *
+ * Y se puede armar porque el mecanismo es ESTRUCTURAL, no una carrera: los dos
+ * `mDropped.bump()` de `AnalysisRing` viven adentro de `read()` —el escritor no
+ * toca ese contador nunca—, asi que el desborde lo cuenta el lector en la MISMA
+ * llamada que devuelve el bloque de despues del hueco. Alcanza con:
+ *
+ *   1. dejar que converja con audio limpio (asi hay una medicion viva que
+ *      contaminar — sin eso no hay nada que arruinar y el test saldria verde por
+ *      vacio, que es lo que vigila el ASSERT de premisa),
+ *   2. **vaciar el ring**, para que el lector quede en su siesta y la rafaga
+ *      entera caiga entre dos vueltas,
+ *   3. tirar de golpe mas de un ring entero,
+ *   4. mirar la PRIMERA publicacion que ya cuenta el desborde.
+ *
+ * Con la guarda: esa vuelta ve Δ > 0, tira la integracion y publica "midiendo".
+ * Muestreando antes de `read()`: el Δ da 0, el salto entra a una integracion que
+ * seguia convergida, y el motor publica CONVERGIDO sobre dos trozos distintos.
+ *
+ * 🔴 LA CAPTURA NO PUEDE USAR `waitFor`: duerme 1 ms entre sondeos y una vuelta
+ * del analisis dura mucho menos, asi que se saltearia justo la publicacion
+ * contaminada y veria la siguiente, ya recuperada. **Medido**: con `waitFor`
+ * este test no mataba al mutante del orden. Por eso el sondeo es apretado y
+ * guarda TODAS las publicaciones distintas.
+ */
+TEST(AnalysisThreadReq009, ABurstOverrunIsNeverPublishedAsConverged) {
+    AnalysisRing ring;
+    AnalysisSnapshot snap;
+    AnalysisThread th(ring, snap);
+    th.setTargetHz(kReq009Target);
+    th.start(kRate);
+
+    // 1 · converger con audio limpio.
+    int written = 0;
+    waitFor([&] {
+        for (int i = 0; i < 4; ++i) {
+            if (!waitForRoom(ring, 1024)) return true;   // lo juzga el ASSERT de abajo
+            const auto blk = stringBlock(kReq009Real, 1024, written * 1024);
+            ring.writeStereo(blk.data(), 1024);
+            ++written;
+        }
+        float o[kSnapshotValueCount];
+        return snap.read(o) && static_cast<int>(o[kSnapState]) == kStateConverged;
+    }, std::chrono::seconds(10));
+
+    float before[kSnapshotValueCount];
+    ASSERT_TRUE(snap.read(before) &&
+                static_cast<int>(before[kSnapState]) == kStateConverged)
+        << "premisa rota: el motor nunca llego a converger con audio limpio, asi que no hay "
+           "medicion viva que el hueco pueda contaminar y el EXPECT de abajo seria verde por "
+           "vacio.";
+    const double droppedBefore = before[kSnapDroppedFrames];
+    ASSERT_EQ(droppedBefore, 0.0) << "el tramo limpio no puede haber pisado nada";
+
+    // 2 · vaciar el ring: el lector queda en la siesta, no adentro de read().
+    ASSERT_TRUE(waitFor([&] { return ring.availableFrames() == 0; }))
+        << "el analisis no llego a drenar el ring: la rafaga no caeria entre dos vueltas";
+
+    // 3 · UNA rafaga de mas de un ring entero, sin esperar lugar.
+    const int burst = 2 * AnalysisRing::kCapacityFrames / 1024;
+    for (int i = 0; i < burst; ++i) {
+        const auto blk = stringBlock(kReq009Real, 1024, written * 1024);
+        ring.writeStereo(blk.data(), 1024);
+        ++written;
+    }
+
+    // 4 · sondeo APRETADO: guarda cada publicacion distinta hasta ver la primera
+    //     que ya cuenta el desborde, mas un par mas de margen.
+    int badState = -1;
+    double badCents = 0.0, badDropped = 0.0, badMark = 0.0;
+    bool sawDrop = false;
+    double lastFrames = -1.0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        float o[kSnapshotValueCount];
+        if (!snap.read(o)) continue;
+        if (o[kSnapFramesAnalyzed] == lastFrames) continue;
+        lastFrames = o[kSnapFramesAnalyzed];
+        if (!(o[kSnapDroppedFrames] > droppedBefore)) continue;
+        if (!sawDrop) {
+            sawDrop = true;
+            badState   = static_cast<int>(o[kSnapState]);
+            badCents   = o[kSnapCents];
+            badDropped = o[kSnapDroppedFrames];
+            badMark    = o[kSnapInputDiscontinuity];
+            break;
+        }
+    }
+    th.stop();
+
+    ASSERT_TRUE(sawDrop)
+        << "premisa rota: la rafaga escribio " << burst << " bloques de golpe sobre un ring de "
+        << AnalysisRing::kCapacityFrames << " frames y ninguna publicacion conto un solo frame "
+           "pisado.";
+
+    EXPECT_NE(badState, kStateConverged)
+        << "el motor siguio diciendo CONVERGIDO en la primera ventana despues de un hueco de "
+        << (badDropped - droppedBefore) << " frames. cents=" << badCents << " — la integracion "
+           "que sostiene ese numero arranco ANTES del hueco y sigue viva.\n"
+        << "  🔴 El sintoma tipico es muestrear `droppedFrames()` ANTES de `read()`: los dos "
+           "bump del contador viven ADENTRO de read(), asi que ahi el Δ da 0 y el salto entra "
+           "sin que nadie lo vea.";
+    EXPECT_FLOAT_EQ(static_cast<float>(badMark), 1.0f)
+        << "hubo hueco y el snapshot no lo dice: el consumidor no puede distinguir esto de "
+           "'todavia no' (AC-009.3).";
+}

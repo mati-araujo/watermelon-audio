@@ -263,6 +263,16 @@ private:
     std::atomic<bool> mRunning{false};
     std::atomic<uint64_t> mTicks{0};
     uint64_t mFramesAnalyzed{0};
+
+    /**
+     * REQ-009 S2. `mRing.droppedFrames()` tal como estaba en la vuelta anterior,
+     * para poder preguntar el **Δ** en vez del acumulado.
+     *
+     * Lo toca SOLO `drainLoop()`, asi que no necesita ser atomico. Y es
+     * `uint64_t` como el contador: restar dos snapshots de un contador que solo
+     * sube no puede desbordar por abajo.
+     */
+    uint64_t mLastDroppedFrames{0};
 };
 
 }  // namespace wma::analysis

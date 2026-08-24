@@ -233,6 +233,78 @@ class TunerContractTest {
     }
 
     /**
+     * REQ-009 (AC-009.3) — `isInputBroken` es la pregunta que sigue a `isConverged`.
+     *
+     * Cuando aquélla da `false`, ésta dice **qué hacer**: `false` en las dos = esperar;
+     * `true` acá = revisar el cable. Van los DOS lados en el mismo test porque una
+     * propiedad clavada en `false` pasa la mitad de arriba sola — y clavada en `true`
+     * pasaría la de abajo.
+     */
+    @Test
+    fun laEntradaRotaSeDistingueDeTodaviaNoConvergi() {
+        sujetos().forEach { s ->
+            val t = s.tuner
+            t.selectedString = 5
+            t.start()
+
+            // Midiendo con la entrada SANA: hay que esperar.
+            s.publicar(nativoConPitch(cents = 0.1f, state = TunerState.MEASURING))
+            val esperando = assertNotNull(t.reading(), "$s: no publicó lectura")
+            assertTrue(!esperando.isConverged, "$s: midiendo no es convergido")
+            assertTrue(
+                !esperando.isInputBroken,
+                "$s: la entrada está entera y aun así dice que llegó rota. Eso manda al " +
+                    "músico a buscar un problema que no existe.",
+            )
+
+            // Mismo estado, entrada ROTA: hay que revisar el cable.
+            s.publicar(
+                nativoConPitch(
+                    cents = 0.1f,
+                    state = TunerState.MEASURING,
+                    inputDiscontinuity = 1f,
+                ),
+            )
+            val rota = assertNotNull(t.reading(), "$s: no publicó lectura")
+            assertTrue(!rota.isConverged, "$s: midiendo no es convergido")
+            assertTrue(
+                rota.isInputBroken,
+                "$s: el motor avisó que la entrada llegó rota y la superficie no lo " +
+                    "transmite. El consumidor ve el MISMO estado que arriba y espera para " +
+                    "siempre.",
+            )
+        }
+    }
+
+    /**
+     * Y nunca las dos a la vez: el motor no publica convergido sobre una integración con
+     * hueco (AC-009.1), así que la superficie no puede inventar esa combinación.
+     */
+    @Test
+    fun convergidoYEntradaRotaSonMutuamenteExcluyentes() {
+        sujetos().forEach { s ->
+            val t = s.tuner
+            t.selectedString = 5
+            t.start()
+            s.publicar(
+                nativoConPitch(
+                    cents = 0.1f,
+                    state = TunerState.CONVERGED,
+                    inputDiscontinuity = 1f,
+                ),
+            )
+
+            val reading = assertNotNull(t.reading(), "$s: no publicó lectura")
+            assertTrue(reading.isConverged, "$s: el estado dice convergido")
+            assertTrue(
+                !reading.isInputBroken,
+                "$s: si la lectura está convergida no hay nada que mandar a revisar — " +
+                    "`isInputBroken` explica una AUSENCIA de convergencia.",
+            )
+        }
+    }
+
+    /**
      * `isConverged` exige las TRES cosas: objetivo, medición y estado convergido. Sin esta
      * exigencia, una UI mostraría el tilde verde sobre una lectura sin objetivo.
      */
@@ -323,12 +395,17 @@ class TunerContractTest {
      * `NaN` y no `0f` para lo ausente: es lo que hace el motor, y por el mismo motivo —0,0
      * cents es una lectura **plausible** (afinado exacto) que una UI dibujaría como medición.
      */
-    private fun nativo(cents: Float, state: Float): FloatArray = floatArrayOf(
+    private fun nativo(
+        cents: Float,
+        state: Float,
+        inputDiscontinuity: Float = 0f,
+    ): FloatArray = floatArrayOf(
         48000f, 0.2f, 48000f, 0f, state,
         cents, 0.3f, 0.01f,
         440f, 0.99f,
         Float.NaN, 0f,
         0f, 2f, 21f,
+        inputDiscontinuity,
     )
 
     private fun nativoSinPitch(): FloatArray =
@@ -337,7 +414,9 @@ class TunerContractTest {
     private fun nativoConPitch(
         cents: Float,
         state: TunerState = TunerState.CONVERGED,
+        inputDiscontinuity: Float = 0f,
     ): FloatArray = nativo(
+        inputDiscontinuity = inputDiscontinuity,
         cents = cents,
         state = when (state) {
             TunerState.NO_SIGNAL -> 0f

@@ -51,16 +51,18 @@ class TunerImplTest {
         configuration: TuningConfiguration = guitar,
     ) = TunerImpl(bridge, configuration)
 
-    /** Los 15 floats en el orden que documenta `wma_tuner_get_snapshot`. */
+    /** Los 16 floats en el orden que documenta `wma_tuner_get_snapshot`. */
     private fun nativeSnapshot(
         cents: Float = -5f,
         state: Float = 3f,
+        inputDiscontinuity: Float = 0f,
     ): FloatArray = floatArrayOf(
         48000f, 0.2f, 48000f, 0f, state,
         cents, 0.3f, 0.01f,
         440f, 0.99f,
         0f, 0f,
         0f, 2f, 21f,
+        inputDiscontinuity,
     )
 
     // =======================================================================

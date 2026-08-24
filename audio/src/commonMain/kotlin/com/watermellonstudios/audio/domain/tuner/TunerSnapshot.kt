@@ -29,6 +29,9 @@ package com.watermellonstudios.audio.domain.tuner
  *   null. Lo publica el motor ya integrado a propósito: si la app tuviera que
  *   integrarlo, un frame perdido correría la fase para siempre.
  * @property uncertainty  Incertidumbre de la medición, o null si no hay dato.
+ * @property inputDiscontinuity `true` si esta lectura arrastra un hueco en la
+ *   entrada (REQ-009). Ver el KDoc del campo: es lo que distingue "todavía no"
+ *   de "la entrada llegó rota".
  */
 data class TunerSnapshot(
     val captureSampleRate: Int,
@@ -86,6 +89,28 @@ data class TunerSnapshot(
      * da un rango más angosto que uno a 48.
      */
     val usableRangeCents: Float?,
+    /**
+     * `true` si la integración detrás de [cents] arrastra un **hueco en la
+     * entrada** (REQ-009).
+     *
+     * Es la mitad que vuelve accionable a [TunerState.MEASURING]. Sin esto la app
+     * muestra el mismo spinner en dos situaciones que le piden al usuario cosas
+     * **opuestas**: *"todavía no convergí"* se arregla **esperando**, y *"la
+     * entrada llegó rota"* se arregla **revisando el cable** —o cerrando lo que le
+     * come la CPU al teléfono—. Esperar frente a un problema que no se arregla
+     * solo es la peor de las dos salidas.
+     *
+     * **No es `droppedFrames > 0`.** Ese contador es acumulado y monótono: tras el
+     * primer desborde queda arriba para siempre, así que una app que lo usara para
+     * esto diría "revisá el cable" el resto de la sesión. Esta bandera describe la
+     * lectura **viva**: se levanta con el hueco y se baja sola cuando el motor
+     * vuelve a tener una medición propia.
+     *
+     * **`Boolean` y no `Boolean?`**: acá no hay ausencia que expresar. La pregunta
+     * *"¿esta lectura vio un hueco?"* tiene respuesta siempre — incluso sin
+     * objetivo y sin señal, donde la respuesta es `false`.
+     */
+    val inputDiscontinuity: Boolean,
 ) {
     companion object {
         /**
@@ -96,7 +121,7 @@ data class TunerSnapshot(
          * librería manda un array más largo y se lee el prefijo conocido, que es
          * exactamente la compatibilidad que el orden append-only compra.
          */
-        const val VALUE_COUNT: Int = 15
+        const val VALUE_COUNT: Int = 16
 
         /**
          * Arma el snapshot desde los floats nativos, en el orden que documenta
@@ -124,6 +149,10 @@ data class TunerSnapshot(
                 lockedString = values[12].toInt().takeIf { it >= 0 },
                 fastModeState = values[13].toInt(),
                 usableRangeCents = values[14].takeIf { !it.isNaN() },
+                // 0/1, no NaN: ver el KDoc del campo. El `>= 0.5f` es la misma
+                // defensa que el índice 11 — un float que viaja por la frontera
+                // no se compara por igualdad exacta.
+                inputDiscontinuity = values[15] >= 0.5f,
             )
         }
     }

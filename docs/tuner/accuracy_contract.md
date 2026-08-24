@@ -79,6 +79,27 @@ exactitud entero y no está en este REQ.
 rápido 85,3 ms; el strobe declara convergencia cuando 1σ ≤ 0,1 cents, lo que en la cuerda más
 grave del catálogo (B0) ocurre pasados los **0,5 s** y en A4 es inmediato.
 
+🔴 **σ NO ES SUFICIENTE PARA DECLARAR CONVERGENCIA, y esa es la segunda vez que pasa (REQ-009).**
+`1σ ≤ 0,1 cents` es **necesario y no suficiente**: σ mide la linealidad del ajuste, y una señal
+con un **salto de fase** —el ring de análisis pisó frames, o la captura entregó audio no
+contiguo— sigue ajustando bien a una recta. Medido: con el ring desbordando, el motor publicaba
+`CONVERGIDO` con la lectura a **1,04 cents** del valor real —10× el presupuesto— y σ en
+**0,024**, o sea holgadamente por debajo del umbral.
+
+Por eso el motor **descarta la integración entera** en cuanto pierde un solo frame, en vez de
+apoyarse en σ. Una discontinuidad invalida la fase acumulada por la misma razón que la invalida
+un cambio de objetivo. El costo es **latencia de aguja, no exactitud**: la lectura tarda más en
+aparecer y ninguna sale de mezclar dos trozos de señal. Con la guarda puesta, el peor error entre
+todas las lecturas publicadas como convergidas mientras el ring desborda es de **3,8·10⁻⁶ cents**
+(20 corridas × 150 ventanas); sin ella, **0,1875** — 4× el presupuesto.
+
+**El motor lo publica**, en el índice 15 del snapshot (`inputDiscontinuity` en Kotlin): distingue
+*"todavía no convergí"* —esperar— de *"la entrada llegó rota"* —revisar el cable—, que son dos
+acciones opuestas para el usuario. **No** es `droppedFrames > 0`: ese contador es acumulado y
+monótono, así que quedaría trabado el resto de la sesión. Verificado por `AnalysisThreadReq009.*`,
+que afirma las dos direcciones — que la marca se levante con el hueco y que **se baje sola** al
+recuperarse.
+
 ---
 
 ## Lo que todavía no está medido, y por qué
