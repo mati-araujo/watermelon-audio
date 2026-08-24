@@ -209,12 +209,12 @@ Lectura correr(Falla modo, int cadaCuantos, bool avisa = true, int bloques = 400
         if (falla && modo == Falla::HUECO) {
             absFrame += kBlockFrames;      // overrun: se pierde audio, no se entrega
             // ...y el backend AVISA, que es lo unico que hace esto arreglable.
-            if (avisa) node.reportCaptureDiscontinuity(kBlockFrames);
+            if (avisa) node.reportCaptureDiscontinuity();
             continue;
         }
         if (!esperarLugar()) break;
         if (falla && modo == Falla::SILENCIO) {
-            if (avisa) node.reportCaptureDiscontinuity(kBlockFrames);
+            if (avisa) node.reportCaptureDiscontinuity();
             // underrun: se entrega silencio de MAS. `absFrame` NO avanza — el
             // audio de fuente no se consumio, sigue esperando.
             std::fill(bloque.begin(), bloque.end(), 0.0f);

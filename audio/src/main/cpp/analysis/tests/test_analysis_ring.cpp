@@ -287,3 +287,36 @@ TEST(AnalysisRing, AReaderThatKeepsUpSeesEveryFrameExactlyOnce) {
     EXPECT_TRUE(writerDone.load(std::memory_order_acquire))
         << "el escritor no llego a terminar: el test se corto antes";
 }
+
+/**
+ * REQ-009 S3 — `reset()` tiene que llevarse tambien la COSTURA de captura.
+ *
+ * 🔴 EL DEFECTO QUE CONGELA ES SILENCIOSO. `reset()` devuelve las posiciones a
+ * cero; si la costura se quedara en su valor viejo, apuntaria a un punto que el
+ * lector no vuelve a alcanzar nunca — y la guarda de REQ-009 descarta bloques
+ * hasta alcanzarla. O sea un afinador MUDO para el resto de la sesion, sin un
+ * solo error. Es el mismo modo de falla que AC-009.2 prohibe para el acumulado
+ * de `droppedFrames`, entrando por otra puerta.
+ *
+ * Cuando esto se escribio el defecto era LATENTE —nadie llama a `reset()`; los
+ * `analysisRing.reset()` del arbol son del `unique_ptr`— y se arreglo igual: un
+ * metodo publico que deja el sistema en un estado del que no se sale no espera a
+ * tener un llamador para ser un defecto.
+ */
+TEST(AnalysisRing, ResetAlsoClearsTheCaptureSeam) {
+    AnalysisRing ring;
+    const std::vector<float> blk(256 * 2, 0.25f);
+    ring.writeStereo(blk.data(), 256);
+    ring.reportCaptureDiscontinuity();
+
+    ASSERT_GT(ring.captureSeamPosition(), 0u)
+        << "premisa rota: el aviso no dejo costura, asi que no hay nada que ver limpiarse";
+
+    ring.reset();
+
+    EXPECT_EQ(ring.captureSeamPosition(), 0u)
+        << "reset() dejo la costura en " << ring.captureSeamPosition()
+        << " con las posiciones en cero. El lector no vuelve a alcanzarla nunca, asi que la "
+           "guarda de REQ-009 descarta todos los bloques a partir de ahora: afinador mudo, "
+           "sin error.";
+}

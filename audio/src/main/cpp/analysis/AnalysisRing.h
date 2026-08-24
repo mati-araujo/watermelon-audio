@@ -200,24 +200,18 @@ public:
      * lector compara contra su propia posicion y reacciona cuando de verdad la
      * cruza, no cuando se entera.
      *
-     * @param frames cuantos frames de continuidad se perdieron. Se suman los dos
-     *        modos —overrun (falta audio) y underrun (sobra silencio)— porque
-     *        para el estimador los dos significan lo mismo: la integracion cruzo
-     *        un salto. Distinguirlos seria superficie sin consumidor.
+     * NO LLEVA CUANTO SE PERDIO, Y ES A PROPOSITO. La guarda no usa la magnitud:
+     * cualquier discontinuidad reinicia, igual que en el eje del ring y por la
+     * misma razon (asi no hay umbral que defender). Un contador de frames
+     * perdidos seria un campo que nadie lee — la clase de superficie que esta
+     * misma etapa ya saco una vez. Si algun dia hace falta medir CUANTO se
+     * pierde en un device real, vuelve junto con su consumidor.
      */
-    void reportCaptureDiscontinuity(uint32_t frames) noexcept {
-        if (frames == 0) return;
-        mCaptureDiscontinuity.fetch_add(frames, std::memory_order_relaxed);
+    void reportCaptureDiscontinuity() noexcept {
         // La frontera queda donde el escritor esta parado AHORA: lo que venga
         // despues de este punto no es contiguo con lo de antes.
         mCaptureSeam.store(mWritten.load(std::memory_order_relaxed),
                            std::memory_order_release);
-    }
-
-    /// Frames de continuidad que la CAPTURA declaro haber perdido, acumulado.
-    /// Es para diagnostico; la GUARDA se apoya en `captureSeamPosition()`.
-    uint64_t captureDiscontinuityFrames() const noexcept {
-        return mCaptureDiscontinuity.load(std::memory_order_relaxed);
     }
 
     /// Posicion de escritura, en frames, de la ULTIMA discontinuidad de captura
@@ -276,6 +270,17 @@ public:
     void reset() noexcept {
         mWritten.store(0, std::memory_order_relaxed);
         mRead.store(0, std::memory_order_relaxed);
+        // 🔴 LA COSTURA TAMBIEN, o el lector queda descartando PARA SIEMPRE
+        // (REQ-009 S3). Las posiciones vuelven a cero y esta se quedaria en un
+        // valor grande, o sea en un punto del futuro que el lector no alcanza
+        // nunca — y la guarda descarta hasta alcanzarlo. Es exactamente el
+        // "se traba y no vuelve a converger" que AC-009.2 prohibe.
+        //
+        // Hoy nadie llama a este metodo (los `analysisRing.reset()` del arbol
+        // son del unique_ptr, que destruye el objeto entero), asi que el defecto
+        // era LATENTE. Se arregla igual: el dia que alguien lo use, el sintoma
+        // seria un afinador mudo sin un solo error.
+        mCaptureSeam.store(0, std::memory_order_release);
         for (uint32_t i = 0; i < kCapacityFrames; ++i) {
             mBuffer[i].store(0.0f, std::memory_order_relaxed);
         }
@@ -303,9 +308,7 @@ private:
     std::unique_ptr<std::atomic<float>[]> mBuffer;
 
     /// La escribe SOLO el thread de captura.
-    /// REQ-009 S3. Los estampa el escritor. `mCaptureSeam` es el que gobierna la
-    /// guarda; el contador es diagnostico. Ver `reportCaptureDiscontinuity()`.
-    std::atomic<uint64_t> mCaptureDiscontinuity{0};
+    /// REQ-009 S3. Lo estampa el escritor. Ver `reportCaptureDiscontinuity()`.
     std::atomic<uint64_t> mCaptureSeam{0};
 
     /// Ver setCaptureRate(). 0 = nadie lo estampo todavia.

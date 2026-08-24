@@ -175,6 +175,12 @@ void AnalysisThread::drainLoop() {
         // ya paga el "cualquier Δ > 0 reinicia" de S2, y por la misma razon: es
         // preferible a defender un numero elegido a ojo.
         const uint64_t seam = mRing.captureSeamPosition();
+        // Si la costura RETROCEDE, el ring se reseteo y las posiciones volvieron
+        // a cero: re-sincronizar es lo unico correcto. Sin esto, una costura
+        // nueva —que ahora nace con un numero chico— quedaria por debajo de lo
+        // ya manejado y NO dispararia nunca. Es la otra mitad del defecto que
+        // `AnalysisRing::reset()` arregla de su lado.
+        if (seam < mLastCaptureSeam) mLastCaptureSeam = seam;
         const bool crossedSeam = seam > mLastCaptureSeam;
         if (crossedSeam && mRing.readPosition() >= seam) mLastCaptureSeam = seam;
 
@@ -218,12 +224,18 @@ void AnalysisThread::drainLoop() {
         // —4,5x el presupuesto— con σ en 0,098, apenas por debajo del umbral. Con
         // el descarte, ninguna. Cuesta un drenaje de latencia sobre una
         // integración que se acaba de tirar de todos modos.
-        if (crossedSeam) {
+        if (got <= 0) {
+            std::this_thread::sleep_for(kIdleNap);
             continue;
         }
 
-        if (got <= 0) {
-            std::this_thread::sleep_for(kIdleNap);
+        // El descarte va DESPUES del chequeo de arriba, y el orden importa: con
+        // una costura pendiente y el ring VACIO, saltar antes del `kIdleNap`
+        // deja el lazo girando en caliente sobre un ring que no tiene nada — un
+        // nucleo quemado mientras el afinador espera audio. Con datos, en cambio,
+        // saltar sin dormir es lo correcto: la vuelta consumio frames, o sea que
+        // avanza hacia la costura en vez de esperarla.
+        if (crossedSeam) {
             continue;
         }
 
