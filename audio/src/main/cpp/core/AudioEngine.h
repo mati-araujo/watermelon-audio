@@ -827,6 +827,18 @@ public:
     /**
      * @brief Called when backend encounters an error
      */
+    /**
+     * @brief REQ-009 S3 (3.3b) — el backend avisa que la captura perdio continuidad.
+     *
+     * Corre en el thread de SALIDA, que es el que escribe el `AnalysisRing` unas
+     * lineas mas abajo via `feedExternalInput`. Traduce el aviso a una costura
+     * posicionada sobre el ring del afinador y no hace nada mas. Si no hay
+     * afinador escuchando, el nodo lo descarta solo.
+     *
+     * RT-safe: dos loads atomicos y un store.
+     */
+    void onCaptureDiscontinuity(uint64_t framesQueuedAhead) noexcept override;
+
     void onBackendError(watermelon_audio::BackendError error) override;
 
     /**

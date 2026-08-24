@@ -28,6 +28,18 @@ import com.watermellonstudios.audio.domain.tuning.TuningConfiguration
  * motor". Es la obligación que la interfaz declara en prosa y que las firmas no pueden
  * expresar: un implementador que nunca empuje el objetivo deja al estimador sin dónde
  * enganchar. Con esto, un test puede exigir que se haya empujado.
+ *
+ * 🔴 **Y las DOS mitades, que es lo que MINI-004 vino a arreglar.** Este doble empujaba en
+ * cada asignación, sin guardia de "cambió", así que él mismo hacía lo que el puente prohíbe
+ * —`setTunerTargetHz` *reinicia la integración*— mientras su KDoc se presentaba como vigía
+ * de esa obligación. Vigilaba **una sola mitad**: que nadie deje de empujar. Al que empuja
+ * de más no lo miraba nadie.
+ *
+ * Que en un doble sea inocuo es justamente lo que lo volvía peligroso: como **referencia**,
+ * quien lo copiara escribía el implementador que nunca converge. Hoy el setter tiene el
+ * mismo guardia que `TunerImpl`, así que las dos implementaciones que el contrato ejerce se
+ * comportan igual — y el contrato puede exigir las dos mitades sin que el doble sea la
+ * excepción. Ver [syncTargetWithEngine].
  */
 class FakeTuner(
     configuration: TuningConfiguration,
@@ -47,7 +59,7 @@ class FakeTuner(
             targets = value.targets()
             // Cambiar la configuración mueve los objetivos, así que hay que re-empujar:
             // es exactamente la obligación que declara ITuner.
-            pushCurrentTarget()
+            syncTargetWithEngine()
         }
 
     override var targets: List<StringTarget> = configuration.targets()
@@ -56,7 +68,7 @@ class FakeTuner(
     override var selectedString: Int? = null
         set(value) {
             field = value
-            pushCurrentTarget()
+            syncTargetWithEngine()
         }
 
     override var isRunning: Boolean = false
@@ -82,11 +94,40 @@ class FakeTuner(
     private fun currentTarget(): StringTarget? =
         selectedString?.let { i -> targets.getOrNull(i - 1) }
 
-    private fun pushCurrentTarget() {
-        currentTarget()?.let { pushedTargets += it.frequency.hz }
+    /**
+     * Empuja el objetivo **sólo cuando el objetivo efectivo cambió** (MINI-004).
+     *
+     * 🔴 Antes esto empujaba en CADA asignación, y era una contradicción con el puente que
+     * este mismo doble dice vigilar: `ITunerBridge.setTunerTargetHz` documenta que
+     * *"cambiarlo reinicia la integración, así que no llamarlo por frame con el mismo
+     * valor"*. En un doble empujar de más es inocuo —agregar a una lista no cuesta nada—,
+     * pero como **referencia** era una trampa: quien lo copiara escribía el implementador
+     * que nunca converge, y ese fallo se ve desde afuera como un DSP roto.
+     *
+     * El punto ciego era exacto y vale nombrarlo: [pushedTargets] permitía exigir que
+     * alguien **empujara**, y nada miraba al que empujaba **de más**. O sea que vigilaba la
+     * mitad barata de una obligación de dos mitades — que es el mismo modo de falla contra
+     * el que previene el KDoc de apertura de esta clase, una capa más arriba.
+     *
+     * "Cambió" se mide sobre los **Hz efectivos**, no sobre la identidad de la
+     * configuración: mover la referencia a los mismos 440 Hz no mueve nada. Y quedarse sin
+     * objetivo empuja [NO_TARGET_HZ], que es una orden ("borrá el objetivo") y no una
+     * ausencia de empuje.
+     */
+    private fun syncTargetWithEngine() {
+        val desired = currentTarget()?.frequency?.hz ?: NO_TARGET_HZ
+        if (desired == lastPushedHz) return
+        lastPushedHz = desired
+        pushedTargets += desired
     }
 
+    /** El último objetivo empujado. Arranca en "sin objetivo", igual que el motor. */
+    private var lastPushedHz: Double = NO_TARGET_HZ
+
     companion object {
+        /** Lo que el puente entiende por "sin objetivo". Ver `ITunerBridge.setTunerTargetHz`. */
+        const val NO_TARGET_HZ = 0.0
+
         /** Un snapshot sin medición de afinación — el estado REAL del motor hoy. */
         fun snapshotWithoutPitch(
             captureSampleRate: Int = 48000,
@@ -98,6 +139,7 @@ class FakeTuner(
             lockedString: Int? = null,
             fastModeState: Int = 1,
             usableRangeCents: Float? = null,
+            inputDiscontinuity: Boolean = false,
         ) = TunerSnapshot(
             captureSampleRate = captureSampleRate,
             levelRms = levelRms,
@@ -113,6 +155,7 @@ class FakeTuner(
             lockedString = lockedString,
             fastModeState = fastModeState,
             usableRangeCents = usableRangeCents,
+            inputDiscontinuity = inputDiscontinuity,
         )
 
         /** Un snapshot con medición, para los tests que necesitan un número. */
@@ -126,6 +169,7 @@ class FakeTuner(
             lockedString: Int? = 0,
             fastModeState: Int = 2,
             usableRangeCents: Float? = 21.0f,
+            inputDiscontinuity: Boolean = false,
         ) = TunerSnapshot(
             captureSampleRate = 48000,
             levelRms = 0.2f,
@@ -141,6 +185,7 @@ class FakeTuner(
             lockedString = lockedString,
             fastModeState = fastModeState,
             usableRangeCents = usableRangeCents,
+            inputDiscontinuity = inputDiscontinuity,
         )
     }
 }

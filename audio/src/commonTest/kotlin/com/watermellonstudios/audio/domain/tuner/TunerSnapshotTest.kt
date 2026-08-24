@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * REQ-001 S1 — la traducción del snapshot nativo a algo con lo que se pueda
@@ -43,9 +44,10 @@ class TunerSnapshotTest {
         lockedString: Float = 2f,
         fastModeState: Float = 2f,
         usableRangeCents: Float = 118.9f,
+        inputDiscontinuity: Float = 0f,
     ) = floatArrayOf(rate, rms, frames, dropped, state, cents, phase, uncertainty,
                      detectedHz, clarity, inharmonicityB, inharmonicityMeasured,
-                     lockedString, fastModeState, usableRangeCents)
+                     lockedString, fastModeState, usableRangeCents, inputDiscontinuity)
 
     @Test
     fun elOrdenDeLosValoresEsElDelContratoNativo() {
@@ -56,6 +58,7 @@ class TunerSnapshotTest {
         assertEquals(96000L, snap.framesAnalyzed)
         assertEquals(3L, snap.droppedFrames)
         assertEquals(TunerState.MEASURING, snap.state)
+        assertTrue(!snap.inputDiscontinuity)
 
         // Los dos que agregó la detección gruesa, AL FINAL del layout.
         assertEquals(82.41f, snap.detectedHz)
@@ -143,7 +146,7 @@ class TunerSnapshotTest {
         // Si esto cambia sin que cambie WMA_TUNER_SNAPSHOT_VALUES, el consumidor
         // pasa un array de otro tamaño que el que la C API va a llenar. Del lado
         // de C++ lo para un static_assert; de este lado, esta línea.
-        assertEquals(15, TunerSnapshot.VALUE_COUNT)
+        assertEquals(16, TunerSnapshot.VALUE_COUNT)
         assertEquals(TunerSnapshot.VALUE_COUNT, nativeValues().size)
     }
 
@@ -166,6 +169,43 @@ class TunerSnapshotTest {
 
         assertEquals(44100, snap.captureSampleRate)
         assertEquals(118.9f, snap.usableRangeCents)
+    }
+
+    /**
+     * REQ-009 · 2.4 — el slot 15 llega como `Boolean`, y en las DOS direcciones.
+     *
+     * Un test de una sola dirección lo pasa un campo clavado en su default. Por
+     * eso van los dos lados con la misma función.
+     */
+    @Test
+    fun laMarcaDeHuecoLlegaEnLasDosDirecciones() {
+        val roto = assertNotNull(TunerSnapshot.fromNative(nativeValues(inputDiscontinuity = 1f)))
+        val sano = assertNotNull(TunerSnapshot.fromNative(nativeValues(inputDiscontinuity = 0f)))
+
+        assertTrue(roto.inputDiscontinuity, "el motor marcó el hueco y no llegó")
+        assertTrue(!sano.inputDiscontinuity, "sin hueco la marca no puede estar prendida")
+    }
+
+    /**
+     * REQ-009 · 2.4 — y NO se lee del acumulado `droppedFrames`.
+     *
+     * La tentación es derivarla (`droppedFrames > 0`), y está medido que eso es
+     * un defecto: el acumulado es monótono, así que después del primer desborde
+     * una app que lo usara diría "revisá el cable" el resto de la sesión. Este
+     * test fija el caso que los separa — frames perdidos hace rato, entrada sana
+     * ahora — y mataría a quien la derivara.
+     */
+    @Test
+    fun laMarcaNoSeDerivaDelAcumuladoDeFramesPerdidos() {
+        val snap = assertNotNull(
+            TunerSnapshot.fromNative(nativeValues(dropped = 329728f, inputDiscontinuity = 0f))
+        )
+        assertEquals(329728L, snap.droppedFrames)
+        assertTrue(
+            !snap.inputDiscontinuity,
+            "se perdieron frames en algún momento de la sesión, pero la lectura VIVA " +
+                "está sana: derivar la marca del acumulado la dejaría trabada para siempre",
+        )
     }
 
     /**

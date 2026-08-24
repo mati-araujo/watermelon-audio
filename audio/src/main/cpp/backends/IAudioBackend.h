@@ -220,6 +220,36 @@ public:
     ) = 0;
 
     /**
+     * @brief La CAPTURA perdio continuidad (REQ-009 S3, tarea 3.3b).
+     *
+     * La llama el backend DESDE EL CALLBACK DE SALIDA —el mismo thread que
+     * despues entrega `inputData` en `onAudioReady`— y SIEMPRE antes de esa
+     * entrega. No es un detalle de orden: quien la recibe la convierte en una
+     * costura posicionada sobre el ring del afinador, y esa posicion tiene que
+     * caer en la frontera ANTERIOR al bloque que trae el salto.
+     *
+     * 🔑 Por eso la llama el callback de SALIDA aunque el overrun lo detecte el
+     * de ENTRADA: la posicion de una costura la estampa siempre el thread que
+     * escribe el ring. El cruce entre los dos threads lo hace
+     * `wma::backends::CaptureGapMailbox`, que transporta un numero y no una
+     * posicion.
+     *
+     * @param framesQueuedAhead frames de captura que seguian encolados por
+     *        DELANTE del hueco. Cero cuando el hueco es aca mismo (underrun,
+     *        detectado por el propio callback de salida). Para un overrun de un
+     *        backend con cola de un segundo, esto vale ~48000 — y omitirlo
+     *        convierte la guarda en un falso CONVERGIDO. Ver el hallazgo F.
+     *
+     * Default INERTE a proposito: un backend que no reporta no es un error, es
+     * un limite — y ese limite ya esta escrito como test
+     * (`CaptureDiscontinuity.NobodyReportedItSoNobodyCanKnow`). Lo que no se
+     * puede es fingir que reporta.
+     *
+     * RT-safe: la llama el thread de audio.
+     */
+    virtual void onCaptureDiscontinuity(uint64_t /*framesQueuedAhead*/) noexcept {}
+
+    /**
      * Called when an error occurs in the backend.
      *
      * This is NOT called from the RT audio thread - it's safe to:

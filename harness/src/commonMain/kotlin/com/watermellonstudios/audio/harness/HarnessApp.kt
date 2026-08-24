@@ -111,6 +111,12 @@ fun HarnessApp() {
                 // site (`setAudioMode`) y era el unico de los 26 que ninguna
                 // pantalla podia alcanzar. Ya encontro una divergencia iOS/Android.
                 ModeControl()
+
+                // Control 9 — afinador. Ademas de probar el afinador en el
+                // dispositivo, es EL CONTROL DE AC-010.1: no tiene @OptIn, asi
+                // que su compilacion afirma que `TunerFactory` alcanza sin tocar
+                // la superficie interna. Ver el KDoc de TunerControl.
+                TunerControl()
             }
         }
     }

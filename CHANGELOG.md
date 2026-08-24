@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.8.1...v2.8.2) (2026-08-24)
+
+
+### Bug Fixes
+
+* **tuner:** el motor deja de declarar CONVERGIDO sobre un salto (REQ-009 S2+S3) ([#189](https://github.com/mati-araujo/watermelon-audio/issues/189)) ([c0fae21](https://github.com/mati-araujo/watermelon-audio/commit/c0fae21988364b46b15c71888ca7765c8450f37a))
+
+## [2.8.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.8.0...v2.8.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* **effects:** las ramas paralelas se suman alineadas (REQ-011) ([#187](https://github.com/mati-araujo/watermelon-audio/issues/187)) ([9b6ea96](https://github.com/mati-araujo/watermelon-audio/commit/9b6ea9611c8534cd8d0047dc7cc7bb057ab0e4d8))
+
+## [2.8.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.7.0...v2.8.0) (2026-08-22)
+
+
+### Features
+
+* **tuner:** la puerta pública del afinador, probada desde afuera ([#183](https://github.com/mati-araujo/watermelon-audio/issues/183)) ([fe50ad3](https://github.com/mati-araujo/watermelon-audio/commit/fe50ad398f3fd6ddd9294ffddb160e41811d98d5))
+
 ## [2.7.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.6.0...v2.7.0) (2026-08-21)
 
 

@@ -263,6 +263,27 @@ private:
     std::atomic<bool> mRunning{false};
     std::atomic<uint64_t> mTicks{0};
     uint64_t mFramesAnalyzed{0};
+
+    /**
+     * REQ-009 S2. `mRing.droppedFrames()` tal como estaba en la vuelta anterior,
+     * para poder preguntar el **Δ** en vez del acumulado.
+     *
+     * Lo toca SOLO `drainLoop()`, asi que no necesita ser atomico. Y es
+     * `uint64_t` como el contador: restar dos snapshots de un contador que solo
+     * sube no puede desbordar por abajo.
+     */
+    uint64_t mLastDroppedFrames{0};
+
+    /**
+     * REQ-009 S3. Lo mismo para el eje de CAPTURA: el acumulado que el backend
+     * estampó en el ring, tal como estaba en la vuelta anterior.
+     *
+     * Va aparte de `mLastDroppedFrames` y no sumado, porque los dos contadores
+     * los mueve gente distinta en momentos distintos — juntarlos haría imposible
+     * decir cuál de los dos ejes disparó, que es lo primero que se pregunta al
+     * depurar esto.
+     */
+    uint64_t mLastCaptureSeam{0};
 };
 
 }  // namespace wma::analysis

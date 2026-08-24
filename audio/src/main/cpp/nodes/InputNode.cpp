@@ -54,8 +54,24 @@
 //      `onAudioReady`), asi que bloquear ahi lo deja atrapado exactamente en el
 //      estado que importa.
 //
-// Ninguno de los dos cambia comportamiento: uno registra, el otro espera a que
-// el test lo suelte.
+//   3. UNA PUERTA AL CAMINO DE OBOE, y esta si abre una rama (REQ-009 S3).
+//      `processInputBlock` es el camino de captura de ANDROID, o sea la
+//      plataforma principal del afinador, y su primer chequeo es
+//      `mInputStreamRunning` — que en host no se puede poner en true por
+//      ninguna via legitima: el unico que lo escribe es `startInputStream()`, y
+//      sin Oboe ese metodo devuelve `false` antes de tocarlo.
+//
+//      Sin este gancho, el cable "el xrun del stream se vuelve una costura"
+//      quedaria sin un solo test de host, verificado nada mas por leerlo. Eso es
+//      exactamente lo que el hallazgo E de esta etapa costo: la plomeria de la
+//      plataforma principal apuntando al lugar equivocado, verde y sin que nadie
+//      lo pudiera ver. El gancho es mas barato que repetirlo.
+//
+//      Lo que simula es fiel —"hay un stream de captura corriendo"— y no cambia
+//      ninguna otra decision del metodo.
+//
+// Los dos primeros no cambian comportamiento: uno registra, el otro espera a que
+// el test lo suelte. El tercero SI, y por eso lleva su propia justificacion.
 #if defined(WMA_TEST_HOOKS)
 #include <thread>
 
@@ -63,6 +79,7 @@ std::atomic<int> gInputNodeDtorCount{0};
 std::atomic<std::thread::id> gInputNodeDtorThread{};
 std::atomic<bool> gInputNodeHoldInCallback{false};
 std::atomic<bool> gInputNodeIsInCallback{false};
+std::atomic<bool> gInputNodeForceStreamRunning{false};
 #endif
 
 #define LOG_TAG "InputNode"
@@ -85,9 +102,22 @@ public:
                                           int32_t numFrames) override {
         // RT path: one pointer hop plus getChannelCount(), which in Oboe is a
         // plain member read. No allocation, no locking, no indirect call setup.
+        //
+        // REQ-009 S3 (3.2b) — el xrun de ESTE stream. En AAudio es la lectura de
+        // un contador que el propio stream lleva; en OpenSL ES el metodo base
+        // devuelve `ErrorUnimplemented` y ahi el nodo se entera de que no sabe,
+        // en vez de que le pasen un cero que significaria "todo bien".
+        //
+        // El adaptador NO decide nada con esto: lo pasa crudo. La regla de que
+        // es una costura vive en `InputNode::noteCaptureXRuns()`, que la suite
+        // de host SI compila y SI puede manejar — este bloque, no (esta adentro
+        // de `#if WMA_HAS_OBOE`).
+        const oboe::ResultWithValue<int32_t> xRuns = stream->getXRunCount();
         return mNode->processInputBlock(static_cast<float*>(audioData),
                                         numFrames,
-                                        stream->getChannelCount())
+                                        stream->getChannelCount(),
+                                        xRuns ? xRuns.value()
+                                              : InputNode::kCaptureXRunsUnknown)
                    ? oboe::DataCallbackResult::Continue
                    : oboe::DataCallbackResult::Stop;
     }
@@ -390,7 +420,23 @@ void InputNode::processCapturedBlock(float* stereo, int numFrames,
     }
 }
 
-bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCount) {
+// REQ-009 S3 (3.2b). El contrato entero esta en el KDoc de InputNode.h.
+void InputNode::noteCaptureXRuns(int32_t xRunCount) noexcept {
+    if (xRunCount < 0) {
+        return;  // el backend no sabe contar xruns: no afirma nada, ni bueno ni malo
+    }
+    const int64_t previo =
+        mLastCaptureXRuns.exchange(xRunCount, std::memory_order_relaxed);
+    if (previo < 0) {
+        return;  // primera observacion: siembra. No hay audio anterior con el que romper
+    }
+    if (previo != static_cast<int64_t>(xRunCount)) {
+        reportCaptureDiscontinuity();
+    }
+}
+
+bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCount,
+                                  int32_t xRunCount) {
     // WD-1.2 — este es el SEGUNDO thread RT del motor: en Android la captura
     // corre en su propio stream de Oboe, con su propio thread y su propio DSP.
     // FPCR/MXCSR son por thread, asi que setearlos en el thread de salida no
@@ -398,9 +444,18 @@ bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCo
     // la llama `AudioEngine::onAudioReady`, que ya flusheo en su propio thread.
     wma::platform::flushDenormalsRtSafe();
 
-    if (!mInputStreamRunning.load()) {
+    bool corriendo = mInputStreamRunning.load();
+#if defined(WMA_TEST_HOOKS)
+    corriendo = corriendo || gInputNodeForceStreamRunning.load(std::memory_order_acquire);
+#endif
+    if (!corriendo) {
         return false;
     }
+
+    // REQ-009 S3 (3.2b) — ANTES de escribir nada en el ring del afinador: la
+    // costura tiene que quedar estampada en la frontera entre el bloque anterior
+    // y este, que es donde el xrun dejo el hueco.
+    noteCaptureXRuns(xRunCount);
 
     numFrames = clampToWorkBuffers(numFrames);
     if (numFrames <= 0) {

@@ -32,6 +32,22 @@
  * es un defecto real del motor y tiene su propio requisito (REQ-009); REQ-005 declara cero
  * archivos de produccion, y un test que exigiera lo correcto —que el motor NO declare
  * convergida una lectura equivocada— naceria ROJO, que es introducir un fallo y no un freno.
+ *
+ * 🔴 REQ-009 S3 YA PASO, Y ESTE TRINQUETE NO SE INVIERTE. Se reviso a proposito, porque el
+ * doc de S2 habia escrito que actualizarlo era trabajo de S3. Leyendo `analyzeWithGap()`:
+ * es falso. Ese helper maneja `StrobeTracker` **en aislamiento** —sin `AnalysisRing`, sin
+ * `AnalysisThread`, sin backend— y le inyecta el hueco corriendo el indice de la señal. El
+ * cable que S3 construyo (xrun del backend -> `InputNode` -> costura posicionada en el ring
+ * -> `noteInputDiscontinuity()`) **no corre aca ni una linea**.
+ *
+ * Y no es una laguna: lo que la tercera asercion afirma es una propiedad del **estimador
+ * solo, sin que nadie le avise**, y esa propiedad no cambio — es justamente la premisa de
+ * REQ-009, medida en S1 (σ ANTI-correlacionada con el error: en la peor fila, 2,15 cents con
+ * σ = 0,00098). El tracker sigue sin poder verlo; lo nuevo es que ahora alguien se lo dice.
+ *
+ * DONDE VIVE LA COBERTURA DEL EJE DE CAPTURA, para que esto no se lea como deuda sin pagar:
+ *   · `core/tests/test_capture_discontinuity.cpp`  — el camino entero, las tres topologias
+ *   · `core/tests/test_capture_gap_mailbox.cpp`    — el cruce de threads de iOS y USB
  */
 
 #include "../StrobeTracker.h"

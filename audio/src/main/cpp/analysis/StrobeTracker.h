@@ -102,6 +102,46 @@ public:
 
     void reset();
 
+    /**
+     * @brief El audio que alimenta esta integracion dejo de ser CONTIGUO (REQ-009 S2).
+     *
+     * La llama `AnalysisThread` cuando el ring piso frames entre dos vueltas: es
+     * el unico que puede saberlo —tiene el ring— y este es el unico que sabe que
+     * hacer con la noticia, porque es el que tiene la ventana.
+     *
+     * QUE HACE: tira la integracion y la vuelve a arrancar, dejando el objetivo,
+     * el rate y la señal en su lugar. **Es la misma regla que el repo ya acepta
+     * para el cambio de objetivo** —`PhaseSlopeEstimator::setTarget()` llama a
+     * `reset()` porque *"la fase acumulada contra el objetivo VIEJO no dice nada
+     * del nuevo: seguir integrando sobre ella daria una pendiente que mezcla dos
+     * mediciones"*— y el argumento vale palabra por palabra para un hueco: la
+     * fase acumulada ANTES del hueco no dice nada de la señal de DESPUES.
+     *
+     * 🔴 POR QUE CUALQUIER Δ > 0 Y NO UN UMBRAL. El barrido de la spec (P6) dejo
+     * un caso incomodo: con 4.096 frames pisados la lectura salio EXACTA, y con
+     * 6.144 ya estaba 1,4 cents afuera. Elegir un numero entre esos dos habria
+     * que defenderlo con evidencia que no existe. Reiniciar siempre cuesta
+     * **latencia de aguja, no correctitud**: el caso de 4.096 tarda un poco mas
+     * en dibujar, y ninguna lectura se publica mezclando dos trozos de señal.
+     *
+     * 🔴 NO ES `reset()` A SECAS, Y LA DIFERENCIA ES AC-009.3. Ademas de tirar la
+     * integracion levanta una marca que sobrevive hasta que la integracion
+     * vuelva a tener una medicion PROPIA —o sea entera de audio posterior al
+     * hueco—. Sin ella el consumidor ve "midiendo" y no puede distinguir
+     * *"todavia no"* (esperar) de *"la entrada llego rota"* (revisar el cable),
+     * que son dos cosas distintas para el usuario.
+     */
+    void noteInputDiscontinuity();
+
+    /**
+     * `true` mientras la integracion viva arrastre un hueco: se levanta en
+     * `noteInputDiscontinuity()` y se baja sola cuando vuelve a haber medicion,
+     * que es el momento en que la ventana entera es audio de despues del hueco.
+     *
+     * Es el insumo de `kSnapInputDiscontinuity` (AC-009.3).
+     */
+    bool sawInputDiscontinuity() const noexcept { return mSawDiscontinuity; }
+
     bool process(const float* mono, int numFrames);
 
     /// Desviacion combinada contra el objetivo, en cents. Solo vale si
@@ -195,6 +235,9 @@ private:
     bool mHasSignal{false};
     bool mHasMeasurement{false};
     bool mDomainVerified{false};
+    /// REQ-009 S2. La integracion viva arranco despues de un hueco y todavia no
+    /// produjo una medicion propia. Ver `noteInputDiscontinuity()`.
+    bool mSawDiscontinuity{false};
     int mPartialsUsed{0};
 };
 

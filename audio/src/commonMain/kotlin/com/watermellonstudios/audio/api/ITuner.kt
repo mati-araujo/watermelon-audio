@@ -101,4 +101,17 @@ data class TunerReading(
     val isConverged: Boolean
         get() = target != null && snapshot.cents != null &&
             snapshot.state == com.watermellonstudios.audio.domain.tuner.TunerState.CONVERGED
+
+    /**
+     * `true` cuando esta lectura **no convergió porque la entrada llegó rota**, y no
+     * porque todavía no haya integrado lo suficiente (REQ-009).
+     *
+     * Va al lado de [isConverged] porque es la pregunta que sigue: cuando aquélla da
+     * `false`, ésta dice **qué hacer**. `false` en las dos = esperar; `true` acá =
+     * revisar el cable, o cerrar lo que le está comiendo la CPU al teléfono.
+     *
+     * Nunca es `true` junto con [isConverged]: el motor no publica convergido sobre una
+     * integración con hueco — eso es AC-009.1, y es el REQ entero.
+     */
+    val isInputBroken: Boolean get() = snapshot.inputDiscontinuity && !isConverged
 }

@@ -102,8 +102,140 @@ void AnalysisThread::drainLoop() {
         const int got = mRing.read(mScratch.data(), kDrainFrames);
         mTicks.fetch_add(1, std::memory_order_relaxed);
 
+        // --- REQ-009 S2 · LA GUARDA: el Δ de frames pisados, no el acumulado ---
+        //
+        // Si el ring desbordo, lo que acabo de leer NO es contiguo con lo que le
+        // di al estimador la vuelta pasada: entre los dos trozos falta un pedazo
+        // de señal que nadie vio. Integrar fase a traves de ese hueco da una
+        // pendiente que mezcla dos mediciones — y sale PLAUSIBLE, con σ chica,
+        // que es el hallazgo entero de REQ-009: medido, el motor publicaba
+        // CONVERGIDO con la lectura a 1,04 cents del valor real (10x el
+        // presupuesto) y σ en 0,024, muy por debajo del umbral de 0,1.
+        //
+        // 🔴 EL Δ, Y NO `droppedFrames() > 0`. El contador es acumulado y
+        // monotono: con el acumulado, el primer desborde apagaria CONVERGIDO
+        // para el resto de la sesion — el fallo que AC-009.2 prohibe
+        // explicitamente. El Δ dice "entre la vuelta pasada y esta se perdio
+        // señal", que es la pregunta que corresponde.
+        //
+        // 🔴 SE MUESTREA DESPUES DE `read()`, Y NO ES UN DETALLE DE ORDEN: ES LA
+        // MITAD QUE HACE FUNCIONAR LA GUARDA. Los DOS `mDropped.bump()` de
+        // `AnalysisRing` estan adentro de `read()` — el escritor no toca ese
+        // contador NUNCA (pisa lo viejo y sigue; es su contrato). O sea que el
+        // desborde lo descubre y lo cuenta el LECTOR, en la misma llamada que
+        // devuelve el bloque que viene despues del hueco. Muestrear antes de
+        // `read()` no es "un tick de corrimiento": es preguntar por un dato que
+        // todavia no existe, y garantiza alimentar el salto y desmentirlo recien
+        // en la vuelta siguiente — cuando la lectura equivocada ya se publico.
+        //
+        // Medido, 20 corridas de cada variante, peor error entre las lecturas
+        // que el motor declaro CONVERGIDAS mientras el ring desbordaba:
+        //     muestreo DESPUES (esto)  ->  3,8e-6 cents
+        //     muestreo ANTES           ->  0,1875 cents  (4x el presupuesto)
+        // Lo cubre `ABurstOverrunIsNeverPublishedAsConverged`, que fuerza el
+        // caso en vez de esperar a que aparezca: la variante de "antes" cruzaba
+        // el presupuesto en 1 de 20 corridas, o sea que un test que solo mire
+        // desbordes sostenidos la deja pasar 19 veces de 20.
+        const uint64_t dropped = mRing.droppedFrames();
+        const uint64_t droppedDelta = dropped - mLastDroppedFrames;
+        mLastDroppedFrames = dropped;
+
+        // --- REQ-009 S3 · el MISMO Δ, para el eje de CAPTURA -----------------
+        //
+        // El otro contador cuenta lo que se pisa en ESTE ring. Éste cuenta lo que
+        // se perdió ANTES de llegar: el ring que cada backend tiene entre su
+        // callback de entrada y el de salida tira audio bajo presión —overrun—
+        // o entrega silencio de más —underrun—, y las dos cosas llegan acá como
+        // un bloque perfectamente normal. Medido en S1: hasta 2,15 cents de
+        // error, 21x el presupuesto, con `droppedFrames` en 0 y el motor
+        // diciendo CONVERGIDO.
+        //
+        // 🔴 EL ORDEN NO SE HEREDA DEL DE ARRIBA, Y ESO ES DELIBERADO. Aquél se
+        // muestrea DESPUÉS de `read()` porque sus dos `bump()` viven adentro de
+        // `read()`. Éste lo bumpea OTRO thread (el de captura) en OTRO lugar, así
+        // que ese argumento no aplica. Lo que sí vale es la regla del estampado:
+        // el aviso viaja con las muestras, así que leerlo junto al bloque que
+        // acaba de salir del ring lo mantiene describiendo a ESE bloque. Leerlo
+        // antes del `read()` describiría al bloque anterior — un tick de atraso
+        // sobre una integración que ya cruzó el salto.
+        // La frontera se compara contra la posicion del LECTOR, no contra un
+        // contador: lo que importa es cuando el lector CRUZA el hueco, no cuando
+        // la noticia llega. Ver `AnalysisRing::reportCaptureDiscontinuity`.
+        //
+        // 🔴 SE DESCARTA HASTA HABER PASADO LA COSTURA MAS NUEVA, y esa forma es
+        // deliberadamente CONSERVADORA. Se guarda una sola posicion, asi que con
+        // varias costuras pendientes a la vez —con huecos cada 4 bloques entran
+        // dos en el ring— las viejas se perderian si solo se reaccionara al
+        // cruzar exactamente una. Medido con esa version ingenua: quedaban
+        // lecturas CONVERGIDAS a 2,1 cents, o sea el defecto entero intacto.
+        //
+        // Manteniendo el descarte hasta pasar la ultima conocida, ninguna costura
+        // se cuela: cuesta tirar tambien algunos bloques sanos ANTERIORES al
+        // hueco, o sea latencia de aguja — la misma moneda con la que esta etapa
+        // ya paga el "cualquier Δ > 0 reinicia" de S2, y por la misma razon: es
+        // preferible a defender un numero elegido a ojo.
+        const uint64_t seam = mRing.captureSeamPosition();
+        // Si la costura RETROCEDE, el ring se reseteo y las posiciones volvieron
+        // a cero: re-sincronizar es lo unico correcto. Sin esto, una costura
+        // nueva —que ahora nace con un numero chico— quedaria por debajo de lo
+        // ya manejado y NO dispararia nunca. Es la otra mitad del defecto que
+        // `AnalysisRing::reset()` arregla de su lado.
+        if (seam < mLastCaptureSeam) mLastCaptureSeam = seam;
+        const bool crossedSeam = seam > mLastCaptureSeam;
+        if (crossedSeam && mRing.readPosition() >= seam) mLastCaptureSeam = seam;
+
+        if (droppedDelta > 0 || crossedSeam) {
+            // El thread DETECTA; el estimador se HACE CARGO. Este lado es el
+            // unico que ve el ring; el otro es el unico que sabe cuando su
+            // integracion vuelve a ser confiable, porque es el que tiene la
+            // ventana.
+            //
+            // El bloque de esta vuelta SI se alimenta, y eso no es descuido: el
+            // ring nunca entrega una copia desgarrada —la re-chequea, la cuenta
+            // en `mTorn` y devuelve 0—, asi que lo que llega aca es contiguo por
+            // adentro. Lo unico roto era su union con el bloque anterior, y de
+            // eso se encarga el reinicio. (Se probo tambien descartarlo: mueve
+            // el peor error de 9,5e-6 a 3,8e-6 cents, o sea nada frente a un
+            // presupuesto de 0,1, y ningun test lo puede matar. Codigo que no se
+            // puede verificar y no cambia el resultado no se queda.)
+            // Los DOS ejes entran por el mismo gancho, y no es pereza: para la
+            // integración significan exactamente lo mismo —cruzó un salto— y el
+            // consumidor tampoco los distingue (la marca es una sola). Tener dos
+            // caminos para la misma consecuencia sería superficie sin uso, y dos
+            // sitios donde equivocarse.
+            mStrobe.noteInputDiscontinuity();
+        }
+
+        // 🔴 EL BLOQUE DE ESTA VUELTA SE DESCARTA, Y SOLO POR EL EJE DE CAPTURA.
+        //
+        // Es la diferencia exacta con el eje del ring, y vale la pena decirla
+        // porque en S2 se probó descartar y se SACÓ por injustificado: ahí el
+        // `AnalysisRing` garantiza que nunca entrega una copia desgarrada —la
+        // re-chequea, la cuenta en `mTorn` y devuelve 0—, así que lo que llegaba
+        // era contiguo por adentro y alcanzaba con reiniciar.
+        //
+        // Acá NO hay tal garantía, porque la costura no está en la mecánica del
+        // ring sino en el CONTENIDO: el escritor metió audio de los dos lados del
+        // hueco en frames consecutivos, y el ring no tiene cómo saberlo. Un
+        // drenaje de 2048 frames se lleva los dos lados en el mismo bloque, así
+        // que reiniciar antes de alimentarlo deja entrar la costura igual.
+        //
+        // Medido: sin este descarte quedaban lecturas CONVERGIDAS a 0,446 cents
+        // —4,5x el presupuesto— con σ en 0,098, apenas por debajo del umbral. Con
+        // el descarte, ninguna. Cuesta un drenaje de latencia sobre una
+        // integración que se acaba de tirar de todos modos.
         if (got <= 0) {
             std::this_thread::sleep_for(kIdleNap);
+            continue;
+        }
+
+        // El descarte va DESPUES del chequeo de arriba, y el orden importa: con
+        // una costura pendiente y el ring VACIO, saltar antes del `kIdleNap`
+        // deja el lazo girando en caliente sobre un ring que no tiene nada — un
+        // nucleo quemado mientras el afinador espera audio. Con datos, en cambio,
+        // saltar sin dormir es lo correcto: la vuelta consumio frames, o sea que
+        // avanza hacia la costura en vez de esperarla.
+        if (crossedSeam) {
             continue;
         }
 
@@ -160,6 +292,14 @@ void AnalysisThread::drainLoop() {
         values[kSnapCaptureSampleRate] = static_cast<float>(rate);
         values[kSnapLevelRms]          = rms;
         values[kSnapFramesAnalyzed]    = static_cast<float>(mFramesAnalyzed);
+        // 🔴 SE RELEE, NO SE REUSA `dropped`. Publicar la muestra que juzgo la
+        // guarda parecia mas coherente y **oculta justamente el tick que
+        // importa**: en la variante rota —muestrear antes de `read()`— la
+        // muestra vale 0 en la vuelta que se come el hueco, asi que el snapshot
+        // negaria el desborde que el ring acababa de contar. Un test que espere
+        // "hasta que el contador suba" se saltearia esa vuelta y veria la
+        // siguiente, ya recuperada. Medido: con la muestra reusada, el mutante
+        // del orden sobrevivia; releyendo, muere.
         values[kSnapDroppedFrames]     = static_cast<float>(mRing.droppedFrames());
 
         // REQ-003 AC-003.8 — sin control no se publica lectura fina.
@@ -234,6 +374,16 @@ void AnalysisThread::drainLoop() {
 
         values[kSnapLockedString]  = static_cast<float>(mFastMode.lockedIndex());
         values[kSnapFastModeState] = static_cast<float>(mFastMode.state());
+
+        // REQ-009 S2 (AC-009.3) — por que este estado NO es "todavia no".
+        //
+        // Sale del estimador y no de `droppedDelta`, y la diferencia no es de
+        // estilo: `droppedDelta` describe UN TICK, y lo que el consumidor
+        // necesita saber es si LA LECTURA QUE ESTA MIRANDO arrastra un hueco.
+        // Eso lo sabe el que tiene la ventana — se levanta con el hueco y se
+        // baja sola cuando la integracion vuelve a tener una medicion propia.
+        values[kSnapInputDiscontinuity] =
+            mStrobe.sawInputDiscontinuity() ? 1.0f : 0.0f;
 
         mSnapshot.publish(values);
     }

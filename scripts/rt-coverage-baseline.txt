@@ -337,6 +337,7 @@ audio/src/main/cpp/nodes/InputNode.cpp::InputNode::clampToWorkBuffers
 audio/src/main/cpp/nodes/InputNode.cpp::InputNode::feedExternalInput
 audio/src/main/cpp/nodes/InputNode.cpp::InputNode::getMonitoringSamples
 audio/src/main/cpp/nodes/InputNode.cpp::InputNode::isMonitoringEnabled
+audio/src/main/cpp/nodes/InputNode.cpp::InputNode::noteCaptureXRuns
 audio/src/main/cpp/nodes/InputNode.cpp::InputNode::process
 audio/src/main/cpp/nodes/InputNode.cpp::InputNode::processCapturedBlock
 audio/src/main/cpp/nodes/InputNode.cpp::InputNode::processInputBlock
