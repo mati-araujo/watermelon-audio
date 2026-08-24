@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.8.1...v2.8.2) (2026-08-24)
+
+
+### Bug Fixes
+
+* **tuner:** el motor deja de declarar CONVERGIDO sobre un salto (REQ-009 S2+S3) ([#189](https://github.com/mati-araujo/watermelon-audio/issues/189)) ([c0fae21](https://github.com/mati-araujo/watermelon-audio/commit/c0fae21988364b46b15c71888ca7765c8450f37a))
+
 ## [2.8.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.8.0...v2.8.1) (2026-08-24)
 
 
