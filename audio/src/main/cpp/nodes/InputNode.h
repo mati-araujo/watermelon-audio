@@ -202,6 +202,29 @@ public:
      * que el motor retira el nodo (WD-1.3): poner `nullptr`, esperar a que no
      * queden callbacks en vuelo, y recien entonces destruir.
      */
+    /**
+     * @brief La CAPTURA perdio continuidad: avisale al afinador (REQ-009 S3).
+     *
+     * La llama el BACKEND —o quien lo represente— cuando tiro audio de entrada:
+     * `OboeBackend` cuando su ring de captura desborda (overrun) o se queda
+     * corto (underrun), `CoreAudioBackend` en los mismos dos puntos. Los dos ya
+     * saben; hasta REQ-009 S3 esa noticia se perdia acá.
+     *
+     * POR QUE PASA POR EL NODO Y NO VA DERECHO AL RING. Porque el nodo es quien
+     * sabe si hay un afinador escuchando: `mAnalysisRing` puede ser nullptr, y
+     * el backend no tiene por que enterarse de que existe un afinador. Es la
+     * misma direccion de dependencia que el resto de `analysis/`.
+     *
+     * RT-safe: un `fetch_add` relajado sobre un atomico, o nada si no hay ring.
+     * La llaman los dos threads de audio.
+     */
+    void reportCaptureDiscontinuity(int frames) noexcept {
+        if (frames <= 0) return;
+        if (auto* ring = mAnalysisRing.load(std::memory_order_acquire)) {
+            ring->reportCaptureDiscontinuity(static_cast<uint32_t>(frames));
+        }
+    }
+
     void setAnalysisRing(wma::analysis::AnalysisRing* ring) noexcept {
         mAnalysisRing.store(ring, std::memory_order_release);
     }

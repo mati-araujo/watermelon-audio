@@ -160,6 +160,79 @@ public:
     }
 
     /**
+     * @brief La CAPTURA perdio continuidad antes de llegar hasta aca (REQ-009 S3).
+     *
+     * POR QUE HACE FALTA UN SEGUNDO CONTADOR, SI YA HAY `droppedFrames`
+     * ----------------------------------------------------------------
+     * `droppedFrames` cuenta lo que se pisa EN ESTE RING, y lo cuenta el LECTOR
+     * adentro de `read()`. Un hueco que se produce **aguas arriba** —en el ring
+     * que cada backend tiene entre su callback de entrada y el de salida— llega
+     * hasta aca como un bloque perfectamente normal: el escritor lo escribe
+     * entero, el lector lo lee entero, y `droppedFrames` no se mueve ni un
+     * frame. Medido en REQ-009 S1: hasta **2,15 cents** de error —21x el
+     * presupuesto— con `droppedFrames` en 0 y el motor diciendo CONVERGIDO.
+     *
+     * Y NO se puede deducir de la señal: σ resulto estar **anti-correlacionada**
+     * con el error (la peor fila del barrido tiene la σ mas chica). La unica
+     * fuente honesta es quien tiro el audio, que es el backend.
+     *
+     * SE ESTAMPA, IGUAL QUE EL RATE, Y POR LA MISMA RAZON
+     * ---------------------------------------------------
+     * Lo escribe el mismo thread que escribe las muestras, en el mismo bloque:
+     * asi el aviso no puede describir a otras muestras que las que lo acompañan.
+     * Un contador consultado por otro lado describiria otro momento — que es
+     * exactamente el defecto que S2 pago con el orden del muestreo.
+     *
+     * Es ACUMULATIVO a proposito: quien lo consume mira el **Δ por ventana**,
+     * nunca el total. El acumulado es monotono y trabaria la convergencia para
+     * el resto de la sesion (AC-009.2).
+     *
+     * 🔴 EL AVISO LLEVA POSICION, Y NO ES UN LUJO: SIN ELLA NO FUNCIONA.
+     * Un contador suelto dice *"se perdio audio"* pero no **donde**, y este ring
+     * es una COLA: cuando el aviso llega, el lector puede estar varios bloques
+     * atras, todavia masticando audio anterior al hueco. Con un contador a secas
+     * reinicia ahi —de mas, sobre audio sano— y para cuando la costura de verdad
+     * le llega, el Δ ya se consumio: la deja pasar. **Medido**: con contador
+     * suelto quedaba 1 de cada ~80 publicaciones CONVERGIDA a 0,18 cents.
+     *
+     * Por eso se guarda `mWritten` en el momento del aviso: esa es la frontera
+     * exacta, en el mismo sistema de coordenadas en el que el lector avanza. El
+     * lector compara contra su propia posicion y reacciona cuando de verdad la
+     * cruza, no cuando se entera.
+     *
+     * @param frames cuantos frames de continuidad se perdieron. Se suman los dos
+     *        modos —overrun (falta audio) y underrun (sobra silencio)— porque
+     *        para el estimador los dos significan lo mismo: la integracion cruzo
+     *        un salto. Distinguirlos seria superficie sin consumidor.
+     */
+    void reportCaptureDiscontinuity(uint32_t frames) noexcept {
+        if (frames == 0) return;
+        mCaptureDiscontinuity.fetch_add(frames, std::memory_order_relaxed);
+        // La frontera queda donde el escritor esta parado AHORA: lo que venga
+        // despues de este punto no es contiguo con lo de antes.
+        mCaptureSeam.store(mWritten.load(std::memory_order_relaxed),
+                           std::memory_order_release);
+    }
+
+    /// Frames de continuidad que la CAPTURA declaro haber perdido, acumulado.
+    /// Es para diagnostico; la GUARDA se apoya en `captureSeamPosition()`.
+    uint64_t captureDiscontinuityFrames() const noexcept {
+        return mCaptureDiscontinuity.load(std::memory_order_relaxed);
+    }
+
+    /// Posicion de escritura, en frames, de la ULTIMA discontinuidad de captura
+    /// avisada. 0 = ninguna. Se compara contra `readPosition()`.
+    uint64_t captureSeamPosition() const noexcept {
+        return mCaptureSeam.load(std::memory_order_acquire);
+    }
+
+    /// Frames que el lector ya consumio, en el mismo sistema de coordenadas que
+    /// `captureSeamPosition()`. Lo lee el propio lector.
+    uint64_t readPosition() const noexcept {
+        return mRead.load(std::memory_order_relaxed);
+    }
+
+    /**
      * @brief Descarta lo que haya sin leer y se para en lo mas nuevo.
      *
      * Lo llama el LECTOR cuando lo viejo dejo de significar algo — hoy, cuando cambia el
@@ -230,6 +303,11 @@ private:
     std::unique_ptr<std::atomic<float>[]> mBuffer;
 
     /// La escribe SOLO el thread de captura.
+    /// REQ-009 S3. Los estampa el escritor. `mCaptureSeam` es el que gobierna la
+    /// guarda; el contador es diagnostico. Ver `reportCaptureDiscontinuity()`.
+    std::atomic<uint64_t> mCaptureDiscontinuity{0};
+    std::atomic<uint64_t> mCaptureSeam{0};
+
     /// Ver setCaptureRate(). 0 = nadie lo estampo todavia.
     std::atomic<int> mCaptureRate{0};
 

@@ -129,6 +129,7 @@ add_executable(core_tests
     test_denormal_flush.cpp
     test_input_node_retire.cpp
     test_input_node_dsp.cpp
+    test_capture_discontinuity.cpp
     test_capture_sample_rate.cpp
     test_offline_render.cpp
     test_fx_track_routing.cpp

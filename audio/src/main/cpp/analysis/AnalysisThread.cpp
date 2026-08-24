@@ -139,7 +139,46 @@ void AnalysisThread::drainLoop() {
         const uint64_t dropped = mRing.droppedFrames();
         const uint64_t droppedDelta = dropped - mLastDroppedFrames;
         mLastDroppedFrames = dropped;
-        if (droppedDelta > 0) {
+
+        // --- REQ-009 S3 · el MISMO Δ, para el eje de CAPTURA -----------------
+        //
+        // El otro contador cuenta lo que se pisa en ESTE ring. Éste cuenta lo que
+        // se perdió ANTES de llegar: el ring que cada backend tiene entre su
+        // callback de entrada y el de salida tira audio bajo presión —overrun—
+        // o entrega silencio de más —underrun—, y las dos cosas llegan acá como
+        // un bloque perfectamente normal. Medido en S1: hasta 2,15 cents de
+        // error, 21x el presupuesto, con `droppedFrames` en 0 y el motor
+        // diciendo CONVERGIDO.
+        //
+        // 🔴 EL ORDEN NO SE HEREDA DEL DE ARRIBA, Y ESO ES DELIBERADO. Aquél se
+        // muestrea DESPUÉS de `read()` porque sus dos `bump()` viven adentro de
+        // `read()`. Éste lo bumpea OTRO thread (el de captura) en OTRO lugar, así
+        // que ese argumento no aplica. Lo que sí vale es la regla del estampado:
+        // el aviso viaja con las muestras, así que leerlo junto al bloque que
+        // acaba de salir del ring lo mantiene describiendo a ESE bloque. Leerlo
+        // antes del `read()` describiría al bloque anterior — un tick de atraso
+        // sobre una integración que ya cruzó el salto.
+        // La frontera se compara contra la posicion del LECTOR, no contra un
+        // contador: lo que importa es cuando el lector CRUZA el hueco, no cuando
+        // la noticia llega. Ver `AnalysisRing::reportCaptureDiscontinuity`.
+        //
+        // 🔴 SE DESCARTA HASTA HABER PASADO LA COSTURA MAS NUEVA, y esa forma es
+        // deliberadamente CONSERVADORA. Se guarda una sola posicion, asi que con
+        // varias costuras pendientes a la vez —con huecos cada 4 bloques entran
+        // dos en el ring— las viejas se perderian si solo se reaccionara al
+        // cruzar exactamente una. Medido con esa version ingenua: quedaban
+        // lecturas CONVERGIDAS a 2,1 cents, o sea el defecto entero intacto.
+        //
+        // Manteniendo el descarte hasta pasar la ultima conocida, ninguna costura
+        // se cuela: cuesta tirar tambien algunos bloques sanos ANTERIORES al
+        // hueco, o sea latencia de aguja — la misma moneda con la que esta etapa
+        // ya paga el "cualquier Δ > 0 reinicia" de S2, y por la misma razon: es
+        // preferible a defender un numero elegido a ojo.
+        const uint64_t seam = mRing.captureSeamPosition();
+        const bool crossedSeam = seam > mLastCaptureSeam;
+        if (crossedSeam && mRing.readPosition() >= seam) mLastCaptureSeam = seam;
+
+        if (droppedDelta > 0 || crossedSeam) {
             // El thread DETECTA; el estimador se HACE CARGO. Este lado es el
             // unico que ve el ring; el otro es el unico que sabe cuando su
             // integracion vuelve a ser confiable, porque es el que tiene la
@@ -153,7 +192,34 @@ void AnalysisThread::drainLoop() {
             // el peor error de 9,5e-6 a 3,8e-6 cents, o sea nada frente a un
             // presupuesto de 0,1, y ningun test lo puede matar. Codigo que no se
             // puede verificar y no cambia el resultado no se queda.)
+            // Los DOS ejes entran por el mismo gancho, y no es pereza: para la
+            // integración significan exactamente lo mismo —cruzó un salto— y el
+            // consumidor tampoco los distingue (la marca es una sola). Tener dos
+            // caminos para la misma consecuencia sería superficie sin uso, y dos
+            // sitios donde equivocarse.
             mStrobe.noteInputDiscontinuity();
+        }
+
+        // 🔴 EL BLOQUE DE ESTA VUELTA SE DESCARTA, Y SOLO POR EL EJE DE CAPTURA.
+        //
+        // Es la diferencia exacta con el eje del ring, y vale la pena decirla
+        // porque en S2 se probó descartar y se SACÓ por injustificado: ahí el
+        // `AnalysisRing` garantiza que nunca entrega una copia desgarrada —la
+        // re-chequea, la cuenta en `mTorn` y devuelve 0—, así que lo que llegaba
+        // era contiguo por adentro y alcanzaba con reiniciar.
+        //
+        // Acá NO hay tal garantía, porque la costura no está en la mecánica del
+        // ring sino en el CONTENIDO: el escritor metió audio de los dos lados del
+        // hueco en frames consecutivos, y el ring no tiene cómo saberlo. Un
+        // drenaje de 2048 frames se lleva los dos lados en el mismo bloque, así
+        // que reiniciar antes de alimentarlo deja entrar la costura igual.
+        //
+        // Medido: sin este descarte quedaban lecturas CONVERGIDAS a 0,446 cents
+        // —4,5x el presupuesto— con σ en 0,098, apenas por debajo del umbral. Con
+        // el descarte, ninguna. Cuesta un drenaje de latencia sobre una
+        // integración que se acaba de tirar de todos modos.
+        if (crossedSeam) {
+            continue;
         }
 
         if (got <= 0) {

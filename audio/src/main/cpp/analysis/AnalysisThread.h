@@ -273,6 +273,17 @@ private:
      * sube no puede desbordar por abajo.
      */
     uint64_t mLastDroppedFrames{0};
+
+    /**
+     * REQ-009 S3. Lo mismo para el eje de CAPTURA: el acumulado que el backend
+     * estampó en el ring, tal como estaba en la vuelta anterior.
+     *
+     * Va aparte de `mLastDroppedFrames` y no sumado, porque los dos contadores
+     * los mueve gente distinta en momentos distintos — juntarlos haría imposible
+     * decir cuál de los dos ejes disparó, que es lo primero que se pregunta al
+     * depurar esto.
+     */
+    uint64_t mLastCaptureSeam{0};
 };
 
 }  // namespace wma::analysis
