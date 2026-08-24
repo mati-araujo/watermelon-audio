@@ -44,7 +44,7 @@ class TunerContractTest {
      * El criterio de muerte de MINI-004 hecho test, en su mitad barata.
      *
      * La mitad cara —descubrir implementaciones nuevas en el fuente— la hace
-     * `scripts/check-ituner-implementations.sh`, porque Kotlin/Native **no tiene
+     * `scripts/check-ituner-implementations.py`, porque Kotlin/Native **no tiene
      * reflection** y ningún test en runtime puede enumerar las implementaciones del módulo.
      * Este test sólo ata la lista declarada a los sujetos que realmente se ejercen: sin él,
      * la lista podría decir tres y el contrato ejercer dos.

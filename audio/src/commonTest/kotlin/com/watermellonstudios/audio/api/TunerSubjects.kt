@@ -55,7 +55,7 @@ internal class TunerSubject(
 /**
  * 🔴 **Las implementaciones que el contrato ejerce, y la lista que el guard vigila.**
  *
- * `scripts/check-ituner-implementations.sh` escanea el fuente buscando implementaciones de
+ * `scripts/check-ituner-implementations.py` escanea el fuente buscando implementaciones de
  * `ITuner` y compara contra esta lista **en las dos direcciones**. Sin eso, la
  * parametrización sería cosmética: el tercer implementador se agrega, nadie lo suma acá, y
  * el contrato vuelve a probar sólo a los dos de antes **sin que nada avise** — la suite
