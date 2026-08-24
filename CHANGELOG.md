@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.9.0...v2.9.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* **tuner:** el afinador se basta solo, y ahora lo dice (MINI-005) ([#193](https://github.com/mati-araujo/watermelon-audio/issues/193)) ([a0f4b2f](https://github.com/mati-araujo/watermelon-audio/commit/a0f4b2f3b31b90637a1972cff094ab52d791f9c4))
+
 ## [2.9.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.8.2...v2.9.0) (2026-08-24)
 
 
