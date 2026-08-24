@@ -263,9 +263,9 @@ public:
      * RT-safe: un `fetch_add` relajado sobre un atomico, o nada si no hay ring.
      * La llaman los dos threads de audio.
      */
-    void reportCaptureDiscontinuity() noexcept {
+    void reportCaptureDiscontinuity(uint64_t framesAhead = 0) noexcept {
         if (auto* ring = mAnalysisRing.load(std::memory_order_acquire)) {
-            ring->reportCaptureDiscontinuity();
+            ring->reportCaptureDiscontinuity(framesAhead);
         }
     }
 

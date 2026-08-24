@@ -2328,6 +2328,14 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
     return processAudioBlock(outputData, numFrames);
 }
 
+void AudioEngine::onCaptureDiscontinuity(uint64_t framesQueuedAhead) noexcept {
+    // WD-1.3 — el mismo load atomico que usa `onAudioReady`: el nodo no puede
+    // desaparecer mientras el callback esta adentro.
+    if (InputNode* inputNode = mInputNodeRt.load(std::memory_order_acquire)) {
+        inputNode->reportCaptureDiscontinuity(framesQueuedAhead);
+    }
+}
+
 void AudioEngine::onBackendError(watermelon_audio::BackendError error) {
     LOGE("Backend error: %s", watermelon_audio::backendErrorToString(error));
 

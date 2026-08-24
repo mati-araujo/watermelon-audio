@@ -30,6 +30,7 @@
 #pragma once
 
 #include "IAudioBackend.h"
+#include "CaptureGapMailbox.h"
 #include "../dsp/LockFreeRingBuffer.h"
 
 #include <atomic>
@@ -149,6 +150,12 @@ private:
     // Capture thread -> render thread. SPSC: the sink block is the only writer,
     // the render block the only reader. Sized in start() to one second.
     LockFreeRingBuffer mInputRing;
+
+    /// REQ-009 S3 (3.4b). El cruce entre el callback de ENTRADA —que es el que
+    /// detecta el overrun de `mInputRing`— y el de SALIDA, que es el unico que
+    /// puede posicionar la costura porque es el que escribe el ring del
+    /// afinador. Ver `CaptureGapMailbox`.
+    wma::backends::CaptureGapMailbox mCaptureGap;
 
     // Interleaved stereo scratch, one per RT thread so they never share memory.
     // Both sized in start() to mMaxFrames * 2 and never resized while running.

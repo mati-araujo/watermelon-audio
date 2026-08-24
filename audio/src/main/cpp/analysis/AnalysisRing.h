@@ -207,11 +207,40 @@ public:
      * misma etapa ya saco una vez. Si algun dia hace falta medir CUANTO se
      * pierde en un device real, vuelve junto con su consumidor.
      */
-    void reportCaptureDiscontinuity() noexcept {
-        // La frontera queda donde el escritor esta parado AHORA: lo que venga
-        // despues de este punto no es contiguo con lo de antes.
-        mCaptureSeam.store(mWritten.load(std::memory_order_relaxed),
-                           std::memory_order_release);
+    void reportCaptureDiscontinuity(uint64_t framesAhead = 0) noexcept {
+        // La frontera queda donde el escritor esta parado AHORA, MAS lo que
+        // todavia venga encolado por delante del hueco.
+        //
+        // 🔴 `framesAhead` NO es un lujo, y su ausencia fue el hallazgo F. Un
+        // backend con cola propia —`CoreAudioBackend::mInputRing`, un SEGUNDO de
+        // estereo— detecta el overrun cuando esa cola esta LLENA: el hueco no se
+        // entrega ahora, se entrega ~48000 frames mas tarde, cuando el callback
+        // de salida termine de drenar lo que ya tenia. Estampar la costura "aca"
+        // la deja adelantada 5,9x la capacidad ENTERA de este ring, y el modo de
+        // falla es el inseguro: el lector descarta audio sano, se pone al dia, y
+        // cuando el salto de verdad llega ya no hay costura pendiente. Integra a
+        // traves y publica CONVERGIDO.
+        //
+        // Con la costura ADELANTE el lector hace lo unico correcto sin cambiar
+        // una linea: su guarda ya es `readPosition() >= seam`, asi que descarta
+        // y no converge HASTA CRUZARLA. Se paga con aguja quieta mientras dura
+        // la cola — y sobra-descartar es latencia, faltar es una lectura falsa.
+        //
+        // GANA LA MAS LEJANA, no la ultima. Una costura cercana avisada despues
+        // de una lejana no retira a la lejana: el salto sigue estando alla. Es
+        // la misma regla que la leccion 4 de esta etapa ("descartar hasta haber
+        // pasado la costura MAS NUEVA conocida"), dicha en distancia en vez de
+        // en tiempo. Sin el maximo, un underrun posterior borraria el overrun.
+        //
+        // El load-then-store no es atomico y no hace falta que lo sea: en cada
+        // topologia hay UN SOLO thread que avisa, y es el que escribe el ring
+        // (Android: el callback de captura; iOS/USB: el de salida). Lo unico que
+        // escribe esto desde otro lado es `reset()`, y el lector re-sincroniza si
+        // la costura retrocede.
+        const uint64_t objetivo = mWritten.load(std::memory_order_relaxed) + framesAhead;
+        if (objetivo > mCaptureSeam.load(std::memory_order_relaxed)) {
+            mCaptureSeam.store(objetivo, std::memory_order_release);
+        }
     }
 
     /// Posicion de escritura, en frames, de la ULTIMA discontinuidad de captura

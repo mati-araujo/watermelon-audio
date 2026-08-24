@@ -130,6 +130,30 @@ void llenarCuerda(float* stereo, int frames, int startFrame, double f0) {
 struct Lectura {
     int muestras = 0;            ///< publicaciones distintas vistas mientras se rompia
     int convergidas = 0;
+    /**
+     * @brief ¿El snapshot llego a decir "la entrada llego rota" alguna vez?
+     *
+     * 🔴 LO LATCHEA UN OBSERVADOR PROPIO, y no el lazo que alimenta. Antes lo
+     * contaba `observar()`, que corre una vez por bloque entregado, y eso hacia
+     * el veredicto de AC-009.3 **dependiente de la suerte**: con daño espaciado
+     * el lazo entero llegaba a ver 3 publicaciones distintas, y la marca es
+     * TRANSITORIA —el motor la baja sola cuando su integracion vuelve a ser
+     * confiable—, asi que caer justo adentro de una de esas ventanas era un
+     * volado. Medido en el arbol limpio: **1 de cada 8 corridas roja**, siempre
+     * `AnInsertedSilenceBlockIsNotPublishedAsConverged`, siempre con
+     * `marcaArriba == 0` sobre 3 publicaciones.
+     *
+     * No era el motor: era el INSTRUMENTO. La propiedad que AC-009.3 pide es
+     * *"lo dijo alguna vez"*, y para medir un "alguna vez" sobre una señal
+     * transitoria hay que **mirar todo el tiempo**, no muestrear al ritmo del
+     * alimentador. Es la misma familia que REQ-002: agrandar la ventana no lo
+     * arregla, poner el observador correcto si.
+     *
+     * Los otros contadores NO se latchean y siguen saliendo de `observar()`: son
+     * estadistica sobre publicaciones distintas y ese es su sistema de
+     * coordenadas.
+     */
+    bool marcaVista = false;
     int marcaArriba = 0;
     double peorErrorConvergido = 0.0;
     double sigmaAhi = 0.0;
@@ -184,6 +208,22 @@ Lectura correr(Falla modo, int cadaCuantos, bool avisa = true, int bloques = 400
     };
 
     Lectura obs;
+
+    // El vigia de la marca. Corre mientras dura la alimentacion y latchea. Es
+    // solo-lectura sobre un snapshot lock-free, asi que no altera lo que mide.
+    std::atomic<bool> vigiaVivo{true};
+    std::atomic<bool> marcaVista{false};
+    std::thread vigia([&] {
+        float o[kSnapshotValueCount];
+        while (vigiaVivo.load(std::memory_order_acquire)) {
+            if (snap.read(o) && o[kSnapFramesAnalyzed] > 0.0f &&
+                o[kSnapInputDiscontinuity] >= 0.5f) {
+                marcaVista.store(true, std::memory_order_release);
+            }
+            std::this_thread::yield();
+        }
+    });
+
     double ultimoFrames = -1.0;
     // Mira el snapshot y guarda cada publicacion NUEVA. Se llama despues de cada
     // bloque para no perderse las vueltas de justo despues del daño.
@@ -234,6 +274,10 @@ Lectura correr(Falla modo, int cadaCuantos, bool avisa = true, int bloques = 400
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
+    vigiaVivo.store(false, std::memory_order_release);
+    vigia.join();
+    obs.marcaVista = marcaVista.load(std::memory_order_acquire);
+
     float o[kSnapshotValueCount];
     if (snap.read(o)) {
         obs.hubo = true;
@@ -267,10 +311,12 @@ void afirmar(Falla modo, int cada, const char* nombre) {
            "falla. La deteccion tiene que venir del backend, que ya sabe que tiro audio.";
 
     // AC-009.3 — y el consumidor tiene que poder distinguirlo de "todavia no".
-    EXPECT_GT(r.marcaArriba, 0)
-        << nombre << ": la captura perdio continuidad a lo largo de " << r.muestras
-        << " publicaciones y el snapshot no lo dijo NUNCA. El consumidor ve un spinner y "
-           "espera a que se arregle algo que no se arregla solo (AC-009.3).";
+    // Lo afirma el LATCH, no el conteo por publicacion: ver el KDoc de `marcaVista`.
+    EXPECT_TRUE(r.marcaVista)
+        << nombre << ": la captura perdio continuidad y el snapshot no lo dijo NUNCA, "
+           "mirandolo sin parar durante toda la corrida (" << r.muestras
+        << " publicaciones distintas vistas). El consumidor ve un spinner y espera a que se "
+           "arregle algo que no se arregla solo (AC-009.3).";
 }
 
 }  // namespace
