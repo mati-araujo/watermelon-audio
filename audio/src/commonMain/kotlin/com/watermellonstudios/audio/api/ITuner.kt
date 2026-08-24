@@ -59,7 +59,30 @@ interface ITuner {
      */
     var selectedString: Int?
 
-    /** Arranca el análisis. `false` si no se pudo — sin motor o sin entrada de audio. */
+    /**
+     * Arranca el análisis.
+     *
+     * **Precondiciones: ninguna.** `start()` es auto-suficiente: crea el motor si no existe,
+     * asegura el nodo de entrada, lo engancha al motor y **abre el stream de captura** si el
+     * backend no entrega la entrada por callback. Un consumidor **no necesita** abrir un
+     * `AudioInput` antes, y no debería: el afinador es dueño de la entrada mientras corre.
+     *
+     * **No enciende el monitoreo** — afinar no es escucharse. Pedir un afinador nunca cambia lo
+     * que sale por los parlantes, que en un instrumento amplificado sería realimentación y no
+     * una molestia.
+     *
+     * `false` significa **"no hay por dónde entrar audio"**: sin motor, sin nodo de entrada, o
+     * el stream de captura no abrió. ⚠️ **No distingue el permiso de micrófono denegado**: en
+     * Android un `AudioRecord` sin permiso falla igual que sin dispositivo, así que el permiso
+     * hay que chequearlo por su propia vía antes de leer este valor.
+     *
+     * 🔴 **Si sostenés tu propio `AudioInput` sobre el mismo proceso**, soltá el afinador con
+     * [stop] **antes** de liberarlo: `release()` baja el nodo de entrada que el afinador está
+     * usando. Dos manos sobre el mismo nodo no es una redundancia inocua.
+     *
+     * Llamarlo dos veces es inofensivo: el segundo `start()` sobre un afinador corriendo
+     * devuelve `true` sin reiniciar nada.
+     */
     fun start(): Boolean
 
     /** Para de analizar. La última lectura sigue siendo legible. */

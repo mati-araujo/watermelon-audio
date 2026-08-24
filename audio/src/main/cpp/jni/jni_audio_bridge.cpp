@@ -954,6 +954,24 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInp
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartTuner(
     JNIEnv* env, jobject thiz) {
+    // MINI-005 — SIN ESTO, `ITuner.start()` DEVUELVE false PARA SIEMPRE EN ANDROID.
+    //
+    // `wma_tuner_start` es auto-suficiente de la entrada para abajo: asegura el
+    // nodo, lo engancha al motor y abre la captura. Lo unico que NO puede hacer
+    // es crear el motor — su primera linea es `if (!engine || !engine->engine)
+    // return false`— y por este camino nada lo creaba.
+    //
+    // No era un diseno distinto: era un olvido. Otros 33 puntos de entrada de
+    // este archivo lo llaman —`grep -c 'if (!ensureEngine())'`, que cuenta
+    // LLAMADAS y no menciones en comentarios— y los del afinador eran la unica
+    // excepcion. El sintoma es que un consumidor que SOLO quiere afinar nunca
+    // arranca. El de al lado que lo destapa: `nativeStartEngine`, arriba.
+    //
+    // Solo Android. iOS entra por la C API y ahi el motor ya existe.
+    if (!ensureEngine()) {
+        LOGE("AudioNativeBridge.startTuner: Failed to create engine");
+        return JNI_FALSE;
+    }
     return wma_tuner_start(g_wmaEngine) ? JNI_TRUE : JNI_FALSE;
 }
 
