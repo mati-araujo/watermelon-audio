@@ -8,6 +8,7 @@
 #include "../analysis/AnalysisRing.h"
 #include "../platform/RtCounter.h"
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -368,10 +369,83 @@ private:
     wma::RtCounter mUsbFeedDrops;           ///< bloque de USB descartado, ring lleno
     wma::RtCounter mFeedClampedBlocks;      ///< numFrames recortado al temp buffer
 
+    // REQ-012 S1 — la compuerta del thread de captura. Ver `CaptureQuiesce`.
+    std::atomic<int>  mCaptureInFlight{0};      ///< bloques de captura adentro AHORA
+    std::atomic<bool> mCaptureGateClosed{false};///< el control pidio que no entre nadie
+    wma::RtCounter    mCaptureGatedBlocks;      ///< bloques que la encontraron cerrada
+
 public:
     uint64_t getMonitorOverflowBlocks() const { return mMonitorOverflowBlocks.get(); }
     uint64_t getMonitorPartialReads() const { return mMonitorPartialReads.get(); }
     uint64_t getMonitorReadFailures() const { return mMonitorReadFailures.get(); }
     uint64_t getUsbFeedDrops() const { return mUsbFeedDrops.get(); }
     uint64_t getFeedClampedBlocks() const { return mFeedClampedBlocks.get(); }
+
+    /// Bloques de captura descartados por encontrar la compuerta cerrada (REQ-012 S1).
+    ///
+    /// No es diagnostico decorativo: cada uno de estos es audio que NO entro, o
+    /// sea una discontinuidad. S3 la convierte en la costura que el afinador
+    /// necesita para no integrar a traves del hueco.
+    uint64_t capturedBlocksGated() const { return mCaptureGatedBlocks.get(); }
+
+    /**
+     * @brief El quiesce del thread de CAPTURA. RAII: cierra, drena, y reabre al salir.
+     *
+     * POR QUE NO ALCANZA EL QUE YA HAY. `AudioEngine::spinForCallbackDrain()`
+     * espera a `mActiveCallbacks`, que mueven `onAudioReady` y los backends — el
+     * camino de SALIDA. `processInputBlock` no lo toca. La captura de Android es
+     * un SEGUNDO thread RT y ningun drenaje del motor lo cubre, asi que
+     * `prepare()` —que hace `resize()` de los dos rings y de los dos buffers de
+     * trabajo— no tiene hoy forma segura de correr con la captura viva.
+     *
+     * EL PROTOCOLO, y su unica parte sutil:
+     *
+     *   control                          captura
+     *   -------                          -------
+     *   1. cerrar la compuerta           a. contarse como EN VUELO
+     *   2. esperar a que no quede         b. consultar la compuerta
+     *      nadie en vuelo                 c. si esta cerrada, salir sin tocar nada
+     *
+     * **`a` va antes que `b`, y ese orden es la propiedad entera.** Al reves
+     * queda una ventana: un bloque que consulto la compuerta y la vio abierta,
+     * pero todavia no se conto, es invisible para el que drena — el control
+     * veria cero, saldria a re-preparar, y el `resize()` correria bajo los pies
+     * de ese bloque. Contarse primero convierte "decidi entrar" en algo que el
+     * otro thread puede ver.
+     *
+     * COSTO EN EL CAMINO NORMAL: un `fetch_add` y una carga relajada por bloque.
+     * Es el segundo thread RT y valen las mismas reglas que el de salida — nada
+     * de logging, allocation ni locks que bloqueen aca adentro.
+     *
+     * 🔴 **ESTO CUBRE UN ESCRITOR, Y EL NODO TIENE DOS.** `processInputBlock` es
+     * el camino de captura de Android y corre en el thread del stream de entrada
+     * de Oboe — ese es el que esta compuerta drena. Pero `feedExternalInput()`
+     * —el camino de USB, y el del vocoder y MIX— entra al MISMO
+     * `processCapturedBlock()` desde `AudioEngine::onAudioReady`, o sea desde el
+     * thread de SALIDA. A ese lo cubre `mActiveCallbacks` y ninguna otra cosa.
+     *
+     * Quien vaya a re-preparar el nodo tiene que drenar **los dos**: un
+     * `CaptureQuiesce` solo deja el camino de USB corriendo contra el `resize()`.
+     * Es el mismo use-after-free, por la puerta menos transitada.
+     *
+     * DRENAR NO ES UN EXITO GARANTIZADO. Si no se puede confirmar dentro del
+     * techo, `drained()` devuelve false y **el llamador no debe re-preparar**.
+     * Es la misma eleccion que `AudioEngine::setInputNode()` ya hace del lado
+     * seguro: antes filtrar un nodo que arriesgar un use-after-free.
+     */
+    class CaptureQuiesce {
+    public:
+        CaptureQuiesce(InputNode& node, std::chrono::milliseconds timeout);
+        ~CaptureQuiesce();
+
+        CaptureQuiesce(const CaptureQuiesce&) = delete;
+        CaptureQuiesce& operator=(const CaptureQuiesce&) = delete;
+
+        /// Si se pudo confirmar que no queda ningun bloque de captura en vuelo.
+        bool drained() const noexcept { return mDrained; }
+
+    private:
+        InputNode& mNode;
+        bool mDrained;
+    };
 };

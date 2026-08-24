@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <chrono>
+#include <thread>
 
 // ===========================================================================
 // GANCHOS DE TEST (WMA_TEST_HOOKS)
@@ -70,8 +72,19 @@
 //      Lo que simula es fiel —"hay un stream de captura corriendo"— y no cambia
 //      ninguna otra decision del metodo.
 //
+//   4. UNA COMPUERTA EN EL CAMINO DE CAPTURA (REQ-012 S1). La de arriba retiene
+//      al thread de SALIDA: vive en `isMonitoringEnabled()`, que es el primer
+//      metodo que `onAudioReady` llama sobre el nodo. Para el quiesce de
+//      `CaptureQuiesce` hace falta retener al OTRO thread RT, adentro de
+//      `processInputBlock`, y ahi no llega ninguno de los ganchos que ya habia.
+//
+//      Va DESPUES de que el bloque se conto como en vuelo, y esa ubicacion es
+//      parte de lo que deja probar: retenido ahi, el bloque ya es visible para
+//      el que drena, que es exactamente la propiedad del protocolo.
+//
 // Los dos primeros no cambian comportamiento: uno registra, el otro espera a que
-// el test lo suelte. El tercero SI, y por eso lleva su propia justificacion.
+// el test lo suelte. El tercero SI, y por eso lleva su propia justificacion. El
+// cuarto tampoco lo cambia: retiene, y nada mas.
 #if defined(WMA_TEST_HOOKS)
 #include <thread>
 
@@ -80,12 +93,40 @@ std::atomic<std::thread::id> gInputNodeDtorThread{};
 std::atomic<bool> gInputNodeHoldInCallback{false};
 std::atomic<bool> gInputNodeIsInCallback{false};
 std::atomic<bool> gInputNodeForceStreamRunning{false};
+std::atomic<bool> gInputNodeHoldInCapture{false};
+std::atomic<bool> gInputNodeIsInCapture{false};
 #endif
 
 #define LOG_TAG "InputNode"
 #define LOGI(...) wma::logMessage(wma::LogLevel::INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) wma::logMessage(wma::LogLevel::WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) wma::logMessage(wma::LogLevel::ERROR, LOG_TAG, __VA_ARGS__)
+
+namespace {
+
+/**
+ * RAII del contador de bloques de captura en vuelo (REQ-012 S1).
+ *
+ * Existe para que el descuento no dependa de acordarse en cada `return` de
+ * `processInputBlock` — que hoy tiene tres y manana puede tener cuatro. El
+ * `acquire` del alta y el `release` de la baja son los que ordenan esto contra
+ * la compuerta que lee el thread de control.
+ *
+ * Dos operaciones atomicas por bloque y nada mas: es RT.
+ */
+struct InFlightGuard {
+    std::atomic<int>& contador;
+
+    explicit InFlightGuard(std::atomic<int>& c) noexcept : contador(c) {
+        contador.fetch_add(1, std::memory_order_acquire);
+    }
+    ~InFlightGuard() noexcept { contador.fetch_sub(1, std::memory_order_release); }
+
+    InFlightGuard(const InFlightGuard&) = delete;
+    InFlightGuard& operator=(const InFlightGuard&) = delete;
+};
+
+}  // namespace
 
 #if WMA_HAS_OBOE
 // ========== OBOE ADAPTER (WA-2.0) ==========
@@ -452,6 +493,28 @@ bool InputNode::processInputBlock(float* audioData, int numFrames, int channelCo
         return false;
     }
 
+    // REQ-012 S1 — la compuerta. Contarse ANTES de consultarla, no al reves: ver
+    // el protocolo en el KDoc de `CaptureQuiesce`. El guard hace el descuento en
+    // todos los caminos de salida, incluidos los `return` de mas abajo.
+    InFlightGuard enVuelo(mCaptureInFlight);
+#if defined(WMA_TEST_HOOKS)
+    // Ver la nota de los ganchos arriba, punto 4.
+    if (gInputNodeHoldInCapture.load(std::memory_order_acquire)) {
+        gInputNodeIsInCapture.store(true, std::memory_order_release);
+        while (gInputNodeHoldInCapture.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        gInputNodeIsInCapture.store(false, std::memory_order_release);
+    }
+#endif
+    if (mCaptureGateClosed.load(std::memory_order_acquire)) {
+        // El control esta por re-configurar el nodo: este bloque no entra. Se
+        // consumio sin incidente —de ahi el `true`—, pero se perdio, y por eso
+        // se cuenta: es una discontinuidad para el que este integrando.
+        mCaptureGatedBlocks.bump();
+        return true;
+    }
+
     // REQ-009 S3 (3.2b) — ANTES de escribir nada en el ring del afinador: la
     // costura tiene que quedar estampada en la frontera entre el bloque anterior
     // y este, que es donde el xrun dejo el hueco.
@@ -724,4 +787,43 @@ void InputNode::feedExternalInput(const float* inputData, int numFrames) {
 
     std::copy(inputData, inputData + numSamples, mTempBuffer.data());
     processCapturedBlock(mTempBuffer.data(), numFrames, mUsbFeedDrops);
+}
+
+// ========== REQ-012 S1 — EL QUIESCE DEL THREAD DE CAPTURA ==========
+
+InputNode::CaptureQuiesce::CaptureQuiesce(InputNode& node, std::chrono::milliseconds timeout)
+    : mNode(node), mDrained(false) {
+    // 1. Cerrar. Desde aca ningun bloque NUEVO entra al DSP de entrada.
+    mNode.mCaptureGateClosed.store(true, std::memory_order_release);
+
+    // 2. Drenar el que pueda estar adentro AHORA.
+    //
+    // Hacen falta LOS DOS pasos, por la misma razon que en
+    // `AudioEngine::ReconfigureQuiesce`: la compuerta sola deja adentro al que
+    // ya la habia leido abierta, y el drenaje solo no impide que entre uno nuevo.
+    //
+    // Polling con deadline. 200 us es la misma cadencia que
+    // `spinForCallbackDrain()`: ~1/13 de un bloque, corto para no alargar el
+    // silencio y largo para no quemar el core.
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (mNode.mCaptureInFlight.load(std::memory_order_acquire) != 0) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            // NO se afirma el drenaje. El llamador no debe re-preparar: el
+            // `resize()` de `prepare()` correria bajo un thread de captura que
+            // sigue usando esos buffers. Misma eleccion que `setInputNode()`,
+            // que prefiere filtrar un nodo antes que arriesgar un UAF.
+            LOGW("CaptureQuiesce: no se pudo confirmar el drenaje de la captura en %lldms",
+                 static_cast<long long>(timeout.count()));
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    mDrained = true;
+}
+
+InputNode::CaptureQuiesce::~CaptureQuiesce() {
+    // Reabrir SIEMPRE, drenado o no. Dejarla cerrada tras un drenaje fallido
+    // silenciaria la captura para siempre — el modo de falla seria peor que
+    // aquel del que la compuerta protege, y ademas invisible.
+    mNode.mCaptureGateClosed.store(false, std::memory_order_release);
 }
