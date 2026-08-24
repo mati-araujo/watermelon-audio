@@ -611,11 +611,15 @@ void EffectChain::processParallel(EffectSnapshot* snapshot, const float* input,
         processOneEffect(snapshot->effects[i], i, snapshot->bypassed[i],
                          input, mBranchBufferA.data(), numFrames);
 
-        // WD-3.1 — idem processParallel: alinear antes de acumular.
-        compensateBranch(i, mRtEffectLatency[i], mBranchBufferA.data(), numFrames);
-
         // WD-3.1 — alinear esta rama contra la mas lenta ANTES de sumarla.
         // Sumar ramas con distinta latencia es un filtro peine.
+        //
+        // UNA sola vez. Hubo un pegado duplicado aca —dos llamadas seguidas, la de
+        // arriba con un comentario que decia "idem processParallel" estando DENTRO de
+        // processParallel— y el efecto era el contrario del buscado: retrasaba cada rama
+        // 2*(max - lat) y las desalineaba justo por lo que debia alinearlas. Medido en
+        // REQ-011: la salida se explicaba con d=94 en vez de 47, 7 veces mejor que con el
+        // valor correcto.
         compensateBranch(i, mRtEffectLatency[i], mBranchBufferA.data(), numFrames);
 
         activeCount++;
@@ -765,6 +769,11 @@ void EffectChain::processParallelSerial(EffectSnapshot* snapshot, const float* i
 
         processOneEffect(snapshot->effects[i], i, snapshot->bypassed[i],
                          input, mBranchBufferA.data(), numFrames);
+
+        // WD-3.1 — alinear esta rama contra la mas lenta ANTES de sumarla, igual que
+        // processParallel. Faltaba: medido en REQ-011, la salida se explicaba con d=0
+        // —o sea sin compensar— 12 veces mejor que con el valor correcto.
+        compensateBranch(i, mRtEffectLatency[i], mBranchBufferA.data(), numFrames);
         activeCount++;
 
         for (int s = 0; s < totalSamples; ++s) {
