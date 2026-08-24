@@ -460,8 +460,33 @@ BackendResult CoreAudioBackend::openEngineLocked() {
             if (backend->mCapturePrimed.load(std::memory_order_acquire)) {
                 // read() fills with silence and returns false on underrun, which
                 // is exactly the wanted behaviour — keep the mode, drop audio.
-                backend->mInputRing.read(backend->mInputScratch.data(), needed);
+                //
+                // REQ-009 S3 (3.3b): pero para el AFINADOR ese silencio no es
+                // inofensivo. El stream queda DILATADO —se entrega un bloque de
+                // ceros de mas y el audio de fuente sigue esperando su turno— y
+                // eso corre la referencia de fase. S1 lo midio en 0,40 cents con
+                // el motor diciendo CONVERGIDO.
+                //
+                // `framesQueuedAhead` = 0: lo detecta el propio callback de
+                // salida y el hueco es ESTE bloque, aca mismo. El overrun es el
+                // que necesita distancia, no este.
+                if (!backend->mInputRing.read(backend->mInputScratch.data(), needed)) {
+                    backend->mCaptureGap.note(0);
+                }
                 inputData = backend->mInputScratch.data();
+            }
+        }
+
+        // REQ-009 S3 (3.3b/3.4b) — ANTES de entregar el bloque, y en el thread de
+        // SALIDA, que es el que escribe el ring del afinador. Levanta lo que el
+        // callback de entrada haya dejado en el buzon (overrun) y lo que este
+        // mismo callback acabe de dejar (underrun), y lo entrega ya en las
+        // coordenadas correctas. Estamparlo desde el thread de entrada lo
+        // pondria en un instante que no corresponde al lugar del hueco.
+        {
+            const uint64_t gap = backend->mCaptureGap.take();
+            if (gap != wma::backends::CaptureGapMailbox::kEmpty) {
+                cb->onCaptureDiscontinuity(gap);
             }
         }
 
@@ -603,7 +628,24 @@ BackendResult CoreAudioBackend::openEngineLocked() {
                     // Overflow drops the block instead of blocking. The reader is
                     // the output RT thread; making the capture thread wait for it
                     // would trade a dropout for an xrun on both paths.
-                    backend->mInputRing.write(scratch, static_cast<size_t>(frames) * 2);
+                    //
+                    // REQ-009 S3 (3.4b): y ese bloque descartado es un hueco que
+                    // el afinador tiene que cruzar sin declararlo convergido. Se
+                    // deja en el buzon la PROFUNDIDAD DE LA COLA, no la posicion:
+                    // este es el thread de ENTRADA y no puede posicionar nada.
+                    //
+                    // 🔴 Y la profundidad no es cosmetica. Un write() que falla
+                    // significa que `mInputRing` esta LLENO —un segundo entero de
+                    // estereo— asi que el hueco no se va a entregar hasta ~48000
+                    // frames mas tarde. Avisarlo sin esa distancia deja la costura
+                    // adelantada 5,9x la capacidad del ring del afinador, el
+                    // lector se pone al dia antes del salto real, y el motor
+                    // publica CONVERGIDO sobre una lectura equivocada. Hallazgo F.
+                    if (!backend->mInputRing.write(scratch,
+                                                   static_cast<size_t>(frames) * 2)) {
+                        backend->mCaptureGap.note(
+                            backend->mInputRing.availableToRead() / 2);
+                    }
                 }
 
                 if (backend->mActiveCallbacks.fetch_sub(1, std::memory_order_release) == 1 &&
@@ -696,6 +738,8 @@ void CoreAudioBackend::closeEngineLocked() {
     mCaptureActive.store(false, std::memory_order_release);
     mCapturePrimed.store(false, std::memory_order_release);
     mInputRing.clear();
+    // Un hueco de la sesion anterior no describe a la que viene. Ver clear().
+    mCaptureGap.clear();
 
     // Dropping the strong refs releases the engine, its nodes and their blocks
     // (ARC). Done off the RT path.

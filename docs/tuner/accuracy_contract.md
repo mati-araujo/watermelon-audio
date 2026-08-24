@@ -79,6 +79,64 @@ exactitud entero y no está en este REQ.
 rápido 85,3 ms; el strobe declara convergencia cuando 1σ ≤ 0,1 cents, lo que en la cuerda más
 grave del catálogo (B0) ocurre pasados los **0,5 s** y en A4 es inmediato.
 
+🔴 **σ NO ES SUFICIENTE PARA DECLARAR CONVERGENCIA, y esa es la segunda vez que pasa (REQ-009).**
+`1σ ≤ 0,1 cents` es **necesario y no suficiente**: σ mide la linealidad del ajuste, y una señal
+con un **salto de fase** —el ring de análisis pisó frames, o la captura entregó audio no
+contiguo— sigue ajustando bien a una recta. Medido: con el ring desbordando, el motor publicaba
+`CONVERGIDO` con la lectura a **1,04 cents** del valor real —10× el presupuesto— y σ en
+**0,024**, o sea holgadamente por debajo del umbral.
+
+Por eso el motor **descarta la integración entera** en cuanto pierde un solo frame, en vez de
+apoyarse en σ. Una discontinuidad invalida la fase acumulada por la misma razón que la invalida
+un cambio de objetivo. El costo es **latencia de aguja, no exactitud**: la lectura tarda más en
+aparecer y ninguna sale de mezclar dos trozos de señal. Con la guarda puesta, el peor error entre
+todas las lecturas publicadas como convergidas mientras el ring desborda es de **3,8·10⁻⁶ cents**
+(20 corridas × 150 ventanas); sin ella, **0,1875** — 4× el presupuesto.
+
+🔴 **Y HAY UN SEGUNDO EJE: LA CAPTURA (REQ-009 S3).** El ring de análisis no es el único lugar
+donde el audio deja de ser contiguo. La plataforma también tira audio de entrada —Oboe cuenta
+xruns, CoreAudio descarta bloques cuando su ring de captura desborda y entrega silencio cuando se
+queda corto— y ese hueco **el motor no lo puede ver**: llega como frames consecutivos, con
+`droppedFrames` en **0**. Medido: hasta **2,15 cents** de error, 21× el presupuesto, con el motor
+diciendo `CONVERGIDO`.
+
+**σ tampoco lo ataja acá, y está peor que en el eje del ring: está ANTI-correlacionada.** En la
+peor fila del barrido —2,15 cents— σ vale **0,00098**, la más chica de todas las filas con falla.
+Es la cuarta vez que este repo lo mide. Por eso la detección **tiene que venir de la plataforma**,
+que ya sabe que tiró audio.
+
+| eje | quién lo detecta | qué mide el snapshot |
+|---|---|---|
+| ring de análisis | el propio motor (`droppedFrames`) | Δ por ventana |
+| **captura** | **el backend / el stream de entrada** | una **costura posicionada** |
+
+**El aviso lleva posición, no cantidad**, y son tres topologías con tres fuentes distintas: en
+Android el afinador **no pasa por el ring del backend** —`wma_tuner_start` hace que el nodo de
+entrada abra su propio stream de Oboe—, así que la fuente ahí son los xruns de **ese** stream; en
+iOS y en USB la captura entra por el callback de salida y la fuente es el ring del backend.
+
+🔴 **Y la posición puede caer ADELANTE del escritor.** Cuando el detector tiene su propia cola, el
+hueco no se entrega en el bloque siguiente: se entrega cuando esa cola se drene. El ring de
+captura de CoreAudio es de **1 segundo** de estéreo, así que un overrun se detecta con ~**48000
+frames** por delante — **5,9× la capacidad entera** del ring de análisis (8192 frames). Un aviso
+sin esa distancia hace que el lector descarte audio sano, se ponga al día, y cruce el salto real
+sin costura pendiente: `CONVERGIDO` sobre una lectura equivocada. **Sobra-descartar es latencia;
+faltar es una lectura falsa.**
+
+**Lo que el motor NO promete acá, dicho antes de que sorprenda**: una plataforma que pierde audio
+de captura y **no lo reporta** es indetectable. El motor converge sobre ese hueco y no tiene cómo
+saberlo. Está escrito como test (`CaptureDiscontinuity.NobodyReportedItSoNobodyCanKnow`) para que
+el día que entre un backend nuevo sin reportar, se sepa exactamente qué se pierde.
+
+**El motor lo publica**, en el índice 15 del snapshot (`inputDiscontinuity` en Kotlin): distingue
+*"todavía no convergí"* —esperar— de *"la entrada llegó rota"* —revisar el cable—, que son dos
+acciones opuestas para el usuario. **No** es `droppedFrames > 0`: ese contador es acumulado y
+monótono, así que quedaría trabado el resto de la sesión. Verificado por `AnalysisThreadReq009.*`,
+que afirma las dos direcciones — que la marca se levante con el hueco y que **se baje sola** al
+recuperarse. El eje de captura lo verifican `CaptureDiscontinuity.*` (el camino entero, las tres
+topologías) y `CaptureGapMailbox.*` / `CaptureSeamAhead.*` (el cruce de threads de iOS y USB, con
+compuerta).
+
 ---
 
 ## Lo que todavía no está medido, y por qué

@@ -139,6 +139,7 @@ class FakeTuner(
             lockedString: Int? = null,
             fastModeState: Int = 1,
             usableRangeCents: Float? = null,
+            inputDiscontinuity: Boolean = false,
         ) = TunerSnapshot(
             captureSampleRate = captureSampleRate,
             levelRms = levelRms,
@@ -154,6 +155,7 @@ class FakeTuner(
             lockedString = lockedString,
             fastModeState = fastModeState,
             usableRangeCents = usableRangeCents,
+            inputDiscontinuity = inputDiscontinuity,
         )
 
         /** Un snapshot con medición, para los tests que necesitan un número. */
@@ -167,6 +169,7 @@ class FakeTuner(
             lockedString: Int? = 0,
             fastModeState: Int = 2,
             usableRangeCents: Float? = 21.0f,
+            inputDiscontinuity: Boolean = false,
         ) = TunerSnapshot(
             captureSampleRate = 48000,
             levelRms = 0.2f,
@@ -182,6 +185,7 @@ class FakeTuner(
             lockedString = lockedString,
             fastModeState = fastModeState,
             usableRangeCents = usableRangeCents,
+            inputDiscontinuity = inputDiscontinuity,
         )
     }
 }

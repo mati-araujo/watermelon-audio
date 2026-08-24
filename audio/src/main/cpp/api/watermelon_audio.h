@@ -695,7 +695,7 @@ WMA_API void wma_input_release(WmaEngine* engine);
  * knows and ignores the tail. Reordering or repurposing an existing index would
  * silently change what an already-shipped consumer displays.
  */
-#define WMA_TUNER_SNAPSHOT_VALUES 15
+#define WMA_TUNER_SNAPSHOT_VALUES 16
 
 /**
  * Start the analysis seam: the capture thread begins feeding a lock-free ring,
@@ -896,6 +896,32 @@ WMA_API float wma_intonation_difference_cents(const WmaEngine* engine);
  *                              a device that negotiates 44.1 kHz gets a narrower
  *                              range than one at 48, and the consumer must not
  *                              have to know that to draw it.
+ *
+ *                         [15] 1 if the integration behind [5] carries a GAP in
+ *                              the input, 0 if not (REQ-009).
+ *
+ *                              This is the half that makes state 2 (measuring)
+ *                              actionable. Without it a consumer shows the same
+ *                              spinner for two situations that ask the user for
+ *                              OPPOSITE things: "I have not converged yet" is
+ *                              fixed by WAITING, "the input arrived broken" is
+ *                              fixed by checking the cable — or by closing
+ *                              whatever is eating the phone's CPU. Waiting out a
+ *                              problem that does not fix itself is the worse of
+ *                              the two.
+ *
+ *                              0 and not NaN, unlike [5]-[7] and [14]: there is
+ *                              no absence to express here. "Did this reading see
+ *                              a gap?" always has an answer — including "no" when
+ *                              there is no target and no signal — so a sentinel
+ *                              would buy nothing and force every consumer into an
+ *                              isNaN check that means nothing.
+ *
+ *                              It is NOT "[3] > 0". That counter is CUMULATIVE
+ *                              and monotonic, so it stays up forever after the
+ *                              first overrun; this one describes the LIVE
+ *                              integration and clears itself once the estimator
+ *                              has a measurement of its own again.
  *
  *                         B comes free with REQ-001 S6: four tracked partials
  *                         that disagree ARE the string's stiffness, so nothing

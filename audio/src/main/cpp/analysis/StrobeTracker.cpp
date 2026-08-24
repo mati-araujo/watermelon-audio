@@ -11,6 +11,7 @@ void StrobeTracker::prepare(int sampleRate) {
     mUncertaintyCents = 0.0;
     mHasSignal = false;
     mHasMeasurement = false;
+    mSawDiscontinuity = false;
 }
 
 void StrobeTracker::setTarget(double fundamentalHz) {
@@ -35,6 +36,16 @@ void StrobeTracker::reset() {
     mTargetHz = 0.0;
     setTarget(f0);
     mHasSignal = false;
+    // Un reinicio PEDIDO —cambio de fuente, de objetivo, de rate— no arrastra
+    // ninguna sospecha sobre la entrada: la marca de REQ-009 se baja.
+    mSawDiscontinuity = false;
+}
+
+void StrobeTracker::noteInputDiscontinuity() {
+    // El orden importa: `reset()` BAJA la marca (un reinicio pedido no acusa a
+    // la entrada), asi que levantarla despues es lo unico que la deja en pie.
+    reset();
+    mSawDiscontinuity = true;
 }
 
 bool StrobeTracker::process(const float* mono, int numFrames) {
@@ -183,6 +194,16 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         mCents = sumWeighted / sumWeights;
         mUncertaintyCents = std::sqrt(1.0 / sumWeights);
         mHasMeasurement = true;
+        // REQ-009 S2 — ACA se baja la marca, y este es el punto exacto en que la
+        // integracion vuelve a ser confiable: `noteInputDiscontinuity()` tiro
+        // todo, asi que una medicion que exista DESPUES sale de ventanas que son
+        // enteramente audio posterior al hueco. Mientras no la haya, la marca
+        // sigue en pie y el consumidor puede decir "la entrada llego rota" en vez
+        // de "todavia no" (AC-009.3).
+        //
+        // Bajarla en cualquier otro lado seria mentir por adelantado: bajarla al
+        // primer `process()` la apagaria con la ventana todavia a medio llenar.
+        mSawDiscontinuity = false;
     } else {
         // Sin ningun parcial utilizable no se inventa una lectura: se conserva
         // la ultima y se declara que no es actual, igual que hace S2.

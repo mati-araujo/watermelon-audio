@@ -131,7 +131,35 @@ enum SnapshotValue : int {
      */
     kSnapUsableRangeCents  = 14,
 
-    kSnapshotValueCount    = 15,
+    // ---- Contiguidad de la entrada (REQ-009 S2). Al final, otra vez.
+    /**
+     * 1 si la integracion que sostiene esta lectura arrastra un HUECO en la
+     * entrada; 0 si no. AC-009.3.
+     *
+     * ES LA MITAD QUE LE DA SENTIDO A `kStateMeasuring`. Sin esto el consumidor
+     * ve el mismo estado en dos situaciones que piden acciones OPUESTAS del
+     * usuario: *"todavia no convergi"* se resuelve **esperando**, y *"la entrada
+     * llego rota"* se resuelve **revisando el cable** (o cerrando lo que le come
+     * la CPU al telefono). Esperar frente a un problema que no se arregla solo
+     * es la peor de las dos salidas.
+     *
+     * **0 y no NaN**, al reves que los indices 5-7 y 14: aca no hay ausencia que
+     * expresar. La pregunta *"¿esta lectura vio un hueco?"* tiene respuesta
+     * siempre —incluso sin objetivo y sin señal, donde la respuesta es "no"—,
+     * asi que un centinela sobraria y obligaria a cada consumidor a un `isNaN`
+     * que no significa nada.
+     *
+     * 🔴 NO ES `kSnapDroppedFrames > 0`, Y LA DIFERENCIA ESTA MEDIDA. Ese
+     * contador es ACUMULADO y monotono: tras el primer desborde queda arriba
+     * para siempre (medido: 329.728 y subiendo), asi que una guarda apoyada en el
+     * se traba y no vuelve a declarar convergido nunca — que es justo lo que
+     * AC-009.2 prohibe. Esto de aca es el estado de la integracion VIVA: se
+     * levanta con el hueco y se baja sola cuando el estimador vuelve a tener una
+     * medicion propia.
+     */
+    kSnapInputDiscontinuity = 15,
+
+    kSnapshotValueCount    = 16,
 };
 
 enum SnapshotState : int {
