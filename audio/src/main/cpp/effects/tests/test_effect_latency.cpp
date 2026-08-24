@@ -498,3 +498,54 @@ TEST(EffectLatency, TheFastBranchIsDelayedToMeetTheSlowOne) {
         << "desfase, que es el filtro peine que compensateBranch() existe para "
         << "evitar. Primer notch en " << (kSampleRate / (2.0 * declared)) << " Hz.";
 }
+
+// ---------------------------------------------------------------------------
+// REQ-012 — el recorte de compensación deja de ser silencioso en SPLIT_2X2.
+//
+// `BranchDelay` retrasa hasta MAX_DELAY_FRAMES (512) y devuelve false cuando hay
+// que recortar. Ese false se contaba en el camino de `compensateBranch`, pero
+// SPLIT_2X2 llamaba a `mBranchDelays[..].process()` directo y lo DESCARTABA: el
+// único modo que puede pedir la compensación más grande —sus ramas son rangos
+// seriales, así que su latencia es una SUMA— era el único que podía alinear de
+// menos sin decirlo.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/** SPLIT_2X2 con la rama A pidiendo `targetHz` en sus dos DECI_HPF. */
+uint64_t clampedBlocksForSplit(float targetHz) {
+    EffectChain chain;
+    chain.setSampleRate(kSampleRate);
+
+    EXPECT_TRUE(chain.addEffect(DECI_HPF));   // rama A, slot 0
+    EXPECT_TRUE(chain.addEffect(DECI_HPF));   // rama A, slot 1
+    EXPECT_TRUE(chain.addEffect(FILTER));     // rama B, slot 2 — 0 samples
+    EXPECT_TRUE(chain.addEffect(FILTER));     // rama B, slot 3 — 0 samples
+
+    chain.setParameter(0, DeciHpfEffect::PARAM_SAMPLE_RATE, targetHz);
+    chain.setParameter(1, DeciHpfEffect::PARAM_SAMPLE_RATE, targetHz);
+    chain.setRoutingMode(RoutingMode::SPLIT_2X2);
+
+    std::vector<float> in(static_cast<size_t>(kFrames) * 2, 0.1f);
+    std::vector<float> out(static_cast<size_t>(kFrames) * 2, 0.0f);
+
+    // Dos bloques: el primero se va en el crossfade de cambio de modo.
+    chain.process(in.data(), out.data(), kFrames);
+    chain.process(in.data(), out.data(), kFrames);
+
+    return chain.latencyClampedBlocks();
+}
+
+}  // namespace
+
+TEST(EffectLatency, SplitCountsTheBlocksItCouldNotFullyAlign) {
+    // Rama A = 2 × ceil(48000/100) - 1 = 2 × 479 = 958 samples, contra una rama B
+    // de 0: se piden 958 de retardo y entran 512. Eso es un recorte, y se cuenta.
+    EXPECT_GT(clampedBlocksForSplit(100.0f), 0u)
+        << "SPLIT_2X2 alineó de menos y no lo contó: el recorte volvió a ser silencioso.";
+
+    // CONTROL: con 1000 Hz la rama A suma 2 × 47 = 94 samples, muy por debajo del
+    // tope. Si esto también contara, el test estaría midiendo cualquier cosa.
+    EXPECT_EQ(clampedBlocksForSplit(1000.0f), 0u)
+        << "contó un recorte donde el retardo pedido (94) entra de sobra en 512.";
+}

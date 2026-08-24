@@ -269,6 +269,19 @@ public:
      */
     int getLatencySamples() const;
 
+    /**
+     * @brief Cuantos bloques tuvieron que alinear DE MENOS, por tope de la linea (WD-3.1).
+     *
+     * `BranchDelay` retrasa hasta `MAX_DELAY_FRAMES`; si una rama pide mas, se
+     * aplica el maximo y se cuenta acá. Alinear de menos suena mejor que alocar
+     * en el thread de audio, pero el hecho tiene que quedar visible.
+     *
+     * El contador existia desde WD-3.1 y **no habia forma de leerlo**: era un
+     * miembro privado sin accesor, o sea que la visibilidad que decia dar no
+     * existia. Thread-safe para lectura desde cualquier thread.
+     */
+    uint64_t latencyClampedBlocks() const noexcept { return mLatencyClampedBlocks.get(); }
+
     /// Latencia declarada por el efecto en `index`, o 0 si el indice no existe.
     int getEffectLatencySamples(size_t index) const;
 
@@ -448,15 +461,38 @@ private:
     // ========== ROUTING PROCESS STRATEGIES (RT-safe) ==========
 
     /**
-     * @brief Alinea una rama contra la mas lenta de la cadena (WD-3.1).
+     * @brief Retrasa una rama `delayFrames` frames y cuenta si hubo que recortar (WD-3.1).
      *
-     * Retrasa `branch` en (maxLatencia - latenciaDeEstaRama) frames. Si la rama
-     * ya es la mas lenta el retardo es cero y no se toca nada.
+     * El unico lugar que toca una `BranchDelay`. Existe para que el recorte se
+     * cuente SIEMPRE: `BranchDelay::process` devuelve false cuando se pidio mas
+     * retardo del que entra en la linea, y ese `false` se ignoraba en SPLIT_2X2
+     * —o sea que ese modo podia alinear de menos sin que el contador lo dijera—.
      *
-     * RT-safe. `slot` indexa mBranchDelays: los indices [0, MAX_EFFECTS) son
-     * los slots de efecto, SPLIT_BRANCH_A/B las dos ramas de SPLIT_2X2.
+     * RT-safe. `delaySlot` indexa mBranchDelays: los indices [0, MAX_EFFECTS)
+     * son los slots de efecto, SPLIT_BRANCH_A/B las dos ramas de SPLIT_2X2.
      */
-    void compensateBranch(size_t slot, int branchLatency, float* branch, int numFrames);
+    void applyBranchDelay(size_t delaySlot, float* branch, int numFrames, int delayFrames);
+
+    /**
+     * @brief Alinea una rama contra la mas lenta y la ACUMULA en `mix` (WD-3.1 / REQ-012).
+     *
+     * ES UNA SOLA OPERACION A PROPOSITO, y ese es todo el punto de que exista.
+     *
+     * Antes eran dos pasos sueltos —compensar, y despues sumar a mano con un `for`
+     * en cada modo—, y nada obligaba a hacer el primero. `processParallelSerial`
+     * nacio sin la llamada y sumo ramas desalineadas hasta REQ-011: medido, su
+     * salida se explicaba con d=0 doce veces mejor que con el valor correcto. El
+     * criterio numerico no era el problema; faltaba la llamada. Con esta firma no
+     * hay forma de agregar una rama al acumulador sin alinearla, porque no existe
+     * la operacion "sumar sin alinear".
+     *
+     * La latencia NO es un parametro: se lee de `mRtEffectLatency[slot]` aca
+     * adentro. Pasarla desde afuera era una segunda cosa que el llamador podia
+     * errar sin que nada lo dijera.
+     *
+     * RT-safe. Usa `mBranchBufferA` como scratch via el puntero `branch`.
+     */
+    void accumulateBranch(size_t slot, float* branch, float* mix, int numFrames);
 
     /** @brief El vocoder activo leido del snapshot, o nullptr. Lock-free (WD-1.6). */
     Effect* vocoderFromSnapshot() const;

@@ -611,23 +611,12 @@ void EffectChain::processParallel(EffectSnapshot* snapshot, const float* input,
         processOneEffect(snapshot->effects[i], i, snapshot->bypassed[i],
                          input, mBranchBufferA.data(), numFrames);
 
-        // WD-3.1 — alinear esta rama contra la mas lenta ANTES de sumarla.
-        // Sumar ramas con distinta latencia es un filtro peine.
-        //
-        // UNA sola vez. Hubo un pegado duplicado aca —dos llamadas seguidas, la de
-        // arriba con un comentario que decia "idem processParallel" estando DENTRO de
-        // processParallel— y el efecto era el contrario del buscado: retrasaba cada rama
-        // 2*(max - lat) y las desalineaba justo por lo que debia alinearlas. Medido en
-        // REQ-011: la salida se explicaba con d=94 en vez de 47, 7 veces mejor que con el
-        // valor correcto.
-        compensateBranch(i, mRtEffectLatency[i], mBranchBufferA.data(), numFrames);
-
+        // WD-3.1 — alinear y acumular, en una sola operacion. Sumar ramas con
+        // distinta latencia es un filtro peine, y aca hubo un pegado duplicado que
+        // compensaba DOS VECES: retrasaba cada rama 2*(max - lat) y la desalineaba
+        // justo por lo que debia alinearla (REQ-011, d=94 en vez de 47).
+        accumulateBranch(i, mBranchBufferA.data(), mMixBuffer.data(), numFrames);
         activeCount++;
-
-        // Accumulate
-        for (int s = 0; s < totalSamples; ++s) {
-            mMixBuffer[s] += mBranchBufferA[s];
-        }
     }
 
     // Average by active count; if all bypassed, pass-through dry input
@@ -679,12 +668,12 @@ void EffectChain::processSplit2x2(EffectSnapshot* snapshot, const float* input,
         for (size_t i = 0; i < splitPoint && i < MAX_EFFECTS; ++i) latA += mRtEffectLatency[i];
         for (size_t i = splitPoint; i < n && i < MAX_EFFECTS; ++i) latB += mRtEffectLatency[i];
         const int target = std::max(latA, latB);
-        if (target > latA) {
-            mBranchDelays[SPLIT_BRANCH_A].process(mBranchBufferA.data(), numFrames, target - latA);
-        }
-        if (target > latB) {
-            mBranchDelays[SPLIT_BRANCH_B].process(mBranchBufferB.data(), numFrames, target - latB);
-        }
+        // Por `applyBranchDelay` y no por `mBranchDelays[..].process` directo: ese
+        // devuelve false cuando hay que recortar el retardo, y aca ese false se
+        // descartaba —o sea que este modo podia alinear de menos en silencio, sin
+        // sumar al contador que existe para dejarlo visible—.
+        applyBranchDelay(SPLIT_BRANCH_A, mBranchBufferA.data(), numFrames, target - latA);
+        applyBranchDelay(SPLIT_BRANCH_B, mBranchBufferB.data(), numFrames, target - latB);
     }
 
     // Mix branches: A * (1-mix) + B * mix
@@ -722,13 +711,9 @@ void EffectChain::processSerialParallel(EffectSnapshot* snapshot, const float* i
         processOneEffect(snapshot->effects[i], i, snapshot->bypassed[i],
                          serialOut, mBranchBufferA.data(), numFrames);
 
-        // WD-3.1 — idem processParallel: alinear antes de acumular.
-        compensateBranch(i, mRtEffectLatency[i], mBranchBufferA.data(), numFrames);
+        // WD-3.1 — alinear y acumular, igual que processParallel.
+        accumulateBranch(i, mBranchBufferA.data(), mMixBuffer.data(), numFrames);
         activeCount++;
-
-        for (int s = 0; s < totalSamples; ++s) {
-            mMixBuffer[s] += mBranchBufferA[s];
-        }
     }
 
     // Average parallel outputs
@@ -770,15 +755,11 @@ void EffectChain::processParallelSerial(EffectSnapshot* snapshot, const float* i
         processOneEffect(snapshot->effects[i], i, snapshot->bypassed[i],
                          input, mBranchBufferA.data(), numFrames);
 
-        // WD-3.1 — alinear esta rama contra la mas lenta ANTES de sumarla, igual que
-        // processParallel. Faltaba: medido en REQ-011, la salida se explicaba con d=0
-        // —o sea sin compensar— 12 veces mejor que con el valor correcto.
-        compensateBranch(i, mRtEffectLatency[i], mBranchBufferA.data(), numFrames);
+        // WD-3.1 — alinear y acumular. Este modo NO llamaba a compensar: medido en
+        // REQ-011, su salida se explicaba con d=0 doce veces mejor que con el valor
+        // correcto. Por eso ahora sumar sin alinear no es una operacion que exista.
+        accumulateBranch(i, mBranchBufferA.data(), mMixBuffer.data(), numFrames);
         activeCount++;
-
-        for (int s = 0; s < totalSamples; ++s) {
-            mMixBuffer[s] += mBranchBufferA[s];
-        }
     }
 
     // Average parallel outputs (or pass dry if all bypassed)
@@ -1335,18 +1316,28 @@ bool BranchDelay::process(float* io, int numFrames, int delayFrames) {
     return ok;
 }
 
-void EffectChain::compensateBranch(size_t slot, int branchLatency,
-                                   float* branch, int numFrames) {
-    if (slot >= mBranchDelays.size()) return;
+void EffectChain::applyBranchDelay(size_t delaySlot, float* branch,
+                                   int numFrames, int delayFrames) {
+    if (delaySlot >= mBranchDelays.size()) return;
+    if (delayFrames <= 0) return;  // esta rama YA es la mas lenta: nada que alinear
 
-    const int delay = mRtMaxLatency - branchLatency;
-    if (delay <= 0) return;  // esta rama YA es la mas lenta: nada que alinear
-
-    if (!mBranchDelays[slot].process(branch, numFrames, delay)) {
+    if (!mBranchDelays[delaySlot].process(branch, numFrames, delayFrames)) {
         // Se pidio mas compensacion que la que entra en la linea. Se aplico el
         // maximo y se cuenta: alinear de menos suena mejor que alocar en el
         // thread de audio, y el contador deja el hecho visible.
         mLatencyClampedBlocks.bump();
+    }
+}
+
+void EffectChain::accumulateBranch(size_t slot, float* branch, float* mix, int numFrames) {
+    // Alinear PRIMERO. Ver el KDoc: que las dos cosas sean una sola llamada es
+    // lo unico que impide que un modo nuevo sume ramas desalineadas.
+    const int lat = (slot < mRtEffectLatency.size()) ? mRtEffectLatency[slot] : 0;
+    applyBranchDelay(slot, branch, numFrames, mRtMaxLatency - lat);
+
+    const int totalSamples = numFrames * 2;
+    for (int i = 0; i < totalSamples; ++i) {
+        mix[i] += branch[i];
     }
 }
 
