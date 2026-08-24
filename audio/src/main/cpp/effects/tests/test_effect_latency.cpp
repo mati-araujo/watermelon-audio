@@ -495,7 +495,7 @@ TEST(EffectLatency, TheFastBranchIsDelayedToMeetTheSlowOne) {
         << "declara " << declared << " samples.\n"
         << "Un onset cerca de 0 significa que la rama RÁPIDA llegó sin alinear: "
         << "se suma contra la lenta con hasta " << declared << " samples de "
-        << "desfase, que es el filtro peine que compensateBranch() existe para "
+        << "desfase, que es el filtro peine que accumulateBranch() existe para "
         << "evitar. Primer notch en " << (kSampleRate / (2.0 * declared)) << " Hz.";
 }
 
@@ -503,7 +503,7 @@ TEST(EffectLatency, TheFastBranchIsDelayedToMeetTheSlowOne) {
 // REQ-012 — el recorte de compensación deja de ser silencioso en SPLIT_2X2.
 //
 // `BranchDelay` retrasa hasta MAX_DELAY_FRAMES (512) y devuelve false cuando hay
-// que recortar. Ese false se contaba en el camino de `compensateBranch`, pero
+// que recortar. Ese false se contaba en el camino de la compensacion por slot, pero
 // SPLIT_2X2 llamaba a `mBranchDelays[..].process()` directo y lo DESCARTABA: el
 // único modo que puede pedir la compensación más grande —sus ramas son rangos
 // seriales, así que su latencia es una SUMA— era el único que podía alinear de

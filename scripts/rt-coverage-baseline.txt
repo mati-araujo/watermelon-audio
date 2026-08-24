@@ -225,7 +225,8 @@ audio/src/main/cpp/effects/DistortionEffect.cpp::DistortionEffect::reset
 audio/src/main/cpp/effects/DistortionEffect.cpp::DistortionEffect::symmetricDiodeClip
 audio/src/main/cpp/effects/DistortionEffect.cpp::DistortionEffect::transistorSaturate
 audio/src/main/cpp/effects/EffectChain.cpp::BranchDelay::process
-audio/src/main/cpp/effects/EffectChain.cpp::EffectChain::compensateBranch
+audio/src/main/cpp/effects/EffectChain.cpp::EffectChain::accumulateBranch
+audio/src/main/cpp/effects/EffectChain.cpp::EffectChain::applyBranchDelay
 audio/src/main/cpp/effects/EffectChain.cpp::EffectChain::process
 audio/src/main/cpp/effects/EffectChain.cpp::EffectChain::processOneEffect
 audio/src/main/cpp/effects/EffectChain.cpp::EffectChain::processParallel
