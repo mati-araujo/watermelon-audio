@@ -30,6 +30,7 @@ add_executable(effects_tests
     test_modulation.cpp
     test_misc_effects.cpp
     test_effect_latency.cpp
+    test_parallel_branch_alignment.cpp
     test_golden_filter_eq.cpp
     test_golden_properties.cpp
     test_golden_dynamics.cpp

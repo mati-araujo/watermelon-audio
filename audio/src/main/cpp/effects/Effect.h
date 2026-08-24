@@ -66,11 +66,17 @@ public:
      *
      * POR QUE HAY QUE DECLARARLO SI HOY TODOS DAN CERO
      * -----------------------------------------------
-     * Porque el dia que alguien agregue un limiter con lookahead, un EQ de fase
-     * lineal o una convolucion particionada, los modos de routing PARALLEL,
-     * SPLIT_2X2, SERIAL_PARALLEL, PARALLEL_SERIAL y FEEDBACK van a sumar ramas
-     * desalineadas — y eso es un filtro peine, audible y reproducible, que
-     * ningun test de los que hay detectaria.
+     * Porque los modos de routing PARALLEL, SPLIT_2X2, SERIAL_PARALLEL y
+     * PARALLEL_SERIAL suman ramas, y sumarlas desalineadas es un filtro peine
+     * audible y reproducible. Ya no es hipotetico: la latencia de DECI_HPF la fija
+     * un PARAMETRO (fs/target - 1), asi que un usuario la alcanza sin que nadie
+     * agregue nada — 47 muestras a target 1000 Hz, 479 al maximo, con el primer
+     * notch en 50 Hz. REQ-011 midio que dos de esos cuatro modos sumaban mal.
+     *
+     * FEEDBACK NO esta en esa lista, y antes si estaba: su unica suma es la entrada
+     * seca mas la realimentacion DEL BLOQUE ANTERIOR, retrasada por diseno. No hay
+     * dos ramas del mismo tramo que alinear, y compensar ahi cambiaria el efecto en
+     * vez de arreglarlo.
      *
      * Retrofitear el contrato despues cuesta tocar los 23 efectos. Declararlo
      * ahora, con todos en cero, cuesta una linea y deja el mecanismo puesto.
