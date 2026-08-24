@@ -195,6 +195,60 @@ void negotiateCaptureRate(WmaEngine* e, int hz) {
 // ---------------------------------------------------------------------------
 
 /**
+ * AC-005.1 y AC-005.5 — EL AFINADOR SE BASTA SOLO, Y ESTO ES LO QUE LO ATA.
+ *
+ * `wma_tuner_start` asegura el nodo de entrada, lo engancha al motor y abre la
+ * captura si el backend no la entrega por callback. Todo eso ya lo hacia; lo que
+ * faltaba era que estuviera DECLARADO — y una declaracion sin test es prosa que
+ * queda stale sin que nada se ponga rojo.
+ *
+ * 🔴 POR QUE ESTE TEST NO LLAMA A `startAt()`, Y NO ES UN DESCUIDO. Todos los
+ * demas de este archivo preparan el backend antes. Este NO puede: lo que afirma
+ * es justamente que **no hay precondicion**. Si alguien le agrega el `startAt()`
+ * "para que se parezca a los otros", el test sigue verde y deja de probar lo
+ * unico que vino a probar.
+ *
+ * LO QUE ESTO LE EVITA A UN CONSUMIDOR. Leyendo el KDoc viejo —*"false si no se
+ * pudo, sin motor o sin entrada de audio"*— la conclusion razonable es que la
+ * entrada la trae uno. Un consumidor real la sacó, y no es redundancia inocua:
+ * es una SEGUNDA MANO sobre el mismo nodo, y liberar su `AudioInput` baja el
+ * nodo que el afinador esta usando.
+ */
+TEST_F(TunerApiTest, TheTunerBringsItsOwnInputAndNeedsNoSetupFromTheConsumer) {
+    // Nada antes. Ni backend arrancado, ni `wma_input_*`, ni una fuente elegida.
+    EXPECT_TRUE(wma_tuner_start(mWma))
+        << "el afinador exigio que alguien le preparara la entrada. Su KDoc declara que no "
+           "tiene precondiciones, asi que o la promesa es falsa o el camino de arranque "
+           "cambio: las dos son el defecto que MINI-005 vino a cerrar.";
+    EXPECT_TRUE(wma_tuner_is_running(mWma)) << "dijo que arranco y no esta corriendo";
+
+    wma_tuner_stop(mWma);
+}
+
+/**
+ * AC-005.2 — EL GEMELO, y es el que se olvida: bastarse solo no puede significar
+ * agarrar de mas.
+ *
+ * Afinar no es escucharse. Si pedir un afinador encendiera el monitoreo, cambiaria
+ * lo que sale por los parlantes como efecto colateral — y en un instrumento
+ * amplificado eso es realimentacion, no una molestia. Sin este test, "asegurar la
+ * entrada" podria crecer hasta prender el monitoreo y el test de arriba seguiria
+ * verde.
+ */
+TEST_F(TunerApiTest, StartingTheTunerNeverTurnsOnMonitoring) {
+    ASSERT_FALSE(wma_input_is_monitoring_enabled(mWma)) << "premisa: arranca apagado";
+
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    EXPECT_FALSE(wma_input_is_monitoring_enabled(mWma))
+        << "pedir un afinador encendio el monitoreo. Nunca puede cambiar lo que sale por los "
+           "parlantes: en un instrumento amplificado eso es realimentacion.";
+
+    wma_tuner_stop(mWma);
+    EXPECT_FALSE(wma_input_is_monitoring_enabled(mWma))
+        << "y pararlo tampoco lo puede dejar prendido";
+}
+
+/**
  * TAREA 1.6. Un motor al que nadie le pidio afinar no tiene snapshot que dar, y
  * lo que hace con el buffer del llamador importa tanto como el `false`.
  */
