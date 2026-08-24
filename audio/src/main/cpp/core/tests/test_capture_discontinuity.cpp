@@ -76,8 +76,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <thread>
 #include <vector>
 
@@ -345,4 +347,215 @@ TEST(CaptureDiscontinuity, NobodyReportedItSoNobodyCanKnow) {
         << "sin aviso, el motor NO tendria como enterarse — y sin embargo dejo de declarar "
            "convergida la lectura. Algo lo esta detectando por otra via: averiguar cual antes "
            "de tocar este test, porque cambiaria el alcance de S3.";
+}
+
+// ===========================================================================
+// EL CAMINO DE ANDROID (REQ-009 S3, tarea 3.2b)
+// ===========================================================================
+//
+// Los cinco tests de arriba entran por `feedExternalInput`, que es el camino de
+// iOS y USB, y el arnes hace de backend llamando a `reportCaptureDiscontinuity()`
+// a mano. Eso deja SIN CUBRIR justo el camino de la plataforma principal: en
+// Android el afinador NO pasa por el ring del backend — `wma_tuner_start` hace
+// que el `InputNode` abra su PROPIO stream de Oboe — asi que la fuente del aviso
+// es el xrun de ESE stream, y quien lo convierte en costura es
+// `processInputBlock`. Esa conversion es la que se maneja aca.
+//
+// Estos NO repiten la medicion de cents: eso ya lo afirman los de arriba sobre el
+// mismo `noteInputDiscontinuity()`. Lo que falta probar es el CABLE, y el cable se
+// observa donde termina: la posicion de la costura en el `AnalysisRing`.
+//
+// 🔴 POR QUE HACE FALTA EL GANCHO. `processInputBlock` chequea
+// `mInputStreamRunning`, que en host no se puede poner en true por ninguna via
+// legitima (lo escribe solo `startInputStream()`, que sin Oboe devuelve false
+// antes de tocarlo). Sin el gancho este cable quedaria verificado unicamente por
+// leerlo — que es exactamente como el plan de esta etapa llego a apuntar al ring
+// equivocado durante dos tareas. Ver la nota de los ganchos en `InputNode.cpp`.
+extern std::atomic<bool> gInputNodeForceStreamRunning;
+
+namespace {
+
+/// Deja el gancho prendido mientras dure el bloque, y lo apaga pase lo que pase.
+/// Es global: dejarlo prendido contaminaria a los otros tests del binario.
+struct StreamCorriendo {
+    StreamCorriendo()  { gInputNodeForceStreamRunning.store(true,  std::memory_order_release); }
+    ~StreamCorriendo() { gInputNodeForceStreamRunning.store(false, std::memory_order_release); }
+};
+
+/// Un nodo con ring conectado, listo para recibir bloques por el camino de Oboe.
+struct NodoOboe {
+    AnalysisRing ring;
+    InputNode node;
+    std::vector<float> bloque;
+
+    NodoOboe() : bloque(static_cast<size_t>(kBlockFrames) * 2, 0.0f) {
+        node.prepare(kRate, kBlockFrames);
+        node.setAnalysisRing(&ring);
+        node.setCaptureSampleRate(kRate);
+        ring.setCaptureRate(kRate);
+    }
+    ~NodoOboe() { node.setAnalysisRing(nullptr); }
+
+    /// Un bloque por el camino de Oboe, con el acumulado de xruns que el stream
+    /// reportaria en ese momento. Estereo, que es como Oboe abre la captura.
+    bool bloqueConXRuns(int32_t xRuns) {
+        std::fill(bloque.begin(), bloque.end(), 0.25f);
+        const bool ok = node.processInputBlock(bloque.data(), kBlockFrames, 2, xRuns);
+        if (ok) escritos += kBlockFrames;
+        return ok;
+    }
+
+    /// La posicion de escritura del ring, en frames — el mismo sistema de
+    /// coordenadas de `captureSeamPosition()`.
+    ///
+    /// Se lleva a mano y no con `availableFrames()`: ese SATURA en
+    /// `kCapacityFrames` y aca nadie lee el ring, asi que pasados 8 bloques
+    /// dejaria de decir la verdad. Nadie mas escribe este ring, o sea que la
+    /// cuenta es exacta.
+    uint64_t frontera() const { return escritos; }
+
+private:
+    uint64_t escritos = 0;
+};
+
+}  // namespace
+
+/**
+ * AC-009.1 sobre el camino de Android — EL CABLE.
+ *
+ * El stream de Oboe acusa un xrun mas: eso tiene que quedar estampado como
+ * costura, y en la frontera EXACTA entre el bloque anterior y el siguiente.
+ * La posicion importa tanto como el hecho: un aviso sin posicion ya se probo y
+ * dejaba 1 de cada ~80 publicaciones convergida a 0,18 cents (ver el KDoc de
+ * `AnalysisRing::reportCaptureDiscontinuity`).
+ */
+TEST(CaptureDiscontinuity, TheOboePathTurnsItsOwnXRunIntoAPositionedSeam) {
+    StreamCorriendo encendido;
+    NodoOboe n;
+
+    ASSERT_TRUE(n.bloqueConXRuns(0)) << "el nodo rechazo el primer bloque";
+    ASSERT_TRUE(n.bloqueConXRuns(0)) << "el nodo rechazo el segundo bloque";
+    ASSERT_EQ(n.ring.captureSeamPosition(), 0u)
+        << "sin xruns nuevos no puede haber costura: una marca siempre prendida no distingue nada";
+
+    // Aca el stream perdio audio entre el bloque anterior y este.
+    const uint64_t frontera = n.frontera();
+    ASSERT_TRUE(n.bloqueConXRuns(1));
+
+    EXPECT_EQ(n.ring.captureSeamPosition(), frontera)
+        << "el xrun del stream de captura no llego al ring del afinador, o llego sin la "
+           "posicion correcta.\n"
+        << "  Se esperaba la costura en " << frontera << " —la frontera entre lo que ya "
+           "estaba escrito y el bloque de despues del hueco— y quedo en "
+        << n.ring.captureSeamPosition() << ".\n"
+        << "  🔴 Estamparla DESPUES de escribir el bloque la corre " << kBlockFrames
+        << " frames, y el lector deja pasar audio que cruza el salto.";
+}
+
+/**
+ * EL GEMELO, y es el que se olvida: sin xruns nuevos, el camino de Oboe no puede
+ * inventar costuras. Sin esto, "reportar siempre" pasaria el test de arriba.
+ */
+TEST(CaptureDiscontinuity, TheOboePathInventsNoSeamWhileTheStreamIsHealthy) {
+    StreamCorriendo encendido;
+    NodoOboe n;
+
+    for (int b = 0; b < 12; ++b) {
+        ASSERT_TRUE(n.bloqueConXRuns(3)) << "bloque " << b << " rechazado";
+    }
+    EXPECT_EQ(n.ring.captureSeamPosition(), 0u)
+        << "el stream reporto SIEMPRE el mismo acumulado de xruns —o sea, ninguno nuevo— y "
+           "el nodo estampo una costura igual. Una guarda que reinicia en cada bloque nunca "
+           "deja converger, y eso pasa los tests de arriba sin resolver nada.";
+}
+
+/**
+ * EL BACKEND QUE NO SABE CONTAR. En OpenSL ES `getXRunCount()` devuelve
+ * `ErrorUnimplemented`, y el adaptador pasa `kCaptureXRunsUnknown`.
+ *
+ * No saber NO es "todo bien" — pero tampoco es "hubo un hueco". Lo unico correcto
+ * es no afirmar nada: si el desconocido se tratara como un valor mas, el primer
+ * bloque de un stream sano ya estamparia una costura, y despues cada alternancia
+ * entre conocido y desconocido otra.
+ */
+TEST(CaptureDiscontinuity, AnUnknownXRunCountAssertsNothingEitherWay) {
+    StreamCorriendo encendido;
+    NodoOboe n;
+
+    ASSERT_TRUE(n.bloqueConXRuns(InputNode::kCaptureXRunsUnknown));
+    ASSERT_TRUE(n.bloqueConXRuns(InputNode::kCaptureXRunsUnknown));
+    EXPECT_EQ(n.ring.captureSeamPosition(), 0u)
+        << "un backend que no sabe contar xruns termino afirmando que hubo uno";
+
+    // Y cuando empieza a saber, la PRIMERA observacion siembra: no hay audio
+    // anterior con el que ese acumulado pudiera ser discontinuo.
+    ASSERT_TRUE(n.bloqueConXRuns(9));
+    EXPECT_EQ(n.ring.captureSeamPosition(), 0u)
+        << "la primera lectura del contador se tomo como un salto. Un stream puede arrancar "
+           "con xruns ya acumulados de antes de que el afinador existiera.";
+
+    const uint64_t frontera = n.frontera();
+    ASSERT_TRUE(n.bloqueConXRuns(10));
+    EXPECT_EQ(n.ring.captureSeamPosition(), frontera)
+        << "sembrado el contador, el salto siguiente si tiene que verse";
+}
+
+/**
+ * EL DESCONOCIDO INTERMITENTE — y este test existe porque un mutante SOBREVIVIO.
+ *
+ * Sacar la guarda de `xRunCount < 0` no rompia ninguno de los otros tres: con la
+ * siembra puesta, una tira de desconocidos al principio se absorbe sola. El caso
+ * que si cambia es el que ninguno tocaba — el stream venia contando, deja de
+ * saber por un bloque, y vuelve:
+ *
+ *   sin la guarda, ese `-1` se compara contra el `5` anterior, sale distinto, y
+ *   el nodo estampa una costura sobre audio SANO. Y de yapa deja el contador
+ *   sembrado en -1, o sea que el bloque siguiente vuelve a sembrar y se pierde
+ *   el proximo salto de verdad.
+ *
+ * "No se" no es "hubo un hueco" — igual que no es "todo bien".
+ */
+TEST(CaptureDiscontinuity, AnIntermittentlyUnknownCountIsNoSeamAndLosesNoSeed) {
+    StreamCorriendo encendido;
+    NodoOboe n;
+
+    ASSERT_TRUE(n.bloqueConXRuns(5));
+    ASSERT_TRUE(n.bloqueConXRuns(5));
+    ASSERT_TRUE(n.bloqueConXRuns(InputNode::kCaptureXRunsUnknown));  // un bloque sin dato
+    ASSERT_TRUE(n.bloqueConXRuns(5));
+    EXPECT_EQ(n.ring.captureSeamPosition(), 0u)
+        << "el stream dejo de saber su cuenta de xruns por un bloque y el nodo lo tomo como "
+           "un salto. El audio no se rompio: lo que falto fue el dato.";
+
+    // Y el contador tiene que haber quedado sembrado en 5, no en el desconocido:
+    // si el `-1` lo piso, este salto se lee como primera observacion y se pierde.
+    const uint64_t frontera = n.frontera();
+    ASSERT_TRUE(n.bloqueConXRuns(6));
+    EXPECT_EQ(n.ring.captureSeamPosition(), frontera)
+        << "despues de un bloque sin dato, el salto siguiente se perdio: el desconocido piso "
+           "la semilla y el nodo volvio a arrancar de cero.";
+}
+
+/**
+ * EL STREAM REABIERTO, que es el caso que un `>` deja pasar.
+ *
+ * Un stream nuevo arranca su contador en cero, asi que el acumulado BAJA. Eso es
+ * una costura tanto como una subida —el audio de antes y el de despues no son
+ * contiguos— y compararlo con "aumento" lo dejaria invisible.
+ */
+TEST(CaptureDiscontinuity, AReopenedStreamResetsTheCounterAndThatIsASeamToo) {
+    StreamCorriendo encendido;
+    NodoOboe n;
+
+    ASSERT_TRUE(n.bloqueConXRuns(7));
+    ASSERT_TRUE(n.bloqueConXRuns(7));
+    ASSERT_EQ(n.ring.captureSeamPosition(), 0u) << "premisa: todavia no hubo salto";
+
+    const uint64_t frontera = n.frontera();
+    ASSERT_TRUE(n.bloqueConXRuns(0));   // stream reabierto: el contador vuelve a cero
+
+    EXPECT_EQ(n.ring.captureSeamPosition(), frontera)
+        << "el contador de xruns BAJO —un stream reabierto— y el nodo no lo tomo como "
+           "discontinuidad. Comparar con `>` en vez de con `!=` deja pasar exactamente este "
+           "caso, y el audio de los dos streams no es contiguo.";
 }

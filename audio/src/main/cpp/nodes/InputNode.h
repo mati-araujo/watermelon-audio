@@ -55,6 +55,9 @@ public:
     void reset() override;
     void process(AudioBuffer& inputBuffer, int numFrames) override;
 
+    /// El backend no sabe decir cuantos xruns lleva. Ver `processInputBlock`.
+    static constexpr int32_t kCaptureXRunsUnknown = -1;
+
     // Entry point for the platform capture callback: takes one interleaved
     // block straight from the device and runs the input DSP chain on it.
     // Returns false when the capture stream must stop.
@@ -62,7 +65,21 @@ public:
     // Called on the input audio thread — the implementation is allocation- and
     // lock-free, and the channel count is passed in (instead of being queried
     // from a stream object) so no backend type leaks into this header.
-    bool processInputBlock(float* audioData, int numFrames, int channelCount);
+    //
+    // `xRunCount` es el ACUMULADO de xruns del stream de captura, tal cual lo
+    // reporta el backend, o `kCaptureXRunsUnknown` si no lo sabe. REQ-009 S3
+    // (3.2b): en Android el afinador NO pasa por el ring del backend —
+    // `wma_tuner_start` hace que este nodo abra su PROPIO stream de Oboe—, asi
+    // que los overrun/underrun que cuenta `OboeBackend` pertenecen a un ring
+    // que el afinador nunca toca. La fuente correcta de este camino es el xrun
+    // de ESTE stream, y por eso entra por parametro: el que lo observa es el
+    // mismo callback que despues escribe el `AnalysisRing`.
+    //
+    // 🔴 NO TIENE DEFAULT A PROPOSITO. Un `= kCaptureXRunsUnknown` dejaria que
+    // un llamador nuevo apague el eje de captura entero sin escribir una linea
+    // que se pueda revisar en un diff.
+    bool processInputBlock(float* audioData, int numFrames, int channelCount,
+                           int32_t xRunCount);
 
 private:
     /**
@@ -117,6 +134,34 @@ private:
      * usa, es lo que hace que las dos mitades no puedan volver a discrepar.
      */
     int clampToWorkBuffers(int numFrames);
+
+    /**
+     * @brief Convierte el acumulado de xruns del stream en una COSTURA (REQ-009 S3).
+     *
+     * Lo llama `processInputBlock` ANTES de escribir el bloque en el ring del
+     * afinador, y eso importa: `AnalysisRing::reportCaptureDiscontinuity()`
+     * estampa la posicion de escritura del momento, o sea la frontera entre lo
+     * que ya entro y lo que esta por entrar. Que es exactamente donde esta el
+     * hueco — el xrun ocurrio entre el bloque anterior y este.
+     *
+     * 🔑 **Lo llama el mismo thread que escribe el ring**, y esa es la unica
+     * razon por la que puede estampar posicion. En el camino de iOS/USB el
+     * overrun lo detecta OTRO thread y por eso ahi hace falta otro mecanismo
+     * (bandera pendiente). Ver el doc de la etapa, hallazgo D.
+     *
+     * REGLAS, y las tres estan medidas o razonadas:
+     *
+     *   - `kCaptureXRunsUnknown` (o cualquier negativo) NO reporta. Un backend
+     *     que no sabe contar no puede afirmar que hubo hueco NI que no lo hubo;
+     *     inventar un 0 seria decir "todo bien" sin haberlo mirado.
+     *   - La PRIMERA observacion siembra y no reporta. Un stream puede arrancar
+     *     con el contador ya distinto de cero y no hay audio anterior con el
+     *     que ese hueco pudiera ser discontinuo.
+     *   - Despues, CUALQUIER cambio reporta — no solo un aumento. Un stream
+     *     reabierto vuelve el contador a cero, y eso tambien es una costura.
+     *     Comparar con `>` dejaria pasar justo ese caso.
+     */
+    void noteCaptureXRuns(int32_t xRunCount) noexcept;
 
 public:
 
@@ -285,6 +330,11 @@ private:
 
     /// 0 = desconocido. Ver getCaptureSampleRate().
     std::atomic<int> mCaptureSampleRate{0};
+
+    /// Ultimo acumulado de xruns visto en el stream de captura. -1 = todavia
+    /// ninguno. Lo escribe el thread de captura; es atomico porque el de
+    /// control lo puede leer al arrancar o parar el stream. Ver noteCaptureXRuns().
+    std::atomic<int64_t> mLastCaptureXRuns{-1};
 
     std::atomic<bool> mNoiseGateEnabled{false};
     LevelMeter mLevelMeter;
