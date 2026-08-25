@@ -28,7 +28,7 @@
 #
 # Formato:  <archivo>::<linea> | <clasificacion>
 
-audio/src/main/cpp/api/watermelon_audio.cpp::45 | DEUDA CON DUEÑO — default con mitigacion (setInputNode() le informa el rate), pero prepare() dimensiona los rings: a 96 kHz quedarian cortos. Tocarlo es cambiar el ciclo de vida del InputNode (REQ-001 S1)
+audio/src/main/cpp/api/watermelon_audio.cpp::73 | default de construccion — aca no hay stream de entrada del que preguntar el rate. DEJO DE SER DEUDA en REQ-012.4: onInputStreamConfigChanged / onStreamConfigChanged / setInputNode re-preparan el nodo con el rate real, RINGS INCLUIDOS, asi que ya no queda corto a 96 kHz. Mismo caso que SynthEngineDispatcher: el literal se queda y lo corrige el camino
 audio/src/main/cpp/core/SynthEngineDispatcher.cpp::25 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
 audio/src/main/cpp/core/SynthEngineDispatcher.cpp::29 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
 audio/src/main/cpp/core/SynthEngineDispatcher.cpp::33 | default de construccion — el constructor no tiene el rate; configureComponentsWithSampleRate() los re-prepara (REQ-006.1/006.2)
