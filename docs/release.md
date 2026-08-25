@@ -14,24 +14,38 @@ version=1.3.1
 `audio/build.gradle.kts` reads that value for the Maven artifact version and
 passes it to CMake so `wma_get_version()` reports the same value.
 
-## Automated release
+## Cutting a release — two deliberate manual steps
+
+Since 2026-08-25 **neither step happens on its own.** `Release Please` used to run on
+every push to `master`, so any merge — a one-line `fix:` included — opened or updated a
+release PR and dragged a full CI run behind it. That produced noise, not releases: a new
+version for every patch, and release PRs nobody had decided to cut.
 
 1. Merge feature and fix commits to `master` using Conventional Commit prefixes
    when possible: `feat:`, `fix:`, `perf:`, `build:`, `docs:`, `chore:`.
-2. The `Release Please` workflow opens or updates a release PR.
-3. Review that PR for:
+2. **When you decide to cut a version**, trigger the `Release Please` workflow by hand
+   (`workflow_dispatch`). It reads every conventional commit since the last tag, so
+   nothing is lost by waiting — you only choose *when* to look at it.
+3. Review the release PR it opens:
    - `CHANGELOG.md`
    - `.release-please-manifest.json`
    - `gradle.properties`
-4. Merge the release PR.
-5. Release Please creates the GitHub release and `vX.Y.Z` tag.
-6. The `Release Please` workflow publishes the tag to GitHub Packages.
+4. Merge the release PR. Release Please creates the GitHub release and the `vX.Y.Z` tag.
+   **It does not publish.**
+5. **Publish as a second explicit gesture**: trigger the `Publish` workflow against that
+   tag.
 
-The publish job fails before building if the tag version does not match
-`gradle.properties`. Its **first** step is `scripts/wait-for-ci.sh`, which blocks
-until the CI of that exact commit is green and is fail-closed: no green CI, no
-publish. There is also a separate `Publish` workflow for manual or emergency
-re-runs against an existing tag, which deliberately does **not** wait.
+### What the split had to preserve
+
+The old automatic publish job was the only one that waited for the CI of that exact
+commit to go green (`scripts/wait-for-ci.sh`), fail-closed: no green CI, no publish. The
+`Publish` workflow deliberately did *not* wait, because it was the emergency override —
+that is how v1.8.0 was rescued.
+
+Moving publication would have dropped that guarantee silently, so `Publish` now waits by
+default and exposes a `saltear_espera_ci` input for a genuine rescue. **The safe path is
+the default; the shortcut has to be asked for.** Either way the job still fails before
+building if the tag version does not match `gradle.properties`.
 
 ## Verificar el release CONTRA EL REGISTRO
 
