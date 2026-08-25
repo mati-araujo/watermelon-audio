@@ -72,10 +72,15 @@ For shipping to production:
 # 1. Use Conventional Commit prefixes on the changes that should drive the release
 # feat:, fix:, perf:, build:, docs:, chore:
 
-# 2. Merge the Release Please PR on master
-# It updates CHANGELOG.md, .release-please-manifest.json, and gradle.properties.
+# 2. When you decide to cut a version, trigger the `Release Please` workflow BY HAND
+# (workflow_dispatch). Since 2026-08-25 it no longer runs on every push to master:
+# a one-line fix: used to open a release PR nobody had asked for. Merging its PR
+# updates CHANGELOG.md, .release-please-manifest.json and gradle.properties, and
+# creates the tag — but it does NOT publish.
 
-# 3. Let the Release Please workflow publish to GitHub Packages.
+# 3. Publish as a second, explicit gesture: trigger the `Publish` workflow on that tag.
+# It waits for the CI of the commit to be green before publishing (fail-closed); the
+# `saltear_espera_ci` input skips that wait, and is only for a rescue. See docs/release.md.
 
 # 4. Update version in NoisyPad
 # All build.gradle.kts: "com.watermellonstudios:audio-android:<released-version>"

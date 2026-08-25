@@ -1,24 +1,40 @@
 name: Publish
 
-# Camino de publicacion MANUAL / de emergencia. El automatico —el que corre en
-# cada release— es el job `publish` de release-please.yml, y ESE si espera a que
-# el CI del commit este verde (scripts/wait-for-ci.sh).
+# LA UNICA VIA DE PUBLICACION (2026-08-25). Antes esto era el override de
+# emergencia y el camino normal vivia en el job `publish` de release-please.yml,
+# que publicaba solo al mergear el PR de release. Ese job se saco: ahora publicar
+# es un gesto humano y explicito.
 #
-# Este NO espera al CI a proposito: es el override humano para cuando el
-# automatico fallo (fue como se rescato v1.8.0). Quien lo dispara se hace cargo.
-# El trigger `push: tags` es en la practica letra muerta para los releases: el
-# tag lo crea el GITHUB_TOKEN de release-please y GitHub no encadena workflows,
-# asi que este workflow solo corre por `workflow_dispatch`. Si algun dia se
-# quiere gatear tambien esta via, agregar el paso de wait-for-ci como en
-# release-please.yml (necesita `actions: read` en permissions).
+# 🔴 Y CON EL SE MOVIO SU GARANTIA, que era lo unico que no se podia perder en la
+# mudanza. Aquel job esperaba a que el CI del commit estuviera verde antes de
+# publicar (`scripts/wait-for-ci.sh`), fail-closed: si el CI no cierra verde, no
+# se publica. Este workflow NO esperaba, a proposito, porque era el rescate de
+# emergencia — asi se salvo v1.8.0.
+#
+# Las dos cosas se conservan, y la segura es el DEFAULT: se espera al CI salvo que
+# quien dispara pida explicitamente `saltear_espera_ci`. El atajo sigue existiendo;
+# ahora hay que pedirlo, en vez de obtenerlo por venir por esta puerta.
+#
+# El trigger `push: tags` es letra muerta en la practica: el tag lo crea el
+# GITHUB_TOKEN de release-please y GitHub no encadena workflows.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      saltear_espera_ci:
+        description: "Publicar SIN esperar a que el CI del tag este verde (rescate)"
+        type: boolean
+        default: false
 
 permissions:
   packages: write
   contents: read
+  # Para que wait-for-ci.sh pueda LEER el estado de la corrida del CI. Con un
+  # bloque `permissions:` explicito, todo scope no listado queda en `none`: sin
+  # esta linea `gh api .../actions/runs` da 403 y la espera falla siempre — no
+  # publicaria, pero por el motivo equivocado.
+  actions: read
 
 concurrency:
   group: publish-${{ github.ref_name }}
@@ -39,6 +55,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      # La garantia que venia del job `publish` de release-please.yml. Se saltea
+      # solo si quien dispara lo pidio: el default es esperar.
+      - name: Esperar a que el CI de este tag este verde
+        if: ${{ !inputs.saltear_espera_ci }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/wait-for-ci.sh "${{ github.sha }}"
 
       - name: Extract version from tag
         id: version
