@@ -2542,9 +2542,20 @@ void AudioEngine::setInputNode(std::shared_ptr<InputNode> inputNode) {
         // no sabia — un nodo que ya tiene rate (USB, que lo recibe directo del
         // driver) sabe mas que el motor.
         const int known = mCaptureStreamSampleRate.load(std::memory_order_relaxed);
-        if (mInputNode && known > 0 && mInputNode->getCaptureSampleRate() <= 0) {
-            mInputNode->setCaptureSampleRate(known);
+        // El rate del NODO gana si lo tiene: un nodo que ya sabe (USB, que lo recibe
+        // del driver; o su propio stream de Oboe ya abierto) sabe mas que el motor.
+        const int propio = mInputNode ? mInputNode->getCaptureSampleRate() : 0;
+        const int rate = propio > 0 ? propio : known;
+        if (mInputNode && rate > 0) {
+            if (propio <= 0) mInputNode->setCaptureSampleRate(rate);
             // REQ-012.4 — y ademas se lo PREPARA para ese rate, no solo se le avisa.
+            //
+            // 🔴 SE RE-PREPARA AUNQUE EL NODO YA SUPIERA SU RATE, y esa es la parte
+            // que faltaba: saber el rate y estar PREPARADO para el son cosas
+            // distintas. Un nodo que abrio su propio stream de Oboe
+            // (`startInputStream`) publica el rate negociado pero sigue con el DSP
+            // del provisional; con la guarda vieja —re-preparar solo si el rate era
+            // desconocido— ese caso quedaba afuera justo al entrar al grafo.
             // Un nodo recien construido trae el `prepare()` provisional de
             // `wmaEnsureInputNode`, asi que sin esto entraria al grafo con el DSP
             // configurado para un rate que nadie midio.
@@ -2554,7 +2565,7 @@ void AudioEngine::setInputNode(std::shared_ptr<InputNode> inputNode) {
             // posible es su propio thread de captura — y a ese lo drena
             // `reconfigureForRate`. Por eso alcanza el del nodo y no hace falta el
             // del motor, que ademas volveria a tomar este mismo mutex.
-            mInputNode->reconfigureForRate(known, kRetireTimeout);
+            mInputNode->reconfigureForRate(rate, kRetireTimeout);
         }
         // 1. Publicar. release: el objeto está completamente construido antes.
         mInputNodeRt.store(mInputNode.get(), std::memory_order_release);

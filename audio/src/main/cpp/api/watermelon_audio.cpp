@@ -82,6 +82,32 @@ bool wmaEnsureInputNode(WmaEngine* e) {
 
 static bool ensureInputNode(WmaEngine* e) { return wmaEnsureInputNode(e); }
 
+/**
+ * @brief Re-prepara el nodo con el rate que el stream de captura negocio (REQ-012.4).
+ *
+ * 🔴 POR QUE HACE FALTA UN CABLE APARTE PARA ESTE CAMINO. `startInputStream()` abre
+ * un stream de Oboe **propio del InputNode**, que NO pasa por `IAudioBackend`: por
+ * eso `AudioEngine::onInputStreamConfigChanged()` nunca se dispara para el, y el
+ * cableado de los hooks del backend no lo alcanza. Si no se re-prepara aca, no lo
+ * hace nadie.
+ *
+ * Y no es un caso de borde: es el camino del afinador en Android — `wma_tuner_start`
+ * abre ese stream— o sea el caso de uso que motiva el REQ entero. Lo encontro el
+ * instrumento del criterio de muerte (buscar los sitios que publican el rate y
+ * chequear cuales re-preparan), antes de que nadie lo declarara.
+ *
+ * Va por el motor y no por el nodo: `reconfigureInputNodeForRate()` drena LOS DOS
+ * escritores. Llamarlo cuando el nodo todavia no esta publicado no rompe nada —
+ * devuelve false sin tocar el nodo— pero por eso los llamadores lo invocan DESPUES
+ * de `setInputNode()` cuando ambos ocurren.
+ */
+static void wmaReconfigureTrasArrancarCaptura(WmaEngine* e) {
+    if (!e || !e->engine || !e->inputNode) return;
+    const int medido = e->inputNode->getCaptureSampleRate();
+    if (medido <= 0) return;   // el stream no dijo a que rate quedo: nada que seguir
+    e->engine->reconfigureInputNodeForRate(medido);
+}
+
 /* ================================================================
  * 1. Lifecycle
  * ================================================================ */
@@ -735,6 +761,7 @@ void wmaAttachInputForMode(WmaEngine* engine) {
 
     engine->inputNode->setMonitoringEnabled(true);
     engine->engine->setInputNode(engine->inputNode);
+    wmaReconfigureTrasArrancarCaptura(engine);   // REQ-012.4 — ver el helper
 
     // Kept from the JNI: on a device this line is how you tell "the mic is not
     // working" apart from "the mode never attached it", and the smoke reads it
@@ -848,6 +875,7 @@ bool wma_input_start(WmaEngine* engine) {
     if (!ensureInputNode(engine)) return false;
 
     if (engine->inputNode->startInputStream()) {
+        wmaReconfigureTrasArrancarCaptura(engine);   // REQ-012.4 — ver el helper
         return true;
     }
 
@@ -1062,6 +1090,10 @@ bool wma_tuner_start(WmaEngine* engine) {
         (backendType == watermelon_audio::BackendType::LIBUSB);
     if (!backendDeliversInput && !engine->inputNode->isInputStreamRunning()) {
         engine->inputNode->startInputStream();
+        // REQ-012.4 — EL CAMINO DEL AFINADOR EN ANDROID. Ver el helper: este stream
+        // no pasa por el backend, asi que sin esto el DSP de entrada se queda con el
+        // rate provisional justo en el caso de uso que motiva el REQ.
+        wmaReconfigureTrasArrancarCaptura(engine);
     }
 
     std::lock_guard<std::mutex> lock(engine->analysisMutex);
