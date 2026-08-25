@@ -78,7 +78,12 @@ For shipping to production:
 # updates CHANGELOG.md, .release-please-manifest.json and gradle.properties, and
 # creates the tag — but it does NOT publish.
 
-# 3. Publish as a second, explicit gesture: trigger the `Publish` workflow on that tag.
+# 3. Trigger `Release Please` AGAIN. That second dispatch is what creates the release and
+# the vX.Y.Z tag. It is easy to miss: while this ran on push, merging the release PR was
+# itself the push that tagged it. With a manual trigger nothing observes that merge, so
+# you end up with the version bumped and no tag. It is idempotent — just run it again.
+
+# 4. Publish as a third, explicit gesture: trigger the `Publish` workflow on that tag.
 # It waits for the CI of the commit to be green before publishing (fail-closed); the
 # `saltear_espera_ci` input skips that wait, and is only for a rescue. See docs/release.md.
 
