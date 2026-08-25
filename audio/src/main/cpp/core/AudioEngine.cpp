@@ -2493,27 +2493,36 @@ void AudioEngine::setDualTouchMode(bool enabled) {
 // Saltearse el paso 2 es la versión "obvia" del arreglo y es la que sigue
 // rompiendo: un callback que cargó el puntero antes del store lo sigue usando
 // mientras el thread de control destruye el objeto.
-bool AudioEngine::reconfigureInputNodeForRate(int sampleRate) {
+AudioEngine::InputReconfigure AudioEngine::reconfigureInputNodeForRate(int sampleRate) {
     // Mismo techo y misma razon que el retiro de `setInputNode()`: un bloque son
     // ~2,7 ms, y un thread de audio que no cerro uno en cien bloques esta trabado.
     constexpr auto kTecho = std::chrono::milliseconds(250);
+
+    // MINI-007 — se valida ACA y no se deja que el `false` del nodo lo represente.
+    // Mapear un rate invalido a `SinDrenaje` seria mentir sobre la razon, y esa
+    // mentira tiene consecuencias: `SinDrenaje` es el unico caso en que el llamador
+    // NO puede caer a ningun camino alternativo.
+    if (sampleRate <= 0) return InputReconfigure::RateInvalido;
 
     std::shared_ptr<InputNode> node;
     {
         std::lock_guard<std::mutex> lock(mInputNodeMutex);
         node = mInputNode;
     }
-    if (!node) return false;
+    // MINI-007 — se distingue de `SinDrenaje` a proposito: ver el KDoc del enum.
+    if (!node) return InputReconfigure::SinNodoPublicado;
 
     // 1. Retirar del camino de SALIDA. Desde aca ningun callback nuevo lo toca.
     mInputNodeRt.store(nullptr, std::memory_order_release);
 
     // 2. Drenar al que ya estaba adentro.
-    bool hecho = false;
+    InputReconfigure resultado = InputReconfigure::SinDrenaje;
     if (waitForCallbackDrain(kTecho)) {
         // 3. Y recien ahora el otro escritor: el thread de captura. Si tampoco se
         //    puede confirmar ese, `reconfigureForRate` no toca nada y devuelve false.
-        hecho = node->reconfigureForRate(sampleRate, kTecho);
+        resultado = node->reconfigureForRate(sampleRate, kTecho)
+                        ? InputReconfigure::Reconfigurado
+                        : InputReconfigure::SinDrenaje;
     } else {
         LOGE("reconfigureInputNodeForRate: no se pudo drenar el callback de salida en "
              "%lldms — no se re-prepara", static_cast<long long>(kTecho.count()));
@@ -2522,7 +2531,7 @@ bool AudioEngine::reconfigureInputNodeForRate(int sampleRate) {
     // 4. Republicar SIEMPRE, drenado o no. Dejarlo retirado silenciaria la entrada
     //    para siempre, que es peor que no haber re-preparado.
     mInputNodeRt.store(node.get(), std::memory_order_release);
-    return hecho;
+    return resultado;
 }
 
 void AudioEngine::setInputNode(std::shared_ptr<InputNode> inputNode) {

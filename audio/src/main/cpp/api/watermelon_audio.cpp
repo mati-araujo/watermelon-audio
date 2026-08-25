@@ -105,7 +105,30 @@ static void wmaReconfigureTrasArrancarCaptura(WmaEngine* e) {
     if (!e || !e->engine || !e->inputNode) return;
     const int medido = e->inputNode->getCaptureSampleRate();
     if (medido <= 0) return;   // el stream no dijo a que rate quedo: nada que seguir
-    e->engine->reconfigureInputNodeForRate(medido);
+
+    // MINI-007 — MEDIDO EN DEVICE (Moto G42): por el camino del afinador esto
+    // re-preparaba —`wma_tuner_start` publica el nodo antes de arrancar el stream— y
+    // por el de `wma_input_start` NO, porque ese no lo publica y el motor salia por
+    // "no tengo nodo". En ese telefono no se notaba: Oboe negocia 48000 y coincide
+    // con el provisional. Con una interfaz USB a 44,1 o 96 kHz, el DSP se quedaba
+    // con los coeficientes viejos, que es el defecto que REQ-012 vino a eliminar.
+    switch (e->engine->reconfigureInputNodeForRate(medido)) {
+        case AudioEngine::InputReconfigure::SinNodoPublicado:
+            // 🔴 EL FALLBACK SOLO VALE EN ESTE CASO, y por eso el motor devuelve un
+            // resultado tipado en vez de un bool: un nodo que el motor no publico no
+            // es alcanzable por el callback de salida, asi que alcanza con el quiesce
+            // del propio nodo. Sobre un `false` indistinto esto habria re-preparado
+            // tambien cuando el drenaje fallo — el use-after-free que REQ-012.2
+            // existe para no cometer, por la puerta del arreglo.
+            e->inputNode->reconfigureForRate(medido, std::chrono::milliseconds(250));
+            break;
+        case AudioEngine::InputReconfigure::SinDrenaje:
+            // NO hay atajo. Si no se pudo drenar, no se re-prepara por ninguna via.
+            break;
+        case AudioEngine::InputReconfigure::Reconfigurado:
+        case AudioEngine::InputReconfigure::RateInvalido:
+            break;
+    }
 }
 
 /* ================================================================

@@ -125,6 +125,38 @@ fun TunerControl(modifier: Modifier = Modifier) {
                 style = MaterialTheme.typography.bodySmall,
             )
 
+            // DIAGNOSTICO DE CAPTURA (REQ-012). La linea que decide si este arreglo se
+            // nota en ESTE telefono, y por eso esta primero entre los diagnosticos.
+            //
+            // `captureSampleRate` es MEDIDO, no asumido: **0 significa desconocido**, y
+            // no 48000 — un default plausible no se puede distinguir de una medicion.
+            // Si aca dice 48000, el device negocia justo el rate provisional y REQ-012
+            // es preventivo en este hardware: no hay diferencia que ver, y saberlo vale
+            // mas que buscarla.
+            //
+            // `droppedFrames` y la marca de discontinuidad van al lado porque son el
+            // otro eje: el ring dimensionado al rate real tolera mas atraso del
+            // consumidor, asi que si el rate NO es 48000, este contador es donde se
+            // veria la mejora.
+            Text(
+                text = when (val r = reading) {
+                    null -> "captura · sin datos"
+                    else -> buildString {
+                        append("captura · ")
+                        append(
+                            when (val hz = r.snapshot.captureSampleRate) {
+                                0 -> "rate DESCONOCIDO (nadie lo informo todavia)"
+                                else -> "$hz Hz medidos"
+                            }
+                        )
+                        append(" · perdidos ${r.snapshot.droppedFrames}")
+                        if (r.snapshot.inputDiscontinuity) append(" · COSTURA")
+                    }
+                },
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall,
+            )
+
             // `targets` en orden de CUERDA, no de altura: para guitarra la cuerda 1 es el mi
             // agudo. Ver el invariante de Instrument.kt — no reordenar.
             Row(
