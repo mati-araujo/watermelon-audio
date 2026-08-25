@@ -101,6 +101,13 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         // la lectura salga sin verificar —`domainVerified()` en false— y que
         // quien publica decida; aca no se inventa un veredicto.
         if (mDomainVerified && !p.canMeasureDeviation(coarse)) continue;
+        // REQ-014 S2 (AC-014.3) — y ademas el SIGNO tiene que coincidir con el
+        // control. La guarda de arriba se apoya en la MAGNITUD de la gruesa, y
+        // con una cuerda inarmonica esa magnitud queda corta justo en el borde:
+        // deja pasar un fundamental aliasado que vuelve con el signo dado
+        // vuelta. Publicar eso le dice al musico que afloje lo que hay que
+        // apretar, que es peor que no decir nada. Ver `contradictsControl`.
+        if (mDomainVerified && contradictsControl(p.cents(), coarse)) continue;
         vals[valid] = p.cents();
         sigmas[valid] = sigma;
         ++valid;
