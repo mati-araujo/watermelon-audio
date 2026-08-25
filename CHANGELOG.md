@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.10.0...v2.11.0) (2026-08-25)
+
+
+### Features
+
+* **tuner:** el snapshot no representa el presente (REQ-014) ([#211](https://github.com/mati-araujo/watermelon-audio/issues/211)) ([71bbd28](https://github.com/mati-araujo/watermelon-audio/commit/71bbd285fa35be0c0ff25160b3b6505e70366288))
+
 ## [2.10.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.9.2...v2.10.0) (2026-08-25)
 
 
