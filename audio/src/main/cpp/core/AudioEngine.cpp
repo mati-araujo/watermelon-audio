@@ -2474,6 +2474,38 @@ void AudioEngine::setDualTouchMode(bool enabled) {
 // Saltearse el paso 2 es la versión "obvia" del arreglo y es la que sigue
 // rompiendo: un callback que cargó el puntero antes del store lo sigue usando
 // mientras el thread de control destruye el objeto.
+bool AudioEngine::reconfigureInputNodeForRate(int sampleRate) {
+    // Mismo techo y misma razon que el retiro de `setInputNode()`: un bloque son
+    // ~2,7 ms, y un thread de audio que no cerro uno en cien bloques esta trabado.
+    constexpr auto kTecho = std::chrono::milliseconds(250);
+
+    std::shared_ptr<InputNode> node;
+    {
+        std::lock_guard<std::mutex> lock(mInputNodeMutex);
+        node = mInputNode;
+    }
+    if (!node) return false;
+
+    // 1. Retirar del camino de SALIDA. Desde aca ningun callback nuevo lo toca.
+    mInputNodeRt.store(nullptr, std::memory_order_release);
+
+    // 2. Drenar al que ya estaba adentro.
+    bool hecho = false;
+    if (waitForCallbackDrain(kTecho)) {
+        // 3. Y recien ahora el otro escritor: el thread de captura. Si tampoco se
+        //    puede confirmar ese, `reconfigureForRate` no toca nada y devuelve false.
+        hecho = node->reconfigureForRate(sampleRate, kTecho);
+    } else {
+        LOGE("reconfigureInputNodeForRate: no se pudo drenar el callback de salida en "
+             "%lldms — no se re-prepara", static_cast<long long>(kTecho.count()));
+    }
+
+    // 4. Republicar SIEMPRE, drenado o no. Dejarlo retirado silenciaria la entrada
+    //    para siempre, que es peor que no haber re-preparado.
+    mInputNodeRt.store(node.get(), std::memory_order_release);
+    return hecho;
+}
+
 void AudioEngine::setInputNode(std::shared_ptr<InputNode> inputNode) {
     // 250 ms: un bloque son ~2,7 ms. Si el thread de audio no cerró uno en cien
     // bloques, no está lento — está trabado, y el audio ya se rompió.
