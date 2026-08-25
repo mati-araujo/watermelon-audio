@@ -14,9 +14,9 @@ version=1.3.1
 `audio/build.gradle.kts` reads that value for the Maven artifact version and
 passes it to CMake so `wma_get_version()` reports the same value.
 
-## Cutting a release — two deliberate manual steps
+## Cutting a release — three deliberate manual steps
 
-Since 2026-08-25 **neither step happens on its own.** `Release Please` used to run on
+Since 2026-08-25 **none of these steps happen on their own.** `Release Please` used to run on
 every push to `master`, so any merge — a one-line `fix:` included — opened or updated a
 release PR and dragged a full CI run behind it. That produced noise, not releases: a new
 version for every patch, and release PRs nobody had decided to cut.
@@ -30,9 +30,18 @@ version for every patch, and release PRs nobody had decided to cut.
    - `CHANGELOG.md`
    - `.release-please-manifest.json`
    - `gradle.properties`
-4. Merge the release PR. Release Please creates the GitHub release and the `vX.Y.Z` tag.
-   **It does not publish.**
-5. **Publish as a second explicit gesture**: trigger the `Publish` workflow against that
+4. Merge the release PR.
+5. **Trigger `Release Please` again.** This second dispatch is what creates the GitHub
+   release and the `vX.Y.Z` tag.
+
+   > 🔴 This step is easy to miss and it was missed the first time (2026-08-25, v2.10.0).
+   > While the workflow ran `on: push`, merging the release PR *was itself* a push, so the
+   > same run that opened the PR later tagged it — the tag looked like a consequence of the
+   > merge. With a manual trigger nothing observes that merge, so `gradle.properties` says
+   > the new version and **no tag exists**. Release Please is idempotent: running it against
+   > an already-merged release PR just creates the release and tag.
+
+6. **Publish as a third explicit gesture**: trigger the `Publish` workflow against that
    tag.
 
 ### What the split had to preserve
