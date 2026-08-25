@@ -810,6 +810,41 @@ bool InputNode::reconfigureForRate(int sampleRate, std::chrono::milliseconds tim
     // cosas a la vez haria que un test que se mueve no dijera cual de las dos fue.
     prepare(sampleRate, mMaxBlockSize);
     setCaptureSampleRate(sampleRate);
+
+    // REQ-012 S3 — RECONFIGURAR ES UNA COSTURA, y hay que decirlo.
+    //
+    // Dos cosas rompieron la continuidad de lo que el afinador venia integrando:
+    // los bloques descartados mientras duro el quiesce (los cuenta
+    // `capturedBlocksGated()`), y el cambio de escala temporal. Integrar a traves
+    // de eso y publicar CONVERGIDO es el modo de falla inseguro que REQ-009
+    // persiguio cuatro veces.
+    //
+    // 🔴 LO ESTAMPA EL THREAD DE CONTROL, y eso contradice de entrada la invariante
+    // que documenta `AnalysisRing::reportCaptureDiscontinuity()` —"en cada topologia
+    // hay UN SOLO thread que avisa, y es el que escribe el ring"—. **La restituye el
+    // drenaje**: aca adentro el thread de captura esta afuera y confirmado, y el otro
+    // escritor (`feedExternalInput`, desde el de salida) es precondicion declarada de
+    // este metodo. Con los dos quietos, el control es momentaneamente el unico
+    // escritor, que es exactamente lo que la invariante pide.
+    //
+    // Por eso NO hace falta la bandera pendiente de iOS/USB: alla el que detecta no
+    // puede parar al que escribe. Aca si lo paro.
+    //
+    // Va ADENTRO del scope del quiesce a proposito. Un renglon mas abajo —despues de
+    // que el destructor reabra la compuerta— ya habria otro escritor posible, y el
+    // load-then-store de la costura dejaria de ser seguro.
+    //
+    // Y sin `framesAhead`: no hay cola por delante como la de `CoreAudioBackend`. El
+    // hueco es aca, entre lo que ya entro y lo que viene.
+    //
+    // El RATE no se estampa desde aca. `processCapturedBlock` ya hace
+    // `ring->setCaptureRate(...)` en cada bloque, o sea que el escritor lo publica
+    // junto con las muestras que describe. Hacerlo tambien desde el control seria un
+    // segundo escritor de ese campo — romper la invariante en el mismo gesto de
+    // respetarla, y ademas decir el rate nuevo sobre muestras que todavia son viejas.
+    if (auto* ring = mAnalysisRing.load(std::memory_order_acquire)) {
+        ring->reportCaptureDiscontinuity();
+    }
     return true;
 }
 
