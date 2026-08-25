@@ -2422,8 +2422,23 @@ void AudioEngine::onStreamConfigChanged(const watermelon_audio::StreamInfo& newI
     // partido el de entrada manda, y este `sampleRate` es el de SALIDA.
     if (!mHasInputStreamConfig.load(std::memory_order_acquire)) {
         mCaptureStreamSampleRate.store(sampleRate, std::memory_order_relaxed);
-        std::lock_guard<std::mutex> lock(mInputNodeMutex);
-        if (mInputNode) mInputNode->setCaptureSampleRate(sampleRate);
+        {
+            std::lock_guard<std::mutex> lock(mInputNodeMutex);
+            if (mInputNode) mInputNode->setCaptureSampleRate(sampleRate);
+        }
+        // REQ-012.4 — EL CABLEADO. Publicar el rate arregla la MEDICION de frecuencia
+        // (REQ-001 S1); re-preparar arregla el DSP, que hasta acá se quedaba con los
+        // coeficientes del rate viejo y los rings dimensionados para él.
+        //
+        // Son dos pasos y no uno a propósito: publicar es un store atómico que no
+        // puede fallar, y el afinador lo necesita SIEMPRE. Re-preparar puede no
+        // ocurrir —si no se confirma el drenaje no se toca nada— y sería un error
+        // que un drenaje fallido dejara además el rate sin publicar.
+        //
+        // FUERA del lock: `reconfigureInputNodeForRate` toma `mInputNodeMutex`.
+        // Y es seguro llamarlo desde acá — el contrato de `IAudioBackend` dice de
+        // este hook: "NOT called from RT thread - safe to allocate/log".
+        reconfigureInputNodeForRate(sampleRate);
     }
 
     incrementStateVersion();
@@ -2441,6 +2456,10 @@ void AudioEngine::onInputStreamConfigChanged(const watermelon_audio::StreamInfo&
         std::lock_guard<std::mutex> lock(mInputNodeMutex);
         if (mInputNode) mInputNode->setCaptureSampleRate(newInfo.sampleRate);
     }
+    // REQ-012.4 — el cableado, ver la nota gemela en `onStreamConfigChanged`. Este es
+    // el camino que MANDA: en un backend partido los dos lados negocian rates
+    // distintos y el de entrada es el que describe a la captura.
+    reconfigureInputNodeForRate(newInfo.sampleRate);
     incrementStateVersion();
 }
 
@@ -2525,6 +2544,17 @@ void AudioEngine::setInputNode(std::shared_ptr<InputNode> inputNode) {
         const int known = mCaptureStreamSampleRate.load(std::memory_order_relaxed);
         if (mInputNode && known > 0 && mInputNode->getCaptureSampleRate() <= 0) {
             mInputNode->setCaptureSampleRate(known);
+            // REQ-012.4 — y ademas se lo PREPARA para ese rate, no solo se le avisa.
+            // Un nodo recien construido trae el `prepare()` provisional de
+            // `wmaEnsureInputNode`, asi que sin esto entraria al grafo con el DSP
+            // configurado para un rate que nadie midio.
+            //
+            // Va ANTES de publicar en `mInputNodeRt`: hasta esa linea el nodo no es
+            // alcanzable por el callback de salida, o sea que aca el unico escritor
+            // posible es su propio thread de captura — y a ese lo drena
+            // `reconfigureForRate`. Por eso alcanza el del nodo y no hace falta el
+            // del motor, que ademas volveria a tomar este mismo mutex.
+            mInputNode->reconfigureForRate(known, kRetireTimeout);
         }
         // 1. Publicar. release: el objeto está completamente construido antes.
         mInputNodeRt.store(mInputNode.get(), std::memory_order_release);

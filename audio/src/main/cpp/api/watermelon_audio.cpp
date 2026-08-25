@@ -42,6 +42,34 @@ bool wmaEnsureInputNode(WmaEngine* e) {
         try {
             e->inputNode = std::make_shared<InputNode>();
             if (e->inputNode) {
+                // DEFAULT DE CONSTRUCCION, y se queda como literal A PROPOSITO.
+                //
+                // Aca todavia no hay stream de entrada del que preguntar el rate, y
+                // el nodo necesita ALGUN tamaño para existir: `prepare()` dimensiona
+                // los rings y los buffers de trabajo. El literal es la unica opcion
+                // honesta, igual que en los constructores de `SynthEngineDispatcher`.
+                //
+                // 🔴 SE DEJA VISIBLE PARA `check-literal-rate.py`. Esconderlo detras
+                // de una constante con nombre lo sacaria del lint sin pagar nada, y
+                // el baseline de ese trinquete dice justo lo contrario: "el arreglo
+                // no es cambiar el numero, es que exista un camino que lo corrija".
+                //
+                // REQ-012.4 construyo ESE CAMINO. Hasta entonces su entrada en el
+                // baseline decia "a 96 kHz los rings quedarian cortos"; ahora
+                // `onInputStreamConfigChanged`, `onStreamConfigChanged` y
+                // `setInputNode` re-preparan el nodo con el rate real, rings
+                // incluidos, y la clasificacion cambio en consecuencia.
+                //
+                // 🔴 `currentSampleRate()` NO sirve como reemplazo, y esto se midio
+                // antes de escribirlo: resuelve el rate de SALIDA, y en un backend
+                // partido el de entrada es otro — lo dice el propio motor en
+                // `onInputStreamConfigChanged`. Cambiar un numero no medido por otro
+                // no medido no arregla nada.
+                //
+                // Lo que SI se cuida es que este estado no se confunda con una
+                // medicion: `getCaptureSampleRate()` sigue devolviendo 0 —desconocido—
+                // hasta que alguien informe el rate de verdad. Un default plausible es
+                // peor que la ausencia, porque el consumidor no lo puede distinguir.
                 e->inputNode->prepare(48000, 4096);
             }
             return e->inputNode != nullptr;
