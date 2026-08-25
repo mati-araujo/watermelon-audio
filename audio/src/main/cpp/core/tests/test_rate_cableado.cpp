@@ -24,6 +24,14 @@
 #include "../../nodes/InputNode.h"
 #include "../../backends/IAudioBackend.h"
 
+#include <atomic>
+#include <thread>
+
+// El gancho de WD-1.3: retiene al thread de SALIDA adentro del callback.
+// `isMonitoringEnabled()` es el primer metodo que `onAudioReady` llama sobre el nodo.
+extern std::atomic<bool> gInputNodeHoldInCallback;
+extern std::atomic<bool> gInputNodeIsInCallback;
+
 namespace {
 
 constexpr int kProvisional = 48000;   // con el que nace el nodo
@@ -201,4 +209,98 @@ TEST(RateCableado, UnNodoQueYaSabeSuRateSaleDePublicarsePreparadoParaEl) {
         << "el nodo entro al grafo sabiendo su rate pero preparado para el provisional: "
            "saber y estar preparado no son lo mismo.";
     engine.setInputNode(nullptr);
+}
+
+/**
+ * MINI-007 — el fallback cuando el nodo NO esta publicado en el motor.
+ *
+ * 🔴 ESTE TEST LO PIDIO UNA MEDICION EN DEVICE, no un mutante. En el Moto G42, con el
+ * harness: arrancar la captura por el camino del AFINADOR dejaba DOS `InputNode
+ * prepared` en el log —el provisional y el re-preparado— y por el de `wma_input_start`
+ * dejaba UNO SOLO. La diferencia es que el primero publica el nodo con `setInputNode()`
+ * antes de arrancar el stream y el segundo no, asi que el motor salia por "no tengo
+ * nodo" sin re-preparar nada.
+ *
+ * Alli no se notaba —Oboe negocia 48000 y coincide con el provisional— pero con una
+ * interfaz USB a 44,1 o 96 kHz el DSP se quedaba con los coeficientes viejos.
+ *
+ * Lo que se afirma aca es el contrato que hace legitimo al fallback: el motor tiene que
+ * DISTINGUIR "no hay nodo publicado" de "no se pudo drenar". Sobre un bool indistinto,
+ * el fallback habria re-preparado tambien sin drenaje confirmado.
+ */
+TEST(RateCableado, ElMotorDistingueNoTenerNodoDeNoPoderDrenar) {
+    AudioEngine engine;
+
+    EXPECT_EQ(AudioEngine::InputReconfigure::SinNodoPublicado,
+              engine.reconfigureInputNodeForRate(kRateEntrada))
+        << "sin nodo publicado el motor tiene que decirlo con su propio valor: es el "
+           "UNICO caso en que el llamador puede caer al camino del nodo sin arriesgar "
+           "un resize sin drenar.";
+
+    auto node = nodoProvisional();
+    engine.setInputNode(node);
+    EXPECT_EQ(AudioEngine::InputReconfigure::Reconfigurado,
+              engine.reconfigureInputNodeForRate(kRateEntrada))
+        << "con el nodo publicado tiene que ir por el camino que drena los dos escritores";
+
+    EXPECT_EQ(AudioEngine::InputReconfigure::RateInvalido,
+              engine.reconfigureInputNodeForRate(0))
+        << "un rate invalido no se puede confundir con no tener nodo";
+
+    engine.setInputNode(nullptr);
+}
+
+/**
+ * AC-3 — un drenaje fallido NO se puede confundir con "no hay nodo".
+ *
+ * 🔴 ESTE ES EL TEST QUE PROTEGE EL FALLBACK, y lo pidio un mutante: reportar
+ * `SinNodoPublicado` cuando en realidad el drenaje se agoto **sobrevivia** todo lo
+ * demas. Y no es un matiz de nomenclatura — el helper del C API cae al
+ * `reconfigureForRate()` del nodo justo en `SinNodoPublicado`, asi que ese mutante
+ * convierte el fallback en un atajo que re-prepara **sin haber drenado el camino de
+ * salida**. Es el use-after-free de REQ-012.2, entrando por la puerta del arreglo.
+ *
+ * Se fuerza con el gancho de WD-1.3: un thread de salida retenido adentro del
+ * callback deja `mActiveCallbacks` en 1, asi que `waitForCallbackDrain()` se agota.
+ */
+TEST(RateCableado, UnDrenajeAgotadoNoSeDisfrazaDeNodoAusente) {
+    AudioEngine engine;
+    engine.setOscillatorEnabled(true);
+    auto node = nodoProvisional();
+    engine.setInputNode(node);
+
+    gInputNodeHoldInCallback.store(true, std::memory_order_release);
+    std::atomic<bool> seguir{true};
+    std::thread salida([&] {
+        std::vector<float> in(static_cast<size_t>(kBlockFrames) * 2, 0.25f);
+        std::vector<float> out(static_cast<size_t>(kBlockFrames) * 2, 0.0f);
+        while (seguir.load(std::memory_order_acquire)) {
+            engine.onAudioReady(out.data(), in.data(), kBlockFrames);
+        }
+    });
+
+    // Suelta el gancho pase lo que pase: un thread retenido cuelga el binario entero.
+    struct Soltar {
+        std::atomic<bool>& seguir;
+        std::thread& t;
+        ~Soltar() {
+            gInputNodeHoldInCallback.store(false, std::memory_order_release);
+            seguir.store(false, std::memory_order_release);
+            if (t.joinable()) t.join();
+        }
+    } soltar{seguir, salida};
+
+    ASSERT_TRUE([] {
+        for (int i = 0; i < 20000; ++i) {
+            if (gInputNodeIsInCallback.load(std::memory_order_acquire)) return true;
+            std::this_thread::yield();
+        }
+        return false;
+    }()) << "premisa: el thread de salida nunca quedo retenido adentro del callback";
+
+    EXPECT_EQ(AudioEngine::InputReconfigure::SinDrenaje,
+              engine.reconfigureInputNodeForRate(kRateEntrada))
+        << "con el callback de salida atascado el motor tiene que decir SIN DRENAJE. "
+           "Decir 'no hay nodo' habilitaria el fallback del C API, que re-prepararia "
+           "sin drenar — el use-after-free que REQ-012.2 existe para no cometer.";
 }

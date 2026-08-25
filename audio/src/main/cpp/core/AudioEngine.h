@@ -699,7 +699,29 @@ public:
      *
      * Devuelve si se re-preparo. `false` = no se toco nada, y el rate viejo sigue.
      */
-    bool reconfigureInputNodeForRate(int sampleRate);
+    /**
+     * @brief Por qué terminó `reconfigureInputNodeForRate()` (MINI-007).
+     *
+     * 🔴 EXISTE PARA QUE UN `false` NO SIRVA DE EXCUSA. Antes devolvía `bool`, y ese
+     * bool decía "no se reconfiguró" por DOS razones que no se parecen en nada: no
+     * había nodo publicado, o no se pudo confirmar el drenaje. Un llamador que
+     * quisiera un fallback —re-preparar por el camino del nodo— no tenía forma de
+     * distinguirlas, y hacerlo sobre el `false` indistinto habría re-preparado SIN
+     * DRENAR el camino de salida: el use-after-free que REQ-012.2 existe para no
+     * cometer, reintroducido por la puerta del arreglo.
+     *
+     * Con esto el fallback sólo se puede escribir para `SinNodoPublicado`, que es
+     * justamente el caso en que es seguro — un nodo que el motor no publicó no es
+     * alcanzable por el callback de salida.
+     */
+    enum class InputReconfigure {
+        Reconfigurado,      ///< se drenó y se re-preparó
+        SinNodoPublicado,   ///< el motor no tiene nodo: no hay nada que reconfigurar acá
+        SinDrenaje,         ///< no se confirmó el drenaje — NO se tocó nada, y no hay atajo
+        RateInvalido,       ///< el rate pedido no era utilizable
+    };
+
+    InputReconfigure reconfigureInputNodeForRate(int sampleRate);
 
     /**
      * @brief Establece el sample rate preferido para el output stream

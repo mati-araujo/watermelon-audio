@@ -283,7 +283,10 @@ TEST(InputReconfigure, ElCaminoDeUsbTampocoCorreContraElResize) {
 
     int hechas = 0;
     for (int i = 0; i < 100; ++i) {
-        if (engine.reconfigureInputNodeForRate(i % 2 == 0 ? kRateNuevo : kRateViejo)) ++hechas;
+        if (engine.reconfigureInputNodeForRate(i % 2 == 0 ? kRateNuevo : kRateViejo) ==
+            AudioEngine::InputReconfigure::Reconfigurado) {
+            ++hechas;
+        }
     }
 
     seguir.store(false, std::memory_order_release);
