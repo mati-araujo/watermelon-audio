@@ -313,7 +313,59 @@ void AnalysisThread::drainLoop() {
         // El costo esta acotado y es el correcto: la gruesa mide 0,21 cents peor
         // caso sobre A0-C7, asi que "no tiene nota" significa que tampoco hay
         // señal utilizable para el strobe.
-        const bool haveReading = measuring && mStrobe.hasSignal() &&
+        // --- REQ-014 S1 (AC-014.1) — ¿HAY ALGO QUE AFINAR? -------------------
+        //
+        // 🔴 LA AUSENCIA DE SEÑAL NO ES UNA PREGUNTA DE NIVEL, Y ESTA MEDIDO
+        // QUE NO PUEDE SERLO. Se reprodujo el 2026-08-25 contra este mismo
+        // lazo: para declarar ausencia con el ruido de habitacion que se
+        // reporto desde hardware (rms 0,0070) el piso tendria que estar POR
+        // ENCIMA de 0,0070; para no apagar una cuerda limpia que HOY se mide
+        // bien en una habitacion silenciosa (rms 0,001649, convergida 50 de 50)
+        // tendria que estar POR DEBAJO de 0,0016. Estan 4,4x separados en la
+        // direccion imposible: **ninguna constante cumple las dos cosas**.
+        // Mover `kSilenceFloor` es el arreglo que la medicion refuto.
+        //
+        // La evidencia que si discrimina es la que el VALOR ya usa: la
+        // deteccion gruesa. Medida sobre siete casos, vale 0,98 / 0,90 / 0,72
+        // de claridad midiendo una cuerda y 0,48 para abajo sobre ruido, y da
+        // 0 Hz cuando no hay altura ninguna.
+        //
+        // Y "esta altura puede ser este objetivo" NO ESTRENA UN UMBRAL: es
+        // `FastModeTracker::kLockCents`, que ya existe en el motor para
+        // exactamente esa pregunta y ya trae su justificacion medida. Sin el,
+        // el zumbido de red pasa: da una altura de 50 Hz con claridad 0,994 y
+        // una compuerta que solo preguntara "hay altura" dejaria el
+        // `kStateMeasuring` eterno vivo en la mitad de las habitaciones reales.
+        //
+        // El piso de nivel se queda, pero para lo unico que sabe contestar: el
+        // silencio de verdad, donde no hay ni altura que evaluar.
+        const bool detectorRan = mPreparedRate > 0;
+        bool tunableSourcePresent = detectorRan && mDetector.hasPitch();
+        if (tunableSourcePresent && measuring) {
+            const double devCents =
+                1200.0 * std::log2(mDetector.frequencyHz() / mAppliedTarget);
+            tunableSourcePresent = std::isfinite(devCents) &&
+                                   std::fabs(devCents) < FastModeTracker::kLockCents;
+        }
+        // Sin rate preparado el detector NO CORRIO, y no se puede afirmar
+        // ausencia apoyandose en una evidencia que no se produjo: ahi queda el
+        // nivel solo, que es el comportamiento anterior.
+        const bool nothingToTune =
+            rms < kSilenceFloor || (detectorRan && !tunableSourcePresent);
+
+        // 🔴 AC-014.5 SE CUMPLE POR CONSTRUCCION, Y ESA ES LA PARTE QUE IMPORTA.
+        //
+        // Colgar el valor de la MISMA compuerta que el rotulo es lo que hace
+        // imposible el snapshot que decia "sin señal" trayendo un numero. El
+        // defecto era estructural, no una carrera: `haveReading` no miraba el
+        // `rms` y el `rms` no tocaba el valor, asi que eran dos compuertas con
+        // ventanas distintas —el bloque contra los 4096 frames del estimador—
+        // que se pisaban en la transicion. Medido antes del arreglo: 3 de 40
+        // snapshots, uno de ellos CONVERGED, y 5 corridas de 5.
+        //
+        // Replicar la condicion con un segundo `if` mas abajo volveria a dejar
+        // dos compuertas que pueden divergir: es el mismo error con otra ropa.
+        const bool haveReading = measuring && !nothingToTune && mStrobe.hasSignal() &&
                                  mStrobe.hasMeasurement() && mStrobe.domainVerified();
 
         if (haveReading) {
@@ -334,8 +386,13 @@ void AnalysisThread::drainLoop() {
         // distintos para el usuario: "sin señal" pide revisar el cable, "sin
         // enganche" pide elegir una cuerda o tocar mas limpio, "midiendo" es un
         // spinner y no un error.
+        //
+        // 🔴 Y por eso `kStateMeasuring` NO puede significar tambien "aca no hay
+        // nada": un spinner eterno es la peor de las cuatro respuestas, porque
+        // le promete al usuario que el numero esta por llegar. Esa era la mitad
+        // de AC-014.1 que si reprodujo.
         int state;
-        if (rms < kSilenceFloor) {
+        if (nothingToTune) {
             state = kStateNoSignal;
         } else if (!measuring) {
             state = kStateNoLock;          // hay señal, pero nadie dijo contra que medir
