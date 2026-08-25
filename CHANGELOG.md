@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.9.2...v2.10.0) (2026-08-25)
+
+
+### Features
+
+* **input:** el DSP de entrada sigue al rate real ([#201](https://github.com/mati-araujo/watermelon-audio/issues/201)) ([651dd19](https://github.com/mati-araujo/watermelon-audio/commit/651dd19ad6aed53b14d3c83f35b2ca54cca3306b))
+* **input:** el rate real dispara la reconfiguracion del DSP de entrada ([#205](https://github.com/mati-araujo/watermelon-audio/issues/205)) ([526f3bd](https://github.com/mati-araujo/watermelon-audio/commit/526f3bd1e92106092d93f474332e43fd560a2d8b))
+* **input:** el thread de captura ahora se puede drenar ([#199](https://github.com/mati-araujo/watermelon-audio/issues/199)) ([62d3225](https://github.com/mati-araujo/watermelon-audio/commit/62d32250fef79986545c50f60addd80dc877ade5))
+* **input:** reconfigurar el rate deja de ser un hueco invisible ([#204](https://github.com/mati-araujo/watermelon-audio/issues/204)) ([91254eb](https://github.com/mati-araujo/watermelon-audio/commit/91254ebeccc46883a84fa0bbcedefeac53cfca17))
+
+
+### Bug Fixes
+
+* **input:** el cableado del rate llega aunque el nodo no este publicado ([#207](https://github.com/mati-araujo/watermelon-audio/issues/207)) ([9ab7f8d](https://github.com/mati-araujo/watermelon-audio/commit/9ab7f8d8c9387e08ebf96fa8aae4d2d334d2cdbb))
+* **input:** el stream propio del nodo tambien re-prepara el DSP ([#206](https://github.com/mati-araujo/watermelon-audio/issues/206)) ([c72047f](https://github.com/mati-araujo/watermelon-audio/commit/c72047f164b7f8ec1429c8f4c14e686c850050e3))
+
 ## [2.9.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.9.1...v2.9.2) (2026-08-24)
 
 
