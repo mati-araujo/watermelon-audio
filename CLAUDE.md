@@ -10,7 +10,7 @@ Motor de sintesis en tiempo real con efectos DSP profesionales. C++20 + Oboe + K
 
 ```
 audio/src/
-  commonMain/kotlin/    91 files — pure Kotlin, zero Android deps
+  commonMain/kotlin/    93 files — pure Kotlin, zero Android deps
     api/                AudioEngine interface, IAudioNativeBridge, IEffectManager,
                         IInputBridge + AudioInput (camino de entrada, WA-5.5),
                         factories (AudioEngine, EffectManager, AudioInput,
@@ -25,7 +25,7 @@ audio/src/
     domain/device/      DeviceCapabilities (interfaz de hechos) + Snapshot
     domain/input/       InputSource + InputMetering (snapshot de 7 valores)
   androidMain/kotlin/   21 files — JNI bridge, USB, platform-specific
-    internal/bridge/    AudioNativeBridge (3304 LOC, 303 external funs)
+    internal/bridge/    AudioNativeBridge (3332 LOC, 306 external funs)
     internal/usb/       USB audio driver (DataStore, BroadcastReceiver)
     internal/mode/      ModeTransitionManagerImpl, NativeModeStateWriter
   iosMain/kotlin/       6 files — IosAudioBridge (sobre cinterop), AudioBridgeProvider,
@@ -34,7 +34,7 @@ audio/src/
                         DeviceCapabilitiesProvider (NSProcessInfo)
   commonTest/kotlin/    8 suites  ·  iosTest/kotlin/ 4 suites
   main/cpp/             C++20 engine
-    api/                C API — watermelon_audio.h (269 declaraciones WMA_API, pure C)
+    api/                C API — watermelon_audio.h (272 declaraciones WMA_API, pure C)
     dsp/                watermelon-dsp sub-library (30 files, zero deps)
     effects/            watermelon-effects sub-library (59 files, 23 efectos + EffectRegistry)
     engines/            watermelon-engines sub-library (SynthEngine + 6 engines
@@ -46,13 +46,15 @@ audio/src/
                         ring lock-free + thread de analisis + snapshot atomico,
                         PhaseSlopeEstimator (S2), StrobeTracker (S6),
                         InharmonicityEstimator (S7), FastModeTracker (S5),
-                        IntonationMode (S9)
+                        IntonationMode (S9). REQ-014 le sumo la compuerta de
+                        ausencia de señal, el arbitraje por signo y el contador
+                        acumulado de discontinuidades (snapshot: 17 valores)
     core/               AudioEngine facade + subsistemas (22 files)
     backends/           IAudioBackend, BackendManager, SplitBackend, DriftResampler,
                         OboeBackend + LibusbBackend (Android),
                         CoreAudioBackend.mm (iOS, output + captura full-duplex),
                         PlatformBackends.cpp (unico punto que nombra backends concretos)
-    jni/                5 files — jni_audio_bridge.cpp (292 JNIEXPORT), jni_engine,
+    jni/                5 files — jni_audio_bridge.cpp (295 JNIEXPORT), jni_engine,
                         jni_usb, jni_benchmark, jni_common.h
     platform/           Logger.h/.cpp (logcat / os_log / stderr), Platform.h,
                         PlatformAndroid.cpp, PlatformApple.cpp, PlatformIsa.inc (ISA comun)
@@ -69,11 +71,19 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
                         Compose aborta al arrancar)
 ```
 
-> Los conteos de arriba son orientativos y **driftean**. Re-medidos el 2026-08-20 al cerrar
-> REQ-001 S10: commonMain 83→**91**, androidMain 23→**21**, iosMain 5→**6**,
-> AudioNativeBridge 3229→**3304** LOC y 291→**303** funs, JNIEXPORT 280→**292**,
-> C API 253→**269**, suite de host 883→**1011** tests. El afinador entero (REQ-001)
-> agregó `cpp/analysis/` con 14 archivos. Re-medir es barato, asi que **medir antes de citar**:
+> Los conteos de arriba son orientativos y **driftean**. Re-medidos el 2026-08-25 al cerrar
+> REQ-014: commonMain 91→**93**, androidMain **21**, iosMain **6**,
+> AudioNativeBridge 3304→**3332** LOC y 303→**306** funs, JNIEXPORT 292→**295**,
+> C API 269→**272**, suite de host 1011→**1131** tests. (La tanda anterior, del 2026-08-20 al
+> cerrar REQ-001 S10, venía de commonMain 83, AudioNativeBridge 3229 LOC / 291 funs,
+> JNIEXPORT 280, C API 253 y 883 tests.) El afinador entero (REQ-001) agregó `cpp/analysis/`
+> con 14 archivos.
+>
+> 🔴 **Que este bloque haya quedado stale DOS veces seguidas es el dato, no el accidente.** Un
+> conteo escrito a mano envejece en silencio: nadie lo lee como "esto puede estar viejo", se lee
+> como un hecho. Le pasó también a la spec viva del afinador —decía "snapshot de 14 valores"
+> cuando ya eran 16— y a un KDoc que decía "ocho floats" con quince, contra el que un consumidor
+> real diseñó tres pedidos. Re-medir es barato, asi que **medir antes de citar**:
 >
 > ```bash
 > find audio/src/commonMain -name '*.kt' | wc -l          # archivos por source set
@@ -237,7 +247,7 @@ sesiones enteras. Los marcados **[gate]** ya los corre `scripts/gate.sh`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (1011 tests, googletest).
+bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (1131 tests, googletest).
                                            # ctest corre en PARALELO desde el 18/08: 149,7 s -> 20,4 s.
                                            # `CTEST_JOBS=n` lo baja si hace falta
                                            # Kotlin: 112 iOS sim / 69 JVM
@@ -263,7 +273,7 @@ bash scripts/regen-golden.sh               # WD-2.2: RECAPTURAR los golden de DS
                                            # Si aparece un preset que el cambio no
                                            # tocaba, eso es el hallazgo.
 
-# Los mismos 774 bajo sanitizers. NO son opcionales: el CI tiene un job para
+# Los mismos 1131 bajo sanitizers. NO son opcionales: el CI tiene un job para
 # cada uno y encontraron dos bugs reales que el resto del gate no ve.
 # OJO: `detect_leaks=1` (lo que usa ci.yml) NO existe en macOS y rompe el
 # discovery de gtest — en esta maquina va sin el.
