@@ -789,6 +789,30 @@ void InputNode::feedExternalInput(const float* inputData, int numFrames) {
     processCapturedBlock(mTempBuffer.data(), numFrames, mUsbFeedDrops);
 }
 
+// ========== REQ-012 S2 — RE-PREPARAR AL RATE REAL ==========
+
+bool InputNode::reconfigureForRate(int sampleRate, std::chrono::milliseconds timeout) {
+    if (sampleRate <= 0) {
+        LOGW("reconfigureForRate: rate invalido (%d), no se toca nada", sampleRate);
+        return false;
+    }
+
+    // El drenaje primero. Si no se confirma, NO se re-prepara: `prepare()` hace
+    // `resize()` de los rings y de los buffers de trabajo, y correrlo con el thread
+    // de captura adentro es el use-after-free que este REQ existe para no cometer.
+    CaptureQuiesce quiesce(*this, timeout);
+    if (!quiesce.drained()) {
+        LOGW("reconfigureForRate: sin drenaje confirmado, el nodo queda como estaba");
+        return false;
+    }
+
+    // El maxBlockSize se PRESERVA. Este metodo es sobre el rate; cambiar las dos
+    // cosas a la vez haria que un test que se mueve no dijera cual de las dos fue.
+    prepare(sampleRate, mMaxBlockSize);
+    setCaptureSampleRate(sampleRate);
+    return true;
+}
+
 // ========== REQ-012 S1 — EL QUIESCE DEL THREAD DE CAPTURA ==========
 
 InputNode::CaptureQuiesce::CaptureQuiesce(InputNode& node, std::chrono::milliseconds timeout)

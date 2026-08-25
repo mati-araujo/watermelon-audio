@@ -683,6 +683,25 @@ public:
     void setInputNode(std::shared_ptr<InputNode> inputNode);
 
     /**
+     * @brief Re-prepara el InputNode para `sampleRate`, drenando LOS DOS escritores RT.
+     *
+     * `InputNode::reconfigureForRate()` sabe drenar el thread de CAPTURA y nada mas.
+     * Pero el nodo tiene un segundo escritor: `feedExternalInput()` —USB, vocoder y
+     * MIX— entra al mismo `processCapturedBlock()` desde `onAudioReady`, o sea desde
+     * el thread de SALIDA. Llamar al del nodo a secas deja ese camino corriendo
+     * contra el `resize()` de `prepare()`: el mismo use-after-free, por la puerta
+     * menos transitada.
+     *
+     * Aca se cierran los dos, y el de salida NO necesita una compuerta nueva: alcanza
+     * con el protocolo que `setInputNode()` ya usa para retirar un nodo — publicar
+     * `nullptr` en `mInputNodeRt`, drenar los callbacks, y republicar. Un callback que
+     * ya leyo el puntero se termina; uno nuevo ve `nullptr` y no toca el nodo.
+     *
+     * Devuelve si se re-preparo. `false` = no se toco nada, y el rate viejo sigue.
+     */
+    bool reconfigureInputNodeForRate(int sampleRate);
+
+    /**
      * @brief Establece el sample rate preferido para el output stream
      * @param sampleRate Sample rate en Hz (0 para auto-selección)
      *
