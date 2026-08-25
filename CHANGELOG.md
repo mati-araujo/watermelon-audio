@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.9.2...v2.10.0) (2026-08-25)
+
+
+### Features
+
+* **input:** el thread de captura ahora se puede drenar ([#199](https://github.com/mati-araujo/watermelon-audio/issues/199)) ([62d3225](https://github.com/mati-araujo/watermelon-audio/commit/62d32250fef79986545c50f60addd80dc877ade5))
+
 ## [2.9.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.9.1...v2.9.2) (2026-08-24)
 
 
