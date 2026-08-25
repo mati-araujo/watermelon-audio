@@ -203,6 +203,25 @@ void AnalysisThread::drainLoop() {
             // consumidor tampoco los distingue (la marca es una sola). Tener dos
             // caminos para la misma consecuencia sería superficie sin uso, y dos
             // sitios donde equivocarse.
+            // REQ-014 S3 (AC-014.4) — el contador sube por FLANCO, no por tick.
+            //
+            // La marca del estimador ya distingue "sigo roto" de "me rompi
+            // recien": se levanta con el hueco y no vuelve a bajar hasta que la
+            // integracion produce una medicion propia. Preguntarle a ella si ya
+            // estaba arriba es lo que convierte un desborde SOSTENIDO —que
+            // dispara este bloque varias vueltas seguidas— en UN evento.
+            //
+            // Contar por tick daria un numero que no significa nada: el
+            // consumidor no podria distinguir "se rompio una vez" de "el lazo
+            // dio muchas vueltas mientras estaba roto", que es la unica pregunta
+            // que este contador existe para contestar.
+            //
+            // Va ACA, en el sitio de DETECCION, y no muestreando la marca al
+            // publicar: sobre una costura el lazo hace `continue` antes de
+            // publicar (mas abajo), asi que un flanco podria quedar sin publicar
+            // y el muestreo al final lo perderia — el mismo modo de falla que
+            // este contador viene a cerrar.
+            if (!mStrobe.sawInputDiscontinuity()) ++mDiscontinuityCount;
             mStrobe.noteInputDiscontinuity();
         }
 
@@ -441,6 +460,10 @@ void AnalysisThread::drainLoop() {
         // baja sola cuando la integracion vuelve a tener una medicion propia.
         values[kSnapInputDiscontinuity] =
             mStrobe.sawInputDiscontinuity() ? 1.0f : 0.0f;
+
+        // REQ-014 S3 (AC-014.4) — la memoria de lo que ya paso. Ver el KDoc de
+        // `kSnapDiscontinuityCount`: el flag de arriba se puede PERDER, este no.
+        values[kSnapDiscontinuityCount] = static_cast<float>(mDiscontinuityCount);
 
         mSnapshot.publish(values);
     }

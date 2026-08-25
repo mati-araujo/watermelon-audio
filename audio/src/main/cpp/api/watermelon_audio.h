@@ -715,7 +715,7 @@ WMA_API void wma_input_release(WmaEngine* engine);
  * knows and ignores the tail. Reordering or repurposing an existing index would
  * silently change what an already-shipped consumer displays.
  */
-#define WMA_TUNER_SNAPSHOT_VALUES 16
+#define WMA_TUNER_SNAPSHOT_VALUES 17
 
 /**
  * Start the analysis seam: the capture thread begins feeding a lock-free ring,
@@ -942,6 +942,32 @@ WMA_API float wma_intonation_difference_cents(const WmaEngine* engine);
  *                              first overrun; this one describes the LIVE
  *                              integration and clears itself once the estimator
  *                              has a measurement of its own again.
+ *
+ *                         [16] how many times the input has LOST CONTINUITY since
+ *                              the analysis started. Cumulative and monotonic
+ *                              (REQ-014).
+ *
+ *                              [15] and this one are not redundant, and the
+ *                              difference is the reason this exists. [15] can be
+ *                              MISSED: it clears itself, so seeing it depends on
+ *                              how many times the consumer happened to look
+ *                              between one publish and the next. On a loaded
+ *                              machine that is two or three, which made a test
+ *                              that watched for it flaky enough to take down two
+ *                              release CIs.
+ *
+ *                              With this, "did anything break since I last
+ *                              looked?" is answered by comparing against the
+ *                              previous value — WITHOUT having been looking at
+ *                              the moment it happened.
+ *
+ *                              Do NOT gate on it. Being cumulative, a guard built
+ *                              on it latches and never declares converged again,
+ *                              which is exactly what [3] warns about. [15] is the
+ *                              one that clears.
+ *
+ *                              Counts EVENTS, not ticks: a sustained overrun adds
+ *                              one.
  *
  *                         B comes free with REQ-001 S6: four tracked partials
  *                         that disagree ARE the string's stiffness, so nothing

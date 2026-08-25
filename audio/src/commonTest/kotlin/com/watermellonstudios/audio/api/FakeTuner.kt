@@ -140,6 +140,10 @@ class FakeTuner(
             fastModeState: Int = 1,
             usableRangeCents: Float? = null,
             inputDiscontinuity: Boolean = false,
+            // REQ-014 S3. El default es 0 porque un fake sin cortes es lo
+            // normal, pero el parametro EXISTE para que un test que necesite
+            // "ya hubo un corte" lo pueda decir en vez de no poder expresarlo.
+            discontinuityCount: Long = 0L,
         ) = TunerSnapshot(
             captureSampleRate = captureSampleRate,
             levelRms = levelRms,
@@ -156,6 +160,7 @@ class FakeTuner(
             fastModeState = fastModeState,
             usableRangeCents = usableRangeCents,
             inputDiscontinuity = inputDiscontinuity,
+            discontinuityCount = discontinuityCount,
         )
 
         /** Un snapshot con medición, para los tests que necesitan un número. */
@@ -170,6 +175,10 @@ class FakeTuner(
             fastModeState: Int = 2,
             usableRangeCents: Float? = 21.0f,
             inputDiscontinuity: Boolean = false,
+            // REQ-014 S3. El default es 0 porque un fake sin cortes es lo
+            // normal, pero el parametro EXISTE para que un test que necesite
+            // "ya hubo un corte" lo pueda decir en vez de no poder expresarlo.
+            discontinuityCount: Long = 0L,
         ) = TunerSnapshot(
             captureSampleRate = 48000,
             levelRms = 0.2f,
@@ -186,6 +195,7 @@ class FakeTuner(
             fastModeState = fastModeState,
             usableRangeCents = usableRangeCents,
             inputDiscontinuity = inputDiscontinuity,
+            discontinuityCount = discontinuityCount,
         )
     }
 }

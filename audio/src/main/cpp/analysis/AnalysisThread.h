@@ -197,6 +197,13 @@ public:
 
 private:
     /**
+     * Cuantas veces la entrada perdio continuidad. Lo escribe y lo lee SOLO el
+     * thread de analisis, asi que no necesita ser atomico: cruza la frontera
+     * por el snapshot, que es el seam que S1 construyo justo para esto.
+     */
+    uint64_t mDiscontinuityCount{0};
+
+    /**
      * El lazo. Se llama `drainLoop` y NO `run`, y el nombre es load-bearing:
      * `check-rt-safety.py` sigue solo las llamadas que resuelven a UNA
      * definicion, asi que un segundo `::run` en el arbol vuelve AMBIGUA la

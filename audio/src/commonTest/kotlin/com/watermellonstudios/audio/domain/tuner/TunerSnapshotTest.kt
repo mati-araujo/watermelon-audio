@@ -45,9 +45,11 @@ class TunerSnapshotTest {
         fastModeState: Float = 2f,
         usableRangeCents: Float = 118.9f,
         inputDiscontinuity: Float = 0f,
+        discontinuityCount: Float = 4f,
     ) = floatArrayOf(rate, rms, frames, dropped, state, cents, phase, uncertainty,
                      detectedHz, clarity, inharmonicityB, inharmonicityMeasured,
-                     lockedString, fastModeState, usableRangeCents, inputDiscontinuity)
+                     lockedString, fastModeState, usableRangeCents, inputDiscontinuity,
+                     discontinuityCount)
 
     @Test
     fun elOrdenDeLosValoresEsElDelContratoNativo() {
@@ -146,7 +148,7 @@ class TunerSnapshotTest {
         // Si esto cambia sin que cambie WMA_TUNER_SNAPSHOT_VALUES, el consumidor
         // pasa un array de otro tamaño que el que la C API va a llenar. Del lado
         // de C++ lo para un static_assert; de este lado, esta línea.
-        assertEquals(16, TunerSnapshot.VALUE_COUNT)
+        assertEquals(17, TunerSnapshot.VALUE_COUNT)
         assertEquals(TunerSnapshot.VALUE_COUNT, nativeValues().size)
     }
 
@@ -162,6 +164,29 @@ class TunerSnapshotTest {
      * basura con cara de medición, que es justo lo que este REQ existe para
      * sacar del producto.
      */
+    /**
+     * REQ-014 S3 — el contador acumulado llega entero, y NO se confunde con la
+     * bandera viva.
+     *
+     * Los dos campos describen la misma familia de evento y significan cosas
+     * distintas: la bandera es la lectura de AHORA y se baja sola; el contador
+     * es la MEMORIA y no baja nunca. Un consumidor que los mezcle o muestra un
+     * aviso que no se va, o no se entera nunca de un corte.
+     */
+    @Test
+    fun elContadorAcumuladoYLaBanderaVivaSonCamposDistintos() {
+        val snap = assertNotNull(TunerSnapshot.fromNative(
+            nativeValues(inputDiscontinuity = 0f, discontinuityCount = 4f)))
+        assertEquals(4L, snap.discontinuityCount)
+        assertEquals(false, snap.inputDiscontinuity)
+
+        // Y al revés: rota AHORA, y es el primer corte de la sesión.
+        val rota = assertNotNull(TunerSnapshot.fromNative(
+            nativeValues(inputDiscontinuity = 1f, discontinuityCount = 1f)))
+        assertEquals(1L, rota.discontinuityCount)
+        assertEquals(true, rota.inputDiscontinuity)
+    }
+
     @Test
     fun unMotorMasNuevoQueEstaLibreriaSigueSiendoLegible() {
         val delFuturo = nativeValues() + floatArrayOf(7f, 8f, 9f)
