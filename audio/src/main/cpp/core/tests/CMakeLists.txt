@@ -132,6 +132,7 @@ add_executable(core_tests
     test_capture_discontinuity.cpp
     test_capture_quiesce.cpp
     test_input_reconfigure.cpp
+    test_reconfigure_seam.cpp
     test_capture_gap_mailbox.cpp
     test_capture_sample_rate.cpp
     test_offline_render.cpp
