@@ -389,6 +389,37 @@ public:
     uint64_t capturedBlocksGated() const { return mCaptureGatedBlocks.get(); }
 
     /**
+     * @brief Re-prepara el DSP de entrada para `sampleRate`. Thread de CONTROL.
+     *
+     * Es lo que faltaba para que el camino de captura siga al rate real en vez de
+     * quedarse con el que tenia cuando se construyo el nodo. Devuelve si se
+     * re-preparo: **`false` significa que NO se toco nada** porque no se pudo
+     * confirmar el drenaje, y el llamador tiene que poder distinguirlo.
+     *
+     * DELEGA EN `prepare()`, y esa es una decision de diseño, no una comodidad.
+     * La alternativa —una lista propia de "lo que hay que re-configurar"— es
+     * exactamente la que REQ-006.2 encontro drifteada un piso mas arriba:
+     * `onStreamConfigChanged` mantenia tres entradas contra las doce de
+     * `configureComponentsWithSampleRate`, y el sintoma fue un dispatcher que no
+     * se enteraba de los cambios de rate. Delegando **no hay dos listas que
+     * puedan diferir**, que es mas fuerte que un trinquete que las compare.
+     *
+     * 🔴 **DRENA UN SOLO ESCRITOR.** Ver el KDoc de `CaptureQuiesce`: el otro es
+     * `feedExternalInput()`, que corre en el thread de SALIDA. Quien llame a esto
+     * con el nodo publicado en `AudioEngine::mInputNodeRt` tiene que haberlo
+     * retirado primero — publicar `nullptr`, drenar los callbacks, re-preparar y
+     * republicar— o el `resize()` corre contra el camino de USB.
+     *
+     * TIRA EL AUDIO EN VUELO. `prepare()` hace `resize()` de los dos rings, asi que
+     * lo que todavia no se consumio se descarta. Los coeficientes del DSP se
+     * recalculan para el rate nuevo, pero su ESTADO —el envolvente del medidor, la
+     * apertura del gate— NO se reinicia: `prepare()` nunca lo hizo. Eso es una
+     * DISCONTINUIDAD para el que este integrando: REQ-012.3 la convierte en la
+     * costura que el afinador necesita para no integrar a traves del hueco.
+     */
+    bool reconfigureForRate(int sampleRate, std::chrono::milliseconds timeout);
+
+    /**
      * @brief El quiesce del thread de CAPTURA. RAII: cierra, drena, y reabre al salir.
      *
      * POR QUE NO ALCANZA EL QUE YA HAY. `AudioEngine::spinForCallbackDrain()`
@@ -412,6 +443,15 @@ public:
      * veria cero, saldria a re-preparar, y el `resize()` correria bajo los pies
      * de ese bloque. Contarse primero convierte "decidi entrar" en algo que el
      * otro thread puede ver.
+     *
+     * 🔴 EL ORDEN ES ARGUMENTADO, NO PROBADO POR UN TEST, y conviene saberlo antes
+     * de tocarlo. REQ-012.2 persiguio el mutante que lo invierte —consultar antes de
+     * contarse— con el consumidor real y bajo ASan: 200 reconfiguraciones contra 1
+     * thread, 4000 contra 3, y con pausas para que la captura entrara de verdad. **No
+     * murio en ninguna.** La ventana son unas pocas instrucciones y para que haya UAF
+     * el control tiene que completar el quiesce entero y el `resize()` adentro de
+     * ellas. Asi que este orden lo sostiene el razonamiento de arriba y nada mas: si
+     * alguien lo invierte, la suite va a quedar verde.
      *
      * COSTO EN EL CAMINO NORMAL: un `fetch_add` y una carga relajada por bloque.
      * Es el segundo thread RT y valen las mismas reglas que el de salida — nada
