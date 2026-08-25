@@ -165,3 +165,40 @@ TEST(RateCableado, UnNodoReciennCreadoNoAfirmaUnRateMedido) {
     EXPECT_EQ(0, node->getCaptureSampleRate())
         << "el nodo dice saber a que rate corre la captura sin que nadie se lo haya dicho.";
 }
+
+/**
+ * EL CAMINO QUE FALTABA: un nodo que YA SABE su rate igual se re-prepara al entrar.
+ *
+ * 🔴 ESTE TEST LO PIDIO EL INSTRUMENTO DEL CRITERIO DE MUERTE, no un mutante. Al
+ * listar los sitios que publican el rate de captura y mirar cuales re-preparan,
+ * quedaba uno sin cablear: `InputNode::startInputStream()`, que abre un stream de
+ * Oboe PROPIO del nodo —no pasa por `IAudioBackend`— asi que
+ * `onInputStreamConfigChanged` nunca se dispara para el. Es el camino del afinador
+ * en Android, o sea el caso que motiva el REQ entero.
+ *
+ * En host no hay Oboe y ese metodo devuelve false antes de tocar nada, asi que lo
+ * que se puede afirmar aca es la mitad que SI es alcanzable: un nodo que llega
+ * sabiendo su rate —como queda tras arrancar ese stream— tiene que salir PREPARADO
+ * para el, no solo enterado.
+ *
+ * La guarda vieja de `setInputNode` re-preparaba solo si el rate era DESCONOCIDO, asi
+ * que este caso caia justo afuera: saber el rate y estar preparado para el son cosas
+ * distintas.
+ */
+TEST(RateCableado, UnNodoQueYaSabeSuRateSaleDePublicarsePreparadoParaEl) {
+    AudioEngine engine;
+
+    auto node = nodoProvisional();
+    node->setCaptureSampleRate(kRateEntrada);   // como lo deja `startInputStream()`
+    ASSERT_EQ(kProvisional, 48000) << "premisa: el nodo nacio con el rate provisional";
+
+    engine.setInputNode(node);
+
+    InputNode referencia;
+    referencia.prepare(kRateEntrada, kBlockFrames);
+
+    EXPECT_EQ(capacidadObservada(referencia), capacidadObservada(*node))
+        << "el nodo entro al grafo sabiendo su rate pero preparado para el provisional: "
+           "saber y estar preparado no son lo mismo.";
+    engine.setInputNode(nullptr);
+}
