@@ -33,6 +33,9 @@ add_executable(analysis_tests
     test_accuracy_contract.cpp
     test_corpus_gate.cpp
     test_non_contiguous.cpp
+    test_silence_gate.cpp
+    test_sign_outside_range.cpp
+    test_discontinuity_count.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp

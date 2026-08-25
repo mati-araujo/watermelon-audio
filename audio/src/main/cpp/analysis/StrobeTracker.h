@@ -50,6 +50,7 @@
 
 #include "PhaseSlopeEstimator.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -195,6 +196,55 @@ public:
      * verificar, que es por donde reentra el defecto entero.
      */
     bool domainVerified() const noexcept { return mDomainVerified; }
+
+    /**
+     * `true` si la lectura de un parcial CONTRADICE EN SIGNO al control externo.
+     *
+     * 🔴 ES LA FIRMA DEL ALIASING, Y ES LO QUE `canMeasureDeviation` NO VE.
+     * Esa guarda compara la desviacion GRUESA contra el rango del parcial, o
+     * sea que usa la gruesa como sustituto de la desviacion verdadera. Con una
+     * cuerda INARMONICA —que es lo que es una cuerda real— ese sustituto queda
+     * OPTIMISTA justo en el borde: medido a 48 kHz sobre E4 con B = 1e-3, con
+     * la cuerda a −35,0 cents la gruesa informa −28,56 y, como |−28,56| < 30,50,
+     * la guarda declara "en dominio". Pero el fundamental si esta afuera de su
+     * rango de captura: aliasa y vuelve como **+27,53** — el numero del reporte
+     * de campo, que decia +27,0 con la cuerda a −35.
+     *
+     * La MAGNITUD de la gruesa deja de ser confiable ahi; **su SIGNO no**. Por
+     * eso el arbitraje es por signo, que ademas es literalmente lo que pide
+     * AC-014.3. Y va POR PARCIAL: asi el que aliaso se cae solo y los que
+     * todavia miden bien siguen entrando en la combinacion.
+     *
+     * 🔴 NO TIENE ZONA MUERTA, Y ESO SE DECIDIO MIDIENDO, NO OMITIENDO. La
+     * primera version no arbitraba cuando alguna de las dos magnitudes caia por
+     * debajo de 1 cent, con el argumento de que cerca de "afinado" el signo es
+     * ruido. El argumento es cierto —a 0,00 cents exactos con ruido el control
+     * informa −0,0121 y la lectura fina +0,0001, o sea signos opuestos— pero la
+     * proteccion **no protegia nada**: comparando los valores publicados en 42
+     * escenarios de cuasi-afinacion, con y sin la zona muerta, salieron
+     * IDENTICOS. Cuando el fundamental se cae por un empate tecnico, los otros
+     * parciales sostienen la lectura igual.
+     *
+     * Dos mutantes que le sacaban una mitad sobrevivian, y el que la sacaba
+     * entera tambien. Una defensa que ningun mutante puede matar y cuya
+     * remocion no cambia un solo numero no es una defensa: es una linea que la
+     * proxima persona va a creer load-bearing. Se fue.
+     *
+     * Lo que queda declarado como riesgo residual, sin dueño: si ALGUNA vez los
+     * cuatro parciales discrepan a la vez con un control cerca de cero, la
+     * lectura se apagaria en "afinado". No se observo en 42 escenarios.
+     */
+    static bool contradictsControl(double partialCents, double coarse) noexcept {
+        // SIN CONTROL NO SE ARBITRA, y esto se chequea ACA y no solo en el
+        // llamador. Con `coarse` NaN la comparacion de abajo no falla: `NaN > 0`
+        // es false, asi que la funcion descartaria en silencio todo parcial de
+        // lectura positiva — un veredicto inventado a partir de la ausencia de
+        // control, que es el auto-engaño exacto que documenta
+        // `setCoarseFrequencyHz`. Una funcion que puede recibir NaN se defiende
+        // sola en vez de confiar en que el llamador se acuerde.
+        if (!std::isfinite(coarse)) return false;
+        return (partialCents > 0.0) != (coarse > 0.0);
+    }
 
     /// Cuantos parciales entraron en la ultima combinacion. 0 = ninguno pudo
     /// medir esta desviacion.

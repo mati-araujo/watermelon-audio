@@ -159,7 +159,45 @@ enum SnapshotValue : int {
      */
     kSnapInputDiscontinuity = 15,
 
-    kSnapshotValueCount    = 16,
+    /**
+     * REQ-014 S3 (AC-014.4) — CUANTAS veces la entrada perdio continuidad desde
+     * que arranco el analisis. Acumulado y monotono.
+     *
+     * 🔴 ES OBSERVACION, NO GUARDA, Y LA DISTINCION ES LA RAZON DE QUE EXISTA.
+     * `kSnapInputDiscontinuity` (indice 15) sigue siendo el flag VIVO: dice si
+     * la lectura que estas mirando arrastra un hueco, sube con el hueco y BAJA
+     * SOLA cuando la integracion se recupera. Esa es la semantica que AC-009.3
+     * contrato y la que usa la guarda, y no cambia.
+     *
+     * El problema es que un flag que sube y baja solo **se puede perder**: verlo
+     * depende de cuantas veces el consumidor alcanzo a mirar entre una
+     * publicacion y la siguiente. Con la maquina cargada son 2 o 3, asi que
+     * verlo es un volado — y eso tumbo dos CI de release. MINI-006 intento
+     * arreglarlo desde el test tres veces y las tres midieron PEOR: la premisa
+     * sobre alimentacion truncada quedo refutada (trunc=0 en 50 corridas),
+     * esperar por condicion es imposible (al terminar la alimentacion el ring se
+     * vacia, asi que esperar no produce publicaciones nuevas), y el umbral por
+     * conteo no discrimina (la corrida sana minima dio 3 y la rota 2).
+     *
+     * Con esto, la pregunta *"¿paso algo desde la ultima vez que mire?"* se
+     * contesta comparando contra el valor anterior, **sin haber estado mirando
+     * en el instante**.
+     *
+     * 🔴 NO SE USA COMO GUARDA. Es acumulado y monotono, o sea que una guarda
+     * apoyada en el se traba y no vuelve a declarar convergido nunca — que es
+     * literalmente el defecto que documenta `kSnapDroppedFrames` y que AC-009.2
+     * prohibe. Para eso esta el indice 15, que baja solo.
+     *
+     * Cuenta EVENTOS, no ticks: un desborde sostenido suma **uno**. Y 0 y no
+     * NaN, igual que el indice 15: la pregunta tiene respuesta siempre.
+     *
+     * SE AGREGA AL FINAL, y el indice de todo lo anterior no se mueve: el
+     * contrato del snapshot es append-only, que es lo que protege al codigo del
+     * consumidor de una recompilacion sorpresa.
+     */
+    kSnapDiscontinuityCount = 16,
+
+    kSnapshotValueCount    = 17,
 };
 
 enum SnapshotState : int {

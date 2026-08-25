@@ -51,11 +51,20 @@ class TunerImplTest {
         configuration: TuningConfiguration = guitar,
     ) = TunerImpl(bridge, configuration)
 
-    /** Los 16 floats en el orden que documenta `wma_tuner_get_snapshot`. */
+    /**
+     * Los [com.watermellonstudios.audio.domain.tuner.TunerSnapshot.VALUE_COUNT]
+     * floats en el orden que documenta `wma_tuner_get_snapshot`.
+     *
+     * 🔴 El conteo NO se escribe con un literal en el KDoc. Decía "los 16" y al
+     * pasar a 17 quedó mintiendo — y el array de abajo, que sí se arma a mano,
+     * hizo fallar seis tests EN EJECUCIÓN cuando el contrato creció. Compilar no
+     * alcanza cuando el test AFIRMA el contrato.
+     */
     private fun nativeSnapshot(
         cents: Float = -5f,
         state: Float = 3f,
         inputDiscontinuity: Float = 0f,
+        discontinuityCount: Float = 0f,
     ): FloatArray = floatArrayOf(
         48000f, 0.2f, 48000f, 0f, state,
         cents, 0.3f, 0.01f,
@@ -63,6 +72,7 @@ class TunerImplTest {
         0f, 0f,
         0f, 2f, 21f,
         inputDiscontinuity,
+        discontinuityCount,
     )
 
     // =======================================================================

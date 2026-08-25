@@ -399,6 +399,7 @@ class TunerContractTest {
         cents: Float,
         state: Float,
         inputDiscontinuity: Float = 0f,
+        discontinuityCount: Float = 0f,
     ): FloatArray = floatArrayOf(
         48000f, 0.2f, 48000f, 0f, state,
         cents, 0.3f, 0.01f,
@@ -406,6 +407,7 @@ class TunerContractTest {
         Float.NaN, 0f,
         0f, 2f, 21f,
         inputDiscontinuity,
+        discontinuityCount,
     )
 
     private fun nativoSinPitch(): FloatArray =

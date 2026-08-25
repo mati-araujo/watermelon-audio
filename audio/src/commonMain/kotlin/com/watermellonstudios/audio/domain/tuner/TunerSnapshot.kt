@@ -111,6 +111,29 @@ data class TunerSnapshot(
      * objetivo y sin señal, donde la respuesta es `false`.
      */
     val inputDiscontinuity: Boolean,
+
+    /**
+     * Cuántas veces la entrada perdió continuidad desde que arrancó el análisis.
+     * Acumulado y monótono (REQ-014).
+     *
+     * 🔴 **No es redundante con [inputDiscontinuity], y la diferencia es la razón
+     * de que exista.** Esa bandera **se puede perder**: se baja sola, así que
+     * verla depende de cuántas veces la app alcanzó a mirar entre una publicación
+     * y la siguiente. Con el teléfono cargado son dos o tres, o sea que verla es
+     * un volado.
+     *
+     * Con esto, *"¿pasó algo desde la última vez que miré?"* se contesta
+     * comparando contra el valor anterior, **sin haber estado mirando en el
+     * instante**. Es lo que le permite a una app decir "la entrada se cortó
+     * mientras estabas afinando" en vez de no enterarse nunca.
+     *
+     * **No lo uses como condición para ocultar la aguja.** Es monótono: una
+     * guarda apoyada acá se traba y no vuelve a mostrar nada. Para eso está
+     * [inputDiscontinuity], que baja sola.
+     *
+     * Cuenta **eventos**, no ticks: un desborde sostenido suma uno.
+     */
+    val discontinuityCount: Long,
 ) {
     companion object {
         /**
@@ -121,7 +144,7 @@ data class TunerSnapshot(
          * librería manda un array más largo y se lee el prefijo conocido, que es
          * exactamente la compatibilidad que el orden append-only compra.
          */
-        const val VALUE_COUNT: Int = 16
+        const val VALUE_COUNT: Int = 17
 
         /**
          * Arma el snapshot desde los floats nativos, en el orden que documenta
@@ -153,6 +176,7 @@ data class TunerSnapshot(
                 // defensa que el índice 11 — un float que viaja por la frontera
                 // no se compara por igualdad exacta.
                 inputDiscontinuity = values[15] >= 0.5f,
+                discontinuityCount = values[16].toLong(),
             )
         }
     }
