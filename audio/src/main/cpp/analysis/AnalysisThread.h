@@ -195,6 +195,27 @@ public:
      */
     static constexpr double kConvergedUncertaintyCents = 0.1;
 
+    /// Que paso en una vuelta de `drainOnce()`. `kRingEmpty` es la unica que el
+    /// llamador tiene que tratar distinto: el thread duerme, el puerto termina.
+    enum class DrainOutcome { kPublished, kSkipped, kRingEmpty };
+
+    /**
+     * @brief UNA vuelta del analisis, sin nada del thread adentro (REQ-015 S1).
+     *
+     * Existe para que el puerto de analisis offline empuje el MISMO analisis en
+     * vez de reimplementarlo. Dos definiciones del analisis serian dos motores,
+     * y el verde de uno no diria nada del otro — que es exactamente lo que
+     * AC-015.3 existe para impedir.
+     *
+     * 🔴 UN SOLO CONDUCTOR A LA VEZ. O se arranca el thread con `start()`, o se
+     * llama a esto desde afuera: **nunca las dos cosas**. Todo el estado que
+     * toca (`mStrobe`, `mDetector`, `mFastMode`, los contadores) es no-atomico
+     * a proposito porque hoy lo toca UN solo thread; dos conductores lo
+     * convierten en una carrera. `isRunning()` dice si el thread ya es el
+     * conductor.
+     */
+    DrainOutcome drainOnce();
+
 private:
     /**
      * Cuantas veces la entrada perdio continuidad. Lo escribe y lo lee SOLO el
