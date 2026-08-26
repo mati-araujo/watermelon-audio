@@ -1093,47 +1093,67 @@ TEST(AnalysisThreadReq009, ABurstOverrunIsNeverPublishedAsConverged) {
            "vacio.";
     const double droppedBefore = before[kSnapDroppedFrames];
     ASSERT_EQ(droppedBefore, 0.0) << "el tramo limpio no puede haber pisado nada";
+    // REQ-014: la referencia contra la que se espera el hueco. Es monotona, asi
+    // que la espera de abajo es una condicion y no un intento de atrapar algo.
+    const double countBefore = before[kSnapDiscontinuityCount];
 
     // 2 · vaciar el ring: el lector queda en la siesta, no adentro de read().
     ASSERT_TRUE(waitFor([&] { return ring.availableFrames() == 0; }))
         << "el analisis no llego a drenar el ring: la rafaga no caeria entre dos vueltas";
 
-    // 3 · UNA rafaga de mas de un ring entero, sin esperar lugar.
-    const int burst = 2 * AnalysisRing::kCapacityFrames / 1024;
-    for (int i = 0; i < burst; ++i) {
+    // 3 · rafaga sin esperar lugar, HASTA QUE EL RING PISE DE VERDAD.
+    //
+    // 🔴 NO es un numero fijo de bloques, y la diferencia esta medida. Escribir
+    // "dos rings enteros" parece de sobra y no lo es: el lector drena EN
+    // PARALELO, asi que a veces se lleva lo suficiente como para que no se pise
+    // nada — 2 de 60 corridas en reposo, y ahi el test caia por su premisa.
+    // Escribir hasta que el contador del ring se mueva es una CONDICION sobre el
+    // mecanismo, no una apuesta sobre quien corre mas rapido.
+    const uint32_t droppedAtStart = ring.droppedFrames();
+    int burst = 0;
+    const auto burstDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (ring.droppedFrames() == droppedAtStart) {
+        ASSERT_LT(std::chrono::steady_clock::now(), burstDeadline)
+            << "premisa rota: se escribieron " << burst << " bloques sobre un ring de "
+            << AnalysisRing::kCapacityFrames << " frames y no se piso un solo frame";
         const auto blk = stringBlock(kReq009Real, 1024, written * 1024);
         ring.writeStereo(blk.data(), 1024);
         ++written;
+        ++burst;
     }
 
-    // 4 · sondeo APRETADO: guarda cada publicacion distinta hasta ver la primera
-    //     que ya cuenta el desborde, mas un par mas de margen.
-    int badState = -1;
-    double badCents = 0.0, badDropped = 0.0, badMark = 0.0;
-    bool sawDrop = false;
-    double lastFrames = -1.0;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (std::chrono::steady_clock::now() < deadline) {
-        float o[kSnapshotValueCount];
-        if (!snap.read(o)) continue;
-        if (o[kSnapFramesAnalyzed] == lastFrames) continue;
-        lastFrames = o[kSnapFramesAnalyzed];
-        if (!(o[kSnapDroppedFrames] > droppedBefore)) continue;
-        if (!sawDrop) {
-            sawDrop = true;
-            badState   = static_cast<int>(o[kSnapState]);
-            badCents   = o[kSnapCents];
-            badDropped = o[kSnapDroppedFrames];
-            badMark    = o[kSnapInputDiscontinuity];
-            break;
-        }
-    }
+    // 4 · SE ESPERA POR EL CONTADOR ACUMULADO, QUE NO SE PUEDE PERDER (REQ-014).
+    //
+    // 🔴 ACA VIVIA LA ESCAMOSIDAD, Y ES LA QUE TUMBO DOS CI DE RELEASE. La
+    // version anterior sondeaba apretado buscando ATRAPAR la primera publicacion
+    // que ya contara el desborde. Eso hace depender el veredicto de cuantas
+    // publicaciones alcanzo a juntar el lazo: con la maquina saturada son dos o
+    // tres, y la premisa `sawDrop` fallaba acusando al motor de un defecto que no
+    // tenia. MINI-006 lo midio (1 de 25 bajo carga, preexistente en master) y
+    // fallo tres veces al intentar arreglarlo DESDE EL TEST — esperar a juntar
+    // publicaciones es imposible porque al terminar la alimentacion el ring se
+    // vacia, y ningun umbral por conteo separa las poblaciones.
+    //
+    // `kSnapDiscontinuityCount` es ACUMULADO y MONOTONO: una vez que sube, se
+    // queda. Un observador YA NO PUEDE PERDERSELO, asi que esperar por el es una
+    // condicion de verdad y no una carrera. Y el snapshot publica todos sus
+    // valores del MISMO publish, asi que el estado y los cents que se leen con el
+    // contador ya subido son los de esa misma ventana contaminada.
+    float bad[kSnapshotValueCount];
+    const bool sawDrop = wma_test::waitUntil([&] {
+        return snap.read(bad) && bad[kSnapDiscontinuityCount] > countBefore;
+    }, std::chrono::seconds(5));
+    const int    badState   = sawDrop ? static_cast<int>(bad[kSnapState]) : -1;
+    const double badCents   = sawDrop ? bad[kSnapCents] : 0.0;
+    const double badDropped = sawDrop ? bad[kSnapDroppedFrames] : 0.0;
+    const double badMark    = sawDrop ? bad[kSnapInputDiscontinuity] : 0.0;
     th.stop();
 
     ASSERT_TRUE(sawDrop)
         << "premisa rota: la rafaga escribio " << burst << " bloques de golpe sobre un ring de "
-        << AnalysisRing::kCapacityFrames << " frames y ninguna publicacion conto un solo frame "
-           "pisado.";
+        << AnalysisRing::kCapacityFrames << " frames y el contador acumulado de "
+           "discontinuidades no se movio. Ese contador NO se puede perder, asi que esto ya no "
+           "es 'no llegue a mirar': es que el hueco no ocurrio.";
 
     EXPECT_NE(badState, kStateConverged)
         << "el motor siguio diciendo CONVERGIDO en la primera ventana despues de un hueco de "
