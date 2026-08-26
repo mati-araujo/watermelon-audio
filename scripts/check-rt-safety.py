@@ -16,7 +16,11 @@ Esto la vuelve mecanica.
 COMO FUNCIONA
 -------------
 1. Parsea las definiciones de funcion de todo el arbol C++ (sin tests, sin
-   thirdparty) por matcheo de llaves, salteando strings y comentarios.
+   thirdparty) por matcheo de llaves, salteando strings y comentarios. Ese
+   parseo vive en `scripts/cpp_callgraph.py` desde REQ-013 S1, porque
+   `check-mechanism-callers.py` construye el MISMO grafo para preguntarle
+   otra cosa. Lo que quedo aca es lo que decide ESTE lint: sus raices, sus
+   prohibiciones y sus dos baselines.
 2. Arranca de las RAICES RT declaradas abajo y camina el grafo de llamadas.
 3. En cada cuerpo alcanzable busca los patrones prohibidos.
 
@@ -91,11 +95,20 @@ import re
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-CPP_ROOT = REPO / "audio/src/main/cpp"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-EXCLUDED_PARTS = ("/tests/", "/thirdparty/", "/ios/build/", "/.deps/")
-SOURCE_SUFFIXES = (".cpp", ".h", ".hpp", ".mm", ".inc")
+# El parseo del arbol C++ vive en un modulo desde REQ-013 S1: este lint y
+# `check-mechanism-callers.py` construyen el MISMO grafo y hacen preguntas
+# distintas. Lo que se comparte es el parser; las raices, las prohibiciones y
+# los baselines siguen siendo de cada script.
+from cpp_callgraph import (  # noqa: E402
+    CALL_RE,
+    NOT_CALLS,
+    REPO,
+    Function,
+    collect_sources,
+    parse_functions,
+)
 
 # ---------------------------------------------------------------------------
 # Las raices RT: todo lo que un thread de audio ejecuta.
@@ -173,21 +186,6 @@ COVERAGE_PATH = REPO / "scripts/rt-coverage-baseline.txt"
 ALLOW_RE = re.compile(r"//\s*RT-SAFE-ALLOW:\s*(?P<reason>\S.*)$")
 ALLOW_BARE_RE = re.compile(r"//\s*RT-SAFE-ALLOW\b")
 
-# Definicion de funcion: tipo de retorno + [Clase::]nombre(args) [const] {
-DEF_RE = re.compile(
-    r"^[ \t]*"
-    r"(?:(?:template\s*<[^>]*>|inline|static|virtual|constexpr|explicit|friend)\s+)*"
-    r"(?:[A-Za-z_][\w:<>,\s*&~]*?\s+)?"                       # tipo de retorno (opcional: ctors)
-    r"(?P<qname>[A-Za-z_]\w*(?:::[A-Za-z_~]\w*)*)"            # [Clase::]nombre
-    r"\s*\([^;{]*?\)"                                          # argumentos
-    r"(?:\s*(?:const|noexcept|override|final|mutable))*"
-    r"\s*(?:->[\w:<>,\s*&]+)?"                                 # trailing return
-    r"\s*\{",
-    re.MULTILINE,
-)
-
-CALL_RE = re.compile(r"(?:(?P<qual>[A-Za-z_]\w*)::)?(?P<name>[A-Za-z_]\w*)\s*\(")
-
 # ---------------------------------------------------------------------------
 # Despacho virtual que SI ocurre en el path RT. Para estos nombres se siguen
 # TODAS las definiciones, porque el tipo concreto no se puede resolver aca y
@@ -217,148 +215,6 @@ VIRTUAL_EXPANSIONS = {
     "processOneEffect": None,
     "processWithMode": None,
 }
-
-# Palabras que parecen llamadas pero son sintaxis o construccion de valores.
-NOT_CALLS = {
-    "if", "for", "while", "switch", "return", "sizeof", "catch", "throw",
-    "static_cast", "dynamic_cast", "reinterpret_cast", "const_cast",
-    "int", "float", "double", "bool", "char", "void", "size_t", "auto",
-    "int32_t", "int64_t", "uint32_t", "uint64_t", "uint8_t", "size_type",
-    "min", "max", "abs", "fabs", "fabsf", "sqrt", "sqrtf", "sin", "cos", "tan",
-    "exp", "expf", "log", "logf", "pow", "powf", "floor", "ceil", "round",
-    "isfinite", "isnan", "isinf", "clamp", "memcpy", "memset", "memmove",
-    "fill", "copy", "swap", "move", "forward", "load", "store", "fetch_add",
-    "fetch_sub", "compare_exchange_strong", "compare_exchange_weak", "exchange",
-    "data", "size", "empty", "begin", "end", "assert", "static_assert",
-}
-
-
-def strip_noise(text: str) -> str:
-    """Reemplaza comentarios y literales por espacios, preservando offsets.
-
-    Preservar offsets importa: los numeros de linea que se reportan salen de
-    contar '\\n' sobre este mismo buffer.
-    """
-    out = list(text)
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c == "/" and i + 1 < n and text[i + 1] == "/":
-            j = text.find("\n", i)
-            j = n if j < 0 else j
-            for k in range(i, j):
-                out[k] = " "
-            i = j
-        elif c == "/" and i + 1 < n and text[i + 1] == "*":
-            j = text.find("*/", i + 2)
-            j = n if j < 0 else j + 2
-            for k in range(i, j):
-                if text[k] != "\n":
-                    out[k] = " "
-            i = j
-        elif c in "\"'":
-            quote, j = c, i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] == quote:
-                    j += 1
-                    break
-                j += 1
-            for k in range(i, min(j, n)):
-                if text[k] != "\n":
-                    out[k] = " "
-            i = j
-        else:
-            i += 1
-    return "".join(out)
-
-
-def body_span(text: str, brace_pos: int) -> int:
-    """Devuelve el offset justo despues de la llave de cierre."""
-    depth, i, n = 0, brace_pos, len(text)
-    while i < n:
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return n
-
-
-class Function:
-    """`line` es la linea de la firma (para reportar donde vive la funcion).
-    `body_line` es la linea de la llave de apertura, y es la unica base valida
-    para convertir un offset dentro de `body` en un numero de linea: una firma
-    puede ocupar varias lineas y usar `line` corre todo el reporte."""
-
-    __slots__ = ("qname", "path", "line", "body_line", "body")
-
-    def __init__(self, qname, path, line, body_line, body):
-        self.qname = qname
-        self.path = path
-        self.line = line
-        self.body_line = body_line
-        self.body = body
-
-
-def collect_sources() -> list[Path]:
-    files = []
-    for p in sorted(CPP_ROOT.rglob("*")):
-        if p.suffix not in SOURCE_SUFFIXES or not p.is_file():
-            continue
-        rel = "/" + str(p.relative_to(REPO)).replace("\\", "/")
-        if any(part in rel for part in EXCLUDED_PARTS):
-            continue
-        files.append(p)
-    return files
-
-
-def parse_functions(files: list[Path]) -> tuple[dict, dict, dict]:
-    """-> (por_qname, por_nombre_simple, texto_crudo_por_path)"""
-    by_qname: dict[str, list[Function]] = {}
-    by_simple: dict[str, list[Function]] = {}
-    raw: dict[Path, str] = {}
-
-    for path in files:
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        raw[path] = text
-        clean = strip_noise(text)
-
-        # Contexto de clase para metodos definidos inline dentro de `class X {`.
-        class_at = []
-        for m in re.finditer(r"\b(?:class|struct)\s+([A-Za-z_]\w*)[^;{]*\{", clean):
-            class_at.append((m.end(), m.group(1), body_span(clean, m.end() - 1)))
-
-        for m in DEF_RE.finditer(clean):
-            qname = m.group("qname")
-            simple = qname.split("::")[-1]
-            if simple in NOT_CALLS:
-                continue
-            brace = clean.index("{", m.end() - 1)
-            end = body_span(clean, brace)
-            body = clean[brace:end]
-            if "::" not in qname:
-                enclosing = [c for (s, c, e) in class_at if s <= brace < e]
-                if enclosing:
-                    qname = f"{enclosing[-1]}::{qname}"
-            fn = Function(
-                qname,
-                path,
-                clean.count("\n", 0, m.start()) + 1,
-                clean.count("\n", 0, brace) + 1,
-                body,
-            )
-            by_qname.setdefault(qname, []).append(fn)
-            by_simple.setdefault(simple, []).append(fn)
-    return by_qname, by_simple, raw
-
 
 def reachable(by_qname, by_simple) -> tuple[list[Function], list[str]]:
     """BFS desde las raices RT. Devuelve (funciones, raices_no_encontradas)."""
