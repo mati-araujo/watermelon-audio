@@ -78,51 +78,57 @@ public:
         return true;
     }
 
-    /// UNA rafaga de mas de un ring entero, sin esperar lugar: el desborde que
-    /// rompe la continuidad. Es la misma tecnica que usa REQ-009.
-    bool burstOverrun() {
-        if (!wma_test::waitUntil([&] { return mRing.availableFrames() == 0; },
-                                 std::chrono::seconds(5))) {
-            return false;
-        }
-        const int burst = 2 * AnalysisRing::kCapacityFrames / kFrames;
-        for (int i = 0; i < burst; ++i) {
-            const auto blk = stringBlock(mWritten * kFrames);
-            mRing.writeStereo(blk.data(), kFrames);
-            ++mWritten;
-        }
-        return true;
-    }
-
     /**
-     * Desborde SOSTENIDO: `rounds` rafagas seguidas, cada una de mas de un ring
-     * entero, dejando que el analisis de una vuelta entre medio.
+     * Discontinuidad SOSTENIDA, y **determinista**: se estampa una costura de
+     * captura `ticksAhead` vueltas ADELANTE del lector y se lo alimenta con
+     * audio limpio hasta que la cruce.
      *
-     * 🔴 ES DISTINTO DE `burstOverrun()`, Y LA DIFERENCIA LA ENCONTRO UN MUTANTE.
-     * Una sola rafaga produce `droppedDelta > 0` en UNA sola vuelta del lazo,
-     * asi que "contar por evento" y "contar por tick" dan lo MISMO y el mutante
-     * que saca el chequeo de flanco sobrevive. Con varias vueltas seguidas los
-     * dos se separan: por evento suma 1, por tick suma una por vuelta.
+     * 🔴 POR QUE POR COSTURA Y NO POR DESBORDE, QUE ES LO QUE HABIA.
+     * El desborde depende de GANARLE AL LECTOR, y eso es una carrera: la
+     * primera version de este test dio rojo en el CI de macOS y **tenia razon el
+     * CI** —afirmaba que un desborde sostenido cuenta UNA vez, y contaba dos,
+     * porque entre rafaga y rafaga el estimador SI puede recuperar una medicion
+     * (el desborde entrega audio de cuerda valido, solo que con huecos) y
+     * entonces la rafaga siguiente es un hueco NUEVO de verdad. Contar 2 era
+     * CORRECTO; el test estaba mal. Los dos intentos de arreglarlo apretando
+     * umbrales dieron 14 de 60 y 3 de 60, siempre nombrando su propia premisa:
+     * es la clase que este repo ya midio en MINI-006 —"no hay umbral que
+     * separe"— y el arreglo no es un umbral mejor, es sacar la carrera.
      *
-     * Entre rondas NO hay audio limpio, asi que el estimador nunca recupera una
-     * medicion propia y la marca no baja: es un unico hueco, sostenido.
+     * La costura no compite con nadie: `crossedSeam` se mantiene VERDADERO en
+     * cada vuelta mientras `readPosition() < seam` (`AnalysisThread.cpp`), asi
+     * que el hueco dura exactamente las vueltas que uno elige. Por evento suma
+     * 1; por tick sumaria una por vuelta. Los dos ejes entran por el MISMO
+     * gancho (`noteInputDiscontinuity`), asi que el mutante sigue expuesto.
      */
-    bool sustainedOverrun(int rounds) {
-        if (!wma_test::waitUntil([&] { return mRing.availableFrames() == 0; },
-                                 std::chrono::seconds(5))) {
-            return false;
-        }
-        const int burst = 2 * AnalysisRing::kCapacityFrames / kFrames;
-        for (int r = 0; r < rounds; ++r) {
-            for (int i = 0; i < burst; ++i) {
+    bool sustainedSeam(int ticksAhead) {
+        const uint64_t ahead =
+            static_cast<uint64_t>(ticksAhead) * AnalysisThread::kDrainFrames;
+        mRing.reportCaptureDiscontinuity(ahead);
+        const uint64_t seam = mRing.captureSeamPosition();
+        if (seam == 0) return false;
+        // Alimenta hasta que el lector CRUCE la costura. Es una condicion sobre
+        // el propio mecanismo, no una duracion ni una carrera.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (mRing.readPosition() < seam) {
+            if (std::chrono::steady_clock::now() > deadline) return false;
+            if (mRing.availableFrames() + static_cast<uint32_t>(kFrames)
+                    <= AnalysisRing::kCapacityFrames) {
                 const auto blk = stringBlock(mWritten * kFrames);
                 mRing.writeStereo(blk.data(), kFrames);
                 ++mWritten;
             }
-            waitForOneMoreTick();
         }
-        return true;
+        // 🔴 HAY QUE ESPERAR UNA PUBLICACION NUEVA, y no es un detalle.
+        // Mientras la costura esta pendiente el lazo hace `continue` ANTES de
+        // publicar (`AnalysisThread.cpp`), asi que durante todo el hueco el
+        // snapshot se queda CONGELADO en lo de antes. Leer el contador apenas se
+        // cruza la costura devuelve el valor viejo — medido: daba 0 y el test
+        // acusaba al motor de no contar.
+        return feedClean(3);
     }
+
+    uint64_t readPosition() const { return mRing.readPosition(); }
 
     double droppedFrames() {
         float o[kSnapshotValueCount];
@@ -188,9 +194,10 @@ TEST(DiscontinuityCount, ABreakThatHappenedWhileNobodyWasLookingIsStillReportabl
     const double before = b.discontinuityCount();
     ASSERT_GE(before, 0.0) << "el snapshot no publico el contador";
 
-    ASSERT_TRUE(b.burstOverrun()) << "premisa rota: no se pudo provocar el desborde";
-    // Se deja correr el analisis SIN MIRAR: exactamente el escenario del AC.
-    ASSERT_TRUE(b.feedClean(8)) << "premisa rota: no hubo lugar para el tramo de recuperacion";
+    // Se provoca el hueco y se deja correr el analisis SIN MIRAR una sola vez:
+    // exactamente el escenario del AC. `sustainedSeam` es determinista — no
+    // depende de ganarle al lector, que es lo que hacia escamoso al desborde.
+    ASSERT_TRUE(b.sustainedSeam(1)) << "premisa rota: no se pudo provocar el hueco";
 
     const double after = b.discontinuityCount();
     EXPECT_GT(after, before)
@@ -216,30 +223,26 @@ TEST(DiscontinuityCount, WithoutABreakTheCounterDoesNotMove) {
  * contara por tick, el numero no significaria nada y el consumidor no podria
  * distinguir "se rompio una vez" de "el lazo dio muchas vueltas".
  */
-TEST(DiscontinuityCount, ASustainedOverrunCountsOnce) {
-    constexpr int kRounds = 6;
+TEST(DiscontinuityCount, ASustainedBreakCountsOnce) {
+    // Vueltas que el hueco dura. Por evento suma 1; por tick sumaria ~kTicks.
+    constexpr int kTicks = 20;
     Bench b;
     ASSERT_TRUE(b.convergeOnCleanAudio());
     const double before = b.discontinuityCount();
     ASSERT_GE(before, 0.0);
-    const double droppedBefore = b.droppedFrames();
 
-    ASSERT_TRUE(b.sustainedOverrun(kRounds));
+    ASSERT_TRUE(b.sustainedSeam(kTicks))
+        << "premisa rota: el lector nunca cruzo la costura";
 
-    // 🔴 PREMISA, Y NO ES DECORATIVA: sin ella el test pasa por VACIO si el
-    // desborde ocurrio en una sola vuelta del lazo, y entonces no distingue
-    // "por evento" de "por tick" — que es justo lo que viene a afirmar.
-    // Cada ronda escribe 2 rings enteros, asi que pisar mucho mas de un ring
-    // prueba que hubo varias vueltas con desborde.
-    const double droppedAfter = b.droppedFrames();
-    ASSERT_GT(droppedAfter - droppedBefore,
-              static_cast<double>(AnalysisRing::kCapacityFrames) * 2.0)
-        << "premisa rota: el desborde no fue sostenido, asi que este test no puede "
-           "distinguir contar por evento de contar por tick";
+    // Que el hueco haya durado de verdad: si el lector la hubiera cruzado en una
+    // sola vuelta, "por evento" y "por tick" darian lo mismo y este test no
+    // distinguiria nada — que es como el mutante sobrevivio la primera vez.
+    ASSERT_GE(b.readPosition(),
+              static_cast<uint64_t>(kTicks) * AnalysisThread::kDrainFrames)
+        << "premisa rota: el hueco no duro las vueltas que se pidieron";
 
-    ASSERT_TRUE(b.feedClean(8));
     EXPECT_EQ(b.discontinuityCount(), before + 1.0)
-        << "un desborde SOSTENIDO de " << kRounds << " rondas conto "
+        << "un hueco SOSTENIDO durante " << kTicks << " vueltas conto "
         << (b.discontinuityCount() - before) << " veces: se esta contando por tick";
 }
 
@@ -258,7 +261,7 @@ TEST(DiscontinuityCount, TheLiveMarkStillComesBackDownWhileTheCounterStaysUp) {
     ASSERT_TRUE(b.convergeOnCleanAudio());
     const double before = b.discontinuityCount();
 
-    ASSERT_TRUE(b.burstOverrun());
+    ASSERT_TRUE(b.sustainedSeam(2)) << "premisa rota: no se pudo provocar el hueco";
     // Recuperacion larga: el estimador tiene que volver a tener medicion propia.
     ASSERT_TRUE(b.feedClean(40));
 
