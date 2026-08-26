@@ -1614,7 +1614,38 @@ typedef enum WmaLooperEventType {
     /** `value` = record progress 0..1, or **< 0** when the recording ENDED. */
     WMA_LOOPER_EVENT_RECORD_PROGRESS = 3,
     /** The track finished its finite play count. `value` unused. */
-    WMA_LOOPER_EVENT_TRACK_COMPLETED = 4
+    WMA_LOOPER_EVENT_TRACK_COMPLETED = 4,
+    /**
+     * REQ-017 — a grid beat just sounded. The ONLY global event: it is not about
+     * a track, so it reuses both fields with a different meaning.
+     *
+     *   `track_index` = absolute play frame of the NEXT beat, in the same scale
+     *                   as wma_transport_get_play_frame().
+     *   `value`       = beat index, monotonic since the metronome was armed.
+     *
+     * Reusing the fields per type is already this enum's convention —
+     * WMA_LOOPER_EVENT_TRACK_COMPLETED declares `value` unused.
+     *
+     * ## Why the anchor is absolute and not "frames until the next beat"
+     *
+     * You do not know the frame at which the event was emitted: it reaches you
+     * after a queue hop, a worker poll (~15 ms) and a thread marshal. A relative
+     * delta used as "from now" is late by exactly that, which is the defect this
+     * event exists to remove. Subtract wma_transport_get_play_frame() when you
+     * receive it and you get the real remaining frames, whatever the delay was.
+     *
+     * ## Two bounds, both deliberate
+     *
+     * - The anchor rides an int32, so it is exact for 2^31 frames of transport
+     *   running without wma_transport_reset_play_position(): **12.4 h at 48 kHz,
+     *   6.2 h at 96 kHz**. Accepted; widening it means widening this callback's
+     *   ABI.
+     * - No beat is emitted while the metronome scheduler is idle. The click train
+     *   is the source of truth on purpose: deriving from play_frame/frames_per_beat
+     *   would keep ticking, but it loses phase against what you HEAR on the first
+     *   in-flight BPM change, because the click countdown keeps the old phase.
+     */
+    WMA_LOOPER_EVENT_BEAT = 5
 } WmaLooperEventType;
 
 /**
@@ -1753,6 +1784,22 @@ WMA_API bool wma_transport_is_metronome_continuous(const WmaEngine* engine);
  * wma_transport_is_metronome_continuous() before reading it.
  */
 WMA_API int wma_transport_get_remaining_beats(const WmaEngine* engine);
+
+/**
+ * Current transport play position, in frames since the last play-position reset.
+ *
+ * Lock-free and callable from any thread, including the UI thread — it is a
+ * single atomic load. Advances on every audio block whether or not the metronome
+ * is running.
+ *
+ * This is the anchor that makes WMA_LOOPER_EVENT_BEAT usable: the beat event
+ * carries the ABSOLUTE frame of the next beat, so
+ * `next_beat_frame - wma_transport_get_play_frame()` is the frames still to go,
+ * independent of how long the event took to reach you.
+ *
+ * Returns 0 for a NULL engine.
+ */
+WMA_API int64_t wma_transport_get_play_frame(const WmaEngine* engine);
 
 /* ================================================================
  * 21. Diagnostics & Latency

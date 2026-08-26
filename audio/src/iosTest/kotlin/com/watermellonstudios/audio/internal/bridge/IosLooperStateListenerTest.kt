@@ -58,6 +58,22 @@ class IosLooperStateListenerTest {
         override fun onTrackCompleted(trackIndex: Int) {
             calls += "completed($trackIndex)"
         }
+
+        override fun onBeat(beatIndex: Int, nextBeatFrame: Int) {
+            calls += "beat($beatIndex, $nextBeatFrame)"
+        }
+    }
+
+    /** No sobrescribe onBeat: prueba que el default no-op alcanza (AC-017.6). */
+    private class OldRecorder : LooperStateListener {
+        val calls = mutableListOf<String>()
+        override fun onTrackProgress(trackIndex: Int, progress: Float) {
+            calls += "progress($trackIndex, $progress)"
+        }
+
+        override fun onTrackPlayingChanged(trackIndex: Int, isPlaying: Boolean) = Unit
+
+        override fun onTrackPeakChanged(trackIndex: Int, peakLevel: Float) = Unit
     }
 
     @AfterTest
@@ -129,6 +145,35 @@ class IosLooperStateListenerTest {
      * una app con una fachada vieja contra un motor nuevo tiene que seguir andando en vez
      * de romper con un `when` sin rama.
      */
+    /**
+     * REQ-017 — el beat es el UNICO evento global, y el unico que cruza los campos.
+     *
+     * `value` trae el indice de beat y `trackIndex` el frame absoluto del proximo,
+     * mientras que `onBeat` los recibe al reves: (beatIndex, nextBeatFrame). Si
+     * alguien "simplifica" el despacho pasandolos en el orden del resto, el
+     * consumidor recibe un frame donde espera un indice y viceversa — dos Int, sin
+     * error de tipos, sin crash, y con el pulso dibujado en cualquier lado.
+     */
+    @Test
+    fun aBeatEventArrivesWithTheIndexAndTheAnchorInThatOrder() {
+        val recorder = Recorder()
+
+        // value = indice de beat (2), trackIndex = frame del proximo beat (72000)
+        dispatchLooperEvent(recorder, type = 5, trackIndex = 72000, value = 2f)
+
+        assertEquals(listOf("beat(2, 72000)"), recorder.calls)
+    }
+
+    /** AC-017.6 — un listener que predate onBeat sigue compilando y no se entera. */
+    @Test
+    fun aListenerThatDoesNotOverrideOnBeatIsUnaffected() {
+        val old = OldRecorder()
+
+        dispatchLooperEvent(old, type = 5, trackIndex = 72000, value = 2f)
+
+        assertTrue(old.calls.isEmpty(), "el default no-op no deberia registrar nada")
+    }
+
     @Test
     fun anUnknownEventTypeIsIgnoredInsteadOfThrowing() {
         val recorder = Recorder()

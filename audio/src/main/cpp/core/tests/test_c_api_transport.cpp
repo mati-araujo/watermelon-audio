@@ -37,7 +37,9 @@
  */
 
 #include "support/CApiFixture.h"
+#include "tests/support/TestWait.h"
 
+#include <mutex>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -398,6 +400,128 @@ TEST(CApiTransportNullHandle, EveryMutatorIsANoOpRatherThanACrash) {
     wma_looper_trigger_click(nullptr, true);
     wma_set_bpm(nullptr, 140.0f);
     SUCCEED();
+}
+
+
+// ===========================================================================
+// REQ-017 — el beat pusheado, y su ancla
+// ===========================================================================
+
+class CApiBeatTest : public CApiTransportTest {
+protected:
+    struct Beat {
+        int     index;
+        int64_t nextBeatFrame;
+    };
+
+    /**
+     * El receptor es MIEMBRO del fixture, no un local del test, y eso no es
+     * estilo: el header de `wma_looper_set_event_callback` declara que un evento
+     * en vuelo cuando se limpia el sink TODAVIA aterriza en el receptor viejo, asi
+     * que `user_data` tiene que seguir vivo despues. Un local muere al salir del
+     * test —antes de `TearDown()`, que es quien destruye el motor— y el worker
+     * despacha sobre un mutex ya muerto. Ese exacto use-after-free mato a
+     * `cpp-tests-macos` en master una vez.
+     */
+    struct Sink {
+        std::mutex mutex;
+        std::vector<Beat> beats;
+
+        static void callback(int type, int trackIndex, float value, void* userData) {
+            if (type != WMA_LOOPER_EVENT_BEAT) return;
+            auto* self = static_cast<Sink*>(userData);
+            std::lock_guard<std::mutex> lk(self->mutex);
+            self->beats.push_back(Beat{static_cast<int>(value), trackIndex});
+        }
+
+        size_t size() {
+            std::lock_guard<std::mutex> lk(mutex);
+            return beats.size();
+        }
+    };
+
+    Sink mSink;
+
+    void installBeatSink() {
+        wma_looper_set_event_callback(mWma, &Sink::callback, &mSink);
+    }
+};
+
+// AC-017.4, de punta a punta y contra el ORACULO MAS DURO que hay: el sonido.
+// El ancla del beat k tiene que apuntar al bloque donde el click k+1 se ESCUCHA,
+// no al que dice una cuenta interna. Si el ancla fuera decorativa o estuviera
+// corrida, esto lo ve.
+TEST_F(CApiBeatTest, TheBeatAnchorPointsAtTheBlockWhereTheNextClickIsAudible) {
+    startAt(kSampleRate, 0);
+    installBeatSink();
+    wma_set_bpm(mWma, 120.0f);          // 24000 frames/beat = 24 bloques
+    wma_transport_start_metronome_continuous(mWma, true);
+
+    const int64_t frame0 = wma_transport_get_play_frame(mWma);
+    const std::vector<float> peaks = renderBlockPeaks(100);
+    const std::vector<int> audible = clickBlocks(peaks);
+
+    ASSERT_GE(audible.size(), 3u) << "hacen falta al menos 3 clicks audibles";
+    ASSERT_TRUE(waitUntil([&] { return mSink.size() >= audible.size(); }))
+        << "llegaron " << mSink.size() << " beats para " << audible.size()
+        << " clicks audibles";
+
+    std::lock_guard<std::mutex> lk(mSink.mutex);
+    ASSERT_GE(mSink.beats.size(), audible.size());
+
+    for (size_t k = 0; k + 1 < audible.size(); ++k) {
+        const int64_t anchor = mSink.beats[k].nextBeatFrame;
+        const int anchorBlock =
+            static_cast<int>((anchor - frame0) / kBlockFrames);
+        EXPECT_EQ(anchorBlock, audible[k + 1])
+            << "el ancla del beat " << k << " (frame " << anchor
+            << ") no cae en el bloque donde suena el click siguiente";
+    }
+}
+
+// AC-017.4 — la propiedad que hace utilizable al ancla: restarle el play frame da
+// los frames que FALTAN, y son positivos. Es lo que le permite al consumidor
+// animar a tiempo en vez de reaccionar tarde, sin conocer su propio atraso.
+TEST_F(CApiBeatTest, SubtractingThePlayFrameFromTheAnchorLeavesTimeStillToGo) {
+    startAt(kSampleRate, 0);
+    installBeatSink();
+    wma_set_bpm(mWma, 120.0f);
+    wma_transport_start_metronome_continuous(mWma, true);
+
+    // 30 bloques = 30000 frames, con beats en 0 y 24000: exactamente DOS.
+    //
+    // Se espera por los DOS y no por "al menos uno", y eso no es prolijidad: los
+    // eventos llegan por un worker que polea, asi que con `>= 1` el `back()` de
+    // abajo podia ser todavia el beat 0 —cuya ancla (24000) ya quedo atras de los
+    // 30000 frames renderizados— y el test fallaba SEGUN QUE OTROS TESTS
+    // corrieran al lado. Pasaba solo y fallaba acompanado.
+    renderBlockPeaks(30);
+    ASSERT_TRUE(waitUntil([&] { return mSink.size() >= 2; }))
+        << "llegaron " << mSink.size() << " beats, se esperaban 2";
+
+    // El ULTIMO beat recibido, no el primero: el ancla apunta al futuro en el
+    // momento de emitirse, y para cuando se renderizaron 30 bloques el ancla del
+    // beat 0 ya quedo atras — como corresponde.
+    int64_t anchor = 0;
+    {
+        std::lock_guard<std::mutex> lk(mSink.mutex);
+        anchor = mSink.beats.back().nextBeatFrame;
+    }
+    const int64_t now = wma_transport_get_play_frame(mWma);
+    const int64_t remaining = anchor - now;
+
+    EXPECT_GT(remaining, 0) << "el proximo beat ya paso: el ancla no sirve para anticipar";
+    EXPECT_LE(remaining, 24000) << "no puede faltar mas de un beat entero";
+}
+
+TEST_F(CApiBeatTest, ThePlayFrameAdvancesWithTheRenderAndIsNullSafe) {
+    startAt(kSampleRate, 0);
+    const int64_t before = wma_transport_get_play_frame(mWma);
+    renderBlockPeaks(5);
+    const int64_t after = wma_transport_get_play_frame(mWma);
+    EXPECT_EQ(after - before, 5 * kBlockFrames);
+
+    EXPECT_EQ(wma_transport_get_play_frame(nullptr), 0);
 }
 
 }  // namespace

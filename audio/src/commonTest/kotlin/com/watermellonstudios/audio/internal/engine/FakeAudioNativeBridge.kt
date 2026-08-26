@@ -155,6 +155,8 @@ internal class FakeAudioNativeBridge(
     override fun transportIsMetronomeRunning(): Boolean = notModeled("transportIsMetronomeRunning")
     override fun transportIsMetronomeContinuous(): Boolean = notModeled("transportIsMetronomeContinuous")
     override fun transportGetRemainingBeats(): Int = notModeled("transportGetRemainingBeats")
+
+    override fun transportGetPlayFrame(): Long = notModeled("transportGetPlayFrame")
     override fun setLogCaptureEnabled(enabled: Boolean) { notModeled("setLogCaptureEnabled") }
     override fun drainCapturedLogs(): Array<String> = notModeled("drainCapturedLogs")
     override fun getLogCaptureDropped(): Int = notModeled("getLogCaptureDropped")

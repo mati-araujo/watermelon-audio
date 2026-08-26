@@ -349,6 +349,19 @@ interface IAudioNativeBridge :
      */
     fun transportGetRemainingBeats(): Int
 
+    /**
+     * Posición de reproducción del transport, en frames desde el último reset.
+     *
+     * Lectura atómica sin locks: se puede llamar desde el thread de UI. Avanza en
+     * cada bloque de audio, corra o no el metrónomo.
+     *
+     * Es el ancla que vuelve utilizable a [LooperStateListener.onBeat]: el evento
+     * trae el frame ABSOLUTO del próximo beat, así que
+     * `nextBeatFrame - transportGetPlayFrame()` son los frames que faltan de
+     * verdad, sin importar cuánto tardó el evento en llegar.
+     */
+    fun transportGetPlayFrame(): Long
+
     // ==================== LOG CAPTURE ====================
 
     /**

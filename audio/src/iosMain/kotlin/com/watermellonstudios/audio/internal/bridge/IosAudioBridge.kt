@@ -138,6 +138,12 @@ internal fun dispatchLooperEvent(
         WMA_LOOPER_EVENT_RECORD_PROGRESS.toInt() ->
             listener.onTrackRecordProgress(trackIndex, value)
         WMA_LOOPER_EVENT_TRACK_COMPLETED.toInt() -> listener.onTrackCompleted(trackIndex)
+        // REQ-017 — el único evento GLOBAL, y el único que usa los dos campos
+        // CRUZADOS respecto del resto: `value` lleva el índice de beat y
+        // `trackIndex` el frame absoluto del próximo. El orden de onBeat es
+        // (beatIndex, nextBeatFrame), así que acá se invierten a propósito.
+        WMA_LOOPER_EVENT_BEAT.toInt() ->
+            listener.onBeat(value.toInt(), trackIndex)
         else -> Unit
     }
 }
@@ -865,6 +871,8 @@ internal class IosAudioBridge : IAudioNativeBridge {
         wma_transport_is_metronome_continuous(engine)
 
     override fun transportGetRemainingBeats(): Int = wma_transport_get_remaining_beats(engine)
+
+    override fun transportGetPlayFrame(): Long = wma_transport_get_play_frame(engine)
 
     // ==================== FILTRO DE VOZ ====================
     //
