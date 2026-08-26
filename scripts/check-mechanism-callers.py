@@ -57,13 +57,20 @@ definiciones), `read` (6) y `reportCaptureDiscontinuity` (2). Si ese numero
 crece mucho, la salida es la misma que ya conoce el repo para el walker de RT:
 renombrar, no redeclarar.
 
-Uso:
-    python3 scripts/check-mechanism-callers.py           # imprime los candidatos
-    python3 scripts/check-mechanism-callers.py --quiet   # solo el resumen
+EL TRINQUETE
+------------
+`scripts/mechanism-callers-baseline.txt` declara lo que hay hoy, con la
+CATEGORIA y la RAZON de cada entrada. El lint falla en las DOS direcciones: si
+aparece algo que no esta declarado, y si algo declarado ya no se reproduce. El
+segundo corte es el que evita que el archivo se vuelva un cementerio de razones
+caducas. Y una entrada sin razon tambien falla: una excepcion tiene que costar
+escribir por que.
 
-TODAVIA NO FALLA. El baseline es de REQ-013 S2 y el cableado a `gate.sh` con su
-`--self-test` es de S3. Hasta entonces esto informa y sale 0: un lint sin
-baseline que fallara con 76 entradas solo ensenaria a ignorarlo.
+Uso:
+    python3 scripts/check-mechanism-callers.py           # falla con exit 1 si el
+                                                         # conjunto cambio
+    python3 scripts/check-mechanism-callers.py --list    # imprime lo detectado
+    python3 scripts/check-mechanism-callers.py --quiet   # solo el resumen
 """
 
 from __future__ import annotations
@@ -87,8 +94,49 @@ from cpp_callgraph import (  # noqa: E402
 )
 
 
+BASELINE_PATH = REPO / "scripts/mechanism-callers-baseline.txt"
+
+CATEGORIES = {"entrada", "callback-externo", "sonda-de-tests", "deuda"}
+
+
 def rel(path: Path) -> str:
     return str(path.relative_to(REPO)).replace("\\", "/")
+
+
+def load_baseline() -> tuple[dict[str, tuple[str, str]], list[str]]:
+    """-> ({clave: (categoria, razon)}, errores_de_formato)
+
+    La clave es `<archivo>::<qname>`. Se parsea DESDE LA DERECHA porque el qname
+    lleva `::` adentro: primero se corta la razon por ` | `, despues la categoria
+    por el ultimo `::`.
+    """
+    entries: dict[str, tuple[str, str]] = {}
+    errors: list[str] = []
+    if not BASELINE_PATH.exists():
+        return entries, [f"no existe {rel(BASELINE_PATH)} — el lint no puede chequear nada"]
+    for n, raw_line in enumerate(BASELINE_PATH.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if " | " not in line:
+            errors.append(f"{rel(BASELINE_PATH)}:{n} sin razon (falta ' | <razon>')")
+            continue
+        left, why = line.split(" | ", 1)
+        if not why.strip():
+            errors.append(f"{rel(BASELINE_PATH)}:{n} razon vacia")
+            continue
+        if "::" not in left:
+            errors.append(f"{rel(BASELINE_PATH)}:{n} formato invalido: {line[:60]}")
+            continue
+        rest, cat = left.rsplit("::", 1)
+        if cat not in CATEGORIES:
+            errors.append(
+                f"{rel(BASELINE_PATH)}:{n} categoria desconocida '{cat}' "
+                f"(validas: {', '.join(sorted(CATEGORIES))})"
+            )
+            continue
+        entries[rest] = (cat, why.strip())
+    return entries, errors
 
 
 def call_sites(by_qname: dict) -> tuple[dict, dict]:
@@ -132,6 +180,7 @@ def find_orphans(by_qname: dict) -> list[tuple[Function, list[Function]]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--list", action="store_true", help="imprime lo detectado")
     ap.add_argument("--quiet", action="store_true", help="solo el resumen")
     args = ap.parse_args()
 
@@ -148,7 +197,7 @@ def main() -> int:
         1 for g in by_qname.values() for f in g if not is_test_path(f.path)
     )
 
-    if not args.quiet:
+    if args.list:
         for fn, callers in hits:
             suites = sorted({Path(c.path).name for c in callers})
             shown = ", ".join(suites[:3]) + (" …" if len(suites) > 3 else "")
@@ -156,16 +205,44 @@ def main() -> int:
             print(f"      definida en  {rel(fn.path)}:{fn.line}")
             print(f"      la llaman    {shown}")
 
+    declared, errors = load_baseline()
+    found = {f"{rel(fn.path)}::{fn.qname}": (fn, callers) for fn, callers in hits}
+
+    nuevas = sorted(k for k in found if k not in declared)
+    muertas = sorted(k for k in declared if k not in found)
+
+    if not args.quiet:
+        for key in nuevas:
+            fn, callers = found[key]
+            suites = sorted({Path(c.path).name for c in callers})
+            print(
+                f"SIN DECLARAR  {fn.qname}\n"
+                f"    {rel(fn.path)}:{fn.line}\n"
+                f"    la llaman solo tests: {', '.join(suites[:4])}\n"
+                f"    si es un mecanismo de produccion, le falta un llamador; si no,\n"
+                f"    declarala en {rel(BASELINE_PATH)} con su categoria y su razon."
+            )
+        for key in muertas:
+            cat, _ = declared[key]
+            print(
+                f"YA NO SE REPRODUCE  {key}  ({cat})\n"
+                f"    esta declarada en el baseline y el lint ya no la detecta.\n"
+                f"    Borrala: una entrada que no se reproduce miente sobre la deuda."
+            )
+        for e in errors:
+            print(f"BASELINE INVALIDO  {e}")
+
     print(
-        f"mechanism-callers — {len(hits)} funcion(es) de produccion sin llamador "
-        f"de produccion, sobre {prod_fns} en {prod_files} archivos "
-        f"({elapsed:.2f} s)"
+        f"mechanism-callers — {len(hits)} detectadas / {len(declared)} declaradas, "
+        f"sobre {prod_fns} funciones en {prod_files} archivos ({elapsed:.2f} s)"
     )
-    if hits:
+    if nuevas or muertas or errors:
         print(
-            "  (informativo: el baseline es de REQ-013 S2 y el gate de S3; "
-            "todavia no falla)"
+            f"  ROJO — {len(nuevas)} sin declarar, {len(muertas)} que ya no se "
+            f"reproducen, {len(errors)} error(es) de formato"
         )
+        return 1
+    print("  sin deuda nueva — el baseline es exactamente lo detectado")
     return 0
 
 
