@@ -126,4 +126,45 @@ interface ITunerBridge {
 
     /** Engancha a mano a una cuerda por índice, como cuando el músico la elige. -1 suelta. */
     fun lockTunerString(index: Int): Boolean
+
+    // ---- El puerto offline (REQ-015 S2) ------------------------------------
+
+    /**
+     * Analiza una **grabación**: sin micrófono, sin dispositivo, sin permiso y sin stream.
+     *
+     * 🔴 **Es la única función de esta interfaz que no habla del motor.** Todas las demás son
+     * sobre el afinador que el músico está mirando; ésta es sobre un buffer. La llamada nativa
+     * **no lleva handle de motor** en ningún tramo, y el análisis arma su propio ring, su propio
+     * snapshot y su propio análisis por llamada: correrla con el afinador vivo andando **no le
+     * mueve la aguja** (AC-015.4). El puente acá es el transporte, no el motor.
+     *
+     * Corre el **mismo** análisis que el camino de tiempo real. Un camino paralelo mediría otro
+     * motor, y su verde no diría nada del producto.
+     *
+     * Es **determinista**: el mismo buffer da el mismo resultado siempre. No hay thread, no hay
+     * reloj y no hay nada que esperar — que es exactamente lo que lo vuelve usable como test de
+     * regresión, y la razón por la que existe.
+     *
+     * @param samples `frames · channels` floats. Mono, o estéreo intercalado (L R L R…).
+     * @param channels 1 o 2. Cualquier otra cosa se **rechaza** en vez de adivinarse: si el
+     *   consumidor tuviera que mezclar el estéreo a mono por su cuenta y lo hiciera distinto de
+     *   `0,5·(L+R)`, rompería la coincidencia con el camino vivo **en silencio** — y esa
+     *   coincidencia es lo que le da sentido al puerto.
+     * @param sampleRate el rate **del material**. No se asume 48000: un buffer de 44,1 leído
+     *   como si fuera de 48 da una lectura bien formada y equivocada, y este repo ya pagó esa
+     *   constante cableada una vez.
+     * @param targetHz contra qué medir, igual que [setTunerTargetHz]. `0` = sin objetivo, y
+     *   entonces cents/ángulo/incertidumbre cruzan como `NaN`, tal cual en vivo.
+     *
+     * @return los [com.watermellonstudios.audio.domain.tuner.TunerSnapshot.VALUE_COUNT] valores,
+     *   o `null` si los argumentos no describen audio analizable o el análisis nunca llegó a
+     *   publicar. **`null` y "todo en cero" no son lo mismo**: la C API deja el buffer intacto
+     *   cuando falla, justamente para que nadie lea ceros como una medición.
+     */
+    fun analyzeTunerBuffer(
+        samples: FloatArray,
+        channels: Int,
+        sampleRate: Int,
+        targetHz: Float,
+    ): FloatArray?
 }

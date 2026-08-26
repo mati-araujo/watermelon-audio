@@ -61,6 +61,16 @@ internal class FakeTunerBridge : ITunerBridge {
     override fun setTunerCandidates(hz: FloatArray): Boolean = fueraDeAlcance("setTunerCandidates")
     override fun lockTunerString(index: Int): Boolean = fueraDeAlcance("lockTunerString")
 
+    // El puerto offline (REQ-015 S2) tampoco lo toca `TunerImpl`, y su punto de entrada
+    // público —`OfflineTuner`— va por el puente REAL, no por este doble. Mismo criterio
+    // que arriba: explotar en vez de fabricar un snapshot.
+    override fun analyzeTunerBuffer(
+        samples: FloatArray,
+        channels: Int,
+        sampleRate: Int,
+        targetHz: Float,
+    ): FloatArray? = fueraDeAlcance("analyzeTunerBuffer")
+
     private fun fueraDeAlcance(nombre: String): Nothing =
         error(
             "$nombre está fuera del alcance de REQ-010 y este doble NO lo modela. " +

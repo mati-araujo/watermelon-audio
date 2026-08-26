@@ -563,6 +563,39 @@ internal class IosAudioBridge : IAudioNativeBridge {
 
     override fun lockTunerString(index: Int): Boolean = wma_tuner_lock_string(engine, index)
 
+    /**
+     * El puerto offline (REQ-015 S2) — **la única `wma_tuner_*` que no recibe `engine`**.
+     *
+     * No es un descuido de este envoltorio: `wma_tuner_analyze_buffer` no toma `WmaEngine*`
+     * porque analiza una grabación, no lo que está sonando. Por eso correrla con el afinador
+     * vivo andando no le mueve la aguja al músico (AC-015.4).
+     */
+    override fun analyzeTunerBuffer(
+        samples: FloatArray,
+        channels: Int,
+        sampleRate: Int,
+        targetHz: Float,
+    ): FloatArray? {
+        if (channels != 1 && channels != 2) return null
+        val frames = samples.size / channels
+        if (frames <= 0) return null
+
+        // `usePinned` y no `allocArray`: el material puede ser de segundos, y copiarlo
+        // muestra por muestra para cruzar la frontera sería trabajo puro sobre un buffer
+        // que el análisis sólo LEE. `addressOf(0)` es seguro acá porque el array vacío ya
+        // salió por `frames <= 0`.
+        return samples.usePinned { pinned ->
+            memScoped {
+                val values = allocArray<FloatVar>(TunerSnapshot.VALUE_COUNT)
+                if (!wma_tuner_analyze_buffer(pinned.addressOf(0), frames, channels,
+                                              sampleRate, targetHz, values)) {
+                    return@memScoped null
+                }
+                FloatArray(TunerSnapshot.VALUE_COUNT) { values[it] }
+            }
+        }
+    }
+
     override fun captureIntonation(slot: Int): Boolean =
         wma_intonation_capture(engine, slot)
 

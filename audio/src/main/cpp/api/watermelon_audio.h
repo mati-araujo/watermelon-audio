@@ -991,6 +991,59 @@ WMA_API float wma_intonation_difference_cents(const WmaEngine* engine);
  */
 WMA_API bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values);
 
+/**
+ * Analyse a buffer OFFLINE: no engine, no device, no permission, no stream.
+ *
+ * WHY THIS ONE TAKES NO WmaEngine*, AND IT IS THE FIRST OF ITS FAMILY
+ * -------------------------------------------------------------------
+ * Every other wma_tuner_* call is about the tuner the musician is looking at.
+ * This one is about a RECORDING. The two defects REQ-014 fixed were found by
+ * hand — a phone, a guitar, a speaker and a person plucking — and nothing stopped
+ * them from coming back, because there was no way to write a test that catches
+ * them. This is that way, and it has to work where the consumer's tests run: a
+ * CI box with no microphone.
+ *
+ * It runs the SAME analysis the live tuner runs (see OfflineAnalysis.h): a
+ * parallel implementation would measure another engine, and its green would say
+ * nothing about the product.
+ *
+ * DETERMINISTIC, AND THAT IS THE POINT
+ * ------------------------------------
+ * Same buffer in, same values out, always: no thread, no clock, no waiting. It
+ * builds its own ring, its own snapshot and its own analysis PER CALL, so it
+ * carries nothing from one call to the next — and nothing from, or to, a live
+ * tuner running at the same time. Calling this while wma_tuner_start() is up
+ * does not move the live reading.
+ *
+ * @param samples      frames * channels floats. Mono, or stereo interleaved
+ *                     (L R L R…) which is what the capture path speaks.
+ * @param frames       frames, NOT floats.
+ * @param channels     1 or 2. Anything else is refused rather than guessed: the
+ *                     usual offline material is mono (a file), and a consumer
+ *                     that had to downmix stereo itself could do it differently
+ *                     from the engine — which would break the agreement with the
+ *                     real-time path SILENTLY, and that agreement is the whole
+ *                     reason this entry point is worth having.
+ * @param sample_rate  the rate of the MATERIAL. Not assumed to be 48000: a 44.1
+ *                     buffer read as if it were 48 gives a well-formed, wrong
+ *                     answer, and this codebase has already paid for that
+ *                     hardcoded constant once.
+ * @param target_hz    what to measure against, like wma_tuner_set_target(). 0 =
+ *                     no target, and then cents/angle/uncertainty cross as NaN,
+ *                     exactly as they do live. It is a float and not a double on
+ *                     purpose: the live target crosses this boundary as a float,
+ *                     and a different type here would have the two paths
+ *                     measuring against subtly different frequencies.
+ * @param[out] out_values  WMA_TUNER_SNAPSHOT_VALUES floats, in the same order
+ *                     wma_tuner_get_snapshot() documents.
+ *
+ * @return false if the arguments do not describe analysable audio, or if the
+ *         analysis never got to publish. The buffer is left UNTOUCHED in that
+ *         case — zeros would be a measurement nobody made.
+ */
+WMA_API bool wma_tuner_analyze_buffer(const float* samples, int frames, int channels,
+                                      int sample_rate, float target_hz, float* out_values);
+
 /* ================================================================
  * 13. Dual Touch
  * ================================================================ */

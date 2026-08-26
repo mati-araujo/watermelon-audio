@@ -10,6 +10,7 @@
 
 #include "watermelon_audio_internal.h"
 
+#include "../analysis/OfflineAnalysis.h"
 #include "../core/AudioMode.h"
 #include "../voice/VoiceTypes.h"
 #include "../platform/Logger.h"
@@ -1234,6 +1235,62 @@ bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values) {
     // salio desgarrada. Devolver ceros seria devolver una medicion que nadie
     // hizo — la leccion de los dos stubs que mentian.
     return engine->analysisSnapshot->read(out_values);
+}
+
+/**
+ * REQ-015 S2 — el puerto offline. **No lleva motor, y no lo busca por atras.**
+ *
+ * No toma `analysisMutex` ni ningun otro lock, y no es un olvido: no hay nada
+ * compartido que serializar. `wma::analysis::analyzeBuffer` arma su propio ring,
+ * su propio snapshot y su propio `AnalysisThread` —que nunca corre `start()`—
+ * por llamada. Eso es lo que hace cierto AC-015.4: con el afinador vivo
+ * corriendo, esto no toca un solo byte de su estado.
+ *
+ * 🔴 Y respeta el contrato de `drainOnce()`: UN SOLO CONDUCTOR A LA VEZ. El
+ * conductor de este analisis es este thread, y el objeto que conduce no lo ve
+ * nadie mas.
+ */
+bool wma_tuner_analyze_buffer(const float* samples, int frames, int channels,
+                              int sample_rate, float target_hz, float* out_values) {
+    if (samples == nullptr || out_values == nullptr) return false;
+    if (frames <= 0 || sample_rate <= 0) return false;
+    if (channels != 1 && channels != 2) return false;
+
+    const double target = static_cast<double>(target_hz);
+
+    if (channels == 2) {
+        return wma::analysis::analyzeBuffer(samples, frames, sample_rate, target, out_values);
+    }
+
+    // MONO -> el formato que habla el ring, que es el de la captura.
+    //
+    // La adaptacion vive ACA y no en el nucleo a proposito: el nucleo habla el
+    // idioma del motor y la frontera habla el del consumidor, cuyo material
+    // offline es un archivo mono. El ring suma `0,5·(L+R)`, asi que duplicar la
+    // muestra devuelve el valor original EXACTO — no es una aproximacion, y por
+    // eso el test de mono contra estereo puede exigir igualdad bit a bit.
+    //
+    // Cuesta un buffer temporal del doble del material. Es aceptable porque esto
+    // NO es el camino de tiempo real: corre en el thread del consumidor, sobre
+    // una grabacion, sin deadline.
+    //
+    // El `try` es la misma convencion que documenta `wma_looper_export_mix_v2`, y
+    // por la misma razon: el tamaño sale de un contador que manda el consumidor,
+    // asi que un `frames` absurdo tira `length_error`/`bad_alloc` en vez de
+    // devolver false — y una excepcion de C++ que cruza esta frontera no es una
+    // excepcion del otro lado, es un abort en JNI y nada en cinterop.
+    try {
+        std::vector<float> interleaved(static_cast<size_t>(frames) * 2);
+        for (int i = 0; i < frames; ++i) {
+            const float v = samples[static_cast<size_t>(i)];
+            interleaved[static_cast<size_t>(i) * 2]     = v;
+            interleaved[static_cast<size_t>(i) * 2 + 1] = v;
+        }
+        return wma::analysis::analyzeBuffer(interleaved.data(), frames, sample_rate, target,
+                                            out_values);
+    } catch (...) {
+        return false;
+    }
 }
 
 void wma_input_set_monitoring(WmaEngine* engine, bool enabled) {

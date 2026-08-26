@@ -1603,6 +1603,22 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override fun setTunerCandidates(hz: FloatArray): Boolean = nativeSetTunerCandidates(hz)
     override fun lockTunerString(index: Int): Boolean = nativeLockTunerString(index)
 
+    /**
+     * El puerto offline (REQ-015 S2).
+     *
+     * 🔴 **Sin mutex, y no es un olvido.** Los demás wrappers de este bloque no lo necesitan
+     * porque la C API ya serializa con `analysisMutex`; éste no lo necesita porque **no hay
+     * nada compartido que serializar**: la llamada nativa no toca el motor, arma su propio
+     * ring/snapshot/análisis y los tira al terminar. Dos hilos analizando dos grabaciones
+     * distintas no se ven entre sí, y ninguno de los dos ve al afinador vivo (AC-015.4).
+     */
+    override fun analyzeTunerBuffer(
+        samples: FloatArray,
+        channels: Int,
+        sampleRate: Int,
+        targetHz: Float,
+    ): FloatArray? = nativeAnalyzeTunerBuffer(samples, channels, sampleRate, targetHz)
+
     override fun captureIntonation(slot: Int): Boolean = nativeIntonationCapture(slot)
     override fun resetIntonation() = nativeIntonationReset()
     override fun intonationState(): Int = nativeIntonationState()
@@ -1998,6 +2014,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeGetTunerSnapshot(): FloatArray?
     private external fun nativeSetTunerCandidates(hz: FloatArray): Boolean
     private external fun nativeLockTunerString(index: Int): Boolean
+    private external fun nativeAnalyzeTunerBuffer(
+        samples: FloatArray,
+        channels: Int,
+        sampleRate: Int,
+        targetHz: Float,
+    ): FloatArray?
     private external fun nativeIntonationCapture(slot: Int): Boolean
     private external fun nativeIntonationReset()
     private external fun nativeIntonationState(): Int
