@@ -38,6 +38,7 @@ add_executable(analysis_tests
     test_discontinuity_count.cpp
     test_offline_analysis.cpp
     test_offline_regression.cpp
+    test_corpus_sweep.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp

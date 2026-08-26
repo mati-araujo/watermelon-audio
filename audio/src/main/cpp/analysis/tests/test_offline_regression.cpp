@@ -335,6 +335,116 @@ TEST(OfflineRegression, InsideTheUsableRangeTheInharmonicStringStillPublishes) {
     }
 }
 
+/**
+ * El desplazamiento del parcial mas agudo que sigue el strobe, en cents.
+ *
+ * De `fn = n·f0·sqrt(1 + B·n²)` con n = 4. Es cuanto puede correr la lectura
+ * HACIA SOSTENIDO por la rigidez de la cuerda, sin que nadie se equivoque: los
+ * parciales de una cuerda real estan mas arriba que sus armonicos ideales.
+ */
+double maxInharmonicBiasCents(double B) {
+    return 1200.0 * std::log2(std::sqrt(1.0 + B * 16.0));
+}
+
+/**
+ * 🔴 EL BARRIDO QUE EL CAMINO VIVO NO PUEDE PAGAR.
+ *
+ * `SignOutsideRange.NoDeviationEverPublishesTheOppositeSign` hace 12 puntos en
+ * **27,7 segundos**, y ese numero es el techo real de lo que el camino vivo
+ * puede permitirse: cada punto arranca un thread, alimenta el ring en tandas y
+ * espera por condicion dos veces por bloque. Aca cada punto cuesta ~12 ms, asi
+ * que la pregunta deja de ser "¿cuantos puntos entran?" y pasa a ser "¿donde la
+ * propiedad es CIERTA?".
+ *
+ * 🔴 Y ESA PREGUNTA TIENE RESPUESTA MEDIDA, PORQUE UN BARRIDO UNIFORME LA
+ * RESPONDIO MAL PRIMERO
+ * ----------------------------------------------------------------------------
+ * La primera version barria de −60 a +60 con paso 5 y reporto **una inversion
+ * en el arbol sano**: a −5 cents con `B = 1e-3` el motor publicaba **+2,7557**.
+ * No era el defecto de REQ-014 —eso vive en el borde del rango util, no cerca de
+ * cero— sino el SESGO FISICO de la inarmonicidad, y la cuenta lo cierra sin
+ * lugar a dudas:
+ *
+ *     sesgo del 3er parcial a B = 1e-3 = 1200·log2(sqrt(1 + 9·B)) = +7,754 c
+ *     −5,000 + 7,754                                              = +2,754 c
+ *     el motor publico                                              +2,7557 c
+ *
+ * Dos milesimas de cent de diferencia. O sea que **el `cents` nominal deja de
+ * ser el sustituto de la verdad** cuando el sesgo lo supera: ahi el motor no
+ * miente, mide una cuerda cuyos parciales estan arriba del objetivo. Es la misma
+ * leccion que REQ-014 S2 —"la inarmonicidad rompe el sustituto"— aplicada al
+ * test en vez de al motor, y por eso el barrido vivo se concentra en el borde y
+ * NO barre cerca de cero.
+ *
+ * El limite se DERIVA de la fisica en vez de copiarse como una lista de puntos:
+ * se afirma el signo solo donde la desviacion nominal es mayor que el sesgo
+ * maximo posible para esa B. Con `B = 0` eso es todo el rango; con `B = 1e-3`
+ * son 13,74 cents para arriba.
+ *
+ * Los ejes son tres y ninguno es decorativo:
+ *   - la DESVIACION, a ambos lados y bien afuera del rango util (que a 48 kHz es
+ *     de 30,50 cents): el defecto vive JUSTO en el borde;
+ *   - la INARMONICIDAD, porque con `B = 0` el defecto es inalcanzable y con
+ *     `B = 1e-3` aparece — o sea que un barrido de una sola B no barre nada;
+ *   - el SIGNO, porque la guarda se apoya en la magnitud de la gruesa y una
+ *     asimetria ahi es exactamente por donde reentra.
+ *
+ * 🔴 Y EL BARRIDO TRAE SU PROPIO GEMELO ADENTRO. Un motor apagado no publica
+ * ninguna inversion, asi que "cero inversiones" solo significa algo si ademas se
+ * exige que los puntos DENTRO del rango util hayan publicado. Sin eso el barrido
+ * mas denso del mundo lo pasa un `return NaN`.
+ */
+TEST(OfflineRegression, NoDeviationEverPublishesTheOppositeSign) {
+    constexpr int kFrames = 51200;
+    constexpr double kInsideUsableRange = 20.0;   // holgado contra los 30,50 c
+    // Margen sobre el sesgo, para no afirmar justo en el filo donde el nominal y
+    // el sesgo se cancelan.
+    constexpr double kBiasMargin = 1.0;
+
+    int inversions = 0;
+    int publishedInside = 0;
+    int pointsInside = 0;
+    int points = 0;
+    int skipped = 0;
+
+    for (double B : {0.0, 1.0e-4, kSteelB}) {
+        const double bias = maxInharmonicBiasCents(B);
+        for (double cents = -60.0; cents <= 60.0 + 1e-9; cents += 2.5) {
+            // Donde el sesgo puede tapar a la desviacion, el nominal NO es el
+            // sustituto de la verdad y afirmar el signo seria afirmar sobre el
+            // generador, no sobre el motor.
+            if (std::fabs(cents) <= bias + kBiasMargin) { ++skipped; continue; }
+            ++points;
+
+            const auto buf = stringBuffer(detune(kE4, cents), B, kFrames, kSignRate, 0.5);
+            const Reading r = analyze(buf, kFrames, kSignRate, kE4);
+            ASSERT_TRUE(r.ok) << "el puerto no analizo el punto " << cents << " c, B = " << B;
+
+            const bool inside = std::fabs(cents) <= kInsideUsableRange;
+            if (inside) ++pointsInside;
+            if (!r.published) continue;
+            if (inside) ++publishedInside;
+
+            if ((cents < 0.0 && r.cents > 0.0) || (cents > 0.0 && r.cents < 0.0)) {
+                ++inversions;
+                ADD_FAILURE() << "signo invertido en " << cents << " cents (B = " << B
+                              << "): el motor publico " << r.cents
+                              << " (sesgo maximo por inarmonicidad: " << bias << " c)";
+            }
+        }
+    }
+
+    EXPECT_EQ(inversions, 0)
+        << inversions << " inversiones en " << points << " puntos evaluados ("
+        << skipped << " salteados por sesgo)";
+
+    // El gemelo del barrido: sin esto, callarse siempre da cero inversiones.
+    EXPECT_GT(publishedInside, pointsInside * 3 / 4)
+        << "solo " << publishedInside << " de " << pointsInside
+        << " puntos DENTRO del rango util publicaron: el barrido esta verde porque el "
+           "motor se callo, no porque acierte el signo";
+}
+
 // ---------------------------------------------------------------------------
 // 3.3 / 3.4 — AC-014.1 y AC-014.2: la ausencia se declara, y no se compra con
 //             sensibilidad
