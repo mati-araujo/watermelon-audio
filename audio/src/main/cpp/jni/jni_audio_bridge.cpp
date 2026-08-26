@@ -2936,6 +2936,13 @@ void dispatchLooperEvent(const wm::LooperEvent& ev) {
                 method = g_looperOnTrackRecordProgress; break;
             case wm::LooperEvent::Type::TrackCompleted:
                 method = g_looperOnTrackCompleted; break;
+            case wm::LooperEvent::Type::Beat:
+                // REQ-017 · S1 — el evento ya existe y viaja por la C API (su
+                // sink es un cast pass-through), pero el puente a Kotlin lo
+                // cablea S2. El `case` explicito esta para que -Wswitch no se
+                // apague solo: sin el, el dia que S2 agregue el metodo nadie
+                // avisaria si este switch quedo afuera.
+                break;
         }
     }
     if (!listener || !method) return;

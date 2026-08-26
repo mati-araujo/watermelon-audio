@@ -1173,6 +1173,35 @@ public:
         mClick.trigger(isDownbeat);
     }
 
+    /**
+     * @brief Push a Beat event (REQ-017). RT-safe: solo `pushFromRT()` sobre la
+     *        cola lock-free. Llamado por `Transport::tick()` desde la MISMA
+     *        iteracion del bucle que dispara el click.
+     *
+     * 🔴 Es una llamada APARTE de `triggerClick()` a proposito, y no es estilo.
+     * `triggerClick` esta declarado invocable desde el thread de UI y tiene un
+     * llamador que no viene de la grilla: `wma_looper_trigger_click`. Plegarle la
+     * emision adentro haria emitir un beat FANTASMA en ese camino — sin indice
+     * valido y sin ancla.
+     *
+     * @param beatIndex     Indice del beat que acaba de sonar, monotono desde que
+     *                      se armo el metronomo.
+     * @param nextBeatFrame Frame ABSOLUTO del PROXIMO beat, en la escala de
+     *                      `Transport::getPlayFrame()`.
+     *
+     * ⚠️ El ancla viaja en un `int32_t`, asi que es exacta hasta 2^31 frames de
+     * transport corrido sin `resetPlayPosition()`: **12,4 h a 48 kHz y 6,2 h a
+     * 96 kHz**. El bound esta aceptado explicitamente (REQ-017); pasarlo requiere
+     * ensanchar la ABI del callback, no un parche aca.
+     */
+    void emitBeat(int beatIndex, int64_t nextBeatFrame) {
+        if (mDispatcher == nullptr) return;
+        mDispatcher->pushFromRT(wm::LooperEvent{
+            wm::LooperEvent::Type::Beat,
+            static_cast<int32_t>(nextBeatFrame),
+            static_cast<float>(beatIndex)});
+    }
+
     // ========== State queries (lock-free) ==========
 
     /** Progress of the longest active track (0..1). */
