@@ -76,4 +76,50 @@ interface LooperStateListener {
      * @param trackIndex 0..15
      */
     fun onTrackCompleted(trackIndex: Int) {}
+
+    /**
+     * Un beat de la grilla acaba de sonar (REQ-017). Es el ÚNICO callback global de
+     * esta interfaz: no habla de una pista.
+     *
+     * Se co-emite desde la misma decisión que dispara el click, así que es
+     * exactamente tan preciso como el click — que está cuantizado al bloque de
+     * audio por diseño, no al sample.
+     *
+     * ## Cómo se usa el ancla, que es el punto entero
+     *
+     * NO sabés cuándo se emitió esto: llegó después de una cola, un poll del worker
+     * (~15 ms) y un salto de thread. Por eso [nextBeatFrame] es un frame ABSOLUTO y
+     * no "frames que faltan": restale
+     * [IAudioNativeBridge.transportGetPlayFrame] cuando lo recibís y obtenés los
+     * frames que faltan **de verdad**, sea cual sea el atraso.
+     *
+     * ```kotlin
+     * override fun onBeat(beatIndex: Int, nextBeatFrame: Int) {
+     *     val faltan = nextBeatFrame - bridge.transportGetPlayFrame()
+     *     val segundos = faltan.toDouble() / sampleRate
+     *     // …programar la animación para que llegue A TIEMPO, no para reaccionar tarde
+     * }
+     * ```
+     *
+     * El compás se deriva acá, no viaja: `beatIndex / beatsPerBar` es el bar y
+     * `beatIndex % beatsPerBar == 0` es el downbeat (`transportGetBeatsPerBar()`).
+     *
+     * ## Dos límites, los dos a propósito
+     *
+     * - **Sin metrónomo armado no hay beat.** Manda el tren de clicks porque es lo
+     *   que hace que el pulso esté clavado a lo que se ESCUCHA: derivar de
+     *   playFrame/framesPerBeat seguiría latiendo, pero pierde la fase contra el
+     *   click en el primer cambio de BPM en vuelo.
+     * - [nextBeatFrame] es un `Int`, así que es exacto por 2^31 frames de transport
+     *   corrido sin resetear la posición: **12,4 h a 48 kHz y 6,2 h a 96 kHz**.
+     *
+     * Tiene default no-op para que las implementaciones existentes sigan compilando;
+     * sobrescribilo para animar el pulso desde el push en vez de con un reloj propio.
+     *
+     * @param beatIndex     Índice del beat que acaba de sonar, monótono desde que se
+     *                      armó el metrónomo.
+     * @param nextBeatFrame Frame ABSOLUTO del PRÓXIMO beat, en la escala de
+     *                      [IAudioNativeBridge.transportGetPlayFrame].
+     */
+    fun onBeat(beatIndex: Int, nextBeatFrame: Int) {}
 }

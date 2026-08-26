@@ -2372,6 +2372,11 @@ int wma_transport_get_remaining_beats(const WmaEngine* engine) {
     return engine->engine->getTransport().getRemainingBeats();
 }
 
+int64_t wma_transport_get_play_frame(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getTransport().getPlayFrame();
+}
+
 /* ================================================================
  * 21. Diagnostics & Latency
  * ================================================================ */

@@ -288,6 +288,7 @@ audio/src/main/cpp/engines/SoundFontManager.h::SoundFontManager::releaseActive
 audio/src/main/cpp/engines/SupersawEngine.h::SupersawEngine::process
 audio/src/main/cpp/engines/SynthEngine.h::SynthEngine::smoothParam
 audio/src/main/cpp/engines/WavetableEngine.h::WavetableEngine::process
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::emitBeat
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::finalizeLoopStartPlayback
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::masterRampFor
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::mixFxTracks

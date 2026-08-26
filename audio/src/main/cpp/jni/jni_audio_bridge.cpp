@@ -2729,6 +2729,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransp
     return wma_transport_get_remaining_beats(g_wmaEngine);
 }
 
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportGetPlayFrame(
+    JNIEnv* env, jobject thiz) {
+    return static_cast<jlong>(wma_transport_get_play_frame(g_wmaEngine));
+}
+
 // Export / Import (NOT RT-safe — call from IO thread)
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperExportMix(
@@ -2891,6 +2897,7 @@ jclass                    g_looperListenerClass = nullptr;
 jmethodID                 g_looperOnTrackProgress = nullptr;
 jmethodID                 g_looperOnTrackPlayingChanged = nullptr;
 jmethodID                 g_looperOnTrackPeakChanged = nullptr;
+jmethodID                 g_looperOnBeat             = nullptr;
 jmethodID                 g_looperOnTrackRecordProgress = nullptr;  // optional (QW-5)
 jmethodID                 g_looperOnTrackCompleted = nullptr;       // optional (F3.4)
 
@@ -2936,6 +2943,8 @@ void dispatchLooperEvent(const wm::LooperEvent& ev) {
                 method = g_looperOnTrackRecordProgress; break;
             case wm::LooperEvent::Type::TrackCompleted:
                 method = g_looperOnTrackCompleted; break;
+            case wm::LooperEvent::Type::Beat:
+                method = g_looperOnBeat; break;
         }
     }
     if (!listener || !method) return;
@@ -2947,6 +2956,16 @@ void dispatchLooperEvent(const wm::LooperEvent& ev) {
     } else if (ev.type == wm::LooperEvent::Type::TrackCompleted) {
         // onTrackCompleted(trackIndex) — no value payload.
         env->CallVoidMethod(listener, method, static_cast<jint>(ev.trackIndex));
+    } else if (ev.type == wm::LooperEvent::Type::Beat) {
+        // REQ-017 — el unico evento GLOBAL: los dos campos van con otro
+        // significado, y CRUZADOS respecto del resto. `value` lleva el indice de
+        // beat y `trackIndex` el frame absoluto del proximo. El orden de los
+        // argumentos de Kotlin es (beatIndex, nextBeatFrame), asi que el mapeo
+        // se escribe explicito aca en vez de caer en la rama generica de abajo,
+        // que los pasaria al reves y en los tipos equivocados.
+        env->CallVoidMethod(listener, method,
+                            static_cast<jint>(ev.value),
+                            static_cast<jint>(ev.trackIndex));
     } else {
         env->CallVoidMethod(listener, method,
                             static_cast<jint>(ev.trackIndex),
@@ -3037,6 +3056,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     if (!g_looperOnTrackCompleted && env->ExceptionCheck()) {
         env->ExceptionClear();
     }
+    // Optional (REQ-017): older listeners predate onBeat (Kotlin default body).
+    g_looperOnBeat = env->GetMethodID(
+        g_looperListenerClass, "onBeat", "(II)V");
+    if (!g_looperOnBeat && env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
 
     if (!g_looperOnTrackProgress
         || !g_looperOnTrackPlayingChanged
@@ -3073,6 +3098,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     g_looperOnTrackProgress = nullptr;
     g_looperOnTrackPlayingChanged = nullptr;
     g_looperOnTrackPeakChanged = nullptr;
+    g_looperOnBeat = nullptr;
     g_looperOnTrackRecordProgress = nullptr;
     g_looperOnTrackCompleted = nullptr;
 }

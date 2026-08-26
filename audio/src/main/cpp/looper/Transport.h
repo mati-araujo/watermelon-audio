@@ -187,8 +187,13 @@ public:
         // Advance the global play frame counter unconditionally — the looper
         // uses this for armed-recording downbeat alignment whether or not the
         // metronome is running.
-        mPlayFrameCounter.fetch_add(static_cast<int64_t>(numFrames),
-                                    std::memory_order_release);
+        // El valor DESPUES del avance: el frame en que termina este bloque
+        // (exclusivo). Es la escala en la que se expresa el ancla del beat
+        // (REQ-017) y la misma que devuelve getPlayFrame().
+        const int64_t playFrameEnd =
+            mPlayFrameCounter.fetch_add(static_cast<int64_t>(numFrames),
+                                        std::memory_order_release)
+            + static_cast<int64_t>(numFrames);
 
         int beatsLeft = mBeatsRemaining.load(std::memory_order_acquire);
         if (beatsLeft <= 0) return;
@@ -223,9 +228,28 @@ public:
                 ? (idx % beatsPerBar) == 0
                 : (idx == 0 && firstDown);
             looper.triggerClick(isDown);
+            const int beatIndex = idx;
             idx++;
             if (!continuous) beatsLeft--;
             next += fpb;
+            // REQ-017 — co-emision. Tres cosas que parecen detalle y no lo son:
+            //
+            //  1. Va ADENTRO del bucle, no despues. El evento tiene que salir de
+            //     la misma iteracion que el click para ser tan preciso como el —
+            //     ni mas ni menos. Sacarlo afuera lo cuantiza al bloque en vez de
+            //     al beat, y con framesPerBeat multiplo del bloque eso ademas
+            //     colapsa dos beats de un mismo bloque en uno solo.
+            //  2. Va DESPUES de `next += fpb`. El ancla es el frame del PROXIMO
+            //     beat, no el residuo del que acaba de sonar: antes de la suma,
+            //     `next` es negativo y apunta al beat ya ido.
+            //  3. `playFrameEnd + next` es el frame absoluto del proximo beat.
+            //     `next` se mide desde el FIN del bloque, que es exactamente lo
+            //     que vale `playFrameEnd`.
+            //
+            // El consumidor necesita el ancla ABSOLUTA, no un delta: no conoce el
+            // frame de emision, asi que un delta lo atrasaria justo lo que tardo
+            // el evento en llegar — el defecto que REQ-017 viene a sacar.
+            looper.emitBeat(beatIndex, playFrameEnd + static_cast<int64_t>(next));
         }
 
         mClickIndex.store(idx, std::memory_order_relaxed);

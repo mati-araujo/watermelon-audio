@@ -28,11 +28,24 @@ struct LooperEvent {
         // auto-stopped. `value` unused. Distinct from PlayingChanged(false) so the
         // UI can tell "completed N plays" from "user stopped" (F3.4).
         TrackCompleted = 4,
+        // REQ-017 — un beat de la grilla acaba de sonar. Es el UNICO tipo GLOBAL:
+        // no habla de una pista, asi que reusa los dos campos con otro significado
+        // (`trackIndex` = ancla, `value` = indice de beat). Ese reuso por tipo ya
+        // es la convencion del enum — `TrackCompleted` declara `value` sin usar.
+        //
+        // Se co-emite desde la MISMA iteracion del bucle de `Transport::tick()`
+        // que dispara el click, asi que es exactamente tan preciso como el click
+        // — que esta cuantizado al bloque por diseño, no al sample.
+        Beat = 5,
     };
 
     Type    type;
-    int32_t trackIndex;  // 0..7
-    float   value;       // progress (0..1), 1.0/0.0 for bool, or peak level (linear 0..1)
+    // 0..15 para los tipos por pista. Para `Beat` NO es una pista: es el frame
+    // absoluto del PROXIMO beat (ver `value`).
+    int32_t trackIndex;
+    // progress (0..1), 1.0/0.0 for bool, or peak level (linear 0..1).
+    // Para `Beat`: el indice de beat, monotono desde que se armo el metronomo.
+    float   value;
 };
 
 /**

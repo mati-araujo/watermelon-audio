@@ -35,6 +35,7 @@
 #include "tests/support/TestWait.h"
 
 #include "looper/LooperExportTypes.h"
+#include "looper/LooperEventDispatcher.h"
 
 #include <algorithm>
 #include <deque>
@@ -1400,6 +1401,43 @@ TEST_F(CApiLooperTest, ANullEngineIsIgnoredRatherThanCrashing) {
     EventCollector collector;
     wma_looper_set_event_callback(nullptr, &EventCollector::callback, &collector);
     SUCCEED();
+}
+
+
+// ===========================================================================
+// REQ-017 · AC-017.7 — los numeros del enum son ABI
+// ===========================================================================
+
+// Un consumidor ya compilado contra la version anterior interpreta el `int type`
+// por su NUMERO. Renumerar es cambiarle el significado a los eventos que ya
+// viajan, en silencio: el receptor no falla, entiende otra cosa. Por eso el
+// header lo declara y por eso esto se testea en vez de confiar en el comentario.
+TEST(WmaLooperEventAbi, TheNumbersAreContractAndBeatIsAppendedAtTheEnd) {
+    EXPECT_EQ(WMA_LOOPER_EVENT_PROGRESS,        0);
+    EXPECT_EQ(WMA_LOOPER_EVENT_PLAYING_CHANGED, 1);
+    EXPECT_EQ(WMA_LOOPER_EVENT_PEAK_CHANGED,    2);
+    EXPECT_EQ(WMA_LOOPER_EVENT_RECORD_PROGRESS, 3);
+    EXPECT_EQ(WMA_LOOPER_EVENT_TRACK_COMPLETED, 4);
+    EXPECT_EQ(WMA_LOOPER_EVENT_BEAT,            5);
+}
+
+// Y que el enum de C ESPEJE al interno, que es lo que el header promete. Los dos
+// pueden derivar por separado sin que nada falle: el sink de la C API castea el
+// tipo interno a int sin traducir, asi que una divergencia manda un numero
+// equivocado al consumidor y ningun compilador se entera.
+TEST(WmaLooperEventAbi, TheCEnumMirrorsTheInternalOne) {
+    EXPECT_EQ(static_cast<int>(wm::LooperEvent::Type::Progress),
+              WMA_LOOPER_EVENT_PROGRESS);
+    EXPECT_EQ(static_cast<int>(wm::LooperEvent::Type::PlayingChanged),
+              WMA_LOOPER_EVENT_PLAYING_CHANGED);
+    EXPECT_EQ(static_cast<int>(wm::LooperEvent::Type::PeakChanged),
+              WMA_LOOPER_EVENT_PEAK_CHANGED);
+    EXPECT_EQ(static_cast<int>(wm::LooperEvent::Type::RecordProgress),
+              WMA_LOOPER_EVENT_RECORD_PROGRESS);
+    EXPECT_EQ(static_cast<int>(wm::LooperEvent::Type::TrackCompleted),
+              WMA_LOOPER_EVENT_TRACK_COMPLETED);
+    EXPECT_EQ(static_cast<int>(wm::LooperEvent::Type::Beat),
+              WMA_LOOPER_EVENT_BEAT);
 }
 
 }  // namespace
