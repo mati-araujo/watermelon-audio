@@ -1062,6 +1062,48 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetTun
     return result;
 }
 
+/**
+ * REQ-015 S2 — el puerto offline. **NO usa `g_wmaEngine`, y eso es el contrato.**
+ *
+ * Es la unica `nativeTuner*` de este archivo que no toca el motor global: analiza
+ * una grabacion, no lo que esta sonando. Si alguien le agrega `g_wmaEngine` aca,
+ * rompe AC-015.4 sin que el compilador diga nada — el modo de falla es que se le
+ * mueva la aguja al musico.
+ *
+ * `frames` sale del largo del array: la superficie Kotlin manda las muestras y el
+ * layout, y que los dos numeros no se puedan contradecir es preferible a un
+ * parametro mas.
+ */
+JNIEXPORT jfloatArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeAnalyzeTunerBuffer(
+    JNIEnv* env, jobject thiz, jfloatArray samples, jint channels, jint sampleRate,
+    jfloat targetHz) {
+    if (samples == nullptr) return nullptr;
+    if (channels != 1 && channels != 2) return nullptr;
+
+    const jsize length = env->GetArrayLength(samples);
+    const jint frames = length / channels;
+    if (frames <= 0) return nullptr;
+
+    // GetFloatArrayElements en vez de una copia propia: el analisis es de solo
+    // lectura, asi que se libera con JNI_ABORT y no se copia nada de vuelta.
+    jfloat* raw = env->GetFloatArrayElements(samples, nullptr);
+    if (raw == nullptr) return nullptr;
+
+    float values[WMA_TUNER_SNAPSHOT_VALUES];
+    const bool ok = wma_tuner_analyze_buffer(raw, frames, channels, sampleRate, targetHz,
+                                             values);
+    env->ReleaseFloatArrayElements(samples, raw, JNI_ABORT);
+    if (!ok) return nullptr;
+
+    jfloatArray result = env->NewFloatArray(WMA_TUNER_SNAPSHOT_VALUES);
+    if (result == nullptr) {
+        return nullptr;
+    }
+    env->SetFloatArrayRegion(result, 0, WMA_TUNER_SNAPSHOT_VALUES, values);
+    return result;
+}
+
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReleaseInputNode(
     JNIEnv* env, jobject thiz) {

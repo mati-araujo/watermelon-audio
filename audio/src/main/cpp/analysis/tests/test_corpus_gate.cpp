@@ -14,9 +14,11 @@
  */
 
 #include "support/Corpus.h"
+#include "support/CorpusSweep.h"
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -96,15 +98,58 @@ TEST(CorpusGate, AChecksumMismatchIsLoudInsteadOfProducingAStrangeResult) {
 // ---------------------------------------------------------------------------
 // El test de robustez de verdad: SKIPPED mientras no haya corpus
 // ---------------------------------------------------------------------------
+/**
+ * REQ-015 S3 · 3.6 — ESTE TEST DEJO DE SER UN `FAIL()` DORMIDO.
+ *
+ * Hasta esta etapa decia "hay corpus y todavia no se escribio el barrido": codigo
+ * que esperaba un dia que puede no llegar. El barrido ahora existe
+ * (`support/CorpusSweep.h`) y **se ejerce en cada corrida** contra un corpus
+ * sintetico —ver `test_corpus_sweep.cpp`—, asi que lo unico que falta para el
+ * material de campo es el material. Cuando aparezca, esto corre sobre el sin
+ * cambiar una linea.
+ *
+ * 🔴 LO QUE ESTE TEST NO AFIRMA, Y POR QUE NO
+ * --------------------------------------------
+ * No hay un presupuesto de exactitud para el corpus grabado, y **no se inventa
+ * uno**. El contrato declara `strobe_worst_error_cents = 0.001092`, pero eso sale
+ * de material sintetico limpio: una grabacion real trae ruido, decaimiento e
+ * inarmonicidad, y el numero que corresponda ahi sale de MEDIRLO sobre el
+ * material — no de elegirlo a ojo hoy.
+ *
+ * Lo que si se puede afirmar sin el material es lo cualitativo, y es justo lo que
+ * atrapa los fallos que importan: que cada archivo se lea, se analice y publique
+ * una altura, y que ninguna lectura este a mas de media nota de su frecuencia
+ * declarada. Un error de esa magnitud no es "el presupuesto es discutible": es el
+ * rate leido mal, el archivo leido mal, o el motor midiendo otra cuerda.
+ */
 TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
     const auto st = corpus::stateOf(corpus::defaultCorpusDir(), corpus::manifestPath());
     if (!corpus::shouldRunRobustness(st)) {
         GTEST_SKIP() << "sin corpus grabado (" << corpus::describe(st)
                      << "). Se baja con: bash scripts/fetch-corpus.sh — y hasta "
-                        "entonces esto NO cuenta como cobertura.";
+                        "entonces esto NO cuenta como cobertura. El BARRIDO en si "
+                        "no queda sin probar: corre contra un corpus sintetico en "
+                        "test_corpus_sweep.cpp.";
     }
-    FAIL() << "hay corpus y todavia no se escribio el barrido: es 10.7, y "
-              "necesita el material que 10.4 baja";
+
+    /// Media nota. No es un presupuesto de exactitud: es la frontera entre "hay
+    /// que calibrar el numero" y "esto midio otra cosa".
+    constexpr double kWrongNoteCents = 50.0;
+
+    const auto results = corpus::sweepAll(corpus::defaultCorpusDir(), corpus::manifestPath());
+    ASSERT_FALSE(results.empty())
+        << "el corpus esta verificado y el barrido no leyo una sola entrada";
+
+    for (const corpus::Outcome& o : results) {
+        EXPECT_TRUE(o.analysed) << o.name << ": no se pudo analizar";
+        EXPECT_TRUE(o.published) << o.name << ": no publico altura";
+        if (o.published) {
+            EXPECT_LT(std::fabs(o.cents), kWrongNoteCents)
+                << o.name << ": " << o.cents << " cents contra su frecuencia declarada ("
+                << o.trueHz << " Hz). A mas de media nota no es un presupuesto discutible: "
+                   "es el rate, el archivo, o la nota equivocada.";
+        }
+    }
 }
 
 }  // namespace

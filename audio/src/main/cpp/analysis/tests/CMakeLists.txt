@@ -36,10 +36,14 @@ add_executable(analysis_tests
     test_silence_gate.cpp
     test_sign_outside_range.cpp
     test_discontinuity_count.cpp
+    test_offline_analysis.cpp
+    test_offline_regression.cpp
+    test_corpus_sweep.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisThread.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../OfflineAnalysis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseSlopeEstimator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../StrobeTracker.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../InharmonicityEstimator.cpp

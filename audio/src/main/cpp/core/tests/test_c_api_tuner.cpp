@@ -30,6 +30,7 @@
 
 #include "api/watermelon_audio.h"
 #include "api/watermelon_audio_internal.h"
+#include "analysis/AnalysisRing.h"
 #include "analysis/AnalysisSnapshot.h"
 #include "analysis/AnalysisThread.h"
 
@@ -39,6 +40,7 @@
 #include <chrono>
 #include <cmath>
 #include <thread>
+#include <vector>
 
 namespace wma_test {
 namespace {
@@ -49,6 +51,7 @@ using wma::analysis::kSnapFramesAnalyzed;
 using wma::analysis::kSnapLevelRms;
 using wma::analysis::kSnapState;
 using wma::analysis::kSnapCents;
+using wma::analysis::kSnapDiscontinuityCount;
 using wma::analysis::kSnapLockedString;
 using wma::analysis::kSnapPhaseAngle;
 using wma::analysis::kSnapUncertainty;
@@ -886,4 +889,278 @@ TEST_F(TunerApiTest, ADifferentCaptureRateDoesNotShiftTheCalibration) {
     for (int i = 0; i < 20; ++i) renderWithInput(1, kBlockFrames, 0.2f);
     ASSERT_TRUE(waitForValue(mWma, kSnapCaptureSampleRate, 48000.0f, buf));
 }
+
+// ---------------------------------------------------------------------------
+// REQ-015 S2 — el puerto offline, desde la frontera
+// ---------------------------------------------------------------------------
+/**
+ * `wma_tuner_analyze_buffer` es la PRIMERA llamada del afinador que no lleva
+ * `WmaEngine*`. Lo que se prueba aca es lo que solo la frontera puede romper:
+ * que no haga falta motor, que los dos formatos de buffer midan lo mismo, y
+ * —lo unico con modo de falla SILENCIOSO— que una llamada offline no le mueva la
+ * aguja al musico que esta afinando.
+ */
+
+namespace {
+
+/// Ninguno es 48000, por la misma razon que el resto del archivo.
+constexpr int kOfflineRate = 44100;
+
+/// A2. El mismo objetivo que usan los tests del camino vivo de arriba, para que
+/// las dos mitades de AC-015.4 se comparen contra el mismo numero.
+constexpr double kOfflineTargetHz = 110.0;
+
+/// ~1,5 s: de sobra para que la integracion converja sin objetivo movil.
+constexpr int kOfflineFrames = 66150;
+
+/// Lo que el puerto tiene que medirle a `offlineString(detunedBy(kOfflineDetune))`.
+constexpr double kOfflineDetuneCents = 3.0;
+
+/// El presupuesto con el que se afirma una lectura. Es el mismo 0,1 cents que ya
+/// usa `WithATargetTheSnapshotPublishesRealCents` para el camino vivo.
+constexpr double kOfflineBudgetCents = 0.1;
+
+double detunedBy(double cents) { return kOfflineTargetHz * std::pow(2.0, cents / 1200.0); }
+
+/**
+ * Una cuerda de 4 parciales, con la fase continua por construccion.
+ *
+ * @param channels 1 (mono) o 2 (estereo intercalado, L == R). Los dos formatos
+ *   salen del MISMO calculo a proposito: si difirieran en una muestra, el test
+ *   que exige que midan identico estaria midiendo el generador y no el puerto.
+ */
+std::vector<float> offlineString(double f0, int frames, int channels) {
+    std::vector<float> b(static_cast<size_t>(frames) * static_cast<size_t>(channels), 0.0f);
+    for (int i = 0; i < frames; ++i) {
+        double s = 0.0;
+        for (int n = 1; n <= 4; ++n) {
+            s += (0.5 / n) * std::sin(2.0 * M_PI * f0 * n * i / kOfflineRate);
+        }
+        for (int c = 0; c < channels; ++c) {
+            b[static_cast<size_t>(i) * static_cast<size_t>(channels) + static_cast<size_t>(c)] =
+                static_cast<float>(s);
+        }
+    }
+    return b;
+}
+
+/// Compara dos snapshots BIT A BIT (NaN cuenta como igual a NaN).
+void expectIdenticalSnapshots(const std::array<float, WMA_TUNER_SNAPSHOT_VALUES>& a,
+                              const std::array<float, WMA_TUNER_SNAPSHOT_VALUES>& b,
+                              const char* what) {
+    for (int i = 0; i < WMA_TUNER_SNAPSHOT_VALUES; ++i) {
+        const auto k = static_cast<size_t>(i);
+        if (std::isnan(a[k])) {
+            EXPECT_TRUE(std::isnan(b[k])) << what << ": el valor " << i << " fue NaN una vez y no la otra";
+        } else {
+            EXPECT_EQ(a[k], b[k]) << what << ": el valor " << i << " cambio";
+        }
+    }
+}
+
+}  // namespace
+
+/**
+ * AC-015.1 — SIN MOTOR, SIN DISPOSITIVO, SIN PERMISO Y SIN STREAM.
+ *
+ * 🔴 Es un `TEST` suelto y no un `TEST_F`, y esa es la mitad de la afirmacion:
+ * `CApiFixture` crea el motor en `SetUp`, asi que heredarlo dejaria sin probar
+ * justo lo que el AC pide. Aca no hay `wma_engine_create`, no hay backend y no
+ * hay `wma_tuner_start` — hay un buffer y nada mas.
+ */
+TEST(TunerOfflinePort, AnalysingABufferNeedsNoEngineNoDeviceAndNoStream) {
+    const auto buf = offlineString(detunedBy(kOfflineDetuneCents), kOfflineFrames, 2);
+
+    auto out = sentinelBuffer();
+    ASSERT_TRUE(wma_tuner_analyze_buffer(buf.data(), kOfflineFrames, 2, kOfflineRate,
+                                         static_cast<float>(kOfflineTargetHz), out.data()))
+        << "el puerto no publico nada sin motor: la unica razon de existir de esta "
+           "llamada es que un consumidor pueda correr una regresion sin telefono";
+
+    EXPECT_FALSE(std::isnan(out[kSnapCents])) << "publico un snapshot sin lectura de altura";
+    EXPECT_NEAR(out[kSnapCents], static_cast<float>(kOfflineDetuneCents), kOfflineBudgetCents)
+        << "midio " << out[kSnapCents] << " cents contra " << kOfflineDetuneCents << " reales";
+    EXPECT_EQ(out[kSnapCaptureSampleRate], static_cast<float>(kOfflineRate))
+        << "publico un rate que no es el del material: la calibracion entera cuelga de ahi";
+    EXPECT_GT(out[kSnapFramesAnalyzed], 0.0f) << "no analizo nada";
+}
+
+/**
+ * AC-015.1 — argumentos que no describen audio: `false` y el buffer INTACTO.
+ *
+ * Los centinelas no son ceremonia: este repo ya shippeo dos stubs que devolvian
+ * un array de ceros, y los ceros derrotaron los fallbacks elvis de sus propios
+ * callers porque un array de ceros NO es dato ausente, es dato plausible.
+ *
+ * `channels = 3` esta aca por su propio motivo: sin validarlo, la unica salida
+ * seria tratarlo como estereo y leer 2/3 del material — una medicion bien
+ * formada de una señal que nadie mando.
+ */
+TEST(TunerOfflinePort, BadArgumentsAreRefusedWithoutTouchingTheOutput) {
+    // 🔴 EL MATERIAL ES EL BUENO, Y ESO ES LA MITAD DEL TEST.
+    //
+    // La primera version usaba 1024 frames — 23 ms — y pasaba por la razon
+    // equivocada: con tan poco material el analisis no llega a publicar NUNCA,
+    // asi que todo devolvia `false` y ningun argumento se estaba rechazando.
+    // Lo destapo el mutante M3 (sacar la validacion de `channels`): sobrevivio.
+    //
+    // Con un buffer que SI alcanza para una lectura, el unico motivo posible de
+    // un `false` es el argumento — y el control positivo de abajo lo ancla.
+    const auto buf = offlineString(kOfflineTargetHz, kOfflineFrames, 2);
+    const float target = static_cast<float>(kOfflineTargetHz);
+    auto out = sentinelBuffer();
+
+    {
+        // Control positivo: con TODO bien, este mismo material devuelve una lectura.
+        auto good = sentinelBuffer();
+        ASSERT_TRUE(wma_tuner_analyze_buffer(buf.data(), kOfflineFrames, 2, kOfflineRate,
+                                             target, good.data()))
+            << "premisa rota: el material del test no alcanza para una lectura, asi que "
+               "un `false` mas abajo no probaria que se rechazo el argumento";
+    }
+
+    EXPECT_FALSE(wma_tuner_analyze_buffer(nullptr, kOfflineFrames, 2, kOfflineRate, target,
+                                          out.data()));
+    EXPECT_FALSE(wma_tuner_analyze_buffer(buf.data(), 0, 2, kOfflineRate, target, out.data()));
+    EXPECT_FALSE(wma_tuner_analyze_buffer(buf.data(), -1, 2, kOfflineRate, target, out.data()));
+    EXPECT_FALSE(wma_tuner_analyze_buffer(buf.data(), kOfflineFrames, 2, 0, target, out.data()));
+    EXPECT_FALSE(wma_tuner_analyze_buffer(buf.data(), kOfflineFrames, 2, -1, target, out.data()));
+    EXPECT_FALSE(wma_tuner_analyze_buffer(buf.data(), kOfflineFrames, 0, kOfflineRate, target,
+                                          out.data()));
+    EXPECT_FALSE(wma_tuner_analyze_buffer(buf.data(), kOfflineFrames, 3, kOfflineRate, target,
+                                          out.data()))
+        << "acepto un layout que no existe: leerlo igual mide una señal que nadie mando";
+    EXPECT_FALSE(wma_tuner_analyze_buffer(buf.data(), kOfflineFrames, 2, kOfflineRate, target,
+                                          nullptr));
+
+    EXPECT_TRUE(allSentinels(out))
+        << "escribio en el buffer en un caso de error: devolver datos a medias es peor "
+           "que no devolver nada";
+}
+
+/**
+ * AC-015.1 — el MISMO audio como mono y como estereo se lee IDENTICO.
+ *
+ * El nucleo habla el formato del ring —estereo intercalado, que es el de la
+ * captura— y el material offline es mono. La adaptacion vive en la frontera, y
+ * este test es lo que impide que se vuelva un SEGUNDO motor: bit a bit, no
+ * `EXPECT_NEAR`. El ring suma `0,5·(L+R)`, asi que con L == R la igualdad exacta
+ * es una propiedad, no una coincidencia numerica.
+ */
+TEST(TunerOfflinePort, TheSameSignalAsMonoAndAsStereoReadsIdentically) {
+    const double f0 = detunedBy(kOfflineDetuneCents);
+    const auto mono   = offlineString(f0, kOfflineFrames, 1);
+    const auto stereo = offlineString(f0, kOfflineFrames, 2);
+
+    auto a = sentinelBuffer();
+    auto b = sentinelBuffer();
+    ASSERT_TRUE(wma_tuner_analyze_buffer(mono.data(), kOfflineFrames, 1, kOfflineRate,
+                                         static_cast<float>(kOfflineTargetHz), a.data()));
+    ASSERT_TRUE(wma_tuner_analyze_buffer(stereo.data(), kOfflineFrames, 2, kOfflineRate,
+                                         static_cast<float>(kOfflineTargetHz), b.data()));
+
+    expectIdenticalSnapshots(a, b, "mono contra estereo");
+}
+
+/**
+ * 🔴 AC-015.4, LA MITAD QUE IMPORTA — y su modo de falla es SILENCIOSO.
+ *
+ * Un puerto que entrara por el motor —alimentando su ring, o publicando en su
+ * snapshot— le moveria la aguja al musico que esta afinando, y desde afuera eso
+ * se ve como un DSP roto, no como "un test de regresion rompio algo". Nada en la
+ * suite lo notaria: el puerto seguiria devolviendo su numero.
+ *
+ * POR QUE LOS CONTADORES Y NO SOLO LOS CENTS
+ * ------------------------------------------
+ * `framesAnalyzed` es la afirmacion que no depende de que tan lejos quede la
+ * lectura: inyectar el buffer offline en el ring vivo son 66150 frames, mas de
+ * OCHO ANILLOS enteros. Los cents podrian recuperarse si el test siguiera
+ * alimentando —y por eso NO sigue alimentando—, pero el contador no vuelve
+ * atras.
+ */
+TEST_F(TunerApiTest, AnOfflineAnalysisDoesNotMoveTheLiveReading) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(kOfflineTargetHz)));
+    ASSERT_TRUE(wma_tuner_start(mWma));
+
+    // El afinador vivo, midiendo un tono a +1 cent y ya convergido.
+    feedTone(mWma, detunedBy(1.0), kFirstRate, 160, kBlockFrames);
+    auto before = sentinelBuffer();
+    ASSERT_TRUE(waitForMeasurement(mWma, before));
+    ASSERT_NEAR(before[kSnapCents], 1.0f, kOfflineBudgetCents)
+        << "premisa rota: el camino vivo no esta midiendo lo que deberia antes de empezar";
+
+    // Y ahora una llamada offline con una señal MUY distinta: otra desafinacion,
+    // 1,5 s de material y otro objetivo. Si el puerto entrara por el motor, esto
+    // es exactamente lo que le arruinaria la lectura al musico.
+    const auto other = offlineString(detunedBy(-40.0), kOfflineFrames, 2);
+    auto off = sentinelBuffer();
+    ASSERT_TRUE(wma_tuner_analyze_buffer(other.data(), kOfflineFrames, 2, kOfflineRate,
+                                         static_cast<float>(kOfflineTargetHz), off.data()));
+    EXPECT_NEAR(off[kSnapCents], -40.0f, kOfflineBudgetCents)
+        << "el puerto tampoco midio lo suyo";
+
+    // Espera de AUSENCIA: no hay condicion que esperar, hay que darle al thread
+    // de analisis la oportunidad de reaccionar a algo que NO tiene que haber
+    // pasado. Drenar 66150 frames son microsegundos de CPU; 200 ms es holgado.
+    wma_test::sleepFixed(std::chrono::milliseconds(200));
+
+    auto after = sentinelBuffer();
+    ASSERT_TRUE(wma_tuner_get_snapshot(mWma, after.data()));
+
+    // 🔴 NO SE VUELVE A ALIMENTAR ANTES DE AFIRMAR. Alimentar dejaria que la
+    // integracion se recupere de la inyeccion, y entonces el mutante sobreviviria.
+    EXPECT_LE(after[kSnapFramesAnalyzed] - before[kSnapFramesAnalyzed],
+              static_cast<float>(wma::analysis::AnalysisRing::kCapacityFrames))
+        << "el analisis vivo consumio " << (after[kSnapFramesAnalyzed] - before[kSnapFramesAnalyzed])
+        << " frames de mas: la llamada offline entro por el motor";
+    EXPECT_EQ(after[kSnapDroppedFrames], before[kSnapDroppedFrames])
+        << "el ring vivo piso frames que nadie le mando";
+    EXPECT_EQ(after[kSnapDiscontinuityCount], before[kSnapDiscontinuityCount])
+        << "la entrada viva perdio continuidad por una llamada que no la toca";
+    EXPECT_NEAR(after[kSnapCents], before[kSnapCents], kOfflineBudgetCents)
+        << "la aguja del musico se movio de " << before[kSnapCents] << " a " << after[kSnapCents];
+    EXPECT_EQ(wma_tuner_get_target(mWma), static_cast<float>(kOfflineTargetHz))
+        << "la llamada offline le empujo su objetivo al motor";
+
+    wma_tuner_stop(mWma);
+}
+
+/**
+ * AC-015.4, LA OTRA DIRECCION — y un test de la primera no la ve.
+ *
+ * Que el afinador vivo no se ensucie no dice nada sobre si el resultado offline
+ * quedo contaminado por el. El mismo buffer, con el afinador parado y con el
+ * afinador corriendo y midiendo, tiene que dar lo mismo **bit a bit**: el puerto
+ * arma su propio ring, su propio snapshot y su propio analisis por llamada, asi
+ * que ni siquiera hay una tolerancia que discutir.
+ */
+TEST_F(TunerApiTest, TheLiveTunerDoesNotContaminateTheOfflineResult) {
+    const auto buf = offlineString(detunedBy(kOfflineDetuneCents), kOfflineFrames, 2);
+    const float target = static_cast<float>(kOfflineTargetHz);
+
+    auto quiet = sentinelBuffer();
+    ASSERT_TRUE(wma_tuner_analyze_buffer(buf.data(), kOfflineFrames, 2, kOfflineRate,
+                                         target, quiet.data()));
+
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_set_target(mWma, target));
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    feedTone(mWma, detunedBy(1.0), kFirstRate, 160, kBlockFrames);
+    auto live = sentinelBuffer();
+    ASSERT_TRUE(waitForMeasurement(mWma, live))
+        << "premisa rota: el afinador vivo no llego a medir, asi que este test no "
+           "estaria comparando contra nada";
+
+    auto busy = sentinelBuffer();
+    ASSERT_TRUE(wma_tuner_analyze_buffer(buf.data(), kOfflineFrames, 2, kOfflineRate,
+                                         target, busy.data()));
+
+    expectIdenticalSnapshots(quiet, busy, "afinador parado contra afinador corriendo");
+
+    wma_tuner_stop(mWma);
+}
+
 }  // namespace wma_test

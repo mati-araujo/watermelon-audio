@@ -37,9 +37,31 @@ void AnalysisThread::stop() {
 }
 
 void AnalysisThread::drainLoop() {
-    const float nan = std::numeric_limits<float>::quiet_NaN();
-
     while (mRunning.load(std::memory_order_acquire)) {
+        // Lo UNICO del thread que habia adentro del cuerpo era esta siesta. El
+        // resto es trabajo puro sobre el estado del objeto, y por eso se puede
+        // manejar desde afuera sin reimplementar nada (REQ-015 S1).
+        if (drainOnce() == DrainOutcome::kRingEmpty) {
+            std::this_thread::sleep_for(kIdleNap);
+        }
+    }
+}
+
+/**
+ * UNA vuelta del analisis. La comparten el thread y el puerto offline.
+ *
+ * 🔴 EL PUERTO NO REIMPLEMENTA EL ANALISIS, Y ESA ES LA RAZON DE ESTA FUNCION.
+ * Un camino offline paralelo mediria OTRO motor: su verde no diria nada del
+ * producto, que es justo lo que AC-015.3 existe para impedir. Extraer el cuerpo
+ * deja UNA sola definicion del analisis y dos maneras de empujarlo.
+ *
+ * Devuelve `kRingEmpty` cuando no habia nada que drenar, para que cada llamador
+ * decida: el thread duerme, el puerto offline termina. Esa decision es lo unico
+ * que los distingue.
+ */
+AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    {
         // --- la configuracion se mira ANTES de drenar ------------------------
         //
         // El orden no es cosmetico: al cambiar el objetivo hay que descartar lo
@@ -244,8 +266,7 @@ void AnalysisThread::drainLoop() {
         // el descarte, ninguna. Cuesta un drenaje de latencia sobre una
         // integración que se acaba de tirar de todos modos.
         if (got <= 0) {
-            std::this_thread::sleep_for(kIdleNap);
-            continue;
+            return DrainOutcome::kRingEmpty;
         }
 
         // El descarte va DESPUES del chequeo de arriba, y el orden importa: con
@@ -255,7 +276,7 @@ void AnalysisThread::drainLoop() {
         // saltar sin dormir es lo correcto: la vuelta consumio frames, o sea que
         // avanza hacia la costura en vez de esperarla.
         if (crossedSeam) {
-            continue;
+            return DrainOutcome::kSkipped;
         }
 
         double sumSq = 0.0;
@@ -467,6 +488,7 @@ void AnalysisThread::drainLoop() {
 
         mSnapshot.publish(values);
     }
+    return DrainOutcome::kPublished;
 }
 
 }  // namespace wma::analysis
