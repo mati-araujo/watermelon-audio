@@ -55,8 +55,19 @@ class TunerEngineJniTest {
         private const val TARGET_A = 441.37f
         private const val TARGET_B = 329.63f
 
-        /** Las seis cuerdas de una guitarra en afinación estándar. */
-        private val CANDIDATES = floatArrayOf(82.41f, 110.0f, 146.83f, 196.0f, 246.94f, 329.63f)
+        /**
+         * Las seis cuerdas de una guitarra en afinación estándar.
+         *
+         * 🔴 **Una FUNCIÓN y no un `val` compartido, y lo decidió un mutante que
+         * sobrevivió.** `nativeSetTunerCandidates` recibe el array PINNEADO, así que
+         * un defecto que escriba ahí corrompe el array de Kotlin. Con un `val` de
+         * companion, el primer test que llamara a la función le dejaba el destrozo al
+         * siguiente — y el siguiente sacaba de ese mismo array **su sujeto y su línea
+         * de base**, o sea comparaba corrupto contra corrupto y pasaba en verde.
+         * Medido: el mutante moría corriendo ese test SOLO y sobrevivía corriendo la
+         * clase entera.
+         */
+        private fun candidates() = floatArrayOf(82.41f, 110.0f, 146.83f, 196.0f, 246.94f, 329.63f)
 
         private const val RATE = 48_000
         private const val SLOT_HARMONIC = 0
@@ -98,7 +109,7 @@ class TunerEngineJniTest {
 
         assertFalse(jni("nativeIsTunerRunning") { it.isTunerRunning() }, "no arrancó nadie")
         assertFalse(jni("nativeSetTunerTarget") { it.setTunerTargetHz(TARGET_A) }, "sin motor no hay objetivo que poner")
-        assertFalse(jni("nativeSetTunerCandidates") { it.setTunerCandidates(CANDIDATES) }, "sin motor no hay candidatos")
+        assertFalse(jni("nativeSetTunerCandidates") { it.setTunerCandidates(candidates()) }, "sin motor no hay candidatos")
         assertFalse(jni("nativeLockTunerString") { it.lockTunerString(2) }, "sin motor no hay cuerda que enganchar")
         assertFalse(jni("nativeIntonationCapture") { it.captureIntonation(SLOT_HARMONIC) }, "sin motor no hay qué capturar")
         assertEquals(0, jni("nativeIntonationState") { it.intonationState() }, "NEED_HARMONIC es el estado sin motor")
@@ -161,11 +172,20 @@ class TunerEngineJniTest {
     fun `los candidatos cruzan pinneados y el array de Kotlin queda intacto`() {
         assertTrue(jni("nativeStartTuner") { it.startTunerSync() })
 
-        val candidates = CANDIDATES.copyOf()
-        val before = CANDIDATES.copyOf()
+        val subject = candidates()
 
-        assertTrue(jni("nativeSetTunerCandidates") { it.setTunerCandidates(candidates) }, "con motor, los candidatos entran")
-        assertTrue(before.contentEquals(candidates), "el array de Kotlin volvió MODIFICADO: se soltó sin JNI_ABORT")
+        assertTrue(jni("nativeSetTunerCandidates") { it.setTunerCandidates(subject) }, "con motor, los candidatos entran")
+
+        // 🔴 La línea de base es LITERAL, no una copia de `subject`.
+        //
+        // Con una copia, el control sale del mismo lugar que el sujeto: si algo lo
+        // corrompió antes de que se saque la copia, la comparación da verde contra el
+        // destrozo. Eso no es hipotético — es lo que dejó vivo al mutante de
+        // `JNI_ABORT` la primera vez.
+        assertTrue(
+            subject.contentEquals(floatArrayOf(82.41f, 110.0f, 146.83f, 196.0f, 246.94f, 329.63f)),
+            "el array de Kotlin volvió MODIFICADO (${subject.joinToString()}): se soltó sin JNI_ABORT",
+        )
 
         // Y con el modo rápido armado, engancharse a una cuerda por índice.
         assertTrue(jni("nativeLockTunerString") { it.lockTunerString(2) }, "con motor se puede enganchar")
@@ -198,6 +218,14 @@ class TunerEngineJniTest {
             "sin las dos capturas la diferencia es NaN, no 0",
         )
 
+        // 🔴 HUECO DECLARADO, medido con un mutante: convertir `nativeIntonationReset`
+        // en un no-op **sobrevive** a este arnés. No es debilidad del test, es el
+        // alcance: sin audio nada converge, el estado nunca sale de NEED_HARMONIC, y un
+        // reset que no hace nada es indistinguible de uno que funciona. Acá queda
+        // cubierto lo que AC-016.1 promete —que CRUZA la frontera contra un JNIEnv
+        // real— y su comportamiento lo cubre `core/tests/test_c_api_tuner.cpp`, que sí
+        // puede manejar el backend. Lo mismo vale para el camino CON dato de
+        // `nativeGetTunerSnapshot`.
         jni("nativeIntonationReset") { it.resetIntonation() }
         assertEquals(0, jni("nativeIntonationState") { it.intonationState() }, "resetear deja NEED_HARMONIC")
     }
