@@ -54,31 +54,42 @@ internal object JniHarness {
             loaded = true
             return
         }
+        fail(loadDiagnosis(LIBRARY_NAME))
+    }
+
+    /**
+     * El mensaje que explica **por qué** no se pudo cargar, con la causa real, dónde
+     * se buscó y cómo construirla.
+     *
+     * Está separado y es alcanzable desde el self-test a propósito: se lo ejerce con
+     * un nombre inexistente, porque un diagnóstico que nunca se probó es prosa —
+     * exactamente la clase de cosa que este repo dejó de aceptar.
+     *
+     * La llamada directa a `System.loadLibrary` de acá abajo NO es el camino del
+     * arnés (ése es [NativeLibraryLoader], el de producción): existe sólo para
+     * recuperar el `UnsatisfiedLinkError` que `ensureLoaded()` se traga.
+     */
+    fun loadDiagnosis(name: String): String {
         val path = System.getProperty("java.library.path").orEmpty()
         val cause = try {
-            System.loadLibrary(LIBRARY_NAME)
-            // Cargó a la segunda: no hay causa que reportar, pero tampoco hay que
-            // ocultar que el camino de produccion dijo que no.
-            loaded = true
-            return
+            System.loadLibrary(name)
+            "ninguna — cargó al reintentar, o sea que ensureLoaded() devolvió false sin motivo"
         } catch (e: UnsatisfiedLinkError) {
             e.message ?: e.toString()
         }
-        fail(
-            "el arnés JNI no pudo cargar lib$LIBRARY_NAME. Esto NO es un test que se saltea:\n" +
-                "  causa            : $cause\n" +
-                "  java.library.path: ${path.ifEmpty { "(vacío)" }}\n" +
-                "  existe el .so/.dylib en esas rutas: ${describeCandidates(path)}\n" +
-                "Construila con: bash scripts/build-host-jni.sh",
-        )
+        return "el arnés JNI no pudo cargar lib$name. Esto NO es un test que se saltea:\n" +
+            "  causa            : $cause\n" +
+            "  java.library.path: ${path.ifEmpty { "(vacío)" }}\n" +
+            "  candidatos en esas rutas: ${describeCandidates(name, path)}\n" +
+            "Construila con: bash scripts/build-host-jni.sh"
     }
 
-    private fun describeCandidates(path: String): String {
+    private fun describeCandidates(name: String, path: String): String {
         if (path.isEmpty()) return "no hay rutas para mirar"
         val hits = path.split(File.pathSeparator)
             .filter { it.isNotBlank() }
             .flatMap { dir ->
-                listOf("lib$LIBRARY_NAME.so", "lib$LIBRARY_NAME.dylib")
+                listOf("lib$name.so", "lib$name.dylib")
                     .map { File(dir, it) }
                     .filter { it.isFile }
             }

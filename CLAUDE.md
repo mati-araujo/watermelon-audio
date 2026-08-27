@@ -33,6 +33,9 @@ audio/src/
                         NativeLibraryLoader (no-op, link estatico),
                         DeviceCapabilitiesProvider (NSProcessInfo)
   commonTest/kotlin/    8 suites  ·  iosTest/kotlin/ 4 suites
+  androidUnitTest/      4 files — el ARNES JNI (REQ-016). Corre en la JVM del host y
+                        EJECUTA funciones JNIEXPORT reales contra un JNIEnv real,
+                        entrando por AudioNativeBridge
   main/cpp/             C++20 engine
     api/                C API — watermelon_audio.h (274 declaraciones WMA_API, pure C)
     dsp/                watermelon-dsp sub-library (30 files, zero deps)
@@ -59,6 +62,10 @@ audio/src/
     platform/           Logger.h/.cpp (logcat / os_log / stderr), Platform.h,
                         PlatformAndroid.cpp, PlatformApple.cpp, PlatformIsa.inc (ISA comun)
     ios/                CMakeLists.txt del build iOS (separado del que maneja AGP)
+    tests/hostjni/      REQ-016: libwatermelon_audio.{so,dylib} PARA EL HOST — el
+                        motor + la capa JNI compilados con el jni.h del JDK, para
+                        que un test de JVM pueda cargarlos. Lleva FakeAudioBackend
+                        adentro: valida la frontera JNI/Kotlin, NO audio en device
 
 harness/src/            :harness — app de prueba multiplataforma (WA-5.5). NO se publica
   commonMain/kotlin/    HarnessApp — la UI entera (Compose Multiplatform)
@@ -83,6 +90,13 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
 > de commonMain 83, AudioNativeBridge 3229 / 291, JNIEXPORT 280, C API 253 y 883 tests.) El
 > afinador entero (REQ-001) agregó `cpp/analysis/` con 14 archivos.
 >
+> **QUINTA tanda, el 2026-08-27 al cerrar REQ-016**: la suite de host es de **1169** tests, no
+> 1154 — o sea que el número de arriba envejeció **el mismo día** en que se lo re-midió. Y los
+> tests de Kotlin en la JVM eran **153**, no los 69 que decía la sección de comandos; con el
+> arnés JNI son **162**. Las `JNIEXPORT` de `jni/*.cpp` son **310** en total (297 del bridge + 8
+> de benchmark + 3 de usb + 2 `JNI_OnLoad`/`JNI_OnUnload`), de las cuales **308** son entradas
+> `Java_*` que Kotlin declara.
+>
 > 🔴 **Que este bloque haya quedado stale CUATRO veces seguidas es el dato, no el accidente**, y
 > la cuarta agregó un eje nuevo: las VERSIONES del stack, que nadie sospechaba. Un
 > conteo escrito a mano envejece en silencio: nadie lo lee como "esto puede estar viejo", se lee
@@ -99,6 +113,11 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
 > grep -nE '^agp|^kotlin ' gradle/libs.versions.toml     # la tabla de Stack tambien driftea
 > python3 scripts/c-api-gap.py                            # C API + delegacion (§4b)
 > ```
+>
+> **REQ-016 construyó el primer pedazo de esa salida**, para su propia rebanada: el conteo de
+> cobertura del arnés JNI (`13 de 310`) sale MEDIDO en cada corrida — el numerador se anota al
+> cruzar la frontera, el denominador se cuenta del árbol, y sacar un test **baja** el número
+> (probado por su propio self-test). No cubre este bloque; muestra la forma.
 >
 > 🔴 **Cuatro veces stale es la evidencia de que "medir antes de citar" NO alcanza**: es una regla
 > que sólo vive en prosa, y este repo ya sabe cómo terminan (WD-1.1: el callback violaba sus
@@ -197,6 +216,21 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 - Lock-free paths para real-time params (setXY, setFrequency)
 - Return `Result<T>` para operaciones que pueden fallar
 
+> 🔴 **El camino JNI tiene DOS preguntas, y una sola no alcanza** (REQ-016).
+>
+> - *¿el simbolo existe?* — `scripts/check-jni-symbols.py` (MINI-001), que compara **solo
+>   NOMBRES**. Da verde con las 310 funciones jamas ejecutadas, y **no ve un desajuste de
+>   FIRMA**: un `Int` declarado donde el C++ espera `jlong` compila de los dos lados,
+>   linkea, pasa ese gate y corrompe memoria en el device.
+> - *¿alguien lo ejecuta?* — el arnes de `androidUnitTest`, que entra por
+>   `AudioNativeBridge` y cruza la frontera de verdad. Hasta REQ-016 la respuesta era
+>   **nadie**: 310 `JNIEXPORT` y ningun test las corria.
+>
+> 🔴 **Y el arnes cubre 13 de 310**, sobre un backend FALSO. El conteo lo imprime el propio
+> arnes en cada corrida, con los dos numeros MEDIDOS —jamas escritos a mano— justamente
+> para que "13/310" no se lea nunca como "el JNI esta probado". No reemplaza al smoke en
+> device; nada de lo que corre en el host lo hace.
+
 ### Kotlin (commonMain)
 - Zero imports de `android.*` o `java.*`
 - Usar `AudioLogger` callback (NO `android.util.Log`)
@@ -260,10 +294,29 @@ sesiones enteras. Los marcados **[gate]** ya los corre `scripts/gate.sh`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (1154 tests, googletest).
+bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (1169 tests, googletest).
                                            # ctest corre en PARALELO desde el 18/08: 149,7 s -> 20,4 s.
                                            # `CTEST_JOBS=n` lo baja si hace falta
-                                           # Kotlin: 112 iOS sim / 69 JVM
+                                           # Kotlin: 112 iOS sim / 162 JVM (los dos numeros
+                                           # RE-MEDIDOS el 27/08: decian 1154 y 69)
+
+./gradlew :audio:testDebugUnitTest         # [gate] commonTest en la JVM + el ARNES JNI (REQ-016).
+                                           # Construye la libreria de host sola (dependsOn +
+                                           # inputs.files de buildHostJniLib) y le pone el
+                                           # java.library.path. Imprime el conteo de cobertura:
+                                           #   [REQ-016] arnes JNI ...: 13 de 310 ... hueco: 297
+                                           # 🔴 `dependsOn` SOLO ORDENA. La libreria esta declarada
+                                           # como INPUT del test porque sin eso, romper el simbolo
+                                           # del lado C++ dejaba la task UP-TO-DATE y el arnes en
+                                           # VERDE sin ejecutar nada — medido, y es la misma trampa
+                                           # que ya tenia documentada cinteropWatermelonAudio.
+
+bash scripts/build-host-jni.sh             # La libreria de host suelta, para iterar.
+                                           # WMA_JAVA_HOME/JAVA_HOME manda el JDK: tiene que ser
+                                           # EL MISMO que corre los tests. NO usa find_package(JNI)
+                                           # —busca AWT y falla contra un JDK headless, medido en
+                                           # ubuntu— y compila jni/ con -Wall -Wextra -Werror, que
+                                           # es el unico gate de warnings que esa capa tiene.
 
 # audio/src/main/cpp/effects/tests/reset-baseline.txt — TRINQUETE del contrato
 # de reset(), igual que scripts/rt-safety-baseline.txt: el test falla si aparece
