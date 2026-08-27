@@ -45,6 +45,61 @@ val cppTest by tasks.registering(Exec::class) {
 
 tasks.named("check") { dependsOn(cppTest) }
 
+// ============================================================================
+// REQ-016 — el arnés JNI. La librería nativa DE HOST que `testDebugUnitTest`
+// carga para EJECUTAR funciones `JNIEXPORT` reales contra un `JNIEnv` real.
+//
+// 310 funciones `JNIEXPORT` y ningún test las ejecutaba: el camino estaba
+// cubierto por compilación, por el gate de símbolos de MINI-001 —que compara
+// sólo NOMBRES— y por el smoke manual en emulador. Un desajuste de FIRMA pasa
+// los tres.
+//
+// 🔴 CERO CAMBIOS EN PRODUCCIÓN, y es la razón por la que esto entra acá y no en
+// `androidMain`: `System.loadLibrary` busca en `java.library.path`, así que la
+// carga se resuelve desde la task de test. Si alguna vez pareciera que hace
+// falta un hook en producción, eso es un hallazgo, no una línea que se agrega.
+// ============================================================================
+val hostJniLibDir = layout.buildDirectory.dir("hostjni")
+
+val buildHostJniLib by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Compila libwatermelon_audio.{so,dylib} para el host (arnés JNI, REQ-016)."
+    workingDir = rootProject.projectDir
+    commandLine("bash", "scripts/build-host-jni.sh")
+
+    // El MISMO JDK que va a correr los tests. Headers de una versión y runtime de
+    // otra es exactamente la clase de desajuste que este arnés existe para no
+    // tener, y `find_package(JNI)` ni siquiera lo mira.
+    environment("WMA_JAVA_HOME", System.getProperty("java.home"))
+
+    inputs.files(
+        fileTree(file("src/main/cpp")) {
+            exclude("ios/build/**", "**/.deps/**", "**/build/**", "**/build-san/**")
+        }
+    )
+    // Y el script que la task EJECUTA. Sin esta línea, cambiarle las banderas sin
+    // tocar C++ deja la task UP-TO-DATE y sobrevive el binario viejo — medido en
+    // `buildIosNativeLib` (ver KmpNativeConventionPlugin.kt).
+    inputs.file(rootProject.file("scripts/build-host-jni.sh"))
+    outputs.dir(hostJniLibDir)
+}
+
+tasks.withType<Test>().configureEach {
+    dependsOn(buildHostJniLib)
+    // D4: así es como la librería aparece sin tocar `androidMain`. Se APENDEA al
+    // valor que traiga el runtime en vez de reemplazarlo: pisarlo deja a la JVM
+    // sin sus propias librerías nativas.
+    val existing = System.getProperty("java.library.path").orEmpty()
+    val harnessDir = hostJniLibDir.get().asFile.absolutePath
+    systemProperty(
+        "java.library.path",
+        if (existing.isEmpty()) harnessDir else "$harnessDir${File.pathSeparator}$existing",
+    )
+    // Lo que el arnés imprime —el conteo de AC-016.3 y la causa de un fallo de
+    // carga— tiene que llegar al log del gate, no morir en el worker de test.
+    testLogging { showStandardStreams = true }
+}
+
 // KMP automatically creates publications for each target.
 // We only configure the repository here.
 publishing {

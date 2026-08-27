@@ -2913,7 +2913,11 @@ JNIEnv* attachWorkerEnv() {
     jint rc = g_javaVm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
     if (rc == JNI_OK) return env;
     if (rc == JNI_EDETACHED) {
-        if (g_javaVm->AttachCurrentThreadAsDaemon(&env, nullptr) != JNI_OK) {
+        // El helper existe por una sola razon: `jni.h` declara el primer
+        // parametro como `JNIEnv**` en el NDK y como `void**` en el JDK.
+        // Ver wmaAttachCurrentThreadAsDaemon en jni_common.h.
+        if (wmaAttachCurrentThreadAsDaemon(
+                g_javaVm, &JavaVM::AttachCurrentThreadAsDaemon, &env) != JNI_OK) {
             return nullptr;
         }
         return env;
