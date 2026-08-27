@@ -11,6 +11,8 @@
 // which works on the host. No Oboe / JNI / device needed.
 // ============================================================================
 #include "tests/support/TestWait.h"
+#include "support/FixturePath.h"
+
 #include <gtest/gtest.h>
 #include "AudioLooper.h"
 
@@ -50,11 +52,16 @@ int64_t feed(AudioLooper& looper, float value, int totalFrames, int block,
     return playFrame;
 }
 
-// Unique temp path for a WAV artifact; removed by WavTempFile's dtor.
+// Ruta temporal para un WAV, borrada por el dtor.
+//
+// 🔴 El comentario de antes decia "Unique temp path" y NO lo era (MINI-009): el
+// nombre lo elige el llamador, y esta suite se compila en DOS binarios que ctest
+// corre en paralelo con los mismos nombres de test. `fixturePath` le mete el pid,
+// asi que ahora la unicidad no depende de que nadie repita un nombre.
 struct WavTempFile {
     std::filesystem::path path;
     explicit WavTempFile(const std::string& name)
-        : path(std::filesystem::temp_directory_path() / name) {
+        : path(wma_test::fixturePath(name)) {
         std::error_code ec;
         std::filesystem::remove(path, ec);
     }

@@ -1,6 +1,10 @@
 // Round-trip tests for the WAV writer/reader at all supported bit depths,
 // plus metadata chunk emission. Files are written into a temp path that is
 // platform-portable (CMake test working dir).
+#include "support/FixturePath.h"
+
+#include <string>
+
 #include <gtest/gtest.h>
 #include "WavFile.h"
 
@@ -27,10 +31,17 @@ std::vector<float> makeStereoSineSweep(int frames, int sr) {
     return buf;
 }
 
+/**
+ * 🔴 Una ruta ABSOLUTA y UNICA POR PROCESO (MINI-009).
+ *
+ * Antes devolvia `"looper_test_<n>.wav"`, o sea una ruta RELATIVA al CWD — y
+ * `looper_tests` y `looper_tests_dense` corren con el mismo CWD, en paralelo, con
+ * los mismos nombres de test. Dos procesos escribiendo el mismo archivo.
+ */
 const char* tempPath(const char* name) {
-    static char buf[512];
-    std::snprintf(buf, sizeof(buf), "looper_test_%s.wav", name);
-    return buf;
+    static std::string buf;
+    buf = wma_test::fixturePath(std::string("looper_test_") + name + ".wav").string();
+    return buf.c_str();
 }
 
 }  // namespace
