@@ -33,9 +33,11 @@ audio/src/
                         NativeLibraryLoader (no-op, link estatico),
                         DeviceCapabilitiesProvider (NSProcessInfo)
   commonTest/kotlin/    8 suites  ·  iosTest/kotlin/ 4 suites
-  androidUnitTest/      4 files — el ARNES JNI (REQ-016). Corre en la JVM del host y
-                        EJECUTA funciones JNIEXPORT reales contra un JNIEnv real,
-                        entrando por AudioNativeBridge
+  androidUnitTest/      6 files — el ARNES JNI (REQ-016 + REQ-018). Corre en la JVM
+                        del host y EJECUTA funciones JNIEXPORT reales contra un
+                        JNIEnv real, entrando por AudioNativeBridge. UNA JVM POR
+                        CLASE (forkEvery=1): el motor nativo es un singleton de
+                        proceso y los tests de ausencia necesitan uno virgen
   main/cpp/             C++20 engine
     api/                C API — watermelon_audio.h (274 declaraciones WMA_API, pure C)
     dsp/                watermelon-dsp sub-library (30 files, zero deps)
@@ -93,7 +95,7 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
 > **QUINTA tanda, el 2026-08-27 al cerrar REQ-016**: la suite de host es de **1169** tests, no
 > 1154 — o sea que el número de arriba envejeció **el mismo día** en que se lo re-midió. Y los
 > tests de Kotlin en la JVM eran **153**, no los 69 que decía la sección de comandos; con el
-> arnés JNI son **169**. Las `JNIEXPORT` de `jni/*.cpp` son **310** en total (297 del bridge + 8
+> arnés JNI son **183**. Las `JNIEXPORT` de `jni/*.cpp` son **310** en total (297 del bridge + 8
 > de benchmark + 3 de usb + 2 `JNI_OnLoad`/`JNI_OnUnload`), de las cuales **308** son entradas
 > `Java_*` que Kotlin declara.
 >
@@ -226,10 +228,24 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 >   `AudioNativeBridge` y cruza la frontera de verdad. Hasta REQ-016 la respuesta era
 >   **nadie**: 310 `JNIEXPORT` y ningun test las corria.
 >
-> 🔴 **Y el arnes cubre 13 de 310**, sobre un backend FALSO. El conteo lo imprime el propio
-> arnes en cada corrida, con los dos numeros MEDIDOS —jamas escritos a mano— justamente
-> para que "13/310" no se lea nunca como "el JNI esta probado". No reemplaza al smoke en
-> device; nada de lo que corre en el host lo hace.
+> 🔴 **Y el arnes cubre 40 de 310** (REQ-016 dejo 13, REQ-018 sumo las 27 de entrada), sobre
+> un backend FALSO. El conteo lo imprime Gradle en cada corrida con los dos numeros MEDIDOS
+> —jamas escritos a mano— justamente para que "40/310" no se lea nunca como "el JNI esta
+> probado". No reemplaza al smoke en device; nada de lo que corre en el host lo hace.
+>
+> **Como se suma**: cada clase corre en su PROPIA JVM (`forkEvery = 1`), asi que ninguna ve el
+> total. Cada una publica lo suyo a `audio/build/jni-coverage/` y la task `jniHarnessCoverage`
+> —finalizador de `testDebugUnitTest`, para que se imprima sin tocar gate.sh ni ci.yml— los
+> suma. Sin archivos o con cero funciones, FALLA: "no pude sumar" no es un pase.
+>
+> 🔴 **Cada clase declara el conjunto que cubre y es un TRINQUETE BIDIRECCIONAL**: ejercer de
+> menos es rojo Y ejercer de mas tambien, para que sumar cobertura aparezca en el diff del PR.
+> Lo trajo un mutante: sacar una funcion bajaba el conteo y nadie se ponia rojo.
+>
+> **Huecos DECLARADOS, con el mutante que los demuestra** (no son olvidos): el stream de
+> entrada VIVO no se puede abrir en el host —`InputNode::createInputStream` no tiene camino
+> sin Oboe— y `nativeIntonationReset` / el camino CON dato de `nativeGetTunerSnapshot` no son
+> observables sin audio. Los cubre la suite de C++, que si maneja el backend.
 
 ### Kotlin (commonMain)
 - Zero imports de `android.*` o `java.*`
@@ -304,7 +320,7 @@ bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (1169 test
                                            # Construye la libreria de host sola (dependsOn +
                                            # inputs.files de buildHostJniLib) y le pone el
                                            # java.library.path. Imprime el conteo de cobertura:
-                                           #   [REQ-016] arnes JNI ...: 13 de 310 ... hueco: 297
+                                           #   [REQ-016] arnes JNI - TOTAL: 40 de 310 ... hueco: 270
                                            # 🔴 `dependsOn` SOLO ORDENA. La libreria esta declarada
                                            # como INPUT del test porque sin eso, romper el simbolo
                                            # del lado C++ dejaba la task UP-TO-DATE y el arnes en
