@@ -85,7 +85,20 @@ val buildHostJniLib by tasks.registering(Exec::class) {
 }
 
 tasks.withType<Test>().configureEach {
+    // Hacen falta LAS DOS lineas, y esto NO es ceremonia: lo destapo el control
+    // positivo de esta etapa. Con solo `dependsOn` —que unicamente ORDENA— se
+    // renombro el simbolo del lado C++, la libreria se reconstruyo SIN el, y
+    // `testDebugUnitTest` quedo UP-TO-DATE: verde, sin ejecutar un solo test.
+    // O sea el modo de falla exacto que REQ-016 existe para borrar, dentro del
+    // propio arnes. Declarando el .so como INPUT, cambiarlo re-corre los tests.
+    //
+    // Es la misma trampa que ya tenia documentada `cinteropWatermelonAudio` en
+    // KmpNativeConventionPlugin.kt, donde costo que la app de iOS corriera
+    // codigo viejo con el gate en OK.
     dependsOn(buildHostJniLib)
+    inputs.files(buildHostJniLib.map { it.outputs.files })
+        .withPropertyName("hostJniHarnessLibrary")
+        .withPathSensitivity(PathSensitivity.NONE)
     // D4: así es como la librería aparece sin tocar `androidMain`. Se APENDEA al
     // valor que traiga el runtime en vez de reemplazarlo: pisarlo deja a la JVM
     // sin sus propias librerías nativas.
