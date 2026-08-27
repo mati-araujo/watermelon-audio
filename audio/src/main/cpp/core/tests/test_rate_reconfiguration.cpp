@@ -51,12 +51,24 @@ constexpr int kKarplusStrong = 1;
 ///
 /// 🔴 Hasta MINI-007 este valor se plantaba con `setPreferredSampleRate()`. Ese
 /// setter se borro —ningun consumidor podia alcanzarlo— y no hizo falta cambiar
-/// nada mas: 48000 es justamente el rate con el que `start()` pre-configura
-/// cuando todavia no hay device al que preguntarle, asi que el escenario de estos
-/// dos AC quedo intacto. Si ese literal de `AudioEngine::start()` cambiara, este
-/// tiene que acompañarlo o los dos tests dejan de producir coercion.
-constexpr int kRequestedRate = 48000;
+/// nada mas: el rate de pre-negociacion de `start()` es justamente 48000, asi que
+/// el escenario de estos dos AC quedo intacto. Se toma de la constante en vez de
+/// repetir el numero, para que no puedan drift ear en silencio.
+constexpr int kRequestedRate = AudioEngine::kPreNegotiationSampleRate;
 constexpr int kNegotiatedRate = 44100;
+
+/// 🔴 LA PRECONDICION DE LOS DOS AC DE ESTE ARCHIVO, EN TIEMPO DE COMPILACION.
+///
+/// Los dos tests existen para cubrir la rama de COERCION: el motor prepara a un
+/// rate y el device le devuelve otro. Si los dos rates coincidieran no habria
+/// coercion, los tests pasarian igual y no ejercerian nada.
+///
+/// Eso no es hipotetico: es un mutante MEDIDO en MINI-007. Poniendo el rate de
+/// pre-negociacion en 44100 los dos tests quedan verdes y la suite entera da
+/// 1169/1169 — el hueco sobrevivia a todo. Un comentario no lo tapaba; esto si.
+static_assert(kRequestedRate != kNegotiatedRate,
+              "sin rates distintos no hay coercion: AC-006.1 y AC-006.2 quedarian "
+              "verdes sin ejercer la rama que existen para cubrir");
 
 } // namespace
 

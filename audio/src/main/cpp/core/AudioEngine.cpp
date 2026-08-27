@@ -511,10 +511,13 @@ bool AudioEngine::start(int fadeTimeMs) {
         // esto es la inicializacion de una local. Queda dicho para que nadie lo
         // lea como "ya esta declarado en algun lado".
         //
-        // 🔴 Y `test_rate_reconfiguration.cpp` DEPENDE de este 48000: es el que
-        // hace que el fake, negociando 44100, produzca coercion. Si cambia aca,
-        // su `kRequestedRate` tiene que acompañarlo.
-        const int expectedRate = 48000;
+        // 🔴 `test_rate_reconfiguration.cpp` DEPENDE de este valor: es el que
+        // hace que el fake, negociando 44100, produzca coercion. Esa dependencia
+        // NO se deja escrita en un comentario —se probo que un comentario no la
+        // sostiene: con este rate en 44100 los dos tests de coercion quedan
+        // verdes sin ejercer nada, y la suite entera tambien— sino en el
+        // `static_assert` que ese archivo hace contra la constante.
+        const int expectedRate = kPreNegotiationSampleRate;
         wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
             "[START] pre-configure components: expectedRate=%d", expectedRate);
         configureComponentsWithSampleRate(expectedRate);

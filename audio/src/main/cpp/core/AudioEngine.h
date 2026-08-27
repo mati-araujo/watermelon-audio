@@ -1412,6 +1412,22 @@ public:
     bool getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const;
 
     /**
+     * @brief El rate con el que `start()` pre-configura los componentes ANTES de
+     *        que el device negocie.
+     *
+     * Es publico porque los tests de coercion (AC-006.1 y AC-006.2) dependen de
+     * el: producen coercion negociando un rate DISTINTO de este, y si los dos
+     * coincidieran no habria coercion que probar.
+     *
+     * 🔴 Y eso pasaba en silencio. MEDIDO en MINI-007: con este valor puesto en
+     * 44100 —el mismo que negocia el fake— los dos tests siguen VERDES y la suite
+     * entera da 1169/1169, sin ejercer una sola vez el camino que existen para
+     * cubrir. El `static_assert` de `test_rate_reconfiguration.cpp` convierte ese
+     * acoplamiento en un error de compilacion en vez de un comentario.
+     */
+    static constexpr int kPreNegotiationSampleRate = 48000;
+
+    /**
      * @brief The sample rate actually in effect, whatever the audio path.
      *
      * Resolves in order: the running stream (BackendManager or legacy Oboe,
