@@ -232,6 +232,17 @@ jobs:
       - name: Ningun subsistema se prepara con un rate literal — REQ-006.4
         run: python3 scripts/check-literal-rate.py
 
+      # REQ-013 — un mecanismo que solo llaman los tests no esta entregado.
+      # Va en ESTE job y no en `build` a proposito: `cpp-tests` (ubuntu) nunca
+      # se saltea por atestacion, y el lint no necesita toolchain (python3 y
+      # nada mas, ~1,2 s). El --self-test primero, misma razon que los de
+      # arriba.
+      - name: Ningun mecanismo de produccion lo llaman solo los tests — self-test
+        run: python3 scripts/check-mechanism-callers.py --self-test
+
+      - name: Ningun mecanismo de produccion lo llaman solo los tests — REQ-013
+        run: python3 scripts/check-mechanism-callers.py
+
   # Same suite under AddressSanitizer + UndefinedBehaviorSanitizer. Catches
   # heap/stack overflows, use-after-free and UB in the lock-free rings and the
   # teardown path — the highest-risk code as the driver plan gains new logic.

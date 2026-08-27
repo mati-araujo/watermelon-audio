@@ -1,0 +1,132 @@
+# Funciones de produccion cuyos unicos llamadores viven en tests, cada una con
+# su categoria y su razon. Lo lee `scripts/check-mechanism-callers.py` (REQ-013).
+#
+# ESTO ES UN TRINQUETE, NO UNA LISTA DE EXCEPCIONES. El lint falla si:
+#   - aparece una funcion que no esta aca        (deuda nueva sin declarar), Y TAMBIEN
+#   - una entrada de aca ya no se reproduce      (la entrada quedo mintiendo)
+#
+# El segundo corte es el que importa a los seis meses: sin el, el archivo se
+# vuelve un cementerio de razones que ya no aplican y nadie lo nota. Mismo
+# mecanismo que `scripts/rt-safety-baseline.txt`, `scripts/rt-coverage-baseline.txt`
+# y `audio/src/main/cpp/effects/tests/reset-baseline.txt`.
+#
+# LA RAZON ES OBLIGATORIA. Una entrada sin razon hace fallar el lint, por la
+# misma regla que `// RT-SAFE-ALLOW:`: una excepcion tiene que costar escribir
+# por que, no ser gratis.
+#
+# Formato:  <archivo>::<Clase::funcion>::<categoria> | <razon>
+# (se parsea desde la derecha: el qname lleva `::` adentro)
+#
+# LAS CUATRO CATEGORIAS
+# ---------------------
+#   entrada           definida en `api/` o `jni/`. Es el borde del sistema: no
+#                     tiene llamador aguas arriba POR CONSTRUCCION, porque su
+#                     consumidor vive fuera del arbol.
+#   callback-externo  lo despacha un framework (Oboe, CoreAudio, libusb) por una
+#                     interfaz, no nuestro codigo.
+#   sonda-de-tests    existe para que un test pueda observar o sincronizar:
+#                     contador RT, accesor de estado, hook declarado. NO es
+#                     deuda: es la unica forma de verificar lo que el callback
+#                     no puede contar.
+#   deuda             un mecanismo REAL de produccion sin llamador. Es la clase
+#                     que este REQ vino a atacar, y cada una lleva su hallazgo
+#                     escrito. NO se declaran para olvidarlas.
+#
+# `override-virtual` NO es una categoria, y eso es un hallazgo de REQ-013 S2: es
+# VACIA POR CONSTRUCCION. Si produccion despachara el virtual, la fusion
+# conservadora por nombre simple ya habria suprimido el reporte de todos sus
+# overrides. Un override que llega hasta aca es un override que NADIE invoca.
+#
+# EL REPARTO AL 2026-08-26 (REQ-013 S2, primera poblacion)
+# -------------------------------------------------------
+#   44  sonda-de-tests
+#   30  deuda           <-- y son ~13 mecanismos, no 30: ver los agrupados
+#    1  entrada
+#    1  callback-externo
+#
+# Las tres deudas mas caras, medidas al clasificar:
+#   1. AudioEngine::setPreferredSampleRate — `mPreferredSampleRate` se LEE en
+#      cinco lugares de la negociacion de rate y su unico escritor de produccion
+#      es `startOffline`, que tampoco tiene llamador. En produccion el rate
+#      preferido es SIEMPRE 0=auto. Es exactamente la clase de REQ-012.
+#   2. SynthEngine::getParameterCount/getParameterDef — virtuales puras, seis
+#      overrides, CERO llamadas en produccion. Doce entradas, un mecanismo.
+#   3. DriftResampler::setDriftCorrection — ClockController MIDE la deriva y el
+#      resampler nunca la recibe: las dos mitades existen y no estan cableadas.
+#
+audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::availableFrames::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::oversizedBlocks::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::tornReads::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/analysis/AnalysisSnapshot.h::AnalysisSnapshot::hasData::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/analysis/AnalysisThread.h::AnalysisThread::ticks::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/analysis/FastModeTracker.h::FastModeTracker::centsFromChromatic::sonda-de-tests | idem centsFromTarget: el snapshot no lo publica
+audio/src/main/cpp/analysis/FastModeTracker.h::FastModeTracker::centsFromTarget::sonda-de-tests | el snapshot publica los cents del STROBE, no los del FastModeTracker; esto lo lee el test del tracker
+audio/src/main/cpp/analysis/InharmonicityEstimator.cpp::InharmonicityEstimator::perceptualCorrections::deuda | las correcciones perceptuales no las aplica ningun camino de produccion
+audio/src/main/cpp/analysis/InharmonicityEstimator.cpp::InharmonicityEstimator::physicsB::deuda | el default de B por fisica NO lo calcula nadie en produccion y la C API no lo expone; AC-001.11 deja el fallback del lado del consumidor. O lo usa el motor, o esta funcion sobra
+audio/src/main/cpp/analysis/InharmonicityEstimator.h::InharmonicityEstimator::measured::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/analysis/IntonationMode.h::IntonationMode::capturedCents::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/analysis/IntonationMode.h::IntonationMode::capturedTargetHz::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/analysis/IntonationMode.h::IntonationMode::invalidate::deuda | invalidate() { reset(); } sin un solo llamador: el modo de entonacion nunca se invalida en produccion
+audio/src/main/cpp/analysis/PhaseSlopeEstimator.h::PhaseSlopeEstimator::windowsAnalyzed::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/analysis/StrobeTracker.h::StrobeTracker::converged::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/analysis/StrobeTracker.h::StrobeTracker::partialsUsed::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/api/watermelon_audio.cpp::wma_looper_set_event_callback::entrada | es el borde: una wma_* de la C API no tiene llamador aguas arriba por construccion. El unico consumidor de una entrada vive fuera del arbol
+audio/src/main/cpp/backends/BackendManager.cpp::BackendManager::waitForCaptureRequest::sonda-de-tests | su propio KDoc lo dice: 'Nunca desde el thread de audio ni desde el de UI. Esta para los tests'. Es un hook de sincronizacion declarado
+audio/src/main/cpp/backends/ClockController.h::ClockController::getFeedbackRejectedCount::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/backends/DriftResampler.cpp::DriftResampler::setDriftCorrection::deuda | el unico escritor de DriftResampler::mDriftPpm, y nadie lo llama: ClockController mide la deriva (getDriftPpm) y el resampler nunca la recibe. Las dos mitades existen y NO estan conectadas
+audio/src/main/cpp/backends/SplitBackend.cpp::SplitBackend::OutputCallback::onStreamConfigChanged::callback-externo | lo despacha el backend por IAudioCallback, no nuestro codigo. Ademas es un FALSO POSITIVO del lint: su cuerpo reenvia a mUserCallback->onStreamConfigChanged (SplitBackend.cpp:283) y esa llamada, por ser al mismo nombre simple desde su propio cuerpo, queda excluida como recursion
+audio/src/main/cpp/backends/SplitBackend.h::SplitBackend::getBridgeUnderruns::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/core/AudioEngine.cpp::AudioEngine::renderBlock::deuda | ver startOffline: la otra mitad del render offline
+audio/src/main/cpp/core/AudioEngine.cpp::AudioEngine::setPreferredSampleRate::deuda | el mas caro de los 76: mPreferredSampleRate se LEE en CINCO lugares de la negociacion de rate (AudioEngine.cpp:465,616,1883,2151) y su unico escritor de produccion es startOffline, que tampoco tiene llamador. En produccion el rate preferido es SIEMPRE 0=auto y no hay forma de encenderlo. Es exactamente la clase de REQ-012
+audio/src/main/cpp/core/AudioEngine.cpp::AudioEngine::startOffline::deuda | el render offline de WD-2.1 entero: definido, documentado y sin un solo llamador de produccion. Junto con renderBlock e isOffline es UNA deuda con tres entradas
+audio/src/main/cpp/core/AudioEngine.h::AudioEngine::getLastInputSampleRate::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/core/AudioEngine.h::AudioEngine::getUndrainedInputNodeCount::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/core/AudioEngine.h::AudioEngine::hasSampleRateMismatch::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/core/AudioEngine.h::AudioEngine::isOffline::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/core/AudioEngine.h::AudioEngine::isOscillatorEnabled::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/core/AudioEngine.h::AudioEngine::isUsingBackendManager::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/dsp/BiquadFilter.cpp::BiquadFilter::getFrequencyResponse::sonda-de-tests | calcula |H(f)| para que un test pueda afirmar sobre la respuesta; el DSP no la necesita
+audio/src/main/cpp/dsp/BiquadFilter.cpp::BiquadFilter::setNotch::deuda | un modo de filtro completo sin un solo usuario: ningun efecto configura un notch
+audio/src/main/cpp/dsp/McLeodPitch.h::McLeodPitch::decimation::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/dsp/McLeodPitch.h::McLeodPitch::windowsAnalyzed::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/dsp/NoiseGate.h::NoiseGate::getGain::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/dsp/NoiseGate.h::NoiseGate::setHysteresis::deuda | la histeresis del gate no la configura nadie: queda siempre en su default
+audio/src/main/cpp/dsp/SoftClipper.h::TruePeakLimiter::getGainReduction::sonda-de-tests | medidor de reduccion de ganancia: lo lee el test, no el audio
+audio/src/main/cpp/effects/CompressorEffect.h::CompressorEffect::getGainReduction::sonda-de-tests | medidor de reduccion de ganancia: lo lee el test, no el audio
+audio/src/main/cpp/effects/EffectChain.cpp::EffectChain::getEffectLatencySamples::sonda-de-tests | latencia POR EFECTO; produccion usa la total. Existe para que el test pueda desglosarla
+audio/src/main/cpp/effects/EffectChain.h::EffectChain::latencyClampedBlocks::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/effects/LookaheadLimiter.cpp::LookaheadLimiter::getGainReduction::sonda-de-tests | medidor de reduccion de ganancia: lo lee el test, no el audio
+audio/src/main/cpp/engines/FMEngine.h::FMEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/engines/FMEngine.h::FMEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/engines/GranularEngine.h::GranularEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/engines/GranularEngine.h::GranularEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/engines/KarplusStrongEngine.h::KarplusStrongEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/engines/KarplusStrongEngine.h::KarplusStrongEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::getActiveTouchCount::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/engines/SoundFontManager.h::SoundFontManager::getActiveSF::sonda-de-tests | devuelve el tsf* crudo para que el test lo inspeccione
+audio/src/main/cpp/engines/SupersawEngine.h::SupersawEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/engines/SupersawEngine.h::SupersawEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/engines/WavetableEngine.h::WavetableEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/engines/WavetableEngine.h::WavetableEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::getRecordingTrack::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::getTrack::sonda-de-tests | devuelve el TrackBuffer para que el test lo inspeccione
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::getTrackRemainingPlays::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/looper/ChunkedAudioBuffer.h::ChunkedAudioBuffer::pageAt::sonda-de-tests | acceso por pagina para que el test verifique el paginado
+audio/src/main/cpp/looper/ChunkedAudioBuffer.h::ChunkedAudioBuffer::pageCount::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/looper/Limiter.h::OfflineLimiter::lookaheadFrames::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
+audio/src/main/cpp/looper/Transport.h::Transport::resetPlayPosition::deuda | resetear la posicion de reproduccion es una operacion de transporte y ningun camino de produccion la invoca
+audio/src/main/cpp/nodes/InputNode.h::InputNode::capturedBlocksGated::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/nodes/InputNode.h::InputNode::getFeedClampedBlocks::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/nodes/InputNode.h::InputNode::getUsbFeedDrops::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
+audio/src/main/cpp/usb/ChannelMap.h::ChannelMap::leftOnlyToStereo::deuda | ver swapStereo
+audio/src/main/cpp/usb/ChannelMap.h::ChannelMap::monoToStereoDownmix::deuda | ver swapStereo
+audio/src/main/cpp/usb/ChannelMap.h::ChannelMap::swapStereo::deuda | tres factories de mapeo de canales USB (swapStereo, leftOnlyToStereo, monoToStereoDownmix) que ningun camino selecciona: UNA deuda con tres entradas
+audio/src/main/cpp/usb/UsbAudioTypes.h::UsbFeatureUnit::muteControlChannels::deuda | idem volumeControlChannels, para mute
+audio/src/main/cpp/usb/UsbAudioTypes.h::UsbFeatureUnit::volumeControlChannels::deuda | el descriptor sabe que canales tienen control de volumen y NADIE se lo pregunta al aplicar volumen
+audio/src/main/cpp/usb/UsbClockGraph.h::UsbClockGraph::requiresSelectorConfiguration::deuda | ver resolvePath: la otra pregunta del grafo de reloj, tambien sin llamador
+audio/src/main/cpp/usb/UsbClockGraph.h::UsbClockGraph::resolvePath::deuda | resolver el camino de reloj del dispositivo es el proposito del grafo, y no lo llama nadie: se parsea y no se usa
+audio/src/main/cpp/usb/UsbDescriptorParser.h::UsbDescriptorParser::getLastError::sonda-de-tests | el ultimo error del parser lo lee el test; produccion decide por el bool de retorno
+audio/src/main/cpp/usb/UsbSnapshotCodec.h::decodeSnapshot::deuda | la mitad DECODIFICADORA del codec USB. El JNI solo encodea (jni_audio_bridge.cpp:1733) y quien decodifica es Kotlin. Este decoder de C++ existe para el round-trip
+audio/src/main/cpp/voice/TouchTriggerSource.cpp::TouchTriggerSource::getActiveTouchCount::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio

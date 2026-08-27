@@ -313,6 +313,17 @@ gate_guardrails() {
     # todavia llamandose "contrato".
     step guardrails ituner-self   python3 scripts/check-ituner-implementations.py --self-test || return 1
     step guardrails ituner-impls  python3 scripts/check-ituner-implementations.py || return 1
+    # REQ-013 — "?quien LLAMA a esto?". REQ-012 entrego un mecanismo completo,
+    # verificado con TSan y mutacion, que nadie llamaba en produccion: en un
+    # telefono el DSP de entrada seguia sin seguir al rate, con la suite entera
+    # en verde. Lo destapo un `grep` al terminar S3.
+    #
+    # El self-test PRIMERO, igual que los cuatro de arriba y por lo mismo: este
+    # lint tiene una degradacion silenciosa propia —si `DEF_RE` deja de matchear,
+    # el conjunto detectado queda vacio, coincide con "no hay deuda nueva" y el
+    # lint queda VERDE PARA SIEMPRE revisando nada.
+    step guardrails callers-self  python3 scripts/check-mechanism-callers.py --self-test || return 1
+    step guardrails callers       python3 scripts/check-mechanism-callers.py || return 1
 }
 
 gate_cpp_tests_macos() {

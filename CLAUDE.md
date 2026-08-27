@@ -370,6 +370,26 @@ python3 scripts/check-rt-safety.py         # [gate] Guardrail WD-1.1. Camina el 
                                            # llamada y el lint queda verde revisando menos.
                                            # Se redeclara con --update-coverage, y SU DIFF
                                            # ES LA REVISION
+python3 scripts/check-mechanism-callers.py # [gate] Guardrail REQ-013. Contesta "?quien LLAMA
+                                           # a esto?": falla si una funcion de produccion tiene
+                                           # sus UNICOS llamadores en tests. REQ-012 entrego un
+                                           # mecanismo verificado con TSan y mutacion que nadie
+                                           # llamaba en produccion, y la suite entera estaba
+                                           # verde. --self-test corre ANTES (misma razon que
+                                           # check-rt-safety).
+                                           # scripts/mechanism-callers-baseline.txt es un
+                                           # TRINQUETE bidireccional, y cada entrada lleva su
+                                           # CATEGORIA y su RAZON (una entrada sin razon falla).
+                                           # Al 26/08: 44 sonda-de-tests, 30 deuda (que son ~13
+                                           # mecanismos), 1 entrada, 1 callback externo.
+                                           # 🔴 NO es un detector de codigo muerto: si no la
+                                           # llama NADIE, no se reporta. Y NO ve el hueco del
+                                           # JNI (REQ-016) — ahi la pregunta es quien EJECUTA.
+                                           # Falso negativo MEDIDO: 117 nombres simples tienen
+                                           # homonimos en produccion y quedan tapados por la
+                                           # fusion conservadora (`reset` tiene 96 definiciones).
+                                           # La salida es RENOMBRAR, igual que en rt-coverage.
+
 bash scripts/build-harness.sh              # [gate] :harness: Android + framework iOS +
                                            # símbolos + shell de Xcode + ARRANQUE
                                            # de la app (lo único que agarra un
