@@ -667,7 +667,38 @@ jobs:
         if: steps.attest.outputs.valid != 'true'
         run: bash scripts/check-no-ui-in-library.sh
 
-      - name: Kotlin unit tests (commonTest)
+      # REQ-016 — el arnes JNI construye `libwatermelon_audio.{so}` para el HOST
+      # (audio/src/main/cpp/tests/hostjni) y la carga desde la JVM de los tests.
+      # Necesita un toolchain de C++, y este job NUNCA instalo uno: hasta aca
+      # dependia de que la imagen lo trajera sin decirlo en ningun lado.
+      #
+      # Es el MISMO bloque que `cpp-tests`, con la misma disciplina: no instala
+      # nada si la imagen ya los trae (que es el caso hoy), y sin reintentos —
+      # ver el comentario largo de aquel paso, que trae la medicion del 18/08.
+      # Lo que compra es que un cambio de imagen falle diciendo QUE falta, en vez
+      # de un error de CMake adentro de una task de Gradle.
+      - name: Install C++ build tools (arnes JNI — REQ-016)
+        if: steps.attest.outputs.valid != 'true'
+        run: |
+          need=""
+          command -v cmake >/dev/null 2>&1 || need="$need cmake"
+          command -v ninja >/dev/null 2>&1 || need="$need ninja-build"
+          command -v g++   >/dev/null 2>&1 || need="$need g++"
+          if [ -z "$need" ]; then
+            echo "cmake/ninja/g++ ya vienen en la imagen — nada que instalar"
+            cmake --version | head -1; ninja --version; g++ --version | head -1
+            exit 0
+          fi
+          echo "falta instalar:$need"
+          sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 \
+            install -y $need
+
+      # El nombre decia solo `commonTest` y ya no es cierto: esta task tambien
+      # corre el arnes JNI de REQ-016, que EJECUTA funciones JNIEXPORT reales
+      # contra un JNIEnv real. No hay un paso aparte a proposito (D3): es un
+      # test, no un lint, y vive donde viven los tests.
+      - name: Kotlin unit tests (commonTest) + arnes JNI (REQ-016)
         if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:testDebugUnitTest
 
