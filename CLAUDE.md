@@ -93,7 +93,7 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
 > **QUINTA tanda, el 2026-08-27 al cerrar REQ-016**: la suite de host es de **1169** tests, no
 > 1154 — o sea que el número de arriba envejeció **el mismo día** en que se lo re-midió. Y los
 > tests de Kotlin en la JVM eran **153**, no los 69 que decía la sección de comandos; con el
-> arnés JNI son **162**. Las `JNIEXPORT` de `jni/*.cpp` son **310** en total (297 del bridge + 8
+> arnés JNI son **169**. Las `JNIEXPORT` de `jni/*.cpp` son **310** en total (297 del bridge + 8
 > de benchmark + 3 de usb + 2 `JNI_OnLoad`/`JNI_OnUnload`), de las cuales **308** son entradas
 > `Java_*` que Kotlin declara.
 >
