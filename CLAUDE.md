@@ -10,7 +10,7 @@ Motor de sintesis en tiempo real con efectos DSP profesionales. C++20 + Oboe + K
 
 ```
 audio/src/
-  commonMain/kotlin/    93 files — pure Kotlin, zero Android deps
+  commonMain/kotlin/    94 files — pure Kotlin, zero Android deps
     api/                AudioEngine interface, IAudioNativeBridge, IEffectManager,
                         IInputBridge + AudioInput (camino de entrada, WA-5.5),
                         factories (AudioEngine, EffectManager, AudioInput,
@@ -25,7 +25,7 @@ audio/src/
     domain/device/      DeviceCapabilities (interfaz de hechos) + Snapshot
     domain/input/       InputSource + InputMetering (snapshot de 7 valores)
   androidMain/kotlin/   21 files — JNI bridge, USB, platform-specific
-    internal/bridge/    AudioNativeBridge (3332 LOC, 306 external funs)
+    internal/bridge/    AudioNativeBridge (3357 LOC, 308 external funs)
     internal/usb/       USB audio driver (DataStore, BroadcastReceiver)
     internal/mode/      ModeTransitionManagerImpl, NativeModeStateWriter
   iosMain/kotlin/       6 files — IosAudioBridge (sobre cinterop), AudioBridgeProvider,
@@ -34,7 +34,7 @@ audio/src/
                         DeviceCapabilitiesProvider (NSProcessInfo)
   commonTest/kotlin/    8 suites  ·  iosTest/kotlin/ 4 suites
   main/cpp/             C++20 engine
-    api/                C API — watermelon_audio.h (272 declaraciones WMA_API, pure C)
+    api/                C API — watermelon_audio.h (274 declaraciones WMA_API, pure C)
     dsp/                watermelon-dsp sub-library (30 files, zero deps)
     effects/            watermelon-effects sub-library (59 files, 23 efectos + EffectRegistry)
     engines/            watermelon-engines sub-library (SynthEngine + 6 engines
@@ -71,15 +71,20 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
                         Compose aborta al arrancar)
 ```
 
-> Los conteos de arriba son orientativos y **driftean**. Re-medidos el 2026-08-25 al cerrar
-> REQ-014: commonMain 91→**93**, androidMain **21**, iosMain **6**,
-> AudioNativeBridge 3304→**3332** LOC y 303→**306** funs, JNIEXPORT 292→**295**,
-> C API 269→**272**, suite de host 1011→**1131** tests. (La tanda anterior, del 2026-08-20 al
-> cerrar REQ-001 S10, venía de commonMain 83, AudioNativeBridge 3229 LOC / 291 funs,
-> JNIEXPORT 280, C API 253 y 883 tests.) El afinador entero (REQ-001) agregó `cpp/analysis/`
-> con 14 archivos.
+> Los conteos de arriba son orientativos y **driftean**. Re-medidos el 2026-08-27 tras cerrar
+> REQ-013 y REQ-017: commonMain 93→**94**, androidMain **21**, iosMain **6**,
+> AudioNativeBridge 3332→**3357** LOC y 306→**308** funs, JNIEXPORT 295→**297**,
+> C API 272→**274**, suite de host 1131→**1154** tests. Y la tabla de **Stack** también estaba
+> vieja: AGP decía 9.2.1 contra **9.3.2** y Kotlin 2.4.0 contra **2.4.10** — o sea que el drift
+> no es sólo de los conteos, alcanza a cualquier número escrito a mano en este archivo.
 >
-> 🔴 **Que este bloque haya quedado stale DOS veces seguidas es el dato, no el accidente.** Un
+> (Tandas anteriores: 2026-08-25 al cerrar REQ-014 venía de commonMain 91, AudioNativeBridge
+> 3304 LOC / 303 funs, JNIEXPORT 292, C API 269 y 1011 tests; 2026-08-20 al cerrar REQ-001 S10,
+> de commonMain 83, AudioNativeBridge 3229 / 291, JNIEXPORT 280, C API 253 y 883 tests.) El
+> afinador entero (REQ-001) agregó `cpp/analysis/` con 14 archivos.
+>
+> 🔴 **Que este bloque haya quedado stale CUATRO veces seguidas es el dato, no el accidente**, y
+> la cuarta agregó un eje nuevo: las VERSIONES del stack, que nadie sospechaba. Un
 > conteo escrito a mano envejece en silencio: nadie lo lee como "esto puede estar viejo", se lee
 > como un hecho. Le pasó también a la spec viva del afinador —decía "snapshot de 14 valores"
 > cuando ya eran 16— y a un KDoc que decía "ocho floats" con quince, contra el que un consumidor
@@ -87,10 +92,18 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
 >
 > ```bash
 > find audio/src/commonMain -name '*.kt' | wc -l          # archivos por source set
+> wc -l audio/src/androidMain/kotlin/com/watermellonstudios/audio/internal/bridge/AudioNativeBridge.kt
 > grep -c 'external fun' audio/src/androidMain/kotlin/com/watermellonstudios/audio/internal/bridge/AudioNativeBridge.kt
 > grep -c JNIEXPORT audio/src/main/cpp/jni/jni_audio_bridge.cpp
+> grep -c WMA_API audio/src/main/cpp/api/watermelon_audio.h
+> grep -nE '^agp|^kotlin ' gradle/libs.versions.toml     # la tabla de Stack tambien driftea
 > python3 scripts/c-api-gap.py                            # C API + delegacion (§4b)
 > ```
+>
+> 🔴 **Cuatro veces stale es la evidencia de que "medir antes de citar" NO alcanza**: es una regla
+> que sólo vive en prosa, y este repo ya sabe cómo terminan (WD-1.1: el callback violaba sus
+> reglas escritas en 65 lugares). La salida coherente con el resto del repo es un guardrail que
+> re-mida y falle contra este archivo, como `rt-safety` o `mechanism-callers`. No existe todavía.
 
 ---
 
@@ -98,8 +111,8 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
 
 | Componente | Version |
 |------------|---------|
-| Kotlin | 2.4.0   |
-| AGP | 9.2.1   |
+| Kotlin | 2.4.10  |
+| AGP | 9.3.2   |
 | Oboe | 1.10.0  |
 | C++ | C++20   |
 | CMake | 3.22.1  |
@@ -247,7 +260,7 @@ sesiones enteras. Los marcados **[gate]** ya los corre `scripts/gate.sh`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (1131 tests, googletest).
+bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (1154 tests, googletest).
                                            # ctest corre en PARALELO desde el 18/08: 149,7 s -> 20,4 s.
                                            # `CTEST_JOBS=n` lo baja si hace falta
                                            # Kotlin: 112 iOS sim / 69 JVM

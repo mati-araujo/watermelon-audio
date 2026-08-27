@@ -183,6 +183,24 @@ enum SnapshotValue : int {
      * contesta comparando contra el valor anterior, **sin haber estado mirando
      * en el instante**.
      *
+     * 🔴 PERO NO ARREGLA EL FLAKE DE MINI-006, y esto esta MEDIDO (2026-08-27),
+     * porque la tentacion de creer que si es directa: el KDoc nombra a MINI-006,
+     * asi que se lee como que migrar `test_capture_discontinuity.cpp` a este
+     * indice lo volveria determinista. NO. Se instrumento ese test para mirar
+     * los DOS instrumentos sobre el mismo estimulo y se reprodujo bajo 40
+     * quemadores en 10 nucleos:
+     *
+     *     sin carga    6/6 pasaron   marca=1  contador=1
+     *     con carga   24/25 pasaron  marca=1  contador=1
+     *                  1/25 FALLO    marca=0  CONTADOR=0
+     *
+     * En la corrida que falla el contador vale CERO. La causa no es que el
+     * observador se pierda el flag: es que bajo starvation el thread de analisis
+     * **nunca llega a procesar el audio con el hueco** —publico 3 veces en toda
+     * la corrida—, asi que no hay evento que contar. Ningun observador, ni
+     * acumulado ni transitorio, puede reportar algo que no ocurrio. Por eso
+     * MINI-006 se cancelo, y por eso sigue cancelado.
+     *
      * 🔴 NO SE USA COMO GUARDA. Es acumulado y monotono, o sea que una guarda
      * apoyada en el se traba y no vuelve a declarar convergido nunca — que es
      * literalmente el defecto que documenta `kSnapDroppedFrames` y que AC-009.2
