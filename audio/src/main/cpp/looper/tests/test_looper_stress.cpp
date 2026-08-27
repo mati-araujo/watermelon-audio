@@ -10,6 +10,8 @@
 // be flagged). Run it under clang `-fsanitize=thread` on Linux/macOS CI for full
 // race detection — the test body is written to be TSan-clean.
 // ============================================================================
+#include "support/FixturePath.h"
+
 #include <gtest/gtest.h>
 #include "AudioLooper.h"
 #include "WavFile.h"
@@ -122,8 +124,14 @@ TEST(LooperStress, ClearVsPlaybackNoUseAfterFree) {
     looper.prepareMixBuffer(4096);
 
     // A WAV to re-import as the track content.
-    const std::filesystem::path wav =
-        std::filesystem::temp_directory_path() / "wm_stress_seed.wav";
+    //
+    // 🔴 UNICA POR PROCESO (MINI-009), y no es cosmetico: este test se compila en
+    // `looper_tests` y en `looper_tests_dense`, ctest corre las dos EN PARALELO, y
+    // abajo se relee este archivo 120 veces durante ~8 s. Con un nombre compartido,
+    // la otra copia lo re-escribe en el medio y la lectura sale truncada
+    // (`readWav returned 0 frames`) — que es como se puso rojo master en 44a9a4d.
+    const wma_test::ScopedFixture seedFile("stress_seed.wav");
+    const std::filesystem::path wav = seedFile.path();
     {
         std::vector<float> seed(30000 * 2);
         for (int i = 0; i < 30000; ++i) {
