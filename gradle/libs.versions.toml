@@ -12,7 +12,7 @@ minSdk = "29"
 harnessCompileSdk = "37"
 
 # Build Tools
-agp = "9.3.1"
+agp = "9.3.2"
 kotlin = "2.4.10"
 cmake = "3.22.1"
 ndk = "28.2.13676358"
