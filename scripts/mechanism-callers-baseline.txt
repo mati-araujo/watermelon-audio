@@ -45,10 +45,20 @@
 #    1  callback-externo
 #
 # Las tres deudas mas caras, medidas al clasificar:
-#   1. AudioEngine::setPreferredSampleRate — `mPreferredSampleRate` se LEE en
-#      cinco lugares de la negociacion de rate y su unico escritor de produccion
-#      es `startOffline`, que tampoco tiene llamador. En produccion el rate
-#      preferido es SIEMPRE 0=auto. Es exactamente la clase de REQ-012.
+#   1. AudioEngine::setPreferredSampleRate — PAGADA por MINI-007 (2026-08-27), y
+#      por eso su entrada ya no esta en este archivo: el setter se BORRO. Se habia
+#      declarado que `mPreferredSampleRate` se leia en cinco lugares de la
+#      negociacion de rate con un unico escritor de produccion (`startOffline`).
+#      Al decidir, dos de los argumentos para cablearlo estaban caducados —REQ-012.4
+#      ya habia construido el seguimiento reactivo del rate, y el caso USB ya tenia
+#      superficie de consumidor por `setUsbStreamPreference`—, asi que se borro el
+#      setter y las TRES ramas que solo el podia encender. Las otras dos —el rung
+#      de `currentSampleRate()` y el store de `startOffline`— eran produccion viva
+#      y se conservaron, con el campo renombrado a `mOfflineSampleRate`.
+#      🔴 La leccion, que es de este archivo y no de ese MINI: la entrada decia
+#      "se LEE en cinco lugares" y la spec que la ejecuto conto CUATRO. El quinto
+#      (`AudioEngine.cpp:498`) era un uso derivado de una variable local, invisible
+#      para un `grep` del nombre del campo. El baseline tenia razon.
 #   2. SynthEngine::getParameterCount/getParameterDef — virtuales puras, seis
 #      overrides, CERO llamadas en produccion. Doce entradas, un mecanismo.
 #   3. DriftResampler::setDriftCorrection — ClockController MIDE la deriva y el
@@ -77,7 +87,6 @@ audio/src/main/cpp/backends/DriftResampler.cpp::DriftResampler::setDriftCorrecti
 audio/src/main/cpp/backends/SplitBackend.cpp::SplitBackend::OutputCallback::onStreamConfigChanged::callback-externo | lo despacha el backend por IAudioCallback, no nuestro codigo. Ademas es un FALSO POSITIVO del lint: su cuerpo reenvia a mUserCallback->onStreamConfigChanged (SplitBackend.cpp:283) y esa llamada, por ser al mismo nombre simple desde su propio cuerpo, queda excluida como recursion
 audio/src/main/cpp/backends/SplitBackend.h::SplitBackend::getBridgeUnderruns::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
 audio/src/main/cpp/core/AudioEngine.cpp::AudioEngine::renderBlock::deuda | ver startOffline: la otra mitad del render offline
-audio/src/main/cpp/core/AudioEngine.cpp::AudioEngine::setPreferredSampleRate::deuda | el mas caro de los 76: mPreferredSampleRate se LEE en CINCO lugares de la negociacion de rate (AudioEngine.cpp:465,616,1883,2151) y su unico escritor de produccion es startOffline, que tampoco tiene llamador. En produccion el rate preferido es SIEMPRE 0=auto y no hay forma de encenderlo. Es exactamente la clase de REQ-012
 audio/src/main/cpp/core/AudioEngine.cpp::AudioEngine::startOffline::deuda | el render offline de WD-2.1 entero: definido, documentado y sin un solo llamador de produccion. Junto con renderBlock e isOffline es UNA deuda con tres entradas
 audio/src/main/cpp/core/AudioEngine.h::AudioEngine::getLastInputSampleRate::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
 audio/src/main/cpp/core/AudioEngine.h::AudioEngine::getUndrainedInputNodeCount::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir

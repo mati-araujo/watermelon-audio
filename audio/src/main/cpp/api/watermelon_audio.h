@@ -1824,7 +1824,7 @@ WMA_API int64_t wma_transport_get_play_frame(const WmaEngine* engine);
  * [64, 2048].
  *
  * Resolved against the sample rate actually in effect — the running stream if
- * there is one, otherwise the preferred rate, otherwise 48000. It never
+ * there is one, otherwise the offline render rate, otherwise 48000. It never
  * silently assumes 48 kHz on a device configured for 44.1.
  *
  * @return frames, or -1 for a non-positive target.

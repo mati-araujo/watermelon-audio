@@ -2385,9 +2385,9 @@ int wma_get_recommended_buffer_size(const WmaEngine* engine, float target_latenc
     if (!(target_latency_ms > 0.0f)) return -1;  // also rejects NaN
 
     // currentSampleRate() rather than "getStreamInfo() or else 48000": it
-    // resolves running stream -> preferred rate -> 48000 and never returns <= 0.
-    // The hand-rolled version skipped the preferred rate, so a device configured
-    // for 44.1 kHz that had not started yet got a size computed for 48 kHz.
+    // resolves running stream -> offline render rate -> 48000 and never returns
+    // <= 0. The hand-rolled version skipped the middle rung, so a render already
+    // running at 44.1 kHz got a size computed for 48 kHz.
     // That shortcut is exactly what AudioEngine.h warns about above
     // currentSampleRate(), and what put SoundFonts on the wrong rate in WA-2.0.
     const int sampleRate = engine && engine->engine

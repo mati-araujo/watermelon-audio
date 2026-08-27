@@ -460,15 +460,13 @@ bool AudioEngine::start(int fadeTimeMs) {
             }
         }
 
-        // Push preferred sample rate to BackendManager BEFORE starting so
-        // the device negotiates to it during start().
-        int preferredRate = mPreferredSampleRate.load(std::memory_order_acquire);
+        // MINI-007 — aca habia un `manager.setSampleRate(preferido)` para que el
+        // device negociara a un rate pedido. El unico escritor de ese campo era
+        // un setter que NINGUNA superficie publica alcanzaba (cero `wma_*`, cero
+        // `JNIEXPORT`), asi que en un telefono el valor era siempre 0 y esta rama
+        // no se tomo nunca. El rate lo negocia el backend.
         wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-            "[START] entry: preferredRate=%d useBackendMgr=1 fadeTimeMs=%d",
-            preferredRate, fadeTimeMs);
-        if (preferredRate > 0) {
-            manager.setSampleRate(preferredRate);
-        }
+            "[START] entry: useBackendMgr=1 fadeTimeMs=%d", fadeTimeMs);
 
         // ====================================================================
         // CRITICAL: configure components BEFORE starting the backend.
@@ -495,7 +493,28 @@ bool AudioEngine::start(int fadeTimeMs) {
         // re-run configureComponentsWithSampleRate() afterwards (the call
         // is idempotent for matching rates).
         // ====================================================================
-        const int expectedRate = (preferredRate > 0) ? preferredRate : 48000;
+        // MINI-007: con el rate preferido borrado, esta expresion resolvia
+        // SIEMPRE a la rama del literal — no hay rate que pedir antes de que el
+        // device negocie.
+        //
+        // Se deja el literal A LA VISTA en vez de esconderlo detras de
+        // `currentSampleRate()`: consultarlo aca leeria el backend, que en un
+        // test con el manager ya corriendo contesta OTRO rate, y eso seria un
+        // cambio de comportamiento colado en un MINI que promete cero. El camino
+        // que lo corrige ya existe y es el `configureComponentsWithSampleRate()`
+        // de despues de `manager.start()` — que es exactamente la doctrina del
+        // baseline de `check-literal-rate.py`: "el arreglo no es cambiar el
+        // numero, es que exista un camino que lo corrija".
+        //
+        // 🔴 Ese lint NO lo reporta (medido: sigue en 18 llamadas, ninguna nueva)
+        // porque persigue LLAMADAS que preparan un subsistema con un literal, y
+        // esto es la inicializacion de una local. Queda dicho para que nadie lo
+        // lea como "ya esta declarado en algun lado".
+        //
+        // 🔴 Y `test_rate_reconfiguration.cpp` DEPENDE de este 48000: es el que
+        // hace que el fake, negociando 44100, produzca coercion. Si cambia aca,
+        // su `kRequestedRate` tiene que acompañarlo.
+        const int expectedRate = 48000;
         wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
             "[START] pre-configure components: expectedRate=%d", expectedRate);
         configureComponentsWithSampleRate(expectedRate);
@@ -612,14 +631,10 @@ bool AudioEngine::start(int fadeTimeMs) {
             ->setCallback(adapter)
             ->setErrorCallback(adapter);
 
-    // Use preferred sample rate if set (important for monitoring to match input stream)
-    int preferredRate = mPreferredSampleRate.load(std::memory_order_acquire);
-    if (preferredRate > 0) {
-        builder.setSampleRate(preferredRate);
-        LOGI("Using preferred sample rate: %d Hz", preferredRate);
-    } else {
-        LOGI("Using auto sample rate selection");
-    }
+    // MINI-007 — aca habia un `builder.setSampleRate(preferido)`. Sin escritor
+    // alcanzable, la rama era inalcanzable en device: el camino real siempre fue
+    // la seleccion automatica.
+    LOGI("Using auto sample rate selection");
 
     oboe::Result result = builder.openStream(mStream);
     if (result != oboe::Result::OK) {
@@ -1880,9 +1895,13 @@ int AudioEngine::currentSampleRate() const {
         return sampleRate;
     }
 
-    const int preferred = mPreferredSampleRate.load(std::memory_order_acquire);
-    if (preferred > 0) {
-        return preferred;
+    // El rate del render offline (REQ-015). Sin backend al que preguntarle es lo
+    // unico que sabe a que rate corre el motor, y su UNICO escritor es
+    // `startOffline()`. Fuera de un render offline vale 0 y se cae a 48000, que
+    // es exactamente lo que pasaba en device antes de MINI-007.
+    const int offline = mOfflineSampleRate.load(std::memory_order_acquire);
+    if (offline > 0) {
+        return offline;
     }
     return 48000;
 }
@@ -1970,10 +1989,14 @@ bool AudioEngine::startOffline(int sampleRate, int maxBlockFrames) {
         return false;
     }
 
-    // currentSampleRate() consulta al backend y, si no hay, cae al preferido.
+    // currentSampleRate() consulta al backend y, si no hay, cae a este campo.
     // Publicarlo aca es lo que hace que TODO el motor vea el rate correcto sin
     // tocar una sola linea mas: no hay backend al que preguntarle.
-    mPreferredSampleRate.store(sampleRate, std::memory_order_release);
+    //
+    // MINI-007: este es el UNICO escritor del campo. Antes lo compartia con un
+    // setter publico que ningun consumidor podia alcanzar, y por eso el campo se
+    // llamaba "preferido" — un nombre que prometia una capacidad inexistente.
+    mOfflineSampleRate.store(sampleRate, std::memory_order_release);
     mOfflineMaxBlockFrames.store(maxBlockFrames, std::memory_order_release);
     mOfflineMode.store(true, std::memory_order_release);
 
@@ -2147,11 +2170,8 @@ void AudioEngine::setUseBackendManager(bool enabled) {
         auto& manager = watermelon_audio::BackendManager::getInstance();
         manager.setCallback(this);
 
-        // Configure BackendManager with current preferred settings
-        int preferredRate = mPreferredSampleRate.load(std::memory_order_acquire);
-        if (preferredRate > 0) {
-            manager.setSampleRate(preferredRate);
-        }
+        // MINI-007 — aca habia un tercer `manager.setSampleRate(preferido)`, la
+        // ultima de las tres ramas que solo el setter borrado podia encender.
     }
 }
 
@@ -2646,11 +2666,6 @@ AudioEngine::ReconfigureQuiesce::ReconfigureQuiesce(AudioEngine& engine,
 
 AudioEngine::ReconfigureQuiesce::~ReconfigureQuiesce() {
     mEngine.mEnginesReconfiguring.store(false, std::memory_order_release);
-}
-
-void AudioEngine::setPreferredSampleRate(int sampleRate) {
-    mPreferredSampleRate.store(sampleRate, std::memory_order_release);
-    LOGI("Preferred sample rate set to: %d Hz (0 = auto)", sampleRate);
 }
 
 void AudioEngine::setOscillatorEnabled(bool enabled) {
