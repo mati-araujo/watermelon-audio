@@ -115,16 +115,27 @@ class TunerEngineJniTest {
     @Test
     fun `a - sin motor las doce contestan ausencia, no ceros plausibles`() {
         // PREMISA, y falla ruidoso si se rompe: este test necesita un proceso en el
-        // que nadie llamó todavía a nativeStartTuner. Si alguna vez sale rojo acá,
-        // el arreglo NO es bajar la exigencia: es que la clase que arranca el motor
-        // no corra antes que ésta.
+        // que nadie llamó todavía a nativeStartTuner. El arreglo NO es bajar la
+        // exigencia: es darle a cada clase su proceso — lo hace `forkEvery = 1` en
+        // audio/build.gradle.kts, que existe por esto.
+        //
+        // 🔴 Las DOS aserciones son la premisa, y la segunda hace falta: `getTarget`
+        // devuelve 0 tanto sin motor como CON motor y sin objetivo puesto, así que
+        // sola no detecta un motor ya creado. Medido al entrar `InputJniTest`
+        // (REQ-018), que arranca el motor en su `@Before`: la premisa pasó y reventó
+        // la aserción de más abajo con un mensaje que decía "no arrancó nadie"
+        // cuando alguien SÍ había arrancado. Un diagnóstico que miente cuesta más
+        // que uno que falta.
         assertEquals(
             0f,
             jni("nativeGetTunerTarget") { it.getTunerTargetHz() },
             "premisa rota: alguien ya creó el motor en esta JVM antes que este test",
         )
-
-        assertFalse(jni("nativeIsTunerRunning") { it.isTunerRunning() }, "no arrancó nadie")
+        assertFalse(
+            jni("nativeIsTunerRunning") { it.isTunerRunning() },
+            "premisa rota: el afinador YA está corriendo, o sea que otra clase arrancó el motor " +
+                "en esta JVM antes que este test. Revisá que `forkEvery = 1` siga puesto.",
+        )
         assertFalse(jni("nativeSetTunerTarget") { it.setTunerTargetHz(TARGET_A) }, "sin motor no hay objetivo que poner")
         assertFalse(jni("nativeSetTunerCandidates") { it.setTunerCandidates(candidates()) }, "sin motor no hay candidatos")
         assertFalse(jni("nativeLockTunerString") { it.lockTunerString(2) }, "sin motor no hay cuerda que enganchar")

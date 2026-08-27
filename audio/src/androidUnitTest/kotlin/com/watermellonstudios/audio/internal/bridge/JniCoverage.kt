@@ -45,14 +45,20 @@ internal object JniCoverage {
     fun allExecuted(): Set<String> = byOwner.values.flatten().toSet()
 
     /**
-     * Cierre de una clase del arnés: **imprime el conteo y falla si no se ejerció
-     * nada o si se anotó un nombre que no existe en el árbol.**
+     * Cierre de una clase del arnés: **falla si no se ejerció nada, si se anotó un
+     * nombre que no existe en el árbol, o si la cobertura declarada no coincide**; y
+     * deja lo ejecutado en un archivo para que alguien pueda sumar el total.
      *
-     * Se llama desde el `@AfterClass` de cada clase del arnés, así que con más de
-     * una clase salen varias líneas ACUMULATIVAS y la última es la completa. Es a
-     * propósito: la alternativa —un gancho de apagado de la JVM— imprime después
-     * de que Gradle dejó de reenviar la salida del worker, o sea que el número
-     * dejaría de estar en el log del gate, que es donde tiene que estar.
+     * 🔴 **El total NO se puede calcular acá, y por eso se escribe a disco.** Cada
+     * clase del arnés corre en su PROPIA JVM (`forkEvery = 1`, ver
+     * `audio/build.gradle.kts`), porque el motor nativo es un singleton de proceso y
+     * los tests de ausencia necesitan uno virgen. O sea que este objeto sólo ve lo
+     * suyo: sumar en memoria daría 16, 13, 1 — tres corridas, no una progresión.
+     *
+     * La versión anterior imprimía una línea "acumulada" que **sólo era correcta en
+     * la última clase**, y encima dependía del orden en que Gradle las corriera. Con
+     * una JVM por clase eso pasó de frágil a directamente falso. El total lo arma
+     * ahora la task `jniHarnessCoverage` de Gradle leyendo estos archivos.
      */
     @Synchronized
     fun requireCoverage(owner: String, declared: Set<String>) {
@@ -60,7 +66,27 @@ internal object JniCoverage {
         val executed = byOwner[owner].orEmpty()
         verify(owner, executed, inventory)
         ratchet(owner, declared, executed)
-        println(report(owner, allExecuted(), inventory))
+        publish(owner, executed)
+        println(
+            "[REQ-016] $owner ejecutó ${executed.size} funciones JNIEXPORT contra un JNIEnv real " +
+                "(de ${inventory.jniexportCount} en el árbol). El total del arnés lo imprime Gradle al terminar.",
+        )
+    }
+
+    /**
+     * Deja lo ejecutado por esta clase donde Gradle lo pueda leer.
+     *
+     * Un archivo por dueño, con un nombre por línea. Si esto no se puede escribir es
+     * un **fallo**: sin el archivo, el total de AC-016.3 se calcularía sobre menos
+     * clases de las que corrieron y saldría MENOR que la realidad — o sea un hueco
+     * declarado más grande que el real, que suena conservador pero es igual de falso.
+     */
+    private fun publish(owner: String, executed: Set<String>) {
+        val dir = File(System.getProperty("wma.jniCoverageDir") ?: "build/jni-coverage")
+        if (!dir.isDirectory && !dir.mkdirs()) {
+            fail("el arnés no pudo crear '$dir' para publicar su cobertura; el total saldría incompleto.")
+        }
+        File(dir, "$owner.txt").writeText(executed.joinToString("\n"))
     }
 
     /**
@@ -118,7 +144,7 @@ internal object JniCoverage {
     }
 
     fun report(owner: String, executed: Set<String>, inventory: JniExports.Inventory): String = buildString {
-        append("[REQ-016] arnés JNI (acumulado, tras $owner): ")
+        append("[REQ-016] arnés JNI ($owner): ")
         append("${executed.size} de ${inventory.jniexportCount} funciones JNIEXPORT ejecutadas ")
         append("contra un JNIEnv real · hueco: ${inventory.jniexportCount - executed.size}\n")
         append("          desglose medido: ${inventory.entryPoints.size} entradas Java_* de Kotlin, ")
