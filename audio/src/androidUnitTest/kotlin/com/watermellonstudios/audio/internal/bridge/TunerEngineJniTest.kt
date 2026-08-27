@@ -73,13 +73,30 @@ class TunerEngineJniTest {
         private const val SLOT_HARMONIC = 0
         private const val SLOT_INVALID = 99
 
+        private const val OWNER = "TunerEngineJniTest"
+
+        /**
+         * Las doce que esta clase declara cubrir, más la offline que usa de control
+         * positivo. **Trinquete bidireccional** — ver `JniCoverage.ratchet`: lo trajo un
+         * mutante que sacó una función del arnés y sobrevivió, porque el conteo bajaba
+         * de 13 a 12 y nadie se ponía rojo.
+         */
+        private val COVERED = setOf(
+            "nativeStartTuner", "nativeStopTuner", "nativeIsTunerRunning",
+            "nativeSetTunerTarget", "nativeGetTunerTarget", "nativeGetTunerSnapshot",
+            "nativeSetTunerCandidates", "nativeLockTunerString",
+            "nativeIntonationCapture", "nativeIntonationReset",
+            "nativeIntonationState", "nativeIntonationDifferenceCents",
+            "nativeAnalyzeTunerBuffer",
+        )
+
         @JvmStatic
         @AfterClass
-        fun tally() = JniCoverage.requireSomethingExecuted("TunerEngineJniTest")
+        fun tally() = JniCoverage.requireCoverage(OWNER, COVERED)
     }
 
     private fun <T> jni(name: String, call: (AudioNativeBridge) -> T): T =
-        JniHarness.exercise(name, call)
+        JniHarness.exercise(OWNER, name, call)
 
     @Before
     fun loadLibrary() = JniHarness.requireNativeLibrary()
@@ -258,7 +275,7 @@ class TunerEngineJniTest {
         // devolver arrays estuviera roto, el null de arriba no probaría nada.
         val sine = FloatArray(RATE) { i -> 0.5f * sin(2.0 * PI * 440.0 * i / RATE).toFloat() }
         val produced = assertNotNull(
-            JniHarness.exercise("nativeAnalyzeTunerBuffer") { it.analyzeTunerBuffer(sine, 1, RATE, TARGET_A) },
+            jni("nativeAnalyzeTunerBuffer") { it.analyzeTunerBuffer(sine, 1, RATE, TARGET_A) },
             "la frontera no supo devolver un array: el null de arriba no es concluyente",
         )
         assertEquals(TunerSnapshot.VALUE_COUNT, produced.size)
@@ -280,8 +297,8 @@ class TunerEngineJniTest {
         val loud = FloatArray(RATE) { i -> 0.5f * sin(2.0 * PI * 440.0 * i / RATE).toFloat() }
         val quiet = FloatArray(RATE) { i -> 0.05f * sin(2.0 * PI * 440.0 * i / RATE).toFloat() }
 
-        val first = assertNotNull(JniHarness.exercise("nativeAnalyzeTunerBuffer") { it.analyzeTunerBuffer(loud, 1, RATE, TARGET_A) })
-        val second = assertNotNull(JniHarness.exercise("nativeAnalyzeTunerBuffer") { it.analyzeTunerBuffer(quiet, 1, RATE, TARGET_A) })
+        val first = assertNotNull(jni("nativeAnalyzeTunerBuffer") { it.analyzeTunerBuffer(loud, 1, RATE, TARGET_A) })
+        val second = assertNotNull(jni("nativeAnalyzeTunerBuffer") { it.analyzeTunerBuffer(quiet, 1, RATE, TARGET_A) })
 
         assertTrue(first !== second, "la frontera devolvió DOS VECES el mismo objeto: los arrays se están reciclando")
         assertTrue(

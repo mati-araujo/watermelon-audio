@@ -30,12 +30,38 @@ class JniHarnessSelfTest {
     private val realInventory get() = JniExports.fromTree()
 
     @Test
-    fun `una libreria que no existe falla nombrando la causa y donde busco`() {
-        val diagnosis = JniHarness.loadDiagnosis("watermelon_audio_que_no_existe")
+    fun `una libreria que no existe falla nombrando la CAUSA REAL y donde busco`() {
+        val ausente = "watermelon_audio_que_no_existe"
 
-        assertContains(diagnosis, "watermelon_audio_que_no_existe", message = "el diagnóstico no nombra la librería")
+        // La causa de verdad, sacada de la JVM y no escrita a mano: es contra ESTO que
+        // se compara. Lo trajo un mutante que le sacaba `$cause` al mensaje y
+        // sobrevivía — el self-test miraba el envoltorio y no el contenido.
+        val real = assertFailsWith<UnsatisfiedLinkError> { System.loadLibrary(ausente) }.message.orEmpty()
+        assertTrue(real.isNotEmpty(), "premisa: la JVM tiene que dar un mensaje de error")
+
+        val diagnosis = JniHarness.loadDiagnosis(ausente)
+
+        assertContains(diagnosis, real, message = "el diagnóstico NO trae la causa real que dio la JVM")
+        assertContains(diagnosis, ausente, message = "el diagnóstico no nombra la librería")
         assertContains(diagnosis, "java.library.path", message = "el diagnóstico no dice dónde buscó")
         assertContains(diagnosis, "scripts/build-host-jni.sh", message = "el diagnóstico no dice cómo construirla")
+    }
+
+    @Test
+    fun `el trinquete de cobertura falla en las DOS direcciones`() {
+        JniCoverage.record("un dueño de mentira", "nativeStartTuner")
+
+        val menos = assertFailsWith<AssertionError> {
+            JniCoverage.requireCoverage("un dueño de mentira", setOf("nativeStartTuner", "nativeStopTuner"))
+        }
+        assertContains(menos.message.orEmpty(), "DEJÓ DE EJERCER")
+        assertContains(menos.message.orEmpty(), "nativeStopTuner")
+
+        val mas = assertFailsWith<AssertionError> {
+            JniCoverage.requireCoverage("un dueño de mentira", emptySet())
+        }
+        assertContains(mas.message.orEmpty(), "EJERCE SIN DECLARAR")
+        assertContains(mas.message.orEmpty(), "nativeStartTuner")
     }
 
     @Test
@@ -56,7 +82,7 @@ class JniHarnessSelfTest {
     @Test
     fun `cero funciones ejecutadas es un fallo, no un verde vacio`() {
         val error = assertFailsWith<AssertionError> {
-            JniCoverage.verify("un dueño de mentira", emptySet(), realInventory)
+            JniCoverage.verify("otro dueño de mentira", emptySet(), realInventory)
         }
         assertContains(error.message.orEmpty(), "verde vacío")
     }
@@ -64,7 +90,7 @@ class JniHarnessSelfTest {
     @Test
     fun `un nombre inventado no puede inflar el conteo`() {
         val error = assertFailsWith<AssertionError> {
-            JniCoverage.verify("un dueño de mentira", setOf("nativeFuncionQueNoExiste"), realInventory)
+            JniCoverage.verify("otro dueño de mentira", setOf("nativeFuncionQueNoExiste"), realInventory)
         }
         assertContains(error.message.orEmpty(), "nativeFuncionQueNoExiste")
     }

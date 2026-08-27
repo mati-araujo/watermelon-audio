@@ -39,9 +39,18 @@ class TunerJniTest {
         /** RMS de un seno de amplitud A es A/√2 = 0,35355 para A = 0,5. */
         private const val EXPECTED_RMS = 0.35355f
 
+        private const val OWNER = "TunerJniTest"
+
+        /**
+         * Lo que esta clase declara cubrir. **Trinquete bidireccional**: si deja de
+         * ejercer una, rojo; si ejerce una que no está acá, también. Su diff es la
+         * revisión — ver `JniCoverage.ratchet`.
+         */
+        private val COVERED = setOf("nativeAnalyzeTunerBuffer")
+
         @JvmStatic
         @AfterClass
-        fun tally() = JniCoverage.requireSomethingExecuted("TunerJniTest")
+        fun tally() = JniCoverage.requireCoverage(OWNER, COVERED)
 
         /** Un segundo de La 440 en mono, amplitud 0,5 — el estímulo de H2. */
         private fun sine440(): FloatArray =
@@ -49,7 +58,7 @@ class TunerJniTest {
     }
 
     private fun analyze(samples: FloatArray, channels: Int): FloatArray? =
-        JniHarness.exercise("nativeAnalyzeTunerBuffer") { bridge ->
+        JniHarness.exercise(OWNER, "nativeAnalyzeTunerBuffer") { bridge ->
             bridge.analyzeTunerBuffer(samples, channels, RATE, TARGET_HZ)
         }
 

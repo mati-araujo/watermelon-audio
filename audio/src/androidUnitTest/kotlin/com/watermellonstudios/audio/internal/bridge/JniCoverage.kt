@@ -27,15 +27,22 @@ import kotlin.test.fail
  */
 internal object JniCoverage {
 
-    private val executed = linkedSetOf<String>()
+    /**
+     * Lo ejecutado, **por clase del arnés**.
+     *
+     * Por clase y no en un solo conjunto porque el `@AfterClass` corre una vez por
+     * clase: un acumulado global se afirmaría distinto según el orden en que Gradle
+     * corra las clases, o sea rojo intermitente.
+     */
+    private val byOwner = linkedMapOf<String, MutableSet<String>>()
 
     @Synchronized
-    fun record(nativeName: String) {
-        executed += nativeName
+    fun record(owner: String, nativeName: String) {
+        byOwner.getOrPut(owner) { linkedSetOf() } += nativeName
     }
 
     @Synchronized
-    fun executedNames(): List<String> = executed.toList()
+    fun allExecuted(): Set<String> = byOwner.values.flatten().toSet()
 
     /**
      * Cierre de una clase del arnés: **imprime el conteo y falla si no se ejerció
@@ -48,10 +55,46 @@ internal object JniCoverage {
      * dejaría de estar en el log del gate, que es donde tiene que estar.
      */
     @Synchronized
-    fun requireSomethingExecuted(owner: String) {
+    fun requireCoverage(owner: String, declared: Set<String>) {
         val inventory = JniExports.fromTree()
+        val executed = byOwner[owner].orEmpty()
         verify(owner, executed, inventory)
-        println(report(owner, executed, inventory))
+        ratchet(owner, declared, executed)
+        println(report(owner, allExecuted(), inventory))
+    }
+
+    /**
+     * **Trinquete bidireccional sobre la cobertura**, igual que
+     * `scripts/rt-coverage-baseline.txt` y `mechanism-callers-baseline.txt`: falla si
+     * la clase ejerce MENOS de lo declarado **y también si ejerce más**.
+     *
+     * Existe porque el conteo, solo, no defiende nada: lo destapó un mutante que sacó
+     * una función del arnés —llamada directa en vez de anotada— y **sobrevivió**. El
+     * número bajaba de 13 a 12, el gate lo imprimía, y nadie se ponía rojo. La
+     * cobertura se puede erosionar hasta cero mientras el arnés sigue en verde, que es
+     * exactamente el eje de degradación que vigila el criterio de muerte de este REQ.
+     *
+     * Bidireccional para que **su diff sea la revisión**: sumar cobertura obliga a
+     * declararla, así que aparece en el PR en vez de colarse.
+     */
+    private fun ratchet(owner: String, declared: Set<String>, executed: Set<String>) {
+        val faltantes = declared - executed
+        val nuevas = executed - declared
+        if (faltantes.isEmpty() && nuevas.isEmpty()) return
+        fail(
+            buildString {
+                append("$owner declara cubrir ${declared.size} funciones JNIEXPORT y ejecutó ${executed.size}.\n")
+                if (faltantes.isNotEmpty()) {
+                    append("  DEJÓ DE EJERCER: ${faltantes.joinToString()}\n")
+                    append("  La cobertura se erosionó. El arreglo es volver a ejercerlas, NO bajar la lista.\n")
+                }
+                if (nuevas.isNotEmpty()) {
+                    append("  EJERCE SIN DECLARAR: ${nuevas.joinToString()}\n")
+                    append("  Sumá esos nombres a la lista de la clase: el trinquete es bidireccional a propósito,\n")
+                    append("  para que sumar cobertura aparezca en el diff del PR en vez de colarse.\n")
+                }
+            },
+        )
     }
 
     /** El chequeo, separado del estado global para que el self-test lo pueda ejercer. */

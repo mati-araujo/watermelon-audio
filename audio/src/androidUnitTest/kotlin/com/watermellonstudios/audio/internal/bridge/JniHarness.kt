@@ -105,10 +105,10 @@ internal object JniHarness {
      * mano envejece en silencio, que es como quedaron stale cuatro veces seguidas
      * los conteos de `CLAUDE.md`.
      */
-    fun <T> exercise(nativeName: String, call: (AudioNativeBridge) -> T): T {
+    fun <T> exercise(owner: String, nativeName: String, call: (AudioNativeBridge) -> T): T {
         requireNativeLibrary()
         val result = call(AudioNativeBridge.getInstance())
-        JniCoverage.record(nativeName)
+        JniCoverage.record(owner, nativeName)
         return result
     }
 }
