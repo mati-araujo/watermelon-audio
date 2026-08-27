@@ -309,6 +309,27 @@ private:
     const char* chars_;
 };
 
+// ==================== Compatibilidad NDK / JDK ====================
+
+/**
+ * `AttachCurrentThreadAsDaemon` es la UNICA firma en la que el `jni.h` del NDK y
+ * el del JDK no coinciden: el primero declara `JNIEnv**` y el segundo `void**`.
+ * Todo lo demas de esta capa compila igual con los dos — medido sobre los 310
+ * `JNIEXPORT` del bridge (REQ-016, H1).
+ *
+ * Importa porque el arnes de host de REQ-016 compila esta capa con el `jni.h`
+ * del JDK para poder EJECUTARLA contra un JNIEnv real; sin esto no hay arnes.
+ *
+ * El tipo del parametro se DEDUCE del header presente en vez de elegirse con un
+ * `#ifdef`: un `#ifdef` deja dos caminos y solo uno se compila por build, que es
+ * como se cuelan las divergencias entre host y device.
+ */
+template <typename PtrEnv>
+inline jint wmaAttachCurrentThreadAsDaemon(
+    JavaVM* vm, jint (JavaVM::*attach)(PtrEnv**, void*), JNIEnv** env) {
+    return (vm->*attach)(reinterpret_cast<PtrEnv**>(env), nullptr);
+}
+
 // ==================== Validation Helpers ====================
 
 inline bool isValidFloat(float value) {
