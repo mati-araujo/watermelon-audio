@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.12.0...v2.13.0) (2026-08-27)
+
+
+### Features
+
+* **looper:** el beat sale del motor por push, con el ancla del proximo (REQ-017) ([#217](https://github.com/mati-araujo/watermelon-audio/issues/217)) ([dc50c73](https://github.com/mati-araujo/watermelon-audio/commit/dc50c736e7278c04ba51611046da24df9a15f1e7))
+
 ## [2.12.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.11.0...v2.12.0) (2026-08-26)
 
 
