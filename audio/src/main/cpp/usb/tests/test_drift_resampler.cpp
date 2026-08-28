@@ -28,37 +28,12 @@ TEST(DriftResamplerTest, UnityRatioPreservesFrameCountAndSamples) {
     }
 }
 
-TEST(DriftResamplerTest, PositivePpmProducesSlightlyFewerFramesOverLongWindow) {
-    DriftResampler resampler(48000.0f, 48000.0f);
-    resampler.setDriftCorrection(500.0f);
-
-    constexpr int kFrames = 48000;
-    std::vector<float> input(static_cast<size_t>(kFrames * 2), 0.0f);
-    std::vector<float> output(static_cast<size_t>(kFrames * 2), 0.0f);
-
-    for (int frame = 0; frame < kFrames; ++frame) {
-        input[frame * 2] = static_cast<float>(frame);
-        input[frame * 2 + 1] = static_cast<float>(frame);
-    }
-
-    const int frames = resampler.process(input.data(), kFrames, 2, output.data(), kFrames);
-
-    EXPECT_LT(frames, kFrames);
-    EXPECT_NEAR(frames, 47976, 2);
-}
-
-TEST(DriftResamplerTest, NegativePpmProducesSlightlyMoreFramesWhenCapacityAllows) {
-    DriftResampler resampler(48000.0f, 48000.0f);
-    resampler.setDriftCorrection(-500.0f);
-
-    constexpr int kFrames = 48000;
-    std::vector<float> input(static_cast<size_t>(kFrames * 2), 0.0f);
-    std::vector<float> output(static_cast<size_t>((kFrames + 64) * 2), 0.0f);
-
-    const int frames = resampler.process(input.data(), kFrames, 2, output.data(), kFrames + 64);
-
-    EXPECT_GT(frames, kFrames);
-    EXPECT_NEAR(frames, 48025, 2);
-}
+// 🔴 Los dos tests de la perilla de ppm se borraron con ella (MINI-011). NO fue
+// "sacar cobertura": existian SOLO para ejercer `setDriftCorrection`, que ningun
+// camino de produccion llamaba, y cuya correccion ya la hace `ClockController`
+// por cadencia de paquetes. Ver el encabezado de DriftResampler.h.
+//
+// Lo que esta clase SI corrige —el desajuste nominal de rates— lo cubre el test
+// de arriba (ratio unitario) y `configure()`.
 
 } // namespace

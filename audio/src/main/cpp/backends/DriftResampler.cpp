@@ -18,11 +18,6 @@ void DriftResampler::configure(float sourceRateHz, float targetRateHz) {
     reset();
 }
 
-void DriftResampler::setDriftCorrection(float ppm) {
-    mDriftPpm = std::clamp(ppm, -5000.0f, 5000.0f);
-    updateStep();
-}
-
 void DriftResampler::reset() {
     mFractionalPos = 0.0;
     mHistory.fill(0.0f);
@@ -76,8 +71,7 @@ int DriftResampler::process(
 void DriftResampler::updateStep() {
     const float safeSource = mSourceRate > 0.0f ? mSourceRate : 48000.0f;
     const float safeTarget = mTargetRate > 0.0f ? mTargetRate : safeSource;
-    const float drift = 1.0f + (mDriftPpm / 1000000.0f);
-    mStep = std::clamp((safeSource / safeTarget) * drift, 0.25f, 4.0f);
+    mStep = std::clamp(safeSource / safeTarget, 0.25f, 4.0f);
 }
 
 } // namespace watermelon_audio
