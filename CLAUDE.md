@@ -47,7 +47,7 @@ audio/src/
     voice/              watermelon-voice sub-library (10 files, VoiceManager, VoicePool)
     looper/             watermelon-looper sub-library (16 files, header-only salvo
                         LooperExporter.cpp)
-    analysis/           watermelon-analysis (14 files) — el afinador de REQ-001:
+    analysis/           watermelon-analysis (17 files) — el afinador de REQ-001:
                         ring lock-free + thread de analisis + snapshot atomico,
                         PhaseSlopeEstimator (S2), StrobeTracker (S6),
                         InharmonicityEstimator (S7), FastModeTracker (S5),
@@ -92,7 +92,12 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
 > de commonMain 83, AudioNativeBridge 3229 / 291, JNIEXPORT 280, C API 253 y 883 tests.) El
 > afinador entero (REQ-001) agregó `cpp/analysis/` con 14 archivos.
 >
-> **QUINTA tanda, el 2026-08-27 al cerrar REQ-016**: la suite de host es de **1169** tests, no
+> **SEXTA tanda, el 2026-08-28 al cerrar REQ-019**: la suite de host es de **1180** tests (venía de
+> 1169), `analysis/` pasó de 14 a **17** archivos (nacieron `AbsenceGate.h` y su test), y el reparto
+> del baseline de llamadores es **45 sonda / 29 deuda / 1 entrada / 1 callback-externo**. Los
+> conteos de JNI y de la C API **no** se movieron: MINI-007 borró un setter de C++ sin superficie.
+>
+> **QUINTA tanda, el 2026-08-27 al cerrar REQ-016**: la suite de host era de **1169** tests, no
 > 1154 — o sea que el número de arriba envejeció **el mismo día** en que se lo re-midió. Y los
 > tests de Kotlin en la JVM eran **153**, no los 69 que decía la sección de comandos; con el
 > arnés JNI son **183**. Las `JNIEXPORT` de `jni/*.cpp` son **310** en total (297 del bridge + 8
@@ -310,7 +315,7 @@ sesiones enteras. Los marcados **[gate]** ya los corre `scripts/gate.sh`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (1169 tests, googletest).
+bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (1180 tests, googletest).
                                            # ctest corre en PARALELO desde el 18/08: 149,7 s -> 20,4 s.
                                            # `CTEST_JOBS=n` lo baja si hace falta
                                            # Kotlin: 112 iOS sim / 162 JVM (los dos numeros
@@ -355,7 +360,7 @@ bash scripts/regen-golden.sh               # WD-2.2: RECAPTURAR los golden de DS
                                            # Si aparece un preset que el cambio no
                                            # tocaba, eso es el hallazgo.
 
-# Los mismos 1131 bajo sanitizers. NO son opcionales: el CI tiene un job para
+# Los mismos 1180 bajo sanitizers. NO son opcionales: el CI tiene un job para
 # cada uno y encontraron dos bugs reales que el resto del gate no ve.
 # OJO: `detect_leaks=1` (lo que usa ci.yml) NO existe en macOS y rompe el
 # discovery de gtest — en esta maquina va sin el.
@@ -462,11 +467,11 @@ python3 scripts/check-mechanism-callers.py # [gate] Guardrail REQ-013. Contesta 
                                            # scripts/mechanism-callers-baseline.txt es un
                                            # TRINQUETE bidireccional, y cada entrada lleva su
                                            # CATEGORIA y su RAZON (una entrada sin razon falla).
-                                           # Al 27/08 (MINI-007): 44 sonda-de-tests, 29 deuda
-                                           # (que son ~12 mecanismos), 1 entrada, 1 callback
-                                           # externo. Venia de 30/~13 el 26/08: MINI-007 pago la
-                                           # primera de las tres deudas caras borrando
-                                           # AudioEngine::setPreferredSampleRate. El reparto se
+                                           # Al 28/08: 45 sonda-de-tests, 29 deuda (que son ~12
+                                           # mecanismos), 1 entrada, 1 callback externo. Venia de
+                                           # 44/30 el 26/08: MINI-007 pago la primera de las tres
+                                           # deudas caras borrando setPreferredSampleRate, y
+                                           # REQ-019 sumo una sonda. El reparto se
                                            # DERIVA, no se cuenta a mano:
                                            #   grep -v '^#' scripts/mechanism-callers-baseline.txt \
                                            #     | grep -v '^$' | sed 's/ | .*//' \
