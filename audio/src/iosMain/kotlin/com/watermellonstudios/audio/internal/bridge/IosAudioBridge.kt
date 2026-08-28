@@ -873,6 +873,7 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun transportGetRemainingBeats(): Int = wma_transport_get_remaining_beats(engine)
 
     override fun transportGetPlayFrame(): Long = wma_transport_get_play_frame(engine)
+    override fun transportGetBeatsElapsed(): Int = wma_transport_get_beats_elapsed(engine)
 
     // ==================== FILTRO DE VOZ ====================
     //

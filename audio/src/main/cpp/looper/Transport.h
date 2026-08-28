@@ -140,6 +140,40 @@ public:
         return mBeatsRemaining.load(std::memory_order_acquire);
     }
 
+    /**
+     * @brief Cuantos beats EMITIO la grilla desde que se armo el metronomo.
+     *
+     * 🔴 Es el unico observable que se mueve **solo si el bucle de `tick()` corrio**,
+     * y existe por eso (REQ-020). Los otros tres mienten, cada uno a su manera:
+     *
+     *  - `isMetronomeRunning()` dice **armado**, no sonando: es `mBeatsRemaining > 0`,
+     *    o sea que contesta `true` para siempre con el render apagado (issue #229).
+     *  - `getRemainingBeats()` en modo CONTINUO es el centinela `1` fijo — mirar
+     *    `startMetronomeContinuous()`, que lo pone a proposito y nunca lo decrementa.
+     *  - `getPlayFrame()` avanza **incondicionalmente**, antes de toda guarda, asi que
+     *    dice si el RENDER corre pero no si el metronomo suena.
+     *
+     * El par que discrimina es (`isMetronomeRunning()`, `getBeatsElapsed()`):
+     *
+     *   | armado | elapsed avanza | que esta pasando                              |
+     *   |--------|----------------|-----------------------------------------------|
+     *   | true   | si             | suena: la grilla emite clicks Y eventos Beat  |
+     *   | true   | no             | armado y NADIE tickea — el render no corre    |
+     *   | false  | no             | parado                                        |
+     *
+     * ⚠️ Un click audible NO implica que esto se haya movido: `AudioLooper::triggerClick`
+     * tiene un segundo llamador que no viene de la grilla (`wma_looper_trigger_click`).
+     * Esa distincion es justamente el discriminador del issue #228.
+     *
+     * Coincide exactamente con la cantidad de eventos `Beat` que se empujaron al
+     * dispatcher: los dos salen de la misma iteracion del mismo bucle.
+     *
+     * Lock-free; seguro desde cualquier thread. Se resetea a 0 al armar.
+     */
+    int getBeatsElapsed() const {
+        return mClickIndex.load(std::memory_order_acquire);
+    }
+
     // ========== Play position (musical clock) ==========
     //
     // The transport maintains a monotonically increasing frame counter while

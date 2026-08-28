@@ -411,3 +411,96 @@ TEST(AudioLooper, DirectClickFromUiThreadEmitsNoBeat) {
     EXPECT_EQ(collector.beats.size(), 0u)
         << "un click suelto de UI no es un beat de la grilla";
 }
+
+// ============================================================================
+// REQ-020 — el observable que distingue ARMADO de SONANDO.
+//
+// Los issues #228 y #229 se veian identicos desde afuera porque ninguna de las
+// tres vias de PULL que ya existian contesta "?la grilla esta avanzando?":
+// `isMetronomeRunning()` dice armado, `getRemainingBeats()` es un centinela fijo
+// en modo continuo, y `getPlayFrame()` avanza aunque el metronomo este parado.
+// ============================================================================
+
+// AC-020.1 — `getBeatsElapsed()` cuenta los beats que la grilla EMITIO, y el
+// oraculo es INDEPENDIENTE del contador: son los eventos `Beat` que llegaron al
+// worker por el dispatcher. Si el getter leyera cualquier otro atomico —o una
+// constante— los dos numeros dejarian de coincidir.
+TEST(Transport, BeatsElapsedCountsExactlyTheBeatsTheGridEmitted) {
+    constexpr int kBlock = 512;
+    constexpr int kBeats = 4;
+
+    Transport t;
+    t.setSampleRate(48000);
+    t.setBpm(120.0f);            // framesPerBeat = 24000
+    AudioLooper looper;
+    looper.setSampleRate(48000);
+
+    BeatCollector collector;
+    collector.attachTo(looper);
+
+    EXPECT_EQ(t.getBeatsElapsed(), 0) << "recien armado no hay pulso emitido";
+
+    t.startMetronome(kBeats);
+    for (int i = 0; i < 200; ++i) t.tick(kBlock, looper);
+
+    ASSERT_TRUE(collector.settle(looper, kBeats));
+    ASSERT_EQ(collector.beats.size(), static_cast<size_t>(kBeats));
+    EXPECT_EQ(collector.dispatcher.getDroppedEvents(), 0);
+
+    EXPECT_EQ(t.getBeatsElapsed(), kBeats)
+        << "el contador tiene que valer lo MISMO que la cantidad de eventos Beat "
+           "empujados: los dos salen de la misma iteracion del mismo bucle";
+}
+
+// AC-020.2 — EL GEMELO, y el que hace util al par. Sin este test, un getter que
+// devolviera `mBeatsRemaining` pasaria el de arriba en modo finito y seguiria sin
+// distinguir armado de sonando, que es el defecto entero de #229.
+TEST(Transport, ArmedWithoutTickingIsRunningButNoBeatHasElapsed) {
+    Transport t;
+    t.setSampleRate(48000);
+    t.setBpm(120.0f);
+
+    t.startMetronome(4);
+
+    // NADIE tickea: es exactamente la condicion de #229 — el render apagado.
+    EXPECT_TRUE(t.isMetronomeRunning())
+        << "control positivo: la query vieja SIGUE diciendo que corre";
+    EXPECT_EQ(t.getBeatsElapsed(), 0)
+        << "y la nueva dice la verdad: no sono un solo beat";
+
+    // Y en modo continuo, donde `getRemainingBeats()` es el centinela fijo `1`,
+    // el par es la UNICA via que discrimina.
+    t.startMetronomeContinuous(true);
+    EXPECT_TRUE(t.isMetronomeRunning());
+    EXPECT_EQ(t.getRemainingBeats(), 1) << "el centinela, que no dice nada";
+    EXPECT_EQ(t.getBeatsElapsed(), 0);
+}
+
+// AC-020.3 — el discriminador de #228, anclado. El argumento del issue era "el
+// click suena, y triggerClick/emitBeat estan en la misma iteracion, asi que
+// emitBeat se llamo". El eslabon es FALSO: `triggerClick` tiene un segundo
+// llamador que no viene de la grilla (`wma_looper_trigger_click`, expuesto a
+// Kotlin como `looperTriggerClick()`). Este test fija que ese camino deja el
+// contador quieto, o sea que (click audible + elapsed == 0) es un veredicto.
+TEST(Transport, DirectClickFromUiThreadDoesNotAdvanceBeatsElapsed) {
+    Transport t;
+    t.setSampleRate(48000);
+    t.setBpm(120.0f);
+
+    AudioLooper looper;
+    looper.setSampleRate(48000);
+    looper.setEnabled(false);
+
+    std::array<float, 256> buffer{};
+    for (int i = 0; i < 8; ++i) looper.triggerClick(i == 0);
+    looper.process(buffer.data(), 128);
+
+    // Control positivo: el click SUENA de verdad por este camino — sin esto, el
+    // EXPECT_EQ de abajo seria verde por construccion (nada paso nunca).
+    ASSERT_TRUE(std::any_of(buffer.begin(), buffer.end(), [](float sample) {
+        return sample != 0.0f;
+    })) << "el click suelto tiene que sonar: es la mitad audible del sintoma";
+
+    EXPECT_EQ(t.getBeatsElapsed(), 0)
+        << "un click que no viene de la grilla no es un beat, y el contador no miente";
+}

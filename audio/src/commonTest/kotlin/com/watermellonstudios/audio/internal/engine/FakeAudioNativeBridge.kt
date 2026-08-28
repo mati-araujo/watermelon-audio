@@ -157,6 +157,7 @@ internal class FakeAudioNativeBridge(
     override fun transportGetRemainingBeats(): Int = notModeled("transportGetRemainingBeats")
 
     override fun transportGetPlayFrame(): Long = notModeled("transportGetPlayFrame")
+    override fun transportGetBeatsElapsed(): Int = notModeled("transportGetBeatsElapsed")
     override fun setLogCaptureEnabled(enabled: Boolean) { notModeled("setLogCaptureEnabled") }
     override fun drainCapturedLogs(): Array<String> = notModeled("drainCapturedLogs")
     override fun getLogCaptureDropped(): Int = notModeled("getLogCaptureDropped")

@@ -1801,6 +1801,35 @@ WMA_API int wma_transport_get_remaining_beats(const WmaEngine* engine);
  */
 WMA_API int64_t wma_transport_get_play_frame(const WmaEngine* engine);
 
+/**
+ * Beats the metronome grid has actually EMITTED since it was armed (REQ-020).
+ *
+ * This is the only pull query that moves *if and only if* the grid loop inside
+ * Transport::tick() ran. The other three each lie in their own way:
+ *
+ *  - wma_transport_is_metronome_running() means ARMED, not sounding: with the
+ *    render callback stopped it answers true forever (issue #229).
+ *  - wma_transport_get_remaining_beats() is a fixed sentinel in continuous mode.
+ *  - wma_transport_get_play_frame() advances unconditionally, so it tells you the
+ *    render is alive but says nothing about the metronome.
+ *
+ * Read it together with wma_transport_is_metronome_running():
+ *
+ *   armed=true,  elapsed advancing -> sounding
+ *   armed=true,  elapsed stuck at 0 -> armed and nobody is ticking (no render)
+ *   armed=false, elapsed stuck      -> stopped
+ *
+ * NOTE: an audible click does NOT imply this moved. wma_looper_trigger_click()
+ * fires a click straight from the control thread, off the grid — that path emits
+ * no beat and leaves this counter alone.
+ *
+ * Equals the number of WMA_LOOPER_EVENT_BEAT events pushed to the dispatcher:
+ * both come out of the same loop iteration.
+ *
+ * Lock-free, callable from any thread. Resets to 0 on arming. 0 for a NULL engine.
+ */
+WMA_API int wma_transport_get_beats_elapsed(const WmaEngine* engine);
+
 /* ================================================================
  * 21. Diagnostics & Latency
  * ================================================================

@@ -2735,6 +2735,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransp
     return static_cast<jlong>(wma_transport_get_play_frame(g_wmaEngine));
 }
 
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportGetBeatsElapsed(
+    JNIEnv* env, jobject thiz) {
+    return wma_transport_get_beats_elapsed(g_wmaEngine);
+}
+
 // Export / Import (NOT RT-safe — call from IO thread)
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperExportMix(
