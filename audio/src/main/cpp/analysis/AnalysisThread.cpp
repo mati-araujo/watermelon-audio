@@ -304,7 +304,10 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
         // No agrega analisis: la gruesa ya corria siempre. Agrega una
         // comparacion, que es lo que el no-funcional de la spec permite.
         if (mPreparedRate > 0) {
-            mDetector.process(mScratch.data(), got);
+            // El `bool` que devuelve NO se descarta: dice si esta pasada produjo un
+            // veredicto NUEVO. La compuerta de ausencia lo necesita para no contar la
+            // misma evidencia una vez por bloque leido (REQ-019.2).
+            mFreshPitchVerdict = mDetector.process(mScratch.data(), got);
         }
         if (measuring) {
             mStrobe.setCoarseFrequencyHz(
@@ -402,7 +405,8 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
         // El reparto es lo que hace compatibles AC-019.2 y AC-019.4; el porque
         // esta entero en `AbsenceGate.h`.
         const bool nothingToTune =
-            mAbsence.update(rms < kSilenceFloor, detectorRan, tunableSourcePresent);
+            mAbsence.update(rms < kSilenceFloor, detectorRan, tunableSourcePresent,
+                            mFreshPitchVerdict);
 
         // 🔴 AC-014.5 SE CUMPLE POR CONSTRUCCION, Y ESA ES LA PARTE QUE IMPORTA.
         //

@@ -21,11 +21,11 @@ using wma::analysis::AbsenceGate;
 constexpr int kN = AbsenceGate::kQuietUpdatesToDeclare;
 
 /// Azucar: una lectura con señal tonal buena.
-bool tonal(AbsenceGate& g) { return g.update(false, true, true); }
+bool tonal(AbsenceGate& g) { return g.update(false, true, true, /*fresh=*/true); }
 /// Azucar: una lectura audible pero SIN altura (el transitorio del defecto).
-bool sinAltura(AbsenceGate& g) { return g.update(false, true, false); }
+bool sinAltura(AbsenceGate& g) { return g.update(false, true, false, /*fresh=*/true); }
 /// Azucar: silencio de verdad.
-bool silencio(AbsenceGate& g) { return g.update(true, true, false); }
+bool silencio(AbsenceGate& g) { return g.update(true, true, false, /*fresh=*/true); }
 
 // ---------------------------------------------------------------------------
 // AC-019.1 — el transitorio no apaga la aguja
@@ -123,7 +123,7 @@ TEST(AbsenceGate, WithoutADetectorThereIsNoTonalVerdictToAccumulate) {
     AbsenceGate g;
     for (int i = 0; i < kN * 2; ++i) {
         EXPECT_FALSE(g.update(/*belowSilenceFloor=*/false, /*detectorRan=*/false,
-                              /*tunableSourcePresent=*/false))
+                              /*tunableSourcePresent=*/false, /*freshVerdict=*/true))
             << "sin detector no hay evidencia tonal, asi que tampoco ausencia tonal (i=" << i << ")";
     }
     EXPECT_EQ(g.quietRun(), 0) << "y no puede quedar acumulando en silencio para disparar despues";
@@ -135,6 +135,43 @@ TEST(AbsenceGate, ResetForgetsTheRun) {
     g.reset();
     EXPECT_EQ(g.quietRun(), 0);
     EXPECT_FALSE(sinAltura(g)) << "tras reset hacen falta N de nuevo, no la que faltaba";
+}
+
+/**
+ * 🔴 REQ-019.2 — LA UNIDAD DEL CONTADOR, y es el test que faltaba en S1.
+ *
+ * La ventana del detector es NO SOLAPADA y de 4096 frames de entrada; el consumidor
+ * lee un snapshot por bloque. Con bloques de 1024 eso son CUATRO lecturas por
+ * veredicto, asi que contar LECTURAS cuenta la misma evidencia cuatro veces.
+ *
+ * Un unico veredicto malo —una ventana que cabalga la transicion de amplitud— NO
+ * puede declarar ausencia, por muchas veces que se lo lea. Esto es exactamente el
+ * defecto de MINI-010: `noSignal` valia 4 porque un veredicto se observaba 4 veces.
+ */
+TEST(AbsenceGate, OneBadVerdictReadManyTimesIsStillOneVerdict) {
+    AbsenceGate g;
+    ASSERT_FALSE(tonal(g));
+    // Un solo veredicto sin altura...
+    EXPECT_FALSE(g.update(false, true, false, /*freshVerdict=*/true));
+    // ...releido veinte veces mientras el detector todavia junta su ventana.
+    for (int i = 0; i < 20; ++i) {
+        EXPECT_FALSE(g.update(false, true, false, /*freshVerdict=*/false))
+            << "releer el MISMO veredicto no es evidencia nueva (relectura " << i << ")";
+    }
+}
+
+/**
+ * El gemelo de arriba: releer no acumula, pero tampoco puede BORRAR una ausencia ya
+ * declarada — si no, el rotulo parpadearia entre veredictos.
+ */
+TEST(AbsenceGate, RereadsHoldADeclaredAbsenceInstead0fFlickering) {
+    AbsenceGate g;
+    for (int i = 0; i < kN; ++i) g.update(false, true, false, /*freshVerdict=*/true);
+    ASSERT_TRUE(g.update(false, true, false, /*freshVerdict=*/false));
+    for (int i = 0; i < 10; ++i) {
+        EXPECT_TRUE(g.update(false, true, false, /*freshVerdict=*/false))
+            << "la ausencia ya declarada tiene que SOSTENERSE entre veredictos (i=" << i << ")";
+    }
 }
 
 }  // namespace

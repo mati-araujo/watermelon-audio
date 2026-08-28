@@ -57,10 +57,14 @@ public:
      *                            se produjo. Sin esto no se puede afirmar ausencia
      *                            apoyandose en una evidencia que no existe.
      * @param tunableSourcePresent hay una altura y es plausible como el objetivo.
+     * @param freshVerdict        el detector produjo un veredicto NUEVO en esta
+     *                            pasada (`McLeodPitch::process()` lo devuelve). Sin
+     *                            esto la compuerta contaria la misma evidencia
+     *                            varias veces — ver la nota adentro.
      * @return true si hay que declarar ausencia AHORA.
      */
     bool update(bool belowSilenceFloor, bool detectorRan,
-                bool tunableSourcePresent) noexcept {
+                bool tunableSourcePresent, bool freshVerdict) noexcept {
         if (belowSilenceFloor) {
             // Silencio real: ausencia sin demora, Y se satura el contador. Saturar
             // importa para la transicion silencio -> ruido sin altura: sin eso, al
@@ -74,6 +78,25 @@ public:
             mQuietRun = 0;
             return false;
         }
+        // 🔴 SOLO SE CUENTA UN VEREDICTO NUEVO, y esta es la parte que costo una
+        // etapa entera aprender.
+        //
+        // La primera version contaba LECTURAS, y eso es un error de UNIDADES: la
+        // ventana del detector es NO SOLAPADA y de 4096 frames de entrada
+        // (2048 decimadas x2 a 44,1 kHz), mientras que el consumidor lee un
+        // snapshot por bloque. Con bloques de 1024 eso son CUATRO lecturas por
+        // veredicto, asi que un unico veredicto malo se contaba cuatro veces.
+        //
+        // Medido (REQ-019.2): con la version que contaba lecturas, el defecto
+        // bajaba de 22/120 a 3/120 y el conteo de ausencias pasaba de 4 a
+        // exactamente 2 — que es 4 menos los 2 que una histeresis de 3 alcanza a
+        // tapar. La aritmetica delataba la unidad equivocada.
+        //
+        // Y por eso subir el umbral habria sido el arreglo malo: compensa un error
+        // de unidades con un numero mas grande, y el numero correcto dependeria del
+        // tamaño de bloque del CONSUMIDOR. Contando veredictos, `N` significa lo
+        // que dice: N ventanas de analisis distintas sin encontrar altura.
+        if (!freshVerdict) return mQuietRun >= kQuietUpdatesToDeclare;
         if (mQuietRun < kQuietUpdatesToDeclare) ++mQuietRun;
         return mQuietRun >= kQuietUpdatesToDeclare;
     }

@@ -275,6 +275,11 @@ private:
     /// lineas sueltas en el lazo porque su defecto era invisible ahi: le creia a
     /// UNA lectura sin altura y apagaba la aguja sobre una cuerda audible.
     AbsenceGate mAbsence;
+
+    /// Si la ultima pasada del detector produjo un veredicto NUEVO. Su ventana es
+    /// NO SOLAPADA y mas larga que un bloque, asi que sin esto la compuerta contaria
+    /// la misma evidencia varias veces (REQ-019.2).
+    bool mFreshPitchVerdict = false;
     std::mutex mCandidateMutex;
     double mPendingCandidates[FastModeTracker::kMaxCandidates]{};
     int mPendingCount{0};
