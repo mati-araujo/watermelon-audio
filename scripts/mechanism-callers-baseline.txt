@@ -64,6 +64,7 @@
 #   3. DriftResampler::setDriftCorrection — ClockController MIDE la deriva y el
 #      resampler nunca la recibe: las dos mitades existen y no estan cableadas.
 #
+audio/src/main/cpp/analysis/AbsenceGate.h::AbsenceGate::quietRun::sonda-de-tests | accesor del contador que existe para que un test pueda afirmar que la racha se REINICIA (no solo que el veredicto final es el correcto): sin el, un mutante que nunca reinicie da el mismo veredicto en los casos probados y sobrevive. No lo llama produccion a proposito
 audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::availableFrames::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
 audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::oversizedBlocks::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
 audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::tornReads::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
