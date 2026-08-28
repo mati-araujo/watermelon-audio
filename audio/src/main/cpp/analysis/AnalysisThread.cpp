@@ -91,6 +91,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             mStrobe.reset();
             mDetector.reset();
             mFastMode.reset();
+            mAbsence.reset();
             mInharmonicity.reset();
             mIntonation.reset();
             // `mAppliedTarget` vuelve a 0 para que el objetivo se re-aplique: si
@@ -303,7 +304,10 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
         // No agrega analisis: la gruesa ya corria siempre. Agrega una
         // comparacion, que es lo que el no-funcional de la spec permite.
         if (mPreparedRate > 0) {
-            mDetector.process(mScratch.data(), got);
+            // El `bool` que devuelve NO se descarta: dice si esta pasada produjo un
+            // veredicto NUEVO. La compuerta de ausencia lo necesita para no contar la
+            // misma evidencia una vez por bloque leido (REQ-019.2).
+            mFreshPitchVerdict = mDetector.process(mScratch.data(), got);
         }
         if (measuring) {
             mStrobe.setCoarseFrequencyHz(
@@ -390,8 +394,19 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
         // Sin rate preparado el detector NO CORRIO, y no se puede afirmar
         // ausencia apoyandose en una evidencia que no se produjo: ahi queda el
         // nivel solo, que es el comportamiento anterior.
+        // REQ-019 — LA RAMA TONAL NO LE CREE A UNA SOLA LECTURA.
+        //
+        // Antes esto era la expresion directa, y por eso un hueco transitorio del
+        // detector grueso apagaba la aguja: MEDIDO en MINI-010, cuatro lecturas
+        // seguidas sin altura sobre una cuerda audible (`hz=0`, `pisados=0`,
+        // `discont=0`), 22 rojos de 120 con 10 procesos TSan concurrentes.
+        //
+        // La rama de NIVEL sigue siendo inmediata y la tonal espera N lecturas.
+        // El reparto es lo que hace compatibles AC-019.2 y AC-019.4; el porque
+        // esta entero en `AbsenceGate.h`.
         const bool nothingToTune =
-            rms < kSilenceFloor || (detectorRan && !tunableSourcePresent);
+            mAbsence.update(rms < kSilenceFloor, detectorRan, tunableSourcePresent,
+                            mFreshPitchVerdict);
 
         // 🔴 AC-014.5 SE CUMPLE POR CONSTRUCCION, Y ESA ES LA PARTE QUE IMPORTA.
         //

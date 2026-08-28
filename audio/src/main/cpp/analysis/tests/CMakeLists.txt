@@ -33,6 +33,7 @@ add_executable(analysis_tests
     test_accuracy_contract.cpp
     test_corpus_gate.cpp
     test_non_contiguous.cpp
+    test_absence_gate.cpp
     test_silence_gate.cpp
     test_sign_outside_range.cpp
     test_discontinuity_count.cpp

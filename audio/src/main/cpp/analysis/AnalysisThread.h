@@ -32,6 +32,7 @@
 #include "InharmonicityEstimator.h"
 #include "IntonationMode.h"
 #include "FastModeTracker.h"
+#include "AbsenceGate.h"
 #include "../dsp/McLeodPitch.h"
 
 #include <atomic>
@@ -269,6 +270,16 @@ private:
     /// el thread de control (protegidos por `mCandidateMutex`, que el lazo NO
     /// toma: copia una vez por tick a `mActiveCandidates`).
     FastModeTracker mFastMode;
+
+    /// REQ-019 — la compuerta de ausencia, con su memoria. Vive aca y no como dos
+    /// lineas sueltas en el lazo porque su defecto era invisible ahi: le creia a
+    /// UNA lectura sin altura y apagaba la aguja sobre una cuerda audible.
+    AbsenceGate mAbsence;
+
+    /// Si la ultima pasada del detector produjo un veredicto NUEVO. Su ventana es
+    /// NO SOLAPADA y mas larga que un bloque, asi que sin esto la compuerta contaria
+    /// la misma evidencia varias veces (REQ-019.2).
+    bool mFreshPitchVerdict = false;
     std::mutex mCandidateMutex;
     double mPendingCandidates[FastModeTracker::kMaxCandidates]{};
     int mPendingCount{0};
