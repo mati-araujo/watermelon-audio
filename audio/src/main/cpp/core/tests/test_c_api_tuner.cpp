@@ -39,6 +39,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -173,15 +174,81 @@ bool waitForValue(WmaEngine* e, int index, float expected,
 /// Igual que `waitForSnapshot`, pero espera a que haya una MEDICION de altura —o sea, a
 /// que `cents` deje de ser NaN. Sin esto un test leeria el primer snapshot publicado, que
 /// sale antes de que la integracion tenga de donde sacar una pendiente.
-bool waitForMeasurement(WmaEngine* e, std::array<float, WMA_TUNER_SNAPSHOT_VALUES>& out,
-                        int timeoutMs = 3000) {
-    const auto deadline = std::chrono::steady_clock::now()
-                          + std::chrono::milliseconds(timeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (wma_tuner_get_snapshot(e, out.data()) && !std::isnan(out[kSnapCents])) return true;
+///
+/// 🔴 DEVUELVE UN DIAGNOSTICO, NO UN `bool` (MINI-008). Un `false` pelado no se puede
+/// atribuir, y eso costo una sesion entera: `ChangingTheTargetRestartsTheIntegration` salio
+/// rojo bajo ASan a los 3606 ms y no habia forma de saber cual de estas tres cosas paso —
+/// que son la misma observacion desde afuera y piden arreglos DISTINTOS:
+///
+///   1. el analisis SEGUIA AVANZANDO al vencer  → el techo quedo corto. Subirlo arregla.
+///   2. se detuvo y el ring PISO frames         → `feedTone()` desbordo el ring y el
+///      estimador vio audio con huecos. Es del RITMO DE ALIMENTACION DEL TEST, no del
+///      motor, y subir el techo no cambia nada: no entra audio nuevo despues de que
+///      `feedTone()` volvio, asi que la condicion es INALCANZABLE, no lenta.
+///   3. se detuvo sin pisar nada                → ni lento ni desbordado: otra cosa, y hay
+///      que mirarla en vez de darle mas tiempo.
+///
+/// Que la distincion importa no es teorico: la busqueda de la causa se fue detras de (1) —
+/// "ASan es 2-3x mas lento"— y la medicion la refuto. El test AISLADO bajo ASan no fallo
+/// **0 de 40 con la maquina a `load average` 140**, ni **0 de 6** con la suite entera a
+/// `-j10`. 86 corridas, cero fallos: no habia con que validar el arreglo que se iba a hacer.
+///
+/// La razon de fondo por la que (2) es inalcanzable y no lenta esta en `feedTone()`: regula
+/// por tanda con un techo de 500 ms y, si no llega, SIGUE ALIMENTANDO igual.
+::testing::AssertionResult waitForMeasurement(
+        WmaEngine* e, std::array<float, WMA_TUNER_SNAPSHOT_VALUES>& out, int timeoutMs = 3000) {
+    using clock = std::chrono::steady_clock;
+    const auto start = clock::now();
+    const auto deadline = start + std::chrono::milliseconds(timeoutMs);
+
+    bool everRead = false;
+    float lastFrames = -1.0f;
+    float lastDropped = -1.0f;
+    auto lastAdvance = start;
+
+    while (clock::now() < deadline) {
+        if (wma_tuner_get_snapshot(e, out.data())) {
+            everRead = true;
+            if (!std::isnan(out[kSnapCents])) return ::testing::AssertionSuccess();
+            const float frames = out[kSnapFramesAnalyzed];
+            if (frames > lastFrames) {
+                lastFrames = frames;
+                lastAdvance = clock::now();
+            }
+            lastDropped = out[kSnapDroppedFrames];
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    return false;
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             clock::now() - start).count();
+    const auto quietMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             clock::now() - lastAdvance).count();
+
+    // El umbral de "seguia avanzando" es generoso a proposito: no se trata de medir el
+    // ritmo del analisis, sino de separar "estaba trabajando" de "se planto". Un cuarto
+    // del techo es holgado para las dos.
+    const bool seguiaAvanzando = lastFrames >= 0.0f && quietMs * 4 < timeoutMs;
+
+    auto r = ::testing::AssertionFailure()
+             << "waitForMeasurement vencio a los " << elapsed << " ms (techo " << timeoutMs
+             << "): ";
+    if (!everRead) {
+        return r << "el snapshot NUNCA estuvo disponible — el afinador no publico nada.";
+    }
+    if (seguiaAvanzando) {
+        return r << "el analisis SEGUIA AVANZANDO (" << lastFrames << " frames, ultimo avance "
+                 << "hace " << quietMs << " ms): el techo quedo corto para este entorno.";
+    }
+    if (lastDropped > 0.0f) {
+        return r << "el analisis se detuvo en " << lastFrames << " frames y el ring PISO "
+                 << lastDropped << ": la señal tenia huecos y la condicion es INALCANZABLE, "
+                 << "no lenta. Es del ritmo de alimentacion del test, no del motor — subir "
+                 << "el techo no cambia el veredicto.";
+    }
+    return r << "el analisis se detuvo en " << lastFrames << " frames SIN pisar ninguno: ni "
+             << "lento ni desbordado. Mirar por que la integracion no produjo altura en vez "
+             << "de darle mas tiempo.";
 }
 
 /// Empuja el rate negociado hasta el `InputNode`, por el mismo camino que un
@@ -480,9 +547,64 @@ TEST_F(TunerApiTest, ChangingTheTargetRestartsTheIntegration) {
 
     auto buf = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, buf));
+
+    // MINI-008 — LA GUARDA QUE ESTE TEST NO TENIA Y SUS TRES HERMANOS SI.
+    //
+    // `kSnapDroppedFrames` se afirma en otros tres lugares de este archivo, y
+    // `WithATargetTheSnapshotPublishesRealCents` explica por que: "el ring piso frames: la
+    // señal que vio el estimador tiene huecos y la medicion no significa nada. Es del ritmo
+    // de alimentacion del test, no del motor".
+    //
+    // Este era el unico que la necesitaba de verdad —es el que salio rojo bajo ASan— y era el
+    // unico sin ella, asi que su rojo no se podia atribuir. Va ANTES de mirar los cents: con
+    // el ring pisado, el valor medido no significa nada y afirmar sobre el seria leer ruido.
+    ASSERT_EQ(buf[kSnapDroppedFrames], 0.0f)
+        << "el ring piso frames antes de la segunda medicion: la señal que vio el estimador "
+           "tiene huecos, asi que los cents de abajo no significan nada. Es del ritmo de "
+           "alimentacion del test, no del motor";
+
     EXPECT_NEAR(buf[kSnapCents], 2.0f, 0.1f)
         << "tras cambiar de objetivo midio " << buf[kSnapCents]
         << ": quedo fase de la nota anterior en la regresion";
+
+    wma_tuner_stop(mWma);
+}
+
+/**
+ * MINI-008 — EL AUTO-TEST DEL DIAGNOSTICO, y existe por la misma razon que los `--self-test`
+ * de los guardrails: un diagnostico que nadie vio funcionar es prosa.
+ *
+ * Fuerza la rama que se puede construir con certeza —afinador arrancado, objetivo puesto, y
+ * NADA de audio— y verifica que el mensaje NOMBRE la causa en vez de decir sólo "false".
+ *
+ * 🔴 Sin audio el analisis nunca arranca, asi que la condicion es inalcanzable POR
+ * CONSTRUCCION: es exactamente el caso que un techo mas alto no arregla, y el que la version
+ * `bool` de este helper no sabia distinguir de "tardo de mas".
+ */
+TEST_F(TunerApiTest, ATimeoutNamesItsCauseInsteadOfJustFailing) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_set_target(mWma, 110.0f));
+    ASSERT_TRUE(wma_tuner_start(mWma));
+
+    // Techo corto a proposito: lo que se prueba es el MENSAJE, no la paciencia.
+    auto buf = sentinelBuffer();
+    const auto r = waitForMeasurement(mWma, buf, /*timeoutMs=*/250);
+    ASSERT_FALSE(r) << "sin una sola muestra de audio no puede haber medicion de altura";
+
+    const std::string msg = r.message();
+    EXPECT_NE(msg.find("vencio a los"), std::string::npos)
+        << "el diagnostico tiene que decir CUANTO espero: " << msg;
+
+    // Las dos formas legitimas sin audio: o el snapshot nunca salio, o salio y el analisis
+    // nunca avanzo. Las dos NOMBRAN la causa; ninguna dice "seguia avanzando", que seria la
+    // lectura que manda a subir el techo — justo la equivocada acá.
+    const bool nombraLaCausa = msg.find("NUNCA estuvo disponible") != std::string::npos
+                               || msg.find("SIN pisar ninguno") != std::string::npos;
+    EXPECT_TRUE(nombraLaCausa) << "el diagnostico no nombro la causa: " << msg;
+    EXPECT_EQ(msg.find("techo quedo corto"), std::string::npos)
+        << "sin audio el techo NO es la causa, y decirlo mandaria a arreglar lo que no es: "
+        << msg;
 
     wma_tuner_stop(mWma);
 }
