@@ -171,6 +171,48 @@ bool waitForValue(WmaEngine* e, int index, float expected,
     return false;
 }
 
+/// Las cuatro causas por las que `waitForMeasurement()` puede vencer. Son la MISMA
+/// observacion desde afuera —un `false`— y piden arreglos DISTINTOS, que es por lo que
+/// existe este enum (MINI-008).
+enum class TimeoutCause { SinSnapshot, SeguiaAvanzando, RingPisado, Detenido };
+
+/// La decision, PURA y separada de la observacion — y esa separacion no es estetica.
+///
+/// 🔴 La primera version decidia adentro del bucle de espera, y su auto-test resulto no
+/// cubrir la rama que importa: sin audio el snapshot nunca sale, asi que `SinSnapshot`
+/// cortaba antes y `SeguiaAvanzando` no se evaluaba nunca. Un mutante que forzaba
+/// "el techo quedo corto" SOBREVIVIA — o sea que el diagnostico podia mandar a subir el
+/// techo, que es justo el arreglo equivocado, sin que nada se pusiera rojo.
+///
+/// Asi las cuatro ramas se ejercen sin threads, sin audio y sin timing: el test es
+/// determinista por construccion en vez de por suerte.
+TimeoutCause classifyTimeout(bool everRead, float lastFrames, float lastDropped,
+                             long long quietMs, int timeoutMs) {
+    if (!everRead) return TimeoutCause::SinSnapshot;
+    // El umbral es generoso a proposito: no mide el ritmo del analisis, solo separa
+    // "estaba trabajando" de "se planto". Un cuarto del techo es holgado para las dos.
+    if (lastFrames >= 0.0f && quietMs * 4 < timeoutMs) return TimeoutCause::SeguiaAvanzando;
+    if (lastDropped > 0.0f) return TimeoutCause::RingPisado;
+    return TimeoutCause::Detenido;
+}
+
+const char* describeTimeoutCause(TimeoutCause c) {
+    switch (c) {
+        case TimeoutCause::SinSnapshot:
+            return "el snapshot NUNCA estuvo disponible — el afinador no publico nada.";
+        case TimeoutCause::SeguiaAvanzando:
+            return "el analisis SEGUIA AVANZANDO: el techo quedo corto para este entorno.";
+        case TimeoutCause::RingPisado:
+            return "el analisis se detuvo y el ring PISO frames: la señal tenia huecos y la "
+                   "condicion es INALCANZABLE, no lenta. Es del ritmo de alimentacion del "
+                   "test, no del motor — subir el techo no cambia el veredicto.";
+        case TimeoutCause::Detenido:
+            return "el analisis se detuvo SIN pisar ninguno: ni lento ni desbordado. Mirar "
+                   "por que la integracion no produjo altura en vez de darle mas tiempo.";
+    }
+    return "causa no clasificada";
+}
+
 /// Igual que `waitForSnapshot`, pero espera a que haya una MEDICION de altura —o sea, a
 /// que `cents` deje de ser NaN. Sin esto un test leeria el primer snapshot publicado, que
 /// sale antes de que la integracion tenga de donde sacar una pendiente.
@@ -225,30 +267,13 @@ bool waitForValue(WmaEngine* e, int index, float expected,
     const auto quietMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                              clock::now() - lastAdvance).count();
 
-    // El umbral de "seguia avanzando" es generoso a proposito: no se trata de medir el
-    // ritmo del analisis, sino de separar "estaba trabajando" de "se planto". Un cuarto
-    // del techo es holgado para las dos.
-    const bool seguiaAvanzando = lastFrames >= 0.0f && quietMs * 4 < timeoutMs;
-
-    auto r = ::testing::AssertionFailure()
-             << "waitForMeasurement vencio a los " << elapsed << " ms (techo " << timeoutMs
-             << "): ";
-    if (!everRead) {
-        return r << "el snapshot NUNCA estuvo disponible — el afinador no publico nada.";
-    }
-    if (seguiaAvanzando) {
-        return r << "el analisis SEGUIA AVANZANDO (" << lastFrames << " frames, ultimo avance "
-                 << "hace " << quietMs << " ms): el techo quedo corto para este entorno.";
-    }
-    if (lastDropped > 0.0f) {
-        return r << "el analisis se detuvo en " << lastFrames << " frames y el ring PISO "
-                 << lastDropped << ": la señal tenia huecos y la condicion es INALCANZABLE, "
-                 << "no lenta. Es del ritmo de alimentacion del test, no del motor — subir "
-                 << "el techo no cambia el veredicto.";
-    }
-    return r << "el analisis se detuvo en " << lastFrames << " frames SIN pisar ninguno: ni "
-             << "lento ni desbordado. Mirar por que la integracion no produjo altura en vez "
-             << "de darle mas tiempo.";
+    const TimeoutCause causa = classifyTimeout(everRead, lastFrames, lastDropped,
+                                               quietMs, timeoutMs);
+    return ::testing::AssertionFailure()
+           << "waitForMeasurement vencio a los " << elapsed << " ms (techo " << timeoutMs
+           << "): " << describeTimeoutCause(causa)
+           << "  [frames=" << lastFrames << " pisados=" << lastDropped
+           << " sin avanzar hace " << quietMs << " ms]";
 }
 
 /// Empuja el rate negociado hasta el `InputNode`, por el mismo camino que un
@@ -581,6 +606,58 @@ TEST_F(TunerApiTest, ChangingTheTargetRestartsTheIntegration) {
  * CONSTRUCCION: es exactamente el caso que un techo mas alto no arregla, y el que la version
  * `bool` de este helper no sabia distinguir de "tardo de mas".
  */
+/**
+ * MINI-008 — LAS CUATRO RAMAS DEL DIAGNOSTICO, sin threads, sin audio y sin timing.
+ *
+ * Existe porque el primer auto-test NO alcanzaba: probaba el diagnostico a traves del motor,
+ * sin audio, y ahi `SinSnapshot` corta antes — la rama `SeguiaAvanzando`, que es la unica que
+ * manda a SUBIR EL TECHO, no se evaluaba nunca. Medido con un mutante que la forzaba a `true`:
+ * SOBREVIVIA. O sea que el diagnostico podia recomendar el arreglo equivocado en silencio.
+ *
+ * La leccion, y es la de siempre en este repo: un mutante que sobrevive acusa al TEST.
+ */
+TEST(TunerTimeoutDiagnosis, EachCauseIsClassifiedApart) {
+    constexpr int kTecho = 3000;
+
+    EXPECT_EQ(classifyTimeout(/*everRead=*/false, -1.0f, -1.0f, 0, kTecho),
+              TimeoutCause::SinSnapshot);
+
+    // Avanzo hace 100 ms contra un techo de 3000: estaba trabajando.
+    EXPECT_EQ(classifyTimeout(true, 4096.0f, 0.0f, 100, kTecho),
+              TimeoutCause::SeguiaAvanzando);
+
+    // Se planto hace 2 s Y hubo frames pisados: el ring desbordo.
+    EXPECT_EQ(classifyTimeout(true, 4096.0f, 512.0f, 2000, kTecho),
+              TimeoutCause::RingPisado);
+
+    // Se planto y no piso nada: ni lento ni desbordado.
+    EXPECT_EQ(classifyTimeout(true, 4096.0f, 0.0f, 2000, kTecho),
+              TimeoutCause::Detenido);
+
+    // 🔴 EL BORDE QUE SEPARA LAS DOS LECTURAS OPUESTAS. Justo del lado de adentro dice
+    // "subi el techo"; justo del lado de afuera dice "no lo subas". Sin fijarlo, mover el
+    // umbral cambiaria la recomendacion sin que nada se pusiera rojo.
+    EXPECT_EQ(classifyTimeout(true, 4096.0f, 0.0f, kTecho / 4 - 1, kTecho),
+              TimeoutCause::SeguiaAvanzando);
+    EXPECT_EQ(classifyTimeout(true, 4096.0f, 0.0f, kTecho / 4, kTecho),
+              TimeoutCause::Detenido);
+
+    // Y que cada causa DIGA algo distinto: cuatro ramas con el mismo texto no diagnostican.
+    const std::string a = describeTimeoutCause(TimeoutCause::SinSnapshot);
+    const std::string b = describeTimeoutCause(TimeoutCause::SeguiaAvanzando);
+    const std::string c = describeTimeoutCause(TimeoutCause::RingPisado);
+    const std::string d = describeTimeoutCause(TimeoutCause::Detenido);
+    EXPECT_NE(a, b); EXPECT_NE(a, c); EXPECT_NE(a, d);
+    EXPECT_NE(b, c); EXPECT_NE(b, d); EXPECT_NE(c, d);
+
+    // Y que SOLO la rama de "seguia avanzando" mande a tocar el techo: es la unica lectura
+    // que justifica ese arreglo, y las otras tres lo desaconsejan explicitamente.
+    EXPECT_NE(b.find("techo quedo corto"), std::string::npos);
+    EXPECT_EQ(a.find("techo quedo corto"), std::string::npos);
+    EXPECT_EQ(c.find("techo quedo corto"), std::string::npos);
+    EXPECT_EQ(d.find("techo quedo corto"), std::string::npos);
+}
+
 TEST_F(TunerApiTest, ATimeoutNamesItsCauseInsteadOfJustFailing) {
     startAt(kFirstRate, 0);
     negotiateCaptureRate(mWma, kFirstRate);
