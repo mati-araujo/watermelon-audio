@@ -155,8 +155,9 @@ public:
      *  - Un plugin de DAW, si algun dia se compromete, NO ABRE UN DISPOSITIVO:
      *    el host le pasa un buffer y le pide un bloque. Esto es exactamente eso.
      *
-     * @param sampleRate      Hz. Se publica como preferido, que es de donde
-     *                        currentSampleRate() lo lee cuando no hay backend.
+     * @param sampleRate      Hz. Se publica en `mOfflineSampleRate`, que es de
+     *                        donde currentSampleRate() lo lee cuando no hay
+     *                        backend al que preguntarle.
      * @param maxBlockFrames  El bloque mas grande que el llamador va a pedir.
      *                        Tope duro 4096: los scratch de EffectChain se
      *                        alocan a 8192 samples (4096 frames estereo) en su
@@ -723,15 +724,6 @@ public:
 
     InputReconfigure reconfigureInputNodeForRate(int sampleRate);
 
-    /**
-     * @brief Establece el sample rate preferido para el output stream
-     * @param sampleRate Sample rate en Hz (0 para auto-selección)
-     *
-     * Debe llamarse ANTES de start() para tener efecto.
-     * Útil para sincronizar con el sample rate del input stream en monitoring.
-     */
-    void setPreferredSampleRate(int sampleRate);
-
     // ========== MODE SYSTEM (Stage 3) ==========
 
     /**
@@ -1187,8 +1179,16 @@ private:
     // un segundo consumidor que necesita los datos estéreo intactos.
     std::vector<float> mVocoderMonoBuffer;
 
-    // Sample rate preferido para el output stream (0 = auto)
-    std::atomic<int> mPreferredSampleRate{0};
+    // El rate del render offline (REQ-015), 0 fuera de el. Lo escribe SOLO
+    // `startOffline()` y lo lee SOLO `currentSampleRate()`, como rung intermedio
+    // de su cadena de resolucion.
+    //
+    // MINI-007 lo renombro de `mPreferredSampleRate`: con un setter publico que
+    // ningun consumidor podia alcanzar, "preferido" nombraba una capacidad que no
+    // existia. `stop()` limpia `mOfflineMode` pero NO este campo, asi que despues
+    // de un render offline queda el ultimo valor — es el comportamiento previo,
+    // solo visible con nada corriendo, y el proximo `startOffline()` lo pisa.
+    std::atomic<int> mOfflineSampleRate{0};
 
     // ========== MODE SYSTEM (Stage 3) ==========
 
@@ -1412,16 +1412,33 @@ public:
     bool getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const;
 
     /**
+     * @brief El rate con el que `start()` pre-configura los componentes ANTES de
+     *        que el device negocie.
+     *
+     * Es publico porque los tests de coercion (AC-006.1 y AC-006.2) dependen de
+     * el: producen coercion negociando un rate DISTINTO de este, y si los dos
+     * coincidieran no habria coercion que probar.
+     *
+     * 🔴 Y eso pasaba en silencio. MEDIDO en MINI-007: con este valor puesto en
+     * 44100 —el mismo que negocia el fake— los dos tests siguen VERDES y la suite
+     * entera da 1169/1169, sin ejercer una sola vez el camino que existen para
+     * cubrir. El `static_assert` de `test_rate_reconfiguration.cpp` convierte ese
+     * acoplamiento en un error de compilacion en vez de un comentario.
+     */
+    static constexpr int kPreNegotiationSampleRate = 48000;
+
+    /**
      * @brief The sample rate actually in effect, whatever the audio path.
      *
      * Resolves in order: the running stream (BackendManager or legacy Oboe,
-     * via getStreamInfo) → the preferred rate → 48000.
+     * via getStreamInfo) → the offline render rate (`startOffline`, its only
+     * writer) → 48000.
      *
      * Use this instead of reaching for mStream directly. Call sites that did
      * `mStream ? mStream->getSampleRate() : 0` silently returned 0 on the
      * BackendManager path, because there mStream is always null — which is how
      * the fade in stopWithFade came to be skipped entirely and how SoundFonts
-     * ended up loaded at the *preferred* rate rather than the negotiated one.
+     * ended up loaded at a stale rate rather than the negotiated one.
      *
      * Never returns <= 0. Not RT-safe (may touch the backend); call from
      * control threads only.

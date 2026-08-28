@@ -462,8 +462,15 @@ python3 scripts/check-mechanism-callers.py # [gate] Guardrail REQ-013. Contesta 
                                            # scripts/mechanism-callers-baseline.txt es un
                                            # TRINQUETE bidireccional, y cada entrada lleva su
                                            # CATEGORIA y su RAZON (una entrada sin razon falla).
-                                           # Al 26/08: 44 sonda-de-tests, 30 deuda (que son ~13
-                                           # mecanismos), 1 entrada, 1 callback externo.
+                                           # Al 27/08 (MINI-007): 44 sonda-de-tests, 29 deuda
+                                           # (que son ~12 mecanismos), 1 entrada, 1 callback
+                                           # externo. Venia de 30/~13 el 26/08: MINI-007 pago la
+                                           # primera de las tres deudas caras borrando
+                                           # AudioEngine::setPreferredSampleRate. El reparto se
+                                           # DERIVA, no se cuenta a mano:
+                                           #   grep -v '^#' scripts/mechanism-callers-baseline.txt \
+                                           #     | grep -v '^$' | sed 's/ | .*//' \
+                                           #     | awk -F'::' '{print $NF}' | sort | uniq -c
                                            # 🔴 NO es un detector de codigo muerto: si no la
                                            # llama NADIE, no se reporta. Y NO ve el hueco del
                                            # JNI (REQ-016) — ahi la pregunta es quien EJECUTA.

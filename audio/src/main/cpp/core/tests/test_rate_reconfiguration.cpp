@@ -45,10 +45,30 @@ namespace {
 /// Karplus-Strong: el engine cuyo `prepare()` reasigna la DelayLine.
 constexpr int kKarplusStrong = 1;
 
-/// El rate que el motor PIDE. El fake devuelve otro, y esa diferencia es la que
-/// dispara la rama de coercion de `start()`.
-constexpr int kRequestedRate = 48000;
+/// El rate con el que el motor PREPARA sus componentes antes de que el device
+/// negocie. El fake devuelve otro, y esa diferencia es la que dispara la rama de
+/// coercion de `start()`.
+///
+/// 🔴 Hasta MINI-007 este valor se plantaba con `setPreferredSampleRate()`. Ese
+/// setter se borro —ningun consumidor podia alcanzarlo— y no hizo falta cambiar
+/// nada mas: el rate de pre-negociacion de `start()` es justamente 48000, asi que
+/// el escenario de estos dos AC quedo intacto. Se toma de la constante en vez de
+/// repetir el numero, para que no puedan drift ear en silencio.
+constexpr int kRequestedRate = AudioEngine::kPreNegotiationSampleRate;
 constexpr int kNegotiatedRate = 44100;
+
+/// 🔴 LA PRECONDICION DE LOS DOS AC DE ESTE ARCHIVO, EN TIEMPO DE COMPILACION.
+///
+/// Los dos tests existen para cubrir la rama de COERCION: el motor prepara a un
+/// rate y el device le devuelve otro. Si los dos rates coincidieran no habria
+/// coercion, los tests pasarian igual y no ejercerian nada.
+///
+/// Eso no es hipotetico: es un mutante MEDIDO en MINI-007. Poniendo el rate de
+/// pre-negociacion en 44100 los dos tests quedan verdes y la suite entera da
+/// 1169/1169 — el hueco sobrevivia a todo. Un comentario no lo tapaba; esto si.
+static_assert(kRequestedRate != kNegotiatedRate,
+              "sin rates distintos no hay coercion: AC-006.1 y AC-006.2 quedarian "
+              "verdes sin ejercer la rama que existen para cubrir");
 
 } // namespace
 
@@ -62,7 +82,6 @@ constexpr int kNegotiatedRate = 44100;
  */
 TEST_F(BackendPathFixture, RateCoercionReconfiguresEnginesWithoutRacingTheAudioThread) {
     mBackend->setNegotiatedSampleRate(kNegotiatedRate);
-    mEngine->setPreferredSampleRate(kRequestedRate);
     mEngine->setEngineType(kKarplusStrong);
     mEngine->setFrequencyAndAmplitude(440.0f, 0.8f);
     mEngine->setUseBackendManager(true);
@@ -129,7 +148,6 @@ TEST_F(BackendPathFixture, RateCoercionReconfiguresEnginesWithoutRacingTheAudioT
  */
 TEST_F(BackendPathFixture, CoercedRateStillPlaysTheStringInTune) {
     mBackend->setNegotiatedSampleRate(kNegotiatedRate);
-    mEngine->setPreferredSampleRate(kRequestedRate);
     mEngine->setUseBackendManager(true);
     ASSERT_TRUE(mManager->selectBackend(watermelon_audio::BackendType::OBOE));
     ASSERT_TRUE(mEngine->start(0));

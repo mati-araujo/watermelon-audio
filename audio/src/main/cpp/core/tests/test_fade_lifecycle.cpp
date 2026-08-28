@@ -72,13 +72,16 @@ TEST_F(FadeLifecycleTest, StopWithFadeRampsDownInsteadOfCuttingTheAudio) {
     awaitDetachedStop(kFadeMs);
 }
 
-TEST_F(FadeLifecycleTest, StopWithFadeSpansTheNegotiatedRateNotThePreferredOne) {
+TEST_F(FadeLifecycleTest, StopWithFadeSpansTheNegotiatedRateNotThe48000Floor) {
     constexpr int kFadeMs = 100;
-    // The device settles at half the rate the app wanted. A ramp measured
-    // against the preferred rate would last twice as many frames as it should,
-    // so the audio would still be clearly audible when the stream is torn down.
+    // The device settles at half the rate the engine assumes by default. A ramp
+    // measured against 48000 would last twice as many frames as it should, so the
+    // audio would still be clearly audible when the stream is torn down.
+    //
+    // MINI-007: la alternativa equivocada la plantaba `setPreferredSampleRate(48000)`.
+    // Borrado el setter, el 48000 sigue siendo la alternativa equivocada —es el
+    // piso de `currentSampleRate()`— asi que el test discrimina igual sin el.
     startEngineAt(24000);
-    mEngine->setPreferredSampleRate(48000);
     settleAtFullVolume(*mEngine);
     ASSERT_FLOAT_EQ(mEngine->getCurrentFadeVolume(), 1.0f);
 
@@ -190,10 +193,9 @@ TEST_F(FadeLifecycleTest, ResumeWithFadeRampsUpFromSilence) {
     EXPECT_NEAR(mEngine->getCurrentFadeVolume(), expected, 0.01f);
 }
 
-TEST_F(FadeLifecycleTest, ResumeWithFadeSpansTheNegotiatedRateNotThePreferredOne) {
+TEST_F(FadeLifecycleTest, ResumeWithFadeSpansTheNegotiatedRateNotThe48000Floor) {
     constexpr int kFadeMs = 100;
     startEngineAt(24000);
-    mEngine->setPreferredSampleRate(48000);
     settleAtFullVolume(*mEngine);
     mEngine->pauseWithFade(0);
 

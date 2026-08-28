@@ -129,11 +129,16 @@ TEST_F(CApiDiagnosticsTest, TheRunningStreamRateWins) {
     EXPECT_EQ(wma_get_recommended_buffer_size(mWma, 2.9f), 128);
 }
 
-TEST_F(CApiDiagnosticsTest, WithNoStreamRunningThePreferredRateIsUsed) {
+TEST_F(CApiDiagnosticsTest, WithNoStreamRunningTheOfflineRenderRateIsUsed) {
     // THE behaviour change. No startAt() — nothing is running, so the old code
     // took its 48000 fallback and answered 256. currentSampleRate() knows the
-    // device was configured for 44.1 and answers 128.
-    mWma->engine->setPreferredSampleRate(44100);
+    // engine is rendering at 44.1 and answers 128.
+    //
+    // MINI-007: el rung del medio se plantaba con `setPreferredSampleRate()`, que
+    // ningun consumidor podia alcanzar. Ahora se planta por `startOffline()`, que
+    // es su unico escritor de produccion — y de paso este test pasa a cubrir el
+    // caso REAL del render offline pidiendo su tamaño de buffer.
+    ASSERT_TRUE(mWma->engine->startOffline(44100, 4096));
 
     EXPECT_EQ(wma_get_recommended_buffer_size(mWma, 2.9f), 128);
 }

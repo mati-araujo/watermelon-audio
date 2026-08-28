@@ -146,11 +146,13 @@ TEST_F(CaptureSampleRateTest, AFreshNodeDoesNotClaimToKnowARateItWasNeverTold) {
  * entrada != salida pero salida = 48 kHz.
  */
 TEST_F(CaptureSampleRateTest, TheMismatchFlagComparesTwoRealRates) {
-    // Sin stream corriendo, `currentSampleRate()` resuelve por el preferido.
-    // Ponerlo modela "el motor esta a 44100" del lado de la SALIDA, que es la
-    // mitad contra la que se compara.
-    mBackend->setNegotiatedSampleRate(kNegotiated);
-    mEngine->setPreferredSampleRate(kNegotiated);
+    // La SALIDA tiene que estar de verdad a 44100: es la mitad contra la que se
+    // compara el rate de entrada. Antes de MINI-007 esto se plantaba con el rate
+    // preferido —un rung que ningun consumidor podia escribir—; ahora se planta
+    // con un backend corriendo, que es el camino por el que un device llega a
+    // 44,1 kHz de verdad.
+    runBackendAt(kNegotiated);
+    ASSERT_EQ(mEngine->currentSampleRate(), kNegotiated);
 
     auto node = std::make_shared<InputNode>();
     node->prepare(48000, 4096);
