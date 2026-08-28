@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.14.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.13.0...v2.14.0) (2026-08-28)
+
+
+### Features
+
+* **transport:** que el pulso que no suena deje rastro (REQ-020) ([#233](https://github.com/mati-araujo/watermelon-audio/issues/233)) ([389f970](https://github.com/mati-araujo/watermelon-audio/commit/389f97020de94062a4daaebe1a0cf8c891bb1fb3))
+
+
+### Bug Fixes
+
+* **analysis:** la compuerta de ausencia deja de apagar una cuerda audible (REQ-019) ([#231](https://github.com/mati-araujo/watermelon-audio/issues/231)) ([2a967b2](https://github.com/mati-araujo/watermelon-audio/commit/2a967b2d7ad59f0dd2333c9fa6876ae3d84cc550))
+
 ## [2.13.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.12.0...v2.13.0) (2026-08-27)
 
 
