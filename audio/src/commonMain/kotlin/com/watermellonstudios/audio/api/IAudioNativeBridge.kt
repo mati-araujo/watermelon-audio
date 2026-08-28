@@ -325,6 +325,15 @@ interface IAudioNativeBridge :
      * @param everyBeatPattern  son downbeat los que caen en `index % beatsPerBar == 0`.
      *                          Tiene prioridad sobre [firstIsDownbeat].
      */
+    /**
+     * 🔴 **Armar no es sonar** (issue #229). Lo que hace sonar los clicks y emitir los beats
+     * es el tick del transport, que corre **desde el camino de render**: con el motor sin
+     * renderizar esto no produce nada, no falla y no avisa — y [transportIsMetronomeRunning]
+     * contesta `true` igual.
+     *
+     * Para verificar que de verdad arrancó, leé [transportGetBeatsElapsed]: si queda en 0,
+     * está armado y nadie lo tickea.
+     */
     fun transportStartMetronome(
         beats: Int,
         firstIsDownbeat: Boolean = true,
@@ -332,11 +341,22 @@ interface IAudioNativeBridge :
     )
 
     /** Click continuo hasta [transportStopMetronome] — la referencia mientras se graba. */
+    /** Igual que [transportStartMetronome]: **armar no es sonar**, ver ahí. */
     fun transportStartMetronomeContinuous(everyBeatPattern: Boolean = true)
 
     /** Cancela lo programado. Un click ya sonando decae solo. */
     fun transportStopMetronome()
 
+    /**
+     * `true` mientras hay un schedule **armado**, contado o continuo.
+     *
+     * 🔴 **Armado no es sonando** (issue #229). `Transport::tick()` —lo único que hace sonar
+     * los clicks y emitir los beats— se llama **desde el camino de render**. Sin render no
+     * hay tick, y esta query sigue contestando `true` porque sólo mira el schedule.
+     *
+     * Para saber si de verdad suena, leé [transportGetBeatsElapsed]: es el único observable
+     * que se mueve si y sólo si corrió el bucle de la grilla.
+     */
     fun transportIsMetronomeRunning(): Boolean
     fun transportIsMetronomeContinuous(): Boolean
 
@@ -361,6 +381,38 @@ interface IAudioNativeBridge :
      * verdad, sin importar cuánto tardó el evento en llegar.
      */
     fun transportGetPlayFrame(): Long
+
+    /**
+     * Beats que la grilla del metrónomo **emitió de verdad** desde que se armó (REQ-020).
+     *
+     * 🔴 Es la única consulta de PULL que se mueve **si y sólo si** corrió el bucle de la
+     * grilla. Las otras tres mienten, cada una a su manera:
+     *
+     * - [transportIsMetronomeRunning] dice **armado**, no sonando: con el callback de render
+     *   parado contesta `true` para siempre (issue #229).
+     * - [transportGetRemainingBeats] en modo continuo es un centinela fijo.
+     * - [transportGetPlayFrame] avanza incondicionalmente: dice que el **render** está vivo,
+     *   no que el metrónomo suene.
+     *
+     * Se lee junto con [transportIsMetronomeRunning]:
+     *
+     * | armado | esto avanza | qué está pasando                          |
+     * |--------|-------------|-------------------------------------------|
+     * | `true` | sí          | suena                                     |
+     * | `true` | no          | armado y **nadie tickea** — sin render     |
+     * | `false`| no          | parado                                    |
+     *
+     * ⚠️ **Un click audible NO implica que esto se haya movido.** `looperTriggerClick()`
+     * dispara un click desde el thread de control, fuera de la grilla: ese camino no emite
+     * beat y deja este contador quieto.
+     *
+     * Coincide con la cantidad de [LooperStateListener.onBeat] que el motor **emitió** — que
+     * no es lo mismo que los que llegaron: entre la emisión y la entrega hay una cola, y lo
+     * descartado se cuenta aparte en `looperGetDroppedEvents()`.
+     *
+     * Lectura atómica sin locks. Se resetea a 0 al armar.
+     */
+    fun transportGetBeatsElapsed(): Int
 
     // ==================== LOG CAPTURE ====================
 

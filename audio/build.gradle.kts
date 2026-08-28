@@ -186,6 +186,21 @@ tasks.withType<Test>().configureEach {
     systemProperty("wma.jniCoverageDir", coverageDirFile.absolutePath)
     doFirst { coverageDirFile.deleteRecursively() }
 
+    // 🔴 Y el directorio va declarado como SALIDA, o el finalizador se queda sin
+    // nada que sumar. Es la lección de `dependsOn` SOLO ORDENA, del lado de las
+    // salidas: Gradle no sabe que esta task produce `build/jni-coverage/`, así que
+    // si el directorio no está —lo borró alguien, o vino de otro checkout— la task
+    // igual se declara UP-TO-DATE, no lo repuebla, y `jniHarnessCoverage` falla con
+    // "no pude sumar". Medido: `rm -rf audio/build/jni-coverage && ./gradlew
+    // :audio:testDebugUnitTest` daba rojo con la task en UP-TO-DATE, y lo mismo
+    // pasaba en `gate.sh` cuando la task venía FROM-CACHE.
+    //
+    // Declarándolo, borrar el directorio vuelve la task out-of-date (se recorre) y
+    // un acierto de caché lo restaura junto con el resto. De paso cierra el modo de
+    // falla espejado y peor: un directorio VIEJO que sobrevive a un cambio de tests
+    // y deja pasar un conteo stale.
+    outputs.dir(coverageDirFile)
+
     // El total se imprime DONDE SEA que corran los tests: `gate.sh` corre
     // `:audio:testDebugUnitTest` y el job `build` del CI también, y ninguno de los
     // dos corre `check`. Con un finalizador, AC-016.3 se cumple sin tocar

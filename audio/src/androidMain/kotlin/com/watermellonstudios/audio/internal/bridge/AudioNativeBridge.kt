@@ -2841,6 +2841,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeTransportIsMetronomeContinuous(): Boolean
     private external fun nativeTransportGetRemainingBeats(): Int
     private external fun nativeTransportGetPlayFrame(): Long
+    private external fun nativeTransportGetBeatsElapsed(): Int
 
     private external fun nativeLooperExportMix(filePath: String): Boolean
     private external fun nativeLooperExportTrack(trackIndex: Int, filePath: String): Boolean
@@ -3192,6 +3193,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override fun transportGetRemainingBeats(): Int = nativeTransportGetRemainingBeats()
 
     override fun transportGetPlayFrame(): Long = nativeTransportGetPlayFrame()
+    override fun transportGetBeatsElapsed(): Int = nativeTransportGetBeatsElapsed()
 
     // Export / Import (call from IO thread)
     override fun looperExportMix(filePath: String): Boolean = nativeLooperExportMix(filePath)

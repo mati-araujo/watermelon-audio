@@ -2377,6 +2377,11 @@ int64_t wma_transport_get_play_frame(const WmaEngine* engine) {
     return engine->engine->getTransport().getPlayFrame();
 }
 
+int wma_transport_get_beats_elapsed(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getTransport().getBeatsElapsed();
+}
+
 /* ================================================================
  * 21. Diagnostics & Latency
  * ================================================================ */
