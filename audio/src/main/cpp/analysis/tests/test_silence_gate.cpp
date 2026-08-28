@@ -141,6 +141,45 @@ struct Observed {
     int transitions = 0;      // parpadeo del estado
     double lastDetectedHz = 0.0;
     int lastState = -1;
+
+    // MINI-010 — EL CONTEXTO DE CADA AUSENCIA, no solo su conteo.
+    //
+    // Un `noSignal` de 4 sobre 40 no se puede atribuir: puede ser el thread de
+    // analisis arrancando (las cuatro PRIMERAS), el ring pisando frames (huecos en
+    // la señal, o sea del ritmo del test), o la compuerta apagando audio limpio —
+    // que seria un defecto de producto. Las tres se ven igual desde el conteo.
+    //
+    // Medido bajo 10 procesos TSan concurrentes: 22 rojos de 120, y los VEINTIDOS
+    // con `noSignal` EXACTAMENTE 4. Un conteo movido por azar se dispersaria; que
+    // sea siempre el mismo numero dice que la causa es estructural, y para verla
+    // hace falta saber CUALES son esas cuatro muestras.
+    std::vector<int> noSignalAt;
+    std::vector<float> noSignalRms;
+    std::vector<float> noSignalDropped;
+    std::vector<float> noSignalDisc;
+    // 🔑 Y las DOS que separan las dos formas de "no hay evidencia tonal":
+    // sin altura (`hz` = 0) o con una altura FUERA de `kLockCents` del objetivo.
+    std::vector<float> noSignalHz;
+    std::vector<float> noSignalClarity;
+
+    /// Una linea por ausencia, para que el rojo se lea sin volver a correr nada.
+    std::string describeNoSignal() const {
+        if (noSignalAt.empty()) return "(ninguna ausencia)";
+        std::string out = "ausencias en las muestras [";
+        for (size_t i = 0; i < noSignalAt.size(); ++i) {
+            out += (i ? ", " : "") + std::to_string(noSignalAt[i]);
+        }
+        out += "] de " + std::to_string(samples) + "  ·  contexto:";
+        for (size_t i = 0; i < noSignalAt.size(); ++i) {
+            out += "\n      k=" + std::to_string(noSignalAt[i])
+                 + " rms=" + std::to_string(noSignalRms[i])
+                 + " pisados=" + std::to_string(noSignalDropped[i])
+                 + " discont=" + std::to_string(noSignalDisc[i])
+                 + " hz=" + std::to_string(noSignalHz[i])
+                 + " clarity=" + std::to_string(noSignalClarity[i]);
+        }
+        return out;
+    }
 };
 
 /// Un banco que arranca el analisis con un objetivo puesto y alimenta el ring
@@ -188,7 +227,16 @@ public:
 
             ++o.samples;
             if (numeric) ++o.publishedCents;
-            if (st == kStateNoSignal) ++o.noSignal;
+            if (st == kStateNoSignal) {
+                ++o.noSignal;
+                // MINI-010: el CONTEXTO, no solo el conteo. Ver `describeNoSignal()`.
+                o.noSignalAt.push_back(k);
+                o.noSignalRms.push_back(v[kSnapLevelRms]);
+                o.noSignalDropped.push_back(v[kSnapDroppedFrames]);
+                o.noSignalDisc.push_back(v[kSnapDiscontinuityCount]);
+                o.noSignalHz.push_back(v[kSnapDetectedHz]);
+                o.noSignalClarity.push_back(v[kSnapDetectionClarity]);
+            }
             if (st == kStateNoSignal && numeric) ++o.contradictions;
             if (o.lastState >= 0 && st != o.lastState) ++o.transitions;
             o.lastState = st;
@@ -344,7 +392,8 @@ TEST(SilenceGate, TheQuietRoomKeepsMeasuringWellBelowTheReportedNoiseFloor) {
     // la habitacion vacia no podrian estar los dos en verde.
     EXPECT_EQ(o.noSignal, 0)
         << "el motor apago una cuerda audible en una habitacion silenciosa:"
-           " la compuerta volvio a ser de nivel";
+           " la compuerta volvio a ser de nivel"
+        << "\n    " << o.describeNoSignal();
     EXPECT_GT(o.publishedCents, o.samples * 3 / 4);
 }
 
