@@ -61,8 +61,22 @@
 #      para un `grep` del nombre del campo. El baseline tenia razon.
 #   2. SynthEngine::getParameterCount/getParameterDef — virtuales puras, seis
 #      overrides, CERO llamadas en produccion. Doce entradas, un mecanismo.
-#   3. DriftResampler::setDriftCorrection — ClockController MIDE la deriva y el
-#      resampler nunca la recibe: las dos mitades existen y no estan cableadas.
+#      Al 2026-08-28 es la UNICA de las tres que sigue abierta, y su decision es de
+#      PRODUCTO: la metadata no cruza ninguna frontera (cero C API, cero JNI, cero
+#      Kotlin), asi que el consumidor que su KDoc promete —"used by UI to
+#      auto-generate controls"— no puede existir hoy. Cablearla o borrarla depende
+#      de si NoisyPad quiere generar esos controles. Ver MINI-012.
+#   3. DriftResampler::setDriftCorrection — PAGADA por MINI-011 (2026-08-28), y se
+#      pago BORRANDO, igual que la 1.
+#      🔴 La leccion es sobre esta lista: la razon que esta entrada daba —"MIDE la
+#      deriva y el resampler nunca la recibe: las dos mitades existen y no estan
+#      cableadas"— era FALSA en su premisa. `getDriftPpm()` no es la mitad que mide
+#      de una correccion pendiente: vive bajo un encabezado que dice "Monitoring /
+#      Debug", y la correccion REAL ya corre en produccion por otro lado
+#      (`ClockController::getAdjustedFrameCount`, desde `UsbTransferManager.cpp`),
+#      absorbiendo la deriva en la cadencia de paquetes USB. Cablearlo habria
+#      corregido DOS VECES. Una razon de este archivo puede envejecer hasta quedar
+#      al reves: verificala contra el arbol antes de ejecutarla.
 #
 audio/src/main/cpp/analysis/AbsenceGate.h::AbsenceGate::quietRun::sonda-de-tests | accesor del contador que existe para que un test pueda afirmar que la racha se REINICIA (no solo que el veredicto final es el correcto): sin el, un mutante que nunca reinicie da el mismo veredicto en los casos probados y sobrevive. No lo llama produccion a proposito
 audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::availableFrames::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
@@ -84,7 +98,6 @@ audio/src/main/cpp/analysis/StrobeTracker.h::StrobeTracker::partialsUsed::sonda-
 audio/src/main/cpp/api/watermelon_audio.cpp::wma_looper_set_event_callback::entrada | es el borde: una wma_* de la C API no tiene llamador aguas arriba por construccion. El unico consumidor de una entrada vive fuera del arbol
 audio/src/main/cpp/backends/BackendManager.cpp::BackendManager::waitForCaptureRequest::sonda-de-tests | su propio KDoc lo dice: 'Nunca desde el thread de audio ni desde el de UI. Esta para los tests'. Es un hook de sincronizacion declarado
 audio/src/main/cpp/backends/ClockController.h::ClockController::getFeedbackRejectedCount::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
-audio/src/main/cpp/backends/DriftResampler.cpp::DriftResampler::setDriftCorrection::deuda | el unico escritor de DriftResampler::mDriftPpm, y nadie lo llama: ClockController mide la deriva (getDriftPpm) y el resampler nunca la recibe. Las dos mitades existen y NO estan conectadas
 audio/src/main/cpp/backends/SplitBackend.cpp::SplitBackend::OutputCallback::onStreamConfigChanged::callback-externo | lo despacha el backend por IAudioCallback, no nuestro codigo. Ademas es un FALSO POSITIVO del lint: su cuerpo reenvia a mUserCallback->onStreamConfigChanged (SplitBackend.cpp:283) y esa llamada, por ser al mismo nombre simple desde su propio cuerpo, queda excluida como recursion
 audio/src/main/cpp/backends/SplitBackend.h::SplitBackend::getBridgeUnderruns::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
 audio/src/main/cpp/core/AudioEngine.cpp::AudioEngine::renderBlock::deuda | ver startOffline: la otra mitad del render offline
