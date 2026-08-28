@@ -325,6 +325,15 @@ interface IAudioNativeBridge :
      * @param everyBeatPattern  son downbeat los que caen en `index % beatsPerBar == 0`.
      *                          Tiene prioridad sobre [firstIsDownbeat].
      */
+    /**
+     * 🔴 **Armar no es sonar** (issue #229). Lo que hace sonar los clicks y emitir los beats
+     * es el tick del transport, que corre **desde el camino de render**: con el motor sin
+     * renderizar esto no produce nada, no falla y no avisa — y [transportIsMetronomeRunning]
+     * contesta `true` igual.
+     *
+     * Para verificar que de verdad arrancó, leé [transportGetBeatsElapsed]: si queda en 0,
+     * está armado y nadie lo tickea.
+     */
     fun transportStartMetronome(
         beats: Int,
         firstIsDownbeat: Boolean = true,
@@ -332,6 +341,7 @@ interface IAudioNativeBridge :
     )
 
     /** Click continuo hasta [transportStopMetronome] — la referencia mientras se graba. */
+    /** Igual que [transportStartMetronome]: **armar no es sonar**, ver ahí. */
     fun transportStartMetronomeContinuous(everyBeatPattern: Boolean = true)
 
     /** Cancela lo programado. Un click ya sonando decae solo. */

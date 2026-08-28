@@ -1792,6 +1792,14 @@ WMA_API int wma_transport_get_remaining_beats(const WmaEngine* engine);
  * single atomic load. Advances on every audio block whether or not the metronome
  * is running.
  *
+ * BECAUSE it advances unconditionally — before every guard in Transport::tick() —
+ * this doubles as THE liveness signal for the render callback: if two reads spaced
+ * in time return the same number, audio is not rendering, and nothing you arm will
+ * sound (issue #229). The API presents it as a musical position, so that reading
+ * has to be deduced; it is written down here so nobody has to deduce it twice.
+ * Note the split: this says the RENDER is alive, wma_transport_get_beats_elapsed()
+ * says the METRONOME is sounding.
+ *
  * This is the anchor that makes WMA_LOOPER_EVENT_BEAT usable: the beat event
  * carries the ABSOLUTE frame of the next beat, so
  * `next_beat_frame - wma_transport_get_play_frame()` is the frames still to go,

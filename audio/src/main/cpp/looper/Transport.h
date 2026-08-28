@@ -110,6 +110,14 @@ public:
      * @param everyBeatDownbeatPattern If true, clicks where idx % beatsPerBar == 0
      *        are downbeats (recommended for in-take reference).
      */
+    /**
+     * @brief Arma un schedule CONTINUO.
+     *
+     * 🔴 **Armar no es sonar** (issue #229). Lo que hace sonar los clicks es `tick()`,
+     * que se llama **desde el camino de render**: con el callback de audio parado esto
+     * no produce nada y no lo dice — y `isMetronomeRunning()` contesta `true` igual.
+     * Para verificar que de verdad suena, mira `getBeatsElapsed()`.
+     */
     void startMetronomeContinuous(bool everyBeatDownbeatPattern = true) {
         mPatternMode.store(everyBeatDownbeatPattern ? 1 : 0, std::memory_order_relaxed);
         mFirstIsDownbeat.store(true, std::memory_order_relaxed);
@@ -188,6 +196,18 @@ public:
     /**
      * @brief Current play position in frames since last resetPlayPosition().
      *        Lock-free; safe from any thread.
+     *
+     * 🔴 **Es tambien LA senal de liveness del render, y por accidente de diseño**
+     * (issue #229): `tick()` avanza este contador **incondicionalmente**, antes de
+     * toda guarda, asi que si dos lecturas separadas en el tiempo dan el mismo
+     * numero, el callback de audio NO esta corriendo — y entonces nada de lo que
+     * armes va a sonar, aunque `isMetronomeRunning()` diga `true`.
+     *
+     * La API lo presenta como una posicion musical, asi que esa lectura hay que
+     * DEDUCIRLA. Queda dicha aca para no tener que deducirla de nuevo.
+     *
+     * Ojo con el reparto: esto dice si el **render** vive; `getBeatsElapsed()` dice
+     * si el **metronomo** suena. No son la misma pregunta.
      */
     int64_t getPlayFrame() const {
         return mPlayFrameCounter.load(std::memory_order_acquire);

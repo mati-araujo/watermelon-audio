@@ -2931,6 +2931,30 @@ JNIEnv* attachWorkerEnv() {
     return nullptr;
 }
 
+/**
+ * @brief Resuelve un callback OPCIONAL del `LooperStateListener`, y deja rastro si no esta.
+ *
+ * Opcional = un listener que predata al callback tiene que poder registrarse igual, asi que
+ * un `null` no voltea el registro. Lo que si hace, desde REQ-020, es DECIRLO: sin esto el
+ * evento se descarta despues en `dispatchLooperEvent` sin una sola linea de log, y desde
+ * afuera "el motor no lo emitio" y "el puente no lo pudo entregar" se ven identicos.
+ *
+ * Se llama desde el thread de control (el registro), nunca desde el de audio: loguear aca
+ * no viola la regla de RT.
+ *
+ * @return el `jmethodID`, o `nullptr` si el listener no expone ese callback.
+ */
+jmethodID resolveOptionalCallback(JNIEnv* env, const char* name, const char* signature) {
+    jmethodID method = env->GetMethodID(g_looperListenerClass, name, signature);
+    if (!method) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("LooperStateListener: el callback opcional %s%s NO resolvio — los eventos de "
+             "ese tipo se van a DESCARTAR en silencio para este listener",
+             name, signature);
+    }
+    return method;
+}
+
 void dispatchLooperEvent(const wm::LooperEvent& ev) {
     JNIEnv* env = attachWorkerEnv();
     if (!env) return;
@@ -3051,27 +3075,20 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
         g_looperListenerClass, "onTrackPlayingChanged", "(IZ)V");
     g_looperOnTrackPeakChanged = env->GetMethodID(
         g_looperListenerClass, "onTrackPeakChanged", "(IF)V");
-    // Optional (QW-5): older listeners predate this callback. It has a Kotlin
-    // default body, so a conforming implementation still exposes it, but we
-    // must not fail registration if it's absent — clear any pending lookup
-    // exception and dispatch RecordProgress only when present.
-    g_looperOnTrackRecordProgress = env->GetMethodID(
-        g_looperListenerClass, "onTrackRecordProgress", "(IF)V");
-    if (!g_looperOnTrackRecordProgress && env->ExceptionCheck()) {
-        env->ExceptionClear();
-    }
-    // Optional (F3.4): older listeners predate onTrackCompleted (Kotlin default body).
-    g_looperOnTrackCompleted = env->GetMethodID(
-        g_looperListenerClass, "onTrackCompleted", "(I)V");
-    if (!g_looperOnTrackCompleted && env->ExceptionCheck()) {
-        env->ExceptionClear();
-    }
-    // Optional (REQ-017): older listeners predate onBeat (Kotlin default body).
-    g_looperOnBeat = env->GetMethodID(
-        g_looperListenerClass, "onBeat", "(II)V");
-    if (!g_looperOnBeat && env->ExceptionCheck()) {
-        env->ExceptionClear();
-    }
+    // Los tres OPCIONALES. Un listener viejo puede no tenerlos, asi que un lookup
+    // fallido NO puede voltear el registro — pero tampoco puede quedar MUDO.
+    //
+    // 🔴 Antes de REQ-020 esto se tragaba la excepcion y listo, y el despacho hacia
+    // `if (!listener || !method) return;`: un no-op perfectamente silencioso. No era
+    // la causa del issue #228 —esta MEDIDO que Kotlin emite un `onBeat(II)V` concreto
+    // en cada clase implementadora, con override o sin el, asi que este lookup no
+    // devuelve null— pero que no se pudiera DESCARTAR en dos minutos costo una sesion
+    // entera de device. El LOGW es para que la proxima vez el silencio hable.
+    g_looperOnTrackRecordProgress = resolveOptionalCallback(
+        env, "onTrackRecordProgress", "(IF)V");
+    g_looperOnTrackCompleted = resolveOptionalCallback(
+        env, "onTrackCompleted", "(I)V");
+    g_looperOnBeat = resolveOptionalCallback(env, "onBeat", "(II)V");
 
     if (!g_looperOnTrackProgress
         || !g_looperOnTrackPlayingChanged
