@@ -5,15 +5,15 @@
   "gates": {
     "cpp-tests-macos": {
       "status": "pass",
-      "seconds": 73
+      "seconds": 91
     },
     "ios": {
       "status": "pass",
-      "seconds": 66
+      "seconds": 57
     },
     "build": {
       "status": "pass",
-      "seconds": 24
+      "seconds": 18
     }
   },
   "versions": {
@@ -25,7 +25,7 @@
     "ninja": "1.13.2",
     "launcher_jvm": "17.0.19"
   },
-  "total_seconds": 369,
-  "created_utc": "2026-08-28T14:51:34Z",
-  "head": "ace0dd2c2b94ed6b1c5ccff66669cd9d37e191ba"
+  "total_seconds": 422,
+  "created_utc": "2026-08-28T16:18:50Z",
+  "head": "77be64b36a0469074e877894a06cbb03f69d1710"
 }
