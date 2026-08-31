@@ -3042,8 +3042,29 @@ void dispatchLooperEvent(const wm::LooperEvent& ev) {
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperRegisterStateListener(
     JNIEnv* env, jobject thiz, jobject listener) {
-    if (!g_jniState.engine) return JNI_FALSE;
-    if (!listener) return JNI_FALSE;
+    // MINI-014 — ningun JNI_FALSE de esta funcion sale mudo, y cada uno dice CUAL
+    // de las causas fue.
+    //
+    // 🔴 Los dos returns de abajo eran SILENCIOSOS, y el primero es exactamente la
+    // falla del issue #228: el consumidor registraba el listener ANTES de
+    // inicializar el motor y descartaba el Boolean. La API funcionaba; el
+    // diagnostico costo una sesion entera de device porque logcat no decia NADA.
+    // Es la misma familia que REQ-020 —que hizo hablar al lookup de un callback
+    // opcional— un eslabon antes, y el mismo precedente de MINI-008/MINI-013:
+    // un "no" que no dice cual de las causas fue manda a investigar al lugar
+    // equivocado.
+    if (!g_jniState.engine) {
+        LOGE("LooperStateListener NO registrado: el motor todavia no esta "
+             "inicializado. Registralo DESPUES de inicializar el motor, y mira el "
+             "Boolean que devuelve setLooperStateListener().");
+        return JNI_FALSE;
+    }
+    if (!listener) {
+        LOGE("LooperStateListener NO registrado: el listener llego en null. Para "
+             "DESREGISTRAR se pasa null a setLooperStateListener(), que enruta a "
+             "nativeLooperUnregisterStateListener; esta funcion no lo hace.");
+        return JNI_FALSE;
+    }
 
     std::lock_guard<std::mutex> lk(g_looperListenerMutex);
 
@@ -3058,10 +3079,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     }
 
     g_looperListenerGlobalRef = env->NewGlobalRef(listener);
-    if (!g_looperListenerGlobalRef) return JNI_FALSE;
+    if (!g_looperListenerGlobalRef) {
+        LOGE("LooperStateListener NO registrado: NewGlobalRef fallo (la tabla de "
+             "referencias globales de la VM esta llena o no hay memoria).");
+        return JNI_FALSE;
+    }
 
     jclass localCls = env->GetObjectClass(listener);
     if (!localCls) {
+        LOGE("LooperStateListener NO registrado: GetObjectClass no devolvio la "
+             "clase del listener.");
         env->DeleteGlobalRef(g_looperListenerGlobalRef);
         g_looperListenerGlobalRef = nullptr;
         return JNI_FALSE;
