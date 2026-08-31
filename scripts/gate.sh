@@ -324,6 +324,8 @@ gate_guardrails() {
     # lint queda VERDE PARA SIEMPRE revisando nada.
     step guardrails callers-self  python3 scripts/check-mechanism-callers.py --self-test || return 1
     step guardrails callers       python3 scripts/check-mechanism-callers.py || return 1
+    step guardrails doc-self      python3 scripts/check-doc-counts.py --self-test || return 1
+    step guardrails doc-counts    python3 scripts/check-doc-counts.py || return 1
 }
 
 gate_cpp_tests_macos() {

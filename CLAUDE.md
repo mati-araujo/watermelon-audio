@@ -126,10 +126,42 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
 > cruzar la frontera, el denominador se cuenta del árbol, y sacar un test **baja** el número
 > (probado por su propio self-test). No cubre este bloque; muestra la forma.
 >
-> 🔴 **Cuatro veces stale es la evidencia de que "medir antes de citar" NO alcanza**: es una regla
-> que sólo vive en prosa, y este repo ya sabe cómo terminan (WD-1.1: el callback violaba sus
-> reglas escritas en 65 lugares). La salida coherente con el resto del repo es un guardrail que
-> re-mida y falle contra este archivo, como `rt-safety` o `mechanism-callers`. No existe todavía.
+> 🔴 **Siete veces stale fue la evidencia de que "medir antes de citar" NO alcanzaba**: era una
+> regla que sólo vivía en prosa, y este repo ya sabe cómo terminan (WD-1.1: el callback violaba
+> sus reglas escritas en 65 lugares). **REQ-021 la convirtió en un gate**:
+> `scripts/check-doc-counts.py` re-mide del árbol y **falla** si la tabla de abajo no coincide —
+> la misma forma que `rt-safety` y `mechanism-callers`.
+
+## Conteos medidos
+
+Esta tabla **la escribe `scripts/check-doc-counts.py`, no la mano** (REQ-021). El lint corre en
+`gate.sh` y en el CI, así que un número stale acá es **rojo**, no prosa. Se re-mide con
+`python3 scripts/check-doc-counts.py --update`, y **su diff es la revisión**.
+
+🔴 Editarla a mano es la misma clase que escribir `.github/local-gate.json` a mano: fabrica la
+prueba de una medición que no se hizo.
+
+**Lo que esta tabla NO vigila, a propósito**: cualquier número que exija *construir o correr* algo
+—la suite de host, la cobertura del arnés JNI—. Esos no se afirman acá; los imprime medidos el
+comando que los produce (`scripts/run-cpp-tests.sh` y `:audio:testDebugUnitTest`). Un número
+afirmado y no vigilado haría leer todo este archivo como verificado cuando sólo una parte lo está.
+
+<!-- BEGIN conteos-medidos — los escribe scripts/check-doc-counts.py, NO la mano -->
+| métrica | valor | qué mide |
+|---|---|---|
+| `kt-commonMain` | 94 | archivos .kt en commonMain |
+| `kt-androidMain` | 21 | archivos .kt en androidMain |
+| `kt-iosMain` | 6 | archivos .kt en iosMain |
+| `bridge-loc` | 3359 | LOC de AudioNativeBridge.kt |
+| `bridge-external` | 309 | `external fun` en AudioNativeBridge |
+| `jniexport-bridge` | 298 | JNIEXPORT en jni_audio_bridge.cpp |
+| `jniexport-total` | 311 | JNIEXPORT en todo jni/*.cpp |
+| `wma-api` | 275 | declaraciones WMA_API en la C API |
+| `analysis-files` | 17 | fuentes .h/.cpp en cpp/analysis/ (sin tests/) |
+| `callers-baseline` | 1 callback-externo / 28 deuda / 1 entrada / 45 sonda-de-tests | reparto del baseline de llamadores |
+| `ver-kotlin` | 2.4.10 | version de Kotlin |
+| `ver-agp` | 9.3.2 | version de AGP |
+<!-- END conteos-medidos -->
 
 ---
 
