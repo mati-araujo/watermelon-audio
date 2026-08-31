@@ -122,14 +122,47 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
 > ```
 >
 > **REQ-016 construyó el primer pedazo de esa salida**, para su propia rebanada: el conteo de
-> cobertura del arnés JNI (`13 de 310`) sale MEDIDO en cada corrida — el numerador se anota al
-> cruzar la frontera, el denominador se cuenta del árbol, y sacar un test **baja** el número
-> (probado por su propio self-test). No cubre este bloque; muestra la forma.
+> cobertura del arnés JNI sale MEDIDO en cada corrida — el numerador se anota al cruzar la
+> frontera, el denominador se cuenta del árbol, y sacar un test **baja** el número (probado por su
+> propio self-test). *Al cerrarse, ese REQ dejaba 13 de 310; el valor de hoy lo imprime Gradle, no
+> este archivo.* No cubrió este bloque; mostró la forma, y REQ-021 la completó.
 >
-> 🔴 **Cuatro veces stale es la evidencia de que "medir antes de citar" NO alcanza**: es una regla
-> que sólo vive en prosa, y este repo ya sabe cómo terminan (WD-1.1: el callback violaba sus
-> reglas escritas en 65 lugares). La salida coherente con el resto del repo es un guardrail que
-> re-mida y falle contra este archivo, como `rt-safety` o `mechanism-callers`. No existe todavía.
+> 🔴 **Siete veces stale fue la evidencia de que "medir antes de citar" NO alcanzaba**: era una
+> regla que sólo vivía en prosa, y este repo ya sabe cómo terminan (WD-1.1: el callback violaba
+> sus reglas escritas en 65 lugares). **REQ-021 la convirtió en un gate**:
+> `scripts/check-doc-counts.py` re-mide del árbol y **falla** si la tabla de abajo no coincide —
+> la misma forma que `rt-safety` y `mechanism-callers`.
+
+## Conteos medidos
+
+Esta tabla **la escribe `scripts/check-doc-counts.py`, no la mano** (REQ-021). El lint corre en
+`gate.sh` y en el CI, así que un número stale acá es **rojo**, no prosa. Se re-mide con
+`python3 scripts/check-doc-counts.py --update`, y **su diff es la revisión**.
+
+🔴 Editarla a mano es la misma clase que escribir `.github/local-gate.json` a mano: fabrica la
+prueba de una medición que no se hizo.
+
+**Lo que esta tabla NO vigila, a propósito**: cualquier número que exija *construir o correr* algo
+—la suite de host, la cobertura del arnés JNI—. Esos no se afirman acá; los imprime medidos el
+comando que los produce (`scripts/run-cpp-tests.sh` y `:audio:testDebugUnitTest`). Un número
+afirmado y no vigilado haría leer todo este archivo como verificado cuando sólo una parte lo está.
+
+<!-- BEGIN conteos-medidos — los escribe scripts/check-doc-counts.py, NO la mano -->
+| métrica | valor | qué mide |
+|---|---|---|
+| `kt-commonMain` | 94 | archivos .kt en commonMain |
+| `kt-androidMain` | 21 | archivos .kt en androidMain |
+| `kt-iosMain` | 6 | archivos .kt en iosMain |
+| `bridge-loc` | 3359 | LOC de AudioNativeBridge.kt |
+| `bridge-external` | 309 | `external fun` en AudioNativeBridge |
+| `jniexport-bridge` | 298 | JNIEXPORT en jni_audio_bridge.cpp |
+| `jniexport-total` | 311 | JNIEXPORT en todo jni/*.cpp |
+| `wma-api` | 275 | declaraciones WMA_API en la C API |
+| `analysis-files` | 17 | fuentes .h/.cpp en cpp/analysis/ (sin tests/) |
+| `callers-baseline` | 1 callback-externo / 28 deuda / 1 entrada / 45 sonda-de-tests | reparto del baseline de llamadores |
+| `ver-kotlin` | 2.4.10 | version de Kotlin |
+| `ver-agp` | 9.3.2 | version de AGP |
+<!-- END conteos-medidos -->
 
 ---
 
@@ -137,8 +170,8 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
 
 | Componente | Version |
 |------------|---------|
-| Kotlin | 2.4.10  |
-| AGP | 9.3.2   |
+| Kotlin | ver «Conteos medidos» |
+| AGP | ver «Conteos medidos» |
 | Oboe | 1.10.0  |
 | C++ | C++20   |
 | CMake | 3.22.1  |
@@ -233,10 +266,11 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 >   `AudioNativeBridge` y cruza la frontera de verdad. Hasta REQ-016 la respuesta era
 >   **nadie**: 310 `JNIEXPORT` y ningun test las corria.
 >
-> 🔴 **Y el arnes cubre 40 de 310** (REQ-016 dejo 13, REQ-018 sumo las 27 de entrada), sobre
-> un backend FALSO. El conteo lo imprime Gradle en cada corrida con los dos numeros MEDIDOS
-> —jamas escritos a mano— justamente para que "40/310" no se lea nunca como "el JNI esta
-> probado". No reemplaza al smoke en device; nada de lo que corre en el host lo hace.
+> 🔴 **Y el arnes cubre una FRACCION**, sobre un backend FALSO. El conteo exacto **no se escribe
+> aca a proposito** (REQ-021): lo imprime `:audio:testDebugUnitTest` en cada corrida con los dos
+> numeros MEDIDOS —numerador anotado al cruzar la frontera, denominador contado del arbol—
+> justamente para que no se lea nunca como "el JNI esta probado". No reemplaza al smoke en
+> device; nada de lo que corre en el host lo hace.
 >
 > **Como se suma**: cada clase corre en su PROPIA JVM (`forkEvery = 1`), asi que ninguna ve el
 > total. Cada una publica lo suyo a `audio/build/jni-coverage/` y la task `jniHarnessCoverage`
@@ -315,17 +349,19 @@ sesiones enteras. Los marcados **[gate]** ya los corre `scripts/gate.sh`.
 ./gradlew :audio:publishToMavenLocal                               # Publish local
 ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository   # Publish GitHub
 
-bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (1180 tests, googletest).
+bash scripts/run-cpp-tests.sh              # [gate] Suite C++ de host (googletest). El total de
+                                           # tests NO se escribe aca (REQ-021): lo imprime ctest al
+                                           # terminar, y un numero que exige CORRER algo no lo
+                                           # puede vigilar `check-doc-counts.py`.
                                            # ctest corre en PARALELO desde el 18/08: 149,7 s -> 20,4 s.
                                            # `CTEST_JOBS=n` lo baja si hace falta
-                                           # Kotlin: 112 iOS sim / 162 JVM (los dos numeros
-                                           # RE-MEDIDOS el 27/08: decian 1154 y 69)
 
 ./gradlew :audio:testDebugUnitTest         # [gate] commonTest en la JVM + el ARNES JNI (REQ-016).
                                            # Construye la libreria de host sola (dependsOn +
                                            # inputs.files de buildHostJniLib) y le pone el
-                                           # java.library.path. Imprime el conteo de cobertura:
-                                           #   [REQ-016] arnes JNI - TOTAL: 40 de 310 ... hueco: 270
+                                           # java.library.path. Imprime el conteo de cobertura,
+                                           # MEDIDO (los numeros no se escriben aca, REQ-021):
+                                           #   [REQ-016] arnes JNI - TOTAL: N de M ... hueco: M-N
                                            # 🔴 `dependsOn` SOLO ORDENA. La libreria esta declarada
                                            # como INPUT del test porque sin eso, romper el simbolo
                                            # del lado C++ dejaba la task UP-TO-DATE y el arnes en

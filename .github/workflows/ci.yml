@@ -243,6 +243,16 @@ jobs:
       - name: Ningun mecanismo de produccion lo llaman solo los tests — REQ-013
         run: python3 scripts/check-mechanism-callers.py
 
+      # REQ-021 — los conteos de CLAUDE.md, re-medidos del arbol. Quedaron stale
+      # SIETE tandas seguidas mientras la regla vivia solo en prosa. El
+      # --self-test primero, misma razon que los de arriba: si el parser se
+      # rompe, el lint queda verde para siempre.
+      - name: Los conteos de CLAUDE.md coinciden con el arbol — self-test
+        run: python3 scripts/check-doc-counts.py --self-test
+
+      - name: Los conteos de CLAUDE.md coinciden con el arbol — REQ-021
+        run: python3 scripts/check-doc-counts.py
+
   # Same suite under AddressSanitizer + UndefinedBehaviorSanitizer. Catches
   # heap/stack overflows, use-after-free and UB in the lock-free rings and the
   # teardown path — the highest-risk code as the driver plan gains new logic.
