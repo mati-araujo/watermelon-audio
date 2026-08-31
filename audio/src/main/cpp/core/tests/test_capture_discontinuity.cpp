@@ -154,6 +154,28 @@ struct Lectura {
      * coordenadas.
      */
     bool marcaVista = false;
+    /**
+     * @brief El MAXIMO del contador acumulado de discontinuidades (indice 16).
+     *
+     * 🔴 Existe para DIAGNOSTICAR, no para decidir (MINI-013). Cuando `marcaVista`
+     * sale en false hay DOS causas posibles, y sin esto el veredicto acusa al motor
+     * de la que no es:
+     *
+     *   contador == 0  el analisis NUNCA proceso el bloque dañado (starvation): no
+     *                  hubo evento que reportar. No es un defecto del motor.
+     *   contador  > 0  el evento ocurrio y el vigia no vio el flag transitorio.
+     *                  Eso SI seria del observador — y seria informacion nueva.
+     *
+     * Medido el 2026-08-27 (KDoc de `kSnapDiscontinuityCount`): en la corrida que
+     * falla bajo carga vale CERO, o sea que es siempre la primera. Lo mide el vigia,
+     * en la MISMA lectura que ya hacia: cuesta un `max`.
+     *
+     * 🔴 El KDoc de ese indice dice "NO SE USA COMO GUARDA", y esto lo respeta: el
+     * test falla igual en los dos casos. Esto entra solo en el MENSAJE.
+     */
+    double contadorMax = 0.0;
+    /// Frames que el analisis alcanzo a procesar. La otra mitad de la evidencia.
+    double framesAnalizados = 0.0;
     int marcaArriba = 0;
     double peorErrorConvergido = 0.0;
     double sigmaAhi = 0.0;
@@ -213,12 +235,24 @@ Lectura correr(Falla modo, int cadaCuantos, bool avisa = true, int bloques = 400
     // solo-lectura sobre un snapshot lock-free, asi que no altera lo que mide.
     std::atomic<bool> vigiaVivo{true};
     std::atomic<bool> marcaVista{false};
+    // El contador va como entero en un atomic: es acumulado y monotono, pero un
+    // stream reabierto lo baja a cero (ver su KDoc), asi que se latchea el MAXIMO.
+    std::atomic<int> contadorMax{0};
     std::thread vigia([&] {
         float o[kSnapshotValueCount];
         while (vigiaVivo.load(std::memory_order_acquire)) {
-            if (snap.read(o) && o[kSnapFramesAnalyzed] > 0.0f &&
-                o[kSnapInputDiscontinuity] >= 0.5f) {
-                marcaVista.store(true, std::memory_order_release);
+            if (snap.read(o) && o[kSnapFramesAnalyzed] > 0.0f) {
+                if (o[kSnapInputDiscontinuity] >= 0.5f) {
+                    marcaVista.store(true, std::memory_order_release);
+                }
+                // MINI-013 — la evidencia que distingue "el motor no lo dijo" de
+                // "el analisis nunca lo proceso". Misma lectura, cuesta un max.
+                const int c = static_cast<int>(o[kSnapDiscontinuityCount]);
+                int prev = contadorMax.load(std::memory_order_relaxed);
+                while (c > prev &&
+                       !contadorMax.compare_exchange_weak(prev, c,
+                                                          std::memory_order_relaxed)) {
+                }
             }
             std::this_thread::yield();
         }
@@ -277,6 +311,7 @@ Lectura correr(Falla modo, int cadaCuantos, bool avisa = true, int bloques = 400
     vigiaVivo.store(false, std::memory_order_release);
     vigia.join();
     obs.marcaVista = marcaVista.load(std::memory_order_acquire);
+    obs.contadorMax = static_cast<double>(contadorMax.load(std::memory_order_relaxed));
 
     float o[kSnapshotValueCount];
     if (snap.read(o)) {
@@ -285,6 +320,7 @@ Lectura correr(Falla modo, int cadaCuantos, bool avisa = true, int bloques = 400
         obs.dropped = o[kSnapDroppedFrames];
         obs.estado = static_cast<int>(o[kSnapState]);
         obs.marca = o[kSnapInputDiscontinuity];
+        obs.framesAnalizados = o[kSnapFramesAnalyzed];
     }
     th.stop();
     return obs;
@@ -312,11 +348,52 @@ void afirmar(Falla modo, int cada, const char* nombre) {
 
     // AC-009.3 — y el consumidor tiene que poder distinguirlo de "todavia no".
     // Lo afirma el LATCH, no el conteo por publicacion: ver el KDoc de `marcaVista`.
+    //
+    // 🔴 MINI-013 — el veredicto dice CUAL de las dos causas fue.
+    //
+    // Antes decia siempre "el snapshot no lo dijo NUNCA", o sea acusaba al MOTOR. Pero
+    // bajo saturacion la causa medida es otra: el thread de analisis nunca llega a
+    // procesar el bloque dañado, asi que no hay evento que reportar. El conteo de
+    // publicaciones estaba impreso, pero habia que conocer MINI-006 para decodificarlo
+    // — y la evidencia de que eso no alcanza es que se abrio un issue encuadrandolo
+    // como regresion, con la tasa base ya medida y cuatro arreglos ya descartados.
+    //
+    // El contador acumulado (indice 16) discrimina, y entra SOLO en el mensaje: el
+    // test falla igual en los dos casos. Su KDoc dice "NO SE USA COMO GUARDA" y esto
+    // lo respeta.
     EXPECT_TRUE(r.marcaVista)
-        << nombre << ": la captura perdio continuidad y el snapshot no lo dijo NUNCA, "
-           "mirandolo sin parar durante toda la corrida (" << r.muestras
-        << " publicaciones distintas vistas). El consumidor ve un spinner y espera a que se "
-           "arregle algo que no se arregla solo (AC-009.3).";
+        << nombre << ": el vigia nunca vio la marca de discontinuidad.\n"
+        << "  publicaciones vistas : " << r.muestras << "\n"
+        << "  frames analizados    : " << r.framesAnalizados << "\n"
+        << "  contador acumulado   : " << r.contadorMax << "\n"
+        << (r.contadorMax > 0.0
+            ? "  🔴 CAUSA (A): el evento OCURRIO —el contador acumulado lo registro— y el "
+              "vigia\n"
+              "     no vio el flag TRANSITORIO. Esto si es del observador, y es INFORMACION\n"
+              "     NUEVA: MINI-006 midio que en la corrida que falla el contador vale CERO.\n"
+              "     Si estas leyendo esto, ese supuesto se cayo y vale la pena mirarlo.\n"
+            : "  🔴 El contador acumulado tambien vale CERO: el evento NO SE REGISTRO. Cual de\n"
+              "     las dos causas es, lo dice el numero de publicaciones de arriba:\n"
+              "\n"
+              "     (B) POCAS publicaciones (2 o 3): el thread de analisis nunca llego a "
+              "procesar\n"
+              "         el audio con el hueco — el ring se sobreescribe antes de que lo drene.\n"
+              "         NO es un defecto del motor: ningun observador puede reportar algo que "
+              "no\n"
+              "         ocurrio. Es el flake conocido de MINI-006 (cancelado): 0 de 40 sin "
+              "carga,\n"
+              "         ~4 % bajo saturacion, PREEXISTENTE, con cuatro arreglos medidos y\n"
+              "         descartados. Si la maquina estaba cargada, re-corre.\n"
+              "\n"
+              "     (C) MUCHAS publicaciones: el analisis SI corrio y aun asi no registro el\n"
+              "         evento. Eso SI seria del MOTOR, y no esta medido en ningun lado.\n"
+              "         🔴 No lo leas como (B) por inercia — mira el numero.\n"
+              "\n"
+              "     No hay umbral que separe (B) de (C) y por eso no se pone uno: MINI-006 lo\n"
+              "     midio y las poblaciones se TOCAN (la sana minima dio 3, la rota 2). El\n"
+              "     numero se imprime para que lo juzgue quien lee, no para decidir aca.\n")
+        << "  (el contrato que este test sostiene es AC-009.3: el consumidor tiene que poder\n"
+           "   distinguir 'la captura se rompio' de 'todavia no'.)";
 }
 
 }  // namespace
