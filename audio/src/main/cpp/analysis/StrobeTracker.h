@@ -90,41 +90,40 @@ public:
     static constexpr double kMaxPartialDisagreementCents = 50.0;
 
     /**
-     * REQ-027 — LOS DOS PISOS DE ADMISION POR ENERGIA DEL BIN.
+     * REQ-027 — EL PISO DE ADMISION POR ENERGIA DEL BIN.
      *
      * Un parcial cuyo bin no tiene señal propia integra la FUGA espectral del
      * vecino. La fuga avanza de fase suave, asi que da un ajuste lineal bueno, o
-     * sea σ chica: sale CONVERGIDA y equivocada. Medido sobre tono puro exacto en
-     * E2, el segundo parcial publicaba **+38,70 cents con σ = 0,0028**, y el
-     * filtro de mediana no lo agarraba — quedaba a 41,96 cents de la mediana
-     * contra un umbral de 50, o sea el 83,9 % del margen.
+     * sea σ chica: sale CONVERGIDA y equivocada. El filtro de mediana no la
+     * agarra — con tono puro exacto en E2 queda a 41,96 cents de la mediana
+     * contra un umbral de 50, o sea el 83,9 % del margen, y pasa.
      *
-     * SON DOS Y NO UNO, Y LA RAZON ESTA MEDIDA:
+     * DE DONDE SALE EL NUMERO. `|bin|/rms` de un parcial CON energia va de 0,296
+     * (el cuarto de una cuerda 1/n) a 1,414 (seno puro). La fuga llega a
+     * **2,63e-02** en el peor caso del catalogo, que es B0 (30,87 Hz) a 48 kHz:
+     * ahi el bin del segundo parcial esta a solo 2,63 bins del fundamental,
+     * contra 7,65 bins en E2 a 44,1 kHz. 0,05 deja 1,9x sobre esa fuga y 5,9x por
+     * debajo del parcial legitimo mas debil.
      *
-     *   · El piso ABSOLUTO mata la fuga. `|bin|/rms` de un parcial con energia va
-     *     de 0,296 (el cuarto de una cuerda 1/n) a 1,414 (seno puro); la fuga
-     *     llega a **2,63e-02** en el peor caso del catalogo, que es B0 (30,87 Hz)
-     *     a 48 kHz — ahi el bin del segundo parcial esta a solo 2,63 bins del
-     *     fundamental. 0,05 deja 1,9x sobre esa fuga.
+     * 🔴 EL PRIMER VALOR CONSIDERADO FUE 0,02, y estaba MAL por medir la muestra
+     * equivocada: sobre las seis cuerdas de guitarra la peor fuga es 9,04e-04 y
+     * el margen parecia de 327x. B0 a 48 kHz lo pasa por arriba, o sea que 0,02
+     * habria dejado el defecto intacto justo en la cuerda mas grave. El margen
+     * real del catalogo es **11,3x**, y se aprieta a ~3,4x con caida armonica
+     * 1/n² — que es lo que vigila el criterio de muerte de REQ-027.
      *
-     *     🔴 El primer valor considerado fue 0,02, elegido midiendo SOLO las seis
-     *     cuerdas de guitarra, donde la peor fuga es 9,04e-04 y el margen parecia
-     *     de 327x. B0 a 48 kHz lo pasa por arriba: habria dejado el defecto
-     *     intacto justo en la cuerda mas grave. Medir la muestra equivocada da un
-     *     margen que no existe.
-     *
-     *   · El piso RELATIVO al parcial mas fuerte sigue a la señal cuando el nivel
-     *     baja, para que un decaimiento no vaya descartando parciales de a uno.
-     *     Se compara contra el MAS FUERTE y no contra el fundamental porque el
-     *     fundamental puede estar AUSENTE (el bajo por un parlante chico), que es
-     *     un caso que este tracker ya maneja.
-     *
-     * El corredor entre fuga maxima y parcial legitimo minimo es de **11,3x** en
-     * el catalogo, y se aprieta a ~3,4x con caida armonica 1/n². Es el numero que
-     * el criterio de muerte de REQ-027 vigila.
+     * 🔴 HUBO UN SEGUNDO PISO, RELATIVO AL PARCIAL MAS FUERTE, Y SE FUE POR
+     * MUTACION. Se lo justificaba diciendo que "sigue a la señal cuando el nivel
+     * baja, para que un decaimiento no descarte parciales de a uno". El
+     * razonamiento estaba **al reves**: los dos pisos se combinaban con AND, asi
+     * que el relativo solo podia descartar MAS, nunca sostener a un parcial
+     * debil — o sea que empeoraba exactamente el caso que decia proteger. Y su
+     * mutante (ponerlo en 0) sobrevivia con la suite entera en verde. Una defensa
+     * que ningun mutante mata y cuyo argumento apunta para el otro lado es una
+     * linea que el proximo va a creer load-bearing. Si el corpus que decae de S3
+     * pide algo asi, vuelve CON el test que mata a su mutante.
      */
     static constexpr double kMinBinToRmsRatio = 0.05;
-    static constexpr double kMinFractionOfStrongestPartial = 0.04;
 
     void prepare(int sampleRate);
 

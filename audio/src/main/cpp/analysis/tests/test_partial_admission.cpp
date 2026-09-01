@@ -65,12 +65,13 @@ constexpr Cuerda kCuerdas[] = {
 constexpr double kFases[] = {0.0, M_PI / 4, M_PI / 2, 3 * M_PI / 4};
 
 /// Señal mono de `nParciales` armonicos, afinada EXACTO en `f0`.
-std::vector<float> mono(double f0, int nParciales, double fase, int frames = kFrames) {
+std::vector<float> mono(double f0, int nParciales, double fase, int frames = kFrames,
+                        int rate = kRate) {
     std::vector<float> m(static_cast<size_t>(frames));
     for (int i = 0; i < frames; ++i) {
         double s = 0.0;
         for (int n = 1; n <= nParciales; ++n) {
-            s += (0.3 / n) * std::sin(2.0 * M_PI * f0 * n * i / kRate + fase * n);
+            s += (0.3 / n) * std::sin(2.0 * M_PI * f0 * n * i / rate + fase * n);
         }
         m[static_cast<size_t>(i)] = static_cast<float>(s);
     }
@@ -78,8 +79,9 @@ std::vector<float> mono(double f0, int nParciales, double fase, int frames = kFr
 }
 
 /// La misma señal, estereo intercalado, para el camino offline.
-std::vector<float> estereo(double f0, int nParciales, double fase) {
-    const auto m = mono(f0, nParciales, fase);
+std::vector<float> estereo(double f0, int nParciales, double fase, int frames = kFrames,
+                           int rate = kRate) {
+    const auto m = mono(f0, nParciales, fase, frames, rate);
     std::vector<float> b(m.size() * 2);
     for (size_t i = 0; i < m.size(); ++i) { b[i * 2] = m[i]; b[i * 2 + 1] = m[i]; }
     return b;
@@ -152,6 +154,51 @@ TEST(PartialAdmission, SeUsanExactamenteLosParcialesQueTienenEnergia) {
             st.process(m.data(), static_cast<int>(m.size()));
             EXPECT_EQ(st.partialsUsed(), nPart)
                 << "cuerda " << c.nombre << " con " << nPart << " parcial(es)";
+        }
+    }
+}
+
+/**
+ * 🔴 LA CUERDA MAS GRAVE A 48 kHz, QUE ES DONDE EL PISO DE ENERGIA SE GANA EL PAN.
+ *
+ * Este test existe porque un MUTANTE lo pidio. Con el piso de admision en 0 —o
+ * sea el comportamiento de v2.14.0— los tests de arriba seguian VERDES: con la
+ * zona muerta ya restaurada, el fundamental sobrevive y la ponderacion por 1/σ²
+ * lo deja dominar, asi que la fuga admitida se diluye por debajo del presupuesto
+ * en las seis cuerdas de guitarra a 44,1 kHz.
+ *
+ * O sea que la rejilla de arriba NO puede refutar el piso de energia, y sin este
+ * test el piso seria una linea que ningun mutante mata — exactamente lo que le
+ * paso a la zona muerta, que se saco por "no cambia ningun numero" medido sobre
+ * una muestra que no contenia el caso.
+ *
+ * Medido sobre 2304 casos (2 rates x 3 duraciones x 8 cuerdas de B0 a C7 x
+ * riqueza 1..4 x 6 fases x con y sin ruido):
+ *
+ *     con piso de energia   ->  peor |cents| = 0,0456
+ *     sin piso de energia   ->  peor |cents| = 0,9375   (9,4x el presupuesto)
+ *
+ * y el peor caso es exactamente este: **B0 a 48 kHz, 2 parciales, 1 s**. La razon
+ * es de resolucion: a 30,87 Hz y 48 kHz el bin del tercer parcial queda a pocos
+ * bins del segundo, asi que la fuga trepa a 2,63e-02 — el doble larga del
+ * catalogo entero, y lo que fija `kMinBinToRmsRatio`.
+ */
+TEST(PartialAdmission, EnLaCuerdaMasGraveA48kLaFugaTampocoEntra) {
+    constexpr int kRate48 = 48000;
+    constexpr double kB0 = 30.8677;
+    for (double secs : {1.0, 2.0, 3.0}) {
+        const int frames = static_cast<int>(kRate48 * secs);
+        for (int nPart = 1; nPart <= 3; ++nPart) {
+            for (double fase : kFases) {
+                const auto buf = estereo(kB0, nPart, fase, frames, kRate48);
+                float v[kSnapshotValueCount] = {};
+                ASSERT_TRUE(analyzeBuffer(buf.data(), frames, kRate48, kB0, v))
+                    << "B0 " << secs << " s, " << nPart << " parcial(es)";
+                EXPECT_LE(std::fabs(static_cast<double>(v[kSnapCents])), kBudgetCents)
+                    << "B0 a 48 kHz, " << secs << " s, " << nPart
+                    << " parcial(es), fase " << fase << " rad: el motor publica "
+                    << v[kSnapCents] << " cents con estado " << v[kSnapState];
+            }
         }
     }
 }
