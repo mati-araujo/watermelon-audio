@@ -2091,14 +2091,21 @@ bool wma_looper_find_content_bounds(const WmaEngine* engine, int track_index,
     WMA_CHECK_VAL(engine, false);
     if (!out_first || !out_last) return false;
 
-    // AudioLooper packs the pair into an int64 for the JNI's benefit; unpack it
-    // here so the C API can hand back two plain ints. The low half is masked as
-    // unsigned on the way in, so it has to come back out the same way or a frame
-    // index with the top bit set would arrive negative.
-    const int64_t packed =
-        engine->engine->getAudioLooper().findTrackContentBounds(track_index, threshold_ratio);
-    *out_first = static_cast<int>(packed >> 32);
-    *out_last = static_cast<int>(static_cast<uint32_t>(packed & 0xFFFFFFFF));
+    // Written into locals and copied out only on success, so "out-params are
+    // untouched then" holds for EVERY failure and not just the two guards above.
+    // This used to unpack an int64 from AudioLooper and `return true`
+    // unconditionally, which broke both halves of that documented promise: an
+    // invalid index answered true with (0, 0) written, and a silent track answered
+    // true with (0, length) — the same pair as a track that is audible end to end.
+    // Both dead-ended the `if (!...)` branches in the JNI bridge and in
+    // IosAudioBridge, which were written for a false that never arrived.
+    int first = 0, last = 0;
+    if (!engine->engine->getAudioLooper().findTrackContentBounds(
+            track_index, threshold_ratio, first, last)) {
+        return false;
+    }
+    *out_first = first;
+    *out_last = last;
     return true;
 }
 

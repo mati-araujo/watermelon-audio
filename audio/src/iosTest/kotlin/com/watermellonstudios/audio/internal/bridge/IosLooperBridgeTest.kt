@@ -1,5 +1,16 @@
 package com.watermellonstudios.audio.internal.bridge
 
+import cnames.structs.WmaEngine
+import com.watermellonstudios.audio.internal.cinterop.wma_engine_create
+import com.watermellonstudios.audio.internal.cinterop.wma_engine_destroy
+import com.watermellonstudios.audio.internal.cinterop.wma_looper_find_content_bounds
+import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.IntVar
+import kotlinx.cinterop.alloc
+import kotlinx.cinterop.memScoped
+import kotlinx.cinterop.ptr
+import kotlinx.cinterop.value
 import kotlinx.coroutines.test.runTest
 import platform.Foundation.NSTemporaryDirectory
 import kotlin.test.AfterTest
@@ -35,6 +46,9 @@ import kotlin.test.assertTrue
 class IosLooperBridgeTest {
 
     private val bridge = IosAudioBridge()
+
+    /** Valor sembrado en los out-params. No es 0 ni -1: los dos son respuestas plausibles. */
+    private val CENTINELA = -7
 
     @AfterTest
     fun cleanup() {
@@ -148,10 +162,85 @@ class IosLooperBridgeTest {
         )
     }
 
-    /** La rama `false` de los out-params: `(0, 0)`, el mismo par que devuelve Android. */
+    /**
+     * La rama `false` de los out-params: `(0, 0)`, el mismo par que devuelve Android.
+     *
+     * 🔴 **Hasta MINI-016 este test pasaba por el camino EQUIVOCADO.** Se documentaba a sí
+     * mismo como la rama `false` y no la ejercía: `wma_looper_find_content_bounds` hacía
+     * `return true` incondicional, así que la C API respondía **éxito** con `(0, 0)` escrito
+     * en los out-params y el `if (!...)` de [IosAudioBridge.looperFindContentBounds] nunca
+     * corría. La aserción era correcta y la razón era falsa — teatro.
+     *
+     * Ahora sí: una pista vacía no tiene contenido audible, C devuelve `false`, y el `0 to 0`
+     * de abajo sale de la rama de rechazo del bridge y no de leer los out-params. Y ese par
+     * **no es ambiguo**: un resultado exitoso exige `outLast > outFirst`, o sea que `(0, 0)`
+     * está reservado para "no hay nada acá".
+     */
     @Test
-    fun findContentBoundsIsZeroZeroOnAnEmptyTrack() {
+    fun findContentBoundsRefusesAnEmptyTrackInsteadOfAnsweringZeroZero() {
         assertEquals(0 to 0, bridge.looperFindContentBounds(0, thresholdRatio = 0.03f))
+    }
+
+    /**
+     * El gemelo: un índice fuera de rango también cae por la rama de rechazo.
+     *
+     * Sin él, "devuelve `(0, 0)`" no distinguiría el rechazo de un bridge que devuelve ese
+     * par pase lo que pase — que es exactamente el estado en que estaba el test de arriba.
+     */
+    @Test
+    fun findContentBoundsRefusesAnOutOfRangeTrack() {
+        assertEquals(0 to 0, bridge.looperFindContentBounds(99, thresholdRatio = 0.03f))
+        assertEquals(0 to 0, bridge.looperFindContentBounds(-1, thresholdRatio = 0.03f))
+    }
+
+    /**
+     * 🔴 **El único test de este archivo que DISTINGUE el arreglo de MINI-016**, y por eso
+     * entra por debajo del bridge en vez de por su API.
+     *
+     * Los dos de arriba no pueden distinguirlo y hay que decirlo: el bridge colapsa las dos
+     * situaciones en `(0, 0)` —la rama de rechazo devuelve ese par, y el camino de éxito
+     * con `(0, 0)` escrito en los out-params devolvía el mismo—, así que pasaban tanto con
+     * el `return true` incondicional de antes como con el rechazo de ahora. Lo que
+     * afirman es el contrato de SALIDA del bridge, que es útil y no es esto.
+     *
+     * Acá se llama a la C API **directo por cinterop**, con los out-params sembrados en un
+     * centinela: si el rechazo no se propaga, la implementación los pisa con `(0, 0)` y el
+     * assert se cae. Es además lo único que ejerce el marshalling de dos `int*` de salida
+     * sobre la ABI de iOS — el equivalente de
+     * `CApiLooperTest.ContentBoundsRefusesAnInvalidIndexAndASilentTrack`, que corre en el
+     * host y no toca cinterop.
+     *
+     * El motor es **propio** y se destruye al salir: el del bridge es privado, y tomarlo
+     * prestado acoplaría este test a un detalle de implementación de [IosAudioBridge].
+     */
+    @OptIn(ExperimentalForeignApi::class)
+    @Test
+    fun findContentBoundsLeavesTheOutParamsAloneWhenItRefuses() {
+        val engine: CPointer<WmaEngine> = requireNotNull(wma_engine_create()) {
+            "wma_engine_create() devolvió null"
+        }
+        try {
+            memScoped {
+                val first = alloc<IntVar>().also { it.value = CENTINELA }
+                val last = alloc<IntVar>().also { it.value = CENTINELA }
+
+                assertFalse(
+                    wma_looper_find_content_bounds(engine, 99, 0.03f, first.ptr, last.ptr),
+                    "una pista fuera de rango no tiene bordes que informar",
+                )
+                assertEquals(CENTINELA, first.value, "los out-params tienen que quedar intactos al rechazar")
+                assertEquals(CENTINELA, last.value)
+
+                assertFalse(
+                    wma_looper_find_content_bounds(engine, 0, 0.03f, first.ptr, last.ptr),
+                    "una pista sin contenido audible tampoco",
+                )
+                assertEquals(CENTINELA, first.value, "los out-params tienen que quedar intactos al rechazar")
+                assertEquals(CENTINELA, last.value)
+            }
+        } finally {
+            wma_engine_destroy(engine)
+        }
     }
 
     // ==================== Export ====================

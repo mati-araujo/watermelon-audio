@@ -744,6 +744,62 @@ TEST_F(CApiLooperTest, ContentBoundsRefusesRatherThanWritingGarbage) {
     EXPECT_FALSE(wma_looper_find_content_bounds(mWma, 0, 0.01f, &first, nullptr));
 }
 
+// MINI-016. These two paths answered `true` and WROTE to the out-params, against
+// what the header promised. The silent one is the one that bites: it came back as
+// (0, length) — the same pair as a track that is audible end to end — so a caller
+// could not tell "there is nothing here" from "it is all content". NoisyPad's
+// finalizeAutoLoop feeds exactly this pair to planAutoLoop, which aborts on a
+// too-short content span; with (0, length) it accepted a silent take instead.
+//
+// The out-param sentinel is checked on BOTH, and it is not decoration: the whole
+// defect was a `return true` that had already scribbled over them.
+TEST_F(CApiLooperTest, ContentBoundsRefusesAnInvalidIndexAndASilentTrack) {
+    startAt(kSampleRate, 0);
+
+    int first = -7, last = -7;
+    EXPECT_FALSE(wma_looper_find_content_bounds(mWma, /*track_index=*/99, 0.01f, &first, &last))
+        << "an out-of-range track has no bounds to report";
+    EXPECT_EQ(first, -7) << "the out-params must be left alone on failure";
+    EXPECT_EQ(last, -7);
+
+    EXPECT_FALSE(wma_looper_find_content_bounds(mWma, /*track_index=*/-1, 0.01f, &first, &last));
+    EXPECT_EQ(first, -7);
+    EXPECT_EQ(last, -7);
+
+    // A track that was recorded with the oscillator silent: it IS active and it
+    // DOES have length, so this is not the empty-track path — it is the one where
+    // the engine finds no peak to threshold against.
+    wma_looper_set_enabled(mWma, true);
+    ASSERT_EQ(wma_looper_prepare_track(mWma, 0, 16 * kBlockFrames, kSampleRate), WMA_OK);
+    wma_set_frequency_amplitude(mWma, 440.0f, 0.0f);
+    render(4, kBlockFrames);
+    wma_looper_start_recording(mWma, 0);
+    render(16, kBlockFrames);
+    wma_looper_stop_recording(mWma);
+    const int silentLength = wma_looper_get_track_length_frames(mWma, 0);
+    ASSERT_GT(silentLength, 0) << "the silent take has to be RECORDED, or this tests the empty path";
+
+    EXPECT_FALSE(wma_looper_find_content_bounds(mWma, 0, 0.01f, &first, &last))
+        << "a silent take has no audible content; answering true with (0, " << silentLength
+        << ") is indistinguishable from a track that is audible end to end";
+    EXPECT_EQ(first, -7) << "the out-params must be left alone on failure";
+    EXPECT_EQ(last, -7);
+}
+
+// The positive half of the sentinel the header now promises: a successful answer
+// always has out_last > out_first, so (0, 0) can never be a success and a caller
+// may use it as one. Without this, "false means nothing here" would rest on the
+// failure cases alone.
+TEST_F(CApiLooperTest, ASuccessfulContentBoundsIsNeverAnEmptySpan) {
+    startAt(kSampleRate, 0);
+    recordTrack(0, /*blocks=*/16);
+
+    int first = -7, last = -7;
+    ASSERT_TRUE(wma_looper_find_content_bounds(mWma, 0, 0.01f, &first, &last));
+    EXPECT_GT(last, first) << "a true result must describe a non-empty span";
+    EXPECT_FALSE(first == 0 && last == 0) << "(0, 0) is reserved for 'no content'";
+}
+
 TEST_F(CApiLooperTest, OnsetDetectionHonoursTheBufferAndNeverReportsNegative) {
     startAt(kSampleRate, 0);
     recordTrack(0, /*blocks=*/16);

@@ -299,14 +299,18 @@ class LooperWidthJniTest {
      * dejaría ese número en cero y el otro intacto — o sea que este assert distingue
      * exactamente el estrechamiento que ninguna firma ve.
      *
-     * 🔴 **El gemelo de silencio devuelve `(0, largo)` y no `(0, 0)`, y el motor tiene
-     * razón.** Lo midió este test: `TrackBuffer::findContentBounds` escribe
-     * `outLast = len` **antes** de sus salidas tempranas y después devuelve `false` cuando
-     * el pico es cero; `wma_looper_find_content_bounds` **no propaga ese `false`** —
-     * devuelve `true` siempre que el motor y los punteros existan
-     * (`watermelon_audio.cpp:2102`)— así que el `false` no llega nunca al `return 0` de la
-     * capa JNI. O sea que "no hay contenido" y "todo es contenido" **son el mismo valor**
-     * para un consumidor. Se afirma lo que el sistema hace, no lo que yo suponía que hacía.
+     * 🔴 **El gemelo de silencio es la rama `return 0` de la capa JNI, y hasta MINI-016 era
+     * código muerto.** Cuando REQ-026 escribió este test, el silencio devolvía `(0, largo)`:
+     * `TrackBuffer::findContentBounds` escribe `outLast = len` **antes** de sus salidas
+     * tempranas y devuelve `false`, pero `wma_looper_find_content_bounds` **se tragaba ese
+     * `false`** y respondía `true`. O sea que *"no hay contenido"* y *"todo es contenido"*
+     * eran el mismo valor para un consumidor, y el `if (!...) return 0` de
+     * `jni_audio_bridge.cpp:2516` no se ejecutaba nunca.
+     *
+     * MINI-016 propagó el rechazo. Ahora el silencio devuelve `0L`, que la capa Kotlin
+     * desempaqueta como `(0, 0)` — y **ese par no colisiona con ningún éxito**, porque un
+     * resultado exitoso exige `outLast > outFirst`. Este assert es lo que mantiene viva esa
+     * rama: si alguien vuelve a poner un `return true` incondicional, se cae acá.
      */
     @Test
     fun `findContentBounds trae el primer frame en los 32 bits altos`() {
@@ -320,11 +324,12 @@ class LooperWidthJniTest {
         )
 
         val largo = importarSilencio(TRACK)
+        assertTrue(largo > 0, "el gemelo tiene que ser una pista CON frames, o probaría el camino vacío")
         assertEquals(
-            0 to largo,
+            0 to 0,
             jni("nativeLooperFindContentBounds") { it.looperFindContentBounds(TRACK, 0.03f) },
-            "sobre silencio, la C API descarta el false de TrackBuffer y devuelve la pista " +
-                "entera. Si esto cambia, cambió el contrato, no el test",
+            "sobre silencio la C API tiene que RECHAZAR (MINI-016), y la capa JNI devolver 0L. " +
+                "Si volviera (0, $largo), el rechazo se está tragando otra vez",
         )
     }
 
