@@ -122,6 +122,16 @@ TEST(PoorStimulusMatrix, LaCuerdaQueDecaeSigueMidiendoALosTresSegundos) {
         st.setCoarseFrequencyHz(cuerda.hz);
         st.process(mono.data(), static_cast<int>(mono.size()));
 
+        // 🔴 CONTROL SOBRE EL INSTRUMENTO, no sobre el motor. Sin esto el test es
+        // decorativo: un mutante que apagaba el decaimiento POR PARCIAL
+        // (`tau_n = tau` en vez de `tau/n`) SOBREVIVIA, porque con decaimiento
+        // uniforme los cuatro parciales siguen vivos y `>= 2` se cumple igual. O
+        // sea que el test no estaba ejerciendo la muerte de parciales que dice
+        // ejercer. Medido con `tau_n = tau/n`: a los 3 s quedan 3.
+        EXPECT_LT(st.partialsUsed(), 4)
+            << cuerda.name << ": a los 3 s siguen vivos los cuatro parciales, asi que"
+            << " este estimulo NO esta ejerciendo la muerte de parciales — el test no"
+            << " prueba lo que dice probar";
         EXPECT_GE(st.partialsUsed(), 2)
             << cuerda.name << ": a los 3 s quedan " << st.partialsUsed()
             << " parciales — el piso de energia esta descartando parciales vivos";
