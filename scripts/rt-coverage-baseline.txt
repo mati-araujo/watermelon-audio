@@ -36,6 +36,8 @@ audio/src/main/cpp/analysis/PhaseSlopeEstimator.h::PhaseSlopeEstimator::goertzel
 audio/src/main/cpp/analysis/StrobeTracker.cpp::StrobeTracker::process
 audio/src/main/cpp/analysis/StrobeTracker.h::StrobeTracker::coarseDeviationCents
 audio/src/main/cpp/analysis/StrobeTracker.h::StrobeTracker::contradictsControl
+audio/src/main/cpp/analysis/StrobeTracker.h::StrobeTracker::fitStretchedSeries
+audio/src/main/cpp/analysis/StrobeTracker.h::StrobeTracker::stretchCents
 audio/src/main/cpp/backends/DriftResampler.cpp::DriftResampler::process
 audio/src/main/cpp/backends/OboeBackend.cpp::OboeBackend::onAudioReady
 audio/src/main/cpp/backends/SplitBackend.cpp::SplitBackend::InputCallback::onAudioReady
