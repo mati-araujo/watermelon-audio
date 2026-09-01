@@ -213,7 +213,7 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     {
         double fitC = 0.0;
         double fitSigma = 0.0;
-        if (fitStretchedSeries(vals, orders, valid, &fitC, &fitSigma)) {
+        if (fitStretchedSeries(vals, sigmas, orders, valid, &fitC, &fitSigma)) {
             mCents = fitC;
             mUncertaintyCents = fitSigma;
             mHasMeasurement = true;

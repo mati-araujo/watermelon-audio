@@ -41,7 +41,7 @@ constexpr double kToleranceCents = 0.1;
 /// debajo de la tolerancia lo pasaria un estimador que devuelva siempre 0.
 constexpr double kProbeCents = 1.0;
 
-struct Str { const char* name; double hz; };
+using Str = wma_test::CatalogString;   // el catalogo vive en support/SyntheticSignal.h
 
 /**
  * Las cuerdas de los instrumentos de S3, en afinacion estandar. Los valores son
@@ -49,19 +49,7 @@ struct Str { const char* name; double hz; };
  * que computa lo esperado con el mismo codigo que prueba, prueba que el codigo es
  * igual a si mismo.
  */
-const std::vector<Str>& strings() {
-    static const std::vector<Str> kStrings = {
-        // Guitarra estandar
-        {"guitarra E2", 82.407}, {"guitarra A2", 110.000}, {"guitarra D3", 146.832},
-        {"guitarra G3", 195.998}, {"guitarra B3", 246.942}, {"guitarra E4", 329.628},
-        // Bajo de 5 cuerdas — el B0 es el caso que justifica todo el diseño
-        {"bajo B0", 30.868}, {"bajo E1", 41.203}, {"bajo A1", 55.000},
-        {"bajo D2", 73.416}, {"bajo G2", 97.999},
-        // Ukelele (reentrante) — la cuerda mas aguda del catalogo
-        {"ukelele G4", 391.995}, {"ukelele C4", 261.626}, {"ukelele A4", 440.000},
-    };
-    return kStrings;
-}
+const std::vector<Str>& strings() { return wma_test::catalogStrings(); }
 
 void feed(StrobeTracker& t, const std::vector<float>& sig, int blockFrames = 512) {
     int i = 0;

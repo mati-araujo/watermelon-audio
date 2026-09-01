@@ -134,10 +134,14 @@ public:
      * es exactamente lo que REQ-027 existe para sacar, asi que con k ≤ 2 se
      * conserva la combinacion por inverso de la varianza de siempre.
      *
-     * Medido: con k = 2 el ajuste recupera C exacto (−12,0000) pero su σ da NaN.
-     * Se prefiere el statu quo a un numero que no significa nada.
+     * 🔴 BAJO DE 3 A 2 EN S3, Y LO PIDIO UNA MEDICION. Con k = 2 y B = 1e-4 la
+     * media ponderada publica **0,13 a 0,15 cents** de error sobre las 14 cuerdas
+     * del catalogo y los dos rates —40 % por encima del presupuesto— porque el
+     * peso 1/σ² es mayor en el parcial 2, que es el mas estirado. El ajuste
+     * recupera C exacto ahi. Con dos puntos no hay residuos con que estimar σ, asi
+     * que se propaga y se declara: ver la rama `dof == 0` de `fitStretchedSeries`.
      */
-    static constexpr int kMinPartialsForStretchFit = 3;
+    static constexpr int kMinPartialsForStretchFit = 2;
 
     /// Techo de la busqueda de B. 5e-3 cubre con holgura el rango publicado de
     /// cuerdas reales (~1e-5 nylon a ~5e-4 acero); `physicsB()` da 1,28e-5 para
@@ -190,7 +194,8 @@ public:
      * @param outSigmaC  su incertidumbre, sacada de los RESIDUOS del ajuste.
      * @return false si no hay grados de libertad para una σ con sentido.
      */
-    static bool fitStretchedSeries(const double* cents, const int* orders, int k,
+    static bool fitStretchedSeries(const double* cents, const double* sigmas,
+                                   const int* orders, int k,
                                    double* outC, double* outSigmaC) noexcept {
         if (k < kMinPartialsForStretchFit) return false;
 
@@ -227,12 +232,30 @@ public:
         double C = 0.0;
         const double sse = sseFor(0.5 * (lo + hi), &C);
         const int dof = k - 2;
-        if (dof <= 0 || !std::isfinite(sse) || !std::isfinite(C)) return false;
+        if (!std::isfinite(sse) || !std::isfinite(C)) return false;
 
         *outC = C;
-        // σ del intercepto a partir de los RESIDUOS. No se propaga la σ por
-        // parcial: ver la nota de arriba.
-        *outSigmaC = std::sqrt(sse / static_cast<double>(dof) / static_cast<double>(k));
+        if (dof > 0) {
+            // σ del intercepto a partir de los RESIDUOS. No se propaga la σ por
+            // parcial: ver la nota de arriba.
+            *outSigmaC = std::sqrt(sse / static_cast<double>(dof) / static_cast<double>(k));
+        } else {
+            // k == 2: el sistema esta EXACTAMENTE determinado, los residuos son
+            // cero y no hay con que estimar dispersion. Se PROPAGA, y se dice que
+            // se propago.
+            //
+            // 🔴 Esa σ es optimista, y aun asi la rama existe porque es
+            // ESTRICTAMENTE MEJOR que la alternativa. Sin ajuste, con dos
+            // parciales de una cuerda inarmonica, la media ponderada por 1/σ² se
+            // va hacia el parcial 2 —el mas estirado, y encima el de σ mas chica—
+            // y publica ~0,14 cents de error sobre TODO el catalogo, con la misma
+            // σ minuscula. O sea: hoy el numero esta MAL y σ es optimista;
+            // ajustando, el numero esta BIEN y σ es igual de optimista. No se
+            // pierde honestidad, se gana exactitud.
+            double acc = 0.0;
+            for (int i = 0; i < k; ++i) acc += sigmas[i] * sigmas[i];
+            *outSigmaC = std::sqrt(acc);
+        }
         return true;
     }
 
