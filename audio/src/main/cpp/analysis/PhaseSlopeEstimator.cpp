@@ -61,6 +61,7 @@ void PhaseSlopeEstimator::reset() {
     mHavePrevPhase = false;
     mCents = 0.0;
     mUncertaintyCents = 0.0;
+    mBinToRmsRatio = 0.0;
     mWrappedPhase = 0.0;
     mHasSignal = false;
     mHasMeasurement = false;
@@ -99,6 +100,18 @@ void PhaseSlopeEstimator::closeWindow() {
 
     const double real = mQ1 - mQ2 * std::cos(mOmega);
     const double imag = mQ2 * std::sin(mOmega);
+
+    // REQ-027 — cuanta de la energia de la ventana esta en ESTE bin.
+    //
+    // `kWindowFrames/4` es la ganancia coherente del Goertzel bajo Hann (la
+    // ventana suma N/2, y el fasor reparte en dos imagenes), asi que dividir por
+    // ella devuelve la AMPLITUD. Contra el RMS de la ventana, un seno puro exacto
+    // da √2. Todo aca es aritmetica sobre lo que ya estaba calculado: no asigna,
+    // no loguea y no toma locks — la primitiva tiene que poder vivir en el
+    // camino RT (ver la nota de RT-SAFETY del header).
+    const double binAmplitude =
+        std::sqrt(real * real + imag * imag) / (static_cast<double>(kWindowFrames) / 4.0);
+    mBinToRmsRatio = (rms > 0.0) ? binAmplitude / rms : 0.0;
 
     // Arranca la proxima ventana. Va ANTES de cualquier `return`: si no, una
     // ventana silenciosa dejaria el estado del Goertzel contaminando la que

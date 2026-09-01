@@ -89,6 +89,43 @@ public:
      */
     static constexpr double kMaxPartialDisagreementCents = 50.0;
 
+    /**
+     * REQ-027 — LOS DOS PISOS DE ADMISION POR ENERGIA DEL BIN.
+     *
+     * Un parcial cuyo bin no tiene señal propia integra la FUGA espectral del
+     * vecino. La fuga avanza de fase suave, asi que da un ajuste lineal bueno, o
+     * sea σ chica: sale CONVERGIDA y equivocada. Medido sobre tono puro exacto en
+     * E2, el segundo parcial publicaba **+38,70 cents con σ = 0,0028**, y el
+     * filtro de mediana no lo agarraba — quedaba a 41,96 cents de la mediana
+     * contra un umbral de 50, o sea el 83,9 % del margen.
+     *
+     * SON DOS Y NO UNO, Y LA RAZON ESTA MEDIDA:
+     *
+     *   · El piso ABSOLUTO mata la fuga. `|bin|/rms` de un parcial con energia va
+     *     de 0,296 (el cuarto de una cuerda 1/n) a 1,414 (seno puro); la fuga
+     *     llega a **2,63e-02** en el peor caso del catalogo, que es B0 (30,87 Hz)
+     *     a 48 kHz — ahi el bin del segundo parcial esta a solo 2,63 bins del
+     *     fundamental. 0,05 deja 1,9x sobre esa fuga.
+     *
+     *     🔴 El primer valor considerado fue 0,02, elegido midiendo SOLO las seis
+     *     cuerdas de guitarra, donde la peor fuga es 9,04e-04 y el margen parecia
+     *     de 327x. B0 a 48 kHz lo pasa por arriba: habria dejado el defecto
+     *     intacto justo en la cuerda mas grave. Medir la muestra equivocada da un
+     *     margen que no existe.
+     *
+     *   · El piso RELATIVO al parcial mas fuerte sigue a la señal cuando el nivel
+     *     baja, para que un decaimiento no vaya descartando parciales de a uno.
+     *     Se compara contra el MAS FUERTE y no contra el fundamental porque el
+     *     fundamental puede estar AUSENTE (el bajo por un parlante chico), que es
+     *     un caso que este tracker ya maneja.
+     *
+     * El corredor entre fuga maxima y parcial legitimo minimo es de **11,3x** en
+     * el catalogo, y se aprieta a ~3,4x con caida armonica 1/n². Es el numero que
+     * el criterio de muerte de REQ-027 vigila.
+     */
+    static constexpr double kMinBinToRmsRatio = 0.05;
+    static constexpr double kMinFractionOfStrongestPartial = 0.04;
+
     void prepare(int sampleRate);
 
     /**
@@ -230,10 +267,42 @@ public:
      * remocion no cambia un solo numero no es una defensa: es una linea que la
      * proxima persona va a creer load-bearing. Se fue.
      *
-     * Lo que queda declarado como riesgo residual, sin dueño: si ALGUNA vez los
-     * cuatro parciales discrepan a la vez con un control cerca de cero, la
-     * lectura se apagaria en "afinado". No se observo en 42 escenarios.
+     * 🔴 LA ZONA MUERTA VOLVIO EN REQ-027, Y EL RIESGO RESIDUAL DE ARRIBA ES
+     * EXACTAMENTE LO QUE PASO — PEOR DE LO DECLARADO.
+     *
+     * Este bloque declaraba: *"si ALGUNA vez los cuatro parciales discrepan a la
+     * vez con un control cerca de cero, la lectura se apagaria en afinado. No se
+     * observo en 42 escenarios."* Se observo. Y no se apago: publico **+38,70
+     * cents con estado CONVERGIDO** sobre una cuerda afinada EXACTA.
+     *
+     * Las dos mitades del razonamiento viejo eran ciertas por separado y falsas
+     * juntas:
+     *
+     *   · *"cerca de afinado el signo es ruido"* — cierto, y es la causa. A 0,00
+     *     cents el control informa −0,0121 y la lectura fina +0,0001: signos
+     *     opuestos, o sea que el fundamental se descarta JUSTO cuando la cuerda
+     *     esta bien. Es un empate tecnico entre dos numeros que valen cero.
+     *
+     *   · *"los otros parciales sostienen la lectura igual"* — esto es lo que se
+     *     cayo. Se midio sobre 42 escenarios que TODOS tenian cuatro parciales
+     *     con energia, que es el mismo punto ciego que tenia el corpus de tests
+     *     entero (los ocho tests de extremo a extremo generaban el estimulo con
+     *     `for (int n = 1; n <= 4; ++n)`). Con un tono puro **no hay otros
+     *     parciales que sostengan nada**: los otros tres son fuga espectral, y
+     *     lo que "sostenia" la lectura era justamente la basura.
+     *
+     * O sea que "sacarla no cambia un solo numero" era verdad **en la muestra
+     * medida**, y la muestra no contenia el caso. La leccion no es que la zona
+     * muerta sea sagrada: es que su remocion se valido contra un corpus que no
+     * podia refutarla.
+     *
+     * EL UMBRAL SALE DE LA RESOLUCION DEL CONTROL, no de un numero redondo: la
+     * deteccion gruesa mide 0,21 cents en el peor caso sobre A0-C7, asi que por
+     * debajo de ~5x eso su SIGNO no transporta informacion. Arbitrar con el
+     * seria arbitrar con ruido.
      */
+    static constexpr double kSignArbitrationDeadZoneCents = 1.0;
+
     static bool contradictsControl(double partialCents, double coarse) noexcept {
         // SIN CONTROL NO SE ARBITRA, y esto se chequea ACA y no solo en el
         // llamador. Con `coarse` NaN la comparacion de abajo no falla: `NaN > 0`
@@ -243,6 +312,10 @@ public:
         // `setCoarseFrequencyHz`. Una funcion que puede recibir NaN se defiende
         // sola en vez de confiar en que el llamador se acuerde.
         if (!std::isfinite(coarse)) return false;
+        // ZONA MUERTA: con cualquiera de las dos magnitudes por debajo del piso,
+        // el signo es un empate tecnico y no una contradiccion. Ver arriba.
+        if (std::fabs(coarse) < kSignArbitrationDeadZoneCents) return false;
+        if (std::fabs(partialCents) < kSignArbitrationDeadZoneCents) return false;
         return (partialCents > 0.0) != (coarse > 0.0);
     }
 

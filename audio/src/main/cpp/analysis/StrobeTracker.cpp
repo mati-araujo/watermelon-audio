@@ -87,6 +87,17 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     const double coarse = coarseDeviationCents();
     mDomainVerified = std::isfinite(coarse);
 
+    // --- REQ-027: EL PISO DE ENERGIA, ANTES QUE CUALQUIER OTRA COSA ---------
+    //
+    // El parcial mas fuerte fija la escala. Se recorre entero primero porque el
+    // piso relativo necesita el maximo antes de poder juzgar a nadie.
+    double strongestBin = 0.0;
+    for (const auto& p : mPartials) {
+        if (!p.hasMeasurement()) continue;
+        const double ratio = p.goertzelBinToRmsRatio();
+        if (ratio > strongestBin) strongestBin = ratio;
+    }
+
     double vals[kPartials];
     double sigmas[kPartials];
     int valid = 0;
@@ -95,6 +106,14 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         const double sigma = p.uncertaintyCents();
         if (!(sigma > 0.0) || !std::isfinite(sigma)) continue;
         if (!std::isfinite(p.cents())) continue;
+        // REQ-027 — ?habia algo que medir en este bin? Va ANTES del descarte por
+        // dominio y del de mediana, y el orden importa: un parcial que no mide
+        // nada no puede VOTAR el consenso que decide a quien se descarta. Con
+        // tono puro los tres parciales de fuga son MAYORIA, asi que la mediana la
+        // fijaban ellos y el unico dato bueno quedaba de outlier.
+        const double binRatio = p.goertzelBinToRmsRatio();
+        if (binRatio < kMinBinToRmsRatio) continue;
+        if (binRatio < kMinFractionOfStrongestPartial * strongestBin) continue;
         // Sin control no se descarta nada: no se PUEDE saber quien esta en
         // dominio, y adivinarlo con la propia fase es el auto-engaño que
         // documenta `setCoarseFrequencyHz`. Lo que corresponde entonces es que
