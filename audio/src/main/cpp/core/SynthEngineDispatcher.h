@@ -96,6 +96,36 @@ public:
     // ========== ENGINE PARAMETERS ==========
 
     /**
+     * @brief Cuantos parametros expone el engine de este tipo
+     * @param engineType Engine type ID
+     * @return El conteo que el engine IMPLEMENTA, o 0 si `engineType` no es un
+     *         SynthEngine (CLASSIC) o no existe.
+     *
+     * Thread de control. No lo llama el callback de audio.
+     */
+    int getEngineParameterCount(int engineType) const;
+
+    /**
+     * @brief Metadata de UN parametro del engine de este tipo
+     * @param engineType Engine type ID
+     * @param paramIndex Indice en [0, getEngineParameterCount(engineType))
+     * @param[out] outDef Se escribe SOLO si la funcion devuelve true
+     * @return false si `engineType` o `paramIndex` estan fuera de rango
+     *
+     * 🔴 El rango se verifica ACA y no se delega al engine. Los seis overrides
+     * de `getParameterDef()` devuelven un centinela `("Unknown", ...)` para un
+     * paramId invalido —y ni siquiera el mismo: SoundFontEngine usa
+     * `{"Unknown", "???", 0, 1, 0.5}` contra el `{"Unknown", "?", 0, 1, 0}` de
+     * los otros cinco—. Propagarlo convertiria un indice invalido en una
+     * medicion perfectamente formada, que es exactamente lo que un llamador no
+     * puede distinguir de un dato.
+     *
+     * Thread de control. No lo llama el callback de audio.
+     */
+    bool getEngineParameterDef(int engineType, int paramIndex,
+                               EngineParameterDef& outDef) const;
+
+    /**
      * @brief Set a parameter on all instances of the current engine type
      * @param paramId Parameter index (0 to MAX_ENGINE_PARAMS-1)
      * @param value Parameter value (typically 0.0-1.0)

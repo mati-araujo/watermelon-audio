@@ -59,13 +59,17 @@
 #      "se LEE en cinco lugares" y la spec que la ejecuto conto CUATRO. El quinto
 #      (`AudioEngine.cpp:498`) era un uso derivado de una variable local, invisible
 #      para un `grep` del nombre del campo. El baseline tenia razon.
-#   2. SynthEngine::getParameterCount/getParameterDef — virtuales puras, seis
-#      overrides, CERO llamadas en produccion. Doce entradas, un mecanismo.
-#      Al 2026-08-28 es la UNICA de las tres que sigue abierta, y su decision es de
-#      PRODUCTO: la metadata no cruza ninguna frontera (cero C API, cero JNI, cero
-#      Kotlin), asi que el consumidor que su KDoc promete —"used by UI to
-#      auto-generate controls"— no puede existir hoy. Cablearla o borrarla depende
-#      de si NoisyPad quiere generar esos controles. Ver MINI-012.
+#   2. SynthEngine::getParameterCount/getParameterDef — PAGADA por REQ-028 S1
+#      (2026-09-01), y es la unica de las tres que se pago CABLEANDO en vez de
+#      borrando. Sus doce entradas ya no estan en este archivo.
+#      La decision era de PRODUCTO y se contesto MIDIENDO: NoisyPad no es que no
+#      tuviera la metadata, la tenia DUPLICADA a mano, con el mismo KDoc palabra
+#      por palabra y los 15 valores escritos. O sea que el consumidor que el KDoc
+#      promete —"used by UI to auto-generate controls"— ya existia.
+#      🔴 La leccion, que es de este archivo: la entrada decia "CERO llamadas en
+#      produccion" y era CIERTA, pero se leia como "nadie quiere esto". Lo que
+#      faltaba no era el consumidor: era el CAMINO. Antes de clasificar una deuda
+#      como no deseada, fijate si el consumidor la reimplemento por su cuenta.
 #   3. DriftResampler::setDriftCorrection — PAGADA por MINI-011 (2026-08-28), y se
 #      pago BORRANDO, igual que la 1.
 #      🔴 La leccion es sobre esta lista: la razon que esta entrada daba —"MIDE la
@@ -78,6 +82,8 @@
 #      corregido DOS VECES. Una razon de este archivo puede envejecer hasta quedar
 #      al reves: verificala contra el arbol antes de ejecutarla.
 #
+audio/src/main/cpp/api/watermelon_audio.cpp::wma_engine_get_parameter_count::deuda | REQ-028 S1 construyo la C API y S2 le da el llamador de produccion (el JNI). Las doce entradas de getParameterCount/getParameterDef se fueron de este archivo en la misma etapa: la lectura al engine ya es produccion. Estas dos son el borde de la etapa, no una deuda de diseño, y S2 las saca
+audio/src/main/cpp/api/watermelon_audio.cpp::wma_engine_get_parameter_def::deuda | REQ-028 S1 construyo la C API y S2 le da el llamador de produccion (el JNI). Las doce entradas de getParameterCount/getParameterDef se fueron de este archivo en la misma etapa: la lectura al engine ya es produccion. Estas dos son el borde de la etapa, no una deuda de diseño, y S2 las saca
 audio/src/main/cpp/analysis/AbsenceGate.h::AbsenceGate::quietRun::sonda-de-tests | accesor del contador que existe para que un test pueda afirmar que la racha se REINICIA (no solo que el veredicto final es el correcto): sin el, un mutante que nunca reinicie da el mismo veredicto en los casos probados y sobrevive. No lo llama produccion a proposito
 audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::availableFrames::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
 audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::oversizedBlocks::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
@@ -119,20 +125,8 @@ audio/src/main/cpp/effects/CompressorEffect.h::CompressorEffect::getGainReductio
 audio/src/main/cpp/effects/EffectChain.cpp::EffectChain::getEffectLatencySamples::sonda-de-tests | latencia POR EFECTO; produccion usa la total. Existe para que el test pueda desglosarla
 audio/src/main/cpp/effects/EffectChain.h::EffectChain::latencyClampedBlocks::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
 audio/src/main/cpp/effects/LookaheadLimiter.cpp::LookaheadLimiter::getGainReduction::sonda-de-tests | medidor de reduccion de ganancia: lo lee el test, no el audio
-audio/src/main/cpp/engines/FMEngine.h::FMEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
-audio/src/main/cpp/engines/FMEngine.h::FMEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
-audio/src/main/cpp/engines/GranularEngine.h::GranularEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
-audio/src/main/cpp/engines/GranularEngine.h::GranularEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
-audio/src/main/cpp/engines/KarplusStrongEngine.h::KarplusStrongEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
-audio/src/main/cpp/engines/KarplusStrongEngine.h::KarplusStrongEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
 audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::getActiveTouchCount::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
-audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
-audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
 audio/src/main/cpp/engines/SoundFontManager.h::SoundFontManager::getActiveSF::sonda-de-tests | devuelve el tsf* crudo para que el test lo inspeccione
-audio/src/main/cpp/engines/SupersawEngine.h::SupersawEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
-audio/src/main/cpp/engines/SupersawEngine.h::SupersawEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
-audio/src/main/cpp/engines/WavetableEngine.h::WavetableEngine::getParameterCount::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
-audio/src/main/cpp/engines/WavetableEngine.h::WavetableEngine::getParameterDef::deuda | SynthEngine::getParameterCount/getParameterDef son virtuales puras con seis overrides y CERO llamadas en produccion: la introspeccion de parametros de engines no la invoca nadie. Es UNA deuda con doce entradas
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::getRecordingTrack::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::getTrack::sonda-de-tests | devuelve el TrackBuffer para que el test lo inspeccione
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::getTrackRemainingPlays::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio

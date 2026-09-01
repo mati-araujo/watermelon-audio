@@ -281,6 +281,46 @@ WMA_API void wma_set_engine_param(WmaEngine* engine, int param_id, float value);
 /** Get the current engine type ID. */
 WMA_API int wma_get_engine_type(const WmaEngine* engine);
 
+/**
+ * Cuantos parametros expone un engine.
+ *
+ * @param engine_type 0=CLASSIC, 1=KARPLUS_STRONG, 2=FM, 3=WAVETABLE,
+ *                    4=GRANULAR, 5=SUPERSAW, 6=SOUNDFONT
+ * @return El conteo que ese engine implementa, o 0 si `engine_type` no es un
+ *         motor de sintesis (CLASSIC usa los osciladores legacy) o no existe.
+ *
+ * NO hace falta que `engine_type` sea el engine activo, ni que el motor este
+ * arrancado: una UI construye los controles de todos los engines antes de que el
+ * usuario elija uno.
+ */
+WMA_API int wma_engine_get_parameter_count(const WmaEngine* engine, int engine_type);
+
+/**
+ * Metadata de UN parametro de un engine: nombre, etiqueta corta, minimo, maximo
+ * y default.
+ *
+ * Cada out-param es opcional (puede ser NULL) y NINGUNO se toca si la funcion
+ * devuelve false.
+ *
+ * @param param_index Indice en [0, wma_engine_get_parameter_count(engine_type))
+ * @return false si `engine_type` o `param_index` estan fuera de rango.
+ *
+ * 🔴 Un indice invalido sale como RECHAZO, nunca como dato. Los engines
+ * devuelven internamente un centinela ("Unknown", ...) para un indice fuera de
+ * rango; esta funcion no lo propaga, porque un llamador no puede distinguir esa
+ * medicion con cara de valida de una real.
+ *
+ * 🔴 Los `const char*` apuntan a LITERALES DE COMPILACION y NO CADUCAN NUNCA: se
+ * pueden guardar sin copiar. Es la diferencia con `wma_sf_get_preset_name`, cuyo
+ * puntero muere al descargar el SoundFont — no hay que heredar esa cautela aca.
+ */
+WMA_API bool wma_engine_get_parameter_def(const WmaEngine* engine, int engine_type,
+                                          int param_index,
+                                          const char** out_name,
+                                          const char** out_short_name,
+                                          float* out_min, float* out_max,
+                                          float* out_default);
+
 /* ================================================================
  * 6. SoundFont
  * ================================================================ */

@@ -380,6 +380,32 @@ int wma_get_engine_type(const WmaEngine* engine) {
     return engine->engine->getEngineType();
 }
 
+int wma_engine_get_parameter_count(const WmaEngine* engine, int engine_type) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getEngineParameterCount(engine_type);
+}
+
+bool wma_engine_get_parameter_def(const WmaEngine* engine, int engine_type,
+                                  int param_index,
+                                  const char** out_name,
+                                  const char** out_short_name,
+                                  float* out_min, float* out_max,
+                                  float* out_default) {
+    WMA_CHECK_VAL(engine, false);
+    // El def se pide PRIMERO y los out-params se escriben DESPUES: un rechazo no
+    // puede dejar la mitad de una medicion escrita.
+    EngineParameterDef def{};
+    if (!engine->engine->getEngineParameterDef(engine_type, param_index, def)) {
+        return false;
+    }
+    if (out_name) *out_name = def.name;
+    if (out_short_name) *out_short_name = def.shortName;
+    if (out_min) *out_min = def.minValue;
+    if (out_max) *out_max = def.maxValue;
+    if (out_default) *out_default = def.defaultValue;
+    return true;
+}
+
 /* ================================================================
  * 6. SoundFont
  * ================================================================ */

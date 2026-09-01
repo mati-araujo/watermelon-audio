@@ -145,6 +145,7 @@ add_executable(core_tests
     test_c_api_input.cpp
     test_c_api_effects.cpp
     test_c_api_synth.cpp
+    test_c_api_engine_params.cpp
     test_soundfont_load.cpp
     test_touch_expression.cpp
     test_touch_expression_surface.cpp

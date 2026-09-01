@@ -157,9 +157,9 @@ afirmado y no vigilado haría leer todo este archivo como verificado cuando sól
 | `bridge-external` | 309 | `external fun` en AudioNativeBridge |
 | `jniexport-bridge` | 298 | JNIEXPORT en jni_audio_bridge.cpp |
 | `jniexport-total` | 311 | JNIEXPORT en todo jni/*.cpp |
-| `wma-api` | 275 | declaraciones WMA_API en la C API |
+| `wma-api` | 277 | declaraciones WMA_API en la C API |
 | `analysis-files` | 17 | fuentes .h/.cpp en cpp/analysis/ (sin tests/) |
-| `callers-baseline` | 1 callback-externo / 28 deuda / 1 entrada / 45 sonda-de-tests | reparto del baseline de llamadores |
+| `callers-baseline` | 1 callback-externo / 18 deuda / 1 entrada / 45 sonda-de-tests | reparto del baseline de llamadores |
 | `ver-kotlin` | 2.4.10 | version de Kotlin |
 | `ver-agp` | 9.3.2 | version de AGP |
 <!-- END conteos-medidos -->

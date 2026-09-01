@@ -175,6 +175,27 @@ void SynthEngineDispatcher::setEngineParameter(int paramId, float value) {
     }
 }
 
+int SynthEngineDispatcher::getEngineParameterCount(int engineType) const {
+    const SynthEngine* engine = getEngine(engineType);
+    return engine ? engine->getParameterCount() : 0;
+}
+
+bool SynthEngineDispatcher::getEngineParameterDef(int engineType, int paramIndex,
+                                                  EngineParameterDef& outDef) const {
+    const SynthEngine* engine = getEngine(engineType);
+    if (!engine) {
+        return false;
+    }
+    // El rango se decide con lo que el engine DECLARA, no con MAX_ENGINE_PARAMS:
+    // un indice entre el conteo del engine y el maximo del array caeria en el
+    // `default:` del override y saldria como el centinela ("Unknown", ...).
+    if (paramIndex < 0 || paramIndex >= engine->getParameterCount()) {
+        return false;
+    }
+    outDef = engine->getParameterDef(paramIndex);
+    return true;
+}
+
 SynthEngine* SynthEngineDispatcher::getEngine(int engineType) const {
     switch (engineType) {
         case static_cast<int>(EngineTypeId::KARPLUS_STRONG):
