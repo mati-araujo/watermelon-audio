@@ -150,10 +150,25 @@ public:
     /// medicion puede distinguir.
     static constexpr int kStretchFitIterations = 40;
 
-    /// El estiramiento inarmonico del parcial `n`, en cents: `600·log2(1+B·n²)`.
-    /// Es el modelo EXACTO y no su linealizacion `K·n²` — a B = 1e-3 la lineal
-    /// erra 0,11 cents contra una σ de 1e-4, o sea que el desajuste de modelo
-    /// dominaria los residuos y apagaria CONVERGIDO sobre cuerdas sanas.
+    /**
+     * El estiramiento inarmonico del parcial `n`, en cents: `600·log2(1+B·n²)`.
+     *
+     * Es el modelo EXACTO y no su linealizacion `K·n²`. 🔴 LA RAZON NO ES LA QUE
+     * ESTE COMENTARIO DECIA, y la corrigio un mutante que sobrevivio. Decia que
+     * la lineal erra 0,11 cents "y apagaria CONVERGIDO sobre cuerdas sanas": es
+     * falso, porque esa cuenta compara los dos modelos al MISMO B, y dentro del
+     * ajuste B es libre y absorbe casi toda la diferencia. Medido, a −12 cents:
+     *
+     *     B        C exacto / σ         C lineal / σ
+     *     1e-04    -12,0000 / 0,00000   -11,9998 / 0,00007
+     *     1e-03    -12,0000 / 0,00000   -11,9823 / 0,00722
+     *
+     * La lectura de la lineal queda DENTRO del presupuesto. Lo que se rompe es σ:
+     * 0,0072 sobre una cuerda que el modelo describe perfectamente es error de
+     * MODELO disfrazado de discrepancia de MEDICION, 140x el del exacto. Y que σ
+     * signifique lo que dice es la entrega entera de esta etapa, asi que el
+     * modelo exacto se paga con un `log2` y se queda.
+     */
     static double stretchCents(double B, int n) noexcept {
         return 600.0 * std::log2(1.0 + B * static_cast<double>(n) * static_cast<double>(n));
     }

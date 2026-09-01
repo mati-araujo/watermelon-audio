@@ -154,6 +154,41 @@ TEST(ConvergenceHonesty, LaCuerdaInarmonicaRealSigueConvergiendo) {
     }
 }
 
+/**
+ * 🔴 σ TIENE QUE SER HONESTA EN LAS DOS DIRECCIONES, y este test existe porque un
+ * MUTANTE sobrevivio y me corrigio una justificacion equivocada.
+ *
+ * El modelo se ajusta con la forma EXACTA `600·log2(1+B·n²)`. Yo habia
+ * justificado eso diciendo que la linealizacion `K·n²` haria explotar los
+ * residuos y apagaria CONVERGIDO sobre cuerdas sanas. **Es falso**, y el mutante
+ * que cambiaba una por otra pasaba los cinco tests: dentro del ajuste B es libre
+ * y absorbe casi toda la diferencia. Medido, con la cuerda a −12 cents:
+ *
+ *     B        C exacto / σ        C lineal / σ
+ *     1e-04    -12,0000 / 0,00000  -11,9998 / 0,00007
+ *     1e-03    -12,0000 / 0,00000  -11,9823 / 0,00722
+ *
+ * O sea que la lectura de la linealizacion sigue DENTRO del presupuesto. Lo que
+ * NO sigue bien es σ: 0,0072 de σ sobre una cuerda que el modelo describe
+ * perfectamente es **error de modelo disfrazado de discrepancia de medicion**,
+ * 140x el del modelo exacto. Y la entrega de esta etapa es justamente que σ
+ * signifique lo que dice.
+ *
+ * Una σ que se infla sola es tan deshonesta como una que miente para abajo: la de
+ * abajo publica basura con cara de certeza, y la de arriba haria que el afinador
+ * se declare inseguro sobre una cuerda que midio perfecto.
+ */
+TEST(ConvergenceHonesty, LaSigmaNoSeInflaPorElModelo) {
+    for (double B : kBs) {
+        const auto buf = estereo(cuerda(kE2, B, -12.0));
+        float v[kSnapshotValueCount] = {};
+        ASSERT_TRUE(analyzeBuffer(buf.data(), kFrames, kRate, kE2, v));
+        EXPECT_LE(static_cast<double>(v[kSnapUncertainty]), 0.001)
+            << "B=" << B << ": la cuerda encaja EXACTO en el modelo, asi que sigma"
+            << " tiene que ser chica; salio " << v[kSnapUncertainty];
+    }
+}
+
 // ---------------------------------------------------------------------------
 // La lectura publicada es la del FUNDAMENTAL, no un promedio de parciales
 // ---------------------------------------------------------------------------
