@@ -89,8 +89,11 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
 
     double vals[kPartials];
     double sigmas[kPartials];
+    int orders[kPartials];      // el orden del parcial (1..4): lo pide el ajuste de S2
     int valid = 0;
+    int order = 0;
     for (const auto& p : mPartials) {
+        ++order;
         if (!p.hasMeasurement()) continue;
         const double sigma = p.uncertaintyCents();
         if (!(sigma > 0.0) || !std::isfinite(sigma)) continue;
@@ -116,6 +119,7 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         if (mDomainVerified && contradictsControl(p.cents(), coarse)) continue;
         vals[valid] = p.cents();
         sigmas[valid] = sigma;
+        orders[valid] = order;
         ++valid;
     }
 
@@ -187,11 +191,39 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
                 std::abs(vals[i] - median) > kMaxPartialDisagreementCents) continue;
             vals[kept] = vals[i];
             sigmas[kept] = sigmas[i];
+            orders[kept] = orders[i];
             ++kept;
         }
         valid = kept;
     }
 
+    mPartialsUsed = valid;
+
+    // --- REQ-027 S2: la serie ESTIRADA, que es lo que es una cuerda real -----
+    //
+    // Los cuatro parciales no miden la misma cantidad: el parcial n esta en
+    // `n·f0·√(1+B·n²)`, asi que discrepan POR FISICA. Promediarlos como si
+    // discreparan por ruido corre la lectura hacia los agudos —y encima el peso
+    // 1/σ² es MAYOR en los parciales altos, que son los mas estirados—. Se ajusta
+    // el modelo y se publica C, la desviacion del FUNDAMENTAL.
+    //
+    // σ sale de los RESIDUOS: es lo unico que mide cuanto NO explica el modelo, y
+    // por eso AC-027.5 sale estructural — un parcial que la serie estirada no
+    // puede explicar infla σ y apaga CONVERGIDO por el umbral que ya existia.
+    {
+        double fitC = 0.0;
+        double fitSigma = 0.0;
+        if (fitStretchedSeries(vals, orders, valid, &fitC, &fitSigma)) {
+            mCents = fitC;
+            mUncertaintyCents = fitSigma;
+            mHasMeasurement = true;
+            mSawDiscontinuity = false;   // ver la nota de REQ-009 S2 mas abajo
+            return true;
+        }
+    }
+
+    // Con k <= 2 no hay grados de libertad para una σ con sentido: se conserva la
+    // combinacion de siempre. Ver `kMinPartialsForStretchFit`.
     double sumWeights = 0.0;
     double sumWeighted = 0.0;
     for (int i = 0; i < valid; ++i) {
@@ -200,8 +232,6 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         sumWeights += w;
         sumWeighted += w * vals[i];
     }
-
-    mPartialsUsed = valid;
 
     if (sumWeights > 0.0) {
         mCents = sumWeighted / sumWeights;

@@ -125,6 +125,102 @@ public:
      */
     static constexpr double kMinBinToRmsRatio = 0.05;
 
+    /**
+     * REQ-027 S2 — CUANTOS PARCIALES HACEN FALTA PARA AJUSTAR `C` Y `B`.
+     *
+     * Tres, y el numero sale de los grados de libertad, no del gusto: el modelo
+     * tiene DOS parametros, asi que con dos puntos el ajuste es exacto, los
+     * residuos valen cero y σ seria arbitrariamente chica. Una σ confiada y falsa
+     * es exactamente lo que REQ-027 existe para sacar, asi que con k ≤ 2 se
+     * conserva la combinacion por inverso de la varianza de siempre.
+     *
+     * Medido: con k = 2 el ajuste recupera C exacto (−12,0000) pero su σ da NaN.
+     * Se prefiere el statu quo a un numero que no significa nada.
+     */
+    static constexpr int kMinPartialsForStretchFit = 3;
+
+    /// Techo de la busqueda de B. 5e-3 cubre con holgura el rango publicado de
+    /// cuerdas reales (~1e-5 nylon a ~5e-4 acero); `physicsB()` da 1,28e-5 para
+    /// la prima de una guitarra y 1,05e-4 para su bordona.
+    static constexpr double kMaxInharmonicityB = 5e-3;
+
+    /// Iteraciones de la busqueda por seccion aurea. FIJAS, para que el costo sea
+    /// acotado y la funcion siga siendo apta para el camino RT: 40 dejan el
+    /// intervalo en 5e-3·0,618⁴⁰ ≈ 4e-11, muy por debajo de lo que cualquier
+    /// medicion puede distinguir.
+    static constexpr int kStretchFitIterations = 40;
+
+    /// El estiramiento inarmonico del parcial `n`, en cents: `600·log2(1+B·n²)`.
+    /// Es el modelo EXACTO y no su linealizacion `K·n²` — a B = 1e-3 la lineal
+    /// erra 0,11 cents contra una σ de 1e-4, o sea que el desajuste de modelo
+    /// dominaria los residuos y apagaria CONVERGIDO sobre cuerdas sanas.
+    static double stretchCents(double B, int n) noexcept {
+        return 600.0 * std::log2(1.0 + B * static_cast<double>(n) * static_cast<double>(n));
+    }
+
+    /**
+     * Ajusta `cents_n = C + 600·log2(1+B·n²)` a los parciales admitidos.
+     *
+     * Para B fijo, C es lineal (es la media de los residuos), asi que alcanza con
+     * una busqueda 1-D acotada sobre B. Sin asignar, sin loguear, sin locks y con
+     * iteraciones fijas: apta para el camino RT.
+     *
+     * 🔴 EL AJUSTE ES NO PONDERADO, A PROPOSITO. Ponderar por 1/σ² dejaria que el
+     * parcial de σ mas chica domine, y la σ del estimador de fase es una
+     * PRECISION —cuan bien encaja una recta— y no una exactitud. Ponderar por
+     * ella es como la precision se vuelve a hacer pasar por exactitud, que es el
+     * defecto que este REQ arregla.
+     *
+     * @param outC       la desviacion del FUNDAMENTAL, en cents.
+     * @param outSigmaC  su incertidumbre, sacada de los RESIDUOS del ajuste.
+     * @return false si no hay grados de libertad para una σ con sentido.
+     */
+    static bool fitStretchedSeries(const double* cents, const int* orders, int k,
+                                   double* outC, double* outSigmaC) noexcept {
+        if (k < kMinPartialsForStretchFit) return false;
+
+        const auto sseFor = [&](double B, double* Cout) {
+            double sum = 0.0;
+            for (int i = 0; i < k; ++i) sum += cents[i] - stretchCents(B, orders[i]);
+            const double C = sum / static_cast<double>(k);
+            double sse = 0.0;
+            for (int i = 0; i < k; ++i) {
+                const double r = cents[i] - (C + stretchCents(B, orders[i]));
+                sse += r * r;
+            }
+            if (Cout != nullptr) *Cout = C;
+            return sse;
+        };
+
+        constexpr double kPhi = 0.6180339887498949;
+        double lo = 0.0;
+        double hi = kMaxInharmonicityB;
+        double b1 = hi - kPhi * (hi - lo);
+        double b2 = lo + kPhi * (hi - lo);
+        double f1 = sseFor(b1, nullptr);
+        double f2 = sseFor(b2, nullptr);
+        for (int it = 0; it < kStretchFitIterations; ++it) {
+            if (f1 < f2) {
+                hi = b2; b2 = b1; f2 = f1;
+                b1 = hi - kPhi * (hi - lo); f1 = sseFor(b1, nullptr);
+            } else {
+                lo = b1; b1 = b2; f1 = f2;
+                b2 = lo + kPhi * (hi - lo); f2 = sseFor(b2, nullptr);
+            }
+        }
+
+        double C = 0.0;
+        const double sse = sseFor(0.5 * (lo + hi), &C);
+        const int dof = k - 2;
+        if (dof <= 0 || !std::isfinite(sse) || !std::isfinite(C)) return false;
+
+        *outC = C;
+        // σ del intercepto a partir de los RESIDUOS. No se propaga la σ por
+        // parcial: ver la nota de arriba.
+        *outSigmaC = std::sqrt(sse / static_cast<double>(dof) / static_cast<double>(k));
+        return true;
+    }
+
     void prepare(int sampleRate);
 
     /**
