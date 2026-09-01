@@ -158,24 +158,6 @@ tasks.withType<Test>().configureEach {
     // carga— tiene que llegar al log del gate, no morir en el worker de test.
     testLogging { showStandardStreams = true }
 
-    // 🔴 REQ-024: el ÚNICO motivo de esto es poder ejercer
-    // `nativeLoadSoundFontFromFd(jint, jlong, jlong)`, que necesita un descriptor de
-    // archivo CRUDO. La JVM no expone ninguno: `FileDescriptor.fd` es un campo privado
-    // y desde JDK 9 el sistema de módulos lo cierra, así que sin esto la reflexión
-    // falla con `InaccessibleObjectException` (medido en el JDK 17 de esta máquina).
-    //
-    // Vale el costo porque esa función es el **primer cruce de parámetro `jlong`** que
-    // el arnés ejerce: hay 16 `external fun` con `Long` en la firma y la única cubierta
-    // era un `Long` de RETORNO. Un `Int` declarado donde el C++ espera `jlong` compila
-    // de los dos lados, linkea, pasa `check-jni-symbols.py` —que compara sólo NOMBRES—
-    // y corrompe memoria en el device. Es exactamente la clase de defecto que el arnés
-    // existe para agarrar.
-    //
-    // Acota a `java.io` y a los tests: no toca el artefacto publicado ni el runtime del
-    // device. Si un JDK futuro renombra ese campo, `SoundFontJniTest` lo dice con su
-    // propio mensaje en vez de saltear el caso en silencio.
-    jvmArgs("--add-opens=java.base/java.io=ALL-UNNAMED")
-
     // 🔴 UN PROCESO POR CLASE, y no es higiene decorativa.
     //
     // El motor nativo es un SINGLETON DE PROCESO: `g_wmaEngine` lo crea

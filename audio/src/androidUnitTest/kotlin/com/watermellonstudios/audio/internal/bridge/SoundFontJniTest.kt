@@ -3,8 +3,6 @@ package com.watermellonstudios.audio.internal.bridge
 import org.junit.AfterClass
 import org.junit.Before
 import java.io.File
-import java.io.FileDescriptor
-import java.io.RandomAccessFile
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -23,11 +21,10 @@ import kotlin.test.assertTrue
  * - **`jintArray` de vuelta ×2** (`NewIntArray` + `SetIntArrayRegion`): REQ-023 cubrió
  *   arrays de **entrada**; de **salida**, ninguno.
  * - **`jbyteArray` de entrada** y **`jstring` de entrada**.
- * - 🔴 **`nativeLoadSoundFontFromFd(jint, jlong, jlong)`** — el **primer cruce de
- *   parámetro `jlong`** que ejerce el arnés. Hay 16 funciones con `Long` en la firma y
- *   hasta hoy la única cubierta era un `Long` de **retorno**. Un `Int` declarado donde el
- *   C++ espera `jlong` compila de los dos lados, linkea, **pasa `check-jni-symbols.py`**
- *   —que compara sólo NOMBRES— y corrompe memoria en el device.
+ *
+ * 🔴 **`nativeLoadSoundFontFromFd` NO está acá, y su ausencia es deliberada** — ver
+ * *"Lo que este archivo NO cubre"* abajo. REQ-024 lo había incluido con dos
+ * justificaciones que **resultaron falsas**, y MINI-015 lo sacó.
  *
  * ## Por qué el grupo que se venía apuntando NO era éste
  *
@@ -48,6 +45,31 @@ import kotlin.test.assertTrue
  * el fixture y lo afirmara estaría midiendo la heurística contra sí misma. De ahí
  * `"Cello Uno"` → 36..84 y `"Violin Dos"` → 55..103: dos ramas distintas de esa función.
  *
+ * ## Lo que este archivo NO cubre, y por qué
+ *
+ * **`nativeLoadSoundFontFromFd(jint, jlong, jlong)` — hueco DECLARADO** (MINI-015). Estuvo acá
+ * y se sacó, porque las dos razones que lo justificaban **no se sostuvieron al verificarlas**:
+ *
+ * 1. *"el primer cruce de parámetro `jlong` del arnés"* — **falso**:
+ *    `nativeLooperSetTrackLoopRegion(jint, jlong, jlong)` ya estaba cubierta desde REQ-022. La
+ *    versión corregida —*el primero cuyo **valor** se afirma*, porque aquel test afirma el
+ *    no-op y los valores nunca vuelven— tampoco se paga: `wma_looper_arm_in_frames` devuelve
+ *    `getPlayFrame() + offset`, así que ese cruce se consigue **sin reflexión**.
+ * 2. *"el offset sin alinear no está cubierto de punta a punta"* — **falso**:
+ *    `core/tests/test_soundfont_load.cpp` (`LoadFromFdAppliesTheRateItIsGiven`) arma el archivo
+ *    con `prefixBytes=1234` —el mismo número— y hace un `mmap` real.
+ *
+ * Lo único que quedaba era **la firma**, que ningún gate ve (`check-jni-symbols.py` compara
+ * sólo NOMBRES) — pero eso vale para **cada una** de las que faltan, y el precio era que el
+ * arnés dependiera de un campo privado del JDK (`FileDescriptor.fd`) más un
+ * `--add-opens=java.base/java.io` permanente, por UNA función. La causa general —firmas sin
+ * verificar— es un REQ propio, no algo que se compre de a una.
+ *
+ * **`nativeSetSoundFontPreset`**: no tiene getter, así que sería cobertura write-only.
+ *
+ * **Las cinco de `sfNoteOn/Off/…`**: despachan a voces y no son observables sin render — el
+ * mismo muro que descartó arp.
+ *
  * 🔴 Verde acá NO significa "el SoundFont está probado": esto valida la **frontera**, no
  * que un preset suene. Ver el KDoc de [JniHarness].
  */
@@ -60,7 +82,6 @@ class SoundFontJniTest {
             "nativeStartTuner",
             "nativeLoadSoundFont",
             "nativeLoadSoundFontFromPath",
-            "nativeLoadSoundFontFromFd",
             "nativeUnloadSoundFont",
             "nativeIsSoundFontLoaded",
             "nativeGetSoundFontPresetCount",
@@ -195,30 +216,19 @@ class SoundFontJniTest {
     }
 
     /**
-     * AC-024.4 — los **otros dos** caminos de carga llegan al mismo estado observable.
+     * AC-024.4 — el camino del **path** llega al mismo estado observable que el de bytes.
      *
-     * ## El `fd`, que es lo más valioso de este archivo
+     * Es `GetStringUTFChars` del otro lado: una ruta que no sobrevive el cruce da un `false`
+     * silencioso, y con `getSoundFontPresetName(1)` se afirma que llegó **el mismo** SoundFont,
+     * no uno cualquiera.
      *
-     * `nativeLoadSoundFontFromFd(fd: Int, offset: Long, length: Long)` es el **primer
-     * cruce de parámetro `jlong`** que ejerce el arnés: hay 16 `external fun` con `Long`
-     * en la firma y la única cubierta hasta hoy era un `Long` de **retorno**. Un `Int`
-     * declarado donde el C++ espera `jlong` compila de los dos lados, linkea, **pasa
-     * `check-jni-symbols.py`** —que compara sólo NOMBRES— y corrompe memoria en el device.
-     *
-     * 🔴 **El offset es 1234 y NO está alineado a página, a propósito.** Es el caso real
-     * —un `.sf2` embebido como asset dentro de un APK— y el que destapó que un test de
-     * aritmética pura sobre `computeSoundFontMmapRegion` **no** cubre el uso de lo que
-     * calcula: perder el `dataDelta` al usar la región no lo detectaba. Con offset 0 este
-     * test pasaría con el delta roto.
-     *
-     * Y los dos `jlong` llevan valores **distintos** (1234 y el largo real): si el
-     * marshalling los corriera, el `offset` tomaría el largo y la carga fallaría.
+     * 🔴 **El camino del `fd` estaba acá y MINI-015 lo sacó** — ver *"Lo que este archivo NO
+     * cubre"* en el KDoc de la clase.
      */
     @Test
-    fun `cargar por path y por fd con offset no alineado llega al mismo estado`() {
+    fun `cargar por path llega al mismo estado que por bytes`() {
         val sf2 = MinimalSoundFont.bytes()
 
-        // --- por path (jstring de entrada) ---
         val sueltoTmp = File.createTempFile("watermelon-sf2-", ".sf2")
         sueltoTmp.deleteOnExit()
         sueltoTmp.writeBytes(sf2)
@@ -233,64 +243,6 @@ class SoundFontJniTest {
             MinimalSoundFont.PRESETS[1].nombre,
             jni("nativeGetSoundFontPresetName") { it.getSoundFontPresetName(1) },
             "por path el SEGUNDO preset tiene que estar igual que por bytes",
-        )
-
-        descargar()
-        assertFalse(estaCargado(), "no se descargó antes del tramo del fd")
-
-        // --- por fd, con la región corrida dentro de un archivo más grande ---
-        val relleno = 1234
-        val empotradoTmp = File.createTempFile("watermelon-sf2-empotrado-", ".bin")
-        empotradoTmp.deleteOnExit()
-        empotradoTmp.writeBytes(ByteArray(relleno) { 0x5A } + sf2 + ByteArray(77) { 0x5A })
-
-        RandomAccessFile(empotradoTmp, "r").use { raf ->
-            val fd = fdEntero(raf.fd)
-            assertTrue(
-                jni("nativeLoadSoundFontFromFd") {
-                    it.loadSoundFontFromFd(fd, relleno.toLong(), sf2.size.toLong())
-                },
-                "no cargó desde fd=${'$'}fd offset=${'$'}relleno largo=${'$'}{sf2.size}",
-            )
-        }
-
-        assertTrue(estaCargado(), "cargó por fd y isSoundFontLoaded dice que no")
-        assertEquals(MinimalSoundFont.PRESETS.size, cantidad(), "por fd el conteo tiene que ser el mismo")
-        assertEquals(
-            MinimalSoundFont.PRESETS[1].nombre,
-            jni("nativeGetSoundFontPresetName") { it.getSoundFontPresetName(1) },
-            "por fd el SEGUNDO preset tiene que estar igual que por bytes. Si esto falla con " +
-                "la carga en true, sospechá del dataDelta de la región mmapeada: el offset " +
-                "${'$'}relleno no está alineado a página",
-        )
-    }
-
-    /**
-     * El descriptor crudo que la JVM no expone.
-     *
-     * Necesita `--add-opens=java.base/java.io=ALL-UNNAMED`, que la task de test declara
-     * con su razón. **Falla ruidoso** si un JDK futuro renombra el campo: saltear el caso
-     * en silencio dejaría el único cruce de `jlong` del arnés sin ejercer, con el conteo
-     * igual de verde.
-     */
-    private fun fdEntero(fd: FileDescriptor): Int = try {
-        FileDescriptor::class.java.getDeclaredField("fd").let { campo ->
-            campo.isAccessible = true
-            campo.getInt(fd)
-        }
-    } catch (e: ReflectiveOperationException) {
-        throw AssertionError(
-            "no pude sacar el descriptor crudo de FileDescriptor: ${'$'}e. Sin él, " +
-                "nativeLoadSoundFontFromFd —el único cruce de parámetro jlong del arnés— " +
-                "queda sin ejercer. Revisá que la task de test siga pasando " +
-                "--add-opens=java.base/java.io=ALL-UNNAMED.",
-            e,
-        )
-    } catch (e: RuntimeException) {
-        throw AssertionError(
-            "el módulo java.base no abrió java.io: ${'$'}e. La task de test tiene que pasar " +
-                "--add-opens=java.base/java.io=ALL-UNNAMED.",
-            e,
         )
     }
 }
