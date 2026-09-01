@@ -140,6 +140,30 @@ public:
      */
     double uncertaintyCents() const noexcept { return mUncertaintyCents; }
 
+    /**
+     * REQ-027 — CUANTA DE LA ENERGIA DE LA VENTANA ESTA DE VERDAD EN ESTE BIN.
+     *
+     * Magnitud del fasor de Goertzel (normalizada a amplitud) dividida por el RMS
+     * de la ventana. Un seno puro exacto en el objetivo da **√2 ≈ 1,414**; un bin
+     * que solo ve la FUGA de otro parcial da entre 1e-06 y 3e-02.
+     *
+     * 🔴 EXISTE PORQUE σ NO PUEDE CONTESTAR ESTA PREGUNTA. Un bin sin señal
+     * propia integra la fuga espectral del vecino, que avanza de fase suave: da
+     * un ajuste lineal bueno, o sea σ CHICA, o sea una lectura confiadamente
+     * equivocada. Medido sobre tono puro en E2, ese parcial publicaba +38,70
+     * cents con σ = 0,0028 y estado CONVERGIDO. `uncertaintyCents()` dice **que
+     * tan bien encaja una recta**; esto dice **si habia algo que medir**.
+     *
+     * Es del ULTIMO ventaneo cerrado, igual que `cents()`. Vale 0 mientras no
+     * haya cerrado ninguno.
+     *
+     * El nombre es deliberadamente largo y especifico: un `magnitude()` o un
+     * `level()` mas en el arbol vuelve ambigua alguna llamada del walker de
+     * `check-rt-safety.py` y le apaga cobertura con el lint en verde — paso dos
+     * veces el 2026-08-19.
+     */
+    double goertzelBinToRmsRatio() const noexcept { return mBinToRmsRatio; }
+
     /// Angulo de fase acumulado, radianes, envuelto a ±π. Lo consume S6 para
     /// el disco: se publica ya integrado para que la app no tenga que hacerlo
     /// —un frame perdido le correria la fase para siempre.
@@ -214,6 +238,8 @@ private:
 
     double mCents{0.0};
     double mUncertaintyCents{0.0};
+    /// Ver `goertzelBinToRmsRatio()`. Se recalcula en cada `closeWindow()`.
+    double mBinToRmsRatio{0.0};
     double mWrappedPhase{0.0};
     bool mHasSignal{false};
     bool mHasMeasurement{false};

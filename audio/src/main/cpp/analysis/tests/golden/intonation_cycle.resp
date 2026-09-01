@@ -2,7 +2,7 @@
 # sampleRate=48000  window=0  rows=4
 # El signo es el del afinador: senal por encima del objetivo = POSITIVO.
 # caso	objetivoHz	diferenciaCents	armonicoCents
-guitarra E2	164.81	3.000003	-1.000003
+guitarra E2	164.81	3.000006	-1.000005
 guitarra A2	220.00	3.000000	0.500000
 guitarra E4	659.26	1.500000	-2.000000
-bajo E1	82.41	4.000048	0.999995
+bajo E1	82.41	4.000067	1.000002

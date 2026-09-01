@@ -73,7 +73,8 @@ inline std::vector<float> pureSine(double hz, int sampleRate, int numFrames,
  */
 inline std::vector<float> partialsWithAmplitudes(double f0, double B,
                                                  const std::vector<double>& amps,
-                                                 int sampleRate, int numFrames) {
+                                                 int sampleRate, int numFrames,
+                                                 double phase0 = 0.0) {
     std::vector<float> out(static_cast<size_t>(numFrames), 0.0f);
     for (size_t k = 0; k < amps.size(); ++k) {
         const int n = static_cast<int>(k) + 1;
@@ -82,7 +83,10 @@ inline std::vector<float> partialsWithAmplitudes(double f0, double B,
         const double a = amps[k];
         if (a == 0.0) continue;
         const double dp = 2.0 * M_PI * fn / static_cast<double>(sampleRate);
-        double p = 0.0;
+        // El parcial n arranca en n·phase0: es lo que produce CORRER EL ORIGEN DE
+        // TIEMPO de la señal entera, que es la eleccion arbitraria de quien graba.
+        // REQ-027 se hizo visible sobre este eje, asi que el generador lo tiene.
+        double p = phase0 * static_cast<double>(n);
         for (int i = 0; i < numFrames; ++i) {
             out[static_cast<size_t>(i)] += static_cast<float>(a * std::sin(p));
             p += dp;
@@ -115,11 +119,69 @@ inline std::vector<float> stringWithWeakFundamental(double f0, double B, int num
  */
 inline std::vector<float> inharmonicString(double f0, double B, int numPartials,
                                            int sampleRate, int numFrames,
-                                           double amp = 0.5) {
+                                           double amp = 0.5, double phase0 = 0.0) {
     std::vector<double> amps;
     amps.reserve(static_cast<size_t>(numPartials));
     for (int n = 1; n <= numPartials; ++n) amps.push_back(amp / n);
-    return partialsWithAmplitudes(f0, B, amps, sampleRate, numFrames);
+    return partialsWithAmplitudes(f0, B, amps, sampleRate, numFrames, phase0);
+}
+
+/**
+ * REQ-027 S3 — cuerda que DECAE con los agudos apagandose ANTES (`tau_n = tau/n`).
+ *
+ * 🔴 `applyDecay` NO sirve para esto, y la diferencia es el test entero: aplica el
+ * mismo decaimiento a toda la señal, asi que las amplitudes RELATIVAS de los
+ * parciales no cambian nunca. Una cuerda real no hace eso — los parciales altos
+ * se apagan primero — y por lo tanto `applyDecay` no puede ejercer el caso donde
+ * el piso de energia de REQ-027 descartaria un parcial legitimo por debil.
+ *
+ * Es el INSTRUMENTO del criterio de muerte de REQ-027.
+ */
+inline std::vector<float> decayingString(double f0, double B, int numPartials,
+                                         int sampleRate, int numFrames,
+                                         double tauFundamental, double amp = 0.5) {
+    std::vector<float> out(static_cast<size_t>(numFrames), 0.0f);
+    for (int n = 1; n <= numPartials; ++n) {
+        const double fn = n * f0 * std::sqrt(1.0 + B * n * n);
+        if (fn >= 0.5 * sampleRate) break;
+        const double tau = tauFundamental / static_cast<double>(n);
+        const double dp = 2.0 * M_PI * fn / static_cast<double>(sampleRate);
+        double ph = 0.0;
+        for (int i = 0; i < numFrames; ++i) {
+            const double t = static_cast<double>(i) / sampleRate;
+            out[static_cast<size_t>(i)] +=
+                static_cast<float>((amp / n) * std::exp(-t / tau) * std::sin(ph));
+            ph += dp;
+            if (ph >= 2.0 * M_PI) ph -= 2.0 * M_PI;
+        }
+    }
+    return out;
+}
+
+/// Una cuerda del catalogo de instrumentos de S3.
+struct CatalogString { const char* name; double hz; };
+
+/**
+ * Las 14 cuerdas del catalogo, en afinacion estandar. Valores de TABLA PUBLICADA,
+ * no calculados con la formula de la implementacion: un test que computa lo
+ * esperado con el mismo codigo que prueba, prueba que el codigo es igual a si
+ * mismo.
+ *
+ * Vive ACA y no dentro de un test porque la usan varios (REQ-027 S3). Una tabla
+ * duplicada entre archivos es una que se desincroniza.
+ */
+inline const std::vector<CatalogString>& catalogStrings() {
+    static const std::vector<CatalogString> kStrings = {
+        // Guitarra estandar
+        {"guitarra E2", 82.407}, {"guitarra A2", 110.000}, {"guitarra D3", 146.832},
+        {"guitarra G3", 195.998}, {"guitarra B3", 246.942}, {"guitarra E4", 329.628},
+        // Bajo de 5 cuerdas — el B0 es el caso que justifica todo el diseño
+        {"bajo B0", 30.868}, {"bajo E1", 41.203}, {"bajo A1", 55.000},
+        {"bajo D2", 73.416}, {"bajo G2", 97.999},
+        // Ukelele (reentrante) — la cuerda mas aguda del catalogo
+        {"ukelele G4", 391.995}, {"ukelele C4", 261.626}, {"ukelele A4", 440.000},
+    };
+    return kStrings;
 }
 
 /// Decaimiento exponencial en el lugar, con `tau` en segundos. Modela que una

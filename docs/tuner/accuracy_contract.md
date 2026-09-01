@@ -36,8 +36,8 @@ es la clase de mentira que un usuario con un Peterson al lado descubre en treint
 
 | Modo | Métrica | Medido | Presupuesto |
 |---|---|---|---|
-| **Strobe** (S6) | error contra objetivo, 3 s, peor de 14 cuerdas, **dentro del rango útil** | **0,0011 cents** | 0,1 |
-| **Strobe** | incertidumbre (1σ) a 3 s, peor caso (B0 del bajo) | **0,0045 cents** | — |
+| **Strobe** (S6) | error contra objetivo, 3 s, peor de 14 cuerdas, **dentro del rango útil** | **0,00095 cents** | 0,1 |
+| **Strobe** | incertidumbre (1σ) a 3 s, peor caso (B0 del bajo) | **0,0017 cents** | — |
 | **Detección gruesa** (S4) | error de identificación, peor caso (C7) | **0,21 cents** | 50 |
 | **Detección gruesa** | claridad mínima sobre el rango A0–C7 | **0,967** | — |
 | **Modo rápido** (S5) | saltos de cuerda durante un barrido desde floja | **0** | 0 |
@@ -48,6 +48,35 @@ es la clase de mentira que un usuario con un Peterson al lado descubre en treint
 | **Inarmonicidad** | corrección perceptual máxima del catálogo | **2,47 cents** | 35 (techo) |
 
 **Rango soportado:** A0 (27,5 Hz) a C7 (2093 Hz), medido por los dos extremos.
+
+### 🔴 La condición de RIQUEZA ARMÓNICA, que hasta REQ-027 estaba implícita
+
+Las cifras del strobe se miden sobre una señal de **cuatro parciales**. Eso NO era una elección
+consciente: era simplemente lo que generaban los ocho tests de extremo a extremo
+(`for (int n = 1; n <= 4; ++n)`), y esa uniformidad escondió un defecto durante toda la vida del
+motor. Sobre `2.14.0`, con señal pobre en armónicos y afinada EXACTO, el motor publicaba hasta
+**38,70 cents con estado `CONVERGIDO`** — cuatro órdenes de magnitud fuera de esta tabla.
+
+Desde REQ-027 el contrato vale para **cualquier riqueza armónica de 1 a 4 parciales**, y hay tests
+que lo afirman por separado en `test_partial_admission.cpp`. Las dos defensas que lo sostienen:
+
+- un parcial **sin energía en su bin** no entra en la combinación (integraba fuga espectral, que da
+  una rampa de fase lineal, o sea σ chica y una lectura confiadamente equivocada);
+- el arbitraje por signo tiene **zona muerta**, así que con la cuerda bien afinada el fundamental
+  —a veces el único parcial con energía— no se descarta por un empate técnico entre dos números que
+  valen cero.
+
+### Qué significa la incertidumbre publicada (cambió en REQ-027)
+
+σ ya **no** se propaga de las σ por parcial: sale de los **residuos** del ajuste
+`cents_n = C + 600·log2(1+B·n²)`. La distinción no es cosmética. La σ del estimador de fase es una
+**precisión** (1e-7 a 1e-4 cents) —cuán bien encaja una recta— y no una **exactitud**. Publicar la
+propagada era decir 0,003 al lado de un error de 38,7.
+
+Como efecto, la lectura publicada es **C, la desviación del FUNDAMENTAL**, y no un promedio
+ponderado de los cuatro parciales. En una cuerda real e inarmónica esos parciales discrepan por
+física —con B = 1e-3 leen 0,865 / 3,455 / 7,756 / 13,740 cents— y el peso 1/σ² era MAYOR en los
+altos, o sea en los más estirados.
 
 **Rango útil de la lectura fina (REQ-003).** El strobe no mide cualquier desajuste: el
 desenvuelto de fase acota la captura a `|Δf| < fs/(2N)`, así que el rango **depende del objetivo
@@ -154,8 +183,8 @@ una que sí — la misma regla que gobierna `regen-golden.sh` y la atestación d
 
 <!-- CONTRACT-DATA — lo lee el test de auto-verificación. NO editar a mano sin recapturar
      los golden: el test compara estos valores contra ellos y falla si divergen.
-strobe_worst_error_cents = 0.001092
-strobe_worst_sigma_cents = 0.004472
+strobe_worst_error_cents = 0.000954
+strobe_worst_sigma_cents = 0.001651
 coarse_worst_error_cents = 0.2124
 coarse_min_clarity = 0.967426
 fast_mode_sweep_switches = 0

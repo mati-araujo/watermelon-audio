@@ -89,6 +89,176 @@ public:
      */
     static constexpr double kMaxPartialDisagreementCents = 50.0;
 
+    /**
+     * REQ-027 — EL PISO DE ADMISION POR ENERGIA DEL BIN.
+     *
+     * Un parcial cuyo bin no tiene señal propia integra la FUGA espectral del
+     * vecino. La fuga avanza de fase suave, asi que da un ajuste lineal bueno, o
+     * sea σ chica: sale CONVERGIDA y equivocada. El filtro de mediana no la
+     * agarra — con tono puro exacto en E2 queda a 41,96 cents de la mediana
+     * contra un umbral de 50, o sea el 83,9 % del margen, y pasa.
+     *
+     * DE DONDE SALE EL NUMERO. `|bin|/rms` de un parcial CON energia va de 0,296
+     * (el cuarto de una cuerda 1/n) a 1,414 (seno puro). La fuga llega a
+     * **2,63e-02** en el peor caso del catalogo, que es B0 (30,87 Hz) a 48 kHz:
+     * ahi el bin del segundo parcial esta a solo 2,63 bins del fundamental,
+     * contra 7,65 bins en E2 a 44,1 kHz. 0,05 deja 1,9x sobre esa fuga y 5,9x por
+     * debajo del parcial legitimo mas debil.
+     *
+     * 🔴 EL PRIMER VALOR CONSIDERADO FUE 0,02, y estaba MAL por medir la muestra
+     * equivocada: sobre las seis cuerdas de guitarra la peor fuga es 9,04e-04 y
+     * el margen parecia de 327x. B0 a 48 kHz lo pasa por arriba, o sea que 0,02
+     * habria dejado el defecto intacto justo en la cuerda mas grave. El margen
+     * real del catalogo es **11,3x**, y se aprieta a ~3,4x con caida armonica
+     * 1/n² — que es lo que vigila el criterio de muerte de REQ-027.
+     *
+     * 🔴 HUBO UN SEGUNDO PISO, RELATIVO AL PARCIAL MAS FUERTE, Y SE FUE POR
+     * MUTACION. Se lo justificaba diciendo que "sigue a la señal cuando el nivel
+     * baja, para que un decaimiento no descarte parciales de a uno". El
+     * razonamiento estaba **al reves**: los dos pisos se combinaban con AND, asi
+     * que el relativo solo podia descartar MAS, nunca sostener a un parcial
+     * debil — o sea que empeoraba exactamente el caso que decia proteger. Y su
+     * mutante (ponerlo en 0) sobrevivia con la suite entera en verde. Una defensa
+     * que ningun mutante mata y cuyo argumento apunta para el otro lado es una
+     * linea que el proximo va a creer load-bearing. Si el corpus que decae de S3
+     * pide algo asi, vuelve CON el test que mata a su mutante.
+     */
+    static constexpr double kMinBinToRmsRatio = 0.05;
+
+    /**
+     * REQ-027 S2 — CUANTOS PARCIALES HACEN FALTA PARA AJUSTAR `C` Y `B`.
+     *
+     * Tres, y el numero sale de los grados de libertad, no del gusto: el modelo
+     * tiene DOS parametros, asi que con dos puntos el ajuste es exacto, los
+     * residuos valen cero y σ seria arbitrariamente chica. Una σ confiada y falsa
+     * es exactamente lo que REQ-027 existe para sacar, asi que con k ≤ 2 se
+     * conserva la combinacion por inverso de la varianza de siempre.
+     *
+     * 🔴 BAJO DE 3 A 2 EN S3, Y LO PIDIO UNA MEDICION. Con k = 2 y B = 1e-4 la
+     * media ponderada publica **0,13 a 0,15 cents** de error sobre las 14 cuerdas
+     * del catalogo y los dos rates —40 % por encima del presupuesto— porque el
+     * peso 1/σ² es mayor en el parcial 2, que es el mas estirado. El ajuste
+     * recupera C exacto ahi. Con dos puntos no hay residuos con que estimar σ, asi
+     * que se propaga y se declara: ver la rama `dof == 0` de `fitStretchedSeries`.
+     */
+    static constexpr int kMinPartialsForStretchFit = 2;
+
+    /// Techo de la busqueda de B. 5e-3 cubre con holgura el rango publicado de
+    /// cuerdas reales (~1e-5 nylon a ~5e-4 acero); `physicsB()` da 1,28e-5 para
+    /// la prima de una guitarra y 1,05e-4 para su bordona.
+    static constexpr double kMaxInharmonicityB = 5e-3;
+
+    /// Iteraciones de la busqueda por seccion aurea. FIJAS, para que el costo sea
+    /// acotado y la funcion siga siendo apta para el camino RT: 40 dejan el
+    /// intervalo en 5e-3·0,618⁴⁰ ≈ 4e-11, muy por debajo de lo que cualquier
+    /// medicion puede distinguir.
+    static constexpr int kStretchFitIterations = 40;
+
+    /**
+     * El estiramiento inarmonico del parcial `n`, en cents: `600·log2(1+B·n²)`.
+     *
+     * Es el modelo EXACTO y no su linealizacion `K·n²`. 🔴 LA RAZON NO ES LA QUE
+     * ESTE COMENTARIO DECIA, y la corrigio un mutante que sobrevivio. Decia que
+     * la lineal erra 0,11 cents "y apagaria CONVERGIDO sobre cuerdas sanas": es
+     * falso, porque esa cuenta compara los dos modelos al MISMO B, y dentro del
+     * ajuste B es libre y absorbe casi toda la diferencia. Medido, a −12 cents:
+     *
+     *     B        C exacto / σ         C lineal / σ
+     *     1e-04    -12,0000 / 0,00000   -11,9998 / 0,00007
+     *     1e-03    -12,0000 / 0,00000   -11,9823 / 0,00722
+     *
+     * La lectura de la lineal queda DENTRO del presupuesto. Lo que se rompe es σ:
+     * 0,0072 sobre una cuerda que el modelo describe perfectamente es error de
+     * MODELO disfrazado de discrepancia de MEDICION, 140x el del exacto. Y que σ
+     * signifique lo que dice es la entrega entera de esta etapa, asi que el
+     * modelo exacto se paga con un `log2` y se queda.
+     */
+    static double stretchCents(double B, int n) noexcept {
+        return 600.0 * std::log2(1.0 + B * static_cast<double>(n) * static_cast<double>(n));
+    }
+
+    /**
+     * Ajusta `cents_n = C + 600·log2(1+B·n²)` a los parciales admitidos.
+     *
+     * Para B fijo, C es lineal (es la media de los residuos), asi que alcanza con
+     * una busqueda 1-D acotada sobre B. Sin asignar, sin loguear, sin locks y con
+     * iteraciones fijas: apta para el camino RT.
+     *
+     * 🔴 EL AJUSTE ES NO PONDERADO, A PROPOSITO. Ponderar por 1/σ² dejaria que el
+     * parcial de σ mas chica domine, y la σ del estimador de fase es una
+     * PRECISION —cuan bien encaja una recta— y no una exactitud. Ponderar por
+     * ella es como la precision se vuelve a hacer pasar por exactitud, que es el
+     * defecto que este REQ arregla.
+     *
+     * @param outC       la desviacion del FUNDAMENTAL, en cents.
+     * @param outSigmaC  su incertidumbre, sacada de los RESIDUOS del ajuste.
+     * @return false si no hay grados de libertad para una σ con sentido.
+     */
+    static bool fitStretchedSeries(const double* cents, const double* sigmas,
+                                   const int* orders, int k,
+                                   double* outC, double* outSigmaC) noexcept {
+        if (k < kMinPartialsForStretchFit) return false;
+
+        const auto sseFor = [&](double B, double* Cout) {
+            double sum = 0.0;
+            for (int i = 0; i < k; ++i) sum += cents[i] - stretchCents(B, orders[i]);
+            const double C = sum / static_cast<double>(k);
+            double sse = 0.0;
+            for (int i = 0; i < k; ++i) {
+                const double r = cents[i] - (C + stretchCents(B, orders[i]));
+                sse += r * r;
+            }
+            if (Cout != nullptr) *Cout = C;
+            return sse;
+        };
+
+        constexpr double kPhi = 0.6180339887498949;
+        double lo = 0.0;
+        double hi = kMaxInharmonicityB;
+        double b1 = hi - kPhi * (hi - lo);
+        double b2 = lo + kPhi * (hi - lo);
+        double f1 = sseFor(b1, nullptr);
+        double f2 = sseFor(b2, nullptr);
+        for (int it = 0; it < kStretchFitIterations; ++it) {
+            if (f1 < f2) {
+                hi = b2; b2 = b1; f2 = f1;
+                b1 = hi - kPhi * (hi - lo); f1 = sseFor(b1, nullptr);
+            } else {
+                lo = b1; b1 = b2; f1 = f2;
+                b2 = lo + kPhi * (hi - lo); f2 = sseFor(b2, nullptr);
+            }
+        }
+
+        double C = 0.0;
+        const double sse = sseFor(0.5 * (lo + hi), &C);
+        const int dof = k - 2;
+        if (!std::isfinite(sse) || !std::isfinite(C)) return false;
+
+        *outC = C;
+        if (dof > 0) {
+            // σ del intercepto a partir de los RESIDUOS. No se propaga la σ por
+            // parcial: ver la nota de arriba.
+            *outSigmaC = std::sqrt(sse / static_cast<double>(dof) / static_cast<double>(k));
+        } else {
+            // k == 2: el sistema esta EXACTAMENTE determinado, los residuos son
+            // cero y no hay con que estimar dispersion. Se PROPAGA, y se dice que
+            // se propago.
+            //
+            // 🔴 Esa σ es optimista, y aun asi la rama existe porque es
+            // ESTRICTAMENTE MEJOR que la alternativa. Sin ajuste, con dos
+            // parciales de una cuerda inarmonica, la media ponderada por 1/σ² se
+            // va hacia el parcial 2 —el mas estirado, y encima el de σ mas chica—
+            // y publica ~0,14 cents de error sobre TODO el catalogo, con la misma
+            // σ minuscula. O sea: hoy el numero esta MAL y σ es optimista;
+            // ajustando, el numero esta BIEN y σ es igual de optimista. No se
+            // pierde honestidad, se gana exactitud.
+            double acc = 0.0;
+            for (int i = 0; i < k; ++i) acc += sigmas[i] * sigmas[i];
+            *outSigmaC = std::sqrt(acc);
+        }
+        return true;
+    }
+
     void prepare(int sampleRate);
 
     /**
@@ -230,10 +400,42 @@ public:
      * remocion no cambia un solo numero no es una defensa: es una linea que la
      * proxima persona va a creer load-bearing. Se fue.
      *
-     * Lo que queda declarado como riesgo residual, sin dueño: si ALGUNA vez los
-     * cuatro parciales discrepan a la vez con un control cerca de cero, la
-     * lectura se apagaria en "afinado". No se observo en 42 escenarios.
+     * 🔴 LA ZONA MUERTA VOLVIO EN REQ-027, Y EL RIESGO RESIDUAL DE ARRIBA ES
+     * EXACTAMENTE LO QUE PASO — PEOR DE LO DECLARADO.
+     *
+     * Este bloque declaraba: *"si ALGUNA vez los cuatro parciales discrepan a la
+     * vez con un control cerca de cero, la lectura se apagaria en afinado. No se
+     * observo en 42 escenarios."* Se observo. Y no se apago: publico **+38,70
+     * cents con estado CONVERGIDO** sobre una cuerda afinada EXACTA.
+     *
+     * Las dos mitades del razonamiento viejo eran ciertas por separado y falsas
+     * juntas:
+     *
+     *   · *"cerca de afinado el signo es ruido"* — cierto, y es la causa. A 0,00
+     *     cents el control informa −0,0121 y la lectura fina +0,0001: signos
+     *     opuestos, o sea que el fundamental se descarta JUSTO cuando la cuerda
+     *     esta bien. Es un empate tecnico entre dos numeros que valen cero.
+     *
+     *   · *"los otros parciales sostienen la lectura igual"* — esto es lo que se
+     *     cayo. Se midio sobre 42 escenarios que TODOS tenian cuatro parciales
+     *     con energia, que es el mismo punto ciego que tenia el corpus de tests
+     *     entero (los ocho tests de extremo a extremo generaban el estimulo con
+     *     `for (int n = 1; n <= 4; ++n)`). Con un tono puro **no hay otros
+     *     parciales que sostengan nada**: los otros tres son fuga espectral, y
+     *     lo que "sostenia" la lectura era justamente la basura.
+     *
+     * O sea que "sacarla no cambia un solo numero" era verdad **en la muestra
+     * medida**, y la muestra no contenia el caso. La leccion no es que la zona
+     * muerta sea sagrada: es que su remocion se valido contra un corpus que no
+     * podia refutarla.
+     *
+     * EL UMBRAL SALE DE LA RESOLUCION DEL CONTROL, no de un numero redondo: la
+     * deteccion gruesa mide 0,21 cents en el peor caso sobre A0-C7, asi que por
+     * debajo de ~5x eso su SIGNO no transporta informacion. Arbitrar con el
+     * seria arbitrar con ruido.
      */
+    static constexpr double kSignArbitrationDeadZoneCents = 1.0;
+
     static bool contradictsControl(double partialCents, double coarse) noexcept {
         // SIN CONTROL NO SE ARBITRA, y esto se chequea ACA y no solo en el
         // llamador. Con `coarse` NaN la comparacion de abajo no falla: `NaN > 0`
@@ -243,6 +445,10 @@ public:
         // `setCoarseFrequencyHz`. Una funcion que puede recibir NaN se defiende
         // sola en vez de confiar en que el llamador se acuerde.
         if (!std::isfinite(coarse)) return false;
+        // ZONA MUERTA: con cualquiera de las dos magnitudes por debajo del piso,
+        // el signo es un empate tecnico y no una contradiccion. Ver arriba.
+        if (std::fabs(coarse) < kSignArbitrationDeadZoneCents) return false;
+        if (std::fabs(partialCents) < kSignArbitrationDeadZoneCents) return false;
         return (partialCents > 0.0) != (coarse > 0.0);
     }
 

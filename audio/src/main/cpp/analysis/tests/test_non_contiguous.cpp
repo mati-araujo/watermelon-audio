@@ -161,19 +161,36 @@ TEST(NonContiguousAudio, SustainedGapsProduceAPlausibleButWrongReading) {
         << "  Si no, este test dejo de reproducir la falla que existe para congelar, y "
         << "cualquier freno que se apoye en el es decorativo.";
 
-    // ---- 3 · y sigma NO lo ve -------------------------------------------
-    // El hallazgo mayor de esta familia, y la razon por la que bajar un umbral no arregla
-    // nada: la incertidumbre publicada no crece con el error. El motor mide MAL y dice que
-    // midio BIEN, con la misma cara que cuando mide bien de verdad.
-    EXPECT_LT(gapped.sigma, kBudgetCents)
-        << "sigma SI vio la discontinuidad (sigma = " << gapped.sigma << " con un error de "
-        << error << " cents).\n"
-        << "  🔴 Si esto se puso rojo, lo mas probable es que REQ-009 haya arreglado el "
-        << "estimador de incertidumbre — que es exactamente lo que se queria.\n"
-        << "  La salida entonces es ACTUALIZAR este trinquete desde REQ-009, no borrarlo: "
-        << "es bidireccional a proposito, igual que rate-invariance-baseline.txt, y avisa "
-        << "tanto si aparece deuda nueva como si una entrada declarada deja de reproducirse.";
-    EXPECT_TRUE(gapped.converged)
-        << "el motor dejo de declarar CONVERGIDA una lectura equivocada. Misma lectura que "
-        << "el EXPECT anterior: ver REQ-009 antes de tocar este test.";
+    // ---- 3 · y sigma SI lo ve, desde REQ-027 ----------------------------
+    //
+    // 🔴 ESTA MITAD ESTABA AL REVES HASTA EL 2026-09-01, y darla vuelta es una
+    // BUENA noticia que hay que dejar congelada en la direccion nueva.
+    //
+    // Decia: "sigma NO lo ve — el motor mide MAL y dice que midio BIEN, con la
+    // misma cara que cuando mide bien de verdad". Era cierto mientras σ se
+    // PROPAGABA de las σ por parcial, que son una PRECISION (cuan bien encaja una
+    // recta) y no una exactitud.
+    //
+    // REQ-027 S2 la cambio por la σ de los RESIDUOS del ajuste
+    // `cents_n = C + 600·log2(1+B·n²)`, y eso arreglo esto de rebote: un hueco
+    // sostenido rompe la coherencia entre parciales, los residuos crecen y σ sube.
+    // Medido con huecos de 64 frames: **σ = 0,341 con un error de 1,359 cents**,
+    // contra un presupuesto de 0,1. El motor ya no dice que midio bien.
+    //
+    // ⚠️ LO QUE **NO** SE ARREGLO, Y POR ESO LA MITAD 2 SIGUE EN PIE: la lectura
+    // SIGUE SIENDO MALA (1,36 cents de error). REQ-027 no hizo al estimador
+    // robusto a la discontinuidad — lo hizo HONESTO sobre ella. La deuda del eje C
+    // sigue abierta y es de REQ-009; lo que se cerro es que saliera disfrazada de
+    // medicion buena.
+    EXPECT_GT(gapped.sigma, kBudgetCents)
+        << "sigma dejo de ver la discontinuidad (sigma = " << gapped.sigma
+        << " con un error de " << error << " cents).\n"
+        << "  🔴 Esto es una REGRESION de REQ-027: la σ volvio a ser una precision "
+        << "propagada en vez del residuo del ajuste, y el motor volvio a publicar "
+        << "una lectura mala con cara de buena.\n"
+        << "  El trinquete es bidireccional: avisa tanto si aparece deuda nueva "
+        << "como si una mejora declarada deja de reproducirse.";
+    EXPECT_FALSE(gapped.converged)
+        << "el motor volvio a declarar CONVERGIDA una lectura equivocada (error "
+        << error << " cents). Misma causa que el EXPECT anterior: ver REQ-027 S2.";
 }
