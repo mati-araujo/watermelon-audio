@@ -7,6 +7,7 @@ import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import com.watermellonstudios.audio.api.EffectParameterUpdate
 import com.watermellonstudios.audio.api.EffectChainSnapshot
 import com.watermellonstudios.audio.domain.effect.EffectType
+import com.watermellonstudios.audio.domain.engine.EngineParameterDef
 import com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
 
 /**
@@ -101,6 +102,9 @@ internal class FakeAudioNativeBridge(
     override fun setEngineType(type: Int) { notModeled("setEngineType") }
     override fun setEngineParameter(paramId: Int,  value: Float) { notModeled("setEngineParameter") }
     override fun getEngineType(): Int = notModeled("getEngineType")
+    override fun getEngineParameterCount(engineType: Int): Int = notModeled("getEngineParameterCount")
+    override fun getEngineParameterDef(engineType: Int, paramIndex: Int): EngineParameterDef? =
+        notModeled("getEngineParameterDef")
     override fun setBpm(bpm: Float) { notModeled("setBpm") }
     override fun getBpm(): Float = notModeled("getBpm")
     override fun setModulatorType(type: Int) { notModeled("setModulatorType") }

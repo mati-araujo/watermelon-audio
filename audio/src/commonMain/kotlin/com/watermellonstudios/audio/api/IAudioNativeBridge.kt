@@ -1,5 +1,7 @@
 package com.watermellonstudios.audio.api
 
+import com.watermellonstudios.audio.domain.engine.EngineParameterDef
+
 /**
  * Platform-agnostic interface for the native audio bridge.
  *
@@ -105,6 +107,31 @@ interface IAudioNativeBridge :
     fun setEngineType(type: Int)
     fun setEngineParameter(paramId: Int, value: Float)
     fun getEngineType(): Int
+
+    /**
+     * Cuántos parámetros expone el engine `engineType`, o **0** si ese tipo no es un
+     * synth engine (CLASSIC usa los osciladores legacy) o no existe.
+     *
+     * NO hace falta que `engineType` sea el engine activo, ni que el motor esté
+     * arrancado: una UI construye los controles de todos los engines antes de que el
+     * usuario elija uno.
+     */
+    fun getEngineParameterCount(engineType: Int): Int
+
+    /**
+     * Metadata del parámetro `paramIndex` del engine `engineType`, o **`null`** si
+     * cualquiera de los dos está fuera de rango.
+     *
+     * 🔴 El rechazo llega como `null`, nunca como un def relleno. El motor tiene
+     * internamente un centinela `("Unknown", "?", …)` para un índice inválido y la C API
+     * **no lo propaga**: una tupla bien formada no se puede distinguir de una medición
+     * real.
+     *
+     * Los valores los declara el engine en C++ y esta llamada los **lee de ahí**. No hay
+     * ninguna copia intermedia: si alguien mantiene la suya, es
+     * [EngineParameterDef] lo que le permite borrarla.
+     */
+    fun getEngineParameterDef(engineType: Int, paramIndex: Int): EngineParameterDef?
     fun setBpm(bpm: Float)
     fun getBpm(): Float
     fun setModulatorType(type: Int)

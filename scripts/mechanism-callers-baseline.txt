@@ -82,8 +82,6 @@
 #      corregido DOS VECES. Una razon de este archivo puede envejecer hasta quedar
 #      al reves: verificala contra el arbol antes de ejecutarla.
 #
-audio/src/main/cpp/api/watermelon_audio.cpp::wma_engine_get_parameter_count::deuda | REQ-028 S1 construyo la C API y S2 le da el llamador de produccion (el JNI). Las doce entradas de getParameterCount/getParameterDef se fueron de este archivo en la misma etapa: la lectura al engine ya es produccion. Estas dos son el borde de la etapa, no una deuda de diseño, y S2 las saca
-audio/src/main/cpp/api/watermelon_audio.cpp::wma_engine_get_parameter_def::deuda | REQ-028 S1 construyo la C API y S2 le da el llamador de produccion (el JNI). Las doce entradas de getParameterCount/getParameterDef se fueron de este archivo en la misma etapa: la lectura al engine ya es produccion. Estas dos son el borde de la etapa, no una deuda de diseño, y S2 las saca
 audio/src/main/cpp/analysis/AbsenceGate.h::AbsenceGate::quietRun::sonda-de-tests | accesor del contador que existe para que un test pueda afirmar que la racha se REINICIA (no solo que el veredicto final es el correcto): sin el, un mutante que nunca reinicie da el mismo veredicto en los casos probados y sobrevive. No lo llama produccion a proposito
 audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::availableFrames::sonda-de-tests | accesor de estado que existe para que un test pueda afirmar sobre el, no para producir audio
 audio/src/main/cpp/analysis/AnalysisRing.h::AnalysisRing::oversizedBlocks::sonda-de-tests | contador RT que existe para que un test pueda verificar lo que el callback no puede decir
