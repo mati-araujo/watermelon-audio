@@ -326,6 +326,11 @@ gate_guardrails() {
     step guardrails callers       python3 scripts/check-mechanism-callers.py || return 1
     step guardrails doc-self      python3 scripts/check-doc-counts.py --self-test || return 1
     step guardrails doc-counts    python3 scripts/check-doc-counts.py || return 1
+    # REQ-025 — la FIRMA del cruce JNI, no solo el nombre. Va en guardrails y no en
+    # `build` porque es source-only: no necesita .so ni NDK, al reves que su primo
+    # check-jni-symbols. El --self-test primero, misma razon que los de arriba.
+    step guardrails jni-sig-self  python3 scripts/check-jni-signatures.py --self-test || return 1
+    step guardrails jni-signatures python3 scripts/check-jni-signatures.py || return 1
 }
 
 gate_cpp_tests_macos() {

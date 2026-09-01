@@ -243,6 +243,17 @@ jobs:
       - name: Ningun mecanismo de produccion lo llaman solo los tests — REQ-013
         run: python3 scripts/check-mechanism-callers.py
 
+      # REQ-025 — la FIRMA de cada cruce JNI, de los dos lados. check-jni-symbols
+      # compara solo NOMBRES: un `Int` declarado donde el C++ espera `jlong`
+      # compila, linkea, pasa ese gate y corrompe memoria en el device. Va aca
+      # (ubuntu, que nunca se saltea por atestacion) y es source-only: no necesita
+      # .so ni NDK. El --self-test primero, misma razon que los de arriba.
+      - name: Las firmas del cruce JNI coinciden — self-test
+        run: python3 scripts/check-jni-signatures.py --self-test
+
+      - name: Las firmas del cruce JNI coinciden — REQ-025
+        run: python3 scripts/check-jni-signatures.py
+
       # REQ-021 — los conteos de CLAUDE.md, re-medidos del arbol. Quedaron stale
       # SIETE tandas seguidas mientras la regla vivia solo en prosa. El
       # --self-test primero, misma razon que los de arriba: si el parser se
