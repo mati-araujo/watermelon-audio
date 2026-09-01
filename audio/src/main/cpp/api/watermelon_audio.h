@@ -1458,7 +1458,13 @@ WMA_API bool wma_looper_finalize_free_loop(WmaEngine* engine, int track_index,
  * API would make every caller unpack a sign-sensitive bitfield for no reason.
  * The JNI still packs, on its own side.
  *
- * @return false if the track index is invalid; out-params are untouched then.
+ * @return false if the track index is invalid OR the track has no audible content
+ *         (silence, or everything under the threshold); out-params are untouched
+ *         then. On true, `out_last > out_first` always — so a successful answer is
+ *         never (0, 0), and callers that need one sentinel can use that pair.
+ *
+ * A false is NOT "nothing to trim": it is "there is nothing here". Reading the
+ * out-params after a false gives whatever the caller put there.
  */
 WMA_API bool wma_looper_find_content_bounds(const WmaEngine* engine, int track_index,
                                              float threshold_ratio,

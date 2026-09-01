@@ -1125,15 +1125,29 @@ public:
     /**
      * @brief Onset bounds (first/last audible frame) of a track, for trimming the
      *        leading/trailing silence of a free take. UI/IO thread only.
-     * @return (first << 32) | (last & 0xFFFFFFFF); first==last (both 0) if silent
-     *         or invalid. `last` is exclusive.
+     *
+     * This used to return the pair packed into an int64, which left NO channel for
+     * failure: 0 meant both "invalid index" and a result. It also dropped
+     * TrackBuffer's bool, so a silent track came back as (0, length) — identical to
+     * a track that is audible end to end. The packing belongs to the JNI layer,
+     * which cannot return two ints; nothing else needs it.
+     *
+     * @param outFirst,outLast Written ONLY when this returns true. TrackBuffer
+     *        writes into them before its own early returns, so they are filled from
+     *        locals here rather than passed straight through — a caller that reads
+     *        them after a false must see what it had.
+     * @return false if the index is invalid or the track has no audible content.
+     *         `outLast` is exclusive, and a true result always has
+     *         outLast > outFirst (so the pair is never (0, 0) on success).
      */
-    int64_t findTrackContentBounds(int index, float thresholdRatio) const {
-        if (index < 0 || index >= MAX_TRACKS) return 0;
+    bool findTrackContentBounds(int index, float thresholdRatio,
+                                int& outFirst, int& outLast) const {
+        if (index < 0 || index >= MAX_TRACKS) return false;
         int first = 0, last = 0;
-        mTracks[index].findContentBounds(thresholdRatio, first, last);
-        return (static_cast<int64_t>(first) << 32)
-             | (static_cast<int64_t>(static_cast<uint32_t>(last)));
+        if (!mTracks[index].findContentBounds(thresholdRatio, first, last)) return false;
+        outFirst = first;
+        outLast = last;
+        return true;
     }
     /**
      * @brief Detect onsets in a track for tempo derivation (free auto-loop).
