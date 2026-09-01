@@ -256,15 +256,26 @@ Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
 - Lock-free paths para real-time params (setXY, setFrequency)
 - Return `Result<T>` para operaciones que pueden fallar
 
-> 🔴 **El camino JNI tiene DOS preguntas, y una sola no alcanza** (REQ-016).
+> 🔴 **El camino JNI tiene TRES preguntas, y ninguna sola alcanza** (REQ-016, REQ-025).
 >
 > - *¿el simbolo existe?* — `scripts/check-jni-symbols.py` (MINI-001), que compara **solo
->   NOMBRES**. Da verde con las 310 funciones jamas ejecutadas, y **no ve un desajuste de
->   FIRMA**: un `Int` declarado donde el C++ espera `jlong` compila de los dos lados,
->   linkea, pasa ese gate y corrompe memoria en el device.
+>   NOMBRES** contra el `.so` compilado. Da verde con las 309 funciones jamas ejecutadas.
+> - *¿la FIRMA coincide?* — `scripts/check-jni-signatures.py` (REQ-025), que compara
+>   **aridad, anchos y retorno** entre la `external fun` y su prototipo. Es la pregunta que
+>   faltaba: un `Int` declarado donde el C++ espera `jlong` compila de los dos lados, linkea,
+>   **pasa el gate de nombres** y corrompe memoria en el device. Es *source-only* —no necesita
+>   `.so`, ni NDK, ni `llvm-nm`— y por eso cuesta centesimas.
 > - *¿alguien lo ejecuta?* — el arnes de `androidUnitTest`, que entra por
 >   `AudioNativeBridge` y cruza la frontera de verdad. Hasta REQ-016 la respuesta era
 >   **nadie**: 310 `JNIEXPORT` y ningun test las corria.
+>
+> 🔴 **Y las tres son complementarias, no redundantes.** REQ-024 intento comprar la garantia
+> de FIRMA *de a una funcion* —un `--add-opens=java.base/java.io` permanente mas reflexion
+> sobre un campo privado del JDK, para poder ejercer `nativeLoadSoundFontFromFd`— y MINI-015
+> lo revirtio: esa clase de riesgo **se compra de una sola vez, para las 309**. Lo que el
+> arnes compra y el gate de firmas NO puede ver es la **semantica** de lo que cruza: que el
+> pinneo de un array se libere, que el largo sea el correcto, que un `null` se maneje, que no
+> quede una excepcion pendiente.
 >
 > 🔴 **Y el arnes cubre una FRACCION**, sobre un backend FALSO. El conteo exacto **no se escribe
 > aca a proposito** (REQ-021): lo imprime `:audio:testDebugUnitTest` en cada corrida con los dos
@@ -533,6 +544,23 @@ python3 scripts/check-rt-safety.py         # [gate] Guardrail WD-1.1. Camina el 
                                            # llamada y el lint queda verde revisando menos.
                                            # Se redeclara con --update-coverage, y SU DIFF
                                            # ES LA REVISION
+python3 scripts/check-jni-signatures.py     # [gate] Guardrail REQ-025. La FIRMA del cruce JNI:
+                                           # aridad, anchos y retorno, entre cada `external fun`
+                                           # y su prototipo. Contesta la pregunta que
+                                           # check-jni-symbols NO contesta (ese compara solo
+                                           # NOMBRES) y que el arnes solo contesta para las que
+                                           # ejerce. SOURCE-ONLY: sin .so, sin NDK, sin llvm-nm.
+                                           # --self-test corre ANTES (misma razon que
+                                           # check-rt-safety).
+                                           # 🔴 Su guarda de COMPLETITUD es lo que lo sostiene:
+                                           # si el parser abarca menos prototipos de los que hay
+                                           # en el arbol, FALLA. Un prototipo con forma
+                                           # inesperada que quede sin revisar en silencio deja
+                                           # el lint verde revisando menos — el modo de falla
+                                           # que ya se pago dos veces con rt-coverage-baseline.
+                                           # No tiene baseline y no lo necesita: nace en CERO
+                                           # desajustes sobre las 309.
+
 python3 scripts/check-mechanism-callers.py # [gate] Guardrail REQ-013. Contesta "?quien LLAMA
                                            # a esto?": falla si una funcion de produccion tiene
                                            # sus UNICOS llamadores en tests. REQ-012 entrego un
