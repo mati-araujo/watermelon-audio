@@ -8,6 +8,7 @@ import com.watermellonstudios.audio.api.LooperStateListener
 import com.watermellonstudios.audio.api.NativeEffectSnapshot
 import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
+import com.watermellonstudios.audio.domain.engine.EngineParameterDef
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.input.InputMetering
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
@@ -25,6 +26,8 @@ import kotlinx.cinterop.cstr
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.FloatVar
+import kotlinx.cinterop.ByteVar
+import kotlinx.cinterop.CPointerVar
 import kotlinx.cinterop.set
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.alloc
@@ -329,6 +332,41 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun setEngineType(type: Int) = wma_set_engine_type(engine, type)
     override fun setEngineParameter(paramId: Int, value: Float) = wma_set_engine_param(engine, paramId, value)
     override fun getEngineType(): Int = wma_get_engine_type(engine)
+
+    override fun getEngineParameterCount(engineType: Int): Int =
+        wma_engine_get_parameter_count(engine, engineType)
+
+    /**
+     * REQ-028 — la metadata sale de los mismos out-params de la C API que usa el JNI, y
+     * se arma con el MISMO [EngineParameterDef.fromNative] que él.
+     *
+     * Los dos `CPointerVar<ByteVar>` apuntan a **literales de compilación** del engine,
+     * no a un buffer que el motor pueda liberar: `toKString()` copia de memoria que no
+     * caduca. Es la diferencia con `wma_sf_get_preset_name`, cuyo puntero muere al
+     * descargar el SoundFont — acá no hay que copiar antes de nada.
+     */
+    override fun getEngineParameterDef(engineType: Int, paramIndex: Int): EngineParameterDef? = memScoped {
+        val name = alloc<CPointerVar<ByteVar>>()
+        val shortName = alloc<CPointerVar<ByteVar>>()
+        val minValue = alloc<FloatVar>()
+        val maxValue = alloc<FloatVar>()
+        val defaultValue = alloc<FloatVar>()
+
+        val ok = wma_engine_get_parameter_def(
+            engine, engineType, paramIndex,
+            name.ptr, shortName.ptr,
+            minValue.ptr, maxValue.ptr, defaultValue.ptr,
+        )
+        if (!ok) return@memScoped null
+
+        EngineParameterDef.fromNative(
+            names = arrayOf(
+                name.value?.toKString() ?: return@memScoped null,
+                shortName.value?.toKString() ?: return@memScoped null,
+            ),
+            range = floatArrayOf(minValue.value, maxValue.value, defaultValue.value),
+        )
+    }
     override fun setBpm(bpm: Float) = wma_set_bpm(engine, bpm)
     override fun getBpm(): Float = wma_get_bpm(engine)
 

@@ -1081,6 +1081,15 @@ void AudioEngine::setSoundFontPreset(int presetIndex) {
     incrementStateVersion();
 }
 
+int AudioEngine::getEngineParameterCount(int engineType) const {
+    return mEngineDispatcher.getEngineParameterCount(engineType);
+}
+
+bool AudioEngine::getEngineParameterDef(int engineType, int paramIndex,
+                                        EngineParameterDef& outDef) const {
+    return mEngineDispatcher.getEngineParameterDef(engineType, paramIndex, outDef);
+}
+
 int AudioEngine::getSoundFontPresetCount() const {
     return mEngineDispatcher.getSoundFontPresetCount();
 }

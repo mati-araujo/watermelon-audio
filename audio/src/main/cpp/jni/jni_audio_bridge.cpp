@@ -375,6 +375,75 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetSou
     return env->NewStringUTF(name);
 }
 
+// ==================== Engine parameter metadata (REQ-028) ====================
+//
+// El def viaja PARTIDO EN DOS —los nombres por un lado, el rango por otro— y no es
+// comodidad: meter los cinco campos en un solo cruce obligaria a serializar los floats
+// como texto, y "0.0" contra "0" es exactamente el bug que el comparador de este REQ
+// tuvo la primera vez. Los numeros cruzan como numeros.
+//
+// Las dos preguntan lo mismo a la misma funcion, asi que aceptan o rechazan juntas; el
+// armador de Kotlin (EngineParameterDef.fromNative) exige las dos mitades igual.
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetEngineParameterCount(
+    JNIEnv* env, jobject thiz, jint engineType) {
+    (void)env; (void)thiz;
+    if (!ensureEngine()) return 0;
+    return wma_engine_get_parameter_count(g_wmaEngine, engineType);
+}
+
+// [name, shortName], o nullptr si el pedido se rechaza. Los `const char*` son literales
+// de compilacion del engine, asi que NewStringUTF copia de memoria que no caduca.
+JNIEXPORT jobjectArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetEngineParameterNames(
+    JNIEnv* env, jobject thiz, jint engineType, jint paramIndex) {
+    (void)thiz;
+    if (!ensureEngine()) return nullptr;
+
+    const char* name = nullptr;
+    const char* shortName = nullptr;
+    if (!wma_engine_get_parameter_def(g_wmaEngine, engineType, paramIndex,
+                                      &name, &shortName, nullptr, nullptr, nullptr)) {
+        return nullptr;
+    }
+    if (!name || !shortName) return nullptr;
+
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (!stringClass) return nullptr;
+    jobjectArray arr = env->NewObjectArray(2, stringClass, nullptr);
+    if (!arr) return nullptr;
+
+    const char* values[2] = { name, shortName };
+    for (jsize i = 0; i < 2; ++i) {
+        jstring s = env->NewStringUTF(values[i]);
+        env->SetObjectArrayElement(arr, i, s);
+        env->DeleteLocalRef(s);
+    }
+    return arr;
+}
+
+// [min, max, default], o nullptr si el pedido se rechaza.
+JNIEXPORT jfloatArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetEngineParameterRange(
+    JNIEnv* env, jobject thiz, jint engineType, jint paramIndex) {
+    (void)thiz;
+    if (!ensureEngine()) return nullptr;
+
+    float minValue = 0.0f, maxValue = 0.0f, defaultValue = 0.0f;
+    if (!wma_engine_get_parameter_def(g_wmaEngine, engineType, paramIndex,
+                                      nullptr, nullptr,
+                                      &minValue, &maxValue, &defaultValue)) {
+        return nullptr;
+    }
+
+    jfloatArray arr = env->NewFloatArray(3);
+    if (!arr) return nullptr;
+    jfloat buf[3] = { minValue, maxValue, defaultValue };
+    env->SetFloatArrayRegion(arr, 0, 3, buf);
+    return arr;
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsSoundFontLoaded(
     JNIEnv* env, jobject thiz) {

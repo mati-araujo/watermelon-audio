@@ -270,6 +270,35 @@ public:
      */
     void setEngineParameter(int paramId, float value);
 
+    /**
+     * @brief Cuantos parametros expone el engine de este tipo
+     * @param engineType Engine type ID
+     * @return El conteo que el engine IMPLEMENTA; 0 si `engineType` no es un
+     *         SynthEngine (CLASSIC) o no existe.
+     *
+     * NO depende de cual sea el engine ACTIVO: una UI construye los controles de
+     * todos los engines antes de que el usuario elija uno.
+     *
+     * Thread de control. No es parte del camino RT.
+     */
+    int getEngineParameterCount(int engineType) const;
+
+    /**
+     * @brief Metadata de UN parametro del engine de este tipo
+     * @param engineType Engine type ID
+     * @param paramIndex Indice en [0, getEngineParameterCount(engineType))
+     * @param[out] outDef Se escribe SOLO si la funcion devuelve true
+     * @return false si `engineType` o `paramIndex` estan fuera de rango
+     *
+     * Los `const char*` de `outDef` apuntan a LITERALES DE COMPILACION de cada
+     * engine: no caducan nunca. Es la diferencia con `getSoundFontPresetName`,
+     * cuyo puntero muere al descargar el SoundFont.
+     *
+     * Thread de control. No es parte del camino RT.
+     */
+    bool getEngineParameterDef(int engineType, int paramIndex,
+                               EngineParameterDef& outDef) const;
+
     // ========== SOUNDFONT ENGINE (Phase 8) ==========
 
     /**

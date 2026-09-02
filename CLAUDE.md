@@ -150,16 +150,16 @@ afirmado y no vigilado haría leer todo este archivo como verificado cuando sól
 <!-- BEGIN conteos-medidos — los escribe scripts/check-doc-counts.py, NO la mano -->
 | métrica | valor | qué mide |
 |---|---|---|
-| `kt-commonMain` | 94 | archivos .kt en commonMain |
+| `kt-commonMain` | 95 | archivos .kt en commonMain |
 | `kt-androidMain` | 21 | archivos .kt en androidMain |
 | `kt-iosMain` | 6 | archivos .kt en iosMain |
-| `bridge-loc` | 3359 | LOC de AudioNativeBridge.kt |
-| `bridge-external` | 309 | `external fun` en AudioNativeBridge |
-| `jniexport-bridge` | 298 | JNIEXPORT en jni_audio_bridge.cpp |
-| `jniexport-total` | 311 | JNIEXPORT en todo jni/*.cpp |
-| `wma-api` | 275 | declaraciones WMA_API en la C API |
+| `bridge-loc` | 3388 | LOC de AudioNativeBridge.kt |
+| `bridge-external` | 312 | `external fun` en AudioNativeBridge |
+| `jniexport-bridge` | 301 | JNIEXPORT en jni_audio_bridge.cpp |
+| `jniexport-total` | 314 | JNIEXPORT en todo jni/*.cpp |
+| `wma-api` | 277 | declaraciones WMA_API en la C API |
 | `analysis-files` | 17 | fuentes .h/.cpp en cpp/analysis/ (sin tests/) |
-| `callers-baseline` | 1 callback-externo / 28 deuda / 1 entrada / 45 sonda-de-tests | reparto del baseline de llamadores |
+| `callers-baseline` | 1 callback-externo / 16 deuda / 1 entrada / 45 sonda-de-tests | reparto del baseline de llamadores |
 | `ver-kotlin` | 2.4.10 | version de Kotlin |
 | `ver-agp` | 9.3.2 | version de AGP |
 <!-- END conteos-medidos -->

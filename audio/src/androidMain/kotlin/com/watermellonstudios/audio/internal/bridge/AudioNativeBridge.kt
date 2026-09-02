@@ -8,6 +8,7 @@ import com.watermellonstudios.audio.api.IEffectStateWriter
 import com.watermellonstudios.audio.api.NativeEffectSnapshot
 import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
+import com.watermellonstudios.audio.domain.engine.EngineParameterDef
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import com.watermellonstudios.audio.domain.usb.StreamPreference
@@ -693,6 +694,31 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override fun getEngineType(): Int {
         return nativeGetEngineType()
     }
+
+    /**
+     * Cuántos parámetros expone el engine `engineType` (REQ-028).
+     *
+     * Sin mutex y sin `Result`: no muta nada, y el motor lo resuelve leyendo metadata
+     * inmutable — literales de compilación de cada engine. Mismo criterio que
+     * [getEngineType].
+     */
+    override fun getEngineParameterCount(engineType: Int): Int =
+        nativeGetEngineParameterCount(engineType)
+
+    /**
+     * Metadata del parámetro `paramIndex` del engine `engineType`, o `null` si alguno
+     * está fuera de rango (REQ-028).
+     *
+     * 🔴 **El armado y el criterio de rechazo NO están acá**: los pone
+     * [EngineParameterDef.fromNative], en `commonMain`, para que el camino de iOS
+     * —cinterop, sin JNI— rechace exactamente igual. Duplicarlo dejaría dos criterios y
+     * un solo test.
+     */
+    override fun getEngineParameterDef(engineType: Int, paramIndex: Int): EngineParameterDef? =
+        EngineParameterDef.fromNative(
+            names = nativeGetEngineParameterNames(engineType, paramIndex),
+            range = nativeGetEngineParameterRange(engineType, paramIndex),
+        )
 
     // ========== SOUNDFONT ENGINE (Phase 8) ==========
 
@@ -1918,6 +1944,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeSetEngineType(type: Int)
     private external fun nativeSetEngineParameter(paramId: Int, value: Float)
     private external fun nativeGetEngineType(): Int
+    private external fun nativeGetEngineParameterCount(engineType: Int): Int
+    private external fun nativeGetEngineParameterNames(engineType: Int, paramIndex: Int): Array<String>?
+    private external fun nativeGetEngineParameterRange(engineType: Int, paramIndex: Int): FloatArray?
     // SoundFont (Phase 8)
     private external fun nativeLoadSoundFont(data: ByteArray): Boolean
     private external fun nativeLoadSoundFontFromPath(path: String): Boolean
