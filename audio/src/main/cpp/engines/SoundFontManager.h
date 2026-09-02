@@ -444,11 +444,18 @@ public:
     }
 
     /**
-     * @brief Effective MIDI key range for a preset, from the cache (AUD-4).
+     * @brief MIDI key range que el preset DECLARA, del caché (AUD-4, MINI-017).
      *
-     * Pre-computed at load time using the same heuristic as before. Thread
-     * model: read from JNI/main thread under [mLoadMutex]; no tsf access here.
-     * @return true if the preset exists and outMinKey/outMaxKey were populated.
+     * Sale de las **regiones** del preset —el min de `lokey` y el max de `hikey`—,
+     * calculado una vez al cargar. Ya NO se infiere del nombre: ver la nota al tope
+     * de `SoundFontManager.cpp`.
+     *
+     * Thread model: se lee desde JNI/main bajo [mLoadMutex]; acá no se toca tsf.
+     *
+     * @return false —sin tocar los out-params— si el índice no existe **o si el
+     *         preset no declara regiones**. Un preset sin regiones no suena en
+     *         ninguna tecla: devolver un rango plausible sería indistinguible de
+     *         un dato, que es justo el defecto que MINI-017 borró.
      */
     bool getPresetKeyRange(int presetIndex, int& outMinKey, int& outMaxKey) const {
         std::lock_guard<std::mutex> lock(mLoadMutex);
@@ -457,6 +464,9 @@ public:
             return false;
         }
         const auto& info = (*mPresetCache)[presetIndex];
+        if (info.minKey < 0 || info.maxKey < 0) {
+            return false;  // el preset no declaró regiones
+        }
         outMinKey = info.minKey;
         outMaxKey = info.maxKey;
         return true;

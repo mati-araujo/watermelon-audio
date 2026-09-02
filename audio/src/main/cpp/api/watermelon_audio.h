@@ -374,10 +374,22 @@ WMA_API const char* wma_sf_get_preset_name(const WmaEngine* engine, int preset_i
 WMA_API bool wma_sf_is_loaded(const WmaEngine* engine);
 
 /**
- * Get the MIDI key range of a SoundFont preset.
+ * MIDI key range that a SoundFont preset DECLARES: the lowest `lokey` and the
+ * highest `hikey` across its regions, i.e. the keys it can actually answer.
+ *
  * @param[out] out_min_key  Lowest MIDI key
  * @param[out] out_max_key  Highest MIDI key
- * @return true if preset exists
+ * @return false — leaving both out-params untouched — if the preset index is out
+ *         of range, no SoundFont is loaded, or the preset declares no regions at
+ *         all. A preset with no regions sounds on no key; there is no plausible
+ *         range to report and none is invented.
+ *
+ * 🔴 Before MINI-017 this was GUESSED from the preset NAME via a chain of
+ * `strstr` matches, and the guess was indistinguishable from an absence: an
+ * unrecognized name and a missing name both returned 21..108, which is also what
+ * a recognized piano returned. It now comes from the file. Kept in the contract
+ * because the old behaviour shipped, and a consumer that calibrated against it
+ * will see different numbers.
  */
 WMA_API bool wma_sf_get_preset_key_range(const WmaEngine* engine, int preset_index,
                                           int* out_min_key, int* out_max_key);

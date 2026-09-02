@@ -40,10 +40,12 @@ import kotlin.test.assertTrue
  * getter cableado al primero **sobrevive a todos los asserts** — el mutante que REQ-022 y
  * REQ-023 midieron por separado. Ver [MinimalSoundFont].
  *
- * 🔴 **Y el rango de teclas NO sale del SF2**: `SoundFontManager::inferKeyRange` lo deduce
- * del **nombre** del preset con `strstr`. Un test que declarara un generador `keyRange` en
- * el fixture y lo afirmara estaría midiendo la heurística contra sí misma. De ahí
- * `"Cello Uno"` → 36..84 y `"Violin Dos"` → 55..103: dos ramas distintas de esa función.
+ * 🔴 **El rango de teclas SÍ sale del SF2 — desde MINI-017.** Antes lo adivinaba
+ * `SoundFontManager::inferKeyRange` del **nombre** del preset con `strstr`, y este archivo
+ * afirmaba `"Cello Uno"` → 36..84, que es exactamente lo que esa heurística devolvía: o sea
+ * que **medía la heurística contra sí misma** y no podía fallar por el defecto que tenía
+ * delante. Ahora el fixture ESCRIBE un `keyRange` que la **contradice** (41..79 y 47..91),
+ * así que si el nombre volviera a decidir, estos asserts se caen.
  *
  * ## Lo que este archivo NO cubre, y por qué
  *
@@ -170,8 +172,9 @@ class SoundFontJniTest {
             assertContentEquals(
                 intArrayOf(esperado.teclaMin, esperado.teclaMax),
                 jni("nativeGetSoundFontPresetKeyRange") { it.getSoundFontPresetKeyRange(i) },
-                "rango de teclas del preset $i. Ojo: NO sale del SF2 — lo infiere " +
-                    "SoundFontManager::inferKeyRange del NOMBRE '${esperado.nombre}'",
+                "rango de teclas del preset $i: sale del generador keyRange que el " +
+                    "fixture escribe, y contradice a propósito lo que la vieja " +
+                    "heurística habría deducido de '${esperado.nombre}'",
             )
         }
     }
