@@ -36,3 +36,30 @@ extern "C" int tsf_get_preset_bank(const tsf* f, int i) {
 extern "C" int tsf_get_preset_number(const tsf* f, int i) {
     return (f && i >= 0 && i < f->presetNum) ? static_cast<int>(f->presets[i].preset) : -1;
 }
+
+// El rango de teclas REAL del preset: el mínimo de `lokey` y el máximo de `hikey`
+// sobre sus regiones. Un preset se toca por regiones, así que la unión es lo que
+// de verdad responde a una tecla.
+//
+// Devuelve 0 y NO toca los out-params cuando no hay nada que informar —fuente o
+// índice inválidos, o cero regiones—. Un preset sin regiones no suena en ninguna
+// tecla; darle un rango plausible sería la misma clase de mentira que la
+// heurística por nombre que esto reemplaza (MINI-017).
+extern "C" int tsf_get_preset_key_range(const tsf* f, int i, int* out_lo, int* out_hi) {
+    if (!f || i < 0 || i >= f->presetNum) return 0;
+    const struct tsf_preset& p = f->presets[i];
+    if (!p.regions || p.regionNum <= 0) return 0;
+
+    int lo = 127, hi = 0;
+    for (int r = 0; r < p.regionNum; ++r) {
+        const int rlo = static_cast<int>(p.regions[r].lokey);
+        const int rhi = static_cast<int>(p.regions[r].hikey);
+        if (rlo < lo) lo = rlo;
+        if (rhi > hi) hi = rhi;
+    }
+    if (lo > hi) return 0;  // regiones presentes pero todas degeneradas
+
+    if (out_lo) *out_lo = lo;
+    if (out_hi) *out_hi = hi;
+    return 1;
+}

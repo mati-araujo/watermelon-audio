@@ -39,28 +39,36 @@ import java.io.ByteArrayOutputStream
  *
  * ## Sobre el rango de teclas
  *
- * 🔴 **No se declara acá, y no se puede**: `SoundFontManager` **no lee** el generador
- * `keyRange` del SF2 — lo **infiere del NOMBRE** del preset (`inferKeyRange`, con
- * `strstr` sobre el nombre en minúsculas). Por eso los nombres de abajo son los que son:
- * son la entrada de esa heurística, y las dos ramas que eligen dan rangos distintos.
+ * 🔴 **Se declara acá, y hasta MINI-017 no se podía.** El fixture escribe un generador
+ * `keyRange` (genOper 43) en la zona de CADA preset, y el motor lo lee de las regiones.
+ *
+ * Antes, `SoundFontManager` lo **adivinaba del NOMBRE** con `strstr`, así que este
+ * fixture declaraba como esperado justo lo que la heurística iba a devolver
+ * (`"Cello Uno"` → 36..84) y **medía la heurística contra sí misma**: un test que no
+ * podía fallar por el defecto que tenía delante. Ahora los rangos declarados
+ * **contradicen** a propósito lo que aquella cadena habría dado para estos nombres, así
+ * que si el nombre volviera a decidir, el arnés se pone rojo.
  */
 internal object MinimalSoundFont {
 
     /** Generadores SF2 usados acá (`tsf.h`, enum de genOper). */
+    private const val GEN_KEY_RANGE = 43
     private const val GEN_INSTRUMENT = 41
     private const val GEN_SAMPLE_ID = 53
 
     /**
      * Los dos presets del fixture, y **todos** sus valores esperados.
      *
-     * Los nombres eligen ramas **distintas** de `inferKeyRange`: `"cello"` → 36..84 y
-     * `"violin"` → 55..103. Ninguno de los cuatro límites, ni los bancos, ni los
-     * programas, es potencia de dos — un getter cableado a una constante redonda no
-     * puede acertar por casualidad.
+     * 🔴 Los rangos **contradicen** lo que la vieja heurística por nombre habría dado:
+     * `"cello"` daba 36..84 y acá el archivo declara 41..79; `"violin"` daba 55..103 y
+     * acá declara 47..91. Elegidos así a propósito — si el nombre volviera a decidir,
+     * estos asserts se caen. Ninguno de los cuatro límites, ni los bancos, ni los
+     * programas, es potencia de dos: un getter cableado a una constante redonda no puede
+     * acertar por casualidad.
      *
      * @property nombre lo que tiene que devolver `getSoundFontPresetName` (retorno `jstring`).
      * @property banco / [programa] lo que tiene que devolver `getSoundFontPresetBankProgram`.
-     * @property teclaMin / [teclaMax] lo que `inferKeyRange` deduce **del nombre**.
+     * @property teclaMin / [teclaMax] el `keyRange` que este fixture ESCRIBE en el archivo.
      */
     internal data class Preset(
         val nombre: String,
@@ -71,9 +79,12 @@ internal object MinimalSoundFont {
     )
 
     val PRESETS = listOf(
-        Preset(nombre = "Cello Uno", banco = 3, programa = 7, teclaMin = 36, teclaMax = 84),
-        Preset(nombre = "Violin Dos", banco = 5, programa = 41, teclaMin = 55, teclaMax = 103),
+        Preset(nombre = "Cello Uno", banco = 3, programa = 7, teclaMin = 41, teclaMax = 79),
+        Preset(nombre = "Violin Dos", banco = 5, programa = 41, teclaMin = 47, teclaMax = 91),
     )
+
+    /** `keyRange` + `instrument` en cada zona de preset. Lo usa el índice de `pbag`. */
+    private const val GENS_POR_ZONA_DE_PRESET = 2
 
     private const val SAMPLE_COUNT = 64
     private const val AMPLITUDE = 16384
@@ -108,21 +119,29 @@ internal object MinimalSoundFont {
         phdr.put16(PRESETS.size)     // el terminal cierra las zonas
         phdr.put32(0); phdr.put32(0); phdr.put32(0)
 
-        // ---- pbag: una zona por preset, cada una con UN generador.
+        // ---- pbag: una zona por preset, cada una con DOS generadores (`keyRange`
+        // + `instrument`). El genNdx de la zona i es i*2, y el terminal cierra en
+        // el total: un terminal que no cuente los generadores reales deja el
+        // `instrument` FUERA de su zona y el preset se queda sin instrumento.
         val pbag = ByteArrayOutputStream()
-        PRESETS.indices.forEach { i -> pbag.put16(i); pbag.put16(0) }
-        pbag.put16(PRESETS.size); pbag.put16(0)  // terminal
+        PRESETS.indices.forEach { i -> pbag.put16(i * GENS_POR_ZONA_DE_PRESET); pbag.put16(0) }
+        pbag.put16(PRESETS.size * GENS_POR_ZONA_DE_PRESET); pbag.put16(0)  // terminal
 
         val pmod = ByteArrayOutputStream()
         repeat(5) { pmod.put16(0) }  // sólo el terminal (10 bytes)
 
-        // ---- pgen: los dos presets apuntan al MISMO instrumento. Alcanza: lo que
-        // distingue a un preset del otro acá es su metadata, que es lo que cruza.
+        // ---- pgen: los dos presets apuntan al MISMO instrumento, y cada uno declara
+        // su PROPIO `keyRange`. Eso es lo que permite dos rangos distintos con un solo
+        // instrumento — tsf intersecta el rango de la zona de preset con el de la de
+        // instrumento.
         //
-        // `instrument` va ÚLTIMO en la zona por exigencia del spec (§7.5), y acá es
-        // además el único.
+        // El orden lo fija el spec (§7.5): `keyRange` PRIMERO de la zona, `instrument`
+        // ÚLTIMO. El amount del rango son dos bytes: lo en el bajo, hi en el alto.
         val pgen = ByteArrayOutputStream()
-        PRESETS.indices.forEach { pgen.put16(GEN_INSTRUMENT); pgen.put16(0) }
+        PRESETS.forEach { p ->
+            pgen.put16(GEN_KEY_RANGE); pgen.put16((p.teclaMax shl 8) or p.teclaMin)
+            pgen.put16(GEN_INSTRUMENT); pgen.put16(0)
+        }
         pgen.put16(0); pgen.put16(0)  // terminal
 
         val inst = ByteArrayOutputStream()

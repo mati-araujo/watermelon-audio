@@ -7,56 +7,29 @@
  * audio thread continues to use the lock-free tsf pointer (mActiveSF) for
  * synthesis and never touches this cache.
  *
- * The key-range heuristic mirrors the historical behavior (probing tsf
+ * EL RANGO DE TECLAS SALE DE LAS REGIONES DEL PRESET (MINI-017)
+ * -------------------------------------------------------------
+ * Hasta el 2026-09-02 se ADIVINABA del NOMBRE del preset, con una cadena de
+ * `strstr` de diez ramas, y este comentario lo justificaba así: *"probing tsf
  * regions requires private struct access that isn't reachable from this
- * translation unit, so we infer ranges from GM preset names).
+ * translation unit"*.
+ *
+ * 🔴 Era cierto sobre ESTA unidad de traducción, y nunca fue un bloqueo: el
+ * proyecto ya había construido la salida —`tsf_ext.h` + `tsf_impl.cpp`, la única
+ * TU donde `struct tsf` está completo— y la estaba usando para `bank`/`program`,
+ * cuyo propio comentario dice que se hizo para clasificar *"regardless of the
+ * preset's often-ambiguous name"*. O sea que alguien ya había desconfiado del
+ * nombre, resolvió su caso por esa vía, y dejó la heurística en pie.
+ *
+ * La adivinanza además NO era distinguible de una ausencia: sus dos fallbacks
+ * —nombre nulo y nombre sin coincidencia— devolvían 21..108, exactamente lo mismo
+ * que su rama `piano`. Un consumidor no podía saber cuál de los tres casos tenía.
  */
 #include "SoundFontManager.h"
 
 #include <cstring>
 
-namespace {
-
-void inferKeyRange(const char* name, int& outMinKey, int& outMaxKey) {
-    if (!name) {
-        outMinKey = 21;
-        outMaxKey = 108;
-        return;
-    }
-
-    char lower[64] = {};
-    for (int i = 0; i < 63 && name[i]; ++i) {
-        lower[i] = (name[i] >= 'A' && name[i] <= 'Z')
-                       ? static_cast<char>(name[i] + 32)
-                       : name[i];
-    }
-
-    if (strstr(lower, "drum") || strstr(lower, "kit") || strstr(lower, "perc")) {
-        outMinKey = 35; outMaxKey = 81;
-    } else if (strstr(lower, "bass")) {
-        outMinKey = 24; outMaxKey = 60;
-    } else if (strstr(lower, "guitar") || strstr(lower, "gtr")) {
-        outMinKey = 40; outMaxKey = 88;
-    } else if (strstr(lower, "violin") || strstr(lower, "viola")) {
-        outMinKey = 55; outMaxKey = 103;
-    } else if (strstr(lower, "cello")) {
-        outMinKey = 36; outMaxKey = 84;
-    } else if (strstr(lower, "flute") || strstr(lower, "piccolo")) {
-        outMinKey = 60; outMaxKey = 108;
-    } else if (strstr(lower, "trumpet") || strstr(lower, "brass")) {
-        outMinKey = 52; outMaxKey = 96;
-    } else if (strstr(lower, "organ")) {
-        outMinKey = 36; outMaxKey = 96;
-    } else if (strstr(lower, "piano") || strstr(lower, "keys")) {
-        outMinKey = 21; outMaxKey = 108;
-    } else if (strstr(lower, "pad") || strstr(lower, "synth") || strstr(lower, "lead")) {
-        outMinKey = 36; outMaxKey = 96;
-    } else {
-        outMinKey = 21; outMaxKey = 108;
-    }
-}
-
-} // namespace
+// (Acá vivía `inferKeyRange`. La borró MINI-017: ver la nota de arriba.)
 
 std::shared_ptr<const std::vector<SoundFontManager::PresetInfo>>
 SoundFontManager::buildPresetCache(tsf* sf, int presetCount) {
@@ -71,7 +44,14 @@ SoundFontManager::buildPresetCache(tsf* sf, int presetCount) {
         const char* name = tsf_get_presetname(sf, i);
         PresetInfo info;
         info.name = name ? name : "";
-        inferKeyRange(name, info.minKey, info.maxKey);
+        // El rango REAL, de las regiones. Si el preset no declara ninguna no hay
+        // rango que informar: se marca ausente y `getPresetKeyRange` lo rechaza,
+        // en vez de inventar un 21..108 que el llamador no podría distinguir de
+        // un dato.
+        if (!tsf_get_preset_key_range(sf, i, &info.minKey, &info.maxKey)) {
+            info.minKey = -1;
+            info.maxKey = -1;
+        }
         info.bank = tsf_get_preset_bank(sf, i);
         info.program = tsf_get_preset_number(sf, i);
         cache->push_back(std::move(info));

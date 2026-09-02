@@ -87,9 +87,15 @@ interface ISoundFontBridge {
     fun getSoundFontPresetName(presetIndex: Int): String?
 
     /**
-     * `[minKey, maxKey]` en notas MIDI, o `null` si el preset no existe.
+     * `[minKey, maxKey]` en notas MIDI: el rango que el preset **declara en el
+     * archivo** —el `lokey` más bajo y el `hikey` más alto de sus regiones—, o
+     * `null` si el preset no existe, no hay SoundFont cargado, o el preset no
+     * declara región alguna.
      *
-     * Sirve para no dibujar teclas que el preset no va a sonar.
+     * Sirve para no dibujar teclas que el preset no va a sonar, y desde MINI-017
+     * eso es **cierto**: antes el rango se **adivinaba del NOMBRE** del preset con
+     * una cadena de `strstr`, así que un nombre no reconocido devolvía `21..108`
+     * —igual que un piano reconocido— y dibujar contra eso mostraba teclas mudas.
      */
     fun getSoundFontPresetKeyRange(presetIndex: Int): IntArray?
 

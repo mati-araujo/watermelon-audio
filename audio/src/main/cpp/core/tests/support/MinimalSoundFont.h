@@ -46,6 +46,7 @@ namespace sf2 {
 
 /** Generadores SF2 que se usan acá (`tsf.h`, enum de genOper). */
 enum : uint16_t {
+    kGenKeyRange = 43,    ///< zona -> rango de teclas MIDI [lo, hi] (byte bajo = lo)
     kGenInstrument = 41,  ///< zona de preset -> índice de instrumento
     kGenSampleModes = 54, ///< zona de instrumento -> modo de loop (0 = one-shot, 1 = loop)
     kGenSampleId = 53,    ///< zona de instrumento -> índice de sample
@@ -96,8 +97,21 @@ inline void putChunk(std::vector<uint8_t>& out, const char* id,
  *   fácil de cometer. Un test que quiera distinguirlas puede mover ésta sin
  *   tocar la otra.
  */
+/**
+ * @param keyRangeLo / @param keyRangeHi rango de teclas que el ARCHIVO declara, como
+ *        generador `keyRange` (genOper 43) en la zona del instrumento. Con -1 no se
+ *        escribe el generador y tsf aplica su default de region (0..127).
+ *
+ *        🔴 Existe para poder DISTINGUIR de dónde sale el rango publicado. Antes de
+ *        MINI-017 el motor lo adivinaba del NOMBRE del preset, así que un fixture sin
+ *        este generador no puede juzgar nada: mediría la heurística contra sí misma.
+ *        Los tests que importan escriben un rango que CONTRADICE lo que la heurística
+ *        habría dado para "Test Preset".
+ */
 inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 22050,
-                                                bool looping = false) {
+                                                bool looping = false,
+                                                int keyRangeLo = -1,
+                                                int keyRangeHi = -1) {
     using namespace sf2;
 
     // ---- sdta: 64 samples de 16 bits. tsf pide >= un short; 64 deja lugar a
@@ -164,18 +178,26 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
     putName20(inst, "EOI");
     put16(inst, 1);   // terminal
 
+    const bool declaraRango = (keyRangeLo >= 0 && keyRangeHi >= 0);
+
     std::vector<uint8_t> ibag;
     put16(ibag, 0); put16(ibag, 0);
     // El terminal dice DONDE TERMINAN los generadores de la zona 0, asi que tiene que contar
     // los que realmente se escribieron. Con `looping` son dos (`sampleModes` + `sampleID`) y
     // con el terminal en 1 el `sampleID` quedaba FUERA de la zona: el instrumento se quedaba
     // sin sample y el render daba silencio absoluto — no un sonido distinto, silencio.
-    put16(ibag, looping ? 2 : 1); put16(ibag, 0);  // terminal
+    put16(ibag, (looping ? 2 : 1) + (declaraRango ? 1 : 0)); put16(ibag, 0);  // terminal
 
     std::vector<uint8_t> imod;
     for (int i = 0; i < 5; ++i) put16(imod, 0);  // terminal
 
     std::vector<uint8_t> igen;
+    // `keyRange` va PRIMERO: el spec de SF2 (§7.5) exige que, si está, sea el generador
+    // inicial de la zona. Su amount son dos bytes — lo en el bajo, hi en el alto.
+    if (declaraRango) {
+        put16(igen, kGenKeyRange);
+        put16(igen, static_cast<uint16_t>((keyRangeHi << 8) | keyRangeLo));
+    }
     // `sampleModes` va ANTES que `sampleID`: el spec de SF2 (§7.5) exige que sampleID sea el
     // ULTIMO generador de una zona de instrumento, y tsf recorre la lista en orden.
     //

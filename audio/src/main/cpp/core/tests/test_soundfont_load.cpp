@@ -383,4 +383,74 @@ TEST_F(SoundFontLoadTest, PreparingWithNoFontLoadedIsHarmless) {
 }
 
 }  // namespace
+
+// ===========================================================================
+// MINI-017 — el rango de teclas sale de las REGIONES, no del nombre
+// ===========================================================================
+//
+// 🔴 EL DISEÑO DE ESTOS TESTS ES EL PUNTO, no las aserciones.
+//
+// Antes de MINI-017 el rango lo adivinaba `inferKeyRange` del NOMBRE del preset,
+// con una cadena de `strstr`. Un fixture que declarara el rango que la heurística
+// habría dado mediría **la heurística contra sí misma** y pasaría en verde con el
+// defecto intacto — es lo que le pasaba al fixture del arnés de REQ-024
+// ("Cello Uno" -> 36..84, que es exactamente lo que `strstr("cello")` devolvía).
+//
+// Por eso el fixture escribe un `keyRange` que **CONTRADICE** a la heurística: el
+// preset se llama "Test Preset", que no matchea ninguna de sus diez ramas y caía
+// en el fallback 21..108. Cualquier valor distinto de 21..108 separa las dos
+// hipótesis de una.
+
+TEST_F(SoundFontLoadTest, TheKeyRangeComesFromTheFileNotFromThePresetName) {
+    // 40..70 no es lo que la heurística daba para "Test Preset" (21..108), ni el
+    // default de región de tsf (0..127). Los tres son distinguibles entre sí.
+    mSf2 = makeMinimalSoundFont(kSampleRateInFile, /*looping=*/false,
+                                /*keyRangeLo=*/40, /*keyRangeHi=*/70);
+    ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 48000));
+
+    int lo = -1, hi = -1;
+    ASSERT_TRUE(mManager.getPresetKeyRange(0, lo, hi));
+    EXPECT_EQ(lo, 40) << "el rango no salió del generador keyRange del archivo";
+    EXPECT_EQ(hi, 70) << "el rango no salió del generador keyRange del archivo";
+}
+
+TEST_F(SoundFontLoadTest, ADifferentDeclaredRangeGivesADifferentAnswer) {
+    // El gemelo obligatorio: sin él, un getter cableado a 40..70 pasa el test de
+    // arriba. Dos rangos distintos sobre el MISMO nombre de preset es lo que
+    // prueba que el nombre dejó de decidir.
+    mSf2 = makeMinimalSoundFont(kSampleRateInFile, /*looping=*/false, 55, 103);
+    ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 48000));
+
+    int lo = -1, hi = -1;
+    ASSERT_TRUE(mManager.getPresetKeyRange(0, lo, hi));
+    EXPECT_EQ(lo, 55);
+    EXPECT_EQ(hi, 103);
+}
+
+TEST_F(SoundFontLoadTest, APresetWithoutADeclaredRangeReportsTheRegionDefault) {
+    // Sin generador `keyRange`, la región de tsf nace en 0..127
+    // (`tsf_region_clear`). Ése es el rango REAL de ese preset — toca todas las
+    // teclas— y es lo que hay que publicar. La heurística devolvía 21..108, que
+    // era una opinión sobre un archivo que no la pedía.
+    ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 48000));
+
+    int lo = -1, hi = -1;
+    ASSERT_TRUE(mManager.getPresetKeyRange(0, lo, hi));
+    EXPECT_EQ(lo, 0);
+    EXPECT_EQ(hi, 127);
+    EXPECT_NE(lo, 21) << "21..108 es el fallback de la heurística: no debería poder salir más";
+}
+
+TEST_F(SoundFontLoadTest, AnOutOfRangePresetIndexIsStillRejected) {
+    // El contrato de rechazo no se movió, y hay que decirlo: el cambio de fuente
+    // no puede haber convertido un índice inválido en un dato.
+    ASSERT_TRUE(mManager.loadFromMemory(mSf2.data(), static_cast<int>(mSf2.size()), 48000));
+
+    int lo = -1, hi = -1;
+    EXPECT_FALSE(mManager.getPresetKeyRange(1, lo, hi));
+    EXPECT_FALSE(mManager.getPresetKeyRange(-1, lo, hi));
+    EXPECT_EQ(lo, -1) << "un rechazo no puede tocar los out-params";
+    EXPECT_EQ(hi, -1);
+}
+
 }  // namespace wma_test
