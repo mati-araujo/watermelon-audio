@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.15.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.14.0...v2.15.0) (2026-09-02)
+
+
+### Features
+
+* **engine:** la metadata de parámetros de engine cruza hasta commonMain (REQ-028) ([fb753c3](https://github.com/mati-araujo/watermelon-audio/commit/fb753c39b0b39540302b221d0178ee80344afb8c))
+* **engine:** la metadata de parametros de engine sale por la C API (REQ-028.1) ([9266ce5](https://github.com/mati-araujo/watermelon-audio/commit/9266ce5ce85e86986700258496bce4f1aedaa234))
+* **gate:** los conteos de CLAUDE.md se re-miden del arbol (REQ-021) ([#237](https://github.com/mati-araujo/watermelon-audio/issues/237)) ([da37aa5](https://github.com/mati-araujo/watermelon-audio/commit/da37aa53d970132cc37087156ecb66e95c738e7d))
+* **kmp:** la metadata de parametros de engine llega a commonMain (REQ-028.2) ([361d8a1](https://github.com/mati-araujo/watermelon-audio/commit/361d8a1097e70dddc8b9e8227abb4c8e31b3a77c))
+
+
+### Bug Fixes
+
+* **looper:** propagar el rechazo de findContentBounds en vez de tragarlo (MINI-016) ([41d7cdf](https://github.com/mati-araujo/watermelon-audio/commit/41d7cdfafd53dbcd01ffd16f91a392466507d4de))
+* **looper:** propagar el rechazo de findContentBounds en vez de tragarlo (MINI-016) ([e673b04](https://github.com/mati-araujo/watermelon-audio/commit/e673b04400a5de696dfc14cd8932d8487842042f))
+* **soundfont:** el rango de teclas sale del archivo, no del nombre (MINI-017) ([8f422cc](https://github.com/mati-araujo/watermelon-audio/commit/8f422ccd4256ec1a251ea77c5e9e285c7912adbc))
+* **soundfont:** el rango de teclas sale del archivo, no del nombre (MINI-017) ([724adcc](https://github.com/mati-araujo/watermelon-audio/commit/724adcced7ac81ae2eb31c8b8c23f250e21d4c37))
+* **tuner:** un parcial sin energía envenenaba la lectura de una cuerda afinada (REQ-027) ([3c80c39](https://github.com/mati-araujo/watermelon-audio/commit/3c80c39149e289ce5c4ba927b373a7a330efbe8e))
+* **tuner:** un parcial sin energía ya no envenena la lectura (REQ-027.1) ([2089718](https://github.com/mati-araujo/watermelon-audio/commit/208971874fcaac3f77c8d91d2bfb12d386454bb2))
+* **tuner:** σ sale de los residuos, y la lectura es la del fundamental (REQ-027.2) ([51b4c16](https://github.com/mati-araujo/watermelon-audio/commit/51b4c16131d7468a4e2f5b2d703b8c42a9e177c2))
+
 ## [2.14.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.13.0...v2.14.0) (2026-08-28)
 
 
