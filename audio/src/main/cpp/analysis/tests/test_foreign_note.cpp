@@ -6,10 +6,6 @@
  * combinaciones de objetivo x tono sobre las seis cuerdas, las 30 de afuera de la
  * diagonal publicaban `NO_SIGNAL` con `detectedHz` EXACTO y claridad 0,9999.
  *
- * Los tests del caso SIN instrumento declarado no viven aca todavia: son de REQ-029 S2
- * y estan escritos en su etapa. Un test rojo no se commitea, y uno saltado tampoco
- * cuenta como cobertura (misma regla que `regen-golden.sh`).
- *
  * 🔴 EL BUFFER VA ESTEREO INTERCALADO, y no es un detalle de estilo.
  * `analyzeBuffer` lee `frames*2` floats. El primer repro de este defecto le paso
  * MONO y dio "30 de 36" — el numero correcto — con `rms=0` y `hz=0` en las 36,
@@ -20,6 +16,7 @@
 #include "../AnalysisSnapshot.h"
 #include "../AnalysisThread.h"
 #include "../OfflineAnalysis.h"
+#include "../../dsp/McLeodPitch.h"
 #include "support/SyntheticSignal.h"
 
 #include <gtest/gtest.h>
@@ -193,15 +190,58 @@ TEST(ForeignNote, ThePortWithAnInstrumentAnswersLikeTheLivePath) {
     ASSERT_EQ(diagonalesConvergidas, 6);
 }
 
-/// AC-029.2 — el zumbido de red NO es ninguna cuerda: sigue siendo ausencia.
-TEST(ForeignNote, MainsHumWithADeclaredInstrumentIsStillAbsence) {
+/**
+ * 🔑 EL INSTRUMENTO ES LO QUE HACE DISTINGUIBLE UNA NOTA DE LA SALA.
+ *
+ * Este test lleva la decision entera de REQ-029, y por eso compara los DOS estimulos
+ * en las DOS configuraciones en vez de afirmar cuatro valores sueltos.
+ *
+ * SIN instrumento declarado, una cuerda ajena y el ruido de una habitacion producen
+ * el MISMO veredicto — y esa es exactamente la razon por la que el motor no puede
+ * tratarlos distinto: no tiene con que. El detector grueso ve 48,45 Hz en el zumbido
+ * con claridad suficiente, asi que "hay una altura clara" no separa una cosa de la otra.
+ *
+ * CON instrumento declarado si se separan, y ahi esta el valor de REQ-029 S1.
+ *
+ * 🔴 POR QUE NO SE ELIGIO LO CONTRARIO. Se implemento el default opuesto —sin
+ * instrumento, cualquier altura clara cuenta como fuente afinable, para que la nota
+ * ajena saliera `NO_LOCK`— y se midio lo que costaba: SEIS tests de REQ-014 en rojo,
+ * los de "el motor declara ausencia cuando solo queda el ruido de la sala". O sea que
+ * el costo no era "el zumbido se lee como una nota": era perder la garantia de
+ * ausencia entera, que un consumidor verifico EN HARDWARE (se declara y se sostiene
+ * dentro de 4,3 s, contra NUNCA en 2.10.0). Se revirtio. La salida para el consumidor
+ * es declarar el instrumento, que es lo que S1 hizo posible.
+ */
+TEST(ForeignNote, WithoutAnInstrumentAForeignNoteAndTheRoomAreIndistinguishable) {
     const auto hz = guitarraHz();
-    const Lectura r = analizar(zumbido(), hz[5], hz);
-    ASSERT_TRUE(r.ok);
+    const auto ajena = cuerda(hz[0]);      // E2 sonando, objetivo E4
+    const auto sala  = zumbido();
 
-    EXPECT_EQ(r.state, kStateNoSignal)
-        << "el zumbido de 50 Hz dio " << nombreEstado(r.state) << ": con instrumento declarado "
-        << "ninguna cuerda esta en rango, asi que no hay nada que afinar (hz=" << r.detectedHz << ")";
+    const Lectura ajenaSin = analizar(ajena, hz[5], {});
+    const Lectura salaSin  = analizar(sala,  hz[5], {});
+    ASSERT_TRUE(ajenaSin.ok && salaSin.ok);
+
+    EXPECT_EQ(ajenaSin.state, salaSin.state)
+        << "sin instrumento declarado el motor los separo, y no tiene con que: "
+        << "nota ajena=" << nombreEstado(ajenaSin.state) << " (hz=" << ajenaSin.detectedHz << ") "
+        << "sala=" << nombreEstado(salaSin.state) << " (hz=" << salaSin.detectedHz << ")";
+    EXPECT_EQ(ajenaSin.state, kStateNoSignal)
+        << "cambio el default de REQ-029 sin que nadie lo decidiera: hoy, sin instrumento, "
+        << "los dos son ausencia. Si esto se cambia, se rompen los seis tests de ausencia "
+        << "sobre ruido de sala de REQ-014 — esta medido";
+
+    // Y CON instrumento, se separan. Sin esta mitad el test de arriba lo satisface un
+    // motor apagado, que declara ausencia sobre todo y no distingue nada.
+    const Lectura ajenaCon = analizar(ajena, hz[5], hz);
+    const Lectura salaCon  = analizar(sala,  hz[5], hz);
+    ASSERT_TRUE(ajenaCon.ok && salaCon.ok);
+
+    EXPECT_NE(ajenaCon.state, kStateNoSignal)
+        << "con el instrumento declarado, una cuerda del instrumento salio como ausencia";
+    EXPECT_EQ(salaCon.state, kStateNoSignal)
+        << "con el instrumento declarado, la sala tiene que seguir siendo ausencia";
+    EXPECT_NE(ajenaCon.state, salaCon.state)
+        << "declarar el instrumento no cambio nada: es lo unico que los separa";
 }
 
 /// AC-029.7 — la ausencia REAL sigue siendo distinguible de la nota ajena.
