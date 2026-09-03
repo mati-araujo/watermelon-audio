@@ -1096,6 +1096,32 @@ WMA_API bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values);
 WMA_API bool wma_tuner_analyze_buffer(const float* samples, int frames, int channels,
                                       int sample_rate, float target_hz, float* out_values);
 
+/**
+ * Same as wma_tuner_analyze_buffer(), but DECLARING the instrument (REQ-029 S1).
+ *
+ * Without candidates the engine cannot ask "could this pitch be one of the
+ * strings?", so a note that is not the target falls through the absence gate and
+ * is reported as NO_SIGNAL. Measured by a consumer on 2.15.0: of 36 target x tone
+ * combinations, the 30 off-diagonal ones reported NO_SIGNAL with the EXACT pitch
+ * and clarity 0.9999 — while playing loudly.
+ *
+ * With candidates that case does not arise: fast mode re-targets to the string
+ * being played and the engine measures it. This entry point exists because the
+ * offline port had no way to express the instrument, and it is the only path on
+ * which that consumer measures.
+ *
+ * @param candidates_hz     string targets in Hz, IN STRING ORDER. NULL (or
+ *                          candidate_count <= 0) is legal and behaves exactly like
+ *                          wma_tuner_analyze_buffer(): no instrument declared.
+ * @param candidate_count   how many; clamped to the tracker's maximum.
+ *
+ * The older entry point is kept and delegates with (NULL, 0): append-only is what
+ * protects a consumer's code from a surprise recompile.
+ */
+WMA_API bool wma_tuner_analyze_buffer_with_candidates(
+    const float* samples, int frames, int channels, int sample_rate, float target_hz,
+    const float* candidates_hz, int candidate_count, float* out_values);
+
 /* ================================================================
  * 13. Dual Touch
  * ================================================================ */

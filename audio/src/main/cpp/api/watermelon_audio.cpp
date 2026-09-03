@@ -1278,14 +1278,42 @@ bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values) {
  */
 bool wma_tuner_analyze_buffer(const float* samples, int frames, int channels,
                               int sample_rate, float target_hz, float* out_values) {
+    // Delega con instrumento VACIO. Duplicar el cuerpo dejaria dos caminos que
+    // nadie obliga a coincidir, que es el defecto que REQ-015 ya pago una vez.
+    return wma_tuner_analyze_buffer_with_candidates(samples, frames, channels, sample_rate,
+                                                    target_hz, nullptr, 0, out_values);
+}
+
+bool wma_tuner_analyze_buffer_with_candidates(
+    const float* samples, int frames, int channels, int sample_rate, float target_hz,
+    const float* candidates_hz, int candidate_count, float* out_values) {
     if (samples == nullptr || out_values == nullptr) return false;
     if (frames <= 0 || sample_rate <= 0) return false;
     if (channels != 1 && channels != 2) return false;
 
     const double target = static_cast<double>(target_hz);
 
+    // Los candidatos cruzan en `float` —el idioma de la frontera— y el nucleo los
+    // habla en `double`. La conversion vive ACA, igual que la de mono a estereo:
+    // un `double` en la C API obligaria a todo consumidor a alinear un tipo que no
+    // usa. Con `nullptr` o cuenta <= 0 no se copia nada y el vector queda vacio,
+    // que es exactamente "sin instrumento declarado".
+    std::vector<double> candidates;
+    if (candidates_hz != nullptr && candidate_count > 0) {
+        try {
+            candidates.reserve(static_cast<size_t>(candidate_count));
+        } catch (...) {
+            return false;
+        }
+        for (int i = 0; i < candidate_count; ++i)
+            candidates.push_back(static_cast<double>(candidates_hz[i]));
+    }
+    const double* cands = candidates.empty() ? nullptr : candidates.data();
+    const int nCands = static_cast<int>(candidates.size());
+
     if (channels == 2) {
-        return wma::analysis::analyzeBuffer(samples, frames, sample_rate, target, out_values);
+        return wma::analysis::analyzeBuffer(samples, frames, sample_rate, target,
+                                            cands, nCands, out_values);
     }
 
     // MONO -> el formato que habla el ring, que es el de la captura.
@@ -1313,7 +1341,7 @@ bool wma_tuner_analyze_buffer(const float* samples, int frames, int channels,
             interleaved[static_cast<size_t>(i) * 2 + 1] = v;
         }
         return wma::analysis::analyzeBuffer(interleaved.data(), frames, sample_rate, target,
-                                            out_values);
+                                            cands, nCands, out_values);
     } catch (...) {
         return false;
     }

@@ -21,6 +21,7 @@ endif()
 # `watermelon-analysis`: la compuerta de `WMA_TEST_HOOKS` tiene que estar
 # activa, y activarla en la libreria la metería en el artefacto que se publica.
 add_executable(analysis_tests
+    test_foreign_note.cpp
     test_analysis_ring.cpp
     test_analysis_thread.cpp
     test_phase_slope.cpp

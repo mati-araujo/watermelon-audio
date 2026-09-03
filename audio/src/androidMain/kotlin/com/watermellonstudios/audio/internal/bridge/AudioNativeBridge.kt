@@ -1645,6 +1645,15 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         targetHz: Float,
     ): FloatArray? = nativeAnalyzeTunerBuffer(samples, channels, sampleRate, targetHz)
 
+    override fun analyzeTunerBufferWithCandidates(
+        samples: FloatArray,
+        channels: Int,
+        sampleRate: Int,
+        targetHz: Float,
+        candidatesHz: FloatArray,
+    ): FloatArray? =
+        nativeAnalyzeTunerBufferWithCandidates(samples, channels, sampleRate, targetHz, candidatesHz)
+
     override fun captureIntonation(slot: Int): Boolean = nativeIntonationCapture(slot)
     override fun resetIntonation() = nativeIntonationReset()
     override fun intonationState(): Int = nativeIntonationState()
@@ -2048,6 +2057,14 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         channels: Int,
         sampleRate: Int,
         targetHz: Float,
+    ): FloatArray?
+
+    private external fun nativeAnalyzeTunerBufferWithCandidates(
+        samples: FloatArray,
+        channels: Int,
+        sampleRate: Int,
+        targetHz: Float,
+        candidatesHz: FloatArray,
     ): FloatArray?
     private external fun nativeIntonationCapture(slot: Int): Boolean
     private external fun nativeIntonationReset()
