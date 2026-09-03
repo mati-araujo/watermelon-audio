@@ -7,6 +7,14 @@ namespace wma::analysis {
 
 bool analyzeBuffer(const float* interleaved, int frames, int sampleRate,
                    double targetHz, float* outValues) noexcept {
+    // Delega: un segundo lazo de drenado seria un segundo motor, y su verde no
+    // diria nada del que corre en produccion (la razon de AC-015.3).
+    return analyzeBuffer(interleaved, frames, sampleRate, targetHz, nullptr, 0, outValues);
+}
+
+bool analyzeBuffer(const float* interleaved, int frames, int sampleRate,
+                   double targetHz, const double* candidatesHz, int candidateCount,
+                   float* outValues) noexcept {
     if (interleaved == nullptr || outValues == nullptr) return false;
     if (frames <= 0 || sampleRate <= 0) return false;
 
@@ -21,6 +29,10 @@ bool analyzeBuffer(const float* interleaved, int frames, int sampleRate,
 
     ring.setCaptureRate(sampleRate);
     analysis.setTargetHz(targetHz);
+    // ANTES de drenar: el tracker copia los candidatos una vez por tick, asi que
+    // ponerlos despues del primer drenado dejaria la primera ventana sin
+    // instrumento — y esa es justamente la que decide el estado inicial.
+    analysis.setCandidates(candidateCount > 0 ? candidatesHz : nullptr, candidateCount);
     // NO se llama a `start()`: acá el conductor somos nosotros. Ver el contrato
     // de `drainOnce()` — dos conductores sobre el mismo estado es una carrera.
 

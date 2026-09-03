@@ -1173,6 +1173,62 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeAnalyz
     return result;
 }
 
+/**
+ * Igual que la de arriba, DECLARANDO el instrumento (REQ-029 S1).
+ *
+ * `candidates` puede ser null o vacio: eso es "sin instrumento declarado" y se
+ * comporta exactamente como `nativeAnalyzeTunerBuffer`. No se agrega un parametro
+ * de cuenta porque el largo del array ya lo dice, igual que con `samples`: dos
+ * numeros que puedan contradecirse son peores que uno.
+ *
+ * 🔴 DOS arrays pinneados a la vez, y los dos se sueltan en TODOS los caminos de
+ * salida — incluido el de error del segundo. Un `return` temprano entre los dos
+ * `Get*ArrayElements` es una fuga que ningun gate de firmas puede ver: es
+ * semantica de marshalling, que es justo lo que el arnes JNI compra y los lints no.
+ */
+JNIEXPORT jfloatArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeAnalyzeTunerBufferWithCandidates(
+    JNIEnv* env, jobject thiz, jfloatArray samples, jint channels, jint sampleRate,
+    jfloat targetHz, jfloatArray candidates) {
+    (void)thiz;
+    if (samples == nullptr) return nullptr;
+    if (channels != 1 && channels != 2) return nullptr;
+
+    const jsize length = env->GetArrayLength(samples);
+    const jint frames = length / channels;
+    if (frames <= 0) return nullptr;
+
+    jfloat* raw = env->GetFloatArrayElements(samples, nullptr);
+    if (raw == nullptr) return nullptr;
+
+    jfloat* cands = nullptr;
+    jsize candCount = 0;
+    if (candidates != nullptr) {
+        candCount = env->GetArrayLength(candidates);
+        if (candCount > 0) {
+            cands = env->GetFloatArrayElements(candidates, nullptr);
+            if (cands == nullptr) {
+                // El primero ya esta pinneado: soltarlo antes de irse.
+                env->ReleaseFloatArrayElements(samples, raw, JNI_ABORT);
+                return nullptr;
+            }
+        }
+    }
+
+    float values[WMA_TUNER_SNAPSHOT_VALUES];
+    const bool ok = wma_tuner_analyze_buffer_with_candidates(
+        raw, frames, channels, sampleRate, targetHz, cands, static_cast<int>(candCount), values);
+
+    if (cands != nullptr) env->ReleaseFloatArrayElements(candidates, cands, JNI_ABORT);
+    env->ReleaseFloatArrayElements(samples, raw, JNI_ABORT);
+    if (!ok) return nullptr;
+
+    jfloatArray result = env->NewFloatArray(WMA_TUNER_SNAPSHOT_VALUES);
+    if (result == nullptr) return nullptr;
+    env->SetFloatArrayRegion(result, 0, WMA_TUNER_SNAPSHOT_VALUES, values);
+    return result;
+}
+
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReleaseInputNode(
     JNIEnv* env, jobject thiz) {

@@ -55,4 +55,30 @@ namespace wma::analysis {
 bool analyzeBuffer(const float* interleaved, int frames, int sampleRate,
                    double targetHz, float* outValues) noexcept;
 
+/**
+ * @brief Igual que el anterior, pero DECLARANDO el instrumento (REQ-029 S1).
+ *
+ * POR QUE HACE FALTA, Y NO ES "precision adicional"
+ * -------------------------------------------------
+ * Sin candidatos el motor no puede preguntarse *"?esta altura es alguna cuerda?"*,
+ * asi que una nota que no es el objetivo cae en la compuerta de ausencia y sale
+ * como SIN SEÑAL. Un consumidor lo midio sobre 2.15.0: de 36 combinaciones de
+ * objetivo x tono, las 30 de afuera de la diagonal daban `NO_SIGNAL` con la altura
+ * EXACTA y claridad 0,9999 — tocando fuerte.
+ *
+ * 🔴 Con candidatos ese caso NO EXISTE, y esta medido: el modo rapido reengancha el
+ * objetivo a la cuerda que suena (`AnalysisThread.cpp:324-332`) y el motor la mide.
+ * O sea que declarar el instrumento **no mejora** la respuesta: es la que hace que
+ * la pregunta del consumidor sea contestable. Esta funcion existe porque el puerto
+ * offline no tenia como expresarlo, y era el unico camino donde el consumidor mide.
+ *
+ * @param candidatesHz    los objetivos en Hz, EN ORDEN DE CUERDA. `nullptr` o
+ *                        `candidateCount <= 0` es legal y equivale a la sobrecarga
+ *                        de arriba: sin instrumento declarado.
+ * @param candidateCount  cuantos. Se recortan a `FastModeTracker::kMaxCandidates`.
+ */
+bool analyzeBuffer(const float* interleaved, int frames, int sampleRate,
+                   double targetHz, const double* candidatesHz, int candidateCount,
+                   float* outValues) noexcept;
+
 }  // namespace wma::analysis

@@ -640,6 +640,39 @@ internal class IosAudioBridge : IAudioNativeBridge {
         }
     }
 
+    override fun analyzeTunerBufferWithCandidates(
+        samples: FloatArray,
+        channels: Int,
+        sampleRate: Int,
+        targetHz: Float,
+        candidatesHz: FloatArray,
+    ): FloatArray? {
+        if (channels != 1 && channels != 2) return null
+        val frames = samples.size / channels
+        if (frames <= 0) return null
+
+        // Sin candidatos NO se pinnea un array vacío: `addressOf(0)` sobre uno vacío no es
+        // válido, y la C API ya define `null` como "sin instrumento declarado".
+        return samples.usePinned { pinnedSamples ->
+            memScoped {
+                val values = allocArray<FloatVar>(TunerSnapshot.VALUE_COUNT)
+                val ok = if (candidatesHz.isEmpty()) {
+                    wma_tuner_analyze_buffer_with_candidates(
+                        pinnedSamples.addressOf(0), frames, channels, sampleRate, targetHz,
+                        null, 0, values)
+                } else {
+                    candidatesHz.usePinned { pinnedCands ->
+                        wma_tuner_analyze_buffer_with_candidates(
+                            pinnedSamples.addressOf(0), frames, channels, sampleRate, targetHz,
+                            pinnedCands.addressOf(0), candidatesHz.size, values)
+                    }
+                }
+                if (!ok) return@memScoped null
+                FloatArray(TunerSnapshot.VALUE_COUNT) { values[it] }
+            }
+        }
+    }
+
     override fun captureIntonation(slot: Int): Boolean =
         wma_intonation_capture(engine, slot)
 

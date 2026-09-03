@@ -71,6 +71,17 @@ internal class FakeTunerBridge : ITunerBridge {
         targetHz: Float,
     ): FloatArray? = fueraDeAlcance("analyzeTunerBuffer")
 
+    // Mismo criterio: el doble NO modela el puerto, y con instrumento declarado menos
+    // todavia. Fabricar un snapshot aca seria inventar la respuesta a la pregunta que
+    // REQ-029 existe para contestar.
+    override fun analyzeTunerBufferWithCandidates(
+        samples: FloatArray,
+        channels: Int,
+        sampleRate: Int,
+        targetHz: Float,
+        candidatesHz: FloatArray,
+    ): FloatArray? = fueraDeAlcance("analyzeTunerBufferWithCandidates")
+
     private fun fueraDeAlcance(nombre: String): Nothing =
         error(
             "$nombre está fuera del alcance de REQ-010 y este doble NO lo modela. " +

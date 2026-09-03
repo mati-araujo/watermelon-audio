@@ -167,4 +167,26 @@ interface ITunerBridge {
         sampleRate: Int,
         targetHz: Float,
     ): FloatArray?
+
+    /**
+     * Igual que [analyzeTunerBuffer], **declarando el instrumento** (REQ-029 S1).
+     *
+     * Sin candidatos el motor no puede preguntarse *"¿esta altura es alguna cuerda?"*, así que
+     * una nota que no es el objetivo cae en la compuerta de ausencia y sale como `NO_SIGNAL`.
+     * Medido sobre 2.15.0: de 36 combinaciones de objetivo × tono, las 30 de afuera de la
+     * diagonal reportaban ausencia con la altura EXACTA y claridad 0,9999 — tocando fuerte.
+     *
+     * Con `candidatesHz` declarado ese caso **no se da**: el modo rápido reengancha el objetivo
+     * a la cuerda que suena y el motor la mide.
+     *
+     * @param candidatesHz los objetivos en Hz, **en orden de cuerda**. Vacío es legal y
+     *   equivale a [analyzeTunerBuffer]: sin instrumento declarado.
+     */
+    fun analyzeTunerBufferWithCandidates(
+        samples: FloatArray,
+        channels: Int,
+        sampleRate: Int,
+        targetHz: Float,
+        candidatesHz: FloatArray,
+    ): FloatArray?
 }

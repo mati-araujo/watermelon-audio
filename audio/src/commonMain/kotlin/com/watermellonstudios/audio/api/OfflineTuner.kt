@@ -76,8 +76,9 @@ object OfflineTuner {
         sampleRate: Int,
         targetHz: Float,
         channels: Int = MONO,
+        candidatesHz: FloatArray = FloatArray(0),
     ): TunerSnapshot? =
         getAudioBridge()
-            .analyzeTunerBuffer(samples, channels, sampleRate, targetHz)
+            .analyzeTunerBufferWithCandidates(samples, channels, sampleRate, targetHz, candidatesHz)
             ?.let(TunerSnapshot::fromNative)
 }
