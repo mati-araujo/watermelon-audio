@@ -98,6 +98,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // no, el strobe recien reseteado se quedaria sin objetivo y el modo
             // no volveria a medir nunca.
             mAppliedTarget = 0.0;
+            mLastUserTarget = -1.0;   // -1 no es un objetivo posible: fuerza la re-aplicacion
         }
 
         double target = mTargetHz.load(std::memory_order_acquire);
@@ -112,14 +113,25 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             mDetector.prepare(rate);
             mPreparedRate = rate;
             mAppliedTarget = 0.0;      // `prepare()` reinicia: hay que re-aplicar
+            mLastUserTarget = -1.0;
         }
-        if (target != mAppliedTarget && mPreparedRate > 0) {
+        // 🔴 LA CONDICION ES "CAMBIO EL PEDIDO", NO "DIFIERE DE LO APLICADO" (REQ-030).
+        // `mAppliedTarget` tiene un segundo escritor —el modo rapido, mas abajo— asi que
+        // preguntar por la diferencia hace que las dos ramas se pisen una vez por tick
+        // apenas hay un reenganche, y cada vuelta descarta el ring. Medido: 27 y 26
+        // re-aplicaciones en 5 s, y la lectura no convergia nunca.
+        if (target != mLastUserTarget && mPreparedRate > 0) {
+            mLastUserTarget = target;
             mTargetAppliedByUser.bump();
             mStrobe.setTarget(target);
             mAppliedTarget = target;
             // Lo que quedo en el ring es de la cuerda ANTERIOR. Ver
             // AnalysisRing::skipToNewest().
-            mRing.skipToNewest();
+            //
+            // Sin objetivo NO se descarta: no hay contra que integrar, y tirar el ring antes
+            // de leerlo deja al analisis sin ver un solo frame — ni el rate de captura se
+            // publicaria. Es un rojo MEDIDO, no una precaucion (AC-030.4).
+            if (target > 0.0) mRing.skipToNewest();
         }
         const bool measuring = mPreparedRate > 0 && mAppliedTarget > 0.0;
 

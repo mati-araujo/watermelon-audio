@@ -107,6 +107,58 @@ Lectura analizar(const std::vector<float>& buf, double targetHz,
 constexpr double kA2 = 110.0;
 constexpr double kE4 = 329.6276;
 
+/**
+ * Como `analizar`, pero el consumidor CAMBIA el objetivo a mitad de la señal (AC-030.3).
+ * Devuelve tambien cuantos frames vio el analisis, para poder afirmar que el cambio no lo
+ * dejo ciego.
+ */
+struct LecturaConCambio {
+    Lectura antes, despues;
+};
+
+LecturaConCambio analizarConCambioDeObjetivo(const std::vector<float>& buf,
+                                             double objetivoInicial, double objetivoFinal) {
+    AnalysisRing ring;
+    AnalysisSnapshot snapshot;
+    AnalysisThread analysis(ring, snapshot);
+
+    ring.setCaptureRate(kRate);
+    analysis.setTargetHz(objetivoInicial);
+
+    const int capacity = static_cast<int>(AnalysisRing::kCapacityFrames);
+    LecturaConCambio r;
+    int written = 0;
+    bool cambiado = false;
+    while (written < kFrames) {
+        const int chunk = (kFrames - written) < capacity ? (kFrames - written) : capacity;
+        ring.writeStereo(buf.data() + static_cast<size_t>(written) * 2, chunk);
+        written += chunk;
+        while (analysis.drainOnce() != AnalysisThread::DrainOutcome::kRingEmpty) {}
+        if (!cambiado && written >= kFrames / 2) {
+            float v[kSnapshotValueCount];
+            if (snapshot.read(v)) {
+                r.antes.ok = true;
+                r.antes.state = static_cast<int>(v[kSnapState]);
+                r.antes.cents = static_cast<double>(v[kSnapCents]);
+            }
+            analysis.setTargetHz(objetivoFinal);
+            cambiado = true;
+        }
+    }
+
+    float v[kSnapshotValueCount];
+    r.despues.ok = snapshot.read(v);
+    r.despues.porElUsuario    = analysis.targetAppliedByUser();
+    r.despues.porElModoRapido = analysis.targetAppliedByFastMode();
+    if (r.despues.ok) {
+        r.despues.state      = static_cast<int>(v[kSnapState]);
+        r.despues.cents      = static_cast<double>(v[kSnapCents]);
+        r.despues.detectedHz = static_cast<double>(v[kSnapDetectedHz]);
+        r.despues.clarity    = static_cast<double>(v[kSnapDetectionClarity]);
+    }
+    return r;
+}
+
 }  // namespace
 
 /**
@@ -171,4 +223,106 @@ TEST(FastModeWiring, WithAForeignTargetAndNoCandidatesTheTargetIsNeverRelatched)
     EXPECT_EQ(r.porElUsuario, 1u);
     EXPECT_EQ(r.porElModoRapido, 0u)
         << "sin candidatos el bloque del modo rapido ni entra (candidateCount() == 0)";
+}
+
+
+// ===========================================================================
+// REQ-030 S2 — el defecto y su arreglo.
+//
+// Los cuatro de abajo nacen ROJOS sobre la base de S1: se escribieron desde los AC y se
+// corrieron ANTES de tocar produccion, que es la disciplina que en REQ-029 dio vuelta dos
+// decisiones de diseño ya aprobadas.
+// ===========================================================================
+
+/**
+ * AC-030.1 — tras un reenganche, la lectura converge igual que si el objetivo hubiera sido
+ * el correcto desde el arranque.
+ *
+ * 🔴 El ORACULO no es un numero elegido a mano: es el caso [1] de esta misma suite
+ * (`WithTheRightTargetAndNoCandidatesTheTargetIsAppliedExactlyOnce`). Un umbral inventado
+ * aca podria ser mas flojo que el que el motor ya cumple y dejar pasar una convergencia
+ * degradada; el control positivo de al lado es el unico oraculo que no se puede aflojar sin
+ * que se note.
+ */
+TEST(FastModeWiring, AfterARelatchTheReadingConvergesLikeItWasTheTargetAllAlong) {
+    const auto reenganchado = analizar(cuerda(kA2), kE4, guitarraHz());
+    const auto desdeElArranque = analizar(cuerda(kA2), kA2, {});
+
+    ASSERT_TRUE(reenganchado.ok) << "el snapshot nunca se publico";
+    ASSERT_TRUE(desdeElArranque.ok);
+    ASSERT_EQ(desdeElArranque.state, kStateConverged)
+        << "el ORACULO no converge: sin control positivo este test no dice nada";
+
+    EXPECT_EQ(reenganchado.state, kStateConverged)
+        << "el modo rapido engancho A2 y despues no midio: un afinador que sigue la cuerda "
+           "correcta y nunca converge es PEOR que uno que declara ausencia, porque parece "
+           "que esta midiendo";
+    EXPECT_NEAR(reenganchado.detectedHz, kA2, 0.05);
+    EXPECT_NEAR(reenganchado.cents, desdeElArranque.cents, 0.1)
+        << "la exactitud tras reenganchar tiene que ser la del objetivo correcto de entrada";
+    EXPECT_NEAR(reenganchado.clarity, desdeElArranque.clarity, 0.02)
+        << "una claridad degradada delata que al detector le esta llegando señal picada: es "
+           "la firma de que el ring se descarta una vez por tick";
+}
+
+/**
+ * AC-030.2 — EL MECANISMO. Con la señal y los candidatos quietos, el objetivo se aplica una
+ * sola vez por lado.
+ *
+ * 🔴 No es redundante con el test de arriba, y la diferencia es la razon de ser de S1: un
+ * test que solo mire el desenlace da verde si mañana converge POR OTRA RAZON. Este defecto
+ * vivio desde agosto justamente porque nadie miraba el mecanismo.
+ */
+TEST(FastModeWiring, AStableSignalRelatchesTheTargetExactlyOnce) {
+    const auto r = analizar(cuerda(kA2), kE4, guitarraHz());
+
+    ASSERT_TRUE(r.ok) << "el snapshot nunca se publico";
+
+    EXPECT_EQ(r.porElModoRapido, 1u)
+        << "el modo rapido elige A2 una vez y no tiene por que volver a elegirla: la señal "
+           "no cambia";
+    EXPECT_EQ(r.porElUsuario, 1u)
+        << "el consumidor pidio E4 UNA vez y nunca lo cambio. Que este contador suba es el "
+           "defecto entero: la rama del usuario reacciona a que lo aplicado DIFIERA de lo "
+           "pedido, y el modo rapido las hace diferir para siempre";
+}
+
+/**
+ * AC-030.4 — sin objetivo declarado, el analisis sigue viendo la señal.
+ *
+ * 🔴 Este test nace de un ROJO PROPIO, no de una hipotesis. La primera version del arreglo
+ * usaba un centinela -1,0 para "el ultimo pedido del usuario"; con `targetHz == 0` la rama
+ * disparaba en el primer tick y llamaba a `skipToNewest()` ANTES de analizar nada, y se
+ * caian tres tests de `AnalysisThread` que en master estaban VERDES. Descartar el ring
+ * cuando no hay objetivo contra el que integrar deja al analisis ciego.
+ */
+TEST(FastModeWiring, WithNoTargetTheAnalysisStillSeesTheSignal) {
+    const auto r = analizar(cuerda(kA2), 0.0, {});
+
+    ASSERT_TRUE(r.ok) << "el snapshot nunca se publico: el analisis no vio un solo frame";
+    EXPECT_GT(r.clarity, 0.99)
+        << "sin objetivo no hay nada contra que integrar, pero la deteccion GRUESA sigue "
+           "corriendo: si esto es 0, el ring se esta descartando antes de leerlo";
+    EXPECT_NEAR(r.detectedHz, kA2, 0.5)
+        << "el motor sabe QUE nota suena aunque no tenga objetivo (R-PITCH-5)";
+}
+
+/**
+ * AC-030.3 — cuando el objetivo lo cambia EL CONSUMIDOR, lo viejo del ring se sigue tirando.
+ *
+ * Es la razon original de `skipToNewest()` (REQ-001.6: la lectura salia 4,55 cents contra 2,0
+ * reales) y el arreglo no la puede perder. Sin este test, "no descartes nunca" pasaria
+ * AC-030.1 y AC-030.2 sin problema.
+ */
+TEST(FastModeWiring, AConsumerRetargetStillDropsThePreviousStringFromTheRing) {
+    const auto r = analizarConCambioDeObjetivo(cuerda(kA2), kE4, kA2);
+
+    ASSERT_TRUE(r.despues.ok) << "el snapshot nunca se publico";
+    EXPECT_EQ(r.despues.state, kStateConverged)
+        << "tras apuntar al tono correcto, converge";
+    EXPECT_NEAR(r.despues.cents, 0.0, 0.1)
+        << "si lo que quedo de la cuerda anterior entrara a la integracion nueva, la lectura "
+           "se corre: 4,55 cents contra 2,0 reales, medido en REQ-001.6";
+    EXPECT_EQ(r.despues.porElUsuario, 2u)
+        << "dos pedidos del consumidor, dos aplicaciones: E4 al arrancar y A2 al cambiar";
 }
