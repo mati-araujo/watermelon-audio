@@ -114,6 +114,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             mAppliedTarget = 0.0;      // `prepare()` reinicia: hay que re-aplicar
         }
         if (target != mAppliedTarget && mPreparedRate > 0) {
+            mTargetAppliedByUser.bump();
             mStrobe.setTarget(target);
             mAppliedTarget = target;
             // Lo que quedo en el ring es de la cuerda ANTERIOR. Ver
@@ -326,6 +327,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
                              mDetector.clarity());
             const double picked = mFastMode.lockedTargetHz();
             if (picked > 0.0 && picked != mAppliedTarget) {
+                mTargetAppliedByFastMode.bump();
                 mStrobe.setTarget(picked);
                 mAppliedTarget = picked;
                 mRing.skipToNewest();

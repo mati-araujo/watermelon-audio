@@ -31,6 +31,7 @@ add_executable(analysis_tests
     test_inharmonicity.cpp
     test_intonation.cpp
     test_fast_mode.cpp
+    test_fast_mode_wiring.cpp
     test_accuracy_contract.cpp
     test_corpus_gate.cpp
     test_non_contiguous.cpp
