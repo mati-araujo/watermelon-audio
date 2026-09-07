@@ -384,6 +384,21 @@ WMA_API bool wma_sf_is_loaded(const WmaEngine* engine);
  *         all. A preset with no regions sounds on no key; there is no plausible
  *         range to report and none is invented.
  *
+ * 🔴 THIS IS NOT A MUSICAL RANGE, and the difference is measured. It answers
+ * *"which keys does this preset respond to?"* — not *"which range is worth
+ * sweeping for this instrument?"*. A consumer that needs the second one has to
+ * apply its own policy: the engine does not have one and will not grow one.
+ * Measured over 269 presets of a real font: the raw range moves the median span
+ * of a consumer's XY pad from 7.25 to 10.42 octaves, and the consumer's own
+ * policy — INTERSECTING with the GM family, not unioning — brings it back to
+ * 7.25.
+ *
+ * 🔴 The union WIDENS: it is taken across every region, so a single catch-all
+ * region drags the answer to the whole keyboard. A preset whose regions declare
+ * no range covers 0..127 by the SF2 default, and that is DATA, not an absence
+ * dressed as data — those presets do add a voice on key 0 and on key 127
+ * (measured, 44/44, with a negative control).
+ *
  * 🔴 Before MINI-017 this was GUESSED from the preset NAME via a chain of
  * `strstr` matches, and the guess was indistinguishable from an absence: an
  * unrecognized name and a missing name both returned 21..108, which is also what

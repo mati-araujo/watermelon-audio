@@ -96,6 +96,20 @@ interface ISoundFontBridge {
      * eso es **cierto**: antes el rango se **adivinaba del NOMBRE** del preset con
      * una cadena de `strstr`, así que un nombre no reconocido devolvía `21..108`
      * —igual que un piano reconocido— y dibujar contra eso mostraba teclas mudas.
+     *
+     * 🔴 **NO ES UN RANGO MUSICAL**, y la diferencia está medida. Contesta *"¿a qué
+     * teclas responde este preset?"*, no *"¿qué rango conviene barrer para este
+     * instrumento?"*. Un consumidor que necesite lo segundo aplica **su propia
+     * política**: el motor no la tiene y no la va a tener. Medido sobre los 269
+     * presets de un font real, el rango crudo lleva el span mediano de un XY pad de
+     * 7,25 a 10,42 octavas, y la política del consumidor —**intersecar** con la
+     * familia GM, no unir— lo devuelve a 7,25.
+     *
+     * 🔴 **La unión ENSANCHA**: se toma sobre todas las regiones, así que una sola
+     * región catch-all arrastra la respuesta al teclado entero. Un preset cuyas
+     * regiones no declaran rango cubre `0..127` **por el default de SF2**, y eso es
+     * **dato, no ausencia disfrazada**: esos presets sí agregan voz en la tecla 0 y
+     * en la 127 (medido, 44/44, con control negativo).
      */
     fun getSoundFontPresetKeyRange(presetIndex: Int): IntArray?
 
