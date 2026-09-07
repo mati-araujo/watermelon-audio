@@ -101,6 +101,8 @@ struct Lectura {
     float support = NAN;
     /// La bandera en CADA publicacion a partir del segundo 1: para preguntar por parpadeo.
     std::vector<float> supportTrail;
+    /// El estado de esas mismas publicaciones, en el mismo orden (S2: el invariante de R-PITCH-37).
+    std::vector<int> stateTrail;
 };
 
 /**
@@ -130,6 +132,7 @@ Lectura analizar(const std::vector<float>& buf, double targetHz,
             float v[kSnapshotValueCount];
             if (written > kRate && snapshot.read(v)) {
                 r.supportTrail.push_back(v[kSnapSpectralSupport]);
+                r.stateTrail.push_back(static_cast<int>(v[kSnapState]));
             }
         }
     }
@@ -358,4 +361,185 @@ TEST(SpectralSupport, AC0314_TheFlagFollowsTheDetectedPitchNotTheLastEvaluation)
         << "el detector reseteado no tiene altura hasta completar una ventana";
     EXPECT_TRUE(std::isnan(v[kSnapSpectralSupport]))
         << "sin altura publicada, la bandera no puede seguir calificando la vieja";
+}
+
+// ===========================================================================================
+// REQ-031 S2 — la compuerta: lo que no tiene soporte no se da por bueno
+// ===========================================================================================
+
+/**
+ * AC-031.2 + AC-031.5 + AC-031.6 · EL CONTROL NEGATIVO. Nacio ROJO sobre S1: ahi el falso daba
+ * `CONVERGED`, 109,874 Hz, −1,955 cents — "A2, casi afinada" sobre una E4.
+ *
+ * Con la compuerta: el estado es `NO_LOCK` (AC-031.5) —"hay señal pero el estimador no
+ * enganchó", no `MEASURING`, que es el spinner eterno que el consumidor describio como peor
+ * que declarar ausencia—, la bandera es 0, y `detectedHz` SIGUE saliendo (AC-031.6): "vi
+ * 109,87 y no le creo" es mas util que el silencio. Los cents NO salen: una desviacion contra
+ * una cuerda que no es la que suena no mide nada.
+ *
+ * Bug plausible: compuerta derivada de un SEGUNDO calculo (la clase de REQ-030), o que cambie
+ * el estado a `MEASURING` en vez de `NO_LOCK`, o que anule `detectedHz` al rechazar.
+ */
+TEST(SpectralSupport, AC0312_TheFalseSubharmonicIsNoLongerPublishedAsConverged) {
+    for (double f0Db : {-24.0, -20.0, -16.0}) {
+        SCOPED_TRACE("f0 a " + std::to_string(static_cast<int>(f0Db)) + " dB");
+        const auto r = analizar(falsoSubarmonico(f0Db), kE4, guitarraHz());
+        ASSERT_TRUE(r.ok);
+        ASSERT_NEAR(r.detectedHz, kE4 / 3.0, 0.5)
+            << "el estimulo no reprodujo la lectura en f0/3: sin eso el test no dice nada";
+        ASSERT_EQ(r.support, 0.0f) << "la bandera de S1 tiene que seguir en 0";
+
+        EXPECT_NE(r.state, kStateConverged)
+            << "AC-031.2: una altura sin soporte no se publica como convergida";
+        EXPECT_EQ(r.state, kStateNoLock)
+            << "AC-031.5: con la bandera en 0 el estado es NO_LOCK, no MEASURING";
+        EXPECT_TRUE(std::isnan(r.cents))
+            << "una desviacion contra una cuerda que no suena no es una medicion";
+        EXPECT_NEAR(r.detectedHz, kE4 / 3.0, 0.5)
+            << "AC-031.6: la altura que vio se sigue publicando, marcada como no confiable";
+    }
+}
+
+/**
+ * AC-031.5 · el invariante, publicacion por publicacion: NUNCA sale un snapshot con la
+ * bandera en 0 y un estado distinto de NO_LOCK, ni uno CONVERGIDO con la bandera distinta de
+ * 1. Es R-PITCH-37 ("convergido con bandera en 0") verificado sobre TODO el rastro, no sobre
+ * la ultima lectura — la compuerta y la bandera salen del mismo calculo, y esto es lo que lo
+ * afirma.
+ *
+ * Bug plausible: dos derivaciones del mismo concepto que se pisan en la transicion (la
+ * compuerta de nivel y `haveReading` de REQ-014, otra vez).
+ */
+TEST(SpectralSupport, AC0315_AFlagAtZeroAlwaysComesWithNoLockAndConvergedAlwaysWithOne) {
+    struct Caso { const char* nombre; std::vector<float> buf; };
+    const std::vector<Caso> casos = {
+        {"falso −20 dB",   falsoSubarmonico(-20.0)},
+        {"cuerda sana",    cuerdaSana(kE4)},
+        {"bordona −40 dB", bordona(40.0)},
+    };
+    for (const auto& c : casos) {
+        SCOPED_TRACE(c.nombre);
+        const auto r = analizar(c.buf, kE4, guitarraHz());
+        ASSERT_TRUE(r.ok);
+        ASSERT_EQ(r.supportTrail.size(), r.stateTrail.size());
+        ASSERT_GT(r.stateTrail.size(), 50u);
+        for (size_t i = 0; i < r.stateTrail.size(); ++i) {
+            const float flag = r.supportTrail[i];
+            const int state = r.stateTrail[i];
+            if (flag == 0.0f) {
+                EXPECT_EQ(state, kStateNoLock) << "publicacion " << i;
+            }
+            if (state == kStateConverged) {
+                EXPECT_EQ(flag, 1.0f) << "publicacion " << i << ": convergido sin soporte";
+            }
+        }
+    }
+}
+
+/**
+ * AC-031.3 · EL CONTROL POSITIVO, EN SUS DOS MITADES, con y sin candidatos. La segunda mitad
+ * NO es decorativa: la bordona a −40 dB de H2 es el caso que refuto la variante A. Sin ella,
+ * "no converjas nunca" satisface AC-031.1 y AC-031.2 — y el falso negativo es el lado que el
+ * consumidor verifico en hardware (R-PITCH-35).
+ *
+ * "La exactitud de hoy" es el presupuesto del producto: 0,1 cents, el mismo que
+ * `test_fast_mode_wiring.cpp` exige.
+ */
+TEST(SpectralSupport, AC0313_HealthyAndLegitimateBassStringsStillConvergeWithTodaysAccuracy) {
+    struct Caso { const char* nombre; std::vector<float> buf; double target; bool candidatos; double hz; };
+    const std::vector<Caso> casos = {
+        {"sana E4, sin candidatos",      cuerdaSana(kE4), kE4, false, kE4},
+        {"sana E4, con candidatos",      cuerdaSana(kE4), kE4, true,  kE4},
+        {"bordona −40, sin candidatos",  bordona(40.0),   kE2, false, kE2},
+        {"bordona −40, con candidatos (reenganche desde E4)", bordona(40.0), kE4, true, kE2},
+    };
+    for (const auto& c : casos) {
+        SCOPED_TRACE(c.nombre);
+        const auto r = analizar(c.buf, c.target, c.candidatos ? guitarraHz() : std::vector<double>{});
+        ASSERT_TRUE(r.ok);
+        ASSERT_NEAR(r.detectedHz, c.hz, 1.0) << "el estimulo no reprodujo la nota";
+        EXPECT_EQ(r.support, 1.0f);
+        EXPECT_EQ(r.state, kStateConverged) << "la compuerta no puede matar una cuerda real";
+        EXPECT_NEAR(r.cents, 0.0, 0.1) << "el presupuesto de exactitud del producto";
+    }
+}
+
+/**
+ * AC-031.3 · la AUSENCIA no se toca: silencio sigue siendo NO_SIGNAL, no NO_LOCK. La compuerta
+ * solo actua sobre una altura publicada sin soporte, y sobre silencio no hay altura.
+ *
+ * Bug plausible: derivar la bandera como 0 (y no NaN) sin altura, y que la compuerta la lea.
+ */
+TEST(SpectralSupport, AC0313_SilenceIsStillNoSignalNotNoLock) {
+    const auto silencio = analizar(std::vector<float>(static_cast<size_t>(kFrames) * 2, 0.0f),
+                                   kE4, guitarraHz());
+    ASSERT_TRUE(silencio.ok);
+    EXPECT_EQ(silencio.state, kStateNoSignal);
+    EXPECT_TRUE(std::isnan(silencio.support));
+}
+
+/**
+ * AC-031.5 · SIN altura publicada la compuerta NO ACTUA. La bandera es NaN, y NaN no es 0.
+ *
+ * Tras el falso (bandera 0, NO_LOCK) entra UN bloque de ruido: el detector produce un
+ * veredicto sin altura, la compuerta de ausencia todavia no dispara (espera
+ * `kQuietUpdatesToDeclare` veredictos mudos, REQ-019) y el estado vuelve a ser el de siempre
+ * para un hueco del detector: MEASURING (MINI-010). Que sea NO_LOCK ahi significaria que la
+ * compuerta juzgo una altura que no se publico — la bandera y el estado dejarian de hablar
+ * de lo mismo.
+ *
+ * Bug plausible, MEDIDO como mutante que sobrevivia: `unsupported = flag != 1` en vez de
+ * `flag == 0`, que trata "no hay altura" como "no le creo".
+ */
+TEST(SpectralSupport, AC0315_WithoutAPublishedPitchTheGateDoesNotAct) {
+    const auto falso = falsoSubarmonico(-20.0);
+    AnalysisRing ring;
+    AnalysisSnapshot snapshot;
+    AnalysisThread analysis(ring, snapshot);
+    ring.setCaptureRate(kRate);
+    analysis.setTargetHz(kE4);
+    const auto cand = guitarraHz();
+    analysis.setCandidates(cand.data(), static_cast<int>(cand.size()));
+
+    const int capacity = static_cast<int>(AnalysisRing::kCapacityFrames);
+    const int frames = kRate * 3;
+    int written = 0;
+    while (written < frames) {
+        const int chunk = (frames - written) < capacity ? (frames - written) : capacity;
+        ring.writeStereo(falso.data() + static_cast<size_t>(written) * 2, chunk);
+        written += chunk;
+        while (analysis.drainOnce() != AnalysisThread::DrainOutcome::kRingEmpty) {}
+    }
+    float v[kSnapshotValueCount];
+    ASSERT_TRUE(snapshot.read(v));
+    ASSERT_NEAR(v[kSnapDetectedHz], kE4 / 3.0, 0.5) << "el estimulo no reprodujo el falso";
+    ASSERT_EQ(v[kSnapSpectralSupport], 0.0f);
+    ASSERT_EQ(static_cast<int>(v[kSnapState]), kStateNoLock) << "la compuerta actuo sobre el falso";
+
+    // Un bloque de ruido blanco, bien por encima del piso de nivel y sin altura.
+    std::vector<float> ruido(static_cast<size_t>(AnalysisThread::kDrainFrames) * 2, 0.0f);
+    uint32_t seed = 777u;
+    for (size_t i = 0; i < ruido.size(); i += 2) {
+        seed = seed * 1664525u + 1013904223u;
+        const float x = 0.2f * ((static_cast<float>(seed) / 2147483648.0f) - 1.0f);
+        ruido[i] = ruido[i + 1] = x;
+    }
+    // El detector decima por 2 a 44,1 kHz (`lround(44100/24000)`), asi que su ventana son
+    // 4096 frames: el primer veredicto sin altura llega en el segundo bloque de ruido, o en
+    // el tercero si la ventana quedo a caballo del falso. La ausencia necesita TRES
+    // veredictos mudos, o sea que el primero la encuentra todavia sin declarar.
+    bool sinAltura = false;
+    for (int bloque = 0; bloque < 4 && !sinAltura; ++bloque) {
+        ring.writeStereo(ruido.data(), AnalysisThread::kDrainFrames);
+        ASSERT_EQ(analysis.drainOnce(), AnalysisThread::DrainOutcome::kPublished);
+        ASSERT_TRUE(snapshot.read(v));
+        sinAltura = v[kSnapDetectedHz] == 0.0f;
+    }
+    ASSERT_TRUE(sinAltura) << "el detector nunca solto la altura sobre ruido: el test no vio el caso";
+    ASSERT_NE(static_cast<int>(v[kSnapState]), kStateNoSignal)
+        << "la ausencia ya se declaro: el test llego tarde al hueco";
+    ASSERT_TRUE(std::isnan(v[kSnapSpectralSupport])) << "sin altura la bandera es NaN, no 0";
+    EXPECT_EQ(static_cast<int>(v[kSnapState]), kStateMeasuring)
+        << "sin altura publicada la compuerta de soporte no puede decidir NO_LOCK: el hueco "
+           "del detector sigue siendo MEASURING hasta que la ausencia se declare (REQ-019)";
 }

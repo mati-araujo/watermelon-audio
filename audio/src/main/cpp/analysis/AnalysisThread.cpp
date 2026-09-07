@@ -509,6 +509,29 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             mAbsence.update(rms < kSilenceFloor, detectorRan, tunableSourcePresent,
                             mFreshPitchVerdict);
 
+        // --- REQ-031 · ¿LA ALTURA DETECTADA ESTA EN LA SEÑAL? -----------------
+        //
+        // La bandera COMPAÑERA de `kSnapDetectedHz` (AC-031.4) y la compuerta sobre el
+        // estado (AC-031.1) salen de ESTA computacion y de ninguna otra. Derivarlas por
+        // separado permitiria que se contradigan —convergido con bandera en 0—, que es lo
+        // que R-PITCH-37 prohibe y la clase exacta de REQ-030: dos escritores del mismo
+        // concepto que se pisan.
+        //
+        // NaN cuando no hay altura: sin altura no hay nada que calificar, y un 0 se leeria
+        // como "vi una altura y no le creo". Y se pregunta `hasPitch()` ACA, ademas de al
+        // evaluar la sonda, porque el detector puede perder la altura SIN producir un
+        // veredicto nuevo —`reset()` por cambio de fuente o de rate— y ahi `mSupportDb`
+        // todavia es el de la altura vieja. La bandera sigue al valor que califica, no a la
+        // ultima evaluacion. Es la UNICA defensa, a proposito: la version con resets
+        // explicitos ademas de esto dejaba un mutante vivo (REQ-031.1, checklist 7).
+        const float spectralSupport =
+            (!mDetector.hasPitch() || std::isnan(mSupportDb))
+                ? nan
+                : (mSupportDb >= kSpectralSupportFloorDb ? 1.0f : 0.0f);
+        // "Vi una altura y no le creo": un SUBMULTIPLO que explica los mismos datos. Con
+        // NaN (sin altura) esto es false, y por eso la ausencia no se toca.
+        const bool unsupportedPitch = spectralSupport == 0.0f;
+
         // 🔴 AC-014.5 SE CUMPLE POR CONSTRUCCION, Y ESA ES LA PARTE QUE IMPORTA.
         //
         // Colgar el valor de la MISMA compuerta que el rotulo es lo que hace
@@ -521,8 +544,14 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
         //
         // Replicar la condicion con un segundo `if` mas abajo volveria a dejar
         // dos compuertas que pueden divergir: es el mismo error con otra ropa.
-        const bool haveReading = measuring && !nothingToTune && mStrobe.hasSignal() &&
-                                 mStrobe.hasMeasurement() && mStrobe.domainVerified();
+        //
+        // REQ-031 (AC-031.1): `!unsupportedPitch` va ACA por la misma razon. Los cents
+        // contra una cuerda que NO es la que suena no miden nada, y publicarlos junto a
+        // un estado no convergido seria la misma contradiccion con otra ropa: el
+        // consumidor dibujaria la aguja.
+        const bool haveReading = measuring && !nothingToTune && !unsupportedPitch &&
+                                 mStrobe.hasSignal() && mStrobe.hasMeasurement() &&
+                                 mStrobe.domainVerified();
 
         if (haveReading) {
             values[kSnapCents]       = static_cast<float>(mStrobe.cents());
@@ -552,6 +581,13 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             state = kStateNoSignal;
         } else if (!measuring) {
             state = kStateNoLock;          // hay señal, pero nadie dijo contra que medir
+        } else if (unsupportedPitch) {
+            // REQ-031 (AC-031.5): hay señal y hay una altura, pero la señal NO la sostiene.
+            // "Sin enganche" y no "midiendo": un spinner sobre una altura inventada le
+            // promete al usuario un numero que no va a llegar — el consumidor lo describio
+            // como peor que declarar ausencia. Y `kSnapDetectedHz` se publica igual
+            // (AC-031.6): "vi 109,87 y no le creo" es mas util que el silencio.
+            state = kStateNoLock;
         } else if (!haveReading) {
             state = kStateMeasuring;       // integrando, todavia sin pendiente
         } else {
@@ -579,24 +615,9 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
                                       : 0.0f;
         values[kSnapDetectionClarity] = static_cast<float>(mDetector.clarity());
 
-        // REQ-031 S1 (AC-031.4) — la bandera COMPAÑERA de `kSnapDetectedHz`: si esa altura
-        // tiene soporte en la señal. Se publica SIEMPRE, no solo al no converger.
-        //
-        // NaN cuando no hay altura: sin altura no hay nada que calificar, y un 0 se leeria
-        // como "vi una altura y no le creo". Y se pregunta `hasPitch()` ACA, ademas de al
-        // evaluar la sonda, porque el detector puede perder la altura SIN producir un
-        // veredicto nuevo —`reset()` por cambio de fuente o de rate— y ahi `mSupportDb`
-        // todavia es el de la altura vieja. La bandera sigue al valor que califica, no a la
-        // ultima evaluacion. Es la UNICA defensa, a proposito: la version con resets
-        // explicitos ademas de esto dejaba un mutante vivo (REQ-031.1, checklist 7).
-        //
-        // 🔴 UNA SOLA COMPUTACION. La compuerta del estado (S2) lee este mismo valor, no
-        // rehace la pregunta: dos derivaciones podrian contradecirse —convergido con bandera
-        // en 0—, que es lo que R-PITCH-37 prohibe.
-        values[kSnapSpectralSupport] =
-            (!mDetector.hasPitch() || std::isnan(mSupportDb))
-                ? nan
-                : (mSupportDb >= kSpectralSupportFloorDb ? 1.0f : 0.0f);
+        // REQ-031 (AC-031.4) — la bandera COMPAÑERA de `kSnapDetectedHz`, publicada SIEMPRE.
+        // Es el MISMO valor que decidio el estado mas arriba, no una segunda derivacion.
+        values[kSnapSpectralSupport] = spectralSupport;
 
         // La inarmonicidad se lee de lo que el strobe YA calculo: cuatro fases
         // que discrepan entre si son, literalmente, la rigidez de la cuerda.
