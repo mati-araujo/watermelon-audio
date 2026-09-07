@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.16.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.15.0...v2.16.0) (2026-09-07)
+
+
+### Features
+
+* **tuner:** el puerto offline acepta los candidatos del instrumento (REQ-029.1) ([137335b](https://github.com/mati-araujo/watermelon-audio/commit/137335bdf8fe10d705789507074557ccb4d6fa37))
+* **tuner:** la altura detectada dice si tiene soporte espectral (REQ-031.1) ([651e3cd](https://github.com/mati-araujo/watermelon-audio/commit/651e3cd851d5273d0908d1687b2f82343f52a2b9))
+
+
+### Bug Fixes
+
+* **tuner:** tras reenganchar, el afinador vuelve a converger ([a772862](https://github.com/mati-araujo/watermelon-audio/commit/a7728628d9681b48d19332543736e2ce070ef1cb))
+* **tuner:** una altura sin soporte espectral ya no se publica como convergida ([daa1254](https://github.com/mati-araujo/watermelon-audio/commit/daa1254b8c5402b814396ecdf70f07bff4547982))
+
 ## [2.15.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.14.0...v2.15.0) (2026-09-02)
 
 
