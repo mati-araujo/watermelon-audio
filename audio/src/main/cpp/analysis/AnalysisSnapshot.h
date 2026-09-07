@@ -215,7 +215,47 @@ enum SnapshotValue : int {
      */
     kSnapDiscontinuityCount = 16,
 
-    kSnapshotValueCount    = 17,
+    // ---- Soporte espectral (REQ-031 S1). Al final, otra vez.
+    /**
+     * ¿La altura publicada en `kSnapDetectedHz` TIENE SOPORTE en la señal? Es la
+     * bandera COMPAÑERA de ese valor: lo califica SIEMPRE, no sólo al no converger
+     * (AC-031.4).
+     *
+     *   1   hay energía en el fundamental detectado O en su octava
+     *   0   no la hay en ninguno de los dos: la altura es un SUBMÚLTIPLO que
+     *       explica los mismos datos, no algo que se midió
+     *   NaN no hay altura que calificar (`kSnapDetectedHz` es 0)
+     *
+     * POR QUÉ EXISTE. El período de una señal puede ser ambiguo: si faltan los
+     * parciales que lo desambigüan, un submúltiplo del período también es un
+     * período. Medido el 2026-09-07: una E4 con fundamental débil más H3 y H5
+     * se lee como A2 (f0/3), y con instrumento declarado el motor la publicaba
+     * CONVERGIDA a −1,955 cents — la coincidencia entre el 3.er armónico de A2 y
+     * el f0 real de E4. Un dato plausible y falso, con claridad 0,9946: la
+     * claridad NO lo delata, porque responde "¿hay UNA altura clara?" y esa
+     * pregunta tiene la misma respuesta en los dos casos.
+     *
+     * POR QUÉ EL FUNDAMENTAL **Y SU OCTAVA**, y no el fundamental solo. Una
+     * bordona real puede tener el fundamental 40 dB por debajo de H2 —es el caso
+     * que R-PITCH-35 obliga a seguir midiendo—, y ahí una pregunta sobre el
+     * fundamental solo la rechazaría: medido, −44,1 dB en la bordona legítima
+     * contra −37,5 en el falso. Lo que separa es la FORMA: en el falso faltan
+     * el fundamental Y su octava; en la cuerda real sin fundamental, H2 es el
+     * pico.
+     *
+     * NaN y no 0 cuando no hay altura: 0 significaría "vi una altura y no le
+     * creo", y sin altura no hay nada que no creer. Es la misma convención que
+     * los índices 5-7, 10 y 14 — el valor está AUSENTE, no es falso.
+     *
+     * 🔴 SALE DE LA MISMA COMPUTACIÓN QUE LA COMPUERTA DEL ESTADO (S2). Derivar
+     * la bandera y el estado por separado permitiría que se contradigan
+     * —convergido con bandera en 0—, que es exactamente lo que R-PITCH-37
+     * prohíbe y la clase de defecto de REQ-030: dos escritores del mismo
+     * concepto que se pisan.
+     */
+    kSnapSpectralSupport   = 17,
+
+    kSnapshotValueCount    = 18,
 };
 
 enum SnapshotState : int {

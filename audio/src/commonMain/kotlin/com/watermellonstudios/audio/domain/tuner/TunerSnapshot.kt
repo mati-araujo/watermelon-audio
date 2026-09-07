@@ -134,6 +134,37 @@ data class TunerSnapshot(
      * Cuenta **eventos**, no ticks: un desborde sostenido suma uno.
      */
     val discontinuityCount: Long,
+
+    /**
+     * Si [detectedHz] tiene **soporte espectral** en la señal (REQ-031). Es la bandera
+     * **compañera** de ese valor y lo califica **siempre**, no sólo cuando el estado no es
+     * [TunerState.CONVERGED]:
+     *
+     * - `true`: hay energía en ese fundamental **o en su octava**.
+     * - `false`: no la hay en ninguno de los dos. La altura es un **submúltiplo** que explica
+     *   los mismos datos, no algo que se midió — *"vi esto y no le creo"*. [detectedHz] se
+     *   sigue publicando igual, porque es más útil que el silencio.
+     * - `null`: no hay altura que calificar ([detectedHz] es `null`).
+     *
+     * **Por qué existe.** El período de una señal puede ser ambiguo: si faltan los parciales
+     * que lo desambigüan, un submúltiplo del período también es un período, y el detector
+     * puede leer una nota un tercio o un quinto **abajo** de su altura real. Medido: una E4
+     * con fundamental débil más H3 y H5 se lee como A2, y con el instrumento declarado el
+     * motor la publicaba convergida a −1,955 cents — la coincidencia entre el 3.er armónico
+     * de A2 y el f0 real de E4. [detectionClarity] **no** lo delata (0,9946 sobre el falso
+     * contra 0,9995 sobre el verdadero): responde *"¿hay UNA altura clara?"*, y esa pregunta
+     * tiene la misma respuesta en los dos casos.
+     *
+     * **Fundamental o octava, no fundamental solo.** Una bordona real puede tener el
+     * fundamental 40 dB por debajo de su segundo parcial y tiene que seguir midiéndose. Lo
+     * que separa las dos poblaciones es la **forma**, no el nivel: en el falso faltan el
+     * fundamental *y* su octava.
+     *
+     * **`Boolean?` y no `Boolean`**: sin altura la pregunta no tiene respuesta, y `false` se
+     * leería como *"vi una altura y no le creo"*. Es la misma convención que [cents] o
+     * [usableRangeCents]: ausente, no falso.
+     */
+    val spectralSupport: Boolean?,
 ) {
     companion object {
         /**
@@ -144,7 +175,7 @@ data class TunerSnapshot(
          * librería manda un array más largo y se lee el prefijo conocido, que es
          * exactamente la compatibilidad que el orden append-only compra.
          */
-        const val VALUE_COUNT: Int = 17
+        const val VALUE_COUNT: Int = 18
 
         /**
          * Arma el snapshot desde los floats nativos, en el orden que documenta
@@ -177,6 +208,9 @@ data class TunerSnapshot(
                 // no se compara por igualdad exacta.
                 inputDiscontinuity = values[15] >= 0.5f,
                 discontinuityCount = values[16].toLong(),
+                // NaN = no hay altura que calificar (REQ-031). El `>= 0.5f` es la misma
+                // defensa que los índices 11 y 15.
+                spectralSupport = values[17].takeIf { !it.isNaN() }?.let { it >= 0.5f },
             )
         }
     }

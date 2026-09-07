@@ -782,7 +782,7 @@ WMA_API void wma_input_release(WmaEngine* engine);
  * knows and ignores the tail. Reordering or repurposing an existing index would
  * silently change what an already-shipped consumer displays.
  */
-#define WMA_TUNER_SNAPSHOT_VALUES 17
+#define WMA_TUNER_SNAPSHOT_VALUES 18
 
 /**
  * Start the analysis seam: the capture thread begins feeding a lock-free ring,
@@ -1035,6 +1035,45 @@ WMA_API float wma_intonation_difference_cents(const WmaEngine* engine);
  *
  *                              Counts EVENTS, not ticks: a sustained overrun adds
  *                              one.
+ *
+ *                         [17] whether the pitch in [8] has SPECTRAL SUPPORT in
+ *                              the signal (REQ-031). It is the COMPANION of [8]
+ *                              and qualifies it ALWAYS, not only when the state
+ *                              is not converged:
+ *                                1   there is energy at that fundamental OR at
+ *                                    its octave
+ *                                0   there is energy at neither: the pitch is a
+ *                                    SUBMULTIPLE that explains the same data, not
+ *                                    something that was measured. "I saw this and
+ *                                    I do not trust it" — [8] is still published,
+ *                                    which is more useful than silence
+ *                                NaN there is no pitch to qualify ([8] is 0)
+ *
+ *                              Why it exists: the period of a signal can be
+ *                              ambiguous. When the partials that pin it down are
+ *                              missing, a submultiple of the period is also a
+ *                              period, and the detector can read a note a third
+ *                              or a fifth below its true pitch. Measured: an E4
+ *                              with a weak fundamental plus H3 and H5 reads as A2
+ *                              (f0/3), and with the instrument declared the
+ *                              engine published it CONVERGED at -1.955 cents —
+ *                              the coincidence between A2's 3rd harmonic and
+ *                              E4's real fundamental. Clarity ([9]) does NOT
+ *                              expose this: 0.9946 on the false reading against
+ *                              0.9995 on the true one, because clarity answers
+ *                              "is there ONE clear pitch?" and that question has
+ *                              the same answer in both cases.
+ *
+ *                              Fundamental OR octave, not fundamental alone: a
+ *                              real bass string can sit 40 dB below its second
+ *                              partial and must keep being measured. What
+ *                              separates the two populations is the SHAPE, not
+ *                              the level — in the false reading both the
+ *                              fundamental and its octave are missing.
+ *
+ *                              NaN and not 0 when there is no pitch, like
+ *                              [5]-[7], [10] and [14]: the value is ABSENT, it is
+ *                              not "false".
  *
  *                         B comes free with REQ-001 S6: four tracked partials
  *                         that disagree ARE the string's stiffness, so nothing

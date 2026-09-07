@@ -144,6 +144,9 @@ class FakeTuner(
             // normal, pero el parametro EXISTE para que un test que necesite
             // "ya hubo un corte" lo pueda decir en vez de no poder expresarlo.
             discontinuityCount: Long = 0L,
+            // REQ-031. `null` porque `detectedHz` arranca en null: sin altura no hay
+            // nada que calificar. Un test que ponga una altura dice tambien si le cree.
+            spectralSupport: Boolean? = null,
         ) = TunerSnapshot(
             captureSampleRate = captureSampleRate,
             levelRms = levelRms,
@@ -161,6 +164,7 @@ class FakeTuner(
             usableRangeCents = usableRangeCents,
             inputDiscontinuity = inputDiscontinuity,
             discontinuityCount = discontinuityCount,
+            spectralSupport = spectralSupport,
         )
 
         /** Un snapshot con medición, para los tests que necesitan un número. */
@@ -179,6 +183,10 @@ class FakeTuner(
             // normal, pero el parametro EXISTE para que un test que necesite
             // "ya hubo un corte" lo pueda decir en vez de no poder expresarlo.
             discontinuityCount: Long = 0L,
+            // REQ-031. `true` es el valor HONESTO de un snapshot que se declara convergido
+            // sobre 440 Hz —convergido sin soporte es lo que el motor ya no publica—, no
+            // uno comodo. Un test del falso lo pone en false a proposito.
+            spectralSupport: Boolean? = true,
         ) = TunerSnapshot(
             captureSampleRate = 48000,
             levelRms = 0.2f,
@@ -196,6 +204,7 @@ class FakeTuner(
             usableRangeCents = usableRangeCents,
             inputDiscontinuity = inputDiscontinuity,
             discontinuityCount = discontinuityCount,
+            spectralSupport = spectralSupport,
         )
     }
 }

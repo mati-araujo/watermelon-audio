@@ -45,6 +45,7 @@ add_executable(analysis_tests
     test_poor_stimulus_matrix.cpp
     test_offline_regression.cpp
     test_corpus_sweep.cpp
+    test_spectral_support.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp

@@ -408,6 +408,9 @@ class TunerContractTest {
         0f, 2f, 21f,
         inputDiscontinuity,
         discontinuityCount,
+        // REQ-031: los 440 Hz de arriba tienen soporte. Valor honesto para un guion con
+        // altura, no cómodo.
+        1f,
     )
 
     private fun nativoSinPitch(): FloatArray =

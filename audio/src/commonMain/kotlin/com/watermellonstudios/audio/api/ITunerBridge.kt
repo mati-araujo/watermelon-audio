@@ -58,6 +58,12 @@ interface ITunerBridge {
      * 🔴 El número va por la constante y no escrito acá: este KDoc decía "ocho"
      * mientras el snapshot ya tenía quince, y un consumidor diseñó contra esa cifra.
      *
+     * El orden es el que documenta `wma_tuner_get_snapshot` en la C API, y es
+     * **append-only**: lo nuevo va al final. Desde REQ-031 el último índice es la bandera
+     * **compañera** de la altura detectada —si esa altura tiene soporte espectral en la
+     * señal— y se publica **siempre**, no sólo al no converger. Ver
+     * [com.watermellonstudios.audio.domain.tuner.TunerSnapshot.spectralSupport].
+     *
      * 🔴 **`stop()` NO borra la última lectura, y eso es una garantía del motor.**
      * Esta función lee de un buffer **publicado**, no del hilo de análisis corriendo,
      * y `wma_tuner_stop` no libera ni el ring ni el snapshot —está dicho explícito
