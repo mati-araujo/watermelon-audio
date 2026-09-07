@@ -292,5 +292,71 @@ TEST(McLeodPitchCost, TheDetectorCostsAFractionOfRealTimeAndTheNumberIsRecorded)
         << "la deteccion gruesa cuesta " << fraction * 100.0 << " % del tiempo real";
 }
 
+/**
+ * MINI-019 — `kPeakThreshold` fijada contra un mutante PLAUSIBLE, no sólo contra uno
+ * aniquilante.
+ *
+ * 🔴 POR QUE HACE FALTA OTRO TEST SI YA HAY UNO DE OCTAVA
+ * ------------------------------------------------------
+ * `ItNeverPicksTheWrongOctaveWhenTheFundamentalIsWeak` mata el mutante `0,9 -> 0`, que
+ * APAGA la defensa entera. Eso no dice nada sobre `0,9 -> 0,80`, que es la mutación que
+ * produciría un cambio real — y esa **sobrevivía la suite entera** (1224 tests, medido).
+ *
+ * La razón es el ESTIMULO: aquel test usa f0 + H2 + H3, y el H3 impar rompe la
+ * periodicidad en tau/2, así que la NSDF en tau/2 nunca compite. Medido: de -6 a -60 dB,
+ * los umbrales 0,80 · 0,90 · 0,95 dan los tres razón 1,000. El estímulo es INSENSIBLE a
+ * la constante que el test dice vigilar.
+ *
+ * Con **sólo pares** (f0 + H2) tau/2 casi explica la señal y el umbral DECIDE. Medido, la
+ * profundidad a partir de la cual el detector se va a la octava:
+ *
+ *     kPeakThreshold   se equivoca desde
+ *          0,80             -9 dB
+ *          0,90            -12 dB     <- el valor de hoy
+ *          0,95            -13 dB
+ *          0,99 / 1,00     mas alla de -14 dB
+ *
+ * De ahí sale la ventana de este test: **-9 a -11 dB**, donde 0,90 acierta y 0,80 falla en
+ * los tres puntos.
+ *
+ * 🔴 OJO CON LEER ESA TABLA DE MAS. Sobre ESTE estímulo subir el umbral es monótonamente
+ * MAS robusto, lo que parecería contradecir al KDoc de la constante (*"subirlo a 1,0 trae
+ * de vuelta la octava"*). No lo contradice: el KDoc tiene razón y el test de arriba lo
+ * demuestra — con f0+H2+H3 se pone **rojo con 0,95 y con 1,00**. O sea que los dos tests se
+ * reparten las direcciones:
+ *
+ *     mutante        0,9 -> 0     0,9 -> 0,80    0,9 -> 0,95    0,9 -> 1,00
+ *     octava (H3)      ROJO          verde          ROJO           ROJO
+ *     este (pares)     ROJO          ROJO           verde          verde
+ *
+ * La conclusión "subir es inocuo" salió de mirar un solo estímulo, y es falsa. Es la misma
+ * trampa que REQ-031: una no-reproducción es una afirmación sobre **el estímulo probado**,
+ * nunca sobre la clase.
+ */
+TEST(McLeodPitchTest, ThePeakThresholdIsPinnedAgainstAPlausibleMutant) {
+    constexpr double kF0 = 82.4069;   // E2
+
+    for (const double db : {9.0, 10.0, 11.0}) {
+        std::vector<float> sig(static_cast<size_t>(kRate), 0.0f);
+        const double weakAmp = 0.5 * std::pow(10.0, -db / 20.0);
+        const auto fundamental = pureSine(kF0, kRate, kRate, weakAmp);
+        const auto second      = pureSine(kF0 * 2.0, kRate, kRate, 0.5);
+        for (size_t i = 0; i < sig.size(); ++i) sig[i] = fundamental[i] + second[i];
+
+        McLeodPitch mpm;
+        mpm.prepare(kRate);
+        feed(mpm, sig);
+
+        ASSERT_TRUE(mpm.hasPitch())
+            << "sin altura no hay veredicto que juzgar, con el fundamental a -" << db << " dB";
+        const double ratio = mpm.frequencyHz() / kF0;
+        EXPECT_NEAR(ratio, 1.0, 0.01)
+            << "con el fundamental a -" << db << " dB de H2 el detector se fue a "
+            << mpm.frequencyHz() << " Hz (razon " << ratio << "). Razon ~2 es LA OCTAVA, y "
+            << "aca la trae bajar `kPeakThreshold`: con 0,80 los tres puntos de este barrido "
+            << "fallan. Si este test se pone rojo, mira esa constante antes que el estimulo.";
+    }
+}
+
 }  // namespace
 }  // namespace wma_test
