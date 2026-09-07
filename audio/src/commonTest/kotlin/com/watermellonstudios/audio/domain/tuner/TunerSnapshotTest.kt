@@ -46,10 +46,11 @@ class TunerSnapshotTest {
         usableRangeCents: Float = 118.9f,
         inputDiscontinuity: Float = 0f,
         discontinuityCount: Float = 4f,
+        spectralSupport: Float = 1f,
     ) = floatArrayOf(rate, rms, frames, dropped, state, cents, phase, uncertainty,
                      detectedHz, clarity, inharmonicityB, inharmonicityMeasured,
                      lockedString, fastModeState, usableRangeCents, inputDiscontinuity,
-                     discontinuityCount)
+                     discontinuityCount, spectralSupport)
 
     @Test
     fun elOrdenDeLosValoresEsElDelContratoNativo() {
@@ -148,8 +149,46 @@ class TunerSnapshotTest {
         // Si esto cambia sin que cambie WMA_TUNER_SNAPSHOT_VALUES, el consumidor
         // pasa un array de otro tamaño que el que la C API va a llenar. Del lado
         // de C++ lo para un static_assert; de este lado, esta línea.
-        assertEquals(17, TunerSnapshot.VALUE_COUNT)
+        assertEquals(18, TunerSnapshot.VALUE_COUNT)
         assertEquals(TunerSnapshot.VALUE_COUNT, nativeValues().size)
+    }
+
+    /**
+     * REQ-031 · 1.6 — el slot 17 es la bandera COMPAÑERA de `detectedHz`, y llega en las
+     * TRES formas: con soporte, sin soporte, y sin altura que calificar.
+     *
+     * Un test de una sola dirección lo pasa un campo clavado en su default; por eso van los
+     * tres valores con la misma función. Y el tercero no es `false`: sin altura la pregunta
+     * no tiene respuesta, y `false` se leería como "vi una altura y no le creo".
+     */
+    @Test
+    fun laBanderaDeSoporteLlegaEnSusTresFormas() {
+        val conSoporte = assertNotNull(TunerSnapshot.fromNative(nativeValues(spectralSupport = 1f)))
+        val sinSoporte = assertNotNull(TunerSnapshot.fromNative(nativeValues(spectralSupport = 0f)))
+        val sinAltura = assertNotNull(
+            TunerSnapshot.fromNative(nativeValues(detectedHz = 0f, spectralSupport = Float.NaN))
+        )
+
+        assertEquals(true, conSoporte.spectralSupport)
+        assertEquals(false, sinSoporte.spectralSupport, "el motor dijo que no le cree y no llegó")
+        assertNull(sinAltura.spectralSupport, "sin altura no hay nada que calificar: null, no false")
+        assertNull(sinAltura.detectedHz)
+    }
+
+    /**
+     * REQ-031 · AC-031.6 — con la bandera en `false`, `detectedHz` SIGUE llegando: la altura
+     * que el motor vio, marcada como no confiable, no un hueco. "Vi 109,87 y no le creo" es
+     * más útil que el silencio, y es la bandera la que evita que se lea como medición.
+     *
+     * Bug plausible: un mapeo que anule `detectedHz` cuando la bandera está en 0.
+     */
+    @Test
+    fun sinSoporteLaAlturaDetectadaSigueLlegando() {
+        val snap = assertNotNull(
+            TunerSnapshot.fromNative(nativeValues(detectedHz = 109.874f, spectralSupport = 0f))
+        )
+        assertEquals(false, snap.spectralSupport)
+        assertEquals(109.874f, snap.detectedHz, "la altura no confiable se publica igual, marcada")
     }
 
     /**

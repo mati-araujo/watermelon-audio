@@ -66,11 +66,21 @@ bool analyzeBuffer(const float* interleaved, int frames, int sampleRate,
  * objetivo x tono, las 30 de afuera de la diagonal daban `NO_SIGNAL` con la altura
  * EXACTA y claridad 0,9999 — tocando fuerte.
  *
- * 🔴 Con candidatos ese caso NO EXISTE, y esta medido: el modo rapido reengancha el
- * objetivo a la cuerda que suena (`AnalysisThread.cpp:324-332`) y el motor la mide.
- * O sea que declarar el instrumento **no mejora** la respuesta: es la que hace que
- * la pregunta del consumidor sea contestable. Esta funcion existe porque el puerto
- * offline no tenia como expresarlo, y era el unico camino donde el consumidor mide.
+ * 🔴 Con candidatos ese caso NO EXISTE **para una cuerda ajena**, y esta medido: el
+ * modo rapido reengancha el objetivo a la cuerda que suena (`AnalysisThread.cpp`, el
+ * bloque "el modo rapido elige el objetivo") y el motor la mide. O sea que declarar
+ * el instrumento **no mejora** la respuesta: es la que hace que la pregunta del
+ * consumidor sea contestable. Esta funcion existe porque el puerto offline no tenia
+ * como expresarlo, y era el unico camino donde el consumidor mide.
+ *
+ * 🔴 Y el alcance de esa frase es EXACTAMENTE ese: la cuerda ajena leida en su
+ * altura. Para una **cuerda correcta leida en un subarmonico** —f0 debil, sin H2,
+ * con H3 y H5— el caso no desaparece con candidatos: **empeora**. El reenganche va
+ * a la cuerda del submultiplo (una E4 leida como A2) y el motor la medía CONVERGIDA
+ * a −1,955 cents, la coincidencia entre el 3.er armonico de A2 y el f0 real. Lo
+ * encontro el consumidor leyendo este contrato, y lo cierra REQ-031: una altura sin
+ * soporte espectral (indice 17 del snapshot) se publica como NO_LOCK, con
+ * `detectedHz` intacto, nunca como convergida.
  *
  * @param candidatesHz    los objetivos en Hz, EN ORDEN DE CUERDA. `nullptr` o
  *                        `candidateCount <= 0` es legal y equivale a la sobrecarga

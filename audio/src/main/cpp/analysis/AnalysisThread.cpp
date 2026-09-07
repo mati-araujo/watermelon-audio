@@ -1,5 +1,6 @@
 #include "AnalysisThread.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -13,6 +14,71 @@ constexpr float kSilenceFloor = 0.001f;
 /// contra los ~170 ms que el ring aguanta antes de pisar.
 constexpr auto kIdleNap = std::chrono::milliseconds(5);
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// SpectralSupportProbe (REQ-031 S1). El porqué entero está en el header.
+// ---------------------------------------------------------------------------
+
+SpectralSupportProbe::SpectralSupportProbe()
+    : mRing(static_cast<size_t>(kWindowFrames), 0.0f),
+      mHann(static_cast<size_t>(kWindowFrames), 0.0f) {
+    static_assert((kWindowFrames & (kWindowFrames - 1)) == 0,
+                  "el ring indexa con mascara: el largo tiene que ser potencia de dos");
+    // Hann "periódica" centrada en (i + ½): sin ceros exactos en las puntas, que a este largo
+    // no cambian la fuga y sí tiran un frame de cada lado. La ventana no depende del rate, así
+    // que se calcula una sola vez.
+    for (int i = 0; i < kWindowFrames; ++i) {
+        mHann[static_cast<size_t>(i)] = static_cast<float>(
+            0.5 * (1.0 - std::cos(2.0 * M_PI * (static_cast<double>(i) + 0.5) / kWindowFrames)));
+    }
+}
+
+void SpectralSupportProbe::pushMono(const float* mono, int numFrames) noexcept {
+    constexpr int kMask = kWindowFrames - 1;
+    for (int i = 0; i < numFrames; ++i) {
+        mRing[static_cast<size_t>(mWrite)] = mono[i];
+        mWrite = (mWrite + 1) & kMask;
+    }
+    if (mFilled < kWindowFrames) {
+        mFilled = numFrames >= kWindowFrames - mFilled ? kWindowFrames : mFilled + numFrames;
+    }
+}
+
+double SpectralSupportProbe::magnitudeAt(int sampleRate, double hz) const noexcept {
+    constexpr int kMask = kWindowFrames - 1;
+    const double w = 2.0 * M_PI * hz / static_cast<double>(sampleRate);
+    const double c = 2.0 * std::cos(w);
+    double s1 = 0.0, s2 = 0.0;
+    // Del frame más VIEJO al más nuevo, para que la ventana de Hann pese la señal en el orden
+    // en que sonó. `mWrite` apunta al slot que se va a pisar, o sea al más viejo.
+    for (int k = 0; k < kWindowFrames; ++k) {
+        const size_t idx = static_cast<size_t>((mWrite + k) & kMask);
+        const double x = static_cast<double>(mRing[idx]) * mHann[static_cast<size_t>(k)];
+        const double s = x + c * s1 - s2;
+        s2 = s1;
+        s1 = s;
+    }
+    // La magnitud de Goertzel; el `max(0, ·)` sólo defiende el redondeo de un valor que por
+    // construcción no es negativo.
+    return std::sqrt(std::max(0.0, s1 * s1 + s2 * s2 - c * s1 * s2));
+}
+
+double SpectralSupportProbe::supportDb(int sampleRate, double hz) const noexcept {
+    const double none = -std::numeric_limits<double>::infinity();
+    if (sampleRate <= 0 || hz <= 0.0) return none;
+    double peak = 0.0, fundamental = 0.0, octave = 0.0;
+    for (int k = 1; k <= kHarmonics; ++k) {
+        const double f = hz * k;
+        if (f >= 0.5 * sampleRate) break;   // por encima de Nyquist no hay parcial que medir
+        const double m = magnitudeAt(sampleRate, f);
+        if (k == 1) fundamental = m;
+        if (k == 2) octave = m;
+        if (m > peak) peak = m;
+    }
+    const double best = std::max(fundamental, octave);
+    if (peak <= 0.0 || best <= 0.0) return none;
+    return 20.0 * std::log10(best / peak);
+}
 
 void AnalysisThread::start(int captureSampleRate) {
     if (mRunning.exchange(true, std::memory_order_acq_rel)) {
@@ -99,6 +165,9 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // no volveria a medir nunca.
             mAppliedTarget = 0.0;
             mLastUserTarget = -1.0;   // -1 no es un objetivo posible: fuerza la re-aplicacion
+            // `mSupportDb` NO se toca aca a proposito: la bandera se deriva de `hasPitch()`
+            // al publicar, asi que sigue sola al detector reseteado. Un reset explicito aca
+            // era una segunda defensa que ningun mutante podia matar (REQ-031.1).
         }
 
         double target = mTargetHz.load(std::memory_order_acquire);
@@ -321,6 +390,24 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // veredicto NUEVO. La compuerta de ausencia lo necesita para no contar la
             // misma evidencia una vez por bloque leido (REQ-019.2).
             mFreshPitchVerdict = mDetector.process(mScratch.data(), got);
+
+            // REQ-031 S1 — la sonda de soporte espectral come el MISMO bloque que el
+            // detector, y se evalua SOLO cuando el detector produjo un veredicto nuevo: es
+            // la altura de ese veredicto la que califica, sobre los frames que lo terminaron.
+            // Entre veredictos la altura no cambia, asi que su soporte tampoco — y por eso la
+            // bandera no puede parpadear mas rapido que el propio detector.
+            mSupportProbe.pushMono(mScratch.data(), got);
+            if (mFreshPitchVerdict) {
+                if (!mDetector.hasPitch()) {
+                    mSupportDb = std::numeric_limits<double>::quiet_NaN();
+                } else if (mSupportProbe.isPrimed()) {
+                    mSupportDb = mSupportProbe.supportDb(mPreparedRate, mDetector.frequencyHz());
+                }
+                // Con altura y la sonda todavia sin ventana entera (no pasa en la practica:
+                // el detector necesita al menos una ventana propia, que es igual o mas larga)
+                // se conserva el ultimo soporte, que es de la misma altura o de la vuelta
+                // anterior: a lo sumo 46 ms de atraso, nunca un valor inventado.
+            }
         }
         if (measuring) {
             mStrobe.setCoarseFrequencyHz(
@@ -422,6 +509,29 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             mAbsence.update(rms < kSilenceFloor, detectorRan, tunableSourcePresent,
                             mFreshPitchVerdict);
 
+        // --- REQ-031 · ¿LA ALTURA DETECTADA ESTA EN LA SEÑAL? -----------------
+        //
+        // La bandera COMPAÑERA de `kSnapDetectedHz` (AC-031.4) y la compuerta sobre el
+        // estado (AC-031.1) salen de ESTA computacion y de ninguna otra. Derivarlas por
+        // separado permitiria que se contradigan —convergido con bandera en 0—, que es lo
+        // que R-PITCH-37 prohibe y la clase exacta de REQ-030: dos escritores del mismo
+        // concepto que se pisan.
+        //
+        // NaN cuando no hay altura: sin altura no hay nada que calificar, y un 0 se leeria
+        // como "vi una altura y no le creo". Y se pregunta `hasPitch()` ACA, ademas de al
+        // evaluar la sonda, porque el detector puede perder la altura SIN producir un
+        // veredicto nuevo —`reset()` por cambio de fuente o de rate— y ahi `mSupportDb`
+        // todavia es el de la altura vieja. La bandera sigue al valor que califica, no a la
+        // ultima evaluacion. Es la UNICA defensa, a proposito: la version con resets
+        // explicitos ademas de esto dejaba un mutante vivo (REQ-031.1, checklist 7).
+        const float spectralSupport =
+            (!mDetector.hasPitch() || std::isnan(mSupportDb))
+                ? nan
+                : (mSupportDb >= kSpectralSupportFloorDb ? 1.0f : 0.0f);
+        // "Vi una altura y no le creo": un SUBMULTIPLO que explica los mismos datos. Con
+        // NaN (sin altura) esto es false, y por eso la ausencia no se toca.
+        const bool unsupportedPitch = spectralSupport == 0.0f;
+
         // 🔴 AC-014.5 SE CUMPLE POR CONSTRUCCION, Y ESA ES LA PARTE QUE IMPORTA.
         //
         // Colgar el valor de la MISMA compuerta que el rotulo es lo que hace
@@ -434,8 +544,14 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
         //
         // Replicar la condicion con un segundo `if` mas abajo volveria a dejar
         // dos compuertas que pueden divergir: es el mismo error con otra ropa.
-        const bool haveReading = measuring && !nothingToTune && mStrobe.hasSignal() &&
-                                 mStrobe.hasMeasurement() && mStrobe.domainVerified();
+        //
+        // REQ-031 (AC-031.1): `!unsupportedPitch` va ACA por la misma razon. Los cents
+        // contra una cuerda que NO es la que suena no miden nada, y publicarlos junto a
+        // un estado no convergido seria la misma contradiccion con otra ropa: el
+        // consumidor dibujaria la aguja.
+        const bool haveReading = measuring && !nothingToTune && !unsupportedPitch &&
+                                 mStrobe.hasSignal() && mStrobe.hasMeasurement() &&
+                                 mStrobe.domainVerified();
 
         if (haveReading) {
             values[kSnapCents]       = static_cast<float>(mStrobe.cents());
@@ -465,6 +581,13 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             state = kStateNoSignal;
         } else if (!measuring) {
             state = kStateNoLock;          // hay señal, pero nadie dijo contra que medir
+        } else if (unsupportedPitch) {
+            // REQ-031 (AC-031.5): hay señal y hay una altura, pero la señal NO la sostiene.
+            // "Sin enganche" y no "midiendo": un spinner sobre una altura inventada le
+            // promete al usuario un numero que no va a llegar — el consumidor lo describio
+            // como peor que declarar ausencia. Y `kSnapDetectedHz` se publica igual
+            // (AC-031.6): "vi 109,87 y no le creo" es mas util que el silencio.
+            state = kStateNoLock;
         } else if (!haveReading) {
             state = kStateMeasuring;       // integrando, todavia sin pendiente
         } else {
@@ -491,6 +614,10 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
                                       ? static_cast<float>(mDetector.frequencyHz())
                                       : 0.0f;
         values[kSnapDetectionClarity] = static_cast<float>(mDetector.clarity());
+
+        // REQ-031 (AC-031.4) — la bandera COMPAÑERA de `kSnapDetectedHz`, publicada SIEMPRE.
+        // Es el MISMO valor que decidio el estado mas arriba, no una segunda derivacion.
+        values[kSnapSpectralSupport] = spectralSupport;
 
         // La inarmonicidad se lee de lo que el strobe YA calculo: cuatro fases
         // que discrepan entre si son, literalmente, la rigidez de la cuerda.

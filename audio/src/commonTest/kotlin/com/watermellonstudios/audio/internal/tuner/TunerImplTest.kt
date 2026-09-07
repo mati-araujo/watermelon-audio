@@ -73,6 +73,10 @@ class TunerImplTest {
         0f, 2f, 21f,
         inputDiscontinuity,
         discontinuityCount,
+        // REQ-031: la altura de arriba (440) tiene soporte. Es el valor HONESTO para un
+        // snapshot que se declara convergido, no uno cómodo: convergido sin soporte es
+        // justo lo que el motor ya no publica.
+        1f,
     )
 
     // =======================================================================
