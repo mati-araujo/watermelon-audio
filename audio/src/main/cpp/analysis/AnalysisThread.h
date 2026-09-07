@@ -34,6 +34,7 @@
 #include "FastModeTracker.h"
 #include "AbsenceGate.h"
 #include "../dsp/McLeodPitch.h"
+#include "../platform/RtCounter.h"
 
 #include <atomic>
 #include <mutex>
@@ -75,6 +76,27 @@ public:
     /// Vueltas completas del lazo. Lo lee el test para saber que arranco de
     /// verdad, en vez de dormir un rato y suponer.
     uint64_t ticks() const noexcept { return mTicks.load(std::memory_order_relaxed); }
+
+    /**
+     * @brief Cuantas veces se APLICO el objetivo, separado por quien lo pidio (REQ-030 S1).
+     *
+     * POR QUE HACE FALTA UN CONTADOR Y NO ALCANZA MIRAR EL DESENLACE
+     * -------------------------------------------------------------
+     * El objetivo tiene dos escritores —el consumidor por `setTargetHz()` y el modo rapido
+     * cuando reengancha— y lo unico que un test podia ver hasta ahora era el estado final.
+     * Eso NO alcanza: una lectura que no converge y una que converge tarde se parecen, y una
+     * que converge por otra razon pasa igual. Lo que decide es **cuantas veces se re-aplico**,
+     * porque cada re-aplicacion descarta el ring y le corta la integracion al estimador.
+     *
+     * 🔴 Y no habia con que verlo: `AnalysisRing::skipToNewest()` declara explicitamente que
+     * **no cuenta como frames perdidos** —es una decision del lector, no un atraso—, asi que
+     * `droppedFrames()` no lo delata, y el snapshot no lleva el dato.
+     *
+     * Un objetivo estable deja los dos quietos. Que sigan subiendo tick a tick es el defecto
+     * de REQ-030: medido, 27 y 26 en 5 s contra 1 y 0 de un objetivo correcto de entrada.
+     */
+    uint64_t targetAppliedByUser() const noexcept { return mTargetAppliedByUser.get(); }
+    uint64_t targetAppliedByFastMode() const noexcept { return mTargetAppliedByFastMode.get(); }
 
     /**
      * @brief Las cuatro fases del strobe, para que S7 lea la inarmonicidad sin
@@ -297,6 +319,28 @@ private:
     /// `prepare()` asigna y `setTarget()` reinicia la integracion.
     int mPreparedRate{0};
     double mAppliedTarget{0.0};
+
+    /**
+     * El ultimo objetivo que pidio EL CONSUMIDOR, que no es lo mismo que el aplicado.
+     *
+     * 🔴 Existe porque `mAppliedTarget` tiene DOS escritores —`setTargetHz()` y el modo
+     * rapido cuando reengancha— y la rama que re-aplica preguntaba *"¿lo aplicado difiere de
+     * lo pedido?"*. Esa pregunta y *"¿cambio lo que pide el consumidor?"* son la misma
+     * mientras hay un solo escritor, y dejan de serlo en cuanto aparece el segundo: apenas el
+     * modo rapido reengancha, difieren PARA SIEMPRE y las dos ramas se pisan una vez por
+     * tick, descartando el ring cada vez (REQ-030).
+     *
+     * Arranca en 0 igual que `mTargetHz`, para que "todavia no pidieron nada" no dispare una
+     * re-aplicacion en el primer tick. Los centinelas de re-aplicacion lo bajan a -1, que no
+     * es un objetivo posible.
+     */
+    double mLastUserTarget{0.0};
+
+    // REQ-030 S1 — miembros y no globales: un contador global de proceso hace que dos
+    // instancias se pisen, que es la leccion WD-1.5 que `RtCounter.h` documenta. Cada test
+    // construye su propio `AnalysisThread`, asi que arrancan en cero solos.
+    wma::RtCounter mTargetAppliedByUser;
+    wma::RtCounter mTargetAppliedByFastMode;
 
     std::thread mThread;
     std::atomic<bool> mRunning{false};
