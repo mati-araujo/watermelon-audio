@@ -220,10 +220,11 @@ namespace {
  *
  * Es el archivo del consumidor, renderizado por este repo con la misma receta (byte a byte: la
  * tabla por tramos de `scripts/spectrum-by-segment.py` reproduce la suya al decimo). Sobre el,
- * REQ-031 tiene que valer igual que sobre la sintesis: el detector lee f0/3 (109,87 Hz), la
- * bandera dice 0 y el estado es NO_LOCK. Si un dia el detector lee E4, ESTE test cambia: la
- * segunda mitad se pone roja para que se escriba el desenlace nuevo, no para que pase en
- * silencio.
+ * REQ-031 tiene que valer igual que sobre la sintesis. Hasta REQ-033 el desenlace era: el
+ * detector lee f0/3 (109,87 Hz), la bandera dice 0 y el estado es NO_LOCK; y el test decia que
+ * si un dia el detector leia E4, la segunda mitad se ponia roja para que se ESCRIBIERA el
+ * desenlace nuevo. Paso el 2026-09-07 (REQ-033 S2): el detector lee E4 —329,614 contra 329,634
+ * del oraculo—, la bandera dice 1 y converge a −0,66 c. Eso es lo que se afirma ahora.
  *
  * Bug plausible: la compuerta de REQ-031 valiendo solo sobre la sintesis (otro nivel, otro
  * espectro, otra cola) — que es exactamente lo que el corpus existe para preguntar.
@@ -253,15 +254,15 @@ TEST(CorpusRealE4, TheConsumersFileIsNeverPublishedAsConvergedOnA2) {
     // La garantia de REQ-031, sobre TODAS las publicaciones de la nota.
     EXPECT_EQ(o.convergedWithoutSupport, 0)
         << "publico CONVERGED con la bandera en 0: el dato plausible y falso volvio";
-    EXPECT_NE(o.state, wma::analysis::kStateConverged) << "termino convergida";
 
-    // Y en que termino HOY, medido: f0/3, sin soporte, sin enganche. Si esto cambia, es un
-    // hallazgo que hay que escribir, no un pase.
-    EXPECT_NEAR(o.detectedHz, e4->trueHz / 3.0, 1.0)
-        << "ya no lee f0/3 (" << o.detectedHz << " Hz): el desenlace cambio, escribilo";
-    EXPECT_EQ(o.spectralSupport, 0.0f);
-    EXPECT_EQ(o.state, wma::analysis::kStateNoLock)
-        << "con instrumento declarado una altura sin soporte es NO_LOCK (R-API-26)";
+    // Y en que termino HOY, medido (REQ-033): E4 con soporte, convergida, dentro del
+    // presupuesto del corpus. Si esto cambia, es un hallazgo que hay que escribir, no un pase.
+    EXPECT_NEAR(o.detectedHz, e4->trueHz, 1.0)
+        << "ya no lee E4 (" << o.detectedHz << " Hz): el desenlace cambio, escribilo";
+    EXPECT_EQ(o.spectralSupport, 1.0f);
+    EXPECT_EQ(o.state, wma::analysis::kStateConverged);
+    EXPECT_TRUE(o.published) << "no trajo lectura fina";
+    EXPECT_LT(std::fabs(o.cents), 6.0) << o.cents << " c: fuera del presupuesto medido del corpus";
 }
 
 }  // namespace

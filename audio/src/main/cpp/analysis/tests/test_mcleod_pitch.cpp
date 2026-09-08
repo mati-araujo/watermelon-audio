@@ -418,9 +418,11 @@ std::vector<Stimulus> stimuli() {
 
 struct Row {
     int lag;
-    double coarse;    // lo que el barrido vio y lo que la eleccion uso
-    double fine;      // max de nsdfAt en ±2
+    double coarse;    // lo que el barrido vio
+    double fine;      // max de nsdfAt en ±2 (la sonda de S1, independiente del detector)
     int fineLag;
+    double refined;   // el pico REAL que el detector refino en ±lag/12 (S2): lo que la eleccion usa
+    int refinedLag;
 };
 
 /**
@@ -440,7 +442,8 @@ std::vector<Row> tableOf(const McLeodPitch& mpm) {
     std::vector<Row> rows;
     for (int i = 0; i < mpm.sweepCandidateCount(); ++i) {
         const int lag = mpm.sweepCandidateLag(i);
-        Row r{lag, mpm.sweepCandidateNsdf(i), -2.0, lag};
+        Row r{lag, mpm.sweepCandidateNsdf(i), -2.0, lag,
+              mpm.sweepCandidateRefinedNsdf(i), mpm.sweepCandidateRefinedLag(i)};
         // La sonda muestra lo que la eleccion uso, sobre la ventana que la eleccion vio.
         EXPECT_EQ(mpm.nsdfAt(lag), r.coarse)
             << "lag " << lag << ": nsdfAt no coincide con el valor grueso — la ventana ya no "
@@ -454,10 +457,21 @@ std::vector<Row> tableOf(const McLeodPitch& mpm) {
     return rows;
 }
 
-/// La regla del detector, replicada para la columna "elegido por el barrido": primer
-/// candidato con grueso ≥ kPeakThreshold · mejor grueso. Si esta columna no coincide con
-/// `frequencyHz()`, la sonda no esta mostrando lo que la eleccion uso.
-int chosenByTheSweep(const std::vector<Row>& rows) {
+/// La regla del detector, replicada para la columna "elegido": primer candidato cuyo pico
+/// REFINADO supera kPeakThreshold · mejor refinado (desde S2; en S1 se comparaban los
+/// gruesos, y ESO era el defecto). Si esta columna no coincide con `frequencyHz()`, la sonda
+/// no esta mostrando lo que la eleccion uso.
+int chosenByTheRule(const std::vector<Row>& rows) {
+    double best = -1.0;
+    for (const Row& r : rows) best = std::max(best, r.refined);
+    for (const Row& r : rows)
+        if (r.refined >= McLeodPitch::kPeakThreshold * best) return r.refinedLag;
+    return -1;
+}
+
+/// Y la regla VIEJA, sobre los gruesos: se imprime al lado para que la tabla siga diciendo
+/// donde estaba el defecto.
+int chosenByTheOldSweepRule(const std::vector<Row>& rows) {
     double best = -1.0;
     for (const Row& r : rows) best = std::max(best, r.coarse);
     for (const Row& r : rows)
@@ -494,31 +508,33 @@ TEST(McLeodPitchTest, AC0332_TheBookPropertyHoldsInsideTheRealDetectorAndTheTabl
             double globalFine = fineAtTau;
             for (const Row& r : rows) globalFine = std::max(globalFine, r.fine);
 
-            const int sweepChoice = chosenByTheSweep(rows);
+            const int ruleChoice = chosenByTheRule(rows);
+            const int oldChoice = chosenByTheOldSweepRule(rows);
             const double ratio = mpm.hasPitch() ? mpm.frequencyHz() / st.f0 : 0.0;
             std::printf("\n  [REQ-033] %s @ %d Hz  (working %.0f, tau = %.2f = lag %d)\n",
                         st.name, rate, working, tau, tauLag);
             std::printf("  detector: %s %.3f Hz  (razon %.4f, claridad %.4f)  |  "
-                        "barrido eligio lag %d  |  fino en tau: %.4f en %d  |  "
-                        "umbral 0,9*maxfino = %.4f\n",
+                        "regla sobre refinados eligio lag %d (la vieja, sobre gruesos: %d)  |  "
+                        "fino en tau: %.4f en %d  |  umbral 0,9*maxfino = %.4f\n",
                         mpm.hasPitch() ? "leyo" : "SIN ALTURA", mpm.frequencyHz(), ratio,
-                        mpm.clarity(), sweepChoice, fineAtTau, fineAtTauLag,
+                        mpm.clarity(), ruleChoice, oldChoice, fineAtTau, fineAtTauLag,
                         McLeodPitch::kPeakThreshold * globalFine);
-            std::printf("  %6s %8s %9s %6s %7s %s\n", "lag", "grueso", "fino(+-2)", "en",
-                        "x tau", "");
+            std::printf("  %6s %8s %9s %6s %9s %6s %7s %s\n", "lag", "grueso", "fino(+-2)", "en",
+                        "refinado", "en", "x tau", "");
             for (const Row& r : rows) {
-                std::printf("  %6d %8.4f %9.4f %6d %7.3f %s\n", r.lag, r.coarse, r.fine,
-                            r.fineLag, r.lag / tau, r.lag == sweepChoice ? "<- elegido" : "");
+                std::printf("  %6d %8.4f %9.4f %6d %9.4f %6d %7.3f %s\n", r.lag, r.coarse,
+                            r.fine, r.fineLag, r.refined, r.refinedLag, r.lag / tau,
+                            r.refinedLag == ruleChoice ? "<- elegido" : "");
             }
 
-            // La sonda muestra LO QUE LA ELECCION USO: la regla replicada sobre la tabla tiene
-            // que dar el mismo lag que el detector refino (a menos de la vecindad tau/12 que el
-            // refinamiento recorre).
+            // La sonda muestra LO QUE LA ELECCION USO: la regla replicada sobre los picos
+            // refinados tiene que dar el mismo lag que el detector publico (a menos de la
+            // interpolacion parabolica, que es sub-muestra).
             ASSERT_TRUE(mpm.hasPitch());
             const double chosenLag = working / mpm.frequencyHz();
-            EXPECT_LE(std::abs(chosenLag - sweepChoice), std::max(1, sweepChoice / 12) + 1)
-                << "la tabla no explica la eleccion: el detector refino hasta " << chosenLag
-                << " y la regla sobre la tabla elige " << sweepChoice;
+            EXPECT_LE(std::abs(chosenLag - ruleChoice), 1.0)
+                << "la tabla no explica la eleccion: el detector publico el lag " << chosenLag
+                << " y la regla sobre los refinados elige " << ruleChoice;
 
             // AC-033.2 — la propiedad de libro, ADENTRO del detector real.
             EXPECT_GE(fineAtTau, McLeodPitch::kPeakThreshold * globalFine)
@@ -552,7 +568,8 @@ TEST(McLeodPitchTest, AC0331_ReadingTheProbesDoesNotChangeTheVerdict) {
         quiet.process(sig.data() + i, take);
         probed.process(sig.data() + i, take);
         for (int k = 0; k < probed.sweepCandidateCount(); ++k)
-            sink += probed.sweepCandidateNsdf(k) + probed.nsdfAt(probed.sweepCandidateLag(k) + 1);
+            sink += probed.sweepCandidateNsdf(k) + probed.nsdfAt(probed.sweepCandidateLag(k) + 1)
+                  + probed.sweepCandidateRefinedNsdf(k) + probed.sweepCandidateRefinedLag(k);
         i += take;
     }
     (void)sink;
@@ -568,6 +585,33 @@ TEST(McLeodPitchTest, AC0331_ReadingTheProbesDoesNotChangeTheVerdict) {
     EXPECT_EQ(probed.sweepCandidateLag(-1), -1);
     EXPECT_EQ(probed.sweepCandidateLag(probed.sweepCandidateCount()), -1);
     EXPECT_EQ(probed.sweepCandidateNsdf(probed.sweepCandidateCount()), 0.0);
+    EXPECT_EQ(probed.sweepCandidateRefinedLag(-1), -1);
+    EXPECT_EQ(probed.sweepCandidateRefinedNsdf(probed.sweepCandidateCount()), 0.0);
+}
+
+/**
+ * AC-033.3 a nivel DETECTOR: el reproductor de Tunio (siete senos de E4, H7 a −9,6 dB) se lee
+ * en E4 a 44,1 y a 48 kHz. Es el gemelo, en `McLeodPitch` solo, del control negativo que vive
+ * en `test_spectral_support.cpp` con el camino entero; aca no hay bandera ni compuerta que
+ * puedan tapar una lectura en f0/3.
+ *
+ * Bug plausible: revertir el refinamiento por candidato (volver a comparar gruesos) lo pone
+ * rojo en los dos rates — 109,875 Hz, razon 0,333. Y la variante "refinar solo hasta el
+ * primer pico ≥ 0,9" tambien: el maximo verdadero se necesita ANTES de aplicar el umbral.
+ */
+TEST(McLeodPitchTest, AC0333_SevenHarmonicsWithAStrongSeventhReadTheirFundamentalAtBothRates) {
+    using namespace req033;
+    const Stimulus st = stimuli()[1];
+    for (const int rate : {44100, 48000}) {
+        SCOPED_TRACE("rate " + std::to_string(rate));
+        McLeodPitch mpm;
+        mpm.prepare(rate);
+        feed(mpm, partialsWithAmplitudes(st.f0, st.B, st.amps, rate, wholeWindows(rate, 5)));
+        ASSERT_TRUE(mpm.hasPitch());
+        const double ratio = mpm.frequencyHz() / st.f0;
+        EXPECT_NEAR(ratio, 1.0, 0.01)
+            << "leyo " << mpm.frequencyHz() << " Hz (razon " << ratio << "): razon 0,333 es f0/3";
+    }
 }
 
 }  // namespace

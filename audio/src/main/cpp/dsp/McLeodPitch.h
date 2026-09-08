@@ -131,6 +131,14 @@ public:
     double sweepCandidateNsdf(int i) const noexcept {
         return (i >= 0 && i < mKeyCount) ? mNsdf[static_cast<size_t>(mKeyLags[i])] : 0.0;
     }
+    /// Lag del PICO REAL del candidato `i` en su vecindad ±lag/12 (REQ-033 S2), o -1.
+    int sweepCandidateRefinedLag(int i) const noexcept {
+        return (i >= 0 && i < mKeyCount) ? mRefinedLags[i] : -1;
+    }
+    /// NSDF en ese pico real: el valor sobre el que la eleccion del primer pico decide, o 0.
+    double sweepCandidateRefinedNsdf(int i) const noexcept {
+        return (i >= 0 && i < mKeyCount) ? mRefinedNsdf[i] : 0.0;
+    }
     /// NSDF en un lag concreto. Se evalua bajo demanda: la busqueda no recorre todos.
     double nsdfAt(int lag) const;
 
@@ -158,6 +166,9 @@ private:
      */
     static constexpr int kMaxCandidates = 128;
     int mKeyLags[kMaxCandidates]{};
+    /// El pico REAL de cada candidato (REQ-033): lag y valor tras refinar en ±lag/12.
+    int mRefinedLags[kMaxCandidates]{};
+    double mRefinedNsdf[kMaxCandidates]{};
     int mKeyCount{0};
     int mFilled{0};
 
