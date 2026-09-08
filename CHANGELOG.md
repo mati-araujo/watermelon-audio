@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.16.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.16.1...v2.16.2) (2026-09-08)
+
+
+### Performance Improvements
+
+* **pitch:** el refinamiento para donde la eleccion ya esta decidida (REQ-034.2) ([bf62145](https://github.com/mati-araujo/watermelon-audio/commit/bf6214557836b8bf352f5756444d47227bfa4051))
+
 ## [2.16.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.16.0...v2.16.1) (2026-09-08)
 
 
