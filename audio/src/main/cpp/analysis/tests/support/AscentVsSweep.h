@@ -31,6 +31,9 @@ namespace wma_test::ascent {
 struct Tally {
     long windows = 0;        ///< ventanas con altura (las sin candidatos no comparan nada)
     long candidates = 0;
+    long refinedAll = 0;     ///< ventanas donde el corte temprano NO corto (se refino todo)
+    long fullRuleDiffer = 0; ///< ventanas donde el detector eligio distinto que la regla ENTERA
+    long evalFullRule = 0;   ///< evaluaciones que costaria refinar TODO (replicado desde aca)
     long differLag = 0;      ///< candidatos donde el ascenso termino en OTRO lag
     long differValue = 0;    ///< o en el mismo lag pero con otro valor (no deberia pasar nunca)
     long chosenDiffer = 0;   ///< ventanas donde el candidato ELEGIDO por la regla cambiaria
@@ -109,16 +112,33 @@ inline void compare(int rate, const std::vector<float>& mono, Tally& t, const st
 
         // La regla del primer pico, con los picos de cada metodo, para saber si la ELECCION
         // cambiaria — que es lo unico que el consumidor veria.
+        //
+        // REQ-034 S2: produccion ya no refina todos los candidatos (corte temprano exacto). El
+        // pico "entero" de los que no refino se calcula ACA con nsdfAt sobre ±span, asi que la
+        // regla entera de abajo es la de REQ-033 tal cual, replicada — y `fullRuleDiffer` es
+        // la prueba de exactitud del corte: el detector tiene que elegir lo mismo.
         double bestFull = -1.0, bestAsc = -1.0;
         std::vector<int> fullLags, ascLags;
         std::vector<double> fullVals, ascVals;
+        if (mpm.refinedCandidateCount() == mpm.sweepCandidateCount()) ++t.refinedAll;
         for (int i = 0; i < mpm.sweepCandidateCount(); ++i) {
             const int lag = mpm.sweepCandidateLag(i);
             const int span = std::max(1, lag / 12);
             const int from = std::max(minLag, lag - span);
             const int to = std::min(maxLag, lag + span);
-            const int fLag = mpm.sweepCandidateRefinedLag(i);
-            const double fVal = mpm.sweepCandidateRefinedNsdf(i);
+            int fLag = mpm.sweepCandidateRefinedLag(i);
+            double fVal = mpm.sweepCandidateRefinedNsdf(i);
+            t.evalFullRule += (to - from);
+            if (i >= mpm.refinedCandidateCount()) {
+                // No refinado por produccion: el pico entero, desde aca.
+                fLag = lag;
+                fVal = mpm.sweepCandidateNsdf(i);
+                for (int l = from; l <= to; ++l) {
+                    if (l == lag) continue;
+                    const double v = mpm.nsdfAt(l);
+                    if (v > fVal) { fVal = v; fLag = l; }
+                }
+            }
             double aVal = 0.0;
             const int aLag = ascend(mpm, lag, mpm.sweepCandidateNsdf(i), from, to, aVal, t.evalAscent);
             ++t.candidates;
@@ -140,6 +160,14 @@ inline void compare(int rate, const std::vector<float>& mono, Tally& t, const st
             if (fullVals[i] >= McLeodPitch::kPeakThreshold * bestFull) { chosenFull = fullLags[i]; break; }
         for (size_t i = 0; i < ascVals.size(); ++i)
             if (ascVals[i] >= McLeodPitch::kPeakThreshold * bestAsc) { chosenAsc = ascLags[i]; break; }
+        // El detector contra la regla ENTERA: la exactitud del corte temprano (AC-034.3).
+        const double detectorLag = working / mpm.frequencyHz();
+        if (std::abs(detectorLag - chosenFull) > 1.0) {
+            ++t.fullRuleDiffer;
+            t.chosenExamples.push_back(label + ": ventana " + std::to_string(windowsSeen) +
+                                       " — EL DETECTOR publico el lag " + std::to_string(detectorLag) +
+                                       " y la regla entera elige " + std::to_string(chosenFull));
+        }
         if (chosenFull != chosenAsc) {
             ++t.chosenDiffer;
             t.chosenExamples.push_back(label + ": ventana " + std::to_string(windowsSeen) + " — entero elige " +
@@ -153,11 +181,11 @@ inline void compare(int rate, const std::vector<float>& mono, Tally& t, const st
 
 inline void print(const char* title, const Tally& t) {
     std::printf("  [REQ-034] %-34s ventanas %5ld  candidatos %6ld  lag distinto %ld  valor distinto %ld"
-                "  ELECCION distinta %ld  |  evaluaciones: barrido %ld  refinado entero %ld  ascenso %ld"
-                "  (%.2fx)\n",
+                "  ELECCION distinta (ascenso) %ld  |  DETECTOR vs regla entera: distinto %ld, refino todo en %ld"
+                "  |  evaluaciones: barrido %ld  refinado (produccion) %ld  refinado entero %ld  ascenso %ld\n",
                 title, t.windows, t.candidates, t.differLag, t.differValue, t.chosenDiffer,
-                t.evalSweep, t.evalFull, t.evalAscent,
-                t.evalAscent > 0 ? static_cast<double>(t.evalFull) / t.evalAscent : 0.0);
+                t.fullRuleDiffer, t.refinedAll,
+                t.evalSweep, t.evalFull, t.evalFullRule, t.evalAscent);
     for (const auto& e : t.examples) std::printf("      %s\n", e.c_str());
     for (const auto& e : t.chosenExamples) std::printf("      ELECCION: %s\n", e.c_str());
 }
@@ -166,6 +194,7 @@ inline void add(Tally& into, const Tally& t) {
     into.windows += t.windows; into.candidates += t.candidates; into.differLag += t.differLag;
     into.differValue += t.differValue; into.chosenDiffer += t.chosenDiffer;
     into.evalSweep += t.evalSweep; into.evalFull += t.evalFull; into.evalAscent += t.evalAscent;
+    into.refinedAll += t.refinedAll; into.fullRuleDiffer += t.fullRuleDiffer; into.evalFullRule += t.evalFullRule;
     for (const auto& e : t.examples) if (into.examples.size() < 12) into.examples.push_back(e);
     for (const auto& e : t.chosenExamples) into.chosenExamples.push_back(e);
 }

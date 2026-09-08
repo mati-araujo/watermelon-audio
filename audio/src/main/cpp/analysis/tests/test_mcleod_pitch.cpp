@@ -588,6 +588,10 @@ TEST(McLeodPitchTest, AC0331_ReadingTheProbesDoesNotChangeTheVerdict) {
     EXPECT_EQ(probed.sweepCandidateNsdf(probed.sweepCandidateCount()), 0.0);
     EXPECT_EQ(probed.sweepCandidateRefinedLag(-1), -1);
     EXPECT_EQ(probed.sweepCandidateRefinedNsdf(probed.sweepCandidateCount()), 0.0);
+    // REQ-034: el corte temprano refina un prefijo, y el prefijo es el mismo en los dos.
+    EXPECT_EQ(quiet.refinedCandidateCount(), probed.refinedCandidateCount());
+    EXPECT_GT(quiet.refinedCandidateCount(), 0);
+    EXPECT_LE(quiet.refinedCandidateCount(), quiet.sweepCandidateCount());
 }
 
 /**
@@ -709,22 +713,82 @@ TEST(McLeodPitchTest, AC0342_AscentVersusFullRefinementOverTheWholeControlSet) {
         }
         EXPECT_GT(t.windows, 0); print("MINI-019 (pares, -9..-11 dB)", t); add(total, t);
     }
-    {   // la matriz de estimulos pobres entera
+    {   // la matriz de estimulos pobres entera — y bajo sanitizer un subconjunto ROTATIVO,
+        // 1 de cada 8 combinaciones por par (cuerda, riqueza), la misma forma que MINI-020: este
+        // test dio timeout bajo TSan a -j4 en el gate de REQ-034.1 (la clase que MINI-020 acaba
+        // de cerrar). La medicion que importa sale del build normal, con los 448.
         Tally t;
+        int par = 0;
         for (const auto& cuerda : catalogStrings())
-            for (const int rate : {44100, 48000})
-                for (int nPart = 1; nPart <= 4; ++nPart)
+            for (int nPart = 1; nPart <= 4; ++nPart, ++par) {
+                int combo = 0;
+                for (const int rate : {44100, 48000})
                     for (const double B : {0.0, 1e-4})
-                        for (const double fase : {0.0, M_PI / 3.0})
+                        for (const double fase : {0.0, M_PI / 3.0}) {
+#ifdef WMA_TEST_UNDER_SANITIZER
+                            if (combo++ != par % 8) continue;
+#else
+                            (void)combo;
+#endif
                             compare(rate, inharmonicString(cuerda.hz, B, nPart, rate, rate * 2, 0.3, fase), t,
                                     std::string(cuerda.name) + " @" + std::to_string(rate) + " n=" +
                                         std::to_string(nPart) + " B=" + std::to_string(B));
-        EXPECT_GT(t.windows, 0); print("matriz pobre (448 x 2 s)", t); add(total, t);
+                        }
+            }
+        EXPECT_GT(t.windows, 0); print("matriz pobre (448 x 2 s; 56 bajo sanitizer)", t); add(total, t);
     }
     print("TOTAL sintetico", total);
     std::printf("\n");
     RecordProperty("candidatos_lag_distinto", std::to_string(total.differLag));
     RecordProperty("ventanas_eleccion_distinta", std::to_string(total.chosenDiffer));
+
+    // AC-034.3 (REQ-034 S2): el corte temprano es EXACTO — en ninguna ventana el detector
+    // eligio distinto que la regla entera replicada desde el test. Y corto de verdad: en la
+    // mayoria de las ventanas periodicas no refino todo.
+    EXPECT_EQ(total.fullRuleDiffer, 0) << "el corte temprano cambio una eleccion";
+    EXPECT_LT(total.refinedAll, total.windows / 2)
+        << "el corte temprano casi nunca corta: refino todo en " << total.refinedAll << " de "
+        << total.windows;
+    EXPECT_LT(total.evalFull * 2, total.evalFullRule)
+        << "produccion evaluo " << total.evalFull << " contra " << total.evalFullRule
+        << " de refinar todo: el ahorro no llega a la mitad";
+}
+
+/**
+ * AC-034.3 / AC-034.5 — LA ZONA AMBIGUA SE EJERCE, y decide como la regla entera.
+ *
+ * El corte temprano para en el primer pico >= 0,9 solo si ningun anterior alcanza
+ * 0,9 · (maximo visto). Un par f0 + H2 con el fundamental hundido pone el pico de τ/2 cerca del
+ * de τ, y con ruido encima el de τ baja de 1: ahi hay ventanas donde τ/2 queda en la zona
+ * ambigua [0,9·M, 0,9), el corte NO puede parar, refina todo y la regla entera decide. Se
+ * afirma que en esas ventanas `refinedCandidateCount() == sweepCandidateCount()` y que la
+ * eleccion coincide con la regla entera — y que hubo al menos una, porque un camino que no se
+ * ejerce es un camino que no se prueba.
+ *
+ * Bug plausible (el mutante m2 de REQ-033.2, "parar en el primero >= 0,9"): en esas ventanas
+ * elige τ aunque la regla entera elija τ/2. Este test lo mata por `fullRuleDiffer`.
+ */
+TEST(McLeodPitchTest, AC0343_TheAmbiguousZoneIsExercisedAndDecidesLikeTheFullRule) {
+    using namespace wma_test::ascent;
+    Tally t;
+    long ambiguousWindows = 0;
+    for (const double db : {11.5, 12.0, 12.5}) {
+        for (const double snr : {6.0, 10.0}) {
+            std::vector<float> sig(static_cast<size_t>(kRate * 2), 0.0f);
+            const auto f = pureSine(82.4069, kRate, kRate * 2, 0.5 * std::pow(10.0, -db / 20.0));
+            const auto h2 = pureSine(82.4069 * 2.0, kRate, kRate * 2, 0.5);
+            for (size_t i = 0; i < sig.size(); ++i) sig[i] = f[i] + h2[i];
+            addNoiseAtSnr(sig, snr, 4242u + static_cast<uint32_t>(db * 10 + snr));
+            Tally one;
+            compare(kRate, sig, one, "par -" + std::to_string(db) + " dB, SNR " + std::to_string(snr));
+            ambiguousWindows += one.refinedAll;
+            add(t, one);
+        }
+    }
+    print("zona ambigua (pares ruidosos)", t);
+    ASSERT_GT(t.windows, 0);
+    EXPECT_GT(ambiguousWindows, 0) << "ningun estimulo entro en la zona ambigua: el camino no se ejercio";
+    EXPECT_EQ(t.fullRuleDiffer, 0) << "en la zona ambigua el detector eligio distinto que la regla entera";
 }
 
 }  // namespace

@@ -42,6 +42,7 @@ void McLeodPitch::reset() {
     mHasPitch = false;
     mWindows = 0;
     mKeyCount = 0;
+    mRefinedCount = 0;
     mEvalSweep = 0;
     mEvalRefine = 0;
     for (auto& v : mWindow) v = 0.0f;
@@ -202,15 +203,42 @@ void McLeodPitch::analyzeWindow() {
     // O sea que la nota dependia de donde caia la grilla —del rate y de f0—, no de la senal.
     //
     // La salida NO es bajar el umbral (MINI-019: mueve el defecto) ni densificar el barrido
-    // (vuelve el costo de la NSDF completa): es refinar CADA candidato —el maximo real en su
+    // (vuelve el costo de la NSDF completa): es refinar cada candidato —el maximo real en su
     // vecindad ±τ/12, que antes se hacia solo para el ya elegido— y recien despues aplicar el
-    // umbral. Un candidato es maximo local entre muestras, asi que su pico real esta a menos
-    // de un paso; en esa vecindad la NSDF es unimodal para armonicos hasta ~12 (los que la
-    // grilla resuelve), y por eso el maximo de la vecindad ES el pico.
+    // umbral.
     //
-    // Se refina TODO, sin corte temprano: "el primero que supera 0,9·máximo" necesita el
-    // máximo VERDADERO, y un corte al primer pico ≥ 0,9 no lo conoce todavia. El costo se
-    // mide en el test de costo y queda anotado en la etapa.
+    // 🔴 EL MAXIMO DE LA VECINDAD, NO UN ASCENSO. REQ-034 S1 midio un ascenso de a un lag
+    // desde la muestra gruesa contra este barrido, sobre 10 105 ventanas sinteticas y 1 734
+    // reales: en el corpus la ELECCION cambiaba en dos ventanas de ataque de cuerdas de acero
+    // (acero_E2 83,5 -> 79,6 Hz; acero_G3 196,9 -> 191,7), porque con parciales altos la
+    // vecindad tiene rizado y el ascenso se queda en un hombro. La vecindad entera es lo unico
+    // que no supone nada sobre la senal.
+    //
+    // --- REQ-034: EL CORTE TEMPRANO EXACTO ------------------------------------------------
+    //
+    // Refinar TODOS los candidatos costaba 5,8x el barrido (medido: 3,67 M evaluaciones contra
+    // 0,63 M sobre el conjunto de control) y la mayor parte se gastaba en candidatos lejanos
+    // que no pueden ser elegidos. La regla del primer pico es "el primero con pico >=
+    // kPeakThreshold * MAXIMO", y el maximo no se conoce hasta refinar todo — por eso el corte
+    // ingenuo "parar en el primero >= 0,9" NO es exacto (era el mutante m2 de REQ-033.2). Este
+    // si lo es, por dos hechos:
+    //
+    //   (a) un candidato con pico R_i >= kPeakThreshold pasa el umbral para CUALQUIER maximo,
+    //       porque la NSDF vive en [-1, 1] y entonces kPeakThreshold * M <= kPeakThreshold;
+    //   (b) los candidatos posteriores solo pueden SUBIR el maximo, o sea solo pueden hacer
+    //       fallar mas a los anteriores: si ningun anterior j alcanza kPeakThreshold * (el
+    //       maximo visto hasta i), tampoco alcanza kPeakThreshold * (el maximo final).
+    //
+    // Entonces: se refina en orden creciente de lag; al primer i con R_i >= kPeakThreshold, si
+    // ningun anterior esta en la zona ambigua [kPeakThreshold * maxVisto, kPeakThreshold), `i`
+    // es el elegido y el resto no se refina (conserva su muestra gruesa, y
+    // `refinedCandidateCount()` lo dice). Si alguno esta en la zona ambigua, se sigue hasta el
+    // final y se aplica la regla entera, como antes. Sobre una senal periodica el corte cae en
+    // τ y solo se refinan los candidatos sub-periodo, de spans 1 a 5: ~30 evaluaciones contra
+    // ~650. Sobre una ventana sin pico >= 0,9 se paga lo de antes. Bit a bit el mismo
+    // resultado en los dos casos: los golden lo fijan.
+    int chosen = -1;
+    mRefinedCount = 0;
     for (int i = 0; i < mKeyCount; ++i) {
         const int lag = mKeyLags[i];
         const int span = std::max(1, lag / 12);
@@ -227,7 +255,27 @@ void McLeodPitch::analyzeWindow() {
         }
         mRefinedLags[i] = peak;
         mRefinedNsdf[i] = peakValue;
+        mRefinedCount = i + 1;
         if (peakValue > bestValue) { bestValue = peakValue; bestLag = peak; }
+
+        if (chosen < 0 && peakValue >= kPeakThreshold) {
+            // (a): `i` pasa contra cualquier maximo. (b): ¿algun anterior podria pasar
+            // todavia? Solo si esta a menos de kPeakThreshold del maximo visto, que ya
+            // incluye a `i`.
+            bool ambiguous = false;
+            const double floorSeen = kPeakThreshold * bestValue;
+            for (int j = 0; j < i; ++j) {
+                if (mRefinedNsdf[j] >= floorSeen) { ambiguous = true; break; }
+            }
+            if (!ambiguous) { chosen = peak; break; }
+            // Ambiguo: se refina el resto y decide la regla entera, abajo.
+        }
+    }
+    // Los candidatos que no se refinaron conservan la muestra gruesa, para que las sondas no
+    // mientan (ver `refinedCandidateCount`).
+    for (int i = mRefinedCount; i < mKeyCount; ++i) {
+        mRefinedLags[i] = mKeyLags[i];
+        mRefinedNsdf[i] = mNsdf[static_cast<size_t>(mKeyLags[i])];
     }
 
     // --- LA DEFENSA CONTRA LA OCTAVA -----------------------------------------
@@ -238,11 +286,14 @@ void McLeodPitch::analyzeWindow() {
     // umbral a 1,0 convierte esto en "elegi el maximo" y trae la octava de vuelta.
     //
     // Desde REQ-033 los dos lados de la comparacion son picos REALES (refinados arriba), asi
-    // que la eleccion ya no depende de donde cayo la grilla del barrido.
-    const double threshold = kPeakThreshold * bestValue;
-    int chosen = bestLag;
-    for (int i = 0; i < mKeyCount; ++i) {
-        if (mRefinedNsdf[i] >= threshold) { chosen = mRefinedLags[i]; break; }
+    // que la eleccion ya no depende de donde cayo la grilla del barrido. Cuando el corte
+    // temprano de REQ-034 ya eligio, esta regla no tiene nada que agregar: es la misma.
+    if (chosen < 0) {
+        const double threshold = kPeakThreshold * bestValue;
+        chosen = bestLag;
+        for (int i = 0; i < mKeyCount; ++i) {
+            if (mRefinedNsdf[i] >= threshold) { chosen = mRefinedLags[i]; break; }
+        }
     }
     // Los vecinos inmediatos, para que la parabola tenga sus tres puntos. Los cubre el
     // refinamiento salvo cuando el pico cae en el borde de su vecindad.

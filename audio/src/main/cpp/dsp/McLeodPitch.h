@@ -132,6 +132,8 @@ public:
         return (i >= 0 && i < mKeyCount) ? mNsdf[static_cast<size_t>(mKeyLags[i])] : 0.0;
     }
     /// Lag del PICO REAL del candidato `i` en su vecindad ±lag/12 (REQ-033 S2), o -1.
+    /// Desde REQ-034 solo los primeros `refinedCandidateCount()` candidatos estan refinados;
+    /// para los demas devuelve el lag grueso (ver `refinedCandidateCount`).
     int sweepCandidateRefinedLag(int i) const noexcept {
         return (i >= 0 && i < mKeyCount) ? mRefinedLags[i] : -1;
     }
@@ -139,6 +141,14 @@ public:
     double sweepCandidateRefinedNsdf(int i) const noexcept {
         return (i >= 0 && i < mKeyCount) ? mRefinedNsdf[i] : 0.0;
     }
+    /**
+     * Cuantos candidatos, contando desde el primero, quedaron REFINADOS en la ultima ventana
+     * (REQ-034 S2). El refinamiento para en el primer pico que supera `kPeakThreshold` cuando
+     * ningun anterior puede alcanzarlo (ver `analyzeWindow`); los que siguen conservan su
+     * muestra gruesa en `sweepCandidateRefined*`. Igual a `sweepCandidateCount()` cuando se
+     * refino todo — que es lo que pasa en una ventana sin pico >= 0,9.
+     */
+    int refinedCandidateCount() const noexcept { return mRefinedCount; }
     /// NSDF en un lag concreto. Se evalua bajo demanda: la busqueda no recorre todos.
     double nsdfAt(int lag) const;
 
@@ -180,6 +190,7 @@ private:
     int mRefinedLags[kMaxCandidates]{};
     double mRefinedNsdf[kMaxCandidates]{};
     int mKeyCount{0};
+    int mRefinedCount{0};
     int mFilled{0};
     int mEvalSweep{0};
     int mEvalRefine{0};
