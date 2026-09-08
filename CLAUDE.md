@@ -617,6 +617,9 @@ bash scripts/render-corpus.sh               # REQ-032: la RECETA del corpus, par
 python3 scripts/corpus-reference-pitch.py --dir DIR   # el ORACULO del hz_verdadero del
                                            # manifiesto: independiente del motor (R-API-48)
                                            # y del nominal. Cuatro tramos desde 2,0 s.
+python3 scripts/spectrum-by-segment.py archivo.wav --f0 HZ   # la tabla de dB POR TRAMOS (Hann
+                                           # 250 ms) que separa hipotesis sobre un timbre real.
+                                           # Reproduce la del consumidor al decimo.
 
 python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2.6).
                                            # Imprime; docs/kmp/c_api_coverage.md
