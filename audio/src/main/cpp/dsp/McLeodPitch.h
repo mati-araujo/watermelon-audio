@@ -114,10 +114,28 @@ public:
     /// Factor de decimacion efectivo. Lo lee el test de costo y el de resolucion.
     int decimation() const noexcept { return mDecimation; }
 
-private:
-    void analyzeWindow();
+    /**
+     * SONDAS DE LA ULTIMA VENTANA (REQ-033 S1). Existen para que un test pueda ver QUE lags
+     * quedaron como candidatos y con que valor GRUESO —el que la eleccion del primer pico
+     * uso—, y evaluar la NSDF fina donde quiera. Sin esto el veredicto es una caja negra:
+     * se sabe que leyo f0/3 y no se sabe si el pico de τ no se evaluo, se evaluo mal, o se
+     * descarto. No producen audio ni cambian el resultado: son `const` sobre estado que ya
+     * existe. `nsdfAt` es publica por la misma razon; era privada y no tenia por que serlo.
+     */
+    int sweepCandidateCount() const noexcept { return mKeyCount; }
+    /// Lag del candidato `i`, o -1 fuera de rango.
+    int sweepCandidateLag(int i) const noexcept {
+        return (i >= 0 && i < mKeyCount) ? mKeyLags[i] : -1;
+    }
+    /// NSDF GRUESA del candidato `i` —la que el barrido evaluo—, o 0 fuera de rango.
+    double sweepCandidateNsdf(int i) const noexcept {
+        return (i >= 0 && i < mKeyCount) ? mNsdf[static_cast<size_t>(mKeyLags[i])] : 0.0;
+    }
     /// NSDF en un lag concreto. Se evalua bajo demanda: la busqueda no recorre todos.
     double nsdfAt(int lag) const;
+
+private:
+    void analyzeWindow();
 
     int mSampleRate{0};
     int mDecimation{1};

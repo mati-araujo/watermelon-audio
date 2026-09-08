@@ -25,7 +25,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -356,6 +358,216 @@ TEST(McLeodPitchTest, ThePeakThresholdIsPinnedAgainstAPlausibleMutant) {
             << "aca la trae bajar `kPeakThreshold`: con 0,80 los tres puntos de este barrido "
             << "fallan. Si este test se pone rojo, mira esa constante antes que el estimulo.";
     }
+}
+
+// ---------------------------------------------------------------------------
+// REQ-033 S1 — QUE LAGS EVALUA EL DETECTOR, Y CON QUE VALOR
+// ---------------------------------------------------------------------------
+
+/**
+ * 🔴 POR QUE HAY UNA TABLA EN UN TEST
+ * ----------------------------------
+ * El detector lee f0/3 sobre el reproductor de Tunio (siete senos armonicos de E4 con H7 a
+ * −9,6 dB) y sobre la E4 real del corpus. MEDIDO afuera del motor (2026-09-07, sonda en
+ * Python sobre la misma ventana y la misma decimacion): la NSDF "de libro" en τ vale 0,9994
+ * contra un umbral 0,9·max = 0,8995 — la regla del primer pico ELEGIRIA τ si viera ese
+ * numero. El motor no lo ve. O sea que la diferencia esta ANTES de la regla: en que lags
+ * evalua `analyzeWindow` (barrido con paso τ/12, criterio de maximo local entre muestras,
+ * refinamiento solo alrededor del elegido) y no en `kPeakThreshold` (MINI-019 midio que
+ * moverlo desplaza el defecto).
+ *
+ * Este test es el INSTRUMENTO: pide al detector real los candidatos de su ultima ventana con
+ * su valor grueso, evalua la NSDF fina en la vecindad de cada uno, y lo imprime. Lo unico
+ * que AFIRMA es la propiedad de libro adentro del detector (AC-033.2): el maximo fino en la
+ * vecindad de τ supera `kPeakThreshold` por el maximo fino de todos los candidatos. Si eso
+ * NO se cumple, el diagnostico de REQ-033 es falso y se re-planifica antes de tocar
+ * produccion. Que el detector lea o no la nota correcta NO se afirma aca: eso es S2, y
+ * fijarlo en S1 escribiria el defecto en el contrato.
+ *
+ * Bug plausible que atrapa: una sonda que devuelva los lags del barrido pero un valor
+ * distinto del que la eleccion uso (p.ej. el refinado en vez del grueso) haria que la tabla
+ * no explique la eleccion, y la columna "elegido por el barrido" no coincidiria con lo que
+ * `frequencyHz()` dice. Se compara.
+ */
+namespace req033 {
+
+double dB(double d) { return std::pow(10.0, d / 20.0); }
+
+struct Stimulus {
+    const char* name;
+    double f0;
+    double B;
+    std::vector<double> amps;
+};
+
+/// Los estimulos de la spec (REQ-033, "Lo que ya esta medido"). Niveles de la nota del
+/// 07/09 b §3; el falso de REQ-031 tal cual esta en test_spectral_support.cpp.
+std::vector<Stimulus> stimuli() {
+    const std::vector<double> seis = {0.5 * dB(-7.2), 0.5 * dB(-3.2), 0.5 * dB(-0.6),
+                                      0.5,            0.5 * dB(-15.1), 0.5 * dB(-15.0)};
+    std::vector<double> siete = seis;
+    siete.push_back(0.5 * dB(-9.6));
+    return {
+        {"seis armonicos (control: converge)", 329.6276, 0.0, seis},
+        {"siete, H7 a -9,6 dB (el reproductor)", 329.6276, 0.0, siete},
+        {"seis estirados, B = 3e-4", 329.6276, 3e-4, seis},
+        {"el falso de REQ-031 (f0 -20, H3, H5)", 329.6276, 0.0,
+         {0.5 * dB(-20.0), 0.0, 0.5, 0.0, 0.5 * dB(-6.0)}},
+    };
+}
+
+struct Row {
+    int lag;
+    double coarse;    // lo que el barrido vio y lo que la eleccion uso
+    double fine;      // max de nsdfAt en ±2
+    int fineLag;
+};
+
+/**
+ * 🔴 LA VENTANA TIENE QUE ESTAR INTACTA PARA QUE `nsdfAt` HABLE DE LA MISMA VENTANA.
+ * `process` sigue escribiendo `mWindow` desde el indice 0 despues de analizarla, asi que si el
+ * feed no es un multiplo entero de ventanas, la columna "fino" se evalua sobre un buffer
+ * MEZCLADO (cola vieja + cabeza nueva, con una discontinuidad de fase) y no explica nada.
+ * Medido en la primera corrida de este test: fino 0,807 contra grueso 0,992 en el MISMO lag.
+ * Por eso se alimenta un numero entero de ventanas y `tableOf` exige igualdad bit a bit.
+ */
+int wholeWindows(int rate, int n) {
+    const int decimation = static_cast<int>(std::lround(rate / 24000.0));
+    return n * McLeodPitch::kWindowFrames * std::max(1, decimation);
+}
+
+std::vector<Row> tableOf(const McLeodPitch& mpm) {
+    std::vector<Row> rows;
+    for (int i = 0; i < mpm.sweepCandidateCount(); ++i) {
+        const int lag = mpm.sweepCandidateLag(i);
+        Row r{lag, mpm.sweepCandidateNsdf(i), -2.0, lag};
+        // La sonda muestra lo que la eleccion uso, sobre la ventana que la eleccion vio.
+        EXPECT_EQ(mpm.nsdfAt(lag), r.coarse)
+            << "lag " << lag << ": nsdfAt no coincide con el valor grueso — la ventana ya no "
+            << "es la analizada (feed no multiplo de ventanas) o la sonda lee otra cosa";
+        for (int l = lag - 2; l <= lag + 2; ++l) {
+            const double v = mpm.nsdfAt(l);
+            if (v > r.fine) { r.fine = v; r.fineLag = l; }
+        }
+        rows.push_back(r);
+    }
+    return rows;
+}
+
+/// La regla del detector, replicada para la columna "elegido por el barrido": primer
+/// candidato con grueso ≥ kPeakThreshold · mejor grueso. Si esta columna no coincide con
+/// `frequencyHz()`, la sonda no esta mostrando lo que la eleccion uso.
+int chosenByTheSweep(const std::vector<Row>& rows) {
+    double best = -1.0;
+    for (const Row& r : rows) best = std::max(best, r.coarse);
+    for (const Row& r : rows)
+        if (r.coarse >= McLeodPitch::kPeakThreshold * best) return r.lag;
+    return -1;
+}
+
+}  // namespace req033
+
+TEST(McLeodPitchTest, AC0332_TheBookPropertyHoldsInsideTheRealDetectorAndTheTableSaysWhy) {
+    using namespace req033;
+    for (const int rate : {44100, 48000}) {
+        for (const Stimulus& st : stimuli()) {
+            SCOPED_TRACE(std::string(st.name) + " @ " + std::to_string(rate));
+            McLeodPitch mpm;
+            mpm.prepare(rate);
+            // Cinco ventanas ENTERAS: la tabla es la de la ultima, con el antialias en regimen
+            // y `mWindow` todavia intacta (ver `wholeWindows`).
+            feed(mpm, partialsWithAmplitudes(st.f0, st.B, st.amps, rate, wholeWindows(rate, 5)));
+            ASSERT_GT(mpm.windowsAnalyzed(), 1);
+            ASSERT_GT(mpm.sweepCandidateCount(), 0) << "sin candidatos no hay tabla";
+
+            const double working = static_cast<double>(rate) / mpm.decimation();
+            const double tau = working / st.f0;
+            const auto rows = tableOf(mpm);
+
+            const int tauLag = static_cast<int>(std::lround(tau));
+            double fineAtTau = -2.0;
+            int fineAtTauLag = tauLag;
+            for (int l = tauLag - 2; l <= tauLag + 2; ++l) {
+                const double v = mpm.nsdfAt(l);
+                if (v > fineAtTau) { fineAtTau = v; fineAtTauLag = l; }
+            }
+            double globalFine = fineAtTau;
+            for (const Row& r : rows) globalFine = std::max(globalFine, r.fine);
+
+            const int sweepChoice = chosenByTheSweep(rows);
+            const double ratio = mpm.hasPitch() ? mpm.frequencyHz() / st.f0 : 0.0;
+            std::printf("\n  [REQ-033] %s @ %d Hz  (working %.0f, tau = %.2f = lag %d)\n",
+                        st.name, rate, working, tau, tauLag);
+            std::printf("  detector: %s %.3f Hz  (razon %.4f, claridad %.4f)  |  "
+                        "barrido eligio lag %d  |  fino en tau: %.4f en %d  |  "
+                        "umbral 0,9*maxfino = %.4f\n",
+                        mpm.hasPitch() ? "leyo" : "SIN ALTURA", mpm.frequencyHz(), ratio,
+                        mpm.clarity(), sweepChoice, fineAtTau, fineAtTauLag,
+                        McLeodPitch::kPeakThreshold * globalFine);
+            std::printf("  %6s %8s %9s %6s %7s %s\n", "lag", "grueso", "fino(+-2)", "en",
+                        "x tau", "");
+            for (const Row& r : rows) {
+                std::printf("  %6d %8.4f %9.4f %6d %7.3f %s\n", r.lag, r.coarse, r.fine,
+                            r.fineLag, r.lag / tau, r.lag == sweepChoice ? "<- elegido" : "");
+            }
+
+            // La sonda muestra LO QUE LA ELECCION USO: la regla replicada sobre la tabla tiene
+            // que dar el mismo lag que el detector refino (a menos de la vecindad tau/12 que el
+            // refinamiento recorre).
+            ASSERT_TRUE(mpm.hasPitch());
+            const double chosenLag = working / mpm.frequencyHz();
+            EXPECT_LE(std::abs(chosenLag - sweepChoice), std::max(1, sweepChoice / 12) + 1)
+                << "la tabla no explica la eleccion: el detector refino hasta " << chosenLag
+                << " y la regla sobre la tabla elige " << sweepChoice;
+
+            // AC-033.2 — la propiedad de libro, ADENTRO del detector real.
+            EXPECT_GE(fineAtTau, McLeodPitch::kPeakThreshold * globalFine)
+                << "la NSDF fina en la vecindad de tau (" << fineAtTau << ") NO supera el "
+                << "umbral (" << McLeodPitch::kPeakThreshold * globalFine << "): el "
+                << "diagnostico de REQ-033 no vale para este estimulo";
+        }
+    }
+}
+
+/**
+ * AC-033.1 — leer las sondas no cambia el resultado. Dos detectores identicos, uno leido
+ * entre bloques y otro nunca: misma altura bit a bit, misma claridad, mismos candidatos.
+ *
+ * Bug plausible: una sonda que evalue la NSDF sobre `mNsdf` y la deje escrita, o que refine
+ * y pise el candidato. `nsdfAt` es const y no escribe; esto lo fija.
+ */
+TEST(McLeodPitchTest, AC0331_ReadingTheProbesDoesNotChangeTheVerdict) {
+    using namespace req033;
+    const Stimulus st = stimuli()[1];   // el reproductor
+    const auto sig = partialsWithAmplitudes(st.f0, st.B, st.amps, 44100, wholeWindows(44100, 5));
+
+    McLeodPitch quiet, probed;
+    quiet.prepare(44100);
+    probed.prepare(44100);
+    int i = 0;
+    const int n = static_cast<int>(sig.size());
+    double sink = 0.0;
+    while (i < n) {
+        const int take = std::min(kBlock, n - i);
+        quiet.process(sig.data() + i, take);
+        probed.process(sig.data() + i, take);
+        for (int k = 0; k < probed.sweepCandidateCount(); ++k)
+            sink += probed.sweepCandidateNsdf(k) + probed.nsdfAt(probed.sweepCandidateLag(k) + 1);
+        i += take;
+    }
+    (void)sink;
+    ASSERT_TRUE(quiet.hasPitch());
+    EXPECT_EQ(quiet.frequencyHz(), probed.frequencyHz());
+    EXPECT_EQ(quiet.clarity(), probed.clarity());
+    ASSERT_EQ(quiet.sweepCandidateCount(), probed.sweepCandidateCount());
+    for (int k = 0; k < quiet.sweepCandidateCount(); ++k) {
+        EXPECT_EQ(quiet.sweepCandidateLag(k), probed.sweepCandidateLag(k));
+        EXPECT_EQ(quiet.sweepCandidateNsdf(k), probed.sweepCandidateNsdf(k));
+    }
+    // Fuera de rango: la sonda no inventa un candidato.
+    EXPECT_EQ(probed.sweepCandidateLag(-1), -1);
+    EXPECT_EQ(probed.sweepCandidateLag(probed.sweepCandidateCount()), -1);
+    EXPECT_EQ(probed.sweepCandidateNsdf(probed.sweepCandidateCount()), 0.0);
 }
 
 }  // namespace
