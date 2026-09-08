@@ -16,6 +16,8 @@
 #include "support/Corpus.h"
 #include "../AnalysisSnapshot.h"
 #include "support/CorpusSweep.h"
+#include "support/PartialOracle.h"
+#include "tests/support/TestSanitizer.h"
 
 #include <gtest/gtest.h>
 
@@ -26,6 +28,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace wma_test {
 namespace {
@@ -273,6 +276,174 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
                 << o.name << ": la lectura fina se aparto " << o.cents << " c del oraculo";
         }
     }
+}
+
+/**
+ * REQ-035 S1 (AC-035.1) — DONDE NACE EL ERROR DE LA LECTURA FINA, archivo por archivo.
+ *
+ * Sobre el corpus la "lectura fina" se apartaba del oraculo hasta +5,40 c mientras la gruesa y el
+ * oraculo coincidian. Tres hipotesis: (a) el rastreo de fase del parcial 1 ya se aparta; (b) el
+ * ajuste de la serie estirada corre C por parciales 2..4 que no la siguen; (c) el sample no sigue
+ * ninguna serie. Esta tabla las separa: por archivo, los cuatro `partialCents(i)` del strobe en la
+ * publicacion de la que salio la fina, contra un oraculo POR PARCIAL (Goertzel + Hann, otro metodo)
+ * en dos ventanas —la sostenida del manifiesto (desde 2,0 s) y la que TERMINA donde el strobe leyo—,
+ * el subconjunto que entro al ajuste (reconstruido contra la funcion de produccion), el B del
+ * snapshot y el del ajuste, y la trayectoria de la fina en el tiempo.
+ *
+ * 🔴 LO QUE LA TABLA ENCONTRO (2026-09-08): NINGUNA DE LAS TRES. El error nacia en el INSTRUMENTO.
+ * ------------------------------------------------------------------------------------------
+ * Los cuatro parciales del strobe coincidian entre si (ukelele_C4: +5,48 / +5,33 / +5,23 / +5,40)
+ * y el oraculo los ponia a 0,00 en la MISMA ventana — o sea que el ajuste no corria nada (b) y el
+ * sample era una serie armonica exacta (c: B_fit ≈ 0, residuo ≤ 0,1 c en 39 de 41). Y el rastreo
+ * (a) tampoco: el incremento de fase de Goertzel a 262,500 Hz, ventana a ventana y a mano, da
+ * 0,00 c desde 0,84 s. Lo que pasaba es que **el strobe no medía contra `trueHz`**: con el
+ * instrumento declarado, el modo rapido reengancha el objetivo a la CUERDA DEL CATALOGO
+ * (`objHz` = 261,626 para ukelele C4, el nominal temperado), asi que `kSnapCents` es relativo a
+ * ese nominal, y el barrido de REQ-032 lo comparaba con un oraculo ABSOLUTO. El "+5,40" era la
+ * desafinacion del propio sample respecto del temperamento igual (+5,78 c en el SoundFont), leida
+ * por un afinador que hace exactamente lo que tiene que hacer. Convertida a Hz absolutos
+ * (`finAbs` = objetivo · 2^(cents/1200), contra `trueHz`), la fina esta a ≤ 0,73 c del oraculo en
+ * los 39 archivos convergidos; los dos restantes no estan convergidos y lo declaran (σ 0,91 y 4,88).
+ *
+ * Es la tercera vez seguida que la hipotesis de entrada se refuta al medir, y esta vez el que
+ * estaba mal era el instrumento: ver [[un-rojo-que-era-del-instrumento]]. La columna `finoC`
+ * (cents publicados, relativos al objetivo) se conserva al lado de `finAbs` justamente para que se
+ * vea la diferencia; la clasificacion por mecanismo se hace sobre `finAbs`, que es el error real.
+ *
+ * Los mecanismos se cuentan con los umbrales de la etapa: RASTREO si |p1 − oraculo_1| ≥ 0,5 c (los
+ * dos en la MISMA referencia); AJUSTE si p1 coincide y |C − oraculo_1| > 2; SAMPLE si los
+ * parciales del oraculo no siguen la serie estirada con ningun B por mas de 2 c. El numero se
+ * IMPRIME: exige correr algo, asi que no se escribe a mano en ningun lado (REQ-021).
+ *
+ * Lo que este test AFIRMA (lo demas lo mide): que la reconstruccion del subconjunto admitido es
+ * UNICA en cada archivo con lectura —si no, la tabla habla de un ajuste que no es el que corrio—,
+ * que el H1 sostenido de este oraculo coincide con el `hz_verdadero` del manifiesto a 0,1 c —los dos
+ * oraculos son el mismo metodo en dos lenguajes, y si divergen uno esta roto—, y que cada archivo
+ * con lectura cae en exactamente una fila de la contabilidad.
+ */
+TEST(CorpusRobustness, WhereTheFineReadingErrorIsBorn) {
+    const auto st = corpus::stateOf(corpus::defaultCorpusDir(), corpus::manifestPath());
+    if (!corpus::shouldRunRobustness(st)) {
+        GTEST_SKIP() << "sin corpus grabado (" << corpus::describe(st) << ")";
+    }
+    namespace orc = wma_test::oracle;
+    constexpr double kSameAsOracleCents = 0.5;   // p1 "coincide" con el oraculo
+    constexpr double kErrorCents = 2.0;          // la fina "se aparta" (umbral de la spec)
+    constexpr double kWindowSec = 0.75;
+
+    /**
+     * Bajo sanitizer, un SUBCONJUNTO declarado (MINI-020, REQ-034 S1): la tabla entera cuesta ~17 s
+     * sin instrumentar y el techo del gate local es 180 s por test. Se conservan SIEMPRE los seis
+     * archivos con hallazgo —los cuatro de la tabla de la spec, el de SAMPLE y el del glide de
+     * ataque— y uno de cada tres del resto, por indice del manifiesto: cada instrumento aparece. Sin
+     * sanitizer se barren los 41. Cuantos se barrieron se imprime y se registra.
+     */
+    std::vector<corpus::Entry> entries;
+    {
+        const std::vector<corpus::Entry> all = corpus::entriesOf(corpus::manifestPath());
+#ifdef WMA_TEST_UNDER_SANITIZER
+        const char* const kAlways[] = {"ukelele_C4.wav", "guitarra-nylon_E4.wav", "guitarra-jazz_E4.wav",
+                                       "ukelele_G4.wav", "guitarra-acero_A2.wav", "bajo-acustico_G2.wav"};
+        for (size_t i = 0; i < all.size(); ++i) {
+            bool keep = (i % 3 == 0);
+            for (const char* k : kAlways) keep = keep || all[i].name == k;
+            if (keep) entries.push_back(all[i]);
+        }
+#else
+        entries = all;
+#endif
+    }
+    std::vector<corpus::Outcome> results;
+    for (const corpus::Entry& e : entries)
+        results.push_back(corpus::sweepFile(corpus::defaultCorpusDir() + "/" + e.name, e));
+    ASSERT_FALSE(results.empty());
+    RecordProperty("archivos_barridos", static_cast<int>(results.size()));
+
+    int published = 0, within = 0, tracking = 0, fit = 0, sample = 0, uniqueMasks = 0;
+    std::printf("\n  [REQ-035] donde nace el error de la fina — strobe (p1..p4) contra el oraculo por parcial "
+                "(%zu de %zu archivos%s)\n", results.size(), corpus::entriesOf(corpus::manifestPath()).size(),
+#ifdef WMA_TEST_UNDER_SANITIZER
+                ", subconjunto bajo sanitizer"
+#else
+                ""
+#endif
+    );
+    std::printf("  %-22s %8s %6s %6s %6s %2s %4s | %6s %6s %6s %6s | %6s %6s %6s %6s | %6s | %5s %5s %5s | %8s %8s | %5s %6s | %s\n",
+                "archivo", "objHz", "finoC", "finAbs", "sigC", "k", "mask", "p1", "p2", "p3", "p4",
+                "o1@t", "o2", "o3", "o4", "o1@2s", "dB2", "dB3", "dB4", "B_snap", "B_fit",
+                "t_1ra", "c_1ra", "mec");
+    for (const corpus::Outcome& o : results) {
+        if (!o.published) continue;
+        ++published;
+        const wav::WavData data = wav::readWav((corpus::defaultCorpusDir() + "/" + o.name).c_str());
+        std::vector<float> mono(static_cast<size_t>(data.numFrames));
+        for (int i = 0; i < data.numFrames; ++i)
+            mono[static_cast<size_t>(i)] = 0.5f * (data.buffer[static_cast<size_t>(i) * 2]
+                                                   + data.buffer[static_cast<size_t>(i) * 2 + 1]);
+        const orc::PartialReading sus = orc::measureSustained(mono, data.sampleRate, o.trueHz);
+        const double t0 = std::max(0.0, o.lastReadingSec - kWindowSec);
+        const orc::PartialReading at = orc::measureAt(mono, data.sampleRate, o.trueHz, t0, kWindowSec);
+
+        // Los dos oraculos (script y C++) son el mismo metodo: tienen que coincidir.
+        ASSERT_TRUE(sus.valid) << o.name << ": el oraculo sostenido no entro en la señal";
+        const double o1Sustained = orc::centsOf(sus.hz[1], o.trueHz);
+        EXPECT_NEAR(o1Sustained, 0.0, 0.1)
+            << o.name << ": el H1 del oraculo en C++ no coincide con el hz_verdadero del manifiesto";
+
+        // La reconstruccion del subconjunto admitido tiene que ser unica.
+        EXPECT_NE(o.admittedMask, -1)
+            << o.name << ": ningun subconjunto de " << o.partialsUsed
+            << " parciales reproduce C = " << o.strobeC << " (o mas de uno lo hace)";
+        if (o.admittedMask != -1) ++uniqueMasks;
+
+        // El oraculo sostenido contra la serie estirada: ?sigue el sample alguna serie?
+        double oc[orc::kPartials], oB = NAN, oC = NAN;
+        int orders[orc::kPartials];
+        for (int n = 1; n <= orc::kPartials; ++n) { oc[n - 1] = sus.cents[n]; orders[n - 1] = n; }
+        double residMax = NAN;
+        if (corpus::fitStretchedSeriesWithB(oc, orders, orc::kPartials, &oC, &oB)) {
+            residMax = 0.0;
+            for (int n = 1; n <= orc::kPartials; ++n)
+                residMax = std::max(residMax, std::fabs(oc[n - 1] - oC
+                                                        - wma::analysis::StrobeTracker::stretchCents(oB, n)));
+        }
+
+        const double o1At = at.valid ? orc::centsOf(at.hz[1], o.trueHz) : NAN;
+        const double ref = at.valid ? o1At : o1Sustained;    // el oraculo en la ventana del strobe
+        // p1 y C vienen relativos al OBJETIVO del strobe (el nominal del catalogo bajo el modo
+        // rapido); se los lleva a la referencia del oraculo (trueHz) antes de comparar.
+        const double targetVsTrue = 1200.0 * std::log2(o.strobeTargetHz / o.trueHz);
+        const double p1VsTrue = o.partialCents[0] + targetVsTrue;
+        const double err = o.fineVsTrueCents - ref;
+        const bool p1Off = std::isfinite(p1VsTrue) && std::fabs(p1VsTrue - ref) >= kSameAsOracleCents;
+        const bool isErr = std::fabs(err) > kErrorCents;
+        const bool sampleOff = std::isfinite(residMax) && residMax > kErrorCents;
+        std::string mec;
+        if (!isErr) { ++within; mec = "-"; }
+        else if (p1Off) { ++tracking; mec = "RASTREO"; }
+        else { ++fit; mec = "AJUSTE"; }
+        if (sampleOff) { ++sample; mec += "+SAMPLE"; }
+
+        char maskStr[5] = "----";
+        for (int i = 0; i < 4; ++i) if (o.admittedMask > 0 && (o.admittedMask & (1 << i))) maskStr[i] = static_cast<char>('1' + i);
+        const auto first = o.trajectory.front();
+        std::printf("  %-22s %8.3f %+6.2f %+6.2f %6.3f %2d %4s | %+6.2f %+6.2f %+6.2f %+6.2f | %+6.2f %+6.2f %+6.2f %+6.2f | %+6.2f | %+5.0f %+5.0f %+5.0f | %8.1e %8.1e | %5.2f %+6.2f | %s\n",
+                    o.name.c_str(), o.strobeTargetHz, o.strobeC, o.fineVsTrueCents, o.strobeSigmaC, o.partialsUsed, maskStr,
+                    o.partialCents[0], o.partialCents[1], o.partialCents[2], o.partialCents[3],
+                    o1At, at.cents[2], at.cents[3], at.cents[4], o1Sustained,
+                    sus.db[2], sus.db[3], sus.db[4], o.snapshotB, o.fitB,
+                    first.first, first.second, mec.c_str());
+    }
+    std::printf("\n  [REQ-035] resumen sobre %d archivos con lectura fina (error = finAbs, en Hz absolutos "
+                "contra el oraculo): dentro de %.0f c = %d · RASTREO (p1 ya se aparta) = %d · AJUSTE (p1 "
+                "coincide, C no) = %d · SAMPLE (el oraculo no sigue ninguna serie) = %d\n\n",
+                published, kErrorCents, within, tracking, fit, sample);
+    EXPECT_EQ(within + tracking + fit, published) << "la contabilidad no cierra";
+    EXPECT_EQ(uniqueMasks, published) << "hay archivos cuyo ajuste no se pudo reconstruir";
+    RecordProperty("archivos_con_lectura", published);
+    RecordProperty("mecanismo_rastreo", tracking);
+    RecordProperty("mecanismo_ajuste", fit);
+    RecordProperty("mecanismo_sample", sample);
 }
 
 /**
