@@ -1075,6 +1075,16 @@ WMA_API float wma_intonation_difference_cents(const WmaEngine* engine);
  *                              [5]-[7], [10] and [14]: the value is ABSENT, it is
  *                              not "false".
  *
+ *                              READ THE FLAG BEFORE THE STATE, not the other way
+ *                              round. 0 does NOT imply state 1 (no lock): without
+ *                              candidates a foreign pitch falls into state 0 (no
+ *                              signal, the absence contract) and the flag travels
+ *                              anyway — state 0 with [8] = 109.87 and [17] = 0.
+ *                              State 1 with [17] = 0 only happens WITH candidates.
+ *                              A consumer that only looks at [17] when it sees
+ *                              state 1 never looks at it without candidates.
+ *                              Measured by a consumer on 2.16.0.
+ *
  *                         B comes free with REQ-001 S6: four tracked partials
  *                         that disagree ARE the string's stiffness, so nothing
  *                         re-analyses the signal to get it. The perceptual
