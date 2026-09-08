@@ -601,15 +601,25 @@ bash scripts/build-ios.sh                  # [gate] libwatermelon_audio.a — am
                                            # check. gate.sh lo corre SUELTO y ANTES de
                                            # Gradle, y no es redundante: ver el comentario
                                            # en KmpNativeConventionPlugin.kt
-bash scripts/fetch-corpus.sh                # REQ-001 S10: baja el corpus grabado y
-                                           # VERIFICA su checksum contra
-                                           # analysis/tests/corpus-manifest.txt.
-                                           # Hoy el manifiesto esta VACIO a proposito:
-                                           # el corpus no existe todavia. Los tests de
-                                           # robustez que dependen de el salen SKIPPED
-                                           # y NUNCA passed — una corrida que no
-                                           # verifico no se puede leer como cobertura,
-                                           # que es la misma regla de regen-golden.sh.
+bash scripts/fetch-corpus.sh                # REQ-001 S10 / REQ-032: baja el corpus grabado
+                                           # de los assets del release `corpus-v1` y
+                                           # VERIFICA su sha256 contra
+                                           # analysis/tests/corpus-manifest.txt. Sin corpus
+                                           # bajado los tests de robustez salen SKIPPED y
+                                           # NUNCA passed — una corrida que no verifico no
+                                           # se puede leer como cobertura, que es la misma
+                                           # regla de regen-golden.sh. El directorio esta
+                                           # en .gitignore: los WAV no se versionan.
+bash scripts/render-corpus.sh               # REQ-032: la RECETA del corpus, para
+                                           # reconstruirlo o extenderlo. Fija el .sf2 por
+                                           # commit + sha256 + blob y lee su version del
+                                           # artefacto. NO hace falta para correr los tests.
+python3 scripts/corpus-reference-pitch.py --dir DIR   # el ORACULO del hz_verdadero del
+                                           # manifiesto: independiente del motor (R-API-48)
+                                           # y del nominal. Cuatro tramos desde 2,0 s.
+python3 scripts/spectrum-by-segment.py archivo.wav --f0 HZ   # la tabla de dB POR TRAMOS (Hann
+                                           # 250 ms) que separa hipotesis sobre un timbre real.
+                                           # Reproduce la del consumidor al decimo.
 
 python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2.6).
                                            # Imprime; docs/kmp/c_api_coverage.md

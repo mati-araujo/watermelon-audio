@@ -206,3 +206,63 @@ TEST(CorpusSweep, ACorruptCorpusDoesNotAuthoriseTheSweep) {
 
 }  // namespace
 }  // namespace wma_test
+
+// ===========================================================================================
+// REQ-032 S3 — AC-032.5: el caso del consumidor sobre material REAL, bajo la compuerta
+// ===========================================================================================
+
+namespace wma_test {
+namespace {
+
+/**
+ * AC-032.5 · `guitarra-limpia_E4` del corpus grabado, con las seis de guitarra declaradas, NO se
+ * publica convergida sobre A2 — y el test dice en que termino.
+ *
+ * Es el archivo del consumidor, renderizado por este repo con la misma receta (byte a byte: la
+ * tabla por tramos de `scripts/spectrum-by-segment.py` reproduce la suya al decimo). Sobre el,
+ * REQ-031 tiene que valer igual que sobre la sintesis: el detector lee f0/3 (109,87 Hz), la
+ * bandera dice 0 y el estado es NO_LOCK. Si un dia el detector lee E4, ESTE test cambia: la
+ * segunda mitad se pone roja para que se escriba el desenlace nuevo, no para que pase en
+ * silencio.
+ *
+ * Bug plausible: la compuerta de REQ-031 valiendo solo sobre la sintesis (otro nivel, otro
+ * espectro, otra cola) — que es exactamente lo que el corpus existe para preguntar.
+ *
+ * Sin corpus sale SKIPPED, nunca PASSED (la regla del corpus).
+ */
+TEST(CorpusRealE4, TheConsumersFileIsNeverPublishedAsConvergedOnA2) {
+    const auto st = corpus::stateOf(corpus::defaultCorpusDir(), corpus::manifestPath());
+    if (!corpus::shouldRunRobustness(st)) {
+        GTEST_SKIP() << "sin corpus grabado (" << corpus::describe(st)
+                     << "). Se baja con: bash scripts/fetch-corpus.sh — hasta entonces esto NO "
+                        "cuenta como cobertura.";
+    }
+    const corpus::Entry* e4 = nullptr;
+    const auto entries = corpus::entriesOf(corpus::manifestPath());
+    for (const auto& e : entries) if (e.name == "guitarra-limpia_E4.wav") e4 = &e;
+    ASSERT_NE(e4, nullptr) << "el manifiesto no declara guitarra-limpia_E4.wav";
+    ASSERT_FALSE(e4->candidatesHz.empty()) << "el nombre no declaro instrumento";
+
+    const corpus::Outcome o = corpus::sweepFile(corpus::defaultCorpusDir() + "/" + e4->name, *e4);
+    ASSERT_TRUE(o.analysed);
+    std::printf("  [REQ-032 S3] %s: estado=%d detectedHz=%.3f soporte=%.0f lectura_fina=%s "
+                "publicaciones=%d convergidas_sin_soporte=%d\n",
+                o.name.c_str(), o.state, o.detectedHz, static_cast<double>(o.spectralSupport),
+                o.published ? "si" : "no", o.publications, o.convergedWithoutSupport);
+
+    // La garantia de REQ-031, sobre TODAS las publicaciones de la nota.
+    EXPECT_EQ(o.convergedWithoutSupport, 0)
+        << "publico CONVERGED con la bandera en 0: el dato plausible y falso volvio";
+    EXPECT_NE(o.state, wma::analysis::kStateConverged) << "termino convergida";
+
+    // Y en que termino HOY, medido: f0/3, sin soporte, sin enganche. Si esto cambia, es un
+    // hallazgo que hay que escribir, no un pase.
+    EXPECT_NEAR(o.detectedHz, e4->trueHz / 3.0, 1.0)
+        << "ya no lee f0/3 (" << o.detectedHz << " Hz): el desenlace cambio, escribilo";
+    EXPECT_EQ(o.spectralSupport, 0.0f);
+    EXPECT_EQ(o.state, wma::analysis::kStateNoLock)
+        << "con instrumento declarado una altura sin soporte es NO_LOCK (R-API-26)";
+}
+
+}  // namespace
+}  // namespace wma_test

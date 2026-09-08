@@ -163,6 +163,13 @@ data class TunerSnapshot(
      * **`Boolean?` y no `Boolean`**: sin altura la pregunta no tiene respuesta, y `false` se
      * leería como *"vi una altura y no le creo"*. Es la misma convención que [cents] o
      * [usableRangeCents]: ausente, no falso.
+     *
+     * 🔴 **Mirá la bandera antes que el estado, no al revés.** `false` **no** implica
+     * [TunerState.NO_LOCK]: sin instrumento declarado una altura ajena cae en
+     * [TunerState.NO_SIGNAL] (es el contrato de la ausencia, R-PITCH-56) **y la bandera viaja
+     * igual** — `NO_SIGNAL` con `detectedHz` = 109,87 y `spectralSupport = false`. `NO_LOCK` con
+     * `false` sólo aparece **con** candidatos. Un consumidor que sólo mire la bandera cuando ve
+     * `NO_LOCK` no la mira nunca sin candidatos. Lo midió el consumidor sobre 2.16.0.
      */
     val spectralSupport: Boolean?,
 ) {

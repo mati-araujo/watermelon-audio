@@ -1,21 +1,74 @@
-# Manifiesto del corpus grabado — REQ-001 · NFR-8
+# Manifiesto del corpus grabado — REQ-001 · NFR-8 · poblado por REQ-032 S1 (2026-09-07)
 #
 # Una linea por archivo:   nombre  sha256  hz_verdadero  descripcion
 #
-# 🔴 ESTE MANIFIESTO ESTA VACIO A PROPOSITO, Y ESO NO ES UN PENDIENTE OLVIDADO.
+# EL ARTEFACTO, FIJADO (no un nombre de font ni una URL de rama):
+#   SoundFont   GeneralUser GS 2.0.3 BETA   (leido del chunk INAM del archivo, no afirmado)
+#   fuente      github.com/mrbumpy409/GeneralUser-GS · commit 684543d5e5efaef08d02be50dcda8d552478fa60
+#   sha256      9575028c7a1f589f5770fccc8cff2734566af40cd26ed836944e9a5152688cfe   (32 319 396 bytes)
+#   blob sha1   298b552d2e9d1307e03e5c5c99d2c046aaed9ec3   (el mismo que renderizo el consumidor)
+#   render      FluidSynth 2.6.0 · -ni -R 0 -C 0 -g 0.9 -r 44100 · una nota de 5 s, velocity 100
+#   receta      scripts/render-corpus.sh  (banco/programa por instrumento y nota por cuerda)
+#   assets      release `corpus-v1` de este repo — scripts/fetch-corpus.sh los baja y verifica
 #
-# El corpus grabado todavia NO EXISTE. Lo que existe —y es lo que esta etapa
-# tenia que dejar— es el MECANISMO: como se baja, como se verifica, y sobre todo
-# que pasa cuando no esta. Los tests de robustez que dependen de el salen
-# **SKIPPED**, nunca PASSED: una corrida que no verifico no puede leerse como
-# cobertura, que es la misma regla que gobierna `regen-golden.sh` y la atestacion
-# del gate local.
+# 🔴 EL hz_verdadero SALE DE UN ORACULO INDEPENDIENTE DEL MOTOR: scripts/corpus-reference-pitch.py
+# (pico espectral por Goertzel + Hann + interpolacion, cuatro tramos de 0,75 s desde 2,0 s). Ni
+# el motor (R-API-48) ni el nominal: el G2 del bajo acustico viene 0,28 c bajo el nominal y el
+# f0_medido que mando el consumidor estaba 21 c mal justo ahi. Donde este oraculo y el del
+# consumidor discrepan por mas de 1 c, la descripcion lo dice.
 #
-# Para agregar un archivo:
-#   1. subirlo a un lugar estable y anotar su URL en `scripts/fetch-corpus.sh`
-#   2. `shasum -a 256 archivo.wav` y pegar el hash aca
-#   3. anotar la frecuencia verdadera, que es contra lo que se compara
+# hz_verdadero = 0 significa "sin altura estable que declarar": el oraculo vio mas de 1 cent de
+# dispersion entre tramos. El archivo se baja y se verifica igual, pero NO se barre — el barrido
+# saltea las lineas sin hz en vez de inventarles un objetivo (CorpusSweep::entriesOf).
 #
-# El checksum no es burocracia: un archivo corrupto que se baja a medias produce
-# un resultado RARO en vez de un error, y un afinador que falla raro es peor que
-# uno que falla fuerte.
+# Se mide desde 2,0 s a proposito: el preset de guitarra limpia (PC 27) trae un glide de afinacion
+# de mas de un segundo en el ataque (E4: -2,3 c a 0,5 s · -1,0 c a 1,0 s · +0,03 c desde 2,0 s).
+#
+# Para agregar un archivo: renderizarlo con la receta, subirlo al release, `shasum -a 256`, correr el
+# oraculo, y pegar la linea. El checksum no es burocracia: un archivo bajado a medias produce un
+# resultado RARO en vez de un error, y un afinador que falla raro es peor que uno que falla fuerte.
+
+bajo-acustico_A1.wav  1caed2331ed11e7a49e88f6cb0e208846a3917b810938aed4fdf8590a4c8c141  54.96921  bajo-acustico A1 · oraculo -0.97c vs nominal, spread 0.03c
+bajo-acustico_D2.wav  1c2a99b91b19bea32ec05714f0e09ab225e73f3e6536b82958d6df966e43419f  73.37529  bajo-acustico D2 · oraculo -0.96c vs nominal, spread 0.22c
+bajo-acustico_E1.wav  e988b5e47c81a9ed7763722c942f22bf2ff03aef1400cbf6496a7e20cb65f767  41.18047  bajo-acustico E1 · oraculo -0.97c vs nominal, spread 0.01c
+bajo-acustico_G2.wav  0bc64e10a5453d77d313341d48f744d27b3c802a8dcc2ddbcc32460b88d55e42  97.98312  bajo-acustico G2 · oraculo -0.28c vs nominal, spread 0.01c · discrepa +21.2c con el f0_medido del consumidor (su calidad 0.261)
+bajo-dedos_A1.wav  9d54ce075add9f9af7221f616dd9badbc28e4b7afd36e177b023a27a0205eb4f  0.00000  bajo-dedos A1 · SIN hz: spread 1.54c entre tramos, la altura no se estabiliza
+bajo-dedos_D2.wav  161a12f83664cc3089483cf32f173bca2e0bcc03505a3c7fa71045c5f9dcb771  73.33746  bajo-dedos D2 · oraculo -1.86c vs nominal, spread 0.80c · discrepa -1.3c con el f0_medido del consumidor (su calidad 0.126)
+bajo-dedos_E1.wav  7d091626e01aac8bd48baef7b88773825b1e8ee1c536b6081b95f40a3136e59c  0.00000  bajo-dedos E1 · SIN hz: spread 1.23c entre tramos, la altura no se estabiliza
+bajo-dedos_G2.wav  ea8411e59fa11e5b882f5feac9116e97272176fb43ba3d674326e40e54cb1e77  97.91101  bajo-dedos G2 · oraculo -1.55c vs nominal, spread 0.82c
+bajo-fretless_A1.wav  c73f8973d2ea0d80cef2052e436dfde8b85b2a12d284eb6b9bff816c867de359  54.96977  bajo-fretless A1 · oraculo -0.95c vs nominal, spread 0.01c
+bajo-fretless_D2.wav  6af332f61ea3121fcfb247afd9e410033debf54042fe4b2cb53472cd0e538fb9  73.35139  bajo-fretless D2 · oraculo -1.53c vs nominal, spread 0.00c · discrepa -4.1c con el f0_medido del consumidor (su calidad 0.066)
+bajo-fretless_E1.wav  06b6698803bc55a62b657ef49e4cb0a03ed55ee7e6ee923ac2327db650078a8a  41.18120  bajo-fretless E1 · oraculo -0.93c vs nominal, spread 0.01c · discrepa +1.3c con el f0_medido del consumidor (su calidad 0.037)
+bajo-fretless_G2.wav  0f048cf2b1b606d8ba18a9e612cf88b7959b57d9ed975e1c49f72b1de56a54d0  97.99353  bajo-fretless G2 · oraculo -0.09c vs nominal, spread 0.01c
+bajo-pua_A1.wav  f1071715fc3372d7140d8ab35cc13c295cb0f2ff08707e2d1dec462b55221171  54.93559  bajo-pua A1 · oraculo -2.03c vs nominal, spread 0.19c
+bajo-pua_D2.wav  f32a016c75d90fc2474ca3a860ebb72f64d940fbcd67815d9a2767051ace3937  73.31092  bajo-pua D2 · oraculo -2.48c vs nominal, spread 0.08c
+bajo-pua_E1.wav  1e59ec3e669618e3a6c861d57880ad63410f8c8b011f89bf429b421a8a37126c  41.16175  bajo-pua E1 · oraculo -1.75c vs nominal, spread 0.01c
+bajo-pua_G2.wav  097e43eef959f4bf4ae4168b2776ce0e836207b28d756ecab48e3cb430ee50df  0.00000  bajo-pua G2 · SIN hz: spread 2.42c entre tramos, la altura no se estabiliza
+guitarra-acero_A2.wav  876c6f1e3c8d4c31bd95bd544f49cd5987bba160c113ce73172fc978ce8f8bcf  110.28113  guitarra-acero A2 · oraculo +4.42c vs nominal, spread 0.25c
+guitarra-acero_B3.wav  9269829f3a8304e6ce99b5d0951f45058df76b4f7b1942779b554f9390ad5075  246.95273  guitarra-acero B3 · oraculo +0.08c vs nominal, spread 0.41c · discrepa -1.1c con el f0_medido del consumidor (su calidad 0.236)
+guitarra-acero_D3.wav  ef5618710869582803448510537609502a33ba0f36d8444a11914bfb613111fa  146.78752  guitarra-acero D3 · oraculo -0.53c vs nominal, spread 0.17c
+guitarra-acero_E2.wav  0b8a439d35056f0f77c9d0e41a70165b5867c8544190e20979f8d855dc06f1bd  82.30588  guitarra-acero E2 · oraculo -2.12c vs nominal, spread 0.17c
+guitarra-acero_E4.wav  65669993e708435ee6cc06957bb1430cdd6f8290807056f2a5a634da53d73c30  329.81954  guitarra-acero E4 · oraculo +1.01c vs nominal, spread 0.29c
+guitarra-acero_G3.wav  9c589cf775d99548cf21aa2d1f5d81089f1360ad51156ffb70e0b1b66cdc23dd  195.97274  guitarra-acero G3 · oraculo -0.22c vs nominal, spread 0.31c · discrepa +8.4c con el f0_medido del consumidor (su calidad 0.064)
+guitarra-jazz_A2.wav  e1f618900292c1fc7af9b7e14c16ae0d1d75e671791cf6e791a8e351f45f5d7b  110.05910  guitarra-jazz A2 · oraculo +0.93c vs nominal, spread 0.00c
+guitarra-jazz_B3.wav  8456432996ca117fc17d35c4862d8342d51f644defbc0669ec962f5b3f6960b5  247.05248  guitarra-jazz B3 · oraculo +0.78c vs nominal, spread 0.00c
+guitarra-jazz_D3.wav  f8bcf56194fb2d7584cc32e98b6a6f0d05ad1b418388fa6ed7db608743ba31be  146.83029  guitarra-jazz D3 · oraculo -0.02c vs nominal, spread 0.00c
+guitarra-jazz_E2.wav  4f490128cc1bb1ef4296ce80e1fbd9e8f82303cc60b8fc2c0fe216e9fa9d0e6f  82.48890  guitarra-jazz E2 · oraculo +1.72c vs nominal, spread 0.01c
+guitarra-jazz_E4.wav  812b2f87dbb31bc72d0bb268e7fc029ea9c3e69d5de682ee6ea02a9c49a1b322  330.21765  guitarra-jazz E4 · oraculo +3.10c vs nominal, spread 0.00c
+guitarra-jazz_G3.wav  81ccb22f8da8dd035cdfffec663ec00f048e86f30bc89e63573fa1ef18413504  195.77371  guitarra-jazz G3 · oraculo -1.98c vs nominal, spread 0.00c
+guitarra-limpia_A2.wav  5fe6581d62cc658b1e4475de85343b95d8fa03640dbe5befad4903e43d386bb3  109.90068  guitarra-limpia A2 · oraculo -1.56c vs nominal, spread 0.02c
+guitarra-limpia_B3.wav  4a2521df2b1ab5b232acee1e1e2b450a277ee76cefa289e6125fe229d799575d  246.95356  guitarra-limpia B3 · oraculo +0.08c vs nominal, spread 0.00c
+guitarra-limpia_D3.wav  823fd3baeacd526a5662f179250264b579ebf08233636e8feabed393e29f384a  146.81242  guitarra-limpia D3 · oraculo -0.24c vs nominal, spread 0.01c
+guitarra-limpia_E2.wav  c699ac10c7aa7c9845bb0c87652ff29edaa8e972f86c808087801fb04f33f4d2  82.39291  guitarra-limpia E2 · oraculo -0.29c vs nominal, spread 0.00c
+guitarra-limpia_E4.wav  882a6d96725eb6890806cc7fa39b1441a56fcefad77ce209ac4fdd6705457fa6  329.63401  guitarra-limpia E4 · oraculo +0.03c vs nominal, spread 0.00c
+guitarra-limpia_G3.wav  251e35ea69ccc7c6b23a65ca58383a01ee7f2b146e3bd171f0d84152a185d133  195.88193  guitarra-limpia G3 · oraculo -1.02c vs nominal, spread 0.00c · discrepa +1.0c con el f0_medido del consumidor (su calidad 0.044)
+guitarra-nylon_A2.wav  65e356fe67e768ca4d1e300f5e31ab8f0cab23989d2012f780445e7f8181bc7c  109.98290  guitarra-nylon A2 · oraculo -0.27c vs nominal, spread 0.00c
+guitarra-nylon_B3.wav  d81fcae66625457b82820cf64947b1afce989e478054c477b4a1bd8ec2f28d56  246.51103  guitarra-nylon B3 · oraculo -3.02c vs nominal, spread 0.00c · discrepa -6.8c con el f0_medido del consumidor (su calidad 0.291)
+guitarra-nylon_D3.wav  0ea574afd8adb8aeb920913245e6c585310057c005f4f3783da6714dafbaa671  146.99999  guitarra-nylon D3 · oraculo +1.98c vs nominal, spread 0.00c
+guitarra-nylon_E2.wav  a84af544045d372ea279ca0b10386f0feaa1e87f77c63259844bf124fb0278f7  82.31020  guitarra-nylon E2 · oraculo -2.03c vs nominal, spread 0.00c · discrepa +2.2c con el f0_medido del consumidor (su calidad 0.009)
+guitarra-nylon_E4.wav  24fe92609c5042599e7e1ceef04308c7322b3caa55f10813d47f2e287f190aef  330.43787  guitarra-nylon E4 · oraculo +4.25c vs nominal, spread 0.00c
+guitarra-nylon_G3.wav  66d2fc080e8f6c078bdf00a55a5e4fb6beeb14d26fae7952cbbce382753bb5e8  196.19388  guitarra-nylon G3 · oraculo +1.73c vs nominal, spread 0.00c
+ukelele_A4.wav  6b33e84bc195789412e1a450bd39ee3ecfa2d1c5eb0bc6439f145d48a8f0332f  440.49114  ukelele A4 · oraculo +1.93c vs nominal, spread 0.08c
+ukelele_C4.wav  79fdcceb5b0c602c6d5396a4d1595085fea691d7a09981ed1209362618714065  262.50004  ukelele C4 · oraculo +5.78c vs nominal, spread 0.00c · discrepa +1.1c con el f0_medido del consumidor (su calidad 0.313)
+ukelele_E4.wav  24fe92609c5042599e7e1ceef04308c7322b3caa55f10813d47f2e287f190aef  330.43787  ukelele E4 · oraculo +4.25c vs nominal, spread 0.00c
+ukelele_G4.wav  c9338243710f7715d2a0476b1f60d673fd3a9f7fc4c757e8c516f22578668908  392.63468  ukelele G4 · oraculo +2.82c vs nominal, spread 0.12c

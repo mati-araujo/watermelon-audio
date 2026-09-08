@@ -8,11 +8,21 @@
 #
 #   bash scripts/fetch-corpus.sh          # baja lo que falte y verifica todo
 #   bash scripts/fetch-corpus.sh --verify # solo verifica lo que ya esta
+#
+# DE DONDE SE BAJA (REQ-032 S1): de los assets del release `corpus-vN` de este
+# repo. El tag es `corpus-*` y NO `v*` a proposito: `release-please.yml` y
+# `publish.yml` escuchan `v*`, y un corpus no puede disparar una release del
+# motor. `WMA_CORPUS_URL_BASE` lo cambia (un mirror, o un release nuevo).
+#
+# 🔴 LA URL NO VALIDA NADA: lo que valida es el sha256 del manifiesto. Un asset
+# reemplazado a mano en el release se baja igual y falla aca, ruidosamente, que
+# es exactamente lo que tiene que pasar.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$REPO_ROOT/audio/src/main/cpp/analysis/tests/corpus-manifest.txt"
 CORPUS_DIR="${WMA_CORPUS_DIR:-$REPO_ROOT/audio/src/main/cpp/analysis/tests/corpus}"
+CORPUS_URL_BASE="${WMA_CORPUS_URL_BASE:-https://github.com/mati-araujo/watermelon-audio/releases/download/corpus-v1}"
 VERIFY_ONLY=0
 [ "${1:-}" = "--verify" ] && VERIFY_ONLY=1
 
@@ -31,9 +41,17 @@ while IFS= read -r line; do
     dest="$CORPUS_DIR/$name"
 
     if [ ! -f "$dest" ] && [ "$VERIFY_ONLY" -eq 0 ]; then
-        printf '  falta %s y no hay URL declarada para bajarlo\n' "$name" >&2
-        failed=$((failed + 1))
-        continue
+        printf '  bajando %s\n' "$name"
+        # A un temporal y despues se mueve: un `curl` cortado a mitad no puede
+        # dejar un archivo con nombre de corpus que el checksum de abajo tenga que
+        # descubrir en la corrida SIGUIENTE.
+        if ! curl -fsSL -o "$dest.part" "$CORPUS_URL_BASE/$name"; then
+            printf '  🔴 no se pudo bajar %s de %s\n' "$name" "$CORPUS_URL_BASE" >&2
+            rm -f "$dest.part"
+            failed=$((failed + 1))
+            continue
+        fi
+        mv "$dest.part" "$dest"
     fi
     if [ ! -f "$dest" ]; then
         printf '  ausente: %s\n' "$name" >&2
