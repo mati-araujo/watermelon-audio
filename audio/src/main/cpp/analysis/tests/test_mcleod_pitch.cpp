@@ -18,6 +18,7 @@
  * acá daría dos fuentes de verdad para la misma pregunta.
  */
 
+#include "support/AscentVsSweep.h"
 #include "support/SyntheticSignal.h"
 #include "tests/support/TestSanitizer.h"
 
@@ -587,6 +588,10 @@ TEST(McLeodPitchTest, AC0331_ReadingTheProbesDoesNotChangeTheVerdict) {
     EXPECT_EQ(probed.sweepCandidateNsdf(probed.sweepCandidateCount()), 0.0);
     EXPECT_EQ(probed.sweepCandidateRefinedLag(-1), -1);
     EXPECT_EQ(probed.sweepCandidateRefinedNsdf(probed.sweepCandidateCount()), 0.0);
+    // REQ-034: el corte temprano refina un prefijo, y el prefijo es el mismo en los dos.
+    EXPECT_EQ(quiet.refinedCandidateCount(), probed.refinedCandidateCount());
+    EXPECT_GT(quiet.refinedCandidateCount(), 0);
+    EXPECT_LE(quiet.refinedCandidateCount(), quiet.sweepCandidateCount());
 }
 
 /**
@@ -612,6 +617,178 @@ TEST(McLeodPitchTest, AC0333_SevenHarmonicsWithAStrongSeventhReadTheirFundamenta
         EXPECT_NEAR(ratio, 1.0, 0.01)
             << "leyo " << mpm.frequencyHz() << " Hz (razon " << ratio << "): razon 0,333 es f0/3";
     }
+}
+
+// ---------------------------------------------------------------------------
+// REQ-034 S1 — EL ASCENSO CONTRA EL BARRIDO ENTERO, sobre todo el conjunto de control
+// ---------------------------------------------------------------------------
+
+/**
+ * AC-034.1 — las sondas de costo cuentan lo que el detector evaluo y no cambian nada.
+ *
+ * Bug plausible: contar solo el barrido y no los vecinos de la parabola, o no resetear por
+ * ventana (el conteo creceria sin techo y la comparacion de S1 sumaria dos veces).
+ */
+TEST(McLeodPitchTest, AC0341_TheCostProbesCountTheWindowsEvaluationsAndDoNotChangeTheVerdict) {
+    McLeodPitch a, b;
+    a.prepare(kRate);
+    b.prepare(kRate);
+    const auto sig = pureSine(110.0, kRate, kRate);
+    feed(a, sig);
+    feed(b, sig);
+    // Antes de cualquier ventana, cero; despues, el barrido evaluo al menos sus ~50 puntos y
+    // el refinamiento al menos los 2·span+1 del candidato mas grave mas los dos vecinos.
+    EXPECT_GT(a.nsdfEvaluationsSweep(), 40);
+    EXPECT_GT(a.nsdfEvaluationsRefine(), 2);
+    EXPECT_EQ(a.nsdfEvaluationsSweep(), b.nsdfEvaluationsSweep()) << "no es determinista";
+    EXPECT_EQ(a.nsdfEvaluationsRefine(), b.nsdfEvaluationsRefine());
+    EXPECT_EQ(a.frequencyHz(), b.frequencyHz());
+    // Es POR VENTANA: dos ventanas mas no lo duplican.
+    const int sweepOne = a.nsdfEvaluationsSweep();
+    feed(a, sig);
+    EXPECT_EQ(a.nsdfEvaluationsSweep(), sweepOne) << "el conteo no se resetea por ventana";
+    McLeodPitch c;
+    c.prepare(kRate);
+    EXPECT_EQ(c.nsdfEvaluationsSweep(), 0);
+    EXPECT_EQ(c.nsdfEvaluationsRefine(), 0);
+}
+
+/**
+ * AC-034.2 — la MEDICION: sobre el conjunto de control entero, ¿el ascenso desde la muestra
+ * gruesa termina en el mismo pico que el barrido ±span entero, y cuanto cuesta cada uno?
+ *
+ * No afirma que sean iguales: eso es lo que S1 mide y S2 decide. Afirma que la medicion se
+ * hizo sobre todo el conjunto (ventanas > 0 en cada grupo) y la imprime, con la cuenta de la
+ * ELECCION distinta —lo unico que un consumidor veria— aparte de la de picos distintos.
+ *
+ * Los estimulos son los de los tests que vigilan el detector, generados igual: los 8 golden
+ * (senos puros, 48 k), el reproductor de Tunio y el falso de REQ-031 a 44,1 y 48 k, la octava
+ * (f0 −20 dB + H2 + H3, notas ≤ 400 Hz), los pares de MINI-019 (E2, −9..−11 dB) y la matriz
+ * de estimulos pobres entera (14 x 4 x 2 x 2 x 2 = 448, 2 s cada uno). El corpus grabado se
+ * compara en test_corpus_gate.cpp, donde vive.
+ */
+TEST(McLeodPitchTest, AC0342_AscentVersusFullRefinementOverTheWholeControlSet) {
+    using namespace wma_test::ascent;
+    Tally total;
+    std::printf("\n");
+
+    {   // los golden de deteccion gruesa
+        Tally t;
+        const struct { const char* label; double hz; } kCases[] = {
+            {"A0", 27.500}, {"B0", 30.868}, {"E2", 82.407}, {"A2", 110.000},
+            {"D3", 146.832}, {"A4", 440.000}, {"E5", 659.255}, {"C7", 2093.005},
+        };
+        for (const auto& c : kCases) compare(kRate, pureSine(c.hz, kRate, kRate), t, std::string("golden ") + c.label);
+        EXPECT_GT(t.windows, 0); print("golden (8 senos, 48 k)", t); add(total, t);
+    }
+    {   // el reproductor de Tunio y el falso de REQ-031, a los dos rates
+        Tally t;
+        for (const int rate : {44100, 48000})
+            for (const auto& st : req033::stimuli())
+                compare(rate, partialsWithAmplitudes(st.f0, st.B, st.amps, rate, req033::wholeWindows(rate, 5)),
+                        t, std::string(st.name) + " @" + std::to_string(rate));
+        EXPECT_GT(t.windows, 0); print("REQ-033 (4 estimulos x 2 rates)", t); add(total, t);
+    }
+    {   // la octava: fundamental 20 dB abajo, H2 y H3
+        Tally t;
+        for (const auto& note : notes()) {
+            if (note.hz > 400.0) continue;
+            std::vector<float> sig(static_cast<size_t>(kRate), 0.0f);
+            const auto weak = pureSine(note.hz, kRate, kRate, 0.05);
+            const auto strong = pureSine(note.hz * 2.0, kRate, kRate, 0.5);
+            const auto third = pureSine(note.hz * 3.0, kRate, kRate, 0.25);
+            for (size_t i = 0; i < sig.size(); ++i) sig[i] = weak[i] + strong[i] + third[i];
+            compare(kRate, sig, t, std::string("octava ") + note.name);
+        }
+        EXPECT_GT(t.windows, 0); print("octava (f0 -20 dB + H2 + H3)", t); add(total, t);
+    }
+    {   // los pares de MINI-019
+        Tally t;
+        for (const double db : {9.0, 10.0, 11.0}) {
+            std::vector<float> sig(static_cast<size_t>(kRate), 0.0f);
+            const auto f = pureSine(82.4069, kRate, kRate, 0.5 * std::pow(10.0, -db / 20.0));
+            const auto h2 = pureSine(82.4069 * 2.0, kRate, kRate, 0.5);
+            for (size_t i = 0; i < sig.size(); ++i) sig[i] = f[i] + h2[i];
+            compare(kRate, sig, t, "pares -" + std::to_string(static_cast<int>(db)) + " dB");
+        }
+        EXPECT_GT(t.windows, 0); print("MINI-019 (pares, -9..-11 dB)", t); add(total, t);
+    }
+    {   // la matriz de estimulos pobres entera — y bajo sanitizer un subconjunto ROTATIVO,
+        // 1 de cada 8 combinaciones por par (cuerda, riqueza), la misma forma que MINI-020: este
+        // test dio timeout bajo TSan a -j4 en el gate de REQ-034.1 (la clase que MINI-020 acaba
+        // de cerrar). La medicion que importa sale del build normal, con los 448.
+        Tally t;
+        int par = 0;
+        for (const auto& cuerda : catalogStrings())
+            for (int nPart = 1; nPart <= 4; ++nPart, ++par) {
+                int combo = 0;
+                for (const int rate : {44100, 48000})
+                    for (const double B : {0.0, 1e-4})
+                        for (const double fase : {0.0, M_PI / 3.0}) {
+#ifdef WMA_TEST_UNDER_SANITIZER
+                            if (combo++ != par % 8) continue;
+#else
+                            (void)combo;
+#endif
+                            compare(rate, inharmonicString(cuerda.hz, B, nPart, rate, rate * 2, 0.3, fase), t,
+                                    std::string(cuerda.name) + " @" + std::to_string(rate) + " n=" +
+                                        std::to_string(nPart) + " B=" + std::to_string(B));
+                        }
+            }
+        EXPECT_GT(t.windows, 0); print("matriz pobre (448 x 2 s; 56 bajo sanitizer)", t); add(total, t);
+    }
+    print("TOTAL sintetico", total);
+    std::printf("\n");
+    RecordProperty("candidatos_lag_distinto", std::to_string(total.differLag));
+    RecordProperty("ventanas_eleccion_distinta", std::to_string(total.chosenDiffer));
+
+    // AC-034.3 (REQ-034 S2): el corte temprano es EXACTO — en ninguna ventana el detector
+    // eligio distinto que la regla entera replicada desde el test. Y corto de verdad: en la
+    // mayoria de las ventanas periodicas no refino todo.
+    EXPECT_EQ(total.fullRuleDiffer, 0) << "el corte temprano cambio una eleccion";
+    EXPECT_LT(total.refinedAll, total.windows / 2)
+        << "el corte temprano casi nunca corta: refino todo en " << total.refinedAll << " de "
+        << total.windows;
+    EXPECT_LT(total.evalFull * 2, total.evalFullRule)
+        << "produccion evaluo " << total.evalFull << " contra " << total.evalFullRule
+        << " de refinar todo: el ahorro no llega a la mitad";
+}
+
+/**
+ * AC-034.3 / AC-034.5 — LA ZONA AMBIGUA SE EJERCE, y decide como la regla entera.
+ *
+ * El corte temprano para en el primer pico >= 0,9 solo si ningun anterior alcanza
+ * 0,9 · (maximo visto). Un par f0 + H2 con el fundamental hundido pone el pico de τ/2 cerca del
+ * de τ, y con ruido encima el de τ baja de 1: ahi hay ventanas donde τ/2 queda en la zona
+ * ambigua [0,9·M, 0,9), el corte NO puede parar, refina todo y la regla entera decide. Se
+ * afirma que en esas ventanas `refinedCandidateCount() == sweepCandidateCount()` y que la
+ * eleccion coincide con la regla entera — y que hubo al menos una, porque un camino que no se
+ * ejerce es un camino que no se prueba.
+ *
+ * Bug plausible (el mutante m2 de REQ-033.2, "parar en el primero >= 0,9"): en esas ventanas
+ * elige τ aunque la regla entera elija τ/2. Este test lo mata por `fullRuleDiffer`.
+ */
+TEST(McLeodPitchTest, AC0343_TheAmbiguousZoneIsExercisedAndDecidesLikeTheFullRule) {
+    using namespace wma_test::ascent;
+    Tally t;
+    long ambiguousWindows = 0;
+    for (const double db : {11.5, 12.0, 12.5}) {
+        for (const double snr : {6.0, 10.0}) {
+            std::vector<float> sig(static_cast<size_t>(kRate * 2), 0.0f);
+            const auto f = pureSine(82.4069, kRate, kRate * 2, 0.5 * std::pow(10.0, -db / 20.0));
+            const auto h2 = pureSine(82.4069 * 2.0, kRate, kRate * 2, 0.5);
+            for (size_t i = 0; i < sig.size(); ++i) sig[i] = f[i] + h2[i];
+            addNoiseAtSnr(sig, snr, 4242u + static_cast<uint32_t>(db * 10 + snr));
+            Tally one;
+            compare(kRate, sig, one, "par -" + std::to_string(db) + " dB, SNR " + std::to_string(snr));
+            ambiguousWindows += one.refinedAll;
+            add(t, one);
+        }
+    }
+    print("zona ambigua (pares ruidosos)", t);
+    ASSERT_GT(t.windows, 0);
+    EXPECT_GT(ambiguousWindows, 0) << "ningun estimulo entro en la zona ambigua: el camino no se ejercio";
+    EXPECT_EQ(t.fullRuleDiffer, 0) << "en la zona ambigua el detector eligio distinto que la regla entera";
 }
 
 }  // namespace

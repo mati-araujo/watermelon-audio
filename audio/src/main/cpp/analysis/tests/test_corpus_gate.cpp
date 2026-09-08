@@ -19,6 +19,8 @@
 
 #include <gtest/gtest.h>
 
+#include "support/AscentVsSweep.h"
+
 #include <array>
 
 #include <cmath>
@@ -271,6 +273,47 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
                 << o.name << ": la lectura fina se aparto " << o.cents << " c del oraculo";
         }
     }
+}
+
+/**
+ * REQ-034 S1 (AC-034.2) — el ascenso contra el barrido entero sobre los 41 archivos REALES.
+ *
+ * Los sinteticos son armonicos exactos o estirados con B chico; una cuerda sampleada trae
+ * ruido, decaimiento y parciales que la sintesis no tiene, y la unimodalidad de la NSDF en la
+ * vecindad de un candidato es una propiedad de la SEÑAL. Se alimenta la misma mezcla a mono
+ * (0,5·(L+R)) y la misma nota (hasta `noteEndFrames`) que el barrido del corpus, a un
+ * `McLeodPitch` solo, en ventanas enteras. Sin corpus verificado: SKIPPED, nunca PASSED.
+ */
+TEST(CorpusRobustness, AscentVersusFullRefinementOnTheRecordedCorpus) {
+    const auto st = corpus::stateOf(corpus::defaultCorpusDir(), corpus::manifestPath());
+    if (!corpus::shouldRunRobustness(st)) {
+        GTEST_SKIP() << "sin corpus grabado (" << corpus::describe(st) << ")";
+    }
+    using namespace wma_test::ascent;
+    Tally total;
+    int files = 0;
+    for (const corpus::Entry& e : corpus::entriesOf(corpus::manifestPath())) {
+        if (e.trueHz <= 0.0) continue;
+        const wav::WavData data = wav::readWav((corpus::defaultCorpusDir() + "/" + e.name).c_str());
+        if (data.numFrames <= 0 || data.sampleRate <= 0) continue;
+        const int frames = corpus::noteEndFrames(data);
+        if (frames <= 0) continue;
+        std::vector<float> mono(static_cast<size_t>(frames));
+        for (int i = 0; i < frames; ++i)
+            mono[static_cast<size_t>(i)] = 0.5f * (data.buffer[static_cast<size_t>(i) * 2]
+                                                   + data.buffer[static_cast<size_t>(i) * 2 + 1]);
+        Tally t;
+        compare(data.sampleRate, mono, t, e.name);
+        add(total, t);
+        ++files;
+    }
+    EXPECT_GT(files, 0);
+    EXPECT_GT(total.windows, 0);
+    std::printf("\n");
+    print(("corpus grabado (" + std::to_string(files) + " archivos)").c_str(), total);
+    std::printf("\n");
+    RecordProperty("candidatos_lag_distinto", std::to_string(total.differLag));
+    RecordProperty("ventanas_eleccion_distinta", std::to_string(total.chosenDiffer));
 }
 
 }  // namespace
