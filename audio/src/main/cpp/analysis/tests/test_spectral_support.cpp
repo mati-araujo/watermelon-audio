@@ -34,6 +34,7 @@
 
 #include <gtest/gtest.h>
 #include <cmath>
+#include <cstdlib>
 #include <set>
 #include <string>
 #include <vector>
@@ -542,4 +543,61 @@ TEST(SpectralSupport, AC0315_WithoutAPublishedPitchTheGateDoesNotAct) {
     EXPECT_EQ(static_cast<int>(v[kSnapState]), kStateMeasuring)
         << "sin altura publicada la compuerta de soporte no puede decidir NO_LOCK: el hueco "
            "del detector sigue siendo MEASURING hasta que la ausencia se declare (REQ-019)";
+}
+
+// ===========================================================================================
+// ROJO CONOCIDO, declarado: el reproductor minimo de Tunio (nota del 07/09 b, §3)
+// ===========================================================================================
+
+/**
+ * 🔴 CONTROL NEGATIVO QUE NACE ROJO, Y LO DICE. Es el reproductor mínimo que el consumidor
+ * destiló de `guitarra-limpia_E4` con su tabla por tramos: SIETE senos armonicos con los niveles
+ * medidos en el tramo estable (H1 −7,2 · H2 −3,2 · H3 −0,6 · H4 0 · H5 −15,1 · H6 −15,0) y H7 a
+ * −9,6 dB. Con seis el motor converge en E4; con el septimo lee f0/3 (109,87 Hz) y la bandera de
+ * REQ-031 dice 0. Reproducido aca el 2026-09-07, identico: con candidatos NO_LOCK, sin candidatos
+ * NO_SIGNAL, 109,874 Hz en los dos.
+ *
+ * NO es el caso de REQ-031 (ahi faltaban los parciales que desambiguan el periodo; aca estan
+ * TODOS hasta H7 y el detector igual elige 3τ): es un defecto del DETECTOR GRUESO con espectros
+ * ricos, y es un REQ propio, propuesto y todavia sin abrir — decision de producto. Hasta que
+ * arranque, este test corre la medicion, la IMPRIME en el veredicto y sale SKIPPED, nunca
+ * PASSED (la regla de `regen-golden.sh` y del corpus: una corrida que no verifico no cuenta). Con
+ * `WMA_RUN_PENDING=1` deja de saltear y muestra el rojo. El control POSITIVO (seis parciales) si
+ * se afirma siempre: si algun dia esto pasa "solo", que sea porque el detector cambio, no porque
+ * la sintesis se rompio.
+ *
+ * Un rojo conocido que no dice que es conocido se re-investiga cada vez; por eso el veredicto
+ * lleva el numero y la referencia.
+ */
+TEST(SpectralSupport, PendingReq_SevenHarmonicsWithAStrongSeventhAreDetectedAtTheirFundamental) {
+    const std::vector<double> seis =
+        {0.5 * dB(-7.2), 0.5 * dB(-3.2), 0.5 * dB(-0.6), 0.5 * dB(0.0), 0.5 * dB(-15.1), 0.5 * dB(-15.0)};
+    std::vector<double> siete = seis;
+    siete.push_back(0.5 * dB(-9.6));
+
+    const auto conSeis = analizar(toStereo(wma_test::partialsWithAmplitudes(kE4, 0.0, seis, kRate, kFrames)),
+                                  kE4, guitarraHz());
+    ASSERT_TRUE(conSeis.ok);
+    ASSERT_NEAR(conSeis.detectedHz, kE4, 1.0) << "el control positivo (seis parciales) dejo de converger";
+    ASSERT_EQ(conSeis.state, kStateConverged);
+    ASSERT_EQ(conSeis.support, 1.0f);
+
+    const auto buf = toStereo(wma_test::partialsWithAmplitudes(kE4, 0.0, siete, kRate, kFrames));
+    const auto conCand = analizar(buf, kE4, guitarraHz());
+    const auto sinCand = analizar(buf, kE4, {});
+    ASSERT_TRUE(conCand.ok);
+    ASSERT_TRUE(sinCand.ok);
+
+    if (std::getenv("WMA_RUN_PENDING") == nullptr) {
+        GTEST_SKIP() << "ROJO CONOCIDO (REQ propuesto: el septimo armonico fuerte lee f0/3; nota de "
+                        "Tunio 2026-09-07 b, §3). Medido ahora: con candidatos state=" << conCand.state
+                     << " detectedHz=" << conCand.detectedHz << " support=" << conCand.support
+                     << " | sin candidatos state=" << sinCand.state << " detectedHz=" << sinCand.detectedHz
+                     << " support=" << sinCand.support << ". Se espera E4 (" << kE4
+                     << ") con soporte. WMA_RUN_PENDING=1 lo muestra rojo. NO cuenta como cobertura.";
+    }
+    EXPECT_NEAR(conCand.detectedHz, kE4, 1.0) << "con candidatos: el detector leyo f0/3";
+    EXPECT_EQ(conCand.support, 1.0f);
+    EXPECT_NEAR(sinCand.detectedHz, kE4, 1.0) << "sin candidatos: el detector leyo f0/3";
+    EXPECT_EQ(sinCand.support, 1.0f);
 }
