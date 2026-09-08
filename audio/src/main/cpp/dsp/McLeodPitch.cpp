@@ -186,34 +186,60 @@ void McLeodPitch::analyzeWindow() {
         return;
     }
 
+    // --- REQ-033: CADA CANDIDATO SE JUZGA POR SU PICO REAL, NO POR LA MUESTRA GRUESA -----
+    //
+    // El barrido de arriba deja cada pico ubicado con un error de hasta medio paso (τ/24), y
+    // en un espectro rico el lobulo es ANGOSTO. Medido (REQ-033 S1) sobre la E4 de siete senos
+    // con H7 a −9,6 dB, a 44,1 kHz: la NSDF vale 0,999 en τ = 67 y 0,816 en el lag 65 que el
+    // barrido muestreo; 3τ cayo a 1,3 muestras de su grilla y vale 0,908. Aplicar el umbral
+    // del primer pico sobre esos valores GRUESOS decidia por 0,001 a favor de 3τ. Y a 48 kHz,
+    // con τ a 2,2 muestras de la grilla y 3τ a 0,4, hasta seis armonicos limpios leian f0/3.
+    // O sea que la nota dependia de donde caia la grilla —del rate y de f0—, no de la senal.
+    //
+    // La salida NO es bajar el umbral (MINI-019: mueve el defecto) ni densificar el barrido
+    // (vuelve el costo de la NSDF completa): es refinar CADA candidato —el maximo real en su
+    // vecindad ±τ/12, que antes se hacia solo para el ya elegido— y recien despues aplicar el
+    // umbral. Un candidato es maximo local entre muestras, asi que su pico real esta a menos
+    // de un paso; en esa vecindad la NSDF es unimodal para armonicos hasta ~12 (los que la
+    // grilla resuelve), y por eso el maximo de la vecindad ES el pico.
+    //
+    // Se refina TODO, sin corte temprano: "el primero que supera 0,9·máximo" necesita el
+    // máximo VERDADERO, y un corte al primer pico ≥ 0,9 no lo conoce todavia. El costo se
+    // mide en el test de costo y queda anotado en la etapa.
+    for (int i = 0; i < mKeyCount; ++i) {
+        const int lag = mKeyLags[i];
+        const int span = std::max(1, lag / 12);
+        const int from = std::max(mMinLag, lag - span);
+        const int to = std::min(mMaxLag, lag + span);
+        int peak = lag;
+        double peakValue = mNsdf[static_cast<size_t>(lag)];
+        for (int l = from; l <= to; ++l) {
+            if (l == lag) continue;
+            const double v = nsdfAt(l);
+            mNsdf[static_cast<size_t>(l)] = v;
+            if (v > peakValue) { peakValue = v; peak = l; }
+        }
+        mRefinedLags[i] = peak;
+        mRefinedNsdf[i] = peakValue;
+        if (peakValue > bestValue) { bestValue = peakValue; bestLag = peak; }
+    }
+
     // --- LA DEFENSA CONTRA LA OCTAVA -----------------------------------------
     //
-    // Se elige el PRIMER lag que supere `kPeakThreshold · máximo`, no el máximo. En una
+    // Se elige el PRIMER pico que supere `kPeakThreshold · máximo`, no el máximo. En una
     // bordona con el fundamental 20 dB por debajo del segundo parcial, el pico de 2·τ es mas
     // alto — pero el de τ es el primero en superar el umbral, y es el correcto. Bajar el
     // umbral a 1,0 convierte esto en "elegi el maximo" y trae la octava de vuelta.
-    const double threshold = kPeakThreshold * bestValue;
-    int coarse = bestLag;
-    for (int i = 0; i < mKeyCount; ++i) {
-        const int candidate = mKeyLags[i];
-        if (mNsdf[static_cast<size_t>(candidate)] >= threshold) { coarse = candidate; break; }
-    }
-
-    // --- segunda pasada: resolucion completa alrededor del candidato ----------
     //
-    // El paso grueso deja el pico ubicado con un error de hasta τ/12, que en cents es
-    // muchisimo. Aca se evalua lag por lag en esa vecindad y se elige el maximo real.
-    const int span = std::max(1, coarse / 12);
-    const int from = std::max(mMinLag, coarse - span);
-    const int to = std::min(mMaxLag, coarse + span);
-    int chosen = coarse;
-    double chosenValue = mNsdf[static_cast<size_t>(coarse)];
-    for (int lag = from; lag <= to; ++lag) {
-        const double v = nsdfAt(lag);
-        mNsdf[static_cast<size_t>(lag)] = v;
-        if (v > chosenValue) { chosenValue = v; chosen = lag; }
+    // Desde REQ-033 los dos lados de la comparacion son picos REALES (refinados arriba), asi
+    // que la eleccion ya no depende de donde cayo la grilla del barrido.
+    const double threshold = kPeakThreshold * bestValue;
+    int chosen = bestLag;
+    for (int i = 0; i < mKeyCount; ++i) {
+        if (mRefinedNsdf[i] >= threshold) { chosen = mRefinedLags[i]; break; }
     }
-    // Los vecinos inmediatos, para que la parabola tenga sus tres puntos.
+    // Los vecinos inmediatos, para que la parabola tenga sus tres puntos. Los cubre el
+    // refinamiento salvo cuando el pico cae en el borde de su vecindad.
     if (chosen - 1 >= 0) mNsdf[static_cast<size_t>(chosen - 1)] = nsdfAt(chosen - 1);
     if (chosen + 1 <= mMaxLag) mNsdf[static_cast<size_t>(chosen + 1)] = nsdfAt(chosen + 1);
 

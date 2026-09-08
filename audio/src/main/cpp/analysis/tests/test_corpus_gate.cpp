@@ -19,6 +19,8 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -193,19 +195,19 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
     std::printf("\n");
 
     /**
-     * 🔴 TRINQUETE BIDIRECCIONAL: los archivos donde HOY el detector lee un SUBMULTIPLO. Son el
-     * caso de REQ-031 sobre el render del propio repo —la E4 de guitarra limpia en f0/3, y su G3
-     * en f0/5— y el consumidor los midio igual (nota del 07/09 b, §2). Se declara el desenlace
-     * exacto: altura en f0/k, bandera 0, NUNCA convergido. Si un dia empiezan a leerse bien, esto
-     * se pone ROJO para que se los saque de la lista — igual que `rt-safety-baseline.txt`. No es
-     * escribir el defecto en el contrato: es decir que se sabe, con nombre, y que cambiarlo
-     * tiene que verse en el diff. El REQ que lo arregla esta propuesto (nota 07/09 b, §3).
+     * 🔴 TRINQUETE BIDIRECCIONAL: los archivos donde el detector lee un SUBMULTIPLO. Se declara
+     * el desenlace exacto: altura en f0/k, bandera 0, NUNCA convergido. Si empiezan a leerse
+     * bien, esto se pone ROJO para que se los saque de la lista — igual que
+     * `rt-safety-baseline.txt`. No es escribir el defecto en el contrato: es decir que se sabe,
+     * con nombre, y que cambiarlo tiene que verse en el diff.
+     *
+     * VACIO desde REQ-033 (2026-09-07), y asi fue: tuvo `guitarra-limpia_E4` (f0/3) y
+     * `guitarra-limpia_G3` (f0/5) —los dos casos de REQ-031 sobre el render del propio repo—,
+     * el arreglo del detector grueso los puso ROJOS y salieron. Hoy leen −0,66 y −1,76 c
+     * convergidas con soporte. La lista queda armada por si vuelve la clase.
      */
     struct KnownSubmultiple { const char* name; int divisor; };
-    constexpr KnownSubmultiple kKnownSubmultiples[] = {
-        {"guitarra-limpia_E4.wav", 3},
-        {"guitarra-limpia_G3.wav", 5},
-    };
+    constexpr std::array<KnownSubmultiple, 0> kKnownSubmultiples{};
     auto knownDivisor = [&](const std::string& name) {
         for (const auto& k : kKnownSubmultiples) if (name == k.name) return k.divisor;
         return 0;
@@ -214,15 +216,16 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
     /**
      * 🔴 Y el tercer caso conocido, de la misma clase pero con otro desenlace: el ATAQUE lee un
      * submultiplo y despues se corrige, y la nota es corta. `guitarra-acero_E4` (2,1 s por encima
-     * del piso): la gruesa lee f0/3 de 0,33 a 1,30 s, vuelve a E4 a 1,44, cae a f0/3 otra vez a
-     * 1,58, y vuelve. Con el instrumento declarado el modo rapido reengancha SEIS veces siguiendo
-     * eso —hace lo correcto con lo que le dan— y cada reenganche descarta el ring, asi que el
-     * strobe nunca junta sus 0,5 s antes de que la nota muera: ninguna publicacion trae lectura
-     * fina. SIN candidatos, con el objetivo fijo, converge a 1,44 s a −0,40 c y se queda. Medido
-     * con la linea de tiempo publicacion por publicacion; el consumidor vio lo mismo (nota del
-     * 07/09 b, §2). Se declara el desenlace exacto y, si un dia trae lectura, esto se pone rojo.
+     * del piso) leia f0/3 de 0,33 a 1,30 s, volvia a E4, caia otra vez a 1,58 y volvia; con el
+     * instrumento declarado el modo rapido reenganchaba SEIS veces siguiendo eso y el strobe
+     * nunca juntaba sus 0,5 s antes de que la nota muriera: ninguna publicacion traia lectura
+     * fina. Medido publicacion por publicacion; el consumidor vio lo mismo (nota del 07/09 b, §2).
+     *
+     * VACIO desde REQ-033 (2026-09-07): el arreglo del detector grueso lo puso ROJO —"ahora SI
+     * trae lectura fina (0,92 c)"— y salio. El ataque era la misma clase (el pico de τ mal
+     * muestreado por el barrido), no un timbre distinto. La lista queda armada.
      */
-    constexpr const char* kKnownNoFineReadingWithCandidates[] = {"guitarra-acero_E4.wav"};
+    constexpr std::array<const char*, 0> kKnownNoFineReadingWithCandidates{};
     auto knownNoFineReading = [&](const std::string& name) {
         for (const char* k : kKnownNoFineReadingWithCandidates) if (name == k) return true;
         return false;

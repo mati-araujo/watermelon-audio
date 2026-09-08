@@ -4,10 +4,16 @@
  *
  * 🔴 POR QUE ESTE ARCHIVO EXISTE
  * ------------------------------
- * El detector lee ciertos timbres un tercio o un quinto ABAJO de su altura verdadera, y con
+ * El detector leia ciertos timbres un tercio o un quinto ABAJO de su altura verdadera, y con
  * instrumento declarado el motor lo publicaba CONVERGIDO sobre la cuerda equivocada, con una
  * desviacion plausible (−1,955 cents: la coincidencia entre el 3.er armonico de A2 y el f0 real
  * de E4). Es el modo de falla que los dos repos prohiben.
+ *
+ * REQ-033 arreglo la CAUSA de esa lectura en el detector grueso (el barrido subestimaba el
+ * pico de τ), asi que los estimulos que antes leian f0/3 hoy leen E4. La bandera y la
+ * compuerta de REQ-031 quedan como red de seguridad, y su control negativo paso a ser una
+ * altura que es el periodo verdadero pero que la señal no sostiene ni en f0 ni en 2f0 (ver
+ * `falsoSubarmonico`). El reproductor de siete senos (AC-033.3) vive al final.
  *
  * El motor de la falla NO es "H3 domina": es que falten los parciales que DESAMBIGUAN el
  * periodo. Con H2 presente el periodo queda fijado y no hay error, aunque el fundamental este
@@ -73,9 +79,17 @@ std::vector<float> cuerdaSana(double f0) {
 
 /**
  * EL FALSO: una E4 con el fundamental `f0Db` por debajo de H3, H3 a 0 dB y H5 a −6 dB, y
- * NADA en H2 ni H4. Sin H2 el periodo es ambiguo y el detector lo lee en f0/3 = 109,87 Hz,
- * que con las seis de guitarra declaradas engancha A2. Medido: entre −24 y −16 dB el motor
- * converge sobre A2 a −1,955 cents.
+ * NADA en H2 ni H4.
+ *
+ * 🔴 LO QUE ESTE ESTIMULO REPRODUCE CAMBIO CON REQ-033. Hasta ahi el detector grueso lo leia
+ * en f0/3 = 109,87 Hz —no porque el periodo fuera ambiguo, sino porque el barrido muestreaba
+ * el pico de τ a 1,9 muestras y lo subestimaba (0,816 contra 0,999)— y con las seis de
+ * guitarra declaradas enganchaba A2 a −1,955 cents. Desde REQ-033 el detector lee E4, que ES
+ * el periodo de H3 + H5, y lo que la bandera juzga es si ESA altura tiene energia en f0 o en
+ * 2f0. Con f0 a −24..−16 dB la tiene (umbral −25): converge sobre E4, y es correcto
+ * (AC-033.7). Con f0 a −30 dB o menos NO la tiene: E4 sale publicada, la bandera dice 0 y el
+ * estado es NO_LOCK. Ese es el control negativo de REQ-031 ahora — una altura que es el
+ * periodo de la señal pero que la señal no sostiene ni en su fundamental ni en su octava.
  */
 std::vector<float> falsoSubarmonico(double f0Db) {
     return toStereo(wma_test::partialsWithAmplitudes(
@@ -112,12 +126,15 @@ struct Lectura {
  * bandera de cada publicacion posterior al primer segundo, que es lo que un consumidor VE.
  */
 Lectura analizar(const std::vector<float>& buf, double targetHz,
-                 const std::vector<double>& candidatos) {
+                 const std::vector<double>& candidatos, int rate = kRate) {
     AnalysisRing ring;
     AnalysisSnapshot snapshot;
     AnalysisThread analysis(ring, snapshot);
 
-    ring.setCaptureRate(kRate);
+    // REQ-033: el rate es parametro porque el defecto del detector grueso dependia de donde
+    // caia la grilla del barrido, o sea del rate. 44,1 kHz es el corpus; 48 kHz es Android.
+    const int frames = static_cast<int>(buf.size() / 2);
+    ring.setCaptureRate(rate);
     analysis.setTargetHz(targetHz);
     analysis.setCandidates(candidatos.empty() ? nullptr : candidatos.data(),
                            static_cast<int>(candidatos.size()));
@@ -125,13 +142,13 @@ Lectura analizar(const std::vector<float>& buf, double targetHz,
     Lectura r;
     const int capacity = static_cast<int>(AnalysisRing::kCapacityFrames);
     int written = 0;
-    while (written < kFrames) {
-        const int chunk = (kFrames - written) < capacity ? (kFrames - written) : capacity;
+    while (written < frames) {
+        const int chunk = (frames - written) < capacity ? (frames - written) : capacity;
         ring.writeStereo(buf.data() + static_cast<size_t>(written) * 2, chunk);
         written += chunk;
         while (analysis.drainOnce() != AnalysisThread::DrainOutcome::kRingEmpty) {
             float v[kSnapshotValueCount];
-            if (written > kRate && snapshot.read(v)) {
+            if (written > rate && snapshot.read(v)) {
                 r.supportTrail.push_back(v[kSnapSpectralSupport]);
                 r.stateTrail.push_back(static_cast<int>(v[kSnapState]));
             }
@@ -229,23 +246,45 @@ TEST(SpectralSupport, AC0314_TheConsumersRealTimbreHasSupport) {
 /**
  * AC-031.4 · EL FALSO: la altura publicada no tiene soporte, y la bandera lo dice.
  *
- * Se afirma que el estimulo reprodujo la lectura falsa (`detectedHz` ≈ f0/3): es la
- * precondicion, no el desenlace. El ESTADO no se afirma: hoy es CONVERGED y ese es el defecto
- * que S2 da vuelta; fijarlo aca lo escribiria en el contrato.
+ * Se afirma que el estimulo reprodujo una altura SIN energia en f0 ni en 2f0 (`detectedHz` ≈
+ * E4 con f0 a −40/−30 dB y nada en H2): es la precondicion, no el desenlace. Hasta REQ-033
+ * la precondicion era "lee f0/3" con f0 a −24..−16 dB; ver `falsoSubarmonico`.
  *
- * Bug plausible: una sonda que mire el NSDF en vez de la señal. El NSDF de un submultiplo es
- * alto POR CONSTRUCCION —un multiplo del periodo tambien es un periodo—, asi que diria 1.
- * Igual la claridad: 0,9946 sobre este falso.
+ * Bug plausible: una sonda que mire el NSDF en vez de la señal. El NSDF en el periodo
+ * verdadero es alto POR CONSTRUCCION aunque el fundamental no exista, asi que diria 1. Igual
+ * la claridad: 0,99 sobre este falso.
  */
 TEST(SpectralSupport, AC0314_TheFalseSubharmonicHasNoSupportAndTheFlagSaysSo) {
+    for (double f0Db : {-40.0, -30.0}) {
+        SCOPED_TRACE("f0 a " + std::to_string(static_cast<int>(f0Db)) + " dB");
+        const auto r = analizar(falsoSubarmonico(f0Db), kE4, guitarraHz());
+        ASSERT_TRUE(r.ok);
+        ASSERT_NEAR(r.detectedHz, kE4, 1.0)
+            << "el estimulo no reprodujo la altura sin soporte: sin eso el 0 no dice nada";
+        EXPECT_EQ(r.support, 0.0f)
+            << "ni el fundamental publicado ni su octava estan en la señal";
+    }
+}
+
+/**
+ * AC-033.7 · el falso ORIGINAL de REQ-031 —f0 a −24/−20/−16 dB, sin H2, con H3 y H5— ya no
+ * se publica sobre A2 en ningun estado: el detector lee E4, su fundamental esta dentro del
+ * umbral de soporte (−25 dB), y converge sobre la cuerda correcta con la exactitud del
+ * producto. Es la lectura correcta, no una excepcion: −1,955 cents sobre A2 era la
+ * coincidencia entre el tercer armonico de A2 y el f0 real de E4.
+ *
+ * Bug plausible: revertir el refinamiento por candidato de REQ-033 —volver a aplicar el
+ * umbral del primer pico sobre las muestras gruesas— lo devuelve a 109,87 Hz.
+ */
+TEST(SpectralSupport, AC0337_TheOriginalFalseOfReq031NowConvergesOnItsTrueFundamental) {
     for (double f0Db : {-24.0, -20.0, -16.0}) {
         SCOPED_TRACE("f0 a " + std::to_string(static_cast<int>(f0Db)) + " dB");
         const auto r = analizar(falsoSubarmonico(f0Db), kE4, guitarraHz());
         ASSERT_TRUE(r.ok);
-        ASSERT_NEAR(r.detectedHz, kE4 / 3.0, 0.5)
-            << "el estimulo no reprodujo la lectura en f0/3: sin eso el 0 no dice nada";
-        EXPECT_EQ(r.support, 0.0f)
-            << "ni el fundamental publicado ni su octava estan en la señal";
+        EXPECT_NEAR(r.detectedHz, kE4, 1.0) << "volvio a leer f0/3 (" << r.detectedHz << " Hz)";
+        EXPECT_EQ(r.support, 1.0f) << "f0 a " << f0Db << " dB esta dentro del umbral de soporte";
+        EXPECT_EQ(r.state, kStateConverged);
+        EXPECT_NEAR(r.cents, 0.0, 0.1) << "sobre E4, no −1,955 sobre A2";
     }
 }
 
@@ -298,8 +337,9 @@ TEST(SpectralSupport, AC0314_TheFlagDoesNotFlickerOnASteadySignal) {
     const std::vector<Caso> casos = {
         {"cuerda sana",       cuerdaSana(kE4),        1.0f},
         {"bordona −40 dB",    bordona(40.0),          1.0f},
-        {"falso −24 dB",      falsoSubarmonico(-24.0), 0.0f},
-        {"falso −16 dB",      falsoSubarmonico(-16.0), 0.0f},
+        {"falso −40 dB",      falsoSubarmonico(-40.0), 0.0f},
+        {"falso −30 dB",      falsoSubarmonico(-30.0), 0.0f},
+        {"ex falso −16 dB (REQ-033: E4 con soporte)", falsoSubarmonico(-16.0), 1.0f},
     };
     for (const auto& c : casos) {
         SCOPED_TRACE(c.nombre);
@@ -382,12 +422,14 @@ TEST(SpectralSupport, AC0314_TheFlagFollowsTheDetectedPitchNotTheLastEvaluation)
  * el estado a `MEASURING` en vez de `NO_LOCK`, o que anule `detectedHz` al rechazar.
  */
 TEST(SpectralSupport, AC0312_TheFalseSubharmonicIsNoLongerPublishedAsConverged) {
-    for (double f0Db : {-24.0, -20.0, -16.0}) {
+    // Niveles SIN soporte desde REQ-033 (ver `falsoSubarmonico`): E4 es el periodo, pero ni
+    // f0 ni 2f0 estan en la señal.
+    for (double f0Db : {-40.0, -30.0}) {
         SCOPED_TRACE("f0 a " + std::to_string(static_cast<int>(f0Db)) + " dB");
         const auto r = analizar(falsoSubarmonico(f0Db), kE4, guitarraHz());
         ASSERT_TRUE(r.ok);
-        ASSERT_NEAR(r.detectedHz, kE4 / 3.0, 0.5)
-            << "el estimulo no reprodujo la lectura en f0/3: sin eso el test no dice nada";
+        ASSERT_NEAR(r.detectedHz, kE4, 1.0)
+            << "el estimulo no reprodujo la altura sin soporte: sin eso el test no dice nada";
         ASSERT_EQ(r.support, 0.0f) << "la bandera de S1 tiene que seguir en 0";
 
         EXPECT_NE(r.state, kStateConverged)
@@ -396,7 +438,7 @@ TEST(SpectralSupport, AC0312_TheFalseSubharmonicIsNoLongerPublishedAsConverged) 
             << "AC-031.5: con la bandera en 0 el estado es NO_LOCK, no MEASURING";
         EXPECT_TRUE(std::isnan(r.cents))
             << "una desviacion contra una cuerda que no suena no es una medicion";
-        EXPECT_NEAR(r.detectedHz, kE4 / 3.0, 0.5)
+        EXPECT_NEAR(r.detectedHz, kE4, 1.0)
             << "AC-031.6: la altura que vio se sigue publicando, marcada como no confiable";
     }
 }
@@ -414,7 +456,8 @@ TEST(SpectralSupport, AC0312_TheFalseSubharmonicIsNoLongerPublishedAsConverged) 
 TEST(SpectralSupport, AC0315_AFlagAtZeroAlwaysComesWithNoLockAndConvergedAlwaysWithOne) {
     struct Caso { const char* nombre; std::vector<float> buf; };
     const std::vector<Caso> casos = {
-        {"falso −20 dB",   falsoSubarmonico(-20.0)},
+        {"falso −30 dB",   falsoSubarmonico(-30.0)},
+        {"ex falso −20 dB (REQ-033: converge sobre E4)", falsoSubarmonico(-20.0)},
         {"cuerda sana",    cuerdaSana(kE4)},
         {"bordona −40 dB", bordona(40.0)},
     };
@@ -493,7 +536,7 @@ TEST(SpectralSupport, AC0313_SilenceIsStillNoSignalNotNoLock) {
  * `flag == 0`, que trata "no hay altura" como "no le creo".
  */
 TEST(SpectralSupport, AC0315_WithoutAPublishedPitchTheGateDoesNotAct) {
-    const auto falso = falsoSubarmonico(-20.0);
+    const auto falso = falsoSubarmonico(-30.0);   // sin soporte desde REQ-033 (ver el generador)
     AnalysisRing ring;
     AnalysisSnapshot snapshot;
     AnalysisThread analysis(ring, snapshot);
@@ -513,7 +556,7 @@ TEST(SpectralSupport, AC0315_WithoutAPublishedPitchTheGateDoesNotAct) {
     }
     float v[kSnapshotValueCount];
     ASSERT_TRUE(snapshot.read(v));
-    ASSERT_NEAR(v[kSnapDetectedHz], kE4 / 3.0, 0.5) << "el estimulo no reprodujo el falso";
+    ASSERT_NEAR(v[kSnapDetectedHz], kE4, 1.0) << "el estimulo no reprodujo el falso";
     ASSERT_EQ(v[kSnapSpectralSupport], 0.0f);
     ASSERT_EQ(static_cast<int>(v[kSnapState]), kStateNoLock) << "la compuerta actuo sobre el falso";
 
@@ -569,35 +612,34 @@ TEST(SpectralSupport, AC0315_WithoutAPublishedPitchTheGateDoesNotAct) {
  * Un rojo conocido que no dice que es conocido se re-investiga cada vez; por eso el veredicto
  * lleva el numero y la referencia.
  */
-TEST(SpectralSupport, PendingReq_SevenHarmonicsWithAStrongSeventhAreDetectedAtTheirFundamental) {
+TEST(SpectralSupport, AC0333_SevenHarmonicsWithAStrongSeventhAreDetectedAtTheirFundamental) {
     const std::vector<double> seis =
         {0.5 * dB(-7.2), 0.5 * dB(-3.2), 0.5 * dB(-0.6), 0.5 * dB(0.0), 0.5 * dB(-15.1), 0.5 * dB(-15.0)};
     std::vector<double> siete = seis;
     siete.push_back(0.5 * dB(-9.6));
 
-    const auto conSeis = analizar(toStereo(wma_test::partialsWithAmplitudes(kE4, 0.0, seis, kRate, kFrames)),
-                                  kE4, guitarraHz());
-    ASSERT_TRUE(conSeis.ok);
-    ASSERT_NEAR(conSeis.detectedHz, kE4, 1.0) << "el control positivo (seis parciales) dejo de converger";
-    ASSERT_EQ(conSeis.state, kStateConverged);
-    ASSERT_EQ(conSeis.support, 1.0f);
+    // 44,1 kHz es el corpus y el rate del reproductor del consumidor; 48 kHz es el de los
+    // dispositivos Android, y ahi el detector leia f0/3 HASTA con seis armonicos (REQ-033 S1).
+    for (const int rate : {44100, 48000}) {
+        SCOPED_TRACE("rate " + std::to_string(rate));
+        const int frames = rate * 5;
+        const auto conSeis = analizar(toStereo(wma_test::partialsWithAmplitudes(kE4, 0.0, seis, rate, frames)),
+                                      kE4, guitarraHz(), rate);
+        ASSERT_TRUE(conSeis.ok);
+        ASSERT_NEAR(conSeis.detectedHz, kE4, 1.0) << "el control positivo (seis parciales) dejo de converger";
+        ASSERT_EQ(conSeis.state, kStateConverged);
+        ASSERT_EQ(conSeis.support, 1.0f);
 
-    const auto buf = toStereo(wma_test::partialsWithAmplitudes(kE4, 0.0, siete, kRate, kFrames));
-    const auto conCand = analizar(buf, kE4, guitarraHz());
-    const auto sinCand = analizar(buf, kE4, {});
-    ASSERT_TRUE(conCand.ok);
-    ASSERT_TRUE(sinCand.ok);
+        const auto buf = toStereo(wma_test::partialsWithAmplitudes(kE4, 0.0, siete, rate, frames));
+        const auto conCand = analizar(buf, kE4, guitarraHz(), rate);
+        const auto sinCand = analizar(buf, kE4, {}, rate);
+        ASSERT_TRUE(conCand.ok);
+        ASSERT_TRUE(sinCand.ok);
 
-    if (std::getenv("WMA_RUN_PENDING") == nullptr) {
-        GTEST_SKIP() << "ROJO CONOCIDO (REQ propuesto: el septimo armonico fuerte lee f0/3; nota de "
-                        "Tunio 2026-09-07 b, §3). Medido ahora: con candidatos state=" << conCand.state
-                     << " detectedHz=" << conCand.detectedHz << " support=" << conCand.support
-                     << " | sin candidatos state=" << sinCand.state << " detectedHz=" << sinCand.detectedHz
-                     << " support=" << sinCand.support << ". Se espera E4 (" << kE4
-                     << ") con soporte. WMA_RUN_PENDING=1 lo muestra rojo. NO cuenta como cobertura.";
+        EXPECT_NEAR(conCand.detectedHz, kE4, 1.0) << "con candidatos: el detector leyo f0/3";
+        EXPECT_EQ(conCand.support, 1.0f);
+        EXPECT_EQ(conCand.state, kStateConverged) << "con candidatos tiene que ENGANCHAR la E4";
+        EXPECT_NEAR(sinCand.detectedHz, kE4, 1.0) << "sin candidatos: el detector leyo f0/3";
+        EXPECT_EQ(sinCand.support, 1.0f);
     }
-    EXPECT_NEAR(conCand.detectedHz, kE4, 1.0) << "con candidatos: el detector leyo f0/3";
-    EXPECT_EQ(conCand.support, 1.0f);
-    EXPECT_NEAR(sinCand.detectedHz, kE4, 1.0) << "sin candidatos: el detector leyo f0/3";
-    EXPECT_EQ(sinCand.support, 1.0f);
 }
