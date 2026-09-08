@@ -42,6 +42,8 @@ void McLeodPitch::reset() {
     mHasPitch = false;
     mWindows = 0;
     mKeyCount = 0;
+    mEvalSweep = 0;
+    mEvalRefine = 0;
     for (auto& v : mWindow) v = 0.0f;
 }
 
@@ -115,6 +117,8 @@ void McLeodPitch::analyzeWindow() {
     // lobulo, tanto en A0 como en C7— y la cantidad de lags evaluados pasa de 862 a ~50. Lo
     // que se pierde es la posicion exacta del pico, y eso lo recupera la segunda pasada.
     mKeyCount = 0;
+    mEvalSweep = 0;
+    mEvalRefine = 0;
     int bestLag = -1;
     double bestValue = -1.0;
 
@@ -155,6 +159,7 @@ void McLeodPitch::analyzeWindow() {
 
     for (int lag = mMinLag; lag <= mMaxLag; lag += std::max(1, lag / 12)) {
         const double v = nsdfAt(lag);
+        ++mEvalSweep;
         mNsdf[static_cast<size_t>(lag)] = v;
 
         // El punto ANTERIOR es maximo local si supera a sus dos vecinos muestreados.
@@ -216,6 +221,7 @@ void McLeodPitch::analyzeWindow() {
         for (int l = from; l <= to; ++l) {
             if (l == lag) continue;
             const double v = nsdfAt(l);
+            ++mEvalRefine;
             mNsdf[static_cast<size_t>(l)] = v;
             if (v > peakValue) { peakValue = v; peak = l; }
         }
@@ -240,8 +246,8 @@ void McLeodPitch::analyzeWindow() {
     }
     // Los vecinos inmediatos, para que la parabola tenga sus tres puntos. Los cubre el
     // refinamiento salvo cuando el pico cae en el borde de su vecindad.
-    if (chosen - 1 >= 0) mNsdf[static_cast<size_t>(chosen - 1)] = nsdfAt(chosen - 1);
-    if (chosen + 1 <= mMaxLag) mNsdf[static_cast<size_t>(chosen + 1)] = nsdfAt(chosen + 1);
+    if (chosen - 1 >= 0) { mNsdf[static_cast<size_t>(chosen - 1)] = nsdfAt(chosen - 1); ++mEvalRefine; }
+    if (chosen + 1 <= mMaxLag) { mNsdf[static_cast<size_t>(chosen + 1)] = nsdfAt(chosen + 1); ++mEvalRefine; }
 
     // --- interpolacion parabolica: sin esto el error en la zona aguda se va ---
     //

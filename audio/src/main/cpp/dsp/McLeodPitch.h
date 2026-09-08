@@ -142,6 +142,16 @@ public:
     /// NSDF en un lag concreto. Se evalua bajo demanda: la busqueda no recorre todos.
     double nsdfAt(int lag) const;
 
+    /**
+     * SONDAS DE COSTO (REQ-034 S1): cuantas evaluaciones de `nsdfAt` hizo la ultima ventana,
+     * separadas en el barrido proporcional y el refinamiento por candidato (mas los dos
+     * vecinos de la parabola). Cada evaluacion cuesta O(W − lag), asi que este numero es el
+     * costo del detector a menos de una constante — y es lo que REQ-034 se propone bajar sin
+     * cambiar un solo resultado. Contadores planos, sin asignar; no producen audio.
+     */
+    int nsdfEvaluationsSweep() const noexcept { return mEvalSweep; }
+    int nsdfEvaluationsRefine() const noexcept { return mEvalRefine; }
+
 private:
     void analyzeWindow();
 
@@ -171,6 +181,8 @@ private:
     double mRefinedNsdf[kMaxCandidates]{};
     int mKeyCount{0};
     int mFilled{0};
+    int mEvalSweep{0};
+    int mEvalRefine{0};
 
     int mMinLag{0};
     int mMaxLag{0};
