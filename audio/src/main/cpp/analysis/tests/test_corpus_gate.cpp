@@ -163,23 +163,29 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
     constexpr double kWrongNoteCents = 50.0;
 
     /**
-     * 🔴 EL PRESUPUESTO DEL CORPUS GRABADO, MEDIDO (REQ-032 S2, 2026-09-07) — y NO es el del
-     * contrato (0,1 cents). Sobre los 38 archivos con lectura, con el instrumento declarado:
+     * 🔴 EL PRESUPUESTO DEL CORPUS GRABADO, MEDIDO — y NO es el del contrato (0,1 cents).
      *
-     *     lectura FINA (strobe) vs hz_verdadero:  |max| = 5,40 c (ukelele_C4) · 4,28 (nylon_E4)
-     *                                             · 2,99 (jazz_E4) · 2,75 (ukelele_G4)
-     *     deteccion GRUESA vs hz_verdadero:       |max| = 4,66 c (bajo-pua_A1) · 4,59 (acero_A2)
-     *                                             y ±0,3 c en 30 de 38
+     * REQ-032 S2 (2026-09-07) lo fijo en 6 c porque la "lectura fina" se apartaba del oraculo hasta
+     * +5,40 c (ukelele_C4) mientras la gruesa coincidia. REQ-035 S1 (2026-09-08) midio DONDE nacia
+     * ese error y no era del strobe: **`kSnapCents` es relativo al OBJETIVO del strobe**, y con el
+     * instrumento declarado el modo rapido reengancha ese objetivo a la cuerda del CATALOGO (el
+     * nominal temperado: 261,626 para C4), no al `trueHz` que `sweepFile` fijo. Este test comparaba
+     * cents-vs-nominal contra un oraculo ABSOLUTO, y el "+5,40" era la desafinacion del propio
+     * sample (+5,78 c en el SoundFont) leida correctamente. Ver `WhereTheFineReadingErrorIsBorn`.
      *
-     * El hallazgo que esto deja para un REQ propio: donde la fina se aparta, la GRUESA y el
-     * oraculo coinciden entre si (ukelele_C4: oraculo 262,500, gruesa 262,483, fina +5,40 c =
-     * 263,32). Dos metodos independientes contra uno: el que se aparta es el strobe, sobre
-     * cuerdas sampleadas INARMONICAS y decayendo. No se concluye la causa aca; se mide y se
-     * fija el techo para que una regresion se vea. Bajar este numero es trabajo del REQ que
-     * lo explique, y el comentario del corpus sintetico ya lo anticipaba: "ese numero sale de
-     * MEDIRLO, no de aflojar este".
+     * Con la fina en Hz absolutos (`Outcome::cents` desde REQ-035), sobre los 41 con lectura:
+     *
+     *     33 CONVERGIDAS (σ ≤ 0,1):  |max| = 0,73 c (limpia_G3) · 0,69 (limpia_E4) · 0,45 (fretless_D2)
+     *      8 MIDIENDO   (σ > 0,1):   6 dentro de 0,52 c; y DOS afuera, declaradas abajo con su mecanismo
+     *
+     * El presupuesto es **1 cent** para toda lectura mostrada, convergida o no: es lo que el
+     * material real alcanza hoy con el motor tal cual esta, y una regresion de la fina se ve. El
+     * residuo que queda (≤ 0,73 c) tiene mecanismo —el ataque de la nota dentro de la ventana de
+     * regresion del estimador de fase (48 × 4096 frames ≈ 4,5 s): la guitarra limpia trae un glide
+     * de > 1 s— y es un REQ aparte si alguna vez importa. La GRUESA no se toca aca (REQ-033/034):
+     * bajo-pua_A1 lee −4,66 c y acero_A2 −4,59, y su presupuesto sigue en 6.
      */
-    constexpr double kRecordedFineBudgetCents = 6.0;
+    constexpr double kRecordedFineBudgetCents = 1.0;
     constexpr double kRecordedCoarseBudgetCents = 6.0;
 
     const auto results = corpus::sweepAll(corpus::defaultCorpusDir(), corpus::manifestPath());
@@ -189,13 +195,13 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
     // REQ-032 S2 — el reporte se IMPRIME, no se escribe en CLAUDE.md: es un numero que exige
     // correr algo, y la regla de REQ-021 es que esos no se afirman a mano.
     std::printf("\n  [REQ-032] corpus grabado: %zu archivos con altura declarada\n", results.size());
-    std::printf("  %-24s %9s %9s %7s %6s %5s %4s %6s %6s\n", "archivo", "hz_verd", "detectHz",
-                "gruesoC", "finoC", "estado", "sop", "lect_s", "nota_s");
+    std::printf("  %-24s %9s %9s %7s %8s %6s %6s %6s %5s %6s %4s %6s %6s\n", "archivo", "hz_verd", "detectHz",
+                "gruesoC", "objHz", "finPub", "finAbs", "sigma", "estLe", "estado", "sop", "lect_s", "nota_s");
     for (const corpus::Outcome& o : results) {
         const double coarse = o.detectedHz > 0.0 ? 1200.0 * std::log2(o.detectedHz / o.trueHz) : NAN;
-        std::printf("  %-24s %9.3f %9.3f %+7.2f %+6.2f %5d %4.0f %6.2f %6.2f\n", o.name.c_str(),
-                    o.trueHz, o.detectedHz, coarse, o.cents, o.state,
-                    static_cast<double>(o.spectralSupport), o.lastReadingSec, o.noteEndSec);
+        std::printf("  %-24s %9.3f %9.3f %+7.2f %8.3f %+6.2f %+6.2f %6.3f %5d %6d %4.0f %6.2f %6.2f\n", o.name.c_str(),
+                    o.trueHz, o.detectedHz, coarse, o.strobeTargetHz, o.strobeC, o.cents, o.strobeSigmaC,
+                    o.readingState, o.state, static_cast<double>(o.spectralSupport), o.lastReadingSec, o.noteEndSec);
     }
     std::printf("\n");
 
@@ -236,6 +242,30 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
         return false;
     };
 
+    /**
+     * 🔴 TRINQUETE BIDIRECCIONAL: las lecturas que terminan la nota FUERA del presupuesto fino, con
+     * su mecanismo medido (REQ-035 S1). Las dos estan SIN CONVERGER —σ 0,91 y 4,88— o sea que el
+     * motor no las afirma; se declaran para que el presupuesto de 1 c sea de verdad 1 c y no "1 c
+     * salvo lo que no miro". Si una converge o entra en el presupuesto, esto se pone ROJO para
+     * sacarla de la lista.
+     *
+     *  · bajo-acustico_G2: el preset trae un GLIDE de ataque de −27,7 c a 0,1 s que se estabiliza
+     *    recien a 1,0 s (oraculo por tramos), y la regresion de 48 ventanas del estimador de fase
+     *    lo arrastra al parcial 1 (−2,73 c contra ~0 en los parciales 2..4). σ lo ve: 0,91.
+     *  · guitarra-acero_A2: su parcial 4 REAL esta a −16 c de la serie estirada (oraculo por
+     *    parcial, −16 dB), y el ajuste se niega a converger: σ 4,88. Es REQ-027 haciendo su trabajo;
+     *    "acertar" ese sample pediria doblar el modelo fisico, y eso no entra (AC-035.6).
+     */
+    struct KnownOutsideFineBudget { const char* name; const char* mechanism; };
+    constexpr std::array<KnownOutsideFineBudget, 2> kKnownOutsideFineBudget{{
+        {"bajo-acustico_G2.wav", "glide de ataque de -27,7 c dentro de la ventana de regresion"},
+        {"guitarra-acero_A2.wav", "parcial 4 real a -16 c de la serie estirada: el ajuste no converge"},
+    }};
+    auto knownOutside = [&](const std::string& name) -> const KnownOutsideFineBudget* {
+        for (const auto& k : kKnownOutsideFineBudget) if (name == k.name) return &k;
+        return nullptr;
+    };
+
     for (const corpus::Outcome& o : results) {
         EXPECT_TRUE(o.analysed) << o.name << ": no se pudo analizar";
         // R-PITCH-37 sobre TODAS las publicaciones de la nota, no solo la ultima.
@@ -272,8 +302,18 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
                 << o.name << ": " << o.cents << " cents contra su frecuencia declarada ("
                 << o.trueHz << " Hz). A mas de media nota no es un presupuesto discutible: "
                    "es el rate, el archivo, o la nota equivocada.";
+            if (const KnownOutsideFineBudget* k = knownOutside(o.name)) {
+                EXPECT_NE(o.readingState, wma::analysis::kStateConverged)
+                    << o.name << ": CONVERGIO con " << o.cents << " c (" << k->mechanism
+                    << ") — si el mecanismo se arreglo, sacalo de la lista";
+                EXPECT_GE(std::fabs(o.cents), kRecordedFineBudgetCents)
+                    << o.name << ": ya esta dentro del presupuesto (" << o.cents << " c, "
+                    << k->mechanism << ") — sacalo de la lista";
+                continue;
+            }
             EXPECT_LT(std::fabs(o.cents), kRecordedFineBudgetCents)
-                << o.name << ": la lectura fina se aparto " << o.cents << " c del oraculo";
+                << o.name << ": la lectura fina (en Hz absolutos, objetivo " << o.strobeTargetHz
+                << " Hz) se aparto " << o.cents << " c del oraculo, σ " << o.strobeSigmaC;
         }
     }
 }

@@ -64,7 +64,21 @@ struct Outcome {
     int sampleRate = 0;
     bool analysed = false;    ///< hubo al menos una publicacion
     bool published = false;   ///< y alguna trajo una lectura FINA de altura
-    double cents = NAN;       ///< la ULTIMA lectura fina durante la nota, contra `trueHz`
+    /**
+     * La ULTIMA lectura fina durante la nota, contra `trueHz`, **en Hz absolutos**:
+     * `objetivo · 2^(kSnapCents/1200)` llevado a cents contra el hz verdadero del manifiesto.
+     *
+     * 🔴 HASTA REQ-035 ESTO ERA `kSnapCents` A SECAS, Y ESTABA MAL. `kSnapCents` es relativo al
+     * OBJETIVO del strobe, y con el instrumento declarado el modo rapido reengancha ese objetivo a
+     * la cuerda del catalogo (el nominal temperado), no al `trueHz` que `sweepFile` fijo. Comparar
+     * eso contra el oraculo absoluto media la desafinacion del propio sample (+5,78 c en ukelele
+     * C4) y la atribuia al strobe: fue el "+5,40 c" de REQ-032 y la hipotesis entera de REQ-035,
+     * refutada por la tabla de S1. Los cents publicados siguen en `strobeC`; el objetivo real, en
+     * `strobeTargetHz`.
+     */
+    double cents = NAN;
+    /// El estado publicado EN ESA publicacion (no en la ultima de la nota, que es la que decae).
+    int readingState = -1;
     // REQ-032 S2 — lo que un consumidor VE, para que el reporte hable en sus terminos.
     int state = -1;               ///< estado de la ULTIMA publicacion de la nota
     double detectedHz = 0.0;      ///< altura gruesa de esa ultima publicacion (0 = ninguna)
@@ -324,9 +338,8 @@ inline Outcome sweepFile(const std::string& path, const Entry& e) {
             const float cents = v[wma::analysis::kSnapCents];
             if (!std::isnan(cents)) {
                 o.published = true;
-                o.cents = static_cast<double>(cents);
                 o.lastReadingSec = static_cast<double>(written) / data.sampleRate;
-                o.trajectory.emplace_back(o.lastReadingSec, o.cents);
+                o.readingState = o.state;
                 // REQ-035 S1 — las sondas del strobe, en ESTA publicacion. Se leen despues de
                 // `drainOnce()`, en el mismo hilo: es el estado que la publicacion acaba de copiar.
                 const wma::analysis::StrobeTracker& s = analysis.strobe();
@@ -338,8 +351,12 @@ inline Outcome sweepFile(const std::string& path, const Entry& e) {
                 o.partialsUsed = s.partialsUsed();
                 o.strobeC = s.cents();
                 o.strobeTargetHz = s.targetHz();
-                o.fineHz = o.strobeTargetHz * std::pow(2.0, o.strobeC / 1200.0);
+                // En Hz ABSOLUTOS, con el objetivo de ESTA publicacion (el modo rapido puede
+                // haberlo movido entre una y otra). Ver la nota de `cents`.
+                o.fineHz = o.strobeTargetHz * std::pow(2.0, static_cast<double>(cents) / 1200.0);
                 o.fineVsTrueCents = 1200.0 * std::log2(o.fineHz / e.trueHz);
+                o.cents = o.fineVsTrueCents;
+                o.trajectory.emplace_back(o.lastReadingSec, o.cents);
                 o.strobeSigmaC = s.uncertaintyCents();
                 o.coarseSeenByStrobe = s.coarseDeviationCents();
                 o.snapshotB = static_cast<double>(v[wma::analysis::kSnapInharmonicityB]);
