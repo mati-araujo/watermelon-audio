@@ -47,13 +47,31 @@ TEST(CorpusGate, WithoutTheCorpusTheDecisionIsSkipAndNeverPass) {
 
 /**
  * El manifiesto vacio es un caso APARTE del corpus ausente, y tiene que seguir
- * siendo "saltear". Es el estado real del repo hoy: el mecanismo existe y el
- * material no.
+ * siendo "saltear".
+ *
+ * Hasta REQ-032 este test miraba el manifiesto REAL del repo, porque estaba
+ * vacio a proposito. Ya no: el corpus existe (release `corpus-v1`), asi que el
+ * caso se construye con un manifiesto temporal que solo tiene comentarios. La
+ * regla que fija no cambio — no haber encontrado nada que verificar no es haber
+ * verificado — y un mutante que devuelva `kVerified` sobre cero entradas sigue
+ * muriendo aca.
  */
 TEST(CorpusGate, AnEmptyManifestIsStillASkipAndNotAQuietPass) {
-    const auto st = corpus::stateOf(corpus::defaultCorpusDir(), corpus::manifestPath());
+    const std::string dir = corpus::makeTempDir();
+    ASSERT_FALSE(dir.empty());
+    const std::string manifest = dir + "/manifest.txt";
+    {
+        std::FILE* f = std::fopen(manifest.c_str(), "wb");
+        ASSERT_NE(f, nullptr);
+        std::fputs("# solo comentarios: ninguna entrada\n\n", f);
+        std::fclose(f);
+    }
+    const auto st = corpus::stateOf(dir, manifest);
+    EXPECT_EQ(st, State::kAbsent)
+        << "un manifiesto sin entradas no describe un corpus: es ausencia, no verificacion";
     EXPECT_FALSE(corpus::countsAsCoverage(st))
         << "el manifiesto no declara archivos y aun asi se contaba como cobertura";
+    corpus::removeTempDir(dir);
 }
 
 // ---------------------------------------------------------------------------
