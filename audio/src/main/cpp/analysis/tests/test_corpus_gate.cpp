@@ -901,6 +901,35 @@ TEST(CorpusRobustness, TheCoarseDetectionMeasuredWhereItMeansSomething) {
         << sinMuestra << " archivos no tienen " << kMinSamples << " publicaciones con altura tras "
         << kSettledSec << " s: su mediana seria de una muestra";
 
+    /**
+     * 🔴 LAS TRES CIFRAS TIENEN QUE SER TRES, y esto lo afirma. Dos mutantes sobrevivieron a la
+     * primera version de este test porque las columnas `lectura` y el asentamiento de la mediana se
+     * IMPRIMIAN y no se afirmaban: con `coarseAtReading` mirando la cola, y con `coarseMedian`
+     * ignorando `fromSec`, la tabla salia distinta y el test seguia verde. Un instrumento cuyas
+     * cifras nadie distingue no es un instrumento.
+     */
+    int difierenLecturaYUltima = 0, difierenConYSinAsentamiento = 0;
+    for (const corpus::Outcome& o : results) {
+        if (!o.analysed || !(o.detectedHz > 0.0)) continue;
+        const double atReading = corpus::coarseAtReading(o);
+        if (std::isfinite(atReading) && std::fabs(1200.0 * std::log2(atReading / o.detectedHz)) > 1.0)
+            ++difierenLecturaYUltima;
+        const double conAsentamiento = corpus::coarseMedian(o, kSettledSec);
+        const double sinAsentamiento = corpus::coarseMedian(o, 0.0);
+        if (std::isfinite(conAsentamiento) && std::isfinite(sinAsentamiento)
+            && std::fabs(1200.0 * std::log2(conAsentamiento / sinAsentamiento)) > 0.05)
+            ++difierenConYSinAsentamiento;
+    }
+    std::printf("  archivos donde la cifra CAMBIA segun el instante: lectura vs ultima = %d · "
+                "mediana con vs sin asentamiento = %d\n\n", difierenLecturaYUltima, difierenConYSinAsentamiento);
+    EXPECT_GT(difierenLecturaYUltima, 0)
+        << "en ningun archivo la gruesa de la publicacion de la lectura difiere de la ultima: o el "
+           "corpus cambio, o `coarseAtReading` dejo de mirar la publicacion con lectura fina y las "
+           "dos columnas son la misma";
+    EXPECT_GT(difierenConYSinAsentamiento, 0)
+        << "en ningun archivo la mediana cambia al excluir el ataque: `coarseMedian` dejo de "
+           "respetar `fromSec` y la cifra ya no describe la nota asentada";
+
     // --- AC-038.2: el sesgo SI se concentra en acero ------------------------------------------
     ASSERT_TRUE(porFamilia.count("acero") && porFamilia.count("otra guitarra"));
     EXPECT_GT(porFamilia["acero"].worst, 4.0 * porFamilia["otra guitarra"].worst)
