@@ -140,6 +140,15 @@ struct Outcome {
     struct Publication {
         double sec = 0.0;
         int state = -1;                ///< el estado publicado
+        /**
+         * REQ-038 S1 — la DETECCION GRUESA de esta publicacion (0 = ninguna), y su soporte.
+         *
+         * 🔴 El barrido guardaba solo la de la ULTIMA publicacion de la nota, que es la cola
+         * decayendo, y eso acuso a `bajo-pua_A1` de −4,66 c: su mediana tras 1 s esta en ±0,2. Una
+         * cifra de la gruesa sobre el corpus no significa nada sin decir DE QUE INSTANTE es.
+         */
+        double detectedHz = 0.0;
+        float spectralSupport = NAN;
         bool fine = false;             ///< trajo lectura fina (kSnapCents no NaN)
         double centsAbs = NAN;         ///< la fina en Hz absolutos contra trueHz
         double strobeC = NAN;          ///< cents contra el objetivo del strobe
@@ -157,6 +166,61 @@ struct Outcome {
     std::vector<Publication> publicationLog;
     std::vector<double> history[kPartials];
 };
+
+/**
+ * REQ-038 S1 — LAS TRES CIFRAS DE LA GRUESA, y por que son tres.
+ *
+ * `detectedHz` cambia a lo largo de la nota: el ataque es otro regimen y la cola decae por debajo
+ * del piso. Preguntar "cuanto se aparta la gruesa en este archivo" sin decir DE QUE INSTANTE
+ * produce numeros que acusan al detector por lecturas que no representan la nota — paso con
+ * `bajo-pua_A1` (−4,66 c de la ultima publicacion contra ±0,2 de la mediana).
+ *
+ *   · `coarseAtReading`  la gruesa en la publicacion de la que sale la lectura fina. Es la que
+ *                        ARBITRA: el dominio de REQ-003 y el signo de REQ-014 se deciden con ella.
+ *   · `coarseMedian`     la mediana desde `fromSec`. Es la que describe la NOTA, y la que se
+ *                        compara con el oraculo (que mide un tramo sostenido).
+ *   · `coarseLast`       la ultima. Se conserva SOLO para que el diff muestre a quien acusaba.
+ *
+ * Devuelven NaN cuando no hay ninguna publicacion que cumpla, y no cero: cero es una altura
+ * plausible y un consumidor la leeria como dato.
+ */
+inline double coarseAtReading(const Outcome& o) {
+    double hz = NAN;
+    for (const Outcome::Publication& p : o.publicationLog)
+        if (p.fine && p.detectedHz > 0.0) hz = p.detectedHz;   // la ULTIMA con lectura fina: la que `cents` describe
+    return hz;
+}
+
+inline double coarseMedian(const Outcome& o, double fromSec) {
+    std::vector<double> v;
+    for (const Outcome::Publication& p : o.publicationLog)
+        if (p.sec >= fromSec && p.detectedHz > 0.0) v.push_back(p.detectedHz);
+    if (v.empty()) return NAN;
+    std::sort(v.begin(), v.end());
+    const size_t n = v.size();
+    return n % 2 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+/// La dispersion entre ventanas desde `fromSec`, en cents contra `trueHz`: max − min. Los saltos
+/// de ±3 c de `guitarra-acero_A2` son tan dato como su mediana, y una mediana sola los esconde.
+inline double coarseSpreadCents(const Outcome& o, double fromSec) {
+    double lo = INFINITY, hi = -INFINITY;
+    for (const Outcome::Publication& p : o.publicationLog) {
+        if (p.sec < fromSec || !(p.detectedHz > 0.0)) continue;
+        const double c = 1200.0 * std::log2(p.detectedHz / o.trueHz);
+        lo = std::min(lo, c); hi = std::max(hi, c);
+    }
+    return std::isfinite(lo) ? hi - lo : NAN;
+}
+
+/// Cuantas publicaciones con altura gruesa hay desde `fromSec`: sin esto, una mediana de UNA
+/// muestra se lee igual que una de treinta.
+inline int coarseSampleCount(const Outcome& o, double fromSec) {
+    int n = 0;
+    for (const Outcome::Publication& p : o.publicationLog)
+        if (p.sec >= fromSec && p.detectedHz > 0.0) ++n;
+    return n;
+}
 
 /**
  * REQ-035 S1 — el ajuste de la serie estirada, ESPEJADO para que devuelva B.
@@ -402,6 +466,8 @@ inline Outcome sweepFile(const std::string& path, const Entry& e) {
                     pub.pCents[i] = pub.measured[i] ? s.partialCents(i) : NAN;
                     pub.pSigma[i] = pub.measured[i] ? s.partialUncertaintyCents(i) : NAN;
                 }
+                pub.detectedHz = static_cast<double>(v[wma::analysis::kSnapDetectedHz]);
+                pub.spectralSupport = v[wma::analysis::kSnapSpectralSupport];
                 pub.used = s.partialsUsed();
                 pub.strobeC = s.cents();
                 pub.sigma = s.uncertaintyCents();

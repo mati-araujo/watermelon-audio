@@ -19,6 +19,9 @@
  */
 
 #include "support/AscentVsSweep.h"
+#include "support/Corpus.h"
+#include "support/PartialOracle.h"
+#include "../../looper/WavFile.h"
 #include "support/SyntheticSignal.h"
 #include "tests/support/TestSanitizer.h"
 
@@ -30,6 +33,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cmath>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -789,6 +793,239 @@ TEST(McLeodPitchTest, AC0343_TheAmbiguousZoneIsExercisedAndDecidesLikeTheFullRul
     ASSERT_GT(t.windows, 0);
     EXPECT_GT(ambiguousWindows, 0) << "ningun estimulo entro en la zona ambigua: el camino no se ejercio";
     EXPECT_EQ(t.fullRuleDiffer, 0) << "en la zona ambigua el detector eligio distinto que la regla entera";
+}
+
+// ===========================================================================
+// REQ-038 S1 (AC-038.3) — POR QUE LA GRUESA SE CORRE EN LA GUITARRA DE ACERO
+// ===========================================================================
+/**
+ * La tabla del corpus (`CorpusRobustness.TheCoarseDetectionMeasuredWhereItMeansSomething`) dejo
+ * dos cosas: el sesgo se concentra en el acero (peor 4,66 c contra 0,23 en las otras guitarras) y
+ * **NO lo explica el timbre** — `guitarra-jazz_E2` tiene el segundo parcial casi tan dominante
+ * (+14,3 dB) y no se corre, y `guitarra-acero_A2` lo tiene DEBIL (−17,8) y sí.
+ *
+ * Esto mira ADENTRO del detector, ventana a ventana, sobre la nota sostenida: que lags quedaron
+ * candidatos, con que NSDF gruesa y refinada, cual eligio, y **como se mueve la eleccion en el
+ * tiempo** (acero_E2 dispersa 10,2 cents entre ventanas, y su mediana +4,66 tiene el signo
+ * CONTRARIO a la lectura de su publicacion, −1,21: eso no es ruido, es que la eleccion se mueve).
+ *
+ * Y el TERCER METODO, que es lo que parte el veredicto: el periodo medido sin el detector y sin el
+ * oraculo de H1 —autocorrelacion cruda sobre la misma ventana— para poder decir si el que se
+ * aparta es el detector o la referencia.
+ *
+ * Lo que AFIRMA: que la instrumentacion PRODUCE datos sobre el caso (candidatos > 0 en las
+ * ventanas sostenidas) y que los tres metodos se computan sobre la MISMA ventana. El veredicto
+ * —donde nace— se imprime: es la medicion de S1, y un umbral hoy seria un numero elegido a ojo.
+ */
+TEST(McLeodPitchTest, AC0383_WhereTheCoarseBiasIsBornOnSteelStrings) {
+    const auto st = corpus::stateOf(corpus::defaultCorpusDir(), corpus::manifestPath());
+    if (!corpus::shouldRunRobustness(st)) {
+        GTEST_SKIP() << "sin corpus grabado (" << corpus::describe(st) << ")";
+    }
+    struct Caso { const char* archivo; double trueHz; const char* nota; };
+    // Los dos que refutan el timbre, y un control sano del mismo instrumento nominal.
+    const Caso kCasos[] = {
+        {"guitarra-acero_E2.wav", 82.30588, "el peor: mediana +4,66 c, H2 a +14,7 dB"},
+        {"guitarra-acero_A2.wav", 110.28113, "sesgado con H2 DEBIL (−17,8 dB): refuta el timbre"},
+        {"guitarra-jazz_E2.wav", 82.48890, "control: H2 a +14,3 dB y NO se sesga"},
+    };
+
+    std::map<std::string, double> desvioAltos, sesgoGrueso;
+    std::printf("\n  [REQ-038] adentro del detector, ventana a ventana sobre la nota sostenida\n");
+    for (const Caso& c : kCasos) {
+        const wav::WavData data = wav::readWav((corpus::defaultCorpusDir() + "/" + c.archivo).c_str());
+        ASSERT_GT(data.numFrames, 0) << c.archivo;
+        std::vector<float> mono(static_cast<size_t>(data.numFrames));
+        for (int i = 0; i < data.numFrames; ++i)
+            mono[static_cast<size_t>(i)] = 0.5f * (data.buffer[static_cast<size_t>(i) * 2]
+                                                   + data.buffer[static_cast<size_t>(i) * 2 + 1]);
+
+        std::printf("\n  == %s (%s)\n     hz_verdadero %.3f · %s\n", c.archivo, c.nota, c.trueHz,
+                    "candidatos: lag/nsdf grueso -> lag/nsdf refinado; * = el elegido");
+
+        McLeodPitch mpm;
+        mpm.prepare(data.sampleRate);
+        const int block = 1024;
+        int conDatos = 0;
+        double sumCents = 0.0;
+        for (int i = 0; i + block <= data.numFrames; i += block) {
+            const int antes = mpm.windowsAnalyzed();
+            mpm.process(mono.data() + i, block);
+            if (mpm.windowsAnalyzed() == antes) continue;
+            const double t = static_cast<double>(i + block) / data.sampleRate;
+            if (t < 1.0 || t > 2.6) continue;          // la nota sostenida, donde el oraculo mide
+            if (!mpm.hasPitch()) continue;
+            ++conDatos;
+            const double cents = 1200.0 * std::log2(mpm.frequencyHz() / c.trueHz);
+            sumCents += cents;
+
+            // 🔴 El lag elegido va en la escala del buffer DECIMADO, que es donde viven los
+            // candidatos: `mFrequencyHz = mWorkingRate / lag` con `mWorkingRate = rate/decimation`
+            // (McLeodPitch.cpp:16 y :326). Calcularlo con `kTargetRate` da un numero que no
+            // coincide con ningun candidato y el marcador `*` termina en cualquier lado — que es
+            // el instrumento mintiendo, otra vez.
+            const double workingRate = static_cast<double>(data.sampleRate) / mpm.decimation();
+            const double lagElegido = workingRate / mpm.frequencyHz();
+            char linea[400];
+            int n = std::snprintf(linea, sizeof linea, "     t=%4.2f  %+6.2f c  clar %.3f  lag* %7.3f (dec %d)  k=%d/%d |",
+                                  t, cents, mpm.clarity(), lagElegido, mpm.decimation(),
+                                  mpm.refinedCandidateCount(), mpm.sweepCandidateCount());
+            for (int k = 0; k < mpm.sweepCandidateCount() && k < 4; ++k) {
+                const int lg = mpm.sweepCandidateLag(k);
+                const int rl = mpm.sweepCandidateRefinedLag(k);
+                const bool elegido = std::fabs(static_cast<double>(rl) - lagElegido) < 1.5;
+                n += std::snprintf(linea + n, sizeof linea - static_cast<size_t>(n),
+                                   " %s%d/%.3f->%d/%.3f", elegido ? "*" : " ", lg,
+                                   mpm.sweepCandidateNsdf(k), rl, mpm.sweepCandidateRefinedNsdf(k));
+            }
+            // El instrumento tiene que poder señalar CUAL candidato se eligio: si ninguno coincide
+            // con el lag publicado, la columna de candidatos no describe esta lectura.
+            bool alguno = false;
+            for (int k = 0; k < mpm.sweepCandidateCount(); ++k)
+                alguno = alguno || std::fabs(static_cast<double>(mpm.sweepCandidateRefinedLag(k)) - lagElegido) < 1.5;
+            EXPECT_TRUE(alguno) << c.archivo << " t=" << t << ": el lag publicado (" << lagElegido
+                                << ") no coincide con ningun candidato refinado — la tabla de candidatos "
+                                   "no describe la lectura y el marcador estaria mintiendo";
+            if (conDatos <= 12) std::printf("%s\n", linea);
+        }
+        ASSERT_GT(conDatos, 0) << c.archivo << ": la instrumentacion no produjo ninguna ventana con altura "
+                                  "en la nota sostenida — sin eso no hay nada que mirar";
+        std::printf("     media de la gruesa en el tramo: %+6.2f c sobre %d ventanas\n", sumCents / conDatos, conDatos);
+        sesgoGrueso[c.archivo] = sumCents / conDatos;
+
+        // --- EL TERCER METODO: autocorrelacion cruda sobre la MISMA ventana --------------------
+        // Ni el detector (NSDF + refinamiento) ni el oraculo de H1 (Goertzel sobre el pico
+        // espectral): el periodo por correlacion directa de la forma de onda. Si coincide con el
+        // detector, el que se aparta es la referencia; si coincide con el oraculo, es el detector.
+        {
+            const int from = static_cast<int>(1.5 * data.sampleRate);
+            const int N = 1 << 14;
+            ASSERT_LE(from + 2 * N, data.numFrames) << c.archivo;
+            const double lagIdeal = data.sampleRate / c.trueHz;
+            double mejor = 0.0, mejorLag = 0.0;
+            for (double lag = lagIdeal * 0.97; lag <= lagIdeal * 1.03; lag += 0.05) {
+                const int L = static_cast<int>(lag);
+                const double frac = lag - L;
+                double num = 0.0, e1 = 0.0, e2 = 0.0;
+                for (int i = 0; i < N; ++i) {
+                    const double a = mono[static_cast<size_t>(from + i)];
+                    const double b0 = mono[static_cast<size_t>(from + i + L)];
+                    const double b1 = mono[static_cast<size_t>(from + i + L + 1)];
+                    const double b = b0 + frac * (b1 - b0);   // interpolacion lineal: el lag es fraccionario
+                    num += a * b; e1 += a * a; e2 += b * b;
+                }
+                const double r = num / std::sqrt(e1 * e2 + 1e-30);
+                if (r > mejor) { mejor = r; mejorLag = lag; }
+            }
+            const double hzCorr = data.sampleRate / mejorLag;
+            std::printf("     tercer metodo (autocorrelacion, 1,5 s, %d muestras): %.4f Hz = %+6.2f c  (r = %.4f)\n",
+                        N, hzCorr, 1200.0 * std::log2(hzCorr / c.trueHz), mejor);
+        }
+
+        // Y el oraculo por parcial sobre el mismo tramo, para tener los tres al lado.
+        const wma_test::oracle::PartialReading sus =
+            wma_test::oracle::measureSustained(mono, data.sampleRate, c.trueHz);
+        ASSERT_TRUE(sus.valid) << c.archivo;
+        std::printf("     oraculo H1 %.4f Hz = %+6.2f c  |  H2 %+.1f dB a %+6.2f c de 2·H1  |  H3 %+.1f dB a %+6.2f c  |  H4 %+.1f dB a %+6.2f c\n",
+                    sus.hz[1], 1200.0 * std::log2(sus.hz[1] / c.trueHz),
+                    sus.db[2], sus.cents[2], sus.db[3], sus.cents[3], sus.db[4], sus.cents[4]);
+        // El periodo que implica CADA parcial, si se lo toma como el n-esimo de una serie exacta.
+        // Si los parciales no coinciden en que periodo implican, "la altura" de esta señal no es
+        // un solo numero, y el detector (temporal) y el oraculo (espectral) miden cosas distintas.
+        std::printf("     periodo implicado por cada parcial (cents contra H1): H2 %+6.2f · H3 %+6.2f · H4 %+6.2f\n",
+                    sus.cents[2], sus.cents[3], sus.cents[4]);
+
+        // 🔴 LA ALTURA A LO LARGO DE LA NOTA. Con los parciales alineados a n·H1, el periodo de la
+        // forma de onda deberia ser 1/H1 — y en acero_E2 dos metodos TEMPORALES dicen +6,5 c. La
+        // unica forma de que eso pase con una serie exacta es que la altura NO sea constante: cada
+        // metodo mide un tramo distinto (detector 1,0–2,6 s · autocorrelacion desde 1,5 · oraculo
+        // sostenido desde 2,0) y promedia otra cosa. Esto lo muestra tramo a tramo.
+        /**
+         * 🔴 LOS PARCIALES ALTOS, que es donde estaba la respuesta. `PartialOracle` llega hasta H4
+         * y ahi los tres archivos se ven armonicos exactos. La inarmonicidad de una cuerda crece
+         * con n² (`f_n = n·f0·√(1+B·n²)`), asi que mirar hasta el cuarto es mirar donde todavia no
+         * se nota. Con H5..H10 el caso se separa solo.
+         */
+        {
+            const int from = static_cast<int>(1.5 * data.sampleRate);
+            const int N = static_cast<int>(0.75 * data.sampleRate);
+            std::vector<double> win(static_cast<size_t>(N));
+            for (int i = 0; i < N; ++i) {
+                const double hann = 0.5 * (1.0 - std::cos(2.0 * M_PI * (i + 0.5) / N));
+                win[static_cast<size_t>(i)] = mono[static_cast<size_t>(from + i)] * hann;
+            }
+            double h1 = 0.0, m1 = 0.0;
+            wma_test::oracle::peakIn(win, data.sampleRate, c.trueHz, 50.0, 1.0, &h1, &m1);
+            wma_test::oracle::peakIn(win, data.sampleRate, h1, 4.0, 0.1, &h1, &m1);
+            std::printf("     parciales ALTOS (H5..H10) contra n·H1, con su nivel:");
+            double peorDesvio = 0.0, desvioConSigno = 0.0;
+            for (int n = 5; n <= 10; ++n) {
+                if (n * h1 >= 0.45 * data.sampleRate) break;
+                double f = 0.0, m = 0.0;
+                wma_test::oracle::peakIn(win, data.sampleRate, n * h1, 40.0, 2.0, &f, &m);
+                wma_test::oracle::peakIn(win, data.sampleRate, f, 4.0, 0.1, &f, &m);
+                const double dev = 1200.0 * std::log2(f / (n * h1));
+                const double db = 20.0 * std::log10(std::max(m, 1e-12) / std::max(m1, 1e-12));
+                std::printf("  H%d %+.2f c/%.0f dB", n, dev, db);
+                if (db > -20.0 && std::fabs(dev) > peorDesvio) { peorDesvio = std::fabs(dev); desvioConSigno = dev; }
+            }
+            std::printf("   -> peor desvio con energia: %+.2f c\n", desvioConSigno);
+            desvioAltos[c.archivo] = desvioConSigno;
+        }
+
+        std::printf("     H1 del oraculo por tramos de 0,75 s (cents contra hz_verdadero):");
+        for (double t0 = 0.5; t0 + 0.75 <= 4.0; t0 += 0.5) {
+            const wma_test::oracle::PartialReading r =
+                wma_test::oracle::measureAt(mono, data.sampleRate, c.trueHz, t0);
+            if (!r.valid) break;
+            std::printf("  %.2f:%+6.2f", t0, 1200.0 * std::log2(r.hz[1] / c.trueHz));
+        }
+        std::printf("\n");
+    }
+    /**
+     * 🔑 EL VEREDICTO DE S1, afirmado: **el sesgo lo explica el MATERIAL, no el detector.**
+     *
+     * El desvío de los parciales altos con energía y el sesgo de la gruesa **coinciden en signo y
+     * en orden de magnitud**, archivo por archivo:
+     *
+     *   · `acero_E2`  altos estirados **+7,4 c** (H9) → la gruesa se va **+6,3 c**
+     *   · `acero_A2`  altos corridos **−6,4 c** (H10, y −12,9 en H5) → la gruesa se va **negativo**
+     *   · `jazz_E2`   altos a **0,02 c** → la gruesa a **−0,09 c**
+     *
+     * Una cuerda de acero es inarmónica (`f_n = n·f0·√(1+B·n²)`): sus parciales altos NO están en
+     * `n·f0`, así que la señal **no tiene un período exacto**. El detector es temporal (NSDF) y
+     * busca el mejor período; el oráculo es espectral y mide H1. Sobre una serie inarmónica esas
+     * dos cantidades difieren, y ninguna de las dos está mal — miden cosas distintas. Por eso un
+     * segundo método temporal independiente (autocorrelación cruda) coincide con el detector y no
+     * con el oráculo.
+     *
+     * Es el desenlace que el criterio de muerte del REQ dejaba disponible. Lo que S2 tiene que
+     * decidir es de PRODUCTO —qué garantiza el motor sobre cuerdas inarmónicas y contra qué se
+     * compara el barrido—, no un arreglo del detector.
+     */
+    ASSERT_EQ(desvioAltos.size(), 3u);
+    ASSERT_EQ(sesgoGrueso.size(), 3u);
+    std::printf("\n  [REQ-038] veredicto: desvio de los parciales altos vs sesgo de la gruesa\n");
+    for (const auto& kv : desvioAltos)
+        std::printf("    %-24s altos %+6.2f c   gruesa %+6.2f c\n", kv.first.c_str(), kv.second,
+                    sesgoGrueso[kv.first]);
+
+    // El control: sin parciales desalineados, no hay sesgo.
+    EXPECT_LT(std::fabs(desvioAltos["guitarra-jazz_E2.wav"]), 0.5)
+        << "el control dejo de ser armonico en sus parciales altos: ya no separa las dos causas";
+    EXPECT_LT(std::fabs(sesgoGrueso["guitarra-jazz_E2.wav"]), 0.5) << "el control empezo a sesgarse";
+
+    // Y los dos de acero: parciales altos desalineados, y la gruesa se va PARA EL MISMO LADO.
+    for (const char* n : {"guitarra-acero_E2.wav", "guitarra-acero_A2.wav"}) {
+        EXPECT_GT(std::fabs(desvioAltos[n]), 3.0)
+            << n << ": sus parciales altos dejaron de estar desalineados (" << desvioAltos[n]
+            << " c) — si el material cambio, el veredicto de S1 hay que rehacerlo";
+        EXPECT_EQ(desvioAltos[n] > 0.0, sesgoGrueso[n] > 0.0)
+            << n << ": el sesgo de la gruesa (" << sesgoGrueso[n] << " c) dejo de seguir el signo del "
+            << "desvio de los parciales altos (" << desvioAltos[n] << " c), que es LA evidencia de que "
+               "el sesgo es del material y no del detector";
+    }
+    std::printf("\n");
 }
 
 }  // namespace

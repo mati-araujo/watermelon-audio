@@ -25,6 +25,8 @@
 #include "support/AscentVsSweep.h"
 
 #include <array>
+#include <limits>
+#include <map>
 
 #include <cmath>
 #include <cstdio>
@@ -791,6 +793,181 @@ TEST(CorpusRobustness, TheAttackTrajectoryAndWhatTheGateWouldChange) {
     RecordProperty("max_error_hoy_milicents", static_cast<int>(maxToday * 1000.0));
     RecordProperty("max_error_compuerta_milicents", static_cast<int>(maxGate * 1000.0));
     RecordProperty("max_error_adaptativa_milicents", static_cast<int>(maxAdap * 1000.0));
+}
+
+/**
+ * REQ-038 S1 (AC-038.1, AC-038.2) — LA DETECCION GRUESA SOBRE EL CORPUS, MEDIDA DONDE CORRESPONDE.
+ *
+ * 🔴 EL INSTRUMENTO ESTABA MAL, Y ESO VA PRIMERO. El barrido guardaba `detectedHz` de la ULTIMA
+ * publicacion de la nota — la cola decayendo, donde la señal ya cruzo el piso y el detector ve lo
+ * que queda. Con esa cifra `bajo-pua_A1` figuraba a **−4,66 c** y parecia el peor caso del corpus,
+ * cuando su mediana tras 1 s esta en ±0,2. Una tabla de la gruesa construida sobre eso mezcla dos
+ * efectos y acusa al detector por lecturas que no representan la nota. Es la misma clase que
+ * REQ-035, donde el instrumento era el test anterior.
+ *
+ * Con el instrumento arreglado (`coarseAtReading`, `coarseMedian`, la ultima al lado), esta tabla
+ * contesta la pregunta de AC-038.2: si el sesgo se concentra en el timbre de la guitarra de ACERO
+ * —donde el oraculo por parcial mide H2 muy por encima de H1— o si esta repartido.
+ *
+ * Lo que AFIRMA (lo demas lo mide): que las tres cifras salen del MISMO barrido; que la mediana se
+ * calcula sobre una muestra que existe (≥ 3 publicaciones tras el asentamiento, o el archivo se
+ * declara sin muestra en vez de publicar una mediana de una); y **el control del instrumento**:
+ * `bajo-pua_A1`, que era el caso testigo, cae dentro de ±1 c medido donde corresponde. Si ese
+ * control fallara, la cifra nueva no es la que se cree y nada de lo de abajo significa algo.
+ */
+TEST(CorpusRobustness, TheCoarseDetectionMeasuredWhereItMeansSomething) {
+    const auto st = corpus::stateOf(corpus::defaultCorpusDir(), corpus::manifestPath());
+    if (!corpus::shouldRunRobustness(st)) {
+        GTEST_SKIP() << "sin corpus grabado (" << corpus::describe(st) << ")";
+    }
+    /// Desde donde se considera asentada la nota para la mediana. 1,0 s: es el instante en que la
+    /// sonda del 08/09 midio ±0,2 c en 33 de 41, y el oraculo del manifiesto mide desde 2,0.
+    constexpr double kSettledSec = 1.0;
+    constexpr int kMinSamples = 3;
+
+    const auto& results = sweptCorpus();
+    ASSERT_FALSE(results.empty());
+
+    auto centsOf = [](double hz, double ref) { return 1200.0 * std::log2(hz / ref); };
+    auto familyOf = [](const std::string& n) -> const char* {
+        if (n.rfind("guitarra-acero", 0) == 0) return "acero";
+        if (n.rfind("guitarra", 0) == 0) return "otra guitarra";
+        if (n.rfind("bajo", 0) == 0) return "bajo";
+        return "ukelele";
+    };
+
+    std::printf("\n  [REQ-038] la gruesa sobre el corpus, por instante. `lectura` = la publicacion de la que sale la "
+                "fina (la que ARBITRA dominio y signo); `mediana` = desde %.1f s (describe la NOTA); `ultima` = la cola "
+                "(lo que el barrido reportaba ANTES, y por eso figura al lado)\n", kSettledSec);
+    std::printf("  %-24s %8s %8s %8s | %7s %4s | %6s %6s %6s | %s\n", "archivo", "lectura", "mediana", "ultima",
+                "disper", "n", "dB_H2", "dB_H3", "dB_H4", "familia");
+
+    struct Acc { double worst = 0.0; double sum = 0.0; int n = 0; };
+    std::map<std::string, Acc> porFamilia;
+    double medianaBajoPua = NAN, ultimaBajoPua = NAN;
+    int sinMuestra = 0;
+
+    for (const corpus::Outcome& o : results) {
+        if (!o.analysed) continue;
+        const double atReading = corpus::coarseAtReading(o);
+        const double median = corpus::coarseMedian(o, kSettledSec);
+        const int n = corpus::coarseSampleCount(o, kSettledSec);
+        const double spread = corpus::coarseSpreadCents(o, kSettledSec);
+
+        // El nivel de los parciales, del oraculo: es lo que separa el timbre de acero del resto.
+        const wav::WavData data = wav::readWav((corpus::defaultCorpusDir() + "/" + o.name).c_str());
+        std::vector<float> mono(static_cast<size_t>(data.numFrames));
+        for (int i = 0; i < data.numFrames; ++i)
+            mono[static_cast<size_t>(i)] = 0.5f * (data.buffer[static_cast<size_t>(i) * 2]
+                                                   + data.buffer[static_cast<size_t>(i) * 2 + 1]);
+        const wma_test::oracle::PartialReading sus =
+            wma_test::oracle::measureSustained(mono, data.sampleRate, o.trueHz);
+
+        const double cReading = std::isfinite(atReading) ? centsOf(atReading, o.trueHz) : NAN;
+        const double cMedian  = std::isfinite(median)    ? centsOf(median, o.trueHz)    : NAN;
+        const double cLast    = o.detectedHz > 0.0       ? centsOf(o.detectedHz, o.trueHz) : NAN;
+
+        std::printf("  %-24s %+8.2f %+8.2f %+8.2f | %7.2f %4d | %+6.1f %+6.1f %+6.1f | %s\n", o.name.c_str(),
+                    cReading, cMedian, cLast, spread, n,
+                    sus.valid ? sus.db[2] : NAN, sus.valid ? sus.db[3] : NAN, sus.valid ? sus.db[4] : NAN,
+                    familyOf(o.name));
+
+        if (n < kMinSamples) { ++sinMuestra; continue; }
+        Acc& a = porFamilia[familyOf(o.name)];
+        a.worst = std::max(a.worst, std::fabs(cMedian));
+        a.sum += std::fabs(cMedian);
+        ++a.n;
+        if (o.name == "bajo-pua_A1.wav") { medianaBajoPua = cMedian; ultimaBajoPua = cLast; }
+    }
+
+    std::printf("\n  [REQ-038] por familia de timbre (sobre la MEDIANA, |cents| contra el oraculo):\n");
+    for (const auto& kv : porFamilia)
+        std::printf("    %-16s peor %5.2f c   promedio %5.2f c   (%d archivos)\n",
+                    kv.first.c_str(), kv.second.worst, kv.second.sum / kv.second.n, kv.second.n);
+    std::printf("  archivos sin muestra suficiente tras %.1f s: %d\n\n", kSettledSec, sinMuestra);
+
+    // --- lo que se AFIRMA -------------------------------------------------------------------
+    // El control del instrumento. Sin esto, la tabla de arriba es un numero nuevo sin validar.
+    ASSERT_FALSE(std::isnan(medianaBajoPua))
+        << "bajo-pua_A1 no dejo muestra tras el asentamiento: el control del instrumento no se pudo evaluar";
+    EXPECT_LT(std::fabs(medianaBajoPua), 1.0)
+        << "bajo-pua_A1 sigue apartado medido donde corresponde (" << medianaBajoPua
+        << " c): la cifra nueva no es la que se creia, o el detector SI se aparta ahi";
+    EXPECT_GT(std::fabs(ultimaBajoPua), std::fabs(medianaBajoPua))
+        << "la ultima publicacion de bajo-pua_A1 (" << ultimaBajoPua << " c) no esta mas apartada que su mediana ("
+        << medianaBajoPua << " c): el defecto del instrumento que este test existe para arreglar no se reproduce";
+
+    EXPECT_EQ(sinMuestra, 0)
+        << sinMuestra << " archivos no tienen " << kMinSamples << " publicaciones con altura tras "
+        << kSettledSec << " s: su mediana seria de una muestra";
+
+    /**
+     * 🔴 LAS TRES CIFRAS TIENEN QUE SER TRES, y esto lo afirma. Dos mutantes sobrevivieron a la
+     * primera version de este test porque las columnas `lectura` y el asentamiento de la mediana se
+     * IMPRIMIAN y no se afirmaban: con `coarseAtReading` mirando la cola, y con `coarseMedian`
+     * ignorando `fromSec`, la tabla salia distinta y el test seguia verde. Un instrumento cuyas
+     * cifras nadie distingue no es un instrumento.
+     */
+    int difierenLecturaYUltima = 0, difierenConYSinAsentamiento = 0;
+    for (const corpus::Outcome& o : results) {
+        if (!o.analysed || !(o.detectedHz > 0.0)) continue;
+        const double atReading = corpus::coarseAtReading(o);
+        if (std::isfinite(atReading) && std::fabs(1200.0 * std::log2(atReading / o.detectedHz)) > 1.0)
+            ++difierenLecturaYUltima;
+        const double conAsentamiento = corpus::coarseMedian(o, kSettledSec);
+        const double sinAsentamiento = corpus::coarseMedian(o, 0.0);
+        if (std::isfinite(conAsentamiento) && std::isfinite(sinAsentamiento)
+            && std::fabs(1200.0 * std::log2(conAsentamiento / sinAsentamiento)) > 0.05)
+            ++difierenConYSinAsentamiento;
+    }
+    std::printf("  archivos donde la cifra CAMBIA segun el instante: lectura vs ultima = %d · "
+                "mediana con vs sin asentamiento = %d\n\n", difierenLecturaYUltima, difierenConYSinAsentamiento);
+    EXPECT_GT(difierenLecturaYUltima, 0)
+        << "en ningun archivo la gruesa de la publicacion de la lectura difiere de la ultima: o el "
+           "corpus cambio, o `coarseAtReading` dejo de mirar la publicacion con lectura fina y las "
+           "dos columnas son la misma";
+    EXPECT_GT(difierenConYSinAsentamiento, 0)
+        << "en ningun archivo la mediana cambia al excluir el ataque: `coarseMedian` dejo de "
+           "respetar `fromSec` y la cifra ya no describe la nota asentada";
+
+    // --- AC-038.2: el sesgo SI se concentra en acero ------------------------------------------
+    ASSERT_TRUE(porFamilia.count("acero") && porFamilia.count("otra guitarra"));
+    EXPECT_GT(porFamilia["acero"].worst, 4.0 * porFamilia["otra guitarra"].worst)
+        << "el sesgo dejo de concentrarse en la guitarra de acero (peor acero "
+        << porFamilia["acero"].worst << " c contra " << porFamilia["otra guitarra"].worst
+        << " c en las otras): si se emparejo, este REQ perdio su caso y hay que re-mirarlo";
+
+    /**
+     * 🔴 Y LA HIPOTESIS DEL TIMBRE, REFUTADA — el hallazgo de S1.
+     *
+     * La spec entro suponiendo que el sesgo venia de tener el SEGUNDO PARCIAL DOMINANTE (acero_E2
+     * tiene H2 a +14,7 dB sobre H1). La tabla lo desmiente con contraejemplos de las dos clases, y
+     * quedan congelados acá porque son lo que le dice a S2 por donde NO buscar:
+     *
+     *   · `guitarra-jazz_E2`  H2 a +14,3 dB — casi igual que acero_E2 — y mediana −0,00 c.
+     *   · `guitarra-limpia_D3` H2 a +14,3 dB y mediana +0,01 c.
+     *   · `guitarra-acero_A2` H2 a −17,8 dB (el segundo parcial es DEBIL) y mediana −1,73 c.
+     *
+     * O sea: H2 dominante sin sesgo, y sesgo sin H2 dominante. Lo que sí acompaña al sesgo es la
+     * DISPERSION entre ventanas (acero: 3,9–10,2 c; el resto casi todo por debajo de 1,6), pero
+     * tampoco alcanza sola —`bajo-fretless_D2` dispersa 6,4 c con la mediana en 0,00—, asi que lo
+     * de acero no es ruido simetrico sino algo sistematico. Eso es lo que AC-038.3 va a mirar
+     * adentro del detector.
+     */
+    auto medianaDe = [&](const char* name) {
+        for (const corpus::Outcome& o : results)
+            if (o.name == name) return 1200.0 * std::log2(corpus::coarseMedian(o, kSettledSec) / o.trueHz);
+        return std::numeric_limits<double>::quiet_NaN();
+    };
+    EXPECT_LT(std::fabs(medianaDe("guitarra-jazz_E2.wav")), 0.5)
+        << "guitarra-jazz_E2 (H2 a +14,3 dB, casi como acero_E2) empezo a sesgarse: el contraejemplo "
+           "que refuta 'el sesgo lo causa H2 dominante' dejo de reproducirse";
+    EXPECT_GT(std::fabs(medianaDe("guitarra-acero_A2.wav")), 1.0)
+        << "guitarra-acero_A2 (H2 a −17,8 dB, el segundo parcial DEBIL) dejo de sesgarse: el otro "
+           "contraejemplo tampoco se reproduce, y la hipotesis del timbre habria que re-abrirla";
+
+    RecordProperty("familias", static_cast<int>(porFamilia.size()));
+    RecordProperty("peor_acero_milicents", static_cast<int>(porFamilia["acero"].worst * 1000.0));
 }
 
 /**

@@ -46,7 +46,8 @@ internal class FakeTunerBridge : ITunerBridge {
         return snapshot
     }
 
-    // Los seis de abajo están FUERA del alcance de REQ-010: `TunerImpl` no los toca.
+    // Los cuatro de abajo están FUERA del alcance de REQ-010: `TunerImpl` no los toca.
+    // (`setTunerCandidates` y `lockTunerString` salieron de este bloque en REQ-037 S1: ver abajo.)
     //
     // 🔴 Explotan en vez de devolver un valor inerte, y es por la misma razón que este
     // archivo ya invoca dos veces: un doble que devuelve ceros no es "sin comportamiento",
@@ -58,8 +59,27 @@ internal class FakeTunerBridge : ITunerBridge {
     override fun resetIntonation(): Unit = fueraDeAlcance("resetIntonation")
     override fun intonationState(): Int = fueraDeAlcance("intonationState")
     override fun intonationDifferenceCents(): Float = fueraDeAlcance("intonationDifferenceCents")
-    override fun setTunerCandidates(hz: FloatArray): Boolean = fueraDeAlcance("setTunerCandidates")
-    override fun lockTunerString(index: Int): Boolean = fueraDeAlcance("lockTunerString")
+    /**
+     * REQ-037 S1 — estas dos dejan de explotar y pasan a OBSERVARSE.
+     *
+     * El comentario de arriba decía que el día que alguien cablee el modo rápido "el test grita".
+     * Ese día es este: `FastModeGateTest` mide si el afinador le declara las cuerdas al motor, y
+     * para medirlo hace falta poder verlas, no que el doble aborte. Lo que NO cambia es la razón
+     * del bloque: siguen sin devolver un valor inerte inventado — registran lo que se les pidió,
+     * que es lo que un doble tiene que hacer cuando su llamada pasa a estar dentro del alcance.
+     */
+    val candidatesPushed = mutableListOf<FloatArray>()
+    val lockedStrings = mutableListOf<Int>()
+
+    override fun setTunerCandidates(hz: FloatArray): Boolean {
+        candidatesPushed += hz
+        return true
+    }
+
+    override fun lockTunerString(index: Int): Boolean {
+        lockedStrings += index
+        return true
+    }
 
     // El puerto offline (REQ-015 S2) tampoco lo toca `TunerImpl`, y su punto de entrada
     // público —`OfflineTuner`— va por el puente REAL, no por este doble. Mismo criterio
