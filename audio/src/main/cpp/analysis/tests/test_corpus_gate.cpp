@@ -944,18 +944,26 @@ TEST(CorpusRobustness, TheAttackTrajectoryAndWhatTheGateWouldChange) {
     std::printf("\n");
 
     /**
-     * AC-036.6 — EL TRINQUETE DEL CORPUS, sobre lo que PRODUCCION publica (la columna "hoy" de arriba):
-     * al menos las 33 convergidas que habia antes de REQ-036, y el error maximo entre ellas por
-     * debajo del 0,73 c de entonces. Medido al cerrar S2 (2026-09-09): 39 y 0,30. Los dos numeros
-     * de la linea de base son los de la spec, no se re-miden aca: son lo que este cambio prometio no
-     * empeorar.
+     * AC-036.6 / AC-038.5 — EL TRINQUETE DEL CORPUS, sobre lo que PRODUCCION publica (la columna
+     * "hoy" de arriba).
+     *
+     * 🔴 REQ-038 S2 LO APRETO A LO QUE REQ-036 DEJO MEDIDO. Estaba escrito contra la linea de base
+     * ANTERIOR a REQ-036 —33 convergidas y 0,73 c— cuando ese REQ ya habia entregado **39 y 0,30**:
+     * o sea que el corpus podia perder SEIS lecturas convergidas y duplicar su error con el gate en
+     * verde. Un trinquete que no se aprieta cuando se gana terreno deja de proteger lo ganado, que
+     * es exactamente lo que un trinquete existe para hacer.
+     *
+     * Y es lo que AC-038.5 pide: arreglar la gruesa no puede pagarse con la fina. S2 no toca
+     * produccion, asi que estos dos numeros tienen que salir IDENTICOS; si no salen, algo mas se
+     * movio y hay que mirarlo.
      */
-    constexpr int kConvergedBeforeReq036 = 33;
-    constexpr double kMaxErrorBeforeReq036 = 0.73;
-    EXPECT_GE(convergedToday, kConvergedBeforeReq036)
-        << "la admision por tendencia bajo las convergidas del corpus: " << convergedToday << " de " << published;
-    EXPECT_LT(maxToday, kMaxErrorBeforeReq036)
-        << "el error maximo de las convergidas no bajo: " << maxToday << " c";
+    constexpr int kConvergedAfterReq036 = 39;
+    constexpr double kMaxErrorAfterReq036 = 0.31;   // medido 0,30; el 0,01 es la resolucion impresa
+    EXPECT_GE(convergedToday, kConvergedAfterReq036)
+        << "bajaron las convergidas del corpus: " << convergedToday << " de " << published
+        << " (REQ-036 dejo " << kConvergedAfterReq036 << ")";
+    EXPECT_LT(maxToday, kMaxErrorAfterReq036)
+        << "subio el error maximo de las convergidas: " << maxToday << " c (REQ-036 dejo 0,30)";
 
     EXPECT_EQ(mismatches, 0) << "la historia de fases reconstruida no reproduce la ventana de produccion";
     EXPECT_LT(worstFidelity, 1e-6) << "el simulador no reproduce la lectura de produccion sin compuerta";
