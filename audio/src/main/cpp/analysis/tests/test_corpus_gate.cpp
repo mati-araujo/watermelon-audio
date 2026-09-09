@@ -281,6 +281,45 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
                 kRecordedCoarseBudgetCents);
 
     /**
+     * 🔴 LO QUE HACE QUE EL CRITERIO DEL INTERVALO PUEDA FALLAR.
+     *
+     * Un criterio que dijera "dentro" siempre pasaria este gate sin medir nada, y ningun
+     * archivo del corpus lo delataria: los 41 estan por debajo del presupuesto. Es el mutante
+     * obvio de este test, y sobrevive a todo lo de arriba.
+     *
+     * Las dos afirmaciones que siguen lo matan, y no son un truco: son las dos propiedades sin
+     * las cuales el intervalo no significaria nada.
+     */
+    ASSERT_GT(conDosOraculos, 0) << "ningun archivo tuvo las dos referencias";
+    // (1) El intervalo NO es universal: si todos cayeran adentro, seria un pase gratis y
+    //     habria que apretarlo. Hoy caen 26 de 41 y el resto queda a 0,085 c de media.
+    EXPECT_LT(adentro, conDosOraculos)
+        << "TODOS los archivos caen dentro del intervalo de sus dos referencias: asi el criterio "
+           "no puede fallar sobre este corpus y no esta midiendo nada";
+    // (2) Y no es degenerado donde importa: sobre el material inarmonico las dos referencias
+    //     TIENEN que discrepar, y sobre el armonico TIENEN que coincidir. Si esto se invirtiera,
+    //     el oraculo temporal habria dejado de ser un segundo metodo.
+    {
+        double anchoAcero = 0.0, anchoControl = 0.0;
+        for (const corpus::Outcome& o : results) {
+            const double med = corpus::coarseMedian(o, corpus::kSustainedFromSec);
+            if (!std::isfinite(med) || !std::isfinite(o.temporalHz)) continue;
+            const double ancho = std::fabs(1200.0 * std::log2(o.temporalHz / o.trueHz));
+            if (o.name.rfind("guitarra-acero_E2", 0) == 0) anchoAcero = ancho;
+            if (o.name.rfind("guitarra-jazz_E2", 0) == 0) anchoControl = ancho;
+        }
+        EXPECT_GT(anchoAcero, 2.0)
+            << "guitarra-acero_E2: las dos referencias coinciden (" << anchoAcero
+            << " c) — sobre una cuerda de acero tienen que discrepar, o el oraculo temporal "
+               "dejo de medir el periodo y volvio a medir H1";
+        EXPECT_LT(anchoControl, 1.0)
+            << "guitarra-jazz_E2 (control armonico): las dos referencias discrepan en "
+            << anchoControl << " c — sobre material armonico el intervalo tiene que cerrarse";
+        std::printf("  ancho del intervalo: acero_E2 %.2f c  ·  jazz_E2 (control) %.2f c\n\n",
+                    anchoAcero, anchoControl);
+    }
+
+    /**
      * 🔴 TRINQUETE BIDIRECCIONAL: los archivos donde el detector lee un SUBMULTIPLO. Se declara
      * el desenlace exacto: altura en f0/k, bandera 0, NUNCA convergido. Si empiezan a leerse
      * bien, esto se pone ROJO para que se los saque de la lista — igual que
