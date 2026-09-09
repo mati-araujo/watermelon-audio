@@ -158,6 +158,94 @@ inline std::vector<float> decayingString(double f0, double B, int numPartials,
     return out;
 }
 
+/**
+ * REQ-036 S1 — cuerda cuya ALTURA CAMBIA EN EL TIEMPO: `centsAt(t)` dice a cuantos cents de `f0`
+ * esta la cuerda en el segundo `t`, y cada parcial avanza su fase con la frecuencia INSTANTANEA
+ * `n · f0 · 2^(centsAt(t)/1200) · √(1+B·n²)`.
+ *
+ * ES EL UNICO GENERADOR DE FASE INSTANTANEA, y el glide y el vibrato delegan en el: dos bucles
+ * que acumulen fase por su cuenta serian dos fuentes de verdad, y la que se usa menos es la que
+ * se desincroniza. Con `centsAt ≡ 0` reproduce `partialsWithAmplitudes` BIT A BIT (mismo `dp`,
+ * misma acumulacion, mismo pliegue): lo afirma un test, y es lo que permite que la nota estable
+ * de los controles y la del glide salgan del mismo codigo.
+ *
+ * La fase se acumula en `double` por la misma razon que en el resto del archivo: el generador
+ * tiene que ser mas exacto que lo que mide. Y `dp` se recalcula POR MUESTRA —cuesta un `pow` por
+ * muestra y parcial— porque un glide exponencial no tiene un `dp` constante por tramo sin
+ * introducir una segunda aproximacion que despues habria que descontar del error medido.
+ */
+template <typename CentsAt>
+inline std::vector<float> partialsWithPitchTrajectory(double f0, double B,
+                                                      const std::vector<double>& amps,
+                                                      int sampleRate, int numFrames,
+                                                      CentsAt centsAt, double phase0 = 0.0) {
+    std::vector<float> out(static_cast<size_t>(numFrames), 0.0f);
+    for (size_t k = 0; k < amps.size(); ++k) {
+        const int n = static_cast<int>(k) + 1;
+        const double fn = n * f0 * std::sqrt(1.0 + B * n * n);
+        if (fn >= 0.5 * sampleRate) break;
+        const double a = amps[k];
+        if (a == 0.0) continue;
+        double p = phase0 * static_cast<double>(n);
+        for (int i = 0; i < numFrames; ++i) {
+            const double t = static_cast<double>(i) / sampleRate;
+            const double dp = 2.0 * M_PI * (fn * std::pow(2.0, centsAt(t) / 1200.0))
+                              / static_cast<double>(sampleRate);
+            out[static_cast<size_t>(i)] += static_cast<float>(a * std::sin(p));
+            p += dp;
+            if (p >= 2.0 * M_PI) p -= 2.0 * M_PI;
+        }
+    }
+    return out;
+}
+
+/// Amplitudes 1/n para `numPartials` parciales: lo que `inharmonicString` usa.
+inline std::vector<double> oneOverNAmplitudes(int numPartials, double amp = 0.5) {
+    std::vector<double> amps;
+    amps.reserve(static_cast<size_t>(numPartials));
+    for (int n = 1; n <= numPartials; ++n) amps.push_back(amp / n);
+    return amps;
+}
+
+/**
+ * REQ-036 S1 — GLIDE DE ATAQUE: la altura parte a `startCents` del valor FINAL `f0` y se asienta
+ * exponencialmente con constante `tau` (segundos): `cents(t) = startCents · e^(−t/tau)`.
+ *
+ * Es la forma que el oraculo por tramos mostro sobre el corpus (bajo-acustico_G2: −27,7 c a 0,1 s,
+ * estable a 1,0 s; ukelele_C4: −3 c hasta 0,7 s). `f0` es la altura a la que la cuerda LLEGA —el
+ * numero verdadero contra el que se mide el error— y no de la que parte.
+ */
+inline std::vector<float> glidingString(double f0, double startCents, double tau, double B,
+                                        int numPartials, int sampleRate, int numFrames,
+                                        double amp = 0.5) {
+    return partialsWithPitchTrajectory(
+        f0, B, oneOverNAmplitudes(numPartials, amp), sampleRate, numFrames,
+        [startCents, tau](double t) { return startCents * std::exp(-t / tau); });
+}
+
+/// El segundo desde el cual un glide (`startCents`, `tau`) queda a menos de `settledCents` de su
+/// valor final, y se queda: `tau · ln(|startCents| / settledCents)`. Cero si ya arranca adentro.
+inline double glideSettleSeconds(double startCents, double tau, double settledCents) {
+    const double ratio = std::fabs(startCents) / settledCents;
+    return ratio > 1.0 ? tau * std::log(ratio) : 0.0;
+}
+
+/**
+ * REQ-036 S1 — VIBRATO: `cents(t) = depthCents · sin(2π · rateHz · t)` alrededor de `f0`.
+ *
+ * Es el CONTROL NEGATIVO del estadistico de tendencia: deja residuos estructurados en la
+ * regresion de fase —igual que un glide— pero su media es `f0`, y el afinador tiene que seguir
+ * mostrando esa media. Un estadistico que dispare aca no mide "el ataque esta en la ventana":
+ * mide "la fase no es una recta", que es otra pregunta y apaga al afinador sobre un cantante.
+ */
+inline std::vector<float> vibratoString(double f0, double depthCents, double rateHz, double B,
+                                        int numPartials, int sampleRate, int numFrames,
+                                        double amp = 0.5) {
+    return partialsWithPitchTrajectory(
+        f0, B, oneOverNAmplitudes(numPartials, amp), sampleRate, numFrames,
+        [depthCents, rateHz](double t) { return depthCents * std::sin(2.0 * M_PI * rateHz * t); });
+}
+
 /// Una cuerda del catalogo de instrumentos de S3.
 struct CatalogString { const char* name; double hz; };
 

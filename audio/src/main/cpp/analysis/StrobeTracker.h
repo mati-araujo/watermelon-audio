@@ -482,6 +482,11 @@ public:
         return mTargetHz > 0.0 ? mTargetHz * (i + 1) : 0.0;
     }
 
+    /// REQ-036 S1 — sonda de solo lectura: el estimador del parcial `i`, para que un test lea
+    /// su ventana de regresion (`regressionPhaseAt`) y su energia de bin. Ver la nota en
+    /// `PhaseSlopeEstimator::regressionPhaseCount()`. Produccion no la llama.
+    const PhaseSlopeEstimator& partialEstimator(int i) const noexcept { return mPartials[i]; }
+
 private:
     PhaseSlopeEstimator mPartials[kPartials];
     double mTargetHz{0.0};

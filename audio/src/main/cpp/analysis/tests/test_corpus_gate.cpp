@@ -17,6 +17,7 @@
 #include "../AnalysisSnapshot.h"
 #include "support/CorpusSweep.h"
 #include "support/PartialOracle.h"
+#include "support/PhaseTrend.h"
 #include "tests/support/TestSanitizer.h"
 
 #include <gtest/gtest.h>
@@ -34,6 +35,15 @@ namespace wma_test {
 namespace {
 
 using corpus::State;
+
+/// El barrido de los 41, hecho UNA vez por proceso y compartido entre los tests que lo leen
+/// (REQ-036 S1): cuesta ~10 s sin instrumentar y ~60 bajo TSan, y dos tests que lo repitan son dos
+/// veces ese costo por nada — la misma regla que el barrido de glides sintetico.
+const std::vector<corpus::Outcome>& sweptCorpus() {
+    static const std::vector<corpus::Outcome> kSwept =
+        corpus::sweepAll(corpus::defaultCorpusDir(), corpus::manifestPath());
+    return kSwept;
+}
 
 // ---------------------------------------------------------------------------
 // 10.5 — sin corpus se SALTEA, no se aprueba
@@ -188,7 +198,7 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
     constexpr double kRecordedFineBudgetCents = 1.0;
     constexpr double kRecordedCoarseBudgetCents = 6.0;
 
-    const auto results = corpus::sweepAll(corpus::defaultCorpusDir(), corpus::manifestPath());
+    const auto& results = sweptCorpus();
     ASSERT_FALSE(results.empty())
         << "el corpus esta verificado y el barrido no leyo una sola entrada";
 
@@ -484,6 +494,277 @@ TEST(CorpusRobustness, WhereTheFineReadingErrorIsBorn) {
     RecordProperty("mecanismo_rastreo", tracking);
     RecordProperty("mecanismo_ajuste", fit);
     RecordProperty("mecanismo_sample", sample);
+}
+
+/**
+ * REQ-036 S1 (AC-036.3) — LA TRAYECTORIA DE LA FINA POR ARCHIVO, Y LO QUE LA COMPUERTA CAMBIARIA.
+ *
+ * Por archivo: la primera lectura fina (t, error), la primera CONVERGIDA, el tiempo hasta quedar a
+ * ±0,5 c del valor final, y la ultima (t, error, estado). Sumado: cuantas de las lecturas finales
+ * CONVERGIDAS superan 0,1 / 0,3 / 0,5 c — la linea de base del trinquete de AC-036.6 (hoy: 33
+ * convergidas, maximo 0,73 c).
+ *
+ * Y la SIMULACION DESDE AFUERA, sobre la historia de fases de cada parcial reconstruida desde la
+ * sonda (`Outcome::history`), del veredicto de `test_attack_in_window.cpp`: el estadistico de
+ * tendencia con su umbral, como compuerta SOLA (la ventana de produccion, sin admitir al parcial
+ * que dispara) y como ventana ADAPTATIVA sincronizada (los cuatro se reinician en el quiebre). Es
+ * el numero que decide S2: cuantas de las 33 dejarian de converger al final de la nota, y con que
+ * error maximo quedan las que siguen.
+ *
+ * Lo que este test AFIRMA: que el simulador es fiel —sin compuerta reproduce la lectura de
+ * produccion en cada publicacion con lectura fina, sobre la MISMA ventana (la historia se
+ * reconstruyo bien)— y que la contabilidad cierra. Los numeros se imprimen y registran: exigen
+ * correr algo (REQ-021).
+ */
+struct CorpusSim {
+    bool convergedAtEnd = false;
+    double errAtEnd = NAN;
+    double firstConvSec = NAN, firstConvErr = NAN;
+    int blindPubs = 0;         ///< publicaciones CONVERGIDAS con |error| > 0,1 c
+    int restarts = 0;
+    int finePubs = 0;          ///< publicaciones con lectura de produccion
+    int simPubs = 0;           ///< ... de las que el simulador tambien dio lectura
+    double worstFidelity = 0.0;
+    int windowMismatch = 0;    ///< ventanas reconstruidas que no coinciden con las de produccion
+};
+
+CorpusSim simulateCorpus(const corpus::Outcome& o, const trend::Threshold& th, bool gate, bool adaptive,
+                         bool majority = false) {
+    using wma::analysis::PhaseSlopeEstimator;
+    using wma::analysis::StrobeTracker;
+    constexpr int kP = StrobeTracker::kPartials;
+    CorpusSim r;
+    int start[kP] = {0, 0, 0, 0};
+    for (const corpus::Outcome::Publication& pub : o.publicationLog) {
+        if (!pub.fine || pub.admitted <= 0) continue;
+        ++r.finePubs;
+        int excluded = 0;
+        for (int p = 0; p < kP; ++p)
+            start[p] = std::max({start[p], pub.histSegment[p], pub.histEnd[p] - PhaseSlopeEstimator::kMaxWindows});
+        if (adaptive) {
+            int common = 0;
+            for (int p = 0; p < kP; ++p) common = std::max(common, start[p]);
+            int nFire = 0, nAdmitted = 0, fired = 0;
+            for (int p = 0; p < kP; ++p) {
+                if (!(pub.admitted & (1 << p))) continue;
+                const int cnt = pub.histEnd[p] - common;
+                if (cnt < th.minWindows) continue;   // un quiebre se juzga sobre una ventana admisible
+                ++nAdmitted;
+                if (trend::fires(trend::trendOver(o.history[p].data() + common, cnt, o.sampleRate,
+                                                  pub.targetHz * (p + 1)), th)) { ++nFire; fired |= 1 << p; }
+            }
+            // `majority`: ver test_attack_in_window.cpp — un parcial solo que dispara se excluye
+            // sin reiniciar a los otros tres.
+            const bool any = majority ? (nFire > 0 && 2 * nFire >= nAdmitted) : (nFire > 0);
+            for (int p = 0; p < kP; ++p) start[p] = common;
+            if (!any) excluded = fired;
+            if (any) {
+                for (int p = 0; p < kP; ++p) start[p] = pub.histEnd[p] - (pub.histEnd[p] - common) / 2;
+                ++r.restarts;
+                continue;
+            }
+        }
+        double pc[kP], ps[kP];
+        int mask = 0;
+        for (int p = 0; p < kP; ++p) {
+            if (!(pub.admitted & (1 << p))) continue;
+            if (excluded & (1 << p)) continue;
+            const int cnt = pub.histEnd[p] - start[p];
+            if (cnt < 4) continue;
+            const double* w = o.history[p].data() + start[p];
+            const trend::PartialReading pr = trend::readingFromSlope(trend::fitSlope(w, 0, cnt), o.sampleRate,
+                                                                     pub.targetHz * (p + 1));
+            if (!pr.ok) continue;
+            if (!gate) {
+                if (cnt != pub.count[p]) ++r.windowMismatch;
+                r.worstFidelity = std::max(r.worstFidelity, std::fabs(pr.cents - pub.pCents[p]));
+            } else if (!trend::admits(trend::trendOver(w, cnt, o.sampleRate, pub.targetHz * (p + 1)), th)) {
+                continue;
+            }
+            pc[p] = pr.cents; ps[p] = pr.sigma; mask |= 1 << p;
+        }
+        const trend::Combined g = trend::combineFrom(pc, ps, mask, gate);
+        if (!g.hasMeasurement) { r.convergedAtEnd = false; continue; }
+        ++r.simPubs;
+        const double err = 1200.0 * std::log2(pub.targetHz * std::pow(2.0, g.cents / 1200.0) / o.trueHz);
+        const bool conv = g.sigma <= StrobeTracker::kConvergedUncertaintyCents;
+        if (!gate) r.worstFidelity = std::max(r.worstFidelity, std::fabs(g.cents - pub.strobeC));
+        if (conv && std::fabs(err) > 0.1) ++r.blindPubs;
+        if (conv && std::isnan(r.firstConvSec)) { r.firstConvSec = pub.sec; r.firstConvErr = err; }
+        r.convergedAtEnd = conv;
+        r.errAtEnd = err;
+    }
+    return r;
+}
+
+TEST(CorpusRobustness, TheAttackTrajectoryAndWhatTheGateWouldChange) {
+    const auto st = corpus::stateOf(corpus::defaultCorpusDir(), corpus::manifestPath());
+    if (!corpus::shouldRunRobustness(st)) {
+        GTEST_SKIP() << "sin corpus grabado (" << corpus::describe(st) << ")";
+    }
+    /// El veredicto de S1 (`test_attack_in_window.cpp`, `kChosen`): la misma terna, escrita dos
+    /// veces a proposito — el barrido sintetico la elige, y este test mide que hace sobre material
+    /// real. Si divergen, uno de los dos habla de otra compuerta.
+    constexpr trend::Threshold kChosen{5.0, 0.05, 12, trend::Magnitude::kDelta};
+    constexpr double kNearFinalCents = 0.5;
+    constexpr double kContractCents = 0.1;
+
+    const auto& results = sweptCorpus();
+    ASSERT_FALSE(results.empty());
+
+    std::printf("\n  [REQ-036] trayectoria de la fina por archivo (error en Hz absolutos contra el oraculo) y la compuerta "
+                "simulada (|T| > %.1f, |Δ| > %.2f c, min %d ventanas): sola y adaptativa sincronizada\n",
+                kChosen.t, kChosen.deltaCents, kChosen.minWindows);
+    std::printf("  %-22s | %5s %6s | %5s %6s | %5s | %5s %6s %4s %6s | %5s %6s %4s %3s | %5s %6s %4s %3s %3s\n",
+                "archivo", "t_1ra", "err1ra", "t_cnv", "errcnv", "t±0.5", "t_ult", "errult", "est", "sigma",
+                "g_cnv", "g_err", "gcie", "gC", "a_cnv", "a_err", "acie", "aC", "rei");
+    int published = 0, convergedToday = 0, over01 = 0, over03 = 0, over05 = 0, blindToday = 0;
+    int gateConverged = 0, gateBlind = 0, adapConverged = 0, adapBlind = 0, mismatches = 0;
+    double maxToday = 0.0, maxGate = 0.0, maxAdap = 0.0, worstFidelity = 0.0;
+    std::vector<std::string> lostGate, lostAdap, gainedAdap;
+    for (const corpus::Outcome& o : results) {
+        if (!o.published) continue;
+        ++published;
+        // --- la trayectoria de hoy ---
+        const auto first = o.trajectory.front();
+        double tConv = NAN, errConv = NAN;
+        for (const corpus::Outcome::Publication& pub : o.publicationLog) {
+            if (pub.fine && pub.state == wma::analysis::kStateConverged) { tConv = pub.sec; errConv = pub.centsAbs; break; }
+        }
+        double tNear = NAN;
+        for (size_t i = 0; i < o.trajectory.size(); ++i) {
+            bool stays = true;
+            for (size_t j = i; j < o.trajectory.size(); ++j)
+                stays = stays && std::fabs(o.trajectory[j].second - o.cents) <= kNearFinalCents;
+            if (stays) { tNear = o.trajectory[i].first; break; }
+        }
+        for (const corpus::Outcome::Publication& pub : o.publicationLog)
+            if (pub.fine && pub.state == wma::analysis::kStateConverged && std::fabs(pub.centsAbs) > kContractCents) ++blindToday;
+        const bool convToday = o.readingState == wma::analysis::kStateConverged;
+        if (convToday) {
+            ++convergedToday;
+            maxToday = std::max(maxToday, std::fabs(o.cents));
+            if (std::fabs(o.cents) > 0.1) ++over01;
+            if (std::fabs(o.cents) > 0.3) ++over03;
+            if (std::fabs(o.cents) > 0.5) ++over05;
+        }
+        // --- las simulaciones ---
+        const CorpusSim today = simulateCorpus(o, kChosen, false, false);
+        const CorpusSim gate = simulateCorpus(o, kChosen, true, false);
+        const CorpusSim adap = simulateCorpus(o, kChosen, true, true);
+        worstFidelity = std::max(worstFidelity, today.worstFidelity);
+        mismatches += today.windowMismatch;
+        if (gate.convergedAtEnd) { ++gateConverged; maxGate = std::max(maxGate, std::fabs(gate.errAtEnd)); }
+        else if (convToday) lostGate.push_back(o.name);
+        if (adap.convergedAtEnd) {
+            ++adapConverged;
+            maxAdap = std::max(maxAdap, std::fabs(adap.errAtEnd));
+            if (!convToday) gainedAdap.push_back(o.name);
+        } else if (convToday) {
+            lostAdap.push_back(o.name);
+        }
+        gateBlind += gate.blindPubs;
+        adapBlind += adap.blindPubs;
+        std::printf("  %-22s | %5.2f %+6.2f | %5.2f %+6.2f | %5.2f | %5.2f %+6.2f %4d %6.3f | %5.2f %+6.2f %4d %3s | %5.2f %+6.2f %4d %3s %3d\n",
+                    o.name.c_str(), first.first, first.second, tConv, errConv, tNear, o.lastReadingSec, o.cents,
+                    o.readingState, o.strobeSigmaC, gate.firstConvSec, gate.errAtEnd, gate.blindPubs,
+                    gate.convergedAtEnd ? "si" : "NO", adap.firstConvSec, adap.errAtEnd, adap.blindPubs,
+                    adap.convergedAtEnd ? "si" : "NO", adap.restarts);
+    }
+    std::printf("\n  [REQ-036] hoy: %d con lectura, %d CONVERGIDAS al final (max |error| %.2f c; > 0,1: %d, > 0,3: %d, > 0,5: %d); "
+                "publicaciones CONVERGIDAS con |error| > 0,1 c: %d\n", published, convergedToday, maxToday, over01, over03, over05, blindToday);
+    std::printf("  [REQ-036] compuerta sola:       %d convergidas al final (max |error| %.2f c), publicaciones convergidas equivocadas %d; "
+                "dejan de converger %zu:", gateConverged, maxGate, gateBlind, lostGate.size());
+    for (const std::string& n : lostGate) std::printf(" %s", n.c_str());
+    std::printf("\n  [REQ-036] ventana adaptativa:   %d convergidas al final (max |error| %.2f c), publicaciones convergidas equivocadas %d; "
+                "dejan de converger %zu:", adapConverged, maxAdap, adapBlind, lostAdap.size());
+    for (const std::string& n : lostAdap) std::printf(" %s", n.c_str());
+    std::printf("; empiezan a converger %zu:", gainedAdap.size());
+    for (const std::string& n : gainedAdap) std::printf(" %s", n.c_str());
+    {
+        int conv = 0, blind = 0, restarts = 0;
+        double maxErr = 0.0;
+        std::vector<std::string> lost, gained;
+        for (const corpus::Outcome& o : results) {
+            if (!o.published) continue;
+            const CorpusSim a = simulateCorpus(o, kChosen, true, true, true);
+            const bool convToday = o.readingState == wma::analysis::kStateConverged;
+            if (a.convergedAtEnd) { ++conv; maxErr = std::max(maxErr, std::fabs(a.errAtEnd)); if (!convToday) gained.push_back(o.name); }
+            else if (convToday) lost.push_back(o.name);
+            blind += a.blindPubs; restarts += a.restarts;
+        }
+        std::printf("\n  [REQ-036] adaptativa por MAYORIA:  %d convergidas al final (max |error| %.2f c), publicaciones convergidas equivocadas %d, "
+                    "%d reinicios; dejan de converger %zu:", conv, maxErr, blind, restarts, lost.size());
+        for (const std::string& n : lost) std::printf(" %s", n.c_str());
+        std::printf("; empiezan a converger %zu:", gained.size());
+        for (const std::string& n : gained) std::printf(" %s", n.c_str());
+        RecordProperty("convergidas_adaptativa_mayoria", conv);
+        RecordProperty("max_error_adaptativa_mayoria_milicents", static_cast<int>(maxErr * 1000.0));
+    }
+    std::printf("\n  fidelidad del simulador: peor |lectura externa − produccion| = %.2e c, ventanas que no coinciden = %d\n",
+                worstFidelity, mismatches);
+    // Los disparos sobre las que DEJAN de converger: donde, y con que T y Δ por parcial, para que S2
+    // sepa que es lo que la compuerta ve en esas notas (un glide real, un batido entre capas del
+    // sample, o una cola que decae) antes de decidir si el precio se paga.
+    for (const std::string& lost : lostAdap) {
+        for (const corpus::Outcome& o : results) {
+            if (o.name != lost) continue;
+            std::printf("  %s: disparos de la adaptativa (t, y por parcial admitido n / T / Δ):\n", o.name.c_str());
+            int start = 0;
+            for (const corpus::Outcome::Publication& pub : o.publicationLog) {
+                if (!pub.fine || pub.admitted <= 0) continue;
+                for (int p = 0; p < corpus::Outcome::kPartials; ++p)
+                    start = std::max({start, pub.histSegment[p], pub.histEnd[p] - wma::analysis::PhaseSlopeEstimator::kMaxWindows});
+                bool any = false;
+                char line[400];
+                int len = std::snprintf(line, sizeof line, "    t=%5.2f err=%+6.2f σ=%.3f est=%d |", pub.sec, pub.centsAbs, pub.sigma, pub.state);
+                for (int p = 0; p < corpus::Outcome::kPartials; ++p) {
+                    if (!(pub.admitted & (1 << p))) continue;
+                    const int cnt = pub.histEnd[p] - start;
+                    if (cnt < kChosen.minWindows) continue;
+                    const trend::Trend tr = trend::trendOver(o.history[p].data() + start, cnt, o.sampleRate, pub.targetHz * (p + 1));
+                    const bool f = trend::fires(tr, kChosen);
+                    any = any || f;
+                    len += std::snprintf(line + len, sizeof line - static_cast<size_t>(len), " p%d n=%2d T=%+6.1f Δ=%+6.3f%s", p + 1, cnt, tr.tScore, tr.deltaCents, f ? "*" : " ");
+                }
+                if (any) { std::printf("%s\n", line); start = pub.histEnd[0] - (pub.histEnd[0] - start) / 2; }
+            }
+        }
+    }
+    std::printf("\n");
+
+    // La misma grilla que el barrido sintetico (T × Δ × minimo), con reinicio sincronizado, sobre
+    // los 41: convergidas al final, error maximo entre ellas, publicaciones convergidas
+    // equivocadas, cuantas de las de hoy se pierden y cuantas nuevas convergen.
+    std::printf("  grilla sobre el corpus, ventana adaptativa sincronizada (hoy: %d convergidas, max %.2f c, %d publicaciones equivocadas):\n",
+                convergedToday, maxToday, blindToday);
+    std::printf("  %5s %6s %5s | %7s %7s %7s %7s %7s %7s\n", "T", "Δ", "min", "conv", "max_err", "pub_eq", "pierde", "gana", "reini");
+    for (double tt : {3.0, 4.0, 5.0, 6.0}) for (double d : {0.05, 0.10}) for (int minW : {8, 12, 16}) {
+        const trend::Threshold th{tt, d, minW, trend::Magnitude::kDelta};
+        int conv = 0, blind = 0, lost = 0, gained = 0, restarts = 0;
+        double maxErr = 0.0;
+        for (const corpus::Outcome& o : results) {
+            if (!o.published) continue;
+            const CorpusSim a = simulateCorpus(o, th, true, true);
+            const bool convToday = o.readingState == wma::analysis::kStateConverged;
+            if (a.convergedAtEnd) { ++conv; maxErr = std::max(maxErr, std::fabs(a.errAtEnd)); if (!convToday) ++gained; }
+            else if (convToday) ++lost;
+            blind += a.blindPubs;
+            restarts += a.restarts;
+        }
+        std::printf("  %5.1f %6.2f %5d | %7d %7.2f %7d %7d %7d %7d\n", tt, d, minW, conv, maxErr, blind, lost, gained, restarts);
+    }
+    std::printf("\n");
+
+    EXPECT_EQ(mismatches, 0) << "la historia de fases reconstruida no reproduce la ventana de produccion";
+    EXPECT_LT(worstFidelity, 1e-6) << "el simulador no reproduce la lectura de produccion sin compuerta";
+    EXPECT_EQ(over01 + (convergedToday - over01), convergedToday) << "la contabilidad no cierra";
+    RecordProperty("convergidas_hoy", convergedToday);
+    RecordProperty("convergidas_compuerta", gateConverged);
+    RecordProperty("convergidas_adaptativa", adapConverged);
+    RecordProperty("max_error_hoy_milicents", static_cast<int>(maxToday * 1000.0));
+    RecordProperty("max_error_compuerta_milicents", static_cast<int>(maxGate * 1000.0));
+    RecordProperty("max_error_adaptativa_milicents", static_cast<int>(maxAdap * 1000.0));
 }
 
 /**

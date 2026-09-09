@@ -181,6 +181,23 @@ public:
     /// para saber que la integracion avanzo, en vez de dormir y suponer.
     int windowsAnalyzed() const noexcept { return mWindowsTotal; }
 
+    /**
+     * REQ-036 S1 — SONDA DE SOLO LECTURA sobre la ventana de regresion: cuantas fases tiene hoy
+     * (`regressionPhaseCount()`, hasta `kMaxWindows`) y la fase desenvuelta de la ventana `i`
+     * (`regressionPhaseAt(i)`, la mas vieja en 0). Es EXACTAMENTE lo que la regresion de
+     * `closeWindow()` acaba de ajustar.
+     *
+     * Existe porque σ es ciega a un glide que sesga a todos los parciales por igual: los residuos
+     * de una recta ajustada a un palo de hockey son chicos. Para elegir el estadistico de
+     * TENDENCIA que lo delate (y su umbral, con nota estable y vibrato como controles) el test
+     * tiene que poder leer las fases que el estimador ya almacena, no reconstruirlas con un
+     * segundo Goertzel que seria otra fuente de verdad. Produccion no la llama: esta declarada
+     * `sonda-de-tests` en `scripts/mechanism-callers-baseline.txt`. S2 mueve el estadistico
+     * adentro de `closeWindow()`.
+     */
+    int regressionPhaseCount() const noexcept { return mCount; }
+    double regressionPhaseAt(int i) const noexcept { return mPhases[static_cast<size_t>(i)]; }
+
 private:
     void closeWindow();
 

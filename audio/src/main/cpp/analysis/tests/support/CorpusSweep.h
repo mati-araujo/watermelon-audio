@@ -29,10 +29,12 @@
 #include "../../AnalysisRing.h"
 #include "../../AnalysisThread.h"
 #include "../../OfflineAnalysis.h"
+#include "../../PhaseSlopeEstimator.h"
 #include "../../StrobeTracker.h"
 #include "../../../looper/WavFile.h"
 #include "SyntheticSignal.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -120,6 +122,40 @@ struct Outcome {
     double fitB = NAN;                ///< el B del ajuste reconstruido (el strobe no lo publica)
     /// (segundo, cents) de CADA publicacion con lectura fina: el eje del tiempo del error.
     std::vector<std::pair<double, double>> trajectory;
+
+    /**
+     * REQ-036 S1 — CADA publicacion de la nota, con lo que el strobe tenia en ese instante, y la
+     * HISTORIA de fases de cada parcial reconstruida desde la sonda `regressionPhaseAt`.
+     *
+     * Existe para simular la compuerta y la ventana adaptativa DESDE AFUERA sobre material real,
+     * antes de tocar produccion: con esto un test puede decir cuantas de las lecturas convergidas
+     * de hoy dejarian de serlo y con que error quedarian las que siguen.
+     *
+     * La historia es contigua por TRAMOS: se corta donde produccion corto la integracion (un
+     * `setTarget` del modo rapido, un `reset`, un hueco, o una ventana en silencio, que reinicia
+     * el hilo de fase). `histSegment[p]` es el indice donde arranca el tramo vigente y
+     * `histEnd[p]` cuantas fases hay hasta esta publicacion; la ventana de produccion en ese
+     * instante es `history[p][histEnd − count, histEnd)`.
+     */
+    struct Publication {
+        double sec = 0.0;
+        int state = -1;                ///< el estado publicado
+        bool fine = false;             ///< trajo lectura fina (kSnapCents no NaN)
+        double centsAbs = NAN;         ///< la fina en Hz absolutos contra trueHz
+        double strobeC = NAN;          ///< cents contra el objetivo del strobe
+        double sigma = NAN;
+        double targetHz = NAN;
+        int used = 0;
+        int admitted = -1;
+        bool measured[kPartials] = {false, false, false, false};
+        double pCents[kPartials] = {NAN, NAN, NAN, NAN};
+        double pSigma[kPartials] = {NAN, NAN, NAN, NAN};
+        int count[kPartials] = {0, 0, 0, 0};
+        int histEnd[kPartials] = {0, 0, 0, 0};
+        int histSegment[kPartials] = {0, 0, 0, 0};
+    };
+    std::vector<Publication> publicationLog;
+    std::vector<double> history[kPartials];
 };
 
 /**
@@ -319,6 +355,10 @@ inline Outcome sweepFile(const std::string& path, const Entry& e) {
 
     const int capacity = static_cast<int>(wma::analysis::AnalysisRing::kCapacityFrames);
     int written = 0;
+    // REQ-036 S1 — la reconstruccion de la historia de fases, por parcial.
+    int lastWindows[Outcome::kPartials] = {0, 0, 0, 0};
+    int lastCount[Outcome::kPartials] = {0, 0, 0, 0};
+    int segment[Outcome::kPartials] = {0, 0, 0, 0};
     while (written < frames) {
         const int chunk = (frames - written) < capacity ? (frames - written) : capacity;
         // `readWav` devuelve SIEMPRE estereo intercalado (duplica el mono): el layout del ring.
@@ -330,6 +370,51 @@ inline Outcome sweepFile(const std::string& path, const Entry& e) {
             ++o.publications;
             o.analysed = true;
             o.state = static_cast<int>(v[wma::analysis::kSnapState]);
+            // REQ-036 S1 — el registro de ESTA publicacion, con o sin lectura fina.
+            {
+                const wma::analysis::StrobeTracker& s = analysis.strobe();
+                Outcome::Publication pub;
+                pub.sec = static_cast<double>(written) / data.sampleRate;
+                pub.state = o.state;
+                for (int i = 0; i < Outcome::kPartials; ++i) {
+                    const wma::analysis::PhaseSlopeEstimator& e = s.partialEstimator(i);
+                    const int windows = e.windowsAnalyzed();
+                    const int count = e.regressionPhaseCount();
+                    std::vector<double>& h = o.history[i];
+                    const int fresh = windows - lastWindows[i];
+                    // Un `reset`/`setTarget` deja windows en cero; una ventana en silencio corta el
+                    // hilo de fase y deja count por debajo de lo acumulado. En los dos casos el
+                    // tramo contiguo arranca de nuevo: se toman las `count` fases que hay.
+                    const int expected = std::min(lastCount[i] + fresh,
+                                                  wma::analysis::PhaseSlopeEstimator::kMaxWindows);
+                    if (windows < lastWindows[i] || fresh > count || count < expected) {
+                        segment[i] = static_cast<int>(h.size());
+                        for (int k = 0; k < count; ++k) h.push_back(e.regressionPhaseAt(k));
+                    } else {
+                        for (int k = count - fresh; k < count; ++k) h.push_back(e.regressionPhaseAt(k));
+                    }
+                    lastWindows[i] = windows;
+                    lastCount[i] = count;
+                    pub.count[i] = count;
+                    pub.histEnd[i] = static_cast<int>(h.size());
+                    pub.histSegment[i] = segment[i];
+                    pub.measured[i] = s.partialHasMeasurement(i);
+                    pub.pCents[i] = pub.measured[i] ? s.partialCents(i) : NAN;
+                    pub.pSigma[i] = pub.measured[i] ? s.partialUncertaintyCents(i) : NAN;
+                }
+                pub.used = s.partialsUsed();
+                pub.strobeC = s.cents();
+                pub.sigma = s.uncertaintyCents();
+                pub.targetHz = s.targetHz();
+                const float centsNow = v[wma::analysis::kSnapCents];
+                pub.fine = !std::isnan(centsNow);
+                if (pub.fine) {
+                    pub.centsAbs = 1200.0 * std::log2(pub.targetHz * std::pow(2.0, static_cast<double>(centsNow) / 1200.0) / e.trueHz);
+                    double fitB = NAN;
+                    pub.admitted = reconstructAdmitted(s, pub.used, pub.strobeC, &fitB);
+                }
+                o.publicationLog.push_back(pub);
+            }
             o.detectedHz = static_cast<double>(v[wma::analysis::kSnapDetectedHz]);
             o.spectralSupport = v[wma::analysis::kSnapSpectralSupport];
             if (o.state == wma::analysis::kStateConverged && o.spectralSupport == 0.0f) {
