@@ -186,7 +186,11 @@ TEST(PartialAdmission, SeUsanExactamenteLosParcialesQueTienenEnergia) {
 TEST(PartialAdmission, EnLaCuerdaMasGraveA48kLaFugaTampocoEntra) {
     constexpr int kRate48 = 48000;
     constexpr double kB0 = 30.8677;
-    for (double secs : {1.0, 2.0, 3.0}) {
+    // 1,2 s y no 1,0: a 48 kHz un segundo son 11 ventanas de 4096, y desde REQ-036 el strobe no
+    // admite un parcial sin veredicto de tendencia, que vale desde 12 (R-PITCH-62); el strobe
+    // arranca despues de la primera ventana del detector, asi que la primera lectura de B0 llega
+    // entre 1,1 y 1,2 s (medido). Lo que este test afirma —que la fuga no entra— no cambia.
+    for (double secs : {1.2, 2.0, 3.0}) {
         const int frames = static_cast<int>(kRate48 * secs);
         for (int nPart = 1; nPart <= 3; ++nPart) {
             for (double fase : kFases) {

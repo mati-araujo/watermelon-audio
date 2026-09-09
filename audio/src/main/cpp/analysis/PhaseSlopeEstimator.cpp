@@ -18,6 +18,33 @@ double slopeToHz(double slope, int sampleRate, int windowFrames) {
            / (2.0 * M_PI * static_cast<double>(windowFrames));
 }
 
+/**
+ * Regresion lineal de `y[0..n)` contra el indice: pendiente, ordenada y error estandar de la
+ * pendiente a partir de los residuos. Es la misma cuenta que siempre hizo `closeWindow()`, sacada a
+ * una funcion porque REQ-036 la corre tres veces por cierre (la ventana entera y sus dos mitades).
+ * @return false si no hay dispersion en x (n < 2).
+ */
+bool regressPhaseLine(const double* y, int n, double* slope, double* intercept, double* slopeStdErr) {
+    if (n < 2) return false;
+    const double dn = static_cast<double>(n);
+    double sumX = 0.0, sumY = 0.0, sumXX = 0.0, sumXY = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double x = static_cast<double>(i);
+        sumX += x; sumY += y[i]; sumXX += x * x; sumXY += x * y[i];
+    }
+    const double sxx = sumXX - sumX * sumX / dn;
+    if (sxx <= 0.0) return false;
+    *slope = (sumXY - sumX * sumY / dn) / sxx;
+    *intercept = (sumY - *slope * sumX) / dn;
+    double sse = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double r = y[i] - (*intercept + *slope * static_cast<double>(i));
+        sse += r * r;
+    }
+    *slopeStdErr = (n > 2) ? std::sqrt(sse / (dn - 2.0) / sxx) : 0.0;
+    return true;
+}
+
 }  // namespace
 
 void PhaseSlopeEstimator::prepare(int sampleRate) {
@@ -61,6 +88,9 @@ void PhaseSlopeEstimator::reset() {
     mHavePrevPhase = false;
     mCents = 0.0;
     mUncertaintyCents = 0.0;
+    mTrendScore = 0.0;
+    mTrendDeltaCents = 0.0;
+    mTrendEvaluable = false;
     mBinToRmsRatio = 0.0;
     mWrappedPhase = 0.0;
     mHasSignal = false;
@@ -174,39 +204,29 @@ void PhaseSlopeEstimator::closeWindow() {
         mPhases[static_cast<size_t>(kMaxWindows - 1)] = mUnwrapped;
     }
 
+    regressOverWindow();
+}
+
+void PhaseSlopeEstimator::regressOverWindow() {
     if (mCount < kMinWindows) {
         mHasMeasurement = false;
+        mTrendEvaluable = false;
         return;
     }
 
     // --- regresion lineal: fase contra indice de ventana ---------------------
     const int n = mCount;
-    const double dn = static_cast<double>(n);
-    double sumX = 0.0, sumY = 0.0, sumXX = 0.0, sumXY = 0.0;
-    for (int i = 0; i < n; ++i) {
-        const double x = static_cast<double>(i);
-        const double y = mPhases[static_cast<size_t>(i)];
-        sumX += x; sumY += y; sumXX += x * x; sumXY += x * y;
-    }
-    const double sxx = sumXX - sumX * sumX / dn;
-    if (sxx <= 0.0) {
+    double slope = 0.0, intercept = 0.0, slopeStdErr = 0.0;
+    if (!regressPhaseLine(mPhases.data(), n, &slope, &intercept, &slopeStdErr)) {
         mHasMeasurement = false;
+        mTrendEvaluable = false;
         return;
     }
-    const double slope = (sumXY - sumX * sumY / dn) / sxx;
-    const double intercept = (sumY - slope * sumX) / dn;
 
     const double deltaHz = slopeToHz(slope, mSampleRate, kWindowFrames);
     mCents = 1200.0 * std::log2((mTargetHz + deltaHz) / mTargetHz);
 
     // --- incertidumbre: error estandar de la pendiente, en cents -------------
-    double sse = 0.0;
-    for (int i = 0; i < n; ++i) {
-        const double r = mPhases[static_cast<size_t>(i)]
-                       - (intercept + slope * static_cast<double>(i));
-        sse += r * r;
-    }
-    const double slopeStdErr = (n > 2) ? std::sqrt(sse / (dn - 2.0) / sxx) : 0.0;
     // Los cents son casi lineales en Δf alrededor del objetivo, asi que la
     // conversion del error usa la misma derivada.
     const double centsPerHz = 1200.0 / (std::log(2.0) * mTargetHz);
@@ -214,6 +234,35 @@ void PhaseSlopeEstimator::closeWindow() {
         std::abs(slopeToHz(slopeStdErr, mSampleRate, kWindowFrames)) * centsPerHz;
 
     mHasMeasurement = true;
+
+    // --- REQ-036: la tendencia entre las dos mitades (ver el header) ---------
+    //
+    // Va DESPUES de la medicion y no la toca: el estimador publica cents, σ y ademas T y Δ;
+    // quien no admite es el strobe. Aritmetica fija sobre ≤ 48 fases, sin asignar.
+    mTrendEvaluable = false;
+    if (n >= kMinWindowsForTrendVerdict) {
+        const int mid = n / 2;
+        double s1 = 0.0, i1 = 0.0, e1 = 0.0, s2 = 0.0, i2 = 0.0, e2 = 0.0;
+        if (regressPhaseLine(mPhases.data(), mid, &s1, &i1, &e1) &&
+            regressPhaseLine(mPhases.data() + mid, n - mid, &s2, &i2, &e2)) {
+            const double diff = s2 - s1;
+            const double se = std::sqrt(e1 * e1 + e2 * e2);
+            mTrendScore = se > 0.0 ? diff / se : (diff == 0.0 ? 0.0 : 1e300);
+            mTrendDeltaCents = slopeToHz(diff, mSampleRate, kWindowFrames) * centsPerHz;
+            mTrendEvaluable = true;
+        }
+    }
+}
+
+void PhaseSlopeEstimator::restartKeepingNewestHalf() {
+    if (mCount <= 0) return;
+    const int keep = mCount - mCount / 2;
+    const int from = mCount - keep;
+    for (int i = 0; i < keep; ++i) {
+        mPhases[static_cast<size_t>(i)] = mPhases[static_cast<size_t>(from + i)];
+    }
+    mCount = keep;
+    regressOverWindow();
 }
 
 }  // namespace wma::analysis

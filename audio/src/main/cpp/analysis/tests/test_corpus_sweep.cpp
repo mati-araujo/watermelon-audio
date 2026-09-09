@@ -42,7 +42,9 @@ using corpus::Outcome;
 using corpus::State;
 
 constexpr int kRate = 44100;      // NO 48000, por la razon de siempre
-constexpr int kFrames = 52920;    // 1,2 s: alcanza para que la integracion converja
+constexpr int kFrames = 88200;    // 2,0 s: la primera lectura del strobe llega con 12 ventanas de
+                                  // 4096 mas la del detector (~1,3 s a 44,1 k) desde REQ-036; 1,2 s
+                                  // alcanzaba antes, cuando bastaban 4
 
 /// Presupuesto del barrido sintetico. Es estricto A PROPOSITO: la señal es
 /// armonica y sin ruido, asi que cualquier desvio real seria del motor o del

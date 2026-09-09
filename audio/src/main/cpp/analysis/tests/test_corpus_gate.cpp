@@ -195,7 +195,15 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
      * de > 1 s— y es un REQ aparte si alguna vez importa. La GRUESA no se toca aca (REQ-033/034):
      * bajo-pua_A1 lee −4,66 c y acero_A2 −4,59, y su presupuesto sigue en 6.
      */
-    constexpr double kRecordedFineBudgetCents = 1.0;
+    /**
+     * REQ-036 (2026-09-09): con la admision por tendencia y la ventana adaptativa (R-PITCH-62/63),
+     * sobre los 41 con lectura: **39 CONVERGIDAS al final** (venian 33), |error| maximo **0,30 c**
+     * (bajo-dedos_D2, una nota que deriva de +2,7 a +0,25 c y a la que el oraculo le mide la media
+     * de 2 a 5 s; venia 0,73) y una sola MIDIENDO dentro del presupuesto (bajo-pua_D2, +0,26 c,
+     * σ 0,17). El presupuesto pasa de 1 c a **0,4 c** sobre toda lectura mostrada: 1,3× sobre lo
+     * medido, la misma holgura que REQ-035 dejo (0,73 → 1).
+     */
+    constexpr double kRecordedFineBudgetCents = 0.4;
     constexpr double kRecordedCoarseBudgetCents = 6.0;
 
     const auto& results = sweptCorpus();
@@ -266,9 +274,13 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
      *    parcial, −16 dB), y el ajuste se niega a converger: σ 4,88. Es REQ-027 haciendo su trabajo;
      *    "acertar" ese sample pediria doblar el modelo fisico, y eso no entra (AC-035.6).
      */
+    /**
+     * REQ-036 (2026-09-09) saco a `bajo-acustico_G2` de esta lista, en ROJO como corresponde: con la
+     * ventana adaptativa el glide de −27,7 c ya no arrastra la regresion y la nota converge a
+     * +0,0005 c a 2,04 s. Queda `guitarra-acero_A2`, cuyo mecanismo no es el ataque.
+     */
     struct KnownOutsideFineBudget { const char* name; const char* mechanism; };
-    constexpr std::array<KnownOutsideFineBudget, 2> kKnownOutsideFineBudget{{
-        {"bajo-acustico_G2.wav", "glide de ataque de -27,7 c dentro de la ventana de regresion"},
+    constexpr std::array<KnownOutsideFineBudget, 1> kKnownOutsideFineBudget{{
         {"guitarra-acero_A2.wav", "parcial 4 real a -16 c de la serie estirada: el ajuste no converge"},
     }};
     auto knownOutside = [&](const std::string& name) -> const KnownOutsideFineBudget* {
@@ -755,6 +767,20 @@ TEST(CorpusRobustness, TheAttackTrajectoryAndWhatTheGateWouldChange) {
         std::printf("  %5.1f %6.2f %5d | %7d %7.2f %7d %7d %7d %7d\n", tt, d, minW, conv, maxErr, blind, lost, gained, restarts);
     }
     std::printf("\n");
+
+    /**
+     * AC-036.6 — EL TRINQUETE DEL CORPUS, sobre lo que PRODUCCION publica (la columna "hoy" de arriba):
+     * al menos las 33 convergidas que habia antes de REQ-036, y el error maximo entre ellas por
+     * debajo del 0,73 c de entonces. Medido al cerrar S2 (2026-09-09): 39 y 0,30. Los dos numeros
+     * de la linea de base son los de la spec, no se re-miden aca: son lo que este cambio prometio no
+     * empeorar.
+     */
+    constexpr int kConvergedBeforeReq036 = 33;
+    constexpr double kMaxErrorBeforeReq036 = 0.73;
+    EXPECT_GE(convergedToday, kConvergedBeforeReq036)
+        << "la admision por tendencia bajo las convergidas del corpus: " << convergedToday << " de " << published;
+    EXPECT_LT(maxToday, kMaxErrorBeforeReq036)
+        << "el error maximo de las convergidas no bajo: " << maxToday << " c";
 
     EXPECT_EQ(mismatches, 0) << "la historia de fases reconstruida no reproduce la ventana de produccion";
     EXPECT_LT(worstFidelity, 1e-6) << "el simulador no reproduce la lectura de produccion sin compuerta";

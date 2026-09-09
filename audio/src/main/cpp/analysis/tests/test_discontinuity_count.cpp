@@ -262,8 +262,11 @@ TEST(DiscontinuityCount, TheLiveMarkStillComesBackDownWhileTheCounterStaysUp) {
     const double before = b.discontinuityCount();
 
     ASSERT_TRUE(b.sustainedSeam(2)) << "premisa rota: no se pudo provocar el hueco";
-    // Recuperacion larga: el estimador tiene que volver a tener medicion propia.
-    ASSERT_TRUE(b.feedClean(40));
+    // Recuperacion larga: el estimador tiene que volver a tener medicion propia. 80 vueltas y no
+    // 40 desde REQ-036: tras el reinicio, la primera medicion propia llega con 12 ventanas de 4096
+    // (24 vueltas de 2048) mas lo que el detector tarda en volver a dar control, y 40 se quedaba
+    // corto por poco. El flag sigue teniendo que BAJAR: lo que se afirma no cambia.
+    ASSERT_TRUE(b.feedClean(80));
 
     EXPECT_EQ(b.liveMark(), 0.0)
         << "el flag vivo se quedo arriba tras la recuperacion: se volvio un latch, "

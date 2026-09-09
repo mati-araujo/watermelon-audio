@@ -66,6 +66,13 @@ using wma::analysis::kSnapUncertainty;
 constexpr float kSentinel = -37.317f;
 
 constexpr int kBlockFrames = 256;
+/**
+ * Bloques de calentamiento para que el afinador VIVO tenga una lectura fina. 256 (1,49 s a 44,1 k,
+ * 2,05 s a 32 k) y no 160 (0,93 s): desde REQ-036 el strobe no admite un parcial sin veredicto de
+ * tendencia, que vale desde 12 ventanas de 4096 (1,11 s a 44,1 k) mas la primera del detector. Con
+ * 160 la espera de medicion vencia; lo que cada test afirma sobre la lectura no cambio.
+ */
+constexpr int kWarmupBlocks = 256;
 
 /// El rate "raro" con el que se arranca, y el que llega despues en caliente.
 /// Ninguno es 48000; ver la nota de arriba.
@@ -505,7 +512,7 @@ TEST_F(TunerApiTest, WithATargetTheSnapshotPublishesRealCents) {
     // Un tono un cent por encima del objetivo. 1 cent es DIEZ VECES el presupuesto,
     // asi que un estimador que devolviera 0 no pasaria.
     const double detuned = target * std::pow(2.0, 1.0 / 1200.0);
-    feedTone(mWma, detuned, kFirstRate, 160, kBlockFrames);
+    feedTone(mWma, detuned, kFirstRate, kWarmupBlocks, kBlockFrames);
 
     auto buf = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, buf))
@@ -560,7 +567,7 @@ TEST_F(TunerApiTest, ChangingTheTargetRestartsTheIntegration) {
     ASSERT_TRUE(wma_tuner_set_target(mWma, 110.0f));
     ASSERT_TRUE(wma_tuner_start(mWma));
 
-    feedTone(mWma, 110.0 * std::pow(2.0, 1.0 / 1200.0), kFirstRate, 160, kBlockFrames);
+    feedTone(mWma, 110.0 * std::pow(2.0, 1.0 / 1200.0), kFirstRate, kWarmupBlocks, kBlockFrames);
     auto first = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, first));
     ASSERT_NEAR(first[kSnapCents], 1.0f, 0.1f);
@@ -568,7 +575,7 @@ TEST_F(TunerApiTest, ChangingTheTargetRestartsTheIntegration) {
     // Otra cuerda: A2 -> D3, y el tono nuevo esta 2 cents por encima de ESE objetivo.
     const double second = 146.832;
     ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(second)));
-    feedTone(mWma, second * std::pow(2.0, 2.0 / 1200.0), kFirstRate, 160, kBlockFrames);
+    feedTone(mWma, second * std::pow(2.0, 2.0 / 1200.0), kFirstRate, kWarmupBlocks, kBlockFrames);
 
     auto buf = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, buf));
@@ -701,7 +708,7 @@ TEST_F(TunerApiTest, TheEstimatorIsPreparedWithTheMeasuredRateNotWithAConstant) 
     ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(target)));
     ASSERT_TRUE(wma_tuner_start(mWma));
 
-    feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kSecondRate, 160, kBlockFrames);
+    feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kSecondRate, kWarmupBlocks, kBlockFrames);
 
     auto buf = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, buf));
@@ -958,7 +965,7 @@ TEST_F(TunerApiTest, SwitchingSourceThrowsAwayEverythingThatWasIntegrating) {
     // `feedTone` se autorregula contra `framesAnalyzed`: alimentar mas rapido que
     // el tiempo real le daria al estimador una señal CON HUECOS, porque el ring
     // pisa lo viejo por diseño.
-    feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kFirstRate, 160, kBlockFrames);
+    feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kFirstRate, kWarmupBlocks, kBlockFrames);
     auto before = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, before))
         << "no llego a producir una medicion antes de conmutar: el test no puede "
@@ -1284,7 +1291,7 @@ TEST_F(TunerApiTest, AnOfflineAnalysisDoesNotMoveTheLiveReading) {
     ASSERT_TRUE(wma_tuner_start(mWma));
 
     // El afinador vivo, midiendo un tono a +1 cent y ya convergido.
-    feedTone(mWma, detunedBy(1.0), kFirstRate, 160, kBlockFrames);
+    feedTone(mWma, detunedBy(1.0), kFirstRate, kWarmupBlocks, kBlockFrames);
     auto before = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, before));
     ASSERT_NEAR(before[kSnapCents], 1.0f, kOfflineBudgetCents)
@@ -1347,7 +1354,7 @@ TEST_F(TunerApiTest, TheLiveTunerDoesNotContaminateTheOfflineResult) {
     negotiateCaptureRate(mWma, kFirstRate);
     ASSERT_TRUE(wma_tuner_set_target(mWma, target));
     ASSERT_TRUE(wma_tuner_start(mWma));
-    feedTone(mWma, detunedBy(1.0), kFirstRate, 160, kBlockFrames);
+    feedTone(mWma, detunedBy(1.0), kFirstRate, kWarmupBlocks, kBlockFrames);
     auto live = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, live))
         << "premisa rota: el afinador vivo no llego a medir, asi que este test no "

@@ -76,6 +76,7 @@ struct WindowSample {
     double cents = NAN, sigma = NAN;
     int used = 0;
     int admitted = -1;             ///< reconstruido contra `fitStretchedSeries` (REQ-035)
+    int measuredMask = 0;          ///< los parciales con medicion: la base del simulador externo
     bool measured[kPartials] = {};
     double pCents[kPartials] = {NAN, NAN, NAN, NAN};
     double pSigma[kPartials] = {NAN, NAN, NAN, NAN};
@@ -89,6 +90,7 @@ struct Trajectory {
     int rate = kRate;
     double targetHz = kF0;
     double settleSec = 0.0;       ///< desde cuando la altura esta a < 0,1 c de la final
+    int restarts = 0;             ///< `windowRestarts()` del strobe al final (R-PITCH-63)
     std::vector<WindowSample> samples;
 };
 
@@ -121,6 +123,7 @@ Trajectory runTrajectory(const std::string& label, const std::vector<float>& sig
         s.used = t.partialsUsed();
         for (int p = 0; p < kPartials; ++p) {
             s.measured[p] = t.partialHasMeasurement(p);
+            if (s.measured[p]) s.measuredMask |= 1 << p;
             s.pCents[p] = s.measured[p] ? t.partialCents(p) : NAN;
             s.pSigma[p] = s.measured[p] ? t.partialUncertaintyCents(p) : NAN;
             s.trend[p] = trend::trendOfPartial(t, p, rate);
@@ -132,6 +135,7 @@ Trajectory runTrajectory(const std::string& label, const std::vector<float>& sig
         s.admitted = t.hasMeasurement() ? corpus::reconstructAdmitted(t, s.used, s.cents, &fitB) : 0;
         r.samples.push_back(s);
     }
+    r.restarts = t.windowRestarts();
     return r;
 }
 
@@ -214,10 +218,11 @@ const std::vector<Trajectory>& vibratoRuns() {
                                            kRate, frames);
             char label[48];
             std::snprintf(label, sizeof label, "vibrato ±%.0f c @ %.0f Hz", v.depthCents, v.rateHz);
-            const double d = v.depthCents, f = v.rateHz;
-            runs.push_back(runTrajectory(
-                label, sig, kRate, kF0,
-                [d, f](double t) { return kProbeCents + d * std::sin(2.0 * M_PI * f * t); }, 0.0));
+            // El control externo va en la MEDIA, no en la altura instantanea: con ±5 c alrededor de
+            // +1 c, media onda tiene el signo contrario a la lectura y el arbitraje por signo de
+            // REQ-014 descarta a los cuatro parciales — un artefacto del test. La gruesa de
+            // produccion promedia su propia ventana; aca se le da la media exacta.
+            runs.push_back(runTrajectory(label, sig, kRate, kF0, [](double) { return kProbeCents; }, 0.0));
         }
         return runs;
     }();
@@ -281,75 +286,14 @@ TEST(AttackInWindow, WithoutAGlideTheSameStringMeetsTheContract) {
         EXPECT_NEAR(last.cents, kProbeCents, kToleranceCents) << r.label << ": fuera del contrato";
         if (last.converged) ++converged;
         worst = std::max(worst, std::fabs(last.cents - kProbeCents));
+        // R-PITCH-63: sobre una nota estable la ventana adaptativa NO se reinicia. Sin esto un
+        // reinicio de mas que converge igual pasaria inadvertido.
+        EXPECT_EQ(r.restarts, 0) << r.label << ": la ventana se reinicio " << r.restarts << " veces sobre una nota estable";
     }
     std::printf("\n  [REQ-036] control estable: %d de %zu convergidas, peor error %.4f c\n",
                 converged, stableRuns().size(), worst);
 }
 
-// ---------------------------------------------------------------------------
-// AC-036.1 — el error en CONVERGIDA y si σ lo vio
-// ---------------------------------------------------------------------------
-struct CaseSummary {
-    double settleSec = 0.0;
-    double convSec = NAN, convErr = NAN, convSigma = NAN;   ///< primera CONVERGIDA
-    bool blindAtConv = false;                              ///< σ ≤ 0,1 con |error| > 0,1 ahi
-    int blindWindows = 0;                                  ///< ventanas CONVERGIDAS con |error| > 0,1
-    double errAt3s = NAN; bool convAt3s = false;           ///< a los 3 s del asentamiento
-};
-
-CaseSummary summarize(const Trajectory& r) {
-    CaseSummary c;
-    c.settleSec = r.settleSec;
-    const double at3 = r.settleSec + 3.0;
-    for (const WindowSample& s : r.samples) {
-        const double err = s.cents - kProbeCents;
-        if (s.converged && std::isnan(c.convSec)) {
-            c.convSec = s.sec; c.convErr = err; c.convSigma = s.sigma;
-            c.blindAtConv = std::fabs(err) > kToleranceCents;
-        }
-        if (s.converged && std::fabs(err) > kToleranceCents) ++c.blindWindows;
-        if (std::isnan(c.errAt3s) && s.sec >= at3) { c.errAt3s = err; c.convAt3s = s.converged; }
-    }
-    return c;
-}
-
-TEST(AttackInWindow, AGlideInsideTheWindowLeavesAConvergedReadingWrongAndSigmaBlind) {
-    std::printf("\n  [REQ-036] AC-036.1 — barrido de glides sobre D3 a 48 k (ventana de %d × %d = %.2f s), "
-                "alimentado %.0f s; asentada = a < %.1f c de la final\n",
-                PhaseSlopeEstimator::kMaxWindows, PhaseSlopeEstimator::kWindowFrames,
-                PhaseSlopeEstimator::kMaxWindows * static_cast<double>(PhaseSlopeEstimator::kWindowFrames) / kRate,
-                kFeedSeconds, kToleranceCents);
-    std::printf("  %-26s %7s | %7s %8s %8s %5s | %6s | %8s %5s\n", "caso", "asent_s",
-                "conv_s", "err_conv", "sig_conv", "ciega", "vent_c", "err@+3s", "conv3");
-    int blindCases = 0, blindWindows = 0, converged = 0;
-    for (const Trajectory& r : glideRuns()) {
-        const CaseSummary c = summarize(r);
-        std::printf("  %-26s %7.2f | %7.2f %+8.3f %8.4f %5s | %6d | %+8.3f %5s\n", r.label.c_str(),
-                    c.settleSec, c.convSec, c.convErr, c.convSigma, c.blindAtConv ? "SI" : "no",
-                    c.blindWindows, c.errAt3s, c.convAt3s ? "si" : "NO");
-        if (!std::isnan(c.convSec)) ++converged;
-        if (c.blindAtConv) ++blindCases;
-        blindWindows += c.blindWindows;
-    }
-    std::printf("  resumen: %d de %zu casos convergen; σ CIEGA en la primera CONVERGIDA en %d; "
-                "ventanas convergidas con |error| > %.1f c: %d\n\n",
-                converged, glideRuns().size(), blindCases, kToleranceCents, blindWindows);
-    RecordProperty("casos_sigma_ciega", blindCases);
-    RecordProperty("ventanas_sigma_ciega", blindWindows);
-    // Que el instrumento mide: todos los casos terminan convergidos (la nota se asienta y 12 s
-    // alcanzan), y el estadistico tiene sobre que decidirse (hay ventanas ciegas que delatar).
-    EXPECT_EQ(converged, static_cast<int>(glideRuns().size()));
-    EXPECT_GT(blindWindows, 0) << "ningun glide dejo una CONVERGIDA equivocada: no hay nada que atajar";
-}
-
-// ---------------------------------------------------------------------------
-// AC-036.2 — el estadistico de tendencia, su umbral, y sus controles
-// ---------------------------------------------------------------------------
-/**
- * EL VEREDICTO DE S1. El umbral se elige donde nota estable y vibrato dan cero disparos y las
- * ventanas con σ ciega disparan en todos sus parciales admitidos; la grilla de abajo lo imprime.
- * (Valores provisionales hasta la primera corrida: la tabla los fija.)
- */
 /**
  * LA COMPUERTA SIMULADA DESDE AFUERA sobre la HISTORIA de fases de cada parcial, en dos variantes:
  *
@@ -366,11 +310,15 @@ TEST(AttackInWindow, AGlideInsideTheWindowLeavesAConvergedReadingWrongAndSigmaBl
  * AC-036.5: CONVERGIDA ≤ 3 s tras el asentamiento) y lo que decide si la ventana adaptativa hace
  * falta tambien por sintesis, no solo por el corpus.
  */
+struct SimWindow { double sec; bool converged; double cents; double sigma; };
 struct SimOutcome {
     double convSec = NAN, convErr = NAN;
     int blind = 0;           ///< ventanas CONVERGIDAS con |error| > 0,1 c
     int restarts = 0;        ///< reinicios de la ventana (solo adaptativa)
     int loneVetoes = 0;      ///< ventanas donde la regla del armonico solo dejo sin lectura
+    int fires = 0;           ///< ventanas donde algun parcial disparo (con la ventana admisible)
+    int evaluated = 0;       ///< ventanas con algun parcial evaluable
+    std::vector<SimWindow> windows;   ///< la lectura simulada, ventana a ventana
 };
 struct BlindDetail {
     double sec, err, sigma, tMin, delta, bias; int windows, used;
@@ -413,7 +361,7 @@ SimOutcome simulate(const Trajectory& r, const trend::Threshold& th, bool adapti
             bool any = false;
             int nFire = 0, nAdmitted = 0, excluded = 0;
             for (int p = 0; p < kPartials; ++p) {
-                if (s.admitted <= 0 || !(s.admitted & (1 << p))) continue;
+                if (!(s.measuredMask & (1 << p))) continue;
                 const int cnt = k + 1 - common;
                 // Un quiebre se juzga sobre una ventana que tambien se admitiria: reiniciar sobre
                 // una mas corta cascadea (medido sobre bajo-acustico_D2: tres reinicios a n = 8 en
@@ -432,16 +380,23 @@ SimOutcome simulate(const Trajectory& r, const trend::Threshold& th, bool adapti
                 const int cnt = k + 1 - common;
                 for (int p = 0; p < kPartials; ++p) start[p] = k + 1 - cnt / 2;
                 ++o.restarts;
+                ++o.fires;
+                o.windows.push_back({s.sec, false, NAN, NAN});
                 continue;   // la ventana acaba de quebrarse: sin lectura en este cierre
             }
         }
+        bool anyEvaluable = false, anyFire = false;
         for (int p = 0; p < kPartials; ++p) {
-            if (s.admitted <= 0 || !(s.admitted & (1 << p))) continue;   // lo que produccion admitio
+            // La base es lo MEDIDO, no lo que produccion admitio: sobre sintesis las otras reglas de
+            // admision (energia, dominio, signo) dejan pasar a los cuatro, y despues de S2 produccion
+            // no admite durante el transitorio — el simulador tiene que seguir midiendo "sin compuerta".
+            if (!(s.measuredMask & (1 << p))) continue;
             if (excludedMask & (1 << p)) { bd.why[p] = 'F'; continue; }  // disparo solo: afuera, sin reiniciar
             start[p] = std::max(start[p], k + 1 - PhaseSlopeEstimator::kMaxWindows);
             const int cnt = k + 1 - start[p];
             const double* w = hist[p].data() + start[p];
             const trend::Trend tr = trend::trendOver(w, cnt, r.rate, r.targetHz * (p + 1));
+            if (tr.evaluable && cnt >= th.minWindows) { anyEvaluable = true; anyFire = anyFire || trend::fires(tr, th); }
             if (tr.evaluable && std::fabs(tr.tScore) < bd.tMin) { bd.tMin = std::fabs(tr.tScore); bd.delta = tr.deltaCents; bd.bias = tr.biasCents; bd.windows = cnt; }
             const trend::PartialReading pr = trend::readingFromSlope(trend::fitSlope(w, 0, cnt), r.rate, r.targetHz * (p + 1));
             if (!adaptive && !gate && pr.ok && cnt == s.count && worstFidelity != nullptr)
@@ -455,10 +410,13 @@ SimOutcome simulate(const Trajectory& r, const trend::Threshold& th, bool adapti
             bd.why[p] = 'A';
             pc[p] = pr.cents; ps[p] = pr.sigma; mask |= 1 << p;
         }
+        if (anyEvaluable) ++o.evaluated;
+        if (anyFire) ++o.fires;
         // La regla del armonico solo va junto con la compuerta: es parte de la admision propuesta.
         const trend::Combined g = trend::combineFrom(pc, ps, mask, gate);
         if (g.loneHarmonicVetoed) ++o.loneVetoes;
         const bool conv = g.hasMeasurement && g.sigma <= StrobeTracker::kConvergedUncertaintyCents;
+        o.windows.push_back({s.sec, conv, g.hasMeasurement ? g.cents : NAN, g.hasMeasurement ? g.sigma : NAN});
         if (conv && std::fabs(g.cents - kProbeCents) > kToleranceCents) {
             ++o.blind;
             if (details != nullptr) { bd.err = g.cents - kProbeCents; bd.sigma = g.sigma; bd.used = g.used; details->push_back(bd); }
@@ -507,39 +465,144 @@ SimOutcome simulate(const Trajectory& r, const trend::Threshold& th, bool adapti
  */
 constexpr trend::Threshold kChosen{5.0, 0.05, 12, trend::Magnitude::kDelta};
 
-/// Sobre una corrida, ?cuantas ventanas tienen ALGUN parcial admitido que dispara con `th`?
-int firingWindows(const Trajectory& r, const trend::Threshold& th, int* evaluated) {
-    int fired = 0;
-    for (const WindowSample& s : r.samples) {
-        bool any = false, anyEval = false;
-        for (int p = 0; p < kPartials; ++p) {
-            if (s.admitted <= 0 || !(s.admitted & (1 << p))) continue;
-            if (!s.trend[p].evaluable || s.trend[p].windows < th.minWindows) continue;
-            anyEval = true;
-            any = any || trend::fires(s.trend[p], th);
+// ---------------------------------------------------------------------------
+// AC-036.1 — el error en CONVERGIDA y si σ lo vio
+// ---------------------------------------------------------------------------
+struct CaseSummary {
+    double settleSec = 0.0;
+    double convSec = NAN, convErr = NAN, convSigma = NAN;   ///< primera CONVERGIDA
+    bool blindAtConv = false;                              ///< σ ≤ 0,1 con |error| > 0,1 ahi
+    int blindWindows = 0;                                  ///< ventanas CONVERGIDAS con |error| > 0,1
+    double errAt3s = NAN; bool convAt3s = false;           ///< a los 3 s del asentamiento
+};
+
+/// El resumen de una serie de lecturas (sec, convergida, cents, σ) contra la altura final.
+template <typename Windows>
+CaseSummary summarizeWindows(double settleSec, const Windows& ws) {
+    CaseSummary c;
+    c.settleSec = settleSec;
+    const double at3 = settleSec + 3.0;
+    for (const auto& s : ws) {
+        const double err = s.cents - kProbeCents;
+        if (s.converged && std::isnan(c.convSec)) {
+            c.convSec = s.sec; c.convErr = err; c.convSigma = s.sigma;
+            c.blindAtConv = std::fabs(err) > kToleranceCents;
         }
-        if (anyEval) ++*evaluated;
-        if (any) ++fired;
+        if (s.converged && std::fabs(err) > kToleranceCents) ++c.blindWindows;
+        if (std::isnan(c.errAt3s) && s.sec >= at3) { c.errAt3s = err; c.convAt3s = s.converged; }
     }
-    return fired;
+    return c;
 }
 
-/// Sobre una corrida de glide, las ventanas CIEGAS (convergida y |error| > 0,1) donde `th` ADMITE
-/// a alguno de los parciales que produccion admitio: la compuerta las dejaria pasar (con ese
-/// parcial solo, o con los que queden). Las de menos de 8 fases no se admiten y por eso no pasan.
-int blindWindowsMissed(const Trajectory& r, const trend::Threshold& th, int* blind) {
-    int missed = 0;
-    for (const WindowSample& s : r.samples) {
-        if (!s.converged || std::fabs(s.cents - kProbeCents) <= kToleranceCents) continue;
-        ++*blind;
-        bool any = false;
-        for (int p = 0; p < kPartials; ++p) {
-            if (s.admitted <= 0 || !(s.admitted & (1 << p))) continue;
-            any = any || trend::admits(s.trend[p], th);
-        }
-        if (any) ++missed;
+/// Lo que PRODUCCION publico, ventana a ventana.
+CaseSummary summarizeProduction(const Trajectory& r) { return summarizeWindows(r.settleSec, r.samples); }
+
+TEST(AttackInWindow, AGlideInsideTheWindowLeavesAConvergedReadingWrongAndSigmaBlind) {
+    std::printf("\n  [REQ-036] AC-036.1 — barrido de glides sobre D3 a 48 k (ventana de %d × %d = %.2f s), "
+                "alimentado %.0f s; asentada = a < %.1f c de la final. SIN compuerta = el estimador de ventana fija "
+                "simulado sobre la historia de fases (fiel a 3,8e-13 c); PRODUCCION = lo que el strobe publica hoy\n",
+                PhaseSlopeEstimator::kMaxWindows, PhaseSlopeEstimator::kWindowFrames,
+                PhaseSlopeEstimator::kMaxWindows * static_cast<double>(PhaseSlopeEstimator::kWindowFrames) / kRate,
+                kFeedSeconds, kToleranceCents);
+    std::printf("  %-26s %7s | %7s %8s %8s %5s %6s %8s | %7s %8s %6s %7s\n", "caso", "asent_s",
+                "conv_s", "err_conv", "sig_conv", "ciega", "vent_c", "err@+3s", "p_conv", "p_err", "p_cieg", "tras_as");
+    int blindCases = 0, blindWindows = 0, converged = 0;
+    for (const Trajectory& r : glideRuns()) {
+        const SimOutcome ungated = simulate(r, kChosen, false, false, nullptr);
+        const CaseSummary c = summarizeWindows(r.settleSec, ungated.windows);
+        const CaseSummary prod = summarizeProduction(r);
+        std::printf("  %-26s %7.2f | %7.2f %+8.3f %8.4f %5s %6d %+8.3f | %7.2f %+8.3f %6d %+7.2f\n", r.label.c_str(),
+                    c.settleSec, c.convSec, c.convErr, c.convSigma, c.blindAtConv ? "SI" : "no",
+                    c.blindWindows, c.errAt3s, prod.convSec, prod.convErr, prod.blindWindows, prod.convSec - r.settleSec);
+        if (!std::isnan(c.convSec)) ++converged;
+        if (c.blindAtConv) ++blindCases;
+        blindWindows += c.blindWindows;
     }
-    return missed;
+    std::printf("  resumen SIN compuerta: %d de %zu casos convergen; σ CIEGA en la primera CONVERGIDA en %d; "
+                "ventanas convergidas con |error| > %.1f c: %d\n\n",
+                converged, glideRuns().size(), blindCases, kToleranceCents, blindWindows);
+    RecordProperty("casos_sigma_ciega", blindCases);
+    RecordProperty("ventanas_sigma_ciega", blindWindows);
+    // Que el instrumento mide: todos los casos terminan convergidos (la nota se asienta y 12 s
+    // alcanzan), y hay ventanas ciegas que delatar: es el defecto que S2 arregla, y tiene que seguir
+    // siendo visible en el estimador de ventana fija despues del arreglo.
+    EXPECT_EQ(converged, static_cast<int>(glideRuns().size()));
+    EXPECT_GT(blindWindows, 0) << "ningun glide dejo una CONVERGIDA equivocada sin compuerta: no hay nada que atajar";
+}
+
+TEST(AttackInWindow, UnderLightVibratoTheReadingStillConvergesToTheMean) {
+    // AC-036.7: el vibrato leve es un control de S2 — lo que hoy hace, lo tiene que seguir haciendo.
+    std::printf("\n  [REQ-036] vibrato leve, lo que produccion publica:\n");
+    for (const Trajectory& r : vibratoRuns()) {
+        ASSERT_FALSE(r.samples.empty());
+        const CaseSummary c = summarizeProduction(r);
+        const WindowSample& last = r.samples.back();
+        std::printf("    %-24s primera CONVERGIDA %5.2f s (err %+6.3f) · ultima %+6.3f c σ %.4f %s\n", r.label.c_str(),
+                    c.convSec, c.convErr, last.cents - kProbeCents, last.sigma, last.converged ? "CONVERGIDA" : "midiendo");
+        EXPECT_TRUE(last.converged) << r.label << ": no converge a la media bajo vibrato leve";
+        EXPECT_NEAR(last.cents, kProbeCents, kToleranceCents) << r.label;
+        EXPECT_EQ(r.restarts, 0) << r.label << ": la ventana se reinicio bajo vibrato leve";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AC-036.4 y AC-036.5 — lo que PRODUCCION tiene que cumplir (S2). Nacieron rojos en S1.
+// ---------------------------------------------------------------------------
+TEST(AttackInWindow, AC0364_NoConvergedReadingIsWrongWhileTheAttackIsInTheWindow) {
+    int blind = 0;
+    for (const Trajectory& r : glideRuns()) {
+        for (const WindowSample& s : r.samples) {
+            if (s.converged && std::fabs(s.cents - kProbeCents) > kToleranceCents) {
+                if (blind < 10)
+                    ADD_FAILURE() << r.label << " a " << s.sec << " s: CONVERGIDA con " << s.cents - kProbeCents
+                                  << " c de error (σ " << s.sigma << ")";
+                ++blind;
+            }
+        }
+    }
+    EXPECT_EQ(blind, 0) << "ventanas CONVERGIDAS con |error| > 0,1 c sobre el barrido de glides";
+}
+
+TEST(AttackInWindow, AC0365_ConvergedAtMostThreeSecondsAfterTheGlideSettles) {
+    double worst = 0.0;
+    int restarts = 0;
+    for (const Trajectory& r : glideRuns()) {
+        const CaseSummary c = summarizeProduction(r);
+        restarts += r.restarts;
+        ASSERT_FALSE(std::isnan(c.convSec)) << r.label << ": nunca convergio en " << kFeedSeconds << " s";
+        const double latency = c.convSec - r.settleSec;
+        worst = std::max(worst, latency);
+        EXPECT_LE(latency, 3.0) << r.label << ": CONVERGIDA " << latency << " s despues del asentamiento";
+    }
+    std::printf("\n  [REQ-036] AC-036.5: peor latencia CONVERGIDA tras el asentamiento = %.2f s, %d reinicios de ventana en %zu casos\n\n",
+                worst, restarts, glideRuns().size());
+    RecordProperty("peor_latencia_ms", static_cast<int>(worst * 1000.0));
+    RecordProperty("reinicios", restarts);
+    // Y la latencia la compra el reinicio: sin ninguno, la compuerta sola tarda 3,3–3,8 s (medido en S1).
+    EXPECT_GT(restarts, 0) << "ningun glide reinicio la ventana: la ventana adaptativa no esta actuando";
+}
+
+// ---------------------------------------------------------------------------
+// AC-036.2 — el estadistico de tendencia, su umbral, y sus controles
+// ---------------------------------------------------------------------------
+/**
+ * EL VEREDICTO DE S1. El umbral se elige donde nota estable y vibrato dan cero disparos y las
+ * ventanas con σ ciega disparan en todos sus parciales admitidos; la grilla de abajo lo imprime.
+ * (Valores provisionales hasta la primera corrida: la tabla los fija.)
+ */
+/// Sobre una corrida, cuantas ventanas (de la historia, ventana fija) tienen algun parcial que
+/// dispara con `th`, y cuantas fueron evaluables.
+int firingWindows(const Trajectory& r, const trend::Threshold& th, int* evaluated) {
+    const SimOutcome o = simulate(r, th, false, true, nullptr);
+    *evaluated += o.evaluated;
+    return o.fires;
+}
+
+/// Sobre una corrida de glide, las ventanas CIEGAS del estimador de ventana fija (convergida y
+/// |error| > 0,1) que la compuerta SOLA (sin reinicio) dejaria pasar.
+int blindWindowsMissed(const Trajectory& r, const trend::Threshold& th, int* blind) {
+    *blind += simulate(r, th, false, false, nullptr).blind;
+    return simulate(r, th, false, true, nullptr).blind;
 }
 
 TEST(AttackInWindow, TheTrendStatisticFiresOnBlindGlidesAndNeverOnStableOrVibrato) {
@@ -548,8 +611,11 @@ TEST(AttackInWindow, TheTrendStatisticFiresOnBlindGlidesAndNeverOnStableOrVibrat
         double tExt = minOverPartials ? INFINITY : 0.0, dExt = minOverPartials ? INFINITY : 0.0;
         int windows = 0;
         for (const Trajectory& r : runs) {
-            for (const WindowSample& s : r.samples) {
-                if (minOverPartials && !(s.converged && std::fabs(s.cents - kProbeCents) > kToleranceCents)) continue;
+            const SimOutcome ungated = simulate(r, kChosen, false, false, nullptr);
+            for (size_t k = 0; k < r.samples.size(); ++k) {
+                const WindowSample& s = r.samples[k];
+                const SimWindow& u = ungated.windows[k];
+                if (minOverPartials && !(u.converged && std::fabs(u.cents - kProbeCents) > kToleranceCents)) continue;
                 double tW = minOverPartials ? INFINITY : 0.0, dW = minOverPartials ? INFINITY : 0.0;
                 bool any = false;
                 for (int p = 0; p < kPartials; ++p) {
@@ -578,8 +644,11 @@ TEST(AttackInWindow, TheTrendStatisticFiresOnBlindGlidesAndNeverOnStableOrVibrat
     for (const Trajectory& r : glideRuns()) {
         double tMin = INFINITY, dMin = INFINITY, tMax = 0.0, dMax = 0.0;
         int blind = 0;
-        for (const WindowSample& s : r.samples) {
-            if (!(s.converged && std::fabs(s.cents - kProbeCents) > kToleranceCents)) continue;
+        const SimOutcome ungated = simulate(r, kChosen, false, false, nullptr);
+        for (size_t k = 0; k < r.samples.size(); ++k) {
+            const WindowSample& s = r.samples[k];
+            const SimWindow& u = ungated.windows[k];
+            if (!(u.converged && std::fabs(u.cents - kProbeCents) > kToleranceCents)) continue;
             ++blind;
             for (int p = 0; p < kPartials; ++p) {
                 if (s.admitted <= 0 || !(s.admitted & (1 << p)) || !s.trend[p].evaluable) continue;
@@ -607,21 +676,7 @@ TEST(AttackInWindow, TheTrendStatisticFiresOnBlindGlidesAndNeverOnStableOrVibrat
             }
         }
     }
-    std::printf("  ventanas CIEGAS con algun parcial admitido a |T| < 5 (caso, t, n, parcial, T, Δ, error):\n");
-    shown = 0;
-    for (const Trajectory& r : glideRuns()) {
-        for (const WindowSample& s : r.samples) {
-            if (!(s.converged && std::fabs(s.cents - kProbeCents) > kToleranceCents)) continue;
-            for (int p = 0; p < kPartials; ++p) {
-                if (s.admitted <= 0 || !(s.admitted & (1 << p)) || !s.trend[p].evaluable) continue;
-                if (std::fabs(s.trend[p].tScore) < 5.0 && shown < 40) {
-                    std::printf("    %-26s t=%5.2f n=%2d p%d  T=%+7.2f  Δ=%+8.4f c  sesgo=%+8.4f c  error %+7.4f c (σ %.4f)\n", r.label.c_str(),
-                                s.sec, s.count, p + 1, s.trend[p].tScore, s.trend[p].deltaCents, s.trend[p].biasCents, s.cents - kProbeCents, s.sigma);
-                    ++shown;
-                }
-            }
-        }
-    }
+    std::printf("  (las ventanas ciegas con |T| < 5 se ven en la grilla de ventana fija: son las que pasan)\n");
 
     // --- la grilla de umbrales: falsos positivos (estable + vibrato) y ciegas perdidas ----------
     const double kTs[] = {2.0, 3.0, 4.0, 5.0, 6.0, 8.0};
@@ -685,7 +740,7 @@ TEST(AttackInWindow, TheTrendStatisticFiresOnBlindGlidesAndNeverOnStableOrVibrat
     EXPECT_GT(evaluated, 0);
     EXPECT_EQ(fp, 0) << "el estadistico dispara sobre nota estable o vibrato: apagaria al afinador sobre lo que hoy converge";
     EXPECT_EQ(restartsOnControls, 0) << "la ventana adaptativa se reinicia sobre nota estable o vibrato";
-    EXPECT_GT(blind, 0);
+    EXPECT_GT(blind, 0) << "el estimador de ventana fija ya no deja ciegas: el instrumento perdio su referencia";
     EXPECT_EQ(blindAdaptive, 0) << "bajo la compuerta con reinicio sincronizado sigue habiendo CONVERGIDAS con |error| > 0,1 c";
     EXPECT_EQ(convergedAdaptive, static_cast<int>(glideRuns().size())) << "hay casos que no convergen bajo la compuerta";
 }
@@ -804,12 +859,12 @@ TEST(AttackInWindow, TheGateSimulatedFromOutsideWithAndWithoutTheAdaptiveWindow)
     std::printf("\n  [REQ-036] la compuerta simulada (|T| > %.1f, |Δ| > %.2f c, desde %d ventanas) sobre el barrido: "
                 "sola, y con ventana adaptativa SINCRONIZADA\n", kChosen.t, kChosen.deltaCents, kChosen.minWindows);
     std::printf("  %-26s %7s | %7s %8s %5s | %7s %8s %7s %5s | %7s %8s %7s %5s %4s %4s\n", "caso", "asent_s",
-                "hoy_s", "hoy_err", "ciega", "gate_s", "gate_err", "tras_as", "ciega", "adap_s", "adap_err", "tras_as", "ciega", "rein", "veto");
+                "fija_s", "fija_err", "ciega", "gate_s", "gate_err", "tras_as", "ciega", "adap_s", "adap_err", "tras_as", "ciega", "rein", "veto");
     double fidelity = 0.0;
     int gateBlind = 0, gateOver = 0, adapBlind = 0, adapOver = 0, gateNever = 0, adapNever = 0;
     double gateWorst = 0.0, adapWorst = 0.0;
     for (const Trajectory& r : glideRuns()) {
-        const SimOutcome today = simulate(r, kChosen, false, false, &fidelity);
+        const SimOutcome today = simulate(r, kChosen, false, false, &fidelity);   // ventana fija, sin compuerta
         const SimOutcome gate = simulate(r, kChosen, false, true, nullptr);
         const SimOutcome adap = simulate(r, kChosen, true, true, nullptr, nullptr, true);
         const double gl = gate.convSec - r.settleSec, al = adap.convSec - r.settleSec;

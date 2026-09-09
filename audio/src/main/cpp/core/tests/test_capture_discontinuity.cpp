@@ -454,22 +454,35 @@ TEST(CaptureDiscontinuity, HealthyCaptureStillConverges) {
  * para que ese limite no se descubra por sorpresa — y para que el dia que un
  * backend nuevo entre sin reportar, se sepa exactamente que se pierde.
  */
+/**
+ * 🔴 ACTUALIZADO POR REQ-036 (2026-09-09), en la direccion BUENA que este test pedia averiguar.
+ *
+ * Decia: "sin aviso, el motor NO tendria como enterarse" y congelaba una lectura CONVERGIDA y
+ * equivocada. Ahora el motor SI se entera por otra via, y es esta: un hueco de captura deja la
+ * fase de cada parcial fuera de una recta (R-PITCH-62: las dos mitades de la ventana discrepan)
+ * y a los cuatro parciales en desacuerdo entre si; con la admision por tendencia, el reinicio de la
+ * ventana (R-PITCH-63) y la regla del sobreviviente contradicho, no queda nada que publicar:
+ * `MEASURING`, cents NaN. No es robustez —la lectura no se corrige— sino HONESTIDAD: el limite de
+ * S3 sigue siendo que sin aviso no hay recuperacion, pero ya no se publica una mentira mientras
+ * tanto. El trinquete se conserva en su forma nueva: si algun dia vuelve a salir CONVERGIDA y
+ * fuera de presupuesto, esto se pone rojo.
+ */
 TEST(CaptureDiscontinuity, NobodyReportedItSoNobodyCanKnow) {
     const Lectura r = correr(Falla::HUECO, 4, /*avisa=*/false);
     ASSERT_TRUE(r.hubo) << "no se publico snapshot";
     ASSERT_EQ(r.dropped, 0.0)
         << "el ring del afinador no puede haber pisado nada: el hueco es de CAPTURA";
 
+    // Sin aviso no hay recuperacion: la lectura, si la hay, no puede estar dentro de presupuesto.
     const double error = std::fabs(r.cents - kRealCents);
-    EXPECT_GT(error, kBudgetCents)
-        << "un hueco de captura NO reportado dejo de producir una lectura fuera de "
-           "presupuesto (error " << error << " cents).\n"
-        << "  Si el motor se volvio robusto a esto, es una BUENA noticia y este trinquete hay "
-           "que actualizarlo — no borrarlo. Si no, dejo de reproducir el limite que declara.";
-    EXPECT_EQ(r.estado, kStateConverged)
-        << "sin aviso, el motor NO tendria como enterarse — y sin embargo dejo de declarar "
-           "convergida la lectura. Algo lo esta detectando por otra via: averiguar cual antes "
-           "de tocar este test, porque cambiaria el alcance de S3.";
+    EXPECT_TRUE(std::isnan(r.cents) || error > kBudgetCents)
+        << "un hueco de captura NO reportado produjo una lectura DENTRO de presupuesto (error "
+        << error << " cents). Si el motor se volvio robusto a esto, es una BUENA noticia y este "
+           "trinquete hay que actualizarlo — no borrarlo.";
+    // Y lo que REQ-036 compro: esa lectura no se declara convergida.
+    EXPECT_NE(r.estado, kStateConverged)
+        << "sin aviso, el motor volvio a declarar CONVERGIDA una lectura sobre audio con hueco "
+           "(cents " << r.cents << "): la admision por tendencia (R-PITCH-62) dejo de verlo";
 }
 
 // ===========================================================================
