@@ -181,8 +181,77 @@ public:
     /// para saber que la integracion avanzo, en vez de dormir y suponer.
     int windowsAnalyzed() const noexcept { return mWindowsTotal; }
 
+    /**
+     * REQ-036 — LA FASE QUE NO ES UNA RECTA NO SE ADMITE COMO MEDICION (R-PITCH-62).
+     *
+     * Un glide de ataque dentro de la ventana deja la fase como un palo de hockey, y una recta
+     * ajustada a un palo de hockey deja residuos CHICOS: `uncertaintyCents()` sale de esos
+     * residuos, asi que es CIEGA al glide — medido en S1: sobre 24 glides sinteticos la lectura
+     * salia CONVERGIDA a 0,34 s con σ ≤ 0,0004 y hasta −13,6 c de error; sobre el corpus, hasta
+     * 0,73 c con σ 0,054. Y no lo ve la σ del ajuste entre parciales tampoco: un glide sesga a los
+     * cuatro por igual.
+     *
+     * Lo que SI lo ve es la TENDENCIA: las dos mitades de la ventana tienen pendientes distintas.
+     * En cada cierre se regresan por separado y se publican dos numeros:
+     *   · `phaseTrendScore()`      T = (b₂ − b₁) / √(se₁² + se₂²) — la significancia contra el
+     *                              ruido de la propia ventana;
+     *   · `phaseTrendDeltaCents()` Δ = (b₂ − b₁) en cents — la magnitud. Hace falta ademas de T
+     *                              porque sobre señal limpia T SATURA (la discrepancia y su error
+     *                              escalan juntos): una cola de 0,001 c da el mismo T que una de 1 c.
+     * El estimador solo MIDE; quien decide que hacer con eso es el strobe (`StrobeTracker`), con
+     * sus umbrales, igual que con el piso de energia de REQ-027.
+     *
+     * 🔴 EL VEREDICTO VALE DESDE 12 VENTANAS, NO DESDE 8 (que es lo que dos mitades con residuos
+     * necesitan). En las cuerdas mas graves a 44,1 kHz (B0, E1) el rizado de la imagen negativa
+     * deja a las mitades de una ventana corta con pendientes distintas sobre una nota ESTABLE
+     * (|T| hasta 4,2 con |Δ| 0,33 c en n = 8–11, 3,57 con 0,14 c en n = 12, 1,49 con 0,09 desde 16)
+     * con la lectura correcta a +0,007 c. Con menos de 12 fases `phaseTrendEvaluable()` es false y
+     * el strobe no admite el parcial: la primera CONVERGIDA posible pasa de 4 ventanas (0,34 s) a 12
+     * (1,02 s a 48 k, 1,11 a 44,1). Con 16 seria mas seguro sobre sintesis, pero las notas cortas
+     * del ukelele (1,49–1,81 s) dejan de converger: medido sobre el corpus, 30 contra 35.
+     */
+    static constexpr int kMinWindowsForTrendVerdict = 12;
+
+    bool phaseTrendEvaluable() const noexcept { return mTrendEvaluable; }
+    double phaseTrendScore() const noexcept { return mTrendScore; }
+    double phaseTrendDeltaCents() const noexcept { return mTrendDeltaCents; }
+
+    /**
+     * REQ-036 — LA VENTANA ADAPTATIVA (R-PITCH-63): reinicia la integracion en el punto de quiebre.
+     *
+     * Descarta la mitad VIEJA de las fases y sigue con la nueva, sin tocar el Goertzel ni la fase
+     * acumulada: la señal es la misma, lo que cambia es desde donde se la regresa. La lectura y la
+     * tendencia se recalculan sobre lo que queda.
+     *
+     * 🔴 POR QUE NO ALCANZA CON NO ADMITIR. Mientras el glide esta en la ventana esta en la primera
+     * mitad, asi que una compuerta que solo excluye tarda hasta que el glide SALE de la ventana
+     * entera: medido, 3,3–3,8 s despues de que la nota se asienta, contra los 3 s del AC — y sobre
+     * el corpus deja 16–21 lecturas convergidas de 33. Reiniciando en el quiebre: ≤ 1,42 s, y 35.
+     */
+    void restartKeepingNewestHalf();
+
+    /**
+     * REQ-036 S1 — SONDA DE SOLO LECTURA sobre la ventana de regresion: cuantas fases tiene hoy
+     * (`regressionPhaseCount()`, hasta `kMaxWindows`) y la fase desenvuelta de la ventana `i`
+     * (`regressionPhaseAt(i)`, la mas vieja en 0). Es EXACTAMENTE lo que la regresion de
+     * `closeWindow()` acaba de ajustar.
+     *
+     * Existe porque σ es ciega a un glide que sesga a todos los parciales por igual: los residuos
+     * de una recta ajustada a un palo de hockey son chicos. Para elegir el estadistico de
+     * TENDENCIA que lo delate (y su umbral, con nota estable y vibrato como controles) el test
+     * tiene que poder leer las fases que el estimador ya almacena, no reconstruirlas con un
+     * segundo Goertzel que seria otra fuente de verdad. Produccion no la llama: esta declarada
+     * `sonda-de-tests` en `scripts/mechanism-callers-baseline.txt`. S2 mueve el estadistico
+     * adentro de `closeWindow()`.
+     */
+    int regressionPhaseCount() const noexcept { return mCount; }
+    double regressionPhaseAt(int i) const noexcept { return mPhases[static_cast<size_t>(i)]; }
+
 private:
     void closeWindow();
+    /// La regresion y la tendencia sobre `mPhases[0, mCount)`. La llaman `closeWindow()` y
+    /// `restartKeepingNewestHalf()`: es aritmetica fija sobre ≤ 48 fases, sin asignar.
+    void regressOverWindow();
 
     int mSampleRate{0};
     double mTargetHz{0.0};
@@ -238,6 +307,10 @@ private:
 
     double mCents{0.0};
     double mUncertaintyCents{0.0};
+    /// REQ-036: la tendencia del ultimo cierre. Ver `phaseTrendScore()`.
+    double mTrendScore{0.0};
+    double mTrendDeltaCents{0.0};
+    bool mTrendEvaluable{false};
     /// Ver `goertzelBinToRmsRatio()`. Se recalcula en cada `closeWindow()`.
     double mBinToRmsRatio{0.0};
     double mWrappedPhase{0.0};

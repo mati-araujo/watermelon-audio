@@ -24,6 +24,8 @@ void StrobeTracker::setTarget(double fundamentalHz) {
     mCents = 0.0;
     mUncertaintyCents = 0.0;
     mHasMeasurement = false;
+    mSuppressUntilNextClose = false;
+    mWindowRestarts = 0;
 }
 
 void StrobeTracker::reset() {
@@ -52,11 +54,14 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     if (mono == nullptr || numFrames <= 0 || mTargetHz <= 0.0) return false;
 
     bool anySignal = false;
+    bool closed = false;
     for (auto& p : mPartials) {
-        p.process(mono, numFrames);
+        // Los cuatro cierran su ventana en la MISMA muestra: mismo largo, misma alimentacion.
+        closed = p.process(mono, numFrames) || closed;
         anySignal = anySignal || p.hasSignal();
     }
     mHasSignal = anySignal;
+    if (closed) mSuppressUntilNextClose = false;
 
     // --- combinacion por inverso de la varianza -----------------------------
     //
@@ -92,9 +97,16 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     int orders[kPartials];      // el orden del parcial (1..4): lo pide el ajuste de S2
     int valid = 0;
     int order = 0;
+    bool breaks = false;        // REQ-036: algun parcial admisible tiene la fase fuera de una recta
+    int contradicted = 0;       // REQ-036: parciales CON energia descartados por desacuerdo (signo, mediana)
     for (const auto& p : mPartials) {
         ++order;
         if (!p.hasMeasurement()) continue;
+        // REQ-036 (R-PITCH-62) — sin veredicto de tendencia no hay admision: son las primeras 12
+        // ventanas, donde el rizado de las cuerdas graves y la falta de dos mitades hacen que "es
+        // una recta" no se pueda afirmar. Va antes que todo lo demas por la misma razon que el piso
+        // de energia: un parcial que no se puede verificar no vota.
+        if (!p.phaseTrendEvaluable()) continue;
         const double sigma = p.uncertaintyCents();
         if (!(sigma > 0.0) || !std::isfinite(sigma)) continue;
         if (!std::isfinite(p.cents())) continue;
@@ -116,11 +128,33 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         // deja pasar un fundamental aliasado que vuelve con el signo dado
         // vuelta. Publicar eso le dice al musico que afloje lo que hay que
         // apretar, que es peor que no decir nada. Ver `contradictsControl`.
-        if (mDomainVerified && contradictsControl(p.cents(), coarse)) continue;
+        if (mDomainVerified && contradictsControl(p.cents(), coarse)) { ++contradicted; continue; }
+        // REQ-036 — el parcial es admisible por todo lo demas: si su fase no es una recta, la
+        // ventana ENTERA se quebro (un glide sesga a los cuatro por igual) y se reinicia abajo.
+        breaks = breaks || phaseBreaksTheLine(p.phaseTrendScore(), p.phaseTrendDeltaCents());
         vals[valid] = p.cents();
         sigmas[valid] = sigma;
         orders[valid] = order;
         ++valid;
+    }
+
+    // --- REQ-036 (R-PITCH-63): LA VENTANA ADAPTATIVA -------------------------
+    //
+    // Se juzga SOLO en el cierre de una ventana: entre cierres la evidencia no cambio, y
+    // reaccionar a ella otra vez seria reiniciar en cascada. Y se reinician LOS CUATRO en el
+    // mismo punto: reiniciar por parcial los deja rebrotando en ventanas distintas y la lectura
+    // pasa por un solo parcial, que publica su estiramiento inarmonico sin corregir (medido en
+    // S1: +1,38 c con el 4to solo). Al quebrarse, este cierre no publica; el siguiente juzga la
+    // mitad nueva.
+    if (closed && breaks) {
+        for (auto& p : mPartials) p.restartKeepingNewestHalf();
+        mSuppressUntilNextClose = true;
+        ++mWindowRestarts;
+    }
+    if (mSuppressUntilNextClose) {
+        mPartialsUsed = 0;
+        mHasMeasurement = false;
+        return true;
     }
 
     // --- descarte del parcial que NO esta midiendo la nota -------------------
@@ -188,7 +222,7 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         int kept = 0;
         for (int i = 0; i < valid; ++i) {
             if (i != best &&
-                std::abs(vals[i] - median) > kMaxPartialDisagreementCents) continue;
+                std::abs(vals[i] - median) > kMaxPartialDisagreementCents) { ++contradicted; continue; }
             vals[kept] = vals[i];
             sigmas[kept] = sigmas[i];
             orders[kept] = orders[i];
@@ -196,6 +230,22 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         }
         valid = kept;
     }
+
+    // --- REQ-036: UN SOBREVIVIENTE SOLO, CONTRADICHO POR SUS HERMANOS, NO ES UNA LECTURA ------
+    //
+    // Con un parcial no hay serie que ajustar ni B que estimar: se publica su valor tal cual. Eso
+    // vale para el tono puro y para el parcial que carga toda la energia —los otros bins no tienen
+    // señal, nadie lo contradice— y NO vale para el que queda solo porque a los demas los descarto
+    // el desacuerdo (signo contra el control, mediana). Medido sobre audio con huecos sostenidos
+    // (test_non_contiguous): los cuatro leian +17 / −2,9 / +4,1 / −1,8 c, el signo se llevo a dos,
+    // el dominio a otro, y el que quedo publicaba −2,9 con σ 0,07 —CONVERGIDO y 2,1 c equivocado—
+    // porque SU fase, en ese regimen, si era una recta. Un parcial al que sus hermanos con energia
+    // contradicen no esta midiendo la nota: esta midiendo lo que sea que le toco a su bin.
+    //
+    // Dominio y energia no cuentan como desacuerdo: son fisica (un parcial fuera de su rango de
+    // captura, un bin sin señal), y REQ-003 exige que los parciales se caigan de a uno sin apagar la
+    // lectura hasta que quede el fundamental solo.
+    if (valid == 1 && contradicted > 0) valid = 0;
 
     mPartialsUsed = valid;
 

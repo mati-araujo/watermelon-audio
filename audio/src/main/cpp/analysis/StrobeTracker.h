@@ -143,6 +143,37 @@ public:
      */
     static constexpr int kMinPartialsForStretchFit = 2;
 
+    /**
+     * REQ-036 — LA ADMISION POR TENDENCIA (R-PITCH-62) Y SUS DOS UMBRALES.
+     *
+     * Un parcial cuya fase no es una recta no esta midiendo una frecuencia: se lo trata como al que
+     * no tiene energia en su bin (REQ-027). El estimador publica el estadistico (ver
+     * `PhaseSlopeEstimator::phaseTrendScore`); aca esta la regla:
+     *
+     *     |T| > 5   Y   |Δ| > 0,05 c   (y con ≥ 12 fases, que decide el estimador)
+     *
+     * DE DONDE SALEN. Medidos en S1 sobre el barrido de 24 glides, 14 cuerdas × 2 rates estables
+     * y dos vibratos, y sobre los 41 archivos del corpus con la compuerta simulada desde afuera:
+     *   · T > 5 deja 1,4× de margen sobre el rizado de B0 a 44,1 k con 12 fases (3,57) y 12× sobre
+     *     el vibrato (0,43). Con 3 el rizado dispara; con 4 el margen es del 12 %.
+     *   · Δ > 0,05 c es lo que ve una cola LENTA (τ = 1 s) despues de un reinicio: deja errores de
+     *     0,10–0,125 c con Δ de 0,06–0,09. Con 0,10 quedan 54–64 convergidas equivocadas.
+     * Con los dos: 0 disparos sobre estable y vibrato, 0 convergidas equivocadas sobre los glides, y
+     * el corpus pasa de 33 convergidas con 0,73 c de error maximo a 35 con 0,20.
+     */
+    static constexpr double kTrendSignificance = 5.0;
+    static constexpr double kTrendMagnitudeCents = 0.05;
+
+    static bool phaseBreaksTheLine(double tScore, double deltaCents) noexcept {
+        return std::fabs(tScore) > kTrendSignificance && std::fabs(deltaCents) > kTrendMagnitudeCents;
+    }
+
+    /**
+     * REQ-036 S1 — cuantas veces se reinicio la ventana (R-PITCH-63) desde el ultimo reset. Sonda:
+     * un test de nota estable o de vibrato afirma que es CERO, y uno de glide que no lo es.
+     */
+    int windowRestarts() const noexcept { return mWindowRestarts; }
+
     /// Techo de la busqueda de B. 5e-3 cubre con holgura el rango publicado de
     /// cuerdas reales (~1e-5 nylon a ~5e-4 acero); `physicsB()` da 1,28e-5 para
     /// la prima de una guitarra y 1,05e-4 para su bordona.
@@ -482,6 +513,11 @@ public:
         return mTargetHz > 0.0 ? mTargetHz * (i + 1) : 0.0;
     }
 
+    /// REQ-036 S1 — sonda de solo lectura: el estimador del parcial `i`, para que un test lea
+    /// su ventana de regresion (`regressionPhaseAt`) y su energia de bin. Ver la nota en
+    /// `PhaseSlopeEstimator::regressionPhaseCount()`. Produccion no la llama.
+    const PhaseSlopeEstimator& partialEstimator(int i) const noexcept { return mPartials[i]; }
+
 private:
     PhaseSlopeEstimator mPartials[kPartials];
     double mTargetHz{0.0};
@@ -495,6 +531,15 @@ private:
     /// produjo una medicion propia. Ver `noteInputDiscontinuity()`.
     bool mSawDiscontinuity{false};
     int mPartialsUsed{0};
+    /**
+     * REQ-036 — la ventana acaba de quebrarse en este cierre: sin lectura hasta el proximo.
+     *
+     * El reinicio deja a los cuatro parciales sobre la mitad nueva, y ESA mitad no se vuelve a
+     * juzgar hasta que cierre otra ventana: juzgarla en el mismo cierre —o en cada bloque hasta el
+     * siguiente— reiniciaria en cascada sobre la misma evidencia. Es lo que se simulo en S1.
+     */
+    bool mSuppressUntilNextClose{false};
+    int mWindowRestarts{0};
 };
 
 }  // namespace wma::analysis

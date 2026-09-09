@@ -29,6 +29,7 @@ add_executable(analysis_tests
     test_mcleod_pitch.cpp
     test_strobe_tracker.cpp
     test_stretched_fit.cpp
+    test_attack_in_window.cpp
     test_inharmonicity.cpp
     test_intonation.cpp
     test_fast_mode.cpp

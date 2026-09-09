@@ -249,7 +249,9 @@ public:
     /// Es la PRECONDICION de todo lo demas: sin haber medido primero, "dejar de
     /// publicar" seria trivial.
     void pluckUntilConverged() {
-        const Observed o = feed([](long c) { return stringBlock(c, 0.5); }, 40);
+        // 64 bloques de 1024 (1,49 s a 44,1 k) y no 40: desde REQ-036 la primera lectura del strobe
+        // llega con 12 ventanas de 4096 (1,11 s), y 40 bloques (0,93 s) se quedaban antes.
+        const Observed o = feed([](long c) { return stringBlock(c, 0.5); }, 64);
         ASSERT_GT(o.publishedCents, 0) << "el banco no llego a medir: sin esa "
                                           "precondicion los tests de ausencia no prueban nada";
     }

@@ -52,9 +52,15 @@ class TunerJniTest {
         @AfterClass
         fun tally() = JniCoverage.requireCoverage(OWNER, COVERED)
 
-        /** Un segundo de La 440 en mono, amplitud 0,5 — el estímulo de H2. */
+        /**
+         * Un segundo y medio de La 440 en mono, amplitud 0,5 — el estímulo de H2. Un segundo y no más
+         * hasta REQ-036; desde entonces el strobe no admite un parcial sin veredicto de tendencia,
+         * que vale con 12 ventanas de 4096 (1,02 s a 48 k) más la primera del detector: con 1,0 s el
+         * puerto devolvía MEASURING, y lo que este test afirma —que un seno limpio converge y cruza
+         * la frontera entero— no cambió.
+         */
         private fun sine440(): FloatArray =
-            FloatArray(RATE) { i -> AMPLITUDE * sin(2.0 * PI * TARGET_HZ * i / RATE).toFloat() }
+            FloatArray(RATE * 3 / 2) { i -> AMPLITUDE * sin(2.0 * PI * TARGET_HZ * i / RATE).toFloat() }
     }
 
     private fun analyze(samples: FloatArray, channels: Int): FloatArray? =
@@ -83,7 +89,7 @@ class TunerJniTest {
             abs(snapshot.levelRms - EXPECTED_RMS) < 0.005f,
             "RMS esperado ~$EXPECTED_RMS, medido ${snapshot.levelRms}",
         )
-        assertEquals(TunerState.CONVERGED, snapshot.state, "un seno limpio de 1 s tiene que converger")
+        assertEquals(TunerState.CONVERGED, snapshot.state, "un seno limpio de 1,5 s tiene que converger")
 
         val cents = assertNotNull(snapshot.cents, "con objetivo y señal limpia tiene que haber cents")
         assertTrue(abs(cents) < 10f, "440 contra objetivo 440 debería dar ~0 cents, dio $cents")

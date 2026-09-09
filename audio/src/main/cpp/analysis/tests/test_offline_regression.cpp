@@ -287,7 +287,10 @@ Reading analyze(const std::vector<float>& buf, int frames, int rate, double targ
  * seguiria verde **sin poder fallar**, y eso es lo que la premisa impide.
  */
 TEST(OfflineRegression, TheReportedStringNeverPublishesTheOppositeSign) {
-    constexpr int kFrames = 51200;   // ~1,07 s a 48 kHz
+    // 72000 (1,5 s a 48 kHz) y no 51200 (1,07 s): desde REQ-036 la primera lectura del strobe
+    // llega con 12 ventanas de 4096 mas la primera del detector (~1,2 s), y con 1,07 s "no
+    // publica" era cierto por corto, no por la guarda. Vale para los tres tests de este archivo.
+    constexpr int kFrames = 72000;
     const auto buf = stringBuffer(detune(kE4, kReportedCents), kSteelB, kFrames, kSignRate, 0.5);
 
     const Reading r = analyze(buf, kFrames, kSignRate, kE4);
@@ -320,7 +323,7 @@ TEST(OfflineRegression, TheReportedStringNeverPublishesTheOppositeSign) {
  * camino.
  */
 TEST(OfflineRegression, InsideTheUsableRangeTheInharmonicStringStillPublishes) {
-    constexpr int kFrames = 51200;
+    constexpr int kFrames = 72000;   // ver la nota de REQ-036 en el primer test
     const auto buf =
         stringBuffer(detune(kE4, kInsideRangeCents), kSteelB, kFrames, kSignRate, 0.5);
 
@@ -395,7 +398,7 @@ double maxInharmonicBiasCents(double B) {
  * mas denso del mundo lo pasa un `return NaN`.
  */
 TEST(OfflineRegression, NoDeviationEverPublishesTheOppositeSign) {
-    constexpr int kFrames = 51200;
+    constexpr int kFrames = 72000;   // ver la nota de REQ-036 en el primer test
     constexpr double kInsideUsableRange = 20.0;   // holgado contra los 30,50 c
     // Margen sobre el sesgo, para no afirmar justo en el filo donde el nominal y
     // el sesgo se cancelan.
