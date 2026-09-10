@@ -191,6 +191,44 @@ class FastModeGateTest {
     }
 
     /**
+     * AC-037.5 — declarar el instrumento **una vez** y que la señal recorra las cuerdas no puede
+     * re-aplicar el objetivo. La puerta no reintroduce REQ-030 por la ventana.
+     *
+     * REQ-030 midió 27 re-targets del usuario contra 26 del modo rápido en la misma corrida, cada
+     * uno tirando el ring del strobe. Acá el equivalente observable es `pushedHz`: en automático el
+     * afinador **no empuja nada**, por muchas veces que el motor cambie de cuerda y por muchas
+     * lecturas que el consumidor pida.
+     */
+    @Test
+    fun `en automatico recorrer las cuerdas no re-aplica el objetivo`() {
+        val bridge = FakeTunerBridge()
+        val tuner: ITuner = TunerImpl(bridge, guitarra())
+        tuner.start()
+        tuner.automaticStringSelection = true
+        val empujesTrasDeclarar = bridge.pushedHz.size
+        val declaracionesTrasDeclarar = bridge.candidatesPushed.size
+
+        // El motor va enganchando una cuerda tras otra, y el consumidor lee en cada tick.
+        repeat(3) { vuelta ->
+            tuner.targets.indices.forEach { cuerda ->
+                bridge.setTunerTargetHz(tuner.targets[cuerda].frequency.hz.toFloat())
+                bridge.snapshot = snapshotConEnganche(lockedString = cuerda)
+                assertNotNull(tuner.reading(), "vuelta $vuelta cuerda $cuerda: no publicó lectura")
+            }
+        }
+
+        assertEquals(
+            empujesTrasDeclarar + 18, bridge.pushedHz.size,
+            "el afinador empujó objetivos por su cuenta: los 18 de este test son del propio test " +
+                "simulando al motor, y cualquier extra es la puerta re-aplicando",
+        )
+        assertEquals(
+            declaracionesTrasDeclarar, bridge.candidatesPushed.size,
+            "el afinador re-declaró el instrumento mientras la señal recorría las cuerdas",
+        )
+    }
+
+    /**
      * AC-037.4 — en automático la lectura dice **contra qué objetivo** se publicó.
      *
      * Sin esto el consumidor ve `target = null` mientras el motor mide contra una cuerda, y no
