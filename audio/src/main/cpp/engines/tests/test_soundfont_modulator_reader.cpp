@@ -100,6 +100,47 @@ TEST(SoundFontModulatorReader, ElRegistroTerminalNoSeCuentaComoModulador) {
     EXPECT_TRUE(s.presetZone.empty());
 }
 
+/**
+ * 🔑 Un font MALFORMADO no puede colar el terminal como modulador.
+ *
+ * Este test lo trajo un **mutante que sobrevivió**: quitar el tope `count - 1`
+ * dejaba los cinco tests en verde, porque en un font **bien formado** el registro
+ * terminal nunca cae dentro del rango de una bag — el bag terminal apunta
+ * exactamente a él. O sea que el tope no era una regla activa sino una defensa, y
+ * una defensa sin test es una promesa sin verificar.
+ *
+ * El riesgo es real y no cosmético: un modulador de ceros tiene identidad
+ * `(0,0,0,0)`, así que **reemplazaría** a cualquier default con esa forma en vez de
+ * ser inofensivo. Y los fonts de terceros vienen rotos.
+ *
+ * Se construye corriendo el `modNdx` del bag terminal un lugar más allá, que es
+ * exactamente la forma en que un font mal escrito incluiría al centinela.
+ */
+TEST(SoundFontModulatorReader, UnBagQueApuntaAlTerminalNoLoDevuelveComoModulador) {
+    ModulatorPlacement m;
+    m.presetZone.push_back({srcOper(kSrcVelocity, false, true, false, kCurveLinear),
+                            kGenInitialAttenuation, 500, kSrcNone, 0});
+    auto sf = makeMinimalSoundFont(22050, true, -1, -1, m);
+
+    // Localizar el chunk `pbag` y correr el `modNdx` de su registro TERMINAL.
+    const auto h = findHydra(sf.data(), sf.size());
+    ASSERT_TRUE(h.complete);
+    ASSERT_GE(h.pbag.count, 2u);
+    const std::size_t offsetTerminal =
+        static_cast<std::size_t>(h.pbag.begin - sf.data()) + (h.pbag.count - 1) * 4 + 2;
+    const std::uint16_t antes = static_cast<std::uint16_t>(
+        sf[offsetTerminal] | (sf[offsetTerminal + 1] << 8));
+    const std::uint16_t despues = static_cast<std::uint16_t>(antes + 1);
+    sf[offsetTerminal] = static_cast<std::uint8_t>(despues & 0xFF);
+    sf[offsetTerminal + 1] = static_cast<std::uint8_t>((despues >> 8) & 0xFF);
+
+    const auto regiones = readRegionModulators(sf.data(), sf.size());
+    ASSERT_EQ(regiones.size(), 1u);
+    EXPECT_EQ(regiones[0].scopes.presetZone.size(), 1u)
+        << "el bag pide DOS moduladores y el segundo es el terminal: no se devuelve";
+    EXPECT_EQ(regiones[0].scopes.presetZone[0].amount, 500) << "y el que se devuelve es el real";
+}
+
 /** Un font que no es un SoundFont se rechaza diciéndolo, no devolviendo vacío. */
 TEST(SoundFontModulatorReader, UnArchivoQueNoEsSoundFontSeRechaza) {
     const std::vector<std::uint8_t> basura(64, 0xAB);
