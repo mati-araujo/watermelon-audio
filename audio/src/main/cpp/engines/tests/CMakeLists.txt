@@ -37,6 +37,9 @@ add_executable(engine_tests
     test_engines.cpp
     test_soundfont_fd_region.cpp
     test_engine_pitch.cpp
+    # REQ-039 S2: la transferencia de un modulador es una funcion PURA (sin tsf, sin
+    # audio), asi que entra aca sin tocar la exclusion de tinysoundfont de arriba.
+    test_soundfont_modulators.cpp
 )
 
 target_include_directories(engine_tests PRIVATE
