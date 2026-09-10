@@ -53,6 +53,42 @@ if [ ! -x "$CORE" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# El extractor de bloques de fallo (MINI-022).
+#
+# `--output-on-failure` YA produce la salida de cada test fallado; el problema era
+# que este script la mandaba a un temporal y sólo rescataba los NOMBRES. Con eso
+# el rojo llegaba sin causa, y de paso anulaba el entregable de MINI-008: la guarda
+# `kSnapDroppedFrames == 0` nombra sola por qué falló
+# `ChangingTheTargetRestartsTheIntegration`, y ese mensaje se tiraba.
+#
+# Medido el 2026-09-10 (PR #275): ese rojo costó un worktree en master, dos
+# corridas de suite y veinte del test aislado, para llegar a lo que la guarda decía
+# en una línea.
+#
+# El formato que se recorta, verificado contra la salida real de ctest:
+#
+#     1/1 Test #1028: NOMBRE ...***Failed    0.04 sec      <- abre el bloque
+#     <la salida del test>                                 <- esto es lo que interesa
+#     0% tests passed, ...                                 <- lo cierra
+#
+# Se imprimen SÓLO los bloques de los fallados, nunca el log entero: un volcado de
+# 1274 tests esconde la causa igual de bien que no imprimir nada.
+bloques_de_fallo() {
+    awk '
+        /^ *[0-9]+\/[0-9]+ Test +#[0-9]+:/ {
+            dentro = ($0 ~ /\*\*\*/) ? 1 : 0
+            if (dentro) print
+            next
+        }
+        /^ *Start +[0-9]+:/            { dentro = 0; next }
+        /^[0-9]+% tests passed/        { dentro = 0 }
+        /^The following tests FAILED:/ { dentro = 0 }
+        /^Total Test time/             { dentro = 0 }
+        dentro { print }
+    ' "$1"
+}
+
+# ---------------------------------------------------------------------------
 # 1. Self-test. Sin esto, nada de lo de abajo vale.
 # ---------------------------------------------------------------------------
 echo "== self-test del instrumento =="
@@ -79,6 +115,34 @@ if ! WMA_TEST_WAIT_SCALE=0 "$CORE" --gtest_filter="$PROBE_NEG" >/dev/null 2>&1; 
     exit 3
 fi
 echo "  escala 0: el control negativo sobrevive                    OK"
+
+# ---------------------------------------------------------------------------
+# Cuarto control (MINI-022): el EXTRACTOR, contra un fallo de verdad.
+#
+# Los tres de arriba verifican que el instrumento COLAPSA las esperas. Este
+# verifica que además sabe CONTAR lo que encontró — que es otra cosa, y es la que
+# se rompió en silencio: `--output-on-failure` producía la salida y el script la
+# tiraba.
+#
+# 🔴 Por qué va acá y no en un test aparte: sin este control, un extractor que deja
+# de encontrar los bloques (formato de ctest distinto, salida en otro orden)
+# imprimiría vacío y NADIE se enteraría hasta el próximo rojo real — que es raro
+# por definición, porque este script casi siempre pasa. El control positivo falla a
+# PROPÓSITO con la escala en 0, así que sirve de fallo real sin depender de que
+# haya un defecto en la suite.
+probe_log="$(mktemp)"
+WMA_TEST_WAIT_SCALE=0 ctest --test-dir "$BUILD" --output-on-failure --no-tests=error \
+    -R "$PROBE_POS" >"$probe_log" 2>&1 || true
+probe_bloque="$(bloques_de_fallo "$probe_log")"
+rm -f "$probe_log"
+if ! printf '%s' "$probe_bloque" | grep -q "$PROBE_POS"; then
+    echo "  ROTO: el extractor no pudo sacar la salida de un fallo REAL." >&2
+    echo "  El script seguiria reportando NOMBRES sin causa, que es el defecto que" >&2
+    echo "  MINI-022 arreglo — y que ya habia anulado una vez el diagnostico de" >&2
+    echo "  MINI-008. Revisa bloques_de_fallo() contra el formato de ctest." >&2
+    exit 3
+fi
+echo "  el extractor saca la causa de un fallo real                OK"
 
 if [ $only_self_test -eq 1 ]; then
     echo "self-test OK."
@@ -135,6 +199,23 @@ fi
 
 echo "  estos tests cambian de veredicto cuando se les saca el tiempo:"
 echo "$failed" | sed 's/^/   /'
+
+# La CAUSA, no sólo el nombre (MINI-022). Sin esto el rojo obliga a reproducir a
+# mano lo que la salida del test ya decía — y en el caso testigo, lo que una guarda
+# de MINI-008 decía en una línea.
+bloques="$(bloques_de_fallo "$log")"
+echo
+if [ -n "$bloques" ]; then
+    echo "  --- lo que dijeron, que es la causa ---"
+    printf '%s\n' "$bloques" | sed 's/^/   /'
+    echo "  --- fin ---"
+else
+    # Un extractor mudo que falla es indistinguible de un test sin salida, y esa
+    # ambiguedad es justo la que este bloque viene a borrar: se DICE.
+    echo "  🔴 NO PUDE EXTRAER la salida de esos tests del log de ctest."
+    echo "  El formato de ctest debe haber cambiado: revisá bloques_de_fallo()."
+    echo "  Esto NO es 'el test no dijo nada' — es 'el instrumento no supo leerlo'."
+fi
 echo
 echo "  Cada uno sincroniza con una duracion y afirma despues. Eso da verde en"
 echo "  una maquina ociosa y rojo en un runner cargado, que es el defecto que"
