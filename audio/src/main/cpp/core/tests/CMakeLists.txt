@@ -88,6 +88,13 @@ endif()
 if(NOT TARGET tinysoundfont)
     include(${WMA_CPP_ROOT}/thirdparty/tinysoundfont.cmake)
 endif()
+# REQ-039 — el parser de MIDI del arnes de conformidad. Header-only e INTERFACE:
+# no agrega una TU ni un artefacto, solo el include. Va aca y no en engines/tests
+# porque el arnes necesita `tinysoundfont`, y engines/tests NO lo linkea a
+# proposito ("SoundFontEngine is intentionally out of host scope").
+if(NOT TARGET tinymidiloader)
+    include(${WMA_CPP_ROOT}/thirdparty/tinymidiloader.cmake)
+endif()
 
 # The slice of the engine AudioEngine.cpp needs to link. Mirrors the
 # watermelon-core target in ios/CMakeLists.txt, with the two substitutions
@@ -147,6 +154,8 @@ add_executable(core_tests
     test_c_api_synth.cpp
     test_c_api_engine_params.cpp
     test_soundfont_load.cpp
+    support/tml_impl.cpp
+    test_sf_spec_conformance.cpp
     test_touch_expression.cpp
     test_touch_expression_surface.cpp
     test_c_api_voice.cpp
@@ -168,7 +177,11 @@ add_executable(core_tests
 # Se define AQUI Y EN NINGUN OTRO LADO: el build de Android (AGP) y el de iOS
 # (cpp/ios/CMakeLists.txt) no lo pasan, asi que en el binario que shippea esos
 # bloques compilan a nada. Ver la nota al tope de nodes/InputNode.cpp.
-target_compile_definitions(core_tests PRIVATE WMA_TEST_HOOKS=1)
+target_compile_definitions(core_tests PRIVATE
+    WMA_TEST_HOOKS=1
+    # REQ-039 — donde `fetch-spec-test.sh` deja el material. No se versiona (.gitignore);
+    # sin el, los tests de conformidad salen SKIPPED y nunca passed.
+    WMA_SPEC_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/spec-test")
 
 target_include_directories(core_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -191,6 +204,7 @@ target_link_libraries(core_tests PRIVATE
     watermelon-effects
     watermelon-dsp
     tinysoundfont
+    tinymidiloader
     GTest::gtest_main
     Threads::Threads
 )

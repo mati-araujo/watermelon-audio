@@ -40,4 +40,4 @@ audio/src/main/cpp/analysis/tests/corpus/
 
 # REQ-039 — el material del SoundFont-Spec-Test (MIT, de terceros). No se versiona:
 # lo baja y lo verifica por sha256 `scripts/fetch-spec-test.sh`, misma regla que el corpus.
-audio/src/main/cpp/engines/tests/spec-test/
+audio/src/main/cpp/core/tests/spec-test/

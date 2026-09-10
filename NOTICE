@@ -34,3 +34,17 @@ Based on SFZero, Copyright (c) 2012 Steve Folta
 
 Licensed under the MIT License.
 See: audio/src/main/cpp/thirdparty/tinysoundfont/tsf.h (header contains license)
+
+================================================================================
+
+TinyMidiLoader 0.7
+https://github.com/schellingb/TinySoundFont
+
+Copyright (c) 2017, 2018, 2020 Bernhard Schelling
+
+Licensed under the MIT License.
+See: audio/src/main/cpp/thirdparty/tinymidiloader/tml.h (header contains license)
+
+Used only by the host test suite (REQ-039): it parses the SoundFont-Spec-Test
+MIDI so the engine can be measured against a third-party conformance test. It is
+NOT part of the published library.

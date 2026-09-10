@@ -38,7 +38,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST_DIR="${WMA_SPEC_TEST_DIR:-$REPO_ROOT/audio/src/main/cpp/engines/tests/spec-test}"
+DEST_DIR="${WMA_SPEC_TEST_DIR:-$REPO_ROOT/audio/src/main/cpp/core/tests/spec-test}"
 
 # --- el artefacto, fijado ----------------------------------------------------
 # HEAD de `main` al 2026-09-10. El README de ese commit se titula v3.1 y fecha
