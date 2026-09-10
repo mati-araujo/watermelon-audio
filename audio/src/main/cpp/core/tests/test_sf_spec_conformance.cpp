@@ -223,3 +223,132 @@ TEST(SfSpecConformance, TheTableOfTodayAgainstFluidSynth) {
         << "todos los tramos coinciden con la referencia dentro de 1 dB: o el motor ya es "
            "conforme, o la tabla no esta midiendo lo que se cree";
 }
+
+/**
+ * AC-039.1 / AC-039.2 — LAS ESCALERAS DE VELOCITY: la tabla que de verdad mide lo
+ * que este REQ existe para arreglar, y el control que prueba que el instrumento
+ * puede cambiar de veredicto.
+ *
+ * QUE SON — todo DERIVADO del archivo, nada declarado
+ * ---------------------------------------------------
+ * Las pruebas #13 (velocity -> atenuacion) y #14 (velocity -> corte del filtro)
+ * tienen cinco sub-pruebas cada una, y el `.mid` las ANUNCIA con notas: la tecla
+ * 33 abre #13 y la 34 abre #14, y las teclas 51..55 abren las sub-pruebas A..E.
+ * Cada anuncio va seguido de una ESCALERA de ocho notas en velocity
+ * 127/111/95/79/63/47/31/15, espaciadas 0,5 s, en las teclas 70..79.
+ *
+ * O sea que las diez escaleras salen del archivo. Lo unico que se declara es la
+ * etiqueta legible de cada una, y la protege el sha256 del `.mid`.
+ *
+ * EL CRITERIO: EL RANGO DE LA ESCALERA
+ * ------------------------------------
+ * De cada escalera se mide el nivel de sus ocho notas **relativo a la de velocity
+ * 127**, y de ahi el RANGO en dB. Es una relacion, asi que es inmune al sesgo de
+ * ganancia global entre los dos renders (~1,47 dB, ver el test de arriba) — y es
+ * exactamente la cantidad que las sub-pruebas estan diseñadas para variar.
+ */
+TEST(SfSpecConformance, TheVelocityLaddersAreTheDefectMadeVisible) {
+    if (!have()) GTEST_SKIP() << "sin material del spec-test — corre scripts/fetch-spec-test.sh";
+    const std::string refPath = dir() + "/reference-fluidsynth-2.6.0.wav";
+    struct stat st {};
+    if (stat(refPath.c_str(), &st) != 0) {
+        GTEST_SKIP() << "sin referencia — corre scripts/render-spec-reference.sh";
+    }
+    const auto ours = wma_test::specmidi::render(sf2(), mid());
+    ASSERT_TRUE(ours.valid);
+    const wav::WavData ref = wav::readWav(refPath.c_str());
+    ASSERT_GT(ref.numFrames, 0);
+
+    struct Escalera { const char* etiqueta; double t0; };
+    // El instante es el de la nota de velocity 127 que abre cada escalera; sale de
+    // los note-on del `.mid` (teclas 70..79), no de un tiempo escrito a mano.
+    const Escalera kEsc[] = {
+        {"#13 A default 96dB concava", 97.5},  {"#13 B 144 dB", 103.5},
+        {"#13 C 48 dB", 109.5},                {"#13 D 96 dB LINEAL", 115.5},
+        {"#13 E modulador BORRADO", 121.5},    {"#14 A default", 128.5},
+        {"#14 B -7200 cents", 134.5},          {"#14 C SoundFont 2.0", 140.5},
+        {"#14 D borrado 2.01", 146.5},         {"#14 E borrado 2.04", 152.5},
+    };
+    // Las ocho velocities de cada escalera, en el orden en que el `.mid` las toca:
+    // 127, 111, 95, 79, 63, 47, 31, 15, una cada 0,5 s. El indice j de `rango()` ES
+    // esa posicion, y por eso j==1 es la nota de velocity 111 (la del oraculo).
+
+    auto rmsAt = [&](const float* s, int frames, double t0, double dur) {
+        long long a = static_cast<long long>(t0 * ours.sampleRate);
+        long long b = static_cast<long long>((t0 + dur) * ours.sampleRate);
+        if (a < 0) a = 0;
+        if (b > frames) b = frames;
+        if (b <= a) return -200.0;
+        double acc = 0.0;
+        for (long long i = a; i < b; ++i) {
+            const double m = 0.5 * (static_cast<double>(s[i * 2]) + static_cast<double>(s[i * 2 + 1]));
+            acc += m * m;
+        }
+        const double r = std::sqrt(acc / static_cast<double>(b - a));
+        return r > 1e-10 ? 20.0 * std::log10(r) : -200.0;
+    };
+    auto rango = [&](const float* s, int frames, double t0, double* delta127a111) {
+        double v0 = 0.0, lo = 0.0, hi = 0.0;
+        for (int j = 0; j < 8; ++j) {
+            const double x = rmsAt(s, frames, t0 + 0.5 * j, 0.40);
+            if (j == 0) { v0 = x; lo = hi = 0.0; }
+            else {
+                const double rel = x - v0;
+                if (rel < lo) lo = rel;
+                if (rel > hi) hi = rel;
+                if (j == 1 && delta127a111) *delta127a111 = rel;
+            }
+        }
+        return hi - lo;
+    };
+
+    std::printf("\n  [REQ-039] RANGO de cada escalera de velocity (dB, relativo a su nota de 127)\n");
+    std::printf("  %-28s %10s %10s\n", "sub-prueba", "motor", "fluidsyn");
+    std::vector<double> rangosNuestros;
+    for (const Escalera& e : kEsc) {
+        double dOurs = 0.0, dRef = 0.0;
+        const double a = rango(ours.stereo.data(), ours.frames, e.t0, &dOurs);
+        const double b = rango(ref.buffer.data(), ref.numFrames, e.t0, &dRef);
+        std::printf("  %-28s %9.2f %10.2f\n", e.etiqueta, a, b);
+        rangosNuestros.push_back(a);
+    }
+
+    /**
+     * 🔴 EL ORACULO EXTERNO, y es lo que hace que la referencia no sea "lo que
+     * FluidSynth diga". El README del spec-test documenta que en #13 A la
+     * diferencia entre velocity 127 y 111 tiene que ser **2,34 dB**. Ese numero no
+     * sale de nuestro motor NI de FluidSynth: sale del spec. Si la referencia no
+     * lo reproduce, la referencia esta mal y todo lo demas sobra.
+     */
+    double refA = 0.0;
+    rango(ref.buffer.data(), ref.numFrames, 97.5, &refA);
+    std::printf("  oraculo del README — #13 A, 127 -> 111 = -2,34 dB · referencia: %+.2f dB\n", refA);
+    EXPECT_NEAR(refA, -2.34, 0.15)
+        << "la referencia de FluidSynth no reproduce el numero que el spec documenta";
+
+    /**
+     * 🔴 EL DEFECTO, MEDIDO: las diez sub-pruebas estan programadas DISTINTAS —96 dB
+     * concava, 144, 48, 96 LINEAL, y dos con el modulador BORRADO— y nuestro motor
+     * da **la misma curva en las diez**, porque no lee ningun modulador: aplica su
+     * propia curva de velocity cableada (`tsf.h:1619`).
+     *
+     * Esto es la linea de base de S1 y el trinquete que S2 tiene que ROMPER. Y es
+     * tambien el control de AC-039.2: un instrumento que no distinguiera las diez
+     * no podria ver el arreglo.
+     */
+    double minR = rangosNuestros[0], maxR = rangosNuestros[0];
+    for (double r : rangosNuestros) { minR = std::min(minR, r); maxR = std::max(maxR, r); }
+    std::printf("  motor: rangos entre %.2f y %.2f dB -> dispersion %.2f dB sobre DIEZ sub-pruebas\n\n",
+                minR, maxR, maxR - minR);
+    EXPECT_LT(maxR - minR, 0.5)
+        << "las diez escaleras dejaron de dar la misma curva (dispersion " << (maxR - minR)
+        << " dB). Si es por el arreglo de REQ-039, ESTE ES EL TRINQUETE QUE HAY QUE DAR VUELTA: "
+           "borralo y escribi el contrato nuevo por sub-prueba.";
+
+    // Y el control positivo del lado de la referencia: #13 E tiene el modulador
+    // BORRADO, asi que sus ocho notas tienen que sonar IGUAL. Si esto no fuera
+    // plano, la referencia no estaria aplicando moduladores y no serviria de nada.
+    const double refE = rango(ref.buffer.data(), ref.numFrames, 121.5, nullptr);
+    EXPECT_LT(refE, 0.5) << "#13 E (modulador borrado) no es plano en la referencia: " << refE
+                         << " dB — la referencia no aplica moduladores";
+}
