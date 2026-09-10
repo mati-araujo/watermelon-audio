@@ -40,6 +40,7 @@ add_executable(engine_tests
     # REQ-039 S2: la transferencia de un modulador es una funcion PURA (sin tsf, sin
     # audio), asi que entra aca sin tocar la exclusion de tinysoundfont de arriba.
     test_soundfont_modulators.cpp
+    test_soundfont_modulator_reader.cpp
 )
 
 target_include_directories(engine_tests PRIVATE
@@ -49,6 +50,9 @@ target_include_directories(engine_tests PRIVATE
 
 target_compile_definitions(engine_tests PRIVATE
     _USE_MATH_DEFINES
+    # REQ-039 S2: el material del spec-test no se versiona (se baja con
+    # fetch-spec-test.sh), asi que su ruta llega por define y el test SKIPPEA si no esta.
+    WMA_SPEC_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../core/tests/spec-test"
     WMA_PITCH_BASELINE="${CMAKE_CURRENT_SOURCE_DIR}/pitch-baseline.txt"
 )
 
