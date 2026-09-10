@@ -423,6 +423,143 @@ TEST(AudioLooper, ExportRepeatAndCountInLengths) {
     EXPECT_GT(maxAbs, 0.0f);
 }
 
+// ============================ MINI-021 ============================
+// The master loop is the longest LOOP, not the longest BUFFER.
+//
+// The engine plays `[loopStart, loopEnd)` and normalises progress against it, so
+// anything measured in buffer frames describes a span that never plays. The two
+// cases are the normal ones, not edge cases: a free take is trimmed to its first
+// onset, an imported sample is bar-snapped short of its buffer end.
+
+// AC-021.1 — the master is the region, not the buffer.
+TEST(AudioLooper, Mini021MasterLoopIsTheRegionNotTheBuffer) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    WavTempFile src("wm_m21_master.wav");
+    ASSERT_TRUE(makeWav(src.str(), /*frames=*/4800, kSR, 0.4f));
+    ASSERT_TRUE(looper.importTrack(0, src.str().c_str(), kSR));
+    ASSERT_EQ(looper.getMasterLoopFrames(), 4800) << "sin region, el maestro ES el buffer";
+
+    looper.setTrackLoopRegion(0, 1200, 3000);
+
+    EXPECT_EQ(looper.getMasterLoopFrames(), 1800)
+        << "el maestro sigue midiendo el buffer (4800) en vez de la vuelta (1800)";
+}
+
+// AC-021.2 — `getProgress()` and `getMasterLoopFrames()` describe the SAME track.
+//
+// 🔑 The two used to pick separately AND in different units: progress relative to
+// the region, master in buffer frames. Every consumer that multiplied one by the
+// other got a duration off by `buffer / region`. Here the longest track by BUFFER
+// is deliberately NOT the longest by REGION, which is the only situation where a
+// split selection is observable.
+TEST(AudioLooper, Mini021ProgressAndMasterDescribeTheSameTrack) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    WavTempFile big("wm_m21_big.wav");
+    WavTempFile small("wm_m21_small.wav");
+    ASSERT_TRUE(makeWav(big.str(), /*frames=*/8000, kSR, 0.4f));
+    ASSERT_TRUE(makeWav(small.str(), /*frames=*/4000, kSR, 0.4f));
+    ASSERT_TRUE(looper.importTrack(0, big.str().c_str(), kSR));    // buffer 8000…
+    ASSERT_TRUE(looper.importTrack(1, small.str().c_str(), kSR));  // …contra 4000
+    looper.setTrackLoopRegion(0, 0, 2000);                         // …pero vuelta 2000
+
+    // El buffer más largo es la pista 0; la VUELTA más larga es la 1.
+    EXPECT_EQ(looper.longestLoopTrack(), 1);
+    EXPECT_EQ(looper.getMasterLoopFrames(), 4000);
+
+    looper.resumeTrack(0);
+    looper.resumeTrack(1);
+    feed(looper, 0.0f, /*totalFrames=*/1000, /*block=*/500);
+
+    // 1000 frames adentro: la pista 0 va por la mitad de su vuelta de 2000 (0,5) y
+    // la 1 por un cuarto de la suya de 4000 (0,25). Son distintas a propósito: es
+    // lo que deja ver A CUÁL de las dos sigue el progreso maestro.
+    EXPECT_NEAR(looper.getTrack(0).getProgress(), 0.5f, 0.02f);
+    EXPECT_NEAR(looper.getTrack(1).getProgress(), 0.25f, 0.02f);
+    EXPECT_NEAR(looper.getProgress(), 0.25f, 0.02f)
+        << "el progreso maestro sigue a una pista y el largo maestro describe otra";
+}
+
+// AC-021.3 — a `repeatLoops = 1` export is EXACTLY one lap.
+//
+// 🔴 `mixTrackInto` always wrapped on the region (`loopStart + t % loopLen`), but
+// the output was sized by the buffer: the file came out with 4800/1800 = 2.67 laps,
+// cut mid-lap. An exported loop that does not loop.
+TEST(AudioLooper, Mini021ExportOfARegionIsExactlyOneLap) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    WavTempFile src("wm_m21_exp_src.wav");
+    ASSERT_TRUE(makeWav(src.str(), /*frames=*/4800, kSR, 0.4f));
+    ASSERT_TRUE(looper.importTrack(0, src.str().c_str(), kSR));
+    looper.setTrackLoopRegion(0, 1200, 3000);
+
+    WavTempFile out("wm_m21_exp_out.wav");
+    AudioLooper::ExportOptions opts;
+    opts.repeatLoops = 1;
+    opts.applyLimiter = false;
+    ASSERT_TRUE(looper.exportMix(out.str().c_str(), opts));
+
+    wav::WavData wd = wav::readWav(out.str().c_str());
+    EXPECT_EQ(wd.numFrames, 1800) << "el export dura el buffer y no la vuelta";
+}
+
+// AC-021.4 — the export length and the master loop agree BY CONSTRUCTION.
+//
+// It is the property that keeps a rendered video and its audio from drifting apart.
+//
+// 🪤 This one PASSES ON THE OLD CODE TOO, and that is not a flaw in the test — it is
+// the finding. Both sides read the same wrong number, so they agreed while both were
+// wrong: an exported "1 repeat" was 2.67 laps and a video over it was 2.67 laps of
+// cursor. It is a COUPLING guard, not a defect detector: it fires the day someone
+// fixes one side and not the other, which is exactly how this bug would come back.
+// The tests above are the ones that fail on the old code.
+TEST(AudioLooper, Mini021ExportLengthMatchesTheMasterLoop) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    WavTempFile src("wm_m21_agree_src.wav");
+    ASSERT_TRUE(makeWav(src.str(), /*frames=*/4800, kSR, 0.4f));
+    ASSERT_TRUE(looper.importTrack(0, src.str().c_str(), kSR));
+    looper.setTrackLoopRegion(0, 1200, 3000);
+
+    const int repeats = 3;
+    WavTempFile out("wm_m21_agree_out.wav");
+    AudioLooper::ExportOptions opts;
+    opts.repeatLoops = repeats;
+    opts.applyLimiter = false;
+    ASSERT_TRUE(looper.exportMix(out.str().c_str(), opts));
+
+    wav::WavData wd = wav::readWav(out.str().c_str());
+    EXPECT_EQ(wd.numFrames, looper.getMasterLoopFrames() * repeats);
+}
+
+// Regresión — sin región puesta nada cambia. Es el caso de la mayoría de las pistas
+// y el que ya andaba: tiene que pasar en las DOS versiones del código, o el test de
+// arriba estaría midiendo "cambió algo" en vez de "cambió lo correcto".
+TEST(AudioLooper, Mini021WithoutARegionNothingChanges) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    WavTempFile src("wm_m21_plain_src.wav");
+    ASSERT_TRUE(makeWav(src.str(), /*frames=*/4800, kSR, 0.4f));
+    ASSERT_TRUE(looper.importTrack(0, src.str().c_str(), kSR));
+
+    EXPECT_EQ(looper.getMasterLoopFrames(), 4800);
+
+    WavTempFile out("wm_m21_plain_out.wav");
+    AudioLooper::ExportOptions opts;
+    opts.repeatLoops = 2;
+    opts.applyLimiter = false;
+    ASSERT_TRUE(looper.exportMix(out.str().c_str(), opts));
+
+    wav::WavData wd = wav::readWav(out.str().c_str());
+    EXPECT_EQ(wd.numFrames, 4800 * 2);
+}
+
 // Export → import round-trip preserves length through the whole WAV pipeline.
 TEST(AudioLooper, ExportImportRoundTrip) {
     AudioLooper looper;
