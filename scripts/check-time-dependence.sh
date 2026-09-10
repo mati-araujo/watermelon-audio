@@ -142,7 +142,24 @@ if ! printf '%s' "$probe_bloque" | grep -q "$PROBE_POS"; then
     echo "  MINI-008. Revisa bloques_de_fallo() contra el formato de ctest." >&2
     exit 3
 fi
-echo "  el extractor saca la causa de un fallo real                OK"
+
+# Y que sea ACOTADO, no el log entero.
+#
+# 🔴 Este chequeo lo trajo un MUTANTE QUE SOBREVIVIO: con `bloques_de_fallo`
+# reemplazada por un `cat` del log, el control de arriba seguia en verde —el nombre
+# aparece igual— y el script habria pasado a volcar 1274 tests por cada rojo. Un
+# volcado esconde la causa igual de bien que no imprimir nada, que es justo lo que
+# este MINI vino a arreglar.
+#
+# El discriminador es el RESUMEN de ctest: son las lineas que sobran, y un
+# extractor correcto no las incluye nunca.
+if printf '%s' "$probe_bloque" | grep -qE '^[0-9]+% tests passed|^Total Test time|^The following tests FAILED:'; then
+    echo "  ROTO: el extractor esta trayendo el resumen de ctest, no solo el bloque." >&2
+    echo "  Si arrastra eso, arrastra tambien la salida de los tests que PASARON: un" >&2
+    echo "  volcado entero esconde la causa igual de bien que no imprimir nada." >&2
+    exit 3
+fi
+echo "  el extractor saca la causa de un fallo real, y acotada     OK"
 
 if [ $only_self_test -eq 1 ]; then
     echo "self-test OK."
