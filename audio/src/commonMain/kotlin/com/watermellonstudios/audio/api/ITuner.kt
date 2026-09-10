@@ -60,6 +60,32 @@ interface ITuner {
     var selectedString: Int?
 
     /**
+     * Que el motor **elija la cuerda solo** desde la detección gruesa, con histéresis (REQ-001 S5).
+     *
+     * Es la **política de fallback de [selectedString]**, no un eje aparte: gobierna qué pasa
+     * cuando no hay cuerda elegida. Con [selectedString] puesto **manda el consumidor**, siempre —
+     * así que "automático encendido y cuerda elegida" no es una contradicción que haya que
+     * resolver, es el modo manual.
+     *
+     * **Nace en `false`**: encenderlo por default le cambiaría el comportamiento a un consumidor
+     * que no lo pidió, y elegir la cuerda es una decisión de producto, no un default nuestro.
+     *
+     * QUÉ MIRAR DEL OTRO LADO
+     * -----------------------
+     * Con esto encendido y sin cuerda elegida, el objetivo lo pone el motor: [TunerReading.target]
+     * dice contra cuál se publicó la lectura, y
+     * [com.watermellonstudios.audio.domain.tuner.TunerSnapshot.lockedString] trae su índice.
+     *
+     * 🔴 **Ese índice es 0-based y [selectedString] es 1-based.** No es un descuido de esta
+     * interfaz: `lockedString` indexa el arreglo de candidatos que el motor recibió, mientras que
+     * `selectedString` numera las cuerdas como las numera el músico. Si necesitás convertir,
+     * `selectedString = lockedString + 1`. Confundirlas devuelve la cuerda de al lado con cara de
+     * lectura válida — el bug que AC-001.15 existe para evitar. Prefiní usar [TunerReading.target],
+     * que ya resuelve la base.
+     */
+    var automaticStringSelection: Boolean
+
+    /**
      * Arranca el análisis.
      *
      * **Precondiciones: ninguna.** `start()` es auto-suficiente: crea el motor si no existe,
