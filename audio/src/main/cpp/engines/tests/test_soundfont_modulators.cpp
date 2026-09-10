@@ -321,4 +321,163 @@ TEST(SoundFontModulators, LaVelocityMaximaNormalizaExactamenteAUno) {
         << "con velocity 127 el default #1 no puede atenuar nada";
 }
 
+// ===========================================================================
+// AC-039.4 — composición y precedencia entre los CUATRO ámbitos (tarea 2.3).
+//
+// 🔑 Las reglas están MEDIDAS contra FluidSynth 2.6.0, no leídas de memoria. Se
+// generó un font por regla —moduladores idénticos en los cuatro campos, amounts
+// distintos— y se midió el rango de nivel entre velocity 127 y 15:
+//
+//   sólo el default (960 cB) .......... 37,12 dB   (la línea de base)
+//   global 960 vs zona 480 ............ 18,60 dB   = 480 solo  -> el local REEMPLAZA
+//   instrumento 960 vs preset 480 ..... 55,51 dB   = 1440      -> el preset SUMA
+//   uno igual al default con amount 0 ..  0,00 dB               -> reemplaza al default
+//   dos en el mismo ámbito (1440, 480) . 18,60 dB   = 480       -> gana el ÚLTIMO
+//
+// Los tests de abajo afirman el AMOUNT EFECTIVO que esas mediciones implican. Es
+// la magnitud que la composición decide; el nivel en dB ya lo cubre la
+// transferencia, probada arriba contra sus propios oráculos.
+// ===========================================================================
+
+using wma::sfmod::Modulator;
+using wma::sfmod::resolve;
+using wma::sfmod::Scopes;
+
+/** El modulador por defecto #1: velocity -> initialAttenuation, cóncava unipolar decreciente. */
+Modulator defaultUno(std::int16_t amount = 960) {
+    Modulator m;
+    m.srcOper = 0x0502;  // velocity, no CC, decreciente, unipolar, cóncava
+    m.destOper = 48;     // initialAttenuation
+    m.amount = amount;
+    m.amtSrcOper = 0;
+    m.transOper = 0;
+    return m;
+}
+
+/** El amount efectivo del modulador con esa identidad, tras componer. */
+std::int16_t amountEfectivo(const std::vector<Modulator>& resueltos, const Modulator& identidad) {
+    for (const auto& m : resueltos) {
+        if (m.sameIdentity(identidad)) return m.amount;
+    }
+    ADD_FAILURE() << "no quedo ningun modulador con esa identidad tras componer";
+    return 0;
+}
+
+/** 🔑 El delta que S1 dejó pedido: entre global y local del MISMO nivel, gana el local. */
+TEST(SoundFontModulators, EnElInstrumentoElAmbitoLocalReemplazaAlGlobal) {
+    Scopes s;
+    s.instrumentGlobal.push_back(defaultUno(960));
+    s.instrumentZone.push_back(defaultUno(480));
+
+    const auto r = resolve({}, s);
+    EXPECT_EQ(amountEfectivo(r, defaultUno()), 480)
+        << "FluidSynth rinde 18,60 dB en este caso, que es lo mismo que 480 solo: reemplaza";
+    EXPECT_EQ(r.size(), 1u) << "reemplazar significa que queda UNO, no dos";
+}
+
+/** Y la asimetría: el preset NO reemplaza — suma sobre lo que dejó el instrumento. */
+TEST(SoundFontModulators, ElPresetSumaSobreElInstrumentoEnVezDeReemplazarlo) {
+    Scopes s;
+    s.instrumentZone.push_back(defaultUno(960));
+    s.presetZone.push_back(defaultUno(480));
+
+    const auto r = resolve({}, s);
+    EXPECT_EQ(amountEfectivo(r, defaultUno()), 1440)
+        << "FluidSynth rinde 55,51 dB, que es 1440 cB: el preset es un OFFSET, no un reemplazo";
+    EXPECT_EQ(r.size(), 1u);
+}
+
+/**
+ * 🔴 La asimetría, afirmada como asimetría.
+ *
+ * Los dos tests de arriba pasarían igual si alguien escribiera las dos reglas como
+ * "sumar": el de instrumento daría 1440 y fallaría… pero si alguien las escribiera
+ * las dos como "reemplazar", el de preset daría 480 y fallaría. Este las compara
+ * **entre sí** para que el par no se pueda satisfacer con una sola regla.
+ */
+TEST(SoundFontModulators, LasDosReglasSonDISTINTASYNoUnaSola) {
+    Scopes enInstrumento;
+    enInstrumento.instrumentGlobal.push_back(defaultUno(960));
+    enInstrumento.instrumentZone.push_back(defaultUno(480));
+
+    Scopes cruzandoNiveles;
+    cruzandoNiveles.instrumentZone.push_back(defaultUno(960));
+    cruzandoNiveles.presetZone.push_back(defaultUno(480));
+
+    const auto a = amountEfectivo(resolve({}, enInstrumento), defaultUno());
+    const auto b = amountEfectivo(resolve({}, cruzandoNiveles), defaultUno());
+    EXPECT_NE(a, b) << "si las dos composiciones dan lo mismo, una de las dos reglas esta mal";
+    EXPECT_EQ(a, 480);
+    EXPECT_EQ(b, 1440);
+}
+
+/** Dentro de un mismo ámbito gana el último declarado. */
+TEST(SoundFontModulators, EnElMismoAmbitoGanaElUltimo) {
+    Scopes s;
+    s.instrumentGlobal.push_back(defaultUno(1440));
+    s.instrumentGlobal.push_back(defaultUno(480));
+
+    const auto r = resolve({}, s);
+    EXPECT_EQ(amountEfectivo(r, defaultUno()), 480) << "FluidSynth rinde 18,60 dB: gana el ultimo";
+    EXPECT_EQ(r.size(), 1u);
+}
+
+/**
+ * 🔑 Declarar uno igual a un default con amount 0 lo ANULA.
+ *
+ * Es la sub-prueba #13 E del spec-test, donde FluidSynth rinde **0,00 dB de rango**
+ * —la velocity deja de mover el nivel— contra los 18,52 que da el motor hoy. Y es
+ * la razón por la que los diez por defecto no podían quedar para otra etapa: sin
+ * ellos no hay qué anular.
+ */
+TEST(SoundFontModulators, DeclararloConAmountCeroAnulaElDefault) {
+    Scopes s;
+    s.instrumentGlobal.push_back(defaultUno(0));
+
+    const auto r = resolve({defaultUno(960)}, s);
+    EXPECT_EQ(amountEfectivo(r, defaultUno()), 0)
+        << "FluidSynth rinde 0,00 dB de rango: el declarado REEMPLAZA al default";
+
+    // Y con el amount en cero la transferencia no aporta nada, para ninguna velocity.
+    const Transform concavaDec = hecho(Curve::Concave, false, true);
+    for (const int v : {0, 15, 63, 127}) {
+        EXPECT_NEAR(contribution(0.0f, normalize7bit(v), concavaDec, 1.0f, sinFuente()), 0.0f, 1e-6)
+            << "velocity " << v;
+    }
+}
+
+/** Un modulador de identidad distinta convive: no se pisan por tener el mismo destino. */
+TEST(SoundFontModulators, DosIdentidadesDistintasConvivenAunqueCompartanDestino) {
+    Modulator porVelocity = defaultUno(960);
+    Modulator porTecla = defaultUno(480);
+    porTecla.srcOper = 0x0503;  // NoteOnKeyNumber en vez de velocity: OTRA identidad
+
+    Scopes s;
+    s.instrumentGlobal.push_back(porVelocity);
+    s.instrumentGlobal.push_back(porTecla);
+
+    const auto r = resolve({}, s);
+    ASSERT_EQ(r.size(), 2u) << "misma destino pero distinta FUENTE: son dos moduladores";
+    EXPECT_EQ(amountEfectivo(r, porVelocity), 960);
+    EXPECT_EQ(amountEfectivo(r, porTecla), 480);
+}
+
+/** El amount NO entra en la identidad: si entrara, nada se reemplazaría nunca. */
+TEST(SoundFontModulators, ElAmountNoFormaParteDeLaIdentidad) {
+    const Modulator a = defaultUno(960);
+    const Modulator b = defaultUno(480);
+    EXPECT_TRUE(a.sameIdentity(b)) << "difieren SOLO en el amount: son el mismo modulador";
+
+    Modulator otroDestino = defaultUno(960);
+    otroDestino.destOper = 8;  // initialFilterFc
+    EXPECT_FALSE(a.sameIdentity(otroDestino));
+}
+
+/** Sin nada declarado, los diez por defecto pasan intactos. */
+TEST(SoundFontModulators, SinModuladoresDeclaradosLosDefaultsPasanIntactos) {
+    const auto r = resolve({defaultUno(960)}, Scopes{});
+    ASSERT_EQ(r.size(), 1u);
+    EXPECT_EQ(r[0].amount, 960);
+}
+
 }  // namespace

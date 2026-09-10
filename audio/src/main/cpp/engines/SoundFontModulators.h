@@ -54,6 +54,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace wma {
 namespace sfmod {
@@ -183,6 +184,124 @@ inline float contribution(float amount, float primaryNormalized, const Transform
                           float amountNormalized, const Transform& secondary) {
     return amount * applyTransform(primaryNormalized, primary) *
            applyTransform(amountNormalized, secondary);
+}
+
+/**
+ * Un modulador tal como vive en `pmod`/`imod`: los cinco campos del spec §8.2.
+ *
+ * `amount` queda aparte de los otros cuatro a propósito: la **identidad** de un
+ * modulador —lo que decide si dos son "el mismo" para las reglas de precedencia—
+ * son `srcOper`, `destOper`, `amtSrcOper` y `transOper`, y NO el amount. De eso
+ * depende que declarar uno con amount 0 **anule** su equivalente en vez de
+ * agregar un cero al montón.
+ */
+struct Modulator {
+    std::uint16_t srcOper = 0;
+    std::uint16_t destOper = 0;
+    std::int16_t amount = 0;
+    std::uint16_t amtSrcOper = 0;
+    std::uint16_t transOper = 0;
+
+    /** Los CUATRO campos que definen identidad. El amount no entra. */
+    bool sameIdentity(const Modulator& other) const {
+        return srcOper == other.srcOper && destOper == other.destOper &&
+               amtSrcOper == other.amtSrcOper && transOper == other.transOper;
+    }
+};
+
+/**
+ * Las listas de moduladores de los cuatro ámbitos de SF2 §9.5, tal como salen del
+ * archivo y antes de componerse.
+ */
+struct Scopes {
+    std::vector<Modulator> instrumentGlobal;
+    std::vector<Modulator> instrumentZone;
+    std::vector<Modulator> presetGlobal;
+    std::vector<Modulator> presetZone;
+};
+
+namespace detail {
+
+/**
+ * Agrega `incoming` sobre `base` **reemplazando** por identidad.
+ *
+ * Es la regla de un nivel contra sí mismo: dentro de una lista gana el último, y
+ * una lista más específica pisa a la más general.
+ */
+inline void mergeReplacing(std::vector<Modulator>& base, const std::vector<Modulator>& incoming) {
+    for (const Modulator& m : incoming) {
+        bool replaced = false;
+        for (Modulator& existing : base) {
+            if (existing.sameIdentity(m)) {
+                existing = m;
+                replaced = true;
+                // Sin `break`: si la base trajera duplicados, todos quedan en el
+                // mismo valor y el resultado no depende de cuál se encontró primero.
+            }
+        }
+        if (!replaced) base.push_back(m);
+    }
+}
+
+/** Agrega `incoming` sobre `base` **sumando** los amounts por identidad. */
+inline void mergeAdding(std::vector<Modulator>& base, const std::vector<Modulator>& incoming) {
+    for (const Modulator& m : incoming) {
+        bool summed = false;
+        for (Modulator& existing : base) {
+            if (existing.sameIdentity(m)) {
+                existing.amount = static_cast<std::int16_t>(existing.amount + m.amount);
+                summed = true;
+            }
+        }
+        if (!summed) base.push_back(m);
+    }
+}
+
+}  // namespace detail
+
+/**
+ * Compone los cuatro ámbitos y los diez por defecto en la lista que se evalúa al
+ * disparar la nota.
+ *
+ * ## 🔑 Las reglas NO salen del spec leído de memoria: se MIDIERON
+ *
+ * Se generó un font por regla —con moduladores idénticos en los cuatro campos y
+ * amounts distintos— y se renderizó con **FluidSynth 2.6.0**, midiendo el rango de
+ * nivel entre velocity 127 y 15. El amount efectivo se lee del rango:
+ *
+ * | font | rango medido | qué prueba |
+ * |---|---|---|
+ * | sólo el default (960 cB) | 37,12 dB | la línea de base |
+ * | global 960 **vs** zona 480 | **18,60** (= 480 solo) | el local **reemplaza** al global |
+ * | instrumento 960 **vs** preset 480 | **55,51** (= 1440) | el preset **suma** sobre el instrumento |
+ * | uno igual al default con amount 0 | **0,00** | el declarado **reemplaza** al default |
+ * | dos en el mismo ámbito (1440, después 480) | **18,60** | gana el **último** |
+ *
+ * 🔴 **La asimetría es el punto y es fácil de escribir al revés**: entre ámbitos de
+ * instrumento se REEMPLAZA, pero el preset SUMA sobre lo que quedó. El spec lo
+ * justifica —los generadores de preset son *offsets*— pero la justificación no es
+ * la prueba; el render sí.
+ *
+ * Y cierra el hueco que S1 dejó declarado: `AC-039.4` hablaba de dos niveles
+ * (preset e instrumento) sin decir qué pasa entre el **global** y el **local** del
+ * mismo nivel. Pasa que el local gana.
+ */
+inline std::vector<Modulator> resolve(const std::vector<Modulator>& defaults,
+                                      const Scopes& scopes) {
+    // Nivel de instrumento: los defaults son la base y cada ámbito más específico
+    // pisa por identidad. Por eso declarar uno igual al default con amount 0 lo anula.
+    std::vector<Modulator> instrument = defaults;
+    detail::mergeReplacing(instrument, scopes.instrumentGlobal);
+    detail::mergeReplacing(instrument, scopes.instrumentZone);
+
+    // Nivel de preset: se compone aparte, con la misma regla de reemplazo.
+    std::vector<Modulator> preset;
+    detail::mergeReplacing(preset, scopes.presetGlobal);
+    detail::mergeReplacing(preset, scopes.presetZone);
+
+    // Y recién acá SUMA sobre el instrumento — medido, no supuesto.
+    detail::mergeAdding(instrument, preset);
+    return instrument;
 }
 
 }  // namespace sfmod
