@@ -340,10 +340,29 @@ TEST(SfSpecConformance, TheVelocityLaddersAreTheDefectMadeVisible) {
     for (double r : rangosNuestros) { minR = std::min(minR, r); maxR = std::max(maxR, r); }
     std::printf("  motor: rangos entre %.2f y %.2f dB -> dispersion %.2f dB sobre DIEZ sub-pruebas\n\n",
                 minR, maxR, maxR - minR);
+    /**
+     * 🔴 EL TRINQUETE ES BIDIRECCIONAL, Y LA PRIMERA VERSION NO LO ERA. Solo
+     * afirmaba que las diez escaleras coincidieran ENTRE SI, y eso no puede
+     * distinguir "las diez identicas en 18,5 dB" (hoy) de "las diez identicas en
+     * 0 dB" (el motor sin ninguna curva de velocity). Medido: con el termino de
+     * velocity de `tsf.h:1619` borrado, la dispersion BAJA de 0,13 a 0,07 y la
+     * version vieja seguia en VERDE mientras la tabla impresa cambiaba entera.
+     * Un numero que se imprime y no se afirma no protege nada.
+     *
+     * Por eso se afirma tambien el VALOR de hoy. Se pone rojo en las dos
+     * direcciones: si el motor deja de aplicar su curva cableada, y si empieza a
+     * leer los moduladores de verdad — que es lo que S2 tiene que hacer.
+     */
     EXPECT_LT(maxR - minR, 0.5)
         << "las diez escaleras dejaron de dar la misma curva (dispersion " << (maxR - minR)
         << " dB). Si es por el arreglo de REQ-039, ESTE ES EL TRINQUETE QUE HAY QUE DAR VUELTA: "
            "borralo y escribi el contrato nuevo por sub-prueba.";
+    EXPECT_GT(minR, 18.0)
+        << "el rango de las escaleras se achico (" << minR << " dB, hoy 18,5): el motor dejo de "
+           "aplicar SU curva de velocity, y eso no es el arreglo de REQ-039 — es otra cosa";
+    EXPECT_LT(maxR, 19.0)
+        << "el rango de las escaleras crecio (" << maxR << " dB, hoy 18,6). Si S2 esta leyendo "
+           "los moduladores, ESTE es el trinquete a dar vuelta.";
 
     // Y el control positivo del lado de la referencia: #13 E tiene el modulador
     // BORRADO, asi que sus ocho notas tienen que sonar IGUAL. Si esto no fuera
