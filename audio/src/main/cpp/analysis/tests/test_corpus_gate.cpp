@@ -206,7 +206,21 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
      * medido, la misma holgura que REQ-035 dejo (0,73 → 1).
      */
     constexpr double kRecordedFineBudgetCents = 0.4;
-    constexpr double kRecordedCoarseBudgetCents = 6.0;
+    /**
+     * REQ-038 S2 — el presupuesto de la GRUESA, sobre el exceso fuera del intervalo de sus dos
+     * referencias (ver el bloque del criterio, mas abajo).
+     *
+     * Venia de **6,0 c**, un numero heredado que ademas se medía sobre la ULTIMA publicacion
+     * —la cola decayendo— y contra el oraculo ESPECTRAL solo. Con la cifra correcta (la mediana
+     * de la nota) y el criterio correcto (el intervalo), lo medido sobre los 41 es un exceso
+     * medio de **0,085 c** y un peor caso de **1,73 c**, que es `guitarra-acero_A2` — el mismo
+     * archivo cuyo parcial 4 real esta a −16 c de la serie estirada y que ya esta declarado
+     * fuera del presupuesto FINO por ese mecanismo. El segundo peor es 0,76 c.
+     *
+     * 2,3 c es 1,3x sobre lo medido: la misma holgura que el repo ya uso dos veces (REQ-035
+     * dejo 0,73 -> 1; REQ-036 dejo 0,30 -> 0,4).
+     */
+    constexpr double kRecordedCoarseBudgetCents = 2.3;
 
     const auto& results = sweptCorpus();
     ASSERT_FALSE(results.empty())
@@ -224,6 +238,86 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
                     o.readingState, o.state, static_cast<double>(o.spectralSupport), o.lastReadingSec, o.noteEndSec);
     }
     std::printf("\n");
+
+    /**
+     * REQ-038 S2 — LA TABLA QUE PARTE EL REQ: la gruesa contra los DOS oraculos, sobre la cifra
+     * que describe la nota. Si el sesgo de acero es del material, la columna `vsTemp` tiene que
+     * ser mucho mas chica que `vsEspec` en los archivos de acero y parecida en el resto.
+     */
+    std::printf("  [REQ-038] la gruesa contra los dos oraculos (mediana desde %.1f s)\n", corpus::kSustainedFromSec);
+    std::printf("  %-24s %10s %10s %8s %8s %7s %7s %9s\n", "archivo", "medianaHz", "temporalHz",
+                "vsEspec", "vsTemp", "exceso", "r_temp", "ultimaC");
+    double peorTemp = 0.0, peorEspec = 0.0, peorExceso = 0.0, sumaExceso = 0.0;
+    int conDosOraculos = 0, adentro = 0;
+    for (const corpus::Outcome& o : results) {
+        const double med = corpus::coarseMedian(o, corpus::kSustainedFromSec);
+        if (!std::isfinite(med) || !std::isfinite(o.temporalHz)) {
+            std::printf("  %-24s %10s %10s\n", o.name.c_str(),
+                        std::isfinite(med) ? "-" : "sin mediana",
+                        std::isfinite(o.temporalHz) ? "-" : "sin temporal");
+            continue;
+        }
+        const double vsEspec = 1200.0 * std::log2(med / o.trueHz);
+        const double vsTemp = 1200.0 * std::log2(med / o.temporalHz);
+        const double ultima = o.detectedHz > 0.0 ? 1200.0 * std::log2(o.detectedHz / o.trueHz) : NAN;
+        const bool dentro = (vsEspec >= 0.0 && vsTemp <= 0.0) || (vsEspec <= 0.0 && vsTemp >= 0.0);
+        const double exceso = dentro ? 0.0 : std::min(std::fabs(vsEspec), std::fabs(vsTemp));
+        std::printf("  %-24s %10.3f %10.3f %+8.2f %+8.2f %7.2f %7.4f %+9.2f\n", o.name.c_str(), med,
+                    o.temporalHz, vsEspec, vsTemp, exceso, o.temporalR, ultima);
+        peorTemp = std::max(peorTemp, std::fabs(vsTemp));
+        peorEspec = std::max(peorEspec, std::fabs(vsEspec));
+        peorExceso = std::max(peorExceso, exceso);
+        sumaExceso += exceso;
+        ++conDosOraculos;
+        adentro += dentro ? 1 : 0;
+    }
+    // 🔴 El resumen que sostiene el criterio: si una sola de las dos referencias fuera la
+    // correcta, su peor caso seria el presupuesto. Es el EXCESO el que se presupuesta.
+    std::printf("  peor |vsEspectral| = %.2f c  ·  peor |vsTemporal| = %.2f c  ·  "
+                "PEOR EXCESO = %.2f c\n", peorEspec, peorTemp, peorExceso);
+    std::printf("  %d de %d caen DENTRO del intervalo de las dos referencias; exceso medio %.3f c "
+                "(presupuesto %.2f)\n\n",
+                adentro, conDosOraculos, conDosOraculos ? sumaExceso / conDosOraculos : 0.0,
+                kRecordedCoarseBudgetCents);
+
+    /**
+     * 🔴 LO QUE HACE QUE EL CRITERIO DEL INTERVALO PUEDA FALLAR.
+     *
+     * Un criterio que dijera "dentro" siempre pasaria este gate sin medir nada, y ningun
+     * archivo del corpus lo delataria: los 41 estan por debajo del presupuesto. Es el mutante
+     * obvio de este test, y sobrevive a todo lo de arriba.
+     *
+     * Las dos afirmaciones que siguen lo matan, y no son un truco: son las dos propiedades sin
+     * las cuales el intervalo no significaria nada.
+     */
+    ASSERT_GT(conDosOraculos, 0) << "ningun archivo tuvo las dos referencias";
+    // (1) El intervalo NO es universal: si todos cayeran adentro, seria un pase gratis y
+    //     habria que apretarlo. Hoy caen 26 de 41 y el resto queda a 0,085 c de media.
+    EXPECT_LT(adentro, conDosOraculos)
+        << "TODOS los archivos caen dentro del intervalo de sus dos referencias: asi el criterio "
+           "no puede fallar sobre este corpus y no esta midiendo nada";
+    // (2) Y no es degenerado donde importa: sobre el material inarmonico las dos referencias
+    //     TIENEN que discrepar, y sobre el armonico TIENEN que coincidir. Si esto se invirtiera,
+    //     el oraculo temporal habria dejado de ser un segundo metodo.
+    {
+        double anchoAcero = 0.0, anchoControl = 0.0;
+        for (const corpus::Outcome& o : results) {
+            const double med = corpus::coarseMedian(o, corpus::kSustainedFromSec);
+            if (!std::isfinite(med) || !std::isfinite(o.temporalHz)) continue;
+            const double ancho = std::fabs(1200.0 * std::log2(o.temporalHz / o.trueHz));
+            if (o.name.rfind("guitarra-acero_E2", 0) == 0) anchoAcero = ancho;
+            if (o.name.rfind("guitarra-jazz_E2", 0) == 0) anchoControl = ancho;
+        }
+        EXPECT_GT(anchoAcero, 2.0)
+            << "guitarra-acero_E2: las dos referencias coinciden (" << anchoAcero
+            << " c) — sobre una cuerda de acero tienen que discrepar, o el oraculo temporal "
+               "dejo de medir el periodo y volvio a medir H1";
+        EXPECT_LT(anchoControl, 1.0)
+            << "guitarra-jazz_E2 (control armonico): las dos referencias discrepan en "
+            << anchoControl << " c — sobre material armonico el intervalo tiene que cerrarse";
+        std::printf("  ancho del intervalo: acero_E2 %.2f c  ·  jazz_E2 (control) %.2f c\n\n",
+                    anchoAcero, anchoControl);
+    }
 
     /**
      * 🔴 TRINQUETE BIDIRECCIONAL: los archivos donde el detector lee un SUBMULTIPLO. Se declara
@@ -308,11 +402,90 @@ TEST(CorpusRobustness, TheRecordedCorpusSweepRunsOnlyWhenThereIsACorpus) {
         EXPECT_EQ(o.spectralSupport, 1.0f) << o.name << ": la altura publicada no tiene soporte";
         EXPECT_NE(o.state, wma::analysis::kStateNoSignal) << o.name << ": termino en ausencia";
         ASSERT_GT(o.detectedHz, 0.0) << o.name << ": termino sin altura gruesa";
-        const double coarseCents = 1200.0 * std::log2(o.detectedHz / o.trueHz);
-        EXPECT_LT(std::fabs(coarseCents), kWrongNoteCents)
+
+        /**
+         * REQ-038 S2 (AC-038.4) — LA GRUESA SE JUZGA CONTRA LA CANTIDAD QUE MIDE, Y SOBRE LA
+         * CIFRA QUE DESCRIBE LA NOTA. Las dos mitades de esta comparacion estaban mal:
+         *
+         *  · LA CIFRA. Se medía `o.detectedHz`, que es la altura de la ULTIMA publicacion —la
+         *    cola decayendo—. Por eso `bajo-pua_A1` figuraba con −4,66 c cuando su mediana esta
+         *    en −0,06: el numero acusaba al detector por una lectura de la cola. S1 arreglo el
+         *    barrido (`coarseMedian`, `coarseAtReading`) y este gate era el ultimo que seguia
+         *    leyendo la vieja.
+         *  · EL ORACULO. Se comparaba contra `trueHz`, que es el pico ESPECTRAL de H1. La
+         *    gruesa es TEMPORAL (NSDF sobre la forma de onda) y sobre una cuerda inarmonica
+         *    esas dos cantidades no son la misma: `f_n = n·f0·sqrt(1+B·n²)` no tiene periodo
+         *    exacto. Medido en S1: sobre `guitarra-acero_E2` el detector da +6,32 c, una
+         *    autocorrelacion cruda INDEPENDIENTE +6,71 c, y H1 0,00 c. Dos metodos temporales
+         *    coinciden y el espectral se aparta: el sesgo es del MATERIAL, no del detector.
+         *
+         * `temporalHz` es ese segundo oraculo (`TemporalOracle.h`, con su propio self-test en
+         * `test_temporal_oracle.cpp`).
+         */
+        const double coarseMedianHz = corpus::coarseMedian(o, corpus::kSustainedFromSec);
+        ASSERT_TRUE(std::isfinite(coarseMedianHz))
+            << o.name << ": no hubo ninguna publicacion con altura despues de "
+            << corpus::kSustainedFromSec << " s";
+
+        // La guarda gruesa —"no es otra nota"— sigue siendo contra el nominal declarado: media
+        // nota es media nota mida quien mida, y ahi no hay ambiguedad de cantidad.
+        const double coarseVsTrue = 1200.0 * std::log2(coarseMedianHz / o.trueHz);
+        EXPECT_LT(std::fabs(coarseVsTrue), kWrongNoteCents)
             << o.name << ": la deteccion gruesa esta a mas de media nota";
-        EXPECT_LT(std::fabs(coarseCents), kRecordedCoarseBudgetCents)
-            << o.name << ": la gruesa se aparto " << coarseCents << " c del oraculo";
+
+        // Sin referencia no se juzga la gruesa — y eso es un FALLO, no un salteo: un archivo
+        // que desaparece de la comparacion en silencio es un falso verde. Se usa
+        // `ADD_FAILURE` y no `ASSERT_` para que una nota corta no se lleve puesta la revision
+        // de los otros 40.
+        if (!std::isfinite(o.temporalHz)) {
+            ADD_FAILURE() << o.name << ": el oraculo temporal no pudo medir esta nota; su gruesa "
+                                       "quedaria sin juzgar";
+            continue;
+        }
+
+        /**
+         * 🔴 EL CRITERIO ES UN INTERVALO, NO UN PUNTO — y eso NO es aflojar el gate: lo APRIETA.
+         *
+         * Sobre una cuerda inarmonica "la altura" no es un solo numero. El pico espectral de H1
+         * dice una cosa, el periodo de la forma de onda dice otra, y las dos son correctas: la
+         * serie `f_n = n·f0·sqrt(1+B·n²)` no tiene periodo exacto. Pedirle al detector que
+         * coincida con UNA de las dos es pedirle que resuelva una ambiguedad que esta en la
+         * señal, no en el.
+         *
+         * Asi que lo que se exige es que caiga DENTRO del intervalo que las dos referencias
+         * abren. Sobre material armonico ese intervalo se cierra —las dos referencias coinciden—
+         * y el criterio queda tan estricto como comparar contra un punto; sobre material
+         * inarmonico se abre exactamente lo que la fisica del material justifica.
+         *
+         * MEDIDO sobre los 41 (2026-09-09), y es lo que decidio el criterio — las tres opciones
+         * se compararon con numeros antes de elegir:
+         *
+         *   | referencia                    | exceso medio | peor  | mejor en |
+         *   |-------------------------------|--------------|-------|----------|
+         *   | espectral sola (lo de antes)  | 0,307 c      | 4,66  | 30 de 41 |
+         *   | temporal sola                 | 0,416 c      | 2,41  |  8 de 41 |
+         *   | **el intervalo de las dos**   | **0,085 c**  | **1,73** | 26 caen ADENTRO |
+         *
+         * 🔴 La opcion "temporal sola" era la que la spec habia decidido (decision 1 de S2), y
+         * la medicion la REFUTA: mejora el peor caso pero empeora la media y esta mas lejos en
+         * 30 de los 41 archivos. El detector no es un estimador puro de periodo de onda —la
+         * normalizacion de McLeod, la decimacion y el refinamiento lo dejan ENTRE las dos
+         * cantidades— asi que ninguna de las dos sola es su referencia. Ver las Notas de S2.
+         *
+         * Y el caso que abrio el REQ queda con exceso CERO: `guitarra-acero_E2`, que contra H1
+         * media +4,66 c, cae entre las dos referencias. El sesgo era del material.
+         */
+        const double coarseVsTemporal = 1200.0 * std::log2(coarseMedianHz / o.temporalHz);
+        // Adentro del intervalo <=> la mediana esta entre las dos referencias <=> los dos
+        // desvios tienen signos opuestos (o alguno es exactamente cero).
+        const bool dentro = (coarseVsTrue >= 0.0 && coarseVsTemporal <= 0.0) ||
+                            (coarseVsTrue <= 0.0 && coarseVsTemporal >= 0.0);
+        const double exceso =
+            dentro ? 0.0 : std::min(std::fabs(coarseVsTrue), std::fabs(coarseVsTemporal));
+        EXPECT_LT(exceso, kRecordedCoarseBudgetCents)
+            << o.name << ": la gruesa quedo " << exceso
+            << " c FUERA del intervalo que abren sus dos referencias (espectral "
+            << coarseVsTrue << " c, temporal " << coarseVsTemporal << " c)";
 
         if (knownNoFineReading(o.name)) {
             EXPECT_FALSE(o.published)
@@ -771,18 +944,26 @@ TEST(CorpusRobustness, TheAttackTrajectoryAndWhatTheGateWouldChange) {
     std::printf("\n");
 
     /**
-     * AC-036.6 — EL TRINQUETE DEL CORPUS, sobre lo que PRODUCCION publica (la columna "hoy" de arriba):
-     * al menos las 33 convergidas que habia antes de REQ-036, y el error maximo entre ellas por
-     * debajo del 0,73 c de entonces. Medido al cerrar S2 (2026-09-09): 39 y 0,30. Los dos numeros
-     * de la linea de base son los de la spec, no se re-miden aca: son lo que este cambio prometio no
-     * empeorar.
+     * AC-036.6 / AC-038.5 — EL TRINQUETE DEL CORPUS, sobre lo que PRODUCCION publica (la columna
+     * "hoy" de arriba).
+     *
+     * 🔴 REQ-038 S2 LO APRETO A LO QUE REQ-036 DEJO MEDIDO. Estaba escrito contra la linea de base
+     * ANTERIOR a REQ-036 —33 convergidas y 0,73 c— cuando ese REQ ya habia entregado **39 y 0,30**:
+     * o sea que el corpus podia perder SEIS lecturas convergidas y duplicar su error con el gate en
+     * verde. Un trinquete que no se aprieta cuando se gana terreno deja de proteger lo ganado, que
+     * es exactamente lo que un trinquete existe para hacer.
+     *
+     * Y es lo que AC-038.5 pide: arreglar la gruesa no puede pagarse con la fina. S2 no toca
+     * produccion, asi que estos dos numeros tienen que salir IDENTICOS; si no salen, algo mas se
+     * movio y hay que mirarlo.
      */
-    constexpr int kConvergedBeforeReq036 = 33;
-    constexpr double kMaxErrorBeforeReq036 = 0.73;
-    EXPECT_GE(convergedToday, kConvergedBeforeReq036)
-        << "la admision por tendencia bajo las convergidas del corpus: " << convergedToday << " de " << published;
-    EXPECT_LT(maxToday, kMaxErrorBeforeReq036)
-        << "el error maximo de las convergidas no bajo: " << maxToday << " c";
+    constexpr int kConvergedAfterReq036 = 39;
+    constexpr double kMaxErrorAfterReq036 = 0.31;   // medido 0,30; el 0,01 es la resolucion impresa
+    EXPECT_GE(convergedToday, kConvergedAfterReq036)
+        << "bajaron las convergidas del corpus: " << convergedToday << " de " << published
+        << " (REQ-036 dejo " << kConvergedAfterReq036 << ")";
+    EXPECT_LT(maxToday, kMaxErrorAfterReq036)
+        << "subio el error maximo de las convergidas: " << maxToday << " c (REQ-036 dejo 0,30)";
 
     EXPECT_EQ(mismatches, 0) << "la historia de fases reconstruida no reproduce la ventana de produccion";
     EXPECT_LT(worstFidelity, 1e-6) << "el simulador no reproduce la lectura de produccion sin compuerta";

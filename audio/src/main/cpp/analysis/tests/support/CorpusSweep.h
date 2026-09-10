@@ -33,6 +33,7 @@
 #include "../../StrobeTracker.h"
 #include "../../../looper/WavFile.h"
 #include "SyntheticSignal.h"
+#include "TemporalOracle.h"
 
 #include <algorithm>
 #include <cmath>
@@ -113,6 +114,21 @@ struct Outcome {
      * el oraculo (`fineHz`, `fineVsTrueCents`).
      */
     double strobeTargetHz = NAN;
+    /**
+     * REQ-038 S2 — EL ORACULO TEMPORAL sobre el tramo sostenido de este archivo: el periodo
+     * de la forma de onda por autocorrelacion cruda (`TemporalOracle.h`).
+     *
+     * 🔴 NO es `trueHz`, y esa es toda la razon de que exista. `trueHz` sale del oraculo
+     * ESPECTRAL (el pico de H1), que es la cantidad correcta para la lectura FINA. La
+     * deteccion GRUESA es temporal, y sobre una cuerda inarmonica las dos cantidades NO son
+     * la misma: medido en S1, `guitarra-acero_E2` da +6,32 c por el detector, +6,71 c por
+     * autocorrelacion y 0,00 c por H1. Comparar la gruesa contra `trueHz` la acusaba de un
+     * sesgo que es del MATERIAL.
+     *
+     * `NAN` = la nota no tenia tramo sostenido suficiente (ver `measurePeriod`).
+     */
+    double temporalHz = NAN;
+    double temporalR = NAN;           ///< la correlacion en ese periodo: baja con la inarmonicidad
     double fineHz = NAN;              ///< la lectura fina en Hz absolutos
     double fineVsTrueCents = NAN;     ///< y contra `trueHz`: el error REAL de la fina
     double strobeSigmaC = NAN;        ///< `uncertaintyCents()`
@@ -184,6 +200,21 @@ struct Outcome {
  * Devuelven NaN cuando no hay ninguna publicacion que cumpla, y no cero: cero es una altura
  * plausible y un consumidor la leeria como dato.
  */
+/**
+ * REQ-038 S2 — DESDE DONDE EMPIEZA "LA NOTA SOSTENIDA", y es UNA sola constante a proposito.
+ *
+ * La usan las dos cosas que se comparan entre si: la MEDIANA de la gruesa (`coarseMedian`) y
+ * el ORACULO TEMPORAL (`sweepFile`). Si cada una arrancara en un instante distinto estarian
+ * describiendo tramos distintos de la nota y su diferencia mezclaria dos efectos — que es
+ * exactamente el defecto de instrumento que S1 arreglo.
+ *
+ * 1,0 s y no 1,5: el ataque es un transitorio de afinacion que se asienta cerca de 1 s
+ * (REQ-036), y las notas mas cortas del corpus duran **1,49 s** (`ukelele_A4`), asi que
+ * arrancar a 1,5 deja al oraculo sin nota que medir. Medido: con 1,5 s ese archivo quedaba
+ * sin referencia y su gruesa sin juzgar.
+ */
+inline constexpr double kSustainedFromSec = 1.0;
+
 inline double coarseAtReading(const Outcome& o) {
     double hz = NAN;
     for (const Outcome::Publication& p : o.publicationLog)
@@ -407,6 +438,23 @@ inline Outcome sweepFile(const std::string& path, const Entry& e) {
     const int frames = noteEndFrames(data);
     o.noteEndSec = static_cast<double>(frames) / data.sampleRate;
     if (frames <= 0) return o;
+
+    // REQ-038 S2 — el oraculo TEMPORAL, sobre las mismas muestras que se le van a dar al
+    // analisis (la NOTA, no el archivo entero: la cola que sigue no tiene altura estable).
+    // Se mide aca y no en el test para no volver a leer los 41 WAV: `sweptCorpus()` comparte
+    // este barrido por proceso.
+    {
+        const std::vector<float> nota(
+            data.buffer.begin(),
+            data.buffer.begin() + static_cast<std::ptrdiff_t>(frames) * 2);
+        const wma_test::oracle::TemporalReading t =
+            wma_test::oracle::measurePeriodInterleaved(nota, 2, data.sampleRate, e.trueHz,
+                                                      kSustainedFromSec);
+        if (t.valid) {
+            o.temporalHz = t.hz;
+            o.temporalR = t.r;
+        }
+    }
 
     wma::analysis::AnalysisRing ring;
     wma::analysis::AnalysisSnapshot snapshot;
