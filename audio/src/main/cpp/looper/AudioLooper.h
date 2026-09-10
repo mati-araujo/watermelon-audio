@@ -1218,18 +1218,37 @@ public:
 
     // ========== State queries (lock-free) ==========
 
-    /** Progress of the longest active track (0..1). */
-    float getProgress() const {
+    /**
+     * @brief Index of the active track with the LONGEST LOOP, or -1 if none.
+     *
+     * 🔴 The unit here is the loop REGION, not the buffer. The engine plays
+     * `[loopStart, loopEnd)` and normalises progress against it
+     * (`TrackBuffer::process`), so a "master" measured in buffer frames describes
+     * something that never plays: a free take is trimmed to its first onset and an
+     * imported sample is bar-snapped short of its buffer end.
+     *
+     * 🔑 It exists so that [getProgress] and [getMasterLoopFrames] can never
+     * disagree. They used to pick the track separately AND in different units —
+     * progress region-relative, master in buffer frames — so every consumer that
+     * multiplied one by the other got a wrong duration, off by `buffer / region`.
+     * Sharing the selection makes the pair correct by construction rather than by
+     * coincidence.
+     */
+    int longestLoopTrack() const {
         int longestIdx = -1;
         int longestLen = 0;
         for (int i = 0; i < MAX_TRACKS; ++i) {
-            if (mTracks[i].isActive()) {
-                int len = mTracks[i].getLengthFrames();
-                if (len > longestLen) { longestLen = len; longestIdx = i; }
-            }
+            if (!mTracks[i].isActive()) continue;
+            const int len = mTracks[i].getLoopLength();
+            if (len > longestLen) { longestLen = len; longestIdx = i; }
         }
-        if (longestIdx >= 0) return mTracks[longestIdx].getProgress();
-        return 0.0f;
+        return longestIdx;
+    }
+
+    /** Progress (0..1) of the active track with the longest loop. */
+    float getProgress() const {
+        const int idx = longestLoopTrack();
+        return (idx >= 0) ? mTracks[idx].getProgress() : 0.0f;
     }
     float getRecordProgress() const { return mRecordProgress.load(std::memory_order_acquire); }
     /** True if any track is currently playing. */
@@ -1241,16 +1260,17 @@ public:
     }
     bool isRecording() const { return mRecordingTrack.load(std::memory_order_acquire) >= 0; }
     int getRecordingTrack() const { return mRecordingTrack.load(std::memory_order_acquire); }
-    /** Returns the length of the longest active track (computed, not stored). */
+    /**
+     * @brief The master loop: the LONGEST LOOP among active tracks, in frames.
+     *
+     * That is `loopEnd - loopStart` of the track [longestLoopTrack] picks — the
+     * span that actually repeats — and NOT the longest buffer. Paired with
+     * [getProgress], which is normalised against that same region, so
+     * `progress * getMasterLoopFrames()` is a real frame offset into the loop.
+     */
     int getMasterLoopFrames() const {
-        int maxLen = 0;
-        for (int i = 0; i < MAX_TRACKS; ++i) {
-            if (mTracks[i].isActive()) {
-                int len = mTracks[i].getLengthFrames();
-                if (len > maxLen) maxLen = len;
-            }
-        }
-        return maxLen;
+        const int idx = longestLoopTrack();
+        return (idx >= 0) ? mTracks[idx].getLoopLength() : 0;
     }
 
     bool isTrackActive(int index) const {

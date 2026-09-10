@@ -43,7 +43,16 @@ LooperExporter::ExportSnapshot LooperExporter::takeSnapshot() const {
         ts.volume = track.getVolume();
         ts.pan = track.getPan();
         ts.track = &track;
-        if (ts.length > s.frames) s.frames = ts.length;
+        // 🔴 The mix is as long as the longest LOOP, not the longest buffer.
+        // `mixTrackInto` wraps each track on its region (`loopStart + t % loopLen`),
+        // so sizing the output by the buffer wrote MORE than one lap: measured on a
+        // real free take, a `repeatLoops = 1` export came out 1.25 laps long, cut
+        // mid-lap — an exported loop that does not loop. Same rule as
+        // `AudioLooper::getMasterLoopFrames`, so a rendered video and its audio
+        // cannot drift apart.
+        const int loopEnd = (ts.loopEnd > 0) ? ts.loopEnd : ts.length;
+        const int loopLen = loopEnd - ts.loopStart;
+        if (loopLen > s.frames) s.frames = loopLen;
         if (s.sampleRate <= 0) s.sampleRate = track.getSampleRate();
     }
     return s;
