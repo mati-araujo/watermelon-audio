@@ -2,6 +2,7 @@
 
 #include "SynthEngine.h"
 #include "SoundFontManager.h"
+#include "SoundFontNoteOn.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -144,13 +145,14 @@ public:
         // El hazard pointer se baja SIEMPRE, por cualquier salida. Mientras esté
         // arriba, el hilo de control tiene prohibido liberar este `tsf`; si se
         // quedara arriba, el font no se liberaría nunca. Ver
-        // SoundFontManager::acquireActive().
+        // SoundFontManager::acquireActiveFont().
         struct ActiveGuard {
             SoundFontManager* mgr;
             ~ActiveGuard() { if (mgr) mgr->releaseActive(); }
         } guard{mSFManager};
 
-        tsf* sf = mSFManager ? mSFManager->acquireActive() : nullptr;
+        const ActiveFont* font = mSFManager ? mSFManager->acquireActiveFont() : nullptr;
+        tsf* sf = font ? font->sf : nullptr;
         if (!sf) {
             std::fill_n(buffer, numFrames * 2, 0.0f);
             return;
@@ -183,7 +185,7 @@ public:
         }
 
         // 2. Drain event queue — all tsf calls happen HERE on audio thread
-        drainEvents(sf);
+        drainEvents(sf, &font->modulators);
 
         // 2b. REQ-008 — la expresion por toque, suavizada POR BLOQUE.
         //
@@ -312,7 +314,12 @@ private:
         mWritePos.store(nextWrite, std::memory_order_release);
     }
 
-    void drainEvents(tsf* sf) {
+    /**
+     * REQ-039 S2 — el note-on pasa por `channelNoteOnWithModulators`, que es EL
+     * note-on del renderizador (tsf + los moduladores del archivo). Ver
+     * `SoundFontNoteOn.h` por qué no es un método de esta fachada.
+     */
+    void drainEvents(tsf* sf, const wma::sfmod::ModulatorTable* table) {
         int read = mReadPos.load(std::memory_order_relaxed);
         int write = mWritePos.load(std::memory_order_acquire);
 
@@ -343,7 +350,8 @@ private:
                         tsf_channel_set_volume(sf, tid, 1.0f);
                         // Start new note
                         if (!touch.active || touch.midiNote != note) {
-                            tsf_channel_note_on(sf, tid, note, event.velocity);
+                            wma::sfmod::channelNoteOnWithModulators(sf, table, tid, note,
+                                                                    event.velocity);
                         }
                         touch.active = true;
                         touch.midiNote = note;

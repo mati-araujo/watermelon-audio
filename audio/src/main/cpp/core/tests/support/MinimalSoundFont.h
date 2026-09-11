@@ -32,7 +32,21 @@
  *
  * Las listas terminan con un registro **terminal** (EOP/EOI/EOS): tsf recorre
  * `num - 1` entradas y usa la última como centinela de índices. Por eso hay dos
- * de casi todo y uno solo de `pmod`/`imod`.
+ * de casi todo.
+ *
+ * ## Moduladores, y por qué son CUATRO ámbitos (REQ-039 S2)
+ *
+ * Sin `ModulatorPlacement` el archivo sale **byte a byte como antes**: `pmod` e
+ * `imod` llevan sólo su terminal, que es lo que este fixture emitía desde que
+ * existe. Al pedir moduladores aparecen las bags que hagan falta, y ahí la forma
+ * importa: la zona **global** es la primera bag que NO declara `GenInstrument`
+ * (preset) o `GenSampleID` (instrumento), y sus moduladores aplican a **todas**
+ * las zonas de su padre — no a una región.
+ *
+ * 🔴 Emitir sólo moduladores de zona dejaría esta etapa probando el caso raro:
+ * medido sobre el `SoundFont-Spec-Test`, **21 de 25** moduladores son globales, y
+ * **18 de los 19** de velocity. Un fixture que no puede producir el caso que el
+ * test dice cubrir deja el test verde **por vacío**.
  */
 
 #include <cstdint>
@@ -52,9 +66,83 @@ enum : uint16_t {
     kGenSampleId = 53,    ///< zona de instrumento -> índice de sample
 };
 
+/** Destinos de modulador que usan los tests (`genOper` como destino). */
+enum : uint16_t {
+    kGenInitialFilterFc = 8,       ///< corte del low-pass, en cents absolutos
+    kGenInitialAttenuation = 48,   ///< atenuación, en centibeles
+    kGenPan = 17,                  ///< paneo, en 0,1 %
+};
+
+/**
+ * `modSrcOper` / `modAmtSrcOper` — el campo de 16 bits del spec SF2 §8.2.
+ *
+ * Se arma con [[srcOper]] en vez de a mano porque el orden de los bits es la
+ * clase de detalle que se escribe mal una vez y después nadie relee:
+ * `bit 0-6` índice, `bit 7` CC, `bit 8` dirección, `bit 9` polaridad,
+ * `bit 10-15` curva.
+ */
+enum : uint16_t {
+    kSrcNone = 0,        ///< "sin controlador": el modulador aporta su amount tal cual
+    kSrcVelocity = 2,    ///< NoteOnVelocity
+    kSrcKeyNumber = 3,   ///< NoteOnKeyNumber
+};
+enum : uint16_t { kCurveLinear = 0, kCurveConcave = 1, kCurveConvex = 2, kCurveSwitch = 3 };
+
+/** Arma un `modSrcOper` del spec §8.2 a partir de sus cinco campos. */
+inline constexpr uint16_t srcOper(uint16_t index, bool isCC, bool decreasing,
+                                  bool bipolar, uint16_t curve) {
+    return static_cast<uint16_t>((index & 0x7F) | (isCC ? 0x80 : 0) |
+                                 (decreasing ? 0x100 : 0) | (bipolar ? 0x200 : 0) |
+                                 ((curve & 0x3F) << 10));
+}
+
+/** Un modulador tal como vive en `pmod`/`imod`: cinco campos de 16 bits. */
+struct Modulator {
+    uint16_t srcOper = kSrcNone;
+    uint16_t destOper = 0;
+    int16_t amount = 0;
+    uint16_t amtSrcOper = kSrcNone;
+    uint16_t transOper = 0;  ///< 0 = lineal. Distinto de 0 es lo que AC-039.8 manda rechazar.
+};
+
+/**
+ * Dónde va cada modulador — **los cuatro ámbitos de SF2 §9.5**, no dos.
+ *
+ * 🔴 Que sean cuatro y no dos es el hallazgo de REQ-039 S1 (tarea 1.6), y no es
+ * teórico: sobre el `SoundFont-Spec-Test` **21 de 25** moduladores viven en la
+ * zona global de su instrumento, y **18 de los 19** de velocity. Un fixture que
+ * sólo supiera emitir moduladores de zona dejaría los tests de esta etapa verdes
+ * sin poder producir el caso que dicen cubrir.
+ *
+ * La zona global es la **primera** bag que no declara `GenInstrument` (preset) o
+ * `GenSampleID` (instrumento) — así la reconoce `tsf_load_presets`, y así se
+ * emite acá. Las bags globales sólo se agregan **si se piden moduladores para
+ * ellas**: sin eso el archivo sale byte a byte igual que antes de REQ-039.
+ */
+struct ModulatorPlacement {
+    std::vector<Modulator> instrumentGlobal;  ///< aplica a todas las zonas del instrumento
+    std::vector<Modulator> instrumentZone;    ///< sólo a la zona que trae el sample
+    std::vector<Modulator> presetGlobal;      ///< aplica a todas las zonas del preset
+    std::vector<Modulator> presetZone;        ///< sólo a la zona que trae el instrumento
+
+    bool empty() const {
+        return instrumentGlobal.empty() && instrumentZone.empty() &&
+               presetGlobal.empty() && presetZone.empty();
+    }
+};
+
 inline void put16(std::vector<uint8_t>& out, uint16_t v) {
     out.push_back(static_cast<uint8_t>(v & 0xFF));
     out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+}
+
+/** Escribe un modulador en su chunk, en el orden del spec. */
+inline void putModulator(std::vector<uint8_t>& out, const Modulator& m) {
+    put16(out, m.srcOper);
+    put16(out, m.destOper);
+    put16(out, static_cast<uint16_t>(m.amount));
+    put16(out, m.amtSrcOper);
+    put16(out, m.transOper);
 }
 
 inline void put32(std::vector<uint8_t>& out, uint32_t v) {
@@ -111,7 +199,8 @@ inline void putChunk(std::vector<uint8_t>& out, const char* id,
 inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 22050,
                                                 bool looping = false,
                                                 int keyRangeLo = -1,
-                                                int keyRangeHi = -1) {
+                                                int keyRangeHi = -1,
+                                                const sf2::ModulatorPlacement& mods = {}) {
     using namespace sf2;
 
     // ---- sdta: 64 samples de 16 bits. tsf pide >= un short; 64 deja lugar a
@@ -158,15 +247,34 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
     put32(phdr, 0); put32(phdr, 0); put32(phdr, 0);  // library / genre / morphology
     putName20(phdr, "EOP");                          // terminal
     put16(phdr, 0); put16(phdr, 0);
-    put16(phdr, 1);   // presetBagNdx del terminal = fin de las zonas
+    // El `presetBagNdx` del terminal marca DÓNDE TERMINAN las zonas de este preset,
+    // así que tiene que contar las que de verdad se escribieron: con zona global
+    // son dos, y dejarlo en 1 escondería la zona real detrás del centinela.
+    put16(phdr, mods.presetGlobal.empty() ? 1 : 2);
     put32(phdr, 0); put32(phdr, 0); put32(phdr, 0);
 
+    // ---- pbag / pmod.
+    //
+    // La zona GLOBAL de preset es la primera bag SIN `GenInstrument`, y sólo se
+    // emite si se pidieron moduladores para ella: sin eso el archivo sale igual
+    // que antes de REQ-039, y los tests que ya existían no ven ninguna
+    // diferencia. Los `genNdx` de la global y de la zona coinciden, o sea que la
+    // global no declara generadores — su rango es vacío, que es lo que se quiere.
+    const bool tieneGlobalDePreset = !mods.presetGlobal.empty();
+    const uint16_t nPresetGlobal = static_cast<uint16_t>(mods.presetGlobal.size());
+    const uint16_t nPresetZone = static_cast<uint16_t>(mods.presetZone.size());
+
     std::vector<uint8_t> pbag;
-    put16(pbag, 0); put16(pbag, 0);  // zona 0: genNdx=0, modNdx=0
-    put16(pbag, 1); put16(pbag, 0);  // terminal
+    if (tieneGlobalDePreset) {
+        put16(pbag, 0); put16(pbag, 0);              // zona GLOBAL: sin generadores, mods desde 0
+    }
+    put16(pbag, 0); put16(pbag, nPresetGlobal);      // zona: genNdx=0, sus mods empiezan tras los globales
+    put16(pbag, 1); put16(pbag, static_cast<uint16_t>(nPresetGlobal + nPresetZone));  // terminal
 
     std::vector<uint8_t> pmod;
-    for (int i = 0; i < 5; ++i) put16(pmod, 0);  // sólo el terminal (10 bytes)
+    for (const auto& m : mods.presetGlobal) putModulator(pmod, m);
+    for (const auto& m : mods.presetZone) putModulator(pmod, m);
+    for (int i = 0; i < 5; ++i) put16(pmod, 0);  // terminal (10 bytes)
 
     std::vector<uint8_t> pgen;
     put16(pgen, kGenInstrument); put16(pgen, 0);  // -> instrumento 0
@@ -176,19 +284,35 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
     putName20(inst, "Test Instrument");
     put16(inst, 0);   // instBagNdx -> ibag[0]
     putName20(inst, "EOI");
-    put16(inst, 1);   // terminal
+    // Igual que en `phdr`: el terminal cuenta las bags que de verdad se escriben.
+    put16(inst, mods.instrumentGlobal.empty() ? 1 : 2);   // terminal
 
     const bool declaraRango = (keyRangeLo >= 0 && keyRangeHi >= 0);
 
+    // ---- ibag / imod.
+    //
+    // La zona GLOBAL de instrumento es la primera bag SIN `GenSampleID`. Ahí es
+    // donde viven casi todos los moduladores de un font real: medido sobre el
+    // `SoundFont-Spec-Test`, 21 de 25 — y 18 de los 19 de velocity.
+    const bool tieneGlobalDeInstrumento = !mods.instrumentGlobal.empty();
+    const uint16_t nInstGlobal = static_cast<uint16_t>(mods.instrumentGlobal.size());
+    const uint16_t nInstZone = static_cast<uint16_t>(mods.instrumentZone.size());
+
     std::vector<uint8_t> ibag;
-    put16(ibag, 0); put16(ibag, 0);
-    // El terminal dice DONDE TERMINAN los generadores de la zona 0, asi que tiene que contar
+    if (tieneGlobalDeInstrumento) {
+        put16(ibag, 0); put16(ibag, 0);           // zona GLOBAL: sin generadores, mods desde 0
+    }
+    put16(ibag, 0); put16(ibag, nInstGlobal);     // zona: genNdx=0, sus mods tras los globales
+    // El terminal dice DONDE TERMINAN los generadores de la zona, asi que tiene que contar
     // los que realmente se escribieron. Con `looping` son dos (`sampleModes` + `sampleID`) y
     // con el terminal en 1 el `sampleID` quedaba FUERA de la zona: el instrumento se quedaba
     // sin sample y el render daba silencio absoluto — no un sonido distinto, silencio.
-    put16(ibag, (looping ? 2 : 1) + (declaraRango ? 1 : 0)); put16(ibag, 0);  // terminal
+    put16(ibag, (looping ? 2 : 1) + (declaraRango ? 1 : 0));
+    put16(ibag, static_cast<uint16_t>(nInstGlobal + nInstZone));  // terminal
 
     std::vector<uint8_t> imod;
+    for (const auto& m : mods.instrumentGlobal) putModulator(imod, m);
+    for (const auto& m : mods.instrumentZone) putModulator(imod, m);
     for (int i = 0; i < 5; ++i) put16(imod, 0);  // terminal
 
     std::vector<uint8_t> igen;

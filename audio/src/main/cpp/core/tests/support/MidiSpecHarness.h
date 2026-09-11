@@ -26,12 +26,20 @@
  * un preset, 16 toques, expresion por toque. No es un sintetizador MIDI, y no
  * tiene por que serlo.
  *
- * Y lo que este REQ mide es el **RENDERIZADOR**, no la fachada. Los moduladores
- * viven en `tsf`; la pregunta es si `tsf` reproduce el font como fue programado.
- * Meter la fachada en el medio mediria **sus** limitaciones —un preset, sin CC— y
- * no la conformidad del renderizador, que es justo lo que hay que medir. Por eso
- * el arnes maneja `tsf` como lo maneja un reproductor de MIDI, que es como el
- * spec-test espera ser tocado.
+ * Y lo que este REQ mide es el **RENDERIZADOR**, no la fachada. La pregunta es si
+ * el renderizador reproduce el font como fue programado. Meter la fachada en el
+ * medio mediria **sus** limitaciones —un preset, sin CC— y no la conformidad del
+ * renderizador, que es justo lo que hay que medir. Por eso el arnes maneja el
+ * renderizador como lo maneja un reproductor de MIDI, que es como el spec-test
+ * espera ser tocado.
+ *
+ * 🔴 Y DESDE S2 EL RENDERIZADOR ES `tsf` MAS LOS MODULADORES DEL ARCHIVO. `tsf`
+ * los descarta al cargar; `SoundFontModulatorTable` los recupera de los bytes y
+ * `channelNoteOnWithModulators` los aplica por voz al disparar. Ese note-on es el
+ * MISMO que cruza `SoundFontEngine::drainEvents` en produccion: el arnes no
+ * duplica el cableado, lo comparte. Si estuviera solo en la fachada, este arnes
+ * mediria un tsf pelado y el trinquete de las escaleras nunca se habria movido —
+ * que es exactamente lo que paso en el primer intento de 2.8.
  *
  * LO QUE ESTE ARNES NO CUBRE, Y ES DELIBERADO
  * -------------------------------------------
@@ -48,8 +56,13 @@
 #include <string>
 #include <vector>
 
+#include <fstream>
+#include <iterator>
+
 #include "tml.h"
 #include "tsf.h"
+#include "../../../engines/SoundFontModulatorTable.h"
+#include "../../../engines/SoundFontNoteOn.h"
 
 namespace wma_test::specmidi {
 
@@ -90,8 +103,16 @@ inline Rendered render(const std::string& sf2Path, const std::string& midPath, i
                        float gain = 0.0f, int blockSize = 512) {
     Rendered out;
 
-    tsf* f = tsf_load_filename(sf2Path.c_str());
+    // Los bytes se leen UNA vez y alimentan a los dos: tsf y la tabla de moduladores.
+    // Es lo mismo que hace SoundFontManager::parseFont entre tsf_load_memory y el munmap.
+    std::ifstream in(sf2Path, std::ios::binary);
+    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(in)),
+                                     std::istreambuf_iterator<char>());
+    if (bytes.empty()) return out;
+    tsf* f = tsf_load_memory(bytes.data(), static_cast<int>(bytes.size()));
     if (!f) return out;
+    wma::sfmod::ModulatorTable modulators;
+    modulators.buildFromFontBytes(bytes.data(), bytes.size());
     tml_message* midi = tml_load_filename(midPath.c_str());
     if (!midi) {
         tsf_close(f);
@@ -135,7 +156,8 @@ inline Rendered render(const std::string& sf2Path, const std::string& midPath, i
                     if (msg->velocity > 0) {
                         out.noteOns.push_back(NoteOn{msg->time / 1000.0, msg->channel, msg->key,
                                                      msg->velocity});
-                        tsf_channel_note_on(f, msg->channel, msg->key, msg->velocity / 127.0f);
+                        wma::sfmod::channelNoteOnWithModulators(f, &modulators, msg->channel,
+                                                                msg->key, msg->velocity / 127.0f);
                     } else {
                         tsf_channel_note_off(f, msg->channel, msg->key);
                     }

@@ -15,6 +15,7 @@
 #include "tsf.h"
 #include "tsf_ext.h"
 #include "SoundFontFdRegion.h"
+#include "SoundFontModulatorTable.h"
 
 #ifndef SFM_LOG_TAG
 #define SFM_LOG_TAG "SF8.Manager"
@@ -32,6 +33,20 @@ using WmaMapOffset = ::off_t;
 #define WMA_MMAP ::mmap64
 using WmaMapOffset = ::off64_t;
 #endif
+
+/**
+ * Lo que el thread de audio toma de una vez: el `tsf` y SU tabla de moduladores
+ * (REQ-039 S2). Van juntos bajo el mismo hazard pointer a propósito — dos atómicos
+ * separados dejarían una ventana, en cada carga, en la que el audio evalúa los
+ * moduladores de OTRO font. Rarísimo, y aun así incorrecto por construcción.
+ *
+ * Se aloca en el thread de control (carga o re-rate) y se libera en
+ * [SoundFontManager::reclaimRetired] cuando el audio ya no lo sostiene.
+ */
+struct ActiveFont {
+    tsf* sf = nullptr;
+    wma::sfmod::ModulatorTable modulators;
+};
 
 /**
  * @class SoundFontManager
@@ -75,7 +90,7 @@ public:
     ~SoundFontManager() {
         unload();
         std::lock_guard<std::mutex> lock(mLoadMutex);
-        for (tsf* p : mRetired) tsf_close(p);
+        for (ActiveFont* p : mRetired) { tsf_close(p->sf); delete p; }
         mRetired.clear();
     }
 
@@ -130,17 +145,18 @@ public:
         SFM_LOGI("[SF8] loadFromPath: mmap'd %zu bytes from %s", fileSize, path);
 
         // Parse SF2 from mmap'd memory — tsf copies what it needs internally
-        tsf* newSF = tsf_load_memory(mapped, static_cast<int>(fileSize));
+        ActiveFont* font = parseFont(mapped, fileSize);
 
-        // Release mmap — tsf has its own copy of parsed data
+        // Release mmap — tsf has its own copy of parsed data, and so does the
+        // modulator table (REQ-039: los bytes no sobreviven a la carga).
         munmap(mapped, fileSize);
 
-        if (!newSF) {
+        if (!font) {
             SFM_LOGE("[SF8] loadFromPath: tsf_load_memory failed");
             return false;
         }
 
-        return configurAndSwap(newSF, sampleRate, fileSize);
+        return configurAndSwap(font, sampleRate, fileSize);
     }
 
     /**
@@ -225,17 +241,18 @@ public:
                  static_cast<long long>(offset));
 
         // Parse SF2/SF3 from the mmap'd memory — tsf copies what it needs.
-        tsf* newSF = tsf_load_memory(sfData, static_cast<int>(length));
+        ActiveFont* font = parseFont(sfData, static_cast<size_t>(length));
 
-        // Release mmap — tsf has its own copy of parsed data.
+        // Release mmap — tsf has its own copy of parsed data, and so does the
+        // modulator table.
         munmap(mapped, static_cast<size_t>(region.mapLength));
 
-        if (!newSF) {
+        if (!font) {
             SFM_LOGE("[SF8] loadFromFd: tsf_load_memory failed");
             return false;
         }
 
-        return configurAndSwap(newSF, sampleRate, static_cast<size_t>(length));
+        return configurAndSwap(font, sampleRate, static_cast<size_t>(length));
     }
 
     /**
@@ -250,13 +267,13 @@ public:
     bool loadFromMemory(const void* data, int size, int32_t sampleRate) {
         std::lock_guard<std::mutex> lock(mLoadMutex);
 
-        tsf* newSF = tsf_load_memory(data, size);
-        if (!newSF) {
+        ActiveFont* font = parseFont(data, static_cast<size_t>(size));
+        if (!font) {
             SFM_LOGE("[SF8] loadFromMemory: Failed to parse SF2 data (%d bytes)", size);
             return false;
         }
 
-        return configurAndSwap(newSF, sampleRate, size);
+        return configurAndSwap(font, sampleRate, static_cast<size_t>(size));
     }
 
     /**
@@ -271,7 +288,8 @@ public:
     /**
      * @brief Publica el `tsf` que se va a usar y lo devuelve. RT-safe.
      *
-     * **Es lo que debe llamar el hilo de audio**, no [getActiveSF]. La diferencia
+     * **Es lo que debe llamar el hilo de audio**, no [getActiveSF]. Devuelve el `tsf`
+     * JUNTO con su tabla de moduladores (REQ-039): son una sola cosa bajo este hazard. La diferencia
      * no es cosmética: entre leer el puntero y usarlo, el hilo de control puede
      * retirarlo y liberarlo. Acá se publica en [mInUse] y se **re-verifica** que
      * siga siendo el activo; recién entonces el reclamador tiene prohibido
@@ -297,9 +315,9 @@ public:
      *
      * Emparejar SIEMPRE con [releaseActive].
      */
-    tsf* acquireActive() {
+    const ActiveFont* acquireActiveFont() {
         for (int attempt = 0; attempt < kAcquireAttempts; ++attempt) {
-            tsf* p = mActiveSF.load(std::memory_order_seq_cst);
+            ActiveFont* p = mActiveSF.load(std::memory_order_seq_cst);
             mInUse.store(p, std::memory_order_seq_cst);
             if (!p) return nullptr;
             if (mActiveSF.load(std::memory_order_seq_cst) == p) return p;
@@ -308,7 +326,8 @@ public:
         return nullptr;
     }
 
-    /** Baja el hazard pointer. RT-safe. Ver [acquireActive]. */
+
+    /** Baja el hazard pointer. RT-safe. Ver [acquireActiveFont]. */
     void releaseActive() {
         mInUse.store(nullptr, std::memory_order_seq_cst);
     }
@@ -318,11 +337,12 @@ public:
      *
      * NO usar desde el hilo de audio: devuelve un puntero sin protegerlo, así
      * que el reclamador puede liberarlo mientras se lo usa. Para renderizar está
-     * [acquireActive]. Sirve para observar *cuál* es el activo (por ejemplo, que
+     * [acquireActiveFont]. Sirve para observar *cuál* es el activo (por ejemplo, que
      * un re-rate haya swapeado), no para desreferenciarlo bajo concurrencia.
      */
     tsf* getActiveSF() const {
-        return mActiveSF.load(std::memory_order_acquire);
+        const ActiveFont* f = mActiveSF.load(std::memory_order_acquire);
+        return f ? f->sf : nullptr;
     }
 
     /**
@@ -421,11 +441,11 @@ public:
 
         std::lock_guard<std::mutex> lock(mLoadMutex);
 
-        tsf* active = mActiveSF.load(std::memory_order_acquire);
+        ActiveFont* active = mActiveSF.load(std::memory_order_acquire);
         if (!active) return true;              // nada cargado, nada que re-ratear
         if (mSampleRate == sampleRate) return true;  // idempotente: NO swapear
 
-        tsf* reRated = tsf_copy(active);
+        tsf* reRated = tsf_copy(active->sf);
         if (!reRated) {
             SFM_LOGE("[SF8] setOutputSampleRate: tsf_copy fallo");
             return false;
@@ -437,8 +457,12 @@ public:
             return false;
         }
 
+        // La tabla de moduladores es del ARCHIVO, no de la tasa: la copia viaja con
+        // el tsf re-rateado. Copiar vectores acá es control, no audio.
+        ActiveFont* reRatedFont = new ActiveFont{reRated, active->modulators};
+
         SFM_LOGI("[SF8] Re-rate del SoundFont: %d -> %d Hz", mSampleRate, sampleRate);
-        publishAndRetire(reRated);
+        publishAndRetire(reRatedFont);
         mSampleRate = sampleRate;
         return true;
     }
@@ -495,13 +519,37 @@ private:
     /**
      * @brief Configure tsf instance and atomically swap to audio thread
      */
-    bool configurAndSwap(tsf* newSF, int32_t sampleRate, size_t fileSize) {
+    /**
+     * `tsf_load_memory` MÁS la tabla de moduladores, sobre los mismos bytes y ANTES de
+     * que el llamador los suelte (los tres caminos de carga hacen `munmap` o pierden
+     * el buffer justo después). Thread de control. `nullptr` si tsf no pudo parsear.
+     */
+    ActiveFont* parseFont(const void* data, size_t size) {
+        tsf* sf = tsf_load_memory(data, static_cast<int>(size));
+        if (!sf) return nullptr;
+        ActiveFont* font = new ActiveFont{sf, {}};
+        font->modulators.buildFromFontBytes(data, size);
+        return font;
+    }
+
+    bool configurAndSwap(ActiveFont* font, int32_t sampleRate, size_t fileSize) {
+        tsf* newSF = font->sf;
         tsf_set_output(newSF, TSF_STEREO_INTERLEAVED, sampleRate, 0.0f);
         tsf_set_max_voices(newSF, 64);
 
         int presetCount = tsf_get_presetcount(newSF);
         SFM_LOGI("[SF8] Loaded SF2 (%zu bytes, %d presets, sr=%d)",
                  fileSize, presetCount, sampleRate);
+        // REQ-039: el rechazo de moduladores deja rastro AL CARGAR, no solo en un
+        // test. Las dos familias por separado: lo que el spec manda rechazar tiene
+        // que ser 0 sobre un font real (AC-039.10); lo fuera de alcance no.
+        const auto& rej = font->modulators.rejections();
+        SFM_LOGI("[SF8] Moduladores: %u declarados en el archivo; rechazados por spec %u "
+                 "(encadenados %u, transform no lineal %u); fuera de alcance de S2 %u "
+                 "(fuente de canal %u, destino no aplicado %u)",
+                 font->modulators.declaredInFile(), rej.specRejections(), rej.linked,
+                 rej.nonLinearTransform, rej.outOfScope(), rej.sourceNotAtNoteOn,
+                 rej.destinationUnsupported);
 
         // Build the immutable preset cache (AUD-4). buildPresetCache must run
         // before the atomic swap so consumers see metadata in lockstep with
@@ -511,7 +559,7 @@ private:
 
         // Atomic swap to audio thread
         mPresetCache = std::move(cache);
-        publishAndRetire(newSF);
+        publishAndRetire(font);
 
         mSampleRate = sampleRate;
         return true;
@@ -530,10 +578,10 @@ private:
      *
      * Llamar SIEMPRE con [mLoadMutex] tomado.
      */
-    void publishAndRetire(tsf* newSF) {
+    void publishAndRetire(ActiveFont* newFont) {
         // seq_cst y no release: es la mitad escritora del hazard pointer. Ver
-        // [acquireActive] para por qué acquire/release no alcanza.
-        tsf* old = mActiveSF.exchange(newSF, std::memory_order_seq_cst);
+        // [acquireActiveFont] para por qué acquire/release no alcanza.
+        ActiveFont* old = mActiveSF.exchange(newFont, std::memory_order_seq_cst);
         if (old) mRetired.push_back(old);
         reclaimRetired();
     }
@@ -548,13 +596,14 @@ private:
      * acá porque el error sería silencioso.
      */
     void reclaimRetired() {
-        tsf* held = mInUse.load(std::memory_order_seq_cst);
+        ActiveFont* held = mInUse.load(std::memory_order_seq_cst);
         auto it = mRetired.begin();
         while (it != mRetired.end()) {
             if (*it == held) {
                 ++it;  // en uso: la próxima vez
             } else {
-                tsf_close(*it);
+                tsf_close((*it)->sf);
+                delete *it;
                 it = mRetired.erase(it);
             }
         }
@@ -569,7 +618,7 @@ private:
         tsf* sf, int presetCount);
 
     /**
-     * Techo de reintentos de [acquireActive]. Un swap entre el load y el
+     * Techo de reintentos de [acquireActiveFont]. Un swap entre el load y el
      * re-chequeo obliga a reintentar; 4 es holgadísimo porque los swaps sólo los
      * produce el hilo de control (cargar, descargar, re-ratear) y son rarísimos.
      * Existe para que el hilo de audio no pueda spinear sin techo, nunca porque
@@ -577,17 +626,17 @@ private:
      */
     static constexpr int kAcquireAttempts = 4;
 
-    std::atomic<tsf*> mActiveSF{nullptr};
+    std::atomic<ActiveFont*> mActiveSF{nullptr};
 
     /**
      * @brief Hazard pointer: el `tsf` que el hilo de audio está usando AHORA.
      *
-     * Lo publica [acquireActive] antes de renderizar y lo limpia
+     * Lo publica [acquireActiveFont] antes de renderizar y lo limpia
      * [releaseActive]. El hilo de control no libera jamás un `tsf` que figure
      * acá. Es lo único que hace segura la reclamación sin que el hilo de audio
      * tome un lock.
      */
-    std::atomic<tsf*> mInUse{nullptr};
+    std::atomic<ActiveFont*> mInUse{nullptr};
 
     /**
      * @brief Fonts retirados, esperando a que nadie los esté usando.
@@ -602,7 +651,7 @@ private:
      * `std::vector` es adecuado — el `push_back` puede alocar y eso ahí está
      * permitido.
      */
-    std::vector<tsf*> mRetired;
+    std::vector<ActiveFont*> mRetired;
 
     mutable std::mutex mLoadMutex;
     // Immutable post-load preset metadata. Replaced wholesale on load/unload
