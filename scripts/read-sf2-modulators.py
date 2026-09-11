@@ -5,6 +5,8 @@ Un numero que exige CORRER algo no se afirma en CLAUDE.md ni en una spec: lo imp
 el comando que lo produce (R-MOT-33). Este es ese comando para los moduladores.
 
     python3 scripts/read-sf2-modulators.py <font.sf2|sf3>
+    python3 scripts/read-sf2-modulators.py <font.sf2|sf3> --presets   # la tabla POR PRESET
+                                                                     # de la nota de bump (S3 3.6)
 
 Lee el chunk `pdta` directamente del archivo: no depende del motor, asi que puede
 contradecirlo. Descuenta la entrada TERMINADORA que la spec SF2 exige al final de
@@ -20,13 +22,30 @@ import collections
 import struct
 import sys
 
-GEN = {0: 'startAddrsOffset', 5: 'modEnvToPitch', 6: 'modLfoToPitch', 7: 'vibLfoToPitch',
-       8: 'initialFilterFc', 9: 'initialFilterQ', 10: 'modLfoToFilterFc', 11: 'modLfoToVolume',
-       15: 'chorusEffectsSend', 16: 'reverbEffectsSend', 17: 'pan', 21: 'delayModLFO',
-       22: 'freqModLFO', 23: 'delayVibLFO', 24: 'freqVibLFO', 26: 'holdVolEnv',
-       28: 'decayVolEnv', 33: 'holdModEnv', 34: 'decayModEnv', 36: 'sustainVolEnv',
-       37: 'releaseVolEnv', 38: 'keynumToVolEnvHold', 48: 'initialAttenuation',
-       51: 'coarseTune', 52: 'fineTune'}
+# La tabla de generadores de SF2 2.04 §8.1.2, COMPLETA y por su numero.
+#
+# 🔴 Hasta REQ-039 S3 (2026-09-11) este mapa estaba CORRIDO en tres tramos (5-7,
+# 11, 26-38): decia `modLfoToVolume` donde el 11 es `modEnvToFilterFc`, `decayModEnv`
+# donde el 34 es `attackVolEnv`, `holdVolEnv` donde el 26 es `attackModEnv`... Los
+# CONTEOS que produjo eran correctos (cuenta por numero); los NOMBRES no, y con esos
+# nombres se escribieron la tabla "por destino" del spec del REQ y la de los 30 de
+# S3. Se detecto porque el test de C++ (que usa los numeros del spec) no encontraba
+# las filas que este script nombraba. La leccion: una tabla de nombres escrita a
+# mano se verifica contra el spec ANTES de que un numero salga de ella.
+GEN = {0: 'startAddrsOffset', 1: 'endAddrsOffset', 2: 'startloopAddrsOffset',
+       3: 'endloopAddrsOffset', 4: 'startAddrsCoarseOffset', 5: 'modLfoToPitch',
+       6: 'vibLfoToPitch', 7: 'modEnvToPitch', 8: 'initialFilterFc', 9: 'initialFilterQ',
+       10: 'modLfoToFilterFc', 11: 'modEnvToFilterFc', 12: 'endAddrsCoarseOffset',
+       13: 'modLfoToVolume', 15: 'chorusEffectsSend', 16: 'reverbEffectsSend', 17: 'pan',
+       21: 'delayModLFO', 22: 'freqModLFO', 23: 'delayVibLFO', 24: 'freqVibLFO',
+       25: 'delayModEnv', 26: 'attackModEnv', 27: 'holdModEnv', 28: 'decayModEnv',
+       29: 'sustainModEnv', 30: 'releaseModEnv', 31: 'keynumToModEnvHold',
+       32: 'keynumToModEnvDecay', 33: 'delayVolEnv', 34: 'attackVolEnv', 35: 'holdVolEnv',
+       36: 'decayVolEnv', 37: 'sustainVolEnv', 38: 'releaseVolEnv', 39: 'keynumToVolEnvHold',
+       40: 'keynumToVolEnvDecay', 41: 'instrument', 43: 'keyRange', 44: 'velRange',
+       46: 'keynum', 47: 'velocity', 48: 'initialAttenuation', 50: 'endloopAddrsCoarseOffset',
+       51: 'coarseTune', 52: 'fineTune', 53: 'sampleID', 54: 'sampleModes',
+       56: 'scaleTuning', 57: 'exclusiveClass', 58: 'overridingRootKey'}
 CTRL = {0: 'NoController', 2: 'NoteOnVelocity', 3: 'NoteOnKeyNumber', 10: 'PolyPressure',
         13: 'ChannelPressure', 14: 'PitchWheel', 16: 'PitchWheelSens'}
 CURVE = {0: 'lineal', 1: 'concava', 2: 'convexa', 3: 'switch'}
@@ -173,5 +192,68 @@ def main():
         print('%6d  amt-src %18s sobre %s' % (v, k[0], k[1]))
 
 
+def _u16(data, off):
+    return struct.unpack_from('<H', data, off)[0]
+
+
+def _s16(data, off):
+    return struct.unpack_from('<h', data, off)[0]
+
+
+def presets(path):
+    """La tabla POR PRESET que sostiene la nota de bump de REQ-039 (S3 3.6, 2026-09-11):
+    cuantos moduladores velocity -> initialFilterFc declara cada preset (por sus
+    instrumentos) y que hace con el default #1 (velocity -> initialAttenuation, identidad
+    `0x0502 -> 48` sin amtSrc ni transform): lo deja, lo ANULA (amount 0, sin otra curva)
+    o lo REEMPLAZA (y con que amounts). Recorre phdr -> pbag -> pgen(instrument 41) ->
+    inst -> ibag -> imod. Solo los moduladores de instrumento: son los que definen la
+    identidad del default; los de preset se SUMAN (SF2 §9.5)."""
+    data, ch = _read_font(path)
+
+    def recs(name, size):
+        b, e = ch[('pdta', name)]
+        return [b + i * size for i in range((e - b) // size)]
+
+    phdr, pbag, pgen = recs('phdr', 38), recs('pbag', 4), recs('pgen', 4)
+    inst, ibag, imod = recs('inst', 22), recs('ibag', 4), recs('imod', 10)
+    DEF1 = (0x0502, 48, 0, 0)
+    rows = []
+    for p in range(len(phdr) - 1):
+        name = data[phdr[p]:phdr[p] + 20].split(b'\0')[0].decode('latin1')
+        prog, bank = _u16(data, phdr[p] + 20), _u16(data, phdr[p] + 22)
+        vel_fc, over = 0, set()
+        for z in range(_u16(data, phdr[p] + 24), _u16(data, phdr[p + 1] + 24)):
+            gens = dict((_u16(data, pgen[g]), _s16(data, pgen[g] + 2))
+                        for g in range(_u16(data, pbag[z]), _u16(data, pbag[z + 1])))
+            if 41 not in gens:
+                continue
+            ii = gens[41]
+            for iz in range(_u16(data, inst[ii] + 20), _u16(data, inst[ii + 1] + 20)):
+                for m in range(_u16(data, ibag[iz] + 2), _u16(data, ibag[iz + 1] + 2)):
+                    src, dest, amt, asrc, tr = struct.unpack_from('<HHhHH', data, imod[m])
+                    if dest == 8 and (src & 0x7F) == 2 and not (src & 0x80):
+                        vel_fc += 1
+                    if (src, dest, asrc, tr) == DEF1:
+                        over.add(amt)
+        if not over:
+            def1 = 'default (960 cB)'
+        elif over == {0}:
+            def1 = 'ANULADO'
+        else:
+            def1 = 'reemplazado %s' % sorted(over)
+        rows.append((bank, prog, name, vel_fc, def1))
+
+    print('%-5s %-3s %-22s %8s  %s' % ('banco', 'prog', 'preset', 'vel->FC', 'default #1 (vel -> nivel)'))
+    for bank, prog, name, vel_fc, def1 in rows:
+        print('%5d %3d  %-22s %8d  %s' % (bank, prog, name, vel_fc, def1))
+    resumen = collections.Counter(r[4].split(' ')[0] for r in rows)
+    print()
+    print('presets: %d; con velocity -> FC: %d; default #1: %s' %
+          (len(rows), sum(1 for r in rows if r[3] > 0), dict(resumen)))
+
+
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) >= 3 and sys.argv[2] == '--presets':
+        presets(sys.argv[1])
+    else:
+        main()

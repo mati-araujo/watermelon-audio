@@ -278,3 +278,104 @@ TEST(SoundFontModulatorTable, GeneralUserNoTieneNingunModuladorQueElSpecMandeRec
     EXPECT_EQ(r.specRejections(), 0u);
     EXPECT_GT(r.outOfScope(), 0u) << "un font real sin moduladores de canal: el lector fallo mudo";
 }
+
+// ---------------------------------------------------------------------------
+// REQ-039 S3, tarea 3.4 (D6) — lo que queda FUERA, nombrado y contado
+// ---------------------------------------------------------------------------
+
+#include <map>
+#include <utility>
+
+/**
+ * Los 712 moduladores de GeneralUser que S2 dejo fuera de alcance no son un numero:
+ * son dos poblaciones con dueño distinto, y este test las fija POR NOMBRE para que
+ * ninguna crezca en silencio ni se "arregle" de a uno sin que aparezca en un diff.
+ *
+ *   - 682 de FUENTE DE CANAL (CC, presion, rueda): la capa de canales de tsf es su
+ *     implementacion en este REQ (D5, R-MOT-39) y lo demas es del REQ que abra la
+ *     superficie de CC.
+ *   - 30 de DESTINO NO APLICADO, con fuente de nota: velocity/keynum hacia envolventes,
+ *     LFO, Q y offset. Ninguno es un send (REQ-040) ni de calidad (REQ-041): nace un
+ *     MINI propio con ESTA tabla como su medicion de apertura (tarea 3.6).
+ *
+ * El desglose se DERIVA en el test con las mismas dos funciones de produccion que la
+ * tabla usa para contar (`readFileModulators` + `rejectionSlotFor`), y su suma tiene que
+ * coincidir con el contador de la tabla: si el clasificador y el desglose se separan,
+ * esto se pone rojo. No hay mecanismo nuevo: un accesor que solo leyeran los tests seria
+ * rojo de `check-mechanism-callers`, con razon.
+ *
+ * 🔴 Es un trinquete BIDIRECCIONAL. Sumar soporte a un destino baja su fila y pone esto
+ * rojo — a proposito: la re-declaracion es el diff que se revisa, y es lo que le
+ * muestra al MINI cuanto pago.
+ */
+TEST(SoundFontModulatorTable, LoQueQuedaFueraDeGeneralUserEstaNombradoYContado) {
+    const auto bytes = generalUserBytes();
+    if (bytes.empty()) GTEST_SKIP() << "sin GeneralUser_GS.sf3 — WMA_GENERALUSER_SF3 o el checkout hermano de NoisyPad";
+
+    ModulatorTable t;
+    ASSERT_TRUE(t.buildFromFontBytes(bytes.data(), bytes.size()));
+    const auto& r = t.rejections();
+    EXPECT_EQ(r.sourceNotAtNoteOn, 682u) << "los de fuente de canal cambiaron: ¿cambio el font, o el clasificador?";
+    EXPECT_EQ(r.destinationUnsupported, 30u) << "los de destino no aplicado cambiaron: si BAJO, re-declara la tabla "
+                                               "de abajo en el PR que sumo el soporte";
+
+    // El desglose (fuente, destino) -> (cuantos, amounts distintos), derivado del archivo.
+    using wma::sfmod::Modulator;
+    using wma::sfmod::RejectionCounters;
+    using wma::sfmod::sourceIndexOf;
+    struct Fila { int cuantos = 0; std::vector<int> amounts; };
+    std::map<std::pair<int, int>, Fila> porDestino;   // (indice de fuente, destOper)
+    RejectionCounters tmp;
+    std::uint32_t total = 0;
+    for (const Modulator& m : wma::sfmod::readFileModulators(bytes.data(), bytes.size())) {
+        RejectionCounters c;
+        if (wma::sfmod::detail::rejectionSlotFor(m, c) != &c.destinationUnsupported) continue;
+        ++total;
+        Fila& f = porDestino[{sourceIndexOf(m.srcOper), m.destOper}];
+        ++f.cuantos;
+        bool visto = false;
+        for (int a : f.amounts) visto = visto || (a == m.amount);
+        if (!visto) f.amounts.push_back(m.amount);
+    }
+    (void)tmp;
+    EXPECT_EQ(total, r.destinationUnsupported) << "el desglose y el contador de la tabla se separaron";
+
+    // LA TABLA — medida el 2026-09-11 (stage doc S3, hecho 7). Fuente 2 = velocity, 3 = keynum.
+    // Los generadores por numero de SF2 §8.1.2. 🔴 Los NOMBRES de la primera version de
+    // esta tabla salian del mapa GEN de `read-sf2-modulators.py`, que estaba corrido en
+    // tres tramos: decia `modLfoToVolume` (11) donde va `modEnvToFilterFc`, `decayModEnv`
+    // (34) donde va `attackVolEnv`... Los conteos eran correctos; los nombres no, y este
+    // test los descubrio porque no encontraba las filas por su numero. Lo que de verdad
+    // hay es mas relevante que lo que se creia: velocity -> ataque de la envolvente de
+    // volumen ("toque suave = ataque lento") y velocity -> cantidad de envolvente al
+    // filtro son TIMBRE, no relleno.
+    struct Esperado { int fuente, dest; const char* nombre; int cuantos; bool inerte; };
+    const Esperado kEsperados[] = {
+        {2, 4, "velocity -> startAddrsCoarseOffset", 6, true},   // amount 0: inertes
+        {2, 34, "velocity -> attackVolEnv", 5, false},           // 3000..14918 timecents
+        {2, 11, "velocity -> modEnvToFilterFc", 5, false},       // -8000 / -2000 / 8000 cents
+        {2, 26, "velocity -> attackModEnv", 3, false},
+        {2, 9, "velocity -> initialFilterQ", 3, false},
+        {2, 0, "velocity -> startAddrsOffset", 3, false},
+        {3, 17, "keynum -> pan (nivel preset)", 2, false},
+        {2, 36, "velocity -> decayVolEnv", 2, false},
+        {2, 38, "velocity -> releaseVolEnv", 1, false},
+    };
+    std::printf("  [REQ-039 S3] GeneralUser, destino no aplicado (fuente de nota), por destino:\n");
+    int sumaEsperada = 0;
+    for (const Esperado& e : kEsperados) {
+        sumaEsperada += e.cuantos;
+        const auto it = porDestino.find({e.fuente, e.dest});
+        const int medido = it == porDestino.end() ? 0 : it->second.cuantos;
+        std::printf("    %3d  %s\n", medido, e.nombre);
+        EXPECT_EQ(medido, e.cuantos) << e.nombre << ": la fila cambio";
+        if (e.inerte && it != porDestino.end()) {
+            for (int a : it->second.amounts)
+                EXPECT_EQ(a, 0) << e.nombre << ": se declaro INERTE (amount 0) y tiene amount " << a;
+        }
+    }
+    EXPECT_EQ(sumaEsperada, 30) << "la tabla esperada no suma 30: el desglose de arriba esta mal escrito";
+    // Y ninguna fila que la tabla no nombre: un destino nuevo tiene que aparecer en el diff.
+    EXPECT_EQ(porDestino.size(), sizeof(kEsperados) / sizeof(kEsperados[0]))
+        << "hay pares (fuente, destino) fuera de alcance que esta tabla no nombra";
+}
