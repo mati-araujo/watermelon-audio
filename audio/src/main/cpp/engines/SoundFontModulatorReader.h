@@ -256,7 +256,7 @@ inline std::vector<RegionModulators> readRegionModulators(const void* data, std:
         Range presetGlobalRange;
         std::vector<Modulator> presetGlobalMods;
 
-        for (std::uint16_t b = bagLo; b + 1 < h.pbag.count && b < bagHi; ++b) {
+        for (std::uint16_t b = bagLo; static_cast<std::size_t>(b) + 1 < h.pbag.count && b < bagHi; ++b) {
             const std::uint16_t genLo = riff::rd16(h.pbag.begin + b * kBagSize);
             const std::uint16_t genHi = riff::rd16(h.pbag.begin + (b + 1) * kBagSize);
             const std::uint16_t modLo = riff::rd16(h.pbag.begin + b * kBagSize + 2);
@@ -273,7 +273,7 @@ inline std::vector<RegionModulators> readRegionModulators(const void* data, std:
                     continue;
                 }
                 hadInstrument = true;
-                if (amount + 1 >= h.inst.count) continue;
+                if (static_cast<std::size_t>(amount) + 1 >= h.inst.count) continue;
 
                 const std::uint16_t iBagLo = riff::rd16(h.inst.begin + amount * kInstSize + 20);
                 const std::uint16_t iBagHi =
@@ -282,7 +282,7 @@ inline std::vector<RegionModulators> readRegionModulators(const void* data, std:
                 Range instGlobalRange;
                 std::vector<Modulator> instGlobalMods;
 
-                for (std::uint16_t ib = iBagLo; ib + 1 < h.ibag.count && ib < iBagHi; ++ib) {
+                for (std::uint16_t ib = iBagLo; static_cast<std::size_t>(ib) + 1 < h.ibag.count && ib < iBagHi; ++ib) {
                     const std::uint16_t iGenLo = riff::rd16(h.ibag.begin + ib * kBagSize);
                     const std::uint16_t iGenHi = riff::rd16(h.ibag.begin + (ib + 1) * kBagSize);
                     const std::uint16_t iModLo = riff::rd16(h.ibag.begin + ib * kBagSize + 2);
