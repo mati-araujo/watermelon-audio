@@ -65,21 +65,6 @@ class FakeTuner(
     override var targets: List<StringTarget> = configuration.targets()
         private set
 
-    /**
-     * REQ-037 S2 — el doble lo declara, y **no lo modela**.
-     *
-     * Este doble existe para vigilar el contrato del OBJETIVO (ver el encabezado), no el del modo
-     * automático: quien mide eso es `FastModeGateTest`, contra `TunerImpl` y un puente falso. Un
-     * doble que fingiera elegir la cuerda sola estaría inventando la respuesta a la pregunta que
-     * REQ-037 existe para contestar.
-     *
-     * 🔴 Lo que sí hace es **no mentir**: si alguien lo enciende acá, el guardia de
-     * [syncTargetWithEngine] sigue empujando el objetivo del consumidor como si nada — que es el
-     * comportamiento de HOY y no el del automático. Un test que lo encienda esperando otra cosa
-     * tiene que ir a `FastModeGateTest`.
-     */
-    override var automaticStringSelection: Boolean = false
-
     override var selectedString: Int? = null
         set(value) {
             field = value
