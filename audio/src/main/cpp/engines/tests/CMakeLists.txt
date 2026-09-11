@@ -41,6 +41,7 @@ add_executable(engine_tests
     # audio), asi que entra aca sin tocar la exclusion de tinysoundfont de arriba.
     test_soundfont_modulators.cpp
     test_soundfont_modulator_reader.cpp
+    test_soundfont_modulator_table.cpp
 )
 
 target_include_directories(engine_tests PRIVATE
