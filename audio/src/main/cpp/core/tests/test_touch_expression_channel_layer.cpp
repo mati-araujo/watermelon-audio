@@ -1,7 +1,7 @@
 /**
  * test_touch_expression_channel_layer.cpp — REQ-039 S3, tarea 3.3: AC-039.6.
  *
- * LA DECISION QUE ESTO AFIRMA (D5 del stage doc de S3, y R-MOT-39)
+ * LA DECISION QUE ESTO AFIRMA (D5 del stage doc de S3, y R-MOT-40 — era 39 hasta que MINI-021 piso el 37)
  * -----------------------------------------------------------------
  * Los diez moduladores por defecto del spec estan en la tabla, pero los OCHO de fuente
  * de canal (#3 presion, #4 CC1, #5 CC7, #6 CC10, #7 CC11, #8 CC91, #9 CC93, #10 rueda)
