@@ -20,13 +20,30 @@ import collections
 import struct
 import sys
 
-GEN = {0: 'startAddrsOffset', 5: 'modEnvToPitch', 6: 'modLfoToPitch', 7: 'vibLfoToPitch',
-       8: 'initialFilterFc', 9: 'initialFilterQ', 10: 'modLfoToFilterFc', 11: 'modLfoToVolume',
-       15: 'chorusEffectsSend', 16: 'reverbEffectsSend', 17: 'pan', 21: 'delayModLFO',
-       22: 'freqModLFO', 23: 'delayVibLFO', 24: 'freqVibLFO', 26: 'holdVolEnv',
-       28: 'decayVolEnv', 33: 'holdModEnv', 34: 'decayModEnv', 36: 'sustainVolEnv',
-       37: 'releaseVolEnv', 38: 'keynumToVolEnvHold', 48: 'initialAttenuation',
-       51: 'coarseTune', 52: 'fineTune'}
+# La tabla de generadores de SF2 2.04 §8.1.2, COMPLETA y por su numero.
+#
+# 🔴 Hasta REQ-039 S3 (2026-09-11) este mapa estaba CORRIDO en tres tramos (5-7,
+# 11, 26-38): decia `modLfoToVolume` donde el 11 es `modEnvToFilterFc`, `decayModEnv`
+# donde el 34 es `attackVolEnv`, `holdVolEnv` donde el 26 es `attackModEnv`... Los
+# CONTEOS que produjo eran correctos (cuenta por numero); los NOMBRES no, y con esos
+# nombres se escribieron la tabla "por destino" del spec del REQ y la de los 30 de
+# S3. Se detecto porque el test de C++ (que usa los numeros del spec) no encontraba
+# las filas que este script nombraba. La leccion: una tabla de nombres escrita a
+# mano se verifica contra el spec ANTES de que un numero salga de ella.
+GEN = {0: 'startAddrsOffset', 1: 'endAddrsOffset', 2: 'startloopAddrsOffset',
+       3: 'endloopAddrsOffset', 4: 'startAddrsCoarseOffset', 5: 'modLfoToPitch',
+       6: 'vibLfoToPitch', 7: 'modEnvToPitch', 8: 'initialFilterFc', 9: 'initialFilterQ',
+       10: 'modLfoToFilterFc', 11: 'modEnvToFilterFc', 12: 'endAddrsCoarseOffset',
+       13: 'modLfoToVolume', 15: 'chorusEffectsSend', 16: 'reverbEffectsSend', 17: 'pan',
+       21: 'delayModLFO', 22: 'freqModLFO', 23: 'delayVibLFO', 24: 'freqVibLFO',
+       25: 'delayModEnv', 26: 'attackModEnv', 27: 'holdModEnv', 28: 'decayModEnv',
+       29: 'sustainModEnv', 30: 'releaseModEnv', 31: 'keynumToModEnvHold',
+       32: 'keynumToModEnvDecay', 33: 'delayVolEnv', 34: 'attackVolEnv', 35: 'holdVolEnv',
+       36: 'decayVolEnv', 37: 'sustainVolEnv', 38: 'releaseVolEnv', 39: 'keynumToVolEnvHold',
+       40: 'keynumToVolEnvDecay', 41: 'instrument', 43: 'keyRange', 44: 'velRange',
+       46: 'keynum', 47: 'velocity', 48: 'initialAttenuation', 50: 'endloopAddrsCoarseOffset',
+       51: 'coarseTune', 52: 'fineTune', 53: 'sampleID', 54: 'sampleModes',
+       56: 'scaleTuning', 57: 'exclusiveClass', 58: 'overridingRootKey'}
 CTRL = {0: 'NoController', 2: 'NoteOnVelocity', 3: 'NoteOnKeyNumber', 10: 'PolyPressure',
         13: 'ChannelPressure', 14: 'PitchWheel', 16: 'PitchWheelSens'}
 CURVE = {0: 'lineal', 1: 'concava', 2: 'convexa', 3: 'switch'}
