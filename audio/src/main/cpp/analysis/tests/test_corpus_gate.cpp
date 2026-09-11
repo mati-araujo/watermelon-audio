@@ -39,13 +39,68 @@ namespace {
 using corpus::State;
 
 /// El barrido de los 41, hecho UNA vez por proceso y compartido entre los tests que lo leen
-/// (REQ-036 S1): cuesta ~10 s sin instrumentar y ~60 bajo TSan, y dos tests que lo repitan son dos
-/// veces ese costo por nada — la misma regla que el barrido de glides sintetico.
+/// (REQ-036 S1): cuesta ~10 s sin instrumentar, y dos tests que lo repitan son dos veces ese costo
+/// por nada — la misma regla que el barrido de glides sintetico.
+///
+/// 🔴 Bajo ctest "una vez por proceso" NO amortiza nada: cada test es su propio proceso y paga el
+/// barrido entero. Y bajo TSan el barrido crecio ~3x entre el 09/09 ("~60 s", decia aca) y el 11/09
+/// (REQ-033..038 le sumaron trabajo a cada ventana): el test que le pone el oraculo por parcial
+/// ENCIMA (REQ-038) tardaba 193 s solo, contra un techo de 180. Por eso ese test barre
+/// `entriesForThisBuild()` y no esto.
 const std::vector<corpus::Outcome>& sweptCorpus() {
     static const std::vector<corpus::Outcome> kSwept =
         corpus::sweepAll(corpus::defaultCorpusDir(), corpus::manifestPath());
     return kSwept;
 }
+
+/**
+ * Las entradas del manifiesto que ESTE build barre cuando un test le suma el oraculo por parcial
+ * al barrido. Sin sanitizer, los 41. Bajo sanitizer, un SUBCONJUNTO declarado (MINI-020, REQ-034
+ * S1): se conservan SIEMPRE los seis archivos con hallazgo —los cuatro de la tabla de la spec, el
+ * de SAMPLE y el del glide de ataque— y uno de cada tres del resto, por indice del manifiesto:
+ * cada instrumento aparece. Cuantos se barrieron lo imprime y registra cada test que lo usa.
+ *
+ * Nacio adentro del test de REQ-035 y se saco aca el 11/09 para que el de REQ-038 use EL MISMO
+ * criterio, mas los archivos que ese test NOMBRA en sus afirmaciones, en la lista fija: el control
+ * del instrumento (`bajo-pua_A1`) y el contraejemplo del sesgo por H2 (`guitarra-jazz_E2`).
+ * 🔴 Contado a mano sobre las lineas del manifiesto, `bajo-pua_A1` parecia caer en `i % 3 == 0`;
+ * medido sobre `entriesOf()` —que saltea las lineas sin `hz`— no cae, y sin el la afirmacion del
+ * instrumento queda sin evaluar. El indice es sobre lo que `entriesOf` devuelve, no sobre el
+ * archivo; lo que un test afirma por nombre va en la lista fija, no en el modulo.
+ */
+std::vector<corpus::Entry> entriesForThisBuild() {
+    const std::vector<corpus::Entry> all = corpus::entriesOf(corpus::manifestPath());
+#ifdef WMA_TEST_UNDER_SANITIZER
+    const char* const kAlways[] = {"ukelele_C4.wav",         "guitarra-nylon_E4.wav", "guitarra-jazz_E4.wav",
+                                   "ukelele_G4.wav",         "guitarra-acero_A2.wav", "bajo-acustico_G2.wav",
+                                   "bajo-pua_A1.wav",        "guitarra-jazz_E2.wav" /* REQ-038 */};
+    std::vector<corpus::Entry> kept;
+    for (size_t i = 0; i < all.size(); ++i) {
+        bool keep = (i % 3 == 0);
+        for (const char* k : kAlways) keep = keep || all[i].name == k;
+        if (keep) kept.push_back(all[i]);
+    }
+    return kept;
+#else
+    return all;
+#endif
+}
+
+/// `sweepFile` sobre cada entrada de `entriesForThisBuild()`.
+std::vector<corpus::Outcome> sweepForThisBuild() {
+    std::vector<corpus::Outcome> results;
+    for (const corpus::Entry& e : entriesForThisBuild())
+        results.push_back(corpus::sweepFile(corpus::defaultCorpusDir() + "/" + e.name, e));
+    return results;
+}
+
+/// El sufijo que cada tabla imprime al lado de "N de M archivos".
+constexpr const char* kSubsetNote =
+#ifdef WMA_TEST_UNDER_SANITIZER
+    ", subconjunto bajo sanitizer";
+#else
+    "";
+#endif
 
 // ---------------------------------------------------------------------------
 // 10.5 — sin corpus se SALTEA, no se aprueba
@@ -568,43 +623,16 @@ TEST(CorpusRobustness, WhereTheFineReadingErrorIsBorn) {
     constexpr double kErrorCents = 2.0;          // la fina "se aparta" (umbral de la spec)
     constexpr double kWindowSec = 0.75;
 
-    /**
-     * Bajo sanitizer, un SUBCONJUNTO declarado (MINI-020, REQ-034 S1): la tabla entera cuesta ~17 s
-     * sin instrumentar y el techo del gate local es 180 s por test. Se conservan SIEMPRE los seis
-     * archivos con hallazgo —los cuatro de la tabla de la spec, el de SAMPLE y el del glide de
-     * ataque— y uno de cada tres del resto, por indice del manifiesto: cada instrumento aparece. Sin
-     * sanitizer se barren los 41. Cuantos se barrieron se imprime y se registra.
-     */
-    std::vector<corpus::Entry> entries;
-    {
-        const std::vector<corpus::Entry> all = corpus::entriesOf(corpus::manifestPath());
-#ifdef WMA_TEST_UNDER_SANITIZER
-        const char* const kAlways[] = {"ukelele_C4.wav", "guitarra-nylon_E4.wav", "guitarra-jazz_E4.wav",
-                                       "ukelele_G4.wav", "guitarra-acero_A2.wav", "bajo-acustico_G2.wav"};
-        for (size_t i = 0; i < all.size(); ++i) {
-            bool keep = (i % 3 == 0);
-            for (const char* k : kAlways) keep = keep || all[i].name == k;
-            if (keep) entries.push_back(all[i]);
-        }
-#else
-        entries = all;
-#endif
-    }
-    std::vector<corpus::Outcome> results;
-    for (const corpus::Entry& e : entries)
-        results.push_back(corpus::sweepFile(corpus::defaultCorpusDir() + "/" + e.name, e));
+    // Bajo sanitizer, el subconjunto declarado (ver `entriesForThisBuild`): la tabla entera cuesta
+    // ~17 s sin instrumentar y el techo del gate local es 180 s por test.
+    const std::vector<corpus::Outcome> results = sweepForThisBuild();
     ASSERT_FALSE(results.empty());
     RecordProperty("archivos_barridos", static_cast<int>(results.size()));
 
     int published = 0, within = 0, tracking = 0, fit = 0, sample = 0, uniqueMasks = 0;
     std::printf("\n  [REQ-035] donde nace el error de la fina — strobe (p1..p4) contra el oraculo por parcial "
                 "(%zu de %zu archivos%s)\n", results.size(), corpus::entriesOf(corpus::manifestPath()).size(),
-#ifdef WMA_TEST_UNDER_SANITIZER
-                ", subconjunto bajo sanitizer"
-#else
-                ""
-#endif
-    );
+                kSubsetNote);
     std::printf("  %-22s %8s %6s %6s %6s %2s %4s | %6s %6s %6s %6s | %6s %6s %6s %6s | %6s | %5s %5s %5s | %8s %8s | %5s %6s | %s\n",
                 "archivo", "objHz", "finoC", "finAbs", "sigC", "k", "mask", "p1", "p2", "p3", "p4",
                 "o1@t", "o2", "o3", "o4", "o1@2s", "dB2", "dB3", "dB4", "B_snap", "B_fit",
@@ -1006,8 +1034,12 @@ TEST(CorpusRobustness, TheCoarseDetectionMeasuredWhereItMeansSomething) {
     constexpr double kSettledSec = 1.0;
     constexpr int kMinSamples = 3;
 
-    const auto& results = sweptCorpus();
+    // Este test le suma el oraculo por parcial (`measureSustained`) a cada archivo del barrido. Con
+    // los 41 bajo TSan eso son 193 s solo (medido el 11/09, techo 180): bajo sanitizer barre el
+    // subconjunto declarado, el mismo de REQ-035, y sin sanitizer los 41.
+    const std::vector<corpus::Outcome> results = sweepForThisBuild();
     ASSERT_FALSE(results.empty());
+    RecordProperty("archivos_barridos", static_cast<int>(results.size()));
 
     auto centsOf = [](double hz, double ref) { return 1200.0 * std::log2(hz / ref); };
     auto familyOf = [](const std::string& n) -> const char* {
@@ -1017,9 +1049,10 @@ TEST(CorpusRobustness, TheCoarseDetectionMeasuredWhereItMeansSomething) {
         return "ukelele";
     };
 
-    std::printf("\n  [REQ-038] la gruesa sobre el corpus, por instante. `lectura` = la publicacion de la que sale la "
-                "fina (la que ARBITRA dominio y signo); `mediana` = desde %.1f s (describe la NOTA); `ultima` = la cola "
-                "(lo que el barrido reportaba ANTES, y por eso figura al lado)\n", kSettledSec);
+    std::printf("\n  [REQ-038] la gruesa sobre el corpus, por instante (%zu de %zu archivos%s). `lectura` = la "
+                "publicacion de la que sale la fina (la que ARBITRA dominio y signo); `mediana` = desde %.1f s "
+                "(describe la NOTA); `ultima` = la cola (lo que el barrido reportaba ANTES, y por eso figura al lado)\n",
+                results.size(), corpus::entriesOf(corpus::manifestPath()).size(), kSubsetNote, kSettledSec);
     std::printf("  %-24s %8s %8s %8s | %7s %4s | %6s %6s %6s | %s\n", "archivo", "lectura", "mediana", "ultima",
                 "disper", "n", "dB_H2", "dB_H3", "dB_H4", "familia");
 
