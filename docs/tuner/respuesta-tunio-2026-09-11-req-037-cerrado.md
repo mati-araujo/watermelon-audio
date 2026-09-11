@@ -9,6 +9,11 @@ created: 2026-09-11
 
 **watermelon-audio → Tunio.** Contesta su segunda respuesta al aviso del 10/09.
 
+> **Enviada el 2026-09-11. Contestada el mismo día**: `carta-tunio-2026-09-11-cierre-req-037.md`
+> — 2.16.4 adoptada (su PR #44, leída del `.aar`), las dos bases de índice anotadas, nada
+> pendiente. Dos afirmaciones de esta carta envejecieron entre escribirla y publicarla, y están
+> corregidas en su lugar con la marca *corregido después de enviada* (§2 y §4c).
+
 Se cruzó con una nota nuestra que no les llegó, y mejor así: esa nota describía algo que
 ahora vamos a revertir. Acá va lo que pasó de nuestro lado, lo que decidimos, y tres cosas
 que aprendimos construyéndolo y que sí les sirven.
@@ -24,8 +29,14 @@ Dos equipos construyendo la misma capacidad en paralelo sin saberlo.
 
 ## 2 · Lo decidimos: se revierte, y nunca va a salir en un artefacto
 
-Todavía no hay release que lo contenga (el último tag es `v2.16.3`), así que lo revertimos
-antes de que exista. **No van a ver `automaticStringSelection` en ningún `.aar`.**
+Ya está revertido y ya salió la release que lo cuenta: **`v2.16.4`**, cortada y publicada
+el 11/09 con la feature y su revert (`24092ac`), que se cancelan en la superficie. **No van a
+ver `automaticStringSelection` en ningún `.aar`.**
+
+*(Corregido después de enviada: la carta salió diciendo "todavía no hay release que lo contenga,
+el último tag es `v2.16.3`, lo revertimos antes de que exista". Entre escribirla y publicarla se
+cortó `v2.16.4`; la afirmación que importa —ningún `.aar` con la superficie— no cambió, y Tunio
+la verificó sobre el artefacto.)*
 
 No es por orgullo ni por ahorrar: es nuestra regla. Algo entra a la API pública porque un
 consumidor real lo necesita, y el único consumidor posible acaba de decir que no lo necesita
@@ -73,9 +84,12 @@ prende el cap de al lado con cara de lectura válida. Queda documentado en los d
 mismos Hz — no compara con lo que ya tenía. Retiraron el pedido de abrirlo, así que hoy es
 irrelevante para ustedes; lo dejamos anotado por si algún día vuelve.
 
-**c. El CHANGELOG de la próxima release va a listar la feature y su revert.** No es un error
-de ustedes ni algo que haya que adoptar: es la traza de estos cinco minutos. La versión va a
-ser **2.16.4**, no 2.17.0 — un minor sin feature real sería mentirles.
+**c. El CHANGELOG de `v2.16.4` lista la feature y su revert.** No es un error de ustedes ni
+algo que haya que adoptar: es la traza de estos cinco minutos. La versión **fue 2.16.4**, no
+2.17.0 — un minor sin feature real sería mentirles.
+
+*(Corregido después de enviada: la carta lo decía en futuro —"la próxima release", "va a ser
+2.16.4"—; ya está cortada y publicada.)*
 
 ## 5 · Lo que queda de nuestro lado
 
