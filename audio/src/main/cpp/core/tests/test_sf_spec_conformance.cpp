@@ -421,3 +421,185 @@ TEST(SfSpecConformance, TheVelocityLaddersFollowWhatTheFileDeclares) {
     EXPECT_LT(refE, 0.5) << "#13 E (modulador borrado) no es plano en la referencia: " << refE
                          << " dB — la referencia no aplica moduladores";
 }
+
+/**
+ * REQ-039 S3, tarea 3.1 — LA CORRIDA QUE IMPRIME LAS 22. No afirma tolerancias: las
+ * tolerancias del trinquete (3.2) salen de ESTA salida, y ninguna se escribe antes de
+ * ver el numero (regla de S1). Lo unico que se afirma es que el instrumento derivo lo
+ * que se cree: 22 pruebas anunciadas por la tecla `20 + N`, 27 sub-pruebas anunciadas
+ * por 51..56 (#5 A-B, #13 A-E, #14 A-E, #17 A-C, #18 A-C, #20 A-C, #22 A-F), y que
+ * ninguna ventana quedo sin carga util.
+ *
+ * Por ventana se imprimen los TRES observables (D4 del stage doc), cada uno como el
+ * maximo |motor - referencia| sobre las notas, en unidades RELATIVAS a la primera
+ * nota de la ventana (nivel y pitch) — asi la ganancia global de ~1,47 dB no entra:
+ *
+ *   nivel    RMS de los primeros 0,40 s de cada nota, dB relativo a la primera nota
+ *   pitch    cruces por cero, cada 0,25 s a lo largo de la nota, y la diferencia en
+ *            cents entre los dos renders EN EL MISMO HOP (asi #2/#6/#20 se ven como
+ *            trayectoria). 🔴 La primera version media cents relativos al primer hop
+ *            de la ventana, y daba 240 c de artefacto donde los Hz eran identicos
+ *            (370,05/370,05): el primer hop caia en el ataque o en la cola de la nota
+ *            anterior y cada lado lo estimaba distinto. Comparar hop contra hop no
+ *            necesita un ancla.
+ *   nivel-t  la TRAYECTORIA del nivel: RMS por hop de 0,25 s a lo largo de la nota,
+ *            relativo al ataque de cada lado, y el maximo |motor - referencia|. Sin
+ *            esto #1/#2/#3/#4/#21 (envolventes, timing) se median con UN RMS de
+ *            0,40 s, que es ciego a la forma. Medido en la primera corrida: #1 daba
+ *            0,00 con una sola nota
+ *   nivel-on la misma trayectoria pero SOLO hasta el note-off. Medido en 3.1: la
+ *            release de tsf difiere de la de FluidSynth en TODAS las pruebas (mas
+ *            rapida en #5/#7/#19/#20: -28 contra -17 dB en el primer hop despues del
+ *            apagado; mas lenta en #1: -14,5 contra -22,3). Es un hallazgo con dueño
+ *            propio (envolventes de tsf contra el spec), y sin esta columna taparia
+ *            la tolerancia de cada fila F con un desacuerdo que no es de esa fila.
+ *   balance  L - R en dB, absoluto (un pan es un valor, no una relacion)
+ *
+ * 🔴 El pitch se mide SOLO en hops donde la nota SUENA en los dos lados (a menos de
+ * 20 dB de su ataque). Sin la compuerta, el estimador leia 125 Hz sobre la cola de
+ * release a -30 dB y las filas de nivel mostraban 240 c de "desacuerdo" con los Hz
+ * identicos en todo el tramo sonoro. Y esa cola —el motor a -30 dB donde FluidSynth
+ * ya esta a -70— la ve la trayectoria de nivel, que es donde corresponde.
+ *
+ * `WMA_SPEC_DETAIL=11,20,22` imprime ademas las filas por nota de esas pruebas.
+ */
+TEST(SfSpecConformance, TheTwentyTwoMeasured) {
+    if (!have()) GTEST_SKIP() << "sin material del spec-test — corre scripts/fetch-spec-test.sh";
+    const std::string refPath = dir() + "/reference-fluidsynth-2.6.0.wav";
+    struct stat st {};
+    if (stat(refPath.c_str(), &st) != 0) {
+        GTEST_SKIP() << "sin referencia — corre scripts/render-spec-reference.sh";
+    }
+    using namespace wma_test::specmidi;
+    const auto ours = render(sf2(), mid());
+    ASSERT_TRUE(ours.valid);
+    const wav::WavData ref = wav::readWav(refPath.c_str());
+    ASSERT_GT(ref.numFrames, 0);
+    ASSERT_EQ(ref.sampleRate, ours.sampleRate);
+    const Signal A = view(ours);
+    const Signal B{ref.buffer.data(), ref.numFrames, ref.sampleRate};
+
+    const std::vector<Window> windows = deriveWindows(ours);
+    int tests = 0, subs = 0, empty = 0;
+    for (const Window& w : windows) {
+        if (w.sub == 0) ++tests; else ++subs;
+        if (w.notes.empty()) ++empty;
+    }
+    // Control de que se derivo lo que se cree (medido el 2026-09-11 con un parser
+    // independiente de tml sobre el .mid; el sha256 lo protege).
+    EXPECT_EQ(tests, 22) << "el canal 0 anuncia 22 pruebas con las teclas 21..42";
+    EXPECT_EQ(subs, 27) << "#5 A-B, #13 A-E, #14 A-E, #17 A-C, #18 A-C, #20 A-C, #22 A-F";
+    EXPECT_EQ(empty, 0) << "una ventana sin carga util no mide nada";
+    for (int n = 1; n <= 22; ++n) {
+        bool found = false;
+        for (const Window& w : windows) found = found || (w.sub == 0 && w.test == n);
+        EXPECT_TRUE(found) << "falta la prueba #" << n;
+    }
+
+    // Que pruebas van con detalle por nota.
+    std::vector<int> detail;
+    if (const char* d = std::getenv("WMA_SPEC_DETAIL")) {
+        std::string s(d);
+        size_t p = 0;
+        while (p < s.size()) {
+            size_t q = s.find(',', p);
+            if (q == std::string::npos) q = s.size();
+            if (q > p) detail.push_back(std::atoi(s.substr(p, q - p).c_str()));
+            p = q + 1;
+        }
+    }
+    auto wantsDetail = [&](int t) {
+        for (int d : detail) if (d == t) return true;
+        return false;
+    };
+    // `WMA_SPEC_HOPS=2,6` imprime la trayectoria de pitch hop por hop de esas pruebas.
+    std::vector<int> hopsOf;
+    if (const char* d = std::getenv("WMA_SPEC_HOPS")) {
+        std::string s(d);
+        size_t p = 0;
+        while (p < s.size()) {
+            size_t q = s.find(',', p);
+            if (q == std::string::npos) q = s.size();
+            if (q > p) hopsOf.push_back(std::atoi(s.substr(p, q - p).c_str()));
+            p = q + 1;
+        }
+    }
+    auto wantsHops = [&](int t) {
+        for (int d : hopsOf) if (d == t) return true;
+        return false;
+    };
+
+    std::printf("\n  [REQ-039 S3] LAS 22 MEDIDAS — max |motor - FluidSynth| por ventana, relativo a su primera nota\n");
+    std::printf("  %-8s %5s %10s %10s %10s %10s %10s %10s  %s\n", "ventana", "notas", "nivel dB",
+                "rango(m)", "nivel-t", "nivel-on", "pitch c", "balance", "nota");
+    for (const Window& w : windows) {
+        const double dur = 0.40;
+        double lvl0A = 0, lvl0B = 0;
+        double maxLvl = 0, maxPitch = 0, maxBal = 0, loA = 0, hiA = 0, maxTraj = 0, maxTrajOn = 0;
+        int hops = 0, silentHops = 0;
+        std::string note;
+        for (size_t i = 0; i < w.notes.size(); ++i) {
+            const NoteOn& n = w.notes[i];
+            // El limite es el proximo note-on de CUALQUIER clase, anuncios incluidos:
+            // la voz que dice "B" suena, y en la primera corrida entraba a -19 dB en la
+            // trayectoria de la ultima nota de la sub-prueba A.
+            double next = w.t1;
+            for (const NoteOn& m : ours.noteOns)
+                if (m.sec > n.sec) { next = std::min(next, m.sec); break; }
+            const double lA = levelDb(A, n.sec, dur), lB = levelDb(B, n.sec, dur);
+            const double bA = balanceDb(A, n.sec, dur), bB = balanceDb(B, n.sec, dur);
+            if (i == 0) { lvl0A = lA; lvl0B = lB; }
+            const double relA = lA - lvl0A, relB = lB - lvl0B;
+            if (relA < loA) loA = relA;
+            if (relA > hiA) hiA = relA;
+            maxLvl = std::max(maxLvl, std::fabs(relA - relB));
+            maxBal = std::max(maxBal, std::fabs(bA - bB));
+            // Las trayectorias corren hasta el note-off MAS 1 s de release (la
+            // envolvente de #1 tiene una release de 1 s entera), sin pasar de la
+            // nota siguiente. El pitch, solo hasta el note-off: la cola no es la nota.
+            // ... y 20 ms ANTES de ese note-on: el arnes cuantiza los eventos al bloque
+            // (512 muestras, 11,6 ms) y el motor arranca la nota siguiente un bloque
+            // antes que la referencia. Un hop que termina justo en el note-on lleva
+            // esos 11 ms de la nota siguiente en un lado y no en el otro — medido:
+            // -19 dB "de cola" en #17 A que era el ataque de la nota de B.
+            const double off = noteOffSec(ours, n, next);
+            const double span = std::min(std::min(off + 1.0, next - 0.02) - n.sec, 8.0);
+            const double sounding = off - n.sec;
+            double notePitchMax = 0;
+            const double onA = levelDb(A, n.sec, 0.25), onB = levelDb(B, n.sec, 0.25);
+            for (double t = n.sec; t + 0.25 <= n.sec + span; t += 0.25) {
+                const double hA = pitchHz(A, t), hB = pitchHz(B, t);
+                const double tA = levelDb(A, t, 0.25) - onA, tB = levelDb(B, t, 0.25) - onB;
+                // La trayectoria de nivel se compara mientras ALGUNO de los dos suena
+                // (-60 dB): asi la cola de release entra, que es donde difieren.
+                if (levelDb(A, t, 0.25) > -60.0 || levelDb(B, t, 0.25) > -60.0) {
+                    const double d = std::fabs(std::max(tA, -60.0) - std::max(tB, -60.0));
+                    maxTraj = std::max(maxTraj, d);
+                    if (t + 0.25 <= n.sec + sounding + 1e-9) maxTrajOn = std::max(maxTrajOn, d);
+                }
+                if (wantsHops(w.test)) {
+                    std::printf("        %-8s nota %2zu hop @%7.2fs  %8.2f / %8.2f Hz  Δ %+8.2f c  nivel %+7.2f/%+7.2f\n",
+                                w.label().c_str(), i, t, hA, hB, centsBetween(hA, hB), tA, tB);
+                }
+                const bool inNote = (t + 0.25 <= n.sec + sounding + 1e-9) && tA > -20.0 && tB > -20.0;
+                if (hA <= 0 || hB <= 0 || !inNote) { ++silentHops; continue; }
+                const double d = centsBetween(hA, hB);
+                notePitchMax = std::max(notePitchMax, std::fabs(d));
+                ++hops;
+            }
+            maxPitch = std::max(maxPitch, notePitchMax);
+            if (wantsDetail(w.test)) {
+                std::printf("      %-8s nota %2zu ch%d k%3d v%3d @%7.2fs  nivel %+7.2f/%+7.2f  bal %+6.2f/%+6.2f"
+                            "  pitch %8.2f/%8.2f Hz  maxΔc %6.2f\n",
+                            w.label().c_str(), i, n.channel, n.key, n.velocity, n.sec, relA, relB,
+                            bA, bB, pitchHz(A, n.sec), pitchHz(B, n.sec), notePitchMax);
+            }
+        }
+        if (hops == 0) note += "sin pitch (ruido/silencio) ";
+        else if (silentHops > 0) note += "hops mudos: " + std::to_string(silentHops) + " ";
+        std::printf("  %-8s %5zu %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f  %s\n", w.label().c_str(),
+                    w.notes.size(), maxLvl, hiA - loA, maxTraj, maxTrajOn, maxPitch, maxBal,
+                    note.c_str());
+    }
+    std::printf("\n");
+}
