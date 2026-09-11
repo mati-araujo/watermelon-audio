@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.16.4](https://github.com/mati-araujo/watermelon-audio/compare/v2.16.3...v2.16.4) (2026-09-11)
+
+
+### Features
+
+* **tuner:** AC-037.5 y la nota a Tunio con lo que le puede morder (REQ-037.2) ([3b0492c](https://github.com/mati-araujo/watermelon-audio/commit/3b0492c5acd62c1347908381bfaa62e715c733b1))
+* **tuner:** la puerta pública del modo rápido (REQ-037 S2) ([6cacd48](https://github.com/mati-araujo/watermelon-audio/commit/6cacd48720190a66e75fd55e855def5da599351f))
+* **tuner:** que el consumidor pueda pedir que el motor elija la cuerda (REQ-037.2) ([c2e2b5d](https://github.com/mati-araujo/watermelon-audio/commit/c2e2b5d99ed6f4d18bbdb54f970c8068bb31c9c1))
+
+
+### Bug Fixes
+
+* **looper:** el loop maestro es la vuelta y no el buffer ([9a86ced](https://github.com/mati-araujo/watermelon-audio/commit/9a86ced691157a2fa93b393965582571a38a082a))
+* **looper:** el loop maestro es la vuelta y no el buffer (MINI-021) ([7c068f5](https://github.com/mati-araujo/watermelon-audio/commit/7c068f5977a584bfa387e8169af8643cf905a9d0))
+* **test:** que el lint de tiempo imprima la causa, no solo el nombre (MINI-022) ([6124295](https://github.com/mati-araujo/watermelon-audio/commit/61242953a03067b43fc2169fe5e495a4cf1659e1))
+* **test:** que el lint de tiempo imprima la causa, no sólo el nombre (MINI-022) ([e3f33a1](https://github.com/mati-araujo/watermelon-audio/commit/e3f33a11c730b8c92fd63e218ca0e6c248d4c44f))
+
+
+### Reverts
+
+* la puerta publica del modo rapido — nadie la iba a cruzar (REQ-037) ([24092ac](https://github.com/mati-araujo/watermelon-audio/commit/24092ac2b6ede2329342b74397007300a08b0c8f))
+* la puerta pública del modo rápido — nadie la iba a cruzar (REQ-037) ([5b4c6b1](https://github.com/mati-araujo/watermelon-audio/commit/5b4c6b1e0a2e169f09634ec22ac7dc0925cb1209))
+
+
+### Miscellaneous Chores
+
+* **release:** que el revert de REQ-037 corte un patch y no un minor ([4d7cddc](https://github.com/mati-araujo/watermelon-audio/commit/4d7cddc56bd66a2a17adc5bf2bb33509e41aa217))
+
 ## [2.16.3](https://github.com/mati-araujo/watermelon-audio/compare/v2.16.2...v2.16.3) (2026-09-09)
 
 
