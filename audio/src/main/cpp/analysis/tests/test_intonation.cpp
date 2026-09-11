@@ -134,7 +134,13 @@ TEST(IntonationTest, LosingASignalExpiresTheResultInsteadOfShowingTheLastGoodOne
     ASSERT_TRUE(put(m, IntonationMode::kFretted, measured(target, +2.0)));
     ASSERT_TRUE(m.hasResult());
 
-    m.invalidate();
+    // La señal se fue o el musico cambio de cuerda: el resultado CADUCA por
+    // `reset()`, que es lo que `AnalysisThread` llama. Hasta MINI-023 este test
+    // entraba por `invalidate()`, un alias de `reset()` que produccion nunca
+    // llamo — y que por eso vivia como deuda en mechanism-callers-baseline.
+    // No se conserva "el ultimo valido": un numero viejo mostrado como actual es
+    // peor que no tener numero, porque el usuario ajusta un saddle con el.
+    m.reset();
 
     EXPECT_FALSE(m.hasResult());
     EXPECT_EQ(m.state(), IntonationMode::kNeedHarmonic)
