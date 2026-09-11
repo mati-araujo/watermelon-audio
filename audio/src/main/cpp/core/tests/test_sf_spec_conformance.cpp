@@ -247,7 +247,7 @@ TEST(SfSpecConformance, TheTableOfTodayAgainstFluidSynth) {
  * ganancia global entre los dos renders (~1,47 dB, ver el test de arriba) — y es
  * exactamente la cantidad que las sub-pruebas estan diseñadas para variar.
  */
-TEST(SfSpecConformance, TheVelocityLaddersAreTheDefectMadeVisible) {
+TEST(SfSpecConformance, TheVelocityLaddersFollowWhatTheFileDeclares) {
     if (!have()) GTEST_SKIP() << "sin material del spec-test — corre scripts/fetch-spec-test.sh";
     const std::string refPath = dir() + "/reference-fluidsynth-2.6.0.wav";
     struct stat st {};
@@ -327,42 +327,92 @@ TEST(SfSpecConformance, TheVelocityLaddersAreTheDefectMadeVisible) {
         << "la referencia de FluidSynth no reproduce el numero que el spec documenta";
 
     /**
-     * 🔴 EL DEFECTO, MEDIDO: las diez sub-pruebas estan programadas DISTINTAS —96 dB
-     * concava, 144, 48, 96 LINEAL, y dos con el modulador BORRADO— y nuestro motor
-     * da **la misma curva en las diez**, porque no lee ningun modulador: aplica su
-     * propia curva de velocity cableada (`tsf.h:1619`).
+     * 🔴 EL TRINQUETE DE S1 SE DIO VUELTA (S2, tarea 2.8), y esto es el contrato nuevo.
      *
-     * Esto es la linea de base de S1 y el trinquete que S2 tiene que ROMPER. Y es
-     * tambien el control de AC-039.2: un instrumento que no distinguiera las diez
-     * no podria ver el arreglo.
+     * S1 dejo medido que las diez escaleras daban UNA sola curva (18,5 dB, dispersion
+     * 0,13) porque el motor no leia moduladores. Con `channelNoteOnWithModulators` en el
+     * note-on del renderizador, las diez salen del archivo. Lo que se afirma ahora es
+     * POR SUB-PRUEBA, y contra DOS oraculos distintos — porque la referencia de
+     * FluidSynth NO es el spec en tres de las diez, y eso lo dice el README del
+     * spec-test por su nombre:
+     *
+     *   "many SoundFont synths including FluidSynth and BASSMIDI choose not to
+     *    implement this default modulator [velocity -> filter cutoff] at all."
+     *
+     * Asi que #14 A (default), #14 C (sin filtro declarado: el default otra vez) y
+     * #14 D (borrado con la identidad 2.01, que NO es la del default 2.04) salen
+     * PLANOS en FluidSynth y con filtrado moderado en un synth 2.04 — que es lo que el
+     * spec manda: "moderate filtering (-2400 cent curve) as the velocity decreases
+     * from 127 to 0 with no sudden jump". Medido en el font con el lector del repo:
+     * `veloToFC-deleted2.01` borra con `amtSrc = velocity/switch` (identidad 2.01) y
+     * `veloToFC-deleted2.04` con `amtSrc = none` (identidad 2.04, la nuestra). Solo
+     * la segunda anula nuestro default #2, y asi tiene que ser.
      */
+    auto nivelesRelativos = [&](const float* s, int frames, double t0, double out[8]) {
+        double v0 = 0.0;
+        for (int j = 0; j < 8; ++j) {
+            const double x = rmsAt(s, frames, t0 + 0.5 * j, 0.40);
+            if (j == 0) v0 = x;
+            out[j] = x - v0;
+        }
+    };
+    auto rangoRef = [&](double t0) { return rango(ref.buffer.data(), ref.numFrames, t0, nullptr); };
+
+    // (1) Las SIETE donde FluidSynth es conforme al spec: al decimo de dB. #13 D lleva
+    // mas tolerancia por el residuo del METODO —el rango de un render con envolvente
+    // contra 84 dB de atenuacion se acerca al piso—, que 2.2 midio en +1,23 dB y NO es
+    // un desacuerdo de formula. Ver `test_soundfont_modulators.cpp`.
+    struct Conforme { int idx; double tol; };
+    const Conforme kConformes[] = {{0, 0.25}, {1, 0.25}, {2, 0.25}, {3, 1.5}, {4, 0.25},
+                                   {6, 0.25}, {9, 0.25}};
+    for (const Conforme& c : kConformes) {
+        EXPECT_NEAR(rangosNuestros[static_cast<size_t>(c.idx)], rangoRef(kEsc[c.idx].t0), c.tol)
+            << kEsc[c.idx].etiqueta << ": el motor se aparto de FluidSynth, que en esta "
+            << "sub-prueba SI es conforme al spec";
+    }
+
+    // (2) Las TRES del default #2, contra el SPEC 2.04 y no contra FluidSynth.
+    const int kDefaultDos[] = {5, 7, 8};  // #14 A, #14 C, #14 D
+    const double rangoMenosSieteMil = rangosNuestros[6];  // #14 B: -7200 cents, el techo
+    for (int idx : kDefaultDos) {
+        const double r = rangosNuestros[static_cast<size_t>(idx)];
+        // "moderate filtering": hay filtrado, y es MENOS que el de -7200 cents.
+        EXPECT_GT(r, 1.0) << kEsc[idx].etiqueta << ": sin filtrado por velocity — el default #2 "
+                          << "(SF2 2.04 §8.4.2) no se esta aplicando";
+        EXPECT_LT(r, rangoMenosSieteMil - 3.0)
+            << kEsc[idx].etiqueta << ": el filtrado del default (-2400) no puede superar al de -7200";
+        // "no sudden jump": la escalera baja de a poco, sin escalon (que era la marca del 2.01
+        // en velocity 63) y sin subir.
+        double niv[8];
+        nivelesRelativos(ours.stereo.data(), ours.frames, kEsc[idx].t0, niv);
+        for (int j = 1; j < 8; ++j) {
+            EXPECT_LE(niv[j], niv[j - 1] + 0.3)
+                << kEsc[idx].etiqueta << ": el nivel SUBE de la velocity " << j - 1 << " a la " << j;
+            EXPECT_GT(niv[j], niv[j - 1] - 4.0)
+                << kEsc[idx].etiqueta << ": salto de mas de 4 dB entre velocities consecutivas — "
+                << "es la marca del default 2.01 (escalon en 63), no del 2.04";
+        }
+        // 🔴 Y la referencia de FluidSynth es PLANA aca, y el motor NO la sigue. Esta
+        // clausula existe para que grite si alguien "arregla" la discrepancia imitando a
+        // FluidSynth en vez de al spec: la decision de este REQ es SF2 2.04.
+        EXPECT_LT(rangoRef(kEsc[idx].t0), 0.5)
+            << kEsc[idx].etiqueta << ": la referencia dejo de ser plana — ¿cambio la referencia?";
+        EXPECT_GT(r - rangoRef(kEsc[idx].t0), 2.0)
+            << kEsc[idx].etiqueta << ": el motor se acerco a FluidSynth, que NO implementa el "
+            << "default #2. El oraculo aca es el spec 2.04, no la referencia";
+    }
+    // Las tres son el MISMO default 2.04 sin nada que lo pise: tienen que coincidir.
+    EXPECT_NEAR(rangosNuestros[5], rangosNuestros[7], 0.5) << "#14 A y #14 C difieren";
+    EXPECT_NEAR(rangosNuestros[5], rangosNuestros[8], 0.5) << "#14 A y #14 D difieren";
+
     double minR = rangosNuestros[0], maxR = rangosNuestros[0];
     for (double r : rangosNuestros) { minR = std::min(minR, r); maxR = std::max(maxR, r); }
     std::printf("  motor: rangos entre %.2f y %.2f dB -> dispersion %.2f dB sobre DIEZ sub-pruebas\n\n",
                 minR, maxR, maxR - minR);
-    /**
-     * 🔴 EL TRINQUETE ES BIDIRECCIONAL, Y LA PRIMERA VERSION NO LO ERA. Solo
-     * afirmaba que las diez escaleras coincidieran ENTRE SI, y eso no puede
-     * distinguir "las diez identicas en 18,5 dB" (hoy) de "las diez identicas en
-     * 0 dB" (el motor sin ninguna curva de velocity). Medido: con el termino de
-     * velocity de `tsf.h:1619` borrado, la dispersion BAJA de 0,13 a 0,07 y la
-     * version vieja seguia en VERDE mientras la tabla impresa cambiaba entera.
-     * Un numero que se imprime y no se afirma no protege nada.
-     *
-     * Por eso se afirma tambien el VALOR de hoy. Se pone rojo en las dos
-     * direcciones: si el motor deja de aplicar su curva cableada, y si empieza a
-     * leer los moduladores de verdad — que es lo que S2 tiene que hacer.
-     */
-    EXPECT_LT(maxR - minR, 0.5)
-        << "las diez escaleras dejaron de dar la misma curva (dispersion " << (maxR - minR)
-        << " dB). Si es por el arreglo de REQ-039, ESTE ES EL TRINQUETE QUE HAY QUE DAR VUELTA: "
-           "borralo y escribi el contrato nuevo por sub-prueba.";
-    EXPECT_GT(minR, 18.0)
-        << "el rango de las escaleras se achico (" << minR << " dB, hoy 18,5): el motor dejo de "
-           "aplicar SU curva de velocity, y eso no es el arreglo de REQ-039 — es otra cosa";
-    EXPECT_LT(maxR, 19.0)
-        << "el rango de las escaleras crecio (" << maxR << " dB, hoy 18,6). Si S2 esta leyendo "
-           "los moduladores, ESTE es el trinquete a dar vuelta.";
+    // (3) Y lo que S1 dejo como trinquete, ahora al reves: las diez YA NO son una curva.
+    EXPECT_GT(maxR - minR, 30.0)
+        << "las diez escaleras volvieron a una sola curva (dispersion " << (maxR - minR)
+        << " dB): el motor dejo de leer los moduladores";
 
     // Y el control positivo del lado de la referencia: #13 E tiene el modulador
     // BORRADO, asi que sus ocho notas tienen que sonar IGUAL. Si esto no fuera

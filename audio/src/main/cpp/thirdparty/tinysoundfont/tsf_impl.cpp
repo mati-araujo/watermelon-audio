@@ -63,3 +63,51 @@ extern "C" int tsf_get_preset_key_range(const tsf* f, int i, int* out_lo, int* o
     if (out_hi) *out_hi = hi;
     return 1;
 }
+
+// ---- REQ-039 S2: las voces que un note-on acaba de arrancar --------------------
+//
+// tsf no guarda "las voces de la ultima llamada": las identifica el `playIndex`,
+// que note_on toma de `f->voicePlayIndex++`, asi que las voces mas recientes
+// llevan `f->voicePlayIndex - 1`. Si el note-on no creo ninguna (tecla fuera de
+// rango), el contador igual avanzo y no matchea nada: se devuelve 0.
+extern "C" int tsf_ext_voices_started_by_last_note_on(const tsf* f, tsf_ext_started_voice* out,
+                                                        int max) {
+    if (!f || !f->voices || f->voicePlayIndex == 0) return 0;
+    const unsigned int last = f->voicePlayIndex - 1;
+    int n = 0;
+    for (int i = 0; i < f->voiceNum; ++i) {
+        const struct tsf_voice& v = f->voices[i];
+        if (v.playingPreset < 0 || v.playIndex != last || !v.region) continue;
+        if (n < max && out) {
+            const struct tsf_preset& p = f->presets[v.playingPreset];
+            out[n].voiceIndex = i;
+            out[n].presetIndex = v.playingPreset;
+            out[n].regionIndex = static_cast<int>(v.region - p.regions);
+            out[n].initialFilterFc = v.region->initialFilterFc;
+        }
+        ++n;
+    }
+    return n;
+}
+
+extern "C" void tsf_ext_voice_replace_velocity_gain(tsf* f, int voiceIndex, float vel,
+                                                     float attenuationDB) {
+    if (!f || !f->voices || voiceIndex < 0 || voiceIndex >= f->voiceNum) return;
+    if (!(vel > 0.0f)) return;
+    struct tsf_voice& v = f->voices[voiceIndex];
+    // tsf.h:1619 hizo `noteGainDB = global - atten - gainToDecibels(1/vel)`.
+    // Se suma de vuelta EXACTAMENTE ese termino y se resta el modulado.
+    v.noteGainDB += tsf_gainToDecibels(1.0f / vel) - attenuationDB;
+}
+
+extern "C" void tsf_ext_voice_set_filter_cutoff(tsf* f, int voiceIndex, float cutoffCents) {
+    if (!f || !f->voices || voiceIndex < 0 || voiceIndex >= f->voiceNum) return;
+    struct tsf_voice& v = f->voices[voiceIndex];
+    // Misma formula que el "Setup lowpass filter" de tsf_note_on, con el corte
+    // modulado en lugar de region->initialFilterFc. QInv no cambia: el Q no se modula.
+    const float lowpassFc =
+        (cutoffCents <= 13500.0f ? tsf_cents2Hertz(cutoffCents) / f->outSampleRate : 1.0f);
+    v.lowpass.z1 = v.lowpass.z2 = 0;
+    v.lowpass.active = (lowpassFc < 0.499f);
+    if (v.lowpass.active) tsf_voice_lowpass_setup(&v.lowpass, lowpassFc);
+}

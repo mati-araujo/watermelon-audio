@@ -346,7 +346,8 @@ TEST_F(SoundFontLoadTest, ReRatingWhileTheAudioThreadRendersIsSafe) {
             // Usar `getActiveSF()` acá sería modelar mal el motor — y de hecho
             // fue así como este test destapó el use-after-free del esquema de
             // retiro viejo, en el TSan de Linux.
-            tsf* sf = mManager.acquireActive();
+            const ActiveFont* font = mManager.acquireActiveFont();
+            tsf* sf = font ? font->sf : nullptr;
             if (sf) {
                 tsf_render_float(sf, buf.data(), 128, 0);
                 blocks.fetch_add(1, std::memory_order_relaxed);
