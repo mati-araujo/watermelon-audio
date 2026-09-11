@@ -155,6 +155,7 @@ add_executable(core_tests
     test_c_api_engine_params.cpp
     test_soundfont_load.cpp
     test_minimal_soundfont_modulators.cpp
+    test_soundfont_note_on.cpp
     support/tml_impl.cpp
     test_sf_spec_conformance.cpp
     test_touch_expression.cpp
