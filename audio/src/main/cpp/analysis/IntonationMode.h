@@ -96,14 +96,6 @@ public:
         return true;
     }
 
-    /**
-     * La señal se fue o el musico cambio de cuerda: el resultado CADUCA.
-     *
-     * No se conserva "el ultimo valido": un numero viejo mostrado como actual es
-     * peor que no tener numero, porque el usuario ajusta un saddle con el.
-     */
-    void invalidate() noexcept { reset(); }
-
     State state() const noexcept {
         if (!mHas[kHarmonic]) return kNeedHarmonic;
         if (!mHas[kFretted]) return kNeedFretted;
