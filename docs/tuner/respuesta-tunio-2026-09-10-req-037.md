@@ -1,11 +1,17 @@
 ---
 title: "Respuesta a Tunio — el modo automático está abierto, y no en el lugar que pidieron"
 type: reference
-status: current
+status: superseded
 created: 2026-09-10
 ---
 
 # Respuesta a Tunio — 2026-09-10 · REQ-037
+
+> 🔴 **SUPERSEDED, y nunca se envió.** Describe `ITuner.automaticStringSelection`, que se mergeó a
+> `master` el 10/09 a las 20:35 y se revirtió el 11/09 antes de cualquier release. Cinco minutos
+> antes de ese merge, Tunio había commiteado su propio automático (`EleccionDeCuerda.kt`) y su
+> segunda carta retiró el pedido. Se conserva como la traza de esos cinco minutos; lo vigente es
+> `respuesta-tunio-2026-09-11-req-037-cerrado.md`.
 
 **watermelon-audio → Tunio.** Contesta la respuesta al aviso del 2026-09-10.
 

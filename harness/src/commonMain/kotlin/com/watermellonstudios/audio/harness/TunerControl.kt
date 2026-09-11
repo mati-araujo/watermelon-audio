@@ -29,7 +29,7 @@ import com.watermellonstudios.audio.domain.tuning.TuningConfiguration
 import kotlinx.coroutines.delay
 
 /**
- * Control 9 — el afinador. **Y, sobre todo, el control de AC-010.1 y de AC-037.1.**
+ * Control 9 — el afinador. **Y, sobre todo, el control de AC-010.1.**
  *
  * ## Este archivo es una aserción de compilación, no sólo una pantalla
  *
@@ -50,20 +50,8 @@ import kotlinx.coroutines.delay
  * > test-teatro perfecto, verde por construcción. La única forma de afirmar "puerta" es
  * > cruzando la frontera de módulo, que es lo que hace este archivo.
  *
- * Y ejercita **todos** los miembros de [ITuner], no sólo `create()`: una puerta que devuelve
+ * Y ejercita los **siete** miembros de [ITuner], no sólo `create()`: una puerta que devuelve
  * algo que después no se puede usar sin optar-in tampoco es una puerta.
- *
- * 🔴 El número no se escribe acá. Este KDoc decía "los **siete** miembros" y REQ-037 agregó el
- * octavo: un conteo a mano envejece en silencio y se lee como un hecho, que es la lección que
- * `CLAUDE.md` cobró siete veces antes de convertirla en un gate.
- *
- * ## REQ-037 — el modo automático entra por acá
- *
- * [ITuner.automaticStringSelection] es la capacidad que Tunio tenía bloqueada desde agosto, y
- * hasta que existió había que llegar a `ITunerBridge.setTunerCandidates` por `getAudioBridge()`.
- * Que este archivo la pueda encender **sin `@OptIn`** es AC-037.1, y es la razón por la que el
- * botón "Auto" y el "Soltar" de abajo no son adorno: el automático sólo manda cuando no hay
- * cuerda elegida, así que sin poder soltarla la capacidad no se puede ejercer.
  *
  * ## Por qué muestra los cents y no un "afinado / desafinado"
  *
@@ -101,7 +89,6 @@ fun TunerControl(modifier: Modifier = Modifier) {
 
     var running by remember { mutableStateOf(tuner.isRunning) }
     var selected by remember { mutableStateOf(tuner.selectedString) }
-    var automatico by remember { mutableStateOf(tuner.automaticStringSelection) }
     var lastStartFailed by remember { mutableStateOf(false) }
     var reading by remember { mutableStateOf<TunerReading?>(null) }
 
@@ -133,26 +120,6 @@ fun TunerControl(modifier: Modifier = Modifier) {
                             (r.target?.let { " · objetivo ${it.note.name}" } ?: " · sin objetivo") +
                             (if (r.isConverged) " · convergido" else "")
                     }
-                },
-                fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.bodySmall,
-            )
-
-            // AC-037.4 — CONTRA QUE OBJETIVO se publico esta lectura.
-            //
-            // En modo automatico `selectedString` es null y la cuerda la elige el motor, asi
-            // que sin esta linea el consumidor ve cents contra un objetivo que no sabe cual
-            // es, y no puede llevarlos a Hz absolutos sin adivinar la cuerda — el error que
-            // REQ-035 midio del lado del barrido.
-            //
-            // Sale de `reading.target`, que ya resuelve la base del indice: `lockedString` es
-            // 0-based y `selectedString` es 1-based. Leerlo del snapshot a mano es donde se
-            // equivoca uno.
-            Text(
-                text = when (val t = reading?.target) {
-                    null -> if (automatico) "objetivo · el motor todavia no engancho" else "objetivo · ninguno"
-                    else -> "objetivo · cuerda ${t.stringIndex} · ${t.note.name}" +
-                        (if (selected == null) " (lo eligio el motor)" else " (lo elegiste vos)")
                 },
                 fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall,
@@ -242,29 +209,6 @@ fun TunerControl(modifier: Modifier = Modifier) {
                     },
                 ) {
                     Text("Drop D")
-                }
-
-                Button(
-                    onClick = {
-                        // AC-037.1: encender el modo automático desde la puerta pública. Sin
-                        // `@OptIn`, que es la aserción entera de este archivo.
-                        tuner.automaticStringSelection = !tuner.automaticStringSelection
-                        automatico = tuner.automaticStringSelection
-                    },
-                ) {
-                    Text(if (automatico) "Auto ✓" else "Auto")
-                }
-
-                Button(
-                    onClick = {
-                        // El automático es la política de fallback de `selectedString`: con
-                        // cuerda elegida manda el consumidor. Soltarla es lo que le deja al
-                        // motor elegir, así que este botón es parte de poder EJERCER AC-037.2.
-                        tuner.selectedString = null
-                        selected = null
-                    },
-                ) {
-                    Text("Soltar")
                 }
             }
 
