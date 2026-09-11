@@ -118,6 +118,49 @@ inline bool waitForRoom(AnalysisRing& ring, int frames,
 }
 
 /**
+ * Lector de `framesAnalyzed` para los alimentadores de abajo.
+ *
+ * 🔴 UNA LECTURA ROTA NO ES "CERO ANALIZADO" (2026-09-11, rojo en el TSan local).
+ * `AnalysisSnapshot::read` devuelve false tambien cuando el escritor esta a mitad
+ * de un publish y sus 8 reintentos —sin `yield`, a proposito: el lector puede
+ * ser la UI— se agotan adentro de la ventana impar. Bajo TSan, medido con un
+ * lector girando: **0,027 %** de las lecturas con la maquina ociosa y el doble
+ * bajo carga, porque el publish instrumentado dura mas que los 8 reintentos. Los
+ * tres alimentadores mapeaban ese false a `0.0`, y `feedAtAnalysisPace` hacia
+ * en su `return` UNA lectura sin reintento DESPUES de que el bucle ya habia
+ * visto la meta cumplida: `ci-l2` lo reporto como "el analisis dejo de
+ * consumir" con el analisis vivo (1 en 1332 bajo `-j4`; 0 en 280 repeticiones
+ * dirigidas: es la cola de esa tasa). En `feedContiguousMore` era peor: la META
+ * salia de la primera lectura, asi que una rota la achicaba a `blocks` bloques
+ * desde cero.
+ *
+ * `framesAnalyzed` es monotono, asi que la ultima lectura COHERENTE es una cota
+ * inferior valida. Una rota se reintenta cediendo el hilo (el publish termina
+ * en microsegundos); si nunca se publico nada, es 0 de verdad. El false honesto
+ * de los alimentadores —el analisis se murio— sigue saliendo por su techo de
+ * 30 s, no por aca.
+ */
+class AnalysedFrames {
+public:
+    explicit AnalysedFrames(const AnalysisSnapshot& snap) : mSnap(snap) {}
+    double operator()() {
+        float o[kSnapshotValueCount];
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            if (mSnap.read(o)) {
+                mLast = static_cast<double>(o[kSnapFramesAnalyzed]);
+                break;
+            }
+            if (!mSnap.hasData()) break;    // nunca se publico: mLast sigue en 0
+            std::this_thread::yield();      // el escritor esta a mitad de un publish
+        }
+        return mLast;
+    }
+private:
+    const AnalysisSnapshot& mSnap;
+    double mLast = 0.0;
+};
+
+/**
  * Alimenta el ring **al ritmo del ANÁLISIS**, no al del reloj.
  *
  * 🔴 ESTO NO ES UN DETALLE DE ESTILO, Y COSTÓ UN ROJO EN EL TSAN DEL CI.
@@ -148,10 +191,7 @@ inline bool waitForRoom(AnalysisRing& ring, int frames,
 template <typename MakeBlock>
 bool feedAtAnalysisPace(AnalysisRing& ring, AnalysisSnapshot& snap,
                         MakeBlock makeBlock, int blocks, int frames = 1024) {
-    auto analysed = [&]() -> double {
-        float o[kSnapshotValueCount];
-        return snap.read(o) ? static_cast<double>(o[kSnapFramesAnalyzed]) : 0.0;
-    };
+    AnalysedFrames analysed(snap);
     const double goal = static_cast<double>(blocks) * frames;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
 
@@ -773,10 +813,7 @@ struct OverrunObservation {
 OverrunObservation feedOverrunning(AnalysisRing& ring, AnalysisSnapshot& snap,
                                    double f0, int k, int iterations) {
     OverrunObservation obs;
-    auto analysed = [&]() -> double {
-        float o[kSnapshotValueCount];
-        return snap.read(o) ? static_cast<double>(o[kSnapFramesAnalyzed]) : 0.0;
-    };
+    AnalysedFrames analysed(snap);
     for (int i = 0; i < iterations; ++i) {
         const double before = analysed();
         for (int j = 0; j < k; ++j) {
@@ -823,10 +860,7 @@ OverrunObservation feedOverrunning(AnalysisRing& ring, AnalysisSnapshot& snap,
  */
 bool feedContiguousMore(AnalysisRing& ring, AnalysisSnapshot& snap, double f0,
                         int blocks, int startBlock) {
-    auto analysed = [&]() -> double {
-        float o[kSnapshotValueCount];
-        return snap.read(o) ? static_cast<double>(o[kSnapFramesAnalyzed]) : 0.0;
-    };
+    AnalysedFrames analysed(snap);
     const double goal = analysed() + static_cast<double>(blocks) * 1024.0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
 
