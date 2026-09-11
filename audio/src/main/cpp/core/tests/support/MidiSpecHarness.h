@@ -393,6 +393,35 @@ inline double pitchHz(const Signal& x, double t0, double dur = 0.25) {
     return static_cast<double>(crossings - 1) * x.rate / (last - first);
 }
 
+/**
+ * Observables de PROFUNDIDAD de un LFO: el pico a pico del nivel (dB) o del pitch
+ * (cents) en hops de 50 ms sobre `[t0, t1)`. A 0,25 s el hop promedia el ciclo entero
+ * de un LFO de 4 Hz y la profundidad desaparece (medido en 3.1: #5 daba 0,00 con
+ * ±6 dB declarados); a 50 ms —un quinto de ciclo— se ve, y el sesgo del promedio es
+ * el MISMO en los dos renders.
+ */
+inline double levelPeakToPeakDb(const Signal& x, double t0, double t1, double hop = 0.05) {
+    double lo = 1e9, hi = -1e9;
+    for (double t = t0; t + hop <= t1 + 1e-9; t += hop) {
+        const double l = rmsDbOf(x, t, hop);
+        if (l < -100.0) continue;
+        lo = std::min(lo, l);
+        hi = std::max(hi, l);
+    }
+    return hi > lo ? hi - lo : 0.0;
+}
+
+inline double pitchPeakToPeakCents(const Signal& x, double t0, double t1, double hop = 0.05) {
+    double lo = 1e9, hi = -1e9;
+    for (double t = t0; t + hop <= t1 + 1e-9; t += hop) {
+        const double hz = pitchHz(x, t, hop);
+        if (hz <= 0.0) continue;
+        lo = std::min(lo, hz);
+        hi = std::max(hi, hz);
+    }
+    return hi > lo ? 1200.0 * std::log2(hi / lo) : 0.0;
+}
+
 inline double centsBetween(double hz, double refHz) {
     return (hz > 0.0 && refHz > 0.0) ? 1200.0 * std::log2(hz / refHz) : 0.0;
 }
