@@ -55,6 +55,9 @@ target_compile_definitions(engine_tests PRIVATE
     # fetch-spec-test.sh), asi que su ruta llega por define y el test SKIPPEA si no esta.
     WMA_SPEC_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../core/tests/spec-test"
     WMA_PITCH_BASELINE="${CMAKE_CURRENT_SOURCE_DIR}/pitch-baseline.txt"
+    # REQ-039 2.9: el font real vive en el bundle de NoisyPad, checkout hermano. Si no
+    # esta, el test sale SKIPPED (nunca passed). Se puede pisar con la env var del mismo nombre.
+    WMA_GENERALUSER_SF3_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../../NoisyPad/core-soundfont-bundle/src/main/assets/soundfonts/GeneralUser_GS.sf3"
 )
 
 target_link_libraries(engine_tests PRIVATE watermelon-dsp GTest::gtest_main)

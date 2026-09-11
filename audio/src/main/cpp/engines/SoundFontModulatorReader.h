@@ -205,6 +205,25 @@ inline Hydra findHydra(const void* data, std::size_t size) {
  * 1.6 contra un parche a `tsf.h`: **0 desajustes** sobre 12 485 regiones de dos
  * fonts, con mutantes que prueban que la comparación no era ciega.
  */
+/**
+ * Los moduladores tal como estan EN EL ARCHIVO: cada entrada de `pmod` e `imod` una
+ * vez, sin los dos terminadores. Es la unidad con la que se cuenta "cuantos declara
+ * el font" y "cuantos manda rechazar el spec" — propiedades del ARCHIVO. Contarlas
+ * por region multiplica cada modulador global por las regiones de su instrumento:
+ * GeneralUser tiene 2812 en el archivo y 63 822 region × modulador. Medido.
+ */
+inline std::vector<Modulator> readFileModulators(const void* data, std::size_t size) {
+    using namespace detail;
+    std::vector<Modulator> out;
+    const Hydra h = findHydra(data, size);
+    if (!h.complete) return out;
+    for (const riff::Span* span : {&h.pmod, &h.imod}) {
+        if (span->count < 1) continue;
+        for (std::size_t i = 0; i + 1 < span->count; ++i) out.push_back(modulatorAt(*span, i));
+    }
+    return out;
+}
+
 inline std::vector<RegionModulators> readRegionModulators(const void* data, std::size_t size) {
     using namespace detail;
     std::vector<RegionModulators> out;

@@ -166,13 +166,28 @@ TEST(SoundFontModulatorTable, UnTransformNoLinealSeDescartaYSeCuenta) {
 }
 
 TEST(SoundFontModulatorTable, LasFuentesDeCanalSonAlcanceDeS3YNoRechazoDelSpec) {
-    // Un font sin moduladores propios ya trae ocho defaults con fuente de canal
-    // (#3..#10): CC, presion, rueda. Se cuentan como fuera de alcance, no como rechazo.
-    const auto t = tablaDe({});
+    // Un modulador del ARCHIVO con fuente de canal (CC1 -> filtro, como el del spec-test)
+    // se cuenta como fuera de alcance, no como rechazo del spec. Los defaults #3..#10
+    // tambien tienen fuente de canal, pero NO son del archivo y no se cuentan.
+    ModulatorPlacement m;
+    m.instrumentGlobal.push_back(
+        {srcOper(1, true, false, false, kCurveLinear), kGenInitialFilterFc, 7000, kSrcNone, 0});
+    const auto t = tablaDe(m);
+    EXPECT_EQ(t.declaredInFile(), 1u);
     EXPECT_EQ(t.rejections().specRejections(), 0u);
-    EXPECT_EQ(t.rejections().sourceNotAtNoteOn, 8u) << "#3 a #10 tienen fuente de canal";
+    EXPECT_EQ(t.rejections().sourceNotAtNoteOn, 1u) << "CC1 es fuente de canal: alcance de S3";
     EXPECT_EQ(t.rejections().destinationUnsupported, 0u);
+    // Y por region quedan #1 y #2 (los dos defaults de velocity): el de CC1 no entra.
     ASSERT_EQ(laUnicaRegion(t)->mods.size(), 2u) << "quedan #1 y #2, los dos de velocity";
+}
+
+TEST(SoundFontModulatorTable, LosContadoresSonDelArchivoYNoSeMultiplicanPorRegion) {
+    // Un font SIN moduladores propios declara CERO en el archivo, aunque cada region
+    // resuelva diez defaults. Es lo que sobre GeneralUser separaba 2812 de 63 822.
+    const auto t = tablaDe({});
+    EXPECT_EQ(t.declaredInFile(), 0u);
+    EXPECT_EQ(t.rejections().outOfScope(), 0u) << "los defaults no son del archivo";
+    EXPECT_EQ(t.rejections().specRejections(), 0u);
 }
 
 TEST(SoundFontModulatorTable, UnDestinoQueS2NoAplicaSeCuentaAparte) {
@@ -204,4 +219,62 @@ TEST(SoundFontModulatorTable, BytesQueNoSonUnSoundFontDejanLaTablaVacia) {
     EXPECT_FALSE(t.buildFromFontBytes(basura.data(), basura.size()));
     EXPECT_EQ(t.declaredInFile(), 0u);
     EXPECT_EQ(t.regionModulators(0, 0), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// AC-039.10 — cero descartes DEL SPEC sobre un font real (tarea 2.9)
+// ---------------------------------------------------------------------------
+
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
+
+namespace {
+
+/**
+ * `GeneralUser_GS.sf3` no esta en este repo: vive en el bundle de NoisyPad. Se
+ * busca por `WMA_GENERALUSER_SF3` y, si no, en la ruta hermana del checkout. Sin
+ * el archivo el test sale SKIPPED y NUNCA passed (regla de REQ-032): una corrida
+ * que no verifico no se puede leer como cobertura.
+ */
+std::vector<std::uint8_t> generalUserBytes() {
+    const char* env = std::getenv("WMA_GENERALUSER_SF3");
+    const std::string path = env ? env : WMA_GENERALUSER_SF3_DEFAULT;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return {};
+    return std::vector<std::uint8_t>((std::istreambuf_iterator<char>(in)),
+                                     std::istreambuf_iterator<char>());
+}
+
+}  // namespace
+
+/**
+ * El contador de 2.7 sobre los 2812 moduladores de GeneralUser tiene que dar CERO:
+ * si no da cero, la forma que se descarta EXISTE en un font real, y entonces se
+ * soporta o se justifica por escrito — no se cuenta y se sigue.
+ *
+ * 🔴 Lo que NO tiene que ser cero es lo fuera de alcance: GeneralUser modula por CC,
+ * presion y rueda (S3) y a destinos que S2 no aplica. Se imprime, para que el
+ * numero exista medido y no afirmado, y se afirma que es DISTINTO de cero — un
+ * font real sin moduladores de canal seria el lector fallando en silencio.
+ */
+TEST(SoundFontModulatorTable, GeneralUserNoTieneNingunModuladorQueElSpecMandeRechazar) {
+    const auto bytes = generalUserBytes();
+    if (bytes.empty()) GTEST_SKIP() << "sin GeneralUser_GS.sf3 — WMA_GENERALUSER_SF3 o el checkout hermano de NoisyPad";
+
+    ModulatorTable t;
+    ASSERT_TRUE(t.buildFromFontBytes(bytes.data(), bytes.size()));
+    const auto& r = t.rejections();
+    std::printf("  [REQ-039] GeneralUser: %u moduladores declarados; rechazados por spec %u "
+                "(encadenados %u, transform no lineal %u); fuera de alcance de S2 %u "
+                "(fuente de canal %u, destino no aplicado %u)\n",
+                t.declaredInFile(), r.specRejections(), r.linked, r.nonLinearTransform,
+                r.outOfScope(), r.sourceNotAtNoteOn, r.destinationUnsupported);
+
+    // S1 1.6 conto 2812 en el archivo con un parche a tsf.h; el lector tiene que dar lo mismo.
+    EXPECT_EQ(t.declaredInFile(), 2812u) << "el lector no ve los mismos moduladores que S1 conto";
+    EXPECT_EQ(r.linked, 0u) << "GeneralUser declara moduladores ENCADENADOS: se soportan o se justifica";
+    EXPECT_EQ(r.nonLinearTransform, 0u) << "GeneralUser usa transform no lineal: se soporta o se justifica";
+    EXPECT_EQ(r.specRejections(), 0u);
+    EXPECT_GT(r.outOfScope(), 0u) << "un font real sin moduladores de canal: el lector fallo mudo";
 }

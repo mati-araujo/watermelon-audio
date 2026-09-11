@@ -133,6 +133,14 @@ struct NoteOnModulator {
  *    §8.3). AC-039.10 exige que sobre GeneralUser sumen CERO.
  *  - `sourceNotAtNoteOn` y `destinationUnsupported` son ALCANCE de este REQ: S3 y
  *    REQ-040 los toman. No son cero sobre GeneralUser y no tienen por qué serlo.
+ *
+ * 🔴 Se cuentan SOBRE EL ARCHIVO —cada entrada de `pmod`/`imod` una vez—, no sobre la
+ * resolución por región. La primera versión contaba por región y sobre GeneralUser
+ * daba 63 822 "declarados" donde el archivo tiene 2812, y 98 883 "fuera de alcance"
+ * —más que los declarados— porque cada global se repetía en las 12 311 regiones y los
+ * ocho defaults de canal entraban una vez por región. Un contador que infla no miente
+ * en cero (los rechazos del spec daban 0 igual), miente en todo lo demás. Los defaults
+ * NO son del archivo y no se cuentan acá: son los diez del spec, siempre.
  */
 struct RejectionCounters {
     std::uint32_t linked = 0;
@@ -178,15 +186,28 @@ inline bool isSupportedDestination(std::uint16_t destOper) {
  * El ORDEN de los chequeos importa para lo que cuenta cada contador: un encadenado con
  * fuente de CC se cuenta como encadenado (lo manda el spec), no como fuera de alcance.
  */
-inline bool classify(const Modulator& m, NoteOnModulator& out, RejectionCounters& c) {
-    if (isLinked(m)) { ++c.linked; return false; }
-    if (hasNonLinearTransform(m)) { ++c.nonLinearTransform; return false; }
+/** En qué contador cae un modulador que esta capa no evalúa, o `nullptr` si lo evalúa. */
+inline std::uint32_t* rejectionSlotFor(const Modulator& m, RejectionCounters& c) {
+    if (isLinked(m)) return &c.linked;
+    if (hasNonLinearTransform(m)) return &c.nonLinearTransform;
     NoteSource primary, secondary;
     if (!classifyNoteSource(m.srcOper, primary) || !classifyNoteSource(m.amtSrcOper, secondary)) {
-        ++c.sourceNotAtNoteOn;
-        return false;
+        return &c.sourceNotAtNoteOn;
     }
-    if (!isSupportedDestination(m.destOper)) { ++c.destinationUnsupported; return false; }
+    if (!isSupportedDestination(m.destOper)) return &c.destinationUnsupported;
+    return nullptr;
+}
+
+/**
+ * De un modulador resuelto a su forma de note-on, o descartado. Thread de control.
+ * NO cuenta: contar es por archivo, y esto corre por región (ver `RejectionCounters`).
+ */
+inline bool classify(const Modulator& m, NoteOnModulator& out) {
+    RejectionCounters scratch;
+    if (rejectionSlotFor(m, scratch) != nullptr) return false;
+    NoteSource primary, secondary;
+    classifyNoteSource(m.srcOper, primary);
+    classifyNoteSource(m.amtSrcOper, secondary);
     out.destOper = m.destOper;
     out.amount = static_cast<float>(m.amount);
     out.primarySource = primary;
@@ -217,6 +238,11 @@ public:
         mTotal = 0;
         const std::vector<RegionModulators> regions = readRegionModulators(data, size);
         if (regions.empty()) return false;
+        // Los contadores, sobre el ARCHIVO: cada pmod/imod una vez.
+        for (const Modulator& m : readFileModulators(data, size)) {
+            ++mTotal;
+            if (std::uint32_t* slot = detail::rejectionSlotFor(m, mCounters)) ++*slot;
+        }
         for (const RegionModulators& r : regions) {
             if (r.presetIndex < 0 || r.regionIndex < 0) continue;
             const auto p = static_cast<std::size_t>(r.presetIndex);
@@ -224,12 +250,9 @@ public:
             if (mByPreset.size() <= p) mByPreset.resize(p + 1);
             if (mByPreset[p].size() <= g) mByPreset[p].resize(g + 1);
             const std::vector<Modulator> resolved = resolve(defaultModulators(), r.scopes);
-            mTotal += static_cast<std::uint32_t>(
-                r.scopes.instrumentGlobal.size() + r.scopes.instrumentZone.size() +
-                r.scopes.presetGlobal.size() + r.scopes.presetZone.size());
             for (const Modulator& m : resolved) {
                 NoteOnModulator n;
-                if (detail::classify(m, n, mCounters)) mByPreset[p][g].mods.push_back(n);
+                if (detail::classify(m, n)) mByPreset[p][g].mods.push_back(n);
             }
         }
         return true;
