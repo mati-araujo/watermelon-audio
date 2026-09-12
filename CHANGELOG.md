@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.16.4...v2.17.0) (2026-09-12)
+
+
+### Features
+
+* **sf:** los moduladores del archivo mandan al disparar la nota (REQ-039.2) ([0b88182](https://github.com/mati-araujo/watermelon-audio/commit/0b8818248ba1aba2fe3c0376d7fd1b31fb88d8b1))
+
+
+### Bug Fixes
+
+* **sf:** que el lector compile bajo gcc con -Wsign-compare (REQ-039.2) ([f2847e8](https://github.com/mati-araujo/watermelon-audio/commit/f2847e8924c18a9df5862127fd1408858080b2bf))
+
 ## [2.16.4](https://github.com/mati-araujo/watermelon-audio/compare/v2.16.3...v2.16.4) (2026-09-11)
 
 
