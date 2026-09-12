@@ -649,7 +649,15 @@ static void tsf_region_operator(struct tsf_region* region, tsf_u16 genOper, unio
 						case GEN_FLOAT_LIMIT12K8K: vfactor =   1.0f; vmin = -12000.0f; vmax = 8000.0f; break;
 						case GEN_FLOAT_LIMIT1200:  vfactor =   1.0f; vmin =  -1200.0f; vmax = 1200.0f; break;
 						case GEN_FLOAT_LIMITPAN:   vfactor = 0.001f; vmin =     -0.5f; vmax =    0.5f; break;
-						case GEN_FLOAT_LIMITATTN:  vfactor =  0.01f; vmin =      0.0f; vmax =   14.4f; break;
+						// watermelon-audio (MINI-024): 0.4 dB por dB declarado, no 0.1. Es la
+						// peculiaridad del hardware que el SoundFont-Spec-Test pide emular "for
+						// compatibility with existing SoundFonts" y que FluidSynth aplica (prueba #11:
+						// -2.00 dB por paso de 5 dB). Con 0.01/cB, todo preset con atenuacion
+						// declarada sonaba mas fuerte de lo programado y sus capas a 20 dB quedaban a
+						// 5. El factor es SOLO del generador: los moduladores a initialAttenuation
+						// (default #1 y los del archivo) entran en dB sin factor (prueba #13 A: 2.34 dB
+						// de 127 -> 111, exactamente el spec). El tope de 1440 cB pasa de 14.4 a 57.6.
+						case GEN_FLOAT_LIMITATTN:  vfactor =  0.04f; vmin =      0.0f; vmax =   57.6f; break;
 						case GEN_FLOAT_MAX1000:    vfactor =   1.0f; vmin =      0.0f; vmax = 1000.0f; break;
 						case GEN_FLOAT_MAX1440:    vfactor =   1.0f; vmin =      0.0f; vmax = 1440.0f; break;
 						default: continue;
