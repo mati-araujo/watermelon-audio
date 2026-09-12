@@ -196,11 +196,18 @@ inline void putChunk(std::vector<uint8_t>& out, const char* id,
  *        Los tests que importan escriben un rango que CONTRADICE lo que la heurística
  *        habría dado para "Test Preset".
  */
+/**
+ * @param attenuationCentibels `initialAttenuation` (generador 48) que la zona del instrumento
+ *        DECLARA, en centibeles. Con 0 no se escribe el generador. Existe para MINI-024: el
+ *        factor con que ese generador entra al nivel (0,4 dB por dB declarado, el spec-quirk)
+ *        sólo se puede afirmar contra un font que lo declare con un número conocido.
+ */
 inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 22050,
                                                 bool looping = false,
                                                 int keyRangeLo = -1,
                                                 int keyRangeHi = -1,
-                                                const sf2::ModulatorPlacement& mods = {}) {
+                                                const sf2::ModulatorPlacement& mods = {},
+                                                int attenuationCentibels = 0) {
     using namespace sf2;
 
     // ---- sdta: 64 samples de 16 bits. tsf pide >= un short; 64 deja lugar a
@@ -307,7 +314,8 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
     // los que realmente se escribieron. Con `looping` son dos (`sampleModes` + `sampleID`) y
     // con el terminal en 1 el `sampleID` quedaba FUERA de la zona: el instrumento se quedaba
     // sin sample y el render daba silencio absoluto — no un sonido distinto, silencio.
-    put16(ibag, (looping ? 2 : 1) + (declaraRango ? 1 : 0));
+    const bool declaraAtenuacion = attenuationCentibels != 0;
+    put16(ibag, (looping ? 2 : 1) + (declaraRango ? 1 : 0) + (declaraAtenuacion ? 1 : 0));
     put16(ibag, static_cast<uint16_t>(nInstGlobal + nInstZone));  // terminal
 
     std::vector<uint8_t> imod;
@@ -321,6 +329,12 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
     if (declaraRango) {
         put16(igen, kGenKeyRange);
         put16(igen, static_cast<uint16_t>((keyRangeHi << 8) | keyRangeLo));
+    }
+    // `initialAttenuation` va entre `keyRange` (que tiene que ir primero) y `sampleModes`/
+    // `sampleID` (que tiene que ir ultimo): el orden de los demas generadores es libre.
+    if (declaraAtenuacion) {
+        put16(igen, kGenInitialAttenuation);
+        put16(igen, static_cast<uint16_t>(static_cast<int16_t>(attenuationCentibels)));
     }
     // `sampleModes` va ANTES que `sampleID`: el spec de SF2 (§7.5) exige que sampleID sea el
     // ULTIMO generador de una zona de instrumento, y tsf recorre la lista en orden.

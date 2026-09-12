@@ -161,6 +161,7 @@ add_executable(core_tests
     test_touch_expression.cpp
     test_touch_expression_surface.cpp
     test_touch_expression_channel_layer.cpp
+    test_initial_attenuation_generator.cpp
     test_c_api_voice.cpp
     test_c_api_mode.cpp
     test_c_api_analysis.cpp
