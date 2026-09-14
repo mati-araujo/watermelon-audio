@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.17.0...v2.17.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **sf:** initialAttenuation a 0,4 dB por dB declarado, el spec-quirk (MINI-024) ([21570f1](https://github.com/mati-araujo/watermelon-audio/commit/21570f1499252b19602ba102c18df5b6ae47807e))
+
 ## [2.17.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.16.4...v2.17.0) (2026-09-12)
 
 
