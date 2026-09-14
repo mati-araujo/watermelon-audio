@@ -61,6 +61,7 @@ struct LateNote {
     int atFrame;
     int midiNote;
     int touchId = 0;
+    float velocity = kVelocity;
 };
 
 /** Un `noteOff` diferido, para separar una nota de la siguiente sin que se solapen. */
@@ -127,7 +128,7 @@ std::vector<float> render(const Scenario& sc) {
         }
         for (const auto& ln : sc.lateNotes) {
             if (ln.atFrame >= done && ln.atFrame < blockEnd) {
-                engine.noteOn(ln.touchId, ln.midiNote, kVelocity);
+                engine.noteOn(ln.touchId, ln.midiNote, ln.velocity);
             }
         }
 
@@ -290,6 +291,57 @@ TEST_F(TouchExpressionTest, ANewNoteOnTheSameTouchStartsAtNeutralImmediately) {
     EXPECT_NEAR(ratio, 1.0, 0.05)
         << "la nota nueva no arranco en el neutro: entro rampeando desde el nivel del "
            "gesto anterior (ratio=" << ratio << ")";
+}
+
+/**
+ * R-MOT-13 + R-MOT-14, juntas, porque un consumidor las pisa juntas: un NOTE_ON con la
+ * MISMA nota sobre un toque activo NO vuelve a atacar y su velocity NO cambia la nota
+ * que suena (`drainEvents` solo dispara si la nota difiere), pero SI reinicia la
+ * expresion del toque a 1,0 — el reset de R-MOT-14 corre para todo NOTE_ON, no solo
+ * para los que atacan.
+ *
+ * Nacio de #4 de la respuesta de NoisyPad a v2.17.0 (2026-09-12): mandaban 16 escalones
+ * de velocity en un arrastre con la misma nota y "nunca cambiaron la ganancia"; el KDoc
+ * de `sfNoteOn` decia "arranca o actualiza", que sugiere lo contrario. Este test es lo
+ * que el KDoc corregido afirma.
+ *
+ * El observable es MUESTRA A MUESTRA contra la nota que nunca recibio ni gesto ni
+ * reenvio, y no un RMS: medido, la base da 6e-8 (un ulp). Un RMS no alcanzaba — el
+ * mutante que re-ataca con la misma nota SUMA una segunda voz a la que sigue sonando
+ * (tsf no mata la anterior), y con la velocity 0,3 elegida el RMS quedo en 0,92 de la
+ * referencia: muere por 0,026 sobre la tolerancia, o sea por la fase. Muestra a muestra
+ * la segunda voz es una diferencia del orden de la señal, con cualquier fase. Y si el
+ * reset no corriera para la misma nota, queda el 0,2 del gesto: tambien del orden de la
+ * señal.
+ */
+TEST_F(TouchExpressionTest, ARepeatedNoteOnWithTheSameNoteKeepsTheAttackAndResetsExpression) {
+    constexpr int kRepeat = 14000;
+    constexpr float kOtraVelocity = 0.3f;   // distinta a proposito: un re-ataque la delataria
+
+    Scenario limpio;   // sin gesto y sin reenvio: la nota como nacio
+    const auto referencia = render(limpio);
+
+    Scenario reenvio;
+    reenvio.gestures = {{kGestureFrame, 0.2f}};
+    reenvio.lateNotes = {{kRepeat, kNote, 0, kOtraVelocity}};
+    const auto conReenvio = render(reenvio);
+
+    // El gesto bajo el nivel antes del reenvio: sin esto, "volvio al neutro" no prueba nada.
+    ASSERT_LT(rms(conReenvio, kGestureFrame + 2400, kRepeat),
+              rms(referencia, kGestureFrame + 2400, kRepeat) * 0.5)
+        << "el gesto previo no bajo el nivel; no hay nada de que recuperarse";
+
+    // Despues del reenvio, la nota ORIGINAL en el neutro, muestra a muestra. El nivel por
+    // toque entra una vez por bloque (R-MOT-16), de ahi el margen de un bloque largo.
+    constexpr int kDesde = kRepeat + 512;
+    constexpr int kHasta = kRepeat + 4800;
+    ASSERT_GT(rms(referencia, kDesde, kHasta), kAudible);
+    const std::vector<float> a(conReenvio.begin() + kDesde, conReenvio.begin() + kHasta);
+    const std::vector<float> b(referencia.begin() + kDesde, referencia.begin() + kHasta);
+    const double diff = worstDiff(a, b);
+    EXPECT_LT(diff, 1e-5)
+        << "un NOTE_ON repetido con la misma nota tiene que dejar la nota como estaba y la "
+           "expresion en el neutro (peor diferencia muestra a muestra=" << diff << ")";
 }
 
 // ===========================================================================
