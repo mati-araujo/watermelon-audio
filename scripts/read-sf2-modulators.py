@@ -12,6 +12,9 @@ el comando que lo produce (R-MOT-33). Este es ese comando para los moduladores.
                                                                      # del spec-test se mide asi)
     python3 scripts/read-sf2-modulators.py <font> --attenuation       # initialAttenuation POR PRESET
                                                                      # y cuanto baja con el factor 0,4
+    python3 scripts/read-sf2-modulators.py <font> --pitch             # las zonas cuyo pitch cambia
+                                                                     # con los offsets FUERA del
+                                                                     # keytrack (MINI-025), y cuanto
 
 Lee el chunk `pdta` directamente del archivo: no depende del motor, asi que puede
 contradecirlo. Descuenta la entrada TERMINADORA que la spec SF2 exige al final de
@@ -420,6 +423,106 @@ def attenuation(path, factor_old=0.1, factor_new=0.4):
     return rows
 
 
+def pitch(path):
+    """Las zonas cuyo pitch depende de si los offsets (coarseTune 51, fineTune 52 y el
+    pitchCorrection del `shdr`) entran ADENTRO o AFUERA del keytrack (scaleTuning 56) — la
+    medicion del AC de MINI-025 sobre el font que se shippea. tsf los metia adentro; SF2 §8.1.2
+    y FluidSynth 2.6.0 (medido sobre fonts minimos el 2026-09-14) los aplican afuera. Las dos
+    formulas difieren SOLO donde scaleTuning != 100 y el offset total != 0, y difieren en
+
+        delta = (100*coarse + fine + corr) * (1 - scaleTuning/100)   cents
+
+    que es lo que cada zona listada se mueve con el arreglo. Se lee del archivo, no del motor,
+    asi que puede contradecirlo.
+
+    🔴 SE RECORRE PRESET -> INSTRUMENTO, no el instrumento solo: la zona de preset (o su global)
+    SUMA a los tres generadores (SF2 §8.5), y en GeneralUser `8:118 808 Tom` pone coarse +17
+    sobre el -24 de `TR-808 Toms`: por instrumento el delta daba -1211 c y en el preset es -361.
+    El conteo de S3 (2026-09-11: 31 zonas / 14 instrumentos) era por instrumento y SOLO con
+    fine != 0; este lista lo que el arreglo mueve de verdad."""
+    data, ch = _read_font(path)
+
+    def recs(name, size):
+        b, e = ch[('pdta', name)]
+        return [b + i * size for i in range((e - b) // size)]
+
+    phdr, pbag, pgen = recs('phdr', 38), recs('pbag', 4), recs('pgen', 4)
+    inst, ibag, igen, shdr = recs('inst', 22), recs('ibag', 4), recs('igen', 4), recs('shdr', 46)
+
+    def zone_gens(bags, gentab, z):
+        return dict((_u16(data, gentab[g]), _s16(data, gentab[g] + 2))
+                    for g in range(_u16(data, bags[z]), _u16(data, bags[z + 1])))
+
+    zones = with_keytrack = 0
+    affected = []
+    for p in range(len(phdr) - 1):
+        pname = data[phdr[p]:phdr[p] + 20].split(b'\0')[0].decode('latin1')
+        prog, bank = _u16(data, phdr[p] + 20), _u16(data, phdr[p] + 22)
+        z0, z1 = _u16(data, phdr[p] + 24), _u16(data, phdr[p + 1] + 24)
+        pglobal = {}
+        for z in range(z0, z1):
+            pg = zone_gens(pbag, pgen, z)
+            if 41 not in pg:
+                if z == z0:
+                    pglobal = pg
+                continue
+            padd = dict(pglobal)
+            padd.update(pg)
+            ii = pg[41]
+            iname = data[inst[ii]:inst[ii] + 20].split(b'\0')[0].decode('latin1')
+            iz0, iz1 = _u16(data, inst[ii] + 20), _u16(data, inst[ii + 1] + 20)
+            iglobal = {}
+            for iz in range(iz0, iz1):
+                ig = zone_gens(ibag, igen, iz)
+                if 53 not in ig:
+                    if iz == iz0:
+                        iglobal = ig
+                    continue
+                eff = dict(iglobal)
+                eff.update(ig)
+                # La zona de preset RESTRINGE: solo cuenta la combinacion cuyos rangos de
+                # tecla y de velocity se cruzan (es lo que tsf_load_presets hace al fusionar).
+                # Sin esto, un preset con tres capas de velocity sobre un instrumento de 21
+                # zonas contaba 63 combinaciones donde hay 21.
+                def rango(g, gens):
+                    v = gens.get(g)
+                    return (v & 0xFF, v >> 8) if v is not None else (0, 127)
+                cruzan = all(rango(g, eff)[0] <= rango(g, padd)[1] and rango(g, padd)[0] <= rango(g, eff)[1]
+                             for g in (43, 44))
+                if not cruzan:
+                    continue
+                zones += 1
+                scale = eff.get(56, 100) + padd.get(56, 0)
+                coarse = eff.get(51, 0) + padd.get(51, 0)
+                fine = eff.get(52, 0) + padd.get(52, 0)
+                corr = struct.unpack_from('<b', data, shdr[ig[53]] + 41)[0]
+                root = eff.get(58, data[shdr[ig[53]] + 40])   # overridingRootKey o el originalPitch
+                offset = 100 * coarse + fine + corr
+                if scale != 100:
+                    with_keytrack += 1
+                    if offset != 0:
+                        # El rango EFECTIVO: la interseccion de la zona de preset con la de
+                        # instrumento, que es donde la combinacion suena.
+                        lo, hi = max(rango(43, eff)[0], rango(43, padd)[0]), min(rango(43, eff)[1], rango(43, padd)[1])
+                        keys = '%d-%d' % (lo, hi)
+                        affected.append((bank, prog, pname, iname, keys, root, scale, coarse, fine,
+                                         corr, offset * (1 - scale / 100.0)))
+
+    print('%-5s %-3s %-20s %-20s %-8s %4s %5s %6s %5s %4s  %s'
+          % ('banco', 'prog', 'preset', 'instrumento', 'teclas', 'root', 'scale', 'coarse', 'fine',
+             'corr', 'delta con el arreglo (cents)'))
+    for bank, prog, pname, iname, keys, root, scale, coarse, fine, corr, delta in affected:
+        print('%5d %3d  %-20s %-20s %-8s %4d %5d %6d %5d %4d  %+8.1f'
+              % (bank, prog, pname, iname, keys, root, scale, coarse, fine, corr, delta))
+    print()
+    presets_ = len(set((a[0], a[1]) for a in affected))
+    print('zonas (preset x instrumento): %d; con scaleTuning != 100: %d; AFECTADAS (offset != 0): %d '
+          'en %d presets (%d instrumentos); |delta| max %.1f c'
+          % (zones, with_keytrack, len(affected), presets_, len(set(a[3] for a in affected)),
+             max([abs(a[10]) for a in affected] or [0])))
+    return affected
+
+
 if __name__ == '__main__':
     mode = sys.argv[2] if len(sys.argv) >= 3 else ''
     if mode == '--presets':
@@ -428,5 +531,7 @@ if __name__ == '__main__':
         generators(sys.argv[1])
     elif mode == '--attenuation':
         attenuation(sys.argv[1])
+    elif mode == '--pitch':
+        pitch(sys.argv[1])
     else:
         main()

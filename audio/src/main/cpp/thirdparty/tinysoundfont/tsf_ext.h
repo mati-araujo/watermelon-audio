@@ -53,6 +53,10 @@ typedef struct tsf_ext_started_voice {
     int regionIndex;  // orden de la region dentro del preset
     int initialFilterFc;  // el corte de la region en cents absolutos (13500 = abierto):
                           // la base sobre la que un modulador de filtro SUMA
+    double pitchTimecents;  // el pitch RESUELTO de la voz al arrancar, en cents absolutos
+                            // (tecla * 100 con keytrack 100 y sin offsets): raiz + keytrack +
+                            // coarse + fine + pitchCorrection (MINI-025), mas el tuning del
+                            // canal. Solo lectura: es lo que `tsf_voice_calcpitchratio` dejo
 } tsf_ext_started_voice;
 
 // Las voces que arranco el ULTIMO tsf_note_on / tsf_channel_note_on: comparten el
