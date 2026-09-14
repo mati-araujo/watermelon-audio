@@ -514,6 +514,14 @@ jobs:
       - name: Set up Android SDK
         if: steps.attest.outputs.valid != 'true'
         uses: android-actions/setup-android@v4
+        # Solo `platform-tools`: el default de la action es `tools platform-tools`, y el
+        # paquete obsoleto `tools` DESAPARECIO del repositorio de Google el 2026-09-14
+        # (entre las 20:16 y las 20:43 UTC: verde en el PR de release 2.17.3, rojo en el
+        # push a master del mismo arbol). sdkmanager sale con 1 si no encuentra un
+        # paquete pedido, y con eso todo job que instale el SDK se cae. Nada de este
+        # repo usa `tools`: el NDK y CMake se instalan aparte, con nombre.
+        with:
+          packages: platform-tools
 
       # AGP resolves (and silently auto-downloads) the NDK even for iOS-only
       # tasks. Installing it explicitly keeps that ~1 GB download visible in the
@@ -664,6 +672,14 @@ jobs:
       - name: Set up Android SDK
         if: steps.attest.outputs.valid != 'true'
         uses: android-actions/setup-android@v4
+        # Solo `platform-tools`: el default de la action es `tools platform-tools`, y el
+        # paquete obsoleto `tools` DESAPARECIO del repositorio de Google el 2026-09-14
+        # (entre las 20:16 y las 20:43 UTC: verde en el PR de release 2.17.3, rojo en el
+        # push a master del mismo arbol). sdkmanager sale con 1 si no encuentra un
+        # paquete pedido, y con eso todo job que instale el SDK se cae. Nada de este
+        # repo usa `tools`: el NDK y CMake se instalan aparte, con nombre.
+        with:
+          packages: platform-tools
 
       - name: Install NDK and CMake
         if: steps.attest.outputs.valid != 'true'
