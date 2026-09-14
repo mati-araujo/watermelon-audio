@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.17.1...v2.17.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* **sf:** el borrado del default [#2](https://github.com/mati-araujo/watermelon-audio/issues/2) con identidad SF 2.01 anula (MINI-028) ([89b045a](https://github.com/mati-araujo/watermelon-audio/commit/89b045a846ff99ef05b26e8e0d96e1db30aa1cdc))
+* **sf:** el borrado del default [#2](https://github.com/mati-araujo/watermelon-audio/issues/2) con identidad SF 2.01 anula (MINI-028) ([ece96c0](https://github.com/mati-araujo/watermelon-audio/commit/ece96c0c073093b51931f0f0bc0c6f77cc93f3f9))
+
 ## [2.17.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.17.0...v2.17.1) (2026-09-14)
 
 
