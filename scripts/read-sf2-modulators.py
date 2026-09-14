@@ -257,18 +257,26 @@ def presets(path):
                    if dest == 8 and (src & 0x7F) == 2 and not (src & 0x80) and amt != 0)
 
     # El default #2 (velocity -> initialFilterFc, -2400) tiene DOS identidades segun la
-    # version del spec: 2.04 = `0x0102 -> 8` sin amtSrc (la del motor, R-MOT-38); 2.01 =
-    # la misma con amtSrc `0x0D02` (velocity, switch). Un archivo que lo borra con la
-    # identidad 2.01 NO lo anula en un synth 2.04 — el default sigue vivo y se SUMA a lo
-    # que el archivo declare. GeneralUser lo borra asi en 1422 zonas de instrumento.
+    # version del spec: 2.04 = `0x0102 -> 8` sin amtSrc (la que declara el motor); 2.01 =
+    # la misma con amtSrc `0x0D02` (velocity, switch, decreciente). GeneralUser 1.471 lo
+    # borra en 1422 zonas de instrumento SOLO con la identidad 2.01, y hasta MINI-028
+    # (2026-09-14) eso no anulaba nada: el -2400 seguia vivo en los 269 presets. Desde
+    # MINI-028 el motor trata las dos identidades como el mismo default (R-MOT-38): la
+    # columna dice lo que el MOTOR hace, y Z cuenta las zonas con un 2.01 de amount != 0
+    # — el normalizador del falsador de MINI-028 (hoy 0: la regla "un 2.01 con amount
+    # propio reemplaza" es inobservable en este font y solo la sostiene el test propio).
     DEF2_204 = (0x0102, 8, 0, 0)
     DEF2_201 = (0x0102, 8, 0x0D02, 0)
 
     def def2_state(mods):
         if mods.get(DEF2_204, None) == 0:
             return 'borrado 2.04'
+        if mods.get(DEF2_201, None) == 0:
+            return 'borrado 2.01 (anula desde MINI-028)'
         if DEF2_201 in mods:
-            return 'borrado 2.01 (sigue vivo en 2.04)'
+            return 'reemplazado con identidad 2.01 (amount %d)' % mods[DEF2_201]
+        if DEF2_204 in mods:
+            return 'reemplazado con identidad 2.04 (amount %d)' % mods[DEF2_204]
         return 'default'
 
     rows = []
@@ -277,6 +285,7 @@ def presets(path):
         prog, bank = _u16(data, phdr[p] + 20), _u16(data, phdr[p] + 22)
         z0, z1 = _u16(data, phdr[p] + 24), _u16(data, phdr[p + 1] + 24)
         pglobal, effective, fc, def2 = {}, collections.Counter(), 0, set()
+        z_201_nonzero = 0
         for z in range(z0, z1):
             pg = zone_gens(pbag, pgen, z)
             if GEN_INSTRUMENT not in pg:
@@ -299,6 +308,8 @@ def presets(path):
                 effective[im.get(DEF1, DEFAULT_1_CB) + pz.get(DEF1, 0)] += 1
                 fc += vel_fc(im) + vel_fc(pz)
                 def2.add(def2_state(im))
+                if im.get(DEF2_201, 0) != 0:
+                    z_201_nonzero += 1
         amounts = sorted(effective)
         if amounts == [0]:
             curve = 'ANULADO'
@@ -308,17 +319,19 @@ def presets(path):
             curve = '%d cB' % amounts[0]
         else:
             curve = 'mezcla %s' % dict((k, effective[k]) for k in amounts)
-        rows.append((bank, prog, name, fc, curve, ' / '.join(sorted(def2))))
+        rows.append((bank, prog, name, fc, curve, ' / '.join(sorted(def2)), z_201_nonzero))
 
     print('%-5s %-3s %-22s %8s  %-34s %s' % ('banco', 'prog', 'preset', 'vel->FC',
                                              'vel -> nivel, curva EFECTIVA', 'default #2 (vel -> filtro)'))
-    for bank, prog, name, fc, curve, def2 in rows:
+    for bank, prog, name, fc, curve, def2, _z in rows:
         print('%5d %3d  %-22s %8d  %-34s %s' % (bank, prog, name, fc, curve, def2))
     resumen = collections.Counter(r[4] if not r[4].startswith('mezcla') else 'mezcla' for r in rows)
     print()
     print('presets: %d; con velocity -> FC declarado (amount != 0): %d; curva efectiva de velocity -> nivel: %s'
           % (len(rows), sum(1 for r in rows if r[3] > 0), dict(resumen.most_common())))
     print('default #2 por preset: %s' % dict(collections.Counter(r[5] for r in rows).most_common()))
+    print('Z = zonas de instrumento con un 2.01 de amount != 0 (normalizador de MINI-028): %d'
+          % sum(r[6] for r in rows))
 
 
 STRUCTURAL_GENS = {GEN_INSTRUMENT, 43, 44, GEN_SAMPLE_ID}  # instrument, keyRange, velRange, sampleID
