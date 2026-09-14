@@ -603,17 +603,23 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
 
     // ---- LA TABLA. Un cambio aca es una decision, y su diff es la revision. ----------
     const Row kRows[] = {
-        // #1..#4, #8: F por el README, NO conformes medidos en 3.1 -> R con dueño
+        // #1..#4: F por el README, NO conformes medidos en 3.1 -> R con dueño (#8 paso a F en MINI-025)
         {1, 0, Obs::LevelOn, Cls::R, 1.0, 4.94,
          "envolvente de volumen: ataque/decay difieren de FluidSynth; dueño: MINI envolventes de tsf"},
         {2, 0, Obs::PitchHop, Cls::R, 30.0, 600.0,
          "mod env -> pitch: sube igual (+1200 c) pero tsf decae ~1 s antes; dueño: MINI envolventes"},
         {3, 0, Obs::LevelOn, Cls::R, 1.0, 9.63,
          "keynum -> decay: pendiente 20 % mas lenta que FluidSynth; dueño: MINI envolventes"},
-        {3, 0, Obs::PitchHop, Cls::R, 3.0, 28.44,
-         "tsf escala `tune` por scaleTuning (tsf.h:1213): +23 c; dueño: MINI afinacion fina"},
+        // #3/#4 pitch: eran 28,44 / 38,49 con `tune` adentro del keytrack (+23 c en TODO hop
+        // estable). MINI-025 lo saco: hoy los hops estables dan 0,00 y lo que queda son hops que
+        // pisan el ataque (#3 nota 3: la referencia lee 368,89 en su primer hop) o el borde del
+        // note-off a -9..-16 dB (#4 notas 1/2/4), donde la release de tsf y la de FluidSynth
+        // difieren y el estimador de cruces lee el borde. Es el mismo dueño que nivel-on.
+        {3, 0, Obs::PitchHop, Cls::R, 3.0, 5.44,
+         "residuo en el hop del ataque de la nota 3; los hops estables dan 0,00 (MINI-025); dueño: MINI envolventes"},
         {4, 0, Obs::LevelOn, Cls::R, 1.0, 3.21, "keynum -> hold: idem #3; dueño: MINI envolventes"},
-        {4, 0, Obs::PitchHop, Cls::R, 3.0, 38.49, "tune x scaleTuning, idem #3; dueño: MINI afinacion fina"},
+        {4, 0, Obs::PitchHop, Cls::R, 3.0, 19.95,
+         "residuo en los hops del borde del note-off (release); los estables dan 0,00 (MINI-025); dueño: MINI envolventes"},
         // #5: A es velocity 127 y FluidSynth SI limita el boost a 0 dB (7,0 p-p contra 8,8 en B)
         // aunque su README diga que no; tsf no limita (9,0 en las dos). B es la conforme.
         {5, 1, Obs::LevelPP, Cls::R, 0.5, 2.03,
@@ -623,7 +629,9 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
          "profundidad del vibrato: ~900 c p-p; 30 c es el 3 % que el estimador resuelve sobre un barrido"},
         {7, 0, Obs::PitchPP, Cls::R, 5.0, 74.54,
          "CC1 -> vibrato (default #4, fuente de canal): tsf ignora CC1; dueño: el REQ de superficie CC"},
-        {8, 0, Obs::PitchHop, Cls::R, 3.0, 23.0, "scaleTune/rootKey: tune x scaleTuning; dueño: MINI afinacion fina"},
+        // #8: R -> F en MINI-025. Era 23,00 (el pitchCorrection de -23 c del sample, anulado por
+        // scaleTuning 0); con los offsets afuera del keytrack da 0,00 hop a hop.
+        {8, 0, Obs::PitchHop, Cls::F, 3.0, 0.0, "scaleTune/rootKey: la afinacion fina no depende del keytrack (MINI-025)"},
         {9, 0, Obs::LevelNotes, Cls::R, 0.5, 2.81, "corte del low-pass: dueño REQ-041"},
         {10, 0, Obs::LevelNotes, Cls::R, 2.0, 46.22, "resonancia: tsf esta a 46 dB en la Q mas alta; dueño REQ-041"},
         // #11: el spec da el numero ("exactly 2 dB" por paso de 5 dB declarados). Era R con 0,50
