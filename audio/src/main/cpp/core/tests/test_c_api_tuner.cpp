@@ -812,10 +812,14 @@ TEST_F(TunerApiTest, TheFeederFailsInsteadOfOverrunningADeadConsumer) {
 
     const auto r = feedTone(mWma, 110.0, kFirstRate, kWarmupBlocks, kBlockFrames,
                             /*stallCap=*/std::chrono::milliseconds(300));
-    ASSERT_FALSE(r) << "el ring no tiene lector y feedTone dijo que alimento todo";
-    const std::string msg = r.message();
-    EXPECT_NE(msg.find("no hizo lugar"), std::string::npos) << msg;
-    EXPECT_NE(msg.find("NO se alimento igual"), std::string::npos) << msg;
+    // EXPECT y no ASSERT: si esto falla, lo que sigue es la EVIDENCIA de por que importa
+    // (el `dropped` de abajo), y un ASSERT la taparia.
+    EXPECT_FALSE(r) << "el ring no tiene lector y feedTone dijo que alimento todo";
+    if (!r) {
+        const std::string msg = r.message();
+        EXPECT_NE(msg.find("no hizo lugar"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("NO se alimento igual"), std::string::npos) << msg;
+    }
 
     // Y NO piso nada: lo que no entro no se escribio. `droppedFrames` lo cuenta el LECTOR al
     // leer, asi que se lo vuelve a poner a drenar y se le pregunta a el. Con la escapatoria
