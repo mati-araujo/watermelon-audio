@@ -43,7 +43,8 @@ created: 2026-09-14
   **posición de producto** (el font como lo afina su autor; FluidSynth es la referencia contra la
   que GeneralUser está calibrado y contra la que ellos miden) y la confirmación de que el brillo
   **no** se mueve con la expresión (1119 Hz fijo: R-MOT-11, el por toque es una ganancia pura).
-  Anotado en MINI-028 como evidencia para la salida (A); no decide.
+  Anotado en MINI-028 como evidencia para la salida (A); no decide. **Decidido el mismo día** en
+  amplificación: (A), implementado y releaseado como **v2.17.2** (`respuesta-noisypad-2026-09-14-v2.17.2.md`).
 - **#4 conforme**; nada pendiente.
 - **#5**: los WAV de `Warm Pad` son los que pedimos (su −8,4 / −16,0 contra nuestro −7,09 / −17,12);
   siguen ofrecidos.
