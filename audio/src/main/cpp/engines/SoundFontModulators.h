@@ -223,13 +223,79 @@ struct Scopes {
 namespace detail {
 
 /**
+ * El default #2 (velocity → `initialFilterFc`, −2400) tiene DOS identidades, porque el
+ * spec le cambió la fuente secundaria entre versiones: SF 2.01 lo define con `amtSrc`
+ * velocity/switch (`0x0D02`); SF 2.04, sin `amtSrc`. El motor declara el 2.04
+ * (`defaultModulators()`), y un font escrito bajo 2.01 se dirige a ESE default con la
+ * identidad vieja — para borrarlo o para cambiarle el amount.
+ *
+ * 🔴 MEDIDO el 2026-09-14 (MINI-028, a partir del #3 de NoisyPad): GeneralUser 1.471 —el
+ * font que se shippea— borra el default #2 en 1422 zonas de instrumento SOLO con la
+ * identidad 2.01. Con identidad exacta ese borrado no anulaba nada: el −2400 seguía
+ * vivo en los 269 presets y se SUMABA a lo que el preset declarara (`Saw Lead`: −2000
+ * del preset + −2400 = −4400 cents; centroide 1640 → 1195 Hz a velocity 124 → 38 donde
+ * el archivo pide 1638 → 1546). FluidSynth no implementa el default #2, y GeneralUser
+ * 2.0.3 ya lo borra con las dos identidades: la intención del autor no es ambigua.
+ *
+ * Así que para ESTE default, y sólo para éste, las dos identidades son dos NOMBRES del
+ * mismo lugar: el modulador de archivo que llega primero con cualquiera de las dos
+ * RECLAMA el lugar del default 2.04 (con amount 0 lo anula; con −1200 y switch se evalúa
+ * como 2.01 EN LUGAR del default — nunca sumado, que sería la duplicación que R-MOT-38
+ * prohíbe). Una vez reclamado, el lugar es de un modulador de ARCHIVO y ahí vuelve a
+ * regir la identidad exacta: un 2.04 y un 2.01 declarados los dos por el archivo son
+ * dos moduladores, como lo son en FluidSynth (que no tiene default #2 que confundir).
+ *
+ * 🔴 Ese segundo tramo no es un refinamiento: lo exigió el spec-test en la primera
+ * corrida. `veloToFC-altered` (#14 B) declara −7200 con identidad 2.04 Y DESPUÉS borra
+ * con la 2.01, en la misma zona global; con una equivalencia simétrica el borrado pisaba
+ * al −7200 y la fila salía plana (0,07 dB donde FluidSynth da 15,68). El autor del font
+ * borra el default 2.01 por costumbre de su herramienta y declara su curva aparte —
+ * exactamente el patrón de GeneralUser.
+ *
+ * La equivalencia vive en la COMPARACIÓN y no en el dato: el modulador viaja intacto
+ * con su `amtSrc 0x0D02` y `classify()` lo evalúa con su switch. Y vale sólo entre
+ * ámbitos de INSTRUMENTO, donde se reemplaza: en el preset, que suma, un 2.01 y el
+ * default no se tocan — un preset no borra defaults en ningún spec.
+ *
+ * Límite declarado: si otro default tuviera doble identidad histórica, se generaliza
+ * entonces. Hoy es un guard por un caso, y el nombre existe para que apagarlo sea una
+ * línea (el instrumento i3 del falsador de MINI-028).
+ */
+constexpr std::uint16_t kDefaultTwoSrcOper = 0x0102;      ///< velocity, lineal, unipolar, decreciente
+constexpr std::uint16_t kDefaultTwoDest = 8;              ///< initialFilterFc
+constexpr std::uint16_t kDefaultTwoAmtSrc201 = 0x0D02;    ///< SF 2.01: velocity, switch, unipolar, decreciente
+
+inline bool isDefaultTwoIdentity(const Modulator& m) {
+    return m.srcOper == kDefaultTwoSrcOper && m.destOper == kDefaultTwoDest &&
+           m.transOper == 0 && (m.amtSrcOper == 0 || m.amtSrcOper == kDefaultTwoAmtSrc201);
+}
+
+/**
+ * El lugar del default #2 mientras lo ocupa el DEFAULT (no un modulador de archivo).
+ * `index` es su posición en la lista que se compone; `claimed` pasa a `true` cuando un
+ * modulador de archivo lo reclama con cualquiera de las dos identidades.
+ */
+struct DefaultTwoSlot {
+    int index = -1;
+    bool claimed = false;
+};
+
+/**
  * Agrega `incoming` sobre `base` **reemplazando** por identidad.
  *
  * Es la regla de un nivel contra sí mismo: dentro de una lista gana el último, y
- * una lista más específica pisa a la más general.
+ * una lista más específica pisa a la más general. La identidad es la exacta, salvo
+ * para reclamar el lugar del default #2 (`slot`, sólo en el nivel de instrumento): ahí
+ * valen sus dos identidades, una sola vez.
  */
-inline void mergeReplacing(std::vector<Modulator>& base, const std::vector<Modulator>& incoming) {
+inline void mergeReplacing(std::vector<Modulator>& base, const std::vector<Modulator>& incoming,
+                           DefaultTwoSlot* slot) {
     for (const Modulator& m : incoming) {
+        if (slot && slot->index >= 0 && !slot->claimed && isDefaultTwoIdentity(m)) {
+            base[static_cast<std::size_t>(slot->index)] = m;
+            slot->claimed = true;
+            continue;
+        }
         bool replaced = false;
         for (Modulator& existing : base) {
             if (existing.sameIdentity(m)) {
@@ -289,15 +355,23 @@ inline void mergeAdding(std::vector<Modulator>& base, const std::vector<Modulato
 inline std::vector<Modulator> resolve(const std::vector<Modulator>& defaults,
                                       const Scopes& scopes) {
     // Nivel de instrumento: los defaults son la base y cada ámbito más específico
-    // pisa por identidad. Por eso declarar uno igual al default con amount 0 lo anula.
+    // pisa por identidad. Por eso declarar uno igual al default con amount 0 lo anula
+    // — y para el default #2, con cualquiera de sus dos identidades (MINI-028).
     std::vector<Modulator> instrument = defaults;
-    detail::mergeReplacing(instrument, scopes.instrumentGlobal);
-    detail::mergeReplacing(instrument, scopes.instrumentZone);
+    detail::DefaultTwoSlot slot;
+    for (std::size_t i = 0; i < defaults.size(); ++i) {
+        if (defaults[i].amtSrcOper == 0 && detail::isDefaultTwoIdentity(defaults[i])) {
+            slot.index = static_cast<int>(i);
+        }
+    }
+    detail::mergeReplacing(instrument, scopes.instrumentGlobal, &slot);
+    detail::mergeReplacing(instrument, scopes.instrumentZone, &slot);
 
-    // Nivel de preset: se compone aparte, con la misma regla de reemplazo.
+    // Nivel de preset: se compone aparte, con la misma regla de reemplazo — y sin lugar
+    // de default que reclamar: acá no hay defaults, y lo que sale de acá se SUMA.
     std::vector<Modulator> preset;
-    detail::mergeReplacing(preset, scopes.presetGlobal);
-    detail::mergeReplacing(preset, scopes.presetZone);
+    detail::mergeReplacing(preset, scopes.presetGlobal, nullptr);
+    detail::mergeReplacing(preset, scopes.presetZone, nullptr);
 
     // Y recién acá SUMA sobre el instrumento — medido, no supuesto.
     detail::mergeAdding(instrument, preset);

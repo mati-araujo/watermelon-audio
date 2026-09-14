@@ -481,3 +481,127 @@ TEST(SoundFontModulators, SinModuladoresDeclaradosLosDefaultsPasanIntactos) {
 }
 
 }  // namespace
+
+// ===========================================================================
+// MINI-028 — el default #2 tiene DOS identidades, y las dos lo reemplazan
+//
+// SF 2.01 definía el default #2 (velocity -> initialFilterFc, -2400) con `amtSrc`
+// velocity/switch (0x0D02); SF 2.04, sin `amtSrc`. El motor declara el 2.04. Un font
+// escrito bajo 2.01 se dirige a ESE default con la identidad vieja — GeneralUser 1.471
+// lo borra asi en 1422 zonas, y con identidad exacta no anulaba nada: el -2400 seguia
+// vivo en los 269 presets y se sumaba a lo que el preset declarara. Lo encontro
+// NoisyPad por el centroide de `Saw Lead` (1123 -> 880 Hz con la velocity).
+//
+// La regla decidida en amplificacion (A2): cualquier modulador de archivo con la
+// identidad 2.01 REEMPLAZA al default 2.04 — con amount 0 lo anula, con otro amount se
+// evalua EN LUGAR del default. Y solo entre ambitos de instrumento: en el preset, que
+// suma, un 2.01 y el default no se tocan.
+// ===========================================================================
+
+/** El default #2 con la identidad SF 2.04: velocity lineal decreciente, sin amtSrc. */
+Modulator defaultDos204(std::int16_t amount = -2400) {
+    Modulator m;
+    m.srcOper = 0x0102;  // velocity, no CC, decreciente, unipolar, lineal
+    m.destOper = 8;      // initialFilterFc
+    m.amount = amount;
+    m.amtSrcOper = 0;
+    m.transOper = 0;
+    return m;
+}
+
+/** El mismo default con la identidad SF 2.01: amtSrc velocity, switch, unipolar, creciente. */
+Modulator defaultDos201(std::int16_t amount = -2400) {
+    Modulator m = defaultDos204(amount);
+    m.amtSrcOper = 0x0D02;
+    return m;
+}
+
+/** AC-M028.2 (composicion): borrar con 2.01 anula el default 2.04 igual que borrar con 2.04. */
+TEST(SoundFontModulators, BorrarElDefaultDosConLaIdentidad201LoAnulaIgualQueCon204) {
+    Scopes con201;
+    con201.instrumentGlobal.push_back(defaultDos201(0));
+    Scopes con204;
+    con204.instrumentGlobal.push_back(defaultDos204(0));
+
+    const auto a = resolve({defaultDos204()}, con201);
+    const auto b = resolve({defaultDos204()}, con204);
+    ASSERT_EQ(a.size(), 1u) << "el borrado 2.01 tiene que REEMPLAZAR al default, no convivir con el";
+    ASSERT_EQ(b.size(), 1u);
+    EXPECT_EQ(a[0].amount, 0) << "GeneralUser 1.471 borra asi en 1422 zonas: el -2400 no puede sobrevivir";
+    EXPECT_EQ(b[0].amount, 0);
+    // El dato viaja INTACTO: la equivalencia esta en la comparacion, no en el modulador.
+    EXPECT_EQ(a[0].amtSrcOper, 0x0D02) << "canonizar el dato era la salida descartada (iii)";
+}
+
+/**
+ * A2, no A1: un 2.01 con amount distinto de cero tambien reemplaza — se evalua como 2.01
+ * EN LUGAR del default, nunca sumado. El mutante A1 (solo el borrado equivale) deja dos:
+ * -1200*switch MAS -2400*lineal, la duplicacion que R-MOT-38 prohibe.
+ */
+TEST(SoundFontModulators, UnDefaultDosConIdentidad201YAmountPropioReemplazaEnVezDeSumar) {
+    Scopes s;
+    s.instrumentGlobal.push_back(defaultDos201(-1200));
+
+    const auto r = resolve({defaultDos204()}, s);
+    ASSERT_EQ(r.size(), 1u) << "quedaron dos moduladores de velocity -> filtro: el default 2.04 sobrevivio";
+    EXPECT_EQ(r[0].amount, -1200);
+    EXPECT_EQ(r[0].amtSrcOper, 0x0D02) << "se evalua como 2.01, con su switch";
+}
+
+/** La equivalencia es de ESE default: dos moduladores cualesquiera con distinto amtSrc siguen siendo distintos. */
+TEST(SoundFontModulators, LaEquivalenciaNoAlcanzaAOtrosModuladoresConDistintoAmtSrc) {
+    Modulator conAmtSrc = defaultUno(500);
+    conAmtSrc.amtSrcOper = 0x0D02;
+    Scopes s;
+    s.instrumentGlobal.push_back(defaultUno(700));
+    s.instrumentGlobal.push_back(conAmtSrc);
+
+    const auto r = resolve({}, s);
+    EXPECT_EQ(r.size(), 2u) << "velocity -> atenuacion con y sin amtSrc son DOS moduladores (#13 lo mide)";
+}
+
+/** Y solo en el nivel de instrumento: un 2.01 en el preset ni borra el default ni se funde con un 2.04 del preset. */
+TEST(SoundFontModulators, EnElPresetLasDosIdentidadesDelDefaultDosNoSeTocan) {
+    Scopes s;
+    s.presetGlobal.push_back(defaultDos201(0));
+
+    const auto r = resolve({defaultDos204()}, s);
+    // El default sigue vivo (un preset no borra defaults en ningun spec) y el 2.01 del
+    // preset queda como modulador aparte, sumado por su propia identidad (con 0, nada).
+    EXPECT_EQ(amountEfectivo(r, defaultDos204()), -2400)
+        << "un borrado en la zona de PRESET no puede anular el default: el preset suma";
+    EXPECT_EQ(r.size(), 2u);
+
+    Scopes dosEnElPreset;
+    dosEnElPreset.presetGlobal.push_back(defaultDos201(-1000));
+    dosEnElPreset.presetZone.push_back(defaultDos204(-500));
+    const auto p = resolve({}, dosEnElPreset);
+    EXPECT_EQ(p.size(), 2u) << "en el preset la identidad es la exacta: no se reemplazan entre si";
+}
+
+/**
+ * 🔴 La forma que el spec-test exigio en la primera corrida (#14 B, `veloToFC-altered`):
+ * el archivo declara SU curva con identidad 2.04 (-7200) y ADEMAS borra el default con
+ * la 2.01, en la misma zona. Las dos identidades son dos nombres del LUGAR del default,
+ * no de cada modulador: el primero lo reclama, y despues rige la identidad exacta. Con
+ * una equivalencia simetrica el borrado pisaba al -7200 y la fila salia plana. Vale en
+ * los dos ordenes, porque el autor del font no controla cual escribe primero.
+ */
+TEST(SoundFontModulators, UnaCurvaDeclaradaSobreviveAlBorrado201DeLaMismaZonaEnLosDosOrdenes) {
+    Scopes curvaYDespuesBorrado;
+    curvaYDespuesBorrado.instrumentGlobal.push_back(defaultDos204(-7200));
+    curvaYDespuesBorrado.instrumentGlobal.push_back(defaultDos201(0));
+
+    Scopes borradoYDespuesCurva;
+    borradoYDespuesCurva.instrumentGlobal.push_back(defaultDos201(0));
+    borradoYDespuesCurva.instrumentGlobal.push_back(defaultDos204(-7200));
+
+    for (const Scopes* s : {&curvaYDespuesBorrado, &borradoYDespuesCurva}) {
+        const auto r = resolve({defaultDos204()}, *s);
+        int suma = 0;
+        for (const auto& m : r) suma += m.amount;
+        EXPECT_EQ(suma, -7200) << "el -7200 declarado tiene que sobrevivir al borrado 2.01 (FluidSynth: 15,68 dB)";
+        EXPECT_EQ(amountEfectivo(r, defaultDos204()), -7200);
+        EXPECT_EQ(r.size(), 2u) << "el borrado queda como modulador aparte (a 0), no pisa la curva";
+    }
+}

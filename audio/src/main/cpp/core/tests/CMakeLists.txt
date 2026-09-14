@@ -156,6 +156,7 @@ add_executable(core_tests
     test_soundfont_load.cpp
     test_minimal_soundfont_modulators.cpp
     test_soundfont_note_on.cpp
+    test_soundfont_default_two_identity.cpp
     support/tml_impl.cpp
     test_sf_spec_conformance.cpp
     test_touch_expression.cpp
@@ -185,7 +186,10 @@ target_compile_definitions(core_tests PRIVATE
     WMA_TEST_HOOKS=1
     # REQ-039 — donde `fetch-spec-test.sh` deja el material. No se versiona (.gitignore);
     # sin el, los tests de conformidad salen SKIPPED y nunca passed.
-    WMA_SPEC_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/spec-test")
+    WMA_SPEC_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/spec-test"
+    # MINI-028 — el font real, en el bundle de NoisyPad (checkout hermano). Misma
+    # regla que en engines/tests: sin el, SKIPPED y nunca passed.
+    WMA_GENERALUSER_SF3_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../../NoisyPad/core-soundfont-bundle/src/main/assets/soundfonts/GeneralUser_GS.sf3")
 
 target_include_directories(core_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
