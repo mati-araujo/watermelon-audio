@@ -675,6 +675,14 @@ TEST_F(TunerApiTest, ChangingTheTargetRestartsTheIntegration) {
     // empuja), y recien despues se toma la marca de agua: todo publish posterior avanza
     // `framesAnalyzed`, asi que una lectura con `framesAnalyzed <= marca` es de la cuerda
     // anterior y `waitForMeasurement` no la acepta como la segunda medicion.
+    //
+    // 🔴 Sacar SOLO esta espera deja el test verde (medido 10/10): con `feedTone` regulando
+    // por lugar, el skip que caiga a mitad de la alimentacion ya no desfasa nada. Se queda
+    // igual, por dos razones que no son de veredicto sino de MARGEN: (1) con el objetivo
+    // aplicado antes de alimentar, el strobe recibe los 65536 frames enteros, no 65536 menos
+    // hasta un ring (8192) — y necesita 53248, o sea que el margen pasa de una ventana a
+    // tres; (2) la marca de agua solo es sonora tomada DESPUES de la aplicacion: antes, un
+    // publish de lo que quedaba de la cuerda anterior la pasa con los cents viejos.
     const double second = 146.832;
     const uint64_t applied = targetApplications(mWma);
     ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(second)));
