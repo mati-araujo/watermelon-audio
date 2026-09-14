@@ -215,14 +215,22 @@ TEST(SfSpecConformance, TheVelocityLaddersFollowWhatTheFileDeclares) {
      *   "many SoundFont synths including FluidSynth and BASSMIDI choose not to
      *    implement this default modulator [velocity -> filter cutoff] at all."
      *
-     * Asi que #14 A (default), #14 C (sin filtro declarado: el default otra vez) y
-     * #14 D (borrado con la identidad 2.01, que NO es la del default 2.04) salen
+     * Asi que #14 A (default) y #14 C (sin filtro declarado: el default otra vez) salen
      * PLANOS en FluidSynth y con filtrado moderado en un synth 2.04 — que es lo que el
      * spec manda: "moderate filtering (-2400 cent curve) as the velocity decreases
      * from 127 to 0 with no sudden jump". Medido en el font con el lector del repo:
      * `veloToFC-deleted2.01` borra con `amtSrc = velocity/switch` (identidad 2.01) y
-     * `veloToFC-deleted2.04` con `amtSrc = none` (identidad 2.04, la nuestra). Solo
-     * la segunda anula nuestro default #2, y asi tiene que ser.
+     * `veloToFC-deleted2.04` con `amtSrc = none` (identidad 2.04, la nuestra).
+     *
+     * 🔴 #14 D (borrado con la identidad 2.01) cambio de grupo en MINI-028 (2026-09-14).
+     * S2 la habia puesto con las del default —"solo la 2.04 anula nuestro default #2, y
+     * asi tiene que ser"— y el font real lo desmintio: GeneralUser 1.471 borra el default
+     * #2 en 1422 zonas SOLO con la identidad 2.01, asi que con esa regla el -2400 seguia
+     * vivo en los 269 presets y sumaba sobre lo que el preset declarara (NoisyPad lo oyo:
+     * `Saw Lead` 1123 -> 880 Hz de centroide con la velocity). Las dos identidades son
+     * dos nombres del mismo default; un font que lo borra con cualquiera no lo quiere.
+     * Desde entonces #14 D es PLANA, como en FluidSynth, y esta con las conformes (0,02
+     * contra 0,01). #14 A y #14 C siguen el spec 2.04: un font que calla recibe el default.
      */
     auto nivelesRelativos = [&](const float* s, int frames, double t0, double out[8]) {
         double v0 = 0.0;
@@ -240,15 +248,15 @@ TEST(SfSpecConformance, TheVelocityLaddersFollowWhatTheFileDeclares) {
     // un desacuerdo de formula. Ver `test_soundfont_modulators.cpp`.
     struct Conforme { int idx; double tol; };
     const Conforme kConformes[] = {{0, 0.25}, {1, 0.25}, {2, 0.25}, {3, 1.5}, {4, 0.25},
-                                   {6, 0.25}, {9, 0.25}};
+                                   {6, 0.25}, {8, 0.25}, {9, 0.25}};  // #14 D desde MINI-028
     for (const Conforme& c : kConformes) {
         EXPECT_NEAR(rangosNuestros[static_cast<size_t>(c.idx)], rangoRef(kEsc[c.idx].t0), c.tol)
             << kEsc[c.idx].etiqueta << ": el motor se aparto de FluidSynth, que en esta "
             << "sub-prueba SI es conforme al spec";
     }
 
-    // (2) Las TRES del default #2, contra el SPEC 2.04 y no contra FluidSynth.
-    const int kDefaultDos[] = {5, 7, 8};  // #14 A, #14 C, #14 D
+    // (2) Las DOS del default #2, contra el SPEC 2.04 y no contra FluidSynth.
+    const int kDefaultDos[] = {5, 7};  // #14 A, #14 C (#14 D: con las conformes, MINI-028)
     const double rangoMenosSieteMil = rangosNuestros[6];  // #14 B: -7200 cents, el techo
     for (int idx : kDefaultDos) {
         const double r = rangosNuestros[static_cast<size_t>(idx)];
@@ -277,9 +285,13 @@ TEST(SfSpecConformance, TheVelocityLaddersFollowWhatTheFileDeclares) {
             << kEsc[idx].etiqueta << ": el motor se acerco a FluidSynth, que NO implementa el "
             << "default #2. El oraculo aca es el spec 2.04, no la referencia";
     }
-    // Las tres son el MISMO default 2.04 sin nada que lo pise: tienen que coincidir.
+    // Las dos son el MISMO default 2.04 sin nada que lo pise: tienen que coincidir.
     EXPECT_NEAR(rangosNuestros[5], rangosNuestros[7], 0.5) << "#14 A y #14 C difieren";
-    EXPECT_NEAR(rangosNuestros[5], rangosNuestros[8], 0.5) << "#14 A y #14 D difieren";
+    // Y #14 D tiene que DIFERIR de ellas: el borrado 2.01 anula (MINI-028). Si vuelve a
+    // coincidir con #14 A, la equivalencia de identidades se cayo y GeneralUser vuelve a
+    // sonar mas oscuro de lo que pide.
+    EXPECT_GT(rangosNuestros[5] - rangosNuestros[8], 2.0)
+        << "#14 D (borrado 2.01) filtra como #14 A: el borrado con la identidad 2.01 no anula";
 
     double minR = rangosNuestros[0], maxR = rangosNuestros[0];
     for (double r : rangosNuestros) { minR = std::min(minR, r); maxR = std::max(maxR, r); }
@@ -627,11 +639,13 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
         {13, 5, Obs::LevelNotes, Cls::F, 0.25, 0.0, "modulador borrado"},
         {14, 2, Obs::LevelNotes, Cls::F, 0.4, 0.0, "-7200 cents: 0,26 por nota donde el rango da 0,02"},
         {14, 5, Obs::LevelNotes, Cls::F, 0.25, 0.0, "borrado 2.04: plano en los dos"},
-        // #14 A/C/D: S, afirmado en detalle en las escaleras. Aca, el control de que la
+        // #14 A/C: S, afirmado en detalle en las escaleras. Aca, el control de que la
         // referencia sigue plana y el motor sigue filtrando.
         {14, 1, Obs::RangeOurs, Cls::S, 1.0, 0.0, "default #2 (2.04): hay filtrado; la referencia es plana"},
         {14, 3, Obs::RangeOurs, Cls::S, 1.0, 0.0, "SoundFont 2.0: el default otra vez"},
-        {14, 4, Obs::RangeOurs, Cls::S, 1.0, 0.0, "borrado 2.01: no anula al 2.04"},
+        // #14 D: S -> F en MINI-028. Decia "borrado 2.01: no anula al 2.04"; GeneralUser 1.471
+        // borra SOLO asi y el -2400 sobrevivia en los 269 presets. Plana en los dos.
+        {14, 4, Obs::LevelNotes, Cls::F, 0.25, 0.0, "borrado 2.01: anula (MINI-028); plano en los dos"},
         {15, 0, Obs::LevelOn, Cls::R, 0.5, 0.78, "CC1 -> corte del filtro: fuente de canal; dueño: el REQ de superficie CC"},
         {16, 0, Obs::LevelNotes, Cls::F, 0.6, 0.0, "sample offset: los dos tocan \"supported\"; sample hablado, 0,43 hoy"},
         {17, 1, Obs::LevelNotes, Cls::R, 0.25, 0.0, "reverb: la referencia es SECA (-R 0), iguales por construccion; dueño REQ-040"},
