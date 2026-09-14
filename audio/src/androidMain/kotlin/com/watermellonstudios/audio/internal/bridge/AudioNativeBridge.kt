@@ -860,8 +860,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // ========== SOUNDFONT POLYPHONY (Phase 8E) ==========
 
     /**
-     * Start/update a SoundFont note for a touch point.
-     * Lock-free — safe to call at touch rate.
+     * Ataca la nota de un punto de contacto. Lock-free: se llama al ritmo del toque.
+     *
+     * Con la MISMA nota sobre un toque activo **no re-ataca y la velocity se ignora**
+     * (R-MOT-13); con otra nota suelta la anterior y ataca. En los dos casos la expresión
+     * por toque vuelve a `1.0` (R-MOT-14). El contrato entero está en el KDoc de
+     * [ISoundFontBridge.sfNoteOn].
      */
     override fun sfNoteOn(touchId: Int, midiNote: Int, velocity: Float) {
         nativeSfNoteOn(touchId, midiNote, velocity)
