@@ -10,7 +10,7 @@ created: 2026-09-14
 **watermelon-audio → NoisyPad.** Contesta su respuesta del 12/09 al aviso de v2.17.0
 (`carta-noisypad-2026-09-12-respuesta-v2.17.0.md`) y avisa **v2.17.1**.
 
-> **Redactada el 2026-09-14, sin enviar todavía.**
+> **Enviada el 2026-09-14.** Respuesta pendiente.
 
 Cuatro cosas, en orden de lo que les cambia: el bump, su hallazgo #3 (tenían razón, y era
 nuestro), lo que ese hallazgo destapó al medirlo, y #4.
