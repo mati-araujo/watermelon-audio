@@ -36,6 +36,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -277,18 +278,15 @@ const char* describeTimeoutCause(TimeoutCause c) {
     float lastDropped = -1.0f;
     auto lastAdvance = start;
 
+    // Una lectura no-NaN por debajo de la marca es del objetivo anterior: no cuenta, se anota.
     while (clock::now() < deadline) {
         if (wma_tuner_get_snapshot(e, out.data())) {
             everRead = true;
-            if (!std::isnan(out[kSnapCents])) {
-                if (out[kSnapFramesAnalyzed] > afterFrames) return ::testing::AssertionSuccess();
-                sawStale = true;   // medicion del objetivo anterior: no cuenta
-            }
-            const float frames = out[kSnapFramesAnalyzed];
-            if (frames > lastFrames) {
-                lastFrames = frames;
-                lastAdvance = clock::now();
-            }
+            const bool fresh = out[kSnapFramesAnalyzed] > afterFrames;
+            if (!std::isnan(out[kSnapCents]) && fresh) return ::testing::AssertionSuccess();
+            if (!std::isnan(out[kSnapCents])) sawStale = true;
+            if (out[kSnapFramesAnalyzed] > lastFrames) lastAdvance = clock::now();
+            lastFrames = std::max(lastFrames, out[kSnapFramesAnalyzed]);
             lastDropped = out[kSnapDroppedFrames];
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
