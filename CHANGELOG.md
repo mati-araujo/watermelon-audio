@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.3](https://github.com/mati-araujo/watermelon-audio/compare/v2.17.2...v2.17.3) (2026-09-14)
+
+
+### Bug Fixes
+
+* **sf:** la afinacion fina y el coarseTune salen del keytrack (MINI-025) ([3115751](https://github.com/mati-araujo/watermelon-audio/commit/311575191900abb75a97bd117a24a48dbd55c47f))
+* **sf:** la afinacion fina y el coarseTune salen del keytrack (MINI-025) ([2ea53d7](https://github.com/mati-araujo/watermelon-audio/commit/2ea53d768e4f094c6f9878e8968e5a1a717b7d68))
+
 ## [2.17.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.17.1...v2.17.2) (2026-09-14)
 
 
