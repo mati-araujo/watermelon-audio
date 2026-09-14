@@ -866,6 +866,72 @@ TEST_F(TunerApiTest, ATimeoutNamesItsCauseInsteadOfJustFailing) {
 }
 
 /**
+ * MINI-029 (AC-M029.2) — EL AUTO-TEST DE LA QUINTA CAUSA, sobre el camino real.
+ *
+ * Es la cara B del flake, construida SIN timing: el thread parado hace de siesta infinita.
+ * Con el objetivo nuevo pendiente y el ring lleno de la cuerda nueva, el primer tick al
+ * reanudar aplica el objetivo y hace `skipToNewest()` ANTES de `read()` — el ring queda
+ * vacio sin que nadie cuente una vuelta (`dropped` sigue en 0), no hay publish, y el
+ * snapshot conserva la medicion de la cuerda anterior. Es exactamente lo que el CI leyo el
+ * 2026-09-11: 1,0000 c contra 2,0, `dropped` 0, en 868 ms.
+ *
+ * Lo que se afirma es el DIAGNOSTICO: que `waitForMeasurement` con la marca de agua no tome
+ * esa lectura por la segunda medicion, y que al vencer diga "objetivo anterior" y no mande a
+ * subir el techo. Sin la marca, este mismo escenario devolvia exito con la lectura vieja y
+ * el rojo caia en `EXPECT_NEAR` — que es donde nadie puede leer la causa.
+ */
+TEST_F(TunerApiTest, AStaleReadingIsNamedNotMistakenForTheSecondMeasurement) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_set_target(mWma, 110.0f));
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    ASSERT_TRUE(waitForTargetApplied(mWma, 0));
+    ASSERT_TRUE(feedTone(mWma, 110.0 * std::pow(2.0, 1.0 / 1200.0), kFirstRate, kWarmupBlocks, kBlockFrames));
+    auto first = sentinelBuffer();
+    ASSERT_TRUE(waitForMeasurement(mWma, first));
+    ASSERT_NEAR(first[kSnapCents], 1.0f, 0.1f);
+
+    // El lector se va (y con el, la posibilidad de que un tick caiga a mitad de camino);
+    // el escritor sigue enganchado.
+    ASSERT_TRUE(wma_test::waitUntil([&] { return mWma->analysisRing->availableFrames() == 0; }))
+        << "el ring no termino de drenarse";
+    {
+        std::lock_guard<std::mutex> lock(mWma->analysisMutex);
+        mWma->analysisThread->stop();
+    }
+    const float mark = analysedFramesNow(mWma);
+
+    // Objetivo nuevo pendiente y un ring ENTERO de la cuerda nueva sin leer: 32 bloques de
+    // 256 son 8192, justo la capacidad, asi que entran sin pisar nada.
+    const double second = 146.832;
+    ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(second)));
+    ASSERT_TRUE(feedTone(mWma, second * std::pow(2.0, 2.0 / 1200.0), kFirstRate,
+                         static_cast<int>(wma::analysis::AnalysisRing::kCapacityFrames) / kBlockFrames,
+                         kBlockFrames));
+
+    // Al reanudar, el primer tick aplica el objetivo y descarta el ring antes de leerlo.
+    {
+        std::lock_guard<std::mutex> lock(mWma->analysisMutex);
+        mWma->analysisThread->start(kFirstRate);
+    }
+    ASSERT_TRUE(wma_test::waitUntil([&] { return mWma->analysisRing->availableFrames() == 0; }))
+        << "el lector reanudado no vacio el ring";
+
+    auto buf = sentinelBuffer();
+    const auto r = waitForMeasurement(mWma, buf, /*timeoutMs=*/300, mark);
+    ASSERT_FALSE(r) << "tomo por segunda medicion una lectura de la cuerda anterior: "
+                    << buf[kSnapCents];
+    const std::string msg = r.message();
+    EXPECT_NE(msg.find("OBJETIVO ANTERIOR"), std::string::npos) << msg;
+    EXPECT_EQ(msg.find("techo quedo corto"), std::string::npos) << msg;
+    EXPECT_EQ(buf[kSnapDroppedFrames], 0.0f)
+        << "la vuelta se conto: el escenario no es el de la cara B, es el de la A";
+    EXPECT_NEAR(buf[kSnapCents], 1.0f, 0.1f) << "la lectura vieja no es la de la cuerda anterior";
+
+    wma_tuner_stop(mWma);
+}
+
+/**
  * TAREA 4.0.4. El estimador se prepara con el rate **medido**, no con 48000.
  *
  * Es el ultimo lugar donde el rate de S1 se podia perder: llega vivo hasta el snapshot y se
