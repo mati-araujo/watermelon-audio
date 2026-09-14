@@ -84,6 +84,7 @@ extern "C" int tsf_ext_voices_started_by_last_note_on(const tsf* f, tsf_ext_star
             out[n].presetIndex = v.playingPreset;
             out[n].regionIndex = static_cast<int>(v.region - p.regions);
             out[n].initialFilterFc = v.region->initialFilterFc;
+            out[n].pitchTimecents = v.pitchInputTimecents;
         }
         ++n;
     }

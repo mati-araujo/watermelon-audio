@@ -1218,8 +1218,15 @@ static void tsf_voice_endquick(tsf* f, struct tsf_voice* v)
 
 static void tsf_voice_calcpitchratio(struct tsf_voice* v, float pitchShift, float outSampleRate)
 {
-	double note = v->playingKey + v->region->transpose + v->region->tune / 100.0;
-	double adjustedPitch = v->region->pitch_keycenter + (note - v->region->pitch_keycenter) * (v->region->pitch_keytrack / 100.0);
+	// watermelon-audio (MINI-025): coarseTune (51), fineTune (52) y el pitchCorrection del
+	// sample (que el loader ya sumo a `tune`) son OFFSETS ABSOLUTOS de pitch (SF2 §8.1.2);
+	// scaleTuning (56) escala SOLO la distancia entre la tecla y la raiz. Upstream los metia
+	// adentro del producto: con scaleTuning 0 la afinacion fina desaparecia y con 50 entraba
+	// a la mitad (spec-test #3/#4/#8: 375,00 Hz donde el sample corregido a -23 c da 370,05).
+	// Es lo que FluidSynth 2.6.0 hace: `pitch = scaletune*(key - root) + root + 100*coarse
+	// + fine` sobre `root_pitch_hz = ct2hz(root - pitchadj)`, o sea los tres afuera.
+	double keytracked = (v->playingKey - v->region->pitch_keycenter) * (v->region->pitch_keytrack / 100.0);
+	double adjustedPitch = v->region->pitch_keycenter + keytracked + v->region->transpose + v->region->tune / 100.0;
 	if (pitchShift) adjustedPitch += pitchShift;
 	v->pitchInputTimecents = adjustedPitch * 100.0;
 	v->pitchOutputFactor = v->region->sample_rate / (tsf_timecents2Secsd(v->region->pitch_keycenter * 100.0) * outSampleRate);

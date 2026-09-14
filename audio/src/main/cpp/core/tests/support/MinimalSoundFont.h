@@ -49,6 +49,7 @@
  * test dice cubrir deja el test verde **por vacío**.
  */
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -71,6 +72,10 @@ enum : uint16_t {
     kGenInitialFilterFc = 8,       ///< corte del low-pass, en cents absolutos
     kGenInitialAttenuation = 48,   ///< atenuación, en centibeles
     kGenPan = 17,                  ///< paneo, en 0,1 %
+    kGenCoarseTune = 51,           ///< offset de pitch en semitonos (MINI-025)
+    kGenFineTune = 52,             ///< offset de pitch en cents (MINI-025)
+    kGenScaleTuning = 56,          ///< cuánto influye la tecla en el pitch, 100 = semitonos (MINI-025)
+    kGenOverridingRootKey = 58,    ///< la tecla que reproduce el sample a su tasa original
 };
 
 /**
@@ -129,6 +134,28 @@ struct ModulatorPlacement {
         return instrumentGlobal.empty() && instrumentZone.empty() &&
                presetGlobal.empty() && presetZone.empty();
     }
+};
+
+/**
+ * Lo que decide el PITCH de la zona (MINI-025): los tres offsets absolutos (coarseTune 51,
+ * fineTune 52 y el `pitchCorrection` del `shdr`), el keytrack (scaleTuning 56) y la raíz.
+ * Con los defaults el archivo sale byte a byte como sin esto: no se escribe ningún generador
+ * y el sample sigue siendo la cuadrada de 64 muestras.
+ *
+ * `sinePeriod > 0` cambia el SAMPLE por una senoide de ese período en muestras, con el loop
+ * cubriendo un número entero de períodos: sobre la cuadrada de 64 el loop de 61 muestras no
+ * es múltiplo del período de 16 y un estimador de cruces por cero lee ~80 c de artefacto.
+ * Sobre la senoide, a la tecla raíz y con el header a la tasa de render, suena a
+ * `rate / sinePeriod` Hz — un número que se puede afirmar contra la fórmula, no contra el
+ * motor.
+ */
+struct PitchGenerators {
+    int scaleTuning = -1;        ///< gen 56; -1 = no se escribe (tsf usa 100)
+    int fineTune = 0;            ///< gen 52, cents; 0 = no se escribe
+    int coarseTune = 0;          ///< gen 51, semitonos; 0 = no se escribe
+    int overridingRootKey = -1;  ///< gen 58; -1 = no se escribe (vale el originalPitch del shdr)
+    int pitchCorrection = 0;     ///< `shdr.chPitchCorrection`, cents, -128..127
+    int sinePeriod = 0;          ///< 0 = la cuadrada de 64; >0 = senoide con ese período
 };
 
 inline void put16(std::vector<uint8_t>& out, uint16_t v) {
@@ -202,12 +229,17 @@ inline void putChunk(std::vector<uint8_t>& out, const char* id,
  *        factor con que ese generador entra al nivel (0,4 dB por dB declarado, el spec-quirk)
  *        sólo se puede afirmar contra un font que lo declare con un número conocido.
  */
+/**
+ * @param pitch los generadores de pitch y, opcionalmente, una senoide en lugar de la cuadrada
+ *        (MINI-025). Ver `PitchGenerators`.
+ */
 inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 22050,
                                                 bool looping = false,
                                                 int keyRangeLo = -1,
                                                 int keyRangeHi = -1,
                                                 const sf2::ModulatorPlacement& mods = {},
-                                                int attenuationCentibels = 0) {
+                                                int attenuationCentibels = 0,
+                                                const sf2::PitchGenerators& pitch = {}) {
     using namespace sf2;
 
     // ---- sdta: 64 samples de 16 bits. tsf pide >= un short; 64 deja lugar a
@@ -216,11 +248,19 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
     // fueron ceros, cualquier test que renderizara media "salio silencio" tanto
     // si el motor andaba como si no. Una onda cuadrada de amplitud media hace
     // que "sono algo" sea una afirmacion con contenido.
-    constexpr uint32_t kSampleCount = 64;
     constexpr int16_t kAmplitude = 16384;
+    // Con `sinePeriod`, 32 períodos enteros de senoide y el loop sobre TODOS ellos (MINI-025);
+    // sin él, la cuadrada de 64 de siempre.
+    const bool senoide = pitch.sinePeriod > 0;
+    const uint32_t kSampleCount = senoide ? 32u * static_cast<uint32_t>(pitch.sinePeriod) : 64u;
     std::vector<uint8_t> smpl;
     for (uint32_t i = 0; i < kSampleCount; ++i) {
-        put16(smpl, static_cast<uint16_t>((i % 16 < 8) ? kAmplitude : -kAmplitude));
+        if (senoide) {
+            const double ph = 2.0 * 3.14159265358979323846 * static_cast<double>(i) / pitch.sinePeriod;
+            put16(smpl, static_cast<uint16_t>(static_cast<int16_t>(std::lround(kAmplitude * std::sin(ph)))));
+        } else {
+            put16(smpl, static_cast<uint16_t>((i % 16 < 8) ? kAmplitude : -kAmplitude));
+        }
     }
 
     // ---- Los 46 sample points en cero que el spec de SF2 exige DESPUES de cada
@@ -315,7 +355,9 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
     // con el terminal en 1 el `sampleID` quedaba FUERA de la zona: el instrumento se quedaba
     // sin sample y el render daba silencio absoluto — no un sonido distinto, silencio.
     const bool declaraAtenuacion = attenuationCentibels != 0;
-    put16(ibag, (looping ? 2 : 1) + (declaraRango ? 1 : 0) + (declaraAtenuacion ? 1 : 0));
+    const int generadoresDePitch = (pitch.scaleTuning >= 0 ? 1 : 0) + (pitch.fineTune != 0 ? 1 : 0) +
+                                   (pitch.coarseTune != 0 ? 1 : 0) + (pitch.overridingRootKey >= 0 ? 1 : 0);
+    put16(ibag, (looping ? 2 : 1) + (declaraRango ? 1 : 0) + (declaraAtenuacion ? 1 : 0) + generadoresDePitch);
     put16(ibag, static_cast<uint16_t>(nInstGlobal + nInstZone));  // terminal
 
     std::vector<uint8_t> imod;
@@ -336,6 +378,11 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
         put16(igen, kGenInitialAttenuation);
         put16(igen, static_cast<uint16_t>(static_cast<int16_t>(attenuationCentibels)));
     }
+    // Los de pitch (MINI-025), en la misma franja de orden libre.
+    if (pitch.scaleTuning >= 0) { put16(igen, kGenScaleTuning); put16(igen, static_cast<uint16_t>(pitch.scaleTuning)); }
+    if (pitch.fineTune != 0) { put16(igen, kGenFineTune); put16(igen, static_cast<uint16_t>(static_cast<int16_t>(pitch.fineTune))); }
+    if (pitch.coarseTune != 0) { put16(igen, kGenCoarseTune); put16(igen, static_cast<uint16_t>(static_cast<int16_t>(pitch.coarseTune))); }
+    if (pitch.overridingRootKey >= 0) { put16(igen, kGenOverridingRootKey); put16(igen, static_cast<uint16_t>(pitch.overridingRootKey)); }
     // `sampleModes` va ANTES que `sampleID`: el spec de SF2 (§7.5) exige que sampleID sea el
     // ULTIMO generador de una zona de instrumento, y tsf recorre la lista en orden.
     //
@@ -354,11 +401,12 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
     putName20(shdr, "Test Sample");
     put32(shdr, 0);                  // start
     put32(shdr, kSampleCount - 1);   // end
-    put32(shdr, 1);                  // startLoop
-    put32(shdr, kSampleCount - 2);   // endLoop
+    // La senoide loopea sus 32 períodos ENTEROS: tsf toma `endLoop - startLoop` muestras de loop.
+    put32(shdr, senoide ? 0 : 1);                             // startLoop
+    put32(shdr, senoide ? kSampleCount : kSampleCount - 2);   // endLoop
     put32(shdr, sampleRateInHeader);
     shdr.push_back(60);              // originalPitch = C4
-    shdr.push_back(0);               // pitchCorrection
+    shdr.push_back(static_cast<uint8_t>(static_cast<int8_t>(pitch.pitchCorrection)));  // pitchCorrection (MINI-025)
     put16(shdr, 0);                  // sampleLink
     put16(shdr, 1);                  // sampleType = monoSample
     putName20(shdr, "EOS");          // terminal
