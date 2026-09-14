@@ -211,54 +211,114 @@ def _s16(data, off):
 
 def presets(path):
     """La tabla POR PRESET que sostiene la nota de bump de REQ-039 (S3 3.6, 2026-09-11):
-    cuantos moduladores velocity -> initialFilterFc declara cada preset (por sus
-    instrumentos) y que hace con el default #1 (velocity -> initialAttenuation, identidad
-    `0x0502 -> 48` sin amtSrc ni transform): lo deja, lo ANULA (amount 0, sin otra curva)
-    o lo REEMPLAZA (y con que amounts). Recorre phdr -> pbag -> pgen(instrument 41) ->
-    inst -> ibag -> imod. Solo los moduladores de instrumento: son los que definen la
-    identidad del default; los de preset se SUMAN (SF2 §9.5)."""
+    que hace cada preset con velocity -> initialAttenuation (el default #1, identidad
+    `0x0502 -> 48` sin amtSrc ni transform) y cuantos velocity -> initialFilterFc declara.
+
+    🔴 HASTA EL 2026-09-14 ESTA TABLA SOLO RECORRIA `imod`, Y CLASIFICO MAL 26 PRESETS.
+    Decia "ANULADO" donde el instrumento pone el default #1 en 0 — y no miraba que el
+    PRESET lo vuelve a declarar en su zona global (`pmod`, 500/800/840 cB), que por SF2
+    §9.5 se SUMA al del instrumento. Los 26 "velocity -> nivel anulado" de la nota de
+    v2.17.0 (pianos, organos, `0:81 Saw Lead`...) tienen TODOS una curva efectiva. Lo
+    encontro NoisyPad midiendo `Saw Lead` en el dispositivo (-6,9 / -16,9 dB a velocity
+    76 / 38: la curva de 800 cB, no "anulado"), y el motor ya lo hacia bien — el que
+    estaba mal era este instrumento. Un lector que recorre un solo ambito describe otro
+    archivo.
+
+    Ahora resuelve los CUATRO ambitos, con la precedencia del spec y la misma que aplica
+    `SoundFontModulatorTable::resolve()`: en el instrumento la zona local pisa a la global
+    por identidad y el default #1 vale 960 si nadie lo pisa; en el preset la zona local
+    pisa a la global; y el resultado del preset se SUMA al del instrumento. Imprime por
+    preset la curva EFECTIVA (o el conjunto, si sus regiones difieren) en cB.
+    """
     data, ch = _read_font(path)
 
     def recs(name, size):
         b, e = ch[('pdta', name)]
         return [b + i * size for i in range((e - b) // size)]
 
-    phdr, pbag, pgen = recs('phdr', 38), recs('pbag', 4), recs('pgen', 4)
-    inst, ibag, imod = recs('inst', 22), recs('ibag', 4), recs('imod', 10)
+    phdr, pbag, pgen, pmod = recs('phdr', 38), recs('pbag', 4), recs('pgen', 4), recs('pmod', 10)
+    inst, ibag, igen, imod = recs('inst', 22), recs('ibag', 4), recs('igen', 4), recs('imod', 10)
     DEF1 = (0x0502, 48, 0, 0)
+    DEFAULT_1_CB = 960
+
+    def zone_mods(bags, tab, z):
+        out = {}
+        for m in range(_u16(data, bags[z] + 2), _u16(data, bags[z + 1] + 2)):
+            src, dest, amt, asrc, tr = struct.unpack_from('<HHhHH', data, tab[m])
+            out[(src, dest, asrc, tr)] = amt   # la ultima identidad igual gana, como en el spec
+        return out
+
+    def zone_gens(bags, tab, z):
+        return dict((_u16(data, tab[g]), _s16(data, tab[g] + 2))
+                    for g in range(_u16(data, bags[z]), _u16(data, bags[z + 1])))
+
+    def vel_fc(mods):
+        return sum(1 for (src, dest, _a, _t), amt in mods.items()
+                   if dest == 8 and (src & 0x7F) == 2 and not (src & 0x80) and amt != 0)
+
+    # El default #2 (velocity -> initialFilterFc, -2400) tiene DOS identidades segun la
+    # version del spec: 2.04 = `0x0102 -> 8` sin amtSrc (la del motor, R-MOT-38); 2.01 =
+    # la misma con amtSrc `0x0D02` (velocity, switch). Un archivo que lo borra con la
+    # identidad 2.01 NO lo anula en un synth 2.04 — el default sigue vivo y se SUMA a lo
+    # que el archivo declare. GeneralUser lo borra asi en 1422 zonas de instrumento.
+    DEF2_204 = (0x0102, 8, 0, 0)
+    DEF2_201 = (0x0102, 8, 0x0D02, 0)
+
+    def def2_state(mods):
+        if mods.get(DEF2_204, None) == 0:
+            return 'borrado 2.04'
+        if DEF2_201 in mods:
+            return 'borrado 2.01 (sigue vivo en 2.04)'
+        return 'default'
+
     rows = []
     for p in range(len(phdr) - 1):
         name = data[phdr[p]:phdr[p] + 20].split(b'\0')[0].decode('latin1')
         prog, bank = _u16(data, phdr[p] + 20), _u16(data, phdr[p] + 22)
-        vel_fc, over = 0, set()
-        for z in range(_u16(data, phdr[p] + 24), _u16(data, phdr[p + 1] + 24)):
-            gens = dict((_u16(data, pgen[g]), _s16(data, pgen[g] + 2))
-                        for g in range(_u16(data, pbag[z]), _u16(data, pbag[z + 1])))
-            if 41 not in gens:
+        z0, z1 = _u16(data, phdr[p] + 24), _u16(data, phdr[p + 1] + 24)
+        pglobal, effective, fc, def2 = {}, collections.Counter(), 0, set()
+        for z in range(z0, z1):
+            pg = zone_gens(pbag, pgen, z)
+            if GEN_INSTRUMENT not in pg:
+                if z == z0:
+                    pglobal = zone_mods(pbag, pmod, z)
                 continue
-            ii = gens[41]
-            for iz in range(_u16(data, inst[ii] + 20), _u16(data, inst[ii + 1] + 20)):
-                for m in range(_u16(data, ibag[iz] + 2), _u16(data, ibag[iz + 1] + 2)):
-                    src, dest, amt, asrc, tr = struct.unpack_from('<HHhHH', data, imod[m])
-                    if dest == 8 and (src & 0x7F) == 2 and not (src & 0x80):
-                        vel_fc += 1
-                    if (src, dest, asrc, tr) == DEF1:
-                        over.add(amt)
-        if not over:
-            def1 = 'default (960 cB)'
-        elif over == {0}:
-            def1 = 'ANULADO'
+            pz = dict(pglobal)
+            pz.update(zone_mods(pbag, pmod, z))
+            ii = pg[GEN_INSTRUMENT]
+            iz0, iz1 = _u16(data, inst[ii] + 20), _u16(data, inst[ii + 1] + 20)
+            iglobal = {}
+            for iz in range(iz0, iz1):
+                ig = zone_gens(ibag, igen, iz)
+                if GEN_SAMPLE_ID not in ig:
+                    if iz == iz0:
+                        iglobal = zone_mods(ibag, imod, iz)
+                    continue
+                im = dict(iglobal)
+                im.update(zone_mods(ibag, imod, iz))
+                effective[im.get(DEF1, DEFAULT_1_CB) + pz.get(DEF1, 0)] += 1
+                fc += vel_fc(im) + vel_fc(pz)
+                def2.add(def2_state(im))
+        amounts = sorted(effective)
+        if amounts == [0]:
+            curve = 'ANULADO'
+        elif amounts == [DEFAULT_1_CB]:
+            curve = 'default (960 cB)'
+        elif len(amounts) == 1:
+            curve = '%d cB' % amounts[0]
         else:
-            def1 = 'reemplazado %s' % sorted(over)
-        rows.append((bank, prog, name, vel_fc, def1))
+            curve = 'mezcla %s' % dict((k, effective[k]) for k in amounts)
+        rows.append((bank, prog, name, fc, curve, ' / '.join(sorted(def2))))
 
-    print('%-5s %-3s %-22s %8s  %s' % ('banco', 'prog', 'preset', 'vel->FC', 'default #1 (vel -> nivel)'))
-    for bank, prog, name, vel_fc, def1 in rows:
-        print('%5d %3d  %-22s %8d  %s' % (bank, prog, name, vel_fc, def1))
-    resumen = collections.Counter(r[4].split(' ')[0] for r in rows)
+    print('%-5s %-3s %-22s %8s  %-34s %s' % ('banco', 'prog', 'preset', 'vel->FC',
+                                             'vel -> nivel, curva EFECTIVA', 'default #2 (vel -> filtro)'))
+    for bank, prog, name, fc, curve, def2 in rows:
+        print('%5d %3d  %-22s %8d  %-34s %s' % (bank, prog, name, fc, curve, def2))
+    resumen = collections.Counter(r[4] if not r[4].startswith('mezcla') else 'mezcla' for r in rows)
     print()
-    print('presets: %d; con velocity -> FC: %d; default #1: %s' %
-          (len(rows), sum(1 for r in rows if r[3] > 0), dict(resumen)))
+    print('presets: %d; con velocity -> FC declarado (amount != 0): %d; curva efectiva de velocity -> nivel: %s'
+          % (len(rows), sum(1 for r in rows if r[3] > 0), dict(resumen.most_common())))
+    print('default #2 por preset: %s' % dict(collections.Counter(r[5] for r in rows).most_common()))
 
 
 STRUCTURAL_GENS = {GEN_INSTRUMENT, 43, 44, GEN_SAMPLE_ID}  # instrument, keyRange, velRange, sampleID
