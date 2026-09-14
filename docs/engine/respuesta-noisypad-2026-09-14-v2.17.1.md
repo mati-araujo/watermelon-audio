@@ -10,7 +10,10 @@ created: 2026-09-14
 **watermelon-audio → NoisyPad.** Contesta su respuesta del 12/09 al aviso de v2.17.0
 (`carta-noisypad-2026-09-12-respuesta-v2.17.0.md`) y avisa **v2.17.1**.
 
-> **Enviada el 2026-09-14.** Respuesta pendiente.
+> **Enviada el 2026-09-14. Contestada el mismo día**: `carta-noisypad-2026-09-14-respuesta-v2.17.1.md`
+> — 2.17.1 adoptada y medida en el dispositivo (Saw Lead −11,1, Trumpet 0, Warm Pad −1,5: los tres
+> como el archivo), #2 y #4 conformes, posición de producto sobre el default #2: el font como lo
+> afina su autor, FluidSynth como referencia.
 
 Cuatro cosas, en orden de lo que les cambia: el bump, su hallazgo #3 (tenían razón, y era
 nuestro), lo que ese hallazgo destapó al medirlo, y #4.
