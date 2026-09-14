@@ -423,7 +423,20 @@ WMA_API bool wma_sf_get_preset_key_range(const WmaEngine* engine, int preset_ind
 WMA_API bool wma_sf_get_preset_bank_program(const WmaEngine* engine, int preset_index,
                                              int* out_bank, int* out_program);
 
-/** Start/update a SoundFont note. */  /* RT-safe */
+/**
+ * Attack the SoundFont note of a touch point. RT-safe.
+ *
+ * On a free touch, or one holding a DIFFERENT note: releases the previous note (if
+ * any) and attacks @p midi_note with @p velocity. On a touch already holding the SAME
+ * note: does NOT re-attack and IGNORES @p velocity — velocity belongs to the attack and
+ * cannot be changed afterwards (R-MOT-13); the sounding note stays sample-identical.
+ * Changing the level of a live note is wma_sf_set_touch_expression() and nothing else.
+ *
+ * In both cases the touch expression is reset to 1.0 first (R-MOT-14): a re-sent
+ * note-on with the same note does not re-attack but DOES undo the previous gesture,
+ * so a consumer sending expression and note-on in the same frame sends the
+ * expression last.
+ */
 WMA_API void wma_sf_note_on(WmaEngine* engine, int touch_id, int midi_note, float velocity);
 
 /** Release a SoundFont note. */  /* RT-safe */

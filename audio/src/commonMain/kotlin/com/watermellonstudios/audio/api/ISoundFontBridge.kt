@@ -127,7 +127,26 @@ interface ISoundFontBridge {
     //
     // Los cuatro son `RT-safe` y lock-free: se llaman al ritmo del toque.
 
-    /** Arranca o actualiza la nota de un punto de contacto. `RT-safe`. */
+    /**
+     * Ataca la nota de un punto de contacto. `RT-safe`.
+     *
+     * Lo que hace depende de lo que ya suena en ese `touchId`:
+     * - **toque libre, o con otra nota**: suelta la anterior (si había) y ataca `midiNote`
+     *   con esta `velocity`;
+     * - **la misma nota**: **no vuelve a atacar y la `velocity` se ignora**. La velocity es
+     *   del ataque y no se puede cambiar después (R-MOT-13): dieciséis reenvíos con la
+     *   misma nota y distinta velocity dejan la nota exactamente como estaba, muestra a
+     *   muestra. Cambiar el nivel de una nota viva es [sfSetTouchExpression] y sólo eso.
+     *
+     * En los dos casos **reinicia la expresión por toque a `1.0`** antes de nada
+     * (R-MOT-14): un reenvío con la misma nota no re-ataca pero **sí** deshace el gesto
+     * anterior. Si el consumidor manda expresión y note-on en el mismo frame, la expresión
+     * va **después**.
+     *
+     * Hasta el 2026-09-14 este KDoc decía *"arranca o actualiza"*, y un consumidor leyó
+     * "actualiza" como "la velocity se actualiza". No: afirmado en
+     * `test_touch_expression.cpp` (`ARepeatedNoteOnWithTheSameNoteKeepsTheAttackAndResetsExpression`).
+     */
     fun sfNoteOn(touchId: Int, midiNote: Int, velocity: Float)
 
     /** Suelta la nota de un punto de contacto. `RT-safe`. */
