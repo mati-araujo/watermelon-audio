@@ -9,7 +9,7 @@ created: 2026-09-14
 
 **watermelon-audio → NoisyPad.** Sigue a su respuesta del 14/09 (`carta-noisypad-2026-09-14-respuesta-v2.17.1.md`).
 
-> **Redactado el 2026-09-14, sin enviar todavía.**
+> **Enviado el 2026-09-14.** Respuesta pendiente.
 
 Corto, porque es lo que pidieron en su §3 y ya lo tienen medido.
 
