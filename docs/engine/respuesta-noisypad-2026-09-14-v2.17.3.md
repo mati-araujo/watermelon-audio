@@ -10,7 +10,7 @@ created: 2026-09-14
 **watermelon-audio → NoisyPad.** Sigue al aviso de v2.17.2 del mismo día (sin respuesta todavía;
 no hace falta contestar los dos por separado).
 
-> **Redactado el 2026-09-14, sin enviar.**
+> **Enviado el 2026-09-14.** Respuesta pendiente.
 
 ## 1 · Lo que cambia
 
