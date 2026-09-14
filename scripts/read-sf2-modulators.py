@@ -7,6 +7,11 @@ el comando que lo produce (R-MOT-33). Este es ese comando para los moduladores.
     python3 scripts/read-sf2-modulators.py <font.sf2|sf3>
     python3 scripts/read-sf2-modulators.py <font.sf2|sf3> --presets   # la tabla POR PRESET
                                                                      # de la nota de bump (S3 3.6)
+    python3 scripts/read-sf2-modulators.py <font> --generators        # que GENERADORES usa el font
+                                                                     # (I-2 de MINI-024: la ceguera
+                                                                     # del spec-test se mide asi)
+    python3 scripts/read-sf2-modulators.py <font> --attenuation       # initialAttenuation POR PRESET
+                                                                     # y cuanto baja con el factor 0,4
 
 Lee el chunk `pdta` directamente del archivo: no depende del motor, asi que puede
 contradecirlo. Descuenta la entrada TERMINADORA que la spec SF2 exige al final de
@@ -23,6 +28,10 @@ import struct
 import sys
 
 # La tabla de generadores de SF2 2.04 §8.1.2, COMPLETA y por su numero.
+#
+# 🔴 Y despues de "COMPLETA" seguia faltando el 45 (`startloopAddrsCoarseOffset`, 523 usos
+# en GeneralUser): lo encontro `--generators` el 2026-09-12 (MINI-024) al imprimir '?' en
+# una fila. Una tabla escrita a mano se verifica CONTRA EL ARCHIVO, no releyendola.
 #
 # 🔴 Hasta REQ-039 S3 (2026-09-11) este mapa estaba CORRIDO en tres tramos (5-7,
 # 11, 26-38): decia `modLfoToVolume` donde el 11 es `modEnvToFilterFc`, `decayModEnv`
@@ -43,7 +52,7 @@ GEN = {0: 'startAddrsOffset', 1: 'endAddrsOffset', 2: 'startloopAddrsOffset',
        32: 'keynumToModEnvDecay', 33: 'delayVolEnv', 34: 'attackVolEnv', 35: 'holdVolEnv',
        36: 'decayVolEnv', 37: 'sustainVolEnv', 38: 'releaseVolEnv', 39: 'keynumToVolEnvHold',
        40: 'keynumToVolEnvDecay', 41: 'instrument', 43: 'keyRange', 44: 'velRange',
-       46: 'keynum', 47: 'velocity', 48: 'initialAttenuation', 50: 'endloopAddrsCoarseOffset',
+       45: 'startloopAddrsCoarseOffset', 46: 'keynum', 47: 'velocity', 48: 'initialAttenuation', 50: 'endloopAddrsCoarseOffset',
        51: 'coarseTune', 52: 'fineTune', 53: 'sampleID', 54: 'sampleModes',
        56: 'scaleTuning', 57: 'exclusiveClass', 58: 'overridingRootKey'}
 CTRL = {0: 'NoController', 2: 'NoteOnVelocity', 3: 'NoteOnKeyNumber', 10: 'PolyPressure',
@@ -252,8 +261,99 @@ def presets(path):
           (len(rows), sum(1 for r in rows if r[3] > 0), dict(resumen)))
 
 
+STRUCTURAL_GENS = {GEN_INSTRUMENT, 43, 44, GEN_SAMPLE_ID}  # instrument, keyRange, velRange, sampleID
+
+
+def generators(path):
+    """Que generadores del SF2 §8.1.2 usa el font, por numero y con cuantos usos (pgen + igen,
+    sin los cuatro estructurales). Es el denominador del normalizador de MINI-024 y, corrido
+    sobre dos fonts, la CEGUERA del spec-test: lo que GeneralUser usa y sf_spec_test.sf2 no."""
+    data, ch = _read_font(path)
+
+    def gens(name):
+        b, e = ch[('pdta', name)]
+        return [_u16(data, b + i * 4) for i in range((e - b) // 4)]
+
+    used = collections.Counter(g for g in gens('pgen') + gens('igen') if g not in STRUCTURAL_GENS)
+    print('generadores distintos usados (sin instrument/keyRange/velRange/sampleID): %d' % len(used))
+    for g, n in sorted(used.items(), key=lambda kv: (-kv[1], kv[0])):
+        print('  %3d %-26s %6d' % (g, GEN.get(g, '?'), n))
+    return used
+
+
+def attenuation(path, factor_old=0.1, factor_new=0.4):
+    """`initialAttenuation` (gen 48) POR PRESET, y cuanto MAS baja cada preset cuando el
+    generador entra a `factor_new` dB por dB declarado en vez de `factor_old` — la nota de bump
+    de MINI-024 se escribe con esto. La regla del SF2 §8.5: el valor de la zona de instrumento
+    (o de su zona global) es el absoluto, y el de la zona de preset (o su global) se SUMA.
+    Se imprime por preset el rango [min, max] en cB entre sus zonas con atenuacion, cuantas
+    zonas la declaran, y la atenuacion EXTRA en dB en la zona mas atenuada."""
+    data, ch = _read_font(path)
+
+    def recs(name, size):
+        b, e = ch[('pdta', name)]
+        return [b + i * size for i in range((e - b) // size)]
+
+    phdr, pbag, pgen = recs('phdr', 38), recs('pbag', 4), recs('pgen', 4)
+    inst, ibag, igen = recs('inst', 22), recs('ibag', 4), recs('igen', 4)
+
+    def zone_gens(bags, gentab, z):
+        return dict((_u16(data, gentab[g]), _s16(data, gentab[g] + 2))
+                    for g in range(_u16(data, bags[z]), _u16(data, bags[z + 1])))
+
+    rows = []
+    for p in range(len(phdr) - 1):
+        name = data[phdr[p]:phdr[p] + 20].split(b'\0')[0].decode('latin1')
+        prog, bank = _u16(data, phdr[p] + 20), _u16(data, phdr[p] + 22)
+        z0, z1 = _u16(data, phdr[p] + 24), _u16(data, phdr[p + 1] + 24)
+        pglobal = 0
+        values, zones = [], 0
+        for z in range(z0, z1):
+            pg = zone_gens(pbag, pgen, z)
+            if 41 not in pg:
+                if z == z0:
+                    pglobal = pg.get(48, 0)
+                continue
+            padd = pglobal + pg.get(48, 0)
+            ii = pg[41]
+            iz0, iz1 = _u16(data, inst[ii] + 20), _u16(data, inst[ii + 1] + 20)
+            iglobal = 0
+            for iz in range(iz0, iz1):
+                ig = zone_gens(ibag, igen, iz)
+                if 53 not in ig:
+                    if iz == iz0:
+                        iglobal = ig.get(48, 0)
+                    continue
+                zones += 1
+                total = ig.get(48, iglobal) + padd
+                if total:
+                    values.append(total)
+        rows.append((bank, prog, name, zones, values))
+
+    print('%-5s %-3s %-22s %6s %6s %8s %8s  %s' % ('banco', 'prog', 'preset', 'zonas', 'c/att',
+                                                    'min cB', 'max cB', 'extra dB (0,%d->0,%d) en la mas atenuada'
+                                                    % (factor_old * 10, factor_new * 10)))
+    affected = 0
+    for bank, prog, name, zones, values in rows:
+        if values:
+            affected += 1
+            extra = (factor_new - factor_old) * max(values) / 10.0
+            print('%5d %3d  %-22s %6d %6d %8d %8d  %6.1f' % (bank, prog, name, zones, len(values),
+                                                            min(values), max(values), extra))
+        else:
+            print('%5d %3d  %-22s %6d %6d %8s %8s  %6s' % (bank, prog, name, zones, 0, '-', '-', '0.0'))
+    print()
+    print('presets: %d; con initialAttenuation declarada en alguna zona: %d' % (len(rows), affected))
+    return rows
+
+
 if __name__ == '__main__':
-    if len(sys.argv) >= 3 and sys.argv[2] == '--presets':
+    mode = sys.argv[2] if len(sys.argv) >= 3 else ''
+    if mode == '--presets':
         presets(sys.argv[1])
+    elif mode == '--generators':
+        generators(sys.argv[1])
+    elif mode == '--attenuation':
+        attenuation(sys.argv[1])
     else:
         main()

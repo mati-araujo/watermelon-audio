@@ -614,9 +614,11 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
         {8, 0, Obs::PitchHop, Cls::R, 3.0, 23.0, "scaleTune/rootKey: tune x scaleTuning; dueño: MINI afinacion fina"},
         {9, 0, Obs::LevelNotes, Cls::R, 0.5, 2.81, "corte del low-pass: dueño REQ-041"},
         {10, 0, Obs::LevelNotes, Cls::R, 2.0, 46.22, "resonancia: tsf esta a 46 dB en la Q mas alta; dueño REQ-041"},
-        // #11: el spec da el numero (2,00 dB por paso) y el motor da 0,50: hallazgo, con dueño.
-        {11, 0, Obs::StepOurs, Cls::R, 0.05, -0.50,
-         "initialAttenuation entra a 0,1 dB/dB (tsf.h:652); el spec-quirk es 0,4 = -2,00 dB/paso; dueño: MINI atenuacion"},
+        // #11: el spec da el numero ("exactly 2 dB" por paso de 5 dB declarados). Era R con 0,50
+        // hasta MINI-024 (tsf entraba a 0,1 dB/dB); con el factor 0,4 del spec-quirk da -2,00 y
+        // pasa a S. La referencia es el CONTROL: si deja de dar -2,00, cambio la referencia.
+        {11, 0, Obs::StepOurs, Cls::S, 0.1, -2.00,
+         "initialAttenuation a 0,4 dB por dB declarado (spec-quirk, tsf.h:652 desde MINI-024)"},
         {12, 0, Obs::RangeOurs, Cls::S, 0.5, 0.0, "atenuacion negativa: \"todos al mismo volumen\""},
         {13, 1, Obs::LevelNotes, Cls::F, 0.25, 0.0, "velocity -> atenuacion, default 96 dB concava"},
         {13, 2, Obs::LevelNotes, Cls::F, 0.25, 0.0, "144 dB concava"},
@@ -644,9 +646,15 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
          "modulador de rueda BORRADO: exige anular el default #10 por voz en el camino de la rueda, que produccion no tiene; dueño: REQ de superficie CC/rueda"},
         {20, 3, Obs::PitchHop, Cls::R, 10.0, 399.0, "rueda INVERTIDA: idem; dueño: REQ de superficie CC/rueda"},
         {21, 0, Obs::LevelNotes, Cls::F, 1.2, 0.0, "clase exclusiva: los dos cortan; 0,91 hoy por la cuantizacion del corte"},
-        {22, 1, Obs::Balance, Cls::R, 2.0, 36.82, "ley de paneo: sqrt en tsf (8,45 dB a -37,5 %) contra sin/cos (14,03); sin dueño aun"},
+        // #22 A/E: el observable pisa cada canal en -96 dB, y con pan duro el canal callado ESTA en
+        // el piso, asi que L - R lleva adentro el NIVEL del canal fuerte. MINI-024 lo mostro: el
+        // preset `panning` declara 150 cB y con el factor 0,4 estas dos filas bajaron 4,5 dB sin
+        // que la ley de paneo cambiara. Los "hoy" se re-declaran; el observable queda como deuda
+        // de quien tome la ley de paneo: medir el balance solo donde los DOS canales suenan.
+        {22, 1, Obs::Balance, Cls::R, 2.0, 32.32,
+         "ley de paneo: sqrt en tsf (8,45 dB a -37,5 %) contra sin/cos (14,03); observable contaminado por nivel; sin dueño aun"},
         {22, 3, Obs::Balance, Cls::R, 0.5, 0.94, "la misma ley sobre el sample estereo"},
-        {22, 5, Obs::Balance, Cls::R, 2.0, 31.72, "ley de paneo, -100..100 %"},
+        {22, 5, Obs::Balance, Cls::R, 2.0, 27.22, "ley de paneo, -100..100 %; observable contaminado por nivel (ver #22 A)"},
         {22, 6, Obs::Balance, Cls::R, 2.0, 48.73, "sobreescribir el default #6 por voz en CC10; dueño: REQ de superficie CC/rueda"},
         // #22 B/D: la RELACION CC10 <-> pan interno, en el motor solo. F sin codigo (3.1).
         {22, 2, Obs::BalRelation, Cls::F, 0.5, 0.0, "CC10 da lo mismo que el pan interno (B ≡ A), tono a tono"},
@@ -693,6 +701,13 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
                     EXPECT_GT(value, row.tol) << label << " S: el default #2 (SF2 2.04 §8.4.2) no filtra";
                     EXPECT_LT(m.rangeRef, 0.5) << label << " control: la referencia (que NO implementa el "
                                                << "default #2) dejo de ser plana — ¿cambio la referencia?";
+                } else if (row.obs == Obs::StepOurs) {
+                    // "exactamente N": N ± tol (D3), y la referencia como control de que el
+                    // numero del spec sigue siendo el que FluidSynth da.
+                    EXPECT_NEAR(value, row.today, row.tol)
+                        << label << " S: el paso entre tonos no es el del spec (" << row.today << ") — " << row.why;
+                    EXPECT_NEAR(m.stepRef, row.today, row.tol)
+                        << label << " control: la referencia dejo de dar los " << row.today << " dB por paso";
                 }
                 break;
             case Cls::R:
@@ -706,10 +721,6 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
     }
     std::printf("  filas: %d F · %d S · %d R = %d\n\n", f, s, r, f + s + r);
 
-    // El control del spec en #11: la referencia da los 2,00 dB por paso que el README
-    // exige, asi que el 0,50 del motor es del motor y no del instrumento.
-    const Window* w11 = findWindow(L.windows, 11, 0);
-    ASSERT_NE(w11, nullptr);
-    const Measured m11 = measureWindow(L.ours, L.A, L.B, *w11);
-    EXPECT_NEAR(m11.stepRef, -2.00, 0.1) << "#11 control: la referencia no da los 2 dB por paso del spec";
+    // El control del spec en #11 (la referencia da los 2,00 dB por paso) vive ahora en la
+    // rama S de la fila, junto con la afirmacion sobre el motor (MINI-024).
 }
