@@ -1,8 +1,8 @@
 # Cobertura C API vs JNI — WA-0.1
 
 **Requerimiento:** `docs/kmp/kmp_requirements.md` § 5, WA-0.1
-**Actualizado:** 2026-08-27 (recuento contra el árbol tras REQ-014, REQ-015, REQ-013 y
-REQ-017) · **Reproducible con:** `python3 scripts/c-api-gap.py`
+**Actualizado:** 2026-09-15 (recuento contra el árbol tras REQ-042: la perilla de la
+ambiencia suma 3 `wma_sf_*` y 3 entry points, cubiertos por match exacto) · **Reproducible con:** `python3 scripts/c-api-gap.py`
 
 > 🔴 **Este doc se actualiza A MANO con la salida del script, y por eso envejece.** Entre el
 > 19/08 y el 27/08 quedó ocho días stale y desfasado en trece entry points (284 → 297) y trece
@@ -63,13 +63,13 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 
 | Métrica | Valor |
 |---|---|
-| JNIEXPORT (entry points) | 297 |
-| Funciones `wma_*` | 273 |
-| Cubiertas (match exacto) | 211 |
-| **Gap total** | **86** |
+| JNIEXPORT (entry points) | 305 |
+| Funciones `wma_*` | 280 |
+| Cubiertas (match exacto) | 217 |
+| **Gap total** | **88** |
 | — USB, no se porta (D4) | 32 |
-| — **Gap portable** | **54** |
-| — con near-match (revisar) | 37 |
+| — **Gap portable** | **56** |
+| — con near-match (revisar) | 39 |
 | — **neto a implementar** | **~17** |
 
 ### Gap portable por categoría
@@ -79,11 +79,11 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 | Input / monitor | 12 |
 | Otros | 8 |
 | Engine / lifecycle | 8 |
+| Analysis | 7 |
 | Looper | 7 |
 | Voice / polyphony | 6 |
-| Analysis | 5 |
-| Benchmark / diagnostics | 4 |
 | Oscillator / synth | 4 |
+| Benchmark / diagnostics | 3 |
 | Effects | 1 |
 
 ---
@@ -127,6 +127,16 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 - `nativeStartEngineWithFade`
 - `nativeStopEngineWithFade`
 
+### Analysis (7)
+
+- `nativeGetEngineParameterNames` — near-match: `wma_engine_get_parameter_def` (0.60)
+- `nativeGetEngineParameterRange` — near-match: `wma_engine_get_parameter_def` (0.60)
+- `nativeGetOutputPeakLevel` — near-match: `wma_get_output_peak` (0.75)
+- `nativeGetOutputPeakLevelDb` — near-match: `wma_get_output_peak_db` (0.80)
+- `nativeGetOutputRmsLevel` — near-match: `wma_get_output_rms` (0.75)
+- `nativeGetOutputRmsLevelDb` — near-match: `wma_get_output_rms_db` (0.80)
+- `nativeSetMultipleEffectParameters` — near-match: `wma_effect_set_params_multi` (0.60)
+
 ### Looper (7)
 
 - `nativeLooperExportMixV2`
@@ -146,27 +156,18 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 - `nativeUpdateChordNotes`
 - `nativeUpdateMultiTouch` — near-match: `wma_voice_update_multi_touch` (0.75)
 
-### Analysis (5)
-
-- `nativeGetOutputPeakLevel` — near-match: `wma_get_output_peak` (0.75)
-- `nativeGetOutputPeakLevelDb` — near-match: `wma_get_output_peak_db` (0.80)
-- `nativeGetOutputRmsLevel` — near-match: `wma_get_output_rms` (0.75)
-- `nativeGetOutputRmsLevelDb` — near-match: `wma_get_output_rms_db` (0.80)
-- `nativeSetMultipleEffectParameters` — near-match: `wma_effect_set_params_multi` (0.60)
-
-### Benchmark / diagnostics (4)
-
-- `nativeDrainCapturedLogs`
-- `nativeGetAdaptiveBufferStats`
-- `nativeGetLogCaptureDropped`
-- `nativeSetLogCaptureEnabled`
-
 ### Oscillator / synth (4)
 
 - `nativeRegenerateArpPattern` — near-match: `wma_arp_regenerate` (0.67)
 - `nativeSetArpBaseFrequency` — near-match: `wma_arp_set_base_freq` (0.60)
 - `nativeSetFrequencyAndAmplitude` — near-match: `wma_set_frequency_amplitude` (0.75)
 - `nativeSetVocoderCarrierFrequency` — near-match: `wma_vocoder_set_carrier_freq` (0.60)
+
+### Benchmark / diagnostics (3)
+
+- `nativeDrainCapturedLogs`
+- `nativeGetAdaptiveBufferStats`
+- `nativeGetLogCaptureDropped` — near-match: `wma_log_capture_dropped` (0.75)
 
 ### Effects (1)
 
@@ -188,21 +189,21 @@ eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
 función JNI.
 
 ```
-WA-2.6 — JNI delegando: 256/297
+WA-2.6 — JNI delegando: 264/305
 ```
 
 | Categoría (heurística del script) | Delegan |
 |---|---|
 | Looper | 79/81 |
-| Otros | 36/38 |
+| Otros | 39/41 |
 | Input / monitor | 22/22 |
 | Oscillator / synth | 21/21 |
 | Voice / polyphony | 19/19 |
+| Analysis | 18/18 |
 | Effects | 16/16 |
 | Engine / lifecycle | 16/16 |
-| Analysis | 14/14 |
+| Metronome | 12/12 |
 | Mode transitions | 12/12 |
-| Metronome | 11/11 |
 | Benchmark / diagnostics | 6/7 |
 | Modulation | 3/3 |
 | Mixer / Regions | 1/1 |
