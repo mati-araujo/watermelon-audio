@@ -461,6 +461,7 @@ TEST(SoundFontNoteOnDestinations, AtFullVelocityADecreasingModulatorLeavesTheReg
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <set>
 #include <string>
 
@@ -502,6 +503,7 @@ TEST(SoundFontNoteOnDestinations, GeneralUserRegionsWhereTheVelocityToFilterWasI
 
     int regions = 0, dynamic = 0, inert = 0;
     std::set<int> presetsInert;
+    std::map<int, std::set<int>> amountsByPreset;   // para la nota de bump (WMA_LIST_PRESETS)
     const int presets = tsf_get_presetcount(f);
     for (int p = 0; p < presets; ++p) {
         const int n = tsf_ext_preset_region_count(f, p);
@@ -518,6 +520,7 @@ TEST(SoundFontNoteOnDestinations, GeneralUserRegionsWhereTheVelocityToFilterWasI
                 if (m.destOper == wma::sfmod::kDestInitialFilterFc &&
                     m.primarySource == wma::sfmod::NoteSource::Velocity && m.amount != 0.0f) {
                     velocityToFc = true;
+                    amountsByPreset[p].insert(static_cast<int>(m.amount));
                 }
             }
             if (velocityToFc) { ++inert; presetsInert.insert(p); }
@@ -527,9 +530,12 @@ TEST(SoundFontNoteOnDestinations, GeneralUserRegionsWhereTheVelocityToFilterWasI
                 "que S2 dejaba INERTE, en %d presets\n", regions, dynamic, inert,
                 static_cast<int>(presetsInert.size()));
     if (std::getenv("WMA_LIST_PRESETS")) {
-        for (int p : presetsInert)
-            std::printf("    %3d:%-3d %s\n", tsf_get_preset_bank(f, p), tsf_get_preset_number(f, p),
+        for (int p : presetsInert) {
+            std::printf("    %3d:%-3d %-20s amounts:", tsf_get_preset_bank(f, p), tsf_get_preset_number(f, p),
                         tsf_get_presetname(f, p));
+            for (int a : amountsByPreset[p]) std::printf(" %d", a);
+            std::printf("\n");
+        }
     }
     tsf_close(f);
     EXPECT_EQ(regions, 12311) << "las regiones de tsf cambiaron: ¿cambio el font?";
