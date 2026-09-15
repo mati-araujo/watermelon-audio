@@ -10,7 +10,11 @@ created: 2026-09-14
 **watermelon-audio → NoisyPad.** Sigue al aviso de v2.17.2 del mismo día (sin respuesta todavía;
 no hace falta contestar los dos por separado).
 
-> **Enviado el 2026-09-14.** Respuesta pendiente.
+> **Enviado el 2026-09-14. Contestado el 14/09 a la noche** (recibido el 15/09):
+> `carta-noisypad-2026-09-15-respuesta-v2.17.2-v2.17.3.md` — el bombo de concierto a la 36 bajó −780 c
+> al cent, los toms del Electronic +250/+350/+600/+700, nada fuera de la lista se movió (18 teclas de
+> kits + 2 melódicos, 0 c) y ninguno de la lista suena peor con número; I-3 contestada. Cotejado
+> contra el archivo al final de esa carta.
 
 ## 1 · Lo que cambia
 
