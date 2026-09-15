@@ -243,6 +243,11 @@ struct ExtraGenerator {
  * @param pitch los generadores de pitch y, opcionalmente, una senoide en lugar de la cuadrada
  *        (MINI-025). Ver `PitchGenerators`.
  */
+/**
+ * @param presetExtra generadores en la ZONA DE PRESET (REQ-040). SF2 §8.5: el preset SUMA sobre el
+ *        instrumento, y un test que afirme esa suma necesita un font que la declare. Van antes
+ *        de `instrument` (§7.3: el generador `instrument` cierra la zona).
+ */
 inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 22050,
                                                 bool looping = false,
                                                 int keyRangeLo = -1,
@@ -250,7 +255,8 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
                                                 const sf2::ModulatorPlacement& mods = {},
                                                 int attenuationCentibels = 0,
                                                 const sf2::PitchGenerators& pitch = {},
-                                                const std::vector<sf2::ExtraGenerator>& extra = {}) {
+                                                const std::vector<sf2::ExtraGenerator>& extra = {},
+                                                const std::vector<sf2::ExtraGenerator>& presetExtra = {}) {
     using namespace sf2;
 
     // ---- sdta: 64 samples de 16 bits. tsf pide >= un short; 64 deja lugar a
@@ -327,7 +333,9 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
         put16(pbag, 0); put16(pbag, 0);              // zona GLOBAL: sin generadores, mods desde 0
     }
     put16(pbag, 0); put16(pbag, nPresetGlobal);      // zona: genNdx=0, sus mods empiezan tras los globales
-    put16(pbag, 1); put16(pbag, static_cast<uint16_t>(nPresetGlobal + nPresetZone));  // terminal
+    // terminal: la zona tiene `presetExtra` generadores mas el `instrument`
+    put16(pbag, static_cast<uint16_t>(presetExtra.size() + 1));
+    put16(pbag, static_cast<uint16_t>(nPresetGlobal + nPresetZone));
 
     std::vector<uint8_t> pmod;
     for (const auto& m : mods.presetGlobal) putModulator(pmod, m);
@@ -335,7 +343,8 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
     for (int i = 0; i < 5; ++i) put16(pmod, 0);  // terminal (10 bytes)
 
     std::vector<uint8_t> pgen;
-    put16(pgen, kGenInstrument); put16(pgen, 0);  // -> instrumento 0
+    for (const ExtraGenerator& g : presetExtra) { put16(pgen, g.oper); put16(pgen, static_cast<uint16_t>(g.amount)); }
+    put16(pgen, kGenInstrument); put16(pgen, 0);  // -> instrumento 0 (cierra la zona, §7.3)
     put16(pgen, 0); put16(pgen, 0);               // terminal
 
     std::vector<uint8_t> inst;

@@ -12,7 +12,8 @@
 # Ademas: un render se REGENERA y una grabacion publicada no.
 #
 # 🔴 `-R 0 -C 0`: reverb y chorus apagados. Es la misma receta que
-# `render-corpus.sh` usa por el mismo motivo.
+# `render-corpus.sh` usa por el mismo motivo. Desde REQ-040 se produce ADEMAS una
+# segunda referencia CON efectos (abajo), para las pruebas #17/#18.
 #
 # 🔴 `-g 1`: ganancia 1,0, no el 0,2 que FluidSynth trae por default. El spec-test
 # tiene pruebas de NIVEL (#11 atenuacion, #12 atenuacion negativa) y una ganancia
@@ -48,3 +49,25 @@ fluidsynth -ni -R 0 -C 0 -g 1 -r 44100 -F "$OUT" \
 
 [ -s "$OUT" ] || { echo "fluidsynth no produjo audio" >&2; exit 1; }
 printf 'referencia: %s (%s bytes)\n' "$OUT" "$(wc -c < "$OUT" | tr -d ' ')"
+
+# --- REQ-040: la SEGUNDA referencia, con efectos ------------------------------
+#
+# `-R 1 -C 1` con los parametros por DEFAULT de FluidSynth 2.6.0 —reverb: room 0,2 ·
+# damp 0 · width 0,5 · level 0,9; chorus: 3 voces · level 2,0 · 0,3 Hz · 8 ms de
+# profundidad, senoidal— que son EXACTAMENTE los que el motor fija en sus dos
+# unidades internas (SoundFontReverb / SoundFontChorus). Es la referencia que juzga
+# las pruebas #17 (reverb send) y #18 (chorus send); las otras 22 se siguen juzgando
+# contra la seca. Dos referencias, cada prueba declara cual la juzga.
+#
+# 🔴 Los parametros van EXPLICITOS aunque sean los default: si upstream cambia un
+# default, esta receta sigue produciendo la misma referencia.
+OUT_FX="$DIR/reference-fluidsynth-${FLUIDSYNTH_VERSION}-fx.wav"
+fluidsynth -ni -R 1 -C 1 -g 1 -r 44100 \
+    -o synth.reverb.room-size=0.2 -o synth.reverb.damp=0.0 \
+    -o synth.reverb.width=0.5 -o synth.reverb.level=0.9 \
+    -o synth.chorus.nr=3 -o synth.chorus.level=2.0 \
+    -o synth.chorus.speed=0.3 -o synth.chorus.depth=8.0 \
+    -F "$OUT_FX" "$DIR/sf_spec_test.sf2" "$DIR/sf_spec_test.mid" >/dev/null 2>&1
+
+[ -s "$OUT_FX" ] || { echo "fluidsynth no produjo la referencia con efectos" >&2; exit 1; }
+printf 'referencia con efectos: %s (%s bytes)\n' "$OUT_FX" "$(wc -c < "$OUT_FX" | tr -d ' ')"
