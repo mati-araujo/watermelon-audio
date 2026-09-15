@@ -296,6 +296,20 @@ TEST(SoundFontNoteOnDestinations, VelocityToAttackVolEnvReachesMinusThreeDecibel
     }
 }
 
+/**
+ * El borde: un ataque que tsf pinneo en 0 s (generador -12000 tc, "instantaneo") mas 1900 tc
+ * de modulador tiene que dar 2^(-10100/1200) = 2,9 ms, que es lo que el spec da para
+ * -12000 + 1900 — y NO quedarse en 0 (cero por cualquier factor es cero). Es el caso de un
+ * font que declara el ataque minimo y deja que la velocity lo estire; la ext parte de
+ * 2^(-12000/1200) cuando el segmento esta pinneado y el desplazamiento es positivo.
+ */
+TEST(SoundFontNoteOnDestinations, VelocityToAttackVolEnvOnAnInstantAttackStartsFromOneMillisecond) {
+    const auto gens = volEnv(kInstant);
+    expectModulatorEqualsBakedGenerator("attackVolEnv (1 ms)", modulated(gens, velocityTo(kGenAttackVolEnv, 2540)),
+                                        baked(gens, kGenAttackVolEnv, velocityContribution(2540, 32)),
+                                        plain(gens), 0.05, -1.0, 32);
+}
+
 // ---------------------------------------------------------------------------------------
 // #36 decayVolEnv y #38 releaseVolEnv — los de los tambores de GeneralUser (-3986 tc)
 // ---------------------------------------------------------------------------------------
