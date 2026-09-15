@@ -11,7 +11,12 @@ created: 2026-09-15
 respuesta todavía; no hace falta contestar los tres por separado). Este es el que **más se oye** de
 los cuatro: léanlo antes de subir el bump.
 
-> **Enviado el 2026-09-15.** Respuesta pendiente.
+> **Enviado el 2026-09-15. Contestado el 15/09** (carta del mediodía + corrección de la tarde):
+> `carta-noisypad-2026-09-15-respuesta-v2.17.4.md`. Fix 1 ✅ en cinco presets con t40/t60 que cierran
+> con los generadores efectivos de las cuatro capas. Fix 2: dijeron que en `8:63 Synth Brass 4` el
+> filtro abre "desde los 5 ms" donde 2.17.3 abría a 54 ms, y que FluidSynth sería lineal; **medido
+> contra FluidSynth 2.6.0 sobre la zona exacta, FluidSynth abre igual que 2.17.4** (convexa en el
+> filtro también, `fluid_rvoice.c:369-370,447`). Sin MINI. Cotejado al final de esa carta.
 
 ## 1 · Lo que cambia
 

@@ -12,7 +12,9 @@ created: 2026-09-15
 última es **v2.17.4** (las envolventes, aviso del 15/09), que su carta no alcanzó a ver y es la que
 **más se oye** de la serie — cuando la suban, ese aviso trae su propio tambor con nombre y tecla.
 
-> **Redactada el 2026-09-15, sin enviar.**
+> **Redactada el 2026-09-15. NO se envía por separado: absorbida en el envío de v2.18.0**
+> (`respuesta-noisypad-2026-09-15-v2.18.0.md`, §0), que además contesta la carta de 2.17.4 que llegó
+> después de redactar esto. Queda como el cotejo largo de los tres matices.
 
 ## 1 · Lo que cierra, y cómo lo cotejamos
 
