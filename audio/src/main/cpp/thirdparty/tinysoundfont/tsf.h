@@ -476,6 +476,9 @@ struct tsf_channels
 
 static double tsf_timecents2Secsd(double timecents) { return TSF_POW(2.0, timecents / 1200.0); }
 static float tsf_timecents2Secsf(float timecents) { return TSF_POWF(2.0f, timecents / 1200.0f); }
+// watermelon-audio (MINI-026): rango completo de la envolvente de volumen, en ln de ganancia.
+// 100 dB = SF2 §8.1.2 #36/#38; ln(10^(-100/20)) = -5 ln 10 = -11.512925.
+#define TSF_ENVELOPE_FULL_RANGE_LN (-11.512925f)
 static float tsf_cents2Hertz(float cents) { return 8.176f * TSF_POWF(2.0f, cents / 1200.0f); }
 static float tsf_decibelsToGain(float db) { return (db > -100.f ? TSF_POWF(10.0f, db * 0.05f) : 0); }
 static float tsf_gainToDecibels(float gain) { return (gain <= .00001f ? -100.f : (float)(20.0 * TSF_LOG10(gain))); }
@@ -1034,11 +1037,11 @@ static void tsf_voice_envelope_nextsegment(struct tsf_voice_envelope* e, short a
 			e->samplesUntilNextSegment = (int)(e->parameters.attack * outSampleRate);
 			if (e->samplesUntilNextSegment > 0)
 			{
-				if (!e->isAmpEnv)
-				{
-					//mod env attack duration scales with velocity (velocity of 1 is full duration, max velocity is 0.125 times duration)
-					e->samplesUntilNextSegment = (int)(e->parameters.attack * ((145 - e->midiVelocity) / 144.0f) * outSampleRate);
-				}
+				// watermelon-audio (MINI-026): el ataque del mod env NO escala por velocity. El
+				// `attack * (145 - vel) / 144` original era un SFZ-ismo (a v=127 duraba 1/8 del
+				// generador): SF2 §8.1.2 #26 define attackModEnv como el tiempo hasta el pico, y
+				// FluidSynth lo respeta. Medido en el spec-test #2: tsf llegaba a +1200 c en
+				// 0,125 s donde la referencia tarda 1 s.
 				e->segment = TSF_SEGMENT_ATTACK;
 				e->segmentIsExponential = TSF_FALSE;
 				e->level = 0.0f;
@@ -1065,17 +1068,23 @@ static void tsf_voice_envelope_nextsegment(struct tsf_voice_envelope* e, short a
 				e->level = 1.0f;
 				if (e->isAmpEnv)
 				{
-					// I don't truly understand this; just following what LinuxSampler does.
-					float mysterySlope = -9.226f / e->samplesUntilNextSegment;
+					// watermelon-audio (MINI-026): 100 dB en el tiempo declarado, no 80,13.
+					// El -9.226 original venia de LinuxSampler (SFZ) y hacia que decay y release
+					// recorrieran 20*log10(e^-9.226) = 80,13 dB en el tiempo del generador. SF2
+					// §8.1.2 #36/#38 fija el rango en 100 dB ("if the sustain level were -100dB,
+					// the Volume Envelope Decay Time would be the time spent in decay phase";
+					// "until 100dB attenuation were reached"). Medido en el spec-test: la
+					// pendiente del decay de #3 salia 2,46 dB/0,25 s donde FluidSynth da 2,96
+					// (80/96 = 0,833, al decimo) y la release de #1 a 80,2 dB/s. FluidSynth usa
+					// 96 (su FLUID_PEAK_ATTENUATION); el spec dice 100 y eso es lo que va.
+					// TSF_ENVELOPE_FULL_RANGE_LN = ln(10^(-100/20)) = -5 ln 10.
+					float mysterySlope = TSF_ENVELOPE_FULL_RANGE_LN / e->samplesUntilNextSegment;
 					e->slope = TSF_EXPF(mysterySlope);
 					e->segmentIsExponential = TSF_TRUE;
 					if (e->parameters.sustain > 0.0f)
 					{
-						// Again, this is following LinuxSampler's example, which is similar to
-						// SF2-style decay, where "decay" specifies the time it would take to
-						// get to zero, not to the sustain level.  The SFZ spec is not that
-						// specific about what "decay" means, so perhaps it's really supposed
-						// to specify the time to reach the sustain level.
+						// SF2-style decay: "decay" es el tiempo que tardaria en llegar a cero
+						// (-100 dB), no al sustain; el decay real dura hasta alcanzar el sustain.
 						e->samplesUntilNextSegment = (int)(TSF_LOG(e->parameters.sustain) / mysterySlope);
 					}
 				}
@@ -1100,14 +1109,23 @@ static void tsf_voice_envelope_nextsegment(struct tsf_voice_envelope* e, short a
 			e->samplesUntilNextSegment = tsf_voice_envelope_release_samples(e, outSampleRate);
 			if (e->isAmpEnv)
 			{
-				// I don't truly understand this; just following what LinuxSampler does.
-				float mysterySlope = -9.226f / e->samplesUntilNextSegment;
+				// watermelon-audio (MINI-026): la release tambien recorre 100 dB en el tiempo
+				// declarado, desde el nivel actual (spec #38). Ver el decay, mas arriba.
+				float mysterySlope = TSF_ENVELOPE_FULL_RANGE_LN / e->samplesUntilNextSegment;
 				e->slope = TSF_EXPF(mysterySlope);
 				e->segmentIsExponential = TSF_TRUE;
 			}
 			else
 			{
-				e->slope = -e->level / e->samplesUntilNextSegment;
+				// watermelon-audio (MINI-026): la release del mod env recorre el 100 % del
+				// rango en el tiempo declarado (spec #30: "the time for a 100% change in the
+				// Modulation Envelope value during release phase"), asi que desde el sustain al
+				// 50 % tarda la mitad. El original iba a `-level / T`: desde cualquier nivel
+				// tardaba T entero. Medido en #2: +220 c a 0,5 s del note-off donde va 0.
+				float fullRangeSamples = (float)e->samplesUntilNextSegment;
+				e->slope = -1.0f / fullRangeSamples;
+				e->samplesUntilNextSegment = (int)(e->level * fullRangeSamples);
+				if (e->samplesUntilNextSegment < 1) e->samplesUntilNextSegment = 1;
 				e->segmentIsExponential = TSF_FALSE;
 			}
 			return;
@@ -1136,6 +1154,23 @@ static void tsf_voice_envelope_setup(struct tsf_voice_envelope* e, struct tsf_en
 	e->midiVelocity = midiVelocity;
 	e->isAmpEnv = isAmpEnv;
 	tsf_voice_envelope_nextsegment(e, TSF_SEGMENT_NONE, outSampleRate);
+}
+
+// watermelon-audio (MINI-026): el valor del mod env que consumen pitch y filtro. Durante el
+// ataque es CONVEXO sobre el nivel lineal: SF2 §8.1.2 #26 ("the attack is convex") y §9.1.7
+// ("rises in a convex curve to a value of one"). El spec no da la formula; la referencia
+// (FluidSynth 2.6.0, fluid_rvoice.c: `fluid_convex(127 * modenv)`) es
+//     1 + (40/96) * log10(x)
+// —la curva de sus controladores convexos— y el spec-test #2 la mide: 48 % a 50 ms, 60 % a
+// 100 ms, 88 % a 500 ms de un ataque de 1 s (0,458 / 0,583 / 0,875 por la formula). Fuera del
+// ataque el valor es el nivel, lineal, como dice el spec para decay y release.
+static float tsf_voice_envelope_modvalue(const struct tsf_voice_envelope* e)
+{
+	float x = e->level;
+	if (e->segment != TSF_SEGMENT_ATTACK) return x;
+	if (x <= 0.0f) return 0.0f;
+	if (x >= 1.0f) return 1.0f;
+	return 1.0f + (40.0f / 96.0f) * (TSF_LOG(x) / 2.302585093f);
 }
 
 static void tsf_voice_envelope_process(struct tsf_voice_envelope* e, int numSamples, float outSampleRate)
@@ -1276,14 +1311,14 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 
 		if (dynamicLowpass)
 		{
-			float fres = tmpInitialFilterFc + v->modlfo.level * tmpModLfoToFilterFc + v->modenv.level * tmpModEnvToFilterFc;
+			float fres = tmpInitialFilterFc + v->modlfo.level * tmpModLfoToFilterFc + tsf_voice_envelope_modvalue(&v->modenv) * tmpModEnvToFilterFc;
 			float lowpassFc = (fres <= 13500 ? tsf_cents2Hertz(fres) / tmpSampleRate : 1.0f);
 			tmpLowpass.active = (lowpassFc < 0.499f);
 			if (tmpLowpass.active) tsf_voice_lowpass_setup(&tmpLowpass, lowpassFc);
 		}
 
 		if (dynamicPitchRatio)
-			pitchRatio = tsf_timecents2Secsd(v->pitchInputTimecents + (v->modlfo.level * tmpModLfoToPitch + v->viblfo.level * tmpVibLfoToPitch + v->modenv.level * tmpModEnvToPitch)) * v->pitchOutputFactor;
+			pitchRatio = tsf_timecents2Secsd(v->pitchInputTimecents + (v->modlfo.level * tmpModLfoToPitch + v->viblfo.level * tmpVibLfoToPitch + tsf_voice_envelope_modvalue(&v->modenv) * tmpModEnvToPitch)) * v->pitchOutputFactor;
 
 		if (dynamicGain)
 			noteGain = tsf_decibelsToGain(v->noteGainDB + (v->modlfo.level * tmpModLfoToVolume));
