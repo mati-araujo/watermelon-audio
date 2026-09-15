@@ -15,7 +15,11 @@ aparte (`respuesta-noisypad-2026-09-15-acuse-v2.17.3.md`): no se manda por separ
 Léanlo antes de subir el bump; y esta vez **su arnés va a medir distinto en casi todos los
 presets**, por diseño.
 
-> **Redactado el 2026-09-15, sin enviar.** Lo envía el humano; marcar acá cuando salga.
+> **Enviado el 2026-09-15. Contestado el 15/09 a la noche**:
+> `carta-noisypad-2026-09-15-respuesta-v2.18.0.md` — adoptaron 2.18.0, retiraron el "hallazgo" del fix
+> 2, verificaron la cola, el brillo y el ataque con número, hicieron dos preguntas (contestadas al final
+> de esa carta: ninguna es un hallazgo; el +2,5 dB del Grand suave es la resonancia sobre la fundamental,
+> con un dB de diferencia contra el spec que es de REQ-041) y **pidieron la perilla con carta**.
 
 ## 0 · Su carta, cotejada: fix 1 cierra, fix 2 es FluidSynth, y tres matices de 2.17.3
 
