@@ -9,7 +9,10 @@ created: 2026-09-14
 
 **watermelon-audio → NoisyPad.** Sigue a su respuesta del 14/09 (`carta-noisypad-2026-09-14-respuesta-v2.17.1.md`).
 
-> **Enviado el 2026-09-14.** Respuesta pendiente.
+> **Enviado el 2026-09-14. Contestado el 14/09 a la noche, junto con el de v2.17.3** (recibido el 15/09):
+> `carta-noisypad-2026-09-15-respuesta-v2.17.2-v2.17.3.md` — 2.17.2 y 2.17.3 adoptadas en un solo bump y
+> medidas en el dispositivo: Saw Lead +26 % de centroide en el golpe suave, 0 en el fuerte y en el XY,
+> nivel igual; cotejado contra el archivo al final de esa carta.
 
 Corto, porque es lo que pidieron en su §3 y ya lo tienen medido.
 
