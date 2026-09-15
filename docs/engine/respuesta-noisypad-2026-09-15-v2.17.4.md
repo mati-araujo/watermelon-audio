@@ -11,7 +11,7 @@ created: 2026-09-15
 respuesta todavía; no hace falta contestar los tres por separado). Este es el que **más se oye** de
 los cuatro: léanlo antes de subir el bump.
 
-> **Redactado el 2026-09-15.** Pendiente de envío.
+> **Enviado el 2026-09-15.** Respuesta pendiente.
 
 ## 1 · Lo que cambia
 
