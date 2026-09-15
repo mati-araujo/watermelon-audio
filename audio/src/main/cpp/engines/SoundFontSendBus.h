@@ -10,7 +10,8 @@
  * `channelNoteOnWithModulators` es una función libre.
  *
  * Lo que hace, por bloque (decisiones 3, 4 y 5 de la amplificación del 2026-09-15):
- *  - escala los dos buses por la costura interna (`setSendScale`, 0..1, default 1);
+ *  - escala los dos buses por la perilla de la ambiencia (`setSendScale`, 0..1 por bus, default 1;
+ *    publica desde REQ-042 como `wma_sf_set_ambience`);
  *  - la COMPUERTA, en segundos: con la entrada de los dos buses más de `kTailSeconds` por
  *    debajo de `kSilence` (−90 dBFS) las unidades se saltean y se limpian, y lo que sale es
  *    cero exacto; el primer bloque con send > 0 las reengancha ahí mismo;
@@ -23,8 +24,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 
+#include "../platform/Logger.h"
 #include "SoundFontChorus.h"
 #include "SoundFontReverb.h"
 
@@ -44,11 +47,39 @@ public:
         mActive = false;
     }
 
-    /// Cualquier thread: la costura de la decisión 3 (0..1 cada uno). El render la lee por bloque.
+    /**
+     * Cualquier thread: la perilla de la ambiencia (REQ-042 sobre la costura de REQ-040), 0..1 por
+     * bus, lineal sobre la amplitud del send. El render la lee por bloque.
+     *
+     * Fuera de rango satura; **NaN deja ese bus como estaba y avisa** (AC-042.2). No es defensa
+     * gratuita: `std::clamp(NaN, 0, 1)` devuelve NaN, y un NaN en el atomico multiplicaria el
+     * bus entero en el thread de audio. Se decide POR BUS: el valor valido del otro entra igual.
+     *
+     * NADA la resetea —ni `prepare()`, ni `clearSendEffects()`, ni el cambio de font—: es un
+     * ajuste del instrumento, no del font (AC-042.4). El unico escritor es este metodo.
+     *
+     * NO RT-safe por el aviso (`wma::logMessage`): la llama el thread de control.
+     */
     void setSendScale(float reverb, float chorus) noexcept {
-        mScaleReverb.store(std::clamp(reverb, 0.0f, 1.0f), std::memory_order_relaxed);
-        mScaleChorus.store(std::clamp(chorus, 0.0f, 1.0f), std::memory_order_relaxed);
+        if (std::isnan(reverb)) {
+            wma::logMessage(wma::LogLevel::WARN, "SF.Ambience", "ambiencia: reverb NaN ignorado (queda %.3f)",
+                            mScaleReverb.load(std::memory_order_relaxed));
+        } else {
+            mScaleReverb.store(std::clamp(reverb, 0.0f, 1.0f), std::memory_order_relaxed);
+        }
+        if (std::isnan(chorus)) {
+            wma::logMessage(wma::LogLevel::WARN, "SF.Ambience", "ambiencia: chorus NaN ignorado (queda %.3f)",
+                            mScaleChorus.load(std::memory_order_relaxed));
+        } else {
+            mScaleChorus.store(std::clamp(chorus, 0.0f, 1.0f), std::memory_order_relaxed);
+        }
     }
+
+    /// Cualquier thread: lo que el render va a aplicar sobre el bus de reverb en el proximo bloque.
+    float sendScaleReverb() const noexcept { return mScaleReverb.load(std::memory_order_relaxed); }
+
+    /// Cualquier thread: idem para el bus de chorus.
+    float sendScaleChorus() const noexcept { return mScaleChorus.load(std::memory_order_relaxed); }
 
     /**
      * Thread de AUDIO. `reverbBus` / `chorusBus` son los buses MONO que `tsf_render_float_sends`

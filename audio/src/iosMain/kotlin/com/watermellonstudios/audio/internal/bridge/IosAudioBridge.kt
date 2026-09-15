@@ -1508,6 +1508,12 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun sfSetTouchExpression(touchId: Int, expression: Float) =
         wma_sf_set_touch_expression(engine, touchId, expression)
 
+    override fun sfSetAmbience(reverb: Float, chorus: Float) = wma_sf_set_ambience(engine, reverb, chorus)
+
+    override fun sfGetAmbienceReverb(): Float = wma_sf_get_ambience_reverb(engine)
+
+    override fun sfGetAmbienceChorus(): Float = wma_sf_get_ambience_chorus(engine)
+
     // ==================== LOG CAPTURE ====================
 
     override fun setLogCaptureEnabled(enabled: Boolean) = wma_log_capture_set_enabled(enabled)

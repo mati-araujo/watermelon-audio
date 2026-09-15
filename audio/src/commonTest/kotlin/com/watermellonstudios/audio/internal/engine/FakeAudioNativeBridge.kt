@@ -265,6 +265,9 @@ internal class FakeAudioNativeBridge(
     override fun sfNoteOffAll() { notModeled("sfNoteOffAll") }
     override fun sfNoteOffAllExcept(keepTouchId: Int) { notModeled("sfNoteOffAllExcept") }
     override fun sfSetTouchExpression(touchId: Int, expression: Float) { notModeled("sfSetTouchExpression") }
+    override fun sfSetAmbience(reverb: Float, chorus: Float) { notModeled("sfSetAmbience") }
+    override fun sfGetAmbienceReverb(): Float = notModeled("sfGetAmbienceReverb")
+    override fun sfGetAmbienceChorus(): Float = notModeled("sfGetAmbienceChorus")
     override fun looperSetEnabled(enabled: Boolean) { notModeled("looperSetEnabled") }
     override fun looperPause() { notModeled("looperPause") }
     override fun looperResume() { notModeled("looperResume") }

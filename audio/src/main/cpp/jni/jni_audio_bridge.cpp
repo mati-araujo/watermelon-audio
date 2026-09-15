@@ -518,6 +518,30 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfSetT
     wma_sf_set_touch_expression(g_wmaEngine, touchId, expression);
 }
 
+// REQ-042 — la perilla de la ambiencia del font. Dos atomicos del otro lado: sin mutex de
+// categoria, igual que las demas del grupo sf. NaN y fuera de rango los resuelve la C API.
+
+JNIEXPORT void JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfSetAmbience(
+    JNIEnv* env, jobject thiz, jfloat reverb, jfloat chorus) {
+    if (!ensureEngine()) return;
+    wma_sf_set_ambience(g_wmaEngine, reverb, chorus);
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfGetAmbienceReverb(
+    JNIEnv* env, jobject thiz) {
+    if (!ensureEngine()) return 1.0f;
+    return wma_sf_get_ambience_reverb(g_wmaEngine);
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSfGetAmbienceChorus(
+    JNIEnv* env, jobject thiz) {
+    if (!ensureEngine()) return 1.0f;
+    return wma_sf_get_ambience_chorus(g_wmaEngine);
+}
+
 // ========== VOICE FILTER (Phase 6) ==========
 
 JNIEXPORT void JNICALL
