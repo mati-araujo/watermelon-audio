@@ -224,9 +224,14 @@ std::vector<float> renderSawLead(const std::vector<unsigned char>& bytes, int ve
                     static_cast<float>(fileCutoffAmount) * (1.0f - velocity / 127.0f));
         }
     }
+    // 1 s estereo entrelazado: kGuRate frames = kGuRate * 2 floats. El paso es en FLOATS (512
+    // frames = 1024 floats); la version anterior avanzaba 512 floats y renderizaba 512 frames, o sea
+    // que la ultima llamada escribia 512 floats mas alla del vector (ASan, gate local del
+    // 2026-09-15; el CI no lo veia porque sin GeneralUser este test sale SKIPPED).
+    constexpr int kStep = 512;
     std::vector<float> out(static_cast<size_t>(kGuRate) * 2, 0.0f);
-    for (int done = 0; done < static_cast<int>(out.size()); done += 512) {
-        tsf_render_float(f, out.data() + done, 512, 0);
+    for (size_t done = 0; done + static_cast<size_t>(kStep) * 2 <= out.size(); done += static_cast<size_t>(kStep) * 2) {
+        tsf_render_float(f, out.data() + done, kStep, 0);
     }
     tsf_close(f);
     return out;
