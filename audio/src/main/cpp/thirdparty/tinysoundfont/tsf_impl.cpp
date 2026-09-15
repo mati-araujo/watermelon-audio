@@ -64,6 +64,24 @@ extern "C" int tsf_get_preset_key_range(const tsf* f, int i, int* out_lo, int* o
     return 1;
 }
 
+// ---- MINI-027: los generadores de filtro de una region (medicion, thread de control) --
+extern "C" int tsf_ext_preset_region_count(const tsf* f, int presetIndex) {
+    if (!f || presetIndex < 0 || presetIndex >= f->presetNum) return 0;
+    return f->presets[presetIndex].regionNum;
+}
+
+extern "C" int tsf_ext_region_filter(const tsf* f, int presetIndex, int regionIndex, int* initialFilterFc,
+                                     int* modEnvToFilterFc, int* modLfoToFilterFc) {
+    if (!f || presetIndex < 0 || presetIndex >= f->presetNum) return 0;
+    const struct tsf_preset& p = f->presets[presetIndex];
+    if (!p.regions || regionIndex < 0 || regionIndex >= p.regionNum) return 0;
+    const struct tsf_region& r = p.regions[regionIndex];
+    if (initialFilterFc) *initialFilterFc = r.initialFilterFc;
+    if (modEnvToFilterFc) *modEnvToFilterFc = r.modEnvToFilterFc;
+    if (modLfoToFilterFc) *modLfoToFilterFc = r.modLfoToFilterFc;
+    return 1;
+}
+
 // ---- REQ-039 S2: las voces que un note-on acaba de arrancar --------------------
 //
 // tsf no guarda "las voces de la ultima llamada": las identifica el `playIndex`,
@@ -101,14 +119,28 @@ extern "C" void tsf_ext_voice_replace_velocity_gain(tsf* f, int voiceIndex, floa
     v.noteGainDB += tsf_gainToDecibels(1.0f / vel) - attenuationDB;
 }
 
-extern "C" void tsf_ext_voice_set_filter_cutoff(tsf* f, int voiceIndex, float cutoffCents) {
-    if (!f || !f->voices || voiceIndex < 0 || voiceIndex >= f->voiceNum) return;
-    struct tsf_voice& v = f->voices[voiceIndex];
-    // Misma formula que el "Setup lowpass filter" de tsf_note_on, con el corte
-    // modulado en lugar de region->initialFilterFc. QInv no cambia: el Q no se modula.
+namespace {
+
+// Misma formula que el "Setup lowpass filter" de tsf_note_on, sobre los valores que la
+// VOZ tiene (MINI-027: el corte es por voz y el render lo lee de ahi).
+void setupVoiceLowpass(tsf* f, struct tsf_voice& v) {
     const float lowpassFc =
-        (cutoffCents <= 13500.0f ? tsf_cents2Hertz(cutoffCents) / f->outSampleRate : 1.0f);
+        (v.initialFilterFc <= 13500.0f ? tsf_cents2Hertz(v.initialFilterFc) / f->outSampleRate : 1.0f);
     v.lowpass.z1 = v.lowpass.z2 = 0;
     v.lowpass.active = (lowpassFc < 0.499f);
     if (v.lowpass.active) tsf_voice_lowpass_setup(&v.lowpass, lowpassFc);
+}
+
+struct tsf_voice* voiceAt(tsf* f, int voiceIndex) {
+    if (!f || !f->voices || voiceIndex < 0 || voiceIndex >= f->voiceNum) return nullptr;
+    return &f->voices[voiceIndex];
+}
+
+}  // namespace
+
+extern "C" void tsf_ext_voice_set_filter_cutoff(tsf* f, int voiceIndex, float cutoffCents) {
+    struct tsf_voice* v = voiceAt(f, voiceIndex);
+    if (!v) return;
+    v->initialFilterFc = cutoffCents;
+    setupVoiceLowpass(f, *v);
 }

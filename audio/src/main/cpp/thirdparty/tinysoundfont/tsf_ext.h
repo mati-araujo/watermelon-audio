@@ -34,6 +34,16 @@ int tsf_get_preset_number(const tsf* f, int preset_index);
 // already live for the very same reason.
 int tsf_get_preset_key_range(const tsf* f, int preset_index, int* out_lo, int* out_hi);
 
+// ---- MINI-027: los generadores de filtro de una region, para MEDIR --------------
+//
+// Cuantas regiones del font que se shippea tienen filtro dinamico (mod env o mod LFO
+// al corte) es el numero que dice cuanto pesaba el limite de S2, y un numero que se
+// afirma se mide del arbol, no se escribe (REQ-021). Thread de control, solo lectura.
+// Devuelve 1 y escribe los tres, o 0 sin tocar nada si el preset o la region no existen.
+int tsf_ext_preset_region_count(const tsf* f, int presetIndex);
+int tsf_ext_region_filter(const tsf* f, int presetIndex, int regionIndex, int* initialFilterFc,
+                          int* modEnvToFilterFc, int* modLfoToFilterFc);
+
 // ---- REQ-039 S2: las voces que un note-on acaba de arrancar --------------------
 //
 // `tsf_note_on` calcula por voz la ganancia de velocity (`tsf.h:1619`, cableada
@@ -74,10 +84,13 @@ void tsf_ext_voice_replace_velocity_gain(tsf* f, int voiceIndex, float vel, floa
 // Re-setupea el low-pass de la voz con un corte en cents absolutos, reproduciendo
 // el setup de note_on (13500 = abierto). RT-safe.
 //
-// LIMITE DECLARADO: si la region tiene `modLfoToFilterFc` o `modEnvToFilterFc`,
-// `tsf_voice_render` recalcula el corte cada bloque desde `region->initialFilterFc`
-// y pisa esto. Modular ESE caso por voz exige un campo que tsf_voice no tiene, o
-// sea un parche a tsf.h — fuera de esta etapa.
+// Hasta MINI-027 esto tenia un LIMITE DECLARADO: si la region tenia `modLfoToFilterFc`
+// o `modEnvToFilterFc`, `tsf_voice_render` recalculaba el corte cada bloque desde
+// `region->initialFilterFc` y pisaba esto en el primer bloque. Medido sobre GeneralUser
+// (2026-09-15): 3380 de 12311 regiones, en 111 presets, con el velocity -> filtro
+// INERTE (166 zonas de instrumento en 24 instrumentos). Desde MINI-027 el corte es un
+// campo POR VOZ (`tsf_voice::initialFilterFc`), esto lo escribe y el render lo lee:
+// sobrevive al bloque dinamico.
 void tsf_ext_voice_set_filter_cutoff(tsf* f, int voiceIndex, float cutoffCents);
 
 #ifdef __cplusplus

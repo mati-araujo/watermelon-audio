@@ -459,6 +459,14 @@ struct tsf_voice
 	struct tsf_voice_envelope ampenv, modenv;
 	struct tsf_voice_lowpass lowpass;
 	struct tsf_voice_lfo modlfo, viblfo;
+	// watermelon-audio (MINI-027): el corte del filtro y cuanto mod env entra a el son POR VOZ.
+	// Hasta aca tsf_voice_render los leia de `region->` en cada bloque cuando la region tenia
+	// envolvente o LFO al filtro (`dynamicLowpass`), y pisaba en el primer bloque lo que un
+	// modulador de velocity -> initialFilterFc (SF2 §8.4, defaults #2) habia escrito en la voz:
+	// medido sobre GeneralUser, 166 zonas de instrumento en 24 instrumentos (cellos, strings,
+	// bronces, hi-hats, crashes) con el velocity -> filtro INERTE. Se copian de la region en
+	// tsf_note_on; tsf_ext los reemplaza por los modulados.
+	float initialFilterFc, modEnvToFilterFc;
 };
 
 struct tsf_channel
@@ -1275,7 +1283,8 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 	float* outR = (f->outputmode == TSF_STEREO_UNWEAVED ? outL + numSamples : TSF_NULL);
 
 	// Cache some values, to give them at least some chance of ending up in registers.
-	TSF_BOOL updateModEnv = (region->modEnvToPitch || region->modEnvToFilterFc);
+	// watermelon-audio (MINI-027): el filtro se lee de la VOZ, no de la region (ver tsf_voice).
+	TSF_BOOL updateModEnv = (region->modEnvToPitch || v->modEnvToFilterFc != 0.0f);
 	TSF_BOOL updateModLFO = (v->modlfo.delta && (region->modLfoToPitch || region->modLfoToFilterFc || region->modLfoToVolume));
 	TSF_BOOL updateVibLFO = (v->viblfo.delta && (region->vibLfoToPitch));
 	TSF_BOOL isLooping    = (v->loopStart < v->loopEnd);
@@ -1284,7 +1293,7 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 	double tmpSourceSamplePosition = v->sourceSamplePosition;
 	struct tsf_voice_lowpass tmpLowpass = v->lowpass;
 
-	TSF_BOOL dynamicLowpass = (region->modLfoToFilterFc || region->modEnvToFilterFc);
+	TSF_BOOL dynamicLowpass = (region->modLfoToFilterFc || v->modEnvToFilterFc != 0.0f);
 	float tmpSampleRate = f->outSampleRate, tmpInitialFilterFc, tmpModLfoToFilterFc, tmpModEnvToFilterFc;
 
 	TSF_BOOL dynamicPitchRatio = (region->modLfoToPitch || region->modEnvToPitch || region->vibLfoToPitch);
@@ -1294,7 +1303,7 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 	TSF_BOOL dynamicGain = (region->modLfoToVolume != 0);
 	float noteGain = 0, tmpModLfoToVolume;
 
-	if (dynamicLowpass) tmpInitialFilterFc = (float)region->initialFilterFc, tmpModLfoToFilterFc = (float)region->modLfoToFilterFc, tmpModEnvToFilterFc = (float)region->modEnvToFilterFc;
+	if (dynamicLowpass) tmpInitialFilterFc = v->initialFilterFc, tmpModLfoToFilterFc = (float)region->modLfoToFilterFc, tmpModEnvToFilterFc = v->modEnvToFilterFc;
 	else tmpInitialFilterFc = 0, tmpModLfoToFilterFc = 0, tmpModEnvToFilterFc = 0;
 
 	if (dynamicPitchRatio) pitchRatio = 0, tmpModLfoToPitch = (float)region->modLfoToPitch, tmpVibLfoToPitch = (float)region->vibLfoToPitch, tmpModEnvToPitch = (float)region->modEnvToPitch;
@@ -1693,6 +1702,9 @@ TSFDEF int tsf_note_on(tsf* f, int preset_index, int key, float vel)
 		tsf_voice_envelope_setup(&voice->modenv, &region->modenv, key, midiVelocity, TSF_FALSE, f->outSampleRate);
 
 		// Setup lowpass filter.
+		// watermelon-audio (MINI-027): los dos valores por voz arrancan como los de la region.
+		voice->initialFilterFc = (float)region->initialFilterFc;
+		voice->modEnvToFilterFc = (float)region->modEnvToFilterFc;
 		lowpassFc = (region->initialFilterFc <= 13500 ? tsf_cents2Hertz((float)region->initialFilterFc) / f->outSampleRate : 1.0f);
 		lowpassFilterQDB = region->initialFilterQ / 10.0f;
 		voice->lowpass.QInv = 1.0 / TSF_POW(10.0, (lowpassFilterQDB / 20.0));
