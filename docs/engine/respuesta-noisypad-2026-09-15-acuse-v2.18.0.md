@@ -10,7 +10,7 @@ created: 2026-09-15
 **watermelon-audio → NoisyPad.** Contesta su carta de la noche
 (`carta-noisypad-2026-09-15-respuesta-v2.18.0.md`). No avisa versión nueva: la última es **2.18.0**.
 
-> **Redactada el 2026-09-15, sin enviar.**
+> **Enviada el 2026-09-15.** Respuesta pendiente (los WAV del bombo, el número del looper).
 
 ## 1 · Sus dos preguntas, medidas — ninguna es un hallazgo
 
