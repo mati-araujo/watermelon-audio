@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.4](https://github.com/mati-araujo/watermelon-audio/compare/v2.17.3...v2.17.4) (2026-09-15)
+
+
+### Bug Fixes
+
+* **sf:** las envolventes de tsf recorren el rango que dice el spec ([bc9d2f9](https://github.com/mati-araujo/watermelon-audio/commit/bc9d2f94a1074829e7ea8a86a5a54c6adff6460c))
+* **sf:** las envolventes de tsf recorren el rango que dice el spec ([2d79d1f](https://github.com/mati-araujo/watermelon-audio/commit/2d79d1fe163946891c4cb650f420af9b83bf17e1))
+
 ## [2.17.3](https://github.com/mati-araujo/watermelon-audio/compare/v2.17.2...v2.17.3) (2026-09-14)
 
 
