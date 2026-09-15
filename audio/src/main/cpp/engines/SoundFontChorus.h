@@ -41,8 +41,17 @@ public:
         mWrite = 0;
         for (int v = 0; v < kVoices; ++v) mPhase[v] = static_cast<float>(v) / kVoices;
         mPhaseInc = kSpeedHz / sampleRate;
-        // Cada voz aporta level / N: con N voces en fase el wet vale `level × entrada`.
-        mVoiceGain = kLevel / static_cast<float>(kVoices);
+        // El reparto del level: cada voz aporta level / N, asi que con las N voces en fase el
+        // wet vale `level × send × entrada`. MEDIDO contra la referencia `-C 1` (S3, prueba #18 A,
+        // escalera de send 0/33/66/100 %): FluidSynth da +1,26 / +2,61 / +1,28 dB por nota (NO
+        // es monotona: al 100 % el dry y el wet se cancelan en la ventana) y esto da +0,39 /
+        // +1,06 / +2,79. Se probo `level / sqrt(voces por canal)` (suma en potencia, como si las
+        // voces fueran incoherentes): +2,05 / +4,83 / +7,86 — sobre un tono sostenido las voces
+        // SON coherentes y el nivel por nota es una funcion de la fase dry/wet, o sea de la
+        // ESTRUCTURA del chorus, que no es la de FluidSynth (LGPL, no se copia). Se queda
+        // level / N y #18 A es S con residuo declarado.
+        mVoiceGainL = kLevel / static_cast<float>(kVoices);
+        mVoiceGainR = mVoiceGainL;
         clearChorusTail();
         mPrepared = true;
     }
@@ -87,8 +96,8 @@ public:
                 const float sample = line[i0] + (line[i1] - line[i0]) * frac;
                 if ((v & 1) == 0) outL += sample; else outR += sample;
             }
-            stereoOut[2 * i] += outL * mVoiceGain;
-            stereoOut[2 * i + 1] += outR * mVoiceGain;
+            stereoOut[2 * i] += outL * mVoiceGainL;
+            stereoOut[2 * i + 1] += outR * mVoiceGainR;
             if (++w >= n) w = 0;
         }
         mWrite = w;
@@ -99,7 +108,8 @@ public:
 private:
     std::vector<float> mLine;
     std::size_t mWrite = 0;
-    float mRate = 0.0f, mCenter = 0.0f, mHalfDepth = 0.0f, mPhaseInc = 0.0f, mVoiceGain = 0.0f;
+    float mRate = 0.0f, mCenter = 0.0f, mHalfDepth = 0.0f, mPhaseInc = 0.0f;
+    float mVoiceGainL = 0.0f, mVoiceGainR = 0.0f;
     float mPhase[kVoices] = {};
     float mDelayStart[kVoices] = {}, mDelayStep[kVoices] = {};
     bool mPrepared = false;

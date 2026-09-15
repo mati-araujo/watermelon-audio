@@ -121,6 +121,12 @@ enum class NoteSource : std::uint8_t {
     Constant,  ///< "sin controlador": vale 1 (§8.2.1, índice 0 sin CC)
     Velocity,  ///< índice 2
     Key,       ///< índice 3
+    /// REQ-040 S3: CC91 (reverb) y CC93 (chorus) se evalúan al disparar con el valor de RESET
+    /// de GM —40 y 0— porque el motor no tiene superficie de CC: nadie los mueve (mover CC91/93
+    /// en vuelo es un REQ propio). Es lo que hace un sinte GM recién encendido: el default #8
+    /// da 200 × 40/127 = +6,3 % de reverb a toda voz, y el #9 cero de chorus.
+    Cc91AtReset,
+    Cc93AtReset,
 };
 
 /** Un modulador ya resuelto, clasificado y listo para el thread de audio. */
@@ -174,7 +180,12 @@ inline bool hasNonLinearTransform(const Modulator& m) { return m.transOper != 0;
 
 /// `true` si la fuente es de nota, y cuál. CC, presión, rueda y "link" (127) no lo son.
 inline bool classifyNoteSource(std::uint16_t oper, NoteSource& out) {
-    if (sourceIsMidiCC(oper)) return false;
+    if (sourceIsMidiCC(oper)) {
+        // REQ-040 S3: solo los dos CC de sends, y en su valor de reset.
+        if (sourceIndexOf(oper) == 91) { out = NoteSource::Cc91AtReset; return true; }
+        if (sourceIndexOf(oper) == 93) { out = NoteSource::Cc93AtReset; return true; }
+        return false;
+    }
     switch (sourceIndexOf(oper)) {
         case 0: out = NoteSource::Constant; return true;
         case 2: out = NoteSource::Velocity; return true;
@@ -202,6 +213,8 @@ inline bool isSupportedDestination(std::uint16_t destOper) {
         case kDestAttackVolEnv:
         case kDestDecayVolEnv:
         case kDestReleaseVolEnv:
+        case kDestReverbSend:
+        case kDestChorusSend:
             return true;
         default:
             return false;
@@ -328,6 +341,8 @@ struct NoteOnContribution {
     float releaseVolEnvTimecents = 0.0f; ///< #38 releaseVolEnv
     float startOffsetSamples = 0.0f;     ///< #0  startAddrsOffset
     float panTenthsOfPercent = 0.0f;     ///< #17 pan (500 = todo a la derecha)
+    float reverbSendTenthsOfPercent = 0.0f;   ///< #16 reverbEffectsSend (REQ-040 S3)
+    float chorusSendTenthsOfPercent = 0.0f;   ///< #15 chorusEffectsSend (REQ-040 S3)
 };
 
 namespace detail {
@@ -335,6 +350,8 @@ inline float noteSourceValue(NoteSource s, int key, int velocity) noexcept {
     switch (s) {
         case NoteSource::Velocity: return normalize7bit(velocity);
         case NoteSource::Key: return normalize7bit(key);
+        case NoteSource::Cc91AtReset: return normalize7bit(40);   // GM reset: reverb 40
+        case NoteSource::Cc93AtReset: return normalize7bit(0);    // GM reset: chorus 0
         case NoteSource::Constant: default: return 1.0f;
     }
 }
@@ -370,6 +387,8 @@ inline NoteOnContribution noteOnContributionsOf(const RegionModulatorList* list,
             case kDestReleaseVolEnv: out.releaseVolEnvTimecents += c; break;
             case kDestStartAddrsOffset: out.startOffsetSamples += c; break;
             case kDestPan: out.panTenthsOfPercent += c; break;
+            case kDestReverbSend: out.reverbSendTenthsOfPercent += c; break;
+            case kDestChorusSend: out.chorusSendTenthsOfPercent += c; break;
             default: break;  // clasificado como soportado pero sin destino: no pasa
         }
     }

@@ -3,8 +3,7 @@
 #include "SynthEngine.h"
 #include "SoundFontManager.h"
 #include "SoundFontNoteOn.h"
-#include "SoundFontReverb.h"
-#include "SoundFontChorus.h"
+#include "SoundFontSendBus.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -74,12 +73,9 @@ public:
         // el render cae al camino sin sends en vez de escribir fuera del buffer.
         mSendReverbBus.assign(static_cast<size_t>(maxBlockSize > 0 ? maxBlockSize : 0), 0.0f);
         mSendChorusBus.assign(static_cast<size_t>(maxBlockSize > 0 ? maxBlockSize : 0), 0.0f);
-        // REQ-040 S2: las dos unidades, dimensionadas para este rate (alocan: thread de control).
-        mFxSampleRate = static_cast<float>(sampleRate);
-        mReverb.prepare(mFxSampleRate, maxBlockSize);
-        mChorus.prepare(mFxSampleRate);
-        mFxQuietSeconds = 0.0f;
-        mFxActive = false;
+        // REQ-040: las dos unidades y la compuerta, dimensionadas para este rate (alocan: thread
+        // de control). Viven en SoundFontSendBus porque el arnes de conformidad cruza el mismo.
+        mSendBus.prepare(static_cast<float>(sampleRate), maxBlockSize);
     }
 
     void reset() override {
@@ -98,10 +94,7 @@ public:
      * para que un test pueda separar el wet del dry y para que `AudioEngine` la tenga a mano.
      * Cualquier thread: atómicos que el render lee una vez por bloque.
      */
-    void setEffectsSendScale(float reverb, float chorus) {
-        mSendScaleReverb.store(std::clamp(reverb, 0.0f, 1.0f), std::memory_order_relaxed);
-        mSendScaleChorus.store(std::clamp(chorus, 0.0f, 1.0f), std::memory_order_relaxed);
-    }
+    void setEffectsSendScale(float reverb, float chorus) { mSendBus.setSendScale(reverb, chorus); }
 
     // ========== SynthEngine interface (unused in SOUNDFONT mode) ==========
 
@@ -184,12 +177,12 @@ public:
         tsf* sf = font ? font->sf : nullptr;
         if (!sf) {
             // Sin font: silencio, y la cola no sobrevive (decisión 4).
-            if (mFxActive) clearSendEffects();
+            if (mSendBus.isActive()) mSendBus.clearSendEffects();
             std::fill_n(buffer, numFrames * 2, 0.0f);
             return;
         }
         // `reset()` pidió limpiar (decisión 4); el swap del font también (abajo).
-        if (mClearFxRequested.exchange(false, std::memory_order_acq_rel)) clearSendEffects();
+        if (mClearFxRequested.exchange(false, std::memory_order_acq_rel)) mSendBus.clearSendEffects();
 
         // 1. Check for preset change (atomic, deferred from setPreset)
         int newPreset = mPendingPreset.load(std::memory_order_acquire);
@@ -204,7 +197,7 @@ public:
         if (presetChanged || sf != mConfiguredFor) {
             // Otro font: la cola del anterior no le pertenece (decisión 4). El cambio de PRESET
             // solo, en cambio, la deja sonar: el cuarto es el mismo.
-            if (sf != mConfiguredFor && mFxActive) clearSendEffects();
+            if (sf != mConfiguredFor && mSendBus.isActive()) mSendBus.clearSendEffects();
             if (presetChanged) {
                 tsf_note_off_all(sf);
                 for (auto& t : mTouches) t.active = false;
@@ -248,7 +241,7 @@ public:
             tsf_render_float_sends(sf, buffer, mSendReverbBus.data(), mSendChorusBus.data(), numFrames, 0);
             // 3b. REQ-040 S2: los buses pasan por las dos unidades y el wet se suma a la salida,
             // ANTES de la expresión global (R-MOT-11: el global va sobre la mezcla ya sumada).
-            mixSendBusesInto(buffer, numFrames);
+            mSendBus.mixSendBusesInto(buffer, mSendReverbBus.data(), mSendChorusBus.data(), numFrames);
         } else {
             tsf_render_float(sf, buffer, numFrames, 0);
         }
@@ -260,50 +253,6 @@ public:
                 buffer[i] *= gain;
             }
         }
-    }
-
-    /**
-     * REQ-040 S2 (decisiones 4 y 5). Thread de AUDIO. Escala los buses por la costura, decide
-     * con la COMPUERTA si las unidades corren, y suma el wet a `buffer`.
-     *
-     * La compuerta se mide en SEGUNDOS, no en bloques (R-MOT-16 / "una ventana más corta que el
-     * efecto"): cuando la entrada de los dos buses lleva más de `kFxTailSeconds` por debajo de
-     * `kFxSilence` (−90 dBFS), las unidades se saltean y se limpian, y lo que sale es CERO
-     * exacto, no −90. El primer bloque con send > 0 las vuelve a encender en ese mismo bloque.
-     * `kFxTailSeconds` cubre la cola del freeverb con room 0,2 (RT60 ≈ 0,75 s) con margen.
-     */
-    void mixSendBusesInto(float* buffer, int32_t numFrames) noexcept {
-        const float scaleR = mSendScaleReverb.load(std::memory_order_relaxed);
-        const float scaleC = mSendScaleChorus.load(std::memory_order_relaxed);
-        float* rb = mSendReverbBus.data();
-        float* cb = mSendChorusBus.data();
-        float peak = 0.0f;
-        for (int32_t i = 0; i < numFrames; ++i) {
-            rb[i] *= scaleR;
-            cb[i] *= scaleC;
-            const float a = rb[i] < 0.0f ? -rb[i] : rb[i];
-            const float b = cb[i] < 0.0f ? -cb[i] : cb[i];
-            if (a > peak) peak = a;
-            if (b > peak) peak = b;
-        }
-        if (peak > kFxSilence) {
-            mFxQuietSeconds = 0.0f;
-            mFxActive = true;
-        } else if (mFxActive) {
-            mFxQuietSeconds += static_cast<float>(numFrames) / mFxSampleRate;
-            if (mFxQuietSeconds > kFxTailSeconds) clearSendEffects();
-        }
-        if (!mFxActive) return;
-        mReverb.addReverbWetFromMono(rb, buffer, numFrames);
-        mChorus.addChorusWetFromMono(cb, buffer, numFrames);
-    }
-
-    /// Thread de AUDIO. Vacía las dos unidades y apaga la compuerta: el próximo bloque es cero.
-    void clearSendEffects() noexcept {
-        mReverb.clearReverbTail();
-        mChorus.clearChorusTail();
-        mFxQuietSeconds = 0.0f;
-        mFxActive = false;
     }
 
     int getActiveTouchCount() const {
@@ -543,17 +492,9 @@ private:
     /// REQ-040: los buses de sends del bloque en curso (mono, maxBlockSize floats). Los llena
     /// tsf por voz; los consumen las unidades de S2. Se dimensionan en prepare().
     std::vector<float> mSendReverbBus, mSendChorusBus;
-    /// REQ-040 S2: las dos unidades fijas (el sonido del font), la costura y la compuerta.
-    wma::SoundFontReverb mReverb;
-    wma::SoundFontChorus mChorus;
-    std::atomic<float> mSendScaleReverb{1.0f};
-    std::atomic<float> mSendScaleChorus{1.0f};
+    /// REQ-040: las dos unidades fijas (el sonido del font), la costura y la compuerta.
+    wma::SoundFontSendBus mSendBus;
     std::atomic<bool> mClearFxRequested{false};
-    float mFxSampleRate = 48000.0f;
-    float mFxQuietSeconds = 0.0f;   // audio-thread only
-    bool mFxActive = false;         // audio-thread only
-    static constexpr float kFxSilence = 3.1623e-5f;   // -90 dBFS
-    static constexpr float kFxTailSeconds = 2.0f;
 
     // Touch state: audio-thread-only (modified in drainEvents)
     std::array<TouchState, MAX_TOUCHES> mTouches{};

@@ -481,6 +481,10 @@ struct tsf_voice
 	// bronces, hi-hats, crashes) con el velocity -> filtro INERTE. Se copian de la region en
 	// tsf_note_on; tsf_ext los reemplaza por los modulados.
 	float initialFilterFc, modEnvToFilterFc;
+	// watermelon-audio (REQ-040 S3): los sends POR VOZ. Arrancan como los de la region
+	// (gens 16/15 sumados) y tsf_ext les suma lo que los moduladores resuelven al disparar
+	// (default #8/#9: CC91/CC93 en su valor de reset). El render lee estos, no la region.
+	float reverbSend, chorusSend;
 };
 
 struct tsf_channel
@@ -1370,8 +1374,8 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 				gainLeft = gainMono * v->panFactorLeft, gainRight = gainMono * v->panFactorRight;
 				// watermelon-audio (REQ-040): la ganancia de cada send, resuelta por bloque. Sin
 				// bus (o send 0) la rama por muestra no toca nada y la salida es la de siempre.
-				sendReverbGain = (sendReverb ? gainMono * region->reverbSend : 0.0f);
-				sendChorusGain = (sendChorus ? gainMono * region->chorusSend : 0.0f);
+				sendReverbGain = (sendReverb ? gainMono * v->reverbSend : 0.0f);
+				sendChorusGain = (sendChorus ? gainMono * v->chorusSend : 0.0f);
 				while (blockSamples-- && tmpSourceSamplePosition < tmpSampleEndDbl)
 				{
 					unsigned int pos = (unsigned int)tmpSourceSamplePosition, nextPos = (pos >= tmpLoopEnd && isLooping ? tmpLoopStart : pos + 1);
@@ -1734,6 +1738,8 @@ TSFDEF int tsf_note_on(tsf* f, int preset_index, int key, float vel)
 		// watermelon-audio (MINI-027): los dos valores por voz arrancan como los de la region.
 		voice->initialFilterFc = (float)region->initialFilterFc;
 		voice->modEnvToFilterFc = (float)region->modEnvToFilterFc;
+		voice->reverbSend = region->reverbSend;
+		voice->chorusSend = region->chorusSend;
 		lowpassFc = (region->initialFilterFc <= 13500 ? tsf_cents2Hertz((float)region->initialFilterFc) / f->outSampleRate : 1.0f);
 		lowpassFilterQDB = region->initialFilterQ / 10.0f;
 		voice->lowpass.QInv = 1.0 / TSF_POW(10.0, (lowpassFilterQDB / 20.0));

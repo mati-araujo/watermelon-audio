@@ -365,6 +365,7 @@ struct Measured {
 struct HopPrinter {
     bool on = false;
     const char* label = "";
+    bool notes = false;   // WMA_SPEC_NOTES: el nivel POR NOTA, ours y ref (REQ-040)
 };
 
 Measured measureWindow(const wma_test::specmidi::Rendered& ours, const Signal& A, const Signal& B,
@@ -389,6 +390,10 @@ Measured measureWindow(const wma_test::specmidi::Rendered& ours, const Signal& A
         if (i > 0) { stepAccA += relA - prevA; stepAccB += relB - prevB; ++steps; }
         prevA = relA; prevB = relB;
         m.levelNotes = std::max(m.levelNotes, std::fabs(relA - relB));
+        if (hp.notes) {
+            std::printf("      nota %2zu a %7.2f s  nivel A %7.2f  B %7.2f  (rel A %6.2f  B %6.2f  dif %5.2f)\n", i,
+                        n.sec, lA, lB, relA, relB, relA - relB);
+        }
         m.balance = std::max(m.balance, std::fabs(bA - bB));
         m.balTonesA.push_back(bA);
         m.balTonesB.push_back(bB);
@@ -456,6 +461,11 @@ struct Loaded {
     wav::WavData ref;
     std::vector<Window> windows;
     Signal A, B;
+    // REQ-040 S3: el par CON efectos — nuestro render con los sends (mismo SoundFontSendBus que
+    // produccion) y la referencia `-R 1 -C 1` sobre el .mid en reset de GM. Juzga #17/#18.
+    wma_test::specmidi::Rendered oursFx;
+    wav::WavData refFx;
+    Signal Afx, Bfx;
 };
 
 /// Carga los dos renders y deriva las ventanas, o devuelve `false` (SKIP en el llamador).
@@ -471,6 +481,16 @@ bool loadBoth(Loaded& L, std::string* why) {
     L.A = wma_test::specmidi::view(L.ours);
     L.B = Signal{L.ref.buffer.data(), L.ref.numFrames, L.ref.sampleRate};
     L.windows = wma_test::specmidi::deriveWindows(L.ours);
+    // La segunda referencia (REQ-040): sin ella, SKIP entero — `render-spec-reference.sh` produce
+    // las dos, asi que "hay una y no la otra" es un material viejo, no un caso.
+    const std::string refFxPath = dir() + "/reference-fluidsynth-2.6.0-fx.wav";
+    if (stat(refFxPath.c_str(), &st) != 0) { *why = "sin referencia con efectos — corre scripts/render-spec-reference.sh"; return false; }
+    L.oursFx = wma_test::specmidi::render(sf2(), mid(), 44100, 0.0f, 512, /*withSends=*/true);
+    if (!L.oursFx.valid) { *why = "el arnes no pudo renderizar con sends"; return false; }
+    L.refFx = wav::readWav(refFxPath.c_str());
+    if (L.refFx.numFrames <= 0 || L.refFx.sampleRate != L.oursFx.sampleRate) { *why = "referencia con efectos ilegible o a otro rate"; return false; }
+    L.Afx = wma_test::specmidi::view(L.oursFx);
+    L.Bfx = Signal{L.refFx.buffer.data(), L.refFx.numFrames, L.refFx.sampleRate};
     return true;
 }
 
@@ -560,6 +580,7 @@ struct Row {
     double tol;             // F: |Δ| <= tol · R: |Δ - today| <= tol · S: segun obs
     double today;           // R: el valor medido el 2026-09-11 · S: el numero del spec
     const char* why;        // la razon, o el dueño
+    bool fx = false;        // REQ-040 S3: se juzga contra el par CON efectos (#17/#18)
 };
 
 const char* obsName(Obs o) {
@@ -674,12 +695,28 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
         {14, 4, Obs::LevelNotes, Cls::F, 0.25, 0.0, "borrado 2.01: anula (MINI-028); plano en los dos"},
         {15, 0, Obs::LevelOn, Cls::R, 0.5, 0.78, "CC1 -> corte del filtro: fuente de canal; dueño: el REQ de superficie CC"},
         {16, 0, Obs::LevelNotes, Cls::F, 0.6, 0.0, "sample offset: los dos tocan \"supported\"; sample hablado, 0,43 hoy"},
-        {17, 1, Obs::LevelNotes, Cls::R, 0.25, 0.0, "reverb: la referencia es SECA (-R 0), iguales por construccion; dueño REQ-040"},
-        {17, 2, Obs::LevelNotes, Cls::R, 0.25, 0.0, "reverb CC91; dueño REQ-040"},
-        {17, 3, Obs::LevelNotes, Cls::R, 0.25, 0.0, "reverb ambos; dueño REQ-040"},
-        {18, 1, Obs::LevelNotes, Cls::R, 0.25, 0.0, "chorus: idem; dueño REQ-040"},
-        {18, 2, Obs::LevelNotes, Cls::R, 0.25, 0.0, "chorus CC93; dueño REQ-040"},
-        {18, 3, Obs::LevelNotes, Cls::R, 0.25, 0.0, "chorus ambos; dueño REQ-040"},
+        // #17/#18 (REQ-040 S3): se juzgan contra el par CON efectos —nuestro render con los sends
+        // por el mismo SoundFontSendBus que produccion, y FluidSynth `-R 1 -C 1` sobre el .mid en
+        // reset de GM (sin los CC91/CC93 = 0 de t = 0: el motor evalua CC91/CC93 en su valor de
+        // reset, 40 / 0, y no tiene superficie para moverlos).
+        // - #17 A (la escalera del GENERADOR de reverb, 0/33/66/100 %): F. Un Freeverb clasico con
+        //   el mapeo de parametros de FluidSynth deja +0,41/+1,40/+2,41 dB por nota donde
+        //   FluidSynth (un FDN modulado) deja +0,34/+1,18/+2,29: 0,23 dB en el peor escalon.
+        // - #17 B / #17 C / #18 B / #18 C mueven CC91/CC93 en vuelo: el motor no los sigue (REQ
+        //   propio, "el REQ de superficie CC"). R con el numero de hoy contra la referencia con
+        //   efectos, que es chico porque el observable es relativo a la primera nota.
+        // - #18 A (la escalera del generador de chorus): S con residuo 1,54. La referencia NO es
+        //   monotona (+1,26 / +2,61 / +1,28: al 100 % el dry y el wet se cancelan en la ventana) y
+        //   la nuestra si (+0,39 / +1,06 / +2,79): el nivel por nota de un chorus sobre un tono
+        //   sostenido es la fase dry/wet, o sea la ESTRUCTURA del chorus (3 voces, centro 16 ms
+        //   contra el de FluidSynth, LGPL). Se midio tambien `level / sqrt(voces)`: 6,57. Queda
+        //   level / N con su numero.
+        {17, 1, Obs::LevelNotes, Cls::F, 0.25, 0.0, "reverb send (generador): Freeverb con el mapeo de FluidSynth, 0,23 en el peor escalon", true},
+        {17, 2, Obs::LevelNotes, Cls::R, 0.25, 0.08, "reverb por CC91 en vuelo: el motor lo evalua en reset (40); dueño: el REQ de superficie CC", true},
+        {17, 3, Obs::LevelNotes, Cls::R, 0.25, 0.16, "generador + CC91 en vuelo: idem", true},
+        {18, 1, Obs::LevelNotes, Cls::S, 0.5, 1.54, "chorus send (generador): otra estructura de chorus; la referencia no es monotona (cancelacion dry/wet al 100 %)", true},
+        {18, 2, Obs::LevelNotes, Cls::R, 0.25, 0.42, "chorus por CC93 en vuelo: el motor lo evalua en reset (0); dueño: el REQ de superficie CC", true},
+        {18, 3, Obs::LevelNotes, Cls::R, 0.5, 0.71, "generador + CC93 en vuelo: idem", true},
         {19, 0, Obs::LevelNotes, Cls::R, 0.25, 0.0, "interpolacion: \"por oido\", este observable no la ve; dueño REQ-041"},
         {20, 1, Obs::PitchHop, Cls::F, 6.0, 0.0, "pitch bend ±2 st: el bend hop a hop; 4,8 c hoy (sample senoide, medido)"},
         {20, 2, Obs::PitchHop, Cls::R, 10.0, 200.5,
@@ -708,7 +745,11 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
         const Window* w = findWindow(L.windows, row.test, row.sub);
         ASSERT_NE(w, nullptr) << "falta la ventana #" << row.test << "/" << row.sub;
         const std::string label = w->label();
-        const Measured m = measureWindow(L.ours, L.A, L.B, *w);
+        HopPrinter np;
+        for (int t : csvEnv("WMA_SPEC_NOTES")) if (t == row.test && row.obs == Obs::LevelNotes) np.notes = true;
+        if (np.notes) std::printf("    %s por nota (%s):\n", label.c_str(), row.fx ? "con efectos" : "seco");
+        const Measured m = row.fx ? measureWindow(L.oursFx, L.Afx, L.Bfx, *w, np)
+                                  : measureWindow(L.ours, L.A, L.B, *w, np);
         double value = valueOf(m, row.obs);
 
         if (row.obs == Obs::BalRelation) {

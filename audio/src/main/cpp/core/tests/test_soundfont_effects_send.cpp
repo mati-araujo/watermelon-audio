@@ -48,6 +48,23 @@ constexpr uint16_t kGenHoldVolEnv = 35;
 constexpr uint16_t kGenSustainVolEnv = 37;
 constexpr int16_t kInstant = -12000;
 
+/// REQ-040 S3: lo que el default #8 (CC91 -> reverbEffectsSend, 200) aporta con CC91 en su valor
+/// de RESET de GM (40), en 0..1 — a TODA voz de TODO font que no lo borre: +6,3 %. El #9 (CC93,
+/// reset 0) aporta cero. Es la misma aritmetica que `contribution` (amount × 40/127) × 0,001.
+inline float defaultReverbAtReset() { return 200.0f * (40.0f / 127.0f) * 0.001f; }
+
+/// Un font que BORRA el default #8 (mismo `src`/`dest`, amount 0: SF2 §8.4): el send es solo el
+/// generador. Sirve para afirmar el generador exacto sin el +6,3 %.
+inline wma_test::sf2::ModulatorPlacement withoutDefaultEight() {
+    wma_test::sf2::ModulatorPlacement m;
+    wma_test::sf2::Modulator erase;
+    erase.srcOper = wma_test::sf2::srcOper(91, true, false, false, 0);   // CC91, lineal, unipolar, creciente
+    erase.destOper = kGenReverbSend;
+    erase.amount = 0;
+    m.instrumentGlobal.push_back(erase);
+    return m;
+}
+
 // Envolvente plana e instantanea: la voz esta en sustain pleno desde la primera muestra.
 std::vector<ExtraGenerator> flatEnv() {
     return {{kGenAttackVolEnv, kInstant}, {kGenHoldVolEnv, kInstant}, {kGenSustainVolEnv, 0}};
@@ -65,11 +82,12 @@ struct Rendered {
 /// toque de produccion entra por ahi), con los generadores dados en la zona del instrumento y
 /// del preset. `withSends`: por `tsf_render_float_sends`; si no, por `tsf_render_float` (control).
 Rendered render(const std::vector<ExtraGenerator>& instGens, const std::vector<ExtraGenerator>& presetGens,
-                float vel = 1.0f, float channelVolume = 1.0f, bool withSends = true) {
+                float vel = 1.0f, float channelVolume = 1.0f, bool withSends = true,
+                const wma_test::sf2::ModulatorPlacement& mods = {}) {
     Rendered r;
     PitchGenerators pitch;
     pitch.sinePeriod = kPeriod;
-    const auto bytes = makeMinimalSoundFont(kRate, true, -1, -1, {}, 0, pitch, instGens, presetGens);
+    const auto bytes = makeMinimalSoundFont(kRate, true, -1, -1, mods, 0, pitch, instGens, presetGens);
     tsf* sf = tsf_load_memory(bytes.data(), static_cast<int>(bytes.size()));
     if (!sf) return r;
     r.loaded = true;
@@ -144,10 +162,12 @@ TEST(SoundFontEffectsSend, TheReverbBusCarriesTheSummedSendTimesTheVoice) {
     ASSERT_GT(peakAbs(r.out), 0.1) << "la nota no sono";
     EXPECT_NEAR(r.regionReverbSend, 0.7f, 1e-6f) << "la region no sumo preset (200) + instrumento (500)";
     EXPECT_EQ(r.regionChorusSend, 0.0f);
-    const double diff = maxDiffFromFormula(r, r.reverb, 0.7f);
-    std::printf("  [REQ-040] bus de reverb vs 0,7 * mono: max |dif| %.2e (pico del bus %.3f)\n", diff,
+    // S3: la VOZ lleva ademas el default #8 con CC91 en reset (+6,3 %): 0,763.
+    const float send = 0.7f + defaultReverbAtReset();
+    const double diff = maxDiffFromFormula(r, r.reverb, send);
+    std::printf("  [REQ-040] bus de reverb vs %.4f * mono: max |dif| %.2e (pico del bus %.3f)\n", send, diff,
                 peakAbs(r.reverb));
-    EXPECT_LT(diff, kUlpTol) << "el bus de reverb no es send * voz";
+    EXPECT_LT(diff, kUlpTol) << "el bus de reverb no es (gen + default #8 en reset) * voz";
     EXPECT_EQ(peakAbs(r.chorus), 0.0) << "sin chorusEffectsSend el bus de chorus tiene que ser CERO exacto";
 }
 
@@ -156,18 +176,31 @@ TEST(SoundFontEffectsSend, TheChorusBusCarriesAPresetOnlySend) {
     const auto r = render(flatEnv(), {{kGenChorusSend, 350}});
     ASSERT_TRUE(r.loaded);
     EXPECT_NEAR(r.regionChorusSend, 0.35f, 1e-6f);
+    // El default #9 (CC93 -> chorus) vale 0 en reset: el chorus es exactamente el generador.
     EXPECT_LT(maxDiffFromFormula(r, r.chorus, 0.35f), kUlpTol) << "el bus de chorus no es send * voz";
-    EXPECT_EQ(peakAbs(r.reverb), 0.0);
+    // Y el reverb, sin generador, es SOLO el default #8: +6,3 %.
+    EXPECT_LT(maxDiffFromFormula(r, r.reverb, defaultReverbAtReset()), kUlpTol)
+        << "sin generador el reverb tiene que ser exactamente el default #8 en reset";
 }
 
-/** AC-040.1: sin ninguno de los dos generadores, los dos buses son cero exacto y la voz suena. */
-TEST(SoundFontEffectsSend, WithoutSendGeneratorsBothBusesAreExactlyZero) {
-    const auto r = render(flatEnv(), {});
+/**
+ * AC-040.1 / AC-040.4: sin generadores y con el default #8 BORRADO (un modulador CC91 -> reverb con
+ * amount 0 en el archivo, §8.4), los dos buses son cero exacto y la voz suena. Sin el borrado, el
+ * reverb lleva el +6,3 % del reset de GM (arriba). Es el par que muestra que el CC91 en reset se
+ * evalua por el mismo camino de identidad que el resto de los defaults.
+ */
+TEST(SoundFontEffectsSend, WithoutSendGeneratorsAndWithDefaultEightErasedBothBusesAreExactlyZero) {
+    const auto r = render(flatEnv(), {}, 1.0f, 1.0f, true, withoutDefaultEight());
     ASSERT_TRUE(r.loaded);
     ASSERT_GT(peakAbs(r.out), 0.1);
     EXPECT_EQ(r.regionReverbSend, 0.0f);
-    EXPECT_EQ(peakAbs(r.reverb), 0.0);
+    EXPECT_EQ(peakAbs(r.reverb), 0.0) << "con el default #8 borrado el bus de reverb no es cero";
     EXPECT_EQ(peakAbs(r.chorus), 0.0);
+    // Control: sin borrar, el mismo font manda el +6,3 %.
+    const auto d = render(flatEnv(), {});
+    ASSERT_TRUE(d.loaded);
+    EXPECT_GT(peakAbs(d.reverb), 0.01) << "el default #8 en reset no aporta nada: ¿se evalua CC91?";
+    EXPECT_LT(maxDiffFromFormula(d, d.reverb, defaultReverbAtReset()), kUlpTol);
 }
 
 /**
@@ -181,7 +214,7 @@ TEST(SoundFontEffectsSend, TheSendIsTakenAfterTheChannelGain) {
     const auto full = render(inst, {}, 1.0f, 1.0f);
     const auto quarter = render(inst, {}, 1.0f, 0.25f);
     ASSERT_TRUE(full.loaded && quarter.loaded);
-    EXPECT_LT(maxDiffFromFormula(quarter, quarter.reverb, 0.5f), kUlpTol)
+    EXPECT_LT(maxDiffFromFormula(quarter, quarter.reverb, 0.5f + defaultReverbAtReset()), kUlpTol)
         << "con el canal a 0,25 el bus dejo de ser send * voz atenuada";
     const double ratio = peakAbs(quarter.reverb) / peakAbs(full.reverb);
     std::printf("  [REQ-040] bus con el canal a 0,25 / a 1,0: %.4f\n", ratio);
@@ -195,6 +228,7 @@ TEST(SoundFontEffectsSend, TheSendFollowsTheVelocityAttenuation) {
     const auto soft = render(inst, {}, 32.5f / 127.0f);
     ASSERT_TRUE(soft.loaded);
     ASSERT_GT(peakAbs(soft.out), 1e-3);
+    // gen 1000 + default #8 se satura a 1,0 (el generador tambien se limita a 0..1).
     EXPECT_LT(maxDiffFromFormula(soft, soft.reverb, 1.0f), kUlpTol);
 }
 
@@ -235,7 +269,8 @@ struct Rig {
     std::vector<uint8_t> font;
 };
 
-/// Un motor con un font de una nota y `reverbSend` / `chorusSend` en 0,1 % (1000 = 100 %).
+/// Un motor con un font de una nota y `reverbSend` / `chorusSend` en 0,1 % (1000 = 100 %). Con
+/// 0 / 0 el font ademas BORRA el default #8: "sin sends" significa sin sends, no +6,3 %.
 Rig makeRig(int reverbSend, int chorusSend, int rate = kRate) {
     Rig r;
     std::vector<ExtraGenerator> gens = flatEnv();
@@ -243,7 +278,8 @@ Rig makeRig(int reverbSend, int chorusSend, int rate = kRate) {
     if (chorusSend) gens.push_back({kGenChorusSend, static_cast<int16_t>(chorusSend)});
     PitchGenerators pitch;
     pitch.sinePeriod = kPeriod;
-    r.font = makeMinimalSoundFont(static_cast<uint32_t>(rate), true, -1, -1, {}, 0, pitch, gens);
+    const auto mods = (reverbSend == 0 && chorusSend == 0) ? withoutDefaultEight() : wma_test::sf2::ModulatorPlacement{};
+    r.font = makeMinimalSoundFont(static_cast<uint32_t>(rate), true, -1, -1, mods, 0, pitch, gens);
     r.manager = std::make_unique<SoundFontManager>();
     if (!r.manager->loadFromMemory(r.font.data(), static_cast<int>(r.font.size()), rate)) return {};
     r.engine = std::make_unique<SoundFontEngine>();

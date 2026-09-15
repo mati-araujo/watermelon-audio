@@ -91,7 +91,18 @@ struct Scenario {
 std::vector<float> render(const Scenario& sc) {
     // `looping=true`: el one-shot dura 4 ms, menos que los 240 frames que tarda en
     // converger el suavizador. Sin loop no hay test de nivel posible.
-    auto sf2 = makeMinimalSoundFont(kSampleRate, /*looping=*/true);
+    // REQ-040: sin sends. El default #8 (CC91 -> reverb, en reset) le pondria +6,3 % de reverb a
+    // la nota, y la COLA de la reverb recuerda el gesto: dos renders que difieren solo en un gesto
+    // ya pasado dejan de ser identicos muestra a muestra aunque el dry lo sea. Este archivo mide
+    // la expresion por toque sobre el dry, asi que el font borra el default #8 (amount 0, misma
+    // identidad: SF2 §8.4).
+    wma_test::sf2::ModulatorPlacement sinSends;
+    wma_test::sf2::Modulator borraDefaultOcho;
+    borraDefaultOcho.srcOper = wma_test::sf2::srcOper(91, true, false, false, 0);
+    borraDefaultOcho.destOper = 16;   // reverbEffectsSend
+    borraDefaultOcho.amount = 0;
+    sinSends.instrumentGlobal.push_back(borraDefaultOcho);
+    auto sf2 = makeMinimalSoundFont(kSampleRate, /*looping=*/true, -1, -1, sinSends);
     auto manager = std::make_unique<SoundFontManager>();
     if (!manager->loadFromMemory(sf2.data(), static_cast<int>(sf2.size()), kSampleRate)) {
         return {};

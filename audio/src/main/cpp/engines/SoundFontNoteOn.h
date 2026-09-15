@@ -99,6 +99,12 @@ inline int channelNoteOnWithModulators(tsf* sf, const ModulatorTable* table, int
         if (c.panTenthsOfPercent != 0.0f) {
             tsf_ext_voice_add_pan(sf, voice, c.panTenthsOfPercent * 0.001f);
         }
+        // REQ-040 S3: los sends = generador de la región + lo que los moduladores resuelven
+        // (default #8/#9 con CC91/CC93 en reset, y lo que el archivo declare), en 0,1 % -> 0..1.
+        if (c.reverbSendTenthsOfPercent != 0.0f || c.chorusSendTenthsOfPercent != 0.0f) {
+            tsf_ext_voice_set_sends(sf, voice, started[i].reverbSend + c.reverbSendTenthsOfPercent * 0.001f,
+                                    started[i].chorusSend + c.chorusSendTenthsOfPercent * 0.001f);
+        }
     }
     return rc;
 }
