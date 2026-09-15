@@ -254,8 +254,11 @@ TEST(TouchExpressionChannelLayer, TheEightChannelDefaultsAreNamedAsNotEvaluatedA
         {5, "CC7 (volumen) -> initialAttenuation — la capa de canales de tsf", false},
         {6, "CC10 (pan) -> pan — la capa de canales de tsf", false},
         {7, "CC11 (expresion) -> initialAttenuation — la capa de canales de tsf", false},
-        {8, "CC91 -> reverb send — REQ-040", false},
-        {9, "CC93 -> chorus send — REQ-040", false},
+        // REQ-040 S3: #8 y #9 se evaluan al disparar con el CC en su valor de RESET de GM (40 / 0),
+        // porque el motor no tiene superficie de CC y nadie los mueve — no es la capa de canales
+        // de tsf (que tampoco los implementa), asi que no duplican nada.
+        {8, "CC91 -> reverb send — REQ-040: evaluado con CC91 en reset (40)", true},
+        {9, "CC93 -> chorus send — REQ-040: evaluado con CC93 en reset (0)", true},
         {10, "rueda de pitch -> pitch — la capa de canales de tsf", false},
     };
 
@@ -275,6 +278,6 @@ TEST(TouchExpressionChannelLayer, TheEightChannelDefaultsAreNamedAsNotEvaluatedA
                 << "canal — ni evaluado (duplicaria la capa de tsf) ni perdido en otro contador";
         }
     }
-    EXPECT_EQ(evaluados, 2);
-    EXPECT_EQ(deCanal, 8);
+    EXPECT_EQ(evaluados, 4);   // #1, #2 (velocity) y #8, #9 (CC91/CC93 en reset, REQ-040)
+    EXPECT_EQ(deCanal, 6);
 }
