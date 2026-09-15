@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.17.4...v2.18.0) (2026-09-15)
+
+
+### Features
+
+* **sf:** CC91/CC93 en reset, el bus con el arnes y [#17](https://github.com/mati-araujo/watermelon-audio/issues/17)/[#18](https://github.com/mati-araujo/watermelon-audio/issues/18) medidos (S3) ([5879d64](https://github.com/mati-araujo/watermelon-audio/commit/5879d640a46332d6fd5e03dd0b47a0d2538d6581))
+* **sf:** CC91/CC93 en reset, el bus con el arnes y [#17](https://github.com/mati-araujo/watermelon-audio/issues/17)/[#18](https://github.com/mati-araujo/watermelon-audio/issues/18) medidos (S3) ([d3a7e5a](https://github.com/mati-araujo/watermelon-audio/commit/d3a7e5a24e26d03a8c22391f4db0045c8228574d))
+* **sf:** la reverb y el chorus fijos del SoundFont, con su cola (REQ-040 S2) ([91689ec](https://github.com/mati-araujo/watermelon-audio/commit/91689ec556ffe3218267bd8012944918ecf14da2))
+* **sf:** la reverb y el chorus fijos del SoundFont, con su cola (REQ-040 S2) ([203a5a7](https://github.com/mati-araujo/watermelon-audio/commit/203a5a7f62c27741d561d3785a2377d5b7d1dd1e))
+* **sf:** los ocho destinos de note-on que REQ-039 S2 dejo fuera ([2a4b504](https://github.com/mati-araujo/watermelon-audio/commit/2a4b5049928727f85569de5b2cc815e33810cf18))
+* **sf:** los ocho destinos de note-on y el filtro que S2 dejaba inerte ([7b94d7b](https://github.com/mati-araujo/watermelon-audio/commit/7b94d7b974dd07c35bcc494d0fe7fe8b946a921b))
+* **sf:** los sends de reverb y chorus por voz, en dos buses (REQ-040 S1) ([6622294](https://github.com/mati-araujo/watermelon-audio/commit/662229478841db5fc97996610096386c4f9d6fcf))
+* **sf:** los sends de reverb y chorus por voz, en dos buses (REQ-040 S1) ([f096719](https://github.com/mati-araujo/watermelon-audio/commit/f096719d8f601f696a2adb8b72c85b4a527daca0))
+
+
+### Bug Fixes
+
+* **sf:** el corte modulado por velocity sobrevive al filtro dinamico ([352f9f7](https://github.com/mati-araujo/watermelon-audio/commit/352f9f7d94561617cec4e425aa64313b4f4d54bd))
+
 ## [2.17.4](https://github.com/mati-araujo/watermelon-audio/compare/v2.17.3...v2.17.4) (2026-09-15)
 
 
