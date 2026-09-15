@@ -603,27 +603,45 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
 
     // ---- LA TABLA. Un cambio aca es una decision, y su diff es la revision. ----------
     const Row kRows[] = {
-        // #1..#4: F por el README, NO conformes medidos en 3.1 -> R con dueño (#8 paso a F en MINI-025)
-        {1, 0, Obs::LevelOn, Cls::R, 1.0, 4.94,
-         "envolvente de volumen: ataque/decay difieren de FluidSynth; dueño: MINI envolventes de tsf"},
-        {2, 0, Obs::PitchHop, Cls::R, 30.0, 600.0,
-         "mod env -> pitch: sube igual (+1200 c) pero tsf decae ~1 s antes; dueño: MINI envolventes"},
-        {3, 0, Obs::LevelOn, Cls::R, 1.0, 9.63,
-         "keynum -> decay: pendiente 20 % mas lenta que FluidSynth; dueño: MINI envolventes"},
-        // #3/#4 pitch: eran 28,44 / 38,49 con `tune` adentro del keytrack (+23 c en TODO hop
-        // estable). MINI-025 lo saco: hoy los hops estables dan 0,00 y lo que queda son hops que
-        // pisan el ataque (#3 nota 3: la referencia lee 368,89 en su primer hop) o el borde del
-        // note-off a -9..-16 dB (#4 notas 1/2/4), donde la release de tsf y la de FluidSynth
-        // difieren y el estimador de cruces lee el borde. Es el mismo dueño que nivel-on.
-        {3, 0, Obs::PitchHop, Cls::R, 3.0, 5.44,
-         "residuo en el hop del ataque de la nota 3; los hops estables dan 0,00 (MINI-025); dueño: MINI envolventes"},
-        {4, 0, Obs::LevelOn, Cls::R, 1.0, 3.21, "keynum -> hold: idem #3; dueño: MINI envolventes"},
-        {4, 0, Obs::PitchHop, Cls::R, 3.0, 19.95,
-         "residuo en los hops del borde del note-off (release); los estables dan 0,00 (MINI-025); dueño: MINI envolventes"},
-        // #5: A es velocity 127 y FluidSynth SI limita el boost a 0 dB (7,0 p-p contra 8,8 en B)
-        // aunque su README diga que no; tsf no limita (9,0 en las dos). B es la conforme.
-        {5, 1, Obs::LevelPP, Cls::R, 0.5, 2.03,
-         "LFO -> volumen con boost sobre 0 dB: FluidSynth lo recorta, tsf no; dueño: MINI envolventes/LFO"},
+        // #1..#4 (MINI-026, 2026-09-15): las envolventes de tsf contra el spec. Lo que quedaba
+        // era UNA constante —decay y release del volumen recorrian 80,13 dB en el tiempo
+        // declarado (LinuxSampler) donde SF2 §8.1.2 #36/#38 dice 100 y FluidSynth usa 96— y
+        // tres SFZ-ismos del mod env (ataque escalado por velocity, ataque lineal, release a
+        // `-level/T`). Con eso #2 pasa de 600 c a 9,5. Lo que queda en #1/#3/#4 se midio en
+        // ABSOLUTO (RMS de 20 ms sobre los dos renders) y no es envolvente: es el observable.
+        //
+        // - Los onsets de tsf llegan 4,4-4,6 ms ANTES que los de FluidSynth en toda nota (el fin
+        //   del delay de #1 coincide a 0,2 ms: el note-on es el mismo, el arranque del ataque no).
+        //   Sobre un blip de 50 ms a 2000 dB/s, 4 ms dentro de una ventana de 20 ms son 6 dB de
+        //   RMS: es el hop del click de anuncio de #1 (zona `sawb-3`) y el hop de #4 que contiene
+        //   el fin del hold (38,515 s contra 38,525). La envolvente de #1 en absoluto: pico/hold
+        //   -1,43 dB (un offset GLOBAL de nivel, tambien en #11), sustain +0,5 (FluidSynth
+        //   lineariza los 120 cB en su escala de 960: 115,2), release 100 contra 96 dB/s.
+        // - #3: +4 % de pendiente por construccion (100 contra 96), acumulados sobre 4 s de decay
+        //   de la nota 4: 2,1 dB a los 28 s. El AC pedia la pendiente a ±10 %.
+        // - Los hops de pitch de #3/#4 son el estimador de cruces sobre el transitorio de la
+        //   REFERENCIA (368,89 Hz en el primer hop del ataque; 374,34 en el borde del note-off a
+        //   2000 dB/s); los hops estables dan 0,00 desde MINI-025.
+        // Son S: el numero que la construccion explica, con su control de que no se mueva.
+        {1, 0, Obs::LevelOn, Cls::S, 0.5, 6.31,
+         "el hop del click de anuncio (50 ms, onset 4 ms distinto, 2000 dB/s): 6 dB de RMS en 20 ms; la envolvente en absoluto: -1,43 pico (offset global), +0,5 sustain (FluidSynth lineariza), release 100 vs 96 dB/s"},
+        {2, 0, Obs::PitchHop, Cls::F, 30.0, 0.0,
+         "mod env -> pitch: ataque sin escalar por velocity y convexo (fluid_convex), release al 100 %/T; 9,5 c hoy en el primer hop del ataque"},
+        {3, 0, Obs::LevelOn, Cls::S, 0.5, 2.63,
+         "keynum -> decay: +4 % de pendiente por construccion (100 dB/s del spec contra 96 de FluidSynth) sobre 4 s de decay"},
+        {3, 0, Obs::PitchHop, Cls::S, 1.0, 5.44,
+         "el estimador de cruces sobre el primer hop del ataque de la REFERENCIA (368,89 Hz); los hops estables dan 0,00 (MINI-025)"},
+        {4, 0, Obs::LevelOn, Cls::S, 0.5, 3.57,
+         "keynum -> hold: el hop que contiene el fin del hold (decay de 50 ms a 2000 dB/s) mide el onset 4-10 ms mas temprano de tsf, no la envolvente"},
+        {4, 0, Obs::PitchHop, Cls::S, 1.0, 19.95,
+         "el estimador de cruces sobre el borde del note-off de la REFERENCIA (374,34 Hz a -8 dB); los hops estables dan 0,00 (MINI-025)"},
+        // #5 A (MINI-026): NO es de tsf. La referencia SATURA a 0 dBFS —20329 muestras en 1,0000:
+        // el render con `-g 1` no tiene headroom para +6 dB— y FluidSynth 2.6.0 SI amplifica
+        // (`fluid_cb2amp`: cb < 0 -> 10^(-cb/200), issue #1374, citando el ejemplo del spec #13).
+        // tsf amplifica igual: 13,06 dB p-p en picos de 5 ms. El p-p en 50 ms de la referencia
+        // recortada es el instrumento, y se controla como tal.
+        {5, 1, Obs::LevelPP, Cls::S, 0.5, 2.03,
+         "LFO -> volumen sobre 0 dB: la referencia satura a 0 dBFS (render sin headroom); FluidSynth y tsf amplifican los dos"},
         {5, 2, Obs::LevelPP, Cls::F, 0.5, 0.0, "profundidad del LFO de volumen, ±6 dB, p-p en 50 ms"},
         {6, 0, Obs::PitchPP, Cls::F, 30.0, 0.0,
          "profundidad del vibrato: ~900 c p-p; 30 c es el 3 % que el estimador resuelve sobre un barrido"},
@@ -730,6 +748,13 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
                         << label << " S: el paso entre tonos no es el del spec (" << row.today << ") — " << row.why;
                     EXPECT_NEAR(m.stepRef, row.today, row.tol)
                         << label << " control: la referencia dejo de dar los " << row.today << " dB por paso";
+                } else {
+                    // MINI-026: un residuo que la CONSTRUCCION explica (spec contra FluidSynth, el
+                    // observable sobre un borde) sigue siendo un trinquete: si se mueve, algo
+                    // cambio en el motor, en la referencia o en el instrumento, y hay que mirarlo.
+                    EXPECT_NEAR(value, row.today, row.tol)
+                        << label << " [" << obsName(row.obs) << "] S: el residuo declarado cambio ("
+                        << row.today << " -> " << value << ") — " << row.why;
                 }
                 break;
             case Cls::R:
