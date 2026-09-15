@@ -291,10 +291,8 @@ audio/src/main/cpp/engines/KarplusStrongEngine.h::KarplusStrongEngine::process
 audio/src/main/cpp/engines/KarplusStrongEngine.h::KarplusStrongEngine::startExcitation
 audio/src/main/cpp/engines/SoundFontChorus.h::SoundFontChorus::addChorusWetFromMono
 audio/src/main/cpp/engines/SoundFontChorus.h::SoundFontChorus::clearChorusTail
-audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::clearSendEffects
 audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::drainEvents
 audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::frequencyToMidi
-audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::mixSendBusesInto
 audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::process
 audio/src/main/cpp/engines/SoundFontEngine.h::SoundFontEngine::render
 audio/src/main/cpp/engines/SoundFontManager.h::SoundFontManager::acquireActiveFont
@@ -315,6 +313,8 @@ audio/src/main/cpp/engines/SoundFontReverb.h::Comb::combClear
 audio/src/main/cpp/engines/SoundFontReverb.h::Comb::combRun
 audio/src/main/cpp/engines/SoundFontReverb.h::SoundFontReverb::addReverbWetFromMono
 audio/src/main/cpp/engines/SoundFontReverb.h::SoundFontReverb::clearReverbTail
+audio/src/main/cpp/engines/SoundFontSendBus.h::SoundFontSendBus::clearSendEffects
+audio/src/main/cpp/engines/SoundFontSendBus.h::SoundFontSendBus::mixSendBusesInto
 audio/src/main/cpp/engines/SupersawEngine.h::SupersawEngine::process
 audio/src/main/cpp/engines/SynthEngine.h::SynthEngine::smoothParam
 audio/src/main/cpp/engines/WavetableEngine.h::WavetableEngine::process

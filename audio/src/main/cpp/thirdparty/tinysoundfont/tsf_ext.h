@@ -127,6 +127,10 @@ void tsf_ext_voice_offset_envelope(tsf* f, int voiceIndex, int isAmpEnv, float a
 // donde note_on lo dejo (el offset de la region), sin salirse del sample.
 void tsf_ext_voice_add_start_offset(tsf* f, int voiceIndex, float samples);
 
+// REQ-040 S3: los sends de la voz, en 0..1 (region + moduladores resueltos al disparar, ya
+// sumados por el llamador; se saturan a 0..1 como el generador). Los lee el render por voz.
+void tsf_ext_voice_set_sends(tsf* f, int voiceIndex, float reverbSend, float chorusSend);
+
 // Suma `pan` (-0.5..0.5, la misma escala que `region->pan`: 0,1 % = 0.001) al paneo de la
 // voz y recalcula los dos factores con la ley de note_on / setup_voice (raiz cuadrada,
 // saturando en los extremos). Tiene en cuenta el panOffset del canal si hay canales.

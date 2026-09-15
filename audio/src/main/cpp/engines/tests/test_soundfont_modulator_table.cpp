@@ -178,8 +178,9 @@ TEST(SoundFontModulatorTable, LasFuentesDeCanalSonAlcanceDeS3YNoRechazoDelSpec) 
     EXPECT_EQ(t.rejections().specRejections(), 0u);
     EXPECT_EQ(t.rejections().sourceNotAtNoteOn, 1u) << "CC1 es fuente de canal: alcance de S3";
     EXPECT_EQ(t.rejections().destinationUnsupported, 0u);
-    // Y por region quedan #1 y #2 (los dos defaults de velocity): el de CC1 no entra.
-    ASSERT_EQ(laUnicaRegion(t)->mods.size(), 2u) << "quedan #1 y #2, los dos de velocity";
+    // Y por region quedan #1, #2 y —desde REQ-040 S3— #8 y #9 (CC91/CC93 en su valor de reset,
+    // porque el motor no tiene superficie de CC): el de CC1 no entra.
+    ASSERT_EQ(laUnicaRegion(t)->mods.size(), 4u) << "quedan #1, #2, #8 y #9";
 }
 
 TEST(SoundFontModulatorTable, LosContadoresSonDelArchivoYNoSeMultiplicanPorRegion) {
@@ -324,7 +325,10 @@ TEST(SoundFontModulatorTable, LoQueQuedaFueraDeGeneralUserEstaNombradoYContado) 
     ModulatorTable t;
     ASSERT_TRUE(t.buildFromFontBytes(bytes.data(), bytes.size()));
     const auto& r = t.rejections();
-    EXPECT_EQ(r.sourceNotAtNoteOn, 682u) << "los de fuente de canal cambiaron: ¿cambio el font, o el clasificador?";
+    // 682 hasta REQ-040 S3 (2026-09-15): los 618 de CC91/CC93 (309 + 309 copias del default
+    // #8/#9) pasan a evaluarse con el CC en su valor de reset de GM; quedan 64 (CC1, presion,
+    // rueda, CC22-24).
+    EXPECT_EQ(r.sourceNotAtNoteOn, 64u) << "los de fuente de canal cambiaron: ¿cambio el font, o el clasificador?";
     // 30 hasta MINI-027 (2026-09-15), que sumo los ocho destinos de fuente de nota; quedan los
     // seis INERTES de `startAddrsCoarseOffset` (amount 0), que se cuentan y no se implementan.
     EXPECT_EQ(r.destinationUnsupported, 6u) << "los de destino no aplicado cambiaron: si BAJO, re-declara la tabla "

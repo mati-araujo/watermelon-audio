@@ -63,6 +63,7 @@
 #include "tsf.h"
 #include "../../../engines/SoundFontModulatorTable.h"
 #include "../../../engines/SoundFontNoteOn.h"
+#include "../../../engines/SoundFontSendBus.h"
 
 namespace wma_test::specmidi {
 
@@ -103,8 +104,15 @@ struct Rendered {
  *                  (64), que es la granularidad con la que tsf actualiza sus
  *                  envolventes y LFO.
  */
+/**
+ * @param withSends REQ-040 S3: `true` rinde con los sends del font —los dos buses de
+ *                  `tsf_render_float_sends` mezclados por `wma::SoundFontSendBus`, EL MISMO
+ *                  objeto que produccion usa en `SoundFontEngine::render`— para juzgar #17/#18
+ *                  contra la referencia con efectos. `false` (default) es el render seco de
+ *                  siempre, con la costura en 0: identico al de antes de REQ-040.
+ */
 inline Rendered render(const std::string& sf2Path, const std::string& midPath, int rate = 44100,
-                       float gain = 0.0f, int blockSize = 512) {
+                       float gain = 0.0f, int blockSize = 512, bool withSends = false) {
     Rendered out;
 
     // Los bytes se leen UNA vez y alimentan a los dos: tsf y la tabla de moduladores.
@@ -140,6 +148,13 @@ inline Rendered render(const std::string& sf2Path, const std::string& midPath, i
     out.frames = static_cast<int>((lastSec + tailSec) * rate);
     out.stereo.assign(static_cast<size_t>(out.frames) * 2, 0.0f);
     out.sampleRate = rate;
+
+    // REQ-040 S3: los buses y las unidades, como en produccion. Con `withSends == false` los
+    // buses se llenan igual (es lo que hace el motor) y la costura en 0 deja el wet en cero.
+    wma::SoundFontSendBus sendBus;
+    sendBus.prepare(static_cast<float>(rate), blockSize);
+    sendBus.setSendScale(withSends ? 1.0f : 0.0f, withSends ? 1.0f : 0.0f);
+    std::vector<float> reverbBus(static_cast<size_t>(blockSize), 0.0f), chorusBus(static_cast<size_t>(blockSize), 0.0f);
 
     tml_message* msg = midi;
     int done = 0;
@@ -182,7 +197,9 @@ inline Rendered render(const std::string& sf2Path, const std::string& midPath, i
             }
         }
 
-        tsf_render_float(f, out.stereo.data() + static_cast<size_t>(done) * 2, n, /*mixing=*/0);
+        float* block = out.stereo.data() + static_cast<size_t>(done) * 2;
+        tsf_render_float_sends(f, block, reverbBus.data(), chorusBus.data(), n, /*mixing=*/0);
+        sendBus.mixSendBusesInto(block, reverbBus.data(), chorusBus.data(), n);
         done += n;
     }
 

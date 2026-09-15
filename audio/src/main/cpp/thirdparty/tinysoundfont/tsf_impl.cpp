@@ -207,6 +207,13 @@ extern "C" void tsf_ext_voice_add_start_offset(tsf* f, int voiceIndex, float sam
     v->sourceSamplePosition = pos;
 }
 
+extern "C" void tsf_ext_voice_set_sends(tsf* f, int voiceIndex, float reverbSend, float chorusSend) {
+    struct tsf_voice* v = voiceAt(f, voiceIndex);
+    if (!v) return;
+    v->reverbSend = reverbSend < 0.0f ? 0.0f : (reverbSend > 1.0f ? 1.0f : reverbSend);
+    v->chorusSend = chorusSend < 0.0f ? 0.0f : (chorusSend > 1.0f ? 1.0f : chorusSend);
+}
+
 extern "C" void tsf_ext_voice_add_pan(tsf* f, int voiceIndex, float pan) {
     struct tsf_voice* v = voiceAt(f, voiceIndex);
     if (!v || !v->region) return;
