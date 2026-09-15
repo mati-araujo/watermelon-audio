@@ -197,6 +197,16 @@ inline void putChunk(std::vector<uint8_t>& out, const char* id,
     if (payload.size() % 2 != 0) out.push_back(0);
 }
 
+/**
+ * Un generador de instrumento cualquiera, por su numero de §8.1.2 y su amount (MINI-026).
+ * Van en la franja de orden libre de la zona (despues de keyRange, antes de sampleModes /
+ * sampleID). Es la forma generica: un struct por MINI (`PitchGenerators`) no escala.
+ */
+struct ExtraGenerator {
+    uint16_t oper;
+    int16_t amount;
+};
+
 }  // namespace sf2
 
 /**
@@ -239,7 +249,8 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
                                                 int keyRangeHi = -1,
                                                 const sf2::ModulatorPlacement& mods = {},
                                                 int attenuationCentibels = 0,
-                                                const sf2::PitchGenerators& pitch = {}) {
+                                                const sf2::PitchGenerators& pitch = {},
+                                                const std::vector<sf2::ExtraGenerator>& extra = {}) {
     using namespace sf2;
 
     // ---- sdta: 64 samples de 16 bits. tsf pide >= un short; 64 deja lugar a
@@ -357,7 +368,8 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
     const bool declaraAtenuacion = attenuationCentibels != 0;
     const int generadoresDePitch = (pitch.scaleTuning >= 0 ? 1 : 0) + (pitch.fineTune != 0 ? 1 : 0) +
                                    (pitch.coarseTune != 0 ? 1 : 0) + (pitch.overridingRootKey >= 0 ? 1 : 0);
-    put16(ibag, (looping ? 2 : 1) + (declaraRango ? 1 : 0) + (declaraAtenuacion ? 1 : 0) + generadoresDePitch);
+    put16(ibag, static_cast<uint16_t>((looping ? 2 : 1) + (declaraRango ? 1 : 0) + (declaraAtenuacion ? 1 : 0) +
+                                      generadoresDePitch + static_cast<int>(extra.size())));
     put16(ibag, static_cast<uint16_t>(nInstGlobal + nInstZone));  // terminal
 
     std::vector<uint8_t> imod;
@@ -383,6 +395,8 @@ inline std::vector<uint8_t> makeMinimalSoundFont(uint32_t sampleRateInHeader = 2
     if (pitch.fineTune != 0) { put16(igen, kGenFineTune); put16(igen, static_cast<uint16_t>(static_cast<int16_t>(pitch.fineTune))); }
     if (pitch.coarseTune != 0) { put16(igen, kGenCoarseTune); put16(igen, static_cast<uint16_t>(static_cast<int16_t>(pitch.coarseTune))); }
     if (pitch.overridingRootKey >= 0) { put16(igen, kGenOverridingRootKey); put16(igen, static_cast<uint16_t>(pitch.overridingRootKey)); }
+    // Los genericos (MINI-026), en la misma franja.
+    for (const ExtraGenerator& g : extra) { put16(igen, g.oper); put16(igen, static_cast<uint16_t>(g.amount)); }
     // `sampleModes` va ANTES que `sampleID`: el spec de SF2 (§7.5) exige que sampleID sea el
     // ULTIMO generador de una zona de instrumento, y tsf recorre la lista en orden.
     //
