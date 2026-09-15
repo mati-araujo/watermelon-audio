@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <vector>
 #include <cmath>
 
 /**
@@ -66,6 +67,11 @@ public:
         if (mSFManager) {
             mSFManager->setOutputSampleRate(sampleRate);
         }
+        // REQ-040: los dos buses de sends, dimensionados aca (thread de control: alocar es
+        // legal). En render se leen por `.data()`; si un bloque viniera mas grande que esto,
+        // el render cae al camino sin sends en vez de escribir fuera del buffer.
+        mSendReverbBus.assign(static_cast<size_t>(maxBlockSize > 0 ? maxBlockSize : 0), 0.0f);
+        mSendChorusBus.assign(static_cast<size_t>(maxBlockSize > 0 ? maxBlockSize : 0), 0.0f);
     }
 
     void reset() override {
@@ -204,8 +210,15 @@ public:
             tsf_channel_set_volume(sf, tid, smoothed);
         }
 
-        // 3. Render all active tsf voices
-        tsf_render_float(sf, buffer, numFrames, 0);
+        // 3. Render all active tsf voices — y los dos buses de sends (REQ-040 S1). Cada voz
+        // suma `send * voz` (mono, ya atenuada por velocity, initialAttenuation, envolvente y
+        // la expresion por toque). En S1 los buses se llenan y NO se mezclan: S2 pone las dos
+        // unidades (freeverb + chorus a la FluidSynth) entre el bus y la salida.
+        if (static_cast<size_t>(numFrames) <= mSendReverbBus.size()) {
+            tsf_render_float_sends(sf, buffer, mSendReverbBus.data(), mSendChorusBus.data(), numFrames, 0);
+        } else {
+            tsf_render_float(sf, buffer, numFrames, 0);
+        }
 
         // 4. Apply expression gain
         float gain = smoothParam(PARAM_EXPRESSION, numFrames);
@@ -450,6 +463,9 @@ private:
      * el primer toque entraria con un fade-in que nadie pidio.
      */
     std::array<ParameterSmoother, MAX_TOUCHES> mTouchExprSmoothers;
+    /// REQ-040: los buses de sends del bloque en curso (mono, maxBlockSize floats). Los llena
+    /// tsf por voz; los consumen las unidades de S2. Se dimensionan en prepare().
+    std::vector<float> mSendReverbBus, mSendChorusBus;
 
     // Touch state: audio-thread-only (modified in drainEvents)
     std::array<TouchState, MAX_TOUCHES> mTouches{};

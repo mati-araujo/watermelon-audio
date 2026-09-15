@@ -65,6 +65,8 @@ typedef struct tsf_ext_started_voice {
                           // la base sobre la que un modulador de filtro SUMA
     int initialFilterQ;   // MINI-027: el Q de la region en centibeles (0..960), misma base
     int modEnvToFilterFc; // MINI-027: cuanto mod env entra al filtro en la region, en cents
+    float reverbSend;     // REQ-040: los sends de la region (gens 16/15 ya sumados preset +
+    float chorusSend;     //          instrumento), en 0..1
     double pitchTimecents;  // el pitch RESUELTO de la voz al arrancar, en cents absolutos
                             // (tecla * 100 con keytrack 100 y sin offsets): raiz + keytrack +
                             // coarse + fine + pitchCorrection (MINI-025), mas el tuning del

@@ -15,7 +15,7 @@
    [OPTIONAL] #define TSF_POW, TSF_POWF, TSF_EXPF, TSF_LOG, TSF_TAN, TSF_LOG10, TSF_SQRT to avoid math.h
 
    NOT YET IMPLEMENTED
-     - Support for ChorusEffectsSend and ReverbEffectsSend generators
+     - (watermelon-audio REQ-040: ChorusEffectsSend y ReverbEffectsSend SI, via tsf_render_float_sends)
      - Better low-pass filter without lowering performance too much
      - Support for modulators
 
@@ -194,6 +194,8 @@ TSFDEF int tsf_active_voice_count(tsf* f);
 //   flag_mixing: if 0 clear the buffer first, otherwise mix into existing data
 TSFDEF void tsf_render_short(tsf* f, short* buffer, int samples, int flag_mixing CPP_DEFAULT0);
 TSFDEF void tsf_render_float(tsf* f, float* buffer, int samples, int flag_mixing CPP_DEFAULT0);
+// watermelon-audio (REQ-040): render + los dos buses de sends (mono, `samples` cada uno).
+TSFDEF void tsf_render_float_sends(tsf* f, float* buffer, float* reverbBus, float* chorusBus, int samples, int flag_mixing CPP_DEFAULT0);
 
 // Higher level channel based functions, set up channel parameters
 //   channel: channel number
@@ -342,6 +344,14 @@ struct tsf
 	enum TSFOutputMode outputmode;
 	float outSampleRate;
 	float globalGainDB;
+	// watermelon-audio (REQ-040): los dos buses de sends, MONO, del render en curso. Los fija
+	// tsf_render_float_sends para la duracion de la llamada; en NULL el render es byte a byte el
+	// de siempre. Cada voz suma `val * gainMono * send` — la voz ya atenuada por velocity,
+	// initialAttenuation, envolvente y ganancia del canal (la expresion por toque), sin paneo:
+	// es lo que FluidSynth manda a sus unidades (fluid_rvoice_mixer: el send es sobre la voz
+	// mono, y la unidad la abre a estereo).
+	float* sendReverbBus;
+	float* sendChorusBus;
 	int* refCount;
 };
 
@@ -431,6 +441,10 @@ struct tsf_region
 	unsigned int group, offset, end, loop_start, loop_end;
 	int transpose, tune, pitch_keycenter, pitch_keytrack;
 	float attenuation, pan;
+	// watermelon-audio (REQ-040): reverbEffectsSend (16) y chorusEffectsSend (15), en 0..1.
+	// tsf los declaraba "NOT YET IMPLEMENTED"; sobre GeneralUser 11 117 de 12 311 zonas
+	// declaran reverb y 4390 chorus. Los consume tsf_voice_render en los dos buses de sends.
+	float reverbSend, chorusSend;
 	struct tsf_envelope ampenv, modenv;
 	int initialFilterQ, initialFilterFc;
 	int modEnvToPitch, modEnvToFilterFc, modLfoToFilterFc, modLfoToVolume;
@@ -556,6 +570,8 @@ static void tsf_region_operator(struct tsf_region* region, tsf_u16 genOper, unio
 		GEN_FLOAT_LIMITATTN  = 0xA0, //* .1f, min 0, max 144.0
 		GEN_FLOAT_MAX1000    = 0xB0, //min 0, max 1000
 		GEN_FLOAT_MAX1440    = 0xC0, //min 0, max 1440
+		// watermelon-audio (REQ-040): los sends de efectos, gens 15/16, en 0.1 % -> 0..1.
+		GEN_FLOAT_LIMITSEND  = 0xD0, //* .001f, min 0, max 1
 
 		_GEN_MAX = 59
 	};
@@ -578,8 +594,9 @@ static void tsf_region_operator(struct tsf_region* region, tsf_u16 genOper, unio
 		{ GEN_UINT_ADD15                   , _TSFREGIONOFFSET(unsigned int, end                  ) }, //12 EndAddrsCoarseOffset
 		{ GEN_INT   | GEN_INT_LIMIT960     , _TSFREGIONOFFSET(         int, modLfoToVolume       ) }, //13 ModLfoToVolume
 		{ 0                                , (0                                                  ) }, //   Unused
-		{ 0                                , (0                                                  ) }, //15 ChorusEffectsSend (unsupported)
-		{ 0                                , (0                                                  ) }, //16 ReverbEffectsSend (unsupported)
+		// watermelon-audio (REQ-040): los dos sends SUMAN preset + instrumento como todo GEN_FLOAT.
+		{ GEN_FLOAT | GEN_FLOAT_LIMITSEND  , _TSFREGIONOFFSET(       float, chorusSend           ) }, //15 ChorusEffectsSend
+		{ GEN_FLOAT | GEN_FLOAT_LIMITSEND  , _TSFREGIONOFFSET(       float, reverbSend           ) }, //16 ReverbEffectsSend
 		{ GEN_FLOAT | GEN_FLOAT_LIMITPAN   , _TSFREGIONOFFSET(       float, pan                  ) }, //17 Pan
 		{ 0                                , (0                                                  ) }, //   Unused
 		{ 0                                , (0                                                  ) }, //   Unused
@@ -671,6 +688,7 @@ static void tsf_region_operator(struct tsf_region* region, tsf_u16 genOper, unio
 						case GEN_FLOAT_LIMITATTN:  vfactor =  0.04f; vmin =      0.0f; vmax =   57.6f; break;
 						case GEN_FLOAT_MAX1000:    vfactor =   1.0f; vmin =      0.0f; vmax = 1000.0f; break;
 						case GEN_FLOAT_MAX1440:    vfactor =   1.0f; vmin =      0.0f; vmax = 1440.0f; break;
+						case GEN_FLOAT_LIMITSEND:  vfactor = 0.001f; vmin =      0.0f; vmax =    1.0f; break;
 						default: continue;
 					}
 					*val *= vfactor;
@@ -1303,6 +1321,10 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 	TSF_BOOL dynamicGain = (region->modLfoToVolume != 0);
 	float noteGain = 0, tmpModLfoToVolume;
 
+	// watermelon-audio (REQ-040): los buses de sends de esta llamada (mono, una muestra por
+	// frame), o NULL. Solo el modo entrelazado los alimenta: es el unico que usa el motor.
+	float *sendReverb = f->sendReverbBus, *sendChorus = f->sendChorusBus, sendReverbGain, sendChorusGain;
+
 	if (dynamicLowpass) tmpInitialFilterFc = v->initialFilterFc, tmpModLfoToFilterFc = (float)region->modLfoToFilterFc, tmpModEnvToFilterFc = v->modEnvToFilterFc;
 	else tmpInitialFilterFc = 0, tmpModLfoToFilterFc = 0, tmpModEnvToFilterFc = 0;
 
@@ -1346,6 +1368,10 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 		{
 			case TSF_STEREO_INTERLEAVED:
 				gainLeft = gainMono * v->panFactorLeft, gainRight = gainMono * v->panFactorRight;
+				// watermelon-audio (REQ-040): la ganancia de cada send, resuelta por bloque. Sin
+				// bus (o send 0) la rama por muestra no toca nada y la salida es la de siempre.
+				sendReverbGain = (sendReverb ? gainMono * region->reverbSend : 0.0f);
+				sendChorusGain = (sendChorus ? gainMono * region->chorusSend : 0.0f);
 				while (blockSamples-- && tmpSourceSamplePosition < tmpSampleEndDbl)
 				{
 					unsigned int pos = (unsigned int)tmpSourceSamplePosition, nextPos = (pos >= tmpLoopEnd && isLooping ? tmpLoopStart : pos + 1);
@@ -1358,6 +1384,9 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 
 					*outL++ += val * gainLeft;
 					*outL++ += val * gainRight;
+					if (sendReverbGain != 0.0f) *sendReverb += val * sendReverbGain;
+					if (sendChorusGain != 0.0f) *sendChorus += val * sendChorusGain;
+					sendReverb += (sendReverb != TSF_NULL); sendChorus += (sendChorus != TSF_NULL);
 
 					// Next sample.
 					tmpSourceSamplePosition += pitchRatio;
@@ -1804,6 +1833,22 @@ TSFDEF void tsf_render_float(tsf* f, float* buffer, int samples, int flag_mixing
 	for (; v != vEnd; v++)
 		if (v->playingPreset != -1)
 			tsf_voice_render(f, v, buffer, samples);
+}
+
+// watermelon-audio (REQ-040): como tsf_render_float, y ademas cada voz suma su send a los dos
+// buses MONO (`samples` floats cada uno; se limpian salvo flag_mixing). Cualquiera puede ser NULL.
+TSFDEF void tsf_render_float_sends(tsf* f, float* buffer, float* reverbBus, float* chorusBus, int samples, int flag_mixing)
+{
+	if (!flag_mixing)
+	{
+		if (reverbBus) TSF_MEMSET(reverbBus, 0, sizeof(float) * samples);
+		if (chorusBus) TSF_MEMSET(chorusBus, 0, sizeof(float) * samples);
+	}
+	f->sendReverbBus = reverbBus;
+	f->sendChorusBus = chorusBus;
+	tsf_render_float(f, buffer, samples, flag_mixing);
+	f->sendReverbBus = TSF_NULL;
+	f->sendChorusBus = TSF_NULL;
 }
 
 static void tsf_channel_setup_voice(tsf* f, struct tsf_voice* v)

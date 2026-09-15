@@ -104,6 +104,8 @@ extern "C" int tsf_ext_voices_started_by_last_note_on(const tsf* f, tsf_ext_star
             out[n].initialFilterFc = v.region->initialFilterFc;
             out[n].initialFilterQ = v.region->initialFilterQ;
             out[n].modEnvToFilterFc = v.region->modEnvToFilterFc;
+            out[n].reverbSend = v.region->reverbSend;
+            out[n].chorusSend = v.region->chorusSend;
             out[n].pitchTimecents = v.pitchInputTimecents;
         }
         ++n;
