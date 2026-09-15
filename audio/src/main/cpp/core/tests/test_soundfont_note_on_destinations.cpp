@@ -24,8 +24,9 @@
  * Y el hueco de S2 (`tsf_ext.h`, "LIMITE DECLARADO"): en una region con envolvente o LFO al
  * filtro, `tsf_voice_render` recalculaba el corte cada bloque desde `region->initialFilterFc`
  * y pisaba en el primer bloque lo que S2 habia escrito. Medido sobre GeneralUser el 2026-09-15:
- * 166 zonas de instrumento en 24 instrumentos con el velocity -> filtro INERTE. El corte es
- * ahora un campo por voz, y el test de abajo lo afirma con el mismo oraculo.
+ * 3380 de 12311 regiones en 111 presets (166 zonas de instrumento en 24 instrumentos) con el
+ * velocity -> filtro INERTE. El corte es ahora un campo por voz, y el test de abajo lo afirma
+ * con el mismo oraculo.
  */
 #include <gtest/gtest.h>
 
@@ -55,13 +56,18 @@ constexpr int kPeriod = 100;   // 441 Hz en la raiz
 constexpr int kRoot = 60;
 
 // Generadores de §8.1.2 que este archivo usa, por numero.
+constexpr uint16_t kGenStartAddrsOffset = 0;
+constexpr uint16_t kGenModEnvToPitch = 7;
 constexpr uint16_t kGenInitialFilterFc = 8;
+constexpr uint16_t kGenInitialFilterQ = 9;
 constexpr uint16_t kGenModEnvToFilterFc = 11;
+constexpr uint16_t kGenPan = 17;
 constexpr uint16_t kGenAttackModEnv = 26;
 constexpr uint16_t kGenSustainModEnv = 29;
 constexpr uint16_t kGenReleaseModEnv = 30;
 constexpr uint16_t kGenAttackVolEnv = 34;
 constexpr uint16_t kGenHoldVolEnv = 35;
+constexpr uint16_t kGenDecayVolEnv = 36;
 constexpr uint16_t kGenSustainVolEnv = 37;
 constexpr uint16_t kGenReleaseVolEnv = 38;
 
@@ -71,11 +77,13 @@ constexpr int16_t kOneSecond = 0;
 // Fuentes §8.2: velocity lineal unipolar DECRECIENTE (vale 1 - v/127: "toque suave = mas")
 // y keynum lineal unipolar creciente (vale key/127).
 constexpr uint16_t kVelocityDecreasing = wma_test::sf2::srcOper(2, false, true, false, 0);
+constexpr uint16_t kKeyIncreasing = wma_test::sf2::srcOper(3, false, false, false, 0);
 
 /// Lo que un modulador de velocity decreciente de `amount` aporta a MIDI `v`: entero si
 /// `amount` es multiplo de 127.
 constexpr int velocityContribution(int amount, int v) { return amount * (127 - v) / 127; }
 static_assert(velocityContribution(2540, 32) == 1900, "el amount tiene que ser multiplo de 127");
+static_assert(velocityContribution(254, 32) == 190, "");
 
 /// La velocity 0..1 que `tsf_note_on` trunca a EXACTAMENTE `v` (`(short)(vel * 127)`).
 float velFor(int v) { return (static_cast<float>(v) + 0.5f) / 127.0f; }
@@ -129,6 +137,14 @@ double peakAbs(const std::vector<float>& a) {
     return m;
 }
 
+wma_test::specmidi::Signal view(const std::vector<float>& out) {
+    return {out.data(), static_cast<int>(out.size() / 2), kRate};
+}
+
+double levelAt(const std::vector<float>& out, double t) {
+    return wma_test::specmidi::levelDb(view(out), t, 0.020);
+}
+
 /// Con modulador `m` en la zona global del instrumento.
 Font modulated(std::vector<ExtraGenerator> gens, const Modulator& m, bool sine = true) {
     Font f;
@@ -163,7 +179,7 @@ Font plain(std::vector<ExtraGenerator> gens, bool sine = true) {
 // atenuacion, 960 cB concava) deja la nota 48 dB abajo, y una tolerancia absoluta que sirve a
 // velocity 127 seria vacia ahi. Dos fonts con el mismo generador salen del mismo tsf, asi que lo
 // unico que separa a "modulado" de "horneado" es el redondeo de un float (timecents -> segundos
-// -> muestras): medido, < 1e-4 del pico. Un desajuste real es 10x el minimo del control o mas.
+// -> muestras): medido, 0 exacto en los ocho. Un desajuste real es 10x el minimo del control o mas.
 constexpr double kSameRel = 5e-3;
 constexpr double kDifferentRel = 0.05;
 
@@ -188,6 +204,21 @@ void expectModulatorEqualsBakedGenerator(const char* what, const Font& withMod, 
 }
 
 // ---- Los fonts de cada destino ----------------------------------------------------------
+
+// Envolvente de volumen: ataque de 0,5 s, sin decay hasta que se pida, release de 1 s.
+std::vector<ExtraGenerator> volEnv(int16_t attackTc = -1200, int16_t decayTc = kOneSecond,
+                                   int16_t sustainCb = 0, int16_t releaseTc = kOneSecond,
+                                   int16_t holdTc = kInstant) {
+    return {{kGenAttackVolEnv, attackTc}, {kGenHoldVolEnv, holdTc}, {kGenDecayVolEnv, decayTc},
+            {kGenSustainVolEnv, sustainCb}, {kGenReleaseVolEnv, releaseTc}};
+}
+
+// Mod env a pitch de +1200 c, ataque de 1 s, sustain al 100 %, envolvente de volumen plana.
+std::vector<ExtraGenerator> modEnvToPitch() {
+    return {{kGenModEnvToPitch, 1200}, {kGenAttackModEnv, kOneSecond}, {kGenSustainModEnv, 0},
+            {kGenReleaseModEnv, kOneSecond}, {kGenAttackVolEnv, kInstant}, {kGenHoldVolEnv, kInstant},
+            {kGenSustainVolEnv, 0}, {kGenReleaseVolEnv, 2400}};
+}
 
 // Filtro: corte a 6000 c (261 Hz) sobre la CUADRADA, mod env con ataque de 0,5 s y sustain al
 // 100 %, envolvente de volumen plana. `modEnvToFilterFc` lo pone cada test.
@@ -222,6 +253,144 @@ Font withoutDefaultTwo(Font f) {
 }  // namespace
 
 // ---------------------------------------------------------------------------------------
+// #34 attackVolEnv — "toque suave = ataque lento", el que GeneralUser mas usa (bronces)
+// ---------------------------------------------------------------------------------------
+
+/**
+ * AC-M027.1 (parte 1): velocity -> attackVolEnv de 2540 tc, a MIDI 32, suma 1900 tc al ataque
+ * de la region — exactamente lo que suena un font cuyo generador ya dice -1200 + 1900.
+ */
+TEST(SoundFontNoteOnDestinations, VelocityToAttackVolEnvSoundsLikeTheSummedGenerator) {
+    const auto gens = volEnv();
+    expectModulatorEqualsBakedGenerator("attackVolEnv", modulated(gens, velocityTo(kGenAttackVolEnv, 2540)),
+                                        baked(gens, kGenAttackVolEnv, velocityContribution(2540, 32)),
+                                        plain(gens), 2.5, -1.0, 32);
+}
+
+/**
+ * AC-M027.1 (parte 2): el oraculo es la FORMULA, no otro render. El ataque de volumen es lineal
+ * en amplitud (spec #34: "convex" en dB), asi que el nivel llega a -3 dB del pico a 0,707 * T
+ * con T = 2^((gen + amount * (127 - v) / 127) / 1200) s. A velocity 127 el modulador vale 0 y
+ * T = 0,5 s; a 32 vale 1900 tc y T = 2^(700/1200) = 1,498 s. El instante se busca a 5 ms.
+ */
+TEST(SoundFontNoteOnDestinations, VelocityToAttackVolEnvReachesMinusThreeDecibelsWhenTheSpecSays) {
+    const Font font = modulated(volEnv(), velocityTo(kGenAttackVolEnv, 2540));
+    for (int v : {127, 32}) {
+        const double tc = -1200.0 + velocityContribution(2540, v);
+        const double T = std::pow(2.0, tc / 1200.0);
+        const auto out = render(font, T + 0.5, -1.0, v);
+        ASSERT_FALSE(out.empty());
+        const double peak = levelAt(out, T + 0.20);
+        double tMinus3 = -1.0;
+        for (double t = 0.02; t < T + 0.2; t += 0.005) {
+            if (levelAt(out, t) >= peak - 3.0) { tMinus3 = t; break; }
+        }
+        // La ventana de 20 ms esta centrada... no: empieza en t. Sobre una rampa lineal el RMS
+        // de [t, t+20 ms] es el de t + 10 ms, asi que se corrige eso.
+        const double expected = 0.7071 * T - 0.010;
+        std::printf("  [MINI-027] attack v=%3d: T=%.3f s, -3 dB a %.3f s (formula %.3f)\n", v, T,
+                    tMinus3, expected);
+        EXPECT_NEAR(tMinus3, expected, 0.05 * T + 0.005)
+            << "v=" << v << ": el ataque llega a -3 dB a " << tMinus3 << " s; con T=" << T
+            << " la formula dice " << expected;
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// #36 decayVolEnv y #38 releaseVolEnv — los de los tambores de GeneralUser (-3986 tc)
+// ---------------------------------------------------------------------------------------
+
+/** AC-M027.2: velocity -> decayVolEnv de -2540 tc a MIDI 32 = decay de 1 s * 2^(-1900/1200). */
+TEST(SoundFontNoteOnDestinations, VelocityToDecayVolEnvSoundsLikeTheSummedGenerator) {
+    // Hold de 0,25 s, decay de 1 s hasta -100 dB (sustain 1000 cB): la pendiente cambia x3.
+    const auto gens = volEnv(kInstant, kOneSecond, 1000, kOneSecond, -2400);
+    expectModulatorEqualsBakedGenerator("decayVolEnv", modulated(gens, velocityTo(kGenDecayVolEnv, -2540)),
+                                        baked(gens, kGenDecayVolEnv, velocityContribution(-2540, 32)),
+                                        plain(gens), 1.0, -1.0, 32);
+}
+
+/** AC-M027.2: velocity -> releaseVolEnv de -2540 tc a MIDI 32, note-off a los 0,5 s. */
+TEST(SoundFontNoteOnDestinations, VelocityToReleaseVolEnvSoundsLikeTheSummedGenerator) {
+    const auto gens = volEnv(kInstant, kOneSecond, 0, kOneSecond);
+    expectModulatorEqualsBakedGenerator("releaseVolEnv", modulated(gens, velocityTo(kGenReleaseVolEnv, -2540)),
+                                        baked(gens, kGenReleaseVolEnv, velocityContribution(-2540, 32)),
+                                        plain(gens), 1.5, 0.5, 32);
+}
+
+// ---------------------------------------------------------------------------------------
+// #26 attackModEnv — el ataque del mod env, leido por el pitch
+// ---------------------------------------------------------------------------------------
+
+/** AC-M027.2: velocity -> attackModEnv de 2540 tc a MIDI 32: el barrido de +1200 c dura x3. */
+TEST(SoundFontNoteOnDestinations, VelocityToAttackModEnvSoundsLikeTheSummedGenerator) {
+    const auto gens = modEnvToPitch();
+    expectModulatorEqualsBakedGenerator("attackModEnv", modulated(gens, velocityTo(kGenAttackModEnv, 2540)),
+                                        baked(gens, kGenAttackModEnv, velocityContribution(2540, 32)),
+                                        plain(gens), 2.0, -1.0, 32);
+}
+
+// ---------------------------------------------------------------------------------------
+// #11 modEnvToFilterFc y #9 initialFilterQ — el filtro, sobre la cuadrada
+// ---------------------------------------------------------------------------------------
+
+/**
+ * AC-M027.2: velocity -> modEnvToFilterFc de 2540 c a MIDI 32 sobre una region SIN envolvente al
+ * filtro (gen 11 = 0): la voz pasa a filtro dinamico por si sola y abre 1900 c con el mod env.
+ * Es el destino que exigio el campo por voz en tsf_voice: la region no lo declara.
+ */
+TEST(SoundFontNoteOnDestinations, VelocityToModEnvToFilterFcSoundsLikeTheSummedGenerator) {
+    const auto gens = filterFont(0);
+    expectModulatorEqualsBakedGenerator(
+        "modEnvToFilterFc", withoutDefaultTwo(modulated(gens, velocityTo(kGenModEnvToFilterFc, 2540), false)),
+        withoutDefaultTwo(baked(gens, kGenModEnvToFilterFc, velocityContribution(2540, 32), false)),
+        withoutDefaultTwo(plain(gens, false)), 1.0, -1.0, 32);
+}
+
+/** AC-M027.2: velocity -> initialFilterQ de 254 cB a MIDI 32 = Q de la region + 190 cB (19 dB). */
+TEST(SoundFontNoteOnDestinations, VelocityToInitialFilterQSoundsLikeTheSummedGenerator) {
+    // Corte a 8000 c (~830 Hz), sin mod env: el Q resuena sobre los armonicos de la cuadrada.
+    std::vector<ExtraGenerator> gens = {{kGenInitialFilterFc, 8000}, {kGenInitialFilterQ, 0},
+                                        {kGenAttackVolEnv, kInstant}, {kGenHoldVolEnv, kInstant},
+                                        {kGenSustainVolEnv, 0}, {kGenReleaseVolEnv, kOneSecond}};
+    expectModulatorEqualsBakedGenerator(
+        "initialFilterQ", withoutDefaultTwo(modulated(gens, velocityTo(kGenInitialFilterQ, 254), false)),
+        withoutDefaultTwo(baked(gens, kGenInitialFilterQ, velocityContribution(254, 32), false)),
+        withoutDefaultTwo(plain(gens, false)), 0.5, -1.0, 32);
+}
+
+// ---------------------------------------------------------------------------------------
+// #0 startAddrsOffset y #17 pan
+// ---------------------------------------------------------------------------------------
+
+/** AC-M027.2: velocity -> startAddrsOffset de 254 muestras a MIDI 32 = arranca 190 muestras adentro. */
+TEST(SoundFontNoteOnDestinations, VelocityToStartAddrsOffsetSoundsLikeTheSummedGenerator) {
+    // Envolvente plana e instantanea: lo unico que cambia es DONDE arranca el sample, y sobre
+    // una senoide de periodo 100 eso es una fase distinta (190 muestras = 1,9 periodos).
+    std::vector<ExtraGenerator> gens = {{kGenAttackVolEnv, kInstant}, {kGenHoldVolEnv, kInstant},
+                                        {kGenSustainVolEnv, 0}, {kGenReleaseVolEnv, kOneSecond}};
+    expectModulatorEqualsBakedGenerator("startAddrsOffset", modulated(gens, velocityTo(kGenStartAddrsOffset, 254)),
+                                        baked(gens, kGenStartAddrsOffset, velocityContribution(254, 32)),
+                                        plain(gens), 0.2, -1.0, 32);
+}
+
+/**
+ * AC-M027.2: keynum -> pan de 254 (decimas de %) creciente: a la tecla 60 aporta 2 * 60 = 120,
+ * o sea 12 % a la derecha — lo que suena un font con `pan` = 120. Es el unico de fuente KEYNUM
+ * y el unico de nivel PRESET en GeneralUser (los dos clavecines); aca va en la global del
+ * instrumento, que es el mismo camino de resolucion.
+ */
+TEST(SoundFontNoteOnDestinations, KeyToPanSoundsLikeTheSummedGenerator) {
+    std::vector<ExtraGenerator> gens = {{kGenAttackVolEnv, kInstant}, {kGenHoldVolEnv, kInstant},
+                                        {kGenSustainVolEnv, 0}, {kGenReleaseVolEnv, kOneSecond}};
+    Modulator m;
+    m.srcOper = kKeyIncreasing;
+    m.destOper = kGenPan;
+    m.amount = 254;
+    expectModulatorEqualsBakedGenerator("pan (keynum)", modulated(gens, m), baked(gens, kGenPan, 2 * kRoot),
+                                        plain(gens), 0.2, -1.0, 100, kRoot);
+}
+
+// ---------------------------------------------------------------------------------------
 // El hueco de S2: el corte modulado en una region con envolvente al filtro
 // ---------------------------------------------------------------------------------------
 
@@ -240,6 +409,34 @@ TEST(SoundFontNoteOnDestinations, VelocityToFilterCutoffSurvivesADynamicLowpassR
         "initialFilterFc+env", modulated(gens, velocityTo(kGenInitialFilterFc, 2540), false),
         withoutDefaultTwo(baked(gens, kGenInitialFilterFc, velocityContribution(2540, 32), false)),
         withoutDefaultTwo(plain(gens, false)), 1.0, -1.0, 32);
+}
+
+/**
+ * Y el control del control: a velocity 127 un modulador decreciente vale CERO y la nota tiene
+ * que sonar como sin modulador. Si esto falla, la ext escribe algo cuando no hay nada que
+ * escribir (o "cero" no es "la region tal cual").
+ */
+TEST(SoundFontNoteOnDestinations, AtFullVelocityADecreasingModulatorLeavesTheRegionUntouched) {
+    struct Case { const char* what; Font withMod; Font without; double seconds, noteOff; };
+    const auto env = volEnv(kInstant, kOneSecond, 1000, kOneSecond, -2400);
+    const auto flt = filterFont(2400);
+    const Case cases[] = {
+        {"attackVolEnv", modulated(volEnv(), velocityTo(kGenAttackVolEnv, 2540)), plain(volEnv()), 1.0, -1.0},
+        {"decayVolEnv", modulated(env, velocityTo(kGenDecayVolEnv, -2540)), plain(env), 1.0, -1.0},
+        {"releaseVolEnv", modulated(env, velocityTo(kGenReleaseVolEnv, -2540)), plain(env), 1.0, 0.5},
+        {"attackModEnv", modulated(modEnvToPitch(), velocityTo(kGenAttackModEnv, 2540)), plain(modEnvToPitch()), 1.0, -1.0},
+        {"modEnvToFilterFc", withoutDefaultTwo(modulated(flt, velocityTo(kGenModEnvToFilterFc, 2540), false)), withoutDefaultTwo(plain(flt, false)), 0.5, -1.0},
+        {"initialFilterQ", withoutDefaultTwo(modulated(flt, velocityTo(kGenInitialFilterQ, 254), false)), withoutDefaultTwo(plain(flt, false)), 0.5, -1.0},
+        {"startAddrsOffset", modulated(volEnv(), velocityTo(kGenStartAddrsOffset, 254)), plain(volEnv()), 0.2, -1.0},
+        {"initialFilterFc+env", modulated(flt, velocityTo(kGenInitialFilterFc, 2540), false), withoutDefaultTwo(plain(flt, false)), 0.5, -1.0},
+    };
+    for (const Case& c : cases) {
+        const auto a = render(c.withMod, c.seconds, c.noteOff, 127);
+        const auto b = render(c.without, c.seconds, c.noteOff, 127);
+        ASSERT_FALSE(a.empty() || b.empty()) << c.what;
+        EXPECT_LT(maxAbsDiff(a, b) / peakAbs(a), kSameRel)
+            << c.what << ": a velocity 127 el modulador vale 0 y la nota cambio";
+    }
 }
 
 // ---------------------------------------------------------------------------------------

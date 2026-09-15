@@ -19,8 +19,10 @@
  * arnés cruzan el MISMO note-on. El renderizador de este motor es tsf + esto.
  *
  * RT: la tabla es de sólo lectura, la consulta es un índice, la suma es un bucle
- * acotado y las dos escrituras son aritmética sobre la voz. Sin alocar, sin lock,
- * sin log. El thread de audio la llama desde `drainEvents`.
+ * acotado y las escrituras son aritmética sobre la voz (dos en S2; MINI-027 sumó las
+ * ocho de los destinos que S2 dejó fuera: envolventes, Q, mod env al filtro, offset de
+ * arranque y paneo). Sin alocar, sin lock, sin log. El thread de audio la llama desde
+ * `drainEvents`.
  */
 #pragma once
 
@@ -65,11 +67,37 @@ inline int channelNoteOnWithModulators(tsf* sf, const ModulatorTable* table, int
         // cB -> dB. REEMPLAZA el término de velocity; no lo corrige (2.6).
         tsf_ext_voice_replace_velocity_gain(sf, started[i].voiceIndex, vel,
                                             c.attenuationCentibels * 0.1f);
+        const int voice = started[i].voiceIndex;
         // El corte modulado es RELATIVO al de la región: cents sobre initialFilterFc.
         if (c.filterFcCents != 0.0f) {
             tsf_ext_voice_set_filter_cutoff(
-                sf, started[i].voiceIndex,
-                static_cast<float>(started[i].initialFilterFc) + c.filterFcCents);
+                sf, voice, static_cast<float>(started[i].initialFilterFc) + c.filterFcCents);
+        }
+        // MINI-027: los ocho destinos que S2 dejó fuera. Cada uno suma al generador de la
+        // región en su unidad del spec (§8.4: "the modulator output is added to the generator")
+        // y la ext lo escribe por voz. Cero = la región tal cual: no se toca.
+        if (c.filterQCentibels != 0.0f) {
+            tsf_ext_voice_set_filter_q(
+                sf, voice, static_cast<float>(started[i].initialFilterQ) + c.filterQCentibels);
+        }
+        if (c.modEnvToFilterFcCents != 0.0f) {
+            tsf_ext_voice_set_mod_env_to_filter(
+                sf, voice, static_cast<float>(started[i].modEnvToFilterFc) + c.modEnvToFilterFcCents);
+        }
+        if (c.attackVolEnvTimecents != 0.0f || c.decayVolEnvTimecents != 0.0f ||
+            c.releaseVolEnvTimecents != 0.0f) {
+            tsf_ext_voice_offset_envelope(sf, voice, 1, c.attackVolEnvTimecents,
+                                          c.decayVolEnvTimecents, c.releaseVolEnvTimecents);
+        }
+        if (c.attackModEnvTimecents != 0.0f) {
+            tsf_ext_voice_offset_envelope(sf, voice, 0, c.attackModEnvTimecents, 0.0f, 0.0f);
+        }
+        if (c.startOffsetSamples != 0.0f) {
+            tsf_ext_voice_add_start_offset(sf, voice, c.startOffsetSamples);
+        }
+        // pan: décimas de por ciento del spec -> la escala de tsf (0,1 % = 0.001, ±0.5).
+        if (c.panTenthsOfPercent != 0.0f) {
+            tsf_ext_voice_add_pan(sf, voice, c.panTenthsOfPercent * 0.001f);
         }
     }
     return rc;

@@ -48,12 +48,19 @@ namespace sfmod {
 
 /** Destinos (`genOper`) que esta capa nombra. Los números son los del spec §8.1.2. */
 enum : std::uint16_t {
+    kDestStartAddrsOffset = 0,
     kDestInitialFilterFc = 8,
+    kDestInitialFilterQ = 9,
+    kDestModEnvToFilterFc = 11,
     kDestChorusSend = 15,
     kDestReverbSend = 16,
     kDestPan = 17,
     kDestInitialAttenuation = 48,
     kDestVibLfoToPitch = 6,
+    kDestAttackModEnv = 26,
+    kDestAttackVolEnv = 34,
+    kDestDecayVolEnv = 36,
+    kDestReleaseVolEnv = 38,
     /// "Initial Pitch" del §8.4.10 no es un generador del §8.1.2. FluidSynth lo mapea a
     /// su GEN_PITCH interno (59); se usa el mismo número para que un modulador de
     /// archivo con esa identidad REEMPLACE al default como el spec manda.
@@ -176,8 +183,29 @@ inline bool classifyNoteSource(std::uint16_t oper, NoteSource& out) {
     }
 }
 
+/**
+ * Los destinos que el note-on EVALÚA. S2 abrió con dos (atenuación y corte); MINI-027 sumó los
+ * ocho de fuente de nota que GeneralUser declara y S3 contó (`destinationUnsupported`): las
+ * tres duraciones de la envolvente de volumen, el ataque de la de modulación, cuánta
+ * envolvente entra al filtro, el Q, el offset de arranque del sample y el paneo. Lo que
+ * queda afuera sigue contado, no perdido.
+ */
 inline bool isSupportedDestination(std::uint16_t destOper) {
-    return destOper == kDestInitialAttenuation || destOper == kDestInitialFilterFc;
+    switch (destOper) {
+        case kDestInitialAttenuation:
+        case kDestInitialFilterFc:
+        case kDestStartAddrsOffset:
+        case kDestInitialFilterQ:
+        case kDestModEnvToFilterFc:
+        case kDestPan:
+        case kDestAttackModEnv:
+        case kDestAttackVolEnv:
+        case kDestDecayVolEnv:
+        case kDestReleaseVolEnv:
+            return true;
+        default:
+            return false;
+    }
 }
 
 /**
@@ -284,10 +312,22 @@ private:
 
 // ---- La evaluación al disparar (thread de audio) ---------------------------------
 
-/** Lo que una nota aporta a sus dos destinos. Unidades del spec: cB y cents. */
+/**
+ * Lo que una nota aporta a cada destino, en las unidades del spec §8.1.2: centibeles,
+ * cents, timecents, muestras y décimas de por ciento. Cero = "como la región". Los dos
+ * primeros son de S2; los ocho siguientes, de MINI-027.
+ */
 struct NoteOnContribution {
     float attenuationCentibels = 0.0f;
     float filterFcCents = 0.0f;
+    float filterQCentibels = 0.0f;       ///< #9  initialFilterQ
+    float modEnvToFilterFcCents = 0.0f;  ///< #11 modEnvToFilterFc
+    float attackModEnvTimecents = 0.0f;  ///< #26 attackModEnv
+    float attackVolEnvTimecents = 0.0f;  ///< #34 attackVolEnv
+    float decayVolEnvTimecents = 0.0f;   ///< #36 decayVolEnv
+    float releaseVolEnvTimecents = 0.0f; ///< #38 releaseVolEnv
+    float startOffsetSamples = 0.0f;     ///< #0  startAddrsOffset
+    float panTenthsOfPercent = 0.0f;     ///< #17 pan (500 = todo a la derecha)
 };
 
 namespace detail {
@@ -319,8 +359,19 @@ inline NoteOnContribution noteOnContributionsOf(const RegionModulatorList* list,
         const float c = contribution(m.amount, detail::noteSourceValue(m.primarySource, key, velocity),
                                      m.primary, detail::noteSourceValue(m.amountSource, key, velocity),
                                      m.secondary);
-        if (m.destOper == kDestInitialAttenuation) out.attenuationCentibels += c;
-        else if (m.destOper == kDestInitialFilterFc) out.filterFcCents += c;
+        switch (m.destOper) {
+            case kDestInitialAttenuation: out.attenuationCentibels += c; break;
+            case kDestInitialFilterFc: out.filterFcCents += c; break;
+            case kDestInitialFilterQ: out.filterQCentibels += c; break;
+            case kDestModEnvToFilterFc: out.modEnvToFilterFcCents += c; break;
+            case kDestAttackModEnv: out.attackModEnvTimecents += c; break;
+            case kDestAttackVolEnv: out.attackVolEnvTimecents += c; break;
+            case kDestDecayVolEnv: out.decayVolEnvTimecents += c; break;
+            case kDestReleaseVolEnv: out.releaseVolEnvTimecents += c; break;
+            case kDestStartAddrsOffset: out.startOffsetSamples += c; break;
+            case kDestPan: out.panTenthsOfPercent += c; break;
+            default: break;  // clasificado como soportado pero sin destino: no pasa
+        }
     }
     return out;
 }

@@ -102,6 +102,8 @@ extern "C" int tsf_ext_voices_started_by_last_note_on(const tsf* f, tsf_ext_star
             out[n].presetIndex = v.playingPreset;
             out[n].regionIndex = static_cast<int>(v.region - p.regions);
             out[n].initialFilterFc = v.region->initialFilterFc;
+            out[n].initialFilterQ = v.region->initialFilterQ;
+            out[n].modEnvToFilterFc = v.region->modEnvToFilterFc;
             out[n].pitchTimecents = v.pitchInputTimecents;
         }
         ++n;
@@ -143,4 +145,74 @@ extern "C" void tsf_ext_voice_set_filter_cutoff(tsf* f, int voiceIndex, float cu
     if (!v) return;
     v->initialFilterFc = cutoffCents;
     setupVoiceLowpass(f, *v);
+}
+
+// ---- MINI-027: los ocho destinos de note-on que S2 dejo fuera ----------------------
+
+extern "C" void tsf_ext_voice_set_mod_env_to_filter(tsf* f, int voiceIndex, float cents) {
+    struct tsf_voice* v = voiceAt(f, voiceIndex);
+    if (!v) return;
+    v->modEnvToFilterFc = cents;
+}
+
+extern "C" void tsf_ext_voice_set_filter_q(tsf* f, int voiceIndex, float qCentibels) {
+    struct tsf_voice* v = voiceAt(f, voiceIndex);
+    if (!v) return;
+    // tsf_note_on: QInv = 1 / 10^((Q / 10) / 20), con Q en centibeles (GEN_INT_LIMITQ: 0..960).
+    const float qDB = qCentibels / 10.0f;
+    v->lowpass.QInv = 1.0 / TSF_POW(10.0, (qDB / 20.0));
+    setupVoiceLowpass(f, *v);
+}
+
+namespace {
+
+// Multiplica una duracion en segundos por 2^(tc/1200). Un segmento que tsf pinneo en 0 s
+// ("instantaneo": generador < -11950 tc, tsf_region_envtosecs) parte de 2^(-12000/1200)
+// cuando el desplazamiento es positivo, que es lo que el spec da para -12000 + tc; con
+// desplazamiento negativo se queda en 0.
+float offsetSeconds(float seconds, float tc) {
+    if (tc == 0.0f) return seconds;
+    if (seconds <= 0.0f) {
+        if (tc <= 0.0f) return seconds;
+        seconds = tsf_timecents2Secsf(-12000.0f);
+    }
+    return seconds * tsf_timecents2Secsf(tc);
+}
+
+}  // namespace
+
+extern "C" void tsf_ext_voice_offset_envelope(tsf* f, int voiceIndex, int isAmpEnv, float attackTc,
+                                              float decayTc, float releaseTc) {
+    struct tsf_voice* v = voiceAt(f, voiceIndex);
+    if (!v) return;
+    struct tsf_voice_envelope& e = isAmpEnv ? v->ampenv : v->modenv;
+    e.parameters.attack = offsetSeconds(e.parameters.attack, attackTc);
+    e.parameters.decay = offsetSeconds(e.parameters.decay, decayTc);
+    e.parameters.release = offsetSeconds(e.parameters.release, releaseTc);
+    // Desde el principio, como note_on: la voz no rindio todavia. keynumToHold/Decay ya
+    // entraron en setup (parameters.hold/decay estan en segundos); multiplicar es correcto.
+    tsf_voice_envelope_nextsegment(&e, TSF_SEGMENT_NONE, f->outSampleRate);
+}
+
+extern "C" void tsf_ext_voice_add_start_offset(tsf* f, int voiceIndex, float samples) {
+    struct tsf_voice* v = voiceAt(f, voiceIndex);
+    if (!v || !v->region) return;
+    double pos = (double)v->region->offset + (double)samples;
+    const double lo = (double)v->region->offset;
+    const double hi = (double)v->region->end - 1.0;
+    if (pos < lo) pos = lo;
+    if (pos > hi) pos = hi;
+    v->sourceSamplePosition = pos;
+}
+
+extern "C" void tsf_ext_voice_add_pan(tsf* f, int voiceIndex, float pan) {
+    struct tsf_voice* v = voiceAt(f, voiceIndex);
+    if (!v || !v->region) return;
+    // La misma ley que tsf_channel_setup_voice: region + canal (+ lo modulado), saturando.
+    float newpan = v->region->pan + pan;
+    if (f->channels && v->playingChannel >= 0 && v->playingChannel < f->channels->channelNum)
+        newpan += f->channels->channels[v->playingChannel].panOffset;
+    if      (newpan <= -0.5f) { v->panFactorLeft = 1.0f; v->panFactorRight = 0.0f; }
+    else if (newpan >=  0.5f) { v->panFactorLeft = 0.0f; v->panFactorRight = 1.0f; }
+    else { v->panFactorLeft = TSF_SQRTF(0.5f - newpan); v->panFactorRight = TSF_SQRTF(0.5f + newpan); }
 }
