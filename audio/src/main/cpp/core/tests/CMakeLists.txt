@@ -159,6 +159,7 @@ add_executable(core_tests
     test_soundfont_default_two_identity.cpp
     test_soundfont_fine_tune_keytrack.cpp
     test_soundfont_envelopes.cpp
+    test_soundfont_note_on_destinations.cpp
     support/tml_impl.cpp
     test_sf_spec_conformance.cpp
     test_touch_expression.cpp

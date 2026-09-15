@@ -31,6 +31,7 @@ using wma_test::sf2::kGenInitialAttenuation;
 using wma_test::sf2::kGenInitialFilterFc;
 using wma_test::sf2::kGenPan;
 using wma_test::sf2::kSrcNone;
+using wma_test::sf2::kSrcKeyNumber;
 using wma_test::sf2::kSrcVelocity;
 using wma_test::sf2::ModulatorPlacement;
 using wma_test::sf2::srcOper;
@@ -190,13 +191,21 @@ TEST(SoundFontModulatorTable, LosContadoresSonDelArchivoYNoSeMultiplicanPorRegio
     EXPECT_EQ(t.rejections().specRejections(), 0u);
 }
 
-TEST(SoundFontModulatorTable, UnDestinoQueS2NoAplicaSeCuentaAparte) {
+TEST(SoundFontModulatorTable, UnDestinoQueElNoteOnNoAplicaSeCuentaAparte) {
+    // Hasta MINI-027 el ejemplo era `pan`; ahora pan se evalua. `startAddrsCoarseOffset` (4)
+    // sigue afuera (GeneralUser lo declara seis veces, todas con amount 0: inertes).
+    constexpr uint16_t kGenStartAddrsCoarseOffset = 4;
     ModulatorPlacement m;
-    m.instrumentZone.push_back(
-        {srcOper(kSrcVelocity, false, false, false, kCurveLinear), kGenPan, 500, kSrcNone, 0});
+    m.instrumentZone.push_back({srcOper(kSrcVelocity, false, false, false, kCurveLinear),
+                                kGenStartAddrsCoarseOffset, 500, kSrcNone, 0});
     const auto t = tablaDe(m);
     EXPECT_EQ(t.rejections().destinationUnsupported, 1u);
     EXPECT_EQ(t.rejections().specRejections(), 0u);
+    // Y los ocho de MINI-027 ya no caen ahi: un pan por keynum se evalua.
+    ModulatorPlacement pan;
+    pan.instrumentZone.push_back(
+        {srcOper(kSrcKeyNumber, false, false, false, kCurveLinear), kGenPan, 250, kSrcNone, 0});
+    EXPECT_EQ(tablaDe(pan).rejections().destinationUnsupported, 0u) << "pan es destino de MINI-027";
 }
 
 // ---------------------------------------------------------------------------
@@ -316,8 +325,10 @@ TEST(SoundFontModulatorTable, LoQueQuedaFueraDeGeneralUserEstaNombradoYContado) 
     ASSERT_TRUE(t.buildFromFontBytes(bytes.data(), bytes.size()));
     const auto& r = t.rejections();
     EXPECT_EQ(r.sourceNotAtNoteOn, 682u) << "los de fuente de canal cambiaron: ¿cambio el font, o el clasificador?";
-    EXPECT_EQ(r.destinationUnsupported, 30u) << "los de destino no aplicado cambiaron: si BAJO, re-declara la tabla "
-                                               "de abajo en el PR que sumo el soporte";
+    // 30 hasta MINI-027 (2026-09-15), que sumo los ocho destinos de fuente de nota; quedan los
+    // seis INERTES de `startAddrsCoarseOffset` (amount 0), que se cuentan y no se implementan.
+    EXPECT_EQ(r.destinationUnsupported, 6u) << "los de destino no aplicado cambiaron: si BAJO, re-declara la tabla "
+                                              "de abajo en el PR que sumo el soporte";
 
     // El desglose (fuente, destino) -> (cuantos, amounts distintos), derivado del archivo.
     using wma::sfmod::Modulator;
@@ -349,17 +360,23 @@ TEST(SoundFontModulatorTable, LoQueQuedaFueraDeGeneralUserEstaNombradoYContado) 
     // hay es mas relevante que lo que se creia: velocity -> ataque de la envolvente de
     // volumen ("toque suave = ataque lento") y velocity -> cantidad de envolvente al
     // filtro son TIMBRE, no relleno.
+    //
+    // RE-DECLARADA el 2026-09-15 (MINI-027): las ocho filas de abajo pasaron de "fuera" a
+    // EVALUADAS (`test_soundfont_note_on_destinations.cpp`, un test por destino contra el
+    // generador ya sumado) y salen de esta tabla. Quedan escritas para que el trinquete diga
+    // de donde viene el 6: eran 30.
+    //
+    //     5  velocity -> attackVolEnv        (34)  3000..14918 tc   Trumpet/Trombone/Muted Tpt/Brass
+    //     5  velocity -> modEnvToFilterFc    (11)  -8000/-2000/8000 los mismos bronces, Mean Saw Bass, Kick 3
+    //     3  velocity -> attackModEnv        (26)                   los tres bronces
+    //     3  velocity -> initialFilterQ      (9)                    los tres bronces
+    //     3  velocity -> startAddrsOffset    (0)                    Bagpipes
+    //     2  keynum   -> pan (nivel preset)  (17)                   los dos clavecines
+    //     2  velocity -> decayVolEnv         (36)                   Room Snare 2, Standard Kick 3
+    //     1  velocity -> releaseVolEnv       (38)                   Room Snare 2
     struct Esperado { int fuente, dest; const char* nombre; int cuantos; bool inerte; };
     const Esperado kEsperados[] = {
         {2, 4, "velocity -> startAddrsCoarseOffset", 6, true},   // amount 0: inertes
-        {2, 34, "velocity -> attackVolEnv", 5, false},           // 3000..14918 timecents
-        {2, 11, "velocity -> modEnvToFilterFc", 5, false},       // -8000 / -2000 / 8000 cents
-        {2, 26, "velocity -> attackModEnv", 3, false},
-        {2, 9, "velocity -> initialFilterQ", 3, false},
-        {2, 0, "velocity -> startAddrsOffset", 3, false},
-        {3, 17, "keynum -> pan (nivel preset)", 2, false},
-        {2, 36, "velocity -> decayVolEnv", 2, false},
-        {2, 38, "velocity -> releaseVolEnv", 1, false},
     };
     std::printf("  [REQ-039 S3] GeneralUser, destino no aplicado (fuente de nota), por destino:\n");
     int sumaEsperada = 0;
@@ -374,7 +391,7 @@ TEST(SoundFontModulatorTable, LoQueQuedaFueraDeGeneralUserEstaNombradoYContado) 
                 EXPECT_EQ(a, 0) << e.nombre << ": se declaro INERTE (amount 0) y tiene amount " << a;
         }
     }
-    EXPECT_EQ(sumaEsperada, 30) << "la tabla esperada no suma 30: el desglose de arriba esta mal escrito";
+    EXPECT_EQ(sumaEsperada, 6) << "la tabla esperada no suma 6: el desglose de arriba esta mal escrito";
     // Y ninguna fila que la tabla no nombre: un destino nuevo tiene que aparecer en el diff.
     EXPECT_EQ(porDestino.size(), sizeof(kEsperados) / sizeof(kEsperados[0]))
         << "hay pares (fuente, destino) fuera de alcance que esta tabla no nombra";

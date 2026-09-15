@@ -34,6 +34,16 @@ int tsf_get_preset_number(const tsf* f, int preset_index);
 // already live for the very same reason.
 int tsf_get_preset_key_range(const tsf* f, int preset_index, int* out_lo, int* out_hi);
 
+// ---- MINI-027: los generadores de filtro de una region, para MEDIR --------------
+//
+// Cuantas regiones del font que se shippea tienen filtro dinamico (mod env o mod LFO
+// al corte) es el numero que dice cuanto pesaba el limite de S2, y un numero que se
+// afirma se mide del arbol, no se escribe (REQ-021). Thread de control, solo lectura.
+// Devuelve 1 y escribe los tres, o 0 sin tocar nada si el preset o la region no existen.
+int tsf_ext_preset_region_count(const tsf* f, int presetIndex);
+int tsf_ext_region_filter(const tsf* f, int presetIndex, int regionIndex, int* initialFilterFc,
+                          int* modEnvToFilterFc, int* modLfoToFilterFc);
+
 // ---- REQ-039 S2: las voces que un note-on acaba de arrancar --------------------
 //
 // `tsf_note_on` calcula por voz la ganancia de velocity (`tsf.h:1619`, cableada
@@ -53,6 +63,8 @@ typedef struct tsf_ext_started_voice {
     int regionIndex;  // orden de la region dentro del preset
     int initialFilterFc;  // el corte de la region en cents absolutos (13500 = abierto):
                           // la base sobre la que un modulador de filtro SUMA
+    int initialFilterQ;   // MINI-027: el Q de la region en centibeles (0..960), misma base
+    int modEnvToFilterFc; // MINI-027: cuanto mod env entra al filtro en la region, en cents
     double pitchTimecents;  // el pitch RESUELTO de la voz al arrancar, en cents absolutos
                             // (tecla * 100 con keytrack 100 y sin offsets): raiz + keytrack +
                             // coarse + fine + pitchCorrection (MINI-025), mas el tuning del
@@ -74,11 +86,49 @@ void tsf_ext_voice_replace_velocity_gain(tsf* f, int voiceIndex, float vel, floa
 // Re-setupea el low-pass de la voz con un corte en cents absolutos, reproduciendo
 // el setup de note_on (13500 = abierto). RT-safe.
 //
-// LIMITE DECLARADO: si la region tiene `modLfoToFilterFc` o `modEnvToFilterFc`,
-// `tsf_voice_render` recalcula el corte cada bloque desde `region->initialFilterFc`
-// y pisa esto. Modular ESE caso por voz exige un campo que tsf_voice no tiene, o
-// sea un parche a tsf.h — fuera de esta etapa.
+// Hasta MINI-027 esto tenia un LIMITE DECLARADO: si la region tenia `modLfoToFilterFc`
+// o `modEnvToFilterFc`, `tsf_voice_render` recalculaba el corte cada bloque desde
+// `region->initialFilterFc` y pisaba esto en el primer bloque. Medido sobre GeneralUser
+// (2026-09-15): 3380 de 12311 regiones, en 111 presets, con el velocity -> filtro
+// INERTE (166 zonas de instrumento en 24 instrumentos). Desde MINI-027 el corte es un
+// campo POR VOZ (`tsf_voice::initialFilterFc`), esto lo escribe y el render lo lee:
+// sobrevive al bloque dinamico.
 void tsf_ext_voice_set_filter_cutoff(tsf* f, int voiceIndex, float cutoffCents);
+
+// ---- MINI-027: los ocho destinos de note-on que REQ-039 S2 dejo fuera ------------
+//
+// Cada uno REEMPLAZA por voz lo que tsf_note_on copio de la region, con el valor ya
+// modulado (generador + lo que la tabla resolvio para esta tecla y velocity). Todo RT:
+// aritmetica sobre la voz, sin alocar, sin lock, sin log. Se llaman DESPUES de
+// tsf_channel_note_on y ANTES del primer render de la voz.
+
+// Cuanto mod env entra al filtro, en cents (SF2 §8.1.2 #11), por voz. Con != 0 el
+// render trata a la voz como de filtro dinamico aunque la region no lo declare.
+void tsf_ext_voice_set_mod_env_to_filter(tsf* f, int voiceIndex, float cents);
+
+// El Q del low-pass en centibeles (#9), por voz. Re-setupea el filtro con el corte que
+// la voz tiene (el de la region o el que set_filter_cutoff dejo).
+void tsf_ext_voice_set_filter_q(tsf* f, int voiceIndex, float qCentibels);
+
+// Desplaza las tres duraciones de una envolvente por voz en TIMECENTS (#26/#34/#36/#38:
+// el modulador SUMA timecents al generador, o sea MULTIPLICA la duracion por
+// 2^(tc/1200)). `isAmpEnv` elige volumen (1) o modulacion (0). Un segmento que tsf
+// habia fijado en 0 s (generador < -11950 tc, "instantaneo") parte de 2^(-12000/1200) =
+// 0,98 ms si el desplazamiento es positivo, que es lo que el spec da para
+// -12000 + tc. Reinicia la envolvente desde el principio: la voz todavia no rindio
+// ninguna muestra, asi que es exactamente lo que note_on habria hecho con el
+// generador ya sumado.
+void tsf_ext_voice_offset_envelope(tsf* f, int voiceIndex, int isAmpEnv, float attackTc,
+                                   float decayTc, float releaseTc);
+
+// Corre el punto de arranque del sample `samples` muestras (#0, startAddrsOffset) desde
+// donde note_on lo dejo (el offset de la region), sin salirse del sample.
+void tsf_ext_voice_add_start_offset(tsf* f, int voiceIndex, float samples);
+
+// Suma `pan` (-0.5..0.5, la misma escala que `region->pan`: 0,1 % = 0.001) al paneo de la
+// voz y recalcula los dos factores con la ley de note_on / setup_voice (raiz cuadrada,
+// saturando en los extremos). Tiene en cuenta el panOffset del canal si hay canales.
+void tsf_ext_voice_add_pan(tsf* f, int voiceIndex, float pan);
 
 #ifdef __cplusplus
 }
