@@ -36,6 +36,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -178,10 +179,10 @@ bool waitForValue(WmaEngine* e, int index, float expected,
     return false;
 }
 
-/// Las cuatro causas por las que `waitForMeasurement()` puede vencer. Son la MISMA
+/// Las cinco causas por las que `waitForMeasurement()` puede vencer. Son la MISMA
 /// observacion desde afuera —un `false`— y piden arreglos DISTINTOS, que es por lo que
-/// existe este enum (MINI-008).
-enum class TimeoutCause { SinSnapshot, SeguiaAvanzando, RingPisado, Detenido };
+/// existe este enum (MINI-008; la quinta es de MINI-029).
+enum class TimeoutCause { SinSnapshot, LecturaVieja, SeguiaAvanzando, RingPisado, Detenido };
 
 /// La decision, PURA y separada de la observacion — y esa separacion no es estetica.
 ///
@@ -193,9 +194,14 @@ enum class TimeoutCause { SinSnapshot, SeguiaAvanzando, RingPisado, Detenido };
 ///
 /// Asi las cuatro ramas se ejercen sin threads, sin audio y sin timing: el test es
 /// determinista por construccion en vez de por suerte.
-TimeoutCause classifyTimeout(bool everRead, float lastFrames, float lastDropped,
-                             long long quietMs, int timeoutMs) {
+TimeoutCause classifyTimeout(bool everRead, bool onlyStaleReadings, float lastFrames,
+                             float lastDropped, long long quietMs, int timeoutMs) {
     if (!everRead) return TimeoutCause::SinSnapshot;
+    // MINI-029 — va ANTES que las otras tres: si lo unico no-NaN que se vio es
+    // anterior a la marca, la pregunta no es "por que no avanzo" sino "por que el
+    // objetivo nuevo nunca produjo una lectura". Es la cara B del flake: el ring se
+    // descarto sin contar y el thread no volvio a publicar.
+    if (onlyStaleReadings) return TimeoutCause::LecturaVieja;
     // El umbral es generoso a proposito: no mide el ritmo del analisis, solo separa
     // "estaba trabajando" de "se planto". Un cuarto del techo es holgado para las dos.
     if (lastFrames >= 0.0f && quietMs * 4 < timeoutMs) return TimeoutCause::SeguiaAvanzando;
@@ -207,6 +213,11 @@ const char* describeTimeoutCause(TimeoutCause c) {
     switch (c) {
         case TimeoutCause::SinSnapshot:
             return "el snapshot NUNCA estuvo disponible — el afinador no publico nada.";
+        case TimeoutCause::LecturaVieja:
+            return "la unica medicion disponible es del OBJETIVO ANTERIOR (framesAnalyzed no "
+                   "paso la marca): el objetivo nuevo nunca produjo una lectura. O no se "
+                   "aplico, o lo que se alimento se descarto sin contar (MINI-029, causa B). "
+                   "Mirar el orden set_target / alimentacion, no el techo.";
         case TimeoutCause::SeguiaAvanzando:
             return "el analisis SEGUIA AVANZANDO: el techo quedo corto para este entorno.";
         case TimeoutCause::RingPisado:
@@ -242,28 +253,40 @@ const char* describeTimeoutCause(TimeoutCause c) {
 /// **0 de 40 con la maquina a `load average` 140**, ni **0 de 6** con la suite entera a
 /// `-j10`. 86 corridas, cero fallos: no habia con que validar el arreglo que se iba a hacer.
 ///
-/// La razon de fondo por la que (2) es inalcanzable y no lenta esta en `feedTone()`: regula
-/// por tanda con un techo de 500 ms y, si no llega, SIGUE ALIMENTANDO igual.
+/// La razon de fondo por la que (2) era inalcanzable y no lenta estaba en `feedTone()`: regulaba
+/// por tanda con un techo de 500 ms y, si no llegaba, SEGUIA ALIMENTANDO igual. MINI-029 le saco
+/// esa escapatoria (ver `feedTone`).
+///
+/// 🔴 `afterFrames` ES LA MARCA DE AGUA (MINI-029, causa B). Una lectura no-NaN NO alcanza
+/// cuando el objetivo acaba de cambiar: el snapshot sigue publicando los cents de la cuerda
+/// ANTERIOR hasta el primer publish posterior a la aplicacion, y "esperar a que exista una
+/// lectura" no es "esperar a que exista una lectura DEL OBJETIVO NUEVO". Como cada publish
+/// avanza `framesAnalyzed`, una lectura con `framesAnalyzed <= afterFrames` es, por
+/// construccion, anterior a la marca: se sigue esperando, y si vence se nombra como quinta
+/// causa en vez de dejar que `EXPECT_NEAR` compare contra una medicion de otra cuerda —
+/// que es exactamente como salio el rojo del 2026-09-11 (1,0000 c contra 2,0 esperados).
 ::testing::AssertionResult waitForMeasurement(
-        WmaEngine* e, std::array<float, WMA_TUNER_SNAPSHOT_VALUES>& out, int timeoutMs = 3000) {
+        WmaEngine* e, std::array<float, WMA_TUNER_SNAPSHOT_VALUES>& out, int timeoutMs = 3000,
+        float afterFrames = -1.0f) {
     using clock = std::chrono::steady_clock;
     const auto start = clock::now();
     const auto deadline = start + std::chrono::milliseconds(timeoutMs);
 
     bool everRead = false;
+    bool sawStale = false;
     float lastFrames = -1.0f;
     float lastDropped = -1.0f;
     auto lastAdvance = start;
 
+    // Una lectura no-NaN por debajo de la marca es del objetivo anterior: no cuenta, se anota.
     while (clock::now() < deadline) {
         if (wma_tuner_get_snapshot(e, out.data())) {
             everRead = true;
-            if (!std::isnan(out[kSnapCents])) return ::testing::AssertionSuccess();
-            const float frames = out[kSnapFramesAnalyzed];
-            if (frames > lastFrames) {
-                lastFrames = frames;
-                lastAdvance = clock::now();
-            }
+            const bool fresh = out[kSnapFramesAnalyzed] > afterFrames;
+            if (!std::isnan(out[kSnapCents]) && fresh) return ::testing::AssertionSuccess();
+            if (!std::isnan(out[kSnapCents])) sawStale = true;
+            if (out[kSnapFramesAnalyzed] > lastFrames) lastAdvance = clock::now();
+            lastFrames = std::max(lastFrames, out[kSnapFramesAnalyzed]);
             lastDropped = out[kSnapDroppedFrames];
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -274,13 +297,77 @@ const char* describeTimeoutCause(TimeoutCause c) {
     const auto quietMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                              clock::now() - lastAdvance).count();
 
-    const TimeoutCause causa = classifyTimeout(everRead, lastFrames, lastDropped,
+    const TimeoutCause causa = classifyTimeout(everRead, sawStale, lastFrames, lastDropped,
                                                quietMs, timeoutMs);
     return ::testing::AssertionFailure()
            << "waitForMeasurement vencio a los " << elapsed << " ms (techo " << timeoutMs
            << "): " << describeTimeoutCause(causa)
-           << "  [frames=" << lastFrames << " pisados=" << lastDropped
-           << " sin avanzar hace " << quietMs << " ms]";
+           << "  [frames=" << lastFrames << " marca=" << afterFrames
+           << " pisados=" << lastDropped << " sin avanzar hace " << quietMs << " ms]";
+}
+
+/**
+ * Cuantas veces el thread de analisis APLICO un objetivo pedido por el consumidor
+ * (`AnalysisThread::targetAppliedByUser()`, REQ-030). Es el seam que MINI-029 eligio en vez
+ * de sumar un campo al snapshot: ya existia, y la ventana que mide —entre `set_target` y el
+ * tick que lo aplica— no es un defecto de contrato para un consumidor con audio en tiempo
+ * real (un tick, <= 46 ms). Para el test si importa, y mucho: ver `waitForTargetApplied`.
+ */
+uint64_t targetApplications(WmaEngine* e) {
+    std::lock_guard<std::mutex> lock(e->analysisMutex);
+    return e->analysisThread ? e->analysisThread->targetAppliedByUser() : 0;
+}
+
+/**
+ * Espera a que el thread haya aplicado un objetivo MAS que `before`.
+ *
+ * 🔴 POR QUE SE ESPERA ESTO ANTES DE ALIMENTAR (MINI-029, causa A). El tick que aplica un
+ * objetivo hace `skipToNewest()`: descarta lo que haya sin leer en el ring, y esos frames
+ * NO pasan por `framesAnalyzed` (es una decision del lector, no un atraso — ver
+ * `AnalysisRing::skipToNewest`). Alimentar ANTES de que se aplique es regalarle al skip lo
+ * que se acaba de empujar: medido, `set_target` seguido de 6144 frames dentro de la siesta
+ * de 5 ms del thread dejaba un deficit de 6144 que la regulacion anterior de `feedTone`
+ * (por `framesAnalyzed`, con margen de 4096) no alcanzaba NUNCA — 30 tandas de 500 ms,
+ * 15,03 s en 10 de 15, la firma exacta del test "verde en 16 s" del CI. Con el objetivo
+ * aplicado sobre el ring vacio: deficit 0, 20 ms en 15 de 15.
+ *
+ * El thread aplica en su proximo tick aunque el ring este vacio (la siesta es de 5 ms), asi
+ * que esto no necesita audio y cuesta menos de un tick.
+ */
+::testing::AssertionResult waitForTargetApplied(WmaEngine* e, uint64_t before,
+                                                int timeoutMs = 1000) {
+    if (wma_test::waitUntil([&] { return targetApplications(e) > before; },
+                            std::chrono::milliseconds(timeoutMs))) {
+        return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure()
+           << "el thread de analisis no aplico el objetivo en " << timeoutMs
+           << " ms (aplicaciones: " << targetApplications(e) << ", esperaba > " << before
+           << "): o no esta corriendo, o el ring no tiene rate todavia";
+}
+
+/**
+ * `framesAnalyzed` AHORA, con una lectura COHERENTE del snapshot — nunca 0 por una rota.
+ *
+ * 🔴 Es [[una-lectura-rota-no-es-cero]] del lado de la C API (MINI-029, causa B). `read()`
+ * devuelve false tanto si nunca se publico como si el escritor estaba a mitad de un publish
+ * y sus reintentos se agotaron; `hasData()` separa los dos casos. La version anterior de
+ * `feedTone` hacia `baseline = 0` en los dos, y con `framesAnalyzed` ya en 65536 por la
+ * primera cuerda eso satisfacia sola su compuerta: 65536 frames en milisegundos, el tick
+ * siguiente aplicaba el objetivo y descartaba el ring ANTES de `read()` —o sea sin contar la
+ * vuelta— y el snapshot se quedaba para siempre con el 1,0000 de la cuerda anterior.
+ * Forzado: 6 de 10 con esa firma exacta, 4 de 10 `RingPisado`.
+ */
+float analysedFramesNow(WmaEngine* e) {
+    std::array<float, WMA_TUNER_SNAPSHOT_VALUES> probe{};
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        if (wma_tuner_get_snapshot(e, probe.data())) return probe[kSnapFramesAnalyzed];
+        if (!e->analysisSnapshot || !e->analysisSnapshot->hasData()) return 0.0f;  // nunca publico
+        std::this_thread::yield();   // el escritor esta a mitad de un publish
+    }
+    ADD_FAILURE() << "64 lecturas del snapshot salieron rotas seguidas: el escritor no termina "
+                     "un publish, y eso no es una carrera, es un defecto";
+    return 0.0f;
 }
 
 /// Empuja el rate negociado hasta el `InputNode`, por el mismo camino que un
@@ -490,8 +577,11 @@ TEST_F(TunerApiTest, ARateChangeMidSessionReachesTheSnapshotWithoutARestart) {
 // 4.0 — EL CABLEADO: el afinador mide de verdad
 // ---------------------------------------------------------------------------
 
-/// Un seno de `hz` alimentado por el camino de captura, en bloques.
-void feedTone(WmaEngine* engine, double hz, int rate, int blocks, int blockFrames);
+/// Un seno de `hz` alimentado por el camino de captura, en bloques. Devuelve fallo —no
+/// sigue alimentando— si el analisis no hace lugar en el ring dentro de `stallCap`.
+::testing::AssertionResult feedTone(WmaEngine* engine, double hz, int rate, int blocks,
+                                    int blockFrames,
+                                    std::chrono::milliseconds stallCap = std::chrono::seconds(30));
 
 /**
  * TAREA 4.0.1. Con objetivo empujado, el snapshot publica **cents reales**.
@@ -512,7 +602,7 @@ TEST_F(TunerApiTest, WithATargetTheSnapshotPublishesRealCents) {
     // Un tono un cent por encima del objetivo. 1 cent es DIEZ VECES el presupuesto,
     // asi que un estimador que devolviera 0 no pasaria.
     const double detuned = target * std::pow(2.0, 1.0 / 1200.0);
-    feedTone(mWma, detuned, kFirstRate, kWarmupBlocks, kBlockFrames);
+    ASSERT_TRUE(feedTone(mWma, detuned, kFirstRate, kWarmupBlocks, kBlockFrames));
 
     auto buf = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, buf))
@@ -542,7 +632,7 @@ TEST_F(TunerApiTest, WithoutATargetItReportsNoLockInsteadOfGuessing) {
     negotiateCaptureRate(mWma, kFirstRate);
     ASSERT_TRUE(wma_tuner_start(mWma));            // sin set_target
 
-    feedTone(mWma, 110.0, kFirstRate, 200, kBlockFrames);
+    ASSERT_TRUE(feedTone(mWma, 110.0, kFirstRate, 200, kBlockFrames));
 
     auto buf = sentinelBuffer();
     ASSERT_TRUE(waitForSnapshot(mWma, buf));
@@ -566,19 +656,40 @@ TEST_F(TunerApiTest, ChangingTheTargetRestartsTheIntegration) {
     negotiateCaptureRate(mWma, kFirstRate);
     ASSERT_TRUE(wma_tuner_set_target(mWma, 110.0f));
     ASSERT_TRUE(wma_tuner_start(mWma));
+    // El primer objetivo se aplica en el primer tick del thread, sobre el ring vacio. Se
+    // espera igual: que el arranque del thread sea mas rapido que tres tandas es timing, no
+    // construccion (MINI-029).
+    ASSERT_TRUE(waitForTargetApplied(mWma, 0));
 
-    feedTone(mWma, 110.0 * std::pow(2.0, 1.0 / 1200.0), kFirstRate, kWarmupBlocks, kBlockFrames);
+    ASSERT_TRUE(feedTone(mWma, 110.0 * std::pow(2.0, 1.0 / 1200.0), kFirstRate, kWarmupBlocks, kBlockFrames));
     auto first = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, first));
     ASSERT_NEAR(first[kSnapCents], 1.0f, 0.1f);
 
     // Otra cuerda: A2 -> D3, y el tono nuevo esta 2 cents por encima de ESE objetivo.
+    //
+    // MINI-029 — EL ORDEN ES PARTE DEL TEST. Primero se espera a que el thread APLIQUE el
+    // objetivo (su tick descarta el ring sin contar: alimentar antes es regalarle lo que se
+    // empuja), y recien despues se toma la marca de agua: todo publish posterior avanza
+    // `framesAnalyzed`, asi que una lectura con `framesAnalyzed <= marca` es de la cuerda
+    // anterior y `waitForMeasurement` no la acepta como la segunda medicion.
+    //
+    // 🔴 Sacar SOLO esta espera deja el test verde (medido 10/10): con `feedTone` regulando
+    // por lugar, el skip que caiga a mitad de la alimentacion ya no desfasa nada. Se queda
+    // igual, por dos razones que no son de veredicto sino de MARGEN: (1) con el objetivo
+    // aplicado antes de alimentar, el strobe recibe los 65536 frames enteros, no 65536 menos
+    // hasta un ring (8192) — y necesita 53248, o sea que el margen pasa de una ventana a
+    // tres; (2) la marca de agua solo es sonora tomada DESPUES de la aplicacion: antes, un
+    // publish de lo que quedaba de la cuerda anterior la pasa con los cents viejos.
     const double second = 146.832;
+    const uint64_t applied = targetApplications(mWma);
     ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(second)));
-    feedTone(mWma, second * std::pow(2.0, 2.0 / 1200.0), kFirstRate, kWarmupBlocks, kBlockFrames);
+    ASSERT_TRUE(waitForTargetApplied(mWma, applied));
+    const float mark = analysedFramesNow(mWma);
+    ASSERT_TRUE(feedTone(mWma, second * std::pow(2.0, 2.0 / 1200.0), kFirstRate, kWarmupBlocks, kBlockFrames));
 
     auto buf = sentinelBuffer();
-    ASSERT_TRUE(waitForMeasurement(mWma, buf));
+    ASSERT_TRUE(waitForMeasurement(mWma, buf, /*timeoutMs=*/3000, mark));
 
     // MINI-008 — LA GUARDA QUE ESTE TEST NO TENIA Y SUS TRES HERMANOS SI.
     //
@@ -626,43 +737,110 @@ TEST_F(TunerApiTest, ChangingTheTargetRestartsTheIntegration) {
 TEST(TunerTimeoutDiagnosis, EachCauseIsClassifiedApart) {
     constexpr int kTecho = 3000;
 
-    EXPECT_EQ(classifyTimeout(/*everRead=*/false, -1.0f, -1.0f, 0, kTecho),
+    EXPECT_EQ(classifyTimeout(/*everRead=*/false, false, -1.0f, -1.0f, 0, kTecho),
               TimeoutCause::SinSnapshot);
 
     // Avanzo hace 100 ms contra un techo de 3000: estaba trabajando.
-    EXPECT_EQ(classifyTimeout(true, 4096.0f, 0.0f, 100, kTecho),
+    EXPECT_EQ(classifyTimeout(true, false, 4096.0f, 0.0f, 100, kTecho),
               TimeoutCause::SeguiaAvanzando);
 
     // Se planto hace 2 s Y hubo frames pisados: el ring desbordo.
-    EXPECT_EQ(classifyTimeout(true, 4096.0f, 512.0f, 2000, kTecho),
+    EXPECT_EQ(classifyTimeout(true, false, 4096.0f, 512.0f, 2000, kTecho),
               TimeoutCause::RingPisado);
 
     // Se planto y no piso nada: ni lento ni desbordado.
-    EXPECT_EQ(classifyTimeout(true, 4096.0f, 0.0f, 2000, kTecho),
+    EXPECT_EQ(classifyTimeout(true, false, 4096.0f, 0.0f, 2000, kTecho),
               TimeoutCause::Detenido);
+
+    // MINI-029 — lo unico no-NaN que se vio era anterior a la marca. Gana sobre las otras
+    // tres aunque el analisis haya seguido avanzando o haya pisado: la pregunta que hay que
+    // contestar es por que el objetivo nuevo no produjo lectura, no cuanto tardo.
+    EXPECT_EQ(classifyTimeout(true, true, 4096.0f, 0.0f, 100, kTecho),
+              TimeoutCause::LecturaVieja);
+    EXPECT_EQ(classifyTimeout(true, true, 4096.0f, 512.0f, 2000, kTecho),
+              TimeoutCause::LecturaVieja);
+    // Pero sin snapshot no hay lectura vieja que nombrar: el orden de las dos primeras importa.
+    EXPECT_EQ(classifyTimeout(false, true, -1.0f, -1.0f, 0, kTecho),
+              TimeoutCause::SinSnapshot);
 
     // 🔴 EL BORDE QUE SEPARA LAS DOS LECTURAS OPUESTAS. Justo del lado de adentro dice
     // "subi el techo"; justo del lado de afuera dice "no lo subas". Sin fijarlo, mover el
     // umbral cambiaria la recomendacion sin que nada se pusiera rojo.
-    EXPECT_EQ(classifyTimeout(true, 4096.0f, 0.0f, kTecho / 4 - 1, kTecho),
+    EXPECT_EQ(classifyTimeout(true, false, 4096.0f, 0.0f, kTecho / 4 - 1, kTecho),
               TimeoutCause::SeguiaAvanzando);
-    EXPECT_EQ(classifyTimeout(true, 4096.0f, 0.0f, kTecho / 4, kTecho),
+    EXPECT_EQ(classifyTimeout(true, false, 4096.0f, 0.0f, kTecho / 4, kTecho),
               TimeoutCause::Detenido);
 
-    // Y que cada causa DIGA algo distinto: cuatro ramas con el mismo texto no diagnostican.
+    // Y que cada causa DIGA algo distinto: cinco ramas con el mismo texto no diagnostican.
     const std::string a = describeTimeoutCause(TimeoutCause::SinSnapshot);
     const std::string b = describeTimeoutCause(TimeoutCause::SeguiaAvanzando);
     const std::string c = describeTimeoutCause(TimeoutCause::RingPisado);
     const std::string d = describeTimeoutCause(TimeoutCause::Detenido);
-    EXPECT_NE(a, b); EXPECT_NE(a, c); EXPECT_NE(a, d);
-    EXPECT_NE(b, c); EXPECT_NE(b, d); EXPECT_NE(c, d);
+    const std::string e = describeTimeoutCause(TimeoutCause::LecturaVieja);
+    EXPECT_NE(a, b); EXPECT_NE(a, c); EXPECT_NE(a, d); EXPECT_NE(a, e);
+    EXPECT_NE(b, c); EXPECT_NE(b, d); EXPECT_NE(b, e);
+    EXPECT_NE(c, d); EXPECT_NE(c, e); EXPECT_NE(d, e);
 
     // Y que SOLO la rama de "seguia avanzando" mande a tocar el techo: es la unica lectura
-    // que justifica ese arreglo, y las otras tres lo desaconsejan explicitamente.
+    // que justifica ese arreglo, y las otras cuatro lo desaconsejan explicitamente.
     EXPECT_NE(b.find("techo quedo corto"), std::string::npos);
     EXPECT_EQ(a.find("techo quedo corto"), std::string::npos);
     EXPECT_EQ(c.find("techo quedo corto"), std::string::npos);
     EXPECT_EQ(d.find("techo quedo corto"), std::string::npos);
+    EXPECT_EQ(e.find("techo quedo corto"), std::string::npos);
+    EXPECT_NE(e.find("OBJETIVO ANTERIOR"), std::string::npos);
+}
+
+/**
+ * MINI-029 (AC-M029.3) — EL CONTROL DE LA CONTRAPRESION: sin el, la escapatoria vuelve.
+ *
+ * `feedTone` sobre un motor cuyo analisis NO drena tiene que DEVOLVER FALLO nombrandolo, no
+ * empujar igual. El consumidor muerto se construye por el seam interno —se para el thread y
+ * se deja el escritor enganchado—, que es la unica forma de tener un ring lleno sin lector
+ * desde afuera de la C API. El techo corto es a proposito: se prueba el veredicto, no la
+ * paciencia (misma razon que `ATimeoutNamesItsCauseInsteadOfJustFailing`).
+ *
+ * Mutante que lo mata: devolverle a `feedTone` el "si no llega, sigue alimentando" de antes.
+ * Con eso esto termina en verde y en 16 s — exactamente el regimen que costo cuatro rojos.
+ */
+TEST_F(TunerApiTest, TheFeederFailsInsteadOfOverrunningADeadConsumer) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_set_target(mWma, 110.0f));
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    ASSERT_TRUE(waitForTargetApplied(mWma, 0));
+
+    {
+        std::lock_guard<std::mutex> lock(mWma->analysisMutex);
+        ASSERT_NE(mWma->analysisThread, nullptr);
+        mWma->analysisThread->stop();      // el lector se va; el escritor sigue enganchado
+    }
+
+    const auto r = feedTone(mWma, 110.0, kFirstRate, kWarmupBlocks, kBlockFrames,
+                            /*stallCap=*/std::chrono::milliseconds(300));
+    // EXPECT y no ASSERT: si esto falla, lo que sigue es la EVIDENCIA de por que importa
+    // (el `dropped` de abajo), y un ASSERT la taparia.
+    EXPECT_FALSE(r) << "el ring no tiene lector y feedTone dijo que alimento todo";
+    if (!r) {
+        const std::string msg = r.message();
+        EXPECT_NE(msg.find("no hizo lugar"), std::string::npos) << msg;
+        EXPECT_NE(msg.find("NO se alimento igual"), std::string::npos) << msg;
+    }
+
+    // Y NO piso nada: lo que no entro no se escribio. `droppedFrames` lo cuenta el LECTOR al
+    // leer, asi que se lo vuelve a poner a drenar y se le pregunta a el. Con la escapatoria
+    // de antes esto daba decenas de miles de frames pisados — es el `dropped` > 0 que
+    // AC-M029.3 pide reproducir sin carga.
+    {
+        std::lock_guard<std::mutex> lock(mWma->analysisMutex);
+        mWma->analysisThread->start(kFirstRate);
+    }
+    ASSERT_TRUE(wma_test::waitUntil([&] { return mWma->analysisRing->availableFrames() == 0; }))
+        << "el lector reanudado no vacio el ring";
+    EXPECT_EQ(mWma->analysisRing->droppedFrames(), 0u)
+        << "feedTone siguio escribiendo sobre un ring sin lector: eso es la escapatoria";
+
+    wma_tuner_stop(mWma);
 }
 
 TEST_F(TunerApiTest, ATimeoutNamesItsCauseInsteadOfJustFailing) {
@@ -694,6 +872,72 @@ TEST_F(TunerApiTest, ATimeoutNamesItsCauseInsteadOfJustFailing) {
 }
 
 /**
+ * MINI-029 (AC-M029.2) — EL AUTO-TEST DE LA QUINTA CAUSA, sobre el camino real.
+ *
+ * Es la cara B del flake, construida SIN timing: el thread parado hace de siesta infinita.
+ * Con el objetivo nuevo pendiente y el ring lleno de la cuerda nueva, el primer tick al
+ * reanudar aplica el objetivo y hace `skipToNewest()` ANTES de `read()` — el ring queda
+ * vacio sin que nadie cuente una vuelta (`dropped` sigue en 0), no hay publish, y el
+ * snapshot conserva la medicion de la cuerda anterior. Es exactamente lo que el CI leyo el
+ * 2026-09-11: 1,0000 c contra 2,0, `dropped` 0, en 868 ms.
+ *
+ * Lo que se afirma es el DIAGNOSTICO: que `waitForMeasurement` con la marca de agua no tome
+ * esa lectura por la segunda medicion, y que al vencer diga "objetivo anterior" y no mande a
+ * subir el techo. Sin la marca, este mismo escenario devolvia exito con la lectura vieja y
+ * el rojo caia en `EXPECT_NEAR` — que es donde nadie puede leer la causa.
+ */
+TEST_F(TunerApiTest, AStaleReadingIsNamedNotMistakenForTheSecondMeasurement) {
+    startAt(kFirstRate, 0);
+    negotiateCaptureRate(mWma, kFirstRate);
+    ASSERT_TRUE(wma_tuner_set_target(mWma, 110.0f));
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    ASSERT_TRUE(waitForTargetApplied(mWma, 0));
+    ASSERT_TRUE(feedTone(mWma, 110.0 * std::pow(2.0, 1.0 / 1200.0), kFirstRate, kWarmupBlocks, kBlockFrames));
+    auto first = sentinelBuffer();
+    ASSERT_TRUE(waitForMeasurement(mWma, first));
+    ASSERT_NEAR(first[kSnapCents], 1.0f, 0.1f);
+
+    // El lector se va (y con el, la posibilidad de que un tick caiga a mitad de camino);
+    // el escritor sigue enganchado.
+    ASSERT_TRUE(wma_test::waitUntil([&] { return mWma->analysisRing->availableFrames() == 0; }))
+        << "el ring no termino de drenarse";
+    {
+        std::lock_guard<std::mutex> lock(mWma->analysisMutex);
+        mWma->analysisThread->stop();
+    }
+    const float mark = analysedFramesNow(mWma);
+
+    // Objetivo nuevo pendiente y un ring ENTERO de la cuerda nueva sin leer: 32 bloques de
+    // 256 son 8192, justo la capacidad, asi que entran sin pisar nada.
+    const double second = 146.832;
+    ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(second)));
+    ASSERT_TRUE(feedTone(mWma, second * std::pow(2.0, 2.0 / 1200.0), kFirstRate,
+                         static_cast<int>(wma::analysis::AnalysisRing::kCapacityFrames) / kBlockFrames,
+                         kBlockFrames));
+
+    // Al reanudar, el primer tick aplica el objetivo y descarta el ring antes de leerlo.
+    {
+        std::lock_guard<std::mutex> lock(mWma->analysisMutex);
+        mWma->analysisThread->start(kFirstRate);
+    }
+    ASSERT_TRUE(wma_test::waitUntil([&] { return mWma->analysisRing->availableFrames() == 0; }))
+        << "el lector reanudado no vacio el ring";
+
+    auto buf = sentinelBuffer();
+    const auto r = waitForMeasurement(mWma, buf, /*timeoutMs=*/300, mark);
+    ASSERT_FALSE(r) << "tomo por segunda medicion una lectura de la cuerda anterior: "
+                    << buf[kSnapCents];
+    const std::string msg = r.message();
+    EXPECT_NE(msg.find("OBJETIVO ANTERIOR"), std::string::npos) << msg;
+    EXPECT_EQ(msg.find("techo quedo corto"), std::string::npos) << msg;
+    EXPECT_EQ(buf[kSnapDroppedFrames], 0.0f)
+        << "la vuelta se conto: el escenario no es el de la cara B, es el de la A";
+    EXPECT_NEAR(buf[kSnapCents], 1.0f, 0.1f) << "la lectura vieja no es la de la cuerda anterior";
+
+    wma_tuner_stop(mWma);
+}
+
+/**
  * TAREA 4.0.4. El estimador se prepara con el rate **medido**, no con 48000.
  *
  * Es el ultimo lugar donde el rate de S1 se podia perder: llega vivo hasta el snapshot y se
@@ -708,7 +952,7 @@ TEST_F(TunerApiTest, TheEstimatorIsPreparedWithTheMeasuredRateNotWithAConstant) 
     ASSERT_TRUE(wma_tuner_set_target(mWma, static_cast<float>(target)));
     ASSERT_TRUE(wma_tuner_start(mWma));
 
-    feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kSecondRate, kWarmupBlocks, kBlockFrames);
+    ASSERT_TRUE(feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kSecondRate, kWarmupBlocks, kBlockFrames));
 
     auto buf = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, buf));
@@ -809,9 +1053,7 @@ TEST_F(TunerApiTest, StoppingDetachesTheWriterFromTheRing) {
 }
 
 /**
- * Alimenta un seno por el camino REAL de captura: `onAudioReady` con `inputData`, que es como
- * lo entrega un backend. La fase se acumula entre bloques —un salto de fase en el borde seria
- * un transitorio que el DSP de entrada veria como señal.
+ * Empuja `blocks` bloques de un seno de `hz` por el camino de captura, AL RITMO DEL ANALISIS.
  *
  * 🔴 SE AUTORREGULA CONTRA EL DRENADOR, Y ESO NO ES OPCIONAL
  * ----------------------------------------------------------
@@ -824,30 +1066,71 @@ TEST_F(TunerApiTest, StoppingDetachesTheWriterFromTheRing) {
  * Medido antes de arreglarlo: 13,94 cents contra 1,0 real. El sintoma parecia del estimador y
  * era del ritmo de alimentacion.
  *
- * Por eso despues de cada tanda se ESPERA a que el analisis la haya consumido, en vez de
- * dormir un rato fijo: una compuerta contra el estado real aguanta una maquina cargada o una
- * corrida bajo sanitizers, y un sleep elegido a ojo no.
+ * 🔴 LA CONDICION ES "HAY LUGAR EN EL RING", NO "EL ANALISIS YA CONTO LO MIO" (MINI-029).
+ * ------------------------------------------------------------------------------------
+ * La version anterior esperaba por tanda a que `framesAnalyzed − baseline >= fed − 4096`, con
+ * un techo de 500 ms y, si no llegaba, SEGUIA ALIMENTANDO. Tenia dos defectos que costaron
+ * cuatro rojos en el CI, y los dos estan en la eleccion del observable:
+ *
+ *   A. `framesAnalyzed` NO cuenta lo que el lector DESCARTA. Cuando el thread aplica un
+ *      objetivo nuevo hace `skipToNewest()` sin contar (es una decision del lector, no un
+ *      atraso). Si eso caia con mas de 4096 frames sin leer —`set_target` y tres tandas
+ *      dentro de una siesta de 5 ms— la compuerta quedaba INALCANZABLE para el resto de la
+ *      alimentacion y cada tanda pagaba los 500 ms enteros: 15,03 s en 10 de 15, forzando el
+ *      orden, y 30 de 50 con la maquina tranquila. Ese regimen es 31 ventanas de 500 ms en
+ *      las que una inanicion del runner pisa un bloque (`dropped` 2048, 2026-09-14).
+ *   B. La base salia de UNA lectura del snapshot, y una rota valia 0. Con 65536 ya contados
+ *      por la cuerda anterior, `analyzed − 0 >= fed − 4096` era cierta siempre: inundacion,
+ *      skip antes de `read()` (la vuelta no se cuenta), y el snapshot congelado en la cuerda
+ *      anterior (2026-09-11, 1,0000 c contra 2,0). Forzado: 6 de 10 con esa firma.
+ *
+ * El lugar en el ring no tiene ninguno de los dos problemas: un skip VACIA el ring (hay lugar,
+ * se sigue), no hay base que leer, y el escritor no puede pisar lo que el lector no vio porque
+ * no escribe hasta que entra. Es la misma condicion que `feedAtAnalysisPace` en los tests de
+ * unidad (REQ-005 S3), por la misma razon: no es una duracion, asi que no se queda corta en
+ * una maquina mas lenta ni bajo sanitizers.
+ *
+ * 🔴 Y SIN ESCAPATORIA. Si no hay lugar dentro de `stallCap` se DEVUELVE FALLO nombrandolo,
+ * no se empuja igual: empujar igual convertia "el consumidor viene lento" en "el estimador
+ * integra fase sobre muestras no contiguas", que no da un rojo honesto sino un numero bien
+ * formado y equivocado. El techo es el de consumidor MUERTO (30 s, el mismo del alimentador
+ * de unidad) y solo existe para que un thread parado se vea como asercion y no como test
+ * colgado. `TheFeederFailsInsteadOfOverrunningADeadConsumer` es el control que impide que
+ * vuelva la escapatoria.
  */
-void feedTone(WmaEngine* engine, double hz, int rate, int blocks, int blockFrames) {
+::testing::AssertionResult feedTone(WmaEngine* engine, double hz, int rate, int blocks,
+                                    int blockFrames, std::chrono::milliseconds stallCap) {
+    if (!engine->analysisRing) {
+        return ::testing::AssertionFailure()
+               << "feedTone: no hay ring de analisis — el afinador no se creo todavia";
+    }
+    const auto& ring = *engine->analysisRing;
     std::vector<float> out(static_cast<size_t>(blockFrames) * 2, 0.0f);
     std::vector<float> in(static_cast<size_t>(blockFrames) * 2, 0.0f);
-    std::array<float, WMA_TUNER_SNAPSHOT_VALUES> probe{};
     double phase = 0.0;
     const double dp = 2.0 * M_PI * hz / static_cast<double>(rate);
-
-    // Un cuarto del ring por tanda: deja al drenador tres cuartos de margen.
-    const int blocksPerChunk = std::max(1, 2048 / blockFrames);
-    long long fed = 0;
-
-    // 🔴 LA BASE ES LO YA ANALIZADO, NO CERO. `framesAnalyzed` es ACUMULADO desde que
-    // arranco el afinador, asi que comparar contra un contador local que empieza en cero
-    // hace que la compuerta se satisfaga sola a partir de la segunda llamada — y entonces
-    // esta funcion vuelve a inundar el ring sin que nada lo diga. Medido: el primer test
-    // pasaba y el segundo media 20 cents contra 2 reales.
-    float baseline = 0.0f;
-    if (wma_tuner_get_snapshot(engine, probe.data())) baseline = probe[kSnapFramesAnalyzed];
+    const auto deadline = std::chrono::steady_clock::now() + stallCap;
 
     for (int b = 0; b < blocks; ++b) {
+        // Lugar para el bloque ENTERO sin pisar nada sin leer. Con el consumidor al dia se
+        // cumple siempre y no cuesta nada; con el consumidor lento se espera en vez de pisar.
+        const auto room = [&] {
+            return ring.availableFrames() + static_cast<uint32_t>(blockFrames)
+                   <= wma::analysis::AnalysisRing::kCapacityFrames;
+        };
+        if (!room()) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  deadline - std::chrono::steady_clock::now());
+            if (left.count() <= 0 || !wma_test::waitUntil(room, left, std::chrono::milliseconds(1))) {
+                return ::testing::AssertionFailure()
+                       << "feedTone: el analisis no hizo lugar en el ring en " << stallCap.count()
+                       << " ms (bloque " << b << " de " << blocks << ", sin leer "
+                       << ring.availableFrames() << " de "
+                       << wma::analysis::AnalysisRing::kCapacityFrames
+                       << "): el consumidor no esta drenando. NO se alimento igual — hacerlo "
+                          "daria una medicion sobre audio con huecos";
+            }
+        }
         for (int f = 0; f < blockFrames; ++f) {
             const float v = static_cast<float>(0.3 * std::sin(phase));
             phase += dp;
@@ -857,21 +1140,8 @@ void feedTone(WmaEngine* engine, double hz, int rate, int blocks, int blockFrame
         }
         std::fill(out.begin(), out.end(), 0.0f);
         engine->engine->onAudioReady(out.data(), in.data(), blockFrames);
-        fed += blockFrames;
-
-        if ((b + 1) % blocksPerChunk == 0) {
-            // Espera a que el analisis se ponga al dia, con techo para no colgar el test.
-            const auto deadline = std::chrono::steady_clock::now()
-                                  + std::chrono::milliseconds(500);
-            while (std::chrono::steady_clock::now() < deadline) {
-                if (wma_tuner_get_snapshot(engine, probe.data())
-                    && probe[kSnapFramesAnalyzed] - baseline >= static_cast<float>(fed - 4096)) {
-                    break;
-                }
-                std::this_thread::sleep_for(std::chrono::microseconds(200));
-            }
-        }
     }
+    return ::testing::AssertionSuccess();
 }
 
 }  // namespace
@@ -965,7 +1235,7 @@ TEST_F(TunerApiTest, SwitchingSourceThrowsAwayEverythingThatWasIntegrating) {
     // `feedTone` se autorregula contra `framesAnalyzed`: alimentar mas rapido que
     // el tiempo real le daria al estimador una señal CON HUECOS, porque el ring
     // pisa lo viejo por diseño.
-    feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kFirstRate, kWarmupBlocks, kBlockFrames);
+    ASSERT_TRUE(feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kFirstRate, kWarmupBlocks, kBlockFrames));
     auto before = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, before))
         << "no llego a producir una medicion antes de conmutar: el test no puede "
@@ -982,7 +1252,7 @@ TEST_F(TunerApiTest, SwitchingSourceThrowsAwayEverythingThatWasIntegrating) {
     auto after = sentinelBuffer();
     bool wentBlank = false;
     for (int round = 0; round < 30 && !wentBlank; ++round) {
-        feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kFirstRate, 2, kBlockFrames);
+        ASSERT_TRUE(feedTone(mWma, target * std::pow(2.0, 1.0 / 1200.0), kFirstRate, 2, kBlockFrames));
         // Se sondea un rato: el drenaje es asincrono, y leer justo despues de
         // empujar puede devolver el snapshot ANTERIOR al reinicio.
         const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(30);
@@ -1291,7 +1561,7 @@ TEST_F(TunerApiTest, AnOfflineAnalysisDoesNotMoveTheLiveReading) {
     ASSERT_TRUE(wma_tuner_start(mWma));
 
     // El afinador vivo, midiendo un tono a +1 cent y ya convergido.
-    feedTone(mWma, detunedBy(1.0), kFirstRate, kWarmupBlocks, kBlockFrames);
+    ASSERT_TRUE(feedTone(mWma, detunedBy(1.0), kFirstRate, kWarmupBlocks, kBlockFrames));
     auto before = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, before));
     ASSERT_NEAR(before[kSnapCents], 1.0f, kOfflineBudgetCents)
@@ -1317,8 +1587,15 @@ TEST_F(TunerApiTest, AnOfflineAnalysisDoesNotMoveTheLiveReading) {
 
     // 🔴 NO SE VUELVE A ALIMENTAR ANTES DE AFIRMAR. Alimentar dejaria que la
     // integracion se recupere de la inyeccion, y entonces el mutante sobreviviria.
-    EXPECT_LE(after[kSnapFramesAnalyzed] - before[kSnapFramesAnalyzed],
-              static_cast<float>(wma::analysis::AnalysisRing::kCapacityFrames))
+    //
+    // La cota es lo que el camino vivo puede tener PENDIENTE cuando se leyo `before`:
+    // `feedTone` deja hasta un ring entero sin drenar (regula por lugar, MINI-029) y
+    // el snapshot publica con hasta un drenaje de atraso. Medido: 8960 con la cota en
+    // un ring solo, que era la post-condicion vieja de `feedTone` (4096 sin leer).
+    // El mutante que se detecta esta OCHO anillos mas alla; la cota no lo acerca.
+    constexpr float kLivePending = static_cast<float>(
+        wma::analysis::AnalysisRing::kCapacityFrames + wma::analysis::AnalysisThread::kDrainFrames);
+    EXPECT_LE(after[kSnapFramesAnalyzed] - before[kSnapFramesAnalyzed], kLivePending)
         << "el analisis vivo consumio " << (after[kSnapFramesAnalyzed] - before[kSnapFramesAnalyzed])
         << " frames de mas: la llamada offline entro por el motor";
     EXPECT_EQ(after[kSnapDroppedFrames], before[kSnapDroppedFrames])
@@ -1354,7 +1631,7 @@ TEST_F(TunerApiTest, TheLiveTunerDoesNotContaminateTheOfflineResult) {
     negotiateCaptureRate(mWma, kFirstRate);
     ASSERT_TRUE(wma_tuner_set_target(mWma, target));
     ASSERT_TRUE(wma_tuner_start(mWma));
-    feedTone(mWma, detunedBy(1.0), kFirstRate, kWarmupBlocks, kBlockFrames);
+    ASSERT_TRUE(feedTone(mWma, detunedBy(1.0), kFirstRate, kWarmupBlocks, kBlockFrames));
     auto live = sentinelBuffer();
     ASSERT_TRUE(waitForMeasurement(mWma, live))
         << "premisa rota: el afinador vivo no llego a medir, asi que este test no "
