@@ -13,6 +13,10 @@ que ya tienen). Es un **minor** con **una superficie nueva** —la perilla que p
 
 > **Redactado el 2026-09-15; enviado por chat el 2026-09-16**, tras verificar `v2.19.0` en el registro
 > (4/4 coordenadas, control 9.9.9 → 404). Su respuesta es **I-1** del criterio de muerte de REQ-042.
+> **Contestado el 16/09 a la tarde** (`carta-noisypad-2026-09-16-respuesta-v2.19.0.md`): adoptaron 2.19.0,
+> AC-1..AC-7 con número, la perilla deja el seco (I-1 de REQ-042 evaluado, N = 3, vivo), el pop no se oye
+> con instrumento de banda alta, y la tabla de colas con tecla/velocity para REQ-040 — que dio I-1 rojo
+> contra el host (F-2: se piden los WAV crudos antes de tocar nada).
 
 ## 1 · Lo que hay
 
