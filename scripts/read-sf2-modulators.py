@@ -576,7 +576,12 @@ def filter_q(path):
                     pglobal = pg.get(9, 0)
                     pglobal_rng = ranges(pg, pglobal_rng)
                 continue
-            padd = pglobal + pg.get(9, 0)
+            # SF2 par. 8.5 y tsf_load_presets: la zona LOCAL de preset SUSTITUYE a la global (la
+            # region arranca como copia de la global y GEN_INT hace `= amount`); lo que se SUMA es
+            # preset + instrumento. La primera version sumaba local + global y daba 1808 regiones
+            # donde tsf da 1787 (Honky-Tonk 100 cB en vez de 80). `--attenuation` tiene el mismo
+            # defecto (`padd = pglobal + pg.get(48, 0)`), preexistente y fuera de alcance de REQ-041.
+            padd = pg.get(9, pglobal)
             plo, phi, pvlo, pvhi = ranges(pg, pglobal_rng)
             ii = pg[41]
             iz0, iz1 = _u16(data, inst[ii] + 20), _u16(data, inst[ii + 1] + 20)
@@ -613,6 +618,10 @@ def filter_q(path):
     print()
     print('regiones: %d; con initialFilterQ > 0: %d (en %d de %d presets); las demas: +1,50 dB'
           % (total_regions, affected_regions, affected_presets, len(rows)))
+    # CONTROL contra el motor (2026-09-16, REQ-041 S1): cargando GeneralUser_GS.sf3 1.471 con
+    # tsf.h y recorriendo `presets[p].regions[r].initialFilterQ` da 12311 regiones, 1787 con
+    # Q > 0 en 90 de 269 presets, preset por preset igual a esta salida. Si este script y tsf se
+    # separan, el que manda es tsf: es el que suena.
     return rows
 
 
