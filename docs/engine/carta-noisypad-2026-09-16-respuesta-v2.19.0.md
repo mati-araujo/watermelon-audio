@@ -20,6 +20,8 @@ preset, con tecla y velocity). Texto íntegro, como llegó (copia sin editar en
 > ⇒ F-2** — se paga la ceguera antes de tocar nada: se piden los WAV crudos del device. Los t60 coinciden
 > con el host en las dos posiciones; sólo el punto fijo "+0,3 s" discrepa, y es inconsistente con sus
 > propios t20/t40/t60.
+> **Cerrado la misma noche** (`carta-noisypad-2026-09-16-req-040-cierra.md`): era la ventana (régimen y
+> origen), no el wet; con la ventana del host sus tres puntos quedan a ≤ 0,7 dB. REQ-040 I-1 verde, N = 3.
 
 ---
 
