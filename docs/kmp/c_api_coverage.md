@@ -1,8 +1,10 @@
 # Cobertura C API vs JNI — WA-0.1
 
 **Requerimiento:** `docs/kmp/kmp_requirements.md` § 5, WA-0.1
-**Actualizado:** 2026-09-15 (recuento contra el árbol tras REQ-042: la perilla de la
-ambiencia suma 3 `wma_sf_*` y 3 entry points, cubiertos por match exacto) · **Reproducible con:** `python3 scripts/c-api-gap.py`
+**Actualizado:** 2026-09-15 (recuento contra el árbol tras REQ-042). De este refresh, el REQ
+aporta **+3/+3/+3** (302/277/214 → 305/280/217: la perilla de la ambiencia y sus dos getters,
+cubiertos por match exacto); el resto (297/273/211 → 302/277/214) era **drift desde el
+2026-08-27** que nadie había re-medido · **Reproducible con:** `python3 scripts/c-api-gap.py`
 
 > 🔴 **Este doc se actualiza A MANO con la salida del script, y por eso envejece.** Entre el
 > 19/08 y el 27/08 quedó ocho días stale y desfasado en trece entry points (284 → 297) y trece
