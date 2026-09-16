@@ -26,9 +26,9 @@ Las tres convenciones del filtro pasan a ser las de FluidSynth 2.6.0 (`fluid_iir
    **sobre la respuesta sin resonancia**: con Q = 0 el filtro es un Butterworth (−3,01 dB en el
    corte, sin joroba). tsf usaba 10^(Q/20): **el pico de resonancia estaba 3 dB por encima** a
    cualquier Q, y a Q = 0 quedaba una joroba de +3 dB cerca del corte que el spec dice que no va.
-2. **La voz baja −(Q − 3,01)/2 dB** donde hay Q. Relativo a 2.19.0 (que no tenía el término): una
-   región con Q = 50 cB queda **−1,0 dB** respecto del +1,5 de las demás (o sea +0,5 neto); con
-   190 cB, **−8,0 dB** neto; con 960 cB, **−46,5**.
+2. **La voz baja −(Q − 3,01)/2 dB** donde hay Q. Toda esta nota mide **respecto de 2.19.0** (que
+   no tenía el término): una región con Q = 50 cB queda **−1,0 dB** (o sea 2,5 dB por debajo del
+   +1,5 de las regiones sin Q); con 190 cB, **−8,0 dB**; con 960 cB, **−46,5**.
 3. **El corte se clampea a [5 Hz, 0,45·sr] y el filtro corre siempre.** tsf lo apagaba si el corte
    pasaba de 0,499·sr: a 22 050 Hz el default (13 500 c = 19 912 Hz) dejaba la voz sin filtro y sin
    el +1,5. A 44,1/48 kHz el default ya estaba activo, así que en el teléfono esto no mueve nada más
@@ -38,15 +38,16 @@ Las tres convenciones del filtro pasan a ser las de FluidSynth 2.6.0 (`fluid_iir
 
 Sobre las **12 311 regiones** de GeneralUser (la región es lo que tsf toca: zona de instrumento ×
 zona de preset con rangos solapados; `--generators` cuenta 323 **zonas** con `initialFilterQ`, que
-no es lo mismo): **1808 regiones con Q > 0 en 91 de 269 presets**. Las otras 10 503 regiones, y los
-178 presets restantes enteros, suben el +1,5 parejo.
+no es lo mismo): **1787 regiones con Q > 0 en 90 de 269 presets** (verificado contra tsf cargando el
+mismo archivo: preset por preset, idéntico). Las otras 10 524 regiones, y los 179 presets restantes
+enteros, suben el +1,5 parejo.
 
 Por el Q máximo de cada preset (cuánto baja **su región de más Q** respecto de 2.19.0):
 
 | Q máximo del preset | presets | nivel vs 2.19.0 en esa región |
 |---|---|---|
-| ≤ 50 cB | 25 | entre +1,5 y −1,0 dB (bajan menos de 1 dB respecto del +1,5) |
-| 51 – 100 cB | 16 | −1,0 a −3,5 dB |
+| ≤ 50 cB | 26 | entre +1,5 y −1,0 dB (hasta 2,5 dB por debajo del +1,5 de las regiones sin Q) |
+| 51 – 100 cB | 14 | −1,0 a −3,5 dB |
 | 101 – 200 cB | 49 | −3,5 a −8,0 dB — son los **kits de percusión** de bank 120 (190 cB en algunos hits) y pads/leads |
 | > 200 cB | 1 | `12:127` Shooting Star: 960 cB, **−46,5 dB** en su única región |
 
@@ -71,7 +72,7 @@ golden de DSP.
 ## Lo que les pedimos
 
 - **Re-tomen sus líneas de base de nivel** antes de comparar cualquier otra cosa: toda toma con
-  SoundFont sube +1,5 dB, y las 1808 regiones con Q bajan lo de la tabla. Es la tercera vez que el
+  SoundFont sube +1,5 dB, y las 1787 regiones con Q bajan lo de la tabla. Es la tercera vez que el
   régimen se mueve en una semana (0,4 dB/dB de MINI-024, los sends de REQ-040, y esto): una
   comparación contra 2.19.0 sin re-tomar la base va a leer este +1,5 como cualquier otra cosa.
 - Nada que adoptar y nada que apagar: cero superficie nueva (`git diff` vacío sobre
@@ -82,7 +83,7 @@ golden de DSP.
   pico 3 dB abajo—, eso es exactamente lo que cambió. Si les suena distinto de FluidSynth 2.6.0
   con el mismo font, eso es un hallazgo: **pídanlo con carta**, con el preset y la tecla.
 
-## Tabla por preset (91 con `initialFilterQ` > 0; el resto sube +1,5 parejo)
+## Tabla por preset (90 con `initialFilterQ` > 0; el resto sube +1,5 parejo)
 
 `regiones` = las de tsf para ese preset; `con Q` = cuántas declaran Q > 0; `Q (cB)` = el rango
 entre ellas; la última columna es el nivel de la región de más Q **respecto de 2.19.0**
@@ -92,7 +93,7 @@ entre ellas; la última columna es el nivel de la región de más Q **respecto d
 |---|---|---|---|---|
 | `0:0` Stereo Grand | 200 | 58 | 10 … 40 | -0.5 dB |
 | `0:2` Electric Grand | 164 | 63 | 50 … 150 | -6.0 dB |
-| `0:3` Honky-Tonk | 218 | 218 | 20 … 100 | -3.5 dB |
+| `0:3` Honky-Tonk | 218 | 218 | 20 … 80 | -2.5 dB |
 | `0:5` FM Electric Piano | 117 | 57 | 40 … 90 | -3.0 dB |
 | `0:10` Music Box | 7 | 7 | 170 | -7.0 dB |
 | `0:20` Reed Organ | 24 | 12 | 40 | -0.5 dB |
@@ -108,11 +109,10 @@ entre ellas; la última columna es el nivel de la región de más Q **respecto d
 | `0:63` Synth Brass 2 | 20 | 10 | 50 | -1.0 dB |
 | `0:76` Bottle Blow | 6 | 1 | 180 | -7.5 dB |
 | `0:77` Shakuhachi | 4 | 1 | 180 | -7.5 dB |
-| `0:79` Ocarina | 21 | 21 | 90 | -3.0 dB |
 | `0:80` Square Lead | 64 | 32 | 50 | -1.0 dB |
 | `0:83` Chiffer Lead | 6 | 5 | 40 | -0.5 dB |
 | `0:84` Charang | 18 | 8 | 80 | -2.5 dB |
-| `0:87` Bass & Lead | 60 | 60 | 30 … 57 | -1.4 dB |
+| `0:87` Bass & Lead | 60 | 60 | 27 … 30 | +0.0 dB |
 | `0:88` Fantasia | 70 | 61 | 40 … 150 | -6.0 dB |
 | `0:91` Space Voice | 8 | 7 | 120 | -4.5 dB |
 | `0:93` Metal Pad | 14 | 14 | 70 … 75 | -2.2 dB |

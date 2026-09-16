@@ -61,8 +61,9 @@ typedef struct tsf_ext_started_voice {
     int voiceIndex;   // indice en f->voices, para las dos escrituras de abajo
     int presetIndex;  // preset YA ordenado por (bank, program)
     int regionIndex;  // orden de la region dentro del preset
-    int initialFilterFc;  // el corte de la region en cents absolutos (13500 = abierto):
-                          // la base sobre la que un modulador de filtro SUMA
+    int initialFilterFc;  // el corte de la region en cents absolutos (13500 = 19 912 Hz, el
+                          // maximo del generador; desde REQ-041 S1 se clampea a 0,45·sr y el
+                          // filtro no se apaga): la base sobre la que un modulador SUMA
     int initialFilterQ;   // MINI-027: el Q de la region en centibeles (0..960), misma base
     int modEnvToFilterFc; // MINI-027: cuanto mod env entra al filtro en la region, en cents
     float reverbSend;     // REQ-040: los sends de la region (gens 16/15 ya sumados preset +
