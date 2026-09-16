@@ -86,7 +86,9 @@ int tsf_ext_voices_started_by_last_note_on(const tsf* f, tsf_ext_started_voice* 
 void tsf_ext_voice_replace_velocity_gain(tsf* f, int voiceIndex, float vel, float attenuationDB);
 
 // Re-setupea el low-pass de la voz con un corte en cents absolutos, reproduciendo
-// el setup de note_on (13500 = abierto). RT-safe.
+// el setup de note_on. RT-safe. Desde REQ-041 S1 el corte se clampea adentro a
+// [5 Hz, 0,45·sr] y el filtro no se apaga: 13500 c (19 912 Hz) ya no es "abierto",
+// es 0,45·sr a 44,1 kHz (-3,01 dB ahi), como en FluidSynth 2.6.0.
 //
 // Hasta MINI-027 esto tenia un LIMITE DECLARADO: si la region tenia `modLfoToFilterFc`
 // o `modEnvToFilterFc`, `tsf_voice_render` recalculaba el corte cada bloque desde
