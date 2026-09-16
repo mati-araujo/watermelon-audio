@@ -1,18 +1,18 @@
 ---
-title: "Aviso a NoisyPad — v2.20.0: el low-pass de la voz es el de FluidSynth (toda nota +1,5 dB)"
+title: "Aviso a NoisyPad — v2.19.1: el low-pass de la voz es el de FluidSynth (toda nota +1,5 dB)"
 type: reference
 status: current
 created: 2026-09-16
 ---
 
-# Aviso a NoisyPad — 2026-09-16 · v2.20.0
+# Aviso a NoisyPad — 2026-09-16 · v2.19.1
 
 **watermelon-audio → NoisyPad.** Sigue a la respuesta de hoy sobre REQ-040 (cerrado evaluado con su
 ventana). Es un **patch** (`fix`) **sin superficie nueva** y **con cambio de nivel en todo preset**:
 REQ-041 S1, el filtro de la voz pasa a las convenciones de FluidSynth 2.6.0. La nota de bump entera,
 con la tabla de los 90 presets, está en `nota-de-bump-2026-09-16-el-filtro-de-la-voz.md`.
 
-> **Redactado el 2026-09-16, antes del tag**; se envía cuando `v2.20.0` esté verificada en el registro
+> **Redactado el 2026-09-16, antes del tag**; se envía cuando `v2.19.1` esté verificada en el registro
 > (4/4 coordenadas). Su respuesta es **I-2** del criterio de muerte de REQ-041.
 
 ## 1 · Lo que cambia, en una frase
@@ -45,7 +45,7 @@ interpolación (S3), no el filtro. Superficie pública sin diff.
 ## 3 · Lo que les cambia a ustedes
 
 - **Sus líneas de base de nivel se corren +1,5 dB en todo preset sin Q, y hasta −8 en los kits.**
-  Re-tomar las cinco sondas con 0/0 en 2.20.0 con la ventana acordada (régimen 0,1–0,4 s tras el
+  Re-tomar las cinco sondas con 0/0 en 2.19.1 con la ventana acordada (régimen 0,1–0,4 s tras el
   note-on) ANTES de comparar cualquier otra cosa. Es el mismo caso que el 0,4 dB/dB de MINI-024.
 - Las tomas de REQ-040 con 1/1 no se invalidan: el wet escala con la voz.
 - El Grand suave 72·42 (Q = 20 cB): esperamos **+0,5 dB neto y el centroide igual** (532 Hz). Si el
@@ -53,7 +53,7 @@ interpolación (S3), no el filtro. Superficie pública sin diff.
 
 ## 4 · Lo que pedimos (I-2 de nuestro criterio de muerte)
 
-Por preset, con **0/0**, 2.19.0 vs 2.20.0, régimen absoluto (dBFS, ventana motor) y su Δ: Saw Lead
+Por preset, con **0/0**, 2.19.0 vs 2.19.1, régimen absoluto (dBFS, ventana motor) y su Δ: Saw Lead
 60·127, Trumpet 72·42 y 72·122, Strings 60·127, Warm Pad 60·127, Grand 72·122 y 72·42 — más **dos
 sondas con Q alto que hoy no tienen**: un hit de un kit de bank 120 (Q 190 cB ⇒ −8,0) y `12:127`
 Shooting Star (⇒ −46,5). Nuestro Δ esperado por preset está en la tabla de la nota (columna
