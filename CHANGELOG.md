@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.18.0...v2.19.0) (2026-09-16)
+
+
+### Features
+
+* **sf:** la ambiencia conmuta en caliente con una rampa de 5 ms ([efe9639](https://github.com/mati-araujo/watermelon-audio/commit/efe96399c9a41823e5dc57931cb2668a4e429f77))
+* **sf:** la perilla de la ambiencia del font cruza las tres superficies ([a854285](https://github.com/mati-araujo/watermelon-audio/commit/a8542858461b0874509d46d5900401678a0da6b6))
+* **sf:** la perilla de la ambiencia del font cruza las tres superficies ([a43edad](https://github.com/mati-araujo/watermelon-audio/commit/a43edad0b558668f1c64d6e76257d703f29b13c0))
+
 ## [2.18.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.17.4...v2.18.0) (2026-09-15)
 
 
