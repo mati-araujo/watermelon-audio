@@ -11,7 +11,8 @@ created: 2026-09-15
 (`carta-noisypad-2026-09-15-respuesta-acuse-v2.18.0.md`). No avisa versión: la próxima es **2.19.0**
 con REQ-042, que ya está ratificado y entra en implementación.
 
-> **Redactada el 2026-09-15, sin enviar.**
+> **Redactada el 2026-09-15; enviada por chat el 2026-09-16**, junto con el aviso de v2.19.0 (por eso §3 ya
+> dice el desenlace del escalón).
 
 ## 1 · El looper: no hay MINI — el umbral es la decisión, y es de ustedes
 
@@ -59,5 +60,6 @@ era el archivo: era la ventana. **Cerrado**; los dos WAV hicieron su trabajo.
 REQ-042 quedó así, ratificado: `wma_sf_set_ambience(engine, reverb, chorus)` + `wma_sf_get_ambience_reverb`
 / `_chorus`; en Kotlin `sfSetAmbience` / `sfGetAmbienceReverb` / `sfGetAmbienceChorus`; 0..1 lineal
 sobre la amplitud del send (0,5 = −6 dB, 0,1 = −20 dB); default 1/1; **del instrumento** (sobrevive a
-`reset()`, cambio y descarga de font); el escalón 0 → 1 en caliente se mide antes de decidir si lleva
-rampa. Sale como **2.19.0** con nota de bump. Nada pendiente de ustedes.
+`reset()`, cambio y descarga de font); el escalón 0 → 1 en caliente se midió antes de decidir si llevaba
+rampa — se midió y **llevó rampa** (el detalle va en el aviso de 2.19.0). Sale como **2.19.0** con nota de
+bump. Nada pendiente de ustedes.

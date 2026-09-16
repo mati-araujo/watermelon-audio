@@ -11,7 +11,8 @@ created: 2026-09-15
 que ya tienen). Es un **minor** con **una superficie nueva** —la perilla que pidieron con carta— y
 **ningún cambio de sonido por defecto**.
 
-> **Redactado el 2026-09-15, sin enviar.** Sale con el tag de 2.19.0; marcar acá cuando se envíe.
+> **Redactado el 2026-09-15; enviado por chat el 2026-09-16**, tras verificar `v2.19.0` en el registro
+> (4/4 coordenadas, control 9.9.9 → 404). Su respuesta es **I-1** del criterio de muerte de REQ-042.
 
 ## 1 · Lo que hay
 
