@@ -29,9 +29,12 @@ apagado del DSP en 0/0 (la compuerta de 2 s ya lo hace). Nota completa:
 ## 2 · Lo medido
 
 0/0 ≡ seco muestra a muestra (con control positivo); 1/1 ≡ 2.18.0 byte a byte; linealidad a 3·10⁻⁸;
-el **escalón 0/0 → 1/1 en caliente** medido antes de decidir rampa: 0,91× la derivada del wet en
-régimen ⇒ **sin rampa**, el test queda de guarda. Persistencia afirmada por `reset()` + swap +
-`prepare()`. Spec-test 18 F · 11 S · 15 R; arnés JNI 126 → 129 de 318.
+el **escalón 0/0 → 1/1 en caliente** medido antes de decidir rampa, contra el transitorio del propio
+note-on en 110 / 220 / 440 / 873 Hz: sin rampa, conmutar era 10,3 / 6,8 / 10,2 / 1,2× más brusco que
+tocar la nota ⇒ **rampa de 5 ms** (tiempo fijo, por muestra, sólo en el cambio en caliente: un set
+antes de arrancar aplica de una, así que 0/0 es el seco desde la primera muestra); con rampa 0,94 /
+0,94 / 0,95 / 0,90×. Los getters devuelven el objetivo, no el valor en tránsito. Persistencia
+afirmada por `reset()` + swap + `prepare()`. Spec-test 18 F · 11 S · 15 R; arnés JNI 126 → 129 de 318.
 
 ## 3 · Para su toggle y su arnés
 
