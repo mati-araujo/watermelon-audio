@@ -125,14 +125,13 @@ extern "C" void tsf_ext_voice_replace_velocity_gain(tsf* f, int voiceIndex, floa
 
 namespace {
 
-// Misma formula que el "Setup lowpass filter" de tsf_note_on, sobre los valores que la
-// VOZ tiene (MINI-027: el corte es por voz y el render lo lee de ahi).
+// Misma escritura que el "Setup lowpass filter" de tsf_note_on, sobre los valores que la
+// VOZ tiene (MINI-027: el corte es por voz y el render lo lee de ahi). REQ-041 S1: el corte
+// se clampea a [5 Hz, 0,45·sr] adentro y el filtro no se apaga; `active` no se toca (lo puso
+// note_on, y solo la sonda de tests lo baja).
 void setupVoiceLowpass(tsf* f, struct tsf_voice& v) {
-    const float lowpassFc =
-        (v.initialFilterFc <= 13500.0f ? tsf_cents2Hertz(v.initialFilterFc) / f->outSampleRate : 1.0f);
     v.lowpass.z1 = v.lowpass.z2 = 0;
-    v.lowpass.active = (lowpassFc < 0.499f);
-    if (v.lowpass.active) tsf_voice_lowpass_setup(&v.lowpass, lowpassFc);
+    tsf_voice_lowpass_setup_cents(&v.lowpass, v.initialFilterFc, f->outSampleRate);
 }
 
 struct tsf_voice* voiceAt(tsf* f, int voiceIndex) {
@@ -160,9 +159,9 @@ extern "C" void tsf_ext_voice_set_mod_env_to_filter(tsf* f, int voiceIndex, floa
 extern "C" void tsf_ext_voice_set_filter_q(tsf* f, int voiceIndex, float qCentibels) {
     struct tsf_voice* v = voiceAt(f, voiceIndex);
     if (!v) return;
-    // tsf_note_on: QInv = 1 / 10^((Q / 10) / 20), con Q en centibeles (GEN_INT_LIMITQ: 0..960).
-    const float qDB = qCentibels / 10.0f;
-    v->lowpass.QInv = 1.0 / TSF_POW(10.0, (qDB / 20.0));
+    // La MISMA escritura que tsf_note_on (REQ-041 S1): clip a 0..96 dB y el -3,01 de
+    // FluidSynth. El modulado puede salirse de 0..960 cB; el generador ya venia saturado.
+    tsf_voice_lowpass_set_q(&v->lowpass, qCentibels);
     setupVoiceLowpass(f, *v);
 }
 
@@ -224,4 +223,11 @@ extern "C" void tsf_ext_voice_add_pan(tsf* f, int voiceIndex, float pan) {
     if      (newpan <= -0.5f) { v->panFactorLeft = 1.0f; v->panFactorRight = 0.0f; }
     else if (newpan >=  0.5f) { v->panFactorLeft = 0.0f; v->panFactorRight = 1.0f; }
     else { v->panFactorLeft = TSF_SQRTF(0.5f - newpan); v->panFactorRight = TSF_SQRTF(0.5f + newpan); }
+}
+
+// ---- REQ-041 S1: la sonda del render neutral (solo tests, ver tsf_ext.h) --------------
+extern "C" void tsf_ext_voice_bypass_lowpass(tsf* f, int voiceIndex) {
+    struct tsf_voice* v = voiceAt(f, voiceIndex);
+    if (!v) return;
+    v->lowpass.active = TSF_FALSE;
 }

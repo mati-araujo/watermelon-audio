@@ -61,8 +61,9 @@ typedef struct tsf_ext_started_voice {
     int voiceIndex;   // indice en f->voices, para las dos escrituras de abajo
     int presetIndex;  // preset YA ordenado por (bank, program)
     int regionIndex;  // orden de la region dentro del preset
-    int initialFilterFc;  // el corte de la region en cents absolutos (13500 = abierto):
-                          // la base sobre la que un modulador de filtro SUMA
+    int initialFilterFc;  // el corte de la region en cents absolutos (13500 = 19 912 Hz, el
+                          // maximo del generador; desde REQ-041 S1 se clampea a 0,45·sr y el
+                          // filtro no se apaga): la base sobre la que un modulador SUMA
     int initialFilterQ;   // MINI-027: el Q de la region en centibeles (0..960), misma base
     int modEnvToFilterFc; // MINI-027: cuanto mod env entra al filtro en la region, en cents
     float reverbSend;     // REQ-040: los sends de la region (gens 16/15 ya sumados preset +
@@ -86,7 +87,9 @@ int tsf_ext_voices_started_by_last_note_on(const tsf* f, tsf_ext_started_voice* 
 void tsf_ext_voice_replace_velocity_gain(tsf* f, int voiceIndex, float vel, float attenuationDB);
 
 // Re-setupea el low-pass de la voz con un corte en cents absolutos, reproduciendo
-// el setup de note_on (13500 = abierto). RT-safe.
+// el setup de note_on. RT-safe. Desde REQ-041 S1 el corte se clampea adentro a
+// [5 Hz, 0,45·sr] y el filtro no se apaga: 13500 c (19 912 Hz) ya no es "abierto",
+// es 0,45·sr a 44,1 kHz (-3,01 dB ahi), como en FluidSynth 2.6.0.
 //
 // Hasta MINI-027 esto tenia un LIMITE DECLARADO: si la region tenia `modLfoToFilterFc`
 // o `modEnvToFilterFc`, `tsf_voice_render` recalculaba el corte cada bloque desde
@@ -135,6 +138,17 @@ void tsf_ext_voice_set_sends(tsf* f, int voiceIndex, float reverbSend, float cho
 // voz y recalcula los dos factores con la ley de note_on / setup_voice (raiz cuadrada,
 // saturando en los extremos). Tiene en cuenta el panOffset del canal si hay canales.
 void tsf_ext_voice_add_pan(tsf* f, int voiceIndex, float pan);
+
+// ---- REQ-041 S1: la sonda del render NEUTRAL, para tests --------------------------
+//
+// Apaga el low-pass de la voz: la voz rinde el sample tal cual, sin filtro y sin el
+// termino de nivel 1/sqrt(q) que el filtro aporta (SF2 p. 59). Produccion NUNCA lo llama:
+// desde S1 el filtro corre siempre (a rates bajos es el anti-alias, como en FluidSynth
+// 2.6.0), y la unica forma de afirmar "+1,505 dB relativo al render con el filtro
+// neutralizado" (AC-041.1) es tener ese render. Un biquad de esta forma no admite una
+// identidad por coeficientes (tsf reutiliza a0 como a2), asi que se apaga, no se anula.
+// Se llama DESPUES del note-on y ANTES del primer render de la voz. RT-safe.
+void tsf_ext_voice_bypass_lowpass(tsf* f, int voiceIndex);
 
 #ifdef __cplusplus
 }

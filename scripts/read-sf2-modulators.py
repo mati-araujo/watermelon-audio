@@ -15,6 +15,9 @@ el comando que lo produce (R-MOT-33). Este es ese comando para los moduladores.
     python3 scripts/read-sf2-modulators.py <font> --pitch             # las zonas cuyo pitch cambia
                                                                      # con los offsets FUERA del
                                                                      # keytrack (MINI-025), y cuanto
+    python3 scripts/read-sf2-modulators.py <font> --filter-q          # initialFilterQ POR REGION y
+                                                                     # POR PRESET, y cuanto se mueve
+                                                                     # el nivel con 1/sqrt(q) (REQ-041)
 
 Lee el chunk `pdta` directamente del archivo: no depende del motor, asi que puede
 contradecirlo. Descuenta la entrada TERMINADORA que la spec SF2 exige al final de
@@ -523,6 +526,105 @@ def pitch(path):
     return affected
 
 
+def filter_q(path):
+    """`initialFilterQ` (gen 9) POR REGION y POR PRESET, con cuanto se mueve el nivel de cada
+    region cuando el low-pass de la voz pasa a ser el de FluidSynth 2.6.0 (REQ-041 S1): el
+    termino 1/sqrt(q) con q = 10^((Q_dB - 3,01)/20) vale +1,505 dB a Q = 0 y (3,01 - Q_dB)/2 dB
+    donde hay Q. Se cuenta en REGIONES (zona de instrumento con sampleID x zona de preset que la
+    referencia), que es lo que tsf toca, y no en zonas del archivo (`--generators` cuenta
+    zonas: la leccion de MINI-027). La regla del SF2 §8.5 es la de `--attenuation`: el valor de
+    la zona de instrumento (o de su global) es el absoluto y el de preset (o su global) se SUMA;
+    tsf lo satura a 0..960 cB (GEN_INT_LIMITQ)."""
+    data, ch = _read_font(path)
+
+    def recs(name, size):
+        b, e = ch[('pdta', name)]
+        return [b + i * size for i in range((e - b) // size)]
+
+    phdr, pbag, pgen = recs('phdr', 38), recs('pbag', 4), recs('pgen', 4)
+    inst, ibag, igen = recs('inst', 22), recs('ibag', 4), recs('igen', 4)
+
+    def zone_gens(bags, gentab, z):
+        return dict((_u16(data, gentab[g]), _s16(data, gentab[g] + 2))
+                    for g in range(_u16(data, bags[z]), _u16(data, bags[z + 1])))
+
+    # Una REGION de tsf es un par (zona de preset, zona de instrumento con sampleID) cuyos rangos
+    # de tecla Y de velocity se solapan (`tsf_load_presets`); los rangos vienen del generador 43/44
+    # (byte bajo = lo, alto = hi; sin generador, 0..127) y la zona global de cada lado los hereda.
+    def ranges(g, inherited):
+        kr = g.get(43); vr = g.get(44)
+        lo, hi, vlo, vhi = inherited
+        if kr is not None:
+            lo, hi = kr & 0xFF, (kr >> 8) & 0xFF
+        if vr is not None:
+            vlo, vhi = vr & 0xFF, (vr >> 8) & 0xFF
+        return lo, hi, vlo, vhi
+
+    rows = []
+    total_regions = 0
+    for p in range(len(phdr) - 1):
+        name = data[phdr[p]:phdr[p] + 20].split(b'\0')[0].decode('latin1')
+        prog, bank = _u16(data, phdr[p] + 20), _u16(data, phdr[p] + 22)
+        z0, z1 = _u16(data, phdr[p] + 24), _u16(data, phdr[p + 1] + 24)
+        pglobal = 0
+        pglobal_rng = (0, 127, 0, 127)
+        values, regions = [], 0
+        for z in range(z0, z1):
+            pg = zone_gens(pbag, pgen, z)
+            if 41 not in pg:
+                if z == z0:
+                    pglobal = pg.get(9, 0)
+                    pglobal_rng = ranges(pg, pglobal_rng)
+                continue
+            # SF2 par. 8.5 y tsf_load_presets: la zona LOCAL de preset SUSTITUYE a la global (la
+            # region arranca como copia de la global y GEN_INT hace `= amount`); lo que se SUMA es
+            # preset + instrumento. La primera version sumaba local + global y daba 1808 regiones
+            # donde tsf da 1787 (Honky-Tonk 100 cB en vez de 80). `--attenuation` tiene el mismo
+            # defecto (`padd = pglobal + pg.get(48, 0)`), preexistente y fuera de alcance de REQ-041.
+            padd = pg.get(9, pglobal)
+            plo, phi, pvlo, pvhi = ranges(pg, pglobal_rng)
+            ii = pg[41]
+            iz0, iz1 = _u16(data, inst[ii] + 20), _u16(data, inst[ii + 1] + 20)
+            iglobal = 0
+            iglobal_rng = (0, 127, 0, 127)
+            for iz in range(iz0, iz1):
+                ig = zone_gens(ibag, igen, iz)
+                if 53 not in ig:
+                    if iz == iz0:
+                        iglobal = ig.get(9, 0)
+                        iglobal_rng = ranges(ig, iglobal_rng)
+                    continue
+                ilo, ihi, ivlo, ivhi = ranges(ig, iglobal_rng)
+                if ihi < plo or ilo > phi or ivhi < pvlo or ivlo > pvhi:
+                    continue
+                regions += 1
+                q = min(max(ig.get(9, iglobal) + padd, 0), 960)
+                if q:
+                    values.append(q)
+        total_regions += regions
+        rows.append((bank, prog, name, regions, values))
+
+    print('%-5s %-3s %-22s %8s %6s %7s %7s  %s' % ('banco', 'prog', 'preset', 'regiones', 'c/Q',
+                                                    'min cB', 'max cB',
+                                                    'nivel vs 2.19.0 en la region de mas Q (dB)'))
+    affected_presets, affected_regions = 0, 0
+    for bank, prog, name, regions, values in rows:
+        if values:
+            affected_presets += 1
+            affected_regions += len(values)
+            delta = (3.01 - max(values) / 10.0) / 2.0
+            print('%5d %3d  %-22s %8d %6d %7d %7d  %+6.2f' % (bank, prog, name, regions, len(values),
+                                                             min(values), max(values), delta))
+    print()
+    print('regiones: %d; con initialFilterQ > 0: %d (en %d de %d presets); las demas: +1,50 dB'
+          % (total_regions, affected_regions, affected_presets, len(rows)))
+    # CONTROL contra el motor (2026-09-16, REQ-041 S1): cargando GeneralUser_GS.sf3 1.471 con
+    # tsf.h y recorriendo `presets[p].regions[r].initialFilterQ` da 12311 regiones, 1787 con
+    # Q > 0 en 90 de 269 presets, preset por preset igual a esta salida. Si este script y tsf se
+    # separan, el que manda es tsf: es el que suena.
+    return rows
+
+
 if __name__ == '__main__':
     mode = sys.argv[2] if len(sys.argv) >= 3 else ''
     if mode == '--presets':
@@ -533,5 +635,7 @@ if __name__ == '__main__':
         attenuation(sys.argv[1])
     elif mode == '--pitch':
         pitch(sys.argv[1])
+    elif mode == '--filter-q':
+        filter_q(sys.argv[1])
     else:
         main()

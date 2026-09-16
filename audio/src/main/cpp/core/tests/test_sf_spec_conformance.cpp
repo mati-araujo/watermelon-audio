@@ -119,9 +119,11 @@ TEST(SfSpecConformance, TheHarnessActuallyPlaysTheSpecTest) {
  * EL CRITERIO: EL RANGO DE LA ESCALERA
  * ------------------------------------
  * De cada escalera se mide el nivel de sus ocho notas **relativo a la de velocity
- * 127**, y de ahi el RANGO en dB. Es una relacion, asi que es inmune al sesgo de
- * ganancia global entre los dos renders (~1,47 dB, ver el test de arriba) — y es
- * exactamente la cantidad que las sub-pruebas estan diseñadas para variar.
+ * 127**, y de ahi el RANGO en dB. Es una relacion, asi que es inmune a la ganancia
+ * global entre los dos renders (era -1,43 dB hasta REQ-041 S1: el termino 1/sqrt(q) del
+ * low-pass, +1,505 a Q = 0, que tsf no tenia; hoy +0,07 y afirmada en absoluto por
+ * `TheGlobalGainMatchesTheReferenceInAbsolute`) — y es exactamente la cantidad que las
+ * sub-pruebas estan diseñadas para variar.
  */
 TEST(SfSpecConformance, TheVelocityLaddersFollowWhatTheFileDeclares) {
     if (!have()) GTEST_SKIP() << "sin material del spec-test — corre scripts/fetch-spec-test.sh";
@@ -316,7 +318,8 @@ TEST(SfSpecConformance, TheVelocityLaddersFollowWhatTheFileDeclares) {
  * numero que el trinquete afirma sea el que la corrida imprimio.
  *
  * Los observables (D4 del stage doc), todos en unidades RELATIVAS para que la ganancia
- * global de ~1,47 dB entre los dos renders no entre:
+ * global entre los dos renders no entre (era -1,43 dB; desde REQ-041 S1 es +0,07 y tiene su
+ * control ABSOLUTO aparte, `TheGlobalGainMatchesTheReferenceInAbsolute`):
  *
  *   levelNotes  RMS de los primeros 0,40 s de cada nota, dB relativo a la primera nota
  *               de la ventana; max |motor - referencia| sobre las notas
@@ -635,17 +638,20 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
         //   del delay de #1 coincide a 0,2 ms: el note-on es el mismo, el arranque del ataque no).
         //   Sobre un blip de 50 ms a 2000 dB/s, 4 ms dentro de una ventana de 20 ms son 6 dB de
         //   RMS: es el hop del click de anuncio de #1 (zona `sawb-3`) y el hop de #4 que contiene
-        //   el fin del hold (38,515 s contra 38,525). La envolvente de #1 en absoluto: pico/hold
-        //   -1,43 dB (un offset GLOBAL de nivel, tambien en #11), sustain +0,5 (FluidSynth
-        //   lineariza los 120 cB en su escala de 960: 115,2), release 100 contra 96 dB/s.
+        //   el fin del hold (38,515 s contra 38,525). La envolvente de #1 en absoluto: sustain
+        //   +0,5 (FluidSynth lineariza los 120 cB en su escala de 960: 115,2), release 100 contra
+        //   96 dB/s. El "pico/hold -1,43 dB (offset GLOBAL, tambien en #11)" que esta fila
+        //   anotaba desde MINI-026 era el termino 1/sqrt(q) del low-pass (+1,505 dB a Q = 0, SF2
+        //   p. 59) que tsf no tenia: lo pago REQ-041 S1 y hoy la ganancia global es +0,07, con
+        //   su control absoluto aparte. El "hoy" de esta fila se movio 6,31 -> 6,33 con eso.
         // - #3: +4 % de pendiente por construccion (100 contra 96), acumulados sobre 4 s de decay
         //   de la nota 4: 2,1 dB a los 28 s. El AC pedia la pendiente a ±10 %.
         // - Los hops de pitch de #3/#4 son el estimador de cruces sobre el transitorio de la
         //   REFERENCIA (368,89 Hz en el primer hop del ataque; 374,34 en el borde del note-off a
         //   2000 dB/s); los hops estables dan 0,00 desde MINI-025.
         // Son S: el numero que la construccion explica, con su control de que no se mueva.
-        {1, 0, Obs::LevelOn, Cls::S, 0.5, 6.31,
-         "el hop del click de anuncio (50 ms, onset 4 ms distinto, 2000 dB/s): 6 dB de RMS en 20 ms; la envolvente en absoluto: -1,43 pico (offset global), +0,5 sustain (FluidSynth lineariza), release 100 vs 96 dB/s"},
+        {1, 0, Obs::LevelOn, Cls::S, 0.5, 6.33,
+         "el hop del click de anuncio (50 ms, onset 4 ms distinto, 2000 dB/s): 6 dB de RMS en 20 ms; la envolvente en absoluto: +0,5 sustain (FluidSynth lineariza), release 100 vs 96 dB/s; el -1,43 global lo pago REQ-041 S1"},
         {2, 0, Obs::PitchHop, Cls::F, 30.0, 0.0,
          "mod env -> pitch: ataque sin escalar por velocity y convexo (fluid_convex), release al 100 %/T; 9,5 c hoy en el primer hop del ataque"},
         {3, 0, Obs::LevelOn, Cls::S, 0.5, 2.63,
@@ -671,8 +677,25 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
         // #8: R -> F en MINI-025. Era 23,00 (el pitchCorrection de -23 c del sample, anulado por
         // scaleTuning 0); con los offsets afuera del keytrack da 0,00 hop a hop.
         {8, 0, Obs::PitchHop, Cls::F, 3.0, 0.0, "scaleTune/rootKey: la afinacion fina no depende del keytrack (MINI-025)"},
-        {9, 0, Obs::LevelNotes, Cls::R, 0.5, 2.81, "corte del low-pass: dueño REQ-041"},
-        {10, 0, Obs::LevelNotes, Cls::R, 2.0, 46.22, "resonancia: tsf esta a 46 dB en la Q mas alta; dueño REQ-041"},
+        // #9/#10 (REQ-041 S1, 2026-09-16): el low-pass de la voz es el de FluidSynth 2.6.0 en
+        // sus tres convenciones (q = 10^((Q-3,01)/20), termino de nivel 1/sqrt(q), corte
+        // clampeado a [5 Hz, 0,45·sr] y siempre activo). Medido con S1 puesto:
+        // - #10 (ruido blanco a 4 kHz, Q = 0..96 dB): 46,22 -> 0,39. F. El residuo crece con Q
+        //   (0,16 hasta 40 dB; 0,22 / 0,35 / 0,39 a 50 / 70 / 96): a 70 y 96 dB el resonador es
+        //   mas angosto (0,6 y 0,09 Hz) que el cent con que FluidSynth cuantiza el corte y que el
+        //   desfase de 4 ms del onset sobre 3,5 s de ring-up; elige OTRA componente del ruido.
+        // - #9 (ruido blanco a 48 kHz tocado a 44,1 kHz, corte 20 Hz..20 kHz): 2,81 -> 1,08, y
+        //   sigue R porque lo que queda NO es del filtro. Por nota, en absoluto y sin el +0,07
+        //   global: la nota 0 (corte 20 Hz, 8 ciclos en 0,40 s) esta +0,34 por varianza del RMS
+        //   de ruido de banda angosta y sesga la columna relativa; quitado eso, el residuo es
+        //   -0,09 / -0,24 / -0,34 / -0,55 / -0,74 a 4 / 8 / 10 / 15 / 20 kHz, y un modelo sin
+        //   el motor (ruido a 48 k, lineal contra 4 puntos, Butterworth por corte) da -0,11 /
+        //   -0,29 / -0,38 / -0,60 / -0,79: es la INTERPOLACION lineal de tsf contra la de 4
+        //   puntos de FluidSynth (convencion 5, #19). Dueño: REQ-041 S3. Bidireccional al 0,25.
+        {9, 0, Obs::LevelNotes, Cls::R, 0.25, 1.08,
+         "corte del low-pass: el filtro ya es el de FluidSynth (S1); el residuo es la interpolacion lineal sobre ruido a 48 k tocado a 44,1 k (modelo: -0,8 dB a 20 kHz) mas la varianza del RMS de la nota de 20 Hz; dueño REQ-041 S3"},
+        {10, 0, Obs::LevelNotes, Cls::F, 0.5, 0.0,
+         "resonancia: q = 10^((Q-3,01)/20) y 1/sqrt(q) (S1); 0,16 hasta Q = 40 dB, 0,39 a 96 donde el resonador es mas angosto que el cent"},
         // #11: el spec da el numero ("exactly 2 dB" por paso de 5 dB declarados). Era R con 0,50
         // hasta MINI-024 (tsf entraba a 0,1 dB/dB); con el factor 0,4 del spec-quirk da -2,00 y
         // pasa a S. La referencia es el CONTROL: si deja de dar -2,00, cambio la referencia.
@@ -728,10 +751,14 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
         // preset `panning` declara 150 cB y con el factor 0,4 estas dos filas bajaron 4,5 dB sin
         // que la ley de paneo cambiara. Los "hoy" se re-declaran; el observable queda como deuda
         // de quien tome la ley de paneo: medir el balance solo donde los DOS canales suenan.
-        {22, 1, Obs::Balance, Cls::R, 2.0, 32.32,
-         "ley de paneo: sqrt en tsf (8,45 dB a -37,5 %) contra sin/cos (14,03); observable contaminado por nivel; sin dueño aun"},
+        // REQ-041 S1: las dos subieron EXACTAMENTE +1,5 (32,32 -> 33,82; 27,22 -> 28,73) — el
+        // termino 1/sqrt(q) sobre el canal fuerte, con el callado en el piso de -96. Es la
+        // contaminacion por nivel que esta fila ya declara, medida otra vez; la ley de paneo no
+        // cambio. Se re-declaran para que el trinquete siga ajustado.
+        {22, 1, Obs::Balance, Cls::R, 2.0, 33.82,
+         "ley de paneo: sqrt en tsf (8,45 dB a -37,5 %) contra sin/cos (14,03); observable contaminado por nivel (+1,5 con REQ-041 S1); sin dueño aun"},
         {22, 3, Obs::Balance, Cls::R, 0.5, 0.94, "la misma ley sobre el sample estereo"},
-        {22, 5, Obs::Balance, Cls::R, 2.0, 27.22, "ley de paneo, -100..100 %; observable contaminado por nivel (ver #22 A)"},
+        {22, 5, Obs::Balance, Cls::R, 2.0, 28.73, "ley de paneo, -100..100 %; observable contaminado por nivel (ver #22 A; +1,5 con REQ-041 S1)"},
         {22, 6, Obs::Balance, Cls::R, 2.0, 48.73, "sobreescribir el default #6 por voz en CC10; dueño: REQ de superficie CC/rueda"},
         // #22 B/D: la RELACION CC10 <-> pan interno, en el motor solo. F sin codigo (3.1).
         {22, 2, Obs::BalRelation, Cls::F, 0.5, 0.0, "CC10 da lo mismo que el pan interno (B ≡ A), tono a tono"},
@@ -811,4 +838,39 @@ TEST(SfSpecConformance, TheTwentyTwoAgainstTheirOracles) {
 
     // El control del spec en #11 (la referencia da los 2,00 dB por paso) vive ahora en la
     // rama S de la fila, junto con la afirmacion sobre el motor (MINI-024).
+}
+
+/**
+ * AC-041.3 (REQ-041 S1) — EL CONTROL ABSOLUTO DE LA GANANCIA GLOBAL. Todo el trinquete de
+ * arriba mide en unidades RELATIVAS (nivel por nota relativo a la primera de la ventana), y por
+ * construccion NO VE un desplazamiento comun entre los dos renders. Ese desplazamiento existia:
+ * -1,43 dB (el motor por debajo de FluidSynth en toda nota), anotado en #1 y en los comentarios
+ * como "~1,47" desde MINI-026 y sin dueño hasta que REQ-041 lo leyo como el termino 1/sqrt(q)
+ * del low-pass a Q = 0 (+1,505 dB). Esto lo afirma en ABSOLUTO, sobre las siete notas de #11
+ * (senoide de 375 Hz, atenuacion creciente, sin filtro que las toque): RMS de 0,40 s de cada
+ * nota, motor menos referencia, |max| <= 0,2 dB. Medido con S1 puesto: +0,07 (nota 0), +0,06 a
+ * +0,09 en las siete; antes de S1, -1,44.
+ *
+ * Mutante: sin el 1/sqrt(q) (M2) -> -1,44 en las siete -> rojo aca.
+ */
+TEST(SfSpecConformance, TheGlobalGainMatchesTheReferenceInAbsolute) {
+    Loaded L;
+    std::string why;
+    if (!loadBoth(L, &why)) GTEST_SKIP() << why;
+    const Window* w = findWindow(L.windows, 11, 0);
+    ASSERT_NE(w, nullptr) << "falta la ventana #11";
+    ASSERT_EQ(w->notes.size(), 7u) << "#11 son siete tonos (README)";
+
+    std::printf("\n  [REQ-041 S1] ganancia global en ABSOLUTO sobre #11 (RMS 0,40 s, motor - FluidSynth)\n");
+    double worst = 0.0;
+    for (size_t i = 0; i < w->notes.size(); ++i) {
+        const double t = w->notes[i].sec;
+        const double a = wma_test::specmidi::levelDb(L.A, t, 0.40), b = wma_test::specmidi::levelDb(L.B, t, 0.40);
+        std::printf("    nota %zu a %6.2f s: motor %7.2f  referencia %7.2f  Δ %+6.2f dB\n", i, t, a, b, a - b);
+        if (std::fabs(a - b) > std::fabs(worst)) worst = a - b;
+    }
+    std::printf("  peor Δ: %+.2f dB\n\n", worst);
+    EXPECT_LE(std::fabs(worst), 0.2)
+        << "la ganancia global entre el motor y FluidSynth se movio (" << worst
+        << " dB): el trinquete relativo de arriba no lo ve, este control si";
 }
