@@ -125,14 +125,13 @@ extern "C" void tsf_ext_voice_replace_velocity_gain(tsf* f, int voiceIndex, floa
 
 namespace {
 
-// Misma formula que el "Setup lowpass filter" de tsf_note_on, sobre los valores que la
-// VOZ tiene (MINI-027: el corte es por voz y el render lo lee de ahi).
+// Misma escritura que el "Setup lowpass filter" de tsf_note_on, sobre los valores que la
+// VOZ tiene (MINI-027: el corte es por voz y el render lo lee de ahi). REQ-041 S1: el corte
+// se clampea a [5 Hz, 0,45·sr] adentro y el filtro no se apaga; `active` no se toca (lo puso
+// note_on, y solo la sonda de tests lo baja).
 void setupVoiceLowpass(tsf* f, struct tsf_voice& v) {
-    const float lowpassFc =
-        (v.initialFilterFc <= 13500.0f ? tsf_cents2Hertz(v.initialFilterFc) / f->outSampleRate : 1.0f);
     v.lowpass.z1 = v.lowpass.z2 = 0;
-    v.lowpass.active = (lowpassFc < 0.499f);
-    if (v.lowpass.active) tsf_voice_lowpass_setup(&v.lowpass, lowpassFc);
+    tsf_voice_lowpass_setup_cents(&v.lowpass, v.initialFilterFc, f->outSampleRate);
 }
 
 struct tsf_voice* voiceAt(tsf* f, int voiceIndex) {

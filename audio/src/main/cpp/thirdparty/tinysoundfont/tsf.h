@@ -1249,6 +1249,20 @@ static void tsf_voice_lowpass_setup(struct tsf_voice_lowpass* e, float Fc)
 	e->b2 = (1 - K * e->QInv + KK) * norm;
 }
 
+// watermelon-audio (REQ-041 S1): el corte en cents absolutos, CLAMPEADO a [5 Hz, 0,45·sr]
+// como FluidSynth 2.6.0 (fluid_iir_filter_calc), y el filtro corre SIEMPRE. tsf lo apagaba si
+// fc >= 0,499·sr (y ponia fc = 1 si los cents pasaban de 13500): con q = 0,707 el filtro en
+// 0,45·sr no es un bypass (-3,01 dB en fc), asi que apagarlo no era una optimizacion sino otra
+// respuesta; y a rates bajos es el anti-alias. Los tres sitios que ponian el corte (note_on,
+// el bloque dinamico del render y tsf_ext) pasan por aca. `active` queda como campo: produccion
+// lo deja en TSF_TRUE y solo la sonda de tests lo apaga (tsf_ext_voice_bypass_lowpass).
+static void tsf_voice_lowpass_setup_cents(struct tsf_voice_lowpass* e, float cents, float outSampleRate)
+{
+	float fc = tsf_cents2Hertz(cents), hi = 0.45f * outSampleRate;
+	if (fc < 5.0f) fc = 5.0f; else if (fc > hi) fc = hi;
+	tsf_voice_lowpass_setup(e, fc / outSampleRate);
+}
+
 static float tsf_voice_lowpass_process(struct tsf_voice_lowpass* e, double In)
 {
 	double Out = In * e->a0 + e->z1; e->z1 = In * e->a1 + e->z2 - e->b1 * Out; e->z2 = In * e->a0 - e->b2 * Out; return (float)Out;
@@ -1371,9 +1385,7 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 		if (dynamicLowpass)
 		{
 			float fres = tmpInitialFilterFc + v->modlfo.level * tmpModLfoToFilterFc + tsf_voice_envelope_modvalue(&v->modenv) * tmpModEnvToFilterFc;
-			float lowpassFc = (fres <= 13500 ? tsf_cents2Hertz(fres) / tmpSampleRate : 1.0f);
-			tmpLowpass.active = (lowpassFc < 0.499f);
-			if (tmpLowpass.active) tsf_voice_lowpass_setup(&tmpLowpass, lowpassFc);
+			tsf_voice_lowpass_setup_cents(&tmpLowpass, fres, tmpSampleRate); // REQ-041 S1: clampeado, nunca apagado
 		}
 
 		if (dynamicPitchRatio)
@@ -1679,7 +1691,7 @@ TSFDEF int tsf_note_on(tsf* f, int preset_index, int key, float vel)
 	voicePlayIndex = f->voicePlayIndex++;
 	for (region = f->presets[preset_index].regions, regionEnd = region + f->presets[preset_index].regionNum; region != regionEnd; region++)
 	{
-		struct tsf_voice *voice, *v, *vEnd; TSF_BOOL doLoop; float lowpassFc;
+		struct tsf_voice *voice, *v, *vEnd; TSF_BOOL doLoop;
 		if (key < region->lokey || key > region->hikey || midiVelocity < region->lovel || midiVelocity > region->hivel) continue;
 
 		voice = TSF_NULL, v = f->voices, vEnd = v + f->voiceNum;
@@ -1764,11 +1776,10 @@ TSFDEF int tsf_note_on(tsf* f, int preset_index, int key, float vel)
 		voice->modEnvToFilterFc = (float)region->modEnvToFilterFc;
 		voice->reverbSend = region->reverbSend;
 		voice->chorusSend = region->chorusSend;
-		lowpassFc = (region->initialFilterFc <= 13500 ? tsf_cents2Hertz((float)region->initialFilterFc) / f->outSampleRate : 1.0f);
 		tsf_voice_lowpass_set_q(&voice->lowpass, (float)region->initialFilterQ);
 		voice->lowpass.z1 = voice->lowpass.z2 = 0;
-		voice->lowpass.active = (lowpassFc < 0.499f);
-		if (voice->lowpass.active) tsf_voice_lowpass_setup(&voice->lowpass, lowpassFc);
+		voice->lowpass.active = TSF_TRUE; // REQ-041 S1: el filtro corre siempre (clampeado a 0,45·sr)
+		tsf_voice_lowpass_setup_cents(&voice->lowpass, (float)region->initialFilterFc, f->outSampleRate);
 
 		// Setup LFO filters.
 		tsf_voice_lfo_setup(&voice->modlfo, region->delayModLFO, region->freqModLFO, f->outSampleRate);
