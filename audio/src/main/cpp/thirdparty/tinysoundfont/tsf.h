@@ -1214,6 +1214,21 @@ static void tsf_voice_envelope_process(struct tsf_voice_envelope* e, int numSamp
 		tsf_voice_envelope_nextsegment(e, e->segment, outSampleRate);
 }
 
+// watermelon-audio (REQ-041 S1): el Q del low-pass como lo lee FluidSynth 2.6.0
+// (fluid_iir_filter_q_from_dB). `initialFilterQ` viene en centibeles (SF2 8.1.3 #9,
+// 0..960); se clipea a 0..96 dB y se le resta 3,01 dB ANTES de pasarlo a lineal, para que
+// Q = 0 sea un Butterworth (q = 0,707: -3,01 dB en fc, sin joroba) y Q_dB sea la altura del
+// pico sobre la respuesta SIN resonancia. tsf usaba 10^(Q/20): +3 dB de resonancia a
+// cualquier Q, y a Q = 0 una joroba que el spec dice que no deberia estar. Es UNA escritura
+// para los dos caminos por los que llega el Q (tsf_note_on y tsf_ext_voice_set_filter_q).
+static void tsf_voice_lowpass_set_q(struct tsf_voice_lowpass* e, float qCentibels)
+{
+	double qDB = qCentibels / 10.0, q;
+	if (qDB < 0.0) qDB = 0.0; else if (qDB > 96.0) qDB = 96.0;
+	q = TSF_POW(10.0, (qDB - 3.01) / 20.0);
+	e->QInv = 1.0 / q;
+}
+
 static void tsf_voice_lowpass_setup(struct tsf_voice_lowpass* e, float Fc)
 {
 	// Lowpass filter from http://www.earlevel.com/main/2012/11/26/biquad-c-source-code/
@@ -1655,7 +1670,7 @@ TSFDEF int tsf_note_on(tsf* f, int preset_index, int key, float vel)
 	voicePlayIndex = f->voicePlayIndex++;
 	for (region = f->presets[preset_index].regions, regionEnd = region + f->presets[preset_index].regionNum; region != regionEnd; region++)
 	{
-		struct tsf_voice *voice, *v, *vEnd; TSF_BOOL doLoop; float lowpassFilterQDB, lowpassFc;
+		struct tsf_voice *voice, *v, *vEnd; TSF_BOOL doLoop; float lowpassFc;
 		if (key < region->lokey || key > region->hikey || midiVelocity < region->lovel || midiVelocity > region->hivel) continue;
 
 		voice = TSF_NULL, v = f->voices, vEnd = v + f->voiceNum;
@@ -1741,8 +1756,7 @@ TSFDEF int tsf_note_on(tsf* f, int preset_index, int key, float vel)
 		voice->reverbSend = region->reverbSend;
 		voice->chorusSend = region->chorusSend;
 		lowpassFc = (region->initialFilterFc <= 13500 ? tsf_cents2Hertz((float)region->initialFilterFc) / f->outSampleRate : 1.0f);
-		lowpassFilterQDB = region->initialFilterQ / 10.0f;
-		voice->lowpass.QInv = 1.0 / TSF_POW(10.0, (lowpassFilterQDB / 20.0));
+		tsf_voice_lowpass_set_q(&voice->lowpass, (float)region->initialFilterQ);
 		voice->lowpass.z1 = voice->lowpass.z2 = 0;
 		voice->lowpass.active = (lowpassFc < 0.499f);
 		if (voice->lowpass.active) tsf_voice_lowpass_setup(&voice->lowpass, lowpassFc);

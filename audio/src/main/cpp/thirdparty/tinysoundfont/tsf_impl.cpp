@@ -160,9 +160,9 @@ extern "C" void tsf_ext_voice_set_mod_env_to_filter(tsf* f, int voiceIndex, floa
 extern "C" void tsf_ext_voice_set_filter_q(tsf* f, int voiceIndex, float qCentibels) {
     struct tsf_voice* v = voiceAt(f, voiceIndex);
     if (!v) return;
-    // tsf_note_on: QInv = 1 / 10^((Q / 10) / 20), con Q en centibeles (GEN_INT_LIMITQ: 0..960).
-    const float qDB = qCentibels / 10.0f;
-    v->lowpass.QInv = 1.0 / TSF_POW(10.0, (qDB / 20.0));
+    // La MISMA escritura que tsf_note_on (REQ-041 S1): clip a 0..96 dB y el -3,01 de
+    // FluidSynth. El modulado puede salirse de 0..960 cB; el generador ya venia saturado.
+    tsf_voice_lowpass_set_q(&v->lowpass, qCentibels);
     setupVoiceLowpass(f, *v);
 }
 
