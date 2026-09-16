@@ -430,7 +430,11 @@ static void tsf_hydra_read_shdr(struct tsf_hydra_shdr* i, struct tsf_stream* str
 struct tsf_riffchunk { tsf_fourcc id; tsf_u32 size; };
 struct tsf_envelope { float delay, attack, hold, decay, sustain, release, keynumToHold, keynumToDecay; };
 struct tsf_voice_envelope { unsigned char segment, segmentIsExponential : 1, isAmpEnv : 1; short midiVelocity; float level, slope; int samplesUntilNextSegment; struct tsf_envelope parameters; };
-struct tsf_voice_lowpass { double QInv, a0, a1, b1, b2, z1, z2; TSF_BOOL active; };
+// watermelon-audio (REQ-041 S1): `gain` es el termino de nivel de la voz que el filtro aporta,
+// 1/sqrt(q) (SF2 p. 59), y va DENTRO de los coeficientes del numerador (a0/a1 aca; b en la
+// forma de FluidSynth, fluid_iir_filter_impl.cpp:86-101), no en noteGainDB: asi lo llevan las
+// dos escrituras del Q y el bloque dinamico por igual, y `dynamicGain` no lo ve.
+struct tsf_voice_lowpass { double QInv, gain, a0, a1, b1, b2, z1, z2; TSF_BOOL active; };
 struct tsf_voice_lfo { int samplesUntil; float level, delta; };
 
 struct tsf_region
@@ -1227,6 +1231,11 @@ static void tsf_voice_lowpass_set_q(struct tsf_voice_lowpass* e, float qCentibel
 	if (qDB < 0.0) qDB = 0.0; else if (qDB > 96.0) qDB = 96.0;
 	q = TSF_POW(10.0, (qDB - 3.01) / 20.0);
 	e->QInv = 1.0 / q;
+	// SF2 p. 59: "gain reduction equal to half the height of the resonance peak": 1/sqrt(q),
+	// o sea -(Q_dB - 3,01)/2 dB. A Q = 0 es +1,505 dB en TODA voz — el "-1,43 global" que
+	// #1/#11 del spec-test tenian anotado sin dueño desde MINI-026. Entra en los coeficientes
+	// del numerador en tsf_voice_lowpass_setup.
+	e->gain = 1.0 / TSF_POW(q, 0.5);
 }
 
 static void tsf_voice_lowpass_setup(struct tsf_voice_lowpass* e, float Fc)
@@ -1234,7 +1243,7 @@ static void tsf_voice_lowpass_setup(struct tsf_voice_lowpass* e, float Fc)
 	// Lowpass filter from http://www.earlevel.com/main/2012/11/26/biquad-c-source-code/
 	double K = TSF_TAN(TSF_PI * Fc), KK = K * K;
 	double norm = 1 / (1 + K * e->QInv + KK);
-	e->a0 = KK * norm;
+	e->a0 = KK * norm * e->gain; // REQ-041 S1: el 1/sqrt(q) va en el numerador (b0 = b2)
 	e->a1 = 2 * e->a0;
 	e->b1 = 2 * (KK - 1) * norm;
 	e->b2 = (1 - K * e->QInv + KK) * norm;
