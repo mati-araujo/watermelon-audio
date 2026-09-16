@@ -97,12 +97,13 @@ public:
      *
      * Es un ajuste del INSTRUMENTO, no del font: sobrevive a `reset()`, al cambio y la descarga
      * de font y a `prepare()` con otro rate (AC-042.4). NaN deja ese bus como estaba y avisa;
-     * fuera de rango satura (AC-042.2). Cualquier thread: atómicos que el render lee por bloque.
+     * fuera de rango satura (AC-042.2). Cualquier thread: atómicos que el render lee por bloque
+     * y alcanza con un slew de 5 ms en caliente (AC-042.7, ver `SoundFontSendBus`).
      * NO RT-safe por el aviso del NaN: la llama el thread de control.
      */
     void setAmbience(float reverb, float chorus) { mSendBus.setSendScale(reverb, chorus); }
 
-    /// La perilla del bus de reverb, tal como el próximo bloque la va a aplicar. Cualquier thread.
+    /// El OBJETIVO del bus de reverb (lo que dejó el set), no el valor en tránsito. Cualquier thread.
     float ambienceReverb() const noexcept { return mSendBus.sendScaleReverb(); }
 
     /// Ídem para el bus de chorus.

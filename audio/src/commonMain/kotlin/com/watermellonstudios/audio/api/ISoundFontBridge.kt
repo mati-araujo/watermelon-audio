@@ -204,7 +204,10 @@ interface ISoundFontBridge {
      * un font y a `prepare()` con otro rate. Un valor fuera de rango satura a `0..1`; un `NaN`
      * deja **ese** bus como estaba y deja rastro en el registro — guard de contrato del lado C,
      * ver el KDoc de la interfaz. Al thread de audio sólo llegan dos atómicos que se leen una vez
-     * por bloque: sin cola, sin lock, sin allocation.
+     * por bloque: sin cola, sin lock, sin allocation. **En caliente el cambio se alcanza con una
+     * rampa de 5 ms** por muestra (medido: sin ella, conmutar `0/0 → 1/1` con una nota sostenida
+     * era hasta 10× más brusco que el propio note-on del font); un valor puesto antes de arrancar
+     * aplica de una.
      *
      * **No es RT-safe** (el rastro del `NaN` loguea): thread de control.
      *
@@ -214,9 +217,9 @@ interface ISoundFontBridge {
     fun sfSetAmbience(reverb: Float, chorus: Float)
 
     /**
-     * La escala del send de reverb que el próximo bloque va a aplicar: lo que dejó
-     * [sfSetAmbience] después de saturar. `1.0` sin motor ("sin motor" no es "ambiencia
-     * apagada"). Es lo que hace afirmable el set sin render.
+     * El **objetivo** del send de reverb: lo que dejó [sfSetAmbience] después de saturar, no el
+     * valor en tránsito de la rampa. `1.0` sin motor ("sin motor" no es "ambiencia apagada").
+     * Es lo que hace afirmable el set sin render.
      */
     fun sfGetAmbienceReverb(): Float
 

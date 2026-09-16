@@ -491,6 +491,11 @@ WMA_API void wma_sf_set_touch_expression(WmaEngine* engine, int touch_id, float 
  * leaves that bus as it was and leaves a trace in the log. Nothing reaches the audio
  * thread but two atomics read once per block: no queue, no lock, no allocation.
  *
+ * A change while audio is running is reached with a 5 ms slew per sample (measured:
+ * without it, switching 0/0 -> 1/1 under a sustained note was up to 10x more abrupt than
+ * the font's own note-on). A value set before the engine starts applies at once. The
+ * getters return the TARGET (what this call left), never the value in transit.
+ *
  * NOT RT-safe (the NaN trace logs): control thread.
  *
  * @param reverb  0..1 scale of the reverb send
@@ -499,8 +504,9 @@ WMA_API void wma_sf_set_touch_expression(WmaEngine* engine, int touch_id, float 
 WMA_API void wma_sf_set_ambience(WmaEngine* engine, float reverb, float chorus);
 
 /**
- * The reverb-send scale the next block will apply (what wma_sf_set_ambience left, after
- * saturation). 1.0 with no engine: "no engine" is not "ambience off". Any thread.
+ * The reverb-send TARGET (what wma_sf_set_ambience left, after saturation) — not the
+ * value in transit of the 5 ms slew. 1.0 with no engine: "no engine" is not "ambience
+ * off". Any thread.
  */
 WMA_API float wma_sf_get_ambience_reverb(const WmaEngine* engine);
 
