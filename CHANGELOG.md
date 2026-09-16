@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.19.0...v2.19.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* **sf:** el low-pass corre siempre, con el corte clampeado a [5 Hz, 0,45 sr] ([2ca6065](https://github.com/mati-araujo/watermelon-audio/commit/2ca6065460d722df9c9aa7500e0e105f97909537))
+* **sf:** el low-pass de la voz con las tres convenciones de FluidSynth ([6919606](https://github.com/mati-araujo/watermelon-audio/commit/69196061fc72ace948c29814e3bbb87d225007e5))
+* **sf:** el Q del low-pass es la altura del pico sobre el Butterworth ([0c96096](https://github.com/mati-araujo/watermelon-audio/commit/0c96096e105c9dfbf65fd3316245f68e88d5fa64))
+* **sf:** la voz lleva el termino de nivel 1/sqrt(q) del low-pass ([3d3929d](https://github.com/mati-araujo/watermelon-audio/commit/3d3929de6d9ce876637d1eadeb4ffa666d4f9bc9))
+
 ## [2.19.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.18.0...v2.19.0) (2026-09-16)
 
 
