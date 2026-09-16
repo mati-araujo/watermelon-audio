@@ -89,14 +89,14 @@ enum class Font {
     Dry,               ///< sin generadores y con el default #8 BORRADO: cero sends de verdad
 };
 
-std::vector<uint8_t> makeFont(Font which, int rate) {
+std::vector<uint8_t> makeFont(Font which, int rate, int period = kPeriod) {
     std::vector<ExtraGenerator> gens = flatEnv();
     if (which == Font::Sends) {
         gens.push_back({kGenReverbSend, 500});
         gens.push_back({kGenChorusSend, 300});
     }
     PitchGenerators pitch;
-    pitch.sinePeriod = kPeriod;
+    pitch.sinePeriod = period;
     const auto mods = which == Font::Dry ? withoutDefaultEight() : wma_test::sf2::ModulatorPlacement{};
     return makeMinimalSoundFont(static_cast<uint32_t>(rate), true, -1, -1, mods, 0, pitch, gens);
 }
@@ -375,9 +375,9 @@ struct Rig {
     std::vector<uint8_t> font;
 };
 
-Rig makeRig(Font which, int rate, int block) {
+Rig makeRig(Font which, int rate, int block, int period = kPeriod) {
     Rig r;
-    r.font = makeFont(which, rate);
+    r.font = makeFont(which, rate, period);
     r.manager = std::make_unique<SoundFontManager>();
     if (!r.manager->loadFromMemory(r.font.data(), static_cast<int>(r.font.size()), rate)) return {};
     r.engine = std::make_unique<SoundFontEngine>();
@@ -461,51 +461,67 @@ TEST(SoundFontAmbienceEngine, HalfScaleHalvesTheWetSampleForSample) {
 
 /**
  * AC-042.7 — el escalon 0/0 → 1/1 con una nota sostenida, MEDIDO antes de decidir rampa
- * (decision 5). El umbral es nuestro: el pico de la derivada del wet en el bloque de conmutacion
- * no supera el pico de la derivada del wet en regimen (el ultimo segundo con 1/1).
+ * (decision 5), como BARRIDO en f.
+ *
+ * 🔴 La primera version de este test comparaba contra la derivada del wet EN REGIMEN, y el
+ * code-review del 2026-09-15 lo refuto: el regimen es la pendiente del seno (A·2πf/fs, ∝ f) y el
+ * escalon de conmutacion es el valor instantaneo del bus (independiente de f). Daba 0,91 a
+ * 480 Hz y habria dado ~1,8 a 240 y ~3,3 a 131: el numero que justificaba "sin rampa" solo valia
+ * en la mitad aguda del teclado.
+ *
+ * El normalizador ahora es INDEPENDIENTE de f y es del propio font: el transitorio del NOTE-ON.
+ * Para cada f, el pico de la derivada del wet en el bloque donde la nota ARRANCA (escalador en
+ * 1/1 desde el principio) contra el pico de la derivada del wet en el bloque de conmutacion
+ * 0/0 → 1/1 con la nota ya sostenida. Si conmutar no es mas brusco que tocar la nota (razon ≤ 1
+ * en las cuatro f), no hace falta rampa; si lo es, entra la rampa y "sin rampa" es el mutante.
  *
  * El bloque es de 2048 frames (43 ms a 48 kHz) a proposito: mas largo que el retardo del chorus
  * (16 ms) y que el comb mas corto del freeverb (~25 ms), para que el arranque del wet CAIGA
- * ADENTRO del bloque de conmutacion. Con 256 el bloque seria trivialmente cero —las unidades no
- * devuelven nada antes de su primer retardo— y la guarda no guardaria nada.
+ * ADENTRO del bloque medido en los dos casos.
  *
- * Se imprime ademas el pico sobre los 100 ms que siguen (la subida entera), como dato.
- *
- * Mutante que este test mata: el escalador aplicado DESPUES de las unidades. Con 0/0 las unidades
- * seguirian alimentadas y en regimen, y al pasar a 1/1 el wet apareceria ENTERO en la primera
- * muestra: una derivada del tamano del wet, no de su pendiente.
+ * Mutantes que este test mata: el escalador aplicado DESPUES de las unidades (con 0/0 las
+ * unidades seguirian en regimen y el wet apareceria ENTERO en la primera muestra), y la rampa
+ * apagada (ver el reporte de la etapa por las razones medidas).
  */
-TEST(SoundFontAmbienceEngine, TheStepFromZeroToOneIsMeasuredAgainstSteadyStateSlope) {
+TEST(SoundFontAmbienceEngine, SwitchingIsNoMoreAbruptThanTheNoteOnItselfAcrossTheKeyboard) {
     constexpr int block = 2048;
     constexpr int blocksBefore = kRate / block;          // ~1 s con 0/0
-    constexpr int blocksAfter = 2 * kRate / block;       // ~2 s con 1/1
+    constexpr int blocksAfter = kRate / block;           // ~1 s con 1/1
     constexpr int total = blocksBefore + blocksAfter;
-    Rig dry = makeRig(Font::Dry, kRate, block), wet = makeRig(Font::Sends, kRate, block);
-    ASSERT_TRUE(dry.engine && wet.engine);
-    wet.engine->setAmbience(0.0f, 0.0f);
-    dry.engine->noteOn(0, kNote, 1.0f);
-    wet.engine->noteOn(0, kNote, 1.0f);
-    const auto d = renderEngineBlocks(*dry.engine, total, block);
-    const auto w = subtract(renderEngineBlocks(*wet.engine, total, block, [&](int b) {
-        if (b == blocksBefore) wet.engine->setAmbience(1.0f, 1.0f);
-    }), d);
+    // ≈ 110, 220, 440 y 880 Hz a 48 kHz (el periodo de la senoide del fixture es entero).
+    for (int period : {436, 218, 109, 55}) {
+        const double f = double(kRate) / period;
 
-    const size_t switchFrame = static_cast<size_t>(blocksBefore) * block;
-    const size_t frames = static_cast<size_t>(total) * block;
-    // Con 0/0 desde el arranque las unidades nunca se engancharon: cero EXACTO antes del escalon.
-    double beforePeak = 0.0;
-    for (size_t i = 0; i < switchFrame * 2; ++i) beforePeak = std::max(beforePeak, std::fabs(double(w[i])));
-    ASSERT_EQ(beforePeak, 0.0) << "con 0/0 hay wet antes del escalon";
+        // El normalizador: la nota arranca con 1/1. El wet del bloque 0 es el transitorio del note-on.
+        Rig dryOn = makeRig(Font::Dry, kRate, block, period), wetOn = makeRig(Font::Sends, kRate, block, period);
+        ASSERT_TRUE(dryOn.engine && wetOn.engine) << f;
+        dryOn.engine->noteOn(0, kNote, 1.0f);
+        wetOn.engine->noteOn(0, kNote, 1.0f);
+        const auto wOn = subtract(renderEngineBlocks(*wetOn.engine, 2, block), renderEngineBlocks(*dryOn.engine, 2, block));
+        const double noteOnPeak = peakDerivative(wOn, 0, block);
+        ASSERT_GT(noteOnPeak, 0.0) << f << ": el note-on no dejo wet en su bloque; no hay normalizador";
 
-    const double atSwitch = peakDerivative(w, switchFrame, switchFrame + block);
-    const double buildUp = peakDerivative(w, switchFrame, switchFrame + static_cast<size_t>(kRate) / 10);
-    const double steady = peakDerivative(w, frames - static_cast<size_t>(kRate), frames);
-    const double wetPeak = peakAbs(std::vector<float>(w.begin() + static_cast<long>((frames - kRate) * 2), w.end()));
-    std::printf("  [REQ-042] escalon 0/0 -> 1/1 (bloque %d a %d Hz): derivada pico en el bloque de conmutacion %.3e; "
-                "en los 100 ms siguientes %.3e; en regimen %.3e (pico del wet en regimen %.4f); razon bloque/regimen %.3f\n",
-                block, kRate, atSwitch, buildUp, steady, wetPeak, atSwitch / steady);
-    ASSERT_GT(steady, 0.0) << "sin wet en regimen no hay umbral";
-    EXPECT_LE(atSwitch, steady) << "el escalon supera la pendiente de regimen: decision 5 pide rampa";
+        // El escalon: 0/0 desde el arranque, la nota sostenida ~1 s, y 1/1 en el bloque `blocksBefore`.
+        Rig dry = makeRig(Font::Dry, kRate, block, period), wet = makeRig(Font::Sends, kRate, block, period);
+        ASSERT_TRUE(dry.engine && wet.engine) << f;
+        wet.engine->setAmbience(0.0f, 0.0f);
+        dry.engine->noteOn(0, kNote, 1.0f);
+        wet.engine->noteOn(0, kNote, 1.0f);
+        const auto d = renderEngineBlocks(*dry.engine, total, block);
+        const auto w = subtract(renderEngineBlocks(*wet.engine, total, block, [&](int b) {
+            if (b == blocksBefore) wet.engine->setAmbience(1.0f, 1.0f);
+        }), d);
+        const size_t switchFrame = static_cast<size_t>(blocksBefore) * block;
+        // Con 0/0 desde el arranque las unidades nunca se engancharon: cero EXACTO antes del escalon.
+        double beforePeak = 0.0;
+        for (size_t i = 0; i < switchFrame * 2; ++i) beforePeak = std::max(beforePeak, std::fabs(double(w[i])));
+        ASSERT_EQ(beforePeak, 0.0) << f << ": con 0/0 hay wet antes del escalon";
+        const double switchPeak = peakDerivative(w, switchFrame, switchFrame + block);
+        const double ratio = switchPeak / noteOnPeak;
+        std::printf("  [REQ-042] escalon 0/0 -> 1/1 a %.1f Hz (bloque %d): derivada pico al conmutar %.3e; "
+                    "al tocar la nota %.3e; razon conmutar/note-on %.3f\n", f, block, switchPeak, noteOnPeak, ratio);
+        EXPECT_LE(ratio, 1.0) << f << " Hz: conmutar es mas brusco que tocar la nota (decision 5 pide rampa)";
+    }
 }
 
 }  // namespace
