@@ -136,6 +136,17 @@ void tsf_ext_voice_set_sends(tsf* f, int voiceIndex, float reverbSend, float cho
 // saturando en los extremos). Tiene en cuenta el panOffset del canal si hay canales.
 void tsf_ext_voice_add_pan(tsf* f, int voiceIndex, float pan);
 
+// ---- REQ-041 S1: la sonda del render NEUTRAL, para tests --------------------------
+//
+// Apaga el low-pass de la voz: la voz rinde el sample tal cual, sin filtro y sin el
+// termino de nivel 1/sqrt(q) que el filtro aporta (SF2 p. 59). Produccion NUNCA lo llama:
+// desde S1 el filtro corre siempre (a rates bajos es el anti-alias, como en FluidSynth
+// 2.6.0), y la unica forma de afirmar "+1,505 dB relativo al render con el filtro
+// neutralizado" (AC-041.1) es tener ese render. Un biquad de esta forma no admite una
+// identidad por coeficientes (tsf reutiliza a0 como a2), asi que se apaga, no se anula.
+// Se llama DESPUES del note-on y ANTES del primer render de la voz. RT-safe.
+void tsf_ext_voice_bypass_lowpass(tsf* f, int voiceIndex);
+
 #ifdef __cplusplus
 }
 #endif

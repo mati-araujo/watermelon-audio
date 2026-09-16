@@ -70,6 +70,7 @@ enum : uint16_t {
 /** Destinos de modulador que usan los tests (`genOper` como destino). */
 enum : uint16_t {
     kGenInitialFilterFc = 8,       ///< corte del low-pass, en cents absolutos
+    kGenInitialFilterQ = 9,        ///< resonancia del low-pass, en centibeles 0..960 (REQ-041)
     kGenInitialAttenuation = 48,   ///< atenuación, en centibeles
     kGenPan = 17,                  ///< paneo, en 0,1 %
     kGenCoarseTune = 51,           ///< offset de pitch en semitonos (MINI-025)

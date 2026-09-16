@@ -225,3 +225,10 @@ extern "C" void tsf_ext_voice_add_pan(tsf* f, int voiceIndex, float pan) {
     else if (newpan >=  0.5f) { v->panFactorLeft = 0.0f; v->panFactorRight = 1.0f; }
     else { v->panFactorLeft = TSF_SQRTF(0.5f - newpan); v->panFactorRight = TSF_SQRTF(0.5f + newpan); }
 }
+
+// ---- REQ-041 S1: la sonda del render neutral (solo tests, ver tsf_ext.h) --------------
+extern "C" void tsf_ext_voice_bypass_lowpass(tsf* f, int voiceIndex) {
+    struct tsf_voice* v = voiceAt(f, voiceIndex);
+    if (!v) return;
+    v->lowpass.active = TSF_FALSE;
+}
