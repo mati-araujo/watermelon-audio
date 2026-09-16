@@ -224,3 +224,29 @@ target_link_libraries(core_tests PRIVATE
 
 include(GoogleTest)
 gtest_discover_tests(core_tests)
+
+# REQ-040, criterio de muerte (I-2): el render de host que produce el Δ_host = 1/1 − 0/0 por
+# preset. EXCLUDE_FROM_ALL a proposito: no es un test, no lo construye el gate ni el CI, y no
+# le cuesta nada a `run-cpp-tests.sh`. Lo construye `scripts/sf-delta-host.py` a pedido con
+# `cmake --build <build> --target sf_render_preset`. Comparte fuentes con core_tests (no un
+# OBJECT lib) para no tocar como se compila la suite: el precio es recompilar CORE_TESTED_SOURCES
+# una vez, solo cuando alguien pide la herramienta.
+add_executable(sf_render_preset EXCLUDE_FROM_ALL
+    tools/sf_render_preset.cpp
+    support/tml_impl.cpp
+    support/test_platform_backends.cpp
+    ${CORE_TESTED_SOURCES}
+)
+target_compile_definitions(sf_render_preset PRIVATE WMA_TEST_HOOKS=1)
+target_include_directories(sf_render_preset PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${WMA_CPP_ROOT})
+target_link_libraries(sf_render_preset PRIVATE
+    watermelon-analysis
+    watermelon-voice
+    watermelon-looper
+    watermelon-engines
+    watermelon-effects
+    watermelon-dsp
+    tinysoundfont
+    tinymidiloader
+    Threads::Threads
+)

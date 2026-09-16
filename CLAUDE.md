@@ -621,6 +621,16 @@ python3 scripts/spectrum-by-segment.py archivo.wav --f0 HZ   # la tabla de dB PO
                                            # 250 ms) que separa hipotesis sobre un timbre real.
                                            # Reproduce la del consumidor al decimo.
 
+python3 scripts/sf-delta-host.py --preset 81 --key 60 --vel 100   # REQ-040, criterio de
+                                           # muerte (I-2): la cola del wet de UN preset en host,
+                                           # con la ambiencia en 1/1 y en 0/0, relativa al
+                                           # regimen, a +0,3 s del note-off. Lo que se compara
+                                           # con el device de NoisyPad (3 dB); el 0/0 es el
+                                           # control de oportunidad. Construye a pedido el
+                                           # target EXCLUDE_FROM_ALL `sf_render_preset` de
+                                           # core_tests (mismo arnes que la conformidad); no
+                                           # es un test y el gate no lo compila. Bank 0 solo.
+
 python3 scripts/c-api-gap.py               # Gap C API vs JNI + delegacion (WA-2.6).
                                            # Imprime; docs/kmp/c_api_coverage.md
                                            # se actualiza a mano con esa salida
