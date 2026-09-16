@@ -189,6 +189,10 @@ public:
     void sfNoteOffAll();
     void sfNoteOffAllExcept(int keepTouchId);
     void sfSetTouchExpression(int touchId, float expression);
+    /// REQ-042: la perilla de la ambiencia (0..1 por bus) y sus lectores. Sin cola: el destino es un atomico.
+    void sfSetAmbience(float reverb, float chorus);
+    float sfGetAmbienceReverb() const;
+    float sfGetAmbienceChorus() const;
 
     /** @brief Direct access to SoundFontEngine (for processAudioBlock rendering) */
     SoundFontEngine* getSoundFontEngine() const { return mSoundFontEngine.get(); }

@@ -910,6 +910,20 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     }
 
     /**
+     * REQ-042 — la perilla de la ambiencia del font. Ver el contrato entero en el KDoc de
+     * [ISoundFontBridge.sfSetAmbience]: 0..1 por bus, lineal sobre el send, default 1/1, del
+     * instrumento y no del font. NaN y fuera de rango los resuelve el lado C, por eso no hay
+     * guard acá: el mismo llamado por JNI vuelve como el contrato promete.
+     */
+    override fun sfSetAmbience(reverb: Float, chorus: Float) {
+        nativeSfSetAmbience(reverb, chorus)
+    }
+
+    override fun sfGetAmbienceReverb(): Float = nativeSfGetAmbienceReverb()
+
+    override fun sfGetAmbienceChorus(): Float = nativeSfGetAmbienceChorus()
+
+    /**
      * Get waveform samples for visualization.
      *
      * @param buffer Buffer to fill with samples
@@ -1977,6 +1991,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeSfNoteOffAll()
     private external fun nativeSfNoteOffAllExcept(keepTouchId: Int)
     private external fun nativeSfSetTouchExpression(touchId: Int, expression: Float)
+    private external fun nativeSfSetAmbience(reverb: Float, chorus: Float)
+    private external fun nativeSfGetAmbienceReverb(): Float
+    private external fun nativeSfGetAmbienceChorus(): Float
     private external fun nativeSetVoiceFilterEnabled(enabled: Boolean)
     private external fun nativeSetVoiceFilterCutoff(hz: Float)
     private external fun nativeSetVoiceFilterResonance(q: Float)

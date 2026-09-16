@@ -383,3 +383,18 @@ void SynthEngineDispatcher::sfSetTouchExpression(int touchId, float expression) 
         mSoundFontEngine->setTouchExpression(touchId, expression);
     }
 }
+
+void SynthEngineDispatcher::sfSetAmbience(float reverb, float chorus) {
+    if (mSoundFontEngine) {
+        mSoundFontEngine->setAmbience(reverb, chorus);
+    }
+}
+
+float SynthEngineDispatcher::sfGetAmbienceReverb() const {
+    // Sin engine (fallo de alocacion en el constructor) no hay perilla: se contesta el neutro.
+    return mSoundFontEngine ? mSoundFontEngine->ambienceReverb() : 1.0f;
+}
+
+float SynthEngineDispatcher::sfGetAmbienceChorus() const {
+    return mSoundFontEngine ? mSoundFontEngine->ambienceChorus() : 1.0f;
+}

@@ -1144,6 +1144,18 @@ void AudioEngine::sfSetTouchExpression(int touchId, float expression) {
     mEngineDispatcher.sfSetTouchExpression(touchId, expression);
 }
 
+void AudioEngine::sfSetAmbience(float reverb, float chorus) {
+    mEngineDispatcher.sfSetAmbience(reverb, chorus);
+}
+
+float AudioEngine::sfGetAmbienceReverb() const {
+    return mEngineDispatcher.sfGetAmbienceReverb();
+}
+
+float AudioEngine::sfGetAmbienceChorus() const {
+    return mEngineDispatcher.sfGetAmbienceChorus();
+}
+
 void AudioEngine::setOscillatorType(int typeId) {
     mOscBank.setOscillatorType(typeId);
 

@@ -424,6 +424,30 @@ public:
     void sfSetTouchExpression(int touchId, float expression);
 
     /**
+     * @brief REQ-042 — la perilla de la ambiencia del SoundFont, por instancia y sin CC.
+     *
+     * Escala el send de reverb y el de chorus de TODAS las voces del font —generador +
+     * moduladores, incluido el default #8/#9 con CC91/CC93 en reset— ANTES de las unidades
+     * (freeverb + chorus a la FluidSynth). La salida seca no cambia. 0..1 por bus, lineal sobre
+     * la amplitud del send (0,5 = −6 dB, 0,1 = −20 dB); default 1/1 (= FluidSynth); con 0/0 el
+     * motor rinde el seco muestra a muestra.
+     *
+     * Es un ajuste del INSTRUMENTO, no del font: sobrevive a `reset()`, al cambio y la descarga
+     * de font y a `prepare()` con otro rate. Fuera de rango satura; NaN deja ese bus como estaba
+     * y deja rastro en el registro. Cruza al thread de audio por atomicos, sin cola ni lock;
+     * en caliente el render alcanza el objetivo con un slew de 5 ms por muestra (AC-042.7:
+     * sin el, conmutar 0/0 → 1/1 con nota sostenida era hasta 10× mas brusco que el note-on).
+     * NO RT-safe por el aviso del NaN: thread de control.
+     */
+    void sfSetAmbience(float reverb, float chorus);
+
+    /// El OBJETIVO del bus de reverb (lo que dejo el set), no el valor en transito. Cualquier thread.
+    float sfGetAmbienceReverb() const;
+
+    /// Idem para el bus de chorus.
+    float sfGetAmbienceChorus() const;
+
+    /**
      * @brief Cambia el tipo de modulador activo
      * @param typeId Tipo de modulador (0=NONE, 1=BURST, 2=AM, 3=FM, 4=PWM, 5=ENV, 6=RING, 7=GATE)
      * Lock-free: Seguro llamar desde cualquier thread

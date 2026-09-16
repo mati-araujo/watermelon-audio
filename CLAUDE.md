@@ -153,13 +153,13 @@ afirmado y no vigilado haría leer todo este archivo como verificado cuando sól
 | `kt-commonMain` | 95 | archivos .kt en commonMain |
 | `kt-androidMain` | 21 | archivos .kt en androidMain |
 | `kt-iosMain` | 6 | archivos .kt en iosMain |
-| `bridge-loc` | 3409 | LOC de AudioNativeBridge.kt |
-| `bridge-external` | 313 | `external fun` en AudioNativeBridge |
-| `jniexport-bridge` | 302 | JNIEXPORT en jni_audio_bridge.cpp |
-| `jniexport-total` | 315 | JNIEXPORT en todo jni/*.cpp |
-| `wma-api` | 278 | declaraciones WMA_API en la C API |
+| `bridge-loc` | 3426 | LOC de AudioNativeBridge.kt |
+| `bridge-external` | 316 | `external fun` en AudioNativeBridge |
+| `jniexport-bridge` | 305 | JNIEXPORT en jni_audio_bridge.cpp |
+| `jniexport-total` | 318 | JNIEXPORT en todo jni/*.cpp |
+| `wma-api` | 281 | declaraciones WMA_API en la C API |
 | `analysis-files` | 17 | fuentes .h/.cpp en cpp/analysis/ (sin tests/) |
-| `callers-baseline` | 1 callback-externo / 15 deuda / 1 entrada / 62 sonda-de-tests | reparto del baseline de llamadores |
+| `callers-baseline` | 1 callback-externo / 15 deuda / 1 entrada / 61 sonda-de-tests | reparto del baseline de llamadores |
 | `ver-kotlin` | 2.4.10 | version de Kotlin |
 | `ver-agp` | 9.3.2 | version de AGP |
 <!-- END conteos-medidos -->

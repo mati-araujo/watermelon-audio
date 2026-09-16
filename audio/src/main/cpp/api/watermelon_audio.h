@@ -473,6 +473,46 @@ WMA_API void wma_sf_note_off_all_except(WmaEngine* engine, int keep_touch_id);
 /* RT-safe */
 WMA_API void wma_sf_set_touch_expression(WmaEngine* engine, int touch_id, float expression);
 
+/**
+ * REQ-042 — the ambience knob of the SoundFont: how much of the font's own reverb and
+ * chorus reaches the two send units. Per instance, no CC.
+ *
+ * Scales the reverb send and the chorus send of EVERY voice — generator plus modulators,
+ * including the SF2 default #8/#9 (CC91/CC93 at their GM reset values) — BEFORE the
+ * units (freeverb + chorus with FluidSynth 2.6.0 defaults). The dry output does not
+ * change: with 1/1 the render is byte for byte the v2.18.0 render, with 0/0 it is
+ * sample for sample the dry font.
+ *
+ * Unit: LINEAR over the amplitude of the send, 0..1 per bus. 0.5 = -6 dB, 0.1 = -20 dB;
+ * a slider curve belongs to the UI. Default 1/1 (= FluidSynth).
+ *
+ * It is a setting of the INSTRUMENT, not of the font: it survives reset(), loading or
+ * unloading a font and prepare() at another rate. Out of range saturates to 0..1; NaN
+ * leaves that bus as it was and leaves a trace in the log. Nothing reaches the audio
+ * thread but two atomics read once per block: no queue, no lock, no allocation.
+ *
+ * A change while audio is running is reached with a 5 ms slew per sample (measured:
+ * without it, switching 0/0 -> 1/1 under a sustained note was up to 10x more abrupt than
+ * the font's own note-on). A value set before the engine starts applies at once. The
+ * getters return the TARGET (what this call left), never the value in transit.
+ *
+ * NOT RT-safe (the NaN trace logs): control thread.
+ *
+ * @param reverb  0..1 scale of the reverb send
+ * @param chorus  0..1 scale of the chorus send
+ */
+WMA_API void wma_sf_set_ambience(WmaEngine* engine, float reverb, float chorus);
+
+/**
+ * The reverb-send TARGET (what wma_sf_set_ambience left, after saturation) — not the
+ * value in transit of the 5 ms slew. 1.0 with no engine: "no engine" is not "ambience
+ * off". Any thread.
+ */
+WMA_API float wma_sf_get_ambience_reverb(const WmaEngine* engine);
+
+/** Same, for the chorus send. */
+WMA_API float wma_sf_get_ambience_chorus(const WmaEngine* engine);
+
 /* ================================================================
  * 7. Voice Filter
  * ================================================================ */

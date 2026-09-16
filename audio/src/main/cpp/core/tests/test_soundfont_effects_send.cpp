@@ -312,7 +312,7 @@ constexpr int blocksFor(double seconds, int rate = kRate) { return static_cast<i
 TEST(SoundFontEffectsSendEngine, TheWetIsAddedAndTheSeamCanRemoveIt) {
     Rig wet = makeRig(1000, 1000), dry = makeRig(0, 0), seamed = makeRig(1000, 1000);
     ASSERT_TRUE(wet.engine && dry.engine && seamed.engine);
-    seamed.engine->setEffectsSendScale(0.0f, 0.0f);
+    seamed.engine->setAmbience(0.0f, 0.0f);   // REQ-042: la costura, ya con su nombre publico
     for (Rig* r : {&wet, &dry, &seamed}) r->engine->noteOn(0, kRoot, 1.0f);
     const auto a = renderBlocks(*wet.engine, blocksFor(0.5));
     const auto b = renderBlocks(*dry.engine, blocksFor(0.5));

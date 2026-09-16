@@ -9,7 +9,8 @@ package com.watermellonstudios.audio.api
  *
  * ## Por qué existe ahora
  *
- * Las 13 vivían **sólo** en el `AudioNativeBridge` de Android. La C API las tiene
+ * Las 13 vivían **sólo** en el `AudioNativeBridge` de Android (REQ-042 sumó tres más: la
+ * perilla de la ambiencia y sus dos lectores). La C API las tiene
  * (`wma_sf_*`) y cinterop ya generaba sus bindings; lo que faltaba era el nombre en
  * Kotlin común. El consumidor es NoisyPad: su `AudioEngineStateManager` las llama y
  * no puede bajar a `commonMain` sin esto.
@@ -183,4 +184,45 @@ interface ISoundFontBridge {
      * evitar, no uno que pueda impedir por su cuenta.
      */
     fun sfSetTouchExpression(touchId: Int, expression: Float)
+
+    // ==================== AMBIENCIA DEL FONT (REQ-042) ====================
+
+    /**
+     * La perilla de la ambiencia del font: cuánto de la reverb y del chorus **propios del
+     * SoundFont** llega a las dos unidades. Por instancia, sin CC.
+     *
+     * Escala el send de reverb y el de chorus de **todas** las voces —generador + moduladores,
+     * incluido el default #8/#9 de SF2 (CC91/CC93 en su valor de reset de GM)— **antes** de las
+     * unidades (freeverb + chorus con los defaults de FluidSynth 2.6.0). La salida seca no
+     * cambia: con `1/1` el render es byte a byte el de v2.18.0; con `0/0` es muestra a muestra
+     * el font seco.
+     *
+     * **Unidad: lineal sobre la amplitud del send, `0..1` por bus.** `0,5` = −6 dB, `0,1` = −20 dB.
+     * La curva de un slider es de la UI, no de esto. **Default `1/1`** (= FluidSynth).
+     *
+     * **Es un ajuste del instrumento, no del font**: sobrevive a `reset()`, a cargar o descargar
+     * un font y a `prepare()` con otro rate. Un valor fuera de rango satura a `0..1`; un `NaN`
+     * deja **ese** bus como estaba y deja rastro en el registro — guard de contrato del lado C,
+     * ver el KDoc de la interfaz. Al thread de audio sólo llegan dos atómicos que se leen una vez
+     * por bloque: sin cola, sin lock, sin allocation. **En caliente el cambio se alcanza con una
+     * rampa de 5 ms** por muestra (medido: sin ella, conmutar `0/0 → 1/1` con una nota sostenida
+     * era hasta 10× más brusco que el propio note-on del font); un valor puesto antes de arrancar
+     * aplica de una.
+     *
+     * **No es RT-safe** (el rastro del `NaN` loguea): thread de control.
+     *
+     * Lo que NO hace: no toca los parámetros de las unidades (room, damp, width, level, voces del
+     * chorus siguen fijos) ni sigue CC91/CC93 en vuelo.
+     */
+    fun sfSetAmbience(reverb: Float, chorus: Float)
+
+    /**
+     * El **objetivo** del send de reverb: lo que dejó [sfSetAmbience] después de saturar, no el
+     * valor en tránsito de la rampa. `1.0` sin motor ("sin motor" no es "ambiencia apagada").
+     * Es lo que hace afirmable el set sin render.
+     */
+    fun sfGetAmbienceReverb(): Float
+
+    /** Ídem para el send de chorus. */
+    fun sfGetAmbienceChorus(): Float
 }

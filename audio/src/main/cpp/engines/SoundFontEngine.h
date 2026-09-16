@@ -89,12 +89,25 @@ public:
     }
 
     /**
-     * REQ-040 (decisión 3): la costura interna sobre los sends, 0..1 cada uno (default 1). Nada
-     * público la expone todavía —es un REQ de un día si el consumidor la pide con carta—; existe
-     * para que un test pueda separar el wet del dry y para que `AudioEngine` la tenga a mano.
-     * Cualquier thread: atómicos que el render lee una vez por bloque.
+     * REQ-042 — la perilla de la ambiencia del font, sobre la costura que REQ-040 dejó adentro
+     * (decisión 3 de aquel: "un REQ de un día si la piden con carta"; NoisyPad la pidió el
+     * 2026-09-15). 0..1 por bus, lineal sobre la amplitud del send (0,5 = −6 dB, 0,1 = −20 dB),
+     * default 1/1 (= FluidSynth). Escala TODOS los sends —generador + moduladores, incluido el
+     * default #8/#9 con CC91/CC93 en reset— ANTES de las unidades; la salida seca no cambia.
+     *
+     * Es un ajuste del INSTRUMENTO, no del font: sobrevive a `reset()`, al cambio y la descarga
+     * de font y a `prepare()` con otro rate (AC-042.4). NaN deja ese bus como estaba y avisa;
+     * fuera de rango satura (AC-042.2). Cualquier thread: atómicos que el render lee por bloque
+     * y alcanza con un slew de 5 ms en caliente (AC-042.7, ver `SoundFontSendBus`).
+     * NO RT-safe por el aviso del NaN: la llama el thread de control.
      */
-    void setEffectsSendScale(float reverb, float chorus) { mSendBus.setSendScale(reverb, chorus); }
+    void setAmbience(float reverb, float chorus) { mSendBus.setSendScale(reverb, chorus); }
+
+    /// El OBJETIVO del bus de reverb (lo que dejó el set), no el valor en tránsito. Cualquier thread.
+    float ambienceReverb() const noexcept { return mSendBus.sendScaleReverb(); }
+
+    /// Ídem para el bus de chorus.
+    float ambienceChorus() const noexcept { return mSendBus.sendScaleChorus(); }
 
     // ========== SynthEngine interface (unused in SOUNDFONT mode) ==========
 

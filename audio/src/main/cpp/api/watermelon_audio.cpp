@@ -505,6 +505,21 @@ void wma_sf_set_touch_expression(WmaEngine* engine, int touch_id, float expressi
     engine->engine->sfSetTouchExpression(touch_id, expression);
 }
 
+void wma_sf_set_ambience(WmaEngine* engine, float reverb, float chorus) {
+    WMA_CHECK_VOID(engine);
+    engine->engine->sfSetAmbience(reverb, chorus);
+}
+
+float wma_sf_get_ambience_reverb(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 1.0f);
+    return engine->engine->sfGetAmbienceReverb();
+}
+
+float wma_sf_get_ambience_chorus(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 1.0f);
+    return engine->engine->sfGetAmbienceChorus();
+}
+
 /* ================================================================
  * 7. Voice Filter
  * ================================================================ */
