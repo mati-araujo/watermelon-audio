@@ -46,14 +46,14 @@ namespace wma::track_analysis {
 
 /// El preset de VOZ, fijado por el motor y no expuesto (decision 5). Entre 40 y 30 ms
 /// decidio el tramo de 65 Hz del fixture (AC-043.2, medido en S1): con 30 ms la regla
-/// `τmax ≤ W/2` del MPM no baja de 66,7 Hz y el tramo sale clavado en ese techo, a 3,4 %
-/// (40 ms: 0,12 %). 60 y no 80 Hz porque un bajo a 65 Hz con rango 80 no sale "sin
+/// `τmax ≤ W/2` del MPM no baja de 66,7 Hz y el tramo sale SIN pitch (0/0: por debajo del
+/// rango alcanzable no se fabrica el borde), con 40 ms a 0,12 %. 60 y no 80 Hz porque un bajo a 65 Hz con rango 80 no sale "sin
 /// pitch": sale como su H2 con claridad alta.
 constexpr double kVoiceWindowMs = 40.0;
 constexpr double kVoiceMinHz = 60.0;
 constexpr double kVoiceMaxHz = 1200.0;
-/// El umbral de REQ-031, sin cambios: por debajo la altura no esta en la señal.
-constexpr double kSupportFloorDb = -25.0;
+/// El umbral de REQ-031, la MISMA definicion que usa el afinador.
+constexpr double kSupportFloorDb = wma::analysis::SpectralSupportProbe::kSupportFloorDb;
 
 /// `W = round(40 ms · sr)`. A 48 kHz, 1920.
 inline int voiceWindowFrames(int sampleRate) {

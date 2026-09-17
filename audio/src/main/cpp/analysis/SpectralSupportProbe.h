@@ -56,6 +56,14 @@ public:
     /// Cuántos armónicos entran en la referencia. Es lo que se midió; más no separa mejor
     /// (el falso ya queda 60 dB abajo) y menos deja al pico fuera cuando H3 domina.
     static constexpr int kHarmonics = 8;
+    /**
+     * El umbral, en dB, por debajo del cual la altura NO esta en la señal. Lo consumen el
+     * afinador (`AnalysisThread::kSpectralSupportFloorDb` lo referencia) y el analisis por
+     * pista de REQ-043: UNA definicion. La medicion que lo fija esta en `AnalysisThread.h`:
+     * −1,8 aceptado / −61,3 rechazado sobre 2048 frames con Hann. No se mueve para salvar un
+     * caso: se mide que tiene ese caso que la sonda no ve.
+     */
+    static constexpr double kSupportFloorDb = -25.0;
 
     /// El afinador: ventana `kWindowFrames`.
     SpectralSupportProbe();

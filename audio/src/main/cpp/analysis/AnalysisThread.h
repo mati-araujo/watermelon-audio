@@ -232,7 +232,7 @@ public:
      * qué tiene esa cuerda que la sonda no ve. Bajar el umbral para salvar un caso compra el
      * falso positivo de vuelta, y ése es el lado que este REQ existe para cerrar.
      */
-    static constexpr double kSpectralSupportFloorDb = -25.0;
+    static constexpr double kSpectralSupportFloorDb = SpectralSupportProbe::kSupportFloorDb;
 
     /// Que paso en una vuelta de `drainOnce()`. `kRingEmpty` es la unica que el
     /// llamador tiene que tratar distinto: el thread duerme, el puerto termina.

@@ -1709,6 +1709,7 @@ WMA_API int wma_looper_detect_onsets(const WmaEngine* engine, int track_index,
  * @param out_hop_frames  puede ser NULL.
  * @return puntos escritos, nunca negativo. **0 = no hay** (R-API-59): pista inactiva,
  *         siendo grabada, region menor que una ventana, hop invalido, o `max_points <= 0`.
+ *         Si devuelve exactamente `max_points`, pudo haber TRUNCADO: dimensiona por la cota.
  */
 WMA_API int wma_looper_analyze_pitch(const WmaEngine* engine, int track_index,
                                       float hop_ms, int* out_frames, float* out_hz,
@@ -1732,6 +1733,7 @@ WMA_API int wma_looper_analyze_pitch(const WmaEngine* engine, int track_index,
  * @param out_first_frame escrito SOLO cuando devuelve > 0. Puede ser NULL.
  * @param out_hop_frames  escrito siempre que `bins_per_second > 0` y haya rate. Puede ser NULL.
  * @return bins escritos, nunca negativo. **0 = no hay** (R-API-59), con las mismas causas.
+ *         Si devuelve exactamente `max_bins`, pudo haber TRUNCADO: dimensiona por la cota.
  */
 WMA_API int wma_looper_get_level_envelope(const WmaEngine* engine, int track_index,
                                            float bins_per_second, float* out_bins,

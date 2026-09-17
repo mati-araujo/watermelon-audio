@@ -277,22 +277,26 @@ public:
      */
     bool estimateWindowAt(int startFrame);
 
-    /// Altura de la ultima ventana, en Hz, o 0 si no hubo (piso, claridad o rango).
+    /**
+     * Altura de la ultima ventana, en Hz, o 0 si no hubo (piso, claridad o rango). El rango
+     * se decide en lags con un lag de margen a cada lado (ver `prepareWindowed`): dentro de
+     * [minHz, maxHz] la lectura esta afirmada por el barrido de test_track_analysis.cpp; a
+     * menos de un lag por fuera sale el valor real (59,7–60 Hz, 1200–1263 Hz), no el borde
+     * fabricado ni una octava; mas afuera no hay garantia (por abajo 0/0; por arriba el
+     * primer lag no puede ser candidato y una nota bien fuera del rango puede leerse en su
+     * octava inferior, que es lo que el rango declarado existe para excluir).
+     */
     double estimatedHz() const noexcept { return mEstimatedHz; }
-    /// Claridad NSDF del pico elegido, 0..1. Es la `confidence` que cruza la frontera.
+    /// Claridad NSDF del pico elegido, 0..1; 0 EXACTO cuando no hay altura (0/0).
     double estimatedClarity() const noexcept { return mEstimatedClarity; }
     /// true si la ultima ventana produjo una altura creible.
     bool hasEstimate() const noexcept { return mHasEstimate; }
-    /// RMS de la ultima ventana (decimada, ya filtrada), lineal.
-    double windowRms() const noexcept { return mWindowRms; }
 
-    /// El minimo que la busqueda alcanza de verdad tras la regla `τmax ≤ W/2`.
+    /// El minimo que la busqueda alcanza de verdad tras la regla `τmax ≤ W/2`; por debajo
+    /// sale 0/0, nunca este valor (ver `searchLoadedWindow`). Lo afirma el test de AC-043.2.
     double effectiveMinHz() const noexcept {
         return mMaxLag > 0 ? mWorkingRate / mMaxLag : 0.0;
     }
-    int windowFrames() const noexcept { return mWindowFrames; }
-    int loadedFrames() const noexcept { return mLoadedFrames; }
-    int decimationFactor() const noexcept { return mDecimation; }
 
 private:
     double nsdfWindowed(int lag) const;
@@ -325,7 +329,6 @@ private:
     double mEstimatedHz{0.0};
     double mEstimatedClarity{0.0};
     bool mHasEstimate{false};
-    double mWindowRms{0.0};
 };
 
 }  // namespace wma::dsp

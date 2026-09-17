@@ -159,7 +159,7 @@ afirmado y no vigilado haría leer todo este archivo como verificado cuando sól
 | `jniexport-total` | 318 | JNIEXPORT en todo jni/*.cpp |
 | `wma-api` | 283 | declaraciones WMA_API en la C API |
 | `analysis-files` | 19 | fuentes .h/.cpp en cpp/analysis/ (sin tests/) |
-| `callers-baseline` | 1 callback-externo / 15 deuda / 3 entrada / 61 sonda-de-tests | reparto del baseline de llamadores |
+| `callers-baseline` | 1 callback-externo / 15 deuda / 3 entrada / 62 sonda-de-tests | reparto del baseline de llamadores |
 | `ver-kotlin` | 2.4.20 | version de Kotlin |
 | `ver-agp` | 9.3.2 | version de AGP |
 <!-- END conteos-medidos -->

@@ -347,7 +347,6 @@ void McLeodWindowedPitch::prepareWindowed(int sampleRate, int windowFrames,
     mHasEstimate = false;
     mEstimatedHz = 0.0;
     mEstimatedClarity = 0.0;
-    mWindowRms = 0.0;
     mLoadedFrames = 0;
     mWin = nullptr;
     mDecimatedRegion.clear();
@@ -367,8 +366,24 @@ void McLeodWindowedPitch::prepareWindowed(int sampleRate, int windowFrames,
     mWindowDecimated = mWindowFrames / mDecimation;
 
     // Rango de lag: la misma regla que el afinador, incluido el techo `τmax ≤ W/2`.
-    mMinLag = static_cast<int>(std::floor(mWorkingRate / mMaxHz));
-    mMaxLag = static_cast<int>(std::ceil(mWorkingRate / mMinHz));
+    //
+    // 🔴 UN LAG DE MARGEN POR DEBAJO DE `wr/maxHz`, Y NO ES OPCIONAL (auditoria de #342). El
+    // primer lag muestreado NUNCA puede ser candidato —el criterio de maximo local necesita un
+    // vecino izquierdo—, asi que un pico con τ ∈ [floor(wr/maxHz), +1) se perdia, el primer
+    // candidato real era 2τ y, como el rango acepta hasta `maxHz` inclusive, la nota salia UNA
+    // OCTAVA ABAJO con claridad 1,00 y la sonda de soporte la aceptaba (X(2f) es el pico).
+    // Medido con f0 + 4 armonicos, W = 40 ms: 1170 → 1169,9; 1171 → 585,5; 1200 → 599,9. El
+    // afinador no lo sufre solo porque `kMaxHz = 2200 < wr/kMinLag = 2400` deja esa banda
+    // muerta fuera de su rango; aca el rango termina justo ahi. `McLeodPitch::prepare` no se
+    // toca (golden).
+    mMinLag = static_cast<int>(std::floor(mWorkingRate / mMaxHz)) - 1;
+    // Y DOS de margen por ARRIBA, por la razon simetrica: el pico elegido en `mMaxLag` no se
+    // publica (ver `searchLoadedWindow`), asi que sin margen `minHz` exacto —τ = wr/minHz—
+    // caeria en el borde y saldria 0/0 estando en el rango. Uno solo no alcanza: con el
+    // rizado de la ventana el pico refinado de un tono de 60,0 Hz cae en 400 o en 401 segun
+    // la ventana (medido: 14 de 22 ventanas en 0/0). Con dos, el borde es
+    // `effectiveMinHz()` = wr/(ceil(wr/minHz)+2) = 59,7 Hz, justo debajo del rango.
+    mMaxLag = static_cast<int>(std::ceil(mWorkingRate / mMinHz)) + 2;
     if (mMinLag < 2) mMinLag = 2;
     if (mMaxLag > mWindowDecimated / 2) mMaxLag = mWindowDecimated / 2;
     if (mMaxLag < mMinLag) { mMinLag = mMaxLag = 0; }
@@ -382,7 +397,6 @@ void McLeodWindowedPitch::loadMonoRegion(const float* mono, int numFrames) {
     mHasEstimate = false;
     mEstimatedHz = 0.0;
     mEstimatedClarity = 0.0;
-    mWindowRms = 0.0;
     if (mono == nullptr || numFrames <= 0 || mSampleRate <= 0 || mWindowDecimated <= 0) {
         mDecimatedRegion.clear();
         return;
@@ -405,7 +419,6 @@ bool McLeodWindowedPitch::estimateWindowAt(int startFrame) {
     mHasEstimate = false;
     mEstimatedHz = 0.0;
     mEstimatedClarity = 0.0;
-    mWindowRms = 0.0;
     mWin = nullptr;
     if (startFrame < 0 || mWindowDecimated <= 0 || mLoadedFrames <= 0) return false;
     if (startFrame + mWindowFrames > mLoadedFrames) return false;
@@ -437,8 +450,8 @@ void McLeodWindowedPitch::searchLoadedWindow() {
         const double v = mWin[i];
         energy += v * v;
     }
-    mWindowRms = std::sqrt(energy / mWindowDecimated);
-    if (mWindowRms < static_cast<double>(kSilenceFloor) || mMaxLag <= 0) return;
+    const double rms = std::sqrt(energy / mWindowDecimated);
+    if (rms < static_cast<double>(kSilenceFloor) || mMaxLag <= 0) return;
 
     // --- barrido con paso proporcional; candidato = maximo local entre muestras ---
     mKeyCount = 0;
@@ -514,6 +527,16 @@ void McLeodWindowedPitch::searchLoadedWindow() {
     if (chosen - 1 >= 0) mNsdf[static_cast<size_t>(chosen - 1)] = nsdfWindowed(chosen - 1);
     if (chosen + 1 <= mMaxLag) mNsdf[static_cast<size_t>(chosen + 1)] = nsdfWindowed(chosen + 1);
 
+    // 🔴 EL BORDE DERECHO NO ES UNA ALTURA (auditoria de #342). Un pico elegido en `mMaxLag`
+    // no tiene vecino ni parabola: es la NSDF todavia subiendo hacia un periodo mas largo que
+    // el rango, y publicarlo FABRICA `effectiveMinHz()` exacto con claridad alta (medido: 57
+    // Hz → 60,0 con 0,87–0,90; 59 → 60,0 con 0,98). Por debajo del rango no hay pitch, y se
+    // dice como tal: 0/0.
+    if (chosen >= mMaxLag) {
+        mEstimatedClarity = 0.0;
+        return;
+    }
+
     // --- parabola acotada a media muestra ---
     double refinedLag = static_cast<double>(chosen);
     if (chosen > 0 && chosen < mMaxLag) {
@@ -527,10 +550,18 @@ void McLeodWindowedPitch::searchLoadedWindow() {
         }
     }
 
-    mEstimatedClarity = mNsdf[static_cast<size_t>(chosen)];
+    // El rango se decide en LAGS, no en Hz: `minHz` exacto es τ = wr/minHz y la parabola lo
+    // deja a ±0,5 muestra de ahi, o sea a ±0,15 Hz — comparar el Hz refinado contra `minHz`
+    // rechazaba 60,0 Hz en 14 de 22 ventanas (medido). Los lags de margen de `prepareWindowed`
+    // son exactamente el borde: adentro de ellos el pico es real y tiene vecinos.
     mEstimatedHz = (refinedLag > 0.0) ? (mWorkingRate / refinedLag) : 0.0;
-    mHasEstimate = mEstimatedHz >= mMinHz && mEstimatedHz <= mMaxHz;
-    if (!mHasEstimate) mEstimatedHz = 0.0;
+    mHasEstimate = chosen > mMinLag && chosen < mMaxLag && mEstimatedHz > 0.0;
+    if (!mHasEstimate) {
+        mEstimatedHz = 0.0;
+        mEstimatedClarity = 0.0;   // 0/0 exacto: no hay claridad de una altura que no se publica
+        return;
+    }
+    mEstimatedClarity = mNsdf[static_cast<size_t>(chosen)];
 }
 
 }  // namespace wma::dsp

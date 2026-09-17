@@ -1184,13 +1184,23 @@ public:
                           float* outConf, int maxPoints) const {
         if (index < 0 || index >= MAX_TRACKS || hopFrames <= 0 || maxPoints <= 0) return 0;
         if (!outFrames || !outHz || !outConf) return 0;
-        std::vector<float> mono;
-        int regionStart = 0;
-        if (!copyTrackRegionMono(index, mono, regionStart)) return 0;
-        const int sr = mSampleRate.load(std::memory_order_acquire);
-        return wma::track_analysis::pitchSeriesOverMono(
-            mono.data(), static_cast<int>(mono.size()), sr, regionStart, hopFrames,
-            wma::track_analysis::voiceWindowFrames(sr), outFrames, outHz, outConf, maxPoints);
+        // UNA guarda para todo el camino, aca y no en cada assign (auditoria de #342): la copia
+        // mono, el buffer decimado del detector y el ring del probe asignan, y esto lo llama
+        // una `wma_*` que es `extern "C"`: un bad_alloc que cruce esa frontera es
+        // std::terminate en el proceso del consumidor. "No pude" es 0 elementos, como
+        // detectOnsets.
+        try {
+            std::vector<float> mono;
+            int regionStart = 0;
+            if (!copyTrackRegionMono(index, mono, regionStart)) return 0;
+            const int sr = mSampleRate.load(std::memory_order_acquire);
+            return wma::track_analysis::pitchSeriesOverMono(
+                mono.data(), static_cast<int>(mono.size()), sr, regionStart, hopFrames,
+                wma::track_analysis::voiceWindowFrames(sr), outFrames, outHz, outConf,
+                maxPoints);
+        } catch (...) {
+            return 0;
+        }
     }
 
     /**
@@ -1210,13 +1220,17 @@ public:
                               int* outFirstFrame) const {
         if (index < 0 || index >= MAX_TRACKS || hopFrames <= 0 || maxBins <= 0) return 0;
         if (!outBins || !outFirstFrame) return 0;
-        std::vector<float> mono;
-        int regionStart = 0;
-        if (!copyTrackRegionMono(index, mono, regionStart)) return 0;
-        const int bins = wma::track_analysis::levelEnvelopeOverMono(
-            mono.data(), static_cast<int>(mono.size()), hopFrames, outBins, maxBins);
-        if (bins > 0) *outFirstFrame = regionStart;
-        return bins;
+        try {   // misma guarda y misma razon que analyzeTrackPitch
+            std::vector<float> mono;
+            int regionStart = 0;
+            if (!copyTrackRegionMono(index, mono, regionStart)) return 0;
+            const int bins = wma::track_analysis::levelEnvelopeOverMono(
+                mono.data(), static_cast<int>(mono.size()), hopFrames, outBins, maxBins);
+            if (bins > 0) *outFirstFrame = regionStart;
+            return bins;
+        } catch (...) {
+            return 0;
+        }
     }
 
     /**
@@ -1459,8 +1473,18 @@ private:
      * `mRecordingTrack` cubre los dos casos. La lectura va por `sampleAt`, que sirve
      * para los dos backends de almacenamiento.
      *
-     * @return false si no hay nada que leer (inactiva, grabando, region vacia, o sin
-     *         memoria para la copia); entonces `mono` queda vacio.
+     * 🔴 TOCTOU HEREDADO DE `getTrackWaveform`, declarado: la guarda lee `mRecordingTrack`
+     * una vez y despues copia sin lock. Si entre medio se dispara el trigger de una pista
+     * ARMADA sobre este indice, o entra el ultimo bloque de un overdub, la copia sale
+     * RASGADA (una serie con un tramo viejo y otro nuevo), no un crash: `sampleAt` nunca
+     * lee fuera del almacenamiento reservado. Es el mismo contrato que el waveform y los
+     * onsets aceptan; el consumidor re-analiza cuando la toma termina.
+     *
+     * Asigna (`mono.assign`) SIN guarda propia: la unica guarda de excepciones vive en
+     * `analyzeTrackPitch` / `getTrackLevelEnvelope`, que envuelven todo el camino.
+     *
+     * @return false si no hay nada que leer (inactiva, grabando o region vacia); entonces
+     *         `mono` queda vacio.
      */
     bool copyTrackRegionMono(int index, std::vector<float>& mono, int& outRegionStart) const {
         mono.clear();
@@ -1472,12 +1496,7 @@ private:
         const int end = std::clamp(track.getLoopEnd(), start, std::max(0, length));
         const int region = end - start;
         if (region <= 0) return false;
-        try {
-            mono.assign(static_cast<size_t>(region), 0.0f);
-        } catch (...) {
-            mono.clear();
-            return false;
-        }
+        mono.assign(static_cast<size_t>(region), 0.0f);
         for (int f = 0; f < region; ++f) {
             mono[static_cast<size_t>(f)] =
                 0.5f * (track.sampleAt(start + f, 0) + track.sampleAt(start + f, 1));

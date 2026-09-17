@@ -266,8 +266,8 @@ TEST_F(TrackAnalysisGlide, GlideMetricsWithinCeilingAndRatchet) {
 // AC-043.1 tambien en el tramo de 65 Hz. Los dos resultados se imprimen.
 //
 // Que bug atrapa: bajar el preset a 30 ms "porque es mas fino" sin que sostenga el
-// grave (con la regla τmax ≤ W/2 el MPM no baja de 66,7 Hz y 65 Hz sale clavado en ese
-// techo: medido 3,4 % contra 0,12 % con 40 ms); o dejarlo en 40 cuando 30 SI sostiene
+// grave (con la regla τmax ≤ W/2 el MPM no baja de 66,7 Hz y 65 Hz sale SIN PITCH: 0/0 en
+// todo el tramo, huecos; con 40 ms, 0,12 %); o dejarlo en 40 cuando 30 SI sostiene
 // (entonces 40 no es "la mas corta").
 // ---------------------------------------------------------------------------
 TEST_F(TrackAnalysisGlide, VoiceWindowIsTheShortestThatHoldsAtSixtyFiveHertz) {
@@ -301,6 +301,119 @@ TEST_F(TrackAnalysisGlide, VoiceWindowIsTheShortestThatHoldsAtSixtyFiveHertz) {
     const int shortest = holds30 ? w30 : w40;
     EXPECT_EQ(windowFrames, shortest)
         << "el preset de voz tiene que ser la mas corta de {40, 30} ms que sostiene 65 Hz";
+}
+
+// ---------------------------------------------------------------------------
+// Barrido sintetico del RANGO DECLARADO (auditoria de #342): cada tono con armonicos de 60 a
+// 1200 Hz se lee sin octava y con error < 1 %; por debajo del rango sale 0/0, nunca un
+// numero fabricado.
+//
+// Que bug atrapa (los dos MEDIDOS por el reviewer sobre el primer diff):
+//   - el primer lag muestreado no puede ser candidato (sin vecino izquierdo), asi que un
+//     pico con τ ∈ [floor(wr/maxHz), +1) se perdia y 1171/1175/1200 Hz salian UNA OCTAVA
+//     ABAJO con claridad 1,00 (M6: `mMinLag` sin el lag de margen ⇒ rojo en 1175);
+//   - el pico elegido en el borde derecho (`chosen == mMaxLag`, sin vecino ni parabola)
+//     FABRICABA effectiveMinHz exacto con claridad alta: 57 Hz → 60,0 (0,87–0,90), 59 → 60,0
+//     (0,98). Ahora es 0/0.
+// Sin fixture: f0 + 4 armonicos a −6 dB/oct, 0,25 s por tono, −20 dBFS.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::vector<float> harmonicTone(double f0, int frames, int harmonics = 4) {
+    std::vector<float> mono(static_cast<size_t>(frames), 0.0f);
+    for (int i = 0; i < frames; ++i) {
+        const double t = static_cast<double>(i) / kSR;
+        double v = 0.0;
+        for (int h = 1; h <= harmonics; ++h) v += std::sin(2.0 * M_PI * f0 * h * t) / h;
+        mono[static_cast<size_t>(i)] = static_cast<float>(0.1 * v);
+    }
+    return mono;
+}
+
+struct ToneVerdict {
+    int points{0};
+    int voiced{0};
+    int octaves{0};
+    double maxErrPct{0.0};
+    float minConf{1.0f};
+};
+
+ToneVerdict readTone(double f0, int W) {
+    const int frames = kSR / 4;
+    const std::vector<float> mono = harmonicTone(f0, frames);
+    const int hop = wma::track_analysis::hopFramesForMs(kHopMs, kSR);
+    std::vector<int> fr(64);
+    std::vector<float> hz(64), conf(64);
+    ToneVerdict v;
+    v.points = wma::track_analysis::pitchSeriesOverMono(mono.data(), frames, kSR, 0, hop, W,
+                                                        fr.data(), hz.data(), conf.data(), 64);
+    for (int i = 0; i < v.points; ++i) {
+        if (hz[static_cast<size_t>(i)] <= 0.0f) {
+            if (conf[static_cast<size_t>(i)] != 0.0f) v.minConf = -1.0f;   // 0/0 no exacto
+            continue;
+        }
+        ++v.voiced;
+        v.minConf = std::min(v.minConf, conf[static_cast<size_t>(i)]);
+        const double ratio = hz[static_cast<size_t>(i)] / f0;
+        if (!(ratio > 0.94 && ratio < 1.06)) { ++v.octaves; continue; }
+        v.maxErrPct = std::max(v.maxErrPct, std::abs(hz[static_cast<size_t>(i)] - f0) / f0 * 100.0);
+    }
+    return v;
+}
+
+}  // namespace
+
+TEST(TrackAnalysisSweep, EveryToneInTheDeclaredRangeIsReadWithoutOctaves) {
+    const int W = wma::track_analysis::voiceWindowFrames(kSR);
+    std::vector<double> tones;
+    for (int f = 60; f <= 80; ++f) tones.push_back(f);                  // borde grave, paso 1
+    for (double f = 85.0; f < 1140.0; f *= 1.05) tones.push_back(f);    // medio, ~1/14 oct
+    for (int f = 1140; f <= 1200; ++f) tones.push_back(f);              // borde agudo, paso 1
+    for (double f : {1171.0, 1175.0, 1200.0}) tones.push_back(f);       // los medidos, explicitos
+
+    int worstOct = 0;
+    double worstErr = 0.0, worstErrHz = 0.0;
+    for (double f0 : tones) {
+        const ToneVerdict v = readTone(f0, W);
+        ASSERT_GT(v.points, 0) << f0;
+        EXPECT_EQ(v.voiced, v.points) << f0 << " Hz: huecos dentro del rango declarado";
+        EXPECT_EQ(v.octaves, 0) << f0 << " Hz: lectura fuera de (0,94; 1,06)";
+        EXPECT_LT(v.maxErrPct, kCeilingErrPct) << f0 << " Hz";
+        worstOct += v.octaves;
+        if (v.maxErrPct > worstErr) { worstErr = v.maxErrPct; worstErrHz = f0; }
+    }
+    std::printf("[barrido] %zu tonos de 60 a 1200 Hz (W = %d): octavas %d, peor error %.3f %% en %.1f Hz\n",
+                tones.size(), W, worstOct, worstErr, worstErrHz);
+    for (double f0 : {1170.0, 1171.0, 1175.0, 1200.0}) {
+        const ToneVerdict v = readTone(f0, W);
+        std::printf("[barrido]   %.0f Hz: %d/%d con voz, octavas %d, err %.3f %%, conf min %.2f\n",
+                    f0, v.voiced, v.points, v.octaves, v.maxErrPct, v.minConf);
+    }
+}
+
+TEST(TrackAnalysisSweep, BelowTheRangeIsZeroZeroNotTheFloorFabricated) {
+    const int W = wma::track_analysis::voiceWindowFrames(kSR);
+    for (double f0 : {50.0, 55.0, 57.0, 59.0}) {
+        const ToneVerdict v = readTone(f0, W);
+        ASSERT_GT(v.points, 0);
+        std::printf("[barrido]   %.0f Hz (bajo el rango): %d/%d con voz\n", f0, v.voiced, v.points);
+        EXPECT_EQ(v.voiced, 0) << f0 << " Hz esta por debajo del rango: 0/0, no effectiveMinHz";
+        EXPECT_GE(v.minConf, 0.0f) << f0 << " Hz: un 0 de hz con confidence != 0";
+    }
+    for (double f0 : {61.0, 65.0}) {
+        const ToneVerdict v = readTone(f0, W);
+        EXPECT_EQ(v.voiced, v.points) << f0;
+        EXPECT_EQ(v.octaves, 0) << f0;
+        EXPECT_LT(v.maxErrPct, kCeilingErrPct) << f0;
+    }
+    // El borde que la busqueda alcanza de verdad, dicho por el detector: wr / (ceil(wr/60) + 2).
+    wma::dsp::McLeodWindowedPitch d;
+    d.prepareWindowed(kSR, W, wma::track_analysis::kVoiceMinHz, wma::track_analysis::kVoiceMaxHz);
+    EXPECT_NEAR(d.effectiveMinHz(), 24000.0 / 402.0, 1e-9);
+    // Y con 30 ms el techo W/2 manda: 720 / 2 = 360 ⇒ 66,67 Hz, por eso 65 Hz sale 0/0 ahi.
+    d.prepareWindowed(kSR, wma::track_analysis::hopFramesForMs(30.0, kSR),
+                      wma::track_analysis::kVoiceMinHz, wma::track_analysis::kVoiceMaxHz);
+    EXPECT_NEAR(d.effectiveMinHz(), 24000.0 / 360.0, 1e-9);
 }
 
 // ---------------------------------------------------------------------------
