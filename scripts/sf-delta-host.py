@@ -28,9 +28,10 @@ Régimen = RMS 0,1–0,4 s tras el note-on; cola = RMS en una ventana de `--win`
 note-off + T. "cola − régimen" es lo que NoisyPad tabula (la que separó 28 dB entre seco y
 cola a +0,3 s).
 
-Límites, declarados: bank 0 solamente (el arnés hace program change sin bank select: las
-baterías de bank 128 y los presets de bank > 0 no se pueden rendir acá); la expresión por toque
-en 1,0; una sola nota. Python stdlib: sin numpy, como el resto de scripts/.
+Límites, declarados: `--bank` manda un CC0 (MSB) antes del program change, que alcanza para los
+bancos melódicos de GeneralUser (`12:127` Shooting Star entró así el 16/09); las baterías de bank
+128 dependen de que el canal sea de percusión y el arnés no lo marca (`drums=0`), así que no se
+pueden rendir acá; la expresión por toque en 1,0; una sola nota. Python stdlib: sin numpy, como el resto de scripts/.
 """
 import argparse
 import math
@@ -56,11 +57,13 @@ def vlq(n):
     return bytes(reversed(out))
 
 
-def write_midi(path, program, key, vel, dur_s, tail_s, ppq=480, bpm=120):
-    """Un track: program change, note-on en t=0, note-off en dur_s, fin en dur_s + tail_s.
-    A 120 bpm un negra = 0,5 s = ppq ticks."""
+def write_midi(path, program, key, vel, dur_s, tail_s, ppq=480, bpm=120, bank=0):
+    """Un track: [bank select MSB,] program change, note-on en t=0, note-off en dur_s, fin en
+    dur_s + tail_s. A 120 bpm un negra = 0,5 s = ppq ticks. El bank va SOLO por CC0: tsf arma
+    (MSB<<7)|LSB si tambien llega CC32, y cae al preset 0 sin avisar."""
     ticks = lambda s: int(round(s * bpm / 60.0 * ppq))
-    trk = (vlq(0) + bytes([0xC0, program & 0x7F])
+    trk = (vlq(0) + bytes([0xB0, 0x00, bank & 0x7F]) if bank else b"")
+    trk += (vlq(0) + bytes([0xC0, program & 0x7F])
            + vlq(0) + bytes([0x90, key & 0x7F, vel & 0x7F])
            + vlq(ticks(dur_s)) + bytes([0x80, key & 0x7F, 0])
            + vlq(ticks(tail_s)) + b"\xff\x2f\x00")
@@ -122,7 +125,8 @@ def render(exe, font, mid, out, sends, block):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--font", default=DEFAULT_FONT)
-    ap.add_argument("--preset", type=int, required=True, help="program number, bank 0")
+    ap.add_argument("--preset", type=int, required=True, help="program number")
+    ap.add_argument("--bank", type=int, default=0, help="bank select MSB (default 0; 128 no rinde: ver arriba)")
     ap.add_argument("--key", type=int, required=True)
     ap.add_argument("--vel", type=int, required=True)
     ap.add_argument("--dur", type=float, default=1.0, help="segundos de nota (default 1,0)")
@@ -138,11 +142,11 @@ def main():
     exe = build_tool(a.build_dir)
     work = a.keep or tempfile.mkdtemp(prefix="sf-delta-")
     os.makedirs(work, exist_ok=True)
-    tag = f"p{a.preset}_k{a.key}_v{a.vel}"
+    tag = f"b{a.bank}_p{a.preset}_k{a.key}_v{a.vel}"
     mid = os.path.join(work, tag + ".mid")
-    write_midi(mid, a.preset, a.key, a.vel, a.dur, tail_s=max(2.0, a.at + 1.0))
+    write_midi(mid, a.preset, a.key, a.vel, a.dur, tail_s=max(2.0, a.at + 1.0), bank=a.bank)
 
-    print(f"font {os.path.basename(a.font)} · preset {a.preset} (bank 0) · key {a.key} · vel {a.vel}"
+    print(f"font {os.path.basename(a.font)} · preset {a.preset} (bank {a.bank}) · key {a.key} · vel {a.vel}"
           f" · nota {a.dur:.2f} s · medición a +{a.at:.2f} s del note-off, ventana {a.win * 1000:.0f} ms")
     print(f"{'ambiencia':>10} {'régimen':>9} {'cola':>9} {'cola−rég':>9}   (dBFS RMS mono)")
     levels = {}

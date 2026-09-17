@@ -12,8 +12,13 @@ ventana). Es un **patch** (`fix`) **sin superficie nueva** y **con cambio de niv
 REQ-041 S1, el filtro de la voz pasa a las convenciones de FluidSynth 2.6.0. La nota de bump entera,
 con la tabla de los 90 presets, está en `nota-de-bump-2026-09-16-el-filtro-de-la-voz.md`.
 
-> **Redactado el 2026-09-16, antes del tag**; se envía cuando `v2.19.1` esté verificada en el registro
-> (4/4 coordenadas). Su respuesta es **I-2** del criterio de muerte de REQ-041.
+> **Redactado el 2026-09-16, antes del tag; enviado por chat el 2026-09-16 a la noche**, tras verificar
+> `v2.19.1` en el registro (4/4 coordenadas). Su respuesta es **I-2** del criterio de muerte de REQ-041.
+> **Contestado la misma noche** (`carta-noisypad-2026-09-16-respuesta-v2.19.1.md`): adoptaron 2.19.1 y
+> trajeron la tabla con las dos sondas de Q alto. **I-2 evaluado VIVO, N = 8** contra el I-5 *rendido*
+> (máx 0,41 dB). Las cuatro filas que la fórmula de abajo no predecía coinciden con el host: **la fórmula
+> sólo vale en la banda de paso**, y la nota de bump se corrigió (§ "Lo que la tabla no dice", del 16/09
+> a la noche). Warm Pad en 2.19.1 es FluidSynth al 0,00 dB. Un hallazgo aparte, previo a S1: MINI-031.
 
 ## 1 · Lo que cambia, en una frase
 
