@@ -153,7 +153,7 @@ afirmado y no vigilado haría leer todo este archivo como verificado cuando sól
 | `kt-commonMain` | 95 | archivos .kt en commonMain |
 | `kt-androidMain` | 21 | archivos .kt en androidMain |
 | `kt-iosMain` | 6 | archivos .kt en iosMain |
-| `bridge-loc` | 3426 | LOC de AudioNativeBridge.kt |
+| `bridge-loc` | 3436 | LOC de AudioNativeBridge.kt |
 | `bridge-external` | 316 | `external fun` en AudioNativeBridge |
 | `jniexport-bridge` | 305 | JNIEXPORT en jni_audio_bridge.cpp |
 | `jniexport-total` | 318 | JNIEXPORT en todo jni/*.cpp |
