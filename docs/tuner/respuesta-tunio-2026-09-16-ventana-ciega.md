@@ -13,9 +13,14 @@ sigue está medido con nuestros instrumentos (el corpus real de GeneralUser GS 2
 compartimos, con el arnés de la conformidad) y, aparte, rejuzgando su log de ticks con un lector
 propio. Al final, lo que entra a un REQ y con qué id.
 
-> **Redactada el 2026-09-16 a la noche. SIN ENVIAR.** Las medidas de host son de la sesión
-> `9e7943d0`; el script de scratch quedó fuera del árbol a propósito (no es un test: es un
-> instrumento de una tarde, y su lugar es el REQ que lo vuelva trinquete).
+> **Enviada el 2026-09-16. Contestada el 2026-09-17** (`referencias/carta-tunio-2026-09-17-respuesta-
+> ventana-ciega.md`): adoptan el contrato de §3 (su A-33b), piden la puerta A con dos condiciones, y
+> mandan el `.tsv` con la definición de cada columna. **Corregido después de enviada** (§2 y §6, marcado
+> en su lugar): el parser nuestro tiraba las líneas con `cents` (`zona=Enganchada(franja=…, cents=…)`
+> lleva un espacio); sus seis `t_fina` coinciden con los nuestros al milisegundo, y el re-punteo con la
+> cuerda sonando **sí** suelta el fino ~0,2–0,4 s y lo recupera a +0,08…+0,59 s — la media ventana, no
+> "0,00 s". Las medidas de host (corpus) no cambian. El script de scratch quedó fuera del árbol a
+> propósito; su copia está en el journal de REQ-044.
 
 ## 1 · Lo que confirmamos, con nuestros números
 
@@ -44,9 +49,9 @@ regla. Depende de si la cuerda seguía sonando:
 
 | en su `tanda-2026-09-16-ticks.log` | qué había antes | `t_fina` tras el re-punteo |
 |---|---|---|
-| E2 a t = 21,0 s (rms 0,127 → re-punteo) | MIDIENDO, `cents` = +0,06 | **0,00 s** — el fino no se soltó |
-| E2 a t = 47,0 s | MIDIENDO, `cents` = −25,2 | **0,00 s** |
-| E2 a t = 45,1 s | MIDIENDO, sin cents todavía | 0,66 s |
+| E2 a t = 21,0 s (rms 0,127 → 0,233) | MIDIENDO, `cents` = +0,06 | se suelta a +421 ms, **vuelve a +587 ms** *(corregido el 17/09: la carta decía "0,00 s, no se soltó" — artefacto del parser)* |
+| E2 a t = 44,9 s (0,012 → 0,178) | MIDIENDO, `cents` = −63,1 | se suelta a +207, vuelve a +462 ms |
+| E2 a t = 45,7 s (0,015 → 0,260) | MIDIENDO, `cents` = −32,6 | se suelta a +0, vuelve a +83 ms |
 | las marcas de la tanda | **SIN_SENAL** 0,3–2 s antes, rms 0,0015–0,0096 | 3,5 / 2,8 / 2,4 / 1,7 / 2,1 / 1,4 s (su tabla) |
 
 En host, la misma nota alimentada dos veces seguidas **sin silencio en el medio** y sin tocar el
@@ -124,13 +129,14 @@ sepan que su suplencia sólo hace falta **hasta el primer fino de cada enganche,
 
 ## 6 · Lo que NO pudimos reproducir de su log, y qué nos serviría
 
-Con un lector propio sobre `tanda-2026-09-16-ticks.log` reproducimos las filas de §2 (los
-re-punteos con la cuerda sonando, tick a tick) y dos de sus seis `t_fina` desde el ataque real
-(A2 3,70 s, D3 4,68 s — más largos que sus 2,8 / 2,4, que cuentan *desde el reenganche*); para
-E2, G3, B3 y E4 nuestro lector no encuentra un `cents` no nulo entre el ataque de la marca y el
-siguiente SIN_SENAL (E2: MIDIENDO 5,3 s sin cents, rms de 0,26 a 0,0008). No es que estén mal:
-es que la atribución por cuerda depende de dónde ponga cada lector el ataque y el reenganche. Si
-nos mandan el `.tsv` de veredicto con el tick de reenganche por punteo, cotejamos fila por fila.
+*(Corregido el 17/09: lo que sigue era falso. El lector nuestro descartaba toda línea con
+`zona=Enganchada(franja=…, cents=…)` —el espacio después de la coma— o sea las 1056 líneas con
+`cents`. Con eso arreglado, sus seis `t_fina` desde el reenganche coinciden al milisegundo: 3090 /
+2054 / 2072 / 1039 / 1548 / 1036 ms, mismos valores. El parser que difería era el nuestro.)*
+~~Con un lector propio reproducimos dos de sus seis `t_fina` desde el ataque real (A2 3,70 s, D3
+4,68 s); para E2, G3, B3 y E4 no encuentra un `cents` no nulo entre el ataque y el siguiente
+SIN_SENAL.~~ Si nos mandan el `.tsv` de veredicto con el tick de reenganche por punteo, cotejamos
+fila por fila.
 Para el criterio de muerte de REQ-044 el instrumento es el suyo (mediana de ticks con gruesa por
 punteo): la definición de "punteo" y de "reenganche" tiene que ser la misma de los dos lados, y
 por eso la pedimos escrita.
