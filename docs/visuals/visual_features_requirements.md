@@ -54,6 +54,25 @@ Proveer al sistema visual de NoisyPad (Phase 17) los datos de audio que necesita
 | WV-3.2 | Curva de pitch por pista (voz) | `wma_looper_analyze_pitch(track, hopMs, out)` — corre el `PitchDetector` (WL-5.1, **gate**) offline sobre el buffer → serie {frame, freqHz, confidence} decimada. Para pistas grabadas con RecordSource=INPUT (voz) alimenta el renderer Ribbon | Curva correcta en voz real (fixture); confidence baja marca tramos no tonales | P1 | M (post WL-5.1) |
 | WV-3.3 | Envelope de bandas del mix | Para el fondo reactivo del video: análisis banded (low/mid/high por ventana) sobre un **archivo** WAV (el mix exportado): `wma_analyze_file_bands(path, hopMs, out)` — comparte pipeline con WL-8.2 (análisis de archivos) y la FFT existente | El fondo del video reacciona al mix final exacto (no al render en vivo) | P1 | M |
 
+**Cláusulas resueltas para WV-3.1 / WV-3.2** (carta de NoisyPad del 2026-09-17,
+[`docs/engine/carta-noisypad-2026-09-17-respuestas-wv3-wl41.md`](../engine/carta-noisypad-2026-09-17-respuestas-wv3-wl41.md)
+§2; las hereda REQ-043 como contrato, WV-3.3 queda fuera de ese REQ):
+
+- **hop (WV-3.2)**: lo fija el consumidor (`hopMs`, valor de arranque 10 ≈ 480 frames a 48 k) y el motor
+  devuelve `hopFrames` **real**, redondeado una vez. Si el MPM impone un mínimo por ventana, lo aplica y
+  lo devuelve — "un hop más grande y verdadero a uno pedido y falso". Cada punto lleva su `frame`
+  absoluto: `hopFrames` dimensiona y sirve al AC de determinismo, no reconstruye el eje.
+- **envolvente (WV-3.1)**: **RMS**, cruda, lineal `[0, 1]`, sin normalizar ni en dB (el consumidor
+  normaliza al pico de la pista). Eje del buffer, igual que la waveform; cubre **sólo la región** y viene
+  con `firstFrame` (= `loopStart`) + `hopFrames`. `binsPerSecond` lo fija el consumidor; el conteo lo
+  devuelve el motor (misma regla que el hop).
+- **`speed ≠ 1` (WV-3.1 y 3.2)**: la serie **no cambia**. El eje es el buffer y el consumidor ya escala
+  `audioFrame × speed` antes del módulo por la región. Lo único exigido: `stretchTrack` (WL-4.1)
+  invalida o re-analiza, porque ahí el buffer sí cambia.
+
+Fixture de la envolvente: `audio/src/main/cpp/looper/tests/testdata/audiograma-prueba.wav` (8 golpes,
+carta §3); el AC cruza contra los onsets de `detectOnsets`, no cuenta máximos locales.
+
 ### WV-4 — Tiempo exacto de grabación
 
 | ID | Requerimiento | Detalle | Criterio de aceptación | Prio | Esf |

@@ -1,0 +1,23 @@
+# Fixtures de audio VERSIONADOS del looper — nacio con la carta de NoisyPad del 2026-09-17 (REQ-043)
+#
+# Una linea por archivo:   nombre  sha256  descripcion
+#
+# Por que aca y no en docs/: es material de TEST (lo consume la suite de looper/tests/), y el
+# directorio espeja effects/tests/testdata/. Se versiona porque es chico (< 1 MB) y de origen
+# propio (lo produjo el consumidor para nosotros); el corpus del afinador NO se versiona por
+# tamano y se baja verificando sha256 (scripts/fetch-corpus.sh). Si un fixture nuevo supera
+# ~1 MB, va por esa via, no aca.
+#
+# 🔴 El sha256 es la identidad del fixture: un test que lo lea tiene que poder decir CONTRA
+# QUE archivo se midieron sus umbrales. Verificar (shasum -c no ignora comentarios):
+#   grep -v "^#" MANIFEST.txt | grep -v "^$" | shasum -a 256 -c
+#
+# audiograma-prueba.wav — 4,000 s · 48 000 Hz · estereo · 16 bit · 192 000 frames · pico -23,2 dBFS.
+#   8 eventos en grilla de 0,5 s (120 BPM), frames 0 · 24000 · 48000 · 72000 · 96000 · 120000 ·
+#   144000 · 168000. Pares (0,0 / 1,0 / 2,0 / 3,0 s): ~300 ms con un ESCALON interno -28 -> -32 dB a
+#   los 200 ms. Impares: ~150 ms a ~-30 dB. Entre eventos: -56 dB. Re-medido al versionarlo (RMS
+#   por 10 ms, mono = (L+R)/2). 🪤 El escalon hace que "8 maximos locales" de 12: el AC de WV-3.1
+#   no cuenta maximos, cruza contra los onsets de detectOnsets (ver la carta del 17/09 §3).
+#   Origen: NoisyPad, carta docs/engine/carta-noisypad-2026-09-17-respuestas-wv3-wl41.md.
+
+82f44736e3b28bf81836bba7f3d89df1e059e5535cec394f83cbedac5804eb75  audiograma-prueba.wav
