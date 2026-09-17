@@ -37,7 +37,10 @@ import kotlin.test.assertTrue
  *   exactamente lo que este arnés existe para no ser. Quedan como hueco declarado.
  * - **Todo lo que necesita render**: el host no lo tiene (`FakeAudioBackend` no llama al
  *   callback), así que grabar, reproducir y los eventos de estado no son observables acá.
- * - **Export/import** hace IO, y **USB** es device-only.
+ * - **Export/import** hace IO, y **USB** es device-only. La excepción es UN import
+ *   (MINI-030): es el único camino en host que deja una pista ACTIVA, y sin él el
+ *   contrato "0 elementos = sin dato" no tendría gemelo. `LooperIoJniTest` lo cubre
+ *   como IO; acá se usa como fixture.
  *
  * 🔴 Verde acá NO significa "el looper está probado": son unas pocas de 93, sobre un
  * backend FALSO. Ver el KDoc de [JniHarness].
@@ -49,6 +52,19 @@ class LooperTrackJniTest {
         private const val TRACK = 0
         private const val RATE = 48_000
         private const val LEN_FRAMES = 96_000   // 2 s, y no es potencia de dos
+
+        /**
+         * La pista que se llena por import para el caso "con contenido" (MINI-030). Es
+         * OTRA que [TRACK] porque el resto de la clase afirma que [TRACK] no tiene audio,
+         * y JUnit no promete el orden de los métodos.
+         */
+        private const val TRACK_CON_AUDIO = 1
+
+        /**
+         * Más bins que `AudioLooper::MAX_WAVEFORM_BINS_CACHE` (512): el motor escribe 512,
+         * rellena el resto con 0 y devuelve 512. No es potencia de dos.
+         */
+        private const val BINS_SOBRE_EL_TECHO = 600
 
         /**
          * Lo que esta clase declara cubrir. **Trinquete bidireccional** — ver
@@ -73,6 +89,8 @@ class LooperTrackJniTest {
             "nativeLooperGetTrackLoopStart", "nativeLooperGetTrackLoopEnd",
             "nativeLooperResetTrackLoopRegion",
             "nativeLooperGetTrackWaveform",
+            // MINI-030: el caso "con contenido" llena la pista por import, sin render.
+            "nativeLooperImportTrack",
             "nativeTransportSetBeatsPerBar", "nativeTransportGetBeatsPerBar",
             "nativeTransportFramesPerBeat", "nativeTransportFramesPerBar",
         )
@@ -230,25 +248,123 @@ class LooperTrackJniTest {
     }
 
     /**
-     * AC-022.3 — **el camino de array**, que del otro lado es `SetFloatArrayRegion` sobre
-     * el buffer que le pasa Kotlin. Un pinneo mal liberado o un largo mal calculado se ve
-     * acá y en ningún otro lado.
+     * AC-M030.1 / AC-M030.3 (a) — **una pista sin contenido devuelve CERO elementos**, no
+     * `numBins` ceros.
+     *
+     * Hasta MINI-030 este test afirmaba `size == 64` con todos en 0 sobre esta misma
+     * pista, y admitía en su propio comentario que no podía distinguir "escrito en 0" de
+     * "sin tocar": Kotlin crea el array en cero y el bridge descartaba el retorno de C. Un
+     * array de 64 ceros sobre una pista inactiva no es silencio, es **la ausencia
+     * disfrazada de silencio** — del lado del consumidor "sin señal" y "en silencio" eran
+     * indistinguibles (carta de NoisyPad WV-3 §1, 2026-09-16).
+     *
+     * La pista está preparada y nunca grabada, o sea NO activa (`mActive` sólo se enciende
+     * en `finalizeRecording()`, import o restore); `getTrackWaveform` sale con 0 bins
+     * escritos y el bridge tiene que traducir ese 0 a `FloatArray(0)`. El `isTrackActive`
+     * de arriba es el control: si diera `true`, el tamaño 0 de abajo hablaría de otra cosa.
+     *
+     * Mutante que mata: descartar el retorno de `nativeLooperGetTrackWaveform` (el código
+     * anterior a MINI-030) ⇒ `size == 64` ⇒ rojo en el primer `assertEquals`.
      */
     @Test
-    fun `la forma de onda llena el array que se le pasa`() {
-        val bins = 64
-        val forma = jni("nativeLooperGetTrackWaveform") { it.looperGetTrackWaveform(TRACK, bins) }
-
-        assertEquals(bins, forma.size, "el array volvió con otro largo que el pedido")
-        assertTrue(
-            forma.all { it.isFinite() },
-            "la forma de onda trajo NaN o infinito: eso es basura de un pinneo mal hecho, " +
-                "no audio — la pista está en silencio, así que todos tienen que ser finitos",
+    fun `una pista sin contenido devuelve cero elementos, no ceros`() {
+        assertFalse(
+            jni("nativeLooperIsTrackActive") { it.looperIsTrackActive(TRACK) },
+            "la pista tiene que estar INACTIVA para que este test hable de 'sin dato'",
         )
-        // La pista se preparó y nunca se grabó: el silencio es el valor ESPERADO, y que
-        // sea exactamente 0 prueba que el array se escribió y no que quedó sin tocar
-        // (Kotlin lo crea en cero, así que esto solo no alcanza — de ahí el largo de arriba).
-        assertTrue(forma.all { it == 0.0f }, "una pista preparada y sin grabar tiene que dar silencio")
+
+        val forma = jni("nativeLooperGetTrackWaveform") { it.looperGetTrackWaveform(TRACK, 64) }
+
+        assertEquals(
+            0,
+            forma.size,
+            "una pista inactiva no tiene forma de onda: el motor escribió 0 bins y el bridge " +
+                "tiene que devolver un array VACÍO, no ${forma.size} ceros que se leen como silencio",
+        )
+    }
+
+    /**
+     * AC-M030.1 / AC-M030.3 (b) — **con contenido, el array tiene `numBins` elementos y
+     * trae señal**; y si el motor escribe menos bins que los pedidos, el resto es relleno
+     * de silencio y el largo sigue siendo `numBins`.
+     *
+     * El gemelo del de arriba: sin él, "devuelve tamaño 0" no se distingue de un bridge
+     * que devuelve `FloatArray(0)` siempre. La pista se llena por `looperImportTrack` de
+     * un WAV con una ráfaga de onda cuadrada —sincrónico, sin render, como lo hace
+     * `LooperIoJniTest`— y eso la deja ACTIVA. Va en OTRA pista que la del `@Before`,
+     * porque el resto de esta clase afirma que `TRACK` no tiene contenido y JUnit no
+     * promete orden.
+     *
+     * Dos pedidos, y los dos importan:
+     *  - `64` bins: el motor escribe los 64 ⇒ largo 64 y un pico `> 0` en la región con
+     *    señal (con `AMP_L = 0,625`, el pico es exactamente ese valor: es una onda cuadrada).
+     *    El pico es lo que distingue "cruzó el dato" de "cruzó el largo".
+     *  - `600` bins: el motor tiene un techo de `MAX_WAVEFORM_BINS_CACHE = 512`, escribe
+     *    512, rellena 88 con 0 y devuelve **512** ⇒ el bridge tiene que devolver los
+     *    **600** igual (el relleno parcial es silencio y no cambia el largo: los
+     *    llamadores de UI no reescalan). Un bridge que hiciera `copyOf(escritos)` pasa
+     *    el primer pedido y muere acá.
+     */
+    @Test
+    fun `una pista con contenido devuelve numBins elementos con senal, aun si el motor escribe menos`() {
+        val fuente = java.nio.file.Files.createTempFile("mini030-waveform", ".wav").toFile()
+        try {
+            val ruta = MinimalWav.writeTo(
+                fuente,
+                frames = LEN_FRAMES,
+                regions = listOf(MinimalWav.Region(6_000, 42_000)),
+            )
+            assertTrue(
+                jni("nativeLooperImportTrack") {
+                    it.looperImportTrack(TRACK_CON_AUDIO, ruta, MinimalWav.RATE)
+                },
+                "el fixture no importó: revisá MinimalWav contra wav::readWav",
+            )
+            assertTrue(
+                jni("nativeLooperIsTrackActive") { it.looperIsTrackActive(TRACK_CON_AUDIO) },
+                "importó y la pista no quedó activa: lo de abajo no hablaría de 'con dato'",
+            )
+
+            val forma = jni("nativeLooperGetTrackWaveform") {
+                it.looperGetTrackWaveform(TRACK_CON_AUDIO, 64)
+            }
+            assertEquals(64, forma.size, "con contenido el array tiene que medir lo pedido")
+            assertTrue(forma.all { it.isFinite() }, "la forma trajo NaN o infinito: basura de pinneo")
+            val pico = forma.max()
+            assertTrue(
+                pico > 0.0f,
+                "la pista tiene una ráfaga de ±${MinimalWav.AMP_L} y la forma no trae ningún pico: " +
+                    "cruzó el largo pero no el dato",
+            )
+            assertEquals(
+                MinimalWav.AMP_L,
+                pico,
+                "el pico de una onda cuadrada de ±${MinimalWav.AMP_L} tiene que ser exactamente eso",
+            )
+            assertEquals(
+                0.0f,
+                forma.first(),
+                "los primeros 6000 frames son silencio exacto: el bin 0 tiene que ser 0",
+            )
+
+            val sobreElTecho = jni("nativeLooperGetTrackWaveform") {
+                it.looperGetTrackWaveform(TRACK_CON_AUDIO, BINS_SOBRE_EL_TECHO)
+            }
+            assertEquals(
+                BINS_SOBRE_EL_TECHO,
+                sobreElTecho.size,
+                "el motor escribe como mucho 512 bins y rellena el resto con 0: el bridge tiene " +
+                    "que devolver los $BINS_SOBRE_EL_TECHO pedidos, no los que el motor escribió",
+            )
+            assertTrue(sobreElTecho.take(512).any { it > 0.0f }, "los 512 escritos tienen que traer señal")
+            assertTrue(
+                sobreElTecho.drop(512).all { it == 0.0f },
+                "más allá del techo del motor el relleno es silencio exacto",
+            )
+        } finally {
+            jni("nativeLooperClearTrack") { it.looperClearTrack(TRACK_CON_AUDIO) }
+            fuente.delete()
+        }
     }
 
     /** AC-022.1 — la matemática del transport, que no necesita render. */

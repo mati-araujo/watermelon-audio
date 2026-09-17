@@ -7,12 +7,19 @@ import com.watermellonstudios.audio.internal.cinterop.wma_looper_find_content_bo
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.IntVar
+import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
+import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
 import kotlinx.coroutines.test.runTest
 import platform.Foundation.NSTemporaryDirectory
+import platform.posix.fclose
+import platform.posix.fopen
+import platform.posix.fwrite
+import platform.posix.remove
+import kotlin.random.Random
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -31,8 +38,10 @@ import kotlin.test.assertTrue
  * volumen maestro, velocidad de pista y el par `saveUndoSnapshot`/`hasUndo`.
  *
  * **Sólo valor de reposo**: todo lo que depende de que exista audio grabado — el
- * progreso, la forma de onda, los onsets, los bordes de contenido. Se verifican igual
- * porque descartan que el binding devuelva basura, pero no prueban comportamiento.
+ * progreso, los onsets, los bordes de contenido. Se verifican igual porque descartan
+ * que el binding devuelva basura, pero no prueban comportamiento. La forma de onda
+ * dejó de estar en este grupo con MINI-030: `looperImportTrack` llena la pista
+ * sincrónicamente sin CoreAudio, así que el caso "con contenido" sí se observa acá.
  *
  * **Una sorpresa que conviene tener anotada**: `looperPrepareTrack` devuelve `true` y
  * sin embargo la pista **no** queda activa ni con largo — `looperIsTrackActive` sigue
@@ -49,6 +58,26 @@ class IosLooperBridgeTest {
 
     /** Valor sembrado en los out-params. No es 0 ni -1: los dos son respuestas plausibles. */
     private val CENTINELA = -7
+
+    private companion object {
+        /** El rate del fixture de MINI-030, igual al que se le pasa al import: sin resampleo. */
+        const val FIXTURE_RATE = 48_000
+
+        /** 2 s a 48 kHz, y no es potencia de dos. */
+        const val FIXTURE_FRAMES = 96_000
+
+        /** Amplitud de la ráfaga: `5/8`, exacta en float y no potencia de dos. */
+        const val AMP = 0.625f
+
+        /**
+         * Más bins que `AudioLooper::MAX_WAVEFORM_BINS_CACHE` (512): el motor escribe 512,
+         * rellena el resto con 0 y devuelve 512. No es potencia de dos.
+         */
+        const val BINS_SOBRE_EL_TECHO = 600
+
+        /** Período de la onda cuadrada, en frames. */
+        const val SQUARE_PERIOD = 16
+    }
 
     @AfterTest
     fun cleanup() {
@@ -122,21 +151,89 @@ class IosLooperBridgeTest {
     // ==================== Buffers de salida ====================
 
     /**
-     * El array de forma de onda tiene **exactamente** los bins pedidos.
+     * AC-M030.1 — **una pista sin contenido devuelve CERO elementos**, no `numBins` ceros.
      *
-     * Es lo que prueba que el par (puntero fijado, tamaño) llega bien: si el tamaño se
-     * marshallara mal, C escribiría más allá del array de Kotlin.
+     * Hasta MINI-030 este test afirmaba `size == 24 / 8 / 64` sobre esta misma pista
+     * vacía: el bridge descartaba el retorno de `wma_looper_get_track_waveform` (0 bins
+     * escritos con la pista inactiva) y devolvía el array entero en cero. Eso no es
+     * silencio, es **la ausencia disfrazada de silencio** — del lado del consumidor "sin
+     * señal" y "en silencio" eran indistinguibles (carta de NoisyPad WV-3 §1). El
+     * `isTrackActive` es el control: si diera `true`, el tamaño 0 hablaría de otra cosa.
+     *
+     * `numBins = 0` sigue dando vacío por la guarda del bridge, sin llegar a C.
      */
     @Test
-    fun theWaveformArrayHonoursTheRequestedBinCount() {
-        assertEquals(24, bridge.looperGetTrackWaveform(0).size, "el default de 24 bins no se aplicó")
-        assertEquals(8, bridge.looperGetTrackWaveform(0, numBins = 8).size, "no respetó numBins")
-        assertEquals(64, bridge.looperGetTrackWaveform(0, numBins = 64).size, "no respetó numBins")
+    fun anEmptyTrackReturnsZeroElementsNotZeros() {
+        assertFalse(bridge.looperIsTrackActive(0), "la pista tiene que estar INACTIVA para hablar de 'sin dato'")
+
+        assertEquals(0, bridge.looperGetTrackWaveform(0).size, "con el default de 24 bins: vacío, no 24 ceros")
+        assertEquals(0, bridge.looperGetTrackWaveform(0, numBins = 8).size, "vacío, no 8 ceros")
+        assertEquals(0, bridge.looperGetTrackWaveform(0, numBins = 64).size, "vacío, no 64 ceros")
 
         assertTrue(
             bridge.looperGetTrackWaveform(0, numBins = 0).isEmpty(),
             "0 bins tiene que dar un array vacío, no una lectura fuera de rango",
         )
+    }
+
+    /**
+     * AC-M030.1, el gemelo — **con contenido, el array tiene `numBins` elementos y trae
+     * señal**; y si C escribe menos bins que los pedidos, el resto es relleno de
+     * silencio y el largo sigue siendo `numBins`.
+     *
+     * Sin este test, "devuelve tamaño 0" no se distingue de un bridge que devuelve
+     * `FloatArray(0)` siempre. La pista se llena por [ILooperBridge.looperImportTrack]
+     * de un WAV float32 con una ráfaga de onda cuadrada de `±0,625` (`5/8`: exacto en
+     * float y no potencia de dos): `LooperExporter::importTrack` lee el archivo y llena
+     * la pista **sincrónicamente, en este thread**, y la deja activa — no hace falta
+     * CoreAudio. Es el mismo camino que usa `LooperIoJniTest` en el arnés de Android.
+     *
+     * Dos pedidos:
+     *  - `64` bins: C escribe los 64 ⇒ largo 64, pico exactamente `0,625` y el bin 0 en
+     *    silencio exacto (los primeros 6000 frames son ceros). El pico es lo que distingue
+     *    "cruzó el dato" de "cruzó el largo".
+     *  - `600` bins: el motor tiene un techo de 512 (`MAX_WAVEFORM_BINS_CACHE`), escribe
+     *    512, rellena 88 con 0 y **devuelve 512** ⇒ el bridge tiene que devolver los 600
+     *    igual. Un `copyOf(escritos)` pasa el primer pedido y muere acá.
+     */
+    @OptIn(ExperimentalForeignApi::class)
+    @Test
+    fun aTrackWithContentReturnsNumBinsWithSignalEvenWhenTheEngineWritesFewer() {
+        val wav = NSTemporaryDirectory() + "mini030-waveform-${randomSuffix()}.wav"
+        writeFloatStereoSquareBurst(
+            path = wav,
+            frames = FIXTURE_FRAMES,
+            burstStart = 6_000,
+            burstEndExclusive = 42_000,
+        )
+        try {
+            assertTrue(
+                bridge.looperImportTrack(0, wav, FIXTURE_RATE),
+                "el fixture no importó: revisá el escritor de WAV de este test contra wav::readWav",
+            )
+            assertTrue(bridge.looperIsTrackActive(0), "importó y la pista no quedó activa")
+
+            val forma = bridge.looperGetTrackWaveform(0, numBins = 64)
+            assertEquals(64, forma.size, "con contenido el array tiene que medir lo pedido")
+            assertTrue(forma.all { it.isFinite() }, "la forma trajo NaN o infinito: basura de pinneo")
+            val pico = forma.max()
+            assertTrue(pico > 0.0f, "la pista tiene una ráfaga de ±$AMP y la forma no trae ningún pico")
+            assertEquals(AMP, pico, "el pico de una onda cuadrada de ±$AMP tiene que ser exactamente eso")
+            assertEquals(0.0f, forma.first(), "los primeros 6000 frames son silencio exacto: el bin 0 es 0")
+
+            val sobreElTecho = bridge.looperGetTrackWaveform(0, numBins = BINS_SOBRE_EL_TECHO)
+            assertEquals(
+                BINS_SOBRE_EL_TECHO,
+                sobreElTecho.size,
+                "el motor escribe como mucho 512 bins y rellena el resto con 0: el bridge tiene " +
+                    "que devolver los $BINS_SOBRE_EL_TECHO pedidos, no los que el motor escribió",
+            )
+            assertTrue(sobreElTecho.take(512).any { it > 0.0f }, "los 512 escritos tienen que traer señal")
+            assertTrue(sobreElTecho.drop(512).all { it == 0.0f }, "más allá del techo el relleno es silencio exacto")
+        } finally {
+            bridge.looperClearTrack(0)
+            remove(wav)
+        }
     }
 
     /**
@@ -291,5 +388,54 @@ class IosLooperBridgeTest {
         bridge.looperCancelExport()
 
         assertFalse(bridge.looperIsExportInProgress(), "cancelar dejó el motor inconsistente")
+    }
+
+    // ==================== El fixture de MINI-030 ====================
+
+    private fun randomSuffix(): String = Random.nextInt(0, Int.MAX_VALUE).toString(16)
+
+    /**
+     * Un `.wav` float32 estéreo de [frames] frames: onda cuadrada de `±`[AMP] entre
+     * [burstStart] y [burstEndExclusive], **ceros exactos** afuera. Es el mismo formato
+     * (y la misma cabecera de 44 bytes) que `MinimalWav` en el arnés de Android, escrito
+     * a mano porque el fixture no puede depender de una librería.
+     *
+     * Falla el test si el archivo no se puede abrir o queda corto: un fixture a medias
+     * haría fallar el import con un mensaje que acusaría al motor.
+     */
+    @OptIn(ExperimentalForeignApi::class)
+    private fun writeFloatStereoSquareBurst(path: String, frames: Int, burstStart: Int, burstEndExclusive: Int) {
+        val channels = 2
+        val blockAlign = channels * 4
+        val dataSize = frames * blockAlign
+        val bytes = ByteArray(44 + dataSize)
+        var at = 0
+        fun ascii(s: String) { for (c in s) bytes[at++] = c.code.toByte() }
+        fun u16(v: Int) { bytes[at++] = (v and 0xFF).toByte(); bytes[at++] = ((v ushr 8) and 0xFF).toByte() }
+        fun u32(v: Int) { u16(v and 0xFFFF); u16((v ushr 16) and 0xFFFF) }
+        fun f32(v: Float) = u32(v.toRawBits())
+
+        ascii("RIFF"); u32(36 + dataSize); ascii("WAVE")
+        ascii("fmt "); u32(16); u16(3); u16(channels); u32(FIXTURE_RATE); u32(FIXTURE_RATE * blockAlign)
+        u16(blockAlign); u16(32)
+        ascii("data"); u32(dataSize)
+        for (i in 0 until frames) {
+            val enRafaga = i >= burstStart && i < burstEndExclusive
+            if (!enRafaga) { f32(0.0f); f32(0.0f); continue }
+            val alto = (i - burstStart) % SQUARE_PERIOD < SQUARE_PERIOD / 2
+            val v = if (alto) AMP else -AMP
+            f32(v); f32(v)
+        }
+        check(at == bytes.size) { "el fixture quedó en $at bytes de ${bytes.size}" }
+
+        val file = requireNotNull(fopen(path, "wb")) { "no se pudo abrir $path para escribir el fixture" }
+        try {
+            val written = bytes.usePinned { pinned ->
+                fwrite(pinned.addressOf(0), 1uL, bytes.size.toULong(), file)
+            }
+            check(written == bytes.size.toULong()) { "el fixture quedó corto: $written de ${bytes.size} bytes" }
+        } finally {
+            fclose(file)
+        }
     }
 }
