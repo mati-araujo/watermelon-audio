@@ -3100,7 +3100,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * escribió, y **decide el tamaño del array que sale** (MINI-030, R-API-59): `0`
      * escritos ⇒ `FloatArray(0)`, "no hay dato"; `N > 0` escritos ⇒ los [numBins]
      * enteros, con lo que el motor no escribió en `0` (relleno de silencio: el motor
-     * tiene un techo interno de bins y rellena él mismo).
+     * tiene un techo interno de bins y sólo escribe hasta ahí; la cola queda en el `0`
+     * con que Kotlin inicializa el array).
      *
      * Hasta MINI-030 ese retorno se descartaba y una pista inactiva salía como
      * `numBins` ceros — silencio y ausencia, indistinguibles. Contrato en
