@@ -19,5 +19,14 @@
 #   por 10 ms, mono = (L+R)/2). 🪤 El escalon hace que "8 maximos locales" de 12: el AC de WV-3.1
 #   no cuenta maximos, cruza contra los onsets de detectOnsets (ver la carta del 17/09 §3).
 #   Origen: NoisyPad, carta docs/engine/carta-noisypad-2026-09-17-respuestas-wv3-wl41.md.
+#
+# glide-voz.wav + glide-voz.truth.txt — 4,500 s · 48 000 Hz · estereo · 16 bit · 216 000 frames ·
+#   pico -20,0 dBFS. El fixture de WV-3.2 (REQ-043, AC-043.1/2): glide 110 -> 440 Hz lineal en
+#   octavas (2,0 s) + 0,5 s de CERO EXACTO + 220 Hz (1,5 s) + 65 Hz (0,5 s); f0 + 6 armonicos a
+#   -6 dB/oct + vibrato 5 Hz +-15 c. El .truth.txt es EL ORACULO (hz por hop de 480 frames, con el
+#   vibrato adentro): sale del generador, nunca del motor. Se REGENERA a proposito con
+#   scripts/gen-glide-fixture.py (regenerar cambia estos sha256 y ese diff es la revision).
 
 82f44736e3b28bf81836bba7f3d89df1e059e5535cec394f83cbedac5804eb75  audiograma-prueba.wav
+f7bbc0123988674ee301640308da38121baf8e1fbf1d7a163c92af3c98f4af9a  glide-voz.wav
+da8715bb4ce123ec0feb7b0c4eabf0a21b520e93591ee94f1e863f2f818291ba  glide-voz.truth.txt
