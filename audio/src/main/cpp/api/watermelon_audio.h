@@ -1676,6 +1676,68 @@ WMA_API int wma_looper_detect_onsets(const WmaEngine* engine, int track_index,
                                       int* out_onsets, int max_onsets,
                                       int hop_frames, float sensitivity);
 
+/**
+ * La serie de PITCH de una pista, offline, en frames del buffer (REQ-043, WV-3.2).
+ *
+ * Recorre la region `[loopStart, loopEnd)` de la pista con el preset de voz del motor
+ * (ventana 40 ms, 60–1200 Hz; no se expone) y un hop de `hop_ms`, y escribe hasta
+ * `max_points` puntos `{frame, hz, confidence}` en los tres arrays paralelos.
+ *
+ * EL EJE. `frame` es ABSOLUTO en frames del buffer —el mismo eje que
+ * `wma_looper_detect_onsets`— y apunta al CENTRO de la ventana analizada: el primer punto
+ * cae en `loopStart + W/2` (960 a 48 kHz) y el ultimo en `<= loopEnd − W/2`. Las ventanas
+ * van enteras dentro de la region: sin relleno con ceros y sin envolver al dar la vuelta
+ * (eso es del consumidor). `speed` no cambia la serie.
+ *
+ * EL HOP. `*out_hop_frames = round(hop_ms · sr / 1000)`, redondeado UNA vez, exacto: hop
+ * menor que la ventana es solapamiento, no un minimo. Los puntos consecutivos distan
+ * exactamente `hop_frames`. Se escribe siempre que `hop_ms > 0` y haya rate, aunque la
+ * pista no tenga puntos, para que el consumidor pueda dimensionar con
+ * `(loopEnd − loopStart) / hop_frames + 1` (cota superior).
+ *
+ * SIN PITCH = 0/0. `hz = 0` Y `confidence = 0` EXACTOS en cada punto sin altura: bajo el
+ * piso (RMS 0,001), claridad NSDF < 0,5, o sin soporte espectral (subarmonico con claridad
+ * alta). Nunca interpolado, sin histeresis temporal: la frontera del silencio cae donde
+ * cae la ventana. `confidence` es la claridad NSDF del pico elegido, 0..1; el umbral de
+ * dibujo lo pone el consumidor.
+ *
+ * DETERMINISTA: el mismo buffer da la misma serie byte a byte, corra o no el afinador en
+ * vivo. Corre en el thread del llamador (UI/IO), NUNCA en el de audio; una pista de 30 s
+ * con hop 10 ms cuesta ~1 s en host sin optimizar.
+ *
+ * @param out_frames,out_hz,out_confidence  arrays de `max_points` (caller-allocated).
+ * @param out_hop_frames  puede ser NULL.
+ * @return puntos escritos, nunca negativo. **0 = no hay** (R-API-59): pista inactiva,
+ *         siendo grabada, region menor que una ventana, hop invalido, o `max_points <= 0`.
+ */
+WMA_API int wma_looper_analyze_pitch(const WmaEngine* engine, int track_index,
+                                      float hop_ms, int* out_frames, float* out_hz,
+                                      float* out_confidence, int max_points,
+                                      int* out_hop_frames);
+
+/**
+ * La ENVOLVENTE RMS de una pista, cruda y lineal [0, 1], decimada (REQ-043, WV-3.1).
+ *
+ * Un bin por `hop_frames = round(sr / bins_per_second)` (redondeado una vez) sobre la
+ * region `[loopStart, loopEnd)`: ventana = hop, sin solapar, `*out_first_frame = loopStart`,
+ * `bins = floor(loopLength / hop_frames)`. La cola menor que un hop NO tiene bin (a 4
+ * bins/s se descartan hasta 250 ms; a 100 bins/s hasta 10 ms). El bin `k` cubre
+ * `[first_frame + k·hop, first_frame + (k+1)·hop)` sobre mono `(L+R)/2`.
+ *
+ * Sin normalizar y sin dB: el consumidor normaliza al pico. Sin suavizar: eso es del
+ * renderer. `speed` no cambia la serie. Mismo eje y misma regla de lectura que
+ * `wma_looper_analyze_pitch`.
+ *
+ * @param out_bins        `max_bins` floats (caller-allocated). Cota: `loopLength / hop_frames`.
+ * @param out_first_frame escrito SOLO cuando devuelve > 0. Puede ser NULL.
+ * @param out_hop_frames  escrito siempre que `bins_per_second > 0` y haya rate. Puede ser NULL.
+ * @return bins escritos, nunca negativo. **0 = no hay** (R-API-59), con las mismas causas.
+ */
+WMA_API int wma_looper_get_level_envelope(const WmaEngine* engine, int track_index,
+                                           float bins_per_second, float* out_bins,
+                                           int max_bins, int* out_first_frame,
+                                           int* out_hop_frames);
+
 /* ---------------- Per-track playback modes ---------------- */
 
 /** How many times a track plays before stopping. 0 = loop forever. */
