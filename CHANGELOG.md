@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.19.1...v2.19.2) (2026-09-17)
+
+
+### Bug Fixes
+
+* **kmp:** un array de tamaño 0 es "sin dato" en looperGetTrackWaveform ([20c7fb7](https://github.com/mati-araujo/watermelon-audio/commit/20c7fb739b94b740234eb55210164c336af69ca6))
+* **kmp:** un array de tamaño 0 es "sin dato" en looperGetTrackWaveform ([51f66e1](https://github.com/mati-araujo/watermelon-audio/commit/51f66e198232e2fb16c06895b0d782f33e063ba0))
+
 ## [2.19.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.19.0...v2.19.1) (2026-09-16)
 
 
