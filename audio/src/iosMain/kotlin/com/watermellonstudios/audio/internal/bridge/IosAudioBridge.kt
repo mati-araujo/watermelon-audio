@@ -1167,18 +1167,25 @@ internal class IosAudioBridge : IAudioNativeBridge {
      * El array se aloca acá y C lo llena en el lugar, con `usePinned` — sin copia
      * intermedia, igual que [getWaveformSamples].
      *
-     * **Se devuelve el array entero aunque C haya escrito menos bins**, que es lo que
-     * hace Android: el retorno de `wma_looper_get_track_waveform` se ignora en las dos
-     * plataformas y los bins que sobran quedan en 0. No es descuido — un array de largo
-     * variable obligaría a cada llamador de UI a reescalar su dibujo.
+     * El retorno de `wma_looper_get_track_waveform` es el número de bins escritos y
+     * **decide el tamaño del array que sale** (MINI-030, R-API-59), igual que Android:
+     * - `0` escritos (pista inactiva o sin contenido) ⇒ `FloatArray(0)`: **no hay dato**.
+     * - `N > 0` escritos ⇒ **el array entero de [numBins]**, aunque C haya escrito menos:
+     *   el motor tiene un techo interno de bins y deja el resto en 0. Ese relleno es
+     *   silencio y no miente; un array de largo variable obligaría a cada llamador de UI
+     *   a reescalar su dibujo.
+     *
+     * Hasta MINI-030 el retorno se ignoraba y el primer caso salía como `numBins` ceros
+     * — la ausencia disfrazada de silencio. Contrato en
+     * [com.watermellonstudios.audio.api.ILooperBridge.looperGetTrackWaveform].
      */
     override fun looperGetTrackWaveform(trackIndex: Int, numBins: Int): FloatArray {
         val bins = FloatArray(numBins)
         if (numBins <= 0) return bins
-        bins.usePinned { pinned ->
+        val written = bins.usePinned { pinned ->
             wma_looper_get_track_waveform(engine, trackIndex, pinned.addressOf(0), numBins)
         }
-        return bins
+        return if (written <= 0) FloatArray(0) else bins
     }
 
     // ---------- undo ----------

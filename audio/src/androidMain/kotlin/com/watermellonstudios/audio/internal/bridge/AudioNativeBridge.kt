@@ -3095,11 +3095,21 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override fun looperRestoreUndo(trackIndex: Int): Boolean = nativeLooperRestoreUndo(trackIndex)
     override fun looperHasUndo(trackIndex: Int): Boolean = nativeLooperHasUndo(trackIndex)
 
-    // Track waveform
+    /**
+     * El retorno de `nativeLooperGetTrackWaveform` es el número de bins que el motor
+     * escribió, y **decide el tamaño del array que sale** (MINI-030, R-API-59): `0`
+     * escritos ⇒ `FloatArray(0)`, "no hay dato"; `N > 0` escritos ⇒ los [numBins]
+     * enteros, con lo que el motor no escribió en `0` (relleno de silencio: el motor
+     * tiene un techo interno de bins y rellena él mismo).
+     *
+     * Hasta MINI-030 ese retorno se descartaba y una pista inactiva salía como
+     * `numBins` ceros — silencio y ausencia, indistinguibles. Contrato en
+     * [com.watermellonstudios.audio.api.ILooperBridge.looperGetTrackWaveform].
+     */
     override fun looperGetTrackWaveform(trackIndex: Int, numBins: Int): FloatArray {
         val bins = FloatArray(numBins)
-        nativeLooperGetTrackWaveform(trackIndex, bins, numBins)
-        return bins
+        val written = nativeLooperGetTrackWaveform(trackIndex, bins, numBins)
+        return if (written <= 0) FloatArray(0) else bins
     }
 
     // Track speed
