@@ -8,6 +8,7 @@
 #include "LooperStateEmitter.h"
 #include "MetronomeClick.h"
 #include "LooperExportTypes.h"
+#include "TrackAnalysis.h"
 #include "../dsp/SIMDUtils.h"
 #include <algorithm>
 #include <atomic>
@@ -1160,6 +1161,65 @@ public:
     }
 
     /**
+     * @brief La serie de PITCH de una pista, offline, en frames del buffer (REQ-043 S1,
+     *        WV-3.2). UI/IO thread only; nunca desde el callback.
+     *
+     * Recorre la region `[loopStart, loopEnd)` con el preset de voz del motor (40 ms,
+     * 60–1200 Hz, `TrackAnalysis.h`) y un hop EXACTO de `hopFrames`. Cada punto lleva
+     * `frame` = centro de su ventana, absoluto en frames del buffer (el mismo eje que
+     * `detectTrackOnsets`); el primero cae en `loopStart + W/2` y el ultimo en
+     * `≤ loopEnd − W/2`. `freqHz = 0 ∧ confidence = 0` exactos donde no hay pitch, nunca
+     * interpolado.
+     *
+     * CUANDO SE PUEDE LEER: la misma disciplina que `getTrackWaveform` y `detectOnsets`.
+     * Una pista inactiva, o la que el thread de audio esta grabando (`writeFrame`
+     * extiende el buffer a mitad de lectura), devuelve **0 elementos** — que es el
+     * contrato de MINI-030 / R-API-59: "0 = no hay", no "0 = vacio".
+     *
+     * @param outFrames,outHz,outConf  arrays paralelos de `maxPoints` (caller-allocated).
+     *        Cota superior para dimensionarlos: `loopLength / hopFrames + 1`.
+     * @return puntos escritos, nunca negativo.
+     */
+    int analyzeTrackPitch(int index, int hopFrames, int* outFrames, float* outHz,
+                          float* outConf, int maxPoints) const {
+        if (index < 0 || index >= MAX_TRACKS || hopFrames <= 0 || maxPoints <= 0) return 0;
+        if (!outFrames || !outHz || !outConf) return 0;
+        std::vector<float> mono;
+        int regionStart = 0;
+        if (!copyTrackRegionMono(index, mono, regionStart)) return 0;
+        const int sr = mSampleRate.load(std::memory_order_acquire);
+        return wma::track_analysis::pitchSeriesOverMono(
+            mono.data(), static_cast<int>(mono.size()), sr, regionStart, hopFrames,
+            wma::track_analysis::voiceWindowFrames(sr), outFrames, outHz, outConf, maxPoints);
+    }
+
+    /**
+     * @brief La ENVOLVENTE RMS de una pista, cruda y lineal [0, 1], decimada a un bin
+     *        por `hopFrames` sobre la region (REQ-043 S1, WV-3.1). UI/IO thread only.
+     *
+     * Ventana = hop, sin solapar; `*outFirstFrame = loopStart`; `bins = floor(loopLength
+     * / hopFrames)` — la cola menor que un hop no tiene bin. Sin normalizar y sin dB: el
+     * consumidor normaliza al pico. Misma regla de lectura y de "0 elementos" que
+     * `analyzeTrackPitch`.
+     *
+     * @param outBins  `maxBins` floats (caller-allocated). Cota: `loopLength / hopFrames`.
+     * @param outFirstFrame  escrito SOLO cuando devuelve > 0.
+     * @return bins escritos, nunca negativo.
+     */
+    int getTrackLevelEnvelope(int index, int hopFrames, float* outBins, int maxBins,
+                              int* outFirstFrame) const {
+        if (index < 0 || index >= MAX_TRACKS || hopFrames <= 0 || maxBins <= 0) return 0;
+        if (!outBins || !outFirstFrame) return 0;
+        std::vector<float> mono;
+        int regionStart = 0;
+        if (!copyTrackRegionMono(index, mono, regionStart)) return 0;
+        const int bins = wma::track_analysis::levelEnvelopeOverMono(
+            mono.data(), static_cast<int>(mono.size()), hopFrames, outBins, maxBins);
+        if (bins > 0) *outFirstFrame = regionStart;
+        return bins;
+    }
+
+    /**
      * @brief Bar-snap + seam-bake a free take's loop region (Free-loop auto-sync,
      *        phases A+C). Pads with silence if loopEnd runs past the recording,
      *        bakes the seam wrap-mix when tailFrames>0, and sets the loop region.
@@ -1389,6 +1449,43 @@ private:
     }
 
     // Upper bound on bins produced by the O(n) fresh-compute path in
+    /**
+     * @brief Copia la region `[loopStart, loopEnd)` de una pista a mono `(L+R)/2`, la
+     *        misma convencion que el ring del afinador (REQ-043 S1).
+     *
+     * Es el UNICO lugar que decide si es seguro leer para el analisis offline: pista
+     * activa y que NO sea la que el thread de audio esta grabando. Un overdub tambien
+     * escribe la pista que graba, y esa es la misma pista, asi que el chequeo del
+     * `mRecordingTrack` cubre los dos casos. La lectura va por `sampleAt`, que sirve
+     * para los dos backends de almacenamiento.
+     *
+     * @return false si no hay nada que leer (inactiva, grabando, region vacia, o sin
+     *         memoria para la copia); entonces `mono` queda vacio.
+     */
+    bool copyTrackRegionMono(int index, std::vector<float>& mono, int& outRegionStart) const {
+        mono.clear();
+        const TrackBuffer& track = mTracks[index];
+        if (!track.isActive()) return false;
+        if (mRecordingTrack.load(std::memory_order_acquire) == index) return false;
+        const int length = track.getLengthFrames();
+        const int start = std::clamp(track.getLoopStart(), 0, std::max(0, length));
+        const int end = std::clamp(track.getLoopEnd(), start, std::max(0, length));
+        const int region = end - start;
+        if (region <= 0) return false;
+        try {
+            mono.assign(static_cast<size_t>(region), 0.0f);
+        } catch (...) {
+            mono.clear();
+            return false;
+        }
+        for (int f = 0; f < region; ++f) {
+            mono[static_cast<size_t>(f)] =
+                0.5f * (track.sampleAt(start + f, 0) + track.sampleAt(start + f, 1));
+        }
+        outRegionStart = start;
+        return true;
+    }
+
     // getTrackWaveform (used when the track is idle/finished). The live path
     // (QW-6) has its own resolution in TrackBuffer::kLiveWaveformBins.
     static constexpr int MAX_WAVEFORM_BINS_CACHE = 512;
