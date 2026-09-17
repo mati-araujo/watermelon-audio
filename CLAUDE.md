@@ -160,7 +160,7 @@ afirmado y no vigilado haría leer todo este archivo como verificado cuando sól
 | `wma-api` | 281 | declaraciones WMA_API en la C API |
 | `analysis-files` | 17 | fuentes .h/.cpp en cpp/analysis/ (sin tests/) |
 | `callers-baseline` | 1 callback-externo / 15 deuda / 1 entrada / 61 sonda-de-tests | reparto del baseline de llamadores |
-| `ver-kotlin` | 2.4.10 | version de Kotlin |
+| `ver-kotlin` | 2.4.20 | version de Kotlin |
 | `ver-agp` | 9.3.2 | version de AGP |
 <!-- END conteos-medidos -->
 
