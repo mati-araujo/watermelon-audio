@@ -34,6 +34,30 @@ Las tres convenciones del filtro pasan a ser las de FluidSynth 2.6.0 (`fluid_iir
    el +1,5. A 44,1/48 kHz el default ya estaba activo, así que en el teléfono esto no mueve nada más
    que el clamp; a rates bajos es el anti-alias, como en FluidSynth.
 
+## Lo que la tabla NO dice (corregido el 2026-09-16 a la noche, con la carta de NoisyPad)
+
+🔴 **La columna "vs 2.19.0" de esta nota es el término 1/√q por región, no el nivel de la voz.** La
+fórmula `+1,505 − Q/2` predice el nivel sólo donde la energía de la voz está en la **banda de paso**
+del filtro. Donde el espectro vive cerca o encima del corte hay un segundo cambio que la tabla no
+lleva: 2.19.0 tenía, a Q = 0, la joroba de tsf (q = 1: 0 dB en fc y +1,25 dB de pico) y 2.19.1 tiene el
+Butterworth (−3,01 en fc). Medido en host, rendido sobre el tag `v2.19.0` y sobre 2.19.1 con el mismo
+arnés (`sf_render_preset`, 0/0, régimen RMS 0,1–0,4 s) — y en su device, a ≤ 0,4 dB de estos números:
+
+| sonda | Q (cB) | fórmula | rendido 2.19.1 − 2.19.0 | por qué |
+|---|---|---|---|---|
+| Warm Pad `0:89` 60·127 | 0 | +1,5 | **−0,00** | corte a 600 Hz sobre un pad: la joroba valía lo que el término |
+| Trumpet `0:56` 72·42 | 0 | +1,5 | **+0,29** | el velocity baja el corte sobre el espectro del bronce |
+| Stereo Grand `0:0` 72·42 | 20 | +0,5 | **−0,96** | corte ≈ 634 Hz sobre la fundamental (523 Hz) |
+| Saw Lead / Strings / Trumpet 72·122 / Grand 72·122 / Music Box (170 cB) | — | +1,5 … −7,0 | +1,50 / +1,50 / +1,46 / +1,48 / −6,99 | banda de paso: la fórmula |
+
+Y **una sonda con ruido y Q 960 (`12:127` Shooting Star) no se compara con 2.19.0**: ese render satura
+(+10,6 dBFS en host); en device el "antes" estaba recortado a 0 dBFS, y su Δ no mide el filtro.
+
+La forma del filtro de 2.19.1 **es la de FluidSynth 2.6.0** también sobre el font real: Warm Pad 60·127
+seco rinde al 0,00 dB de FluidSynth en el hold (−17,20 / −17,20) con el mismo centroide (450 / 449 Hz),
+sobre un `.sf2` mínimo con el sample real (`scripts/sf-preset-to-minimal-sf2.py`, control de identidad
+0,01 dB contra el `.sf3`). El **Δ_host del criterio de muerte es el render, no esta tabla.**
+
 ## En qué presets, medido en regiones (no en zonas)
 
 Sobre las **12 311 regiones** de GeneralUser (la región es lo que tsf toca: zona de instrumento ×
