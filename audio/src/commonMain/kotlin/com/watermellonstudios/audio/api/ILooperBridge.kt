@@ -218,10 +218,25 @@ interface ILooperBridge {
     fun looperGetTrackLengthFrames(trackIndex: Int): Int
 
     /**
-     * La forma de onda de la pista, resumida en [numBins] valores.
+     * La forma de onda de la pista, resumida en [numBins] valores (pico por bin).
      *
-     * Devuelve un array propio de largo [numBins]: el buffer se aloca y se llena del
-     * lado de la implementación, así que el llamador no maneja memoria prestada.
+     * Devuelve un array propio: el buffer se aloca y se llena del lado de la
+     * implementación, así que el llamador no maneja memoria prestada.
+     *
+     * **El tamaño del array es parte del contrato** (MINI-030, R-API-59):
+     * - **`size == 0`: no hay dato.** La pista está inactiva o sin contenido y el motor
+     *   no escribió ningún bin. No es silencio: es la ausencia de una forma de onda, y
+     *   un consumidor tiene que poder distinguirla de una pista en silencio sin
+     *   preguntar aparte por [looperIsTrackActive].
+     * - **`size == numBins`: hay dato, con relleno de silencio.** Si el motor escribe
+     *   menos bins que los pedidos (tiene un techo interno), el resto queda en `0` y
+     *   el largo sigue siendo [numBins]: los llamadores de UI no reescalan su dibujo.
+     *
+     * Hasta MINI-030 las dos implementaciones devolvían `numBins` ceros en el primer
+     * caso, y "sin señal" y "en silencio" eran indistinguibles desde Kotlin. Un
+     * consumidor que indexa `[0]` sin mirar el tamaño se rompe con este contrato: ésa es
+     * la nota del bump. El mismo contrato vale para toda lectura de análisis por pista
+     * que se agregue después.
      */
     fun looperGetTrackWaveform(trackIndex: Int, numBins: Int = 24): FloatArray
 
