@@ -12,8 +12,8 @@ Es un **patch** (`fix(kmp)`) **con nota de bump**: la firma no cambia, la semán
 REQ-043, que sigue detrás (spec en escritura, las tres ❓ cerradas con su carta).
 
 > Redactado el 2026-09-17 antes del tag. `v2.19.2` **verificada en el registro, 4/4 coordenadas** (audio,
-> audio-android, audio-iosarm64, audio-iossimulatorarm64), Publish run 35240128766. **SIN ENVIAR** al
-> abrir el PR: marcar acá cuando salga por chat.
+> audio-android, audio-iosarm64, audio-iossimulatorarm64), Publish run 35240128766. **Enviado por chat el
+> 2026-09-17 a la tarde.**
 
 ## 1 · Lo que cambia, en una frase
 
