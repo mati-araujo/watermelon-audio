@@ -328,4 +328,209 @@ void McLeodPitch::analyzeWindow() {
     if (!mHasPitch) mFrequencyHz = 0.0;
 }
 
+
+// ============================================================================
+// McLeodWindowedPitch (REQ-043 S1) — el mismo metodo, por ventana y parametrizado.
+//
+// Cada paso de abajo tiene su porque escrito en `analyzeWindow()`, arriba, y NO se
+// repite aca: lo que cambia es que la ventana, el rango y el origen son parametros y
+// que la señal ya esta decimada entera en `mDecimatedRegion`. Ver el encabezado de la
+// clase para por que esta duplicado y no factorizado.
+// ============================================================================
+
+void McLeodWindowedPitch::prepareWindowed(int sampleRate, int windowFrames,
+                                          double minHz, double maxHz) {
+    mSampleRate = sampleRate > 0 ? sampleRate : 0;
+    mWindowFrames = windowFrames > 0 ? windowFrames : 0;
+    mMinHz = minHz;
+    mMaxHz = maxHz;
+    mHasEstimate = false;
+    mEstimatedHz = 0.0;
+    mEstimatedClarity = 0.0;
+    mWindowRms = 0.0;
+    mLoadedFrames = 0;
+    mWin = nullptr;
+    mDecimatedRegion.clear();
+    if (mSampleRate <= 0 || mWindowFrames <= 0 || !(minHz > 0.0) || !(maxHz > minHz)) {
+        mWindowDecimated = 0;
+        mMinLag = mMaxLag = 0;
+        return;
+    }
+
+    mDecimation = static_cast<int>(std::lround(
+        static_cast<double>(mSampleRate) / static_cast<double>(kTargetRate)));
+    if (mDecimation < 1) mDecimation = 1;
+    mWorkingRate = static_cast<double>(mSampleRate) / mDecimation;
+    mAntiAlias.setSampleRate(static_cast<float>(mSampleRate));
+    mAntiAlias.setLowpass(static_cast<float>(mWorkingRate / 3.0));
+
+    mWindowDecimated = mWindowFrames / mDecimation;
+
+    // Rango de lag: la misma regla que el afinador, incluido el techo `τmax ≤ W/2`.
+    mMinLag = static_cast<int>(std::floor(mWorkingRate / mMaxHz));
+    mMaxLag = static_cast<int>(std::ceil(mWorkingRate / mMinHz));
+    if (mMinLag < 2) mMinLag = 2;
+    if (mMaxLag > mWindowDecimated / 2) mMaxLag = mWindowDecimated / 2;
+    if (mMaxLag < mMinLag) { mMinLag = mMaxLag = 0; }
+
+    mNsdf.assign(static_cast<size_t>(mMaxLag + 1), 0.0);
+}
+
+void McLeodWindowedPitch::loadMonoRegion(const float* mono, int numFrames) {
+    mLoadedFrames = 0;
+    mWin = nullptr;
+    mHasEstimate = false;
+    mEstimatedHz = 0.0;
+    mEstimatedClarity = 0.0;
+    mWindowRms = 0.0;
+    if (mono == nullptr || numFrames <= 0 || mSampleRate <= 0 || mWindowDecimated <= 0) {
+        mDecimatedRegion.clear();
+        return;
+    }
+    mDecimatedRegion.assign(static_cast<size_t>(numFrames / mDecimation), 0.0f);
+    mAntiAlias.reset();
+    int phase = 0;
+    size_t out = 0;
+    for (int i = 0; i < numFrames; ++i) {
+        // Filtrar SIEMPRE, decimar despues (ver `process()`).
+        const float filtered = mAntiAlias.process(mono[i]);
+        if (++phase < mDecimation) continue;
+        phase = 0;
+        if (out < mDecimatedRegion.size()) mDecimatedRegion[out++] = filtered;
+    }
+    mLoadedFrames = numFrames;
+}
+
+bool McLeodWindowedPitch::estimateWindowAt(int startFrame) {
+    mHasEstimate = false;
+    mEstimatedHz = 0.0;
+    mEstimatedClarity = 0.0;
+    mWindowRms = 0.0;
+    mWin = nullptr;
+    if (startFrame < 0 || mWindowDecimated <= 0 || mLoadedFrames <= 0) return false;
+    if (startFrame + mWindowFrames > mLoadedFrames) return false;
+    const size_t startDec = static_cast<size_t>(startFrame / mDecimation);
+    if (startDec + static_cast<size_t>(mWindowDecimated) > mDecimatedRegion.size()) return false;
+    mWin = mDecimatedRegion.data() + startDec;
+    searchLoadedWindow();
+    return true;
+}
+
+double McLeodWindowedPitch::nsdfWindowed(int lag) const {
+    if (mWin == nullptr || lag < 0 || lag >= mWindowDecimated) return 0.0;
+    double r = 0.0;
+    double m = 0.0;
+    const int n = mWindowDecimated - lag;
+    for (int i = 0; i < n; ++i) {
+        const double a = mWin[i];
+        const double b = mWin[i + lag];
+        r += a * b;
+        m += a * a + b * b;
+    }
+    return (m > 0.0) ? (2.0 * r / m) : 0.0;
+}
+
+void McLeodWindowedPitch::searchLoadedWindow() {
+    // --- nivel: por debajo del piso no hay nota, y no se inventa una ----------
+    double energy = 0.0;
+    for (int i = 0; i < mWindowDecimated; ++i) {
+        const double v = mWin[i];
+        energy += v * v;
+    }
+    mWindowRms = std::sqrt(energy / mWindowDecimated);
+    if (mWindowRms < static_cast<double>(kSilenceFloor) || mMaxLag <= 0) return;
+
+    // --- barrido con paso proporcional; candidato = maximo local entre muestras ---
+    mKeyCount = 0;
+    int bestLag = -1;
+    double bestValue = -1.0;
+    double prevValue = 2.0;
+    double pendingValue = 2.0;
+    int pendingLag = -1;
+    for (int lag = mMinLag; lag <= mMaxLag; lag += std::max(1, lag / 12)) {
+        const double v = nsdfWindowed(lag);
+        mNsdf[static_cast<size_t>(lag)] = v;
+        if (pendingLag >= 0 && pendingValue > prevValue && pendingValue >= v) {
+            if (mKeyCount < kMaxCandidates) mKeyLags[mKeyCount++] = pendingLag;
+            if (pendingValue > bestValue) { bestValue = pendingValue; bestLag = pendingLag; }
+        }
+        prevValue = pendingValue;
+        pendingLag = lag;
+        pendingValue = v;
+    }
+    // El borde derecho: el caso de la nota mas grave del rango.
+    if (pendingLag >= 0 && pendingValue > prevValue) {
+        if (mKeyCount < kMaxCandidates) mKeyLags[mKeyCount++] = pendingLag;
+        if (pendingValue > bestValue) { bestValue = pendingValue; bestLag = pendingLag; }
+    }
+    if (bestLag < 0 || bestValue < kMinClarity) {
+        mEstimatedClarity = bestValue > 0.0 ? bestValue : 0.0;
+        return;
+    }
+
+    // --- cada candidato se juzga por su pico REAL (±τ/12), con el corte temprano exacto ---
+    int chosen = -1;
+    int refined = 0;
+    for (int i = 0; i < mKeyCount; ++i) {
+        const int lag = mKeyLags[i];
+        const int span = std::max(1, lag / 12);
+        const int from = std::max(mMinLag, lag - span);
+        const int to = std::min(mMaxLag, lag + span);
+        int peak = lag;
+        double peakValue = mNsdf[static_cast<size_t>(lag)];
+        for (int l = from; l <= to; ++l) {
+            if (l == lag) continue;
+            const double v = nsdfWindowed(l);
+            mNsdf[static_cast<size_t>(l)] = v;
+            if (v > peakValue) { peakValue = v; peak = l; }
+        }
+        mRefinedLags[i] = peak;
+        mRefinedNsdf[i] = peakValue;
+        refined = i + 1;
+        if (peakValue > bestValue) { bestValue = peakValue; bestLag = peak; }
+
+        if (chosen < 0 && peakValue >= kPeakThreshold) {
+            bool ambiguous = false;
+            const double floorSeen = kPeakThreshold * bestValue;
+            for (int j = 0; j < i; ++j) {
+                if (mRefinedNsdf[j] >= floorSeen) { ambiguous = true; break; }
+            }
+            if (!ambiguous) { chosen = peak; break; }
+        }
+    }
+    for (int i = refined; i < mKeyCount; ++i) {
+        mRefinedLags[i] = mKeyLags[i];
+        mRefinedNsdf[i] = mNsdf[static_cast<size_t>(mKeyLags[i])];
+    }
+
+    // --- la defensa contra la octava: el PRIMER pico ≥ kPeakThreshold·maximo ---
+    if (chosen < 0) {
+        const double threshold = kPeakThreshold * bestValue;
+        chosen = bestLag;
+        for (int i = 0; i < mKeyCount; ++i) {
+            if (mRefinedNsdf[i] >= threshold) { chosen = mRefinedLags[i]; break; }
+        }
+    }
+    if (chosen - 1 >= 0) mNsdf[static_cast<size_t>(chosen - 1)] = nsdfWindowed(chosen - 1);
+    if (chosen + 1 <= mMaxLag) mNsdf[static_cast<size_t>(chosen + 1)] = nsdfWindowed(chosen + 1);
+
+    // --- parabola acotada a media muestra ---
+    double refinedLag = static_cast<double>(chosen);
+    if (chosen > 0 && chosen < mMaxLag) {
+        const double y0 = mNsdf[static_cast<size_t>(chosen - 1)];
+        const double y1 = mNsdf[static_cast<size_t>(chosen)];
+        const double y2 = mNsdf[static_cast<size_t>(chosen + 1)];
+        const double denom = 2.0 * (2.0 * y1 - y0 - y2);
+        if (std::abs(denom) > 1e-12) {
+            const double delta = (y2 - y0) / denom;
+            refinedLag += std::clamp(delta, -0.5, 0.5);
+        }
+    }
+
+    mEstimatedClarity = mNsdf[static_cast<size_t>(chosen)];
+    mEstimatedHz = (refinedLag > 0.0) ? (mWorkingRate / refinedLag) : 0.0;
+    mHasEstimate = mEstimatedHz >= mMinHz && mEstimatedHz <= mMaxHz;
+    if (!mHasEstimate) mEstimatedHz = 0.0;
+}
+
 }  // namespace wma::dsp
