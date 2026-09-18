@@ -204,4 +204,131 @@ private:
     int mWindows{0};
 };
 
+
+/**
+ * @brief El MISMO MPM, por ventana y con parametros (REQ-043 S1).
+ *
+ * POR QUE OTRA CLASE Y NO OTRO METODO DE `McLeodPitch`
+ * ---------------------------------------------------
+ * El afinador consume un STREAM (`process()`: filtra, decima y analiza cada vez que
+ * completa 2048 muestras, sin hop) con sus constantes —85 ms, 26–2200 Hz— y sus golden
+ * `analysis/tests/golden/` (los .resp) son el guardia de que nada de eso se mueve. El video de
+ * NoisyPad necesita lo contrario: un BUFFER entero ya grabado, recorrido por hop con una
+ * ventana de voz (40 ms, 60–1200 Hz) y con `frame` al centro de cada ventana.
+ *
+ * Reusar `process()` con hop fijo de 85 ms serrucha la cinta (0,35 puntos por cuadro), y
+ * un `PitchDetector.h` nuevo reescribiria la defensa contra la octava que REQ-033/034/035
+ * pagaron en corpus real. Asi que la busqueda es LA MISMA —barrido con paso proporcional
+ * τ/12, maximo local, refinamiento de cada candidato en ±τ/12 con el corte temprano
+ * exacto, PRIMER pico ≥ 0,9·maximo, parabola acotada— sobre una ventana de largo y rango
+ * parametrizados.
+ *
+ * 🔴 ESTA DUPLICADA A PROPOSITO, Y ES EL PRECIO DE DOS TRINQUETES. `analyzeWindow()` y
+ * `nsdfAt()` estan en `scripts/rt-coverage-baseline.txt`: factorizar el nucleo en una
+ * funcion compartida agregaria un alcanzado nuevo al walker del callback y obligaria a
+ * REDECLARAR la cobertura, que es justo lo que ese trinquete existe para impedir; y
+ * cualquier cambio en el cuerpo del afinador tiene que salir byte a byte en los golden.
+ * Una segunda clase con nombres PROPIOS (ningun `process`/`nsdfAt`/`analyzeWindow`: un
+ * homonimo vuelve ambigua una llamada del walker y le apaga cobertura, medido dos veces
+ * el 2026-08-19) deja al afinador intacto y verificable. Si alguna vez se unifican, el
+ * diff de los `.resp` es la revision.
+ *
+ * NO ES RT. Asigna en `prepareWindowed()` y en `loadMonoRegion()`, y corre en el thread de
+ * UI/IO sobre una copia del buffer (la disciplina de `AudioLooper::detectOnsets`).
+ */
+class McLeodWindowedPitch {
+public:
+    /// Mismo rate de trabajo que el afinador: decimar a ~24 kHz con antialias antes.
+    static constexpr int kTargetRate = McLeodPitch::kTargetRate;
+
+    /**
+     * Copia PROPIA del umbral del primer pico, con el mismo valor que el afinador. Es
+     * propia para que el mutante M1 de AC-043.1 (`= 1,0` ⇒ "elegi el maximo" ⇒ octavas)
+     * exista SOLO en esta entrada, sin tocar la constante que los golden fijan.
+     */
+    static constexpr double kPeakThreshold = 0.9;
+    static constexpr double kMinClarity = McLeodPitch::kMinClarity;
+    static constexpr float kSilenceFloor = McLeodPitch::kSilenceFloor;
+
+    /**
+     * Fija ventana y rango. **Asigna.** `windowFrames` en frames de ENTRADA (a 48 kHz,
+     * 40 ms son 1920); `minHz`/`maxHz` acotan la busqueda de lag.
+     *
+     * La regla del afinador `τmax ≤ W/2` se conserva: por debajo de `effectiveMinHz()`
+     * la ventana no tiene dos periodos que correlacionar y la busqueda NO baja. Con
+     * 30 ms a 24 kHz eso son 66,7 Hz — o sea que un tramo de 65 Hz no puede salir bien
+     * con 30 ms por construccion, y AC-043.2 lo mide en vez de suponerlo.
+     */
+    void prepareWindowed(int sampleRate, int windowFrames, double minHz, double maxHz);
+
+    /**
+     * Filtra y decima `numFrames` frames mono de una vez, en ORDEN, como el stream del
+     * afinador: el antialias ve todas las muestras y arranca en reposo al principio de
+     * la region. Asigna el buffer decimado. Reemplaza lo cargado antes.
+     */
+    void loadMonoRegion(const float* mono, int numFrames);
+
+    /**
+     * Analiza la ventana que ARRANCA en `startFrame` (frames de entrada, relativos a la
+     * region cargada). La posicion se redondea a la grilla decimada (a 48 kHz, a 2
+     * frames; el `frame` que el llamador publica no se redondea).
+     * @return false si la ventana no entra entera en lo cargado; entonces no hay
+     *         estimacion y `hasEstimate()` es false.
+     */
+    bool estimateWindowAt(int startFrame);
+
+    /**
+     * Altura de la ultima ventana, en Hz, o 0 si no hubo (piso, claridad o rango). El rango
+     * se decide en lags con un lag de margen a cada lado (ver `prepareWindowed`): dentro de
+     * [minHz, maxHz] la lectura esta afirmada por el barrido de test_track_analysis.cpp; a
+     * menos de un lag por fuera sale el valor real (59,7–60 Hz, 1200–1263 Hz), no el borde
+     * fabricado ni una octava; mas afuera no hay garantia (por abajo 0/0; por arriba el
+     * primer lag no puede ser candidato y una nota bien fuera del rango puede leerse en su
+     * octava inferior, que es lo que el rango declarado existe para excluir).
+     */
+    double estimatedHz() const noexcept { return mEstimatedHz; }
+    /// Claridad NSDF del pico elegido, 0..1; 0 EXACTO cuando no hay altura (0/0).
+    double estimatedClarity() const noexcept { return mEstimatedClarity; }
+    /// true si la ultima ventana produjo una altura creible.
+    bool hasEstimate() const noexcept { return mHasEstimate; }
+
+    /// El minimo que la busqueda alcanza de verdad tras la regla `τmax ≤ W/2`; por debajo
+    /// sale 0/0, nunca este valor (ver `searchLoadedWindow`). Lo afirma el test de AC-043.2.
+    double effectiveMinHz() const noexcept {
+        return mMaxLag > 0 ? mWorkingRate / mMaxLag : 0.0;
+    }
+
+private:
+    double nsdfWindowed(int lag) const;
+    void searchLoadedWindow();
+
+    int mSampleRate{0};
+    int mDecimation{1};
+    double mWorkingRate{0.0};
+    int mWindowFrames{0};
+    int mWindowDecimated{0};
+    double mMinHz{0.0};
+    double mMaxHz{0.0};
+    int mMinLag{0};
+    int mMaxLag{0};
+
+    BiquadFilter mAntiAlias;
+    std::vector<float> mDecimatedRegion;
+    int mLoadedFrames{0};
+    /// Ventana bajo analisis: un tramo de `mDecimatedRegion`, sin copiar.
+    const float* mWin{nullptr};
+
+    std::vector<double> mNsdf;
+    /// El mismo 128 del afinador: ~12·ln(τmax/τmin) ≈ 60 candidatos con el doble de margen.
+    static constexpr int kMaxCandidates = 128;
+    int mKeyLags[kMaxCandidates]{};
+    int mRefinedLags[kMaxCandidates]{};
+    double mRefinedNsdf[kMaxCandidates]{};
+    int mKeyCount{0};
+
+    double mEstimatedHz{0.0};
+    double mEstimatedClarity{0.0};
+    bool mHasEstimate{false};
+};
+
 }  // namespace wma::dsp

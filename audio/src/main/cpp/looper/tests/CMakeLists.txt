@@ -34,7 +34,23 @@ FetchContent_MakeAvailable(googletest)
 set(LOOPER_TESTED_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../platform/Logger.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../LooperExporter.cpp
+    # REQ-043: TrackAnalysis.h usa el MPM parametrizado y la sonda de soporte espectral,
+    # y test_track_analysis.cpp corre el afinador offline como testigo de AC-043.4.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/SpectralSupportProbe.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/OfflineAnalysis.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/AnalysisThread.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/AnalysisRing.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/PhaseSlopeEstimator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/StrobeTracker.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/InharmonicityEstimator.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/FastModeTracker.cpp
 )
+
+# REQ-043: los fixtures VERSIONADOS (glide-voz.*, audiograma-prueba.wav) se leen del arbol,
+# solo lectura. Los que se escriben siguen yendo por support/FixturePath.h.
+set(LOOPER_TESTDATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/testdata")
 
 # looper_tests — the DEFAULT backend (paged ChunkedAudioBuffer, no storage flag).
 # looper_tests_dense below rebuilds the same suite with WM_LOOPER_DENSE_BUFFER.
@@ -49,6 +65,7 @@ add_executable(looper_tests
     test_free_loop_autosync.cpp
     test_pre_roll_ring.cpp
     test_pan_lut.cpp
+    test_track_analysis.cpp
     ${LOOPER_TESTED_SOURCES}
 )
 
@@ -60,7 +77,8 @@ target_include_directories(looper_tests PRIVATE
 target_link_libraries(looper_tests PRIVATE GTest::gtest_main)
 
 # Define M_PI on platforms that don't (MSVC/MinGW).
-target_compile_definitions(looper_tests PRIVATE _USE_MATH_DEFINES)
+target_compile_definitions(looper_tests PRIVATE _USE_MATH_DEFINES
+    WMA_LOOPER_TESTDATA_DIR="${LOOPER_TESTDATA_DIR}")
 
 include(GoogleTest)
 gtest_discover_tests(looper_tests)
@@ -83,6 +101,7 @@ add_executable(looper_tests_dense
     test_free_loop_autosync.cpp
     test_pre_roll_ring.cpp
     test_pan_lut.cpp
+    test_track_analysis.cpp
     ${LOOPER_TESTED_SOURCES}
 )
 target_include_directories(looper_tests_dense PRIVATE
@@ -91,7 +110,8 @@ target_include_directories(looper_tests_dense PRIVATE
 )
 target_link_libraries(looper_tests_dense PRIVATE GTest::gtest_main)
 target_compile_definitions(looper_tests_dense PRIVATE
-    _USE_MATH_DEFINES WM_LOOPER_DENSE_BUFFER)
+    _USE_MATH_DEFINES WM_LOOPER_DENSE_BUFFER
+    WMA_LOOPER_TESTDATA_DIR="${LOOPER_TESTDATA_DIR}")
 gtest_discover_tests(looper_tests_dense)
 
 # ----------------------------------------------------------------------------

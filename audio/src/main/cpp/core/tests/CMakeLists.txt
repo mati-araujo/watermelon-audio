@@ -176,6 +176,7 @@ add_executable(core_tests
     test_c_api_transport.cpp
     test_c_api_diagnostics.cpp
     test_c_api_looper.cpp
+    test_c_api_looper_analysis.cpp
     test_time_dependence_probe.cpp
     test_c_api_routing.cpp
     test_c_api_logcapture.cpp
@@ -195,7 +196,10 @@ target_compile_definitions(core_tests PRIVATE
     WMA_SPEC_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/spec-test"
     # MINI-028 — el font real, en el bundle de NoisyPad (checkout hermano). Misma
     # regla que en engines/tests: sin el, SKIPPED y nunca passed.
-    WMA_GENERALUSER_SF3_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../../NoisyPad/core-soundfont-bundle/src/main/assets/soundfonts/GeneralUser_GS.sf3")
+    WMA_GENERALUSER_SF3_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../../NoisyPad/core-soundfont-bundle/src/main/assets/soundfonts/GeneralUser_GS.sf3"
+    # REQ-043 — los fixtures versionados del looper (glide-voz.*), de solo lectura, para el
+    # test que entra por la C API. Mismo directorio que usa looper/tests.
+    WMA_LOOPER_TESTDATA_DIR="${WMA_CPP_ROOT}/looper/tests/testdata")
 
 target_include_directories(core_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

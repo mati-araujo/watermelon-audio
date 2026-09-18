@@ -2188,6 +2188,38 @@ int wma_looper_detect_onsets(const WmaEngine* engine, int track_index,
     return written < 0 ? 0 : written;
 }
 
+int wma_looper_analyze_pitch(const WmaEngine* engine, int track_index, float hop_ms,
+                              int* out_frames, float* out_hz, float* out_confidence,
+                              int max_points, int* out_hop_frames) {
+    WMA_CHECK_VAL(engine, 0);
+    const AudioLooper& looper = engine->engine->getAudioLooper();
+    const int hopFrames = wma::track_analysis::hopFramesForMs(
+        static_cast<double>(hop_ms), looper.getSampleRate());
+    if (hopFrames <= 0) return 0;
+    if (out_hop_frames) *out_hop_frames = hopFrames;
+    if (!out_frames || !out_hz || !out_confidence || max_points <= 0) return 0;
+    const int written = looper.analyzeTrackPitch(track_index, hopFrames, out_frames, out_hz,
+                                                 out_confidence, max_points);
+    return written < 0 ? 0 : written;
+}
+
+int wma_looper_get_level_envelope(const WmaEngine* engine, int track_index,
+                                   float bins_per_second, float* out_bins, int max_bins,
+                                   int* out_first_frame, int* out_hop_frames) {
+    WMA_CHECK_VAL(engine, 0);
+    const AudioLooper& looper = engine->engine->getAudioLooper();
+    const int hopFrames = wma::track_analysis::hopFramesForBinsPerSecond(
+        static_cast<double>(bins_per_second), looper.getSampleRate());
+    if (hopFrames <= 0) return 0;
+    if (out_hop_frames) *out_hop_frames = hopFrames;
+    if (!out_bins || max_bins <= 0) return 0;
+    int firstFrame = 0;
+    const int written = looper.getTrackLevelEnvelope(track_index, hopFrames, out_bins,
+                                                     max_bins, &firstFrame);
+    if (written > 0 && out_first_frame) *out_first_frame = firstFrame;
+    return written < 0 ? 0 : written;
+}
+
 /* ---------------- Per-track playback modes ---------------- */
 
 void wma_looper_set_track_play_count(WmaEngine* engine, int track_index, int plays) {
