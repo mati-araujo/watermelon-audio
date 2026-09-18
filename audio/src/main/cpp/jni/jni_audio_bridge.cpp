@@ -2689,6 +2689,81 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     return result;
 }
 
+// REQ-043 (WV-3.2) — la serie de pitch de una pista, offline. Kotlin llama DOS veces:
+// primero con los tres arrays en null para que `outHopFrames[0]` traiga el hop real y
+// pueda dimensionar por la cota `(loopEnd - loopStart) / hop + 1`; después con los
+// arrays de ese largo. `max_points` sale de los LARGOS de los arrays pinneados (el menor
+// de los tres), nunca de un int aparte que pudiera desalinearse: así un array corto no
+// se escribe de más. El retorno es el número de puntos escritos, y Kotlin recorta a eso.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperAnalyzePitch(
+    JNIEnv* env, jobject thiz, jint trackIndex, jfloat hopMs, jintArray outFrames,
+    jfloatArray outHz, jfloatArray outConfidence, jintArray outHopFrames) {
+    static_assert(sizeof(jint) == sizeof(int), "frame buffer is reinterpreted as int*");
+    int hopFrames = 0;
+    jint written = 0;
+    if (outFrames == nullptr || outHz == nullptr || outConfidence == nullptr) {
+        // Sólo el hop: `max_points = 0` es una forma legal de preguntarlo (KDoc de la C API).
+        wma_looper_analyze_pitch(g_wmaEngine, trackIndex, hopMs, nullptr, nullptr, nullptr, 0,
+                                 &hopFrames);
+    } else {
+        ScopedIntArrayRW frames(env, outFrames);
+        ScopedFloatArrayRW hz(env, outHz);
+        ScopedFloatArrayRW confidence(env, outConfidence);
+        if (!frames.isValid() || !hz.isValid() || !confidence.isValid()) {
+            return 0;
+        }
+        const int maxPoints = std::min({static_cast<int>(frames.size()),
+                                        static_cast<int>(hz.size()),
+                                        static_cast<int>(confidence.size())});
+        written = wma_looper_analyze_pitch(g_wmaEngine, trackIndex, hopMs,
+                                           reinterpret_cast<int*>(frames.get()), hz.get(),
+                                           confidence.get(), maxPoints, &hopFrames);
+    }
+    if (outHopFrames != nullptr) {
+        ScopedIntArrayRW hop(env, outHopFrames);
+        if (hop.isValid() && hop.size() > 0) {
+            hop.get()[0] = hopFrames;
+        }
+    }
+    return written;
+}
+
+// REQ-043 (WV-3.1) — la envolvente RMS de una pista, decimada. Mismo protocolo de dos
+// llamadas que nativeLooperAnalyzePitch: con `outBins` en null sólo contesta el hop en
+// `outMeta[1]`; con el array, escribe hasta su largo y devuelve los bins escritos.
+// `outMeta` = { firstFrame, hopFrames }; `firstFrame` sólo se escribe con bins > 0
+// (la C API lo deja como está si no hay dato), y acá se siembra en 0 para que Kotlin
+// no lea basura de un array que no inicializó.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperGetLevelEnvelope(
+    JNIEnv* env, jobject thiz, jint trackIndex, jfloat binsPerSecond, jfloatArray outBins,
+    jintArray outMeta) {
+    int firstFrame = 0;
+    int hopFrames = 0;
+    jint written = 0;
+    if (outBins == nullptr) {
+        wma_looper_get_level_envelope(g_wmaEngine, trackIndex, binsPerSecond, nullptr, 0,
+                                      &firstFrame, &hopFrames);
+    } else {
+        ScopedFloatArrayRW bins(env, outBins);
+        if (!bins.isValid()) {
+            return 0;
+        }
+        written = wma_looper_get_level_envelope(g_wmaEngine, trackIndex, binsPerSecond,
+                                                bins.get(), static_cast<int>(bins.size()),
+                                                &firstFrame, &hopFrames);
+    }
+    if (outMeta != nullptr) {
+        ScopedIntArrayRW meta(env, outMeta);
+        if (meta.isValid() && meta.size() >= 2) {
+            meta.get()[0] = firstFrame;
+            meta.get()[1] = hopFrames;
+        }
+    }
+    return written;
+}
+
 // Bar-snap + seam-bake a free take's loop (Free-loop auto-sync, phases A+C).
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperFinalizeFreeLoop(

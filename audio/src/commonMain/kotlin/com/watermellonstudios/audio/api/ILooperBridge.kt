@@ -1,6 +1,8 @@
 package com.watermellonstudios.audio.api
 
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
+import com.watermellonstudios.audio.domain.looper.LevelEnvelope
+import com.watermellonstudios.audio.domain.looper.PitchSeries
 
 /**
  * El looper de la sección 19 de `watermelon_audio.h`, como contrato propio.
@@ -272,6 +274,108 @@ interface ILooperBridge {
         hopFrames: Int = 256,
         sensitivity: Float = 1.0f,
     ): IntArray
+
+    /**
+     * La serie de **pitch** de la pista, offline, en frames del buffer (REQ-043, WV-3.2,
+     * R-API-60). Es lo que alimenta la cinta de voz del video.
+     *
+     * Recorre la región `[loopStart, loopEnd)` con el preset de voz del motor —ventana
+     * **W = 40 ms**, rango nominal 60–1200 Hz; ninguno se expone— y un hop de [hopMs], y
+     * devuelve un punto `(frame, hz, confidence)` por hop.
+     *
+     * ## El eje y el origen
+     *
+     * `frame` es **absoluto**, en frames del buffer —el mismo eje que [looperDetectOnsets]
+     * y que [looperGetLevelEnvelope]— y apunta al **centro** de la ventana analizada. Por
+     * eso **la serie NO arranca en `loopStart`: arranca en `loopStart + W/2`** (960 a 48 kHz)
+     * y termina en `≤ loopEnd − W/2`. Las ventanas van enteras dentro de la región: sin
+     * relleno con ceros (fabricaría un 0/0 del instrumento) y sin envolver al dar la vuelta
+     * (eso es del consumidor). 🔴 Es un origen **distinto** del de la envolvente, que sí
+     * arranca en `loopStart` exacto — no alineen las dos series por índice, alinéenlas por
+     * `frame`.
+     *
+     * ## El hop
+     *
+     * `hopFrames = round(hopMs · sr / 1000)`, redondeado **una vez**, y es **exacto**: no hay
+     * un mínimo impuesto por la ventana. Un hop menor que W es solapamiento, no un error, y
+     * los puntos consecutivos distan exactamente `hopFrames`. Se devuelve en
+     * [PitchSeries.hopFrames] incluso cuando la serie viene vacía (si hubo rate y el hop era
+     * válido), para que se pueda dimensionar.
+     *
+     * ## Qué es un 0/0
+     *
+     * `hz == 0f && confidence == 0f`, **exactos**, en cada punto sin altura: bajo el piso de
+     * RMS (0,001), claridad NSDF < 0,5, o sin soporte espectral (el subarmónico con claridad
+     * alta se rechaza). **Nunca interpolado** y sin histéresis temporal: la frontera del
+     * silencio cae donde cae la ventana. `confidence` es la claridad NSDF del pico elegido,
+     * 0..1; el umbral de dibujo lo pone el consumidor. La ventana **efectiva** del rango es
+     * **59,7–1200 Hz** (el rango se decide en lags, con margen): una fundamental por debajo
+     * sale como 0/0, no como su armónico.
+     *
+     * ## Tamaño y dimensionamiento
+     *
+     * **`size == 0` es "no hay dato"** (R-API-59): pista inactiva o sin contenido, región
+     * más corta que una ventana, o [hopMs] inválido. Con dato, el largo es **el número real
+     * de puntos** —nada de relleno: un 0/0 de relleno sería "sin pitch" inventado—. La cota
+     * superior es `(loopEnd − loopStart) / hopFrames + 1`; **el bridge dimensiona por esa
+     * cota y recorta al retorno, así que nunca trunca**: no hay que pasar un máximo.
+     *
+     * ## Determinismo y thread
+     *
+     * El mismo buffer da la misma serie byte a byte, corra o no el afinador en vivo. Corre
+     * en el thread del llamador —UI/IO, **nunca** el de audio—; una pista de 30 s con hop
+     * 10 ms cuesta ~1 s en host sin optimizar. `speed` no cambia la serie; una pista que se
+     * estira (WL-4.1) hay que re-analizarla.
+     *
+     * **Sobre una pista que no se está grabando ni disparando.** La copia puede salir
+     * rasgada si la toma cambia durante la lectura (TOCTOU heredado de
+     * [looperGetTrackWaveform]): re-analizar cuando la toma termina. Si la región crece
+     * entre la cota y el análisis, el bridge re-lee la cota y reintenta (hasta tres
+     * lecturas); una región que no para de crecer devuelve lo que hay.
+     *
+     * @param hopMs hop en milisegundos, **≥ 1 ms** (`PitchSeries.MIN_HOP_MS`, `require`):
+     *   por debajo, `hopMs = 0,03` a 48 kHz reserva `L + 1` puntos × 3 arrays (~170 MB en
+     *   5 min) y corre 14 M ventanas de MPM. 0 o negativo devuelve vacío. 10 ms ≈ 480 frames
+     *   a 48 kHz.
+     */
+    fun looperAnalyzePitch(trackIndex: Int, hopMs: Double = 10.0): PitchSeries
+
+    /**
+     * La **envolvente RMS** de la pista, cruda y lineal `[0, 1]`, decimada (REQ-043, WV-3.1,
+     * R-API-61). Es lo que alimenta el `SampleWaveRenderer` y el Modo Show.
+     *
+     * ## Ventana = hop, origen en `loopStart`
+     *
+     * `hopFrames = round(sr / binsPerSecond)`, redondeado **una vez**, y el bin `k` cubre
+     * `[firstFrame + k·hopFrames, firstFrame + (k+1)·hopFrames)` sobre mono `(L+R)/2`, sin
+     * solapar. **`firstFrame == loopStart` exacto** —a diferencia de la serie de pitch, que
+     * arranca en `loopStart + W/2`: alineen por `frame`, no por índice—.
+     *
+     * ## La cola se descarta
+     *
+     * `bins = floor((loopEnd − loopStart) / hopFrames)`: **la cola menor que un hop no tiene
+     * bin**. Un bin parcial tendría otra ventana sin nombre. A 100 bins/s se descartan hasta
+     * 10 ms; a 4 bins/s, hasta 250 ms. El suavizado, si lo quieren, es del renderer; no se
+     * normaliza ni se pasa a dB.
+     *
+     * ## Tamaño y dimensionamiento
+     *
+     * **`size == 0` es "no hay dato"** (R-API-59), con las mismas causas que
+     * [looperAnalyzePitch]. Con dato, el largo es el número real de bins. La cota superior es
+     * `(loopEnd − loopStart) / hopFrames + 1`; **el bridge dimensiona por esa cota y recorta
+     * al retorno, así que nunca trunca**. [LevelEnvelope.hopFrames] viene aunque no haya bins.
+     *
+     * Determinista y en el thread del llamador, igual que la serie de pitch. `speed` no cambia
+     * la serie. **Sobre una pista que no se está grabando ni disparando**: la copia puede
+     * salir rasgada si la toma cambia durante la lectura (TOCTOU heredado de
+     * [looperGetTrackWaveform]); re-analizar cuando la toma termina. La región que crece
+     * entre la cota y el análisis se re-lee y se reintenta, igual que en [looperAnalyzePitch].
+     *
+     * @param binsPerSecond bins por segundo, **≤ 1000** (`LevelEnvelope.MAX_BINS_PER_SECOND`,
+     *   `require`): por encima el bin es más corto que 1 ms y la reserva crece como con un
+     *   hop diminuto. 0 o negativo devuelve vacío. 100 ≈ 480 frames por bin a 48 kHz.
+     */
+    fun looperGetLevelEnvelope(trackIndex: Int, binsPerSecond: Double = 100.0): LevelEnvelope
 
     // ==================== IMPORTAR Y CAPTURAR ====================
 

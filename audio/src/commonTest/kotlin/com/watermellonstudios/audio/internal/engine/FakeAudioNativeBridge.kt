@@ -4,6 +4,8 @@ import com.watermellonstudios.audio.api.IAudioNativeBridge
 import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.api.LooperStateListener
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
+import com.watermellonstudios.audio.domain.looper.LevelEnvelope
+import com.watermellonstudios.audio.domain.looper.PitchSeries
 import com.watermellonstudios.audio.api.EffectParameterUpdate
 import com.watermellonstudios.audio.api.EffectChainSnapshot
 import com.watermellonstudios.audio.domain.effect.EffectType
@@ -321,6 +323,8 @@ internal class FakeAudioNativeBridge(
     override fun looperHasUndo(trackIndex: Int): Boolean = notModeled("looperHasUndo")
     override fun looperFindContentBounds(trackIndex: Int,  thresholdRatio: Float): Pair<Int, Int> = notModeled("looperFindContentBounds")
     override fun looperDetectOnsets(trackIndex: Int,  maxOnsets: Int,  hopFrames: Int,  sensitivity: Float): IntArray = notModeled("looperDetectOnsets")
+    override fun looperAnalyzePitch(trackIndex: Int,  hopMs: Double): PitchSeries = notModeled("looperAnalyzePitch")
+    override fun looperGetLevelEnvelope(trackIndex: Int,  binsPerSecond: Double): LevelEnvelope = notModeled("looperGetLevelEnvelope")
     override fun looperImportTrack(trackIndex: Int,  filePath: String,  sampleRate: Int): Boolean = notModeled("looperImportTrack")
     override fun looperCaptureTrack(trackIndex: Int,  filePath: String,  bitDepth: Int): Boolean = notModeled("looperCaptureTrack")
     override fun looperExportMix(filePath: String): Boolean = notModeled("looperExportMix")

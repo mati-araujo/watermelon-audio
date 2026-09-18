@@ -1,10 +1,12 @@
 # Cobertura C API vs JNI — WA-0.1
 
 **Requerimiento:** `docs/kmp/kmp_requirements.md` § 5, WA-0.1
-**Actualizado:** 2026-09-15 (recuento contra el árbol tras REQ-042). De este refresh, el REQ
-aporta **+3/+3/+3** (302/277/214 → 305/280/217: la perilla de la ambiencia y sus dos getters,
-cubiertos por match exacto); el resto (297/273/211 → 302/277/214) era **drift desde el
-2026-08-27** que nadie había re-medido · **Reproducible con:** `python3 scripts/c-api-gap.py`
+**Actualizado:** 2026-09-17 (recuento contra el árbol tras REQ-043 S2). De este refresh, el REQ
+aporta **+2/+2/+2** (305/280/217 → 307/282/219: `wma_looper_analyze_pitch` y
+`wma_looper_get_level_envelope`, con su JNI del mismo nombre, cubiertas por match exacto; el
+C API había subido en S1 y este doc no se re-midió hasta S2). El refresh anterior (2026-09-15,
+REQ-042) aportaba +3/+3/+3 (302/277/214 → 305/280/217) y el resto era drift desde el 2026-08-27
+· **Reproducible con:** `python3 scripts/c-api-gap.py`
 
 > 🔴 **Este doc se actualiza A MANO con la salida del script, y por eso envejece.** Entre el
 > 19/08 y el 27/08 quedó ocho días stale y desfasado en trece entry points (284 → 297) y trece
@@ -65,9 +67,9 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 
 | Métrica | Valor |
 |---|---|
-| JNIEXPORT (entry points) | 305 |
-| Funciones `wma_*` | 280 |
-| Cubiertas (match exacto) | 217 |
+| JNIEXPORT (entry points) | 307 |
+| Funciones `wma_*` | 282 |
+| Cubiertas (match exacto) | 219 |
 | **Gap total** | **88** |
 | — USB, no se porta (D4) | 32 |
 | — **Gap portable** | **56** |
@@ -191,12 +193,12 @@ eso el número de abajo se mide aparte, mirando adentro del cuerpo de cada
 función JNI.
 
 ```
-WA-2.6 — JNI delegando: 264/305
+WA-2.6 — JNI delegando: 266/307
 ```
 
 | Categoría (heurística del script) | Delegan |
 |---|---|
-| Looper | 79/81 |
+| Looper | 81/83 |
 | Otros | 39/41 |
 | Input / monitor | 22/22 |
 | Oscillator / synth | 21/21 |

@@ -11,6 +11,8 @@ import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
+import com.watermellonstudios.audio.domain.looper.LevelEnvelope
+import com.watermellonstudios.audio.domain.looper.PitchSeries
 import com.watermellonstudios.audio.domain.usb.StreamPreference
 import com.watermellonstudios.audio.export.Mp4AacTranscoder
 import com.watermellonstudios.audio.internal.native.NativeLibraryLoader
@@ -2888,6 +2890,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperDetectOnsets(
         trackIndex: Int, maxOnsets: Int, hopFrames: Int, sensitivity: Float
     ): IntArray
+    private external fun nativeLooperAnalyzePitch(
+        trackIndex: Int, hopMs: Float, outFrames: IntArray?, outHz: FloatArray?,
+        outConfidence: FloatArray?, outHopFrames: IntArray
+    ): Int
+    private external fun nativeLooperGetLevelEnvelope(
+        trackIndex: Int, binsPerSecond: Float, outBins: FloatArray?, outMeta: IntArray
+    ): Int
     private external fun nativeLooperFinalizeFreeLoop(
         trackIndex: Int, loopStart: Int, loopEnd: Int, tailFrames: Int
     ): Boolean
@@ -3212,6 +3221,87 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         hopFrames: Int,
         sensitivity: Float
     ): IntArray = nativeLooperDetectOnsets(trackIndex, maxOnsets, hopFrames, sensitivity)
+
+    /**
+     * Dos cruces, y el orden importa (REQ-043, R-API-60): el primero —con los arrays en
+     * `null`— sólo trae el `hopFrames` real, que el motor redondea una vez y que hace
+     * falta ANTES de reservar; el segundo lleva los tres arrays dimensionados por la cota
+     * `(loopEnd − loopStart) / hopFrames + 1`, que es una cota superior estricta del número
+     * de puntos, así que **el motor nunca trunca**. El retorno es cuántos puntos escribió
+     * y **decide el largo de lo que sale**: `copyOf(escritos)`. Un 0/0 de relleno acá sería
+     * "sin pitch" inventado, a diferencia del relleno de [looperGetTrackWaveform], que es
+     * silencio y no miente.
+     *
+     * La cota se lee ANTES de analizar y la región puede crecer entre medio (una toma que
+     * termina, `setLoopRegion` desde la UI): ese caso lo cubre [BoundedRead] (commonMain, con test propio), que re-lee la cota
+     * cuando el motor la llenó entera y reintenta con la nueva.
+     *
+     * `size == 0` es "no hay dato" (R-API-59); `hopFrames` viene igual si el hop era válido.
+     * Contrato en [com.watermellonstudios.audio.api.ILooperBridge.looperAnalyzePitch].
+     */
+    override fun looperAnalyzePitch(trackIndex: Int, hopMs: Double): PitchSeries {
+        require(hopMs.isNaN() || hopMs <= 0.0 || hopMs >= PitchSeries.MIN_HOP_MS) {
+            "hopMs = $hopMs: por debajo de ${PitchSeries.MIN_HOP_MS} ms reserva y analiza miles de ventanas por segundo " +
+                "(ver ILooperBridge.looperAnalyzePitch); 0 o negativo devuelve vacío"
+        }
+        val hop = IntArray(1)
+        nativeLooperAnalyzePitch(trackIndex, hopMs.toFloat(), null, null, null, hop)
+        val hopFrames = hop[0]
+        if (hopFrames <= 0) return PitchSeries(0, IntArray(0), FloatArray(0), FloatArray(0))
+
+        return BoundedRead.read(bound = { analysisBound(trackIndex, hopFrames) }) { bound ->
+            val frames = IntArray(bound)
+            val hz = FloatArray(bound)
+            val confidence = FloatArray(bound)
+            val written = nativeLooperAnalyzePitch(trackIndex, hopMs.toFloat(), frames, hz, confidence, hop)
+                .coerceIn(0, bound)
+            written to PitchSeries(hop[0], frames.copyOf(written), hz.copyOf(written), confidence.copyOf(written))
+        }
+    }
+
+    /**
+     * Mismo protocolo de dos cruces que [looperAnalyzePitch] (REQ-043, R-API-61): el
+     * primero trae `hopFrames` en `meta[1]`; el segundo lleva el array dimensionado por la
+     * cota y devuelve los bins escritos, con `meta[0] = firstFrame` (= `loopStart`) sólo
+     * cuando hay bins. `copyOf(escritos)`: la cola menor que un hop no tiene bin, y un
+     * bin de relleno sería un silencio inventado. La región que crece entre la cota y el
+     * análisis la cubre [BoundedRead].
+     *
+     * Contrato en [com.watermellonstudios.audio.api.ILooperBridge.looperGetLevelEnvelope].
+     */
+    override fun looperGetLevelEnvelope(trackIndex: Int, binsPerSecond: Double): LevelEnvelope {
+        require(binsPerSecond.isNaN() || binsPerSecond <= LevelEnvelope.MAX_BINS_PER_SECOND) {
+            "binsPerSecond = $binsPerSecond: por encima de ${LevelEnvelope.MAX_BINS_PER_SECOND} el bin es más corto que un " +
+                "hop de 1 ms (ver ILooperBridge.looperGetLevelEnvelope); 0 o negativo devuelve vacío"
+        }
+        val meta = IntArray(2)
+        nativeLooperGetLevelEnvelope(trackIndex, binsPerSecond.toFloat(), null, meta)
+        val hopFrames = meta[1]
+        if (hopFrames <= 0) return LevelEnvelope(0, 0, FloatArray(0))
+
+        return BoundedRead.read(bound = { analysisBound(trackIndex, hopFrames) }) { bound ->
+            val bins = FloatArray(bound)
+            val written = nativeLooperGetLevelEnvelope(trackIndex, binsPerSecond.toFloat(), bins, meta)
+                .coerceIn(0, bound)
+            written to LevelEnvelope(
+                firstFrame = if (written > 0) meta[0] else 0,
+                hopFrames = meta[1],
+                rms = bins.copyOf(written),
+            )
+        }
+    }
+
+    /**
+     * La cota superior de puntos de una lectura por hop sobre la región
+     * `[loopStart, loopEnd)`: `largo / hop + 1`. Es estricta para las dos series (pitch:
+     * `floor((largo − W) / hop) + 1`; envolvente: `floor(largo / hop)`), así que un array de
+     * este tamaño nunca se llena de más. Sobre una pista inactiva la región es `[0, 0)` y la
+     * cota es 1: el motor escribe 0 y sale vacío. Mínimo 1, por si la región viniera rota.
+     */
+    private fun analysisBound(trackIndex: Int, hopFrames: Int): Int {
+        val length = nativeLooperGetTrackLoopEnd(trackIndex) - nativeLooperGetTrackLoopStart(trackIndex)
+        return (length.coerceAtLeast(0) / hopFrames) + 1
+    }
 
     /**
      * Bar-snap + seam-bake a free take's loop (Free-loop auto-sync, phases A+C):
