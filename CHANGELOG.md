@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.20.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.19.2...v2.20.0) (2026-09-18)
+
+
+### Features
+
+* **kmp:** pitch y envolvente por pista para el video (WV-3.1, WV-3.2) ([2302f82](https://github.com/mati-araujo/watermelon-audio/commit/2302f8226f6754318338c4b09cc1c46adc50eae8))
+
 ## [2.19.2](https://github.com/mati-araujo/watermelon-audio/compare/v2.19.1...v2.19.2) (2026-09-17)
 
 
