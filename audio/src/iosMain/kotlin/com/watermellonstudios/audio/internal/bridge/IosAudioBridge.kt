@@ -12,6 +12,8 @@ import com.watermellonstudios.audio.domain.engine.EngineParameterDef
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.input.InputMetering
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
+import com.watermellonstudios.audio.domain.looper.LevelEnvelope
+import com.watermellonstudios.audio.domain.looper.PitchSeries
 import com.watermellonstudios.audio.domain.tuner.TunerSnapshot
 import com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
 import cnames.structs.WmaEngine
@@ -1238,6 +1240,95 @@ internal class IosAudioBridge : IAudioNativeBridge {
             )
             if (count <= 0) IntArray(0) else IntArray(count) { out[it] }
         }
+    }
+
+    /**
+     * Dos llamadas a la C API, y el orden importa (REQ-043, R-API-60): la primera —con
+     * `max_points = 0`, que la C API declara legal— sólo trae el `hopFrames` real, que el
+     * motor redondea una vez y hace falta ANTES de reservar; la segunda lleva los tres
+     * arrays pinneados, dimensionados por la cota `(loopEnd − loopStart) / hopFrames + 1`
+     * —cota superior estricta del número de puntos, así que **el motor nunca trunca**—.
+     * El retorno es cuántos puntos escribió y **decide el largo de lo que sale**:
+     * `copyOf(escritos)`. Un 0/0 de relleno sería "sin pitch" inventado, a diferencia del
+     * relleno de [looperGetTrackWaveform], que es silencio y no miente. Mismo protocolo que
+     * Android.
+     *
+     * `size == 0` es "no hay dato" (R-API-59); `hopFrames` viene igual si el hop era válido.
+     * Contrato en [com.watermellonstudios.audio.api.ILooperBridge.looperAnalyzePitch].
+     */
+    override fun looperAnalyzePitch(trackIndex: Int, hopMs: Double): PitchSeries {
+        val hopFrames = memScoped {
+            val hop = alloc<IntVar>()
+            hop.value = 0
+            wma_looper_analyze_pitch(engine, trackIndex, hopMs.toFloat(), null, null, null, 0, hop.ptr)
+            hop.value
+        }
+        if (hopFrames <= 0) return PitchSeries(0, IntArray(0), FloatArray(0), FloatArray(0))
+
+        val bound = analysisBound(trackIndex, hopFrames)
+        val frames = IntArray(bound)
+        val hz = FloatArray(bound)
+        val confidence = FloatArray(bound)
+        val written = frames.usePinned { pinnedFrames ->
+            hz.usePinned { pinnedHz ->
+                confidence.usePinned { pinnedConfidence ->
+                    wma_looper_analyze_pitch(
+                        engine, trackIndex, hopMs.toFloat(),
+                        pinnedFrames.addressOf(0), pinnedHz.addressOf(0), pinnedConfidence.addressOf(0),
+                        bound, null,
+                    )
+                }
+            }
+        }.coerceIn(0, bound)
+        return PitchSeries(hopFrames, frames.copyOf(written), hz.copyOf(written), confidence.copyOf(written))
+    }
+
+    /**
+     * Mismo protocolo de dos llamadas que [looperAnalyzePitch] (REQ-043, R-API-61): la
+     * primera trae `hopFrames`; la segunda lleva el array pinneado, dimensionado por la
+     * cota, y devuelve los bins escritos con `firstFrame` (= `loopStart`) escrito sólo
+     * cuando hay bins. `copyOf(escritos)`: la cola menor que un hop no tiene bin, y un bin
+     * de relleno sería un silencio inventado.
+     *
+     * Contrato en [com.watermellonstudios.audio.api.ILooperBridge.looperGetLevelEnvelope].
+     */
+    override fun looperGetLevelEnvelope(trackIndex: Int, binsPerSecond: Double): LevelEnvelope {
+        val hopFrames = memScoped {
+            val hop = alloc<IntVar>()
+            hop.value = 0
+            wma_looper_get_level_envelope(engine, trackIndex, binsPerSecond.toFloat(), null, 0, null, hop.ptr)
+            hop.value
+        }
+        if (hopFrames <= 0) return LevelEnvelope(0, 0, FloatArray(0))
+
+        val bound = analysisBound(trackIndex, hopFrames)
+        val bins = FloatArray(bound)
+        return memScoped {
+            val first = alloc<IntVar>()
+            first.value = 0
+            val written = bins.usePinned { pinned ->
+                wma_looper_get_level_envelope(
+                    engine, trackIndex, binsPerSecond.toFloat(), pinned.addressOf(0), bound, first.ptr, null,
+                )
+            }.coerceIn(0, bound)
+            LevelEnvelope(
+                firstFrame = if (written > 0) first.value else 0,
+                hopFrames = hopFrames,
+                rms = bins.copyOf(written),
+            )
+        }
+    }
+
+    /**
+     * La cota superior de puntos de una lectura por hop sobre la región
+     * `[loopStart, loopEnd)`: `largo / hop + 1`. Es estricta para las dos series (pitch:
+     * `floor((largo − W) / hop) + 1`; envolvente: `floor(largo / hop)`), así que un array de
+     * este tamaño nunca se llena de más. Sobre una pista inactiva la región es `[0, 0)` y la
+     * cota es 1: el motor escribe 0 y sale vacío. Mínimo 1, por si la región viniera rota.
+     */
+    private fun analysisBound(trackIndex: Int, hopFrames: Int): Int {
+        val length = wma_looper_get_track_loop_end(engine, trackIndex) - wma_looper_get_track_loop_start(engine, trackIndex)
+        return (length.coerceAtLeast(0) / hopFrames) + 1
     }
 
     // ---------- importar y capturar ----------
