@@ -327,7 +327,16 @@ interface ILooperBridge {
      * 10 ms cuesta ~1 s en host sin optimizar. `speed` no cambia la serie; una pista que se
      * estira (WL-4.1) hay que re-analizarla.
      *
-     * @param hopMs hop en milisegundos. 10 ms ≈ 480 frames a 48 kHz.
+     * **Sobre una pista que no se está grabando ni disparando.** La copia puede salir
+     * rasgada si la toma cambia durante la lectura (TOCTOU heredado de
+     * [looperGetTrackWaveform]): re-analizar cuando la toma termina. Si la región crece
+     * entre la cota y el análisis, el bridge re-lee la cota y reintenta (hasta tres
+     * lecturas); una región que no para de crecer devuelve lo que hay.
+     *
+     * @param hopMs hop en milisegundos, **≥ 1 ms** (`PitchSeries.MIN_HOP_MS`, `require`):
+     *   por debajo, `hopMs = 0,03` a 48 kHz reserva `L + 1` puntos × 3 arrays (~170 MB en
+     *   5 min) y corre 14 M ventanas de MPM. 0 o negativo devuelve vacío. 10 ms ≈ 480 frames
+     *   a 48 kHz.
      */
     fun looperAnalyzePitch(trackIndex: Int, hopMs: Double = 10.0): PitchSeries
 
@@ -357,9 +366,14 @@ interface ILooperBridge {
      * al retorno, así que nunca trunca**. [LevelEnvelope.hopFrames] viene aunque no haya bins.
      *
      * Determinista y en el thread del llamador, igual que la serie de pitch. `speed` no cambia
-     * la serie.
+     * la serie. **Sobre una pista que no se está grabando ni disparando**: la copia puede
+     * salir rasgada si la toma cambia durante la lectura (TOCTOU heredado de
+     * [looperGetTrackWaveform]); re-analizar cuando la toma termina. La región que crece
+     * entre la cota y el análisis se re-lee y se reintenta, igual que en [looperAnalyzePitch].
      *
-     * @param binsPerSecond bins por segundo. 100 ≈ 480 frames por bin a 48 kHz.
+     * @param binsPerSecond bins por segundo, **≤ 1000** (`LevelEnvelope.MAX_BINS_PER_SECOND`,
+     *   `require`): por encima el bin es más corto que 1 ms y la reserva crece como con un
+     *   hop diminuto. 0 o negativo devuelve vacío. 100 ≈ 480 frames por bin a 48 kHz.
      */
     fun looperGetLevelEnvelope(trackIndex: Int, binsPerSecond: Double = 100.0): LevelEnvelope
 

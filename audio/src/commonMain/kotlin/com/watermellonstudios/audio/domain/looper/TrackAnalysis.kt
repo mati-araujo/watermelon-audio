@@ -36,6 +36,16 @@ class PitchSeries(
     val size: Int get() = frames.size
 
     fun isEmpty(): Boolean = frames.isEmpty()
+
+    companion object {
+        /**
+         * Piso de `hopMs` que los bridges exigen (`require`). Por debajo, el costo deja de ser
+         * "un análisis": `hopMs = 0,03` a 48 kHz reserva `L + 1` puntos × 3 arrays (~170 MB
+         * en 5 min de pista) y corre 14 M ventanas de MPM. 0 o negativo NO pasa por acá:
+         * devuelve vacío, como siempre.
+         */
+        const val MIN_HOP_MS: Double = 1.0
+    }
 }
 
 /**
@@ -61,4 +71,13 @@ class LevelEnvelope(
     val size: Int get() = rms.size
 
     fun isEmpty(): Boolean = rms.isEmpty()
+
+    companion object {
+        /**
+         * Techo de `binsPerSecond` que los bridges exigen (`require`): por encima el bin es
+         * más corto que 1 ms y la reserva crece como en [PitchSeries.MIN_HOP_MS]. 0 o
+         * negativo devuelve vacío, sin pasar por acá.
+         */
+        const val MAX_BINS_PER_SECOND: Double = 1000.0
+    }
 }

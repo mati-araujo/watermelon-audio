@@ -26,10 +26,12 @@ class PitchSeries(val hopFrames: Int, val frames: IntArray, val hz: FloatArray, 
 class LevelEnvelope(val firstFrame: Int, val hopFrames: Int, val rms: FloatArray)
 ```
 
-Las dos corren en el thread del llamador (UI/IO), read-only sobre una copia consistente del buffer, y son
-**deterministas byte a byte** (mismo buffer ⇒ misma serie, corra o no el afinador). Una pista de 30 s con
-hop 10 ms cuesta ~1 s en host sin optimizar (0,035× tiempo real en Debug); la envolvente, 0,001×. Ninguna
-toca el thread de audio.
+Las dos corren en el thread del llamador (UI/IO), read-only, **sobre una pista que no se está grabando ni
+disparando**: la copia puede salir rasgada si la toma cambia durante la lectura (TOCTOU heredado de
+`getTrackWaveform`) — re-analicen cuando la toma termina. Con la pista quieta son **deterministas byte a
+byte** (mismo buffer ⇒ misma serie, corra o no el afinador). Una pista de 30 s con hop 10 ms cuesta ~1 s en
+host sin optimizar (0,035× tiempo real en Debug); la envolvente, 0,001×. Ninguna toca el thread de audio.
+Límites de argumento (`require`): `hopMs ≥ 1` y `binsPerSecond ≤ 1000`; 0 o negativo devuelve vacío.
 
 ## 2 · El contrato, por escrito (R-API-60 / R-API-61, sobre R-API-59)
 

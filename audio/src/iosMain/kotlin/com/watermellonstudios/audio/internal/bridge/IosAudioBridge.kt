@@ -1251,12 +1251,17 @@ internal class IosAudioBridge : IAudioNativeBridge {
      * El retorno es cuántos puntos escribió y **decide el largo de lo que sale**:
      * `copyOf(escritos)`. Un 0/0 de relleno sería "sin pitch" inventado, a diferencia del
      * relleno de [looperGetTrackWaveform], que es silencio y no miente. Mismo protocolo que
-     * Android.
+     * Android, y el mismo [BoundedRead] (commonMain) para la región que crece entre la cota
+     * y el análisis.
      *
      * `size == 0` es "no hay dato" (R-API-59); `hopFrames` viene igual si el hop era válido.
      * Contrato en [com.watermellonstudios.audio.api.ILooperBridge.looperAnalyzePitch].
      */
     override fun looperAnalyzePitch(trackIndex: Int, hopMs: Double): PitchSeries {
+        require(hopMs.isNaN() || hopMs <= 0.0 || hopMs >= PitchSeries.MIN_HOP_MS) {
+            "hopMs = $hopMs: por debajo de ${PitchSeries.MIN_HOP_MS} ms reserva y analiza miles de ventanas por segundo " +
+                "(ver ILooperBridge.looperAnalyzePitch); 0 o negativo devuelve vacío"
+        }
         val hopFrames = memScoped {
             val hop = alloc<IntVar>()
             hop.value = 0
@@ -1265,22 +1270,23 @@ internal class IosAudioBridge : IAudioNativeBridge {
         }
         if (hopFrames <= 0) return PitchSeries(0, IntArray(0), FloatArray(0), FloatArray(0))
 
-        val bound = analysisBound(trackIndex, hopFrames)
-        val frames = IntArray(bound)
-        val hz = FloatArray(bound)
-        val confidence = FloatArray(bound)
-        val written = frames.usePinned { pinnedFrames ->
-            hz.usePinned { pinnedHz ->
-                confidence.usePinned { pinnedConfidence ->
-                    wma_looper_analyze_pitch(
-                        engine, trackIndex, hopMs.toFloat(),
-                        pinnedFrames.addressOf(0), pinnedHz.addressOf(0), pinnedConfidence.addressOf(0),
-                        bound, null,
-                    )
+        return BoundedRead.read(bound = { analysisBound(trackIndex, hopFrames) }) { bound ->
+            val frames = IntArray(bound)
+            val hz = FloatArray(bound)
+            val confidence = FloatArray(bound)
+            val written = frames.usePinned { pinnedFrames ->
+                hz.usePinned { pinnedHz ->
+                    confidence.usePinned { pinnedConfidence ->
+                        wma_looper_analyze_pitch(
+                            engine, trackIndex, hopMs.toFloat(),
+                            pinnedFrames.addressOf(0), pinnedHz.addressOf(0), pinnedConfidence.addressOf(0),
+                            bound, null,
+                        )
+                    }
                 }
-            }
-        }.coerceIn(0, bound)
-        return PitchSeries(hopFrames, frames.copyOf(written), hz.copyOf(written), confidence.copyOf(written))
+            }.coerceIn(0, bound)
+            written to PitchSeries(hopFrames, frames.copyOf(written), hz.copyOf(written), confidence.copyOf(written))
+        }
     }
 
     /**
@@ -1293,6 +1299,10 @@ internal class IosAudioBridge : IAudioNativeBridge {
      * Contrato en [com.watermellonstudios.audio.api.ILooperBridge.looperGetLevelEnvelope].
      */
     override fun looperGetLevelEnvelope(trackIndex: Int, binsPerSecond: Double): LevelEnvelope {
+        require(binsPerSecond.isNaN() || binsPerSecond <= LevelEnvelope.MAX_BINS_PER_SECOND) {
+            "binsPerSecond = $binsPerSecond: por encima de ${LevelEnvelope.MAX_BINS_PER_SECOND} el bin es más corto que un " +
+                "hop de 1 ms (ver ILooperBridge.looperGetLevelEnvelope); 0 o negativo devuelve vacío"
+        }
         val hopFrames = memScoped {
             val hop = alloc<IntVar>()
             hop.value = 0
@@ -1301,21 +1311,22 @@ internal class IosAudioBridge : IAudioNativeBridge {
         }
         if (hopFrames <= 0) return LevelEnvelope(0, 0, FloatArray(0))
 
-        val bound = analysisBound(trackIndex, hopFrames)
-        val bins = FloatArray(bound)
-        return memScoped {
-            val first = alloc<IntVar>()
-            first.value = 0
-            val written = bins.usePinned { pinned ->
-                wma_looper_get_level_envelope(
-                    engine, trackIndex, binsPerSecond.toFloat(), pinned.addressOf(0), bound, first.ptr, null,
+        return BoundedRead.read(bound = { analysisBound(trackIndex, hopFrames) }) { bound ->
+            val bins = FloatArray(bound)
+            memScoped {
+                val first = alloc<IntVar>()
+                first.value = 0
+                val written = bins.usePinned { pinned ->
+                    wma_looper_get_level_envelope(
+                        engine, trackIndex, binsPerSecond.toFloat(), pinned.addressOf(0), bound, first.ptr, null,
+                    )
+                }.coerceIn(0, bound)
+                written to LevelEnvelope(
+                    firstFrame = if (written > 0) first.value else 0,
+                    hopFrames = hopFrames,
+                    rms = bins.copyOf(written),
                 )
-            }.coerceIn(0, bound)
-            LevelEnvelope(
-                firstFrame = if (written > 0) first.value else 0,
-                hopFrames = hopFrames,
-                rms = bins.copyOf(written),
-            )
+            }
         }
     }
 

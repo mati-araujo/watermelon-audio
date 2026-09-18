@@ -1,5 +1,7 @@
 package com.watermellonstudios.audio.internal.bridge
 
+import com.watermellonstudios.audio.domain.looper.LevelEnvelope
+import com.watermellonstudios.audio.domain.looper.PitchSeries
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
@@ -17,6 +19,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -99,6 +102,18 @@ class IosLooperAnalysisBridgeTest {
 
         assertEquals(0, bridge.looperAnalyzePitch(0, hopMs = 0.0).hopFrames, "un hop inválido no tiene hopFrames")
         assertEquals(0, bridge.looperGetLevelEnvelope(0, binsPerSecond = 0.0).hopFrames, "ídem binsPerSecond")
+    }
+
+    /**
+     * Auditoría de #343 — el piso de `hopMs` (1 ms) y el techo de `binsPerSecond` (1000) se
+     * exigen con `require`, no se clampean; en el límite exacto pasan (hop 48 a 48 kHz).
+     */
+    @Test
+    fun aTinyHopOrAnOversizedBinsPerSecondIsRejectedNotClamped() {
+        assertFailsWith<IllegalArgumentException> { bridge.looperAnalyzePitch(0, hopMs = 0.5) }
+        assertFailsWith<IllegalArgumentException> { bridge.looperGetLevelEnvelope(0, binsPerSecond = 2_000.0) }
+        assertEquals(48, bridge.looperAnalyzePitch(0, hopMs = PitchSeries.MIN_HOP_MS).hopFrames)
+        assertEquals(48, bridge.looperGetLevelEnvelope(0, binsPerSecond = LevelEnvelope.MAX_BINS_PER_SECOND).hopFrames)
     }
 
     /** AC-043.7 — la serie de pitch cruza el binding con su eje, su largo real y sus ceros exactos. */

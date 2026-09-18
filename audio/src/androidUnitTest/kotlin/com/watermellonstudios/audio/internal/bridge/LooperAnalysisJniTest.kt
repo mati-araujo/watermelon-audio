@@ -10,6 +10,7 @@ import kotlin.math.log10
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.test.fail
@@ -332,5 +333,22 @@ class LooperAnalysisJniTest {
         val sinBins = jni("nativeLooperGetLevelEnvelope") { it.looperGetLevelEnvelope(TRACK_VACIA, binsPerSecond = 0.0) }
         assertEquals(0, sinBins.size)
         assertEquals(0, sinBins.hopFrames, "un binsPerSecond inválido no tiene hopFrames")
+    }
+
+    /**
+     * Auditoría de #343 — un hop diminuto o un `binsPerSecond` desmedido no se aceptan en
+     * silencio: `hopMs = 0,03` a 48 k reservaría `L + 1` × 3 arrays y 14 M ventanas de MPM.
+     * El `require` corta ANTES de cruzar (por eso no pasa por `jni(...)`); 0 y negativo
+     * siguen devolviendo vacío (el test de arriba). Bug que atrapa: un bridge que clampea o
+     * que deja pasar el valor.
+     */
+    @Test
+    fun `un hop por debajo del piso o un binsPerSecond sobre el techo se rechazan, no se clampean`() {
+        val bridge = AudioNativeBridge.getInstance()
+        assertFailsWith<IllegalArgumentException> { bridge.looperAnalyzePitch(TRACK_VACIA, hopMs = 0.5) }
+        assertFailsWith<IllegalArgumentException> { bridge.looperGetLevelEnvelope(TRACK_VACIA, binsPerSecond = 2_000.0) }
+        // Justo en el límite pasa: sin dato, pero con hop.
+        assertEquals(48, bridge.looperAnalyzePitch(TRACK_VACIA, hopMs = PitchSeries.MIN_HOP_MS).hopFrames)
+        assertEquals(48, bridge.looperGetLevelEnvelope(TRACK_VACIA, binsPerSecond = LevelEnvelope.MAX_BINS_PER_SECOND).hopFrames)
     }
 }
