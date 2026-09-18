@@ -12,8 +12,9 @@ contestaron el 17/09. Es un **minor** (`feat(kmp)`): dos lecturas nuevas en `ILo
 nada de lo que ya usan. Lleva **cuatro deltas** respecto de lo acordado por carta (§4) y **un pedido con
 número** (§6): la primera toma de voz real decide si esto vive.
 
-> Redactado el 2026-09-18 **antes del tag**, sobre el PR de REQ-043 S2. **SIN ENVIAR**: se manda
-> cuando `v2.20.0` esté verificada en el registro (4/4 coordenadas), con el run de Publish anotado acá.
+> Redactado el 2026-09-18 antes del tag, sobre el PR de REQ-043 S2. `v2.20.0` **verificada en el
+> registro, 4/4 coordenadas** (audio, audio-android, audio-iosarm64, audio-iossimulatorarm64), Publish
+> run 35297322143. **SIN ENVIAR** al abrir este PR: marcar acá cuando salga por chat.
 
 ## 1 · Lo que cambia, en dos firmas
 
