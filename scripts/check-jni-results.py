@@ -24,15 +24,40 @@ es justo el defecto D1 del analisis de las cartas de NoisyPad.
 
 ## Que cuenta como descartado
 
-Una llamada a una `wma_*` que el header declara devolviendo `WmaResult`, escrita
-como **sentencia suelta**: la linea empieza con el nombre de la funcion y termina
-en `;`. Si el valor se asigna, se compara, se devuelve, se castea o entra a otra
-expresion, no es un descarte.
+Se aisla la SENTENCIA que contiene la llamada, se le pelan los envoltorios que **no
+consumen el valor**, y si lo que queda ES la llamada, el resultado se descarto:
+
+    wma_engine_start(e, f);                      <- sentencia suelta
+    (void)wma_engine_start(e, f);                <- el idioma canonico de "a proposito"
+    static_cast<void>(wma_engine_start(e, f));   <- idem, en C++
+    if (algo) wma_engine_start(e, f);            <- sentencia, en una linea
+    else wma_engine_start(e, f);
+    MACRO(wma_engine_start(e, f));               <- el valor se lo come un macro
+
+🔴 **El `(void)` es el caso que mas importa y el que faltaba.** Es el idioma con el
+que un programador dice "descarto esto a proposito" — o sea exactamente lo que este
+gate quiere que se escriba CON UNA RAZON al lado. Mientras no lo detectaba, alcanzaba
+un `(void)` para saltear la excepcion y su razon obligatoria: la valla existia y tenia
+la puerta abierta al lado.
+
+NO es descarte si el valor se asigna, se compara, se devuelve, se castea a algo que
+no sea `void`, o entra a una expresion mas grande (`return c ? wma_x() : WMA_OK;`).
 
 Excepcion unica y con razon obligatoria, en la linea de arriba o al final de la
 misma:
 
     // RESULT-DISCARD-OK: el contrato de esta entrada es best-effort, ver ...
+
+## Limite DECLARADO: "asignado a una variable que nadie lee"
+
+    WmaResult r = wma_engine_start(e, f);   // y `r` no se usa nunca
+
+NO lo detecta, y queda dicho en vez de implicito. Requeriria seguir el uso de la
+variable dentro del cuerpo —o sea un analisis de flujo, no un parser de formas— y con
+`-Wunused-variable` puesto en la capa JNI (`tests/hostjni/CMakeLists.txt` compila
+`jni/` con `-Wall -Wextra -Werror`) el compilador ya lo agarra cuando la variable
+queda REALMENTE muerta. Lo que ese warning no ve es un `(void)r`, que es justo la
+forma que este limite deja pasar.
 
 ## La guarda de completitud es lo que lo sostiene
 
@@ -72,10 +97,21 @@ RESULT_FN = re.compile(r"WMA_API\s+WmaResult\s+(wma_\w+)\s*\(")
 EXPORT_LINE = re.compile(r"^JNIEXPORT\b", re.MULTILINE)
 EXPORT_DEF = re.compile(r"JNIEXPORT\s+(?P<ret>[\w:*&<> ]+?)\s+(?:JNICALL\s+)?(?P<name>\w+)\s*\(")
 
-# Una sentencia suelta: la linea abre con el nombre de la wma_* (nada delante salvo
-# blancos) y lo que sigue al parentesis de cierre es `;`. Si el valor se asigna, se
-# compara o se devuelve, hay algo delante y esto no matchea.
-STATEMENT = re.compile(r"^[ \t]*(wma_\w+)\s*\(", re.MULTILINE)
+# Toda llamada a una wma_*, en cualquier posicion. Que sea o no un descarte lo decide
+# `es_descarte()` mirando la SENTENCIA entera, no la forma de la linea: mirar la linea
+# fue lo que dejo pasar `(void)wma_engine_start(...)`.
+CALL = re.compile(r"\b(wma_\w+)\s*\(")
+
+# Envoltorios que NO consumen el valor. Se pelan de a uno hasta que no quede ninguno.
+VOID_CAST = re.compile(r"^\(\s*void\s*\)\s*")
+STATIC_VOID = re.compile(r"^static_cast\s*<\s*void\s*>\s*\(\s*")
+CONTROL_HEAD = re.compile(r"^(?:if|while|for|switch)\s*\(")
+ELSE_HEAD = re.compile(r"^else\b\s*")
+# Un macro (o una funcion) que recibe la llamada como UNICO argumento y cuya sentencia
+# termina ahi: el valor se lo come el macro. `static_cast<jint>(...)` no cae aca porque
+# a esa altura la sentencia empieza con `return`, o sea que ya no es una sentencia
+# suelta y nunca llega a pelarse.
+WRAPPER_CALL = re.compile(r"^([A-Za-z_]\w*)\s*\(\s*")
 
 
 def result_functions(header_text: str) -> set[str]:
@@ -118,19 +154,93 @@ def function_bodies(src: str) -> list[tuple[str, str, int]]:
     return out
 
 
+def statement_around(body: str, call_start: int) -> tuple[str, int]:
+    """La SENTENCIA que contiene la llamada, y donde arranca.
+
+    Se delimita por el `;`, `{` o `}` mas cercano hacia atras y el primer `;` a
+    profundidad cero hacia adelante. Mirar la linea en vez de la sentencia fue lo que
+    dejo pasar `(void)wma_engine_start(...)` durante toda la primera version.
+    """
+    begin = max(body.rfind(ch, 0, call_start) for ch in ";{}") + 1
+    depth = 0
+    end = call_start
+    while end < len(body):
+        c = body[end]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif c == ";" and depth <= 0:
+            break
+        end += 1
+    return body[begin:end].strip(), begin
+
+
+# Comentarios dentro de la sentencia. Se sacan ANTES de pelar, y no es cosmetico: sin
+# esto, un `// RESULT-DISCARD-OK:` arriba de la llamada cambiaba el texto de la sentencia
+# y el gate dejaba de ver el descarte — o sea que la excepcion "funcionaba" por el
+# motivo equivocado, y su exigencia de razon no se aplicaba nunca. Lo encontro el
+# self-test de "la excepcion SIN razon NO excusa".
+COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+
+
+def peel(stmt: str, call: str) -> str:
+    """Le saca a la sentencia los envoltorios que NO consumen el valor.
+
+    `call` es la wma_* que se esta juzgando, y hace falta: sin ella el pelador se come
+    la llamada misma —`wma_engine_start(` matchea `WRAPPER_CALL`— y el gate deja de ver
+    hasta la sentencia suelta. Una `wma_*` como envoltorio tampoco se pela: ahi el
+    valor SI se usa, como argumento de la otra.
+    """
+    stmt = COMMENT.sub(" ", stmt)
+    prev = None
+    while prev != stmt:
+        prev = stmt
+        stmt = stmt.strip()
+        for rx in (VOID_CAST, ELSE_HEAD):
+            m = rx.match(stmt)
+            if m:
+                stmt = stmt[m.end():]
+                break
+        else:
+            m = STATIC_VOID.match(stmt)
+            if m and stmt.rstrip().endswith(")"):
+                stmt = stmt[m.end():].rstrip()[:-1]
+                continue
+            m = CONTROL_HEAD.match(stmt)
+            if m:
+                close = matching_paren(stmt, m.end() - 1)
+                if close > 0:
+                    stmt = stmt[close + 1:]
+                    continue
+            m = WRAPPER_CALL.match(stmt)
+            # Un envoltorio solo si abarca la sentencia ENTERA: si el `)` que cierra no
+            # es el ultimo caracter, la llamada es parte de una expresion mas grande y
+            # el valor puede estar usandose.
+            if (m and not m.group(1).startswith("wma_") and m.group(1) != call
+                    and matching_paren(stmt, m.end() - 1) == len(stmt.rstrip()) - 1):
+                stmt = stmt[m.end():].rstrip()[:-1]
+    return stmt.strip()
+
+
 def discards(path: str, src: str, result_fns: set[str]) -> list[str]:
     """Los descartes de UN archivo, con archivo:linea y el nombre de la entrada."""
     lines = src.splitlines()
     found: list[str] = []
     for name, body, body_offset in function_bodies(src):
-        for m in STATEMENT.finditer(body):
+        for m in CALL.finditer(body):
             call = m.group(1)
             if call not in result_fns:
                 continue
-            # El `;` tiene que cerrar la sentencia: si el valor se usa, el texto entre
-            # el parentesis de cierre y el `;` no esta vacio (o no hay `;` en la linea).
             close = matching_paren(body, m.end() - 1)
-            if close < 0 or body[close + 1 :].lstrip()[:1] != ";":
+            if close < 0:
+                continue
+            llamada = body[m.start():close + 1]
+            stmt, _ = statement_around(body, m.start())
+            # El descarte es que, peladas las capas que no consumen nada, la sentencia
+            # SEA la llamada. Se normalizan los blancos porque una llamada partida en
+            # dos lineas trae saltos y sangria.
+            if " ".join(peel(stmt, call).split()) != " ".join(llamada.split()):
                 continue
             lineno = src.count("\n", 0, body_offset + m.start()) + 1
             if excused(lines, lineno):
@@ -262,9 +372,38 @@ Java_x_nativeArranca(JNIEnv* env, jobject thiz, jint fade) {
         ("asignado", "    WmaResult r = wma_engine_start(g_wmaEngine, fade);\n    (void)r;"),
         ("comparado", "    if (wma_engine_start(g_wmaEngine, fade) != WMA_OK) { return; }"),
         ("casteado", "    return wma_engine_start(g_wmaEngine, fade) == WMA_OK ? 1 : 0;"),
+        ("dentro de una expresion mayor",
+         "    return algo ? wma_engine_start(g_wmaEngine, fade) : WMA_OK;"),
+        ("pasado como argumento entre otros",
+         '    LOGI("%d %d", wma_engine_start(g_wmaEngine, fade), fade);'),
     ):
         cuerpo = VICTIMA.replace("    wma_engine_start(g_wmaEngine, fade);", texto)
-        check(f"NO acusa un resultado {forma}", not analyze({"v.cpp": cuerpo}, hdr))
+        check(f"NO acusa un resultado {forma}", not analyze({"v.cpp": cuerpo}, hdr),
+              str(analyze({"v.cpp": cuerpo}, hdr)[:1]))
+
+    # 🔴 Las cinco formas que la PRIMERA version del gate no veia (REQ-045, M3 de la
+    # auditoria). Un caso por forma, porque cada una se pela distinto — y el `(void)`
+    # es el que mas importa: es el idioma canonico de "descarto a proposito", o sea
+    # justo lo que este gate quiere que se escriba con su razon al lado.
+    for forma, texto in (
+        ("(void) delante", "    (void)wma_engine_start(g_wmaEngine, fade);"),
+        ("static_cast<void>", "    static_cast<void>(wma_engine_start(g_wmaEngine, fade));"),
+        ("sentencia de un `if` en una linea", "    if (fade > 0) wma_engine_start(g_wmaEngine, fade);"),
+        ("sentencia de un `else` en una linea",
+         "    if (fade > 0) { return; } else wma_engine_start(g_wmaEngine, fade);"),
+        ("envuelto en un macro que se come el valor",
+         "    WMA_FIRE_AND_FORGET(wma_engine_start(g_wmaEngine, fade));"),
+    ):
+        cuerpo = VICTIMA.replace("    wma_engine_start(g_wmaEngine, fade);", texto)
+        check(f"mata un descarte con {forma} (M3)",
+              any("descarta el WmaResult" in p for p in analyze({"v.cpp": cuerpo}, hdr)))
+        # Y la excepcion sigue siendo el unico modo de callarlo, tambien en estas formas.
+        excusado = VICTIMA.replace(
+            "    wma_engine_start(g_wmaEngine, fade);",
+            "    // RESULT-DISCARD-OK: best-effort por contrato\n" + texto)
+        check(f"la excepcion con razon excusa {forma}",
+              not analyze({"v.cpp": excusado}, hdr),
+              str(analyze({"v.cpp": excusado}, hdr)[:1]))
 
     # La excepcion, y su exigencia de razon.
     con_razon = VICTIMA.replace(
