@@ -143,7 +143,10 @@ struct StreamInfo {
      * IO buffer duration would be inventing the answer again, one layer down.
      * UNKNOWN travels to Kotlin as `null`.
      */
-    enum class LowLatency { UNKNOWN = -1, NO = 0, YES = 1 };
+    // 🔴 `OFF`/`ON` y no `NO`/`YES`: `NO` e `YES` son MACROS de `<objc/objc.h>`, que
+    // `CoreAudioBackend.mm` arrastra. Con esos nombres este header no compila para iOS
+    // —"expected identifier"— y el único build que lo dice es el de iOS.
+    enum class LowLatency { UNKNOWN = -1, OFF = 0, ON = 1 };
     LowLatency lowLatency = LowLatency::UNKNOWN;
     BackendType backendType = BackendType::NONE;
 

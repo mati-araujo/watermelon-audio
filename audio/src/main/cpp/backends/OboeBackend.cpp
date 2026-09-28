@@ -526,8 +526,8 @@ void OboeBackend::updateStreamInfo() {
     // Kotlin lo contestaba con `true` a mano para cualquier stream.
     mCachedStreamInfo.lowLatency =
         mOutputStream->getPerformanceMode() == oboe::PerformanceMode::LowLatency
-            ? StreamInfo::LowLatency::YES
-            : StreamInfo::LowLatency::NO;
+            ? StreamInfo::LowLatency::ON
+            : StreamInfo::LowLatency::OFF;
     mCachedStreamInfo.backendType = BackendType::OBOE;
     mCachedStreamInfo.deviceName = "Oboe (AAudio/OpenSL)";
 

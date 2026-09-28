@@ -331,6 +331,12 @@ gate_guardrails() {
     # check-jni-symbols. El --self-test primero, misma razon que los de arriba.
     step guardrails jni-sig-self  python3 scripts/check-jni-signatures.py --self-test || return 1
     step guardrails jni-signatures python3 scripts/check-jni-signatures.py || return 1
+    # REQ-045 — que el RESULTADO del cruce llegue a algun lado. Es la cuarta pregunta
+    # del camino JNI y ninguna de las otras tres la contesta: una firma perfecta sobre
+    # un `WmaResult` tirado al piso le devuelve `Result.success` al consumidor con el
+    # stream sin abrir. Source-only, y el --self-test primero por lo mismo que arriba.
+    step guardrails jni-res-self  python3 scripts/check-jni-results.py --self-test || return 1
+    step guardrails jni-results   python3 scripts/check-jni-results.py || return 1
 }
 
 gate_cpp_tests_macos() {

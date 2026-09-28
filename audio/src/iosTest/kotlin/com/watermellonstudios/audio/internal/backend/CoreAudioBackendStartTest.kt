@@ -7,7 +7,10 @@ import com.watermellonstudios.audio.internal.cinterop.wma_engine_create
 import com.watermellonstudios.audio.internal.cinterop.wma_engine_destroy
 import com.watermellonstudios.audio.internal.cinterop.wma_engine_start
 import com.watermellonstudios.audio.internal.cinterop.wma_engine_stop
+import com.watermellonstudios.audio.internal.cinterop.wma_get_stream_info_ex
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.IntVar
+import kotlinx.cinterop.FloatVar
 import kotlinx.cinterop.ObjCObjectVar
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.memScoped
@@ -18,6 +21,7 @@ import platform.Foundation.NSError
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -210,6 +214,70 @@ class CoreAudioBackendStartTest {
         } finally {
             // Si `destroy` crashea tras un arranque fallido, el proceso de test muere acá y
             // eso ES el hallazgo.
+            wma_engine_destroy(engine)
+        }
+    }
+
+    /**
+     * **AC-045.3 (D10), la mitad de iOS — la paridad del stream info.**
+     *
+     * `StreamInfo.fromNativeArray` rellenaba `channelCount = 2` e `isLowLatency = true`
+     * sobre los tres números que cruzaban, **en las dos plataformas**. En Android los dos
+     * ahora salen del stream; acá sale uno solo, y eso es la respuesta honesta:
+     * `AVAudioSession` no tiene un modo análogo al `PerformanceMode` de Oboe, así que
+     * `CoreAudioBackend` publica `UNKNOWN` (-1) y Kotlin lo mapea a `null`. Un `false`
+     * inventado se leería como una medición — el defecto una capa más abajo.
+     *
+     * Lo que se afirma **sin depender del entorno**: sin stream la función dice `false`, y
+     * si el stream abrió, `is_low_latency` es exactamente -1 y los canales son > 0. Nunca
+     * un valor plausible para lo que no se sabe.
+     */
+    @Test
+    fun elStreamInfoDeIosDiceLosCanalesYNoInventaElModoDeLatencia() = withPreparedSession {
+        val engine = wma_engine_create()
+        assertNotNull(engine, "wma_engine_create() devolvió null")
+
+        try {
+            memScoped {
+                val rate = alloc<IntVar>()
+                val frames = alloc<IntVar>()
+                val latency = alloc<FloatVar>()
+                val channels = alloc<IntVar>()
+                val lowLatency = alloc<IntVar>()
+
+                // Sin stream: la ausencia se reporta como `false`, no como un juego de
+                // valores plausibles. Vale en cualquier máquina.
+                assertFalse(
+                    wma_get_stream_info_ex(engine, rate.ptr, frames.ptr, latency.ptr,
+                                           channels.ptr, lowLatency.ptr),
+                    "sin stream abierto no hay nada que describir y contestó que sí",
+                )
+
+                if (wma_engine_start(engine, 0) != WMA_OK) {
+                    println("[CoreAudioBackend] sin salida de audio en este runner: " +
+                        "sólo se verificó el camino de ausencia (ver el KDoc de la clase)")
+                    return@memScoped
+                }
+
+                assertTrue(
+                    wma_get_stream_info_ex(engine, rate.ptr, frames.ptr, latency.ptr,
+                                           channels.ptr, lowLatency.ptr),
+                    "el stream abrió y el stream info dijo que no hay nada",
+                )
+                assertTrue(
+                    channels.value > 0,
+                    "los canales del stream abierto salieron en ${channels.value}: " +
+                        "un 0 sería ausencia, y acá el formato del grafo los sabe",
+                )
+                assertEquals(
+                    -1,
+                    lowLatency.value,
+                    "iOS no puede contestar el modo de latencia y contestó ${lowLatency.value}. " +
+                        "Un 0 o un 1 acá es un valor inventado, que es el defecto D10 otra vez.",
+                )
+                wma_engine_stop(engine, 0)
+            }
+        } finally {
             wma_engine_destroy(engine)
         }
     }
