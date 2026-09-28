@@ -3,7 +3,9 @@ package com.watermellonstudios.audio.internal.engine
 import com.watermellonstudios.audio.api.config.AudioEngineConfig
 import com.watermellonstudios.audio.domain.state.EngineLifecycle
 import com.watermellonstudios.audio.callback.AudioAnalyticsListener
+import com.watermellonstudios.audio.callback.AudioLogger
 import com.watermellonstudios.audio.callback.NoOpAudioAnalytics
+import com.watermellonstudios.audio.callback.NoOpAudioLogger
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.state.AudioError
 import com.watermellonstudios.audio.domain.state.StreamInfo
@@ -316,6 +318,23 @@ class AudioEngineImplTest {
     }
 
     /**
+     * Anota los `error()` que le llegan al logger. Hace falta para
+     * [cancellingPauseMidFadeRethrowsInsteadOfPublishingAFailure]: el catch genérico de
+     * `transicion()` no toca ni `state.error` ni `analytics.onError` — así que, a
+     * diferencia de `start()`/`stop()`, esas dos ausencias son verdes con o sin el
+     * mutante (`job.cancel()` deja al job en Cancelled de cualquier forma, lo trague o
+     * no el catch, porque `withContext` fuerza la cancelación al completar sobre un Job
+     * ya cancelado). Lo único que SÍ cambia es si se ejecuta el `logger.error("$que
+     * audio lanzó", e)` del catch genérico: con el catch correcto nunca se llega ahí.
+     */
+    private class LoggerSpy : AudioLogger by NoOpAudioLogger {
+        val errores = mutableListOf<Pair<String, Throwable?>>()
+        override fun error(tag: String, message: String, throwable: Throwable?, params: Map<String, Any>) {
+            errores += message to throwable
+        }
+    }
+
+    /**
      * **1.10 — cancelar `start()` NO es fallar, y no puede publicarse como si lo fuera.**
      *
      * `CancellationException` es una `Exception`, así que el `catch (e: Exception)` de
@@ -424,13 +443,23 @@ class AudioEngineImplTest {
      * Mismo `catch` compartido por `pause()` y `resume()`. Se cubre `pause()`, que es
      * el camino que un consumidor real cancela más seguido (la UI se va a background
      * a mitad de un fade de pausa).
+     *
+     * 🔴 Acá NO alcanza con `spy.errores`/`state.error`: el catch genérico de
+     * `transicion()` no los toca (a diferencia del de `start`/`stop`), así que esas dos
+     * ausencias son verdes CON o SIN el mutante — medido: `trabajo.isCancelled` también
+     * da `true` en los dos casos, porque `withContext` fuerza la cancelación al
+     * completar sobre un job que ya la pidió, la trague o no el catch de adentro. Lo
+     * único que sí cambia es si se llega a ejecutar el `logger.error(...)` del catch
+     * genérico — con el catch correcto nunca se llega ahí — y eso es lo que afirma
+     * [LoggerSpy].
      */
     @Test
     fun cancellingPauseMidFadeRethrowsInsteadOfPublishingAFailure() = runTest {
         val spy = AnalyticsSpy()
+        val loggerSpy = LoggerSpy()
         val bridge = FakeAudioNativeBridge()
         val engine = AudioEngineImpl(
-            AudioEngineConfig(analyticsListener = spy),
+            AudioEngineConfig(analyticsListener = spy, logger = loggerSpy),
             bridge,
             BridgeConcurrency(dispatcher = StandardTestDispatcher(testScheduler)),
         )
@@ -438,6 +467,7 @@ class AudioEngineImplTest {
             engine.start(fadeMs = 0).isSuccess,
             "premisa: el motor tiene que estar arrancado antes de poder pausarlo",
         )
+        loggerSpy.errores.clear() // limpiar lo que haya logueado el arranque
 
         val trabajo = launch { engine.pause(fadeMs = 400) }
         // Hasta la mitad del fade: el bridge ya dijo que sí y `pause()` está en el delay.
@@ -458,6 +488,11 @@ class AudioEngineImplTest {
             "publicó un error de analytics por una CANCELACIÓN: eso no es un fallo del motor",
         )
         assertNull(engine.state.value.error, "publicó un AudioError por una cancelación")
+        assertTrue(
+            loggerSpy.errores.none { (_, throwable) -> throwable is kotlinx.coroutines.CancellationException },
+            "el catch genérico logueó la cancelación como si fuera un fallo del motor " +
+                "(loggerSpy.errores=${loggerSpy.errores})",
+        )
     }
 
     /**
