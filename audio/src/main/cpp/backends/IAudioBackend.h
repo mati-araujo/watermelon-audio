@@ -132,6 +132,15 @@ struct StreamInfo {
     float outputLatencyMs = 0.0f;
     float inputLatencyMs = 0.0f;
     bool isFullDuplex = false;
+    /**
+     * Whether the OPEN stream is in the platform's low-latency mode (REQ-045, D10).
+     *
+     * It is a property of the negotiated stream, not a request: Oboe reads it back
+     * from `getPerformanceMode()` after opening, CoreAudio from the IO buffer it
+     * actually got. Kotlin used to hardcode `isLowLatency = true` for every stream
+     * ever reported; that is the value it now transports instead of inventing.
+     */
+    bool isLowLatency = false;
     BackendType backendType = BackendType::NONE;
 
     // USB-specific info

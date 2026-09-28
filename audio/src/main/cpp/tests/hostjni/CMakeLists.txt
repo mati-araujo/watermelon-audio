@@ -109,6 +109,11 @@ add_library(watermelon_audio SHARED
     # BackendManager un FakeAudioBackend en vez del nullptr que devuelve el
     # factory real fuera de Android. Ver el 🔴 del encabezado.
     ${WMA_CPP_ROOT}/core/tests/support/test_platform_backends.cpp
+    # REQ-045 S1: las palancas que la JVM necesita para que el arranque FALLE y
+    # para que el stream reporte canales/modo que no sean el default. Sólo en
+    # este .so; el de produccion no las lleva, y ningun gate de la frontera las
+    # ve (viven fuera de jni/). Ver su encabezado.
+    host_test_hooks.cpp
     # Los cuerpos vacios de LibusbBackend que jni_usb.cpp nombra. USB necesita
     # dispositivo y queda fuera de alcance (spec.md): esto existe para que el
     # .so cierre sus simbolos, no para probar USB.
