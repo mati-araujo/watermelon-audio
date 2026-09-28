@@ -530,8 +530,12 @@ class AudioEngineImplTest {
             val siguioAlMotor = withTimeoutOrNull(5_000) {
                 engine.state.first { it.lifecycle == EngineLifecycle.STOPPING }
             }
-            assertNotNull(
-                siguioAlMotor,
+            // `assertTrue`, no `assertNotNull`: acá es la ÚLTIMA expresión del bloque
+            // `try`, y `assertNotNull` devuelve el valor no-nulo — el tipo del `try`
+            // (y por lo tanto el de `runBlocking`) dejaría de ser `Unit`, y JUnit
+            // rechaza un método de test que no devuelve `void`.
+            assertTrue(
+                siguioAlMotor != null,
                 "el lifecycle publicado nunca reflejó el nuevo estado del nativo: el " +
                     "poller se apagó (o murió) después de un stop fallido",
             )
