@@ -11,6 +11,7 @@ import com.watermellonstudios.audio.callback.AudioLogger
 import com.watermellonstudios.audio.domain.effect.EffectChainState
 import com.watermellonstudios.audio.domain.effect.EffectState
 import com.watermellonstudios.audio.domain.effect.EffectType
+import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.modulator.ModulatorType
 import com.watermellonstudios.audio.domain.oscillator.OscillatorType
 import com.watermellonstudios.audio.domain.scale.ScaleMode
@@ -19,6 +20,7 @@ import com.watermellonstudios.audio.domain.state.AudioState
 import com.watermellonstudios.audio.domain.state.EngineLifecycle
 import com.watermellonstudios.audio.domain.state.StreamInfo
 import com.watermellonstudios.audio.domain.AudioBackendType
+import com.watermellonstudios.audio.internal.bridge.BridgeConcurrency
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
 import com.watermellonstudios.audio.internal.util.ScaleQuantizer
 import com.watermellonstudios.audio.internal.util.epochMillis
@@ -52,7 +54,20 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
     // necesita la lib nativa. Con el puente cableado adentro la clase no se
     // podia ni construir en un test. La ausencia de tests era una imposibilidad,
     // no una deuda de disciplina.
-    private val bridge: IAudioNativeBridge = getAudioBridge()
+    private val bridge: IAudioNativeBridge = getAudioBridge(),
+    // REQ-045 (AC-045.2): la serializacion del ciclo de vida VIVE ACA, no solo dentro
+    // del bridge. `start()` no es una llamada: son cinco (preguntar, arrancar,
+    // oscilador, efectos por default, leer el stream) mas tres escrituras de `state`.
+    // Sin un mutex propio, dos `start()`/`stop()` concurrentes intercalaban esa
+    // secuencia y el `state` final dependia de quien escribia ultimo.
+    //
+    // Es el mismo `LIFECYCLE` de [BridgeConcurrency] que ya usan los dos bridges, y
+    // anidar los dos mutexes no puede trabar: son instancias distintas y el orden de
+    // toma es siempre el mismo (motor primero, bridge despues).
+    //
+    // Entra por parametro con default por la misma razon que el bridge: para que un
+    // test le pueda dar un dispatcher controlado y afirmar el ORDEN en vez de esperar.
+    private val concurrency: BridgeConcurrency = BridgeConcurrency()
 ) : AudioEngine {
 
     companion object {
@@ -84,21 +99,43 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
 
     // ==================== LIFECYCLE ====================
 
-    override suspend fun start(fadeMs: Int?) {
-        val fade = fadeMs ?: config.defaultFadeMs
+    override suspend fun start(fadeMs: Int?): Result<Unit> =
+        concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "AudioEngine.start") {
+            startLocked(fadeMs ?: config.defaultFadeMs)
+        }
 
+    /**
+     * El arranque, ya serializado.
+     *
+     * 🔴 **El `RUNNING` se publica DESPUES de que el nativo dijo que si** (AC-045.2).
+     * Antes se publicaba siempre: `startEngineWithFadeSync` devolvia `Unit`, el fallo
+     * del stream no llegaba, y `state.lifecycle` quedaba en `RUNNING` con el stream
+     * cerrado. Un consumidor que decidiera por `isRunning` tomaba la decision sobre una
+     * afirmacion que nadie verifico.
+     */
+    private suspend fun startLocked(fade: Int): Result<Unit> {
         try {
             if (bridge.hasInitializationFailed()) {
                 val error = AudioError(-1, "Initialization failed due to insufficient memory", false)
                 _state.update { it.copy(error = error) }
                 analytics.onError(error)
-                return
+                return Result.failure(NativeBridgeException.MemoryAllocationFailed())
             }
 
             logger.info(TAG, "Starting audio engine", mapOf("fadeMs" to fade))
             _state.update { it.copy(lifecycle = EngineLifecycle.STARTING) }
 
-            bridge.startEngineWithFadeSync(fade)
+            // La variante `suspend`, que devuelve el codigo del motor. La `*Sync` esta
+            // deprecada justamente porque acá no habia donde ponerlo.
+            val arrancado = bridge.startEngineWithFade(fade)
+            arrancado.exceptionOrNull()?.let { causa ->
+                logger.error(TAG, "El motor no pudo arrancar", causa)
+                val error = AudioError(-1, "Failed to start: ${causa.message}", true)
+                _state.update { it.copy(lifecycle = EngineLifecycle.STOPPED, error = error) }
+                analytics.onError(error)
+                return Result.failure(causa)
+            }
+
             bridge.setOscillatorType(config.defaultOscillator.id)
 
             // Add default effects
@@ -120,23 +157,38 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
 
             delay(fade.toLong())
             logger.info(TAG, "Audio engine started")
+            return Result.success(Unit)
 
         } catch (e: Exception) {
             logger.error(TAG, "Failed to start audio engine", e)
             val error = AudioError(-1, "Failed to start: ${e.message}", true)
             _state.update { it.copy(lifecycle = EngineLifecycle.STOPPED, error = error) }
             analytics.onError(error)
+            return Result.failure(e)
         }
     }
 
-    override suspend fun stop(fadeMs: Int?) {
-        val fade = fadeMs ?: config.defaultFadeMs
+    override suspend fun stop(fadeMs: Int?): Result<Unit> =
+        concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "AudioEngine.stop") {
+            stopLocked(fadeMs ?: config.defaultFadeMs)
+        }
 
+    private suspend fun stopLocked(fade: Int): Result<Unit> {
         try {
             logger.info(TAG, "Stopping audio engine", mapOf("fadeMs" to fade))
             _state.update { it.copy(lifecycle = EngineLifecycle.STOPPING) }
 
-            bridge.stopEngineWithFadeSync(fade)
+            val parado = bridge.stopEngineWithFade(fade)
+            parado.exceptionOrNull()?.let { causa ->
+                logger.error(TAG, "El motor no pudo parar", causa)
+                // 🔴 El `lifecycle` NO vuelve a STOPPED acá: el motor dijo que no paró,
+                // y publicar STOPPED sería la misma mentira al revés. Queda en STOPPING
+                // con el error a la vista, que es lo que de verdad se sabe.
+                _state.update {
+                    it.copy(error = AudioError(-1, "Failed to stop: ${causa.message}", true))
+                }
+                return Result.failure(causa)
+            }
             stopStatePolling()
 
             delay(fade.toLong())
@@ -151,32 +203,52 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
             }
 
             logger.info(TAG, "Audio engine stopped")
+            return Result.success(Unit)
 
         } catch (e: Exception) {
             logger.error(TAG, "Failed to stop audio engine", e)
             _state.update { it.copy(error = AudioError(-1, "Failed to stop: ${e.message}", true)) }
+            return Result.failure(e)
         }
     }
 
-    override suspend fun pause(fadeMs: Int) {
-        try {
-            logger.debug(TAG, "Pausing audio", mapOf("fadeMs" to fadeMs))
-            bridge.pauseEngineWithFadeSync(fadeMs)
-            delay(fadeMs.toLong())
-            _state.update { it.copy(isPaused = true) }
-        } catch (e: Exception) {
-            logger.error(TAG, "Failed to pause audio", e)
+    override suspend fun pause(fadeMs: Int): Result<Unit> =
+        concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "AudioEngine.pause") {
+            transicion(fadeMs, pausado = true)
         }
-    }
 
-    override suspend fun resume(fadeMs: Int) {
+    override suspend fun resume(fadeMs: Int): Result<Unit> =
+        concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "AudioEngine.resume") {
+            transicion(fadeMs, pausado = false)
+        }
+
+    /**
+     * Pausa y reanudacion, que son la misma forma con el bit al revés.
+     *
+     * 🔴 **`isPaused` se publica sólo si el motor lo hizo.** Antes se publicaba
+     * siempre: la `*Sync` devolvia `Unit` y encima el `catch` se tragaba la excepcion
+     * SIN tocar el estado, asi que un fallo dejaba `isPaused` diciendo lo contrario de
+     * lo que pasaba. Era el mismo defecto que `start`, dos veces.
+     */
+    private suspend fun transicion(fadeMs: Int, pausado: Boolean): Result<Unit> {
+        val que = if (pausado) "Pausing" else "Resuming"
         try {
-            logger.debug(TAG, "Resuming audio", mapOf("fadeMs" to fadeMs))
-            bridge.resumeEngineWithFadeSync(fadeMs)
+            logger.debug(TAG, "$que audio", mapOf("fadeMs" to fadeMs))
+            val hecho = if (pausado) {
+                bridge.pauseEngineWithFade(fadeMs)
+            } else {
+                bridge.resumeEngineWithFade(fadeMs)
+            }
+            hecho.exceptionOrNull()?.let { causa ->
+                logger.error(TAG, "$que audio falló en el motor", causa)
+                return Result.failure(causa)
+            }
             delay(fadeMs.toLong())
-            _state.update { it.copy(isPaused = false) }
+            _state.update { it.copy(isPaused = pausado) }
+            return Result.success(Unit)
         } catch (e: Exception) {
-            logger.error(TAG, "Failed to resume audio", e)
+            logger.error(TAG, "$que audio lanzó", e)
+            return Result.failure(e)
         }
     }
 
@@ -504,6 +576,15 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
         logger.info(TAG, "Releasing audio engine")
         stopStatePolling()
         try {
+            // 🔴 EL ÚNICO `*Sync` QUE LA LIBRERÍA SIGUE LLAMANDO, y queda declarado.
+            //
+            // REQ-045 saca los cinco de `start/stop/pause/resume` porque ahí el fallo
+            // del motor TENÍA a dónde ir y se perdía. Acá no: `release()` es
+            // `override fun` —no `suspend`— en la superficie pública, y volverla
+            // `suspend` rompería a todo consumidor en fuente, que es lo que este REQ
+            // se comprometió a no hacer. Un teardown no tiene tampoco a quién
+            // reportarle: el motor se está yendo.
+            @Suppress("DEPRECATION")
             bridge.stopEngineSync()
         } catch (e: Exception) {
             logger.error(TAG, "Error during release", e)

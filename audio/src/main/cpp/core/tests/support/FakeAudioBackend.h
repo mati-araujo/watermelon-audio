@@ -135,7 +135,8 @@ public:
 
     void setNegotiatedLowLatency(bool lowLatency) {
         std::lock_guard<std::mutex> lock(mInfoMutex);
-        mInfo.isLowLatency = lowLatency;
+        mInfo.lowLatency = lowLatency ? watermelon_audio::StreamInfo::LowLatency::YES
+                                      : watermelon_audio::StreamInfo::LowLatency::NO;
     }
 
     /// Make start() fail, so the manager never reports isRunning().

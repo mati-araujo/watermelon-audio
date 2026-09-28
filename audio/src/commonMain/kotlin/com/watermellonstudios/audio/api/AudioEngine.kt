@@ -58,34 +58,55 @@ interface AudioEngine {
     val isPaused: Boolean
 
     // ==================== LIFECYCLE ====================
+    //
+    // 🔴 LAS CUATRO DEVUELVEN `Result<Unit>` DESDE REQ-045 (R-API-62), y el cambio es
+    // el punto: antes devolvian `Unit` y publicaban `RUNNING` en [state] aunque el
+    // motor nativo hubiera dicho que no. O sea que "arranco" era una afirmacion que la
+    // libreria no tenia como sostener — el defecto W1 que reporto la auditoria de
+    // NoisyPad.
+    //
+    // **Es compatible en fuente**: un llamador que ignora el retorno sigue
+    // compilando igual. El que quiera enterarse ahora puede.
+    //
+    // Un `success` afirma que el nativo lo hizo. Un `failure` trae la causa TIPADA
+    // (`NativeBridgeException`), transportada desde la C API y no re-derivada aca.
+    // Las cuatro se serializan entre si bajo el mutex `LIFECYCLE`.
 
     /**
      * Start the audio engine with optional fade-in.
      *
      * @param fadeMs Fade-in duration in milliseconds (default from config)
+     * @return `success` si el motor arranco de verdad; `failure` con la causa si no
+     *   —por ejemplo `NativeBridgeException.StreamError` cuando el backend no pudo
+     *   abrir el stream. En ese caso [state] **no** pasa a `RUNNING`.
      */
-    suspend fun start(fadeMs: Int? = null)
+    suspend fun start(fadeMs: Int? = null): Result<Unit>
 
     /**
      * Stop the audio engine with optional fade-out.
      *
      * @param fadeMs Fade-out duration in milliseconds (default from config)
+     * @return `success` si el motor paro; `failure` con la causa si no.
      */
-    suspend fun stop(fadeMs: Int? = null)
+    suspend fun stop(fadeMs: Int? = null): Result<Unit>
 
     /**
      * Pause audio output (keeps stream open).
      *
      * @param fadeMs Fade-out duration in milliseconds
+     * @return `success` si el motor pauso; `failure` con la causa si no. En ese caso
+     *   `isPaused` **no** pasa a `true`.
      */
-    suspend fun pause(fadeMs: Int = 300)
+    suspend fun pause(fadeMs: Int = 300): Result<Unit>
 
     /**
      * Resume audio output from pause.
      *
      * @param fadeMs Fade-in duration in milliseconds
+     * @return `success` si el motor reanudo; `failure` con la causa si no. En ese caso
+     *   `isPaused` **no** pasa a `false`.
      */
-    suspend fun resume(fadeMs: Int = 300)
+    suspend fun resume(fadeMs: Int = 300): Result<Unit>
 
     // ==================== OSCILLATOR ====================
 

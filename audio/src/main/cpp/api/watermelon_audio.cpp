@@ -278,6 +278,23 @@ bool wma_get_stream_info(const WmaEngine* engine,
     return ok;
 }
 
+bool wma_get_stream_info_ex(const WmaEngine* engine,
+                            int* sample_rate, int* buffer_size, float* latency_ms,
+                            int* channel_count, int* is_low_latency) {
+    if (!engine || !engine->engine) return false;
+    int32_t sr = 0, bs = 0, ch = 0, ll = -1;
+    double lat = 0.0;
+    bool ok = engine->engine->getStreamInfoEx(sr, bs, lat, ch, ll);
+    if (ok) {
+        if (sample_rate)    *sample_rate = sr;
+        if (buffer_size)    *buffer_size = bs;
+        if (latency_ms)     *latency_ms = static_cast<float>(lat);
+        if (channel_count)  *channel_count = ch;
+        if (is_low_latency) *is_low_latency = ll;
+    }
+    return ok;
+}
+
 bool wma_is_using_reduced_buffers(const WmaEngine* engine) {
     WMA_CHECK_VAL(engine, false);
     return engine->engine->isUsingReducedBuffers();

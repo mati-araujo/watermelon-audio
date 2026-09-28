@@ -1465,6 +1465,23 @@ public:
     bool getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const;
 
     /**
+     * @brief Lo mismo, más los canales y el modo de latencia del stream ABIERTO
+     *        (REQ-045, D10).
+     *
+     * Existe aparte y no cambia la firma de arriba porque el header de la C API
+     * sólo puede **sumar** (compatibilidad en fuente para C), y por lo mismo
+     * `wma_get_stream_info_ex` es una función nueva y no un parámetro más.
+     *
+     * @param[out] channelCount canales del stream (0 si no hay stream)
+     * @param[out] lowLatency   -1 desconocido / 0 no / 1 sí. Core Audio no tiene
+     *             cómo contestarlo y devuelve desconocido a propósito: derivarlo
+     *             del buffer sería volver a inventar el valor, que es el defecto.
+     * @return true si hay un stream activo
+     */
+    bool getStreamInfoEx(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis,
+                         int32_t& channelCount, int32_t& lowLatency) const;
+
+    /**
      * @brief El rate con el que `start()` pre-configura los componentes ANTES de
      *        que el device negocie.
      *

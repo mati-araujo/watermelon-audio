@@ -135,12 +135,16 @@ struct StreamInfo {
     /**
      * Whether the OPEN stream is in the platform's low-latency mode (REQ-045, D10).
      *
-     * It is a property of the negotiated stream, not a request: Oboe reads it back
-     * from `getPerformanceMode()` after opening, CoreAudio from the IO buffer it
-     * actually got. Kotlin used to hardcode `isLowLatency = true` for every stream
-     * ever reported; that is the value it now transports instead of inventing.
+     * **Three states and not a bool**, which is the whole point. Kotlin used to
+     * hardcode `isLowLatency = true` for every stream it ever reported, so a
+     * consumer read an invented value as a measured one. Oboe can answer the
+     * question —`getPerformanceMode()` is a property of the opened stream— and
+     * Core Audio cannot: AVAudioSession has no such mode, and deriving one from the
+     * IO buffer duration would be inventing the answer again, one layer down.
+     * UNKNOWN travels to Kotlin as `null`.
      */
-    bool isLowLatency = false;
+    enum class LowLatency { UNKNOWN = -1, NO = 0, YES = 1 };
+    LowLatency lowLatency = LowLatency::UNKNOWN;
     BackendType backendType = BackendType::NONE;
 
     // USB-specific info

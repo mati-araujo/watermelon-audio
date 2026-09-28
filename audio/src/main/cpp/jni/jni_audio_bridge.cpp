@@ -47,49 +47,63 @@ extern "C" {
 // they are the opposite, a side effect (create the engine on first use) that
 // the C API deliberately does not have.
 
-JNIEXPORT void JNICALL
+// 🔴 LAS SEIS DEVUELVEN EL CODIGO, Y NO ES COSMETICO (REQ-045, D1).
+//
+// Hasta el 2026-09-28 las seis llamaban a su `wma_engine_*` como SENTENCIA SUELTA:
+// el `WmaResult` se caia al piso y `AudioNativeBridge` devolvia
+// `Result.success(Unit)` incondicional. O sea que el stream no abria y el
+// consumidor leia un exito — y en iOS el mismo contrato SI propagaba, asi que las
+// dos plataformas contestaban distinto a la misma pregunta.
+//
+// Lo reporto la auditoria de NoisyPad (#348-#364, W1) y lo vigila desde ahora
+// `scripts/check-jni-results.py`: una `wma_*` que devuelve `WmaResult` escrita como
+// sentencia suelta es ROJO. `ensureEngine()` se queda, que es lo contrario —un
+// efecto que la C API deliberadamente no tiene— y su fallo tambien viaja ahora, como
+// WMA_ERROR_NOT_INITIALIZED en vez de un log y un `void`.
+
+JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartEngine(
     JNIEnv* env, jobject thiz) {
     if (!ensureEngine()) {
         LOGE("AudioNativeBridge.startEngine: Failed to create engine");
-        return;
+        return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
     }
-    wma_engine_start(g_wmaEngine, WMA_FADE_DEFAULT);
+    return static_cast<jint>(wma_engine_start(g_wmaEngine, WMA_FADE_DEFAULT));
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStopEngine(
     JNIEnv* env, jobject thiz) {
-    wma_engine_stop(g_wmaEngine, WMA_FADE_DEFAULT);
+    return static_cast<jint>(wma_engine_stop(g_wmaEngine, WMA_FADE_DEFAULT));
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartEngineWithFade(
     JNIEnv* env, jobject thiz, jint fadeTimeMs) {
     if (!ensureEngine()) {
         LOGE("AudioNativeBridge.startEngineWithFade: Failed to create engine");
-        return;
+        return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
     }
     // Kotlin already coerces to >= 0, so this never means WMA_FADE_DEFAULT.
-    wma_engine_start(g_wmaEngine, fadeTimeMs);
+    return static_cast<jint>(wma_engine_start(g_wmaEngine, fadeTimeMs));
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStopEngineWithFade(
     JNIEnv* env, jobject thiz, jint fadeTimeMs) {
-    wma_engine_stop(g_wmaEngine, fadeTimeMs);
+    return static_cast<jint>(wma_engine_stop(g_wmaEngine, fadeTimeMs));
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativePauseEngineWithFade(
     JNIEnv* env, jobject thiz, jint fadeTimeMs) {
-    wma_engine_pause(g_wmaEngine, fadeTimeMs);
+    return static_cast<jint>(wma_engine_pause(g_wmaEngine, fadeTimeMs));
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeResumeEngineWithFade(
     JNIEnv* env, jobject thiz, jint fadeTimeMs) {
-    wma_engine_resume(g_wmaEngine, fadeTimeMs);
+    return static_cast<jint>(wma_engine_resume(g_wmaEngine, fadeTimeMs));
 }
 
 // ==================== State Functions ====================
@@ -151,19 +165,30 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsin
 JNIEXPORT jfloatArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetStreamInfo(
     JNIEnv* env, jobject thiz) {
-    int sampleRate = 0, bufferSize = 0;
+    // CINCO valores, no tres (REQ-045, D10). Los dos que se suman al final son los
+    // que `StreamInfo.fromNativeArray` rellenaba a mano —`channelCount = 2`,
+    // `isLowLatency = true`— para CUALQUIER stream: dos valores inventados que un
+    // consumidor leia como medidos. Van al FINAL para que los indices 0..2 sigan
+    // significando lo mismo.
+    //
+    // `isLowLatency` cruza como -1/0/1 y no como booleano: Oboe sabe contestarlo y
+    // Core Audio no, y "no se sabe" tiene que poder viajar. Kotlin lo mapea a `null`.
+    int sampleRate = 0, bufferSize = 0, channelCount = 0, lowLatency = -1;
     float latencyMillis = 0.0f;
-    if (!wma_get_stream_info(g_wmaEngine, &sampleRate, &bufferSize, &latencyMillis)) {
+    if (!wma_get_stream_info_ex(g_wmaEngine, &sampleRate, &bufferSize, &latencyMillis,
+                                &channelCount, &lowLatency)) {
         return nullptr;
     }
-    jfloatArray result = env->NewFloatArray(3);
+    jfloatArray result = env->NewFloatArray(5);
     if (result) {
-        float data[3] = {
+        float data[5] = {
             static_cast<float>(sampleRate),
             static_cast<float>(bufferSize),
-            latencyMillis
+            latencyMillis,
+            static_cast<float>(channelCount),
+            static_cast<float>(lowLatency)
         };
-        env->SetFloatArrayRegion(result, 0, 3, data);
+        env->SetFloatArrayRegion(result, 0, 5, data);
     }
     return result;
 }

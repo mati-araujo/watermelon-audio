@@ -1969,6 +1969,44 @@ bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double
 #endif
 }
 
+bool AudioEngine::getStreamInfoEx(int32_t& sampleRate, int32_t& bufferSize,
+                                  double& latencyMillis, int32_t& channelCount,
+                                  int32_t& lowLatency) const {
+    // Desconocido ANTES de mirar: si no hay stream, lo que se publica es la ausencia
+    // y no un valor plausible. Es la lección de los dos stubs que devolvían ceros y
+    // derrotaron los fallbacks elvis de sus propios llamadores.
+    channelCount = 0;
+    lowLatency = -1;
+
+    if (mUseBackendManager.load(std::memory_order_acquire)) {
+        auto& manager = watermelon_audio::BackendManager::getInstance();
+        if (manager.isRunning()) {
+            auto info = manager.getStreamInfo();
+            sampleRate = info.sampleRate;
+            bufferSize = info.framesPerBuffer;
+            latencyMillis = info.outputLatencyMs;
+            channelCount = info.channelCount;
+            lowLatency = static_cast<int32_t>(info.lowLatency);
+            return true;
+        }
+    }
+
+    if (!getStreamInfo(sampleRate, bufferSize, latencyMillis)) {
+        return false;
+    }
+
+#if WMA_HAS_OBOE
+    // El camino Oboe directo (el que shippea en Android): los dos valores son
+    // propiedades del stream ABIERTO, no del pedido. `getPerformanceMode()` es
+    // exactamente la pregunta que Kotlin contestaba con `true` a mano.
+    if (mStream) {
+        channelCount = mStream->getChannelCount();
+        lowLatency = mStream->getPerformanceMode() == oboe::PerformanceMode::LowLatency ? 1 : 0;
+    }
+#endif
+    return true;
+}
+
 oboe::AudioStream* AudioEngine::getOutputStream() const {
     return mStream.get();
 }
