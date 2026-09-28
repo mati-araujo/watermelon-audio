@@ -265,7 +265,7 @@ class PreInitConfigJniTest {
     @Test
     fun `c - las 68 configuraciones del conjunto crean el motor`() {
         for ((nombre, llamada) in CONFIGURACIONES) {
-            HostTestHooks.resetEngine()
+            volverAlEstadoSinMotor()
             assertFalse(
                 bridge.isEngineInitialized(),
                 "$nombre: el reset no dejó el proceso sin motor, así que esta vuelta no mide la " +
@@ -330,7 +330,7 @@ class PreInitConfigJniTest {
         configurar: (AudioNativeBridge) -> Unit,
         leer: (AudioNativeBridge) -> Pair<Any, Any>,
     ) {
-        HostTestHooks.resetEngine()
+        volverAlEstadoSinMotor()
         assertFalse(bridge.isEngineInitialized(), "$nombre: el reset no dejó el proceso sin motor")
 
         jni(nombre) { configurar(it) }
@@ -343,6 +343,22 @@ class PreInitConfigJniTest {
                 "configuró $esperado. Crear el motor no alcanza si la configuración vive un nivel " +
                 "más abajo (el InputNode): ahí va `ensureInputNode()`.",
         )
+    }
+
+    /**
+     * Deja el proceso sin motor, reseteando **sólo si hay uno**.
+     *
+     * 🔴 El guard no es cosmético: lo trajo un mutante. Con
+     * `HostTestHooks.resetEngine()` a secas, una configuración que NO creaba el motor
+     * hacía fallar la vuelta SIGUIENTE con *"el reset no encontró motor que destruir"* —
+     * o sea que el mutante moría en el assert equivocado, con un mensaje que no nombraba
+     * la configuración culpable. Cada vuelta tiene que dar su propio veredicto.
+     *
+     * Lo que se pierde no es nada: `resetEngine` sigue fallando si se lo llama con un
+     * motor presente y no puede destruirlo, que es la degradación que hay que delatar.
+     */
+    private fun volverAlEstadoSinMotor() {
+        if (bridge.isEngineInitialized()) HostTestHooks.resetEngine()
     }
 
     private fun jni(name: String, call: (AudioNativeBridge) -> Unit) =
