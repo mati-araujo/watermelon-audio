@@ -1013,6 +1013,35 @@ private:
     // Only used when mUseBackendManager is false (direct Oboe path)
     std::shared_ptr<oboe::AudioStream> mStream;
 
+    /**
+     * El candado que protege el PUNTERO `mStream`, no el stream (REQ-045, M5).
+     *
+     * `mStream` lo escriben `start()` y `stop()` —los dos con `mStateMutex` tomado— en
+     * cinco lugares (`openStream` y cuatro `reset()`), y lo leia `getStreamInfo()` SIN
+     * ninguna sincronizacion, desde el poller de la UI. Un `reset()` concurrente con esa
+     * lectura es un use-after-free: es la misma clase que `OboeBackend.cpp:93-100`
+     * documenta como bug ya pagado del lado del backend.
+     *
+     * 🔴 Y el TSan de Linux NO lo puede ver, porque todo esto vive bajo
+     * `#if WMA_HAS_OBOE`: el camino que shippea en Android es justo el que ningun
+     * sanitizer del CI compila.
+     *
+     * Es un mutex de CONTROL y jamas entra al hilo de audio: el unico lector RT del rate
+     * (`currentSampleRate()`) pasa por `mLegacyStreamSampleRate`, que es un atomic, y por
+     * eso mismo dejo de desreferenciar un `shared_ptr` adentro del callback. El orden de
+     * toma es siempre `mStateMutex` -> `mStreamMutex`; los lectores toman solo este.
+     */
+    mutable std::mutex mStreamMutex;
+
+    /**
+     * El sample rate del stream Oboe ABIERTO, o 0 si no hay (REQ-045, M5).
+     *
+     * Existe para que `currentSampleRate()` —que es RT: esta declarado en
+     * `scripts/rt-coverage-baseline.txt`— conteste sin tocar `mStream`. Lo escriben los
+     * mismos cinco lugares que el puntero, con `mStateMutex` tomado.
+     */
+    std::atomic<int32_t> mLegacyStreamSampleRate{0};
+
     // Opaque pointer to Oboe callback adapter (defined in AudioEngine.cpp)
     // Using void* + custom deleter to avoid incomplete type issue with unique_ptr
     struct OboeAdapterDeleter { void operator()(void* p) const; };
@@ -1480,6 +1509,22 @@ public:
      */
     bool getStreamInfoEx(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis,
                          int32_t& channelCount, int32_t& lowLatency) const;
+
+private:
+    /**
+     * @brief Suelta el stream Oboe legacy, limpiando primero el rate publicado (M5).
+     *
+     * Toma `mStreamMutex`, y **siempre** se la llama con `mStateMutex` ya tomado. El
+     * parametro `std::nullptr_t` existe para que la llamada se lea como la asignacion que
+     * reemplaza (`mStream.reset()`) y para que no haya una segunda forma de escribir el
+     * puntero sin pasar por aca.
+     */
+    void setLegacyStream(std::nullptr_t);
+
+    /** @brief El stream Oboe legacy, leido UNA vez bajo `mStreamMutex` (M5). */
+    std::shared_ptr<oboe::AudioStream> legacyStream() const;
+
+public:
 
     /**
      * @brief El rate con el que `start()` pre-configura los componentes ANTES de

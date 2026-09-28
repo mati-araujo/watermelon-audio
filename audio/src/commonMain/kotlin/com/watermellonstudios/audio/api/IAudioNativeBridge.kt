@@ -38,6 +38,14 @@ interface IAudioNativeBridge :
     suspend fun startEngine(): Result<Unit>
     suspend fun stopEngine(): Result<Unit>
     suspend fun startEngineWithFade(fadeTimeMs: Int): Result<Unit>
+    /**
+     * Para el motor con fade-out.
+     *
+     * 🔴 **`success` = "el motor aceptó el stop", no "el stream ya cerró"** (REQ-045, B9).
+     * Con `fadeTimeMs > 0`, `AudioEngine::stopWithFade` arranca el fade y deja la
+     * detención a un worker que corre al terminarlo, así que esto vuelve antes. Con 0 el
+     * camino es sincrónico. Un `failure` sí es definitivo: el motor no aceptó.
+     */
     suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit>
     suspend fun pauseEngineWithFade(fadeTimeMs: Int): Result<Unit>
     suspend fun resumeEngineWithFade(fadeTimeMs: Int): Result<Unit>

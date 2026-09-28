@@ -282,16 +282,19 @@ bool wma_get_stream_info_ex(const WmaEngine* engine,
                             int* sample_rate, int* buffer_size, float* latency_ms,
                             int* channel_count, int* is_low_latency) {
     if (!engine || !engine->engine) return false;
-    int32_t sr = 0, bs = 0, ch = 0, ll = -1;
-    double lat = 0.0;
+    int32_t sr = -1, bs = -1, ch = 0, ll = -1;
+    double lat = -1.0;
     bool ok = engine->engine->getStreamInfoEx(sr, bs, lat, ch, ll);
-    if (ok) {
-        if (sample_rate)    *sample_rate = sr;
-        if (buffer_size)    *buffer_size = bs;
-        if (latency_ms)     *latency_ms = static_cast<float>(lat);
-        if (channel_count)  *channel_count = ch;
-        if (is_low_latency) *is_low_latency = ll;
-    }
+    // Los out-params se escriben SIEMPRE, tambien cuando no hay stream. `wma_get_stream_info`
+    // no lo hacia y dejaba lo que el llamador tuviera en esas variables: lo agarro el test
+    // de iOS, que leyo un 0 —un valor PLAUSIBLE para "no es low latency"— donde la
+    // respuesta es "no hay stream". Escribir la ausencia es exactamente lo que este REQ
+    // pide del resto del camino: 0 canales y -1 de modo no son datos, son la ausencia.
+    if (sample_rate)    *sample_rate = sr;
+    if (buffer_size)    *buffer_size = bs;
+    if (latency_ms)     *latency_ms = static_cast<float>(lat);
+    if (channel_count)  *channel_count = ch;
+    if (is_low_latency) *is_low_latency = ll;
     return ok;
 }
 

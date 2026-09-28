@@ -24,6 +24,7 @@ import com.watermellonstudios.audio.internal.bridge.BridgeConcurrency
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
 import com.watermellonstudios.audio.internal.util.ScaleQuantizer
 import com.watermellonstudios.audio.internal.util.epochMillis
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -97,10 +98,35 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
 
     private var currentScaleMode: ScaleMode = ScaleMode.FREE
 
+    /**
+     * Si alguien ya llamó a [release] (REQ-045, B8).
+     *
+     * `release()` **no puede tomar el mutex**: es `override fun`, no `suspend`, en la
+     * superficie pública. Así que la exclusión se compra con este flag en vez de con el
+     * lock: las cuatro del ciclo de vida lo miran ADENTRO del mutex, antes de tocar el
+     * bridge, y otra vez ANTES de devolver `success` — porque una que ya estaba en vuelo
+     * puede terminar DESPUÉS del release, y ahí `success` afirmaría algo sobre un motor
+     * que ya no existe.
+     *
+     * Un `MutableStateFlow` y no un `@Volatile`: la anotación no está en `commonMain` para
+     * Kotlin/Native (vive en `kotlin.concurrent` y es experimental), y este módulo no tiene
+     * atomicfu. Un `StateFlow` ya es seguro entre hilos en las dos plataformas y no agrega
+     * dependencias. La única transición es false → true y nadie la revierte.
+     */
+    private val releasedFlow = MutableStateFlow(false)
+    private val released: Boolean get() = releasedFlow.value
+
     // ==================== LIFECYCLE ====================
+
+    /** El rechazo tipado de una operación pedida sobre un motor ya liberado (B8). */
+    private fun liberado(operacion: String): Result<Unit> {
+        logger.warn(TAG, "$operacion pedido sobre un motor ya liberado")
+        return Result.failure(NativeBridgeException.InvalidOperation(operacion, "RELEASED"))
+    }
 
     override suspend fun start(fadeMs: Int?): Result<Unit> =
         concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "AudioEngine.start") {
+            if (released) return@guarded liberado("start")
             startLocked(fadeMs ?: config.defaultFadeMs)
         }
 
@@ -119,6 +145,11 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
                 val error = AudioError(-1, "Initialization failed due to insufficient memory", false)
                 _state.update { it.copy(error = error) }
                 analytics.onError(error)
+                // B10: la causa se fabrica acá y no viaja desde la C API, pero NO es una
+                // re-derivación: `hasInitializationFailed()` es un HECHO nativo cuyo único
+                // motivo es una allocation fallida (`mInitializationFailed`, que sólo se
+                // pone en el fallo de memoria del constructor). Es un mapeo 1:1, no una
+                // adivinanza sobre qué pudo haber pasado.
                 return Result.failure(NativeBridgeException.MemoryAllocationFailed())
             }
 
@@ -157,8 +188,29 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
 
             delay(fade.toLong())
             logger.info(TAG, "Audio engine started")
+            // B8 — se vuelve a mirar DESPUÉS del fade: `release()` pudo haber corrido
+            // mientras esto esperaba, y devolver `success` afirmaría que el motor está
+            // andando cuando ya lo destruyeron.
+            if (released) return liberado("start")
             return Result.success(Unit)
 
+        } catch (e: CancellationException) {
+            // 🔴 LA CANCELACIÓN SE RELANZA, NO SE PUBLICA COMO FALLO (REQ-045, 1.10).
+            //
+            // `CancellationException` es una `Exception`, así que el `catch (e: Exception)`
+            // de abajo se la comía ANTES de que `BridgeConcurrency.guarded` pudiera
+            // relanzarla — el bug exacto que el KDoc de `guarded` dice que WA-1.4 vino a
+            // arreglar para los 22 `catch` del bridge, reintroducido acá.
+            //
+            // Lo que costaba: cancelar `start()` durante el `delay(fade)` deja el motor
+            // nativo ARRANCADO (ya se llamó al bridge), y este catch publicaba `STOPPED`
+            // y disparaba `analytics.onError` sobre un motor sonando. El poller volvía a
+            // escribir `RUNNING` un tick después: un parpadeo en el estado del consumidor
+            // y una métrica de error que no describe ningún error. Es el ENG-14 de
+            // NoisyPad.
+            //
+            // Cancelar NO es fallar: el scope padre decidió, y tiene que enterarse.
+            throw e
         } catch (e: Exception) {
             logger.error(TAG, "Failed to start audio engine", e)
             val error = AudioError(-1, "Failed to start: ${e.message}", true)
@@ -170,6 +222,7 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
 
     override suspend fun stop(fadeMs: Int?): Result<Unit> =
         concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "AudioEngine.stop") {
+            if (released) return@guarded liberado("stop")
             stopLocked(fadeMs ?: config.defaultFadeMs)
         }
 
@@ -181,9 +234,14 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
             val parado = bridge.stopEngineWithFade(fade)
             parado.exceptionOrNull()?.let { causa ->
                 logger.error(TAG, "El motor no pudo parar", causa)
-                // 🔴 El `lifecycle` NO vuelve a STOPPED acá: el motor dijo que no paró,
-                // y publicar STOPPED sería la misma mentira al revés. Queda en STOPPING
-                // con el error a la vista, que es lo que de verdad se sabe.
+                // 🔴 NO se publica `STOPPED`, y el poller sigue vivo A PROPÓSITO (M4).
+                //
+                // Se vuelve ANTES de `stopStatePolling()`, así que el `lifecycle` lo
+                // sigue escribiendo `refreshStateFromNative()` con lo que el motor
+                // reporta. Eso es lo honesto: el motor dijo que no paró, así que el
+                // estado publicado tiene que seguir al motor, no a nuestra intención.
+                // Publicar `STOPPED` sería la misma mentira al revés, y apagar el poller
+                // dejaría el estado congelado en lo último que alcanzó a escribir.
                 _state.update {
                     it.copy(error = AudioError(-1, "Failed to stop: ${causa.message}", true))
                 }
@@ -203,8 +261,11 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
             }
 
             logger.info(TAG, "Audio engine stopped")
+            if (released) return liberado("stop")
             return Result.success(Unit)
 
+        } catch (e: CancellationException) {
+            throw e  // Ver el porqué largo en `startLocked`.
         } catch (e: Exception) {
             logger.error(TAG, "Failed to stop audio engine", e)
             _state.update { it.copy(error = AudioError(-1, "Failed to stop: ${e.message}", true)) }
@@ -214,11 +275,13 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
 
     override suspend fun pause(fadeMs: Int): Result<Unit> =
         concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "AudioEngine.pause") {
+            if (released) return@guarded liberado("pause")
             transicion(fadeMs, pausado = true)
         }
 
     override suspend fun resume(fadeMs: Int): Result<Unit> =
         concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "AudioEngine.resume") {
+            if (released) return@guarded liberado("resume")
             transicion(fadeMs, pausado = false)
         }
 
@@ -245,7 +308,10 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
             }
             delay(fadeMs.toLong())
             _state.update { it.copy(isPaused = pausado) }
+            if (released) return liberado(if (pausado) "pause" else "resume")
             return Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e  // Ver el porqué largo en `startLocked`.
         } catch (e: Exception) {
             logger.error(TAG, "$que audio lanzó", e)
             return Result.failure(e)
@@ -574,6 +640,11 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
 
     override fun release() {
         logger.info(TAG, "Releasing audio engine")
+        // B8 — la marca va PRIMERO, antes de destruir nada: cualquier operación que entre
+        // al mutex después de esta línea se rechaza tipada, y una que ya esté en vuelo la
+        // ve antes de devolver `success`. Sin esto, `start()` después de `release()`
+        // devolvía `success` sobre un motor destruido.
+        releasedFlow.value = true
         stopStatePolling()
         try {
             // 🔴 EL ÚNICO `*Sync` QUE LA LIBRERÍA SIGUE LLAMANDO, y queda declarado.
@@ -600,6 +671,21 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
             while (isActive) {
                 try {
                     refreshStateFromNative()
+                    // 1.11 — la latencia llega TARDE, y una sola lectura la pierde para
+                    // siempre. En el camino Oboe directo (el que shippea en Android)
+                    // `calculateLatencyMillis()` no tiene dato justo después de
+                    // `requestStart()`, así que el `refreshStreamInfo()` de `start()` leía
+                    // -1 y nadie volvía a preguntar: medido en el moto g42, con
+                    // `latencyMillis` en -1.0 para toda la sesión y `onSessionStarted`
+                    // recibiendo ese -1.
+                    //
+                    // Se pregunta de nuevo SÓLO mientras está ausente, así que el costo es
+                    // una llamada JNI por poll hasta que aparece y CERO después. Reintentar
+                    // siempre habría sido una llamada por poll para toda la sesión, en el
+                    // camino que la UI pollea a 100 ms.
+                    if (_state.value.streamInfo?.latencyMillis == null) {
+                        refreshStreamInfo()
+                    }
                     val interval = when {
                         _state.value.isFading -> 16L
                         _state.value.isRunning -> 100L

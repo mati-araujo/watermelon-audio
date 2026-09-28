@@ -218,7 +218,10 @@ WMA_API bool wma_get_stream_info(const WmaEngine* engine,
  * @param[out] sample_rate    Stream sample rate in Hz
  * @param[out] buffer_size    Buffer size in frames
  * @param[out] latency_ms     Estimated latency in milliseconds
- * @param[out] channel_count  Channels of the open stream; 0 when unknown
+ * @param[out] channel_count  Channels of the open stream; 0 when unknown. Written even
+ *             when the call returns false: the absence is a fact worth reporting, and a
+ *             caller that read back its own uninitialised variable would read a plausible
+ *             value instead (measured — an iOS test read 0 for "not low latency").
  * @param[out] is_low_latency -1 unknown / 0 no / 1 yes. Core Audio reports UNKNOWN
  *             on purpose: AVAudioSession has no such mode, and deriving one from
  *             the IO buffer duration would be inventing the answer one layer down.

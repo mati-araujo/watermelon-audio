@@ -639,12 +639,20 @@ bool AudioEngine::start(int fadeTimeMs) {
     // la seleccion automatica.
     LOGI("Using auto sample rate selection");
 
-    oboe::Result result = builder.openStream(mStream);
+    // M5 — se abre en un local y se PUBLICA bajo `mStreamMutex`. Escribir `mStream`
+    // directo dejaba al lector viendo un `shared_ptr` a medio construir, que es la otra
+    // mitad de la misma carrera (la primera es el `reset()`).
+    std::shared_ptr<oboe::AudioStream> opened;
+    oboe::Result result = builder.openStream(opened);
     if (result != oboe::Result::OK) {
         LOGE("Failed to open stream: %s", oboe::convertToText(result));
-        mStream.reset();
+        setLegacyStream(nullptr);
         transitionToState(EngineState::Stopped);
         return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mStreamMutex);
+        mStream = opened;
     }
 
     // ========== CRITICAL: CONFIGURE BUFFER SIZE FOR GLITCH-FREE AUDIO ==========
@@ -675,6 +683,10 @@ bool AudioEngine::start(int fadeTimeMs) {
 
     // Configurar SampleRate en TODOS los osciladores
     int sampleRate = mStream->getSampleRate();
+    // M5 — se publica para que `currentSampleRate()` (que es RT) no tenga que
+    // desreferenciar `mStream`. Estamos con `mStateMutex` tomado, como los cinco sitios
+    // que escriben el puntero.
+    mLegacyStreamSampleRate.store(sampleRate, std::memory_order_release);
 
     // DEBUG: Log stream info for routing diagnostics
     LOGI("=== OUTPUT STREAM OPENED ===");
@@ -784,7 +796,7 @@ bool AudioEngine::start(int fadeTimeMs) {
     if (!transitionToState(EngineState::Running)) {
         LOGE("Failed to transition to Running state");
         mStream->close();
-        mStream.reset();
+        setLegacyStream(nullptr);
         transitionToState(EngineState::Stopped);
         return false;
     }
@@ -794,7 +806,7 @@ bool AudioEngine::start(int fadeTimeMs) {
     if (result != oboe::Result::OK) {
         LOGE("Failed to start stream: %s", oboe::convertToText(result));
         mStream->close();
-        mStream.reset();
+        setLegacyStream(nullptr);
         transitionToState(EngineState::Stopped);
         return false;
     }
@@ -901,7 +913,7 @@ void AudioEngine::stop() {
 #if WMA_HAS_OBOE
     if (mStream) {
         mStream->close();
-        mStream.reset();
+        setLegacyStream(nullptr);
         LOGI("Audio stream closed");
     }
 #endif
@@ -1911,12 +1923,43 @@ void AudioEngine::resumeWithFade(int fadeTimeMs) {
 
 // ========== STREAM INFO (moved from header in Phase 0B) ==========
 
+void AudioEngine::setLegacyStream(std::nullptr_t) {
+    // Se llama SIEMPRE con `mStateMutex` tomado (start() y stop() son sus unicos
+    // llamadores). El atomic se limpia ANTES de soltar el puntero, para que un lector RT
+    // nunca vea un rate que ya no corresponde a ningun stream abierto.
+    mLegacyStreamSampleRate.store(0, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(mStreamMutex);
+    mStream.reset();
+}
+
+std::shared_ptr<oboe::AudioStream> AudioEngine::legacyStream() const {
+    // UNA lectura, y devuelve una COPIA del shared_ptr: eso es lo que mantiene vivo al
+    // stream mientras el llamador lo usa, aunque `stop()` lo resetee en el medio. Leerlo
+    // dos veces —`if (mStream) ... mStream->getSampleRate()`— era justamente el hueco.
+    std::lock_guard<std::mutex> lock(mStreamMutex);
+    return mStream;
+}
+
 int AudioEngine::currentSampleRate() const {
-    int32_t sampleRate = 0;
-    int32_t bufferSize = 0;
-    double latencyMillis = 0.0;
-    if (getStreamInfo(sampleRate, bufferSize, latencyMillis) && sampleRate > 0) {
-        return sampleRate;
+    // M5 — el camino RT NO pasa mas por `getStreamInfo()`.
+    //
+    // Esta funcion esta declarada en `scripts/rt-coverage-baseline.txt`, o sea que la
+    // alcanza el hilo de audio, y hasta ahora desreferenciaba un `shared_ptr` miembro que
+    // `stop()` resetea. Ahora lee un atomic, que es lo unico que el hilo de audio puede
+    // hacer, y `getStreamInfo()` quedo fuera del camino RT — que es lo que le permite
+    // tomar el mutex de control.
+    if (mUseBackendManager.load(std::memory_order_acquire)) {
+        int32_t sampleRate = 0;
+        int32_t bufferSize = 0;
+        double latencyMillis = 0.0;
+        if (getStreamInfo(sampleRate, bufferSize, latencyMillis) && sampleRate > 0) {
+            return sampleRate;
+        }
+    } else {
+        const int32_t legacy = mLegacyStreamSampleRate.load(std::memory_order_acquire);
+        if (legacy > 0) {
+            return legacy;
+        }
     }
 
     // El rate del render offline (REQ-015). Sin backend al que preguntarle es lo
@@ -1946,7 +1989,12 @@ bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double
     // Legacy Oboe path. Off Android mStream is never populated, so this is the
     // only branch and it reports "no stream" — which is correct: without
     // BackendManager running there is nothing to describe.
-    if (!mStream) {
+    // M5 — UNA lectura del puntero, bajo `mStreamMutex`, y lo que queda es una COPIA que
+    // mantiene vivo el stream. La version anterior lo miraba y despues lo desreferenciaba
+    // cuatro veces mas, sin ninguna sincronizacion, desde el poller de la UI: un
+    // `stop()` en el medio era un use-after-free.
+    const std::shared_ptr<oboe::AudioStream> stream = legacyStream();
+    if (!stream) {
         sampleRate = -1;
         bufferSize = -1;
         latencyMillis = -1.0;
@@ -1954,10 +2002,10 @@ bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double
     }
 
 #if WMA_HAS_OBOE
-    sampleRate = mStream->getSampleRate();
-    bufferSize = mStream->getFramesPerBurst();
+    sampleRate = stream->getSampleRate();
+    bufferSize = stream->getFramesPerBurst();
 
-    auto latency = mStream->calculateLatencyMillis();
+    auto latency = stream->calculateLatencyMillis();
     if (latency) {
         latencyMillis = latency.value();
     } else {
@@ -1999,9 +2047,13 @@ bool AudioEngine::getStreamInfoEx(int32_t& sampleRate, int32_t& bufferSize,
     // El camino Oboe directo (el que shippea en Android): los dos valores son
     // propiedades del stream ABIERTO, no del pedido. `getPerformanceMode()` es
     // exactamente la pregunta que Kotlin contestaba con `true` a mano.
-    if (mStream) {
-        channelCount = mStream->getChannelCount();
-        lowLatency = mStream->getPerformanceMode() == oboe::PerformanceMode::LowLatency ? 1 : 0;
+    //
+    // Una sola lectura del puntero y una copia que lo mantiene vivo, igual que arriba
+    // (M5). Y NO se reusa la que hizo `getStreamInfo()`: entre las dos puede haber
+    // corrido un `stop()`, y en ese caso lo correcto es que estos dos queden ausentes.
+    if (const auto stream = legacyStream()) {
+        channelCount = stream->getChannelCount();
+        lowLatency = stream->getPerformanceMode() == oboe::PerformanceMode::LowLatency ? 1 : 0;
     }
 #endif
     return true;

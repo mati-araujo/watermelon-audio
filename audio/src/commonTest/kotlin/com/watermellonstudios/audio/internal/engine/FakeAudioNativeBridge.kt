@@ -49,6 +49,14 @@ internal class FakeAudioNativeBridge(
      * los que siguen se encolan. Ver el test del orden.
      */
     private val gate: CompletableDeferred<Unit>? = null,
+    /**
+     * Lo que `getStreamInfoArray()` devuelve, lectura por lectura (REQ-045, 1.11).
+     *
+     * Una LISTA y no un valor porque el defecto que se prueba es temporal: en el camino
+     * Oboe directo la latencia **no está** justo después de arrancar y aparece unos ms
+     * después. La última entrada se repite cuando se agota la lista.
+     */
+    private val streamInfoReadings: List<FloatArray?> = listOf(null),
 ) : IAudioNativeBridge {
 
     /**
@@ -127,14 +135,18 @@ internal class FakeAudioNativeBridge(
     override fun pauseEngineWithFadeSync(fadeTimeMs: Int) { notModeled("pauseEngineWithFadeSync") }
     @Deprecated("El motor no puede transportar su fallo por un Unit (REQ-045).")
     override fun resumeEngineWithFadeSync(fadeTimeMs: Int) { notModeled("resumeEngineWithFadeSync") }
+    /**
+     * El ÚNICO `*Sync` que la librería sigue llamando: `release()`, que no es `suspend` en
+     * la superficie pública y no tiene a quién reportarle. Modelado por eso, y porque un
+     * `NotImplementedError` es un `Error` —no una `Exception`— así que el `try/catch` de
+     * `release()` no lo atrapa y el test se cae en un lugar que no es el que mide.
+     */
     @Deprecated("El motor no puede transportar su fallo por un Unit (REQ-045).")
-    override fun stopEngineSync() { notModeled("stopEngineSync") }
-    override fun getEngineState(): Int = notModeled("getEngineState")
+    override fun stopEngineSync() {
+        calls += "stopEngineSync"
+    }
     override fun getStateVersion(): Long = notModeled("getStateVersion")
-    override fun hasStreamError(): Boolean = notModeled("hasStreamError")
     override fun getLastStreamErrorCode(): Int = notModeled("getLastStreamErrorCode")
-    override fun clearStreamError() { notModeled("clearStreamError") }
-    override fun getIsPaused(): Boolean = notModeled("getIsPaused")
     override fun isEngineInitialized(): Boolean = notModeled("isEngineInitialized")
     /**
      * `null` = "no hay stream que describir", que es lo que el nativo contesta sin
@@ -142,16 +154,42 @@ internal class FakeAudioNativeBridge(
      * feliz, y un doble que tirara ahí volvería intesteable el camino que AC-045.2 pide.
      */
     override fun getStreamInfoArray(): FloatArray? {
+        val i = streamInfoReads
+        streamInfoReads++
         calls += "getStreamInfoArray"
-        return null
+        return streamInfoReadings[minOf(i, streamInfoReadings.size - 1)]
     }
+
+    /** Cuántas veces se leyó el stream info. Lo afirma el test de la latencia tardía. */
+    var streamInfoReads: Int = 0
+        private set
+
+    // ---- lo que el POLLER necesita ------------------------------------------
+    //
+    // Modelado porque `refreshStateFromNative()` corre ANTES del reintento del stream
+    // info en el bucle de polling: si cualquiera de estos tirara, el reintento de la
+    // latencia (1.11) no se alcanzaría nunca y el test de esa propiedad sería verde por
+    // vacío. Devuelven lo que devuelve un motor corriendo y sin errores.
+
+    override fun hasStreamError(): Boolean = false
+    override fun clearStreamError() { notModeled("clearStreamError") }
+    override fun getEngineState(): Int = nativeEngineState
+    override fun getCurrentFadeVolume(): Float = 1.0f
+    override fun getTargetFadeVolume(): Float = 1.0f
+    override fun getIsFading(): Boolean = false
+    override fun getFadeProgress(): Float = 1.0f
+    override fun getIsPaused(): Boolean = false
+
+    /**
+     * El estado que el nativo reporta. `2` es RUNNING en `EngineLifecycle.fromNativeCode`.
+     *
+     * El nombre NO es `engineState`: su getter generado choca en la JVM con
+     * `getEngineState()` de la interfaz.
+     */
+    var nativeEngineState: Int = 2
     override fun isUsingReducedBuffers(): Boolean = notModeled("isUsingReducedBuffers")
     override fun getMasterVolume(): Float = notModeled("getMasterVolume")
     override fun getSynthVolume(): Float = notModeled("getSynthVolume")
-    override fun getCurrentFadeVolume(): Float = notModeled("getCurrentFadeVolume")
-    override fun getTargetFadeVolume(): Float = notModeled("getTargetFadeVolume")
-    override fun getIsFading(): Boolean = notModeled("getIsFading")
-    override fun getFadeProgress(): Float = notModeled("getFadeProgress")
     override fun setXY(x: Float,  y: Float,  coalesce: Boolean) { notModeled("setXY") }
     override fun setFrequencyAndAmplitude(frequency: Float,  amplitude: Float) { notModeled("setFrequencyAndAmplitude") }
     override fun setFrequencyRange(minHz: Float,  maxHz: Float) { notModeled("setFrequencyRange") }

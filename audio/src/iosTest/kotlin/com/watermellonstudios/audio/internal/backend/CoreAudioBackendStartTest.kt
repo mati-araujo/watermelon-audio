@@ -228,9 +228,15 @@ class CoreAudioBackendStartTest {
      * `CoreAudioBackend` publica `UNKNOWN` (-1) y Kotlin lo mapea a `null`. Un `false`
      * inventado se leería como una medición — el defecto una capa más abajo.
      *
-     * Lo que se afirma **sin depender del entorno**: sin stream la función dice `false`, y
-     * si el stream abrió, `is_low_latency` es exactamente -1 y los canales son > 0. Nunca
-     * un valor plausible para lo que no se sabe.
+     * Lo que se afirma **sin depender del entorno**, y siempre: sin stream la función dice
+     * `false` y deja los dos out-params en su ausencia declarada (canales `0`, modo `-1`),
+     * nunca en un default plausible. Con el stream abierto —lo que depende del runner— los
+     * canales son > 0 y el modo sigue siendo exactamente `-1`.
+     *
+     * 🔴 Una corrida que no pudo abrir el stream **igual verifica algo y lo afirma**: un
+     * `return` temprano con un `println` haría que "no se pudo medir" se leyera como
+     * PASSED, que es la regla que este repo ya aplica a `fetch-corpus.sh` y a
+     * `regen-golden.sh`.
      */
     @Test
     fun elStreamInfoDeIosDiceLosCanalesYNoInventaElModoDeLatencia() = withPreparedSession {
@@ -253,9 +259,32 @@ class CoreAudioBackendStartTest {
                     "sin stream abierto no hay nada que describir y contestó que sí",
                 )
 
+                // 🔴 **El camino de ausencia se AFIRMA, no se saltea** (M6).
+                //
+                // La primera versión hacía `return@memScoped` con un `println` cuando el
+                // runner no tiene salida de audio, así que una corrida que no verificó nada
+                // se leía como PASSED — la regla que este repo aplica a `fetch-corpus.sh` y
+                // a `regen-golden.sh`. Los dos valores de abajo SON la promesa de AC-045.3
+                // para "sin stream": canales en 0 (ausente) y modo en -1 (no se sabe),
+                // nunca un default plausible. Eso vale en cualquier máquina y se afirma
+                // siempre; lo que depende del entorno es sólo lo de más abajo.
+                assertEquals(
+                    0,
+                    channels.value,
+                    "sin stream los canales tienen que ser 0 (ausencia) y salieron en " +
+                        "${channels.value}: un 2 sería el default inventado",
+                )
+                assertEquals(
+                    -1,
+                    lowLatency.value,
+                    "sin stream el modo de latencia tiene que ser -1 (no se sabe) y salió " +
+                        "en ${lowLatency.value}",
+                )
+
                 if (wma_engine_start(engine, 0) != WMA_OK) {
                     println("[CoreAudioBackend] sin salida de audio en este runner: " +
-                        "sólo se verificó el camino de ausencia (ver el KDoc de la clase)")
+                        "este test verificó el camino de AUSENCIA, afirmado arriba; el del " +
+                        "stream abierto queda para una máquina con salida de audio")
                     return@memScoped
                 }
 

@@ -2,12 +2,19 @@ package com.watermellonstudios.audio.internal.engine
 
 import com.watermellonstudios.audio.api.config.AudioEngineConfig
 import com.watermellonstudios.audio.domain.state.EngineLifecycle
+import com.watermellonstudios.audio.callback.AudioAnalyticsListener
+import com.watermellonstudios.audio.callback.NoOpAudioAnalytics
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
+import com.watermellonstudios.audio.domain.state.AudioError
 import com.watermellonstudios.audio.domain.state.StreamInfo
 import com.watermellonstudios.audio.internal.bridge.BridgeConcurrency
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -15,9 +22,11 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 /**
@@ -203,8 +212,16 @@ class AudioEngineImplTest {
             BridgeConcurrency(dispatcher = StandardTestDispatcher(testScheduler)),
         )
 
-        // Tres operaciones DISTINTAS, para que el orden sea legible en la lista. Las
-        // tres son de la categoría LIFECYCLE, así que comparten el mutex.
+        // Cuatro operaciones DISTINTAS, para que el orden sea legible en la lista, y las
+        // cuatro de la categoría LIFECYCLE, así que comparten el mutex.
+        //
+        // 🔴 `start()` VA PRIMERA y no es una más (M7): es la única con la secuencia de
+        // cinco llamadas al bridge más tres escrituras de `state`, o sea la que de verdad
+        // justifica que el mutex viva en el motor y no sólo dentro del bridge. Sin ella,
+        // este test lo pasaría un motor con el mutex sólo en las operaciones de UNA
+        // llamada, donde no hay nada que intercalar.
+        launch { engine.start(fadeMs = 0) }
+        runCurrent()
         launch { engine.pause(fadeMs = 0) }
         runCurrent()
         launch { engine.resume(fadeMs = 0) }
@@ -212,10 +229,10 @@ class AudioEngineImplTest {
         launch { engine.stop(fadeMs = 0) }
         runCurrent()
 
-        // Premisa: sólo la PRIMERA llegó al bridge. Si acá hubiera tres entradas, el
+        // Premisa: sólo la PRIMERA llegó al bridge. Si acá hubiera más de una entrada, el
         // mutex no existe y el resto del test no probaría nada.
         assertEquals(
-            listOf("pauseEngineWithFade:in"),
+            listOf("hasInitializationFailed", "startEngineWithFade:in"),
             bridge.calls,
             "más de una operación entró al bridge con el mutex tomado: no se serializó",
         )
@@ -225,6 +242,7 @@ class AudioEngineImplTest {
 
         assertEquals(
             listOf(
+                "startEngineWithFade:in", "startEngineWithFade:out",
                 "pauseEngineWithFade:in", "pauseEngineWithFade:out",
                 "resumeEngineWithFade:in", "resumeEngineWithFade:out",
                 "stopEngineWithFade:in", "stopEngineWithFade:out",
@@ -281,5 +299,251 @@ class AudioEngineImplTest {
         // Y el default del data class no puede inventar tampoco.
         assertNull(StreamInfo.EMPTY.channelCount)
         assertNull(StreamInfo.EMPTY.isLowLatency)
+    }
+
+    // ============ el espía de analytics, para los tests que afirman AUSENCIA ============
+
+    /**
+     * Anota los eventos que le llegan. Es lo que permite afirmar que una cancelación
+     * **no** publica un error — y una ausencia sólo se puede afirmar contra algo que sí
+     * registra, si no es verde por vacío.
+     */
+    private class AnalyticsSpy : AudioAnalyticsListener by NoOpAudioAnalytics {
+        val errores = mutableListOf<AudioError>()
+        val sesionesIniciadas = mutableListOf<StreamInfo>()
+        override fun onError(error: AudioError) { errores += error }
+        override fun onSessionStarted(streamInfo: StreamInfo) { sesionesIniciadas += streamInfo }
+    }
+
+    /**
+     * **1.10 — cancelar `start()` NO es fallar, y no puede publicarse como si lo fuera.**
+     *
+     * `CancellationException` es una `Exception`, así que el `catch (e: Exception)` de
+     * `startLocked` se la comía **antes** de que `BridgeConcurrency.guarded` pudiera
+     * relanzarla: es el bug exacto que el KDoc de `guarded` dice que WA-1.4 vino a
+     * arreglar para los 22 `catch` del bridge, reintroducido un nivel más arriba.
+     *
+     * ¿Qué bug plausible atrapa? El medido: se cancela `start()` durante el `delay(fade)`
+     * —el motor nativo YA arrancó— y el catch publicaba `STOPPED` + `analytics.onError`
+     * sobre un motor sonando. El poller volvía a escribir `RUNNING` un tick después: un
+     * parpadeo en el estado del consumidor y una métrica de error que no describe ningún
+     * error. Es el ENG-14 de NoisyPad.
+     *
+     * 🔴 La cancelación se dispara **a mitad del fade y por la compuerta del scheduler**,
+     * no con un `sleep`: `advanceTimeBy` mueve el reloj virtual la mitad del fade, ahí se
+     * cancela, y `advanceUntilIdle` deja que todo termine.
+     */
+    @Test
+    fun cancellingStartMidFadeRethrowsInsteadOfPublishingAFailure() = runTest {
+        val spy = AnalyticsSpy()
+        val bridge = FakeAudioNativeBridge()
+        val engine = AudioEngineImpl(
+            AudioEngineConfig(analyticsListener = spy),
+            bridge,
+            BridgeConcurrency(dispatcher = StandardTestDispatcher(testScheduler)),
+        )
+
+        val trabajo = launch { engine.start(fadeMs = 400) }
+        // Hasta la mitad del fade: el motor nativo ya arrancó y `start()` está en el delay.
+        advanceTimeBy(200)
+        assertTrue(
+            bridge.calls.contains("startEngineWithFade:out"),
+            "premisa: el motor nativo tiene que estar YA arrancado cuando se cancela, " +
+                "si no esto no prueba nada (calls=${bridge.calls})",
+        )
+
+        trabajo.cancel()
+        advanceUntilIdle()
+
+        assertTrue(trabajo.isCancelled, "la cancelación no llegó al job: se la tragó alguien")
+
+        // Lo que NO tiene que haber pasado. Las tres aserciones son la propiedad.
+        assertEquals(
+            emptyList(),
+            spy.errores,
+            "publicó un error de analytics por una CANCELACIÓN: eso no es un fallo del motor",
+        )
+        assertNotEquals(
+            EngineLifecycle.STOPPED,
+            engine.state.value.lifecycle,
+            "publicó STOPPED sobre un motor que quedó arrancado — el parpadeo del ENG-14",
+        )
+        assertNull(engine.state.value.error, "publicó un AudioError por una cancelación")
+    }
+
+    /**
+     * **M4 — el gemelo del `stop()` que falla.**
+     *
+     * El motor dice que no paró: `Result.failure`, error publicado, y el `lifecycle` lo
+     * sigue escribiendo el **poller** con lo que el nativo reporta. Eso es lo honesto —
+     * publicar `STOPPED` sería la mentira al revés, y apagar el poller dejaría el estado
+     * congelado en lo último que alcanzó a escribir.
+     *
+     * ¿Qué bug plausible atrapa? Que alguien "arregle" esto publicando `STOPPED` en el
+     * camino de fallo, o que apague el polling antes de saber si el motor paró.
+     */
+    @Test
+    fun aFailedStopKeepsThePollerSoTheStateFollowsTheEngine() = runTest {
+        val causa = NativeBridgeException.InvalidOperation("stop", "Running")
+        val bridge = FakeAudioNativeBridge(
+            lifecycleResults = mapOf("stopEngineWithFade" to Result.failure(causa)),
+        )
+        val engine = AudioEngineImpl(AudioEngineConfig(), bridge)
+
+        val result = engine.stop(fadeMs = 0)
+
+        assertTrue(result.isFailure, "el motor dijo que no paró y stop() devolvió éxito")
+        assertSame(causa, result.exceptionOrNull(), "la causa se re-derivó en vez de transportarse")
+        assertNotNull(engine.state.value.error, "un stop que falló tiene que dejar el error a la vista")
+        assertNotEquals(
+            EngineLifecycle.STOPPED,
+            engine.state.value.lifecycle,
+            "publicó STOPPED sobre un motor que dijo que no paró",
+        )
+        // Y NO siguió con el resto del apagado: el doble tira ante lo no modelado, así que
+        // un paso de más sería rojo. Lo que se ve es la llamada y nada después.
+        assertEquals(
+            listOf("stopEngineWithFade:in", "stopEngineWithFade:out"),
+            bridge.calls,
+            "siguió apagando cosas después de que el motor dijo que no paró",
+        )
+    }
+
+    /**
+     * **1.11 — la latencia llega TARDE, y el poller la va a buscar.**
+     *
+     * Medido en el moto g42: en el camino Oboe directo —el que shippea en Android—
+     * `calculateLatencyMillis()` no tiene dato justo después de `requestStart()`, así que
+     * la única lectura que hacía `start()` traía `-1` y nadie volvía a preguntar. El
+     * consumidor veía `StreamInfo(sampleRate=48000, bufferSizeInFrames=240,
+     * channelCount=2, latencyMillis=-1.0, isLowLatency=true)` para toda la sesión, y ese
+     * `-1` llegaba a `analytics.onSessionStarted`.
+     *
+     * ¿Qué bug plausible atrapa? Los dos: que un `-1` se publique como latencia, y que se
+     * lea una sola vez y quede ausente para siempre.
+     *
+     * 🔴 Va con `runBlocking` y **espera por CONDICIÓN con techo**, no con un `sleep`: el
+     * poller corre en el scope propio del motor, sobre `Dispatchers.Default`, y ése no se
+     * inyecta. Un techo agotado es rojo, no un salteo.
+     */
+    @Test
+    fun theLatencyThatArrivesLateIsPickedUpByThePoller() = runBlocking {
+        val spy = AnalyticsSpy()
+        val sinLatencia = floatArrayOf(48000f, 240f, -1f, 2f, 1f)
+        val conLatencia = floatArrayOf(48000f, 240f, 8.5f, 2f, 1f)
+        val bridge = FakeAudioNativeBridge(
+            streamInfoReadings = listOf(sinLatencia, sinLatencia, conLatencia),
+        )
+        val engine = AudioEngineImpl(AudioEngineConfig(analyticsListener = spy), bridge)
+
+        try {
+            assertTrue(engine.start(fadeMs = 0).isSuccess, "el motor aceptó y start() falló")
+
+            // Lo primero que se publica: la latencia AUSENTE, nunca -1.0.
+            val primera = assertNotNull(engine.state.value.streamInfo)
+            assertNull(
+                primera.latencyMillis,
+                "publicó ${primera.latencyMillis} como latencia: un negativo no es una " +
+                    "medición, es la ausencia de una",
+            )
+            assertEquals(48000, primera.sampleRate, "y el resto del stream info sí viajó")
+            assertEquals(
+                listOf(null),
+                spy.sesionesIniciadas.map { it.latencyMillis },
+                "onSessionStarted recibió un -1 disfrazado de latencia",
+            )
+
+            // Y el poller vuelve a preguntar hasta que llega. Espera por CONDICIÓN.
+            val llegada = withTimeoutOrNull(5_000) {
+                engine.state.first { it.streamInfo?.latencyMillis != null }
+            }
+            assertNotNull(
+                llegada,
+                "la latencia nunca llegó: el poller no vuelve a preguntar, así que un -1 " +
+                    "inicial queda ausente para toda la sesión (lecturas=${bridge.streamInfoReads})",
+            )
+            assertEquals(8.5, llegada.streamInfo?.latencyMillis)
+        } finally {
+            engine.release()
+        }
+    }
+
+    /**
+     * **B8 — después de `release()`, nadie puede decir que sí.**
+     *
+     * `release()` destruye el motor nativo y **no puede tomar el mutex** (es
+     * `override fun`, no `suspend`, en la superficie pública). Sin una marca, las cuatro
+     * del ciclo de vida seguían devolviendo `success` sobre un motor destruido.
+     *
+     * ¿Qué bug plausible atrapa? El uso-después-de-liberar más común de una librería de
+     * audio: la UI se va, alguien libera, y un callback tardío llama `start()`.
+     */
+    @Test
+    fun afterReleaseEveryLifecycleCallIsARejectionWithATypedCause() = runTest {
+        val bridge = FakeAudioNativeBridge()
+        val engine = AudioEngineImpl(AudioEngineConfig(), bridge)
+
+        engine.release()
+        val despues = bridge.calls.size
+
+        for ((que, llamada) in listOf<Pair<String, suspend () -> Result<Unit>>>(
+            "start" to { engine.start(fadeMs = 0) },
+            "stop" to { engine.stop(fadeMs = 0) },
+            "pause" to { engine.pause(fadeMs = 0) },
+            "resume" to { engine.resume(fadeMs = 0) },
+        )) {
+            val r = llamada()
+            assertTrue(r.isFailure, "$que devolvió éxito sobre un motor ya liberado")
+            val causa = assertIs<NativeBridgeException.InvalidOperation>(
+                r.exceptionOrNull(),
+                "$que falló pero sin causa tipada de 'motor liberado': ${r.exceptionOrNull()}",
+            )
+            assertEquals("RELEASED", causa.currentState, "la causa no nombra el estado real")
+        }
+
+        // Y no tocó el motor NI UNA vez: el rechazo es antes del bridge.
+        assertEquals(
+            despues,
+            bridge.calls.size,
+            "le pidió algo al motor después de liberarlo (calls=${bridge.calls})",
+        )
+    }
+
+    /**
+     * **B8, la mitad difícil — un `start()` EN VUELO que termina después de `release()`.**
+     *
+     * El rechazo de la entrada no alcanza: una operación que ya tomó el mutex antes del
+     * release no lo ve al entrar. Tiene que volver a mirar antes de devolver `success`,
+     * porque a esa altura el motor que iba a afirmar que está andando ya no existe.
+     */
+    @Test
+    fun aStartInFlightWhenReleaseHappensCannotReportSuccess() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val bridge = FakeAudioNativeBridge(gate = gate)
+        val engine = AudioEngineImpl(
+            AudioEngineConfig(),
+            bridge,
+            BridgeConcurrency(dispatcher = StandardTestDispatcher(testScheduler)),
+        )
+
+        var resultado: Result<Unit>? = null
+        launch { resultado = engine.start(fadeMs = 0) }
+        runCurrent()
+        assertEquals(
+            listOf("hasInitializationFailed", "startEngineWithFade:in"),
+            bridge.calls,
+            "premisa: el start tiene que estar EN VUELO y adentro del bridge",
+        )
+
+        engine.release()
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        val r = assertNotNull(resultado, "el start nunca terminó")
+        assertTrue(
+            r.isFailure,
+            "un start que terminó DESPUÉS del release devolvió éxito: estaría afirmando que " +
+                "un motor destruido está andando",
+        )
     }
 }

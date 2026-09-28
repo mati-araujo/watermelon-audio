@@ -346,52 +346,101 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // ==================== Lifecycle Operations (Synchronous - Legacy Compatibility) ====================
 
     /**
+     * Deja RASTRO del código que un `*Sync` no puede devolver (REQ-045, A2).
+     *
+     * 🔴 **El consumidor real usa los `*Sync`, no `AudioEngine`.** NoisyPad llama
+     * `startEngineWithFadeSync` desde `AudioEngineStateManager` y publica RUNNING
+     * incondicional, así que arreglar sólo la puerta pública le dejaba el defecto D1
+     * intacto por el camino que de verdad usa.
+     *
+     * El tipo de retorno **no se cambia a propósito**: NoisyPad tiene tres dobles que
+     * overridean estos miembros (`NoOpAudioNativeBridge`, `FakeEngineBridge`), y
+     * cambiarlo rompería su compilación en el mismo release en que este REQ promete
+     * compatibilidad en fuente. Así que lo que se compra acá es lo que se puede comprar
+     * sin romper nada: el fallo deja de ser **invisible**. Pasa de "no ocurrió nada" a
+     * una línea de log con el código, que es lo que se puede buscar en un bug report.
+     *
+     * La migración de verdad —pasar a la variante `suspend`, que devuelve el `Result`—
+     * la pide la carta de bump, y el `ReplaceWith` de cada `@Deprecated` la nombra.
+     */
+    private fun Int.logSiFallo(operation: String) {
+        if (this != NativeErrorCode.SUCCESS.code) {
+            Log.w(
+                TAG,
+                "$operation (variante Sync): el motor devolvió $this " +
+                    "(${NativeErrorCode.fromCode(this)}) y un Unit no puede transportarlo. " +
+                    "Usá la variante suspend, que devuelve Result<Unit>.",
+            )
+        }
+    }
+
+    /**
      * Start engine with fade-in synchronously (for legacy callers).
      */
-    @Deprecated("Un Unit no puede transportar el fallo del motor (REQ-045). Usá la variante suspend.")
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor (REQ-045): el codigo se pierde y\nel llamador sigue como si hubiera funcionado. La variante suspend devuelve\nResult<Unit> con la causa tipada y se serializa bajo LIFECYCLE.",
+        ReplaceWith("startEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
     override fun startEngineWithFadeSync(fadeTimeMs: Int) {
-        // El codigo SE DESCARTA acá, y el `@Deprecated` de la interfaz dice por qué:
-        // un `Unit` no tiene dónde ponerlo. El reemplazo es la variante `suspend`.
-        nativeStartEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+        // El codigo no tiene dónde ir en un `Unit`, pero SÍ deja rastro: ver
+        // [logSiFallo]. El reemplazo es la variante `suspend`.
+        nativeStartEngineWithFade(fadeTimeMs.coerceAtLeast(0)).logSiFallo("startEngineWithFade")
     }
 
     /**
      * Stop engine with fade-out synchronously (for legacy callers).
      */
-    @Deprecated("Un Unit no puede transportar el fallo del motor (REQ-045). Usá la variante suspend.")
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor (REQ-045): el codigo se pierde y\nel llamador sigue como si hubiera funcionado. La variante suspend devuelve\nResult<Unit> con la causa tipada y se serializa bajo LIFECYCLE.",
+        ReplaceWith("stopEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
     override fun stopEngineWithFadeSync(fadeTimeMs: Int) {
-        // El codigo SE DESCARTA acá, y el `@Deprecated` de la interfaz dice por qué:
-        // un `Unit` no tiene dónde ponerlo. El reemplazo es la variante `suspend`.
-        nativeStopEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+        // El codigo no tiene dónde ir en un `Unit`, pero SÍ deja rastro: ver
+        // [logSiFallo]. El reemplazo es la variante `suspend`.
+        nativeStopEngineWithFade(fadeTimeMs.coerceAtLeast(0)).logSiFallo("stopEngineWithFade")
     }
 
     /**
      * Pause engine with fade-out synchronously (for legacy callers).
      */
-    @Deprecated("Un Unit no puede transportar el fallo del motor (REQ-045). Usá la variante suspend.")
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor (REQ-045): el codigo se pierde y\nel llamador sigue como si hubiera funcionado. La variante suspend devuelve\nResult<Unit> con la causa tipada y se serializa bajo LIFECYCLE.",
+        ReplaceWith("pauseEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
     override fun pauseEngineWithFadeSync(fadeTimeMs: Int) {
-        // El codigo SE DESCARTA acá, y el `@Deprecated` de la interfaz dice por qué:
-        // un `Unit` no tiene dónde ponerlo. El reemplazo es la variante `suspend`.
-        nativePauseEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+        // El codigo no tiene dónde ir en un `Unit`, pero SÍ deja rastro: ver
+        // [logSiFallo]. El reemplazo es la variante `suspend`.
+        nativePauseEngineWithFade(fadeTimeMs.coerceAtLeast(0)).logSiFallo("pauseEngineWithFade")
     }
 
     /**
      * Resume engine with fade-in synchronously (for legacy callers).
      */
-    @Deprecated("Un Unit no puede transportar el fallo del motor (REQ-045). Usá la variante suspend.")
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor (REQ-045): el codigo se pierde y\nel llamador sigue como si hubiera funcionado. La variante suspend devuelve\nResult<Unit> con la causa tipada y se serializa bajo LIFECYCLE.",
+        ReplaceWith("resumeEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
     override fun resumeEngineWithFadeSync(fadeTimeMs: Int) {
-        // El codigo SE DESCARTA acá, y el `@Deprecated` de la interfaz dice por qué:
-        // un `Unit` no tiene dónde ponerlo. El reemplazo es la variante `suspend`.
-        nativeResumeEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+        // El codigo no tiene dónde ir en un `Unit`, pero SÍ deja rastro: ver
+        // [logSiFallo]. El reemplazo es la variante `suspend`.
+        nativeResumeEngineWithFade(fadeTimeMs.coerceAtLeast(0)).logSiFallo("resumeEngineWithFade")
     }
 
     /**
      * Stop engine synchronously (for legacy callers).
      */
-    @Deprecated("Un Unit no puede transportar el fallo del motor (REQ-045). Usá la variante suspend.")
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor (REQ-045): el codigo se pierde y\nel llamador sigue como si hubiera funcionado. La variante suspend devuelve\nResult<Unit> con la causa tipada y se serializa bajo LIFECYCLE.",
+        ReplaceWith("stopEngine()"),
+        DeprecationLevel.WARNING,
+    )
     override fun stopEngineSync() {
-        // Idem: el codigo no tiene dónde ir en un `Unit`. Ver el `@Deprecated`.
-        nativeStopEngine()
+        // Idem: no tiene dónde ir, pero deja rastro. Ver [logSiFallo].
+        nativeStopEngine().logSiFallo("stopEngine")
     }
 
     // ==================== State Queries (No mutex needed) ====================
