@@ -561,9 +561,16 @@ class AudioEngineImplTest {
 
             // El poller SIGUE VIVO y el lifecycle publicado sigue al motor: cambia lo que
             // el nativo reporta y esperamos por CONDICIÓN a que el poller lo levante.
-            bridge.nativeEngineState = 3 // STOPPING en EngineLifecycle.fromNativeCode
+            //
+            // 🔴 El código NO puede ser `3` (STOPPING): `stopLocked` YA publicó
+            // STOPPING de forma directa, antes de saber si el bridge iba a fallar —
+            // así que `engine.state.first { it.lifecycle == STOPPING }` daría VERDE
+            // de inmediato sin que el poller hiciera nada, midiendo cero. `1`
+            // (STARTING) no lo escribe nadie más en este punto: la única forma de que
+            // vuelva a aparecer es que el poller vuelva a preguntarle al nativo.
+            bridge.nativeEngineState = 1 // STARTING en EngineLifecycle.fromNativeCode
             val siguioAlMotor = withTimeoutOrNull(5_000) {
-                engine.state.first { it.lifecycle == EngineLifecycle.STOPPING }
+                engine.state.first { it.lifecycle == EngineLifecycle.STARTING }
             }
             // `assertTrue`, no `assertNotNull`: acá es la ÚLTIMA expresión del bloque
             // `try`, y `assertNotNull` devuelve el valor no-nulo — el tipo del `try`
