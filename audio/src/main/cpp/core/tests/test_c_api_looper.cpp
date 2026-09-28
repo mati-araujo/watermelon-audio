@@ -1580,4 +1580,86 @@ TEST_F(CApiLooperTest, ANullEngineIsSurvivedByBothHalvesOfThePair) {
     EXPECT_FALSE(wma_looper_is_track_send_to_fx(nullptr, 0));
 }
 
+
+// ===========================================================================
+// REQ-045 — el looper que dice que no, desde la C API (D4, D6).
+//
+// El oráculo de los tres campos NO es el setter que se está probando: se lee
+// `AudioLooper::getCapabilities()` por el handle del motor. Un round-trip contra
+// el propio setter habría dado verde con el defecto adentro, porque el defecto
+// era precisamente que el setter reconstruía los tres campos.
+// ===========================================================================
+
+TEST_F(CApiLooperTest, Req045SetCapabilitiesLeavesTheZeroFieldsAlone) {
+    startAt(kSampleRate, /*fadeTimeMs=*/0);
+    auto caps = [this] { return mWma->engine->getAudioLooper().getCapabilities(); };
+
+    wma_looper_set_capabilities(mWma, 64LL * 1024 * 1024, /*max_tracks=*/6,
+                                /*max_free_seconds=*/120);
+    ASSERT_EQ(caps().memoryBudgetBytes, 64u * 1024 * 1024);
+    ASSERT_EQ(caps().maxActiveTracks, 6);
+    ASSERT_EQ(caps().maxFreeSeconds, 120);
+
+    // AC-045.6: sólo las pistas se piden; los otros dos van en 0, o sea "no toques".
+    wma_looper_set_capabilities(mWma, 0, /*max_tracks=*/4, /*max_free_seconds=*/0);
+    EXPECT_EQ(caps().maxActiveTracks, 4) << "lo que SÍ se pidió tiene que cambiar";
+    EXPECT_EQ(caps().memoryBudgetBytes, 64u * 1024 * 1024)
+        << "un 0 reseteó el presupuesto al default: es el contrato del header al revés, "
+           "y un tier de 64 MB se queda en 48 sin que nadie se entere";
+    EXPECT_EQ(caps().maxFreeSeconds, 120) << "un 0 reseteó el tope de la toma libre";
+
+    // Los tres en 0 es un no-op completo, no un reset de todo.
+    wma_looper_set_capabilities(mWma, 0, 0, 0);
+    EXPECT_EQ(caps().memoryBudgetBytes, 64u * 1024 * 1024);
+    EXPECT_EQ(caps().maxActiveTracks, 4);
+    EXPECT_EQ(caps().maxFreeSeconds, 120);
+}
+
+TEST_F(CApiLooperTest, Req045ImportTrackExNamesTheCauseAndTheBoolDelegates) {
+    startAt(kSampleRate, /*fadeTimeMs=*/0);
+
+    // Éxito: la referencia contra la que valen los rechazos.
+    const std::string bueno = tempPath("bueno.wav");
+    {
+        std::vector<float> muestras(20'000 * 2, 0.375f);
+        ASSERT_TRUE(wav::writeWav(bueno.c_str(), muestras.data(), 20'000, kSampleRate,
+                                  wav::BitDepth::FLOAT_32));
+    }
+    EXPECT_EQ(wma_looper_import_track_ex(mWma, 0, bueno.c_str(), kSampleRate), WMA_OK);
+    EXPECT_TRUE(wma_looper_import_track(mWma, 0, bueno.c_str(), kSampleRate))
+        << "el bool tiene que seguir siendo el mismo camino, sólo sin la causa";
+
+    // Io — el archivo no abre. Y la ruta nula es el mismo caso.
+    const std::string noExiste = tempPath("no-existe.wav");
+    EXPECT_EQ(wma_looper_import_track_ex(mWma, 1, noExiste.c_str(), kSampleRate),
+              WMA_ERROR_IO);
+    EXPECT_EQ(wma_looper_import_track_ex(mWma, 1, nullptr, kSampleRate), WMA_ERROR_IO);
+    EXPECT_FALSE(wma_looper_import_track(mWma, 1, noExiste.c_str(), kSampleRate));
+
+    // UnsupportedFormat — abre y no es RIFF/WAVE.
+    const std::string basura = tempPath("basura.wav");
+    {
+        std::ofstream f(basura, std::ios::binary);
+        f << "no soy un wav, soy un archivo";
+    }
+    EXPECT_EQ(wma_looper_import_track_ex(mWma, 1, basura.c_str(), kSampleRate),
+              WMA_ERROR_UNSUPPORTED_FORMAT);
+    EXPECT_FALSE(wma_looper_import_track(mWma, 1, basura.c_str(), kSampleRate));
+
+    // BudgetExceeded — el MISMO archivo que importó arriba, con el presupuesto
+    // apretado. Que sea el mismo es lo que prueba que la causa es el presupuesto.
+    wma_looper_set_capabilities(mWma, /*budget_bytes=*/64 * 1024, 0, 0);
+    EXPECT_EQ(wma_looper_import_track_ex(mWma, 1, bueno.c_str(), kSampleRate),
+              WMA_ERROR_MEMORY_BUDGET);
+    EXPECT_FALSE(wma_looper_import_track(mWma, 1, bueno.c_str(), kSampleRate));
+
+    // Índice fuera del límite de pistas activas, y motor nulo.
+    wma_looper_set_capabilities(mWma, 64LL * 1024 * 1024, 0, 0);
+    EXPECT_EQ(wma_looper_import_track_ex(mWma, 99, bueno.c_str(), kSampleRate),
+              WMA_ERROR_INVALID_OPERATION);
+    EXPECT_EQ(wma_looper_import_track_ex(nullptr, 0, bueno.c_str(), kSampleRate),
+              WMA_ERROR_NOT_INITIALIZED);
+    EXPECT_FALSE(wma_looper_import_track(nullptr, 0, bueno.c_str(), kSampleRate));
+}
+
 }  // namespace wma_test

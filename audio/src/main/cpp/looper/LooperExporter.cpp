@@ -328,13 +328,78 @@ bool LooperExporter::captureTrack(int trackIndex, const char* filePath,
 // ---------------------------------------------------------------------------
 
 bool LooperExporter::importTrack(int trackIndex, const char* filePath, int sampleRate) {
-    if (trackIndex < 0 || trackIndex >= mL.getMaxActiveTracks()) return false;
+    return importTrackChecked(trackIndex, filePath, sampleRate) == ImportStatus::Ok;
+}
+
+/**
+ * REQ-045 D6 — import that rejects from the HEADER and never destroys the target.
+ *
+ * What changed, and why the order is the fix:
+ *
+ *  1. The memory-budget decision is taken from the header alone (frames, rate,
+ *     channels), so a 5-minute file over the budget costs one open + a few reads
+ *     instead of decoding and resampling ~55 MB first. The size is derived with the
+ *     SAME `ceil(numFrames × ratio)` formula the resample below uses — two formulas
+ *     would mean the check and the allocation disagree by a frame at some ratio.
+ *  2. Everything that can fail is done BEFORE the destination track is touched:
+ *     header, representability, budget, decode and resample. The decode's buffer is
+ *     `outputFrames × 2` floats — the same RAM the track is about to reserve — so by
+ *     the time clear() runs, the allocation has effectively already been proven.
+ *     Before this, `setMuted(true)` + `clear()` ran first and a failing `allocate()`
+ *     left the track EMPTY AND MUTED: an out-of-memory import silently deleted a
+ *     take.
+ *  3. writeFrame()'s return is read. It reports a dropped frame (pool exhausted);
+ *     ignoring it produced a track that reported the full length with silence in it.
+ */
+ImportStatus LooperExporter::importTrackChecked(int trackIndex, const char* filePath,
+                                               int sampleRate) {
+    if (trackIndex < 0 || trackIndex >= mL.getMaxActiveTracks()) return ImportStatus::InvalidTrack;
+
+    // ---- 1. Header only: not one sample decoded, not one byte of payload read.
+    wav::WavInfo info;
+    const wav::WavReadStatus headerStatus = wav::readWavInfo(filePath, info);
+    if (headerStatus == wav::WavReadStatus::Io) {
+        EXP_LOGE("importTrack FAILED: the file did not open");
+        return ImportStatus::Io;
+    }
+    if (headerStatus != wav::WavReadStatus::Ok || info.numFrames <= 0) {
+        EXP_LOGE("importTrack FAILED: unsupported format or corrupt file");
+        return ImportStatus::UnsupportedFormat;
+    }
+
+    // ---- 2. The resampled size, from the header.
+    const bool needsResampleFromHeader = (info.sampleRate > 0 && info.sampleRate != sampleRate);
+    int64_t outputFrames64 = info.numFrames;
+    if (needsResampleFromHeader) {
+        const double headerRatio = static_cast<double>(sampleRate)
+                                 / static_cast<double>(info.sampleRate);
+        outputFrames64 = static_cast<int64_t>(std::ceil(info.numFrames * headerRatio));
+    }
+    // A length no track can address. Not a format problem and not the budget's
+    // doing: the request is simply larger than the storage can hold, which is the
+    // same answer an allocation failure gives.
+    if (outputFrames64 <= 0 || outputFrames64 > static_cast<int64_t>(INT32_MAX)) {
+        EXP_LOGE("importTrack FAILED: %lld frames after resample is unallocatable",
+                 static_cast<long long>(outputFrames64));
+        return ImportStatus::OutOfMemory;
+    }
+
+    // ---- 3. Budget (reserved RAM — see AudioLooper::prepareTrack), before decoding.
+    const size_t needed = static_cast<size_t>(outputFrames64) * 2 * sizeof(float);
+    const size_t currentUsage = mL.getTotalReservedBytes();
+    const size_t trackCurrent = mL.mTracks[trackIndex].reservedBytes();
+    const size_t budget = mL.getMemoryBudgetBytes();
+    if (currentUsage - trackCurrent + needed > budget) {
+        EXP_LOGE("importTrack FAILED: memory budget exceeded (need %zu, budget %zu, used %zu)",
+                 needed, budget, currentUsage - trackCurrent);
+        return ImportStatus::BudgetExceeded;
+    }
 
     EXP_LOGD("importTrack: reading %s", filePath);
     wav::WavData wavData = wav::readWav(filePath);
     if (wavData.numFrames <= 0) {
         EXP_LOGE("importTrack FAILED: readWav returned 0 frames (unsupported format or corrupt file)");
-        return false;
+        return ImportStatus::UnsupportedFormat;
     }
     EXP_LOGD("importTrack: %d frames, %dHz, %d ch", wavData.numFrames, wavData.sampleRate, wavData.numChannels);
 
@@ -377,16 +442,8 @@ bool LooperExporter::importTrack(int trackIndex, const char* filePath, int sampl
 
     const float* srcBuffer = needsResample ? resampledBuffer.data() : wavData.buffer.data();
 
-    // Check memory budget (reserved RAM — see AudioLooper::prepareTrack).
-    size_t needed = static_cast<size_t>(outputFrames) * 2 * sizeof(float);
-    size_t currentUsage = mL.getTotalReservedBytes();
-    size_t trackCurrent = mL.mTracks[trackIndex].reservedBytes();
-    const size_t budget = mL.getMemoryBudgetBytes();
-    if (currentUsage - trackCurrent + needed > budget) {
-        EXP_LOGE("importTrack FAILED: memory budget exceeded (need %zu, budget %zu, used %zu)",
-                 needed, budget, currentUsage - trackCurrent);
-        return false;
-    }
+    // Nothing above this line touched the destination track: a failure so far leaves
+    // the previous take playing exactly as it was (AC-045.8).
 
     // Stop playback on this track before clearing to avoid race with audio thread.
     mL.mTracks[trackIndex].setMuted(true);
@@ -399,15 +456,29 @@ bool LooperExporter::importTrack(int trackIndex, const char* filePath, int sampl
     // Allocate and fill with (possibly resampled) data. allocate() pre-reserves the
     // pool for the full capacity, so the writes below never hit an empty pool.
     size_t allocated = mL.mTracks[trackIndex].allocate(outputFrames, sampleRate);
-    if (allocated == 0) return false;
+    if (allocated == 0) {
+        // The decoded buffer above is the same size as this allocation, so reaching
+        // here means the RAM went away between the two. Unmute so the track is not
+        // left silent-and-muted on top of being empty.
+        mL.mTracks[trackIndex].setMuted(false);
+        EXP_LOGE("importTrack FAILED: the track could not reserve %d frames", outputFrames);
+        return ImportStatus::OutOfMemory;
+    }
 
     for (int i = 0; i < outputFrames; ++i) {
-        mL.mTracks[trackIndex].writeFrame(srcBuffer[i * 2], srcBuffer[i * 2 + 1]);
+        if (!mL.mTracks[trackIndex].writeFrame(srcBuffer[i * 2], srcBuffer[i * 2 + 1])) {
+            // A dropped frame means the storage ran out mid-fill: the track would
+            // report the full length with a hole in it. Report the cause instead.
+            mL.mTracks[trackIndex].clear();
+            mL.mTracks[trackIndex].setMuted(false);
+            EXP_LOGE("importTrack FAILED: storage exhausted at frame %d of %d", i, outputFrames);
+            return ImportStatus::OutOfMemory;
+        }
     }
     mL.mTracks[trackIndex].finalizeRecording();
     mL.mTracks[trackIndex].setMuted(false);
     mL.mEnabled.store(true, std::memory_order_release);
-    return true;
+    return ImportStatus::Ok;
 }
 
 }  // namespace wm
@@ -431,4 +502,8 @@ bool AudioLooper::captureTrack(int trackIndex, const char* filePath, wav::BitDep
 }
 bool AudioLooper::importTrack(int trackIndex, const char* filePath, int sampleRate) {
     return wm::LooperExporter(*this).importTrack(trackIndex, filePath, sampleRate);
+}
+wm::ImportStatus AudioLooper::importTrackChecked(int trackIndex, const char* filePath,
+                                                int sampleRate) {
+    return wm::LooperExporter(*this).importTrackChecked(trackIndex, filePath, sampleRate);
 }

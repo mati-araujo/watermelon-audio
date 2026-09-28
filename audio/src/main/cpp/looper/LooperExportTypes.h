@@ -22,4 +22,21 @@ struct ExportOptions {
     wav::WavMetadata metadata; // BPM, project name, etc. — embedded in WAV
 };
 
+/**
+ * @brief Why an import did not happen (REQ-045 D6).
+ *
+ * The bool importTrack() used to return could not tell a consumer whether to offer
+ * "free some space", "pick another file" or "try again" — NoisyPad's own audit asked
+ * for exactly this. Every value here is reached BEFORE the destination track is
+ * touched, so a non-Ok status also means "the track still holds what it held".
+ */
+enum class ImportStatus {
+    Ok = 0,
+    InvalidTrack,        ///< index out of range for the active-track limit
+    Io,                  ///< the file did not open
+    UnsupportedFormat,   ///< not a RIFF/WAVE, or a format the reader does not decode
+    BudgetExceeded,      ///< the resampled size does not fit the memory budget
+    OutOfMemory,         ///< the destination track could not reserve the storage
+};
+
 }  // namespace wm

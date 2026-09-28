@@ -2262,10 +2262,17 @@ int wma_looper_get_tail_ms(const WmaEngine* engine) {
 void wma_looper_set_capabilities(WmaEngine* engine, int64_t budget_bytes,
                                   int max_tracks, int max_free_seconds) {
     WMA_CHECK_VOID(engine);
-    // Defaults reproduce the historical behaviour; each field is only overridden
-    // when the caller passes a positive value. That "0 means leave it alone"
-    // contract is the whole reason this takes three arguments instead of a struct.
-    AudioLooper::LooperCapabilities caps;
+    // "0 means leave it alone" — so the baseline is what the looper has RIGHT NOW,
+    // not the defaults (REQ-045 D4). Starting from a default-constructed struct made
+    // this the opposite of its own contract: `set_capabilities(0, 4, 0)` on a device
+    // configured for 64 MB / 120 s silently reset it to 48 MB / 60 s, and the caller
+    // that only wanted to change the track count had no way to tell.
+    //
+    // Reading back what the looper reports (rather than remembering what was pushed)
+    // also keeps the looper's own safe-reduction rule visible: `maxActiveTracks` is
+    // clamped up to the highest active track, so re-applying the vigente value is a
+    // no-op instead of a silent attempt to shrink below it.
+    AudioLooper::LooperCapabilities caps = engine->engine->getAudioLooper().getCapabilities();
     if (budget_bytes > 0) caps.memoryBudgetBytes = static_cast<size_t>(budget_bytes);
     if (max_tracks > 0) caps.maxActiveTracks = max_tracks;
     if (max_free_seconds > 0) caps.maxFreeSeconds = max_free_seconds;
@@ -2408,8 +2415,31 @@ bool wma_looper_export_track(WmaEngine* engine, int track_index, const char* fil
     }
 }
 
+WmaResult wma_looper_import_track_ex(WmaEngine* engine, int track_index,
+                                     const char* file_path, int sample_rate) {
+    WMA_CHECK_VAL(engine, WMA_ERROR_NOT_INITIALIZED);
+    if (!file_path) return WMA_ERROR_IO;
+    try {
+        switch (engine->engine->getAudioLooper().importTrackChecked(track_index, file_path,
+                                                                   sample_rate)) {
+            case wm::ImportStatus::Ok:                return WMA_OK;
+            case wm::ImportStatus::InvalidTrack:      return WMA_ERROR_INVALID_OPERATION;
+            case wm::ImportStatus::Io:                return WMA_ERROR_IO;
+            case wm::ImportStatus::UnsupportedFormat: return WMA_ERROR_UNSUPPORTED_FORMAT;
+            case wm::ImportStatus::BudgetExceeded:    return WMA_ERROR_MEMORY_BUDGET;
+            case wm::ImportStatus::OutOfMemory:       return WMA_ERROR_MEMORY;
+        }
+        return WMA_ERROR_UNKNOWN;
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
 bool wma_looper_import_track(WmaEngine* engine, int track_index,
                               const char* file_path, int sample_rate) {
+    // Untouched: AudioLooper::importTrack is itself importTrackChecked with the
+    // cause dropped, so the two entry points share one implementation without this
+    // one having to know the code table (REQ-045 decision 4: additive).
     WMA_CHECK_VAL(engine, false);
     if (!file_path) return false;
     try {

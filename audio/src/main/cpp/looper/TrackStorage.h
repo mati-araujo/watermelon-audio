@@ -33,6 +33,9 @@ namespace wm {
 
 class TrackStorage {
 public:
+    /** "No ceiling" for saveUndo()'s headroom argument. */
+    static constexpr size_t kNoExtraLimit = static_cast<size_t>(-1);
+
     // ---- lifecycle (UI/IO thread) ----
 
     /** (Re)initialise to `frames` of silence. Returns logical bytes (frames×2×4). */
@@ -178,15 +181,40 @@ public:
 
     // ---- single-level undo ----
 
-    bool saveUndo() {
+    /**
+     * @brief Snapshot the buffer for a single-level undo, reserving the copy-on-write
+     *        headroom the overdub will need — but never more than @p maxExtraBytes.
+     *
+     * @param maxExtraBytes how much NEW RAM this call may reserve. The caller
+     *        (AudioLooper::saveUndoSnapshot) derives it from the memory budget; the
+     *        default is "no ceiling", for callers that own no budget.
+     * @return false, WITHOUT reserving anything, when the headroom does not fit.
+     *
+     * 🔴 Two REQ-045 D5 defects lived in the one line this replaced
+     * (`prefill(freeCount() + ownedChunks())`): it asked for the free chunks it
+     * ALREADY had PLUS one per owned page, so every call grew the pool by the whole
+     * content — K calls with no overdub between them reserved K times the take — and
+     * it returned `true` unconditionally, so a caller could not tell that the budget
+     * had been blown. The headroom an overdub actually needs is `ownedChunks()` FREE
+     * chunks (one materialisation per in-use page), which is what prefill() takes as
+     * a target: asking for it twice was the bug.
+     */
+    bool saveUndo(size_t maxExtraBytes = kNoExtraLimit) {
 #ifdef WM_LOOPER_CHUNKED_BUFFER
         // COW headroom so materialisation during the overdub never allocates on the
         // audio thread. An overdub copies at most every currently in-use page, so
         // reserve that many free chunks — bounded by real content, not full capacity.
-        mPool.prefill(mPool.freeCount() + mChunked.ownedChunks());
+        const size_t needFree = mChunked.ownedChunks();
+        const size_t haveFree = mPool.freeCount();
+        const size_t missing  = (needFree > haveFree) ? (needFree - haveFree) : 0;
+        if (missing > maxExtraBytes / Chunk::kBytes) return false;
+        mPool.prefill(needFree);
         mChunked.snapshotForUndo();
         return true;
 #else
+        const size_t needBytes = mBuffer.size() * sizeof(float);
+        const size_t haveBytes = mUndoBuffer.capacity() * sizeof(float);
+        if (needBytes > haveBytes && needBytes - haveBytes > maxExtraBytes) return false;
         try {
             mUndoBuffer.resize(mBuffer.size());
             std::copy(mBuffer.begin(), mBuffer.end(), mUndoBuffer.begin());

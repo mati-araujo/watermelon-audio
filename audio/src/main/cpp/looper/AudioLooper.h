@@ -819,9 +819,21 @@ public:
     void resetTrackPlayHead(int index) {
         if (index >= 0 && index < MAX_TRACKS) mTracks[index].resetPlayHead();
     }
+    /**
+     * @brief Snapshot a track for undo, under the memory budget (REQ-045 D5).
+     *
+     * The budget bounds RESERVED RAM (same quantity prepareTrack and importTrack
+     * bound), so the headroom this call may take is what the budget has left. Before
+     * REQ-045 this always answered `true` and each call grew the chunk pool by the
+     * whole take: K undos with no overdub between them reserved K times the content,
+     * with nothing in the API saying so.
+     */
     bool saveUndoSnapshot(int index) {
         if (index < 0 || index >= MAX_TRACKS) return false;
-        return mTracks[index].saveUndoSnapshot();
+        const size_t budget = mMemoryBudgetBytes.load(std::memory_order_acquire);
+        const size_t used   = getTotalReservedBytes();
+        const size_t headroom = (budget > used) ? (budget - used) : 0;
+        return mTracks[index].saveUndoSnapshot(headroom);
     }
     bool restoreUndo(int index) {
         if (index < 0 || index >= MAX_TRACKS) return false;
@@ -974,6 +986,15 @@ public:
      * @return true if successful
      */
     bool importTrack(int trackIndex, const char* filePath, int sampleRate);
+
+    /**
+     * @brief importTrack with the CAUSE of the failure (REQ-045 D6).
+     *
+     * Same work, same result on success; every non-Ok value is decided before the
+     * destination track is touched, so a failure also means "the previous take is
+     * still there, still audible". importTrack() is this, with the cause thrown away.
+     */
+    wm::ImportStatus importTrackChecked(int trackIndex, const char* filePath, int sampleRate);
 
     // ========== Track parameters (lock-free) ==========
 
