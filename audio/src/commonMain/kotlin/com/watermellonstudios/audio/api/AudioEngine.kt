@@ -143,17 +143,26 @@ interface AudioEngine {
     // ==================== MODULATOR ====================
 
     /**
-     * Set the modulator type.
+     * Fija el tipo de modulador.
+     *
+     * 🔴 **Devolvía `Unit` y el rechazo del motor se perdía** (REQ-045, D3): un id que el
+     * motor no conoce volvía indistinguible de uno aplicado. Compatible en fuente: ignorar
+     * el retorno compila igual.
+     *
+     * @return `failure` con la causa tipada si el motor no lo aplicó. Con `failure`, el
+     *         `state` **no** cambia: publicar un modulador que el motor no tiene sería la
+     *         misma mentira una capa más arriba.
      */
-    fun setModulator(type: ModulatorType)
+    fun setModulator(type: ModulatorType): Result<Unit>
 
     /**
-     * Set a modulator parameter.
+     * Fija un parámetro del modulador.
      *
      * @param paramId Parameter ID (modulator-specific)
      * @param value Parameter value (typically 0.0 - 1.0)
+     * @return `failure` si el id no existe o el valor no es finito (REQ-045, D3).
      */
-    fun setModulatorParameter(paramId: Int, value: Float)
+    fun setModulatorParameter(paramId: Int, value: Float): Result<Unit>
 
     // ==================== EFFECTS ====================
 
@@ -166,20 +175,27 @@ interface AudioEngine {
     fun addEffect(type: EffectType): Boolean
 
     /**
-     * Remove an effect from the chain.
+     * Quita un efecto de la cadena.
+     *
+     * 🔴 **Devolvía `Unit`** y un índice fuera de la cadena era un no-op mudo (REQ-045,
+     * D3). Compatible en fuente.
      *
      * @param index Effect index in chain (0-based)
+     * @return `failure` con `InvalidEffectIndex` si el índice no existe. Con `failure` la
+     *         cadena de `state` queda como estaba.
      */
-    fun removeEffect(index: Int)
+    fun removeEffect(index: Int): Result<Unit>
 
     /**
-     * Set an effect parameter.
+     * Fija un parámetro de efecto.
      *
      * @param effectIndex Effect index in chain
      * @param paramId Parameter ID (effect-specific)
      * @param value Parameter value
+     * @return `failure` si el índice no existe o el valor no es finito (REQ-045, D3). Con
+     *         `failure` el parámetro de `state` no se actualiza.
      */
-    fun setEffectParameter(effectIndex: Int, paramId: Int, value: Float)
+    fun setEffectParameter(effectIndex: Int, paramId: Int, value: Float): Result<Unit>
 
     /**
      * Get an effect parameter value.
@@ -191,12 +207,13 @@ interface AudioEngine {
     fun getEffectParameter(effectIndex: Int, paramId: Int): Float
 
     /**
-     * Set effect bypass state.
+     * Fija el bypass de UN efecto.
      *
      * @param index Effect index in chain
      * @param bypass true to bypass, false to enable
+     * @return `failure` con `InvalidEffectIndex` si el índice no existe (REQ-045, D3).
      */
-    fun setEffectBypass(index: Int, bypass: Boolean)
+    fun setEffectBypass(index: Int, bypass: Boolean): Result<Unit>
 
     /**
      * Set global effect-chain bypass state.
@@ -205,16 +222,22 @@ interface AudioEngine {
      * performance controls such as a guitar FX master bypass.
      *
      * @param bypass true to bypass the whole effect chain, false to process it
+     * @return `failure` si el motor no lo aplicó (REQ-045, D3).
      */
-    fun setEffectsBypass(bypass: Boolean)
+    fun setEffectsBypass(bypass: Boolean): Result<Unit>
 
     /**
-     * Reorder effects in the chain.
+     * Reordena la cadena de efectos.
      *
      * @param fromIndex Source index
      * @param toIndex Destination index
+     * @return `failure` con `InvalidEffectIndex` si alguno de los dos no existe (REQ-045,
+     *         D3). Con `failure` el orden de `state` queda como estaba — y eso importa: la
+     *         versión anterior hacía el `removeAt`/`add` sobre la lista **igual**, así que
+     *         con un índice inválido tiraba `IndexOutOfBoundsException` después de no haber
+     *         hecho nada en el motor.
      */
-    fun reorderEffects(fromIndex: Int, toIndex: Int)
+    fun reorderEffects(fromIndex: Int, toIndex: Int): Result<Unit>
 
     // ==================== SCALE ====================
 

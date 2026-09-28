@@ -10,6 +10,7 @@ import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
+import com.watermellonstudios.audio.domain.input.CaptureOutcome
 import com.watermellonstudios.audio.domain.input.InputMetering
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import com.watermellonstudios.audio.domain.looper.LevelEnvelope
@@ -390,33 +391,55 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun setBpm(bpm: Float) = wma_set_bpm(engine, bpm)
     override fun getBpm(): Float = wma_get_bpm(engine)
 
-    override fun setModulatorType(type: Int) {
-        wma_set_modulator_type(engine, type)
-    }
+    /**
+     * Los dos del modulador propagan el `WmaResult` (REQ-045, D3).
+     *
+     * iOS no tenía el defecto de Android por casualidad: acá también se descartaba. La
+     * causa sale del MISMO `fromCode` que usa Android, que es el punto — los códigos vienen
+     * de la misma C API, así que la misma llamada no puede contestar distinto según el
+     * teléfono. Eso fue D1.
+     */
+    override fun setModulatorType(type: Int): Result<Unit> =
+        wma_set_modulator_type(engine, type).asUnitResult("setModulatorType")
 
-    override fun setModulatorParameter(paramId: Int, value: Float) {
-        wma_set_modulator_param(engine, paramId, value)
+    override fun setModulatorParameter(paramId: Int, value: Float): Result<Unit> {
+        if (!value.isFinite()) return noFinito(paramId, value)
+        return wma_set_modulator_param(engine, paramId, value).asUnitResult("setModulatorParameter")
     }
 
     // ==================== EFFECTS (variantes sync para AudioEngineImpl) ====================
 
     override fun addEffectSync(typeId: Int): Boolean = wma_effect_add(engine, typeId) >= 0
-    override fun removeEffectSync(index: Int) { wma_effect_remove(engine, index) }
-    override fun setEffectParameterSync(effectIndex: Int, paramId: Int, value: Float) {
-        wma_effect_set_param(engine, effectIndex, paramId, value)
+    /**
+     * Los cinco `*Sync` de efectos propagan el `WmaResult` (REQ-045, D3).
+     *
+     * 🔴 **Acá el índice lo valida la C API, no un guard de Kotlin.** `wma_effect_remove` y
+     * compañía contestan `WMA_ERROR_INVALID_EFFECT_INDEX`, así que iOS llega a la MISMA
+     * causa tipada que Android sin repetir la comparación contra el largo de la cadena —
+     * que es justo la clase de transcripción paralela que WA-2.6 sacó de encima.
+     */
+    override fun removeEffectSync(index: Int): Result<Unit> =
+        wma_effect_remove(engine, index).asUnitResult("removeEffectSync")
+
+    override fun setEffectParameterSync(effectIndex: Int, paramId: Int, value: Float): Result<Unit> {
+        if (!value.isFinite()) return noFinito(paramId, value)
+        return wma_effect_set_param(engine, effectIndex, paramId, value)
+            .asUnitResult("setEffectParameterSync")
     }
+
     override fun getEffectParameterSync(effectIndex: Int, paramId: Int): Float =
         wma_effect_get_param(engine, effectIndex, paramId)
-    override fun setEffectBypassSync(index: Int, bypass: Boolean) {
-        wma_effect_set_bypass(engine, index, bypass)
-    }
-    override fun setEffectsBypassSync(bypass: Boolean) {
-        wma_effect_set_global_bypass(engine, bypass)
-    }
+
+    override fun setEffectBypassSync(index: Int, bypass: Boolean): Result<Unit> =
+        wma_effect_set_bypass(engine, index, bypass).asUnitResult("setEffectBypassSync")
+
+    override fun setEffectsBypassSync(bypass: Boolean): Result<Unit> =
+        wma_effect_set_global_bypass(engine, bypass).asUnitResult("setEffectsBypassSync")
+
     override fun isEffectsBypassedSync(): Boolean = wma_effect_is_global_bypassed(engine)
-    override fun reorderEffectsSync(fromIndex: Int, toIndex: Int) {
-        wma_effect_reorder(engine, fromIndex, toIndex)
-    }
+
+    override fun reorderEffectsSync(fromIndex: Int, toIndex: Int): Result<Unit> =
+        wma_effect_reorder(engine, fromIndex, toIndex).asUnitResult("reorderEffectsSync")
 
     // ==================== EFFECT ROUTING ====================
 
@@ -733,8 +756,14 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun configureUsbBackend(sampleRate: Int, channels: Int, bitDepth: Int) =
         wma_configure_usb_backend(sampleRate, channels, bitDepth)
 
-    /** Ídem: detrás es `BackendManager::setFullDuplexEnabled`, que en iOS sí aplica. */
-    override fun setUsbStreamingMode(modeId: Int) = wma_set_usb_streaming_mode(modeId)
+    /**
+     * Ídem: detrás es `BackendManager::setFullDuplexEnabled`, que en iOS sí aplica.
+     *
+     * El rechazo del modo 1 y la traducción del tri-estado viven en la C API y en
+     * [CaptureOutcome.fromNativeCode], los dos compartidos con Android (REQ-045, D3).
+     */
+    override fun setUsbStreamingMode(modeId: Int): Result<CaptureOutcome> =
+        CaptureOutcome.fromNativeCode(wma_set_usb_streaming_mode(modeId), "setUsbStreamingMode")
 
     /**
      * No soportado en iOS. `SplitBackend` compone un backend de entrada con otro
@@ -928,6 +957,14 @@ internal class IosAudioBridge : IAudioNativeBridge {
      * `fromCode` que usa Android — los códigos son los mismos porque salen de la
      * misma C API.
      */
+    /**
+     * El rechazo de un valor no finito, con la misma causa que devolvería la C API si el
+     * valor llegara a cruzar. Gemelo del de Android, por la misma razón que [asUnitResult].
+     */
+    private fun noFinito(paramId: Int, value: Float): Result<Unit> = Result.failure(
+        NativeBridgeException.ParameterOutOfRange(paramId, value, -Float.MAX_VALUE, Float.MAX_VALUE),
+    )
+
     private fun WmaResult.asUnitResult(operation: String): Result<Unit> =
         if (this == WMA_OK) {
             Result.success(Unit)

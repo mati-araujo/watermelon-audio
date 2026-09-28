@@ -652,6 +652,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMod
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeAddEffect(
     JNIEnv* env, jobject thiz, jint typeId) {
+    if (!ensureEngine()) return JniError::ENGINE_NOT_INITIALIZED;
     // Returns the new effect's index on success, a negative WmaResult on error.
     return wma_effect_add(g_wmaEngine, typeId);
 }
@@ -779,6 +780,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsEffe
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetEffectsBypass(
     JNIEnv* env, jobject thiz, jboolean bypass) {
+    if (!ensureEngine()) return JniError::ENGINE_NOT_INITIALIZED;
     return wma_effect_set_global_bypass(g_wmaEngine, bypass == JNI_TRUE);
 }
 
@@ -793,6 +795,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsEffe
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetBpm(
     JNIEnv* env, jobject thiz, jfloat bpm) {
+    if (!ensureEngine()) return;
     // Fans out to the tempo-synced effects AND the Transport — see §20.
     wma_set_bpm(g_wmaEngine, bpm);
 }
@@ -809,6 +812,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetBpm
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetRoutingMode(
     JNIEnv* env, jobject thiz, jint mode) {
+    if (!ensureEngine()) return;
     // The 0..5 RoutingMode range check lives in wma_set_routing_mode now.
     wma_set_routing_mode(g_wmaEngine, mode);
 }
@@ -823,12 +827,14 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetRou
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetParallelMix(
     JNIEnv* env, jobject thiz, jfloat mix) {
+    if (!ensureEngine()) return;
     wma_set_parallel_mix(g_wmaEngine, mix);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetFeedbackAmount(
     JNIEnv* env, jobject thiz, jfloat amount) {
+    if (!ensureEngine()) return;
     wma_set_feedback_amount(g_wmaEngine, amount);
 }
 
@@ -965,6 +971,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsInpu
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetInputSource(
     JNIEnv* env, jobject thiz, jint source) {
+    if (!ensureInputNode()) return;
     // The range check and the try/catch moved into wma_input_set_source.
     wma_input_set_source(g_wmaEngine, source);
 }
@@ -978,6 +985,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInp
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetInputGain(
     JNIEnv* env, jobject thiz, jfloat gainDb) {
+    if (!ensureInputNode()) return;
     wma_input_set_gain(g_wmaEngine, gainDb);
 }
 
@@ -990,6 +998,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetInp
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetNoiseGateEnabled(
     JNIEnv* env, jobject thiz, jboolean enabled) {
+    if (!ensureInputNode()) return;
     wma_input_set_noise_gate(g_wmaEngine, enabled);
 }
 
@@ -1002,6 +1011,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsNois
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetNoiseGateThreshold(
     JNIEnv* env, jobject thiz, jfloat thresholdDb) {
+    if (!ensureInputNode()) return;
     wma_input_set_noise_gate_threshold(g_wmaEngine, thresholdDb);
 }
 
@@ -1290,6 +1300,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReleas
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMonitoringEnabled(
     JNIEnv* env, jobject thiz, jboolean enabled) {
+    if (!ensureInputNode()) return;
     wma_input_set_monitoring(g_wmaEngine, enabled);
 }
 
@@ -1302,6 +1313,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsMoni
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMonitoringVolume(
     JNIEnv* env, jobject thiz, jfloat volume) {
+    if (!ensureInputNode()) return;
     // wma_input_set_monitoring_volume clamps to [0, 1] itself.
     wma_input_set_monitoring_volume(g_wmaEngine, volume);
 }
@@ -1317,6 +1329,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetMon
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetDualTouchMode(
     JNIEnv* env, jobject thiz, jboolean enabled) {
+    if (!ensureEngine()) return;
     wma_set_dual_touch_mode(g_wmaEngine, enabled == JNI_TRUE);
 }
 
@@ -1335,6 +1348,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetDua
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetDualTouchMixMode(
     JNIEnv* env, jobject thiz, jint modeId) {
+    if (!ensureEngine()) return;
     // The 0–5 range check lives in wma_set_dual_touch_mix_mode now.
     wma_set_dual_touch_mix_mode(g_wmaEngine, modeId);
 }
@@ -1342,6 +1356,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetDua
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetSecondaryOscillatorType(
     JNIEnv* env, jobject thiz, jint typeId) {
+    if (!ensureEngine()) return;
     // Section 4, sitting in the dual-touch block rather than with the other
     // oscillator setters — which is exactly why it nearly got left behind.
     wma_set_secondary_oscillator_type(g_wmaEngine, typeId);
@@ -1358,6 +1373,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetDua
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeEnableVoiceSystem(
     JNIEnv* env, jobject thiz, jboolean enable) {
+    if (!ensureEngine()) return;
     wma_voice_enable(g_wmaEngine, enable == JNI_TRUE);
 }
 
@@ -1414,12 +1430,14 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetAct
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMaxVoices(
     JNIEnv* env, jobject thiz, jint maxVoices) {
+    if (!ensureEngine()) return;
     wma_voice_set_max(g_wmaEngine, maxVoices);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVoiceStealingStrategy(
     JNIEnv* env, jobject thiz, jint strategy) {
+    if (!ensureEngine()) return;
     wma_voice_set_stealing_strategy(g_wmaEngine, strategy);
 }
 
@@ -1464,12 +1482,14 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReleas
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVocoderCarrierSource(
     JNIEnv* env, jobject thiz, jboolean useInternalCarrier) {
+    if (!ensureEngine()) return;
     wma_vocoder_set_carrier_source(g_wmaEngine, useInternalCarrier == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVocoderCarrierFrequency(
     JNIEnv* env, jobject thiz, jfloat frequency) {
+    if (!ensureEngine()) return;
     wma_vocoder_set_carrier_freq(g_wmaEngine, frequency);
 }
 
@@ -1482,6 +1502,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeHasVoc
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetVocoderModulatorSource(
     JNIEnv* env, jobject thiz, jboolean useExternalMod) {
+    if (!ensureEngine()) return;
     wma_vocoder_set_modulator_source(g_wmaEngine, useExternalMod == JNI_TRUE);
 }
 
@@ -1497,6 +1518,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsbB
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUseBackendManager(
     JNIEnv* env, jobject thiz, jboolean use) {
+    if (!ensureEngine()) return;
     wma_set_use_backend_manager(g_wmaEngine, use);
 }
 
@@ -1528,13 +1550,15 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetCur
     return static_cast<jint>(wma_get_backend_type());
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsbStreamingMode(
     JNIEnv* env, jobject thiz, jint modeId) {
-    // Streaming mode is controlled via full-duplex enable
-    // modeId: 0=PLAYBACK_ONLY, 1=CAPTURE_ONLY, 2=FULL_DUPLEX
-    auto& backendManager = watermelon_audio::BackendManager::getInstance();
-    backendManager.setFullDuplexEnabled(modeId == 2);
+    // modeId: 0=PLAYBACK_ONLY, 2=FULL_DUPLEX. El 1 (CAPTURE_ONLY) no esta
+    // implementado y lo RECHAZA la C API — ver wma_set_usb_streaming_mode, que es
+    // tambien donde vive la traduccion del CaptureOutcome. Esta entrada tocaba el
+    // BackendManager directo y descartaba el resultado: dos copias del mismo
+    // criterio, una de ellas muda (REQ-045, D3).
+    return wma_set_usb_streaming_mode(modeId);
 }
 
 JNIEXPORT void JNICALL
@@ -1581,6 +1605,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMap
     jint axis, jint effectIndex, jint paramId,
     jint curve, jint polarity,
     jfloat mapMin, jfloat mapMax, jboolean inverted) {
+    if (!ensureEngine()) return;
     // The axis/curve/polarity range checks and the isfinite() guard on the
     // mapping bounds all live in wma_set_mapping_config now.
     wma_set_mapping_config(g_wmaEngine, axis, effectIndex, paramId,
@@ -1591,6 +1616,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetMap
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeClearMappingConfig(
     JNIEnv* env, jobject thiz, jint axis) {
+    if (!ensureEngine()) return;
     // The 0..2 axis check lives in wma_clear_mapping_config now.
     wma_clear_mapping_config(g_wmaEngine, axis);
 }
@@ -2249,6 +2275,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsbI
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpEnabled(
     JNIEnv* env, jobject thiz, jboolean enabled) {
+    if (!ensureEngine()) return;
     wma_arp_set_enabled(g_wmaEngine, enabled == JNI_TRUE);
 }
 
@@ -2261,60 +2288,70 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsArpE
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpPattern(
     JNIEnv* env, jobject thiz, jint patternId) {
+    if (!ensureEngine()) return;
     wma_arp_set_pattern(g_wmaEngine, patternId);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpSubdivision(
     JNIEnv* env, jobject thiz, jfloat beatsPerStep) {
+    if (!ensureEngine()) return;
     wma_arp_set_subdivision(g_wmaEngine, beatsPerStep);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpOctaveRange(
     JNIEnv* env, jobject thiz, jint octaves) {
+    if (!ensureEngine()) return;
     wma_arp_set_octave_range(g_wmaEngine, octaves);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpGateLength(
     JNIEnv* env, jobject thiz, jfloat gate) {
+    if (!ensureEngine()) return;
     wma_arp_set_gate_length(g_wmaEngine, gate);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpSwing(
     JNIEnv* env, jobject thiz, jfloat swing) {
+    if (!ensureEngine()) return;
     wma_arp_set_swing(g_wmaEngine, swing);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpLatch(
     JNIEnv* env, jobject thiz, jboolean latch) {
+    if (!ensureEngine()) return;
     wma_arp_set_latch(g_wmaEngine, latch == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpVelocity(
     JNIEnv* env, jobject thiz, jfloat velocity) {
+    if (!ensureEngine()) return;
     wma_arp_set_velocity(g_wmaEngine, velocity);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpVelocityVariation(
     JNIEnv* env, jobject thiz, jfloat variation) {
+    if (!ensureEngine()) return;
     wma_arp_set_velocity_variation(g_wmaEngine, variation);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpProbability(
     JNIEnv* env, jobject thiz, jfloat probability) {
+    if (!ensureEngine()) return;
     wma_arp_set_probability(g_wmaEngine, probability);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpScaleIntervals(
     JNIEnv* env, jobject thiz, jintArray intervals) {
+    if (!ensureEngine()) return;
     // The one arp function with Java-object handling, so the pinning stays here.
     if (!intervals) {
         return;
@@ -2354,6 +2391,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetArp
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetArpRatchet(
     JNIEnv* env, jobject thiz, jboolean active) {
+    if (!ensureEngine()) return;
     wma_arp_set_ratchet(g_wmaEngine, active == JNI_TRUE);
 }
 
@@ -2428,24 +2466,28 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetFreeLength(
     JNIEnv* env, jobject thiz, jboolean freeLength) {
+    if (!ensureEngine()) return;
     wma_looper_set_free_length(g_wmaEngine, freeLength == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackMuted(
     JNIEnv* env, jobject thiz, jint trackIndex, jboolean muted) {
+    if (!ensureEngine()) return;
     wma_looper_set_track_muted(g_wmaEngine, trackIndex, muted == JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackPan(
     JNIEnv* env, jobject thiz, jint trackIndex, jfloat pan) {
+    if (!ensureEngine()) return;
     wma_looper_set_track_pan(g_wmaEngine, trackIndex, pan);
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackVolume(
     JNIEnv* env, jobject thiz, jint trackIndex, jfloat volume) {
+    if (!ensureEngine()) return;
     wma_looper_set_track_volume(g_wmaEngine, trackIndex, volume);
 }
 
@@ -2472,6 +2514,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetEnabled(
     JNIEnv* env, jobject thiz, jboolean enabled) {
+    if (!ensureEngine()) return;
     wma_looper_set_enabled(g_wmaEngine, enabled == JNI_TRUE);
 }
 
@@ -2593,6 +2636,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackSpeed(
     JNIEnv* env, jobject thiz, jint trackIndex, jfloat speed) {
+    if (!ensureEngine()) return;
     wma_looper_set_track_speed(g_wmaEngine, trackIndex, speed);
 }
 
@@ -2602,6 +2646,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetCapabilities(
     JNIEnv* env, jobject thiz, jlong budgetBytes, jint maxTracks, jint maxFreeSeconds) {
+    if (!ensureEngine()) return;
     wma_looper_set_capabilities(g_wmaEngine, budgetBytes, maxTracks, maxFreeSeconds);
 }
 
@@ -2609,6 +2654,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackPlayCount(
     JNIEnv* env, jobject thiz, jint trackIndex, jint plays) {
+    if (!ensureEngine()) return;
     wma_looper_set_track_play_count(g_wmaEngine, trackIndex, plays);
 }
 
@@ -2623,6 +2669,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackPercussionMode(
     JNIEnv* env, jobject thiz, jint trackIndex, jboolean percussion) {
+    if (!ensureEngine()) return;
     wma_looper_set_track_percussion_mode(g_wmaEngine, trackIndex, percussion == JNI_TRUE);
 }
 
@@ -2637,6 +2684,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTrackSendToFx(
     JNIEnv* env, jobject thiz, jint trackIndex, jboolean sendToFx) {
+    if (!ensureEngine()) return;
     wma_looper_set_track_send_to_fx(g_wmaEngine, trackIndex, sendToFx == JNI_TRUE);
 }
 
@@ -2650,6 +2698,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetMasterVolume(
     JNIEnv* env, jobject thiz, jfloat volume) {
+    if (!ensureEngine()) return;
     wma_looper_set_master_volume(g_wmaEngine, volume);
 }
 
@@ -2838,6 +2887,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetTailMs(
     JNIEnv* env, jobject thiz, jint ms) {
+    if (!ensureEngine()) return;
     wma_looper_set_tail_ms(g_wmaEngine, ms);
 }
 
@@ -2916,6 +2966,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTransportSetBeatsPerBar(
     JNIEnv* env, jobject thiz, jint beatsPerBar) {
+    if (!ensureEngine()) return;
     wma_transport_set_beats_per_bar(g_wmaEngine, beatsPerBar);
 }
 
@@ -3091,6 +3142,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperSetExportSampleRate(
     JNIEnv* env, jobject thiz, jint sampleRate) {
+    if (!ensureEngine()) return;
     wma_looper_set_export_sample_rate(g_wmaEngine, sampleRate);
 }
 

@@ -20,6 +20,8 @@
 
 #include "support/BackendPathFixture.h"
 
+#include "api/watermelon_audio.h"
+
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -437,6 +439,59 @@ TEST_F(CaptureRequestTest, DestroyingTheManagerMidReopenDoesNotLeaveAThreadBehin
            "no joineó, y ese thread sigue usando un manager liberado";
 
     releaser.join();
+}
+
+
+// --- REQ-045 (D3): el modo de streaming contesta, y el 1 se RECHAZA ---------
+//
+// `wma_set_usb_streaming_mode` era `void` y `BackendManager::setFullDuplexEnabled`
+// descartaba el `CaptureOutcome`: pedir captura y que no pasara nada era
+// indistinguible de pedirla y que pasara, hasta arriba en Kotlin.
+//
+// Y el modo 1 (`CAPTURE_ONLY`) se trataba igual que el 0, o sea que quien pedia
+// captura recibia reproduccion **en silencio**. Esta suite es el unico lugar que
+// puede afirmar "no toco el modo vigente": es lo unico que ve el flag del backend.
+
+TEST_F(CaptureRequestTest, CaptureOnlyModeIsRejectedAndLeavesTheCurrentModeAlone) {
+    runWithoutCapture();
+    ASSERT_GE(wma_set_usb_streaming_mode(2), 0) << "premisa: el full-duplex quedo pedido";
+    ASSERT_TRUE(mBackend->fullDuplexRequested());
+    const int startsBefore = mBackend->startCount();
+
+    EXPECT_EQ(wma_set_usb_streaming_mode(1), WMA_ERROR_INVALID_OPERATION);
+
+    EXPECT_TRUE(mBackend->fullDuplexRequested())
+        << "el modo 1 se rechaza ANTES de tocar nada. Tratarlo como 0 —lo que hacia "
+           "hasta REQ-045— le retira el pedido de captura al backend sin decirlo: "
+           "el consumidor pide microfono y se queda sin el";
+    EXPECT_EQ(mBackend->startCount(), startsBefore) << "un rechazo no reabre el stream";
+}
+
+TEST_F(CaptureRequestTest, AnUnknownStreamingModeIsRejectedWithADifferentCause) {
+    // Causa distinta del modo 1 a proposito: el 1 EXISTE y no esta implementado,
+    // el 7 no es un modo. Colapsarlas haria indistinguible "todavia no" de "nunca".
+    runWithoutCapture();
+    ASSERT_GE(wma_set_usb_streaming_mode(2), 0);
+
+    EXPECT_EQ(wma_set_usb_streaming_mode(7), WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    EXPECT_EQ(wma_set_usb_streaming_mode(-1), WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+
+    EXPECT_TRUE(mBackend->fullDuplexRequested());
+}
+
+TEST_F(CaptureRequestTest, TheStreamingModeReturnsWhatTheCaptureRequestAchieved) {
+    // El gemelo, y lo que hace que el retorno no sea decorativo: los DOS valores
+    // se producen en la misma corrida. Un `return WMA_CAPTURE_NOT_LIVE` cableado
+    // pasaria la primera asercion y muere en la segunda.
+    runWithoutCapture();
+    EXPECT_EQ(wma_set_usb_streaming_mode(0), WMA_CAPTURE_NOT_LIVE)
+        << "sin captura pedida y sin path de entrada, la respuesta honesta es NOT_LIVE";
+
+    ASSERT_EQ(requestCaptureAndSettle(Requester::INPUT_NODE, true, true), Outcome::PENDING);
+    ASSERT_TRUE(mManager->isCaptureLive());
+
+    EXPECT_EQ(wma_set_usb_streaming_mode(2), WMA_CAPTURE_LIVE)
+        << "la captura YA esta viva, asi que el pedido del modo se cumple sin reabrir";
 }
 
 }  // namespace

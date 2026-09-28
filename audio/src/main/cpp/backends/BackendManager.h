@@ -251,8 +251,17 @@ public:
      *
      * Applies at the next start(); never restarts a running stream. See
      * requestCapture() for why.
+     *
+     * 🔴 **Devuelve lo que el pedido logro, y no es cosmetico** (REQ-045, D3): hasta
+     * el 2026-09-28 descartaba el `CaptureOutcome` de [requestCapture] y era `void`,
+     * asi que rio arriba —hasta la C API y Kotlin— pedir captura y que no pasara nada
+     * era indistinguible de pedirla y que pasara.
+     *
+     * @return el mismo tri-estado de [requestCapture]: LIVE / NOT_LIVE cuando la
+     *         respuesta se supo sin reabrir, PENDING cuando hay una reapertura en
+     *         vuelo.
      */
-    void setFullDuplexEnabled(bool enable);
+    CaptureOutcome setFullDuplexEnabled(bool enable);
 
     /**
      * Whether the active backend is actually delivering captured frames.

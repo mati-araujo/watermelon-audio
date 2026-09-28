@@ -11,6 +11,7 @@ import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.error.NativeErrorCode
+import com.watermellonstudios.audio.domain.input.CaptureOutcome
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import com.watermellonstudios.audio.domain.looper.LevelEnvelope
 import com.watermellonstudios.audio.domain.looper.PitchSeries
@@ -1024,23 +1025,43 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // ==================== Modulator Operations ====================
 
     /**
-     * Set modulator type.
+     * El rechazo de un valor no finito, con su causa tipada.
      *
-     * @param type Modulator type ID
+     * Los límites son los de los finitos representables a propósito: lo que NaN o
+     * infinito violan es eso, no un rango de dominio que esta capa no conoce. La C API
+     * contesta `WMA_ERROR_PARAMETER_OUT_OF_RANGE` a lo mismo, así que la causa coincide
+     * con la que devolvería si el valor llegara a cruzar.
      */
-    override fun setModulatorType(type: Int) {
-        nativeSetModulatorType(type)
-    }
+    private fun noFinito(paramId: Int, value: Float): Result<Unit> = Result.failure(
+        NativeBridgeException.ParameterOutOfRange(paramId, value, -Float.MAX_VALUE, Float.MAX_VALUE),
+    )
 
     /**
-     * Set modulator parameter.
+     * Fija el tipo de modulador.
      *
-     * @param paramId Parameter ID
-     * @param value Parameter value
+     * 🔴 **El `jint` del cruce se descartaba** (REQ-045, D3): `wma_set_modulator_type`
+     * rechaza un id fuera de `0..7` con `WMA_ERROR_INVALID_PARAMETER_ID`, el JNI lo
+     * devolvía entero, y esta línea lo tiraba al piso. El consumidor pedía un modulador
+     * que no existe y leía silencio. Es la forma KOTLIN de la clase que REQ-045 borra: el
+     * C++ estaba impecable.
+     *
+     * @return `failure` con la causa tipada si el motor no aceptó el id.
      */
-    override fun setModulatorParameter(paramId: Int, value: Float) {
-        if (!value.isFinite()) return
-        nativeSetModulatorParameter(paramId, value)
+    override fun setModulatorType(type: Int): Result<Unit> =
+        nativeSetModulatorType(type).asUnitResult("setModulatorType")
+
+    /**
+     * Fija un parámetro del modulador.
+     *
+     * Tiene DOS rechazos y los dos terminaban en el mismo silencio: el valor no finito lo
+     * para este guard —ni llega a cruzar— y el id inválido lo rechaza la C API. Los dos
+     * viajan ahora como `failure`.
+     */
+    override fun setModulatorParameter(paramId: Int, value: Float): Result<Unit> {
+        if (!value.isFinite()) {
+            return noFinito(paramId, value)
+        }
+        return nativeSetModulatorParameter(paramId, value).asUnitResult("setModulatorParameter")
     }
 
     // ==================== Voice Filter Operations (Phase 6) ====================
@@ -1078,21 +1099,37 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     }
 
     /**
-     * Remove effect synchronously (for legacy callers).
+     * Quita un efecto, sin suspender.
+     *
+     * 🔴 **El guard devolvía sin hacer nada y sin decirlo** (REQ-045, D3): con la cadena
+     * vacía, `removeEffectSync(0)` era un no-op mudo, y cuando el índice SÍ era válido el
+     * `jint` del cruce se descartaba igual. Las dos formas se ven idénticas desde afuera:
+     * nada pasa y nadie avisa.
      */
-    override fun removeEffectSync(index: Int) {
-        if (index >= 0 && index < nativeGetEffectChainSize()) {
-            nativeRemoveEffect(index)
+    override fun removeEffectSync(index: Int): Result<Unit> {
+        val chainSize = nativeGetEffectChainSize()
+        if (index < 0 || index >= chainSize) {
+            return Result.failure(NativeBridgeException.InvalidEffectIndex(index, chainSize))
         }
+        return nativeRemoveEffect(index).asUnitResult("removeEffectSync")
     }
 
     /**
-     * Set effect parameter synchronously (for legacy callers).
+     * Fija un parámetro de efecto, sin suspender.
+     *
+     * Los dos rechazos que el guard se comía —índice fuera de la cadena y valor no
+     * finito— viajan ahora con su causa, en vez de un retorno temprano mudo (REQ-045, D3).
      */
-    override fun setEffectParameterSync(effectIndex: Int, paramId: Int, value: Float) {
-        if (effectIndex >= 0 && effectIndex < nativeGetEffectChainSize() && value.isFinite()) {
-            nativeSetEffectParameter(effectIndex, paramId, value)
+    override fun setEffectParameterSync(effectIndex: Int, paramId: Int, value: Float): Result<Unit> {
+        val chainSize = nativeGetEffectChainSize()
+        if (effectIndex < 0 || effectIndex >= chainSize) {
+            return Result.failure(NativeBridgeException.InvalidEffectIndex(effectIndex, chainSize))
         }
+        if (!value.isFinite()) {
+            return noFinito(paramId, value)
+        }
+        return nativeSetEffectParameter(effectIndex, paramId, value)
+            .asUnitResult("setEffectParameterSync")
     }
 
     /**
@@ -1104,17 +1141,27 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     }
 
     /**
-     * Set effect bypass synchronously (for legacy callers).
+     * Bypassea UN efecto, sin suspender. Mismo arreglo que [removeEffectSync] (REQ-045, D3).
      */
-    override fun setEffectBypassSync(index: Int, bypass: Boolean) {
-        if (index >= 0 && index < nativeGetEffectChainSize()) {
-            nativeSetEffectBypass(index, bypass)
+    override fun setEffectBypassSync(index: Int, bypass: Boolean): Result<Unit> {
+        val chainSize = nativeGetEffectChainSize()
+        if (index < 0 || index >= chainSize) {
+            return Result.failure(NativeBridgeException.InvalidEffectIndex(index, chainSize))
         }
+        return nativeSetEffectBypass(index, bypass).asUnitResult("setEffectBypassSync")
     }
 
-    override fun setEffectsBypassSync(bypass: Boolean) {
-        nativeSetEffectsBypass(bypass)
-    }
+    /**
+     * Bypassea la cadena entera, sin suspender.
+     *
+     * No tiene rechazo posible y está dicho: con un motor vivo
+     * `wma_effect_set_global_bypass` sólo devuelve `WMA_OK`, y desde REQ-045 S2 el motor
+     * siempre existe (la entrada JNI llama `ensureEngine`). Lo que cambia es que el código
+     * **viaja** en vez de caerse al piso: si mañana gana una causa de fallo, el consumidor
+     * se entera sin tocar esta línea.
+     */
+    override fun setEffectsBypassSync(bypass: Boolean): Result<Unit> =
+        nativeSetEffectsBypass(bypass).asUnitResult("setEffectsBypassSync")
 
     override fun isEffectsBypassedSync(): Boolean = nativeIsEffectsBypassed()
 
@@ -1165,11 +1212,16 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Reorder effects synchronously (for legacy callers).
      */
-    override fun reorderEffectsSync(fromIndex: Int, toIndex: Int) {
+    /** Reordena la cadena, sin suspender. Mismo arreglo que [removeEffectSync] (REQ-045, D3). */
+    override fun reorderEffectsSync(fromIndex: Int, toIndex: Int): Result<Unit> {
         val chainSize = nativeGetEffectChainSize()
-        if (fromIndex in 0 until chainSize && toIndex in 0 until chainSize) {
-            nativeReorderEffects(fromIndex, toIndex)
+        if (fromIndex !in 0 until chainSize) {
+            return Result.failure(NativeBridgeException.InvalidEffectIndex(fromIndex, chainSize))
         }
+        if (toIndex !in 0 until chainSize) {
+            return Result.failure(NativeBridgeException.InvalidEffectIndex(toIndex, chainSize))
+        }
+        return nativeReorderEffects(fromIndex, toIndex).asUnitResult("reorderEffectsSync")
     }
 
     // ==================== IEffectStateWriter Implementation ====================
@@ -2253,7 +2305,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      *
      * @param modeId Mode ID (0=PLAYBACK_ONLY, 1=CAPTURE_ONLY, 2=FULL_DUPLEX)
      */
-    override fun setUsbStreamingMode(modeId: Int) = nativeSetUsbStreamingMode(modeId)
+    override fun setUsbStreamingMode(modeId: Int): Result<CaptureOutcome> =
+        CaptureOutcome.fromNativeCode(nativeSetUsbStreamingMode(modeId), "setUsbStreamingMode")
 
     /**
      * Configure USB backend parameters.
@@ -2332,7 +2385,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeCreateSplitBackend(inputBackendId: Int, outputBackendId: Int): Boolean
     private external fun nativeSelectBackend(backendId: Int): Boolean
     private external fun nativeGetCurrentBackendType(): Int
-    private external fun nativeSetUsbStreamingMode(modeId: Int)
+    private external fun nativeSetUsbStreamingMode(modeId: Int): Int
     private external fun nativeConfigureUsbBackend(sampleRate: Int, channels: Int, bitDepth: Int)
 
     // ==================== Native Methods: Memory ====================
