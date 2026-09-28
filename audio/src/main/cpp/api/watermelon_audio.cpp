@@ -2424,6 +2424,7 @@ WmaResult wma_looper_import_track_ex(WmaEngine* engine, int track_index,
                                                                    sample_rate)) {
             case wm::ImportStatus::Ok:                return WMA_OK;
             case wm::ImportStatus::InvalidTrack:      return WMA_ERROR_INVALID_OPERATION;
+            case wm::ImportStatus::InvalidArgument:   return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
             case wm::ImportStatus::Io:                return WMA_ERROR_IO;
             case wm::ImportStatus::UnsupportedFormat: return WMA_ERROR_UNSUPPORTED_FORMAT;
             case wm::ImportStatus::BudgetExceeded:    return WMA_ERROR_MEMORY_BUDGET;

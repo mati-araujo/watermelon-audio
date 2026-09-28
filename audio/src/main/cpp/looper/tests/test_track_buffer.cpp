@@ -577,3 +577,26 @@ TEST(TrackBuffer, Req045RepeatedSaveUndoDoesNotKeepReserving) {
         << "diez snapshots sin overdub entre medio reservaron de más: " << tb.reservedBytes()
         << " contra " << afterFirst;
 }
+
+// REQ-045 (review, item 4) — la fórmula del presupuesto CUBRE la reserva real.
+//
+// El chequeo del import usaba bytes lógicos (`frames × 2 × 4`) y el backend paged
+// reserva chunks enteros de 256 KB: 33 000 frames son 264 KB lógicos y 512 KB
+// reservados. Un chequeo que subestima PASA y después deja `reservedBytes` arriba del
+// tope, que es exactamente el invariante que el presupuesto existe para sostener.
+//
+// La dirección de la desigualdad es la que importa: la fórmula no puede quedar CORTA.
+// El segundo assert evita que "no quedarse corta" se cumpla con un cheque en blanco.
+TEST(TrackBuffer, Req045TheBudgetFormulaCoversTheRealReservation) {
+    TrackBuffer tb;
+    const int frames = 33'000;                 // 1,0078 chunks: fuerza el redondeo
+    ASSERT_GT(tb.allocate(frames, 48000), 0u);
+
+    const size_t formula = wm::TrackStorage::reservationBytesFor(frames);
+    EXPECT_LE(tb.reservedBytes(), formula)
+        << "la fórmula del presupuesto (" << formula << " B) es MENOR que lo que la pista "
+        << "reserva de verdad (" << tb.reservedBytes() << " B): el chequeo pasa y la reserva "
+        << "se va arriba del tope";
+    EXPECT_LE(formula, 2 * tb.reservedBytes())
+        << "la fórmula no puede ser un cheque en blanco: eso rechazaría imports que entran";
+}

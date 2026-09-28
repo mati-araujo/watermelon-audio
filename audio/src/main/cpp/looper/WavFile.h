@@ -258,12 +258,19 @@ inline std::atomic<uint64_t>& decodeEntries() {
  * decode keep reading from `file` without seeking.
  */
 inline WavReadStatus scanWavHeader(std::ifstream& file, WavInfo& out) {
-    // Read and validate RIFF header
-    char riff[4], wave[4];
-    uint32_t fileSize;
+    // Read and validate RIFF header.
+    //
+    // 🔴 Zero-initialised, and the read is CHECKED: an ifstream opens on a directory on
+    // both macOS and Linux, and every read then fails leaving these arrays untouched —
+    // the memcmp below was comparing uninitialised stack. "I could not read the first
+    // twelve bytes" is an IO failure, not a format one, and a consumer told the wrong
+    // one goes looking for a converter instead of looking at the path it passed.
+    char riff[4] = {0}, wave[4] = {0};
+    uint32_t fileSize = 0;
     file.read(riff, 4);
     file.read(reinterpret_cast<char*>(&fileSize), 4);
     file.read(wave, 4);
+    if (!file.good()) return WavReadStatus::Io;
     if (std::memcmp(riff, "RIFF", 4) != 0 || std::memcmp(wave, "WAVE", 4) != 0) {
         return WavReadStatus::UnsupportedFormat;
     }

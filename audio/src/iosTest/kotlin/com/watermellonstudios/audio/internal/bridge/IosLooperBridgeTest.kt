@@ -78,12 +78,27 @@ class IosLooperBridgeTest {
 
         /** Período de la onda cuadrada, en frames. */
         const val SQUARE_PERIOD = 16
+
+        /** Los defaults de `AudioLooper::LooperCapabilities`, para restaurarlos explícitos. */
+        const val DEFAULT_BUDGET_BYTES = 48L * 1024 * 1024
+        const val DEFAULT_MAX_TRACKS = 8
+        const val DEFAULT_MAX_FREE_SECONDS = 60
     }
 
     @AfterTest
     fun cleanup() {
         bridge.looperClearAll()
         bridge.looperSetEnabled(false)
+        // 🔴 Las capabilities son PEGAJOSAS desde REQ-045 D4: un 0 ya no resetea, así que
+        // "restaurar con ceros" no restaura nada y el tier que dejó un test lo hereda el
+        // siguiente. Los tres campos, explícitos, con los defaults del motor
+        // (`AudioLooper::DEFAULT_*`). El motor nativo es un singleton de proceso: esto es
+        // lo que evita que el orden en que corran los tests decida un veredicto.
+        bridge.looperSetCapabilities(
+            budgetBytes = DEFAULT_BUDGET_BYTES,
+            maxTracks = DEFAULT_MAX_TRACKS,
+            maxFreeSeconds = DEFAULT_MAX_FREE_SECONDS,
+        )
     }
 
     // ==================== Round-trips de verdad ====================
@@ -412,7 +427,11 @@ class IosLooperBridgeTest {
             burstEndExclusive = 42_000,
         )
         try {
-            bridge.looperSetCapabilities(budgetBytes = 48L * 1024 * 1024, maxTracks = 0, maxFreeSeconds = 0)
+            bridge.looperSetCapabilities(
+                budgetBytes = DEFAULT_BUDGET_BYTES,
+                maxTracks = DEFAULT_MAX_TRACKS,
+                maxFreeSeconds = DEFAULT_MAX_FREE_SECONDS,
+            )
             assertTrue(
                 bridge.looperImportTrackResult(0, wav, FIXTURE_RATE).isSuccess,
                 "el import del fixture tenía que salir bien: sin eso los rechazos no dicen nada",
@@ -440,7 +459,11 @@ class IosLooperBridgeTest {
 
             // BudgetExceeded — el mismo archivo, con el presupuesto apretado. El 0 en los
             // otros dos campos también ejerce el "0 = no tocar" de AC-045.6.
-            bridge.looperSetCapabilities(budgetBytes = 64L * 1024, maxTracks = 0, maxFreeSeconds = 0)
+            bridge.looperSetCapabilities(
+                budgetBytes = 64L * 1024,
+                maxTracks = DEFAULT_MAX_TRACKS,
+                maxFreeSeconds = DEFAULT_MAX_FREE_SECONDS,
+            )
             val presupuesto = bridge.looperImportTrackResult(0, wav, FIXTURE_RATE)
             assertTrue(
                 presupuesto.exceptionOrNull() is NativeBridgeException.MemoryBudgetExceeded,
@@ -450,7 +473,7 @@ class IosLooperBridgeTest {
             assertTrue(bridge.looperIsTrackActive(0), "un import fallido desactivó la pista")
             assertEquals(largo, bridge.looperGetTrackLengthFrames(0), "un import fallido cambió el largo")
         } finally {
-            bridge.looperSetCapabilities(budgetBytes = 48L * 1024 * 1024, maxTracks = 0, maxFreeSeconds = 0)
+            // Las capabilities las restaura cleanup(), con los tres campos explícitos.
             bridge.looperClearTrack(0)
             remove(wav)
         }

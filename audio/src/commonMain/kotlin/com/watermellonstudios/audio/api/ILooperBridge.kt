@@ -396,10 +396,21 @@ interface ILooperBridge {
      * - [NativeBridgeException.UnsupportedFormat] — no es RIFF/WAVE, o es un formato que
      *   el lector no decodifica (PCM 16/24 e IEEE float 32).
      * - [NativeBridgeException.IoError] — el archivo no abrió.
-     * - [NativeBridgeException.MemoryAllocationFailed] — la pista no pudo reservar.
+     * - [NativeBridgeException.MemoryAllocationFailed] — el pedido es inasignable, o la
+     *   pista no pudo reservar.
+     * - [NativeBridgeException.ParameterOutOfRange] — `sampleRate` no es positivo.
      *
-     * 🔴 **En cualquier fallo la pista destino queda como estaba**: con su contenido, su
-     * largo y su mute. Antes de REQ-045 un fallo por memoria la dejaba VACÍA y MUTEADA.
+     * 🔴 **La pista destino queda como estaba —contenido, largo y mute— en todo fallo que
+     * el import puede VALIDAR**: argumento, formato, IO, presupuesto (el del decode de la
+     * fuente y el de la reserva) y la asignación del decode, que es del mismo tamaño que
+     * la reserva. La ÚNICA excepción es `MemoryAllocationFailed` levantado por la reserva
+     * de la pista: ahí la pista queda **vacía y sin mutear**, y el `Result` es cómo te
+     * enterás. Conservar la toma vieja en ese caso exigiría tener las dos a la vez, que es
+     * justo el pico que el presupuesto prohíbe. Antes de REQ-045 CUALQUIER fallo por
+     * memoria la dejaba vacía **y muteada**, sin decir nada.
+     *
+     * Pico transitorio de un import ACEPTADO: decode de la fuente + copia resampleada +
+     * la reserva de la pista. Uno RECHAZADO cuesta sólo la cabecera.
      *
      * El cuerpo por defecto existe para no romper implementaciones de afuera (fakes de
      * test de un consumidor): delega en [looperImportTrack] y, si dice `false`, devuelve

@@ -2000,12 +2000,24 @@ WMA_API bool wma_looper_import_track(WmaEngine* engine, int track_index,
  *                                 not decode (PCM 16/24 and IEEE float 32 only).
  *   WMA_ERROR_IO                  the file did not open (missing, unreadable,
  *                                 or a null path).
- *   WMA_ERROR_MEMORY              the track could not reserve the storage.
+ *   WMA_ERROR_MEMORY              the request is unallocatable, or the track could
+ *                                 not reserve the storage.
+ *   WMA_ERROR_PARAMETER_OUT_OF_RANGE  sample_rate is not positive.
  *   WMA_ERROR_INVALID_OPERATION   track_index outside the active-track limit.
  *   WMA_ERROR_NOT_INITIALIZED     no engine.
  *
- * On ANY error the destination track keeps its previous content, its length and
- * its mute state: the import validates everything it can before touching it.
+ * The destination track keeps its previous content, its length and its mute state
+ * on every failure the import can VALIDATE — argument, format, IO, budget (both the
+ * source decode and the reservation), and the decode's own allocation, which is the
+ * same size as the reservation.
+ *
+ * The ONE exception is WMA_ERROR_MEMORY raised by the reservation itself, after the
+ * decode already held that much RAM: there the track is left EMPTY and UNMUTED, and
+ * the code is how the caller finds out. Preserving the old take through that would
+ * require holding both takes at once — the peak the memory budget exists to forbid.
+ *
+ * Transient peak of an ACCEPTED import: source decode + resampled copy + the track's
+ * reservation. A REJECTED one costs only the header.
  */
 WMA_API WmaResult wma_looper_import_track_ex(WmaEngine* engine, int track_index,
                                              const char* file_path, int sample_rate);

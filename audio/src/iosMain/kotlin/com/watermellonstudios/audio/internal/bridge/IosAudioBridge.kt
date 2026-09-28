@@ -1358,7 +1358,7 @@ internal class IosAudioBridge : IAudioNativeBridge {
         return if (code == NativeErrorCode.SUCCESS.code) {
             Result.success(Unit)
         } else {
-            Result.failure(NativeBridgeException.fromCode(code, filePath))
+            Result.failure(NativeBridgeException.fromCode(code, "track $trackIndex: $filePath"))
         }
     }
 

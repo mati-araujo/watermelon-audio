@@ -1653,6 +1653,12 @@ TEST_F(CApiLooperTest, Req045ImportTrackExNamesTheCauseAndTheBoolDelegates) {
               WMA_ERROR_MEMORY_BUDGET);
     EXPECT_FALSE(wma_looper_import_track(mWma, 1, bueno.c_str(), kSampleRate));
 
+    // Rate de destino no positivo: es un argumento inválido del llamador, no memoria.
+    EXPECT_EQ(wma_looper_import_track_ex(mWma, 1, bueno.c_str(), 0),
+              WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    EXPECT_EQ(wma_looper_import_track_ex(mWma, 1, bueno.c_str(), -1),
+              WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+
     // Índice fuera del límite de pistas activas, y motor nulo.
     wma_looper_set_capabilities(mWma, 64LL * 1024 * 1024, 0, 0);
     EXPECT_EQ(wma_looper_import_track_ex(mWma, 99, bueno.c_str(), kSampleRate),

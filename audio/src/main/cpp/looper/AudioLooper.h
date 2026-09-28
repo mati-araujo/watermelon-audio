@@ -990,9 +990,13 @@ public:
     /**
      * @brief importTrack with the CAUSE of the failure (REQ-045 D6).
      *
-     * Same work, same result on success; every non-Ok value is decided before the
-     * destination track is touched, so a failure also means "the previous take is
-     * still there, still audible". importTrack() is this, with the cause thrown away.
+     * Same work, same result on success. Every failure the import can VALIDATE —
+     * argument, format, IO, budget (source decode and reservation), and the decode's
+     * own allocation — is decided before the destination track is touched, so it also
+     * means "the previous take is still there, still audible, still unmuted". The one
+     * exception is the allocator failing when the track reserves, after the decode held
+     * the same RAM: that leaves the track empty and unmuted, reported as
+     * `OutOfMemory` (AC-045.8). importTrack() is this, with the cause thrown away.
      */
     wm::ImportStatus importTrackChecked(int trackIndex, const char* filePath, int sampleRate);
 

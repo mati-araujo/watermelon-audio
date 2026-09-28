@@ -341,19 +341,42 @@ bool LooperExporter::importTrack(int trackIndex, const char* filePath, int sampl
  *     instead of decoding and resampling ~55 MB first. The size is derived with the
  *     SAME `ceil(numFrames × ratio)` formula the resample below uses — two formulas
  *     would mean the check and the allocation disagree by a frame at some ratio.
- *  2. Everything that can fail is done BEFORE the destination track is touched:
- *     header, representability, budget, decode and resample. The decode's buffer is
- *     `outputFrames × 2` floats — the same RAM the track is about to reserve — so by
- *     the time clear() runs, the allocation has effectively already been proven.
- *     Before this, `setMuted(true)` + `clear()` ran first and a failing `allocate()`
- *     left the track EMPTY AND MUTED: an out-of-memory import silently deleted a
- *     take.
+ *  2. Everything VALIDABLE is done BEFORE the destination track is touched: argument,
+ *     header, representability, budget (of the source decode AND of the reservation),
+ *     decode and resample. Before this, `setMuted(true)` + `clear()` ran first and a
+ *     failing `allocate()` left the track EMPTY AND MUTED: an out-of-memory import
+ *     silently deleted a take.
+ *
+ *     🔴 **What is NOT closed, and cannot be without the budget the import is enforcing:**
+ *     the allocator itself failing when the track reserves, after the decode already
+ *     proved the same amount of RAM. Keeping the old take through that needs A and B
+ *     alive at once, which is the very peak the budget forbids — and the `clear()` is
+ *     also what performs the `waitForRenderIdle()` handshake and returns the chunks. In
+ *     that one case the track is left EMPTY, **UNMUTED** and the cause is reported as
+ *     `OutOfMemory`. That is the contract (AC-045.8, re-declared after measuring); the
+ *     four doc comments on this path say exactly that and nothing wider.
  *  3. writeFrame()'s return is read. It reports a dropped frame (pool exhausted);
  *     ignoring it produced a track that reported the full length with silence in it.
+ *  4. **Transient peak.** A rejected import costs O(header). An accepted one peaks at
+ *     `source decode (numFrames × 2 × 4) + resample (outputFrames × 2 × 4) + the
+ *     track's reservation`, plus the raw payload `readWav` holds while converting. With
+ *     a ratio < 1 (192 kHz → 48 kHz) the SOURCE buffer is the big one and the output
+ *     says nothing about it, so the source decode is budget-checked on its own — that
+ *     was a 430 MB peak sneaking past a 48 MB budget.
  */
 ImportStatus LooperExporter::importTrackChecked(int trackIndex, const char* filePath,
                                                int sampleRate) {
-    if (trackIndex < 0 || trackIndex >= mL.getMaxActiveTracks()) return ImportStatus::InvalidTrack;
+    if (trackIndex < 0 || trackIndex >= mL.getMaxActiveTracks()) {
+        EXP_LOGE("importTrack FAILED: track %d is outside the active-track limit (%d)",
+                 trackIndex, mL.getMaxActiveTracks());
+        return ImportStatus::InvalidTrack;
+    }
+    // A target rate of 0 or less is the caller's mistake, not a memory problem: it used
+    // to fall through the resample arithmetic and come back as OutOfMemory.
+    if (sampleRate <= 0) {
+        EXP_LOGE("importTrack FAILED: target sample rate %d is not positive", sampleRate);
+        return ImportStatus::InvalidArgument;
+    }
 
     // ---- 1. Header only: not one sample decoded, not one byte of payload read.
     wav::WavInfo info;
@@ -384,11 +407,27 @@ ImportStatus LooperExporter::importTrackChecked(int trackIndex, const char* file
         return ImportStatus::OutOfMemory;
     }
 
-    // ---- 3. Budget (reserved RAM — see AudioLooper::prepareTrack), before decoding.
-    const size_t needed = static_cast<size_t>(outputFrames64) * 2 * sizeof(float);
+    // ---- 3. Budget, before decoding. TWO questions, and the second one is not
+    // implied by the first.
     const size_t currentUsage = mL.getTotalReservedBytes();
     const size_t trackCurrent = mL.mTracks[trackIndex].reservedBytes();
     const size_t budget = mL.getMemoryBudgetBytes();
+
+    // (a) the SOURCE decode. With a ratio < 1 the output is smaller than the file, so
+    // the reservation below says nothing about the transient: a 192 MB source
+    // downsampled to 48 kHz reserves 24 MB and peaks at ~430 MB while decoding. The
+    // budget is the only ceiling this engine has, so it bounds the transient too.
+    const size_t sourceDecodeBytes = static_cast<size_t>(info.numFrames) * 2 * sizeof(float);
+    if (sourceDecodeBytes > budget) {
+        EXP_LOGE("importTrack FAILED: decoding the source needs %zu B, budget is %zu B",
+                 sourceDecodeBytes, budget);
+        return ImportStatus::BudgetExceeded;
+    }
+
+    // (b) what the track will RESERVE — computed by the same function the reservation
+    // uses, because the paged backend rounds up to whole 256 KB chunks. Using the
+    // logical size here let a check pass whose reservation then landed over the budget.
+    const size_t needed = TrackStorage::reservationBytesFor(static_cast<int>(outputFrames64));
     if (currentUsage - trackCurrent + needed > budget) {
         EXP_LOGE("importTrack FAILED: memory budget exceeded (need %zu, budget %zu, used %zu)",
                  needed, budget, currentUsage - trackCurrent);
@@ -457,9 +496,12 @@ ImportStatus LooperExporter::importTrackChecked(int trackIndex, const char* file
     // pool for the full capacity, so the writes below never hit an empty pool.
     size_t allocated = mL.mTracks[trackIndex].allocate(outputFrames, sampleRate);
     if (allocated == 0) {
-        // The decoded buffer above is the same size as this allocation, so reaching
-        // here means the RAM went away between the two. Unmute so the track is not
-        // left silent-and-muted on top of being empty.
+        // REACHABLE, and this is the one case AC-045.8 leaves open: the chunk pool (or
+        // the dense vector) could not get the memory even though the decode above just
+        // held the same amount. The track is already cleared — undoing that would need
+        // both takes alive, the peak the budget forbids — so it is left EMPTY and
+        // UNMUTED, with the cause reported. Unmuting matters: empty-and-muted reads
+        // from the UI as a volume bug instead of a failed import.
         mL.mTracks[trackIndex].setMuted(false);
         EXP_LOGE("importTrack FAILED: the track could not reserve %d frames", outputFrames);
         return ImportStatus::OutOfMemory;

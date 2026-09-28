@@ -3381,14 +3381,14 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * El import con la causa (REQ-045 D6). El `jint` que vuelve es un `WmaResult`, o sea
      * el mismo espacio de códigos que [NativeErrorCode]: la causa nace en la C API y se
-     * TRANSPORTA, no se re-deriva acá. `filePath` viaja como contexto para que
-     * `UnsupportedFormat` / `IoError` digan de qué archivo hablan.
+     * TRANSPORTA, no se re-deriva acá. El contexto lleva la PISTA y la ruta:
+     * un índice inválido que sólo nombrara el archivo no diría qué estuvo mal.
      */
     override fun looperImportTrackResult(trackIndex: Int, filePath: String, sampleRate: Int): Result<Unit> {
         val code = nativeLooperImportTrackResult(trackIndex, filePath, sampleRate)
         if (code == NativeErrorCode.SUCCESS.code) return Result.success(Unit)
         Log.e(TAG, "looperImportTrack($trackIndex, $filePath): native returned $code")
-        return Result.failure(NativeBridgeException.fromCode(code, filePath))
+        return Result.failure(NativeBridgeException.fromCode(code, "track $trackIndex: $filePath"))
     }
 
     // ========== EXPORT V2 (suspend wrappers, professional) ==========

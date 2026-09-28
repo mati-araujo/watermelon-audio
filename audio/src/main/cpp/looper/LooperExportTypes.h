@@ -27,16 +27,25 @@ struct ExportOptions {
  *
  * The bool importTrack() used to return could not tell a consumer whether to offer
  * "free some space", "pick another file" or "try again" — NoisyPad's own audit asked
- * for exactly this. Every value here is reached BEFORE the destination track is
- * touched, so a non-Ok status also means "the track still holds what it held".
+ * for exactly this.
+ *
+ * 🔴 **What each value says about the destination track.** Every value EXCEPT
+ * `OutOfMemory` is decided before the track is touched, so it also means "the track
+ * still holds what it held, still unmuted". `OutOfMemory` splits in two: when the
+ * request is unallocatable by construction it is refused up front like the others,
+ * but when the allocator fails at the reservation — after the decode already held the
+ * same amount of RAM — the track is left EMPTY and UNMUTED. Keeping the old take
+ * through that would require both takes alive at once, which is the peak the memory
+ * budget exists to forbid (AC-045.8, re-declared after measuring).
  */
 enum class ImportStatus {
     Ok = 0,
     InvalidTrack,        ///< index out of range for the active-track limit
+    InvalidArgument,     ///< a caller argument makes no sense (target sample rate <= 0)
     Io,                  ///< the file did not open
     UnsupportedFormat,   ///< not a RIFF/WAVE, or a format the reader does not decode
-    BudgetExceeded,      ///< the resampled size does not fit the memory budget
-    OutOfMemory,         ///< the destination track could not reserve the storage
+    BudgetExceeded,      ///< the source decode or the reservation does not fit the budget
+    OutOfMemory,         ///< the request is unallocatable, or the reservation failed
 };
 
 }  // namespace wm

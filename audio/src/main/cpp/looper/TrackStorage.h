@@ -38,22 +38,56 @@ public:
 
     // ---- lifecycle (UI/IO thread) ----
 
-    /** (Re)initialise to `frames` of silence. Returns logical bytes (frames×2×4). */
+    /**
+     * @brief (Re)initialise to `frames` of silence. Returns logical bytes (frames×2×4),
+     *        or **0 when the backing store could not be reserved**.
+     *
+     * 🔴 The 0 is new (REQ-045): the prefill used to be fire-and-forget, so a pool that
+     * could only get half the chunks still reported the full size. The caller filled a
+     * track it did not have, and the failure surfaced on the AUDIO thread as dropped
+     * frames. Reporting it here is what lets the import answer `OutOfMemory` before it
+     * writes a single frame.
+     */
     size_t allocate(int frames) {
         if (frames < 0) frames = 0;
-        mCapacity = frames;
 #ifdef WM_LOOPER_CHUNKED_BUFFER
         // Prefill the pool to cover the whole capacity so the audio thread never
         // allocates while recording within [0, frames). This RAM is now honestly
         // counted by reservedBytes() (the memory budget bounds it) and handed back
         // to the OS by shrinkToContent() once a shorter take is trimmed.
-        mPool.prefill(static_cast<size_t>(pageCountFor(frames)));
+        if (!mPool.prefill(static_cast<size_t>(pageCountFor(frames)))) {
+            // Leave the store EMPTY rather than half-reserved: a capacity the pool
+            // cannot back is exactly the lie this return value exists to stop.
+            mCapacity = 0;
+            mChunked.setPool(&mPool);
+            mChunked.reset(0);
+            return 0;
+        }
+        mCapacity = frames;
         mChunked.setPool(&mPool);
         mChunked.reset(frames);
 #else
+        mCapacity = frames;
         mBuffer.assign(static_cast<size_t>(frames) * 2, 0.0f);
 #endif
         return static_cast<size_t>(frames) * 2 * sizeof(float);
+    }
+
+    /**
+     * @brief The RAM `allocate(frames)` will actually reserve, for the memory budget.
+     *
+     * NOT `frames × 2 × 4`: the paged backend reserves whole 256 KB chunks, so a
+     * 33 000-frame take costs 512 KB, not 264 KB. The budget check and the reservation
+     * have to use THE SAME function or they diverge — the check passes and
+     * `reservedBytes()` lands above the budget (REQ-045, item 4 of the review).
+     */
+    static size_t reservationBytesFor(int frames) {
+        if (frames <= 0) return 0;
+#ifdef WM_LOOPER_CHUNKED_BUFFER
+        return static_cast<size_t>(pageCountFor(frames)) * Chunk::kBytes;
+#else
+        return static_cast<size_t>(frames) * 2 * sizeof(float);
+#endif
     }
 
     /**
@@ -208,7 +242,11 @@ public:
         const size_t haveFree = mPool.freeCount();
         const size_t missing  = (needFree > haveFree) ? (needFree - haveFree) : 0;
         if (missing > maxExtraBytes / Chunk::kBytes) return false;
-        mPool.prefill(needFree);
+        // A failed prefill must NOT become an undo (REQ-045): with the snapshot taken
+        // and no copy-on-write headroom, the next overdub asks the pool for a page on
+        // the AUDIO thread, gets nullptr and drops the frame. `false` here is "there is
+        // no undo", which is true and recoverable.
+        if (!mPool.prefill(needFree)) return false;
         mChunked.snapshotForUndo();
         return true;
 #else

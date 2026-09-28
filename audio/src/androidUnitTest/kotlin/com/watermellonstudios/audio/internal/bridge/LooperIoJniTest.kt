@@ -481,6 +481,12 @@ class LooperIoJniTest {
             jni("nativeLooperGetTrackLengthFrames") { it.looperGetTrackLengthFrames(TRACK) },
             "un import fallido cambió el largo de la pista",
         )
+
+        // La pista queda limpia: el motor es un singleton de proceso y este test la deja
+        // CARGADA. El @Before la limpia, pero dejarla es apoyarse en que el próximo se
+        // acuerde — y las capabilities no se tocaron acá justamente para no tener que
+        // restaurar un tier (el rechazo por presupuesto sale de la cabeza del archivo).
+        jni("nativeLooperClearTrack") { it.looperClearTrack(TRACK) }
     }
 
     // ---- helpers: cada uno anota UNA función, para que el trinquete siga siendo legible ----
