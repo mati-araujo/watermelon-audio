@@ -1026,10 +1026,26 @@ private:
      * `#if WMA_HAS_OBOE`: el camino que shippea en Android es justo el que ningun
      * sanitizer del CI compila.
      *
-     * Es un mutex de CONTROL y jamas entra al hilo de audio: el unico lector RT del rate
-     * (`currentSampleRate()`) pasa por `mLegacyStreamSampleRate`, que es un atomic, y por
-     * eso mismo dejo de desreferenciar un `shared_ptr` adentro del callback. El orden de
-     * toma es siempre `mStateMutex` -> `mStreamMutex`; los lectores toman solo este.
+     * Es un mutex de CONTROL, y **desde REQ-045.1 jamas entra al hilo de audio** — antes
+     * NO era cierto del todo: `currentSampleRate()` (que es RT: esta declarado en
+     * `scripts/rt-coverage-baseline.txt`, la alcanza `captureMonitoringBlock`) llamaba a
+     * `getStreamInfo()`, y con `mUseBackendManager == true` pero `BackendManager` sin
+     * correr, esa llamada caia a la rama legacy de `getStreamInfo()`, que SI toma este
+     * mutex via `legacyStream()`. `check-rt-safety.py` no lo veia porque `getStreamInfo`
+     * resuelve a mas de una definicion y el walker no sigue una llamada ambigua.
+     *
+     * Ahora `currentSampleRate()` no llama mas a `getStreamInfo()`: le pregunta directo
+     * a `BackendManager` y, si no hay nada que contestar, lee `mLegacyStreamSampleRate`
+     * (un atomic) — nunca este mutex. El orden de toma sigue siendo `mStateMutex` ->
+     * `mStreamMutex`; los lectores de control (`getStreamInfo()`, no RT) toman solo
+     * este.
+     *
+     * 🔴 Lo que SIGUE entrando al hilo RT, y es deuda preexistente aparte (no de este
+     * mutex): con `mUseBackendManager == true` y el manager CORRIENDO,
+     * `currentSampleRate()` toma `BackendManager::mMutex` (via `isRunning()` +
+     * `getStreamInfo()` de `BackendManager`). Viene desde c1f822d (2026-07-22), tambien
+     * invisible para el lint por la misma ambiguedad, y se sigue aparte: es el rate en
+     * caliente de REQ-006.
      */
     mutable std::mutex mStreamMutex;
 

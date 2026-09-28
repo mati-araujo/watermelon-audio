@@ -1941,25 +1941,42 @@ std::shared_ptr<oboe::AudioStream> AudioEngine::legacyStream() const {
 }
 
 int AudioEngine::currentSampleRate() const {
-    // M5 — el camino RT NO pasa mas por `getStreamInfo()`.
+    // REQ-045.1 — esta funcion NO puede llamar a `getStreamInfo()` (ver el mutante
+    // M5b: volver a hacerlo reintroduce un lock que bloquea en el hilo RT).
     //
     // Esta funcion esta declarada en `scripts/rt-coverage-baseline.txt`, o sea que la
-    // alcanza el hilo de audio, y hasta ahora desreferenciaba un `shared_ptr` miembro que
-    // `stop()` resetea. Ahora lee un atomic, que es lo unico que el hilo de audio puede
-    // hacer, y `getStreamInfo()` quedo fuera del camino RT — que es lo que le permite
-    // tomar el mutex de control.
-    if (mUseBackendManager.load(std::memory_order_acquire)) {
-        int32_t sampleRate = 0;
-        int32_t bufferSize = 0;
-        double latencyMillis = 0.0;
-        if (getStreamInfo(sampleRate, bufferSize, latencyMillis) && sampleRate > 0) {
-            return sampleRate;
+    // alcanza el hilo de audio de captura (`captureMonitoringBlock`). Con
+    // `mUseBackendManager == true`, llamar a `getStreamInfo()` la mandaba a SU rama
+    // legacy en cuanto `BackendManager` no estaba corriendo (`manager.isRunning()`
+    // falso), y esa rama hace `legacyStream()` -> `lock_guard(mStreamMutex)`: un lock
+    // bloqueante nuevo en el hilo RT que `check-rt-safety.py` NO ve, porque
+    // `getStreamInfo` resuelve a mas de una definicion (la de esta clase y la de
+    // `BackendManager`) y el walker no sigue una llamada ambigua.
+    //
+    // El arreglo: preguntarle DIRECTO a `BackendManager` (no a la funcion de esta
+    // clase) y, si no dio, leer el atomic — el mismo orden BM-primero/legacy-despues
+    // de antes, pero la mitad legacy sin lock.
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    if (mUseBackendManager.load(std::memory_order_acquire) && manager.isRunning()) {
+        // 🔴 DEUDA PREEXISTENTE, no de esta funcion: `BackendManager::isRunning()` y
+        // `BackendManager::getStreamInfo()` toman `BackendManager::mMutex` (un
+        // `lock_guard`, ver `backends/BackendManager.cpp`), y por eso mismo esta rama
+        // SIGUE siendo un lock que bloquea en el hilo RT. Viene desde c1f822d
+        // (2026-07-22) — de antes de que esta funcion se declarara RT — y es invisible
+        // para `check-rt-safety.py` por la misma ambiguedad de `getStreamInfo`. No se
+        // arregla aca: es el rate en caliente de REQ-006, que es quien tiene que
+        // rediseñar `BackendManager` para que un lector RT no choque con `mMutex`.
+        const auto info = manager.getStreamInfo();
+        if (info.sampleRate > 0) {
+            return info.sampleRate;
         }
-    } else {
-        const int32_t legacy = mLegacyStreamSampleRate.load(std::memory_order_acquire);
-        if (legacy > 0) {
-            return legacy;
-        }
+    }
+
+    // El camino legacy: SOLO el atomic, nunca `legacyStream()` (M5b). Es lo unico que
+    // el hilo de audio puede hacer sin tomar `mStreamMutex`.
+    const int32_t legacy = mLegacyStreamSampleRate.load(std::memory_order_acquire);
+    if (legacy > 0) {
+        return legacy;
     }
 
     // El rate del render offline (REQ-015). Sin backend al que preguntarle es lo
@@ -1974,6 +1991,12 @@ int AudioEngine::currentSampleRate() const {
 }
 
 bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const {
+    // REQ-045.1 — esta funcion NO es RT: puede tomar `BackendManager::mMutex` (rama
+    // BackendManager) o `mStreamMutex` via `legacyStream()` (rama legacy). Sus
+    // llamadores son todos de control (el poller de la UI, la C API, JNI). El hilo de
+    // audio de captura llega a `currentSampleRate()`, que YA NO llama a esta funcion —
+    // ver el comentario de ahi.
+    //
     // Try BackendManager first (works for both USB and Oboe-via-backend paths)
     if (mUseBackendManager.load(std::memory_order_acquire)) {
         auto& manager = watermelon_audio::BackendManager::getInstance();
