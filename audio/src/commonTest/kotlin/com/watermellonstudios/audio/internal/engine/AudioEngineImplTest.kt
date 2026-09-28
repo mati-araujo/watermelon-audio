@@ -372,6 +372,95 @@ class AudioEngineImplTest {
     }
 
     /**
+     * **1.10 — el mismo bug, en `stopLocked`.**
+     *
+     * El `catch (e: CancellationException)` de acá relanza, pero el mutante que lo
+     * cambia por `ArithmeticException` SOBREVIVÍA: nada ejercitaba una cancelación a
+     * mitad del fade de `stop()`. Es el mismo defecto que
+     * [cancellingStartMidFadeRethrowsInsteadOfPublishingAFailure], del lado del apagado
+     * — y ahí el motor YA paró (el bridge dijo que sí) cuando se cancela, así que
+     * publicar `STOPPED`/un error de analytics sería la misma mentira sobre un motor
+     * que en este caso SÍ terminó de parar, sólo que el `stop()` que lo pidió nunca se
+     * enteró.
+     */
+    @Test
+    fun cancellingStopMidFadeRethrowsInsteadOfPublishingAFailure() = runTest {
+        val spy = AnalyticsSpy()
+        val bridge = FakeAudioNativeBridge()
+        val engine = AudioEngineImpl(
+            AudioEngineConfig(analyticsListener = spy),
+            bridge,
+            BridgeConcurrency(dispatcher = StandardTestDispatcher(testScheduler)),
+        )
+        assertTrue(
+            engine.start(fadeMs = 0).isSuccess,
+            "premisa: el motor tiene que estar arrancado antes de poder cancelar su stop",
+        )
+
+        val trabajo = launch { engine.stop(fadeMs = 400) }
+        // Hasta la mitad del fade: el bridge ya dijo que paró y `stop()` está en el delay.
+        advanceTimeBy(200)
+        assertTrue(
+            bridge.calls.contains("stopEngineWithFade:out"),
+            "premisa: el motor nativo tiene que haber dicho YA que paró cuando se " +
+                "cancela, si no esto no prueba nada (calls=${bridge.calls})",
+        )
+
+        trabajo.cancel()
+        advanceUntilIdle()
+
+        assertTrue(trabajo.isCancelled, "la cancelación no llegó al job: se la tragó alguien")
+        assertEquals(
+            emptyList(),
+            spy.errores,
+            "publicó un error de analytics por una CANCELACIÓN: eso no es un fallo del motor",
+        )
+        assertNull(engine.state.value.error, "publicó un AudioError por una cancelación")
+    }
+
+    /**
+     * **1.10 — el mismo bug, en `transicion` (pause/resume).**
+     *
+     * Mismo `catch` compartido por `pause()` y `resume()`. Se cubre `pause()`, que es
+     * el camino que un consumidor real cancela más seguido (la UI se va a background
+     * a mitad de un fade de pausa).
+     */
+    @Test
+    fun cancellingPauseMidFadeRethrowsInsteadOfPublishingAFailure() = runTest {
+        val spy = AnalyticsSpy()
+        val bridge = FakeAudioNativeBridge()
+        val engine = AudioEngineImpl(
+            AudioEngineConfig(analyticsListener = spy),
+            bridge,
+            BridgeConcurrency(dispatcher = StandardTestDispatcher(testScheduler)),
+        )
+        assertTrue(
+            engine.start(fadeMs = 0).isSuccess,
+            "premisa: el motor tiene que estar arrancado antes de poder pausarlo",
+        )
+
+        val trabajo = launch { engine.pause(fadeMs = 400) }
+        // Hasta la mitad del fade: el bridge ya dijo que sí y `pause()` está en el delay.
+        advanceTimeBy(200)
+        assertTrue(
+            bridge.calls.contains("pauseEngineWithFade:out"),
+            "premisa: el motor nativo tiene que haber contestado YA cuando se cancela, " +
+                "si no esto no prueba nada (calls=${bridge.calls})",
+        )
+
+        trabajo.cancel()
+        advanceUntilIdle()
+
+        assertTrue(trabajo.isCancelled, "la cancelación no llegó al job: se la tragó alguien")
+        assertEquals(
+            emptyList(),
+            spy.errores,
+            "publicó un error de analytics por una CANCELACIÓN: eso no es un fallo del motor",
+        )
+        assertNull(engine.state.value.error, "publicó un AudioError por una cancelación")
+    }
+
+    /**
      * **M4 — el gemelo del `stop()` que falla.**
      *
      * El motor dice que no paró: `Result.failure`, error publicado, y el `lifecycle` lo
@@ -380,33 +469,75 @@ class AudioEngineImplTest {
      * congelado en lo último que alcanzó a escribir.
      *
      * ¿Qué bug plausible atrapa? Que alguien "arregle" esto publicando `STOPPED` en el
-     * camino de fallo, o que apague el polling antes de saber si el motor paró.
+     * camino de fallo, o que apague el polling antes de saber si el motor paró. La
+     * primera version de este test sólo miraba la firma del fallo: nunca arrancaba el
+     * motor, así que el poller no existía y `stopStatePolling()` era un no-op — el
+     * mutante que agrega un `stopStatePolling()` de más antes del `return
+     * Result.failure(causa)` (M4) SOBREVIVÍA porque no había nada que apagar. Acá el
+     * poller EXISTE (el motor arranca primero) y se observa la propiedad que el
+     * comentario de producción promete: el `lifecycle` publicado sigue cambiando con lo
+     * que el nativo reporta DESPUÉS del stop fallido.
+     *
+     * 🔴 Va con `runBlocking` y **espera por CONDICIÓN con techo**, misma razón que
+     * [theLatencyThatArrivesLateIsPickedUpByThePoller]: el poller corre en el scope
+     * propio del motor, sobre `Dispatchers.Default`, y ése no se inyecta — un `delay`
+     * fijo y afirmar después dependería del reloj real de la máquina que corre el test.
      */
     @Test
-    fun aFailedStopKeepsThePollerSoTheStateFollowsTheEngine() = runTest {
+    fun aFailedStopKeepsThePollerSoTheStateFollowsTheEngine() = runBlocking {
         val causa = NativeBridgeException.InvalidOperation("stop", "Running")
         val bridge = FakeAudioNativeBridge(
             lifecycleResults = mapOf("stopEngineWithFade" to Result.failure(causa)),
+            // Latencia YA presente desde la primera lectura: así el poller no vuelve a
+            // llamar `getStreamInfoArray()` en cada tick (esa es la propiedad de 1.11,
+            // no la de este test) y el tramo de `calls` posterior al arranque queda
+            // limpio para afirmar exactamente lo que pasó durante el stop.
+            streamInfoReadings = listOf(floatArrayOf(48000f, 240f, 8.5f, 2f, 1f)),
         )
         val engine = AudioEngineImpl(AudioEngineConfig(), bridge)
 
-        val result = engine.stop(fadeMs = 0)
+        try {
+            assertTrue(
+                engine.start(fadeMs = 0).isSuccess,
+                "premisa: el motor tiene que estar ARRANCADO, si no el poller no existe " +
+                    "y apagarlo es un no-op — que es justo lo que dejaba sobrevivir al mutante",
+            )
+            val llamadasAlArrancar = bridge.calls.size
 
-        assertTrue(result.isFailure, "el motor dijo que no paró y stop() devolvió éxito")
-        assertSame(causa, result.exceptionOrNull(), "la causa se re-derivó en vez de transportarse")
-        assertNotNull(engine.state.value.error, "un stop que falló tiene que dejar el error a la vista")
-        assertNotEquals(
-            EngineLifecycle.STOPPED,
-            engine.state.value.lifecycle,
-            "publicó STOPPED sobre un motor que dijo que no paró",
-        )
-        // Y NO siguió con el resto del apagado: el doble tira ante lo no modelado, así que
-        // un paso de más sería rojo. Lo que se ve es la llamada y nada después.
-        assertEquals(
-            listOf("stopEngineWithFade:in", "stopEngineWithFade:out"),
-            bridge.calls,
-            "siguió apagando cosas después de que el motor dijo que no paró",
-        )
+            val result = engine.stop(fadeMs = 0)
+
+            assertTrue(result.isFailure, "el motor dijo que no paró y stop() devolvió éxito")
+            assertSame(causa, result.exceptionOrNull(), "la causa se re-derivó en vez de transportarse")
+            assertNotNull(engine.state.value.error, "un stop que falló tiene que dejar el error a la vista")
+            assertNotEquals(
+                EngineLifecycle.STOPPED,
+                engine.state.value.lifecycle,
+                "publicó STOPPED sobre un motor que dijo que no paró",
+            )
+            // Y NO siguió con el resto del apagado: el doble tira ante lo no modelado, así que
+            // un paso de más sería rojo. Lo que se ve, sobre el TRAMO posterior al arranque,
+            // es la llamada de stop y nada después.
+            assertEquals(
+                listOf("stopEngineWithFade:in", "stopEngineWithFade:out"),
+                bridge.calls.drop(llamadasAlArrancar),
+                "siguió apagando cosas después de que el motor dijo que no paró " +
+                    "(calls=${bridge.calls})",
+            )
+
+            // El poller SIGUE VIVO y el lifecycle publicado sigue al motor: cambia lo que
+            // el nativo reporta y esperamos por CONDICIÓN a que el poller lo levante.
+            bridge.nativeEngineState = 3 // STOPPING en EngineLifecycle.fromNativeCode
+            val siguioAlMotor = withTimeoutOrNull(5_000) {
+                engine.state.first { it.lifecycle == EngineLifecycle.STOPPING }
+            }
+            assertNotNull(
+                siguioAlMotor,
+                "el lifecycle publicado nunca reflejó el nuevo estado del nativo: el " +
+                    "poller se apagó (o murió) después de un stop fallido",
+            )
+        } finally {
+            engine.release()
+        }
     }
 
     /**
@@ -544,6 +675,85 @@ class AudioEngineImplTest {
             r.isFailure,
             "un start que terminó DESPUÉS del release devolvió éxito: estaría afirmando que " +
                 "un motor destruido está andando",
+        )
+    }
+
+    /**
+     * **B8, la mitad difícil — el gemelo de `aStartInFlightWhenReleaseHappensCannotReportSuccess`
+     * para `pause()`.**
+     *
+     * El chequeo post-fade de `transicion()` —
+     * `if (released) return liberado(if (pausado) "pause" else "resume")` — es el que
+     * borra este mutante. `pause()` no necesita el motor arrancado para tener algo que
+     * verificar: `transicion()` llama al bridge sin mirar `isRunning`, así que alcanza
+     * con dejarla EN VUELO y liberar mientras espera adentro.
+     */
+    @Test
+    fun aPauseInFlightWhenReleaseHappensCannotReportSuccess() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val bridge = FakeAudioNativeBridge(gate = gate)
+        val engine = AudioEngineImpl(
+            AudioEngineConfig(),
+            bridge,
+            BridgeConcurrency(dispatcher = StandardTestDispatcher(testScheduler)),
+        )
+
+        var resultado: Result<Unit>? = null
+        launch { resultado = engine.pause(fadeMs = 0) }
+        runCurrent()
+        assertEquals(
+            listOf("pauseEngineWithFade:in"),
+            bridge.calls,
+            "premisa: el pause tiene que estar EN VUELO y adentro del bridge",
+        )
+
+        engine.release()
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        val r = assertNotNull(resultado, "el pause nunca terminó")
+        assertTrue(
+            r.isFailure,
+            "un pause que terminó DESPUÉS del release devolvió éxito: estaría afirmando " +
+                "que un motor destruido quedó pausado",
+        )
+    }
+
+    /**
+     * **B8, la mitad difícil — el mismo gemelo para `stop()`.**
+     *
+     * El chequeo post-fade de `stopLocked` —`if (released) return liberado("stop")`—
+     * ni siquiera estaba mutado en la tanda anterior: no había ningún test que dejara
+     * un `stop()` en vuelo cruzándose con un `release()`.
+     */
+    @Test
+    fun aStopInFlightWhenReleaseHappensCannotReportSuccess() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val bridge = FakeAudioNativeBridge(gate = gate)
+        val engine = AudioEngineImpl(
+            AudioEngineConfig(),
+            bridge,
+            BridgeConcurrency(dispatcher = StandardTestDispatcher(testScheduler)),
+        )
+
+        var resultado: Result<Unit>? = null
+        launch { resultado = engine.stop(fadeMs = 0) }
+        runCurrent()
+        assertEquals(
+            listOf("stopEngineWithFade:in"),
+            bridge.calls,
+            "premisa: el stop tiene que estar EN VUELO y adentro del bridge",
+        )
+
+        engine.release()
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        val r = assertNotNull(resultado, "el stop nunca terminó")
+        assertTrue(
+            r.isFailure,
+            "un stop que terminó DESPUÉS del release devolvió éxito: estaría afirmando " +
+                "que un motor destruido paró",
         )
     }
 }
