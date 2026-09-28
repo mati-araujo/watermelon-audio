@@ -1,6 +1,7 @@
 package com.watermellonstudios.audio.internal.bridge
 
 import cnames.structs.WmaEngine
+import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.internal.cinterop.wma_engine_create
 import com.watermellonstudios.audio.internal.cinterop.wma_engine_destroy
 import com.watermellonstudios.audio.internal.cinterop.wma_looper_find_content_bounds
@@ -390,6 +391,71 @@ class IosLooperBridgeTest {
         assertFalse(bridge.looperIsExportInProgress(), "cancelar dejó el motor inconsistente")
     }
 
+    // ==================== REQ-045 — el import con la causa ====================
+
+    /**
+     * AC-045.8 en iOS — `looperImportTrackResult` trae la CAUSA, y la paridad con
+     * Android no es cortesía: media librería arreglada es el defecto D1 otra vez.
+     *
+     * Las cuatro respuestas se piden sobre el MISMO bridge y, para el presupuesto,
+     * sobre el MISMO archivo que acaba de importar bien — que es lo que prueba que la
+     * causa es el presupuesto y no el archivo. El `isTrackActive` después del rechazo
+     * es la otra mitad de AC-045.8: un import fallido no puede haber vaciado la pista.
+     */
+    @Test
+    fun importTrackResultCarriesTheCauseAndNeverLosesTheTake() {
+        val wav = NSTemporaryDirectory() + "req045-import-${randomSuffix()}.wav"
+        writeFloatStereoSquareBurst(
+            path = wav,
+            frames = FIXTURE_FRAMES,
+            burstStart = 6_000,
+            burstEndExclusive = 42_000,
+        )
+        try {
+            bridge.looperSetCapabilities(budgetBytes = 48L * 1024 * 1024, maxTracks = 0, maxFreeSeconds = 0)
+            assertTrue(
+                bridge.looperImportTrackResult(0, wav, FIXTURE_RATE).isSuccess,
+                "el import del fixture tenía que salir bien: sin eso los rechazos no dicen nada",
+            )
+            assertTrue(bridge.looperIsTrackActive(0), "importó y la pista no quedó activa")
+            val largo = bridge.looperGetTrackLengthFrames(0)
+
+            // Io — el archivo no abre. No es "formato raro": no hay archivo.
+            val io = bridge.looperImportTrackResult(0, NSTemporaryDirectory() + "no-existe-req045.wav", FIXTURE_RATE)
+            assertTrue(io.isFailure, "una ruta inexistente no puede dar success")
+            assertTrue(
+                io.exceptionOrNull() is NativeBridgeException.IoError,
+                "la causa tenía que ser IoError y fue ${io.exceptionOrNull()}",
+            )
+
+            // UnsupportedFormat — abre y no es un RIFF/WAVE.
+            val basuraPath = NSTemporaryDirectory() + "req045-basura-${randomSuffix()}.wav"
+            writeBytes(basuraPath, ByteArray(512) { 0x7B })
+            val formato = bridge.looperImportTrackResult(0, basuraPath, FIXTURE_RATE)
+            assertTrue(
+                formato.exceptionOrNull() is NativeBridgeException.UnsupportedFormat,
+                "la causa tenía que ser UnsupportedFormat y fue ${formato.exceptionOrNull()}",
+            )
+            remove(basuraPath)
+
+            // BudgetExceeded — el mismo archivo, con el presupuesto apretado. El 0 en los
+            // otros dos campos también ejerce el "0 = no tocar" de AC-045.6.
+            bridge.looperSetCapabilities(budgetBytes = 64L * 1024, maxTracks = 0, maxFreeSeconds = 0)
+            val presupuesto = bridge.looperImportTrackResult(0, wav, FIXTURE_RATE)
+            assertTrue(
+                presupuesto.exceptionOrNull() is NativeBridgeException.MemoryBudgetExceeded,
+                "la causa tenía que ser MemoryBudgetExceeded y fue ${presupuesto.exceptionOrNull()}",
+            )
+
+            assertTrue(bridge.looperIsTrackActive(0), "un import fallido desactivó la pista")
+            assertEquals(largo, bridge.looperGetTrackLengthFrames(0), "un import fallido cambió el largo")
+        } finally {
+            bridge.looperSetCapabilities(budgetBytes = 48L * 1024 * 1024, maxTracks = 0, maxFreeSeconds = 0)
+            bridge.looperClearTrack(0)
+            remove(wav)
+        }
+    }
+
     // ==================== El fixture de MINI-030 ====================
 
     private fun randomSuffix(): String = Random.nextInt(0, Int.MAX_VALUE).toString(16)
@@ -434,6 +500,20 @@ class IosLooperBridgeTest {
                 fwrite(pinned.addressOf(0), 1uL, bytes.size.toULong(), file)
             }
             check(written == bytes.size.toULong()) { "el fixture quedó corto: $written de ${bytes.size} bytes" }
+        } finally {
+            fclose(file)
+        }
+    }
+
+    /** Bytes crudos a un archivo, para los fixtures que NO son WAV. */
+    @OptIn(ExperimentalForeignApi::class)
+    private fun writeBytes(path: String, bytes: ByteArray) {
+        val file = requireNotNull(fopen(path, "wb")) { "no se pudo abrir $path" }
+        try {
+            val written = bytes.usePinned { pinned ->
+                fwrite(pinned.addressOf(0), 1uL, bytes.size.toULong(), file)
+            }
+            check(written == bytes.size.toULong()) { "quedó corto: $written de ${bytes.size}" }
         } finally {
             fclose(file)
         }

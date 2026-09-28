@@ -1,5 +1,6 @@
 package com.watermellonstudios.audio.api
 
+import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import com.watermellonstudios.audio.domain.looper.LevelEnvelope
 import com.watermellonstudios.audio.domain.looper.PitchSeries
@@ -381,6 +382,40 @@ interface ILooperBridge {
 
     /** Carga un WAV en la pista, resampleando si hace falta. */
     fun looperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean
+
+    /**
+     * El mismo import, con la **causa** del fallo (REQ-045 D6).
+     *
+     * `Result.failure` trae un [NativeBridgeException] que dice qué pasó, que es lo que
+     * un `false` no podía decir: un consumidor no sabía si ofrecer *"liberá espacio"*,
+     * *"elegí otro archivo"* o *"reintentá"*.
+     *
+     * - [NativeBridgeException.MemoryBudgetExceeded] — el tamaño **resampleado** no entra
+     *   en el presupuesto del looper. Se decide leyendo la **cabecera**: no se decodifica
+     *   nada, así que rechazar un archivo de 5 minutos cuesta un `open` y unos `read`.
+     * - [NativeBridgeException.UnsupportedFormat] — no es RIFF/WAVE, o es un formato que
+     *   el lector no decodifica (PCM 16/24 e IEEE float 32).
+     * - [NativeBridgeException.IoError] — el archivo no abrió.
+     * - [NativeBridgeException.MemoryAllocationFailed] — la pista no pudo reservar.
+     *
+     * 🔴 **En cualquier fallo la pista destino queda como estaba**: con su contenido, su
+     * largo y su mute. Antes de REQ-045 un fallo por memoria la dejaba VACÍA y MUTEADA.
+     *
+     * El cuerpo por defecto existe para no romper implementaciones de afuera (fakes de
+     * test de un consumidor): delega en [looperImportTrack] y, si dice `false`, devuelve
+     * un fallo sin causa precisa — nunca un `success` inventado.
+     */
+    fun looperImportTrackResult(trackIndex: Int, filePath: String, sampleRate: Int): Result<Unit> =
+        if (looperImportTrack(trackIndex, filePath, sampleRate)) {
+            Result.success(Unit)
+        } else {
+            Result.failure(
+                NativeBridgeException.InvalidOperation(
+                    operation = "looperImportTrack($trackIndex, $filePath)",
+                    currentState = "esta implementación no transporta la causa",
+                ),
+            )
+        }
 
     /**
      * Escribe el buffer **completo** de la pista, ignorando la región de loop.

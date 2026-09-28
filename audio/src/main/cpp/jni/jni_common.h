@@ -58,6 +58,10 @@ namespace JniError {
     constexpr jint INVALID_OPERATION = -9;
     constexpr jint INVALID_EFFECT_TYPE = -10;
     constexpr jint TIMEOUT = -11;
+    // REQ-045: las tres causas que el import del looper tiene que poder nombrar.
+    constexpr jint MEMORY_BUDGET_EXCEEDED = -12;
+    constexpr jint UNSUPPORTED_FORMAT = -13;
+    constexpr jint IO_ERROR = -14;
     constexpr jint UNKNOWN_ERROR = -99;
 }
 

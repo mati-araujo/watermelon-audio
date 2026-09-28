@@ -10,6 +10,7 @@ import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
+import com.watermellonstudios.audio.domain.error.NativeErrorCode
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import com.watermellonstudios.audio.domain.looper.LevelEnvelope
 import com.watermellonstudios.audio.domain.looper.PitchSeries
@@ -2923,6 +2924,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperExportTrack(trackIndex: Int, filePath: String): Boolean
     private external fun nativeLooperCaptureTrack(trackIndex: Int, filePath: String, bitDepth: Int): Boolean
     private external fun nativeLooperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean
+    private external fun nativeLooperImportTrackResult(trackIndex: Int, filePath: String, sampleRate: Int): Int
 
     // Export V2 (with options + metadata + limiter)
     private external fun nativeLooperExportMixV2(
@@ -3375,6 +3377,19 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override fun looperCaptureTrack(trackIndex: Int, filePath: String, bitDepth: Int): Boolean =
         nativeLooperCaptureTrack(trackIndex, filePath, bitDepth)
     override fun looperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean = nativeLooperImportTrack(trackIndex, filePath, sampleRate)
+
+    /**
+     * El import con la causa (REQ-045 D6). El `jint` que vuelve es un `WmaResult`, o sea
+     * el mismo espacio de códigos que [NativeErrorCode]: la causa nace en la C API y se
+     * TRANSPORTA, no se re-deriva acá. `filePath` viaja como contexto para que
+     * `UnsupportedFormat` / `IoError` digan de qué archivo hablan.
+     */
+    override fun looperImportTrackResult(trackIndex: Int, filePath: String, sampleRate: Int): Result<Unit> {
+        val code = nativeLooperImportTrackResult(trackIndex, filePath, sampleRate)
+        if (code == NativeErrorCode.SUCCESS.code) return Result.success(Unit)
+        Log.e(TAG, "looperImportTrack($trackIndex, $filePath): native returned $code")
+        return Result.failure(NativeBridgeException.fromCode(code, filePath))
+    }
 
     // ========== EXPORT V2 (suspend wrappers, professional) ==========
     //

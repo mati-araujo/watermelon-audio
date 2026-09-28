@@ -114,6 +114,23 @@ internal object MinimalWav {
         return out.toByteArray()
     }
 
+    /**
+     * Sólo la **cabecera**: 44 bytes que declaran [frames] frames de float32 estéreo y
+     * NINGÚN byte de payload (REQ-045 AC-045.8).
+     *
+     * No es un fixture roto: `wav::readWavInfo` lo lee entero y correcto —el formato y el
+     * tamaño declarado viven en la cabecera— mientras que decodificar los `frames × 8`
+     * bytes es imposible porque no están. Es lo que hace afirmable "rechazó por
+     * presupuesto SIN decodificar" sin commitear un WAV de 5 minutos (55 MB) ni medir
+     * tiempo.
+     */
+    fun writeHeaderOnlyTo(file: File, frames: Int, sampleRate: Int = RATE): String {
+        val out = ByteArrayOutputStream(HEADER_BYTES)
+        writeHeader(out, frames = frames, sampleRate = sampleRate)
+        file.writeBytes(out.toByteArray())
+        return file.absolutePath
+    }
+
     /** El fixture escrito a [file]. Devuelve la **ruta absoluta**, que es lo que cruza el JNI. */
     fun writeTo(file: File, frames: Int, regions: List<Region>, sampleRate: Int = RATE): String {
         file.writeBytes(floatStereo(frames, regions, sampleRate))
