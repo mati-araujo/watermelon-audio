@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -435,7 +436,25 @@ ImportStatus LooperExporter::importTrackChecked(int trackIndex, const char* file
     }
 
     EXP_LOGD("importTrack: reading %s", filePath);
-    wav::WavData wavData = wav::readWav(filePath);
+
+    // ---- 4. Decode + resample. The two allocations that can THROW, and a `bad_alloc`
+    // here is an out-of-memory with a name: without this it escaped to the C API and
+    // came back as WMA_ERROR_UNKNOWN, so "the decode's allocation reports OutOfMemory
+    // and leaves the take intact" (AC-045.8) was not true. The resampled buffer is
+    // pre-sized from the HEADER's numbers — the same ones the budget was checked
+    // against — so the resize below finds it already the right size and the decode path
+    // itself is untouched (its bit-exactness is the reference).
+    wav::WavData wavData;
+    std::vector<float> resampledBuffer;
+    try {
+        wavData = wav::readWav(filePath);
+        if (needsResampleFromHeader) {
+            resampledBuffer.resize(static_cast<size_t>(outputFrames64) * 2);
+        }
+    } catch (const std::bad_alloc&) {
+        EXP_LOGE("importTrack FAILED: out of memory decoding the source");
+        return ImportStatus::OutOfMemory;
+    }
     if (wavData.numFrames <= 0) {
         EXP_LOGE("importTrack FAILED: readWav returned 0 frames (unsupported format or corrupt file)");
         return ImportStatus::UnsupportedFormat;
@@ -445,7 +464,6 @@ ImportStatus LooperExporter::importTrackChecked(int trackIndex, const char* file
     // Resample if source sample rate differs from target (e.g., 44100 → 48000)
     bool needsResample = (wavData.sampleRate > 0 && wavData.sampleRate != sampleRate);
     int outputFrames = wavData.numFrames;
-    std::vector<float> resampledBuffer;
 
     if (needsResample) {
         double ratio = static_cast<double>(sampleRate) / static_cast<double>(wavData.sampleRate);
