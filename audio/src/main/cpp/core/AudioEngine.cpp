@@ -1956,19 +1956,26 @@ int AudioEngine::currentSampleRate() const {
     // El arreglo: preguntarle DIRECTO a `BackendManager` (no a la funcion de esta
     // clase) y, si no dio, leer el atomic — el mismo orden BM-primero/legacy-despues
     // de antes, pero la mitad legacy sin lock.
-    auto& manager = watermelon_audio::BackendManager::getInstance();
-    if (mUseBackendManager.load(std::memory_order_acquire) && manager.isRunning()) {
+    //
+    // `getInstance()` va ADENTRO de la rama, no antes: en el camino Oboe directo no hay
+    // nada que preguntarle, y si la instancia global ya se soltó
+    // (`setGlobalInstance(nullptr)` al destruir el motor, `watermelon_audio.cpp`) su
+    // fallback CONSTRUYE un `static BackendManager` — desde el hilo RT.
+    if (mUseBackendManager.load(std::memory_order_acquire)) {
+        auto& manager = watermelon_audio::BackendManager::getInstance();
         // 🔴 DEUDA PREEXISTENTE, no de esta funcion: `BackendManager::isRunning()` y
         // `BackendManager::getStreamInfo()` toman `BackendManager::mMutex` (un
-        // `lock_guard`, ver `backends/BackendManager.cpp`), y por eso mismo esta rama
-        // SIGUE siendo un lock que bloquea en el hilo RT. Viene desde c1f822d
-        // (2026-07-22) — de antes de que esta funcion se declarara RT — y es invisible
-        // para `check-rt-safety.py` por la misma ambiguedad de `getStreamInfo`. No se
-        // arregla aca: es el rate en caliente de REQ-006, que es quien tiene que
-        // rediseñar `BackendManager` para que un lector RT no choque con `mMutex`.
-        const auto info = manager.getStreamInfo();
-        if (info.sampleRate > 0) {
-            return info.sampleRate;
+        // `lock_guard`, ver `backends/BackendManager.cpp`), y el segundo ademas el
+        // `mStreamInfoMutex` del backend activo: esta rama SIGUE tomando dos locks
+        // anidados en el hilo RT. Viene desde c1f822d (2026-07-22) y es invisible para
+        // `check-rt-safety.py` por la misma ambiguedad de `getStreamInfo`. La paga
+        // MINI-033 (un atomic de rate de stream en el motor + renombrar los dos
+        // `getStreamInfo` para que el lint vea la cadena), despues de este REQ.
+        if (manager.isRunning()) {
+            const auto info = manager.getStreamInfo();
+            if (info.sampleRate > 0) {
+                return info.sampleRate;
+            }
         }
     }
 
