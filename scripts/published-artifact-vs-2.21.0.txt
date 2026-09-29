@@ -1,16 +1,29 @@
 # Diferencias DECLARADAS del artefacto publicado contra 2.21.0 del registro (REQ-047).
 #
 #   python3 scripts/diff-published-artifact.py --against 2.21.0 \
-#       --local-version <la de publishToMavenLocal> \
+#       --local-version 2.21.0-req047-s2 \
 #       --expect-file scripts/published-artifact-vs-2.21.0.txt
 #
-# Es un TRINQUETE: una diferencia que no esta aca es roja, y una linea de aca que
-# no se reproduce tambien. Cada etapa de REQ-047 que toca lo publicado agrega las
-# suyas con su razon; la nota de bump de 2.22.0 se escribe desde este archivo.
-# Linea de base (master 0c34ab0 contra 2.21.0, 29/09): CERO diferencias.
+# Forma: CLAVE = VALOR_BASE -> VALOR_HEAD   # razon
+# Es un TRINQUETE SOBRE EL VALOR: una diferencia que no esta aca es roja, una que
+# esta con OTRO valor tambien, y una linea que no se reproduce tambien. Cada etapa
+# de REQ-047 que toca lo publicado re-declara las suyas; para eso,
+# `--print-declarations` imprime lo observado en esta sintaxis y SU DIFF ES LA
+# REVISION. La nota de bump de 2.22.0 se escribe desde este archivo.
+#
+# Los hash de libwatermelon_audio.so estan atados al publish con la version de
+# arriba: el .so embebe la version como string, asi que otro -Pversion da otros
+# bytes. Linea de base (master 0c34ab0 como 2.21.0-req047-base): solo esos cuatro
+# hash, por la misma razon.
 
 # --- S2: AGP 9.4.1, compileSdk 37, core-ktx 1.19.1
-aar/metadata:minCompileSdk   # 36 -> 37: core-ktx 1.19 exige compilar contra 37, y el AAR lo propaga
-aar/metadata:minCompileMinorSdk   # ausente -> 0: clave nueva que aparece con S2 (AGP 9.4.1 escribe la version MENOR del SDK, p. ej. 36.1); 0 no exige ninguna
-pom:audio-android/dep:androidx.core:core-ktx   # 1.18.0 -> 1.19.1 (runtime)
-module:audio-android/variant:releaseRuntimeElements-published/dep:androidx.core:core-ktx   # requires 1.18.0 -> 1.19.1
+aar/metadata:minCompileSdk = 36 -> 37   # core-ktx 1.19 exige compilar contra 37, y el AAR lo propaga (S2)
+aar/metadata:minCompileMinorSdk = (ausente) -> 0   # clave nueva que escribe AGP 9.4.1 (version MENOR del SDK, p. ej. 36.1); 0 no exige ninguna (S2). NoisyPad con AGP 9.2.1 la acepta, medido
+pom:audio-android/dep:androidx.core:core-ktx = 1.18.0 scope=runtime type=jar optional=false excl=[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common] -> 1.19.1 scope=runtime type=jar optional=false excl=[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common]   # core-ktx 1.18.0 -> 1.19.1 (S2); scope, type, optional y exclusiones sin cambio
+module:audio-android/variant:releaseRuntimeElements-published/dep:androidx.core:core-ktx = version[requires=1.18.0] excl[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common] -> version[requires=1.19.1] excl[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common]   # la misma dependencia en el .module (S2); excludes sin cambio
+
+# --- bytes de nuestro .so (no es un cambio de S2: ver el encabezado)
+aar/so:jni/arm64-v8a/libwatermelon_audio.so/sha = sha256:078bc38357457da2 -> sha256:fedf12f018c4bf22   # bytes propios: el .so embebe la version publicada como string (-Pversion=2.21.0-req047-s2) y master trae MINI-032..035 desde 2.21.0. Alineacion, .comment, DT_NEEDED y SONAME: sin cambio. Valor atado a ESE publish
+aar/so:jni/armeabi-v7a/libwatermelon_audio.so/sha = sha256:4203aab5de085f2d -> sha256:8b94eb6ab6289941   # bytes propios: el .so embebe la version publicada como string (-Pversion=2.21.0-req047-s2) y master trae MINI-032..035 desde 2.21.0. Alineacion, .comment, DT_NEEDED y SONAME: sin cambio. Valor atado a ESE publish
+aar/so:jni/x86/libwatermelon_audio.so/sha = sha256:1e6f89785775db8b -> sha256:1577f62eeb431025   # bytes propios: el .so embebe la version publicada como string (-Pversion=2.21.0-req047-s2) y master trae MINI-032..035 desde 2.21.0. Alineacion, .comment, DT_NEEDED y SONAME: sin cambio. Valor atado a ESE publish
+aar/so:jni/x86_64/libwatermelon_audio.so/sha = sha256:ebf3bfb329d140c5 -> sha256:774c5da6ab41d284   # bytes propios: el .so embebe la version publicada como string (-Pversion=2.21.0-req047-s2) y master trae MINI-032..035 desde 2.21.0. Alineacion, .comment, DT_NEEDED y SONAME: sin cambio. Valor atado a ESE publish
