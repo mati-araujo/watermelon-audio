@@ -26,7 +26,7 @@ int at(int page, int off = 0) { return page * kCF + off; }
 // ---- silence ----
 
 TEST(ChunkedBuffer, SilentBufferReadsZeroAndCostsNothing) {
-    ChunkPool pool; pool.prefill(8);
+    ChunkPool pool; ASSERT_TRUE(pool.prefill(8));
     ChunkedAudioBuffer buf; buf.setPool(&pool);
     buf.reset(100000);                       // 4 pages
 
@@ -49,7 +49,7 @@ TEST(ChunkedBuffer, SilentBufferReadsZeroAndCostsNothing) {
 // ---- write materialises exactly one page ----
 
 TEST(ChunkedBuffer, WriteMaterialisesSinglePage) {
-    ChunkPool pool; pool.prefill(8);
+    ChunkPool pool; ASSERT_TRUE(pool.prefill(8));
     const size_t free0 = pool.freeCount();
     ChunkedAudioBuffer buf; buf.setPool(&pool);
     buf.reset(100000);                       // 4 pages
@@ -70,7 +70,7 @@ TEST(ChunkedBuffer, WriteMaterialisesSinglePage) {
 // ---- pool exhaustion drops frames, no alloc, no crash ----
 
 TEST(ChunkedBuffer, WriteDropsWhenPoolExhausted) {
-    ChunkPool pool; pool.prefill(2);         // only 2 chunks available
+    ChunkPool pool; ASSERT_TRUE(pool.prefill(2));         // only 2 chunks available
     ChunkedAudioBuffer buf; buf.setPool(&pool);
     buf.reset(at(6, 1));                      // 7 pages
 
@@ -91,7 +91,7 @@ TEST(ChunkedBuffer, WriteDropsWhenPoolExhausted) {
 // ---- trim: O(pages), stable pointers, returns pages to pool ----
 
 TEST(ChunkedBuffer, TrimReturnsPagesWithStablePointers) {
-    ChunkPool pool; pool.prefill(8);
+    ChunkPool pool; ASSERT_TRUE(pool.prefill(8));
     ChunkedAudioBuffer buf; buf.setPool(&pool);
     buf.reset(7 * kCF);                       // 7 full pages
     for (int p = 0; p < 7; ++p) buf.writeFrame(at(p, 3), static_cast<float>(p + 1), 0.0f);
@@ -117,7 +117,7 @@ TEST(ChunkedBuffer, TrimReturnsPagesWithStablePointers) {
 // ---- pad: adds silent pages, O(1), no alloc ----
 
 TEST(ChunkedBuffer, PadAddsSilentPagesNoAlloc) {
-    ChunkPool pool; pool.prefill(8);
+    ChunkPool pool; ASSERT_TRUE(pool.prefill(8));
     ChunkedAudioBuffer buf; buf.setPool(&pool);
     buf.reset(40000);                         // 2 pages
     buf.writeFrame(at(0, 9), 0.7f, 0.7f);
@@ -136,7 +136,7 @@ TEST(ChunkedBuffer, PadAddsSilentPagesNoAlloc) {
 // ---- copy-on-write undo ----
 
 TEST(ChunkedBuffer, CowUndoRestoresBitExactAndFreesCopies) {
-    ChunkPool pool; pool.prefill(16);
+    ChunkPool pool; ASSERT_TRUE(pool.prefill(16));
     ChunkedAudioBuffer buf; buf.setPool(&pool);
     buf.reset(at(6, 1));                      // 7 pages
 
@@ -174,7 +174,7 @@ TEST(ChunkedBuffer, CowUndoRestoresBitExactAndFreesCopies) {
 }
 
 TEST(ChunkedBuffer, DiscardUndoCommitsOverdubAndFreesOriginals) {
-    ChunkPool pool; pool.prefill(16);
+    ChunkPool pool; ASSERT_TRUE(pool.prefill(16));
     ChunkedAudioBuffer buf; buf.setPool(&pool);
     buf.reset(at(3, 1));                      // 4 pages
 
@@ -200,7 +200,7 @@ TEST(ChunkedBuffer, DiscardUndoCommitsOverdubAndFreesOriginals) {
 // ---- accounting stays exact through a mixed sequence ----
 
 TEST(ChunkedBuffer, AllocatedBytesTracksLiveChunks) {
-    ChunkPool pool; pool.prefill(16);
+    ChunkPool pool; ASSERT_TRUE(pool.prefill(16));
     ChunkedAudioBuffer buf; buf.setPool(&pool);
 
     buf.reset(at(5, 1));                      // 6 pages

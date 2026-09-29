@@ -33,24 +33,61 @@ namespace wm {
 
 class TrackStorage {
 public:
+    /** "No ceiling" for saveUndo()'s headroom argument. */
+    static constexpr size_t kNoExtraLimit = static_cast<size_t>(-1);
+
     // ---- lifecycle (UI/IO thread) ----
 
-    /** (Re)initialise to `frames` of silence. Returns logical bytes (frames×2×4). */
+    /**
+     * @brief (Re)initialise to `frames` of silence. Returns logical bytes (frames×2×4),
+     *        or **0 when the backing store could not be reserved**.
+     *
+     * 🔴 The 0 is new (REQ-045): the prefill used to be fire-and-forget, so a pool that
+     * could only get half the chunks still reported the full size. The caller filled a
+     * track it did not have, and the failure surfaced on the AUDIO thread as dropped
+     * frames. Reporting it here is what lets the import answer `OutOfMemory` before it
+     * writes a single frame.
+     */
     size_t allocate(int frames) {
         if (frames < 0) frames = 0;
-        mCapacity = frames;
 #ifdef WM_LOOPER_CHUNKED_BUFFER
         // Prefill the pool to cover the whole capacity so the audio thread never
         // allocates while recording within [0, frames). This RAM is now honestly
         // counted by reservedBytes() (the memory budget bounds it) and handed back
         // to the OS by shrinkToContent() once a shorter take is trimmed.
-        mPool.prefill(static_cast<size_t>(pageCountFor(frames)));
+        if (!mPool.prefill(static_cast<size_t>(pageCountFor(frames)))) {
+            // Leave the store EMPTY rather than half-reserved: a capacity the pool
+            // cannot back is exactly the lie this return value exists to stop.
+            mCapacity = 0;
+            mChunked.setPool(&mPool);
+            mChunked.reset(0);
+            return 0;
+        }
+        mCapacity = frames;
         mChunked.setPool(&mPool);
         mChunked.reset(frames);
 #else
+        mCapacity = frames;
         mBuffer.assign(static_cast<size_t>(frames) * 2, 0.0f);
 #endif
         return static_cast<size_t>(frames) * 2 * sizeof(float);
+    }
+
+    /**
+     * @brief The RAM `allocate(frames)` will actually reserve, for the memory budget.
+     *
+     * NOT `frames × 2 × 4`: the paged backend reserves whole 256 KB chunks, so a
+     * 33 000-frame take costs 512 KB, not 264 KB. The budget check and the reservation
+     * have to use THE SAME function or they diverge — the check passes and
+     * `reservedBytes()` lands above the budget (REQ-045, item 4 of the review).
+     */
+    static size_t reservationBytesFor(int frames) {
+        if (frames <= 0) return 0;
+#ifdef WM_LOOPER_CHUNKED_BUFFER
+        return static_cast<size_t>(pageCountFor(frames)) * Chunk::kBytes;
+#else
+        return static_cast<size_t>(frames) * 2 * sizeof(float);
+#endif
     }
 
     /**
@@ -178,15 +215,44 @@ public:
 
     // ---- single-level undo ----
 
-    bool saveUndo() {
+    /**
+     * @brief Snapshot the buffer for a single-level undo, reserving the copy-on-write
+     *        headroom the overdub will need — but never more than @p maxExtraBytes.
+     *
+     * @param maxExtraBytes how much NEW RAM this call may reserve. The caller
+     *        (AudioLooper::saveUndoSnapshot) derives it from the memory budget; the
+     *        default is "no ceiling", for callers that own no budget.
+     * @return false, WITHOUT reserving anything, when the headroom does not fit.
+     *
+     * 🔴 Two REQ-045 D5 defects lived in the one line this replaced
+     * (`prefill(freeCount() + ownedChunks())`): it asked for the free chunks it
+     * ALREADY had PLUS one per owned page, so every call grew the pool by the whole
+     * content — K calls with no overdub between them reserved K times the take — and
+     * it returned `true` unconditionally, so a caller could not tell that the budget
+     * had been blown. The headroom an overdub actually needs is `ownedChunks()` FREE
+     * chunks (one materialisation per in-use page), which is what prefill() takes as
+     * a target: asking for it twice was the bug.
+     */
+    bool saveUndo(size_t maxExtraBytes = kNoExtraLimit) {
 #ifdef WM_LOOPER_CHUNKED_BUFFER
         // COW headroom so materialisation during the overdub never allocates on the
         // audio thread. An overdub copies at most every currently in-use page, so
         // reserve that many free chunks — bounded by real content, not full capacity.
-        mPool.prefill(mPool.freeCount() + mChunked.ownedChunks());
+        const size_t needFree = mChunked.ownedChunks();
+        const size_t haveFree = mPool.freeCount();
+        const size_t missing  = (needFree > haveFree) ? (needFree - haveFree) : 0;
+        if (missing > maxExtraBytes / Chunk::kBytes) return false;
+        // A failed prefill must NOT become an undo (REQ-045): with the snapshot taken
+        // and no copy-on-write headroom, the next overdub asks the pool for a page on
+        // the AUDIO thread, gets nullptr and drops the frame. `false` here is "there is
+        // no undo", which is true and recoverable.
+        if (!mPool.prefill(needFree)) return false;
         mChunked.snapshotForUndo();
         return true;
 #else
+        const size_t needBytes = mBuffer.size() * sizeof(float);
+        const size_t haveBytes = mUndoBuffer.capacity() * sizeof(float);
+        if (needBytes > haveBytes && needBytes - haveBytes > maxExtraBytes) return false;
         try {
             mUndoBuffer.resize(mBuffer.size());
             std::copy(mBuffer.begin(), mBuffer.end(), mUndoBuffer.begin());

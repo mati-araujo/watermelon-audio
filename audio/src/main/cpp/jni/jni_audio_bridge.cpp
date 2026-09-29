@@ -3097,6 +3097,17 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
         ? JNI_TRUE : JNI_FALSE;
 }
 
+// The same import, with the CAUSE (REQ-045 D6). The `jint` is a WmaResult, which
+// is the same code space as JniError / Kotlin's NativeErrorCode, so the cause is
+// TRANSPORTED rather than re-derived on the Kotlin side.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooperImportTrackResult(
+    JNIEnv* env, jobject thiz, jint trackIndex, jstring filePath, jint sampleRate) {
+    ScopedUtfChars path(env, filePath);
+    return static_cast<jint>(
+        wma_looper_import_track_ex(g_wmaEngine, trackIndex, path.c_str(), sampleRate));
+}
+
 // Export with options. bitDepth: 16, 24, 32 (32 = float).
 // repeatLoops: number of iterations (>=1). countInBeats: leading silence beats.
 // applyLimiter: 1 to apply true-peak limiter, 0 for raw.

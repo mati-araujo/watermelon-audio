@@ -1,5 +1,6 @@
 package com.watermellonstudios.audio.internal.bridge
 
+import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import kotlinx.coroutines.runBlocking
 import org.junit.AfterClass
@@ -95,6 +96,7 @@ class LooperIoJniTest {
             "nativeLooperIsTrackActive",
             "nativeLooperGetTrackLengthFrames",
             "nativeLooperImportTrack",
+            "nativeLooperImportTrackResult",
             "nativeLooperExportTrack",
             "nativeLooperCaptureTrack",
             "nativeLooperExportMix",
@@ -418,6 +420,73 @@ class LooperIoJniTest {
         val t = telemetria()
         assertEquals(0L, t.framesDropped, "sin render no hay frames que descartar")
         assertEquals(0L, t.armedTriggered, "sin render no hay armado que dispare")
+    }
+
+    /**
+     * AC-045.8 / AC-045.10 — **la causa del import cruza el JNI**, y un fallo no se lleva
+     * la pista.
+     *
+     * Lo que compra este test, que el gate de firmas NO puede comprar: que el `jint` que
+     * vuelve sea el código de la C API y no un `0`/`1` disfrazado, y que
+     * `GetStringUTFChars` siga liberándose en el camino nuevo. Las tres causas se piden
+     * en una sola clase porque el trinquete cuenta funciones, no llamadas.
+     *
+     * El caso del presupuesto usa el MISMO archivo que acaba de importar bien: así la
+     * causa no puede ser el archivo. Y al final la pista sigue activa con su largo — la
+     * mitad de AC-045.8 que habla de la pista destino, del lado de Kotlin.
+     */
+    @Test
+    fun `el import tipado trae la causa y un fallo no se lleva la pista`() {
+        val ruta = MinimalWav.writeTo(File(dir, "tipado.wav"), FRAMES, CONTINUO)
+
+        jni("nativeLooperImportTrackResult") {
+            it.looperImportTrackResult(TRACK, ruta, MinimalWav.RATE)
+        }.let { assertTrue(it.isSuccess, "el import del fixture falló: $it") }
+        val largo = jni("nativeLooperGetTrackLengthFrames") { it.looperGetTrackLengthFrames(TRACK) }
+        assertEquals(FRAMES, largo, "el import tipado no dejó los frames del fixture")
+
+        val inexistente = File(dir, "no-existe.wav").absolutePath
+        val io = AudioNativeBridge.getInstance().looperImportTrackResult(TRACK, inexistente, MinimalWav.RATE)
+        assertTrue(
+            io.exceptionOrNull() is NativeBridgeException.IoError,
+            "una ruta inexistente tenía que volver como IoError y volvió ${io.exceptionOrNull()}",
+        )
+
+        val basura = File(dir, "no-es-wav.bin").apply { writeBytes(ByteArray(512) { 0x7B }) }
+        val formato = AudioNativeBridge.getInstance().looperImportTrackResult(TRACK, basura.absolutePath, MinimalWav.RATE)
+        assertTrue(
+            formato.exceptionOrNull() is NativeBridgeException.UnsupportedFormat,
+            "un archivo que no es RIFF tenía que volver como UnsupportedFormat y volvió " +
+                "${formato.exceptionOrNull()}",
+        )
+
+        // Cinco minutos declarados en 44 bytes: 115 MB contra el presupuesto de 48. El
+        // rechazo sale de la CABECERA, y este fixture lo vuelve doblemente afirmable —
+        // si mirara las muestras, tendría que leer un cuerpo que no existe.
+        val gigante = MinimalWav.writeHeaderOnlyTo(File(dir, "cinco-minutos.wav"), 5 * 60 * MinimalWav.RATE)
+        val presupuesto = AudioNativeBridge.getInstance()
+            .looperImportTrackResult(TRACK, gigante, MinimalWav.RATE)
+        assertTrue(
+            presupuesto.exceptionOrNull() is NativeBridgeException.MemoryBudgetExceeded,
+            "un archivo que no entra en el presupuesto tenía que volver como " +
+                "MemoryBudgetExceeded y volvió ${presupuesto.exceptionOrNull()}",
+        )
+
+        assertTrue(
+            jni("nativeLooperIsTrackActive") { it.looperIsTrackActive(TRACK) },
+            "un import fallido desactivó la pista",
+        )
+        assertEquals(
+            largo,
+            jni("nativeLooperGetTrackLengthFrames") { it.looperGetTrackLengthFrames(TRACK) },
+            "un import fallido cambió el largo de la pista",
+        )
+
+        // La pista queda limpia: el motor es un singleton de proceso y este test la deja
+        // CARGADA. El @Before la limpia, pero dejarla es apoyarse en que el próximo se
+        // acuerde — y las capabilities no se tocaron acá justamente para no tener que
+        // restaurar un tier (el rechazo por presupuesto sale de la cabeza del archivo).
+        jni("nativeLooperClearTrack") { it.looperClearTrack(TRACK) }
     }
 
     // ---- helpers: cada uno anota UNA función, para que el trinquete siga siendo legible ----

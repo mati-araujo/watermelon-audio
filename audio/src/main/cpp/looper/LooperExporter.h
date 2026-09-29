@@ -38,6 +38,8 @@ public:
     bool exportTrack(int trackIndex, const char* filePath, const ExportOptions& opts);
     bool captureTrack(int trackIndex, const char* filePath, wav::BitDepth bitDepth);
     bool importTrack(int trackIndex, const char* filePath, int sampleRate);
+    /** importTrack with the cause of the failure (REQ-045 D6). */
+    ImportStatus importTrackChecked(int trackIndex, const char* filePath, int sampleRate);
 
 private:
     struct TrackSnapshot {

@@ -45,6 +45,15 @@ enum class NativeErrorCode(val code: Int) {
     /** Timeout waiting for operation */
     TIMEOUT(-11),
 
+    /** Lo que la operación necesitaba reservar no entra en el presupuesto (REQ-045) */
+    MEMORY_BUDGET_EXCEEDED(-12),
+
+    /** El archivo no está en un formato que el motor decodifique (REQ-045) */
+    UNSUPPORTED_FORMAT(-13),
+
+    /** El archivo no abrió: falta, no se puede leer, o la ruta es nula (REQ-045) */
+    IO_ERROR(-14),
+
     /** Unknown error */
     UNKNOWN_ERROR(-99);
 

@@ -10,6 +10,7 @@ import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
+import com.watermellonstudios.audio.domain.error.NativeErrorCode
 import com.watermellonstudios.audio.domain.input.CaptureOutcome
 import com.watermellonstudios.audio.domain.input.InputMetering
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
@@ -1417,6 +1418,20 @@ internal class IosAudioBridge : IAudioNativeBridge {
 
     override fun looperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean =
         wma_looper_import_track(engine, trackIndex, filePath, sampleRate)
+
+    /**
+     * El import con la causa (REQ-045 D6), por el MISMO camino que Android: el
+     * `WmaResult` de `wma_looper_import_track_ex` mapeado con [NativeBridgeException.fromCode].
+     * La paridad no es cortesía — una mitad arreglada es el defecto D1 otra vez.
+     */
+    override fun looperImportTrackResult(trackIndex: Int, filePath: String, sampleRate: Int): Result<Unit> {
+        val code = wma_looper_import_track_ex(engine, trackIndex, filePath, sampleRate)
+        return if (code == NativeErrorCode.SUCCESS.code) {
+            Result.success(Unit)
+        } else {
+            Result.failure(NativeBridgeException.fromCode(code, "track $trackIndex: $filePath"))
+        }
+    }
 
     override fun looperCaptureTrack(trackIndex: Int, filePath: String, bitDepth: Int): Boolean =
         wma_looper_capture_track(engine, trackIndex, filePath, bitDepth)

@@ -85,6 +85,10 @@ class LooperWidthJniTest {
         private const val PRESUPUESTO_CHICO = 99_991L
         private const val PRESUPUESTO_ANCHO = 4_294_967_296L + PRESUPUESTO_CHICO
 
+        /** Los defaults de `AudioLooper::LooperCapabilities`, para restaurar explícito. */
+        private const val MAX_TRACKS_DEFAULT = 8
+        private const val MAX_FREE_SECONDS_DEFAULT = 60
+
         /**
          * Lo que esta clase declara cubrir. **Trinquete bidireccional** — ver
          * `JniCoverage.ratchet`: ejercer de menos es rojo, y ejercer de más también.
@@ -126,12 +130,21 @@ class LooperWidthJniTest {
      * El presupuesto se restaura acá y no al final del test que lo baja porque el motor es
      * un singleton de proceso: si ese test se cae en el medio, dejaría a los demás
      * importando contra 99 991 bytes y el veredicto dependería del orden de JUnit.
+     *
+     * 🔴 Los TRES campos van explícitos desde REQ-045 D4. Antes, pasar 0 en los otros dos
+     * los RESETEABA a los defaults —o sea que este `@Before` restauraba de más sin
+     * saberlo— y ahora un 0 significa "no tocar", así que un tier que dejara otro test
+     * sobreviviría. Escribir los tres es lo único que "restaurado" puede significar.
      */
     @Before
     fun engineUpAndTracksEmpty() {
         assertTrue(jni("nativeStartTuner") { it.startTunerSync() }, "el motor no arrancó")
         jni("nativeLooperSetCapabilities") {
-            it.looperSetCapabilities(PRESUPUESTO_ANCHO, maxTracks = 0, maxFreeSeconds = 0)
+            it.looperSetCapabilities(
+                budgetBytes = PRESUPUESTO_ANCHO,
+                maxTracks = MAX_TRACKS_DEFAULT,
+                maxFreeSeconds = MAX_FREE_SECONDS_DEFAULT,
+            )
         }
         jni("nativeLooperCancelArm") { it.looperCancelArm() }
         listOf(TRACK, REF).forEach { t -> jni("nativeLooperClearTrack") { it.looperClearTrack(t) } }

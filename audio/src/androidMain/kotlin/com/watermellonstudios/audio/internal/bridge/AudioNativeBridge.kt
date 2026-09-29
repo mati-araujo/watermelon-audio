@@ -3054,6 +3054,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeLooperExportTrack(trackIndex: Int, filePath: String): Boolean
     private external fun nativeLooperCaptureTrack(trackIndex: Int, filePath: String, bitDepth: Int): Boolean
     private external fun nativeLooperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean
+    private external fun nativeLooperImportTrackResult(trackIndex: Int, filePath: String, sampleRate: Int): Int
 
     // Export V2 (with options + metadata + limiter)
     private external fun nativeLooperExportMixV2(
@@ -3506,6 +3507,19 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override fun looperCaptureTrack(trackIndex: Int, filePath: String, bitDepth: Int): Boolean =
         nativeLooperCaptureTrack(trackIndex, filePath, bitDepth)
     override fun looperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean = nativeLooperImportTrack(trackIndex, filePath, sampleRate)
+
+    /**
+     * El import con la causa (REQ-045 D6). El `jint` que vuelve es un `WmaResult`, o sea
+     * el mismo espacio de códigos que [NativeErrorCode]: la causa nace en la C API y se
+     * TRANSPORTA, no se re-deriva acá. El contexto lleva la PISTA y la ruta:
+     * un índice inválido que sólo nombrara el archivo no diría qué estuvo mal.
+     */
+    override fun looperImportTrackResult(trackIndex: Int, filePath: String, sampleRate: Int): Result<Unit> {
+        val code = nativeLooperImportTrackResult(trackIndex, filePath, sampleRate)
+        if (code == NativeErrorCode.SUCCESS.code) return Result.success(Unit)
+        Log.e(TAG, "looperImportTrack($trackIndex, $filePath): native returned $code")
+        return Result.failure(NativeBridgeException.fromCode(code, "track $trackIndex: $filePath"))
+    }
 
     // ========== EXPORT V2 (suspend wrappers, professional) ==========
     //

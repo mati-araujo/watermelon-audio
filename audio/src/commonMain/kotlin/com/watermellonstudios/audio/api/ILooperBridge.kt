@@ -1,5 +1,6 @@
 package com.watermellonstudios.audio.api
 
+import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import com.watermellonstudios.audio.domain.looper.LevelEnvelope
 import com.watermellonstudios.audio.domain.looper.PitchSeries
@@ -381,6 +382,51 @@ interface ILooperBridge {
 
     /** Carga un WAV en la pista, resampleando si hace falta. */
     fun looperImportTrack(trackIndex: Int, filePath: String, sampleRate: Int): Boolean
+
+    /**
+     * El mismo import, con la **causa** del fallo (REQ-045 D6).
+     *
+     * `Result.failure` trae un [NativeBridgeException] que dice qué pasó, que es lo que
+     * un `false` no podía decir: un consumidor no sabía si ofrecer *"liberá espacio"*,
+     * *"elegí otro archivo"* o *"reintentá"*.
+     *
+     * - [NativeBridgeException.MemoryBudgetExceeded] — el tamaño **resampleado** no entra
+     *   en el presupuesto del looper. Se decide leyendo la **cabecera**: no se decodifica
+     *   nada, así que rechazar un archivo de 5 minutos cuesta un `open` y unos `read`.
+     * - [NativeBridgeException.UnsupportedFormat] — no es RIFF/WAVE, o es un formato que
+     *   el lector no decodifica (PCM 16/24 e IEEE float 32).
+     * - [NativeBridgeException.IoError] — el archivo no abrió.
+     * - [NativeBridgeException.MemoryAllocationFailed] — el pedido es inasignable, o la
+     *   pista no pudo reservar.
+     * - [NativeBridgeException.ParameterOutOfRange] — `sampleRate` no es positivo.
+     *
+     * 🔴 **La pista destino queda como estaba —contenido, largo y mute— en todo fallo que
+     * el import puede VALIDAR**: argumento, formato, IO, presupuesto (el del decode de la
+     * fuente y el de la reserva) y la asignación del decode, que es del mismo tamaño que
+     * la reserva. La ÚNICA excepción es `MemoryAllocationFailed` levantado por la reserva
+     * de la pista: ahí la pista queda **vacía y sin mutear**, y el `Result` es cómo te
+     * enterás. Conservar la toma vieja en ese caso exigiría tener las dos a la vez, que es
+     * justo el pico que el presupuesto prohíbe. Antes de REQ-045 CUALQUIER fallo por
+     * memoria la dejaba vacía **y muteada**, sin decir nada.
+     *
+     * Pico transitorio de un import ACEPTADO: decode de la fuente + copia resampleada +
+     * la reserva de la pista. Uno RECHAZADO cuesta sólo la cabecera.
+     *
+     * El cuerpo por defecto existe para no romper implementaciones de afuera (fakes de
+     * test de un consumidor): delega en [looperImportTrack] y, si dice `false`, devuelve
+     * un fallo sin causa precisa — nunca un `success` inventado.
+     */
+    fun looperImportTrackResult(trackIndex: Int, filePath: String, sampleRate: Int): Result<Unit> =
+        if (looperImportTrack(trackIndex, filePath, sampleRate)) {
+            Result.success(Unit)
+        } else {
+            Result.failure(
+                NativeBridgeException.InvalidOperation(
+                    operation = "looperImportTrack($trackIndex, $filePath)",
+                    currentState = "esta implementación no transporta la causa",
+                ),
+            )
+        }
 
     /**
      * Escribe el buffer **completo** de la pista, ignorando la región de loop.
