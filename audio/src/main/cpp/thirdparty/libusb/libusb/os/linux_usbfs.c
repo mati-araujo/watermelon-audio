@@ -301,16 +301,7 @@ static const char *find_usbfs_path(void)
 		}
 	}
 
-/* On udev based systems without any usb-devices /dev/bus/usb will not
- * exist. So if we've not found anything and we're using udev for hotplug
- * simply assume /dev/bus/usb rather then making libusb_init fail.
- * Make the same assumption for Android where SELinux policies might block us
- * from reading /dev on newer devices. */
-#if defined(HAVE_LIBUDEV) || defined(__ANDROID__)
-	return USB_DEVTMPFS_PATH;
-#else
 	return NULL;
-#endif
 }
 
 static int get_kernel_version(struct libusb_context *ctx,
@@ -378,11 +369,15 @@ static int op_init(struct libusb_context *ctx)
 
 	usbfs_path = find_usbfs_path();
 	if (!usbfs_path) {
-		usbi_err(ctx, "could not find usbfs");
-		return LIBUSB_ERROR_OTHER;
+		/* On udev based systems without any usb devices /dev/bus/usb will not
+		* exist. On android and other systems SELinux policies might block us
+		* from reading /dev. Nonetheless it's the default for most modern linux
+		systems including those using udev alternatives such as busybox's mdev. */
+		usbfs_path = USB_DEVTMPFS_PATH;
+		usbi_dbg(ctx, "could not find usbfs, defaulting to %s", usbfs_path);
+	} else {
+		usbi_dbg(ctx, "found usbfs at %s", usbfs_path);
 	}
-
-	usbi_dbg(ctx, "found usbfs at %s", usbfs_path);
 
 	if (!max_iso_packet_len) {
 		if (kernel_version_ge(&kversion, 5, 2, 0))
@@ -473,6 +468,8 @@ static int op_get_device_string(struct libusb_device *dev,
 		case LIBUSB_DEVICE_STRING_MANUFACTURER: attr = "manufacturer"; break;
 		case LIBUSB_DEVICE_STRING_PRODUCT: attr = "product"; break;
 		case LIBUSB_DEVICE_STRING_SERIAL_NUMBER: attr = "serial"; break;
+		case LIBUSB_DEVICE_STRING_COUNT:
+			/* intentional fall-through, avoid -Wswitch-enum */
 		default:
 			return LIBUSB_ERROR_INVALID_PARAM;
 	}
@@ -1300,6 +1297,10 @@ static int usbfs_get_device_list(struct libusb_context *ctx)
 		buses = opendir(USB_DEVTMPFS_PATH);
 
 	if (!buses) {
+		if (!usbdev_names && errno == ENOENT) {
+			/* The path does not exist if there are no devices plugged in */
+			return LIBUSB_SUCCESS;
+		}
 		usbi_err(ctx, "opendir buses failed, errno=%d", errno);
 		return LIBUSB_ERROR_IO;
 	}
@@ -1377,10 +1378,10 @@ static int linux_default_scan_devices(struct libusb_context *ctx)
 	 * any autosuspended USB devices. however, sysfs is not available
 	 * everywhere, so we need a usbfs fallback too.
 	 */
-	if (sysfs_available)
-		return sysfs_get_device_list(ctx);
-	else
-		return usbfs_get_device_list(ctx);
+	if (sysfs_available && sysfs_get_device_list(ctx) == LIBUSB_SUCCESS)
+		return LIBUSB_SUCCESS;
+
+    return usbfs_get_device_list(ctx);
 }
 #endif
 

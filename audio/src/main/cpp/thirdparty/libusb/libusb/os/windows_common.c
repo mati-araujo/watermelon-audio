@@ -496,9 +496,11 @@ static unsigned __stdcall windows_iocp_thread(void *arg)
 		}
 
 		itransfer = TRANSFER_PRIV_TO_USBI_TRANSFER(transfer_priv);
+#ifdef ENABLE_LOGGING
 		struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
 		usbi_dbg(ctx, "transfer %p completed, length %lu",
 			 transfer, ULONG_CAST(num_bytes));
+#endif
 		usbi_signal_transfer_completion(itransfer);
 	}
 
@@ -862,15 +864,26 @@ static int windows_handle_transfer_completion(struct usbi_transfer *itransfer)
 	struct windows_transfer_priv *transfer_priv = usbi_get_transfer_priv(itransfer);
 	enum libusb_transfer_status status, istatus;
 	DWORD result, bytes_transferred;
+	HANDLE transfer_handle;
 
-	if (GetOverlappedResult(transfer_priv->handle, &transfer_priv->overlapped, &bytes_transferred, FALSE))
+	/*
+	 * The submit path runs with itransfer->lock held. Grab the handle under
+	 * the same lock so we do not race with submission/completion bookkeeping.
+	 */
+	usbi_mutex_lock(&itransfer->lock);
+	transfer_handle = transfer_priv->handle;
+	usbi_mutex_unlock(&itransfer->lock);
+
+	if (GetOverlappedResult(transfer_handle, &transfer_priv->overlapped, &bytes_transferred, FALSE))
 		result = NO_ERROR;
 	else
 		result = GetLastError();
 
+#ifdef ENABLE_LOGGING
 	struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
 	usbi_dbg(ctx, "handling transfer %p completion with errcode %lu, length %lu",
 		 transfer, ULONG_CAST(result), ULONG_CAST(bytes_transferred));
+#endif
 
 	switch (result) {
 	case NO_ERROR:
@@ -905,7 +918,9 @@ static int windows_handle_transfer_completion(struct usbi_transfer *itransfer)
 		break;
 	}
 
+	usbi_mutex_lock(&itransfer->lock);
 	transfer_priv->handle = NULL;
+	usbi_mutex_unlock(&itransfer->lock);
 
 	// Backend-specific cleanup
 	backend->clear_transfer_priv(itransfer);
