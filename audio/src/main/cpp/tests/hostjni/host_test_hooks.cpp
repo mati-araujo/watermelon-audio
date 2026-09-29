@@ -38,6 +38,9 @@
 
 #include <jni.h>
 
+#include <mutex>
+
+#include "api/watermelon_audio.h"
 #include "backends/BackendManager.h"
 #include "core/tests/support/FakeAudioBackend.h"
 #include "jni/jni_common.h"
@@ -80,6 +83,42 @@ Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativeSetStartFa
     backend->setStartResult(fails == JNI_TRUE
                                 ? watermelon_audio::BackendResult::ERROR_STREAM_FAILED
                                 : watermelon_audio::BackendResult::OK);
+    return JNI_TRUE;
+}
+
+/**
+ * Devuelve el proceso al estado "todavia no hay motor" (REQ-045 S2, AC-045.4).
+ *
+ * ## Por que hace falta una palanca
+ *
+ * La propiedad de AC-045.4 es *"una configuracion llamada ANTES de que exista el
+ * motor llega igual"*, y el estado "no hay motor" existe **una sola vez por
+ * JVM**: el motor nativo es un singleton de proceso. Con una JVM por clase
+ * (`forkEvery = 1`) eso alcanza para UNA configuracion, y la spec pide el
+ * conjunto entero — no una muestra. Sin esto habria que elegir entre afirmar la
+ * propiedad para una sola y afirmarla por lectura del codigo, y lo segundo no es
+ * afirmarla.
+ *
+ * Hace **exactamente** lo que hace `JNI_OnUnload` (jni_engine.cpp): toma
+ * `engineMutex`, suelta el InputNode con las dos manijas, despublica los dos
+ * punteros ANTES de destruir, y recien ahi destruye. El orden no es cosmetico y
+ * esta explicado alla.
+ *
+ * Devuelve `false` si ya no habia motor: un reset que no reseteo nada dejaria al
+ * test midiendo el camino "con motor" con nombre de camino "sin motor".
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativeResetEngine(
+    JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    std::lock_guard<std::mutex> lock(g_jniState.engineMutex);
+    if (!g_wmaEngine) return JNI_FALSE;
+    releaseInputNode();
+    WmaEngine* engine = g_wmaEngine;
+    g_wmaEngine = nullptr;
+    g_jniState.engine = nullptr;
+    wma_engine_destroy(engine);
     return JNI_TRUE;
 }
 

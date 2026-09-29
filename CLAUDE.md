@@ -150,10 +150,10 @@ afirmado y no vigilado haría leer todo este archivo como verificado cuando sól
 <!-- BEGIN conteos-medidos — los escribe scripts/check-doc-counts.py, NO la mano -->
 | métrica | valor | qué mide |
 |---|---|---|
-| `kt-commonMain` | 97 | archivos .kt en commonMain |
+| `kt-commonMain` | 98 | archivos .kt en commonMain |
 | `kt-androidMain` | 21 | archivos .kt en androidMain |
 | `kt-iosMain` | 6 | archivos .kt en iosMain |
-| `bridge-loc` | 3626 | LOC de AudioNativeBridge.kt |
+| `bridge-loc` | 3672 | LOC de AudioNativeBridge.kt |
 | `bridge-external` | 319 | `external fun` en AudioNativeBridge |
 | `jniexport-bridge` | 308 | JNIEXPORT en jni_audio_bridge.cpp |
 | `jniexport-total` | 321 | JNIEXPORT en todo jni/*.cpp |

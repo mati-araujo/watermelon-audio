@@ -1389,8 +1389,50 @@ WMA_API int wma_get_backend_type(void);
 /** Check if USB backend is available. */
 WMA_API bool wma_is_usb_available(void);
 
-/** Set USB streaming mode (0=PLAYBACK_ONLY, 1=CAPTURE_ONLY, 2=FULL_DUPLEX). */
-WMA_API void wma_set_usb_streaming_mode(int mode_id);
+/**
+ * Lo que un pedido de captura logro, tal como estaba al volver.
+ *
+ * Espeja `BackendManager::CaptureOutcome`, y son TRES valores por la razon que
+ * explica ese enum: una reapertura ya no termina antes que la llamada, asi que
+ * colapsar PENDING en NOT_LIVE haria indistinguible "todavia abriendo" de "el
+ * usuario nego el microfono" — la unica distincion para la que existe todo el
+ * camino de entrada.
+ */
+typedef enum WmaCaptureOutcome {
+    WMA_CAPTURE_NOT_LIVE = 0,  /**< no esta capturando, y nada en vuelo lo va a cambiar */
+    WMA_CAPTURE_LIVE     = 1,  /**< esta entregando frames ahora mismo */
+    WMA_CAPTURE_PENDING  = 2   /**< hay una reapertura corriendo; sondea wma_is_capture_live() */
+} WmaCaptureOutcome;
+
+/**
+ * Set USB streaming mode (0=PLAYBACK_ONLY, 2=FULL_DUPLEX).
+ *
+ * 🔴 **Devolvia `void` y descartaba lo que el backend contesto** (REQ-045, D3): pedir
+ * captura y que no pasara nada era indistinguible de pedirla y que pasara.
+ *
+ * 🔴 **El modo 1 (`CAPTURE_ONLY`) NO esta implementado y se RECHAZA.** Hasta el
+ * 2026-09-28 se lo trataba igual que el 0, o sea que quien pedia captura recibia
+ * reproduccion **en silencio**. Un rechazo explicito es la respuesta honesta, y no
+ * toca el modo vigente (REQ-045, decision 3). Si el consumidor lo necesita, se
+ * implementa; lo que no puede seguir es mentir.
+ *
+ * @return `>= 0` un [WmaCaptureOutcome]; `< 0` un [WmaResult]
+ *         (`WMA_ERROR_INVALID_OPERATION` para el modo 1,
+ *         `WMA_ERROR_PARAMETER_OUT_OF_RANGE` para un modo que no existe). El mismo
+ *         reparto signo/valor que `wma_effect_add`.
+ *
+ * 🔴 **UN LLAMADOR C NO DEBE COMPARAR ESTO CON `WMA_OK`.** El exito no es `0`: `0` es
+ * `WMA_CAPTURE_NOT_LIVE`, que tambien es exito, y `WMA_CAPTURE_LIVE` es `1`. La unica
+ * lectura correcta es por SIGNO:
+ *
+ *     int r = wma_set_usb_streaming_mode(2);
+ *     if (r < 0) { ... }   // es un WmaResult: fallo
+ *     else       { ... }   // es un WmaCaptureOutcome
+ *
+ * `if (r != WMA_OK)` leeria LIVE y PENDING como errores, y `if (r == WMA_OK)` leeria
+ * NOT_LIVE como "todo bien" — las dos formas estan mal por motivos opuestos.
+ */
+WMA_API int wma_set_usb_streaming_mode(int mode_id);
 
 /** Configure USB backend parameters. */
 WMA_API void wma_configure_usb_backend(int sample_rate, int channels, int bit_depth);

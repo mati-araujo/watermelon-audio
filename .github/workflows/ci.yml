@@ -264,6 +264,16 @@ jobs:
       - name: Ningun cruce JNI descarta el WmaResult — REQ-045
         run: python3 scripts/check-jni-results.py
 
+      # REQ-045 S2 — la configuracion llamada antes del init LLEGA (crea el motor sin
+      # abrir stream). Quinta pregunta del cruce: un setter con nombre, firma y
+      # resultado impecables puede seguir siendo un no-op mudo, y no deja rastro de
+      # ninguna clase. Eran 50. Source-only; --self-test primero.
+      - name: La configuracion pre-init llega — self-test
+        run: python3 scripts/check-jni-preinit.py --self-test
+
+      - name: La configuracion pre-init llega — REQ-045
+        run: python3 scripts/check-jni-preinit.py
+
       # REQ-021 — los conteos de CLAUDE.md, re-medidos del arbol. Quedaron stale
       # SIETE tandas seguidas mientras la regla vivia solo en prosa. El
       # --self-test primero, misma razon que los de arriba: si el parser se

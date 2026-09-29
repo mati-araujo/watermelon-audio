@@ -1,6 +1,7 @@
 package com.watermellonstudios.audio.api
 
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
+import com.watermellonstudios.audio.domain.input.CaptureOutcome
 
 /**
  * Platform-agnostic interface for the native audio bridge.
@@ -187,19 +188,33 @@ interface IAudioNativeBridge :
     fun getEngineParameterDef(engineType: Int, paramIndex: Int): EngineParameterDef?
     fun setBpm(bpm: Float)
     fun getBpm(): Float
-    fun setModulatorType(type: Int)
-    fun setModulatorParameter(paramId: Int, value: Float)
+    /**
+     * Los dos del modulador devuelven `Result` (REQ-045, D3).
+     *
+     * 🔴 El cruce JNI **ya devolvía** el código (`nativeSetModulatorType` es `jint` desde
+     * siempre) y el envoltorio de Kotlin lo tiraba al piso: `wma_set_modulator_type`
+     * rechaza un id fuera de `0..7` y el consumidor leía silencio. Es la forma KOTLIN de la
+     * clase que REQ-045 borra — la que `check-jni-results.py` **no** puede ver, porque el
+     * C++ está impecable. S0 midió siete descartes de esta forma.
+     */
+    fun setModulatorType(type: Int): Result<Unit>
+    fun setModulatorParameter(paramId: Int, value: Float): Result<Unit>
 
     // ==================== EFFECTS (sync variants for AudioEngineImpl) ====================
+    //
+    // Los cinco que devuelven `Result` son cinco de los siete descartes de S0. Además del
+    // `jint` tirado, cuatro tenían un guard de índice que devolvía **sin decir nada**: con
+    // la cadena vacía, `removeEffectSync(0)` era un no-op mudo. Las dos formas se ven
+    // idénticas desde afuera, y las dos son la misma clase (REQ-045, D3).
 
     fun addEffectSync(typeId: Int): Boolean
-    fun removeEffectSync(index: Int)
-    fun setEffectParameterSync(effectIndex: Int, paramId: Int, value: Float)
+    fun removeEffectSync(index: Int): Result<Unit>
+    fun setEffectParameterSync(effectIndex: Int, paramId: Int, value: Float): Result<Unit>
     fun getEffectParameterSync(effectIndex: Int, paramId: Int): Float
-    fun setEffectBypassSync(index: Int, bypass: Boolean)
-    fun setEffectsBypassSync(bypass: Boolean)
+    fun setEffectBypassSync(index: Int, bypass: Boolean): Result<Unit>
+    fun setEffectsBypassSync(bypass: Boolean): Result<Unit>
     fun isEffectsBypassedSync(): Boolean
-    fun reorderEffectsSync(fromIndex: Int, toIndex: Int)
+    fun reorderEffectsSync(fromIndex: Int, toIndex: Int): Result<Unit>
 
     /**
      * Cuántos efectos tiene la cadena, sin suspender.
@@ -354,13 +369,24 @@ interface IAudioNativeBridge :
     fun configureUsbBackend(sampleRate: Int, channels: Int, bitDepth: Int)
 
     /**
-     * 0 = sólo reproducción, 1 = sólo captura, 2 = full-duplex.
+     * 0 = sólo reproducción, 2 = full-duplex.
      *
      * Misma historia que [configureUsbBackend]: detrás es
      * `BackendManager::setFullDuplexEnabled(mode == 2)`, y el full-duplex es exactamente
      * lo que hace `CoreAudioBackend` en iOS. El nombre quedó del origen Android.
+     *
+     * 🔴 **El modo 1 (`CAPTURE_ONLY`) se RECHAZA** (REQ-045, decisión 3). Hasta el
+     * 2026-09-28 se lo trataba igual que el 0: quien pedía captura recibía reproducción y
+     * nada lo decía. No está implementado —el backend sólo sabe "con captura" o "sin
+     * captura"— y mentir sobre eso es peor que decir que no. El rechazo ocurre antes de
+     * tocar nada, así que el modo vigente queda intacto.
+     *
+     * @return el [CaptureOutcome] que el pedido logró, o `failure` con la causa:
+     *         `InvalidOperation` para el modo 1, `ParameterOutOfRange` para un modo que no
+     *         existe. Devolvía `Unit` y el tri-estado se descartaba tres veces seguidas
+     *         (D3); ver el KDoc de [CaptureOutcome].
      */
-    fun setUsbStreamingMode(modeId: Int)
+    fun setUsbStreamingMode(modeId: Int): Result<CaptureOutcome>
 
     /**
      * Select the USB latency profile (Fase 1). Re-parametrizes the USB

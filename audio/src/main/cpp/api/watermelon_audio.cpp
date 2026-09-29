@@ -1576,9 +1576,24 @@ bool wma_is_usb_available(void) {
     return manager.isUsbBackendAvailable();
 }
 
-void wma_set_usb_streaming_mode(int mode_id) {
+int wma_set_usb_streaming_mode(int mode_id) {
+    // 1 = CAPTURE_ONLY. No esta implementado: el backend solo sabe "con captura" o
+    // "sin captura", asi que tratarlo como 0 —lo que hacia hasta REQ-045— le daba
+    // reproduccion a quien pidio captura, sin decirlo. Se rechaza ANTES de tocar
+    // nada, que es lo que hace que el modo vigente quede intacto (decision 3).
+    if (mode_id == 1) return WMA_ERROR_INVALID_OPERATION;
+    if (mode_id != 0 && mode_id != 2) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    manager.setFullDuplexEnabled(mode_id == 2);
+    switch (manager.setFullDuplexEnabled(mode_id == 2)) {
+        case watermelon_audio::BackendManager::CaptureOutcome::LIVE:
+            return WMA_CAPTURE_LIVE;
+        case watermelon_audio::BackendManager::CaptureOutcome::PENDING:
+            return WMA_CAPTURE_PENDING;
+        case watermelon_audio::BackendManager::CaptureOutcome::NOT_LIVE:
+            break;
+    }
+    return WMA_CAPTURE_NOT_LIVE;
 }
 
 void wma_configure_usb_backend(int sample_rate, int channels, int bit_depth) {

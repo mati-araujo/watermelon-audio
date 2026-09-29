@@ -337,6 +337,13 @@ gate_guardrails() {
     # stream sin abrir. Source-only, y el --self-test primero por lo mismo que arriba.
     step guardrails jni-res-self  python3 scripts/check-jni-results.py --self-test || return 1
     step guardrails jni-results   python3 scripts/check-jni-results.py || return 1
+
+    # REQ-045 S2 — que la CONFIGURACION llegue cuando todavia no hay motor. Es la QUINTA
+    # pregunta del cruce, y las otras cuatro no la ven: un setter puede tener nombre,
+    # firma y resultado impecables y seguir siendo un no-op mudo antes del init — no hay
+    # crash, no hay log y no hay retorno. Eran 50. Source-only, --self-test primero.
+    step guardrails jni-pre-self  python3 scripts/check-jni-preinit.py --self-test || return 1
+    step guardrails jni-preinit   python3 scripts/check-jni-preinit.py || return 1
 }
 
 gate_cpp_tests_macos() {

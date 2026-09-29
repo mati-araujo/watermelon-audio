@@ -356,17 +356,27 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
 
     // ==================== MODULATOR ====================
 
-    override fun setModulator(type: ModulatorType) {
+    /**
+     * 🔴 **El `state` se publicaba ANTES de preguntarle al motor, y el rechazo se
+     * descartaba** (REQ-045, D3): un id que el motor no acepta dejaba `state.modulator` en
+     * el valor nuevo, `analytics` avisando del cambio, y un log que decía que cambió.
+     * Ahora el orden es el único correcto — primero el motor, y el `state` sólo si dijo sí.
+     */
+    override fun setModulator(type: ModulatorType): Result<Unit> {
         val previous = _state.value.modulator
+        val result = bridge.setModulatorType(type.id)
+        if (result.isFailure) {
+            logger.error(TAG, "setModulator: el motor rechazó el tipo", result.exceptionOrNull())
+            return result
+        }
         _state.update { it.copy(modulator = type) }
-        bridge.setModulatorType(type.id)
         analytics.onModulatorChanged(type, previous)
         logger.debug(TAG, "Modulator changed", mapOf("type" to type.displayName))
+        return result
     }
 
-    override fun setModulatorParameter(paramId: Int, value: Float) {
+    override fun setModulatorParameter(paramId: Int, value: Float): Result<Unit> =
         bridge.setModulatorParameter(paramId, value)
-    }
 
     // ==================== EFFECTS ====================
 
@@ -396,15 +406,21 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
         return success
     }
 
-    override fun removeEffect(index: Int) {
+    override fun removeEffect(index: Int): Result<Unit> {
         val currentChain = _state.value.effectChain
         if (index < 0 || index >= currentChain.effects.size) {
             logger.warn(TAG, "Invalid effect index", mapOf("index" to index))
-            return
+            return Result.failure(
+                NativeBridgeException.InvalidEffectIndex(index, currentChain.effects.size),
+            )
         }
 
         val removedEffect = currentChain.effects[index]
-        bridge.removeEffectSync(index)
+        val result = bridge.removeEffectSync(index)
+        if (result.isFailure) {
+            logger.error(TAG, "removeEffect: el motor no lo quitó", result.exceptionOrNull())
+            return result
+        }
 
         val newEffects = currentChain.effects
             .filterNot { it.index == index }
@@ -416,10 +432,12 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
 
         analytics.onEffectRemoved(removedEffect.type, index)
         logger.info(TAG, "Effect removed", mapOf("type" to removedEffect.type.displayName))
+        return result
     }
 
-    override fun setEffectParameter(effectIndex: Int, paramId: Int, value: Float) {
-        bridge.setEffectParameterSync(effectIndex, paramId, value)
+    override fun setEffectParameter(effectIndex: Int, paramId: Int, value: Float): Result<Unit> {
+        val result = bridge.setEffectParameterSync(effectIndex, paramId, value)
+        if (result.isFailure) return result
 
         _state.update { state ->
             val newEffects = state.effectChain.effects.map { effect ->
@@ -431,14 +449,16 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
             }
             state.copy(effectChain = state.effectChain.copy(effects = newEffects))
         }
+        return result
     }
 
     override fun getEffectParameter(effectIndex: Int, paramId: Int): Float {
         return bridge.getEffectParameterSync(effectIndex, paramId)
     }
 
-    override fun setEffectBypass(index: Int, bypass: Boolean) {
-        bridge.setEffectBypassSync(index, bypass)
+    override fun setEffectBypass(index: Int, bypass: Boolean): Result<Unit> {
+        val result = bridge.setEffectBypassSync(index, bypass)
+        if (result.isFailure) return result
 
         _state.update { state ->
             val newEffects = state.effectChain.effects.map { effect ->
@@ -450,26 +470,66 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
             }
             state.copy(effectChain = state.effectChain.copy(effects = newEffects))
         }
+        return result
     }
 
-    override fun setEffectsBypass(bypass: Boolean) {
-        bridge.setEffectsBypassSync(bypass)
+    override fun setEffectsBypass(bypass: Boolean): Result<Unit> {
+        val result = bridge.setEffectsBypassSync(bypass)
+        if (result.isFailure) return result
 
         _state.update { state ->
             state.copy(effectChain = state.effectChain.copy(isGloballyBypassed = bypass))
         }
+        return result
     }
 
-    override fun reorderEffects(fromIndex: Int, toIndex: Int) {
-        bridge.reorderEffectsSync(fromIndex, toIndex)
+    /**
+     * 🔴 **EL MOTOR ES LA AUTORIDAD, y el `state` de acá es sólo un espejo.**
+     *
+     * `_state.value.effectChain.effects` lo escriben **únicamente** los cinco métodos de
+     * efectos de esta clase. La MISMA cadena nativa la escribe también `EffectManager`, que
+     * tiene su propio espejo: si los efectos se agregaron por `EffectManager.addEffect`, el
+     * motor tiene dos y éste tiene cero. Con el bridge diciendo éxito, un `removeAt(0)`
+     * sobre la lista vacía tira `IndexOutOfBoundsException` **en el camino de ÉXITO**, con
+     * el motor ya reordenado — un fallo del consumidor por una operación que salió bien.
+     *
+     * Así que el orden es: preguntarle al motor, y **si dijo sí**, mover el espejo sólo si
+     * los dos índices existen EN EL ESPEJO. Si no existen, el espejo simplemente no estaba
+     * al día: queda un `warn` que nombra la divergencia y el resultado sigue siendo
+     * `success`, porque el motor hizo lo que se le pidió. Nunca una excepción.
+     *
+     * (Antes de esto el `removeAt`/`add` corría SIEMPRE, incluso con el motor rechazando,
+     * así que un índice inválido daba un no-op en el motor y una excepción acá.)
+     *
+     * Inconsistencia preexistente que este REQ NO cambia: [removeEffect] valida el índice
+     * contra el espejo y rechaza sin preguntarle al motor. Con los dos espejos
+     * desincronizados eso rechaza operaciones que el motor habría aceptado. Queda anotado
+     * en el journal de la etapa; arreglarlo es unificar los dos espejos, no un parche acá.
+     */
+    override fun reorderEffects(fromIndex: Int, toIndex: Int): Result<Unit> {
+        val result = bridge.reorderEffectsSync(fromIndex, toIndex)
+        if (result.isFailure) {
+            logger.error(TAG, "reorderEffects: el motor no reordenó", result.exceptionOrNull())
+            return result
+        }
 
         _state.update { state ->
-            val mutableList = state.effectChain.effects.toMutableList()
+            val efectos = state.effectChain.effects
+            if (fromIndex !in efectos.indices || toIndex !in efectos.indices) {
+                logger.warn(
+                    TAG,
+                    "reorderEffects: el motor reordenó pero este espejo no tiene esos índices",
+                    mapOf("fromIndex" to fromIndex, "toIndex" to toIndex, "espejo" to efectos.size),
+                )
+                return@update state
+            }
+            val mutableList = efectos.toMutableList()
             val item = mutableList.removeAt(fromIndex)
             mutableList.add(toIndex, item)
             val reordered = mutableList.mapIndexed { i, effect -> effect.copy(index = i) }
             state.copy(effectChain = state.effectChain.copy(effects = reordered))
         }
+        return result
     }
 
     // ==================== SCALE ====================

@@ -314,10 +314,13 @@ void BackendManager::setBufferSize(int framesPerBuffer) {
     }
 }
 
-void BackendManager::setFullDuplexEnabled(bool enable) {
+BackendManager::CaptureOutcome BackendManager::setFullDuplexEnabled(bool enable) {
     // The mode requester never restarts a running stream: a mode change must not
     // punch an audible gap into playback.
-    requestCapture(CaptureRequester::MODE, enable, /*allowRestart=*/false);
+    //
+    // El outcome se DEVUELVE (REQ-045, D3). Descartarlo acá era el eslabón que dejaba
+    // a `wma_set_usb_streaming_mode` sin nada que contestar.
+    return requestCapture(CaptureRequester::MODE, enable, /*allowRestart=*/false);
 }
 
 bool BackendManager::isCaptureLive() const {

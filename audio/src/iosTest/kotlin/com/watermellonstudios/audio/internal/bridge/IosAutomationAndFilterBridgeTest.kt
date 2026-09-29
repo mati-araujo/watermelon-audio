@@ -1,10 +1,13 @@
 package com.watermellonstudios.audio.internal.bridge
 
 import com.watermellonstudios.audio.domain.effect.EffectType
+import com.watermellonstudios.audio.domain.error.NativeBridgeException
+import com.watermellonstudios.audio.domain.input.CaptureOutcome
 import kotlinx.coroutines.test.runTest
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 /**
@@ -216,14 +219,105 @@ class IosAutomationAndFilterBridgeTest {
      * `wma_*`, así que si estos dos símbolos no estuvieran, el framework ni se armaría.
      * Su **efecto** —sample rate y full-duplex sobre el `BackendManager`— no se puede
      * leer sin un stream abierto; ver el KDoc de la clase.
+     *
+     * **AC-045.5 (REQ-045, D3)**: el modo de streaming ya no descarta el tri-estado de la
+     * captura, y el modo 1 (`CAPTURE_ONLY`) se rechaza. Las dos cosas viven en la C API y
+     * en `CaptureOutcome.fromNativeCode`, compartidas con Android — que es el punto: la
+     * misma llamada no puede contestar distinto según el teléfono (eso fue D1).
      */
     @Test
     fun theTwoUsbNamedCallsLinkAndRunOnIos() {
         bridge.configureUsbBackend(sampleRate = 44_100, channels = 2, bitDepth = 16)
-        bridge.setUsbStreamingMode(FULL_DUPLEX)
-        bridge.setUsbStreamingMode(0)
+
+        // Sin stream abierto la respuesta honesta es que la captura NO está viva. Lo que
+        // se afirma acá es que el valor VIAJA: antes no había valor.
+        assertEquals(
+            CaptureOutcome.NOT_LIVE,
+            bridge.setUsbStreamingMode(FULL_DUPLEX).getOrNull(),
+            "sin stream abierto, pedir full-duplex no puede decir LIVE",
+        )
+        assertEquals(CaptureOutcome.NOT_LIVE, bridge.setUsbStreamingMode(0).getOrNull())
+
+        assertIs<NativeBridgeException.InvalidOperation>(
+            bridge.setUsbStreamingMode(CAPTURE_ONLY).exceptionOrNull(),
+            "el modo 1 no está implementado y se trataba como 0: quien pedía captura " +
+                "recibía reproducción en silencio",
+        )
+        assertIs<NativeBridgeException.ParameterOutOfRange>(
+            bridge.setUsbStreamingMode(7).exceptionOrNull(),
+            "un modo que no existe es otra causa que el modo 1, que sí existe",
+        )
 
         assertEquals(0, bridge.getEffectChainSize(), "el motor quedó inconsistente")
+    }
+
+    /**
+     * **AC-045.5 (REQ-045, D3) — el modulador y los efectos dicen cuándo no hicieron lo
+     * pedido, igual que en Android.**
+     *
+     * iOS tampoco propagaba: `setModulatorType` y los cinco `*Sync` de efectos tiraban el
+     * `WmaResult`. La causa sale del MISMO `fromCode` que usa Android, así que las dos
+     * plataformas contestan lo mismo — lo que D1 rompía.
+     *
+     * Acá el índice lo valida la C API (no un guard de Kotlin), y eso hace el test más
+     * fuerte que en Android: el rechazo **cruza** de verdad.
+     */
+    @Test
+    fun theRejectedSetterSaysSoOnIos() = runTest {
+        assertIs<NativeBridgeException.InvalidParameterId>(
+            bridge.setModulatorType(99).exceptionOrNull(),
+            "un id de modulador fuera de 0..7 tiene que llegar como failure",
+        )
+        assertTrue(bridge.setModulatorType(1).isSuccess, "un id válido falló: el de arriba no prueba nada")
+
+        assertIs<NativeBridgeException.ParameterOutOfRange>(
+            bridge.setModulatorParameter(0, Float.NaN).exceptionOrNull(),
+            "un valor no finito tiene que llegar como failure",
+        )
+        assertTrue(bridge.setModulatorParameter(0, 0.5f).isSuccess)
+
+        // Cadena vacía: el índice 0 no existe, y lo rechaza la C API.
+        assertEquals(0, bridge.getEffectChainSize(), "la premisa es una cadena vacía")
+        assertIs<NativeBridgeException.InvalidEffectIndex>(
+            bridge.removeEffectSync(0).exceptionOrNull(), "removeEffectSync sobre cadena vacía",
+        )
+        assertIs<NativeBridgeException.InvalidEffectIndex>(
+            bridge.setEffectParameterSync(0, 0, 0.5f).exceptionOrNull(),
+            "setEffectParameterSync sobre cadena vacía",
+        )
+        assertIs<NativeBridgeException.InvalidEffectIndex>(
+            bridge.setEffectBypassSync(0, true).exceptionOrNull(),
+            "setEffectBypassSync sobre cadena vacía",
+        )
+        assertIs<NativeBridgeException.InvalidEffectIndex>(
+            bridge.reorderEffectsSync(0, 1).exceptionOrNull(), "reorderEffectsSync sobre cadena vacía",
+        )
+
+        // 🔴 LA PARIDAD CON ANDROID, que es el hallazgo del review de S2. Con índice
+        // inválido Y valor no finito manda el ÍNDICE: antes iOS mira `isFinite` primero y
+        // contestaba `ParameterOutOfRange` donde Android decía `InvalidEffectIndex` — la
+        // misma llamada, dos causas según el teléfono. El orden lo fija la C API
+        // (índice → param_id → finito) y ya no se duplica en Kotlin.
+        val porIndice = assertIs<NativeBridgeException.InvalidEffectIndex>(
+            bridge.setEffectParameterSync(99, 0, Float.NaN).exceptionOrNull(),
+            "setEffectParameterSync(99, 0, NaN) tiene que decir InvalidEffectIndex, como Android",
+        )
+        assertEquals(99, porIndice.index, "el índice del mensaje tiene que ser el REAL, no -1")
+        assertEquals(0, porIndice.chainSize, "el largo de la cadena también sale medido")
+
+        // Y en el modulador manda el id sobre el valor, igual que en Android.
+        assertIs<NativeBridgeException.InvalidParameterId>(
+            bridge.setModulatorParameter(-1, Float.NaN).exceptionOrNull(),
+            "setModulatorParameter(-1, NaN): manda el id, no el valor",
+        )
+
+        // El gemelo: con un efecto de verdad, los cuatro dicen sí.
+        assertTrue(bridge.addEffectSync(EffectType.REVERB.id), "no pude agregar el efecto del control")
+        assertTrue(bridge.setEffectParameterSync(0, 0, 0.5f).isSuccess)
+        assertTrue(bridge.setEffectBypassSync(0, true).isSuccess)
+        assertTrue(bridge.setEffectsBypassSync(true).isSuccess)
+        assertTrue(bridge.setEffectsBypassSync(false).isSuccess)
+        assertTrue(bridge.removeEffectSync(0).isSuccess)
     }
 
     private fun mapAxisXToFirstParam() = bridge.setMappingConfig(
@@ -241,5 +335,6 @@ class IosAutomationAndFilterBridgeTest {
         const val AXIS_X = 0
         const val PARAM_ID = 0
         const val FULL_DUPLEX = 2
+        const val CAPTURE_ONLY = 1
     }
 }

@@ -48,6 +48,27 @@ internal object HostTestHooks {
         }
     }
 
+    /**
+     * Devuelve el proceso al estado "todavía no hay motor" (AC-045.4).
+     *
+     * La propiedad "una configuración llamada antes del init llega igual" se puede
+     * observar UNA vez por JVM, y la spec pide el conjunto entero. Esto la vuelve
+     * repetible. Ver el encabezado de `host_test_hooks.cpp` para el orden del
+     * teardown, que es el de `JNI_OnUnload` y no otro.
+     */
+    fun resetEngine() {
+        JniHarness.requireNativeLibrary()
+        if (!nativeResetEngine()) {
+            fail(
+                "el reset no encontró motor que destruir. Eso NO es 'ya estaba limpio': el " +
+                    "test siguiente afirmaría la propiedad pre-init sobre un proceso cuyo estado " +
+                    "no controla, y un verde así no distingue 'la config llegó' de 'el motor ya " +
+                    "existía'.",
+            )
+        }
+    }
+
+    private external fun nativeResetEngine(): Boolean
     private external fun nativeSetStartFails(fails: Boolean): Boolean
     private external fun nativeSetNegotiatedStream(channelCount: Int, lowLatency: Boolean): Boolean
 }

@@ -1,6 +1,7 @@
 package com.watermellonstudios.audio.internal.engine
 
 import com.watermellonstudios.audio.api.IAudioNativeBridge
+import com.watermellonstudios.audio.domain.input.CaptureOutcome
 import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.api.LooperStateListener
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
@@ -57,6 +58,14 @@ internal class FakeAudioNativeBridge(
      * después. La última entrada se repite cuando se agota la lista.
      */
     private val streamInfoReadings: List<FloatArray?> = listOf(null),
+    /**
+     * Lo que los setters de REQ-045 S2 contestan (D3, decisión 6).
+     *
+     * Por operación, igual que [lifecycleResults]: "el índice del efecto es inválido y el
+     * modulador no" es un escenario real, y un único resultado global lo volvería
+     * inexpresable.
+     */
+    private val setterResults: Map<String, Result<Unit>> = emptyMap(),
 ) : IAudioNativeBridge {
 
     /**
@@ -78,6 +87,12 @@ internal class FakeAudioNativeBridge(
         val result = lifecycleResults[name] ?: Result.success(Unit)
         calls += "$name:out"
         return result
+    }
+
+    /** Anota la llamada y devuelve lo que este doble tenga declarado para ella. */
+    private fun setter(name: String): Result<Unit> {
+        calls += name
+        return setterResults[name] ?: Result.success(Unit)
     }
 
     private fun notModeled(name: String): Nothing =
@@ -204,15 +219,20 @@ internal class FakeAudioNativeBridge(
         notModeled("getEngineParameterDef")
     override fun setBpm(bpm: Float) { notModeled("setBpm") }
     override fun getBpm(): Float = notModeled("getBpm")
-    override fun setModulatorType(type: Int) { notModeled("setModulatorType") }
-    override fun setModulatorParameter(paramId: Int,  value: Float) { notModeled("setModulatorParameter") }
-    override fun removeEffectSync(index: Int) { notModeled("removeEffectSync") }
-    override fun setEffectParameterSync(effectIndex: Int,  paramId: Int,  value: Float) { notModeled("setEffectParameterSync") }
+    // Los siete de REQ-045 S2: modelados porque el test de sus Result los necesita.
+    override fun setModulatorType(type: Int): Result<Unit> = setter("setModulatorType")
+    override fun setModulatorParameter(paramId: Int, value: Float): Result<Unit> =
+        setter("setModulatorParameter")
+    override fun removeEffectSync(index: Int): Result<Unit> = setter("removeEffectSync")
+    override fun setEffectParameterSync(effectIndex: Int, paramId: Int, value: Float): Result<Unit> =
+        setter("setEffectParameterSync")
     override fun getEffectParameterSync(effectIndex: Int,  paramId: Int): Float = notModeled("getEffectParameterSync")
-    override fun setEffectBypassSync(index: Int,  bypass: Boolean) { notModeled("setEffectBypassSync") }
-    override fun setEffectsBypassSync(bypass: Boolean) { notModeled("setEffectsBypassSync") }
+    override fun setEffectBypassSync(index: Int, bypass: Boolean): Result<Unit> =
+        setter("setEffectBypassSync")
+    override fun setEffectsBypassSync(bypass: Boolean): Result<Unit> = setter("setEffectsBypassSync")
     override fun isEffectsBypassedSync(): Boolean = notModeled("isEffectsBypassedSync")
-    override fun reorderEffectsSync(fromIndex: Int,  toIndex: Int) { notModeled("reorderEffectsSync") }
+    override fun reorderEffectsSync(fromIndex: Int, toIndex: Int): Result<Unit> =
+        setter("reorderEffectsSync")
     override fun getEffectChainSize(): Int = notModeled("getEffectChainSize")
     override fun setRoutingMode(mode: Int) { notModeled("setRoutingMode") }
     override fun getRoutingMode(): Int = notModeled("getRoutingMode")
@@ -246,7 +266,7 @@ internal class FakeAudioNativeBridge(
     override fun getCurrentBackendType(): Int = notModeled("getCurrentBackendType")
     override fun isUsbBackendAvailable(): Boolean = notModeled("isUsbBackendAvailable")
     override fun configureUsbBackend(sampleRate: Int,  channels: Int,  bitDepth: Int) { notModeled("configureUsbBackend") }
-    override fun setUsbStreamingMode(modeId: Int) { notModeled("setUsbStreamingMode") }
+    override fun setUsbStreamingMode(modeId: Int): Result<CaptureOutcome> = notModeled("setUsbStreamingMode")
     override fun transportSetBeatsPerBar(beatsPerBar: Int) { notModeled("transportSetBeatsPerBar") }
     override fun transportGetBeatsPerBar(): Int = notModeled("transportGetBeatsPerBar")
     override fun transportFramesPerBeat(): Int = notModeled("transportFramesPerBeat")
