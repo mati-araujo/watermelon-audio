@@ -231,22 +231,27 @@ internal class IosAudioBridge : IAudioNativeBridge {
     // No toman el mutex de lifecycle a propósito — igual que en Android, donde
     // tampoco lo hacen. El motor serializa internamente.
 
+    @Deprecated("Un Unit no puede transportar el fallo del motor (REQ-045). Usá la variante suspend.")
     override fun startEngineWithFadeSync(fadeTimeMs: Int) {
         wma_engine_start(engine, fadeTimeMs.coerceAtLeast(0))
     }
 
+    @Deprecated("Un Unit no puede transportar el fallo del motor (REQ-045). Usá la variante suspend.")
     override fun stopEngineWithFadeSync(fadeTimeMs: Int) {
         wma_engine_stop(engine, fadeTimeMs.coerceAtLeast(0))
     }
 
+    @Deprecated("Un Unit no puede transportar el fallo del motor (REQ-045). Usá la variante suspend.")
     override fun pauseEngineWithFadeSync(fadeTimeMs: Int) {
         wma_engine_pause(engine, fadeTimeMs.coerceAtLeast(0))
     }
 
+    @Deprecated("Un Unit no puede transportar el fallo del motor (REQ-045). Usá la variante suspend.")
     override fun resumeEngineWithFadeSync(fadeTimeMs: Int) {
         wma_engine_resume(engine, fadeTimeMs.coerceAtLeast(0))
     }
 
+    @Deprecated("Un Unit no puede transportar el fallo del motor (REQ-045). Usá la variante suspend.")
     override fun stopEngineSync() {
         // La contraparte de nativeStopEngine(): sin rampa, no una rampa de 0 ms.
         wma_engine_stop(engine, fadeDefault)
@@ -271,21 +276,34 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun isUsingReducedBuffers(): Boolean = wma_is_using_reduced_buffers(engine)
 
     /**
-     * `[sampleRate, bufferSize, latencyMs]`, o `null` si el motor no puede
-     * informarlos todavía (típicamente porque no hay stream abierto).
+     * `[sampleRate, bufferSize, latencyMs, channelCount, isLowLatency]`, o `null` si
+     * el motor no puede informarlos todavía (típicamente porque no hay stream
+     * abierto).
+     *
+     * Los dos últimos los suma REQ-045 (D10), con la MISMA forma y el mismo orden que
+     * Android: son los que `StreamInfo.fromNativeArray` rellenaba a mano con `2` y
+     * `true`. Y `isLowLatency` cruza como -1/0/1 porque en iOS la respuesta honesta es
+     * **desconocida**: `AVAudioSession` no tiene un modo análogo al `PerformanceMode`
+     * de Oboe, así que `CoreAudioBackend` publica UNKNOWN y esto llega a Kotlin como
+     * `null`. Un `false` inventado se leería como una medición.
      */
     override fun getStreamInfoArray(): FloatArray? = memScoped {
         val sampleRate = alloc<IntVar>()
         val bufferSize = alloc<IntVar>()
         val latencyMs = alloc<FloatVar>()
+        val channelCount = alloc<IntVar>()
+        val lowLatency = alloc<IntVar>()
 
-        if (!wma_get_stream_info(engine, sampleRate.ptr, bufferSize.ptr, latencyMs.ptr)) {
+        if (!wma_get_stream_info_ex(engine, sampleRate.ptr, bufferSize.ptr, latencyMs.ptr,
+                                    channelCount.ptr, lowLatency.ptr)) {
             return@memScoped null
         }
         floatArrayOf(
             sampleRate.value.toFloat(),
             bufferSize.value.toFloat(),
             latencyMs.value,
+            channelCount.value.toFloat(),
+            lowLatency.value.toFloat(),
         )
     }
 

@@ -10,6 +10,7 @@ import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
+import com.watermellonstudios.audio.domain.error.NativeErrorCode
 import com.watermellonstudios.audio.domain.looper.ExportBitDepth
 import com.watermellonstudios.audio.domain.looper.LevelEnvelope
 import com.watermellonstudios.audio.domain.looper.PitchSeries
@@ -264,6 +265,29 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // ==================== Lifecycle Operations ====================
 
     /**
+     * Traduce el `WmaResult` que devuelve el cruce JNI al `Result<Unit>` del contrato
+     * (REQ-045, D1).
+     *
+     * Es el **mismo** `fromCode` que usa `IosAudioBridge.asUnitResult`, y eso es el
+     * punto: los códigos salen de la misma C API, así que la causa tipada tiene que
+     * ser la misma en las dos plataformas. Hasta el 2026-09-28 Android devolvía
+     * `Result.success(Unit)` incondicional mientras iOS propagaba — la misma llamada
+     * contestaba distinto según el teléfono.
+     *
+     * La causa **se transporta, no se re-deriva**: `WMA_ERROR_STREAM` llega como
+     * [NativeBridgeException.StreamError] porque el motor lo dijo, no porque acá se
+     * adivine qué pudo haber pasado.
+     */
+    private fun Int.asUnitResult(operation: String): Result<Unit> =
+        if (this == NativeErrorCode.SUCCESS.code) {
+            Log.d(TAG, "$operation: success")
+            Result.success(Unit)
+        } else {
+            Log.w(TAG, "$operation: el motor devolvió $this")
+            Result.failure(NativeBridgeException.fromCode(this, operation))
+        }
+
+    /**
      * Start the audio engine.
      *
      * @return Result.success(Unit) if started, Result.failure with error otherwise
@@ -271,9 +295,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override suspend fun startEngine(): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "startEngine") {
         JniMetrics.measured("startEngine") {
             nativeStartEngine()
-        }
-        Log.d(TAG, "startEngine: success")
-        Result.success(Unit)
+        }.asUnitResult("startEngine")
     }
 
     /**
@@ -282,9 +304,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override suspend fun stopEngine(): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "stopEngine") {
         JniMetrics.measured("stopEngine") {
             nativeStopEngine()
-        }
-        Log.d(TAG, "stopEngine: success")
-        Result.success(Unit)
+        }.asUnitResult("stopEngine")
     }
 
     /**
@@ -293,9 +313,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param fadeTimeMs Fade duration in milliseconds
      */
     override suspend fun startEngineWithFade(fadeTimeMs: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "startEngineWithFade") {
-        nativeStartEngineWithFade(fadeTimeMs.coerceAtLeast(0))
-        Log.d(TAG, "startEngineWithFade: fadeTimeMs=$fadeTimeMs")
-        Result.success(Unit)
+        nativeStartEngineWithFade(fadeTimeMs.coerceAtLeast(0)).asUnitResult("startEngineWithFade")
     }
 
     /**
@@ -304,9 +322,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param fadeTimeMs Fade duration in milliseconds
      */
     override suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "stopEngineWithFade") {
-        nativeStopEngineWithFade(fadeTimeMs.coerceAtLeast(0))
-        Log.d(TAG, "stopEngineWithFade: fadeTimeMs=$fadeTimeMs")
-        Result.success(Unit)
+        nativeStopEngineWithFade(fadeTimeMs.coerceAtLeast(0)).asUnitResult("stopEngineWithFade")
     }
 
     /**
@@ -315,9 +331,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param fadeTimeMs Fade duration in milliseconds
      */
     override suspend fun pauseEngineWithFade(fadeTimeMs: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "pauseEngineWithFade") {
-        nativePauseEngineWithFade(fadeTimeMs.coerceAtLeast(0))
-        Log.d(TAG, "pauseEngineWithFade: fadeTimeMs=$fadeTimeMs")
-        Result.success(Unit)
+        nativePauseEngineWithFade(fadeTimeMs.coerceAtLeast(0)).asUnitResult("pauseEngineWithFade")
     }
 
     /**
@@ -326,37 +340,108 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param fadeTimeMs Fade duration in milliseconds
      */
     override suspend fun resumeEngineWithFade(fadeTimeMs: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "resumeEngineWithFade") {
-        nativeResumeEngineWithFade(fadeTimeMs.coerceAtLeast(0))
-        Log.d(TAG, "resumeEngineWithFade: fadeTimeMs=$fadeTimeMs")
-        Result.success(Unit)
+        nativeResumeEngineWithFade(fadeTimeMs.coerceAtLeast(0)).asUnitResult("resumeEngineWithFade")
     }
 
     // ==================== Lifecycle Operations (Synchronous - Legacy Compatibility) ====================
 
     /**
+     * Deja RASTRO del código que un `*Sync` no puede devolver (REQ-045, A2).
+     *
+     * 🔴 **El consumidor real usa los `*Sync`, no `AudioEngine`.** NoisyPad llama
+     * `startEngineWithFadeSync` desde `AudioEngineStateManager` y publica RUNNING
+     * incondicional, así que arreglar sólo la puerta pública le dejaba el defecto D1
+     * intacto por el camino que de verdad usa.
+     *
+     * El tipo de retorno **no se cambia a propósito**: NoisyPad tiene tres dobles que
+     * overridean estos miembros (`NoOpAudioNativeBridge`, `FakeEngineBridge`), y
+     * cambiarlo rompería su compilación en el mismo release en que este REQ promete
+     * compatibilidad en fuente. Así que lo que se compra acá es lo que se puede comprar
+     * sin romper nada: el fallo deja de ser **invisible**. Pasa de "no ocurrió nada" a
+     * una línea de log con el código, que es lo que se puede buscar en un bug report.
+     *
+     * La migración de verdad —pasar a la variante `suspend`, que devuelve el `Result`—
+     * la pide la carta de bump, y el `ReplaceWith` de cada `@Deprecated` la nombra.
+     */
+    private fun Int.logSiFallo(operation: String) {
+        if (this != NativeErrorCode.SUCCESS.code) {
+            Log.w(
+                TAG,
+                "$operation (variante Sync): el motor devolvió $this " +
+                    "(${NativeErrorCode.fromCode(this)}) y un Unit no puede transportarlo. " +
+                    "Usá la variante suspend, que devuelve Result<Unit>.",
+            )
+        }
+    }
+
+    /**
      * Start engine with fade-in synchronously (for legacy callers).
      */
-    override fun startEngineWithFadeSync(fadeTimeMs: Int) = nativeStartEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor (REQ-045): el codigo se pierde y\nel llamador sigue como si hubiera funcionado. La variante suspend devuelve\nResult<Unit> con la causa tipada y se serializa bajo LIFECYCLE.",
+        ReplaceWith("startEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
+    override fun startEngineWithFadeSync(fadeTimeMs: Int) {
+        // El codigo no tiene dónde ir en un `Unit`, pero SÍ deja rastro: ver
+        // [logSiFallo]. El reemplazo es la variante `suspend`.
+        nativeStartEngineWithFade(fadeTimeMs.coerceAtLeast(0)).logSiFallo("startEngineWithFade")
+    }
 
     /**
      * Stop engine with fade-out synchronously (for legacy callers).
      */
-    override fun stopEngineWithFadeSync(fadeTimeMs: Int) = nativeStopEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor (REQ-045): el codigo se pierde y\nel llamador sigue como si hubiera funcionado. La variante suspend devuelve\nResult<Unit> con la causa tipada y se serializa bajo LIFECYCLE.",
+        ReplaceWith("stopEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
+    override fun stopEngineWithFadeSync(fadeTimeMs: Int) {
+        // El codigo no tiene dónde ir en un `Unit`, pero SÍ deja rastro: ver
+        // [logSiFallo]. El reemplazo es la variante `suspend`.
+        nativeStopEngineWithFade(fadeTimeMs.coerceAtLeast(0)).logSiFallo("stopEngineWithFade")
+    }
 
     /**
      * Pause engine with fade-out synchronously (for legacy callers).
      */
-    override fun pauseEngineWithFadeSync(fadeTimeMs: Int) = nativePauseEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor (REQ-045): el codigo se pierde y\nel llamador sigue como si hubiera funcionado. La variante suspend devuelve\nResult<Unit> con la causa tipada y se serializa bajo LIFECYCLE.",
+        ReplaceWith("pauseEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
+    override fun pauseEngineWithFadeSync(fadeTimeMs: Int) {
+        // El codigo no tiene dónde ir en un `Unit`, pero SÍ deja rastro: ver
+        // [logSiFallo]. El reemplazo es la variante `suspend`.
+        nativePauseEngineWithFade(fadeTimeMs.coerceAtLeast(0)).logSiFallo("pauseEngineWithFade")
+    }
 
     /**
      * Resume engine with fade-in synchronously (for legacy callers).
      */
-    override fun resumeEngineWithFadeSync(fadeTimeMs: Int) = nativeResumeEngineWithFade(fadeTimeMs.coerceAtLeast(0))
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor (REQ-045): el codigo se pierde y\nel llamador sigue como si hubiera funcionado. La variante suspend devuelve\nResult<Unit> con la causa tipada y se serializa bajo LIFECYCLE.",
+        ReplaceWith("resumeEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
+    override fun resumeEngineWithFadeSync(fadeTimeMs: Int) {
+        // El codigo no tiene dónde ir en un `Unit`, pero SÍ deja rastro: ver
+        // [logSiFallo]. El reemplazo es la variante `suspend`.
+        nativeResumeEngineWithFade(fadeTimeMs.coerceAtLeast(0)).logSiFallo("resumeEngineWithFade")
+    }
 
     /**
      * Stop engine synchronously (for legacy callers).
      */
-    override fun stopEngineSync() = nativeStopEngine()
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor (REQ-045): el codigo se pierde y\nel llamador sigue como si hubiera funcionado. La variante suspend devuelve\nResult<Unit> con la causa tipada y se serializa bajo LIFECYCLE.",
+        ReplaceWith("stopEngine()"),
+        DeprecationLevel.WARNING,
+    )
+    override fun stopEngineSync() {
+        // Idem: no tiene dónde ir, pero deja rastro. Ver [logSiFallo].
+        nativeStopEngine().logSiFallo("stopEngine")
+    }
 
     // ==================== State Queries (No mutex needed) ====================
 
@@ -1926,12 +2011,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     // ==================== Native Methods: Lifecycle ====================
 
-    private external fun nativeStartEngine()
-    private external fun nativeStopEngine()
-    private external fun nativeStartEngineWithFade(fadeTimeMs: Int)
-    private external fun nativeStopEngineWithFade(fadeTimeMs: Int)
-    private external fun nativePauseEngineWithFade(fadeTimeMs: Int)
-    private external fun nativeResumeEngineWithFade(fadeTimeMs: Int)
+    private external fun nativeStartEngine(): Int
+    private external fun nativeStopEngine(): Int
+    private external fun nativeStartEngineWithFade(fadeTimeMs: Int): Int
+    private external fun nativeStopEngineWithFade(fadeTimeMs: Int): Int
+    private external fun nativePauseEngineWithFade(fadeTimeMs: Int): Int
+    private external fun nativeResumeEngineWithFade(fadeTimeMs: Int): Int
 
     // ==================== Native Methods: State ====================
 

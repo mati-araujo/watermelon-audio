@@ -203,6 +203,37 @@ WMA_API bool wma_get_stream_info(const WmaEngine* engine,
                                   int* buffer_size,
                                   float* latency_ms);
 
+/**
+ * Get stream information, plus the channel count and the low-latency mode of the
+ * OPEN stream (REQ-045, D10).
+ *
+ * A separate function rather than more out-params on wma_get_stream_info(): this
+ * header may only ever ADD declarations, so that a C consumer that compiled
+ * yesterday still compiles today.
+ *
+ * Why it exists at all: Kotlin's StreamInfo filled `channelCount = 2` and
+ * `isLowLatency = true` out of thin air, because the three numbers above are all
+ * the boundary ever carried. A consumer read two invented values as measured ones.
+ *
+ * @param[out] sample_rate    Stream sample rate in Hz
+ * @param[out] buffer_size    Buffer size in frames
+ * @param[out] latency_ms     Estimated latency in milliseconds
+ * @param[out] channel_count  Channels of the open stream; 0 when unknown. Written even
+ *             when the call returns false: the absence is a fact worth reporting, and a
+ *             caller that read back its own uninitialised variable would read a plausible
+ *             value instead (measured — an iOS test read 0 for "not low latency").
+ * @param[out] is_low_latency -1 unknown / 0 no / 1 yes. Core Audio reports UNKNOWN
+ *             on purpose: AVAudioSession has no such mode, and deriving one from
+ *             the IO buffer duration would be inventing the answer one layer down.
+ * @return true if a stream is active
+ */
+WMA_API bool wma_get_stream_info_ex(const WmaEngine* engine,
+                                     int* sample_rate,
+                                     int* buffer_size,
+                                     float* latency_ms,
+                                     int* channel_count,
+                                     int* is_low_latency);
+
 /** Check if engine is using reduced buffers (low memory mode). */
 WMA_API bool wma_is_using_reduced_buffers(const WmaEngine* engine);
 

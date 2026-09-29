@@ -45,6 +45,12 @@ is_allowed() {
         # `#if defined(__ANDROID__)` block, so this file compiles for iOS too.
         # It is in the shipped iOS target — see ios/CMakeLists.txt.
         platform/Logger.cpp) return 0 ;;
+        # REQ-045: las palancas de test del `.so` del ARNÉS de host, que sólo existe
+        # para que un test de JVM ejecute las JNIEXPORT reales — o sea que `jni.h` es
+        # su razón de ser, igual que en jni/. No entra a ningún build que shippee:
+        # lo compila únicamente tests/hostjni/CMakeLists.txt, y ese proyecto no tiene
+        # target de iOS. Ver el encabezado del archivo.
+        tests/hostjni/*) return 0 ;;
         *) return 1 ;;
     esac
 }

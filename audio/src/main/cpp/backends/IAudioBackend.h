@@ -132,6 +132,22 @@ struct StreamInfo {
     float outputLatencyMs = 0.0f;
     float inputLatencyMs = 0.0f;
     bool isFullDuplex = false;
+    /**
+     * Whether the OPEN stream is in the platform's low-latency mode (REQ-045, D10).
+     *
+     * **Three states and not a bool**, which is the whole point. Kotlin used to
+     * hardcode `isLowLatency = true` for every stream it ever reported, so a
+     * consumer read an invented value as a measured one. Oboe can answer the
+     * question —`getPerformanceMode()` is a property of the opened stream— and
+     * Core Audio cannot: AVAudioSession has no such mode, and deriving one from the
+     * IO buffer duration would be inventing the answer again, one layer down.
+     * UNKNOWN travels to Kotlin as `null`.
+     */
+    // 🔴 `OFF`/`ON` y no `NO`/`YES`: `NO` e `YES` son MACROS de `<objc/objc.h>`, que
+    // `CoreAudioBackend.mm` arrastra. Con esos nombres este header no compila para iOS
+    // —"expected identifier"— y el único build que lo dice es el de iOS.
+    enum class LowLatency { UNKNOWN = -1, OFF = 0, ON = 1 };
+    LowLatency lowLatency = LowLatency::UNKNOWN;
     BackendType backendType = BackendType::NONE;
 
     // USB-specific info

@@ -266,6 +266,8 @@ StreamInfo CoreAudioBackend::getStreamInfo() const {
     StreamInfo info;
     info.sampleRate      = mRequestedSampleRate > 0 ? mRequestedSampleRate : 48000;
     info.channelCount    = 2;
+    // Sin stream abierto no hay modo que reportar (ver el comentario de start()).
+    info.lowLatency      = StreamInfo::LowLatency::UNKNOWN;
     info.framesPerBuffer = mRequestedBufferSize > 0 ? mRequestedBufferSize : 256;
     info.format          = AudioFormat::FLOAT_32;
     info.outputLatencyMs = 0.0f;
@@ -704,7 +706,15 @@ BackendResult CoreAudioBackend::openEngineLocked() {
     {
         std::lock_guard<std::mutex> lock(mStreamInfoMutex);
         mCachedStreamInfo.sampleRate      = (int)std::lround(negotiatedSampleRate);
-        mCachedStreamInfo.channelCount    = 2;
+        // Los canales del FORMATO con el que el grafo quedó conectado (paso 5), no
+        // un literal: es la propiedad del stream abierto, que es lo que REQ-045 (D10)
+        // pide transportar en vez de inventar.
+        mCachedStreamInfo.channelCount    = (int)format.channelCount;
+        // Y el modo de latencia queda DESCONOCIDO a propósito: AVAudioSession no
+        // tiene un modo análogo al `PerformanceMode` de Oboe, y derivarlo de
+        // `IOBufferDuration` sería volver a inventar el valor — el defecto exacto que
+        // este REQ vino a borrar, una capa más abajo. Viaja a Kotlin como `null`.
+        mCachedStreamInfo.lowLatency      = StreamInfo::LowLatency::UNKNOWN;
         mCachedStreamInfo.framesPerBuffer = negotiatedFrames;
         mCachedStreamInfo.format          = AudioFormat::FLOAT_32;
         mCachedStreamInfo.outputLatencyMs = outLatencyMs;

@@ -11,6 +11,7 @@ import com.watermellonstudios.audio.api.EffectChainSnapshot
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
 import com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
+import kotlinx.coroutines.CompletableDeferred
 
 /**
  * Doble de [IAudioNativeBridge] para los tests de [AudioEngineImpl].
@@ -33,10 +34,51 @@ import com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
 internal class FakeAudioNativeBridge(
     private val initializationFailed: Boolean = false,
     private val throwOnStart: Throwable? = null,
+    /**
+     * Lo que el motor contesta a las cuatro del ciclo de vida (REQ-045). Por operación
+     * y no uno global: "arrancar falla y parar no" es un escenario real, y un único
+     * resultado lo volvería inexpresable.
+     */
+    private val lifecycleResults: Map<String, Result<Unit>> = emptyMap(),
+    /**
+     * Compuerta para forzar el interleaving (AC-045.2).
+     *
+     * Mientras no se complete, **toda** operación del ciclo de vida se queda suspendida
+     * DENTRO del bridge. Eso es lo que permite afirmar el orden del mutex sin
+     * iteraciones ni `sleep`: el primer llamador queda adentro con el mutex tomado y
+     * los que siguen se encolan. Ver el test del orden.
+     */
+    private val gate: CompletableDeferred<Unit>? = null,
+    /**
+     * Lo que `getStreamInfoArray()` devuelve, lectura por lectura (REQ-045, 1.11).
+     *
+     * Una LISTA y no un valor porque el defecto que se prueba es temporal: en el camino
+     * Oboe directo la latencia **no está** justo después de arrancar y aparece unos ms
+     * después. La última entrada se repite cuando se agota la lista.
+     */
+    private val streamInfoReadings: List<FloatArray?> = listOf(null),
 ) : IAudioNativeBridge {
 
-    /** Miembros llamados, en orden. Es lo que afirman los tests. */
+    /**
+     * Miembros llamados, en orden. Es lo que afirman los tests.
+     *
+     * Las cuatro del ciclo de vida anotan `:in` al ENTRAR y `:out` al salir, y los dos
+     * hacen falta: con una sola marca por llamada, dos operaciones que se intercalan
+     * producen la misma lista que dos que se serializan. La diferencia entre
+     * `[a:in, a:out, b:in, b:out]` y `[a:in, b:in, ...]` ES la aserción de AC-045.2.
+     */
     val calls = mutableListOf<String>()
+
+    private suspend fun lifecycle(name: String): Result<Unit> {
+        calls += "$name:in"
+        // El `throw` va DESPUÉS de anotar la entrada y ANTES de la salida: esa lista
+        // ("llegó y ahí explotó") es lo que afirma el test del bridge que lanza.
+        if (name == "startEngineWithFade") throwOnStart?.let { throw it }
+        gate?.await()
+        val result = lifecycleResults[name] ?: Result.success(Unit)
+        calls += "$name:out"
+        return result
+    }
 
     private fun notModeled(name: String): Nothing =
         throw NotImplementedError(
@@ -51,11 +93,13 @@ internal class FakeAudioNativeBridge(
         return initializationFailed
     }
 
+    @Deprecated("El motor no puede transportar su fallo por un Unit (REQ-045).")
     override fun startEngineWithFadeSync(fadeTimeMs: Int) {
         calls += "startEngineWithFadeSync"
         throwOnStart?.let { throw it }
     }
 
+    @Deprecated("El motor no puede transportar su fallo por un Unit (REQ-045).")
     override fun stopEngineWithFadeSync(fadeTimeMs: Int) {
         calls += "stopEngineWithFadeSync"
     }
@@ -73,28 +117,79 @@ internal class FakeAudioNativeBridge(
 
     override suspend fun startEngine(): Result<Unit> = notModeled("startEngine")
     override suspend fun stopEngine(): Result<Unit> = notModeled("stopEngine")
-    override suspend fun startEngineWithFade(fadeTimeMs: Int): Result<Unit> = notModeled("startEngineWithFade")
-    override suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit> = notModeled("stopEngineWithFade")
-    override suspend fun pauseEngineWithFade(fadeTimeMs: Int): Result<Unit> = notModeled("pauseEngineWithFade")
-    override suspend fun resumeEngineWithFade(fadeTimeMs: Int): Result<Unit> = notModeled("resumeEngineWithFade")
+
+    // Las cuatro que AudioEngineImpl usa desde REQ-045, en vez de las `*Sync`.
+    override suspend fun startEngineWithFade(fadeTimeMs: Int): Result<Unit> =
+        lifecycle("startEngineWithFade")
+    override suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit> =
+        lifecycle("stopEngineWithFade")
+    override suspend fun pauseEngineWithFade(fadeTimeMs: Int): Result<Unit> =
+        lifecycle("pauseEngineWithFade")
+    override suspend fun resumeEngineWithFade(fadeTimeMs: Int): Result<Unit> =
+        lifecycle("resumeEngineWithFade")
+
+    // 🔴 Las `*Sync` siguen SIN MODELAR a propósito: desde REQ-045 la librería no las
+    // llama, y que tiren es lo que hace que un test se ponga rojo si alguien las
+    // vuelve a cablear en vez de pasar en verde sobre un no-op.
+    @Deprecated("El motor no puede transportar su fallo por un Unit (REQ-045).")
     override fun pauseEngineWithFadeSync(fadeTimeMs: Int) { notModeled("pauseEngineWithFadeSync") }
+    @Deprecated("El motor no puede transportar su fallo por un Unit (REQ-045).")
     override fun resumeEngineWithFadeSync(fadeTimeMs: Int) { notModeled("resumeEngineWithFadeSync") }
-    override fun stopEngineSync() { notModeled("stopEngineSync") }
-    override fun getEngineState(): Int = notModeled("getEngineState")
+    /**
+     * El ÚNICO `*Sync` que la librería sigue llamando: `release()`, que no es `suspend` en
+     * la superficie pública y no tiene a quién reportarle. Modelado por eso, y porque un
+     * `NotImplementedError` es un `Error` —no una `Exception`— así que el `try/catch` de
+     * `release()` no lo atrapa y el test se cae en un lugar que no es el que mide.
+     */
+    @Deprecated("El motor no puede transportar su fallo por un Unit (REQ-045).")
+    override fun stopEngineSync() {
+        calls += "stopEngineSync"
+    }
     override fun getStateVersion(): Long = notModeled("getStateVersion")
-    override fun hasStreamError(): Boolean = notModeled("hasStreamError")
     override fun getLastStreamErrorCode(): Int = notModeled("getLastStreamErrorCode")
-    override fun clearStreamError() { notModeled("clearStreamError") }
-    override fun getIsPaused(): Boolean = notModeled("getIsPaused")
     override fun isEngineInitialized(): Boolean = notModeled("isEngineInitialized")
-    override fun getStreamInfoArray(): FloatArray? = notModeled("getStreamInfoArray")
+    /**
+     * `null` = "no hay stream que describir", que es lo que el nativo contesta sin
+     * stream abierto. Modelado y no `notModeled` porque `start()` lo llama en su camino
+     * feliz, y un doble que tirara ahí volvería intesteable el camino que AC-045.2 pide.
+     */
+    override fun getStreamInfoArray(): FloatArray? {
+        val i = streamInfoReads
+        streamInfoReads++
+        calls += "getStreamInfoArray"
+        return streamInfoReadings[minOf(i, streamInfoReadings.size - 1)]
+    }
+
+    /** Cuántas veces se leyó el stream info. Lo afirma el test de la latencia tardía. */
+    var streamInfoReads: Int = 0
+        private set
+
+    // ---- lo que el POLLER necesita ------------------------------------------
+    //
+    // Modelado porque `refreshStateFromNative()` corre ANTES del reintento del stream
+    // info en el bucle de polling: si cualquiera de estos tirara, el reintento de la
+    // latencia (1.11) no se alcanzaría nunca y el test de esa propiedad sería verde por
+    // vacío. Devuelven lo que devuelve un motor corriendo y sin errores.
+
+    override fun hasStreamError(): Boolean = false
+    override fun clearStreamError() { notModeled("clearStreamError") }
+    override fun getEngineState(): Int = nativeEngineState
+    override fun getCurrentFadeVolume(): Float = 1.0f
+    override fun getTargetFadeVolume(): Float = 1.0f
+    override fun getIsFading(): Boolean = false
+    override fun getFadeProgress(): Float = 1.0f
+    override fun getIsPaused(): Boolean = false
+
+    /**
+     * El estado que el nativo reporta. `2` es RUNNING en `EngineLifecycle.fromNativeCode`.
+     *
+     * El nombre NO es `engineState`: su getter generado choca en la JVM con
+     * `getEngineState()` de la interfaz.
+     */
+    var nativeEngineState: Int = 2
     override fun isUsingReducedBuffers(): Boolean = notModeled("isUsingReducedBuffers")
     override fun getMasterVolume(): Float = notModeled("getMasterVolume")
     override fun getSynthVolume(): Float = notModeled("getSynthVolume")
-    override fun getCurrentFadeVolume(): Float = notModeled("getCurrentFadeVolume")
-    override fun getTargetFadeVolume(): Float = notModeled("getTargetFadeVolume")
-    override fun getIsFading(): Boolean = notModeled("getIsFading")
-    override fun getFadeProgress(): Float = notModeled("getFadeProgress")
     override fun setXY(x: Float,  y: Float,  coalesce: Boolean) { notModeled("setXY") }
     override fun setFrequencyAndAmplitude(frequency: Float,  amplitude: Float) { notModeled("setFrequencyAndAmplitude") }
     override fun setFrequencyRange(minHz: Float,  maxHz: Float) { notModeled("setFrequencyRange") }
