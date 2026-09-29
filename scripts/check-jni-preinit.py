@@ -98,6 +98,13 @@ HANDLE = re.compile(r"\bg_wmaEngine\b|\bg_jniState\.engine\b")
 ENSURE = re.compile(r"\bensure(Engine|InputNode)\s*\(")
 WMA_CALL = re.compile(r"\b(wma_\w+)\s*\(")
 
+# 🔴 Los COMENTARIOS se sacan antes de mirar el cuerpo, y lo destapo un mutante de 2.8:
+# el comentario que EXPLICA por que va `ensureEngine()` contiene el texto
+# `ensureEngine()`, asi que borrar la llamada y dejar la explicacion dejaba el lint en
+# VERDE. Un lint que lee la prosa como si fuera codigo es exactamente la clase de falso
+# verde que este REQ existe para borrar. Misma mecanica que `check-jni-results.py`.
+COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+
 # Los verbos. `CONFIG` es estado que persiste; `LECTURA` devuelve el default que la C
 # API declara; el resto son acciones.
 #
@@ -186,7 +193,7 @@ def function_bodies(src: str) -> list[tuple[str, str]]:
                 if depth == 0:
                     break
             i += 1
-        out.append((m.group("name"), src[brace : i + 1]))
+        out.append((m.group("name"), COMMENT.sub(" ", src[brace : i + 1])))
     return out
 
 
@@ -412,6 +419,18 @@ def self_test() -> int:
     sin_handle = PERDIDA.replace("g_wmaEngine, ", "")
     check("NO mete una entrada que no pasa el handle",
           not any("ensureEngine" in p for p in analyze({"v.cpp": sin_handle}, [], {}, {})))
+
+    # 🔴 El COMENTARIO que menciona `ensureEngine()` NO cuenta como la llamada. Lo
+    # destapo un mutante de 2.8: borrar la llamada y dejar su explicacion al lado dejaba
+    # el lint en VERDE, porque el regex encontraba el texto en la prosa.
+    SOLO_COMENTADO = PERDIDA.replace(
+        "    wma_set_algo(g_wmaEngine, v);",
+        "    // ensureEngine() va primero, ver el review de S2\n    wma_set_algo(g_wmaEngine, v);")
+    check(
+        "un comentario que nombra ensureEngine() NO excusa (M19)",
+        any("NO llama a ensureEngine" in p
+            for p in analyze({"v.cpp": SOLO_COMENTADO}, ["nativeSetAlgo"], {}, {})),
+    )
 
     # 🔴 El VERBO DESCONOCIDO falla, no se supone. Son los dos casos del review de S2: un
     # nombre nuevo cuyo verbo no esta en la tabla quedaba VERDE en silencio, y con el
