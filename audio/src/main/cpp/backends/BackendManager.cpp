@@ -261,8 +261,18 @@ void BackendManager::stop() {
 // leer EN VIVO del backend con un lock normal, y pueden hacerlo porque mMutex ya
 // no se sostiene alrededor de nada lento: una reapertura corre bajo mOpMutex.
 //
-// En vivo y no un snapshot, además, porque la UI pollea estos tres por frame y un
-// device puede renegociar el sample rate sin que el motor reinicie.
+// En vivo y no un snapshot **DE ESTE ARCHIVO**: quien conteste es el backend que esté
+// activo AHORA. Y ahí está el límite, que este comentario declaraba al revés.
+//
+// 🔴 Decía "porque un device puede renegociar el sample rate sin que el motor
+// reinicie". Eso NO es lo que estos lectores entregan, y un review lo midió: los tres
+// backends CACHEAN su `StreamInfo` en `start()` (`OboeBackend::getStreamInfo()` devuelve
+// `mCachedStreamInfo`, y Libusb y CoreAudio igual), así que una renegociación a mitad de
+// stream no la ve nadie. Lo que "en vivo" sí compra es lo que cambia CON un
+// start()/stop(): que `selectBackend()` o `reopenOnce()` reemplacen el backend —el
+// camino del fallback a Oboe cuando se desconecta un DAC USB— y el llamador vea el
+// stream nuevo sin que nadie le avise. Ese es exactamente el escenario por el que
+// `AudioEngine::controlSampleRate()` vuelve a pasar por acá.
 //
 // 🔴 `currentSampleRate()` YA NO ESTÁ ENTRE ESOS LECTORES (MINI-033), y por eso
 // `activeStreamInfo()` se llama así: era `getStreamInfo()`, un nombre que el árbol
@@ -270,7 +280,8 @@ void BackendManager::stop() {
 // `check-rt-safety.py` — de modo que el hilo RT de captura entraba acá, tomaba este
 // `mMutex` y anidaba el `mStreamInfoMutex` del backend, en cada bloque, con el lint
 // en verde. El rate que ve el RT sale ahora de un atomic del motor. **Estos tres
-// lectores son de CONTROL: ninguno se llama desde el hilo de audio.**
+// lectores son de CONTROL: ninguno se llama desde el hilo de audio** — el de control que
+// los usa es `AudioEngine::controlSampleRate()`, vía `queryStreamInfo()`.
 //
 // Que esto sea seguro NO lo da este archivo: lo da el contrato de IAudioBackend,
 // que desde #117 obliga a cada implementación a sincronizar su propio estado

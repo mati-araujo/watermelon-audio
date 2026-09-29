@@ -2563,14 +2563,20 @@ int wma_transport_get_beats_elapsed(const WmaEngine* engine) {
 int wma_get_recommended_buffer_size(const WmaEngine* engine, float target_latency_ms) {
     if (!(target_latency_ms > 0.0f)) return -1;  // also rejects NaN
 
-    // currentSampleRate() rather than "getStreamInfo() or else 48000": it
-    // resolves running stream -> offline render rate -> 48000 and never returns
-    // <= 0. The hand-rolled version skipped the middle rung, so a render already
-    // running at 44.1 kHz got a size computed for 48 kHz.
-    // That shortcut is exactly what AudioEngine.h warns about above
-    // currentSampleRate(), and what put SoundFonts on the wrong rate in WA-2.0.
+    // `controlSampleRate()` rather than a hand-rolled "stream info or else 48000": it
+    // resolves live stream -> offline render rate -> 48000 and never returns <= 0. The
+    // hand-rolled version skipped the middle rung, so a render already running at
+    // 44.1 kHz got a size computed for 48 kHz. That shortcut is what put SoundFonts on
+    // the wrong rate in WA-2.0.
+    //
+    // 🔴 Y es `controlSampleRate()`, NO `currentSampleRate()` (MINI-033 / D3). Este
+    // llamador corre en el hilo de control y le contesta a un consumidor que va a
+    // DIMENSIONAR un buffer, asi que necesita el rate al que el stream corre AHORA: el
+    // fallback de USB puede haber cambiado el backend sin avisarle al motor, y el lector
+    // RT —que recuerda en vez de preguntar— se queda con el rate del device que ya no
+    // esta.
     const int sampleRate = engine && engine->engine
-                               ? engine->engine->currentSampleRate()
+                               ? engine->engine->controlSampleRate()
                                : 48000;
 
     const double targetFrames =
@@ -2607,7 +2613,7 @@ int wma_get_latency_report(const WmaEngine* engine, char* buffer, int buffer_siz
             report += "Input Latency: " + std::to_string(inputLatency) + " ms\n";
         }
 
-        // The backend was available all along —BackendManager::getStreamInfo()
+        // The backend was available all along —BackendManager::activeStreamInfo()
         // carries it and AudioEngine logs it at start— and the report threw it
         // away. On the USB path that left a latency report with no mention of
         // USB, which is the first thing you would want to know.
