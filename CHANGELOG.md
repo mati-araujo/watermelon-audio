@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.21.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.20.0...v2.21.0) (2026-09-29)
+
+
+### Features
+
+* **kmp:** el import del looper con la causa tipada ([7f05810](https://github.com/mati-araujo/watermelon-audio/commit/7f05810520988ce9548210d851559c08470c1b97))
+
+
+### Bug Fixes
+
+* **engine:** currentSampleRate() ya no toma mStreamMutex en el hilo RT ([79fedd2](https://github.com/mati-araujo/watermelon-audio/commit/79fedd270ff8cffff256c5d8005a64e32574e56a))
+* **engine:** getInstance() no corre en el hilo RT por el camino Oboe directo ([ed9e9c9](https://github.com/mati-araujo/watermelon-audio/commit/ed9e9c9b49452d644963c782e11b8ed2d7eed1d7))
+* **kmp:** el ciclo de vida del motor deja de mentir en Android ([75d4b17](https://github.com/mati-araujo/watermelon-audio/commit/75d4b1726fd9fe13bd8ba5eb9a784f70b84564af))
+* **kmp:** el paquete del review adversarial de S2 ([0e82c24](https://github.com/mati-araujo/watermelon-audio/commit/0e82c24c2a7d619a0f5c93d19560da5ed3b7771b))
+* **kmp:** la cancelacion, la latencia tardia y el motor ya liberado ([0cbfd22](https://github.com/mati-araujo/watermelon-audio/commit/0cbfd22e47729a31d27637665cfb7ecb8e736a05))
+* **kmp:** la configuracion llega al motor y los setters dicen que no ([3c06a11](https://github.com/mati-araujo/watermelon-audio/commit/3c06a11c91266330c84f3ef9c4dcd644148d0ece))
+* **looper:** capabilities, undo e import que no mienten ([1388de0](https://github.com/mati-araujo/watermelon-audio/commit/1388de0b34d162927cc77aeb29d8af14f4bb4a42))
+* **looper:** el OOM del pool deja de ser invisible ([e658119](https://github.com/mati-araujo/watermelon-audio/commit/e658119d6c826199011c7f9537f8c6522642f727))
+* **looper:** un bad_alloc del decode es OutOfMemory, no UNKNOWN ([900d5a2](https://github.com/mati-araujo/watermelon-audio/commit/900d5a26f2f87578998ff489bd020c9198097501))
+
 ## [2.20.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.19.2...v2.20.0) (2026-09-18)
 
 
