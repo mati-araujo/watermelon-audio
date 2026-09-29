@@ -205,43 +205,54 @@ TEST_F(CurrentSampleRateTest, PublishesTheStreamRateEvenWhenTheQuiesceFails) {
 
     gInputNodeHoldInCallback.store(true, std::memory_order_release);
     std::atomic<bool> keepRendering{true};
-    std::thread audio;
-
-    // Suelta el gancho pase lo que pase: un thread retenido cuelga el binario
-    // entero, incluso si una asercion aborta el cuerpo del test.
-    struct Release {
-        std::atomic<bool>& keepRendering;
-        std::thread& audio;
-        AudioEngine& engine;
-        ~Release() {
-            gInputNodeHoldInCallback.store(false, std::memory_order_release);
-            keepRendering.store(false, std::memory_order_release);
-            if (audio.joinable()) audio.join();
-            engine.stop();
-            engine.setInputNode(nullptr);
-        }
-    } release{keepRendering, audio, *mEngine};
+    std::atomic<bool> startOk{false};
 
     // 1. Trabar el backend ADENTRO de start(): en ese punto el motor ya paso a
     //    Running (`transitionToState` corre antes que `manager.start()`), asi que
     //    los callbacks hacen trabajo de verdad y el gancho los puede retener.
     mBackend->blockStart();
-    std::atomic<bool> startReturned{false};
-    std::atomic<bool> startOk{false};
     std::thread starter([&] {
         startOk.store(mEngine->start(0), std::memory_order_release);
-        startReturned.store(true, std::memory_order_release);
     });
-    mBackend->waitUntilStartEntered();
 
     // 2. Largar el render, que queda retenido adentro del callback.
-    audio = std::thread([&] {
+    std::thread audio([&] {
         std::vector<float> in(static_cast<size_t>(kBlockFrames) * 2, 0.25f);
         std::vector<float> out(static_cast<size_t>(kBlockFrames) * 2, 0.0f);
         while (keepRendering.load(std::memory_order_acquire)) {
             mEngine->onAudioReady(out.data(), in.data(), kBlockFrames);
         }
     });
+
+    // 🔴 EL GUARD VA DESPUES DE LOS DOS THREADS, Y ESE ORDEN ES EL ARREGLO (lo
+    // encontro un review). Declarado ANTES, cualquier `ASSERT_*` del cuerpo salia de
+    // la funcion con `starter` todavia sin construir/joinear: destruir un
+    // `std::thread` joinable es `std::terminate`, o sea que una PREMISA fallida
+    // reventaba el binario en vez de reportar un test rojo. Y el orden de adentro
+    // tampoco es libre: primero se sueltan los dos threads —`releaseStart()` para que
+    // `start()` pueda volver, el gancho para que el render salga del callback— y
+    // recien despues se toca el motor. Al reves, el `stop()` del guard se bloquea
+    // para siempre en `mStateMutex`, que `start()` todavia tiene tomado.
+    //
+    // Es el patron de `test_rate_cableado.cpp`, con un thread mas.
+    struct Release {
+        std::atomic<bool>& keepRendering;
+        std::thread& starter;
+        std::thread& audio;
+        wma_test::FakeAudioBackend& backend;
+        AudioEngine& engine;
+        ~Release() {
+            backend.releaseStart();
+            gInputNodeHoldInCallback.store(false, std::memory_order_release);
+            keepRendering.store(false, std::memory_order_release);
+            if (starter.joinable()) starter.join();
+            if (audio.joinable()) audio.join();
+            engine.stop();
+            engine.setInputNode(nullptr);
+        }
+    } release{keepRendering, starter, audio, *mBackend, *mEngine};
+
+    mBackend->waitUntilStartEntered();
     ASSERT_TRUE(wma_test::waitUntil(
         [] { return gInputNodeIsInCallback.load(std::memory_order_acquire); }))
         << "premisa: el thread de salida nunca quedo retenido adentro del callback, "
@@ -249,15 +260,76 @@ TEST_F(CurrentSampleRateTest, PublishesTheStreamRateEvenWhenTheQuiesceFails) {
 
     // 3. Destrabar: `manager.start()` vuelve, se lee 44100 != 48000 y se entra al
     //    re-configure — cuyo quiesce se va a agotar con el callback adentro.
+    //
+    // `releaseStart()` es idempotente respecto del guard: el que corre primero
+    // destraba, el segundo no encuentra a nadie esperando.
     mBackend->releaseStart();
     starter.join();
-    ASSERT_TRUE(wma_test::waitUntil(
-        [&] { return startReturned.load(std::memory_order_acquire); }));
     ASSERT_TRUE(startOk.load(std::memory_order_acquire))
         << "un quiesce fallido no puede hacer fallar el start: solo deja el DSP al rate viejo";
 
     EXPECT_EQ(mEngine->currentSampleRate(), kNegotiated)
         << "el rate del STREAM se publica aunque el re-configure no haya podido correr";
+}
+
+/**
+ * D3 — `controlSampleRate()` SIGUE un cambio de backend que nadie notifico, y
+ * `currentSampleRate()` NO.
+ *
+ * 🔴 ESTE TEST EXISTE POR UN ESCENARIO DE PRODUCCION MEDIDO EN EL REVIEW, no por
+ * simetria. En Android, un DAC USB negociado a 44100 que se desconecta en caliente
+ * entra por `UsbAudioManagerImpl.handleUsbDisconnectedDuringStreaming` ->
+ * `nativeFallbackToOboeBackend` -> `BackendManager::fallbackToOboe` ->
+ * `selectBackend(OBOE)`, que PARA el backend viejo y arranca el nuevo **sin avisarle
+ * al motor** (no hay `onStreamConfigChanged` en ese camino). Lo mismo hace
+ * `reopenOnce()`. Con el rate saliendo sólo del atomic, `loadSoundFont*` se quedaba
+ * en 44100 para siempre y preparaba el SoundFont ≈ +1,47 semitonos arriba.
+ *
+ * De ahi los DOS lectores: el RT recuerda (no puede tomar locks), el control
+ * pregunta en vivo (puede, y lo necesita). El estimulo es justamente "el backend
+ * cambio de rate a espaldas del motor".
+ */
+TEST_F(CurrentSampleRateTest, TheControlReaderFollowsABackendSwitchTheEngineWasNeverToldAbout) {
+    constexpr int kNegotiated = 44100;
+    constexpr int kAfterSwitch = 96000;
+    static_assert(kNegotiated != kAfterSwitch, "sin dos rates distintos no hay nada que seguir");
+
+    startEngineAt(kNegotiated);
+    ASSERT_EQ(mEngine->controlSampleRate(), kNegotiated);
+
+    // El backend pasa a correr a otro rate sin decirselo al motor: es lo que deja
+    // `selectBackend()` cuando lo llama el fallback de USB.
+    mBackend->setNegotiatedSampleRate(kAfterSwitch);
+
+    EXPECT_EQ(mEngine->controlSampleRate(), kAfterSwitch)
+        << "el lector de CONTROL tiene que ver el rate al que corre el stream AHORA: "
+           "es el que le da el rate a loadSoundFont* y al buffer recomendado";
+    EXPECT_EQ(mEngine->currentSampleRate(), kNegotiated)
+        << "y el lector RT tiene que seguir contestando desde el atomic, sin locks: "
+           "ese es el punto entero de MINI-033";
+
+    mEngine->stop();
+}
+
+/**
+ * D3, la otra mitad — sin backend que conteste, el lector de control cae en la
+ * MISMA cadena que el RT.
+ *
+ * Absorbe lo que valia `IgnoresARunningBackendWhenTheBackendPathIsDisabled`, que se
+ * borro: un backend corriendo no se puede colar en la respuesta de un motor que no
+ * esta en ese camino — y ahora eso hay que afirmarlo de los DOS lectores, porque el
+ * de control SI le pregunta al manager.
+ */
+TEST_F(CurrentSampleRateTest, TheControlReaderFallsBackToTheSameChainWhenNoStreamAnswers) {
+    // Un manager corriendo, con el motor fuera de ese camino y con el rung del medio
+    // cargado: las dos respuestas tienen que ser el rung, no el 96000 del backend.
+    runBackendAt(96000);
+    mEngine->setUseBackendManager(false);
+    ASSERT_FALSE(mEngine->isUsingBackendManager());
+    ASSERT_TRUE(mEngine->startOffline(44100, kOfflineBlockFrames));
+
+    EXPECT_EQ(mEngine->controlSampleRate(), 44100);
+    EXPECT_EQ(mEngine->currentSampleRate(), 44100);
 }
 
 TEST_F(CurrentSampleRateTest, DoesNotConsultABackendTheEngineNeverStarted) {
@@ -303,6 +375,12 @@ TEST_F(CurrentSampleRateTest, NeverReturnsANonPositiveRate) {
     // el hook de cambio de config. Un `sampleRate` de 0 ahi no puede pisar lo que
     // ya se sabia ni hundir la respuesta.
     //
+    // 🔴 EL RATE QUE SE PLANTA NO PUEDE SER 48000, Y ESO LO ENCONTRO UN REVIEW.
+    // Con 48000 —que es EL PISO— este bloque no podia matar la guarda `> 0` del
+    // hook: sin la guarda, el atomic queda en 0, la cadena cae al piso y contesta
+    // 48000 igual. Medido por el reviewer: 535/535 verdes con la guarda sacada. Con
+    // 44100 la respuesta sin guarda seria 48000 y la afirmacion lo ve.
+    //
     // 🔴 EL EJE SE QUEDA EN 0 A PROPOSITO, y no es pereza: un rate NEGATIVO por
     // este hook ya TIRA UNA EXCEPCION hoy, antes de llegar al atomic —
     // `configureComponentsWithSampleRate()` corre primero y una de sus
@@ -312,10 +390,13 @@ TEST_F(CurrentSampleRateTest, NeverReturnsANonPositiveRate) {
     // en el eje de este test haria rojo un defecto que este MINI no arregla, y
     // taparlo con un try/catch seria peor. El 0 es ademas el unico de los dos que
     // un backend real puede entregar (una config leida a mitad de camino).
-    startEngineAt(48000);
+    constexpr int kPublished = 44100;
+    static_assert(kPublished != 48000,
+                  "plantar el PISO aca deja la guarda `> 0` del hook sin poder morir");
+    startEngineAt(kPublished);
     for (int junk : {0}) {
         mEngine->onStreamConfigChanged(streamInfoAt(junk));
-        EXPECT_EQ(mEngine->currentSampleRate(), 48000)
+        EXPECT_EQ(mEngine->currentSampleRate(), kPublished)
             << "onStreamConfigChanged(" << junk << ") piso un rate que era valido";
     }
 
@@ -336,18 +417,14 @@ TEST_F(CurrentSampleRateTest, ResolvesOnTheLegacyPathToo) {
     EXPECT_EQ(mEngine->currentSampleRate(), 88200);
 }
 
-TEST_F(CurrentSampleRateTest, IgnoresARunningBackendWhenTheBackendPathIsDisabled) {
-    // Un backend corriendo no se puede colar en la respuesta de un motor que no
-    // esta en ese camino. `setUseBackendManager()` es no-op con el motor
-    // corriendo, asi que el orden importa: la bandera se baja con el motor
-    // parado, que es el unico momento en que produccion la toca.
-    runBackendAt(96000);
-    mEngine->setUseBackendManager(false);
-    ASSERT_FALSE(mEngine->isUsingBackendManager());
-
-    EXPECT_EQ(mEngine->currentSampleRate(), 48000);
-    EXPECT_NE(mEngine->currentSampleRate(), 96000);
-}
+// 🔴 ACA VIVIA `IgnoresARunningBackendWhenTheBackendPathIsDisabled`, y lo borro un
+// review: no se distinguia por mutacion de
+// `DoesNotConsultABackendTheEngineNeverStarted` —mismo estimulo, mismo
+// observable— porque el unico eje que agregaba (bajar `mUseBackendManager`) dejo de
+// entrar en la respuesta cuando `currentSampleRate()` paso a leer solo el atomic. Lo
+// que valia de el lo cubren ahora
+// `TheControlReaderFallsBackToTheSameChainWhenNoStreamAnswers`, que hace esa misma
+// pregunta sobre el lector que SI consulta al manager, y `ResolvesOnTheLegacyPathToo`.
 
 }  // namespace
 }  // namespace wma_test
