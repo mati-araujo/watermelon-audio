@@ -42,6 +42,7 @@
 #include "support/BackendPathFixture.h"
 
 #include <atomic>
+#include <climits>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -381,20 +382,23 @@ TEST_F(CurrentSampleRateTest, NeverReturnsANonPositiveRate) {
     // 48000 igual. Medido por el reviewer: 535/535 verdes con la guarda sacada. Con
     // 44100 la respuesta sin guarda seria 48000 y la afirmacion lo ve.
     //
-    // 🔴 EL EJE SE QUEDA EN 0 A PROPOSITO, y no es pereza: un rate NEGATIVO por
-    // este hook ya TIRA UNA EXCEPCION hoy, antes de llegar al atomic —
-    // `configureComponentsWithSampleRate()` corre primero y una de sus
-    // dimensiones sale de `rate * algo`, asi que un negativo se convierte en un
-    // `resize()` gigante (`std::length_error`, medido el 2026-09-29 con este
-    // mismo test). Es PREEXISTENTE y ajeno a MINI-033 (queda reportado); meterlo
-    // en el eje de este test haria rojo un defecto que este MINI no arregla, y
-    // taparlo con un try/catch seria peor. El 0 es ademas el unico de los dos que
-    // un backend real puede entregar (una config leida a mitad de camino).
+    // 🔴 AC-M034.2 — LOS NEGATIVOS VOLVIERON AL EJE.
+    //
+    // MINI-033 los tuvo que dejar afuera: un rate NEGATIVO por este hook TIRABA una
+    // excepcion antes de llegar al atomic, porque
+    // `configureComponentsWithSampleRate()` corre primero y una de sus dimensiones
+    // sale de `rate * algo`, asi que un negativo se convertia en un `resize()`
+    // gigante (`std::length_error`, medido el 2026-09-29 con este mismo test).
+    // Meterlos entonces habria hecho rojo un defecto que ese MINI no arreglaba.
+    //
+    // MINI-034 puso la guarda en el primitivo, asi que el eje entero entra: `0` (el
+    // unico que un backend real puede entregar, con una config leida a mitad de
+    // camino), `-1` (el borde) e `INT_MIN` (el que no se puede negar sin desbordar).
     constexpr int kPublished = 44100;
     static_assert(kPublished != 48000,
                   "plantar el PISO aca deja la guarda `> 0` del hook sin poder morir");
     startEngineAt(kPublished);
-    for (int junk : {0}) {
+    for (int junk : {0, -1, INT_MIN}) {
         mEngine->onStreamConfigChanged(streamInfoAt(junk));
         EXPECT_EQ(mEngine->currentSampleRate(), kPublished)
             << "onStreamConfigChanged(" << junk << ") piso un rate que era valido";

@@ -1,19 +1,19 @@
 {
   "_comment": "Prueba de que el gate local corrio sobre ESTE contenido. La escribe scripts/gate.sh y nadie mas; el CI la verifica con scripts/verify-attestation.sh. Editarla a mano fabrica una prueba falsa.",
   "schema": 1,
-  "digest": "68100bde63500b74cba139de42ad14965a3aa7c77aa2064ee97737b08f48584c",
+  "digest": "8bf4da02abff3a794d6f41ab99ae6c656f30dd8bb0f57d0f34b0daf257d087d5",
   "gates": {
     "cpp-tests-macos": {
       "status": "pass",
-      "seconds": 130
+      "seconds": 112
     },
     "ios": {
       "status": "pass",
-      "seconds": 103
+      "seconds": 233
     },
     "build": {
       "status": "pass",
-      "seconds": 97
+      "seconds": 344
     }
   },
   "versions": {
@@ -25,7 +25,7 @@
     "ninja": "1.13.2",
     "launcher_jvm": "17.0.19"
   },
-  "total_seconds": 646,
-  "created_utc": "2026-09-29T13:59:33Z",
-  "head": "2663820fae208801b25b10b6e23450b34fc36ce0"
+  "total_seconds": 1249,
+  "created_utc": "2026-09-29T15:39:32Z",
+  "head": "5d67a72ba054a6b56e895ffb568a173e34a53da3"
 }
