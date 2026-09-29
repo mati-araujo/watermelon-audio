@@ -146,9 +146,17 @@ public:
     bool isRunning() const;
 
     /**
-     * Get stream info from the current backend.
+     * Stream info del backend activo, leída EN VIVO.
+     *
+     * @warning Toma `mMutex` y, anidado, el candado de stream info del backend: es un
+     *          lector de CONTROL y **no se puede llamar desde el hilo de audio**. El
+     *          nombre es único en el árbol a propósito (MINI-033): se llamaba
+     *          `getStreamInfo()`, y como ese nombre tiene muchas definiciones el walker
+     *          de `check-rt-safety.py` no seguía la llamada — el hilo RT de captura llegó
+     *          a tomar estos dos mutex por bloque con el lint en verde. Renombrarla es lo
+     *          que hace que reintroducir esa cadena salga ROJO.
      */
-    StreamInfo getStreamInfo() const;
+    StreamInfo activeStreamInfo() const;
 
     // =========================================================================
     // Configuration

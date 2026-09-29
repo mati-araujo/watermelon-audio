@@ -2,7 +2,8 @@
  * test_current_sample_rate.cpp
  *
  * AudioEngine::currentSampleRate() — the resolution order every call site now
- * shares: running stream → offline render rate → 48000, never <= 0.
+ * shares: el rate del stream que el motor abrio → offline render rate → 48000,
+ * never <= 0.
  *
  * What made this worth a suite: the call sites it replaced all read
  * `mStream ? mStream->getSampleRate() : 0`, and on the BackendManager path
@@ -20,11 +21,40 @@
  * plantaba un rate preferido, ahora se planta por ese camino o se afirma contra
  * el piso de 48000; lo que ya no se puede escribir es el estado que produccion
  * no podia alcanzar.
+ *
+ * 🔴 MINI-033 CAMBIO EL RUNG DE ARRIBA, y con el la FORMA de estos tests.
+ * ---------------------------------------------------------------------
+ * Antes el rung de arriba era *preguntarle al backend en vivo*: `isRunning()` +
+ * `BackendManager::getStreamInfo()`, o sea **dos mutex anidados en el hilo RT de
+ * captura** (`captureMonitoringBlock` llama a esta funcion en cada bloque).
+ * Ahora el rung de arriba es un atomic del motor (`mStreamSampleRate`) que se
+ * escribe donde el motor YA se entera del rate: `start()` en sus dos caminos,
+ * `onStreamConfigChanged()`, y `0` en `stop()` / `rollbackFailedStart()`.
+ *
+ * Consecuencia para los tests: **el estimulo es el motor, no el manager**. Un
+ * `mManager->start()` a espaldas del motor ya NO mueve la respuesta, y eso no es
+ * una perdida de cobertura — es el costo declarado del diseño (un cambio de rate
+ * INTERNO del backend que nadie notifica deja el valor viejo, exactamente igual
+ * que le pasa al DSP). El estimulo de un cambio en caliente es
+ * `onStreamConfigChanged()`, que es el unico hook que produccion tiene para eso.
  */
 
 #include "support/BackendPathFixture.h"
 
+#include <atomic>
+#include <memory>
+#include <thread>
+#include <vector>
+
 #include <gtest/gtest.h>
+
+#include "../../nodes/InputNode.h"
+
+// El gancho de WD-1.3: retiene al thread de SALIDA adentro del callback, lo que
+// deja `mActiveCallbacks` en 1 y hace que el quiesce de re-configuracion se
+// agote. Es el mismo mecanismo que usa `test_rate_cableado.cpp`.
+extern std::atomic<bool> gInputNodeHoldInCallback;
+extern std::atomic<bool> gInputNodeIsInCallback;
 
 namespace wma_test {
 namespace {
@@ -35,6 +65,22 @@ using CurrentSampleRateTest = BackendPathFixture;
 // `startOffline()` los acepte, porque es el unico escritor del rung del medio.
 constexpr int kOfflineBlockFrames = 512;
 
+/// Deja el rung del medio cargado SIN dejar el motor en modo offline, para que
+/// despues se le pueda arrancar un stream encima y observar la precedencia.
+/// `stop()` apaga `mOfflineMode` y no toca `mOfflineSampleRate`, que es
+/// justamente el estado que hace falta.
+void plantOfflineRungAt(AudioEngine& engine, int rate) {
+    ASSERT_TRUE(engine.startOffline(rate, kOfflineBlockFrames));
+    engine.stop();
+}
+
+watermelon_audio::StreamInfo streamInfoAt(int rate) {
+    watermelon_audio::StreamInfo info{};
+    info.sampleRate = rate;
+    info.channelCount = 2;
+    return info;
+}
+
 TEST_F(CurrentSampleRateTest, FallsBackTo48000WhenNothingIsConfigured) {
     // Fresh engine: no stream running, no offline render. The documented floor
     // is 48000 — the value the old code would have reported as 0.
@@ -42,68 +88,272 @@ TEST_F(CurrentSampleRateTest, FallsBackTo48000WhenNothingIsConfigured) {
 }
 
 TEST_F(CurrentSampleRateTest, UsesTheOfflineRenderRateWhenNoStreamIsRunning) {
-    // El rung del medio, por su unico escritor de produccion. Sin backend al que
-    // preguntarle, esto es lo unico que sabe a que rate corre el motor: un render
-    // offline a 44,1 kHz tiene que reportar 44,1, no el piso.
+    // El rung del medio, por su unico escritor de produccion. Sin stream abierto,
+    // esto es lo unico que sabe a que rate corre el motor: un render offline a
+    // 44,1 kHz tiene que reportar 44,1, no el piso.
     ASSERT_TRUE(mEngine->startOffline(44100, kOfflineBlockFrames));
 
     EXPECT_EQ(mEngine->currentSampleRate(), 44100);
 }
 
-TEST_F(CurrentSampleRateTest, PrefersNegotiatedBackendRateOverTheOfflineRate) {
-    // The scenario that desynchronised SoundFont playback: something prepared
-    // at one rate while the device settles on another ends up detuned.
-    //
-    // El rung del medio va en un valor DISTINTO del piso a proposito: con 48000
-    // ahi, este test no distinguiria "gano el stream" de "cayo al piso".
-    ASSERT_TRUE(mEngine->startOffline(96000, kOfflineBlockFrames));
-    runBackendAt(44100);
+/**
+ * AC-M033.1 — el rate del stream, despues de `start()`.
+ *
+ * El escenario que desincronizaba la reproduccion de SoundFonts: algo preparado a
+ * un rate mientras el device se asienta en otro suena desafinado.
+ *
+ * El rung del medio va cargado en un valor DISTINTO a proposito: con 48000 ahi,
+ * este test no distinguiria "gano el stream" de "cayo al piso".
+ */
+TEST_F(CurrentSampleRateTest, PrefersTheStartedStreamRateOverTheOfflineRate) {
+    plantOfflineRungAt(*mEngine, 96000);
+    startEngineAt(44100);
 
-    EXPECT_EQ(mEngine->currentSampleRate(), 44100);
+    EXPECT_EQ(mEngine->currentSampleRate(), 44100)
+        << "el rate del stream que start() negocio tiene que ganarle al rung offline";
+
+    mEngine->stop();
 }
 
-TEST_F(CurrentSampleRateTest, IgnoresBackendRateUntilTheBackendIsActuallyRunning) {
-    // Selected but never started: getStreamInfo() would happily report the
-    // backend's default, so the running check is what keeps a stale rate out.
-    mBackend->setNegotiatedSampleRate(96000);
-    ASSERT_TRUE(mManager->selectBackend(watermelon_audio::BackendType::OBOE));
-    ASSERT_FALSE(mManager->isRunning());
-
-    EXPECT_EQ(mEngine->currentSampleRate(), 48000);
-    EXPECT_NE(mEngine->currentSampleRate(), 96000);
-}
-
-TEST_F(CurrentSampleRateTest, ReturnsToTheFloorAfterTheBackendStops) {
-    runBackendAt(96000);
+/**
+ * AC-M033.1 — y vuelve al fallback despues de `stop()`.
+ *
+ * Es el mutante (c) del MINI: no limpiar el atomic en `stop()` deja pegado el
+ * ultimo rate negociado sobre un motor sin stream.
+ */
+TEST_F(CurrentSampleRateTest, ReturnsToTheFloorAfterTheEngineStops) {
+    startEngineAt(96000);
     ASSERT_EQ(mEngine->currentSampleRate(), 96000);
 
-    mManager->stop();
+    mEngine->stop();
 
     // Sin stream y sin render offline queda el piso — y sobre todo NO queda
     // pegado el ultimo rate negociado, que es lo que este test vigila.
     EXPECT_EQ(mEngine->currentSampleRate(), 48000);
 }
 
-TEST_F(CurrentSampleRateTest, FollowsTheBackendAcrossARenegotiation) {
-    runBackendAt(44100);
-    ASSERT_EQ(mEngine->currentSampleRate(), 44100);
+/**
+ * AC-M033.1 — un `start()` que no prospera no deja rate publicado.
+ *
+ * 🔴 ES UN TRINQUETE, y conviene decir de que: HOY el atomic todavia vale 0
+ * cuando `rollbackFailedStart()` corre, porque se escribe DESPUES de que
+ * `manager.start()` volvio OK. O sea que el limpiado de ese camino es defensa en
+ * profundidad y este test no lo mata solo.
+ *
+ * Lo que SI mata es mover el store hacia arriba — publicar el rate *pedido*
+ * antes de que el backend conteste, que es la forma natural de "simplificar" esto
+ * mas adelante. Con el store adelantado y sin el limpiado, un motor que quedo en
+ * Stopped seguiria contestando el rate de un stream que nunca corrio.
+ */
+TEST_F(CurrentSampleRateTest, AFailedStartLeavesNoStreamRateBehind) {
+    mBackend->setNegotiatedSampleRate(44100);
+    mBackend->setStartResult(watermelon_audio::BackendResult::ERROR_DEVICE_NOT_FOUND);
+    mEngine->setUseBackendManager(true);
+    ASSERT_TRUE(mManager->selectBackend(watermelon_audio::BackendType::OBOE));
 
-    // A hot-plugged device can come back at a different rate without the
-    // engine restarting; the answer must track the backend, not a snapshot.
-    mBackend->setNegotiatedSampleRate(96000);
+    ASSERT_FALSE(mEngine->start(0)) << "premisa: el backend tenia que rechazar el start";
 
-    EXPECT_EQ(mEngine->currentSampleRate(), 96000);
+    EXPECT_EQ(mEngine->currentSampleRate(), 48000);
 }
 
-TEST_F(CurrentSampleRateTest, FallsBackWhenARunningBackendReportsANonPositiveRate) {
-    // A backend can be running and still have nothing sensible to report
+/**
+ * AC-M033.2 — `onStreamConfigChanged` mueve el rate en caliente.
+ *
+ * Es el UNICO hook de cambio de rate sin reiniciar el motor (REQ-006.2). Antes
+ * de MINI-033 esto lo cubria "cambiarle el rate al fake y volver a preguntar",
+ * que dejaba de valer en cuanto la respuesta salio de un atomic: ese estimulo
+ * modelaba un cambio que NADIE notifica, que es el costo declarado del diseño.
+ */
+TEST_F(CurrentSampleRateTest, FollowsAHotStreamConfigChange) {
+    startEngineAt(44100);
+    ASSERT_EQ(mEngine->currentSampleRate(), 44100);
+
+    mEngine->onStreamConfigChanged(streamInfoAt(96000));
+
+    EXPECT_EQ(mEngine->currentSampleRate(), 96000);
+
+    mEngine->stop();
+}
+
+/**
+ * AC-M033.2 — un `start()` cuyo quiesce falla publica IGUAL el rate del stream.
+ *
+ * El control del punto 2 del diseño (R-MOT-1): si el drenaje no se confirma,
+ * `configureComponentsWithSampleRate()` **no re-prepara** y el DSP queda al rate
+ * viejo — pero lo que el stream corre es `actualRate`, y eso es lo que el flag de
+ * mismatch y el largo de los fades necesitan saber. Publicar el rate y
+ * re-preparar son dos pasos distintos, y el segundo puede no ocurrir.
+ *
+ * Se fuerza con dos mecanismos que ya existen: el freno de `FakeAudioBackend`
+ * adentro de `start()` (para meter el render en la ventana exacta) y el gancho de
+ * WD-1.3 (para que ese render quede retenido adentro del callback, dejando
+ * `mActiveCallbacks` en 1 mientras el quiesce agota su techo de 250 ms).
+ */
+TEST_F(CurrentSampleRateTest, PublishesTheStreamRateEvenWhenTheQuiesceFails) {
+    constexpr int kNegotiated = 44100;
+    constexpr int kBlockFrames = 256;
+    static_assert(kNegotiated != AudioEngine::kPreNegotiationSampleRate,
+                  "sin coercion no se entra a la rama del re-configure que este test cubre");
+
+    auto node = std::make_shared<InputNode>();
+    node->prepare(48000, kBlockFrames);
+    mEngine->setInputNode(node);
+
+    mBackend->setNegotiatedSampleRate(kNegotiated);
+    mEngine->setUseBackendManager(true);
+    ASSERT_TRUE(mManager->selectBackend(watermelon_audio::BackendType::OBOE));
+
+    gInputNodeHoldInCallback.store(true, std::memory_order_release);
+    std::atomic<bool> keepRendering{true};
+    std::atomic<bool> startOk{false};
+
+    // 1. Trabar el backend ADENTRO de start(): en ese punto el motor ya paso a
+    //    Running (`transitionToState` corre antes que `manager.start()`), asi que
+    //    los callbacks hacen trabajo de verdad y el gancho los puede retener.
+    mBackend->blockStart();
+    std::thread starter([&] {
+        startOk.store(mEngine->start(0), std::memory_order_release);
+    });
+
+    // 2. Largar el render, que queda retenido adentro del callback.
+    std::thread audio([&] {
+        std::vector<float> in(static_cast<size_t>(kBlockFrames) * 2, 0.25f);
+        std::vector<float> out(static_cast<size_t>(kBlockFrames) * 2, 0.0f);
+        while (keepRendering.load(std::memory_order_acquire)) {
+            mEngine->onAudioReady(out.data(), in.data(), kBlockFrames);
+        }
+    });
+
+    // 🔴 EL GUARD VA DESPUES DE LOS DOS THREADS, Y ESE ORDEN ES EL ARREGLO (lo
+    // encontro un review). Declarado ANTES, cualquier `ASSERT_*` del cuerpo salia de
+    // la funcion con `starter` todavia sin construir/joinear: destruir un
+    // `std::thread` joinable es `std::terminate`, o sea que una PREMISA fallida
+    // reventaba el binario en vez de reportar un test rojo. Y el orden de adentro
+    // tampoco es libre: primero se sueltan los dos threads —`releaseStart()` para que
+    // `start()` pueda volver, el gancho para que el render salga del callback— y
+    // recien despues se toca el motor. Al reves, el `stop()` del guard se bloquea
+    // para siempre en `mStateMutex`, que `start()` todavia tiene tomado.
+    //
+    // Es el patron de `test_rate_cableado.cpp`, con un thread mas.
+    struct Release {
+        std::atomic<bool>& keepRendering;
+        std::thread& starter;
+        std::thread& audio;
+        wma_test::FakeAudioBackend& backend;
+        AudioEngine& engine;
+        ~Release() {
+            backend.releaseStart();
+            gInputNodeHoldInCallback.store(false, std::memory_order_release);
+            keepRendering.store(false, std::memory_order_release);
+            if (starter.joinable()) starter.join();
+            if (audio.joinable()) audio.join();
+            engine.stop();
+            engine.setInputNode(nullptr);
+        }
+    } release{keepRendering, starter, audio, *mBackend, *mEngine};
+
+    mBackend->waitUntilStartEntered();
+    ASSERT_TRUE(wma_test::waitUntil(
+        [] { return gInputNodeIsInCallback.load(std::memory_order_acquire); }))
+        << "premisa: el thread de salida nunca quedo retenido adentro del callback, "
+           "asi que el quiesce del re-configure NO iba a fallar";
+
+    // 3. Destrabar: `manager.start()` vuelve, se lee 44100 != 48000 y se entra al
+    //    re-configure — cuyo quiesce se va a agotar con el callback adentro.
+    //
+    // `releaseStart()` es idempotente respecto del guard: el que corre primero
+    // destraba, el segundo no encuentra a nadie esperando.
+    mBackend->releaseStart();
+    starter.join();
+    ASSERT_TRUE(startOk.load(std::memory_order_acquire))
+        << "un quiesce fallido no puede hacer fallar el start: solo deja el DSP al rate viejo";
+
+    EXPECT_EQ(mEngine->currentSampleRate(), kNegotiated)
+        << "el rate del STREAM se publica aunque el re-configure no haya podido correr";
+}
+
+/**
+ * D3 — `controlSampleRate()` SIGUE un cambio de backend que nadie notifico, y
+ * `currentSampleRate()` NO.
+ *
+ * 🔴 ESTE TEST EXISTE POR UN ESCENARIO DE PRODUCCION MEDIDO EN EL REVIEW, no por
+ * simetria. En Android, un DAC USB negociado a 44100 que se desconecta en caliente
+ * entra por `UsbAudioManagerImpl.handleUsbDisconnectedDuringStreaming` ->
+ * `nativeFallbackToOboeBackend` -> `BackendManager::fallbackToOboe` ->
+ * `selectBackend(OBOE)`, que PARA el backend viejo y arranca el nuevo **sin avisarle
+ * al motor** (no hay `onStreamConfigChanged` en ese camino). Lo mismo hace
+ * `reopenOnce()`. Con el rate saliendo sólo del atomic, `loadSoundFont*` se quedaba
+ * en 44100 para siempre y preparaba el SoundFont ≈ +1,47 semitonos arriba.
+ *
+ * De ahi los DOS lectores: el RT recuerda (no puede tomar locks), el control
+ * pregunta en vivo (puede, y lo necesita). El estimulo es justamente "el backend
+ * cambio de rate a espaldas del motor".
+ */
+TEST_F(CurrentSampleRateTest, TheControlReaderFollowsABackendSwitchTheEngineWasNeverToldAbout) {
+    constexpr int kNegotiated = 44100;
+    constexpr int kAfterSwitch = 96000;
+    static_assert(kNegotiated != kAfterSwitch, "sin dos rates distintos no hay nada que seguir");
+
+    startEngineAt(kNegotiated);
+    ASSERT_EQ(mEngine->controlSampleRate(), kNegotiated);
+
+    // El backend pasa a correr a otro rate sin decirselo al motor: es lo que deja
+    // `selectBackend()` cuando lo llama el fallback de USB.
+    mBackend->setNegotiatedSampleRate(kAfterSwitch);
+
+    EXPECT_EQ(mEngine->controlSampleRate(), kAfterSwitch)
+        << "el lector de CONTROL tiene que ver el rate al que corre el stream AHORA: "
+           "es el que le da el rate a loadSoundFont* y al buffer recomendado";
+    EXPECT_EQ(mEngine->currentSampleRate(), kNegotiated)
+        << "y el lector RT tiene que seguir contestando desde el atomic, sin locks: "
+           "ese es el punto entero de MINI-033";
+
+    mEngine->stop();
+}
+
+/**
+ * D3, la otra mitad — sin backend que conteste, el lector de control cae en la
+ * MISMA cadena que el RT.
+ *
+ * Absorbe lo que valia `IgnoresARunningBackendWhenTheBackendPathIsDisabled`, que se
+ * borro: un backend corriendo no se puede colar en la respuesta de un motor que no
+ * esta en ese camino — y ahora eso hay que afirmarlo de los DOS lectores, porque el
+ * de control SI le pregunta al manager.
+ */
+TEST_F(CurrentSampleRateTest, TheControlReaderFallsBackToTheSameChainWhenNoStreamAnswers) {
+    // Un manager corriendo, con el motor fuera de ese camino y con el rung del medio
+    // cargado: las dos respuestas tienen que ser el rung, no el 96000 del backend.
+    runBackendAt(96000);
+    mEngine->setUseBackendManager(false);
+    ASSERT_FALSE(mEngine->isUsingBackendManager());
+    ASSERT_TRUE(mEngine->startOffline(44100, kOfflineBlockFrames));
+
+    EXPECT_EQ(mEngine->controlSampleRate(), 44100);
+    EXPECT_EQ(mEngine->currentSampleRate(), 44100);
+}
+
+TEST_F(CurrentSampleRateTest, DoesNotConsultABackendTheEngineNeverStarted) {
+    // Un manager corriendo a espaldas del motor. Antes esto ERA el rung de
+    // arriba; ahora la respuesta sale del atomic del motor, que nadie escribio.
+    // El test sigue puesto porque afirma justamente eso: `currentSampleRate()` no
+    // le pregunta al backend (que es lo que le costaba dos mutex en el hilo RT).
+    runBackendAt(96000);
+
+    EXPECT_EQ(mEngine->currentSampleRate(), 48000);
+    EXPECT_NE(mEngine->currentSampleRate(), 96000);
+}
+
+TEST_F(CurrentSampleRateTest, FallsBackWhenTheNegotiatedRateIsNonPositive) {
+    // A backend can start and still have nothing sensible to report
     // (mid-reconfiguration, or a descriptor that never yielded a rate). El rung
     // del medio va cargado para que la caida sea observable y no se confunda con
     // el piso.
-    ASSERT_TRUE(mEngine->startOffline(44100, kOfflineBlockFrames));
-    runBackendAt(0);
+    plantOfflineRungAt(*mEngine, 44100);
+    startEngineAt(0);
 
     EXPECT_EQ(mEngine->currentSampleRate(), 44100);
+
+    mEngine->stop();
 }
 
 TEST_F(CurrentSampleRateTest, NeverReturnsANonPositiveRate) {
@@ -114,8 +364,6 @@ TEST_F(CurrentSampleRateTest, NeverReturnsANonPositiveRate) {
     // un recorte de cobertura: `startOffline()` RECHAZA un rate <= 0 (lo afirma
     // el bloque de abajo), asi que ya no existe un camino que meta basura ahi.
     // El `> 0` que guarda ese rung se queda igual, como defensa en profundidad.
-    const int junkNegotiatedRates[] = {0, -1, -44100};
-
     for (int junk : {0, -1, -48000}) {
         EXPECT_FALSE(mEngine->startOffline(junk, kOfflineBlockFrames))
             << "startOffline deberia rechazar el rate " << junk;
@@ -123,18 +371,43 @@ TEST_F(CurrentSampleRateTest, NeverReturnsANonPositiveRate) {
             << "tras rechazar " << junk;
     }
 
-    runBackendAt(48000);
-    for (int negotiated : junkNegotiatedRates) {
-        mBackend->setNegotiatedSampleRate(negotiated);
-        EXPECT_GT(mEngine->currentSampleRate(), 0)
-            << "negotiated=" << negotiated;
+    // El eje de basura del rung DE ARRIBA entra por donde produccion lo entrega:
+    // el hook de cambio de config. Un `sampleRate` de 0 ahi no puede pisar lo que
+    // ya se sabia ni hundir la respuesta.
+    //
+    // 🔴 EL RATE QUE SE PLANTA NO PUEDE SER 48000, Y ESO LO ENCONTRO UN REVIEW.
+    // Con 48000 —que es EL PISO— este bloque no podia matar la guarda `> 0` del
+    // hook: sin la guarda, el atomic queda en 0, la cadena cae al piso y contesta
+    // 48000 igual. Medido por el reviewer: 535/535 verdes con la guarda sacada. Con
+    // 44100 la respuesta sin guarda seria 48000 y la afirmacion lo ve.
+    //
+    // 🔴 EL EJE SE QUEDA EN 0 A PROPOSITO, y no es pereza: un rate NEGATIVO por
+    // este hook ya TIRA UNA EXCEPCION hoy, antes de llegar al atomic —
+    // `configureComponentsWithSampleRate()` corre primero y una de sus
+    // dimensiones sale de `rate * algo`, asi que un negativo se convierte en un
+    // `resize()` gigante (`std::length_error`, medido el 2026-09-29 con este
+    // mismo test). Es PREEXISTENTE y ajeno a MINI-033 (queda reportado); meterlo
+    // en el eje de este test haria rojo un defecto que este MINI no arregla, y
+    // taparlo con un try/catch seria peor. El 0 es ademas el unico de los dos que
+    // un backend real puede entregar (una config leida a mitad de camino).
+    constexpr int kPublished = 44100;
+    static_assert(kPublished != 48000,
+                  "plantar el PISO aca deja la guarda `> 0` del hook sin poder morir");
+    startEngineAt(kPublished);
+    for (int junk : {0}) {
+        mEngine->onStreamConfigChanged(streamInfoAt(junk));
+        EXPECT_EQ(mEngine->currentSampleRate(), kPublished)
+            << "onStreamConfigChanged(" << junk << ") piso un rate que era valido";
     }
+
+    mEngine->stop();
 }
 
 TEST_F(CurrentSampleRateTest, ResolvesOnTheLegacyPathToo) {
     // With BackendManager disabled there is no stream at all off Android, so
-    // this exercises the same fallback chain with the backend branch skipped.
-    // It is the shape the legacy Oboe path degrades to before a stream opens.
+    // this exercises the same fallback chain with nothing publishing the top
+    // rung. It is the shape the legacy Oboe path degrades to before a stream
+    // opens.
     mEngine->setUseBackendManager(false);
     ASSERT_FALSE(mEngine->isUsingBackendManager());
 
@@ -144,15 +417,14 @@ TEST_F(CurrentSampleRateTest, ResolvesOnTheLegacyPathToo) {
     EXPECT_EQ(mEngine->currentSampleRate(), 88200);
 }
 
-TEST_F(CurrentSampleRateTest, IgnoresARunningBackendWhenTheBackendPathIsDisabled) {
-    // getStreamInfo() consults the manager only when the engine is on the
-    // backend path; a running backend must not leak into the legacy answer.
-    runBackendAt(96000);
-    mEngine->setUseBackendManager(false);
-
-    EXPECT_EQ(mEngine->currentSampleRate(), 48000);
-    EXPECT_NE(mEngine->currentSampleRate(), 96000);
-}
+// 🔴 ACA VIVIA `IgnoresARunningBackendWhenTheBackendPathIsDisabled`, y lo borro un
+// review: no se distinguia por mutacion de
+// `DoesNotConsultABackendTheEngineNeverStarted` —mismo estimulo, mismo
+// observable— porque el unico eje que agregaba (bajar `mUseBackendManager`) dejo de
+// entrar en la respuesta cuando `currentSampleRate()` paso a leer solo el atomic. Lo
+// que valia de el lo cubren ahora
+// `TheControlReaderFallsBackToTheSameChainWhenNoStreamAnswers`, que hace esa misma
+// pregunta sobre el lector que SI consulta al manager, y `ResolvesOnTheLegacyPathToo`.
 
 }  // namespace
 }  // namespace wma_test

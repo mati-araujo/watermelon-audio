@@ -111,7 +111,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeRunLat
         int32_t sampleRate = 0;
         int32_t bufferSize = 0;
         double currentLatency = 0.0;
-        if (g_jniState.engine->getStreamInfo(sampleRate, bufferSize, currentLatency)) {
+        if (g_jniState.engine->queryStreamInfo(sampleRate, bufferSize, currentLatency)) {
             values[1] = static_cast<float>(currentLatency);
         }
     }
