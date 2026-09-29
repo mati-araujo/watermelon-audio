@@ -2248,6 +2248,33 @@ bool AudioEngine::renderBlock(float* output, const float* input, int frames) {
 }
 
 void AudioEngine::configureComponentsWithSampleRate(int sampleRate, int maxBlockSize) {
+    // MINI-034 — UN RATE NO POSITIVO NO PREPARA.
+    //
+    // La guarda va ACA, en el primitivo, y no en cada llamador:
+    // [[la-deuda-esta-en-el-primitivo-compartido]]. De los tres llamadores dos ya
+    // filtran (`startOffline()` RECHAZA `<= 0`; `start()` entra por `actualRate > 0`)
+    // y el tercero —`onStreamConfigChanged()`, el unico hook de rate en caliente de
+    // REQ-006.2— no: con un rate negativo esta funcion reventaba con
+    // `std::length_error` (una de las dimensiones sale de `rate * algo`, asi que un
+    // negativo se vuelve un `resize()` gigante; medido el 2026-09-29 en el eje de
+    // basura de `NeverReturnsANonPositiveRate`), y con `0` preparaba el motor entero
+    // a 0 Hz. Hoy ningun backend dispara ese hook, pero el primero que lo haga
+    // heredaba el crash.
+    //
+    // Las guardas de los llamadores que ya filtran se QUEDAN: esas deciden que
+    // PUBLICAR, no que preparar, y son defensa en profundidad.
+    //
+    // La salida es la misma que la del quiesce que no drena, unas lineas mas abajo:
+    // no se prepara, se conserva la configuracion anterior, y se registra — fuera
+    // del hilo RT, que es donde corre esta funcion (R-MOT-3).
+    if (sampleRate <= 0) {
+        LOGE("configureComponentsWithSampleRate(%d): rate no positivo — se conserva "
+             "la configuracion anterior en vez de preparar el motor a un rate "
+             "imposible",
+             sampleRate);
+        return;
+    }
+
     // REQ-006.1 — QUIESCE. Nada de lo que sigue es seguro con el thread de audio
     // adentro.
     //
