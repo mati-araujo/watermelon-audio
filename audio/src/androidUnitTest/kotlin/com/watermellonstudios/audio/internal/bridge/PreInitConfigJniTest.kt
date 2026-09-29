@@ -77,6 +77,9 @@ class PreInitConfigJniTest {
         /** `FULL_DUPLEX`: el único modo del que se puede observar que el pedido llegó. */
         private const val USB_FULL_DUPLEX = 2
 
+        /** Techo de las esperas por condición, holgado: no es una medición de tiempo. */
+        private const val TECHO_MS = 5_000L
+
         /**
          * Cada configuración del conjunto y **cómo se la llama desde la superficie de
          * producción**.
@@ -405,6 +408,70 @@ class PreInitConfigJniTest {
         )
 
         assertTrue(runBlocking { bridge.stopEngineWithFade(NO_FADE) }.isSuccess)
+    }
+
+    /**
+     * **El ORDEN DE LOCK de `ensureInputNode()`, no la carrera** (review de S2, ítem 6).
+     *
+     * 🔴 **Este test NO detecta la carrera, y decirlo es parte del test.** La ventana vive
+     * ENTRE la lectura y la escritura de `g_jniState.inputNode`, adentro de
+     * `ensureInputNode()`. Forzar ese interleaving necesitaría una compuerta **dentro de
+     * código de producción**, que no se pone; y la suite de C++ no puede llamar a esa
+     * función porque no linkea `jni/`. Agregar iteraciones en vez de una compuerta es
+     * justamente lo que este repo ya midió que no pega la ventana.
+     *
+     * Lo que SÍ mide, y es lo que el arreglo puede romper: que meter el cuerpo entero bajo
+     * `engineMutex` —con `ensureEngineLocked()` para no auto-deadlockear, y el orden
+     * `engineMutex → inputNodeMutex`— **no traba**. Un `std::mutex` tomado dos veces por el
+     * mismo hilo es UB y en la práctica un cuelgue: sin este test, esa regresión se vería
+     * como un job de CI que expira sin nombrar nada. Que dos hilos lleguen juntos es lo que
+     * la hace probable.
+     *
+     * La espera es por CONDICIÓN con techo (`join(techo)` + `isAlive`), no una duración que
+     * se afirme después.
+     */
+    @Test
+    fun `f - ensureInputNode bajo el mutex no traba con dos hilos`() {
+        volverAlEstadoSinMotor()
+        assertFalse(bridge.isEngineInitialized(), "la premisa es un proceso sin InputNode")
+
+        val puerta = java.util.concurrent.CountDownLatch(1)
+        val listos = java.util.concurrent.CountDownLatch(2)
+        val fallos = java.util.Collections.synchronizedList(mutableListOf<Throwable>())
+        val hilos = (0 until 2).map { i ->
+            Thread {
+                try {
+                    listos.countDown()
+                    puerta.await()
+                    // Los dos entran por una configuración que necesita el InputNode.
+                    if (i == 0) bridge.setInputGain(3f) else bridge.setNoiseGateEnabled(true)
+                } catch (e: Throwable) {
+                    fallos += e
+                }
+            }
+        }
+        hilos.forEach { it.start() }
+        assertTrue(
+            listos.await(TECHO_MS, java.util.concurrent.TimeUnit.MILLISECONDS),
+            "los dos hilos no llegaron a la puerta",
+        )
+        puerta.countDown()
+
+        hilos.forEach { it.join(TECHO_MS) }
+        hilos.forEachIndexed { i, h ->
+            assertFalse(
+                h.isAlive,
+                "el hilo $i sigue adentro de ensureInputNode() después de ${TECHO_MS} ms: el " +
+                    "cuerpo toma engineMutex y algo adentro lo vuelve a tomar. Es un deadlock, " +
+                    "no lentitud.",
+            )
+        }
+        assertEquals(emptyList(), fallos.toList(), "un hilo salió por excepción")
+
+        // Y el nodo quedó, una sola vez: los dos hilos ven la misma configuración aplicada.
+        assertTrue(bridge.isEngineInitialized(), "ninguno de los dos creó el motor")
+        assertEquals(3f, bridge.getInputGain(), "la ganancia de un hilo se perdió")
+        assertTrue(bridge.isNoiseGateEnabled(), "la compuerta de ruido del otro hilo se perdió")
     }
 
     /** Resetea, configura pre-init, y afirma que la lectura de vuelta trae lo configurado. */
