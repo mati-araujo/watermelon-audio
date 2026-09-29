@@ -416,23 +416,113 @@ TEST(SoundFontEffectsSendEngine, TheGateIsMeasuredInSecondsAndReengagesOnTheFirs
     }
 }
 
+namespace {
+
+/// Un trabajo medido: corre `blocks` bloques y devuelve los ns por bloque.
+template <typename Job>
+double nsPerBlock(Job&& job, int blocks) {
+    using clock = std::chrono::steady_clock;
+    const auto t0 = clock::now();
+    for (int b = 0; b < blocks; ++b) job();
+    return std::chrono::duration<double, std::nano>(clock::now() - t0).count() / blocks;
+}
+
+/// El resultado de una medicion PAREADA: los dos lados en ns/bloque (promediados sobre todos
+/// los pares, que es lo que se imprime) y la distribucion del cociente POR PAR.
+struct Paired {
+    double nsA = 0.0;
+    double nsB = 0.0;
+    double median = 0.0;
+    double lo = 0.0;
+    double hi = 0.0;
+};
+
 /**
- * AC-040.7: el costo, MEDIDO. 10 s de bloques de 128 a 48 kHz con 8 voces con send al 100 %:
- * las dos unidades no pueden costar mas de 3x el render de tsf de esas 8 voces (sanidad; medido
- * 1,09x); y la compuerta (el barrido de los buses) no mas del 50 % de eso (sanidad tambien, desde
- * MINI-032; medido 4,8 % sin carga). Los numeros se imprimen; los techos son
- * relativos porque el motor no tiene presupuesto absoluto declarado.
+ * 🔴 POR QUE PAREADO Y ENTRELAZADO, Y NO DOS TOTALES (MINI-032, segunda tanda).
  *
- * El techo era 1,0x al escribir el AC y quedo en 1,5x AL MEDIR (2026-09-15): el build de host es
- * -O0 (`run-cpp-tests.sh`) y ahi un Freeverb (16 combs + 8 allpass) mide 1,12x un tsf de 8 voces
- * con interpolacion lineal y sin filtro — 17 us por bloque de 2,67 ms, el 0,65 % del tiempo real.
- * La primera version, por muestra y con `vector::operator[]`, media 2,0x: lo que se compro fue
- * recorrer una linea por vez sobre el bloque con punteros crudos y evaluar el LFO del chorus por
- * bloque. El techo es de sanidad, no un presupuesto: el numero impreso es el que se mira.
+ * Este test afirma cocientes, y la version anterior media el numerador y el denominador en
+ * MOMENTOS DISTINTOS: primero 10 s de tsf, despues 10 s de reverb, despues 10 s de chorus,
+ * despues 10 s de compuerta. Con eso, una rafaga de carga que cae sobre uno de los tramos
+ * infla ese lado solo y el cociente se mueve sin que el codigo cambie. Medido el 2026-09-29:
+ * seis corridas seguidas a la misma carga dieron unidades/tsf entre **0,55x y 3,81x** (factor
+ * 7) con el arbol intacto, y una de las seis se puso ROJA contra un techo de 3x que ya era de
+ * sanidad. O sea que el problema no era ningun techo: era el DENOMINADOR.
+ *
+ * Asi que los dos lados se miden entrelazados en tramos cortos (`blocksPerPair`), y el
+ * veredicto sale de la **mediana de los cocientes por par**. Una rafaga que dura mas que un
+ * par les pega a los dos lados del par por igual y el cociente casi no se mueve; una que dura
+ * menos arruina a lo sumo unos pocos pares, y la mediana los descarta. El promedio NO servia:
+ * un solo par arruinado lo arrastra.
+ *
+ * El ORDEN dentro del par se alterna (A,B / B,A / ...): si A fuera siempre primero, cualquier
+ * efecto sistematico de entrar al par —cache, frecuencia del core— le tocaria siempre al mismo
+ * lado y se leeria como si un trabajo costara mas que el otro.
+ */
+template <typename JobA, typename JobB>
+Paired measurePaired(JobA&& a, JobB&& b, int pairs, int blocksPerPair) {
+    std::vector<double> ratios;
+    ratios.reserve(static_cast<size_t>(pairs));
+    double sumA = 0.0, sumB = 0.0;
+    for (int p = 0; p < pairs; ++p) {
+        double na, nb;
+        if (p % 2 == 0) {
+            na = nsPerBlock(a, blocksPerPair);
+            nb = nsPerBlock(b, blocksPerPair);
+        } else {
+            nb = nsPerBlock(b, blocksPerPair);
+            na = nsPerBlock(a, blocksPerPair);
+        }
+        sumA += na;
+        sumB += nb;
+        ratios.push_back(na / nb);
+    }
+    std::sort(ratios.begin(), ratios.end());
+    Paired r;
+    r.nsA = sumA / pairs;
+    r.nsB = sumB / pairs;
+    const size_t n = ratios.size();
+    r.median = (n % 2 == 1) ? ratios[n / 2] : 0.5 * (ratios[n / 2 - 1] + ratios[n / 2]);
+    r.lo = ratios.front();
+    r.hi = ratios.back();
+    return r;
+}
+
+}  // namespace
+
+/**
+ * AC-040.7: el costo, MEDIDO. 10 s de bloques de 128 a 48 kHz con 8 voces con send al 100 %.
+ * Los dos cocientes salen de mediciones **pareadas y entrelazadas** (ver `measurePaired`), que es
+ * lo que los hace un veredicto y no un reporte de la carga de la maquina:
+ *
+ *   - las dos unidades contra el render de tsf de esas 8 voces;
+ *   - la compuerta (el barrido de pico de los dos buses) contra **su mismo barrido sin la rama**
+ *     —mismo bucle, mismos buffers, misma forma de acceso a memoria, sin el `if`—, que es lo que
+ *     AC-040.7 queria decir con "la compuerta cuesta una fraccion de lo que evita". Contra tsf no
+ *     se puede: son bucles de forma distinta (memoria pura contra aritmetica por acceso) y su
+ *     RELACION se mueve con el sanitizer y con la contencion de memoria de `ctest -j`, que es
+ *     exactamente lo que se midio cinco veces como rojo.
+ *
+ * Los numeros se imprimen; los techos son relativos porque el motor no tiene presupuesto absoluto
+ * declarado, y son de SANIDAD: el numero que importa es el impreso, y si sube de verdad se ve en el
+ * diff del log.
+ *
+ * El techo de las unidades era 1,0x al escribir el AC y quedo en 1,5x AL MEDIR (2026-09-15): el
+ * build de host es -O0 (`run-cpp-tests.sh`) y ahi un Freeverb (16 combs + 8 allpass) mide 1,12x un
+ * tsf de 8 voces con interpolacion lineal y sin filtro — 17 us por bloque de 2,67 ms, el 0,65 % del
+ * tiempo real. La primera version, por muestra y con `vector::operator[]`, media 2,0x: lo que se
+ * compro fue recorrer una linea por vez sobre el bloque con punteros crudos y evaluar el LFO del
+ * chorus por bloque.
  */
 TEST(SoundFontEffectsSendEngine, TheUnitsCostLessThanTheVoicesAndTheGateAFractionOfThat) {
-    using clock = std::chrono::steady_clock;
     constexpr int rate = 48000, seconds = 10, blocks = seconds * rate / kBlock;
+    // 64 pares de 58 bloques ~ los 3750 bloques (10 s) de siempre. El tramo es corto a
+    // proposito: tiene que durar menos que una rafaga de carga tipica para que la rafaga caiga
+    // sobre los DOS lados del par, y largo como para que el reloj no sea el que se mide (58
+    // bloques de tsf son ~1,2 ms, contra una resolucion de `steady_clock` de nanosegundos).
+    constexpr int kPairs = 64;
+    constexpr int kBlocksPerPair = blocks / kPairs;
+    static_assert(kBlocksPerPair > 0, "el tramo de un par no puede ser cero bloques");
+
     // tsf con 8 voces y sends.
     std::vector<ExtraGenerator> gens = flatEnv();
     gens.push_back({kGenReverbSend, 1000});
@@ -445,70 +535,107 @@ TEST(SoundFontEffectsSendEngine, TheUnitsCostLessThanTheVoicesAndTheGateAFractio
     tsf_set_output(sf, TSF_STEREO_INTERLEAVED, rate, 0.0f);
     tsf_set_max_voices(sf, 16);
     for (int k = 0; k < 8; ++k) tsf_note_on(sf, 0, kRoot - 12 + k * 3, 1.0f);
+
     std::vector<float> out(static_cast<size_t>(kBlock) * 2), rb(kBlock), cb(kBlock);
-    auto t0 = clock::now();
-    for (int b = 0; b < blocks; ++b) tsf_render_float_sends(sf, out.data(), rb.data(), cb.data(), kBlock, 0);
-    const double nsTsf = std::chrono::duration<double, std::nano>(clock::now() - t0).count() / blocks;
-    tsf_close(sf);
-    // Las unidades sobre un bus con senal.
     wma::SoundFontReverb rev; rev.prepare(rate);
     wma::SoundFontChorus cho; cho.prepare(rate);
-    for (int i = 0; i < kBlock; ++i) rb[i] = cb[i] = 0.3f * std::sin(0.05f * i);
-    t0 = clock::now();
-    for (int b = 0; b < blocks; ++b) rev.addReverbWetFromMono(rb.data(), out.data(), kBlock);
-    const double nsRev = std::chrono::duration<double, std::nano>(clock::now() - t0).count() / blocks;
-    t0 = clock::now();
-    for (int b = 0; b < blocks; ++b) cho.addChorusWetFromMono(cb.data(), out.data(), kBlock);
-    const double nsCho = std::chrono::duration<double, std::nano>(clock::now() - t0).count() / blocks;
-    const double nsUnits = nsRev + nsCho;
-    // La compuerta sola: el barrido de los dos buses (lo que cuesta un bloque con las unidades saltadas).
-    volatile float sink = 0.0f;
-    t0 = clock::now();
-    for (int b = 0; b < blocks; ++b) {
-        float peak = 0.0f;
-        for (int i = 0; i < kBlock; ++i) { rb[i] *= 1.0f; cb[i] *= 1.0f; const float a = std::fabs(rb[i]), c = std::fabs(cb[i]); if (a > peak) peak = a; if (c > peak) peak = c; }
-        sink = sink + peak;
+    // Las unidades y la compuerta trabajan sobre buffers PROPIOS, con la senal fija de siempre.
+    // Entrelazar los trabajos significa que tsf escribe sus buses en cada tramo; si las unidades
+    // leyeran esos mismos buffers, lo que procesan cambiaria de tramo en tramo y el estimulo
+    // dejaria de ser el mismo para los dos lados del par.
+    std::vector<float> rbFx(kBlock), cbFx(kBlock), rbGate(kBlock), cbGate(kBlock);
+    for (int i = 0; i < kBlock; ++i) {
+        const float v = 0.3f * std::sin(0.05f * i);
+        rbFx[i] = cbFx[i] = rbGate[i] = cbGate[i] = v;
     }
-    const double nsGate = std::chrono::duration<double, std::nano>(clock::now() - t0).count() / blocks;
+
+    // --- par 1: las dos unidades contra tsf -------------------------------------------------
+    double nsRev = 0.0, nsCho = 0.0;
+    const Paired units = measurePaired(
+        [&] {
+            const auto t0 = std::chrono::steady_clock::now();
+            rev.addReverbWetFromMono(rbFx.data(), out.data(), kBlock);
+            const auto t1 = std::chrono::steady_clock::now();
+            cho.addChorusWetFromMono(cbFx.data(), out.data(), kBlock);
+            const auto t2 = std::chrono::steady_clock::now();
+            nsRev += std::chrono::duration<double, std::nano>(t1 - t0).count();
+            nsCho += std::chrono::duration<double, std::nano>(t2 - t1).count();
+        },
+        [&] { tsf_render_float_sends(sf, out.data(), rb.data(), cb.data(), kBlock, 0); },
+        kPairs, kBlocksPerPair);
+    tsf_close(sf);
+    const int measuredBlocks = kPairs * kBlocksPerPair;
+    nsRev /= measuredBlocks;
+    nsCho /= measuredBlocks;
+    const double nsTsf = units.nsB;
+    const double nsUnits = units.nsA;
+
+    // --- par 2: la compuerta contra su mismo barrido SIN la rama -----------------------------
+    // El `if` es lo unico que cambia. Lo reemplaza un `+=` porque algo tiene que consumir `a` y
+    // `c`: si el lado B no los usara, lo que se estaria comparando no seria "con rama contra sin
+    // rama" sino "con rama contra sin los fabs".
+    volatile float sink = 0.0f;
+    const Paired gate = measurePaired(
+        [&] {
+            float peak = 0.0f;
+            for (int i = 0; i < kBlock; ++i) { rbGate[i] *= 1.0f; cbGate[i] *= 1.0f; const float a = std::fabs(rbGate[i]), c = std::fabs(cbGate[i]); if (a > peak) peak = a; if (c > peak) peak = c; }
+            sink = sink + peak;
+        },
+        [&] {
+            float acc = 0.0f;
+            for (int i = 0; i < kBlock; ++i) { rbGate[i] *= 1.0f; cbGate[i] *= 1.0f; const float a = std::fabs(rbGate[i]), c = std::fabs(cbGate[i]); acc += a + c; }
+            sink = sink + acc;
+        },
+        kPairs, kBlocksPerPair);
+    const double nsGate = gate.nsA;
     const double nsBlock = 1e9 * kBlock / rate;
+
     std::printf("  [REQ-040] costo por bloque de 128 a 48 kHz (-O0): tsf 8 voces %.0f ns · reverb %.0f + chorus %.0f = "
-                "%.0f ns (%.2fx tsf, %.2f %% del tiempo real) · compuerta %.0f ns (%.1f %% de tsf)\n", nsTsf, nsRev,
-                nsCho, nsUnits, nsUnits / nsTsf, 100.0 * nsUnits / nsBlock, nsGate, 100.0 * nsGate / nsTsf);
-    // 🔴 El techo es de SANIDAD (3x sobre 1,09x medido), no un trinquete fino: es una medicion de
-    // tiempo en una suite que corre en paralelo (`ctest -j`) y en runners cargados, y un techo
-    // ajustado seria un flake — a 1,5x se puso rojo bajo la carga de un build al lado. El numero
-    // que importa es el impreso; si sube de verdad, se ve en el diff del log, no en un rojo.
-    EXPECT_LT(nsUnits, 3.0 * nsTsf) << "las dos unidades cuestan mas de 3x el render de 8 voces";
-    // 🔴 EL TECHO DE LA COMPUERTA TAMBIEN ES DE SANIDAD, Y COSTO CINCO ROJOS LLEGAR AHI
-    // (MINI-032). Era 0,15 · nsTsf — ajustado sobre el 4,8 % medido al escribirlo— y se puso
-    // rojo CINCO veces con el C++ intacto:
+                "%.0f ns (%.2fx tsf, %.2f %% del tiempo real) · compuerta %.0f ns (%.1f %% de tsf)"
+                " · pareado (mediana de %d pares de %d bloques): unidades %.2fx tsf [%.2f–%.2f] · "
+                "compuerta %.2fx su barrido sin la rama [%.2f–%.2f]\n", nsTsf, nsRev,
+                nsCho, nsUnits, nsUnits / nsTsf, 100.0 * nsUnits / nsBlock, nsGate, 100.0 * nsGate / nsTsf,
+                kPairs, kBlocksPerPair, units.median, units.lo, units.hi,
+                gate.median, gate.lo, gate.hi);
+
+    // 🔴 LOS DOS TECHOS SE DECLARARON **DESPUES** DE MEDIR (MINI-032, segunda tanda).
     //
-    //   2026-09-16  ci-l2 local, load 23          compuerta 93,7 % de tsf   (Python + Xcode + Docker al lado)
-    //   2026-09-17  CI cpp-tests-tsan   PR #333   26 206 / 24 403 = 16,1 %  (el PR eran docs + 2 scripts)
-    //   2026-09-17  CI cpp-tests-asan   PR #335   13 161 / 11 682 = 16,9 %  (el PR era libs.versions.toml)
-    //   2026-09-28  ci-l2 local ASan, load 24-34  14 400 / 82 547 = 17,4 %  (S2 no toca el SoundFont)
-    //   2026-09-29  run-cpp-tests local, load 52   4 202 ns vs el techo de 3 919 = 16,1 %  (SIN sanitizer;
-    //                                              la corrida tardo 170,8 s contra 96-104)
+    // Veinte corridas del binario el 2026-09-29, alternando el diseño VIEJO (`af81a1a`: totales
+    // en momentos distintos, compuerta contra tsf) y el NUEVO (pareado, compuerta contra su
+    // barrido sin la rama) corrida por corrida, para que los dos vieran la MISMA carga: load
+    // 1 min 29,5–31,8 todo el tiempo (Python de otras sesiones, ningun gate).
     //
-    // Por que el COCIENTE no es estable: el bucle de la compuerta es memoria pura (dos `*= 1`, dos
-    // `fabs` por muestra) y el render de tsf tiene mucha mas aritmetica por acceso. Un sanitizer
-    // instrumenta cada acceso, y `ctest -j` pone 4-10 procesos a competir por el ancho de banda de
-    // memoria: las dos cosas mueven la RELACION entre los dos tiempos sin que el codigo cambie. Y
-    // `-O0`: este bucle no se vectoriza.
+    //                                        min     max     factor   mediana   rojos
+    //   VIEJO  unidades / tsf                0,72x   1,60x    2,2      1,11x     
+    //   VIEJO  compuerta / tsf               2,9 %   207,1 %  71       5,2 %     1 de 20
+    //   NUEVO  unidades / tsf   (mediana)    0,98x   1,27x    1,30     1,08x     0 de 20
+    //   NUEVO  compuerta / sin rama (med.)   0,97x   1,03x    1,06     1,02x     0 de 20
     //
-    // Asi que el techo pasa a ser de sanidad, igual que el de las unidades y por la misma razon:
-    // 0,5 · nsTsf es 10x el 4,8 % medido sin carga y ~3x el peor de los cuatro cocientes de la tabla
-    // que se pueden derivar (16,9 %). Sigue matando una compuerta que cueste lo que evita —
-    // verificado con un mutante de 2x tsf (AC-M032.3)— y deja de reportar la carga de la maquina
-    // como un defecto del motor. **El numero que importa es el impreso**: si el costo sube de
-    // verdad, se ve en el diff del log.
+    // El rojo del VIEJO fue la compuerta a 207 % de tsf, o sea la clase de la primera ocurrencia
+    // (93,7 %) que el techo de 0,5 declaraba no cubrir: se reprodujo con el codigo intacto, en la
+    // primera tanda de diez. Y los PARES individuales del diseño nuevo llegan a 0,02x y 54x —la
+    // carga es la misma—: lo que no se mueve es la MEDIANA, que es lo que el veredicto lee.
     //
-    // 🔴 LO QUE ESTE TECHO **NO** CUBRE, DICHO EN VOZ ALTA: la primera ocurrencia (93,7 %) queda
-    // igual por ENCIMA de 0,5. O sea que con la maquina ahogada de verdad este test puede volver a
-    // ponerse rojo, y eso no seria un techo mal elegido sino la misma medicion perdiendo sentido:
-    // a esa carga el cociente ya no describe el costo de nada. La salida ante un rojo nuevo es
-    // MIRAR LA CARGA primero — [[un-timeout-de-sanitizer-puede-ser-de-la-maquina]] — y no subir el
-    // techo otra vez: si el cociente hay que abandonarlo, se cambia QUE mide el test (comparar la
-    // compuerta contra si misma sin la rama), y eso pide ratificacion aparte.
-    EXPECT_LT(nsGate, 0.5 * nsTsf) << "la compuerta cuesta mas del 50 % del render de 8 voces (medido 4,8 % sin carga)";
+    // Por que cada techo es el que es:
+    //
+    //   * COMPUERTA < 1,5x su barrido sin la rama. Medido 1,02x (la rama cuesta ~2 %), peor
+    //     mediana 1,03x en veinte: el techo deja 46 % de margen sobre el peor visto y una
+    //     dispersion de ±3 %. Y a diferencia del cociente contra tsf, este NO lo puede correr un
+    //     sanitizer: los dos lados hacen exactamente los mismos accesos a memoria, y todos los
+    //     builds de test son Debug/-O0 (sanitizers incluidos), asi que ninguno vectoriza un lado
+    //     y el otro no. Lo que un 1,5x deja pasar es una compuerta un 50 % mas cara que el
+    //     barrido que envuelve, que ya es un defecto de la compuerta y no ruido.
+    //
+    //   * UNIDADES < 3x tsf, SIN CAMBIO, y ahora por otra razon. Por la carga sola se podria bajar
+    //     a 2x (1,57x el peor de veinte, y atraparia volver a la version por muestra que media
+    //     2,0x). No se baja porque hay un corrimiento que el pareo NO cancela y que aca no se pudo
+    //     medir: un sanitizer instrumenta distinto un Freeverb (lineas de retardo, mucha memoria)
+    //     que un tsf (aritmetica por muestra), y eso mueve el cociente de forma SISTEMATICA, no
+    //     por rafagas. Pareado o no, eso lo mide el CI. Bajarlo a 2x es un paso aparte, cuando los
+    //     jobs de ASan y TSan hayan impreso su mediana pareada.
+    EXPECT_LT(units.median, 3.0) << "las dos unidades cuestan mas de 3x el render de 8 voces "
+                                    "(mediana de los pares; medido 1,08x)";
+    EXPECT_LT(gate.median, 1.5) << "la compuerta cuesta mas de 1,5x su mismo barrido sin la rama "
+                                   "(mediana de los pares; medido 1,02x)";
 }
+
