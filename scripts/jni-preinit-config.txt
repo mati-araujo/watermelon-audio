@@ -4,7 +4,11 @@
 # se hizo. Dos consumidores: ese lint y PreInitConfigJniTest (el arnes).
 nativeAddEffect
 nativeClearMappingConfig
+nativeConfigureUsbBackend
 nativeEnableVoiceSystem
+nativeLoadSoundFont
+nativeLoadSoundFontFromFd
+nativeLoadSoundFontFromPath
 nativeLooperSetCapabilities
 nativeLooperSetEnabled
 nativeLooperSetExportSampleRate
@@ -57,6 +61,8 @@ nativeSetRoutingMode
 nativeSetSecondaryOscillatorType
 nativeSetSoundFontPreset
 nativeSetSynthVolume
+nativeSetUsbLatencyProfile
+nativeSetUsbStreamingMode
 nativeSetUseBackendManager
 nativeSetVocoderCarrierFrequency
 nativeSetVocoderCarrierSource
@@ -70,3 +76,4 @@ nativeSetXY
 nativeSfSetAmbience
 nativeSfSetTouchExpression
 nativeTransportSetBeatsPerBar
+nativeUnloadSoundFont

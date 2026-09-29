@@ -31,8 +31,16 @@ FloatArrayPool g_floatArrayPool;
 
 // ==================== Helper Implementations ====================
 
-bool ensureEngine() {
-    std::lock_guard<std::mutex> lock(g_jniState.engineMutex);
+namespace {
+
+/**
+ * El cuerpo de `ensureEngine()`, **con `engineMutex` ya tomado por el llamador**.
+ *
+ * Existe porque `ensureInputNode()` necesita el mismo mutex para su propio chequeo-y-
+ * escritura, y `std::mutex` no es recursivo: llamar al `ensureEngine()` publico desde
+ * adentro del lock seria un deadlock.
+ */
+bool ensureEngineLocked() {
     if (!g_jniState.engine) {
         LOGI("Creating AudioEngine via WmaEngine (Phase 0D)");
         g_wmaEngine = wma_engine_create();
@@ -48,7 +56,33 @@ bool ensureEngine() {
     return true;
 }
 
+}  // namespace
+
+bool ensureEngine() {
+    std::lock_guard<std::mutex> lock(g_jniState.engineMutex);
+    return ensureEngineLocked();
+}
+
+/**
+ * 🔴 **TODO el cuerpo va bajo `engineMutex`** (review de REQ-045 S2).
+ *
+ * Antes leia `g_jniState.inputNode` y lo escribia **sin ningun lock**. Dos hilos que
+ * llegaran antes de que el nodo existiera se pisaban sobre el control block del
+ * `shared_ptr`: los dos veian el `nullptr`, los dos asignaban. `wmaEnsureInputNode()`
+ * si toma `inputNodeMutex`, asi que el nodo en si no se duplicaba — lo que corria era
+ * la copia del `shared_ptr` de ESTE lado.
+ *
+ * Nunca se habia notado porque el unico camino que llamaba a esto venia de una
+ * operacion serializada rio arriba. **Este REQ le sumo seis llamadores nuevos sin
+ * mutex** (`nativeSetInputGain`, `nativeSetMonitoringEnabled`, ...), que son setters de
+ * configuracion y pueden llegar de cualquier hilo de control.
+ *
+ * El orden es `engineMutex -> inputNodeMutex`, el mismo que ya usan `JNI_OnUnload` y
+ * `nativeResetEngine` (los dos toman `engineMutex` y llaman a `releaseInputNode()`, que
+ * entra a `inputNodeMutex` adentro de la C API). Nadie toma los dos al reves.
+ */
 bool ensureInputNode() {
+    std::lock_guard<std::mutex> lock(g_jniState.engineMutex);
     if (g_jniState.inputNode) {
         return true;
     }
@@ -60,7 +94,7 @@ bool ensureInputNode() {
     // node the shipping Android path never touched. It never broke on Android
     // because only one of the two paths was ever exercised — and iOS was about to
     // become the first real user of the other one.
-    if (!ensureEngine()) {
+    if (!ensureEngineLocked()) {
         LOGE("Cannot create InputNode: engine unavailable");
         return false;
     }

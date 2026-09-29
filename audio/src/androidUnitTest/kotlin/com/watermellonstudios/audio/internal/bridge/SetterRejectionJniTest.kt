@@ -118,11 +118,19 @@ class SetterRejectionJniTest {
             "setModulatorParameter(-1, …), con id negativo,",
         )
 
-        // Éste NO cruza la frontera: lo para el guard de Kotlin. Por eso se llama directo,
-        // sin anotar cobertura — anotarlo inflaría el numerador con algo que no se ejecutó.
+        // Éste SÍ cruza desde el review de S2: el `if (!value.isFinite())` que lo paraba en
+        // Kotlin adelantaba el rechazo del valor al del `paramId`, y con `(-1, NaN)` las dos
+        // plataformas contestaban distinto. Ahora el orden lo fija la C API.
         causa<NativeBridgeException.ParameterOutOfRange>(
-            bridge.setModulatorParameter(0, Float.NaN),
+            jni("nativeSetModulatorParameter") { it.setModulatorParameter(0, Float.NaN) },
             "setModulatorParameter(0, NaN)",
+        )
+
+        // Y la PARIDAD misma, que es el punto: con id inválido Y valor no finito manda el
+        // id, en las dos plataformas (el test gemelo vive en iosTest).
+        causa<NativeBridgeException.InvalidParameterId>(
+            jni("nativeSetModulatorParameter") { it.setModulatorParameter(-1, Float.NaN) },
+            "setModulatorParameter(-1, NaN): manda el id, no el valor,",
         )
 
         assertTrue(
@@ -152,6 +160,13 @@ class SetterRejectionJniTest {
         )
         causa<NativeBridgeException.InvalidEffectIndex>(
             bridge.setEffectParameterSync(0, 0, 0.5f), "setEffectParameterSync(0, …) sobre una cadena vacía",
+        )
+        // La paridad con iOS, medida: con índice inválido Y valor no finito manda el
+        // ÍNDICE. Antes del review, Android decía InvalidEffectIndex y iOS
+        // ParameterOutOfRange para esta misma llamada.
+        causa<NativeBridgeException.InvalidEffectIndex>(
+            bridge.setEffectParameterSync(99, 0, Float.NaN),
+            "setEffectParameterSync(99, 0, NaN): manda el índice, no el valor,",
         )
         causa<NativeBridgeException.InvalidEffectIndex>(
             bridge.setEffectBypassSync(0, true), "setEffectBypassSync(0, …) sobre una cadena vacía",
@@ -207,7 +222,14 @@ class SetterRejectionJniTest {
             fullDuplex.isSuccess,
             "pedir full-duplex falló con el motor vivo: ${fullDuplex.exceptionOrNull()}",
         )
-        assertNotNull(fullDuplex.getOrNull(), "dijo éxito sin traer el CaptureOutcome")
+        // El VALOR, no sólo que haya valor: un `assertNotNull` sobre un `CaptureOutcome?`
+        // no puede fallar por tipo, así que no afirmaba nada (review de S2). Sin stream
+        // abierto la única respuesta honesta es que la captura no está viva.
+        assertEquals(
+            CaptureOutcome.NOT_LIVE,
+            fullDuplex.getOrNull(),
+            "sin stream abierto, pedir full-duplex no puede decir LIVE ni PENDING",
+        )
 
         causa<NativeBridgeException.InvalidOperation>(
             jni("nativeSetUsbStreamingMode") { it.setUsbStreamingMode(USB_CAPTURE_ONLY) },

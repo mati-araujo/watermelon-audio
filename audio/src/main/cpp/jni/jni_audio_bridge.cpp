@@ -1553,6 +1553,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetCur
 JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsbStreamingMode(
     JNIEnv* env, jobject thiz, jint modeId) {
+    // 🔴 `ensureEngine()` PRIMERO, y no es cosmetico (REQ-045, decision 2 + review de S2).
+    // Esto configura el `BackendManager`, y sin motor `getInstance()` devuelve un STATIC
+    // DE FALLBACK: el pedido queda anotado ahi, `wma_engine_create` instala otro manager,
+    // y la configuracion se pierde — el mismo D2 de los cincuenta setters, por otra
+    // puerta. La regla del handle no lo veia porque este cuerpo nunca nombra g_wmaEngine;
+    // lo declara `SIEMPRE` en scripts/check-jni-preinit.py.
+    if (!ensureEngine()) return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
     // modeId: 0=PLAYBACK_ONLY, 2=FULL_DUPLEX. El 1 (CAPTURE_ONLY) no esta
     // implementado y lo RECHAZA la C API — ver wma_set_usb_streaming_mode, que es
     // tambien donde vive la traduccion del CaptureOutcome. Esta entrada tocaba el
@@ -1564,6 +1571,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsb
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeConfigureUsbBackend(
     JNIEnv* env, jobject thiz, jint sampleRate, jint channels, jint bitDepth) {
+    // 🔴 `ensureEngine()` PRIMERO, y no es cosmetico (REQ-045, decision 2 + review de S2).
+    // Esto configura el `BackendManager`, y sin motor `getInstance()` devuelve un STATIC
+    // DE FALLBACK: el pedido queda anotado ahi, `wma_engine_create` instala otro manager,
+    // y la configuracion se pierde — el mismo D2 de los cincuenta setters, por otra
+    // puerta. La regla del handle no lo veia porque este cuerpo nunca nombra g_wmaEngine;
+    // lo declara `SIEMPRE` en scripts/check-jni-preinit.py.
+    if (!ensureEngine()) return;
     // `channels` and `bitDepth` are informational only. LibusbBackend picks
     // the actual stream format via AltsettingSelector based on the parsed
     // device topology and the registered StreamPreference — the JNI layer
@@ -1980,6 +1994,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsb
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsbLatencyProfile(
     JNIEnv* env, jobject thiz, jint profile) {
+    // 🔴 `ensureEngine()` PRIMERO, y no es cosmetico (REQ-045, decision 2 + review de S2).
+    // Esto configura el `BackendManager`, y sin motor `getInstance()` devuelve un STATIC
+    // DE FALLBACK: el pedido queda anotado ahi, `wma_engine_create` instala otro manager,
+    // y la configuracion se pierde — el mismo D2 de los cincuenta setters, por otra
+    // puerta. La regla del handle no lo veia porque este cuerpo nunca nombra g_wmaEngine;
+    // lo declara `SIEMPRE` en scripts/check-jni-preinit.py.
+    if (!ensureEngine()) return JNI_FALSE;
     // Persist on the BackendManager (not the LibusbBackend directly): it
     // survives backend recreation and is re-applied via applyConfigToBackend,
     // exactly like the USB streaming mode (setFullDuplexEnabled). Consumed by

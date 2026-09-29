@@ -484,10 +484,27 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
     }
 
     /**
-     * 🔴 **El `removeAt`/`add` corría SIEMPRE**, incluso cuando el motor no había
-     * reordenado nada: con un índice fuera de la cadena, esto tiraba
-     * `IndexOutOfBoundsException` desde adentro de un `_state.update` después de un no-op
-     * mudo en el motor. Ahora el rechazo llega como `failure` y la lista no se toca.
+     * 🔴 **EL MOTOR ES LA AUTORIDAD, y el `state` de acá es sólo un espejo.**
+     *
+     * `_state.value.effectChain.effects` lo escriben **únicamente** los cinco métodos de
+     * efectos de esta clase. La MISMA cadena nativa la escribe también `EffectManager`, que
+     * tiene su propio espejo: si los efectos se agregaron por `EffectManager.addEffect`, el
+     * motor tiene dos y éste tiene cero. Con el bridge diciendo éxito, un `removeAt(0)`
+     * sobre la lista vacía tira `IndexOutOfBoundsException` **en el camino de ÉXITO**, con
+     * el motor ya reordenado — un fallo del consumidor por una operación que salió bien.
+     *
+     * Así que el orden es: preguntarle al motor, y **si dijo sí**, mover el espejo sólo si
+     * los dos índices existen EN EL ESPEJO. Si no existen, el espejo simplemente no estaba
+     * al día: queda un `warn` que nombra la divergencia y el resultado sigue siendo
+     * `success`, porque el motor hizo lo que se le pidió. Nunca una excepción.
+     *
+     * (Antes de esto el `removeAt`/`add` corría SIEMPRE, incluso con el motor rechazando,
+     * así que un índice inválido daba un no-op en el motor y una excepción acá.)
+     *
+     * Inconsistencia preexistente que este REQ NO cambia: [removeEffect] valida el índice
+     * contra el espejo y rechaza sin preguntarle al motor. Con los dos espejos
+     * desincronizados eso rechaza operaciones que el motor habría aceptado. Queda anotado
+     * en el journal de la etapa; arreglarlo es unificar los dos espejos, no un parche acá.
      */
     override fun reorderEffects(fromIndex: Int, toIndex: Int): Result<Unit> {
         val result = bridge.reorderEffectsSync(fromIndex, toIndex)
@@ -497,7 +514,16 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
         }
 
         _state.update { state ->
-            val mutableList = state.effectChain.effects.toMutableList()
+            val efectos = state.effectChain.effects
+            if (fromIndex !in efectos.indices || toIndex !in efectos.indices) {
+                logger.warn(
+                    TAG,
+                    "reorderEffects: el motor reordenó pero este espejo no tiene esos índices",
+                    mapOf("fromIndex" to fromIndex, "toIndex" to toIndex, "espejo" to efectos.size),
+                )
+                return@update state
+            }
+            val mutableList = efectos.toMutableList()
             val item = mutableList.removeAt(fromIndex)
             mutableList.add(toIndex, item)
             val reordered = mutableList.mapIndexed { i, effect -> effect.copy(index = i) }

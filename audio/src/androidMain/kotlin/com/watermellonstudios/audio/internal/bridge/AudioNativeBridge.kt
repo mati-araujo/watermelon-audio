@@ -281,7 +281,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     private fun Int.asUnitResult(operation: String): Result<Unit> =
         if (this == NativeErrorCode.SUCCESS.code) {
-            Log.d(TAG, "$operation: success")
+            // 🔴 Sin log en el camino de éxito: desde que los setters de efectos pasan por
+            // acá, esto corría en CADA tick de un slider. Un `Log.d` por movimiento de dedo
+            // no es gratis, y no dice nada que el consumidor no sepa (review de S2).
             Result.success(Unit)
         } else {
             Log.w(TAG, "$operation: el motor devolvió $this")
@@ -1025,18 +1027,6 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     // ==================== Modulator Operations ====================
 
     /**
-     * El rechazo de un valor no finito, con su causa tipada.
-     *
-     * Los límites son los de los finitos representables a propósito: lo que NaN o
-     * infinito violan es eso, no un rango de dominio que esta capa no conoce. La C API
-     * contesta `WMA_ERROR_PARAMETER_OUT_OF_RANGE` a lo mismo, así que la causa coincide
-     * con la que devolvería si el valor llegara a cruzar.
-     */
-    private fun noFinito(paramId: Int, value: Float): Result<Unit> = Result.failure(
-        NativeBridgeException.ParameterOutOfRange(paramId, value, -Float.MAX_VALUE, Float.MAX_VALUE),
-    )
-
-    /**
      * Fija el tipo de modulador.
      *
      * 🔴 **El `jint` del cruce se descartaba** (REQ-045, D3): `wma_set_modulator_type`
@@ -1053,16 +1043,15 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Fija un parámetro del modulador.
      *
-     * Tiene DOS rechazos y los dos terminaban en el mismo silencio: el valor no finito lo
-     * para este guard —ni llega a cruzar— y el id inválido lo rechaza la C API. Los dos
-     * viajan ahora como `failure`.
+     * 🔴 **El orden de validación es el de la C API, y no se duplica acá** (review de S2).
+     * Había un `if (!value.isFinite()) return` delante que adelantaba el rechazo del valor
+     * al del `paramId`: con `(-1, NaN)` esta plataforma contestaba `ParameterOutOfRange` y
+     * la C API —o sea iOS— `InvalidParameterId`. La misma llamada, dos causas. Ahora decide
+     * `wma_set_modulator_param` (param_id → finito) y las dos plataformas dicen lo mismo,
+     * que es de lo que se trata todo REQ-045.
      */
-    override fun setModulatorParameter(paramId: Int, value: Float): Result<Unit> {
-        if (!value.isFinite()) {
-            return noFinito(paramId, value)
-        }
-        return nativeSetModulatorParameter(paramId, value).asUnitResult("setModulatorParameter")
-    }
+    override fun setModulatorParameter(paramId: Int, value: Float): Result<Unit> =
+        nativeSetModulatorParameter(paramId, value).asUnitResult("setModulatorParameter")
 
     // ==================== Voice Filter Operations (Phase 6) ====================
 
@@ -1117,16 +1106,15 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Fija un parámetro de efecto, sin suspender.
      *
-     * Los dos rechazos que el guard se comía —índice fuera de la cadena y valor no
-     * finito— viajan ahora con su causa, en vez de un retorno temprano mudo (REQ-045, D3).
+     * El índice se valida acá para poder reportar el largo REAL de la cadena; el `paramId`
+     * y el valor los valida la C API, en ESE orden (índice → param_id → finito). El chequeo
+     * de `isFinite` que había delante rompía ese orden y hacía que Android e iOS
+     * contestaran distinto a `setEffectParameter(99, 0, NaN)` — review de S2.
      */
     override fun setEffectParameterSync(effectIndex: Int, paramId: Int, value: Float): Result<Unit> {
         val chainSize = nativeGetEffectChainSize()
         if (effectIndex < 0 || effectIndex >= chainSize) {
             return Result.failure(NativeBridgeException.InvalidEffectIndex(effectIndex, chainSize))
-        }
-        if (!value.isFinite()) {
-            return noFinito(paramId, value)
         }
         return nativeSetEffectParameter(effectIndex, paramId, value)
             .asUnitResult("setEffectParameterSync")
@@ -1154,11 +1142,15 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Bypassea la cadena entera, sin suspender.
      *
-     * No tiene rechazo posible y está dicho: con un motor vivo
-     * `wma_effect_set_global_bypass` sólo devuelve `WMA_OK`, y desde REQ-045 S2 el motor
-     * siempre existe (la entrada JNI llama `ensureEngine`). Lo que cambia es que el código
-     * **viaja** en vez de caerse al piso: si mañana gana una causa de fallo, el consumidor
-     * se entera sin tocar esta línea.
+     * 🔴 **Su fallo es INOBSERVABLE desde un test de host, no imposible.** La entrada JNI
+     * llama `ensureEngine()`, que devuelve `WMA_ERROR_NOT_INITIALIZED` si el motor no se
+     * pudo crear — y eso sólo pasa si `new` falla, que ninguna palanca del arnés provoca.
+     * Con el motor vivo, `wma_effect_set_global_bypass` sólo devuelve `WMA_OK`.
+     *
+     * Por eso el mutante que vuelve a descartar el código acá **sobrevive**, y está
+     * declarado así en las notas de la etapa: sobrevive por falta de observable, no porque
+     * el camino no exista. Lo que el arreglo compra es que el código **viaje** — si mañana
+     * gana una causa de fallo alcanzable, el consumidor se entera sin tocar esta línea.
      */
     override fun setEffectsBypassSync(bypass: Boolean): Result<Unit> =
         nativeSetEffectsBypass(bypass).asUnitResult("setEffectsBypassSync")
@@ -2303,7 +2295,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Set USB streaming mode.
      *
-     * @param modeId Mode ID (0=PLAYBACK_ONLY, 1=CAPTURE_ONLY, 2=FULL_DUPLEX)
+     * @param modeId Mode ID (0=PLAYBACK_ONLY, 2=FULL_DUPLEX). El 1 (`CAPTURE_ONLY`) no
+     *   está implementado y devuelve `failure`: ver [IAudioNativeBridge.setUsbStreamingMode].
      */
     override fun setUsbStreamingMode(modeId: Int): Result<CaptureOutcome> =
         CaptureOutcome.fromNativeCode(nativeSetUsbStreamingMode(modeId), "setUsbStreamingMode")

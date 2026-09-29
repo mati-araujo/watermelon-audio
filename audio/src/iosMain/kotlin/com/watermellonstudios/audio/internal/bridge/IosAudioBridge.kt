@@ -402,10 +402,8 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun setModulatorType(type: Int): Result<Unit> =
         wma_set_modulator_type(engine, type).asUnitResult("setModulatorType")
 
-    override fun setModulatorParameter(paramId: Int, value: Float): Result<Unit> {
-        if (!value.isFinite()) return noFinito(paramId, value)
-        return wma_set_modulator_param(engine, paramId, value).asUnitResult("setModulatorParameter")
-    }
+    override fun setModulatorParameter(paramId: Int, value: Float): Result<Unit> =
+        wma_set_modulator_param(engine, paramId, value).asUnitResult("setModulatorParameter")
 
     // ==================== EFFECTS (variantes sync para AudioEngineImpl) ====================
 
@@ -419,19 +417,24 @@ internal class IosAudioBridge : IAudioNativeBridge {
      * que es justo la clase de transcripción paralela que WA-2.6 sacó de encima.
      */
     override fun removeEffectSync(index: Int): Result<Unit> =
-        wma_effect_remove(engine, index).asUnitResult("removeEffectSync")
+        wma_effect_remove(engine, index).asEffectResult("removeEffectSync", index)
 
-    override fun setEffectParameterSync(effectIndex: Int, paramId: Int, value: Float): Result<Unit> {
-        if (!value.isFinite()) return noFinito(paramId, value)
-        return wma_effect_set_param(engine, effectIndex, paramId, value)
-            .asUnitResult("setEffectParameterSync")
-    }
+    /**
+     * 🔴 **Sin pre-chequeo de `isFinite`, y eso es el arreglo** (review de S2). Había uno
+     * delante, así que con `setEffectParameter(99, 0, NaN)` esta plataforma contestaba
+     * `ParameterOutOfRange` y Android `InvalidEffectIndex`: la misma llamada, dos causas
+     * según el teléfono — exactamente lo que REQ-045 existe para borrar. El orden lo fija
+     * `wma_effect_set_param`: índice → param_id → finito.
+     */
+    override fun setEffectParameterSync(effectIndex: Int, paramId: Int, value: Float): Result<Unit> =
+        wma_effect_set_param(engine, effectIndex, paramId, value)
+            .asEffectResult("setEffectParameterSync", effectIndex)
 
     override fun getEffectParameterSync(effectIndex: Int, paramId: Int): Float =
         wma_effect_get_param(engine, effectIndex, paramId)
 
     override fun setEffectBypassSync(index: Int, bypass: Boolean): Result<Unit> =
-        wma_effect_set_bypass(engine, index, bypass).asUnitResult("setEffectBypassSync")
+        wma_effect_set_bypass(engine, index, bypass).asEffectResult("setEffectBypassSync", index)
 
     override fun setEffectsBypassSync(bypass: Boolean): Result<Unit> =
         wma_effect_set_global_bypass(engine, bypass).asUnitResult("setEffectsBypassSync")
@@ -439,7 +442,11 @@ internal class IosAudioBridge : IAudioNativeBridge {
     override fun isEffectsBypassedSync(): Boolean = wma_effect_is_global_bypassed(engine)
 
     override fun reorderEffectsSync(fromIndex: Int, toIndex: Int): Result<Unit> =
-        wma_effect_reorder(engine, fromIndex, toIndex).asUnitResult("reorderEffectsSync")
+        wma_effect_reorder(engine, fromIndex, toIndex).asEffectResult(
+            "reorderEffectsSync",
+            // El que de verdad no entra, para que el mensaje nombre ese y no el otro.
+            if (fromIndex !in 0 until getEffectChainSize()) fromIndex else toIndex,
+        )
 
     // ==================== EFFECT ROUTING ====================
 
@@ -958,12 +965,21 @@ internal class IosAudioBridge : IAudioNativeBridge {
      * misma C API.
      */
     /**
-     * El rechazo de un valor no finito, con la misma causa que devolvería la C API si el
-     * valor llegara a cruzar. Gemelo del de Android, por la misma razón que [asUnitResult].
+     * Como [asUnitResult], pero un índice de efecto rechazado viaja con el índice REAL y el
+     * largo REAL de la cadena — igual que en Android, que los tiene porque valida el índice
+     * él mismo.
+     *
+     * Sin esto, `NativeBridgeException.fromCode` construye `InvalidEffectIndex(-1)`: la
+     * causa correcta con los números inventados, o sea un mensaje que no sirve para
+     * diagnosticar. Los DEMÁS códigos siguen saliendo de `fromCode`, que es lo que mantiene
+     * una sola definición del mapeo.
      */
-    private fun noFinito(paramId: Int, value: Float): Result<Unit> = Result.failure(
-        NativeBridgeException.ParameterOutOfRange(paramId, value, -Float.MAX_VALUE, Float.MAX_VALUE),
-    )
+    private fun WmaResult.asEffectResult(operation: String, indice: Int): Result<Unit> = when {
+        this == WMA_OK -> Result.success(Unit)
+        this == WMA_ERROR_INVALID_EFFECT_INDEX ->
+            Result.failure(NativeBridgeException.InvalidEffectIndex(indice, getEffectChainSize()))
+        else -> Result.failure(NativeBridgeException.fromCode(this, operation))
+    }
 
     private fun WmaResult.asUnitResult(operation: String): Result<Unit> =
         if (this == WMA_OK) {

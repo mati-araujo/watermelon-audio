@@ -98,14 +98,44 @@ HANDLE = re.compile(r"\bg_wmaEngine\b|\bg_jniState\.engine\b")
 ENSURE = re.compile(r"\bensure(Engine|InputNode)\s*\(")
 WMA_CALL = re.compile(r"\b(wma_\w+)\s*\(")
 
-# Los verbos, tal cual los derivo S0. `CONFIG` es estado que persiste; `LECTURA`
-# devuelve el default que la C API declara; el resto son acciones.
+# Los verbos. `CONFIG` es estado que persiste; `LECTURA` devuelve el default que la C
+# API declara; el resto son acciones.
+#
+# 🔴 **La tabla FALLA CERRADO**: una `wma_*` cuyo nombre no matchea ningun verbo hace
+# fallar el lint pidiendo que se la clasifique. La primera version devolvia `False` en
+# silencio, o sea que un nombre nuevo quedaba VERDE por no estar en la tabla — y eso es
+# el modo de falla que este repo ya pago dos veces con `rt-coverage-baseline`: el lint
+# revisando menos sin cambiar de color. Medido en el review de S2: habia **20** `wma_*`
+# llamadas desde `jni/` sin ningun verbo reconocido, entre ellas las tres de carga de
+# SoundFont, y sacarle el `ensureEngine()` a `nativeLoadSoundFontFromPath` daba VERDE.
 CONFIG = {"set", "enable", "add", "remove", "clear", "reorder", "register",
-          "unregister", "lock", "regenerate"}
-LECTURA = {"get", "is", "has", "find", "detect", "analyze", "count"}
+          "unregister", "lock", "regenerate", "load", "unload"}
+LECTURA = {"get", "is", "has", "find", "detect", "analyze", "count",
+           "size", "state", "difference", "requires", "line", "frames"}
 ACCION = {"start", "stop", "pause", "resume", "trigger", "release", "update", "arm",
           "cancel", "export", "import", "capture", "prepare", "trim", "save",
-          "restore", "reset", "finalize", "apply"}
+          "restore", "reset", "finalize", "apply",
+          "create", "destroy", "free", "abort", "note", "select"}
+
+# Configuracion que NO nombra el handle y entra al conjunto de todos modos, con su razon.
+#
+# 🔴 Viaja por `BackendManager::getInstance()`, y ahi esta el defecto: sin motor ese
+# `getInstance()` devuelve un **static de fallback**, el pedido queda anotado en ESE
+# manager, y `wma_engine_create` instala otro — asi que la configuracion se pierde
+# exactamente igual que en D2, pero la regla del handle no la ve. Medido en el review de
+# S2. La otra familia que pasa por el singleton (`getLibusbBackend()`, ~25 entradas) NO
+# esta aca a proposito: son operaciones sobre un dispositivo USB que tiene que existir,
+# no configuracion latcheada del manager.
+SIEMPRE = {
+    "nativeSetUsbStreamingMode":
+        "el pedido de captura se anota en el BackendManager, no en el motor: sin "
+        "ensureEngine queda en el static de fallback y se pierde al crearse el motor",
+    "nativeConfigureUsbBackend":
+        "idem con setSampleRate(), y encima es void: se pierde sin rastro",
+    "nativeSetUsbLatencyProfile":
+        "idem con setLatencyProfile(), que el manager LATCHEA para reaplicarlo en el "
+        "start siguiente — y devuelve JNI_TRUE igual",
+}
 
 # Las que pasan el filtro y NO tienen que crear el motor. Cada una con su razon:
 # una exclusion sin motivo escrito es la que nadie puede revisar.
@@ -160,32 +190,60 @@ def function_bodies(src: str) -> list[tuple[str, str]]:
     return out
 
 
-def es_configuracion(body: str) -> bool:
-    """Si alguna `wma_*` del cuerpo tiene verbo de configuracion."""
+def clasificar(call: str) -> str | None:
+    """"config" / "lectura" / "accion" para una `wma_*`, o None si su verbo es desconocido.
+
+    None NO es "no es configuracion": es "no se sabe", y el llamador lo convierte en
+    FALLA. Un verbo nuevo tiene que aparecer en el diff del PR, no volverse verde solo.
+    """
+    for parte in call[4:].split("_"):
+        if parte in CONFIG:
+            return "config"
+        if parte in LECTURA:
+            return "lectura"
+        if parte in ACCION:
+            return "accion"
+    return None
+
+
+def es_configuracion(body: str) -> tuple[bool, list[str]]:
+    """(¿configura?, las `wma_*` del cuerpo cuyo verbo no se pudo clasificar)."""
+    configura = False
+    sin_clasificar: list[str] = []
     for call in WMA_CALL.findall(body):
-        for parte in call[4:].split("_"):
-            if parte in CONFIG:
-                return True
-            if parte in LECTURA or parte in ACCION:
-                break
-    return False
+        k = clasificar(call)
+        if k is None:
+            sin_clasificar.append(call)
+        elif k == "config":
+            configura = True
+    return configura, sin_clasificar
 
 
 def corto(name: str) -> str:
     return name.rsplit("_", 1)[-1]
 
 
-def scan(sources: dict[str, str]) -> tuple[dict[str, bool], int, int]:
-    """(conjunto -> tiene ensureEngine, cuerpos parseados, JNIEXPORT declaradas)."""
+def scan(sources: dict[str, str], siempre: dict[str, str] | None = None
+         ) -> tuple[dict[str, bool], int, int, set[str], set[str]]:
+    """(conjunto -> tiene ensureEngine, parseadas, declaradas, verbos sin clasificar, nombres vistos)."""
+    siempre = SIEMPRE if siempre is None else siempre
     bucket: dict[str, bool] = {}
+    desconocidos: set[str] = set()
+    vistos: set[str] = set()
     parsed = declared = 0
     for src in sources.values():
         declared += len(EXPORT_LINE.findall(src))
         for name, body in function_bodies(src):
             parsed += 1
-            if HANDLE.search(body) and es_configuracion(body):
-                bucket[corto(name)] = bool(ENSURE.search(body))
-    return bucket, parsed, declared
+            n = corto(name)
+            vistos.add(n)
+            configura, sin_clasificar = es_configuracion(body)
+            desconocidos |= set(sin_clasificar)
+            # `SIEMPRE` entra aunque no pase el handle: hay configuracion que viaja por el
+            # singleton del BackendManager y nunca nombra `g_wmaEngine`.
+            if (HANDLE.search(body) and configura) or n in siempre:
+                bucket[n] = bool(ENSURE.search(body))
+    return bucket, parsed, declared, desconocidos, vistos
 
 
 def declarado() -> list[str] | None:
@@ -199,12 +257,28 @@ def declarado() -> list[str] | None:
 
 
 def analyze(sources: dict[str, str], esperado: list[str] | None,
-            excluir: dict[str, str] | None = None) -> list[str]:
+            excluir: dict[str, str] | None = None,
+            siempre: dict[str, str] | None = None) -> list[str]:
     """Todos los problemas. Lista vacia = verde. La completitud va PRIMERO."""
     excluir = EXCLUIR if excluir is None else excluir
+    siempre = SIEMPRE if siempre is None else siempre
     problems: list[str] = []
 
-    bucket, parsed, declared = scan(sources)
+    bucket, parsed, declared, desconocidos, vistos = scan(sources, siempre)
+    if desconocidos:
+        problems.append(
+            "VERBO SIN CLASIFICAR: " + ", ".join(sorted(desconocidos)) + "\n"
+            "  El lint no sabe si eso es configuracion, lectura o accion, y por eso FALLA en\n"
+            "  vez de suponer que no lo es: un verbo nuevo que devuelve 'no es configuracion'\n"
+            "  en silencio deja el lint verde revisando menos.\n"
+            "  Clasificalo en CONFIG / LECTURA / ACCION de este script."
+        )
+    huerfanas_siempre = sorted(set(siempre) - vistos)
+    if huerfanas_siempre:
+        problems.append(
+            "SIEMPRE HUERFANAS: " + ", ".join(huerfanas_siempre) + "\n"
+            "  Ya no existen como JNIEXPORT, asi que su razon no se puede revisar contra nada."
+        )
     if parsed != declared:
         problems.append(
             f"COMPLETITUD: el parser abarco {parsed} cuerpos de JNIEXPORT y el arbol declara "
@@ -314,12 +388,12 @@ def self_test() -> int:
     check(
         "mata un setter nuevo que se pierde pre-init (AC-045.4)",
         any("NO llama a ensureEngine" in p
-            for p in analyze({"v.cpp": PERDIDA}, ["nativeSetAlgo"], {})),
+            for p in analyze({"v.cpp": PERDIDA}, ["nativeSetAlgo"], {}, {})),
     )
     check(
         "NO acusa al mismo setter cuando llama ensureEngine",
-        not analyze({"v.cpp": SANA}, ["nativeSetAlgo"], {}),
-        str(analyze({"v.cpp": SANA}, ["nativeSetAlgo"], {})[:1]),
+        not analyze({"v.cpp": SANA}, ["nativeSetAlgo"], {}, {}),
+        str(analyze({"v.cpp": SANA}, ["nativeSetAlgo"], {}, {})[:1]),
     )
 
     # Las lecturas y las acciones no entran al conjunto: crear el motor para
@@ -330,41 +404,96 @@ def self_test() -> int:
         ("una accion", PERDIDA.replace("nativeSetAlgo", "nativeTriggerAlgo")
                               .replace("wma_set_algo", "wma_trigger_algo")),
     ):
-        problemas = analyze({"v.cpp": cuerpo}, [], {})
+        problemas = analyze({"v.cpp": cuerpo}, [], {}, {})
         check(f"NO mete {forma} en el conjunto",
               not any("ensureEngine" in p for p in problemas), str(problemas[:1]))
 
     # Una entrada que no pasa el handle tampoco: no hay motor que perder.
     sin_handle = PERDIDA.replace("g_wmaEngine, ", "")
     check("NO mete una entrada que no pasa el handle",
-          not any("ensureEngine" in p for p in analyze({"v.cpp": sin_handle}, [], {})))
+          not any("ensureEngine" in p for p in analyze({"v.cpp": sin_handle}, [], {}, {})))
+
+    # 🔴 El VERBO DESCONOCIDO falla, no se supone. Son los dos casos del review de S2: un
+    # nombre nuevo cuyo verbo no esta en la tabla quedaba VERDE en silencio, y con el
+    # `ensureEngine` sacado tambien.
+    DESCONOCIDO = """
+JNIEXPORT void JNICALL
+Java_x_nativeConfigureAgc(JNIEnv* env, jobject thiz, jfloat v) {
+    wma_input_configure_agc(g_wmaEngine, v);
+}
+"""
+    check(
+        "mata un verbo que no esta clasificado (M12)",
+        any("VERBO SIN CLASIFICAR" in p for p in analyze({"v.cpp": DESCONOCIDO}, [], {}, {})),
+    )
+    check(
+        "lo mata TAMBIEN cuando el setter si llama ensureEngine",
+        any("VERBO SIN CLASIFICAR" in p
+            for p in analyze({"v.cpp": DESCONOCIDO.replace(
+                "    wma_input_configure_agc", "    if (!ensureInputNode()) return;\n    wma_input_configure_agc")},
+                ["nativeConfigureAgc"], {}, {})),
+    )
+    # Un verbo de CARGA es configuracion: `load` estaba en el limbo y por eso sacarle el
+    # ensureEngine a nativeLoadSoundFontFromPath daba verde (M13).
+    CARGA = PERDIDA.replace("nativeSetAlgo", "nativeLoadAlgoFromPath").replace(
+        "wma_set_algo(g_wmaEngine, v)", "wma_algo_load_path(g_wmaEngine, \"x\")")
+    check(
+        "mata una CARGA sin ensureEngine (M13)",
+        any("NO llama a ensureEngine" in p
+            for p in analyze({"v.cpp": CARGA}, ["nativeLoadAlgoFromPath"], {}, {})),
+    )
+
+    # `SIEMPRE`: entra al conjunto aunque el cuerpo no nombre el handle...
+    SINGLETON = """
+JNIEXPORT void JNICALL
+Java_x_nativeConfigurarPorElSingleton(JNIEnv* env, jobject thiz, jint rate) {
+    auto& manager = watermelon_audio::BackendManager::getInstance();
+    manager.setSampleRate(rate);
+}
+"""
+    check(
+        "mata una configuracion por el singleton que esta en SIEMPRE",
+        any("NO llama a ensureEngine" in p
+            for p in analyze({"v.cpp": SINGLETON}, ["nativeConfigurarPorElSingleton"], {},
+                             {"nativeConfigurarPorElSingleton": "por el singleton"})),
+    )
+    check(
+        "NO la mete en el conjunto si no esta en SIEMPRE",
+        not any("NO llama a ensureEngine" in p
+                for p in analyze({"v.cpp": SINGLETON}, [], {}, {})),
+    )
+    check(
+        "mata una entrada de SIEMPRE que ya no existe",
+        any("SIEMPRE HUERFANAS" in p
+            for p in analyze({"v.cpp": SANA}, ["nativeSetAlgo"], {}, {"nativeFantasma": "vieja"})),
+    )
 
     # La exclusion con razon calla el fallo...
     check("una exclusion con razon excusa",
-          not analyze({"v.cpp": PERDIDA}, [], {"nativeSetAlgo": "porque si"}))
+          not analyze({"v.cpp": PERDIDA}, [], {"nativeSetAlgo": "porque si"}, {}))
     # ...y una exclusion que ya no se reproduce FALLA (trinquete).
     check(
         "mata una exclusion huerfana",
         any("HUERFANAS" in p
-            for p in analyze({"v.cpp": SANA}, ["nativeSetAlgo"], {"nativeYaNoExiste": "vieja"})),
+            for p in analyze({"v.cpp": SANA}, ["nativeSetAlgo"], {"nativeYaNoExiste": "vieja"}, {})),
     )
 
     # El trinquete del conjunto, en las DOS direcciones.
     check(
         "mata un conjunto que declara de menos",
-        any("CONJUNTO" in p for p in analyze({"v.cpp": SANA}, [], {})),
+        any("CONJUNTO" in p for p in analyze({"v.cpp": SANA}, [], {}, {})),
     )
     check(
         "mata un conjunto que declara de mas",
         any("CONJUNTO" in p
-            for p in analyze({"v.cpp": SANA}, ["nativeSetAlgo", "nativeFantasma"], {})),
+            for p in analyze({"v.cpp": SANA}, ["nativeSetAlgo", "nativeFantasma"], {}, {})),
     )
 
     # La guarda de completitud: un prototipo suelto la baja.
     roto = "JNIEXPORT void JNICALL Java_x_nativeDeclaradaAparte(JNIEnv*, jobject);\n" + SANA
     check(
         "mata un parser que abarco de menos (completitud)",
-        any("COMPLETITUD" in p for p in analyze({"v.cpp": roto}, ["nativeSetAlgo"], {})),
+        any("COMPLETITUD" in p for p in analyze({"v.cpp": roto}, ["nativeSetAlgo"], {}, {})),
     )
 
     # Un arbol sin configuraciones es FALLA, nunca "nada que revisar".
@@ -372,7 +501,7 @@ def self_test() -> int:
         "un arbol sin configuraciones es falla, no un pase",
         any("parseo roto" in p
             for p in analyze({"v.cpp": PERDIDA.replace("wma_set_algo", "wma_get_algo")
-                                             .replace("nativeSetAlgo", "nativeGetAlgo")}, [], {})),
+                                             .replace("nativeSetAlgo", "nativeGetAlgo")}, [], {}, {})),
     )
 
     if fallos:
@@ -383,7 +512,7 @@ def self_test() -> int:
 
 
 def update() -> int:
-    bucket, _, _ = scan(read_tree())
+    bucket, _, _, _, _ = scan(read_tree())
     requerido = sorted(n for n in bucket if n not in EXCLUIR)
     CONJUNTO.write_text(
         "# REQ-045 AC-045.4 — las configuraciones que TIENEN que llegar al motor aunque\n"
@@ -419,10 +548,11 @@ def main() -> int:
         )
         return 1
 
-    bucket, _, _ = scan(sources)
+    bucket, _, _, _, _ = scan(sources)
     print(
         f"\033[32mok\033[0m — las {len(bucket) - len(EXCLUIR)} configuraciones del conjunto "
-        f"aseguran el motor ({len(EXCLUIR)} exclusiones con razon)."
+        f"aseguran el motor ({len(EXCLUIR)} exclusiones y {len(SIEMPRE)} inclusiones "
+        "explicitas, todas con razon)."
     )
     return 0
 

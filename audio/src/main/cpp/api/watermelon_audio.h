@@ -1413,6 +1413,17 @@ typedef enum WmaCaptureOutcome {
  *         (`WMA_ERROR_INVALID_OPERATION` para el modo 1,
  *         `WMA_ERROR_PARAMETER_OUT_OF_RANGE` para un modo que no existe). El mismo
  *         reparto signo/valor que `wma_effect_add`.
+ *
+ * 🔴 **UN LLAMADOR C NO DEBE COMPARAR ESTO CON `WMA_OK`.** El exito no es `0`: `0` es
+ * `WMA_CAPTURE_NOT_LIVE`, que tambien es exito, y `WMA_CAPTURE_LIVE` es `1`. La unica
+ * lectura correcta es por SIGNO:
+ *
+ *     int r = wma_set_usb_streaming_mode(2);
+ *     if (r < 0) { ... }   // es un WmaResult: fallo
+ *     else       { ... }   // es un WmaCaptureOutcome
+ *
+ * `if (r != WMA_OK)` leeria LIVE y PENDING como errores, y `if (r == WMA_OK)` leeria
+ * NOT_LIVE como "todo bien" — las dos formas estan mal por motivos opuestos.
  */
 WMA_API int wma_set_usb_streaming_mode(int mode_id);
 

@@ -293,6 +293,24 @@ class IosAutomationAndFilterBridgeTest {
             bridge.reorderEffectsSync(0, 1).exceptionOrNull(), "reorderEffectsSync sobre cadena vacía",
         )
 
+        // 🔴 LA PARIDAD CON ANDROID, que es el hallazgo del review de S2. Con índice
+        // inválido Y valor no finito manda el ÍNDICE: antes iOS mira `isFinite` primero y
+        // contestaba `ParameterOutOfRange` donde Android decía `InvalidEffectIndex` — la
+        // misma llamada, dos causas según el teléfono. El orden lo fija la C API
+        // (índice → param_id → finito) y ya no se duplica en Kotlin.
+        val porIndice = assertIs<NativeBridgeException.InvalidEffectIndex>(
+            bridge.setEffectParameterSync(99, 0, Float.NaN).exceptionOrNull(),
+            "setEffectParameterSync(99, 0, NaN) tiene que decir InvalidEffectIndex, como Android",
+        )
+        assertEquals(99, porIndice.index, "el índice del mensaje tiene que ser el REAL, no -1")
+        assertEquals(0, porIndice.chainSize, "el largo de la cadena también sale medido")
+
+        // Y en el modulador manda el id sobre el valor, igual que en Android.
+        assertIs<NativeBridgeException.InvalidParameterId>(
+            bridge.setModulatorParameter(-1, Float.NaN).exceptionOrNull(),
+            "setModulatorParameter(-1, NaN): manda el id, no el valor",
+        )
+
         // El gemelo: con un efecto de verdad, los cuatro dicen sí.
         assertTrue(bridge.addEffectSync(EffectType.REVERB.id), "no pude agregar el efecto del control")
         assertTrue(bridge.setEffectParameterSync(0, 0, 0.5f).isSuccess)

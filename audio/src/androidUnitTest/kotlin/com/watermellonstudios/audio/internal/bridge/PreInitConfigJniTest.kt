@@ -1,5 +1,7 @@
 package com.watermellonstudios.audio.internal.bridge
 
+import com.watermellonstudios.audio.domain.input.CaptureOutcome
+import com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
 import kotlinx.coroutines.runBlocking
 import org.junit.AfterClass
 import org.junit.FixMethodOrder
@@ -72,6 +74,9 @@ class PreInitConfigJniTest {
 
         private const val NO_FADE = 0
 
+        /** `FULL_DUPLEX`: el único modo del que se puede observar que el pedido llegó. */
+        private const val USB_FULL_DUPLEX = 2
+
         /**
          * Cada configuración del conjunto y **cómo se la llama desde la superficie de
          * producción**.
@@ -85,7 +90,10 @@ class PreInitConfigJniTest {
         private val CONFIGURACIONES: Map<String, (AudioNativeBridge) -> Unit> = linkedMapOf(
             "nativeAddEffect" to { b -> b.addEffectSync(0) },
             "nativeClearMappingConfig" to { b -> b.clearMappingConfig(0) },
+            "nativeConfigureUsbBackend" to { b -> b.configureUsbBackend(44_100, 2, 16) },
             "nativeEnableVoiceSystem" to { b -> b.enableVoiceSystem(true) },
+            "nativeLoadSoundFont" to { b -> b.loadSoundFont(MinimalSoundFont.bytes()) },
+            "nativeLoadSoundFontFromPath" to { b -> b.loadSoundFontFromPath(fontEnDisco()) },
             "nativeLooperSetCapabilities" to { b -> b.looperSetCapabilities(8L shl 20, 4, 30) },
             "nativeLooperSetEnabled" to { b -> b.looperSetEnabled(true) },
             "nativeLooperSetExportSampleRate" to { b -> b.looperSetExportSampleRate(44100) },
@@ -138,6 +146,8 @@ class PreInitConfigJniTest {
             "nativeSetSecondaryOscillatorType" to { b -> b.setSecondaryOscillatorType(1) },
             "nativeSetSoundFontPreset" to { b -> b.setSoundFontPreset(0) },
             "nativeSetSynthVolume" to { b -> b.setSynthVolume(0.7f) },
+            "nativeSetUsbLatencyProfile" to { b -> b.setUsbLatencyProfile(UsbLatencyProfile.SAFE) },
+            "nativeSetUsbStreamingMode" to { b -> b.setUsbStreamingMode(0) },
             "nativeSetUseBackendManager" to { b -> b.setUseBackendManager(true) },
             "nativeSetVocoderCarrierFrequency" to { b -> b.setVocoderCarrierFrequency(220f) },
             "nativeSetVocoderCarrierSource" to { b -> b.setVocoderCarrierSource(true) },
@@ -151,6 +161,24 @@ class PreInitConfigJniTest {
             "nativeSfSetAmbience" to { b -> b.sfSetAmbience(1f, 1f) },
             "nativeSfSetTouchExpression" to { b -> b.sfSetTouchExpression(0, 1f) },
             "nativeTransportSetBeatsPerBar" to { b -> b.transportSetBeatsPerBar(4) },
+            "nativeUnloadSoundFont" to { b -> b.unloadSoundFont() },
+        )
+
+        /**
+         * Del conjunto derivado, lo que **no se puede ejercer en el host**, con su razón.
+         *
+         * 🔴 No es un descuido y no baja la exigencia del lint: el lint sigue pidiéndole
+         * `ensureEngine()` a estas entradas. Lo que declara este mapa es que el ARNÉS no
+         * las puede ejecutar, que es otra pregunta. El trinquete de abajo suma los dos
+         * conjuntos, así que un hueco nuevo también aparece en el diff del PR.
+         */
+        private val SIN_ARNES = mapOf(
+            "nativeLoadSoundFontFromFd" to
+                "hueco DECLARADO de MINI-015: sacarle el `int` al FileDescriptor del JDK " +
+                "exige `--add-opens=java.base/java.io` permanente más reflexión sobre un " +
+                "campo privado, y ese riesgo se compra de una sola vez para las 309, no " +
+                "de a una función. Lo cubre `test_soundfont_load.cpp` " +
+                "(LoadFromFdAppliesTheRateItIsGiven); ver el KDoc de SoundFontJniTest",
         )
 
         /**
@@ -179,6 +207,14 @@ class PreInitConfigJniTest {
             )
         }
 
+        /** El SF2 mínimo en disco, para la variante por path. Uno solo para toda la clase. */
+        private fun fontEnDisco(): String {
+            val f = File.createTempFile("watermelon-preinit-", ".sf2")
+            f.deleteOnExit()
+            f.writeBytes(MinimalSoundFont.bytes())
+            return f.absolutePath
+        }
+
         @JvmStatic
         @AfterClass
         fun tally() = JniCoverage.requireCoverage(OWNER, CONFIGURACIONES.keys)
@@ -195,14 +231,15 @@ class PreInitConfigJniTest {
     @Test
     fun `a - la lista de esta clase es la que el lint deriva del arbol`() {
         val declarado = conjuntoDeclarado()
-        val ejercido = CONFIGURACIONES.keys
+        val ejercido = CONFIGURACIONES.keys + SIN_ARNES.keys
         val faltan = declarado - ejercido
         val sobran = ejercido - declarado
         assertTrue(
             faltan.isEmpty() && sobran.isEmpty(),
             buildString {
                 append("el conjunto derivado del árbol tiene ${declarado.size} configuraciones y ")
-                append("esta clase ejerce ${ejercido.size}.\n")
+                append("esta clase da cuenta de ${ejercido.size} ")
+                append("(${CONFIGURACIONES.size} ejercidas + ${SIN_ARNES.size} huecos declarados).\n")
                 if (faltan.isNotEmpty()) {
                     append("  SIN EJERCER: ${faltan.joinToString()}\n")
                     append("  Son configuraciones nuevas del árbol. El arreglo es agregarlas a\n")
@@ -263,7 +300,7 @@ class PreInitConfigJniTest {
      * que un rojo dice exactamente cuál se pierde.
      */
     @Test
-    fun `c - las 68 configuraciones del conjunto crean el motor`() {
+    fun `c - cada configuracion del conjunto crea el motor`() {
         for ((nombre, llamada) in CONFIGURACIONES) {
             volverAlEstadoSinMotor()
             assertFalse(
@@ -324,6 +361,52 @@ class PreInitConfigJniTest {
         }
     }
 
+    /**
+     * **AC-045.4 — la configuración que viaja por el `BackendManager` también LLEGA.**
+     *
+     * 🔴 Hallazgo del review de S2, y la parte que `isEngineInitialized()` no puede ver.
+     * `setUsbStreamingMode` no toca el motor: anota el pedido en
+     * `BackendManager::getInstance()`. Sin motor, ese `getInstance()` devuelve un **static
+     * de fallback**; el pedido queda ahí; `wma_engine_create()` instala OTRO manager, y la
+     * configuración se pierde — el mismo D2, por una puerta que la regla del handle no veía.
+     *
+     * El observable que lo distingue es el `CaptureOutcome` **después de arrancar**: el
+     * backend decide la captura en su `start()`, así que
+     *
+     *  - si el pedido llegó al manager del motor, el stream abre CON captura y el segundo
+     *    pedido de full-duplex encuentra `live == pedido` → [CaptureOutcome.LIVE];
+     *  - si se perdió en el static, el stream abrió sin captura y el segundo pedido
+     *    encuentra una divergencia → `PENDING` o `NOT_LIVE`.
+     *
+     * Por eso el assert es contra `LIVE` y no contra "no es null".
+     */
+    @Test
+    fun `e - el modo usb pedido antes del init llega al manager del motor`() {
+        volverAlEstadoSinMotor()
+        assertFalse(bridge.isEngineInitialized(), "la premisa es un proceso sin motor")
+
+        assertEquals(
+            CaptureOutcome.NOT_LIVE,
+            jniValor("nativeSetUsbStreamingMode") { it.setUsbStreamingMode(USB_FULL_DUPLEX) }.getOrNull(),
+            "sin stream abierto todavía, pedir full-duplex no puede decir LIVE",
+        )
+        assertTrue(bridge.isEngineInitialized(), "el pedido de captura no creó el motor")
+
+        assertTrue(
+            runBlocking { bridge.startEngineWithFade(NO_FADE) }.isSuccess,
+            "sin arrancar no hay stream que decida la captura",
+        )
+        assertEquals(
+            CaptureOutcome.LIVE,
+            bridge.setUsbStreamingMode(USB_FULL_DUPLEX).getOrNull(),
+            "el stream abrió SIN captura, así que el pedido pre-init no llegó al manager del " +
+                "motor: quedó anotado en el static de fallback de getInstance() y se perdió " +
+                "cuando wma_engine_create() instaló el suyo.",
+        )
+
+        assertTrue(runBlocking { bridge.stopEngineWithFade(NO_FADE) }.isSuccess)
+    }
+
     /** Resetea, configura pre-init, y afirma que la lectura de vuelta trae lo configurado. */
     private fun verificar(
         nombre: String,
@@ -362,5 +445,9 @@ class PreInitConfigJniTest {
     }
 
     private fun jni(name: String, call: (AudioNativeBridge) -> Unit) =
+        JniHarness.exercise(OWNER, name) { b -> call(b) }
+
+    /** Igual, pero devolviendo lo que la llamada contestó. */
+    private fun <T> jniValor(name: String, call: (AudioNativeBridge) -> T): T =
         JniHarness.exercise(OWNER, name) { b -> call(b) }
 }
