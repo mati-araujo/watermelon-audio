@@ -254,6 +254,16 @@ jobs:
       - name: Las firmas del cruce JNI coinciden — REQ-025
         run: python3 scripts/check-jni-signatures.py
 
+      # REQ-045 — ninguna JNIEXPORT descarta el WmaResult que la C API devolvio. Es la
+      # cuarta pregunta del cruce, y las otras tres no la ven: un resultado tirado al
+      # piso pasa el gate de nombres Y el de firmas, y le devuelve `Result.success` al
+      # consumidor con el motor diciendo que no. Source-only; --self-test primero.
+      - name: Ningun cruce JNI descarta el WmaResult — self-test
+        run: python3 scripts/check-jni-results.py --self-test
+
+      - name: Ningun cruce JNI descarta el WmaResult — REQ-045
+        run: python3 scripts/check-jni-results.py
+
       # REQ-021 — los conteos de CLAUDE.md, re-medidos del arbol. Quedaron stale
       # SIETE tandas seguidas mientras la regla vivia solo en prosa. El
       # --self-test primero, misma razon que los de arriba: si el parser se

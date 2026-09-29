@@ -1013,6 +1013,51 @@ private:
     // Only used when mUseBackendManager is false (direct Oboe path)
     std::shared_ptr<oboe::AudioStream> mStream;
 
+    /**
+     * El candado que protege el PUNTERO `mStream`, no el stream (REQ-045, M5).
+     *
+     * `mStream` lo escriben `start()` y `stop()` —los dos con `mStateMutex` tomado— en
+     * cinco lugares (`openStream` y cuatro `reset()`), y lo leia `getStreamInfo()` SIN
+     * ninguna sincronizacion, desde el poller de la UI. Un `reset()` concurrente con esa
+     * lectura es un use-after-free: es la misma clase que `OboeBackend.cpp:93-100`
+     * documenta como bug ya pagado del lado del backend.
+     *
+     * 🔴 Y el TSan de Linux NO lo puede ver, porque todo esto vive bajo
+     * `#if WMA_HAS_OBOE`: el camino que shippea en Android es justo el que ningun
+     * sanitizer del CI compila.
+     *
+     * Es un mutex de CONTROL, y **desde REQ-045.1 jamas entra al hilo de audio** — antes
+     * NO era cierto del todo: `currentSampleRate()` (que es RT: esta declarado en
+     * `scripts/rt-coverage-baseline.txt`, la alcanza `captureMonitoringBlock`) llamaba a
+     * `getStreamInfo()`, y con `mUseBackendManager == true` pero `BackendManager` sin
+     * correr, esa llamada caia a la rama legacy de `getStreamInfo()`, que SI toma este
+     * mutex via `legacyStream()`. `check-rt-safety.py` no lo veia porque `getStreamInfo`
+     * resuelve a mas de una definicion y el walker no sigue una llamada ambigua.
+     *
+     * Ahora `currentSampleRate()` no llama mas a `getStreamInfo()`: le pregunta directo
+     * a `BackendManager` y, si no hay nada que contestar, lee `mLegacyStreamSampleRate`
+     * (un atomic) — nunca este mutex. El orden de toma sigue siendo `mStateMutex` ->
+     * `mStreamMutex`; los lectores de control (`getStreamInfo()`, no RT) toman solo
+     * este.
+     *
+     * 🔴 Lo que SIGUE entrando al hilo RT, y es deuda preexistente aparte (no de este
+     * mutex): con `mUseBackendManager == true` y el manager CORRIENDO,
+     * `currentSampleRate()` toma `BackendManager::mMutex` (via `isRunning()` +
+     * `getStreamInfo()` de `BackendManager`). Viene desde c1f822d (2026-07-22), tambien
+     * invisible para el lint por la misma ambiguedad, y se sigue aparte: es el rate en
+     * caliente de REQ-006.
+     */
+    mutable std::mutex mStreamMutex;
+
+    /**
+     * El sample rate del stream Oboe ABIERTO, o 0 si no hay (REQ-045, M5).
+     *
+     * Existe para que `currentSampleRate()` —que es RT: esta declarado en
+     * `scripts/rt-coverage-baseline.txt`— conteste sin tocar `mStream`. Lo escriben los
+     * mismos cinco lugares que el puntero, con `mStateMutex` tomado.
+     */
+    std::atomic<int32_t> mLegacyStreamSampleRate{0};
+
     // Opaque pointer to Oboe callback adapter (defined in AudioEngine.cpp)
     // Using void* + custom deleter to avoid incomplete type issue with unique_ptr
     struct OboeAdapterDeleter { void operator()(void* p) const; };
@@ -1463,6 +1508,39 @@ public:
      * Works with both legacy Oboe path and BackendManager path.
      */
     bool getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const;
+
+    /**
+     * @brief Lo mismo, más los canales y el modo de latencia del stream ABIERTO
+     *        (REQ-045, D10).
+     *
+     * Existe aparte y no cambia la firma de arriba porque el header de la C API
+     * sólo puede **sumar** (compatibilidad en fuente para C), y por lo mismo
+     * `wma_get_stream_info_ex` es una función nueva y no un parámetro más.
+     *
+     * @param[out] channelCount canales del stream (0 si no hay stream)
+     * @param[out] lowLatency   -1 desconocido / 0 no / 1 sí. Core Audio no tiene
+     *             cómo contestarlo y devuelve desconocido a propósito: derivarlo
+     *             del buffer sería volver a inventar el valor, que es el defecto.
+     * @return true si hay un stream activo
+     */
+    bool getStreamInfoEx(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis,
+                         int32_t& channelCount, int32_t& lowLatency) const;
+
+private:
+    /**
+     * @brief Suelta el stream Oboe legacy, limpiando primero el rate publicado (M5).
+     *
+     * Toma `mStreamMutex`, y **siempre** se la llama con `mStateMutex` ya tomado. El
+     * parametro `std::nullptr_t` existe para que la llamada se lea como la asignacion que
+     * reemplaza (`mStream.reset()`) y para que no haya una segunda forma de escribir el
+     * puntero sin pasar por aca.
+     */
+    void setLegacyStream(std::nullptr_t);
+
+    /** @brief El stream Oboe legacy, leido UNA vez bajo `mStreamMutex` (M5). */
+    std::shared_ptr<oboe::AudioStream> legacyStream() const;
+
+public:
 
     /**
      * @brief El rate con el que `start()` pre-configura los componentes ANTES de

@@ -38,15 +38,68 @@ interface IAudioNativeBridge :
     suspend fun startEngine(): Result<Unit>
     suspend fun stopEngine(): Result<Unit>
     suspend fun startEngineWithFade(fadeTimeMs: Int): Result<Unit>
+    /**
+     * Para el motor con fade-out.
+     *
+     * 🔴 **`success` = "el motor aceptó el stop", no "el stream ya cerró"** (REQ-045, B9).
+     * Con `fadeTimeMs > 0`, `AudioEngine::stopWithFade` arranca el fade y deja la
+     * detención a un worker que corre al terminarlo, así que esto vuelve antes. Con 0 el
+     * camino es sincrónico. Un `failure` sí es definitivo: el motor no aceptó.
+     */
     suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit>
     suspend fun pauseEngineWithFade(fadeTimeMs: Int): Result<Unit>
     suspend fun resumeEngineWithFade(fadeTimeMs: Int): Result<Unit>
 
-    /** Synchronous lifecycle — for use from AudioEngineImpl (non-suspend context). */
+    /**
+     * Ciclo de vida sincrónico — **deprecado desde REQ-045** (D1b).
+     *
+     * Devuelven `Unit`, así que el `WmaResult` del motor **no tiene dónde ir**: un
+     * fallo del stream se pierde y el llamador sigue como si hubiera arrancado. Eso es
+     * lo que hacía `AudioEngineImpl` hasta el 2026-09-28, y por qué `AudioEngine.start`
+     * publicaba `RUNNING` con el stream cerrado.
+     *
+     * Siguen existiendo —sacarlos rompería a un implementador externo de esta
+     * interfaz— pero ya nadie de la librería los llama. El reemplazo es la variante
+     * `suspend`, que además se serializa bajo el mutex `LIFECYCLE`.
+     */
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor. Usá la variante suspend, " +
+            "que devuelve Result<Unit> y se serializa bajo LIFECYCLE (REQ-045).",
+        ReplaceWith("startEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
     fun startEngineWithFadeSync(fadeTimeMs: Int)
+
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor. Usá la variante suspend, " +
+            "que devuelve Result<Unit> y se serializa bajo LIFECYCLE (REQ-045).",
+        ReplaceWith("stopEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
     fun stopEngineWithFadeSync(fadeTimeMs: Int)
+
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor. Usá la variante suspend, " +
+            "que devuelve Result<Unit> y se serializa bajo LIFECYCLE (REQ-045).",
+        ReplaceWith("pauseEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
     fun pauseEngineWithFadeSync(fadeTimeMs: Int)
+
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor. Usá la variante suspend, " +
+            "que devuelve Result<Unit> y se serializa bajo LIFECYCLE (REQ-045).",
+        ReplaceWith("resumeEngineWithFade(fadeTimeMs)"),
+        DeprecationLevel.WARNING,
+    )
     fun resumeEngineWithFadeSync(fadeTimeMs: Int)
+
+    @Deprecated(
+        "Un Unit no puede transportar el fallo del motor. Usá la variante suspend, " +
+            "que devuelve Result<Unit> y se serializa bajo LIFECYCLE (REQ-045).",
+        ReplaceWith("stopEngine()"),
+        DeprecationLevel.WARNING,
+    )
     fun stopEngineSync()
 
     // ==================== STATE QUERIES ====================

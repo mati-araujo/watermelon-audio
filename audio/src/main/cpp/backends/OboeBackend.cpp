@@ -520,6 +520,14 @@ void OboeBackend::updateStreamInfo() {
     mCachedStreamInfo.outputLatencyMs = getOutputLatencyMs();
     mCachedStreamInfo.inputLatencyMs = getInputLatencyMs();
     mCachedStreamInfo.isFullDuplex = (mInputStream != nullptr);
+    // REQ-045 (D10): el modo con el que el stream quedó ABIERTO. Oboe puede
+    // contestarlo —`getPerformanceMode()` es propiedad del stream negociado, no del
+    // pedido: pedir LowLatency y que el device dé None es normal— y hasta ahora
+    // Kotlin lo contestaba con `true` a mano para cualquier stream.
+    mCachedStreamInfo.lowLatency =
+        mOutputStream->getPerformanceMode() == oboe::PerformanceMode::LowLatency
+            ? StreamInfo::LowLatency::ON
+            : StreamInfo::LowLatency::OFF;
     mCachedStreamInfo.backendType = BackendType::OBOE;
     mCachedStreamInfo.deviceName = "Oboe (AAudio/OpenSL)";
 

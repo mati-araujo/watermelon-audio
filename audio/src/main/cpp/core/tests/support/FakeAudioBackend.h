@@ -121,6 +121,24 @@ public:
     /// The rate the engine asked for, as recorded by setSampleRate().
     int requestedSampleRate() const { return mRequestedSampleRate; }
 
+    /**
+     * What the "device" settled on for channels and low-latency mode (REQ-045, D10).
+     *
+     * Separate knobs from the struct defaults on purpose: a test that leaves them
+     * alone cannot tell a value that TRAVELLED from the stream apart from one Kotlin
+     * made up, because both would read 2 / true.
+     */
+    void setNegotiatedChannelCount(int channelCount) {
+        std::lock_guard<std::mutex> lock(mInfoMutex);
+        mInfo.channelCount = channelCount;
+    }
+
+    void setNegotiatedLowLatency(bool lowLatency) {
+        std::lock_guard<std::mutex> lock(mInfoMutex);
+        mInfo.lowLatency = lowLatency ? watermelon_audio::StreamInfo::LowLatency::ON
+                                      : watermelon_audio::StreamInfo::LowLatency::OFF;
+    }
+
     /// Make start() fail, so the manager never reports isRunning().
     void setStartResult(watermelon_audio::BackendResult result) { mStartResult = result; }
 
