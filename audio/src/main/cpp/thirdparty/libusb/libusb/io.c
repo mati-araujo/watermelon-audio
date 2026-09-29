@@ -1303,7 +1303,6 @@ struct libusb_transfer * LIBUSB_CALL libusb_alloc_transfer(
 		return NULL;
 
 	struct usbi_transfer *itransfer = (struct usbi_transfer *)(ptr + priv_size);
-	itransfer->num_iso_packets = iso_packets;
 	itransfer->priv = ptr;
 	usbi_mutex_init(&itransfer->lock);
 	struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
@@ -1370,8 +1369,10 @@ static int arm_timer_for_next_timeout(struct libusb_context *ctx)
 
 		/* act on first transfer that has not already been handled */
 		if (!(itransfer->timeout_flags & (USBI_TRANSFER_TIMEOUT_HANDLED | USBI_TRANSFER_OS_HANDLES_TIMEOUT))) {
+#ifdef ENABLE_LOGGING
 			struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
 			usbi_dbg(ctx, "next timeout originally %ums", transfer->timeout);
+#endif
 			return usbi_arm_timer(&ctx->timer, cur_ts);
 		}
 	}
@@ -1434,9 +1435,11 @@ out:
 	if (first && usbi_using_timer(ctx) && TIMESPEC_IS_SET(timeout)) {
 		/* if this transfer has the lowest timeout of all active transfers,
 		 * rearm the timer with this transfer's timeout */
+#ifdef ENABLE_LOGGING
 		struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
 		usbi_dbg(ctx, "arm timer for timeout in %ums (first in line)",
 			transfer->timeout);
+#endif
 		r = usbi_arm_timer(&ctx->timer, timeout);
 	}
 #else
