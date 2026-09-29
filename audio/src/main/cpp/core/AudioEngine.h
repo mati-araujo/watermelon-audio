@@ -1442,6 +1442,10 @@ private:
      *
      * Called during start() to configure oscillators, modulators, effects,
      * nodes, and other components with the stream's sample rate.
+     *
+     * MINI-034 — un @p sampleRate **no positivo** NO prepara: conserva la
+     * configuracion anterior y lo registra, igual que un quiesce que no drena.
+     * La guarda vive aca, en el primitivo, no en los llamadores.
      */
     void configureComponentsWithSampleRate(int sampleRate, int maxBlockSize = 4096);
 

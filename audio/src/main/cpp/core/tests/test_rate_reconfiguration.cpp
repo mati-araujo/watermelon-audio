@@ -34,6 +34,7 @@
 #include "../../engines/tests/PitchHarness.h"
 
 #include <atomic>
+#include <climits>
 #include <cmath>
 #include <thread>
 #include <vector>
@@ -292,5 +293,76 @@ TEST_F(BackendPathFixture, AConfigChangeReconfiguresWithoutRacingTheAudioThread)
 
     stopRender.store(true, std::memory_order_relaxed);
     audio.join();
+    mEngine->stop();
+}
+
+// ---------------------------------------------------------------------------
+// MINI-034 — el eje de basura del hook de rate en caliente
+// ---------------------------------------------------------------------------
+
+/**
+ * AC-M034.1 — WHEN `onStreamConfigChanged()` transporta un sample rate NO POSITIVO,
+ * THE SYSTEM SHALL no preparar nada: ni tirar, ni mover el rate publicado, ni mover
+ * el rate al que los engines estan preparados — y seguir sonando.
+ *
+ * EL DEFECTO QUE PERSIGUE
+ * -----------------------
+ * `configureComponentsWithSampleRate()` no validaba su argumento. Con un negativo,
+ * una de las dimensiones que deriva (`rate * algo`) se vuelve un `resize()` gigante
+ * y la funcion sale por `std::length_error` — o sea que el hook de rate en caliente
+ * de REQ-006.2 crasheaba, no fallaba. Con `0` era peor que un crash: PREPARABA el
+ * motor entero a 0 Hz, que es un estado del que no se vuelve.
+ *
+ * COMO SE HACE OBSERVABLE QUE EL RATE **PREPARADO** NO SE MOVIO
+ * ------------------------------------------------------------
+ * Por el mismo mecanismo que `AConfigChangeReachesTheSynthEngines`, en la direccion
+ * contraria: el lazo de Karplus-Strong se dimensiona en MUESTRAS con el rate
+ * preparado, asi que si la basura llegara a `prepare()` la nota dejaria de salir
+ * donde sale. El test afirma que la nota SIGUE en su lugar despues de los tres
+ * valores de basura, medida al rate con el que el motor arranco.
+ *
+ * Los tres valores son el eje entero: `0` (el unico que un backend real puede
+ * entregar, con una config leida a mitad de camino), `-1` (el borde) e `INT_MIN`
+ * (el que no se puede negar sin desbordar).
+ */
+TEST_F(BackendPathFixture, ANonPositiveConfigChangeKeepsTheEngineConfigured) {
+    startEngineAt(kNegotiatedRate);          // 44100
+    mEngine->setEngineType(kKarplusStrong);
+
+    constexpr float kTarget = 440.0f;
+    mEngine->setFrequencyAndAmplitude(kTarget, 0.8f);
+
+    // La basura, por donde produccion la entregaria. Que esto no tire es la mitad
+    // del AC: sin la guarda, el negativo sale por excepcion desde adentro del hook.
+    for (int junk : {0, -1, INT_MIN}) {
+        watermelon_audio::StreamInfo info{};
+        info.sampleRate = junk;
+        info.channelCount = 2;
+        mEngine->onStreamConfigChanged(info);
+
+        EXPECT_EQ(mEngine->currentSampleRate(), kNegotiatedRate)
+            << "onStreamConfigChanged(" << junk << ") movio el rate publicado";
+    }
+
+    // El motor sigue sonando, y sigue sonando AL RATE VIEJO.
+    const std::vector<float> mono = renderMono(*mEngine, kNegotiatedRate, 1.0);
+
+    for (size_t i = 0; i < mono.size(); ++i) {
+        ASSERT_TRUE(std::isfinite(mono[i]))
+            << "la muestra " << i << " no es finita despues del eje de basura";
+    }
+
+    const size_t from = static_cast<size_t>(0.1 * kNegotiatedRate);
+    const size_t len = static_cast<size_t>(0.4 * kNegotiatedRate);
+    ASSERT_GE(mono.size(), from + len);
+    const double f = wma::pitch::fundamentalHz(mono, from, len, kNegotiatedRate, kTarget);
+    ASSERT_GT(f, 0.0) << "no se pudo medir la fundamental despues del eje de basura";
+
+    const double offCents = 1200.0 * std::log2(f / static_cast<double>(kTarget));
+    EXPECT_LT(std::abs(offCents), 15.0)
+        << "la nota de " << kTarget << " Hz salio en " << f << " Hz (" << offCents
+        << " cents) despues de tres cambios de config con rate no positivo: la basura "
+        << "llego a prepare() y re-dimensiono los engines.";
+
     mEngine->stop();
 }
