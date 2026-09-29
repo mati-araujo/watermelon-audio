@@ -419,7 +419,8 @@ TEST(SoundFontEffectsSendEngine, TheGateIsMeasuredInSecondsAndReengagesOnTheFirs
 /**
  * AC-040.7: el costo, MEDIDO. 10 s de bloques de 128 a 48 kHz con 8 voces con send al 100 %:
  * las dos unidades no pueden costar mas de 3x el render de tsf de esas 8 voces (sanidad; medido
- * 1,09x); y la compuerta (el barrido de los buses) no mas del 15 % de eso (medido 4,8 %). Los numeros se imprimen; los techos son
+ * 1,09x); y la compuerta (el barrido de los buses) no mas del 50 % de eso (sanidad tambien, desde
+ * MINI-032; medido 4,8 % sin carga). Los numeros se imprimen; los techos son
  * relativos porque el motor no tiene presupuesto absoluto declarado.
  *
  * El techo era 1,0x al escribir el AC y quedo en 1,5x AL MEDIR (2026-09-15): el build de host es
@@ -478,5 +479,36 @@ TEST(SoundFontEffectsSendEngine, TheUnitsCostLessThanTheVoicesAndTheGateAFractio
     // ajustado seria un flake — a 1,5x se puso rojo bajo la carga de un build al lado. El numero
     // que importa es el impreso; si sube de verdad, se ve en el diff del log, no en un rojo.
     EXPECT_LT(nsUnits, 3.0 * nsTsf) << "las dos unidades cuestan mas de 3x el render de 8 voces";
-    EXPECT_LT(nsGate, 0.15 * nsTsf) << "la compuerta cuesta mas del 15 % del render de 8 voces (medido 4,8 %)";
+    // 🔴 EL TECHO DE LA COMPUERTA TAMBIEN ES DE SANIDAD, Y COSTO CINCO ROJOS LLEGAR AHI
+    // (MINI-032). Era 0,15 · nsTsf — ajustado sobre el 4,8 % medido al escribirlo— y se puso
+    // rojo CINCO veces con el C++ intacto:
+    //
+    //   2026-09-16  ci-l2 local, load 23          compuerta 93,7 % de tsf   (Python + Xcode + Docker al lado)
+    //   2026-09-17  CI cpp-tests-tsan   PR #333   26 206 / 24 403 = 16,1 %  (el PR eran docs + 2 scripts)
+    //   2026-09-17  CI cpp-tests-asan   PR #335   13 161 / 11 682 = 16,9 %  (el PR era libs.versions.toml)
+    //   2026-09-28  ci-l2 local ASan, load 24-34  14 400 / 82 547 = 17,4 %  (S2 no toca el SoundFont)
+    //   2026-09-29  run-cpp-tests local, load 52   4 202 ns vs el techo de 3 919 = 16,1 %  (SIN sanitizer;
+    //                                              la corrida tardo 170,8 s contra 96-104)
+    //
+    // Por que el COCIENTE no es estable: el bucle de la compuerta es memoria pura (dos `*= 1`, dos
+    // `fabs` por muestra) y el render de tsf tiene mucha mas aritmetica por acceso. Un sanitizer
+    // instrumenta cada acceso, y `ctest -j` pone 4-10 procesos a competir por el ancho de banda de
+    // memoria: las dos cosas mueven la RELACION entre los dos tiempos sin que el codigo cambie. Y
+    // `-O0`: este bucle no se vectoriza.
+    //
+    // Asi que el techo pasa a ser de sanidad, igual que el de las unidades y por la misma razon:
+    // 0,5 · nsTsf es 10x el 4,8 % medido sin carga y ~3x el peor de los cuatro cocientes de la tabla
+    // que se pueden derivar (16,9 %). Sigue matando una compuerta que cueste lo que evita —
+    // verificado con un mutante de 2x tsf (AC-M032.3)— y deja de reportar la carga de la maquina
+    // como un defecto del motor. **El numero que importa es el impreso**: si el costo sube de
+    // verdad, se ve en el diff del log.
+    //
+    // 🔴 LO QUE ESTE TECHO **NO** CUBRE, DICHO EN VOZ ALTA: la primera ocurrencia (93,7 %) queda
+    // igual por ENCIMA de 0,5. O sea que con la maquina ahogada de verdad este test puede volver a
+    // ponerse rojo, y eso no seria un techo mal elegido sino la misma medicion perdiendo sentido:
+    // a esa carga el cociente ya no describe el costo de nada. La salida ante un rojo nuevo es
+    // MIRAR LA CARGA primero — [[un-timeout-de-sanitizer-puede-ser-de-la-maquina]] — y no subir el
+    // techo otra vez: si el cociente hay que abandonarlo, se cambia QUE mide el test (comparar la
+    // compuerta contra si misma sin la rama), y eso pide ratificacion aparte.
+    EXPECT_LT(nsGate, 0.5 * nsTsf) << "la compuerta cuesta mas del 50 % del render de 8 voces (medido 4,8 % sin carga)";
 }
