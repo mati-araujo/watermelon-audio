@@ -269,7 +269,7 @@ bool wma_get_stream_info(const WmaEngine* engine,
     if (!engine || !engine->engine) return false;
     int32_t sr = 0, bs = 0;
     double lat = 0.0;
-    bool ok = engine->engine->getStreamInfo(sr, bs, lat);
+    bool ok = engine->engine->queryStreamInfo(sr, bs, lat);
     if (ok) {
         if (sample_rate) *sample_rate = sr;
         if (buffer_size) *buffer_size = bs;
@@ -2592,7 +2592,7 @@ int wma_get_latency_report(const WmaEngine* engine, char* buffer, int buffer_siz
     } else {
         int32_t sampleRate = 0, bufferFrames = 0;
         double latencyMillis = 0.0;
-        if (engine->engine->getStreamInfo(sampleRate, bufferFrames, latencyMillis)) {
+        if (engine->engine->queryStreamInfo(sampleRate, bufferFrames, latencyMillis)) {
             report += "Sample Rate: " + std::to_string(sampleRate) + " Hz\n";
             report += "Buffer Size: " + std::to_string(bufferFrames) + " frames\n";
             report += "Output Latency: " + std::to_string(latencyMillis) + " ms\n";

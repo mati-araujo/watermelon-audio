@@ -149,9 +149,14 @@ TEST_F(CaptureSampleRateTest, TheMismatchFlagComparesTwoRealRates) {
     // La SALIDA tiene que estar de verdad a 44100: es la mitad contra la que se
     // compara el rate de entrada. Antes de MINI-007 esto se plantaba con el rate
     // preferido —un rung que ningun consumidor podia escribir—; ahora se planta
-    // con un backend corriendo, que es el camino por el que un device llega a
-    // 44,1 kHz de verdad.
-    runBackendAt(kNegotiated);
+    // arrancando EL MOTOR sobre un device que negocia 44,1 kHz.
+    //
+    // 🔴 Y el estimulo cambio con MINI-033: alcanzaba con `runBackendAt()` —el manager
+    // corriendo a espaldas del motor— porque `currentSampleRate()` le preguntaba al
+    // backend en vivo, lo que le costaba dos mutex en el hilo RT de captura. Ahora el
+    // rate lo publica el motor al arrancar, asi que el estimulo tiene que pasar por
+    // `start()`. Es el mismo camino que recorre un device real.
+    startEngineAt(kNegotiated);
     ASSERT_EQ(mEngine->currentSampleRate(), kNegotiated);
 
     auto node = std::make_shared<InputNode>();
@@ -184,6 +189,7 @@ TEST_F(CaptureSampleRateTest, TheMismatchFlagComparesTwoRealRates) {
     EXPECT_TRUE(mEngine->hasSampleRateMismatch())
         << "entrada a 32000 y salida a " << kNegotiated << ": eso ES un desajuste";
 
+    mEngine->stop();
     mEngine->setInputNode(nullptr);
 }
 

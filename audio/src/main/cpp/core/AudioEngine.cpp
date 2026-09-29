@@ -333,6 +333,15 @@ void AudioEngine::rollbackFailedStart() {
     transitionToState(EngineState::Stopping);
     transitionToState(EngineState::Stopped);
 
+    // MINI-033 — y no queda rate de stream publicado. Defensa en profundidad HOY: el
+    // unico llamador de esta funcion corre cuando `manager.start()` fallo, o sea antes
+    // del store. Se pone igual porque el store esta a una linea de moverse hacia arriba
+    // (publicar el rate PEDIDO antes de que el device conteste es la "simplificacion"
+    // natural), y en ese mundo un motor que quedo en Stopped seguiria contestando el rate
+    // de un stream que nunca corrio. Lo vigila
+    // `CurrentSampleRateTest.AFailedStartLeavesNoStreamRateBehind`.
+    mStreamSampleRate.store(0, std::memory_order_release);
+
     // El fade se arrancó antes de tocar el backend, para que los primeros
     // callbacks vieran una rampa válida. Si el arranque no prosperó, esa rampa
     // no la va a consumir nadie: dejarla viva hace que isFading() informe una
@@ -566,8 +575,27 @@ bool AudioEngine::start(int fadeTimeMs) {
         // components with the corrected rate. In practice the three test
         // DACs (GHW UAC1, UGREEN CM720 UAC2, C-Media UC02 UAC1) all honor
         // the requested rate exactly, so this fallback is rarely hit.
-        watermelon_audio::StreamInfo info = manager.getStreamInfo();
+        watermelon_audio::StreamInfo info = manager.activeStreamInfo();
         int actualRate = info.sampleRate;
+
+        // MINI-033 — ACA se publica el rate del stream para el hilo RT, y va ANTES
+        // del re-configure a proposito.
+        //
+        // Publicar es un store atomico que no puede fallar; re-preparar el DSP puede
+        // NO ocurrir (si el quiesce de REQ-006.1 no confirma el drenaje,
+        // `configureComponentsWithSampleRate()` se vuelve sin tocar nada). Lo que el
+        // stream CORRE es `actualRate` en los dos casos, y eso es lo que el flag de
+        // mismatch y el largo de los fades necesitan saber — R-MOT-1. Es la misma
+        // jerarquia de dos pasos que ya usa `onStreamConfigChanged` para el rate de
+        // captura ("publicar siempre, re-preparar si se puede").
+        //
+        // El `> 0` no es decorativo: un backend puede estar corriendo y no tener
+        // todavia nada sensato que reportar, y en ese caso lo correcto es dejar el rung
+        // de abajo (el render offline, o el piso) en vez de publicar un 0 que
+        // `currentSampleRate()` tendria que volver a filtrar.
+        if (actualRate > 0) {
+            mStreamSampleRate.store(actualRate, std::memory_order_release);
+        }
 
         LOGI("=== BACKEND MANAGER STREAM STARTED ===");
         LOGI("  Backend type: %s", watermelon_audio::backendTypeToString(info.backendType));
@@ -578,7 +606,7 @@ bool AudioEngine::start(int fadeTimeMs) {
         LOGI("======================================");
 
         wma::logMessage(wma::LogLevel::INFO, "WMA_AUDIT",
-            "[START] getStreamInfo: actualRate=%d channels=%d frames=%d latencyMs=%.1f",
+            "[START] activeStreamInfo: actualRate=%d channels=%d frames=%d latencyMs=%.1f",
             actualRate, info.channelCount, info.framesPerBuffer, info.outputLatencyMs);
 
         if (actualRate > 0 && actualRate != expectedRate) {
@@ -686,7 +714,7 @@ bool AudioEngine::start(int fadeTimeMs) {
     // M5 — se publica para que `currentSampleRate()` (que es RT) no tenga que
     // desreferenciar `mStream`. Estamos con `mStateMutex` tomado, como los cinco sitios
     // que escriben el puntero.
-    mLegacyStreamSampleRate.store(sampleRate, std::memory_order_release);
+    mStreamSampleRate.store(sampleRate, std::memory_order_release);
 
     // DEBUG: Log stream info for routing diagnostics
     LOGI("=== OUTPUT STREAM OPENED ===");
@@ -855,6 +883,15 @@ void AudioEngine::stop() {
         LOGI("Stopping via BackendManager...");
 
         auto& manager = watermelon_audio::BackendManager::getInstance();
+
+        // MINI-033 — el rate se despublica ANTES de soltar el stream, igual que en
+        // `setLegacyStream(nullptr)` del camino Oboe: un lector RT no puede ver un rate
+        // que ya no corresponde a ningun stream abierto. Despues de esto
+        // `currentSampleRate()` cae al rung offline o al piso, que es lo correcto para
+        // un motor sin stream — y es lo que afirma
+        // `CurrentSampleRateTest.ReturnsToTheFloorAfterTheEngineStops`.
+        mStreamSampleRate.store(0, std::memory_order_release);
+
         manager.stop();
 
         // Wait for any remaining callbacks
@@ -1927,7 +1964,7 @@ void AudioEngine::setLegacyStream(std::nullptr_t) {
     // Se llama SIEMPRE con `mStateMutex` tomado (start() y stop() son sus unicos
     // llamadores). El atomic se limpia ANTES de soltar el puntero, para que un lector RT
     // nunca vea un rate que ya no corresponde a ningun stream abierto.
-    mLegacyStreamSampleRate.store(0, std::memory_order_release);
+    mStreamSampleRate.store(0, std::memory_order_release);
     std::lock_guard<std::mutex> lock(mStreamMutex);
     mStream.reset();
 }
@@ -1941,49 +1978,33 @@ std::shared_ptr<oboe::AudioStream> AudioEngine::legacyStream() const {
 }
 
 int AudioEngine::currentSampleRate() const {
-    // REQ-045.1 — esta funcion NO puede llamar a `getStreamInfo()` (ver el mutante
-    // M5b: volver a hacerlo reintroduce un lock que bloquea en el hilo RT).
+    // 🔴 ESTA FUNCION ES RT Y NO PUEDE TOMAR NI UN LOCK, EN NINGUNA RAMA.
     //
-    // Esta funcion esta declarada en `scripts/rt-coverage-baseline.txt`, o sea que la
-    // alcanza el hilo de audio de captura (`captureMonitoringBlock`). Con
-    // `mUseBackendManager == true`, llamar a `getStreamInfo()` la mandaba a SU rama
-    // legacy en cuanto `BackendManager` no estaba corriendo (`manager.isRunning()`
-    // falso), y esa rama hace `legacyStream()` -> `lock_guard(mStreamMutex)`: un lock
-    // bloqueante nuevo en el hilo RT que `check-rt-safety.py` NO ve, porque
-    // `getStreamInfo` resuelve a mas de una definicion (la de esta clase y la de
-    // `BackendManager`) y el walker no sigue una llamada ambigua.
+    // Esta declarada en `scripts/rt-coverage-baseline.txt`: la alcanza el hilo de
+    // captura, que la llama desde `captureMonitoringBlock` en CADA bloque. Hasta
+    // MINI-033 tenia dos formas de romper esa regla, y las dos eran invisibles para
+    // `check-rt-safety.py` porque `getStreamInfo` resolvia a mas de una definicion y el
+    // walker no sigue una llamada ambigua:
     //
-    // El arreglo: preguntarle DIRECTO a `BackendManager` (no a la funcion de esta
-    // clase) y, si no dio, leer el atomic — el mismo orden BM-primero/legacy-despues
-    // de antes, pero la mitad legacy sin lock.
+    //   1. (REQ-045.1, pagada) llamar a la `getStreamInfo()` de esta clase caia a su
+    //      rama legacy -> `legacyStream()` -> `lock_guard(mStreamMutex)`;
+    //   2. (MINI-033, pagada aca) preguntarle a `BackendManager` tomaba su `mMutex` via
+    //      `isRunning()` y otra vez via su `getStreamInfo()`, que ademas anidaba el
+    //      `mStreamInfoMutex` del backend activo. **Dos mutex por bloque de captura**,
+    //      desde c1f822d (2026-07-22).
     //
-    // `getInstance()` va ADENTRO de la rama, no antes: en el camino Oboe directo no hay
-    // nada que preguntarle, y si la instancia global ya se soltó
-    // (`setGlobalInstance(nullptr)` al destruir el motor, `watermelon_audio.cpp`) su
-    // fallback CONSTRUYE un `static BackendManager` — desde el hilo RT.
-    if (mUseBackendManager.load(std::memory_order_acquire)) {
-        auto& manager = watermelon_audio::BackendManager::getInstance();
-        // 🔴 DEUDA PREEXISTENTE, no de esta funcion: `BackendManager::isRunning()` y
-        // `BackendManager::getStreamInfo()` toman `BackendManager::mMutex` (un
-        // `lock_guard`, ver `backends/BackendManager.cpp`), y el segundo ademas el
-        // `mStreamInfoMutex` del backend activo: esta rama SIGUE tomando dos locks
-        // anidados en el hilo RT. Viene desde c1f822d (2026-07-22) y es invisible para
-        // `check-rt-safety.py` por la misma ambiguedad de `getStreamInfo`. La paga
-        // MINI-033 (un atomic de rate de stream en el motor + renombrar los dos
-        // `getStreamInfo` para que el lint vea la cadena), despues de este REQ.
-        if (manager.isRunning()) {
-            const auto info = manager.getStreamInfo();
-            if (info.sampleRate > 0) {
-                return info.sampleRate;
-            }
-        }
-    }
-
-    // El camino legacy: SOLO el atomic, nunca `legacyStream()` (M5b). Es lo unico que
-    // el hilo de audio puede hacer sin tomar `mStreamMutex`.
-    const int32_t legacy = mLegacyStreamSampleRate.load(std::memory_order_acquire);
-    if (legacy > 0) {
-        return legacy;
+    // Ahora la cadena entera son tres lecturas atomicas. El rung de arriba es
+    // `mStreamSampleRate`, que el hilo de CONTROL publica donde el motor ya se entera
+    // del rate (ver su KDoc en el header: los dos `start()`, el hook de cambio de
+    // config, y 0 al soltar el stream). El motor dejo de PREGUNTAR el rate y paso a
+    // RECORDARLO.
+    //
+    // Y para que reintroducir el lock sea ROJO en vez de una advertencia en prosa, los
+    // dos `getStreamInfo` de esa cadena tienen nombres unicos en el arbol
+    // (`queryStreamInfo` / `activeStreamInfo`): desde aca el walker los sigue.
+    const int32_t streamRate = mStreamSampleRate.load(std::memory_order_acquire);
+    if (streamRate > 0) {
+        return streamRate;
     }
 
     // El rate del render offline (REQ-015). Sin backend al que preguntarle es lo
@@ -1997,7 +2018,7 @@ int AudioEngine::currentSampleRate() const {
     return 48000;
 }
 
-bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const {
+bool AudioEngine::queryStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const {
     // REQ-045.1 — esta funcion NO es RT: puede tomar `BackendManager::mMutex` (rama
     // BackendManager) o `mStreamMutex` via `legacyStream()` (rama legacy). Sus
     // llamadores son todos de control (el poller de la UI, la C API, JNI). El hilo de
@@ -2008,7 +2029,7 @@ bool AudioEngine::getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double
     if (mUseBackendManager.load(std::memory_order_acquire)) {
         auto& manager = watermelon_audio::BackendManager::getInstance();
         if (manager.isRunning()) {
-            auto info = manager.getStreamInfo();
+            auto info = manager.activeStreamInfo();
             sampleRate = info.sampleRate;
             bufferSize = info.framesPerBuffer;
             latencyMillis = info.outputLatencyMs;
@@ -2059,7 +2080,7 @@ bool AudioEngine::getStreamInfoEx(int32_t& sampleRate, int32_t& bufferSize,
     if (mUseBackendManager.load(std::memory_order_acquire)) {
         auto& manager = watermelon_audio::BackendManager::getInstance();
         if (manager.isRunning()) {
-            auto info = manager.getStreamInfo();
+            auto info = manager.activeStreamInfo();
             sampleRate = info.sampleRate;
             bufferSize = info.framesPerBuffer;
             latencyMillis = info.outputLatencyMs;
@@ -2069,7 +2090,7 @@ bool AudioEngine::getStreamInfoEx(int32_t& sampleRate, int32_t& bufferSize,
         }
     }
 
-    if (!getStreamInfo(sampleRate, bufferSize, latencyMillis)) {
+    if (!queryStreamInfo(sampleRate, bufferSize, latencyMillis)) {
         return false;
     }
 
@@ -2553,6 +2574,18 @@ void AudioEngine::onStreamConfigChanged(const watermelon_audio::StreamInfo& newI
 
     // Update sample rate in all components
     int sampleRate = newInfo.sampleRate;
+
+    // MINI-033 — el rate del stream, PARA EL HILO RT, y antes de re-preparar.
+    //
+    // Este es el unico hook de cambio de rate en caliente (REQ-006.2), asi que es el
+    // unico camino por el que `currentSampleRate()` puede seguir a un rate nuevo sin
+    // que el motor reinicie. Va ANTES de `configureComponentsWithSampleRate()` por la
+    // misma razon que el del rate de CAPTURA, mas abajo en esta funcion: publicar es un
+    // store que no puede fallar, re-preparar puede no ocurrir (quiesce), y seria un
+    // error que un drenaje fallido dejara ademas el rate sin publicar.
+    if (sampleRate > 0) {
+        mStreamSampleRate.store(sampleRate, std::memory_order_release);
+    }
 
     // REQ-006.2 — se DELEGA en vez de mantener una lista propia.
     //

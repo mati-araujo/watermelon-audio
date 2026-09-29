@@ -261,9 +261,16 @@ void BackendManager::stop() {
 // leer EN VIVO del backend con un lock normal, y pueden hacerlo porque mMutex ya
 // no se sostiene alrededor de nada lento: una reapertura corre bajo mOpMutex.
 //
-// En vivo y no un snapshot, además, porque un device puede renegociar el sample
-// rate sin que el motor reinicie y `currentSampleRate()` tiene que verlo — lo
-// pincha FollowsTheBackendAcrossARenegotiation.
+// En vivo y no un snapshot, además, porque la UI pollea estos tres por frame y un
+// device puede renegociar el sample rate sin que el motor reinicie.
+//
+// 🔴 `currentSampleRate()` YA NO ESTÁ ENTRE ESOS LECTORES (MINI-033), y por eso
+// `activeStreamInfo()` se llama así: era `getStreamInfo()`, un nombre que el árbol
+// define muchas veces, y esa ambigüedad dejaba ciego al walker de
+// `check-rt-safety.py` — de modo que el hilo RT de captura entraba acá, tomaba este
+// `mMutex` y anidaba el `mStreamInfoMutex` del backend, en cada bloque, con el lint
+// en verde. El rate que ve el RT sale ahora de un atomic del motor. **Estos tres
+// lectores son de CONTROL: ninguno se llama desde el hilo de audio.**
 //
 // Que esto sea seguro NO lo da este archivo: lo da el contrato de IAudioBackend,
 // que desde #117 obliga a cada implementación a sincronizar su propio estado
@@ -285,7 +292,7 @@ bool BackendManager::isRunning() const {
     return mActiveBackend && mActiveBackend->isRunning();
 }
 
-StreamInfo BackendManager::getStreamInfo() const {
+StreamInfo BackendManager::activeStreamInfo() const {
     std::lock_guard<std::mutex> lock(mMutex);
     return mActiveBackend ? mActiveBackend->getStreamInfo() : StreamInfo{};
 }

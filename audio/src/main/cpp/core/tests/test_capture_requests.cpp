@@ -239,7 +239,7 @@ TEST_F(CaptureRequestTest, StateReadsDoNotBlockWhileTheStreamIsBeingReopened) {
     EXPECT_TRUE(mManager->isCaptureRequestPending());
     EXPECT_FALSE(mManager->isCaptureLive()) << "todavía no hay captura";
     EXPECT_FALSE(mManager->isRunning()) << "el stream está cerrado a mitad del reopen";
-    (void)mManager->getStreamInfo();  // no puede colgarse
+    (void)mManager->activeStreamInfo();  // no puede colgarse
 
     mBackend->releaseStart();
     mManager->waitForCaptureRequest();
@@ -303,7 +303,7 @@ TEST_F(CaptureRequestTest, ReadingStateWhileTheStreamIsBeingReopenedIsNotADataRa
     std::thread reader([&] {
         while (!done.load(std::memory_order_acquire)) {
             (void)mManager->isRunning();
-            (void)mManager->getStreamInfo();
+            (void)mManager->activeStreamInfo();
             (void)mManager->isCaptureLive();
         }
     });

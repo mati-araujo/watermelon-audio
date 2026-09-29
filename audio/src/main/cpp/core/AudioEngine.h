@@ -1034,29 +1034,52 @@ private:
      * mutex via `legacyStream()`. `check-rt-safety.py` no lo veia porque `getStreamInfo`
      * resuelve a mas de una definicion y el walker no sigue una llamada ambigua.
      *
-     * Ahora `currentSampleRate()` no llama mas a `getStreamInfo()`: le pregunta directo
-     * a `BackendManager` y, si no hay nada que contestar, lee `mLegacyStreamSampleRate`
-     * (un atomic) — nunca este mutex. El orden de toma sigue siendo `mStateMutex` ->
-     * `mStreamMutex`; los lectores de control (`getStreamInfo()`, no RT) toman solo
-     * este.
+     * Ahora `currentSampleRate()` no llama mas a `queryStreamInfo()`: lee `mStreamSampleRate`
+     * (un atomic) y nada mas — nunca este mutex, y desde MINI-033 tampoco los de
+     * `BackendManager`. El orden de toma sigue siendo `mStateMutex` -> `mStreamMutex`; los
+     * lectores de control (`queryStreamInfo()`, no RT) toman solo este.
      *
-     * 🔴 Lo que SIGUE entrando al hilo RT, y es deuda preexistente aparte (no de este
-     * mutex): con `mUseBackendManager == true` y el manager CORRIENDO,
-     * `currentSampleRate()` toma `BackendManager::mMutex` (via `isRunning()` +
-     * `getStreamInfo()` de `BackendManager`). Viene desde c1f822d (2026-07-22), tambien
-     * invisible para el lint por la misma ambiguedad, y se sigue aparte: es el rate en
-     * caliente de REQ-006.
+     * 🔴 MINI-033 cerro lo que este bloque declaraba como deuda: con
+     * `mUseBackendManager == true` y el manager CORRIENDO, `currentSampleRate()` tomaba
+     * ADEMAS `BackendManager::mMutex` (via `isRunning()` + el `getStreamInfo()` de
+     * `BackendManager`) y, anidado, el `mStreamInfoMutex` del backend activo — dos mutex
+     * en cada bloque de captura, desde c1f822d (2026-07-22). **Ninguna rama del camino RT
+     * toma un lock ya.** Y para que reintroducirlo sea ROJO y no una nota en prosa, los dos
+     * `getStreamInfo` de la cadena se renombraron a nombres unicos en el arbol
+     * (`AudioEngine::queryStreamInfo`, `BackendManager::activeStreamInfo`): el walker de
+     * `check-rt-safety.py` solo sigue lo que resuelve a UNA definicion, y era esa
+     * ambiguedad la que lo dejaba ciego.
      */
     mutable std::mutex mStreamMutex;
 
     /**
-     * El sample rate del stream Oboe ABIERTO, o 0 si no hay (REQ-045, M5).
+     * El sample rate del stream que el motor tiene ABIERTO, o 0 si no hay
+     * (REQ-045 M5 para el camino Oboe; generalizado a los dos caminos por MINI-033).
      *
-     * Existe para que `currentSampleRate()` —que es RT: esta declarado en
-     * `scripts/rt-coverage-baseline.txt`— conteste sin tocar `mStream`. Lo escriben los
-     * mismos cinco lugares que el puntero, con `mStateMutex` tomado.
+     * 🔴 ES EL UNICO RUNG DE ARRIBA DE `currentSampleRate()`, que es RT: esta declarado
+     * en `scripts/rt-coverage-baseline.txt` y lo llama `captureMonitoringBlock` en cada
+     * bloque de captura. Existe para que esa funcion conteste **sin tocar `mStream` ni
+     * `BackendManager`**, que era lo que le costaba dos mutex anidados por bloque.
+     *
+     * Escritores, todos en el hilo de CONTROL y todos con `mStateMutex` tomado salvo el
+     * hook (que el contrato de `IAudioBackend` declara no-RT):
+     *   - `start()`, camino Oboe directo: el rate del stream recien abierto;
+     *   - `start()`, camino `BackendManager`: el `actualRate` que negocio el device, justo
+     *     despues de `manager.start()` — **se haya podido re-preparar el DSP o no**
+     *     (R-MOT-1: si el quiesce de REQ-006.1 falla el DSP queda al rate viejo, pero lo
+     *     que el stream corre es este, y es lo que el flag de mismatch y el largo de los
+     *     fades necesitan);
+     *   - `onStreamConfigChanged()`: el unico hook de cambio de rate en caliente;
+     *   - `0` en `stop()` y en `rollbackFailedStart()`, ANTES de soltar el stream.
+     *
+     * **El costo, declarado y aprobado**: un cambio de rate INTERNO del backend que nadie
+     * notifica (una reapertura de Oboe tras desconexion, un cambio de ruta en iOS) deja
+     * aca el valor viejo. Es exactamente el mismo estado en que queda el DSP —
+     * `onStreamConfigChanged` no lo dispara ningun backend todavia (deuda de REQ-006)—
+     * asi que no abre una clase nueva: el rate que ve el RT pasa a coincidir con el rate
+     * al que esta preparado el motor.
      */
-    std::atomic<int32_t> mLegacyStreamSampleRate{0};
+    std::atomic<int32_t> mStreamSampleRate{0};
 
     // Opaque pointer to Oboe callback adapter (defined in AudioEngine.cpp)
     // Using void* + custom deleter to avoid incomplete type issue with unique_ptr
@@ -1506,8 +1529,15 @@ public:
     /**
      * @brief Gets stream info (sample rate, buffer size, latency).
      * Works with both legacy Oboe path and BackendManager path.
+     *
+     * @warning Lector de CONTROL: toma `BackendManager::mMutex` (rama BackendManager) o
+     *          `mStreamMutex` via `legacyStream()` (rama legacy). **No se puede llamar
+     *          desde el hilo de audio** — para el rate está `currentSampleRate()`, que
+     *          lee un atomic. El nombre es único en el árbol a propósito (MINI-033):
+     *          como `getStreamInfo()` tiene muchas definiciones, el walker de
+     *          `check-rt-safety.py` no seguía la llamada y el lock quedaba invisible.
      */
-    bool getStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const;
+    bool queryStreamInfo(int32_t& sampleRate, int32_t& bufferSize, double& latencyMillis) const;
 
     /**
      * @brief Lo mismo, más los canales y el modo de latencia del stream ABIERTO
@@ -1561,8 +1591,8 @@ public:
     /**
      * @brief The sample rate actually in effect, whatever the audio path.
      *
-     * Resolves in order: the running stream (BackendManager or legacy Oboe,
-     * via getStreamInfo) → the offline render rate (`startOffline`, its only
+     * Resolves in order: `mStreamSampleRate` —el rate del stream que el motor abrió, por
+     * cualquiera de los dos caminos— → the offline render rate (`startOffline`, its only
      * writer) → 48000.
      *
      * Use this instead of reaching for mStream directly. Call sites that did
@@ -1571,8 +1601,17 @@ public:
      * the fade in stopWithFade came to be skipped entirely and how SoundFonts
      * ended up loaded at a stale rate rather than the negotiated one.
      *
-     * Never returns <= 0. Not RT-safe (may touch the backend); call from
-     * control threads only.
+     * Never returns <= 0.
+     *
+     * 🔴 **ES RT-SAFE Y TIENE QUE SEGUIR SIÉNDOLO** (MINI-033). Este bloque decía
+     * exactamente lo contrario —"Not RT-safe (may touch the backend); call from control
+     * threads only"— y era falso en las dos mitades: la llama `captureMonitoringBlock`
+     * desde el hilo de captura en cada bloque (está en
+     * `scripts/rt-coverage-baseline.txt`), y tocar el backend era precisamente el
+     * defecto, no el contrato. Hoy son tres lecturas atómicas y ningún lock. No le
+     * agregues una llamada a `queryStreamInfo()` ni a `BackendManager`: eso sale ROJO en
+     * `check-rt-safety.py`, y sale rojo porque esos dos tienen nombres únicos en el
+     * árbol — ver el KDoc de `mStreamSampleRate`.
      */
     int currentSampleRate() const;
 
