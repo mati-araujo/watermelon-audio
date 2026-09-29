@@ -1,0 +1,16 @@
+# REQ-048 — corpus hostil de regresion (AC-048.1, AC-048.5)
+#
+# Cada archivo es un artefacto que produjo el fuzzer de REQ-048 S0 (libFuzzer, clang 18.1.3,
+# ubuntu:24.04, 29/09), copiado TAL CUAL: no se escriben inputs hostiles a mano (decision
+# del lider, 29/09). Uno por firma de crash, elegido de la re-ejecucion de los 2385
+# artefactos (triage de S0). Se versionan porque son chicos (0,8 a 4 KB) y nuestros.
+#
+# "hoy" = stb_vorbis 1.22 (nothings/stb master), C++20, ASan+UBSan.
+# "fork" = libsdl-org/SDL_mixer@df66ae893c91b0f6fa5d026a195bb278213d007d src/stb_vorbis/stb_vorbis.h
+#
+# firma  archivo                          sha256                                                            artefacto de S0                                   hoy (lo que lo mata)                         fork
+F1  stb_F1_vendor_len.ogg          7e53e6351e91664bcf335828b31bddd3d090d7c2697832b7b0ccfba10e540c27  crash-134a9089041f6d6d43d63144dd6e8d236d23b5e9  ASan requested-allocation-size stb:3653       rechaza
+F2  stb_F2_comment_list_len.ogg    268e49f37676a3031141a93ebaf9924b853414af9e4de8301db1bb8ef6d55490  crash-014814878bda3091510bec0b9b6bd4b7dd98e9fe  ASan requested-allocation-size stb:3664       rechaza
+F3  stb_F3_comment_len.ogg         abebc769eaa4f4175cf2f33ef3196123a45fc19325ad7478a99774ad951b843c  crash-021b9a9d8932807d949688d57739158243aecf02  ASan requested-allocation-size stb:3670       rechaza
+F4  stb_F4_deinit_null.ogg         7ea26e883034d8a892ddd6f6cc4d293ff7061c76b293a36fa482788fd979176f  crash-12e8ea347eb420bd8a80fc1364e03032a2652818  UBSan null load vorbis_deinit stb:4214         rechaza
+F5  stb_F5_lookup1_values.ogg      1c4f71b514ba830d5bdffcefbc51eb4776bb5dc070d26f34605c12fc5e97c2d6  crash-057e312e69499a075b5392b2f768330439ba471e  UBSan float-cast-overflow lookup1_values stb:1244  rechaza con el parche propio (sin el, el fork solo apaga UBSan)
