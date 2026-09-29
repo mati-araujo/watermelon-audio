@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -208,26 +209,70 @@ struct WavData {
 };
 
 /**
- * @brief Read a WAV file into stereo interleaved float buffer.
- *        Supports 16-bit and 24-bit PCM. Mono files are duplicated to stereo.
- * @param filePath Input file path
- * @return WavData with buffer, or empty on failure
+ * @brief What the HEADER of a WAV says, with not one sample decoded (REQ-045 D6).
+ *
+ * `numFrames` is derived the same way readWav() derives it (`dataSize` divided by
+ * the block size the `fmt ` chunk declares), so a caller can size — or REFUSE —
+ * an allocation before paying for the decode. `dataSizeBytes` is what the chunk
+ * declares, not what the file actually holds: a truncated file reports the
+ * declared size here and readWav() tolerates the short read.
  */
-inline WavData readWav(const char* filePath) {
-    WavData result;
-    if (!filePath) return result;
+struct WavInfo {
+    int numFrames{0};
+    int sampleRate{0};
+    int numChannels{0};
+    int bitsPerSample{0};
+    int audioFormat{0};
+    uint32_t dataSizeBytes{0};
+};
 
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file.is_open()) return result;
+/** Why a WAV could not be read. `Io` is "the file did not open", nothing else. */
+enum class WavReadStatus {
+    Ok = 0,
+    Io = 1,
+    UnsupportedFormat = 2,
+};
 
-    // Read and validate RIFF header
-    char riff[4], wave[4];
-    uint32_t fileSize;
+namespace detail {
+
+/**
+ * @brief The decode probe (REQ-045 AC-045.8).
+ *
+ * Bumped once per readWav() that reaches the sample-decoding stage. It exists so
+ * a test can assert that a rejected import NEVER DECODED — an assertion that
+ * cannot be made with wall-clock time (a fast machine decodes 5 minutes of audio
+ * in the noise) nor with process memory (the allocator does not hand pages back
+ * on a schedule a test can observe). Relaxed: nothing orders on it.
+ */
+inline std::atomic<uint64_t>& decodeEntries() {
+    static std::atomic<uint64_t> counter{0};
+    return counter;
+}
+
+/**
+ * @brief Walk RIFF to the `fmt ` + `data` chunks and validate the format.
+ *
+ * Extracted VERBATIM from readWav() so both entry points ask the file the same
+ * questions in the same order: on Ok the stream is left exactly where readWav()
+ * used to find it (right after the `data` chunk header), which is what lets the
+ * decode keep reading from `file` without seeking.
+ */
+inline WavReadStatus scanWavHeader(std::ifstream& file, WavInfo& out) {
+    // Read and validate RIFF header.
+    //
+    // 🔴 Zero-initialised, and the read is CHECKED: an ifstream opens on a directory on
+    // both macOS and Linux, and every read then fails leaving these arrays untouched —
+    // the memcmp below was comparing uninitialised stack. "I could not read the first
+    // twelve bytes" is an IO failure, not a format one, and a consumer told the wrong
+    // one goes looking for a converter instead of looking at the path it passed.
+    char riff[4] = {0}, wave[4] = {0};
+    uint32_t fileSize = 0;
     file.read(riff, 4);
     file.read(reinterpret_cast<char*>(&fileSize), 4);
     file.read(wave, 4);
+    if (!file.good()) return WavReadStatus::Io;
     if (std::memcmp(riff, "RIFF", 4) != 0 || std::memcmp(wave, "WAVE", 4) != 0) {
-        return result;
+        return WavReadStatus::UnsupportedFormat;
     }
 
     // Find fmt and data chunks
@@ -262,16 +307,77 @@ inline WavData readWav(const char* filePath) {
         }
     }
 
-    if (!foundFmt || !foundData) return result;
+    if (!foundFmt || !foundData) return WavReadStatus::UnsupportedFormat;
     // Support PCM (1) and IEEE float (3)
-    if (audioFormat != 1 && audioFormat != 3) return result;
-    if (numChannels < 1 || numChannels > 2) return result;
-    if (audioFormat == 1 && bitsPerSample != 16 && bitsPerSample != 24) return result;
-    if (audioFormat == 3 && bitsPerSample != 32) return result;
+    if (audioFormat != 1 && audioFormat != 3) return WavReadStatus::UnsupportedFormat;
+    if (numChannels < 1 || numChannels > 2) return WavReadStatus::UnsupportedFormat;
+    if (audioFormat == 1 && bitsPerSample != 16 && bitsPerSample != 24)
+        return WavReadStatus::UnsupportedFormat;
+    if (audioFormat == 3 && bitsPerSample != 32) return WavReadStatus::UnsupportedFormat;
 
-    int bytesPerSample = bitsPerSample / 8;
-    int totalSamples = static_cast<int>(dataSize) / bytesPerSample;
-    int numFrames = totalSamples / numChannels;
+    const int bytesPerSample = bitsPerSample / 8;
+    const int totalSamples = static_cast<int>(dataSize) / bytesPerSample;
+
+    out.numFrames     = totalSamples / numChannels;
+    out.sampleRate    = static_cast<int>(sampleRate);
+    out.numChannels   = static_cast<int>(numChannels);
+    out.bitsPerSample = static_cast<int>(bitsPerSample);
+    out.audioFormat   = static_cast<int>(audioFormat);
+    out.dataSizeBytes = dataSize;
+    return WavReadStatus::Ok;
+}
+
+}  // namespace detail
+
+/**
+ * @brief How many times readWav() has entered its decode stage (test probe).
+ *
+ * Production does not read this: it is the only way to assert the ABSENCE of a
+ * decode. See detail::decodeEntries().
+ */
+inline uint64_t wavDecodeEntries() { return detail::decodeEntries().load(std::memory_order_relaxed); }
+
+/**
+ * @brief Read ONLY the header of a WAV: frames, rate, channels, format.
+ *
+ * O(header) in time and memory — it never touches the sample payload, so a
+ * caller can refuse a 5-minute file without the 55 MB the decode would cost.
+ */
+inline WavReadStatus readWavInfo(const char* filePath, WavInfo& out) {
+    out = WavInfo{};
+    if (!filePath) return WavReadStatus::Io;
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file.is_open()) return WavReadStatus::Io;
+    return detail::scanWavHeader(file, out);
+}
+
+/**
+ * @brief Read a WAV file into stereo interleaved float buffer.
+ *        Supports 16-bit and 24-bit PCM. Mono files are duplicated to stereo.
+ * @param filePath Input file path
+ * @return WavData with buffer, or empty on failure
+ */
+inline WavData readWav(const char* filePath) {
+    WavData result;
+    if (!filePath) return result;
+
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file.is_open()) return result;
+
+    WavInfo info;
+    if (detail::scanWavHeader(file, info) != WavReadStatus::Ok) return result;
+
+    const uint16_t audioFormat = static_cast<uint16_t>(info.audioFormat);
+    const uint16_t numChannels = static_cast<uint16_t>(info.numChannels);
+    const uint16_t bitsPerSample = static_cast<uint16_t>(info.bitsPerSample);
+    const uint32_t sampleRate = static_cast<uint32_t>(info.sampleRate);
+    const uint32_t dataSize = info.dataSizeBytes;
+    const int numFrames = info.numFrames;
+
+    // Everything below this line decodes samples. The probe is bumped HERE and
+    // not at the top of the function on purpose: a header-only rejection must
+    // leave it untouched, which is exactly what AC-045.8 asserts.
+    detail::decodeEntries().fetch_add(1, std::memory_order_relaxed);
 
     // Read raw PCM data
     std::vector<uint8_t> rawData(dataSize);

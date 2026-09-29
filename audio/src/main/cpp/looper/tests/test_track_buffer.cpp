@@ -515,3 +515,88 @@ TEST(TrackBuffer, TrimReclaimsReservedMemory) {
     const size_t reservedTrimmed = tb.reservedBytes();
     EXPECT_LT(reservedTrimmed, reservedFull / 4) << "trim must reclaim the unused RAM";
 }
+
+// ===========================================================================
+// REQ-045 D5 — AC-045.7: `saveUndo` dice que NO, y repetirlo no reserva más.
+//
+// Las dos mitades del defecto vivían en una línea:
+// `mPool.prefill(mPool.freeCount() + mChunked.ownedChunks())` pedía los chunks
+// libres que YA tenía MÁS uno por página en uso, así que cada llamada agrandaba
+// el pool por el contenido entero; y devolvía `true` sin mirar presupuesto
+// ninguno, así que el consumidor no se podía enterar.
+//
+// 🔴 Los dos tests valen para los DOS backends y eso importa: el suite se
+// compila dos veces (paged por default, `WM_LOOPER_DENSE_BUFFER` la otra), y un
+// chequeo de presupuesto que sólo existiera en uno sería el defecto D1 otra vez,
+// con otra cara.
+// ===========================================================================
+
+// AC-045.7 — sin techo no entra nada: `false`, y NADA reservado.
+//
+// Lo que hace afirmable el `false` es el gemelo de abajo (el mismo estado con
+// techo de sobra dice `true`): sin él, "devolvió false" no se distingue de
+// "devuelve false siempre", que es el mismo agujero que tenía el `true` de hoy.
+TEST(TrackBuffer, Req045SaveUndoRefusesWhenTheHeadroomDoesNotFit) {
+    TrackBuffer tb;
+    ASSERT_GT(tb.allocate(200'000, 48000), 0u);
+    writeConstant(tb, 0.5f, 200'000);
+    tb.finalizeRecording();
+
+    const size_t reservedBefore = tb.reservedBytes();
+    EXPECT_FALSE(tb.saveUndoSnapshot(/*maxExtraBytes=*/0))
+        << "con cero de techo no hay headroom de copy-on-write que quepa";
+    EXPECT_FALSE(tb.hasUndo()) << "un saveUndo que dijo que no, no puede haber dejado snapshot";
+    EXPECT_EQ(tb.reservedBytes(), reservedBefore)
+        << "rechazar y reservar igual es la peor de las dos: cobra sin entregar";
+
+    EXPECT_TRUE(tb.saveUndoSnapshot(wm::TrackStorage::kNoExtraLimit))
+        << "el mismo estado, con techo de sobra, tiene que poder";
+    EXPECT_TRUE(tb.hasUndo());
+}
+
+// AC-045.7 — K snapshots sin overdub entre medio no reservan K veces.
+//
+// El mutante que esto mata es el código de hoy: con `free + owned`, el pool crece
+// por el contenido en CADA llamada, o sea que diez undos de una pista de 1,6 MB
+// se comen 16. Se mide DESPUÉS del primer snapshot a propósito: el primero SÍ
+// puede reservar (el headroom de COW no existía), y lo que el defecto hace es no
+// parar nunca.
+TEST(TrackBuffer, Req045RepeatedSaveUndoDoesNotKeepReserving) {
+    TrackBuffer tb;
+    ASSERT_GT(tb.allocate(200'000, 48000), 0u);
+    writeConstant(tb, 0.5f, 200'000);
+    tb.finalizeRecording();
+
+    ASSERT_TRUE(tb.saveUndoSnapshot());
+    const size_t afterFirst = tb.reservedBytes();
+
+    for (int k = 0; k < 10; ++k) {
+        ASSERT_TRUE(tb.saveUndoSnapshot()) << "snapshot " << k << " sin overdub tiene que poder";
+    }
+    EXPECT_EQ(tb.reservedBytes(), afterFirst)
+        << "diez snapshots sin overdub entre medio reservaron de más: " << tb.reservedBytes()
+        << " contra " << afterFirst;
+}
+
+// REQ-045 (review, item 4) — la fórmula del presupuesto CUBRE la reserva real.
+//
+// El chequeo del import usaba bytes lógicos (`frames × 2 × 4`) y el backend paged
+// reserva chunks enteros de 256 KB: 33 000 frames son 264 KB lógicos y 512 KB
+// reservados. Un chequeo que subestima PASA y después deja `reservedBytes` arriba del
+// tope, que es exactamente el invariante que el presupuesto existe para sostener.
+//
+// La dirección de la desigualdad es la que importa: la fórmula no puede quedar CORTA.
+// El segundo assert evita que "no quedarse corta" se cumpla con un cheque en blanco.
+TEST(TrackBuffer, Req045TheBudgetFormulaCoversTheRealReservation) {
+    TrackBuffer tb;
+    const int frames = 33'000;                 // 1,0078 chunks: fuerza el redondeo
+    ASSERT_GT(tb.allocate(frames, 48000), 0u);
+
+    const size_t formula = wm::TrackStorage::reservationBytesFor(frames);
+    EXPECT_LE(tb.reservedBytes(), formula)
+        << "la fórmula del presupuesto (" << formula << " B) es MENOR que lo que la pista "
+        << "reserva de verdad (" << tb.reservedBytes() << " B): el chequeo pasa y la reserva "
+        << "se va arriba del tope";
+    EXPECT_LE(formula, 2 * tb.reservedBytes())
+        << "la fórmula no puede ser un cheque en blanco: eso rechazaría imports que entran";
+}

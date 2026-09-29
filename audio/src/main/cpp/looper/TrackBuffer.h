@@ -545,10 +545,13 @@ public:
 
     /**
      * @brief Save current buffer state for undo. Call before overdub.
-     * @return true if snapshot saved successfully
+     * @param maxExtraBytes how much NEW RAM the snapshot may reserve (REQ-045 D5).
+     *        The looper derives it from the memory budget; the default is no ceiling.
+     * @return true if snapshot saved successfully; false — having reserved nothing —
+     *         when the copy-on-write headroom does not fit in @p maxExtraBytes.
      */
-    bool saveUndoSnapshot() {
-        if (!mStore.saveUndo()) return false;
+    bool saveUndoSnapshot(size_t maxExtraBytes = wm::TrackStorage::kNoExtraLimit) {
+        if (!mStore.saveUndo(maxExtraBytes)) return false;
         mHasUndo.store(true, std::memory_order_release);
         return true;
     }

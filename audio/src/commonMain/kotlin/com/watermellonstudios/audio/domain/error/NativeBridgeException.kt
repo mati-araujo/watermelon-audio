@@ -151,6 +151,39 @@ sealed class NativeBridgeException(
     )
 
     /**
+     * Lo que la operación necesitaba reservar no entra en el presupuesto de memoria
+     * (REQ-045 D6). No es "no hay RAM": es "el tope configurado no lo permite", y por
+     * eso la salida del consumidor es liberar pistas o subir el tier, no reintentar.
+     *
+     * @property neededBytes lo que hacía falta, si se conoce (-1 si no).
+     * @property budgetBytes el tope vigente, si se conoce (-1 si no).
+     */
+    class MemoryBudgetExceeded(
+        val neededBytes: Long = -1,
+        val budgetBytes: Long = -1,
+        message: String = "Memory budget exceeded" +
+            if (neededBytes >= 0) " (needed $neededBytes B, budget $budgetBytes B)" else "",
+    ) : NativeBridgeException(message, NativeErrorCode.MEMORY_BUDGET_EXCEEDED)
+
+    /**
+     * El archivo abrió y el motor no sabe decodificarlo (REQ-045 D6). WAV: PCM de 16 o
+     * 24 bits e IEEE float de 32, 1 o 2 canales.
+     */
+    class UnsupportedFormat(
+        val path: String? = null,
+        message: String = "Unsupported audio format" + if (path != null) ": $path" else "",
+    ) : NativeBridgeException(message, NativeErrorCode.UNSUPPORTED_FORMAT)
+
+    /**
+     * El archivo no abrió: falta, no se puede leer, o la ruta era nula (REQ-045 D6).
+     * Distinto de [UnsupportedFormat] a propósito: la salida del consumidor es otra.
+     */
+    class IoError(
+        val path: String? = null,
+        message: String = "I/O error" + if (path != null) ": $path" else "",
+    ) : NativeBridgeException(message, NativeErrorCode.IO_ERROR)
+
+    /**
      * An unknown native error occurred.
      *
      * @property nativeCode The raw error code from native
@@ -185,6 +218,9 @@ sealed class NativeBridgeException(
                 NativeErrorCode.INVALID_OPERATION -> InvalidOperation(context)
                 NativeErrorCode.INVALID_EFFECT_TYPE -> InvalidEffectType(-1)
                 NativeErrorCode.TIMEOUT -> Timeout(context, 0)
+                NativeErrorCode.MEMORY_BUDGET_EXCEEDED -> MemoryBudgetExceeded()
+                NativeErrorCode.UNSUPPORTED_FORMAT -> UnsupportedFormat(context.ifEmpty { null })
+                NativeErrorCode.IO_ERROR -> IoError(context.ifEmpty { null })
                 else -> NativeError(code, context)
             }
         }

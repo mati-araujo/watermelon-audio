@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -794,4 +795,369 @@ TEST(AudioLooper, QuantizedSyncArmStartsAtNextBarAndPhaseLocks) {
     EXPECT_LE(circularDist(takePos, expected, refLen), 512)
         << "rotated take must phase-lock to the reference (refPos=" << refPos
         << " startOffset=" << startOffset << " takePos=" << takePos << ")";
+}
+
+// ===========================================================================
+// REQ-045 — el looper que dice que no (D5, D6).
+//
+// Helpers locales: un WAV del que sólo existe la CABECERA. Es lo único que hace
+// afirmable "rechazó sin decodificar" sin depender del tiempo: si el rechazo
+// mirara las muestras, tendría que leer un cuerpo que no está.
+// ===========================================================================
+
+namespace {
+
+// 44 bytes que declaran `frames` de float32 estéreo y NINGÚN byte de payload.
+// No es un WAV inválido a propósito: `wav::readWavInfo` lo lee entero y correcto
+// —el formato y el tamaño declarado viven en la cabecera— mientras que decodificar
+// los `frames × 8` bytes es imposible porque no existen. Un WAV de 5 minutos de
+// verdad pesaría 55 MB y no se puede commitear; éste se GENERA y pesa 44 bytes.
+bool makeWavHeaderOnly(const std::string& path, int64_t frames, int sr) {
+    const uint32_t dataSize = static_cast<uint32_t>(frames * 8);
+    std::ofstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+    auto u32 = [&](uint32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
+    auto u16 = [&](uint16_t v) { f.write(reinterpret_cast<const char*>(&v), 2); };
+    f.write("RIFF", 4);
+    u32(36 + dataSize);
+    f.write("WAVE", 4);
+    f.write("fmt ", 4);
+    u32(16);
+    u16(3);                                   // IEEE float
+    u16(2);                                   // estéreo
+    u32(static_cast<uint32_t>(sr));
+    u32(static_cast<uint32_t>(sr) * 8);       // byteRate
+    u16(8);                                   // blockAlign
+    u16(32);                                  // bits
+    f.write("data", 4);
+    u32(dataSize);
+    return f.good();
+}
+
+// El contenido de una pista, para poder afirmar que un import fallido NO la tocó.
+struct TrackFingerprint {
+    bool active = false;
+    bool muted = false;
+    int length = 0;
+    float firstL = 0.0f;
+    float midL = 0.0f;
+    float lastL = 0.0f;
+
+    bool operator==(const TrackFingerprint& o) const {
+        return active == o.active && muted == o.muted && length == o.length
+            && firstL == o.firstL && midL == o.midL && lastL == o.lastL;
+    }
+};
+
+TrackFingerprint fingerprint(const AudioLooper& looper, int track) {
+    TrackFingerprint fp;
+    fp.active = looper.isTrackActive(track);
+    fp.length = looper.getTrackLengthFrames(track);
+    const auto& tb = looper.getTrack(track);
+    fp.muted = tb.isMuted();
+    if (fp.length > 0) {
+        fp.firstL = tb.sampleAt(0, 0);
+        fp.midL   = tb.sampleAt(fp.length / 2, 0);
+        fp.lastL  = tb.sampleAt(fp.length - 1, 0);
+    }
+    return fp;
+}
+
+}  // namespace
+
+// AC-045.7 — con el presupuesto lleno, `saveUndoSnapshot` devuelve false.
+//
+// El presupuesto se llena con la pista misma (6M frames = 48 MB contra el default
+// de 48 MB), así que el headroom de copy-on-write no tiene dónde caer. El gemelo
+// —el mismo estado con el presupuesto al doble— es el que hace afirmable el false.
+TEST(AudioLooper, Req045SaveUndoRefusesWhenTheBudgetIsFull) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.setTailMs(0);
+
+    const int nearMax = 6'000'000;                   // 48 MB, el presupuesto entero
+    ASSERT_TRUE(looper.prepareTrack(0, nearMax, kSR));
+    looper.startRecording(0);
+    feed(looper, 0.5f, nearMax, 4096);
+    looper.stopRecording();
+    ASSERT_TRUE(looper.isTrackActive(0));
+
+    EXPECT_FALSE(looper.saveUndoSnapshot(0))
+        << "el undo necesita headroom y el presupuesto está lleno: tiene que decir que no";
+    EXPECT_FALSE(looper.hasUndo(0));
+
+    AudioLooper::LooperCapabilities caps = looper.getCapabilities();
+    caps.memoryBudgetBytes = 128ULL * 1024 * 1024;
+    looper.setCapabilities(caps);
+    EXPECT_TRUE(looper.saveUndoSnapshot(0))
+        << "con presupuesto de sobra el MISMO estado tiene que poder";
+    EXPECT_TRUE(looper.hasUndo(0));
+}
+
+// AC-045.8 — rechazo por presupuesto **desde la cabecera**: el lector de muestras
+// NO corrió.
+//
+// 🔴 La sonda es un contador del lector, no el tiempo ni la memoria del proceso.
+// El tiempo no sirve: decodificar 5 minutos entra en el ruido de una máquina
+// rápida, y en una cargada un rechazo correcto puede tardar más que un decode. La
+// memoria tampoco: el allocator no devuelve páginas en un momento que un test
+// pueda observar. Lo único que responde "¿decodificó?" es contar entradas al
+// decode, y el fixture de 44 bytes lo vuelve doblemente afirmable: si mirara las
+// muestras, tendría que leer un cuerpo que no existe.
+TEST(AudioLooper, Req045ImportRejectsFromTheHeaderWithoutDecoding) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    WavTempFile wf("wm_r045_cinco_minutos.wav");
+    ASSERT_TRUE(makeWavHeaderOnly(wf.str(), /*frames=*/5 * 60 * kSR, kSR));  // ~110 MB
+
+    const uint64_t decodesBefore = wav::wavDecodeEntries();
+    EXPECT_EQ(looper.importTrackChecked(0, wf.str().c_str(), kSR),
+              wm::ImportStatus::BudgetExceeded);
+    EXPECT_EQ(wav::wavDecodeEntries(), decodesBefore)
+        << "el rechazo por presupuesto decodificó: el chequeo quedó después del decode";
+    EXPECT_FALSE(looper.isTrackActive(0));
+}
+
+// AC-045.8 — el tamaño se deriva del RESAMPLEO, con la misma fórmula.
+//
+// A 8 kHz el archivo entra en el presupuesto; a 48 kHz de destino son seis veces
+// más frames y no entra. Un chequeo que mirara los frames del archivo en vez de
+// los de salida diría que sí y después reventaría el presupuesto por 6x.
+TEST(AudioLooper, Req045ImportSizesTheBudgetAfterResampling) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    AudioLooper::LooperCapabilities caps = looper.getCapabilities();
+    caps.memoryBudgetBytes = 16ULL * 1024 * 1024;
+    looper.setCapabilities(caps);
+
+    // 1,5M frames a 8 kHz = 12 MB (entra); a 48 kHz son 9M = 72 MB (no entra).
+    WavTempFile wf("wm_r045_8k.wav");
+    ASSERT_TRUE(makeWavHeaderOnly(wf.str(), /*frames=*/1'500'000, /*sr=*/8000));
+
+    const uint64_t decodesBefore = wav::wavDecodeEntries();
+    EXPECT_EQ(looper.importTrackChecked(0, wf.str().c_str(), kSR),
+              wm::ImportStatus::BudgetExceeded)
+        << "el presupuesto se mide sobre los frames de SALIDA, no los del archivo";
+    EXPECT_EQ(wav::wavDecodeEntries(), decodesBefore);
+}
+
+// AC-045.8 — una causa por test, y las cuatro se distinguen entre sí.
+TEST(AudioLooper, Req045ImportNamesTheCause) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    // Io: el archivo no abre. No es "formato raro": no hay archivo.
+    EXPECT_EQ(looper.importTrackChecked(0, "/no/existe/ni/un/wav.wav", kSR),
+              wm::ImportStatus::Io);
+
+    // UnsupportedFormat: el archivo abre y no es un RIFF/WAVE.
+    WavTempFile basura("wm_r045_basura.wav");
+    {
+        std::ofstream f(basura.str(), std::ios::binary);
+        const std::vector<char> relleno(4096, 0x7B);
+        f.write(relleno.data(), static_cast<std::streamsize>(relleno.size()));
+    }
+    EXPECT_EQ(looper.importTrackChecked(0, basura.str().c_str(), kSR),
+              wm::ImportStatus::UnsupportedFormat);
+
+    // Un WAV que abre, es RIFF/WAVE y declara un formato que el lector NO decodifica
+    // (PCM de 8 bits) es la otra cara de UnsupportedFormat: no es "el archivo está
+    // roto", es "este archivo no lo sé leer".
+    WavTempFile ocho("wm_r045_pcm8.wav");
+    {
+        std::ofstream f(ocho.str(), std::ios::binary);
+        auto u32 = [&](uint32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
+        auto u16 = [&](uint16_t v) { f.write(reinterpret_cast<const char*>(&v), 2); };
+        f.write("RIFF", 4); u32(36 + 800); f.write("WAVE", 4);
+        f.write("fmt ", 4); u32(16);
+        u16(1); u16(2); u32(kSR); u32(kSR * 2); u16(2); u16(8);   // PCM de 8 bits
+        f.write("data", 4); u32(800);
+        const std::vector<char> payload(800, 0);
+        f.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    }
+    EXPECT_EQ(looper.importTrackChecked(0, ocho.str().c_str(), kSR),
+              wm::ImportStatus::UnsupportedFormat);
+
+    // Y ninguna de las tres dejó la pista activa.
+    EXPECT_FALSE(looper.isTrackActive(0));
+}
+
+// AC-045.8 — OutOfMemory: un pedido que NINGUNA pista puede direccionar.
+//
+// El presupuesto se abre de par en par a propósito, para que el veredicto no
+// pueda ser BudgetExceeded: con 100M frames a 1 Hz resampleados a 48 kHz el
+// pedido son 4,8e12 frames, que no es un problema de formato ni de presupuesto
+// sino de almacenamiento — la misma respuesta que da un `allocate` que falla.
+//
+// 🔴 **Desvío declarado**: la etapa pedía forzar esta causa "por el pool", y no
+// se puede desde un test de host: `ChunkPool::prefill` usa `new (std::nothrow)`
+// y agotarlo de verdad requeriría reservar los GB de la máquina. El pedido
+// inallocatable ejerce el MISMO retorno por el MISMO camino, en microsegundos y
+// sin tocar una página.
+TEST(AudioLooper, Req045ImportReportsOutOfMemoryForAnUnallocatableRequest) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    AudioLooper::LooperCapabilities caps = looper.getCapabilities();
+    caps.memoryBudgetBytes = static_cast<size_t>(-1);
+    looper.setCapabilities(caps);
+
+    WavTempFile wf("wm_r045_inallocatable.wav");
+    ASSERT_TRUE(makeWavHeaderOnly(wf.str(), /*frames=*/100'000'000, /*sr=*/1));
+
+    const uint64_t decodesBefore = wav::wavDecodeEntries();
+    EXPECT_EQ(looper.importTrackChecked(0, wf.str().c_str(), kSR),
+              wm::ImportStatus::OutOfMemory);
+    EXPECT_EQ(wav::wavDecodeEntries(), decodesBefore)
+        << "un pedido inallocatable tampoco se decodifica";
+}
+
+// AC-045.8 — GIVEN una pista con contenido, WHEN un import falla por cualquier
+// causa, THEN la pista suena igual que antes.
+//
+// 🔴 El `isMuted()` es la mitad que faltaba y no es cosmética: el orden de hoy
+// era `setMuted(true)` → `clear()` → `allocate()`, así que un fallo dejaba la
+// pista VACÍA **y MUTEADA**. Una pista muteada se ve desde la UI como un bug del
+// volumen, no como un import que falló.
+TEST(AudioLooper, Req045AFailedImportLeavesThePreviousTakeIntact) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.setTailMs(0);
+
+    WavTempFile bueno("wm_r045_bueno.wav");
+    ASSERT_TRUE(makeWav(bueno.str(), /*frames=*/40'000, kSR, 0.375f));
+    ASSERT_TRUE(looper.importTrack(0, bueno.str().c_str(), kSR));
+    ASSERT_TRUE(looper.isTrackActive(0));
+    const TrackFingerprint antes = fingerprint(looper, 0);
+    ASSERT_EQ(antes.length, 40'000);
+    ASSERT_NE(antes.midL, 0.0f) << "sin contenido previo el test no mide nada";
+
+    WavTempFile gigante("wm_r045_gigante.wav");
+    ASSERT_TRUE(makeWavHeaderOnly(gigante.str(), /*frames=*/5 * 60 * kSR, kSR));
+    EXPECT_EQ(looper.importTrackChecked(0, gigante.str().c_str(), kSR),
+              wm::ImportStatus::BudgetExceeded);
+    EXPECT_EQ(fingerprint(looper, 0), antes) << "el import fallido tocó la pista destino";
+
+    WavTempFile roto("wm_r045_roto.wav");
+    {
+        std::ofstream f(roto.str(), std::ios::binary);
+        f << "esto no es un RIFF";
+    }
+    EXPECT_EQ(looper.importTrackChecked(0, roto.str().c_str(), kSR),
+              wm::ImportStatus::UnsupportedFormat);
+    EXPECT_EQ(fingerprint(looper, 0), antes) << "un formato inválido tocó la pista destino";
+
+    EXPECT_EQ(looper.importTrackChecked(0, "/no/existe/nada.wav", kSR), wm::ImportStatus::Io);
+    EXPECT_EQ(fingerprint(looper, 0), antes) << "una ruta inexistente tocó la pista destino";
+}
+
+// ===========================================================================
+// REQ-045 — el paquete del code-reviewer adversarial (items 3, 4, 5a, 5c).
+// ===========================================================================
+
+// AC-045.8 (item 3) — el TRANSITORIO del decode también entra en el presupuesto.
+//
+// 🔴 Con ratio < 1 la salida no dice NADA del pico: una fuente de 192 kHz
+// resampleada a 48 reserva la cuarta parte de lo que decodifica. Acá la reserva
+// (3M frames ≈ 24 MB) entra holgada en el presupuesto de 48 MB y el decode de la
+// fuente (12M frames = 96 MB, más el payload crudo que `readWav` sostiene mientras
+// convierte) lo dobla. Sin este chequeo el import lo aceptaba y el pico era invisible.
+//
+// El contador de decodes es lo que hace la afirmación: se rechaza ANTES, no "más
+// rápido".
+TEST(AudioLooper, Req045ImportRejectsASourceDecodeThatDoesNotFitEither) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    WavTempFile wf("wm_r045_192k.wav");
+    ASSERT_TRUE(makeWavHeaderOnly(wf.str(), /*frames=*/12'000'000, /*sr=*/192'000));
+
+    // La reserva de salida SÍ entra: ceil(12M / 4) = 3M frames.
+    ASSERT_LT(wm::TrackStorage::reservationBytesFor(3'000'000), looper.getMemoryBudgetBytes())
+        << "si la salida no entrara, el test estaría midiendo el otro chequeo";
+
+    const uint64_t decodesBefore = wav::wavDecodeEntries();
+    EXPECT_EQ(looper.importTrackChecked(0, wf.str().c_str(), kSR),
+              wm::ImportStatus::BudgetExceeded)
+        << "el decode de la fuente son 96 MB contra un presupuesto de "
+        << looper.getMemoryBudgetBytes() << " B";
+    EXPECT_EQ(wav::wavDecodeEntries(), decodesBefore) << "lo rechazó DESPUÉS de decodificar";
+    EXPECT_FALSE(looper.isTrackActive(0));
+}
+
+// AC-045.8 (item 4) — el presupuesto se chequea con la reserva REAL, no con los
+// bytes lógicos.
+//
+// El tope se deriva de la misma función que usa la reserva, así que el test vale en
+// los dos backends: un chequeo que mire los bytes lógicos acepta este import en el
+// backend paged (264 KB contra un tope de 512 KB − 1) y deja `reservedBytes` arriba.
+TEST(AudioLooper, Req045ImportBudgetCountsWhatTheTrackReallyReserves) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    const int frames = 33'000;
+    AudioLooper::LooperCapabilities caps = looper.getCapabilities();
+    caps.memoryBudgetBytes = wm::TrackStorage::reservationBytesFor(frames) - 1;
+    looper.setCapabilities(caps);
+
+    WavTempFile wf("wm_r045_redondeo.wav");
+    ASSERT_TRUE(makeWav(wf.str(), frames, kSR, 0.375f));
+
+    EXPECT_EQ(looper.importTrackChecked(0, wf.str().c_str(), kSR),
+              wm::ImportStatus::BudgetExceeded)
+        << "con un byte menos que la reserva real el import tiene que decir que no";
+    EXPECT_FALSE(looper.isTrackActive(0));
+
+    // Y con la reserva real exacta, entra: sin este gemelo, "rechaza" no se distingue
+    // de "rechaza siempre" y la fórmula podría ser un cheque en blanco.
+    caps.memoryBudgetBytes = wm::TrackStorage::reservationBytesFor(frames);
+    looper.setCapabilities(caps);
+    EXPECT_EQ(looper.importTrackChecked(0, wf.str().c_str(), kSR), wm::ImportStatus::Ok);
+}
+
+// (item 5a) — un rate de destino no positivo es un ARGUMENTO inválido, no memoria.
+//
+// Antes caía por la aritmética del resampleo (ratio 0 o negativo → 0 frames de
+// salida) y volvía como `OutOfMemory`, que manda al consumidor a liberar memoria por
+// un error suyo de llamada.
+TEST(AudioLooper, Req045ANonPositiveTargetRateIsAnInvalidArgument) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    WavTempFile wf("wm_r045_rate.wav");
+    ASSERT_TRUE(makeWav(wf.str(), /*frames=*/8'000, kSR, 0.375f));
+
+    EXPECT_EQ(looper.importTrackChecked(0, wf.str().c_str(), 0),
+              wm::ImportStatus::InvalidArgument);
+    EXPECT_EQ(looper.importTrackChecked(0, wf.str().c_str(), -48'000),
+              wm::ImportStatus::InvalidArgument);
+    // Control: el mismo archivo con un rate válido importa.
+    EXPECT_EQ(looper.importTrackChecked(0, wf.str().c_str(), kSR), wm::ImportStatus::Ok);
+}
+
+// (item 5c) — un DIRECTORIO es un fallo de IO, no de formato.
+//
+// 🔴 `std::ifstream` ABRE un directorio en macOS y en Linux, y después toda lectura
+// falla. El lector comparaba `riff`/`wave` sin inicializar contra "RIFF"/"WAVE": el
+// veredicto salía de pila sin inicializar (UB) y, cuando no coincidía, decía
+// "formato no soportado" — que manda al consumidor a buscar un conversor en vez de
+// mirar la ruta que pasó.
+TEST(AudioLooper, Req045ADirectoryIsAnIoFailureAndNotAFormatOne) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    const std::filesystem::path dir = wma_test::fixturePath("wm_r045_dir_no_wav");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    ASSERT_TRUE(std::filesystem::create_directories(dir, ec));
+
+    wav::WavInfo info;
+    EXPECT_EQ(wav::readWavInfo(dir.string().c_str(), info), wav::WavReadStatus::Io);
+    EXPECT_EQ(looper.importTrackChecked(0, dir.string().c_str(), kSR), wm::ImportStatus::Io);
+    EXPECT_EQ(wav::readWav(dir.string().c_str()).numFrames, 0)
+        << "el lector completo tiene que rechazarlo igual";
+
+    std::filesystem::remove_all(dir, ec);
 }

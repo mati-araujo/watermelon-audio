@@ -59,17 +59,27 @@ public:
     /**
      * @brief Ensure at least `target` free chunks are available. UI/IO thread.
      *        Allocates the shortfall and pushes them onto the free-list.
+     *
+     * @return true when the pool ended up with at least `target` free chunks.
+     *
+     * 🔴 **The return value is the only place an out-of-memory is visible** (REQ-045).
+     * This used to be `void` and bail silently on a failed `new`, which made a real OOM
+     * *undetectable until the audio thread*: `TrackStorage::allocate` reported the full
+     * logical size anyway, the import filled a track it had not reserved, and the first
+     * evidence was `pageForWrite` handing the RT thread a nullptr and dropping frames.
+     * A caller that ignores this is asking for that bug back.
      */
-    void prefill(size_t target) {
+    [[nodiscard]] bool prefill(size_t target) {
         while (mFreeCount.load(std::memory_order_relaxed) < target) {
             Chunk* c = new (std::nothrow) Chunk();
-            if (!c) return;  // out of memory — leave the pool as large as we got
+            if (!c) return false;  // out of memory — the pool is as large as we got
             {
                 std::lock_guard<std::mutex> lk(mOwnMutex);
                 mOwned.push_back(c);
             }
             release(c);
         }
+        return true;
     }
 
     /** RT-safe: take a free chunk, or nullptr if the pool is empty. */
