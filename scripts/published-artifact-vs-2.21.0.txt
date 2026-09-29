@@ -1,0 +1,16 @@
+# Diferencias DECLARADAS del artefacto publicado contra 2.21.0 del registro (REQ-047).
+#
+#   python3 scripts/diff-published-artifact.py --against 2.21.0 \
+#       --local-version <la de publishToMavenLocal> \
+#       --expect-file scripts/published-artifact-vs-2.21.0.txt
+#
+# Es un TRINQUETE: una diferencia que no esta aca es roja, y una linea de aca que
+# no se reproduce tambien. Cada etapa de REQ-047 que toca lo publicado agrega las
+# suyas con su razon; la nota de bump de 2.22.0 se escribe desde este archivo.
+# Linea de base (master 0c34ab0 contra 2.21.0, 29/09): CERO diferencias.
+
+# --- S2: AGP 9.4.1, compileSdk 37, core-ktx 1.19.1
+aar/metadata:minCompileSdk   # 36 -> 37: core-ktx 1.19 exige compilar contra 37, y el AAR lo propaga
+aar/metadata:minCompileMinorSdk   # ausente -> 0: clave nueva que aparece con S2 (AGP 9.4.1 escribe la version MENOR del SDK, p. ej. 36.1); 0 no exige ninguna
+pom:audio-android/dep:androidx.core:core-ktx   # 1.18.0 -> 1.19.1 (runtime)
+module:audio-android/variant:releaseRuntimeElements-published/dep:androidx.core:core-ktx   # requires 1.18.0 -> 1.19.1
