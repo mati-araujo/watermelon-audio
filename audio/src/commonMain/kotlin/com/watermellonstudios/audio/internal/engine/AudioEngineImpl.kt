@@ -406,19 +406,43 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
         return success
     }
 
+    /**
+     * 🔴 **EL MOTOR ES LA AUTORIDAD.** La misma regla que [reorderEffects], y por la misma
+     * razón: `_state.value.effectChain.effects` es un ESPEJO que escriben únicamente los cinco
+     * métodos de efectos de esta clase, mientras la MISMA cadena nativa la escribe también
+     * `EffectManager`, que tiene su propio espejo.
+     *
+     * Antes de MINI-035 esto validaba el índice contra el espejo y devolvía
+     * `InvalidEffectIndex` **sin llamar al bridge**: con los efectos entrados por
+     * `EffectManager.addEffect`, el espejo está vacío y `removeEffect(0)` rechazaba una
+     * operación que el motor sí podía hacer — el simétrico del bloqueante que
+     * [reorderEffects] pagó en REQ-045 S2 (allá el espejo tiraba en el camino de ÉXITO;
+     * acá rechazaba antes de preguntar).
+     *
+     * El orden, entonces: preguntarle al motor; si dijo no, `failure` sin tocar nada; si dijo
+     * sí, sacar el efecto del espejo **sólo si el índice le entra**. Si no le entra, el espejo
+     * no estaba al día: queda un `warn` que nombra la divergencia y el resultado sigue siendo
+     * `success`, porque lo que se preguntó fue si el MOTOR lo hizo. Nunca una excepción.
+     *
+     * El evento de analytics sale **sólo** tras el `success` del motor, y además sólo cuando
+     * el espejo conocía el efecto: `onEffectRemoved` lleva el `EffectType`, y un espejo que no
+     * tenía ese índice no sabe cuál era.
+     */
     override fun removeEffect(index: Int): Result<Unit> {
-        val currentChain = _state.value.effectChain
-        if (index < 0 || index >= currentChain.effects.size) {
-            logger.warn(TAG, "Invalid effect index", mapOf("index" to index))
-            return Result.failure(
-                NativeBridgeException.InvalidEffectIndex(index, currentChain.effects.size),
-            )
-        }
-
-        val removedEffect = currentChain.effects[index]
         val result = bridge.removeEffectSync(index)
         if (result.isFailure) {
             logger.error(TAG, "removeEffect: el motor no lo quitó", result.exceptionOrNull())
+            return result
+        }
+
+        val currentChain = _state.value.effectChain
+        val removedEffect = currentChain.effects.getOrNull(index)
+        if (removedEffect == null) {
+            logger.warn(
+                TAG,
+                "removeEffect: el motor lo quitó pero este espejo no tiene ese índice",
+                mapOf("index" to index, "espejo" to currentChain.effects.size),
+            )
             return result
         }
 
@@ -501,10 +525,7 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
      * (Antes de esto el `removeAt`/`add` corría SIEMPRE, incluso con el motor rechazando,
      * así que un índice inválido daba un no-op en el motor y una excepción acá.)
      *
-     * Inconsistencia preexistente que este REQ NO cambia: [removeEffect] valida el índice
-     * contra el espejo y rechaza sin preguntarle al motor. Con los dos espejos
-     * desincronizados eso rechaza operaciones que el motor habría aceptado. Queda anotado
-     * en el journal de la etapa; arreglarlo es unificar los dos espejos, no un parche acá.
+     * [removeEffect] sigue esta misma regla desde MINI-035.
      */
     override fun reorderEffects(fromIndex: Int, toIndex: Int): Result<Unit> {
         val result = bridge.reorderEffectsSync(fromIndex, toIndex)

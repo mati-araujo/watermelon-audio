@@ -151,23 +151,77 @@ class AudioEngineSetterResultTest {
         )
     }
 
+    /**
+     * AC-M035.1 — **el espejo vacío no es una cadena vacía.**
+     *
+     * 🔴 ACA VIVIA `removeEffect con un indice que no existe se rechaza sin tocar el motor`,
+     * y este test **invierte su aserción a propósito**: ese test afirmaba `bridge.calls ==
+     * emptyList()`, o sea el defecto de MINI-035 escrito como contrato. `_state.effectChain`
+     * lo escriben únicamente los cinco métodos de efectos de `AudioEngineImpl`; la MISMA
+     * cadena nativa la escribe también `EffectManager`, con su propio espejo. Con los efectos
+     * entrados por ahí, el espejo está vacío, el motor tiene efectos, y `removeEffect(0)`
+     * devolvía `InvalidEffectIndex(0, 0)` **sin tocar el motor**: un rechazo inventado por un
+     * espejo que no era la autoridad.
+     *
+     * Es el simétrico del bloqueante que `reorderEffects` pagó en REQ-045 S2 — allá el
+     * espejo tiraba en el camino de ÉXITO, acá rechazaba antes de preguntar.
+     */
     @Test
-    fun `removeEffect con un indice que no existe se rechaza sin tocar el motor`() = runTest {
+    fun `removeEffect con el espejo vacio le pregunta al motor y le cree`() = runTest {
         val bridge = FakeAudioNativeBridge()
-        val engine = AudioEngineImpl(AudioEngineConfig(), bridge)
+        val engine = AudioEngineImpl(AudioEngineConfig(analyticsListener = spy), bridge)
+        assertEquals(
+            emptyList(),
+            engine.state.value.effectChain.effects,
+            "la premisa es un espejo vacío: así se ve cuando los efectos entraron por EffectManager",
+        )
+        val antes = spy.eventos.size
 
-        causaDe<NativeBridgeException.InvalidEffectIndex>(
-            engine.removeEffect(0),
-            "removeEffect(0) sobre una cadena vacía",
+        val r = engine.removeEffect(0)
+
+        assertTrue(
+            r.isSuccess,
+            "el motor lo quitó y esto devolvió failure: el veredicto lo da el motor, no el espejo",
+        )
+        assertContains(
+            bridge.calls,
+            "removeEffectSync",
+            "rechazó sin preguntarle al motor: el espejo vacío no es una cadena vacía",
         )
         assertEquals(
             emptyList(),
-            bridge.calls,
-            "con un índice inválido no hay nada que pedirle al motor, y antes de REQ-045 esto " +
-                "era un `return` mudo: el consumidor no distinguía 'no existe' de 'listo'",
+            engine.state.value.effectChain.effects,
+            "el espejo no tenía ese índice, así que no se toca — pero tampoco se explota",
+        )
+        sinEventosNuevos(
+            antes,
+            "removeEffect con el espejo vacío",
         )
     }
 
+    /**
+     * AC-M035.2, con el espejo vacío: el rechazo que importa es el del MOTOR, y su causa
+     * viaja tal cual. El gemelo con espejo poblado es
+     * `removeEffect rechazado deja la cadena como estaba`.
+     */
+    @Test
+    fun `removeEffect con el motor rechazando y el espejo vacio propaga la causa del motor`() = runTest {
+        val engine = motor("removeEffectSync")
+        val antes = spy.eventos.size
+
+        causaDe<NativeBridgeException.InvalidEffectIndex>(
+            engine.removeEffect(0),
+            "removeEffect(0) con espejo vacío y el motor rechazando",
+        )
+        assertEquals(
+            emptyList(),
+            engine.state.value.effectChain.effects,
+            "el motor rechazó: el espejo queda como estaba",
+        )
+        sinEventosNuevos(antes, "removeEffect rechazado con el espejo vacío")
+    }
+
+    /** AC-M035.3 — el gemelo: con espejo y motor coincidentes, nada de esto cambió. */
     @Test
     fun `removeEffect aceptado si saca el efecto`() = runTest {
         val engine = motor()
