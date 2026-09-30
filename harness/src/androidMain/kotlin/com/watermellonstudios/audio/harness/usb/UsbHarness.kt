@@ -11,6 +11,7 @@ import com.watermellonstudios.audio.domain.usb.UsbAudioDevice
 import com.watermellonstudios.audio.domain.usb.UsbAudioError
 import com.watermellonstudios.audio.domain.usb.UsbCapabilitySnapshot
 import com.watermellonstudios.audio.domain.usb.UsbConnectionState
+import com.watermellonstudios.audio.domain.usb.UsbDeviceEvent
 import com.watermellonstudios.audio.domain.usb.UsbResult
 import com.watermellonstudios.audio.domain.usb.UsbTestPresets
 import com.watermellonstudios.audio.domain.usb.UsbTestResult
@@ -20,7 +21,14 @@ import com.watermellonstudios.audio.harness.smoke.ENGINE_STATE_STOPPED
 import com.watermellonstudios.audio.harness.smoke.SmokeReporter
 import com.watermellonstudios.audio.harness.smoke.SuiteRowVerdict
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -109,17 +117,12 @@ class UsbHarness(context: Context) {
 
     private suspend fun connectWithEngineReady(r: SmokeReporter, device: UsbAudioDevice, humanTimeoutMs: Long): Boolean {
         val hadPermission = manager.hasPermission(device)
-        if (hadPermission) {
+        val result = if (hadPermission) {
             r.report(PANEL, "permiso", true, "origen" to "ya-concedido", "dispositivo" to device.vidPid)
+            withTimeoutOrNull(humanTimeoutMs) { manager.connectDevice(device) }
         } else {
-            r.waitingForHuman(
-                PANEL,
-                "aceptar_el_dialogo_de_permiso_USB_de_WMA_Harness_para_${device.vidPid}_en_el_telefono",
-                "dispositivo" to device.vidPid, "espera-max-s" to humanTimeoutMs / 1000,
-            )
+            connectThroughDialog(r, device, humanTimeoutMs)
         }
-
-        val result = withTimeoutOrNull(humanTimeoutMs) { manager.connectDevice(device) }
         if (result == null) {
             r.report(
                 PANEL, "conectar", false,
@@ -165,6 +168,75 @@ class UsbHarness(context: Context) {
         )
 
         return selectBackend(r, AudioBackendType.LIBUSB, "backend")
+    }
+
+    /**
+     * El camino con diálogo: `connectDevice` queda esperando al humano, y mientras tanto
+     * `smoke-device.sh` le manda a la app el broadcast de resultado FALSO por `am broadcast`
+     * (REQ-050 S1, tarea 1.4). `step=esperando-humano` se emite recién cuando la librería ya pidió
+     * el diálogo (`PERMISSION_REQUESTED`): es la señal que el script usa para mandarlo, y un falso
+     * que llega sin espera pendiente no prueba nada. La librería escribe ese estado justo ANTES de
+     * pedir el diálogo, no después; la vuelta de adb (leer logcat, mandar el broadcast) es de
+     * cientos de ms y tapa esa ventana, pero no es una garantía.
+     *
+     * `step=permiso-falso` afirma que nada cambió, en las dos mitades de AC-050.1:
+     * - ningún `PermissionGranted` de este device llegó con `UsbManager` diciendo que no (el falso
+     *   con `permission=true` no marcó nada);
+     * - el resultado no salió `PERMISSION_DENIED` (el falso con `permission=false` no abortó). El
+     *   smoke le pide al humano ACEPTAR, así que una negación es un humano que se equivocó o un
+     *   broadcast ajeno que abortó: desde acá no se distinguen, y los dos invalidan la corrida.
+     *   Por eso sale FAIL con `motivo=negado:humano-o-broadcast-ajeno`, no HUMANO.
+     *
+     * Devuelve `null` si el humano no contestó dentro de [humanTimeoutMs].
+     */
+    private suspend fun connectThroughDialog(
+        r: SmokeReporter,
+        device: UsbAudioDevice,
+        humanTimeoutMs: Long,
+    ): UsbResult<Unit>? = coroutineScope {
+        var grants = 0
+        var forged = 0
+        // Unconfined: el colector corre DENTRO del emit de la librería, así que cada
+        // PermissionGranted se juzga contra UsbManager en el instante en que se emitió, y antes de
+        // que `connectDevice` siga. Con otro dispatcher el evento podía procesarse después de que
+        // el humano aceptara, y un grant falso se leería como bueno.
+        val watcher = launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) {
+            manager.deviceEvents.collect { e ->
+                if (e is UsbDeviceEvent.PermissionGranted && e.device.deviceId == device.deviceId) {
+                    grants++
+                    if (!manager.hasPermission(device)) forged++
+                }
+            }
+        }
+        val pending = async { manager.connectDevice(device) }
+        val requested = withTimeoutOrNull(DIALOG_REQUESTED_MS) {
+            manager.connectionState.first { it == UsbConnectionState.PERMISSION_REQUESTED }
+        } != null
+        r.waitingForHuman(
+            PANEL,
+            "aceptar_el_dialogo_de_permiso_USB_de_WMA_Harness_para_${device.vidPid}_en_el_telefono",
+            "dispositivo" to device.vidPid, "espera-max-s" to humanTimeoutMs / 1000,
+            "dialogo-pedido" to requested,
+        )
+        val result = withTimeoutOrNull(humanTimeoutMs) { pending.await() }
+        if (result == null) pending.cancel()
+        watcher.cancelAndJoin()
+        val deniedResult = (result as? UsbResult.Failure)?.error == UsbAudioError.PERMISSION_DENIED
+        r.report(
+            PANEL, "permiso-falso", forged == 0 && !deniedResult,
+            "granted" to grants, "granted-sin-permiso-en-usbmanager" to forged,
+            "motivo" to when {
+                forged > 0 -> "granted-con-usbmanager-diciendo-que-no"
+                deniedResult -> "negado:humano-o-broadcast-ajeno"
+                else -> null
+            },
+            "resultado" to when (result) {
+                null -> "sin-respuesta-humana"
+                is UsbResult.Success -> "conectado"
+                is UsbResult.Failure -> result.error
+            },
+        )
+        result
     }
 
     /**
@@ -409,6 +481,9 @@ class UsbHarness(context: Context) {
         /** El rate al que el harness abre el stream USB. La suite mide ESTE stream (D11). */
         const val STREAM_RATE_HZ = 48_000
         private const val RELEASE_DISCONNECT_MS = 1000L
+
+        /** Techo para que la librería pida el diálogo. Es una espera por condición: no se duerme. */
+        private const val DIALOG_REQUESTED_MS = 5000L
 
         /** El veredicto D11 de una fila, con los datos del resultado de la librería. */
         fun suiteVerdict(res: UsbTestResult): SuiteRowVerdict = SuiteRowVerdict.of(

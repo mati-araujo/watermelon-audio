@@ -10,6 +10,7 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.PowerManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.watermellonstudios.audio.BuildConfig
 import com.watermellonstudios.audio.api.IUsbAudioManager
 import com.watermellonstudios.audio.domain.usb.*
@@ -152,14 +153,15 @@ internal class UsbAudioManagerImpl(
                         @Suppress("DEPRECATION")
                         intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                     }
-                    val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                    // EXTRA_PERMISSION_GRANTED NO se lee (REQ-050, AC-050.2): lo puede escribir
+                    // cualquier app que mande este broadcast. Decide UsbManager, en
+                    // handlePermissionResult.
 
                     Log.i(TAG, "  device: ${device?.productName} (id=${device?.deviceId})")
-                    Log.i(TAG, "  granted: $granted")
                     Log.i(TAG, "  pendingPermissionDevice: ${pendingPermissionDevice?.productName} (id=${pendingPermissionDevice?.deviceId})")
                     Log.i(TAG, "  permissionContinuation is null: ${permissionContinuation == null}")
 
-                    handlePermissionResult(device, granted)
+                    handlePermissionResult(device)
                 }
 
                 else -> {
@@ -442,34 +444,54 @@ internal class UsbAudioManagerImpl(
         }
     }
 
-    private fun handlePermissionResult(device: UsbDevice?, granted: Boolean) {
-        Log.d(TAG, "handlePermissionResult called: device=${device?.productName}, granted=$granted")
+    /**
+     * Resuelve la espera del diálogo de permiso con lo que dice [UsbManager], no con el intent
+     * (REQ-050, AC-050.1 y AC-050.2).
+     *
+     * El broadcast que llega acá lo puede mandar cualquier app, con el extra que quiera: el que
+     * decide es `usbManager.hasPermission(pendiente)`, que el sistema ya actualizó antes de mandar
+     * el resultado del diálogo. Cuatro casos:
+     * - sin espera pendiente, o con el resultado de OTRO device: se ignora;
+     * - con el permiso dado: se reanuda con `true`, traiga o no el device. Decide UsbManager, así
+     *   que un resultado sin device no cuesta nada aceptarlo;
+     * - sin permiso y CON el device: el usuario negó, se reanuda con `false`;
+     * - sin permiso y SIN device: se ignora y la espera sigue. No se distingue de un broadcast ajeno,
+     *   y reanudar con `false` le dejaría a cualquier app abortar una conexión en curso.
+     *
+     * Límites, dichos:
+     * - AOSP siempre pone `EXTRA_DEVICE` en el resultado. En un Android que lo omitiera, una
+     *   NEGACIÓN real caería en el último caso y la espera no terminaría: no tiene techo, y sólo la
+     *   corta cancelar a quien llamó.
+     * - Un broadcast ajeno que SÍ trae el device (cualquier app puede tomarlo de `deviceList`) y
+     *   llega sin permiso se lee como una negación y aborta la espera. Esa variante la cierra el
+     *   registro NO exportado de [startMonitoring], no esta función.
+     */
+    private fun handlePermissionResult(device: UsbDevice?) {
+        val pending = pendingPermissionDevice
+        val continuation = permissionContinuation
+        Log.d(TAG, "handlePermissionResult called: device=${device?.productName}, pending=${pending?.productName}")
 
-        // Handle case where device is null but we have a pending request
-        if (device == null) {
-            Log.w(TAG, "Permission result received with null device")
-            // If we have a pending continuation, resume it with the granted value anyway
-            // Some devices/Android versions may not include the device in the result
-            if (permissionContinuation != null && pendingPermissionDevice != null) {
-                Log.i(TAG, "Resuming continuation despite null device (granted=$granted)")
-                permissionContinuation?.resume(granted)
-                permissionContinuation = null
-                pendingPermissionDevice = null
-            }
+        if (pending == null || continuation == null) {
+            Log.w(TAG, "Permission result without a pending request: ignored")
             return
         }
 
-        // Verify this is for our pending device
-        if (device.deviceId != pendingPermissionDevice?.deviceId) {
-            Log.w(TAG, "Permission result device mismatch: received=${device.deviceId}, pending=${pendingPermissionDevice?.deviceId}")
+        if (device != null && device.deviceId != pending.deviceId) {
+            Log.w(TAG, "Permission result device mismatch: received=${device.deviceId}, pending=${pending.deviceId}")
             return
         }
 
-        Log.i(TAG, "Permission result for ${device.productName}: $granted")
+        val granted = usbManager.hasPermission(pending)
+        if (!granted && device == null) {
+            Log.w(TAG, "Permission result without device and without permission in UsbManager: ignored, still waiting")
+            return
+        }
 
-        permissionContinuation?.resume(granted)
+        Log.i(TAG, "Permission result for ${pending.productName}: $granted (UsbManager)")
+
         permissionContinuation = null
         pendingPermissionDevice = null
+        continuation.resume(granted)
     }
 
     // ==================== Device Capabilities ====================
@@ -798,16 +820,17 @@ internal class UsbAudioManagerImpl(
             addAction(ACTION_USB_PERMISSION)
         }
 
-        // IMPORTANT: Must use RECEIVER_EXPORTED to receive USB permission results
-        // from the system UsbService. The permission broadcast comes from the system,
-        // not from our app, so RECEIVER_NOT_EXPORTED would block it.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(usbReceiver, filter, Context.RECEIVER_EXPORTED)
-            Log.i(TAG, "BroadcastReceiver registered with RECEIVER_EXPORTED flag (Android 13+)")
-        } else {
-            context.registerReceiver(usbReceiver, filter)
-            Log.i(TAG, "BroadcastReceiver registered (pre-Android 13)")
-        }
+        // NO exportado (REQ-050, D4): exportado, cualquier app podía mandarle el resultado del
+        // permiso. Los que tienen que seguir llegando llegan igual: el resultado del diálogo lo
+        // entrega un PendingIntent NUESTRO (setPackage, más abajo), o sea con nuestro uid, y
+        // ATTACHED/DETACHED son broadcasts protegidos del sistema. En API < 33 ContextCompat lo
+        // protege con el permiso de firma <paquete>.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION.
+        // El comentario anterior afirmaba lo contrario sin medirlo. Medido en el g42 (API 31, camino
+        // del permiso de firma) con la CM720, REQ-050 S1: ATTACHED/DETACHED y el resultado del
+        // diálogo llegan; el `am broadcast` del shell sale con "Permission Denial ... requires
+        // <paquete>.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" y el receiver no lo ve.
+        ContextCompat.registerReceiver(context, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        Log.i(TAG, "BroadcastReceiver registered RECEIVER_NOT_EXPORTED")
 
         Log.i(TAG, "Listening for actions: ATTACHED, DETACHED, $ACTION_USB_PERMISSION")
 

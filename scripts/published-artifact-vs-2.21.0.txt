@@ -57,3 +57,11 @@ aar/so:jni/x86_64/libwatermelon_audio.so/comment = Android (13624864, +pgo, +bol
 module:audio-android/variant:releaseRuntimeElements-published/dep:com.google.oboe:oboe = version[requires=1.10.0] excl[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common] -> version[requires=1.11.0] excl[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common]   # Oboe 1.10.0 -> 1.11.0 (S3); scope, type, optional y exclusiones sin cambio
 pom:audio-android/dep:com.google.oboe:oboe = 1.10.0 scope=runtime type=jar optional=false excl=[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common] -> 1.11.0 scope=runtime type=jar optional=false excl=[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common]   # Oboe 1.10.0 -> 1.11.0 (S3); scope, type, optional y exclusiones sin cambio
 aar/size = referencia -> crece-10-15%   # S3 + MINI-036: +10,01 % medido sobre master 5fb3143 (5447939 -> 5993133 bytes; el instrumento los imprime). libc++_shared.so de r30 crece 13-17 % por ABI (S3); libwatermelon_audio.so crece +6,7..+9,2 % por ABI al compilarse en -O3 (MINI-036, #378); liboboe.so +1..2,2 % (Oboe 1.11, S3); classes.jar igual. OJO: el margen sobre el borde del 10 % es de ~400 bytes; si una etapa posterior lo cruza hacia abajo, esta linea se vuelve a declarar con su razon, no se ensancha la banda. Se declara la BANDA, no los bytes (REQ-047 S4, 4.11/4.12)
+
+# --- REQ-050 S1: el permiso USB sale de UsbManager (sin diferencias propias)
+# Medido publicando esta etapa como 2.21.0-req050-s1 contra 2.21.0: el mismo conjunto de clases
+# en classes.jar (el arreglo no agrega ni saca ninguna), el mismo .kotlin_module (la superficie
+# Kotlin no cambia) y el mismo AndroidManifest (RECEIVER_NOT_EXPORTED es un flag de registro en
+# runtime, no una entrada del manifest). En bytes lo unico propio es classes.jar -0,01 %; el AAR
+# entero cae en la banda que declara aar/size arriba (los bytes cambian con cada publish).
+# Nada que declarar.
