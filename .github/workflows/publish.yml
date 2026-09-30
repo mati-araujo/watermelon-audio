@@ -54,7 +54,12 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v7
+      # Sin credenciales persistidas (REQ-047 S4, 4.13, del security-auditor): este job
+      # tiene `packages: write`, y ningun paso usa git autenticado. El token lo reciben
+      # por env sólo la espera del CI (`gh api`) y el publish de Gradle.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # La garantia que venia del job `publish` de release-please.yml. Se saltea
       # solo si quien dispara lo pidio: el default es esperar.
@@ -67,6 +72,11 @@ jobs:
       - name: Extract version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # REQ-047 S4 — el Xcode que construye lo publicado lo fija
+      # .github/toolchain-pins.json, no el default de la imagen, y queda en el log.
+      - name: Fijar Xcode (toolchain-pins.json)
+        run: bash scripts/ci-select-xcode.sh
 
       - name: Verify tag matches Gradle version
         run: |
@@ -90,7 +100,7 @@ jobs:
           done
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: 17
@@ -98,7 +108,7 @@ jobs:
       # Necesario aunque el foco sea iOS: el módulo aplica com.android.library, así
       # que sin SDK Gradle ni configura el proyecto.
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         # Solo `platform-tools`: el default de la action es `tools platform-tools`, y el
         # paquete obsoleto `tools` DESAPARECIO del repositorio de Google el 2026-09-14
         # (entre las 20:16 y las 20:43 UTC: verde en el PR de release 2.17.3, rojo en el
@@ -126,14 +136,14 @@ jobs:
 
       # ~1 GB por corrida sin cache.
       - name: Cache Kotlin/Native toolchain
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.konan
           key: ${{ runner.os }}-konan-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: ${{ runner.os }}-konan-
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Build release
         run: ./gradlew :audio:assembleRelease
