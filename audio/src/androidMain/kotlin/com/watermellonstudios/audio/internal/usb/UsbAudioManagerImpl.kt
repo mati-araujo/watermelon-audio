@@ -452,10 +452,19 @@ internal class UsbAudioManagerImpl(
      * decide es `usbManager.hasPermission(pendiente)`, que el sistema ya actualizó antes de mandar
      * el resultado del diálogo. Cuatro casos:
      * - sin espera pendiente, o con el resultado de OTRO device: se ignora;
-     * - con el permiso dado: se reanuda con `true`, traiga o no el device (algunos Android lo omiten);
+     * - con el permiso dado: se reanuda con `true`, traiga o no el device. Decide UsbManager, así
+     *   que un resultado sin device no cuesta nada aceptarlo;
      * - sin permiso y CON el device: el usuario negó, se reanuda con `false`;
      * - sin permiso y SIN device: se ignora y la espera sigue. No se distingue de un broadcast ajeno,
      *   y reanudar con `false` le dejaría a cualquier app abortar una conexión en curso.
+     *
+     * Límites, dichos:
+     * - AOSP siempre pone `EXTRA_DEVICE` en el resultado. En un Android que lo omitiera, una
+     *   NEGACIÓN real caería en el último caso y la espera no terminaría: no tiene techo, y sólo la
+     *   corta cancelar a quien llamó.
+     * - Un broadcast ajeno que SÍ trae el device (cualquier app puede tomarlo de `deviceList`) y
+     *   llega sin permiso se lee como una negación y aborta la espera. Esa variante la cierra el
+     *   registro NO exportado de [startMonitoring], no esta función.
      */
     private fun handlePermissionResult(device: UsbDevice?) {
         val pending = pendingPermissionDevice
