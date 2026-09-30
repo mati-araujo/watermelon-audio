@@ -28,6 +28,8 @@ class SmokePlanRunner(
     private val engine: AudioEngine,
     private val input: AudioInput,
     private val playFrame: () -> Long,
+    /** `getEngineState()` del puente: el estado NATIVO, que es el que decide si se puede reconfigurar. */
+    private val engineState: () -> Int,
     private val soundFont: SoundFontCheck,
     private val fixtures: Fixtures,
     private val usb: (suspend (SmokeReporter) -> Boolean)?,
@@ -66,7 +68,9 @@ class SmokePlanRunner(
             if (!ok) failed += panel.id
         }
 
-        val stopped = engine.stop().isSuccess
+        // "Detenido" es el ESTADO final, no el Result de stop(): con `--plan usb` suelto el motor
+        // nunca arrancó y stop() sobre un motor parado no es un fallo.
+        val stopped = stopEngineAndWait(engine, engineState, pause).stopped
         return reporter.report(
             PLAN, "fin", failed.isEmpty() && stopped,
             "fallidos" to failed.joinToString(",").ifEmpty { "-" }, "motor-detenido" to stopped,
@@ -81,7 +85,7 @@ class SmokePlanRunner(
         Panel.USB -> usb?.let { runUsb ->
             // El test tone de USB y el motor no pueden pelearse por el device: el motor se para
             // antes, igual que hace NoisyPad antes de `startStreaming`. Y si no para, se dice.
-            val stopped = stopEngineForUsb(engine, r)
+            val stopped = stopEngineForUsb(engine, engineState, r, pause)
             runUsb(r) && stopped
         } ?: r.report(panel.id, "disponible", false, "motivo" to "no-aplica")
     }
@@ -177,14 +181,51 @@ class SmokePlanRunner(
     }
 }
 
+/** El resultado de [stopEngineAndWait]. */
+class EngineStop(val stopped: Boolean, val waitedMs: Long, val nativeState: Int, val error: String?)
+
+/** `EngineState::Stopped` de `core/AudioEngine.h`: lo que devuelve `getEngineState()`. */
+const val ENGINE_STATE_STOPPED = 0
+
+/**
+ * Para el motor y ESPERA a que el estado NATIVO sea Stopped. Medido en el g42 (30/09): `stop()`
+ * vuelve —y el estado de Kotlin dice parado— antes de que termine el fade-out nativo; el motor
+ * nativo seguía en Running ~70 ms después, y el paso USB siguiente lo encontraba corriendo. Se
+ * decide por el estado nativo y no por `isRunning`, que es el de Kotlin.
+ */
+suspend fun stopEngineAndWait(
+    engine: AudioEngine,
+    engineState: () -> Int,
+    pause: suspend (Long) -> Unit,
+    deadlineMs: Long = 3000,
+): EngineStop {
+    var error: String? = null
+    if (engine.isRunning || engineState() != ENGINE_STATE_STOPPED) {
+        error = engine.stop().exceptionOrNull()?.message
+    }
+    var waited = 0L
+    while (engineState() != ENGINE_STATE_STOPPED && waited < deadlineMs) {
+        pause(50)
+        waited += 50
+    }
+    val state = engineState()
+    return EngineStop(state == ENGINE_STATE_STOPPED && !engine.isRunning, waited, state, error)
+}
+
 /**
  * Para el motor antes de tocar USB y lo reporta (`panel=usb step=motor-parado`). Lo usan el plan y
- * el panel USB de la UI: los dos caminos cumplen la misma invariante.
+ * el panel USB de la UI: los dos caminos cumplen la misma invariante (I5: no se reconfigura el
+ * backend con el stream vivo).
  */
-suspend fun stopEngineForUsb(engine: AudioEngine, r: SmokeReporter): Boolean {
-    val result = if (engine.isRunning) engine.stop() else Result.success(Unit)
+suspend fun stopEngineForUsb(
+    engine: AudioEngine,
+    engineState: () -> Int,
+    r: SmokeReporter,
+    pause: suspend (Long) -> Unit = { delay(it) },
+): Boolean {
+    val result = stopEngineAndWait(engine, engineState, pause)
     return r.report(
-        "usb", "motor-parado", result.isSuccess && !engine.isRunning,
-        "error" to result.exceptionOrNull()?.message,
+        "usb", "motor-parado", result.stopped,
+        "estado-motor" to result.nativeState, "espera-ms" to result.waitedMs, "error" to result.error,
     )
 }
