@@ -10,6 +10,13 @@
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!--
+      MINI-038: el panel USB usa USB host (libusb con el fd de UsbManager.openDevice()).
+      required="false": el harness tiene que instalarse igual en un device sin USB host. El permiso
+      de USB host NO es un uses-permission: es un dialogo del sistema por dispositivo, en runtime.
+    -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
     <application
         android:allowBackup="false"
         android:label="WMA Harness"
