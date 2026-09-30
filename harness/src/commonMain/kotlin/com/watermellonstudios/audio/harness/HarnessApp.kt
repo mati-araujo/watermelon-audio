@@ -99,6 +99,7 @@ fun HarnessApp(platform: HarnessPlatform) {
                 engine = engine,
                 input = AudioInputFactory.create(),
                 playFrame = { bridge.transportGetPlayFrame() },
+                engineState = { bridge.getEngineState() },
                 soundFont = sfCheck,
                 fixtures = fixtures,
                 usb = platform.usbSmoke,
@@ -177,7 +178,7 @@ fun HarnessApp(platform: HarnessPlatform) {
                 // Control 11 — USB (MINI-038). Sólo Android lo tiene; en iOS el lugar lo dice.
                 val usbPanel = platform.usbPanel
                 if (usbPanel != null) {
-                    usbPanel(uiReporter) { stopEngineForUsb(engine, uiReporter) }
+                    usbPanel(uiReporter) { stopEngineForUsb(engine, { bridge.getEngineState() }, uiReporter) }
                 } else {
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Text(

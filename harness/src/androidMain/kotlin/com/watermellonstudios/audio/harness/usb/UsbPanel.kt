@@ -111,13 +111,16 @@ fun UsbPanel(
                 Button(enabled = !busy && devices.size > 1, onClick = { selected = (current + 1) % devices.size }) {
                     Text("siguiente")
                 }
-                Button(enabled = !busy && device != null, onClick = {
+                Button(enabled = !busy && device != null && state in CONNECTABLE, onClick = {
                     act("conectar") {
                         // Misma invariante que el plan: el motor no se pelea con USB por el device.
                         prepareForUsb() && usb.connect(reporter, device!!, humanTimeoutMs = UI_PERMISSION_TIMEOUT_MS)
                     }
                 }) { Text("permiso + conectar") }
-                Button(enabled = !busy, onClick = { act("desconectar") { usb.disconnect(reporter) } }) {
+                Button(enabled = !busy, onClick = {
+                    // Como el plan: el motor parado antes de sacarlo del modo BackendManager.
+                    act("desconectar") { prepareForUsb(); usb.disconnect(reporter) }
+                }) {
                     Text("desconectar")
                 }
             }
@@ -166,3 +169,13 @@ fun UsbPanel(
 
 /** Desde la UI el humano está delante: si no contesta en dos minutos, se reporta y se suelta. */
 private const val UI_PERMISSION_TIMEOUT_MS = 120_000L
+
+/**
+ * Los estados desde los que "permiso + conectar" tiene sentido. En CONNECTED/STREAMING un segundo
+ * `connectDevice` re-inicializa el backend libusb con el stream vivo (medido con el auto-connect).
+ */
+private val CONNECTABLE = setOf(
+    UsbConnectionState.DISCONNECTED,
+    UsbConnectionState.ERROR,
+    UsbConnectionState.PERMISSION_DENIED,
+)
