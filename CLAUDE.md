@@ -563,11 +563,16 @@ python3 scripts/check-jni-signatures.py     # [gate] Guardrail REQ-025. La FIRMA
 
 python3 scripts/check-release-flags.py     # [gate] Guardrail MINI-036. Las flags EFECTIVAS del
                                            # .so que publica assembleRelease, en las 4 ABIs:
-                                           # -O3 (el ultimo -O), FP seguras, -ftree-vectorize,
-                                           # -flto=thin y -g en cada objeto que entra al .so; SIN
-                                           # -ffinite-math-only ni nada que la implique; link LTO
-                                           # y sin strip. Corre despues de assemble-release (como
-                                           # jni-symbols) y --self-test primero.
+                                           # -O3, FP seguras, -ftree-vectorize, -flto=thin y -g
+                                           # en cada objeto que entra al .so, con la semantica del
+                                           # driver (GANA LA ULTIMA: un -fno-lto al final anula);
+                                           # SIN -ffinite-math-only ni nada que la implique
+                                           # (-ffast-math, -ffp-model=*...); link LTO; y la copia
+                                           # sin strip CON .symtab/.debug_info/.debug_line, leido
+                                           # con readelf, no inferido de las flags. Le pregunta a
+                                           # ninja (-n) si el .so esta al dia con ese build.ninja.
+                                           # Corre despues de assemble-release (como jni-symbols)
+                                           # y --self-test primero.
                                            # 🔴 NO lee el CMakeLists, y ese es el punto: el bloque
                                            # pedia "Release", AGP construye RelWithDebInfo, y
                                            # todas las versiones hasta MINI-036 salieron a -O2 sin

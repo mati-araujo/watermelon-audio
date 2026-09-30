@@ -795,7 +795,8 @@ jobs:
         run: python3 scripts/check-jni-symbols.py
 
       # MINI-036 — el .so que se publica compila con -O3, FP seguras sin
-      # -ffinite-math-only, vectorizacion, LTO y -g, y el link no strippea. Lee
+      # -ffinite-math-only, vectorizacion, LTO y -g, y la copia sin strip
+      # conserva .symtab y .debug_* (con el readelf del NDK). Lee
       # el build.ninja que produjo el .so empaquetado (no el CMakeLists: leerlo
       # decia "Release" y AGP construia RelWithDebInfo). Necesita el build de
       # `Build release`, igual que JNI symbols. El self-test primero.
