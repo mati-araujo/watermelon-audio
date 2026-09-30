@@ -4,6 +4,7 @@ import com.watermellonstudios.audio.harness.smoke.SmokeReporter
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -27,6 +28,8 @@ class SoundFontCheckTest {
         var frame = 0L
         var framesPerRead = 10_000L
         var noteIsOn = false
+        var presetNameOverride: String? = "WMA fixture"
+        var setPresetThrows = false
 
         override fun load(path: String): Boolean {
             loaded = loadResult
@@ -35,9 +38,11 @@ class SoundFontCheckTest {
         override fun isLoaded() = loaded
         override fun unload() { unloads++; loaded = false }
         override fun presetCount() = if (loaded) presets else 0
-        override fun presetName(index: Int) = if (index < presetCount()) "WMA fixture" else null
+        override fun presetName(index: Int) = if (index < presetCount()) presetNameOverride else null
         override fun bankProgram(index: Int) = if (index < presetCount()) intArrayOf(0, 0) else null
-        override fun setPreset(index: Int) = Unit
+        override fun setPreset(index: Int) {
+            if (setPresetThrows) throw IllegalStateException("preset")
+        }
         override suspend fun ensureEngineRunning() = engineStarts
         override fun engineType() = currentType
         override fun setEngineType(type: Int) { typesSet += type; currentType = type }
@@ -61,6 +66,24 @@ class SoundFontCheckTest {
         assertFalse(check(port).load(reporter, "sf2", "/x.sf2", "x.sf2"))
         assertTrue(line("carga").contains("ok=false") && line("carga").contains("presets=0"))
         assertTrue(lines.none { " step=preset " in it })
+    }
+
+    /** Bug que atrapa: la UI dice "cargado" y el juez FAIL porque el preset 0 no tiene nombre. */
+    @Test
+    fun aLoadWhosePresetIsUnreadableIsNotALoad() {
+        val port = FakePort().apply { presetNameOverride = null }
+        assertFalse(check(port).load(reporter, "sf2", "/x.sf2", "x.sf2"))
+        assertEquals("true", field("carga", "ok"))
+        assertEquals("false", field("preset", "ok"))
+    }
+
+    /** Bug que atrapa: una excepción a mitad de la nota deja el motor en SOUNDFONT y la nota colgada. */
+    @Test
+    fun anExceptionMidNoteStillRestoresTheEngineAndReleasesTheNote() = runTest {
+        val port = FakePort().apply { loaded = true; currentType = 2; setPresetThrows = true }
+        assertFailsWith<IllegalStateException> { check(port).playNote(reporter, "sf2") }
+        assertEquals(listOf(SoundFontCheck.ENGINE_SOUNDFONT, 2), port.typesSet)
+        assertEquals(1, port.noteOffs)
     }
 
     @Test

@@ -19,6 +19,7 @@ import com.watermellonstudios.audio.domain.usb.UsbTransferStats
 import com.watermellonstudios.audio.harness.smoke.SmokeReporter
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -48,6 +49,12 @@ class UsbHarness(context: Context) {
     }
 
     fun release() {
+        // `manager.release()` lanza el disconnect en su scope y enseguida lo cancela, así que el
+        // disconnect puede no correr nunca y libusb quedaría inicializado con el fd viejo. Se
+        // desconecta antes, con techo: esto corre en `onDestroy`.
+        if (manager.isDeviceReady()) {
+            runBlocking { withTimeoutOrNull(RELEASE_DISCONNECT_MS) { manager.disconnectDevice() } }
+        }
         runner.release()
         manager.stopMonitoring()
         manager.release()
@@ -183,24 +190,41 @@ class UsbHarness(context: Context) {
             deviceVidPid = device.vidPid,
             uacVersion = manager.getUacVersion(),
         )
+        var passed = 0
         report.results.forEachIndexed { i, res ->
             onResult(res)
             val real = res.statsSamples.lastOrNull()?.currentSampleRateHz
+            // El PASSED de la librería no alcanza: `runPlaybackTest` también da PASSED con las stats
+            // siempre nulas o con el stream trabado (medido en la review de MINI-038). Lo que el
+            // harness afirma es que hubo TRÁFICO durante el test: muestras de stats y paquetes
+            // completados que crecen de la primera a la última.
+            val first = res.statsSamples.firstOrNull()?.packetsCompleted
+            val last = res.statsSamples.lastOrNull()?.packetsCompleted
+            val traffic = first != null && last != null && last > first
+            // Informativo (bifurcación abierta, ver las notas del MINI): el runner NO aplica
+            // `config.sampleRate`, así que una fila de 44100/96000 mide el stream que ya corre.
+            val rateApplied = real != null && kotlin.math.abs(real - res.config.sampleRate) <= res.config.sampleRate * 0.01f
+            val ok = res.status == UsbTestStatus.PASSED && traffic
+            if (ok) passed++
             r.report(
-                PANEL, "suite-${i + 1}", res.status == UsbTestStatus.PASSED,
-                "test" to res.testType, "estado" to res.status,
+                PANEL, "suite-${i + 1}", ok,
+                "test" to res.testType, "estado" to res.status, "trafico" to traffic,
+                "muestras" to res.statsSamples.size, "rate-aplicado" to rateApplied,
                 "rate-config" to res.config.sampleRate, "bits-config" to res.config.bitDepth, "rate-real" to real,
                 "paquetes" to res.totalPackets, "ok-paquetes" to res.successfulPackets,
                 "underruns" to res.underruns, "overruns" to res.overruns, "errores" to res.errors,
                 "latencia-ms" to res.avgLatencyMs, "mensaje" to res.errorMessage,
+                "motivo" to when {
+                    res.status != UsbTestStatus.PASSED -> "estado-${res.status}"
+                    !traffic -> "sin-trafico"
+                    else -> null
+                },
             )
         }
-        val all = report.results.isNotEmpty() && report.results.all { it.status == UsbTestStatus.PASSED }
+        val expected = UsbTestPresets.STANDARD_SUITE.size
         return r.report(
-            PANEL, "suite", all,
-            "tests" to report.results.size,
-            "pasaron" to report.results.count { it.status == UsbTestStatus.PASSED },
-            "esperados" to UsbTestPresets.STANDARD_SUITE.size,
+            PANEL, "suite", report.results.size == expected && passed == expected,
+            "tests" to report.results.size, "pasaron" to passed, "esperados" to expected,
         )
     }
 
@@ -251,6 +275,7 @@ class UsbHarness(context: Context) {
 
     companion object {
         const val PANEL = "usb"
+        private const val RELEASE_DISCONNECT_MS = 1000L
 
         fun describe(d: UsbAudioDevice): String =
             "${d.vidPid}|${d.displayName}|UAC${d.capabilities.uacVersion}|captura=${d.capabilities.hasCapture}"

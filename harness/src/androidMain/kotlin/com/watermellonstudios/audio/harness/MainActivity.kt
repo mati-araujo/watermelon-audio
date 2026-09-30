@@ -37,12 +37,20 @@ class MainActivity : ComponentActivity() {
 
         val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         val plan = intent?.getStringExtra(EXTRA_PLAN)
+        // Un extra presente e inválido NO cae callado al default: la corrida lo reporta y no arranca.
+        val rawWait = intent?.getStringExtra(EXTRA_USB_WAIT_S)
+        val waitS = rawWait?.toLongOrNull()?.takeIf { it > 0 }
+        val waitProblem = if (rawWait != null && waitS == null) "usb-espera-s-invalido:$rawWait" else null
+        val humanWaitMs = (waitS ?: DEFAULT_USB_WAIT_S) * 1000
         val request = if (debuggable && plan != null && savedInstanceState == null) {
-            SmokeRequest(plan = plan, run = intent.getStringExtra(EXTRA_RUN) ?: "adb-${System.currentTimeMillis()}")
+            SmokeRequest(
+                plan = plan,
+                run = intent.getStringExtra(EXTRA_RUN) ?: "adb-${System.currentTimeMillis()}",
+                problem = waitProblem,
+            )
         } else {
             null
         }
-        val humanWaitMs = (intent?.getStringExtra(EXTRA_USB_WAIT_S)?.toLongOrNull() ?: DEFAULT_USB_WAIT_S) * 1000
 
         val platform = HarnessPlatform(
             smokeSink = SmokeSink { line -> Log.i(HarnessSmoke.TAG, line) },
@@ -50,7 +58,7 @@ class MainActivity : ComponentActivity() {
                 val dir = File(cacheDir, "harness-fixtures").apply { mkdirs() }
                 File(dir, name).apply { writeBytes(bytes) }.absolutePath
             },
-            usbPanel = { reporter -> UsbPanel(usbHarness, reporter) },
+            usbPanel = { reporter, prepareForUsb -> UsbPanel(usbHarness, reporter, prepareForUsb) },
             usbSmoke = { reporter -> usbHarness.runAutomatic(reporter, humanWaitMs) },
             soundFontExtras = { check, reporter -> SoundFontFdPicker(check, reporter) },
             smokeRequest = request,

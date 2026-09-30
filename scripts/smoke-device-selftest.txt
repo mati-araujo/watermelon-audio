@@ -1,31 +1,32 @@
 # MINI-038 — log GRABADO de una corrida real de scripts/smoke-device.sh en un device, para el
 # --self-test del juez (no para volver a juzgar al device: eso es lo que hace la corrida).
 #
-# Origen: moto g42 (Android 12), plan `todo`, 2026-09-30. `adb logcat -d -v raw -s HARNESS-SMOKE:I`
-# filtrado por su run. Lo automático (salida, captura, sf2, sf3) pasó entero; USB dio FAIL en
-# `dispositivos` porque la UGREEN CM720 no estaba enumerada (dumpsys usb: su última conexión
-# terminó el día anterior; /dev/bus/usb/001 sólo tenía el hub raíz). Ese FAIL es real y se
-# queda: el control del self-test es que el juez dé EXACTAMENTE este veredicto.
+# Origen: moto g42 (Android 12), plan `todo`, 2026-09-30, run `smoke-20260930-150712-15100`: las lineas del tag
+# de logcat del harness, filtradas por su run. Lo automatico (salida, captura, sf2, sf3) paso
+# entero; USB dio FAIL en `dispositivos` porque la UGREEN CM720 no estaba enumerada (dumpsys usb:
+# su ultima conexion termino el dia anterior; /dev/bus/usb/001 solo tenia el hub raiz). Ese FAIL es
+# real y se queda: el control del self-test es que el juez de EXACTAMENTE este veredicto.
 #
 # exit-esperado: 1  (usb/dispositivos ok=false + los once pasos USB que faltan)
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=plan step=inicio ok=true plan=salida,captura,sf2,sf3,usb
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=salida step=start ok=true lifecycle=RUNNING error=-
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=salida step=stream ok=true rate=48000 buffer=240 canales=2 latencia-ms=12.888749122619629 motivo=-
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=salida step=frames ok=true delta=24000 ventana-ms=500 esperado-aprox=24000
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=captura step=start ok=true aceptado=true corriendo=true espera-ms=0 motivo=-
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=captura step=nivel ok=true l-db=-32.14544 r-db=-30.818325 latencia-ms=8.0 motivo=-
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=captura step=stop ok=true
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf2 step=fixture ok=true archivo=wma-fixture.sf2 bytes=88744
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf2 step=carga ok=true archivo=wma-fixture.sf2 cargado=true presets=1
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf2 step=preset ok=true indice=0 nombre=WMA_fixture bank=0 program=0
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf2 step=nota ok=true nota=69 preset=0 pico-antes=0.0000 pico-durante=0.2548 frames=19440 motivo=-
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf2 step=descarga ok=true queda-cargado=false
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf2 step=fixture ok=true archivo=no-soundfont.sf2 bytes=35
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf2 step=no-soundfont ok=true archivo=no-soundfont.sf2 cargado=false queda-cargado=false
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf3 step=fixture ok=true archivo=wma-fixture.sf3 bytes=8026
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf3 step=carga ok=true archivo=wma-fixture.sf3 cargado=true presets=1
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf3 step=preset ok=true indice=0 nombre=WMA_fixture bank=0 program=0
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf3 step=nota ok=true nota=69 preset=0 pico-antes=0.0000 pico-durante=0.1811 frames=19440 motivo=-
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=sf3 step=descarga ok=true queda-cargado=false
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=usb step=dispositivos ok=false cantidad=0 lista=- host-soportado=true
-HARNESS-SMOKE v=1 run=smoke-20260930-144823-96876 panel=plan step=fin ok=false fallidos=usb motor-detenido=true
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=plan step=inicio ok=true plan=salida,captura,sf2,sf3,usb
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=salida step=start ok=true lifecycle=RUNNING error=-
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=salida step=stream ok=true rate=48000 buffer=240 canales=2 latencia-ms=9.594791412353516 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=salida step=frames ok=true delta=24240 ventana-ms=500 esperado-aprox=24000
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=captura step=start ok=true aceptado=true corriendo=true espera-ms=0 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=captura step=nivel ok=true l-db=-32.196434 r-db=-30.929718 pico=0.028412806 latencia-ms=8.0 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=captura step=stop ok=true
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf2 step=fixture ok=true archivo=wma-fixture.sf2 bytes=88744
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf2 step=carga ok=true archivo=wma-fixture.sf2 cargado=true presets=1
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf2 step=preset ok=true indice=0 nombre=WMA_fixture bank=0 program=0
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf2 step=nota ok=true nota=69 preset=0 pico-antes=0.0000 pico-durante=0.2548 frames=19200 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf2 step=descarga ok=true queda-cargado=false
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf2 step=fixture ok=true archivo=no-soundfont.sf2 bytes=35
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf2 step=no-soundfont ok=true archivo=no-soundfont.sf2 cargado=false queda-cargado=false
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf3 step=fixture ok=true archivo=wma-fixture.sf3 bytes=8026
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf3 step=carga ok=true archivo=wma-fixture.sf3 cargado=true presets=1
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf3 step=preset ok=true indice=0 nombre=WMA_fixture bank=0 program=0
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf3 step=nota ok=true nota=69 preset=0 pico-antes=0.0000 pico-durante=0.1812 frames=19440 motivo=-
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=sf3 step=descarga ok=true queda-cargado=false
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=usb step=motor-parado ok=true error=-
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=usb step=dispositivos ok=false cantidad=0 lista=- host-soportado=true
+HARNESS-SMOKE v=1 run=smoke-20260930-150712-15100 panel=plan step=fin ok=false fallidos=usb motor-detenido=true

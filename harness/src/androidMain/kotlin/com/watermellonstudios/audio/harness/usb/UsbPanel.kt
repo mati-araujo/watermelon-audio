@@ -42,7 +42,12 @@ import kotlinx.coroutines.launch
  * librería, no un "OK".
  */
 @Composable
-fun UsbPanel(usb: UsbHarness, reporter: SmokeReporter, modifier: Modifier = Modifier) {
+fun UsbPanel(
+    usb: UsbHarness,
+    reporter: SmokeReporter,
+    prepareForUsb: suspend () -> Boolean,
+    modifier: Modifier = Modifier,
+) {
     val scope = rememberCoroutineScope()
     val devices by usb.manager.connectedDevices.collectAsState()
     val state by usb.manager.connectionState.collectAsState()
@@ -71,7 +76,9 @@ fun UsbPanel(usb: UsbHarness, reporter: SmokeReporter, modifier: Modifier = Modi
         }
     }
 
-    val device = devices.getOrNull(selected)
+    // Con un dispositivo desenchufado el índice puede quedar afuera: se vuelve al primero.
+    val current = if (selected < devices.size) selected else 0
+    val device = devices.getOrNull(current)
 
     Card(modifier = modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -88,7 +95,7 @@ fun UsbPanel(usb: UsbHarness, reporter: SmokeReporter, modifier: Modifier = Modi
             }
             devices.forEachIndexed { i, d ->
                 Text(
-                    (if (i == selected) "▶ " else "  ") + UsbHarness.describe(d),
+                    (if (i == current) "▶ " else "  ") + UsbHarness.describe(d),
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                 )
@@ -101,11 +108,14 @@ fun UsbPanel(usb: UsbHarness, reporter: SmokeReporter, modifier: Modifier = Modi
                 Button(enabled = !busy, onClick = { act("listar") { usb.listDevices(reporter).isNotEmpty() } }) {
                     Text("listar")
                 }
-                Button(enabled = !busy && devices.size > 1, onClick = { selected = (selected + 1) % devices.size }) {
+                Button(enabled = !busy && devices.size > 1, onClick = { selected = (current + 1) % devices.size }) {
                     Text("siguiente")
                 }
                 Button(enabled = !busy && device != null, onClick = {
-                    act("conectar") { usb.connect(reporter, device!!, humanTimeoutMs = UI_PERMISSION_TIMEOUT_MS) }
+                    act("conectar") {
+                        // Misma invariante que el plan: el motor no se pelea con USB por el device.
+                        prepareForUsb() && usb.connect(reporter, device!!, humanTimeoutMs = UI_PERMISSION_TIMEOUT_MS)
+                    }
                 }) { Text("permiso + conectar") }
                 Button(enabled = !busy, onClick = { act("desconectar") { usb.disconnect(reporter) } }) {
                     Text("desconectar")
@@ -115,7 +125,7 @@ fun UsbPanel(usb: UsbHarness, reporter: SmokeReporter, modifier: Modifier = Modi
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Button(enabled = !busy, onClick = { act("streaming") { usb.startStreaming(reporter) } }) {
+                Button(enabled = !busy, onClick = { act("streaming") { prepareForUsb() && usb.startStreaming(reporter) } }) {
                     Text("start stream")
                 }
                 Button(enabled = !busy, onClick = { act("stop") { usb.stopStreaming(reporter) } }) {

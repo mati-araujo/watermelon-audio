@@ -30,6 +30,7 @@ import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.harness.smoke.SmokePlanRunner
 import com.watermellonstudios.audio.harness.smoke.SmokeReporter
 import com.watermellonstudios.audio.harness.smoke.SmokeSink
+import com.watermellonstudios.audio.harness.smoke.stopEngineForUsb
 import com.watermellonstudios.audio.harness.soundfont.BridgeSoundFontPort
 import com.watermellonstudios.audio.harness.soundfont.Fixtures
 import com.watermellonstudios.audio.harness.soundfont.SoundFontCheck
@@ -101,7 +102,7 @@ fun HarnessApp(platform: HarnessPlatform) {
                 soundFont = sfCheck,
                 fixtures = fixtures,
                 usb = platform.usbSmoke,
-            ).run(request.plan, SmokeReporter(sink, run = request.run))
+            ).run(request.plan, SmokeReporter(sink, run = request.run), request.problem)
         }
     }
 
@@ -176,7 +177,7 @@ fun HarnessApp(platform: HarnessPlatform) {
                 // Control 11 — USB (MINI-038). Sólo Android lo tiene; en iOS el lugar lo dice.
                 val usbPanel = platform.usbPanel
                 if (usbPanel != null) {
-                    usbPanel(uiReporter)
+                    usbPanel(uiReporter) { stopEngineForUsb(engine, uiReporter) }
                 } else {
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Text(

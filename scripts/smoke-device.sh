@@ -31,7 +31,7 @@
 #   ANDROID_SERIAL=<serial> bash scripts/smoke-device.sh [--plan todo|salida,sf2,...]
 #        [--usb-espera-s 120] [--techo-s N] [--out DIR] [--no-build]
 #   bash scripts/smoke-device.sh --self-test
-#   bash scripts/smoke-device.sh --veredicto LOG RUN     # juzga un log ya grabado
+#   bash scripts/smoke-device.sh --veredicto LOG RUN PLAN   # juzga un log ya grabado
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -46,11 +46,11 @@ readonly SELFTEST_LOG="scripts/smoke-device-selftest.txt"
 # --self-test, asi que no puede depender de adb.
 # ---------------------------------------------------------------------------
 verdict() {
-    local log="$1" run="$2"
-    python3 - "$log" "$run" <<'PY'
+    local log="$1" run="$2" requested="$3"
+    python3 - "$log" "$run" "$requested" <<'PY'
 import sys
 
-log, run = sys.argv[1], sys.argv[2]
+log, run, requested = sys.argv[1], sys.argv[2], sys.argv[3]
 
 # La otra punta del contrato (ver la cabecera). El orden es el de emision.
 EXPECTED = {
@@ -58,11 +58,21 @@ EXPECTED = {
     "captura": ["start", "nivel", "stop"],
     "sf2": ["fixture", "carga", "preset", "nota", "descarga", "no-soundfont"],
     "sf3": ["fixture", "carga", "preset", "nota", "descarga"],
-    "usb": ["dispositivos", "permiso", "conectar", "capacidades", "descriptores", "backend",
+    "usb": ["motor-parado", "dispositivos", "permiso", "conectar", "capacidades", "descriptores", "backend",
             "streaming-start", "streaming-stats", "suite", "streaming-stop",
             "backend-restaurado", "desconectar"],
 }
 ORDER = ["salida", "captura", "sf2", "sf3", "usb"]
+# El plan PEDIDO, normalizado como lo normaliza SmokePlan (orden canonico, sin repetidos). El juez
+# lo compara contra el que la app dice haber corrido: si la app corre menos de lo pedido (una
+# regresion en SmokePlan o en MainActivity), eso es FAIL, no "todo lo que corrio paso".
+if requested == "todo":
+    wanted = list(ORDER)
+else:
+    ids = [x.strip() for x in requested.split(",")]
+    wanted = [p for p in ORDER if p in ids]
+    if any(x not in ORDER for x in ids):
+        wanted = None
 # Pasos del panel USB que dependen de que el humano haya dado el permiso.
 AFTER_PERMISSION = EXPECTED["usb"][EXPECTED["usb"].index("permiso"):]
 HUMAN = "esperando-humano"
@@ -105,14 +115,18 @@ if not inicio:
 else:
     add("PASS" if inicio[0].get("ok") == "true" else "FAIL", "plan", "inicio", extras(inicio[0]))
     panels = [p for p in inicio[0].get("plan", "").split(",") if p in EXPECTED]
+    if wanted is None or panels != wanted:
+        add("FAIL", "plan", "pedido", "se pidio '%s' y la app corrio '%s'" % (requested, ",".join(panels) or "-"))
 
 human_pending = set()
 for panel in [p for p in ORDER if p in panels]:
     mine = [f for f in lines if f.get("panel") == panel]
     waits = [f for f in mine if f.get("step") == HUMAN]
     granted = any(f.get("step") == "permiso" and f.get("ok") == "true" for f in mine)
+    denied = any(f.get("step") == "permiso" and f.get("ok") != "true" for f in mine)
     for w in waits:
-        add("HUMANO", panel, HUMAN, ("hecho — " if granted else "PENDIENTE — ") + extras(w))
+        state = "hecho — " if granted else ("DENEGADO por el humano — " if denied else "PENDIENTE — ")
+        add("HUMANO", panel, HUMAN, state + extras(w))
     pending = bool(waits) and not granted
     if pending:
         human_pending.add(panel)
@@ -191,9 +205,9 @@ self_test() {
     [[ -n "$run" ]] || { echo "self-test: FAIL — el log grabado no tiene 'plan inicio'" >&2; return 1; }
 
     local failures=0
-    expect() {  # expect <nombre> <exit esperado> <archivo>
-        local name="$1" want="$2" file="$3" got=0
-        verdict "$file" "$run" > "$tmp/out" 2>&1 || got=$?
+    expect() {  # expect <nombre> <exit esperado> <archivo> [plan pedido]
+        local name="$1" want="$2" file="$3" plan="${4:-todo}" got=0
+        verdict "$file" "$run" "$plan" > "$tmp/out" 2>&1 || got=$?
         if [[ "$got" == "$want" ]]; then
             printf '  ok    %-44s exit %s\n' "$name" "$got"
         else
@@ -215,23 +229,24 @@ self_test() {
     sed -E "/panel=usb /d; s/(panel=plan step=inicio ok=true plan=)[^ ]*/\1salida,captura,sf2,sf3/; \
             s/(panel=plan step=fin )ok=[a-z]+ fallidos=[^ ]*/\1ok=true fallidos=-/" \
         "$SELFTEST_LOG" > "$tmp/verde.log"
-    expect "verde: sin usb, todo lo automatico" 0 "$tmp/verde.log"
+    expect "verde: sin usb, todo lo automatico" 0 "$tmp/verde.log" salida,captura,sf2,sf3
 
     # M1: UN paso con ok=false da rojo.
     sed -E 's/panel=sf3 step=nota ok=true/panel=sf3 step=nota ok=false/' "$tmp/verde.log" > "$tmp/m1.log"
-    expect "M1: sf3/nota con ok=false" 1 "$tmp/m1.log"
+    expect "M1: sf3/nota con ok=false" 1 "$tmp/m1.log" salida,captura,sf2,sf3
 
     # M2: UN paso faltante da rojo.
     grep -v 'panel=salida step=frames ' "$tmp/verde.log" > "$tmp/m2.log"
-    expect "M2: falta salida/frames" 1 "$tmp/m2.log"
+    expect "M2: falta salida/frames" 1 "$tmp/m2.log" salida,captura,sf2,sf3
 
     # M3: sin `fin` la corrida no termino: rojo, aunque todo lo demas pase.
     grep -v 'panel=plan step=fin ' "$tmp/verde.log" > "$tmp/m3.log"
-    expect "M3: falta plan/fin" 1 "$tmp/m3.log"
+    expect "M3: falta plan/fin" 1 "$tmp/m3.log" salida,captura,sf2,sf3
 
     # M4: el humano no contesto — el USB queda HUMANO, no PASS ni FAIL: exit 3.
     {
         cat "$tmp/verde.log" | grep -v 'panel=plan step=fin '
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-parado ok=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=dispositivos ok=true cantidad=1"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=esperando-humano ok=false accion=aceptar_el_dialogo"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=conectar ok=false motivo=sin-respuesta-humana"
@@ -241,19 +256,50 @@ self_test() {
 
     # M5: lineas de OTRA corrida no cuentan: con otro run id no hay nada que juzgar.
     sed -E "s/run=$run /run=otra-corrida /" "$tmp/verde.log" > "$tmp/m5.log"
-    expect "M5: el run id es de otra corrida" 1 "$tmp/m5.log"
+    expect "M5: el run id es de otra corrida" 1 "$tmp/m5.log" salida,captura,sf2,sf3
 
     # M6: un paso con ok=false que NO esta en la lista esperada (p.ej. una excepcion) tambien es rojo.
     awk -v run="$run" '/panel=plan step=fin /{print "HARNESS-SMOKE v=1 run=" run " panel=sf2 step=excepcion ok=false error=boom"} {print}' \
         "$tmp/verde.log" > "$tmp/m6.log"
-    expect "M6: un paso inesperado con ok=false" 1 "$tmp/m6.log"
+    expect "M6: un paso inesperado con ok=false" 1 "$tmp/m6.log" salida,captura,sf2,sf3
+
+    # Un USB completo y sano, detras del permiso que el humano SI dio.
+    usb_ok() {
+        local s
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-parado ok=true"
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=dispositivos ok=true cantidad=1"
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=esperando-humano ok=false accion=aceptar_el_dialogo"
+        for s in permiso conectar capacidades descriptores backend streaming-start streaming-stats \
+                 suite-1 suite-2 suite-3 suite streaming-stop backend-restaurado desconectar; do
+            echo "HARNESS-SMOKE v=1 run=$run panel=usb step=$s ok=true"
+        done
+    }
+    with_usb() {  # with_usb <archivo destino> <sed sobre las lineas usb>
+        { grep -v 'panel=plan step=fin ' "$tmp/verde.log"
+          usb_ok | sed -E "$2"
+          echo "HARNESS-SMOKE v=1 run=$run panel=plan step=fin ok=true fallidos=- motor-detenido=true"
+        } | sed -E "s/(panel=plan step=inicio ok=true plan=)[^ ]*/\1salida,captura,sf2,sf3,usb/" > "$1"
+    }
+
+    # M7: el humano dio el permiso y el USB paso entero: exit 0 (el HUMANO "hecho" no retiene).
+    with_usb "$tmp/m7.log" 's/^//'
+    expect "M7: humano hecho y usb sano" 0 "$tmp/m7.log"
+
+    # M8: el humano dio el permiso y libusb FALLO: es FAIL, no HUMANO. Un fallo real de libusb con
+    # el permiso dado no se puede esconder detras del gesto humano.
+    with_usb "$tmp/m8.log" 's/step=conectar ok=true/step=conectar ok=false error=INITIALIZATION_FAILED/'
+    expect "M8: permiso dado y conectar falla" 1 "$tmp/m8.log"
+
+    # M9: se pidio `todo` y la app corrio menos (una regresion en el plan): FAIL aunque lo que
+    # corrio haya pasado.
+    expect "M9: la app corrio menos que el plan pedido" 1 "$tmp/verde.log" todo
 
     rm -rf "$tmp"
     if (( failures )); then
         echo "self-test: FAIL — $failures caso(s) con el veredicto equivocado" >&2
         return 1
     fi
-    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano y otra corrida"
+    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado y otra corrida"
 }
 
 # ---------------------------------------------------------------------------
@@ -271,6 +317,8 @@ run_device() {
             *) echo "opcion desconocida: $1" >&2; exit 2 ;;
         esac
     done
+    [[ "$usb_wait" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL — --usb-espera-s tiene que ser un entero > 0: '$usb_wait'" >&2; exit 2; }
+    [[ -z "$ceiling" || "$ceiling" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL — --techo-s tiene que ser un entero > 0: '$ceiling'" >&2; exit 2; }
     # El techo cubre la espera humana, la suite USB (3 tests de 5 s) y el resto con holgura.
     ceiling="${ceiling:-$((usb_wait + 120))}"
 
@@ -314,9 +362,22 @@ run_device() {
     echo
 
     echo "=== install -r -g (sólo $PKG) ==="
-    adb_ install -r -g "$APK" | tail -1
+    local installed
+    installed="$(adb_ install -r -g "$APK" 2>&1 || true)"
+    if ! grep -q '^Success' <<< "$installed"; then
+        echo "FAIL — no se pudo instalar el harness:" >&2
+        echo "$installed" | tail -3 >&2
+        exit 2
+    fi
+    echo "Success"
 
     echo "=== plan '$plan', run=$run ==="
+    # Las lineas se capturan en STREAMING desde antes del am start, y no releyendo el buffer: durante
+    # la espera humana y la suite USB el buffer circular de logcat rota, y releerlo perdia `inicio`.
+    local raw="$out/logcat-harness-smoke-raw.txt"
+    adb_ logcat -v raw -s HARNESS-SMOKE:I > "$raw" 2>/dev/null &
+    local logcat_pid=$!
+    trap 'kill "$logcat_pid" 2>/dev/null || true' EXIT
     adb_ shell am force-stop "$PKG"
     adb_ shell am start -n "$ACTIVITY" \
         --es harness.smoke "$plan" --es harness.smoke.run "$run" \
@@ -324,7 +385,7 @@ run_device() {
 
     local log="$out/harness-smoke.log" waited=0 announced=0
     while (( waited < ceiling )); do
-        adb_ logcat -d -v raw -s HARNESS-SMOKE:I | tr -d '\r' | grep -F "run=$run " > "$log" || true
+        tr -d '\r' < "$raw" | grep -F "run=$run " > "$log" || true
         if (( ! announced )) && grep -q 'step=esperando-humano' "$log"; then
             announced=1
             echo ">>> HUMANO: $(grep -m1 'step=esperando-humano' "$log" | sed -E 's/.*accion=([^ ]+).*/\1/' | tr '_' ' ')"
@@ -336,6 +397,7 @@ run_device() {
         waited=$((waited + 2))
     done
 
+    kill "$logcat_pid" 2>/dev/null || true
     local pid
     pid="$(adb_ shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
     if [[ -n "$pid" ]]; then
@@ -346,7 +408,7 @@ run_device() {
     echo
 
     local rc=0
-    verdict "$log" "$run" || rc=$?
+    verdict "$log" "$run" "$plan" || rc=$?
     print_ear_checks
     exit "$rc"
 }
@@ -354,8 +416,8 @@ run_device() {
 case "${1:-}" in
     --self-test) self_test ;;
     --veredicto)
-        [[ $# -eq 3 ]] || { echo "uso: $0 --veredicto LOG RUN" >&2; exit 2; }
-        verdict "$2" "$3" ;;
+        [[ $# -eq 4 ]] || { echo "uso: $0 --veredicto LOG RUN PLAN" >&2; exit 2; }
+        verdict "$2" "$3" "$4" ;;
     -h|--help) sed -n '2,40p' "$0" ;;
     *) run_device "$@" ;;
 esac

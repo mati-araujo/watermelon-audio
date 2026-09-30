@@ -58,15 +58,16 @@ class SoundFontCheck(
             panel, "carga", loaded && presets > 0,
             "archivo" to label, "cargado" to loaded, "presets" to presets,
         )
-        if (ok) {
-            val name = port.presetName(0)
-            val bp = port.bankProgram(0)
-            reporter.report(
-                panel, "preset", name != null && bp != null && bp.size == 2,
-                "indice" to 0, "nombre" to name, "bank" to bp?.getOrNull(0), "program" to bp?.getOrNull(1),
-            )
-        }
-        return ok
+        if (!ok) return false
+        val name = port.presetName(0)
+        val bp = port.bankProgram(0)
+        // El preset es parte de "cargó": un font cuyo preset 0 no tiene nombre ni bank/program no
+        // es uno que la UI pueda mostrar ni el plan tocar, y la pantalla no puede decir "cargado"
+        // mientras el juez dice FAIL.
+        return reporter.report(
+            panel, "preset", name != null && bp != null && bp.size == 2,
+            "indice" to 0, "nombre" to name, "bank" to bp?.getOrNull(0), "program" to bp?.getOrNull(1),
+        )
     }
 
     /**
@@ -95,9 +96,9 @@ class SoundFontCheck(
         if (!port.ensureEngineRunning()) return reporter.report(panel, "nota", false, "motivo" to "motor-no-arranca")
 
         val previousType = port.engineType()
-        port.setEngineType(ENGINE_SOUNDFONT)
-        port.setPreset(presetIndex)
         try {
+            port.setEngineType(ENGINE_SOUNDFONT)
+            port.setPreset(presetIndex)
             pause(SETTLE_MS)
             val before = port.outputPeak()
             val frame0 = port.playFrame()

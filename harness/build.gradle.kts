@@ -163,6 +163,11 @@ abstract class GenerateHarnessSoundFonts @Inject constructor(
 val generateHarnessSoundFonts = tasks.register<GenerateHarnessSoundFonts>("generateHarnessSoundFonts") {
     recipe.set(rootProject.layout.projectDirectory.file("scripts/gen-harness-soundfonts.py"))
     resourcesDir.set(layout.buildDirectory.dir("generated/harness-soundfonts"))
+    // La salida del .sf3 depende del encoder Vorbis del ENTORNO (ffmpeg, libvorbis o el nativo),
+    // que no es un input declarable. Sin esto la task quedaba UP-TO-DATE aunque se desinstalara el
+    // encoder, y "sin encoder falla" sólo valía en un build limpio. Correrla siempre cuesta ~1 s y
+    // re-imprime el sha; las tasks de abajo comparan CONTENIDO, así que bytes iguales no las rehacen.
+    doNotTrackState("la salida depende del encoder Vorbis del entorno, que no es un input declarable")
 }
 
 compose.resources {
