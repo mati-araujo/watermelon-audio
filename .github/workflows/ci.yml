@@ -70,6 +70,18 @@ concurrency:
   group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
+# El GITHUB_TOKEN de este workflow sólo LEE (REQ-047 S4, 4.13, del security-auditor).
+# Sin este bloque dependia del default del repo. Ningun job escribe: el cache de
+# actions/cache y de setup-gradle no usa este token. check-dep-pins.py exige que todo
+# workflow declare `permissions:` y que ci.yml no pida escritura.
+permissions:
+  contents: read
+
+# Las actions van fijadas por SHA COMPLETO, con el tag en comentario (REQ-047 S4):
+# un tag se puede mover, un SHA no. Cada SHA se verifico contra su tag con
+# `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (desreferenciando el tag
+# anotado), y `scripts/check-dep-pins.py` falla si una action aparece sin SHA o
+# con dos SHA distintos. Dependabot las actualiza de a grupo, SHA y comentario.
 jobs:
   # ¿El cambio toca algo que se compile? Es el reemplazo de `paths-ignore`, y la
   # diferencia que importa es que ESTE JOB SÍ CORRE SIEMPRE: los cinco de abajo se
@@ -85,7 +97,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -139,7 +151,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # WA-0.4 — pure grep, no toolchain. Runs here rather than in the `ios`
       # job on purpose: macOS minutes cost 10x, and a forbidden include is just
@@ -284,6 +296,21 @@ jobs:
       - name: Los conteos de CLAUDE.md coinciden con el arbol — REQ-021
         run: python3 scripts/check-doc-counts.py
 
+      # REQ-047 S4 — un lugar por pin (googletest, NDK/CMake del SDK, java-version,
+      # Xcode, SHA de cada action). Va aca, en el job que nunca se saltea por
+      # atestacion: es source-only. El --self-test primero, misma razon que arriba.
+      - name: Un lugar por pin — self-test
+        run: python3 scripts/check-dep-pins.py --self-test
+
+      - name: Un lugar por pin — REQ-047
+        run: python3 scripts/check-dep-pins.py
+
+      # REQ-047 S4 (4.10) — el diff del artefacto publicado contra el registro
+      # (AC-047.2) tiene que poder fallar. Solo el self-test: el diff real necesita
+      # un publish y la credencial del registro.
+      - name: El diff del artefacto publicado puede fallar — self-test
+        run: python3 scripts/diff-published-artifact.py --self-test
+
   # Same suite under AddressSanitizer + UndefinedBehaviorSanitizer. Catches
   # heap/stack overflows, use-after-free and UB in the lock-free rings and the
   # teardown path — the highest-risk code as the driver plan gains new logic.
@@ -293,7 +320,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Instala SOLO lo que falte. La imagen de ubuntu-latest ya trae varias de
       # estas herramientas, y `apt-get update` es la linea mas fragil de todo el
       # CI: si no hace falta, no se corre.
@@ -336,7 +363,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Instala SOLO lo que falte. La imagen de ubuntu-latest ya trae varias de
       # estas herramientas, y `apt-get update` es la linea mas fragil de todo el
       # CI: si no hace falta, no se corre.
@@ -408,7 +435,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # ¿Ya corrió el gate local sobre este contenido exacto? Si sí, los
       # pasos de abajo se saltean y este job termina en verde en segundos.
@@ -418,6 +445,13 @@ jobs:
       - id: attest
         name: Verificar la atestación local
         run: bash scripts/verify-attestation.sh cpp-tests-macos
+
+      # REQ-047 S4 — el Xcode lo fija .github/toolchain-pins.json, no el default de
+      # la imagen, y el log dice cual se uso. Falla si la imagen no lo trae o si el
+      # seleccionado no es el del pin (build incluido). Ver scripts/ci-select-xcode.sh.
+      - name: Fijar Xcode (toolchain-pins.json)
+        if: steps.attest.outputs.valid != 'true'
+        run: bash scripts/ci-select-xcode.sh
 
       # La imagen normalmente trae los dos; se instala solo lo que falte, para que
       # un cambio de imagen no rompa el job y una corrida normal cueste ~0s.
@@ -461,7 +495,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # ¿Ya corrió el gate local sobre este contenido exacto? Si sí, los
       # pasos de abajo se saltean y este job termina en verde en segundos.
@@ -471,6 +505,13 @@ jobs:
       - id: attest
         name: Verificar la atestación local
         run: bash scripts/verify-attestation.sh ios
+
+      # REQ-047 S4 — el Xcode lo fija .github/toolchain-pins.json, no el default de
+      # la imagen, y el log dice cual se uso. Falla si la imagen no lo trae o si el
+      # seleccionado no es el del pin (build incluido). Ver scripts/ci-select-xcode.sh.
+      - name: Fijar Xcode (toolchain-pins.json)
+        if: steps.attest.outputs.valid != 'true'
+        run: bash scripts/ci-select-xcode.sh
 
       # El boot del simulador tarda ~3m30s y NO depende de nada de lo que sigue,
       # asi que se dispara primero y se espera recien al final (paso "Wait for
@@ -523,7 +564,7 @@ jobs:
 
       - name: Set up JDK 17
         if: steps.attest.outputs.valid != 'true'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: 17
@@ -533,7 +574,7 @@ jobs:
       # project at all — without it Gradle fails before reaching any iOS task.
       - name: Set up Android SDK
         if: steps.attest.outputs.valid != 'true'
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         # Solo `platform-tools`: el default de la action es `tools platform-tools`, y el
         # paquete obsoleto `tools` DESAPARECIO del repositorio de Google el 2026-09-14
         # (entre las 20:16 y las 20:43 UTC: verde en el PR de release 2.17.3, rojo en el
@@ -566,7 +607,7 @@ jobs:
       # The Kotlin/Native toolchain is a ~1 GB download per run otherwise.
       - name: Cache Kotlin/Native toolchain
         if: steps.attest.outputs.valid != 'true'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.konan
           key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
@@ -574,7 +615,7 @@ jobs:
 
       - name: Set up Gradle
         if: steps.attest.outputs.valid != 'true'
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       # Since WA-3.1 these also run cinterop, which re-invokes build-ios.sh through
       # the buildIosNativeLib task. That is not wasted work: the CMake tree from the
@@ -680,7 +721,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # ¿Ya corrió el gate local sobre este contenido exacto? Si sí, los
       # pasos de abajo se saltean y este job termina en verde en segundos.
@@ -693,14 +734,14 @@ jobs:
 
       - name: Set up JDK 17
         if: steps.attest.outputs.valid != 'true'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: 17
 
       - name: Set up Android SDK
         if: steps.attest.outputs.valid != 'true'
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         # Solo `platform-tools`: el default de la action es `tools platform-tools`, y el
         # paquete obsoleto `tools` DESAPARECIO del repositorio de Google el 2026-09-14
         # (entre las 20:16 y las 20:43 UTC: verde en el PR de release 2.17.3, rojo en el
@@ -729,7 +770,7 @@ jobs:
 
       - name: Set up Gradle
         if: steps.attest.outputs.valid != 'true'
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       # WA-5.5 — la UI del harness no puede entrar al artefacto publicado.
       # Corre aca y no en el job de macOS porque solo necesita que Gradle

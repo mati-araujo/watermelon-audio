@@ -49,9 +49,16 @@ Y del AAR de `audio-android`:
     (el compilador), las `DT_NEEDED` (de que bibliotecas depende), el `DT_SONAME`
     y —salvo el nuestro, ver abajo— el hash de sus BYTES. El ELF se lee aca, en
     Python: no depende de llvm-readelf ni del NDK.
-El TAMAÑO se imprime siempre, entrada por entrada, y el del AAR entero es una
-diferencia (`aar/size`) si se mueve mas del 5 % en cualquier direccion (el no
-funcional de REQ-047).
+El TAMAÑO se imprime siempre, entrada por entrada, en bytes. El del AAR entero
+es una diferencia (`aar/size`) si se mueve mas del 5 % (el no funcional de
+REQ-047), y lo que entra al trinquete es la BANDA de 5 % en la que cayo y su
+sentido, no los bytes: `aar/size = referencia -> crece-5-10%` quiere decir "crece
+mas del 5 % y hasta el 10 % inclusive" (`achica-10-15%`, etc.). Los bytes no son
+un hecho reproducible, por la misma razon que los del `.so` de abajo: publicar el
+MISMO arbol con otra version movio el AAR 48 bytes (REQ-047 S3), asi que una
+linea en bytes quedaba atada a un publish. Y la banda, no solo el sentido
+(decision del humano, REQ-047 S4 4.12): con `crece` a secas, una vez declarado el
+cruce +5 % y +40 % daban igual de verde; con la banda, salirse de ella es rojo.
 
 La VERSION se normaliza en todo lo que es texto (nombres de archivo, POM,
 `.module`, referencias entre nuestras publicaciones).
@@ -124,6 +131,7 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import struct
@@ -134,6 +142,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
+from fractions import Fraction
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -150,6 +159,12 @@ EMPTY = "(vacio)"
 NO_VERSION = "(sin-version)"
 PLACEHOLDER_REASON = "RAZON"
 SIZE_KEY = "aar/size"
+# Los VALORES de `aar/size` (REQ-047 S4, 4.11 y 4.12): la banda de 5 % y su
+# sentido, no los bytes. El ancho de banda es SIZE_TOLERANCE: si cambia, una
+# declaracion hecha con el viejo deja de coincidir y queda roja.
+SIZE_BASE = "referencia"
+SIZE_UP_WORD = "crece"
+SIZE_DOWN_WORD = "achica"
 # El .so cuyos BYTES no son un hecho reproducible (ver el docstring): su hash se
 # imprime, no entra al trinquete.
 UNPINNED_SO = "libwatermelon_audio.so"
@@ -566,8 +581,30 @@ def size_diff(sa: dict[str, int], sb: dict[str, int]) -> tuple[list[tuple[str, i
     if total_a <= 0 or total_b <= 0:
         raise ReadError("tamaño del AAR ilegible")
     if abs(total_b - total_a) / total_a > SIZE_TOLERANCE:
-        return rows, (SIZE_KEY, str(total_a), str(total_b))
+        return rows, (SIZE_KEY, SIZE_BASE, size_band(total_a, total_b))
     return rows, None
+
+
+def size_band(total_a: int, total_b: int) -> str:
+    """La banda en la que cayo el cambio del AAR: `crece-5-10%` es "mas del 5 % y hasta
+    el 10 % inclusive". Aritmetica EXACTA (Fraction): el borde de una banda es un
+    cociente de enteros. El float da lo mismo en lo medido (cada multiplo de 5 % hasta el
+    200 %, con AAR de 0,2 a 3 MB), pero eso es una propiedad del redondeo, no una garantia."""
+    step = Fraction(str(SIZE_TOLERANCE))
+    k = math.ceil(Fraction(abs(total_b - total_a), total_a) / step)
+    pct = round(SIZE_TOLERANCE * 100)
+    word = SIZE_UP_WORD if total_b > total_a else SIZE_DOWN_WORD
+    return f"{word}-{(k - 1) * pct}-{k * pct}%"
+
+
+def print_size_verdict(rows, diffs) -> None:
+    """Los bytes del AAR y el cruce del umbral, en claro: el trinquete ve el cruce, quien
+    lee ve los bytes. El cruce se toma de `diffs` (lo que vio size_diff), no se recalcula:
+    dos copias del umbral podrian decir cosas distintas."""
+    a, b = next((a, b) for k, a, b in rows if k == "(AAR entero)")
+    pct = (b - a) / a * 100
+    cruce = next((vb for k, _va, vb in diffs if k == SIZE_KEY), "dentro del umbral")
+    print(f"\n{SIZE_KEY}: {a} -> {b} bytes ({pct:+.2f} %), umbral {SIZE_TOLERANCE:.0%}: {cruce}")
 
 
 ARROW = " -> "
@@ -716,6 +753,7 @@ def compare(base: Source, head: Source, expectations, quiet=False) -> tuple[int,
         print(f"base: {base.label}  —  {o.na} hechos")
         print(f"head: {head.label}  —  {o.nb} hechos")
         print_sizes(o.rows)
+        print_size_verdict(o.rows, o.diffs)
         print_unpinned(o.info_a, o.info_b)
     return verdict(o.diffs, expectations, quiet)
 
@@ -1188,8 +1226,12 @@ def self_test() -> int:
             rc, detail = verdict(o.diffs, {}, quiet=True)
             want = {f"{SO64}/sha"} | ({SIZE_KEY} if red else set())
             seen = {k for k, _, _ in o.diffs}
-            ok = seen == want and abs(abs(real) - ratio) < 0.0005 and rc == 1
-            return ok, f"razon real {real:+.4%}, vio {sorted(seen)} esperaba {sorted(want)}"
+            # 4.11: el VALOR es el cruce y su sentido, nunca los bytes.
+            value = next(((va, vb) for k, va, vb in o.diffs if k == SIZE_KEY), None)
+            want_value = (SIZE_BASE, "crece-5-10%" if side == "head" else "achica-5-10%") if red else None
+            ok = seen == want and value == want_value and abs(abs(real) - ratio) < 0.0005 and rc == 1
+            return ok, (f"razon real {real:+.4%}, vio {sorted(seen)} esperaba {sorted(want)}; "
+                        f"valor {value} esperaba {want_value}")
         attempt(f"tamaño: {label}", size_case)
 
     def size_exact():
@@ -1203,6 +1245,107 @@ def self_test() -> int:
         seen = {k for k, _, _ in o.diffs}
         return (tb - ta) * 20 == ta and seen == {f"{SO64}/sha"}, f"{ta} -> {tb}, vio {sorted(seen)}"
     attempt("tamaño: +5,000 % exacto -> no es diferencia", size_exact)
+
+    # 4.12: los BORDES de banda, medidos en bytes exactos. `exact_sides` rellena los
+    # dos lados para que |head - base| sea exactamente base*num/den + extra.
+    size_b0 = len(make_aar(dict(DEFAULT_SIDE), "2.21.0-local"))
+
+    def exact_sides(num, den, extra, up):
+        start = size_a if up else 2 * size_a  # achicar necesita una base mas grande que el head
+        q = (start - size_a) + ((-start) % den)
+        ta = size_a + q
+        delta = ta * num // den + extra
+        tb = ta + delta if up else ta - delta
+        return {"pad": tb - size_b0}, {"pad": q}, delta
+
+    for label, num, den, extra, up, want in [
+            ("-5,000 % exacto -> no es diferencia", 1, 20, 0, False, None),
+            ("+10,000 % exacto -> crece-5-10%", 1, 10, 0, True, "crece-5-10%"),
+            ("+10 % y un byte -> crece-10-15%", 1, 10, 1, True, "crece-10-15%"),
+            ("-10,000 % exacto -> achica-5-10%", 1, 10, 0, False, "achica-5-10%"),
+            ("-10 % y un byte -> achica-10-15%", 1, 10, 1, False, "achica-10-15%"),
+            ("+40 % y un byte -> crece-40-45%", 2, 5, 1, True, "crece-40-45%")]:
+        def band_case(num=num, den=den, extra=extra, up=up, want=want):
+            head_kw, base_kw, delta = exact_sides(num, den, extra, up)
+            o = observe_sides(head_kw, base_kw)
+            ta, tb = next((a, b) for k, a, b in o.rows if k == "(AAR entero)")
+            value = next((vb for k, _va, vb in o.diffs if k == SIZE_KEY), None)
+            exact = (tb - ta) == (delta if up else -delta)
+            return exact and value == want, f"{ta} -> {tb} ({(tb - ta) / ta:+.5%}), valor {value} esperaba {want}"
+        attempt(f"tamaño: {label}", band_case)
+
+    def size_out_of_band():
+        # Lo que decidio el humano: declarado crece-5-10% y el AAR crece +40 % -> ROJO
+        # "con otro valor". Con `crece` a secas, esto daba verde.
+        head_kw, base_kw, _ = exact_sides(2, 5, 1, True)
+        o = observe_sides(head_kw, base_kw)
+        rc, d = verdict(o.diffs, size_expect(o, (SIZE_BASE, "crece-5-10%")), quiet=True)
+        return rc == 1 and d["wrong_value"] == [SIZE_KEY], f"rc={rc} {d}"
+
+    # 4.11: una declaracion de tamaño se escribe con el cruce, y ata al SENTIDO, no a
+    # los bytes. `expect` arma la declaracion con el `.so` observado (que en estos
+    # lados siempre difiere) y la linea de tamaño que se le pase.
+    def size_expect(o, size_line):
+        exp = {k: (va, vb, "caso") for k, va, vb in o.diffs if k != SIZE_KEY}
+        if size_line is not None:
+            exp[SIZE_KEY] = (*size_line, "caso")
+        return exp
+
+    up = (SIZE_BASE, "crece-5-10%")
+    attempt("tamaño: declarado crece-5-10%, crece +40 % -> con otro valor", size_out_of_band)
+
+    def size_other_bytes():
+        # La misma banda con otros bytes (+5,1 % y +7 %) -> la MISMA declaracion da verde
+        # en los dos. Con bytes en el valor, el segundo quedaba "con otro valor".
+        rcs = []
+        for ratio in (0.051, 0.07):
+            o = observe_sides({"pad": round(ratio * size_a)})
+            rcs.append(verdict(o.diffs, size_expect(o, up), quiet=True)[0])
+        return rcs == [0, 0], f"rc {rcs}"
+    attempt("tamaño: el mismo cruce con otros bytes -> la misma declaracion, verde", size_other_bytes)
+
+    def size_other_direction():
+        # Declarado "crece" y el AAR achica mas del 5 % -> con otro valor.
+        p = round(0.051 * size_a / (1 - 0.051))
+        o = observe_sides({}, {"pad": p})
+        rc, d = verdict(o.diffs, size_expect(o, up), quiet=True)
+        return rc == 1 and d["wrong_value"] == [SIZE_KEY] and not d["unobserved"], f"rc={rc} {d}"
+    attempt("tamaño: declarado crece, achica -> con otro valor", size_other_direction)
+
+    def size_back_inside():
+        # Declarado "crece" y el AAR vuelve adentro del umbral -> no se reproduce.
+        o = observe_sides({"pad": round(0.049 * size_a)})
+        rc, d = verdict(o.diffs, size_expect(o, up), quiet=True)
+        return rc == 1 and d["unobserved"] == [SIZE_KEY] and not d["wrong_value"], f"rc={rc} {d}"
+    attempt("tamaño: declarado crece, dentro del 5 % -> no se reproduce", size_back_inside)
+
+    def size_bytes_declared():
+        # La forma VIEJA (bytes) ya no puede dar verde: queda con otro valor.
+        o = observe_sides({"pad": round(0.051 * size_a)})
+        ta, tb = next((a, b) for k, a, b in o.rows if k == "(AAR entero)")
+        rc, d = verdict(o.diffs, size_expect(o, (str(ta), str(tb))), quiet=True)
+        return rc == 1 and d["wrong_value"] == [SIZE_KEY], f"rc={rc} {d}"
+    attempt("tamaño: una declaracion en bytes -> con otro valor", size_bytes_declared)
+
+    def size_printed():
+        # Los bytes no entran al trinquete, pero se IMPRIMEN.
+        o = observe_sides({"pad": round(0.051 * size_a)})
+        ta, tb = next((a, b) for k, a, b in o.rows if k == "(AAR entero)")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            print_size_verdict(o.rows, o.diffs)
+        text = out.getvalue()
+        return f"{ta} -> {tb} bytes" in text and "crece-5-10%" in text, text.strip()
+    attempt("tamaño: los bytes y el cruce se imprimen", size_printed)
+
+    def size_vocabulary():
+        # Las palabras del trinquete de tamaño estan escritas en los archivos de
+        # declaracion (scripts/published-artifact-vs-*.txt). Cambiarlas deja cada
+        # declaracion vieja "con otro valor" en la proxima corrida real, lejos de aca.
+        got = (SIZE_BASE, size_band(100, 106), size_band(100, 94), size_band(100, 111))
+        want = ("referencia", "crece-5-10%", "achica-5-10%", "crece-10-15%")
+        return got == want, f"{got}"
+    attempt("tamaño: el vocabulario de la declaracion es estable", size_vocabulary)
 
     # 2. El trinquete es sobre el VALOR (B1), del head Y de la base (R4).
     bump = {"min_compile_sdk": "37", "core_ktx": "1.19.1", "scope": "runtime"}

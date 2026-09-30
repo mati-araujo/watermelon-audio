@@ -251,6 +251,9 @@ else
   dice "verificado" sin decir con que, no prueba nada. Si el toolchain nuevo es
   el que corresponde, actualiza .github/toolchain-pins.json — eso cambia el
   digest y fuerza una corrida completa en CI, que es lo correcto.
+  OJO con la clave `xcode`: desde REQ-047 S4 TAMBIEN fija el Xcode de los jobs de
+  macOS del CI (scripts/ci-select-xcode.sh). Bumpearla a un Xcode que la imagen
+  del runner no trae pone rojos ios, cpp-tests-macos y publish.
 EOF
 fi
 
@@ -344,6 +347,18 @@ gate_guardrails() {
     # crash, no hay log y no hay retorno. Eran 50. Source-only, --self-test primero.
     step guardrails jni-pre-self  python3 scripts/check-jni-preinit.py --self-test || return 1
     step guardrails jni-preinit   python3 scripts/check-jni-preinit.py || return 1
+
+    # REQ-047 S4 — UN lugar por pin: googletest, el NDK/CMake del SDK, java-version,
+    # el Xcode del CI y el SHA de cada action. Un pin escrito dos veces se bumpea en
+    # uno y en el otro no, con el build verde. Source-only; --self-test primero.
+    step guardrails dep-pins-self python3 scripts/check-dep-pins.py --self-test || return 1
+    step guardrails dep-pins      python3 scripts/check-dep-pins.py || return 1
+
+    # REQ-047 S4 (4.10) — el instrumento que diffea el artefacto publicado contra el
+    # registro (AC-047.2) tiene que poder fallar: un caso por comparador. Sólo el
+    # self-test: el diff real necesita un publish y la credencial del registro, así
+    # que lo corre a mano la etapa que toca lo publicado. Source-only, un segundo.
+    step guardrails artifact-diff-self python3 scripts/diff-published-artifact.py --self-test || return 1
 }
 
 gate_cpp_tests_macos() {

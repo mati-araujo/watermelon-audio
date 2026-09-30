@@ -178,10 +178,20 @@ afirmado y no vigilado haría leer todo este archivo como verificado cuando sól
 | Min SDK | 29      |
 | Compile SDK | 37      |
 | kotlinx-coroutines | 1.11.0  |
-| TinySoundFont | 0.9     |
+| TinySoundFont | 0.9, **fork** (ver `thirdparty/VENDORED.md`) |
 | iOS deployment target | 15.0    |
+| googletest (suite de host) | ver `audio/src/main/cpp/thirdparty/googletest.cmake` |
+| Compose Multiplatform (sólo `:harness`) | ver `gradle/libs.versions.toml` |
+| Xcode del CI | ver la clave `xcode` de `.github/toolchain-pins.json` |
 
 Targets KMP: `androidTarget`, `iosArm64`, `iosSimulatorArm64`.
+
+Las filas que dicen "ver" apuntan a la **única fuente** del pin, a propósito: un número
+copiado acá envejece en silencio (ver «Conteos medidos»). `scripts/check-dep-pins.py`
+(REQ-047 S4) falla si googletest, el NDK/CMake del SDK, `java-version`, el Xcode del CI o el
+SHA de una action aparecen escritos en un segundo lugar. Lo vendorizado —y lo que Dependabot
+no ve— está inventariado, con cómo buscar sus CVE, en
+`audio/src/main/cpp/thirdparty/VENDORED.md`.
 
 ---
 
@@ -582,6 +592,18 @@ python3 scripts/check-release-flags.py     # [gate] Guardrail MINI-036. Las flag
                                            # build.ninja que produjo el .so EMPAQUETADO, atado por
                                            # contenido: .cxx/ acumula un hash por configuracion y
                                            # "el mas nuevo" puede ser otro.
+
+python3 scripts/check-dep-pins.py          # [gate] Guardrail REQ-047 S4. UN lugar por pin:
+                                           # googletest (thirdparty/googletest.cmake), el
+                                           # NDK/CMake del SDK (el catalogo), java-version, el
+                                           # Xcode del CI (toolchain-pins.json, aplicado por
+                                           # scripts/ci-select-xcode.sh en todo job de macOS) y
+                                           # el SHA+tag de cada action. --self-test corre ANTES.
+python3 scripts/diff-published-artifact.py --self-test   # [gate] REQ-047 S4 (4.10): el
+                                           # instrumento de AC-047.2 puede fallar. El diff REAL
+                                           # contra el registro NO es gate: necesita un publish
+                                           # y la credencial, y lo corre la etapa que toca lo
+                                           # publicado.
 
 python3 scripts/check-mechanism-callers.py # [gate] Guardrail REQ-013. Contesta "?quien LLAMA
                                            # a esto?": falla si una funcion de produccion tiene

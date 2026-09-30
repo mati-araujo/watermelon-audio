@@ -82,16 +82,11 @@ if(WMA_TESTS_SANITIZE)
     add_link_options(-fsanitize=${WMA_TESTS_SANITIZE})
 endif()
 
-# Fetch googletest once, here. The child suites also declare it, but
-# FetchContent dedupes by name, so this is the single source of truth and
-# the only network hit. Pin matches every child suite (v1.15.2).
-include(FetchContent)
-FetchContent_Declare(googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.15.2
-)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
+# Fetch googletest once, here. The child suites include the same file so they
+# still configure standalone, but include_guard(GLOBAL) makes this the only
+# fetch. The version lives ONLY in thirdparty/googletest.cmake (REQ-047 S4);
+# scripts/check-dep-pins.py fails if a second pin shows up anywhere.
+include(${CMAKE_CURRENT_LIST_DIR}/../thirdparty/googletest.cmake)
 
 # ----------------------------------------------------------------------------
 # Warning gate — host test build ONLY (never the NDK/production build).

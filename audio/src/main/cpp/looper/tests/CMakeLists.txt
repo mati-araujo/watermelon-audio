@@ -22,12 +22,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Fetch Google Test (same pin as usb/tests).
 include(FetchContent)
-FetchContent_Declare(googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.15.2
-)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
+# El pin de googletest vive en UN solo lugar (REQ-047 S4).
+include(${CMAKE_CURRENT_LIST_DIR}/../../thirdparty/googletest.cmake)
 
 # Shared sources from the engine (Logger.cpp for the stderr fallback that
 # the looper headers include via platform/Logger.h).
