@@ -44,7 +44,15 @@ readonly MIN_WMA_SYMBOLS=100
 
 if (( do_android )); then
     printf '=== :harness — Android ===\n'
-    ./gradlew :harness:assembleDebug
+    # MINI-038: los tests de commonTest del harness (el formato HARNESS-SMOKE, el plan y los
+    # veredictos del SoundFont) corren en la JVM junto con el APK. Van aca y no como paso propio
+    # del gate porque este script ya corre en el gate Y en el CI: un solo lugar, las dos puntas.
+    ./gradlew :harness:assembleDebug :harness:testDebugUnitTest
+
+    # MINI-038: el juez de scripts/smoke-device.sh tiene que poder decir que NO. El smoke en
+    # device no entra al CI (no hay device); su --self-test sobre un log grabado si.
+    printf '\n=== smoke-device.sh --self-test ===\n'
+    bash scripts/smoke-device.sh --self-test
 fi
 
 if (( ! do_ios )); then
