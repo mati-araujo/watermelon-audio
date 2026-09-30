@@ -147,8 +147,8 @@ jobs:
       #
       # Por que no puede dar un rojo falso en ESTE runner: todo lo que el chequeo
       # necesita ya lo usa el paso de arriba. Toma ninja y llvm-readelf del
-      # CMakeCache.txt del propio build (el ninja de "cmake;3.22.1" y el readelf
-      # del "ndk;28.2.13676358" que instala "Install NDK and CMake", binarios
+      # CMakeCache.txt del propio build: el ninja del CMake y el readelf del NDK
+      # que "Install NDK and CMake" instala desde el catalogo (binarios
       # universales x86_64/arm64); si el build corrio, esas rutas existen. El
       # self-test busca un ninja en el PATH (lo garantiza "Install C++ build
       # tools") o en $ANDROID_HOME/cmake. python3 viene en la imagen de macOS

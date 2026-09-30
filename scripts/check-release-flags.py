@@ -85,11 +85,13 @@ CXX_OBJ_GLOB = "build/intermediates/cxx/*/*/obj/{abi}/" + LIB
 
 # Cada propiedad requerida: (nombre, tokens que la PRENDEN, tokens que la APAGAN).
 # Gana el último token del conjunto que aparezca, como en el driver. Los
-# conjuntos salen de `clang -###` del NDK r28 (clang 19.0.1), agregando cada
-# token DESPUÉS de las flags del arreglo y mirando qué le llega a cc1:
+# conjuntos salen de `clang -###` del toolchain del repo, el NDK r30 (clang
+# 21.0.0, D8 de MINI-036), agregando cada token DESPUÉS de las flags del arreglo
+# y mirando qué le llega a cc1:
 #   -fno-fast-math                  apaga signed-zeros, reciprocal y reassociate;
 #                                   NO toca math-errno ni el comportamiento de excepciones
-#   -fno-unsafe-math-optimizations  lo mismo, y además -ffp-exception-behavior=strict
+#   -fno-unsafe-math-optimizations  lo mismo, y tampoco toca las excepciones (en clang
+#                                   19 / NDK r28 ponía exception-behavior=strict: cambió)
 #   -ftrapping-math                 -ffp-exception-behavior=strict (y cc1 pierde -mreassociate)
 #   -ffp-exception-behavior=strict  pierde -mreassociate; =maytrap lo conserva, pero
 #                                   ya no es "ignore": las dos apagan -fno-trapping-math
@@ -102,8 +104,7 @@ _FAST_OFF = ("-fno-fast-math", "-fno-unsafe-math-optimizations")
 REQUIRED = (
     ("-fno-math-errno", ("-fno-math-errno",), ("-fmath-errno",)),
     ("-fno-trapping-math", ("-fno-trapping-math", "-ffp-exception-behavior=ignore"),
-     ("-ftrapping-math", "-ffp-exception-behavior=strict", "-ffp-exception-behavior=maytrap",
-      "-fno-unsafe-math-optimizations")),
+     ("-ftrapping-math", "-ffp-exception-behavior=strict", "-ffp-exception-behavior=maytrap")),
     ("-fno-signed-zeros", ("-fno-signed-zeros",), ("-fsigned-zeros",) + _FAST_OFF),
     ("-freciprocal-math", ("-freciprocal-math",), ("-fno-reciprocal-math",) + _FAST_OFF),
     ("-fassociative-math", ("-fassociative-math",), ("-fno-associative-math",) + _FAST_OFF),
@@ -121,7 +122,9 @@ FORBIDDEN = (
     "-fno-honor-nans",
     "-fno-honor-infinities",
 )
-FORBIDDEN_PREFIX = ("-ffp-model=",)   # =fast implica finite-math; =precise/strict deshacen las de arriba
+# -ffp-model=aggressive implica finite-math (en clang 21; en 19 lo hacía =fast), y
+# =precise/strict deshacen las de arriba: se rechaza cualquier -ffp-model.
+FORBIDDEN_PREFIX = ("-ffp-model=",)
 LTO_WANTED = "-flto=thin"
 
 # Lo que la copia sin strip tiene que conservar para simbolizar un crash.
@@ -753,7 +756,8 @@ def self_test() -> int:
           problems(fixture(extra_test_flags="-O0")) == [])
 
     # --- lo que implica -ffinite-math-only o reescribe el modelo de FP (hallazgo 2)
-    for tok in ("-ffp-model=fast", "-ffp-model=precise", "-funsafe-math-optimizations"):
+    for tok in ("-ffp-model=fast", "-ffp-model=aggressive", "-ffp-model=precise",
+                "-funsafe-math-optimizations"):
         check(f"con {tok} FALLA", dice(fixture(FLAGS_FIXED + " " + tok), f"tiene {tok}"))
     check("-ffast-math en el LINK FALLA (el codegen de LTO pasa por ahí)",
           dice(fixture(link_lang=LINK_LANG_FIXED + " -ffast-math"), "link de"))
@@ -791,9 +795,11 @@ def self_test() -> int:
         ("-fno-fast-math", {"falta -fno-signed-zeros", "falta -freciprocal-math",
                             "falta -fassociative-math"}),
         ("-fno-fast-math -fno-signed-zeros -freciprocal-math -fassociative-math", set()),
-        # -fno-unsafe-math-optimizations además pone exception-behavior=strict
-        ("-fno-unsafe-math-optimizations", {"falta -fno-trapping-math", "falta -fno-signed-zeros",
+        # -fno-unsafe-math-optimizations: en clang 21 NO toca las excepciones (en 19 sí)
+        ("-fno-unsafe-math-optimizations", {"falta -fno-signed-zeros",
                                             "falta -freciprocal-math", "falta -fassociative-math"}),
+        ("-fno-unsafe-math-optimizations -fno-signed-zeros -freciprocal-math "
+         "-fassociative-math", set()),
         ("-fno-unsafe-math-optimizations -fno-trapping-math -fno-signed-zeros "
          "-freciprocal-math -fassociative-math", set()),
         ("-fno-associative-math -fassociative-math", set()),
