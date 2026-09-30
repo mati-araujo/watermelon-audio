@@ -172,7 +172,7 @@ afirmado y no vigilado haría leer todo este archivo como verificado cuando sól
 |------------|---------|
 | Kotlin | ver «Conteos medidos» |
 | AGP | ver «Conteos medidos» |
-| Oboe | 1.10.0  |
+| Oboe | 1.11.0  |
 | C++ | C++20   |
 | CMake | 3.22.1  |
 | Min SDK | 29      |

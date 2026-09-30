@@ -78,7 +78,7 @@ jobs:
           fi
 
       # cmake/ninja de sistema para el build iOS (scripts/build-ios.sh). NO es el
-      # "cmake;3.22.1" del Android SDK más abajo: ese no está en PATH y es para AGP.
+      # "cmake;<version>" del Android SDK (catálogo) más abajo: ese no está en PATH y es para AGP.
       - name: Install C++ build tools
         run: |
           for tool in cmake ninja; do
@@ -110,10 +110,19 @@ jobs:
 
       - name: Install NDK and CMake
         run: |
+          # Las versiones salen del catalogo (REQ-047 S3): una sola fuente para el
+          # build (build-logic) y para lo que se instala aca.
+          PKGS="$(python3 scripts/android-sdk-packages.py)"
+          echo "Paquetes del catalogo:" $PKGS
           yes | sdkmanager --licenses > /dev/null 2>&1
-          sdkmanager --install \
-            "ndk;28.2.13676358" \
-            "cmake;3.22.1"
+          sdkmanager --install $PKGS
+          # Cada paquete pedido, con SU version, tiene que figurar instalado. La
+          # imagen del runner trae otros NDK: un grep generico no probaria nada.
+          INSTALLED="$(sdkmanager --list_installed)"
+          for p in $PKGS; do
+            printf '%s\n' "$INSTALLED" | grep -F " $p " \
+              || { echo "::error::$p no figura instalado"; exit 1; }
+          done
 
       # ~1 GB por corrida sin cache.
       - name: Cache Kotlin/Native toolchain

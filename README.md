@@ -180,7 +180,7 @@ engine.release()
 
 | Library | Version | License |
 |---------|---------|---------|
-| Oboe | 1.10.0 | Apache 2.0 |
+| Oboe | 1.11.0 | Apache 2.0 |
 | kotlinx-coroutines | 1.10.2 | Apache 2.0 |
 | TinySoundFont | 0.9 | MIT |
 | AndroidX Core KTX | 1.18.0 | Apache 2.0 |
