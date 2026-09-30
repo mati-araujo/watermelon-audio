@@ -352,13 +352,25 @@ self_test() {
     expect "M11: fila de 48 k con ok=false" 1 "$tmp/m11.log"
     expect_line "M11: suite-1 sale FAIL" '^FAIL +usb/suite-1 ' "$tmp/m11.log"
 
-    # M13 (g42, 30/09): streaming-start FALLA y streaming-stats no se emite. Rojo, y por los pasos
-    # correctos: streaming-start FAIL y streaming-stats FALTA (no por otro paso).
-    with_usb "$tmp/m13.log" '/step=streaming-stats /d; s/step=streaming-start ok=true/step=streaming-start ok=false motivo=motor-sin-callback/'
-    expect "M13: streaming-start FAIL sin streaming-stats" 1 "$tmp/m13.log"
-    expect_line "M13: streaming-start sale FAIL" '^FAIL +usb/streaming-start +motivo=motor-sin-callback' "$tmp/m13.log"
-    expect_line "M13: streaming-stats sale FALTA" '^FAIL +usb/streaming-stats +FALTA' "$tmp/m13.log"
-    expect_no_line "M13: ningun otro paso usb sale FAIL" '^FAIL +usb/(dispositivos|permiso|conectar|capacidades|descriptores|motor-callback|backend|suite|streaming-stop|desconectar) ' "$tmp/m13.log"
+    # M13 (g42, 30/09): streaming-start FALLA. Rojo, y por los pasos correctos, en las dos formas:
+    # (a) la vieja, sin streaming-stats (FALTA), y (b) la actual, con streaming-stats ok=false
+    # motivo=sin-streaming. Ningun otro paso USB puede salir FAIL por eso.
+    with_usb "$tmp/m13a.log" '/step=streaming-stats /d; s/step=streaming-start ok=true/step=streaming-start ok=false motivo=motor-sin-callback/'
+    expect "M13a: streaming-start FAIL sin streaming-stats" 1 "$tmp/m13a.log"
+    expect_line "M13a: streaming-start sale FAIL" '^FAIL +usb/streaming-start +motivo=motor-sin-callback' "$tmp/m13a.log"
+    expect_line "M13a: streaming-stats sale FALTA" '^FAIL +usb/streaming-stats +FALTA' "$tmp/m13a.log"
+    with_usb "$tmp/m13b.log" 's/step=streaming-start ok=true/step=streaming-start ok=false motivo=motor-sin-callback/; s/step=streaming-stats ok=true/step=streaming-stats ok=false motivo=sin-streaming/'
+    expect "M13b: streaming-start y streaming-stats FAIL" 1 "$tmp/m13b.log"
+    expect_line "M13b: streaming-stats sale FAIL sin-streaming" '^FAIL +usb/streaming-stats +motivo=sin-streaming' "$tmp/m13b.log"
+    for m in m13a m13b; do
+        expect_no_line "$m: ningun otro paso usb sale FAIL" '^FAIL +usb/(dispositivos|motor-callback|permiso|conectar|capacidades|descriptores|backend|suite|streaming-stop|desconectar) ' "$tmp/$m.log"
+    done
+
+    # M14: si falta motor-callback (el motor antes del device), es FAIL por ESE paso. Mata el
+    # mutante que lo saca de EXPECTED.
+    with_usb "$tmp/m14.log" '/step=motor-callback /d'
+    expect "M14: falta usb/motor-callback" 1 "$tmp/m14.log"
+    expect_line "M14: motor-callback sale FALTA" '^FAIL +usb/motor-callback +FALTA' "$tmp/m14.log"
 
     # M12: `medido=false` fuera de una fila de la suite no puede hacer desaparecer un paso: FAIL.
     with_usb "$tmp/m12.log" 's/step=streaming-stats ok=true/step=streaming-stats ok=false medido=false motivo=x/'

@@ -192,25 +192,53 @@ const val ENGINE_STATE_STOPPED = 0
  * vuelve —y el estado de Kotlin dice parado— antes de que termine el fade-out nativo; el motor
  * nativo seguía en Running ~70 ms después, y el paso USB siguiente lo encontraba corriendo. Se
  * decide por el estado nativo y no por `isRunning`, que es el de Kotlin.
+ *
+ * Si Kotlin ya dice parado y el nativo sigue en Running, es un fade EN CURSO: se espera y NO se
+ * vuelve a llamar a `stop()`, porque un segundo stop a mitad del fade lo cancela y reinicia a
+ * volumen pleno (`AudioEngine.cpp`, `stopWithFade`). Sólo si se vence el plazo se insiste.
  */
 suspend fun stopEngineAndWait(
     engine: AudioEngine,
     engineState: () -> Int,
     pause: suspend (Long) -> Unit,
-    deadlineMs: Long = 3000,
+    deadlineMs: Long = STOP_DEADLINE_MS,
+): EngineStop = stopEngineAndWait({ engine.isRunning }, { engine.stop() }, engineState, pause, deadlineMs)
+
+/** La lógica de [stopEngineAndWait] sobre funciones, para poder probarla sin un motor. */
+suspend fun stopEngineAndWait(
+    kotlinRunning: () -> Boolean,
+    stop: suspend () -> Result<Unit>,
+    engineState: () -> Int,
+    pause: suspend (Long) -> Unit,
+    deadlineMs: Long = STOP_DEADLINE_MS,
 ): EngineStop {
     var error: String? = null
-    if (engine.isRunning || engineState() != ENGINE_STATE_STOPPED) {
-        error = engine.stop().exceptionOrNull()?.message
+    var stopCalled = false
+    if (kotlinRunning()) {
+        error = stop().exceptionOrNull()?.message
+        stopCalled = true
     }
-    var waited = 0L
-    while (engineState() != ENGINE_STATE_STOPPED && waited < deadlineMs) {
-        pause(50)
-        waited += 50
+    var waited = waitStopped(engineState, pause, deadlineMs)
+    if (engineState() != ENGINE_STATE_STOPPED && !stopCalled) {
+        // El fade en curso no terminó en el plazo: ahora sí, stop().
+        error = stop().exceptionOrNull()?.message
+        waited += waitStopped(engineState, pause, deadlineMs)
     }
     val state = engineState()
-    return EngineStop(state == ENGINE_STATE_STOPPED && !engine.isRunning, waited, state, error)
+    return EngineStop(state == ENGINE_STATE_STOPPED && !kotlinRunning(), waited, state, error)
 }
+
+private suspend fun waitStopped(engineState: () -> Int, pause: suspend (Long) -> Unit, deadlineMs: Long): Long {
+    var waited = 0L
+    while (engineState() != ENGINE_STATE_STOPPED && waited < deadlineMs) {
+        pause(STOP_POLL_MS)
+        waited += STOP_POLL_MS
+    }
+    return waited
+}
+
+const val STOP_DEADLINE_MS = 3000L
+const val STOP_POLL_MS = 50L
 
 /**
  * Para el motor antes de tocar USB y lo reporta (`panel=usb step=motor-parado`). Lo usan el plan y

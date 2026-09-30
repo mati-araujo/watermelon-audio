@@ -100,6 +100,14 @@ class UsbHarness(context: Context) {
         // la instancia de respaldo de `BackendManager`; al crearse el motor instala la SUYA como
         // global y el backend USB queda en la vieja ("USB backend not available, falling back").
         if (!installEngineCallback(r)) return false
+        // Si algo falla DESPUÉS de instalar el callback, el motor no puede quedar en modo
+        // BackendManager: salida y captura medirían ese camino en vez del directo de Oboe.
+        val ok = connectWithEngineReady(r, device, humanTimeoutMs)
+        if (!ok) restoreEngineMode()
+        return ok
+    }
+
+    private suspend fun connectWithEngineReady(r: SmokeReporter, device: UsbAudioDevice, humanTimeoutMs: Long): Boolean {
         val hadPermission = manager.hasPermission(device)
         if (hadPermission) {
             r.report(PANEL, "permiso", true, "origen" to "ya-concedido", "dispositivo" to device.vidPid)
@@ -179,13 +187,28 @@ class UsbHarness(context: Context) {
             )
         }
         bridge.setUseBackendManager(true)
+        // No hay un getter del callback: lo que se puede verificar es que el motor exista y SIGA
+        // parado después del set (con el motor corriendo, el set se ignora con un LOGE). La línea
+        // lo dice (`verificado=inicializado`) para que nadie la lea como más de lo que es.
         val initialized = bridge.isEngineInitialized()
-        callbackInstalled = initialized
+        val after = bridge.getEngineState()
+        val ok = initialized && after == ENGINE_STATE_STOPPED
+        callbackInstalled = ok
         return r.report(
-            PANEL, "motor-callback", initialized,
-            "inicializado" to initialized, "estado-motor" to bridge.getEngineState(),
-            "motivo" to if (!initialized) "motor-sin-callback" else null,
+            PANEL, "motor-callback", ok,
+            "verificado" to "inicializado", "inicializado" to initialized, "estado-motor" to after,
+            "motivo" to when {
+                !initialized -> "motor-sin-callback"
+                after != ENGINE_STATE_STOPPED -> "motor-corriendo:no-se-reconfigura-con-el-stream-vivo"
+                else -> null
+            },
         )
+    }
+
+    /** Deshace [installEngineCallback]: sin BackendManager (si el motor está parado) y sin callback. */
+    private fun restoreEngineMode() {
+        if (bridge.getEngineState() == ENGINE_STATE_STOPPED) bridge.setUseBackendManager(false)
+        callbackInstalled = false
     }
 
     /** `step=<step>`: pide [wanted] y afirma lo que el motor REPORTA después. */
@@ -200,6 +223,12 @@ class UsbHarness(context: Context) {
 
     /** `step=streaming-start` y, después de [warmupMs], `step=streaming-stats`. */
     suspend fun startStreaming(r: SmokeReporter, warmupMs: Long = 2000): Boolean {
+        val state = manager.connectionState.value
+        if (!manager.isDeviceReady() || (state != UsbConnectionState.CONNECTED && state != UsbConnectionState.STREAMING)) {
+            r.report(PANEL, "streaming-start", false, "motivo" to UsbAudioError.NOT_CONNECTED, "estado" to state)
+            reportNoStreaming(r)
+            return false
+        }
         if (!callbackInstalled) {
             // La precondición falta: se dice con su nombre en vez de dejar que la librería
             // devuelva un STREAMING_ERROR mudo. Y `streaming-stats` se emite igual.
@@ -320,10 +349,18 @@ class UsbHarness(context: Context) {
 
     /** Vuelve a Oboe y suelta el dispositivo. */
     suspend fun disconnect(r: SmokeReporter): Boolean {
-        // El camino inverso de NoisyPad: sin BackendManager, y Oboe seleccionado.
-        if (bridge.getEngineState() == ENGINE_STATE_STOPPED) bridge.setUseBackendManager(false)
+        // El camino inverso de NoisyPad: sin BackendManager, y Oboe seleccionado. Con el motor
+        // corriendo no se puede (el set se ignora): se dice, no se reporta "restaurado".
+        val engineStopped = bridge.getEngineState() == ENGINE_STATE_STOPPED
+        if (engineStopped) bridge.setUseBackendManager(false)
         callbackInstalled = false
-        val restored = selectBackend(r, AudioBackendType.OBOE, "backend-restaurado")
+        val returned = bridge.selectBackend(AudioBackendType.OBOE.id)
+        val actual = AudioBackendType.fromId(bridge.getCurrentBackendType())
+        val restored = r.report(
+            PANEL, "backend-restaurado", engineStopped && actual == AudioBackendType.OBOE,
+            "pedido" to AudioBackendType.OBOE, "select-devolvio" to returned, "reporta" to actual,
+            "motivo" to if (!engineStopped) "backend-manager-sigue-activo" else null,
+        )
         manager.disconnectDevice()
         val fd = manager.getFileDescriptor()
         val state = manager.connectionState.value
