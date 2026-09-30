@@ -26,7 +26,9 @@ libvorbis y el encoder nativo de ffmpeg dan bytes distintos. Por eso el sha256 s
 fija: es la huella de lo que se empaquetó, para comparar corridas.
 
 Sin encoder Vorbis la receta FALLA con un mensaje claro (exit 3). No se versiona un binario para
-esquivarlo.
+esquivarlo. El build de `:harness` corre `--only sf2` y `--only sf3` por separado y, por D10 de
+MINI-038, trata SOLO ese exit 3 como WARNING: empaqueta el `.sf2` y la app reporta el `.sf3` como no
+empaquetado (FAIL del smoke). Cualquier otro fallo rompe el build.
 
 Uso:
     python3 scripts/gen-harness-soundfonts.py --out DIR            # los dos

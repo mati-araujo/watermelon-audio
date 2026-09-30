@@ -1,4 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.io.ByteArrayOutputStream
+import java.security.MessageDigest
 import javax.inject.Inject
 
 /**
@@ -134,8 +136,14 @@ android {
 // `scripts/gen-harness-soundfonts.py` es la receta (y su cabecera explica la forma de cada
 // archivo). Su salida entra como directorio de recursos de Compose de commonMain, asi que el MISMO
 // par de archivos llega a los assets del APK y al bundle de la app de iOS
-// (`Res.readBytes("files/wma-fixture.sf2")`). Sin encoder Vorbis la receta falla con su mensaje y
-// el build con ella: no se versiona un binario para esquivarlo.
+// (`Res.readBytes("files/wma-fixture.sf2")`).
+//
+// D10 (humano): el .sf2 es Python puro y su receta falla el build si falla. El .sf3 necesita un
+// encoder Vorbis (ffmpeg), que los runners del CI NO traen: sin encoder la receta sale con exit 3 y
+// su mensaje, el build lo muestra como WARNING y empaqueta SOLO el .sf2. No se esconde: la app dice
+// "fixture .sf3 no empaquetado" y emite `panel=sf3 step=fixture ok=false`, que smoke-device.sh da
+// como FAIL. Cualquier OTRO fallo de la receta del .sf3 (ffmpeg que no codifica, salida rota) sigue
+// rompiendo el build. No se versiona un binario para esquivar nada de esto.
 // ---------------------------------------------------------------------------
 abstract class GenerateHarnessSoundFonts @Inject constructor(
     private val execOps: ExecOperations,
@@ -154,9 +162,48 @@ abstract class GenerateHarnessSoundFonts @Inject constructor(
         val files = resourcesDir.get().dir("files").asFile
         files.deleteRecursively()
         files.mkdirs()
+        val script = recipe.get().asFile.absolutePath
         execOps.exec {
-            commandLine("python3", recipe.get().asFile.absolutePath, "--out", files.absolutePath)
+            commandLine("python3", script, "--out", files.absolutePath, "--only", "sf2")
         }
+        val stderr = ByteArrayOutputStream()
+        val sf3 = execOps.exec {
+            commandLine("python3", script, "--out", files.absolutePath, "--only", "sf3")
+            errorOutput = stderr
+            isIgnoreExitValue = true
+        }
+        when (sf3.exitValue) {
+            0 -> Unit
+            NO_VORBIS_ENCODER -> logger.warn(
+                "WARNING: fixture .sf3 NO empaquetado (MINI-038, D10) — el harness sale solo con el " +
+                    ".sf2 y su panel sf3 va a dar FAIL.\n" + stderr.toString().trimEnd(),
+            )
+            else -> throw GradleException(
+                "gen-harness-soundfonts.py --only sf3 fallo (exit ${sf3.exitValue}):\n" + stderr.toString().trimEnd(),
+            )
+        }
+
+        // El MANIFIESTO de lo que este build empaqueto, y lo que la app consulta antes de usar un
+        // fixture. Existe por algo medido: la copia de recursos de Compose a los assets de Android
+        // NO borra un archivo que desaparecio de la entrada, asi que un build incremental sin
+        // encoder seguia empaquetando el .sf3 de un build anterior. El manifiesto se reescribe
+        // siempre, y un archivo que cambia si se propaga: la app lo lee y un .sf3 que no figura es
+        // "no empaquetado" aunque sus bytes hayan quedado en el APK.
+        val manifest = files.listFiles().orEmpty()
+            .filter { it.isFile && it.name != MANIFEST }
+            .sortedBy { it.name }
+            .joinToString("") { f ->
+                val sha = MessageDigest.getInstance("SHA-256").digest(f.readBytes())
+                    .joinToString("") { b -> "%02x".format(b) }
+                "${f.name} ${f.length()} $sha\n"
+            }
+        files.resolve(MANIFEST).writeText(manifest)
+    }
+
+    private companion object {
+        /** El exit de la receta cuando no hay encoder Vorbis. Cualquier otro fallo rompe el build. */
+        const val NO_VORBIS_ENCODER = 3
+        const val MANIFEST = "fixtures-manifest.txt"
     }
 }
 

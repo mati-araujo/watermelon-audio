@@ -74,6 +74,7 @@ fun SoundFontControl(
                 panel = if (name == Fixtures.SF3) "sf3" else "sf2"
                 val path = fixtures.materialize(reporter, panel, name)
                 status = when {
+                    path == null && name == Fixtures.SF3 -> SF3_NOT_PACKAGED
                     path == null -> "$name: fixture no disponible (ver log)"
                     check.load(reporter, panel, path, name) -> "$name: cargado, ${port.presetCount()} presets"
                     else -> "$name: NO cargó (presets = ${port.presetCount()})"
@@ -143,3 +144,9 @@ fun SoundFontControl(
         }
     }
 }
+
+/**
+ * D10: el build empaqueta el .sf3 sólo si tuvo encoder Vorbis. Sin él, la pantalla lo dice con estas
+ * palabras, y la línea `panel=sf3 step=fixture ok=false motivo=no-empaquetado` lo dice al script.
+ */
+const val SF3_NOT_PACKAGED = "fixture .sf3 no empaquetado: el build no tenía encoder Vorbis"

@@ -15,9 +15,30 @@ import org.jetbrains.compose.resources.ExperimentalResourceApi
  */
 class Fixtures(private val writeFile: (name: String, bytes: ByteArray) -> String) {
 
-    /** El path del fixture [name] listo para cargar, o `null` (ya reportado). */
+    /**
+     * El path del fixture [name] listo para cargar, o `null` (ya reportado).
+     *
+     * Primero el MANIFIESTO que escribió el build ([FixtureManifest]): un fixture que no figura ahí
+     * no está empaquetado aunque sus bytes hayan quedado en el paquete de un build anterior (D10).
+     */
     @OptIn(ExperimentalResourceApi::class)
     suspend fun materialize(reporter: SmokeReporter, panel: String, name: String): String? {
+        val manifest = try {
+            FixtureManifest.parse(Res.readBytes("files/${FixtureManifest.FILE}").decodeToString())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            reporter.report(
+                panel, "fixture", false,
+                "archivo" to name, "motivo" to "sin-manifiesto", "error" to e::class.simpleName,
+            )
+            return null
+        }
+        val entry = manifest[name]
+            ?: run {
+                reporter.report(panel, "fixture", false, "archivo" to name, "motivo" to "no-empaquetado")
+                return null
+            }
         val bytes = try {
             Res.readBytes("files/$name")
         } catch (e: CancellationException) {
@@ -29,14 +50,27 @@ class Fixtures(private val writeFile: (name: String, bytes: ByteArray) -> String
             )
             return null
         }
-        return write(reporter, panel, name, bytes)
+        if (bytes.size.toLong() != entry.size) {
+            reporter.report(
+                panel, "fixture", false,
+                "archivo" to name, "motivo" to "fixture-viejo", "bytes" to bytes.size, "manifiesto" to entry.size,
+            )
+            return null
+        }
+        return write(reporter, panel, name, bytes, entry.sha256)
     }
 
     /** Un archivo que NO es SoundFont, para el caso de rechazo de AC-3. */
     fun notASoundFont(reporter: SmokeReporter, panel: String): String? =
-        write(reporter, panel, NOT_A_SOUNDFONT, NOT_A_SOUNDFONT_BYTES)
+        write(reporter, panel, NOT_A_SOUNDFONT, NOT_A_SOUNDFONT_BYTES, sha256 = null)
 
-    private fun write(reporter: SmokeReporter, panel: String, name: String, bytes: ByteArray): String? {
+    private fun write(
+        reporter: SmokeReporter,
+        panel: String,
+        name: String,
+        bytes: ByteArray,
+        sha256: String?,
+    ): String? {
         val path = try {
             writeFile(name, bytes)
         } catch (e: Exception) {
@@ -46,7 +80,7 @@ class Fixtures(private val writeFile: (name: String, bytes: ByteArray) -> String
             )
             return null
         }
-        reporter.report(panel, "fixture", true, "archivo" to name, "bytes" to bytes.size)
+        reporter.report(panel, "fixture", true, "archivo" to name, "bytes" to bytes.size, "sha256" to sha256)
         return path
     }
 
@@ -59,4 +93,24 @@ class Fixtures(private val writeFile: (name: String, bytes: ByteArray) -> String
         val NOT_A_SOUNDFONT_BYTES: ByteArray =
             "RIFF\u0010\u0000\u0000\u0000WAVEesto no es un SoundFont".encodeToByteArray()
     }
+}
+
+/**
+ * MINI-038, D10 — el manifiesto que escribe la task `generateHarnessSoundFonts`: una línea por
+ * fixture empaquetado, `<nombre> <bytes> <sha256>`. El sha es el mismo que imprime la receta en el
+ * log del build, así que una línea `step=fixture` se puede cruzar con el build que la produjo.
+ */
+object FixtureManifest {
+    const val FILE = "fixtures-manifest.txt"
+
+    data class Entry(val size: Long, val sha256: String)
+
+    /** Tira [IllegalArgumentException] ante una línea mal formada: un manifiesto roto no es "vacío". */
+    fun parse(text: String): Map<String, Entry> =
+        text.lines().filter { it.isNotBlank() }.associate { line ->
+            val parts = line.trim().split(' ')
+            require(parts.size == 3) { "linea de manifiesto invalida: '$line'" }
+            val size = requireNotNull(parts[1].toLongOrNull()) { "tamano invalido: '$line'" }
+            parts[0] to Entry(size, parts[2])
+        }
 }
