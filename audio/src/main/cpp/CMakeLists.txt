@@ -100,6 +100,13 @@ if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$")
     # trae gold.
     set(CMAKE_C_LINK_OPTIONS_IPO "-fuse-ld=lld")
     set(CMAKE_CXX_LINK_OPTIONS_IPO "-fuse-ld=lld")
+    # -O3 tambien en el LINK. Con ThinLTO el backend (la optimizacion y el
+    # codegen de verdad) corre en el link, y el driver le pasa a lld el nivel
+    # del -O de la LINEA DE LINK como -plugin-opt=O<n>. Esa linea lleva
+    # $LANGUAGE_COMPILE_FLAGS, o sea el -O2 de CMAKE_CXX_FLAGS_RELWITHDEBINFO,
+    # y add_compile_options no llega ahi: sin esto, el -O3 de arriba queda en
+    # el front-end y el backend corre a O2.
+    add_link_options(-O3)
 
     message(STATUS "Release build: Professional audio optimizations enabled")
 endif()
