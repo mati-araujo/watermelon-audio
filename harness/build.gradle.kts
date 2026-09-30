@@ -1,4 +1,5 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import javax.inject.Inject
 
 /**
  * :harness — WA-5.5. App de prueba multiplataforma que corre la libreria en
@@ -80,7 +81,17 @@ kotlin {
             implementation(compose.runtime)
             implementation(compose.foundation)
             implementation(compose.material3)
+            // MINI-038: los fixtures SoundFont viajan como recursos de Compose (assets en
+            // Android, bundle en iOS) desde un solo directorio generado. Ver abajo.
+            implementation(compose.components.resources)
             implementation(libs.kotlinx.coroutines.core)
+        }
+
+        // MINI-038: el formato HARNESS-SMOKE, el plan y los veredictos del SoundFont. Corren en
+        // la JVM (`:harness:testDebugUnitTest`, que build-harness.sh ejecuta) sin tocar el motor.
+        commonTest.dependencies {
+            implementation(kotlin("test"))
+            implementation(libs.kotlinx.coroutines.test)
         }
 
         androidMain.dependencies {
@@ -115,4 +126,49 @@ android {
             isMinifyEnabled = false
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// MINI-038 — los fixtures .sf2/.sf3 se GENERAN en el build, no se versionan.
+//
+// `scripts/gen-harness-soundfonts.py` es la receta (y su cabecera explica la forma de cada
+// archivo). Su salida entra como directorio de recursos de Compose de commonMain, asi que el MISMO
+// par de archivos llega a los assets del APK y al bundle de la app de iOS
+// (`Res.readBytes("files/wma-fixture.sf2")`). Sin encoder Vorbis la receta falla con su mensaje y
+// el build con ella: no se versiona un binario para esquivarlo.
+// ---------------------------------------------------------------------------
+abstract class GenerateHarnessSoundFonts @Inject constructor(
+    private val execOps: ExecOperations,
+) : DefaultTask() {
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val recipe: RegularFileProperty
+
+    /** Raiz de recursos de Compose: la receta escribe en `<raiz>/files/`. */
+    @get:OutputDirectory
+    abstract val resourcesDir: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        val files = resourcesDir.get().dir("files").asFile
+        files.deleteRecursively()
+        files.mkdirs()
+        execOps.exec {
+            commandLine("python3", recipe.get().asFile.absolutePath, "--out", files.absolutePath)
+        }
+    }
+}
+
+val generateHarnessSoundFonts = tasks.register<GenerateHarnessSoundFonts>("generateHarnessSoundFonts") {
+    recipe.set(rootProject.layout.projectDirectory.file("scripts/gen-harness-soundfonts.py"))
+    resourcesDir.set(layout.buildDirectory.dir("generated/harness-soundfonts"))
+}
+
+compose.resources {
+    packageOfResClass = "com.watermellonstudios.audio.harness.resources"
+    customDirectory(
+        sourceSetName = "commonMain",
+        directoryProvider = generateHarnessSoundFonts.flatMap { it.resourcesDir },
+    )
 }
