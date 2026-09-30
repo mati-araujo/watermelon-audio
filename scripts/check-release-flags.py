@@ -69,6 +69,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -79,19 +80,33 @@ ABIS = ("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
 LIB = "libwatermelon_audio.so"
 
 MERGED_GLOB = "build/intermediates/merged_native_libs/release/*/out/lib/{abi}/" + LIB
+AAR_GLOB = "build/outputs/aar/*release*.aar"
 CXX_OBJ_GLOB = "build/intermediates/cxx/*/*/obj/{abi}/" + LIB
 
 # Cada propiedad requerida: (nombre, tokens que la PRENDEN, tokens que la APAGAN).
-# Gana el último token del conjunto que aparezca, como en el driver de clang.
-# `-fno-fast-math` y `-fno-unsafe-math-optimizations` restauran los defaults de
-# FP, así que apagan las cinco.
-_FP_OFF = ("-fno-fast-math", "-fno-unsafe-math-optimizations")
+# Gana el último token del conjunto que aparezca, como en el driver. Los
+# conjuntos salen de `clang -###` del NDK r28 (clang 19.0.1), agregando cada
+# token DESPUÉS de las flags del arreglo y mirando qué le llega a cc1:
+#   -fno-fast-math                  apaga signed-zeros, reciprocal y reassociate;
+#                                   NO toca math-errno ni el comportamiento de excepciones
+#   -fno-unsafe-math-optimizations  lo mismo, y además -ffp-exception-behavior=strict
+#   -ftrapping-math                 -ffp-exception-behavior=strict (y cc1 pierde -mreassociate)
+#   -ffp-exception-behavior=strict  pierde -mreassociate; =maytrap lo conserva, pero
+#                                   ya no es "ignore": las dos apagan -fno-trapping-math
+#   -ffp-exception-behavior=ignore  equivale a -fno-trapping-math
+#   -fsigned-zeros                  pierde también -mreassociate
+# -mreassociate es DERIVADO: cc1 lo recibe si al final valen associative-math,
+# no-signed-zeros y no-trapping-math (un -ftrapping-math seguido de
+# -fno-trapping-math lo devuelve). Por eso alcanza con exigir las tres por separado.
+_FAST_OFF = ("-fno-fast-math", "-fno-unsafe-math-optimizations")
 REQUIRED = (
-    ("-fno-math-errno", ("-fno-math-errno",), ("-fmath-errno",) + _FP_OFF),
-    ("-fno-trapping-math", ("-fno-trapping-math",), ("-ftrapping-math",) + _FP_OFF),
-    ("-fno-signed-zeros", ("-fno-signed-zeros",), ("-fsigned-zeros",) + _FP_OFF),
-    ("-freciprocal-math", ("-freciprocal-math",), ("-fno-reciprocal-math",) + _FP_OFF),
-    ("-fassociative-math", ("-fassociative-math",), ("-fno-associative-math",) + _FP_OFF),
+    ("-fno-math-errno", ("-fno-math-errno",), ("-fmath-errno",)),
+    ("-fno-trapping-math", ("-fno-trapping-math", "-ffp-exception-behavior=ignore"),
+     ("-ftrapping-math", "-ffp-exception-behavior=strict", "-ffp-exception-behavior=maytrap",
+      "-fno-unsafe-math-optimizations")),
+    ("-fno-signed-zeros", ("-fno-signed-zeros",), ("-fsigned-zeros",) + _FAST_OFF),
+    ("-freciprocal-math", ("-freciprocal-math",), ("-fno-reciprocal-math",) + _FAST_OFF),
+    ("-fassociative-math", ("-fassociative-math",), ("-fno-associative-math",) + _FAST_OFF),
     ("-ftree-vectorize", ("-ftree-vectorize", "-fvectorize"),
      ("-fno-tree-vectorize", "-fno-vectorize")),
 )
@@ -209,7 +224,6 @@ def parse_ninja(text: str) -> list[Build]:
 class Result:
     objects: int
     problems: list[str]
-    skipped: list[str] = field(default_factory=list)   # .a prebuilt: no se compilan acá
 
 
 def check_ninja(text: str, so_path: str | None = None) -> Result:
@@ -235,18 +249,15 @@ def check_ninja(text: str, so_path: str | None = None) -> Result:
     # Los objetos: los explícitos del link, más los de cada .a del árbol.
     objects: list[str] = [i for i in link.inputs if i.endswith(".o")]
     libs = [t for t in _split_ninja(link.vars.get("LINK_LIBRARIES", "")) if t.endswith(".a")]
-    skipped: list[str] = []
     for lib in dict.fromkeys(libs):
         producer = by_output.get(lib)
         if producer is None:
-            # Un .a con ruta absoluta y SIN regla es de afuera del árbol
-            # (prebuilt): no se compila acá y no se le pueden pedir flags. Uno
-            # con regla se recorre aunque la ruta sea absoluta; uno relativo sin
-            # regla es del árbol y el recorrido está roto.
-            if lib.startswith("/"):
-                skipped.append(lib)
-                continue
-            raise CannotCheck(f"`{lib}` entra al link y no encontré la regla que lo produce.")
+            # Relativo o absoluto: si entra al .so y no sé cómo se compiló, no
+            # puedo afirmar sus flags. Hoy no hay ningún .a prebuilt (oboe entra
+            # como .so); el día que haya uno, se decide explícitamente qué hacer
+            # con él en vez de saltearlo en silencio.
+            raise CannotCheck(f"`{lib}` entra al link y no encontré la regla que lo produce"
+                              + (" (¿prebuilt?)" if lib.startswith("/") else "") + ".")
         if not STATIC_RULE.match(producer.rule):
             raise CannotCheck(f"`{lib}` lo produce `{producer.rule}`, que no es un .a.")
         objs = [i for i in producer.inputs if i.endswith(".o")]
@@ -270,12 +281,14 @@ def check_ninja(text: str, so_path: str | None = None) -> Result:
             raise CannotCheck(f"`{obj}` no tiene FLAGS en su regla.")
         problems += [f"{obj}: {p}" for p in compile_problems(_split_ninja(b.vars["FLAGS"]))]
 
-    # En el orden del comando de la regla de link de CMake:
-    #   ... $LANGUAGE_COMPILE_FLAGS $ARCH_FLAGS $LINK_FLAGS -shared ...
-    link_flags = [t for k in ("LANGUAGE_COMPILE_FLAGS", "ARCH_FLAGS", "LINK_FLAGS")
+    # En el orden del comando de la regla de link de CMake (rules.ninja):
+    #   $LANGUAGE_COMPILE_FLAGS $ARCH_FLAGS $LINK_FLAGS -shared ... $in $LINK_PATH $LINK_LIBRARIES
+    # LINK_LIBRARIES también llega al driver: un -fno-lto o un -O2 ahí gana.
+    link_flags = [t for k in ("LANGUAGE_COMPILE_FLAGS", "ARCH_FLAGS", "LINK_FLAGS",
+                              "LINK_PATH", "LINK_LIBRARIES")
                   for t in _split_ninja(link.vars.get(k, ""))]
     problems += [f"link de {LIB}: {p}" for p in link_problems(link_flags)]
-    return Result(len(objects), problems, skipped)
+    return Result(len(objects), problems)
 
 
 def _last(flags: list[str], pred) -> str | None:
@@ -344,8 +357,17 @@ def section_names(readelf_s: str) -> set[str]:
 def debug_problems(names: set[str]) -> list[str]:
     if not names:
         raise CannotCheck("readelf no listó ninguna sección: no leí el .so.")
-    return [f"la copia sin strip no tiene {s}: no simboliza" for s in DEBUG_SECTIONS
+    return [f"la copia sin strip no tiene {s} (no simboliza)" for s in DEBUG_SECTIONS
             if s not in names]
+
+
+def published_problems(names: set[str]) -> list[str]:
+    """El .so que se PUBLICA (el del AAR) va sin debug info: el strip lo hace
+    AGP, y desde MINI-036 nadie más (se sacó -Wl,--strip-all)."""
+    if not names:
+        raise CannotCheck("readelf no listó ninguna sección: no leí el .so publicado.")
+    return [f"el .so publicado lleva {s} (AGP no lo strippeó)"
+            for s in sorted(names) if s.startswith(".debug_")]
 
 
 # ---------------------------------------------------------------------------
@@ -452,10 +474,45 @@ def resolve_abi(audio: Path, abi: str) -> tuple[Path, list[tuple[Path, Path]]]:
     return so, pairs
 
 
+def find_aar(audio: Path) -> Path:
+    aars = sorted(audio.glob(AAR_GLOB))
+    if len(aars) != 1:
+        raise CannotCheck(f"esperaba UN AAR de release en {AAR_GLOB}, encontré {len(aars)}: "
+                          + ", ".join(a.name for a in aars))
+    return aars[0]
+
+
+def aar_member(aar: Path, abi: str, dest: Path) -> Path:
+    """Extrae jni/<abi>/libwatermelon_audio.so del AAR a `dest`."""
+    name = f"jni/{abi}/{LIB}"
+    try:
+        with zipfile.ZipFile(aar) as z:
+            data = z.read(name)
+    except KeyError as exc:
+        raise CannotCheck(f"[{abi}] el AAR {aar.name} no trae {name}.") from exc
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise CannotCheck(f"no pude leer {aar}: {exc}") from exc
+    out = dest / abi / LIB
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(data)
+    return out
+
+
 def check_tree(audio: Path, tools=None) -> tuple[list[str], list[str]]:
     """(líneas de reporte, problemas). Lanza CannotCheck si no pudo chequear."""
     tools = tools or RealTools()
     report, problems = [], []
+    aar = find_aar(audio)
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        _check_abis(audio, tools, aar, Path(tmp.name), report, problems)
+    finally:
+        tmp.cleanup()
+    return report, problems
+
+
+def _check_abis(audio: Path, tools, aar: Path, tmp: Path,
+                report: list[str], problems: list[str]) -> None:
     for abi in ABIS:
         so, pairs = resolve_abi(audio, abi)
         # Si hay varios builds con el mismo contenido, se revisan TODOS: no hay
@@ -473,12 +530,23 @@ def check_tree(audio: Path, tools=None) -> tuple[list[str], list[str]]:
             except ValueError:
                 rel = ninja
             report.append(f"  {abi:<12} {res.objects:>4} objetos  {rel}")
-            for lib in res.skipped:
-                report.append(f"  {'':<12}      prebuilt salteado: {lib}")
             problems += [f"[{abi}] {p}" for p in res.problems]
             problems += [f"[{abi}] {so.name} (merged): {p}"
                          for p in debug_problems(tools.sections(ninja.parent, so))]
-    return report, problems
+            published = aar_member(aar, abi, tmp)
+            problems += [f"[{abi}] {LIB} (en {aar.name}): {p}"
+                         for p in published_problems(tools.sections(ninja.parent, published))]
+
+
+def group_problems(problems: list[str]) -> dict[tuple[str, str], list[str]]:
+    """{(abi, mensaje): [lugares]}. Corta en el PRIMER ": ": el lugar (un .o,
+    el link, un .so) no lo lleva, y el mensaje sí puede (el de las secciones)."""
+    groups: dict[tuple[str, str], list[str]] = {}
+    for p in problems:
+        abi, _, rest = p.partition("] ")
+        where, _, msg = rest.partition(": ")
+        groups.setdefault((abi + "]", msg), []).append(where)
+    return groups
 
 
 def run_real_check() -> int:
@@ -488,19 +556,15 @@ def run_real_check() -> int:
     if problems:
         # Agrupado por (ABI, problema): con 91 objetos por ABI el listado plano
         # son miles de líneas iguales y esconde lo que importa.
-        groups: dict[tuple[str, str], list[str]] = {}
-        for p in problems:
-            abi, _, rest = p.partition("] ")
-            where, _, msg = rest.rpartition(": ")
-            groups.setdefault((abi + "]", msg), []).append(where)
+        groups = group_problems(problems)
         print(f"\n\033[31mFALLA\033[0m — {len(problems)} problema(s). El .so que se publica NO "
               "compila con las flags de release:\n")
         for (abi, msg), wheres in groups.items():
             print(f"    {abi} {msg} — {len(wheres)} (ej. {wheres[0]})")
         return 1
     print("\n\033[32mok\033[0m — las cuatro ABIs compilan con -O3, FP seguras, vectorización, "
-          "LTO y -g, sin -ffinite-math-only; la copia sin strip conserva "
-          + ", ".join(DEBUG_SECTIONS) + ".")
+          "LTO y -g, sin -ffinite-math-only, y el link a -O3; la copia sin strip conserva "
+          + ", ".join(DEBUG_SECTIONS) + ", y el .so del AAR no lleva .debug_*.")
     return 0
 
 
@@ -542,9 +606,10 @@ def fixture(flags: str = FLAGS_FIXED, link: str = LINK_FIXED,
             effects_flags: str | None = None, drop_effectchain_rule: bool = False,
             with_effectchain: bool = True, extra_test_flags: str = FLAGS_FIXED,
             so: str = "/abs/obj/arm64-v8a/" + LIB, libs_without_rule: bool = False,
-            effects_lib: str = "effects/libwatermelon-effects.a") -> str:
+            effects_lib: str = "effects/libwatermelon-effects.a",
+            link_libs_extra: str = "") -> str:
     """Un build.ninja con la forma que genera CMake: un .o del target, un .a de
-    efectos con dos objetos, un .a prebuilt absoluto y un ejecutable de test
+    efectos con dos objetos, un .so prebuilt (oboe) y un ejecutable de test
     (EffectTest) que NO entra al .so."""
     ef = effects_flags if effects_flags is not None else flags
     eff_objs = ["effects/CMakeFiles/watermelon-effects.dir/Delay.cpp.o"]
@@ -578,7 +643,7 @@ def fixture(flags: str = FLAGS_FIXED, link: str = LINK_FIXED,
     t.append(f"  LANGUAGE_COMPILE_FLAGS = {link_lang}")
     t.append(f"  LINK_FLAGS = {link}")
     t.append(f"  LINK_LIBRARIES = {effects_lib}  "
-             "/gradle/caches/oboe/liboboe.so  /abs/prebuilt/libfoo.a  -landroid  -llog")
+             f"/gradle/caches/oboe/liboboe.so  -landroid  -llog {link_libs_extra}".rstrip())
     t.append("")
     return "\n".join(t) + "\n"
 
@@ -671,6 +736,63 @@ def self_test() -> int:
                         ("-fno-unsafe-math-optimizations",
                          "falta -freciprocal-math (la anula un -fno-unsafe-math-optimizations")):
         check(f"{tok} DESPUÉS FALLA", dice(fixture(FLAGS_FIXED + " " + tok), needle))
+    # --- el modelo de FP es el del driver (NDK r28, clang 19; cada caso visto con -###)
+    def solo(extra: str) -> set[str]:
+        """Las propiedades que un sufijo apaga, en un objeto (sin el link)."""
+        p = problems(fixture(FLAGS_FIXED + " " + extra))
+        assert p is not None, extra
+        return {x.split(": ", 1)[1].split(" (")[0] for x in p if x.startswith("CMakeFiles/")}
+
+    for extra, esperado in (
+        ("-ffp-exception-behavior=strict", {"falta -fno-trapping-math"}),
+        ("-ffp-exception-behavior=maytrap", {"falta -fno-trapping-math"}),
+        ("-ftrapping-math", {"falta -fno-trapping-math"}),
+        ("-ftrapping-math -ffp-exception-behavior=ignore", set()),
+        ("-ftrapping-math -fno-trapping-math", set()),
+        ("-ffp-exception-behavior=strict -fno-trapping-math", set()),
+        ("-fsigned-zeros -fno-signed-zeros", set()),
+        # -fno-fast-math NO toca math-errno ni trapping (antes: rojo falso en esas dos)
+        ("-fno-fast-math", {"falta -fno-signed-zeros", "falta -freciprocal-math",
+                            "falta -fassociative-math"}),
+        ("-fno-fast-math -fno-signed-zeros -freciprocal-math -fassociative-math", set()),
+        # -fno-unsafe-math-optimizations además pone exception-behavior=strict
+        ("-fno-unsafe-math-optimizations", {"falta -fno-trapping-math", "falta -fno-signed-zeros",
+                                            "falta -freciprocal-math", "falta -fassociative-math"}),
+        ("-fno-unsafe-math-optimizations -fno-trapping-math -fno-signed-zeros "
+         "-freciprocal-math -fassociative-math", set()),
+        ("-fno-associative-math -fassociative-math", set()),
+    ):
+        got = solo(extra)
+        check(f"[{extra}] apaga exactamente {sorted(esperado) or 'nada'}", got == esperado,
+              f"dio {sorted(got)}")
+
+    # --- LINK_LIBRARIES también llega al driver del link, y va al final
+    check("un -fno-lto en LINK_LIBRARIES FALLA",
+          dice(fixture(link_libs_extra="-fno-lto"), "lo anula -fno-lto"))
+    check("un -O2 en LINK_LIBRARIES FALLA",
+          dice(fixture(link_libs_extra="-O2"), "último -O del link es -O2"))
+
+    # --- el reporte agrupado nombra la sección que falta
+    g = group_problems(["[x86] libwatermelon_audio.so (merged): "
+                        "la copia sin strip no tiene .debug_info (no simboliza)",
+                        "[x86] libwatermelon_audio.so (merged): "
+                        "la copia sin strip no tiene .symtab (no simboliza)"])
+    g2 = group_problems(["[x86] link de libwatermelon_audio.so: un mensaje: con dos puntos"])
+    check("el reporte agrupado corta en el PRIMER ': ' (el lugar no lo lleva)",
+          list(g2.items()) == [(("[x86]", "un mensaje: con dos puntos"),
+                                ["link de libwatermelon_audio.so"])], f"dio {g2}")
+    check("el reporte agrupado dice QUÉ sección falta",
+          {m for (_, m) in g} == {"la copia sin strip no tiene .debug_info (no simboliza)",
+                                  "la copia sin strip no tiene .symtab (no simboliza)"}, f"dio {g}")
+
+    # --- el .so publicado (AAR) no lleva debug info
+    check("un .so publicado sin .debug_* no tiene problema",
+          published_problems({".text", ".dynsym", ".dynstr"}) == [])
+    check("un .so publicado CON .debug_info FALLA",
+          any(".debug_info" in p for p in published_problems({".text", ".debug_info"})))
+    check("cero secciones del publicado NO es un pase",
+          levanta(lambda: published_problems(set()), "no leí el .so publicado"))
+
     # --- -O3 en el link: el backend de ThinLTO corre ahí (D6)
     check("HOY el link falla también por su -O2",
           hoy is not None and any("último -O del link es -O2" in p for p in hoy), f"dio {hoy}")
@@ -691,9 +813,9 @@ def self_test() -> int:
     res = check_ninja(fixture(effects_flags=FLAGS_HOY, effects_lib="/abs/tree/libwatermelon-effects.a"))
     check("un .a del árbol con ruta ABSOLUTA se recorre igual",
           any("EffectChain" in p for p in res.problems), f"dio {res.problems}")
-    check("el .a prebuilt sin regla se saltea, y se DICE",
-          check_ninja(fixture()).skipped == ["/abs/prebuilt/libfoo.a"],
-          f"dio {check_ninja(fixture()).skipped}")
+    check("un .a prebuilt absoluto SIN regla NO es un pase (falla cerrado)",
+          levanta(lambda: check_ninja(fixture(link_libs_extra="/abs/prebuilt/libfoo.a")),
+                  "(¿prebuilt?)"))
 
     # --- las secciones de la copia sin strip (hallazgo 5)
     readelf = ("There are 3 section headers:\n"
@@ -799,9 +921,20 @@ def self_test() -> int:
                 return True, "ninja: no work to do."
 
             def sections(self, build_dir: Path, so: Path) -> set[str]:
+                if not str(so).startswith(str(audio)):   # extraído del AAR
+                    return self.pub.get(so.parent.name, {".text", ".dynsym"})
                 return self.secs.get(str(so), {".text", *DEBUG_SECTIONS})
 
         tools = FakeTools()
+        tools.pub = {}
+
+        aar_path = audio / "build/outputs/aar/audio-release.aar"
+
+        def write_aar(abis=ABIS) -> None:
+            aar_path.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(aar_path, "w") as z:
+                for a in abis:
+                    z.writestr(f"jni/{a}/{LIB}", b"stripped " + a.encode())
 
         def tree_ok() -> tuple[bool, list[str]]:
             try:
@@ -812,6 +945,7 @@ def self_test() -> int:
 
         for abi in ABIS:
             make(abi, abi.encode(), fixture(so="@SO@"))
+        write_aar()
         ok, probs = tree_ok()
         check("árbol con las cuatro ABIs en regla PASA", ok and probs == [], f"dio {probs}")
 
@@ -841,6 +975,36 @@ def self_test() -> int:
         check("con dos builds idénticos se revisan TODOS",
               ok and any(p.startswith("[arm64-v8a]") and "-O2" in p for p in probs), f"dio {probs}")
         shutil.rmtree(audio / "build/intermediates/cxx/RelWithDebInfo/h2")
+        # El espejo: el malo en el hash que ordena PRIMERO (mata pairs[-1:]).
+        make("arm64-v8a", b"arm64-v8a", fixture(FLAGS_HOY, LINK_HOY, LINK_LANG_HOY, so="@SO@"),
+             bhash="h0")
+        ok, probs = tree_ok()
+        check("con dos builds idénticos se revisan TODOS (el malo primero)",
+              ok and any(p.startswith("[arm64-v8a]") and "-O2" in p for p in probs), f"dio {probs}")
+        shutil.rmtree(audio / "build/intermediates/cxx/RelWithDebInfo/h0")
+        shutil.rmtree(audio / ".cxx/RelWithDebInfo/h0")
+
+        # El AAR: su .so con debug info, sin el AAR, y sin una ABI adentro.
+        tools.pub["x86_64"] = {".text", ".debug_info", ".debug_line"}
+        ok, probs = tree_ok()
+        check("un .so del AAR con .debug_* FALLA",
+              ok and any(p.startswith("[x86_64]") and "publicado lleva .debug_info" in p
+                         for p in probs), f"dio {probs}")
+        tools.pub.clear()
+        write_aar(abis=("arm64-v8a", "armeabi-v7a", "x86"))
+        ok, probs = tree_ok()
+        check("un AAR sin la ABI NO es un pase",
+              not ok and "[x86_64] el AAR" in probs[0], f"dio {probs}")
+        write_aar()
+        otro_aar = aar_path.with_name("audio-release-viejo.aar")
+        shutil.copy(aar_path, otro_aar)
+        ok, probs = tree_ok()
+        check("dos AAR de release NO es un pase", not ok and "encontré 2" in probs[0], f"dio {probs}")
+        otro_aar.unlink()
+        aar_path.unlink()
+        ok, probs = tree_ok()
+        check("sin AAR NO es un pase", not ok and "esperaba UN AAR" in probs[0], f"dio {probs}")
+        write_aar()
 
         # El .so no está al día con su build.ninja (se regeneró y el link falló).
         so_arm = str(audio / "build/intermediates/cxx/RelWithDebInfo/h1/obj/arm64-v8a" / LIB)

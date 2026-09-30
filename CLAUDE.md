@@ -567,10 +567,12 @@ python3 scripts/check-release-flags.py     # [gate] Guardrail MINI-036. Las flag
                                            # en cada objeto que entra al .so, con la semantica del
                                            # driver (GANA LA ULTIMA: un -fno-lto al final anula);
                                            # SIN -ffinite-math-only ni nada que la implique
-                                           # (-ffast-math, -ffp-model=*...); link LTO; y la copia
-                                           # sin strip CON .symtab/.debug_info/.debug_line, leido
-                                           # con readelf, no inferido de las flags. Le pregunta a
-                                           # ninja (-n) si el .so esta al dia con ese build.ninja.
+                                           # (-ffast-math, -ffp-model=*...); link LTO y a -O3 (el
+                                           # backend de ThinLTO corre en el link); la copia sin
+                                           # strip CON .symtab/.debug_info/.debug_line y el .so del
+                                           # AAR SIN .debug_*, leidos con readelf, no inferidos de
+                                           # las flags. Le pregunta a ninja (-n) si el .so esta al
+                                           # dia con ese build.ninja.
                                            # Corre despues de assemble-release (como jni-symbols)
                                            # y --self-test primero.
                                            # 🔴 NO lee el CMakeLists, y ese es el punto: el bloque
