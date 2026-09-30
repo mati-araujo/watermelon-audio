@@ -81,6 +81,8 @@ USES_PINNED = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(/[^@\s]*)?@([0-9a-
 USES_COMMENT = re.compile(r"^\s*#\s*(v[0-9]+(\.[0-9]+)*)\s*$")
 JOBS_KEY = re.compile(r"^jobs:\s*(#.*)?$")
 RUNS_ON = re.compile(r"^\s+runs-on:\s*(.*?)\s*(#.*)?$")
+NEUTRALIZE_CONTINUE = re.compile(r"^continue-on-error:\s*['\"]?true", re.I)
+NEUTRALIZE_IF = re.compile(r"^if:.*\bfalse\b", re.I)
 XCODE_CALL = re.compile(r"^(-\s*)?(run:\s*)?bash\s+" + re.escape("scripts/ci-select-xcode.sh") + r"\s*$")
 
 
@@ -133,7 +135,7 @@ def strip_yaml_comment_lines(text):
 
 def is_build_config(rel):
     """Donde un NDK/CMake escrito a mano SI cambia lo que se instala o se usa."""
-    return (is_workflow(rel) or rel.endswith((".gradle.kts", ".gradle", ".properties"))
+    return (is_action_file(rel) or rel.endswith((".gradle.kts", ".gradle", ".properties"))
             or (rel.startswith("build-logic/") and rel.endswith(".kt"))
             or (rel.startswith("scripts/") and rel.endswith(".sh")))
 
@@ -225,7 +227,7 @@ def check_java(root, files, findings):
     launcher = str(pins.get("launcher_jvm", ""))
     values = []
     for rel in files:
-        if not is_workflow(rel):
+        if not is_action_file(rel):
             continue
         for n, line in strip_yaml_comment_lines(read(root, rel)):
             values += [(rel, v) for v in JAVA_VERSION.findall(line)]
@@ -289,15 +291,44 @@ def runs_on_of(job_lines):
     return None
 
 
+def indent_of(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def effective_call(job_lines, k):
+    """Si la llamada de la linea k CORRE de verdad: ni su paso ni el job la neutralizan con
+    `continue-on-error: true` (el script sale 1 y el job sigue con el Xcode default) ni con
+    un `if:` que contenga `false`."""
+    start = k
+    while start > 0 and not job_lines[start].lstrip().startswith("- "):
+        start -= 1
+    s_ind = indent_of(job_lines[start])
+    end = start + 1
+    while end < len(job_lines):
+        l = job_lines[end]
+        if indent_of(l) < s_ind or (indent_of(l) == s_ind and l.lstrip().startswith("- ")):
+            break
+        end += 1
+    step = [l.strip().lstrip("- ").strip() for l in job_lines[start:end]]
+    if any(NEUTRALIZE_CONTINUE.match(l) for l in step):
+        return False
+    if any(NEUTRALIZE_IF.match(l) for l in step):
+        return False
+    job_level = [l.strip() for l in job_lines if indent_of(l) < s_ind]
+    return not any(NEUTRALIZE_CONTINUE.match(l) for l in job_level)
+
+
 def check_xcode(root, files, findings):
     for rel in files:
-        if not is_workflow(rel):
+        if not is_action_file(rel):
             continue
         text = read(root, rel)
         for n, line in strip_yaml_comment_lines(text):
             if XCODE_LITERAL.search(line):
                 findings.append(("xcode", f"{rel}:{n}: Xcode fijado a mano (la fuente es la clave "
                                           f"`xcode` de {PINS}): {line.strip()}"))
+        if not is_workflow(rel):
+            continue
         for job, job_lines in jobs_of(text):
             runs = runs_on_of(job_lines)
             if runs is None:
@@ -306,10 +337,13 @@ def check_xcode(root, files, findings):
                 findings.append(("xcode", f"{rel}: el job `{job}` tiene `runs-on: {runs}`, dinamico: no puedo "
                                           f"saber si corre en macOS ni exigirle {XCODE_SCRIPT}"))
                 continue
-            calls = any(XCODE_CALL.match(l.strip()) for l in job_lines if not l.lstrip().startswith("#"))
+            calls = any(XCODE_CALL.match(l.strip()) and effective_call(job_lines, k)
+                        for k, l in enumerate(job_lines))
             if "macos" in runs.lower() and not calls:
                 findings.append(("xcode", f"{rel}: el job `{job}` corre en {runs} y no llama a "
-                                          f"{XCODE_SCRIPT}: usaria el Xcode default de la imagen"))
+                                          f"{XCODE_SCRIPT} en un paso que corra y pueda fallar (sin "
+                                          f"`continue-on-error: true` ni `if:` con false): usaria el "
+                                          f"Xcode default de la imagen"))
 
 
 def check_actions(root, files, findings):
@@ -548,6 +582,33 @@ CASES = [
     ("uses en un mapa en linea, por tag", mutate(
         ".github/workflows/ci.yml", "      - uses: ./local-action\n",
         "      - uses: ./local-action\n      - { uses: actions/cache@v4 }\n"), "actions"),
+    ("el paso de Xcode con continue-on-error", mutate(
+        ".github/workflows/publish.yml", "      - run: bash scripts/ci-select-xcode.sh\n",
+        "      - name: Fijar Xcode\n        continue-on-error: true\n        run: bash scripts/ci-select-xcode.sh\n"),
+     "xcode"),
+    ("el paso de Xcode con if: false", mutate(
+        ".github/workflows/publish.yml", "      - run: bash scripts/ci-select-xcode.sh\n",
+        "      - if: false\n        run: bash scripts/ci-select-xcode.sh\n"), "xcode"),
+    ("el job de macOS entero con continue-on-error", mutate(
+        ".github/workflows/publish.yml", "    runs-on: macos-latest\n",
+        "    runs-on: macos-latest\n    continue-on-error: true\n"), "xcode"),
+    ("java-version en una composite action", add(
+        ".github/actions/java/action.yml", "runs:\n  using: composite\n  steps:\n"
+        f"    - uses: actions/setup-java@{SHA_B} # v6.0.1\n      with:\n        java-version: 21\n"), "java-version"),
+    ("Xcode_N.app en una composite action", add(
+        ".github/actions/xc/action.yml", "runs:\n  using: composite\n  steps:\n"
+        "    - run: sudo xcode-select -s /Applications/Xcode_27.0.app\n      shell: bash\n"), "xcode"),
+    ("el NDK como paquete en una composite action", add(
+        ".github/actions/ndk/action.yml", "runs:\n  using: composite\n  steps:\n"
+        "    - run: sdkmanager 'ndk;28.0.1'\n      shell: bash\n"), "ndk-cmake"),
+    ("googletest unico por URL de una rama", mutate(
+        "audio/src/main/cpp/thirdparty/googletest.cmake",
+        "    GIT_REPOSITORY https://github.com/google/googletest.git\n    GIT_TAG v${WMA_GOOGLETEST_VERSION}\n",
+        "    URL https://github.com/google/googletest/archive/refs/heads/main.zip\n"), "googletest"),
+    ("googletest por ExternalProject en otra suite", add(
+        "audio/src/main/cpp/engines/tests/CMakeLists.txt",
+        "ExternalProject_Add(gt\n  GIT_REPOSITORY https://github.com/google/googletest.git\n  GIT_TAG v1.18.0\n)\n"),
+     "googletest"),
     ("uses por tag en una composite action local", add(
         ".github/actions/setup/action.yml",
         "runs:\n  using: composite\n  steps:\n    - uses: actions/setup-java@v5\n"), "actions"),
@@ -559,6 +620,10 @@ GREEN_CASES = [
         "audio/src/main/cpp/thirdparty/googletest.cmake",
         "    GIT_REPOSITORY https://github.com/google/googletest.git\n    GIT_TAG v${WMA_GOOGLETEST_VERSION}\n",
         "    URL https://github.com/google/googletest/archive/refs/tags/v1.18.0.zip\n")),
+    ("el paso de Xcode con el if de la atestacion", mutate(
+        ".github/workflows/publish.yml", "      - run: bash scripts/ci-select-xcode.sh\n",
+        "      - name: Fijar Xcode\n        if: steps.attest.outputs.valid != 'true'\n"
+        "        run: bash scripts/ci-select-xcode.sh\n")),
     ("el script de Xcode llamado dentro de un run de varias lineas", mutate(
         ".github/workflows/publish.yml", "      - run: bash scripts/ci-select-xcode.sh\n",
         "      - run: |\n          bash scripts/ci-select-xcode.sh\n")),
