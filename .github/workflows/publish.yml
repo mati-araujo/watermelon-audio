@@ -148,6 +148,28 @@ jobs:
       - name: Build release
         run: ./gradlew :audio:assembleRelease
 
+      # MINI-036 (D7) — lo que se va a publicar compila con las flags de release
+      # y sale strippeado. Es el MISMO chequeo del job `build` de ci.yml y de
+      # gate.sh, repetido aca porque este workflow no corre en el PR: es la
+      # ultima puerta antes de que el AAR llegue a GitHub Packages. Desde que se
+      # saco -Wl,--strip-all, que el .so del AAR no lleve .debug_*/.symtab
+      # depende solo del strip de AGP, y esto lo vigila. Falla cerrado.
+      #
+      # Por que no puede dar un rojo falso en ESTE runner: todo lo que el chequeo
+      # necesita ya lo usa el paso de arriba. Toma ninja y llvm-readelf del
+      # CMakeCache.txt del propio build: el ninja del CMake y el readelf del NDK
+      # que "Install NDK and CMake" instala desde el catalogo (binarios
+      # universales x86_64/arm64); si el build corrio, esas rutas existen. El
+      # self-test busca un ninja en el PATH (lo garantiza "Install C++ build
+      # tools") o en $ANDROID_HOME/cmake. python3 viene en la imagen de macOS
+      # (el job `ios` de ci.yml ya lo usa sin instalarlo). Es el mismo sistema
+      # operativo y la misma forma de rutas que gate.sh, que lo corre en cada PR.
+      - name: Flags del release nativo — self-test
+        run: python3 scripts/check-release-flags.py --self-test
+
+      - name: Flags del release nativo — MINI-036
+        run: python3 scripts/check-release-flags.py
+
       - name: Publish to GitHub Packages
         run: ./gradlew :audio:publishAllPublicationsToGitHubPackagesRepository
         env:
