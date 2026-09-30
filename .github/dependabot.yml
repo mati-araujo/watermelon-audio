@@ -1,13 +1,60 @@
+# Dependabot ACOTADO, no pausado (REQ-047, decision del humano del 29/09): que quede
+# como senal mensual y no como un flujo de PRs de a una dependencia.
+#
+# - gradle: mensual, UN solo PR agrupado, cooldown de 14 dias (una version recien
+#   salida no se propone hasta que tenga dos semanas), y SIN majors de AGP, Kotlin
+#   ni Gradle: esos cambios son un REQ, como REQ-047, no un bump.
+# - github-actions: mensual, agrupado y con el mismo cooldown de 14 dias. Las
+#   actions van fijadas por SHA con el tag en comentario; Dependabot actualiza los dos.
+#
+# Lo que Dependabot NO ve (NDK, CMake del SDK, googletest, libusb, TinySoundFont,
+# stb_vorbis, TinyMidiLoader, Xcode) lo cubre el inventario de
+# audio/src/main/cpp/thirdparty/VENDORED.md, con su procedimiento de CVE.
+#
+# Sintaxis verificada contra la referencia de GitHub
+# (content/code-security/reference/supply-chain-security/dependabot-options-reference.md
+# de github/docs, commit c008b66a92 del 29/09/2026). Los nombres de dependencia son
+# los que arma dependabot-core para Gradle: `grupo:artefacto` para librerias, el id
+# para los plugins del catalogo y `gradle-wrapper` para el wrapper.
 version: 2
 updates:
   - package-ecosystem: "gradle"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    cooldown:
+      default-days: 14
+    groups:
+      gradle:
+        patterns:
+          - "*"
+    ignore:
+      # AGP (libreria del build-logic y los dos plugins del catalogo)
+      - dependency-name: "com.android.tools.build:gradle"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "com.android.library"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "com.android.application"
+        update-types: ["version-update:semver-major"]
+      # Kotlin: librerias (org.jetbrains.kotlin:*) y plugins (org.jetbrains.kotlin.*).
+      # NO `org.jetbrains.kotlin*`: eso tambien agarraria kotlinx (coroutines).
+      - dependency-name: "org.jetbrains.kotlin:*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "org.jetbrains.kotlin.*"
+        update-types: ["version-update:semver-major"]
+      # Gradle
+      - dependency-name: "gradle-wrapper"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 3
+      interval: "monthly"
+    # REQ-047 S4, 4.13 (security-auditor): una action recien publicada no se propone
+    # hasta que tenga dos semanas, igual que gradle.
+    cooldown:
+      default-days: 14
+    groups:
+      github-actions:
+        patterns:
+          - "*"
