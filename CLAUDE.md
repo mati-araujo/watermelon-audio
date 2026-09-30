@@ -561,6 +561,21 @@ python3 scripts/check-jni-signatures.py     # [gate] Guardrail REQ-025. La FIRMA
                                            # No tiene baseline y no lo necesita: nace en CERO
                                            # desajustes sobre las 309.
 
+python3 scripts/check-release-flags.py     # [gate] Guardrail MINI-036. Las flags EFECTIVAS del
+                                           # .so que publica assembleRelease, en las 4 ABIs:
+                                           # -O3 (el ultimo -O), FP seguras, -ftree-vectorize,
+                                           # -flto=thin y -g en cada objeto que entra al .so; SIN
+                                           # -ffinite-math-only ni nada que la implique; link LTO
+                                           # y sin strip. Corre despues de assemble-release (como
+                                           # jni-symbols) y --self-test primero.
+                                           # 🔴 NO lee el CMakeLists, y ese es el punto: el bloque
+                                           # pedia "Release", AGP construye RelWithDebInfo, y
+                                           # todas las versiones hasta MINI-036 salieron a -O2 sin
+                                           # LTO con el CMakeLists diciendo lo contrario. Lee el
+                                           # build.ninja que produjo el .so EMPAQUETADO, atado por
+                                           # contenido: .cxx/ acumula un hash por configuracion y
+                                           # "el mas nuevo" puede ser otro.
+
 python3 scripts/check-mechanism-callers.py # [gate] Guardrail REQ-013. Contesta "?quien LLAMA
                                            # a esto?": falla si una funcion de produccion tiene
                                            # sus UNICOS llamadores en tests. REQ-012 entrego un

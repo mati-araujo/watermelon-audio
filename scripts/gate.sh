@@ -436,6 +436,16 @@ gate_build() {
     # declaraciones): "no pude mirar" nunca es un pase.
     step build jni-symbols-self   python3 scripts/check-jni-symbols.py --self-test || return 1
     step build jni-symbols        python3 scripts/check-jni-symbols.py || return 1
+
+    # MINI-036 — el .so que se publica compila con las flags de release. Hasta
+    # MINI-036 el bloque de optimizaciones del CMakeLists pedia "Release", AGP
+    # construye RelWithDebInfo, y todas las versiones salieron a -O2 sin LTO con
+    # el CMakeLists diciendo lo contrario. Por eso lee las flags EFECTIVAS del
+    # build.ninja que produjo el .so empaquetado (atado por contenido), no el
+    # CMakeLists. Va aca por lo mismo que jni-symbols: necesita el build de
+    # assemble-release. El --self-test primero.
+    step build release-flags-self python3 scripts/check-release-flags.py --self-test || return 1
+    step build release-flags      python3 scripts/check-release-flags.py || return 1
 }
 
 gate_sanitizers() {
