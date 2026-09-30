@@ -65,9 +65,13 @@ se compilo (medido en REQ-047 S2: la misma fuente en dos worktrees difiere en
 esos 20 bytes). Declararlo ataria el trinquete a un publish y a un directorio.
 Por eso sale del trinquete: se imprime su hash crudo y el hash con el build-id
 en cero. La igualdad de bytes se afirma solo en un diff PAREADO —las dos
-construcciones publicadas con la MISMA version— mirando ese segundo hash. Su
-alineacion, `.comment`, `DT_NEEDED` y `DT_SONAME` siguen en el trinquete, y el
-hash de `liboboe.so` y `libc++_shared.so` tambien.
+construcciones publicadas con la MISMA version— y la afirma QUIEN LEE ese
+segundo hash: el instrumento lo imprime, no lo compara. Para parear, se copian
+los archivos de una construccion a un directorio plano y se lo usa de base:
+`--against V --cache <dir> --local-version V` (`--against-local V` con la misma
+V leeria el mismo directorio de los dos lados). Su alineacion, `.comment`,
+`DT_NEEDED` y `DT_SONAME` siguen en el trinquete, y el hash de `liboboe.so` y
+`libc++_shared.so` tambien.
 
 LO QUE NO ABRE
 --------------
@@ -143,6 +147,7 @@ TEXT_SUFFIXES = (".xml", ".txt", ".pro", ".properties", ".json", ".MF")
 VERSION_TOKEN = "<VERSION>"
 ABSENT = "(ausente)"
 EMPTY = "(vacio)"
+NO_VERSION = "(sin-version)"
 PLACEHOLDER_REASON = "RAZON"
 SIZE_KEY = "aar/size"
 # El .so cuyos BYTES no son un hecho reproducible (ver el docstring): su hash se
@@ -163,6 +168,8 @@ def sha(data: bytes) -> str:
 # =============================================================================
 
 PT_LOAD = 1
+PT_DYNAMIC = 2
+PT_GNU_STACK = 0x6474E551
 SHT_DYNAMIC = 6
 DT_NULL, DT_NEEDED, DT_SONAME = 0, 1, 14
 
@@ -291,7 +298,9 @@ def pom_facts(raw: bytes, artifact: str, version: str) -> dict[str, str]:
             ga = f"{g}:{a}" + (f":{cl}" if cl else "")
             excl = sorted(f"{e.findtext('m:groupId', '', ns)}:{e.findtext('m:artifactId', '', ns)}"
                           for e in d.findall("m:exclusions/m:exclusion", ns))
-            value = (f"{normalize(d.findtext('m:version', '', ns), version)}"
+            # Sin <version> (la resuelve un BOM de <dependencyManagement>): un token,
+            # no un valor que empieza con espacio y no se podria declarar.
+            value = (f"{normalize(d.findtext('m:version', '', ns), version) or NO_VERSION}"
                      f" scope={d.findtext('m:scope', 'compile', ns)}"
                      f" type={d.findtext('m:type', 'jar', ns)}"
                      f" optional={d.findtext('m:optional', 'false', ns)}"
@@ -716,9 +725,11 @@ def compare(base: Source, head: Source, expectations, quiet=False) -> tuple[int,
 # =============================================================================
 
 def make_elf(bits: int, *, aligns=(16384,), comment: bytes = b"", needed=(), soname: str | None = None,
-             pad: int = 0, build_id: bytes | None = None) -> bytes:
-    """Un ELF minimo: un PT_LOAD por cada valor de `aligns`, .comment, .dynstr,
-    .dynamic y, si se pide, .note.gnu.build-id."""
+             pad: int = 0, build_id: bytes | None = None, dynamic_section: bool = True) -> bytes:
+    """Un ELF minimo: un PT_LOAD por cada valor de `aligns` ENTRE un PT_GNU_STACK
+    (p_align 0) y un PT_DYNAMIC (p_align 8), como los .so reales —asi, contar un
+    segmento que no es PT_LOAD cambia el minimo—; .comment, .dynstr, .dynamic
+    (salvo `dynamic_section=False`) y, si se pide, .note.gnu.build-id."""
     b64 = bits == 64
     ehsize, phentsize, shentsize = (64, 56, 64) if b64 else (52, 32, 40)
     dyn_fmt = "<qQ" if b64 else "<iI"
@@ -735,8 +746,10 @@ def make_elf(bits: int, *, aligns=(16384,), comment: bytes = b"", needed=(), son
     # (nombre, sh_type, sh_flags, contenido, sh_link, sh_entsize). El indice 0 es
     # la seccion nula, asi que .dynstr es la 3 y .dynamic la linkea.
     secs = [(".shstrtab", 3, 0, b"", 0, 0), (".comment", 1, 0x30, comment, 0, 1),
-            (".dynstr", 3, 2, dynstr, 0, 0),
-            (".dynamic", SHT_DYNAMIC, 3, dynamic, 3, struct.calcsize(dyn_fmt))]
+            (".dynstr", 3, 2, dynstr, 0, 0)]
+    if dynamic_section:
+        secs.append((".dynamic", SHT_DYNAMIC, 3, dynamic, 3, struct.calcsize(dyn_fmt)))
+    phdrs = [(PT_GNU_STACK, 0)] + [(PT_LOAD, a) for a in aligns] + [(PT_DYNAMIC, 8)]
     if build_id is not None:
         note = struct.pack("<III", 4, len(build_id), 3) + b"GNU\0" + build_id
         secs.append((".note.gnu.build-id", 7, 2, note, 0, 0))
@@ -747,7 +760,7 @@ def make_elf(bits: int, *, aligns=(16384,), comment: bytes = b"", needed=(), son
         shstr += s[0].encode() + b"\0"
     contents = {s[0]: (shstr if s[0] == ".shstrtab" else s[3]) for s in secs}
 
-    cur = ehsize + phentsize * len(aligns)
+    cur = ehsize + phentsize * len(phdrs)
     offsets = {}
     payload = b""
     for s in secs:
@@ -767,13 +780,13 @@ def make_elf(bits: int, *, aligns=(16384,), comment: bytes = b"", needed=(), son
     ident = b"\x7fELF" + bytes([2 if b64 else 1, 1, 1]) + bytes(9)
     if b64:
         eh = ident + struct.pack("<HHIQQQIHHHHHH", 3, 183, 1, 0, ehsize, shoff, 0,
-                                 ehsize, phentsize, len(aligns), shentsize, shnum, 1)
-        ph = b"".join(struct.pack("<IIQQQQQQ", PT_LOAD, 5, 0, 0, 0, 0x1000, 0x1000, a) for a in aligns)
+                                 ehsize, phentsize, len(phdrs), shentsize, shnum, 1)
+        ph = b"".join(struct.pack("<IIQQQQQQ", t, 5, 0, 0, 0, 0x1000, 0x1000, a) for t, a in phdrs)
         shf = "<IIQQQQIIQQ"
     else:
         eh = ident + struct.pack("<HHIIIIIHHHHHH", 3, 40, 1, 0, ehsize, shoff, 0,
-                                 ehsize, phentsize, len(aligns), shentsize, shnum, 1)
-        ph = b"".join(struct.pack("<IIIIIIII", PT_LOAD, 0, 0, 0, 0x1000, 0x1000, 5, a) for a in aligns)
+                                 ehsize, phentsize, len(phdrs), shentsize, shnum, 1)
+        ph = b"".join(struct.pack("<IIIIIIII", t, 0, 0, 0, 0x1000, 0x1000, 5, a) for t, a in phdrs)
         shf = "<IIIIIIIIII"
     sh = bytes(shentsize)
     for name, typ, flags, _c, link, entsize in secs:
@@ -807,6 +820,7 @@ CLASSES = ["com/watermellonstudios/audio/api/AudioEngine.class"]
 # trinquete (liboboe); el nuestro va aparte, con sus perillas `own_*`.
 SO64_PATH = "jni/arm64-v8a/liboboe.so"
 OWN64_PATH = f"jni/arm64-v8a/{UNPINNED_SO}"
+IMPOSTOR_PATH = f"jni/arm64-v8a/libimpostor_{UNPINNED_SO}"
 RUNTIME_VARIANT = "releaseRuntimeElements-published"
 
 # Lo que arma un lado del self-test. Cada caso cambia UNA de estas perillas del
@@ -815,7 +829,7 @@ DEFAULT_SIDE = dict(
     # AAR
     extra_entry=False, manifest="29", min_compile_sdk="36", meta=True, so=True,
     so_align=16384, so_comment=CLANG, so_needed=NEEDED, so_soname="liboboe.so", so_pad=0,
-    own_align=16384, own_build_id=b"\x11" * 20,
+    own_align=16384, own_build_id=b"\x11" * 20, impostor_pad=0,
     blob=b"\x01\x02", classes=CLASSES, major=61, kotlin_module=b"\x00\x01pkg",
     jar_manifest="Manifest-Version: 1.0\n", bad_class=False, pad=0,
     # POM
@@ -824,6 +838,7 @@ DEFAULT_SIDE = dict(
     dup_pom_dep=False,
     # .module
     gradle="9.7.1", format_version="1.1", component_attr="release", component_module_suffix="",
+    component_group=GROUP, available_at_group=GROUP, available_at_version_suffix="",
     component_url_dir="audio", variant_attr="java-runtime", variant_caps=None,
     runtime_variant_name=RUNTIME_VARIANT, module_excludes=("org.jetbrains.kotlin:kotlin-stdlib-common",),
     dep_attrs=None, dep_caps=None, dep_endorse=False, dup_module_dep=False,
@@ -833,10 +848,11 @@ DEFAULT_SIDE = dict(
 )
 
 
-def make_aar(k: dict) -> bytes:
+def make_aar(k: dict, version: str) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:  # ZIP_STORED: el tamaño del AAR crece byte a byte con `pad`
         z.writestr("AndroidManifest.xml", '<manifest package="com.watermellonstudios.audio">'
+                                          f' android:versionName="{version}">'
                                           f'<uses-sdk android:minSdkVersion="{k["manifest"]}"/></manifest>')
         if k["meta"]:
             z.writestr("META-INF/com/android/build/gradle/aar-metadata.properties",
@@ -859,6 +875,11 @@ def make_aar(k: dict) -> bytes:
                                 build_id=k["own_build_id"]))
             z.writestr(f"jni/armeabi-v7a/{UNPINNED_SO}",
                        make_elf(32, aligns=(4096,), comment=CLANG, needed=NEEDED, soname=UNPINNED_SO))
+            # Termina en el nombre del nuestro pero NO es el nuestro: sus bytes siguen
+            # en el trinquete (R5 excluye por nombre de archivo exacto).
+            z.writestr(IMPOSTOR_PATH,
+                       make_elf(64, aligns=(16384,), comment=CLANG, needed=[], soname="libimpostor.so",
+                                pad=k["impostor_pad"]))
         if k["extra_entry"]:
             z.writestr("jni/arm64-v8a/libsorpresa.so",
                        make_elf(64, aligns=(16384,), comment=CLANG, needed=[], soname="libsorpresa.so"))
@@ -879,6 +900,10 @@ def make_pom(artifact: str, version: str, k: dict) -> bytes:
                        f"</artifactId></exclusion>" for e in k["exclusions"])
         stdlib = ("<dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId>"
                   "<version>2.4.20</version><scope>compile</scope></dependency>")
+        # Una dependencia hacia NUESTRA version: sin normalizar, "identico salvo la
+        # version" deja de ser verde.
+        stdlib += (f"<dependency><groupId>{GROUP}</groupId><artifactId>audio</artifactId>"
+                   f"<version>{version}</version><scope>compile</scope></dependency>")
         deps = f"""<dependencies>
   <dependency><groupId>androidx.core</groupId><artifactId>core-ktx</artifactId>
     <version>{k['core_ktx']}</version><scope>{k['scope']}</scope>{extra}
@@ -900,14 +925,14 @@ def make_pom(artifact: str, version: str, k: dict) -> bytes:
 
 def make_module(artifact: str, version: str, k: dict) -> bytes:
     variants = []
-    comp = {"group": GROUP, "module": artifact + k["component_module_suffix"], "version": version,
+    comp = {"group": k["component_group"], "module": artifact + k["component_module_suffix"], "version": version,
             "attributes": {"org.gradle.status": k["component_attr"]}}
     if artifact == "audio":
         variants.append({"name": "releaseApiElements-published",
                          "attributes": {"org.gradle.usage": "java-api"},
                          "available-at": {"url": f"../../{k['available_at_module']}/{version}/{k['available_at_url']}",
-                                          "group": GROUP, "module": k["available_at_module"],
-                                          "version": version}})
+                                          "group": k["available_at_group"], "module": k["available_at_module"],
+                                          "version": version + k["available_at_version_suffix"]}})
     else:
         comp["url"] = f"../../{k['component_url_dir']}/{version}/audio-{version}.module"
         deps = []
@@ -922,6 +947,8 @@ def make_module(artifact: str, version: str, k: dict) -> bytes:
             if k["dep_endorse"]:
                 dep["endorseStrictVersions"] = True
             deps.append(dep)
+            # Hacia NUESTRA version (la normalizacion de la spec de version).
+            deps.append({"group": GROUP, "module": "audio", "version": {"requires": version}})
             if k["dup_module_dep"]:
                 deps.append(dict(dep, version={"requires": "9.9.9"}))
         var = {"attributes": {"org.gradle.usage": k["variant_attr"]},
@@ -931,8 +958,9 @@ def make_module(artifact: str, version: str, k: dict) -> bytes:
                           "size": 123, "sha256": "x"}]}
         if k["runtime_variant_name"] is not None:
             var["name"] = k["runtime_variant_name"]
-        if k["variant_caps"]:
-            var["capabilities"] = k["variant_caps"]
+        # Por defecto, la capacidad implicita CON nuestra version (la normalizacion
+        # de las capacidades); el caso de la variante la cambia por otra.
+        var["capabilities"] = k["variant_caps"] or [{"group": GROUP, "name": artifact, "version": version}]
         if artifact == AAR_PUBLICATION and (k["constraint"] or k["dup_constraint"]):
             c = {"group": "androidx.core", "module": "core", "version": {"requires": k["constraint"] or "1.19.1"}}
             var["dependencyConstraints"] = [c, dict(c)] if k["dup_constraint"] else [c]
@@ -963,7 +991,7 @@ def write_side(root: Path, version: str, **overrides) -> None:
     for art in k["publications"]:
         (root / f"{art}-{version}.pom").write_bytes(make_pom(art, version, k))
         (root / f"{art}-{version}.module").write_bytes(make_module(art, version, k))
-    (root / f"{AAR_PUBLICATION}-{version}.aar").write_bytes(make_aar(k))
+    (root / f"{AAR_PUBLICATION}-{version}.aar").write_bytes(make_aar(k, version))
 
 
 def write_m2(m2: Path, version: str, **overrides) -> None:
@@ -975,7 +1003,7 @@ def write_m2(m2: Path, version: str, **overrides) -> None:
         (d / f"{art}-{version}.pom").write_bytes(make_pom(art, version, k))
         (d / f"{art}-{version}.module").write_bytes(make_module(art, version, k))
         if art == AAR_PUBLICATION:
-            (d / f"{art}-{version}.aar").write_bytes(make_aar(k))
+            (d / f"{art}-{version}.aar").write_bytes(make_aar(k, version))
 
 
 SO64 = f"aar/so:{SO64_PATH}"
@@ -998,6 +1026,8 @@ COMPARATOR_CASES = [
     (".so DT_NEEDED", {"so_needed": NEEDED + ["libsorpresa.so"]}, {f"{SO64}/needed", f"{SO64}/sha"}),
     (".so DT_SONAME", {"so_soname": "libotro.so"}, {f"{SO64}/soname", f"{SO64}/sha"}),
     (".so solo bytes", {"so_pad": 64}, {f"{SO64}/sha"}),
+    ("un .so que solo TERMINA como el nuestro sigue en el trinquete", {"impostor_pad": 64},
+     {f"aar/so:{IMPOSTOR_PATH}/sha"}),
     # R5: los bytes del nuestro NO son una diferencia; su alineacion SI.
     (f"{UNPINNED_SO} solo bytes (build-id) -> no es diferencia", {"own_build_id": b"\x22" * 20}, set()),
     (f"{UNPINNED_SO} alineacion (sigue en el trinquete)", {"own_align": 4096}, {f"{OWN64}/pt_load_align_min"}),
@@ -1020,6 +1050,7 @@ COMPARATOR_CASES = [
     ("module formatVersion", {"format_version": "1.2"}, {f"module:{a}/formatVersion" for a in PUBLICATIONS}),
     ("module createdBy", {"gradle": "9.8.0"}, {f"module:{a}/createdBy.gradle" for a in PUBLICATIONS}),
     ("module component url", {"component_url_dir": "audio-otro"}, {f"module:{a}/component" for a in NON_ROOT}),
+    ("module component grupo", {"component_group": "com.otro"}, {f"module:{a}/component" for a in PUBLICATIONS}),
     ("module component G:M:V", {"component_module_suffix": "-otro"},
      {f"module:{a}/component" for a in PUBLICATIONS}),
     ("module component atributos", {"component_attr": "integration"},
@@ -1033,6 +1064,10 @@ COMPARATOR_CASES = [
     ("module dep capacidades pedidas",
      {"dep_caps": [{"group": "androidx.core", "name": "core-ktx-fixtures", "version": "1"}]}, {MODULE_DEP}),
     ("module dep endorseStrictVersions", {"dep_endorse": True}, {MODULE_DEP}),
+    ("module available-at grupo", {"available_at_group": "com.otro"},
+     {"module:audio/variant:releaseApiElements-published/available-at"}),
+    ("module available-at version", {"available_at_version_suffix": "-x"},
+     {"module:audio/variant:releaseApiElements-published/available-at"}),
     ("module available-at", {"available_at_module": "audio-otro"},
      {"module:audio/variant:releaseApiElements-published/available-at"}),
     ("module url de available-at", {"available_at_url": "y.module"},
@@ -1140,12 +1175,12 @@ def self_test() -> int:
     # R1: el umbral del 5 %, en las DOS direcciones y a los dos lados del borde.
     #     El AAR va sin comprimir, asi que `pad` lo agranda byte a byte; la razon
     #     REAL se mide del AAR construido, para que el caso no mienta sobre si mismo.
-    base_size = len(make_aar(dict(DEFAULT_SIDE)))
+    size_a = len(make_aar(dict(DEFAULT_SIDE), "2.21.0"))
     for label, side, ratio, red in [("+4,9 % -> no es diferencia", "head", 0.049, False),
                                     ("+5,1 % -> aar/size", "head", 0.051, True),
                                     ("-5,1 % -> aar/size", "base", 0.051, True)]:
         def size_case(side=side, ratio=ratio, red=red):
-            p = round(ratio * base_size) if side == "head" else round(ratio * base_size / (1 - ratio))
+            p = round(ratio * size_a) if side == "head" else round(ratio * size_a / (1 - ratio))
             kw = {"pad": p}
             o = observe_sides(kw if side == "head" else {}, kw if side == "base" else None)
             total = next((a, b) for k, a, b in o.rows if k == "(AAR entero)")
@@ -1156,6 +1191,18 @@ def self_test() -> int:
             ok = seen == want and abs(abs(real) - ratio) < 0.0005 and rc == 1
             return ok, f"razon real {real:+.4%}, vio {sorted(seen)} esperaba {sorted(want)}"
         attempt(f"tamaño: {label}", size_case)
+
+    def size_exact():
+        # "Mas del 5 %": el 5 % JUSTO no es diferencia. Se rellenan los dos lados
+        # para que la diferencia sea exactamente 1/20 del base, medido en bytes.
+        size_b = len(make_aar(dict(DEFAULT_SIDE), "2.21.0-local"))
+        q = (-size_a) % 20
+        p = size_a + q - size_b + (size_a + q) // 20
+        o = observe_sides({"pad": p}, {"pad": q})
+        ta, tb = next((a, b) for k, a, b in o.rows if k == "(AAR entero)")
+        seen = {k for k, _, _ in o.diffs}
+        return (tb - ta) * 20 == ta and seen == {f"{SO64}/sha"}, f"{ta} -> {tb}, vio {sorted(seen)}"
+    attempt("tamaño: +5,000 % exacto -> no es diferencia", size_exact)
 
     # 2. El trinquete es sobre el VALOR (B1), del head Y de la base (R4).
     bump = {"min_compile_sdk": "37", "core_ktx": "1.19.1", "scope": "runtime"}
@@ -1214,7 +1261,8 @@ def self_test() -> int:
                        ("R9: head vacio sin (vacio)", "k = 36 ->    # r"),
                        ("R9: base vacia sin (vacio)", "k =  -> 37   # r"),
                        ("R9: un valor con '#'", "k = a#b -> c   # r"),
-                       ("R9: un valor con '->'", "k = a -> ->b   # r")]:
+                       ("R9: un valor con '->'", "k = a -> ->b   # r"),
+                       ("una clave con espacio", "k x = 1 -> 2   # r")]:
         attempt(f"parser rechaza {label}: {bad!r}",
                 lambda bad=bad: raises_read_error(lambda: read_expectations([bad], None)))
     attempt("parser rechaza una clave declarada dos veces",
@@ -1223,7 +1271,8 @@ def self_test() -> int:
     # --print-declarations: lo que imprime se lee de vuelta IGUAL, y lo que no se
     # puede escribir sin ambiguedad se rechaza en vez de imprimirse mal.
     def roundtrip():
-        diffs = [("k1", "", "x"), ("k2", ABSENT, "a = b"), ("k3", "1.18.0 scope=runtime", "1.19.1 scope=runtime")]
+        diffs = [("k1", "", "x"), ("k2", ABSENT, "a = b"), ("k3", "1.18.0 scope=runtime", "1.19.1 scope=runtime"),
+                 ("k4", "1", "")]
         lines = [line.replace(f"# {PLACEHOLDER_REASON}", "# r") for line in declaration_lines(diffs)]
         exp = read_expectations(lines, None)
         return exp == {k: (va, vb, "r") for k, va, vb in diffs}, f"{lines} -> {exp}"
@@ -1232,6 +1281,7 @@ def self_test() -> int:
                          ("un valor con ' # '", [("k", "1", "a # b")]),
                          ("un valor con espacio al final", [("k", "1 ", "2")]),
                          (f"un valor que es literalmente {EMPTY}", [("k", EMPTY, "2")]),
+                         ("un valor con salto de linea", [("k", "1", "a\nb")]),
                          ("una clave con espacio", [("k x", "1", "2")])]:
         attempt(f"print-declarations rechaza {label}",
                 lambda diffs=diffs: raises_read_error(lambda: declaration_lines(diffs)))
@@ -1240,6 +1290,8 @@ def self_test() -> int:
     for name, kw in UNREADABLE_CASES:
         attempt(f"ilegible: {name}", lambda kw=kw: raises_read_error(lambda: observe_sides(kw)))
     attempt("ilegible: un .so que no es ELF", lambda: raises_read_error(lambda: elf_facts(b"no soy un elf", "x.so")))
+    attempt("ilegible: un ELF sin seccion dinamica",
+            lambda: raises_read_error(lambda: elf_facts(make_elf(64, comment=CLANG, dynamic_section=False), "x.so")))
     attempt("ilegible: un ELF truncado",
             lambda: raises_read_error(lambda: elf_facts(b"\x7fELF\x02\x01" + bytes(10), "x.so")))
 
@@ -1277,9 +1329,20 @@ def self_test() -> int:
     attempt("parser ELF 64/32: alineacion, .comment, DT_NEEDED, DT_SONAME", elf_parser)
 
     def align_min():
-        f = elf_facts(make_elf(64, aligns=(16384, 4096), comment=CLANG, needed=NEEDED, soname="a.so"), "a")
-        return f["pt_load_align_min"] == "4096", f"{f['pt_load_align_min']}"
-    attempt("R2: parser ELF, dos PT_LOAD [16384, 4096] -> la MINIMA, 4096", align_min)
+        # Entre un PT_GNU_STACK de p_align 0 y un PT_DYNAMIC de 8 (make_elf): contar
+        # un segmento que no es PT_LOAD daria 0 u 8, no el minimo de los PT_LOAD.
+        got = {al: elf_facts(make_elf(64, aligns=al, comment=CLANG, needed=NEEDED, soname="a.so"),
+                             "a")["pt_load_align_min"]
+               for al in [(16384, 4096), (4096, 16384), (16384, 4096, 16384)]}
+        return all(v == "4096" for v in got.values()), f"{got}"
+    attempt("R2: parser ELF, PT_LOAD [16384, 4096], [4096, 16384] y [16384, 4096, 16384] -> 4096", align_min)
+
+    def pom_without_version():
+        pom = (f'<project xmlns="{POM_NS["m"]}"><dependencies><dependency><groupId>g</groupId>'
+               '<artifactId>a</artifactId></dependency></dependencies></project>').encode()
+        v = pom_facts(pom, "x", "1.0")["pom:x/dep:g:a"]
+        return v.startswith(f"{NO_VERSION} ") and declarable_value(v), repr(v)
+    attempt(f"POM: una dependencia sin <version> se escribe {NO_VERSION} y es declarable", pom_without_version)
 
     def needed_repeated():
         f = elf_facts(make_elf(64, comment=CLANG, needed=["libc.so", "libc.so"], soname="a.so"), "a")
