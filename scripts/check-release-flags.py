@@ -319,6 +319,15 @@ def compile_problems(flags: list[str]) -> list[str]:
 
 def link_problems(flags: list[str]) -> list[str]:
     probs = []
+    # Con ThinLTO el backend corre en el LINK: el driver le pasa a lld el último
+    # -O de esta línea como -plugin-opt=O<n>. Sin -O3 acá, el -O3 de los objetos
+    # sólo alcanza al front-end (medido con -###: -plugin-opt=O2).
+    opt = _last(flags, OPT_RE.match)
+    if opt is None:
+        probs.append("el link no tiene -O: el backend de ThinLTO corre al default")
+    elif opt != "-O3":
+        probs.append(f"el último -O del link es {opt}, no -O3 (el backend de ThinLTO "
+                     f"corre a {opt})")
     lto = _last(flags, _is_lto)
     if lto is None or lto == "-fno-lto":
         probs.append("el link no es LTO (falta -flto" + (", lo anula -fno-lto)" if lto else ")"))
@@ -516,10 +525,12 @@ FLAGS_FIXED = ("-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables
                "-fassociative-math -ftree-vectorize -ffunction-sections -fdata-sections "
                "-mcpu=cortex-a53 -std=c++20")
 # En el link, -flto=thin llega por LANGUAGE_COMPILE_FLAGS (CMake no lo pone en
-# CMAKE_CXX_LINK_OPTIONS_IPO); la fixture lo lleva ahí, igual que el real.
+# CMAKE_CXX_LINK_OPTIONS_IPO) junto con el -O2 de AGP; el -O3 de add_link_options
+# llega por LINK_FLAGS, que va después y gana. La fixture los lleva ahí, igual
+# que el real.
 LINK_FIXED = ("-Wl,--build-id=sha1 -Wl,--no-rosegment -Wl,--no-undefined-version "
               "-Wl,--fatal-warnings -Wl,--no-undefined -Qunused-arguments  "
-              "-Wl,-z,max-page-size=16384 -Wl,--gc-sections -Wl,--gc-sections   -fuse-ld=lld")
+              "-Wl,-z,max-page-size=16384 -Wl,--gc-sections -Wl,--gc-sections   -O3 -fuse-ld=lld")
 LINK_LANG_HOY = ("-g -DANDROID -fdata-sections -ffunction-sections -funwind-tables "
                  "-fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat "
                  "-Werror=format-security  -std=c++20 -O2 -g -DNDEBUG")
@@ -660,6 +671,17 @@ def self_test() -> int:
                         ("-fno-unsafe-math-optimizations",
                          "falta -freciprocal-math (la anula un -fno-unsafe-math-optimizations")):
         check(f"{tok} DESPUÉS FALLA", dice(fixture(FLAGS_FIXED + " " + tok), needle))
+    # --- -O3 en el link: el backend de ThinLTO corre ahí (D6)
+    check("HOY el link falla también por su -O2",
+          hoy is not None and any("último -O del link es -O2" in p for p in hoy), f"dio {hoy}")
+    check("sin el -O3 de add_link_options, el link FALLA (queda el -O2 de AGP)",
+          dice(fixture(link=drop(LINK_FIXED, "-O3")), "último -O del link es -O2"))
+    check("un -O2 después del -O3 en el link FALLA",
+          dice(fixture(link=LINK_FIXED + " -O2"), "último -O del link es -O2"))
+    check("un link sin ningún -O FALLA",
+          dice(fixture(link=drop(LINK_FIXED, "-O3"),
+                       link_lang=" ".join(t for t in _split_ninja(LINK_LANG_FIXED) if t != "-O2")),
+               "el link no tiene -O"))
     check("un -fno-lto al final del LINK FALLA",
           dice(fixture(link=LINK_FIXED + " -fno-lto"), "lo anula -fno-lto"))
     check("-fvectorize vale como -ftree-vectorize (no es un falso rojo)",
