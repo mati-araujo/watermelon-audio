@@ -62,20 +62,26 @@ XCODE_SCRIPT = "scripts/ci-select-xcode.sh"
 
 SKIP_DIRS = {".git", ".gradle", ".cxx", "build", "build-san", ".deps", ".idea", ".kotlin", "node_modules"}
 
-GTEST_DECL = re.compile(r"FetchContent_Declare\(\s*googletest\b|GIT_REPOSITORY\s+\S*github\.com[/:]google/googletest")
-GTEST_TAG = re.compile(r"GIT_TAG\s+(\S+)")
+FC_DECL = re.compile(r"FetchContent_Declare\(\s*([\w-]+)", re.I)
+GTEST_REPO = re.compile(r"github\.com[/:]google/googletest", re.I)
+FIND_GTEST = re.compile(r"find_package\(\s*GTest\b", re.I)
+GTEST_TAG = re.compile(r"GIT_TAG\s+([^\s)]+)")
+GTEST_URL = re.compile(r"\bURL\s+([^\s)]+)")
 CMAKE_SET = re.compile(r"set\(\s*(\w+)\s+\"?([^\")\s]+)\"?\s*\)")
 TAG_VERSION = re.compile(r"^v?[0-9]+\.[0-9]+(\.[0-9]+)?$")
+URL_VERSION = re.compile(r"/v?[0-9]+\.[0-9]+\.[0-9]+\.(zip|tar\.gz)$")
 
 SDK_PKG = re.compile(r"\b(ndk|cmake);[0-9]")
 NDK_VERSION_ASSIGN = re.compile(r"ndkVersion\s*(=|\()\s*\"")
 XCODE_LITERAL = re.compile(r"Xcode_[0-9]|DEVELOPER_DIR|xcode-select\s+(-s|--switch)")
-JAVA_VERSION = re.compile(r"^\s*java-version:\s*['\"]?([^'\"\s#]+)", re.M)
-USES = re.compile(r"^\s*-?\s*uses:\s*(\S+)(.*)$", re.M)
+JAVA_VERSION = re.compile(r"(?<![\w-])java-version:\s*['\"]?([^'\"\s,}#]+)")
+JAVA_VERSION_FILE = re.compile(r"(?<![\w-])java-version-file:")
+USES = re.compile(r"(?:^|[\s{,])uses:\s*['\"]?([^'\"\s,}]+)['\"]?(.*)$")
 USES_PINNED = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(/[^@\s]*)?@([0-9a-f]{40})$")
 USES_COMMENT = re.compile(r"^\s*#\s*(v[0-9]+(\.[0-9]+)*)\s*$")
-JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$", re.M)
-RUNS_ON = re.compile(r"^\s+runs-on:\s*(\S+)", re.M)
+JOBS_KEY = re.compile(r"^jobs:\s*(#.*)?$")
+RUNS_ON = re.compile(r"^\s+runs-on:\s*(.*?)\s*(#.*)?$")
+XCODE_CALL = re.compile(r"^(-\s*)?(run:\s*)?bash\s+" + re.escape("scripts/ci-select-xcode.sh") + r"\s*$")
 
 
 class Unreadable(Exception):
@@ -115,6 +121,16 @@ def is_workflow(rel):
     return rel.startswith(WORKFLOWS_DIR) and rel.endswith((".yml", ".yaml"))
 
 
+def is_action_file(rel):
+    """Workflows y composite actions locales: donde puede aparecer un `uses:`."""
+    return is_workflow(rel) or (rel.startswith(".github/actions/")
+                                and os.path.basename(rel) in ("action.yml", "action.yaml"))
+
+
+def strip_yaml_comment_lines(text):
+    return [(n, line) for n, line in enumerate(text.splitlines(), 1) if not line.lstrip().startswith("#")]
+
+
 def is_build_config(rel):
     """Donde un NDK/CMake escrito a mano SI cambia lo que se instala o se usa."""
     return (is_workflow(rel) or rel.endswith((".gradle.kts", ".gradle", ".properties"))
@@ -122,30 +138,58 @@ def is_build_config(rel):
             or (rel.startswith("scripts/") and rel.endswith(".sh")))
 
 
+def cmake_code(text):
+    """El CMake sin comentarios `#...`: un comentario que NOMBRA la declaracion no es una."""
+    return re.sub(r"#[^\n]*", "", text)
+
+
+def fc_blocks(code):
+    """(nombre, texto) de cada FetchContent_Declare(...), cortado en su parentesis de cierre."""
+    for m in FC_DECL.finditer(code):
+        depth, i = 1, code.index("(", m.start()) + 1
+        while i < len(code) and depth:
+            depth += {"(": 1, ")": -1}.get(code[i], 0)
+            i += 1
+        yield m.group(1), code[m.start():i], (m.start(), i)
+
+
 def check_googletest(root, files, findings):
+    """Cada DECLARACION cuenta (no cada archivo): dos en el mismo .cmake son dos fuentes."""
     decls = []
     for rel in files:
         if not is_cmake(rel):
             continue
-        text = read(root, rel)
-        if not GTEST_DECL.search(text):
-            continue
-        variables = dict(CMAKE_SET.findall(text))
-        tags = GTEST_TAG.findall(text)
-        tag = tags[0] if tags else None
-        if tag:
-            tag = re.sub(r"\$\{(\w+)\}", lambda m: variables.get(m.group(1), m.group(0)), tag)
-        decls.append((rel, tag))
+        code = cmake_code(read(root, rel))
+        variables = dict(CMAKE_SET.findall(code))
+        spans = []
+        for name, block, span in fc_blocks(code):
+            spans.append(span)
+            if name.lower() != "googletest" and not GTEST_REPO.search(block):
+                continue
+            tag = GTEST_TAG.search(block)
+            url = GTEST_URL.search(block)
+            value = tag.group(1) if tag else (url.group(1) if url else None)
+            if value:
+                value = re.sub(r"\$\{(\w+)\}", lambda m: variables.get(m.group(1), m.group(0)), value)
+            fixed = bool(value) and (TAG_VERSION.match(value) if tag else bool(URL_VERSION.search(value)))
+            decls.append((rel, value, fixed))
+        # googletest por otro camino: un repo fuera de un FetchContent_Declare
+        # (ExternalProject, un add_subdirectory de un clone) o el del sistema.
+        for m in GTEST_REPO.finditer(code):
+            if not any(a <= m.start() < b for a, b in spans):
+                decls.append((rel, "(fuera de FetchContent_Declare)", False))
+        for _m in FIND_GTEST.finditer(code):
+            decls.append((rel, "find_package(GTest), el del sistema", False))
     if not decls:
         findings.append(("leer", "ninguna declaracion de googletest en el arbol: no pude medir el pin"))
         return None
     if len(decls) > 1:
-        lista = ", ".join(f"{r} ({t})" for r, t in decls)
-        findings.append(("googletest", f"googletest declarado en {len(decls)} lugares, tiene que ser UNO: {lista}"))
-    for rel, tag in decls:
-        if not tag or not TAG_VERSION.match(tag):
-            findings.append(("googletest", f"{rel}: el tag de googletest es {tag!r}, no una version fija"))
-    return decls
+        lista = ", ".join(f"{r} ({t})" for r, t, _ in decls)
+        findings.append(("googletest", f"googletest declarado {len(decls)} veces, tiene que ser UNA: {lista}"))
+    for rel, value, fixed in decls:
+        if not fixed:
+            findings.append(("googletest", f"{rel}: googletest en {value!r}, no una version fija"))
+    return [(r, t) for r, t, _ in decls]
 
 
 def catalog_ndk(root, findings):
@@ -181,8 +225,13 @@ def check_java(root, files, findings):
     launcher = str(pins.get("launcher_jvm", ""))
     values = []
     for rel in files:
-        if is_workflow(rel):
-            values += [(rel, v) for v in JAVA_VERSION.findall(read(root, rel))]
+        if not is_workflow(rel):
+            continue
+        for n, line in strip_yaml_comment_lines(read(root, rel)):
+            values += [(rel, v) for v in JAVA_VERSION.findall(line)]
+            if JAVA_VERSION_FILE.search(line):
+                findings.append(("java-version", f"{rel}:{n}: `java-version-file:` es una segunda fuente "
+                                                 f"del JDK; el pin es `java-version:`"))
     if not values:
         findings.append(("leer", "ningun `java-version:` en los workflows: no pude medir el pin"))
         return
@@ -198,14 +247,46 @@ def check_java(root, files, findings):
 
 
 def jobs_of(text):
-    """(nombre, cuerpo) de cada job de un workflow, cortando por el encabezado de 2 espacios."""
-    start = text.find("\njobs:")
-    if start < 0:
+    """(nombre, lineas) de cada job. La indentacion de los jobs se toma de la primera clave
+    bajo `jobs:` (no se asume de 2 espacios), y un encabezado puede llevar comentario."""
+    lines = text.splitlines()
+    start = next((i for i, l in enumerate(lines) if JOBS_KEY.match(l)), None)
+    if start is None:
         return []
-    body = text[start:]
-    heads = list(JOB_HEADER.finditer(body))
-    return [(m.group(1), body[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(body)])
-            for i, m in enumerate(heads)]
+    body = [(i, l) for i, l in enumerate(lines[start + 1:], start + 1)
+            if l.strip() and not l.lstrip().startswith("#")]
+    if not body:
+        return []
+    indent = len(body[0][1]) - len(body[0][1].lstrip(" "))
+    header = re.compile(r"^ {%d}([A-Za-z0-9_-]+):\s*(#.*)?$" % indent)
+    jobs, cur = [], None
+    for _i, l in body:
+        lead = len(l) - len(l.lstrip(" "))
+        if lead < indent:
+            break  # otra clave de primer nivel despues de `jobs:`
+        m = header.match(l) if lead == indent else None
+        if m:
+            cur = (m.group(1), [])
+            jobs.append(cur)
+        elif cur:
+            cur[1].append(l)
+    return jobs
+
+
+def runs_on_of(job_lines):
+    """El valor de `runs-on`, con la forma de lista en lineas siguientes incluida."""
+    for k, line in enumerate(job_lines):
+        m = RUNS_ON.match(line)
+        if not m:
+            continue
+        value = m.group(1)
+        lead = len(line) - len(line.lstrip(" "))
+        for nxt in job_lines[k + 1:]:
+            if len(nxt) - len(nxt.lstrip(" ")) <= lead:
+                break
+            value += " " + nxt.strip()
+        return value
+    return None
 
 
 def check_xcode(root, files, findings):
@@ -213,28 +294,33 @@ def check_xcode(root, files, findings):
         if not is_workflow(rel):
             continue
         text = read(root, rel)
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
-                continue
+        for n, line in strip_yaml_comment_lines(text):
             if XCODE_LITERAL.search(line):
                 findings.append(("xcode", f"{rel}:{n}: Xcode fijado a mano (la fuente es la clave "
                                           f"`xcode` de {PINS}): {line.strip()}"))
-        for job, body in jobs_of(text):
-            runs = RUNS_ON.search(body)
-            if runs and "macos" in runs.group(1) and XCODE_SCRIPT not in body:
-                findings.append(("xcode", f"{rel}: el job `{job}` corre en {runs.group(1)} y no "
-                                          f"llama a {XCODE_SCRIPT}: usaria el Xcode default de la imagen"))
+        for job, job_lines in jobs_of(text):
+            runs = runs_on_of(job_lines)
+            if runs is None:
+                continue
+            if "${{" in runs:
+                findings.append(("xcode", f"{rel}: el job `{job}` tiene `runs-on: {runs}`, dinamico: no puedo "
+                                          f"saber si corre en macOS ni exigirle {XCODE_SCRIPT}"))
+                continue
+            calls = any(XCODE_CALL.match(l.strip()) for l in job_lines if not l.lstrip().startswith("#"))
+            if "macos" in runs.lower() and not calls:
+                findings.append(("xcode", f"{rel}: el job `{job}` corre en {runs} y no llama a "
+                                          f"{XCODE_SCRIPT}: usaria el Xcode default de la imagen"))
 
 
 def check_actions(root, files, findings):
     seen = {}
     total = 0
     for rel in files:
-        if not is_workflow(rel):
+        if not is_action_file(rel):
             continue
         text = read(root, rel)
-        for n, line in enumerate(text.splitlines(), 1):
-            m = USES.match(line)
+        for n, line in strip_yaml_comment_lines(text):
+            m = USES.search(line)
             if not m:
                 continue
             ref, rest = m.group(1).strip("'\""), m.group(2)
@@ -294,6 +380,7 @@ CLEAN = {
     CATALOG: '[versions]\nndk = "30.0.16248370"\ncmake = "3.22.1"\n',
     PINS: json.dumps({"xcode": "26.6 (17F113)", "launcher_jvm": "17.0.19"}),
     "audio/src/main/cpp/thirdparty/googletest.cmake":
+        '# un comentario que nombra FetchContent_Declare(googletest no es una declaracion\n'
         'set(WMA_GOOGLETEST_VERSION "1.18.0")\nFetchContent_Declare(googletest\n'
         '    GIT_REPOSITORY https://github.com/google/googletest.git\n'
         '    GIT_TAG v${WMA_GOOGLETEST_VERSION}\n)\n',
@@ -382,9 +469,9 @@ CASES = [
         "    env:\n      DEVELOPER_DIR: /Applications/Xcode.app\n    steps:\n"), "xcode"),
     ("un job de macOS sin el script de Xcode", mutate(
         ".github/workflows/publish.yml", "      - run: bash scripts/ci-select-xcode.sh\n", ""), "xcode"),
-    ("action por tag", mutate(
-        ".github/workflows/ci.yml", f"actions/checkout@{SHA_A} # v7.0.1\n      - uses: actions/setup-java",
-        "actions/checkout@v7\n      - uses: actions/setup-java"), "actions"),
+    # Las DOS apariciones de checkout, para que la regla de "dos pins" no lo tape.
+    ("action por tag", lambda f: f.__setitem__(".github/workflows/ci.yml", f[".github/workflows/ci.yml"].replace(
+        f"actions/checkout@{SHA_A} # v7.0.1", "actions/checkout@v7 # v7.0.1")), "actions"),
     ("action por SHA corto", mutate(
         ".github/workflows/publish.yml", f"setup-gradle@{SHA_A}", f"setup-gradle@{SHA_A[:12]}"), "actions"),
     ("action por SHA sin el tag en comentario", mutate(
@@ -397,6 +484,84 @@ CASES = [
         ".github/workflows/publish.yml", f"actions/setup-java@{SHA_B} # v6.0.1",
         f"actions/setup-java@{SHA_B} # v5.0.0"), "actions"),
     ("toolchain-pins ilegible", add(PINS, "{no es json"), "leer"),
+    # --- de la review de S4
+    ("dos declaraciones de googletest en el MISMO archivo", mutate(
+        "audio/src/main/cpp/thirdparty/googletest.cmake", "    GIT_TAG v${WMA_GOOGLETEST_VERSION}\n)\n",
+        "    GIT_TAG v${WMA_GOOGLETEST_VERSION}\n)\nif(OLD)\nFetchContent_Declare(googletest\n"
+        "    GIT_REPOSITORY https://github.com/google/googletest.git\n    GIT_TAG v1.15.2\n)\nendif()\n"),
+     "googletest"),
+    ("el GIT_TAG de OTRA dependencia no tapa un googletest en rama", lambda f: [
+        mutate("audio/src/main/cpp/thirdparty/googletest.cmake", "set(WMA_GOOGLETEST_VERSION",
+               "FetchContent_Declare(benchmark\n  GIT_REPOSITORY https://github.com/google/benchmark.git\n"
+               "  GIT_TAG v1.9.1\n)\nset(WMA_GOOGLETEST_VERSION")(f),
+        mutate("audio/src/main/cpp/thirdparty/googletest.cmake", "GIT_TAG v${WMA_GOOGLETEST_VERSION}",
+               "GIT_TAG main")(f)], "googletest"),
+    ("googletest por URL de tarball en otra suite", add(
+        "audio/src/main/cpp/voice/tests/CMakeLists.txt",
+        "FetchContent_Declare(gt\n  URL https://github.com/google/googletest/archive/refs/tags/v1.17.0.zip\n)\n"),
+     "googletest"),
+    ("googletest del sistema", add(
+        "audio/src/main/cpp/looper/tests/CMakeLists.txt", "find_package(GTest REQUIRED)\n"), "googletest"),
+    ("el NDK literal en un .properties", add("gradle.properties", "ndk.version=30.0.16248370\n"), "ndk-cmake"),
+    ("java-version: mismo major, otro valor", mutate(
+        ".github/workflows/publish.yml", "java-version: '17'", "java-version: '17.0.2'"), "java-version"),
+    ("java-version-file como segunda fuente", mutate(
+        ".github/workflows/publish.yml", "          java-version: '17'\n",
+        "          java-version: '17'\n          java-version-file: .java-version\n"), "java-version"),
+    ("java-version en un mapa en linea", mutate(
+        ".github/workflows/publish.yml", "        with:\n          java-version: '17'\n",
+        "        with: { distribution: temurin, java-version: '21' }\n"), "java-version"),
+    ("xcode-select sin literal", mutate(
+        ".github/workflows/ci.yml", "      - run: bash scripts/ci-select-xcode.sh\n",
+        "      - run: bash scripts/ci-select-xcode.sh\n      - run: sudo xcode-select -s \"$XCODE\"\n"),
+     "xcode"),
+    ("el script de Xcode nombrado en el name de un paso, sin llamarlo", mutate(
+        ".github/workflows/publish.yml", "      - run: bash scripts/ci-select-xcode.sh\n",
+        "      - name: Fijar Xcode (ver scripts/ci-select-xcode.sh)\n        run: echo nada\n"), "xcode"),
+    ("el script de Xcode nombrado sólo en un comentario", mutate(
+        ".github/workflows/publish.yml", "      - run: bash scripts/ci-select-xcode.sh\n",
+        "      # ver scripts/ci-select-xcode.sh\n"), "xcode"),
+    ("dos jobs de macOS en un workflow, uno sin el script", mutate(
+        ".github/workflows/ci.yml", "      - run: bash scripts/ci-select-xcode.sh\n",
+        "      - run: bash scripts/ci-select-xcode.sh\n  ios-otro:\n    runs-on: macos-latest\n"
+        "    steps:\n      - run: echo hola\n"), "xcode"),
+    ("runs-on macOS en mayusculas", mutate(
+        ".github/workflows/ci.yml", "  build:\n    runs-on: ubuntu-latest\n",
+        "  build:\n    runs-on: macOS-14\n"), "xcode"),
+    ("runs-on dinamico", mutate(
+        ".github/workflows/ci.yml", "  build:\n    runs-on: ubuntu-latest\n",
+        "  build:\n    runs-on: ${{ matrix.os }}\n"), "xcode"),
+    ("runs-on en forma de lista", mutate(
+        ".github/workflows/ci.yml", "  build:\n    runs-on: ubuntu-latest\n",
+        "  build:\n    runs-on:\n      - self-hosted\n      - macos\n"), "xcode"),
+    ("un encabezado de job con comentario no se funde con el anterior", mutate(
+        ".github/workflows/ci.yml", "      - uses: ./local-action\n",
+        "      - uses: ./local-action\n  mac2:  # un comentario\n    runs-on: macos-latest\n"
+        "    steps:\n      - run: echo hola\n"), "xcode"),
+    ("jobs indentados con 4 espacios", add(
+        ".github/workflows/otro.yml",
+        "name: Otro\njobs:\n    mac:\n        runs-on: macos-latest\n        steps:\n"
+        f"            - uses: actions/checkout@{SHA_A} # v7.0.1\n"), "xcode"),
+    ("ningun uses", lambda f: [f.__setitem__(p, re.sub(r"(?m)^.*uses:.*\n", "", f[p]))
+                               for p in (".github/workflows/ci.yml", ".github/workflows/publish.yml")],
+     "leer"),
+    ("uses en un mapa en linea, por tag", mutate(
+        ".github/workflows/ci.yml", "      - uses: ./local-action\n",
+        "      - uses: ./local-action\n      - { uses: actions/cache@v4 }\n"), "actions"),
+    ("uses por tag en una composite action local", add(
+        ".github/actions/setup/action.yml",
+        "runs:\n  using: composite\n  steps:\n    - uses: actions/setup-java@v5\n"), "actions"),
+]
+
+
+GREEN_CASES = [
+    ("googletest unico por URL de tarball con version", mutate(
+        "audio/src/main/cpp/thirdparty/googletest.cmake",
+        "    GIT_REPOSITORY https://github.com/google/googletest.git\n    GIT_TAG v${WMA_GOOGLETEST_VERSION}\n",
+        "    URL https://github.com/google/googletest/archive/refs/tags/v1.18.0.zip\n")),
+    ("el script de Xcode llamado dentro de un run de varias lineas", mutate(
+        ".github/workflows/publish.yml", "      - run: bash scripts/ci-select-xcode.sh\n",
+        "      - run: |\n          bash scripts/ci-select-xcode.sh\n")),
 ]
 
 
@@ -421,6 +586,13 @@ def self_test():
         failures.append(f"el arbol limpio salio ROJO: {findings}")
     elif not gtest or gtest[0][1] != "v1.18.0":
         failures.append(f"el arbol limpio no resolvio el tag de googletest: {gtest}")
+
+    for name, apply in GREEN_CASES:
+        files = dict(CLEAN)
+        apply(files)
+        found, _ = run(files)
+        if found:
+            failures.append(f"MAL verde: {name}: esperaba verde, vio {found}")
 
     for name, apply, want in CASES:
         files = dict(CLEAN)
@@ -449,7 +621,8 @@ def self_test():
         for f in failures:
             print("  " + f)
         return 1
-    print(f"check-dep-pins --self-test: ok ({len(CASES)} casos rojos, cada uno con su clave, y el limpio verde)")
+    print(f"check-dep-pins --self-test: ok ({len(CASES)} casos rojos, cada uno con su clave; "
+          f"{len(GREEN_CASES)} verdes y el limpio)")
     return 0
 
 

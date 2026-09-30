@@ -251,6 +251,9 @@ else
   dice "verificado" sin decir con que, no prueba nada. Si el toolchain nuevo es
   el que corresponde, actualiza .github/toolchain-pins.json — eso cambia el
   digest y fuerza una corrida completa en CI, que es lo correcto.
+  OJO con la clave `xcode`: desde REQ-047 S4 TAMBIEN fija el Xcode de los jobs de
+  macOS del CI (scripts/ci-select-xcode.sh). Bumpearla a un Xcode que la imagen
+  del runner no trae pone rojos ios, cpp-tests-macos y publish.
 EOF
 fi
 
