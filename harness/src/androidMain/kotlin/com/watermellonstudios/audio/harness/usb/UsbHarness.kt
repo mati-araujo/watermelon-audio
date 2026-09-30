@@ -152,10 +152,10 @@ class UsbHarness(context: Context) {
     suspend fun startStreaming(r: SmokeReporter, warmupMs: Long = 2000): Boolean {
         val bits = manager.getCurrentCapabilitySnapshot()?.effectiveOutputBitDepths
             ?.let { if (24 in it) 24 else it.firstOrNull() } ?: 16
-        val result = manager.startStreaming(sampleRate = 48000, channels = 2, bitDepth = bits)
+        val result = manager.startStreaming(sampleRate = STREAM_RATE_HZ, channels = 2, bitDepth = bits)
         val started = r.report(
             PANEL, "streaming-start", result is UsbResult.Success,
-            "rate" to 48000, "canales" to 2, "bits" to bits, "estado" to manager.connectionState.value,
+            "rate" to STREAM_RATE_HZ, "canales" to 2, "bits" to bits, "estado" to manager.connectionState.value,
             "error" to (result as? UsbResult.Failure)?.error, "mensaje" to (result as? UsbResult.Failure)?.message,
         )
         if (!started) return false
@@ -165,12 +165,23 @@ class UsbHarness(context: Context) {
 
     fun reportStats(r: SmokeReporter, step: String): Boolean {
         val s: UsbTransferStats? = manager.getTransferStats()
+        // El rate medido sólo existe con feedback (async o implícito por captura); sin él vale 0 y no
+        // se puede verificar — se dice, no se da por bueno ni por malo. Si existe y no es el pedido,
+        // es un rate mal negociado: FAIL.
+        val measured = s?.currentSampleRateHz
+        val contradicts = SuiteRowVerdict.rateContradicts(measured, STREAM_RATE_HZ)
         return r.report(
-            PANEL, step, s != null && s.packetsCompleted > 0,
+            PANEL, step, s != null && s.packetsCompleted > 0 && !contradicts,
             "enviados" to s?.packetsSubmitted, "completados" to s?.packetsCompleted,
             "errores" to s?.packetsErrors, "underruns" to s?.underruns, "overruns" to s?.overruns,
-            "rate-real" to s?.currentSampleRateHz, "latencia-ms" to s?.avgLatencyMs,
-            "motivo" to if (s == null) "sin-stats" else null,
+            "rate-pedido" to STREAM_RATE_HZ, "rate-real" to measured,
+            "rate-verificable" to (measured != null && measured > 0f), "latencia-ms" to s?.avgLatencyMs,
+            "motivo" to when {
+                s == null -> "sin-stats"
+                contradicts -> "rate-real-distinto-del-pedido"
+                s.packetsCompleted <= 0 -> "sin-paquetes"
+                else -> null
+            },
         )
     }
 
@@ -204,7 +215,8 @@ class UsbHarness(context: Context) {
             val fields = arrayOf<Pair<String, Any?>>(
                 "test" to res.testType, "estado" to res.status,
                 "trafico" to (first != null && last != null && last > first), "muestras" to res.statsSamples.size,
-                "rate-config" to res.config.sampleRate, "bits-config" to res.config.bitDepth, "rate-real" to real,
+                "rate-config" to res.config.sampleRate, "rate-stream" to STREAM_RATE_HZ,
+                "bits-config" to res.config.bitDepth, "rate-real" to real,
                 "paquetes" to res.totalPackets, "ok-paquetes" to res.successfulPackets,
                 "underruns" to res.underruns, "overruns" to res.overruns, "errores" to res.errors,
                 "latencia-ms" to res.avgLatencyMs, "mensaje" to res.errorMessage,
@@ -222,7 +234,11 @@ class UsbHarness(context: Context) {
                     measured++
                     r.report(
                         PANEL, step, false, *fields,
-                        "motivo" to if (res.status != UsbTestStatus.PASSED) "estado-${res.status}" else "sin-trafico",
+                        "motivo" to when {
+                            first == null || last == null || last <= first -> "sin-trafico"
+                            SuiteRowVerdict.rateContradicts(real, STREAM_RATE_HZ) -> "rate-real-distinto-del-pedido"
+                            else -> "estado-${res.status}"
+                        },
                     )
                 }
             }
@@ -284,6 +300,9 @@ class UsbHarness(context: Context) {
 
     companion object {
         const val PANEL = "usb"
+
+        /** El rate al que el harness abre el stream USB. La suite mide ESTE stream (D11). */
+        const val STREAM_RATE_HZ = 48_000
         private const val RELEASE_DISCONNECT_MS = 1000L
 
         /** El veredicto D11 de una fila, con los datos del resultado de la librería. */
@@ -291,8 +310,9 @@ class UsbHarness(context: Context) {
             libraryPassed = res.status == UsbTestStatus.PASSED,
             firstCompleted = res.statsSamples.firstOrNull()?.packetsCompleted,
             lastCompleted = res.statsSamples.lastOrNull()?.packetsCompleted,
-            realRateHz = res.statsSamples.lastOrNull()?.currentSampleRateHz,
-            configRateHz = res.config.sampleRate,
+            measuredRateHz = res.statsSamples.lastOrNull()?.currentSampleRateHz,
+            rowRateHz = res.config.sampleRate,
+            streamRateHz = STREAM_RATE_HZ,
         )
 
         fun describe(d: UsbAudioDevice): String =

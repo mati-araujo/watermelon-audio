@@ -6,6 +6,10 @@
 # enchufada y un humano que acepte el dialogo de permiso). Lo corre una persona, o un agente con
 # un device asignado. Lo que SI entra al gate es `--self-test`, que no necesita device.
 #
+# 🔴 Para el panel USB, adb tiene que ir por WI-FI (`adb pair`/`adb connect`, ANDROID_SERIAL del
+# estilo `adb-XXXX._adb-tls-connect._tcp`): un telefono con un solo USB-C y adb por cable esta en
+# modo device y no puede ser host de la interfaz de audio.
+#
 # Que hace:
 #   1. exige ANDROID_SERIAL y lo usa en CADA llamada a adb: nunca toca otro device;
 #   2. construye e instala SOLO com.watermellonstudios.audio.harness (`install -r -g`: -g concede
@@ -51,6 +55,8 @@ verdict() {
     local log="$1" run="$2" requested="$3"
     python3 - "$log" "$run" "$requested" <<'PY'
 import sys
+
+import re
 
 log, run, requested = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -141,10 +147,13 @@ for panel in [p for p in ORDER if p in panels]:
         seen.add(step)
         if pending and step in AFTER_PERMISSION:
             add("HUMANO", panel, step, "sin permiso: " + extras(f))
-        elif f.get("medido") == "false":
-            # D11: un paso que no se pudo medir por un defecto conocido fuera del harness. Ni PASS
-            # (aunque diga ok=true) ni FAIL, y no cuenta como cobertura: se lista aparte.
+        elif f.get("medido") == "false" and panel == "usb" and re.fullmatch(r"suite-[0-9]+", step or ""):
+            # D11: una fila de la suite cuyo rate el runner no aplica. Ni PASS (aunque diga ok=true)
+            # ni FAIL, y no cuenta como cobertura: se lista aparte. SOLO filas de la suite: cualquier
+            # otro paso con medido=false es un FAIL, o un paso podria desaparecer del veredicto.
             add("NO-MEDIDO", panel, step, extras(f))
+        elif f.get("medido") == "false":
+            add("FAIL", panel, step, "medido=false fuera de la suite (D11 no lo cubre): " + extras(f))
         elif f.get("ok") == "true":
             add("PASS", panel, step, extras(f))
         else:
@@ -341,6 +350,10 @@ self_test() {
     expect "M11: fila de 48 k con ok=false" 1 "$tmp/m11.log"
     expect_line "M11: suite-1 sale FAIL" '^FAIL +usb/suite-1 ' "$tmp/m11.log"
 
+    # M12: `medido=false` fuera de una fila de la suite no puede hacer desaparecer un paso: FAIL.
+    with_usb "$tmp/m12.log" 's/step=streaming-stats ok=true/step=streaming-stats ok=false medido=false motivo=x/'
+    expect "M12: medido=false fuera de la suite" 1 "$tmp/m12.log"
+
     rm -rf "$tmp"
     if (( failures )); then
         echo "self-test: FAIL — $failures caso(s) con el veredicto equivocado" >&2
@@ -397,7 +410,11 @@ run_device() {
 
     if (( build )); then
         echo "=== build: :harness:assembleDebug ==="
-        ./gradlew :harness:assembleDebug --console=plain -q
+        # Sin -q: el WARNING de D10 (sin encoder Vorbis, el .sf3 no se empaqueta) es un logger.warn
+        # que -q esconde. Se muestra aca, antes de que el veredicto diga FAIL en sf3.
+        ./gradlew :harness:assembleDebug --console=plain > "$out/build.log" 2>&1 \
+            || { tail -20 "$out/build.log" >&2; echo "FAIL — no construye el harness" >&2; exit 2; }
+        grep -A3 'WARNING: fixture' "$out/build.log" || true
     fi
     [[ -f "$APK" ]] || { echo "FAIL — no hay APK en $APK" >&2; exit 2; }
 
@@ -422,8 +439,13 @@ run_device() {
     # Las lineas se capturan en STREAMING desde antes del am start, y no releyendo el buffer: durante
     # la espera humana y la suite USB el buffer circular de logcat rota, y releerlo perdia `inicio`.
     local raw="$out/logcat-harness-smoke-raw.txt"
-    adb_ logcat -v raw -s HARNESS-SMOKE:I > "$raw" 2>/dev/null &
-    local logcat_pid=$!
+    : > "$raw"
+    local logcat_pid=""
+    start_capture() {
+        adb_ logcat -v raw -s HARNESS-SMOKE:I >> "$raw" 2>/dev/null &
+        logcat_pid=$!
+    }
+    start_capture
     trap 'kill "$logcat_pid" 2>/dev/null || true' EXIT
     adb_ shell am force-stop "$PKG"
     adb_ shell am start -n "$ACTIVITY" \
@@ -432,6 +454,12 @@ run_device() {
 
     local log="$out/harness-smoke.log" waited=0 announced=0
     while (( waited < ceiling )); do
+        # Por Wi-Fi, un corte mata el logcat en streaming: se relanza (y lo perdido lo recupera el
+        # volcado final de abajo mientras siga en el buffer).
+        if ! kill -0 "$logcat_pid" 2>/dev/null; then
+            echo "(logcat se corto; se relanza)"
+            start_capture
+        fi
         tr -d '\r' < "$raw" | grep -F "run=$run " > "$log" || true
         if (( ! announced )) && grep -q 'step=esperando-humano' "$log"; then
             announced=1
@@ -445,6 +473,10 @@ run_device() {
     done
 
     kill "$logcat_pid" 2>/dev/null || true
+    # Un ultimo volcado del buffer, combinado con lo capturado y sin duplicados (el orden de emision
+    # se conserva: primero lo capturado en vivo).
+    { cat "$raw"; adb_ logcat -d -v raw -s HARNESS-SMOKE:I 2>/dev/null || true; } \
+        | tr -d '\r' | grep -F "run=$run " | awk '!seen[$0]++' > "$log" || true
     local pid
     pid="$(adb_ shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
     if [[ -n "$pid" ]]; then

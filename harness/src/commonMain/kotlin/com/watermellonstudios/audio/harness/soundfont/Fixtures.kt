@@ -15,6 +15,10 @@ import org.jetbrains.compose.resources.ExperimentalResourceApi
  */
 class Fixtures(private val writeFile: (name: String, bytes: ByteArray) -> String) {
 
+    /** El `motivo` del último fixture que no se pudo materializar, para que la UI diga lo mismo que el log. */
+    var lastFailure: String? = null
+        private set
+
     /**
      * El path del fixture [name] listo para cargar, o `null` (ya reportado).
      *
@@ -23,6 +27,7 @@ class Fixtures(private val writeFile: (name: String, bytes: ByteArray) -> String
      */
     @OptIn(ExperimentalResourceApi::class)
     suspend fun materialize(reporter: SmokeReporter, panel: String, name: String): String? {
+        lastFailure = null
         val manifest = try {
             FixtureManifest.parse(Res.readBytes("files/${FixtureManifest.FILE}").decodeToString())
         } catch (e: CancellationException) {
@@ -30,13 +35,13 @@ class Fixtures(private val writeFile: (name: String, bytes: ByteArray) -> String
         } catch (e: Exception) {
             reporter.report(
                 panel, "fixture", false,
-                "archivo" to name, "motivo" to "sin-manifiesto", "error" to e::class.simpleName,
+                "archivo" to name, "motivo" to "sin-manifiesto".also { lastFailure = it }, "error" to e::class.simpleName,
             )
             return null
         }
         val entry = manifest[name]
             ?: run {
-                reporter.report(panel, "fixture", false, "archivo" to name, "motivo" to "no-empaquetado")
+                reporter.report(panel, "fixture", false, "archivo" to name, "motivo" to "no-empaquetado".also { lastFailure = it })
                 return null
             }
         val bytes = try {
@@ -46,14 +51,14 @@ class Fixtures(private val writeFile: (name: String, bytes: ByteArray) -> String
         } catch (e: Exception) {
             reporter.report(
                 panel, "fixture", false,
-                "archivo" to name, "motivo" to "no-empaquetado", "error" to e::class.simpleName,
+                "archivo" to name, "motivo" to "no-empaquetado".also { lastFailure = it }, "error" to e::class.simpleName,
             )
             return null
         }
         if (bytes.size.toLong() != entry.size) {
             reporter.report(
                 panel, "fixture", false,
-                "archivo" to name, "motivo" to "fixture-viejo", "bytes" to bytes.size, "manifiesto" to entry.size,
+                "archivo" to name, "motivo" to "fixture-viejo".also { lastFailure = it }, "bytes" to bytes.size, "manifiesto" to entry.size,
             )
             return null
         }
@@ -76,7 +81,7 @@ class Fixtures(private val writeFile: (name: String, bytes: ByteArray) -> String
         } catch (e: Exception) {
             reporter.report(
                 panel, "fixture", false,
-                "archivo" to name, "motivo" to "escritura", "error" to (e.message ?: e::class.simpleName),
+                "archivo" to name, "motivo" to "escritura".also { lastFailure = it }, "error" to (e.message ?: e::class.simpleName),
             )
             return null
         }
@@ -99,6 +104,9 @@ class Fixtures(private val writeFile: (name: String, bytes: ByteArray) -> String
  * MINI-038, D10 — el manifiesto que escribe la task `generateHarnessSoundFonts`: una línea por
  * fixture empaquetado, `<nombre> <bytes> <sha256>`. El sha es el mismo que imprime la receta en el
  * log del build, así que una línea `step=fixture` se puede cruzar con el build que la produjo.
+ *
+ * Límite declarado: la app compara el TAMAÑO, no el sha (commonMain no trae SHA-256). Un fixture viejo
+ * del mismo tamaño exacto que el nuevo pasaría; el sha viaja en la línea para verlo a ojo.
  */
 object FixtureManifest {
     const val FILE = "fixtures-manifest.txt"
