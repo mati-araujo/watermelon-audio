@@ -555,7 +555,13 @@ jobs:
           echo "Paquetes del catalogo:" $PKGS
           yes | sdkmanager --licenses > /dev/null 2>&1
           sdkmanager --install $PKGS
-          sdkmanager --list_installed | grep -E '^ *(ndk|cmake);'
+          # Cada paquete pedido, con SU version, tiene que figurar instalado. La
+          # imagen del runner trae otros NDK: un grep generico no probaria nada.
+          INSTALLED="$(sdkmanager --list_installed)"
+          for p in $PKGS; do
+            printf '%s\n' "$INSTALLED" | grep -F " $p " \
+              || { echo "::error::$p no figura instalado"; exit 1; }
+          done
 
       # The Kotlin/Native toolchain is a ~1 GB download per run otherwise.
       - name: Cache Kotlin/Native toolchain
@@ -713,7 +719,13 @@ jobs:
           echo "Paquetes del catalogo:" $PKGS
           yes | sdkmanager --licenses > /dev/null 2>&1
           sdkmanager --install $PKGS
-          sdkmanager --list_installed | grep -E '^ *(ndk|cmake);'
+          # Cada paquete pedido, con SU version, tiene que figurar instalado. La
+          # imagen del runner trae otros NDK: un grep generico no probaria nada.
+          INSTALLED="$(sdkmanager --list_installed)"
+          for p in $PKGS; do
+            printf '%s\n' "$INSTALLED" | grep -F " $p " \
+              || { echo "::error::$p no figura instalado"; exit 1; }
+          done
 
       - name: Set up Gradle
         if: steps.attest.outputs.valid != 'true'
