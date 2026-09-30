@@ -175,11 +175,17 @@ class UsbHarness(context: Context) {
      * `smoke-device.sh` le manda a la app el broadcast de resultado FALSO por `am broadcast`
      * (REQ-050 S1, tarea 1.4). `step=esperando-humano` se emite recién cuando la librería ya pidió
      * el diálogo (`PERMISSION_REQUESTED`): es la señal que el script usa para mandarlo, y un falso
-     * que llega sin espera pendiente no prueba nada.
+     * que llega sin espera pendiente no prueba nada. La librería escribe ese estado justo ANTES de
+     * pedir el diálogo, no después; la vuelta de adb (leer logcat, mandar el broadcast) es de
+     * cientos de ms y tapa esa ventana, pero no es una garantía.
      *
-     * `step=permiso-falso` afirma que nada cambió: ningún `PermissionGranted` de este device llegó
-     * con `UsbManager` diciendo que no. Un falso que ABORTA la conexión (`permission=false`) se ve en
-     * `step=permiso`: el humano acepta, y el resultado sale negado.
+     * `step=permiso-falso` afirma que nada cambió, en las dos mitades de AC-050.1:
+     * - ningún `PermissionGranted` de este device llegó con `UsbManager` diciendo que no (el falso
+     *   con `permission=true` no marcó nada);
+     * - el resultado no salió `PERMISSION_DENIED` (el falso con `permission=false` no abortó). El
+     *   smoke le pide al humano ACEPTAR, así que una negación es un humano que se equivocó o un
+     *   broadcast ajeno que abortó: desde acá no se distinguen, y los dos invalidan la corrida.
+     *   Por eso sale FAIL con `motivo=negado:humano-o-broadcast-ajeno`, no HUMANO.
      *
      * Devuelve `null` si el humano no contestó dentro de [humanTimeoutMs].
      */
@@ -215,9 +221,15 @@ class UsbHarness(context: Context) {
         val result = withTimeoutOrNull(humanTimeoutMs) { pending.await() }
         if (result == null) pending.cancel()
         watcher.cancelAndJoin()
+        val deniedResult = (result as? UsbResult.Failure)?.error == UsbAudioError.PERMISSION_DENIED
         r.report(
-            PANEL, "permiso-falso", forged == 0,
+            PANEL, "permiso-falso", forged == 0 && !deniedResult,
             "granted" to grants, "granted-sin-permiso-en-usbmanager" to forged,
+            "motivo" to when {
+                forged > 0 -> "granted-con-usbmanager-diciendo-que-no"
+                deniedResult -> "negado:humano-o-broadcast-ajeno"
+                else -> null
+            },
             "resultado" to when (result) {
                 null -> "sin-respuesta-humana"
                 is UsbResult.Success -> "conectado"

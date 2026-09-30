@@ -506,7 +506,11 @@ run_device() {
     # El resultado lo escribe el script como su propio paso (origen=adb) en la captura cruda; lo
     # que cambio o no en la app lo afirma ella en `step=permiso-falso`.
     send_forged_permission() {
-        local waiting="$1" sent=0 v outp
+        local waiting="$1" sent=0 v outp late=false
+        # Si la app ya juzgo el permiso (el humano acepto antes de que este loop viera la espera),
+        # el falso llega sin espera pendiente y no prueba nada: se manda igual, pero no vale.
+        # (grep -c y no -q: con pipefail, el SIGPIPE de un -q que corta temprano tapa el match)
+        (( $(tr -d '\r' < "$raw" | grep -F "run=$run " | grep -c 'step=permiso-falso ' || true) > 0 )) && late=true
         for v in true false; do
             outp="$(adb_ shell am broadcast -a com.watermellonstudios.audio.USB_PERMISSION -p "$PKG" --ez permission "$v" 2>&1 | tr -d '\r' || true)"
             echo "$outp" >> "$out/broadcast-falso.txt"
@@ -514,8 +518,8 @@ run_device() {
         done
         local requested=false ok=false
         grep -q 'dialogo-pedido=true' <<< "$waiting" && requested=true
-        [[ "$sent" == 2 && "$requested" == true ]] && ok=true
-        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=broadcast-falso ok=$ok origen=adb enviados=$sent de=2 dialogo-pedido=$requested" >> "$raw"
+        [[ "$sent" == 2 && "$requested" == true && "$late" == false ]] && ok=true
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=broadcast-falso ok=$ok origen=adb enviados=$sent de=2 dialogo-pedido=$requested tarde=$late" >> "$raw"
         echo "=== broadcast falso: $sent de 2 despachados (dialogo pedido: $requested) — $out/broadcast-falso.txt ==="
     }
     adb_ shell am force-stop "$PKG"
