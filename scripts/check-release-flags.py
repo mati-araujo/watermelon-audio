@@ -361,6 +361,15 @@ def debug_problems(names: set[str]) -> list[str]:
             if s not in names]
 
 
+def parse_build_id(readelf_n: str) -> str | None:
+    """El NT_GNU_BUILD_ID de `llvm-readelf -n`. Sobrevive al strip: ata la copia
+    sin strip con la que se publica."""
+    ids = set(re.findall(r"Build ID:\s*([0-9a-fA-F]+)", readelf_n))
+    if len(ids) > 1:
+        raise CannotCheck(f"el .so trae {len(ids)} build-ids distintos: {sorted(ids)}")
+    return ids.pop().lower() if ids else None
+
+
 def published_problems(names: set[str]) -> list[str]:
     """El .so que se PUBLICA (el del AAR) va sin debug info: el strip lo hace
     AGP, y desde MINI-036 nadie más (se sacó -Wl,--strip-all)."""
@@ -444,6 +453,15 @@ class RealTools:
             raise CannotCheck(f"{readelf} -S falló sobre {so}: {exc}") from exc
         return section_names(out)
 
+    def build_id(self, build_dir: Path, so: Path) -> str | None:
+        readelf = self._tool(build_dir, "CMAKE_READELF")
+        try:
+            out = subprocess.run([readelf, "-n", str(so)], capture_output=True,
+                                 text=True, check=True, timeout=120).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CannotCheck(f"{readelf} -n falló sobre {so}: {exc}") from exc
+        return parse_build_id(out)
+
 
 def resolve_abi(audio: Path, abi: str) -> tuple[Path, list[tuple[Path, Path]]]:
     """Devuelve el .so empaquetado y los (obj .so, build.ninja) que lo produjeron."""
@@ -478,7 +496,8 @@ def find_aar(audio: Path) -> Path:
     aars = sorted(audio.glob(AAR_GLOB))
     if len(aars) != 1:
         raise CannotCheck(f"esperaba UN AAR de release en {AAR_GLOB}, encontré {len(aars)}: "
-                          + ", ".join(a.name for a in aars))
+                          + (", ".join(a.name for a in aars) or "ninguno")
+                          + ". Corré primero: ./gradlew :audio:assembleRelease")
     return aars[0]
 
 
@@ -502,6 +521,10 @@ def check_tree(audio: Path, tools=None) -> tuple[list[str], list[str]]:
     """(líneas de reporte, problemas). Lanza CannotCheck si no pudo chequear."""
     tools = tools or RealTools()
     report, problems = [], []
+    # Primero lo que no depende del AAR: si falta el build entero, la pista que
+    # sirve es la de resolve_abi, no "falta el AAR".
+    for abi in ABIS:
+        resolve_abi(audio, abi)
     aar = find_aar(audio)
     tmp = tempfile.TemporaryDirectory()
     try:
@@ -534,6 +557,16 @@ def _check_abis(audio: Path, tools, aar: Path, tmp: Path,
             problems += [f"[{abi}] {so.name} (merged): {p}"
                          for p in debug_problems(tools.sections(ninja.parent, so))]
             published = aar_member(aar, abi, tmp)
+            bid_so = tools.build_id(ninja.parent, so)
+            bid_pub = tools.build_id(ninja.parent, published)
+            if bid_so is None or bid_pub is None:
+                raise CannotCheck(f"[{abi}] sin .note.gnu.build-id en "
+                                  + ("el merged" if bid_so is None else "el del AAR")
+                                  + ": no puedo atar el AAR a este build.")
+            if bid_so != bid_pub:
+                raise CannotCheck(f"[{abi}] AAR de otra corrida: el build-id de {aar.name} "
+                                  f"({bid_pub}) no es el del .so revisado ({bid_so}). "
+                                  "Corré ./gradlew :audio:assembleRelease.")
             problems += [f"[{abi}] {LIB} (en {aar.name}): {p}"
                          for p in published_problems(tools.sections(ninja.parent, published))]
 
@@ -785,6 +818,17 @@ def self_test() -> int:
           {m for (_, m) in g} == {"la copia sin strip no tiene .debug_info (no simboliza)",
                                   "la copia sin strip no tiene .symtab (no simboliza)"}, f"dio {g}")
 
+    # --- el build-id que ata el AAR al build revisado (salida real de llvm-readelf -n)
+    notes = ("Displaying notes found in: .note.gnu.build-id\n"
+             "  Owner                Data size \tDescription\n"
+             "  GNU                  0x00000014\tNT_GNU_BUILD_ID (unique build ID bitstring)\n"
+             "    Build ID: 36e7ecb34748507e9e86dd28fa579455716d5614\n")
+    check("lee el build-id de llvm-readelf -n",
+          parse_build_id(notes) == "36e7ecb34748507e9e86dd28fa579455716d5614")
+    check("sin nota de build-id devuelve None", parse_build_id("no notes") is None)
+    check("dos build-ids distintos NO es un pase",
+          levanta(lambda: parse_build_id(notes + notes.replace("36e7", "aaaa")), "build-ids distintos"))
+
     # --- el .so publicado (AAR) no lleva debug info
     check("un .so publicado sin .debug_* no tiene problema",
           published_problems({".text", ".dynsym", ".dynstr"}) == [])
@@ -925,8 +969,16 @@ def self_test() -> int:
                     return self.pub.get(so.parent.name, {".text", ".dynsym"})
                 return self.secs.get(str(so), {".text", *DEBUG_SECTIONS})
 
+        def fake_build_id(build_dir: Path, so: Path) -> str | None:
+            abi = so.parent.name
+            if not str(so).startswith(str(audio)):   # extraído del AAR
+                return tools.pub_ids.get(abi, "id-" + abi)
+            return "id-" + abi
+
         tools = FakeTools()
         tools.pub = {}
+        tools.pub_ids = {}
+        tools.build_id = fake_build_id
 
         aar_path = audio / "build/outputs/aar/audio-release.aar"
 
@@ -996,6 +1048,15 @@ def self_test() -> int:
         check("un AAR sin la ABI NO es un pase",
               not ok and "[x86_64] el AAR" in probs[0], f"dio {probs}")
         write_aar()
+        tools.pub_ids["armeabi-v7a"] = "id-de-otra-corrida"
+        ok, probs = tree_ok()
+        check("un AAR de otra corrida (build-id distinto) NO es un pase",
+              not ok and probs[0].startswith("[armeabi-v7a] AAR de otra corrida"), f"dio {probs}")
+        tools.pub_ids["armeabi-v7a"] = None
+        ok, probs = tree_ok()
+        check("un .so del AAR sin build-id NO es un pase",
+              not ok and "sin .note.gnu.build-id en el del AAR" in probs[0], f"dio {probs}")
+        tools.pub_ids.clear()
         otro_aar = aar_path.with_name("audio-release-viejo.aar")
         shutil.copy(aar_path, otro_aar)
         ok, probs = tree_ok()
@@ -1003,7 +1064,19 @@ def self_test() -> int:
         otro_aar.unlink()
         aar_path.unlink()
         ok, probs = tree_ok()
-        check("sin AAR NO es un pase", not ok and "esperaba UN AAR" in probs[0], f"dio {probs}")
+        check("sin AAR NO es un pase, y dice qué correr",
+              not ok and "esperaba UN AAR" in probs[0]
+              and "Corré primero: ./gradlew :audio:assembleRelease" in probs[0], f"dio {probs}")
+        # Sin AAR y sin una ABI: la pista es la del build, no la del AAR.
+        merged_x86 = (audio / "build/intermediates/merged_native_libs/release/"
+                      "mergeReleaseNativeLibs/out/lib/x86" / LIB)
+        payload = merged_x86.read_bytes()
+        merged_x86.unlink()
+        ok, probs = tree_ok()
+        check("sin build ni AAR, gana la pista del build",
+              not ok and probs[0].startswith("[x86] no hay " + LIB)
+              and "Corré primero" in probs[0], f"dio {probs}")
+        merged_x86.write_bytes(payload)
         write_aar()
 
         # El .so no está al día con su build.ninja (se regeneró y el link falló).
