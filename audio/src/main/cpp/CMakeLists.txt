@@ -48,8 +48,21 @@ endif()
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
 
 # ========== PROFESSIONAL AUDIO OPTIMIZATION FLAGS ==========
-# Optimizaciones para release builds
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
+# Optimizaciones para release builds.
+#
+# MINI-036 — la condicion cubre RelWithDebInfo, y no es un detalle: AGP
+# construye el release nativo como RelWithDebInfo, NO como Release. Con
+# `STREQUAL "Release"` este bloque no corrio NUNCA y todas las versiones
+# publicadas salieron a -O2, sin LTO y sin las flags de audio (el .so de 2.21.0
+# es byte-identico, salvo el build-id, a un build RelWithDebInfo de v2.21.0).
+# El -O3 de abajo va despues del -O2 que AGP pone en
+# CMAKE_CXX_FLAGS_RELWITHDEBINFO, y gana el ultimo. El -g de RelWithDebInfo se
+# queda: es lo que sostiene la simbolizacion de la copia sin strip.
+#
+# Leer este archivo NO prueba que las flags se apliquen — eso fue exactamente lo
+# que fallo. Lo prueba scripts/check-release-flags.py, que lee el build.ninja
+# que produjo el .so empaquetado.
+if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo)$")
     # Base optimization level
     add_compile_options(-O3 -DNDEBUG)
 
@@ -73,11 +86,27 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_compile_options(-ffunction-sections -fdata-sections)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--gc-sections")
 
-    # Strip debug symbols for release
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--strip-all")
+    # SIN -Wl,--strip-all, a proposito (MINI-036): el strip lo hace AGP sobre
+    # el .so que empaqueta. Strippear en el link deja tambien sin .debug_* ni
+    # .symtab a la copia sin strip (merged_native_libs), que es la que simboliza
+    # un crash. Al artefacto publicado no le cambia nada.
 
     # Link Time Optimization (cross-TU inlining, better optimization)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+    # El IPO linkea con lld, explicito. CMake 3.22.1 (Compiler/Clang.cmake:83)
+    # le pone -fuse-ld=gold al IPO cuando CMAKE_ANDROID_NDK_VERSION < 22, y con
+    # el toolchain file del NDK esa variable llega VACIA: el link falla con
+    # `invalid linker name in argument '-fuse-ld=gold'`, porque el NDK r28 no
+    # trae gold.
+    set(CMAKE_C_LINK_OPTIONS_IPO "-fuse-ld=lld")
+    set(CMAKE_CXX_LINK_OPTIONS_IPO "-fuse-ld=lld")
+    # -O3 tambien en el LINK. Con ThinLTO el backend (la optimizacion y el
+    # codegen de verdad) corre en el link, y el driver le pasa a lld el nivel
+    # del -O de la LINEA DE LINK como -plugin-opt=O<n>. Esa linea lleva
+    # $LANGUAGE_COMPILE_FLAGS, o sea el -O2 de CMAKE_CXX_FLAGS_RELWITHDEBINFO,
+    # y add_compile_options no llega ahi: sin esto, el -O3 de arriba queda en
+    # el front-end y el backend corre a O2.
+    add_link_options(-O3)
 
     message(STATUS "Release build: Professional audio optimizations enabled")
 endif()

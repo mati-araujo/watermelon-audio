@@ -571,6 +571,28 @@ python3 scripts/check-jni-signatures.py     # [gate] Guardrail REQ-025. La FIRMA
                                            # No tiene baseline y no lo necesita: nace en CERO
                                            # desajustes sobre las 309.
 
+python3 scripts/check-release-flags.py     # [gate] Guardrail MINI-036. Las flags EFECTIVAS del
+                                           # .so que publica assembleRelease, en las 4 ABIs:
+                                           # -O3, FP seguras, -ftree-vectorize, -flto=thin y -g
+                                           # en cada objeto que entra al .so, con la semantica del
+                                           # driver (GANA LA ULTIMA: un -fno-lto al final anula);
+                                           # SIN -ffinite-math-only ni nada que la implique
+                                           # (-ffast-math, -ffp-model=*...); link LTO y a -O3 (el
+                                           # backend de ThinLTO corre en el link); la copia sin
+                                           # strip CON .symtab/.debug_info/.debug_line y el .so del
+                                           # AAR SIN .debug_*, leidos con readelf, no inferidos de
+                                           # las flags. Le pregunta a ninja (-n) si el .so esta al
+                                           # dia con ese build.ninja.
+                                           # Corre despues de assemble-release (como jni-symbols)
+                                           # y --self-test primero.
+                                           # 🔴 NO lee el CMakeLists, y ese es el punto: el bloque
+                                           # pedia "Release", AGP construye RelWithDebInfo, y
+                                           # todas las versiones hasta MINI-036 salieron a -O2 sin
+                                           # LTO con el CMakeLists diciendo lo contrario. Lee el
+                                           # build.ninja que produjo el .so EMPAQUETADO, atado por
+                                           # contenido: .cxx/ acumula un hash por configuracion y
+                                           # "el mas nuevo" puede ser otro.
+
 python3 scripts/check-dep-pins.py          # [gate] Guardrail REQ-047 S4. UN lugar por pin:
                                            # googletest (thirdparty/googletest.cmake), el
                                            # NDK/CMake del SDK (el catalogo), java-version, el
