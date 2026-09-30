@@ -51,3 +51,13 @@ aar/so:jni/x86_64/libwatermelon_audio.so/comment = Android (13624864, +pgo, +bol
 module:audio-android/variant:releaseRuntimeElements-published/dep:com.google.oboe:oboe = version[requires=1.10.0] excl[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common] -> version[requires=1.11.0] excl[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common]   # Oboe 1.10.0 -> 1.11.0 (S3); scope, type, optional y exclusiones sin cambio
 pom:audio-android/dep:com.google.oboe:oboe = 1.10.0 scope=runtime type=jar optional=false excl=[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common] -> 1.11.0 scope=runtime type=jar optional=false excl=[org.jetbrains.kotlin:kotlin-stdlib-common,org.jetbrains.kotlin:kotlin-test-annotations-common,org.jetbrains.kotlin:kotlin-test-common]   # Oboe 1.10.0 -> 1.11.0 (S3); scope, type, optional y exclusiones sin cambio
 aar/size = 5447939 -> 5730104   # +5,18 % (+282 165 bytes): casi todo es el libc++_shared.so de r30, que crece 13-17 % por ABI (~+650 KB sin comprimir, ~264 KB comprimido); liboboe.so crece 1-2,2 % (~13 KB) y libwatermelon_audio.so entre -5 y +9 KB sin comprimir por ABI (~5 KB); classes.jar identico. El HEAD son los bytes de ESTE publish (-Pversion=2.21.0-req047-s3): el mismo arbol publicado con otra version dio 48 bytes distintos, asi que esta linea se re-declara al publicar 2.22.0 (S3)
+
+# --- REQ-050 S1: el permiso USB sale de UsbManager (sin diferencias propias)
+# Medido publicando esta etapa como 2.21.0-req050-s1 contra 2.21.0: el mismo conjunto de clases
+# en classes.jar (el arreglo no agrega ni saca ninguna), el mismo .kotlin_module (la superficie
+# Kotlin no cambia) y el mismo AndroidManifest (RECEIVER_NOT_EXPORTED es un flag de registro en
+# runtime, no una entrada del manifest). En bytes solo se mueve el tamaño: classes.jar
+# 1326303 -> 1326155 y el AAR entero 5447939 -> 5730009 (+5,18 %), dentro de la banda +5..10 %
+# que declara S3. Con el instrumento de master, que ata aar/size a los bytes del publish de S3,
+# esa linea sale roja por 95 bytes; con el de REQ-047 S4 (#377, por bandas) el diff da VERDE.
+# Se re-verifica al mergear master despues de #377.
