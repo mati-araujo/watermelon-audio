@@ -19,6 +19,9 @@ package com.watermellonstudios.audio.harness.smoke
  * - `step=esperando-humano` es el único paso que NO es un veredicto: dice que la corrida está
  *   parada esperando un gesto humano (el diálogo de permiso USB) y lleva `accion=` con lo que hay
  *   que hacer. El script lo cuenta como `HUMANO`, no como `FAIL`.
+ * - `medido=false` (D11) marca un paso que NO se pudo medir por un defecto conocido fuera del harness
+ *   (hoy: las filas de la suite USB cuyo rate el runner no aplica). Va con `ok=false` y su `motivo`;
+ *   el script lo da como `NO-MEDIDO`, que no es PASS ni FAIL y no cuenta como cobertura.
  * - La corrida empieza con `panel=plan step=inicio` y termina con `panel=plan step=fin`. Sin `fin`
  *   el script no sabe si terminó, y lo dice.
  *
@@ -31,8 +34,11 @@ object HarnessSmoke {
     /** El paso que no es un veredicto. Ver el KDoc del objeto. */
     const val STEP_WAITING_HUMAN: String = "esperando-humano"
 
+    /** La clave de un paso no medido (D11). Ver el KDoc del objeto. */
+    const val FIELD_MEASURED: String = "medido"
+
     private val KEY = Regex("[a-z0-9-]+")
-    private val RESERVED = setOf("v", "run", "panel", "step", "ok")
+    private val RESERVED = setOf("v", "run", "panel", "step", "ok", FIELD_MEASURED)
 
     /**
      * Arma una línea. Tira [IllegalArgumentException] si una clave no es `[a-z0-9-]+` o pisa un
@@ -45,6 +51,7 @@ object HarnessSmoke {
         step: String,
         ok: Boolean,
         fields: List<Pair<String, Any?>> = emptyList(),
+        measured: Boolean = true,
     ): String {
         require(KEY.matches(panel)) { "panel invalido: '$panel'" }
         require(KEY.matches(step)) { "step invalido: '$step'" }
@@ -55,6 +62,8 @@ object HarnessSmoke {
             append(" panel=").append(panel)
             append(" step=").append(step)
             append(" ok=").append(ok)
+            // D11: la marca la pone SÓLO este parámetro; como clave de `fields` está reservada.
+            if (!measured) append(' ').append(FIELD_MEASURED).append("=false")
             for ((k, v) in fields) {
                 require(KEY.matches(k)) { "clave invalida: '$k'" }
                 require(k !in RESERVED) { "clave reservada: '$k'" }
@@ -87,6 +96,21 @@ class SmokeReporter(private val sink: SmokeSink, val run: String) {
     fun report(panel: String, step: String, ok: Boolean, vararg fields: Pair<String, Any?>): Boolean {
         sink.emit(HarnessSmoke.format(run, panel, step, ok, fields.toList()))
         return ok
+    }
+
+    /**
+     * Un paso que NO se pudo medir (D11): `ok=false medido=false motivo=<reason>`. Devuelve `false`:
+     * quien lo emite no puede contarlo como pasado.
+     */
+    fun notMeasured(panel: String, step: String, reason: String, vararg fields: Pair<String, Any?>): Boolean {
+        sink.emit(
+            HarnessSmoke.format(
+                run, panel, step, ok = false,
+                fields = listOf("motivo" to reason) + fields.toList(),
+                measured = false,
+            ),
+        )
+        return false
     }
 
     /** `step=esperando-humano`, con la acción exacta que hay que hacer. */

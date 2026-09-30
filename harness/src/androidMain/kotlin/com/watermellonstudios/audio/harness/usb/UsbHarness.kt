@@ -17,6 +17,7 @@ import com.watermellonstudios.audio.domain.usb.UsbTestResult
 import com.watermellonstudios.audio.domain.usb.UsbTestStatus
 import com.watermellonstudios.audio.domain.usb.UsbTransferStats
 import com.watermellonstudios.audio.harness.smoke.SmokeReporter
+import com.watermellonstudios.audio.harness.smoke.SuiteRowVerdict
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -191,40 +192,48 @@ class UsbHarness(context: Context) {
             uacVersion = manager.getUacVersion(),
         )
         var passed = 0
+        var measured = 0
         report.results.forEachIndexed { i, res ->
             onResult(res)
             val real = res.statsSamples.lastOrNull()?.currentSampleRateHz
-            // El PASSED de la librería no alcanza: `runPlaybackTest` también da PASSED con las stats
-            // siempre nulas o con el stream trabado (medido en la review de MINI-038). Lo que el
-            // harness afirma es que hubo TRÁFICO durante el test: muestras de stats y paquetes
-            // completados que crecen de la primera a la última.
             val first = res.statsSamples.firstOrNull()?.packetsCompleted
             val last = res.statsSamples.lastOrNull()?.packetsCompleted
-            val traffic = first != null && last != null && last > first
-            // Informativo (bifurcación abierta, ver las notas del MINI): el runner NO aplica
-            // `config.sampleRate`, así que una fila de 44100/96000 mide el stream que ya corre.
-            val rateApplied = real != null && kotlin.math.abs(real - res.config.sampleRate) <= res.config.sampleRate * 0.01f
-            val ok = res.status == UsbTestStatus.PASSED && traffic
-            if (ok) passed++
-            r.report(
-                PANEL, "suite-${i + 1}", ok,
-                "test" to res.testType, "estado" to res.status, "trafico" to traffic,
-                "muestras" to res.statsSamples.size, "rate-aplicado" to rateApplied,
+            // D11: tres veredictos. El PASSED de la librería no alcanza (también sale con las stats
+            // nulas o el stream trabado), y una fila cuyo rate el runner no aplicó no midió ese rate.
+            val verdict = suiteVerdict(res)
+            val fields = arrayOf<Pair<String, Any?>>(
+                "test" to res.testType, "estado" to res.status,
+                "trafico" to (first != null && last != null && last > first), "muestras" to res.statsSamples.size,
                 "rate-config" to res.config.sampleRate, "bits-config" to res.config.bitDepth, "rate-real" to real,
                 "paquetes" to res.totalPackets, "ok-paquetes" to res.successfulPackets,
                 "underruns" to res.underruns, "overruns" to res.overruns, "errores" to res.errors,
                 "latencia-ms" to res.avgLatencyMs, "mensaje" to res.errorMessage,
-                "motivo" to when {
-                    res.status != UsbTestStatus.PASSED -> "estado-${res.status}"
-                    !traffic -> "sin-trafico"
-                    else -> null
-                },
             )
+            val step = "suite-${i + 1}"
+            when (verdict) {
+                SuiteRowVerdict.NOT_MEASURED ->
+                    r.notMeasured(PANEL, step, "rate-no-aplicado:el-runner-ignora-config.sampleRate", *fields)
+                SuiteRowVerdict.PASS -> {
+                    measured++
+                    passed++
+                    r.report(PANEL, step, true, *fields)
+                }
+                SuiteRowVerdict.FAIL -> {
+                    measured++
+                    r.report(
+                        PANEL, step, false, *fields,
+                        "motivo" to if (res.status != UsbTestStatus.PASSED) "estado-${res.status}" else "sin-trafico",
+                    )
+                }
+            }
         }
+        // El verde de la suite lo deciden las filas MEDIDAS (D11): tiene que haber al menos una, y
+        // todas tienen que pasar. Las no medidas se listan aparte y no cuentan como cobertura.
         val expected = UsbTestPresets.STANDARD_SUITE.size
         return r.report(
-            PANEL, "suite", report.results.size == expected && passed == expected,
-            "tests" to report.results.size, "pasaron" to passed, "esperados" to expected,
+            PANEL, "suite", report.results.size == expected && measured > 0 && passed == measured,
+            "tests" to report.results.size, "medidas" to measured, "pasaron" to passed,
+            "no-medidas" to report.results.size - measured, "esperados" to expected,
         )
     }
 
@@ -276,6 +285,15 @@ class UsbHarness(context: Context) {
     companion object {
         const val PANEL = "usb"
         private const val RELEASE_DISCONNECT_MS = 1000L
+
+        /** El veredicto D11 de una fila, con los datos del resultado de la librería. */
+        fun suiteVerdict(res: UsbTestResult): SuiteRowVerdict = SuiteRowVerdict.of(
+            libraryPassed = res.status == UsbTestStatus.PASSED,
+            firstCompleted = res.statsSamples.firstOrNull()?.packetsCompleted,
+            lastCompleted = res.statsSamples.lastOrNull()?.packetsCompleted,
+            realRateHz = res.statsSamples.lastOrNull()?.currentSampleRateHz,
+            configRateHz = res.config.sampleRate,
+        )
 
         fun describe(d: UsbAudioDevice): String =
             "${d.vidPid}|${d.displayName}|UAC${d.capabilities.uacVersion}|captura=${d.capabilities.hasCapture}"

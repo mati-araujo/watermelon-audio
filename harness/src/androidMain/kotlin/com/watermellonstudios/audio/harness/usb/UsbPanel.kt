@@ -24,9 +24,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.watermellonstudios.audio.domain.usb.UsbConnectionState
 import com.watermellonstudios.audio.domain.usb.UsbTestResult
-import com.watermellonstudios.audio.domain.usb.UsbTestStatus
 import com.watermellonstudios.audio.domain.usb.UsbTransferStats
 import com.watermellonstudios.audio.harness.smoke.SmokeReporter
+import com.watermellonstudios.audio.harness.smoke.SuiteRowVerdict
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -146,11 +146,16 @@ fun UsbPanel(
                 )
             }
             results.forEachIndexed { i, res ->
-                val failed = res.status != UsbTestStatus.PASSED
+                // El mismo veredicto D11 que la línea HARNESS-SMOKE, no el `status` crudo de la librería.
+                val verdict = UsbHarness.suiteVerdict(res)
                 Text(
-                    "suite ${i + 1}: ${res.testType.displayName} @${res.config.sampleRate} → ${res.status}" +
-                        (res.errorMessage?.let { " — $it" } ?: ""),
-                    color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                    "suite ${i + 1}: ${res.testType.displayName} @${res.config.sampleRate} → " +
+                        when (verdict) {
+                            SuiteRowVerdict.PASS -> "PASS"
+                            SuiteRowVerdict.FAIL -> "FAIL (${res.status})"
+                            SuiteRowVerdict.NOT_MEASURED -> "NO-MEDIDO (el runner no aplica el rate)"
+                        } + (res.errorMessage?.let { " — $it" } ?: ""),
+                    color = if (verdict == SuiteRowVerdict.FAIL) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                 )

@@ -21,6 +21,8 @@
 #   6. lista aparte lo que requiere OIDO (ningun log dice si algo suena bien).
 #
 # Exit: 0 todo PASS · 1 algun FAIL · 3 sin FAIL pero con puntos HUMANO pendientes · 2 uso/infra.
+# Un paso NO-MEDIDO (linea con medido=false, D11) no mueve el exit: se lista aparte y no cuenta
+# como cobertura.
 #
 # El formato de las lineas vive en un solo lugar:
 #   harness/src/commonMain/kotlin/com/watermellonstudios/audio/harness/smoke/HarnessSmoke.kt
@@ -139,6 +141,10 @@ for panel in [p for p in ORDER if p in panels]:
         seen.add(step)
         if pending and step in AFTER_PERMISSION:
             add("HUMANO", panel, step, "sin permiso: " + extras(f))
+        elif f.get("medido") == "false":
+            # D11: un paso que no se pudo medir por un defecto conocido fuera del harness. Ni PASS
+            # (aunque diga ok=true) ni FAIL, y no cuenta como cobertura: se lista aparte.
+            add("NO-MEDIDO", panel, step, extras(f))
         elif f.get("ok") == "true":
             add("PASS", panel, step, extras(f))
         else:
@@ -166,10 +172,17 @@ else:
 
 width = max(len("%s/%s" % (p, s)) for _, p, s, _ in rows)
 for v, p, s, d in rows:
-    print("%-6s  %-*s  %s" % (v, width, "%s/%s" % (p, s), d))
+    if v != "NO-MEDIDO":
+        print("%-6s  %-*s  %s" % (v, width, "%s/%s" % (p, s), d))
+unmeasured = [r for r in rows if r[0] == "NO-MEDIDO"]
+if unmeasured:
+    print("\nNO-MEDIDO (no es PASS ni FAIL y NO cuenta como cobertura):")
+    for v, p, s, d in unmeasured:
+        print("%-9s  %-*s  %s" % (v, width, "%s/%s" % (p, s), d))
 
-n = {k: sum(1 for r in rows if r[0] == k) for k in ("PASS", "FAIL", "HUMANO")}
-print("\nresumen: %d PASS · %d FAIL · %d HUMANO" % (n["PASS"], n["FAIL"], n["HUMANO"]))
+n = {k: sum(1 for r in rows if r[0] == k) for k in ("PASS", "FAIL", "HUMANO", "NO-MEDIDO")}
+print("\nresumen: %d PASS · %d FAIL · %d HUMANO · %d NO-MEDIDO"
+      % (n["PASS"], n["FAIL"], n["HUMANO"], n["NO-MEDIDO"]))
 pending = [r for r in rows if r[0] == "HUMANO" and (r[1] in human_pending or r[1] == "plan")]
 sys.exit(1 if n["FAIL"] else (3 if pending else 0))
 PY
@@ -214,6 +227,27 @@ self_test() {
             printf '  MAL   %-44s exit %s, esperaba %s\n' "$name" "$got" "$want"
             sed 's/^/        /' "$tmp/out" | tail -8
             failures=$((failures + 1))
+        fi
+    }
+
+    expect_line() {  # expect_line <nombre> <regex que TIENE que aparecer> <archivo> [plan]
+        local name="$1" re="$2" file="$3" plan="${4:-todo}"
+        verdict "$file" "$run" "$plan" > "$tmp/out" 2>&1 || true
+        if grep -Eq "$re" "$tmp/out"; then
+            printf '  ok    %-44s\n' "$name"
+        else
+            printf '  MAL   %-44s falta /%s/\n' "$name" "$re"
+            failures=$((failures + 1))
+        fi
+    }
+    expect_no_line() {  # expect_no_line <nombre> <regex que NO puede aparecer> <archivo> [plan]
+        local name="$1" re="$2" file="$3" plan="${4:-todo}"
+        verdict "$file" "$run" "$plan" > "$tmp/out" 2>&1 || true
+        if grep -Eq "$re" "$tmp/out"; then
+            printf '  MAL   %-44s aparece /%s/\n' "$name" "$re"
+            failures=$((failures + 1))
+        else
+            printf '  ok    %-44s\n' "$name"
         fi
     }
 
@@ -294,12 +328,25 @@ self_test() {
     # corrio haya pasado.
     expect "M9: la app corrio menos que el plan pedido" 1 "$tmp/verde.log" todo
 
+    # D11 — M10: las filas cuyo rate el runner no aplica son NO-MEDIDO: no mueven el exit (el verde
+    # lo deciden las demas) y NUNCA salen PASS, ni siquiera con ok=true.
+    with_usb "$tmp/m10.log" 's/step=suite-2 ok=true/step=suite-2 ok=false medido=false motivo=rate-no-aplicado/; s/step=suite-3 ok=true/step=suite-3 ok=true medido=false motivo=rate-no-aplicado/'
+    expect "M10: filas no medidas, el resto sano" 0 "$tmp/m10.log"
+    expect_line "M10: suite-2 sale NO-MEDIDO" '^NO-MEDIDO +usb/suite-2 ' "$tmp/m10.log"
+    expect_line "M10: suite-3 con ok=true sale NO-MEDIDO" '^NO-MEDIDO +usb/suite-3 ' "$tmp/m10.log"
+    expect_no_line "M10: ninguna fila no medida sale PASS" '^PASS +usb/suite-[23] ' "$tmp/m10.log"
+
+    # D11 — M11: una fila de 48 k (medida) con ok=false sigue siendo FAIL.
+    with_usb "$tmp/m11.log" 's/step=suite-1 ok=true/step=suite-1 ok=false rate-config=48000 motivo=sin-trafico/'
+    expect "M11: fila de 48 k con ok=false" 1 "$tmp/m11.log"
+    expect_line "M11: suite-1 sale FAIL" '^FAIL +usb/suite-1 ' "$tmp/m11.log"
+
     rm -rf "$tmp"
     if (( failures )); then
         echo "self-test: FAIL — $failures caso(s) con el veredicto equivocado" >&2
         return 1
     fi
-    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado y otra corrida"
+    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no medido y otra corrida"
 }
 
 # ---------------------------------------------------------------------------

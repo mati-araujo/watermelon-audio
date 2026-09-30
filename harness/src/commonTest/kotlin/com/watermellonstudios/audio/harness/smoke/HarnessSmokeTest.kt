@@ -66,6 +66,20 @@ class HarnessSmokeTest {
         )
     }
 
+    /** Bug que atrapa (D11): una fila no medida emitida con `ok=true`, o sin la marca que lee el script. */
+    @Test
+    fun notMeasuredIsOkFalseWithTheMarkAndTheReason() {
+        val lines = mutableListOf<String>()
+        val returned = SmokeReporter({ lines += it }, run = "r").notMeasured("usb", "suite-3", "rate-no-aplicado", "rate-config" to 96000)
+        assertEquals(false, returned)
+        assertEquals(
+            listOf("HARNESS-SMOKE v=1 run=r panel=usb step=suite-3 ok=false medido=false motivo=rate-no-aplicado rate-config=96000"),
+            lines,
+        )
+        // Nadie puede escribir la marca a mano con otro valor.
+        assertFailsWith<IllegalArgumentException> { HarnessSmoke.format("r", "usb", "suite-1", true, listOf("medido" to true)) }
+    }
+
     /** Bug que atrapa: un reporter que emite un `ok` y le devuelve otro a quien decide el paso siguiente. */
     @Test
     fun reportReturnsTheVerdictItEmitted() {
