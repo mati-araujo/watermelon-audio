@@ -126,6 +126,8 @@ LTO_WANTED = "-flto=thin"
 
 # Lo que la copia sin strip tiene que conservar para simbolizar un crash.
 DEBUG_SECTIONS = (".symtab", ".debug_info", ".debug_line")
+# Y lo que el .so PUBLICADO no puede llevar, además de cualquier .debug_*.
+PUBLISHED_FORBIDDEN = (".symtab", ".gnu_debuglink")
 
 # El objeto por el que existe la regla de -ffinite-math-only. Si el recorrido no
 # lo ve, recorrió otra cosa.
@@ -371,12 +373,13 @@ def parse_build_id(readelf_n: str) -> str | None:
 
 
 def published_problems(names: set[str]) -> list[str]:
-    """El .so que se PUBLICA (el del AAR) va sin debug info: el strip lo hace
-    AGP, y desde MINI-036 nadie más (se sacó -Wl,--strip-all)."""
+    """El .so que se PUBLICA (el del AAR) va strippeado: sin debug info, sin la
+    tabla de símbolos estática y sin un puntero a un archivo de debug. El strip
+    lo hace AGP, y desde MINI-036 nadie más (se sacó -Wl,--strip-all)."""
     if not names:
         raise CannotCheck("readelf no listó ninguna sección: no leí el .so publicado.")
     return [f"el .so publicado lleva {s} (AGP no lo strippeó)"
-            for s in sorted(names) if s.startswith(".debug_")]
+            for s in sorted(names) if s.startswith(".debug_") or s in PUBLISHED_FORBIDDEN]
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +600,7 @@ def run_real_check() -> int:
         return 1
     print("\n\033[32mok\033[0m — las cuatro ABIs compilan con -O3, FP seguras, vectorización, "
           "LTO y -g, sin -ffinite-math-only, y el link a -O3; la copia sin strip conserva "
-          + ", ".join(DEBUG_SECTIONS) + ", y el .so del AAR no lleva .debug_*.")
+          + ", ".join(DEBUG_SECTIONS) + ", y el .so del AAR no lleva .debug_*, .symtab ni .gnu_debuglink.")
     return 0
 
 
@@ -834,6 +837,10 @@ def self_test() -> int:
           published_problems({".text", ".dynsym", ".dynstr"}) == [])
     check("un .so publicado CON .debug_info FALLA",
           any(".debug_info" in p for p in published_problems({".text", ".debug_info"})))
+    for sec in (".symtab", ".gnu_debuglink", ".debug_line"):
+        check(f"un .so publicado CON {sec} FALLA",
+              [p for p in published_problems({".text", ".dynsym", sec})]
+              == [f"el .so publicado lleva {sec} (AGP no lo strippeó)"])
     check("cero secciones del publicado NO es un pase",
           levanta(lambda: published_problems(set()), "no leí el .so publicado"))
 
