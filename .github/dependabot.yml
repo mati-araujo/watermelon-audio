@@ -4,8 +4,8 @@
 # - gradle: mensual, UN solo PR agrupado, cooldown de 14 dias (una version recien
 #   salida no se propone hasta que tenga dos semanas), y SIN majors de AGP, Kotlin
 #   ni Gradle: esos cambios son un REQ, como REQ-047, no un bump.
-# - github-actions: mensual y agrupado. Las actions van fijadas por SHA con el tag
-#   en comentario; Dependabot actualiza los dos.
+# - github-actions: mensual, agrupado y con el mismo cooldown de 14 dias. Las
+#   actions van fijadas por SHA con el tag en comentario; Dependabot actualiza los dos.
 #
 # Lo que Dependabot NO ve (NDK, CMake del SDK, googletest, libusb, TinySoundFont,
 # stb_vorbis, TinyMidiLoader, Xcode) lo cubre el inventario de
@@ -50,6 +50,10 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
+    # REQ-047 S4, 4.13 (security-auditor): una action recien publicada no se propone
+    # hasta que tenga dos semanas, igual que gradle.
+    cooldown:
+      default-days: 14
     groups:
       github-actions:
         patterns:

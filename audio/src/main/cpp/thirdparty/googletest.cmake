@@ -11,6 +11,10 @@
 #   commit   063de7e9578f82b369302001269680b4b1553359  (el tag v1.18.0, liviano:
 #            apunta al commit, medido con `gh api repos/google/googletest/git/ref/tags/v1.18.0`)
 #
+# Se fija por el SHA y no por el tag (REQ-047 S4, 4.13, del security-auditor): un
+# tag se puede mover, un commit no. El tag queda en el comentario de la linea, igual
+# que las actions. Un bump cambia las dos cosas, verificadas con `gh api`.
+#
 # Un bump de googletest se verifica igual que el de REQ-047 S4 (AC-047.12): el
 # conjunto de NOMBRES de `ctest -N` antes y despues tiene que ser identico. Un test
 # que deja de listarse es un verde con menos tests, y nada mas lo ve.
@@ -24,12 +28,10 @@
 
 include_guard(GLOBAL)
 
-set(WMA_GOOGLETEST_VERSION "1.18.0")
-
 include(FetchContent)
 FetchContent_Declare(googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v${WMA_GOOGLETEST_VERSION}
+    GIT_TAG 063de7e9578f82b369302001269680b4b1553359  # v1.18.0
 )
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)

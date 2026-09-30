@@ -70,6 +70,13 @@ concurrency:
   group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
+# El GITHUB_TOKEN de este workflow sólo LEE (REQ-047 S4, 4.13, del security-auditor).
+# Sin este bloque dependia del default del repo. Ningun job escribe: el cache de
+# actions/cache y de setup-gradle no usa este token. check-dep-pins.py exige que todo
+# workflow declare `permissions:` y que ci.yml no pida escritura.
+permissions:
+  contents: read
+
 # Las actions van fijadas por SHA COMPLETO, con el tag en comentario (REQ-047 S4):
 # un tag se puede mover, un SHA no. Cada SHA se verifico contra su tag con
 # `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (desreferenciando el tag

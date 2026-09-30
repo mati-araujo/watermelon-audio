@@ -62,7 +62,7 @@ son nuestros (como se compila / extensiones), no parte de lo vendorizado.
 
 Lo baja CMake con `FetchContent` para la suite de host. Version **v1.18.0**, commit
 `063de7e9578f82b369302001269680b4b1553359` (2026-08-10; `gh api repos/google/googletest/git/ref/tags/v1.18.0 --jq .object`,
-el tag es lightweight: `type` es `commit`). El pin vive en un solo lugar, `thirdparty/googletest.cmake`, y
+el tag es lightweight: `type` es `commit`). El pin vive en un solo lugar, `thirdparty/googletest.cmake`, fijado por ese SHA (`GIT_TAG <sha>  # v1.18.0`), y
 `scripts/check-dep-pins.py` falla si aparece otro. Un bump se verifica con el diff de nombres de `ctest -N`
 antes y despues (tiene que dar vacio: REQ-047 S4 lo midio con 1465 nombres, 1.15.2 -> 1.18.0).
 Solo corre en tests, no entra al artefacto.

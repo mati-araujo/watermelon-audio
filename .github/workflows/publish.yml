@@ -54,7 +54,12 @@ jobs:
     runs-on: macos-latest
 
     steps:
+      # Sin credenciales persistidas (REQ-047 S4, 4.13, del security-auditor): este job
+      # tiene `packages: write`, y ningun paso usa git autenticado. El token lo reciben
+      # por env sólo la espera del CI (`gh api`) y el publish de Gradle.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # La garantia que venia del job `publish` de release-please.yml. Se saltea
       # solo si quien dispara lo pidio: el default es esperar.
