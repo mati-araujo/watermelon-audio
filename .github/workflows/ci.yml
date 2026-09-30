@@ -421,7 +421,7 @@ jobs:
 
       # La imagen normalmente trae los dos; se instala solo lo que falte, para que
       # un cambio de imagen no rompa el job y una corrida normal cueste ~0s.
-      # Necesita un cmake de sistema: el "cmake;3.22.1" del SDK de Android no esta
+      # Necesita un cmake de sistema: el "cmake;<version>" del SDK de Android (catalogo) no esta
       # en PATH y es para AGP.
       - name: Install C++ build tools
         if: steps.attest.outputs.valid != 'true'
@@ -491,7 +491,7 @@ jobs:
       # Sigue haciendo falta para build-ios.sh, que es el primer paso pesado del
       # job ahora que la suite se mudo. La imagen normalmente trae los dos; se
       # instala solo lo que falte. Necesita un cmake de sistema: el
-      # "cmake;3.22.1" del SDK de Android no esta en PATH y es para AGP.
+      # "cmake;<version>" del SDK de Android (catalogo) no esta en PATH y es para AGP.
       - name: Install C++ build tools
         if: steps.attest.outputs.valid != 'true'
         run: |
@@ -549,10 +549,13 @@ jobs:
       - name: Install NDK and CMake
         if: steps.attest.outputs.valid != 'true'
         run: |
+          # Las versiones salen del catalogo (REQ-047 S3): una sola fuente para el
+          # build (build-logic) y para lo que se instala aca.
+          PKGS="$(python3 scripts/android-sdk-packages.py)"
+          echo "Paquetes del catalogo:" $PKGS
           yes | sdkmanager --licenses > /dev/null 2>&1
-          sdkmanager --install \
-            "ndk;28.2.13676358" \
-            "cmake;3.22.1"
+          sdkmanager --install $PKGS
+          sdkmanager --list_installed | grep -E '^ *(ndk|cmake);'
 
       # The Kotlin/Native toolchain is a ~1 GB download per run otherwise.
       - name: Cache Kotlin/Native toolchain
@@ -704,10 +707,13 @@ jobs:
       - name: Install NDK and CMake
         if: steps.attest.outputs.valid != 'true'
         run: |
+          # Las versiones salen del catalogo (REQ-047 S3): una sola fuente para el
+          # build (build-logic) y para lo que se instala aca.
+          PKGS="$(python3 scripts/android-sdk-packages.py)"
+          echo "Paquetes del catalogo:" $PKGS
           yes | sdkmanager --licenses > /dev/null 2>&1
-          sdkmanager --install \
-            "ndk;28.2.13676358" \
-            "cmake;3.22.1"
+          sdkmanager --install $PKGS
+          sdkmanager --list_installed | grep -E '^ *(ndk|cmake);'
 
       - name: Set up Gradle
         if: steps.attest.outputs.valid != 'true'

@@ -10,7 +10,7 @@
     "  Kotlin y AGP        -> gradle/libs.versions.toml",
     "  Gradle              -> gradle/wrapper/gradle-wrapper.properties",
     "  JVM del daemon      -> gradle/gradle-daemon-jvm.properties",
-    "  NDK y CMake de AGP  -> .github/workflows/ci.yml",
+    "  NDK y CMake de AGP  -> gradle/libs.versions.toml (los workflows lo leen de ahi)",
     "",
     "Bumpear este archivo cambia el digest y fuerza UNA corrida completa en CI. Eso es",
     "el comportamiento correcto: un cambio de toolchain es una decision, no una deriva.",
