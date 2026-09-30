@@ -22,7 +22,7 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
-The first build downloads Google Test 1.15.2 via `FetchContent`. Subsequent
+The first build downloads Google Test (pinned once, in `thirdparty/googletest.cmake`) via `FetchContent`. Subsequent
 builds reuse the cached copy in `build/_deps/`.
 
 ## What the tests do NOT cover
