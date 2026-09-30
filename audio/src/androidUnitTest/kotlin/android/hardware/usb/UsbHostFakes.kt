@@ -1,0 +1,74 @@
+package android.hardware.usb
+
+import android.app.PendingIntent
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * Los dobles de `UsbManager` y `UsbDevice` para los tests de host del camino USB (REQ-050 S1).
+ *
+ * ## Por qué viven en `android.hardware.usb`
+ *
+ * El repo no usa Robolectric ni una librería de mocks, y los dos tipos del SDK tienen el
+ * constructor **package-private**: desde otro paquete no se pueden instanciar ni heredar. En la
+ * JVM de `testDebugUnitTest` el `android.jar` "mockable" y estas clases los carga el mismo
+ * classloader, así que comparten paquete de runtime y el constructor es accesible.
+ *
+ * La alternativa era abrir una costura en producción (una interfaz sobre `UsbManager`) sólo para
+ * poder probar: más superficie en una clase de 1700 líneas que S2 también toca. Esto no cambia
+ * una línea de `androidMain`.
+ *
+ * 🔴 Sólo sustituye lo que el camino del permiso lee. Lo demás de la clase base devuelve el valor
+ * por defecto del jar mockable (`isReturnDefaultValues = true`), no lo que haría un device.
+ */
+class FakeUsbManager : UsbManager() {
+
+    private val devices = HashMap<String, UsbDevice>()
+
+    /** Lo que `UsbManager.hasPermission` contesta: la verdad del sistema, no la del intent. */
+    val permissionGranted = AtomicBoolean(false)
+
+    /** Se completa cuando la librería pidió el diálogo, o sea cuando ya hay una espera pendiente. */
+    val permissionRequested = CompletableFuture<UsbDevice>()
+
+    /** Cuántas veces se intentó abrir el device: sólo pasa si el permiso se dio por bueno. */
+    val openDeviceCalls = AtomicInteger(0)
+
+    fun attach(device: UsbDevice) {
+        devices[device.deviceName] = device
+    }
+
+    override fun getDeviceList(): HashMap<String, UsbDevice> = HashMap(devices)
+
+    override fun hasPermission(device: UsbDevice?): Boolean = permissionGranted.get()
+
+    override fun requestPermission(device: UsbDevice?, pi: PendingIntent?) {
+        permissionRequested.complete(device)
+    }
+
+    /**
+     * Devuelve `null`: una conexión de verdad necesita un file descriptor de usbfs que el host no
+     * tiene. Que se haya LLAMADO es la observación: la librería ya dio el permiso por bueno.
+     */
+    override fun openDevice(device: UsbDevice?): UsbDeviceConnection? {
+        openDeviceCalls.incrementAndGet()
+        return null
+    }
+}
+
+class FakeUsbDevice(
+    private val id: Int,
+    private val vid: Int,
+    private val pid: Int,
+) : UsbDevice() {
+    override fun getDeviceId(): Int = id
+    override fun getVendorId(): Int = vid
+    override fun getProductId(): Int = pid
+    override fun getDeviceName(): String = "/dev/bus/usb/001/%03d".format(id)
+    override fun getProductName(): String = "Fake DAC $id"
+    override fun getManufacturerName(): String = "Fake"
+    override fun getSerialNumber(): String? = null
+    override fun getDeviceClass(): Int = 1 // USB_CLASS_AUDIO
+    override fun getInterfaceCount(): Int = 0
+}
