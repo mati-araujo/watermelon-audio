@@ -275,7 +275,13 @@ class UsbPermissionResultTest {
             usb.attach(device)
             // Sin auto-connect: el único `connectDevice` es el del test.
             manager.setAutoConnectEnabled(false)
-            scope.launch(start = CoroutineStart.UNDISPATCHED) { manager.deviceEvents.collect { events += it } }
+            // Unconfined: el colector corre DENTRO del `emit` de la librería, así que cada evento
+            // está en `events` antes de que `connectDevice` siga y devuelva. Con un dispatcher
+            // propio, "falta PermissionGranted" podía salir rojo con el código bien, sólo porque
+            // el worker todavía no lo había recolectado (y una ausencia pasaba sin haber mirado).
+            scope.launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) {
+                manager.deviceEvents.collect { events += it }
+            }
             manager.startMonitoring()
             receiver = assertNotNull(context.registrations.singleOrNull()?.receiver, "startMonitoring no registró el receiver")
         }
