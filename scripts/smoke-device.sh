@@ -66,7 +66,7 @@ EXPECTED = {
     "captura": ["start", "nivel", "stop"],
     "sf2": ["fixture", "carga", "preset", "nota", "descarga", "no-soundfont"],
     "sf3": ["fixture", "carga", "preset", "nota", "descarga"],
-    "usb": ["motor-parado", "dispositivos", "permiso", "conectar", "capacidades", "descriptores", "backend",
+    "usb": ["motor-parado", "dispositivos", "motor-callback", "permiso", "conectar", "capacidades", "descriptores", "backend",
             "streaming-start", "streaming-stats", "suite", "streaming-stop",
             "backend-restaurado", "desconectar"],
 }
@@ -291,6 +291,7 @@ self_test() {
         cat "$tmp/verde.log" | grep -v 'panel=plan step=fin '
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-parado ok=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=dispositivos ok=true cantidad=1"
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-callback ok=true inicializado=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=esperando-humano ok=false accion=aceptar_el_dialogo"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=conectar ok=false motivo=sin-respuesta-humana"
         echo "HARNESS-SMOKE v=1 run=$run panel=plan step=fin ok=false fallidos=usb motor-detenido=true"
@@ -311,6 +312,7 @@ self_test() {
         local s
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-parado ok=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=dispositivos ok=true cantidad=1"
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-callback ok=true inicializado=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=esperando-humano ok=false accion=aceptar_el_dialogo"
         for s in permiso conectar capacidades descriptores backend streaming-start streaming-stats \
                  suite-1 suite-2 suite-3 suite streaming-stop backend-restaurado desconectar; do
@@ -349,6 +351,26 @@ self_test() {
     with_usb "$tmp/m11.log" 's/step=suite-1 ok=true/step=suite-1 ok=false rate-config=48000 motivo=sin-trafico/'
     expect "M11: fila de 48 k con ok=false" 1 "$tmp/m11.log"
     expect_line "M11: suite-1 sale FAIL" '^FAIL +usb/suite-1 ' "$tmp/m11.log"
+
+    # M13 (g42, 30/09): streaming-start FALLA. Rojo, y por los pasos correctos, en las dos formas:
+    # (a) la vieja, sin streaming-stats (FALTA), y (b) la actual, con streaming-stats ok=false
+    # motivo=sin-streaming. Ningun otro paso USB puede salir FAIL por eso.
+    with_usb "$tmp/m13a.log" '/step=streaming-stats /d; s/step=streaming-start ok=true/step=streaming-start ok=false motivo=motor-sin-callback/'
+    expect "M13a: streaming-start FAIL sin streaming-stats" 1 "$tmp/m13a.log"
+    expect_line "M13a: streaming-start sale FAIL" '^FAIL +usb/streaming-start +motivo=motor-sin-callback' "$tmp/m13a.log"
+    expect_line "M13a: streaming-stats sale FALTA" '^FAIL +usb/streaming-stats +FALTA' "$tmp/m13a.log"
+    with_usb "$tmp/m13b.log" 's/step=streaming-start ok=true/step=streaming-start ok=false motivo=motor-sin-callback/; s/step=streaming-stats ok=true/step=streaming-stats ok=false motivo=sin-streaming/'
+    expect "M13b: streaming-start y streaming-stats FAIL" 1 "$tmp/m13b.log"
+    expect_line "M13b: streaming-stats sale FAIL sin-streaming" '^FAIL +usb/streaming-stats +motivo=sin-streaming' "$tmp/m13b.log"
+    for m in m13a m13b; do
+        expect_no_line "$m: ningun otro paso usb sale FAIL" '^FAIL +usb/(dispositivos|motor-callback|permiso|conectar|capacidades|descriptores|backend|suite|streaming-stop|desconectar) ' "$tmp/$m.log"
+    done
+
+    # M14: si falta motor-callback (el motor antes del device), es FAIL por ESE paso. Mata el
+    # mutante que lo saca de EXPECTED.
+    with_usb "$tmp/m14.log" '/step=motor-callback /d'
+    expect "M14: falta usb/motor-callback" 1 "$tmp/m14.log"
+    expect_line "M14: motor-callback sale FALTA" '^FAIL +usb/motor-callback +FALTA' "$tmp/m14.log"
 
     # M12: `medido=false` fuera de una fila de la suite no puede hacer desaparecer un paso: FAIL.
     with_usb "$tmp/m12.log" 's/step=streaming-stats ok=true/step=streaming-stats ok=false medido=false motivo=x/'
