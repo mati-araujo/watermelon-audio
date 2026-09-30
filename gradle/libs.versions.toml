@@ -1,6 +1,6 @@
 [versions]
 # SDK
-compileSdk = "36"
+compileSdk = "37"
 minSdk = "29"
 
 # compileSdk propio de :harness (WA-5.5). Compose Multiplatform arrastra
@@ -9,10 +9,15 @@ minSdk = "29"
 # puede arrastrar la configuracion de lo que se publica, que es el punto entero
 # de tenerlo en un modulo aparte. Subir el de :audio es una decision de la
 # libreria, a tomar por sus propios motivos.
+#
+# REQ-047 S2 la tomo: core-ktx 1.19 exige compilar contra 37, asi que hoy los dos
+# valen lo mismo. Se mantienen SEPARADOS a proposito: que coincidan es una
+# casualidad de hoy, y el motivo de arriba (el harness no arrastra la
+# configuracion de lo que se publica) sigue valiendo.
 harnessCompileSdk = "37"
 
 # Build Tools
-agp = "9.3.2"
+agp = "9.4.1"
 kotlin = "2.4.20"
 cmake = "3.22.1"
 ndk = "28.2.13676358"
@@ -20,7 +25,7 @@ ndk = "28.2.13676358"
 # Dependencies
 kotlinxCoroutines = "1.11.0"
 oboe = "1.10.0"
-coreKtx = "1.18.0"
+coreKtx = "1.19.1"
 lifecycleRuntimeKtx = "2.11.0"
 datastore = "1.2.1"
 

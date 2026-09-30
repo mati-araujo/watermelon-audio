@@ -161,7 +161,7 @@ afirmado y no vigilado haría leer todo este archivo como verificado cuando sól
 | `analysis-files` | 19 | fuentes .h/.cpp en cpp/analysis/ (sin tests/) |
 | `callers-baseline` | 1 callback-externo / 15 deuda / 1 entrada / 63 sonda-de-tests | reparto del baseline de llamadores |
 | `ver-kotlin` | 2.4.20 | version de Kotlin |
-| `ver-agp` | 9.3.2 | version de AGP |
+| `ver-agp` | 9.4.1 | version de AGP |
 <!-- END conteos-medidos -->
 
 ---
@@ -176,7 +176,7 @@ afirmado y no vigilado haría leer todo este archivo como verificado cuando sól
 | C++ | C++20   |
 | CMake | 3.22.1  |
 | Min SDK | 29      |
-| Compile SDK | 36      |
+| Compile SDK | 37      |
 | kotlinx-coroutines | 1.11.0  |
 | TinySoundFont | 0.9     |
 | iOS deployment target | 15.0    |
