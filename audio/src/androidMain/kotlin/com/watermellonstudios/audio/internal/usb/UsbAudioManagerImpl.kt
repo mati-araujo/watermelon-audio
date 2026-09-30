@@ -825,7 +825,10 @@ internal class UsbAudioManagerImpl(
         // entrega un PendingIntent NUESTRO (setPackage, más abajo), o sea con nuestro uid, y
         // ATTACHED/DETACHED son broadcasts protegidos del sistema. En API < 33 ContextCompat lo
         // protege con el permiso de firma <paquete>.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION.
-        // El comentario anterior afirmaba lo contrario sin medirlo; lo mide REQ-050 S1 en el g42.
+        // El comentario anterior afirmaba lo contrario sin medirlo. Medido en el g42 (API 31, camino
+        // del permiso de firma) con la CM720, REQ-050 S1: ATTACHED/DETACHED y el resultado del
+        // diálogo llegan; el `am broadcast` del shell sale con "Permission Denial ... requires
+        // <paquete>.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" y el receiver no lo ve.
         ContextCompat.registerReceiver(context, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         Log.i(TAG, "BroadcastReceiver registered RECEIVER_NOT_EXPORTED")
 
