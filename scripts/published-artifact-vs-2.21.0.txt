@@ -62,6 +62,6 @@ aar/size = referencia -> crece-5-10%   # S3 cae en la banda +5..10 %: +5,18 % en
 # Medido publicando esta etapa como 2.21.0-req050-s1 contra 2.21.0: el mismo conjunto de clases
 # en classes.jar (el arreglo no agrega ni saca ninguna), el mismo .kotlin_module (la superficie
 # Kotlin no cambia) y el mismo AndroidManifest (RECEIVER_NOT_EXPORTED es un flag de registro en
-# runtime, no una entrada del manifest). En bytes solo se mueve el tamaño: classes.jar
-# 1326303 -> 1326155 y el AAR entero 5447939 -> 5730009 (+5,18 %), dentro de la banda +5..10 %
-# que declara S3 arriba. Nada que declarar.
+# runtime, no una entrada del manifest). En bytes solo se mueve el tamaño: classes.jar -0,01 % y
+# el AAR entero +5,18 % (5447939 -> 5729950 en el publish tras mergear #377; los bytes cambian con
+# cada publish), dentro de la banda +5..10 % que declara S3 arriba. Nada que declarar: VERDE.
