@@ -81,6 +81,9 @@ else:
     wanted = [p for p in ORDER if p in ids]
     if any(x not in ORDER for x in ids):
         wanted = None
+# Pasos que se piden SOLO si hubo dialogo de permiso (REQ-050 S1): el broadcast falso que manda el
+# script mientras el dialogo esta pendiente, y el juicio de la app sobre lo que paso.
+WITH_DIALOG = {"usb": ["broadcast-falso", "permiso-falso"]}
 # Pasos del panel USB que dependen de que el humano haya dado el permiso.
 AFTER_PERMISSION = EXPECTED["usb"][EXPECTED["usb"].index("permiso"):]
 HUMAN = "esperando-humano"
@@ -164,6 +167,13 @@ for panel in [p for p in ORDER if p in panels]:
                 add("HUMANO", panel, step, "no corrio: espera el permiso USB")
             else:
                 add("FAIL", panel, step, "FALTA: el panel no emitio este paso")
+    # REQ-050 S1: con el dialogo pendiente, el script le manda a la app el broadcast de resultado
+    # FALSO (broadcast-falso, lo escribe el script) y la app afirma que nada cambio (permiso-falso).
+    # Sin dialogo (permiso ya concedido) no hay espera que falsear y no se piden.
+    if waits:
+        for step in WITH_DIALOG.get(panel, []):
+            if step not in seen:
+                add("FAIL", panel, step, "FALTA: con dialogo de permiso este paso es obligatorio (REQ-050 S1)")
 
 if not fin:
     add("FAIL", "plan", "fin", "FALTA: la corrida no termino (o no llego al techo de espera)")
@@ -293,6 +303,8 @@ self_test() {
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=dispositivos ok=true cantidad=1"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-callback ok=true inicializado=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=esperando-humano ok=false accion=aceptar_el_dialogo"
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=broadcast-falso ok=true origen=adb enviados=2"
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=permiso-falso ok=true resultado=sin-respuesta-humana"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=conectar ok=false motivo=sin-respuesta-humana"
         echo "HARNESS-SMOKE v=1 run=$run panel=plan step=fin ok=false fallidos=usb motor-detenido=true"
     } | sed -E "s/(panel=plan step=inicio ok=true plan=)[^ ]*/\1salida,captura,sf2,sf3,usb/" > "$tmp/m4.log"
@@ -314,6 +326,8 @@ self_test() {
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=dispositivos ok=true cantidad=1"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-callback ok=true inicializado=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=esperando-humano ok=false accion=aceptar_el_dialogo"
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=broadcast-falso ok=true origen=adb enviados=2"
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=permiso-falso ok=true granted=1 granted-sin-permiso-en-usbmanager=0"
         for s in permiso conectar capacidades descriptores backend streaming-start streaming-stats \
                  suite-1 suite-2 suite-3 suite streaming-stop backend-restaurado desconectar; do
             echo "HARNESS-SMOKE v=1 run=$run panel=usb step=$s ok=true"
@@ -375,6 +389,20 @@ self_test() {
     # M12: `medido=false` fuera de una fila de la suite no puede hacer desaparecer un paso: FAIL.
     with_usb "$tmp/m12.log" 's/step=streaming-stats ok=true/step=streaming-stats ok=false medido=false motivo=x/'
     expect "M12: medido=false fuera de la suite" 1 "$tmp/m12.log"
+
+    # REQ-050 S1 — M15/M16/M17: con dialogo, el broadcast falso y su juicio son obligatorios; un
+    # grant falso es FAIL; y sin dialogo (permiso ya concedido, el log grabado) no se piden.
+    with_usb "$tmp/m15.log" '/step=broadcast-falso /d'
+    expect "M15: con dialogo y sin broadcast-falso" 1 "$tmp/m15.log"
+    expect_line "M15: broadcast-falso sale FALTA" '^FAIL +usb/broadcast-falso +FALTA' "$tmp/m15.log"
+    with_usb "$tmp/m15b.log" '/step=permiso-falso /d'
+    expect_line "M15b: permiso-falso sale FALTA" '^FAIL +usb/permiso-falso +FALTA' "$tmp/m15b.log"
+    with_usb "$tmp/m16.log" 's/step=permiso-falso ok=true granted=1 granted-sin-permiso-en-usbmanager=0/step=permiso-falso ok=false granted=1 granted-sin-permiso-en-usbmanager=1/'
+    expect "M16: un grant con UsbManager diciendo que no" 1 "$tmp/m16.log"
+    expect_line "M16: permiso-falso sale FAIL" '^FAIL +usb/permiso-falso ' "$tmp/m16.log"
+    with_usb "$tmp/m16b.log" 's/step=broadcast-falso ok=true/step=broadcast-falso ok=false/'
+    expect "M16b: el broadcast falso no se despacho" 1 "$tmp/m16b.log"
+    expect_no_line "M17: sin dialogo no se piden los pasos del falso" '^FAIL +usb/(broadcast|permiso)-falso ' "$SELFTEST_LOG"
 
     rm -rf "$tmp"
     if (( failures )); then
@@ -469,6 +497,27 @@ run_device() {
     }
     start_capture
     trap 'kill "$logcat_pid" 2>/dev/null || true' EXIT
+
+    # REQ-050 S1 (1.4): con el dialogo de permiso PENDIENTE, lo que haria otra app instalada —
+    # mandarle a la libreria el resultado del permiso con el extra que quiera (MINI-040)—. Primero
+    # `true` (marcaria el device como confiable) y despues `false` (abortaria la conexion). Se manda
+    # ANTES de avisarle al humano, asi el falso llega primero. `am broadcast` vuelve cuando el
+    # broadcast termino de despacharse: no hace falta esperar un tiempo.
+    # El resultado lo escribe el script como su propio paso (origen=adb) en la captura cruda; lo
+    # que cambio o no en la app lo afirma ella en `step=permiso-falso`.
+    send_forged_permission() {
+        local waiting="$1" sent=0 v outp
+        for v in true false; do
+            outp="$(adb_ shell am broadcast -a com.watermellonstudios.audio.USB_PERMISSION -p "$PKG" --ez permission "$v" 2>&1 | tr -d '\r' || true)"
+            echo "$outp" >> "$out/broadcast-falso.txt"
+            grep -q 'Broadcast completed' <<< "$outp" && sent=$((sent + 1))
+        done
+        local requested=false ok=false
+        grep -q 'dialogo-pedido=true' <<< "$waiting" && requested=true
+        [[ "$sent" == 2 && "$requested" == true ]] && ok=true
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=broadcast-falso ok=$ok origen=adb enviados=$sent de=2 dialogo-pedido=$requested" >> "$raw"
+        echo "=== broadcast falso: $sent de 2 despachados (dialogo pedido: $requested) — $out/broadcast-falso.txt ==="
+    }
     adb_ shell am force-stop "$PKG"
     adb_ shell am start -n "$ACTIVITY" \
         --es harness.smoke "$plan" --es harness.smoke.run "$run" \
@@ -485,6 +534,7 @@ run_device() {
         tr -d '\r' < "$raw" | grep -F "run=$run " > "$log" || true
         if (( ! announced )) && grep -q 'step=esperando-humano' "$log"; then
             announced=1
+            send_forged_permission "$(grep -m1 'step=esperando-humano' "$log")"
             echo ">>> HUMANO: $(grep -m1 'step=esperando-humano' "$log" | sed -E 's/.*accion=([^ ]+).*/\1/' | tr '_' ' ')"
         fi
         if grep -q 'panel=plan step=fin ' "$log"; then
@@ -504,6 +554,9 @@ run_device() {
     if [[ -n "$pid" ]]; then
         adb_ logcat -d --pid="$pid" > "$out/logcat-app.txt" 2>/dev/null || true
         grep -E 'LibusbBackend|UsbAudio|libusb' "$out/logcat-app.txt" > "$out/logcat-usb.txt" || true
+        # Evidencia (no veredicto) para D4: cuantas veces el receiver vio el resultado del permiso.
+        # Con RECEIVER_NOT_EXPORTED los dos falsos no llegan: se espera 1, el del dialogo.
+        echo "=== receiver USB_PERMISSION: $(grep -c 'ACTION_USB_PERMISSION received' "$out/logcat-app.txt" || true) recepciones ==="
     fi
     echo "=== registro: $out ==="
     echo
