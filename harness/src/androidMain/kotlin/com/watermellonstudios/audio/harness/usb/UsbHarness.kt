@@ -314,6 +314,79 @@ class UsbHarness(private val context: Context) {
         )
     }
 
+    /**
+     * REQ-050 S2 (AC-050.5, D7) — con el stream VIVO, dos pedidos de conexión que antes lo
+     * destruían (MINI-041 #3: el último `connectDevice` re-inicializaba el backend libusb con otro fd):
+     *
+     * - `step=reconectar-mismo`: `connectDevice` al MISMO device tiene que dar éxito sin tocar nada:
+     *   el mismo fd, el estado sigue en STREAMING y los paquetes completados SIGUEN creciendo desde
+     *   donde estaban. Un re-init crea un backend nuevo y sus contadores arrancan de cero, así que
+     *   "siguen creciendo" no lo puede imitar. Se espera POR CONDICIÓN, con techo.
+     * - `step=conectar-otro`: `connectDevice` a un deviceId que no existe tiene que dar
+     *   `DEVICE_BUSY` (el chequeo de ocupado va antes de buscar el device), y el stream sigue.
+     *
+     * Los dos pasos se emiten SIEMPRE: sin streaming, con `ok=false motivo=sin-streaming`.
+     */
+    suspend fun connectAgainWhileStreaming(r: SmokeReporter, device: UsbAudioDevice, streaming: Boolean): Boolean {
+        if (!streaming) {
+            r.report(PANEL, "reconectar-mismo", false, "motivo" to "sin-streaming", "estado" to manager.connectionState.value)
+            r.report(PANEL, "conectar-otro", false, "motivo" to "sin-streaming", "estado" to manager.connectionState.value)
+            return false
+        }
+        val fdBefore = manager.getFileDescriptor()
+        val before = manager.getTransferStats()?.packetsCompleted ?: -1L
+        val same = manager.connectDevice(device)
+        val fdAfter = manager.getFileDescriptor()
+        val stateAfter = manager.connectionState.value
+        val advanced = awaitPacketsAbove(before, RECONNECT_TRAFFIC_MS)
+        val sameOk = r.report(
+            PANEL, "reconectar-mismo",
+            same is UsbResult.Success && fdAfter == fdBefore && stateAfter == UsbConnectionState.STREAMING &&
+                before >= 0 && advanced != null,
+            "resultado" to (if (same is UsbResult.Success) "exito" else (same as UsbResult.Failure).error),
+            "fd-antes" to fdBefore, "fd-despues" to fdAfter, "estado" to stateAfter,
+            "completados-antes" to before, "completados-despues" to advanced,
+            "motivo" to when {
+                same !is UsbResult.Success -> "el-mismo-device-no-dio-exito"
+                fdAfter != fdBefore -> "cambio-el-fd:re-init"
+                stateAfter != UsbConnectionState.STREAMING -> "el-stream-no-sigue"
+                before < 0 -> "sin-stats-antes"
+                advanced == null -> "los-paquetes-no-siguen-creciendo"
+                else -> null
+            },
+        )
+
+        val other = device.copy(deviceId = "${device.deviceId}-falso", deviceName = "dispositivo-falso")
+        val otherResult = manager.connectDevice(other)
+        val stateAfterOther = manager.connectionState.value
+        val otherOk = r.report(
+            PANEL, "conectar-otro",
+            (otherResult as? UsbResult.Failure)?.error == UsbAudioError.DEVICE_BUSY &&
+                stateAfterOther == UsbConnectionState.STREAMING && manager.getFileDescriptor() == fdBefore,
+            "device-id" to other.deviceId,
+            "resultado" to (if (otherResult is UsbResult.Success) "exito" else (otherResult as UsbResult.Failure).error),
+            "estado" to stateAfterOther, "fd" to manager.getFileDescriptor(),
+            "motivo" to when {
+                (otherResult as? UsbResult.Failure)?.error != UsbAudioError.DEVICE_BUSY -> "no-dio-DEVICE_BUSY"
+                stateAfterOther != UsbConnectionState.STREAMING -> "el-stream-no-sigue"
+                else -> null
+            },
+        )
+        return sameOk && otherOk
+    }
+
+    /** Espera a que los paquetes completados pasen de [floor], con techo. Devuelve el valor, o null. */
+    private suspend fun awaitPacketsAbove(floor: Long, ceilingMs: Long): Long? {
+        var waited = 0L
+        while (waited <= ceilingMs) {
+            val now = manager.getTransferStats()?.packetsCompleted
+            if (now != null && now > floor && floor >= 0) return now
+            delay(TRAFFIC_POLL_MS)
+            waited += TRAFFIC_POLL_MS
+        }
+        return null
+    }
+
     /** `streaming-stats` se emite SIEMPRE: si no hubo streaming, con `ok=false` y el porqué. */
     private fun reportNoStreaming(r: SmokeReporter) {
         r.report(PANEL, "streaming-stats", false, "motivo" to "sin-streaming", "estado" to manager.connectionState.value)
@@ -445,7 +518,9 @@ class UsbHarness(private val context: Context) {
         }
         var ok = true
         try {
-            ok = startStreaming(r) && ok
+            val streaming = startStreaming(r)
+            ok = streaming && ok
+            ok = connectAgainWhileStreaming(r, device, streaming) && ok
             ok = runSuite(r, device) && ok
             ok = stopStreaming(r) && ok
         } finally {
@@ -470,6 +545,10 @@ class UsbHarness(private val context: Context) {
         /** El rate al que el harness abre el stream USB. La suite mide ESTE stream (D11). */
         const val STREAM_RATE_HZ = 48_000
         private const val RELEASE_DISCONNECT_MS = 1000L
+
+        /** Techo para ver crecer los paquetes después de reconectar (a 48 kHz son ~1000 por segundo). */
+        private const val RECONNECT_TRAFFIC_MS = 2000L
+        private const val TRAFFIC_POLL_MS = 50L
 
         /** Techo para que la librería pida el diálogo. Es una espera por condición: no se duerme. */
         private const val DIALOG_REQUESTED_MS = 5000L
