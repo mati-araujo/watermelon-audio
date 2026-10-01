@@ -2458,14 +2458,27 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param channels Number of channels
      * @param bitDepth Bit depth
      * @param streamingMode 0=playback only, 1=capture only, 2=full duplex
-     * @return true if streaming started
+     * @return true if streaming started (or was already running)
      */
     fun startUsbStreamingWithMode(
         sampleRate: Int,
         channels: Int,
         bitDepth: Int,
         streamingMode: Int
-    ): Boolean = nativeStartUsbStreamingWithMode(sampleRate, channels, bitDepth, streamingMode)
+    ): Boolean = startUsbStreamingWithModeStatus(sampleRate, channels, bitDepth, streamingMode) ==
+        UsbStreamStartStatus.OK
+
+    /**
+     * Como [startUsbStreamingWithMode], pero con la CAUSA (REQ-050 S2, AC-050.3): uno de los
+     * valores de [UsbStreamStartStatus]. El `Boolean` de arriba la tiraba, y por eso "sin motor"
+     * o "sin callback" llegaban al consumidor como un STREAMING_ERROR genérico.
+     */
+    fun startUsbStreamingWithModeStatus(
+        sampleRate: Int,
+        channels: Int,
+        bitDepth: Int,
+        streamingMode: Int
+    ): Int = nativeStartUsbStreamingWithMode(sampleRate, channels, bitDepth, streamingMode)
 
     /**
      * Check if USB device supports full-duplex.
@@ -2641,7 +2654,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeStartUsbStreaming(sampleRate: Int, channels: Int, bitDepth: Int): Boolean
     private external fun nativeStopUsbStreaming()
     private external fun nativeGetUsbTransferStats(): FloatArray?
-    private external fun nativeStartUsbStreamingWithMode(sampleRate: Int, channels: Int, bitDepth: Int, streamingMode: Int): Boolean
+    private external fun nativeStartUsbStreamingWithMode(sampleRate: Int, channels: Int, bitDepth: Int, streamingMode: Int): Int
     private external fun nativeUsbDeviceSupportsFullDuplex(): Boolean
     private external fun nativeUsbDeviceHasCapture(): Boolean
     private external fun nativeGetUsbDeviceUacVersion(): Int
@@ -3669,4 +3682,19 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     )
 
     fun looperResetTelemetry() = nativeLooperResetTelemetry()
+}
+
+/**
+ * Lo que devuelve `nativeStartUsbStreamingWithMode` (REQ-050 S2, AC-050.3). Espeja
+ * `watermelon_audio::UsbStreamStartStatus` de `BackendManager.h`, valor por valor: no se
+ * renumera de un solo lado.
+ */
+internal object UsbStreamStartStatus {
+    const val OK = 0
+    const val NOT_INITIALIZED = 1
+    const val NO_ENGINE = 2
+    const val NO_BACKEND = 3
+    const val NO_CALLBACK = 4
+    const val INVALID_MODE = 5
+    const val START_FAILED = 6
 }

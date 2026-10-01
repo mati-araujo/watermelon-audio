@@ -42,6 +42,56 @@ class LibusbBackend;
 class SplitBackend;
 
 /**
+ * REQ-050 S2 (AC-050.3) — por qué no puede arrancar el streaming USB, con su causa.
+ *
+ * `nativeStartUsbStreamingWithMode` devolvía un `jboolean`, así que "sin motor", "sin
+ * callback", "sin device" y "libusb no arrancó" llegaban a Kotlin como el mismo
+ * STREAMING_ERROR genérico. Los valores 0..6 cruzan el JNI como `jint` y Kotlin los mapea
+ * uno por uno (`UsbStreamStartStatus` en AudioNativeBridge.kt): **no se renumeran**.
+ *
+ * `PROCEED` no cruza: es "las precondiciones están, ahora arrancá", y el resultado final
+ * lo da `LibusbBackend::start()` (OK o START_FAILED).
+ */
+enum class UsbStreamStartStatus : int {
+    PROCEED = -1,
+    OK = 0,
+    NOT_INITIALIZED = 1,
+    NO_ENGINE = 2,
+    NO_BACKEND = 3,
+    NO_CALLBACK = 4,
+    INVALID_MODE = 5,
+    START_FAILED = 6,
+};
+
+/** Los hechos que la JNIEXPORT junta antes de arrancar el streaming USB. */
+struct UsbStreamStartFacts {
+    bool alreadyStreaming = false;
+    bool engineExists = false;
+    bool deviceInitialized = false;
+    bool backendPresent = false;
+    bool modeValid = false;
+    bool backendHasCallback = false;
+};
+
+/**
+ * Decide qué causa nombrar. Pura y sin estado para poder afirmarla en la suite de host,
+ * donde no hay backend libusb (test_usb_stream_start.cpp).
+ *
+ * El orden es el de las causas de raíz: sin motor no hay callback ni manager propio, así
+ * que se nombra el motor antes que el device, y el device antes que el backend.
+ * "Ya transmitiendo" va primero porque era el contrato previo: éxito sin tocar nada.
+ */
+inline UsbStreamStartStatus classifyUsbStreamStart(const UsbStreamStartFacts& f) noexcept {
+    if (f.alreadyStreaming) return UsbStreamStartStatus::OK;
+    if (!f.engineExists) return UsbStreamStartStatus::NO_ENGINE;
+    if (!f.deviceInitialized) return UsbStreamStartStatus::NOT_INITIALIZED;
+    if (!f.backendPresent) return UsbStreamStartStatus::NO_BACKEND;
+    if (!f.modeValid) return UsbStreamStartStatus::INVALID_MODE;
+    if (!f.backendHasCallback) return UsbStreamStartStatus::NO_CALLBACK;
+    return UsbStreamStartStatus::PROCEED;
+}
+
+/**
  * BackendManager
  *
  * Manager for audio backends. Constructible (Phase 0D: no longer singleton-only).
