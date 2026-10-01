@@ -36,7 +36,7 @@ internal class UsbAudioManagerImpl(
      * los tests de host del contrato de conexión; en producción es siempre el bridge.
      */
     private val nativePort: UsbNativePort = BridgeUsbNativePort(AudioNativeBridge.getInstance()),
-) : IUsbAudioManager {
+) : IUsbAudioManager, UsbActiveStreamSource {
 
     // Native bridge instance for USB audio operations
     private val nativeBridge = AudioNativeBridge.getInstance()
@@ -433,6 +433,8 @@ internal class UsbAudioManagerImpl(
             _selectedDevice.value = null
             _currentCapabilitySnapshot.value = null
             _selectedAltsetting = null
+            _selectedClockSourceId = null
+            _activeStreamConfig = null
             _connectionState.value = UsbConnectionState.DISCONNECTED
 
             device?.let {
@@ -692,9 +694,8 @@ internal class UsbAudioManagerImpl(
      * side effect so subsequent reads have it.
      */
     override fun getCurrentCapabilitySnapshot(): UsbCapabilitySnapshot? {
-        val raw = nativeBridge.getUsbCapabilitySnapshot() ?: return _currentSnapshot
         return try {
-            val snapshot = UsbSnapshotCodec.decode(raw)
+            val snapshot = nativePort.capabilitySnapshot() ?: return _currentSnapshot
             _currentSnapshot = snapshot
             snapshot
         } catch (e: Exception) {
@@ -732,8 +733,17 @@ internal class UsbAudioManagerImpl(
         alternateSetting: Int,
         formatIndex: Int,
     ): UsbResult<Unit> {
-        if (formatIndex < 0) {
-            return UsbResult.Failure(UsbAudioError.UNSUPPORTED_FORMAT, "formatIndex must be >= 0")
+        // REQ-050 S3 (D17): el centinela EXACTO vuelve a la selección automática. Se valida acá y
+        // otra vez del lado C++ (classifyAltsettingRequest): cualquier otro negativo es rechazo.
+        if (isAutomaticAltsetting(interfaceNumber, alternateSetting, formatIndex)) {
+            return clearAltsettingSelection()
+        }
+        if (interfaceNumber < 0 || alternateSetting < 0 || formatIndex < 0) {
+            return UsbResult.Failure(
+                UsbAudioError.UNSUPPORTED_FORMAT,
+                "IF$interfaceNumber Alt$alternateSetting format $formatIndex: indices must be >= 0 " +
+                    "(or ${UsbStreamSelection.AUTOMATIC_ALTSETTING} in all three for the automatic choice)",
+            )
         }
         val snapshot = getCurrentCapabilitySnapshot()
             ?: return UsbResult.Failure(UsbAudioError.DESCRIPTOR_PARSE_ERROR, "No capability snapshot available")
@@ -751,9 +761,9 @@ internal class UsbAudioManagerImpl(
         }
 
         return withContext(Dispatchers.IO) {
-            val applied = nativeBridge.selectUsbAltsetting(interfaceNumber, alternateSetting, formatIndex)
+            val applied = nativePort.selectUsbAltsetting(interfaceNumber, alternateSetting, formatIndex)
             if (applied) {
-                _selectedAltsetting = SelectedAltsetting(interfaceNumber, alternateSetting, formatIndex)
+                _selectedAltsetting = UsbAltsettingSelection(interfaceNumber, alternateSetting, formatIndex)
                 UsbResult.Success(Unit)
             } else {
                 UsbResult.Failure(
@@ -784,8 +794,13 @@ internal class UsbAudioManagerImpl(
     }
 
     override suspend fun selectClockSource(clockSourceId: Int): UsbResult<Unit> {
-        if (clockSourceId <= 0) {
-            return UsbResult.Failure(UsbAudioError.UNSUPPORTED_FORMAT, "clockSourceId must be > 0")
+        // REQ-050 S3 (D17): 0 vuelve al reloj automático; un negativo sigue siendo rechazo, acá y
+        // del lado C++ (classifyClockSourceRequest).
+        if (clockSourceId == UsbStreamSelection.AUTOMATIC_CLOCK_SOURCE) {
+            return clearClockSourceSelection()
+        }
+        if (clockSourceId < 0) {
+            return UsbResult.Failure(UsbAudioError.UNSUPPORTED_FORMAT, "clockSourceId must be > 0 (or 0 for automatic)")
         }
         val snapshot = getCurrentCapabilitySnapshot()
             ?: return UsbResult.Failure(UsbAudioError.DESCRIPTOR_PARSE_ERROR, "No capability snapshot available")
@@ -800,7 +815,8 @@ internal class UsbAudioManagerImpl(
         }
 
         return withContext(Dispatchers.IO) {
-            if (nativeBridge.selectUsbClockSource(clockSourceId)) {
+            if (nativePort.selectUsbClockSource(clockSourceId)) {
+                _selectedClockSourceId = clockSourceId
                 UsbResult.Success(Unit)
             } else {
                 UsbResult.Failure(
@@ -812,13 +828,56 @@ internal class UsbAudioManagerImpl(
     }
 
     private var _currentStreamPreference: StreamPreference? = null
-    private var _selectedAltsetting: SelectedAltsetting? = null
+    @Volatile private var _selectedAltsetting: UsbAltsettingSelection? = null
 
-    private data class SelectedAltsetting(
-        val interfaceNumber: Int,
-        val alternateSetting: Int,
-        val formatIndex: Int,
-    )
+    /** REQ-050 S3 (D18): el reloj elegido a mano, para poder restaurarlo. null = automático. */
+    @Volatile private var _selectedClockSourceId: Int? = null
+
+    /** REQ-050 S3 (D18): la config del stream que corre, o null si no hay streaming. */
+    @Volatile private var _activeStreamConfig: UsbActiveStreamConfig? = null
+
+    override fun activeStreamConfig(): UsbActiveStreamConfig? = _activeStreamConfig
+
+    override fun manualSelection(): UsbManualSelection = UsbManualSelection(_selectedAltsetting, _selectedClockSourceId)
+
+    private fun isAutomaticAltsetting(interfaceNumber: Int, alternateSetting: Int, formatIndex: Int): Boolean =
+        interfaceNumber == UsbStreamSelection.AUTOMATIC_ALTSETTING &&
+            alternateSetting == UsbStreamSelection.AUTOMATIC_ALTSETTING &&
+            formatIndex == UsbStreamSelection.AUTOMATIC_ALTSETTING
+
+    /**
+     * REQ-050 S3 (D17): olvida la selección manual de altsetting, en Kotlin (que la re-aplicaba
+     * en cada arranque) y en el nativo. Sólo con el stream parado, como la selección misma.
+     */
+    private suspend fun clearAltsettingSelection(): UsbResult<Unit> {
+        if (_connectionState.value == UsbConnectionState.STREAMING) {
+            return UsbResult.Failure(UsbAudioError.STREAMING_ERROR, "Stop the stream before changing the altsetting selection")
+        }
+        return withContext(Dispatchers.IO) {
+            val auto = UsbStreamSelection.AUTOMATIC_ALTSETTING
+            if (nativePort.selectUsbAltsetting(auto, auto, auto)) {
+                _selectedAltsetting = null
+                UsbResult.Success(Unit)
+            } else {
+                UsbResult.Failure(UsbAudioError.INTERNAL_ERROR, "Native backend rejected clearing the altsetting selection")
+            }
+        }
+    }
+
+    /** REQ-050 S3 (D17): olvida el reloj elegido a mano. Sólo con el stream parado. */
+    private suspend fun clearClockSourceSelection(): UsbResult<Unit> {
+        if (_connectionState.value == UsbConnectionState.STREAMING) {
+            return UsbResult.Failure(UsbAudioError.STREAMING_ERROR, "Stop the stream before changing the clock source selection")
+        }
+        return withContext(Dispatchers.IO) {
+            if (nativePort.selectUsbClockSource(UsbStreamSelection.AUTOMATIC_CLOCK_SOURCE)) {
+                _selectedClockSourceId = null
+                UsbResult.Success(Unit)
+            } else {
+                UsbResult.Failure(UsbAudioError.INTERNAL_ERROR, "Native backend rejected clearing the clock source selection")
+            }
+        }
+    }
 
     private fun passesHardConstraints(
         snapshot: UsbCapabilitySnapshot,
@@ -1179,7 +1238,9 @@ internal class UsbAudioManagerImpl(
                 val preference = (_currentStreamPreference ?: StreamPreference())
                     .copy(preferredSampleRate = sampleRate)
                 nativePort.setUsbStreamPreference(preference)
-                _selectedAltsetting?.let {
+                // REQ-050 S3 (D18): la config activa registra la selección sólo si el nativo la
+                // aceptó; si la rechazó, el arranque usa la elección automática y eso es lo que corre.
+                val appliedAltsetting = _selectedAltsetting?.takeIf {
                     nativePort.selectUsbAltsetting(
                         it.interfaceNumber,
                         it.alternateSetting,
@@ -1194,6 +1255,16 @@ internal class UsbAudioManagerImpl(
                     streamingMode.id
                 )
                 if (status == UsbStreamStartStatus.OK) {
+                    // REQ-050 S3 (D18): lo que se pidió, con la selección que se aplicó, para que el
+                    // runner sepa si una fila coincide y pueda restaurar el stream después.
+                    _activeStreamConfig = UsbActiveStreamConfig(
+                        sampleRate = sampleRate,
+                        channels = channels,
+                        bitDepth = bitDepth,
+                        streamingMode = streamingMode,
+                        altsetting = appliedAltsetting,
+                        clockSourceId = _selectedClockSourceId,
+                    )
                     // Acquire wake lock to prevent CPU from sleeping during streaming
                     acquireWakeLock()
 
@@ -1262,6 +1333,7 @@ internal class UsbAudioManagerImpl(
                 stopHealthChecks()
 
                 nativePort.stopUsbStreaming()
+                _activeStreamConfig = null
 
                 // Release wake lock
                 releaseWakeLock()
@@ -1301,54 +1373,7 @@ internal class UsbAudioManagerImpl(
             val healthScore = adaptiveStats?.getOrNull(6) ?: 100f
             val bufferAdjustments = adaptiveStats?.getOrNull(8)?.toInt() ?: 0
 
-            statsArray?.let { arr ->
-                // Extended stats array format (19 elements):
-                // [0] packetsSubmitted, [1] packetsCompleted, [2] packetsErrors
-                // [3] underruns, [4] overruns
-                // [5] currentLatencyMs, [6] avgLatencyMs, [7] minLatencyMs, [8] maxLatencyMs
-                // [9] ringBufferLevel, [10] ringBufferFillPct, [11] ringBufferCapacity
-                // [12] bytesTransferred
-                // [13] currentSampleRateHz, [14] driftPpm, [15] feedbackEffectiveFramesPerPacket
-                // [16] feedbackPacketsReceived, [17] feedbackPacketsInvalid, [18] activeClockSourceId
-                if (arr.size >= 13) {
-                    UsbTransferStats(
-                        packetsSubmitted = arr[0].toLong(),
-                        packetsCompleted = arr[1].toLong(),
-                        packetsErrors = arr[2].toLong(),
-                        bytesTransferred = arr[12].toLong(),
-                        underruns = arr[3].toLong(),
-                        overruns = arr[4].toLong(),
-                        currentLatencyMs = arr[5].toDouble(),
-                        avgLatencyMs = arr[6].toDouble(),
-                        minLatencyMs = arr[7].toDouble(),
-                        maxLatencyMs = arr[8].toDouble(),
-                        ringBufferLevel = arr[9].toInt(),
-                        ringBufferFillPct = arr[10],
-                        ringBufferCapacity = arr[11].toInt(),
-                        bufferMs = currentBufferMs,
-                        healthScore = healthScore,
-                        bufferAdjustments = bufferAdjustments,
-                        currentSampleRateHz = arr.getOrElse(13) { 0f },
-                        driftPpm = arr.getOrElse(14) { 0f },
-                        feedbackEffectiveFramesPerPacket = arr.getOrElse(15) { 0f },
-                        feedbackPacketsReceived = arr.getOrElse(16) { 0f }.toLong(),
-                        feedbackPacketsInvalid = arr.getOrElse(17) { 0f }.toLong(),
-                        activeClockSourceId = arr.getOrElse(18) { -1f }.toInt()
-                    )
-                } else {
-                    // Fallback for old format (5 elements)
-                    UsbTransferStats(
-                        packetsCompleted = arr[0].toLong(),
-                        bytesTransferred = arr[1].toLong(),
-                        underruns = arr[2].toLong(),
-                        overruns = arr[3].toLong(),
-                        avgLatencyMs = arr.getOrElse(4) { 0f }.toDouble(),
-                        bufferMs = currentBufferMs,
-                        healthScore = healthScore,
-                        bufferAdjustments = bufferAdjustments
-                    )
-                }
-            }
+            statsArray?.let { arr -> parseUsbTransferStats(arr, currentBufferMs, healthScore, bufferAdjustments) }
         } catch (e: Exception) {
             Log.e(TAG, "Exception getting transfer stats: ${e.message}", e)
             null
@@ -1874,3 +1899,102 @@ internal class UsbAudioManagerImpl(
         )
     }
 }
+
+/**
+ * REQ-050 S3 (D18) — la config del stream que corre, tal como se pidió a [UsbAudioManagerImpl.startStreaming],
+ * con la selección manual que se le aplicó. El runner la usa para saber si una fila coincide con el
+ * stream (si no, lo reabre) y para restaurarlo después.
+ *
+ * `bitDepth` es lo PEDIDO: el nativo no lo aplica por sí solo (elige el formato por puntaje). Lo que
+ * fija los bits es [altsetting]; sin selección manual los bits del stream no se conocen.
+ */
+internal data class UsbActiveStreamConfig(
+    val sampleRate: Int,
+    val channels: Int,
+    val bitDepth: Int,
+    val streamingMode: UsbStreamingMode,
+    val altsetting: UsbAltsettingSelection?,
+    val clockSourceId: Int?,
+)
+
+/** Una selección manual de altsetting de playback (los tres índices de `selectAltsetting`). */
+internal data class UsbAltsettingSelection(
+    val interfaceNumber: Int,
+    val alternateSetting: Int,
+    val formatIndex: Int,
+)
+
+/** La selección manual pendiente (altsetting y reloj); null en cada uno = automático. */
+internal data class UsbManualSelection(
+    val altsetting: UsbAltsettingSelection?,
+    val clockSourceId: Int?,
+)
+
+/**
+ * Quien sabe con qué config corre el stream USB y qué selección manual tiene pendiente (REQ-050 S3,
+ * D18). Lo implementa [UsbAudioManagerImpl]; el runner lo necesita para no tocar un stream que no
+ * puede devolver como estaba.
+ */
+internal interface UsbActiveStreamSource {
+    fun activeStreamConfig(): UsbActiveStreamConfig?
+    fun manualSelection(): UsbManualSelection
+}
+
+/**
+ * El array de `nativeGetUsbTransferStats` como [UsbTransferStats].
+ *
+ * Formato extendido (21 valores desde REQ-050 S3, D16):
+ * [0] packetsSubmitted, [1] packetsCompleted, [2] packetsErrors, [3] underruns, [4] overruns,
+ * [5] currentLatencyMs, [6] avgLatencyMs, [7] minLatencyMs, [8] maxLatencyMs,
+ * [9] ringBufferLevel, [10] ringBufferFillPct, [11] ringBufferCapacity, [12] bytesTransferred,
+ * [13] currentSampleRateHz, [14] driftPpm, [15] feedbackEffectiveFramesPerPacket,
+ * [16] feedbackPacketsReceived, [17] feedbackPacketsInvalid, [18] activeClockSourceId,
+ * [19] packetsInFlight (la cola de salida declarada), [20] declaredMaxLatencyMs.
+ * Los nuevos van al final y se leen con `getOrElse`: un `.so` viejo de 19 los deja en 0.
+ */
+internal fun parseUsbTransferStats(
+    arr: FloatArray,
+    bufferMs: Int,
+    healthScore: Float,
+    bufferAdjustments: Int,
+): UsbTransferStats =
+    if (arr.size >= 13) {
+        UsbTransferStats(
+            packetsSubmitted = arr[0].toLong(),
+            packetsCompleted = arr[1].toLong(),
+            packetsErrors = arr[2].toLong(),
+            bytesTransferred = arr[12].toLong(),
+            underruns = arr[3].toLong(),
+            overruns = arr[4].toLong(),
+            currentLatencyMs = arr[5].toDouble(),
+            avgLatencyMs = arr[6].toDouble(),
+            minLatencyMs = arr[7].toDouble(),
+            maxLatencyMs = arr[8].toDouble(),
+            ringBufferLevel = arr[9].toInt(),
+            ringBufferFillPct = arr[10],
+            ringBufferCapacity = arr[11].toInt(),
+            bufferMs = bufferMs,
+            healthScore = healthScore,
+            bufferAdjustments = bufferAdjustments,
+            currentSampleRateHz = arr.getOrElse(13) { 0f },
+            driftPpm = arr.getOrElse(14) { 0f },
+            feedbackEffectiveFramesPerPacket = arr.getOrElse(15) { 0f },
+            feedbackPacketsReceived = arr.getOrElse(16) { 0f }.toLong(),
+            feedbackPacketsInvalid = arr.getOrElse(17) { 0f }.toLong(),
+            activeClockSourceId = arr.getOrElse(18) { -1f }.toInt(),
+            packetsInFlight = arr.getOrElse(19) { 0f }.toLong(),
+            declaredMaxLatencyMs = arr.getOrElse(20) { 0f }.toDouble(),
+        )
+    } else {
+        // Formato viejo (5 valores).
+        UsbTransferStats(
+            packetsCompleted = arr[0].toLong(),
+            bytesTransferred = arr[1].toLong(),
+            underruns = arr[2].toLong(),
+            overruns = arr[3].toLong(),
+            avgLatencyMs = arr.getOrElse(4) { 0f }.toDouble(),
+            bufferMs = bufferMs,
+            healthScore = healthScore,
+            bufferAdjustments = bufferAdjustments,
+        )
+    }

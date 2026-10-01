@@ -495,6 +495,28 @@ bool LibusbBackend::selectClockSource(int clockSourceId) {
     return true;
 }
 
+bool LibusbBackend::clearManualAltsettingSelection() {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mIsRunning.load()) {
+        LOGW("clearManualAltsettingSelection rejected while stream is running");
+        return false;
+    }
+    mManualPlaybackSelection.reset();
+    LOGI("Manual playback altsetting cleared: automatic selection on next start");
+    return true;
+}
+
+bool LibusbBackend::clearManualClockSourceSelection() {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (mIsRunning.load()) {
+        LOGW("clearManualClockSourceSelection rejected while stream is running");
+        return false;
+    }
+    mManualClockSourceId.reset();
+    LOGI("Manual clock source cleared: automatic selection on next start");
+    return true;
+}
+
 bool LibusbBackend::claimControlInterface() {
     if (!mDeviceHandle || !mUsbDevice) {
         return false;
@@ -1172,6 +1194,9 @@ BackendResult LibusbBackend::start() {
     // Pre-allocate DSP buffers BEFORE starting the RT thread (P0-4 fix)
     {
         const int framesPerBlock = mRequestedBufferSize;
+        // REQ-050 S3 (D16): the block the DSP loop really uses, for the declared latency
+        // ceiling. mRequestedBufferSize can change later (setBufferSize) without changing it.
+        mDspBlockFramesInUse.store(framesPerBlock, std::memory_order_relaxed);
         const int outputChannels = mSelectedPlaybackFormat ? mSelectedPlaybackFormat->channels
                                 : mSelectedPlayback ? mSelectedPlayback->primaryFormat().channels : 0;
         const int inputChannels = mSelectedCaptureFormat ? mSelectedCaptureFormat->channels

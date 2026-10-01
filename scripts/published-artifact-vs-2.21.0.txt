@@ -82,3 +82,46 @@ aar/class:classes.jar!com/watermellonstudios/audio/internal/bridge/UsbStreamStar
 aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbNativePort.class = (ausente) -> presente   # REQ-050 S2 (D14): la costura interna de las operaciones nativas de conexion y streaming USB
 aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/BridgeUsbNativePort.class = (ausente) -> presente   # REQ-050 S2 (D14): la implementacion de produccion de UsbNativePort, sobre AudioNativeBridge
 aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImpl$connectDeviceLocked$1.class = (ausente) -> presente   # REQ-050 S2 (D7): continuacion de corrutina de connectDeviceLocked, el cuerpo de connectDevice bajo el mutex (la genera el compilador)
+
+# --- REQ-050 S3: el runner USB mide lo que declara
+# Medido de forma DIFERENCIAL, sin credencial del registro: master ae6d844 publicado como
+# 2.21.0-req050-s3base contra esta etapa como 2.21.0-req050-s3 (--against-local). Cada linea
+# vale igual contra 2.21.0 porque ninguno de estos hechos cambio entre 2.21.0 y master: S1 y S2
+# no tocaron el runner, ni UsbAudioManagerImpl$SelectedAltsetting, ni el .kotlin_module (ver
+# sus bloques). aar/size sigue en su banda: 6058098 bytes, +11,20 % contra 2.21.0 (+0,79 %
+# contra master). El .so cambia (21 valores de stats, el centinela de seleccion, el techo
+# declarado) pero sus bytes no se declaran; DT_NEEDED, DT_SONAME, alineacion y .comment no
+# cambian. Manifest, POM y .module, sin diferencias.
+#
+# Superficie publica que cambia sin clase nueva (va en la nota de bump, no aca): el caso
+# UsbTestStatus.NOT_APPLICABLE, los campos nuevos de UsbTestResult y UsbTransferStats, el
+# default de UsbTestConfig.maxAllowedLatencyMs (20.0 -> +inf) y los presets LOW_LATENCY y
+# HIGH_QUALITY sin techo fijo.
+aar/class:classes.jar!com/watermellonstudios/audio/domain/usb/UsbStreamRestore.class = (ausente) -> presente   # REQ-050 S3 (D18): enum publico nuevo, que paso con el stream del consumidor despues de una fila (UsbTestResult.streamRestore)
+aar/class:classes.jar!com/watermellonstudios/audio/domain/usb/UsbStreamSelection.class = (ausente) -> presente   # REQ-050 S3 (D17): objeto publico nuevo con los centinelas de "volver a la seleccion automatica" (AUTOMATIC_ALTSETTING = -1, AUTOMATIC_CLOCK_SOURCE = 0)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/OfferedPlaybackFormat.class = (ausente) -> presente   # REQ-050 S3 (AC-050.8): interna, el altsetting/formato (y el reloj UAC2) que ofrece la config de una fila
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbActiveStreamConfig.class = (ausente) -> presente   # REQ-050 S3 (D18): interna, la config del stream que corre, para decidir si la fila reabre y para restaurarlo
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbActiveStreamSource.class = (ausente) -> presente   # REQ-050 S3 (D18): interfaz interna que implementa UsbAudioManagerImpl para el runner
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAltsettingSelection.class = (ausente) -> presente   # REQ-050 S3 (D17): interna, reemplaza a UsbAudioManagerImpl$SelectedAltsetting para que el runner la comparta
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImpl$SelectedAltsetting.class = presente -> (ausente)   # REQ-050 S3 (D17): la clase privada pasa a ser UsbAltsettingSelection (interna, compartida con el runner)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImpl$clearAltsettingSelection$2.class = (ausente) -> presente   # REQ-050 S3 (D17): el bloque withContext de volver al altsetting automatico (lo genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImpl$clearClockSourceSelection$2.class = (ausente) -> presente   # REQ-050 S3 (D17): el bloque withContext de volver al reloj automatico (lo genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImplKt.class = (ausente) -> presente   # REQ-050 S3 (D16): fachada de archivo de parseUsbTransferStats, la lectura de los 21 valores del array de stats (interna)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$1.class = (ausente) -> presente   # REQ-050 S3: referencia a funcion del constructor publico (la fuente del rate real del stream, D19); la genera el compilador
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$2.class = (ausente) -> presente   # REQ-050 S3: referencia a System::currentTimeMillis del constructor publico (el reloj del runner, inyectable en el test); la genera el compilador
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$RowCounters.class = (ausente) -> presente   # REQ-050 S3 (AC-050.9): privada, los contadores de la fila (de la ventana si no se reabrio)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$Sample.class = (ausente) -> presente   # REQ-050 S3 (AC-050.9): privada, una muestra de stats con su instante, para detectar la traba a mitad de fila
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$Window.class = (ausente) -> presente   # REQ-050 S3 (AC-050.9): privada, lo que vio la ventana de medicion (trafico, traba, latencia)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$measurePlayback$1.class = (ausente) -> presente   # REQ-050 S3: continuacion de corrutina de measurePlayback (la genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$reopenAt$1.class = (ausente) -> presente   # REQ-050 S3 (D17): continuacion de corrutina de reopenAt (la genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$restoreStream$1.class = (ausente) -> presente   # REQ-050 S3 (D18): continuacion de corrutina de restoreStream (la genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$runPlaybackTest$1.class = presente -> (ausente)   # REQ-050 S3: runPlaybackTest pasa a delegar en withRowStream y su continuacion cambia de nombre ($2, abajo); la genera el compilador
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$runPlaybackTest$2.class = (ausente) -> presente   # REQ-050 S3: la lambda de runPlaybackTest sobre withRowStream (la genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$runRateNegotiationTest$1.class = presente -> (ausente)   # REQ-050 S3: el barrido pasa a delegar en withRowStream y su continuacion cambia de nombre ($2, abajo); la genera el compilador
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$runRateNegotiationTest$2.class = (ausente) -> presente   # REQ-050 S3: la lambda del barrido sobre withRowStream (la genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$sampleWindow$1.class = (ausente) -> presente   # REQ-050 S3: continuacion de corrutina de sampleWindow (la genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$withRowStream$1.class = (ausente) -> presente   # REQ-050 S3 (D17, D18): continuacion de corrutina de withRowStream, reabrir y restaurar (la genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunner$withRowStream$result$1.class = (ausente) -> presente   # REQ-050 S3 (D18): el bloque NonCancellable de la restauracion (lo genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunnerKt.class = (ausente) -> presente   # REQ-050 S3 (AC-050.8): fachada de archivo de findOfferedPlaybackFormat y los helpers del runner (internos/privados)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbManualSelection.class = (ausente) -> presente   # REQ-050 S3 (D18): interna, la seleccion manual pendiente, para restaurarla aunque no haya stream
+aar/jar-entry:classes.jar!META-INF/com.watermellonstudios_audio_release.kotlin_module = sha256:844f12b34c1dccbc -> sha256:e2e5edb547caa524   # REQ-050 S3: la superficie Kotlin suma dos fachadas de archivo (UsbAudioManagerImplKt, UsbAudioTestRunnerKt), que el .kotlin_module lista

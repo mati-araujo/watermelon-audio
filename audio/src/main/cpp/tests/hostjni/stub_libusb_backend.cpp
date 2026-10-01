@@ -41,4 +41,9 @@ bool LibusbBackend::selectAltsetting(int, int, int) { return false; }
 
 bool LibusbBackend::selectClockSource(int) { return false; }
 
+// REQ-050 S3 (D17): nunca se llaman en el host (no hay backend vivo), pero la JNIEXPORT los nombra.
+bool LibusbBackend::clearManualAltsettingSelection() { return false; }
+
+bool LibusbBackend::clearManualClockSourceSelection() { return false; }
+
 }  // namespace watermelon_audio

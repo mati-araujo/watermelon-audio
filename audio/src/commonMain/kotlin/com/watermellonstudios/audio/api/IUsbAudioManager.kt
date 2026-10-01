@@ -263,6 +263,12 @@ interface IUsbAudioManager {
 
     /**
      * Select a specific playback altsetting+format for the next startStreaming() call.
+     *
+     * The selection is STICKY: it applies to every later startStreaming() until it is cleared
+     * or the device is disconnected. To go back to the automatic choice, pass
+     * [UsbStreamSelection.AUTOMATIC_ALTSETTING] in the three arguments (REQ-050, D17); any other
+     * negative value is rejected with [UsbAudioError.UNSUPPORTED_FORMAT]. Only while the stream
+     * is stopped.
      */
     suspend fun selectAltsetting(
         interfaceNumber: Int,
@@ -272,6 +278,10 @@ interface IUsbAudioManager {
 
     /**
      * Select a UAC2 clock source for the next startStreaming() call.
+     *
+     * Sticky like [selectAltsetting]. [UsbStreamSelection.AUTOMATIC_CLOCK_SOURCE] (0) goes back
+     * to the automatic choice (REQ-050, D17); a negative id is rejected. Only while the stream
+     * is stopped.
      */
     suspend fun selectClockSource(clockSourceId: Int): UsbResult<Unit>
 

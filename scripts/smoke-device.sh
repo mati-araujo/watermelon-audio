@@ -25,8 +25,9 @@
 #   6. lista aparte lo que requiere OIDO (ningun log dice si algo suena bien).
 #
 # Exit: 0 todo PASS · 1 algun FAIL · 3 sin FAIL pero con puntos HUMANO pendientes · 2 uso/infra.
-# Un paso NO-MEDIDO (linea con medido=false, D11) no mueve el exit: se lista aparte y no cuenta
-# como cobertura.
+# Una fila de la suite USB NO-APLICA (linea con aplica=false: el device no ofrece su config, REQ-050
+# S3) no mueve el exit: se lista aparte y no cuenta como cobertura. La vieja marca medido=false (D11
+# de MINI-038: el runner ignoraba el rate de la fila) ya no existe y, si reaparece, es FAIL.
 #
 # El formato de las lineas vive en un solo lugar:
 #   harness/src/commonMain/kotlin/com/watermellonstudios/audio/harness/smoke/HarnessSmoke.kt
@@ -154,13 +155,17 @@ for panel in [p for p in ORDER if p in panels]:
         seen.add(step)
         if pending and step in AFTER_PERMISSION:
             add("HUMANO", panel, step, "sin permiso: " + extras(f))
-        elif f.get("medido") == "false" and panel == "usb" and re.fullmatch(r"suite-[0-9]+", step or ""):
-            # D11: una fila de la suite cuyo rate el runner no aplica. Ni PASS (aunque diga ok=true)
-            # ni FAIL, y no cuenta como cobertura: se lista aparte. SOLO filas de la suite: cualquier
-            # otro paso con medido=false es un FAIL, o un paso podria desaparecer del veredicto.
-            add("NO-MEDIDO", panel, step, extras(f))
-        elif f.get("medido") == "false":
-            add("FAIL", panel, step, "medido=false fuera de la suite (D11 no lo cubre): " + extras(f))
+        elif "medido" in f:
+            # REQ-050 S3: el runner aplica el rate de cada fila, asi que NO-MEDIDO (D11 de MINI-038)
+            # ya no existe. Una linea que lo trae es una regresion del harness o del runner: FAIL.
+            add("FAIL", panel, step, "NO-MEDIDO ya no existe (REQ-050 S3): " + extras(f))
+        elif f.get("aplica") == "false" and panel == "usb" and re.fullmatch(r"suite-[0-9]+", step or ""):
+            # REQ-050 S3 (D5): una fila que el device no ofrece. Ni PASS (aunque diga ok=true) ni FAIL,
+            # y no cuenta como cobertura: se lista aparte. SOLO filas de la suite: cualquier otro paso
+            # con aplica=false es un FAIL, o un paso podria desaparecer del veredicto.
+            add("NO-APLICA", panel, step, extras(f))
+        elif f.get("aplica") == "false":
+            add("FAIL", panel, step, "aplica=false fuera de una fila de la suite: " + extras(f))
         elif f.get("ok") == "true":
             add("PASS", panel, step, extras(f))
         else:
@@ -195,17 +200,17 @@ else:
 
 width = max(len("%s/%s" % (p, s)) for _, p, s, _ in rows)
 for v, p, s, d in rows:
-    if v != "NO-MEDIDO":
+    if v != "NO-APLICA":
         print("%-6s  %-*s  %s" % (v, width, "%s/%s" % (p, s), d))
-unmeasured = [r for r in rows if r[0] == "NO-MEDIDO"]
-if unmeasured:
-    print("\nNO-MEDIDO (no es PASS ni FAIL y NO cuenta como cobertura):")
-    for v, p, s, d in unmeasured:
+not_applicable = [r for r in rows if r[0] == "NO-APLICA"]
+if not_applicable:
+    print("\nNO-APLICA (el device no ofrece la config de la fila: no es PASS ni FAIL y NO cuenta como cobertura):")
+    for v, p, s, d in not_applicable:
         print("%-9s  %-*s  %s" % (v, width, "%s/%s" % (p, s), d))
 
-n = {k: sum(1 for r in rows if r[0] == k) for k in ("PASS", "FAIL", "HUMANO", "NO-MEDIDO")}
-print("\nresumen: %d PASS · %d FAIL · %d HUMANO · %d NO-MEDIDO"
-      % (n["PASS"], n["FAIL"], n["HUMANO"], n["NO-MEDIDO"]))
+n = {k: sum(1 for r in rows if r[0] == k) for k in ("PASS", "FAIL", "HUMANO", "NO-APLICA")}
+print("\nresumen: %d PASS · %d FAIL · %d HUMANO · %d NO-APLICA"
+      % (n["PASS"], n["FAIL"], n["HUMANO"], n["NO-APLICA"]))
 pending = [r for r in rows if r[0] == "HUMANO" and (r[1] in human_pending or r[1] == "plan")]
 sys.exit(1 if n["FAIL"] else (3 if pending else 0))
 PY
@@ -358,15 +363,25 @@ self_test() {
     # corrio haya pasado.
     expect "M9: la app corrio menos que el plan pedido" 1 "$tmp/verde.log" todo
 
-    # D11 — M10: las filas cuyo rate el runner no aplica son NO-MEDIDO: no mueven el exit (el verde
-    # lo deciden las demas) y NUNCA salen PASS, ni siquiera con ok=true.
+    # REQ-050 S3 — M10: NO-MEDIDO ya no existe (el runner aplica el rate de cada fila). Una fila que
+    # vuelve a traer medido=false es FAIL, tambien con ok=true: es la regresion a MINI-039.
     with_usb "$tmp/m10.log" 's/step=suite-2 ok=true/step=suite-2 ok=false medido=false motivo=rate-no-aplicado/; s/step=suite-3 ok=true/step=suite-3 ok=true medido=false motivo=rate-no-aplicado/'
-    expect "M10: filas no medidas, el resto sano" 0 "$tmp/m10.log"
-    expect_line "M10: suite-2 sale NO-MEDIDO" '^NO-MEDIDO +usb/suite-2 ' "$tmp/m10.log"
-    expect_line "M10: suite-3 con ok=true sale NO-MEDIDO" '^NO-MEDIDO +usb/suite-3 ' "$tmp/m10.log"
-    expect_no_line "M10: ninguna fila no medida sale PASS" '^PASS +usb/suite-[23] ' "$tmp/m10.log"
+    expect "M10: filas NO-MEDIDO, el resto sano" 1 "$tmp/m10.log"
+    expect_line "M10: suite-2 NO-MEDIDO sale FAIL" '^FAIL +usb/suite-2 +NO-MEDIDO ya no existe' "$tmp/m10.log"
+    expect_line "M10: suite-3 NO-MEDIDO con ok=true sale FAIL" '^FAIL +usb/suite-3 +NO-MEDIDO ya no existe' "$tmp/m10.log"
 
-    # D11 — M11: una fila de 48 k (medida) con ok=false sigue siendo FAIL.
+    # REQ-050 S3 — M20: una fila que el device no ofrece es NO-APLICA: no mueve el exit (el verde lo
+    # deciden las demas) y NUNCA sale PASS, ni siquiera con ok=true.
+    with_usb "$tmp/m20.log" 's/step=suite-2 ok=true/step=suite-2 ok=false aplica=false motivo=el-device-no-ofrece/; s/step=suite-3 ok=true/step=suite-3 ok=true aplica=false motivo=el-device-no-ofrece/'
+    expect "M20: filas no aplicables, el resto sano" 0 "$tmp/m20.log"
+    expect_line "M20: suite-2 sale NO-APLICA" '^NO-APLICA +usb/suite-2 ' "$tmp/m20.log"
+    expect_line "M20: suite-3 con ok=true sale NO-APLICA" '^NO-APLICA +usb/suite-3 ' "$tmp/m20.log"
+    expect_no_line "M20: ninguna fila no aplicable sale PASS" '^PASS +usb/suite-[23] ' "$tmp/m20.log"
+    # M20b: aplica=false fuera de una fila de la suite no puede hacer desaparecer un paso: FAIL.
+    with_usb "$tmp/m20b.log" 's/step=streaming-stats ok=true/step=streaming-stats ok=true aplica=false/'
+    expect "M20b: aplica=false fuera de la suite" 1 "$tmp/m20b.log"
+
+    # M11: una fila medida con ok=false sigue siendo FAIL.
     with_usb "$tmp/m11.log" 's/step=suite-1 ok=true/step=suite-1 ok=false rate-config=48000 motivo=sin-trafico/'
     expect "M11: fila de 48 k con ok=false" 1 "$tmp/m11.log"
     expect_line "M11: suite-1 sale FAIL" '^FAIL +usb/suite-1 ' "$tmp/m11.log"
@@ -411,7 +426,7 @@ self_test() {
     expect "M19c: conectar-otro ok=false" 1 "$tmp/m19c.log"
     expect_line "M19c: conectar-otro sale FAIL" '^FAIL +usb/conectar-otro ' "$tmp/m19c.log"
 
-    # M12: `medido=false` fuera de una fila de la suite no puede hacer desaparecer un paso: FAIL.
+    # M12: `medido=false` en un paso que no es fila de la suite tambien es FAIL (la marca esta retirada).
     with_usb "$tmp/m12.log" 's/step=streaming-stats ok=true/step=streaming-stats ok=false medido=false motivo=x/'
     expect "M12: medido=false fuera de la suite" 1 "$tmp/m12.log"
 
@@ -434,7 +449,7 @@ self_test() {
         echo "self-test: FAIL — $failures caso(s) con el veredicto equivocado" >&2
         return 1
     fi
-    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no medido y otra corrida"
+    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado y otra corrida"
 }
 
 # ---------------------------------------------------------------------------

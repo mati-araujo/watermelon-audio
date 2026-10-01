@@ -1,6 +1,8 @@
 package com.watermellonstudios.audio.internal.usb
 
 import com.watermellonstudios.audio.domain.usb.StreamPreference
+import com.watermellonstudios.audio.domain.usb.UsbCapabilitySnapshot
+import com.watermellonstudios.audio.domain.usb.UsbSnapshotCodec
 import com.watermellonstudios.audio.internal.bridge.AudioNativeBridge
 
 /**
@@ -35,6 +37,18 @@ internal interface UsbNativePort {
     fun setUsbStreamPreference(preference: StreamPreference): Boolean
     fun selectUsbAltsetting(interfaceNumber: Int, alternateSetting: Int, formatIndex: Int): Boolean
 
+    /**
+     * REQ-050 S3 (D17): la selección manual de reloj; 0 la limpia (selección automática). Pasa
+     * por acá, junto con la de altsetting, para que el test de host afirme el centinela.
+     */
+    fun selectUsbClockSource(clockSourceId: Int): Boolean
+
+    /**
+     * REQ-050 S3: el snapshot de descriptores ya decodificado, o null si no hay device. Tira si
+     * los bytes no se pueden decodificar (el manager lo registra y conserva el último bueno).
+     */
+    fun capabilitySnapshot(): UsbCapabilitySnapshot?
+
     /** Uno de los valores de `UsbStreamStartStatus` (AC-050.3). */
     fun startUsbStreamingWithModeStatus(sampleRate: Int, channels: Int, bitDepth: Int, streamingMode: Int): Int
 }
@@ -54,6 +68,9 @@ internal class BridgeUsbNativePort(private val bridge: AudioNativeBridge) : UsbN
         bridge.setUsbStreamPreference(preference)
     override fun selectUsbAltsetting(interfaceNumber: Int, alternateSetting: Int, formatIndex: Int): Boolean =
         bridge.selectUsbAltsetting(interfaceNumber, alternateSetting, formatIndex)
+    override fun selectUsbClockSource(clockSourceId: Int): Boolean = bridge.selectUsbClockSource(clockSourceId)
+    override fun capabilitySnapshot(): UsbCapabilitySnapshot? =
+        bridge.getUsbCapabilitySnapshot()?.let { UsbSnapshotCodec.decode(it) }
     override fun startUsbStreamingWithModeStatus(sampleRate: Int, channels: Int, bitDepth: Int, streamingMode: Int): Int =
         bridge.startUsbStreamingWithModeStatus(sampleRate, channels, bitDepth, streamingMode)
 }

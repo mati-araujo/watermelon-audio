@@ -1840,12 +1840,18 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
 
-    constexpr int STATS_SIZE = 19;
+    // REQ-050 S3 (D16): 21 valores. [19] y [20] van al FINAL para que 0..18 sigan
+    // significando lo mismo (UsbAudioManagerImpl lee los nuevos con getOrElse).
+    constexpr int STATS_SIZE = 21;
     jfloat statsArray[STATS_SIZE] = {0};
 
     if (backend) {
         auto* stats = backend->getTransferStats();
         if (stats) {
+            // 🔴 El ORDEN de estas dos lecturas es parte del contrato (AC-050.9): enviados
+            // ANTES que completados. Así, enviados − completados nunca supera lo que había en
+            // vuelo al leer enviados, y el runner, que le resta la cola declarada ([19]), no
+            // puede inventar una pérdida por una completación que entró entre las dos lecturas.
             statsArray[0] = static_cast<float>(stats->packetsSubmitted.load());
             statsArray[1] = static_cast<float>(stats->packetsCompleted.load());
             statsArray[2] = static_cast<float>(stats->packetsErrors.load());
@@ -1866,6 +1872,10 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
             statsArray[17] = static_cast<float>(stats->feedbackPacketsInvalid.load());
             statsArray[18] = static_cast<float>(stats->activeClockSourceId.load());
         }
+        // [19] paquetes de salida en vuelo (la cola declarada) y [20] el techo de latencia de
+        // salida que el backend declara, en ms (UsbLatencyMath.h). 0 sin stream.
+        statsArray[19] = static_cast<float>(backend->getOutputInFlightDepthPackets());
+        statsArray[20] = backend->getDeclaredOutputLatencyCeilingMs();
     }
 
     jfloatArray result = env->NewFloatArray(STATS_SIZE);
@@ -2085,8 +2095,24 @@ JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelectUsbAltsetting(
     JNIEnv* env, jobject thiz, jint interfaceNumber, jint alternateSetting,
     jint formatIndex) {
+    using watermelon_audio::UsbSelectionRequest;
+    // REQ-050 S3 (D17): (-1, -1, -1) EXACTO es "volver a la selección automática"; cualquier
+    // otro negativo se rechaza ANTES de buscar el backend. Sin backend no hay selección manual
+    // que limpiar: el estado ya es el automático, y eso es un éxito.
+    const auto request = watermelon_audio::classifyAltsettingRequest(
+        static_cast<int>(interfaceNumber), static_cast<int>(alternateSetting),
+        static_cast<int>(formatIndex));
+    if (request == UsbSelectionRequest::REJECT) {
+        LOGW("nativeSelectUsbAltsetting: rejected out-of-range request (%d, %d, %d)",
+             static_cast<int>(interfaceNumber), static_cast<int>(alternateSetting),
+             static_cast<int>(formatIndex));
+        return JNI_FALSE;
+    }
     auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
+    if (request == UsbSelectionRequest::CLEAR) {
+        return (!backend || backend->clearManualAltsettingSelection()) ? JNI_TRUE : JNI_FALSE;
+    }
     if (!backend) {
         LOGW("nativeSelectUsbAltsetting: no LibusbBackend");
         return JNI_FALSE;
@@ -2101,8 +2127,19 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelect
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelectUsbClockSource(
     JNIEnv* env, jobject thiz, jint clockSourceId) {
+    using watermelon_audio::UsbSelectionRequest;
+    // REQ-050 S3 (D17): 0 es "volver al reloj automático"; un negativo o un id que no entra
+    // en un byte se rechaza antes de buscar el backend.
+    const auto request = watermelon_audio::classifyClockSourceRequest(static_cast<int>(clockSourceId));
+    if (request == UsbSelectionRequest::REJECT) {
+        LOGW("nativeSelectUsbClockSource: rejected out-of-range id %d", static_cast<int>(clockSourceId));
+        return JNI_FALSE;
+    }
     auto& manager = watermelon_audio::BackendManager::getInstance();
     auto* backend = manager.getLibusbBackend();
+    if (request == UsbSelectionRequest::CLEAR) {
+        return (!backend || backend->clearManualClockSourceSelection()) ? JNI_TRUE : JNI_FALSE;
+    }
     if (!backend) {
         LOGW("nativeSelectUsbClockSource: no LibusbBackend");
         return JNI_FALSE;

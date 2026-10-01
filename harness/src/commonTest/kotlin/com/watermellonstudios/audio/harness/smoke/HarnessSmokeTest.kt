@@ -66,18 +66,22 @@ class HarnessSmokeTest {
         )
     }
 
-    /** Bug que atrapa (D11): una fila no medida emitida con `ok=true`, o sin la marca que lee el script. */
+    /**
+     * Bug que atrapa (REQ-050 S3): una fila no aplicable emitida con `ok=true`, o sin la marca que
+     * lee el script — se juzgaría como PASS.
+     */
     @Test
-    fun notMeasuredIsOkFalseWithTheMarkAndTheReason() {
+    fun notApplicableIsOkFalseWithTheMarkAndTheReason() {
         val lines = mutableListOf<String>()
-        val returned = SmokeReporter({ lines += it }, run = "r").notMeasured("usb", "suite-3", "rate-no-aplicado", "rate-config" to 96000)
+        val returned = SmokeReporter({ lines += it }, run = "r").notApplicable("usb", "suite-3", "no-aplicable", "rate-config" to 88200)
         assertEquals(false, returned)
         assertEquals(
-            listOf("HARNESS-SMOKE v=1 run=r panel=usb step=suite-3 ok=false medido=false motivo=rate-no-aplicado rate-config=96000"),
+            listOf("HARNESS-SMOKE v=1 run=r panel=usb step=suite-3 ok=false aplica=false motivo=no-aplicable rate-config=88200"),
             lines,
         )
-        // Nadie puede escribir la marca a mano con otro valor.
-        assertFailsWith<IllegalArgumentException> { HarnessSmoke.format("r", "usb", "suite-1", true, listOf("medido" to true)) }
+        // Nadie puede escribir la marca a mano con otro valor, ni la vieja de D11.
+        assertFailsWith<IllegalArgumentException> { HarnessSmoke.format("r", "usb", "suite-1", true, listOf("aplica" to true)) }
+        assertFailsWith<IllegalArgumentException> { HarnessSmoke.format("r", "usb", "suite-1", true, listOf("medido" to false)) }
     }
 
     /** Bug que atrapa: un reporter que emite un `ok` y le devuelve otro a quien decide el paso siguiente. */
