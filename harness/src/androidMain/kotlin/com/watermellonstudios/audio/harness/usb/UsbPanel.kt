@@ -149,14 +149,15 @@ fun UsbPanel(
                 )
             }
             results.forEachIndexed { i, res ->
-                // El mismo veredicto D11 que la línea HARNESS-SMOKE, no el `status` crudo de la librería.
+                // El mismo veredicto que la línea HARNESS-SMOKE, no el `status` crudo de la librería.
                 val verdict = UsbHarness.suiteVerdict(res)
                 Text(
-                    "suite ${i + 1}: ${res.testType.displayName} @${res.config.sampleRate} → " +
+                    "suite ${i + 1}: ${res.testType.displayName} @${res.config.sampleRate}/${res.config.bitDepth}bit " +
+                        "(stream ${res.streamSampleRateHz}) → " +
                         when (verdict) {
                             SuiteRowVerdict.PASS -> "PASS"
                             SuiteRowVerdict.FAIL -> "FAIL (${res.status})"
-                            SuiteRowVerdict.NOT_MEASURED -> "NO-MEDIDO (el runner no aplica el rate)"
+                            SuiteRowVerdict.NOT_APPLICABLE -> "NO-APLICA (el device no la ofrece)"
                         } + (res.errorMessage?.let { " — $it" } ?: ""),
                     color = if (verdict == SuiteRowVerdict.FAIL) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                     style = MaterialTheme.typography.bodySmall,

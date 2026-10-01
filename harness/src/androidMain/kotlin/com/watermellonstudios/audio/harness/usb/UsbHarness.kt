@@ -15,6 +15,7 @@ import com.watermellonstudios.audio.domain.usb.UsbCapabilitySnapshot
 import com.watermellonstudios.audio.domain.usb.UsbConnectionState
 import com.watermellonstudios.audio.domain.usb.UsbDeviceEvent
 import com.watermellonstudios.audio.domain.usb.UsbResult
+import com.watermellonstudios.audio.domain.usb.UsbStreamRestore
 import com.watermellonstudios.audio.domain.usb.UsbTestPresets
 import com.watermellonstudios.audio.domain.usb.UsbTestResult
 import com.watermellonstudios.audio.domain.usb.UsbTestStatus
@@ -399,16 +400,26 @@ class UsbHarness(private val context: Context) {
         // es un rate mal negociado: FAIL.
         val measured = s?.currentSampleRateHz
         val contradicts = SuiteRowVerdict.rateContradicts(measured, STREAM_RATE_HZ)
+        // REQ-050 S3 (D16): los dos valores nuevos del array de stats tienen que cruzar el JNI en el
+        // device — en el host no hay backend que los produzca. Si [19] y [20] se cruzaran, el techo
+        // saldría 192 y lo en vuelo 61: el chequeo de que la latencia entra bajo el techo lo ve.
+        val declared = s?.declaredMaxLatencyMs ?: 0.0
+        val inFlight = s?.packetsInFlight ?: 0L
+        val underCeiling = s != null && declared > 0.0 && s.currentLatencyMs <= declared
         return r.report(
-            PANEL, step, s != null && s.packetsCompleted > 0 && !contradicts,
-            "enviados" to s?.packetsSubmitted, "completados" to s?.packetsCompleted,
+            PANEL, step, s != null && s.packetsCompleted > 0 && !contradicts && inFlight > 0 && underCeiling,
+            "enviados" to s?.packetsSubmitted, "completados" to s?.packetsCompleted, "en-vuelo" to inFlight,
             "errores" to s?.packetsErrors, "underruns" to s?.underruns, "overruns" to s?.overruns,
             "rate-pedido" to STREAM_RATE_HZ, "rate-real" to measured,
             "rate-verificable" to (measured != null && measured > 0f), "latencia-ms" to s?.avgLatencyMs,
+            "techo-ms" to declared,
             "motivo" to when {
                 s == null -> "sin-stats"
                 contradicts -> "rate-real-distinto-del-pedido"
                 s.packetsCompleted <= 0 -> "sin-paquetes"
+                inFlight <= 0 -> "el-backend-no-declaro-lo-en-vuelo"
+                declared <= 0.0 -> "el-backend-no-declaro-su-techo"
+                !underCeiling -> "latencia-por-encima-del-techo-declarado"
                 else -> null
             },
         )
@@ -421,8 +432,13 @@ class UsbHarness(private val context: Context) {
     }
 
     /**
-     * AC-2: la suite estándar de `UsbAudioTestRunner`. Una línea `step=suite-<n>` por resultado
-     * (su `ok` es `status == PASSED`: un test que falla se ve como falla) y un `step=suite` final.
+     * AC-2 / REQ-050 S3 (AC-050.8, AC-050.10): la suite estándar de `UsbAudioTestRunner`. Una línea
+     * `step=suite-<n>` por resultado y un `step=suite` final.
+     *
+     * Desde S3 el runner mide cada fila a su config (reabre el stream si hace falta y lo restaura),
+     * así que cada fila sale PASS, FAIL o, si el device no la ofrece, NO-APLICA (`aplica=false`).
+     * La línea lleva el rate al que corrió el stream, el techo de latencia contra el que se juzgó,
+     * lo que estaba en vuelo y el resultado de la restauración.
      */
     suspend fun runSuite(r: SmokeReporter, device: UsbAudioDevice, onResult: (UsbTestResult) -> Unit = {}): Boolean {
         val report = runner.runTestSuite(
@@ -438,22 +454,23 @@ class UsbHarness(private val context: Context) {
             val real = res.statsSamples.lastOrNull()?.currentSampleRateHz
             val first = res.statsSamples.firstOrNull()?.packetsCompleted
             val last = res.statsSamples.lastOrNull()?.packetsCompleted
-            // D11: tres veredictos. El PASSED de la librería no alcanza (también sale con las stats
-            // nulas o el stream trabado), y una fila cuyo rate el runner no aplicó no midió ese rate.
             val verdict = suiteVerdict(res)
             val fields = arrayOf<Pair<String, Any?>>(
                 "test" to res.testType, "estado" to res.status,
                 "trafico" to (first != null && last != null && last > first), "muestras" to res.statsSamples.size,
-                "rate-config" to res.config.sampleRate, "rate-stream" to STREAM_RATE_HZ,
+                "rate-config" to res.config.sampleRate, "rate-stream" to res.streamSampleRateHz,
                 "bits-config" to res.config.bitDepth, "rate-real" to real,
-                "paquetes" to res.totalPackets, "ok-paquetes" to res.successfulPackets,
-                "underruns" to res.underruns, "overruns" to res.overruns, "errores" to res.errors,
-                "latencia-ms" to res.avgLatencyMs, "mensaje" to res.errorMessage,
+                "paquetes" to res.totalPackets, "ok-paquetes" to res.successfulPackets, "en-vuelo" to res.packetsInFlight,
+                "exito-pct" to res.successRate, "underruns" to res.underruns, "overruns" to res.overruns,
+                "errores" to res.errors, "latencia-ms" to res.avgLatencyMs, "techo-ms" to res.latencyLimitMs,
+                "restauracion" to res.streamRestore, "restauracion-msg" to res.streamRestoreMessage,
+                "traba-ms" to stallMs(res),
+                "mensaje" to res.errorMessage,
             )
             val step = "suite-${i + 1}"
             when (verdict) {
-                SuiteRowVerdict.NOT_MEASURED ->
-                    r.notMeasured(PANEL, step, "rate-no-aplicado:el-runner-ignora-config.sampleRate", *fields)
+                SuiteRowVerdict.NOT_APPLICABLE ->
+                    r.notApplicable(PANEL, step, "el-device-no-ofrece-la-config-de-la-fila", *fields)
                 SuiteRowVerdict.PASS -> {
                     measured++
                     passed++
@@ -461,24 +478,18 @@ class UsbHarness(private val context: Context) {
                 }
                 SuiteRowVerdict.FAIL -> {
                     measured++
-                    r.report(
-                        PANEL, step, false, *fields,
-                        "motivo" to when {
-                            first == null || last == null || last <= first -> "sin-trafico"
-                            SuiteRowVerdict.rateContradicts(real, STREAM_RATE_HZ) -> "rate-real-distinto-del-pedido"
-                            else -> "estado-${res.status}"
-                        },
-                    )
+                    r.report(PANEL, step, false, *fields, "motivo" to suiteFailureReason(res))
                 }
             }
         }
-        // El verde de la suite lo deciden las filas MEDIDAS (D11): tiene que haber al menos una, y
-        // todas tienen que pasar. Las no medidas se listan aparte y no cuentan como cobertura.
+        // El verde de la suite lo deciden las filas MEDIDAS: tiene que haber al menos una, y todas
+        // tienen que pasar. Las no aplicables se listan aparte y no cuentan como cobertura.
         val expected = UsbTestPresets.STANDARD_SUITE.size
         return r.report(
             PANEL, "suite", report.results.size == expected && measured > 0 && passed == measured,
             "tests" to report.results.size, "medidas" to measured, "pasaron" to passed,
-            "no-medidas" to report.results.size - measured, "esperados" to expected,
+            "no-aplican" to report.results.size - measured, "esperados" to expected,
+            "stream-despues" to manager.connectionState.value,
         )
     }
 
@@ -542,7 +553,7 @@ class UsbHarness(private val context: Context) {
     companion object {
         const val PANEL = "usb"
 
-        /** El rate al que el harness abre el stream USB. La suite mide ESTE stream (D11). */
+        /** El rate al que el harness abre el stream USB (la suite lo restaura a éste después de cada fila). */
         const val STREAM_RATE_HZ = 48_000
         private const val RELEASE_DISCONNECT_MS = 1000L
 
@@ -553,15 +564,34 @@ class UsbHarness(private val context: Context) {
         /** Techo para que la librería pida el diálogo. Es una espera por condición: no se duerme. */
         private const val DIALOG_REQUESTED_MS = 5000L
 
-        /** El veredicto D11 de una fila, con los datos del resultado de la librería. */
+        /** El veredicto de una fila (REQ-050 S3), con los datos del resultado de la librería. */
         fun suiteVerdict(res: UsbTestResult): SuiteRowVerdict = SuiteRowVerdict.of(
             libraryPassed = res.status == UsbTestStatus.PASSED,
+            libraryNotApplicable = res.status == UsbTestStatus.NOT_APPLICABLE,
             firstCompleted = res.statsSamples.firstOrNull()?.packetsCompleted,
             lastCompleted = res.statsSamples.lastOrNull()?.packetsCompleted,
             measuredRateHz = res.statsSamples.lastOrNull()?.currentSampleRateHz,
             rowRateHz = res.config.sampleRate,
-            streamRateHz = STREAM_RATE_HZ,
+            streamRateHz = res.streamSampleRateHz,
+            restored = res.streamRestore != UsbStreamRestore.FAILED,
+            longestStallMs = stallMs(res),
         )
+
+        /** El tramo más largo sin paquetes completados, con el reloj de las stats del device. */
+        private fun stallMs(res: UsbTestResult): Long =
+            SuiteRowVerdict.longestStallMs(res.statsSamples.map { it.timestampMs to it.packetsCompleted })
+
+        private fun suiteFailureReason(res: UsbTestResult): String =
+            SuiteRowVerdict.failureReason(
+                libraryPassed = res.status == UsbTestStatus.PASSED,
+                firstCompleted = res.statsSamples.firstOrNull()?.packetsCompleted,
+                lastCompleted = res.statsSamples.lastOrNull()?.packetsCompleted,
+                measuredRateHz = res.statsSamples.lastOrNull()?.currentSampleRateHz,
+                rowRateHz = res.config.sampleRate,
+                streamRateHz = res.streamSampleRateHz,
+                restored = res.streamRestore != UsbStreamRestore.FAILED,
+                longestStallMs = stallMs(res),
+            )?.let { if (it == "estado-de-la-libreria") "estado-${res.status}" else it } ?: "estado-${res.status}"
 
         fun describe(d: UsbAudioDevice): String =
             "${d.vidPid}|${d.displayName}|UAC${d.capabilities.uacVersion}|captura=${d.capabilities.hasCapture}"

@@ -4,11 +4,12 @@
 # Origen: moto g42 (Android 12) por adb Wi-Fi, UGREEN CM720 (2b89:64ec, UAC2) enchufada y con el
 # permiso USB ya dado, plan `todo`, 2026-09-30, run `smoke-20260930-164444-43299`: las lineas del tag de logcat del
 # harness, filtradas por su run. Pasa todo lo automatico y el camino USB entero (libusb con fd real,
-# backend LIBUSB, streaming con 16 320 paquetes, 0 errores, 0 underruns); suite-2/3 son NO-MEDIDO
-# (D11) y suite-1 da FAIL por el umbral del runner (latencia 37,3 ms > maxAllowedLatencyMs 20).
+# backend LIBUSB, streaming con 16 320 paquetes, 0 errores, 0 underruns); suite-2/3 salieron NO-MEDIDO
+# (D11) y suite-1 FAIL por el umbral del runner (latencia 37,3 ms > maxAllowedLatencyMs 20).
 # Esos FAIL son reales y se quedan: el control del self-test es que el juez de EXACTAMENTE esto.
+# Desde REQ-050 S3 NO-MEDIDO ya no existe, asi que suite-2/3 tambien salen FAIL: el exit no cambia.
 #
-# exit-esperado: 1  (usb/suite-1 y usb/suite: FAIL del runner)
+# exit-esperado: 1  (usb/suite-1, usb/suite y, desde REQ-050 S3, usb/suite-2 y usb/suite-3)
 HARNESS-SMOKE v=1 run=smoke-20260930-164444-43299 panel=plan step=inicio ok=true plan=salida,captura,sf2,sf3,usb
 HARNESS-SMOKE v=1 run=smoke-20260930-164444-43299 panel=salida step=start ok=true lifecycle=RUNNING error=-
 HARNESS-SMOKE v=1 run=smoke-20260930-164444-43299 panel=salida step=stream ok=true rate=48000 buffer=240 canales=2 latencia-ms=5.613853931427002 motivo=-
