@@ -18,6 +18,9 @@ import com.watermellonstudios.audio.domain.usb.UsbDeviceCompatibility
 import com.watermellonstudios.audio.internal.bridge.AudioNativeBridge
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import com.watermellonstudios.audio.internal.bridge.UsbStreamStartStatus
 import kotlin.coroutines.resume
 
 /**
@@ -27,11 +30,27 @@ import kotlin.coroutines.resume
  */
 internal class UsbAudioManagerImpl(
     private val context: Context,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob()),
+    /**
+     * Las operaciones nativas de conexión y streaming (REQ-050 S2, D14). La costura existe para
+     * los tests de host del contrato de conexión; en producción es siempre el bridge.
+     */
+    private val nativePort: UsbNativePort = BridgeUsbNativePort(AudioNativeBridge.getInstance()),
 ) : IUsbAudioManager {
 
     // Native bridge instance for USB audio operations
     private val nativeBridge = AudioNativeBridge.getInstance()
+
+    /**
+     * Serializa [connectDevice] (REQ-050 S2, D7). Lo toman el connect explícito y el auto-connect
+     * de la librería por igual: antes corrían en paralelo y el último re-inicializaba el backend
+     * libusb con otro fd en pleno streaming (MINI-041 #3).
+     *
+     * Cubre también la espera del diálogo de permiso, que no tiene techo (D13): mientras el
+     * usuario no conteste, cualquier otro `connectDevice` espera. Cancelar a quien llamó suelta
+     * el lock.
+     */
+    private val connectMutex = Mutex()
 
     companion object {
         private const val TAG = "UsbAudioManager"
@@ -41,6 +60,9 @@ internal class UsbAudioManagerImpl(
         private const val USB_CLASS_AUDIO = 1
         private const val USB_SUBCLASS_AUDIOCONTROL = 1
         private const val USB_SUBCLASS_AUDIOSTREAMING = 2
+
+        /** `EngineState::Stopped` de `core/AudioEngine.h`. */
+        private const val ENGINE_STATE_STOPPED = 0
     }
 
     // Android USB Manager
@@ -238,8 +260,33 @@ internal class UsbAudioManagerImpl(
 
     // ==================== Device Selection ====================
 
-    override suspend fun connectDevice(device: UsbAudioDevice): UsbResult<Unit> {
+    override suspend fun connectDevice(device: UsbAudioDevice): UsbResult<Unit> =
+        connectMutex.withLock { connectDeviceLocked(device) }
+
+    /** El cuerpo de [connectDevice], con [connectMutex] tomado. */
+    private suspend fun connectDeviceLocked(device: UsbAudioDevice): UsbResult<Unit> {
         Log.d(TAG, "Connecting to device: ${device.displayName}")
+
+        // D7: un device ya conectado (o transmitiendo) no se vuelve a abrir. El mismo device es
+        // éxito sin tocar nada; otro es DEVICE_BUSY. Antes el segundo pedido re-inicializaba el
+        // backend con otro fd y destruía el stream vivo.
+        val current = _selectedDevice.value
+        val state = _connectionState.value
+        if (current != null &&
+            (state == UsbConnectionState.CONNECTED || state == UsbConnectionState.STREAMING) &&
+            nativePort.isUsbDeviceInitialized()
+        ) {
+            return if (current.deviceId == device.deviceId) {
+                Log.i(TAG, "connectDevice: ${device.displayName} is already connected ($state); nothing to do")
+                UsbResult.Success(Unit)
+            } else {
+                Log.w(TAG, "connectDevice: ${device.displayName} refused, ${current.displayName} is connected")
+                UsbResult.Failure(
+                    UsbAudioError.DEVICE_BUSY,
+                    "${current.displayName} is already connected; disconnect it first",
+                )
+            }
+        }
 
         // Find the actual USB device
         val usbDevice = findUsbDevice(device.deviceId)
@@ -280,15 +327,27 @@ internal class UsbAudioManagerImpl(
         _connectionState.value = UsbConnectionState.PERMISSION_GRANTED
         _deviceEvents.emit(UsbDeviceEvent.PermissionGranted(device))
 
+        // D6: el motor va ANTES que el device (AC-050.4). Sin motor, el backend libusb quedaría
+        // en el BackendManager de respaldo y se perdería al crearse el motor.
+        if (!prepareEngineForUsb()) {
+            _connectionState.value = UsbConnectionState.ERROR
+            _deviceEvents.emit(UsbDeviceEvent.Error(device.deviceId, UsbAudioError.NO_ENGINE))
+            return UsbResult.Failure(
+                UsbAudioError.NO_ENGINE,
+                "The audio engine could not be created; the USB device was not initialized",
+            )
+        }
+
         // Open connection
         return try {
             _connectionState.value = UsbConnectionState.CONNECTING
 
             val connection = usbManager.openDevice(usbDevice)
-                ?: return UsbResult.Failure(
-                    UsbAudioError.INTERNAL_ERROR,
-                    "Failed to open USB device"
-                )
+            if (connection == null) {
+                // Antes volvía dejando el estado en CONNECTING (review de REQ-050 S2).
+                _connectionState.value = UsbConnectionState.ERROR
+                return UsbResult.Failure(UsbAudioError.INTERNAL_ERROR, "Failed to open USB device")
+            }
 
             currentConnection = connection
             currentFileDescriptor = connection.fileDescriptor
@@ -331,6 +390,27 @@ internal class UsbAudioManagerImpl(
             )
             UsbResult.Failure(UsbAudioError.INTERNAL_ERROR, e.message)
         }
+    }
+
+    /**
+     * D6 + D12 (REQ-050 S2). Con el motor ausente o PARADO: lo crea si hace falta e instala su
+     * callback en el `BackendManager`, para que el backend libusb que se inicializa después
+     * nazca en el manager del motor y con a quién pedirle audio. Con el motor CORRIENDO no lo
+     * toca: el nativo rechaza reconfigurarlo con el stream vivo, el motor ya existe (así que el
+     * backend cae en el manager correcto), y si al final falta el callback, `startStreaming` lo
+     * dice con [UsbAudioError.NO_AUDIO_CALLBACK].
+     *
+     * @return `false` si después de esto el motor sigue sin existir.
+     */
+    private fun prepareEngineForUsb(): Boolean {
+        if (nativePort.isEngineInitialized() && nativePort.engineState() != ENGINE_STATE_STOPPED) {
+            Log.i(TAG, "Engine is running: USB connect leaves it untouched (D12)")
+            return true
+        }
+        nativePort.installEngineCallback()
+        val ok = nativePort.isEngineInitialized()
+        if (!ok) Log.e(TAG, "Engine could not be created before initializing the USB device")
+        return ok
     }
 
     override suspend fun disconnectDevice() {
@@ -924,7 +1004,7 @@ internal class UsbAudioManagerImpl(
                 compatibility.isAllowed -> {
                     Log.i(TAG, "Compatible device detected, auto-connect: $autoConnectEnabled")
                     Log.i(TAG, "  selectedDevice before auto-connect: ${_selectedDevice.value?.displayName}")
-                    Log.i(TAG, "  isDeviceReady before auto-connect: ${nativeBridge.isUsbDeviceInitialized()}")
+                    Log.i(TAG, "  isDeviceReady before auto-connect: ${nativePort.isUsbDeviceInitialized()}")
 
                     // Auto-connect if enabled and not already connected.
                     //
@@ -941,7 +1021,7 @@ internal class UsbAudioManagerImpl(
                         Log.i(TAG, "Auto-connecting to ${audioDevice.displayName} (permission already granted)")
                         val result = connectDevice(audioDevice)
                         Log.i(TAG, "Auto-connect result: $result")
-                        Log.i(TAG, "  isDeviceReady after auto-connect: ${nativeBridge.isUsbDeviceInitialized()}")
+                        Log.i(TAG, "  isDeviceReady after auto-connect: ${nativePort.isUsbDeviceInitialized()}")
 
                         result.onSuccess {
                             Log.i(TAG, "Auto-connect successful, emitting CompatibleDeviceDetected")
@@ -962,7 +1042,7 @@ internal class UsbAudioManagerImpl(
                     } else {
                         // Not auto-connecting, emit event immediately
                         Log.w(TAG, "Skipping auto-connect: autoConnectEnabled=$autoConnectEnabled, selectedDevice=${_selectedDevice.value?.displayName}")
-                        Log.w(TAG, "  isDeviceReady (skip path): ${nativeBridge.isUsbDeviceInitialized()}")
+                        Log.w(TAG, "  isDeviceReady (skip path): ${nativePort.isUsbDeviceInitialized()}")
                         _deviceEvents.emit(UsbDeviceEvent.CompatibleDeviceDetected(audioDevice, compatibility))
                     }
                 }
@@ -1007,12 +1087,12 @@ internal class UsbAudioManagerImpl(
         Log.d(TAG, "Initialize native USB: fd=$fileDescriptor, path=$usbfsPath")
 
         return try {
-            val success = nativeBridge.initializeUsbDevice(fileDescriptor, usbfsPath)
+            val success = nativePort.initializeUsbDevice(fileDescriptor, usbfsPath)
             if (success) {
                 Log.i(TAG, "Native USB device initialized successfully")
 
                 // Parse descriptors to get full capabilities
-                val capsArray = nativeBridge.parseUsbDescriptors()
+                val capsArray = nativePort.parseUsbDescriptors()
                 if (capsArray != null) {
                     Log.d(TAG, "USB Capabilities parsed: ${capsArray.contentToString()}")
                 }
@@ -1030,9 +1110,9 @@ internal class UsbAudioManagerImpl(
         Log.d(TAG, "Close native USB")
         try {
             // Stop streaming if active
-            if (nativeBridge.isUsbDeviceInitialized()) {
-                nativeBridge.stopUsbStreaming()
-                nativeBridge.closeUsbDevice()
+            if (nativePort.isUsbDeviceInitialized()) {
+                nativePort.stopUsbStreaming()
+                nativePort.closeUsbDevice()
                 Log.i(TAG, "Native USB device closed")
             }
         } catch (e: Exception) {
@@ -1098,22 +1178,22 @@ internal class UsbAudioManagerImpl(
             try {
                 val preference = (_currentStreamPreference ?: StreamPreference())
                     .copy(preferredSampleRate = sampleRate)
-                nativeBridge.setUsbStreamPreference(preference)
+                nativePort.setUsbStreamPreference(preference)
                 _selectedAltsetting?.let {
-                    nativeBridge.selectUsbAltsetting(
+                    nativePort.selectUsbAltsetting(
                         it.interfaceNumber,
                         it.alternateSetting,
                         it.formatIndex
                     )
                 }
 
-                val success = nativeBridge.startUsbStreamingWithMode(
+                val status = nativePort.startUsbStreamingWithModeStatus(
                     sampleRate,
                     channels,
                     bitDepth,
                     streamingMode.id
                 )
-                if (success) {
+                if (status == UsbStreamStartStatus.OK) {
                     // Acquire wake lock to prevent CPU from sleeping during streaming
                     acquireWakeLock()
 
@@ -1131,14 +1211,45 @@ internal class UsbAudioManagerImpl(
                     Log.i(TAG, "USB streaming started: ${sampleRate}Hz, ${channels}ch, ${bitDepth}bit, mode=${streamingMode.displayName}")
                     UsbResult.Success(Unit)
                 } else {
-                    Log.e(TAG, "Failed to start USB streaming")
-                    UsbResult.Failure(UsbAudioError.STREAMING_ERROR, "Failed to start streaming")
+                    val failure = streamStartFailure(status)
+                    Log.e(TAG, "Failed to start USB streaming: ${failure.error} (native status $status)")
+                    failure
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Exception starting USB streaming: ${e.message}", e)
                 UsbResult.Failure(UsbAudioError.INTERNAL_ERROR, e.message)
             }
         }
+    }
+
+    /**
+     * La causa con que el nativo rechazó el arranque, como error tipado (REQ-050 S2, AC-050.3).
+     * Antes todo salía como [UsbAudioError.STREAMING_ERROR]; ahora ése queda sólo para el único
+     * caso en que es la causa verdadera: libusb no arrancó.
+     */
+    private fun streamStartFailure(status: Int): UsbResult.Failure = when (status) {
+        UsbStreamStartStatus.NO_ENGINE -> UsbResult.Failure(
+            UsbAudioError.NO_ENGINE, "The audio engine does not exist",
+        )
+        UsbStreamStartStatus.NO_CALLBACK -> UsbResult.Failure(
+            UsbAudioError.NO_AUDIO_CALLBACK,
+            "The engine callback is not installed on the USB backend: stop the engine and switch it " +
+                "to the LIBUSB backend before streaming",
+        )
+        UsbStreamStartStatus.NOT_INITIALIZED -> UsbResult.Failure(
+            UsbAudioError.NOT_CONNECTED, "The native USB device is not initialized",
+        )
+        UsbStreamStartStatus.NO_BACKEND -> UsbResult.Failure(
+            UsbAudioError.INITIALIZATION_FAILED,
+            "The USB backend is not registered in the engine's backend manager",
+        )
+        UsbStreamStartStatus.INVALID_MODE -> UsbResult.Failure(
+            UsbAudioError.UNSUPPORTED_FORMAT, "Unknown streaming mode",
+        )
+        UsbStreamStartStatus.START_FAILED -> UsbResult.Failure(
+            UsbAudioError.STREAMING_ERROR, "The USB backend failed to start",
+        )
+        else -> UsbResult.Failure(UsbAudioError.INTERNAL_ERROR, "Unknown native start status $status")
     }
 
     /**
@@ -1150,7 +1261,7 @@ internal class UsbAudioManagerImpl(
                 // Stop health checks first
                 stopHealthChecks()
 
-                nativeBridge.stopUsbStreaming()
+                nativePort.stopUsbStreaming()
 
                 // Release wake lock
                 releaseWakeLock()
@@ -1247,7 +1358,7 @@ internal class UsbAudioManagerImpl(
     /**
      * Check if USB device is ready for streaming.
      */
-    override fun isDeviceReady(): Boolean = nativeBridge.isUsbDeviceInitialized()
+    override fun isDeviceReady(): Boolean = nativePort.isUsbDeviceInitialized()
 
     /**
      * Check if the connected device supports full-duplex.

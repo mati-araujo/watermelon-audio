@@ -82,6 +82,26 @@ interface IUsbAudioManager {
     /**
      * Request permission and connect to a USB Audio device.
      *
+     * Contrato (REQ-050):
+     * - **Serializado.** Un segundo `connectDevice` (el explícito, o el auto-connect de la
+     *   librería) espera al que está en curso. Si el MISMO device ya quedó conectado o
+     *   transmitiendo, devuelve éxito sin tocar nada. Si es OTRO device, falla con
+     *   [UsbAudioError.DEVICE_BUSY]: para cambiar de device, [disconnectDevice] primero.
+     * - **El motor va antes que el device.** Con el motor ausente o parado, lo crea e instala su
+     *   callback (`setUseBackendManager(true)`) antes de inicializar el device; si no puede
+     *   crearlo, falla con [UsbAudioError.NO_ENGINE]. Con el motor corriendo no lo toca: en ese
+     *   caso hay que pararlo y pasar a LIBUSB antes de [startStreaming], o éste devuelve
+     *   [UsbAudioError.NO_AUDIO_CALLBACK].
+     * - **La espera del diálogo de permiso no tiene techo**, y mientras dura cualquier otro
+     *   `connectDevice` espera. La corta quien llama cancelando la corrutina, y cancelar suelta
+     *   la serialización.
+     * - **[disconnectDevice] NO se serializa con esto.** Un disconnect que llega mientras un
+     *   `connectDevice` espera el permiso no tiene nada que cerrar todavía: si el usuario acepta
+     *   después, la conexión queda hecha. Para abortar una conexión en curso, cancelá la
+     *   corrutina de `connectDevice`.
+     * - Si la conexión falla DESPUÉS de preparar el motor (el device no abre o no inicializa),
+     *   el motor queda en modo BackendManager: la librería no sabe en qué modo estaba antes.
+     *
      * @param device The device to connect to
      * @return Result indicating success or failure
      */
@@ -148,6 +168,11 @@ interface IUsbAudioManager {
     /**
      * Start USB audio streaming with the current device.
      * Must be called after [connectDevice] succeeds.
+     *
+     * Un rechazo nombra su causa (REQ-050, AC-050.3): [UsbAudioError.NO_ENGINE] sin motor,
+     * [UsbAudioError.NO_AUDIO_CALLBACK] si el motor no le instaló su callback al backend USB,
+     * [UsbAudioError.NOT_CONNECTED] sin device inicializado. [UsbAudioError.STREAMING_ERROR]
+     * queda para cuando libusb no arrancó.
      *
      * @param sampleRate Sample rate in Hz (44100, 48000, 96000)
      * @param channels Number of channels (1, 2)
