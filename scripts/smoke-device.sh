@@ -66,8 +66,12 @@ EXPECTED = {
     "captura": ["start", "nivel", "stop"],
     "sf2": ["fixture", "carga", "preset", "nota", "descarga", "no-soundfont"],
     "sf3": ["fixture", "carga", "preset", "nota", "descarga"],
-    "usb": ["motor-parado", "dispositivos", "motor-callback", "permiso", "conectar", "capacidades", "descriptores", "backend",
-            "streaming-start", "streaming-stats", "suite", "streaming-stop",
+    # REQ-050 S2: `motor-callback` va DESPUES de conectar (lo prepara la libreria dentro de
+    # connectDevice, D6), asi que depende del permiso. `wake-lock` (D9): WAKE_LOCK llega por el
+    # merge del manifest de :audio, porque el harness no lo declara.
+    "usb": ["motor-parado", "dispositivos", "permiso", "conectar", "motor-callback", "capacidades", "descriptores", "backend",
+            "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo", "conectar-otro",
+            "suite", "streaming-stop",
             "backend-restaurado", "desconectar"],
 }
 ORDER = ["salida", "captura", "sf2", "sf3", "usb"]
@@ -328,7 +332,8 @@ self_test() {
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=esperando-humano ok=false accion=aceptar_el_dialogo"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=broadcast-falso ok=true origen=adb enviados=2"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=permiso-falso ok=true granted=1 granted-sin-permiso-en-usbmanager=0"
-        for s in permiso conectar capacidades descriptores backend streaming-start streaming-stats \
+        for s in permiso conectar capacidades descriptores backend wake-lock streaming-start streaming-stats \
+                 reconectar-mismo conectar-otro \
                  suite-1 suite-2 suite-3 suite streaming-stop backend-restaurado desconectar; do
             echo "HARNESS-SMOKE v=1 run=$run panel=usb step=$s ok=true"
         done
@@ -385,6 +390,26 @@ self_test() {
     with_usb "$tmp/m14.log" '/step=motor-callback /d'
     expect "M14: falta usb/motor-callback" 1 "$tmp/m14.log"
     expect_line "M14: motor-callback sale FALTA" '^FAIL +usb/motor-callback +FALTA' "$tmp/m14.log"
+
+    # REQ-050 S2 — M18: sin wake-lock (el permiso no llego por el merge, D9) es FAIL por ESE paso,
+    # tanto si falta la linea como si dice ok=false. Mata el mutante que lo saca de EXPECTED.
+    with_usb "$tmp/m18.log" '/step=wake-lock /d'
+    expect "M18: falta usb/wake-lock" 1 "$tmp/m18.log"
+    expect_line "M18: wake-lock sale FALTA" '^FAIL +usb/wake-lock +FALTA' "$tmp/m18.log"
+    with_usb "$tmp/m18b.log" 's/step=wake-lock ok=true/step=wake-lock ok=false motivo=WAKE_LOCK-no-llego-por-el-merge/'
+    expect "M18b: wake-lock ok=false" 1 "$tmp/m18b.log"
+
+    # REQ-050 S2 — M19: AC-050.5 en device. Reconectar el mismo device con el stream vivo y pedir
+    # otro device son pasos obligatorios: si faltan o dicen ok=false (re-init, fd cambiado, sin
+    # DEVICE_BUSY), es FAIL por ESE paso.
+    with_usb "$tmp/m19.log" '/step=reconectar-mismo /d'
+    expect "M19: falta usb/reconectar-mismo" 1 "$tmp/m19.log"
+    expect_line "M19: reconectar-mismo sale FALTA" '^FAIL +usb/reconectar-mismo +FALTA' "$tmp/m19.log"
+    with_usb "$tmp/m19b.log" 's/step=reconectar-mismo ok=true/step=reconectar-mismo ok=false motivo=cambio-el-fd:re-init/'
+    expect "M19b: reconectar-mismo ok=false" 1 "$tmp/m19b.log"
+    with_usb "$tmp/m19c.log" 's/step=conectar-otro ok=true/step=conectar-otro ok=false motivo=no-dio-DEVICE_BUSY/'
+    expect "M19c: conectar-otro ok=false" 1 "$tmp/m19c.log"
+    expect_line "M19c: conectar-otro sale FAIL" '^FAIL +usb/conectar-otro ' "$tmp/m19c.log"
 
     # M12: `medido=false` fuera de una fila de la suite no puede hacer desaparecer un paso: FAIL.
     with_usb "$tmp/m12.log" 's/step=streaming-stats ok=true/step=streaming-stats ok=false medido=false motivo=x/'

@@ -1673,6 +1673,18 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeInitia
 
     LOGI("AudioNativeBridge.initializeUsbDevice: fd=%d, path=%s", fileDescriptor, pathChars.c_str());
 
+    // 🔴 REQ-050 S2 (AC-050.4): `ensureEngine()` ANTES de tocar el BackendManager, por la
+    // misma razon que nativeSetUsbStreamingMode. Sin motor, getInstance() devuelve el
+    // STATIC DE FALLBACK: el backend libusb quedaba registrado ahi, wma_engine_create
+    // instalaba otro manager como global y el device se perdia sin error —
+    // selectBackend(LIBUSB) devolvia true y despues reportaba OBOE (medido en el g42,
+    // MINI-041 #2). UsbAudioManagerImpl ya prepara el motor antes de llegar aca (D6);
+    // esto cubre a quien llame al bridge directo.
+    if (!ensureEngine()) {
+        LOGE("AudioNativeBridge.initializeUsbDevice: Failed to create engine");
+        return JNI_FALSE;
+    }
+
     gUsbDeviceState.fileDescriptor = fileDescriptor;
     gUsbDeviceState.usbfsPath = std::string(pathChars.c_str());
 
@@ -1863,26 +1875,52 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     return result;
 }
 
-JNIEXPORT jboolean JNICALL
+// REQ-050 S2 (AC-050.3): devuelve la CAUSA, no un jboolean. Los valores son los de
+// `watermelon_audio::UsbStreamStartStatus` (BackendManager.h) y Kotlin los mapea uno por
+// uno; antes "sin motor", "sin callback" y "libusb no arranco" llegaban todos como el
+// mismo STREAMING_ERROR generico. La decision vive en classifyUsbStreamStart(), pura,
+// para que la suite de host la afirme: aca solo se juntan los hechos.
+JNIEXPORT jint JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartUsbStreamingWithMode(
     JNIEnv* env, jobject thiz, jint sampleRate, jint channels, jint bitDepth, jint streamingMode) {
-    if (!gUsbDeviceState.isInitialized || gUsbDeviceState.isStreaming) {
-        return gUsbDeviceState.isStreaming ? JNI_TRUE : JNI_FALSE;
-    }
+    using watermelon_audio::UsbStreamStartStatus;
 
-    auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-
-    if (!backend) {
-        return JNI_FALSE;
-    }
-
-    watermelon_audio::UsbStreamingMode mode;
+    watermelon_audio::UsbStreamingMode mode = watermelon_audio::UsbStreamingMode::PLAYBACK_ONLY;
+    bool modeValid = true;
     switch (streamingMode) {
         case 0: mode = watermelon_audio::UsbStreamingMode::PLAYBACK_ONLY; break;
         case 1: mode = watermelon_audio::UsbStreamingMode::CAPTURE_ONLY; break;
         case 2: mode = watermelon_audio::UsbStreamingMode::FULL_DUPLEX; break;
-        default: return JNI_FALSE;
+        default: modeValid = false; break;
+    }
+
+    // Sin ensureEngine(): leer si el motor existe no lo crea. Crear un motor aca no le
+    // instalaria el callback al backend, que ya se configuro al inicializar el device.
+    const bool engineExists = g_jniState.engine != nullptr;
+    watermelon_audio::LibusbBackend* backend = nullptr;
+    if (engineExists) {
+        backend = watermelon_audio::BackendManager::getInstance().getLibusbBackend();
+    }
+
+    watermelon_audio::UsbStreamStartFacts facts;
+    // "Ya transmitiendo" exige un backend VIVO que este corriendo, no solo la marca de
+    // gUsbDeviceState: el fallback de salud (fallbackToOboe) destruye el backend libusb y
+    // deja esa marca en true, y con ella sola esto devolvia OK sin que nada transmitiera
+    // (review de REQ-050 S2). Sin backend vivo cae a la clasificacion y nombra la causa.
+    facts.alreadyStreaming = gUsbDeviceState.isStreaming && backend != nullptr && backend->isRunning();
+    facts.engineExists = engineExists;
+    facts.deviceInitialized = gUsbDeviceState.isInitialized;
+    facts.backendPresent = backend != nullptr;
+    facts.modeValid = modeValid;
+    facts.backendHasCallback = backend != nullptr && backend->hasAudioCallback();
+
+    const UsbStreamStartStatus precondition = watermelon_audio::classifyUsbStreamStart(facts);
+    if (precondition != UsbStreamStartStatus::PROCEED) {
+        if (precondition != UsbStreamStartStatus::OK) {
+            LOGE("AudioNativeBridge.startUsbStreamingWithMode: refused (status %d)",
+                 static_cast<int>(precondition));
+        }
+        return static_cast<jint>(precondition);
     }
 
     backend->setStreamingMode(mode);
@@ -1890,11 +1928,13 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartU
 
     auto result = backend->start();
     if (result != watermelon_audio::BackendResult::OK) {
-        return JNI_FALSE;
+        LOGE("AudioNativeBridge.startUsbStreamingWithMode: LibusbBackend::start failed: %s",
+             watermelon_audio::backendResultToString(result));
+        return static_cast<jint>(UsbStreamStartStatus::START_FAILED);
     }
 
     gUsbDeviceState.isStreaming = true;
-    return JNI_TRUE;
+    return static_cast<jint>(UsbStreamStartStatus::OK);
 }
 
 JNIEXPORT jboolean JNICALL

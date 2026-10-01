@@ -1,6 +1,8 @@
 package com.watermellonstudios.audio.harness.usb
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import com.watermellonstudios.audio.api.IAudioNativeBridge
 import com.watermellonstudios.audio.api.IUsbAudioManager
 import com.watermellonstudios.audio.api.InternalWatermelonApi
@@ -46,18 +48,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  *   exacta y se ESPERA. No se acepta por adb ni se simula.
  */
 @OptIn(InternalWatermelonApi::class)
-class UsbHarness(context: Context) {
+class UsbHarness(private val context: Context) {
 
     val manager: IUsbAudioManager = UsbAudioManagerFactory.create(context)
     private val bridge: IAudioNativeBridge = getAudioBridge()
     private val runner = UsbAudioTestRunnerFactory.create(manager)
-
-    /**
-     * Si ESTE harness le instaló al backend USB el callback del motor (ver [installEngineCallback]).
-     * `LibusbBackend::start()` sin callback falla con "No audio callback set", y `startStreaming`
-     * lo devolvía como un STREAMING_ERROR genérico: medido en el g42 con `--plan usb` suelto.
-     */
-    private var callbackInstalled = false
 
     init {
         // SIN auto-connect, y antes de monitorear. Medido en el g42 (30/09): con el permiso ya
@@ -103,13 +98,12 @@ class UsbHarness(context: Context) {
      * activo. Si falta el permiso, emite `esperando-humano` y espera hasta [humanTimeoutMs].
      */
     suspend fun connect(r: SmokeReporter, device: UsbAudioDevice, humanTimeoutMs: Long): Boolean {
-        // El motor va ANTES que el device, y no es un detalle de estilo: medido en el g42 (30/09),
-        // un `initializeUsbDevice` hecho antes de que exista el motor registra el backend libusb en
-        // la instancia de respaldo de `BackendManager`; al crearse el motor instala la SUYA como
-        // global y el backend USB queda en la vieja ("USB backend not available, falling back").
-        if (!installEngineCallback(r)) return false
-        // Si algo falla DESPUÉS de instalar el callback, el motor no puede quedar en modo
-        // BackendManager: salida y captura medirían ese camino en vez del directo de Oboe.
+        // REQ-050 S2 (D6): el motor va ANTES que el device, y desde S2 lo pone la LIBRERÍA dentro de
+        // `connectDevice`. El harness ya no lo prepara a mano: así el smoke prueba AC-050.4 de
+        // punta a punta (MINI-041 #2: un `initializeUsbDevice` sin motor dejaba el backend libusb
+        // en el `BackendManager` de respaldo). `motor-callback` queda como verificación, después de
+        // conectar. Si algo falla, el motor no puede quedar en modo BackendManager: salida y
+        // captura medirían ese camino en vez del directo de Oboe.
         val ok = connectWithEngineReady(r, device, humanTimeoutMs)
         if (!ok) restoreEngineMode()
         return ok
@@ -145,6 +139,7 @@ class UsbHarness(context: Context) {
             "error" to (result as? UsbResult.Failure)?.error, "mensaje" to (result as? UsbResult.Failure)?.message,
         )
         if (!connected) return false
+        if (!verifyEngineCallback(r)) return false
 
         val caps = manager.getDeviceCapabilities(device)
         val c = caps.getOrNull()
@@ -240,47 +235,32 @@ class UsbHarness(context: Context) {
     }
 
     /**
-     * `step=motor-callback` — va antes de `connectDevice` (ver [connect]). El contrato de NoisyPad (`AudioEngineStateManager.setAudioBackend`) y
-     * de la API pública (`AudioEngine.setAudioBackend(LIBUSB)`): con el motor DETENIDO,
-     * `setUseBackendManager(true)` crea el motor si hace falta y registra el `AudioEngine` como
-     * callback de `BackendManager`, que se lo pasa al backend libusb al seleccionarlo. Sin eso,
-     * `LibusbBackend::start()` no tiene a quién pedirle audio.
+     * `step=motor-callback` — después de `connectDevice` (REQ-050 S2, D6): la librería tuvo que dejar
+     * el motor creado y PARADO, con su callback instalado en `BackendManager`. El harness para el
+     * motor antes del panel (`motor-parado`), así que acá vale D6 y no D12 (motor corriendo).
      *
-     * Inicializado NO es corriendo (I5): el motor tiene que existir y estar parado. Con el stream
-     * vivo no se reconfigura — el motor lo rechaza con un LOGE y nada más, así que se verifica antes.
+     * No hay un getter del callback: lo que se verifica es que el motor exista y siga parado. La
+     * línea lo dice (`verificado=inicializado`) para que nadie la lea como más de lo que es; que el
+     * callback esté lo prueba `streaming-start`, que sin él falla con `NO_AUDIO_CALLBACK`.
      */
-    fun installEngineCallback(r: SmokeReporter): Boolean {
-        val state = bridge.getEngineState()
-        if (state != ENGINE_STATE_STOPPED) {
-            callbackInstalled = false
-            return r.report(
-                PANEL, "motor-callback", false,
-                "estado-motor" to state, "motivo" to "motor-corriendo:no-se-reconfigura-con-el-stream-vivo",
-            )
-        }
-        bridge.setUseBackendManager(true)
-        // No hay un getter del callback: lo que se puede verificar es que el motor exista y SIGA
-        // parado después del set (con el motor corriendo, el set se ignora con un LOGE). La línea
-        // lo dice (`verificado=inicializado`) para que nadie la lea como más de lo que es.
+    private fun verifyEngineCallback(r: SmokeReporter): Boolean {
         val initialized = bridge.isEngineInitialized()
-        val after = bridge.getEngineState()
-        val ok = initialized && after == ENGINE_STATE_STOPPED
-        callbackInstalled = ok
+        val state = bridge.getEngineState()
         return r.report(
-            PANEL, "motor-callback", ok,
-            "verificado" to "inicializado", "inicializado" to initialized, "estado-motor" to after,
+            PANEL, "motor-callback", initialized && state == ENGINE_STATE_STOPPED,
+            "verificado" to "inicializado", "preparado-por" to "libreria", "inicializado" to initialized,
+            "estado-motor" to state,
             "motivo" to when {
-                !initialized -> "motor-sin-callback"
-                after != ENGINE_STATE_STOPPED -> "motor-corriendo:no-se-reconfigura-con-el-stream-vivo"
+                !initialized -> "connectDevice-no-creo-el-motor"
+                state != ENGINE_STATE_STOPPED -> "motor-corriendo"
                 else -> null
             },
         )
     }
 
-    /** Deshace [installEngineCallback]: sin BackendManager (si el motor está parado) y sin callback. */
+    /** Deshace lo que `connectDevice` le hizo al motor (D6): sin BackendManager, si está parado. */
     private fun restoreEngineMode() {
         if (bridge.getEngineState() == ENGINE_STATE_STOPPED) bridge.setUseBackendManager(false)
-        callbackInstalled = false
     }
 
     /** `step=<step>`: pide [wanted] y afirma lo que el motor REPORTA después. */
@@ -295,19 +275,15 @@ class UsbHarness(context: Context) {
 
     /** `step=streaming-start` y, después de [warmupMs], `step=streaming-stats`. */
     suspend fun startStreaming(r: SmokeReporter, warmupMs: Long = 2000): Boolean {
+        reportWakeLockPermission(r)
         val state = manager.connectionState.value
         if (!manager.isDeviceReady() || (state != UsbConnectionState.CONNECTED && state != UsbConnectionState.STREAMING)) {
             r.report(PANEL, "streaming-start", false, "motivo" to UsbAudioError.NOT_CONNECTED, "estado" to state)
             reportNoStreaming(r)
             return false
         }
-        if (!callbackInstalled) {
-            // La precondición falta: se dice con su nombre en vez de dejar que la librería
-            // devuelva un STREAMING_ERROR mudo. Y `streaming-stats` se emite igual.
-            r.report(PANEL, "streaming-start", false, "motivo" to "motor-sin-callback")
-            reportNoStreaming(r)
-            return false
-        }
+        // Sin precondición del callback acá (REQ-050 S2, AC-050.3): si falta, la librería lo dice
+        // con NO_AUDIO_CALLBACK y sale en el campo `error` de `streaming-start`.
         val bits = manager.getCurrentCapabilitySnapshot()?.effectiveOutputBitDepths
             ?.let { if (24 in it) 24 else it.firstOrNull() } ?: 16
         val result = manager.startStreaming(sampleRate = STREAM_RATE_HZ, channels = 2, bitDepth = bits)
@@ -322,6 +298,93 @@ class UsbHarness(context: Context) {
         }
         delay(warmupMs)
         return reportStats(r, "streaming-stats")
+    }
+
+    /**
+     * `step=wake-lock` (REQ-050 S2, D9, AC-050.7): el harness NO declara `WAKE_LOCK` en su manifest,
+     * así que si el permiso está concedido llegó por el merge del manifest de `:audio`. Sin él,
+     * `startStreaming` tomaba el wake lock y `PowerManager` tiraba `SecurityException`.
+     */
+    private fun reportWakeLockPermission(r: SmokeReporter) {
+        val granted = context.checkSelfPermission(Manifest.permission.WAKE_LOCK) == PackageManager.PERMISSION_GRANTED
+        r.report(
+            PANEL, "wake-lock", granted,
+            "concedido" to granted, "declarado-por-el-harness" to false, "origen" to "merge-del-manifest-de-audio",
+            "motivo" to if (granted) null else "WAKE_LOCK-no-llego-por-el-merge",
+        )
+    }
+
+    /**
+     * REQ-050 S2 (AC-050.5, D7) — con el stream VIVO, dos pedidos de conexión que antes lo
+     * destruían (MINI-041 #3: el último `connectDevice` re-inicializaba el backend libusb con otro fd):
+     *
+     * - `step=reconectar-mismo`: `connectDevice` al MISMO device tiene que dar éxito sin tocar nada:
+     *   el mismo fd, el estado sigue en STREAMING y los paquetes completados SIGUEN creciendo desde
+     *   donde estaban. Un re-init crea un backend nuevo y sus contadores arrancan de cero, así que
+     *   "siguen creciendo" no lo puede imitar. Se espera POR CONDICIÓN, con techo.
+     * - `step=conectar-otro`: `connectDevice` a un deviceId que no existe tiene que dar
+     *   `DEVICE_BUSY` (el chequeo de ocupado va antes de buscar el device), y el stream sigue.
+     *
+     * Los dos pasos se emiten SIEMPRE: sin streaming, con `ok=false motivo=sin-streaming`.
+     */
+    suspend fun connectAgainWhileStreaming(r: SmokeReporter, device: UsbAudioDevice, streaming: Boolean): Boolean {
+        if (!streaming) {
+            r.report(PANEL, "reconectar-mismo", false, "motivo" to "sin-streaming", "estado" to manager.connectionState.value)
+            r.report(PANEL, "conectar-otro", false, "motivo" to "sin-streaming", "estado" to manager.connectionState.value)
+            return false
+        }
+        val fdBefore = manager.getFileDescriptor()
+        val before = manager.getTransferStats()?.packetsCompleted ?: -1L
+        val same = manager.connectDevice(device)
+        val fdAfter = manager.getFileDescriptor()
+        val stateAfter = manager.connectionState.value
+        val advanced = awaitPacketsAbove(before, RECONNECT_TRAFFIC_MS)
+        val sameOk = r.report(
+            PANEL, "reconectar-mismo",
+            same is UsbResult.Success && fdAfter == fdBefore && stateAfter == UsbConnectionState.STREAMING &&
+                before >= 0 && advanced != null,
+            "resultado" to (if (same is UsbResult.Success) "exito" else (same as UsbResult.Failure).error),
+            "fd-antes" to fdBefore, "fd-despues" to fdAfter, "estado" to stateAfter,
+            "completados-antes" to before, "completados-despues" to advanced,
+            "motivo" to when {
+                same !is UsbResult.Success -> "el-mismo-device-no-dio-exito"
+                fdAfter != fdBefore -> "cambio-el-fd:re-init"
+                stateAfter != UsbConnectionState.STREAMING -> "el-stream-no-sigue"
+                before < 0 -> "sin-stats-antes"
+                advanced == null -> "los-paquetes-no-siguen-creciendo"
+                else -> null
+            },
+        )
+
+        val other = device.copy(deviceId = "${device.deviceId}-falso", deviceName = "dispositivo-falso")
+        val otherResult = manager.connectDevice(other)
+        val stateAfterOther = manager.connectionState.value
+        val otherOk = r.report(
+            PANEL, "conectar-otro",
+            (otherResult as? UsbResult.Failure)?.error == UsbAudioError.DEVICE_BUSY &&
+                stateAfterOther == UsbConnectionState.STREAMING && manager.getFileDescriptor() == fdBefore,
+            "device-id" to other.deviceId,
+            "resultado" to (if (otherResult is UsbResult.Success) "exito" else (otherResult as UsbResult.Failure).error),
+            "estado" to stateAfterOther, "fd" to manager.getFileDescriptor(),
+            "motivo" to when {
+                (otherResult as? UsbResult.Failure)?.error != UsbAudioError.DEVICE_BUSY -> "no-dio-DEVICE_BUSY"
+                stateAfterOther != UsbConnectionState.STREAMING -> "el-stream-no-sigue"
+                else -> null
+            },
+        )
+        return sameOk && otherOk
+    }
+
+    /** Espera a que los paquetes completados pasen de [floor], con techo. Devuelve el valor, o null. */
+    private suspend fun awaitPacketsAbove(floor: Long, ceilingMs: Long): Long? {
+        var waited = 0L
+        while (waited <= ceilingMs) {
+            val now = manager.getTransferStats()?.packetsCompleted
+            if (now != null && now > floor && floor >= 0) return now
+            delay(TRAFFIC_POLL_MS)
+            waited += TRAFFIC_POLL_MS
+        }
+        return null
     }
 
     /** `streaming-stats` se emite SIEMPRE: si no hubo streaming, con `ok=false` y el porqué. */
@@ -425,7 +488,6 @@ class UsbHarness(context: Context) {
         // corriendo no se puede (el set se ignora): se dice, no se reporta "restaurado".
         val engineStopped = bridge.getEngineState() == ENGINE_STATE_STOPPED
         if (engineStopped) bridge.setUseBackendManager(false)
-        callbackInstalled = false
         val returned = bridge.selectBackend(AudioBackendType.OBOE.id)
         val actual = AudioBackendType.fromId(bridge.getCurrentBackendType())
         val restored = r.report(
@@ -456,7 +518,9 @@ class UsbHarness(context: Context) {
         }
         var ok = true
         try {
-            ok = startStreaming(r) && ok
+            val streaming = startStreaming(r)
+            ok = streaming && ok
+            ok = connectAgainWhileStreaming(r, device, streaming) && ok
             ok = runSuite(r, device) && ok
             ok = stopStreaming(r) && ok
         } finally {
@@ -481,6 +545,10 @@ class UsbHarness(context: Context) {
         /** El rate al que el harness abre el stream USB. La suite mide ESTE stream (D11). */
         const val STREAM_RATE_HZ = 48_000
         private const val RELEASE_DISCONNECT_MS = 1000L
+
+        /** Techo para ver crecer los paquetes después de reconectar (a 48 kHz son ~1000 por segundo). */
+        private const val RECONNECT_TRAFFIC_MS = 2000L
+        private const val TRAFFIC_POLL_MS = 50L
 
         /** Techo para que la librería pida el diálogo. Es una espera por condición: no se duerme. */
         private const val DIALOG_REQUESTED_MS = 5000L

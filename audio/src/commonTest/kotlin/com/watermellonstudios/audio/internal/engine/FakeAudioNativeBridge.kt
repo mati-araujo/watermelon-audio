@@ -1,5 +1,7 @@
 package com.watermellonstudios.audio.internal.engine
 
+import kotlinx.coroutines.delay
+
 import com.watermellonstudios.audio.api.IAudioNativeBridge
 import com.watermellonstudios.audio.domain.input.CaptureOutcome
 import com.watermellonstudios.audio.api.InternalWatermelonApi
@@ -136,8 +138,25 @@ internal class FakeAudioNativeBridge(
     // Las cuatro que AudioEngineImpl usa desde REQ-045, en vez de las `*Sync`.
     override suspend fun startEngineWithFade(fadeTimeMs: Int): Result<Unit> =
         lifecycle("startEngineWithFade")
-    override suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit> =
-        lifecycle("stopEngineWithFade")
+    /**
+     * Cuántos `stopEngineWithFade` terminaron su espera del Stopped. Va aparte de [calls] para no
+     * cambiar las listas exactas que afirman los tests del orden.
+     */
+    var stopsSettled = 0
+        private set
+
+    /**
+     * REQ-050 S2 (D11): la variante suspend vuelve con el motor nativo PARADO, o sea después del
+     * fade. El doble lo modela con un `delay(fade)` (tiempo virtual) tras la aceptación.
+     */
+    override suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit> {
+        val accepted = lifecycle("stopEngineWithFade")
+        if (accepted.isSuccess) {
+            delay(fadeTimeMs.toLong())
+            stopsSettled++
+        }
+        return accepted
+    }
     override suspend fun pauseEngineWithFade(fadeTimeMs: Int): Result<Unit> =
         lifecycle("pauseEngineWithFade")
     override suspend fun resumeEngineWithFade(fadeTimeMs: Int): Result<Unit> =

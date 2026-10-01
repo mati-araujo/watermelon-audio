@@ -249,8 +249,9 @@ internal class AudioEngineImpl @OptIn(InternalWatermelonApi::class) constructor(
             }
             stopStatePolling()
 
-            delay(fade.toLong())
-
+            // Sin `delay(fade)`: el bridge ya devolvió con el motor nativo en Stopped
+            // (REQ-050 S2, D11). El delay de antes adivinaba el fin del fade, quedaba ~60 ms
+            // corto del Stopped real y, con la espera nueva, duplicaría el tiempo de parada.
             _state.update { it.copy(lifecycle = EngineLifecycle.STOPPED) }
 
             // Analytics

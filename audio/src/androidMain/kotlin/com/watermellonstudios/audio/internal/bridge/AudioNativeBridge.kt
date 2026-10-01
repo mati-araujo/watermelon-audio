@@ -303,11 +303,15 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     /**
      * Stop the audio engine.
+     *
+     * `success` significa que el motor nativo YA está en Stopped (REQ-050 S2, D11): ver
+     * [EngineStopWait]. Si no llega dentro del techo, `failure(NativeBridgeException.Timeout)`.
      */
     override suspend fun stopEngine(): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "stopEngine") {
-        JniMetrics.measured("stopEngine") {
+        val accepted = JniMetrics.measured("stopEngine") {
             nativeStopEngine()
         }.asUnitResult("stopEngine")
+        EngineStopWait.afterAccepted(accepted, "stopEngine", EngineStopWait.ceilingFor(-1)) { nativeGetEngineState() }
     }
 
     /**
@@ -322,10 +326,17 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     /**
      * Stop engine with fade-out.
      *
+     * `success` significa que el motor nativo YA está en Stopped, o sea después del fade
+     * (REQ-050 S2, D11): ver [EngineStopWait]. Si no llega dentro de `fade + 4 s`,
+     * `failure(NativeBridgeException.Timeout)`. Un segundo stop durante el fade no reinicia la
+     * rampa: espera a la que está en curso.
+     *
      * @param fadeTimeMs Fade duration in milliseconds
      */
     override suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "stopEngineWithFade") {
-        nativeStopEngineWithFade(fadeTimeMs.coerceAtLeast(0)).asUnitResult("stopEngineWithFade")
+        val fade = fadeTimeMs.coerceAtLeast(0)
+        val accepted = nativeStopEngineWithFade(fade).asUnitResult("stopEngineWithFade")
+        EngineStopWait.afterAccepted(accepted, "stopEngineWithFade", EngineStopWait.ceilingFor(fade)) { nativeGetEngineState() }
     }
 
     /**
@@ -402,6 +413,10 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override fun stopEngineWithFadeSync(fadeTimeMs: Int) {
         // El codigo no tiene dónde ir en un `Unit`, pero SÍ deja rastro: ver
         // [logSiFallo]. El reemplazo es la variante `suspend`.
+        //
+        // 🔴 Vuelve cuando el motor ACEPTÓ, no cuando paró (REQ-050 S2, D11): el motor sigue
+        // sonando el fade y para ~60 ms después. No espera a propósito —bloquearía el hilo que
+        // llama, que en NoisyPad es el de UI—. La variante `suspend` sí espera el Stopped.
         nativeStopEngineWithFade(fadeTimeMs.coerceAtLeast(0)).logSiFallo("stopEngineWithFade")
     }
 
@@ -2458,14 +2473,27 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * @param channels Number of channels
      * @param bitDepth Bit depth
      * @param streamingMode 0=playback only, 1=capture only, 2=full duplex
-     * @return true if streaming started
+     * @return true if streaming started (or was already running)
      */
     fun startUsbStreamingWithMode(
         sampleRate: Int,
         channels: Int,
         bitDepth: Int,
         streamingMode: Int
-    ): Boolean = nativeStartUsbStreamingWithMode(sampleRate, channels, bitDepth, streamingMode)
+    ): Boolean = startUsbStreamingWithModeStatus(sampleRate, channels, bitDepth, streamingMode) ==
+        UsbStreamStartStatus.OK
+
+    /**
+     * Como [startUsbStreamingWithMode], pero con la CAUSA (REQ-050 S2, AC-050.3): uno de los
+     * valores de [UsbStreamStartStatus]. El `Boolean` de arriba la tiraba, y por eso "sin motor"
+     * o "sin callback" llegaban al consumidor como un STREAMING_ERROR genérico.
+     */
+    fun startUsbStreamingWithModeStatus(
+        sampleRate: Int,
+        channels: Int,
+        bitDepth: Int,
+        streamingMode: Int
+    ): Int = nativeStartUsbStreamingWithMode(sampleRate, channels, bitDepth, streamingMode)
 
     /**
      * Check if USB device supports full-duplex.
@@ -2641,7 +2669,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeStartUsbStreaming(sampleRate: Int, channels: Int, bitDepth: Int): Boolean
     private external fun nativeStopUsbStreaming()
     private external fun nativeGetUsbTransferStats(): FloatArray?
-    private external fun nativeStartUsbStreamingWithMode(sampleRate: Int, channels: Int, bitDepth: Int, streamingMode: Int): Boolean
+    private external fun nativeStartUsbStreamingWithMode(sampleRate: Int, channels: Int, bitDepth: Int, streamingMode: Int): Int
     private external fun nativeUsbDeviceSupportsFullDuplex(): Boolean
     private external fun nativeUsbDeviceHasCapture(): Boolean
     private external fun nativeGetUsbDeviceUacVersion(): Int
@@ -3669,4 +3697,19 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     )
 
     fun looperResetTelemetry() = nativeLooperResetTelemetry()
+}
+
+/**
+ * Lo que devuelve `nativeStartUsbStreamingWithMode` (REQ-050 S2, AC-050.3). Espeja
+ * `watermelon_audio::UsbStreamStartStatus` de `BackendManager.h`, valor por valor: no se
+ * renumera de un solo lado.
+ */
+internal object UsbStreamStartStatus {
+    const val OK = 0
+    const val NOT_INITIALIZED = 1
+    const val NO_ENGINE = 2
+    const val NO_BACKEND = 3
+    const val NO_CALLBACK = 4
+    const val INVALID_MODE = 5
+    const val START_FAILED = 6
 }

@@ -108,6 +108,13 @@ public:
      */
     IAudioCallback* swapCallback(IAudioCallback* next);
 
+    /**
+     * REQ-050 S2 (AC-050.3): si el backend tiene a quién pedirle audio. Sin callback
+     * `start()` falla con "No audio callback set"; la JNIEXPORT lo pregunta ANTES para
+     * poder nombrar la causa. Inline a propósito: el stub de host no necesita cuerpo.
+     */
+    bool hasAudioCallback() const { return mCallback.load(std::memory_order_acquire) != nullptr; }
+
     void setSampleRate(int sampleRate) override;
     void setBufferSize(int framesPerBuffer) override;
     void setFullDuplexEnabled(bool enable) override;

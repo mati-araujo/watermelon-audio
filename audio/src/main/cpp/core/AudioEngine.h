@@ -1185,6 +1185,23 @@ private:
     std::unique_ptr<std::thread> mStopFadeThread;
     std::atomic<bool> mStopFadeCancel{false};
 
+    // REQ-050 S2 (D8): hay un stopWithFade() con su rampa en curso. Un segundo stop
+    // con fade lo encuentra en true y NO re-arma la rampa (antes volvía a 1.0). Lo
+    // baja el worker justo antes de su stop(), o quien lo cancela.
+    std::atomic<bool> mStopFadePending{false};
+    // Serializa el manejo de mStopFadeThread entre threads de control: dos
+    // stopWithFade() concurrentes se pisaban el unique_ptr. El worker NO lo toma (sólo
+    // llama a stop(), que toma mStateMutex), así que joinearlo con éste tomado no
+    // puede deadlockear.
+    std::mutex mStopFadeMutex;
+
+    /**
+     * REQ-050 S2: recoge el worker de stopWithFade() si ya terminó, está en su stop()
+     * final, o quedó huérfano (el motor ya está Stopped por otro camino). Con un fade
+     * en curso no hace nada. Requiere mStopFadeMutex tomado y mStateMutex NO tomado.
+     */
+    void reapStaleStopFadeWorker();
+
     // IMPROVED: Manejo de memoria insuficiente (Fase 2.2.3)
     std::atomic<bool> mInitializationFailed{false};
 

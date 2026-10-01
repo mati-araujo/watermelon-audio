@@ -48,12 +48,29 @@ class FakeUsbManager : UsbManager() {
     }
 
     /**
-     * Devuelve `null`: una conexión de verdad necesita un file descriptor de usbfs que el host no
-     * tiene. Que se haya LLAMADO es la observación: la librería ya dio el permiso por bueno.
+     * Lo que devuelve [openDevice]. Por defecto `null`: una conexión de verdad necesita un file
+     * descriptor de usbfs que el host no tiene, y en los tests del permiso (S1) que se haya LLAMADO
+     * es la observación. Los del contrato de conexión (S2) le ponen una [FakeUsbDeviceConnection].
      */
+    @Volatile
+    var connectionFactory: (UsbDevice?) -> UsbDeviceConnection? = { null }
+
     override fun openDevice(device: UsbDevice?): UsbDeviceConnection? {
         openDeviceCalls.incrementAndGet()
-        return null
+        return connectionFactory(device)
+    }
+}
+
+/**
+ * Una conexión con un fd inventado (REQ-050 S2). El fd no se usa: el puerto nativo de los tests
+ * es un doble, así que lo único que importa es que la librería lo pase y cierre la conexión cuando
+ * corresponde.
+ */
+class FakeUsbDeviceConnection(private val fd: Int) : UsbDeviceConnection() {
+    val closeCalls = AtomicInteger(0)
+    override fun getFileDescriptor(): Int = fd
+    override fun close() {
+        closeCalls.incrementAndGet()
     }
 }
 

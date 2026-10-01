@@ -125,6 +125,118 @@ TEST_F(FadeLifecycleTest, StopWithFadeEventuallyStopsTheEngine) {
     EXPECT_EQ(mEngine->getEngineState(), kStateStopped);
 }
 
+// ---------------------------------------------------------------------------
+// REQ-050 S2 (D8): un stop durante el fade NO reinicia la rampa.
+//
+// MINI-041 #4, medido en el g42: un segundo stopWithFade() con el fade en curso
+// hacía `cancel()` + `startFade(1.0 -> 0.0)`: el audio volvía a pleno volumen y el
+// motor tardaba un fade entero más en parar.
+// ---------------------------------------------------------------------------
+
+// Fade de 1 s y bloques largos, a proposito: las aserciones tienen que terminar antes
+// de que el worker dispare (fade + 50 ms de PARED). Con 100 ms quedaban 150 ms para dos
+// renders y media docena de aserciones, y bajo TSan con ctest en paralelo eso no esta
+// garantizado (review de S2; es la clase de REQ-002). Con 1 s el margen es de un orden
+// de magnitud, y la pendiente se sigue distinguiendo.
+constexpr int kLongFadeMs = 1000;                 // 48000 frames a 48 kHz
+constexpr int kLongBlocks = 40;                   // 40 x 256 = 10240 frames por tramo
+constexpr int kLongTramo = kBlockFrames * kLongBlocks;
+
+TEST_F(FadeLifecycleTest, AC050_6_ASecondStopDuringTheFadeNeitherRaisesTheVolumeNorRestartsTheRamp) {
+    startEngineAt(48000);
+    settleAtFullVolume(*mEngine);
+
+    mEngine->stopWithFade(kLongFadeMs);
+    render(kLongBlocks, kBlockFrames);
+    const float midFade = mEngine->getCurrentFadeVolume();
+    ASSERT_NEAR(midFade, 1.0f - static_cast<float>(kLongTramo) / 48000.0f, 0.01f);
+
+    mEngine->stopWithFade(kLongFadeMs);
+
+    // Bug que atrapa (a): reiniciar desde 1.0, que es el salto audible que se midio.
+    EXPECT_FLOAT_EQ(mEngine->getCurrentFadeVolume(), midFade)
+        << "el segundo stop volvio a subir el volumen";
+    EXPECT_FLOAT_EQ(mEngine->getTargetFadeVolume(), 0.0f);
+
+    // Bug que atrapa (b): re-armar una rampa NUEVA desde el volumen actual. No sube el
+    // volumen, pero estira la parada un fade entero: la pendiente sale de la rampa
+    // ORIGINAL (20480 de 48000 frames -> 0.573), no de una nueva que arranca en midFade
+    // (midFade * (1 - 10240/48000) = 0.619).
+    render(kLongBlocks, kBlockFrames);
+    EXPECT_NEAR(mEngine->getCurrentFadeVolume(),
+                1.0f - static_cast<float>(2 * kLongTramo) / 48000.0f, 0.01f)
+        << "el segundo stop re-armo la rampa en vez de dejar seguir la que estaba";
+
+    EXPECT_TRUE(awaitEngineStopped(kLongFadeMs)) << "el stop del primer fade nunca llego";
+}
+
+TEST_F(FadeLifecycleTest, AC050_6_ACutDuringTheFadeStopsRightAway) {
+    startEngineAt(48000);
+    settleAtFullVolume(*mEngine);
+
+    mEngine->stopWithFade(kLongFadeMs);
+    render(kLongBlocks, kBlockFrames);
+    ASSERT_EQ(mEngine->getEngineState(), kStateRunning);
+
+    // Un corte (fade 0) no "reinicia" nada: pide parar YA, y nunca mas fuerte.
+    // Bug que atrapa: tratar el corte como un stop mas durante el fade e ignorarlo.
+    mEngine->stopWithFade(0);
+    EXPECT_EQ(mEngine->getEngineState(), kStateStopped);
+}
+
+TEST_F(FadeLifecycleTest, AC050_6_AStopOnAStoppedEngineDoesNotStopTheNextStart) {
+    constexpr int kFadeMs = 20;
+    startEngineAt(48000);
+    mEngine->stopWithFade(0);
+    ASSERT_EQ(mEngine->getEngineState(), kStateStopped);
+
+    // Un segundo stop con el motor ya parado (lo que hace un stop serializado detras de
+    // otro, D11) dejaba un worker que paraba el motor que se arrancara despues.
+    mEngine->stopWithFade(kFadeMs);
+    // Sobre un motor parado no hay nada que rampear: no se arma fade ni worker. (start()
+    // recoge un worker huerfano igual, asi que sin esta asercion el caso 1 de
+    // stopWithFade quedaba sin test: lo mostro su mutante, que sobrevivia.)
+    EXPECT_FALSE(mEngine->getIsFading()) << "un stop sobre un motor parado armo una rampa";
+    ASSERT_TRUE(mEngine->start(0));
+
+    // AUSENCIA: no hay condicion que esperar, solo la ventana en la que el worker
+    // espurio habria disparado (fade + 50 ms + un chunk de 10 ms).
+    wma_test::sleepFixed(std::chrono::milliseconds(kFadeMs + 250));
+    EXPECT_EQ(mEngine->getEngineState(), kStateRunning)
+        << "un stop sobre un motor parado dejo programada la parada del arranque siguiente";
+    mEngine->stopWithFade(0);
+}
+
+// Review de S2, hallazgo 1: un stop() DIRECTO (wma_engine_stop con -1, el de stopEngine)
+// durante el fade dejaba vivo el worker de stopWithFade con el flag de "parada en curso".
+// El arranque siguiente lo paraba ese worker, y un stopWithFade sobre ese arranque no
+// armaba rampa (lo creia "en curso"): corte seco al disparar el worker viejo.
+TEST_F(FadeLifecycleTest, AC050_6_AStopFadeWorkerOrphanedByADirectStopDoesNotStopTheNextStart) {
+    constexpr int kFadeMs = 100;
+    startEngineAt(48000);
+    settleAtFullVolume(*mEngine);
+
+    mEngine->stopWithFade(kFadeMs);
+    mEngine->stop();
+    ASSERT_EQ(mEngine->getEngineState(), kStateStopped);
+
+    ASSERT_TRUE(mEngine->start(0));
+    settleAtFullVolume(*mEngine);
+
+    // El stop con fade sobre el arranque nuevo tiene que armar SU rampa.
+    mEngine->stopWithFade(kLongFadeMs);
+    EXPECT_TRUE(mEngine->getIsFading()) << "el stop creyo que habia una parada en curso";
+    EXPECT_FLOAT_EQ(mEngine->getTargetFadeVolume(), 0.0f);
+
+    // AUSENCIA: la ventana del worker huerfano (fade + 50 ms + chunk), muy por debajo
+    // del worker nuevo (1 s + 50 ms).
+    wma_test::sleepFixed(std::chrono::milliseconds(kFadeMs + 250));
+    EXPECT_EQ(mEngine->getEngineState(), kStateRunning)
+        << "el worker del primer stopWithFade paro el arranque siguiente";
+
+    mEngine->stopWithFade(0);
+}
+
 // ===========================================================================
 // pauseWithFade / resumeWithFade
 // ===========================================================================
