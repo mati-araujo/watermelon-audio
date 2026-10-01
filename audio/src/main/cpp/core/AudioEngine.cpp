@@ -393,6 +393,15 @@ bool AudioEngine::transitionToState(EngineState newState) {
 }
 
 bool AudioEngine::start(int fadeTimeMs) {
+    // REQ-050 S2 (review): un worker de stopWithFade() que quedó vivo después de que
+    // otro camino (un stop() directo) paró el motor dispararía su stop() sobre ESTE
+    // arranque, fade + 50 ms después. Se lo recoge antes de tomar mStateMutex: el
+    // worker toma ese mutex en su stop(), así que joinearlo con él tomado deadlockea.
+    {
+        std::lock_guard<std::mutex> control(mStopFadeMutex);
+        reapStaleStopFadeWorker();
+    }
+
     std::lock_guard<std::mutex> lock(mStateMutex);
 
     // WD-1.2 — esto NO configura el thread de audio, y ahora el comentario lo
@@ -1865,6 +1874,44 @@ bool AudioEngine::startWithFade(int fadeTimeMs) {
 }
 
 void AudioEngine::stopWithFade(int fadeTimeMs) {
+    std::lock_guard<std::mutex> control(mStopFadeMutex);
+
+    // REQ-050 S2 (D8) — tres casos que antes re-armaban la rampa y no tenían por qué:
+    //
+    //   1. Motor ya parado (o parándose): no hay nada que parar. Antes armaba un fade
+    //      y un worker que, fade + 50 ms después, llamaba a stop() sobre el motor que
+    //      se hubiera arrancado mientras tanto. Un stop serializado detrás de otro
+    //      (D11: la variante suspend espera el Stopped) caía justo acá.
+    //   2. Ya hay una parada con fade en curso y piden otra con fade: no se reinicia.
+    //      Antes: cancel() + startFade(1.0 -> 0.0), o sea el audio volvía a pleno
+    //      volumen y el motor tardaba un fade entero más (MINI-041 #4, medido en el
+    //      g42). La rampa en curso sigue con su pendiente y su deadline.
+    //   3. Ya hay una parada en curso y piden un CORTE (0): se corta ya. No sube el
+    //      volumen; sólo adelanta lo que ya se pidió.
+    //
+    // Antes de mirar el estado se recoge un worker terminado o huérfano: si el anterior
+    // está DENTRO de su stop(), leer "Running" acá y armar una rampa nueva haría saltar
+    // el volumen a 1.0 y dejaría un worker nuevo sobre un motor que está parando.
+    reapStaleStopFadeWorker();
+    const EngineState state = mState.load(std::memory_order_acquire);
+    if (state == EngineState::Stopped || state == EngineState::Stopping) {
+        LOGI("stopWithFade: engine already stopped or stopping, nothing to do");
+        return;
+    }
+    if (mStopFadePending.load(std::memory_order_acquire)) {
+        if (fadeTimeMs > 0) {
+            LOGI("stopWithFade: a fade-out stop is already in progress; not restarting it");
+            return;
+        }
+        if (mStopFadeThread && mStopFadeThread->joinable()) {
+            mStopFadeCancel.store(true, std::memory_order_release);
+            mStopFadeThread->join();
+        }
+        mStopFadePending.store(false, std::memory_order_release);
+        stop();
+        return;
+    }
+
     mFadeCtrl.cancel();
 
     // Fade out, then stop. Previously this was gated on `if (mStream)`, so the
@@ -1879,13 +1926,14 @@ void AudioEngine::stopWithFade(int fadeTimeMs) {
 
         // Delayed stop after the fade completes. Owned (see mStopFadeThread) so
         // the destructor can reclaim it; a detached thread could outlive the
-        // engine and call stop() on freed memory. A prior worker, if any, is
-        // superseded: cancel and join it before starting the next.
+        // engine and call stop() on freed memory. A prior worker (one that already
+        // ran its stop()) is joined before starting the next.
         if (mStopFadeThread && mStopFadeThread->joinable()) {
             mStopFadeCancel.store(true, std::memory_order_release);
             mStopFadeThread->join();
         }
         mStopFadeCancel.store(false, std::memory_order_release);
+        mStopFadePending.store(true, std::memory_order_release);
         mStopFadeThread = std::make_unique<std::thread>([this, fadeTimeMs]() {
             // Chunked sleep so teardown can reclaim the thread promptly instead
             // of blocking for the whole fade.
@@ -1893,15 +1941,35 @@ void AudioEngine::stopWithFade(int fadeTimeMs) {
                                 + std::chrono::milliseconds(fadeTimeMs + 50);
             while (!mStopFadeCancel.load(std::memory_order_acquire)) {
                 if (std::chrono::steady_clock::now() >= deadline) {
+                    // Se baja ANTES de stop(): un stopWithFade() que llegue durante este
+                    // stop() ve el motor en Stopping y no hace nada (caso 1).
+                    mStopFadePending.store(false, std::memory_order_release);
                     stop();  // idempotent
                     return;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            // Cancelled: the engine is tearing down and owns the stop() itself.
+            // Cancelled: whoever cancelled owns the stop() (or the teardown).
         });
     } else {
         stop();
+    }
+}
+
+void AudioEngine::reapStaleStopFadeWorker() {
+    if (!mStopFadeThread || !mStopFadeThread->joinable()) return;
+    if (!mStopFadePending.load(std::memory_order_acquire)) {
+        // Terminado, o dentro de su stop() final (baja el flag justo antes): el join
+        // dura a lo sumo ese stop().
+        mStopFadeThread->join();
+        return;
+    }
+    if (mState.load(std::memory_order_acquire) == EngineState::Stopped) {
+        // Huérfano: su parada ya la hizo otro (un stop() directo). Si se lo deja, para
+        // lo que se arranque después.
+        mStopFadeCancel.store(true, std::memory_order_release);
+        mStopFadeThread->join();
+        mStopFadePending.store(false, std::memory_order_release);
     }
 }
 
