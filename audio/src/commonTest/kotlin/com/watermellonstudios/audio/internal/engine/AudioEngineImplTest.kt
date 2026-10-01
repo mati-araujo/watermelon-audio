@@ -397,10 +397,14 @@ class AudioEngineImplTest {
      * cambia por `ArithmeticException` SOBREVIVÍA: nada ejercitaba una cancelación a
      * mitad del fade de `stop()`. Es el mismo defecto que
      * [cancellingStartMidFadeRethrowsInsteadOfPublishingAFailure], del lado del apagado
-     * — y ahí el motor YA paró (el bridge dijo que sí) cuando se cancela, así que
+     * — y ahí el motor YA aceptó parar (el nativo dijo que sí) cuando se cancela, así que
      * publicar `STOPPED`/un error de analytics sería la misma mentira sobre un motor
-     * que en este caso SÍ terminó de parar, sólo que el `stop()` que lo pidió nunca se
+     * que en este caso SÍ termina de parar, sólo que el `stop()` que lo pidió nunca se
      * enteró.
+     *
+     * REQ-050 S2 (D11): el fade ya no se espera con un `delay` de `stopLocked` sino DENTRO
+     * del bridge (que vuelve con el motor parado). La cancelación a mitad del fade cae
+     * ahí, y tiene que atravesar el mismo `catch`.
      */
     @Test
     fun cancellingStopMidFadeRethrowsInsteadOfPublishingAFailure() = runTest {
@@ -417,12 +421,13 @@ class AudioEngineImplTest {
         )
 
         val trabajo = launch { engine.stop(fadeMs = 400) }
-        // Hasta la mitad del fade: el bridge ya dijo que paró y `stop()` está en el delay.
+        // Hasta la mitad del fade: el nativo ya aceptó y el bridge espera el Stopped.
         advanceTimeBy(200)
         assertTrue(
-            bridge.calls.contains("stopEngineWithFade:out"),
-            "premisa: el motor nativo tiene que haber dicho YA que paró cuando se " +
-                "cancela, si no esto no prueba nada (calls=${bridge.calls})",
+            bridge.calls.contains("stopEngineWithFade:out") && bridge.stopsSettled == 0,
+            "premisa: el motor nativo tiene que haber aceptado YA, y el fade seguir en curso, " +
+                "cuando se cancela; si no esto no prueba nada (calls=${bridge.calls}, " +
+                "asentados=${bridge.stopsSettled})",
         )
 
         trabajo.cancel()

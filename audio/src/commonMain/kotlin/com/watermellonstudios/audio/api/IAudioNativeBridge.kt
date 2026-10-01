@@ -37,15 +37,30 @@ interface IAudioNativeBridge :
     // ==================== LIFECYCLE ====================
 
     suspend fun startEngine(): Result<Unit>
+
+    /**
+     * Para el motor sin fade. `success` = el motor nativo YA está en Stopped (REQ-050, D11);
+     * ver [stopEngineWithFade] para el techo y el `Timeout`.
+     */
     suspend fun stopEngine(): Result<Unit>
     suspend fun startEngineWithFade(fadeTimeMs: Int): Result<Unit>
     /**
      * Para el motor con fade-out.
      *
-     * 🔴 **`success` = "el motor aceptó el stop", no "el stream ya cerró"** (REQ-045, B9).
-     * Con `fadeTimeMs > 0`, `AudioEngine::stopWithFade` arranca el fade y deja la
-     * detención a un worker que corre al terminarlo, así que esto vuelve antes. Con 0 el
-     * camino es sincrónico. Un `failure` sí es definitivo: el motor no aceptó.
+     * 🔴 **`success` = "el motor nativo YA está en Stopped"** (REQ-050, D11). Hasta 2.21.0
+     * significaba "el motor aceptó el stop" y el motor paraba un fade + ~60 ms después: quien
+     * reconfiguraba enseguida (`setUseBackendManager`) lo encontraba corriendo. Ahora esto
+     * vuelve después del fade, cuando `getEngineState()` dice Stopped.
+     *
+     * - Techo: `fadeTimeMs` + 4 s (lo que el nativo puede tardar en cerrar el stream). Si
+     *   no paró dentro de eso, `failure(NativeBridgeException.Timeout)`; el motor puede
+     *   terminar de parar después.
+     * - Un segundo stop durante el fade NO reinicia la rampa: espera a la que está en curso.
+     *   Las variantes `suspend` se serializan bajo LIFECYCLE, así que dos de ellas nunca se
+     *   pisan; si la rampa en curso la pidió un `*Sync` con un fade más largo que el techo
+     *   de esta llamada, ésta puede devolver `Timeout` aunque el motor pare después.
+     * - Un `failure` del nativo (sin motor, por ejemplo) se devuelve sin esperar.
+     * - Las `*Sync` NO esperan: vuelven cuando el motor aceptó.
      */
     suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit>
     suspend fun pauseEngineWithFade(fadeTimeMs: Int): Result<Unit>
@@ -77,6 +92,7 @@ interface IAudioNativeBridge :
         ReplaceWith("stopEngineWithFade(fadeTimeMs)"),
         DeprecationLevel.WARNING,
     )
+    /** Vuelve cuando el motor ACEPTÓ el stop, no cuando paró (REQ-050, D11): no bloquea el hilo que llama. */
     fun stopEngineWithFadeSync(fadeTimeMs: Int)
 
     @Deprecated(

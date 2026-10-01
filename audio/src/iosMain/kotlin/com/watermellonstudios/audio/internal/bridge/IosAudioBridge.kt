@@ -204,9 +204,14 @@ internal class IosAudioBridge : IAudioNativeBridge {
             wma_engine_start(engine, fadeDefault).asUnitResult("startEngine")
         }
 
+    // REQ-050 S2 (D11): las dos variantes suspend de parar devuelven éxito recién con el motor
+    // en Stopped, igual que en Android. Ver EngineStopWait.
     override suspend fun stopEngine(): Result<Unit> =
         concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "stopEngine") {
-            wma_engine_stop(engine, fadeDefault).asUnitResult("stopEngine")
+            val accepted = wma_engine_stop(engine, fadeDefault).asUnitResult("stopEngine")
+            EngineStopWait.afterAccepted(accepted, "stopEngine", EngineStopWait.ceilingFor(-1)) {
+                wma_get_engine_state(engine)
+            }
         }
 
     override suspend fun startEngineWithFade(fadeTimeMs: Int): Result<Unit> =
@@ -216,7 +221,11 @@ internal class IosAudioBridge : IAudioNativeBridge {
 
     override suspend fun stopEngineWithFade(fadeTimeMs: Int): Result<Unit> =
         concurrency.guarded(BridgeConcurrency.Category.LIFECYCLE, "stopEngineWithFade") {
-            wma_engine_stop(engine, fadeTimeMs.coerceAtLeast(0)).asUnitResult("stopEngineWithFade")
+            val fade = fadeTimeMs.coerceAtLeast(0)
+            val accepted = wma_engine_stop(engine, fade).asUnitResult("stopEngineWithFade")
+            EngineStopWait.afterAccepted(accepted, "stopEngineWithFade", EngineStopWait.ceilingFor(fade)) {
+                wma_get_engine_state(engine)
+            }
         }
 
     override suspend fun pauseEngineWithFade(fadeTimeMs: Int): Result<Unit> =

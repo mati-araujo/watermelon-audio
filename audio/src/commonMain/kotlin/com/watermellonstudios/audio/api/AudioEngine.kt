@@ -86,14 +86,14 @@ interface AudioEngine {
      * Stop the audio engine with optional fade-out.
      *
      * @param fadeMs Fade-out duration in milliseconds (default from config)
-     * @return `success` si el motor **aceptó** el stop; `failure` con la causa si no.
+     * @return `success` con el motor nativo **ya en Stopped**; `failure` con la causa si no.
      *
-     * 🔴 **Con `fadeMs > 0` el `success` NO significa "el stream ya está cerrado"** (B9).
-     * `AudioEngine::stopWithFade` arranca el fade y delega la detención a un worker que
-     * corre cuando el fade termina, así que esta función vuelve antes. `success` afirma
-     * exactamente **que el motor aceptó el pedido**; la detención se completa después, de
-     * forma asíncrona. Con `fadeMs = 0` el camino es sincrónico y no hay nada pendiente.
-     * Quien necesite esperar el cierre mira `state.lifecycle`, que el poller sigue.
+     * 🔴 **`success` significa "el motor paró", también con `fadeMs > 0`** (REQ-050, D11).
+     * Hasta 2.21.0 significaba "el motor aceptó el pedido" y la detención llegaba un fade
+     * + ~60 ms después. Ahora esto vuelve después del fade, con `state.lifecycle` en
+     * `STOPPED`. Si el motor no para dentro de `fadeMs` + 4 s, devuelve
+     * `failure(NativeBridgeException.Timeout)` y **no** publica `STOPPED`: el poller sigue al
+     * motor. Un segundo `stop` durante el fade no reinicia la rampa.
      */
     suspend fun stop(fadeMs: Int? = null): Result<Unit>
 
