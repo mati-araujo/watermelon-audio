@@ -193,6 +193,10 @@ TEST_F(FadeLifecycleTest, AC050_6_AStopOnAStoppedEngineDoesNotStopTheNextStart) 
     // Un segundo stop con el motor ya parado (lo que hace un stop serializado detras de
     // otro, D11) dejaba un worker que paraba el motor que se arrancara despues.
     mEngine->stopWithFade(kFadeMs);
+    // Sobre un motor parado no hay nada que rampear: no se arma fade ni worker. (start()
+    // recoge un worker huerfano igual, asi que sin esta asercion el caso 1 de
+    // stopWithFade quedaba sin test: lo mostro su mutante, que sobrevivia.)
+    EXPECT_FALSE(mEngine->getIsFading()) << "un stop sobre un motor parado armo una rampa";
     ASSERT_TRUE(mEngine->start(0));
 
     // AUSENCIA: no hay condicion que esperar, solo la ventana en la que el worker
