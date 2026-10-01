@@ -10,9 +10,16 @@ import android.hardware.usb.FakeUsbDevice
 import android.hardware.usb.FakeUsbDeviceConnection
 import android.hardware.usb.FakeUsbManager
 import android.os.Handler
+import com.watermellonstudios.audio.domain.usb.AltsettingInfo
+import com.watermellonstudios.audio.domain.usb.AudioFormatInfo
+import com.watermellonstudios.audio.domain.usb.ClockSourceInfo
+import com.watermellonstudios.audio.domain.usb.ClockSourceType
 import com.watermellonstudios.audio.domain.usb.StreamPreference
+import com.watermellonstudios.audio.domain.usb.UsbStreamingMode
+import com.watermellonstudios.audio.domain.usb.UsbSyncMode
 import com.watermellonstudios.audio.domain.usb.UsbAudioCapabilities
 import com.watermellonstudios.audio.domain.usb.UsbAudioDevice
+import com.watermellonstudios.audio.domain.usb.UsbCapabilitySnapshot
 import com.watermellonstudios.audio.domain.usb.UsbAudioError
 import com.watermellonstudios.audio.domain.usb.UsbConnectionState
 import com.watermellonstudios.audio.domain.usb.UsbResult
@@ -306,6 +313,176 @@ class UsbConnectionContractTest {
         )
     }
 
+    // ==================== REQ-050 S3 — la selección vuelve a automático (D17, D18) ====================
+
+    /** Un device UAC2 con un altsetting 2ch/24 bits y un reloj (id 9) de 44,1 a 96 kHz. */
+    private fun uac2Snapshot() = UsbCapabilitySnapshot(
+        vendorId = 0x3001, productId = 0x4001, productName = "fake", manufacturer = "fake", serialNumber = "",
+        uacVersion = 2,
+        playbackAltsettings = listOf(
+            AltsettingInfo(
+                interfaceNumber = 1, alternateSetting = 2,
+                formats = listOf(AudioFormatInfo(2, 24, 3, emptyList(), false, 0, 0)),
+                syncType = UsbSyncMode.ADAPTIVE, hasFeedbackEndpoint = false, hasImplicitFeedback = false,
+                dataEndpointAddress = 1, terminalLinkId = 2,
+            )
+        ),
+        captureAltsettings = emptyList(),
+        clockSources = listOf(
+            ClockSourceInfo(9, ClockSourceType.INTERNAL_FIXED, false, true, false, listOf(44100, 48000, 96000))
+        ),
+        featureUnits = emptyList(),
+    )
+
+    /**
+     * D17. El centinela (-1,-1,-1) llega al nativo y Kotlin deja de re-aplicar la selección
+     * manual en cada arranque.
+     *
+     * Bug que atrapa: limpiar sólo el nativo. `startStreaming` re-aplica `_selectedAltsetting` en
+     * cada arranque, así que la selección del runner volvería a pegarse al stream del consumidor.
+     */
+    @Test
+    fun `D17 el centinela limpia la seleccion y el proximo arranque no la re-aplica`() = withRig { rig ->
+        rig.connectWithPermission(rig.deviceA)
+        rig.port.snapshot = uac2Snapshot()
+        assertEquals(UsbResult.Success(Unit), rig.manager.selectAltsetting(1, 2, 0))
+
+        assertEquals(UsbResult.Success(Unit), rig.manager.selectAltsetting(-1, -1, -1))
+        assertTrue("selectUsbAltsetting(-1,-1,-1)" in rig.port.log, "el centinela no llegó al nativo: ${rig.port.log}")
+        rig.port.log.clear()
+        assertEquals(UsbResult.Success(Unit), rig.manager.startStreaming(48000, 2, 24))
+
+        assertTrue("selectUsbAltsetting(1,2,0)" !in rig.port.log, "se re-aplicó la selección limpiada: ${rig.port.log}")
+        assertEquals(null, rig.manager.activeStreamConfig()?.altsetting)
+    }
+
+    /** D17, el gemelo: sin limpiar, el arranque SÍ re-aplica la selección (el test la puede ver). */
+    @Test
+    fun `D17 gemelo - sin limpiar, el arranque re-aplica la seleccion`() = withRig { rig ->
+        rig.connectWithPermission(rig.deviceA)
+        rig.port.snapshot = uac2Snapshot()
+        assertEquals(UsbResult.Success(Unit), rig.manager.selectAltsetting(1, 2, 0))
+        rig.port.log.clear()
+
+        assertEquals(UsbResult.Success(Unit), rig.manager.startStreaming(48000, 2, 24))
+
+        assertTrue("selectUsbAltsetting(1,2,0)" in rig.port.log, "premisa: ${rig.port.log}")
+        assertEquals(UsbAltsettingSelection(1, 2, 0), rig.manager.activeStreamConfig()?.altsetting)
+    }
+
+    /**
+     * D18 (review de S3, M6). Si el nativo rechaza re-aplicar la selección al arrancar, el stream
+     * corre con la elección automática, y la config activa lo dice: el runner no puede creer que
+     * el stream está en esos bits.
+     */
+    @Test
+    fun `D18 una seleccion que el nativo rechaza al arrancar no queda en la config activa`() = withRig { rig ->
+        rig.connectWithPermission(rig.deviceA)
+        rig.port.snapshot = uac2Snapshot()
+        assertEquals(UsbResult.Success(Unit), rig.manager.selectAltsetting(1, 2, 0))
+        rig.port.rejectSelect = true
+
+        assertEquals(UsbResult.Success(Unit), rig.manager.startStreaming(48000, 2, 24))
+
+        assertEquals(null, rig.manager.activeStreamConfig()?.altsetting)
+        assertEquals(UsbAltsettingSelection(1, 2, 0), rig.manager.manualSelection().altsetting, "la pendiente sigue")
+    }
+
+    /**
+     * D17. El centinela es EXACTO: cualquier otro negativo se rechaza en Kotlin y no llega al
+     * nativo (que lo vuelve a rechazar por su cuenta, `classifyAltsettingRequest`).
+     */
+    @Test
+    fun `D17 un negativo distinto del centinela se rechaza sin llegar al nativo`() = withRig { rig ->
+        rig.connectWithPermission(rig.deviceA)
+        // Sin descriptores todavía: el índice negativo es un error de formato por sí mismo, no
+        // "no hay snapshot" (que es lo que diría la búsqueda en los descriptores).
+        val early = rig.manager.selectAltsetting(-1, -1, 0)
+        assertEquals(UsbAudioError.UNSUPPORTED_FORMAT, (early as? UsbResult.Failure)?.error, "sin snapshot: $early")
+        rig.port.snapshot = uac2Snapshot()
+
+        for ((i, a, f) in listOf(Triple(-1, -1, 0), Triple(0, -1, -1), Triple(-2, -2, -2))) {
+            val r = rig.manager.selectAltsetting(i, a, f)
+            assertEquals(UsbAudioError.UNSUPPORTED_FORMAT, (r as? UsbResult.Failure)?.error, "($i,$a,$f): $r")
+        }
+        val clock = rig.manager.selectClockSource(-1)
+        assertEquals(UsbAudioError.UNSUPPORTED_FORMAT, (clock as? UsbResult.Failure)?.error, "reloj -1: $clock")
+        assertTrue(rig.port.log.none { it.startsWith("select") }, "un pedido rechazado llegó al nativo: ${rig.port.log}")
+    }
+
+    /** D17/D18. Reloj 0 vuelve a automático, y la config del stream lo refleja. */
+    @Test
+    fun `D17 reloj 0 limpia el reloj elegido a mano`() = withRig { rig ->
+        rig.connectWithPermission(rig.deviceA)
+        rig.port.snapshot = uac2Snapshot()
+        assertEquals(UsbResult.Success(Unit), rig.manager.selectClockSource(9))
+        assertEquals(UsbResult.Success(Unit), rig.manager.startStreaming(48000, 2, 24))
+        assertEquals(9, rig.manager.activeStreamConfig()?.clockSourceId, "premisa: el reloj manual quedó en la config")
+        rig.manager.stopStreaming()
+
+        assertEquals(UsbResult.Success(Unit), rig.manager.selectClockSource(0))
+        assertTrue("selectUsbClockSource(0)" in rig.port.log, "el centinela no llegó al nativo: ${rig.port.log}")
+        assertEquals(UsbResult.Success(Unit), rig.manager.startStreaming(48000, 2, 24))
+
+        assertEquals(null, rig.manager.activeStreamConfig()?.clockSourceId)
+    }
+
+    /** D17. Con el stream corriendo, limpiar se rechaza (como la selección misma). */
+    @Test
+    fun `D17 con el stream corriendo no se limpia la seleccion`() = withRig { rig ->
+        rig.connectWithPermission(rig.deviceA)
+        assertEquals(UsbResult.Success(Unit), rig.manager.startStreaming(48000, 2, 24))
+        rig.port.log.clear()
+
+        val r = rig.manager.selectAltsetting(-1, -1, -1)
+
+        assertEquals(UsbAudioError.STREAMING_ERROR, (r as? UsbResult.Failure)?.error, "resultado: $r")
+        assertTrue(rig.port.log.isEmpty(), "llegó al nativo con el stream vivo: ${rig.port.log}")
+    }
+
+    /**
+     * D18. La config del stream que corre es la del último arranque exitoso, y desaparece al
+     * parar: el runner decide con ella si reabre y cómo restaura.
+     */
+    @Test
+    fun `D18 la config activa es la del arranque y se borra al parar`() = withRig { rig ->
+        rig.connectWithPermission(rig.deviceA)
+        assertEquals(null, rig.manager.activeStreamConfig())
+
+        assertEquals(UsbResult.Success(Unit), rig.manager.startStreaming(44100, 2, 16))
+        assertEquals(
+            UsbActiveStreamConfig(44100, 2, 16, UsbStreamingMode.PLAYBACK_ONLY, null, null),
+            rig.manager.activeStreamConfig(),
+        )
+        rig.manager.stopStreaming()
+        assertEquals(null, rig.manager.activeStreamConfig())
+
+        rig.port.startStatus = UsbStreamStartStatus.START_FAILED
+        rig.manager.startStreaming(96000, 2, 24)
+        assertEquals(null, rig.manager.activeStreamConfig(), "un arranque fallido dejó una config activa")
+    }
+
+    /**
+     * D16. Los dos valores nuevos del array de stats van a sus campos, y un `.so` viejo de 19 los
+     * deja en 0 en vez de inventarlos.
+     *
+     * Bug que atrapa: leer [19]/[20] al revés (192 paquetes como techo de latencia) o con
+     * índices que un array de 19 no tiene.
+     */
+    @Test
+    fun `D16 el array de 21 llena en vuelo y techo, y uno de 19 los deja en cero`() {
+        val arr = FloatArray(21) { it.toFloat() }.also { it[19] = 192f; it[20] = 61.3f }
+
+        val stats = parseUsbTransferStats(arr, bufferMs = 5, healthScore = 100f, bufferAdjustments = 0)
+        assertEquals(192L, stats.packetsInFlight)
+        assertEquals(61.3, stats.declaredMaxLatencyMs, 0.001)
+
+        val old = parseUsbTransferStats(arr.copyOf(19), bufferMs = 5, healthScore = 100f, bufferAdjustments = 0)
+        assertEquals(0L, old.packetsInFlight)
+        assertEquals(0.0, old.declaredMaxLatencyMs, 0.0)
+        assertEquals(18, old.activeClockSourceId, "premisa: los 19 de antes siguen en su lugar")
+    }
+
     // ==================== El arnés ====================
 
     private fun withRig(body: suspend (Rig) -> Unit) = runBlocking {
@@ -418,7 +595,17 @@ class UsbConnectionContractTest {
             deviceInitialized = false
         }
         override fun setUsbStreamPreference(preference: StreamPreference): Boolean = true
-        override fun selectUsbAltsetting(interfaceNumber: Int, alternateSetting: Int, formatIndex: Int): Boolean = true
+        @Volatile var snapshot: UsbCapabilitySnapshot? = null
+        @Volatile var rejectSelect = false
+        override fun selectUsbAltsetting(interfaceNumber: Int, alternateSetting: Int, formatIndex: Int): Boolean {
+            log += "selectUsbAltsetting($interfaceNumber,$alternateSetting,$formatIndex)"
+            return !rejectSelect
+        }
+        override fun selectUsbClockSource(clockSourceId: Int): Boolean {
+            log += "selectUsbClockSource($clockSourceId)"
+            return true
+        }
+        override fun capabilitySnapshot(): UsbCapabilitySnapshot? = snapshot
         override fun startUsbStreamingWithModeStatus(sampleRate: Int, channels: Int, bitDepth: Int, streamingMode: Int): Int {
             log += "startUsbStreaming"
             return startStatus

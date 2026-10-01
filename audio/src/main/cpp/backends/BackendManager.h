@@ -92,6 +92,39 @@ inline UsbStreamStartStatus classifyUsbStreamStart(const UsbStreamStartFacts& f)
 }
 
 /**
+ * REQ-050 S3 (AC-050.8, D17) — what a manual altsetting / clock source request means.
+ *
+ * The USB test runner renegotiates each row with `selectAltsetting`/`selectClockSource`,
+ * and the backend keeps that selection for every later start. To hand the consumer back
+ * the automatic choice, the two existing JNI entry points take a sentinel: exactly
+ * (-1, -1, -1) for the altsetting and 0 for the clock source. Any other out-of-range value
+ * is still a rejection, so a miscomputed negative index can never read as "automatic".
+ * Pure, so the host suite can assert it (test_usb_selection_request.cpp).
+ */
+enum class UsbSelectionRequest : int {
+    SELECT = 0,
+    CLEAR = 1,
+    REJECT = 2,
+};
+
+inline UsbSelectionRequest classifyAltsettingRequest(int interfaceNumber, int alternateSetting,
+                                                     int formatIndex) noexcept {
+    if (interfaceNumber == -1 && alternateSetting == -1 && formatIndex == -1) {
+        return UsbSelectionRequest::CLEAR;
+    }
+    if (interfaceNumber < 0 || alternateSetting < 0 || formatIndex < 0) {
+        return UsbSelectionRequest::REJECT;
+    }
+    return UsbSelectionRequest::SELECT;
+}
+
+inline UsbSelectionRequest classifyClockSourceRequest(int clockSourceId) noexcept {
+    if (clockSourceId == 0) return UsbSelectionRequest::CLEAR;
+    if (clockSourceId < 0 || clockSourceId > 255) return UsbSelectionRequest::REJECT;
+    return UsbSelectionRequest::SELECT;
+}
+
+/**
  * BackendManager
  *
  * Manager for audio backends. Constructible (Phase 0D: no longer singleton-only).

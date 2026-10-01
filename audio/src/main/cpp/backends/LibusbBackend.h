@@ -236,6 +236,21 @@ public:
         return mTransferManager ? mTransferManager->getConvergedFloorMs() : 0;
     }
 
+    /**
+     * REQ-050 S3 (AC-050.9, D16): output packets in flight (declared queue depth) and the
+     * output latency ceiling the backend declares. Both 0 when not streaming. They cross
+     * the JNI as [19] and [20] of nativeGetUsbTransferStats.
+     */
+    std::size_t getOutputInFlightDepthPackets() const {
+        return mTransferManager ? mTransferManager->getOutputInFlightDepthPackets() : 0;
+    }
+    float getDeclaredOutputLatencyCeilingMs() const {
+        return mTransferManager
+            ? mTransferManager->getDeclaredOutputLatencyCeilingMs(
+                  mDspBlockFramesInUse.load(std::memory_order_relaxed))
+            : 0.0f;
+    }
+
     /** Current latency profile as an ordinal (usb::UsbLatencyProfile). */
     int getLatencyProfileOrdinal() const {
         return static_cast<int>(mLatencyProfile.load(std::memory_order_relaxed));
@@ -367,6 +382,15 @@ public:
      * The clock graph validates reachability per selected terminal at start.
      */
     bool selectClockSource(int clockSourceId);
+
+    /**
+     * REQ-050 S3 (AC-050.8, D17): forget the manual altsetting / clock source selection, so
+     * the next start() goes back to the automatic choice. Rejected while running, like the
+     * selections themselves. Reached through the sentinels of the existing JNI entry points
+     * (classifyAltsettingRequest / classifyClockSourceRequest).
+     */
+    bool clearManualAltsettingSelection();
+    bool clearManualClockSourceSelection();
 
     /**
      * Set error callback for USB-specific errors.
@@ -502,6 +526,8 @@ private:
     // restart the transfer manager at the real rate (0.4, hallazgo C5).
     std::atomic<int> mNegotiatedSampleRate{0};
     int mRequestedBufferSize = 256;
+    /** REQ-050 S3 (D16): the DSP block of the running stream, published by start(). */
+    std::atomic<int> mDspBlockFramesInUse{0};
     bool mFullDuplexEnabled = false;  // Legacy, use mStreamingMode
     UsbStreamingMode mStreamingMode = UsbStreamingMode::PLAYBACK_ONLY;
 

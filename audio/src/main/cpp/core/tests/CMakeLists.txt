@@ -143,6 +143,7 @@ add_executable(core_tests
     test_fx_track_routing.cpp
     test_fade_lifecycle.cpp
     test_usb_stream_start.cpp
+    test_usb_selection_request.cpp
     test_capture_requests.cpp
     test_c_api_lifecycle.cpp
     test_c_api_master_bus.cpp

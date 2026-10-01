@@ -196,6 +196,20 @@ data class UsbTransferStats(
     val feedbackPacketsInvalid: Long = 0,
     val activeClockSourceId: Int = -1,
 
+    /**
+     * REQ-050 (AC-050.9, D16): output packets the backend keeps in flight — its declared queue
+     * depth. They are in `packetsSubmitted` and not yet in `packetsCompleted`. 0 when unknown.
+     */
+    val packetsInFlight: Long = 0,
+
+    /**
+     * REQ-050 (AC-050.9, D16): the output latency ceiling the backend declares for its current
+     * configuration, in ms: what [currentLatencyMs] can reach at worst with a healthy stream
+     * (ring target at the jitter budget's maximum, one DSP block, half of what is in flight).
+     * 0 when unknown.
+     */
+    val declaredMaxLatencyMs: Double = 0.0,
+
     // Timestamp for stats
     val timestampMs: Long = epochMillis()
 ) {
@@ -242,6 +256,23 @@ sealed class UsbHealthEvent {
 /**
  * USB Audio streaming mode.
  */
+/**
+ * REQ-050 (AC-050.8, D17) — the values that hand a manual selection back to the automatic
+ * choice. A manual altsetting or clock source applies to EVERY later `startStreaming` until it
+ * is cleared or the device is disconnected:
+ *
+ * ```kotlin
+ * usbManager.selectAltsetting(AUTOMATIC_ALTSETTING, AUTOMATIC_ALTSETTING, AUTOMATIC_ALTSETTING)
+ * usbManager.selectClockSource(AUTOMATIC_CLOCK_SOURCE)
+ * ```
+ *
+ * The sentinel is exact: any other negative index, or a negative clock id, is still rejected.
+ */
+object UsbStreamSelection {
+    const val AUTOMATIC_ALTSETTING: Int = -1
+    const val AUTOMATIC_CLOCK_SOURCE: Int = 0
+}
+
 enum class UsbStreamingMode(val id: Int, val displayName: String) {
     PLAYBACK_ONLY(0, "Playback Only"),
     CAPTURE_ONLY(1, "Capture Only"),
