@@ -18,12 +18,10 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <!--
-      MINI-038: `UsbAudioManager.startStreaming` toma un wake lock, y sin este permiso tira un
-      SecurityException (medido en el g42; el streaming sigue, pero el lock no). La librería no lo
-      declara en su manifest; NoisyPad lo tiene por el merge de otro módulo. Es un permiso normal,
-      concedido al instalar.
+      WAKE_LOCK NO se declara acá, a propósito (REQ-050 S2, D9): lo declara el manifest de `:audio`
+      y tiene que llegar por el merge. El smoke en device lo verifica con el lock tomado durante el
+      streaming; si alguien lo vuelve a agregar acá, esa verificación deja de probar el merge.
     -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:allowBackup="false"
