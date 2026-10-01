@@ -65,3 +65,20 @@ aar/size = referencia -> crece-10-15%   # S3 + MINI-036: +10,01 % medido sobre m
 # runtime, no una entrada del manifest). En bytes lo unico propio es classes.jar -0,01 %; el AAR
 # entero cae en la banda que declara aar/size arriba (los bytes cambian con cada publish).
 # Nada que declarar.
+
+# --- REQ-050 S2: el contrato USB devuelve errores tipados y no pierde operaciones
+# Medido publicando esta etapa como 2.21.0-req050-s2 contra 2.21.0. aar/size sigue en su banda
+# (+10,32 %: S2 suma clases chicas y el permiso al manifest). El .so cambia (ensureEngine en
+# initializeUsbDevice, la causa del arranque USB por el JNI, stopWithFade) pero sus bytes no se
+# declaran (ver la cabecera); DT_NEEDED, DT_SONAME, alineacion y .comment no cambian. La superficie
+# publica nueva (UsbAudioError.NO_ENGINE / NO_AUDIO_CALLBACK / DEVICE_BUSY) son entradas de un enum
+# que ya existia: no agrega clases; va en la nota de bump.
+aar/text:AndroidManifest.xml = sha256:9ca083b0542e1231 -> sha256:a8393f8b04670e62   # REQ-050 S2 (D9, AC-050.7): uses-permission WAKE_LOCK, que llega a la app por el merge. Sale de src/androidMain/AndroidManifest.xml, el que AGP empaqueta con KMP; el src/main/AndroidManifest.xml viejo no entra al AAR (su RECORD_AUDIO no se publica: fuera de alcance, reportado)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/bridge/EngineStopWait.class = (ausente) -> presente   # REQ-050 S2 (D11): la espera del Stopped nativo de las variantes suspend de stop, compartida por los bridges de Android e iOS (internal)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/bridge/EngineStopWait$afterAccepted$1.class = (ausente) -> presente   # REQ-050 S2 (D11): continuacion de corrutina de EngineStopWait.afterAccepted (la genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/bridge/EngineStopWait$awaitStopped$1.class = (ausente) -> presente   # REQ-050 S2 (D11): continuacion de corrutina de EngineStopWait.awaitStopped (la genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/bridge/EngineStopWait$awaitStopped$stopped$1.class = (ausente) -> presente   # REQ-050 S2 (D11): el bloque de withTimeoutOrNull de awaitStopped (lo genera el compilador)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/bridge/UsbStreamStartStatus.class = (ausente) -> presente   # REQ-050 S2 (AC-050.3): los valores de la causa que devuelve nativeStartUsbStreamingWithMode, espejo del enum de BackendManager.h (internal)
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbNativePort.class = (ausente) -> presente   # REQ-050 S2 (D14): la costura interna de las operaciones nativas de conexion y streaming USB
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/BridgeUsbNativePort.class = (ausente) -> presente   # REQ-050 S2 (D14): la implementacion de produccion de UsbNativePort, sobre AudioNativeBridge
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImpl$connectDeviceLocked$1.class = (ausente) -> presente   # REQ-050 S2 (D7): continuacion de corrutina de connectDeviceLocked, el cuerpo de connectDevice bajo el mutex (la genera el compilador)
