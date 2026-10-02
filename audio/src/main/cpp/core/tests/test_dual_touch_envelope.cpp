@@ -1827,6 +1827,40 @@ TEST_P(DualTouchGhost, Ac0523_TheOscillatorDisabledPathLeavesNoGhostReleaseWhenT
         << "control: el regimen previo no suena igual que la referencia";
 }
 
+TEST_P(DualTouchGhost, Ac0523_AnotherRenderPathLeavesNoGhostReleaseWhenTheFingerLiftedMeanwhile) {
+    // a') igual que a), pero el callback sale del camino dual por OTRA RAMA de onAudioReady
+    // (engine SoundFont, sin font cargado: la rama de SoundFont va antes que la dual) y vuelve
+    // con setEngineType(engine original) sin dedos. A diferencia de a), aca renderDualTouch NO
+    // corre mientras tanto, y ninguna epoca se mueve (ni setDualTouchMode ni prepare): lo unico
+    // que suelta la envolvente es el bloque que pasa por otra rama.
+    // Bug que atrapa: sin eso la envolvente queda en "held, ganancia 1" y al volver suena el
+    // release de 80 ms de la nota vieja (mismo observable y umbral que a).
+    constexpr int kEngineTypeSoundFont = 6;
+    const EngineInfo& e = kEngines[GetParam()];
+    const float f = kFreqSlot0;
+    Rig r(e.type, kCoarseStepFrames);
+    r.run(kGhostLeadMs, 0, 0);
+    r.run(kGhostRegimeEndMs - kGhostLeadMs, f, e.amp);
+    r.engine.setEngineType(kEngineTypeSoundFont);
+    r.run(kGhostHeldWhileAwayMs, f, e.amp);
+    r.run(kGhostLiftedWhileAwayMs, 0, 0);
+    r.engine.setEngineType(e.type);
+    const long returnFrame = r.frames();
+    const uint64_t probeAtReturn = r.engine.dualTouchSlotBlocksRendered(0);
+    r.run(kGhostAfterReturnMs, 0, 0);
+
+    const double totalMs = static_cast<double>(r.frames()) / kFramesPerMs;
+    const Rendered ref = render(e.type, DualTouchMixMode::AVERAGE, ghostReference(totalMs, f, e.amp));
+    const GhostReading g = readGhost(r.mono, returnFrame, ref.mono, f);
+    EXPECT_LE(g.worstBandDb, kGhostBandMaxDb)
+        << "AC-052.3 " << e.name << ": tras volver de la rama SoundFont sin dedos, la banda de " << f
+        << " Hz esta a " << g.worstBandDb << " dB del regimen en la ventana " << g.worstWindow
+        << " (release fantasma de la nota vieja; debe ser <= " << kGhostBandMaxDb << ")";
+    EXPECT_EQ(r.engine.dualTouchSlotBlocksRendered(0), probeAtReturn)
+        << "AC-052.3 " << e.name << ": el engine del slot 0 se proceso "
+        << (r.engine.dualTouchSlotBlocksRendered(0) - probeAtReturn) << " bloques tras volver sin dedos";
+}
+
 TEST_P(DualTouchGhost, Ac0523_TheDualModeSwitchedOffLeavesNoGhostReleaseWhenTheFingerLiftedMeanwhile) {
     // b) igual, saliendo con setDualTouchMode(false) (el motor pasa al camino single touch) y
     // volviendo con setDualTouchMode(true) sin dedos.
