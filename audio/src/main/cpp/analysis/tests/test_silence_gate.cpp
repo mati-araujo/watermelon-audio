@@ -31,6 +31,7 @@
  * reales.
  */
 
+#include "tests/support/SnapshotRead.h"
 #include "tests/support/TestWait.h"
 #include "../AnalysisRing.h"
 #include "../AnalysisSnapshot.h"
@@ -219,9 +220,21 @@ public:
                 continue;
             }
             mSeenFrames = analysedFrames();
+            // MINI-043: NaN = el lector ya fallo con "no se pudo leer". Seguir
+            // haria vencer cada espera de abajo por 2 s y terminaria en un
+            // timeout de ctest en vez de en ese mensaje.
+            if (std::isnan(mSeenFrames)) return o;
 
+            // MINI-043: es la observacion de un publish que YA se espero, asi que
+            // perderla por una lectura rota achicaria el denominador de un test de
+            // ausencia. Se lee coherente; el techo vencido falla con su mensaje.
             float v[kSnapshotValueCount];
-            if (!mSnap.read(v)) continue;
+            const wma_test::SnapshotRead leida = wma_test::readCoherent(mSnap, v);
+            if (leida == wma_test::SnapshotRead::kTimedOut) {
+                ADD_FAILURE() << "no se pudo leer el snapshot: " << wma_test::describe(leida);
+                return o;
+            }
+            if (leida != wma_test::SnapshotRead::kCoherent) continue;
             const int st = static_cast<int>(v[kSnapState]);
             const bool numeric = !std::isnan(v[kSnapCents]);
 
@@ -256,9 +269,11 @@ public:
                                           "precondicion los tests de ausencia no prueban nada";
     }
 
+    /// MINI-043: monotono, asi que sin publicacion es 0 de verdad; una lectura
+    /// ROTA no lo es. Con el 0 de antes, `mSeenFrames = analysedFrames()` podia
+    /// quedar en 0 y la espera siguiente (`> before`) salia sin esperar nada.
     double analysedFrames() {
-        float v[kSnapshotValueCount];
-        return mSnap.read(v) ? static_cast<double>(v[kSnapFramesAnalyzed]) : 0.0;
+        return wma_test::readCoherentValueOr(mSnap, kSnapFramesAnalyzed, 0.0);
     }
 
 private:

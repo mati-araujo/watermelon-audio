@@ -23,6 +23,7 @@
  * parte de la aserción.**
  */
 
+#include "tests/support/SnapshotRead.h"
 #include "tests/support/TestWait.h"
 #include "../AnalysisRing.h"
 #include "../AnalysisSnapshot.h"
@@ -108,9 +109,16 @@ Reading measureAt(double realCents, double B) {
         }, std::chrono::seconds(2));
     }
 
+    // MINI-043: con el thread vivo, un `read()` a mitad de un publish daba false
+    // y dejaba `published = false` — una AUSENCIA que el motor no publico, y que
+    // vuelve vacuo el chequeo de signo de los tests que solo miran lo publicado.
     Reading r;
     float v[kSnapshotValueCount];
-    if (snap.read(v)) {
+    const wma_test::SnapshotRead got = wma_test::readCoherent(snap, v);
+    if (got == wma_test::SnapshotRead::kTimedOut) {
+        ADD_FAILURE() << "no se pudo leer el snapshot: " << wma_test::describe(got);
+    }
+    if (got == wma_test::SnapshotRead::kCoherent) {
         r.cents = static_cast<double>(v[kSnapCents]);
         r.published = !std::isnan(r.cents);
         const double hz = static_cast<double>(v[kSnapDetectedHz]);
@@ -264,7 +272,9 @@ TEST(SignOutsideRange, APerfectlyTunedStringWithNoiseStillPublishes) {
         }
 
         float v[kSnapshotValueCount];
-        ASSERT_TRUE(snap.read(v));
+        const wma_test::SnapshotRead got = wma_test::readCoherent(snap, v);
+        ASSERT_EQ(got, wma_test::SnapshotRead::kCoherent)
+            << "no se pudo leer el snapshot: " << wma_test::describe(got);
         EXPECT_FALSE(std::isnan(v[kSnapCents]))
             << "el motor apago la aguja con la cuerda AFINADA (ruido " << noise
             << "): el arbitraje por signo se disparo sobre un empate tecnico";
