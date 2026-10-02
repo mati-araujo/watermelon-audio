@@ -975,6 +975,14 @@ private:
                            int cachedEngineType, size_t cachedOscIndex,
                            bool cachedHasActiveModulator, size_t cachedModIndex);
 
+    /**
+     * Procesa la fuente de UN slot del dual touch (engine o, en Classic, el
+     * oscilador primario/secundario) en @p dst, con @p freq / @p amp, y lo
+     * cuenta en la sonda del slot. Thread de audio (REQ-052).
+     */
+    void renderDualSlotSource(int slot, SynthEngine* engine, size_t oscIndex,
+                              float* dst, int32_t numFrames, float freq, float amp);
+
     /** Render DUAL_TOUCH mode: two oscillators + mix + effects */
     void renderDualTouch(float* output, int32_t numFrames,
                          const TouchState& dualTouchState,

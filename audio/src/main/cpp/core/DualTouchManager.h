@@ -4,6 +4,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include "../dsp/SIMDUtils.h"
 #include "../platform/Logger.h"
 #include "../platform/RtCounter.h"
@@ -13,15 +14,29 @@
 #define DTM_LOGE(...) wma::logMessage(wma::LogLevel::ERROR, "DualTouchMgr", __VA_ARGS__)
 
 /**
- * @brief Modos de mezcla para dual touch
+ * @brief Modos de mezcla para dual touch.
+ *
+ * Cada slot (dedo) es UNA voz con su engine y su envolvente (REQ-052): ataque
+ * de ~5 ms al apoyar, release exponencial de ~80 ms a −60 dB al levantar —con
+ * la ultima frecuencia y amplitud del dedo— y, si el dedo vuelve durante el
+ * release, la ganancia sube desde donde estaba. Con UN solo dedo la salida es
+ * esa voz a ganancia 1 en todos los modos; con dos, la ley de cada modo; y las
+ * transiciones entre esos estados siguen a las envolventes, sin escalon.
+ *
+ * Desde REQ-052 (2.22.0) **SUM y AVERAGE son la misma ley: suma a ganancia 1
+ * por voz**, igual que un dedo solo. Antes los dos multiplicaban la suma por
+ * 0,5, asi que una voz bajaba ~6 dB al entrar la otra y subia ~6 dB al salir.
+ * El pico de la suma lo cuida la proteccion de salida (LookaheadLimiter,
+ * −0,5 dBFS), no una ganancia que dependa de cuantos dedos haya. AVERAGE
+ * conserva su nombre (y su valor) por compatibilidad.
  */
 enum class DualTouchMixMode {
-    SUM = 0,        // Suma simple (puede saturar)
-    AVERAGE = 1,    // Promedio (mantiene nivel) - DEFAULT
-    MAX = 2,        // Máximo de ambas señales
-    CROSSFADE = 3,  // Crossfade basado en distancia
-    RING = 4,       // Multiplicación (ring modulation)
-    AMPLITUDE_BALANCED = 5  // Balance automático de amplitud
+    SUM = 0,        ///< Suma a ganancia 1 por voz (misma ley que AVERAGE desde REQ-052)
+    AVERAGE = 1,    ///< DEFAULT. Suma a ganancia 1 por voz; el nombre es historico
+    MAX = 2,        ///< max(|voz1|, |voz2|) con el signo de la suma
+    CROSSFADE = 3,  ///< (1 − d)·voz1 + d·voz2, con d = distancia entre dedos en [0, 1]
+    RING = 4,       ///< voz1·voz2·0,5 (ring modulation)
+    AMPLITUDE_BALANCED = 5  ///< pesos amp_i / (amp1 + amp2), con la amplitud de cada dedo
 };
 
 /**
@@ -150,72 +165,184 @@ public:
         return s;
     }
 
-    // ========== MIXING ==========
+    // ========== ENVOLVENTE POR SLOT (REQ-052) ==========
+    //
+    // Cada slot (0 = principal, 1 = el otro) es UNA voz: su engine, su ultima
+    // frecuencia y amplitud, y una envolvente de ganancia propia. El estado de
+    // abajo (`mSlotVoice`, coeficientes, epoca y rate cacheados) lo leen y lo
+    // escriben SOLO el thread de audio; desde el thread de control entran dos
+    // atomics (`mEnvelopeRate`, `mEnvelopeEpoch`) y el thread de audio los
+    // consulta una vez por bloque.
+
+    /// Ataque lineal desde la ganancia actual hasta 1 (D5).
+    static constexpr float kSlotAttackMs = 5.0f;
+    /// Release exponencial: llega a `kSlotOffGain` (−60 dB) en este tiempo (D4).
+    static constexpr float kSlotReleaseMs = 80.0f;
+    /// −60 dB. Debajo de esto el release termina y el engine del slot deja de procesarse.
+    static constexpr float kSlotOffGain = 1.0e-3f;
+    /// Umbral de "el dedo esta apoyado" — el mismo que usaba renderDualTouch.
+    static constexpr float kSlotHeldAmp = 0.001f;
+
+    /// Lo que el thread de audio tiene que renderizar en este bloque.
+    struct SlotBlockPlan {
+        bool render[2];   ///< el engine del slot se procesa (apoyado o en release)
+        float freq[2];    ///< frecuencia a usar (la retenida si esta en release)
+        float amp[2];     ///< amplitud a usar (la retenida si esta en release)
+    };
 
     /**
-     * @brief Mix two dual-touch audio buffers according to the current mix mode.
-     * @param buffer1 Touch 1 audio (interleaved stereo)
-     * @param buffer2 Touch 2 audio (interleaved stereo)
-     * @param output Output buffer (interleaved stereo)
-     * @param numFrames Number of stereo frames
-     * @param ts TouchState snapshot (must be obtained via snapshot() before calling)
-     *
-     * RT-safe: No allocations, no locks.
+     * @brief Publica el sample rate para los coeficientes de la envolvente.
+     * Thread de control (camino de prepare). El thread de audio recalcula
+     * los coeficientes la proxima vez que planifica un bloque.
      */
-    void mixSignals(const float* buffer1, const float* buffer2,
-                    float* output, int32_t numFrames,
-                    const TouchState& ts) const {
+    void setEnvelopeSampleRate(int sampleRate) noexcept {
+        if (sampleRate > 0) mEnvelopeRate.store(sampleRate, std::memory_order_release);
+    }
+
+    /**
+     * @brief Pide que las dos envolventes vuelvan a cero (sin release pendiente).
+     * Thread de control: al prender el modo dual y al parar el motor.
+     */
+    void requestEnvelopeRestart() noexcept {
+        mEnvelopeEpoch.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    /**
+     * @brief Decide, al principio del bloque, que slots se procesan y con que
+     * frecuencia y amplitud. Retiene freq/amp mientras el dedo esta apoyado y
+     * los usa durante el release. Thread de audio. RT-safe.
+     */
+    SlotBlockPlan planSlotBlock(const TouchState& ts) noexcept {
+        refreshEnvelopeCoefficients();
+
+        const uint32_t epoch = mEnvelopeEpoch.load(std::memory_order_acquire);
+        if (epoch != mSeenEnvelopeEpoch) {
+            mSeenEnvelopeEpoch = epoch;
+            for (auto& v : mSlotVoice) {
+                v.gain = 0.0f;
+                v.held = false;
+            }
+        }
+
+        const float amps[2] = {ts.amp1, ts.amp2};
+        const float freqs[2] = {ts.freq1, ts.freq2};
+
+        SlotBlockPlan plan{};
+        for (int k = 0; k < 2; ++k) {
+            SlotVoice& v = mSlotVoice[k];
+            v.held = amps[k] > kSlotHeldAmp;
+            if (v.held) {
+                v.heldFreq = freqs[k];
+                v.heldAmp = amps[k];
+            }
+            plan.render[k] = v.held || v.gain > 0.0f;
+            plan.freq[k] = v.heldFreq;
+            plan.amp[k] = v.heldAmp;
+        }
+        return plan;
+    }
+
+    /**
+     * @brief Un solo slot sonando: aplica su envolvente EN EL LUGAR sobre @p buffer.
+     * Con el dedo apoyado y la ganancia ya en 1 no toca nada (mismo costo que
+     * el camino de un dedo de antes). Thread de audio. RT-safe.
+     */
+    void shapeSoloSlot(int slot, float* buffer, int32_t numFrames) noexcept {
+        SlotVoice& v = mSlotVoice[slot == 1 ? 1 : 0];
+        if (v.held && v.gain >= 1.0f) return;  // regimen: ganancia 1
+        for (int32_t i = 0; i < numFrames; ++i) {
+            const float g = advanceSlotGain(v);
+            buffer[i * 2] *= g;
+            buffer[i * 2 + 1] *= g;
+        }
+    }
+
+    /**
+     * @brief Los dos slots sonando: aplica las envolventes y mezcla.
+     *
+     * Con x1, x2 la salida de cada engine (sin envolvente) y g1, g2 sus
+     * ganancias, la mezcla es la interpolacion bilineal entre los cuatro
+     * estados de presencia:
+     *
+     *     out = g1·(1−g2)·x1 + g2·(1−g1)·x2 + g1·g2·L(x1, x2)
+     *
+     * donde L es la ley del modo con los dos dedos (MAX es la excepcion: ver
+     * su caso). Con un solo dedo (g del
+     * otro = 0) da ese dedo a ganancia 1, que es lo que el modo dual hacia con
+     * un dedo en TODOS los modos; con los dos en 1 da L, la ley de siempre; y
+     * es continua entre medio, que es lo que pide AC-052.8. Para SUM/AVERAGE
+     * (L = x1 + x2) se reduce a g1·x1 + g2·x2: la suma a unidad de D2/D3.
+     *
+     * Thread de audio. RT-safe.
+     */
+    void blendSlotVoices(const float* buffer1, const float* buffer2,
+                         float* output, int32_t numFrames,
+                         const TouchState& ts) noexcept {
+        SlotVoice& v1 = mSlotVoice[0];
+        SlotVoice& v2 = mSlotVoice[1];
+
         switch (ts.mixMode) {
-            case DualTouchMixMode::SUM:
-            case DualTouchMixMode::AVERAGE:
-                simd::addStereoBuffers(output, buffer1, buffer2, numFrames, true);
-                break;
-
             case DualTouchMixMode::MAX:
-            {
-                int32_t totalSamples = numFrames * 2;
-                for (int32_t i = 0; i < totalSamples; ++i) {
-                    float absMax = std::max(std::abs(buffer1[i]), std::abs(buffer2[i]));
-                    float sign = (buffer1[i] + buffer2[i] >= 0.0f) ? 1.0f : -1.0f;
-                    output[i] = absMax * sign;
+                // MAX se aplica sobre las voces YA envueltas: max(|g1·x1|, |g2·x2|)
+                // con el signo de la suma. Con un dedo da ese dedo (max con 0) y
+                // con los dos en 1 da la ley de siempre, igual que la forma
+                // bilineal; pero ademas |salida| es continua durante la
+                // transicion. La bilineal mezcla x1 con una ley cuyo signo salta
+                // (el de la suma), y ese salto, escalado por g1·g2, aparece como
+                // escalon en |salida| — medido: 0,24 contra 0,036 de regimen.
+                for (int32_t i = 0; i < numFrames; ++i) {
+                    const float g1 = advanceSlotGain(v1);
+                    const float g2 = advanceSlotGain(v2);
+                    for (int c = 0; c < 2; ++c) {
+                        const float a = g1 * buffer1[i * 2 + c];
+                        const float b = g2 * buffer2[i * 2 + c];
+                        const float absMax = std::max(std::abs(a), std::abs(b));
+                        output[i * 2 + c] = (a + b >= 0.0f) ? absMax : -absMax;
+                    }
                 }
-            }
-            break;
+                return;
 
-            case DualTouchMixMode::CROSSFADE:
-            {
-                float crossfade = std::clamp(ts.distance, 0.0f, 1.0f);
-                simd::mixStereoBuffers(output, buffer1, buffer2,
-                                       1.0f - crossfade, crossfade, numFrames);
+            case DualTouchMixMode::CROSSFADE: {
+                const float d = std::clamp(ts.distance, 0.0f, 1.0f);
+                blendWithLaw(buffer1, buffer2, output, numFrames,
+                             [d](float a, float b) { return (1.0f - d) * a + d * b; });
+                return;
             }
-            break;
 
             case DualTouchMixMode::RING:
-            {
-                int32_t totalSamples = numFrames * 2;
-                for (int32_t i = 0; i < totalSamples; ++i) {
-                    output[i] = buffer1[i] * buffer2[i] * 0.5f;
-                }
-            }
-            break;
+                blendWithLaw(buffer1, buffer2, output, numFrames,
+                             [](float a, float b) { return a * b * 0.5f; });
+                return;
 
-            case DualTouchMixMode::AMPLITUDE_BALANCED:
-            {
-                float totalAmp = ts.amp1 + ts.amp2;
-                if (totalAmp > 0.001f) {
-                    float weight1 = ts.amp1 / totalAmp;
-                    float weight2 = ts.amp2 / totalAmp;
-                    simd::mixStereoBuffers(output, buffer1, buffer2,
-                                           weight1, weight2, numFrames);
-                } else {
-                    simd::addStereoBuffers(output, buffer1, buffer2, numFrames, true);
-                }
+            case DualTouchMixMode::AMPLITUDE_BALANCED: {
+                // Pesos con la amplitud RETENIDA: el dedo en release conserva
+                // la suya, asi que la ley no salta cuando su amp cruda pasa a 0.
+                const float a1 = v1.heldAmp;
+                const float a2 = v2.heldAmp;
+                const float total = a1 + a2;
+                const float w1 = total > kSlotHeldAmp ? a1 / total : 0.5f;
+                const float w2 = total > kSlotHeldAmp ? a2 / total : 0.5f;
+                blendWithLaw(buffer1, buffer2, output, numFrames,
+                             [w1, w2](float a, float b) { return w1 * a + w2 * b; });
+                return;
             }
-            break;
 
+            case DualTouchMixMode::SUM:
+            case DualTouchMixMode::AVERAGE:
             default:
-                simd::addStereoBuffers(output, buffer1, buffer2, numFrames, true);
-                break;
+                if (v1.held && v2.held && v1.gain >= 1.0f && v2.gain >= 1.0f) {
+                    // Regimen con los dos dedos: suma a unidad, sin costo por muestra extra.
+                    simd::addStereoBuffers(output, buffer1, buffer2, numFrames,
+                                           /*applyHeadroom=*/false);
+                    return;
+                }
+                for (int32_t i = 0; i < numFrames; ++i) {
+                    const float g1 = advanceSlotGain(v1);
+                    const float g2 = advanceSlotGain(v2);
+                    output[i * 2] = g1 * buffer1[i * 2] + g2 * buffer2[i * 2];
+                    output[i * 2 + 1] = g1 * buffer1[i * 2 + 1] + g2 * buffer2[i * 2 + 1];
+                }
+                return;
         }
     }
 
@@ -256,6 +383,9 @@ public:
     }
 
     void clearBuffers() {
+        // Un buffer limpio sin envolvente limpia dejaria un release a medias
+        // sonando sobre ceros: las dos vuelven a cero juntas.
+        requestEnvelopeRestart();
         if (!mTouch1Buffer.empty()) std::fill(mTouch1Buffer.begin(), mTouch1Buffer.end(), 0.0f);
         if (!mTouch2Buffer.empty()) std::fill(mTouch2Buffer.begin(), mTouch2Buffer.end(), 0.0f);
         DTM_LOGI("Dual touch buffers cleared (size: %zu)", mTouch1Buffer.size());
@@ -291,6 +421,71 @@ private:
 
     // Sonda REQ-052: bloques procesados por slot (los escribe el thread de audio).
     wma::RtCounter mSlotBlocks[2];
+
+    // ========== ENVOLVENTE POR SLOT: estado del thread de audio (REQ-052) ==========
+
+    struct SlotVoice {
+        float gain = 0.0f;       ///< ganancia actual de la envolvente [0, 1]
+        bool held = false;       ///< el dedo esta apoyado (amp > kSlotHeldAmp) en este bloque
+        float heldFreq = 440.0f; ///< ultima frecuencia con el dedo apoyado
+        float heldAmp = 0.0f;    ///< ultima amplitud con el dedo apoyado
+    };
+
+    /// Avanza UNA muestra la envolvente del slot y devuelve la ganancia a aplicar.
+    /// Apoyado: rampa lineal hacia 1 desde donde este (ataque y re-toque).
+    /// Levantado: decae exponencial; debajo de −60 dB queda en 0 y el slot se apaga.
+    float advanceSlotGain(SlotVoice& v) const noexcept {
+        if (v.held) {
+            v.gain = std::min(1.0f, v.gain + mAttackStep);
+        } else if (v.gain > 0.0f) {
+            v.gain *= mReleaseCoeff;
+            if (v.gain < kSlotOffGain) v.gain = 0.0f;
+        }
+        return v.gain;
+    }
+
+    /// Los coeficientes salen del sample rate publicado por el camino de prepare.
+    /// Se recalculan en el thread de audio solo cuando el rate cambia.
+    void refreshEnvelopeCoefficients() noexcept {
+        const int rate = mEnvelopeRate.load(std::memory_order_acquire);
+        if (rate == mCoefficientRate || rate <= 0) return;
+        mCoefficientRate = rate;
+        const float attackSamples = kSlotAttackMs * 0.001f * static_cast<float>(rate);
+        const float releaseSamples = kSlotReleaseMs * 0.001f * static_cast<float>(rate);
+        mAttackStep = 1.0f / std::max(1.0f, attackSamples);
+        // g·r^N = kSlotOffGain con g = 1 y N = releaseSamples.
+        mReleaseCoeff = std::exp(std::log(kSlotOffGain) / std::max(1.0f, releaseSamples));
+    }
+
+    /// Mezcla bilineal por presencia (ver blendSlotVoices) con la ley @p law.
+    template <typename Law>
+    void blendWithLaw(const float* buffer1, const float* buffer2, float* output,
+                      int32_t numFrames, Law law) noexcept {
+        SlotVoice& v1 = mSlotVoice[0];
+        SlotVoice& v2 = mSlotVoice[1];
+        for (int32_t i = 0; i < numFrames; ++i) {
+            const float g1 = advanceSlotGain(v1);
+            const float g2 = advanceSlotGain(v2);
+            const float only1 = g1 * (1.0f - g2);
+            const float only2 = g2 * (1.0f - g1);
+            const float both = g1 * g2;
+            for (int c = 0; c < 2; ++c) {
+                const float x1 = buffer1[i * 2 + c];
+                const float x2 = buffer2[i * 2 + c];
+                output[i * 2 + c] = only1 * x1 + only2 * x2 + both * law(x1, x2);
+            }
+        }
+    }
+
+    SlotVoice mSlotVoice[2];
+    float mAttackStep = 1.0f / 240.0f;   // 5 ms a 48 kHz hasta que llegue el rate real
+    float mReleaseCoeff = 0.99820f;      // 80 ms a −60 dB a 48 kHz
+    int mCoefficientRate = 0;            // 0: todavia no se calculo con un rate publicado
+    uint32_t mSeenEnvelopeEpoch = 0;
+
+    // Entradas desde el thread de control.
+    std::atomic<int> mEnvelopeRate{48000};
+    std::atomic<uint32_t> mEnvelopeEpoch{0};
 
     // Buffers pre-alocados para dual touch (RT-safe)
     std::vector<float> mTouch1Buffer;
