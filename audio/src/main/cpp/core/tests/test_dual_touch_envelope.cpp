@@ -66,8 +66,10 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -156,6 +158,17 @@ constexpr double kEngineDoneMs = 120.0;
 /// Despues del ultimo release la salida (menos el dither) es silencio. -60 dB en 80 ms => a 150 ms
 /// el residuo es < -110 dB de ~0,1 = 3e-7, bajo el piso de 1e-5.
 constexpr double kSilenceAfterMs = 150.0;
+/// "Silencio" = lo AUDIBLE de la salida. MEDIDO: tras el ultimo soltar, Karplus-Strong y Granular
+/// dejan una cola monotona de ~1,9e-5 que decae con tau ~54 ms y cuya media es ~0,85 de su pico: es un
+/// OFFSET DE CC (esos engines no son de media cero) que el DC blocker de OutputStage —de esquina
+/// ~3 Hz— tarda en drenar. Classic no la tiene (cero a los 560 ms). Es sub-audible, asi que el pico
+/// crudo mide otra cosa. Se mide el pico de la salida pasada por un pasa-altos de un polo a 20 Hz (el
+/// limite inferior de lo audible; deja ~0,15 de una exponencial de tau 54 ms: 2,8e-6 < 1e-5) y la
+/// banda de la fundamental contra el regimen.
+constexpr double kSilenceHighPassHz = 20.0;
+/// La fundamental, 150 ms despues del soltar, a >= 80 dB bajo el regimen: los 60 dB del release
+/// (AC-052.3) mas 20 dB de margen. Con el release del spec queda a ~-100 dB.
+constexpr double kSilenceBandMaxDb = -80.0;
 
 // --- AC-052.4 / .5 / .8: click ---
 /// Tolerancia del AC-052.4: "x 1,10".
@@ -332,8 +345,8 @@ struct Rendered {
     }
 };
 
-/// Renderiza un gesto dual por la puerta de afuera. Instancia fresca.
-Rendered render(int engineType, DualTouchMixMode mode, const Script& script) {
+/// Renderiza un gesto dual por la puerta de afuera. Instancia fresca. SIN limpiar el dither.
+Rendered renderRaw(int engineType, DualTouchMixMode mode, const Script& script) {
     Rendered r;
     r.stepFrames = script.stepFrames();
     for (const auto& f : script.fingers()) {
@@ -344,7 +357,7 @@ Rendered render(int engineType, DualTouchMixMode mode, const Script& script) {
     AudioEngine engine;
     EXPECT_TRUE(engine.startOffline(kSampleRate, kMaxBlock));
     // Un reverb por defecto arruinaria el release: la cadena tiene que estar vacia.
-    EXPECT_EQ(engine.getEffectChainNodeCount(), 0) << "la cadena de efectos no esta vacia";
+    EXPECT_EQ(engine.getNumEffects(), 0u) << "la cadena de efectos del render (mEffectChain) no esta vacia";
     engine.setOscillatorEnabled(true);
     engine.setEngineType(engineType);
     if (engineType == kClassic) engine.setOscillatorType(kOscSine);
@@ -379,6 +392,37 @@ Rendered render(int engineType, DualTouchMixMode mode, const Script& script) {
         r.probe[1].push_back(engine.dualTouchSlotBlocksRendered(1));
     }
     engine.stop();
+    return r;
+}
+
+/**
+ * El piso de dither de un render de `stepFrames` x `totalFrames`: el render en SILENCIO. El
+ * dither (TPDF +-1 LSB de 16 bit, semilla fija) se suma DESPUES del soft-clip, asi que es aditivo y
+ * depende solo del numero de muestras; no depende del engine (lo verifica
+ * `TheDitherFloorIsTheSameForEveryEngineAndIsAdditive`).
+ *
+ * POR QUE SE RESTA EN TODOS LOS RENDERS. Es el paso 5 de medir-dsp: "antes de restar dos niveles,
+ * confirma que tienen el MISMO piso". `dual - gemelo(otra)` cancela el dither pero el render de la
+ * voz sola lo conserva; `dual - a - b` deja -1 vez el dither. En Karplus-Strong (la voz decae a 3e-4
+ * entre re-excitaciones) y en Granular (huecos de 6e-5 entre granos) el dither pesa -20 dB o mas en
+ * la banda y fabricaba deltas de hasta 1,6 dB que NO eran de la implementacion. Con todos los
+ * renders limpios, cualquier resta o cociente compara voces contra voces.
+ */
+const std::vector<float>& ditherFloor(const Script& like) {
+    static std::map<std::pair<int, int>, std::vector<float>> cache;
+    const auto key = std::make_pair(like.stepFrames(), like.totalFrames());
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        it = cache.emplace(key, renderRaw(kClassic, DualTouchMixMode::AVERAGE, like.silent()).mono).first;
+    }
+    return it->second;
+}
+
+/// Un render CON EL DITHER RESTADO (`peak` y `allFinite` son los de la salida real).
+Rendered render(int engineType, DualTouchMixMode mode, const Script& script) {
+    Rendered r = renderRaw(engineType, mode, script);
+    const std::vector<float>& floorSignal = ditherFloor(script);
+    for (size_t i = 0; i < r.mono.size() && i < floorSignal.size(); ++i) r.mono[i] -= floorSignal[i];
     return r;
 }
 
@@ -516,6 +560,34 @@ std::string describeSeries(const std::vector<double>& s) {
     std::string out = "[dB re sostenido, ventanas de 20 ms desde el soltar:";
     for (double d : s) out += " " + std::to_string(d);
     return out + "]";
+}
+
+struct SilenceReading {
+    double audiblePeak = 0.0;      // pico de la salida por encima de kSilenceHighPassHz
+    double bandDbReRegime = 0.0;   // banda de la fundamental, re el mayor nivel de regimen
+};
+
+/// `lifted` y `sustained` ya sin dither. Regimen = el mayor nivel de banda de `sustained` en los
+/// 100 ms previos al soltar (un cociente contra la MISMA ventana compararia dos pisos cuando la
+/// voz sostenida tiene huecos —Granular—).
+SilenceReading readSilence(const std::vector<float>& lifted, const std::vector<float>& sustained,
+                           double hz, long liftOut) {
+    SilenceReading r;
+    const double a = std::exp(-2.0 * M_PI * kSilenceHighPassHz / kSampleRate);
+    double y = 0.0, xPrev = 0.0;
+    const long from = liftOut + static_cast<long>(kSilenceAfterMs * kFramesPerMs);
+    for (long n = 0; n < static_cast<long>(lifted.size()); ++n) {
+        const double x = lifted[static_cast<size_t>(n)];
+        y = a * (y + x - xPrev);
+        xPrev = x;
+        if (n >= from) r.audiblePeak = std::max(r.audiblePeak, std::fabs(y));
+    }
+    double regime = -300.0;
+    for (long s = liftOut - static_cast<long>(100.0 * kFramesPerMs); s + kWindowFrames <= liftOut; s += kHopFrames) {
+        regime = std::max(regime, bandDb(sustained, s, hz));
+    }
+    r.bandDbReRegime = bandDb(lifted, from, hz) - regime;
+    return r;
 }
 
 /// Aplica a `x` una ganancia `g(tMs)` desde el cuadro `fromFrame` (cuadros previos intactos).
@@ -667,6 +739,26 @@ TEST_P(DualTouchByEngine, TheTwinIsExactlyTheDualRenderBeforeTheSecondFingerLand
 // Controles del instrumento (paso 6 de medir-dsp)
 // ===========================================================================
 
+TEST_P(DualTouchByEngine, TheDitherFloorIsTheSameForEveryEngineAndIsAdditive) {
+    // Control de `ditherFloor`: (1) el render en silencio de cada engine es BIT A BIT el que se
+    // resta (si dependiera del engine, restarlo fabricaria una senal); (2) es aditivo: un render con
+    // voz menos el piso no deja el piso (el dither de la voz sola esta en el piso a +-1 LSB).
+    const EngineInfo& e = kEngines[GetParam().engineIndex];
+    const Script g = standardGesture(e, 0, 0);
+    const Rendered silent = renderRaw(e.type, DualTouchMixMode::AVERAGE, g.silent());
+    const std::vector<float>& floorSignal = ditherFloor(g);
+    ASSERT_EQ(silent.mono.size(), floorSignal.size());
+    for (size_t i = 0; i < silent.mono.size(); ++i) {
+        ASSERT_EQ(silent.mono[i], floorSignal[i]) << e.name << ": el piso depende del engine, cuadro " << i;
+    }
+    // El piso es dither de verdad (no cero): pico ~1 LSB de 16 bit = 3,05e-5.
+    EXPECT_GT(maxAbs(floorSignal, 0, static_cast<long>(floorSignal.size())), 1e-5);
+    // Aditivo: la cola de un render con una voz (cuando ya no hay voz) menos el piso es << el piso.
+    const Rendered voiced = render(e.type, DualTouchMixMode::AVERAGE, g.onlySlot(0));
+    const long tail = outFrame(kGestureTotalMs - 80.0);
+    EXPECT_LT(maxAbs(voiced.mono, tail, static_cast<long>(voiced.mono.size()) - 1), 1e-5) << e.name;
+}
+
 TEST_P(DualTouchByEngine, TheDifferenceMethodIsolatesAVoiceAndSeesTheOldHalvingLaw) {
     // Control de ANULACION del metodo de la DIFERENCIA (paso 6 de medir-dsp). El brief recomienda
     // medir la banda de V directamente en el dual y controlar que la otra voz quede >= 30 dB abajo.
@@ -707,17 +799,16 @@ TEST_P(DualTouchByEngine, TheDifferenceMethodIsolatesAVoiceAndSeesTheOldHalvingL
 TEST_P(DualTouchByEngine, TheMeterSeesAHalvedVoiceAsMinusSixDb) {
     // Control: el medidor de banda detecta un cambio de amplitud conocido. Renderiza la voz a
     // amp y a amp/2 y compara la banda; verifica de paso que cada engine es LINEAL en amp (si no
-    // lo fuera, comparar a otra amp no valdria). Los dos renders se limpian del dither (resta del
-    // render en silencio): Karplus-Strong baja a -56 dB y ahi el dither mueve la lectura 0,6 dB.
+    // lo fuera, comparar a otra amp no valdria). `render` ya resta el dither: Karplus-Strong baja a
+    // -56 dB y ahi el dither mueve la lectura 0,6 dB.
     const EngineInfo& e = kEngines[GetParam().engineIndex];
     Script full(kCoarseStepFrames, kGestureTotalMs);
     full.touch(0, kFirstDownMs, kExitFirstMs, kFreqSlot0, e.amp);
     Script half(kCoarseStepFrames, kGestureTotalMs);
     half.touch(0, kFirstDownMs, kExitFirstMs, kFreqSlot0, e.amp * 0.5f);
 
-    const Rendered silence = render(e.type, DualTouchMixMode::AVERAGE, full.silent());
-    const std::vector<float> a = subtract(render(e.type, DualTouchMixMode::AVERAGE, full).mono, silence.mono);
-    const std::vector<float> b = subtract(render(e.type, DualTouchMixMode::AVERAGE, half).mono, silence.mono);
+    const std::vector<float> a = render(e.type, DualTouchMixMode::AVERAGE, full).mono;
+    const std::vector<float> b = render(e.type, DualTouchMixMode::AVERAGE, half).mono;
     const long first = outFrame(kFirstDownMs + kSettleMs);
     const long last = outFrame(kExitFirstMs) - kWindowFrames;
     const Worst w = worstDeltaDb(b, a, kFreqSlot0, first, last);
@@ -727,8 +818,7 @@ TEST_P(DualTouchByEngine, TheMeterSeesAHalvedVoiceAsMinusSixDb) {
 TEST_P(DualTouchByEngine, TheSoftClipCrossModulationAtTheChosenAmplitudeStaysUnderTheLinearityBudget) {
     // Control PREDICTIVO del de abajo, que se puede correr ANTES de que exista la implementacion:
     // reconstruye la suma ideal ANTES de la cadena invirtiendo el soft-clip de cada voz sola
-    // (r = 1,5 tanh(0,666 x) => x = atanh(r/1,5)/0,666; el dither se resta con el render en
-    // silencio), las suma, la vuelve a pasar por el soft-clip y mide el residuo
+    // (r = 1,5 tanh(0,666 x) => x = atanh(r/1,5)/0,666; `render` ya resta el dither), las suma, la vuelve a pasar por el soft-clip y mide el residuo
     //    soft-clip(x0 + x1) - r0 - r1
     // en la banda de cada voz. Es lo que el control de linealidad va a ver con la ley nueva
     // (out = voz1 + voz2): si esto supera -60 dB a la amplitud elegida, hay que bajar la amplitud
@@ -736,9 +826,8 @@ TEST_P(DualTouchByEngine, TheSoftClipCrossModulationAtTheChosenAmplitudeStaysUnd
     constexpr double kLinearityBudgetDb = -60.0;  // brief
     const EngineInfo& e = kEngines[GetParam().engineIndex];
     const Script g = standardGesture(e, 0, 0);
-    const Rendered silence = render(e.type, DualTouchMixMode::AVERAGE, g.silent());
-    const std::vector<float> r0 = subtract(render(e.type, DualTouchMixMode::AVERAGE, g.onlySlot(0)).mono, silence.mono);
-    const std::vector<float> r1 = subtract(render(e.type, DualTouchMixMode::AVERAGE, g.onlySlot(1)).mono, silence.mono);
+    const std::vector<float> r0 = render(e.type, DualTouchMixMode::AVERAGE, g.onlySlot(0)).mono;
+    const std::vector<float> r1 = render(e.type, DualTouchMixMode::AVERAGE, g.onlySlot(1)).mono;
 
     std::vector<float> residual(r0.size());
     for (size_t n = 0; n < r0.size(); ++n) {
@@ -827,6 +916,35 @@ TEST(DualTouchEnvelopeInstrument, TheReleaseVerdictAcceptsTheSpecEnvelopeAndReje
 
     const auto linear = seriesFor([](double t) { return std::max(0.0, 1.0 - t / 100.0); });
     EXPECT_FALSE(judgeRelease(linear).deepEnough) << describeSeries(linear);
+
+    // Veredicto de SILENCIO (AC-052.6): una cola de CC sub-audible (como la del DC blocker con
+    // Karplus-Strong/Granular) NO es ruido; un zumbido audible de la misma amplitud SI; una voz
+    // que cae solo a -60 dB y se queda ahi tampoco es silencio.
+    {
+        const long lift = liftOut;
+        const auto tail = [&](const std::function<double(double)>& dc, const std::function<double(double)>& gain) {
+            std::vector<float> y = withGain(sustained.mono, lift, gain);
+            for (long n = lift; n < static_cast<long>(y.size()); ++n) {
+                const double t = static_cast<double>(n - lift) / kFramesPerMs;
+                y[static_cast<size_t>(n)] += static_cast<float>(dc(t));
+            }
+            return readSilence(y, sustained.mono, kFreqSlot0, lift);
+        };
+        const auto none = [](double) { return 0.0; };
+        const auto stopAt80 = [](double t) { return t < 80.0 ? std::pow(10.0, -3.0 * t / 80.0) : 0.0; };
+        const SilenceReading clean = tail(none, stopAt80);
+        EXPECT_LE(clean.audiblePeak, kSilenceFloor);
+        EXPECT_LE(clean.bandDbReRegime, kSilenceBandMaxDb);
+        // CC de 2,5e-5 con tau 54 ms (mas que lo medido: 1,9e-5): pasa.
+        const SilenceReading dcTail = tail([](double t) { return 2.5e-5 * std::exp(-(t - 0.0) / 54.0) * std::exp(150.0 / 54.0); }, stopAt80);
+        EXPECT_LE(dcTail.audiblePeak, kSilenceFloor) << "la cola de CC sub-audible no debe contar como ruido";
+        // Zumbido audible de 3e-5 a 1 kHz (la fundamental): se ve en las dos.
+        const SilenceReading hum = tail([](double t) { return 3e-5 * std::sin(2.0 * M_PI * 1000.0 * t / 1000.0); }, stopAt80);
+        EXPECT_GT(hum.audiblePeak, kSilenceFloor);
+        // La voz que se queda en -60 dB: la banda lo ve.
+        const SilenceReading held = tail(none, [](double t) { return std::max(1e-3, std::pow(10.0, -3.0 * t / 80.0)); });
+        EXPECT_GT(held.bandDbReRegime, kSilenceBandMaxDb) << "una voz clavada a -60 dB no es silencio";
+    }
 
     const auto bump = seriesFor([](double t) {
         return std::pow(10.0, -3.0 * t / 80.0) * ((t > 45.0 && t < 65.0) ? 50.0 : 1.0);
@@ -1021,8 +1139,8 @@ TEST_P(DualTouchByMode, Ac0523_TheLeavingSlotReleasesWhileTheOtherVoiceKeepsSoun
 
 TEST_P(DualTouchByMode, Ac0526_TheLastFingerReleasesThenSilenceAndNoEngineIsProcessed) {
     // order = que slot sale primero; el ULTIMO en salir es el otro. Observable: igual que
-    // AC-052.3 pero sin la otra voz: `dual - render en silencio` (que descuenta el dither) contra la
-    // misma voz sostenida; luego pico de la salida sin dither tras 150 ms y sondas congeladas.
+    // AC-052.3 pero sin la otra voz: el dual (sin dither) contra la misma voz sostenida; despues
+    // "silencio" (ver `judgeSilence`) y sondas de los dos slots congeladas.
     const ModeCase c = GetParam();
     const EngineInfo& e = kEngines[c.engineIndex];
     const int firstOut = c.order;
@@ -1031,14 +1149,9 @@ TEST_P(DualTouchByMode, Ac0526_TheLastFingerReleasesThenSilenceAndNoEngineIsProc
 
     const Rendered dual = render(e.type, c.mode, g);
     const Rendered sustained = render(e.type, c.mode, g.sustained(last));
-    const Rendered silence = render(e.type, c.mode, g.silent());
 
     const long liftOut = outFrame(kExitLastMs);
-    const std::vector<float> lifted = subtract(dual.mono, silence.mono);
-    // La voz sostenida de referencia: solo el ultimo slot, sin dither.
-    const std::vector<float> sustainedClean = subtract(sustained.mono, silence.mono);
-    // Antes de que el ultimo salga, el unico dedo vivo es `last`: dual == sostenido (control).
-    const std::vector<double> series = releaseSeries(lifted, sustainedClean, freqOfSlot(last), liftOut);
+    const std::vector<double> series = releaseSeries(dual.mono, sustained.mono, freqOfSlot(last), liftOut);
     const ReleaseVerdict verdict = judgeRelease(series);
 
     EXPECT_TRUE(verdict.notCut)
@@ -1050,12 +1163,14 @@ TEST_P(DualTouchByMode, Ac0526_TheLastFingerReleasesThenSilenceAndNoEngineIsProc
         << series[kReleaseWindows - 1] << " dB (<= " << kReleaseDeepMaxDb << ") " << describeSeries(series);
     EXPECT_TRUE(verdict.monotone) << "AC-052.6 " << e.name << ": la banda crece " << describeSeries(series);
 
-    // Despues del release: silencio (sin el dither) y ningun engine procesado.
-    const long silentFrom = liftOut + ms(kSilenceAfterMs);
-    const double residual = maxAbs(lifted, silentFrom, static_cast<long>(lifted.size()));
-    EXPECT_LE(residual, kSilenceFloor)
-        << "AC-052.6 " << e.name << ": quedan " << residual << " de pico " << kSilenceAfterMs
-        << " ms despues del ultimo soltar";
+    // Despues del release: silencio y ningun engine procesado.
+    const SilenceReading silence = readSilence(dual.mono, sustained.mono, freqOfSlot(last), liftOut);
+    EXPECT_LE(silence.audiblePeak, kSilenceFloor)
+        << "AC-052.6 " << e.name << ": quedan " << silence.audiblePeak << " de pico sobre " << kSilenceHighPassHz
+        << " Hz " << kSilenceAfterMs << " ms despues del ultimo soltar";
+    EXPECT_LE(silence.bandDbReRegime, kSilenceBandMaxDb)
+        << "AC-052.6 " << e.name << ": la fundamental esta a " << silence.bandDbReRegime
+        << " dB del regimen " << kSilenceAfterMs << " ms despues del ultimo soltar";
 
     const uint64_t during = dual.probeAtMs(last, kExitLastMs + kProbeGrowthWindowMs) -
                             dual.probeAtMs(last, kExitLastMs);
@@ -1069,7 +1184,7 @@ TEST_P(DualTouchByMode, Ac0526_TheLastFingerReleasesThenSilenceAndNoEngineIsProc
                                  << " sigue procesandose tras el ultimo soltar ("
                                  << (atEnd - atDone) << " bloques despues de " << kEngineDoneMs << " ms)";
     }
-    EXPECT_GT(maxAbs(sustainedClean, liftOut - ms(40.0), liftOut), kAudible * 0.01)
+    EXPECT_GT(maxAbs(sustained.mono, liftOut - ms(40.0), liftOut), kAudible * 0.01)
         << "control: la voz sostenida no suena antes del soltar";
 }
 
@@ -1331,15 +1446,13 @@ TEST_P(DualTouchOtherModes, Ac0528_TheLastFingerReleasesInEveryMode) {
 
     const Rendered dual = render(e.type, mode, g);
     const Rendered sustained = render(e.type, mode, g.sustained(0));
-    const Rendered silence = render(e.type, mode, g.silent());
-    const std::vector<float> lifted = subtract(dual.mono, silence.mono);
-    const std::vector<float> reference = subtract(sustained.mono, silence.mono);
-    const std::vector<double> series = releaseSeries(lifted, reference, kFreqSlot0, outFrame(kExitLastMs));
+    const std::vector<double> series = releaseSeries(dual.mono, sustained.mono, kFreqSlot0, outFrame(kExitLastMs));
     const ReleaseVerdict v = judgeRelease(series);
     EXPECT_TRUE(v.ok()) << "AC-052.8 " << modeName(mode) << ": el release del ultimo dedo no tiene la envolvente del spec "
                         << describeSeries(series);
-    EXPECT_LE(maxAbs(lifted, outFrame(kExitLastMs) + ms(kSilenceAfterMs), static_cast<long>(lifted.size())), kSilenceFloor)
-        << "AC-052.8 " << modeName(mode) << ": no queda en silencio";
+    const SilenceReading silence = readSilence(dual.mono, sustained.mono, kFreqSlot0, outFrame(kExitLastMs));
+    EXPECT_LE(silence.audiblePeak, kSilenceFloor) << "AC-052.8 " << modeName(mode) << ": no queda en silencio";
+    EXPECT_LE(silence.bandDbReRegime, kSilenceBandMaxDb) << "AC-052.8 " << modeName(mode) << ": la fundamental no cae";
     EXPECT_EQ(dual.probeAtMs(0, kExitLastMs + kEngineDoneMs), dual.probeAtMs(0, kGestureTotalMs))
         << "AC-052.8 " << modeName(mode) << ": el engine sigue procesandose tras el release";
 }
@@ -1549,6 +1662,8 @@ INSTANTIATE_TEST_SUITE_P(Slots, DualTouchPassthrough, ::testing::ValuesIn(allMod
                          [](const ::testing::TestParamInfo<ModeCase>& i) {
                              return std::string(modeName(i.param.mode)) + "_Slot" + std::to_string(i.param.order);
                          });
+
+
 
 
 
