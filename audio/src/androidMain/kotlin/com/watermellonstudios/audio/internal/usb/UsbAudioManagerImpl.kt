@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.watermellonstudios.audio.internal.bridge.UsbStreamStartStatus
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 
 /**
@@ -116,8 +117,18 @@ internal class UsbAudioManagerImpl(
     private var lastUnderrunSeverity = UsbHealthEvent.Severity.INFO
 
     // Permission request continuation
-    private var permissionContinuation: CancellableContinuation<Boolean>? = null
-    private var pendingPermissionDevice: UsbDevice? = null
+    /**
+     * La espera del diálogo de permiso, como UN par (MINI-042). Un CAS sobre la continuación sola
+     * dejaba al perdedor leer el device todavía en null y negar en vez de tomar el camino "pedido en
+     * curso". Todo registro y toda liberación pasan por `compareAndSet` sobre este par.
+     */
+    private class PendingPermission(val continuation: CancellableContinuation<Boolean>, val device: UsbDevice)
+
+    private val pendingPermission = AtomicReference<PendingPermission?>(null)
+
+    /** Costura de test (MINI-042): corre entre el chequeo de "pedido en curso" y el registro. En producción es null. */
+    @Volatile
+    internal var permissionRegistrationGate: (() -> Unit)? = null
 
     // Trusted devices repository for remembering user-approved devices
     private val trustedDevicesRepository by lazy {
@@ -180,8 +191,8 @@ internal class UsbAudioManagerImpl(
                     // handlePermissionResult.
 
                     Log.i(TAG, "  device: ${device?.productName} (id=${device?.deviceId})")
-                    Log.i(TAG, "  pendingPermissionDevice: ${pendingPermissionDevice?.productName} (id=${pendingPermissionDevice?.deviceId})")
-                    Log.i(TAG, "  permissionContinuation is null: ${permissionContinuation == null}")
+                    val pendingNow = pendingPermission.get()
+                    Log.i(TAG, "  pendingPermission: ${pendingNow?.device?.productName} (id=${pendingNow?.device?.deviceId})")
 
                     handlePermissionResult(device)
                 }
@@ -472,57 +483,76 @@ internal class UsbAudioManagerImpl(
 
         // BUG FIX: Prevent concurrent permission requests (double dialog issue)
         // If there's already a pending permission request, wait for it or skip
-        if (permissionContinuation != null) {
-            Log.w(TAG, "Permission request already in progress for ${pendingPermissionDevice?.productName}")
-            // If requesting for the same device, wait for the existing request
-            if (pendingPermissionDevice?.deviceId == usbDevice.deviceId) {
-                Log.i(TAG, "Same device - waiting for existing permission request")
-                // Return true to allow caller to proceed (permission will be checked again)
-                return usbManager.hasPermission(usbDevice)
-            } else {
-                Log.w(TAG, "Different device - denying concurrent request")
-                return false
-            }
-        }
+        pendingPermission.get()?.let { return permissionRequestInProgress(it, usbDevice) }
+
+        permissionRegistrationGate?.invoke()
 
         return suspendCancellableCoroutine { cont ->
-            permissionContinuation = cont
-            pendingPermissionDevice = usbDevice
-
-            // IMPORTANT: Must use FLAG_MUTABLE because the system USB service needs to
-            // add EXTRA_PERMISSION_GRANTED to the intent when sending the result.
-            // FLAG_IMMUTABLE would prevent this modification and break permission handling.
-            val intent = Intent(ACTION_USB_PERMISSION).apply {
-                setPackage(context.packageName)
+            val mine = PendingPermission(cont, usbDevice)
+            // La decisión la da el CAS, no el chequeo de arriba: dos hilos pueden verlo vacío a la vez.
+            if (!pendingPermission.compareAndSet(null, mine)) {
+                val current = pendingPermission.get()
+                cont.resume(
+                    if (current != null) permissionRequestInProgress(current, usbDevice)
+                    // El pedido ajeno terminó entre el CAS y la lectura: nada en curso que esperar.
+                    else usbManager.hasPermission(usbDevice)
+                )
+                return@suspendCancellableCoroutine
             }
 
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            } else {
-                PendingIntent.FLAG_UPDATE_CURRENT
+            // MINI-042 (review M1): si pedir el diálogo LANZA, el lugar registrado se suelta antes
+            // de relanzar. Sin esto quedaba ocupado para siempre y todo pedido posterior se tomaba
+            // por "en curso" sin que nadie fuera a reanudarlo.
+            try {
+                // IMPORTANT: Must use FLAG_MUTABLE because the system USB service needs to
+                // add EXTRA_PERMISSION_GRANTED to the intent when sending the result.
+                // FLAG_IMMUTABLE would prevent this modification and break permission handling.
+                val intent = Intent(ACTION_USB_PERMISSION).apply {
+                    setPackage(context.packageName)
+                }
+
+                val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                } else {
+                    PendingIntent.FLAG_UPDATE_CURRENT
+                }
+
+                val permissionIntent = PendingIntent.getBroadcast(
+                    context,
+                    0,
+                    intent,
+                    flags
+                )
+
+                Log.i(TAG, "  Action: $ACTION_USB_PERMISSION")
+                Log.i(TAG, "  Package: ${context.packageName}")
+                Log.i(TAG, "  Flags: $flags (FLAG_MUTABLE=${PendingIntent.FLAG_MUTABLE}, FLAG_UPDATE_CURRENT=${PendingIntent.FLAG_UPDATE_CURRENT})")
+                Log.i(TAG, "  Device: ${usbDevice.productName} (id=${usbDevice.deviceId})")
+                Log.i(TAG, "  isMonitoring: $isMonitoring")
+
+                usbManager.requestPermission(usbDevice, permissionIntent)
+            } catch (t: Throwable) {
+                pendingPermission.compareAndSet(mine, null)
+                throw t
             }
-
-            val permissionIntent = PendingIntent.getBroadcast(
-                context,
-                0,
-                intent,
-                flags
-            )
-
-            Log.i(TAG, "  Action: $ACTION_USB_PERMISSION")
-            Log.i(TAG, "  Package: ${context.packageName}")
-            Log.i(TAG, "  Flags: $flags (FLAG_MUTABLE=${PendingIntent.FLAG_MUTABLE}, FLAG_UPDATE_CURRENT=${PendingIntent.FLAG_UPDATE_CURRENT})")
-            Log.i(TAG, "  Device: ${usbDevice.productName} (id=${usbDevice.deviceId})")
-            Log.i(TAG, "  isMonitoring: $isMonitoring")
-
-            usbManager.requestPermission(usbDevice, permissionIntent)
             Log.i(TAG, "Permission dialog should now appear - waiting for user response...")
 
             cont.invokeOnCancellation {
                 Log.w(TAG, "Permission request cancelled")
-                permissionContinuation = null
-                pendingPermissionDevice = null
+                pendingPermission.compareAndSet(mine, null)
             }
+        }
+    }
+
+    private fun permissionRequestInProgress(current: PendingPermission, usbDevice: UsbDevice): Boolean {
+        Log.w(TAG, "Permission request already in progress for ${current.device.productName}")
+        return if (current.device.deviceId == usbDevice.deviceId) {
+            Log.i(TAG, "Same device - not requesting again")
+            // El caller sigue; el permiso se vuelve a chequear con lo que diga UsbManager.
+            usbManager.hasPermission(usbDevice)
+        } else {
+            Log.w(TAG, "Different device - denying concurrent request")
+            false
         }
     }
 
@@ -549,11 +579,11 @@ internal class UsbAudioManagerImpl(
      *   registro NO exportado de [startMonitoring], no esta función.
      */
     private fun handlePermissionResult(device: UsbDevice?) {
-        val pending = pendingPermissionDevice
-        val continuation = permissionContinuation
+        val registered = pendingPermission.get()
+        val pending = registered?.device
         Log.d(TAG, "handlePermissionResult called: device=${device?.productName}, pending=${pending?.productName}")
 
-        if (pending == null || continuation == null) {
+        if (registered == null || pending == null) {
             Log.w(TAG, "Permission result without a pending request: ignored")
             return
         }
@@ -571,9 +601,10 @@ internal class UsbAudioManagerImpl(
 
         Log.i(TAG, "Permission result for ${pending.productName}: $granted (UsbManager)")
 
-        permissionContinuation = null
-        pendingPermissionDevice = null
-        continuation.resume(granted)
+        // Sólo quien gana el CAS reanuda: dos entregas a la vez no pueden reanudar dos veces.
+        if (pendingPermission.compareAndSet(registered, null)) {
+            registered.continuation.resume(granted)
+        }
     }
 
     // ==================== Device Capabilities ====================
