@@ -41,9 +41,25 @@ class FakeUsbManager : UsbManager() {
 
     override fun getDeviceList(): HashMap<String, UsbDevice> = HashMap(devices)
 
-    override fun hasPermission(device: UsbDevice?): Boolean = permissionGranted.get()
+    /** Se invoca en cada `hasPermission`: deja retener a un hilo en ese punto (MINI-042). */
+    @Volatile
+    var onHasPermission: (() -> Unit)? = null
+
+    /** Cuántas veces la librería pidió el diálogo (MINI-042: tiene que ser una por pedido en curso). */
+    val requestPermissionCalls = AtomicInteger(0)
+
+    override fun hasPermission(device: UsbDevice?): Boolean {
+        onHasPermission?.invoke()
+        return permissionGranted.get()
+    }
+
+    /** Si no es null, `requestPermission` lo lanza (MINI-042: el lugar registrado se tiene que soltar). */
+    @Volatile
+    var requestPermissionThrows: RuntimeException? = null
 
     override fun requestPermission(device: UsbDevice?, pi: PendingIntent?) {
+        requestPermissionCalls.incrementAndGet()
+        requestPermissionThrows?.let { throw it }
         permissionRequested.complete(device)
     }
 
