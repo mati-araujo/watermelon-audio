@@ -79,4 +79,17 @@ bool hasNeonSupport();
  */
 bool hasSseSupport();
 
+/**
+ * Id de kernel del thread que llama (el `tid` de Linux), para registrarlo en
+ * una sesion ADPF o pedirle prioridad al scheduler. -1 donde el SO no tiene un
+ * id de kernel por thread que esas APIs acepten (Apple, y cualquier host que
+ * no sea Linux).
+ *
+ * Vive aca y no como `syscall(SYS_gettid)` suelto en usb/ (MINI-042, D6):
+ * `SYS_gettid` es de Linux, y el codigo de USB lo resolvia por un include
+ * transitivo que el host de macOS no tiene. Una llamada al sistema, sin lock y
+ * sin alocar: se puede llamar al arrancar un thread de audio.
+ */
+int32_t currentKernelThreadId();
+
 }} // namespace wma::platform

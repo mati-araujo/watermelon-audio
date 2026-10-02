@@ -20,8 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <vector>
-#include <sys/syscall.h>  // SYS_gettid (F4: was resolved only transitively)
-#include <unistd.h>       // syscall()
+#include "../platform/Platform.h"  // currentKernelThreadId() (MINI-042: era syscall(SYS_gettid))
 
 #define LOG_TAG "LibusbBackend"
 #undef LOGI
@@ -1768,7 +1767,7 @@ void LibusbBackend::dspThreadFunc() {
         const int64_t adpfTargetNanos =
             static_cast<int64_t>(framesPerBlock) * 1000000000LL / adpfSampleRate;
         std::vector<int32_t> adpfTids;
-        adpfTids.push_back(static_cast<int32_t>(syscall(SYS_gettid)));
+        adpfTids.push_back(wma::platform::currentKernelThreadId());
         const int eventTid =
             mTransferManager ? mTransferManager->getEventThreadTid() : 0;
         if (eventTid > 0) {
