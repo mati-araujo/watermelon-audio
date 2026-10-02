@@ -33,6 +33,7 @@
 #include <mutex>
 #include <thread>
 #include <functional>
+#include <utility>
 
 namespace watermelon_audio {
 
@@ -412,14 +413,52 @@ public:
     }
 
     /**
-     * Get direct access to LibusbBackend.
+     * MINI-042 (M1, D5) — acceso al LibusbBackend CON ALCANCE, para lecturas y
+     * configuraciones CORTAS.
      *
-     * Used for USB-specific operations like getting transfer stats.
-     * Only valid after successful initializeUsbBackend().
+     * Corre `fn(LibusbBackend*)` con `mMutex` tomado; el puntero es nullptr si no
+     * hay backend USB. Antes habia un `getLibusbBackend()` que devolvia el puntero
+     * crudo DESPUES de soltar el lock, y `fallbackToOboe()` lo destruia mientras la
+     * JNI lo leia: un SIGSEGV en el proceso del consumidor.
      *
-     * @return Pointer to LibusbBackend, or nullptr if not available.
+     * El puntero no puede salir de `fn`. Y `fn`:
+     *   - no puede volver a entrar al manager (mMutex no es recursivo);
+     *   - no puede hacer nada lento: este es el lock que pregunta Main. Arrancar,
+     *     parar o elegir altsetting/reloj (que toman el mutex del backend con
+     *     lock(), y por eso esperan a un start() en curso) van por
+     *     withLibusbBackendLifecycle().
      */
-    LibusbBackend* getLibusbBackend();
+    template <typename Fn>
+    decltype(auto) withLibusbBackend(Fn&& fn) {
+        std::lock_guard<std::mutex> lock(mMutex);
+        return std::forward<Fn>(fn)(usbBackendLocked());
+    }
+
+    /**
+     * MINI-042 (M1, D5) — acceso al LibusbBackend para operaciones de CICLO DE
+     * VIDA: start(), stop(), la seleccion de altsetting y de reloj.
+     *
+     * Corre `fn(LibusbBackend*)` con `mOpMutex` tomado y `mMutex` LIBRE: el lock
+     * que se sostiene alrededor de la llamada lenta es el de operaciones, nunca el
+     * de estado (ver mOpMutex). Asi un start() USB no le traba la mano a Main, que
+     * sigue leyendo por withLibusbBackend(). El backend no se puede destruir
+     * mientras `fn` corre porque todo camino que lo destruye —fallbackToOboe(),
+     * initializeUsbBackend()— toma mOpMutex primero.
+     *
+     * `fn` no puede llamar a start()/stop()/selectBackend()/fallbackToOboe()/
+     * initializeUsbBackend() del manager: todos toman mOpMutex, que no es
+     * recursivo.
+     */
+    template <typename Fn>
+    decltype(auto) withLibusbBackendLifecycle(Fn&& fn) {
+        std::lock_guard<std::mutex> op(mOpMutex);
+        LibusbBackend* backend = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            backend = usbBackendLocked();
+        }
+        return std::forward<Fn>(fn)(backend);
+    }
 
     // =========================================================================
     // Event Callbacks
@@ -560,6 +599,18 @@ private:
 
     /// Una pasada: stop + start, con el fallback a "sin captura" si falla.
     void reopenOnce();
+
+    /// El LibusbBackend detras de mUsbBackend, o nullptr. Requiere mMutex tomado.
+    LibusbBackend* usbBackendLocked() const;
+
+    /// Cuerpo de selectBackend(). Requiere mOpMutex tomado (y mMutex LIBRE): lo
+    /// usa fallbackToOboe() para cambiar de backend y desenganchar el USB sin
+    /// soltar mOpMutex en el medio.
+    bool selectBackendOpLocked(BackendType type);
+
+    /// MINI-042 (D6): el reproductor de host adopta un LibusbBackend real como
+    /// mUsbBackend. Definido sólo en el test.
+    friend struct BackendManagerTestAccess;
 
     // Internal helpers
     void notifyBackendChanged(BackendType oldType, BackendType newType);

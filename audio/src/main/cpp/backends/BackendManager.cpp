@@ -85,7 +85,10 @@ bool BackendManager::selectBackend(BackendType type) {
     // Otra operación de ciclo de vida: se serializa con start()/stop() por
     // mOpMutex, y las dos llamadas lentas de acá van fuera de mMutex.
     std::lock_guard<std::mutex> op(mOpMutex);
+    return selectBackendOpLocked(type);
+}
 
+bool BackendManager::selectBackendOpLocked(BackendType type) {
     const BackendType oldType = mCurrentType.load(std::memory_order_acquire);
 
     if (oldType == type) {
@@ -561,6 +564,12 @@ void BackendManager::setLatencyProfile(usb::UsbLatencyProfile profile) {
 // =============================================================================
 
 bool BackendManager::initializeUsbBackend(int fd, const char* usbfsPath) {
+    // MINI-042 (D5): destruye y reemplaza mUsbBackend, así que toma mOpMutex
+    // PRIMERO. Sin él, una operación de ciclo de vida de la JNI
+    // (withLibusbBackendLifecycle, que corre con mOpMutex y mMutex libre) podía
+    // estar adentro de start() del backend que esto destruye. Cambio mínimo a
+    // propósito (D5): el resto de la función sigue bajo mMutex como antes.
+    std::lock_guard<std::mutex> op(mOpMutex);
     std::lock_guard<std::mutex> lock(mMutex);
 
     LOGI("Initializing USB backend: fd=%d, path=%s", fd, usbfsPath);
@@ -656,24 +665,42 @@ bool BackendManager::createSplitBackend(BackendType inputType, BackendType outpu
 void BackendManager::fallbackToOboe() {
     LOGI("Falling back to Oboe backend");
 
+    // MINI-042 (M1, D5). Esto hacía los dos reset() SIN NINGÚN LOCK, mientras la
+    // JNI leía el backend por un puntero crudo: uso de memoria liberada. Ahora:
+    //
+    //   1. mOpMutex, para que ninguna operación de ciclo de vida
+    //      (withLibusbBackendLifecycle) esté adentro del backend;
+    //   2. desenganchar los punteros bajo mMutex, para que ningún lector
+    //      (withLibusbBackend) lo esté — y ninguno lo encuentre después;
+    //   3. parar y destruir FUERA de mMutex: stop() espera al hilo DSP y a las
+    //      transferencias, y retener ahí el lock de estado congelaría a Main.
+    std::lock_guard<std::mutex> op(mOpMutex);
+
     mUsbBackendAvailable.store(false, std::memory_order_release);
 
-    // Switch to Oboe
-    selectBackend(BackendType::OBOE);
+    // Switch to Oboe, sin soltar mOpMutex entre el cambio y el desenganche.
+    selectBackendOpLocked(BackendType::OBOE);
 
-    // Clean up LibUSB backend
-    if (mSplitBackend) {
-        mSplitBackend->stop();
-        mSplitBackend.reset();
+    std::unique_ptr<SplitBackend> split;
+    std::unique_ptr<IAudioBackend> usb;
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        split = std::move(mSplitBackend);
+        usb = std::move(mUsbBackend);
     }
-    if (mUsbBackend) {
-        mUsbBackend->stop();
-        mUsbBackend.reset();
+
+    // El split primero: compone al USB por referencia.
+    if (split) {
+        split->stop();
+        split.reset();
+    }
+    if (usb) {
+        usb->stop();
+        usb.reset();
     }
 }
 
-LibusbBackend* BackendManager::getLibusbBackend() {
-    std::lock_guard<std::mutex> lock(mMutex);
+LibusbBackend* BackendManager::usbBackendLocked() const {
     return asLibusbBackend(mUsbBackend.get());
 }
 

@@ -7,6 +7,9 @@
 #include <sched.h>
 #include <unistd.h>
 #include <sys/resource.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 
 // Android implementation of the platform layer.
 //
@@ -31,6 +34,16 @@ void setAudioThreadPriority() {
     } else {
         WMA_LOGI("Audio thread priority set to SCHED_FIFO");
     }
+#endif
+}
+
+int32_t currentKernelThreadId() {
+#if defined(__linux__)  // Android incluido: su kernel es Linux.
+    return static_cast<int32_t>(syscall(SYS_gettid));
+#else
+    // La suite de host compila este archivo tambien en macOS (ver
+    // core/tests/CMakeLists.txt): ahi no hay tid de Linux que pedir.
+    return -1;
 #endif
 }
 

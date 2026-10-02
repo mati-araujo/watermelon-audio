@@ -125,3 +125,10 @@ aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunn
 aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioTestRunnerKt.class = (ausente) -> presente   # REQ-050 S3 (AC-050.8): fachada de archivo de findOfferedPlaybackFormat y los helpers del runner (internos/privados)
 aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbManualSelection.class = (ausente) -> presente   # REQ-050 S3 (D18): interna, la seleccion manual pendiente, para restaurarla aunque no haya stream
 aar/jar-entry:classes.jar!META-INF/com.watermellonstudios_audio_release.kotlin_module = sha256:844f12b34c1dccbc -> sha256:e2e5edb547caa524   # REQ-050 S3: la superficie Kotlin suma dos fachadas de archivo (UsbAudioManagerImplKt, UsbAudioTestRunnerKt), que el .kotlin_module lista
+
+# --- MINI-042: el backend USB se lee después de liberado (medido diferencial: master 9daee42
+# como 2.21.0-mini042base contra la rama como 2.21.0-mini042, --against-local). El cambio de C++
+# no mueve nada declarable: el .so cambia de bytes, que no se declaran (ver arriba).
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImpl$PendingPermission.class = (ausente) -> presente   # MINI-042 (D3/D7, L2): privada, el par continuación + device que registra el CAS de la espera de permiso
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImpl$requestPermissionSuspend$2$1.class = presente -> (ausente)   # MINI-042 (L2): la lambda de invokeOnCancellation cambia de nombre sintético (pasa a $3$1) porque el registro con CAS agrega un bloque antes
+aar/class:classes.jar!com/watermellonstudios/audio/internal/usb/UsbAudioManagerImpl$requestPermissionSuspend$3$1.class = (ausente) -> presente   # MINI-042 (L2): la misma lambda de invokeOnCancellation, que ahora suelta con compareAndSet(propio, null); verificado con javap

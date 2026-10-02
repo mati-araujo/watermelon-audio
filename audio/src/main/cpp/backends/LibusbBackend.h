@@ -42,6 +42,7 @@
 #include <thread>
 #include <functional>
 #include <semaphore>
+#include <optional>
 
 namespace watermelon_audio {
 
@@ -180,20 +181,62 @@ public:
     }
 
     /**
-     * Get current USB transfer statistics.
+     * MINI-042 (AC-042.2, D7) — las stats de transferencia, COPIADAS por valor.
+     *
+     * Antes esto devolvia un puntero adentro de `mTransferManager`, y `start()` lo
+     * destruye y lo recrea bajo `mMutex`: el llamador leia ~20 campos de un objeto
+     * que podia estar liberado. Un `try_lock` adentro de un getter que devuelve un
+     * puntero no protege nada, porque el uso viene despues del `return`; por eso la
+     * copia ocurre ADENTRO del lock.
+     *
+     * Los valores son los que cruzan el JNI en `nativeGetUsbTransferStats`, en las
+     * mismas unidades.
      */
-    const usb::TransferStatistics* getTransferStats() const;
+    struct TransferStatsSnapshot {
+        uint64_t packetsSubmitted = 0;
+        uint64_t packetsCompleted = 0;
+        uint64_t packetsErrors = 0;
+        uint64_t underruns = 0;
+        uint64_t overruns = 0;
+        float currentLatencyMs = 0.0f;
+        float avgLatencyMs = 0.0f;
+        int ringBufferLevel = 0;
+        float ringBufferFillPct = 0.0f;
+        float currentSampleRateHz = 0.0f;
+        float driftPpm = 0.0f;
+        float feedbackEffectiveFramesPerPacket = 0.0f;
+        uint32_t feedbackPacketsReceived = 0;
+        uint32_t feedbackPacketsInvalid = 0;
+        int activeClockSourceId = -1;
+        std::size_t outputInFlightDepthPackets = 0;   // [19] (REQ-050 D16)
+        float declaredOutputLatencyCeilingMs = 0.0f;  // [20] (REQ-050 D16)
+    };
 
     /**
-     * Get detailed latency profiling statistics.
+     * La copia de las stats, o **"sin dato"** (`nullopt`) si no hay stream o si
+     * `mMutex` esta tomado — un `start()`/`stop()` en curso. No bloquea nunca: un
+     * `start()` USB tarda lo que tarda el device, y quien pregunta puede ser Main.
+     *
+     * 🔴 El orden de lectura "enviados ANTES que completados" (AC-050.9) se respeta
+     * ADENTRO de la copia: el runner le resta a `enviados − completados` la cola
+     * declarada, y leerlos al reves inventaria una perdida.
+     */
+    std::optional<TransferStatsSnapshot> getTransferStatsSnapshot() const;
+
+    /**
+     * Get detailed latency profiling statistics. Default-constructed ("sin dato")
+     * without a stream or while start()/stop() hold `mMutex` (MINI-042, D7).
      * NOT lock-free - only call from non-RT thread.
      */
     usb::UsbProfilingStats getProfilingStats() const;
 
     /**
-     * Get latency profiler for direct access.
+     * MINI-042 (D7): el profiler ya no sale como puntero (vivia adentro de
+     * `mTransferManager`, que `start()` recrea). Devuelven true si se aplico; false
+     * sin stream o con un start()/stop() en curso, y en ese caso queda en el log.
      */
-    usb::UsbLatencyProfiler* getLatencyProfiler();
+    bool setProfilingEnabled(bool enabled);
+    bool resetProfilingStats();
 
     /**
      * Get clock controller for drift monitoring.
@@ -213,9 +256,7 @@ public:
      * Actual scheduling outcome of the libusb event thread (ThreadUtils::
      * SchedResult as int, -1 until it runs). Reported by the USB Lab RT-env step.
      */
-    int getEventLoopSchedResult() const {
-        return mTransferManager ? mTransferManager->getEventLoopSchedResult() : -1;
-    }
+    int getEventLoopSchedResult() const;
 
     /**
      * ADPF hint-session state of the DSP loop: 0 = unavailable (pre-API 33 or
@@ -227,29 +268,18 @@ public:
     }
 
     /** Live adaptive jitter budget in ms (Fase 2 telemetry; 0 if not streaming). */
-    int getJitterBudgetMs() const {
-        return mTransferManager ? mTransferManager->getJitterBudgetMs() : 0;
-    }
+    int getJitterBudgetMs() const;
 
     /** Per-session converged jitter-budget floor (telemetry; 0 if not streaming). */
-    int getConvergedFloorMs() const {
-        return mTransferManager ? mTransferManager->getConvergedFloorMs() : 0;
-    }
+    int getConvergedFloorMs() const;
 
     /**
      * REQ-050 S3 (AC-050.9, D16): output packets in flight (declared queue depth) and the
      * output latency ceiling the backend declares. Both 0 when not streaming. They cross
      * the JNI as [19] and [20] of nativeGetUsbTransferStats.
      */
-    std::size_t getOutputInFlightDepthPackets() const {
-        return mTransferManager ? mTransferManager->getOutputInFlightDepthPackets() : 0;
-    }
-    float getDeclaredOutputLatencyCeilingMs() const {
-        return mTransferManager
-            ? mTransferManager->getDeclaredOutputLatencyCeilingMs(
-                  mDspBlockFramesInUse.load(std::memory_order_relaxed))
-            : 0.0f;
-    }
+    std::size_t getOutputInFlightDepthPackets() const;
+    float getDeclaredOutputLatencyCeilingMs() const;
 
     /** Current latency profile as an ordinal (usb::UsbLatencyProfile). */
     int getLatencyProfileOrdinal() const {
@@ -611,8 +641,14 @@ private:
     mutable StreamInfo mCachedStreamInfo;
     mutable std::mutex mStreamInfoMutex;
 
-    // Thread synchronization
-    std::mutex mMutex;
+    // Thread synchronization. `mutable` because the const telemetry getters take it
+    // with try_lock (MINI-042, AC-042.2): start() recreates mTransferManager under
+    // it, and a reader must get "sin dato" instead of a freed object or a wait.
+    mutable std::mutex mMutex;
+
+    // MINI-042 (D6): the host reproducer recreates mTransferManager the way start()
+    // does, to race it against the getters. Defined only in the test.
+    friend struct LibusbBackendTestAccess;
 
     // =========================================================================
     // Internal Methods

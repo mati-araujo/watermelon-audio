@@ -53,4 +53,9 @@ void setAudioThreadPriority() {
 #endif
 }
 
+int32_t currentKernelThreadId() {
+    // Ni ADPF ni sched_setaffinity existen en Apple: no hay a quien darle un tid.
+    return -1;
+}
+
 }} // namespace wma::platform

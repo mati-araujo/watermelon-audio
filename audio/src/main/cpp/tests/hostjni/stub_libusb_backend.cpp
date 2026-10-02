@@ -8,8 +8,9 @@
  *
  * 🔴 ESTO NO PRUEBA NADA DE USB, y no puede: `createUsbAudioBackend()` devuelve
  * `nullptr` en el host (test_platform_backends.cpp, la misma sustitución que usa
- * la suite de C++), así que `BackendManager::getLibusbBackend()` devuelve
- * `nullptr` y **ninguno de estos cuerpos se ejecuta jamás**. Existen para que el
+ * la suite de C++), así que el acceso con alcance de `BackendManager`
+ * (`withLibusbBackend`/`withLibusbBackendLifecycle`, MINI-042) le pasa `nullptr`
+ * a la JNI y **ninguno de estos cuerpos se ejecuta jamás**. Existen para que el
  * `.so` cierre sus símbolos con `--no-undefined`, que es lo que convierte un
  * `UnsatisfiedLinkError` tardío en un error de link que dice el nombre.
  *
@@ -29,11 +30,22 @@ bool LibusbBackend::hasCapture() const { return false; }
 
 int LibusbBackend::getUacVersion() const { return 0; }
 
-const usb::TransferStatistics* LibusbBackend::getTransferStats() const { return nullptr; }
+// MINI-042 (D7): las stats salen por copia y el profiler por métodos, no por puntero.
+std::optional<LibusbBackend::TransferStatsSnapshot> LibusbBackend::getTransferStatsSnapshot() const {
+    return std::nullopt;
+}
 
 usb::UsbProfilingStats LibusbBackend::getProfilingStats() const { return {}; }
 
-usb::UsbLatencyProfiler* LibusbBackend::getLatencyProfiler() { return nullptr; }
+bool LibusbBackend::setProfilingEnabled(bool) { return false; }
+
+bool LibusbBackend::resetProfilingStats() { return false; }
+
+int LibusbBackend::getEventLoopSchedResult() const { return -1; }
+
+int LibusbBackend::getJitterBudgetMs() const { return 0; }
+
+int LibusbBackend::getConvergedFloorMs() const { return 0; }
 
 LibusbBackend::DeviceCapabilities LibusbBackend::getCapabilities() const { return {}; }
 

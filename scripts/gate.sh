@@ -348,6 +348,13 @@ gate_guardrails() {
     step guardrails jni-pre-self  python3 scripts/check-jni-preinit.py --self-test || return 1
     step guardrails jni-preinit   python3 scripts/check-jni-preinit.py || return 1
 
+    # MINI-042 (D8) — cada JNIEXPORT entra al LibusbBackend por SU accesor: lo lento
+    # (start/stop/select) bajo mOpMutex, lo corto bajo mMutex. Un start() bajo el lock de
+    # estado congela a Main y ningun test de host lo ve: el arnes JNI usa un backend vacio.
+    # Source-only, --self-test primero.
+    step guardrails jni-usb-self  python3 scripts/check-jni-usb-access.py --self-test || return 1
+    step guardrails jni-usb       python3 scripts/check-jni-usb-access.py || return 1
+
     # REQ-047 S4 — UN lugar por pin: googletest, el NDK/CMake del SDK, java-version,
     # el Xcode del CI y el SHA de cada action. Un pin escrito dos veces se bumpea en
     # uno y en el otro no, con el build verde. Source-only; --self-test primero.
