@@ -286,6 +286,16 @@ jobs:
       - name: La configuracion pre-init llega — REQ-045
         run: python3 scripts/check-jni-preinit.py
 
+      # MINI-042 (D8) — cada JNIEXPORT entra al LibusbBackend por su accesor: start/stop/
+      # select bajo mOpMutex, lo corto bajo mMutex. Un start() bajo el lock de estado congela
+      # a Main y ningun test de host lo ve (el arnes JNI usa un backend vacio). Source-only;
+      # --self-test primero.
+      - name: Acceso al backend USB desde la JNI — self-test
+        run: python3 scripts/check-jni-usb-access.py --self-test
+
+      - name: Acceso al backend USB desde la JNI — MINI-042
+        run: python3 scripts/check-jni-usb-access.py
+
       # REQ-021 — los conteos de CLAUDE.md, re-medidos del arbol. Quedaron stale
       # SIETE tandas seguidas mientras la regla vivia solo en prosa. El
       # --self-test primero, misma razon que los de arriba: si el parser se
