@@ -138,6 +138,11 @@ constexpr double kLevelToleranceDb = 0.5;
 /// Release -60 dB en ~80 ms => ~-15 dB a 20 ms. Un corte en seco, o un release <= ~25 ms, deja
 /// la ventana [20,40) en el piso (<< -40). Mata al mutante "sin release".
 constexpr double kReleaseNotCutMinDb = -40.0;
+/// D4 pide release EXPONENCIAL. Una rampa LINEAL de 80 ms pasa "no cortado" y "profundo" y es un
+/// mutante distinto: exp -60 dB/80 ms esta en -15 dB a 20 ms y en ~-22 dB de media en [20,40)
+/// (medido con la implementacion: -21,6 a -27,5); la rampa lineal de 80 ms esta en -2,5 dB a
+/// 20 ms y ~-4 dB de media. -10 dB deja 12 dB de margen al exponencial y 6 dB a la lineal.
+constexpr double kReleaseDecayMaxDb = -10.0;
 /// AC-052.3: "cae >= 60 dB respecto del regimen en <= 100 ms". La ventana [80,100) (centro de
 /// Hann a 90 ms) ve ~-67 dB con el release nominal de 80 ms.
 constexpr double kReleaseDeepMaxDb = -60.0;
@@ -539,14 +544,16 @@ std::vector<double> releaseSeries(const std::vector<float>& lifted,
 
 struct ReleaseVerdict {
     bool notCut = false;      // [20,40) >= regimen - 40 dB
+    bool decaying = false;    // [20,40) <= regimen - 10 dB (exponencial, no lineal)
     bool deepEnough = false;  // [80,100) <= regimen - 60 dB
     bool monotone = false;    // ninguna ventana crece respecto de la anterior
-    bool ok() const { return notCut && deepEnough && monotone; }
+    bool ok() const { return notCut && decaying && deepEnough && monotone; }
 };
 
 ReleaseVerdict judgeRelease(const std::vector<double>& s) {
     ReleaseVerdict v;
     v.notCut = s[1] >= kReleaseNotCutMinDb;
+    v.decaying = s[1] <= kReleaseDecayMaxDb;
     v.deepEnough = s[kReleaseWindows - 1] <= kReleaseDeepMaxDb;
     v.monotone = true;
     for (size_t k = 1; k < s.size(); ++k) {
@@ -914,6 +921,14 @@ TEST(DualTouchEnvelopeInstrument, TheReleaseVerdictAcceptsTheSpecEnvelopeAndReje
     EXPECT_TRUE(judgeRelease(slow).notCut);
     EXPECT_FALSE(judgeRelease(slow).deepEnough) << describeSeries(slow);
 
+    // D4: el release es EXPONENCIAL. La rampa lineal de 80 ms cumple "no cortado" y "profundo"
+    // (llega a 0 en 80 ms) y solo la cota superior de [20,40) la distingue.
+    const auto linear80 = seriesFor([](double t) { return std::max(0.0, 1.0 - t / 80.0); });
+    EXPECT_TRUE(judgeRelease(linear80).notCut);
+    EXPECT_TRUE(judgeRelease(linear80).deepEnough);
+    EXPECT_FALSE(judgeRelease(linear80).decaying) << describeSeries(linear80);
+    EXPECT_FALSE(judgeRelease(linear80).ok());
+
     const auto linear = seriesFor([](double t) { return std::max(0.0, 1.0 - t / 100.0); });
     EXPECT_FALSE(judgeRelease(linear).deepEnough) << describeSeries(linear);
 
@@ -1110,6 +1125,10 @@ TEST_P(DualTouchByMode, Ac0523_TheLeavingSlotReleasesWhileTheOtherVoiceKeepsSoun
         << "AC-052.3 " << e.name << "/" << modeName(c.mode) << ": la ventana [20,40) ms tras soltar el slot "
         << leaving << " esta a " << series[1] << " dB del regimen (>= " << kReleaseNotCutMinDb
         << " si hay release; un corte la deja en el piso) " << describeSeries(series);
+    EXPECT_TRUE(verdict.decaying)
+        << "AC-052.3 " << e.name << "/" << modeName(c.mode) << ": la ventana [20,40) ms esta a " << series[1]
+        << " dB del regimen (debe ser <= " << kReleaseDecayMaxDb << ": el release es exponencial, no lineal) "
+        << describeSeries(series);
     EXPECT_TRUE(verdict.deepEnough)
         << "AC-052.3 " << e.name << "/" << modeName(c.mode) << ": la ventana [80,100) ms esta a "
         << series[kReleaseWindows - 1] << " dB del regimen (debe ser <= " << kReleaseDeepMaxDb << ") "
@@ -1158,6 +1177,10 @@ TEST_P(DualTouchByMode, Ac0526_TheLastFingerReleasesThenSilenceAndNoEngineIsProc
         << "AC-052.6 " << e.name << "/" << modeName(c.mode) << ": el ultimo dedo (slot " << last
         << ") se corta en seco: ventana [20,40) a " << series[1] << " dB (>= " << kReleaseNotCutMinDb
         << " con release) " << describeSeries(series);
+    EXPECT_TRUE(verdict.decaying)
+        << "AC-052.6 " << e.name << "/" << modeName(c.mode) << ": la ventana [20,40) ms esta a " << series[1]
+        << " dB del regimen (debe ser <= " << kReleaseDecayMaxDb << ": el release es exponencial, no lineal) "
+        << describeSeries(series);
     EXPECT_TRUE(verdict.deepEnough)
         << "AC-052.6 " << e.name << "/" << modeName(c.mode) << ": ventana [80,100) a "
         << series[kReleaseWindows - 1] << " dB (<= " << kReleaseDeepMaxDb << ") " << describeSeries(series);
@@ -1667,3 +1690,292 @@ INSTANTIATE_TEST_SUITE_P(Slots, DualTouchPassthrough, ::testing::ValuesIn(allMod
 
 
 
+
+// ===========================================================================
+// AC-052.3 / .6 / .4 — una envolvente congelada no reaparece
+// ===========================================================================
+//
+// `planSlotBlock` corre solo desde `renderDualTouch`. Si el callback sale del camino dual con un
+// dedo apoyado (oscilador apagado, modo dual apagado, stop), el estado de la envolvente queda en
+// "held, ganancia 1"; al volver al camino dual SIN dedos tiene que sonar silencio, no un release
+// fantasma de 80 ms de la nota vieja.
+//
+// Estos tests manejan UNA instancia de motor a mano (`Rig`) en vez de un `Script`, porque el
+// escenario es justamente que la instancia vive entre un camino y otro.
+
+namespace {
+
+/// Una instancia de motor dual, avanzada a mano de a `stepFrames`.
+class Rig {
+public:
+    Rig(int engineType, int stepFrames) : mStep(stepFrames), mBlock(static_cast<size_t>(stepFrames) * 2, 0.0f) {
+        EXPECT_TRUE(engine.startOffline(kSampleRate, kMaxBlock));
+        EXPECT_EQ(engine.getNumEffects(), 0u) << "la cadena de efectos del render (mEffectChain) no esta vacia";
+        engine.setOscillatorEnabled(true);
+        engine.setEngineType(engineType);
+        if (engineType == kClassic) engine.setOscillatorType(kOscSine);
+        engine.setDualTouchMixMode(DualTouchMixMode::AVERAGE);
+        engine.setDualTouchMode(true);
+    }
+
+    /// `ms` milisegundos con el slot 0 en (f0, a0) y el 1 en (f1, a1).
+    void run(double ms, float f0, float a0, float f1 = 0.0f, float a1 = 0.0f) {
+        const int steps = static_cast<int>(std::lround(ms * kFramesPerMs / mStep));
+        for (int k = 0; k < steps; ++k) {
+            engine.updateDualTouch(0.5f, 0.5f, f0, a0, 0.5f, 0.5f, 0.5f, f1, a1, 0.5f, 0.5f, 0.0f);
+            std::fill(mBlock.begin(), mBlock.end(), 0.0f);
+            EXPECT_TRUE(engine.renderBlock(mBlock.data(), nullptr, mStep));
+            for (int n = 0; n < mStep; ++n) {
+                mono.push_back(0.5f * (mBlock[static_cast<size_t>(n) * 2] + mBlock[static_cast<size_t>(n) * 2 + 1]));
+            }
+        }
+    }
+    long frames() const { return static_cast<long>(mono.size()); }
+
+    AudioEngine engine;
+    std::vector<float> mono;
+
+private:
+    int mStep;
+    std::vector<float> mBlock;
+};
+
+constexpr double kGhostLeadMs = 20.0;
+constexpr double kGhostRegimeEndMs = 200.0;   // el dedo esta en regimen hasta aca
+constexpr double kGhostHeldWhileAwayMs = 20.0;  // sigue apoyado un rato con el motor fuera del camino dual
+constexpr double kGhostLiftedWhileAwayMs = 40.0;  // y se levanta SIN que el camino dual lo vea
+constexpr double kGhostAfterReturnMs = 400.0;
+/// Ventanas [0,20) .. [60,80) ms desde que la salida del primer bloque de vuelta aparece. Un release
+/// fantasma de 80 ms vive en esas cuatro (-7 / -22 / -37 / -52 dB re regimen).
+constexpr int kGhostWindows = 4;
+/// El piso "sin voz" de la banda: -50 dB re regimen. Origen: el fantasma da -7 dB en [0,20) y
+/// >= -52 dB hasta [60,80); lo que SI queda en la banda sin fantasma es la fuga de Hann de la cola
+/// de continua del DC blocker (que NO avanza con el oscilador apagado y retoma al volver: el
+/// bloque `else` de `renderDualTouch` no pasa por `applyEffectsAndLooper`), de ~-77 dB (cuenta:
+/// continua de ~-10 dB re regimen con tau 54 ms, a 10 bins de 50 Hz, Hann ~-67 dB).
+/// NO se usa el pico por pasa-altos de AC-052.6 en estos escenarios, porque esa cola de continua lo
+/// ensucia (2e-3 a la vuelta) con independencia de la envolvente.
+constexpr double kGhostBandMaxDb = -50.0;
+
+struct GhostReading {
+    double worstBandDb = -300.0;
+    long worstWindow = 0;
+};
+
+/// El peor nivel de la banda de `hz` en las cuatro ventanas siguientes a `returnFrame`, re el regimen
+/// de `reference` (voz sostenida) en los 100 ms previos a `regimeEndMs`.
+GhostReading readGhost(const std::vector<float>& x, long returnFrame, const std::vector<float>& reference,
+                       double hz) {
+    GhostReading g;
+    double regime = -300.0;
+    for (long s = outFrame(kGhostRegimeEndMs - 100.0); s + kWindowFrames <= outFrame(kGhostRegimeEndMs); s += kHopFrames) {
+        regime = std::max(regime, bandDb(reference, s, hz));
+    }
+    for (int k = 0; k < kGhostWindows; ++k) {
+        const long start = returnFrame + kOutputLatencyFrames + static_cast<long>(k) * kWindowFrames;
+        const double rel = bandDb(x, start, hz) - regime;
+        if (rel > g.worstBandDb) {
+            g.worstBandDb = rel;
+            g.worstWindow = k;
+        }
+    }
+    return g;
+}
+
+Script ghostReference(double totalMs, float freq, float amp) {
+    Script ref(kCoarseStepFrames, totalMs);
+    ref.touch(0, kGhostLeadMs, totalMs, freq, amp);
+    return ref;
+}
+
+}  // namespace
+
+class DualTouchGhost : public ::testing::TestWithParam<int> {};
+
+TEST_P(DualTouchGhost, Ac0523_TheOscillatorDisabledPathLeavesNoGhostReleaseWhenTheFingerLiftedMeanwhile) {
+    // a) dual on, dedo en regimen -> setOscillatorEnabled(false) -> el dedo se levanta mientras el
+    // camino dual no corre -> setOscillatorEnabled(true) SIN dedos. Observable: la banda de 500 Hz
+    // en las cuatro ventanas de 20 ms tras la vuelta, y la sonda del slot 0.
+    // Bug que atrapa: la envolvente quedo en "held, ganancia 1" y suena un release de 80 ms de la
+    // nota vieja (-7 dB re regimen en la primera ventana).
+    const EngineInfo& e = kEngines[GetParam()];
+    const float f = kFreqSlot0;
+    Rig r(e.type, kCoarseStepFrames);
+    r.run(kGhostLeadMs, 0, 0);
+    r.run(kGhostRegimeEndMs - kGhostLeadMs, f, e.amp);
+    r.engine.setOscillatorEnabled(false);
+    r.run(kGhostHeldWhileAwayMs, f, e.amp);
+    r.run(kGhostLiftedWhileAwayMs, 0, 0);
+    r.engine.setOscillatorEnabled(true);
+    const long returnFrame = r.frames();
+    const uint64_t probeAtReturn = r.engine.dualTouchSlotBlocksRendered(0);
+    r.run(kGhostAfterReturnMs, 0, 0);
+
+    const double totalMs = static_cast<double>(r.frames()) / kFramesPerMs;
+    const Rendered ref = render(e.type, DualTouchMixMode::AVERAGE, ghostReference(totalMs, f, e.amp));
+    const GhostReading g = readGhost(r.mono, returnFrame, ref.mono, f);
+    EXPECT_LE(g.worstBandDb, kGhostBandMaxDb)
+        << "AC-052.3 " << e.name << ": tras volver al camino dual sin dedos, la banda de " << f
+        << " Hz esta a " << g.worstBandDb << " dB del regimen en la ventana " << g.worstWindow
+        << " (release fantasma de la nota vieja; debe ser <= " << kGhostBandMaxDb << ")";
+    EXPECT_EQ(r.engine.dualTouchSlotBlocksRendered(0), probeAtReturn)
+        << "AC-052.3 " << e.name << ": el engine del slot 0 se proceso "
+        << (r.engine.dualTouchSlotBlocksRendered(0) - probeAtReturn) << " bloques tras volver sin dedos";
+    // Control positivo del instrumento: con el dedo en regimen la banda SI esta cerca de 0 dB.
+    EXPECT_GE(bandDb(r.mono, outFrame(kGhostRegimeEndMs - 60.0), f) -
+                  bandDb(ref.mono, outFrame(kGhostRegimeEndMs - 60.0), f), -0.5)
+        << "control: el regimen previo no suena igual que la referencia";
+}
+
+TEST_P(DualTouchGhost, Ac0523_TheDualModeSwitchedOffLeavesNoGhostReleaseWhenTheFingerLiftedMeanwhile) {
+    // b) igual, saliendo con setDualTouchMode(false) (el motor pasa al camino single touch) y
+    // volviendo con setDualTouchMode(true) sin dedos.
+    const EngineInfo& e = kEngines[GetParam()];
+    const float f = kFreqSlot0;
+    Rig r(e.type, kCoarseStepFrames);
+    r.run(kGhostLeadMs, 0, 0);
+    r.run(kGhostRegimeEndMs - kGhostLeadMs, f, e.amp);
+    r.engine.setDualTouchMode(false);
+    r.run(kGhostHeldWhileAwayMs, f, e.amp);
+    r.run(kGhostLiftedWhileAwayMs, 0, 0);
+    r.engine.setDualTouchMode(true);
+    const long returnFrame = r.frames();
+    const uint64_t probeAtReturn = r.engine.dualTouchSlotBlocksRendered(0);
+    r.run(kGhostAfterReturnMs, 0, 0);
+
+    const double totalMs = static_cast<double>(r.frames()) / kFramesPerMs;
+    const Rendered ref = render(e.type, DualTouchMixMode::AVERAGE, ghostReference(totalMs, f, e.amp));
+    const GhostReading g = readGhost(r.mono, returnFrame, ref.mono, f);
+    EXPECT_LE(g.worstBandDb, kGhostBandMaxDb)
+        << "AC-052.3 " << e.name << ": tras volver al modo dual sin dedos, la banda de " << f << " Hz esta a "
+        << g.worstBandDb << " dB del regimen en la ventana " << g.worstWindow
+        << " (release fantasma de la nota vieja; debe ser <= " << kGhostBandMaxDb << ")";
+    EXPECT_EQ(r.engine.dualTouchSlotBlocksRendered(0), probeAtReturn)
+        << "AC-052.3 " << e.name << ": el engine del slot 0 se proceso "
+        << (r.engine.dualTouchSlotBlocksRendered(0) - probeAtReturn) << " bloques tras volver sin dedos";
+}
+
+INSTANTIATE_TEST_SUITE_P(Engines, DualTouchGhost, ::testing::Values(kClassic, kFm),
+                         [](const ::testing::TestParamInfo<int>& i) { return std::string(kEngines[i.param].name); });
+
+TEST(DualTouchGhostStop, Ac0526_AStoppedAndRestartedEngineLeavesNoGhostReleaseWhenTheFingerLiftedMeanwhile) {
+    // c) offline stop() con un dedo apoyado y startOffline de nuevo en la MISMA instancia, sin dedos.
+    // Se mide la banda de 500 Hz desde el primer bloque tras el reinicio.
+    const EngineInfo& e = kEngines[kClassic];
+    const float f = kFreqSlot0;
+    Rig r(e.type, kCoarseStepFrames);
+    r.run(kGhostLeadMs, 0, 0);
+    r.run(kGhostRegimeEndMs - kGhostLeadMs, f, e.amp);
+    const std::vector<float> before = r.mono;
+    r.engine.stop();
+    ASSERT_TRUE(r.engine.startOffline(kSampleRate, kMaxBlock)) << "el motor no permite reusar la instancia";
+    r.mono.clear();
+    const long returnFrame = 0;
+    const uint64_t probeAtReturn = r.engine.dualTouchSlotBlocksRendered(0);
+    r.run(kGhostAfterReturnMs, 0, 0);
+
+    const Rendered ref = render(e.type, DualTouchMixMode::AVERAGE,
+                                ghostReference(kGhostRegimeEndMs + kGhostAfterReturnMs, f, e.amp));
+    const GhostReading g = readGhost(r.mono, returnFrame, ref.mono, f);
+    EXPECT_LE(g.worstBandDb, kGhostBandMaxDb)
+        << "AC-052.6 " << e.name << ": tras stop()/startOffline() sin dedos, la banda de " << f
+        << " Hz esta a " << g.worstBandDb << " dB del regimen en la ventana " << g.worstWindow
+        << " (release fantasma; debe ser <= " << kGhostBandMaxDb << ")";
+    EXPECT_EQ(r.engine.dualTouchSlotBlocksRendered(0), probeAtReturn)
+        << "AC-052.6 " << e.name << ": el engine del slot 0 se proceso tras reiniciar sin dedos";
+    EXPECT_GT(maxAbs(before, outFrame(kGhostRegimeEndMs - 60.0), outFrame(kGhostRegimeEndMs)), kAudible)
+        << "control: antes del stop() el dedo no sonaba";
+}
+
+TEST(DualTouchGhostControl, Ac0524_AFingerStillHeldWhenTheDualPathReturnsComesBackWithAnAttackAtItsLevel) {
+    // d) control positivo de a): el dedo SIGUE apoyado al volver. La voz vuelve con ataque (primer
+    // ciclo <= 0,5 del pico, y sin escalon: criterio de AC-052.4) y a su nivel (+-0,5 dB).
+    // Seno a 1 kHz (periodo = 48 cuadros = la ventana del primer ciclo), paso fino, y el apagado cae
+    // a 1/8 de ciclo: la fase congelada da |sin| = 0,707, asi que sin ataque el primer ciclo es 1.
+    const double away = kGhostRegimeEndMs + kOffZeroCrossingMs;
+    Rig r(kClassic, kFineStepFrames);
+    r.run(kGhostLeadMs, 0, 0);
+    r.run(away - kGhostLeadMs, kFineFreq, kFineAmp);
+    r.engine.setOscillatorEnabled(false);
+    r.run(60.0, kFineFreq, kFineAmp);
+    r.engine.setOscillatorEnabled(true);
+    const long returnFrame = r.frames();
+    r.run(150.0, kFineFreq, kFineAmp);
+
+    const double totalMs = static_cast<double>(r.frames()) / kFramesPerMs;
+    Script refScript(kFineStepFrames, totalMs);
+    refScript.touch(0, kGhostLeadMs, totalMs, kFineFreq, kFineAmp);
+    const Rendered ref = render(kClassic, DualTouchMixMode::AVERAGE, refScript);
+
+    const long regimeFrom = outFrame(kGhostLeadMs + kSettleMs);
+    const long regimeTo = outFrame(away);
+    const double regimeStep = maxStep(r.mono, regimeFrom, regimeTo);
+    const double regimePeak = maxAbs(r.mono, regimeFrom, regimeTo);
+    ASSERT_GT(regimePeak, kAudible);
+
+    const long returnOut = returnFrame + kOutputLatencyFrames;
+    EXPECT_LE(maxStep(r.mono, returnOut - ms(kEdgeGuardMs), returnOut + ms(kAttackClickWindowMs)),
+              regimeStep * kClickTolerance)
+        << "AC-052.4: escalon al volver al camino dual con el dedo apoyado (la envolvente quedo abierta)";
+    const double firstCycle = peakAfterOnset(r.mono, returnOut - ms(kEdgeGuardMs), returnOut + ms(kAttackClickWindowMs),
+                                             kOnsetLevel, kAttackProbeFrames);
+    ASSERT_GE(firstCycle, 0.0) << "la voz no vuelve";
+    EXPECT_LE(firstCycle, regimePeak * kAttackFirstMsMaxFraction)
+        << "AC-052.4: el primer ciclo tras volver con el dedo apoyado esta a " << firstCycle / regimePeak
+        << " del pico (con ataque de ~5 ms ~0,2)";
+    const long levelAt = returnOut + ms(kSettleMs);
+    EXPECT_NEAR(bandDb(r.mono, levelAt, kFineFreq) - bandDb(ref.mono, levelAt, kFineFreq), 0.0, kLevelToleranceDb)
+        << "AC-052.4: la voz no vuelve a su nivel";
+}
+
+// ===========================================================================
+// AC-052.3 — el release suena en la ULTIMA frecuencia
+// ===========================================================================
+
+TEST(DualTouchLastFrequency, Ac0523_AfterAFrequencyChangeTheReleaseRingsAtTheNewFrequency) {
+    // Un dedo a 500 Hz salta a 620 Hz entre bloques (en regimen) y despues se levanta. El release
+    // tiene que estar en la banda de 620 (envolvente del spec) y la de 500 en el piso.
+    // Bug que atrapa: el release latchea la frecuencia del ATAQUE, o la vigente al levantar (0 Hz).
+    constexpr float kFreqAfter = 620.0f;
+    constexpr double kChangeMs = 160.0, kLiftMs = 320.0, kTotalMs = 480.0;
+    // 500 Hz queda a 120 Hz de 620 = 2,4 bins: la fuga de Hann de la voz de 620 a esa distancia es
+    // ~-31 dB (primer lobulo lateral), asi que "en el piso" se afirma como >= 20 dB bajo la banda
+    // de 620 en la misma ventana, no como un nivel absoluto.
+    constexpr double kOldBandBelowNewDb = 20.0;
+    const EngineInfo& e = kEngines[kClassic];
+    Script g(kCoarseStepFrames, kTotalMs);
+    g.touch(0, kFirstDownMs, kChangeMs, kFreqSlot0, e.amp).touch(0, kChangeMs, kLiftMs, kFreqAfter, e.amp);
+    Script sus(kCoarseStepFrames, kTotalMs);
+    sus.touch(0, kFirstDownMs, kChangeMs, kFreqSlot0, e.amp).touch(0, kChangeMs, kTotalMs, kFreqAfter, e.amp);
+
+    const Rendered lifted = render(e.type, DualTouchMixMode::AVERAGE, g);
+    const Rendered sustained = render(e.type, DualTouchMixMode::AVERAGE, sus);
+    const long liftOut = outFrame(kLiftMs);
+    const std::vector<double> series = releaseSeries(lifted.mono, sustained.mono, kFreqAfter, liftOut);
+    const ReleaseVerdict v = judgeRelease(series);
+    EXPECT_TRUE(v.ok()) << "AC-052.3: el release no esta en la ultima frecuencia (" << kFreqAfter
+                        << " Hz) " << describeSeries(series);
+    const long w2 = liftOut + kWindowFrames;
+    EXPECT_GE(bandDb(lifted.mono, w2, kFreqAfter) - bandDb(lifted.mono, w2, kFreqSlot0), kOldBandBelowNewDb)
+        << "AC-052.3: en [20,40) ms sigue sonando la frecuencia ANTERIOR (" << kFreqSlot0 << " Hz)";
+}
+
+TEST(DualTouchLastFrequency, Ac0523_ASplitReadWithZeroFrequencyBeforeTheLiftKeepsTheLastValidFrequency) {
+    // El control escribe freq antes que amp: un bloque con freq = 0 y amp > 0 llega justo antes del
+    // soltar. El release tiene que estar en la ultima frecuencia VALIDA (> 0), no en 0 Hz.
+    // Bug que atrapa: latchear la frecuencia del ultimo bloque con amp > 0 sin validarla.
+    constexpr double kLiftMs = 305.0, kTotalMs = 480.0;
+    const EngineInfo& e = kEngines[kClassic];
+    Script g(kCoarseStepFrames, kTotalMs);
+    g.touch(0, kFirstDownMs, 300.0, kFreqSlot0, e.amp).touch(0, 300.0, kLiftMs, 0.0f, e.amp);
+    Script sus(kCoarseStepFrames, kTotalMs);
+    sus.touch(0, kFirstDownMs, kTotalMs, kFreqSlot0, e.amp);
+
+    const Rendered lifted = render(e.type, DualTouchMixMode::AVERAGE, g);
+    const Rendered sustained = render(e.type, DualTouchMixMode::AVERAGE, sus);
+    EXPECT_TRUE(lifted.allFinite);
+    const std::vector<double> series = releaseSeries(lifted.mono, sustained.mono, kFreqSlot0, outFrame(kLiftMs));
+    const ReleaseVerdict v = judgeRelease(series);
+    EXPECT_TRUE(v.ok()) << "AC-052.3: tras un bloque con freq=0 y amp>0 el release no esta en la ultima frecuencia valida ("
+                        << kFreqSlot0 << " Hz) " << describeSeries(series);
+}
