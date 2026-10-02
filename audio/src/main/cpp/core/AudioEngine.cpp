@@ -1601,6 +1601,9 @@ void AudioEngine::renderDualTouch(float* output, int32_t numFrames,
         const bool touch1Active = amp1 > 0.001f;
         const bool touch2Active = amp2 > 0.001f;
 
+        if (touch1Active) mDualTouch.countSlotBlock(0);
+        if (touch2Active) mDualTouch.countSlotBlock(1);
+
         if (touch1Active && touch2Active) {
             if (engine1 && engine2) {
                 engine1->process(mDualTouch.getTouch1Buffer(), numFrames, freq1, amp1);

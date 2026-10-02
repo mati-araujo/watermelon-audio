@@ -6,6 +6,7 @@
 #include <cmath>
 #include "../dsp/SIMDUtils.h"
 #include "../platform/Logger.h"
+#include "../platform/RtCounter.h"
 
 // Logging macros local to this header (header-only, no LOG_TAG from .cpp)
 #define DTM_LOGI(...) wma::logMessage(wma::LogLevel::INFO, "DualTouchMgr", __VA_ARGS__)
@@ -218,6 +219,33 @@ public:
         }
     }
 
+    // ========== SONDA: BLOQUES PROCESADOS POR SLOT (REQ-052) ==========
+
+    /**
+     * @brief Cuenta un bloque en el que el engine (u oscilador) del slot se proceso.
+     *
+     * Lo llama SOLO el thread de audio, desde `AudioEngine::renderDualTouch`.
+     * RT-safe: un `fetch_add` relajado (`wma::RtCounter`).
+     */
+    void countSlotBlock(int slot) noexcept {
+        if (slot == 0) mSlotBlocks[0].bump();
+        else if (slot == 1) mSlotBlocks[1].bump();
+    }
+
+    /**
+     * @brief Cuantos bloques proceso el engine del slot (0 = principal, 1 = el otro).
+     *
+     * Sonda de tests (REQ-052, AC-052.3/.6): es el unico observable de "el engine
+     * de ese slot dejo de procesarse" — la salida pasa por DC block y limitador,
+     * asi que "exactamente cero" no lo distingue de un engine que sigue corriendo
+     * a ganancia minima. Para el thread de control.
+     */
+    uint64_t slotBlocksRendered(int slot) const noexcept {
+        if (slot == 0) return mSlotBlocks[0].get();
+        if (slot == 1) return mSlotBlocks[1].get();
+        return 0;
+    }
+
     // ========== BUFFER ACCESS ==========
 
     float* getTouch1Buffer() { return mTouch1Buffer.data(); }
@@ -260,6 +288,9 @@ private:
 
     // Modo de mezcla
     std::atomic<DualTouchMixMode> mDualTouchMixMode{DualTouchMixMode::AVERAGE};
+
+    // Sonda REQ-052: bloques procesados por slot (los escribe el thread de audio).
+    wma::RtCounter mSlotBlocks[2];
 
     // Buffers pre-alocados para dual touch (RT-safe)
     std::vector<float> mTouch1Buffer;

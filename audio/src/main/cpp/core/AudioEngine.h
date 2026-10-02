@@ -725,6 +725,12 @@ public:
         return mDualTouch.isEnabled();
     }
 
+    /// Sonda de tests (REQ-052): bloques en que el engine del slot del dual touch
+    /// se proceso (0 = principal, 1 = el otro). Ver DualTouchManager::slotBlocksRendered.
+    uint64_t dualTouchSlotBlocksRendered(int slot) const {
+        return mDualTouch.slotBlocksRendered(slot);
+    }
+
     // ========== INPUT NODE INTEGRATION (Full-Duplex Monitoring) ==========
 
     /**
