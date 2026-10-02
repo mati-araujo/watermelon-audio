@@ -71,13 +71,13 @@ audio/src/main/cpp/core/AudioSource.h::AudioSource::getAmplitude
 audio/src/main/cpp/core/AudioSource.h::AudioSource::getFrequency
 audio/src/main/cpp/core/AudioSource.h::AudioSource::setParameters
 audio/src/main/cpp/core/ChordHarmony.h::ChordHarmony::renderInto
+audio/src/main/cpp/core/DualTouchManager.h::DualTouchManager::abandonSlotVoices
 audio/src/main/cpp/core/DualTouchManager.h::DualTouchManager::advanceSlotGain
 audio/src/main/cpp/core/DualTouchManager.h::DualTouchManager::blendSlotVoices
 audio/src/main/cpp/core/DualTouchManager.h::DualTouchManager::countSlotBlock
 audio/src/main/cpp/core/DualTouchManager.h::DualTouchManager::getTouch1Buffer
 audio/src/main/cpp/core/DualTouchManager.h::DualTouchManager::getTouch2Buffer
 audio/src/main/cpp/core/DualTouchManager.h::DualTouchManager::planSlotBlock
-audio/src/main/cpp/core/DualTouchManager.h::DualTouchManager::refreshEnvelopeCoefficients
 audio/src/main/cpp/core/DualTouchManager.h::DualTouchManager::shapeSoloSlot
 audio/src/main/cpp/core/FadeController.h::FadeController::isPaused
 audio/src/main/cpp/core/FadeController.h::FadeController::processFadeBlock
@@ -165,6 +165,7 @@ audio/src/main/cpp/dsp/SIMDUtils.h::applyStereoGain
 audio/src/main/cpp/dsp/SIMDUtils.h::applyStereoGainRamp
 audio/src/main/cpp/dsp/SIMDUtils.h::clearBuffer
 audio/src/main/cpp/dsp/SIMDUtils.h::hardLimitStereo
+audio/src/main/cpp/dsp/SIMDUtils.h::mixStereoBuffers
 audio/src/main/cpp/dsp/SoftClipper.h::SoftClipper::process
 audio/src/main/cpp/dsp/SoftClipper.h::SoftClipper::processAtan
 audio/src/main/cpp/dsp/SoftClipper.h::SoftClipper::processCubic

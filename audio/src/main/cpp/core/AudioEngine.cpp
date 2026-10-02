@@ -1633,6 +1633,7 @@ void AudioEngine::renderDualTouch(float* output, int32_t numFrames,
         applyEffectsAndLooper(output, numFrames);
 
     } else {
+        mDualTouch.abandonSlotVoices();
         std::fill_n(output, totalSamples, 0.0f);
     }
 }
@@ -1780,6 +1781,7 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
         const int cachedEngineType = mEngineDispatcher.detectCrossfadeAndGetType();
 
         // Render per mode
+        bool rendersDual = false;
         if (!oscillatorEnabled && hasInputMonitoring) {
             renderInputFx(outputData, numFrames, inputNode);
 
@@ -1798,7 +1800,12 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
         } else {
             renderDualTouch(outputData, numFrames, dualTouchState, cachedEngineType,
                             cachedOscIndex, cachedHasActiveModulator, cachedModIndex);
+            rendersDual = true;
         }
+
+        // REQ-052 — todo bloque que NO paso por renderDualTouch suelta las
+        // envolventes por slot (ver DualTouchManager::abandonSlotVoices).
+        if (!rendersDual) mDualTouch.abandonSlotVoices();
 
         // MIX mode monitoring (post-render)
         handleMixMonitoring(outputData, numFrames, oscillatorEnabled, hasInputMonitoring);
@@ -2420,6 +2427,9 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate, int maxBlock
     // REQ-052 — los coeficientes de la envolvente por slot del dual touch salen
     // del rate; el thread de audio los recalcula al ver el valor nuevo.
     mDualTouch.setEnvelopeSampleRate(sampleRate);
+    // Un prepare arranca de cero: una envolvente que quedo "apoyada" al parar
+    // el motor no puede sonar como release fantasma en el primer bloque.
+    mDualTouch.requestEnvelopeRestart();
     mEngineDispatcher.updateVoiceEngines(mVoiceManager.get());
     LOGI("SynthEngineDispatcher prepared");
 

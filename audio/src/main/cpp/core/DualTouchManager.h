@@ -76,12 +76,20 @@ public:
 
     void setEnabled(bool enabled) {
         bool wasEnabled = mDualTouchMode.load(std::memory_order_acquire);
-        mDualTouchMode.store(enabled, std::memory_order_release);
 
         if (enabled && !wasEnabled) {
-            DTM_LOGI("Dual touch mode ENABLED (UNIFIED: using same oscillator for both touches)");
+            // ANTES de publicar `true` (REQ-052): con el modo dual apagado el
+            // thread de audio no toca estos buffers ni las envolventes, asi que
+            // limpiarlos y pedir envolventes en cero ahora no compite con el
+            // primer bloque dual, que ya ve la epoca nueva.
             clearBuffers();
-        } else if (!enabled && wasEnabled) {
+            mDualTouchMode.store(true, std::memory_order_release);
+            DTM_LOGI("Dual touch mode ENABLED (UNIFIED: using same oscillator for both touches)");
+            return;
+        }
+        mDualTouchMode.store(enabled, std::memory_order_release);
+
+        if (!enabled && wasEnabled) {
             DTM_LOGI("Dual touch mode DISABLED");
             // Clear stale dual-touch state to prevent glitches when
             // returning to single-touch mode.
@@ -171,7 +179,7 @@ public:
     // frecuencia y amplitud, y una envolvente de ganancia propia. El estado de
     // abajo (`mSlotVoice`, coeficientes, epoca y rate cacheados) lo leen y lo
     // escriben SOLO el thread de audio; desde el thread de control entran dos
-    // atomics (`mEnvelopeRate`, `mEnvelopeEpoch`) y el thread de audio los
+    // atomics (los coeficientes publicados y `mEnvelopeEpoch`) y el thread de audio los
     // consulta una vez por bloque.
 
     /// Ataque lineal desde la ganancia actual hasta 1 (D5).
@@ -191,12 +199,18 @@ public:
     };
 
     /**
-     * @brief Publica el sample rate para los coeficientes de la envolvente.
-     * Thread de control (camino de prepare). El thread de audio recalcula
-     * los coeficientes la proxima vez que planifica un bloque.
+     * @brief Calcula los coeficientes de la envolvente para @p sampleRate y los
+     * publica. Thread de control (camino de prepare); el thread de audio los
+     * toma al planificar el bloque siguiente.
      */
     void setEnvelopeSampleRate(int sampleRate) noexcept {
-        if (sampleRate > 0) mEnvelopeRate.store(sampleRate, std::memory_order_release);
+        if (sampleRate <= 0) return;
+        const float attackSamples = kSlotAttackMs * 0.001f * static_cast<float>(sampleRate);
+        const float releaseSamples = kSlotReleaseMs * 0.001f * static_cast<float>(sampleRate);
+        mSharedAttackStep.store(1.0f / std::max(1.0f, attackSamples), std::memory_order_relaxed);
+        // g·r^N = kSlotOffGain con g = 1 y N = releaseSamples.
+        mSharedReleaseCoeff.store(std::exp(std::log(kSlotOffGain) / std::max(1.0f, releaseSamples)),
+                                  std::memory_order_relaxed);
     }
 
     /**
@@ -213,7 +227,8 @@ public:
      * los usa durante el release. Thread de audio. RT-safe.
      */
     SlotBlockPlan planSlotBlock(const TouchState& ts) noexcept {
-        refreshEnvelopeCoefficients();
+        mAttackStep = mSharedAttackStep.load(std::memory_order_relaxed);
+        mReleaseCoeff = mSharedReleaseCoeff.load(std::memory_order_relaxed);
 
         const uint32_t epoch = mEnvelopeEpoch.load(std::memory_order_acquire);
         if (epoch != mSeenEnvelopeEpoch) {
@@ -232,7 +247,11 @@ public:
             SlotVoice& v = mSlotVoice[k];
             v.held = amps[k] > kSlotHeldAmp;
             if (v.held) {
-                v.heldFreq = freqs[k];
+                // El control escribe freq antes que amp, y el soltar manda
+                // freq = 0: un bloque puede leer freq nueva (0) con amp vieja.
+                // Una frecuencia no positiva no se retiene, o todo el release
+                // sonaria a 0 Hz.
+                if (freqs[k] > 0.0f) v.heldFreq = freqs[k];
                 v.heldAmp = amps[k];
             }
             plan.render[k] = v.held || v.gain > 0.0f;
@@ -240,6 +259,25 @@ public:
             plan.amp[k] = v.heldAmp;
         }
         return plan;
+    }
+
+    /**
+     * @brief El bloque NO paso por el camino dual: las envolventes vuelven a cero.
+     *
+     * Lo llama el thread de audio en cada bloque que se renderiza por otro
+     * camino (un dedo, SoundFont, voice system, oscilador apagado...). Sin
+     * esto, un dedo apoyado al salir del camino dual dejaria su envolvente
+     * congelada en "apoyado, ganancia 1", y al volver sin dedos sonaria un
+     * release fantasma de la nota vieja. Al volver con el dedo apoyado, la voz
+     * entra con su ataque. RT-safe; dos comparaciones cuando no hay nada.
+     */
+    void abandonSlotVoices() noexcept {
+        for (auto& v : mSlotVoice) {
+            if (v.held || v.gain > 0.0f) {
+                v.held = false;
+                v.gain = 0.0f;
+            }
+        }
     }
 
     /**
@@ -280,9 +318,20 @@ public:
                          const TouchState& ts) noexcept {
         SlotVoice& v1 = mSlotVoice[0];
         SlotVoice& v2 = mSlotVoice[1];
+        // Regimen con los dos dedos: las dos ganancias quedan en 1 todo el
+        // bloque, asi que la mezcla es la ley sola, al mismo costo que antes.
+        const bool settled = v1.held && v2.held && v1.gain >= 1.0f && v2.gain >= 1.0f;
 
         switch (ts.mixMode) {
             case DualTouchMixMode::MAX:
+                if (settled) {
+                    const int32_t totalSamples = numFrames * 2;
+                    for (int32_t i = 0; i < totalSamples; ++i) {
+                        const float absMax = std::max(std::abs(buffer1[i]), std::abs(buffer2[i]));
+                        output[i] = (buffer1[i] + buffer2[i] >= 0.0f) ? absMax : -absMax;
+                    }
+                    return;
+                }
                 // MAX se aplica sobre las voces YA envueltas: max(|g1·x1|, |g2·x2|)
                 // con el signo de la suma. Con un dedo da ese dedo (max con 0) y
                 // con los dos en 1 da la ley de siempre, igual que la forma
@@ -304,12 +353,23 @@ public:
 
             case DualTouchMixMode::CROSSFADE: {
                 const float d = std::clamp(ts.distance, 0.0f, 1.0f);
+                if (settled) {
+                    simd::mixStereoBuffers(output, buffer1, buffer2, 1.0f - d, d, numFrames);
+                    return;
+                }
                 blendWithLaw(buffer1, buffer2, output, numFrames,
                              [d](float a, float b) { return (1.0f - d) * a + d * b; });
                 return;
             }
 
             case DualTouchMixMode::RING:
+                if (settled) {
+                    const int32_t totalSamples = numFrames * 2;
+                    for (int32_t i = 0; i < totalSamples; ++i) {
+                        output[i] = buffer1[i] * buffer2[i] * 0.5f;
+                    }
+                    return;
+                }
                 blendWithLaw(buffer1, buffer2, output, numFrames,
                              [](float a, float b) { return a * b * 0.5f; });
                 return;
@@ -322,6 +382,10 @@ public:
                 const float total = a1 + a2;
                 const float w1 = total > kSlotHeldAmp ? a1 / total : 0.5f;
                 const float w2 = total > kSlotHeldAmp ? a2 / total : 0.5f;
+                if (settled) {
+                    simd::mixStereoBuffers(output, buffer1, buffer2, w1, w2, numFrames);
+                    return;
+                }
                 blendWithLaw(buffer1, buffer2, output, numFrames,
                              [w1, w2](float a, float b) { return w1 * a + w2 * b; });
                 return;
@@ -330,7 +394,7 @@ public:
             case DualTouchMixMode::SUM:
             case DualTouchMixMode::AVERAGE:
             default:
-                if (v1.held && v2.held && v1.gain >= 1.0f && v2.gain >= 1.0f) {
+                if (settled) {
                     // Regimen con los dos dedos: suma a unidad, sin costo por muestra extra.
                     simd::addStereoBuffers(output, buffer1, buffer2, numFrames,
                                            /*applyHeadroom=*/false);
@@ -444,19 +508,6 @@ private:
         return v.gain;
     }
 
-    /// Los coeficientes salen del sample rate publicado por el camino de prepare.
-    /// Se recalculan en el thread de audio solo cuando el rate cambia.
-    void refreshEnvelopeCoefficients() noexcept {
-        const int rate = mEnvelopeRate.load(std::memory_order_acquire);
-        if (rate == mCoefficientRate || rate <= 0) return;
-        mCoefficientRate = rate;
-        const float attackSamples = kSlotAttackMs * 0.001f * static_cast<float>(rate);
-        const float releaseSamples = kSlotReleaseMs * 0.001f * static_cast<float>(rate);
-        mAttackStep = 1.0f / std::max(1.0f, attackSamples);
-        // g·r^N = kSlotOffGain con g = 1 y N = releaseSamples.
-        mReleaseCoeff = std::exp(std::log(kSlotOffGain) / std::max(1.0f, releaseSamples));
-    }
-
     /// Mezcla bilineal por presencia (ver blendSlotVoices) con la ley @p law.
     template <typename Law>
     void blendWithLaw(const float* buffer1, const float* buffer2, float* output,
@@ -478,13 +529,15 @@ private:
     }
 
     SlotVoice mSlotVoice[2];
-    float mAttackStep = 1.0f / 240.0f;   // 5 ms a 48 kHz hasta que llegue el rate real
+    // Copia del bloque de los coeficientes publicados (thread de audio).
+    float mAttackStep = 1.0f / 240.0f;   // 5 ms a 48 kHz
     float mReleaseCoeff = 0.99820f;      // 80 ms a −60 dB a 48 kHz
-    int mCoefficientRate = 0;            // 0: todavia no se calculo con un rate publicado
     uint32_t mSeenEnvelopeEpoch = 0;
 
-    // Entradas desde el thread de control.
-    std::atomic<int> mEnvelopeRate{48000};
+    // Entradas desde el thread de control. El default es 48 kHz hasta que el
+    // camino de prepare publique el rate real.
+    std::atomic<float> mSharedAttackStep{1.0f / 240.0f};
+    std::atomic<float> mSharedReleaseCoeff{0.99820f};
     std::atomic<uint32_t> mEnvelopeEpoch{0};
 
     // Buffers pre-alocados para dual touch (RT-safe)
