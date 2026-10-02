@@ -31,6 +31,7 @@
  * reales.
  */
 
+#include "tests/support/SnapshotRead.h"
 #include "tests/support/TestWait.h"
 #include "../AnalysisRing.h"
 #include "../AnalysisSnapshot.h"
@@ -256,9 +257,11 @@ public:
                                           "precondicion los tests de ausencia no prueban nada";
     }
 
+    /// MINI-043: monotono, asi que sin publicacion es 0 de verdad; una lectura
+    /// ROTA no lo es. Con el 0 de antes, `mSeenFrames = analysedFrames()` podia
+    /// quedar en 0 y la espera siguiente (`> before`) salia sin esperar nada.
     double analysedFrames() {
-        float v[kSnapshotValueCount];
-        return mSnap.read(v) ? static_cast<double>(v[kSnapFramesAnalyzed]) : 0.0;
+        return wma_test::readCoherentValueOr(mSnap, kSnapFramesAnalyzed, 0.0);
     }
 
 private:

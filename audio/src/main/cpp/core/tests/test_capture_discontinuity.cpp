@@ -72,6 +72,7 @@
 #include "../../analysis/AnalysisRing.h"
 #include "../../analysis/AnalysisSnapshot.h"
 #include "../../analysis/AnalysisThread.h"
+#include "tests/support/SnapshotRead.h"
 
 #include <gtest/gtest.h>
 
@@ -212,9 +213,11 @@ Lectura correr(Falla modo, int cadaCuantos, bool avisa = true, int bloques = 400
     const double real = kTargetHz * std::pow(2.0, kRealCents / 1200.0);
     std::vector<float> bloque(static_cast<size_t>(kBlockFrames) * 2, 0.0f);
 
+    // MINI-043: monotono, sin publicacion es 0 de verdad; una lectura ROTA no lo
+    // es — con el 0 de antes la `meta` de abajo quedaba en 0 y no se esperaba
+    // la publicacion siguiente.
     auto analizados = [&]() -> double {
-        float o[kSnapshotValueCount];
-        return snap.read(o) ? static_cast<double>(o[kSnapFramesAnalyzed]) : 0.0;
+        return wma_test::readCoherentValueOr(snap, kSnapFramesAnalyzed, 0.0);
     };
     // 🔴 SE ESPERA LUGAR EN EL RING, y no es opcional: si el alimentador lo
     // desborda, este test deja de medir el eje de CAPTURA y pasa a medir el del
@@ -313,8 +316,14 @@ Lectura correr(Falla modo, int cadaCuantos, bool avisa = true, int bloques = 400
     obs.marcaVista = marcaVista.load(std::memory_order_acquire);
     obs.contadorMax = static_cast<double>(contadorMax.load(std::memory_order_relaxed));
 
+    // MINI-043: el thread sigue vivo aca, asi que un `read()` a mitad de un
+    // publish daba `hubo = false` — "no se publico", que es otra cosa.
     float o[kSnapshotValueCount];
-    if (snap.read(o)) {
+    const wma_test::SnapshotRead leida = wma_test::readCoherent(snap, o);
+    if (leida == wma_test::SnapshotRead::kTimedOut) {
+        ADD_FAILURE() << "no se pudo leer el snapshot: " << wma_test::describe(leida);
+    }
+    if (leida == wma_test::SnapshotRead::kCoherent) {
         obs.hubo = true;
         obs.cents = o[kSnapCents];   obs.sigma  = o[kSnapUncertainty];
         obs.dropped = o[kSnapDroppedFrames];
