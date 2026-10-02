@@ -16,6 +16,7 @@
 #include "../backends/BackendManager.h"
 #include "../backends/LibusbBackend.h"
 #include <cmath>
+#include <optional>
 #include <string>
 
 // ==================== USB Device Shared State ====================
@@ -67,13 +68,19 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     if (!gUsbDeviceState.isInitialized) return nullptr;
 
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
 
     constexpr int STATS_SIZE = 18;
     jfloat statsArray[STATS_SIZE] = {0};
 
-    if (backend) {
-        auto profilingStats = backend->getProfilingStats();
+    // MINI-042 (D5 + AC-042.2): copia bajo el lock de estado del manager; el backend
+    // la saca con try_lock ("sin dato" = todo en cero, como sin stream).
+    const auto maybeStats = manager.withLibusbBackend(
+        [](watermelon_audio::LibusbBackend* backend) -> std::optional<watermelon_audio::usb::UsbProfilingStats> {
+            if (!backend) return std::nullopt;
+            return backend->getProfilingStats();
+        });
+    if (maybeStats) {
+        const auto& profilingStats = *maybeStats;
         statsArray[0] = static_cast<float>(profilingStats.outputTransfers.avgLatencyUs);
         statsArray[1] = static_cast<float>(profilingStats.outputTransfers.minLatencyUs);
         statsArray[2] = static_cast<float>(profilingStats.outputTransfers.maxLatencyUs);
@@ -105,22 +112,21 @@ JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsbProfilingEnabled(
         JNIEnv *env, jobject thiz, jboolean enabled) {
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    if (backend) {
-        auto* profiler = backend->getLatencyProfiler();
-        if (profiler) profiler->setEnabled(enabled == JNI_TRUE);
-    }
+    // MINI-042 (D7): el profiler vive adentro del transfer manager, que start()
+    // recrea; ya no sale como puntero. Si no se aplica, el backend lo deja en el log.
+    manager.withLibusbBackend([enabled](watermelon_audio::LibusbBackend* backend) {
+        if (backend) backend->setProfilingEnabled(enabled == JNI_TRUE);
+    });
 }
 
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeResetUsbProfilingStats(
         JNIEnv *env, jobject thiz) {
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    if (backend) {
-        auto* profiler = backend->getLatencyProfiler();
-        if (profiler) profiler->reset();
-    }
+    // MINI-042 (D7): idem setProfilingEnabled.
+    manager.withLibusbBackend([](watermelon_audio::LibusbBackend* backend) {
+        if (backend) backend->resetProfilingStats();
+    });
 }
 
 } // extern "C"

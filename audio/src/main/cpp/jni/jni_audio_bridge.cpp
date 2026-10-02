@@ -20,6 +20,7 @@
 #include "../nodes/InputNode.h"
 #include "../backends/BackendManager.h"
 #include "../backends/LibusbBackend.h"
+#include "../backends/UsbTransferStatsArray.h"
 #include "../looper/LooperEventDispatcher.h"
 #include "../usb/UsbSnapshotCodec.h"
 #include "../usb/RoundTripMeasurer.h"
@@ -27,6 +28,7 @@
 #include <cmath>
 #include <algorithm>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 // External declarations from jni_usb.cpp for USB volume
@@ -1707,16 +1709,19 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeCloseU
     JNIEnv* env, jobject thiz) {
     LOGI("AudioNativeBridge.closeUsbDevice");
 
+    auto& manager = watermelon_audio::BackendManager::getInstance();
     if (gUsbDeviceState.isStreaming) {
-        auto& manager = watermelon_audio::BackendManager::getInstance();
-        auto* backend = manager.getLibusbBackend();
-        if (backend) {
-            backend->stop();
-        }
+        // MINI-042 (D5): stop() es ciclo de vida — corre bajo mOpMutex, no bajo el
+        // lock de estado que pregunta Main.
+        manager.withLibusbBackendLifecycle([](watermelon_audio::LibusbBackend* backend) {
+            if (backend) {
+                backend->stop();
+            }
+        });
         gUsbDeviceState.isStreaming = false;
     }
 
-    auto& manager = watermelon_audio::BackendManager::getInstance();
+    // FUERA del acceso: fallbackToOboe() toma mOpMutex, que no es recursivo.
     manager.fallbackToOboe();
 
     gUsbDeviceState.fileDescriptor = -1;
@@ -1738,10 +1743,11 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeParseU
     }
 
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
 
     jfloat caps[7] = {1.0f, 0.0f, 48000.0f, 3.0f, 2.0f, 0.0f, 2.0f};
 
+    // MINI-042 (D5): lectura corta, bajo el lock de estado; el array JNI se arma afuera.
+    manager.withLibusbBackend([&caps](watermelon_audio::LibusbBackend* backend) {
     if (backend) {
         auto backendCaps = backend->getCapabilities();
         if (!backendCaps.supportedSampleRates.empty()) {
@@ -1762,6 +1768,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeParseU
             caps[1] = static_cast<float>(usbDevice->captureInterfaces.size());
         }
     }
+    });
 
     jfloatArray result = env->NewFloatArray(7);
     if (result) {
@@ -1785,8 +1792,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartU
     LOGI("AudioNativeBridge.startUsbStreaming: sampleRate=%d, channels=%d, bitDepth=%d", sampleRate, channels, bitDepth);
 
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-
+    // MINI-042 (D5): start() es ciclo de vida — bajo mOpMutex, con el lock de estado libre.
+    return manager.withLibusbBackendLifecycle([sampleRate](watermelon_audio::LibusbBackend* backend) -> jboolean {
     if (!backend) {
         LOGE("AudioNativeBridge.startUsbStreaming: LibusbBackend not available");
         return JNI_FALSE;
@@ -1809,6 +1816,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartU
     gUsbDeviceState.isStreaming = true;
     LOGI("AudioNativeBridge.startUsbStreaming: USB streaming started successfully");
     return JNI_TRUE;
+    });
 }
 
 JNIEXPORT void JNICALL
@@ -1821,11 +1829,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStopUs
     }
 
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-
-    if (backend) {
-        backend->stop();
-    }
+    // MINI-042 (D5): stop() es ciclo de vida — bajo mOpMutex.
+    manager.withLibusbBackendLifecycle([](watermelon_audio::LibusbBackend* backend) {
+        if (backend) {
+            backend->stop();
+        }
+    });
 
     gUsbDeviceState.isStreaming = false;
 }
@@ -1838,45 +1847,20 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     }
 
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
 
-    // REQ-050 S3 (D16): 21 valores. [19] y [20] van al FINAL para que 0..18 sigan
-    // significando lo mismo (UsbAudioManagerImpl lee los nuevos con getOrElse).
-    constexpr int STATS_SIZE = 21;
-    jfloat statsArray[STATS_SIZE] = {0};
-
-    if (backend) {
-        auto* stats = backend->getTransferStats();
-        if (stats) {
-            // 🔴 El ORDEN de estas dos lecturas es parte del contrato (AC-050.9): enviados
-            // ANTES que completados. Así, enviados − completados nunca supera lo que había en
-            // vuelo al leer enviados, y el runner, que le resta la cola declarada ([19]), no
-            // puede inventar una pérdida por una completación que entró entre las dos lecturas.
-            statsArray[0] = static_cast<float>(stats->packetsSubmitted.load());
-            statsArray[1] = static_cast<float>(stats->packetsCompleted.load());
-            statsArray[2] = static_cast<float>(stats->packetsErrors.load());
-            statsArray[3] = static_cast<float>(stats->underruns.load());
-            statsArray[4] = static_cast<float>(stats->overruns.load());
-            statsArray[5] = stats->currentLatencyMs.load();
-            statsArray[6] = stats->avgLatencyMs.load();
-            statsArray[7] = stats->currentLatencyMs.load() * 0.8f;
-            statsArray[8] = stats->currentLatencyMs.load() * 1.5f;
-            statsArray[9] = static_cast<float>(stats->ringBufferLevel.load());
-            statsArray[10] = stats->ringBufferFillPct.load();
-            statsArray[11] = 3840.0f;
-            statsArray[12] = statsArray[1] * 192.0f;
-            statsArray[13] = stats->currentSampleRateHz.load();
-            statsArray[14] = stats->driftPpm.load();
-            statsArray[15] = stats->feedbackEffectiveFramesPerPacket.load();
-            statsArray[16] = static_cast<float>(stats->feedbackPacketsReceived.load());
-            statsArray[17] = static_cast<float>(stats->feedbackPacketsInvalid.load());
-            statsArray[18] = static_cast<float>(stats->activeClockSourceId.load());
-        }
-        // [19] paquetes de salida en vuelo (la cola declarada) y [20] el techo de latencia de
-        // salida que el backend declara, en ms (UsbLatencyMath.h). 0 sin stream.
-        statsArray[19] = static_cast<float>(backend->getOutputInFlightDepthPackets());
-        statsArray[20] = backend->getDeclaredOutputLatencyCeilingMs();
-    }
+    // MINI-042 (M1 + AC-042.2): la copia sale bajo el lock de estado del manager
+    // (fallbackToOboe no puede liberar el backend en el medio) y bajo un try_lock del
+    // backend (start() no puede estar recreando el transfer manager). Sin stream, o
+    // con un start()/stop() en curso, es "sin dato": los 21 en cero, como siempre.
+    const auto snap = manager.withLibusbBackend(
+        [](watermelon_audio::LibusbBackend* backend)
+            -> std::optional<watermelon_audio::LibusbBackend::TransferStatsSnapshot> {
+            return backend ? backend->getTransferStatsSnapshot() : std::nullopt;
+        });
+    // REQ-050 S3 (D16): 21 valores; el layout es una funcion pura con test de host.
+    constexpr int STATS_SIZE = watermelon_audio::kUsbTransferStatsArraySize;
+    jfloat statsArray[STATS_SIZE];
+    watermelon_audio::usbTransferStatsToArray(snap, statsArray);
 
     jfloatArray result = env->NewFloatArray(STATS_SIZE);
     if (result) {
@@ -1907,10 +1891,14 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartU
     // Sin ensureEngine(): leer si el motor existe no lo crea. Crear un motor aca no le
     // instalaria el callback al backend, que ya se configuro al inicializar el device.
     const bool engineExists = g_jniState.engine != nullptr;
-    watermelon_audio::LibusbBackend* backend = nullptr;
-    if (engineExists) {
-        backend = watermelon_audio::BackendManager::getInstance().getLibusbBackend();
-    }
+
+    // MINI-042 (D5): los hechos y el start() van JUNTOS bajo mOpMutex, con el lock de
+    // estado libre — el backend no se puede destruir entre que se lo mira y se lo
+    // arranca, y Main sigue leyendo stats mientras el device arranca.
+    return watermelon_audio::BackendManager::getInstance().withLibusbBackendLifecycle(
+        [&](watermelon_audio::LibusbBackend* managed) -> jint {
+    // Sin motor no se mira el backend: es el mismo hecho que antes ("sin backend").
+    watermelon_audio::LibusbBackend* backend = engineExists ? managed : nullptr;
 
     watermelon_audio::UsbStreamStartFacts facts;
     // "Ya transmitiendo" exige un backend VIVO que este corriendo, no solo la marca de
@@ -1945,6 +1933,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeStartU
 
     gUsbDeviceState.isStreaming = true;
     return static_cast<jint>(UsbStreamStartStatus::OK);
+        });
 }
 
 JNIEXPORT jboolean JNICALL
@@ -1952,8 +1941,9 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbDev
     JNIEnv* env, jobject thiz) {
     if (!gUsbDeviceState.isInitialized) return JNI_FALSE;
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    return (backend && backend->supportsFullDuplex()) ? JNI_TRUE : JNI_FALSE;
+    return manager.withLibusbBackend([](watermelon_audio::LibusbBackend* backend) -> jboolean {
+        return (backend && backend->supportsFullDuplex()) ? JNI_TRUE : JNI_FALSE;
+    });
 }
 
 JNIEXPORT jboolean JNICALL
@@ -1961,8 +1951,9 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbDev
     JNIEnv* env, jobject thiz) {
     if (!gUsbDeviceState.isInitialized) return JNI_FALSE;
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    return (backend && backend->hasCapture()) ? JNI_TRUE : JNI_FALSE;
+    return manager.withLibusbBackend([](watermelon_audio::LibusbBackend* backend) -> jboolean {
+        return (backend && backend->hasCapture()) ? JNI_TRUE : JNI_FALSE;
+    });
 }
 
 JNIEXPORT jint JNICALL
@@ -1970,34 +1961,42 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     JNIEnv* env, jobject thiz) {
     if (!gUsbDeviceState.isInitialized) return 0;
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    return backend ? static_cast<jint>(backend->getUacVersion()) : 0;
+    return manager.withLibusbBackend([](watermelon_audio::LibusbBackend* backend) -> jint {
+        return backend ? static_cast<jint>(backend->getUacVersion()) : 0;
+    });
 }
 
 JNIEXPORT jbyteArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsbCapabilitySnapshot(
     JNIEnv* env, jobject thiz) {
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    if (!backend) {
-        LOGW("nativeGetUsbCapabilitySnapshot: no LibusbBackend in BackendManager");
+    // MINI-042 (D5): se codifica bajo el lock de estado (el device parseado vive
+    // adentro del backend) y el array JNI se arma afuera, con la copia.
+    std::optional<std::vector<uint8_t>> maybeEncoded = manager.withLibusbBackend(
+        [](watermelon_audio::LibusbBackend* backend) -> std::optional<std::vector<uint8_t>> {
+            if (!backend) {
+                LOGW("nativeGetUsbCapabilitySnapshot: no LibusbBackend in BackendManager");
+                return std::nullopt;
+            }
+            if (!backend->isUsbDeviceReady()) {
+                LOGW("nativeGetUsbCapabilitySnapshot: backend not ready");
+                return std::nullopt;
+            }
+            const auto* device = backend->getUsbAudioDevice();
+            if (!device) {
+                LOGW("nativeGetUsbCapabilitySnapshot: backend has no parsed device");
+                return std::nullopt;
+            }
+            auto bytes = watermelon_audio::usb::encodeSnapshot(*device);
+            LOGI("nativeGetUsbCapabilitySnapshot: encoded %zu bytes (UAC%d, %zu pb / %zu cap)",
+                 bytes.size(), device->uacVersion,
+                 device->playbackInterfaces.size(), device->captureInterfaces.size());
+            return bytes;
+        });
+    if (!maybeEncoded) {
         return nullptr;
     }
-    if (!backend->isUsbDeviceReady()) {
-        LOGW("nativeGetUsbCapabilitySnapshot: backend not ready");
-        return nullptr;
-    }
-
-    const auto* device = backend->getUsbAudioDevice();
-    if (!device) {
-        LOGW("nativeGetUsbCapabilitySnapshot: backend has no parsed device");
-        return nullptr;
-    }
-
-    auto encoded = watermelon_audio::usb::encodeSnapshot(*device);
-    LOGI("nativeGetUsbCapabilitySnapshot: encoded %zu bytes (UAC%d, %zu pb / %zu cap)",
-         encoded.size(), device->uacVersion,
-         device->playbackInterfaces.size(), device->captureInterfaces.size());
+    const auto& encoded = *maybeEncoded;
     jbyteArray result = env->NewByteArray(static_cast<jsize>(encoded.size()));
     if (result) {
         env->SetByteArrayRegion(result, 0, static_cast<jsize>(encoded.size()),
@@ -2011,11 +2010,6 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsb
     JNIEnv* env, jobject thiz, jint preferredSampleRate, jint minChannels,
     jboolean requireFeedback, jint profile) {
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    if (!backend) {
-        LOGW("nativeSetUsbStreamPreference: no LibusbBackend");
-        return JNI_FALSE;
-    }
 
     watermelon_audio::usb::StreamPreference pref;
     switch (profile) {
@@ -2034,7 +2028,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsb
     pref.requireFeedback = (requireFeedback == JNI_TRUE);
     pref.skipRateCheck = false;
 
-    backend->setStreamPreference(pref);
+    // MINI-042 (D5): configuracion corta, bajo el lock de estado.
+    const bool applied = manager.withLibusbBackend([&pref](watermelon_audio::LibusbBackend* backend) {
+        if (!backend) return false;
+        backend->setStreamPreference(pref);
+        return true;
+    });
+    if (!applied) {
+        LOGW("nativeSetUsbStreamPreference: no LibusbBackend");
+        return JNI_FALSE;
+    }
     LOGI("nativeSetUsbStreamPreference: rate=%d minCh=%d requireFeedback=%d profile=%d",
          pref.requiredSampleRate, pref.minChannels,
          pref.requireFeedback ? 1 : 0, profile);
@@ -2071,11 +2074,6 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsb
     JNIEnv* env, jobject thiz, jint targetTransferMs, jint numTransfers,
     jint jitterBudgetMs, jint dspBlockFrames, jint ringCapacityMs) {
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    if (!backend) {
-        LOGW("nativeSetUsbLatencyTuning: no LibusbBackend");
-        return JNI_FALSE;
-    }
     // Latched; consumed on the next start() (see nativeSetUsbLatencyProfile).
     watermelon_audio::usb::UsbLatencyTuning tuning;
     tuning.targetTransferMs = static_cast<int>(targetTransferMs);
@@ -2083,7 +2081,16 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSetUsb
     tuning.jitterBudgetMs   = static_cast<int>(jitterBudgetMs);
     tuning.dspBlockFrames   = static_cast<int>(dspBlockFrames);
     tuning.ringCapacityMs   = static_cast<int>(ringCapacityMs);
-    backend->setLatencyTuning(tuning);
+    // MINI-042 (D5): configuracion corta, bajo el lock de estado.
+    const bool applied = manager.withLibusbBackend([&tuning](watermelon_audio::LibusbBackend* backend) {
+        if (!backend) return false;
+        backend->setLatencyTuning(tuning);
+        return true;
+    });
+    if (!applied) {
+        LOGW("nativeSetUsbLatencyTuning: no LibusbBackend");
+        return JNI_FALSE;
+    }
     LOGI("nativeSetUsbLatencyTuning: targetTransferMs=%d numTransfers=%d "
          "jitterBudgetMs=%d dspBlockFrames=%d ringCapacityMs=%d",
          tuning.targetTransferMs, tuning.numTransfers, tuning.jitterBudgetMs,
@@ -2109,19 +2116,23 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelect
         return JNI_FALSE;
     }
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    if (request == UsbSelectionRequest::CLEAR) {
-        return (!backend || backend->clearManualAltsettingSelection()) ? JNI_TRUE : JNI_FALSE;
-    }
-    if (!backend) {
-        LOGW("nativeSelectUsbAltsetting: no LibusbBackend");
-        return JNI_FALSE;
-    }
-    const bool ok = backend->selectAltsetting(
-        static_cast<int>(interfaceNumber),
-        static_cast<int>(alternateSetting),
-        static_cast<int>(formatIndex));
-    return ok ? JNI_TRUE : JNI_FALSE;
+    // MINI-042 (D5): ciclo de vida. selectAltsetting/clear toman el mutex del backend
+    // con lock(), asi que esperan a un start() en curso: bajo mOpMutex, no bajo el
+    // lock de estado que pregunta Main.
+    return manager.withLibusbBackendLifecycle([&](watermelon_audio::LibusbBackend* backend) -> jboolean {
+        if (request == UsbSelectionRequest::CLEAR) {
+            return (!backend || backend->clearManualAltsettingSelection()) ? JNI_TRUE : JNI_FALSE;
+        }
+        if (!backend) {
+            LOGW("nativeSelectUsbAltsetting: no LibusbBackend");
+            return JNI_FALSE;
+        }
+        const bool ok = backend->selectAltsetting(
+            static_cast<int>(interfaceNumber),
+            static_cast<int>(alternateSetting),
+            static_cast<int>(formatIndex));
+        return ok ? JNI_TRUE : JNI_FALSE;
+    });
 }
 
 JNIEXPORT jboolean JNICALL
@@ -2136,42 +2147,52 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSelect
         return JNI_FALSE;
     }
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    if (request == UsbSelectionRequest::CLEAR) {
-        return (!backend || backend->clearManualClockSourceSelection()) ? JNI_TRUE : JNI_FALSE;
-    }
-    if (!backend) {
-        LOGW("nativeSelectUsbClockSource: no LibusbBackend");
-        return JNI_FALSE;
-    }
-    const bool ok = backend->selectClockSource(static_cast<int>(clockSourceId));
-    return ok ? JNI_TRUE : JNI_FALSE;
+    // MINI-042 (D5): ciclo de vida, por la misma razon que nativeSelectUsbAltsetting.
+    return manager.withLibusbBackendLifecycle([&](watermelon_audio::LibusbBackend* backend) -> jboolean {
+        if (request == UsbSelectionRequest::CLEAR) {
+            return (!backend || backend->clearManualClockSourceSelection()) ? JNI_TRUE : JNI_FALSE;
+        }
+        if (!backend) {
+            LOGW("nativeSelectUsbClockSource: no LibusbBackend");
+            return JNI_FALSE;
+        }
+        const bool ok = backend->selectClockSource(static_cast<int>(clockSourceId));
+        return ok ? JNI_TRUE : JNI_FALSE;
+    });
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsbDeviceDisconnected(
     JNIEnv* env, jobject thiz) {
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    if (!backend) return JNI_TRUE;
-    return !backend->isUsbDeviceReady() ? JNI_TRUE : JNI_FALSE;
+    return manager.withLibusbBackend([](watermelon_audio::LibusbBackend* backend) -> jboolean {
+        if (!backend) return JNI_TRUE;
+        return !backend->isUsbDeviceReady() ? JNI_TRUE : JNI_FALSE;
+    });
 }
 
 JNIEXPORT jintArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsbHealthStatus(
     JNIEnv* env, jobject thiz) {
     auto& manager = watermelon_audio::BackendManager::getInstance();
-    auto* backend = manager.getLibusbBackend();
-    if (!backend) return nullptr;
-
-    const auto* stats = backend->getTransferStats();
-    if (!stats) return nullptr;
+    // MINI-042 (M1 + AC-042.2): corre en Main cada segundo. Lectura corta bajo el
+    // lock de estado y copia de stats con try_lock: con un start()/stop() en curso
+    // es "sin dato" (null), lo mismo que sin stream.
+    struct Health { bool ready; uint64_t errors; };
+    const auto health = manager.withLibusbBackend(
+        [](watermelon_audio::LibusbBackend* backend) -> std::optional<Health> {
+            if (!backend) return std::nullopt;
+            const auto snap = backend->getTransferStatsSnapshot();
+            if (!snap) return std::nullopt;
+            return Health{backend->isUsbDeviceReady(), snap->packetsErrors};
+        });
+    if (!health) return nullptr;
 
     jintArray result = env->NewIntArray(3);
     if (result) {
         jint values[3] = {
-            backend->isUsbDeviceReady() ? 0 : 1,
-            static_cast<jint>(stats->packetsErrors.load()),
+            health->ready ? 0 : 1,
+            static_cast<jint>(health->errors),
             0
         };
         env->SetIntArrayRegion(result, 0, 3, values);
@@ -3591,8 +3612,12 @@ std::mutex g_rtLifecycleMutex;
 // Restore the backend's original callback. Caller holds g_rtLifecycleMutex.
 void rtRestoreCallbackLocked() {
     if (!g_rtInstalled) return;
-    auto* backend = watermelon_audio::BackendManager::getInstance().getLibusbBackend();
-    if (backend) backend->swapCallback(g_rtPrevCallback);
+    // MINI-042 (D5): lectura corta bajo el lock de estado. Orden: g_rtLifecycleMutex ->
+    // BackendManager::mMutex, y nada toma el inverso.
+    watermelon_audio::BackendManager::getInstance().withLibusbBackend(
+        [](watermelon_audio::LibusbBackend* backend) {
+            if (backend) backend->swapCallback(g_rtPrevCallback);
+        });
     g_rtPrevCallback = nullptr;
     g_rtInstalled = false;
 }
@@ -3607,24 +3632,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRou
         LOGE("Round-trip: test already active");
         return JNI_FALSE;
     }
-    auto* backend = watermelon_audio::BackendManager::getInstance().getLibusbBackend();
-    if (!backend || !backend->isRunning()) {
-        LOGE("Round-trip: USB backend not running");
-        return JNI_FALSE;
-    }
-    const auto info = backend->getStreamInfo();
-    if (!info.isFullDuplex) {
-        LOGE("Round-trip: requires FULL_DUPLEX");
-        return JNI_FALSE;  // Kotlin pre-check surfaces REQUIRES_FULL_DUPLEX
-    }
-
+    // El config JNI se lee ANTES de tomar el lock del manager: es una llamada a la JVM.
     watermelon_audio::usb::RoundTripMeasurer::StartParams params;
-    params.sampleRate = info.sampleRate > 0 ? info.sampleRate : 48000;
-    params.outChannels = info.channelCount > 0 ? info.channelCount : 2;
-    params.inChannels = params.outChannels;  // engine-facing layout is symmetric
-    params.jitterBudgetMs = backend->getJitterBudgetMs();
-    params.profile = backend->getLatencyProfileOrdinal();
-
     if (config) {
         const jsize n = env->GetArrayLength(config);
         jfloat buf[4] = {10.0f, 300.0f, 0.25f, 250.0f};
@@ -3635,6 +3644,27 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRou
         params.config.searchWindowMs = std::max(50, static_cast<int>(buf[3]));
     }
 
+    // MINI-042 (D5): mirar el stream e instalar el medidor bajo el lock de estado del
+    // manager, para que fallbackToOboe no libere el backend entre una cosa y la otra.
+    // Todo es corto: getters, un swap atomico y el start() del medidor (no el del device).
+    return watermelon_audio::BackendManager::getInstance().withLibusbBackend(
+        [&params](watermelon_audio::LibusbBackend* backend) -> jboolean {
+    if (!backend || !backend->isRunning()) {
+        LOGE("Round-trip: USB backend not running");
+        return JNI_FALSE;
+    }
+    const auto info = backend->getStreamInfo();
+    if (!info.isFullDuplex) {
+        LOGE("Round-trip: requires FULL_DUPLEX");
+        return JNI_FALSE;  // Kotlin pre-check surfaces REQUIRES_FULL_DUPLEX
+    }
+
+    params.sampleRate = info.sampleRate > 0 ? info.sampleRate : 48000;
+    params.outChannels = info.channelCount > 0 ? info.channelCount : 2;
+    params.inChannels = params.outChannels;  // engine-facing layout is symmetric
+    params.jitterBudgetMs = backend->getJitterBudgetMs();
+    params.profile = backend->getLatencyProfileOrdinal();
+
     if (!g_rtMeasurer.start(params)) {
         LOGE("Round-trip: measurer.start() failed");
         return JNI_FALSE;
@@ -3643,6 +3673,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRou
     g_rtInstalled = true;
     LOGI("Round-trip: installed measurer over live stream");
     return JNI_TRUE;
+        });
 }
 
 // poll floats [13]: [0]=state [1]=progressPct [2]=currentBurst [3]=medianMs
@@ -3657,11 +3688,15 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeUsbRou
     // Feed the software-latency (L7) average while actively measuring.
     if (g_rtInstalled &&
         snap.phase == watermelon_audio::usb::RoundTripMeasurer::Phase::MEASURING) {
-        if (auto* backend =
-                watermelon_audio::BackendManager::getInstance().getLibusbBackend()) {
-            g_rtMeasurer.noteSoftwareLatency(backend->getOutputLatencyMs(),
-                                             backend->getInputLatencyMs());
-        }
+        // MINI-042 (D5 + AC-042.2): bajo el lock de estado; las dos latencias usan
+        // try_lock adentro del backend.
+        watermelon_audio::BackendManager::getInstance().withLibusbBackend(
+            [](watermelon_audio::LibusbBackend* backend) {
+                if (backend) {
+                    g_rtMeasurer.noteSoftwareLatency(backend->getOutputLatencyMs(),
+                                                     backend->getInputLatencyMs());
+                }
+            });
     }
 
     jfloat v[13] = {0};
@@ -3710,7 +3745,10 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
         JNIEnv* env, jobject thiz) {
     (void)thiz;
     jfloat v[6] = {-1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    auto* backend = watermelon_audio::BackendManager::getInstance().getLibusbBackend();
+    // MINI-042 (D5 + AC-042.2): lectura corta bajo el lock de estado; la telemetria
+    // que vive en el transfer manager usa try_lock adentro del backend.
+    watermelon_audio::BackendManager::getInstance().withLibusbBackend(
+        [&v](watermelon_audio::LibusbBackend* backend) {
     if (backend) {
         v[0] = static_cast<float>(backend->getDspSchedResult());
         v[1] = static_cast<float>(backend->getEventLoopSchedResult());
@@ -3719,6 +3757,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
         v[4] = static_cast<float>(backend->getConvergedFloorMs());
         v[5] = static_cast<float>(backend->getLatencyProfileOrdinal());
     }
+        });
     jfloatArray result = env->NewFloatArray(6);
     if (result) env->SetFloatArrayRegion(result, 0, 6, v);
     return result;

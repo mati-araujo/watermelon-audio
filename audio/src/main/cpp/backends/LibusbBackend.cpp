@@ -1334,10 +1334,15 @@ StreamInfo LibusbBackend::getStreamInfo() const {
     info.format = AudioFormat::FLOAT_32;
     info.backendType = BackendType::LIBUSB;
 
-    // Calculate latency
-    if (mTransferManager) {
-        auto& stats = mTransferManager->getStatistics();
-        info.outputLatencyMs = stats.currentLatencyMs.load();
+    // Calculate latency. MINI-042 (AC-042.2): sin `mMutex`, start() puede estar
+    // destruyendo y recreando mTransferManager. try_lock y, si esta tomado, la
+    // latencia queda en "sin dato" (0, lo mismo que sin stream). Orden de toma:
+    // mStreamInfoMutex -> mMutex, y solo con try_lock, asi que no puede trabar.
+    if (mMutex.try_lock()) {
+        std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
+        if (mTransferManager) {
+            info.outputLatencyMs = mTransferManager->getStatistics().currentLatencyMs.load();
+        }
     }
 
     // USB info
@@ -1356,8 +1361,13 @@ bool LibusbBackend::isRunning() const {
 }
 
 float LibusbBackend::getOutputLatencyMs() const {
-    if (mTransferManager) {
-        return mTransferManager->getStatistics().currentLatencyMs.load();
+    // MINI-042 (AC-042.2): try_lock; ocupado = "sin dato", que aca es la misma
+    // estimacion por configuracion que se devuelve sin stream.
+    if (mMutex.try_lock()) {
+        std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
+        if (mTransferManager) {
+            return mTransferManager->getStatistics().currentLatencyMs.load();
+        }
     }
     // Estimate based on buffer config
     return static_cast<float>(mRequestedBufferSize) /
@@ -1365,6 +1375,11 @@ float LibusbBackend::getOutputLatencyMs() const {
 }
 
 float LibusbBackend::getInputLatencyMs() const {
+    // MINI-042 (AC-042.2): try_lock; ocupado = "sin dato" (0, como sin captura).
+    if (!mMutex.try_lock()) {
+        return 0.0f;
+    }
+    std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
     if (mSelectedCapture && mTransferManager) {
         // Host-side software latency of the capture path (L7). No longer
         // aliases the output latency.
@@ -2377,11 +2392,78 @@ void LibusbBackend::dspThreadFunc() {
 // Query Methods
 // ============================================================================
 
-const usb::TransferStatistics* LibusbBackend::getTransferStats() const {
-    if (mTransferManager) {
-        return &mTransferManager->getStatistics();
+std::optional<LibusbBackend::TransferStatsSnapshot> LibusbBackend::getTransferStatsSnapshot() const {
+    // MINI-042 (AC-042.2, D7): try_lock, nunca lock. start()/stop() sostienen
+    // mMutex durante todo el arranque del device; quien pregunta (el health-check
+    // corre en Main) no puede esperarlo, y tampoco puede leer un mTransferManager
+    // que start() esta recreando. Ocupado = "sin dato", igual que sin stream.
+    if (!mMutex.try_lock()) {
+        return std::nullopt;
     }
-    return nullptr;
+    std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
+    if (!mTransferManager) {
+        return std::nullopt;
+    }
+    const auto& stats = mTransferManager->getStatistics();
+    TransferStatsSnapshot snap;
+    // 🔴 El ORDEN de estas dos lecturas es parte del contrato (AC-050.9): enviados
+    // ANTES que completados. Asi enviados - completados nunca supera lo que habia en
+    // vuelo al leer enviados, y el runner, que le resta la cola declarada, no puede
+    // inventar una perdida por una completacion que entro entre las dos lecturas.
+    snap.packetsSubmitted = stats.packetsSubmitted.load();
+    snap.packetsCompleted = stats.packetsCompleted.load();
+    snap.packetsErrors = stats.packetsErrors.load();
+    snap.underruns = stats.underruns.load();
+    snap.overruns = stats.overruns.load();
+    snap.currentLatencyMs = stats.currentLatencyMs.load();
+    snap.avgLatencyMs = stats.avgLatencyMs.load();
+    snap.ringBufferLevel = stats.ringBufferLevel.load();
+    snap.ringBufferFillPct = stats.ringBufferFillPct.load();
+    snap.currentSampleRateHz = stats.currentSampleRateHz.load();
+    snap.driftPpm = stats.driftPpm.load();
+    snap.feedbackEffectiveFramesPerPacket = stats.feedbackEffectiveFramesPerPacket.load();
+    snap.feedbackPacketsReceived = stats.feedbackPacketsReceived.load();
+    snap.feedbackPacketsInvalid = stats.feedbackPacketsInvalid.load();
+    snap.activeClockSourceId = stats.activeClockSourceId.load();
+    snap.outputInFlightDepthPackets = mTransferManager->getOutputInFlightDepthPackets();
+    snap.declaredOutputLatencyCeilingMs = mTransferManager->getDeclaredOutputLatencyCeilingMs(
+        mDspBlockFramesInUse.load(std::memory_order_relaxed));
+    return snap;
+}
+
+// MINI-042 (AC-042.2): la telemetria que lee mTransferManager, con try_lock. Ocupado
+// = "sin dato", los mismos valores que sin stream.
+int LibusbBackend::getEventLoopSchedResult() const {
+    if (!mMutex.try_lock()) return -1;
+    std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
+    return mTransferManager ? mTransferManager->getEventLoopSchedResult() : -1;
+}
+
+int LibusbBackend::getJitterBudgetMs() const {
+    if (!mMutex.try_lock()) return 0;
+    std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
+    return mTransferManager ? mTransferManager->getJitterBudgetMs() : 0;
+}
+
+int LibusbBackend::getConvergedFloorMs() const {
+    if (!mMutex.try_lock()) return 0;
+    std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
+    return mTransferManager ? mTransferManager->getConvergedFloorMs() : 0;
+}
+
+std::size_t LibusbBackend::getOutputInFlightDepthPackets() const {
+    if (!mMutex.try_lock()) return 0;
+    std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
+    return mTransferManager ? mTransferManager->getOutputInFlightDepthPackets() : 0;
+}
+
+float LibusbBackend::getDeclaredOutputLatencyCeilingMs() const {
+    if (!mMutex.try_lock()) return 0.0f;
+    std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
+    return mTransferManager
+        ? mTransferManager->getDeclaredOutputLatencyCeilingMs(
+              mDspBlockFramesInUse.load(std::memory_order_relaxed))
+        : 0.0f;
 }
 
 ClockController* LibusbBackend::getClockController() {
@@ -2392,17 +2474,46 @@ ClockController* LibusbBackend::getClockController() {
 }
 
 usb::UsbProfilingStats LibusbBackend::getProfilingStats() const {
+    // MINI-042 (AC-042.2): try_lock; ocupado = "sin dato".
+    if (!mMutex.try_lock()) {
+        return usb::UsbProfilingStats{};
+    }
+    std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
     if (mTransferManager) {
         return mTransferManager->getProfilingStats();
     }
     return usb::UsbProfilingStats{};
 }
 
-usb::UsbLatencyProfiler* LibusbBackend::getLatencyProfiler() {
-    if (mTransferManager) {
-        return &mTransferManager->getLatencyProfiler();
+bool LibusbBackend::setProfilingEnabled(bool enabled) {
+    // MINI-042 (D7): era un puntero al profiler, que vive adentro de
+    // mTransferManager. try_lock: con un start()/stop() en curso no se aplica, y se
+    // dice — un pedido descartado en silencio se leeria como aplicado.
+    if (!mMutex.try_lock()) {
+        LOGW("setProfilingEnabled(%d) not applied: start()/stop() in progress", enabled ? 1 : 0);
+        return false;
     }
-    return nullptr;
+    std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
+    if (!mTransferManager) {
+        LOGW("setProfilingEnabled(%d) not applied: no stream", enabled ? 1 : 0);
+        return false;
+    }
+    mTransferManager->getLatencyProfiler().setEnabled(enabled);
+    return true;
+}
+
+bool LibusbBackend::resetProfilingStats() {
+    if (!mMutex.try_lock()) {
+        LOGW("resetProfilingStats not applied: start()/stop() in progress");
+        return false;
+    }
+    std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
+    if (!mTransferManager) {
+        LOGW("resetProfilingStats not applied: no stream");
+        return false;
+    }
+    mTransferManager->getLatencyProfiler().reset();
+    return true;
 }
 
 LibusbBackend::DeviceCapabilities LibusbBackend::getCapabilities() const {
@@ -2622,8 +2733,12 @@ bool LibusbBackend::isAdaptiveBufferingEnabled() const {
 }
 
 int LibusbBackend::getCurrentBufferMs() const {
-    if (mTransferManager) {
-        return mTransferManager->getCurrentBufferMs();
+    // MINI-042 (AC-042.2): try_lock; ocupado = "sin dato" (el default sin stream).
+    if (mMutex.try_lock()) {
+        std::lock_guard<std::mutex> state(mMutex, std::adopt_lock);
+        if (mTransferManager) {
+            return mTransferManager->getCurrentBufferMs();
+        }
     }
     return 100;  // Default
 }
