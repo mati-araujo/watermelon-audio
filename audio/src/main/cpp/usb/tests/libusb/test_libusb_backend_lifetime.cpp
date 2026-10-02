@@ -26,6 +26,7 @@
 #include "backends/LibusbBackend.h"
 #include "backends/UsbTransferStatsArray.h"
 #include "tests/support/TestWait.h"
+#include "FakeAudioBackend.h"
 
 #include <atomic>
 #include <chrono>
@@ -256,6 +257,56 @@ INSTANTIATE_TEST_SUITE_P(FallbackAndInitialize, LifecycleVersusDestroyer, ::test
                              return info.param == 0 ? std::string("fallbackToOboe")
                                                     : std::string("initializeUsbBackend");
                          });
+
+// ---------------------------------------------------------------------------------------
+// D5 — un lector NO espera al stop() de fallbackToOboe. El paso 3 del fallback (parar y
+// destruir FUERA de mMutex) es lo que lo garantiza: stop() espera al hilo DSP y a las
+// transferencias, y el health-check de Main pregunta por mMutex cada segundo.
+// Bug que atrapa (mutante de la auditoría del líder): stop/destrucción adentro del bloque del
+// desenganche, con mMutex tomado — Main congelado lo que tarde el device en pararse.
+// El backend adoptado es un falso cuyo stop() espera una compuerta: no es un LibusbBackend, así
+// que el lector recibe nullptr, pero igual tiene que tomar mMutex, que es lo que se mide.
+// ---------------------------------------------------------------------------------------
+namespace {
+class StopGatedBackend : public wma_test::FakeAudioBackend {
+public:
+    void stop() override {
+        stopEntered.store(true);
+        // Techo sólo para no colgar la suite si el test se rompe; la compuerta la abre el test.
+        (void)wma_test::waitUntil([this] { return releaseStop.load(); }, 10000ms);
+        wma_test::FakeAudioBackend::stop();
+    }
+    std::atomic<bool> stopEntered{false};
+    std::atomic<bool> releaseStop{false};
+};
+}  // namespace
+
+TEST(LibusbBackendLifetime, D5_ReadersDoNotWaitForTheFallbackStop) {
+    BackendManager manager;
+    ASSERT_TRUE(manager.selectBackend(watermelon_audio::BackendType::OBOE));
+    auto owned = std::make_unique<StopGatedBackend>();
+    StopGatedBackend* gated = owned.get();
+    BackendManagerTestAccess::adopt(manager, std::move(owned));
+
+    std::thread fallback([&] { manager.fallbackToOboe(); });
+    ASSERT_TRUE(wma_test::waitUntil([&] { return gated->stopEntered.load(); }))
+        << "fallbackToOboe no llegó a parar el backend USB";
+
+    std::atomic<bool> readerDone{false};
+    std::thread reader([&] {
+        manager.withLibusbBackend([](LibusbBackend* backend) { (void)backend; });
+        (void)manager.isRunning();
+        readerDone.store(true);
+    });
+
+    EXPECT_TRUE(wma_test::waitUntil([&] { return readerDone.load(); }))
+        << "un lector quedó esperando al stop() de fallbackToOboe";
+
+    gated->releaseStop.store(true);  // gated sigue vivo: el fallback lo destruye recién después
+    reader.join();
+    fallback.join();
+    EXPECT_TRUE(manager.withLibusbBackend([](LibusbBackend* b) { return b == nullptr; }));
+}
 
 // ---------------------------------------------------------------------------------------
 // D5 — una operación de ciclo de vida NO bloquea a los lectores (Main). Bug que atrapa: correr
