@@ -806,6 +806,8 @@ new_run_id() {
 plan_valid() {
     local plan="$1" p
     [[ "$plan" =~ ^[a-z0-9,]+$ ]] || return 1
+    # El word-splitting de `for p in $plan` se come la coma final: un elemento vacio se rechaza aca.
+    [[ "$plan" != ,* && "$plan" != *, && "$plan" != *,,* ]] || return 1
     [[ "$plan" == todo ]] && return 0
     local IFS=,
     for p in $plan; do
@@ -1482,6 +1484,9 @@ SPY
     plan_case "S-3: mayusculas, exit 2 sin adb" 'Salida' 2 no
     plan_case "S-3: un plan con espacio o \$() es exit 2 sin adb" 'salida $(id)' 2 no
     plan_case "S-3: un plan vacio es exit 2 sin adb" '' 2 no
+    plan_case "S-3: coma final (salida,) es exit 2 sin adb" 'salida,' 2 no
+    plan_case "S-3: elemento vacio en el medio es exit 2 sin adb" 'salida,,sf2' 2 no
+    plan_case "S-3: coma inicial es exit 2 sin adb" ',salida' 2 no
 
     # Los verificadores de HOST, contra un adb FALSO: ninguno corre sin `-s <serial>`, y cada salida
     # que no se puede leer (adb falla, rc != 0, basura, formato desconocido, tarjeta sin dueno
