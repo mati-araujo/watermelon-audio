@@ -444,9 +444,9 @@ def check_placa_no_reclamada(p, sh):
     if rc != 0:
         raise Unverifiable("ls-dev-snd-rc=%d" % rc)
     entries = out.split()
-    # Solo nombres de /dev/snd (controlC1, pcmC1D0p, timer, seq...): si hay otra cosa, no es
-    # un listado y la ausencia de controlC<n> no significa nada.
-    if not entries or not all(re.fullmatch(r"controlC\d+|(pcm|hw|midi)C\d+D\d+[pc]?|timer|seq", e) for e in entries):
+    # Solo nombres de /dev/snd (controlC1, pcmC1D0p, comprC0D11, timer, seq...): si hay otra cosa,
+    # no es un listado y la ausencia de controlC<n> no significa nada.
+    if not entries or not all(re.fullmatch(r"controlC\d+|(pcm|hw|midi|compr)C\d+D\d+[pc]?|timer|seq", e) for e in entries):
         raise Unverifiable("dev-snd-ilegible")
     if "controlC%d" % card in entries:
         return "true", "controlC%d-presente" % card
@@ -1571,8 +1571,9 @@ case "$cmd" in
         case "$FAKE_MODE" in
             snd-ilegible) echo "lorem ipsum" ;;
             snd-vacio) : ;;
-            *) printf 'controlC0\npcmC0D0p\npcmC0D0c\ntimer\n'
-               [[ "$FAKE_MODE" == reclamada || "$FAKE_MODE" == sin-placa ]] || printf 'controlC1\npcmC1D0p\n' ;;
+            # El listado REAL del g42 (una linea, separada por espacios): `ls` por adb sale uno por linea.
+            reclamada|sin-placa) tr -s ' ' '\n' < "$FAKE_DIR/dev-snd-reclamada.txt" ;;
+            *) tr -s ' ' '\n' < "$FAKE_DIR/dev-snd-cm720.txt" ;;
         esac ;;
     *) echo "comando no previsto: $cmd" >> "$FAKE_DIR/sin-s.txt" ;;
 esac
@@ -1593,6 +1594,9 @@ FAKE
     awk -v hid="$evid/dumpsys-usb-hid.txt" 'FNR == NR { if (/^    devices=\{$/) on = 1; if (on) d = d $0 "\n"; if (on && /^    \}$/) on = 0; next }
         /^    devices=\{$/ && !done { printf "%s", d; done = 1 } { print }' "$evid/dumpsys-usb-hid.txt" "$fx/dumpsys-usb-cm720.txt" > "$evid/dumpsys-usb-dos.txt"
     # audio_flinger: el hilo USB es AudioOut_15; su linea de nivel de hilo es la UNICA de 2 espacios.
+    # /dev/snd real, sin su cabecera `#`; la placa reclamada es el MISMO listado sin controlC1 ni pcmC1*.
+    grep -v '^#' "$fx/dev-snd-cm720.txt" > "$evid/dev-snd-cm720.txt"
+    sed -E 's/(^| )(controlC1|pcmC1[^ ]*)//g' "$evid/dev-snd-cm720.txt" > "$evid/dev-snd-reclamada.txt"
     local af="$fx/audio-flinger-cm720.txt" usb_hilo='/^Output thread .*name AudioOut_15,/,/^Output thread .*name (AudioOut_D|AudioOut_25),|^Historical/'
     cp "$af" "$evid/af-standby.txt"
     sed -E "${usb_hilo}"'s/^  Standby: yes$/  Standby: no/' "$af" > "$evid/af-tomada.txt"
