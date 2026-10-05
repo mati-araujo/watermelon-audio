@@ -55,6 +55,7 @@
           "verificador": "host",
           "chequeo": "usb-placa-no-reclamada",
           "tarjeta": 1,
+          "clase": 1,
           "descripcion": "D14: la placa esta enumerada (dumpsys usb, interfaz de clase 1) y /dev/snd lista controlC1. Mientras un proceso reclama la placa por usbfs el kernel desliga el driver ALSA y controlC1 y pcmC1* desaparecen; vuelven cuando la suelta. Sin placa enumerada queda cumplida (la bloquea placa-enumerada). Se verifica ANTES del am start del harness: despues, el propio harness la reclamaria. Si adb falla o /dev/snd no se lee, es no-verificable.",
           "depende": ["conectar", "motor-callback", "capacidades", "descriptores", "backend", "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo", "conectar-otro", "suite*", "streaming-stop", "backend-restaurado", "desconectar"],
           "remedio": "Cerrar la app que tenga la placa tomada, o desenchufar y volver a enchufar la placa, y volver a correr el plan. El script no sabe quien la tiene."

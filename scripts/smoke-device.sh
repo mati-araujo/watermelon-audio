@@ -151,7 +151,7 @@ CHECKS = {
     "usb-interfaz-de-clase": {"clase": int},
     "paquetes-sin-proceso": {"paquetes": list},
     "alsa-tarjeta-libre": {"tarjeta": int},
-    "usb-placa-no-reclamada": {"tarjeta": int},
+    "usb-placa-no-reclamada": {"tarjeta": int, "clase": int},
 }
 COMMON_KEYS = {"id", "verificador", "depende", "remedio", "descripcion"}
 
@@ -234,6 +234,15 @@ def load_setup(path):
             if not isinstance(p.get("remedio"), str) or not p["remedio"].strip():
                 raise BadSetup("%s: sin remedio (D3: cada precondicion declara su accion manual)" % where)
             out[panel].append(p)
+    # El atajo "sin placa => cumplida" de usb-placa-no-reclamada solo es honesto si la precondicion
+    # que SI bloquea sin placa (usb-interfaz-de-clase, de la misma clase) esta en el mismo plan.
+    for panel, pres in out.items():
+        classes = {p["clase"] for p in pres if p.get("chequeo") == "usb-interfaz-de-clase"}
+        for p in pres:
+            if p.get("chequeo") == "usb-placa-no-reclamada" and p["clase"] not in classes:
+                raise BadSetup("%s/%s: usb-placa-no-reclamada exige una precondicion usb-interfaz-de-clase "
+                               "con la misma clase (%d) en el plan: sin ella, 'sin placa' no bloquea nada"
+                               % (panel, p["id"], p["clase"]))
     return out
 
 
@@ -444,7 +453,7 @@ def check_placa_no_reclamada(p, sh):
     esa otra, y una segunda precondicion bloqueando por lo mismo duplicaria el BLOQUEADO con
     un remedio que no es el de ese caso."""
     card = p["tarjeta"]
-    present, _ = check_usb_interface_class({"clase": 1}, sh)
+    present, _ = check_usb_interface_class({"clase": p["clase"]}, sh)
     if present != "true":
         return "true", "sin-placa:lo-cubre-placa-enumerada"
     rc, out = sh.run("ls /dev/snd")
@@ -885,7 +894,7 @@ self_test() {
        "remedio": "REMEDIO-T-HOST-USB"},
       {"id": "t-alsa", "verificador": "host", "chequeo": "alsa-tarjeta-libre", "tarjeta": 1,
        "depende": ["streaming-start"], "remedio": "REMEDIO-T-ALSA"},
-      {"id": "t-reclamada", "verificador": "host", "chequeo": "usb-placa-no-reclamada", "tarjeta": 1,
+      {"id": "t-reclamada", "verificador": "host", "chequeo": "usb-placa-no-reclamada", "tarjeta": 1, "clase": 1,
        "depende": ["streaming-start"], "remedio": "REMEDIO-T-RECLAMADA"},
       {"id": "t-permiso", "verificador": "app", "ventana-humana": true,
        "depende": ["permiso", "permiso-falso", "conectar", "motor-callback", "capacidades", "descriptores",
@@ -1314,6 +1323,11 @@ JSON
     ficha_mutante "lista de paquetes vacia" "f['planes']['usb']['precondiciones'][1]['paquetes'] = []"
     ficha_mutante "ventana humana en una de host" "f['planes']['captura']['precondiciones'][0]['ventana-humana'] = True"
     ficha_mutante "formato desconocido" "f['formato'] = 2"
+    # El atajo "sin placa => cumplida" del chequeo usb-placa-no-reclamada solo es honesto si la que SI bloquea
+    # (usb-interfaz-de-clase, de la misma clase) esta en el mismo plan.
+    ficha_mutante "usb-placa-no-reclamada sin usb-interfaz-de-clase en su plan" "del f['planes']['usb']['precondiciones'][0]"
+    ficha_mutante "usb-placa-no-reclamada con otra clase que usb-interfaz-de-clase" "f['planes']['usb']['precondiciones'][0]['clase'] = 3"
+    ficha_mutante "usb-placa-no-reclamada sin su clase" "del f['planes']['usb']['precondiciones'][3]['clase']"
     echo '{"formato": 1, "planes": {' > "$tmp/rota.json"
     expect "ficha: JSON roto" 2 "$tmp/verde.log" "$auto" "$tmp/rota.json"
     expect "ficha: no existe" 2 "$tmp/verde.log" "$auto" "$tmp/no-existe.json"
@@ -1654,6 +1668,12 @@ FAKE
     host_case snd-rc t-reclamada no-verificable     # ls /dev/snd termina mal
     host_case snd-ilegible t-reclamada no-verificable  # ls /dev/snd no es un listado
     host_case snd-vacio t-reclamada no-verificable     # ls vacio: la ausencia de controlC1 no significa nada
+    # La clase de la placa sale de la entrada de la ficha, no de un 1 fijo: con la clase 3 (el HID de
+    # `sin-placa`) en las dos precondiciones, la placa ESTA y su controlC1 no, o sea reclamada.
+    python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); [p.update(clase=3) for p in f["planes"]["usb"]["precondiciones"] if "clase" in p]; json.dump(f, open(sys.argv[2], "w"))' "$ficha" "$evid/ficha-clase3.json"
+    FAKE_MODE=sin-placa FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
+        smoke_py host "$evid/adb" "$serial" "$evid/ficha-clase3.json" todo "$run" "$PKG" "$evid/evidencia-clase3" > "$evid/out-clase3.txt" 2>&1 || true
+    host_case clase3 t-reclamada false            # la clase de su propia entrada (3), no un 1 fijo
     host_case af-tomada t-reclamada true          # el audioserver con la salida USB tomada NO la hace incumplida
     # La tarjeta ALSA contra audio_flinger real. Cada regla tiene su caso y su mutante (ver el reporte).
     host_case af-standby t-alsa true            # el hilo USB en standby: libre
