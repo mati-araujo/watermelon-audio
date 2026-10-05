@@ -66,6 +66,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <string>
 #include <tuple>
@@ -2012,4 +2013,49 @@ TEST(DualTouchLastFrequency, Ac0523_ASplitReadWithZeroFrequencyBeforeTheLiftKeep
     const ReleaseVerdict v = judgeRelease(series);
     EXPECT_TRUE(v.ok()) << "AC-052.3: tras un bloque con freq=0 y amp>0 el release no esta en la ultima frecuencia valida ("
                         << kFreqSlot0 << " Hz) " << describeSeries(series);
+}
+
+TEST(DualTouchLastFrequency, Ac0523_ANonFiniteAmplitudeOrFrequencyBeforeTheLiftIsNotRetainedAndTheReleaseKeepsTheLastValidFrequency) {
+    // Un bloque con +Inf o NaN en amp o en freq llega justo antes del soltar (el control no valida).
+    // Con amp no finita el dedo NO cuenta como apoyado: el release arranca en ese bloque. Con freq
+    // no finita el dedo sigue apoyado y la frecuencia retenida es la ultima valida. En los dos
+    // casos la salida es finita y el release suena en la ultima frecuencia VALIDA, con la caida
+    // de AC-052.3.
+    // Bug que atrapa: retener +Inf como amplitud o como frecuencia; el release hereda el Inf y la
+    // mezcla (0 * Inf, Inf / Inf) lo vuelve NaN en la salida.
+    constexpr double kBadMs = 300.0, kLiftMs = 305.0, kTotalMs = 480.0;
+    constexpr float kInf = std::numeric_limits<float>::infinity();
+    constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+    const EngineInfo& e = kEngines[kClassic];
+
+    struct Variant {
+        const char* name;
+        float freq, amp;
+        bool ampIsBad;  // amp no finita => el release arranca en el bloque malo
+    };
+    const Variant variants[] = {
+        {"+Inf en amp", kFreqSlot0, kInf, true},
+        {"NaN en amp", kFreqSlot0, kNaN, true},
+        {"+Inf en freq", kInf, e.amp, false},
+        {"NaN en freq", kNaN, e.amp, false},
+    };
+    Script sus(kCoarseStepFrames, kTotalMs);
+    sus.touch(0, kFirstDownMs, kTotalMs, kFreqSlot0, e.amp);
+    const Rendered sustained = render(e.type, DualTouchMixMode::AVERAGE, sus);
+
+    for (const Variant& var : variants) {
+        SCOPED_TRACE(var.name);
+        Script g(kCoarseStepFrames, kTotalMs);
+        g.touch(0, kFirstDownMs, kBadMs, kFreqSlot0, e.amp).touch(0, kBadMs, kLiftMs, var.freq, var.amp);
+
+        const Rendered lifted = render(e.type, DualTouchMixMode::AVERAGE, g);
+        EXPECT_TRUE(lifted.allFinite) << "AC-052.3: hay muestras no finitas con " << var.name;
+        const double releaseFromMs = var.ampIsBad ? kBadMs : kLiftMs;
+        const std::vector<double> series =
+            releaseSeries(lifted.mono, sustained.mono, kFreqSlot0, outFrame(releaseFromMs));
+        const ReleaseVerdict v = judgeRelease(series);
+        EXPECT_TRUE(v.ok()) << "AC-052.3: con " << var.name
+                            << " el release no esta en la ultima frecuencia valida (" << kFreqSlot0 << " Hz) "
+                            << describeSeries(series);
+    }
 }
