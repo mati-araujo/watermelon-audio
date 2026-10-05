@@ -34,7 +34,9 @@
 #     con una linea `step=precondicion`), que pasos bloquea (`depende`) y la accion manual que la
 #     arregla (`remedio`, D3). Es la UNICA fuente: este script no tiene ningun id escrito — nombra
 #     CHEQUEOS de host (permiso-runtime, usb-interfaz-de-clase, paquetes-sin-proceso,
-#     alsa-tarjeta-libre) y la ficha elige uno por precondicion, con sus parametros.
+#     alsa-tarjeta-libre, usb-placa-no-reclamada) y la ficha elige uno por precondicion, con sus
+#     parametros. Una precondicion con `depende: []` es una OBSERVACION (D14): se verifica y va al
+#     JSON, pero no bloquea ningun paso.
 #   - El script NUNCA ejecuta un remedio ni cambia nada del telefono (D3): lo imprime y lo deja en
 #     el JSON. Una granja lo podra ejecutar despues; este script no.
 #   - BLOQUEADO es un veredicto, no una cancelacion: la corrida se ejecuta igual y el JSON guarda lo
@@ -149,6 +151,7 @@ CHECKS = {
     "usb-interfaz-de-clase": {"clase": int},
     "paquetes-sin-proceso": {"paquetes": list},
     "alsa-tarjeta-libre": {"tarjeta": int},
+    "usb-placa-no-reclamada": {"tarjeta": int},
 }
 COMMON_KEYS = {"id", "verificador", "depende", "remedio", "descripcion"}
 
@@ -222,8 +225,9 @@ def load_setup(path):
             if unknown:
                 raise BadSetup("%s: clave desconocida %s" % (where, ", ".join(sorted(unknown))))
             dep = p.get("depende")
-            if not isinstance(dep, list) or not dep or not all(isinstance(d, str) and d for d in dep):
-                raise BadSetup("%s: 'depende' tiene que ser una lista de pasos, no vacia" % where)
+            # Vacia es valida (D14): una observacion se registra y no bloquea nada.
+            if not isinstance(dep, list) or not all(isinstance(d, str) and d for d in dep):
+                raise BadSetup("%s: 'depende' tiene que ser una lista de pasos (vacia: observacion)" % where)
             for pattern in dep:
                 if not any(fnmatch.fnmatchcase(s, pattern) for s in known_steps(panel)):
                     raise BadSetup("%s: depende de '%s', que no es un paso de %s" % (where, pattern, panel))
@@ -426,11 +430,35 @@ def check_alsa_card_free(p, sh):
     return "true", "sin-hilo-usb"
 
 
+def check_placa_no_reclamada(p, sh):
+    """D14: un proceso que reclama la placa por usbfs hace que el kernel desligue el driver ALSA, y
+    `controlC<n>` desaparece de /dev/snd hasta que la suelta. La placa se busca con el mismo parser
+    de la precondicion de placa enumerada. Sin placa devuelve CUMPLIDA y no no-verificable: ya la bloquea
+    esa otra, y una segunda precondicion bloqueando por lo mismo duplicaria el BLOQUEADO con
+    un remedio que no es el de ese caso."""
+    card = p["tarjeta"]
+    present, _ = check_usb_interface_class({"clase": 1}, sh)
+    if present != "true":
+        return "true", "sin-placa:lo-cubre-placa-enumerada"
+    rc, out = sh.run("ls /dev/snd")
+    if rc != 0:
+        raise Unverifiable("ls-dev-snd-rc=%d" % rc)
+    entries = out.split()
+    # Solo nombres de /dev/snd (controlC1, pcmC1D0p, timer, seq...): si hay otra cosa, no es
+    # un listado y la ausencia de controlC<n> no significa nada.
+    if not entries or not all(re.fullmatch(r"controlC\d+|(pcm|hw|midi)C\d+D\d+[pc]?|timer|seq", e) for e in entries):
+        raise Unverifiable("dev-snd-ilegible")
+    if "controlC%d" % card in entries:
+        return "true", "controlC%d-presente" % card
+    return "false", "placa-enumerada-sin-controlC%d:otro-proceso-la-reclama" % card
+
+
 HOST_CHECKS = {
     "permiso-runtime": check_runtime_permission,
     "usb-interfaz-de-clase": check_usb_interface_class,
     "paquetes-sin-proceso": check_packages_without_process,
     "alsa-tarjeta-libre": check_alsa_card_free,
+    "usb-placa-no-reclamada": check_placa_no_reclamada,
 }
 assert set(HOST_CHECKS) == set(CHECKS)
 
@@ -850,6 +878,8 @@ self_test() {
        "remedio": "REMEDIO-T-HOST-USB"},
       {"id": "t-alsa", "verificador": "host", "chequeo": "alsa-tarjeta-libre", "tarjeta": 1,
        "depende": ["streaming-start"], "remedio": "REMEDIO-T-ALSA"},
+      {"id": "t-reclamada", "verificador": "host", "chequeo": "usb-placa-no-reclamada", "tarjeta": 1,
+       "depende": ["streaming-start"], "remedio": "REMEDIO-T-RECLAMADA"},
       {"id": "t-permiso", "verificador": "app", "ventana-humana": true,
        "depende": ["permiso", "permiso-falso", "conectar", "motor-callback", "capacidades", "descriptores",
                    "backend", "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo",
@@ -907,10 +937,10 @@ JSON
         fi
     }
     # expect_json <nombre> <archivo> <plan> <expresion python sobre j, el JSON de la corrida>
-    expect_json() {
-        local name="$1" file="$2" plan="$3" expr="$4"
+    expect_json() {  # el quinto argumento, opcional, es otra ficha
+        local name="$1" file="$2" plan="$3" expr="$4" setup="${5:-$ficha}"
         rm -f "$tmp/corrida.json"
-        verdict_split "$file" "$run" "$plan" "$ficha" "$tmp/corrida.json" > "$tmp/out" 2>&1 || true
+        verdict_split "$file" "$run" "$plan" "$setup" "$tmp/corrida.json" > "$tmp/out" 2>&1 || true
         if python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); sys.exit(0 if eval(sys.argv[2]) else 1)' \
                 "$tmp/corrida.json" "$expr" 2>"$tmp/json-err"; then
             printf '  ok    %-58s\n' "$name"
@@ -939,7 +969,7 @@ JSON
         echo "/ id=$1 /s/ ok=[a-z]+ / ok=$ok /; / id=$1 /s/ cumplida=[^ ]+ / cumplida=$2 /"
     }
     met_captura() { pre captura t-host-cap true host; pre captura t-app-cap true; }
-    met_usb_host() { pre usb t-usb-clase true host; pre usb t-host-usb true host; pre usb t-alsa true host; }
+    met_usb_host() { pre usb t-usb-clase true host; pre usb t-host-usb true host; pre usb t-alsa true host; pre usb t-reclamada true host; }
 
     # El control: el log grabado tal cual, con una ficha SIN precondiciones — o sea, el juez de
     # antes de REQ-053. Su exit es el que se grabo (ver la cabecera del log).
@@ -1438,12 +1468,59 @@ SPY
     # (scripts/smoke-device-fixtures/); las variantes se derivan de ellos con sed, nunca a mano.
     host_selftest "$tmp" "$ficha" "$run" || failures=$((failures + $?))
 
+    # D14: la ficha REAL (sin captura), con el adb falso. NoisyPad vivo y la salida USB tomada por el
+    # audioserver ya NO bloquean: son observaciones (depende: []), y los pasos se juzgan. Lo que bloquea
+    # es la placa reclamada, que se ve en /dev/snd. El log es el grabado, con las precondiciones del
+    # host de cada modo en su archivo aparte (como en la corrida).
+    python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); del f["planes"]["captura"]; json.dump(f, open(sys.argv[2], "w"))' "$real" "$tmp/ficha-usb-real.json"
+    d14_case() {  # d14_case <modo del adb falso> <archivo de salida>
+        FAKE_MODE="$1" FAKE_SERIAL=falso-123 FAKE_DIR="$tmp/host" \
+            smoke_py host "$tmp/host/adb" falso-123 "$tmp/ficha-usb-real.json" usb "$run" "$PKG" "$tmp/host/evidencia-d14-$1" > "$tmp/d14-$1.txt" 2>&1 || true
+        with_usb "$tmp/d14-$1-pre.log" 's/^//'
+        grep -v 'step=precondicion' "$tmp/d14-$1-pre.log" > "$tmp/d14-$1-base.log"
+        { grep 'panel=usb' "$tmp/d14-$1.txt"; pre usb "$id_permiso" true; } | before_fin "$tmp/d14-$1-base.log" "$2"
+    }
+    local real_ficha="$tmp/ficha-usb-real.json" id_app id_alsa id_reclamada id_placa
+    # Los ids salen de la ficha por su chequeo: el script no copia ninguno (AC-053.5).
+    id_by_check() { python3 -c 'import json,sys; print([p["id"] for p in json.load(open(sys.argv[1]))["planes"]["usb"]["precondiciones"] if p.get("chequeo") == sys.argv[2]][0])' "$real_ficha" "$1"; }
+    id_app="$(id_by_check paquetes-sin-proceso)"; id_alsa="$(id_by_check alsa-tarjeta-libre)"
+    id_reclamada="$(id_by_check usb-placa-no-reclamada)"; id_placa="$(id_by_check usb-interfaz-de-clase)"
+    local id_permiso
+    id_permiso="$(python3 -c 'import json,sys; print([p["id"] for p in json.load(open(sys.argv[1]))["planes"]["usb"]["precondiciones"] if p.get("ventana-humana")][0])' "$real_ficha")"
+    d14_case noisypad-vivo "$tmp/d14-vivo.log"
+    expect "D14: NoisyPad vivo y la salida USB tomada, exit 0" 0 "$tmp/d14-vivo.log" todo "$real_ficha"
+    expect_line "D14: con NoisyPad vivo streaming-start se juzga: PASS" '^PASS +usb/streaming-start ' "$tmp/d14-vivo.log" todo "$real_ficha"
+    expect_no_line "D14: nada sale BLOQUEADO con NoisyPad vivo" '^BLOQUEADO ' "$tmp/d14-vivo.log" todo "$real_ficha"
+    expect_json "D14: el JSON registra la observacion de NoisyPad" "$tmp/d14-vivo.log" todo \
+        "[p for p in j['precondiciones'] if p['id'] == '$id_app' and p['estado'] == 'incumplida' and p['depende'] == [] and 'noisypad' in p['evidencia']]" "$real_ficha"
+    expect_json "D14: ... y la de la tarjeta ALSA tomada" "$tmp/d14-vivo.log" todo \
+        "[p for p in j['precondiciones'] if p['id'] == '$id_alsa' and p['estado'] == 'incumplida' and p['depende'] == [] and 'standby=no' in p['evidencia']]" "$real_ficha"
+    expect_json "D14: ... y la placa no reclamada, cumplida, bloqueante" "$tmp/d14-vivo.log" todo \
+        "[p for p in j['precondiciones'] if p['id'] == '$id_reclamada' and p['estado'] == 'cumplida' and p['depende']]" "$real_ficha"
+    d14_case reclamada "$tmp/d14-reclamada.log"
+    expect "D14: placa reclamada bloquea (exit 4)" 4 "$tmp/d14-reclamada.log" todo "$real_ficha"
+    expect_line "D14: streaming-start BLOQUEADO por la placa reclamada, con su remedio" "^BLOQUEADO +usb/streaming-start +precondicion=$id_reclamada estado=incumplida evidencia=placa-enumerada-sin-controlC1:otro-proceso-la-reclama remedio=Cerrar la app que tenga la placa tomada.*El script no sabe quien la tiene" "$tmp/d14-reclamada.log" todo "$real_ficha"
+    expect_line "D14: usb/dispositivos (no depende) se juzga" '^PASS +usb/dispositivos ' "$tmp/d14-reclamada.log" todo "$real_ficha"
+    d14_case sin-placa "$tmp/d14-sin-placa.log"
+    expect_line "D14: sin placa bloquea la de placa enumerada" "^BLOQUEADO +usb/streaming-start +precondicion=$id_placa " "$tmp/d14-sin-placa.log" todo "$real_ficha"
+    expect_no_line "D14: ... y la de placa reclamada no duplica el bloqueo" "precondicion=$id_reclamada" "$tmp/d14-sin-placa.log" todo "$real_ficha"
+    # El orden (la carrera): el harness reclama la placa al arrancar, asi que el host la mira ANTES.
+    local host_at start_at
+    host_at="$(grep -nE '^    host_lines="\$\(smoke_py host ' "$0" | head -1 | cut -d: -f1)"
+    start_at="$(grep -nE '^    adb_ shell am start -n ' "$0" | head -1 | cut -d: -f1)"
+    if [[ -n "$host_at" && -n "$start_at" ]] && (( host_at < start_at )); then
+        printf '  ok    %-58s\n' "D14: la verificacion de host corre ANTES del am start"
+    else
+        printf '  MAL   %-58s host=%s am-start=%s\n' "D14: la verificacion de host corre ANTES del am start" "${host_at:-nada}" "${start_at:-nada}"
+        failures=$((failures + 1))
+    fi
+
     rm -rf "$tmp"
     if (( failures )); then
         echo "self-test: FAIL — $failures caso(s) con el veredicto equivocado" >&2
         return 1
     fi
-    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado, otra corrida, y (REQ-053) precondicion incumplida, no verificable, BLOQUEADO que no suma PASS, precedencia del exit, permiso negado vs ventana vencida, ficha invalida y verificadores de host"
+    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado, otra corrida, y (REQ-053) precondicion incumplida, no verificable, BLOQUEADO que no suma PASS, precedencia del exit, permiso negado vs ventana vencida, ficha invalida, verificadores de host y (D14) placa reclamada vs observaciones"
 }
 
 # El adb falso del self-test y sus casos. Devuelve la cantidad de casos MAL.
@@ -1464,6 +1541,9 @@ case "$FAKE_MODE" in
     basura) echo "lorem ipsum"; exit 0 ;;
     denegado) echo "/system/bin/sh: Permission denied"; echo "wma-rc=1"; exit 0 ;;
 esac
+# `usb-falla` / `snd-rc`: solo ese comando termina mal, el resto responde sano.
+[[ "$FAKE_MODE" == usb-falla && "$cmd" == *"dumpsys usb"* ]] && { echo "dumpsys: boom"; echo; echo "wma-rc=1"; exit 0; }
+[[ "$FAKE_MODE" == snd-rc && "$cmd" == *"ls /dev/snd"* ]] && { echo "ls: /dev/snd: No such file or directory"; echo; echo "wma-rc=1"; exit 0; }
 case "$cmd" in
     *"dumpsys package"*)
         g=true; [[ "$FAKE_MODE" == incumplida ]] && g=false
@@ -1471,23 +1551,29 @@ case "$cmd" in
         printf 'Packages:\n  Package [x]\n    User 0: ceDataInode=1 installed=true\n      runtime permissions:\n        android.permission.RECORD_AUDIO: granted=%s, flags=[ USER_SENSITIVE ]\n    User 10: ceDataInode=0 installed=false\n      runtime permissions:\n        android.permission.RECORD_AUDIO: granted=false, flags=[ ]\n' "$g" ;;
     *"dumpsys usb"*)
         f=cm720
-        [[ "$FAKE_MODE" == incumplida ]] && f=hid
+        [[ "$FAKE_MODE" == incumplida || "$FAKE_MODE" == sin-placa ]] && f=hid
         [[ "$FAKE_MODE" == sin-host ]] && f=sin-host
         [[ "$FAKE_MODE" == dos-dispositivos ]] && f=dos
         cat "$FAKE_DIR/dumpsys-usb-$f.txt" ;;
     *"dumpsys media.audio_flinger"*)
         f=af-standby
-        [[ "$FAKE_MODE" == incumplida ]] && f=af-tomada
+        [[ "$FAKE_MODE" == incumplida || "$FAKE_MODE" == noisypad-vivo ]] && f=af-tomada
         [[ "$FAKE_MODE" == af-* ]] && f="$FAKE_MODE"
         cat "$FAKE_DIR/$f.txt" ;;
     *"ps -A"*)
         printf '  PID NAME\n    1 init\n'
         # `ps-ciego`: un ps que no ve los procesos de otros UID (sin system_server).
         [[ "$FAKE_MODE" == ps-ciego ]] || printf ' 1500 system_server\n  812 com.android.systemui\n'
-        [[ "$FAKE_MODE" == incumplida ]] && printf ' 4242 com.example.ajena:servicio\n' ;;
+        [[ "$FAKE_MODE" == incumplida ]] && printf ' 4242 com.example.ajena:servicio\n'
+        [[ "$FAKE_MODE" == noisypad-vivo ]] && printf ' 4343 com.watermellonstudios.noisypad\n' ;;
     *"ls /dev/snd"*)
-        printf 'controlC0\npcmC0D0p\npcmC0D0c\ntimer\n'
-        [[ "$FAKE_MODE" == incumplida || "$FAKE_MODE" == af-* ]] && printf 'controlC1\npcmC1D0p\n' ;;
+        # `reclamada`: la placa esta enumerada y un proceso la reclama, asi que controlC1/pcmC1* no estan.
+        case "$FAKE_MODE" in
+            snd-ilegible) echo "lorem ipsum" ;;
+            snd-vacio) : ;;
+            *) printf 'controlC0\npcmC0D0p\npcmC0D0c\ntimer\n'
+               [[ "$FAKE_MODE" == reclamada || "$FAKE_MODE" == sin-placa ]] || printf 'controlC1\npcmC1D0p\n' ;;
+        esac ;;
     *) echo "comando no previsto: $cmd" >> "$FAKE_DIR/sin-s.txt" ;;
 esac
 # `cortado`: la salida de un comando sano, pero la conexion se cae antes de la marca final. Lo
@@ -1531,20 +1617,31 @@ FAKE
         fi
     }
     for mode in ok incumplida falla basura denegado cortado rc-1 ps-ciego sin-host dos-dispositivos \
-        af-standby af-tomada af-cerrado-no af-hal-no af-vacio af-sin-hilos af-sin-usb af-sin-standby af-entrada-tomada; do
+        af-standby af-tomada af-cerrado-no af-hal-no af-vacio af-sin-hilos af-sin-usb af-sin-standby af-entrada-tomada \
+        reclamada sin-placa usb-falla snd-rc snd-ilegible snd-vacio; do
         FAKE_MODE="$mode" FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
             smoke_py host "$evid/adb" "$serial" "$ficha" todo "$run" "$PKG" "$evid/evidencia-$mode" \
             > "$evid/out-$mode.txt" 2>&1 || true
     done
     host_case ok t-host-cap true;  host_case ok t-usb-clase true;  host_case ok t-host-usb true;  host_case ok t-alsa true
+    host_case ok t-reclamada true
     host_case incumplida t-host-cap false; host_case incumplida t-usb-clase false
     host_case incumplida t-host-usb false; host_case incumplida t-alsa false
     for mode in falla basura denegado cortado rc-1; do
-        for id in t-host-cap t-usb-clase t-host-usb t-alsa; do host_case "$mode" "$id" no-verificable; done
+        for id in t-host-cap t-usb-clase t-host-usb t-alsa t-reclamada; do host_case "$mode" "$id" no-verificable; done
     done
     host_case sin-host t-usb-clase no-verificable
     host_case dos-dispositivos t-usb-clase true     # el HID primero no tapa a la CM720 que viene despues
     host_case ps-ciego t-host-usb no-verificable
+    # D14, la placa reclamada. Una regla por caso, cada una con su mutante (ver el reporte).
+    host_case reclamada t-reclamada false         # placa enumerada y sin controlC1: la reclama otro proceso
+    host_case sin-placa t-reclamada true          # sin placa no bloquea esta: la bloquea la de placa enumerada
+    host_case sin-placa t-usb-clase false         # ... y esa si da incumplida (no se duplica el bloqueo)
+    host_case usb-falla t-reclamada no-verificable  # dumpsys usb falla (el resto responde sano)
+    host_case snd-rc t-reclamada no-verificable     # ls /dev/snd termina mal
+    host_case snd-ilegible t-reclamada no-verificable  # ls /dev/snd no es un listado
+    host_case snd-vacio t-reclamada no-verificable     # ls vacio: la ausencia de controlC1 no significa nada
+    host_case af-tomada t-reclamada true          # el audioserver con la salida USB tomada NO la hace incumplida
     # La tarjeta ALSA contra audio_flinger real. Cada regla tiene su caso y su mutante (ver el reporte).
     host_case af-standby t-alsa true            # el hilo USB en standby: libre
     host_case af-tomada t-alsa false            # Standby: no en el hilo USB: tomada
@@ -1559,7 +1656,7 @@ FAKE
         host_case "$mode" t-usb-clase true      # la captura real: la CM720 tiene interfaces de clase 1
     done
     local check
-    for check in "incumplida:t-host-usb:4242" "incumplida:t-alsa:AudioOut_15:0x4000000" "af-tomada:t-alsa:AudioOut_15:0x4000000" "af-entrada-tomada:t-alsa:IN_USB_DEVICE" "af-standby:t-usb-clase:2b89:64ec:UGREEN" "dos-dispositivos:t-usb-clase:2b89:64ec:UGREEN" "af-standby:t-alsa:AudioOut_15:standby=yes" "af-sin-usb:t-alsa:sin-hilo-usb" "incumplida:t-usb-clase:046d"; do
+    for check in "incumplida:t-host-usb:4242" "incumplida:t-alsa:AudioOut_15:0x4000000" "af-tomada:t-alsa:AudioOut_15:0x4000000" "af-entrada-tomada:t-alsa:IN_USB_DEVICE" "af-standby:t-usb-clase:2b89:64ec:UGREEN" "dos-dispositivos:t-usb-clase:2b89:64ec:UGREEN" "af-standby:t-alsa:AudioOut_15:standby=yes" "af-sin-usb:t-alsa:sin-hilo-usb" "incumplida:t-usb-clase:046d" "reclamada:t-reclamada:placa-enumerada-sin-controlC1:otro-proceso-la-reclama" "sin-placa:t-reclamada:sin-placa:lo-cubre-placa-enumerada" "ok:t-reclamada:controlC1-presente"; do
         IFS=: read -r mode id needle <<< "$check"
         if grep -E " id=$id .*evidencia=[^ ]*$needle" "$evid/out-$mode.txt" > /dev/null; then
             printf '  ok    %-58s\n' "host[$mode]: la evidencia de $id lleva $needle"
@@ -1574,11 +1671,11 @@ FAKE
         bad=$((bad + 1))
     fi
     # Cada linea la firma el host y es de ESTA corrida; y lo que no se pidio no se verifica.
-    if grep -c . "$evid/out-ok.txt" | grep -qx 4 \
-        && [[ "$(grep -c " run=$run panel=[a-z]* step=precondicion .* verificador=host$" "$evid/out-ok.txt")" == 4 ]]; then
-        printf '  ok    %-58s\n' "host: 4 lineas firmadas verificador=host, run de la corrida"
+    if grep -c . "$evid/out-ok.txt" | grep -qx 5 \
+        && [[ "$(grep -c " run=$run panel=[a-z]* step=precondicion .* verificador=host$" "$evid/out-ok.txt")" == 5 ]]; then
+        printf '  ok    %-58s\n' "host: 5 lineas firmadas verificador=host, run de la corrida"
     else
-        printf '  MAL   %-58s\n' "host: 4 lineas firmadas verificador=host, run de la corrida"; bad=$((bad + 1))
+        printf '  MAL   %-58s\n' "host: 5 lineas firmadas verificador=host, run de la corrida"; bad=$((bad + 1))
     fi
     FAKE_MODE=ok FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
         smoke_py host "$evid/adb" "$serial" "$ficha" salida,sf2 "$run" "$PKG" "$evid/evidencia-x" > "$evid/out-nada.txt" 2>&1 || true
