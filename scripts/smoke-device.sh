@@ -749,6 +749,14 @@ verdict() {
     smoke_py veredicto "$1" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}" "${6:-}"
 }
 
+# Un id por corrida que otra app no pueda adivinar: fecha, pid y 48 bits de /dev/urandom.
+new_run_id() {
+    local rnd
+    rnd="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+    [[ "$rnd" =~ ^[0-9a-f]{12}$ ]] || { echo "FAIL — no pude leer /dev/urandom" >&2; return 1; }
+    echo "smoke-$(date +%Y%m%d-%H%M%S)-$$-$rnd"
+}
+
 # uid_of_package <paquete> < salida de `pm list packages -U`: el uid del paquete EXACTO (el listado
 # filtra por subcadena y trae paquetes vecinos).
 uid_of_package() {
@@ -1356,6 +1364,33 @@ package:com.ajena uid:10001"
         printf '  MAL   %-58s\n' "S-1: la captura filtra por uid, y sin uid sigue como antes"; failures=$((failures + 1))
     fi
 
+    # S-2: el run id no se puede adivinar (fecha + pid + 48 bits de /dev/urandom), y el juez sigue
+    # aceptando el viejo: el del control grabado ya se juzgo arriba con ese formato.
+    local rid1 rid2
+    rid1="$(new_run_id || true)"; rid2="$(new_run_id || true)"
+    if [[ "$rid1" =~ ^smoke-[0-9]{8}-[0-9]{6}-[0-9]+-[0-9a-f]{12}$ && "$rid1" != "$rid2" ]]; then
+        printf '  ok    %-58s\n' "S-2: el run id lleva 48 bits aleatorios y cambia"
+    else
+        printf '  MAL   %-58s %s %s\n' "S-2: el run id lleva 48 bits aleatorios y cambia" "$rid1" "$rid2"; failures=$((failures + 1))
+    fi
+    sed -E "s/run=$run /run=$rid1 /" "$tmp/verde.log" > "$tmp/verde-rid.log"
+    grep -v 'verificador=host' "$tmp/verde-rid.log" > "$tmp/app-rid.log" || true
+    grep 'verificador=host' "$tmp/verde-rid.log" > "$tmp/host-rid.log" || true
+    local got=0
+    verdict "$tmp/app-rid.log" "$rid1" "$auto" "$ficha" "" "$tmp/host-rid.log" > /dev/null 2>&1 || got=$?
+    if [[ "$got" == 0 ]]; then printf '  ok    %-58s exit 0\n' "S-2: el juez acepta un run id con el formato nuevo"
+    else printf '  MAL   %-58s exit %s\n' "S-2: el juez acepta un run id con el formato nuevo" "$got"; failures=$((failures + 1)); fi
+    if grep -qE '^    run="\$\(new_run_id\)" \|\| exit 2$' "$0"; then
+        printf '  ok    %-58s\n' "S-2: la corrida en device saca su run id de new_run_id"
+    else
+        printf '  MAL   %-58s\n' "S-2: la corrida en device saca su run id de new_run_id"; failures=$((failures + 1))
+    fi
+    if [[ "$run" =~ ^smoke-[0-9]{8}-[0-9]{6}-[0-9]+$ ]]; then
+        printf '  ok    %-58s\n' "S-2: el control grabado conserva el run id viejo"
+    else
+        printf '  MAL   %-58s %s\n' "S-2: el control grabado conserva el run id viejo" "$run"; failures=$((failures + 1))
+    fi
+
     # Los verificadores de HOST, contra un adb FALSO: ninguno corre sin `-s <serial>`, y cada salida
     # que no se puede leer (adb falla, rc != 0, basura, formato desconocido, tarjeta sin dueno
     # visible) da no-verificable — nunca cumplida. Los dumpsys son RECORTES de la captura real del g42
@@ -1601,7 +1636,8 @@ run_device() {
         exit 2
     fi
 
-    local run="smoke-$(date +%Y%m%d-%H%M%S)-$$"
+    local run
+    run="$(new_run_id)" || exit 2
     out="${out:-harness/build/smoke-device/$run}"
     mkdir -p "$out"
 
