@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.22.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.21.0...v2.22.0) (2026-10-05)
+
+
+### Features
+
+* **engine:** parar con la variante suspend espera el Stopped nativo ([b5d24c4](https://github.com/mati-araujo/watermelon-audio/commit/b5d24c424180ce2eaea51f6c08847b5b8bafa35b))
+* **usb:** connectDevice crea el motor antes del device y se serializa ([69cdc3d](https://github.com/mati-araujo/watermelon-audio/commit/69cdc3d90d8fd4a8319aa174a72dc0e4fe9f0c73))
+* **usb:** REQ-050 S2, el contrato USB devuelve errores tipados ([ae6d844](https://github.com/mati-araujo/watermelon-audio/commit/ae6d844fa87e5a4aaa2792f2e02741481652df9e))
+* **usb:** startStreaming e initializeUsbDevice nombran la causa del fallo ([777be21](https://github.com/mati-araujo/watermelon-audio/commit/777be2177281653502efeaeba38c22cafb28254c))
+
+
+### Bug Fixes
+
+* **android:** Oboe 1.11.0 con NDK r30 ([798e613](https://github.com/mati-araujo/watermelon-audio/commit/798e61319696e3092e3e0665efffca96b4997016))
+* **build:** el release nativo de Android compila con las flags de release ([5fb3143](https://github.com/mati-araujo/watermelon-audio/commit/5fb314331c3240c14850d51baf2c3115e6a25119))
+* **dual-touch:** cada dedo suena a su nivel y el que se levanta hace release ([ce230b8](https://github.com/mati-araujo/watermelon-audio/commit/ce230b80b28c66ab67087085676c2a2eaa28ce92))
+* **dual-touch:** cada dedo suena a su nivel y el que se levanta hace release ([817aec9](https://github.com/mati-araujo/watermelon-audio/commit/817aec9785d18d4f46ebc47bbbcecf20a08f5afa))
+* **engine:** el control vuelve a leer el rate en vivo; el RT sigue con el atomic ([009c8b8](https://github.com/mati-araujo/watermelon-audio/commit/009c8b8850effb51701ec075ba237e6dcfc3aebe))
+* **engine:** un rate no positivo ya no prepara el motor ([df2d4fe](https://github.com/mati-araujo/watermelon-audio/commit/df2d4fed0cfb86e1b422f1c5e8232b47e0f3e03e))
+* **engine:** un stop durante el fade ya no reinicia la rampa ([a90ad69](https://github.com/mati-araujo/watermelon-audio/commit/a90ad69d8a1bdc5a3cbaf6ef0526ff978cccec90))
+* **kmp:** removeEffect le pregunta al motor antes de rechazar ([1f16fc1](https://github.com/mati-araujo/watermelon-audio/commit/1f16fc15ba29d1fe75d3b875fdf815b34608bdf2))
+* **usb:** dos pedidos de permiso USB a la vez ya no se pisan ([8ee7ab0](https://github.com/mati-araujo/watermelon-audio/commit/8ee7ab06249903f6ceaf780db4db3a87c09294ab))
+* **usb:** el backend USB ya no se lee después de liberado ([8d93609](https://github.com/mati-araujo/watermelon-audio/commit/8d9360906ad1598971e9b55ea1fdb0d7078d2a48))
+* **usb:** el backend USB ya no se lee después de liberado (MINI-042) ([f66a523](https://github.com/mati-araujo/watermelon-audio/commit/f66a523b5ad2c2d305128799d508de791382805d))
+* **usb:** el permiso USB sale de UsbManager, no del intent ([f7c250f](https://github.com/mati-araujo/watermelon-audio/commit/f7c250f944fb0e9d8f7786ea5ee0f8ea2864fda3))
+* **usb:** el runner USB mide cada fila a su config o dice que no aplica ([9daee42](https://github.com/mati-araujo/watermelon-audio/commit/9daee42f6008e7af1e63927afbd41c5b7506b1ea))
+* **usb:** el runner USB mide cada fila a su config o dice que no aplica ([4115eb4](https://github.com/mati-araujo/watermelon-audio/commit/4115eb41cf84683021626100b99583ca4f4e2e8b))
+* **usb:** la libreria declara WAKE_LOCK ([03f5796](https://github.com/mati-araujo/watermelon-audio/commit/03f5796c3b75144185f1a272cba00ded25336f33))
+* **usb:** libusb 1.0.30 (CVE-2026-47104, CVE-2026-23679) ([bf24397](https://github.com/mati-araujo/watermelon-audio/commit/bf24397edbeee6ffe52ea9a3abf7a64550f7435f))
+* **usb:** REQ-050 S1, el permiso USB sale de UsbManager ([1f032c8](https://github.com/mati-araujo/watermelon-audio/commit/1f032c80ea5cd799eac8edb845c017bc4826c6ce))
+
 ## [2.21.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.20.0...v2.21.0) (2026-09-29)
 
 
