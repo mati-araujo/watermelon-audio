@@ -1232,6 +1232,8 @@ esac
 # `cortado`: la salida de un comando sano, pero la conexion se cae antes de la marca final. Lo
 # que llego se PARSEA bien (ps sin el proceso ajeno) y aun asi no se puede leer: no es completa.
 [[ "$FAKE_MODE" == cortado ]] && { echo "error: closed" >&2; exit 255; }
+# `rc-1`: la salida de un comando sano, pero el comando termino mal. Se parsearia bien; no se lee.
+[[ "$FAKE_MODE" == rc-1 ]] && { echo "wma-rc=1"; exit 0; }
 echo "wma-rc=0"
 FAKE
     chmod +x "$evid/adb"
@@ -1286,7 +1288,7 @@ TXT
             bad=$((bad + 1))
         fi
     }
-    for mode in ok incumplida falla basura denegado cortado sin-host alsa-cerrada alsa-oculta; do
+    for mode in ok incumplida falla basura denegado cortado rc-1 sin-host alsa-cerrada alsa-oculta; do
         FAKE_MODE="$mode" FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
             smoke_py host "$evid/adb" "$serial" "$ficha" todo "$run" "$PKG" "$evid/evidencia-$mode" \
             > "$evid/out-$mode.txt" 2>&1 || true
@@ -1294,7 +1296,7 @@ TXT
     host_case ok t-host-cap true;  host_case ok t-usb-clase true;  host_case ok t-host-usb true;  host_case ok t-alsa true
     host_case incumplida t-host-cap false; host_case incumplida t-usb-clase false
     host_case incumplida t-host-usb false; host_case incumplida t-alsa false
-    for mode in falla basura denegado cortado; do
+    for mode in falla basura denegado cortado rc-1; do
         for id in t-host-cap t-usb-clase t-host-usb t-alsa; do host_case "$mode" "$id" no-verificable; done
     done
     host_case sin-host t-usb-clase no-verificable
