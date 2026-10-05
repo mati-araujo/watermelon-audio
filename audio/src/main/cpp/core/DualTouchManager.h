@@ -245,13 +245,15 @@ public:
         SlotBlockPlan plan{};
         for (int k = 0; k < 2; ++k) {
             SlotVoice& v = mSlotVoice[k];
-            v.held = amps[k] > kSlotHeldAmp;
+            // Una amplitud no finita no es un dedo apoyado: retenida, el release
+            // la mezclaria durante ~80 ms y la salida saldria NaN (0 * Inf).
+            v.held = std::isfinite(amps[k]) && amps[k] > kSlotHeldAmp;
             if (v.held) {
                 // El control escribe freq antes que amp, y el soltar manda
                 // freq = 0: un bloque puede leer freq nueva (0) con amp vieja.
-                // Una frecuencia no positiva no se retiene, o todo el release
-                // sonaria a 0 Hz.
-                if (freqs[k] > 0.0f) v.heldFreq = freqs[k];
+                // Una frecuencia no positiva o no finita no se retiene, o todo
+                // el release sonaria a 0 Hz (o a Inf).
+                if (std::isfinite(freqs[k]) && freqs[k] > 0.0f) v.heldFreq = freqs[k];
                 v.heldAmp = amps[k];
             }
             plan.render[k] = v.held || v.gain > 0.0f;
