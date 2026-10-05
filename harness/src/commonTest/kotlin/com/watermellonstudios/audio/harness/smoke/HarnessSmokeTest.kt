@@ -94,6 +94,55 @@ class HarnessSmokeTest {
         assertTrue(lines[0].contains(" ok=false") && lines[1].contains(" ok=true"))
     }
 
+    /**
+     * REQ-053 S1 (1.3) — la línea `step=precondicion` tiene formato fijo: `id`, `cumplida`,
+     * `evidencia`, en ese orden, con `ok` igual a `cumplida`.
+     *
+     * Bug que atrapa: un `ok` que no copia a `cumplida` (el juez lo da `no-verificable` y bloquea
+     * una corrida sana), o las claves con otro nombre (el juez no encuentra la precondición y la
+     * da `no-verificable`, nunca cumplida — pero la corrida no se puede juzgar nunca más).
+     */
+    @Test
+    fun aPreconditionLineHasIdMetAndEvidenceAndOkMirrorsMet() {
+        val lines = mutableListOf<String>()
+        val r = SmokeReporter({ lines += it }, run = "r7")
+        assertEquals(false, r.precondition("usb", "permiso-usb", met = false, evidence = "dialogo:denegado"))
+        assertEquals(true, r.precondition("captura", "mic-abre", met = true, evidence = "aceptado:true corriendo:true"))
+        assertEquals(
+            listOf(
+                "HARNESS-SMOKE v=1 run=r7 panel=usb step=precondicion ok=false id=permiso-usb cumplida=false evidencia=dialogo:denegado",
+                "HARNESS-SMOKE v=1 run=r7 panel=captura step=precondicion ok=true id=mic-abre cumplida=true " +
+                    "evidencia=aceptado:true_corriendo:true",
+            ),
+            lines,
+        )
+    }
+
+    /**
+     * Bug que atrapa: una precondición armada a mano con `format(step = "precondicion")` (sin
+     * `cumplida`, o con un `ok` que no la copia), o una línea de la app que dice
+     * `verificador=host` y se hace pasar por la verificación del host (el juez la aceptaría como
+     * la del verificador declarado en la ficha).
+     */
+    @Test
+    fun aPreconditionCannotBeForgedThroughFormatNorClaimToBeTheHost() {
+        assertFailsWith<IllegalArgumentException> { HarnessSmoke.format("r", "usb", "precondicion", true) }
+        assertFailsWith<IllegalArgumentException> {
+            HarnessSmoke.format("r", "usb", "conectar", true, listOf("verificador" to "host"))
+        }
+        assertFailsWith<IllegalArgumentException> { HarnessSmoke.precondition("r", "usb", "Permiso USB", true, "x") }
+        assertFailsWith<IllegalArgumentException> { HarnessSmoke.precondition("r", "usb", "", true, "x") }
+    }
+
+    /** Bug que atrapa: una evidencia vacía parte la línea (`evidencia=` sin valor) en vez de `-`. */
+    @Test
+    fun aPreconditionWithoutEvidenceSaysDash() {
+        assertEquals(
+            "HARNESS-SMOKE v=1 run=r panel=usb step=precondicion ok=true id=permiso-usb cumplida=true evidencia=-",
+            HarnessSmoke.precondition("r", "usb", "permiso-usb", true, ""),
+        )
+    }
+
     @Test
     fun theWholePlanRunsInTheCanonicalOrder() {
         val plan = assertIs<SmokePlan.Valid>(SmokePlan.parse("todo"))
