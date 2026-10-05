@@ -15,7 +15,8 @@
         {
           "id": "mic-abre",
           "verificador": "app",
-          "depende": ["start", "nivel"],
+          "descripcion": "La app la emite con la misma observacion que el paso start (start acepto y el stream corre). Por eso NO bloquea start: si bloqueara, un stream que no abre por un bug de la libreria saldria BLOQUEADO en vez de FAIL. Bloquea lo que se mide CON el mic abierto.",
+          "depende": ["nivel"],
           "remedio": "Cerrar lo que tenga tomado el microfono (una llamada, una grabadora, un asistente de voz) y volver a correr el plan."
         }
       ]

@@ -253,7 +253,8 @@ class Shell:
     def run(self, cmd):
         argv = [self.adb, "-s", self.serial, "shell", "%s; r=$?; echo; echo wma-rc=$r" % cmd]
         try:
-            p = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+            p = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=30)
         except (OSError, subprocess.SubprocessError) as e:
             self.log.append("$ %s\n[no corrio: %s]\n" % (cmd, e))
             raise Unverifiable("adb-no-corrio:%s" % type(e).__name__)
@@ -270,6 +271,11 @@ def check_runtime_permission(p, sh):
     rc, out = sh.run("dumpsys package %s" % sh.pkg)
     if rc != 0:
         raise Unverifiable("dumpsys-package-rc=%d" % rc)
+    # Con varios usuarios (perfil de trabajo, Secure Folder) cada uno tiene su bloque `User N:`;
+    # el smoke corre en el usuario 0, y un perfil secundario sin el permiso no es este setup.
+    users = re.split(r"^\s*User (\d+):", out, flags=re.M)
+    if len(users) > 1:
+        out = "".join(users[i + 1] for i in range(1, len(users), 2) if users[i] == "0")
     grants = re.findall(r"^\s*%s: granted=(true|false)" % re.escape(p["permiso"]), out, re.M)
     if not grants:
         raise Unverifiable("%s-no-figura-en-dumpsys-package" % p["permiso"].rsplit(".", 1)[-1])
@@ -345,8 +351,9 @@ def check_packages_without_process(p, sh):
     if not rows or rows[0][:2] != ["PID", "NAME"]:
         raise Unverifiable("ps-salida-ilegible")
     procs = [(r[0], r[1]) for r in rows[1:] if len(r) >= 2 and r[0].isdigit()]
-    if not procs:
-        raise Unverifiable("ps-sin-procesos")
+    if not any(name == "system_server" for _, name in procs):
+        # Sin system_server este ps no ve procesos de otros UID: "no esta vivo" no se puede afirmar.
+        raise Unverifiable("ps-no-ve-otros-uid:sin-system_server")
     alive = ["%s:pid=%s" % (name, pid) for pid, name in procs
              for pkg in p["paquetes"] if name == pkg or name.startswith(pkg + ":")]
     if alive:
@@ -469,7 +476,13 @@ def judge(log, run, requested, setup_path, json_out):
     def human_wait(panel):
         mine = [f for f in lines if f.get("panel") == panel]
         waits = [f for f in mine if f.get("step") == HUMAN]
-        granted = any(f.get("step") == "permiso" and f.get("ok") == "true" for f in mine)
+        # El humano actuo si el paso `permiso` lo dice, o si la precondicion con ventana humana de
+        # la app se CUMPLIO (D13): con el permiso dado y connectDevice colgado no hay paso
+        # `permiso`, y lo que sigue es un FAIL de la libreria, no una espera humana.
+        window_ids = {p["id"] for p in setup.get(panel, []) if p["verificador"] == "app" and p.get("ventana-humana")}
+        granted = any(f.get("step") == "permiso" and f.get("ok") == "true" for f in mine) or any(
+            f.get("step") == PRECOND and f.get("id") in window_ids and "verificador" not in f
+            and f.get("ok") == "true" and f.get("cumplida") == "true" for f in mine)
         denied = any(f.get("step") == "permiso" and f.get("ok") != "true" for f in mine)
         return waits, granted, denied
 
@@ -558,7 +571,12 @@ def judge(log, run, requested, setup_path, json_out):
                 continue
             seen.add(step)
             bs = blockers(panel, step)
-            if bs:
+            if bs and f.get("ok") != "true" and f.get("concluyente") == "true":
+                # La app sabe que esta falla no la explica ninguna precondicion (p.ej. un grant que
+                # UsbManager desmiente): un bloqueo no la puede tapar. Solo vale para ok=false:
+                # `concluyente` nunca destapa un PASS.
+                add("FAIL", panel, step, "concluyente, ninguna precondicion lo explica: " + extras(f), observed(f))
+            elif bs:
                 # AC-053.2: ni PASS ni FAIL, aunque la app haya dicho ok=true: lo que se observo
                 # queda en el JSON (S2 lo necesita), pero no se juzga.
                 blocked(panel, step, bs, extras(f) or "-", observed(f))
@@ -1521,8 +1539,12 @@ run_device() {
     local host_lines
     host_lines="$(smoke_py host "$adb_bin" "$serial" "$setup" "$plan" "$run" "$PKG" "$out/precondiciones-host")" \
         || { echo "FAIL — no corrieron los verificadores de host" >&2; exit 2; }
+    # En su PROPIO archivo, no en la captura: logcat escribe ahi en paralelo y una linea podria
+    # intercalarse. Se juntan con la captura al armar el log.
+    local host_log="$out/precondiciones-host.log"
+    : > "$host_log"
     if [[ -n "$host_lines" ]]; then
-        printf '%s\n' "$host_lines" >> "$raw"
+        printf '%s\n' "$host_lines" > "$host_log"
         sed -E 's/.* panel=([^ ]+) .* id=([^ ]+) cumplida=([^ ]+) evidencia=([^ ]+) .*/  \3  \1\/\2  \4/' <<< "$host_lines"
     else
         echo "  (el plan '$plan' no tiene precondiciones de host)"
@@ -1565,7 +1587,7 @@ run_device() {
             echo "(logcat se corto; se relanza)"
             start_capture
         fi
-        tr -d '\r' < "$raw" | grep -F "run=$run " > "$log" || true
+        cat "$host_log" "$raw" | tr -d '\r' | grep -F "run=$run " > "$log" || true
         if (( ! announced )) && grep -q 'step=esperando-humano' "$log"; then
             announced=1
             send_forged_permission "$(grep -m1 'step=esperando-humano' "$log")"
@@ -1581,7 +1603,7 @@ run_device() {
     kill "$logcat_pid" 2>/dev/null || true
     # Un ultimo volcado del buffer, combinado con lo capturado y sin duplicados (el orden de emision
     # se conserva: primero lo capturado en vivo).
-    { cat "$raw"; adb_ logcat -d -v raw -s HARNESS-SMOKE:I 2>/dev/null || true; } \
+    { cat "$host_log" "$raw"; adb_ logcat -d -v raw -s HARNESS-SMOKE:I 2>/dev/null || true; } \
         | tr -d '\r' | grep -F "run=$run " | awk '!seen[$0]++' > "$log" || true
     local pid
     pid="$(adb_ shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
