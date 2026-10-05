@@ -26,6 +26,12 @@ package com.watermellonstudios.audio.harness.smoke
  *   el script la da como FAIL si reaparece.
  * - La corrida empieza con `panel=plan step=inicio` y termina con `panel=plan step=fin`. Sin `fin`
  *   el script no sabe si terminó, y lo dice.
+ * - `step=precondicion` (REQ-053 S1) tampoco es un veredicto: es lo que la APP verificó de una
+ *   precondición de la ficha de setup (`scripts/smoke-setup.json`), con formato fijo
+ *   `id=<id> cumplida=<true|false> evidencia=<texto>` y `ok` igual a `cumplida`. Sólo la arma
+ *   [precondition]; `format` la rechaza. El juez del script la cruza con la ficha y decide
+ *   BLOQUEADO. Las del HOST las escribe el script con `verificador=host`, una clave que la app no
+ *   puede escribir: así una línea de la app nunca pasa por la verificación del host.
  *
  * En Android las líneas van a logcat con el tag [TAG]; en iOS, a la salida estándar.
  */
@@ -42,8 +48,23 @@ object HarnessSmoke {
     /** La marca vieja de D11 (MINI-038). Reservada para que nadie la vuelva a escribir a mano. */
     private const val FIELD_MEASURED_RETIRED: String = "medido"
 
+    /** REQ-053 S1: el paso que lleva una precondición verificada por la app. Ver el KDoc del objeto. */
+    const val STEP_PRECONDITION: String = "precondicion"
+
+    /** La clave con la que el SCRIPT firma sus precondiciones de host. La app no la puede escribir. */
+    private const val FIELD_VERIFIER: String = "verificador"
+
     private val KEY = Regex("[a-z0-9-]+")
-    private val RESERVED = setOf("v", "run", "panel", "step", "ok", FIELD_APPLICABLE, FIELD_MEASURED_RETIRED)
+    private val RESERVED = setOf("v", "run", "panel", "step", "ok", FIELD_APPLICABLE, FIELD_MEASURED_RETIRED, FIELD_VERIFIER)
+
+    /**
+     * La línea de una precondición que verificó la app:
+     * `... step=precondicion ok=<met> id=<id> cumplida=<met> evidencia=<evidence>`.
+     */
+    fun precondition(run: String, panel: String, id: String, met: Boolean, evidence: String): String {
+        require(KEY.matches(id)) { "id de precondicion invalido: '$id'" }
+        return line(run, panel, STEP_PRECONDITION, met, listOf("id" to id, "cumplida" to met, "evidencia" to evidence), true)
+    }
 
     /**
      * Arma una línea. Tira [IllegalArgumentException] si una clave no es `[a-z0-9-]+` o pisa un
@@ -57,6 +78,18 @@ object HarnessSmoke {
         ok: Boolean,
         fields: List<Pair<String, Any?>> = emptyList(),
         applicable: Boolean = true,
+    ): String {
+        require(step != STEP_PRECONDITION) { "una precondicion se arma con precondition(), no con format()" }
+        return line(run, panel, step, ok, fields, applicable)
+    }
+
+    private fun line(
+        run: String,
+        panel: String,
+        step: String,
+        ok: Boolean,
+        fields: List<Pair<String, Any?>>,
+        applicable: Boolean,
     ): String {
         require(KEY.matches(panel)) { "panel invalido: '$panel'" }
         require(KEY.matches(step)) { "step invalido: '$step'" }
@@ -116,6 +149,15 @@ class SmokeReporter(private val sink: SmokeSink, val run: String) {
             ),
         )
         return false
+    }
+
+    /**
+     * `step=precondicion` (REQ-053 S1): lo que la app verificó de una precondición de la ficha.
+     * Devuelve [met], por la misma razón que [report].
+     */
+    fun precondition(panel: String, id: String, met: Boolean, evidence: String): Boolean {
+        sink.emit(HarnessSmoke.precondition(run, panel, id, met, evidence))
+        return met
     }
 
     /** `step=esperando-humano`, con la acción exacta que hay que hacer. */

@@ -21,8 +21,10 @@ import com.watermellonstudios.audio.domain.usb.UsbTestResult
 import com.watermellonstudios.audio.domain.usb.UsbTestStatus
 import com.watermellonstudios.audio.domain.usb.UsbTransferStats
 import com.watermellonstudios.audio.harness.smoke.ENGINE_STATE_STOPPED
+import com.watermellonstudios.audio.harness.smoke.SmokePreconditions
 import com.watermellonstudios.audio.harness.smoke.SmokeReporter
 import com.watermellonstudios.audio.harness.smoke.SuiteRowVerdict
+import com.watermellonstudios.audio.harness.smoke.usbPermissionAfterDialog
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +36,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.TimeSource
 
 /**
  * MINI-038 — el camino USB del harness sobre la API pública de la librería: [IUsbAudioManager]
@@ -113,6 +116,8 @@ class UsbHarness(private val context: Context) {
     private suspend fun connectWithEngineReady(r: SmokeReporter, device: UsbAudioDevice, humanTimeoutMs: Long): Boolean {
         val hadPermission = manager.hasPermission(device)
         val result = if (hadPermission) {
+            // REQ-053 S1 (D13): sin diálogo no hay ventana; la precondición se ve en el acto.
+            r.precondition(PANEL, SmokePreconditions.USB_PERMISSION, true, "ya-concedido")
             r.report(PANEL, "permiso", true, "origen" to "ya-concedido", "dispositivo" to device.vidPid)
             withTimeoutOrNull(humanTimeoutMs) { manager.connectDevice(device) }
         } else {
@@ -214,6 +219,7 @@ class UsbHarness(private val context: Context) {
             "dispositivo" to device.vidPid, "espera-max-s" to humanTimeoutMs / 1000,
             "dialogo-pedido" to requested,
         )
+        val window = TimeSource.Monotonic.markNow()
         val result = withTimeoutOrNull(humanTimeoutMs) { pending.await() }
         if (result == null) pending.cancel()
         watcher.cancelAndJoin()
@@ -232,6 +238,15 @@ class UsbHarness(private val context: Context) {
                 is UsbResult.Failure -> result.error
             },
         )
+        // REQ-053 S1 (D13): el permiso como precondición, al cerrar la ventana. Una negación espera
+        // el resto de la ventana antes de afirmarse (ver usbPermissionAfterDialog); sin respuesta y
+        // sin permiso no hay línea, y el juez lo da HUMANO.
+        usbPermissionAfterDialog(
+            answered = result != null,
+            hasPermission = { manager.hasPermission(device) },
+            remainingMs = { humanTimeoutMs - window.elapsedNow().inWholeMilliseconds },
+            pause = { delay(it) },
+        )?.let { r.precondition(PANEL, SmokePreconditions.USB_PERMISSION, it.met, it.evidence) }
         result
     }
 
