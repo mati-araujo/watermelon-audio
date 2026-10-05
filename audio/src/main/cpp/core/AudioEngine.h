@@ -725,6 +725,12 @@ public:
         return mDualTouch.isEnabled();
     }
 
+    /// Sonda de tests (REQ-052): bloques en que el engine del slot del dual touch
+    /// se proceso (0 = principal, 1 = el otro). Ver DualTouchManager::slotBlocksRendered.
+    uint64_t dualTouchSlotBlocksRendered(int slot) const {
+        return mDualTouch.slotBlocksRendered(slot);
+    }
+
     // ========== INPUT NODE INTEGRATION (Full-Duplex Monitoring) ==========
 
     /**
@@ -968,6 +974,14 @@ private:
     void renderSingleTouch(float* output, int32_t numFrames,
                            int cachedEngineType, size_t cachedOscIndex,
                            bool cachedHasActiveModulator, size_t cachedModIndex);
+
+    /**
+     * Procesa la fuente de UN slot del dual touch (engine o, en Classic, el
+     * oscilador primario/secundario) en @p dst, con @p freq / @p amp, y lo
+     * cuenta en la sonda del slot. Thread de audio (REQ-052).
+     */
+    void renderDualSlotSource(int slot, SynthEngine* engine, size_t oscIndex,
+                              float* dst, int32_t numFrames, float freq, float amp);
 
     /** Render DUAL_TOUCH mode: two oscillators + mix + effects */
     void renderDualTouch(float* output, int32_t numFrames,

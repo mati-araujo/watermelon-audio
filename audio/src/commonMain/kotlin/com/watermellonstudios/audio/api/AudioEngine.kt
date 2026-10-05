@@ -305,7 +305,24 @@ interface AudioEngine {
     /**
      * Set dual touch mix mode.
      *
-     * @param mode Mix mode (0=SUM, 1=AVERAGE, etc.)
+     * Cada dedo es una voz con su propia envolvente: ataque de ~5 ms al apoyar y, al levantar,
+     * un release exponencial de ~80 ms a −60 dB con la última frecuencia y amplitud del dedo.
+     * Si el dedo vuelve durante el release, sube desde donde estaba. Con un solo dedo, la salida
+     * es esa voz a ganancia 1 en todos los modos.
+     *
+     * Modos:
+     * - `0` SUM y `1` AVERAGE (default): **desde 2.22.0 son la misma ley, suma a ganancia 1 por
+     *   voz**. Antes los dos multiplicaban la suma por 0,5, así que una voz bajaba ~6 dB al
+     *   entrar la otra. El pico de la suma lo cuida la protección de salida del motor.
+     *   AVERAGE conserva su nombre por compatibilidad.
+     * - `2` MAX: max(|voz1|, |voz2|) con el signo de la suma.
+     * - `3` CROSSFADE: (1 − d)·voz1 + d·voz2, con d = distancia entre los dedos en [0, 1].
+     * - `4` RING: voz1·voz2·0,5.
+     * - `5` AMPLITUDE_BALANCED: pesos amp_i / (amp1 + amp2).
+     *
+     * Los modos 2–5 conservan su ley con los dos dedos y comparten la envolvente.
+     *
+     * @param mode Mix mode (0=SUM, 1=AVERAGE, 2=MAX, 3=CROSSFADE, 4=RING, 5=AMPLITUDE_BALANCED)
      */
     fun setDualTouchMixMode(mode: Int)
 

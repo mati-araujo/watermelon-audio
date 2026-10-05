@@ -1593,47 +1593,31 @@ void AudioEngine::renderDualTouch(float* output, int32_t numFrames,
     );
 
     if (hasValidSource) {
-        const float amp1 = dualTouchState.amp1;
-        const float amp2 = dualTouchState.amp2;
-        const float freq1 = dualTouchState.freq1;
-        const float freq2 = dualTouchState.freq2;
+        // REQ-052 — cada slot es una voz con su envolvente. El plan dice que
+        // slots se procesan en este bloque (apoyados o en release) y con que
+        // frecuencia y amplitud (las retenidas, si el dedo ya se levanto).
+        const DualTouchManager::SlotBlockPlan plan = mDualTouch.planSlotBlock(dualTouchState);
+        float* const mixBuffer = mOutputStage.getTempBuffer();
 
-        const bool touch1Active = amp1 > 0.001f;
-        const bool touch2Active = amp2 > 0.001f;
-
-        if (touch1Active && touch2Active) {
-            if (engine1 && engine2) {
-                engine1->process(mDualTouch.getTouch1Buffer(), numFrames, freq1, amp1);
-                engine2->process(mDualTouch.getTouch2Buffer(), numFrames, freq2, amp2);
-            } else {
-                mOscBank.getPrimaryOscillator(static_cast<int>(cachedOscIndex))->setParameters(freq1, amp1);
-                mOscBank.getPrimaryOscillator(static_cast<int>(cachedOscIndex))->render(mDualTouch.getTouch1Buffer(), numFrames);
-                mOscBank.getSecondaryOscillator(static_cast<int>(cachedOscIndex))->setParameters(freq2, amp2);
-                mOscBank.getSecondaryOscillator(static_cast<int>(cachedOscIndex))->render(mDualTouch.getTouch2Buffer(), numFrames);
-            }
-            mDualTouch.mixSignals(
-                mDualTouch.getTouch1Buffer(),
-                mDualTouch.getTouch2Buffer(),
-                mOutputStage.getTempBuffer(),
-                numFrames,
-                dualTouchState
-            );
-        } else if (touch1Active) {
-            if (engine1) {
-                engine1->process(mOutputStage.getTempBuffer(), numFrames, freq1, amp1);
-            } else {
-                mOscBank.getPrimaryOscillator(static_cast<int>(cachedOscIndex))->setParameters(freq1, amp1);
-                mOscBank.getPrimaryOscillator(static_cast<int>(cachedOscIndex))->render(mOutputStage.getTempBuffer(), numFrames);
-            }
-        } else if (touch2Active) {
-            if (engine2) {
-                engine2->process(mOutputStage.getTempBuffer(), numFrames, freq2, amp2);
-            } else {
-                mOscBank.getSecondaryOscillator(static_cast<int>(cachedOscIndex))->setParameters(freq2, amp2);
-                mOscBank.getSecondaryOscillator(static_cast<int>(cachedOscIndex))->render(mOutputStage.getTempBuffer(), numFrames);
-            }
+        if (plan.render[0] && plan.render[1]) {
+            renderDualSlotSource(0, engine1, cachedOscIndex, mDualTouch.getTouch1Buffer(),
+                                 numFrames, plan.freq[0], plan.amp[0]);
+            renderDualSlotSource(1, engine2, cachedOscIndex, mDualTouch.getTouch2Buffer(),
+                                 numFrames, plan.freq[1], plan.amp[1]);
+            mDualTouch.blendSlotVoices(mDualTouch.getTouch1Buffer(),
+                                       mDualTouch.getTouch2Buffer(),
+                                       mixBuffer, numFrames, dualTouchState);
+        } else if (plan.render[0] || plan.render[1]) {
+            // Una sola voz: directo al buffer de mezcla, con su envolvente en el
+            // lugar. Con el dedo apoyado y la ganancia en 1 cuesta lo mismo que
+            // el camino de un dedo de antes.
+            const int slot = plan.render[0] ? 0 : 1;
+            renderDualSlotSource(slot, slot == 0 ? engine1 : engine2, cachedOscIndex,
+                                 mixBuffer, numFrames, plan.freq[slot], plan.amp[slot]);
+            mDualTouch.shapeSoloSlot(slot, mixBuffer, numFrames);
         } else {
-            simd::clearBuffer(mOutputStage.getTempBuffer(), numFrames * 2);
+            // Ningun dedo y ningun release pendiente: no se procesa ningun engine.
+            simd::clearBuffer(mixBuffer, totalSamples);
         }
 
         // Apply engine crossfade if switching
@@ -1649,8 +1633,28 @@ void AudioEngine::renderDualTouch(float* output, int32_t numFrames,
         applyEffectsAndLooper(output, numFrames);
 
     } else {
+        mDualTouch.abandonSlotVoices();
         std::fill_n(output, totalSamples, 0.0f);
     }
+}
+
+void AudioEngine::renderDualSlotSource(int slot, SynthEngine* engine, size_t oscIndex,
+                                       float* dst, int32_t numFrames,
+                                       float freq, float amp) {
+    if (engine) {
+        engine->process(dst, numFrames, freq, amp);
+    } else {
+        AudioSource* osc = (slot == 0)
+            ? mOscBank.getPrimaryOscillator(static_cast<int>(oscIndex))
+            : mOscBank.getSecondaryOscillator(static_cast<int>(oscIndex));
+        if (osc) {
+            osc->setParameters(freq, amp);
+            osc->render(dst, numFrames);
+        } else {
+            simd::clearBuffer(dst, numFrames * 2);
+        }
+    }
+    mDualTouch.countSlotBlock(slot);
 }
 
 void AudioEngine::handleMixMonitoring(float* output, int32_t numFrames,
@@ -1777,6 +1781,7 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
         const int cachedEngineType = mEngineDispatcher.detectCrossfadeAndGetType();
 
         // Render per mode
+        bool rendersDual = false;
         if (!oscillatorEnabled && hasInputMonitoring) {
             renderInputFx(outputData, numFrames, inputNode);
 
@@ -1795,7 +1800,12 @@ watermelon_audio::IAudioCallback::Result AudioEngine::processAudioBlock(
         } else {
             renderDualTouch(outputData, numFrames, dualTouchState, cachedEngineType,
                             cachedOscIndex, cachedHasActiveModulator, cachedModIndex);
+            rendersDual = true;
         }
+
+        // REQ-052 — todo bloque que NO paso por renderDualTouch suelta las
+        // envolventes por slot (ver DualTouchManager::abandonSlotVoices).
+        if (!rendersDual) mDualTouch.abandonSlotVoices();
 
         // MIX mode monitoring (post-render)
         handleMixMonitoring(outputData, numFrames, oscillatorEnabled, hasInputMonitoring);
@@ -2413,6 +2423,13 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate, int maxBlock
 
     // Configure synth engines (Phase 1E — via SynthEngineDispatcher)
     mEngineDispatcher.prepare(sampleRate, maxBlockSize);
+
+    // REQ-052 — los coeficientes de la envolvente por slot del dual touch salen
+    // del rate; el thread de audio los recalcula al ver el valor nuevo.
+    mDualTouch.setEnvelopeSampleRate(sampleRate);
+    // Un prepare arranca de cero: una envolvente que quedo "apoyada" al parar
+    // el motor no puede sonar como release fantasma en el primer bloque.
+    mDualTouch.requestEnvelopeRestart();
     mEngineDispatcher.updateVoiceEngines(mVoiceManager.get());
     LOGI("SynthEngineDispatcher prepared");
 
