@@ -1047,6 +1047,7 @@ JSON
     grep -v ' id=t-app-cap ' "$tmp/verde.log" > "$tmp/b2.log"
     expect "b2: la app no emitio su linea" 4 "$tmp/b2.log" "$auto"
     expect_line "b2: captura/start sale BLOQUEADO no-verificable" '^BLOQUEADO +captura/start +precondicion=t-app-cap estado=no-verificable' "$tmp/b2.log" "$auto"
+    expect_line "b2: salida/start (otro panel, mismo paso) se juzga" '^PASS +salida/start ' "$tmp/b2.log" "$auto"
     grep -v ' id=t-host-cap ' "$tmp/verde.log" > "$tmp/b3.log"
     expect "b3: el host no registro su verificacion" 4 "$tmp/b3.log" "$auto"
     sed -E '/ id=t-app-cap /s/ cumplida=true / cumplida=quizas /' "$tmp/verde.log" > "$tmp/b4.log"
@@ -1097,6 +1098,29 @@ JSON
     expect "D13: sin espera humana y sin linea = BLOQUEADO" 4 "$tmp/p2.log"
     expect_line "D13: ... por no-verificable" '^BLOQUEADO +usb/conectar +precondicion=t-permiso estado=no-verificable' "$tmp/p2.log"
     expect "D13: concedido = 0 (M7)" 0 "$tmp/m7.log"
+    # Gemelo con dialogo: el humano dio el permiso (`permiso ok=true`) y la app no emitio la linea.
+    # No hay espera pendiente que la exima: no-verificable.
+    with_usb "$tmp/p3.log" '/ id=t-permiso /d'
+    expect "D13: dialogo, permiso dado y sin linea = BLOQUEADO" 4 "$tmp/p3.log"
+    # Negado y permiso-falso no emitido: un paso de WITH_DIALOG que depende tambien sale BLOQUEADO.
+    grep -v ' step=permiso-falso ' "$tmp/p1.log" > "$tmp/p1b.log"
+    expect_line "D13: permiso-falso no emitido sale BLOQUEADO" '^BLOQUEADO +usb/permiso-falso +precondicion=t-permiso .*no-emitido' "$tmp/p1b.log"
+    # El permiso se CUMPLIO pero connectDevice no volvio (no hay `permiso`, conectar sin respuesta):
+    # no es un humano pendiente — es un FAIL de la libreria.
+    with_usb "$tmp/p4.log" "/step=permiso /d; s/step=conectar ok=true/step=conectar ok=false motivo=sin-respuesta-humana/; /step=(motor-callback|capacidades|descriptores|backend|wake-lock|streaming-[a-z]+|reconectar-mismo|conectar-otro|suite[-0-9]*|backend-restaurado|desconectar) /d"
+    usb_failed "$tmp/p4.log"
+    expect "D13: permiso cumplido y connect colgado = FAIL" 1 "$tmp/p4.log"
+    expect_line "D13: ... conectar sale FAIL, no HUMANO" '^FAIL +usb/conectar ' "$tmp/p4.log"
+
+    # Un paso CONCLUYENTE (`concluyente=true`: la app sabe que la falla no la explica ninguna
+    # precondicion — p.ej. un grant que UsbManager desmiente) es FAIL aunque este bloqueado.
+    sed -E 's/step=permiso-falso ok=false [^ ]+/step=permiso-falso ok=false concluyente=true granted-sin-permiso-en-usbmanager=1/' \
+        "$tmp/p1.log" > "$tmp/k1.log"
+    expect "concluyente: grant falso con el permiso negado = FAIL" 1 "$tmp/k1.log"
+    expect_line "concluyente: permiso-falso sale FAIL" '^FAIL +usb/permiso-falso +concluyente' "$tmp/k1.log"
+    # Gemelo: `concluyente` nunca destapa un PASS — con ok=true el paso sigue BLOQUEADO.
+    sed -E 's/(panel=captura step=nivel ok=true)/\1 concluyente=true/' "$tmp/a1.log" > "$tmp/k2.log"
+    expect "concluyente con ok=true sigue BLOQUEADO" 4 "$tmp/k2.log" "$auto"
 
     # Una linea de precondicion que la ficha no declara es FAIL: o la app y la ficha se
     # desincronizaron, o alguien emite precondiciones que nadie juzga.
@@ -1164,15 +1188,22 @@ JSON
     else
         printf '  MAL   %-58s\n' "1.4: el chequeo ve un id copiado al script"; failures=$((failures + 1))
     fi
-    local id_app missing_app=""
-    for id_app in $(smoke_py ids "$real" | awk '$3 == "app" {print $2}'); do
-        grep -rqF "\"$id_app\"" harness/src/commonMain harness/src/androidMain || missing_app+=" $id_app"
-    done
+    local missing_app
+    missing_app="$(app_ids_not_emitted harness/src "$real")"
     if [[ -z "$missing_app" ]] && smoke_py ids "$real" | grep -q ' app$'; then
-        printf '  ok    %-58s\n' "ficha real: cada id de app lo emite el harness"
+        printf '  ok    %-58s\n' "ficha real: cada id de app tiene su precondition() en el harness"
     else
-        printf '  MAL   %-58s falta:%s\n' "ficha real: cada id de app lo emite el harness" "${missing_app:- (no hay ids de app)}"
+        printf '  MAL   %-58s falta: %s\n' "ficha real: cada id de app tiene su precondition() en el harness" "${missing_app:-(no hay ids de app)}"
         failures=$((failures + 1))
+    fi
+    # Su mutante: el harness sin la llamada que emite mic... (la primera de app de la ficha).
+    cp -R harness/src "$tmp/harness-src"
+    grep -rl 'precondition(.*SmokePreconditions\.' "$tmp/harness-src" | head -1 | xargs sed -i.bak '/precondition(.*SmokePreconditions\./d'
+    find "$tmp/harness-src" -name '*.bak' -delete
+    if [[ -n "$(app_ids_not_emitted "$tmp/harness-src" "$real")" ]]; then
+        printf '  ok    %-58s\n' "... y el chequeo ve una llamada borrada"
+    else
+        printf '  MAL   %-58s\n' "... y el chequeo ve una llamada borrada"; failures=$((failures + 1))
     fi
 
     # La ficha real sobre el control grabado (01/10, anterior a REQ-053, sin lineas de
@@ -1222,14 +1253,17 @@ esac
 case "$cmd" in
     *"dumpsys package"*)
         g=true; [[ "$FAKE_MODE" == incumplida ]] && g=false
-        printf 'Packages:\n  Package [x]\n    runtime permissions:\n      android.permission.RECORD_AUDIO: granted=%s, flags=[ USER_SENSITIVE ]\n' "$g" ;;
+        # Dos usuarios: el 0 (el que corre el smoke) y un perfil secundario sin el permiso.
+        printf 'Packages:\n  Package [x]\n    User 0: ceDataInode=1 installed=true\n      runtime permissions:\n        android.permission.RECORD_AUDIO: granted=%s, flags=[ USER_SENSITIVE ]\n    User 10: ceDataInode=0 installed=false\n      runtime permissions:\n        android.permission.RECORD_AUDIO: granted=false, flags=[ ]\n' "$g" ;;
     *"dumpsys usb"*)
         f=audio
         [[ "$FAKE_MODE" == incumplida ]] && f=hid
         [[ "$FAKE_MODE" == sin-host ]] && f=sin-host
         cat "$FAKE_DIR/dumpsys-usb-$f.txt" ;;
     *"ps -A"*)
-        printf '  PID NAME\n    1 init\n  812 com.android.systemui\n'
+        printf '  PID NAME\n    1 init\n'
+        # `ps-ciego`: un ps que no ve los procesos de otros UID (sin system_server).
+        [[ "$FAKE_MODE" == ps-ciego ]] || printf ' 1500 system_server\n  812 com.android.systemui\n'
         [[ "$FAKE_MODE" == incumplida ]] && printf ' 4242 com.example.ajena:servicio\n' ;;
     *"ls /dev/snd"*)
         printf 'controlC0\npcmC0D0p\npcmC0D0c\ntimer\n'
@@ -1301,7 +1335,7 @@ TXT
             bad=$((bad + 1))
         fi
     }
-    for mode in ok incumplida falla basura denegado cortado rc-1 sin-host alsa-cerrada alsa-oculta; do
+    for mode in ok incumplida falla basura denegado cortado rc-1 ps-ciego sin-host alsa-cerrada alsa-oculta; do
         FAKE_MODE="$mode" FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
             smoke_py host "$evid/adb" "$serial" "$ficha" todo "$run" "$PKG" "$evid/evidencia-$mode" \
             > "$evid/out-$mode.txt" 2>&1 || true
@@ -1313,6 +1347,7 @@ TXT
         for id in t-host-cap t-usb-clase t-host-usb t-alsa; do host_case "$mode" "$id" no-verificable; done
     done
     host_case sin-host t-usb-clase no-verificable
+    host_case ps-ciego t-host-usb no-verificable
     host_case alsa-cerrada t-alsa true
     host_case alsa-oculta t-alsa no-verificable
     local check
@@ -1362,6 +1397,19 @@ TXT
     if [[ "$got" == 4 ]]; then printf '  ok    %-58s exit 4\n' "host+juez: adb caido = BLOQUEADO"
     else printf '  MAL   %-58s exit %s\n' "host+juez: adb caido = BLOQUEADO" "$got"; bad=$((bad + 1)); fi
     return "$bad"
+}
+
+# app_ids_not_emitted <raiz de harness/src> <ficha>: los ids de app de la ficha que el harness NO
+# emite — sin la constante en SmokePreconditions, o sin una llamada `precondition(...)` que la use.
+app_ids_not_emitted() {
+    local root="$1" setup="$2" id name
+    for id in $(smoke_py ids "$setup" | awk '$3 == "app" {print $2}'); do
+        name="$(grep -rhE --include='*.kt' "const val [A-Z_]+: String = \"$id\"" "$root" | sed -E 's/.*const val ([A-Z_]+):.*/\1/' | head -1)"
+        if [[ -z "$name" ]] || ! grep -rqE --include='*.kt' "precondition\(.*SmokePreconditions\.$name\b" "$root"; then
+            printf '%s ' "$id"
+        fi
+    done
+    return 0
 }
 
 # ids_literal_in <archivo> <ficha>: los ids de la ficha que aparecen escritos en el archivo, como

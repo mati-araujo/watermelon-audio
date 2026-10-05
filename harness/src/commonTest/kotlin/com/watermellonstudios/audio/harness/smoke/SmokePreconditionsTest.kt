@@ -40,7 +40,7 @@ class SmokePreconditionsTest {
     @Test
     fun aGrantedPermissionIsMetAtOnce() = runTest {
         val w = Window(120_000)
-        val reading = assertNotNull(usbPermissionAfterDialog(answered = true, { true }, { w.remainingMs }, w::pause))
+        val reading = assertNotNull(usbPermissionAfterDialog(DialogOutcome.OTHER, { true }, { w.remainingMs }, w::pause))
         assertTrue(reading.met)
         assertEquals("dialogo:concedido", reading.evidence)
         assertEquals(0, w.paused)
@@ -56,9 +56,9 @@ class SmokePreconditionsTest {
     @Test
     fun aDenialIsUnmetOnlyAfterTheWholeWindow() = runTest {
         val w = Window(10_000)
-        val reading = assertNotNull(usbPermissionAfterDialog(answered = true, { false }, { w.remainingMs }, w::pause))
+        val reading = assertNotNull(usbPermissionAfterDialog(DialogOutcome.DENIED, { false }, { w.remainingMs }, w::pause))
         assertFalse(reading.met)
-        assertEquals("dialogo:denegado", reading.evidence)
+        assertEquals("resultado=PERMISSION_DENIED,sin-permiso-al-cerrar-la-ventana", reading.evidence)
         assertEquals(10_000, w.paused)
     }
 
@@ -71,10 +71,10 @@ class SmokePreconditionsTest {
         val w = Window(10_000)
         var reads = 0
         val reading = assertNotNull(
-            usbPermissionAfterDialog(answered = true, { reads++ >= 3 }, { w.remainingMs }, w::pause),
+            usbPermissionAfterDialog(DialogOutcome.DENIED, { reads++ >= 3 }, { w.remainingMs }, w::pause),
         )
         assertTrue(reading.met)
-        assertEquals("negado-y-despues-concedido", reading.evidence)
+        assertEquals("concedido-despues-del-resultado", reading.evidence)
         assertTrue(w.paused in 1 until 10_000)
     }
 
@@ -87,7 +87,7 @@ class SmokePreconditionsTest {
     @Test
     fun noAnswerInTheWindowEmitsNothing() = runTest {
         val w = Window(0)
-        assertNull(usbPermissionAfterDialog(answered = false, { false }, { w.remainingMs }, w::pause))
+        assertNull(usbPermissionAfterDialog(DialogOutcome.NO_ANSWER, { false }, { w.remainingMs }, w::pause))
         assertEquals(0, w.paused)
     }
 
@@ -95,7 +95,7 @@ class SmokePreconditionsTest {
     @Test
     fun noAnswerButThePermissionIsThereIsMet() = runTest {
         val w = Window(0)
-        val reading = assertNotNull(usbPermissionAfterDialog(answered = false, { true }, { w.remainingMs }, w::pause))
+        val reading = assertNotNull(usbPermissionAfterDialog(DialogOutcome.NO_ANSWER, { true }, { w.remainingMs }, w::pause))
         assertTrue(reading.met)
         assertEquals("concedido-sin-respuesta-de-connect", reading.evidence)
     }
@@ -104,7 +104,53 @@ class SmokePreconditionsTest {
     @Test
     fun theWaitAfterADenialNeverExceedsTheWindow() = runTest {
         val w = Window(1_250)
-        usbPermissionAfterDialog(answered = true, { false }, { w.remainingMs }, w::pause)
+        usbPermissionAfterDialog(DialogOutcome.DENIED, { false }, { w.remainingMs }, w::pause)
         assertEquals(1_250, w.paused)
+    }
+
+    /**
+     * D13: sólo un PERMISSION_DENIED es una negación. Otro fallo sin permiso al cerrar la ventana
+     * no muestra que el humano haya negado: no hay línea, y el juez lo da HUMANO.
+     *
+     * Bug que atrapa: afirmar "negado" de cualquier fallo de `connectDevice` (un grant falso que
+     * terminó en SecurityException se leería como un humano que negó, y se bloquearía).
+     */
+    @Test
+    fun aFailureThatIsNotADenialWithoutPermissionEmitsNothing() = runTest {
+        val w = Window(2_000)
+        assertNull(usbPermissionAfterDialog(DialogOutcome.OTHER, { false }, { w.remainingMs }, w::pause))
+        assertEquals(2_000, w.paused)
+    }
+
+    /**
+     * `permiso-falso` es CONCLUYENTE (el juez no lo puede bloquear) cuando la regresión de REQ-050
+     * está probada sin importar lo que haga el humano: un grant que UsbManager desmiente, o un
+     * PERMISSION_DENIED con el permiso concedido al cerrar la ventana.
+     *
+     * Bug que atrapa: marcar concluyente la negación ambigua (una negación humana de verdad
+     * saldría FAIL en vez de BLOQUEADO, contra D13), o no marcar el grant falso (un FAIL probado
+     * quedaría tapado por el BLOQUEADO del permiso negado).
+     */
+    @Test
+    fun theForgedCheckIsConclusiveOnlyWhenTheHumanCannotExplainIt() {
+        val forgedGrant = forgedPermissionCheck(forgedGrants = 1, denied = false, permissionAtWindowClose = false)
+        assertFalse(forgedGrant.ok)
+        assertTrue(forgedGrant.conclusive)
+        assertEquals("granted-con-usbmanager-diciendo-que-no", forgedGrant.reason)
+
+        val deniedThenGranted = forgedPermissionCheck(forgedGrants = 0, denied = true, permissionAtWindowClose = true)
+        assertFalse(deniedThenGranted.ok)
+        assertTrue(deniedThenGranted.conclusive)
+        assertEquals("negado-con-el-permiso-concedido:broadcast-ajeno", deniedThenGranted.reason)
+
+        val ambiguous = forgedPermissionCheck(forgedGrants = 0, denied = true, permissionAtWindowClose = false)
+        assertFalse(ambiguous.ok)
+        assertFalse(ambiguous.conclusive)
+        assertEquals("negado:humano-o-broadcast-ajeno", ambiguous.reason)
+
+        val clean = forgedPermissionCheck(forgedGrants = 0, denied = false, permissionAtWindowClose = true)
+        assertTrue(clean.ok)
+        assertFalse(clean.conclusive)
+        assertNull(clean.reason)
     }
 }
