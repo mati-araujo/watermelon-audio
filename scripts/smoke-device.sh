@@ -386,7 +386,7 @@ def audioserver_threads(dump):
     for line in dump.splitlines():
         if line and not line[0].isspace():
             m = re.match(r"(Output|Input|Mmap\S*) thread (?:\S+, name ([^\s,]+))?", line)
-            cur = {"kind": m.group(1), "name": m.group(2) or "?", "devices": [], "standby": None} if m else None
+            cur = {"kind": m.group(1), "name": m.group(2) or "?", "devices": [], "seen": set(), "standby": None} if m else None
             if cur:
                 threads.append(cur)
             continue
@@ -395,6 +395,7 @@ def audioserver_threads(dump):
         m = re.match(r"  (Output devices|Input device): (.*)$", line)
         if m:
             cur["devices"].append(m.group(2))
+            cur["seen"].add(m.group(1))
         m = re.match(r"  Standby: (yes|no)\s*$", line)
         if m and cur["standby"] is None:
             cur["standby"] = m.group(1)
@@ -418,6 +419,12 @@ def check_alsa_card_free(p, sh):
     threads = audioserver_threads(dump)
     if not any(t["kind"] == "Output" for t in threads):
         raise Unverifiable("audio_flinger-sin-Output-thread:formato-no-reconocido")
+    # Un hilo vivo sin la linea de dispositivos de SU lado (un Output thread trae tambien un
+    # `Input device: 0`, que no lo cuenta) podria ser el de la placa: no se sabe.
+    own = {"Output": "Output devices", "Input": "Input device"}
+    nameless = [t["name"] for t in threads if (own[t["kind"]] not in t["seen"] if t["kind"] in own else not t["seen"])]
+    if nameless:
+        raise Unverifiable("%s:hilo-sin-linea-de-dispositivos" % ",".join(nameless))
     usb = [t for t in threads if any(re.search(r"AUDIO_DEVICE_(OUT|IN)_USB_", d) for d in t["devices"])]
     taken = [t for t in usb if t["standby"] == "no"]
     if taken:
@@ -1603,6 +1610,8 @@ FAKE
     sed -E 's/^-   Standby: yes$/-   Standby: no/; s/^-   Output devices: .*$/-   Output devices: 0x4000000 (AUDIO_DEVICE_OUT_USB_HEADSET)/' "$af" > "$evid/af-cerrado-no.txt"
     sed -E "${usb_hilo}"'s/^      Standby: yes$/      Standby: no/' "$af" > "$evid/af-hal-no.txt"
     : > "$evid/af-vacio.txt"
+    # El formato que cambia: `Output devices:` pasa a singular y ningun hilo vivo dice sus dispositivos.
+    sed -E 's/^  Output devices: /  Output device: /' "$af" > "$evid/af-sin-dispositivos.txt"
     sed -E '/^Output thread /,$d' "$af" > "$evid/af-sin-hilos.txt"
     sed -E "${usb_hilo}"'s/AUDIO_DEVICE_OUT_USB_HEADSET/AUDIO_DEVICE_OUT_SPEAKER/' "$af" > "$evid/af-sin-usb.txt"
     sed -E "${usb_hilo}"'{/^  Standby: /d;}' "$af" > "$evid/af-sin-standby.txt"
@@ -1621,7 +1630,7 @@ FAKE
         fi
     }
     for mode in ok incumplida falla basura denegado cortado rc-1 ps-ciego sin-host dos-dispositivos \
-        af-standby af-tomada af-cerrado-no af-hal-no af-vacio af-sin-hilos af-sin-usb af-sin-standby af-entrada-tomada \
+        af-standby af-tomada af-cerrado-no af-hal-no af-vacio af-sin-hilos af-sin-usb af-sin-standby af-sin-dispositivos af-entrada-tomada \
         reclamada sin-placa usb-falla snd-rc snd-ilegible snd-vacio; do
         FAKE_MODE="$mode" FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
             smoke_py host "$evid/adb" "$serial" "$ficha" todo "$run" "$PKG" "$evid/evidencia-$mode" \
@@ -1655,8 +1664,9 @@ FAKE
     host_case af-sin-hilos t-alsa no-verificable
     host_case af-sin-usb t-alsa true            # hay tarjeta pero ningun hilo USB
     host_case af-sin-standby t-alsa no-verificable
+    host_case af-sin-dispositivos t-alsa no-verificable  # un hilo vivo sin linea de dispositivos legible
     host_case af-entrada-tomada t-alsa false    # un Input thread con IN_USB_ tambien toma la tarjeta
-    for mode in af-standby af-tomada af-cerrado-no af-hal-no af-vacio af-sin-hilos af-sin-usb af-sin-standby af-entrada-tomada; do
+    for mode in af-standby af-tomada af-cerrado-no af-hal-no af-vacio af-sin-hilos af-sin-usb af-sin-standby af-sin-dispositivos af-entrada-tomada; do
         host_case "$mode" t-usb-clase true      # la captura real: la CM720 tiene interfaces de clase 1
     done
     local check
