@@ -51,19 +51,28 @@ readonly SETUP_DEFAULT="scripts/smoke-setup.json"
 readonly SELF="scripts/smoke-device.sh"
 
 # ---------------------------------------------------------------------------
-# El juez. Puro: un log y un run id adentro, veredictos y exit code afuera. Es lo que prueba
-# --self-test, asi que no puede depender de adb.
+# La parte en Python: la ficha, el juez y los verificadores de host. Un solo programa con modos,
+# para que los tres lean la ficha con el MISMO cargador:
+#   veredicto LOG RUN PLAN FICHA [JSON]   el juez. Puro: log + run + plan + ficha adentro,
+#                                         veredictos, exit code y (si se pide) el JSON afuera.
+#                                         Es lo que prueba --self-test: no depende de adb.
+#   host ADB SERIAL FICHA PLAN RUN PKG [DIR]
+#                                         los verificadores de host: SOLO LECTURA, cada llamada
+#                                         con `-s SERIAL`, y una linea `step=precondicion
+#                                         verificador=host` por precondicion de host de la ficha.
+#   validar FICHA                         exit 0 si la ficha es valida, 2 si no.
+#   ids FICHA                             "plan id verificador", una por precondicion.
 # ---------------------------------------------------------------------------
-verdict() {
-    local log="$1" run="$2" requested="$3"
-    python3 - "$log" "$run" "$requested" <<'PY'
+smoke_py() {
+    python3 - "$@" <<'PY'
+import fnmatch
+import json
+import os
+import re
+import subprocess
 import sys
 
-import re
-
-log, run, requested = sys.argv[1], sys.argv[2], sys.argv[3]
-
-# La otra punta del contrato (ver la cabecera). El orden es el de emision.
+# --- El contrato con la app (ver la cabecera). El orden es el de emision. ---------------------
 EXPECTED = {
     "salida": ["start", "stream", "frames"],
     "captura": ["start", "nivel", "stop"],
@@ -78,144 +87,563 @@ EXPECTED = {
             "backend-restaurado", "desconectar"],
 }
 ORDER = ["salida", "captura", "sf2", "sf3", "usb"]
-# El plan PEDIDO, normalizado como lo normaliza SmokePlan (orden canonico, sin repetidos). El juez
-# lo compara contra el que la app dice haber corrido: si la app corre menos de lo pedido (una
-# regresion en SmokePlan o en MainActivity), eso es FAIL, no "todo lo que corrio paso".
-if requested == "todo":
-    wanted = list(ORDER)
-else:
-    ids = [x.strip() for x in requested.split(",")]
-    wanted = [p for p in ORDER if p in ids]
-    if any(x not in ORDER for x in ids):
-        wanted = None
 # Pasos que se piden SOLO si hubo dialogo de permiso (REQ-050 S1): el broadcast falso que manda el
 # script mientras el dialogo esta pendiente, y el juicio de la app sobre lo que paso.
 WITH_DIALOG = {"usb": ["broadcast-falso", "permiso-falso"]}
 # Pasos del panel USB que dependen de que el humano haya dado el permiso.
 AFTER_PERMISSION = EXPECTED["usb"][EXPECTED["usb"].index("permiso"):]
 HUMAN = "esperando-humano"
+# REQ-053 S1: la linea que trae una precondicion verificada (de la app, o del host con
+# `verificador=host`). No es un paso: el juez la cruza con la ficha.
+PRECOND = "precondicion"
+KEY = re.compile(r"[a-z0-9-]+\Z")
 
-lines = []
-with open(log, encoding="utf-8", errors="replace") as f:
-    for raw in f:
-        i = raw.find("HARNESS-SMOKE ")
-        if i < 0:
-            continue
-        parts = raw[i:].strip().split(" ")
-        fields = {}
-        for p in parts[1:]:
-            if "=" in p:
-                k, v = p.split("=", 1)
-                fields[k] = v
-        if fields.get("run") != run:
-            continue
-        if fields.get("v") != "1":
-            print("FAIL  formato  version desconocida: %s" % raw.strip())
-            sys.exit(1)
-        lines.append(fields)
 
-if not lines:
-    print("FAIL  plan  ninguna linea HARNESS-SMOKE con run=%s" % run)
-    sys.exit(1)
+def plan_panels(requested):
+    """El plan PEDIDO, normalizado como lo normaliza SmokePlan (orden canonico, sin repetidos).
+    None si nombra un panel que no existe."""
+    if requested == "todo":
+        return list(ORDER)
+    ids = [x.strip() for x in requested.split(",")]
+    if any(x not in ORDER for x in ids):
+        return None
+    return [p for p in ORDER if p in ids]
 
-rows = []   # (veredicto, panel, paso, detalle)
-def add(v, panel, step, detail=""):
-    rows.append((v, panel, step, detail))
 
-def extras(f):
-    return " ".join("%s=%s" % (k, v) for k, v in f.items() if k not in ("v", "run", "panel", "step", "ok"))
+# --- La ficha de setup ---------------------------------------------------------------------------
+# Los chequeos de host que el script sabe hacer, con los parametros que cada uno exige. La ficha
+# elige uno por precondicion: el script nombra CHEQUEOS, nunca ids de precondicion.
+CHECKS = {
+    "permiso-runtime": {"permiso": str},
+    "usb-interfaz-de-clase": {"clase": int},
+    "paquetes-sin-proceso": {"paquetes": list},
+    "alsa-tarjeta-libre": {"tarjeta": int},
+}
+COMMON_KEYS = {"id", "verificador", "depende", "remedio", "descripcion"}
 
-inicio = [f for f in lines if f.get("panel") == "plan" and f.get("step") == "inicio"]
-fin = [f for f in lines if f.get("panel") == "plan" and f.get("step") == "fin"]
-if not inicio:
-    add("FAIL", "plan", "inicio", "falta")
-    panels = []
-else:
-    add("PASS" if inicio[0].get("ok") == "true" else "FAIL", "plan", "inicio", extras(inicio[0]))
-    panels = [p for p in inicio[0].get("plan", "").split(",") if p in EXPECTED]
-    if wanted is None or panels != wanted:
-        add("FAIL", "plan", "pedido", "se pidio '%s' y la app corrio '%s'" % (requested, ",".join(panels) or "-"))
 
-human_pending = set()
-for panel in [p for p in ORDER if p in panels]:
-    mine = [f for f in lines if f.get("panel") == panel]
-    waits = [f for f in mine if f.get("step") == HUMAN]
-    granted = any(f.get("step") == "permiso" and f.get("ok") == "true" for f in mine)
-    denied = any(f.get("step") == "permiso" and f.get("ok") != "true" for f in mine)
-    for w in waits:
-        state = "hecho — " if granted else ("DENEGADO por el humano — " if denied else "PENDIENTE — ")
-        add("HUMANO", panel, HUMAN, state + extras(w))
-    pending = bool(waits) and not granted
-    if pending:
-        human_pending.add(panel)
+class BadSetup(Exception):
+    pass
 
-    seen = set()
-    for f in mine:
-        step = f.get("step")
-        if step == HUMAN:
-            continue
-        seen.add(step)
-        if pending and step in AFTER_PERMISSION:
-            add("HUMANO", panel, step, "sin permiso: " + extras(f))
-        elif "medido" in f:
-            # REQ-050 S3: el runner aplica el rate de cada fila, asi que NO-MEDIDO (D11 de MINI-038)
-            # ya no existe. Una linea que lo trae es una regresion del harness o del runner: FAIL.
-            add("FAIL", panel, step, "NO-MEDIDO ya no existe (REQ-050 S3): " + extras(f))
-        elif f.get("aplica") == "false" and panel == "usb" and re.fullmatch(r"suite-[0-9]+", step or ""):
-            # REQ-050 S3 (D5): una fila que el device no ofrece. Ni PASS (aunque diga ok=true) ni FAIL,
-            # y no cuenta como cobertura: se lista aparte. SOLO filas de la suite: cualquier otro paso
-            # con aplica=false es un FAIL, o un paso podria desaparecer del veredicto.
-            add("NO-APLICA", panel, step, extras(f))
-        elif f.get("aplica") == "false":
-            add("FAIL", panel, step, "aplica=false fuera de una fila de la suite: " + extras(f))
-        elif f.get("ok") == "true":
-            add("PASS", panel, step, extras(f))
-        else:
-            add("FAIL", panel, step, extras(f))
-    for step in EXPECTED[panel]:
-        if step not in seen:
-            if pending and step in AFTER_PERMISSION:
-                add("HUMANO", panel, step, "no corrio: espera el permiso USB")
+
+def known_steps(panel):
+    # `suite-1` representa a las filas `suite-N`, que no estan en EXPECTED.
+    return EXPECTED[panel] + WITH_DIALOG.get(panel, []) + (["suite-1"] if panel == "usb" else [])
+
+
+def valid_param(value, kind):
+    if kind is int:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    if kind is str:
+        return isinstance(value, str) and bool(value.strip())
+    return isinstance(value, list) and bool(value) and all(isinstance(x, str) and x.strip() for x in value)
+
+
+def load_setup(path):
+    """La ficha, validada. Cualquier defecto es BadSetup: una ficha que no se entiende no puede
+    decidir que bloquear, y adivinar es peor que no correr."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except OSError as e:
+        raise BadSetup("no se puede leer %s: %s" % (path, e.strerror))
+    except ValueError as e:
+        raise BadSetup("%s no es JSON valido: %s" % (path, e))
+    if not isinstance(doc, dict) or doc.get("formato") != 1:
+        raise BadSetup('formato desconocido (se espera "formato": 1)')
+    if set(doc) - {"formato", "descripcion", "planes"} or not isinstance(doc.get("planes"), dict):
+        raise BadSetup('se espera {"formato", "descripcion", "planes"} y "planes" como objeto')
+    seen, out = set(), {}
+    for panel, body in doc["planes"].items():
+        if panel not in EXPECTED:
+            raise BadSetup("plan desconocido: '%s'" % panel)
+        if (not isinstance(body, dict) or set(body) - {"precondiciones", "descripcion"}
+                or not isinstance(body.get("precondiciones"), list)):
+            raise BadSetup("%s: se espera {\"precondiciones\": [...]}" % panel)
+        out[panel] = []
+        for p in body["precondiciones"]:
+            if not isinstance(p, dict):
+                raise BadSetup("%s: una precondicion no es un objeto" % panel)
+            pid = p.get("id")
+            if not isinstance(pid, str) or not KEY.match(pid):
+                raise BadSetup("%s: id invalido %r (se espera [a-z0-9-]+)" % (panel, pid))
+            where = "%s/%s" % (panel, pid)
+            if pid in seen:
+                raise BadSetup("%s: id duplicado" % where)
+            seen.add(pid)
+            verifier = p.get("verificador")
+            if verifier == "host":
+                check = p.get("chequeo")
+                if check not in CHECKS:
+                    raise BadSetup("%s: chequeo de host desconocido %r (conocidos: %s)"
+                                   % (where, check, ", ".join(sorted(CHECKS))))
+                for name, kind in CHECKS[check].items():
+                    if not valid_param(p.get(name), kind):
+                        raise BadSetup("%s: el chequeo %s exige '%s' (%s, no vacio)" % (where, check, name, kind.__name__))
+                allowed = COMMON_KEYS | {"chequeo"} | set(CHECKS[check])
+            elif verifier == "app":
+                if "ventana-humana" in p and not isinstance(p["ventana-humana"], bool):
+                    raise BadSetup("%s: ventana-humana tiene que ser true o false" % where)
+                allowed = COMMON_KEYS | {"ventana-humana"}
             else:
-                add("FAIL", panel, step, "FALTA: el panel no emitio este paso")
-    # REQ-050 S1: con el dialogo pendiente, el script le manda a la app el broadcast de resultado
-    # FALSO (broadcast-falso, lo escribe el script) y la app afirma que nada cambio (permiso-falso).
-    # Sin dialogo (permiso ya concedido) no hay espera que falsear y no se piden.
-    if waits:
-        for step in WITH_DIALOG.get(panel, []):
-            if step not in seen:
-                add("FAIL", panel, step, "FALTA: con dialogo de permiso este paso es obligatorio (REQ-050 S1)")
+                raise BadSetup("%s: verificador desconocido %r (host o app)" % (where, verifier))
+            unknown = set(p) - allowed
+            if unknown:
+                raise BadSetup("%s: clave desconocida %s" % (where, ", ".join(sorted(unknown))))
+            dep = p.get("depende")
+            if not isinstance(dep, list) or not dep or not all(isinstance(d, str) and d for d in dep):
+                raise BadSetup("%s: 'depende' tiene que ser una lista de pasos, no vacia" % where)
+            for pattern in dep:
+                if not any(fnmatch.fnmatchcase(s, pattern) for s in known_steps(panel)):
+                    raise BadSetup("%s: depende de '%s', que no es un paso de %s" % (where, pattern, panel))
+            if not isinstance(p.get("remedio"), str) or not p["remedio"].strip():
+                raise BadSetup("%s: sin remedio (D3: cada precondicion declara su accion manual)" % where)
+            out[panel].append(p)
+    return out
 
-if not fin:
-    add("FAIL", "plan", "fin", "FALTA: la corrida no termino (o no llego al techo de espera)")
-else:
-    ok = fin[0].get("ok") == "true"
-    # `fin` agrega los paneles: si el unico motivo de su ok=false es un panel que espera al humano,
-    # el veredicto es de ese panel (HUMANO), no un FAIL mas.
-    failed = [p for p in fin[0].get("fallidos", "-").split(",") if p and p != "-"]
-    if ok:
-        add("PASS", "plan", "fin", extras(fin[0]))
-    elif failed and set(failed) <= human_pending and fin[0].get("motor-detenido") == "true":
-        add("HUMANO", "plan", "fin", extras(fin[0]))
+
+def value(v):
+    """Como HarnessSmoke.value: sin blancos, nunca vacio."""
+    s = re.sub(r"\s", "_", str(v))
+    return s or "-"
+
+
+# --- Los verificadores de host -------------------------------------------------------------------
+class Unverifiable(Exception):
+    """La precondicion no se pudo verificar. NUNCA cuenta como cumplida (AC-053.3)."""
+
+
+class Shell:
+    """`adb -s SERIAL shell CMD`, SOLO LECTURA. El exit del comando remoto viaja en una marca final:
+    sin la marca, la salida no es de ese comando (adb fallo, el device se fue) y no se lee."""
+
+    def __init__(self, adb, serial, pkg):
+        self.adb, self.serial, self.pkg, self.log = adb, serial, pkg, []
+
+    def run(self, cmd):
+        argv = [self.adb, "-s", self.serial, "shell", "%s; r=$?; echo; echo wma-rc=$r" % cmd]
+        try:
+            p = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:
+            self.log.append("$ %s\n[no corrio: %s]\n" % (cmd, e))
+            raise Unverifiable("adb-no-corrio:%s" % type(e).__name__)
+        out = p.stdout.replace("\r", "")
+        self.log.append("$ %s\n[adb rc=%d]\n%s%s\n" % (cmd, p.returncode, out, p.stderr))
+        m = re.search(r"(?:\A|\n)wma-rc=(\d+)\s*\Z", out)
+        if not m:
+            why = (p.stderr.strip() or out.strip() or "sin-salida").splitlines()[0][:80]
+            raise Unverifiable("adb-sin-marca:rc=%d:%s" % (p.returncode, why))
+        return int(m.group(1)), out[:m.start()]
+
+
+def check_runtime_permission(p, sh):
+    rc, out = sh.run("dumpsys package %s" % sh.pkg)
+    if rc != 0:
+        raise Unverifiable("dumpsys-package-rc=%d" % rc)
+    grants = re.findall(r"^\s*%s: granted=(true|false)" % re.escape(p["permiso"]), out, re.M)
+    if not grants:
+        raise Unverifiable("%s-no-figura-en-dumpsys-package" % p["permiso"].rsplit(".", 1)[-1])
+    return ("true", "granted=true") if all(g == "true" for g in grants) else ("false", "granted=false")
+
+
+def parse_dump(text):
+    """El modo texto de dumpsys: `clave={` abre un bloque, `}` lo cierra, `clave=valor` es hoja."""
+    root, stack = [], []
+    stack.append(root)
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line == "}":
+            if len(stack) > 1:
+                stack.pop()
+            continue
+        m = re.match(r"([A-Za-z0-9_]+)=\{$", line)
+        if m:
+            block = []
+            stack[-1].append((m.group(1), block))
+            stack.append(block)
+            continue
+        m = re.match(r"([A-Za-z0-9_]+)=(.*)$", line)
+        if m:
+            stack[-1].append((m.group(1), m.group(2)))
+    return root
+
+
+def blocks(nodes, key):
+    out = []
+    for k, v in nodes:
+        if isinstance(v, list):
+            if k == key:
+                out.append(v)
+            out.extend(blocks(v, key))
+    return out
+
+
+def leaf(nodes, key):
+    for k, v in nodes:
+        if k == key and isinstance(v, str):
+            return v
+    return None
+
+
+def check_usb_interface_class(p, sh):
+    rc, out = sh.run("dumpsys usb")
+    if rc != 0:
+        raise Unverifiable("dumpsys-usb-rc=%d" % rc)
+    hosts = blocks(parse_dump(out), "host_manager")
+    if not hosts:
+        # Sin el bloque del host no se sabe si la placa esta o si cambio el formato: no se adivina.
+        raise Unverifiable("dumpsys-usb-sin-host_manager:formato-no-reconocido")
+    devices = [d for h in hosts for k, d in h if k == "devices" and isinstance(d, list)]
+    seen, hits = [], []
+    for d in devices:
+        vid, pid = leaf(d, "vendor_id") or "", leaf(d, "product_id") or ""
+        tag = "%04x:%04x" % (int(vid), int(pid)) if vid.isdigit() and pid.isdigit() else "%s:%s" % (vid or "?", pid or "?")
+        classes = sorted({leaf(i, "class") for i in blocks(d, "interfaces")} - {None})
+        seen.append("%s(clases:%s)" % (tag, ",".join(classes) or "-"))
+        if str(p["clase"]) in classes:
+            hits.append("%s:%s" % (tag, leaf(d, "product_name") or "-"))
+    if hits:
+        return "true", "interfaz-clase-%d:%s" % (p["clase"], ";".join(hits))
+    return "false", "sin-interfaz-clase-%d:dispositivos=%s" % (p["clase"], ";".join(seen) or "ninguno")
+
+
+def check_packages_without_process(p, sh):
+    rc, out = sh.run("ps -A -o PID,NAME")
+    if rc != 0:
+        raise Unverifiable("ps-rc=%d" % rc)
+    rows = [l.split() for l in out.splitlines() if l.strip()]
+    if not rows or rows[0][:2] != ["PID", "NAME"]:
+        raise Unverifiable("ps-salida-ilegible")
+    procs = [(r[0], r[1]) for r in rows[1:] if len(r) >= 2 and r[0].isdigit()]
+    if not procs:
+        raise Unverifiable("ps-sin-procesos")
+    alive = ["%s:pid=%s" % (name, pid) for pid, name in procs
+             for pkg in p["paquetes"] if name == pkg or name.startswith(pkg + ":")]
+    if alive:
+        return "false", "vivos=" + ",".join(alive)
+    return "true", "sin-proceso:" + ",".join(p["paquetes"])
+
+
+def check_alsa_card_free(p, sh):
+    card = p["tarjeta"]
+    rc, out = sh.run("ls /dev/snd")
+    if rc != 0:
+        raise Unverifiable("ls-dev-snd-rc=%d" % rc)
+    entries = out.split()
+    if not any(re.fullmatch(r"controlC\d+", e) for e in entries):
+        raise Unverifiable("dev-snd-ilegible")
+    pcms = sorted(e for e in entries if re.fullmatch(r"pcmC%dD\d+[pc]" % card, e))
+    if not pcms:
+        return "true", "sin-pcmC%d" % card
+    # La tarjeta esta: libre o tomada lo dice /proc/asound, si se puede leer sin root.
+    states = []
+    for e in pcms:
+        dev, direction = re.fullmatch(r"pcmC%dD(\d+)([pc])" % card, e).groups()
+        rc, status = sh.run("cat /proc/asound/card%d/pcm%s%s/sub0/status" % (card, dev, direction))
+        if rc != 0:
+            raise Unverifiable("%s:presente,dueno-no-visible" % e)
+        if status.strip() == "closed":
+            states.append("%s:cerrado" % e)
+            continue
+        owner = re.search(r"owner_pid\s*:\s*(\d+)", status)
+        if not owner:
+            raise Unverifiable("%s:presente,estado-ilegible" % e)
+        states.append("%s:abierto,owner_pid=%s" % (e, owner.group(1)))
+    taken = [s for s in states if ":abierto" in s]
+    return ("false", ";".join(taken)) if taken else ("true", ";".join(states))
+
+
+HOST_CHECKS = {
+    "permiso-runtime": check_runtime_permission,
+    "usb-interfaz-de-clase": check_usb_interface_class,
+    "paquetes-sin-proceso": check_packages_without_process,
+    "alsa-tarjeta-libre": check_alsa_card_free,
+}
+assert set(HOST_CHECKS) == set(CHECKS)
+
+
+def host(adb, serial, setup_path, requested, run, pkg, evidence_dir):
+    setup = load_setup(setup_path)
+    for panel in plan_panels(requested) or []:
+        for p in setup.get(panel, []):
+            if p["verificador"] != "host":
+                continue
+            sh = Shell(adb, serial, pkg)
+            try:
+                met, evidence = HOST_CHECKS[p["chequeo"]](p, sh)
+            except Unverifiable as e:
+                met, evidence = "no-verificable", str(e)
+            if evidence_dir:
+                os.makedirs(evidence_dir, exist_ok=True)
+                with open(os.path.join(evidence_dir, "%s.txt" % p["id"]), "w", encoding="utf-8") as f:
+                    f.write("".join(sh.log))
+            print("HARNESS-SMOKE v=1 run=%s panel=%s step=%s ok=%s id=%s cumplida=%s evidencia=%s verificador=host"
+                  % (run, panel, PRECOND, "true" if met == "true" else "false", p["id"], met, value(evidence)))
+
+
+# --- El juez -------------------------------------------------------------------------------------
+def judge(log, run, requested, setup_path, json_out):
+    setup = load_setup(setup_path)
+    wanted = plan_panels(requested)
+    rows = []        # {veredicto, panel, paso, detalle, observado, precondiciones}
+    preconditions = []
+
+    def add(v, panel, step, detail="", observed=None, blockers=()):
+        rows.append({"veredicto": v, "panel": panel, "paso": step, "detalle": detail,
+                     "observado": observed, "precondiciones": [b["id"] for b in blockers]})
+
+    def extras(f):
+        return " ".join("%s=%s" % (k, v) for k, v in f.items() if k not in ("v", "run", "panel", "step", "ok"))
+
+    def observed(f):
+        return {k: v for k, v in f.items() if k not in ("v", "run", "panel", "step")}
+
+    def finish(code):
+        counts = {k: sum(1 for r in rows if r["veredicto"] == k) for k in ("PASS", "FAIL", "BLOQUEADO", "HUMANO", "NO-APLICA")}
+        if json_out:
+            doc = {"formato": 1, "run": run, "plan": requested, "ficha": setup_path, "exit": code,
+                   "resumen": counts, "precondiciones": preconditions, "pasos": rows,
+                   # S3 lo llena: cada juicio de sensor sobre una ventana de estimulo o de control.
+                   "sensor": []}
+            try:
+                with open(json_out, "w", encoding="utf-8") as f:
+                    json.dump(doc, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+            except OSError as e:
+                print("ERROR — no se pudo escribir el JSON %s: %s" % (json_out, e.strerror))
+                sys.exit(2)
+        sys.exit(code)
+
+    lines = []
+    with open(log, encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            i = raw.find("HARNESS-SMOKE ")
+            if i < 0:
+                continue
+            fields = {}
+            for part in raw[i:].strip().split(" ")[1:]:
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    fields[k] = v
+            if fields.get("run") != run:
+                continue
+            if fields.get("v") != "1":
+                add("FAIL", "formato", "version", "version desconocida: %s" % raw.strip())
+                print("FAIL  formato  version desconocida: %s" % raw.strip())
+                finish(1)
+            lines.append(fields)
+
+    inicio = [f for f in lines if f.get("panel") == "plan" and f.get("step") == "inicio"]
+    panels = [p for p in inicio[0].get("plan", "").split(",") if p in EXPECTED] if inicio else []
+
+    def human_wait(panel):
+        mine = [f for f in lines if f.get("panel") == panel]
+        waits = [f for f in mine if f.get("step") == HUMAN]
+        granted = any(f.get("step") == "permiso" and f.get("ok") == "true" for f in mine)
+        denied = any(f.get("step") == "permiso" and f.get("ok") != "true" for f in mine)
+        return waits, granted, denied
+
+    # --- AC-053.1: las precondiciones, ANTES de juzgar cualquier paso. -----------------------
+    def evaluate(p, panel, human_pending):
+        mine = [f for f in lines if f.get("panel") == panel and f.get("step") == PRECOND and f.get("id") == p["id"]]
+        # Una linea vale solo si la firmo el verificador que declara la ficha. La app no puede
+        # escribir `verificador` (HarnessSmoke lo reserva): sin la clave, la linea es de la app.
+        right = [f for f in mine if f.get("verificador", "app") == p["verificador"]]
+        if not right:
+            if mine:
+                state, evidence = "no-verificable", "la-linea-no-es-del-verificador-%s" % p["verificador"]
+            elif p["verificador"] == "app" and p.get("ventana-humana") and human_pending:
+                # D13: la ventana humana vencio sin respuesta. No es un setup roto: lo que depende
+                # queda HUMANO (la regla del permiso, abajo), nunca BLOQUEADO ni cumplido.
+                state, evidence = "pendiente-humano", "sin-respuesta-humana-en-la-ventana"
+            elif p["verificador"] == "app":
+                state, evidence = "no-verificable", "la-app-no-emitio-su-linea"
+            else:
+                state, evidence = "no-verificable", "el-host-no-registro-su-verificacion"
+        else:
+            evidence = ";".join(f.get("evidencia", "-") for f in right)
+            bad = [f for f in right if f.get("cumplida") not in ("true", "false") or f.get("ok") != f.get("cumplida")]
+            if bad:
+                # Incluye la de host que dice cumplida=no-verificable (adb fallo, salida ilegible).
+                state = "no-verificable"
+                if any(f.get("cumplida") != "no-verificable" for f in bad):
+                    evidence = "linea-ilegible:" + evidence
+            elif all(f.get("cumplida") == "true" for f in right):
+                state = "cumplida"
+            else:
+                state = "incumplida"
+                evidence = ";".join(f.get("evidencia", "-") for f in right if f.get("cumplida") == "false")
+        return {"id": p["id"], "plan": panel, "verificador": p["verificador"], "cumplida": state == "cumplida",
+                "estado": state, "evidencia": evidence, "remedio": p["remedio"], "depende": list(p["depende"])}
+
+    judged = [p for p in ORDER if (wanted is not None and p in wanted) or p in panels]
+    for panel in judged:
+        waits, granted, _ = human_wait(panel)
+        for p in setup.get(panel, []):
+            preconditions.append(evaluate(p, panel, bool(waits) and not granted))
+    blocking = [r for r in preconditions if r["estado"] in ("incumplida", "no-verificable")]
+
+    def blockers(panel, step):
+        return [r for r in blocking if r["plan"] == panel and any(fnmatch.fnmatchcase(step, d) for d in r["depende"])]
+
+    def blocked(panel, step, bs, seen_text, observed_fields):
+        detail = " | ".join("precondicion=%s estado=%s evidencia=%s remedio=%s"
+                            % (b["id"], b["estado"], b["evidencia"], b["remedio"]) for b in bs)
+        add("BLOQUEADO", panel, step, "%s · observado: %s" % (detail, seen_text), observed_fields, bs)
+
+    # --- Los pasos. ------------------------------------------------------------------------
+    if not lines:
+        add("FAIL", "plan", "inicio", "ninguna linea HARNESS-SMOKE con run=%s" % run)
+        print("FAIL  plan  ninguna linea HARNESS-SMOKE con run=%s" % run)
+        finish(1)
+    if not inicio:
+        add("FAIL", "plan", "inicio", "falta")
     else:
-        add("FAIL", "plan", "fin", extras(fin[0]))
+        add("PASS" if inicio[0].get("ok") == "true" else "FAIL", "plan", "inicio", extras(inicio[0]), observed(inicio[0]))
+        if wanted is None or panels != wanted:
+            add("FAIL", "plan", "pedido", "se pidio '%s' y la app corrio '%s'" % (requested, ",".join(panels) or "-"))
 
-width = max(len("%s/%s" % (p, s)) for _, p, s, _ in rows)
-for v, p, s, d in rows:
-    if v != "NO-APLICA":
-        print("%-6s  %-*s  %s" % (v, width, "%s/%s" % (p, s), d))
-not_applicable = [r for r in rows if r[0] == "NO-APLICA"]
-if not_applicable:
-    print("\nNO-APLICA (el device no ofrece la config de la fila: no es PASS ni FAIL y NO cuenta como cobertura):")
-    for v, p, s, d in not_applicable:
-        print("%-9s  %-*s  %s" % (v, width, "%s/%s" % (p, s), d))
+    declared = {(r["plan"], r["id"]) for r in preconditions}
+    for f in lines:
+        if f.get("step") == PRECOND and (f.get("panel"), f.get("id")) not in declared:
+            add("FAIL", f.get("panel", "-"), PRECOND,
+                "id=%s no esta declarada en la ficha de setup para %s (o el plan no se pidio)" % (f.get("id", "-"), f.get("panel", "-")),
+                observed(f))
 
-n = {k: sum(1 for r in rows if r[0] == k) for k in ("PASS", "FAIL", "HUMANO", "NO-APLICA")}
-print("\nresumen: %d PASS · %d FAIL · %d HUMANO · %d NO-APLICA"
-      % (n["PASS"], n["FAIL"], n["HUMANO"], n["NO-APLICA"]))
-pending = [r for r in rows if r[0] == "HUMANO" and (r[1] in human_pending or r[1] == "plan")]
-sys.exit(1 if n["FAIL"] else (3 if pending else 0))
+    human_pending = set()
+    for panel in [p for p in ORDER if p in panels]:
+        mine = [f for f in lines if f.get("panel") == panel]
+        waits, granted, denied = human_wait(panel)
+        for w in waits:
+            state = "hecho — " if granted else ("DENEGADO por el humano — " if denied else "PENDIENTE — ")
+            add("HUMANO", panel, HUMAN, state + extras(w), observed(w))
+        pending = bool(waits) and not granted
+        if pending:
+            human_pending.add(panel)
+
+        seen = set()
+        for f in mine:
+            step = f.get("step")
+            if step in (HUMAN, PRECOND):
+                continue
+            seen.add(step)
+            bs = blockers(panel, step)
+            if bs:
+                # AC-053.2: ni PASS ni FAIL, aunque la app haya dicho ok=true: lo que se observo
+                # queda en el JSON (S2 lo necesita), pero no se juzga.
+                blocked(panel, step, bs, extras(f) or "-", observed(f))
+            elif pending and step in AFTER_PERMISSION:
+                add("HUMANO", panel, step, "sin permiso: " + extras(f), observed(f))
+            elif "medido" in f:
+                # REQ-050 S3: el runner aplica el rate de cada fila, asi que NO-MEDIDO (D11 de MINI-038)
+                # ya no existe. Una linea que lo trae es una regresion del harness o del runner: FAIL.
+                add("FAIL", panel, step, "NO-MEDIDO ya no existe (REQ-050 S3): " + extras(f), observed(f))
+            elif f.get("aplica") == "false" and panel == "usb" and re.fullmatch(r"suite-[0-9]+", step or ""):
+                # REQ-050 S3 (D5): una fila que el device no ofrece. Ni PASS (aunque diga ok=true) ni FAIL,
+                # y no cuenta como cobertura: se lista aparte. SOLO filas de la suite: cualquier otro paso
+                # con aplica=false es un FAIL, o un paso podria desaparecer del veredicto.
+                add("NO-APLICA", panel, step, extras(f), observed(f))
+            elif f.get("aplica") == "false":
+                add("FAIL", panel, step, "aplica=false fuera de una fila de la suite: " + extras(f), observed(f))
+            elif f.get("ok") == "true":
+                add("PASS", panel, step, extras(f), observed(f))
+            else:
+                add("FAIL", panel, step, extras(f), observed(f))
+        for step in EXPECTED[panel]:
+            if step not in seen:
+                bs = blockers(panel, step)
+                if bs:
+                    blocked(panel, step, bs, "no-emitido", None)
+                elif pending and step in AFTER_PERMISSION:
+                    add("HUMANO", panel, step, "no corrio: espera el permiso USB")
+                else:
+                    add("FAIL", panel, step, "FALTA: el panel no emitio este paso")
+        # REQ-050 S1: con el dialogo pendiente, el script le manda a la app el broadcast de resultado
+        # FALSO (broadcast-falso, lo escribe el script) y la app afirma que nada cambio (permiso-falso).
+        # Sin dialogo (permiso ya concedido) no hay espera que falsear y no se piden.
+        if waits:
+            for step in WITH_DIALOG.get(panel, []):
+                if step not in seen:
+                    bs = blockers(panel, step)
+                    if bs:
+                        blocked(panel, step, bs, "no-emitido", None)
+                    else:
+                        add("FAIL", panel, step, "FALTA: con dialogo de permiso este paso es obligatorio (REQ-050 S1)")
+
+    fin = [f for f in lines if f.get("panel") == "plan" and f.get("step") == "fin"]
+    if not fin:
+        add("FAIL", "plan", "fin", "FALTA: la corrida no termino (o no llego al techo de espera)")
+    else:
+        ok = fin[0].get("ok") == "true"
+        # `fin` agrega los paneles: si cada panel que la app dio por fallido lo explica una espera
+        # humana pendiente o sus propios BLOQUEADO (sin ningun FAIL), el veredicto es ese, no un FAIL mas.
+        failed = [p for p in fin[0].get("fallidos", "-").split(",") if p and p != "-"]
+        with_fail = {r["panel"] for r in rows if r["veredicto"] == "FAIL"}
+        with_block = {r["panel"] for r in rows if r["veredicto"] == "BLOQUEADO"} - with_fail
+        explained = bool(failed) and all(p in human_pending or p in with_block for p in failed)
+        if ok:
+            add("PASS", "plan", "fin", extras(fin[0]), observed(fin[0]))
+        elif explained and fin[0].get("motor-detenido") == "true":
+            add("BLOQUEADO" if any(p in with_block for p in failed) else "HUMANO", "plan", "fin", extras(fin[0]), observed(fin[0]))
+        else:
+            add("FAIL", "plan", "fin", extras(fin[0]), observed(fin[0]))
+
+    # --- La salida. --------------------------------------------------------------------------
+    if preconditions:
+        print("precondiciones (ficha %s):" % setup_path)
+        for r in preconditions:
+            print("  %-16s %s/%s (%s)  %s" % (r["estado"], r["plan"], r["id"], r["verificador"], r["evidencia"]))
+            if r["estado"] in ("incumplida", "no-verificable"):
+                print("  %-16s remedio: %s" % ("", r["remedio"]))
+        print()
+    width = max(len("%s/%s" % (r["panel"], r["paso"])) for r in rows)
+    for r in rows:
+        if r["veredicto"] != "NO-APLICA":
+            print("%-9s  %-*s  %s" % (r["veredicto"], width, "%s/%s" % (r["panel"], r["paso"]), r["detalle"]))
+    not_applicable = [r for r in rows if r["veredicto"] == "NO-APLICA"]
+    if not_applicable:
+        print("\nNO-APLICA (el device no ofrece la config de la fila: no es PASS ni FAIL y NO cuenta como cobertura):")
+        for r in not_applicable:
+            print("%-9s  %-*s  %s" % (r["veredicto"], width, "%s/%s" % (r["panel"], r["paso"]), r["detalle"]))
+
+    n = {k: sum(1 for r in rows if r["veredicto"] == k) for k in ("PASS", "FAIL", "BLOQUEADO", "HUMANO", "NO-APLICA")}
+    print("\nresumen: %d PASS · %d FAIL · %d BLOQUEADO · %d HUMANO · %d NO-APLICA"
+          % (n["PASS"], n["FAIL"], n["BLOQUEADO"], n["HUMANO"], n["NO-APLICA"]))
+    pending = [r for r in rows if r["veredicto"] == "HUMANO" and (r["panel"] in human_pending or r["panel"] == "plan")]
+    # AC-053.4: 1 FAIL > 4 BLOQUEADO > 3 HUMANO > 0.
+    finish(1 if n["FAIL"] else (4 if n["BLOQUEADO"] else (3 if pending else 0)))
+
+
+def main(argv):
+    mode, args = (argv[0], argv[1:]) if argv else ("", [])
+    try:
+        if mode == "veredicto" and len(args) in (4, 5):
+            judge(args[0], args[1], args[2], args[3], args[4] if len(args) == 5 and args[4] else None)
+        elif mode == "host" and len(args) in (6, 7):
+            host(*args[:6], evidence_dir=args[6] if len(args) == 7 else None)
+        elif mode == "validar" and len(args) == 1:
+            setup = load_setup(args[0])
+            print("ficha valida: %d precondiciones en %d planes"
+                  % (sum(len(v) for v in setup.values()), len(setup)))
+        elif mode == "ids" and len(args) == 1:
+            for panel, pres in load_setup(args[0]).items():
+                for p in pres:
+                    print("%s %s %s" % (panel, p["id"], p["verificador"]))
+        else:
+            print("smoke_py: modo o argumentos invalidos: %s" % " ".join(argv), file=sys.stderr)
+            sys.exit(2)
+    except BadSetup as e:
+        print("ERROR — ficha de setup invalida: %s" % e)
+        sys.exit(2)
+
+
+main(sys.argv[1:])
 PY
+}
+
+# El juez. verdict LOG RUN PLAN [FICHA] [JSON] — ver smoke_py.
+verdict() {
+    smoke_py veredicto "$1" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}"
 }
 
 print_ear_checks() {
@@ -902,10 +1330,11 @@ ids_literal_in() {
 # La corrida en device.
 # ---------------------------------------------------------------------------
 run_device() {
-    local plan="todo" usb_wait=120 ceiling="" out="" build=1
+    local plan="todo" usb_wait=120 ceiling="" out="" build=1 setup="$SETUP_DEFAULT"
     while (( $# )); do
         case "$1" in
             --plan) plan="$2"; shift 2 ;;
+            --setup) setup="$2"; shift 2 ;;
             --usb-espera-s) usb_wait="$2"; shift 2 ;;
             --techo-s) ceiling="$2"; shift 2 ;;
             --out) out="$2"; shift 2 ;;
@@ -917,6 +1346,9 @@ run_device() {
     [[ -z "$ceiling" || "$ceiling" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL — --techo-s tiene que ser un entero > 0: '$ceiling'" >&2; exit 2; }
     # El techo cubre la espera humana, la suite USB (3 tests de 5 s) y el resto con holgura.
     ceiling="${ceiling:-$((usb_wait + 120))}"
+    # REQ-053 S1: una ficha que no se entiende no puede decidir que bloquear. Se valida antes de
+    # tocar nada: es un error de uso (exit 2), no un juicio.
+    smoke_py validar "$setup" || exit 2
 
     if [[ -z "${ANDROID_SERIAL:-}" ]]; then
         echo "FAIL — falta ANDROID_SERIAL. Este script no elige device: nunca toca uno que no le nombraron." >&2
@@ -931,6 +1363,7 @@ run_device() {
         adb_bin="${sdk:+$sdk/platform-tools/adb}"
     fi
     [[ -x "${adb_bin:-}" ]] || { echo "FAIL — no encuentro adb (PATH, ANDROID_HOME o sdk.dir)." >&2; exit 2; }
+    # TODA llamada a adb pasa por aca (o por smoke_py host, que hace lo mismo): nunca sin -s.
     adb_() { "$adb_bin" -s "$serial" "$@"; }
 
     local state
@@ -983,6 +1416,21 @@ run_device() {
     }
     start_capture
     trap 'kill "$logcat_pid" 2>/dev/null || true' EXIT
+
+    # REQ-053 S1 (AC-053.1, D4): las precondiciones del HOST, antes de disparar el plan. Solo
+    # lectura (D3: el script no cambia nada del telefono). Cada una deja su linea en la captura,
+    # firmada `verificador=host`, y su salida cruda en $out/precondiciones-host/<id>.txt. Las de la
+    # app las emite la app durante la corrida; el juez cruza las dos con la ficha al final.
+    echo "=== precondiciones del host (ficha: $setup) ==="
+    local host_lines
+    host_lines="$(smoke_py host "$adb_bin" "$serial" "$setup" "$plan" "$run" "$PKG" "$out/precondiciones-host")" \
+        || { echo "FAIL — no corrieron los verificadores de host" >&2; exit 2; }
+    if [[ -n "$host_lines" ]]; then
+        printf '%s\n' "$host_lines" >> "$raw"
+        sed -E 's/.* panel=([^ ]+) .* id=([^ ]+) cumplida=([^ ]+) evidencia=([^ ]+) .*/  \3  \1\/\2  \4/' <<< "$host_lines"
+    else
+        echo "  (el plan '$plan' no tiene precondiciones de host)"
+    fi
 
     # REQ-050 S1 (1.4): con el dialogo de permiso PENDIENTE, lo que haria otra app instalada —
     # mandarle a la libreria el resultado del permiso con el extra que quiera (MINI-040)—. Primero
@@ -1052,7 +1500,8 @@ run_device() {
     echo
 
     local rc=0
-    verdict "$log" "$run" "$plan" || rc=$?
+    verdict "$log" "$run" "$plan" "$setup" "$out/harness-smoke.json" || rc=$?
+    echo "=== JSON de la corrida: $out/harness-smoke.json ==="
     print_ear_checks
     exit "$rc"
 }
@@ -1060,8 +1509,17 @@ run_device() {
 case "${1:-}" in
     --self-test) self_test ;;
     --veredicto)
-        [[ $# -eq 4 ]] || { echo "uso: $0 --veredicto LOG RUN PLAN" >&2; exit 2; }
-        verdict "$2" "$3" "$4" ;;
-    -h|--help) sed -n '2,40p' "$0" ;;
+        [[ $# -ge 4 ]] || { echo "uso: $0 --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA]" >&2; exit 2; }
+        log_="$2" run_="$3" plan_="$4" setup_="$SETUP_DEFAULT" json_=""
+        shift 4
+        while (( $# )); do
+            case "$1" in
+                --setup) setup_="${2:?--setup necesita un archivo}"; shift 2 ;;
+                --json) json_="${2:?--json necesita un archivo}"; shift 2 ;;
+                *) echo "opcion desconocida: $1" >&2; exit 2 ;;
+            esac
+        done
+        verdict "$log_" "$run_" "$plan_" "$setup_" "$json_" ;;
+    -h|--help) awk 'NR > 1 && /^set -euo/ {exit} NR > 1 {print}' "$0" ;;
     *) run_device "$@" ;;
 esac
