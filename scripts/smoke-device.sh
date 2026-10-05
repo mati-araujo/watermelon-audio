@@ -746,9 +746,22 @@ self_test() {
 JSON
 
     local failures=0
+    # judged <archivo> <plan> <ficha>: corre el juez y deja su salida en $tmp/out y su exit en
+    # $tmp/out.rc. Cacheado por CONTENIDO (log + ficha + plan): varios casos miran la misma corrida.
+    judged() {
+        local key
+        key="$({ cat "$1" "$3" 2>/dev/null; printf '|%s|%s' "$2" "$3"; } | shasum | cut -c1-16)"
+        if [[ ! -f "$tmp/juez-$key.out" ]]; then
+            local rc=0
+            verdict "$1" "$run" "$2" "$3" > "$tmp/juez-$key.out" 2>&1 || rc=$?
+            echo "$rc" > "$tmp/juez-$key.rc"
+        fi
+        cp "$tmp/juez-$key.out" "$tmp/out"
+        cat "$tmp/juez-$key.rc"
+    }
     expect() {  # expect <nombre> <exit esperado> <archivo> [plan pedido] [ficha]
-        local name="$1" want="$2" file="$3" plan="${4:-todo}" setup="${5:-$ficha}" got=0
-        verdict "$file" "$run" "$plan" "$setup" > "$tmp/out" 2>&1 || got=$?
+        local name="$1" want="$2" file="$3" plan="${4:-todo}" setup="${5:-$ficha}" got
+        got="$(judged "$file" "$plan" "$setup")"
         if [[ "$got" == "$want" ]]; then
             printf '  ok    %-58s exit %s\n' "$name" "$got"
         else
@@ -760,7 +773,7 @@ JSON
 
     expect_line() {  # expect_line <nombre> <regex que TIENE que aparecer> <archivo> [plan] [ficha]
         local name="$1" re="$2" file="$3" plan="${4:-todo}" setup="${5:-$ficha}"
-        verdict "$file" "$run" "$plan" "$setup" > "$tmp/out" 2>&1 || true
+        judged "$file" "$plan" "$setup" > /dev/null
         if grep -Eq -- "$re" "$tmp/out"; then
             printf '  ok    %-58s\n' "$name"
         else
@@ -770,7 +783,7 @@ JSON
     }
     expect_no_line() {  # expect_no_line <nombre> <regex que NO puede aparecer> <archivo> [plan] [ficha]
         local name="$1" re="$2" file="$3" plan="${4:-todo}" setup="${5:-$ficha}"
-        verdict "$file" "$run" "$plan" "$setup" > "$tmp/out" 2>&1 || true
+        judged "$file" "$plan" "$setup" > /dev/null
         if grep -Eq -- "$re" "$tmp/out"; then
             printf '  MAL   %-58s aparece /%s/\n' "$name" "$re"
             failures=$((failures + 1))
