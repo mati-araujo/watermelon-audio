@@ -1541,9 +1541,9 @@ case "$FAKE_MODE" in
     basura) echo "lorem ipsum"; exit 0 ;;
     denegado) echo "/system/bin/sh: Permission denied"; echo "wma-rc=1"; exit 0 ;;
 esac
-# `usb-falla` / `snd-rc`: solo ese comando termina mal, el resto responde sano.
+# `usb-falla` / `snd-rc`: solo ese comando termina mal (snd-rc con un listado legible: el rc manda).
 [[ "$FAKE_MODE" == usb-falla && "$cmd" == *"dumpsys usb"* ]] && { echo "dumpsys: boom"; echo; echo "wma-rc=1"; exit 0; }
-[[ "$FAKE_MODE" == snd-rc && "$cmd" == *"ls /dev/snd"* ]] && { echo "ls: /dev/snd: No such file or directory"; echo; echo "wma-rc=1"; exit 0; }
+[[ "$FAKE_MODE" == snd-rc && "$cmd" == *"ls /dev/snd"* ]] && { printf 'controlC0\ncontrolC1\n'; echo; echo "wma-rc=1"; exit 0; }
 case "$cmd" in
     *"dumpsys package"*)
         g=true; [[ "$FAKE_MODE" == incumplida ]] && g=false
