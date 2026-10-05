@@ -757,6 +757,18 @@ new_run_id() {
     echo "smoke-$(date +%Y%m%d-%H%M%S)-$$-$rnd"
 }
 
+# --plan viaja por el `sh` del telefono (am start --es): solo `todo` o paneles conocidos separados
+# por comas, y nada mas.
+plan_valid() {
+    local plan="$1" p
+    [[ "$plan" =~ ^[a-z0-9,]+$ ]] || return 1
+    [[ "$plan" == todo ]] && return 0
+    local IFS=,
+    for p in $plan; do
+        case "$p" in salida|captura|sf2|sf3|usb) ;; *) return 1 ;; esac
+    done
+}
+
 # uid_of_package <paquete> < salida de `pm list packages -U`: el uid del paquete EXACTO (el listado
 # filtra por subcadena y trae paquetes vecinos).
 uid_of_package() {
@@ -1391,6 +1403,35 @@ package:com.ajena uid:10001"
         printf '  MAL   %-58s %s\n' "S-2: el control grabado conserva el run id viejo" "$run"; failures=$((failures + 1))
     fi
 
+    # S-3: --plan se interpola en `adb shell am start`, o sea que vuelve a pasar por el `sh` del
+    # telefono. Un plan que no sea `todo` o paneles conocidos es exit 2 SIN llamar a adb.
+    mkdir -p "$tmp/espia"
+    cat > "$tmp/espia/adb" <<'SPY'
+#!/usr/bin/env bash
+echo "$*" >> "$SPY_LOG"
+SPY
+    chmod +x "$tmp/espia/adb"
+    plan_case() {  # plan_case <nombre> <plan> <exit esperado> <llamo a adb: si|no>
+        local name="$1" plan="$2" want="$3" calls="$4" got=0 called=no
+        : > "$tmp/espia.log"
+        PATH="$tmp/espia:$PATH" SPY_LOG="$tmp/espia.log" ANDROID_SERIAL=falso-123 \
+            bash "$0" --plan "$plan" --no-build > "$tmp/out" 2>&1 || got=$?
+        [[ -s "$tmp/espia.log" ]] && called=si
+        if [[ "$got" == "$want" && "$called" == "$calls" ]]; then
+            printf '  ok    %-58s exit %s, adb: %s\n' "$name" "$got" "$called"
+        else
+            printf '  MAL   %-58s exit %s (esperaba %s), adb: %s (esperaba %s)\n' "$name" "$got" "$want" "$called" "$calls"
+            failures=$((failures + 1))
+        fi
+    }
+    plan_case "S-3 control: un plan valido llega a adb (el espia anda)" salida 2 si
+    plan_case "S-3: todo,usb no es un plan (todo va solo)" 'todo,usb' 2 no
+    plan_case "S-3: --plan 'todo;id' es exit 2 sin llamar a adb" 'todo;id' 2 no
+    plan_case "S-3: un panel desconocido es exit 2 sin adb" 'salida,nada' 2 no
+    plan_case "S-3: mayusculas, exit 2 sin adb" 'Salida' 2 no
+    plan_case "S-3: un plan con espacio o \$() es exit 2 sin adb" 'salida $(id)' 2 no
+    plan_case "S-3: un plan vacio es exit 2 sin adb" '' 2 no
+
     # Los verificadores de HOST, contra un adb FALSO: ninguno corre sin `-s <serial>`, y cada salida
     # que no se puede leer (adb falla, rc != 0, basura, formato desconocido, tarjeta sin dueno
     # visible) da no-verificable — nunca cumplida. Los dumpsys son RECORTES de la captura real del g42
@@ -1605,6 +1646,8 @@ run_device() {
             *) echo "opcion desconocida: $1" >&2; exit 2 ;;
         esac
     done
+    # --plan viaja al `sh` del telefono: se valida ANTES de cualquier llamada a adb.
+    plan_valid "$plan" || { echo "FAIL — --plan invalido: '$plan' (todo, o paneles de salida,captura,sf2,sf3,usb separados por comas)" >&2; exit 2; }
     [[ "$usb_wait" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL — --usb-espera-s tiene que ser un entero > 0: '$usb_wait'" >&2; exit 2; }
     [[ -z "$ceiling" || "$ceiling" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL — --techo-s tiene que ser un entero > 0: '$ceiling'" >&2; exit 2; }
     # El techo cubre la espera humana, la suite USB (3 tests de 5 s) y el resto con holgura.
