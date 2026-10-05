@@ -12,33 +12,63 @@
 #
 # Que hace:
 #   1. exige ANDROID_SERIAL y lo usa en CADA llamada a adb: nunca toca otro device;
-#   2. construye e instala SOLO com.watermellonstudios.audio.harness (`install -r -g`: -g concede
+#   2. lee la FICHA DE SETUP (scripts/smoke-setup.json, o --setup) y la valida antes de tocar nada;
+#   3. construye e instala SOLO com.watermellonstudios.audio.harness (`install -r -g`: -g concede
 #      los permisos de runtime del manifest, o sea RECORD_AUDIO; el permiso USB NO es de runtime y
 #      no se concede asi — es el dialogo del sistema, un gesto humano);
-#   3. dispara el plan con un extra de intent (MainActivity, build debug):
+#   4. verifica las precondiciones de HOST de la ficha para el plan pedido, por adb y en SOLO
+#      LECTURA, antes de disparar el plan (REQ-053, AC-053.1);
+#   5. dispara el plan con un extra de intent (MainActivity, build debug):
 #        am start ... --es harness.smoke <plan> --es harness.smoke.run <id>
-#   4. lee las lineas `HARNESS-SMOKE` de ESA corrida (filtra por run=<id>; el buffer de logcat no
+#   6. lee las lineas `HARNESS-SMOKE` de ESA corrida (filtra por run=<id>; el buffer de logcat no
 #      se borra, es del device) hasta `panel=plan step=fin`, o hasta el techo;
-#   5. da un veredicto por punto: PASS / FAIL / HUMANO. Un paso con ok=false es FAIL; un paso que
-#      falta es FAIL; lo que quedo detras de `step=esperando-humano` sin que el humano lo
+#   7. cruza las precondiciones (las del host y las que emite la app) con la ficha y da un
+#      veredicto por punto: PASS / FAIL / BLOQUEADO / HUMANO. Un paso con ok=false es FAIL; un paso
+#      que falta es FAIL; lo que quedo detras de `step=esperando-humano` sin que el humano lo
 #      resolviera es HUMANO, nunca PASS;
-#   6. lista aparte lo que requiere OIDO (ningun log dice si algo suena bien).
+#   8. deja el JSON de la corrida al lado del log (harness-smoke.json);
+#   9. lista aparte lo que requiere OIDO (ningun log dice si algo suena bien).
 #
-# Exit: 0 todo PASS · 1 algun FAIL · 3 sin FAIL pero con puntos HUMANO pendientes · 2 uso/infra.
+# REQ-053 — el modelo de precondiciones:
+#   - La ficha declara, por plan, cada precondicion: quien la verifica (D4: `host` por adb, o `app`
+#     con una linea `step=precondicion`), que pasos bloquea (`depende`) y la accion manual que la
+#     arregla (`remedio`, D3). Es la UNICA fuente: este script no tiene ningun id escrito — nombra
+#     CHEQUEOS de host (permiso-runtime, usb-interfaz-de-clase, paquetes-sin-proceso,
+#     alsa-tarjeta-libre) y la ficha elige uno por precondicion, con sus parametros.
+#   - El script NUNCA ejecuta un remedio ni cambia nada del telefono (D3): lo imprime y lo deja en
+#     el JSON. Una granja lo podra ejecutar despues; este script no.
+#   - BLOQUEADO es un veredicto, no una cancelacion: la corrida se ejecuta igual y el JSON guarda lo
+#     OBSERVADO de cada paso bloqueado. Un paso bloqueado no es PASS ni FAIL, aunque diga ok=true.
+#   - Una precondicion que no se pudo verificar (adb fallo, salida que no se parsea o cortada, la
+#     app no emitio su linea, la emitio quien no es su verificador) es `no-verificable`, y eso
+#     bloquea igual que una incumplida: NUNCA cuenta como cumplida.
+#   - D13: una precondicion de app con `ventana-humana` sin linea, con la espera humana del panel
+#     pendiente, es `pendiente-humano`: lo que depende queda HUMANO (la ventana vencio), no BLOQUEADO.
+#     Negada explicitamente, la app emite `cumplida=false` y es BLOQUEADO.
+#
+# Exit: 1 algun FAIL > 4 algun BLOQUEADO > 3 HUMANO pendiente > 0 todo PASS · 2 uso/infra (tambien
+# una ficha invalida).
 # Una fila de la suite USB NO-APLICA (linea con aplica=false: el device no ofrece su config, REQ-050
 # S3) no mueve el exit: se lista aparte y no cuenta como cobertura. La vieja marca medido=false (D11
 # de MINI-038: el runner ignoraba el rate de la fila) ya no existe y, si reaparece, es FAIL.
 #
+# El JSON (`<out>/harness-smoke.json`, D12): `run`, `plan`, `ficha`, `exit`, `resumen`,
+# `precondiciones` ({id, plan, verificador, cumplida, estado, evidencia, remedio, depende}),
+# `pasos` ({panel, paso, veredicto, detalle, observado, precondiciones}) y `sensor` (vacio: lo llena
+# REQ-053 S3). `observado` es lo que emitio la app para ese paso (null si no lo emitio).
+#
 # El formato de las lineas vive en un solo lugar:
 #   harness/src/commonMain/kotlin/com/watermellonstudios/audio/harness/smoke/HarnessSmoke.kt
 # y lo fija HarnessSmokeTest. Los pasos que cada panel emite estan en SmokePlanRunner (salida,
-# captura, sf2, sf3) y en UsbHarness (usb); EXPECTED, abajo, es la otra punta de ese contrato.
+# captura, sf2, sf3) y en UsbHarness (usb); EXPECTED, abajo, es la otra punta de ese contrato. Las
+# precondiciones que emite la app estan en SmokePreconditions.
 #
 # Uso:
 #   ANDROID_SERIAL=<serial> bash scripts/smoke-device.sh [--plan todo|salida,sf2,...]
-#        [--usb-espera-s 120] [--techo-s N] [--out DIR] [--no-build]
+#        [--usb-espera-s 120] [--techo-s N] [--out DIR] [--no-build] [--setup FICHA]
 #   bash scripts/smoke-device.sh --self-test
-#   bash scripts/smoke-device.sh --veredicto LOG RUN PLAN   # juzga un log ya grabado
+#   bash scripts/smoke-device.sh --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA]
+#        # juzga un log ya grabado (con las lineas de precondicion del host que haya grabadas)
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
