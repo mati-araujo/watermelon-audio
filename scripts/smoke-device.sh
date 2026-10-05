@@ -70,8 +70,12 @@
 #        [--usb-espera-s 120] [--techo-s N] [--out DIR] [--no-build] [--setup FICHA]
 #   bash scripts/smoke-device.sh --self-test
 #   bash scripts/smoke-device.sh --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA] [--host-log LOG]
+#        [--host-en-log]
 #        # juzga un log ya grabado. LOG es el de la APP; las precondiciones del host van en
 #        # --host-log (precondiciones-host.log). Una linea `verificador=host` en LOG se descarta.
+#        # --host-en-log: SOLO para logs grabados antes de la separacion (S1), que traen las del
+#        # host mezcladas; las toma del propio LOG y avisa que ese log no separa origenes. La
+#        # corrida en device nunca lo pasa.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -499,7 +503,7 @@ def host(adb, serial, setup_path, requested, run, pkg, evidence_dir):
 
 
 # --- El juez -------------------------------------------------------------------------------------
-def judge(log, run, requested, setup_path, json_out, host_log=None):
+def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=False):
     setup = load_setup(setup_path)
     wanted = plan_panels(requested)
     rows = []        # {veredicto, panel, paso, detalle, observado, precondiciones}
@@ -519,7 +523,8 @@ def judge(log, run, requested, setup_path, json_out, host_log=None):
         counts = {k: sum(1 for r in rows if r["veredicto"] == k) for k in ("PASS", "FAIL", "BLOQUEADO", "HUMANO", "NO-APLICA")}
         if json_out:
             doc = {"formato": 1, "run": run, "plan": requested, "ficha": setup_path, "exit": code,
-                   "resumen": counts, "lineas-host-descartadas": discarded, "precondiciones": preconditions, "pasos": rows,
+                   "resumen": counts, "lineas-host-descartadas": discarded, "host-en-log": taken_from_log,
+                   "precondiciones": preconditions, "pasos": rows,
                    # S3 lo llena: cada juicio de sensor sobre una ventana de estimulo o de control.
                    "sensor": []}
             try:
@@ -533,12 +538,13 @@ def judge(log, run, requested, setup_path, json_out, host_log=None):
 
     lines = []
     discarded = 0
+    taken_from_log = 0
 
     def read_lines(path, from_host):
         # El log de la app (logcat) lo puede escribir cualquier app con el tag: una linea
         # `verificador=host` que llegue por ahi es una falsificacion y se DESCARTA (ni bloquea ni
         # cuenta). Las del host vienen SOLO de su propio archivo.
-        nonlocal discarded
+        nonlocal discarded, taken_from_log
         with open(path, encoding="utf-8", errors="replace") as f:
             for raw in f:
                 i = raw.find("HARNESS-SMOKE ")
@@ -552,9 +558,14 @@ def judge(log, run, requested, setup_path, json_out, host_log=None):
                 if fields.get("run") != run:
                     continue
                 if from_host != (fields.get("verificador") == "host"):
-                    if not from_host:
-                        discarded += 1
-                    continue
+                    # --host-en-log (solo logs grabados de S1, que mezclan origenes): las del host
+                    # que trae el propio log valen como del host.
+                    if not from_host and host_in_log:
+                        taken_from_log += 1
+                    else:
+                        if not from_host:
+                            discarded += 1
+                        continue
                 if fields.get("v") != "1":
                     add("FAIL", "formato", "version", "version desconocida: %s" % raw.strip())
                     print("FAIL  formato  version desconocida: %s" % raw.strip())
@@ -564,6 +575,9 @@ def judge(log, run, requested, setup_path, json_out, host_log=None):
     if host_log:
         read_lines(host_log, True)
     read_lines(log, False)
+    if host_in_log:
+        print("AVISO — --host-en-log: %d linea(s) verificador=host tomadas del propio log; este log no separa origenes "
+              "(cualquier app con el tag las puede escribir), asi que NO prueba que el host verifico\n" % taken_from_log)
     if discarded:
         print("AVISO — %d linea(s) verificador=host en el log de la app: descartadas (solo el host firma como host)\n" % discarded)
 
@@ -762,9 +776,9 @@ def judge(log, run, requested, setup_path, json_out, host_log=None):
 def main(argv):
     mode, args = (argv[0], argv[1:]) if argv else ("", [])
     try:
-        if mode == "veredicto" and len(args) in (4, 5, 6):
+        if mode == "veredicto" and len(args) in (4, 5, 6, 7):
             judge(args[0], args[1], args[2], args[3], args[4] if len(args) >= 5 and args[4] else None,
-                  args[5] if len(args) == 6 and args[5] else None)
+                  args[5] if len(args) >= 6 and args[5] else None, host_in_log=len(args) == 7 and args[6] == "host-en-log")
         elif mode == "host" and len(args) in (6, 7):
             host(*args[:6], evidence_dir=args[6] if len(args) == 7 else None)
         elif mode == "validar" and len(args) == 1:
@@ -787,10 +801,11 @@ main(sys.argv[1:])
 PY
 }
 
-# El juez. verdict LOG RUN PLAN [FICHA] [JSON] [LOG-DEL-HOST] — ver smoke_py. LOG es el de la APP:
-# una linea `verificador=host` que traiga se descarta; las del host vienen en LOG-DEL-HOST.
+# El juez. verdict LOG RUN PLAN [FICHA] [JSON] [LOG-DEL-HOST] [host-en-log] — ver smoke_py. LOG es el
+# de la APP: una linea `verificador=host` que traiga se descarta; las del host vienen en LOG-DEL-HOST.
+# El 7mo argumento, el literal `host-en-log`, es SOLO del CLI --veredicto (logs grabados que mezclan).
 verdict() {
-    smoke_py veredicto "$1" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}" "${6:-}"
+    smoke_py veredicto "$1" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}" "${6:-}" ${7:+"$7"}
 }
 
 # Un id por corrida que otra app no pueda adivinar: fecha, pid y 48 bits de /dev/urandom.
@@ -1413,6 +1428,34 @@ JSON
     split_case "S-1: una linea host falsa no suple la que el host no grabo" 4 "$tmp/app-forjada-buena.log" "$tmp/host-vacio.log" \
         'el-host-no-registro-su-verificacion'
     split_case "S-1: las lineas host del log de la app no se cuentan" 4 "$tmp/verde.log" "$tmp/host-vacio.log"
+    # --host-en-log: los logs grabados de S1 traen las lineas del host MEZCLADAS con las de la app. El
+    # flag es explicito, solo del CLI --veredicto, y avisa que ese log no separa origenes.
+    cli_case() {  # cli_case <nombre> <exit esperado> <regex que TIENE que salir> <args de --veredicto...>
+        local name="$1" want="$2" re="$3" got=0; shift 3
+        bash "$0" --veredicto "$@" > "$tmp/out" 2>&1 || got=$?
+        if [[ "$got" == "$want" ]] && grep -Eq -- "$re" "$tmp/out"; then
+            printf '  ok    %-58s exit %s\n' "$name" "$got"
+        else
+            printf '  MAL   %-58s exit %s, esperaba %s y /%s/\n' "$name" "$got" "$want" "$re"
+            sed 's/^/        /' "$tmp/out" | tail -6
+            failures=$((failures + 1))
+        fi
+    }
+    sed -E 's/ok=true id=t-host-cap cumplida=true/ok=false id=t-host-cap cumplida=false/' "$tmp/verde.log" > "$tmp/mezclado-incumplida.log"
+    cli_case "host-en-log: un log mezclado se juzga con el flag" 0 'no separa origenes' \
+        "$tmp/verde.log" "$run" "$auto" --setup "$ficha" --host-en-log
+    cli_case "host-en-log: ... y juzga las precondiciones del propio log" 4 '^BLOQUEADO +captura/nivel +precondicion=t-host-cap estado=incumplida' \
+        "$tmp/mezclado-incumplida.log" "$run" "$auto" --setup "$ficha" --host-en-log
+    cli_case "host-en-log: sin el flag el mismo log es BLOQUEADO, con su AVISO" 4 '^AVISO .* [0-9]+ linea\(s\) verificador=host.*descartadas' \
+        "$tmp/verde.log" "$run" "$auto" --setup "$ficha"
+    cli_case "host-en-log: sin el flag no se toma ni una linea host" 4 'estado=no-verificable evidencia=el-host-no-registro-su-verificacion' \
+        "$tmp/mezclado-incumplida.log" "$run" "$auto" --setup "$ficha"
+    # La corrida en device nunca lo activa: el log de la app es de un tercero, el del host es el suyo.
+    if [[ "$(awk '/^run_device\(\) \{/ {on = 1} on {print} on && /^\}/ {exit}' "$0" | grep -c 'host-en-log')" == 0 ]]; then
+        printf '  ok    %-58s\n' "host-en-log: run_device no lo pasa"
+    else
+        printf '  MAL   %-58s\n' "host-en-log: run_device no lo pasa"; failures=$((failures + 1))
+    fi
     # La captura del script: con uid, solo lo del harness; el uid sale del paquete EXACTO.
     local pm_fix="package:$PKG.test uid:10999
 package:$PKG uid:10234
@@ -1974,18 +2017,19 @@ run_device() {
 case "${1:-}" in
     --self-test) self_test ;;
     --veredicto)
-        [[ $# -ge 4 ]] || { echo "uso: $0 --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA] [--host-log LOG]" >&2; exit 2; }
-        log_="$2" run_="$3" plan_="$4" setup_="$SETUP_DEFAULT" json_="" hostlog_=""
+        [[ $# -ge 4 ]] || { echo "uso: $0 --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA] [--host-log LOG] [--host-en-log]" >&2; exit 2; }
+        log_="$2" run_="$3" plan_="$4" setup_="$SETUP_DEFAULT" json_="" hostlog_="" mixed_=""
         shift 4
         while (( $# )); do
             case "$1" in
                 --setup) setup_="${2:?--setup necesita un archivo}"; shift 2 ;;
                 --json) json_="${2:?--json necesita un archivo}"; shift 2 ;;
                 --host-log) hostlog_="${2:?--host-log necesita un archivo}"; shift 2 ;;
+                --host-en-log) mixed_=1; shift ;;
                 *) echo "opcion desconocida: $1" >&2; exit 2 ;;
             esac
         done
-        verdict "$log_" "$run_" "$plan_" "$setup_" "$json_" "$hostlog_" ;;
+        verdict "$log_" "$run_" "$plan_" "$setup_" "$json_" "$hostlog_" ${mixed_:+host-en-log} ;;
     -h|--help) awk 'NR > 1 && /^set -euo/ {exit} NR > 1 {print}' "$0" ;;
     *) run_device "$@" ;;
 esac
