@@ -37,7 +37,7 @@
           "verificador": "host",
           "chequeo": "paquetes-sin-proceso",
           "paquetes": ["com.watermellonstudios.noisypad"],
-          "descripcion": "Candidata del BUSY de claim_interface(0) (D8): ningun paquete de la lista tiene un proceso vivo.",
+          "descripcion": "Candidata del BUSY de claim_interface(0) (D8): /dev/snd no lista pcmC1*, o la lista y `dumpsys media.audio_flinger` (que shell puede leer; /proc/asound pide root) no muestra ningun hilo vivo con dispositivo AUDIO_DEVICE_OUT_USB_/IN_USB_ fuera de standby (Standby: no = tomada por el audioserver). Sin salida legible o un hilo USB sin linea de Standby, es no-verificable.",
           "depende": ["conectar", "motor-callback", "capacidades", "descriptores", "backend", "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo", "conectar-otro", "suite*", "streaming-stop", "backend-restaurado", "desconectar"],
           "remedio": "Cerrar en el telefono cada app de la lista (para NoisyPad: adb -s $ANDROID_SERIAL shell am force-stop com.watermellonstudios.noisypad), sin tocar nada mas, y volver a correr el plan."
         },
@@ -48,7 +48,7 @@
           "tarjeta": 1,
           "descripcion": "Candidata del BUSY de claim_interface(0) (D8): /dev/snd no lista pcmC1*, o la lista y /proc/asound dice que ningun substream esta abierto. Si la tarjeta esta y no se puede ver quien la tiene, es no-verificable.",
           "depende": ["conectar", "motor-callback", "capacidades", "descriptores", "backend", "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo", "conectar-otro", "suite*", "streaming-stop", "backend-restaurado", "desconectar"],
-          "remedio": "Liberar la tarjeta ALSA C1: cerrar las apps de audio y desenchufar y volver a enchufar la placa hasta que /dev/snd no liste pcmC1*, y volver a correr el plan (la causa exacta la atribuye REQ-053 S2)."
+          "remedio": "Liberar la tarjeta ALSA C1: cerrar las apps de audio y desenchufar y volver a enchufar la placa hasta que `dumpsys media.audio_flinger` muestre el hilo USB en standby (o /dev/snd no liste pcmC1*), y volver a correr el plan (la causa exacta la atribuye REQ-053 S2)."
         },
         {
           "id": "permiso-usb",

@@ -283,16 +283,17 @@ def check_runtime_permission(p, sh):
 
 
 def parse_dump(text):
-    """El modo texto de dumpsys: `clave={` abre un bloque, `}` lo cierra, `clave=valor` es hoja."""
+    """El modo texto de dumpsys: `clave={` / `clave=[` abre un bloque, `{` suelto abre uno anonimo
+    (clave "": los elementos de una lista), `}` / `]` lo cierran, `clave=valor` es hoja."""
     root, stack = [], []
     stack.append(root)
     for raw in text.splitlines():
         line = raw.strip()
-        if line == "}":
+        if line in ("}", "]"):
             if len(stack) > 1:
                 stack.pop()
             continue
-        m = re.match(r"([A-Za-z0-9_]+)=\{$", line)
+        m = re.match(r"([A-Za-z0-9_]*)=?[\{\[]$", line)
         if m:
             block = []
             stack[-1].append((m.group(1), block))
@@ -321,6 +322,16 @@ def leaf(nodes, key):
     return None
 
 
+def interfaces(device):
+    """Las interfaces de un dispositivo: cada `interfaces={...}` suelto, o cada bloque anonimo de una
+    lista `interfaces=[ {...} {...} ]` (el formato real del g42)."""
+    out = []
+    for b in blocks(device, "interfaces"):
+        anon = [v for k, v in b if k == "" and isinstance(v, list)]
+        out.extend(anon if anon else [b])
+    return out
+
+
 def check_usb_interface_class(p, sh):
     rc, out = sh.run("dumpsys usb")
     if rc != 0:
@@ -334,7 +345,7 @@ def check_usb_interface_class(p, sh):
     for d in devices:
         vid, pid = leaf(d, "vendor_id") or "", leaf(d, "product_id") or ""
         tag = "%04x:%04x" % (int(vid), int(pid)) if vid.isdigit() and pid.isdigit() else "%s:%s" % (vid or "?", pid or "?")
-        classes = sorted({leaf(i, "class") for i in blocks(d, "interfaces")} - {None})
+        classes = sorted({leaf(i, "class") for i in interfaces(d)} - {None})
         seen.append("%s(clases:%s)" % (tag, ",".join(classes) or "-"))
         if str(p["clase"]) in classes:
             hits.append("%s:%s" % (tag, leaf(d, "product_name") or "-"))
@@ -361,6 +372,30 @@ def check_packages_without_process(p, sh):
     return "true", "sin-proceso:" + ",".join(p["paquetes"])
 
 
+def audioserver_threads(dump):
+    """Los hilos VIVOS de `dumpsys media.audio_flinger`: columna 0 y `Output thread `, `Input thread `
+    o `Mmap... thread `. Los que empiezan con `- ` son hilos ya cerrados y no cuentan. Devuelve
+    (nombre, dispositivos, standby) con standby None si el hilo no tiene su linea de nivel de hilo
+    (la de 2 espacios; la de `Hal stream dump` va mas adentro y no es la del hilo)."""
+    threads, cur = [], None
+    for line in dump.splitlines():
+        if line and not line[0].isspace():
+            m = re.match(r"(Output|Input|Mmap\S*) thread (?:\S+, name ([^\s,]+))?", line)
+            cur = {"kind": m.group(1), "name": m.group(2) or "?", "devices": [], "standby": None} if m else None
+            if cur:
+                threads.append(cur)
+            continue
+        if cur is None:
+            continue
+        m = re.match(r"  (Output devices|Input device): (.*)$", line)
+        if m:
+            cur["devices"].append(m.group(2))
+        m = re.match(r"  Standby: (yes|no)\s*$", line)
+        if m and cur["standby"] is None:
+            cur["standby"] = m.group(1)
+    return threads
+
+
 def check_alsa_card_free(p, sh):
     card = p["tarjeta"]
     rc, out = sh.run("ls /dev/snd")
@@ -369,25 +404,25 @@ def check_alsa_card_free(p, sh):
     entries = out.split()
     if not any(re.fullmatch(r"controlC\d+", e) for e in entries):
         raise Unverifiable("dev-snd-ilegible")
-    pcms = sorted(e for e in entries if re.fullmatch(r"pcmC%dD\d+[pc]" % card, e))
-    if not pcms:
+    if not any(re.fullmatch(r"pcmC%dD\d+[pc]" % card, e) for e in entries):
         return "true", "sin-pcmC%d" % card
-    # La tarjeta esta: libre o tomada lo dice /proc/asound, si se puede leer sin root.
-    states = []
-    for e in pcms:
-        dev, direction = re.fullmatch(r"pcmC%dD(\d+)([pc])" % card, e).groups()
-        rc, status = sh.run("cat /proc/asound/card%d/pcm%s%s/sub0/status" % (card, dev, direction))
-        if rc != 0:
-            raise Unverifiable("%s:presente,dueno-no-visible" % e)
-        if status.strip() == "closed":
-            states.append("%s:cerrado" % e)
-            continue
-        owner = re.search(r"owner_pid\s*:\s*(\d+)", status)
-        if not owner:
-            raise Unverifiable("%s:presente,estado-ilegible" % e)
-        states.append("%s:abierto,owner_pid=%s" % (e, owner.group(1)))
-    taken = [s for s in states if ":abierto" in s]
-    return ("false", ";".join(taken)) if taken else ("true", ";".join(states))
+    # La tarjeta esta. /proc/asound pide root; quien la tiene lo dice el audioserver, que shell lee.
+    rc, dump = sh.run("dumpsys media.audio_flinger")
+    if rc != 0:
+        raise Unverifiable("dumpsys-audio_flinger-rc=%d" % rc)
+    threads = audioserver_threads(dump)
+    if not any(t["kind"] == "Output" for t in threads):
+        raise Unverifiable("audio_flinger-sin-Output-thread:formato-no-reconocido")
+    usb = [t for t in threads if any(re.search(r"AUDIO_DEVICE_(OUT|IN)_USB_", d) for d in t["devices"])]
+    taken = [t for t in usb if t["standby"] == "no"]
+    if taken:
+        return "false", ";".join("%s:%s:standby=no" % (t["name"], " ".join(t["devices"])) for t in taken)
+    blind = [t["name"] for t in usb if t["standby"] is None]
+    if blind:
+        raise Unverifiable("%s:hilo-usb-sin-Standby-legible" % ",".join(blind))
+    if usb:
+        return "true", ";".join("%s:standby=yes" % t["name"] for t in usb)
+    return "true", "sin-hilo-usb"
 
 
 HOST_CHECKS = {
@@ -1238,8 +1273,8 @@ JSON
 
     # Los verificadores de HOST, contra un adb FALSO: ninguno corre sin `-s <serial>`, y cada salida
     # que no se puede leer (adb falla, rc != 0, basura, formato desconocido, tarjeta sin dueno
-    # visible) da no-verificable — nunca cumplida. El dumpsys de abajo es SINTETICO, armado a mano
-    # con el formato de texto de `dumpsys usb`: NO es una captura del g42.
+    # visible) da no-verificable — nunca cumplida. Los dumpsys son RECORTES de la captura real del g42
+    # (scripts/smoke-device-fixtures/); las variantes se derivan de ellos con sed, nunca a mano.
     host_selftest "$tmp" "$ficha" "$run" || failures=$((failures + $?))
 
     rm -rf "$tmp"
@@ -1274,10 +1309,16 @@ case "$cmd" in
         # Dos usuarios: el 0 (el que corre el smoke) y un perfil secundario sin el permiso.
         printf 'Packages:\n  Package [x]\n    User 0: ceDataInode=1 installed=true\n      runtime permissions:\n        android.permission.RECORD_AUDIO: granted=%s, flags=[ USER_SENSITIVE ]\n    User 10: ceDataInode=0 installed=false\n      runtime permissions:\n        android.permission.RECORD_AUDIO: granted=false, flags=[ ]\n' "$g" ;;
     *"dumpsys usb"*)
-        f=audio
+        f=cm720
         [[ "$FAKE_MODE" == incumplida ]] && f=hid
         [[ "$FAKE_MODE" == sin-host ]] && f=sin-host
+        [[ "$FAKE_MODE" == dos-dispositivos ]] && f=dos
         cat "$FAKE_DIR/dumpsys-usb-$f.txt" ;;
+    *"dumpsys media.audio_flinger"*)
+        f=af-standby
+        [[ "$FAKE_MODE" == incumplida ]] && f=af-tomada
+        [[ "$FAKE_MODE" == af-* ]] && f="$FAKE_MODE"
+        cat "$FAKE_DIR/$f.txt" ;;
     *"ps -A"*)
         printf '  PID NAME\n    1 init\n'
         # `ps-ciego`: un ps que no ve los procesos de otros UID (sin system_server).
@@ -1285,13 +1326,7 @@ case "$cmd" in
         [[ "$FAKE_MODE" == incumplida ]] && printf ' 4242 com.example.ajena:servicio\n' ;;
     *"ls /dev/snd"*)
         printf 'controlC0\npcmC0D0p\npcmC0D0c\ntimer\n'
-        [[ "$FAKE_MODE" == incumplida || "$FAKE_MODE" == alsa-* ]] && printf 'controlC1\npcmC1D0p\n' ;;
-    *"/proc/asound/card1/pcm0p/sub0/status"*)
-        case "$FAKE_MODE" in
-            incumplida) printf 'state: RUNNING\nowner_pid   : 777\ntrigger_time: 1.0\n' ;;
-            alsa-cerrada) printf 'closed\n' ;;
-            alsa-oculta) echo "cat: /proc/asound/card1/pcm0p/sub0/status: Permission denied"; echo "wma-rc=1"; exit 0 ;;
-        esac ;;
+        [[ "$FAKE_MODE" == incumplida || "$FAKE_MODE" == af-* ]] && printf 'controlC1\npcmC1D0p\n' ;;
     *) echo "comando no previsto: $cmd" >> "$FAKE_DIR/sin-s.txt" ;;
 esac
 # `cortado`: la salida de un comando sano, pero la conexion se cae antes de la marca final. Lo
@@ -1302,45 +1337,26 @@ esac
 echo "wma-rc=0"
 FAKE
     chmod +x "$evid/adb"
-    # SINTETICOS (ver arriba): un host con la placa de audio, uno con un HID y uno sin host_manager.
-    cat > "$evid/dumpsys-usb-audio.txt" <<'TXT'
-USB MANAGER STATE (dumpsys usb):
-{
-  device_manager={
-    handler={
-      current_functions=0
-    }
-  }
-  host_manager={
-    default_usb_host_connection_handler=com.android.usb/.UsbHostConnection
-    devices={
-      name=/dev/bus/usb/001/002
-      vendor_id=11145
-      product_id=25836
-      class=0
-      manufacturer_name=Realtek
-      product_name=UGREEN CM720 USB Audio
-      configurations={
-        id=1
-        interfaces={
-          id=0
-          alternate_settings=0
-          class=1
-          subclass=1
-        }
-        interfaces={
-          id=1
-          alternate_settings=1
-          class=1
-          subclass=2
-        }
-      }
-    }
-  }
-}
-TXT
-    sed -E 's/class=1$/class=3/; s/vendor_id=11145/vendor_id=1133/' "$evid/dumpsys-usb-audio.txt" > "$evid/dumpsys-usb-hid.txt"
-    sed -E '/host_manager=\{/,$d' "$evid/dumpsys-usb-audio.txt" > "$evid/dumpsys-usb-sin-host.txt"
+    local fx=scripts/smoke-device-fixtures
+    cp "$fx/dumpsys-usb-cm720.txt" "$evid/dumpsys-usb-cm720.txt"
+    # Sin interfaces de clase 1 (y otro vendor): la misma captura con la placa convertida en un HID.
+    sed -E 's/^( *)class=1$/\1class=3/; s/vendor_id=11145/vendor_id=1133/' "$fx/dumpsys-usb-cm720.txt" > "$evid/dumpsys-usb-hid.txt"
+    sed -E '/host_manager=\{/,$d' "$fx/dumpsys-usb-cm720.txt" > "$evid/dumpsys-usb-sin-host.txt"
+    # Dos dispositivos bajo host_manager: un HID primero y la CM720 despues (el recorte, repetido).
+    awk -v hid="$evid/dumpsys-usb-hid.txt" 'FNR == NR { if (/^    devices=\{$/) on = 1; if (on) d = d $0 "\n"; if (on && /^    \}$/) on = 0; next }
+        /^    devices=\{$/ && !done { printf "%s", d; done = 1 } { print }' "$evid/dumpsys-usb-hid.txt" "$fx/dumpsys-usb-cm720.txt" > "$evid/dumpsys-usb-dos.txt"
+    # audio_flinger: el hilo USB es AudioOut_15; su linea de nivel de hilo es la UNICA de 2 espacios.
+    local af="$fx/audio-flinger-cm720.txt" usb_hilo='/^Output thread .*name AudioOut_15,/,/^Output thread .*name (AudioOut_D|AudioOut_25),|^Historical/'
+    cp "$af" "$evid/af-standby.txt"
+    sed -E "${usb_hilo}"'s/^  Standby: yes$/  Standby: no/' "$af" > "$evid/af-tomada.txt"
+    sed -E 's/^-   Standby: yes$/-   Standby: no/; s/^-   Output devices: .*$/-   Output devices: 0x4000000 (AUDIO_DEVICE_OUT_USB_HEADSET)/' "$af" > "$evid/af-cerrado-no.txt"
+    sed -E "${usb_hilo}"'s/^      Standby: yes$/      Standby: no/' "$af" > "$evid/af-hal-no.txt"
+    : > "$evid/af-vacio.txt"
+    sed -E '/^Output thread /,$d' "$af" > "$evid/af-sin-hilos.txt"
+    sed -E "${usb_hilo}"'s/AUDIO_DEVICE_OUT_USB_HEADSET/AUDIO_DEVICE_OUT_SPEAKER/' "$af" > "$evid/af-sin-usb.txt"
+    sed -E "${usb_hilo}"'{/^  Standby: /d;}' "$af" > "$evid/af-sin-standby.txt"
+    # Un hilo de ENTRADA con la placa: el mismo hilo USB reescrito como Input, con su Standby en no.
+    sed -E "${usb_hilo}"'{s/^Output thread /Input thread /; s/^  Output devices: .*$/  Output devices:  (Empty device types)/; s/^  Input device: 0 \(AUDIO_DEVICE_NONE\)/  Input device: 0x80000000 (AUDIO_DEVICE_IN_USB_DEVICE)/; s/^  Standby: yes$/  Standby: no/;}' "$af" > "$evid/af-entrada-tomada.txt"
 
     host_case() {  # host_case <modo> <id> <cumplida esperada>
         local m="$1" id="$2" want="$3" got
@@ -1353,7 +1369,8 @@ TXT
             bad=$((bad + 1))
         fi
     }
-    for mode in ok incumplida falla basura denegado cortado rc-1 ps-ciego sin-host alsa-cerrada alsa-oculta; do
+    for mode in ok incumplida falla basura denegado cortado rc-1 ps-ciego sin-host dos-dispositivos \
+        af-standby af-tomada af-cerrado-no af-hal-no af-vacio af-sin-hilos af-sin-usb af-sin-standby af-entrada-tomada; do
         FAKE_MODE="$mode" FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
             smoke_py host "$evid/adb" "$serial" "$ficha" todo "$run" "$PKG" "$evid/evidencia-$mode" \
             > "$evid/out-$mode.txt" 2>&1 || true
@@ -1365,11 +1382,23 @@ TXT
         for id in t-host-cap t-usb-clase t-host-usb t-alsa; do host_case "$mode" "$id" no-verificable; done
     done
     host_case sin-host t-usb-clase no-verificable
+    host_case dos-dispositivos t-usb-clase true     # el HID primero no tapa a la CM720 que viene despues
     host_case ps-ciego t-host-usb no-verificable
-    host_case alsa-cerrada t-alsa true
-    host_case alsa-oculta t-alsa no-verificable
+    # La tarjeta ALSA contra audio_flinger real. Cada regla tiene su caso y su mutante (ver el reporte).
+    host_case af-standby t-alsa true            # el hilo USB en standby: libre
+    host_case af-tomada t-alsa false            # Standby: no en el hilo USB: tomada
+    host_case af-cerrado-no t-alsa true         # un `Standby: no` en un hilo "- " cerrado no cuenta
+    host_case af-hal-no t-alsa true             # el de `Hal stream dump` no es el del hilo
+    host_case af-vacio t-alsa no-verificable    # salida vacia: nunca cumplida por defecto
+    host_case af-sin-hilos t-alsa no-verificable
+    host_case af-sin-usb t-alsa true            # hay tarjeta pero ningun hilo USB
+    host_case af-sin-standby t-alsa no-verificable
+    host_case af-entrada-tomada t-alsa false    # un Input thread con IN_USB_ tambien toma la tarjeta
+    for mode in af-standby af-tomada af-cerrado-no af-hal-no af-vacio af-sin-hilos af-sin-usb af-sin-standby af-entrada-tomada; do
+        host_case "$mode" t-usb-clase true      # la captura real: la CM720 tiene interfaces de clase 1
+    done
     local check
-    for check in "incumplida:t-host-usb:4242" "incumplida:t-alsa:777" "incumplida:t-usb-clase:046d"; do
+    for check in "incumplida:t-host-usb:4242" "incumplida:t-alsa:AudioOut_15:0x4000000" "af-tomada:t-alsa:AudioOut_15:0x4000000" "af-entrada-tomada:t-alsa:IN_USB_DEVICE" "af-standby:t-usb-clase:2b89:64ec:UGREEN" "dos-dispositivos:t-usb-clase:2b89:64ec:UGREEN" "af-standby:t-alsa:AudioOut_15:standby=yes" "af-sin-usb:t-alsa:sin-hilo-usb" "incumplida:t-usb-clase:046d"; do
         IFS=: read -r mode id needle <<< "$check"
         if grep -E " id=$id .*evidencia=[^ ]*$needle" "$evid/out-$mode.txt" > /dev/null; then
             printf '  ok    %-58s\n' "host[$mode]: la evidencia de $id lleva $needle"
