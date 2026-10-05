@@ -47,6 +47,8 @@ readonly PKG="com.watermellonstudios.audio.harness"
 readonly ACTIVITY="$PKG/.MainActivity"
 readonly APK="harness/build/outputs/apk/debug/harness-debug.apk"
 readonly SELFTEST_LOG="scripts/smoke-device-selftest.txt"
+readonly SETUP_DEFAULT="scripts/smoke-setup.json"
+readonly SELF="scripts/smoke-device.sh"
 
 # ---------------------------------------------------------------------------
 # El juez. Puro: un log y un run id adentro, veredictos y exit code afuera. Es lo que prueba
@@ -236,78 +238,158 @@ EOF
 # ---------------------------------------------------------------------------
 # --self-test: el juez tiene que poder decir que NO. Sobre un log grabado de una corrida real en
 # device (scripts/smoke-device-selftest.txt), y sobre mutantes de ese log.
+#
+# REQ-053 S1: los casos de las precondiciones corren con una ficha DE PRUEBA (abajo), no con la
+# real: la real la cambian S2-S4 y estos casos fijan las REGLAS del juez, no los datos. La real se
+# valida aparte, se cruza con el script (ningun id escrito aca) y con el harness (cada id de app
+# lo emite la app), y juzga el control.
 # ---------------------------------------------------------------------------
 self_test() {
     local tmp
     tmp="$(mktemp -d)"
     [[ -f "$SELFTEST_LOG" ]] || { echo "self-test: FAIL — falta $SELFTEST_LOG" >&2; return 1; }
+    [[ -f "$SETUP_DEFAULT" ]] || { echo "self-test: FAIL — falta $SETUP_DEFAULT" >&2; return 1; }
     local run
     run="$(sed -nE 's/.*HARNESS-SMOKE v=1 run=([^ ]+) panel=plan step=inicio .*/\1/p' "$SELFTEST_LOG" | head -1)"
     [[ -n "$run" ]] || { echo "self-test: FAIL — el log grabado no tiene 'plan inicio'" >&2; return 1; }
 
+    local real="$SETUP_DEFAULT" ficha="$tmp/ficha.json" vacia="$tmp/vacia.json"
+    echo '{"formato": 1, "planes": {}}' > "$vacia"
+    # La ficha de prueba: una precondicion de host por cada chequeo que conoce el script, y dos de
+    # app (una con ventana humana, D13). Los remedios son marcas unicas para poder buscarlas.
+    cat > "$ficha" <<'JSON'
+{
+  "formato": 1,
+  "planes": {
+    "captura": {"precondiciones": [
+      {"id": "t-host-cap", "verificador": "host", "chequeo": "permiso-runtime",
+       "permiso": "android.permission.RECORD_AUDIO", "depende": ["nivel"], "remedio": "REMEDIO-T-HOST-CAP"},
+      {"id": "t-app-cap", "verificador": "app", "depende": ["start"], "remedio": "REMEDIO-T-APP-CAP"}
+    ]},
+    "usb": {"precondiciones": [
+      {"id": "t-usb-clase", "verificador": "host", "chequeo": "usb-interfaz-de-clase", "clase": 1,
+       "depende": ["dispositivos"], "remedio": "REMEDIO-T-USB-CLASE"},
+      {"id": "t-host-usb", "verificador": "host", "chequeo": "paquetes-sin-proceso",
+       "paquetes": ["com.example.ajena"],
+       "depende": ["conectar", "motor-callback", "capacidades", "descriptores", "backend", "wake-lock",
+                   "streaming-start", "streaming-stats", "reconectar-mismo", "conectar-otro", "suite*",
+                   "streaming-stop", "backend-restaurado", "desconectar"],
+       "remedio": "REMEDIO-T-HOST-USB"},
+      {"id": "t-alsa", "verificador": "host", "chequeo": "alsa-tarjeta-libre", "tarjeta": 1,
+       "depende": ["streaming-start"], "remedio": "REMEDIO-T-ALSA"},
+      {"id": "t-permiso", "verificador": "app", "ventana-humana": true,
+       "depende": ["permiso", "permiso-falso", "conectar", "motor-callback", "capacidades", "descriptores",
+                   "backend", "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo",
+                   "conectar-otro", "suite*", "streaming-stop", "backend-restaurado", "desconectar"],
+       "remedio": "REMEDIO-T-PERMISO"}
+    ]}
+  }
+}
+JSON
+
     local failures=0
-    expect() {  # expect <nombre> <exit esperado> <archivo> [plan pedido]
-        local name="$1" want="$2" file="$3" plan="${4:-todo}" got=0
-        verdict "$file" "$run" "$plan" > "$tmp/out" 2>&1 || got=$?
+    expect() {  # expect <nombre> <exit esperado> <archivo> [plan pedido] [ficha]
+        local name="$1" want="$2" file="$3" plan="${4:-todo}" setup="${5:-$ficha}" got=0
+        verdict "$file" "$run" "$plan" "$setup" > "$tmp/out" 2>&1 || got=$?
         if [[ "$got" == "$want" ]]; then
-            printf '  ok    %-44s exit %s\n' "$name" "$got"
+            printf '  ok    %-58s exit %s\n' "$name" "$got"
         else
-            printf '  MAL   %-44s exit %s, esperaba %s\n' "$name" "$got" "$want"
+            printf '  MAL   %-58s exit %s, esperaba %s\n' "$name" "$got" "$want"
             sed 's/^/        /' "$tmp/out" | tail -8
             failures=$((failures + 1))
         fi
     }
 
-    expect_line() {  # expect_line <nombre> <regex que TIENE que aparecer> <archivo> [plan]
-        local name="$1" re="$2" file="$3" plan="${4:-todo}"
-        verdict "$file" "$run" "$plan" > "$tmp/out" 2>&1 || true
-        if grep -Eq "$re" "$tmp/out"; then
-            printf '  ok    %-44s\n' "$name"
+    expect_line() {  # expect_line <nombre> <regex que TIENE que aparecer> <archivo> [plan] [ficha]
+        local name="$1" re="$2" file="$3" plan="${4:-todo}" setup="${5:-$ficha}"
+        verdict "$file" "$run" "$plan" "$setup" > "$tmp/out" 2>&1 || true
+        if grep -Eq -- "$re" "$tmp/out"; then
+            printf '  ok    %-58s\n' "$name"
         else
-            printf '  MAL   %-44s falta /%s/\n' "$name" "$re"
+            printf '  MAL   %-58s falta /%s/\n' "$name" "$re"
             failures=$((failures + 1))
         fi
     }
-    expect_no_line() {  # expect_no_line <nombre> <regex que NO puede aparecer> <archivo> [plan]
-        local name="$1" re="$2" file="$3" plan="${4:-todo}"
-        verdict "$file" "$run" "$plan" > "$tmp/out" 2>&1 || true
-        if grep -Eq "$re" "$tmp/out"; then
-            printf '  MAL   %-44s aparece /%s/\n' "$name" "$re"
+    expect_no_line() {  # expect_no_line <nombre> <regex que NO puede aparecer> <archivo> [plan] [ficha]
+        local name="$1" re="$2" file="$3" plan="${4:-todo}" setup="${5:-$ficha}"
+        verdict "$file" "$run" "$plan" "$setup" > "$tmp/out" 2>&1 || true
+        if grep -Eq -- "$re" "$tmp/out"; then
+            printf '  MAL   %-58s aparece /%s/\n' "$name" "$re"
             failures=$((failures + 1))
         else
-            printf '  ok    %-44s\n' "$name"
+            printf '  ok    %-58s\n' "$name"
+        fi
+    }
+    # expect_json <nombre> <archivo> <plan> <expresion python sobre j, el JSON de la corrida>
+    expect_json() {
+        local name="$1" file="$2" plan="$3" expr="$4"
+        rm -f "$tmp/corrida.json"
+        verdict "$file" "$run" "$plan" "$ficha" "$tmp/corrida.json" > "$tmp/out" 2>&1 || true
+        if python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); sys.exit(0 if eval(sys.argv[2]) else 1)' \
+                "$tmp/corrida.json" "$expr" 2>"$tmp/json-err"; then
+            printf '  ok    %-58s\n' "$name"
+        else
+            printf '  MAL   %-58s el JSON no cumple: %s\n' "$name" "$expr"
+            sed 's/^/        /' "$tmp/json-err" | tail -3
+            failures=$((failures + 1))
         fi
     }
 
-    # El control: el log grabado tal cual. Su exit es el que se grabo (ver la cabecera del log).
+    # pre <panel> <id> <cumplida> [host] — una linea de precondicion como la emite la app (o el
+    # host, con el cuarto argumento: firma `verificador=host`).
+    pre() {
+        local ok=false
+        [[ "$3" == true ]] && ok=true
+        echo "HARNESS-SMOKE v=1 run=$run panel=$1 step=precondicion ok=$ok id=$2 cumplida=$3 evidencia=prueba-$2${4:+ verificador=host}"
+    }
+    # before_fin <origen> <destino>: agrega stdin al origen, antes de `plan fin`.
+    before_fin() {
+        { grep -v 'panel=plan step=fin ' "$1" || true; cat; grep 'panel=plan step=fin ' "$1" || true; } > "$2"
+    }
+    # set_pre <id> <cumplida>: el sed que cambia el resultado de esa precondicion.
+    set_pre() {
+        local ok=false
+        [[ "$2" == true ]] && ok=true
+        echo "/ id=$1 /s/ ok=[a-z]+ / ok=$ok /; / id=$1 /s/ cumplida=[^ ]+ / cumplida=$2 /"
+    }
+    met_captura() { pre captura t-host-cap true host; pre captura t-app-cap true; }
+    met_usb_host() { pre usb t-usb-clase true host; pre usb t-host-usb true host; pre usb t-alsa true host; }
+
+    # El control: el log grabado tal cual, con una ficha SIN precondiciones — o sea, el juez de
+    # antes de REQ-053. Su exit es el que se grabo (ver la cabecera del log).
     local want_base
     want_base="$(sed -nE 's/^# exit-esperado: ([0-9]+).*/\1/p' "$SELFTEST_LOG" | head -1)"
     [[ -n "$want_base" ]] || { echo "self-test: FAIL — el log grabado no declara '# exit-esperado:'" >&2; return 1; }
-    expect "control: el log grabado" "$want_base" "$SELFTEST_LOG"
+    expect "control: el log grabado, ficha sin precondiciones" "$want_base" "$SELFTEST_LOG" todo "$vacia"
 
     # Una version del control donde todo lo automatico pasa y el humano ya actuo: exit 0. Se arma
     # quitando del log los pasos USB (queda pendiente) — ver abajo — asi que primero el caso verde
-    # sin USB: se recorta el plan a los paneles automaticos.
+    # sin USB: se recorta el plan a los paneles automaticos. Lleva las precondiciones de captura
+    # CUMPLIDAS: es el gemelo de todos los casos de BLOQUEADO (cumplida no bloquea nada).
     sed -E "/panel=usb /d; s/(panel=plan step=inicio ok=true plan=)[^ ]*/\1salida,captura,sf2,sf3/; \
             s/(panel=plan step=fin )ok=[a-z]+ fallidos=[^ ]*/\1ok=true fallidos=-/" \
-        "$SELFTEST_LOG" > "$tmp/verde.log"
-    expect "verde: sin usb, todo lo automatico" 0 "$tmp/verde.log" salida,captura,sf2,sf3
+        "$SELFTEST_LOG" > "$tmp/verde0.log"
+    met_captura | before_fin "$tmp/verde0.log" "$tmp/verde.log"
+    local auto=salida,captura,sf2,sf3
+    expect "verde: sin usb, todo lo automatico" 0 "$tmp/verde.log" "$auto"
 
     # M1: UN paso con ok=false da rojo.
     sed -E 's/panel=sf3 step=nota ok=true/panel=sf3 step=nota ok=false/' "$tmp/verde.log" > "$tmp/m1.log"
-    expect "M1: sf3/nota con ok=false" 1 "$tmp/m1.log" salida,captura,sf2,sf3
+    expect "M1: sf3/nota con ok=false" 1 "$tmp/m1.log" "$auto"
 
     # M2: UN paso faltante da rojo.
     grep -v 'panel=salida step=frames ' "$tmp/verde.log" > "$tmp/m2.log"
-    expect "M2: falta salida/frames" 1 "$tmp/m2.log" salida,captura,sf2,sf3
+    expect "M2: falta salida/frames" 1 "$tmp/m2.log" "$auto"
 
     # M3: sin `fin` la corrida no termino: rojo, aunque todo lo demas pase.
     grep -v 'panel=plan step=fin ' "$tmp/verde.log" > "$tmp/m3.log"
-    expect "M3: falta plan/fin" 1 "$tmp/m3.log" salida,captura,sf2,sf3
+    expect "M3: falta plan/fin" 1 "$tmp/m3.log" "$auto"
 
-    # M4: el humano no contesto — el USB queda HUMANO, no PASS ni FAIL: exit 3.
+    # M4: el humano no contesto — el USB queda HUMANO, no PASS ni FAIL: exit 3. Las precondiciones
+    # de host se cumplen; la del permiso (app, con ventana humana) NO tiene linea: D13.
     {
-        cat "$tmp/verde.log" | grep -v 'panel=plan step=fin '
+        grep -v 'panel=plan step=fin ' "$tmp/verde.log"
+        met_usb_host
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-parado ok=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=dispositivos ok=true cantidad=1"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-callback ok=true inicializado=true"
@@ -321,22 +403,24 @@ self_test() {
 
     # M5: lineas de OTRA corrida no cuentan: con otro run id no hay nada que juzgar.
     sed -E "s/run=$run /run=otra-corrida /" "$tmp/verde.log" > "$tmp/m5.log"
-    expect "M5: el run id es de otra corrida" 1 "$tmp/m5.log" salida,captura,sf2,sf3
+    expect "M5: el run id es de otra corrida" 1 "$tmp/m5.log" "$auto"
 
     # M6: un paso con ok=false que NO esta en la lista esperada (p.ej. una excepcion) tambien es rojo.
     awk -v run="$run" '/panel=plan step=fin /{print "HARNESS-SMOKE v=1 run=" run " panel=sf2 step=excepcion ok=false error=boom"} {print}' \
         "$tmp/verde.log" > "$tmp/m6.log"
-    expect "M6: un paso inesperado con ok=false" 1 "$tmp/m6.log" salida,captura,sf2,sf3
+    expect "M6: un paso inesperado con ok=false" 1 "$tmp/m6.log" "$auto"
 
-    # Un USB completo y sano, detras del permiso que el humano SI dio.
+    # Un USB completo y sano, detras del permiso que el humano SI dio, con sus precondiciones.
     usb_ok() {
         local s
+        met_usb_host
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-parado ok=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=dispositivos ok=true cantidad=1"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-callback ok=true inicializado=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=esperando-humano ok=false accion=aceptar_el_dialogo"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=broadcast-falso ok=true origen=adb enviados=2"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=permiso-falso ok=true granted=1 granted-sin-permiso-en-usbmanager=0"
+        pre usb t-permiso true
         for s in permiso conectar capacidades descriptores backend wake-lock streaming-start streaming-stats \
                  reconectar-mismo conectar-otro \
                  suite-1 suite-2 suite-3 suite streaming-stop backend-restaurado desconectar; do
@@ -349,6 +433,8 @@ self_test() {
           echo "HARNESS-SMOKE v=1 run=$run panel=plan step=fin ok=true fallidos=- motor-detenido=true"
         } | sed -E "s/(panel=plan step=inicio ok=true plan=)[^ ]*/\1salida,captura,sf2,sf3,usb/" > "$1"
     }
+    # El `fin` de una corrida en la que el panel usb fallo.
+    usb_failed() { sed -i.bak -E 's/(panel=plan step=fin )ok=true fallidos=-/\1ok=false fallidos=usb/' "$1"; }
 
     # M7: el humano dio el permiso y el USB paso entero: exit 0 (el HUMANO "hecho" no retiene).
     with_usb "$tmp/m7.log" 's/^//'
@@ -442,14 +528,374 @@ self_test() {
     expect_line "M16: permiso-falso sale FAIL" '^FAIL +usb/permiso-falso ' "$tmp/m16.log"
     with_usb "$tmp/m16b.log" 's/step=broadcast-falso ok=true/step=broadcast-falso ok=false/'
     expect "M16b: el broadcast falso no se despacho" 1 "$tmp/m16b.log"
-    expect_no_line "M17: sin dialogo no se piden los pasos del falso" '^FAIL +usb/(broadcast|permiso)-falso ' "$SELFTEST_LOG"
+    expect_no_line "M17: sin dialogo no se piden los pasos del falso" '^FAIL +usb/(broadcast|permiso)-falso ' "$SELFTEST_LOG" todo "$vacia"
+
+    # =====================================================================================
+    # REQ-053 S1 — AC-053.6, una regla por bloque. Cada uno es un mutante del log + la ficha de
+    # prueba, y cada uno tiene su gemelo: el verde de arriba (todo cumplido, exit 0).
+    # =====================================================================================
+
+    # (a) Una incumplida bloquea SUS dependientes y NO otros. t-host-cap bloquea captura/nivel; el
+    # resto de captura y los demas paneles se juzgan igual.
+    sed -E "$(set_pre t-host-cap false)" "$tmp/verde.log" > "$tmp/a1.log"
+    expect "a1: incumplida (host) bloquea su dependiente" 4 "$tmp/a1.log" "$auto"
+    expect_line "a1: captura/nivel sale BLOQUEADO por t-host-cap" '^BLOQUEADO +captura/nivel +precondicion=t-host-cap estado=incumplida' "$tmp/a1.log" "$auto"
+    expect_line "a1: con la evidencia observada" '^BLOQUEADO +captura/nivel .*evidencia=prueba-t-host-cap' "$tmp/a1.log" "$auto"
+    expect_line "a1: con la accion manual de la ficha" '^BLOQUEADO +captura/nivel .*remedio=REMEDIO-T-HOST-CAP' "$tmp/a1.log" "$auto"
+    expect_line "a1: captura/start (no depende) se juzga: PASS" '^PASS +captura/start ' "$tmp/a1.log" "$auto"
+    expect_line "a1: captura/stop (no depende) se juzga: PASS" '^PASS +captura/stop ' "$tmp/a1.log" "$auto"
+    expect_no_line "a1: ningun otro paso sale BLOQUEADO" '^BLOQUEADO +(salida|sf2|sf3|captura/(start|stop))' "$tmp/a1.log" "$auto"
+    # Y los no dependientes siguen pudiendo FALLAR: el bloqueo no tapa un rojo ajeno.
+    sed -E 's/panel=captura step=stop ok=true/panel=captura step=stop ok=false/' "$tmp/a1.log" > "$tmp/a1b.log"
+    expect_line "a1b: un no dependiente con ok=false sale FAIL" '^FAIL +captura/stop' "$tmp/a1b.log" "$auto"
+
+    # (a) en usb, la forma del BUSY del 05/10 (GWT de S1): con otra app viva, streaming-start falla
+    # y la suite no trafica. Lo que depende sale BLOQUEADO con el remedio; dispositivos, permiso y
+    # los paneles automaticos se juzgan igual; `fin` no agrega un FAIL por el panel bloqueado.
+    with_usb "$tmp/a2.log" "$(set_pre t-host-usb false); s/step=streaming-start ok=true/step=streaming-start ok=false error=STREAMING_ERROR/; s/step=(suite-[123]|suite|streaming-stats) ok=true/step=\1 ok=false motivo=sin-streaming/"
+    usb_failed "$tmp/a2.log"
+    expect "a2: otra app viva (BUSY) da BLOQUEADO, no FAIL" 4 "$tmp/a2.log"
+    expect_line "a2: streaming-start sale BLOQUEADO" '^BLOQUEADO +usb/streaming-start +precondicion=t-host-usb estado=incumplida.*remedio=REMEDIO-T-HOST-USB' "$tmp/a2.log"
+    expect_line "a2: usb/dispositivos (no depende) PASS" '^PASS +usb/dispositivos ' "$tmp/a2.log"
+    expect_line "a2: salida/frames (otro panel) PASS" '^PASS +salida/frames ' "$tmp/a2.log"
+    expect_line "a2: plan/fin explicado por el bloqueo" '^BLOQUEADO +plan/fin ' "$tmp/a2.log"
+    expect_no_line "a2: ningun FAIL" '^FAIL ' "$tmp/a2.log"
+    # Los pasos que dependen y NO se emitieron (conectar fallo y el panel corto) son BLOQUEADO,
+    # no FAIL por FALTA.
+    with_usb "$tmp/a3.log" "$(set_pre t-host-usb false); s/step=conectar ok=true/step=conectar ok=false error=DEVICE_BUSY/; /step=(motor-callback|capacidades|descriptores|backend|wake-lock|streaming-[a-z]+|reconectar-mismo|conectar-otro|suite[-0-9]*|backend-restaurado|desconectar) /d"
+    usb_failed "$tmp/a3.log"
+    expect "a3: los dependientes que no corrieron" 4 "$tmp/a3.log"
+    expect_line "a3: desconectar (no emitido) sale BLOQUEADO" '^BLOQUEADO +usb/desconectar +precondicion=t-host-usb.*no-emitido' "$tmp/a3.log"
+    expect_no_line "a3: ninguno sale FALTA" '^FAIL ' "$tmp/a3.log"
+
+    # (b) Una no verificable bloquea, nunca cuenta como cumplida: el host no pudo (adb fallo), la
+    # app no emitio su linea, la linea no se parsea, o la emitio el verificador equivocado.
+    sed -E "$(set_pre t-host-cap no-verificable)" "$tmp/verde.log" > "$tmp/b1.log"
+    expect "b1: el host la dio no-verificable" 4 "$tmp/b1.log" "$auto"
+    expect_line "b1: captura/nivel sale BLOQUEADO no-verificable" '^BLOQUEADO +captura/nivel +precondicion=t-host-cap estado=no-verificable' "$tmp/b1.log" "$auto"
+    grep -v ' id=t-app-cap ' "$tmp/verde.log" > "$tmp/b2.log"
+    expect "b2: la app no emitio su linea" 4 "$tmp/b2.log" "$auto"
+    expect_line "b2: captura/start sale BLOQUEADO no-verificable" '^BLOQUEADO +captura/start +precondicion=t-app-cap estado=no-verificable' "$tmp/b2.log" "$auto"
+    grep -v ' id=t-host-cap ' "$tmp/verde.log" > "$tmp/b3.log"
+    expect "b3: el host no registro su verificacion" 4 "$tmp/b3.log" "$auto"
+    sed -E '/ id=t-app-cap /s/ cumplida=true / cumplida=quizas /' "$tmp/verde.log" > "$tmp/b4.log"
+    expect "b4: cumplida ilegible" 4 "$tmp/b4.log" "$auto"
+    sed -E '/ id=t-app-cap /s/ ok=true / ok=false /' "$tmp/verde.log" > "$tmp/b5.log"
+    expect "b5: ok y cumplida no coinciden" 4 "$tmp/b5.log" "$auto"
+    sed -E '/ id=t-host-cap /s/ verificador=host//' "$tmp/verde.log" > "$tmp/b6.log"
+    expect "b6: la de host la emitio la app" 4 "$tmp/b6.log" "$auto"
+    expect_line "b6: sale no-verificable, no cumplida" '^BLOQUEADO +captura/nivel +precondicion=t-host-cap estado=no-verificable' "$tmp/b6.log" "$auto"
+    { cat "$tmp/verde.log"; pre captura t-host-cap false host; } > "$tmp/b7.log"
+    expect "b7: dos lineas que no coinciden: no cumplida" 4 "$tmp/b7.log" "$auto"
+
+    # (c) Un BLOQUEADO nunca suma como PASS: a1 bloquea captura/nivel, que la app dio ok=true.
+    expect_no_line "c1: el bloqueado con ok=true no sale PASS" '^PASS +captura/nivel ' "$tmp/a1.log" "$auto"
+    expect_line "c1: y el resumen lo cuenta BLOQUEADO" '^resumen: [0-9]+ PASS · 0 FAIL · 1 BLOQUEADO ' "$tmp/a1.log" "$auto"
+    local pass_verde pass_a1
+    pass_verde="$(verdict "$tmp/verde.log" "$run" "$auto" "$ficha" 2>&1 | sed -nE 's/^resumen: ([0-9]+) PASS.*/\1/p' || true)"
+    pass_a1="$(verdict "$tmp/a1.log" "$run" "$auto" "$ficha" 2>&1 | sed -nE 's/^resumen: ([0-9]+) PASS.*/\1/p' || true)"
+    if [[ -n "$pass_verde" && "$pass_a1" == "$((pass_verde - 1))" ]]; then
+        printf '  ok    %-58s\n' "c2: bloquear un paso le resta uno al PASS ($pass_verde -> $pass_a1)"
+    else
+        printf '  MAL   %-58s PASS verde=%s, con un bloqueo=%s\n' "c2: bloquear un paso le resta uno al PASS" "$pass_verde" "$pass_a1"
+        failures=$((failures + 1))
+    fi
+
+    # (d) Precedencia del exit: 1 FAIL > 4 BLOQUEADO > 3 HUMANO > 0.
+    sed -E 's/panel=sf3 step=nota ok=true/panel=sf3 step=nota ok=false/' "$tmp/a1.log" > "$tmp/d1.log"
+    expect "d1: FAIL + BLOQUEADO = 1" 1 "$tmp/d1.log" "$auto"
+    sed -E "$(set_pre t-host-cap false)" "$tmp/m4.log" > "$tmp/d2.log"
+    expect "d2: BLOQUEADO + HUMANO = 4" 4 "$tmp/d2.log"
+    expect "d3: HUMANO solo = 3 (M4)" 3 "$tmp/m4.log"
+    expect "d4: nada de eso = 0 (verde)" 0 "$tmp/verde.log" "$auto"
+
+    # D13 — el permiso USB con su ventana humana.
+    # Negado explicitamente: la app emite t-permiso cumplida=false al cerrar la ventana. Los pasos
+    # que dependen —incluido permiso-falso, que no puede distinguir al humano de un broadcast
+    # ajeno— salen BLOQUEADO, no FAIL ni HUMANO.
+    with_usb "$tmp/p1.log" "$(set_pre t-permiso false); s/step=permiso ok=true/step=permiso ok=false origen=dialogo concedido=false/; s/step=permiso-falso ok=true .*/step=permiso-falso ok=false motivo=negado:humano-o-broadcast-ajeno resultado=PERMISSION_DENIED/; s/step=conectar ok=true/step=conectar ok=false error=PERMISSION_DENIED/; /step=(motor-callback|capacidades|descriptores|backend|wake-lock|streaming-[a-z]+|reconectar-mismo|conectar-otro|suite[-0-9]*|backend-restaurado|desconectar) /d"
+    usb_failed "$tmp/p1.log"
+    expect "D13: permiso negado = BLOQUEADO (exit 4)" 4 "$tmp/p1.log"
+    expect_line "D13: permiso-falso sale BLOQUEADO" '^BLOQUEADO +usb/permiso-falso +precondicion=t-permiso estado=incumplida' "$tmp/p1.log"
+    expect_line "D13: conectar sale BLOQUEADO" '^BLOQUEADO +usb/conectar +precondicion=t-permiso' "$tmp/p1.log"
+    # La ventana vencio sin respuesta (M4): sin linea de la app, HUMANO como hoy — nunca BLOQUEADO.
+    expect_no_line "D13: ventana vencida no da BLOQUEADO (M4)" '^BLOQUEADO ' "$tmp/m4.log"
+    # Gemelo: la exencion de la ventana humana vale SOLO con una espera humana pendiente. Sin
+    # dialogo (permiso ya concedido) la app tiene que emitir su linea: sin ella, no-verificable.
+    with_usb "$tmp/p2.log" '/step=(esperando-humano|broadcast-falso|permiso-falso) /d; / id=t-permiso /d'
+    expect "D13: sin espera humana y sin linea = BLOQUEADO" 4 "$tmp/p2.log"
+    expect_line "D13: ... por no-verificable" '^BLOQUEADO +usb/conectar +precondicion=t-permiso estado=no-verificable' "$tmp/p2.log"
+    expect "D13: concedido = 0 (M7)" 0 "$tmp/m7.log"
+
+    # Una linea de precondicion que la ficha no declara es FAIL: o la app y la ficha se
+    # desincronizaron, o alguien emite precondiciones que nadie juzga.
+    { cat "$tmp/verde.log"; pre captura t-no-declarada true; } > "$tmp/u1.log"
+    expect "u1: precondicion no declarada en la ficha" 1 "$tmp/u1.log" "$auto"
+    expect_line "u1: sale FAIL con su id" '^FAIL +captura/precondicion +.*t-no-declarada' "$tmp/u1.log" "$auto"
+
+    # AC-053.5 / D12 — el JSON de la corrida: run id, cada paso con lo OBSERVADO (tambien los
+    # bloqueados: S2 lee de ahi el claim_interface), cada precondicion y el sensor (vacio hasta S3).
+    expect_json "json: run, exit y sensor vacio" "$tmp/a2.log" todo \
+        "j['run'] == '$run' and j['exit'] == 4 and j['sensor'] == []"
+    expect_json "json: el bloqueado guarda lo observado" "$tmp/a2.log" todo \
+        "[p for p in j['pasos'] if p['panel'] == 'usb' and p['paso'] == 'streaming-start' and p['veredicto'] == 'BLOQUEADO' and p['observado'].get('error') == 'STREAMING_ERROR' and p['precondiciones'] == ['t-host-usb']]"
+    expect_json "json: el no emitido guarda observado nulo" "$tmp/a3.log" todo \
+        "[p for p in j['pasos'] if p['paso'] == 'desconectar' and p['veredicto'] == 'BLOQUEADO' and p['observado'] is None]"
+    expect_json "json: cada precondicion con sus campos" "$tmp/a2.log" todo \
+        "[p for p in j['precondiciones'] if p['id'] == 't-host-usb' and p['verificador'] == 'host' and p['cumplida'] is False and p['estado'] == 'incumplida' and p['evidencia'] == 'prueba-t-host-usb' and p['remedio'] == 'REMEDIO-T-HOST-USB'] and [p for p in j['precondiciones'] if p['id'] == 't-permiso' and p['cumplida'] is True]"
+    expect_json "json: una no verificable nunca es cumplida" "$tmp/b2.log" "$auto" \
+        "[p for p in j['precondiciones'] if p['id'] == 't-app-cap' and p['cumplida'] is False and p['estado'] == 'no-verificable']"
+
+    # La ficha: un error en ella es de uso (exit 2), nunca un juicio. Cada mutante rompe UNA regla.
+    local v
+    ficha_mutante() {  # ficha_mutante <nombre> <expresion python que muta f, la ficha de prueba>
+        python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); exec(sys.argv[2]); json.dump(f, open(sys.argv[3], "w"))' \
+            "$ficha" "$2" "$tmp/fm.json"
+        expect "ficha: $1" 2 "$tmp/verde.log" "$auto" "$tmp/fm.json"
+    }
+    ficha_mutante "depende de un paso que no existe" "f['planes']['captura']['precondiciones'][0]['depende'] = ['nivle']"
+    ficha_mutante "comodin que no matchea ningun paso" "f['planes']['usb']['precondiciones'][1]['depende'] = ['suite-x*']"
+    ficha_mutante "chequeo de host desconocido" "f['planes']['captura']['precondiciones'][0]['chequeo'] = 'adivinar'"
+    ficha_mutante "sin remedio" "del f['planes']['captura']['precondiciones'][1]['remedio']"
+    ficha_mutante "remedio vacio" "f['planes']['captura']['precondiciones'][1]['remedio'] = ' '"
+    ficha_mutante "id duplicado" "f['planes']['usb']['precondiciones'][0]['id'] = 't-host-cap'"
+    ficha_mutante "id con mayusculas" "f['planes']['captura']['precondiciones'][1]['id'] = 'T-App'"
+    ficha_mutante "clave desconocida (typo)" "f['planes']['captura']['precondiciones'][1]['dependen'] = ['start']"
+    ficha_mutante "verificador desconocido" "f['planes']['captura']['precondiciones'][1]['verificador'] = 'telefono'"
+    ficha_mutante "plan desconocido" "f['planes']['sf4'] = {'precondiciones': []}"
+    ficha_mutante "host sin el parametro de su chequeo" "del f['planes']['usb']['precondiciones'][1]['paquetes']"
+    ficha_mutante "lista de paquetes vacia" "f['planes']['usb']['precondiciones'][1]['paquetes'] = []"
+    ficha_mutante "ventana humana en una de host" "f['planes']['captura']['precondiciones'][0]['ventana-humana'] = True"
+    ficha_mutante "formato desconocido" "f['formato'] = 2"
+    echo '{"formato": 1, "planes": {' > "$tmp/rota.json"
+    expect "ficha: JSON roto" 2 "$tmp/verde.log" "$auto" "$tmp/rota.json"
+    expect "ficha: no existe" 2 "$tmp/verde.log" "$auto" "$tmp/no-existe.json"
+
+    # La ficha REAL: valida, la unica fuente de los ids (AC-053.5) y en sintonia con el harness.
+    if smoke_py validar "$real" > "$tmp/out" 2>&1; then
+        printf '  ok    %-58s\n' "ficha real: valida"
+    else
+        printf '  MAL   %-58s\n' "ficha real: valida"; sed 's/^/        /' "$tmp/out"; failures=$((failures + 1))
+    fi
+    local leaked
+    leaked="$(ids_literal_in "$SELF" "$real")"
+    if [[ -z "$leaked" ]]; then
+        printf '  ok    %-58s\n' "1.4: ningun id de la ficha escrito en el script"
+    else
+        printf '  MAL   %-58s %s\n' "1.4: ningun id de la ficha escrito en el script" "$leaked"; failures=$((failures + 1))
+    fi
+    # ... y el chequeo ve un id copiado (su mutante): si no, el verde de arriba no prueba nada.
+    local first_id
+    first_id="$(smoke_py ids "$real" | awk 'NR == 1 {print $2}')"
+    { cat "$SELF"; echo "    [[ \"\$x\" == $first_id ]]"; } > "$tmp/script-mutante.sh"
+    if [[ -n "$first_id" && "$(ids_literal_in "$tmp/script-mutante.sh" "$real")" == *"$first_id"* ]]; then
+        printf '  ok    %-58s\n' "1.4: el chequeo ve un id copiado al script ($first_id)"
+    else
+        printf '  MAL   %-58s\n' "1.4: el chequeo ve un id copiado al script"; failures=$((failures + 1))
+    fi
+    local id_app missing_app=""
+    for id_app in $(smoke_py ids "$real" | awk '$3 == "app" {print $2}'); do
+        grep -rqF "\"$id_app\"" harness/src/commonMain harness/src/androidMain || missing_app+=" $id_app"
+    done
+    if [[ -z "$missing_app" ]] && smoke_py ids "$real" | grep -q ' app$'; then
+        printf '  ok    %-58s\n' "ficha real: cada id de app lo emite el harness"
+    else
+        printf '  MAL   %-58s falta:%s\n' "ficha real: cada id de app lo emite el harness" "${missing_app:- (no hay ids de app)}"
+        failures=$((failures + 1))
+    fi
+
+    # La ficha real sobre el control grabado (01/10, anterior a REQ-053, sin lineas de
+    # precondicion): nada se verifico, asi que captura y usb salen BLOQUEADO — y con cada una
+    # cumplida, el control vuelve a 0. El control NO se re-graba (1.9): la app nueva agrega lineas
+    # pero no cambia ninguna de las que el control ya tiene.
+    expect "control + ficha real: nada verificado = 4" 4 "$SELFTEST_LOG" todo "$real"
+    expect_line "control + ficha real: usb/conectar no-verificable" '^BLOQUEADO +usb/conectar +precondicion=.* estado=no-verificable' "$SELFTEST_LOG" todo "$real"
+    expect_line "control + ficha real: salida/frames se juzga" '^PASS +salida/frames ' "$SELFTEST_LOG" todo "$real"
+    smoke_py ids "$real" | while read -r panel id verifier; do
+        if [[ "$verifier" == host ]]; then pre "$panel" "$id" true host; else pre "$panel" "$id" true; fi
+    done | before_fin "$SELFTEST_LOG" "$tmp/control-cumplido.log"
+    expect "control + ficha real, todo cumplido = el exit grabado" "$want_base" "$tmp/control-cumplido.log" todo "$real"
+
+    # Los verificadores de HOST, contra un adb FALSO: ninguno corre sin `-s <serial>`, y cada salida
+    # que no se puede leer (adb falla, rc != 0, basura, formato desconocido, tarjeta sin dueno
+    # visible) da no-verificable — nunca cumplida. El dumpsys de abajo es SINTETICO, armado a mano
+    # con el formato de texto de `dumpsys usb`: NO es una captura del g42.
+    host_selftest "$tmp" "$ficha" "$run" || failures=$((failures + $?))
 
     rm -rf "$tmp"
     if (( failures )); then
         echo "self-test: FAIL — $failures caso(s) con el veredicto equivocado" >&2
         return 1
     fi
-    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado y otra corrida"
+    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado, otra corrida, y (REQ-053) precondicion incumplida, no verificable, BLOQUEADO que no suma PASS, precedencia del exit, permiso negado vs ventana vencida, ficha invalida y verificadores de host"
+}
+
+# El adb falso del self-test y sus casos. Devuelve la cantidad de casos MAL.
+host_selftest() {
+    local tmp="$1" ficha="$2" run="$3" serial="falso-123" bad=0 mode
+    local evid="$tmp/host"
+    mkdir -p "$evid"
+    : > "$evid/sin-s.txt"
+    cat > "$evid/adb" <<'FAKE'
+#!/usr/bin/env bash
+# adb FALSO del self-test de smoke-device.sh. Anota toda llamada que no empiece con -s <serial>.
+if [[ "${1:-}" != "-s" || "${2:-}" != "$FAKE_SERIAL" ]]; then echo "$*" >> "$FAKE_DIR/sin-s.txt"; exit 97; fi
+shift 2
+[[ "${1:-}" == shell && $# -eq 2 ]] || { echo "no es 'shell <cmd>': $*" >> "$FAKE_DIR/sin-s.txt"; exit 98; }
+cmd="$2"
+case "$FAKE_MODE" in
+    falla) echo "error: device '$FAKE_SERIAL' not found" >&2; exit 1 ;;
+    basura) echo "lorem ipsum"; exit 0 ;;
+    denegado) echo "/system/bin/sh: Permission denied"; echo "wma-rc=1"; exit 0 ;;
+esac
+case "$cmd" in
+    *"dumpsys package"*)
+        g=true; [[ "$FAKE_MODE" == incumplida ]] && g=false
+        printf 'Packages:\n  Package [x]\n    runtime permissions:\n      android.permission.RECORD_AUDIO: granted=%s, flags=[ USER_SENSITIVE ]\n' "$g" ;;
+    *"dumpsys usb"*)
+        f=audio
+        [[ "$FAKE_MODE" == incumplida ]] && f=hid
+        [[ "$FAKE_MODE" == sin-host ]] && f=sin-host
+        cat "$FAKE_DIR/dumpsys-usb-$f.txt" ;;
+    *"ps -A"*)
+        printf '  PID NAME\n    1 init\n  812 com.android.systemui\n'
+        [[ "$FAKE_MODE" == incumplida ]] && printf ' 4242 com.example.ajena:servicio\n' ;;
+    *"ls /dev/snd"*)
+        printf 'controlC0\npcmC0D0p\npcmC0D0c\ntimer\n'
+        [[ "$FAKE_MODE" == incumplida || "$FAKE_MODE" == alsa-* ]] && printf 'controlC1\npcmC1D0p\n' ;;
+    *"/proc/asound/card1/pcm0p/sub0/status"*)
+        case "$FAKE_MODE" in
+            incumplida) printf 'state: RUNNING\nowner_pid   : 777\ntrigger_time: 1.0\n' ;;
+            alsa-cerrada) printf 'closed\n' ;;
+            alsa-oculta) echo "cat: /proc/asound/card1/pcm0p/sub0/status: Permission denied"; echo "wma-rc=1"; exit 0 ;;
+        esac ;;
+    *) echo "comando no previsto: $cmd" >> "$FAKE_DIR/sin-s.txt" ;;
+esac
+echo "wma-rc=0"
+FAKE
+    chmod +x "$evid/adb"
+    # SINTETICOS (ver arriba): un host con la placa de audio, uno con un HID y uno sin host_manager.
+    cat > "$evid/dumpsys-usb-audio.txt" <<'TXT'
+USB MANAGER STATE (dumpsys usb):
+{
+  device_manager={
+    handler={
+      current_functions=0
+    }
+  }
+  host_manager={
+    default_usb_host_connection_handler=com.android.usb/.UsbHostConnection
+    devices={
+      name=/dev/bus/usb/001/002
+      vendor_id=11145
+      product_id=25836
+      class=0
+      manufacturer_name=Realtek
+      product_name=UGREEN CM720 USB Audio
+      configurations={
+        id=1
+        interfaces={
+          id=0
+          alternate_settings=0
+          class=1
+          subclass=1
+        }
+        interfaces={
+          id=1
+          alternate_settings=1
+          class=1
+          subclass=2
+        }
+      }
+    }
+  }
+}
+TXT
+    sed -E 's/class=1$/class=3/; s/vendor_id=11145/vendor_id=1133/' "$evid/dumpsys-usb-audio.txt" > "$evid/dumpsys-usb-hid.txt"
+    sed -E '/host_manager=\{/,$d' "$evid/dumpsys-usb-audio.txt" > "$evid/dumpsys-usb-sin-host.txt"
+
+    host_case() {  # host_case <modo> <id> <cumplida esperada>
+        local m="$1" id="$2" want="$3" got
+        got="$(sed -nE "s/.* id=$id cumplida=([^ ]+) .*/\1/p" "$evid/out-$m.txt" | head -1)"
+        if [[ "$got" == "$want" ]]; then
+            printf '  ok    %-58s\n' "host[$m]: $id = $want"
+        else
+            printf '  MAL   %-58s dio %s\n' "host[$m]: $id = $want" "${got:-nada}"
+            sed 's/^/        /' "$evid/out-$m.txt" | tail -6
+            bad=$((bad + 1))
+        fi
+    }
+    for mode in ok incumplida falla basura denegado sin-host alsa-cerrada alsa-oculta; do
+        FAKE_MODE="$mode" FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
+            smoke_py host "$evid/adb" "$serial" "$ficha" todo "$run" "$PKG" "$evid/evidencia-$mode" \
+            > "$evid/out-$mode.txt" 2>&1 || true
+    done
+    host_case ok t-host-cap true;  host_case ok t-usb-clase true;  host_case ok t-host-usb true;  host_case ok t-alsa true
+    host_case incumplida t-host-cap false; host_case incumplida t-usb-clase false
+    host_case incumplida t-host-usb false; host_case incumplida t-alsa false
+    for mode in falla basura denegado; do
+        for id in t-host-cap t-usb-clase t-host-usb t-alsa; do host_case "$mode" "$id" no-verificable; done
+    done
+    host_case sin-host t-usb-clase no-verificable
+    host_case alsa-cerrada t-alsa true
+    host_case alsa-oculta t-alsa no-verificable
+    local check
+    for check in "incumplida:t-host-usb:4242" "incumplida:t-alsa:777" "incumplida:t-usb-clase:046d"; do
+        IFS=: read -r mode id needle <<< "$check"
+        if grep -E " id=$id .*evidencia=[^ ]*$needle" "$evid/out-$mode.txt" > /dev/null; then
+            printf '  ok    %-58s\n' "host[$mode]: la evidencia de $id lleva $needle"
+        else
+            printf '  MAL   %-58s\n' "host[$mode]: la evidencia de $id lleva $needle"; bad=$((bad + 1))
+        fi
+    done
+    if [[ ! -s "$evid/sin-s.txt" ]]; then
+        printf '  ok    %-58s\n' "host: toda llamada a adb lleva -s <serial>"
+    else
+        printf '  MAL   %-58s\n' "host: toda llamada a adb lleva -s <serial>"; sed 's/^/        /' "$evid/sin-s.txt" | head -5
+        bad=$((bad + 1))
+    fi
+    # Cada linea la firma el host y es de ESTA corrida; y lo que no se pidio no se verifica.
+    if grep -c . "$evid/out-ok.txt" | grep -qx 4 \
+        && [[ "$(grep -c " run=$run panel=[a-z]* step=precondicion .* verificador=host$" "$evid/out-ok.txt")" == 4 ]]; then
+        printf '  ok    %-58s\n' "host: 4 lineas firmadas verificador=host, run de la corrida"
+    else
+        printf '  MAL   %-58s\n' "host: 4 lineas firmadas verificador=host, run de la corrida"; bad=$((bad + 1))
+    fi
+    FAKE_MODE=ok FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
+        smoke_py host "$evid/adb" "$serial" "$ficha" salida,sf2 "$run" "$PKG" "$evid/evidencia-x" > "$evid/out-nada.txt" 2>&1 || true
+    if [[ ! -s "$evid/out-nada.txt" ]]; then
+        printf '  ok    %-58s\n' "host: un plan sin precondiciones no consulta nada"
+    else
+        printf '  MAL   %-58s\n' "host: un plan sin precondiciones no consulta nada"; bad=$((bad + 1))
+    fi
+    # Y lo que escribe el host es lo que el juez lee: el log de captura + las lineas del host en
+    # modo ok + la de la app da 0; con el adb caido, 4.
+    local base="$tmp/verde0.log"
+    { grep -v 'panel=plan step=fin ' "$base"; grep 'panel=captura' "$evid/out-ok.txt"; \
+      echo "HARNESS-SMOKE v=1 run=$run panel=captura step=precondicion ok=true id=t-app-cap cumplida=true evidencia=x"; \
+      grep 'panel=plan step=fin ' "$base"; } > "$evid/juez-ok.log"
+    { grep -v 'panel=plan step=fin ' "$base"; grep 'panel=captura' "$evid/out-falla.txt"; \
+      echo "HARNESS-SMOKE v=1 run=$run panel=captura step=precondicion ok=true id=t-app-cap cumplida=true evidencia=x"; \
+      grep 'panel=plan step=fin ' "$base"; } > "$evid/juez-falla.log"
+    local got=0
+    verdict "$evid/juez-ok.log" "$run" salida,captura,sf2,sf3 "$ficha" > /dev/null 2>&1 || got=$?
+    if [[ "$got" == 0 ]]; then printf '  ok    %-58s exit 0\n' "host+juez: lo que escribe el host se juzga (ok)"
+    else printf '  MAL   %-58s exit %s\n' "host+juez: lo que escribe el host se juzga (ok)" "$got"; bad=$((bad + 1)); fi
+    got=0
+    verdict "$evid/juez-falla.log" "$run" salida,captura,sf2,sf3 "$ficha" > /dev/null 2>&1 || got=$?
+    if [[ "$got" == 4 ]]; then printf '  ok    %-58s exit 4\n' "host+juez: adb caido = BLOQUEADO"
+    else printf '  MAL   %-58s exit %s\n' "host+juez: adb caido = BLOQUEADO" "$got"; bad=$((bad + 1)); fi
+    return "$bad"
+}
+
+# ids_literal_in <archivo> <ficha>: los ids de la ficha que aparecen escritos en el archivo, como
+# palabra (AC-053.5: el script lee la ficha, no la copia).
+ids_literal_in() {
+    local file="$1" setup="$2" id
+    for id in $(smoke_py ids "$setup" | awk '{print $2}'); do
+        grep -Eq -- "(^|[^a-z0-9-])${id}([^a-z0-9-]|\$)" "$file" && printf '%s ' "$id"
+    done
+    return 0
 }
 
 # ---------------------------------------------------------------------------
