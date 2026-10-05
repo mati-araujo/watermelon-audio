@@ -67,8 +67,9 @@
 #   ANDROID_SERIAL=<serial> bash scripts/smoke-device.sh [--plan todo|salida,sf2,...]
 #        [--usb-espera-s 120] [--techo-s N] [--out DIR] [--no-build] [--setup FICHA]
 #   bash scripts/smoke-device.sh --self-test
-#   bash scripts/smoke-device.sh --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA]
-#        # juzga un log ya grabado (con las lineas de precondicion del host que haya grabadas)
+#   bash scripts/smoke-device.sh --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA] [--host-log LOG]
+#        # juzga un log ya grabado. LOG es el de la APP; las precondiciones del host van en
+#        # --host-log (precondiciones-host.log). Una linea `verificador=host` en LOG se descarta.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -454,7 +455,7 @@ def host(adb, serial, setup_path, requested, run, pkg, evidence_dir):
 
 
 # --- El juez -------------------------------------------------------------------------------------
-def judge(log, run, requested, setup_path, json_out):
+def judge(log, run, requested, setup_path, json_out, host_log=None):
     setup = load_setup(setup_path)
     wanted = plan_panels(requested)
     rows = []        # {veredicto, panel, paso, detalle, observado, precondiciones}
@@ -474,7 +475,7 @@ def judge(log, run, requested, setup_path, json_out):
         counts = {k: sum(1 for r in rows if r["veredicto"] == k) for k in ("PASS", "FAIL", "BLOQUEADO", "HUMANO", "NO-APLICA")}
         if json_out:
             doc = {"formato": 1, "run": run, "plan": requested, "ficha": setup_path, "exit": code,
-                   "resumen": counts, "precondiciones": preconditions, "pasos": rows,
+                   "resumen": counts, "lineas-host-descartadas": discarded, "precondiciones": preconditions, "pasos": rows,
                    # S3 lo llena: cada juicio de sensor sobre una ventana de estimulo o de control.
                    "sensor": []}
             try:
@@ -487,23 +488,40 @@ def judge(log, run, requested, setup_path, json_out):
         sys.exit(code)
 
     lines = []
-    with open(log, encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            i = raw.find("HARNESS-SMOKE ")
-            if i < 0:
-                continue
-            fields = {}
-            for part in raw[i:].strip().split(" ")[1:]:
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    fields[k] = v
-            if fields.get("run") != run:
-                continue
-            if fields.get("v") != "1":
-                add("FAIL", "formato", "version", "version desconocida: %s" % raw.strip())
-                print("FAIL  formato  version desconocida: %s" % raw.strip())
-                finish(1)
-            lines.append(fields)
+    discarded = 0
+
+    def read_lines(path, from_host):
+        # El log de la app (logcat) lo puede escribir cualquier app con el tag: una linea
+        # `verificador=host` que llegue por ahi es una falsificacion y se DESCARTA (ni bloquea ni
+        # cuenta). Las del host vienen SOLO de su propio archivo.
+        nonlocal discarded
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                i = raw.find("HARNESS-SMOKE ")
+                if i < 0:
+                    continue
+                fields = {}
+                for part in raw[i:].strip().split(" ")[1:]:
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        fields[k] = v
+                if fields.get("run") != run:
+                    continue
+                if from_host != (fields.get("verificador") == "host"):
+                    if not from_host:
+                        discarded += 1
+                    continue
+                if fields.get("v") != "1":
+                    add("FAIL", "formato", "version", "version desconocida: %s" % raw.strip())
+                    print("FAIL  formato  version desconocida: %s" % raw.strip())
+                    finish(1)
+                lines.append(fields)
+
+    if host_log:
+        read_lines(host_log, True)
+    read_lines(log, False)
+    if discarded:
+        print("AVISO — %d linea(s) verificador=host en el log de la app: descartadas (solo el host firma como host)\n" % discarded)
 
     inicio = [f for f in lines if f.get("panel") == "plan" and f.get("step") == "inicio"]
     panels = [p for p in inicio[0].get("plan", "").split(",") if p in EXPECTED] if inicio else []
@@ -700,8 +718,9 @@ def judge(log, run, requested, setup_path, json_out):
 def main(argv):
     mode, args = (argv[0], argv[1:]) if argv else ("", [])
     try:
-        if mode == "veredicto" and len(args) in (4, 5):
-            judge(args[0], args[1], args[2], args[3], args[4] if len(args) == 5 and args[4] else None)
+        if mode == "veredicto" and len(args) in (4, 5, 6):
+            judge(args[0], args[1], args[2], args[3], args[4] if len(args) >= 5 and args[4] else None,
+                  args[5] if len(args) == 6 and args[5] else None)
         elif mode == "host" and len(args) in (6, 7):
             host(*args[:6], evidence_dir=args[6] if len(args) == 7 else None)
         elif mode == "validar" and len(args) == 1:
@@ -724,9 +743,32 @@ main(sys.argv[1:])
 PY
 }
 
-# El juez. verdict LOG RUN PLAN [FICHA] [JSON] — ver smoke_py.
+# El juez. verdict LOG RUN PLAN [FICHA] [JSON] [LOG-DEL-HOST] — ver smoke_py. LOG es el de la APP:
+# una linea `verificador=host` que traiga se descarta; las del host vienen en LOG-DEL-HOST.
 verdict() {
-    smoke_py veredicto "$1" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}"
+    smoke_py veredicto "$1" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}" "${6:-}"
+}
+
+# uid_of_package <paquete> < salida de `pm list packages -U`: el uid del paquete EXACTO (el listado
+# filtra por subcadena y trae paquetes vecinos).
+uid_of_package() {
+    tr -d '\r' | awk -v p="package:$1" '$1 == p && $2 ~ /^uid:[0-9]+$/ {sub(/^uid:/, "", $2); print $2; exit}'
+}
+
+# Los argumentos de `adb logcat` de la captura. Con uid, solo lo que escribio el harness.
+logcat_capture_args() {
+    local uid="${1:-}"
+    echo "-v raw ${uid:+--uid=$uid }-s HARNESS-SMOKE:I"
+}
+
+# verdict_split LOG RUN PLAN FICHA [JSON]: LOG trae mezcladas las lineas de la app y las del host
+# (como las armaban los casos de antes de la separacion); las separa para el juez.
+verdict_split() {
+    local d
+    d="$(mktemp -d)"
+    { grep -v 'verificador=host' "$1" || true; } > "$d/app.log"
+    { grep 'verificador=host' "$1" || true; } > "$d/host.log"
+    verdict "$d/app.log" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}" "$d/host.log"
 }
 
 print_ear_checks() {
@@ -806,7 +848,7 @@ JSON
         key="$({ cat "$1" "$3" 2>/dev/null; printf '|%s|%s' "$2" "$3"; } | shasum | cut -c1-16)"
         if [[ ! -f "$tmp/juez-$key.out" ]]; then
             local rc=0
-            verdict "$1" "$run" "$2" "$3" > "$tmp/juez-$key.out" 2>&1 || rc=$?
+            verdict_split "$1" "$run" "$2" "$3" > "$tmp/juez-$key.out" 2>&1 || rc=$?
             echo "$rc" > "$tmp/juez-$key.rc"
         fi
         cp "$tmp/juez-$key.out" "$tmp/out"
@@ -848,7 +890,7 @@ JSON
     expect_json() {
         local name="$1" file="$2" plan="$3" expr="$4"
         rm -f "$tmp/corrida.json"
-        verdict "$file" "$run" "$plan" "$ficha" "$tmp/corrida.json" > "$tmp/out" 2>&1 || true
+        verdict_split "$file" "$run" "$plan" "$ficha" "$tmp/corrida.json" > "$tmp/out" 2>&1 || true
         if python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); sys.exit(0 if eval(sys.argv[2]) else 1)' \
                 "$tmp/corrida.json" "$expr" 2>"$tmp/json-err"; then
             printf '  ok    %-58s\n' "$name"
@@ -1117,8 +1159,8 @@ JSON
     expect_no_line "c1: el bloqueado con ok=true no sale PASS" '^PASS +captura/nivel ' "$tmp/a1.log" "$auto"
     expect_line "c1: y el resumen lo cuenta BLOQUEADO" '^resumen: [0-9]+ PASS · 0 FAIL · 1 BLOQUEADO ' "$tmp/a1.log" "$auto"
     local pass_verde pass_a1
-    pass_verde="$(verdict "$tmp/verde.log" "$run" "$auto" "$ficha" 2>&1 | sed -nE 's/^resumen: ([0-9]+) PASS.*/\1/p' || true)"
-    pass_a1="$(verdict "$tmp/a1.log" "$run" "$auto" "$ficha" 2>&1 | sed -nE 's/^resumen: ([0-9]+) PASS.*/\1/p' || true)"
+    pass_verde="$(verdict_split "$tmp/verde.log" "$run" "$auto" "$ficha" 2>&1 | sed -nE 's/^resumen: ([0-9]+) PASS.*/\1/p' || true)"
+    pass_a1="$(verdict_split "$tmp/a1.log" "$run" "$auto" "$ficha" 2>&1 | sed -nE 's/^resumen: ([0-9]+) PASS.*/\1/p' || true)"
     if [[ -n "$pass_verde" && "$pass_a1" == "$((pass_verde - 1))" ]]; then
         printf '  ok    %-58s\n' "c2: bloquear un paso le resta uno al PASS ($pass_verde -> $pass_a1)"
     else
@@ -1270,6 +1312,49 @@ JSON
         if [[ "$verifier" == host ]]; then pre "$panel" "$id" true host; else pre "$panel" "$id" true; fi
     done | before_fin "$SELFTEST_LOG" "$tmp/control-cumplido.log"
     expect "control + ficha real, todo cumplido = el exit grabado" "$want_base" "$tmp/control-cumplido.log" todo "$real"
+
+    # S-1 (security-auditor): logcat filtra por TAG, asi que cualquier app puede escribir una linea
+    # `verificador=host`. El juez recibe las del host por SEPARADO y descarta las que lleguen por el
+    # log de la app: no bloquean ni cuentan.
+    grep -v 'verificador=host' "$tmp/verde.log" > "$tmp/app-verde.log" || true
+    grep 'verificador=host' "$tmp/verde.log" > "$tmp/host-verde.log" || true
+    : > "$tmp/host-vacio.log"
+    split_case() {  # split_case <nombre> <exit esperado> <log de la app> <log del host> [regex que TIENE que salir]
+        local name="$1" want="$2" app="$3" hostf="$4" re="${5:-}" got=0
+        verdict "$app" "$run" "$auto" "$ficha" "" "$hostf" > "$tmp/out" 2>&1 || got=$?
+        if [[ "$got" == "$want" ]] && { [[ -z "$re" ]] || grep -Eq -- "$re" "$tmp/out"; }; then
+            printf '  ok    %-58s exit %s\n' "$name" "$got"
+        else
+            printf '  MAL   %-58s exit %s, esperaba %s%s\n' "$name" "$got" "$want" "${re:+ y /$re/}"
+            sed 's/^/        /' "$tmp/out" | tail -6
+            failures=$((failures + 1))
+        fi
+    }
+    sed -E 's/panel=captura step=nivel ok=true/panel=captura step=nivel ok=false/' "$tmp/app-verde.log" > "$tmp/app-nivel-mal.log"
+    split_case "S-1 gemelo: captura/nivel mal, host cumplido" 1 "$tmp/app-nivel-mal.log" "$tmp/host-verde.log"
+    { cat "$tmp/app-nivel-mal.log"; pre captura t-host-cap false host; } > "$tmp/app-forjada-mala.log"
+    split_case "S-1: una linea host falsa de la app no tapa el FAIL" 1 "$tmp/app-forjada-mala.log" "$tmp/host-verde.log" \
+        '^AVISO .* 1 linea\(s\) verificador=host'
+    { cat "$tmp/app-verde.log"; pre captura t-host-cap true host; } > "$tmp/app-forjada-buena.log"
+    split_case "S-1 gemelo: host cumplido, sin forjar" 0 "$tmp/app-verde.log" "$tmp/host-verde.log"
+    split_case "S-1: una linea host falsa no suple la que el host no grabo" 4 "$tmp/app-forjada-buena.log" "$tmp/host-vacio.log" \
+        'el-host-no-registro-su-verificacion'
+    split_case "S-1: las lineas host del log de la app no se cuentan" 4 "$tmp/verde.log" "$tmp/host-vacio.log"
+    # La captura del script: con uid, solo lo del harness; el uid sale del paquete EXACTO.
+    local pm_fix="package:$PKG.test uid:10999
+package:$PKG uid:10234
+package:com.ajena uid:10001"
+    if [[ "$(uid_of_package "$PKG" <<< "$pm_fix")" == 10234 && -z "$(uid_of_package "$PKG" <<< "package:$PKG.test uid:10999")" \
+        && -z "$(uid_of_package "$PKG" <<< "package:$PKG uid:x1")" && -z "$(uid_of_package "$PKG" <<< "")" ]]; then
+        printf '  ok    %-58s\n' "S-1: el uid es el del paquete exacto, o nada"
+    else
+        printf '  MAL   %-58s\n' "S-1: el uid es el del paquete exacto, o nada"; failures=$((failures + 1))
+    fi
+    if [[ "$(logcat_capture_args 10234)" == "-v raw --uid=10234 -s HARNESS-SMOKE:I" && "$(logcat_capture_args "")" == "-v raw -s HARNESS-SMOKE:I" ]]; then
+        printf '  ok    %-58s\n' "S-1: la captura filtra por uid, y sin uid sigue como antes"
+    else
+        printf '  MAL   %-58s\n' "S-1: la captura filtra por uid, y sin uid sigue como antes"; failures=$((failures + 1))
+    fi
 
     # Los verificadores de HOST, contra un adb FALSO: ninguno corre sin `-s <serial>`, y cada salida
     # que no se puede leer (adb falla, rc != 0, basura, formato desconocido, tarjeta sin dueno
@@ -1436,11 +1521,11 @@ FAKE
       echo "HARNESS-SMOKE v=1 run=$run panel=captura step=precondicion ok=true id=t-app-cap cumplida=true evidencia=x"; \
       grep 'panel=plan step=fin ' "$base"; } > "$evid/juez-falla.log"
     local got=0
-    verdict "$evid/juez-ok.log" "$run" salida,captura,sf2,sf3 "$ficha" > /dev/null 2>&1 || got=$?
+    verdict_split "$evid/juez-ok.log" "$run" salida,captura,sf2,sf3 "$ficha" > /dev/null 2>&1 || got=$?
     if [[ "$got" == 0 ]]; then printf '  ok    %-58s exit 0\n' "host+juez: lo que escribe el host se juzga (ok)"
     else printf '  MAL   %-58s exit %s\n' "host+juez: lo que escribe el host se juzga (ok)" "$got"; bad=$((bad + 1)); fi
     got=0
-    verdict "$evid/juez-falla.log" "$run" salida,captura,sf2,sf3 "$ficha" > /dev/null 2>&1 || got=$?
+    verdict_split "$evid/juez-falla.log" "$run" salida,captura,sf2,sf3 "$ficha" > /dev/null 2>&1 || got=$?
     if [[ "$got" == 4 ]]; then printf '  ok    %-58s exit 4\n' "host+juez: adb caido = BLOQUEADO"
     else printf '  MAL   %-58s exit %s\n' "host+juez: adb caido = BLOQUEADO" "$got"; bad=$((bad + 1)); fi
     return "$bad"
@@ -1552,9 +1637,23 @@ run_device() {
     # la espera humana y la suite USB el buffer circular de logcat rota, y releerlo perdia `inicio`.
     local raw="$out/logcat-harness-smoke-raw.txt"
     : > "$raw"
+    # Cualquier app puede escribir con el tag HARNESS-SMOKE: si el logcat sabe filtrar por uid
+    # (--uid=), la captura es solo del harness. Si no, se sigue como antes y la corrida queda
+    # marcada (el juez igual descarta lo que se haga pasar por el host).
+    local uid="" uid_note
+    uid="$(adb_ shell pm list packages -U "$PKG" 2>/dev/null | uid_of_package "$PKG" || true)"
+    if [[ -n "$uid" ]] && adb_ logcat -d -t 1 --uid="$uid" -s HARNESS-SMOKE:I > /dev/null 2>&1; then
+        uid_note="filtro-uid=$uid"
+    else
+        uid=""
+        uid_note="SIN-filtro-uid: el logcat no filtra por uid (o no se pudo leer el uid); la captura puede traer lineas ajenas"
+    fi
+    echo "=== captura: $uid_note ==="
+    echo "$uid_note" > "$out/captura.txt"
     local logcat_pid=""
     start_capture() {
-        adb_ logcat -v raw -s HARNESS-SMOKE:I >> "$raw" 2>/dev/null &
+        # shellcheck disable=SC2046
+        adb_ logcat $(logcat_capture_args "$uid") >> "$raw" 2>/dev/null &
         logcat_pid=$!
     }
     start_capture
@@ -1608,7 +1707,9 @@ run_device() {
         --es harness.smoke "$plan" --es harness.smoke.run "$run" \
         --es harness.smoke.usb-espera-s "$usb_wait" | tr -d '\r'
 
-    local log="$out/harness-smoke.log" waited=0 announced=0
+    # Mientras corre, el log para mirar (esperando-humano, fin) junta host y captura; el que se
+    # JUZGA es el de la app solo, con el del host aparte.
+    local log="$out/harness-smoke-polling.log" waited=0 announced=0
     while (( waited < ceiling )); do
         # Por Wi-Fi, un corte mata el logcat en streaming: se relanza (y lo perdido lo recupera el
         # volcado final de abajo mientras siga en el buffer).
@@ -1632,8 +1733,9 @@ run_device() {
     kill "$logcat_pid" 2>/dev/null || true
     # Un ultimo volcado del buffer, combinado con lo capturado y sin duplicados (el orden de emision
     # se conserva: primero lo capturado en vivo).
-    { cat "$host_log" "$raw"; adb_ logcat -d -v raw -s HARNESS-SMOKE:I 2>/dev/null || true; } \
-        | tr -d '\r' | grep -F "run=$run " | awk '!seen[$0]++' > "$log" || true
+    local app_log="$out/harness-smoke.log"
+    { cat "$raw"; adb_ logcat -d $(logcat_capture_args "$uid") 2>/dev/null || true; } \
+        | tr -d '\r' | grep -F "run=$run " | awk '!seen[$0]++' > "$app_log" || true
     local pid
     pid="$(adb_ shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
     if [[ -n "$pid" ]]; then
@@ -1647,8 +1749,9 @@ run_device() {
     echo
 
     local rc=0
-    verdict "$log" "$run" "$plan" "$setup" "$out/harness-smoke.json" || rc=$?
+    verdict "$app_log" "$run" "$plan" "$setup" "$out/harness-smoke.json" "$host_log" || rc=$?
     echo "=== JSON de la corrida: $out/harness-smoke.json ==="
+    [[ -n "$uid" ]] || echo "AVISO — $uid_note"
     print_ear_checks
     exit "$rc"
 }
@@ -1656,17 +1759,18 @@ run_device() {
 case "${1:-}" in
     --self-test) self_test ;;
     --veredicto)
-        [[ $# -ge 4 ]] || { echo "uso: $0 --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA]" >&2; exit 2; }
-        log_="$2" run_="$3" plan_="$4" setup_="$SETUP_DEFAULT" json_=""
+        [[ $# -ge 4 ]] || { echo "uso: $0 --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA] [--host-log LOG]" >&2; exit 2; }
+        log_="$2" run_="$3" plan_="$4" setup_="$SETUP_DEFAULT" json_="" hostlog_=""
         shift 4
         while (( $# )); do
             case "$1" in
                 --setup) setup_="${2:?--setup necesita un archivo}"; shift 2 ;;
                 --json) json_="${2:?--json necesita un archivo}"; shift 2 ;;
+                --host-log) hostlog_="${2:?--host-log necesita un archivo}"; shift 2 ;;
                 *) echo "opcion desconocida: $1" >&2; exit 2 ;;
             esac
         done
-        verdict "$log_" "$run_" "$plan_" "$setup_" "$json_" ;;
+        verdict "$log_" "$run_" "$plan_" "$setup_" "$json_" "$hostlog_" ;;
     -h|--help) awk 'NR > 1 && /^set -euo/ {exit} NR > 1 {print}' "$0" ;;
     *) run_device "$@" ;;
 esac
