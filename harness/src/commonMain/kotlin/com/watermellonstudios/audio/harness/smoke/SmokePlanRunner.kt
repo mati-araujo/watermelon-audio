@@ -6,6 +6,7 @@ import com.watermellonstudios.audio.harness.soundfont.Fixtures
 import com.watermellonstudios.audio.harness.soundfont.SoundFontCheck
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlin.random.Random
 
 /**
  * MINI-038 — la corrida automática que dispara `scripts/smoke-device.sh` por adb.
@@ -18,12 +19,19 @@ import kotlinx.coroutines.delay
  * - `salida`: `start`, `stream`, `frames`.
  * - `captura`: `start`, `nivel`, `stop`, y antes de `start` la precondición `mic-abre`
  *   (`step=precondicion`, REQ-053 S1).
- * - `sf2`: `fixture`, `carga`, `preset`, `nota`, `descarga`, y el rechazo: `fixture`
+ * - `sf2`: `fixture`, `carga`, `preset`, `nota`, las dos ventanas de escucha (`estimulo` y
+ *   `control`, cada una con su aviso `escuchar`, REQ-053 S3), `descarga`, y el rechazo: `fixture`
  *   (el archivo trucho) + `no-soundfont`.
- * - `sf3`: `fixture`, `carga`, `preset`, `nota`, `descarga`.
- * - `usb`: `motor-parado` (acá) y los que emita el panel de la plataforma (ver `UsbHarness` en
- *   androidMain). Sin USB en la plataforma, `usb step=disponible ok=false motivo=no-aplica`.
- * - siempre: `plan inicio` al principio y `plan fin` al final, con los paneles que fallaron.
+ * - `sf3`: `fixture`, `carga`, `preset`, `nota`, las dos ventanas, `descarga`.
+ * - `usb`: el fixture `.sf2` (`fixture`, `carga`, `preset`), `motor-parado` (acá), los que emita el
+ *   panel de la plataforma (ver `UsbHarness` en androidMain), que toca las dos ventanas POR LIBUSB
+ *   con la función que recibe, y `descarga`. Sin USB en la plataforma,
+ *   `usb step=disponible ok=false motivo=no-aplica`.
+ * - siempre: `plan inicio` al principio (con la `semilla` del orden de las ventanas y su
+ *   `semilla-origen`) y `plan fin` al final, con los paneles que fallaron.
+ *
+ * Las ventanas (D5, D7): el A4 del fixture por la ruta declarada (`sistema` en sf2/sf3, `libusb` en
+ * usb) y un control de silencio, en el orden que da [WindowOrder] con la semilla. Ver [ListeningWindows].
  */
 class SmokePlanRunner(
     private val engine: AudioEngine,
@@ -33,15 +41,25 @@ class SmokePlanRunner(
     private val engineState: () -> Int,
     private val soundFont: SoundFontCheck,
     private val fixtures: Fixtures,
-    private val usb: (suspend (SmokeReporter) -> Boolean)?,
+    /**
+     * La parte USB de la plataforma. Recibe la función que toca las ventanas de escucha por libusb:
+     * la llama con el device conectado y el streaming parado, y antes de desconectar.
+     */
+    private val usb: (suspend (SmokeReporter, suspend (SmokeReporter) -> Boolean) -> Boolean)?,
+    private val windows: ListeningWindows,
     private val pause: suspend (Long) -> Unit = { delay(it) },
 ) {
+
+    /** La semilla de la corrida en curso (la que mandó el script, o la que eligió el plan). */
+    private var seed: Long = 0
 
     /**
      * @param requestProblem un defecto del pedido que el shell detectó al leerlo (p. ej. un extra
      *   con un número inválido). Si lo hay, la corrida NO arranca: se reporta, no se adivina.
+     * @param requestedSeed la semilla del orden de las ventanas que mandó el script (AC-053.10). Sin
+     *   ella, el plan elige una y la registra con `semilla-origen=app`.
      */
-    suspend fun run(raw: String, reporter: SmokeReporter, requestProblem: String? = null): Boolean {
+    suspend fun run(raw: String, reporter: SmokeReporter, requestProblem: String? = null, requestedSeed: Long? = null): Boolean {
         if (requestProblem != null) {
             reporter.report(PLAN, "inicio", false, "plan" to raw, "motivo" to requestProblem)
             reporter.report(PLAN, "fin", false, "fallidos" to PLAN)
@@ -54,7 +72,11 @@ class SmokePlanRunner(
             return false
         }
         val panels = (plan as SmokePlan.Valid).panels
-        reporter.report(PLAN, "inicio", true, "plan" to panels.joinToString(",") { it.id })
+        seed = requestedSeed ?: Random.nextInt(0, Int.MAX_VALUE).toLong()
+        reporter.report(
+            PLAN, "inicio", true, "plan" to panels.joinToString(",") { it.id },
+            "semilla" to seed, "semilla-origen" to if (requestedSeed != null) "script" else "app",
+        )
 
         val failed = mutableListOf<String>()
         for (panel in panels) {
@@ -83,12 +105,36 @@ class SmokePlanRunner(
         Panel.CAPTURA -> capture(r)
         Panel.SF2 -> sf2(r)
         Panel.SF3 -> sf3(r)
-        Panel.USB -> usb?.let { runUsb ->
-            // El test tone de USB y el motor no pueden pelearse por el device: el motor se para
-            // antes, igual que hace NoisyPad antes de `startStreaming`. Y si no para, se dice.
-            val stopped = stopEngineForUsb(engine, engineState, r, pause)
-            runUsb(r) && stopped
-        } ?: r.report(panel.id, "disponible", false, "motivo" to "no-aplica")
+        Panel.USB -> usb?.let { runUsb -> usbPanel(r, runUsb) }
+            ?: r.report(panel.id, "disponible", false, "motivo" to "no-aplica")
+    }
+
+    private suspend fun usbPanel(
+        r: SmokeReporter,
+        runUsb: suspend (SmokeReporter, suspend (SmokeReporter) -> Boolean) -> Boolean,
+    ): Boolean {
+        val p = Panel.USB.id
+        // REQ-053 S3: el A4 del fixture .sf2 (D5). Se carga ANTES de parar el motor: cargar no lo
+        // necesita, y después de `motor-parado` lo único que arranca el motor es la ventana, por libusb.
+        val fixture = fixtures.materialize(r, p, Fixtures.SF2)
+        val loaded = fixture != null && soundFont.load(r, p, fixture, Fixtures.SF2)
+        // El streaming USB y el motor no pueden pelearse por el device: el motor se para antes,
+        // igual que hace NoisyPad antes de `startStreaming`. Y si no para, se dice.
+        val stopped = stopEngineForUsb(engine, engineState, r, pause)
+        val ok = try {
+            runUsb(r) { rr ->
+                // Con el streaming parado y el device conectado, el motor arranca por el backend
+                // activo (LIBUSB) y suena por la placa. Se para después: `desconectar` lo exige.
+                try {
+                    windows.run(rr, p, Route.LIBUSB, WindowOrder.of(seed, p), Fixtures.SF2)
+                } finally {
+                    stopEngineAndWait(engine, engineState, pause)
+                }
+            }
+        } finally {
+            soundFont.unload(r, p)
+        }
+        return ok && stopped && loaded
     }
 
     private suspend fun output(r: SmokeReporter): Boolean {
@@ -164,7 +210,9 @@ class SmokePlanRunner(
     private suspend fun sf2(r: SmokeReporter): Boolean {
         val p = Panel.SF2.id
         val fixture = fixtures.materialize(r, p, Fixtures.SF2)
-        val played = fixture != null && soundFont.runFixture(r, p, fixture, Fixtures.SF2)
+        val played = fixture != null && soundFont.runFixture(r, p, fixture, Fixtures.SF2) {
+            windows.run(r, p, Route.SYSTEM, WindowOrder.of(seed, p), Fixtures.SF2)
+        }
         val junk = fixtures.notASoundFont(r, p)
         val rejected = junk != null && soundFont.loadRejects(r, p, junk, Fixtures.NOT_A_SOUNDFONT)
         return played && rejected
@@ -173,7 +221,9 @@ class SmokePlanRunner(
     private suspend fun sf3(r: SmokeReporter): Boolean {
         val p = Panel.SF3.id
         val fixture = fixtures.materialize(r, p, Fixtures.SF3) ?: return false
-        return soundFont.runFixture(r, p, fixture, Fixtures.SF3)
+        return soundFont.runFixture(r, p, fixture, Fixtures.SF3) {
+            windows.run(r, p, Route.SYSTEM, WindowOrder.of(seed, p), Fixtures.SF3)
+        }
     }
 
     companion object {

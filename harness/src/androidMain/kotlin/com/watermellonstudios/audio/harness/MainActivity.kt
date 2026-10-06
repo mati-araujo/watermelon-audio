@@ -6,6 +6,7 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import com.watermellonstudios.audio.harness.smoke.HarnessSmoke
+import com.watermellonstudios.audio.harness.smoke.SeedRequest
 import com.watermellonstudios.audio.harness.smoke.SmokeSink
 import com.watermellonstudios.audio.harness.soundfont.SoundFontFdPicker
 import com.watermellonstudios.audio.harness.usb.UsbHarness
@@ -20,8 +21,12 @@ import java.io.File
  *
  * ```
  * adb shell am start -n com.watermellonstudios.audio.harness/.MainActivity \
- *     --es harness.smoke todo --es harness.smoke.run <id> [--es harness.smoke.usb-espera-s 120]
+ *     --es harness.smoke todo --es harness.smoke.run <id> [--es harness.smoke.usb-espera-s 120] \
+ *     [--es harness.smoke.semilla <0..2147483647>]
  * ```
+ *
+ * La semilla (REQ-053 S3) fija el orden de las ventanas de escucha; la manda `smoke-device.sh` y la
+ * registra en el JSON de la corrida.
  *
  * corre la secuencia automática y emite sus líneas `HARNESS-SMOKE` con `run=<id>`. Sólo en un
  * build DEBUGGABLE: el extra no es una puerta que un release deba tener abierta. Sólo en el primer
@@ -42,11 +47,13 @@ class MainActivity : ComponentActivity() {
         val waitS = rawWait?.toLongOrNull()?.takeIf { it > 0 }
         val waitProblem = if (rawWait != null && waitS == null) "usb-espera-s-invalido:$rawWait" else null
         val humanWaitMs = (waitS ?: DEFAULT_USB_WAIT_S) * 1000
+        val seed = SeedRequest.parse(intent?.getStringExtra(EXTRA_SEED))
         val request = if (debuggable && plan != null && savedInstanceState == null) {
             SmokeRequest(
                 plan = plan,
                 run = intent.getStringExtra(EXTRA_RUN) ?: "adb-${System.currentTimeMillis()}",
-                problem = waitProblem,
+                problem = waitProblem ?: seed.problem,
+                seed = seed.seed,
             )
         } else {
             null
@@ -59,7 +66,7 @@ class MainActivity : ComponentActivity() {
                 File(dir, name).apply { writeBytes(bytes) }.absolutePath
             },
             usbPanel = { reporter, prepareForUsb -> UsbPanel(usbHarness, reporter, prepareForUsb) },
-            usbSmoke = { reporter -> usbHarness.runAutomatic(reporter, humanWaitMs) },
+            usbSmoke = { reporter, listen -> usbHarness.runAutomatic(reporter, humanWaitMs, listen) },
             soundFontExtras = { check, reporter -> SoundFontFdPicker(check, reporter) },
             smokeRequest = request,
         )
@@ -76,6 +83,7 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_PLAN = "harness.smoke"
         const val EXTRA_RUN = "harness.smoke.run"
         const val EXTRA_USB_WAIT_S = "harness.smoke.usb-espera-s"
+        const val EXTRA_SEED = "harness.smoke.semilla"
         const val DEFAULT_USB_WAIT_S = 120L
     }
 }

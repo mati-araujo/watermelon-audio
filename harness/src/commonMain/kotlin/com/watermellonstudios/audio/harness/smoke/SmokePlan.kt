@@ -16,6 +16,25 @@ enum class Panel(val id: String) {
     USB("usb"),
 }
 
+/**
+ * REQ-053 S3 (AC-053.10) — la semilla del orden de las ventanas, tal como llega por el extra
+ * `harness.smoke.semilla`: un entero de 0 a `Int.MAX_VALUE` (el script la saca de 31 bits).
+ *
+ * Ausente no es un defecto (una corrida a mano): [seed] y [problem] quedan `null` y el plan elige
+ * una y la registra con `semilla-origen=app`. Presente e inválida SÍ lo es: la corrida no arranca,
+ * porque el orden ya no saldría de la semilla que el script registró.
+ */
+data class SeedRequest(val seed: Long?, val problem: String?) {
+    companion object {
+        fun parse(raw: String?): SeedRequest {
+            if (raw == null) return SeedRequest(null, null)
+            val seed = raw.toLongOrNull()?.takeIf { it in 0..Int.MAX_VALUE.toLong() }
+                ?: return SeedRequest(null, "semilla-invalida:" + HarnessSmoke.value(raw))
+            return SeedRequest(seed, null)
+        }
+    }
+}
+
 sealed class SmokePlan {
     data class Valid(val panels: List<Panel>) : SmokePlan()
 

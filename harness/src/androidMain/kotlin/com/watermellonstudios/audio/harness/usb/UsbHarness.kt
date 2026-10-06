@@ -541,10 +541,16 @@ class UsbHarness(private val context: Context) {
 
     /**
      * La parte USB del plan por adb: dispositivos → permiso (humano) → conexión por libusb →
-     * streaming con stats → suite → desconexión. Lo que falla no frena el cierre: la desconexión y
-     * la vuelta a Oboe corren siempre que hubo conexión.
+     * streaming con stats → suite → [listen] → desconexión. Lo que falla no frena el cierre: la
+     * desconexión y la vuelta a Oboe corren siempre que hubo conexión.
+     *
+     * [listen] (REQ-053 S3, D5) toca las ventanas de escucha: el A4 del fixture con el MOTOR, por
+     * el backend activo (LIBUSB). Corre con el streaming de la librería ya parado —con el backend
+     * libusb corriendo, `AudioEngine::start` no lo puede volver a arrancar (`ERROR_ALREADY_RUNNING`)
+     * y el motor parado sólo rinde silencio—, así que es el arranque del motor el que abre el stream
+     * de la placa. Quien la pasa deja el motor parado al terminar: `desconectar` lo exige.
      */
-    suspend fun runAutomatic(r: SmokeReporter, humanTimeoutMs: Long): Boolean {
+    suspend fun runAutomatic(r: SmokeReporter, humanTimeoutMs: Long, listen: suspend (SmokeReporter) -> Boolean): Boolean {
         val device = listDevices(r).firstOrNull() ?: return false
         if (!connect(r, device, humanTimeoutMs)) {
             if (manager.isDeviceReady()) disconnect(r)
@@ -557,6 +563,7 @@ class UsbHarness(private val context: Context) {
             ok = connectAgainWhileStreaming(r, device, streaming) && ok
             ok = runSuite(r, device) && ok
             ok = stopStreaming(r) && ok
+            ok = listen(r) && ok
         } finally {
             ok = disconnect(r) && ok
         }

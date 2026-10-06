@@ -32,6 +32,13 @@ package com.watermellonstudios.audio.harness.smoke
  *   [precondition]; `format` la rechaza. El juez del script la cruza con la ficha y decide
  *   BLOQUEADO. Las del HOST las escribe el script con `verificador=host`, una clave que la app no
  *   puede escribir: así una línea de la app nunca pasa por la verificación del host.
+ * - `step=escuchar` (REQ-053 S3) tampoco es un veredicto: es el AVISO de una ventana de escucha
+ *   (`n`, `de`, `estimulo`, `ruta`, `en-ms`, `ventana-ms`), y es CIEGO — el de un estímulo y el de un
+ *   control son la misma línea salvo `n`. Al cerrar la ventana la app emite `step=estimulo` o
+ *   `step=control` con lo que el motor rindió (ver `ListeningWindows`).
+ * - `step=sensor` (REQ-053 S3) es el juicio de un sensor sobre una ventana. Lo escribe el SCRIPT en
+ *   su propio registro, nunca la app: `format` lo rechaza, y el juez descarta el que llegue por
+ *   logcat (cualquier app puede escribir con el tag).
  *
  * En Android las líneas van a logcat con el tag [TAG]; en iOS, a la salida estándar.
  */
@@ -50,6 +57,12 @@ object HarnessSmoke {
 
     /** REQ-053 S1: el paso que lleva una precondición verificada por la app. Ver el KDoc del objeto. */
     const val STEP_PRECONDITION: String = "precondicion"
+
+    /** REQ-053 S3: el aviso (ciego) de una ventana de escucha. No es un veredicto. */
+    const val STEP_LISTEN: String = "escuchar"
+
+    /** REQ-053 S3: el juicio de un sensor. Lo escribe el script; la app no lo puede armar. */
+    const val STEP_SENSOR: String = "sensor"
 
     /** La clave con la que el SCRIPT firma sus precondiciones de host. La app no la puede escribir. */
     private const val FIELD_VERIFIER: String = "verificador"
@@ -80,6 +93,7 @@ object HarnessSmoke {
         applicable: Boolean = true,
     ): String {
         require(step != STEP_PRECONDITION) { "una precondicion se arma con precondition(), no con format()" }
+        require(step != STEP_SENSOR) { "un juicio de sensor lo registra el script, no la app" }
         return line(run, panel, step, ok, fields, applicable)
     }
 

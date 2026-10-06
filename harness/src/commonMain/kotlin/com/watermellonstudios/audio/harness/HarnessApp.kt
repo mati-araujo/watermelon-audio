@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import com.watermellonstudios.audio.api.AudioEngineFactory
 import com.watermellonstudios.audio.api.AudioInputFactory
 import com.watermellonstudios.audio.api.InternalWatermelonApi
+import com.watermellonstudios.audio.harness.smoke.ListeningWindows
 import com.watermellonstudios.audio.harness.smoke.SmokePlanRunner
 import com.watermellonstudios.audio.harness.smoke.SmokeReporter
 import com.watermellonstudios.audio.harness.smoke.SmokeSink
@@ -103,7 +104,8 @@ fun HarnessApp(platform: HarnessPlatform) {
                 soundFont = sfCheck,
                 fixtures = fixtures,
                 usb = platform.usbSmoke,
-            ).run(request.plan, SmokeReporter(sink, run = request.run), request.problem)
+                windows = ListeningWindows(sfPort),
+            ).run(request.plan, SmokeReporter(sink, run = request.run), request.problem, request.seed)
         }
     }
 
