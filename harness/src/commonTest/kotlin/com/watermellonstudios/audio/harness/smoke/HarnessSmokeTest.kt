@@ -134,6 +134,43 @@ class HarnessSmokeTest {
         assertFailsWith<IllegalArgumentException> { HarnessSmoke.precondition("r", "usb", "", true, "x") }
     }
 
+    /**
+     * REQ-053 S3 (D6) — un juicio de sensor lo escribe el SCRIPT en su propio registro, nunca la app.
+     *
+     * Bug que atrapa: una línea `step=sensor` armada por la app (o por cualquier app con el tag de
+     * logcat) que el juez tomaría como "el oyente dijo que sí".
+     */
+    @Test
+    fun aSensorJudgmentCannotBeForgedByTheApp() {
+        assertFailsWith<IllegalArgumentException> { HarnessSmoke.format("r", "sf2", "sensor", true) }
+        assertFailsWith<IllegalArgumentException> {
+            SmokeReporter({}, run = "r").report("sf2", HarnessSmoke.STEP_SENSOR, true, "veredicto" to "presente")
+        }
+        // El aviso de una ventana SÍ es de la app: no es un veredicto, como esperando-humano.
+        assertEquals(
+            "HARNESS-SMOKE v=1 run=r panel=sf2 step=escuchar ok=true n=1",
+            HarnessSmoke.format("r", "sf2", HarnessSmoke.STEP_LISTEN, true, listOf("n" to 1)),
+        )
+    }
+
+    /**
+     * REQ-053 S3 (AC-053.10) — la semilla llega por el extra `harness.smoke.semilla`.
+     *
+     * Bug que atrapa: una semilla inválida que cae callada a otra (el orden ya no sale de la que el
+     * script registró), o una ausente que se toma como inválida y no deja correr a mano.
+     */
+    @Test
+    fun theSeedIsAnIntegerFromZeroToIntMaxOrAProblem() {
+        assertEquals(SeedRequest(12345L, null), SeedRequest.parse("12345"))
+        assertEquals(SeedRequest(0L, null), SeedRequest.parse("0"))
+        assertEquals(SeedRequest(2147483647L, null), SeedRequest.parse("2147483647"))
+        assertEquals(SeedRequest(null, null), SeedRequest.parse(null))
+        assertEquals(SeedRequest(null, "semilla-invalida:-1"), SeedRequest.parse("-1"))
+        assertEquals(SeedRequest(null, "semilla-invalida:2147483648"), SeedRequest.parse("2147483648"))
+        assertEquals(SeedRequest(null, "semilla-invalida:abc"), SeedRequest.parse("abc"))
+        assertEquals(SeedRequest(null, "semilla-invalida:-"), SeedRequest.parse(""))
+    }
+
     /** Bug que atrapa: una evidencia vacía parte la línea (`evidencia=` sin valor) en vez de `-`. */
     @Test
     fun aPreconditionWithoutEvidenceSaysDash() {
