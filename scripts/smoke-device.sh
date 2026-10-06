@@ -100,36 +100,92 @@ readonly SELF="scripts/smoke-device.sh"
 #   validar FICHA                         exit 0 si la ficha es valida, 2 si no.
 #   ids FICHA                             "plan id verificador", una por precondicion.
 # ---------------------------------------------------------------------------
-smoke_py() {
-    python3 - "$@" <<'PY'
+IFS= read -r -d '' SMOKE_PY <<'PY' || true
 import fnmatch
 import json
 import os
 import re
+import select
 import subprocess
 import sys
+import time
 
 # --- El contrato con la app (ver la cabecera). El orden es el de emision. ---------------------
 EXPECTED = {
     "salida": ["start", "stream", "frames"],
     "captura": ["start", "nivel", "stop"],
-    "sf2": ["fixture", "carga", "preset", "nota", "descarga", "no-soundfont"],
-    "sf3": ["fixture", "carga", "preset", "nota", "descarga"],
+    # REQ-053 S3: `estimulo` y `control` son las dos ventanas de escucha (D5, D7), con el fixture
+    # cargado: despues de la nota y antes de la descarga. Su orden lo fija la semilla.
+    "sf2": ["fixture", "carga", "preset", "nota", "estimulo", "control", "descarga", "no-soundfont"],
+    "sf3": ["fixture", "carga", "preset", "nota", "estimulo", "control", "descarga"],
     # REQ-050 S2: `motor-callback` va DESPUES de conectar (lo prepara la libreria dentro de
     # connectDevice, D6), asi que depende del permiso. `wake-lock` (D9): WAKE_LOCK llega por el
-    # merge del manifest de :audio, porque el harness no lo declara.
-    "usb": ["motor-parado", "dispositivos", "permiso", "conectar", "motor-callback", "capacidades", "descriptores", "backend",
+    # merge del manifest de :audio, porque el harness no lo declara. REQ-053 S3: el A4 del fixture
+    # .sf2 se carga ANTES de parar el motor (fixture, carga, preset), suena por libusb despues de
+    # parar el streaming (estimulo, control) y se descarga al final.
+    "usb": ["fixture", "carga", "preset",
+            "motor-parado", "dispositivos", "permiso", "conectar", "motor-callback", "capacidades", "descriptores", "backend",
             "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo", "conectar-otro",
-            "suite", "streaming-stop",
-            "backend-restaurado", "desconectar"],
+            "suite", "streaming-stop", "estimulo", "control",
+            "backend-restaurado", "desconectar", "descarga"],
 }
 ORDER = ["salida", "captura", "sf2", "sf3", "usb"]
 # Pasos que se piden SOLO si hubo dialogo de permiso (REQ-050 S1): el broadcast falso que manda el
 # script mientras el dialogo esta pendiente, y el juicio de la app sobre lo que paso.
 WITH_DIALOG = {"usb": ["broadcast-falso", "permiso-falso"]}
+# Lo del fixture en usb no depende del permiso: corre con o sin el humano.
+USB_FONT = ("fixture", "carga", "preset", "descarga")
 # Pasos del panel USB que dependen de que el humano haya dado el permiso.
-AFTER_PERMISSION = EXPECTED["usb"][EXPECTED["usb"].index("permiso"):]
+AFTER_PERMISSION = [s for s in EXPECTED["usb"][EXPECTED["usb"].index("permiso"):] if s not in USB_FONT]
 HUMAN = "esperando-humano"
+# --- REQ-053 S3: el estimulo y el sensor ---------------------------------------------------------
+# `escuchar` es el AVISO de una ventana (no es un veredicto, como esperando-humano) y es CIEGO: no
+# dice si la ventana es estimulo o control. Al cerrarla la app emite `estimulo` o `control` con lo
+# que el motor rindio. `sensor` es el juicio del sensor sobre una ventana: lo escribe el SCRIPT en
+# su propio archivo, nunca la app (HarnessSmoke lo reserva y el juez descarta el que llegue por
+# logcat).
+LISTEN = "escuchar"
+STIMULUS, CONTROL = "estimulo", "control"
+WINDOW_STEPS = (STIMULUS, CONTROL)
+SENSOR_STEP = "sensor"
+AUDIBLE = ("sf2", "sf3", "usb")
+# Lo que contesta un sensor sobre una ventana (D6): si detecto el estimulo, si no, o no sabe.
+SENSOR_VERDICTS = ("presente", "ausente", "sin-dato")
+NOT_DISCRIMINATING = "sensor-no-discrimina"
+NOT_DISCRIMINATING_REMEDY = ("Repetir la corrida contestando SOLO lo que se oye: en una ventana de control no suena nada. "
+                             "Si la ruta es la placa USB, escuchar con auriculares enchufados a la placa.")
+# El margen entre la espera de la respuesta y la pausa que la app deja despues de cada ventana: la
+# respuesta tiene que llegar ANTES de que la app avise la ventana siguiente (ver seguir()).
+ANSWER_MARGIN_S = 3
+
+
+def window_order(seed, panel):
+    """El orden de las dos ventanas de un panel, de la semilla (AC-053.10). La MISMA cuenta que
+    `WindowOrder.of` en el harness: FNV-1a de 32 bits sobre "<semilla>:<panel>", y el bit 0 de
+    (h ^ (h >> 16)). Los dos lados fijan los mismos vectores en sus tests."""
+    h = 2166136261
+    for b in ("%d:%s" % (seed, panel)).encode("utf-8"):
+        h ^= b
+        h = (h * 16777619) & 0xFFFFFFFF
+    return [STIMULUS, CONTROL] if ((h >> 16) ^ h) & 1 == 0 else [CONTROL, STIMULUS]
+
+
+def number(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def window_rendered(f):
+    """AC-053.8: el motor rindio la ventana como se declaro. Un estimulo: ok, frames > 0 y pico > 0.
+    Un control: ok (la app midio silencio) y frames > 0. El juez mira los NUMEROS, no solo el ok."""
+    frames, peak = number(f.get("frames")), number(f.get("pico"))
+    if f.get("ok") != "true" or frames is None or frames <= 0:
+        return False
+    if f.get("step") == STIMULUS:
+        return peak is not None and peak > 0
+    return True
 # REQ-053 S1: la linea que trae una precondicion verificada (de la app, o del host con
 # `verificador=host`). No es un paso: el juez la cruza con la ficha.
 PRECOND = "precondicion"
@@ -503,15 +559,18 @@ def host(adb, serial, setup_path, requested, run, pkg, evidence_dir):
 
 
 # --- El juez -------------------------------------------------------------------------------------
-def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=False):
+def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=False, sensor_log=None, cli_seed=None):
     setup = load_setup(setup_path)
     wanted = plan_panels(requested)
     rows = []        # {veredicto, panel, paso, detalle, observado, precondiciones}
     preconditions = []
+    sensor_entries = []   # S3: un registro por ventana cerrada, con lo que dijo el sensor y su juicio
+    seed, seed_origin, orders = None, None, {}
 
     def add(v, panel, step, detail="", observed=None, blockers=()):
         rows.append({"veredicto": v, "panel": panel, "paso": step, "detalle": detail,
-                     "observado": observed, "precondiciones": [b["id"] for b in blockers]})
+                     "observado": observed, "precondiciones": [b if isinstance(b, str) else b["id"] for b in blockers]})
+        return rows[-1]
 
     def extras(f):
         return " ".join("%s=%s" % (k, v) for k, v in f.items() if k not in ("v", "run", "panel", "step", "ok"))
@@ -524,9 +583,13 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
         if json_out:
             doc = {"formato": 1, "run": run, "plan": requested, "ficha": setup_path, "exit": code,
                    "resumen": counts, "lineas-host-descartadas": discarded, "host-en-log": taken_from_log,
-                   "precondiciones": preconditions, "pasos": rows,
-                   # S3 lo llena: cada juicio de sensor sobre una ventana de estimulo o de control.
-                   "sensor": []}
+                   "lineas-sensor-descartadas": discarded_sensor,
+                   # S3 (AC-053.10): la semilla y el orden que da; con la semilla se reproduce.
+                   "semilla": seed, "semilla-origen": seed_origin, "orden": orders,
+                   "precondiciones": preconditions,
+                   "pasos": [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows],
+                   # S3: cada ventana cerrada, con el juicio del sensor (o por que no se lo consulto).
+                   "sensor": [{k: v for k, v in e.items() if not k.startswith("_")} for e in sensor_entries]}
             try:
                 with open(json_out, "w", encoding="utf-8") as f:
                     json.dump(doc, f, ensure_ascii=False, indent=2)
@@ -537,25 +600,29 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
         sys.exit(code)
 
     lines = []
+    sensor_lines = []
     discarded = 0
+    discarded_sensor = 0
     taken_from_log = 0
 
-    def read_lines(path, from_host):
+    def read_lines(path, from_host, from_sensor=False):
         # El log de la app (logcat) lo puede escribir cualquier app con el tag: una linea
         # `verificador=host` que llegue por ahi es una falsificacion y se DESCARTA (ni bloquea ni
-        # cuenta). Las del host vienen SOLO de su propio archivo.
-        nonlocal discarded, taken_from_log
+        # cuenta). Las del host vienen SOLO de su propio archivo. S3: lo mismo con `step=sensor`, que
+        # viene SOLO del registro del sensor, que escribe el script.
+        nonlocal discarded, taken_from_log, discarded_sensor
         with open(path, encoding="utf-8", errors="replace") as f:
             for raw in f:
-                i = raw.find("HARNESS-SMOKE ")
-                if i < 0:
+                fields = parse_line(raw)
+                if fields is None or fields.get("run") != run:
                     continue
-                fields = {}
-                for part in raw[i:].strip().split(" ")[1:]:
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        fields[k] = v
-                if fields.get("run") != run:
+                if from_sensor:
+                    if fields.get("step") == SENSOR_STEP:
+                        sensor_lines.append(fields)
+                    continue
+                if fields.get("step") == SENSOR_STEP:
+                    if not from_host:
+                        discarded_sensor += 1
                     continue
                 if from_host != (fields.get("verificador") == "host"):
                     # --host-en-log (solo logs grabados de S1, que mezclan origenes): las del host
@@ -575,11 +642,16 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
     if host_log:
         read_lines(host_log, True)
     read_lines(log, False)
+    if sensor_log:
+        read_lines(sensor_log, False, from_sensor=True)
     if host_in_log:
         print("AVISO — --host-en-log: %d linea(s) verificador=host tomadas del propio log; este log no separa origenes "
               "(cualquier app con el tag las puede escribir), asi que NO prueba que el host verifico\n" % taken_from_log)
     if discarded:
         print("AVISO — %d linea(s) verificador=host en el log de la app: descartadas (solo el host firma como host)\n" % discarded)
+    if discarded_sensor:
+        print("AVISO — %d linea(s) step=sensor en el log de la app: descartadas (los juicios del sensor los registra "
+              "el script)\n" % discarded_sensor)
 
     inicio = [f for f in lines if f.get("panel") == "plan" and f.get("step") == "inicio"]
     panels = [p for p in inicio[0].get("plan", "").split(",") if p in EXPECTED] if inicio else []
@@ -664,50 +736,40 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
                 "id=%s no esta declarada en la ficha de setup para %s (o el plan no se pidio)" % (f.get("id", "-"), f.get("panel", "-")),
                 observed(f))
 
-    human_pending = set()
-    for panel in [p for p in ORDER if p in panels]:
-        mine = [f for f in lines if f.get("panel") == panel]
-        waits, granted, denied = human_wait(panel)
-        for w in waits:
-            state = "hecho — " if granted else ("DENEGADO por el humano — " if denied else "PENDIENTE — ")
-            add("HUMANO", panel, HUMAN, state + extras(w), observed(w))
-        pending = bool(waits) and not granted
-        if pending:
-            human_pending.add(panel)
+    def judge_step(panel, step, f, pending):
+        bs = blockers(panel, step)
+        if bs and f.get("ok") != "true" and f.get("concluyente") == "true":
+            # La app sabe que esta falla no la explica ninguna precondicion (p.ej. un grant que
+            # UsbManager desmiente): un bloqueo no la puede tapar. Solo vale para ok=false:
+            # `concluyente` nunca destapa un PASS.
+            add("FAIL", panel, step, "concluyente, ninguna precondicion lo explica: " + extras(f), observed(f))
+        elif bs:
+            # AC-053.2: ni PASS ni FAIL, aunque la app haya dicho ok=true: lo que se observo
+            # queda en el JSON (S2 lo necesita), pero no se juzga.
+            blocked(panel, step, bs, extras(f) or "-", observed(f))
+        elif pending and step in AFTER_PERMISSION:
+            add("HUMANO", panel, step, "sin permiso: " + extras(f), observed(f))
+        elif "medido" in f:
+            # REQ-050 S3: el runner aplica el rate de cada fila, asi que NO-MEDIDO (D11 de MINI-038)
+            # ya no existe. Una linea que lo trae es una regresion del harness o del runner: FAIL.
+            add("FAIL", panel, step, "NO-MEDIDO ya no existe (REQ-050 S3): " + extras(f), observed(f))
+        elif f.get("aplica") == "false" and panel == "usb" and re.fullmatch(r"suite-[0-9]+", step or ""):
+            # REQ-050 S3 (D5): una fila que el device no ofrece. Ni PASS (aunque diga ok=true) ni FAIL,
+            # y no cuenta como cobertura: se lista aparte. SOLO filas de la suite: cualquier otro paso
+            # con aplica=false es un FAIL, o un paso podria desaparecer del veredicto.
+            add("NO-APLICA", panel, step, extras(f), observed(f))
+        elif f.get("aplica") == "false":
+            add("FAIL", panel, step, "aplica=false fuera de una fila de la suite: " + extras(f), observed(f))
+        elif step in WINDOW_STEPS and not window_rendered(f):
+            # AC-053.8: el motor no rindio la ventana como se declaro. El juez mira los numeros
+            # (frames, pico), no solo el ok: un ok=true con frames=0 tambien es FAIL.
+            add("FAIL", panel, step, "%s no-rendido: %s" % (step, extras(f)), observed(f))
+        elif f.get("ok") == "true":
+            add("PASS", panel, step, extras(f), observed(f))
+        else:
+            add("FAIL", panel, step, extras(f), observed(f))
 
-        seen = set()
-        for f in mine:
-            step = f.get("step")
-            if step in (HUMAN, PRECOND):
-                continue
-            seen.add(step)
-            bs = blockers(panel, step)
-            if bs and f.get("ok") != "true" and f.get("concluyente") == "true":
-                # La app sabe que esta falla no la explica ninguna precondicion (p.ej. un grant que
-                # UsbManager desmiente): un bloqueo no la puede tapar. Solo vale para ok=false:
-                # `concluyente` nunca destapa un PASS.
-                add("FAIL", panel, step, "concluyente, ninguna precondicion lo explica: " + extras(f), observed(f))
-            elif bs:
-                # AC-053.2: ni PASS ni FAIL, aunque la app haya dicho ok=true: lo que se observo
-                # queda en el JSON (S2 lo necesita), pero no se juzga.
-                blocked(panel, step, bs, extras(f) or "-", observed(f))
-            elif pending and step in AFTER_PERMISSION:
-                add("HUMANO", panel, step, "sin permiso: " + extras(f), observed(f))
-            elif "medido" in f:
-                # REQ-050 S3: el runner aplica el rate de cada fila, asi que NO-MEDIDO (D11 de MINI-038)
-                # ya no existe. Una linea que lo trae es una regresion del harness o del runner: FAIL.
-                add("FAIL", panel, step, "NO-MEDIDO ya no existe (REQ-050 S3): " + extras(f), observed(f))
-            elif f.get("aplica") == "false" and panel == "usb" and re.fullmatch(r"suite-[0-9]+", step or ""):
-                # REQ-050 S3 (D5): una fila que el device no ofrece. Ni PASS (aunque diga ok=true) ni FAIL,
-                # y no cuenta como cobertura: se lista aparte. SOLO filas de la suite: cualquier otro paso
-                # con aplica=false es un FAIL, o un paso podria desaparecer del veredicto.
-                add("NO-APLICA", panel, step, extras(f), observed(f))
-            elif f.get("aplica") == "false":
-                add("FAIL", panel, step, "aplica=false fuera de una fila de la suite: " + extras(f), observed(f))
-            elif f.get("ok") == "true":
-                add("PASS", panel, step, extras(f), observed(f))
-            else:
-                add("FAIL", panel, step, extras(f), observed(f))
+    def missing_steps(panel, seen, waits, pending):
         for step in EXPECTED[panel]:
             if step not in seen:
                 bs = blockers(panel, step)
@@ -728,6 +790,131 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
                         blocked(panel, step, bs, "no-emitido", None)
                     else:
                         add("FAIL", panel, step, "FALTA: con dialogo de permiso este paso es obligatorio (REQ-050 S1)")
+
+    # --- S3 (AC-053.10): la semilla y el orden de las ventanas. ------------------------------
+    windows = []   # (panel, linea de cierre, fila de su veredicto)
+    window_lines = [f for f in lines if f.get("step") in WINDOW_STEPS and f.get("panel") in AUDIBLE]
+    app_seed = inicio[0].get("semilla") if inicio else None
+    if app_seed is not None and not re.fullmatch(r"[0-9]+", app_seed):
+        add("FAIL", "plan", "semilla", "la app registro una semilla ilegible: %s" % app_seed)
+    elif cli_seed is not None:
+        seed, seed_origin = cli_seed, "script"
+        if app_seed is None and window_lines:
+            add("FAIL", "plan", "semilla", "el script mando semilla=%d y la app no registro ninguna" % cli_seed)
+        elif app_seed is not None and int(app_seed) != cli_seed:
+            add("FAIL", "plan", "semilla", "el script mando semilla=%d y la app corrio con semilla=%s" % (cli_seed, app_seed))
+    elif app_seed is not None:
+        seed, seed_origin = int(app_seed), inicio[0].get("semilla-origen", "app")
+    elif window_lines:
+        add("FAIL", "plan", "semilla", "sin semilla registrada: el orden de las ventanas no se puede reproducir")
+    if seed is not None:
+        orders.update({p: window_order(seed, p) for p in judged if p in AUDIBLE})
+    for panel in [p for p in judged if p in AUDIBLE and p in orders]:
+        mine_w = [f for f in window_lines if f.get("panel") == panel]
+        ran = [(f.get("n"), f.get("step")) for f in mine_w]
+        want = [(str(i + 1), k) for i, k in enumerate(orders[panel])]
+        if mine_w and ran != want[:len(ran)]:
+            add("FAIL", panel, "orden", "las ventanas no siguen la semilla %d: corrio %s, la semilla da %s"
+                % (seed, ",".join("%s:%s" % x for x in ran), ",".join("%s:%s" % x for x in want)))
+
+    # --- S3 (AC-053.8..10): el juicio del sensor sobre cada ventana cerrada. ------------------
+    def judge_windows():
+        by_key = {}
+        for rec in sensor_lines:
+            by_key.setdefault((rec.get("panel"), rec.get("n")), []).append(rec)
+        used = set()
+        not_discriminating = {}   # sensor -> controles en los que dijo "presente"
+        listens = {(f.get("panel"), f.get("n")): f for f in lines if f.get("step") == LISTEN}
+        for panel, f, wrow in windows:
+            key = (panel, f.get("n"))
+            used.add(key)
+            recs = by_key.get(key, [])
+            rec = recs[0] if len(recs) == 1 else {}
+            kind = f.get("step")
+            step = "sensor-" + kind
+            entry = {"panel": panel, "n": int(f["n"]) if (f.get("n") or "").isdigit() else f.get("n"), "tipo": kind,
+                     "estimulo": listens.get(key, {}).get("estimulo") or rec.get("estimulo"),
+                     "ruta": f.get("ruta"), "sensor": rec.get("sensor"), "veredicto": rec.get("veredicto"),
+                     "evidencia": rec.get("evidencia"), "consultado": bool(recs), "juicio": None}
+            sensor_entries.append(entry)
+            said = "sensor=%s veredicto=%s evidencia=%s ventana=%s/%s ruta=%s" % (
+                rec.get("sensor", "-"), rec.get("veredicto", "-"), rec.get("evidencia", "-"), panel, f.get("n", "-"), f.get("ruta", "-"))
+            v = wrow["veredicto"]
+            if v in ("BLOQUEADO", "HUMANO"):
+                # La ventana no se juzgo (precondicion, o el permiso USB pendiente): su juicio tampoco.
+                entry["juicio"] = v
+                bs = [b for b in blocking if b["plan"] == panel and b["id"] in wrow["precondiciones"]]
+                if bs:
+                    blocked(panel, step, bs, "la ventana salio BLOQUEADO; " + said, rec or None)
+                else:
+                    add(v, panel, step, "la ventana salio %s; %s" % (v, said), rec or None)
+                continue
+            if v != "PASS":
+                # AC-053.8: el motor no rindio la ventana como se declaro, y el sensor NO se consulta.
+                # Si hay juicio, el script lo pidio cuando no debia: eso es un FAIL, nunca un PASS.
+                if recs:
+                    entry["juicio"] = "FAIL"
+                    add("FAIL", panel, step, "se consulto al sensor sobre una ventana no-rendida: " + said, rec or None)
+                continue
+            if not recs:
+                entry["juicio"] = "HUMANO"
+                add("HUMANO", panel, step, "sin-juicio: el sensor no registro nada para esta ventana", None)
+                continue
+            if len(recs) > 1:
+                entry["juicio"] = "FAIL"
+                add("FAIL", panel, step, "%d juicios para la misma ventana: el script consulto mas de una vez" % len(recs), None)
+                continue
+            heard = rec.get("veredicto")
+            if heard not in SENSOR_VERDICTS or heard == "sin-dato":
+                verdict = "HUMANO"
+            elif kind == STIMULUS:
+                verdict = "PASS" if heard == "presente" else "FAIL"
+            elif heard == "ausente":
+                verdict = "PASS"
+            else:
+                # D7: oyo el estimulo donde no sono. Invalida a ESE sensor en toda la corrida (abajo).
+                verdict = "BLOQUEADO"
+                not_discriminating.setdefault(rec.get("sensor"), []).append("%s/%s:control:presente" % key)
+            entry["juicio"] = verdict
+            row = add(verdict, panel, step, said, rec)
+            row["_sensor"], row["_entry"] = rec.get("sensor"), entry
+        for key in sorted(k for k in by_key if k not in used):
+            for rec in by_key[key]:
+                add("FAIL", key[0] or "-", "sensor-sin-ventana",
+                    "juicio de sensor para la ventana %s/%s, que la app no emitio" % key, rec)
+        # AC-053.10: un "si" en un control => TODO lo que juzgo ese sensor sale BLOQUEADO.
+        for name, where in not_discriminating.items():
+            for row in rows:
+                if row.get("_sensor") == name:
+                    old = "%s: %s" % (row["veredicto"], row["detalle"])
+                    row.update(veredicto="BLOQUEADO", precondiciones=[NOT_DISCRIMINATING],
+                               detalle="precondicion=%s estado=incumplida evidencia=%s remedio=%s · antes: %s"
+                               % (NOT_DISCRIMINATING, ",".join(where), NOT_DISCRIMINATING_REMEDY, old))
+                    row["_entry"]["juicio"] = "BLOQUEADO"
+
+    human_pending = set()
+    for panel in [p for p in ORDER if p in panels]:
+        mine = [f for f in lines if f.get("panel") == panel]
+        waits, granted, denied = human_wait(panel)
+        for w in waits:
+            state = "hecho — " if granted else ("DENEGADO por el humano — " if denied else "PENDIENTE — ")
+            add("HUMANO", panel, HUMAN, state + extras(w), observed(w))
+        pending = bool(waits) and not granted
+        if pending:
+            human_pending.add(panel)
+
+        seen = set()
+        for f in mine:
+            step = f.get("step")
+            if step in (HUMAN, PRECOND, LISTEN):
+                continue
+            seen.add(step)
+            before = len(rows)
+            judge_step(panel, step, f, pending)
+            if step in WINDOW_STEPS and len(rows) > before:
+                windows.append((panel, f, rows[-1]))
+        missing_steps(panel, seen, waits, pending)
+    judge_windows()
 
     fin = [f for f in lines if f.get("panel") == "plan" and f.get("step") == "fin"]
     if not fin:
@@ -768,17 +955,247 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
     n = {k: sum(1 for r in rows if r["veredicto"] == k) for k in ("PASS", "FAIL", "BLOQUEADO", "HUMANO", "NO-APLICA")}
     print("\nresumen: %d PASS · %d FAIL · %d BLOQUEADO · %d HUMANO · %d NO-APLICA"
           % (n["PASS"], n["FAIL"], n["BLOQUEADO"], n["HUMANO"], n["NO-APLICA"]))
-    pending = [r for r in rows if r["veredicto"] == "HUMANO" and (r["panel"] in human_pending or r["panel"] == "plan")]
+    # S3: un juicio de sensor sin dato (?, sin respuesta, sin TTY, --sensor ninguno) es HUMANO pendiente.
+    pending = [r for r in rows if r["veredicto"] == "HUMANO"
+               and (r["panel"] in human_pending or r["panel"] == "plan" or r["paso"].startswith("sensor-"))]
     # AC-053.4: 1 FAIL > 4 BLOQUEADO > 3 HUMANO > 0.
     finish(1 if n["FAIL"] else (4 if n["BLOQUEADO"] else (3 if pending else 0)))
+
+
+# --- REQ-053 S3: los sensores (D6) y el seguidor de ventanas ---------------------------------------
+# Un SENSOR es una funcion con el contrato de D6: recibe {estimulo, ventana, ruta} (y cuanto puede
+# esperar) y devuelve (veredicto, evidencia), con veredicto en SENSOR_VERDICTS. No sabe si la ventana
+# es estimulo o control: se le pregunta lo MISMO en las dos (D7, controles ciegos). `consult` le
+# agrega su nombre. REQ-051 enchufa el loopback agregando su funcion a SENSORS; el juez no cambia.
+ROUTES = {
+    "sistema": "la salida del sistema del telefono (Oboe: parlante o auriculares del telefono)",
+    "libusb": "la placa USB, por libusb (en los auriculares enchufados a la placa)",
+}
+STIMULI = {"A4-440Hz": "un A4 (la de 440 Hz)"}
+
+
+def sensor_oido_humano(estimulo, ventana, ruta, timeout_s):
+    """El oido humano: una pregunta cerrada en la terminal de quien corre el script (s/n/?). Sin TTY,
+    sin respuesta antes de `timeout_s` o con `?`, no sabe: sin-dato (=> HUMANO, nunca PASS)."""
+    if not os.isatty(0):
+        return "sin-dato", "sin-tty"
+    try:
+        import termios
+        termios.tcflush(0, termios.TCIFLUSH)   # lo tipeado ANTES de la pregunta no la contesta
+    except (ImportError, OSError):
+        pass
+    question = ">>> ¿Sonó %s por %s en la ventana %s? [s/n/?] " % (
+        STIMULI.get(estimulo, estimulo), ROUTES.get(ruta, ruta), ventana)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        sys.stdout.write(question)
+        sys.stdout.flush()
+        ready, _, _ = select.select([0], [], [], left)
+        if not ready:
+            break
+        data = os.read(0, 4096)
+        if not data:
+            return "sin-dato", "eof"
+        answer = data.decode("utf-8", "replace").strip().lower()
+        if answer in ("s", "si", "sí"):
+            return "presente", "respuesta:s"
+        if answer in ("n", "no"):
+            return "ausente", "respuesta:n"
+        if answer == "?":
+            return "sin-dato", "respuesta:?"
+        print("    (contestá s, n o ?)")
+    print()
+    return "sin-dato", "sin-respuesta:%ds" % timeout_s
+
+
+def sensor_ninguno(estimulo, ventana, ruta, timeout_s):
+    """`--sensor ninguno`: corre sin nadie que juzgue. Todo queda HUMANO (D6)."""
+    return "sin-dato", "--sensor-ninguno"
+
+
+def sensor_guion(estimulo, ventana, ruta, timeout_s):
+    """Solo del --self-test (el CLI no lo deja elegir): contesta en orden lo que dice el archivo
+    WMA_SENSOR_GUION, anota cada consulta en WMA_SENSOR_LLAMADAS y, si se le pide, agrega una linea al
+    log MIENTRAS contesta (WMA_SENSOR_AL_CONTESTAR en WMA_SENSOR_AL_CONTESTAR_EN): asi se prueba la
+    respuesta que llega tarde sin relojes."""
+    calls_path = os.environ["WMA_SENSOR_LLAMADAS"]
+    with open(calls_path, encoding="utf-8") as f:
+        done = sum(1 for line in f if line.strip())
+    with open(calls_path, "a", encoding="utf-8") as f:
+        f.write("estimulo=%s ventana=%s ruta=%s espera-s=%d\n" % (estimulo, ventana, ruta, timeout_s))
+    late = os.environ.get("WMA_SENSOR_AL_CONTESTAR")
+    if late:
+        with open(os.environ["WMA_SENSOR_AL_CONTESTAR_EN"], "a", encoding="utf-8") as f:
+            f.write(late + "\n")
+    with open(os.environ["WMA_SENSOR_GUION"], encoding="utf-8") as f:
+        answers = [line.strip() for line in f if line.strip()]
+    return (answers[done] if done < len(answers) else "sin-dato"), "guion:%d" % (done + 1)
+
+
+SENSORS = {"oido-humano": sensor_oido_humano, "ninguno": sensor_ninguno, "guion": sensor_guion}
+# Los que se pueden elegir con --sensor en una corrida de device.
+SENSORS_CLI = ("oido-humano", "ninguno")
+
+
+def consult(name, estimulo, ventana, ruta, timeout_s):
+    """{estimulo, ventana, ruta} -> {veredicto, sensor, evidencia} (D6). Un veredicto fuera del
+    contrato es sin-dato: un sensor que dice algo que no se entiende no sabe."""
+    verdict, evidence = SENSORS[name](estimulo, ventana, ruta, timeout_s)
+    if verdict not in SENSOR_VERDICTS:
+        verdict, evidence = "sin-dato", "veredicto-ilegible:%s" % value(verdict)
+    return {"veredicto": verdict, "sensor": name, "evidencia": value(evidence)}
+
+
+def parse_line(raw):
+    """Los campos de una linea HARNESS-SMOKE, o None si no es una."""
+    i = raw.find("HARNESS-SMOKE ")
+    if i < 0:
+        return None
+    fields = {}
+    for part in raw[i:].replace("\r", "").strip().split(" ")[1:]:
+        if "=" in part:
+            k, v = part.split("=", 1)
+            fields[k] = v
+    return fields
+
+
+def app_events(path, run):
+    """Las lineas de la APP de esta corrida, en el orden del log (sin las del host ni las del sensor)."""
+    out = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                fields = parse_line(raw)
+                if (fields is not None and fields.get("run") == run and fields.get("verificador") != "host"
+                        and fields.get("step") != SENSOR_STEP):
+                    out.append(fields)
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def follow(log, sensor_log, state_path, sensor, run):
+    """El seguidor de ventanas, en vivo: lo llama el bucle de la corrida en cada vuelta, sobre la
+    captura cruda. La APP anuncia cada ventana (`escuchar`) y la cierra (`estimulo`/`control`); el
+    script la sigue — no hay relojes que sincronizar. Al ver un aviso, se lo dice al humano; al ver un
+    cierre, consulta al sensor y anota el juicio en su propio registro.
+
+    Lo que se decide por el ORDEN del log, sin relojes:
+    - un cierre con el motor sin rendir la ventana NO se consulta (AC-053.8);
+    - un aviso que se ve cuando su ventana ya cerro no dejo escuchar: no se consulta, sin-dato;
+    - una respuesta que llega cuando la app ya aviso la ventana siguiente no vale: sin-dato.
+    Cada ventana se procesa una vez (el estado vive en `state_path`), y se marca ANTES de consultar:
+    si el seguidor se cae a mitad, esa ventana queda sin juicio (HUMANO), nunca con dos."""
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        state = {"anunciadas": [], "tarde": [], "procesadas": []}
+
+    def save():
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+
+    def record(f, res, estimulo, ruta):
+        with open(sensor_log, "a", encoding="utf-8") as out:
+            out.write("HARNESS-SMOKE v=1 run=%s panel=%s step=%s ok=true n=%s sensor=%s veredicto=%s evidencia=%s "
+                      "estimulo=%s ruta=%s\n" % (run, f.get("panel"), SENSOR_STEP, f.get("n"), res["sensor"],
+                                                 res["veredicto"], res["evidencia"], value(estimulo), value(ruta)))
+
+    events = app_events(log, run)
+    key = lambda f: "%s/%s" % (f.get("panel"), f.get("n"))
+    closed = {key(f) for f in events if f.get("step") in WINDOW_STEPS}
+    listens = {key(f): f for f in events if f.get("step") == LISTEN}
+    for i, f in enumerate(events):
+        k = key(f)
+        if f.get("step") == LISTEN and k not in state["anunciadas"]:
+            state["anunciadas"].append(k)
+            if k in closed:
+                state["tarde"].append(k)
+                print("(ventana %s de %s, %s: el aviso llego cuando ya habia cerrado; no se pregunta)"
+                      % (f.get("n"), f.get("de"), f.get("panel")))
+            else:
+                print(">>> ESCUCHÁ — ventana %s de %s (%s): arranca en ~%s s y dura %s s, por %s."
+                      % (f.get("n"), f.get("de"), f.get("panel"), int(number(f.get("en-ms")) or 0) // 1000,
+                         int(number(f.get("ventana-ms")) or 0) // 1000, ROUTES.get(f.get("ruta"), f.get("ruta"))))
+            sys.stdout.flush()
+            save()
+        elif f.get("step") in WINDOW_STEPS and k not in state["procesadas"]:
+            state["procesadas"].append(k)
+            save()
+            if not window_rendered(f):
+                print("(ventana %s de %s: el motor no la rindio como se declaro; no se pregunta)" % (f.get("n"), f.get("panel")))
+                continue
+            listen = listens.get(k)
+            if listen is None:
+                record(f, {"veredicto": "sin-dato", "sensor": sensor, "evidencia": "sin-aviso"}, "-", f.get("ruta"))
+                continue
+            estimulo, ruta = listen.get("estimulo", "-"), listen.get("ruta", "-")
+            if k in state["tarde"]:
+                record(f, {"veredicto": "sin-dato", "sensor": sensor, "evidencia": "aviso-tarde"}, estimulo, ruta)
+                continue
+            pause_ms = number(f.get("pausa-ms")) or 0
+            timeout_s = max(1, int(pause_ms // 1000) - ANSWER_MARGIN_S)
+            ventana = "%s-%sde%s-%sms" % (f.get("panel"), f.get("n"), f.get("de"), f.get("ventana-ms"))
+            res = consult(sensor, estimulo, ventana, ruta, timeout_s)
+            # Releer: si mientras el sensor contestaba la app ya aviso OTRA ventana, la respuesta
+            # pudo mezclar las dos. No vale.
+            now = app_events(log, run)
+            pos = next((j for j, g in enumerate(now) if g.get("step") in WINDOW_STEPS and key(g) == k), None)
+            if pos is not None and any(g.get("step") == LISTEN for g in now[pos + 1:]):
+                res = {"veredicto": "sin-dato", "sensor": res["sensor"],
+                       "evidencia": "respuesta-tardia:%s" % res["veredicto"]}
+            record(f, res, estimulo, ruta)
+
+
+def veredicto_args(args):
+    """veredicto LOG RUN PLAN FICHA [--json F] [--host-log F] [--host-en-log] [--sensor-log F] [--semilla N]"""
+    pos, opt, flags = [], {}, set()
+    it = iter(args)
+    for a in it:
+        if a in ("--json", "--host-log", "--sensor-log", "--semilla"):
+            v = next(it, None)
+            if v is None:
+                raise ValueError("%s necesita un valor" % a)
+            opt[a] = v
+        elif a == "--host-en-log":
+            flags.add(a)
+        elif a.startswith("--"):
+            raise ValueError("opcion desconocida: %s" % a)
+        else:
+            pos.append(a)
+    if len(pos) != 4:
+        raise ValueError("se esperan LOG RUN PLAN FICHA")
+    seed = opt.get("--semilla")
+    if seed is not None and not re.fullmatch(r"[0-9]+", seed):
+        raise ValueError("--semilla tiene que ser un entero >= 0: %s" % seed)
+    return pos, opt, flags, (int(seed) if seed is not None else None)
 
 
 def main(argv):
     mode, args = (argv[0], argv[1:]) if argv else ("", [])
     try:
-        if mode == "veredicto" and len(args) in (4, 5, 6, 7):
-            judge(args[0], args[1], args[2], args[3], args[4] if len(args) >= 5 and args[4] else None,
-                  args[5] if len(args) >= 6 and args[5] else None, host_in_log=len(args) == 7 and args[6] == "host-en-log")
+        if mode == "veredicto":
+            try:
+                pos, opt, flags, seed = veredicto_args(args)
+            except ValueError as e:
+                print("smoke_py veredicto: %s" % e, file=sys.stderr)
+                sys.exit(2)
+            judge(pos[0], pos[1], pos[2], pos[3], opt.get("--json") or None, opt.get("--host-log") or None,
+                  host_in_log="--host-en-log" in flags, sensor_log=opt.get("--sensor-log") or None, cli_seed=seed)
+        elif mode == "orden" and len(args) == 2 and re.fullmatch(r"[0-9]+", args[0]) and args[1] in AUDIBLE:
+            print(" ".join(window_order(int(args[0]), args[1])))
+        elif mode == "seguir" and len(args) == 5 and args[3] in SENSORS:
+            follow(*args)
+        elif mode == "sensor" and len(args) == 5 and re.fullmatch(r"[0-9]+", args[4]):
+            if args[0] not in SENSORS_CLI:
+                print("sensor desconocido: %s (conocidos: %s)" % (args[0], ", ".join(SENSORS_CLI)), file=sys.stderr)
+                sys.exit(2)
+            res = consult(args[0], args[1], args[2], args[3], int(args[4]))
+            print("veredicto=%s sensor=%s evidencia=%s" % (res["veredicto"], res["sensor"], res["evidencia"]))
         elif mode == "host" and len(args) in (6, 7):
             host(*args[:6], evidence_dir=args[6] if len(args) == 7 else None)
         elif mode == "validar" and len(args) == 1:
@@ -799,13 +1216,19 @@ def main(argv):
 
 main(sys.argv[1:])
 PY
+# `python3 -c` y no `python3 - <<PY`: con el heredoc, el stdin de python ERA el programa, y el sensor
+# oido-humano (S3) necesita el stdin de quien llama, que es la TTY del humano.
+smoke_py() {
+    python3 -c "$SMOKE_PY" "$@"
 }
 
-# El juez. verdict LOG RUN PLAN [FICHA] [JSON] [LOG-DEL-HOST] [host-en-log] — ver smoke_py. LOG es el
-# de la APP: una linea `verificador=host` que traiga se descarta; las del host vienen en LOG-DEL-HOST.
-# El 7mo argumento, el literal `host-en-log`, es SOLO del CLI --veredicto (logs grabados que mezclan).
+# El juez. verdict LOG RUN PLAN [FICHA] [JSON] [LOG-DEL-HOST] [LOG-DEL-SENSOR] [opciones...] — ver
+# smoke_py. LOG es el de la APP: una linea `verificador=host` o `step=sensor` que traiga se descarta;
+# las del host vienen en LOG-DEL-HOST y los juicios del sensor (S3) en LOG-DEL-SENSOR. Las opciones
+# (`--semilla N`, y `--host-en-log`, que es SOLO del CLI --veredicto) pasan tal cual.
 verdict() {
-    smoke_py veredicto "$1" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}" "${6:-}" ${7:+"$7"}
+    smoke_py veredicto "$1" "$2" "$3" "${4:-$SETUP_DEFAULT}" ${5:+--json "$5"} ${6:+--host-log "$6"} \
+        ${7:+--sensor-log "$7"} "${@:8}"
 }
 
 # Un id por corrida que otra app no pueda adivinar: fecha, pid y 48 bits de /dev/urandom.
@@ -814,6 +1237,32 @@ new_run_id() {
     rnd="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
     [[ "$rnd" =~ ^[0-9a-f]{12}$ ]] || { echo "FAIL — no pude leer /dev/urandom" >&2; return 1; }
     echo "smoke-$(date +%Y%m%d-%H%M%S)-$$-$rnd"
+}
+
+# REQ-053 S3: la semilla del orden de las ventanas (AC-053.10). 31 bits de /dev/urandom: entra en
+# un Int de Kotlin sin signo. Va por extra a la app y queda en el JSON; con ella el orden se reproduce.
+new_seed() {
+    local n
+    n="$(od -An -N4 -tu4 /dev/urandom | tr -d ' \n')"
+    [[ "$n" =~ ^[0-9]+$ ]] || { echo "FAIL — no pude leer /dev/urandom" >&2; return 1; }
+    echo $(( n % 2147483648 ))
+}
+
+# Los sensores que se pueden elegir con --sensor (D6). El registro vive en smoke_py (SENSORS); estos
+# son los que corren en device. REQ-051 agrega el suyo en los dos lugares.
+sensor_valid() {
+    case "$1" in oido-humano|ninguno) return 0 ;; *) return 1 ;; esac
+}
+
+# Cuantos paneles audibles (sf2, sf3, usb) tiene el plan: cada uno toca dos ventanas.
+audible_panels() {
+    local plan="$1" p n=0
+    [[ "$plan" == todo ]] && plan="salida,captura,sf2,sf3,usb"
+    local IFS=,
+    for p in $plan; do
+        case "$p" in sf2|sf3|usb) n=$((n + 1)) ;; esac
+    done
+    echo "$n"
 }
 
 # --plan viaja por el `sh` del telefono (am start --es): solo `todo` o paneles conocidos separados
@@ -842,28 +1291,24 @@ logcat_capture_args() {
     echo "-v raw ${uid:+--uid=$uid }-s HARNESS-SMOKE:I"
 }
 
-# verdict_split LOG RUN PLAN FICHA [JSON]: LOG trae mezcladas las lineas de la app y las del host
-# (como las armaban los casos de antes de la separacion); las separa para el juez.
+# verdict_split LOG RUN PLAN FICHA [JSON]: LOG trae mezcladas las lineas de la app, las del host y
+# los juicios del sensor (como los arman los casos del self-test); las separa para el juez.
 verdict_split() {
     local d
     d="$(mktemp -d)"
-    { grep -v 'verificador=host' "$1" || true; } > "$d/app.log"
+    { grep -v -e 'verificador=host' -e ' step=sensor ' "$1" || true; } > "$d/app.log"
     { grep 'verificador=host' "$1" || true; } > "$d/host.log"
-    verdict "$d/app.log" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}" "$d/host.log"
+    { grep ' step=sensor ' "$1" || true; } > "$d/sensor.log"
+    verdict "$d/app.log" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}" "$d/host.log" "$d/sensor.log"
 }
 
-print_ear_checks() {
+# REQ-053 S3 (AC-053.11): la vieja lista de OIDO ya no existe. Lo que tenia es un paso con estimulo y
+# sensor (sf2/sf3/usb), o se borro con su razon (ver la cabecera). Lo unico que queda fuera del plan
+# es un gesto de MANO, no de oido.
+print_manual_checks() {
     cat <<'EOF'
 
-Requiere OIDO (ningun log lo decide; hacerlo con la app abierta):
-  - sf2/sf3: el boton "tocar A4" del panel SoundFont suena como una senoide limpia de 440 Hz,
-    sin clicks en el loop y sin distorsion (el .sf3 pasa por stb_vorbis).
-  - usb: con auriculares en la interfaz USB, "start stream" saca el tono de prueba de 440 Hz por
-    ESA salida (no por el parlante del telefono), y la suite no se corta.
-  - captura: hablandole al microfono, la barra del panel Entrada se mueve (el plan solo afirma que
-    hay medicion, no que haya voz).
-Requiere MANO (fuera del plan automatico):
-  - el dialogo de permiso USB (el plan lo deja en esperando-humano);
+Fuera del plan automatico (MANO, no oido):
   - "elegir archivo (fd)" en el panel SoundFont: el selector del sistema, que carga por
     loadSoundFontFromFd.
 EOF
@@ -1836,7 +2281,7 @@ PTY
 
     # AC-053.11: ya no hay lista de OIDO: lo que habia es un paso con estimulo y sensor, o se borro.
     is_eq "AC-053.11: el script no lista chequeos de oido" \
-        "$(grep -cE 'Requiere OIDO|Requiere OÍDO|print_ear''_checks' "$0" || true)" 0
+        "$(grep -cE 'Requiere O[IÍ]DO|print_ear[_]checks' "$0" || true)" 0
     # El sensor se valida antes de tocar el telefono, como --plan.
     : > "$tmp/espia.log"
     rc_s=0
@@ -2126,10 +2571,11 @@ ids_literal_in() {
 # La corrida en device.
 # ---------------------------------------------------------------------------
 run_device() {
-    local plan="todo" usb_wait=120 ceiling="" out="" build=1 setup="$SETUP_DEFAULT"
+    local plan="todo" usb_wait=120 ceiling="" out="" build=1 setup="$SETUP_DEFAULT" sensor="oido-humano"
     while (( $# )); do
         case "$1" in
             --plan) plan="$2"; shift 2 ;;
+            --sensor) sensor="$2"; shift 2 ;;
             --setup) setup="$2"; shift 2 ;;
             --usb-espera-s) usb_wait="$2"; shift 2 ;;
             --techo-s) ceiling="$2"; shift 2 ;;
@@ -2142,8 +2588,11 @@ run_device() {
     plan_valid "$plan" || { echo "FAIL — --plan invalido: '$plan' (todo, o paneles de salida,captura,sf2,sf3,usb separados por comas)" >&2; exit 2; }
     [[ "$usb_wait" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL — --usb-espera-s tiene que ser un entero > 0: '$usb_wait'" >&2; exit 2; }
     [[ -z "$ceiling" || "$ceiling" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL — --techo-s tiene que ser un entero > 0: '$ceiling'" >&2; exit 2; }
-    # El techo cubre la espera humana, la suite USB (3 tests de 5 s) y el resto con holgura.
-    ceiling="${ceiling:-$((usb_wait + 120))}"
+    # REQ-053 S3: el sensor tambien se valida antes de tocar el telefono.
+    sensor_valid "$sensor" || { echo "FAIL — --sensor invalido: '$sensor' (oido-humano o ninguno)" >&2; exit 2; }
+    # El techo cubre la espera humana, la suite USB (3 tests de 5 s), las ventanas de escucha (dos por
+    # panel audible, ~20 s cada una con la pausa para contestar) y el resto con holgura.
+    ceiling="${ceiling:-$((usb_wait + 120 + 50 * $(audible_panels "$plan")))}"
     # REQ-053 S1: una ficha que no se entiende no puede decidir que bloquear. Se valida antes de
     # tocar nada: es un error de uso (exit 2), no un juicio.
     smoke_py validar "$setup" || exit 2
@@ -2171,8 +2620,9 @@ run_device() {
         exit 2
     fi
 
-    local run
+    local run seed
     run="$(new_run_id)" || exit 2
+    seed="$(new_seed)" || exit 2
     out="${out:-harness/build/smoke-device/$run}"
     mkdir -p "$out"
 
@@ -2263,7 +2713,8 @@ run_device() {
         # (grep -c y no -q: con pipefail, el SIGPIPE de un -q que corta temprano tapa el match)
         (( $(tr -d '\r' < "$raw" | grep -F "run=$run " | grep -c 'step=permiso-falso ' || true) > 0 )) && late=true
         for v in true false; do
-            outp="$(adb_ shell am broadcast -a com.watermellonstudios.audio.USB_PERMISSION -p "$PKG" --ez permission "$v" 2>&1 | tr -d '\r' || true)"
+            # </dev/null: el stdin de la corrida es la TTY del oido humano (S3), y adb shell lo reenvia.
+            outp="$(adb_ shell am broadcast -a com.watermellonstudios.audio.USB_PERMISSION -p "$PKG" --ez permission "$v" 2>&1 < /dev/null | tr -d '\r' || true)"
             echo "$outp" >> "$out/broadcast-falso.txt"
             grep -q 'Broadcast completed' <<< "$outp" && sent=$((sent + 1))
         done
@@ -2273,15 +2724,26 @@ run_device() {
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=broadcast-falso ok=$ok origen=adb enviados=$sent de=2 dialogo-pedido=$requested tarde=$late" >> "$raw"
         echo "=== broadcast falso: $sent de 2 despachados (dialogo pedido: $requested) — $out/broadcast-falso.txt ==="
     }
+    # REQ-053 S3 (D6, D7): las ventanas de escucha. La app las ANUNCIA (`escuchar`) y las cierra
+    # (`estimulo`/`control`); el seguidor (smoke_py seguir) las sigue en la captura y, al cerrar
+    # cada una, le pregunta al sensor. El orden sale de la semilla, que va por extra y queda en el JSON.
+    local sensor_log="$out/sensor.log" follow_state="$out/seguidor.json"
+    : > "$sensor_log"; rm -f "$follow_state"
+    echo "=== sensor: $sensor · semilla del orden de las ventanas: $seed ==="
+    if [[ "$sensor" == oido-humano && "$(audible_panels "$plan")" -gt 0 ]]; then
+        echo ">>> HUMANO: en sf2, sf3 y usb vas a escuchar dos ventanas por panel. Te aviso cuando arranca cada"
+        echo "    una y al cerrarla te pregunto si sonó el A4 (s/n/?). Algunas son de CONTROL y no suena nada:"
+        echo "    contestá solo lo que oíste. Si no sabés, '?'."
+    fi
     adb_ shell am force-stop "$PKG"
     adb_ shell am start -n "$ACTIVITY" \
         --es harness.smoke "$plan" --es harness.smoke.run "$run" \
-        --es harness.smoke.usb-espera-s "$usb_wait" | tr -d '\r'
+        --es harness.smoke.usb-espera-s "$usb_wait" --es harness.smoke.semilla "$seed" | tr -d '\r'
 
     # Mientras corre, el log para mirar (esperando-humano, fin) junta host y captura; el que se
     # JUZGA es el de la app solo, con el del host aparte.
-    local log="$out/harness-smoke-polling.log" waited=0 announced=0
-    while (( waited < ceiling )); do
+    local log="$out/harness-smoke-polling.log" announced=0 started=$SECONDS
+    while (( SECONDS - started < ceiling )); do
         # Por Wi-Fi, un corte mata el logcat en streaming: se relanza (y lo perdido lo recupera el
         # volcado final de abajo mientras siga en el buffer).
         if ! kill -0 "$logcat_pid" 2>/dev/null; then
@@ -2294,11 +2756,14 @@ run_device() {
             send_forged_permission "$(grep -m1 'step=esperando-humano' "$log")"
             echo ">>> HUMANO: $(grep -m1 'step=esperando-humano' "$log" | sed -E 's/.*accion=([^ ]+).*/\1/' | tr '_' ' ')"
         fi
+        # S3: avisa las ventanas nuevas y pregunta por las que cerraron. Puede bloquear lo que dura
+        # una respuesta (la pausa que la app deja despues de cada ventana): el techo cuenta en SECONDS.
+        smoke_py seguir "$raw" "$sensor_log" "$follow_state" "$sensor" "$run" \
+            || echo "(el seguidor de ventanas fallo: lo que no se pregunto queda HUMANO)"
         if grep -q 'panel=plan step=fin ' "$log"; then
             break
         fi
-        sleep 2   # WAIT-OK: polling con techo explicito (ceiling), no una espera ciega
-        waited=$((waited + 2))
+        sleep 1   # WAIT-OK: polling con techo explicito (ceiling), no una espera ciega
     done
 
     kill "$logcat_pid" 2>/dev/null || true
@@ -2307,6 +2772,9 @@ run_device() {
     local app_log="$out/harness-smoke.log"
     { cat "$raw"; adb_ logcat -d $(logcat_capture_args "$uid") 2>/dev/null || true; } \
         | tr -d '\r' | grep -F "run=$run " | awk '!seen[$0]++' > "$app_log" || true
+    # La ultima ventana pudo cerrar entre la ultima vuelta y `fin`: una pasada mas, sobre el log final.
+    smoke_py seguir "$app_log" "$sensor_log" "$follow_state" "$sensor" "$run" \
+        || echo "(el seguidor de ventanas fallo: lo que no se pregunto queda HUMANO)"
     local pid
     pid="$(adb_ shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
     if [[ -n "$pid" ]]; then
@@ -2320,29 +2788,36 @@ run_device() {
     echo
 
     local rc=0
-    verdict "$app_log" "$run" "$plan" "$setup" "$out/harness-smoke.json" "$host_log" || rc=$?
+    verdict "$app_log" "$run" "$plan" "$setup" "$out/harness-smoke.json" "$host_log" "$sensor_log" --semilla "$seed" || rc=$?
     echo "=== JSON de la corrida: $out/harness-smoke.json ==="
     [[ -n "$uid" ]] || echo "AVISO — $uid_note"
-    print_ear_checks
+    print_manual_checks
     exit "$rc"
 }
 
 case "${1:-}" in
     --self-test) self_test ;;
     --veredicto)
-        [[ $# -ge 4 ]] || { echo "uso: $0 --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA] [--host-log LOG] [--host-en-log]" >&2; exit 2; }
-        log_="$2" run_="$3" plan_="$4" setup_="$SETUP_DEFAULT" json_="" hostlog_="" mixed_=""
+        [[ $# -ge 4 ]] || { echo "uso: $0 --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA] [--host-log LOG] [--sensor-log LOG] [--semilla N] [--host-en-log]" >&2; exit 2; }
+        log_="$2" run_="$3" plan_="$4" setup_="$SETUP_DEFAULT" json_="" hostlog_="" sensorlog_="" seed_="" mixed_=""
         shift 4
         while (( $# )); do
             case "$1" in
                 --setup) setup_="${2:?--setup necesita un archivo}"; shift 2 ;;
                 --json) json_="${2:?--json necesita un archivo}"; shift 2 ;;
                 --host-log) hostlog_="${2:?--host-log necesita un archivo}"; shift 2 ;;
+                --sensor-log) sensorlog_="${2:?--sensor-log necesita un archivo}"; shift 2 ;;
+                --semilla) seed_="${2:?--semilla necesita un numero}"; shift 2 ;;
                 --host-en-log) mixed_=1; shift ;;
                 *) echo "opcion desconocida: $1" >&2; exit 2 ;;
             esac
         done
-        verdict "$log_" "$run_" "$plan_" "$setup_" "$json_" "$hostlog_" ${mixed_:+host-en-log} ;;
+        verdict "$log_" "$run_" "$plan_" "$setup_" "$json_" "$hostlog_" "$sensorlog_" \
+            ${seed_:+--semilla "$seed_"} ${mixed_:+--host-en-log} ;;
+    --sensor-consulta)
+        # El contrato de D6, suelto: SENSOR ESTIMULO VENTANA RUTA ESPERA-S -> "veredicto=.. sensor=.. evidencia=..".
+        [[ $# -eq 6 ]] || { echo "uso: $0 --sensor-consulta SENSOR ESTIMULO VENTANA RUTA ESPERA-S" >&2; exit 2; }
+        smoke_py sensor "$2" "$3" "$4" "$5" "$6" ;;
     -h|--help) awk 'NR > 1 && /^set -euo/ {exit} NR > 1 {print}' "$0" ;;
     *) run_device "$@" ;;
 esac
