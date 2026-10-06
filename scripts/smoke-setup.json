@@ -37,18 +37,28 @@
           "verificador": "host",
           "chequeo": "paquetes-sin-proceso",
           "paquetes": ["com.watermellonstudios.noisypad"],
-          "descripcion": "Candidata del BUSY de claim_interface(0) (D8): ningun paquete de la lista tiene un proceso vivo.",
-          "depende": ["conectar", "motor-callback", "capacidades", "descriptores", "backend", "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo", "conectar-otro", "suite*", "streaming-stop", "backend-restaurado", "desconectar"],
-          "remedio": "Cerrar en el telefono cada app de la lista (para NoisyPad: adb -s $ANDROID_SERIAL shell am force-stop com.watermellonstudios.noisypad), sin tocar nada mas, y volver a correr el plan."
+          "descripcion": "OBSERVACION, no bloquea (D14): era candidata del BUSY de claim_interface(0) (D8) y S2 no lo reprodujo en 6 corridas; con NoisyPad vivo la placa conecta igual. Se verifica y va al JSON para tener el dato: ningun proceso vivo de los paquetes de la lista (para NoisyPad: com.watermellonstudios.noisypad). Sin salida legible de ps, es no-verificable.",
+          "depende": [],
+          "remedio": "Observacion: no bloquea nada. Si se quiere descartar la interferencia, cerrar la app (para NoisyPad: adb -s $ANDROID_SERIAL shell am force-stop com.watermellonstudios.noisypad) y volver a correr el plan."
         },
         {
           "id": "alsa-c1",
           "verificador": "host",
           "chequeo": "alsa-tarjeta-libre",
           "tarjeta": 1,
-          "descripcion": "Candidata del BUSY de claim_interface(0) (D8): /dev/snd no lista pcmC1*, o la lista y /proc/asound dice que ningun substream esta abierto. Si la tarjeta esta y no se puede ver quien la tiene, es no-verificable.",
+          "descripcion": "OBSERVACION, no bloquea (D14): era candidata del BUSY de claim_interface(0) (D8) y S2 no lo reprodujo en 6 corridas. Se verifica y va al JSON: /dev/snd no lista pcmC1*, o la lista y `dumpsys media.audio_flinger` (que shell puede leer; /proc/asound pide root) no muestra ningun hilo USB fuera de standby (Standby: no = tomada por el audioserver). Si la tarjeta esta y no se puede ver quien la tiene, es no-verificable.",
+          "depende": [],
+          "remedio": "Observacion: no bloquea nada. La tarjeta ALSA C1 esta tomada por el audioserver: cerrar las apps de audio y desenchufar y volver a enchufar la placa."
+        },
+        {
+          "id": "placa-no-reclamada",
+          "verificador": "host",
+          "chequeo": "usb-placa-no-reclamada",
+          "tarjeta": 1,
+          "clase": 1,
+          "descripcion": "D14: la placa esta enumerada (dumpsys usb, interfaz de clase 1) y /dev/snd lista controlC1. Mientras un proceso reclama la placa por usbfs el kernel desliga el driver ALSA y controlC1 y pcmC1* desaparecen; vuelven cuando la suelta. Sin placa enumerada queda cumplida (la bloquea placa-enumerada). Se verifica ANTES del am start del harness: despues, el propio harness la reclamaria. Si adb falla o /dev/snd no se lee, es no-verificable.",
           "depende": ["conectar", "motor-callback", "capacidades", "descriptores", "backend", "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo", "conectar-otro", "suite*", "streaming-stop", "backend-restaurado", "desconectar"],
-          "remedio": "Liberar la tarjeta ALSA C1: cerrar las apps de audio y desenchufar y volver a enchufar la placa hasta que /dev/snd no liste pcmC1*, y volver a correr el plan (la causa exacta la atribuye REQ-053 S2)."
+          "remedio": "Cerrar la app que tenga la placa tomada, o desenchufar y volver a enchufar la placa, y volver a correr el plan. El script no sabe quien la tiene."
         },
         {
           "id": "permiso-usb",

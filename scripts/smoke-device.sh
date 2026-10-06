@@ -34,7 +34,9 @@
 #     con una linea `step=precondicion`), que pasos bloquea (`depende`) y la accion manual que la
 #     arregla (`remedio`, D3). Es la UNICA fuente: este script no tiene ningun id escrito — nombra
 #     CHEQUEOS de host (permiso-runtime, usb-interfaz-de-clase, paquetes-sin-proceso,
-#     alsa-tarjeta-libre) y la ficha elige uno por precondicion, con sus parametros.
+#     alsa-tarjeta-libre, usb-placa-no-reclamada) y la ficha elige uno por precondicion, con sus
+#     parametros. Una precondicion con `depende: []` es una OBSERVACION (D14): se verifica y va al
+#     JSON, pero no bloquea ningun paso.
 #   - El script NUNCA ejecuta un remedio ni cambia nada del telefono (D3): lo imprime y lo deja en
 #     el JSON. Una granja lo podra ejecutar despues; este script no.
 #   - BLOQUEADO es un veredicto, no una cancelacion: la corrida se ejecuta igual y el JSON guarda lo
@@ -67,8 +69,13 @@
 #   ANDROID_SERIAL=<serial> bash scripts/smoke-device.sh [--plan todo|salida,sf2,...]
 #        [--usb-espera-s 120] [--techo-s N] [--out DIR] [--no-build] [--setup FICHA]
 #   bash scripts/smoke-device.sh --self-test
-#   bash scripts/smoke-device.sh --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA]
-#        # juzga un log ya grabado (con las lineas de precondicion del host que haya grabadas)
+#   bash scripts/smoke-device.sh --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA] [--host-log LOG]
+#        [--host-en-log]
+#        # juzga un log ya grabado. LOG es el de la APP; las precondiciones del host van en
+#        # --host-log (precondiciones-host.log). Una linea `verificador=host` en LOG se descarta.
+#        # --host-en-log: SOLO para logs grabados antes de la separacion (S1), que traen las del
+#        # host mezcladas; las toma del propio LOG y avisa que ese log no separa origenes. La
+#        # corrida en device nunca lo pasa.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -148,6 +155,7 @@ CHECKS = {
     "usb-interfaz-de-clase": {"clase": int},
     "paquetes-sin-proceso": {"paquetes": list},
     "alsa-tarjeta-libre": {"tarjeta": int},
+    "usb-placa-no-reclamada": {"tarjeta": int, "clase": int},
 }
 COMMON_KEYS = {"id", "verificador", "depende", "remedio", "descripcion"}
 
@@ -221,14 +229,24 @@ def load_setup(path):
             if unknown:
                 raise BadSetup("%s: clave desconocida %s" % (where, ", ".join(sorted(unknown))))
             dep = p.get("depende")
-            if not isinstance(dep, list) or not dep or not all(isinstance(d, str) and d for d in dep):
-                raise BadSetup("%s: 'depende' tiene que ser una lista de pasos, no vacia" % where)
+            # Vacia es valida (D14): una observacion se registra y no bloquea nada.
+            if not isinstance(dep, list) or not all(isinstance(d, str) and d for d in dep):
+                raise BadSetup("%s: 'depende' tiene que ser una lista de pasos (vacia: observacion)" % where)
             for pattern in dep:
                 if not any(fnmatch.fnmatchcase(s, pattern) for s in known_steps(panel)):
                     raise BadSetup("%s: depende de '%s', que no es un paso de %s" % (where, pattern, panel))
             if not isinstance(p.get("remedio"), str) or not p["remedio"].strip():
                 raise BadSetup("%s: sin remedio (D3: cada precondicion declara su accion manual)" % where)
             out[panel].append(p)
+    # El atajo "sin placa => cumplida" de usb-placa-no-reclamada solo es honesto si la precondicion
+    # que SI bloquea sin placa (usb-interfaz-de-clase, de la misma clase) esta en el mismo plan.
+    for panel, pres in out.items():
+        classes = {p["clase"] for p in pres if p.get("chequeo") == "usb-interfaz-de-clase"}
+        for p in pres:
+            if p.get("chequeo") == "usb-placa-no-reclamada" and p["clase"] not in classes:
+                raise BadSetup("%s/%s: usb-placa-no-reclamada exige una precondicion usb-interfaz-de-clase "
+                               "con la misma clase (%d) en el plan: sin ella, 'sin placa' no bloquea nada"
+                               % (panel, p["id"], p["clase"]))
     return out
 
 
@@ -283,16 +301,17 @@ def check_runtime_permission(p, sh):
 
 
 def parse_dump(text):
-    """El modo texto de dumpsys: `clave={` abre un bloque, `}` lo cierra, `clave=valor` es hoja."""
+    """El modo texto de dumpsys: `clave={` / `clave=[` abre un bloque, `{` suelto abre uno anonimo
+    (clave "": los elementos de una lista), `}` / `]` lo cierran, `clave=valor` es hoja."""
     root, stack = [], []
     stack.append(root)
     for raw in text.splitlines():
         line = raw.strip()
-        if line == "}":
+        if line in ("}", "]"):
             if len(stack) > 1:
                 stack.pop()
             continue
-        m = re.match(r"([A-Za-z0-9_]+)=\{$", line)
+        m = re.match(r"([A-Za-z0-9_]*)=?[\{\[]$", line)
         if m:
             block = []
             stack[-1].append((m.group(1), block))
@@ -321,6 +340,16 @@ def leaf(nodes, key):
     return None
 
 
+def interfaces(device):
+    """Las interfaces de un dispositivo: cada `interfaces={...}` suelto, o cada bloque anonimo de una
+    lista `interfaces=[ {...} {...} ]` (el formato real del g42)."""
+    out = []
+    for b in blocks(device, "interfaces"):
+        anon = [v for k, v in b if k == "" and isinstance(v, list)]
+        out.extend(anon if anon else [b])
+    return out
+
+
 def check_usb_interface_class(p, sh):
     rc, out = sh.run("dumpsys usb")
     if rc != 0:
@@ -334,7 +363,7 @@ def check_usb_interface_class(p, sh):
     for d in devices:
         vid, pid = leaf(d, "vendor_id") or "", leaf(d, "product_id") or ""
         tag = "%04x:%04x" % (int(vid), int(pid)) if vid.isdigit() and pid.isdigit() else "%s:%s" % (vid or "?", pid or "?")
-        classes = sorted({leaf(i, "class") for i in blocks(d, "interfaces")} - {None})
+        classes = sorted({leaf(i, "class") for i in interfaces(d)} - {None})
         seen.append("%s(clases:%s)" % (tag, ",".join(classes) or "-"))
         if str(p["clase"]) in classes:
             hits.append("%s:%s" % (tag, leaf(d, "product_name") or "-"))
@@ -361,6 +390,31 @@ def check_packages_without_process(p, sh):
     return "true", "sin-proceso:" + ",".join(p["paquetes"])
 
 
+def audioserver_threads(dump):
+    """Los hilos VIVOS de `dumpsys media.audio_flinger`: columna 0 y `Output thread `, `Input thread `
+    o `Mmap... thread `. Los que empiezan con `- ` son hilos ya cerrados y no cuentan. Devuelve
+    (nombre, dispositivos, standby) con standby None si el hilo no tiene su linea de nivel de hilo
+    (la de 2 espacios; la de `Hal stream dump` va mas adentro y no es la del hilo)."""
+    threads, cur = [], None
+    for line in dump.splitlines():
+        if line and not line[0].isspace():
+            m = re.match(r"(Output|Input|Mmap\S*) thread (?:\S+, name ([^\s,]+))?", line)
+            cur = {"kind": m.group(1), "name": m.group(2) or "?", "devices": [], "seen": set(), "standby": None} if m else None
+            if cur:
+                threads.append(cur)
+            continue
+        if cur is None:
+            continue
+        m = re.match(r"  (Output devices|Input device): (.*)$", line)
+        if m:
+            cur["devices"].append(m.group(2))
+            cur["seen"].add(m.group(1))
+        m = re.match(r"  Standby: (yes|no)\s*$", line)
+        if m and cur["standby"] is None:
+            cur["standby"] = m.group(1)
+    return threads
+
+
 def check_alsa_card_free(p, sh):
     card = p["tarjeta"]
     rc, out = sh.run("ls /dev/snd")
@@ -369,25 +423,54 @@ def check_alsa_card_free(p, sh):
     entries = out.split()
     if not any(re.fullmatch(r"controlC\d+", e) for e in entries):
         raise Unverifiable("dev-snd-ilegible")
-    pcms = sorted(e for e in entries if re.fullmatch(r"pcmC%dD\d+[pc]" % card, e))
-    if not pcms:
+    if not any(re.fullmatch(r"pcmC%dD\d+[pc]" % card, e) for e in entries):
         return "true", "sin-pcmC%d" % card
-    # La tarjeta esta: libre o tomada lo dice /proc/asound, si se puede leer sin root.
-    states = []
-    for e in pcms:
-        dev, direction = re.fullmatch(r"pcmC%dD(\d+)([pc])" % card, e).groups()
-        rc, status = sh.run("cat /proc/asound/card%d/pcm%s%s/sub0/status" % (card, dev, direction))
-        if rc != 0:
-            raise Unverifiable("%s:presente,dueno-no-visible" % e)
-        if status.strip() == "closed":
-            states.append("%s:cerrado" % e)
-            continue
-        owner = re.search(r"owner_pid\s*:\s*(\d+)", status)
-        if not owner:
-            raise Unverifiable("%s:presente,estado-ilegible" % e)
-        states.append("%s:abierto,owner_pid=%s" % (e, owner.group(1)))
-    taken = [s for s in states if ":abierto" in s]
-    return ("false", ";".join(taken)) if taken else ("true", ";".join(states))
+    # La tarjeta esta. /proc/asound pide root; quien la tiene lo dice el audioserver, que shell lee.
+    rc, dump = sh.run("dumpsys media.audio_flinger")
+    if rc != 0:
+        raise Unverifiable("dumpsys-audio_flinger-rc=%d" % rc)
+    threads = audioserver_threads(dump)
+    if not any(t["kind"] == "Output" for t in threads):
+        raise Unverifiable("audio_flinger-sin-Output-thread:formato-no-reconocido")
+    # Un hilo vivo sin la linea de dispositivos de SU lado (un Output thread trae tambien un
+    # `Input device: 0`, que no lo cuenta) podria ser el de la placa: no se sabe.
+    own = {"Output": "Output devices", "Input": "Input device"}
+    nameless = [t["name"] for t in threads if (own[t["kind"]] not in t["seen"] if t["kind"] in own else not t["seen"])]
+    if nameless:
+        raise Unverifiable("%s:hilo-sin-linea-de-dispositivos" % ",".join(nameless))
+    usb = [t for t in threads if any(re.search(r"AUDIO_DEVICE_(OUT|IN)_USB_", d) for d in t["devices"])]
+    taken = [t for t in usb if t["standby"] == "no"]
+    if taken:
+        return "false", ";".join("%s:%s:standby=no" % (t["name"], " ".join(t["devices"])) for t in taken)
+    blind = [t["name"] for t in usb if t["standby"] is None]
+    if blind:
+        raise Unverifiable("%s:hilo-usb-sin-Standby-legible" % ",".join(blind))
+    if usb:
+        return "true", ";".join("%s:standby=yes" % t["name"] for t in usb)
+    return "true", "sin-hilo-usb"
+
+
+def check_placa_no_reclamada(p, sh):
+    """D14: un proceso que reclama la placa por usbfs hace que el kernel desligue el driver ALSA, y
+    `controlC<n>` desaparece de /dev/snd hasta que la suelta. La placa se busca con el mismo parser
+    de la precondicion de placa enumerada. Sin placa devuelve CUMPLIDA y no no-verificable: ya la bloquea
+    esa otra, y una segunda precondicion bloqueando por lo mismo duplicaria el BLOQUEADO con
+    un remedio que no es el de ese caso."""
+    card = p["tarjeta"]
+    present, _ = check_usb_interface_class({"clase": p["clase"]}, sh)
+    if present != "true":
+        return "true", "sin-placa:lo-cubre-placa-enumerada"
+    rc, out = sh.run("ls /dev/snd")
+    if rc != 0:
+        raise Unverifiable("ls-dev-snd-rc=%d" % rc)
+    entries = out.split()
+    # Solo nombres de /dev/snd (controlC1, pcmC1D0p, comprC0D11, timer, seq...): si hay otra cosa,
+    # no es un listado y la ausencia de controlC<n> no significa nada.
+    if not entries or not all(re.fullmatch(r"controlC\d+|(pcm|hw|midi|compr)C\d+D\d+[pc]?|timer|seq", e) for e in entries):
+        raise Unverifiable("dev-snd-ilegible")
+    if "controlC%d" % card in entries:
+        return "true", "controlC%d-presente" % card
+    return "false", "placa-enumerada-sin-controlC%d:otro-proceso-la-reclama" % card
 
 
 HOST_CHECKS = {
@@ -395,6 +478,7 @@ HOST_CHECKS = {
     "usb-interfaz-de-clase": check_usb_interface_class,
     "paquetes-sin-proceso": check_packages_without_process,
     "alsa-tarjeta-libre": check_alsa_card_free,
+    "usb-placa-no-reclamada": check_placa_no_reclamada,
 }
 assert set(HOST_CHECKS) == set(CHECKS)
 
@@ -419,7 +503,7 @@ def host(adb, serial, setup_path, requested, run, pkg, evidence_dir):
 
 
 # --- El juez -------------------------------------------------------------------------------------
-def judge(log, run, requested, setup_path, json_out):
+def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=False):
     setup = load_setup(setup_path)
     wanted = plan_panels(requested)
     rows = []        # {veredicto, panel, paso, detalle, observado, precondiciones}
@@ -439,7 +523,8 @@ def judge(log, run, requested, setup_path, json_out):
         counts = {k: sum(1 for r in rows if r["veredicto"] == k) for k in ("PASS", "FAIL", "BLOQUEADO", "HUMANO", "NO-APLICA")}
         if json_out:
             doc = {"formato": 1, "run": run, "plan": requested, "ficha": setup_path, "exit": code,
-                   "resumen": counts, "precondiciones": preconditions, "pasos": rows,
+                   "resumen": counts, "lineas-host-descartadas": discarded, "host-en-log": taken_from_log,
+                   "precondiciones": preconditions, "pasos": rows,
                    # S3 lo llena: cada juicio de sensor sobre una ventana de estimulo o de control.
                    "sensor": []}
             try:
@@ -452,23 +537,49 @@ def judge(log, run, requested, setup_path, json_out):
         sys.exit(code)
 
     lines = []
-    with open(log, encoding="utf-8", errors="replace") as f:
-        for raw in f:
-            i = raw.find("HARNESS-SMOKE ")
-            if i < 0:
-                continue
-            fields = {}
-            for part in raw[i:].strip().split(" ")[1:]:
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    fields[k] = v
-            if fields.get("run") != run:
-                continue
-            if fields.get("v") != "1":
-                add("FAIL", "formato", "version", "version desconocida: %s" % raw.strip())
-                print("FAIL  formato  version desconocida: %s" % raw.strip())
-                finish(1)
-            lines.append(fields)
+    discarded = 0
+    taken_from_log = 0
+
+    def read_lines(path, from_host):
+        # El log de la app (logcat) lo puede escribir cualquier app con el tag: una linea
+        # `verificador=host` que llegue por ahi es una falsificacion y se DESCARTA (ni bloquea ni
+        # cuenta). Las del host vienen SOLO de su propio archivo.
+        nonlocal discarded, taken_from_log
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                i = raw.find("HARNESS-SMOKE ")
+                if i < 0:
+                    continue
+                fields = {}
+                for part in raw[i:].strip().split(" ")[1:]:
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        fields[k] = v
+                if fields.get("run") != run:
+                    continue
+                if from_host != (fields.get("verificador") == "host"):
+                    # --host-en-log (solo logs grabados de S1, que mezclan origenes): las del host
+                    # que trae el propio log valen como del host.
+                    if not from_host and host_in_log:
+                        taken_from_log += 1
+                    else:
+                        if not from_host:
+                            discarded += 1
+                        continue
+                if fields.get("v") != "1":
+                    add("FAIL", "formato", "version", "version desconocida: %s" % raw.strip())
+                    print("FAIL  formato  version desconocida: %s" % raw.strip())
+                    finish(1)
+                lines.append(fields)
+
+    if host_log:
+        read_lines(host_log, True)
+    read_lines(log, False)
+    if host_in_log:
+        print("AVISO — --host-en-log: %d linea(s) verificador=host tomadas del propio log; este log no separa origenes "
+              "(cualquier app con el tag las puede escribir), asi que NO prueba que el host verifico\n" % taken_from_log)
+    if discarded:
+        print("AVISO — %d linea(s) verificador=host en el log de la app: descartadas (solo el host firma como host)\n" % discarded)
 
     inicio = [f for f in lines if f.get("panel") == "plan" and f.get("step") == "inicio"]
     panels = [p for p in inicio[0].get("plan", "").split(",") if p in EXPECTED] if inicio else []
@@ -665,8 +776,9 @@ def judge(log, run, requested, setup_path, json_out):
 def main(argv):
     mode, args = (argv[0], argv[1:]) if argv else ("", [])
     try:
-        if mode == "veredicto" and len(args) in (4, 5):
-            judge(args[0], args[1], args[2], args[3], args[4] if len(args) == 5 and args[4] else None)
+        if mode == "veredicto" and len(args) in (4, 5, 6, 7):
+            judge(args[0], args[1], args[2], args[3], args[4] if len(args) >= 5 and args[4] else None,
+                  args[5] if len(args) >= 6 and args[5] else None, host_in_log=len(args) == 7 and args[6] == "host-en-log")
         elif mode == "host" and len(args) in (6, 7):
             host(*args[:6], evidence_dir=args[6] if len(args) == 7 else None)
         elif mode == "validar" and len(args) == 1:
@@ -689,9 +801,55 @@ main(sys.argv[1:])
 PY
 }
 
-# El juez. verdict LOG RUN PLAN [FICHA] [JSON] — ver smoke_py.
+# El juez. verdict LOG RUN PLAN [FICHA] [JSON] [LOG-DEL-HOST] [host-en-log] — ver smoke_py. LOG es el
+# de la APP: una linea `verificador=host` que traiga se descarta; las del host vienen en LOG-DEL-HOST.
+# El 7mo argumento, el literal `host-en-log`, es SOLO del CLI --veredicto (logs grabados que mezclan).
 verdict() {
-    smoke_py veredicto "$1" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}"
+    smoke_py veredicto "$1" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}" "${6:-}" ${7:+"$7"}
+}
+
+# Un id por corrida que otra app no pueda adivinar: fecha, pid y 48 bits de /dev/urandom.
+new_run_id() {
+    local rnd
+    rnd="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+    [[ "$rnd" =~ ^[0-9a-f]{12}$ ]] || { echo "FAIL — no pude leer /dev/urandom" >&2; return 1; }
+    echo "smoke-$(date +%Y%m%d-%H%M%S)-$$-$rnd"
+}
+
+# --plan viaja por el `sh` del telefono (am start --es): solo `todo` o paneles conocidos separados
+# por comas, y nada mas.
+plan_valid() {
+    local plan="$1" p
+    [[ "$plan" =~ ^[a-z0-9,]+$ ]] || return 1
+    # El word-splitting de `for p in $plan` se come la coma final: un elemento vacio se rechaza aca.
+    [[ "$plan" != ,* && "$plan" != *, && "$plan" != *,,* ]] || return 1
+    [[ "$plan" == todo ]] && return 0
+    local IFS=,
+    for p in $plan; do
+        case "$p" in salida|captura|sf2|sf3|usb) ;; *) return 1 ;; esac
+    done
+}
+
+# uid_of_package <paquete> < salida de `pm list packages -U`: el uid del paquete EXACTO (el listado
+# filtra por subcadena y trae paquetes vecinos).
+uid_of_package() {
+    tr -d '\r' | awk -v p="package:$1" '$1 == p && $2 ~ /^uid:[0-9]+$/ {sub(/^uid:/, "", $2); print $2; exit}'
+}
+
+# Los argumentos de `adb logcat` de la captura. Con uid, solo lo que escribio el harness.
+logcat_capture_args() {
+    local uid="${1:-}"
+    echo "-v raw ${uid:+--uid=$uid }-s HARNESS-SMOKE:I"
+}
+
+# verdict_split LOG RUN PLAN FICHA [JSON]: LOG trae mezcladas las lineas de la app y las del host
+# (como las armaban los casos de antes de la separacion); las separa para el juez.
+verdict_split() {
+    local d
+    d="$(mktemp -d)"
+    { grep -v 'verificador=host' "$1" || true; } > "$d/app.log"
+    { grep 'verificador=host' "$1" || true; } > "$d/host.log"
+    verdict "$d/app.log" "$2" "$3" "${4:-$SETUP_DEFAULT}" "${5:-}" "$d/host.log"
 }
 
 print_ear_checks() {
@@ -753,6 +911,8 @@ self_test() {
        "remedio": "REMEDIO-T-HOST-USB"},
       {"id": "t-alsa", "verificador": "host", "chequeo": "alsa-tarjeta-libre", "tarjeta": 1,
        "depende": ["streaming-start"], "remedio": "REMEDIO-T-ALSA"},
+      {"id": "t-reclamada", "verificador": "host", "chequeo": "usb-placa-no-reclamada", "tarjeta": 1, "clase": 1,
+       "depende": ["streaming-start"], "remedio": "REMEDIO-T-RECLAMADA"},
       {"id": "t-permiso", "verificador": "app", "ventana-humana": true,
        "depende": ["permiso", "permiso-falso", "conectar", "motor-callback", "capacidades", "descriptores",
                    "backend", "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo",
@@ -771,7 +931,7 @@ JSON
         key="$({ cat "$1" "$3" 2>/dev/null; printf '|%s|%s' "$2" "$3"; } | shasum | cut -c1-16)"
         if [[ ! -f "$tmp/juez-$key.out" ]]; then
             local rc=0
-            verdict "$1" "$run" "$2" "$3" > "$tmp/juez-$key.out" 2>&1 || rc=$?
+            verdict_split "$1" "$run" "$2" "$3" > "$tmp/juez-$key.out" 2>&1 || rc=$?
             echo "$rc" > "$tmp/juez-$key.rc"
         fi
         cp "$tmp/juez-$key.out" "$tmp/out"
@@ -810,10 +970,10 @@ JSON
         fi
     }
     # expect_json <nombre> <archivo> <plan> <expresion python sobre j, el JSON de la corrida>
-    expect_json() {
-        local name="$1" file="$2" plan="$3" expr="$4"
+    expect_json() {  # el quinto argumento, opcional, es otra ficha
+        local name="$1" file="$2" plan="$3" expr="$4" setup="${5:-$ficha}"
         rm -f "$tmp/corrida.json"
-        verdict "$file" "$run" "$plan" "$ficha" "$tmp/corrida.json" > "$tmp/out" 2>&1 || true
+        verdict_split "$file" "$run" "$plan" "$setup" "$tmp/corrida.json" > "$tmp/out" 2>&1 || true
         if python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); sys.exit(0 if eval(sys.argv[2]) else 1)' \
                 "$tmp/corrida.json" "$expr" 2>"$tmp/json-err"; then
             printf '  ok    %-58s\n' "$name"
@@ -842,7 +1002,7 @@ JSON
         echo "/ id=$1 /s/ ok=[a-z]+ / ok=$ok /; / id=$1 /s/ cumplida=[^ ]+ / cumplida=$2 /"
     }
     met_captura() { pre captura t-host-cap true host; pre captura t-app-cap true; }
-    met_usb_host() { pre usb t-usb-clase true host; pre usb t-host-usb true host; pre usb t-alsa true host; }
+    met_usb_host() { pre usb t-usb-clase true host; pre usb t-host-usb true host; pre usb t-alsa true host; pre usb t-reclamada true host; }
 
     # El control: el log grabado tal cual, con una ficha SIN precondiciones — o sea, el juez de
     # antes de REQ-053. Su exit es el que se grabo (ver la cabecera del log).
@@ -1082,8 +1242,8 @@ JSON
     expect_no_line "c1: el bloqueado con ok=true no sale PASS" '^PASS +captura/nivel ' "$tmp/a1.log" "$auto"
     expect_line "c1: y el resumen lo cuenta BLOQUEADO" '^resumen: [0-9]+ PASS · 0 FAIL · 1 BLOQUEADO ' "$tmp/a1.log" "$auto"
     local pass_verde pass_a1
-    pass_verde="$(verdict "$tmp/verde.log" "$run" "$auto" "$ficha" 2>&1 | sed -nE 's/^resumen: ([0-9]+) PASS.*/\1/p' || true)"
-    pass_a1="$(verdict "$tmp/a1.log" "$run" "$auto" "$ficha" 2>&1 | sed -nE 's/^resumen: ([0-9]+) PASS.*/\1/p' || true)"
+    pass_verde="$(verdict_split "$tmp/verde.log" "$run" "$auto" "$ficha" 2>&1 | sed -nE 's/^resumen: ([0-9]+) PASS.*/\1/p' || true)"
+    pass_a1="$(verdict_split "$tmp/a1.log" "$run" "$auto" "$ficha" 2>&1 | sed -nE 's/^resumen: ([0-9]+) PASS.*/\1/p' || true)"
     if [[ -n "$pass_verde" && "$pass_a1" == "$((pass_verde - 1))" ]]; then
         printf '  ok    %-58s\n' "c2: bloquear un paso le resta uno al PASS ($pass_verde -> $pass_a1)"
     else
@@ -1180,6 +1340,11 @@ JSON
     ficha_mutante "lista de paquetes vacia" "f['planes']['usb']['precondiciones'][1]['paquetes'] = []"
     ficha_mutante "ventana humana en una de host" "f['planes']['captura']['precondiciones'][0]['ventana-humana'] = True"
     ficha_mutante "formato desconocido" "f['formato'] = 2"
+    # El atajo "sin placa => cumplida" del chequeo usb-placa-no-reclamada solo es honesto si la que SI bloquea
+    # (usb-interfaz-de-clase, de la misma clase) esta en el mismo plan.
+    ficha_mutante "usb-placa-no-reclamada sin usb-interfaz-de-clase en su plan" "del f['planes']['usb']['precondiciones'][0]"
+    ficha_mutante "usb-placa-no-reclamada con otra clase que usb-interfaz-de-clase" "f['planes']['usb']['precondiciones'][0]['clase'] = 3"
+    ficha_mutante "usb-placa-no-reclamada sin su clase" "del f['planes']['usb']['precondiciones'][3]['clase']"
     echo '{"formato": 1, "planes": {' > "$tmp/rota.json"
     expect "ficha: JSON roto" 2 "$tmp/verde.log" "$auto" "$tmp/rota.json"
     expect "ficha: no existe" 2 "$tmp/verde.log" "$auto" "$tmp/no-existe.json"
@@ -1236,18 +1401,195 @@ JSON
     done | before_fin "$SELFTEST_LOG" "$tmp/control-cumplido.log"
     expect "control + ficha real, todo cumplido = el exit grabado" "$want_base" "$tmp/control-cumplido.log" todo "$real"
 
+    # S-1 (security-auditor): logcat filtra por TAG, asi que cualquier app puede escribir una linea
+    # `verificador=host`. El juez recibe las del host por SEPARADO y descarta las que lleguen por el
+    # log de la app: no bloquean ni cuentan.
+    grep -v 'verificador=host' "$tmp/verde.log" > "$tmp/app-verde.log" || true
+    grep 'verificador=host' "$tmp/verde.log" > "$tmp/host-verde.log" || true
+    : > "$tmp/host-vacio.log"
+    split_case() {  # split_case <nombre> <exit esperado> <log de la app> <log del host> [regex que TIENE que salir]
+        local name="$1" want="$2" app="$3" hostf="$4" re="${5:-}" got=0
+        verdict "$app" "$run" "$auto" "$ficha" "" "$hostf" > "$tmp/out" 2>&1 || got=$?
+        if [[ "$got" == "$want" ]] && { [[ -z "$re" ]] || grep -Eq -- "$re" "$tmp/out"; }; then
+            printf '  ok    %-58s exit %s\n' "$name" "$got"
+        else
+            printf '  MAL   %-58s exit %s, esperaba %s%s\n' "$name" "$got" "$want" "${re:+ y /$re/}"
+            sed 's/^/        /' "$tmp/out" | tail -6
+            failures=$((failures + 1))
+        fi
+    }
+    sed -E 's/panel=captura step=nivel ok=true/panel=captura step=nivel ok=false/' "$tmp/app-verde.log" > "$tmp/app-nivel-mal.log"
+    split_case "S-1 gemelo: captura/nivel mal, host cumplido" 1 "$tmp/app-nivel-mal.log" "$tmp/host-verde.log"
+    { cat "$tmp/app-nivel-mal.log"; pre captura t-host-cap false host; } > "$tmp/app-forjada-mala.log"
+    split_case "S-1: una linea host falsa de la app no tapa el FAIL" 1 "$tmp/app-forjada-mala.log" "$tmp/host-verde.log" \
+        '^AVISO .* 1 linea\(s\) verificador=host'
+    { cat "$tmp/app-verde.log"; pre captura t-host-cap true host; } > "$tmp/app-forjada-buena.log"
+    split_case "S-1 gemelo: host cumplido, sin forjar" 0 "$tmp/app-verde.log" "$tmp/host-verde.log"
+    split_case "S-1: una linea host falsa no suple la que el host no grabo" 4 "$tmp/app-forjada-buena.log" "$tmp/host-vacio.log" \
+        'el-host-no-registro-su-verificacion'
+    split_case "S-1: las lineas host del log de la app no se cuentan" 4 "$tmp/verde.log" "$tmp/host-vacio.log"
+    # --host-en-log: los logs grabados de S1 traen las lineas del host MEZCLADAS con las de la app. El
+    # flag es explicito, solo del CLI --veredicto, y avisa que ese log no separa origenes.
+    cli_case() {  # cli_case <nombre> <exit esperado> <regex que TIENE que salir> <args de --veredicto...>
+        local name="$1" want="$2" re="$3" got=0; shift 3
+        bash "$0" --veredicto "$@" > "$tmp/out" 2>&1 || got=$?
+        if [[ "$got" == "$want" ]] && grep -Eq -- "$re" "$tmp/out"; then
+            printf '  ok    %-58s exit %s\n' "$name" "$got"
+        else
+            printf '  MAL   %-58s exit %s, esperaba %s y /%s/\n' "$name" "$got" "$want" "$re"
+            sed 's/^/        /' "$tmp/out" | tail -6
+            failures=$((failures + 1))
+        fi
+    }
+    sed -E 's/ok=true id=t-host-cap cumplida=true/ok=false id=t-host-cap cumplida=false/' "$tmp/verde.log" > "$tmp/mezclado-incumplida.log"
+    cli_case "host-en-log: un log mezclado se juzga con el flag" 0 'no separa origenes' \
+        "$tmp/verde.log" "$run" "$auto" --setup "$ficha" --host-en-log
+    cli_case "host-en-log: ... y juzga las precondiciones del propio log" 4 '^BLOQUEADO +captura/nivel +precondicion=t-host-cap estado=incumplida' \
+        "$tmp/mezclado-incumplida.log" "$run" "$auto" --setup "$ficha" --host-en-log
+    cli_case "host-en-log: sin el flag el mismo log es BLOQUEADO, con su AVISO" 4 '^AVISO .* [0-9]+ linea\(s\) verificador=host.*descartadas' \
+        "$tmp/verde.log" "$run" "$auto" --setup "$ficha"
+    cli_case "host-en-log: sin el flag no se toma ni una linea host" 4 'estado=no-verificable evidencia=el-host-no-registro-su-verificacion' \
+        "$tmp/mezclado-incumplida.log" "$run" "$auto" --setup "$ficha"
+    # La corrida en device nunca lo activa: el log de la app es de un tercero, el del host es el suyo.
+    if [[ "$(awk '/^run_device\(\) \{/ {on = 1} on {print} on && /^\}/ {exit}' "$0" | grep -c 'host-en-log')" == 0 ]]; then
+        printf '  ok    %-58s\n' "host-en-log: run_device no lo pasa"
+    else
+        printf '  MAL   %-58s\n' "host-en-log: run_device no lo pasa"; failures=$((failures + 1))
+    fi
+    # La captura del script: con uid, solo lo del harness; el uid sale del paquete EXACTO.
+    local pm_fix="package:$PKG.test uid:10999
+package:$PKG uid:10234
+package:com.ajena uid:10001"
+    if [[ "$(uid_of_package "$PKG" <<< "$pm_fix")" == 10234 && -z "$(uid_of_package "$PKG" <<< "package:$PKG.test uid:10999")" \
+        && -z "$(uid_of_package "$PKG" <<< "package:$PKG uid:x1")" && -z "$(uid_of_package "$PKG" <<< "")" ]]; then
+        printf '  ok    %-58s\n' "S-1: el uid es el del paquete exacto, o nada"
+    else
+        printf '  MAL   %-58s\n' "S-1: el uid es el del paquete exacto, o nada"; failures=$((failures + 1))
+    fi
+    if [[ "$(logcat_capture_args 10234)" == "-v raw --uid=10234 -s HARNESS-SMOKE:I" && "$(logcat_capture_args "")" == "-v raw -s HARNESS-SMOKE:I" ]]; then
+        printf '  ok    %-58s\n' "S-1: la captura filtra por uid, y sin uid sigue como antes"
+    else
+        printf '  MAL   %-58s\n' "S-1: la captura filtra por uid, y sin uid sigue como antes"; failures=$((failures + 1))
+    fi
+
+    # S-2: el run id no se puede adivinar (fecha + pid + 48 bits de /dev/urandom), y el juez sigue
+    # aceptando el viejo: el del control grabado ya se juzgo arriba con ese formato.
+    local rid1 rid2
+    rid1="$(new_run_id || true)"; rid2="$(new_run_id || true)"
+    if [[ "$rid1" =~ ^smoke-[0-9]{8}-[0-9]{6}-[0-9]+-[0-9a-f]{12}$ && "$rid1" != "$rid2" ]]; then
+        printf '  ok    %-58s\n' "S-2: el run id lleva 48 bits aleatorios y cambia"
+    else
+        printf '  MAL   %-58s %s %s\n' "S-2: el run id lleva 48 bits aleatorios y cambia" "$rid1" "$rid2"; failures=$((failures + 1))
+    fi
+    sed -E "s/run=$run /run=$rid1 /" "$tmp/verde.log" > "$tmp/verde-rid.log"
+    grep -v 'verificador=host' "$tmp/verde-rid.log" > "$tmp/app-rid.log" || true
+    grep 'verificador=host' "$tmp/verde-rid.log" > "$tmp/host-rid.log" || true
+    local got=0
+    verdict "$tmp/app-rid.log" "$rid1" "$auto" "$ficha" "" "$tmp/host-rid.log" > /dev/null 2>&1 || got=$?
+    if [[ "$got" == 0 ]]; then printf '  ok    %-58s exit 0\n' "S-2: el juez acepta un run id con el formato nuevo"
+    else printf '  MAL   %-58s exit %s\n' "S-2: el juez acepta un run id con el formato nuevo" "$got"; failures=$((failures + 1)); fi
+    if grep -qE '^    run="\$\(new_run_id\)" \|\| exit 2$' "$0"; then
+        printf '  ok    %-58s\n' "S-2: la corrida en device saca su run id de new_run_id"
+    else
+        printf '  MAL   %-58s\n' "S-2: la corrida en device saca su run id de new_run_id"; failures=$((failures + 1))
+    fi
+    if [[ "$run" =~ ^smoke-[0-9]{8}-[0-9]{6}-[0-9]+$ ]]; then
+        printf '  ok    %-58s\n' "S-2: el control grabado conserva el run id viejo"
+    else
+        printf '  MAL   %-58s %s\n' "S-2: el control grabado conserva el run id viejo" "$run"; failures=$((failures + 1))
+    fi
+
+    # S-3: --plan se interpola en `adb shell am start`, o sea que vuelve a pasar por el `sh` del
+    # telefono. Un plan que no sea `todo` o paneles conocidos es exit 2 SIN llamar a adb.
+    mkdir -p "$tmp/espia"
+    cat > "$tmp/espia/adb" <<'SPY'
+#!/usr/bin/env bash
+echo "$*" >> "$SPY_LOG"
+SPY
+    chmod +x "$tmp/espia/adb"
+    plan_case() {  # plan_case <nombre> <plan> <exit esperado> <llamo a adb: si|no>
+        local name="$1" plan="$2" want="$3" calls="$4" got=0 called=no
+        : > "$tmp/espia.log"
+        PATH="$tmp/espia:$PATH" SPY_LOG="$tmp/espia.log" ANDROID_SERIAL=falso-123 \
+            bash "$0" --plan "$plan" --no-build > "$tmp/out" 2>&1 || got=$?
+        [[ -s "$tmp/espia.log" ]] && called=si
+        if [[ "$got" == "$want" && "$called" == "$calls" ]]; then
+            printf '  ok    %-58s exit %s, adb: %s\n' "$name" "$got" "$called"
+        else
+            printf '  MAL   %-58s exit %s (esperaba %s), adb: %s (esperaba %s)\n' "$name" "$got" "$want" "$called" "$calls"
+            failures=$((failures + 1))
+        fi
+    }
+    plan_case "S-3 control: un plan valido llega a adb (el espia anda)" salida 2 si
+    plan_case "S-3: todo,usb no es un plan (todo va solo)" 'todo,usb' 2 no
+    plan_case "S-3: --plan 'todo;id' es exit 2 sin llamar a adb" 'todo;id' 2 no
+    plan_case "S-3: un panel desconocido es exit 2 sin adb" 'salida,nada' 2 no
+    plan_case "S-3: mayusculas, exit 2 sin adb" 'Salida' 2 no
+    plan_case "S-3: un plan con espacio o \$() es exit 2 sin adb" 'salida $(id)' 2 no
+    plan_case "S-3: un plan vacio es exit 2 sin adb" '' 2 no
+    plan_case "S-3: coma final (salida,) es exit 2 sin adb" 'salida,' 2 no
+    plan_case "S-3: elemento vacio en el medio es exit 2 sin adb" 'salida,,sf2' 2 no
+    plan_case "S-3: coma inicial es exit 2 sin adb" ',salida' 2 no
+
     # Los verificadores de HOST, contra un adb FALSO: ninguno corre sin `-s <serial>`, y cada salida
     # que no se puede leer (adb falla, rc != 0, basura, formato desconocido, tarjeta sin dueno
-    # visible) da no-verificable — nunca cumplida. El dumpsys de abajo es SINTETICO, armado a mano
-    # con el formato de texto de `dumpsys usb`: NO es una captura del g42.
+    # visible) da no-verificable — nunca cumplida. Los dumpsys son RECORTES de la captura real del g42
+    # (scripts/smoke-device-fixtures/); las variantes se derivan de ellos con sed, nunca a mano.
     host_selftest "$tmp" "$ficha" "$run" || failures=$((failures + $?))
+
+    # D14: la ficha REAL (sin captura), con el adb falso. NoisyPad vivo y la salida USB tomada por el
+    # audioserver ya NO bloquean: son observaciones (depende: []), y los pasos se juzgan. Lo que bloquea
+    # es la placa reclamada, que se ve en /dev/snd. El log es el grabado, con las precondiciones del
+    # host de cada modo en su archivo aparte (como en la corrida).
+    python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); del f["planes"]["captura"]; json.dump(f, open(sys.argv[2], "w"))' "$real" "$tmp/ficha-usb-real.json"
+    d14_case() {  # d14_case <modo del adb falso> <archivo de salida>
+        FAKE_MODE="$1" FAKE_SERIAL=falso-123 FAKE_DIR="$tmp/host" \
+            smoke_py host "$tmp/host/adb" falso-123 "$tmp/ficha-usb-real.json" usb "$run" "$PKG" "$tmp/host/evidencia-d14-$1" > "$tmp/d14-$1.txt" 2>&1 || true
+        with_usb "$tmp/d14-$1-pre.log" 's/^//'
+        grep -v 'step=precondicion' "$tmp/d14-$1-pre.log" > "$tmp/d14-$1-base.log"
+        { grep 'panel=usb' "$tmp/d14-$1.txt"; pre usb "$id_permiso" true; } | before_fin "$tmp/d14-$1-base.log" "$2"
+    }
+    local real_ficha="$tmp/ficha-usb-real.json" id_app id_alsa id_reclamada id_placa
+    # Los ids salen de la ficha por su chequeo: el script no copia ninguno (AC-053.5).
+    id_by_check() { python3 -c 'import json,sys; print([p["id"] for p in json.load(open(sys.argv[1]))["planes"]["usb"]["precondiciones"] if p.get("chequeo") == sys.argv[2]][0])' "$real_ficha" "$1"; }
+    id_app="$(id_by_check paquetes-sin-proceso)"; id_alsa="$(id_by_check alsa-tarjeta-libre)"
+    id_reclamada="$(id_by_check usb-placa-no-reclamada)"; id_placa="$(id_by_check usb-interfaz-de-clase)"
+    local id_permiso
+    id_permiso="$(python3 -c 'import json,sys; print([p["id"] for p in json.load(open(sys.argv[1]))["planes"]["usb"]["precondiciones"] if p.get("ventana-humana")][0])' "$real_ficha")"
+    d14_case noisypad-vivo "$tmp/d14-vivo.log"
+    expect "D14: NoisyPad vivo y la salida USB tomada, exit 0" 0 "$tmp/d14-vivo.log" todo "$real_ficha"
+    expect_line "D14: con NoisyPad vivo streaming-start se juzga: PASS" '^PASS +usb/streaming-start ' "$tmp/d14-vivo.log" todo "$real_ficha"
+    expect_no_line "D14: nada sale BLOQUEADO con NoisyPad vivo" '^BLOQUEADO ' "$tmp/d14-vivo.log" todo "$real_ficha"
+    expect_json "D14: el JSON registra la observacion de NoisyPad" "$tmp/d14-vivo.log" todo \
+        "[p for p in j['precondiciones'] if p['id'] == '$id_app' and p['estado'] == 'incumplida' and p['depende'] == [] and 'noisypad' in p['evidencia']]" "$real_ficha"
+    expect_json "D14: ... y la de la tarjeta ALSA tomada" "$tmp/d14-vivo.log" todo \
+        "[p for p in j['precondiciones'] if p['id'] == '$id_alsa' and p['estado'] == 'incumplida' and p['depende'] == [] and 'standby=no' in p['evidencia']]" "$real_ficha"
+    expect_json "D14: ... y la placa no reclamada, cumplida, bloqueante" "$tmp/d14-vivo.log" todo \
+        "[p for p in j['precondiciones'] if p['id'] == '$id_reclamada' and p['estado'] == 'cumplida' and p['depende']]" "$real_ficha"
+    d14_case reclamada "$tmp/d14-reclamada.log"
+    expect "D14: placa reclamada bloquea (exit 4)" 4 "$tmp/d14-reclamada.log" todo "$real_ficha"
+    expect_line "D14: streaming-start BLOQUEADO por la placa reclamada, con su remedio" "^BLOQUEADO +usb/streaming-start +precondicion=$id_reclamada estado=incumplida evidencia=placa-enumerada-sin-controlC1:otro-proceso-la-reclama remedio=Cerrar la app que tenga la placa tomada.*El script no sabe quien la tiene" "$tmp/d14-reclamada.log" todo "$real_ficha"
+    expect_line "D14: usb/dispositivos (no depende) se juzga" '^PASS +usb/dispositivos ' "$tmp/d14-reclamada.log" todo "$real_ficha"
+    d14_case sin-placa "$tmp/d14-sin-placa.log"
+    expect_line "D14: sin placa bloquea la de placa enumerada" "^BLOQUEADO +usb/streaming-start +precondicion=$id_placa " "$tmp/d14-sin-placa.log" todo "$real_ficha"
+    expect_no_line "D14: ... y la de placa reclamada no duplica el bloqueo" "precondicion=$id_reclamada" "$tmp/d14-sin-placa.log" todo "$real_ficha"
+    # El orden (la carrera): el harness reclama la placa al arrancar, asi que el host la mira ANTES.
+    local host_at start_at
+    host_at="$(grep -nE '^    host_lines="\$\(smoke_py host ' "$0" | head -1 | cut -d: -f1)"
+    start_at="$(grep -nE '^    adb_ shell am start -n ' "$0" | head -1 | cut -d: -f1)"
+    if [[ -n "$host_at" && -n "$start_at" ]] && (( host_at < start_at )); then
+        printf '  ok    %-58s\n' "D14: la verificacion de host corre ANTES del am start"
+    else
+        printf '  MAL   %-58s host=%s am-start=%s\n' "D14: la verificacion de host corre ANTES del am start" "${host_at:-nada}" "${start_at:-nada}"
+        failures=$((failures + 1))
+    fi
 
     rm -rf "$tmp"
     if (( failures )); then
         echo "self-test: FAIL — $failures caso(s) con el veredicto equivocado" >&2
         return 1
     fi
-    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado, otra corrida, y (REQ-053) precondicion incumplida, no verificable, BLOQUEADO que no suma PASS, precedencia del exit, permiso negado vs ventana vencida, ficha invalida y verificadores de host"
+    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado, otra corrida, y (REQ-053) precondicion incumplida, no verificable, BLOQUEADO que no suma PASS, precedencia del exit, permiso negado vs ventana vencida, ficha invalida, verificadores de host y (D14) placa reclamada vs observaciones"
 }
 
 # El adb falso del self-test y sus casos. Devuelve la cantidad de casos MAL.
@@ -1268,29 +1610,39 @@ case "$FAKE_MODE" in
     basura) echo "lorem ipsum"; exit 0 ;;
     denegado) echo "/system/bin/sh: Permission denied"; echo "wma-rc=1"; exit 0 ;;
 esac
+# `usb-falla` / `snd-rc`: solo ese comando termina mal (snd-rc con un listado legible: el rc manda).
+[[ "$FAKE_MODE" == usb-falla && "$cmd" == *"dumpsys usb"* ]] && { echo "dumpsys: boom"; echo; echo "wma-rc=1"; exit 0; }
+[[ "$FAKE_MODE" == snd-rc && "$cmd" == *"ls /dev/snd"* ]] && { printf 'controlC0\ncontrolC1\n'; echo; echo "wma-rc=1"; exit 0; }
 case "$cmd" in
     *"dumpsys package"*)
         g=true; [[ "$FAKE_MODE" == incumplida ]] && g=false
         # Dos usuarios: el 0 (el que corre el smoke) y un perfil secundario sin el permiso.
         printf 'Packages:\n  Package [x]\n    User 0: ceDataInode=1 installed=true\n      runtime permissions:\n        android.permission.RECORD_AUDIO: granted=%s, flags=[ USER_SENSITIVE ]\n    User 10: ceDataInode=0 installed=false\n      runtime permissions:\n        android.permission.RECORD_AUDIO: granted=false, flags=[ ]\n' "$g" ;;
     *"dumpsys usb"*)
-        f=audio
-        [[ "$FAKE_MODE" == incumplida ]] && f=hid
+        f=cm720
+        [[ "$FAKE_MODE" == incumplida || "$FAKE_MODE" == sin-placa ]] && f=hid
         [[ "$FAKE_MODE" == sin-host ]] && f=sin-host
+        [[ "$FAKE_MODE" == dos-dispositivos ]] && f=dos
         cat "$FAKE_DIR/dumpsys-usb-$f.txt" ;;
+    *"dumpsys media.audio_flinger"*)
+        f=af-standby
+        [[ "$FAKE_MODE" == incumplida || "$FAKE_MODE" == noisypad-vivo ]] && f=af-tomada
+        [[ "$FAKE_MODE" == af-* ]] && f="$FAKE_MODE"
+        cat "$FAKE_DIR/$f.txt" ;;
     *"ps -A"*)
         printf '  PID NAME\n    1 init\n'
         # `ps-ciego`: un ps que no ve los procesos de otros UID (sin system_server).
         [[ "$FAKE_MODE" == ps-ciego ]] || printf ' 1500 system_server\n  812 com.android.systemui\n'
-        [[ "$FAKE_MODE" == incumplida ]] && printf ' 4242 com.example.ajena:servicio\n' ;;
+        [[ "$FAKE_MODE" == incumplida ]] && printf ' 4242 com.example.ajena:servicio\n'
+        [[ "$FAKE_MODE" == noisypad-vivo ]] && printf ' 4343 com.watermellonstudios.noisypad\n' ;;
     *"ls /dev/snd"*)
-        printf 'controlC0\npcmC0D0p\npcmC0D0c\ntimer\n'
-        [[ "$FAKE_MODE" == incumplida || "$FAKE_MODE" == alsa-* ]] && printf 'controlC1\npcmC1D0p\n' ;;
-    *"/proc/asound/card1/pcm0p/sub0/status"*)
+        # `reclamada`: la placa esta enumerada y un proceso la reclama, asi que controlC1/pcmC1* no estan.
         case "$FAKE_MODE" in
-            incumplida) printf 'state: RUNNING\nowner_pid   : 777\ntrigger_time: 1.0\n' ;;
-            alsa-cerrada) printf 'closed\n' ;;
-            alsa-oculta) echo "cat: /proc/asound/card1/pcm0p/sub0/status: Permission denied"; echo "wma-rc=1"; exit 0 ;;
+            snd-ilegible) echo "lorem ipsum" ;;
+            snd-vacio) : ;;
+            # El listado REAL del g42 (una linea, separada por espacios): `ls` por adb sale uno por linea.
+            reclamada|sin-placa) tr -s ' ' '\n' < "$FAKE_DIR/dev-snd-reclamada.txt" ;;
+            *) tr -s ' ' '\n' < "$FAKE_DIR/dev-snd-cm720.txt" ;;
         esac ;;
     *) echo "comando no previsto: $cmd" >> "$FAKE_DIR/sin-s.txt" ;;
 esac
@@ -1302,45 +1654,31 @@ esac
 echo "wma-rc=0"
 FAKE
     chmod +x "$evid/adb"
-    # SINTETICOS (ver arriba): un host con la placa de audio, uno con un HID y uno sin host_manager.
-    cat > "$evid/dumpsys-usb-audio.txt" <<'TXT'
-USB MANAGER STATE (dumpsys usb):
-{
-  device_manager={
-    handler={
-      current_functions=0
-    }
-  }
-  host_manager={
-    default_usb_host_connection_handler=com.android.usb/.UsbHostConnection
-    devices={
-      name=/dev/bus/usb/001/002
-      vendor_id=11145
-      product_id=25836
-      class=0
-      manufacturer_name=Realtek
-      product_name=UGREEN CM720 USB Audio
-      configurations={
-        id=1
-        interfaces={
-          id=0
-          alternate_settings=0
-          class=1
-          subclass=1
-        }
-        interfaces={
-          id=1
-          alternate_settings=1
-          class=1
-          subclass=2
-        }
-      }
-    }
-  }
-}
-TXT
-    sed -E 's/class=1$/class=3/; s/vendor_id=11145/vendor_id=1133/' "$evid/dumpsys-usb-audio.txt" > "$evid/dumpsys-usb-hid.txt"
-    sed -E '/host_manager=\{/,$d' "$evid/dumpsys-usb-audio.txt" > "$evid/dumpsys-usb-sin-host.txt"
+    local fx=scripts/smoke-device-fixtures
+    cp "$fx/dumpsys-usb-cm720.txt" "$evid/dumpsys-usb-cm720.txt"
+    # Sin interfaces de clase 1 (y otro vendor): la misma captura con la placa convertida en un HID.
+    sed -E 's/^( *)class=1$/\1class=3/; s/vendor_id=11145/vendor_id=1133/' "$fx/dumpsys-usb-cm720.txt" > "$evid/dumpsys-usb-hid.txt"
+    sed -E '/host_manager=\{/,$d' "$fx/dumpsys-usb-cm720.txt" > "$evid/dumpsys-usb-sin-host.txt"
+    # Dos dispositivos bajo host_manager: un HID primero y la CM720 despues (el recorte, repetido).
+    awk -v hid="$evid/dumpsys-usb-hid.txt" 'FNR == NR { if (/^    devices=\{$/) on = 1; if (on) d = d $0 "\n"; if (on && /^    \}$/) on = 0; next }
+        /^    devices=\{$/ && !done { printf "%s", d; done = 1 } { print }' "$evid/dumpsys-usb-hid.txt" "$fx/dumpsys-usb-cm720.txt" > "$evid/dumpsys-usb-dos.txt"
+    # audio_flinger: el hilo USB es AudioOut_15; su linea de nivel de hilo es la UNICA de 2 espacios.
+    # /dev/snd real, sin su cabecera `#`; la placa reclamada es el MISMO listado sin controlC1 ni pcmC1*.
+    grep -v '^#' "$fx/dev-snd-cm720.txt" > "$evid/dev-snd-cm720.txt"
+    sed -E 's/(^| )(controlC1|pcmC1[^ ]*)//g' "$evid/dev-snd-cm720.txt" > "$evid/dev-snd-reclamada.txt"
+    local af="$fx/audio-flinger-cm720.txt" usb_hilo='/^Output thread .*name AudioOut_15,/,/^Output thread .*name (AudioOut_D|AudioOut_25),|^Historical/'
+    cp "$af" "$evid/af-standby.txt"
+    sed -E "${usb_hilo}"'s/^  Standby: yes$/  Standby: no/' "$af" > "$evid/af-tomada.txt"
+    sed -E 's/^-   Standby: yes$/-   Standby: no/; s/^-   Output devices: .*$/-   Output devices: 0x4000000 (AUDIO_DEVICE_OUT_USB_HEADSET)/' "$af" > "$evid/af-cerrado-no.txt"
+    sed -E "${usb_hilo}"'s/^      Standby: yes$/      Standby: no/' "$af" > "$evid/af-hal-no.txt"
+    : > "$evid/af-vacio.txt"
+    # El formato que cambia: `Output devices:` pasa a singular y ningun hilo vivo dice sus dispositivos.
+    sed -E 's/^  Output devices: /  Output device: /' "$af" > "$evid/af-sin-dispositivos.txt"
+    sed -E '/^Output thread /,$d' "$af" > "$evid/af-sin-hilos.txt"
+    sed -E "${usb_hilo}"'s/AUDIO_DEVICE_OUT_USB_HEADSET/AUDIO_DEVICE_OUT_SPEAKER/' "$af" > "$evid/af-sin-usb.txt"
+    sed -E "${usb_hilo}"'{/^  Standby: /d;}' "$af" > "$evid/af-sin-standby.txt"
+    # Un hilo de ENTRADA con la placa: el mismo hilo USB reescrito como Input, con su Standby en no.
+    sed -E "${usb_hilo}"'{s/^Output thread /Input thread /; s/^  Output devices: .*$/  Output devices:  (Empty device types)/; s/^  Input device: 0 \(AUDIO_DEVICE_NONE\)/  Input device: 0x80000000 (AUDIO_DEVICE_IN_USB_DEVICE)/; s/^  Standby: yes$/  Standby: no/;}' "$af" > "$evid/af-entrada-tomada.txt"
 
     host_case() {  # host_case <modo> <id> <cumplida esperada>
         local m="$1" id="$2" want="$3" got
@@ -1353,23 +1691,54 @@ TXT
             bad=$((bad + 1))
         fi
     }
-    for mode in ok incumplida falla basura denegado cortado rc-1 ps-ciego sin-host alsa-cerrada alsa-oculta; do
+    for mode in ok incumplida falla basura denegado cortado rc-1 ps-ciego sin-host dos-dispositivos \
+        af-standby af-tomada af-cerrado-no af-hal-no af-vacio af-sin-hilos af-sin-usb af-sin-standby af-sin-dispositivos af-entrada-tomada \
+        reclamada sin-placa usb-falla snd-rc snd-ilegible snd-vacio; do
         FAKE_MODE="$mode" FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
             smoke_py host "$evid/adb" "$serial" "$ficha" todo "$run" "$PKG" "$evid/evidencia-$mode" \
             > "$evid/out-$mode.txt" 2>&1 || true
     done
     host_case ok t-host-cap true;  host_case ok t-usb-clase true;  host_case ok t-host-usb true;  host_case ok t-alsa true
+    host_case ok t-reclamada true
     host_case incumplida t-host-cap false; host_case incumplida t-usb-clase false
     host_case incumplida t-host-usb false; host_case incumplida t-alsa false
     for mode in falla basura denegado cortado rc-1; do
-        for id in t-host-cap t-usb-clase t-host-usb t-alsa; do host_case "$mode" "$id" no-verificable; done
+        for id in t-host-cap t-usb-clase t-host-usb t-alsa t-reclamada; do host_case "$mode" "$id" no-verificable; done
     done
     host_case sin-host t-usb-clase no-verificable
+    host_case dos-dispositivos t-usb-clase true     # el HID primero no tapa a la CM720 que viene despues
     host_case ps-ciego t-host-usb no-verificable
-    host_case alsa-cerrada t-alsa true
-    host_case alsa-oculta t-alsa no-verificable
+    # D14, la placa reclamada. Una regla por caso, cada una con su mutante (ver el reporte).
+    host_case reclamada t-reclamada false         # placa enumerada y sin controlC1: la reclama otro proceso
+    host_case sin-placa t-reclamada true          # sin placa no bloquea esta: la bloquea la de placa enumerada
+    host_case sin-placa t-usb-clase false         # ... y esa si da incumplida (no se duplica el bloqueo)
+    host_case usb-falla t-reclamada no-verificable  # dumpsys usb falla (el resto responde sano)
+    host_case snd-rc t-reclamada no-verificable     # ls /dev/snd termina mal
+    host_case snd-ilegible t-reclamada no-verificable  # ls /dev/snd no es un listado
+    host_case snd-vacio t-reclamada no-verificable     # ls vacio: la ausencia de controlC1 no significa nada
+    # La clase de la placa sale de la entrada de la ficha, no de un 1 fijo: con la clase 3 (el HID de
+    # `sin-placa`) en las dos precondiciones, la placa ESTA y su controlC1 no, o sea reclamada.
+    python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); [p.update(clase=3) for p in f["planes"]["usb"]["precondiciones"] if "clase" in p]; json.dump(f, open(sys.argv[2], "w"))' "$ficha" "$evid/ficha-clase3.json"
+    FAKE_MODE=sin-placa FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
+        smoke_py host "$evid/adb" "$serial" "$evid/ficha-clase3.json" todo "$run" "$PKG" "$evid/evidencia-clase3" > "$evid/out-clase3.txt" 2>&1 || true
+    host_case clase3 t-reclamada false            # la clase de su propia entrada (3), no un 1 fijo
+    host_case af-tomada t-reclamada true          # el audioserver con la salida USB tomada NO la hace incumplida
+    # La tarjeta ALSA contra audio_flinger real. Cada regla tiene su caso y su mutante (ver el reporte).
+    host_case af-standby t-alsa true            # el hilo USB en standby: libre
+    host_case af-tomada t-alsa false            # Standby: no en el hilo USB: tomada
+    host_case af-cerrado-no t-alsa true         # un `Standby: no` en un hilo "- " cerrado no cuenta
+    host_case af-hal-no t-alsa true             # el de `Hal stream dump` no es el del hilo
+    host_case af-vacio t-alsa no-verificable    # salida vacia: nunca cumplida por defecto
+    host_case af-sin-hilos t-alsa no-verificable
+    host_case af-sin-usb t-alsa true            # hay tarjeta pero ningun hilo USB
+    host_case af-sin-standby t-alsa no-verificable
+    host_case af-sin-dispositivos t-alsa no-verificable  # un hilo vivo sin linea de dispositivos legible
+    host_case af-entrada-tomada t-alsa false    # un Input thread con IN_USB_ tambien toma la tarjeta
+    for mode in af-standby af-tomada af-cerrado-no af-hal-no af-vacio af-sin-hilos af-sin-usb af-sin-standby af-sin-dispositivos af-entrada-tomada; do
+        host_case "$mode" t-usb-clase true      # la captura real: la CM720 tiene interfaces de clase 1
+    done
     local check
-    for check in "incumplida:t-host-usb:4242" "incumplida:t-alsa:777" "incumplida:t-usb-clase:046d"; do
+    for check in "incumplida:t-host-usb:4242" "incumplida:t-alsa:AudioOut_15:0x4000000" "af-tomada:t-alsa:AudioOut_15:0x4000000" "af-entrada-tomada:t-alsa:IN_USB_DEVICE" "af-standby:t-usb-clase:2b89:64ec:UGREEN" "dos-dispositivos:t-usb-clase:2b89:64ec:UGREEN" "af-standby:t-alsa:AudioOut_15:standby=yes" "af-sin-usb:t-alsa:sin-hilo-usb" "incumplida:t-usb-clase:046d" "reclamada:t-reclamada:placa-enumerada-sin-controlC1:otro-proceso-la-reclama" "sin-placa:t-reclamada:sin-placa:lo-cubre-placa-enumerada" "ok:t-reclamada:controlC1-presente"; do
         IFS=: read -r mode id needle <<< "$check"
         if grep -E " id=$id .*evidencia=[^ ]*$needle" "$evid/out-$mode.txt" > /dev/null; then
             printf '  ok    %-58s\n' "host[$mode]: la evidencia de $id lleva $needle"
@@ -1384,11 +1753,11 @@ TXT
         bad=$((bad + 1))
     fi
     # Cada linea la firma el host y es de ESTA corrida; y lo que no se pidio no se verifica.
-    if grep -c . "$evid/out-ok.txt" | grep -qx 4 \
-        && [[ "$(grep -c " run=$run panel=[a-z]* step=precondicion .* verificador=host$" "$evid/out-ok.txt")" == 4 ]]; then
-        printf '  ok    %-58s\n' "host: 4 lineas firmadas verificador=host, run de la corrida"
+    if grep -c . "$evid/out-ok.txt" | grep -qx 5 \
+        && [[ "$(grep -c " run=$run panel=[a-z]* step=precondicion .* verificador=host$" "$evid/out-ok.txt")" == 5 ]]; then
+        printf '  ok    %-58s\n' "host: 5 lineas firmadas verificador=host, run de la corrida"
     else
-        printf '  MAL   %-58s\n' "host: 4 lineas firmadas verificador=host, run de la corrida"; bad=$((bad + 1))
+        printf '  MAL   %-58s\n' "host: 5 lineas firmadas verificador=host, run de la corrida"; bad=$((bad + 1))
     fi
     FAKE_MODE=ok FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
         smoke_py host "$evid/adb" "$serial" "$ficha" salida,sf2 "$run" "$PKG" "$evid/evidencia-x" > "$evid/out-nada.txt" 2>&1 || true
@@ -1407,11 +1776,11 @@ TXT
       echo "HARNESS-SMOKE v=1 run=$run panel=captura step=precondicion ok=true id=t-app-cap cumplida=true evidencia=x"; \
       grep 'panel=plan step=fin ' "$base"; } > "$evid/juez-falla.log"
     local got=0
-    verdict "$evid/juez-ok.log" "$run" salida,captura,sf2,sf3 "$ficha" > /dev/null 2>&1 || got=$?
+    verdict_split "$evid/juez-ok.log" "$run" salida,captura,sf2,sf3 "$ficha" > /dev/null 2>&1 || got=$?
     if [[ "$got" == 0 ]]; then printf '  ok    %-58s exit 0\n' "host+juez: lo que escribe el host se juzga (ok)"
     else printf '  MAL   %-58s exit %s\n' "host+juez: lo que escribe el host se juzga (ok)" "$got"; bad=$((bad + 1)); fi
     got=0
-    verdict "$evid/juez-falla.log" "$run" salida,captura,sf2,sf3 "$ficha" > /dev/null 2>&1 || got=$?
+    verdict_split "$evid/juez-falla.log" "$run" salida,captura,sf2,sf3 "$ficha" > /dev/null 2>&1 || got=$?
     if [[ "$got" == 4 ]]; then printf '  ok    %-58s exit 4\n' "host+juez: adb caido = BLOQUEADO"
     else printf '  MAL   %-58s exit %s\n' "host+juez: adb caido = BLOQUEADO" "$got"; bad=$((bad + 1)); fi
     return "$bad"
@@ -1456,6 +1825,8 @@ run_device() {
             *) echo "opcion desconocida: $1" >&2; exit 2 ;;
         esac
     done
+    # --plan viaja al `sh` del telefono: se valida ANTES de cualquier llamada a adb.
+    plan_valid "$plan" || { echo "FAIL — --plan invalido: '$plan' (todo, o paneles de salida,captura,sf2,sf3,usb separados por comas)" >&2; exit 2; }
     [[ "$usb_wait" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL — --usb-espera-s tiene que ser un entero > 0: '$usb_wait'" >&2; exit 2; }
     [[ -z "$ceiling" || "$ceiling" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL — --techo-s tiene que ser un entero > 0: '$ceiling'" >&2; exit 2; }
     # El techo cubre la espera humana, la suite USB (3 tests de 5 s) y el resto con holgura.
@@ -1487,7 +1858,8 @@ run_device() {
         exit 2
     fi
 
-    local run="smoke-$(date +%Y%m%d-%H%M%S)-$$"
+    local run
+    run="$(new_run_id)" || exit 2
     out="${out:-harness/build/smoke-device/$run}"
     mkdir -p "$out"
 
@@ -1523,9 +1895,23 @@ run_device() {
     # la espera humana y la suite USB el buffer circular de logcat rota, y releerlo perdia `inicio`.
     local raw="$out/logcat-harness-smoke-raw.txt"
     : > "$raw"
+    # Cualquier app puede escribir con el tag HARNESS-SMOKE: si el logcat sabe filtrar por uid
+    # (--uid=), la captura es solo del harness. Si no, se sigue como antes y la corrida queda
+    # marcada (el juez igual descarta lo que se haga pasar por el host).
+    local uid="" uid_note
+    uid="$(adb_ shell pm list packages -U "$PKG" 2>/dev/null | uid_of_package "$PKG" || true)"
+    if [[ -n "$uid" ]] && adb_ logcat -d -t 1 --uid="$uid" -s HARNESS-SMOKE:I > /dev/null 2>&1; then
+        uid_note="filtro-uid=$uid"
+    else
+        uid=""
+        uid_note="SIN-filtro-uid: el logcat no filtra por uid (o no se pudo leer el uid); la captura puede traer lineas ajenas"
+    fi
+    echo "=== captura: $uid_note ==="
+    echo "$uid_note" > "$out/captura.txt"
     local logcat_pid=""
     start_capture() {
-        adb_ logcat -v raw -s HARNESS-SMOKE:I >> "$raw" 2>/dev/null &
+        # shellcheck disable=SC2046
+        adb_ logcat $(logcat_capture_args "$uid") >> "$raw" 2>/dev/null &
         logcat_pid=$!
     }
     start_capture
@@ -1579,7 +1965,9 @@ run_device() {
         --es harness.smoke "$plan" --es harness.smoke.run "$run" \
         --es harness.smoke.usb-espera-s "$usb_wait" | tr -d '\r'
 
-    local log="$out/harness-smoke.log" waited=0 announced=0
+    # Mientras corre, el log para mirar (esperando-humano, fin) junta host y captura; el que se
+    # JUZGA es el de la app solo, con el del host aparte.
+    local log="$out/harness-smoke-polling.log" waited=0 announced=0
     while (( waited < ceiling )); do
         # Por Wi-Fi, un corte mata el logcat en streaming: se relanza (y lo perdido lo recupera el
         # volcado final de abajo mientras siga en el buffer).
@@ -1603,8 +1991,9 @@ run_device() {
     kill "$logcat_pid" 2>/dev/null || true
     # Un ultimo volcado del buffer, combinado con lo capturado y sin duplicados (el orden de emision
     # se conserva: primero lo capturado en vivo).
-    { cat "$host_log" "$raw"; adb_ logcat -d -v raw -s HARNESS-SMOKE:I 2>/dev/null || true; } \
-        | tr -d '\r' | grep -F "run=$run " | awk '!seen[$0]++' > "$log" || true
+    local app_log="$out/harness-smoke.log"
+    { cat "$raw"; adb_ logcat -d $(logcat_capture_args "$uid") 2>/dev/null || true; } \
+        | tr -d '\r' | grep -F "run=$run " | awk '!seen[$0]++' > "$app_log" || true
     local pid
     pid="$(adb_ shell pidof "$PKG" 2>/dev/null | tr -d '\r' || true)"
     if [[ -n "$pid" ]]; then
@@ -1618,8 +2007,9 @@ run_device() {
     echo
 
     local rc=0
-    verdict "$log" "$run" "$plan" "$setup" "$out/harness-smoke.json" || rc=$?
+    verdict "$app_log" "$run" "$plan" "$setup" "$out/harness-smoke.json" "$host_log" || rc=$?
     echo "=== JSON de la corrida: $out/harness-smoke.json ==="
+    [[ -n "$uid" ]] || echo "AVISO — $uid_note"
     print_ear_checks
     exit "$rc"
 }
@@ -1627,17 +2017,19 @@ run_device() {
 case "${1:-}" in
     --self-test) self_test ;;
     --veredicto)
-        [[ $# -ge 4 ]] || { echo "uso: $0 --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA]" >&2; exit 2; }
-        log_="$2" run_="$3" plan_="$4" setup_="$SETUP_DEFAULT" json_=""
+        [[ $# -ge 4 ]] || { echo "uso: $0 --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA] [--host-log LOG] [--host-en-log]" >&2; exit 2; }
+        log_="$2" run_="$3" plan_="$4" setup_="$SETUP_DEFAULT" json_="" hostlog_="" mixed_=""
         shift 4
         while (( $# )); do
             case "$1" in
                 --setup) setup_="${2:?--setup necesita un archivo}"; shift 2 ;;
                 --json) json_="${2:?--json necesita un archivo}"; shift 2 ;;
+                --host-log) hostlog_="${2:?--host-log necesita un archivo}"; shift 2 ;;
+                --host-en-log) mixed_=1; shift ;;
                 *) echo "opcion desconocida: $1" >&2; exit 2 ;;
             esac
         done
-        verdict "$log_" "$run_" "$plan_" "$setup_" "$json_" ;;
+        verdict "$log_" "$run_" "$plan_" "$setup_" "$json_" "$hostlog_" ${mixed_:+host-en-log} ;;
     -h|--help) awk 'NR > 1 && /^set -euo/ {exit} NR > 1 {print}' "$0" ;;
     *) run_device "$@" ;;
 esac
