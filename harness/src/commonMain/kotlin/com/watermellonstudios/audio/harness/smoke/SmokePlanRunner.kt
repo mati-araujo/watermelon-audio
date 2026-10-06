@@ -16,7 +16,8 @@ import kotlinx.coroutines.delay
  *
  * Pasos, por panel (el contrato que `smoke-device.sh` espera):
  * - `salida`: `start`, `stream`, `frames`.
- * - `captura`: `start`, `nivel`, `stop`.
+ * - `captura`: `start`, `nivel`, `stop`, y antes de `start` la precondición `mic-abre`
+ *   (`step=precondicion`, REQ-053 S1).
  * - `sf2`: `fixture`, `carga`, `preset`, `nota`, `descarga`, y el rechazo: `fixture`
  *   (el archivo trucho) + `no-soundfont`.
  * - `sf3`: `fixture`, `carga`, `preset`, `nota`, `descarga`.
@@ -123,6 +124,10 @@ class SmokePlanRunner(
             waited += POLL_MS
         }
         val running = input.isRunning
+        // REQ-053 S1: `mic-abre` es precondición de la ficha (D4: la ve la app). Si no se cumple,
+        // el juez da BLOQUEADO a los pasos que declara la ficha, no FAIL.
+        val mic = micOpens(accepted, running, waited)
+        r.precondition(p, SmokePreconditions.MIC_OPENS, mic.met, mic.evidence)
         val started = r.report(
             p, "start", accepted && running,
             "aceptado" to accepted, "corriendo" to running, "espera-ms" to waited,

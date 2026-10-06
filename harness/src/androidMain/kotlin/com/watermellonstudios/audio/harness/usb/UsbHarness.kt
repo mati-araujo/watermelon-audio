@@ -21,8 +21,12 @@ import com.watermellonstudios.audio.domain.usb.UsbTestResult
 import com.watermellonstudios.audio.domain.usb.UsbTestStatus
 import com.watermellonstudios.audio.domain.usb.UsbTransferStats
 import com.watermellonstudios.audio.harness.smoke.ENGINE_STATE_STOPPED
+import com.watermellonstudios.audio.harness.smoke.DialogOutcome
+import com.watermellonstudios.audio.harness.smoke.SmokePreconditions
 import com.watermellonstudios.audio.harness.smoke.SmokeReporter
 import com.watermellonstudios.audio.harness.smoke.SuiteRowVerdict
+import com.watermellonstudios.audio.harness.smoke.forgedPermissionCheck
+import com.watermellonstudios.audio.harness.smoke.usbPermissionAfterDialog
 import com.watermellonstudios.audio.internal.bridge.getAudioBridge
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +38,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.TimeSource
 
 /**
  * MINI-038 — el camino USB del harness sobre la API pública de la librería: [IUsbAudioManager]
@@ -113,6 +118,8 @@ class UsbHarness(private val context: Context) {
     private suspend fun connectWithEngineReady(r: SmokeReporter, device: UsbAudioDevice, humanTimeoutMs: Long): Boolean {
         val hadPermission = manager.hasPermission(device)
         val result = if (hadPermission) {
+            // REQ-053 S1 (D13): sin diálogo no hay ventana; la precondición se ve en el acto.
+            r.precondition(PANEL, SmokePreconditions.USB_PERMISSION, true, "ya-concedido")
             r.report(PANEL, "permiso", true, "origen" to "ya-concedido", "dispositivo" to device.vidPid)
             withTimeoutOrNull(humanTimeoutMs) { manager.connectDevice(device) }
         } else {
@@ -180,8 +187,11 @@ class UsbHarness(private val context: Context) {
      *   con `permission=true` no marcó nada);
      * - el resultado no salió `PERMISSION_DENIED` (el falso con `permission=false` no abortó). El
      *   smoke le pide al humano ACEPTAR, así que una negación es un humano que se equivocó o un
-     *   broadcast ajeno que abortó: desde acá no se distinguen, y los dos invalidan la corrida.
-     *   Por eso sale FAIL con `motivo=negado:humano-o-broadcast-ajeno`, no HUMANO.
+     *   broadcast ajeno que abortó: en el instante no se distinguen. Sale `ok=false` con
+     *   `motivo=negado:humano-o-broadcast-ajeno`, y REQ-053 S1 (D13) la resuelve con la ventana:
+     *   si el permiso aparece antes de cerrarla, el broadcast ajeno queda probado
+     *   (`concluyente=true`, FAIL aunque el permiso no se cumpla); si no, es una negación y el
+     *   juez la da BLOQUEADO por la precondición del permiso. Ver [forgedPermissionCheck].
      *
      * Devuelve `null` si el humano no contestó dentro de [humanTimeoutMs].
      */
@@ -214,24 +224,37 @@ class UsbHarness(private val context: Context) {
             "dispositivo" to device.vidPid, "espera-max-s" to humanTimeoutMs / 1000,
             "dialogo-pedido" to requested,
         )
+        val window = TimeSource.Monotonic.markNow()
         val result = withTimeoutOrNull(humanTimeoutMs) { pending.await() }
         if (result == null) pending.cancel()
         watcher.cancelAndJoin()
         val deniedResult = (result as? UsbResult.Failure)?.error == UsbAudioError.PERMISSION_DENIED
-        r.report(
-            PANEL, "permiso-falso", forged == 0 && !deniedResult,
-            "granted" to grants, "granted-sin-permiso-en-usbmanager" to forged,
-            "motivo" to when {
-                forged > 0 -> "granted-con-usbmanager-diciendo-que-no"
-                deniedResult -> "negado:humano-o-broadcast-ajeno"
-                else -> null
+        // REQ-053 S1 (D13): el permiso como precondición, al cerrar la ventana. Una negación espera
+        // el resto de la ventana antes de afirmarse (ver usbPermissionAfterDialog); sin respuesta y
+        // sin permiso no hay línea, y el juez lo da HUMANO. Se lee ANTES de juzgar permiso-falso:
+        // un PERMISSION_DENIED con el permiso concedido después prueba el broadcast ajeno.
+        val permission = usbPermissionAfterDialog(
+            outcome = when {
+                result == null -> DialogOutcome.NO_ANSWER
+                deniedResult -> DialogOutcome.DENIED
+                else -> DialogOutcome.OTHER
             },
+            hasPermission = { manager.hasPermission(device) },
+            remainingMs = { humanTimeoutMs - window.elapsedNow().inWholeMilliseconds },
+            pause = { delay(it) },
+        )
+        val check = forgedPermissionCheck(forged, deniedResult, permission?.met == true)
+        r.report(
+            PANEL, "permiso-falso", check.ok,
+            "granted" to grants, "granted-sin-permiso-en-usbmanager" to forged,
+            "concluyente" to check.conclusive, "motivo" to check.reason,
             "resultado" to when (result) {
                 null -> "sin-respuesta-humana"
                 is UsbResult.Success -> "conectado"
                 is UsbResult.Failure -> result.error
             },
         )
+        permission?.let { r.precondition(PANEL, SmokePreconditions.USB_PERMISSION, it.met, it.evidence) }
         result
     }
 
