@@ -2147,6 +2147,24 @@ SPY
     sed -E '/panel=sf2 step=control /s/ ok=true (.*) pico=0.0000 (.*)$/ ok=false \1 pico=0.2000 \2 motivo=el-control-sono/' "$tmp/verde.log" > "$tmp/e4.log"
     expect "e4: un control que sono = FAIL" 1 "$tmp/e4.log" "$auto"
     expect_line "e4: sf2/control sale FAIL" '^FAIL +sf2/control ' "$tmp/e4.log" "$auto"
+    # ... tambien si la app dice ok=true: el juez mira el pico del control (review de S3). Si no, un
+    # control que sono por una regresion de la app culparia al oyente (sensor-no-discrimina).
+    sed -E '/panel=sf2 step=control /s/ pico=0.0000 / pico=0.2500 /' "$tmp/verde.log" > "$tmp/e5.log"
+    expect "e5: un control con pico (aunque diga ok=true) = FAIL" 1 "$tmp/e5.log" "$auto"
+    expect_line "e5: sf2/control sale FAIL" '^FAIL +sf2/control +control no-rendido' "$tmp/e5.log" "$auto"
+    sed -E "/panel=sf2 step=sensor ok=true n=$nc /s/veredicto=[a-z-]+/veredicto=presente/" "$tmp/e5.log" > "$tmp/e5b.log"
+    expect_no_line "e5b: un si sobre ese control no culpa al sensor" '^BLOQUEADO ' "$tmp/e5b.log" "$auto"
+    # AC-053.8, "por la ruta declarada": sf2/sf3 por el sistema, usb por libusb. El juez la cruza con
+    # el backend que reporto el motor, aunque la app diga ok=true.
+    sed -E '/panel=sf2 step=estimulo /s/ backend=OBOE / backend=LIBUSB /' "$tmp/verde.log" > "$tmp/r1.log"
+    expect "r1: un estimulo de sf2 que salio por libusb = FAIL" 1 "$tmp/r1.log" "$auto"
+    expect_line "r1: sf2/estimulo sale FAIL" '^FAIL +sf2/estimulo +estimulo no-rendido' "$tmp/r1.log" "$auto"
+    sed -E '/panel=sf3 step=(escuchar|estimulo|control) /s/ ruta=sistema / ruta=libusb /; /panel=sf3 step=(estimulo|control) /s/ backend=OBOE / backend=LIBUSB /' "$tmp/verde.log" > "$tmp/r2.log"
+    expect "r2: sf3 declarado por libusb (otra ruta que la del plan) = FAIL" 1 "$tmp/r2.log" "$auto"
+    with_usb "$tmp/r3.log" '/panel=usb step=(escuchar|estimulo|control) /s/ ruta=libusb / ruta=sistema /; /panel=usb step=(estimulo|control) /s/ backend=LIBUSB / backend=OBOE /'
+    expect "r3: el A4 de usb por la salida del sistema = FAIL" 1 "$tmp/r3.log"
+    expect_line "r3: usb/estimulo sale FAIL" '^FAIL +usb/estimulo +estimulo no-rendido' "$tmp/r3.log"
+    expect "r3 gemelo: el usb sano por libusb = 0 (M7)" 0 "$tmp/m7.log"
 
     # --- El seguidor (en vivo): consulta al sensor al cerrar cada ventana, y SOLO si se rindio. ---
     # Corre con el sensor `guion` (contesta de un archivo y anota cada consulta), sin TTY.
@@ -2200,6 +2218,30 @@ SPY
     seguir_reset; head -1 "$tmp/f-ok.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
     head -2 "$tmp/f-ok.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
     has_line "f5: un veredicto fuera del contrato queda sin-dato" ' n=1 sensor=guion veredicto=sin-dato evidencia=veredicto-ilegible:si ' "$tmp/seg.sensor"
+    printf 'presente\nausente\npresente\nausente\n' > "$tmp/guion"
+    # Un cierre sin su aviso: nadie supo cuando escuchar. No se consulta, sin-dato.
+    sed -n 2p "$tmp/f-ok.log" > "$tmp/f-sin-aviso.log"
+    seguir_reset; seguir_case "$tmp/f-sin-aviso.log"
+    is_eq "f6: un cierre sin aviso no se consulta" "$(calls)" 0
+    has_line "f6: ... y queda sin-dato sin-aviso" ' n=1 sensor=guion veredicto=sin-dato evidencia=sin-aviso ' "$tmp/seg.sensor"
+    # La ventana se marca procesada ANTES de consultar: si el seguidor se cae a mitad, esa ventana
+    # queda sin juicio (HUMANO) y no se vuelve a preguntar.
+    printf '!caida\nausente\n' > "$tmp/guion"
+    seguir_reset; head -1 "$tmp/f-ok.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
+    head -2 "$tmp/f-ok.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
+    seguir_case "$tmp/f-part.log"
+    is_eq "f7: caido a mitad de una consulta, no se repite" "$(calls)" 1
+    is_eq "f7: ... y no queda juicio de esa ventana" "$(grep -c ' n=1 ' "$tmp/seg.sensor" || true)" 0
+    # El aviso tardio se decide sobre el log RELEIDO despues de cada consulta, no sobre la foto de
+    # antes (review de S3): si mientras el oyente contestaba la ventana siguiente ya se aviso y cerro,
+    # esa no se anuncia como si faltara.
+    printf 'presente\nausente\n' > "$tmp/guion"
+    seguir_reset; head -1 "$tmp/f-ok.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
+    head -3 "$tmp/f-ok.log" > "$tmp/f-part.log"
+    seguir_case "$tmp/f-part.log" "$(sed -n 4p "$tmp/f-ok.log")"
+    seguir_case "$tmp/f-part.log"
+    is_eq "f8: la ventana que cerro mientras se contestaba no se consulta" "$(calls)" 1
+    has_line "f8: ... y queda sin-dato aviso-tarde" ' n=2 sensor=guion veredicto=sin-dato evidencia=aviso-tarde' "$tmp/seg.sensor"
     printf 'presente\nausente\npresente\nausente\n' > "$tmp/guion"
     # `--sensor ninguno` deja todo HUMANO: el seguidor registra sin-dato y el juez no da PASS.
     {
@@ -2258,7 +2300,7 @@ def pump(prompts, limit):
             buf += chunk
 for i, a in enumerate([x for x in answers.split("|") if x]):
     pump(i + 1, 20)
-    os.write(fd, a.encode() + b"\n")
+    os.write(fd, b"\x04" if a == "^D" else a.encode() + b"\n")
 pump(None, 30)
 os.waitpid(pid, 0)
 print(next((l.strip() for l in buf.decode(errors="replace").splitlines() if l.strip().startswith("veredicto=")), "sin-linea"))
@@ -2269,6 +2311,7 @@ PTY
     is_eq "sensor tty: ? = sin-dato" "$(sensor_pty '?' 20)" "veredicto=sin-dato sensor=oido-humano evidencia=respuesta:?"
     is_eq "sensor tty: algo que no es s/n/? se vuelve a preguntar" "$(sensor_pty 'x|s' 20)" "veredicto=presente sensor=oido-humano evidencia=respuesta:s"
     is_eq "sensor tty: sin respuesta = sin-dato" "$(sensor_pty '' 1)" "veredicto=sin-dato sensor=oido-humano evidencia=sin-respuesta:1s"
+    is_eq "sensor tty: fin de entrada (Ctrl-D) = sin-dato" "$(sensor_pty '^D' 20)" "veredicto=sin-dato sensor=oido-humano evidencia=eof"
     is_eq "sensor: sin TTY = sin-dato (no pregunta)" \
         "$(bash "$0" --sensor-consulta oido-humano A4-440Hz sf2-1de2-2000ms sistema 20 < /dev/null 2>/dev/null)" \
         "veredicto=sin-dato sensor=oido-humano evidencia=sin-tty"
@@ -2293,6 +2336,12 @@ PTY
     sed -E '/panel=sf3 step=sensor /s/sensor=oido-humano/sensor=otro/' "$tmp/nd.log" > "$tmp/nd2.log"
     expect_line "nd2: el otro sensor sigue juzgando: PASS" '^PASS +sf3/sensor-estimulo +.*sensor=otro' "$tmp/nd2.log" "$auto"
     expect_line "nd2: ... y el que no discrimina sigue BLOQUEADO" '^BLOQUEADO +sf2/sensor-estimulo ' "$tmp/nd2.log" "$auto"
+    expect_json "nd: el bloqueo del sensor esta en las precondiciones del JSON, con su remedio" "$tmp/nd.log" "$auto" \
+        "[p for p in j['precondiciones'] if p['id'] == 'sensor-no-discrimina' and p['verificador'] == 'juez' and p['estado'] == 'incumplida' and p['remedio'] and 'sf2/$nc:control:presente' in p['evidencia']]"
+    # Un registro sin `sensor=` (editado a mano) no tumba al juez: el bloqueo cae sobre ese registro.
+    sed -E "/panel=sf2 step=sensor ok=true n=$nc /s/ sensor=oido-humano//" "$tmp/nd.log" > "$tmp/nd4.log"
+    expect "nd4: un juicio sin nombre de sensor que oyo el control = BLOQUEADO" 4 "$tmp/nd4.log" "$auto"
+    expect_line "nd4: ... sin tocar los juicios que si tienen sensor" '^PASS +sf3/sensor-estimulo ' "$tmp/nd4.log" "$auto"
     # Un "si" en un control que NO fue silencio no prueba nada del sensor: no invalida.
     sed -E "/panel=sf2 step=sensor ok=true n=$nc /s/veredicto=[a-z-]+/veredicto=presente/" "$tmp/e4.log" > "$tmp/nd3.log"
     expect_no_line "nd3: un si en un control invalido no bloquea al sensor" '^BLOQUEADO ' "$tmp/nd3.log" "$auto"
@@ -2340,7 +2389,10 @@ PTY
     is_eq "semilla: va a la app por el extra harness.smoke.semilla" "$(grep -cE -- '--es harness\.smoke\.semilla "\$seed"' <<< "$body")" 1
     is_eq "semilla y sensor: el juez los recibe" \
         "$(grep -cE '^    verdict "\$app_log" .* "\$sensor_log" --semilla "\$seed"' <<< "$body")" 1
-    is_eq "seguidor: corre en el bucle y una vez mas al final" "$(grep -cE '^ +smoke_py seguir ' <<< "$body")" 2
+    is_eq "seguidor: una vez en cada vuelta del bucle" \
+        "$(awk '/^    while \(\( SECONDS - started < ceiling \)\); do$/ {on = 1} on && /^    done$/ {exit} on' <<< "$body" | grep -cE '^ +smoke_py seguir "\$raw" ')" 1
+    is_eq "seguidor: y una vez mas sobre el log final" \
+        "$(awk '/> "\$app_log" \|\| true$/ {on = 1} on' <<< "$body" | grep -cE '^ +smoke_py seguir "\$app_log" ')" 1
     # AC-053.11: ya no hay lista de OIDO: lo que habia es un paso con estimulo y sensor, o se borro.
     is_eq "AC-053.11: el script no lista chequeos de oido" \
         "$(grep -cE 'Requiere O[IÍ]DO|print_ear[_]checks' "$0" || true)" 0
