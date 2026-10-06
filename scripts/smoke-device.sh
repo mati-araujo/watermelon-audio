@@ -215,15 +215,34 @@ def number(v):
         return None
 
 
+# La ruta que declara cada plan audible (AC-053.8, "por la ruta declarada"): sf2/sf3 por la salida
+# del sistema, usb por la placa (libusb). El juez la cruza con el backend que REPORTA el motor.
+EXPECTED_ROUTE = {"sf2": "sistema", "sf3": "sistema", "usb": "libusb"}
+# El silencio de un control: por debajo de -40 dBFS, el mismo umbral con el que el harness dice que
+# algo sono (SoundFontCheck.MIN_PEAK).
+CONTROL_MAX_PEAK = 0.01
+
+
+def route_ok(f):
+    """La ventana salio por la ruta que declara su plan. `sistema` es cualquier backend que no sea
+    libusb (el camino directo de Oboe no pasa por BackendManager y reporta NONE); `libusb`, ese."""
+    ruta, backend = f.get("ruta"), f.get("backend")
+    if ruta != EXPECTED_ROUTE.get(f.get("panel")) or backend is None:
+        return False
+    return backend == "LIBUSB" if ruta == "libusb" else backend != "LIBUSB"
+
+
 def window_rendered(f):
-    """AC-053.8: el motor rindio la ventana como se declaro. Un estimulo: ok, frames > 0 y pico > 0.
-    Un control: ok (la app midio silencio) y frames > 0. El juez mira los NUMEROS, no solo el ok."""
+    """AC-053.8: el motor rindio la ventana como se declaro, por la ruta declarada. Un estimulo: ok,
+    frames > 0 y pico > 0. Un control: ok, frames > 0 y pico por debajo del umbral de silencio. El
+    juez mira los NUMEROS y la ruta, no solo el ok: una regresion de la app que dice ok=true sobre un
+    control que sono culparia al oyente (sensor-no-discrimina) en vez de dar FAIL."""
     frames, peak = number(f.get("frames")), number(f.get("pico"))
-    if f.get("ok") != "true" or frames is None or frames <= 0:
+    if not route_ok(f) or f.get("ok") != "true" or frames is None or frames <= 0 or peak is None:
         return False
     if f.get("step") == STIMULUS:
-        return peak is not None and peak > 0
-    return True
+        return peak > 0
+    return peak < CONTROL_MAX_PEAK
 # REQ-053 S1: la linea que trae una precondicion verificada (de la app, o del host con
 # `verificador=host`). No es un paso: el juez la cruza con la ficha.
 PRECOND = "precondicion"
@@ -912,16 +931,23 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
             else:
                 # D7: oyo el estimulo donde no sono. Invalida a ESE sensor en toda la corrida (abajo).
                 verdict = "BLOQUEADO"
-                not_discriminating.setdefault(rec.get("sensor"), []).append("%s/%s:control:presente" % key)
+                not_discriminating.setdefault(rec.get("sensor") or "-", []).append("%s/%s:control:presente" % key)
             entry["juicio"] = verdict
             row = add(verdict, panel, step, said, rec)
-            row["_sensor"], row["_entry"] = rec.get("sensor"), entry
+            # Un registro sin `sensor=` (editado a mano) es su propio sensor, "-": nunca coincide con
+            # las filas que no tienen registro.
+            row["_sensor"], row["_entry"] = rec.get("sensor") or "-", entry
         for key in sorted(k for k in by_key if k not in used):
             for rec in by_key[key]:
                 add("FAIL", key[0] or "-", "sensor-sin-ventana",
                     "juicio de sensor para la ventana %s/%s, que la app no emitio" % key, rec)
         # AC-053.10: un "si" en un control => TODO lo que juzgo ese sensor sale BLOQUEADO.
         for name, where in not_discriminating.items():
+            # Tambien en las precondiciones del JSON, con su remedio: una granja resuelve el remedio
+            # de un BLOQUEADO por el id de `pasos[].precondiciones`.
+            preconditions.append({"id": NOT_DISCRIMINATING, "plan": "*", "verificador": "juez", "cumplida": False,
+                                  "estado": "incumplida", "evidencia": "sensor=%s:%s" % (name, ",".join(where)),
+                                  "remedio": NOT_DISCRIMINATING_REMEDY, "depende": ["sensor-*"], "sensor": name})
             for row in rows:
                 if row.get("_sensor") == name:
                     old = "%s: %s" % (row["veredicto"], row["detalle"])
@@ -1020,7 +1046,7 @@ def sensor_oido_humano(estimulo, ventana, ruta, timeout_s):
     try:
         import termios
         termios.tcflush(0, termios.TCIFLUSH)   # lo tipeado ANTES de la pregunta no la contesta
-    except (ImportError, OSError):
+    except Exception:   # sin termios, o una TTY que no lo acepta (termios.error no es OSError)
         pass
     question = ">>> ¿Sonó %s por %s en la ventana %s? [s/n/?] " % (
         STIMULI.get(estimulo, estimulo), ROUTES.get(ruta, ruta), ventana)
@@ -1029,13 +1055,17 @@ def sensor_oido_humano(estimulo, ventana, ruta, timeout_s):
         left = deadline - time.monotonic()
         if left <= 0:
             break
-        sys.stdout.write(question)
-        sys.stdout.flush()
-        ready, _, _ = select.select([0], [], [], left)
-        if not ready:
-            break
-        data = os.read(0, 4096)
+        try:
+            sys.stdout.write(question)
+            sys.stdout.flush()
+            ready, _, _ = select.select([0], [], [], left)
+            if not ready:
+                break
+            data = os.read(0, 4096)
+        except OSError as e:   # la TTY se colgo (una sesion ssh que se corta): no sabe
+            return "sin-dato", "tty-error:%s" % type(e).__name__
         if not data:
+            print()   # el Ctrl-D no deja salto de linea
             return "sin-dato", "eof"
         answer = data.decode("utf-8", "replace").strip().lower()
         if answer in ("s", "si", "sí"):
@@ -1070,7 +1100,10 @@ def sensor_guion(estimulo, ventana, ruta, timeout_s):
             f.write(late + "\n")
     with open(os.environ["WMA_SENSOR_GUION"], encoding="utf-8") as f:
         answers = [line.strip() for line in f if line.strip()]
-    return (answers[done] if done < len(answers) else "sin-dato"), "guion:%d" % (done + 1)
+    answer = answers[done] if done < len(answers) else "sin-dato"
+    if answer.startswith("!"):
+        raise RuntimeError("guion: caida simulada a mitad de la consulta")
+    return answer, "guion:%d" % (done + 1)
 
 
 SENSORS = {"oido-humano": sensor_oido_humano, "ninguno": sensor_ninguno, "guion": sensor_guion}
@@ -1143,50 +1176,59 @@ def follow(log, sensor_log, state_path, sensor, run):
                       "estimulo=%s ruta=%s\n" % (run, f.get("panel"), SENSOR_STEP, f.get("n"), res["sensor"],
                                                  res["veredicto"], res["evidencia"], value(estimulo), value(ruta)))
 
-    events = app_events(log, run)
     key = lambda f: "%s/%s" % (f.get("panel"), f.get("n"))
-    closed = {key(f) for f in events if f.get("step") in WINDOW_STEPS}
-    listens = {key(f): f for f in events if f.get("step") == LISTEN}
-    for i, f in enumerate(events):
-        k = key(f)
-        if f.get("step") == LISTEN and k not in state["anunciadas"]:
-            state["anunciadas"].append(k)
-            if k in closed:
-                state["tarde"].append(k)
-                print("(ventana %s de %s, %s: el aviso llego cuando ya habia cerrado; no se pregunta)"
-                      % (f.get("n"), f.get("de"), f.get("panel")))
-            else:
-                print(">>> ESCUCHÁ — ventana %s de %s (%s): arranca en ~%s s y dura %s s, por %s."
-                      % (f.get("n"), f.get("de"), f.get("panel"), int(number(f.get("en-ms")) or 0) // 1000,
-                         int(number(f.get("ventana-ms")) or 0) // 1000, ROUTES.get(f.get("ruta"), f.get("ruta"))))
-            sys.stdout.flush()
-            save()
-        elif f.get("step") in WINDOW_STEPS and k not in state["procesadas"]:
-            state["procesadas"].append(k)
-            save()
-            if not window_rendered(f):
-                print("(ventana %s de %s: el motor no la rindio como se declaro; no se pregunta)" % (f.get("n"), f.get("panel")))
-                continue
-            listen = listens.get(k)
-            if listen is None:
-                record(f, {"veredicto": "sin-dato", "sensor": sensor, "evidencia": "sin-aviso"}, "-", f.get("ruta"))
-                continue
-            estimulo, ruta = listen.get("estimulo", "-"), listen.get("ruta", "-")
-            if k in state["tarde"]:
-                record(f, {"veredicto": "sin-dato", "sensor": sensor, "evidencia": "aviso-tarde"}, estimulo, ruta)
-                continue
-            pause_ms = number(f.get("pausa-ms")) or 0
-            timeout_s = max(1, int(pause_ms // 1000) - ANSWER_MARGIN_S)
-            ventana = "%s-%sde%s-%sms" % (f.get("panel"), f.get("n"), f.get("de"), f.get("ventana-ms"))
-            res = consult(sensor, estimulo, ventana, ruta, timeout_s)
-            # Releer: si mientras el sensor contestaba la app ya aviso OTRA ventana, la respuesta
-            # pudo mezclar las dos. No vale.
-            now = app_events(log, run)
-            pos = next((j for j, g in enumerate(now) if g.get("step") in WINDOW_STEPS and key(g) == k), None)
-            if pos is not None and any(g.get("step") == LISTEN for g in now[pos + 1:]):
-                res = {"veredicto": "sin-dato", "sensor": res["sensor"],
-                       "evidencia": "respuesta-tardia:%s" % res["veredicto"]}
-            record(f, res, estimulo, ruta)
+    # Despues de cada consulta (que puede tardar lo que tarda el oyente) se RELEE el log y se empieza
+    # de nuevo: lo que se decide sobre el orden (aviso tardio, respuesta tardia) se decide sobre el
+    # log de ESE momento, no sobre la foto de antes de preguntar.
+    while True:
+        events = app_events(log, run)
+        closed = {key(f) for f in events if f.get("step") in WINDOW_STEPS}
+        listens = {key(f): f for f in events if f.get("step") == LISTEN}
+        consulted = False
+        for i, f in enumerate(events):
+            k = key(f)
+            if f.get("step") == LISTEN and k not in state["anunciadas"]:
+                state["anunciadas"].append(k)
+                if k in closed:
+                    state["tarde"].append(k)
+                    print("(ventana %s de %s, %s: el aviso llego cuando ya habia cerrado; no se pregunta)"
+                          % (f.get("n"), f.get("de"), f.get("panel")))
+                else:
+                    print(">>> ESCUCHÁ — ventana %s de %s (%s): arranca en ~%s s y dura %s s, por %s."
+                          % (f.get("n"), f.get("de"), f.get("panel"), int(number(f.get("en-ms")) or 0) // 1000,
+                             int(number(f.get("ventana-ms")) or 0) // 1000, ROUTES.get(f.get("ruta"), f.get("ruta"))))
+                sys.stdout.flush()
+                save()
+            elif f.get("step") in WINDOW_STEPS and k not in state["procesadas"]:
+                state["procesadas"].append(k)
+                save()
+                if not window_rendered(f):
+                    print("(ventana %s de %s: el motor no la rindio como se declaro; no se pregunta)" % (f.get("n"), f.get("panel")))
+                    continue
+                listen = listens.get(k)
+                if listen is None:
+                    record(f, {"veredicto": "sin-dato", "sensor": sensor, "evidencia": "sin-aviso"}, "-", f.get("ruta"))
+                    continue
+                estimulo, ruta = listen.get("estimulo", "-"), listen.get("ruta", "-")
+                if k in state["tarde"]:
+                    record(f, {"veredicto": "sin-dato", "sensor": sensor, "evidencia": "aviso-tarde"}, estimulo, ruta)
+                    continue
+                pause_ms = number(f.get("pausa-ms")) or 0
+                timeout_s = max(1, int(pause_ms // 1000) - ANSWER_MARGIN_S)
+                ventana = "%s-%sde%s-%sms" % (f.get("panel"), f.get("n"), f.get("de"), f.get("ventana-ms"))
+                res = consult(sensor, estimulo, ventana, ruta, timeout_s)
+                # Releer: si mientras el sensor contestaba la app ya aviso OTRA ventana, la respuesta
+                # pudo mezclar las dos. No vale.
+                now = app_events(log, run)
+                pos = next((j for j, g in enumerate(now) if g.get("step") in WINDOW_STEPS and key(g) == k), None)
+                if pos is not None and any(g.get("step") == LISTEN for g in now[pos + 1:]):
+                    res = {"veredicto": "sin-dato", "sensor": res["sensor"],
+                           "evidencia": "respuesta-tardia:%s" % res["veredicto"]}
+                record(f, res, estimulo, ruta)
+                consulted = True
+                break
+        if not consulted:
+            return
 
 
 def veredicto_args(args):
@@ -2304,6 +2346,7 @@ for i, a in enumerate([x for x in answers.split("|") if x]):
 pump(None, 30)
 os.waitpid(pid, 0)
 print(next((l.strip() for l in buf.decode(errors="replace").splitlines() if l.strip().startswith("veredicto=")), "sin-linea"))
+# (la linea del resultado tiene que salir SOLA: lo que la precede es la pregunta y el eco del oyente)
 PTY
     }
     is_eq "sensor tty: s = presente" "$(sensor_pty s 20)" "veredicto=presente sensor=oido-humano evidencia=respuesta:s"
