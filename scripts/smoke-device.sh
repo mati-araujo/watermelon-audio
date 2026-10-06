@@ -2157,6 +2157,12 @@ SPY
     seguir_reset; seguir_case "$tmp/f-ok.log"
     is_eq "f4: aviso tardio: no se consulta" "$(calls)" 0
     has_line "f4: ... y queda sin-dato aviso-tarde" ' n=1 sensor=guion veredicto=sin-dato evidencia=aviso-tarde' "$tmp/seg.sensor"
+    # Un sensor que contesta fuera del contrato (presente/ausente/sin-dato) no sabe: sin-dato.
+    printf 'si\n' > "$tmp/guion"
+    seguir_reset; head -1 "$tmp/f-ok.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
+    head -2 "$tmp/f-ok.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
+    has_line "f5: un veredicto fuera del contrato queda sin-dato" ' n=1 sensor=guion veredicto=sin-dato evidencia=veredicto-ilegible:si ' "$tmp/seg.sensor"
+    printf 'presente\nausente\npresente\nausente\n' > "$tmp/guion"
     # `--sensor ninguno` deja todo HUMANO: el seguidor registra sin-dato y el juez no da PASS.
     {
         sed -E '/ step=sensor /d' "$tmp/verde.log"
@@ -2168,6 +2174,8 @@ SPY
     expect "ninguno: todo HUMANO, exit 3" 3 "$tmp/ninguno.log" "$auto"
     expect_no_line "ninguno: ningun juicio del sensor sale PASS" '^PASS +[a-z0-9]+/sensor-' "$tmp/ninguno.log" "$auto"
 
+    # El aviso de una ventana no es un veredicto (como esperando-humano): no tiene fila.
+    expect_no_line "escuchar: el aviso no es un paso juzgado" '/escuchar ' "$tmp/verde.log" "$auto"
     # --- AC-053.9: s => PASS (el verde), n => FAIL, ? / sin respuesta / ilegible => HUMANO. -----
     sed -E "/panel=sf2 step=sensor ok=true n=$ne /s/veredicto=[a-z-]+/veredicto=ausente/" "$tmp/verde.log" > "$tmp/s-n.log"
     expect "s-n: el sensor no oyo el estimulo = FAIL" 1 "$tmp/s-n.log" "$auto"
@@ -2279,6 +2287,22 @@ PTY
     split_case "sensor forjado por logcat: se descarta = HUMANO" 3 "$tmp/s3-forjado.log" "$tmp/s3-host.log" \
         '^AVISO .* 4 linea\(s\) step=sensor'
 
+    # La corrida en device: la semilla sale de /dev/urandom (31 bits), va a la app por extra y al juez,
+    # y el juez recibe el registro del sensor.
+    local seed1 seed2
+    seed1="$(new_seed || true)"; seed2="$(new_seed || true)"
+    if [[ "$seed1" =~ ^[0-9]+$ && "$seed1" -le 2147483647 && "$seed1" != "$seed2" ]]; then
+        printf '  ok    %-58s\n' "semilla: 31 bits aleatorios, cambia"
+    else
+        printf '  MAL   %-58s %s %s\n' "semilla: 31 bits aleatorios, cambia" "$seed1" "$seed2"; failures=$((failures + 1))
+    fi
+    local body
+    body="$(awk '/^run_device\(\) \{/ {on = 1} on {print} on && /^\}/ {exit}' "$0")"
+    is_eq "semilla: la corrida la saca de new_seed" "$(grep -cE '^    seed="\$\(new_seed\)" \|\| exit 2$' <<< "$body")" 1
+    is_eq "semilla: va a la app por el extra harness.smoke.semilla" "$(grep -cE -- '--es harness\.smoke\.semilla "\$seed"' <<< "$body")" 1
+    is_eq "semilla y sensor: el juez los recibe" \
+        "$(grep -cE '^    verdict "\$app_log" .* "\$sensor_log" --semilla "\$seed"' <<< "$body")" 1
+    is_eq "seguidor: corre en el bucle y una vez mas al final" "$(grep -cE '^ +smoke_py seguir ' <<< "$body")" 2
     # AC-053.11: ya no hay lista de OIDO: lo que habia es un paso con estimulo y sensor, o se borro.
     is_eq "AC-053.11: el script no lista chequeos de oido" \
         "$(grep -cE 'Requiere O[IÍ]DO|print_ear[_]checks' "$0" || true)" 0
