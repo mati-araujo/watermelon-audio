@@ -19,15 +19,15 @@
 #   4. verifica las precondiciones de HOST de la ficha para el plan pedido, por adb y en SOLO
 #      LECTURA, antes de disparar el plan (REQ-053, AC-053.1);
 #   5. dispara el plan con un extra de intent (MainActivity, build debug):
-#        am start ... --es harness.smoke <plan> --es harness.smoke.run <id>
+#        am start ... --es harness.smoke <plan> --es harness.smoke.run <id> --es harness.smoke.semilla <n>
 #   6. lee las lineas `HARNESS-SMOKE` de ESA corrida (filtra por run=<id>; el buffer de logcat no
-#      se borra, es del device) hasta `panel=plan step=fin`, o hasta el techo;
+#      se borra, es del device) hasta `panel=plan step=fin`, o hasta el techo; mientras tanto SIGUE
+#      las ventanas de escucha y le pregunta al sensor por cada una (REQ-053 S3, abajo);
 #   7. cruza las precondiciones (las del host y las que emite la app) con la ficha y da un
 #      veredicto por punto: PASS / FAIL / BLOQUEADO / HUMANO. Un paso con ok=false es FAIL; un paso
 #      que falta es FAIL; lo que quedo detras de `step=esperando-humano` sin que el humano lo
 #      resolviera es HUMANO, nunca PASS;
-#   8. deja el JSON de la corrida al lado del log (harness-smoke.json);
-#   9. lista aparte lo que requiere OIDO (ningun log dice si algo suena bien).
+#   8. deja el JSON de la corrida al lado del log (harness-smoke.json).
 #
 # REQ-053 — el modelo de precondiciones:
 #   - La ficha declara, por plan, cada precondicion: quien la verifica (D4: `host` por adb, o `app`
@@ -48,6 +48,38 @@
 #     pendiente, es `pendiente-humano`: lo que depende queda HUMANO (la ventana vencio), no BLOQUEADO.
 #     Negada explicitamente, la app emite `cumplida=false` y es BLOQUEADO.
 #
+# REQ-053 S3 — el estimulo y el sensor (D5, D6, D7):
+#   - En sf2, sf3 y usb la app toca el A4 del fixture (.sf2 en sf2 y usb, .sf3 en sf3) CON EL MOTOR
+#     (D5: :audio no cambia) durante una ventana declarada, por una ruta declarada (`sistema` en
+#     sf2/sf3; `libusb` en usb, con el streaming de la libreria ya parado), y una ventana de CONTROL
+#     de silencio. El orden de las dos sale de la semilla (/dev/urandom, 31 bits), que va por extra
+#     y queda en el JSON: window_order() en el juez y WindowOrder en el harness son la misma cuenta,
+#     con los mismos vectores fijados en los dos tests, y el juez da FAIL si la app corrio otro orden.
+#   - Sincronizacion, sin relojes: la APP anuncia cada ventana (`step=escuchar`, CIEGO: el aviso de
+#     un estimulo y el de un control son la misma linea salvo `n`) y la cierra (`step=estimulo` /
+#     `step=control`, con frames y pico) y deja una pausa para contestar. El SCRIPT la sigue en la
+#     captura (smoke_py seguir): al ver el aviso se lo dice al humano, al ver el cierre consulta al
+#     sensor. El orden del log decide lo que llega tarde: un aviso visto con su ventana ya cerrada
+#     no se pregunta, y una respuesta dada cuando la app ya aviso la siguiente no vale (sin-dato).
+#   - El SENSOR es una funcion con el contrato de D6: {estimulo, ventana, ruta} -> {veredicto,
+#     sensor, evidencia}, con veredicto presente / ausente / sin-dato. `--sensor oido-humano` (el
+#     default) pregunta en la terminal s/n/?; sin TTY, sin respuesta o `?` es sin-dato.
+#     `--sensor ninguno` deja todo sin-dato, para correr sin humano. REQ-051 enchufa el loopback
+#     agregando su funcion al registro SENSORS (y su nombre a sensor_valid); el juez no cambia.
+#     `--sensor-consulta` lo expone suelto. Los juicios los registra el SCRIPT en <out>/sensor.log;
+#     uno que llegue por logcat se descarta (HarnessSmoke tampoco deja armar `step=sensor`).
+#   - El juez: un estimulo que el motor no rindio (ok=false, frames=0 o pico=0) es FAIL y el
+#     sensor NO se consulta (AC-053.8); un control que no fue silencio es FAIL y tampoco se
+#     consulta. Sobre una ventana rendida: estimulo presente => PASS, ausente => FAIL, sin-dato o
+#     sin juicio => HUMANO (AC-053.9); control ausente => PASS, sin-dato => HUMANO, y presente =>
+#     TODO lo que juzgo ese sensor en la corrida sale BLOQUEADO `sensor-no-discrimina` (AC-053.10).
+#     El juicio de una ventana BLOQUEADO o HUMANO hereda ese veredicto.
+#   - La vieja lista de OIDO ya no existe (AC-053.11). sf2/sf3 ("tocar A4 suena") y usb ("el 440 sale
+#     por la placa") son ventanas con estimulo y sensor. Se borraron, con su razon: "senoide limpia,
+#     sin clicks ni distorsion" (el sensor contesta presencia con controles; la calidad necesita
+#     numeros: REQ-051), "la suite no se corta" (ya lo miden las filas de la suite) y "captura:
+#     hablarle al microfono" (el estimulo hacia el mic es S4, el afinador, o REQ-051).
+#
 # Exit: 1 algun FAIL > 4 algun BLOQUEADO > 3 HUMANO pendiente > 0 todo PASS · 2 uso/infra (tambien
 # una ficha invalida).
 # Una fila de la suite USB NO-APLICA (linea con aplica=false: el device no ofrece su config, REQ-050
@@ -56,8 +88,10 @@
 #
 # El JSON (`<out>/harness-smoke.json`, D12): `run`, `plan`, `ficha`, `exit`, `resumen`,
 # `precondiciones` ({id, plan, verificador, cumplida, estado, evidencia, remedio, depende}),
-# `pasos` ({panel, paso, veredicto, detalle, observado, precondiciones}) y `sensor` (vacio: lo llena
-# REQ-053 S3). `observado` es lo que emitio la app para ese paso (null si no lo emitio).
+# `pasos` ({panel, paso, veredicto, detalle, observado, precondiciones}), `semilla`, `semilla-origen`,
+# `orden` ({panel: [estimulo|control, ...]}, lo que da la semilla) y `sensor` ({panel, n, tipo,
+# estimulo, ruta, sensor, veredicto, evidencia, consultado, juicio}, una por ventana cerrada).
+# `observado` es lo que emitio la app para ese paso (null si no lo emitio).
 #
 # El formato de las lineas vive en un solo lugar:
 #   harness/src/commonMain/kotlin/com/watermellonstudios/audio/harness/smoke/HarnessSmoke.kt
@@ -68,11 +102,15 @@
 # Uso:
 #   ANDROID_SERIAL=<serial> bash scripts/smoke-device.sh [--plan todo|salida,sf2,...]
 #        [--usb-espera-s 120] [--techo-s N] [--out DIR] [--no-build] [--setup FICHA]
+#        [--sensor oido-humano|ninguno]
 #   bash scripts/smoke-device.sh --self-test
+#   bash scripts/smoke-device.sh --sensor-consulta SENSOR ESTIMULO VENTANA RUTA ESPERA-S
 #   bash scripts/smoke-device.sh --veredicto LOG RUN PLAN [--setup FICHA] [--json SALIDA] [--host-log LOG]
-#        [--host-en-log]
+#        [--sensor-log LOG] [--semilla N] [--host-en-log]
 #        # juzga un log ya grabado. LOG es el de la APP; las precondiciones del host van en
-#        # --host-log (precondiciones-host.log). Una linea `verificador=host` en LOG se descarta.
+#        # --host-log (precondiciones-host.log) y los juicios del sensor en --sensor-log
+#        # (sensor.log). Una linea `verificador=host` o `step=sensor` en LOG se descarta.
+#        # --semilla es la que mando el script (la corrida la pasa): si la app corrio otra, FAIL.
 #        # --host-en-log: SOLO para logs grabados antes de la separacion (S1), que traen las del
 #        # host mezcladas; las toma del propio LOG y avisa que ese log no separa origenes. La
 #        # corrida en device nunca lo pasa.
