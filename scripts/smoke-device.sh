@@ -907,7 +907,7 @@ self_test() {
        "paquetes": ["com.example.ajena"],
        "depende": ["conectar", "motor-callback", "capacidades", "descriptores", "backend", "wake-lock",
                    "streaming-start", "streaming-stats", "reconectar-mismo", "conectar-otro", "suite*",
-                   "streaming-stop", "backend-restaurado", "desconectar"],
+                   "streaming-stop", "estimulo", "control", "backend-restaurado", "desconectar"],
        "remedio": "REMEDIO-T-HOST-USB"},
       {"id": "t-alsa", "verificador": "host", "chequeo": "alsa-tarjeta-libre", "tarjeta": 1,
        "depende": ["streaming-start"], "remedio": "REMEDIO-T-ALSA"},
@@ -916,7 +916,8 @@ self_test() {
       {"id": "t-permiso", "verificador": "app", "ventana-humana": true,
        "depende": ["permiso", "permiso-falso", "conectar", "motor-callback", "capacidades", "descriptores",
                    "backend", "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo",
-                   "conectar-otro", "suite*", "streaming-stop", "backend-restaurado", "desconectar"],
+                   "conectar-otro", "suite*", "streaming-stop", "estimulo", "control", "backend-restaurado",
+                   "desconectar"],
        "remedio": "REMEDIO-T-PERMISO"}
     ]}
   }
@@ -1004,20 +1005,77 @@ JSON
     met_captura() { pre captura t-host-cap true host; pre captura t-app-cap true; }
     met_usb_host() { pre usb t-usb-clase true host; pre usb t-host-usb true host; pre usb t-alsa true host; pre usb t-reclamada true host; }
 
-    # El control: el log grabado tal cual, con una ficha SIN precondiciones — o sea, el juez de
-    # antes de REQ-053. Su exit es el que se grabo (ver la cabecera del log).
+    # --- REQ-053 S3: las ventanas de escucha y lo que registro el sensor. -----------------------
+    # El control grabado (01/10) es ANTERIOR a S3: no tiene ventanas, ni semilla, ni sensor. Lo que
+    # S3 agrega se INYECTA con estos helpers, como mutantes declarados: no es una corrida de device.
+    # La semilla de prueba fija el orden de cada panel (ver los vectores de abajo): con 12345, sf2 va
+    # estimulo-control y sf3 y usb van control-estimulo.
+    local SEM=12345 ord_sf2 ord_sf3 ord_usb
+    ord_sf2="$(smoke_py orden "$SEM" sf2)"; ord_sf3="$(smoke_py orden "$SEM" sf3)"; ord_usb="$(smoke_py orden "$SEM" usb)"
+    # ord <panel> [semilla]: el orden de ese panel (cacheado para la semilla de prueba).
+    ord() {
+        if [[ "${2:-$SEM}" != "$SEM" ]]; then smoke_py orden "$2" "$1"; return; fi
+        case "$1" in sf2) echo "$ord_sf2" ;; sf3) echo "$ord_sf3" ;; usb) echo "$ord_usb" ;; esac
+    }
+    # win <panel> [ruta] [semilla]: el aviso y el cierre de cada ventana, como los emite la app.
+    win() {
+        local panel="$1" ruta="${2:-sistema}" seed="${3:-$SEM}" k=0 kind backend=OBOE
+        [[ "$ruta" == libusb ]] && backend=LIBUSB
+        for kind in $(ord "$panel" "$seed"); do
+            k=$((k + 1))
+            echo "HARNESS-SMOKE v=1 run=$run panel=$panel step=escuchar ok=true n=$k de=2 estimulo=A4-440Hz ruta=$ruta en-ms=4000 ventana-ms=2000"
+            if [[ "$kind" == estimulo ]]; then
+                echo "HARNESS-SMOKE v=1 run=$run panel=$panel step=estimulo ok=true n=$k de=2 sono=A4 hz=440 nota=69 archivo=wma-fixture.sf2 preset=0 ruta=$ruta backend=$backend ventana-ms=2000 frames=96000 pico=0.2100 pausa-ms=12000"
+            else
+                echo "HARNESS-SMOKE v=1 run=$run panel=$panel step=control ok=true n=$k de=2 tipo=silencio ruta=$ruta backend=$backend ventana-ms=2000 frames=96000 pico=0.0000 pausa-ms=12000"
+            fi
+        done
+    }
+    # sens <panel> [veredicto en el estimulo] [veredicto en el control] [sensor]: el registro del
+    # sensor (lo escribe el SCRIPT, en su propio archivo: verdict_split lo separa del log de la app).
+    sens() {
+        local panel="$1" ve="${2:-presente}" vc="${3:-ausente}" sensor="${4:-oido-humano}" k=0 kind v
+        for kind in $(ord "$panel"); do
+            k=$((k + 1)); v="$vc"; [[ "$kind" == estimulo ]] && v="$ve"
+            echo "HARNESS-SMOKE v=1 run=$run panel=$panel step=sensor ok=true n=$k sensor=$sensor veredicto=$v evidencia=prueba-$panel-$k estimulo=A4-440Hz ruta=x"
+        done
+    }
+    # n_of <panel> <estimulo|control>: el numero de esa ventana con la semilla de prueba.
+    n_of() { ord "$1" | tr ' ' '\n' | grep -n -x "$2" | cut -d: -f1; }
+    # El usb de S3 carga el fixture .sf2 antes de parar el motor y lo descarga al final.
+    usb_font_pre() {
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=fixture ok=true archivo=wma-fixture.sf2"
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=carga ok=true archivo=wma-fixture.sf2 cargado=true presets=1"
+        echo "HARNESS-SMOKE v=1 run=$run panel=usb step=preset ok=true indice=0"
+    }
+    usb_font_post() { echo "HARNESS-SMOKE v=1 run=$run panel=usb step=descarga ok=true queda-cargado=false"; }
+    with_seed() { sed -E "s/(panel=plan step=inicio ok=true plan=[^ ]*)/\1 semilla=$SEM semilla-origen=script/"; }
+
+    # El control: el log grabado tal cual, con una ficha SIN precondiciones. Es anterior a S3, asi
+    # que el juez de S3 le pide las ventanas y no las encuentra: FALTA (exit 1). Con las ventanas,
+    # la semilla y el sensor inyectados, vuelve al exit que se grabo (ver la cabecera del log).
     local want_base
     want_base="$(sed -nE 's/^# exit-esperado: ([0-9]+).*/\1/p' "$SELFTEST_LOG" | head -1)"
     [[ -n "$want_base" ]] || { echo "self-test: FAIL — el log grabado no declara '# exit-esperado:'" >&2; return 1; }
-    expect "control: el log grabado, ficha sin precondiciones" "$want_base" "$SELFTEST_LOG" todo "$vacia"
+    expect "control: el log grabado (anterior a S3) sin ventanas = FALTA" 1 "$SELFTEST_LOG" todo "$vacia"
+    expect_line "control: sf2/estimulo sale FALTA" '^FAIL +sf2/estimulo +FALTA' "$SELFTEST_LOG" todo "$vacia"
+    expect_line "control: usb/control sale FALTA" '^FAIL +usb/control +FALTA' "$SELFTEST_LOG" todo "$vacia"
+    {
+        win sf2; win sf3; usb_font_pre; win usb libusb; usb_font_post
+        sens sf2; sens sf3; sens usb
+    } | before_fin "$SELFTEST_LOG" "$tmp/control-s30.log"
+    with_seed < "$tmp/control-s30.log" > "$tmp/control-s3.log"
+    expect "control + S3 inyectado, ficha sin precondiciones = el exit grabado" "$want_base" "$tmp/control-s3.log" todo "$vacia"
 
     # Una version del control donde todo lo automatico pasa y el humano ya actuo: exit 0. Se arma
     # quitando del log los pasos USB (queda pendiente) — ver abajo — asi que primero el caso verde
-    # sin USB: se recorta el plan a los paneles automaticos. Lleva las precondiciones de captura
-    # CUMPLIDAS: es el gemelo de todos los casos de BLOQUEADO (cumplida no bloquea nada).
+    # sin USB: se recorta el plan a los paneles automaticos. Lleva las ventanas de S3 con el sensor
+    # contestando bien, y las precondiciones de captura CUMPLIDAS: es el gemelo de todos los casos
+    # de BLOQUEADO (cumplida no bloquea nada) y de los del sensor.
     sed -E "/panel=usb /d; s/(panel=plan step=inicio ok=true plan=)[^ ]*/\1salida,captura,sf2,sf3/; \
             s/(panel=plan step=fin )ok=[a-z]+ fallidos=[^ ]*/\1ok=true fallidos=-/" \
-        "$SELFTEST_LOG" > "$tmp/verde0.log"
+        "$SELFTEST_LOG" | with_seed > "$tmp/verde00.log"
+    { win sf2; win sf3; sens sf2; sens sf3; } | before_fin "$tmp/verde00.log" "$tmp/verde0.log"
     met_captura | before_fin "$tmp/verde0.log" "$tmp/verde.log"
     local auto=salida,captura,sf2,sf3
     expect "verde: sin usb, todo lo automatico" 0 "$tmp/verde.log" "$auto"
@@ -1039,6 +1097,7 @@ JSON
     {
         grep -v 'panel=plan step=fin ' "$tmp/verde.log"
         met_usb_host
+        usb_font_pre
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-parado ok=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=dispositivos ok=true cantidad=1"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-callback ok=true inicializado=true"
@@ -1046,6 +1105,7 @@ JSON
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=broadcast-falso ok=true origen=adb enviados=2"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=permiso-falso ok=true resultado=sin-respuesta-humana"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=conectar ok=false motivo=sin-respuesta-humana"
+        usb_font_post
         echo "HARNESS-SMOKE v=1 run=$run panel=plan step=fin ok=false fallidos=usb motor-detenido=true"
     } | sed -E "s/(panel=plan step=inicio ok=true plan=)[^ ]*/\1salida,captura,sf2,sf3,usb/" > "$tmp/m4.log"
     expect "M4: usb esperando al humano" 3 "$tmp/m4.log"
@@ -1063,6 +1123,7 @@ JSON
     usb_ok() {
         local s
         met_usb_host
+        usb_font_pre
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-parado ok=true"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=dispositivos ok=true cantidad=1"
         echo "HARNESS-SMOKE v=1 run=$run panel=usb step=motor-callback ok=true inicializado=true"
@@ -1072,9 +1133,16 @@ JSON
         pre usb t-permiso true
         for s in permiso conectar capacidades descriptores backend wake-lock streaming-start streaming-stats \
                  reconectar-mismo conectar-otro \
-                 suite-1 suite-2 suite-3 suite streaming-stop backend-restaurado desconectar; do
+                 suite-1 suite-2 suite-3 suite streaming-stop; do
             echo "HARNESS-SMOKE v=1 run=$run panel=usb step=$s ok=true"
         done
+        # REQ-053 S3: las ventanas por libusb, despues de parar el streaming y antes de desconectar.
+        win usb libusb
+        for s in backend-restaurado desconectar; do
+            echo "HARNESS-SMOKE v=1 run=$run panel=usb step=$s ok=true"
+        done
+        usb_font_post
+        sens usb
     }
     with_usb() {  # with_usb <archivo destino> <sed sobre las lineas usb>
         { grep -v 'panel=plan step=fin ' "$tmp/verde.log"
@@ -1211,7 +1279,7 @@ JSON
     expect_no_line "a2: ningun FAIL" '^FAIL ' "$tmp/a2.log"
     # Los pasos que dependen y NO se emitieron (conectar fallo y el panel corto) son BLOQUEADO,
     # no FAIL por FALTA.
-    with_usb "$tmp/a3.log" "$(set_pre t-host-usb false); s/step=conectar ok=true/step=conectar ok=false error=DEVICE_BUSY/; /step=(motor-callback|capacidades|descriptores|backend|wake-lock|streaming-[a-z]+|reconectar-mismo|conectar-otro|suite[-0-9]*|backend-restaurado|desconectar) /d"
+    with_usb "$tmp/a3.log" "$(set_pre t-host-usb false); s/step=conectar ok=true/step=conectar ok=false error=DEVICE_BUSY/; /step=(motor-callback|capacidades|descriptores|backend|wake-lock|streaming-[a-z]+|reconectar-mismo|conectar-otro|suite[-0-9]*|escuchar|estimulo|control|sensor|backend-restaurado|desconectar) /d"
     usb_failed "$tmp/a3.log"
     expect "a3: los dependientes que no corrieron" 4 "$tmp/a3.log"
     expect_line "a3: desconectar (no emitido) sale BLOQUEADO" '^BLOQUEADO +usb/desconectar +precondicion=t-host-usb.*no-emitido' "$tmp/a3.log"
@@ -1263,7 +1331,7 @@ JSON
     # Negado explicitamente: la app emite t-permiso cumplida=false al cerrar la ventana. Los pasos
     # que dependen —incluido permiso-falso, que no puede distinguir al humano de un broadcast
     # ajeno— salen BLOQUEADO, no FAIL ni HUMANO.
-    with_usb "$tmp/p1.log" "$(set_pre t-permiso false); s/step=permiso ok=true/step=permiso ok=false origen=dialogo concedido=false/; s/step=permiso-falso ok=true .*/step=permiso-falso ok=false motivo=negado:humano-o-broadcast-ajeno resultado=PERMISSION_DENIED/; s/step=conectar ok=true/step=conectar ok=false error=PERMISSION_DENIED/; /step=(motor-callback|capacidades|descriptores|backend|wake-lock|streaming-[a-z]+|reconectar-mismo|conectar-otro|suite[-0-9]*|backend-restaurado|desconectar) /d"
+    with_usb "$tmp/p1.log" "$(set_pre t-permiso false); s/step=permiso ok=true/step=permiso ok=false origen=dialogo concedido=false/; s/step=permiso-falso ok=true .*/step=permiso-falso ok=false motivo=negado:humano-o-broadcast-ajeno resultado=PERMISSION_DENIED/; s/step=conectar ok=true/step=conectar ok=false error=PERMISSION_DENIED/; /step=(motor-callback|capacidades|descriptores|backend|wake-lock|streaming-[a-z]+|reconectar-mismo|conectar-otro|suite[-0-9]*|escuchar|estimulo|control|sensor|backend-restaurado|desconectar) /d"
     usb_failed "$tmp/p1.log"
     expect "D13: permiso negado = BLOQUEADO (exit 4)" 4 "$tmp/p1.log"
     expect_line "D13: permiso-falso sale BLOQUEADO" '^BLOQUEADO +usb/permiso-falso +precondicion=t-permiso estado=incumplida' "$tmp/p1.log"
@@ -1285,7 +1353,7 @@ JSON
     expect_line "D13: permiso-falso no emitido sale BLOQUEADO" '^BLOQUEADO +usb/permiso-falso +precondicion=t-permiso .*no-emitido' "$tmp/p1b.log"
     # El permiso se CUMPLIO pero connectDevice no volvio (no hay `permiso`, conectar sin respuesta):
     # no es un humano pendiente — es un FAIL de la libreria.
-    with_usb "$tmp/p4.log" "/step=permiso /d; s/step=conectar ok=true/step=conectar ok=false motivo=sin-respuesta-humana/; /step=(motor-callback|capacidades|descriptores|backend|wake-lock|streaming-[a-z]+|reconectar-mismo|conectar-otro|suite[-0-9]*|backend-restaurado|desconectar) /d"
+    with_usb "$tmp/p4.log" "/step=permiso /d; s/step=conectar ok=true/step=conectar ok=false motivo=sin-respuesta-humana/; /step=(motor-callback|capacidades|descriptores|backend|wake-lock|streaming-[a-z]+|reconectar-mismo|conectar-otro|suite[-0-9]*|escuchar|estimulo|control|sensor|backend-restaurado|desconectar) /d"
     usb_failed "$tmp/p4.log"
     expect "D13: permiso cumplido y connect colgado = FAIL" 1 "$tmp/p4.log"
     expect_line "D13: ... conectar sale FAIL, no HUMANO" '^FAIL +usb/conectar ' "$tmp/p4.log"
@@ -1308,8 +1376,8 @@ JSON
 
     # AC-053.5 / D12 — el JSON de la corrida: run id, cada paso con lo OBSERVADO (tambien los
     # bloqueados: S2 lee de ahi el claim_interface), cada precondicion y el sensor (vacio hasta S3).
-    expect_json "json: run, exit y sensor vacio" "$tmp/a2.log" todo \
-        "j['run'] == '$run' and j['exit'] == 4 and j['sensor'] == []"
+    expect_json "json: run, exit y un juicio de sensor por ventana" "$tmp/a2.log" todo \
+        "j['run'] == '$run' and j['exit'] == 4 and len(j['sensor']) == 6"
     expect_json "json: el bloqueado guarda lo observado" "$tmp/a2.log" todo \
         "[p for p in j['pasos'] if p['panel'] == 'usb' and p['paso'] == 'streaming-start' and p['veredicto'] == 'BLOQUEADO' and p['observado'].get('error') == 'STREAMING_ERROR' and p['precondiciones'] == ['t-host-usb']]"
     expect_json "json: el no emitido guarda observado nulo" "$tmp/a3.log" todo \
@@ -1393,23 +1461,27 @@ JSON
     # precondicion): nada se verifico, asi que captura y usb salen BLOQUEADO — y con cada una
     # cumplida, el control vuelve a 0. El control NO se re-graba (1.9): la app nueva agrega lineas
     # pero no cambia ninguna de las que el control ya tiene.
-    expect "control + ficha real: nada verificado = 4" 4 "$SELFTEST_LOG" todo "$real"
-    expect_line "control + ficha real: usb/conectar no-verificable" '^BLOQUEADO +usb/conectar +precondicion=.* estado=no-verificable' "$SELFTEST_LOG" todo "$real"
-    expect_line "control + ficha real: salida/frames se juzga" '^PASS +salida/frames ' "$SELFTEST_LOG" todo "$real"
+    expect "control + ficha real: nada verificado = 4" 4 "$tmp/control-s3.log" todo "$real"
+    expect_line "control + ficha real: usb/conectar no-verificable" '^BLOQUEADO +usb/conectar +precondicion=.* estado=no-verificable' "$tmp/control-s3.log" todo "$real"
+    expect_line "control + ficha real: usb/estimulo no-verificable" '^BLOQUEADO +usb/estimulo +precondicion=.* estado=no-verificable' "$tmp/control-s3.log" todo "$real"
+    expect_line "control + ficha real: salida/frames se juzga" '^PASS +salida/frames ' "$tmp/control-s3.log" todo "$real"
     smoke_py ids "$real" | while read -r panel id verifier; do
         if [[ "$verifier" == host ]]; then pre "$panel" "$id" true host; else pre "$panel" "$id" true; fi
-    done | before_fin "$SELFTEST_LOG" "$tmp/control-cumplido.log"
+    done | before_fin "$tmp/control-s3.log" "$tmp/control-cumplido.log"
     expect "control + ficha real, todo cumplido = el exit grabado" "$want_base" "$tmp/control-cumplido.log" todo "$real"
 
     # S-1 (security-auditor): logcat filtra por TAG, asi que cualquier app puede escribir una linea
     # `verificador=host`. El juez recibe las del host por SEPARADO y descarta las que lleguen por el
     # log de la app: no bloquean ni cuentan.
-    grep -v 'verificador=host' "$tmp/verde.log" > "$tmp/app-verde.log" || true
+    # (S3: los juicios del sensor tambien van en su propio archivo, como los del host.)
+    grep -v -e 'verificador=host' -e ' step=sensor ' "$tmp/verde.log" > "$tmp/app-verde.log" || true
     grep 'verificador=host' "$tmp/verde.log" > "$tmp/host-verde.log" || true
+    grep ' step=sensor ' "$tmp/verde.log" > "$tmp/sensor-verde.log" || true
+    local split_sensor="$tmp/sensor-verde.log"
     : > "$tmp/host-vacio.log"
     split_case() {  # split_case <nombre> <exit esperado> <log de la app> <log del host> [regex que TIENE que salir]
         local name="$1" want="$2" app="$3" hostf="$4" re="${5:-}" got=0
-        verdict "$app" "$run" "$auto" "$ficha" "" "$hostf" > "$tmp/out" 2>&1 || got=$?
+        verdict "$app" "$run" "$auto" "$ficha" "" "$hostf" "$split_sensor" > "$tmp/out" 2>&1 || got=$?
         if [[ "$got" == "$want" ]] && { [[ -z "$re" ]] || grep -Eq -- "$re" "$tmp/out"; }; then
             printf '  ok    %-58s exit %s\n' "$name" "$got"
         else
@@ -1443,9 +1515,9 @@ JSON
     }
     sed -E 's/ok=true id=t-host-cap cumplida=true/ok=false id=t-host-cap cumplida=false/' "$tmp/verde.log" > "$tmp/mezclado-incumplida.log"
     cli_case "host-en-log: un log mezclado se juzga con el flag" 0 'no separa origenes' \
-        "$tmp/verde.log" "$run" "$auto" --setup "$ficha" --host-en-log
+        "$tmp/verde.log" "$run" "$auto" --setup "$ficha" --host-en-log --sensor-log "$tmp/sensor-verde.log"
     cli_case "host-en-log: ... y juzga las precondiciones del propio log" 4 '^BLOQUEADO +captura/nivel +precondicion=t-host-cap estado=incumplida' \
-        "$tmp/mezclado-incumplida.log" "$run" "$auto" --setup "$ficha" --host-en-log
+        "$tmp/mezclado-incumplida.log" "$run" "$auto" --setup "$ficha" --host-en-log --sensor-log "$tmp/sensor-verde.log"
     cli_case "host-en-log: sin el flag el mismo log es BLOQUEADO, con su AVISO" 4 '^AVISO .* [0-9]+ linea\(s\) verificador=host.*descartadas' \
         "$tmp/verde.log" "$run" "$auto" --setup "$ficha"
     cli_case "host-en-log: sin el flag no se toma ni una linea host" 4 'estado=no-verificable evidencia=el-host-no-registro-su-verificacion' \
@@ -1482,10 +1554,11 @@ package:com.ajena uid:10001"
         printf '  MAL   %-58s %s %s\n' "S-2: el run id lleva 48 bits aleatorios y cambia" "$rid1" "$rid2"; failures=$((failures + 1))
     fi
     sed -E "s/run=$run /run=$rid1 /" "$tmp/verde.log" > "$tmp/verde-rid.log"
-    grep -v 'verificador=host' "$tmp/verde-rid.log" > "$tmp/app-rid.log" || true
+    grep -v -e 'verificador=host' -e ' step=sensor ' "$tmp/verde-rid.log" > "$tmp/app-rid.log" || true
     grep 'verificador=host' "$tmp/verde-rid.log" > "$tmp/host-rid.log" || true
+    grep ' step=sensor ' "$tmp/verde-rid.log" > "$tmp/sensor-rid.log" || true
     local got=0
-    verdict "$tmp/app-rid.log" "$rid1" "$auto" "$ficha" "" "$tmp/host-rid.log" > /dev/null 2>&1 || got=$?
+    verdict "$tmp/app-rid.log" "$rid1" "$auto" "$ficha" "" "$tmp/host-rid.log" "$tmp/sensor-rid.log" > /dev/null 2>&1 || got=$?
     if [[ "$got" == 0 ]]; then printf '  ok    %-58s exit 0\n' "S-2: el juez acepta un run id con el formato nuevo"
     else printf '  MAL   %-58s exit %s\n' "S-2: el juez acepta un run id con el formato nuevo" "$got"; failures=$((failures + 1)); fi
     if grep -qE '^    run="\$\(new_run_id\)" \|\| exit 2$' "$0"; then
@@ -1530,6 +1603,246 @@ SPY
     plan_case "S-3: coma final (salida,) es exit 2 sin adb" 'salida,' 2 no
     plan_case "S-3: elemento vacio en el medio es exit 2 sin adb" 'salida,,sf2' 2 no
     plan_case "S-3: coma inicial es exit 2 sin adb" ',salida' 2 no
+
+    # =====================================================================================
+    # REQ-053 S3 — el estimulo y el sensor (AC-053.8..11). Cada regla tiene su gemelo (el verde, con
+    # el sensor contestando bien) y un mutante del juez, del seguidor o del sensor que la mata (ver
+    # la tabla de las Notas de la etapa).
+    # =====================================================================================
+    local ne nc
+    ne="$(n_of sf2 estimulo)"; nc="$(n_of sf2 control)"
+    is_eq() {  # is_eq <nombre> <obtenido> <esperado>
+        if [[ "$2" == "$3" ]]; then
+            printf '  ok    %-58s\n' "$1"
+        else
+            printf '  MAL   %-58s dio [%s], esperaba [%s]\n' "$1" "$2" "$3"; failures=$((failures + 1))
+        fi
+    }
+    has_line() {  # has_line <nombre> <regex> <archivo>
+        if grep -Eq -- "$2" "$3"; then
+            printf '  ok    %-58s\n' "$1"
+        else
+            printf '  MAL   %-58s falta /%s/ en %s\n' "$1" "$2" "$(basename "$3")"
+            sed 's/^/        /' "$3" | tail -6; failures=$((failures + 1))
+        fi
+    }
+
+    # AC-053.10 — el orden sale de la semilla, con los MISMOS vectores que fija ListeningWindowsTest
+    # (harness, commonTest): son dos implementaciones del mismo orden y el juez cruza una con otra.
+    local vec v_seed v_panel v_a v_b bad_vec=""
+    for vec in "0 sf2 estimulo control" "1 sf2 control estimulo" "42 usb estimulo control" \
+               "12345 sf3 control estimulo" "2147483647 sf2 control estimulo" "123456789 usb estimulo control"; do
+        read -r v_seed v_panel v_a v_b <<< "$vec"
+        [[ "$(smoke_py orden "$v_seed" "$v_panel")" == "$v_a $v_b" ]] || bad_vec+="[$vec] "
+    done
+    is_eq "orden: los vectores compartidos con el harness" "${bad_vec:-ninguno}" ninguno
+
+    # --- AC-053.8: el estimulo declarado, y lo que el motor rindio en la ventana. ---------------
+    expect_line "S3 gemelo: sf2/estimulo rendido sale PASS" '^PASS +sf2/estimulo ' "$tmp/verde.log" "$auto"
+    expect_line "S3 gemelo: sf2/control (silencio rendido) sale PASS" '^PASS +sf2/control ' "$tmp/verde.log" "$auto"
+    expect_line "S3 gemelo: el sensor oyo el estimulo = PASS" '^PASS +sf2/sensor-estimulo +.*sensor=oido-humano veredicto=presente' "$tmp/verde.log" "$auto"
+    expect_line "S3 gemelo: el sensor no oyo nada en el control = PASS" '^PASS +sf2/sensor-control +.*veredicto=ausente' "$tmp/verde.log" "$auto"
+    # El juez mira los NUMEROS (frames > 0 y pico > 0), no solo el ok de la app.
+    sed -E '/panel=sf2 step=estimulo /s/ frames=[0-9]+ / frames=0 /' "$tmp/verde.log" > "$tmp/e1.log"
+    expect "e1: estimulo con frames=0 (aunque diga ok=true) = FAIL" 1 "$tmp/e1.log" "$auto"
+    expect_line "e1: sf2/estimulo sale FAIL" '^FAIL +sf2/estimulo +.*no-rendido' "$tmp/e1.log" "$auto"
+    sed -E '/panel=sf2 step=estimulo /s/ pico=[0-9.]+ / pico=0.0000 /' "$tmp/verde.log" > "$tmp/e2.log"
+    expect "e2: estimulo con pico=0 (aunque diga ok=true) = FAIL" 1 "$tmp/e2.log" "$auto"
+    expect_line "e2: sf2/estimulo sale FAIL" '^FAIL +sf2/estimulo ' "$tmp/e2.log" "$auto"
+    sed -E '/panel=sf2 step=estimulo /s/ ok=true (.*)$/ ok=false \1 motivo=sin-senal/' "$tmp/verde.log" > "$tmp/e3.log"
+    expect "e3: estimulo con ok=false = FAIL" 1 "$tmp/e3.log" "$auto"
+    # ... y lo que el sensor haya dicho sobre esa ventana NO se juzga: si hay juicio, el script lo
+    # pidio cuando no debia (FAIL); si no lo hay, no hay fila del sensor.
+    expect_no_line "e1: el sensor no da PASS sobre un estimulo no rendido" '^PASS +sf2/sensor-estimulo ' "$tmp/e1.log" "$auto"
+    expect_line "e1: un juicio sobre la ventana no rendida sale FAIL" '^FAIL +sf2/sensor-estimulo +.*no-rendida' "$tmp/e1.log" "$auto"
+    grep -v " panel=sf2 step=sensor ok=true n=$ne " "$tmp/e1.log" > "$tmp/e1b.log"
+    expect "e1b: sin consulta, sigue FAIL por el estimulo" 1 "$tmp/e1b.log" "$auto"
+    expect_no_line "e1b: sin consulta no hay fila del sensor" 'sf2/sensor-estimulo ' "$tmp/e1b.log" "$auto"
+    expect_json "e1b: el JSON dice que no se consulto" "$tmp/e1b.log" "$auto" \
+        "[x for x in j['sensor'] if x['panel'] == 'sf2' and x['n'] == $ne and x['consultado'] is False and x['juicio'] is None]"
+    # Un control que no fue silencio (la app lo dice) es FAIL, y su juicio tampoco se juzga.
+    sed -E '/panel=sf2 step=control /s/ ok=true (.*) pico=0.0000 (.*)$/ ok=false \1 pico=0.2000 \2 motivo=el-control-sono/' "$tmp/verde.log" > "$tmp/e4.log"
+    expect "e4: un control que sono = FAIL" 1 "$tmp/e4.log" "$auto"
+    expect_line "e4: sf2/control sale FAIL" '^FAIL +sf2/control ' "$tmp/e4.log" "$auto"
+
+    # --- El seguidor (en vivo): consulta al sensor al cerrar cada ventana, y SOLO si se rindio. ---
+    # Corre con el sensor `guion` (contesta de un archivo y anota cada consulta), sin TTY.
+    seguir_case() {  # seguir_case <log> [linea que "llega" mientras el sensor contesta]
+        WMA_SENSOR_GUION="$tmp/guion" WMA_SENSOR_LLAMADAS="$tmp/seg.calls" WMA_SENSOR_AL_CONTESTAR="${2:-}" \
+            WMA_SENSOR_AL_CONTESTAR_EN="$1" \
+            smoke_py seguir "$1" "$tmp/seg.sensor" "$tmp/seg.state" guion "$run" > "$tmp/seg.out" 2>&1 < /dev/null \
+            || echo "seguir: rc=$?" >> "$tmp/seg.out"
+    }
+    seguir_reset() { rm -f "$tmp/seg.state" "$tmp/seg.sensor"; : > "$tmp/seg.calls"; : > "$tmp/seg.sensor"; }
+    calls() { grep -c . "$tmp/seg.calls" || true; }
+    printf 'presente\nausente\npresente\nausente\n' > "$tmp/guion"
+    win sf2 > "$tmp/f-ok.log"
+    seguir_reset; head -1 "$tmp/f-ok.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
+    head -2 "$tmp/f-ok.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
+    head -3 "$tmp/f-ok.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
+    seguir_case "$tmp/f-ok.log"
+    is_eq "f1 gemelo: dos ventanas rendidas, dos consultas" "$(calls)" 2
+    has_line "f1: el sensor recibe estimulo, ventana y ruta del aviso" \
+        '^estimulo=A4-440Hz ventana=sf2-1de2-2000ms ruta=sistema espera-s=9$' "$tmp/seg.calls"
+    has_line "f1: el registro lleva sensor, veredicto y evidencia" \
+        "^HARNESS-SMOKE v=1 run=$run panel=sf2 step=sensor ok=true n=1 sensor=guion veredicto=presente evidencia=[^ ]+ estimulo=A4-440Hz ruta=sistema" "$tmp/seg.sensor"
+    seguir_case "$tmp/f-ok.log"
+    is_eq "f1: correr otra vez no vuelve a consultar" "$(calls)" 2
+    # AC-053.8: un estimulo no rendido NO se consulta (frames=0, pico=0, ok=false), ni un control invalido.
+    local mode_sed
+    for mode_sed in 's/ frames=[0-9]+ / frames=0 /' 's/ pico=[0-9.]+ / pico=0.0000 /' 's/ ok=true / ok=false /'; do
+        sed -E "/step=estimulo /$mode_sed" "$tmp/f-ok.log" > "$tmp/f-mal.log"
+        seguir_reset; head -1 "$tmp/f-mal.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
+        head -3 "$tmp/f-mal.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"; seguir_case "$tmp/f-mal.log"
+        is_eq "f2: estimulo no rendido ($mode_sed): solo se consulta el control" "$(calls)" 1
+        is_eq "f2: ... y no queda juicio de esa ventana" "$(grep -c " n=$ne " "$tmp/seg.sensor" || true)" 0
+    done
+    sed -E '/step=control /s/ ok=true / ok=false /' "$tmp/f-ok.log" > "$tmp/f-mal.log"
+    seguir_reset; head -1 "$tmp/f-mal.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
+    head -3 "$tmp/f-mal.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"; seguir_case "$tmp/f-mal.log"
+    is_eq "f2: un control invalido no se consulta" "$(calls)" 1
+    # Sin relojes: el ORDEN del log dice si la respuesta llego a tiempo. Si mientras el sensor
+    # contestaba ya se anuncio la ventana siguiente, la respuesta no vale (sin-dato, nunca PASS).
+    seguir_reset; head -1 "$tmp/f-ok.log" > "$tmp/f-part.log"; seguir_case "$tmp/f-part.log"
+    head -2 "$tmp/f-ok.log" > "$tmp/f-part.log"
+    seguir_case "$tmp/f-part.log" "$(sed -n 3p "$tmp/f-ok.log")"
+    is_eq "f3: la respuesta tardia se consulto" "$(calls)" 1
+    has_line "f3: ... pero queda sin-dato" ' n=1 sensor=guion veredicto=sin-dato evidencia=respuesta-tardia:presente ' "$tmp/seg.sensor"
+    # Un aviso que llega cuando la ventana ya cerro no deja escuchar: no se consulta, sin-dato.
+    seguir_reset; seguir_case "$tmp/f-ok.log"
+    is_eq "f4: aviso tardio: no se consulta" "$(calls)" 0
+    has_line "f4: ... y queda sin-dato aviso-tarde" ' n=1 sensor=guion veredicto=sin-dato evidencia=aviso-tarde' "$tmp/seg.sensor"
+    # `--sensor ninguno` deja todo HUMANO: el seguidor registra sin-dato y el juez no da PASS.
+    {
+        sed -E '/ step=sensor /d' "$tmp/verde.log"
+    } > "$tmp/ninguno-app.log"
+    seguir_reset
+    smoke_py seguir "$tmp/ninguno-app.log" "$tmp/seg.sensor" "$tmp/seg.state" ninguno "$run" > /dev/null 2>&1 < /dev/null || true
+    is_eq "ninguno: 4 juicios sin-dato" "$(grep -c 'sensor=ninguno veredicto=sin-dato ' "$tmp/seg.sensor" || true)" 4
+    cat "$tmp/ninguno-app.log" "$tmp/seg.sensor" > "$tmp/ninguno.log"
+    expect "ninguno: todo HUMANO, exit 3" 3 "$tmp/ninguno.log" "$auto"
+    expect_no_line "ninguno: ningun juicio del sensor sale PASS" '^PASS +[a-z0-9]+/sensor-' "$tmp/ninguno.log" "$auto"
+
+    # --- AC-053.9: s => PASS (el verde), n => FAIL, ? / sin respuesta / ilegible => HUMANO. -----
+    sed -E "/panel=sf2 step=sensor ok=true n=$ne /s/veredicto=[a-z-]+/veredicto=ausente/" "$tmp/verde.log" > "$tmp/s-n.log"
+    expect "s-n: el sensor no oyo el estimulo = FAIL" 1 "$tmp/s-n.log" "$auto"
+    expect_line "s-n: sf2/sensor-estimulo sale FAIL" '^FAIL +sf2/sensor-estimulo ' "$tmp/s-n.log" "$auto"
+    sed -E "/panel=sf2 step=sensor ok=true n=$ne /s/veredicto=[a-z-]+/veredicto=sin-dato/" "$tmp/verde.log" > "$tmp/s-q.log"
+    expect "s-?: sin dato del sensor = HUMANO (exit 3)" 3 "$tmp/s-q.log" "$auto"
+    expect_line "s-?: sf2/sensor-estimulo sale HUMANO" '^HUMANO +sf2/sensor-estimulo ' "$tmp/s-q.log" "$auto"
+    grep -v " panel=sf2 step=sensor ok=true n=$ne " "$tmp/verde.log" > "$tmp/s-0.log"
+    expect "s-0: sin juicio del sensor = HUMANO (exit 3)" 3 "$tmp/s-0.log" "$auto"
+    expect_line "s-0: sf2/sensor-estimulo sale HUMANO" '^HUMANO +sf2/sensor-estimulo +.*sin-juicio' "$tmp/s-0.log" "$auto"
+    sed -E "/panel=sf2 step=sensor ok=true n=$ne /s/veredicto=[a-z-]+/veredicto=si/" "$tmp/verde.log" > "$tmp/s-x.log"
+    expect "s-x: un veredicto ilegible = HUMANO, nunca PASS" 3 "$tmp/s-x.log" "$auto"
+    sed -E "/panel=sf2 step=sensor ok=true n=$nc /s/veredicto=[a-z-]+/veredicto=sin-dato/" "$tmp/verde.log" > "$tmp/s-qc.log"
+    expect "s-?c: sin dato en el control = HUMANO (exit 3)" 3 "$tmp/s-qc.log" "$auto"
+    # Dos juicios para la misma ventana: el script consulto dos veces. No se elige uno.
+    { cat "$tmp/verde.log"; grep " panel=sf2 step=sensor ok=true n=$ne " "$tmp/verde.log" | sed -E 's/veredicto=[a-z-]+/veredicto=ausente/'; } > "$tmp/s-2.log"
+    expect "s-2: dos juicios para una ventana = FAIL" 1 "$tmp/s-2.log" "$auto"
+    # Un juicio para una ventana que la app no emitio.
+    { cat "$tmp/verde.log"; echo "HARNESS-SMOKE v=1 run=$run panel=sf2 step=sensor ok=true n=7 sensor=oido-humano veredicto=presente evidencia=x estimulo=A4-440Hz ruta=x"; } > "$tmp/s-7.log"
+    expect "s-7: juicio de una ventana que no existe = FAIL" 1 "$tmp/s-7.log" "$auto"
+    # El sensor oido-humano por una TTY de verdad (pty): s/n/? y sin respuesta; y sin TTY.
+    sensor_pty() {  # sensor_pty <respuestas separadas por |, o vacio> <espera-s>
+        python3 - "$0" "$1" "$2" <<'PTY'
+import os, pty, select, sys, time
+script, answers, wait = sys.argv[1], sys.argv[2], sys.argv[3]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp("bash", ["bash", script, "--sensor-consulta", "oido-humano", "A4-440Hz", "sf2-1de2-2000ms", "sistema", wait])
+buf = b""
+def pump(prompts, limit):
+    global buf
+    end = time.time() + limit
+    while time.time() < end and (prompts is None or buf.count(b"[s/n/?]") < prompts):
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if r:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                return
+            if not chunk:
+                return
+            buf += chunk
+for i, a in enumerate([x for x in answers.split("|") if x]):
+    pump(i + 1, 20)
+    os.write(fd, a.encode() + b"\n")
+pump(None, 30)
+os.waitpid(pid, 0)
+print(next((l.strip() for l in buf.decode(errors="replace").splitlines() if l.strip().startswith("veredicto=")), "sin-linea"))
+PTY
+    }
+    is_eq "sensor tty: s = presente" "$(sensor_pty s 20)" "veredicto=presente sensor=oido-humano evidencia=respuesta:s"
+    is_eq "sensor tty: n = ausente" "$(sensor_pty n 20)" "veredicto=ausente sensor=oido-humano evidencia=respuesta:n"
+    is_eq "sensor tty: ? = sin-dato" "$(sensor_pty '?' 20)" "veredicto=sin-dato sensor=oido-humano evidencia=respuesta:?"
+    is_eq "sensor tty: algo que no es s/n/? se vuelve a preguntar" "$(sensor_pty 'x|s' 20)" "veredicto=presente sensor=oido-humano evidencia=respuesta:s"
+    is_eq "sensor tty: sin respuesta = sin-dato" "$(sensor_pty '' 1)" "veredicto=sin-dato sensor=oido-humano evidencia=sin-respuesta:1s"
+    is_eq "sensor: sin TTY = sin-dato (no pregunta)" \
+        "$(bash "$0" --sensor-consulta oido-humano A4-440Hz sf2-1de2-2000ms sistema 20 < /dev/null 2>/dev/null)" \
+        "veredicto=sin-dato sensor=oido-humano evidencia=sin-tty"
+    is_eq "sensor: ninguno = sin-dato" \
+        "$(bash "$0" --sensor-consulta ninguno A4-440Hz sf2-1de2-2000ms sistema 20 < /dev/null 2>/dev/null)" \
+        "veredicto=sin-dato sensor=ninguno evidencia=--sensor-ninguno"
+    local rc_s=0
+    bash "$0" --sensor-consulta loopback A4-440Hz v sistema 5 < /dev/null > /dev/null 2>&1 || rc_s=$?
+    is_eq "sensor: uno que no esta en el registro = exit 2" "$rc_s" 2
+
+    # --- AC-053.10: un "si" en un control => todo lo que juzgo ESE sensor sale BLOQUEADO. --------
+    sed -E "/panel=sf2 step=sensor ok=true n=$nc /s/veredicto=[a-z-]+/veredicto=presente/" "$tmp/verde.log" > "$tmp/nd.log"
+    expect "nd: el sensor oyo algo en un control = BLOQUEADO (exit 4)" 4 "$tmp/nd.log" "$auto"
+    expect_line "nd: el control sale BLOQUEADO sensor-no-discrimina" '^BLOQUEADO +sf2/sensor-control +precondicion=sensor-no-discrimina ' "$tmp/nd.log" "$auto"
+    expect_line "nd: el estimulo del mismo panel tambien" '^BLOQUEADO +sf2/sensor-estimulo +precondicion=sensor-no-discrimina ' "$tmp/nd.log" "$auto"
+    expect_line "nd: y los de OTRO panel juzgados por el mismo sensor" '^BLOQUEADO +sf3/sensor-estimulo +precondicion=sensor-no-discrimina ' "$tmp/nd.log" "$auto"
+    expect_no_line "nd: ningun juicio de ese sensor sale PASS" '^PASS +[a-z0-9]+/sensor-' "$tmp/nd.log" "$auto"
+    expect_line "nd: lo que rindio el motor se juzga igual" '^PASS +sf3/estimulo ' "$tmp/nd.log" "$auto"
+    expect_json "nd: en el JSON, juicio BLOQUEADO para los 4" "$tmp/nd.log" "$auto" \
+        "len([x for x in j['sensor'] if x['sensor'] == 'oido-humano' and x['juicio'] == 'BLOQUEADO']) == 4"
+    # Otro sensor en la misma corrida no queda invalidado por el que no discrimina.
+    sed -E '/panel=sf3 step=sensor /s/sensor=oido-humano/sensor=otro/' "$tmp/nd.log" > "$tmp/nd2.log"
+    expect_line "nd2: el otro sensor sigue juzgando: PASS" '^PASS +sf3/sensor-estimulo +.*sensor=otro' "$tmp/nd2.log" "$auto"
+    expect_line "nd2: ... y el que no discrimina sigue BLOQUEADO" '^BLOQUEADO +sf2/sensor-estimulo ' "$tmp/nd2.log" "$auto"
+    # Un "si" en un control que NO fue silencio no prueba nada del sensor: no invalida.
+    sed -E "/panel=sf2 step=sensor ok=true n=$nc /s/veredicto=[a-z-]+/veredicto=presente/" "$tmp/e4.log" > "$tmp/nd3.log"
+    expect_no_line "nd3: un si en un control invalido no bloquea al sensor" '^BLOQUEADO ' "$tmp/nd3.log" "$auto"
+    # Heredan el BLOQUEADO de su ventana: con la precondicion del USB incumplida (a2).
+    expect_line "a2: usb/sensor-estimulo hereda el BLOQUEADO de su ventana" '^BLOQUEADO +usb/sensor-estimulo +precondicion=t-host-usb ' "$tmp/a2.log"
+
+    # --- AC-053.10: la semilla queda en el JSON y reproduce el orden; el juez lo verifica. -------
+    expect_json "semilla: queda en el JSON con el orden que da" "$tmp/verde.log" "$auto" \
+        "j['semilla'] == $SEM and j['orden'] == {'sf2': '$ord_sf2'.split(), 'sf3': '$ord_sf3'.split()}"
+    expect_json "json: cada juicio del sensor con su ventana, su respuesta y su juicio" "$tmp/verde.log" "$auto" \
+        "[x for x in j['sensor'] if x['panel'] == 'sf2' and x['n'] == $ne and x['tipo'] == 'estimulo' and x['estimulo'] == 'A4-440Hz' and x['ruta'] == 'sistema' and x['sensor'] == 'oido-humano' and x['veredicto'] == 'presente' and x['evidencia'] == 'prueba-sf2-$ne' and x['consultado'] is True and x['juicio'] == 'PASS']"
+    { win sf2 sistema 1; win sf3; sens sf2; sens sf3; } | before_fin "$tmp/verde00.log" "$tmp/o1-0.log"
+    met_captura | before_fin "$tmp/o1-0.log" "$tmp/o1.log"
+    expect "o1: la app corrio otro orden que el de la semilla = FAIL" 1 "$tmp/o1.log" "$auto"
+    expect_line "o1: sf2/orden sale FAIL" '^FAIL +sf2/orden ' "$tmp/o1.log" "$auto"
+    sed -E 's/ semilla=[0-9]+ semilla-origen=[a-z]+//' "$tmp/verde.log" > "$tmp/o2.log"
+    expect "o2: sin semilla registrada el orden no se reproduce = FAIL" 1 "$tmp/o2.log" "$auto"
+    expect_line "o2: plan/semilla sale FAIL" '^FAIL +plan/semilla ' "$tmp/o2.log" "$auto"
+    grep -v -e 'verificador=host' -e ' step=sensor ' "$tmp/verde.log" > "$tmp/s3-app.log" || true
+    grep 'verificador=host' "$tmp/verde.log" > "$tmp/s3-host.log" || true
+    grep ' step=sensor ' "$tmp/verde.log" > "$tmp/s3-sensor.log" || true
+    cli_case "o3 gemelo: --semilla igual a la de la app = 0" 0 'resumen:' \
+        "$tmp/s3-app.log" "$run" "$auto" --setup "$ficha" --host-log "$tmp/s3-host.log" --sensor-log "$tmp/s3-sensor.log" --semilla "$SEM"
+    cli_case "o3: --semilla distinta de la que corrio la app = FAIL" 1 '^FAIL +plan/semilla ' \
+        "$tmp/s3-app.log" "$run" "$auto" --setup "$ficha" --host-log "$tmp/s3-host.log" --sensor-log "$tmp/s3-sensor.log" --semilla 999
+
+    # D6: un juicio de sensor que llega por el log de la APP no cuenta (cualquier app escribe el tag).
+    cat "$tmp/s3-app.log" "$tmp/s3-sensor.log" > "$tmp/s3-forjado.log"
+    split_sensor=""
+    split_case "sensor forjado por logcat: se descarta = HUMANO" 3 "$tmp/s3-forjado.log" "$tmp/s3-host.log" \
+        '^AVISO .* 4 linea\(s\) step=sensor'
+
+    # AC-053.11: ya no hay lista de OIDO: lo que habia es un paso con estimulo y sensor, o se borro.
+    is_eq "AC-053.11: el script no lista chequeos de oido" \
+        "$(grep -cE 'Requiere OIDO|Requiere OÍDO|print_ear''_checks' "$0" || true)" 0
+    # El sensor se valida antes de tocar el telefono, como --plan.
+    : > "$tmp/espia.log"
+    rc_s=0
+    PATH="$tmp/espia:$PATH" SPY_LOG="$tmp/espia.log" ANDROID_SERIAL=falso-123 \
+        bash "$0" --plan salida --sensor loopback --no-build > /dev/null 2>&1 || rc_s=$?
+    is_eq "--sensor desconocido: exit 2 sin llamar a adb" "$rc_s:$(grep -c . "$tmp/espia.log" || true)" "2:0"
 
     # Los verificadores de HOST, contra un adb FALSO: ninguno corre sin `-s <serial>`, y cada salida
     # que no se puede leer (adb falla, rc != 0, basura, formato desconocido, tarjeta sin dueno
@@ -1589,7 +1902,7 @@ SPY
         echo "self-test: FAIL — $failures caso(s) con el veredicto equivocado" >&2
         return 1
     fi
-    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado, otra corrida, y (REQ-053) precondicion incumplida, no verificable, BLOQUEADO que no suma PASS, precedencia del exit, permiso negado vs ventana vencida, ficha invalida, verificadores de host y (D14) placa reclamada vs observaciones"
+    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado, otra corrida, y (REQ-053) precondicion incumplida, no verificable, BLOQUEADO que no suma PASS, precedencia del exit, permiso negado vs ventana vencida, ficha invalida, verificadores de host, (D14) placa reclamada vs observaciones y (S3) estimulo no rendido sin consulta, s/n/? del sensor, controles que invalidan al sensor y el orden de la semilla"
 }
 
 # El adb falso del self-test y sus casos. Devuelve la cantidad de casos MAL.
