@@ -169,7 +169,11 @@ enum class WindowKind(val step: String) {
  * El contrato no supone Android: [SYSTEM] es el backend del sistema de cada plataforma.
  */
 enum class Route(val id: String) {
-    /** La salida del sistema (Oboe en Android, CoreAudio en iOS): cualquier cosa que no sea libusb. */
+    /**
+     * La salida del sistema (Oboe en Android, CoreAudio en iOS): cualquier cosa que no sea libusb.
+     * Acepta [AudioBackendType.NONE] a propósito: el camino directo de Oboe (el que shippea en
+     * Android) no pasa por `BackendManager`, que entonces no reporta ningún backend.
+     */
     SYSTEM("sistema"),
 
     /** La placa USB por libusb (sólo Android). */
@@ -180,6 +184,29 @@ enum class Route(val id: String) {
         SYSTEM -> backend != AudioBackendType.LIBUSB
         LIBUSB -> backend == AudioBackendType.LIBUSB
     }
+}
+
+/**
+ * La semilla de la corrida (AC-053.10): la que mandó el script, o una que elige el plan — y lo dice
+ * en `semilla-origen`, para que el juez sepa contra cuál verificar el orden.
+ */
+data class SeedChoice(val seed: Long, val origin: String) {
+    companion object {
+        fun of(requested: Long?, pick: () -> Long): SeedChoice =
+            if (requested != null) SeedChoice(requested, "script") else SeedChoice(pick(), "app")
+    }
+}
+
+/**
+ * Las ventanas de cada panel, con SU orden (el de la semilla y el id del panel) y SU ruta: el
+ * sistema en sf2/sf3, libusb en usb. Es el cableado que el plan no puede equivocar.
+ */
+class SeededWindows(private val windows: ListeningWindows, val seed: Long) {
+    suspend fun overSystem(r: SmokeReporter, panel: String, fixture: String): Boolean =
+        windows.run(r, panel, Route.SYSTEM, WindowOrder.of(seed, panel), fixture)
+
+    suspend fun overUsb(r: SmokeReporter, fixture: String): Boolean =
+        windows.run(r, Panel.USB.id, Route.LIBUSB, WindowOrder.of(seed, Panel.USB.id), fixture)
 }
 
 /**

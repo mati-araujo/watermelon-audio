@@ -50,8 +50,8 @@ class SmokePlanRunner(
     private val pause: suspend (Long) -> Unit = { delay(it) },
 ) {
 
-    /** La semilla de la corrida en curso (la que mandó el script, o la que eligió el plan). */
-    private var seed: Long = 0
+    /** Las ventanas de la corrida en curso, con su semilla (la que mandó el script, o la del plan). */
+    private var seeded = SeededWindows(windows, 0)
 
     /**
      * @param requestProblem un defecto del pedido que el shell detectó al leerlo (p. ej. un extra
@@ -72,10 +72,11 @@ class SmokePlanRunner(
             return false
         }
         val panels = (plan as SmokePlan.Valid).panels
-        seed = requestedSeed ?: Random.nextInt(0, Int.MAX_VALUE).toLong()
+        val seed = SeedChoice.of(requestedSeed) { Random.nextInt(0, Int.MAX_VALUE).toLong() }
+        seeded = SeededWindows(windows, seed.seed)
         reporter.report(
             PLAN, "inicio", true, "plan" to panels.joinToString(",") { it.id },
-            "semilla" to seed, "semilla-origen" to if (requestedSeed != null) "script" else "app",
+            "semilla" to seed.seed, "semilla-origen" to seed.origin,
         )
 
         val failed = mutableListOf<String>()
@@ -114,27 +115,23 @@ class SmokePlanRunner(
         runUsb: suspend (SmokeReporter, suspend (SmokeReporter) -> Boolean) -> Boolean,
     ): Boolean {
         val p = Panel.USB.id
-        // REQ-053 S3: el A4 del fixture .sf2 (D5). Se carga ANTES de parar el motor: cargar no lo
-        // necesita, y después de `motor-parado` lo único que arranca el motor es la ventana, por libusb.
-        val fixture = fixtures.materialize(r, p, Fixtures.SF2)
-        val loaded = fixture != null && soundFont.load(r, p, fixture, Fixtures.SF2)
-        // El streaming USB y el motor no pueden pelearse por el device: el motor se para antes,
-        // igual que hace NoisyPad antes de `startStreaming`. Y si no para, se dice.
-        val stopped = stopEngineForUsb(engine, engineState, r, pause)
-        val ok = try {
-            runUsb(r) { rr ->
-                // Con el streaming parado y el device conectado, el motor arranca por el backend
-                // activo (LIBUSB) y suena por la placa. Se para después: `desconectar` lo exige.
-                try {
-                    windows.run(rr, p, Route.LIBUSB, WindowOrder.of(seed, p), Fixtures.SF2)
-                } finally {
-                    stopEngineAndWait(engine, engineState, pause)
-                }
-            }
-        } finally {
-            soundFont.unload(r, p)
-        }
-        return ok && stopped && loaded
+        return runUsbPanel(
+            r,
+            // REQ-053 S3: el A4 del fixture .sf2 (D5).
+            loadFixture = {
+                val fixture = fixtures.materialize(r, p, Fixtures.SF2)
+                fixture != null && soundFont.load(r, p, fixture, Fixtures.SF2)
+            },
+            // El streaming USB y el motor no pueden pelearse por el device: el motor se para antes,
+            // igual que hace NoisyPad antes de `startStreaming`. Y si no para, se dice.
+            stopEngineForUsb = { stopEngineForUsb(engine, engineState, r, pause) },
+            runUsb = runUsb,
+            // Con el streaming parado y el device conectado, el motor arranca por el backend activo
+            // (LIBUSB) y suena por la placa.
+            listen = { rr -> seeded.overUsb(rr, Fixtures.SF2) },
+            stopEngine = { stopEngineAndWait(engine, engineState, pause) },
+            unload = { soundFont.unload(r, p) },
+        )
     }
 
     private suspend fun output(r: SmokeReporter): Boolean {
@@ -211,7 +208,7 @@ class SmokePlanRunner(
         val p = Panel.SF2.id
         val fixture = fixtures.materialize(r, p, Fixtures.SF2)
         val played = fixture != null && soundFont.runFixture(r, p, fixture, Fixtures.SF2) {
-            windows.run(r, p, Route.SYSTEM, WindowOrder.of(seed, p), Fixtures.SF2)
+            seeded.overSystem(r, p, Fixtures.SF2)
         }
         val junk = fixtures.notASoundFont(r, p)
         val rejected = junk != null && soundFont.loadRejects(r, p, junk, Fixtures.NOT_A_SOUNDFONT)
@@ -222,7 +219,7 @@ class SmokePlanRunner(
         val p = Panel.SF3.id
         val fixture = fixtures.materialize(r, p, Fixtures.SF3) ?: return false
         return soundFont.runFixture(r, p, fixture, Fixtures.SF3) {
-            windows.run(r, p, Route.SYSTEM, WindowOrder.of(seed, p), Fixtures.SF3)
+            seeded.overSystem(r, p, Fixtures.SF3)
         }
     }
 
@@ -234,6 +231,38 @@ class SmokePlanRunner(
         const val METERING_SECOND_READ_MS = 200L
         const val POLL_MS = 50L
     }
+}
+
+/**
+ * REQ-053 S3 — el panel USB del plan, paso por paso: carga el fixture ANTES de parar el motor
+ * (cargar no lo necesita, y después de `motor-parado` lo único que arranca el motor es la ventana),
+ * para el motor para el USB, y le da a la plataforma [listen] envuelta: las ventanas por libusb y,
+ * pase lo que pase, el motor parado otra vez (`backend-restaurado` y `desconectar` lo exigen). El
+ * fixture se descarga siempre, haya conexión o no.
+ */
+suspend fun runUsbPanel(
+    r: SmokeReporter,
+    loadFixture: suspend () -> Boolean,
+    stopEngineForUsb: suspend () -> Boolean,
+    runUsb: suspend (SmokeReporter, suspend (SmokeReporter) -> Boolean) -> Boolean,
+    listen: suspend (SmokeReporter) -> Boolean,
+    stopEngine: suspend () -> Unit,
+    unload: () -> Unit,
+): Boolean {
+    val loaded = loadFixture()
+    val stopped = stopEngineForUsb()
+    val ok = try {
+        runUsb(r) { rr ->
+            try {
+                listen(rr)
+            } finally {
+                stopEngine()
+            }
+        }
+    } finally {
+        unload()
+    }
+    return ok && stopped && loaded
 }
 
 /** El resultado de [stopEngineAndWait]. */
