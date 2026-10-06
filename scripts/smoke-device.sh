@@ -2384,6 +2384,7 @@ PTY
     # Un registro sin `sensor=` (editado a mano) no tumba al juez: el bloqueo cae sobre ese registro.
     sed -E "/panel=sf2 step=sensor ok=true n=$nc /s/ sensor=oido-humano//" "$tmp/nd.log" > "$tmp/nd4.log"
     expect "nd4: un juicio sin nombre de sensor que oyo el control = BLOQUEADO" 4 "$tmp/nd4.log" "$auto"
+    expect_line "nd4: ... el bloqueo cae sobre ese juicio, con su causa" '^BLOQUEADO +sf2/sensor-control +precondicion=sensor-no-discrimina ' "$tmp/nd4.log" "$auto"
     expect_line "nd4: ... sin tocar los juicios que si tienen sensor" '^PASS +sf3/sensor-estimulo ' "$tmp/nd4.log" "$auto"
     # Un "si" en un control que NO fue silencio no prueba nada del sensor: no invalida.
     sed -E "/panel=sf2 step=sensor ok=true n=$nc /s/veredicto=[a-z-]+/veredicto=presente/" "$tmp/e4.log" > "$tmp/nd3.log"
