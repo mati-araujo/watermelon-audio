@@ -1,0 +1,5 @@
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=captura step=precondicion ok=true id=record-audio cumplida=true evidencia=granted=true verificador=host
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=precondicion ok=true id=placa-enumerada cumplida=true evidencia=interfaz-clase-1:2b89:64ec:UGREEN_CM720_USB_Audio verificador=host
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=precondicion ok=false id=sin-otra-app-con-la-placa cumplida=false evidencia=vivos=com.watermellonstudios.noisypad:pid=29122 verificador=host
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=precondicion ok=true id=alsa-c1 cumplida=true evidencia=AudioOut_D:standby=yes verificador=host
+HARNESS-SMOKE v=1 run=smoke-20261009-151024-71665-c9dfa086034b panel=usb step=precondicion ok=true id=placa-no-reclamada cumplida=true evidencia=controlC1-presente verificador=host

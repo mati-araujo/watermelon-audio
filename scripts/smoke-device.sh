@@ -2500,12 +2500,32 @@ PTY
         failures=$((failures + 1))
     fi
 
+    # La corrida REAL de S3 (g42, 2026-10-09, `--plan todo`, D16): el motor rindio las seis ventanas
+    # por su ruta y el oido contesto "presente" al control sf2/1 (pico medido 0,0000). Es AC-053.10
+    # sobre un device: los seis juicios de ese sensor salen BLOQUEADO `sensor-no-discrimina` y el exit
+    # es 4. Se juzga con los tres archivos que dejo el script, sin tocarlos.
+    local g42=scripts/smoke-device-fixtures/g42-20261009-control-oido g42_rc=0
+    bash "$0" --veredicto "$g42/harness-smoke.txt" smoke-20261009-151024-71665-c9dfa086034b todo \
+        --host-log "$g42/precondiciones-host.txt" --sensor-log "$g42/sensor.txt" --semilla 1787862246 \
+        > "$tmp/g42.out" 2>&1 || g42_rc=$?
+    g42_check() {  # g42_check <nombre> <condicion: 0 = ok>
+        if [[ "$2" == 0 ]]; then printf '  ok    %-58s\n' "$1"
+        else printf '  MAL   %-58s\n' "$1"; failures=$((failures + 1)); fi
+    }
+    g42_check "g42 real: exit 4 (BLOQUEADO)" "$([[ $g42_rc == 4 ]]; echo $?)"
+    g42_check "g42 real: 6 juicios sensor-no-discrimina por sf2/1" \
+        "$([[ $(grep -cE '^BLOQUEADO +(sf2|sf3|usb)/sensor-(estimulo|control) +precondicion=sensor-no-discrimina .*evidencia=sf2/1:control:presente' "$tmp/g42.out") == 6 ]]; echo $?)"
+    g42_check "g42 real: las 6 ventanas rendidas por su ruta son PASS" \
+        "$([[ $(grep -cE '^PASS +(sf2|sf3|usb)/(estimulo|control) ' "$tmp/g42.out") == 6 ]]; echo $?)"
+    g42_check "g42 real: 50 PASS, 0 FAIL, 6 BLOQUEADO, 0 HUMANO" \
+        "$(grep -q '^resumen: 50 PASS · 0 FAIL · 6 BLOQUEADO · 0 HUMANO' "$tmp/g42.out"; echo $?)"
+
     rm -rf "$tmp"
     if (( failures )); then
         echo "self-test: FAIL — $failures caso(s) con el veredicto equivocado" >&2
         return 1
     fi
-    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado, otra corrida, y (REQ-053) precondicion incumplida, no verificable, BLOQUEADO que no suma PASS, precedencia del exit, permiso negado vs ventana vencida, ficha invalida, verificadores de host, (D14) placa reclamada vs observaciones y (S3) estimulo no rendido sin consulta, s/n/? del sensor, controles que invalidan al sensor y el orden de la semilla"
+    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado, otra corrida, y (REQ-053) precondicion incumplida, no verificable, BLOQUEADO que no suma PASS, precedencia del exit, permiso negado vs ventana vencida, ficha invalida, verificadores de host, (D14) placa reclamada vs observaciones y (S3) estimulo no rendido sin consulta, s/n/? del sensor, controles que invalidan al sensor (tambien en la corrida real del g42) y el orden de la semilla"
 }
 
 # El adb falso del self-test y sus casos. Devuelve la cantidad de casos MAL.
