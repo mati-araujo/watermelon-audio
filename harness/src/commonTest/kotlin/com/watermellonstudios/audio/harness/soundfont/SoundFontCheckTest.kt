@@ -50,6 +50,7 @@ class SoundFontCheckTest {
         override fun noteOff() { noteOffs++; noteIsOn = false }
         override fun outputPeak() = if (noteIsOn) peakDuring else peakBefore
         override fun playFrame(): Long { frame += framesPerRead; return frame }
+        override fun backend() = com.watermellonstudios.audio.domain.AudioBackendType.OBOE
     }
 
     private val lines = mutableListOf<String>()
@@ -175,6 +176,25 @@ class SoundFontCheckTest {
         assertEquals(listOf("carga", "preset", "nota", "descarga"), lines.map { it.substringAfter(" step=").substringBefore(' ') })
         assertTrue(line("descarga").contains("ok=true"))
         assertFalse(port.loaded)
+    }
+
+    /**
+     * REQ-053 S3 — las ventanas de escucha van con el fixture CARGADO: después de la nota y antes de
+     * la descarga. Bug que atrapa: escuchar con el font ya descargado (el estímulo no puede sonar) o
+     * pedir ventanas sobre un font que no cargó.
+     */
+    @Test
+    fun theListeningWindowsRunWithTheFixtureLoadedBetweenTheNoteAndTheUnload() = runTest {
+        val port = FakePort()
+        assertTrue(check(port).runFixture(reporter, "sf2", "/x.sf2", "x.sf2") { lines += "ESCUCHA cargado=${port.loaded}"; true })
+        assertEquals(listOf("carga", "preset", "nota", "ESCUCHA", "descarga"), lines.map { if (it.startsWith("ESCUCHA")) "ESCUCHA" else it.substringAfter(" step=").substringBefore(' ') })
+        assertTrue(lines.contains("ESCUCHA cargado=true"))
+        lines.clear()
+        assertFalse(check(port).runFixture(reporter, "sf2", "/x.sf2", "x.sf2") { false })
+        lines.clear()
+        var listened = false
+        assertFalse(check(FakePort().apply { loadResult = false }).runFixture(reporter, "sf2", "/x.sf2", "x.sf2") { listened = true; true })
+        assertFalse(listened)
     }
 
     @Test

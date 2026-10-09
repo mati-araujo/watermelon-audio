@@ -2,6 +2,7 @@ package com.watermellonstudios.audio.harness.soundfont
 
 import com.watermellonstudios.audio.api.AudioEngine
 import com.watermellonstudios.audio.api.IAudioNativeBridge
+import com.watermellonstudios.audio.domain.AudioBackendType
 
 /**
  * [SoundFontPort] sobre el puente de verdad. `ISoundFontBridge` es API pública; el tipo de engine,
@@ -39,6 +40,8 @@ class BridgeSoundFontPort(
     }
 
     override fun playFrame(): Long = bridge.transportGetPlayFrame()
+
+    override fun backend(): AudioBackendType = AudioBackendType.fromId(bridge.getCurrentBackendType())
 
     private companion object {
         const val TOUCH_ID = 0

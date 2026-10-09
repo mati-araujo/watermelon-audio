@@ -41,6 +41,25 @@ class HarnessSmokeTest {
         assertEquals(1 + 5 + 3, line.split(' ').size)
     }
 
+    /**
+     * Bug que atrapa (auditoría de REQ-053, bajo): un valor que viene de afuera (el `product_name` de
+     * una placa USB) con secuencias de escape de terminal o caracteres de formato. El script imprime
+     * la evidencia tal cual: un ESC puede mover el cursor y dibujar un PASS encima de un BLOQUEADO, y
+     * un U+202E da vuelta el texto. Todo lo no imprimible se vuelve `_`, como los blancos. El
+     * `--self-test` fija la misma regla en el value() del script con una placa USB hostil (su
+     * product_name con un OSC, un CSI y un U+202E).
+     */
+    @Test
+    fun valuesNeverCarryTerminalEscapesOrInvisibleCharacters() {
+        assertEquals("_]0;titulo_", HarnessSmoke.value("\u001b]0;titulo\u0007"))
+        assertEquals("_[2K_[1APASS", HarnessSmoke.value("\u001b[2K\u001b[1APASS"))
+        assertEquals("a_b_c_d", HarnessSmoke.value("a\u0000b\u007fc\u009bd"))
+        assertEquals("UGREEN_SSAP", HarnessSmoke.value("UGREEN\u202eSSAP"))
+        assertEquals("Realtek_UGREEN_CM720_USB_Audio", HarnessSmoke.value("Realtek UGREEN CM720 USB Audio"))
+        assertEquals("ñandú-ÄÖ", HarnessSmoke.value("ñandú-ÄÖ"))
+        assertEquals("🍉x_", HarnessSmoke.value("🍉x\ud800"))
+    }
+
     /** Bug que atrapa: una clave con `=` o espacios, o que pisa `ok`, hace ambigua la línea. */
     @Test
     fun keysThatWouldMakeTheLineAmbiguousAreRejected() {
@@ -134,6 +153,48 @@ class HarnessSmokeTest {
         assertFailsWith<IllegalArgumentException> { HarnessSmoke.precondition("r", "usb", "", true, "x") }
     }
 
+    /**
+     * REQ-053 S3 (D6) — un juicio de sensor lo escribe el SCRIPT en su propio registro, nunca la app.
+     *
+     * Bug que atrapa: una línea `step=sensor` armada por la app (o por cualquier app con el tag de
+     * logcat) que el juez tomaría como "el oyente dijo que sí".
+     */
+    @Test
+    fun aSensorJudgmentCannotBeForgedByTheApp() {
+        assertFailsWith<IllegalArgumentException> { HarnessSmoke.format("r", "sf2", "sensor", true) }
+        // Auditoría de REQ-053 (bajo): tampoco un step que EMPIECE con `sensor`. La fila `sensor-control`
+        // del juez (el juicio de una ventana) no puede tener un gemelo armado por la app.
+        for (forged in listOf("sensor-control", "sensor-estimulo", "sensores")) {
+            assertFailsWith<IllegalArgumentException>(forged) { HarnessSmoke.format("r", "sf2", forged, true) }
+        }
+        assertFailsWith<IllegalArgumentException> {
+            SmokeReporter({}, run = "r").report("sf2", HarnessSmoke.STEP_SENSOR, true, "veredicto" to "presente")
+        }
+        // El aviso de una ventana SÍ es de la app: no es un veredicto, como esperando-humano.
+        assertEquals(
+            "HARNESS-SMOKE v=1 run=r panel=sf2 step=escuchar ok=true n=1",
+            HarnessSmoke.format("r", "sf2", HarnessSmoke.STEP_LISTEN, true, listOf("n" to 1)),
+        )
+    }
+
+    /**
+     * REQ-053 S3 (AC-053.10) — la semilla llega por el extra `harness.smoke.semilla`.
+     *
+     * Bug que atrapa: una semilla inválida que cae callada a otra (el orden ya no sale de la que el
+     * script registró), o una ausente que se toma como inválida y no deja correr a mano.
+     */
+    @Test
+    fun theSeedIsAnIntegerFromZeroToIntMaxOrAProblem() {
+        assertEquals(SeedRequest(12345L, null), SeedRequest.parse("12345"))
+        assertEquals(SeedRequest(0L, null), SeedRequest.parse("0"))
+        assertEquals(SeedRequest(2147483647L, null), SeedRequest.parse("2147483647"))
+        assertEquals(SeedRequest(null, null), SeedRequest.parse(null))
+        assertEquals(SeedRequest(null, "semilla-invalida:-1"), SeedRequest.parse("-1"))
+        assertEquals(SeedRequest(null, "semilla-invalida:2147483648"), SeedRequest.parse("2147483648"))
+        assertEquals(SeedRequest(null, "semilla-invalida:abc"), SeedRequest.parse("abc"))
+        assertEquals(SeedRequest(null, "semilla-invalida:-"), SeedRequest.parse(""))
+    }
+
     /** Bug que atrapa: una evidencia vacía parte la línea (`evidencia=` sin valor) en vez de `-`. */
     @Test
     fun aPreconditionWithoutEvidenceSaysDash() {
@@ -163,5 +224,30 @@ class HarnessSmokeTest {
         assertEquals(SmokePlan.Invalid("panel-desconocido:"), SmokePlan.parse("sf2,,sf3"))
         assertEquals(SmokePlan.Invalid("plan-vacio"), SmokePlan.parse("  "))
         assertEquals(SmokePlan.Invalid("plan-vacio"), SmokePlan.parse(null))
+    }
+
+    /**
+     * Bug que atrapa (D7, auditoría de REQ-053): la pantalla del teléfono dice qué ventana fue. El
+     * cierre `step=control tipo=silencio` / `step=estimulo sono=A4 pico=…` llega a la vista ANTES de
+     * la pregunta, y la semilla en `plan inicio` da el orden entero: el oyente que mira el teléfono
+     * contesta lo que lee y el control deja de ser ciego. En pantalla, un cierre de estímulo y uno de
+     * control son la misma línea salvo `n`, y la semilla no aparece. El log (logcat) no cambia.
+     */
+    @Test
+    fun theScreenDoesNotTellAStimulusFromAControl() {
+        val stimulus = "HARNESS-SMOKE v=1 run=r panel=sf2 step=estimulo ok=true n=1 de=2 sono=A4 hz=440 " +
+            "ruta=sistema backend=NONE ventana-ms=2000 frames=103440 pico=0.2671 pausa-ms=12000"
+        val control = "HARNESS-SMOKE v=1 run=r panel=sf2 step=control ok=true n=1 de=2 tipo=silencio " +
+            "ruta=sistema backend=NONE ventana-ms=2000 frames=120720 pico=0.0000 pausa-ms=12000"
+        assertEquals(HarnessSmoke.forScreen(stimulus), HarnessSmoke.forScreen(control))
+        assertEquals("HARNESS-SMOKE v=1 run=r panel=sf2 step=ventana n=1 de=2", HarnessSmoke.forScreen(control))
+        val failed = control.replace("ok=true", "ok=false")
+        assertEquals(HarnessSmoke.forScreen(stimulus.replace("ok=true", "ok=false")), HarnessSmoke.forScreen(failed))
+
+        val start = "HARNESS-SMOKE v=1 run=r panel=plan step=inicio ok=true plan=sf2 semilla=740502568 semilla-origen=script"
+        assertEquals("HARNESS-SMOKE v=1 run=r panel=plan step=inicio ok=true plan=sf2", HarnessSmoke.forScreen(start))
+
+        val other = "HARNESS-SMOKE v=1 run=r panel=sf2 step=nota ok=true nota=69"
+        assertEquals(other, HarnessSmoke.forScreen(other))
     }
 }

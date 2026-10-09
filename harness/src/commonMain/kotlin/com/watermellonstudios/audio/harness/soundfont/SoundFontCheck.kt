@@ -1,8 +1,10 @@
 package com.watermellonstudios.audio.harness.soundfont
 
+import com.watermellonstudios.audio.domain.AudioBackendType
 import com.watermellonstudios.audio.harness.smoke.SmokeReporter
 import kotlinx.coroutines.delay
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * MINI-038 — lo que el panel SoundFont y el plan automático necesitan del motor, y NADA más.
@@ -32,6 +34,9 @@ interface SoundFontPort {
 
     /** La posición del transport en frames: avanza en cada bloque de audio renderizado. */
     fun playFrame(): Long
+
+    /** REQ-053 S3: el backend que el motor REPORTA (no el que se pidió): la ruta por la que sale. */
+    fun backend(): AudioBackendType
 }
 
 /**
@@ -119,7 +124,7 @@ class SoundFontCheck(
             return reporter.report(
                 panel, "nota", motivo == null,
                 "nota" to midiNote, "preset" to presetIndex,
-                "pico-antes" to before.fmt(), "pico-durante" to during.fmt(), "frames" to frames,
+                "pico-antes" to formatPeak(before), "pico-durante" to formatPeak(during), "frames" to frames,
                 "motivo" to motivo,
             )
         } finally {
@@ -135,15 +140,29 @@ class SoundFontCheck(
         return reporter.report(panel, "descarga", !still, "queda-cargado" to still)
     }
 
-    /** La secuencia de un fixture: carga, nota y descarga (la descarga corre aunque la nota falle). */
-    suspend fun runFixture(reporter: SmokeReporter, panel: String, path: String, label: String): Boolean {
+    /**
+     * La secuencia de un fixture: carga, nota, [listen] y descarga (la descarga corre aunque la nota
+     * falle). [listen] (REQ-053 S3, las ventanas de escucha) corre con el font CARGADO, y sólo si cargó.
+     */
+    suspend fun runFixture(
+        reporter: SmokeReporter,
+        panel: String,
+        path: String,
+        label: String,
+        listen: (suspend () -> Boolean)? = null,
+    ): Boolean {
         if (!load(reporter, panel, path, label)) {
             if (port.isLoaded()) unload(reporter, panel)
             return false
         }
         val note = playNote(reporter, panel)
-        val unloaded = unload(reporter, panel)
-        return note && unloaded
+        var unloaded = false
+        val listened = try {
+            listen?.invoke() ?: true
+        } finally {
+            unloaded = unload(reporter, panel)
+        }
+        return note && listened && unloaded
     }
 
     companion object {
@@ -169,9 +188,11 @@ class SoundFontCheck(
     }
 }
 
-private fun Float.fmt(): String {
-    if (isNaN() || isInfinite()) return toString()
-    val scaled = (this * 10000f).toInt()
+/** Un pico con cuatro decimales, sin depender del locale (lo lee el script). */
+internal fun formatPeak(peak: Float): String {
+    if (peak.isNaN() || peak.isInfinite()) return peak.toString()
+    // Redondeado y no truncado: 0,3f * 10000 da 2999,9998 en Float.
+    val scaled = (peak * 10000f).roundToInt()
     val whole = scaled / 10000
     val frac = (scaled % 10000).toString().padStart(4, '0')
     return "$whole.$frac"

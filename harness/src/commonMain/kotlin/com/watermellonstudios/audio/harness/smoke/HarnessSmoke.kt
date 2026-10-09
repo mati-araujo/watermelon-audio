@@ -32,6 +32,13 @@ package com.watermellonstudios.audio.harness.smoke
  *   [precondition]; `format` la rechaza. El juez del script la cruza con la ficha y decide
  *   BLOQUEADO. Las del HOST las escribe el script con `verificador=host`, una clave que la app no
  *   puede escribir: así una línea de la app nunca pasa por la verificación del host.
+ * - `step=escuchar` (REQ-053 S3) tampoco es un veredicto: es el AVISO de una ventana de escucha
+ *   (`n`, `de`, `estimulo`, `ruta`, `en-ms`, `ventana-ms`), y es CIEGO — el de un estímulo y el de un
+ *   control son la misma línea salvo `n`. Al cerrar la ventana la app emite `step=estimulo` o
+ *   `step=control` con lo que el motor rindió (ver `ListeningWindows`).
+ * - `step=sensor` (REQ-053 S3) es el juicio de un sensor sobre una ventana. Lo escribe el SCRIPT en
+ *   su propio registro, nunca la app: `format` lo rechaza, y el juez descarta el que llegue por
+ *   logcat (cualquier app puede escribir con el tag).
  *
  * En Android las líneas van a logcat con el tag [TAG]; en iOS, a la salida estándar.
  */
@@ -50,6 +57,12 @@ object HarnessSmoke {
 
     /** REQ-053 S1: el paso que lleva una precondición verificada por la app. Ver el KDoc del objeto. */
     const val STEP_PRECONDITION: String = "precondicion"
+
+    /** REQ-053 S3: el aviso (ciego) de una ventana de escucha. No es un veredicto. */
+    const val STEP_LISTEN: String = "escuchar"
+
+    /** REQ-053 S3: el juicio de un sensor. Lo escribe el script; la app no lo puede armar. */
+    const val STEP_SENSOR: String = "sensor"
 
     /** La clave con la que el SCRIPT firma sus precondiciones de host. La app no la puede escribir. */
     private const val FIELD_VERIFIER: String = "verificador"
@@ -80,6 +93,8 @@ object HarnessSmoke {
         applicable: Boolean = true,
     ): String {
         require(step != STEP_PRECONDITION) { "una precondicion se arma con precondition(), no con format()" }
+        // Ni `sensor` ni nada que empiece así: la fila `sensor-control` del juez no tiene gemelo de la app.
+        require(!step.startsWith(STEP_SENSOR)) { "un juicio de sensor lo registra el script, no la app" }
         return line(run, panel, step, ok, fields, applicable)
     }
 
@@ -110,14 +125,58 @@ object HarnessSmoke {
         }
     }
 
-    /** Un valor sin blancos, nunca vacío. */
+    /**
+     * REQ-053 (D7): lo que la PANTALLA del harness muestra de [line]. El cierre de una ventana de
+     * escucha llega antes de la pregunta al oyente, y dice si fue estímulo o control; la semilla de
+     * `plan inicio` da el orden entero. En pantalla los dos cierres son `step=ventana n= de=` y la
+     * semilla no aparece, para que el control siga siendo ciego con el teléfono en la mano. El log
+     * (logcat), que es lo que juzga el script, no pasa por acá.
+     */
+    fun forScreen(line: String): String {
+        val parts = line.split(' ')
+        val step = parts.firstOrNull { it.startsWith("step=") }?.substringAfter('=')
+        if (step in WINDOW_CLOSES) {
+            val kept = parts.filter { p -> SCREEN_HEAD.any { p.startsWith("$it=") } || p == TAG }
+            val nOf = parts.filter { it.startsWith("n=") || it.startsWith("de=") }
+            return (kept + "step=ventana" + nOf).joinToString(" ")
+        }
+        if (step == "inicio") return parts.filterNot { it.startsWith("semilla=") || it.startsWith("semilla-origen=") }.joinToString(" ")
+        return line
+    }
+
+    private val WINDOW_CLOSES = setOf("estimulo", "control")
+    private val SCREEN_HEAD = listOf("v", "run", "panel")
+
+    /**
+     * Un valor sin blancos ni nada que no se imprima, nunca vacío. Lo no imprimible (controles C0/C1,
+     * caracteres de formato como U+202E, separadores, sustitutos sueltos, privados y sin asignar) se
+     * vuelve `_` como los blancos: un `product_name` USB con un ESC no llega a la terminal del script.
+     * Es la misma regla que `str.isprintable()` del value() del script.
+     */
     fun value(v: Any?): String {
         val s = v?.toString() ?: return "-"
         if (s.isEmpty()) return "-"
         return buildString(s.length) {
-            for (c in s) append(if (c.isWhitespace()) '_' else c)
+            var i = 0
+            while (i < s.length) {
+                val c = s[i]
+                // Un par sustituto válido es UN carácter (un emoji): pasa entero. Uno suelto, no.
+                if (c.isHighSurrogate() && i + 1 < s.length && s[i + 1].isLowSurrogate()) {
+                    append(c).append(s[i + 1])
+                    i += 2
+                    continue
+                }
+                append(if (c.isWhitespace() || c.category in NOT_PRINTABLE) '_' else c)
+                i++
+            }
         }
     }
+
+    private val NOT_PRINTABLE = setOf(
+        CharCategory.CONTROL, CharCategory.FORMAT, CharCategory.SURROGATE, CharCategory.PRIVATE_USE,
+        CharCategory.UNASSIGNED, CharCategory.LINE_SEPARATOR, CharCategory.PARAGRAPH_SEPARATOR,
+        CharCategory.SPACE_SEPARATOR,
+    )
 }
 
 /** A dónde van las líneas. Lo pone el shell de cada plataforma (logcat / stdout). */
