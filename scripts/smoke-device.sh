@@ -282,6 +282,11 @@ def known_steps(panel):
     return EXPECTED[panel] + WITH_DIALOG.get(panel, []) + (["suite-1"] if panel == "usb" else [])
 
 
+def known_step(panel, step):
+    """Un paso que el juez sabe juzgar: los de known_steps, y cualquier fila `suite-N` de usb."""
+    return step in known_steps(panel) or (panel == "usb" and re.fullmatch(r"suite-[0-9]+", step or "") is not None)
+
+
 def valid_param(value, kind):
     if kind is int:
         return isinstance(value, int) and not isinstance(value, bool) and value >= 0
@@ -364,8 +369,10 @@ def load_setup(path):
 
 
 def value(v):
-    """Como HarnessSmoke.value: sin blancos, nunca vacio."""
-    s = re.sub(r"\s", "_", str(v))
+    """Como HarnessSmoke.value: sin blancos ni nada que no se imprima, nunca vacio. Un product_name
+    USB con un ESC o un U+202E no llega a la terminal (auditoria de REQ-053): todo lo que
+    str.isprintable() rechaza (controles, formato, separadores, sustitutos) se vuelve `_`."""
+    s = "".join(c if c.isprintable() and not c.isspace() else "_" for c in str(v))
     return s or "-"
 
 
@@ -795,7 +802,11 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
 
     def judge_step(panel, step, f, pending):
         bs = blockers(panel, step)
-        if bs and f.get("ok") != "true" and f.get("concluyente") == "true":
+        if not known_step(panel, step):
+            # Auditoria de REQ-053 (bajo): un paso que el juez no conoce no es PASS aunque diga
+            # ok=true. Primero que nada: ni un bloqueo ni una espera humana lo pueden tapar.
+            add("FAIL", panel, step, "paso-desconocido: " + extras(f), observed(f))
+        elif bs and f.get("ok") != "true" and f.get("concluyente") == "true":
             # La app sabe que esta falla no la explica ninguna precondicion (p.ej. un grant que
             # UsbManager desmiente): un bloqueo no la puede tapar. Solo vale para ok=false:
             # `concluyente` nunca destapa un PASS.
@@ -1608,6 +1619,15 @@ JSON
     # M1: UN paso con ok=false da rojo.
     sed -E 's/panel=sf3 step=nota ok=true/panel=sf3 step=nota ok=false/' "$tmp/verde.log" > "$tmp/m1.log"
     expect "M1: sf3/nota con ok=false" 1 "$tmp/m1.log" "$auto"
+
+    # M2b (auditoria de REQ-053, bajo): un paso que el juez no conoce, aunque diga ok=true, es FAIL.
+    # Si saliera PASS, la app podria dejar en pasos[] una fila `sensor-control` PASS con el mismo
+    # nombre que el juicio del sensor (el exit y sensor[] no cambian, pero un tablero lee la fila).
+    { grep -m1 'panel=sf2 step=nota ' "$tmp/verde.log" | sed -E 's/step=nota /step=sensor-control /'; } | before_fin "$tmp/verde.log" "$tmp/m2b.log"
+    expect "M2b: un paso desconocido con ok=true es FAIL" 1 "$tmp/m2b.log" "$auto"
+    expect_line "M2b: ... y sale como FAIL paso-desconocido" '^FAIL +sf2/sensor-control +paso-desconocido' "$tmp/m2b.log" "$auto"
+    { grep -m1 'panel=usb step=suite-1 ' "$SELFTEST_LOG" | sed -E 's/step=suite-1 /step=suite-7 /'; } | before_fin "$tmp/control-s3.log" "$tmp/m2c.log"
+    expect_no_line "M2b: una fila suite-N sigue siendo conocida" '^FAIL +usb/suite-7 +paso-desconocido' "$tmp/m2c.log" todo "$vacia"
 
     # M2: UN paso faltante da rojo.
     grep -v 'panel=salida step=frames ' "$tmp/verde.log" > "$tmp/m2.log"
@@ -2572,6 +2592,7 @@ case "$cmd" in
         [[ "$FAKE_MODE" == incumplida || "$FAKE_MODE" == sin-placa ]] && f=hid
         [[ "$FAKE_MODE" == sin-host ]] && f=sin-host
         [[ "$FAKE_MODE" == dos-dispositivos ]] && f=dos
+        [[ "$FAKE_MODE" == placa-hostil ]] && f=hostil
         cat "$FAKE_DIR/dumpsys-usb-$f.txt" ;;
     *"dumpsys media.audio_flinger"*)
         f=af-standby
@@ -2611,6 +2632,10 @@ FAKE
     # Dos dispositivos bajo host_manager: un HID primero y la CM720 despues (el recorte, repetido).
     awk -v hid="$evid/dumpsys-usb-hid.txt" 'FNR == NR { if (/^    devices=\{$/) on = 1; if (on) d = d $0 "\n"; if (on && /^    \}$/) on = 0; next }
         /^    devices=\{$/ && !done { printf "%s", d; done = 1 } { print }' "$evid/dumpsys-usb-hid.txt" "$fx/dumpsys-usb-cm720.txt" > "$evid/dumpsys-usb-dos.txt"
+    # Una placa HOSTIL (auditoria de REQ-053, bajo): su product_name trae un OSC de titulo, un CSI que
+    # borra la linea y sube el cursor, y un U+202E. La evidencia se imprime en la terminal tal cual.
+    python3 -c 'import sys; s=open(sys.argv[1], encoding="utf-8").read(); open(sys.argv[2], "w", encoding="utf-8").write(s.replace("product_name=UGREEN CM720 USB Audio", "product_name=UGREEN\x1b]0;pwn\x07\x1b[2K\x1b[1APASS\u202eX", 1))' \
+        "$fx/dumpsys-usb-cm720.txt" "$evid/dumpsys-usb-hostil.txt"
     # audio_flinger: el hilo USB es AudioOut_15; su linea de nivel de hilo es la UNICA de 2 espacios.
     # /dev/snd real, sin su cabecera `#`; la placa reclamada es el MISMO listado sin controlC1 ni pcmC1*.
     grep -v '^#' "$fx/dev-snd-cm720.txt" > "$evid/dev-snd-cm720.txt"
@@ -2642,7 +2667,7 @@ FAKE
     }
     for mode in ok incumplida falla basura denegado cortado rc-1 ps-ciego sin-host dos-dispositivos \
         af-standby af-tomada af-cerrado-no af-hal-no af-vacio af-sin-hilos af-sin-usb af-sin-standby af-sin-dispositivos af-entrada-tomada \
-        reclamada sin-placa usb-falla snd-rc snd-ilegible snd-vacio; do
+        reclamada sin-placa usb-falla snd-rc snd-ilegible snd-vacio placa-hostil; do
         FAKE_MODE="$mode" FAKE_SERIAL="$serial" FAKE_DIR="$evid" \
             smoke_py host "$evid/adb" "$serial" "$ficha" todo "$run" "$PKG" "$evid/evidencia-$mode" \
             > "$evid/out-$mode.txt" 2>&1 || true
@@ -2695,6 +2720,14 @@ FAKE
             printf '  MAL   %-58s\n' "host[$mode]: la evidencia de $id lleva $needle"; bad=$((bad + 1))
         fi
     done
+    host_case placa-hostil t-usb-clase true
+    if ! LC_ALL=C grep -q $'\x1b\|\x07\|\xe2\x80\xae' "$evid/out-placa-hostil.txt" \
+        && grep -qE ' id=t-usb-clase .*evidencia=[^ ]*UGREEN_\]0;pwn__\[2K_\[1APASS_X' "$evid/out-placa-hostil.txt"; then
+        printf '  ok    %-58s\n' "host[placa-hostil]: sin escapes de terminal en la evidencia"
+    else
+        printf '  MAL   %-58s\n' "host[placa-hostil]: sin escapes de terminal en la evidencia"; bad=$((bad + 1))
+        LC_ALL=C cat -v "$evid/out-placa-hostil.txt" | sed 's/^/        /' | tail -4
+    fi
     if [[ ! -s "$evid/sin-s.txt" ]]; then
         printf '  ok    %-58s\n' "host: toda llamada a adb lleva -s <serial>"
     else

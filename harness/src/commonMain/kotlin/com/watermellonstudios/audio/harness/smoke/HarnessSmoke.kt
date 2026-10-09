@@ -93,7 +93,8 @@ object HarnessSmoke {
         applicable: Boolean = true,
     ): String {
         require(step != STEP_PRECONDITION) { "una precondicion se arma con precondition(), no con format()" }
-        require(step != STEP_SENSOR) { "un juicio de sensor lo registra el script, no la app" }
+        // Ni `sensor` ni nada que empiece así: la fila `sensor-control` del juez no tiene gemelo de la app.
+        require(!step.startsWith(STEP_SENSOR)) { "un juicio de sensor lo registra el script, no la app" }
         return line(run, panel, step, ok, fields, applicable)
     }
 
@@ -146,14 +147,36 @@ object HarnessSmoke {
     private val WINDOW_CLOSES = setOf("estimulo", "control")
     private val SCREEN_HEAD = listOf("v", "run", "panel")
 
-    /** Un valor sin blancos, nunca vacío. */
+    /**
+     * Un valor sin blancos ni nada que no se imprima, nunca vacío. Lo no imprimible (controles C0/C1,
+     * caracteres de formato como U+202E, separadores, sustitutos sueltos, privados y sin asignar) se
+     * vuelve `_` como los blancos: un `product_name` USB con un ESC no llega a la terminal del script.
+     * Es la misma regla que `str.isprintable()` del value() del script.
+     */
     fun value(v: Any?): String {
         val s = v?.toString() ?: return "-"
         if (s.isEmpty()) return "-"
         return buildString(s.length) {
-            for (c in s) append(if (c.isWhitespace()) '_' else c)
+            var i = 0
+            while (i < s.length) {
+                val c = s[i]
+                // Un par sustituto válido es UN carácter (un emoji): pasa entero. Uno suelto, no.
+                if (c.isHighSurrogate() && i + 1 < s.length && s[i + 1].isLowSurrogate()) {
+                    append(c).append(s[i + 1])
+                    i += 2
+                    continue
+                }
+                append(if (c.isWhitespace() || c.category in NOT_PRINTABLE) '_' else c)
+                i++
+            }
         }
     }
+
+    private val NOT_PRINTABLE = setOf(
+        CharCategory.CONTROL, CharCategory.FORMAT, CharCategory.SURROGATE, CharCategory.PRIVATE_USE,
+        CharCategory.UNASSIGNED, CharCategory.LINE_SEPARATOR, CharCategory.PARAGRAPH_SEPARATOR,
+        CharCategory.SPACE_SEPARATOR,
+    )
 }
 
 /** A dónde van las líneas. Lo pone el shell de cada plataforma (logcat / stdout). */

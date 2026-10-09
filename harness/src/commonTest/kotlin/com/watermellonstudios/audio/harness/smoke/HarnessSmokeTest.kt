@@ -41,6 +41,25 @@ class HarnessSmokeTest {
         assertEquals(1 + 5 + 3, line.split(' ').size)
     }
 
+    /**
+     * Bug que atrapa (auditoría de REQ-053, bajo): un valor que viene de afuera (el `product_name` de
+     * una placa USB) con secuencias de escape de terminal o caracteres de formato. El script imprime
+     * la evidencia tal cual: un ESC puede mover el cursor y dibujar un PASS encima de un BLOQUEADO, y
+     * un U+202E da vuelta el texto. Todo lo no imprimible se vuelve `_`, como los blancos. El
+     * `--self-test` fija la misma regla en el value() del script con una placa USB hostil (su
+     * product_name con un OSC, un CSI y un U+202E).
+     */
+    @Test
+    fun valuesNeverCarryTerminalEscapesOrInvisibleCharacters() {
+        assertEquals("_]0;titulo_", HarnessSmoke.value("\u001b]0;titulo\u0007"))
+        assertEquals("_[2K_[1APASS", HarnessSmoke.value("\u001b[2K\u001b[1APASS"))
+        assertEquals("a_b_c_d", HarnessSmoke.value("a\u0000b\u007fc\u009bd"))
+        assertEquals("UGREEN_SSAP", HarnessSmoke.value("UGREEN\u202eSSAP"))
+        assertEquals("Realtek_UGREEN_CM720_USB_Audio", HarnessSmoke.value("Realtek UGREEN CM720 USB Audio"))
+        assertEquals("ñandú-ÄÖ", HarnessSmoke.value("ñandú-ÄÖ"))
+        assertEquals("🍉x_", HarnessSmoke.value("🍉x\ud800"))
+    }
+
     /** Bug que atrapa: una clave con `=` o espacios, o que pisa `ok`, hace ambigua la línea. */
     @Test
     fun keysThatWouldMakeTheLineAmbiguousAreRejected() {
@@ -143,6 +162,11 @@ class HarnessSmokeTest {
     @Test
     fun aSensorJudgmentCannotBeForgedByTheApp() {
         assertFailsWith<IllegalArgumentException> { HarnessSmoke.format("r", "sf2", "sensor", true) }
+        // Auditoría de REQ-053 (bajo): tampoco un step que EMPIECE con `sensor`. La fila `sensor-control`
+        // del juez (el juicio de una ventana) no puede tener un gemelo armado por la app.
+        for (forged in listOf("sensor-control", "sensor-estimulo", "sensores")) {
+            assertFailsWith<IllegalArgumentException>(forged) { HarnessSmoke.format("r", "sf2", forged, true) }
+        }
         assertFailsWith<IllegalArgumentException> {
             SmokeReporter({}, run = "r").report("sf2", HarnessSmoke.STEP_SENSOR, true, "veredicto" to "presente")
         }
