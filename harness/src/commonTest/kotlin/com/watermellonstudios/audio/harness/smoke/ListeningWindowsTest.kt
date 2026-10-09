@@ -203,6 +203,20 @@ class ListeningWindowsTest {
         assertEquals("pausa=${ListeningWindows.ANSWER_PAUSE_MS}", events[close + 1])
     }
 
+    /**
+     * Bug que atrapa (D7, medido en el g42 el 2026-10-09): el primer aviso pegado a lo que sonó antes
+     * del panel (la `nota` de sf2/sf3, la suite de usb). El oyente oye un A4 junto al aviso y, si la
+     * ventana 1 es un control, contesta "presente" sobre un silencio que el motor midió en 0.
+     */
+    @Test
+    fun theFirstNoticeComesAfterASilentLeadIn() = runTest {
+        val port = FakePort()
+        windows(port).run(reporter, "sf3", Route.SYSTEM, listOf(WindowKind.CONTROL, WindowKind.STIMULUS), "f.sf3")
+        val listen = events.indexOfFirst { it.startsWith("HARNESS-SMOKE ") && step(it) == "escuchar" }
+        assertEquals(listOf("pausa=${ListeningWindows.LEAD_IN_MS}"), events.subList(0, listen))
+        assertTrue(ListeningWindows.LEAD_IN_MS >= 3000L)
+    }
+
     /** Bug que atrapa: la nota suena fuera de su ventana, queda colgada o deja el motor en SOUNDFONT. */
     @Test
     fun theNoteSoundsOnlyInTheStimulusWindowAndTheEngineIsLeftAsItWas() = runTest {

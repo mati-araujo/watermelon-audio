@@ -14,6 +14,9 @@ import kotlinx.coroutines.delay
  * en esa ventana. Intercala ventanas de control (silencio) en el orden que fija la semilla.
  *
  * El protocolo con `scripts/smoke-device.sh` (que juzga, y le pregunta al sensor):
+ * 0. [leadInMs] de silencio antes del primer aviso: lo que sonó antes del panel (la `nota` de
+ *    sf2/sf3, la suite de usb) no queda pegado a la ventana 1. Medido en el g42 (2026-10-09): con el
+ *    aviso a 10 ms de la `nota`, el oyente contestó "presente" a un control que el motor midió en 0.
  * 1. `step=escuchar`: el AVISO. Lleva `n`, `de`, `estimulo` (qué hay que detectar), `ruta`, `en-ms`
  *    (cuándo arranca) y `ventana-ms`. Es CIEGO: el aviso de un estímulo y el de un control son la
  *    misma línea salvo `n`, así que ni el script ni el oyente saben cuál es cuál.
@@ -31,6 +34,7 @@ import kotlinx.coroutines.delay
 class ListeningWindows(
     private val port: SoundFontPort,
     private val pause: suspend (Long) -> Unit = { delay(it) },
+    private val leadInMs: Long = LEAD_IN_MS,
     private val preRollMs: Long = PRE_ROLL_MS,
     private val windowMs: Long = WINDOW_MS,
     private val answerPauseMs: Long = ANSWER_PAUSE_MS,
@@ -58,6 +62,7 @@ class ListeningWindows(
         try {
             port.setEngineType(SoundFontCheck.ENGINE_SOUNDFONT)
             port.setPreset(PRESET)
+            pause(leadInMs)
             order.forEachIndexed { i, kind ->
                 all = window(r, panel, route, kind, i + 1, order.size, fixture) && all
             }
@@ -145,6 +150,9 @@ class ListeningWindows(
         /** Lo que el sensor tiene que detectar: el A4 del fixture (un seno a 440 Hz). */
         const val STIMULUS = "A4-440Hz"
         const val PRESET = 0
+
+        /** El silencio antes del primer aviso: separa la ventana 1 de lo que sonó antes del panel. */
+        const val LEAD_IN_MS = 3000L
 
         /** El aviso llega al oyente con latencia (logcat por Wi-Fi + el sondeo del script, 1 s). */
         const val PRE_ROLL_MS = 4000L
