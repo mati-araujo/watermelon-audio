@@ -2500,6 +2500,19 @@ PTY
         failures=$((failures + 1))
     fi
 
+    # D7 (auditoria de REQ-053): la semilla da el orden de las ventanas; impresa antes, quien contesta
+    # en esta terminal sabe cual es el control. Se imprime DESPUES del veredicto.
+    local seed_at verdict_at
+    seed_at="$(grep -nE '^    echo "=== semilla del orden de las ventanas: ' "$0" | head -1 | cut -d: -f1)"
+    verdict_at="$(grep -nE '^    verdict "\$app_log" ' "$0" | head -1 | cut -d: -f1)"
+    if [[ -n "$seed_at" && -n "$verdict_at" ]] && (( seed_at > verdict_at )) \
+        && ! grep -qE '^    echo .*semilla.*\$seed' <(sed -n "1,${verdict_at}p" "$0"); then
+        printf '  ok    %-58s\n' "D7: la semilla se imprime DESPUES del veredicto"
+    else
+        printf '  MAL   %-58s semilla=%s veredicto=%s\n' "D7: la semilla se imprime DESPUES del veredicto" "${seed_at:-nada}" "${verdict_at:-nada}"
+        failures=$((failures + 1))
+    fi
+
     # La corrida REAL de S3 (g42, 2026-10-09, `--plan todo`, D16): el motor rindio las seis ventanas
     # por su ruta y el oido contesto "presente" al control sf2/1 (pico medido 0,0000). Es AC-053.10
     # sobre un device: los seis juicios de ese sensor salen BLOQUEADO `sensor-no-discrimina` y el exit
@@ -2907,7 +2920,9 @@ run_device() {
     # cada una, le pregunta al sensor. El orden sale de la semilla, que va por extra y queda en el JSON.
     local sensor_log="$out/sensor.log" follow_state="$out/seguidor.json"
     : > "$sensor_log"; rm -f "$follow_state"
-    echo "=== sensor: $sensor · semilla del orden de las ventanas: $seed ==="
+    # La semilla NO se imprime aca: da el orden entero de las ventanas, y el control dejaria de ser
+    # ciego para quien contesta en esta terminal (D7). Sale al final, con el JSON.
+    echo "=== sensor: $sensor ==="
     if [[ "$sensor" == oido-humano && "$(audible_panels "$plan")" -gt 0 ]]; then
         echo ">>> HUMANO: en sf2, sf3 y usb vas a escuchar dos ventanas por panel. Te aviso cuando arranca cada"
         echo "    una y al cerrarla te pregunto si sonó el A4 (s/n/?). Algunas son de CONTROL y no suena nada:"
@@ -2967,6 +2982,7 @@ run_device() {
 
     local rc=0
     verdict "$app_log" "$run" "$plan" "$setup" "$out/harness-smoke.json" "$host_log" "$sensor_log" --semilla "$seed" || rc=$?
+    echo "=== semilla del orden de las ventanas: $seed (tambien en el JSON) ==="
     echo "=== JSON de la corrida: $out/harness-smoke.json ==="
     [[ -n "$uid" ]] || echo "AVISO — $uid_note"
     print_manual_checks

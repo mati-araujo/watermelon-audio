@@ -201,4 +201,29 @@ class HarnessSmokeTest {
         assertEquals(SmokePlan.Invalid("plan-vacio"), SmokePlan.parse("  "))
         assertEquals(SmokePlan.Invalid("plan-vacio"), SmokePlan.parse(null))
     }
+
+    /**
+     * Bug que atrapa (D7, auditoría de REQ-053): la pantalla del teléfono dice qué ventana fue. El
+     * cierre `step=control tipo=silencio` / `step=estimulo sono=A4 pico=…` llega a la vista ANTES de
+     * la pregunta, y la semilla en `plan inicio` da el orden entero: el oyente que mira el teléfono
+     * contesta lo que lee y el control deja de ser ciego. En pantalla, un cierre de estímulo y uno de
+     * control son la misma línea salvo `n`, y la semilla no aparece. El log (logcat) no cambia.
+     */
+    @Test
+    fun theScreenDoesNotTellAStimulusFromAControl() {
+        val stimulus = "HARNESS-SMOKE v=1 run=r panel=sf2 step=estimulo ok=true n=1 de=2 sono=A4 hz=440 " +
+            "ruta=sistema backend=NONE ventana-ms=2000 frames=103440 pico=0.2671 pausa-ms=12000"
+        val control = "HARNESS-SMOKE v=1 run=r panel=sf2 step=control ok=true n=1 de=2 tipo=silencio " +
+            "ruta=sistema backend=NONE ventana-ms=2000 frames=120720 pico=0.0000 pausa-ms=12000"
+        assertEquals(HarnessSmoke.forScreen(stimulus), HarnessSmoke.forScreen(control))
+        assertEquals("HARNESS-SMOKE v=1 run=r panel=sf2 step=ventana n=1 de=2", HarnessSmoke.forScreen(control))
+        val failed = control.replace("ok=true", "ok=false")
+        assertEquals(HarnessSmoke.forScreen(stimulus.replace("ok=true", "ok=false")), HarnessSmoke.forScreen(failed))
+
+        val start = "HARNESS-SMOKE v=1 run=r panel=plan step=inicio ok=true plan=sf2 semilla=740502568 semilla-origen=script"
+        assertEquals("HARNESS-SMOKE v=1 run=r panel=plan step=inicio ok=true plan=sf2", HarnessSmoke.forScreen(start))
+
+        val other = "HARNESS-SMOKE v=1 run=r panel=sf2 step=nota ok=true nota=69"
+        assertEquals(other, HarnessSmoke.forScreen(other))
+    }
 }

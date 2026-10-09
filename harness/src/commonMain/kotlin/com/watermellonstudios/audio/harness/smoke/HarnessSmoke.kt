@@ -124,6 +124,28 @@ object HarnessSmoke {
         }
     }
 
+    /**
+     * REQ-053 (D7): lo que la PANTALLA del harness muestra de [line]. El cierre de una ventana de
+     * escucha llega antes de la pregunta al oyente, y dice si fue estímulo o control; la semilla de
+     * `plan inicio` da el orden entero. En pantalla los dos cierres son `step=ventana n= de=` y la
+     * semilla no aparece, para que el control siga siendo ciego con el teléfono en la mano. El log
+     * (logcat), que es lo que juzga el script, no pasa por acá.
+     */
+    fun forScreen(line: String): String {
+        val parts = line.split(' ')
+        val step = parts.firstOrNull { it.startsWith("step=") }?.substringAfter('=')
+        if (step in WINDOW_CLOSES) {
+            val kept = parts.filter { p -> SCREEN_HEAD.any { p.startsWith("$it=") } || p == TAG }
+            val nOf = parts.filter { it.startsWith("n=") || it.startsWith("de=") }
+            return (kept + "step=ventana" + nOf).joinToString(" ")
+        }
+        if (step == "inicio") return parts.filterNot { it.startsWith("semilla=") || it.startsWith("semilla-origen=") }.joinToString(" ")
+        return line
+    }
+
+    private val WINDOW_CLOSES = setOf("estimulo", "control")
+    private val SCREEN_HEAD = listOf("v", "run", "panel")
+
     /** Un valor sin blancos, nunca vacío. */
     fun value(v: Any?): String {
         val s = v?.toString() ?: return "-"

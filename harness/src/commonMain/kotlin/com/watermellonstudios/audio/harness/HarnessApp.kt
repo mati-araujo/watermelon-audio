@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import com.watermellonstudios.audio.api.AudioEngineFactory
 import com.watermellonstudios.audio.api.AudioInputFactory
 import com.watermellonstudios.audio.api.InternalWatermelonApi
+import com.watermellonstudios.audio.harness.smoke.HarnessSmoke
 import com.watermellonstudios.audio.harness.smoke.ListeningWindows
 import com.watermellonstudios.audio.harness.smoke.SmokePlanRunner
 import com.watermellonstudios.audio.harness.smoke.SmokeReporter
@@ -79,12 +80,13 @@ fun HarnessApp(platform: HarnessPlatform) {
     val state by engine.state.collectAsState()
 
     // Las líneas HARNESS-SMOKE van al sink de la plataforma Y a la vista de abajo: la pantalla y
-    // el log no pueden contar dos historias distintas.
+    // el log no pueden contar dos historias distintas. La pantalla sólo CALLA lo que tiene que ser
+    // ciego para el oyente (D7): qué ventana fue estímulo y cuál control, y la semilla.
     val smokeLines = remember { mutableStateListOf<String>() }
     val sink = remember {
         SmokeSink { line ->
             platform.smokeSink.emit(line)
-            smokeLines.add(line)
+            smokeLines.add(HarnessSmoke.forScreen(line))
             while (smokeLines.size > MAX_SMOKE_LINES) smokeLines.removeAt(0)
         }
     }
