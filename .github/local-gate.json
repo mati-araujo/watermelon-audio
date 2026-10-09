@@ -9,11 +9,11 @@
     },
     "ios": {
       "status": "pass",
-      "seconds": 120
+      "seconds": 166
     },
     "build": {
       "status": "pass",
-      "seconds": 134
+      "seconds": 225
     }
   },
   "versions": {
@@ -25,7 +25,7 @@
     "ninja": "1.13.2",
     "launcher_jvm": "17.0.19"
   },
-  "total_seconds": 737,
-  "created_utc": "2026-10-05T20:35:43Z",
-  "head": "a7520da8c53b8ba865ac299d3db638f7b67aa094"
+  "total_seconds": 1007,
+  "created_utc": "2026-10-09T14:14:42Z",
+  "head": "b7f51d68aa4cab75933c09c51e195a43b7c7b7f4"
 }
