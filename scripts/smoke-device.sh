@@ -3155,6 +3155,34 @@ JSON
     g42_check "g42 real: 50 PASS, 0 FAIL, 6 BLOQUEADO, 0 HUMANO" \
         "$(grep -q '^resumen: 50 PASS · 0 FAIL · 6 BLOQUEADO · 0 HUMANO' "$tmp/g42.out"; echo $?)"
 
+    # REQ-053 S4 (4.6, D18): dos corridas REALES de `--plan afinador` en el g42 (2026-10-14), juzgadas con
+    # la ficha real y los dos archivos que dejo el script, sin tocarlos (el registro del sensor estaba
+    # vacio: el afinador no consulta al oido). La referencia verde reproduce el "sin reaccion" en la fase
+    # reproduccion (OBSERVADO quedo-en=midiendo, con el motor sin objetivo) y engancha el A4 en juicio. La
+    # de control atrapa en device un tick enganchado en el silencio de juicio (440,4 Hz a -48 dBFS).
+    local af42=scripts/smoke-device-fixtures/g42-20261014-afinador af42_rc=0
+    bash "$0" --veredicto "$af42/harness-smoke.txt" smoke-20261014-132651-61763-0e6e66b78669 afinador \
+        --host-log "$af42/precondiciones-host.txt" --semilla 1552609212 > "$tmp/af42.out" 2>&1 || af42_rc=$?
+    g42_check "g42 afinador: exit 0" "$([[ $af42_rc == 0 ]]; echo $?)"
+    g42_check "g42 afinador: la reproduccion se observa sin enganche (quedo midiendo)" \
+        "$(grep -qE '^OBSERVADO +afinador/lectura-reproduccion-estimulo +quedo-en=midiendo hz=440.0 nota=- cents=- \(ticks=50 midiendo=50;' "$tmp/af42.out"; echo $?)"
+    g42_check "g42 afinador: ... con el motor sin objetivo" \
+        "$(grep -qE '^PASS +afinador/reproduccion-arranque +.*objetivo-motor-hz=0.0 ' "$tmp/af42.out"; echo $?)"
+    g42_check "g42 afinador: el juicio engancha el A4 = PASS" \
+        "$(grep -qE '^PASS +afinador/lectura-juicio-estimulo +enganchado nota=A4 ' "$tmp/af42.out"; echo $?)"
+    g42_check "g42 afinador: los dos silencios sin enganche y el piso cumplido" \
+        "$([[ $(grep -cE '^PASS +afinador/lectura-(reproduccion|juicio)-control +sin-enganche-en-silencio' "$tmp/af42.out") == 2 ]] && grep -qE '^ +cumplida +afinador/[a-z-]+ \(app\) +fase:reproduccion,medidor:nivel-afinador,nivel-max-dbfs:-41.7,' "$tmp/af42.out"; echo $?)"
+    g42_check "g42 afinador: 16 PASS, 0 FAIL, 1 OBSERVADO" \
+        "$(grep -q '^resumen: 16 PASS · 0 FAIL · 0 BLOQUEADO · 0 HUMANO · 0 NO-APLICA · 1 OBSERVADO$' "$tmp/af42.out"; echo $?)"
+    local af42c=scripts/smoke-device-fixtures/g42-20261014-afinador-control af42c_rc=0
+    bash "$0" --veredicto "$af42c/harness-smoke.txt" smoke-20261014-132457-59977-a2e3bf7c1af1 afinador \
+        --host-log "$af42c/precondiciones-host.txt" --semilla 541460330 > "$tmp/af42c.out" 2>&1 || af42c_rc=$?
+    g42_check "g42 afinador control: exit 1" "$([[ $af42c_rc == 1 ]]; echo $?)"
+    g42_check "g42 afinador control: el silencio de juicio atrapa el enganche" \
+        "$(grep -qE '^FAIL +afinador/lectura-juicio-control +enganchado-en-silencio nota=A4 hz=440.4 cents=0.5 t-ms=3040 ' "$tmp/af42c.out"; echo $?)"
+    g42_check "g42 afinador control: es el unico FAIL (el A4 de juicio = PASS)" \
+        "$([[ $(grep -c '^FAIL ' "$tmp/af42c.out") == 1 ]] && grep -qE '^PASS +afinador/lectura-juicio-estimulo ' "$tmp/af42c.out"; echo $?)"
+
     rm -rf "$tmp"
     if (( failures )); then
         echo "self-test: FAIL — $failures caso(s) con el veredicto equivocado" >&2

@@ -1,0 +1,1 @@
+HARNESS-SMOKE v=1 run=smoke-20261014-132651-61763-0e6e66b78669 panel=afinador step=precondicion ok=true id=record-audio cumplida=true evidencia=granted=true verificador=host

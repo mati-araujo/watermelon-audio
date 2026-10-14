@@ -89,6 +89,7 @@ class TunerSmokeTest {
         }
         override fun stop() {
             created += "stop"
+            if (stopThrows) throw IllegalStateException("stop")
             running = false
         }
         override fun reading(): TunerReading? = behavior(port.noteIsOn, selectedString?.let { configuration.targetForString(it) }, engine.targetHz)
@@ -99,6 +100,7 @@ class TunerSmokeTest {
     private val created = mutableListOf<String>()
     private val configurations = mutableListOf<TuningConfiguration>()
     private var startAccepts = true
+    private var stopThrows = false
     private var behavior: (noteOn: Boolean, target: StringTarget?, engineHz: Float) -> TunerReading? =
         { noteOn, target, engineHz ->
             when {
@@ -277,6 +279,20 @@ class TunerSmokeTest {
         )
         assertFalse(stuck.run(reporter, seed = 12345L, fixture = "f.sf2"))
         assertEquals("false", field(lines.single { step(it) == "parada" }, "ok"))
+    }
+
+    /**
+     * Bug que atrapa (security-auditor del REQ): un `stop()` del afinador que tira deja la captura
+     * abierta, porque el cierre venía después en el mismo `finally`. La captura se cierra igual, y la
+     * excepción sigue su camino (no se traga).
+     */
+    @Test
+    fun theCaptureIsClosedEvenIfTheTunersStopThrows() = runTest {
+        stopThrows = true
+        assertFailsWith<IllegalStateException> { windows().run(reporter, seed = 12345L, fixture = "f.sf2") }
+        assertFalse(captureOpen)
+        assertEquals(listOf("start", "stop", "cerrar-entrada"), created)
+        assertFalse(port.noteIsOn)
     }
 
     /** Bug que atrapa: ventanas que no son múltiplo del período del tick (podrían quedar sin ticks). */
