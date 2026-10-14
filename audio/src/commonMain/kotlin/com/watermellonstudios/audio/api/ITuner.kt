@@ -65,7 +65,11 @@ interface ITuner {
      * **Precondiciones: ninguna.** `start()` es auto-suficiente: crea el motor si no existe,
      * asegura el nodo de entrada, lo engancha al motor y **abre el stream de captura** si el
      * backend no entrega la entrada por callback. Un consumidor **no necesita** abrir un
-     * `AudioInput` antes, y no debería: el afinador es dueño de la entrada mientras corre.
+     * `AudioInput` antes, y no debería: el afinador es **uno de los dueños** de la captura
+     * mientras corre, y [stop] suelta sólo lo suyo. Qué cierra y qué no: ver [stop].
+     *
+     * Después de un [stop] que cerró la captura, un `start()` —sobre este afinador o sobre uno
+     * nuevo— la vuelve a abrir y el análisis vuelve a avanzar.
      *
      * **No enciende el monitoreo** — afinar no es escucharse. Pedir un afinador nunca cambia lo
      * que sale por los parlantes, que en un instrumento amplificado sería realimentación y no
@@ -85,7 +89,27 @@ interface ITuner {
      */
     fun start(): Boolean
 
-    /** Para de analizar. La última lectura sigue siendo legible. */
+    /**
+     * Para de analizar y **suelta la captura que tomó [start]**. La última lectura sigue siendo
+     * legible.
+     *
+     * **La regla del dueño.** La captura de entrada tiene dos clases de dueño: el afinador y el
+     * consumidor (un [AudioInput] arrancado con `start()`, o un modo de audio con entrada,
+     * INPUT_FX o MIX). Cada uno suelta **sólo lo suyo**, y la captura se cierra cuando la suelta
+     * el **último**:
+     *
+     * - **Sólo el afinador** la sostiene: `stop()` la cierra antes de devolver. En Android eso
+     *   libera el micrófono (el indicador del sistema se apaga); no hace falta llamar
+     *   `AudioInput.stop()` después.
+     * - **También la sostiene un consumidor** (su `AudioInput` arrancado antes o después que el
+     *   afinador, o el modo): `stop()` la deja abierta y la cierra el `AudioInput.stop()` del
+     *   consumidor, que es el último dueño. Es simétrico: `AudioInput.stop()` con el afinador
+     *   corriendo tampoco le cierra la captura al afinador.
+     * - **El backend entrega la entrada por callback** (USB, iOS): no hay stream propio que abrir
+     *   ni que cerrar; `start()`/`stop()` no tocan ninguno.
+     *
+     * Llamarlo dos veces, o sin [start] previo, es inofensivo: no suelta lo de otro dueño.
+     */
     fun stop()
 
     val isRunning: Boolean

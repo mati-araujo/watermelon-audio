@@ -70,7 +70,15 @@ interface AudioInput {
      */
     fun start(): Boolean
 
-    /** Cierra el stream. El nodo de entrada sigue existiendo — ver [release]. */
+    /**
+     * Suelta la captura que tomó [start] y la cierra **si nadie más la sostiene**. El nodo de
+     * entrada sigue existiendo — ver [release].
+     *
+     * Si un [ITuner] está corriendo, la captura queda abierta para él y la cierra su
+     * [ITuner.stop], que es el último dueño (la regla está en [ITuner.stop]). Un modo de audio
+     * con entrada (INPUT_FX, MIX) cuenta como este mismo consumidor: `stop()` también suelta lo
+     * que abrió el modo. Llamarlo sin [start] previo es inofensivo.
+     */
     fun stop()
 
     val isRunning: Boolean

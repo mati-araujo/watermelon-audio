@@ -25,8 +25,17 @@ package com.watermellonstudios.audio.api
  */
 interface IInputBridge {
 
-    /** @return false si no se pudo abrir el stream (permiso denegado, sin device). */
+    /**
+     * Toma la captura como **consumidor** y la abre si no corría.
+     *
+     * @return false si no se pudo abrir el stream (permiso denegado, sin device).
+     */
     fun startInputStreamSync(): Boolean
+
+    /**
+     * Suelta la captura del **consumidor** y la cierra sólo si no queda otro dueño: con el
+     * afinador corriendo sigue abierta. La regla del dueño: [ITuner.stop].
+     */
     fun stopInputStreamSync()
     fun isInputStreamRunning(): Boolean
 
