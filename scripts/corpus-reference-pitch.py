@@ -16,6 +16,9 @@ Solo stdlib: no le agrega una dependencia al repo por un script que corre una ve
     python3 scripts/corpus-reference-pitch.py --dir DIR --partials 4   # REQ-035: H1..H4 por archivo
     python3 scripts/corpus-reference-pitch.py --self-test      # el instrumento contra una serie conocida
 
+Modos nuevos de REQ-055 (afinador, «lectura progresiva») al final de este docstring: `--short`
+(la altura instantanea por tramos cortos) y la lectura de WAV float32 con rechazo de tomas invalidas.
+
 Salida por archivo (una linea, tab-separada):
     nombre  hz_mediana  spread_cents  n_tramos  veredicto(ok|inestable)
 
@@ -52,8 +55,40 @@ que REQ-035 persigue (+5,4 c) — pero un lector que compare C con H1 tiene que 
 🔴 EL INSTRUMENTO SE VERIFICA ANTES DE CREERLE (`--self-test`): sobre un WAV sintetico con B
 conocido devuelve `600·log2(1+B·n²)` a 0,1 c y recupera B; y sobre uno con un parcial corrido
 +10 c el residuo lo delata (> 2 c). Un oraculo que no puede fallar no es un oraculo.
+
+EL ORACULO CORTO (REQ-055 D4, `--short`)
+----------------------------------------
+`measure` promedia 0,75 s: declara lo SOSTENIDO. El afinador de REQ-055 lee progresivamente, y a los
+250 ms del ataque su verdad es lo que la cuerda hace AHORA, glide del ataque incluido (D4). Con
+`--short` el oraculo da la altura instantanea por tramos: ventana Hann de max(`--short-win`, 10
+periodos del centro) (0,1 s por defecto; en E1 son 0,243 s), salto `--short-hop` (0,05 s). Por
+tramo busca el pico del DTFT (Goertzel + interpolacion parabolica, el metodo de siempre) en ±`--span-cents`
+(150) del centro (`--nominal` o el de `nominal_for`). Barre grueso (~10 c) sólo en el primer tramo
+con senal o si pierde el seguimiento (o hay un salto de nivel > 10 dB); despues sigue al tramo
+anterior (±20 c) con parabola sucesiva sobre el log de la magnitud hasta < 0,005 c. Es lo que lo
+hace posible en Python puro: 5 s tardan 0,1-0,6 s en vez de minutos.
+
+    python3 scripts/corpus-reference-pitch.py --short --dir DIR --tsv OUT.tsv
+    python3 scripts/corpus-reference-pitch.py --short archivo.wav --nominal 196
+
+Salida por tramo (tab-separada): `archivo t_ini_s t_fin_s hz cents_vs_centro nivel_dbfs`. El nivel es
+el RMS del tramo; bajo `--short-floor-dbfs` (-60) o sin pico en ±span el hz es `nan`: no hay altura
+que declarar, y no se inventa una. Con `--tsv` la cabecera `#` dice el comando, la ventana y el hop, y
+cada archivo va precedido de `# archivo NOMBRE sha256 HEX rate HZ frames N`: el consumidor ata el
+oraculo al archivo EXACTO. Limite conocido: con 10 periodos (E1, E2) la fuga del 2do armonico en la
+ventana de Hann sesga el pico hasta ~0,1 c segun la fase; con la ventana de 0,1 s es < 0,002 c.
+
+LECTURA DE WAV Y TOMAS INVALIDAS
+--------------------------------
+El afinador vuelca su entrada a WAV float32 mono con un chunk propio `wmad`; el modulo `wave` no lee
+float, asi que el script trae su parser RIFF: PCM16 (igual que siempre, la salida de los modos
+viejos es identica byte a byte), float32 IEEE y WAVE_FORMAT_EXTENSIBLE con subformato PCM16 o float,
+mono o estereo (estereo = 0,5·(L+R)). Cualquier otra cosa es SystemExit. Una toma con huecos no puede
+ser oraculo de nada: se RECHAZA si el nombre termina en `.invalid.wav`, o si `wmad` dice valid=0,
+framesLost>0 o discontinuities>0, o su rate no es el de fmt (o su version no es la 1). Solo
+`--allow-invalid` la lee igual.
 """
-import argparse, math, os, struct, sys, wave
+import argparse, hashlib, math, operator, os, struct, sys, wave
 
 # Nominales por nombre de cuerda: SOLO para centrar la busqueda (±100 cents). El resultado sale
 # del archivo. Tabla publicada (A4 = 440), no derivada del motor.
@@ -61,17 +96,103 @@ NOMINAL = {"E1": 41.20344, "A1": 55.0, "D2": 73.41619, "G2": 97.99886,
            "E2": 82.40689, "A2": 110.0, "D3": 146.83238, "G3": 195.99772, "B3": 246.94165,
            "E4": 329.62756, "C4": 261.62557, "G4": 391.99544, "A4": 440.0}
 
-def read_mono(path):
-    with wave.open(path, 'rb') as w:
-        ch, sw, sr, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
-        raw = w.readframes(n)
-    if sw != 2:
-        raise SystemExit(f"{path}: solo PCM de 16 bits (tiene {sw*8})")
-    vals = struct.unpack('<%dh' % (n * ch), raw)
-    if ch == 1:
+# Chunk `wmad` que el afinador agrega al volcar su entrada (REQ-055): u32 version, u64 framesWritten,
+# u64 framesLost, u64 discontinuities, i32 sampleRate, i32 inputSource, u32 valid. Little-endian,
+# sin relleno. Se reescribe aca (R-API-48): el layout es el contrato del archivo, no codigo del motor.
+WMAD_FMT = '<IQQQiiI'
+WMAD_SIZE = struct.calcsize(WMAD_FMT)
+assert WMAD_SIZE == 40
+WAVE_FORMAT_PCM, WAVE_FORMAT_FLOAT, WAVE_FORMAT_EXTENSIBLE = 1, 3, 0xFFFE
+
+# Si es True, una toma marcada como invalida se lee igual (`--allow-invalid`). Una toma con huecos
+# no puede ser oraculo de nada: el default es rechazarla.
+ALLOW_INVALID = False
+
+def parse_wav(data, name):
+    """Parser RIFF propio (el modulo `wave` no lee float). `data` son los bytes del archivo.
+
+    Devuelve (mono, sr, frames, wmad|None). PCM16 y float32 IEEE, mono o estereo (estereo: media de
+    L y R); WAVE_FORMAT_EXTENSIBLE con subformato PCM o float. Todo lo demas: SystemExit."""
+    if len(data) < 12 or data[0:4] != b'RIFF' or data[8:12] != b'WAVE':
+        raise SystemExit(f"{name}: no es un WAV RIFF/WAVE")
+    fmt = wmad_raw = pcm = None
+    pos = 12
+    while pos + 8 <= len(data):
+        cid, size = data[pos:pos + 4], struct.unpack_from('<I', data, pos + 4)[0]
+        body = pos + 8
+        end = min(body + size, len(data))     # `data` de una captura cortada puede declarar de mas
+        if cid == b'fmt ':
+            fmt = data[body:end]
+        elif cid == b'data' and pcm is None:
+            pcm = data[body:end]
+        elif cid == b'wmad':
+            wmad_raw = data[body:end]
+        pos = body + size + (size & 1)        # los chunks se alinean a par
+    if fmt is None or len(fmt) < 16:
+        raise SystemExit(f"{name}: falta el chunk fmt")
+    if pcm is None:
+        raise SystemExit(f"{name}: falta el chunk data")
+    tag, ch, sr, _, _, bits = struct.unpack_from('<HHIIHH', fmt, 0)
+    if tag == WAVE_FORMAT_EXTENSIBLE:
+        if len(fmt) < 40:
+            raise SystemExit(f"{name}: WAVE_FORMAT_EXTENSIBLE truncado")
+        tag = struct.unpack_from('<H', fmt, 24)[0]     # los 2 primeros bytes del GUID del subformato
+    if ch not in (1, 2):
+        raise SystemExit(f"{name}: {ch} canales; solo mono o estereo")
+    if tag == WAVE_FORMAT_PCM and bits == 16:
+        code, width = 'h', 2
+    elif tag == WAVE_FORMAT_FLOAT and bits == 32:
+        code, width = 'f', 4
+    else:
+        raise SystemExit(f"{name}: formato {tag} de {bits} bits no soportado (PCM16 o float32)")
+    n = len(pcm) // (width * ch)
+    vals = struct.unpack('<%d%s' % (n * ch, code), pcm[:n * ch * width])
+    if code == 'f':
+        if not all(map(math.isfinite, vals)):
+            raise SystemExit(f"{name}: muestras NaN/inf en el float32")
+        if ch == 1:
+            mono = list(vals)
+        else:
+            mono = [0.5 * (vals[i] + vals[i + 1]) for i in range(0, n * ch, ch)]
+    elif ch == 1:
         mono = [v / 32768.0 for v in vals]
     else:
         mono = [(vals[i] + vals[i + 1]) / 65536.0 for i in range(0, n * ch, ch)]
+    wmad = None
+    if wmad_raw is not None and len(wmad_raw) >= WMAD_SIZE:
+        k = ("version", "frames_written", "frames_lost", "discontinuities", "rate", "input_source", "valid")
+        wmad = dict(zip(k, struct.unpack_from(WMAD_FMT, wmad_raw, 0)))
+    elif wmad_raw is not None and not ALLOW_INVALID:
+        raise SystemExit(f"{name}: chunk wmad de {len(wmad_raw)} bytes (esperaba {WMAD_SIZE})")
+    if not ALLOW_INVALID:
+        why = invalid_reason(name, sr, wmad)
+        if why:
+            raise SystemExit(f"{name}: toma rechazada, {why} (--allow-invalid para leerla igual)")
+    return mono, sr, n, wmad
+
+def invalid_reason(name, sr, wmad):
+    """Por que una toma no puede ser oraculo, o None. Una toma con huecos no mide la altura de nada."""
+    if name.endswith(".invalid.wav"):
+        return "el nombre dice .invalid.wav"
+    if wmad is None:
+        return None
+    if wmad["version"] != 1:
+        return f"wmad version {wmad['version']} desconocida"
+    if not wmad["valid"]: return "wmad valid=0"
+    if wmad["frames_lost"] > 0: return f"wmad framesLost={wmad['frames_lost']}"
+    if wmad["discontinuities"] > 0: return f"wmad discontinuities={wmad['discontinuities']}"
+    if wmad["rate"] != sr: return f"el rate de wmad ({wmad['rate']}) no es el de fmt ({sr})"
+    return None
+
+def read_wav(path):
+    """(mono, sr, info) con el sha256 y los frames, para atar el oraculo al archivo exacto."""
+    with open(path, 'rb') as f:
+        data = f.read()
+    mono, sr, n, wmad = parse_wav(data, os.path.basename(path))
+    return mono, sr, {"sha256": hashlib.sha256(data).hexdigest(), "frames": n, "wmad": wmad}
+
+def read_mono(path):
+    mono, sr, _ = read_wav(path)
     return mono, sr
 
 def goertzel(x, sr, hz):
@@ -220,8 +341,102 @@ def format_partials(name, nominal, res, max_spread):
         cols.append(f"res_max={max(abs(v) for v in resid.values()):.2f}c")
     return "\t".join(cols)
 
-def self_test():
-    """El instrumento contra una serie CONOCIDA, en las dos direcciones. Sale con 1 si falla."""
+# --- REQ-055 (D4): el oraculo CORTO, la altura instantanea --------------------------------------
+
+SHORT_PERIODS = 10          # la ventana nunca baja de 10 periodos del centro: menos no resuelve el f0
+_HANN = {}
+
+def hann_window(n):
+    if n not in _HANN:
+        _HANN[n] = [0.5 * (1.0 - math.cos(2.0 * math.pi * (i + 0.5) / n)) for i in range(n)]
+    return _HANN[n]
+
+def goertzel_fast(x, c):
+    """Lo mismo que `goertzel` con `c = 2cos(w)` ya calculado y un solo paso por muestra: este es el
+    lazo caliente del modo corto (cientos de tramos por archivo, en Python puro)."""
+    s1 = s2 = 0.0
+    for v in x:
+        s1, s2 = v + c * s1 - s2, s1
+    return math.sqrt(max(0.0, s1 * s1 + s2 * s2 - c * s1 * s2))
+
+def refine_peak(logmag, c0, s0, limit, max_iter=12):
+    """Parabola sucesiva sobre el LOG de la magnitud (con Hann el pico es casi una gaussiana: la
+    parabola en log es la que menos sesga) con paso decreciente. Si el maximo cae en un borde del
+    trio, corre el centro y repite. Devuelve cents respecto del centro de busqueda, o None si se
+    aleja mas de `limit` de `c0` o no converge: eso es 'perdi el pico', y el que llama decide."""
+    c, s = c0, s0
+    for _ in range(max_iter):
+        a, b, d = logmag(c - s), logmag(c), logmag(c + s)
+        if b < a or b < d:
+            c += -s if a > d else s
+        else:
+            den = a - 2.0 * b + d
+            if den >= 0.0:                      # plano: no hay curvatura de la que fiarse
+                return None
+            off = 0.5 * s * (a - d) / den
+            c += off
+            if abs(off) < 0.005:                # 0,005 c: 10x por debajo de los 0,05 c exigidos
+                return c
+            s = max(0.4 * s, 0.3)
+        if abs(c - c0) > limit:
+            return None
+    return None
+
+def locate(x, sr, center, span, prev):
+    """Cents del pico de `x` (ya con Hann) respecto de `center`, o None si no hay pico en ±span.
+    Con `prev` sigue desde el tramo anterior (±20 c); sin el, o si lo pierde, barre ±span de a ~10 c."""
+    cache = {}
+    def logmag(cc):
+        if cc not in cache:
+            cache[cc] = math.log(goertzel_fast(x, 2.0 * math.cos(2.0 * math.pi * detune(center, cc) / sr)) + 1e-300)
+        return cache[cc]
+    if prev is not None:
+        r = refine_peak(logmag, prev, 1.5, 20.0)
+        if r is not None and abs(r) <= span:
+            return r
+    k = max(2, round(2.0 * span / 10.0))
+    step = 2.0 * span / k
+    grid = [-span + step * i for i in range(k + 1)]
+    ms = [logmag(g) for g in grid]
+    i = max(range(len(ms)), key=ms.__getitem__)
+    if i == 0 or i == len(ms) - 1:
+        return None                             # el pico esta en el borde: fuera del rango declarado
+    a, b, d = ms[i - 1], ms[i], ms[i + 1]
+    c0 = grid[i] + 0.5 * step * (a - d) / (a - 2.0 * b + d)
+    r = refine_peak(logmag, c0, 1.5, 15.0)
+    return r if r is not None and abs(r) <= span else None
+
+def short_track(mono, sr, center, win_s=0.1, hop_s=0.05, floor_db=-60.0, span=150.0):
+    """Altura instantanea por tramos cortos. Devuelve [(t_ini, t_fin, hz, cents_vs_centro, dbfs)].
+
+    Ventana Hann de max(win_s, 10 periodos del centro); hop fijo. Bajo `floor_db` (RMS del tramo) o
+    sin pico en ±span el hz es nan: no hay altura que declarar, y no se inventa una."""
+    n = int(round(max(win_s, SHORT_PERIODS / center) * sr))
+    hop = max(1, int(round(hop_s * sr)))
+    hann = hann_window(n)
+    rows, prev, prev_db = [], None, None
+    for start in range(0, len(mono) - n + 1, hop):
+        seg = mono[start:start + n]
+        rms = math.sqrt(sum(map(operator.mul, seg, seg)) / n)
+        db = 20.0 * math.log10(rms) if rms > 0.0 else -math.inf
+        c = None
+        if db >= floor_db:
+            # Un salto de nivel (ataque nuevo, fin de nota) invalida el seguimiento: se re-barre.
+            if prev_db is not None and abs(db - prev_db) > 10.0:
+                prev = None
+            c = locate(list(map(operator.mul, seg, hann)), sr, center, span, prev)
+        prev, prev_db = c, db
+        hz, cc = (math.nan, math.nan) if c is None else (detune(center, c), c)
+        rows.append((start / sr, (start + n) / sr, hz, cc, db))
+    return rows
+
+def format_short(name, rows):
+    nan = lambda v, f: "nan" if v != v else format(v, f)
+    return ["\t".join((name, f"{t0:.4f}", f"{t1:.4f}", nan(hz, ".5f"), nan(c, "+.3f"), f"{db:.2f}"))
+            for t0, t1, hz, c, db in rows]
+
+def self_test_partials():
+    """El oraculo por parcial contra una serie CONOCIDA, en las dos direcciones. Devuelve los fallos."""
     import tempfile
     sr, secs, f0 = 44100, 6.0, detune(82.40689, 3.0)     # E2, +3 c: el error no puede ser 0
     def write_wav(path, partial_cents):
@@ -264,6 +479,142 @@ def self_test():
             failures.append(f"p3 +10 c: res_max {max(abs(v) for v in resid.values()):.2f} c no delata al parcial corrido")
         if abs(res[3]["cents"] - (stretch_cents(1e-4, 3) - stretch_cents(1e-4, 1) + 10.0)) > 0.1:
             failures.append(f"p3 +10 c: el oraculo leyo {res[3]['cents']:+.3f} c en el parcial 3")
+    return failures
+
+def riff(fmt_body, payload, wmad=None):
+    """Arma un WAV a mano (el modulo `wave` no escribe float): fmt + [wmad] + data."""
+    chunks = [(b'fmt ', fmt_body)]
+    if wmad is not None: chunks.append((b'wmad', wmad))
+    chunks.append((b'data', payload))
+    body = b'WAVE' + b''.join(cid + struct.pack('<I', len(b)) + b + (b'\0' if len(b) & 1 else b'')
+                              for cid, b in chunks)
+    return b'RIFF' + struct.pack('<I', len(body)) + body
+
+def fmt_chunk(tag, ch, sr, bits, extensible=None):
+    width = bits // 8
+    base = struct.pack('<HHIIHH', WAVE_FORMAT_EXTENSIBLE if extensible else tag, ch, sr, sr * ch * width, ch * width, bits)
+    if not extensible:
+        return base
+    guid = struct.pack('<H', extensible) + bytes.fromhex("000000001000800000aa00389b71")
+    return base + struct.pack('<HHI', 22, bits, 0) + guid
+
+def wmad_chunk(version=1, written=1000, lost=0, disc=0, rate=44100, source=1, valid=1):
+    return struct.pack(WMAD_FMT, version, written, lost, disc, rate, source, valid)
+
+def f32(v): return struct.unpack('<f', struct.pack('<f', v))[0]
+
+def self_test_formats():
+    """Float32, EXTENSIBLE y el rechazo de tomas invalidas. Devuelve los fallos."""
+    import tempfile
+    failures = []
+    global ALLOW_INVALID
+    ALLOW_INVALID = False
+    # |x| > 1 y valores que un entero de 16 bits no puede representar (1/3, 1e-6, 1e-9).
+    mono_vals = [f32(v) for v in (0.0, 1.0, -1.0, 1.5, -2.25, 1.0 / 3.0, 1e-6, -1e-9, 123.456, 0.99999994)]
+    L = mono_vals
+    R = [f32(v) for v in (0.25, -1.0, 1.0, 0.5, 2.25, -1.0 / 7.0, 3e-6, 1e-9, -23.456, 0.5)]
+    pack = lambda vals: struct.pack('<%df' % len(vals), *vals)
+    stereo = [x for lr in zip(L, R) for x in lr]
+    with tempfile.TemporaryDirectory() as d:
+        def read(name, data):
+            p = os.path.join(d, name)
+            with open(p, 'wb') as f: f.write(data)
+            return read_wav(p)
+        got, sr, info = read("m.wav", riff(fmt_chunk(3, 1, 48000, 32), pack(mono_vals)))
+        if got != mono_vals or sr != 48000 or info["frames"] != len(mono_vals):
+            failures.append(f"float32 mono no vuelve bit a bit: {got[:4]} ...")
+        got, sr, _ = read("s.wav", riff(fmt_chunk(3, 2, 44100, 32), pack(stereo)))
+        if got != [0.5 * (l + r) for l, r in zip(L, R)]:
+            failures.append("float32 estereo no es 0,5·(L+R) exacto")
+        got, _, _ = read("xf.wav", riff(fmt_chunk(3, 1, 44100, 32, extensible=3), pack(mono_vals)))
+        if got != mono_vals: failures.append("EXTENSIBLE float no vuelve bit a bit")
+        ints = [0, 1, -1, 32767, -32768, 12345]
+        got, _, _ = read("xp.wav", riff(fmt_chunk(1, 1, 44100, 16, extensible=1), struct.pack('<6h', *ints)))
+        if got != [v / 32768.0 for v in ints]: failures.append("EXTENSIBLE PCM16 mal leido")
+        got, _, _ = read("p.wav", riff(fmt_chunk(1, 2, 44100, 16), struct.pack('<12h', *[x for lr in zip(ints, ints[::-1]) for x in lr])))
+        if got != [(a + b) / 65536.0 for a, b in zip(ints, ints[::-1])]:
+            failures.append("PCM16 estereo ya no es (L+R)/65536")
+        for what, data in (("24 bits", riff(fmt_chunk(1, 1, 44100, 24), b'\0' * 9)),
+                           ("3 canales", riff(fmt_chunk(3, 3, 44100, 32), b'\0' * 12)),
+                           ("float64", riff(fmt_chunk(3, 1, 44100, 64), b'\0' * 16)),
+                           ("NaN", riff(fmt_chunk(3, 1, 44100, 32), pack([float('nan')])))):
+            try: read("bad.wav", data); failures.append(f"{what}: tenia que rechazarse")
+            except SystemExit: pass
+        # wmad: el valido pasa; cada causa de rechazo, por separado.
+        ok = riff(fmt_chunk(3, 1, 44100, 32), pack(mono_vals), wmad_chunk())
+        got, _, info = read("ok.wav", ok)
+        if got != mono_vals or info["wmad"]["frames_written"] != 1000:
+            failures.append("wmad valido: no se acepto o no se parseo")
+        pay = pack(mono_vals)
+        cases = (("valid=0", "v0.wav", wmad_chunk(valid=0)), ("lost>0", "l.wav", wmad_chunk(lost=3)),
+                 ("discontinuities>0", "dc.wav", wmad_chunk(disc=1)),
+                 ("rate distinto", "r.wav", wmad_chunk(rate=48000)),
+                 ("version 2", "v2.wav", wmad_chunk(version=2)),
+                 ("nombre .invalid.wav", "toma.invalid.wav", wmad_chunk()))
+        for what, name, wm in cases:
+            data = riff(fmt_chunk(3, 1, 44100, 32), pay, wm)
+            ALLOW_INVALID = False
+            try: read(name, data); failures.append(f"wmad {what}: tenia que rechazarse")
+            except SystemExit: pass
+            ALLOW_INVALID = True
+            try: read(name, data)
+            except SystemExit: failures.append(f"wmad {what}: --allow-invalid tenia que dejarlo pasar")
+            ALLOW_INVALID = False
+    return failures
+
+def synth(sr, secs, hz_of_t, harmonics=6):
+    """Tono con armonicos (amplitud 1/k) y FASE CONTINUA: la fase integra la frecuencia, no la evalua."""
+    n, ph, w = int(secs * sr), 0.0, 2.0 * math.pi / sr
+    amp = 0.3 / sum(1.0 / k for k in range(1, harmonics + 1))
+    out = []
+    for i in range(n):
+        out.append(amp * sum(math.sin(k * ph) / k for k in range(1, harmonics + 1)))
+        ph += w * hz_of_t(i / sr)
+    return out
+
+def self_test_short():
+    """El oraculo corto contra tonos y glides CONOCIDOS. Devuelve los fallos."""
+    failures = []
+    G3 = NOMINAL["G3"]
+    # (c) tono estable con armonicos: cada tramo con senal a <= 0,1 c de la verdad.
+    for sr in (44100, 48000):
+        for name, center, off in (("E1", NOMINAL["E1"], 0.0), ("E2+3c", NOMINAL["E2"], 3.0),
+                                  ("E4", NOMINAL["E4"], 0.0), ("A4-7c", NOMINAL["A4"], -7.0)):
+            hz = detune(center, off)
+            rows = short_track(synth(sr, 1.2, lambda t: hz), sr, center)
+            if not rows: failures.append(f"{name}@{sr}: sin tramos")
+            for t0, t1, h, c, db in rows:
+                if not abs(c - off) <= 0.1:       # `not <=` atrapa tambien el nan
+                    failures.append(f"{name}@{sr} t={t0:.2f}: {c:+.3f} c contra {off:+.3f}"); break
+    # (d) glide de ataque con fase continua: c(t) = 2 - 20·exp(-t/0,3) c sobre G3, 2 s. El tramo ve el
+    # glide promediado con su Hann: se compara con ese promedio ponderado.
+    sr = 44100
+    ct = lambda t: 2.0 - 20.0 * math.exp(-t / 0.3)
+    rows = short_track(synth(sr, 2.0, lambda t: detune(G3, ct(t))), sr, G3)
+    worst = 0.0
+    for t0, t1, h, c, db in rows:
+        n = int(round((t1 - t0) * sr)); hw = hann_window(n)
+        want = sum(w * ct(t0 + (i + 0.5) / sr) for i, w in enumerate(hw)) / sum(hw)
+        worst = max(worst, abs(c - want)) if c == c else math.inf
+    if not worst <= 0.3: failures.append(f"glide: peor tramo a {worst:.3f} c del promedio de la ventana (tope 0,3)")
+    if len(rows) < 30: failures.append(f"glide: solo {len(rows)} tramos (el hop no se respeta)")
+    # (e) las dos direcciones del rango: no se pega al nominal. Y el silencio no tiene altura.
+    for off in (40.0, -120.0):
+        hz = detune(G3, off)
+        rows = short_track(synth(sr, 0.6, lambda t: hz), sr, G3)
+        for t0, t1, h, c, db in rows:
+            if not abs(c - off) <= 0.1: failures.append(f"{off:+.0f} c: leyo {c:+.3f}"); break
+    rows = short_track([0.0] * sr, sr, G3)
+    if not rows or any(r[2] == r[2] for r in rows): failures.append("silencio: algun tramo declara hz")
+    # El hop se respeta: los inicios avanzan de a hop_s.
+    ts = [r[0] for r in short_track(synth(sr, 0.6, lambda t: G3), sr, G3, hop_s=0.1)]
+    if any(abs(b - a - 0.1) > 1e-6 for a, b in zip(ts, ts[1:])) or len(ts) < 2:
+        failures.append(f"hop 0,1 s: inicios {ts}")
+    return failures
+
+def self_test():
+    """El instrumento contra series CONOCIDAS, en las dos direcciones. Sale con 1 si falla."""
+    failures = self_test_partials() + self_test_formats() + self_test_short()
     for f in failures: print("SELF-TEST FALLO:", f)
     print("self-test:", "ROJO" if failures else "verde", f"({len(failures)} fallos)")
     return 1 if failures else 0
@@ -273,6 +624,25 @@ def nominal_for(name):
     if cuerda not in NOMINAL:
         raise SystemExit(f"{name}: no se que cuerda es '{cuerda}'; pasa --nominal")
     return NOMINAL[cuerda]
+
+def run_short(a, files):
+    out = open(a.tsv, 'w') if a.tsv else sys.stdout
+    try:
+        print("# comando: " + " ".join(sys.argv), file=out)
+        print(f"# ventana_min_s {a.short_win} (y >= {SHORT_PERIODS} periodos del centro, Hann) "
+              f"hop_s {a.short_hop} span_cents ±{a.span_cents} piso_dbfs {a.short_floor_dbfs}", file=out)
+        print("# archivo\tt_ini_s\tt_fin_s\thz\tcents_vs_centro\tnivel_dbfs", file=out)
+        for path in files:
+            name = os.path.basename(path)
+            mono, sr, info = read_wav(path)
+            center = a.nominal or nominal_for(name)
+            print(f"# archivo {name} sha256 {info['sha256']} rate {sr} frames {info['frames']}", file=out)
+            rows = short_track(mono, sr, center, a.short_win, a.short_hop, a.short_floor_dbfs, a.span_cents)
+            print("\n".join(format_short(name, rows)), file=out)
+            out.flush()
+    finally:
+        if a.tsv: out.close()
+    return 0
 
 def main():
     ap = argparse.ArgumentParser()
@@ -285,14 +655,26 @@ def main():
     ap.add_argument("--partials", type=int, default=1,
                     help="REQ-035: medir tambien los parciales 2..N alrededor de n·hz_1")
     ap.add_argument("--self-test", action="store_true",
-                    help="verificar el oraculo por parcial contra una serie sintetica conocida")
+                    help="verificar el oraculo (parcial, float32, wmad, corto) contra series sinteticas conocidas")
+    ap.add_argument("--short", action="store_true", help="REQ-055: altura instantanea por tramos cortos")
+    ap.add_argument("--short-win", type=float, default=0.1, help="ventana minima, en s (y >= 10 periodos)")
+    ap.add_argument("--short-hop", type=float, default=0.05, help="salto entre tramos, en s")
+    ap.add_argument("--short-floor-dbfs", type=float, default=-60.0, help="bajo este RMS el hz es nan")
+    ap.add_argument("--span-cents", type=float, default=150.0, help="busqueda ±N cents del centro")
+    ap.add_argument("--tsv", help="con --short: escribe el TSV (con cabecera) a este archivo")
+    ap.add_argument("--allow-invalid", action="store_true",
+                    help="leer tambien tomas con huecos / .invalid.wav (nunca para un oraculo)")
     a = ap.parse_args()
+    global ALLOW_INVALID
+    ALLOW_INVALID = a.allow_invalid
     if a.self_test:
         sys.exit(self_test())
     files = sorted(os.path.join(a.dir, f) for f in os.listdir(a.dir) if f.endswith(".wav")) \
             if a.dir else [a.wav]
     if not files or files == [None]:
         ap.error("falta el .wav o --dir")
+    if a.short:
+        sys.exit(run_short(a, files))
     for path in files:
         name = os.path.basename(path)
         nominal = a.nominal or nominal_for(name)
