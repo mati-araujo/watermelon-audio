@@ -27,6 +27,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +43,7 @@ using latch::OracleSegment;
 using latch::Params;
 using latch::Publication;
 using latch::TargetEvent;
+using latch::Window;
 
 // =====================================================================================
 // El nucleo, sin corpus
@@ -63,12 +65,26 @@ Params params() {
     return p;
 }
 
-/// Una publicacion al final del bloque [pos − 100, pos).
-Publication pub(int64_t pos, double rms, double hz = kNan, int state = kNoLock, double sigma = 1.0) {
+/// Ventana de los tests del nucleo: 100 frames. La de produccion (4096) es la misma regla a otra escala.
+constexpr int kWin = 100;
+
+/// Una serie de ventanas de 100 frames desde el frame 0, con el rms dado a cada una.
+std::vector<Window> wins(const std::vector<double>& rms) {
+    std::vector<Window> out;
+    int64_t start = 0;
+    for (double r : rms) {
+        out.push_back({start, r});
+        start += kWin;
+    }
+    return out;
+}
+
+std::vector<Window> loudWins(int n) { return wins(std::vector<double>(static_cast<size_t>(n), kLoud)); }
+
+/// Una publicacion fechada en `pos`.
+Publication pub(int64_t pos, double hz = kNan, int state = kNoLock, double sigma = 1.0) {
     Publication p;
-    p.posStart = pos - 100;
     p.pos = pos;
-    p.rms = rms;
     p.hz = hz;
     p.state = state;
     p.sigmaCents = sigma;
@@ -82,8 +98,8 @@ const std::vector<OracleSegment> kNoOracle{};
 TEST(LatchInstrument, SignalAfterSilenceOpensALatchAtTheStartOfThatWindow) {
     // Atrapa: no abrir enganche tras el silencio, o fechar t0 al FINAL de la ventana en vez de a
     // su inicio (400 en lugar de 300).
-    const std::vector<Publication> pubs = {pub(100, kLoud), pub(200, kQuiet), pub(300, kQuiet), pub(400, kLoud)};
-    const auto l = latch::measure(pubs, {{0, true}}, kNoOracle, params());
+    const std::vector<Publication> pubs = {pub(100), pub(200), pub(300), pub(400)};
+    const auto l = latch::measure(pubs, wins({kLoud, kQuiet, kQuiet, kLoud}), {{0, true}}, kNoOracle, params());
     ASSERT_EQ(l.size(), 2u);
     EXPECT_EQ(l[0].t0Frames, 0);
     EXPECT_EQ(l[1].t0Frames, 300);
@@ -94,8 +110,8 @@ TEST(LatchInstrument, SignalAfterSilenceOpensALatchAtTheStartOfThatWindow) {
 TEST(LatchInstrument, TheFirstWindowWithSignalAtTheTargetChangeIsOneLatchNotTwo) {
     // Atrapa: contar dos veces el arranque (el evento de objetivo Y la primera ventana con senal
     // sobre el ring vacio) y duplicar el enganche inicial.
-    const std::vector<Publication> pubs = {pub(100, kLoud), pub(200, kLoud)};
-    const auto l = latch::measure(pubs, {{0, true}}, kNoOracle, params());
+    const std::vector<Publication> pubs = {pub(100), pub(200)};
+    const auto l = latch::measure(pubs, loudWins(2), {{0, true}}, kNoOracle, params());
     ASSERT_EQ(l.size(), 1u);
     EXPECT_EQ(l[0].cause, Latch::Cause::kTargetChange);
     EXPECT_EQ(l[0].publications, 2);
@@ -104,22 +120,22 @@ TEST(LatchInstrument, TheFirstWindowWithSignalAtTheTargetChangeIsOneLatchNotTwo)
 TEST(LatchInstrument, SignalFloorIsInclusiveAtOneThousandth) {
     // Atrapa: `>` en vez de `>=`, o un piso distinto de 0,001. rms == 0,001 ES senal;
     // 0,00099 no lo es. Un piso mal puesto mueve t0 de todos los enganches por senal.
-    const std::vector<Publication> atFloor = {pub(100, 0.0), pub(200, 0.001)};
-    auto l = latch::measure(atFloor, {{0, true}}, kNoOracle, params());
+    const std::vector<Publication> atFloor = {pub(100), pub(200)};
+    auto l = latch::measure(atFloor, wins({0.0, 0.001}), {{0, true}}, kNoOracle, params());
     ASSERT_EQ(l.size(), 2u);
     EXPECT_EQ(l[1].t0Frames, 100);
 
-    const std::vector<Publication> below = {pub(100, 0.0), pub(200, 0.00099)};
-    l = latch::measure(below, {{0, true}}, kNoOracle, params());
+    const std::vector<Publication> below = {pub(100), pub(200)};
+    l = latch::measure(below, wins({0.0, 0.00099}), {{0, true}}, kNoOracle, params());
     EXPECT_EQ(l.size(), 1u) << "0,00099 es silencio: no abre enganche";
 }
 
 TEST(LatchInstrument, TargetChangeOpensALatchEvenWhileTheStringKeepsSounding) {
     // Atrapa: ignorar los cambios de objetivo cuando no hubo silencio. Las publicaciones
     // posteriores al evento se atribuyen al enganche NUEVO.
-    const std::vector<Publication> pubs = {pub(100, kLoud, 100.0), pub(200, kLoud, 100.0), pub(300, kLoud),
-                                           pub(400, kLoud, 200.0)};
-    const auto l = latch::measure(pubs, {{0, true}, {200, true}}, kNoOracle, params());
+    const std::vector<Publication> pubs = {pub(100, 100.0), pub(200, 100.0), pub(300),
+                                           pub(400, 200.0)};
+    const auto l = latch::measure(pubs, loudWins(4), {{0, true}, {200, true}}, kNoOracle, params());
     ASSERT_EQ(l.size(), 2u);
     EXPECT_EQ(l[1].t0Frames, 200);
     EXPECT_EQ(l[0].publications, 2);
@@ -130,9 +146,9 @@ TEST(LatchInstrument, TargetChangeOpensALatchEvenWhileTheStringKeepsSounding) {
 TEST(LatchInstrument, ARepluckWithoutSilenceInBetweenOpensNoLatch) {
     // Atrapa: abrir un enganche en cada subida de nivel. El segundo ataque llega con la cuerda
     // aun sonando (nunca bajo 0,001): es el MISMO enganche.
-    const std::vector<Publication> pubs = {pub(100, 0.5), pub(200, 0.01), pub(300, 0.002), pub(400, 0.9),
-                                           pub(500, 0.9)};
-    const auto l = latch::measure(pubs, {{0, true}}, kNoOracle, params());
+    const std::vector<Publication> pubs = {pub(100), pub(200), pub(300), pub(400),
+                                           pub(500)};
+    const auto l = latch::measure(pubs, wins({0.5, 0.01, 0.002, 0.9, 0.9}), {{0, true}}, kNoOracle, params());
     ASSERT_EQ(l.size(), 1u);
     EXPECT_EQ(l[0].publications, 5);
 }
@@ -140,8 +156,8 @@ TEST(LatchInstrument, ARepluckWithoutSilenceInBetweenOpensNoLatch) {
 TEST(LatchInstrument, TargetSetDuringSilenceThenSignalAreTwoLatches) {
     // Atrapa: fusionar el evento con una ventana con senal que llega MUCHO despues. Son dos
     // t_reenganche distintos; el primero queda sin lecturas.
-    const std::vector<Publication> pubs = {pub(100, kQuiet), pub(200, kQuiet), pub(300, kLoud, 100.0)};
-    const auto l = latch::measure(pubs, {{0, true}}, kNoOracle, params());
+    const std::vector<Publication> pubs = {pub(100), pub(200), pub(300, 100.0)};
+    const auto l = latch::measure(pubs, wins({kQuiet, kQuiet, kLoud}), {{0, true}}, kNoOracle, params());
     ASSERT_EQ(l.size(), 2u);
     EXPECT_EQ(l[0].t0Frames, 0);
     EXPECT_EQ(l[0].readings, 0);
@@ -152,10 +168,10 @@ TEST(LatchInstrument, TargetSetDuringSilenceThenSignalAreTwoLatches) {
 TEST(LatchInstrument, WithoutATargetNothingIsAttributed) {
     // Atrapa: abrir enganches por senal "con objetivo puesto" cuando NO hay objetivo; y que
     // quitar el objetivo (hasTarget=false) deje el enganche anterior abierto.
-    const std::vector<Publication> pubs = {pub(100, kLoud, 100.0), pub(200, kQuiet), pub(300, kLoud, 100.0),
-                                           pub(400, kQuiet), pub(500, kLoud, 100.0)};
-    EXPECT_TRUE(latch::measure(pubs, {}, kNoOracle, params()).empty());
-    const auto l = latch::measure(pubs, {{0, true}, {250, false}}, kNoOracle, params());
+    const std::vector<Publication> pubs = {pub(100, 100.0), pub(200), pub(300, 100.0),
+                                           pub(400), pub(500, 100.0)};
+    EXPECT_TRUE(latch::measure(pubs, wins({kLoud, kLoud, kQuiet, kLoud, kQuiet, kLoud}), {}, kNoOracle, params()).empty());
+    const auto l = latch::measure(pubs, wins({kLoud, kLoud, kQuiet, kLoud, kQuiet, kLoud}), {{0, true}, {250, false}}, kNoOracle, params());
     ASSERT_EQ(l.size(), 1u);
     EXPECT_EQ(l[0].publications, 2) << "lo posterior a quitar el objetivo no cuenta";
 }
@@ -164,9 +180,9 @@ TEST(LatchInstrument, FirstReadingAndConvergedAreMeasuredFromT0Exactly) {
     // Atrapa: medir desde 0 en vez de desde t0, contar por indice en vez de frames, tomar el
     // primer CONVERGED sin esperar al primero, o contar una publicacion sin cents como lectura.
     const std::vector<Publication> pubs = {
-        pub(100, kQuiet), pub(200, kLoud), pub(300, kLoud, kNan, kMeas), pub(400, kLoud, 100.0, kMeas),
-        pub(500, kLoud, 100.0, kConv), pub(600, kLoud, 100.0, kConv)};
-    const auto l = latch::measure(pubs, {{0, true}}, kNoOracle, params());
+        pub(100), pub(200), pub(300, kNan, kMeas), pub(400, 100.0, kMeas),
+        pub(500, 100.0, kConv), pub(600, 100.0, kConv)};
+    const auto l = latch::measure(pubs, wins({kQuiet, kLoud, kLoud, kLoud, kLoud, kLoud}), {{0, true}}, kNoOracle, params());
     ASSERT_EQ(l.size(), 2u);
     const Latch& b = l[1];
     EXPECT_EQ(b.t0Frames, 100);
@@ -180,8 +196,8 @@ TEST(LatchInstrument, FirstReadingAndConvergedAreMeasuredFromT0Exactly) {
 
 TEST(LatchInstrument, NoReadingOrNoConvergenceIsMissingNotZero) {
     // Atrapa: devolver 0 donde no hubo lectura (un cero se lee como "instantaneo").
-    const std::vector<Publication> pubs = {pub(100, kLoud), pub(200, kLoud)};
-    const auto l = latch::measure(pubs, {{0, true}}, kNoOracle, params());
+    const std::vector<Publication> pubs = {pub(100), pub(200)};
+    const auto l = latch::measure(pubs, loudWins(2), {{0, true}}, kNoOracle, params());
     ASSERT_EQ(l.size(), 1u);
     EXPECT_EQ(l[0].firstReadingFrames, -1);
     EXPECT_TRUE(std::isnan(l[0].firstReadingSec));
@@ -196,8 +212,8 @@ TEST(LatchInstrument, OracleSegmentChosenIsTheLatestEndingAtOrBeforeThePublicati
     // tramo que termino en 200 (110 Hz), no el de 300 (120 Hz); y una publicacion justo en
     // t_fin usa ESE tramo (el limite es inclusivo).
     const std::vector<OracleSegment> oracle = {{0.2, 0.3, 120.0}, {0.0, 0.1, 100.0}, {0.1, 0.2, 110.0}};
-    const std::vector<Publication> pubs = {pub(100, kLoud), pub(200, kLoud, 110.0, kMeas), pub(250, kLoud, 110.0, kMeas)};
-    const auto l = latch::measure(pubs, {{0, true}}, oracle, params());
+    const std::vector<Publication> pubs = {pub(100), pub(200, 110.0, kMeas), pub(250, 110.0, kMeas)};
+    const auto l = latch::measure(pubs, loudWins(3), {{0, true}}, oracle, params());
     ASSERT_EQ(l.size(), 1u);
     ASSERT_EQ(l[0].withError, 2);
     EXPECT_NEAR(l[0].maxAbsCents, 0.0, 1e-9) << "contra el tramo previo el error es 0; contra el posterior seria -151 c";
@@ -208,10 +224,10 @@ TEST(LatchInstrument, ReadingsWithoutOracleAreCountedApartNotAsError) {
     // t = 0,1 s: ningun tramo termino todavia. t >= 0,25 s: el tramo previo (0,15-0,25) no tiene hz.
     const std::vector<OracleSegment> oracle = {{0.0, 0.15, 100.0}, {0.15, 0.25, kNan}};
     const std::vector<Publication> pubs = {
-        pub(100, kLoud, 500.0, kMeas),   // sin tramo previo
-        pub(300, kLoud, 500.0, kMeas),   // el tramo previo es NaN
-        pub(400, kLoud, hzAt(100.0, 3.0), kMeas)};   // idem: el de t_fin mas cercano manda, aunque haya uno valido antes
-    auto l = latch::measure(pubs, {{0, true}}, oracle, params());
+        pub(100, 500.0, kMeas),   // sin tramo previo
+        pub(300, 500.0, kMeas),   // el tramo previo es NaN
+        pub(400, hzAt(100.0, 3.0), kMeas)};   // idem: el de t_fin mas cercano manda, aunque haya uno valido antes
+    auto l = latch::measure(pubs, loudWins(4), {{0, true}}, oracle, params());
     ASSERT_EQ(l.size(), 1u);
     EXPECT_EQ(l[0].readings, 3);
     EXPECT_EQ(l[0].noOracle, 3);
@@ -220,8 +236,8 @@ TEST(LatchInstrument, ReadingsWithoutOracleAreCountedApartNotAsError) {
     EXPECT_TRUE(std::isnan(l[0].firstErrorCents));
 
     const std::vector<OracleSegment> oracle2 = {{0.0, 0.15, 100.0}};
-    const std::vector<Publication> pubs2 = {pub(100, kLoud, 500.0, kMeas), pub(200, kLoud, hzAt(100.0, 3.0), kMeas)};
-    l = latch::measure(pubs2, {{0, true}}, oracle2, params());
+    const std::vector<Publication> pubs2 = {pub(100, 500.0, kMeas), pub(200, hzAt(100.0, 3.0), kMeas)};
+    l = latch::measure(pubs2, loudWins(2), {{0, true}}, oracle2, params());
     ASSERT_EQ(l.size(), 1u);
     EXPECT_EQ(l[0].noOracle, 1);
     EXPECT_EQ(l[0].withError, 1);
@@ -233,9 +249,9 @@ TEST(LatchInstrument, ErrorHasThePublishedOverOracleSign) {
     // Atrapa: la razon invertida (oraculo/publicado) o el error de la primera lectura tomado de
     // otra. Publicado +7 c arriba del oraculo = +7; la segunda lectura (−2 c) no pisa la primera.
     const std::vector<OracleSegment> oracle = {{0.0, 0.1, 200.0}};
-    const std::vector<Publication> pubs = {pub(100, kLoud), pub(200, kLoud, hzAt(200.0, 7.0), kMeas, 3.5),
-                                           pub(300, kLoud, hzAt(200.0, -2.0), kMeas, 0.5)};
-    const auto l = latch::measure(pubs, {{0, true}}, oracle, params());
+    const std::vector<Publication> pubs = {pub(100), pub(200, hzAt(200.0, 7.0), kMeas, 3.5),
+                                           pub(300, hzAt(200.0, -2.0), kMeas, 0.5)};
+    const auto l = latch::measure(pubs, loudWins(3), {{0, true}}, oracle, params());
     ASSERT_EQ(l.size(), 1u);
     EXPECT_NEAR(l[0].firstErrorCents, 7.0, 1e-9);
     EXPECT_DOUBLE_EQ(l[0].firstSigmaCents, 3.5);
@@ -248,10 +264,10 @@ TEST(LatchInstrument, PercentilesAndCoverageOnAHandMadeCase) {
     // Atrapa: mediana "alta" (6), p90 = max, error con signo en vez de |error| (el max seria 9),
     // y la cobertura contra σ en vez de 2σ (daria 4/10).
     const std::vector<OracleSegment> oracle = {{0.0, 0.05, 100.0}};
-    std::vector<Publication> pubs = {pub(100, kLoud)};
+    std::vector<Publication> pubs = {pub(100)};
     for (int k = 1; k <= 10; ++k)
-        pubs.push_back(pub(100 + 100 * k, kLoud, hzAt(100.0, (k % 2 ? 1.0 : -1.0) * k), kMeas, 4.95));
-    const auto l = latch::measure(pubs, {{0, true}}, oracle, params());
+        pubs.push_back(pub(100 + 100 * k, hzAt(100.0, (k % 2 ? 1.0 : -1.0) * k), kMeas, 4.95));
+    const auto l = latch::measure(pubs, loudWins(11), {{0, true}}, oracle, params());
     ASSERT_EQ(l.size(), 1u);
     EXPECT_EQ(l[0].withError, 10);
     EXPECT_NEAR(l[0].medianAbsCents, 5.5, 1e-9);
@@ -265,8 +281,8 @@ TEST(LatchInstrument, ANaNSigmaIsNeverCovered) {
     // Atrapa: tratar la σ NaN como "sin limite" y cubrir todo. Una lectura sin incertidumbre no
     // esta calibrada: no cuenta como cubierta.
     const std::vector<OracleSegment> oracle = {{0.0, 0.05, 100.0}};
-    const std::vector<Publication> pubs = {pub(100, kLoud), pub(200, kLoud, 100.0, kMeas, kNan), pub(300, kLoud, 100.0, kMeas, 1.0)};
-    const auto l = latch::measure(pubs, {{0, true}}, oracle, params());
+    const std::vector<Publication> pubs = {pub(100), pub(200, 100.0, kMeas, kNan), pub(300, 100.0, kMeas, 1.0)};
+    const auto l = latch::measure(pubs, loudWins(3), {{0, true}}, oracle, params());
     ASSERT_EQ(l.size(), 1u);
     EXPECT_EQ(l[0].withError, 2);
     EXPECT_EQ(l[0].covered, 1);
@@ -276,17 +292,94 @@ TEST(LatchInstrument, PooledStatisticsUseAllPublicationsNotTheMeanOfMedians) {
     // Un enganche con 1 error de 10 c y otro con 3 errores de 1 c: mediana del conjunto = 1, no
     // el promedio de medianas (5,5). Atrapa agregar entre enganches promediando resumenes.
     const std::vector<OracleSegment> oracle = {{0.0, 0.05, 100.0}};
-    const std::vector<Publication> pubs = {pub(100, kLoud, hzAt(100.0, 10.0), kMeas, 1.0), pub(200, kLoud),
-                                           pub(300, kLoud, hzAt(100.0, 1.0), kMeas, 1.0),
-                                           pub(400, kLoud, hzAt(100.0, -1.0), kMeas, 1.0),
-                                           pub(500, kLoud, hzAt(100.0, 1.0), kMeas, 1.0)};
-    const auto l = latch::measure(pubs, {{0, true}, {250, true}}, oracle, params());
+    const std::vector<Publication> pubs = {pub(100, hzAt(100.0, 10.0), kMeas, 1.0), pub(200),
+                                           pub(300, hzAt(100.0, 1.0), kMeas, 1.0),
+                                           pub(400, hzAt(100.0, -1.0), kMeas, 1.0),
+                                           pub(500, hzAt(100.0, 1.0), kMeas, 1.0)};
+    const auto l = latch::measure(pubs, loudWins(5), {{0, true}, {250, true}}, oracle, params());
     ASSERT_EQ(l.size(), 2u);
     const auto pooled = latch::poolLatchErrors(l);
     EXPECT_EQ(pooled.withError, 4);
     EXPECT_NEAR(pooled.medianAbsCents, 1.0, 1e-9);
     EXPECT_NEAR(pooled.maxAbsCents, 10.0, 1e-9);
     EXPECT_NEAR(pooled.coverage, 3.0 / 4.0, 1e-12) << "el 10 c queda fuera de 2σ = 2";
+}
+
+/// `n` frames de senal constante (0,5 en ambos canales: mono 0,5) o de silencio digital, a mono.
+std::vector<float> monoRun(int n, bool loud) { return std::vector<float>(static_cast<size_t>(n), loud ? 0.5f : 0.0f); }
+
+void append(std::vector<float>* dst, const std::vector<float>& src) { dst->insert(dst->end(), src.begin(), src.end()); }
+
+TEST(LatchInstrument, ShortSilenceBeforeTheAttackInsideAWindowOpensNoSecondLatch) {
+    // Atrapa: que un silencio digital MAS CORTO que la ventana al comienzo del archivo cuente como
+    // ventana silenciosa y abra un enganche vacio ademas del de la nota (lo que pasaba con el rms del
+    // bloque drenado de 256 frames: 55 enganches sobre 41 archivos).
+    std::vector<float> mono = monoRun(40, false);
+    append(&mono, monoRun(260, true));
+    const auto levels = latch::windowLevels(mono, kWin);
+    ASSERT_EQ(levels.size(), 3u);
+    EXPECT_GE(levels[0].rms, 0.001) << "40 frames mudos + 60 con senal: la ventana tiene senal";
+    const auto l = latch::measure({pub(150), pub(250)}, levels, {{0, true}}, kNoOracle, params());
+    ASSERT_EQ(l.size(), 1u);
+    EXPECT_EQ(l[0].t0Frames, 0);
+}
+
+TEST(LatchInstrument, AFullSilentWindowBetweenTwoNotesOpensALatchAtTheNextWindow) {
+    // Atrapa: no abrir el enganche (o fecharlo en el final de la ventana) cuando el silencio ocupa una
+    // ventana ENTERA de la grilla.
+    std::vector<float> mono = monoRun(200, true);
+    append(&mono, monoRun(100, false));
+    append(&mono, monoRun(200, true));
+    const auto levels = latch::windowLevels(mono, kWin);
+    const auto l = latch::measure({pub(150), pub(450)}, levels, {{0, true}}, kNoOracle, params());
+    ASSERT_EQ(l.size(), 2u);
+    EXPECT_EQ(l[1].t0Frames, 300);
+    EXPECT_EQ(l[1].publications, 1);
+}
+
+TEST(LatchInstrument, SilenceStraddlingTwoWindowsWithoutFillingOneOpensNoLatch) {
+    // Atrapa: una grilla desalineada o que mida el silencio por duracion: 120 frames de silencio que
+    // cruzan el limite 200 no llenan ninguna ventana de 100 alineada en 100..199 y 200..299.
+    std::vector<float> mono = monoRun(140, true);
+    append(&mono, monoRun(120, false));
+    append(&mono, monoRun(140, true));
+    const auto levels = latch::windowLevels(mono, kWin);
+    ASSERT_EQ(levels.size(), 4u);
+    for (const auto& w : levels) EXPECT_GE(w.rms, 0.001);
+    EXPECT_EQ(latch::measure({pub(150)}, levels, {{0, true}}, kNoOracle, params()).size(), 1u);
+}
+
+TEST(LatchInstrument, TheLatchesDoNotDependOnPublicationGranularity) {
+    // Atrapa: volver a medir el enganche con el bloque drenado. Misma serie de ventanas, publicadas
+    // cada 100 frames o cada 25: mismos t0 y mismas cuentas de lecturas, salvo el instante exacto
+    // de la primera lectura (que sigue a la publicacion).
+    std::vector<float> mono = monoRun(30, false);
+    append(&mono, monoRun(270, true));
+    const auto levels = latch::windowLevels(mono, kWin);
+    std::vector<Publication> coarse, fine;
+    for (int64_t pos = 100; pos <= 300; pos += 100) coarse.push_back(pub(pos, pos >= 200 ? 100.0 : kNan));
+    for (int64_t pos = 25; pos <= 300; pos += 25) fine.push_back(pub(pos, pos >= 200 ? 100.0 : kNan));
+    const auto a = latch::measure(coarse, levels, {{0, true}}, kNoOracle, params());
+    const auto b = latch::measure(fine, levels, {{0, true}}, kNoOracle, params());
+    ASSERT_EQ(a.size(), b.size());
+    for (size_t i = 0; i < a.size(); ++i) EXPECT_EQ(a[i].t0Frames, b[i].t0Frames);
+    EXPECT_EQ(a.size(), 1u);
+}
+
+TEST(LatchInstrument, WindowLevelsIsTheRmsOfCompleteWindowsOnAGridFromFrameZero) {
+    // Atrapa: rms sin raiz o dividido por otro largo, una cola incompleta tratada como ventana, o
+    // una grilla que no arranca en 0. Una ventana 0,5 constante tiene rms 0,5; mitad 0,5 y mitad 0 =
+    // 0,5/sqrt(2).
+    std::vector<float> mono = monoRun(100, true);
+    append(&mono, monoRun(50, true));
+    append(&mono, monoRun(50, false));
+    append(&mono, monoRun(30, true));
+    const auto levels = latch::windowLevels(mono, kWin);
+    ASSERT_EQ(levels.size(), 2u) << "los 30 frames de cola no son una ventana";
+    EXPECT_EQ(levels[0].start, 0);
+    EXPECT_NEAR(levels[0].rms, 0.5, 1e-9);
+    EXPECT_EQ(levels[1].start, 100);
+    EXPECT_NEAR(levels[1].rms, 0.5 / std::sqrt(2.0), 1e-6);
 }
 
 // =====================================================================================
@@ -529,20 +622,34 @@ std::string missingCorpusMessage(corpus::State st) {
            "entonces esto NO cuenta como cobertura";
 }
 
-/// La corrida de UN archivo: la NOTA alimentada DOS veces seguidas sin tocar el objetivo, con cada
-/// publicacion registrada. La primera pasada es la que se mide por enganche; la segunda, el
+/// La corrida de UN archivo: la NOTA alimentada DOS veces seguidas sin tocar el objetivo, en tandas
+/// de `chunkFrames` drenadas hasta ring vacio, con cada publicacion registrada. La primera pasada es la que se mide por enganche; la segunda, el
 /// re-punteo, que por definicion no abre enganche nuevo.
 struct FedRun {
     int rate = 0;
     int64_t frames1 = 0;   ///< donde termina la primera pasada (= donde empieza la segunda)
     std::vector<Publication> pubs;
     std::vector<TargetEvent> events;
+    /// rms por ventana fija de la senal alimentada (las DOS pasadas, en una sola grilla desde 0).
+    std::vector<latch::Window> windows;
 };
 
-FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e) {
+// 🔴 EL TAMANO DE TANDA ES PARTE DE LO QUE SE MIDE. Escribir el ring entero (8192 frames) antes de
+// drenar hace que el modo rapido, al re-enganchar el objetivo (`skipToNewest` en AnalysisThread),
+// tire lo que queda de la tanda: hasta 6144 frames del ataque. Con tandas de 8192 los 39 t_primera de
+// la primera linea de base salian multiplos exactos de 8192 (escalon de 186 ms a 44,1 kHz) y, por
+// ejemplo, bajo-acustico_A1 leia en el frame 57344 en vez del 53248 que da con 2048 o menos. En un
+// dispositivo la captura llega en callbacks de ~100-500 frames y el hilo de analisis drena cada ~5 ms:
+// 256 es de ese orden. Tandas <= 2048 no cambian la medicion (lo exige `ChunkSizeInProductionRange`).
+constexpr int kProductionChunkFrames = 256;
+
+FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e, int chunkFrames = kProductionChunkFrames) {
     FedRun run;
     run.rate = data.sampleRate;
     const int frames = corpus::noteEndFrames(data);
+    std::vector<float> fedMono;
+    for (int pass = 0; pass < 2; ++pass) latch::appendMonoMix(&fedMono, data.buffer.data(), frames);
+    run.windows = latch::windowLevels(fedMono, latch::kLatchWindowFrames);
     wma::analysis::AnalysisRing ring;
     wma::analysis::AnalysisSnapshot snapshot;
     wma::analysis::AnalysisThread analysis(ring, snapshot);
@@ -559,23 +666,19 @@ FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e) {
     // descarta nada, y es la situacion de la definicion: "al empezar a alimentar con objetivo
     // puesto y ring vacio".
     (void)analysis.drainOnce();
-    const int capacity = static_cast<int>(wma::analysis::AnalysisRing::kCapacityFrames);
     for (int pass = 0; pass < 2; ++pass) {
         int written = 0;
         while (written < frames) {
-            const int chunk = std::min(frames - written, capacity);
+            const int chunk = std::min(frames - written, chunkFrames);
             ring.writeStereo(data.buffer.data() + static_cast<size_t>(written) * 2, chunk);
             written += chunk;
             for (;;) {
-                const int64_t before = static_cast<int64_t>(ring.readPosition());
                 if (analysis.drainOnce() == wma::analysis::AnalysisThread::DrainOutcome::kRingEmpty) break;
                 float v[wma::analysis::kSnapshotValueCount];
                 if (!snapshot.read(v)) continue;
                 Publication p;
-                p.posStart = before;
                 p.pos = static_cast<int64_t>(ring.readPosition());
                 p.state = static_cast<int>(v[wma::analysis::kSnapState]);
-                p.rms = static_cast<double>(v[wma::analysis::kSnapLevelRms]);
                 p.sigmaCents = static_cast<double>(v[wma::analysis::kSnapUncertainty]);
                 const float cents = v[wma::analysis::kSnapCents];
                 // kSnapCents es relativo al OBJETIVO del strobe, que el modo rapido puede mover:
@@ -588,6 +691,21 @@ FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e) {
         if (pass == 0) run.frames1 = static_cast<int64_t>(ring.readPosition());
     }
     return run;
+}
+
+/// Lo de la PRIMERA pasada: las publicaciones hasta `frames1` y las ventanas que empiezan antes.
+struct FirstPassOfRun {
+    std::vector<Publication> pubs;
+    std::vector<latch::Window> windows;
+};
+
+FirstPassOfRun firstPassOfRun(const FedRun& run) {
+    FirstPassOfRun out;
+    for (const Publication& p : run.pubs)
+        if (p.pos <= run.frames1) out.pubs.push_back(p);
+    for (const latch::Window& w : run.windows)
+        if (w.start < run.frames1) out.windows.push_back(w);
+    return out;
 }
 
 struct Pass2 {
@@ -650,12 +768,19 @@ std::string baselineHeader() {
         "# Motor medido: commit 1351b7e (el de hoy, sin cambio de produccion). Al regenerar tras un cambio de motor\n"
         "# INTENCIONAL, actualizar este commit en `baselineHeader()` (test_latch_instrument.cpp).\n"
         "#\n"
-        "# Definicion de enganche (acordada con el consumidor): t_reenganche = cambio de objetivo, o (con objetivo\n"
-        "# puesto) la primera ventana con senal (rms >= 0,001 del bloque mono drenado) despues de una ventana con\n"
-        "# rms < 0,001; el enganche dura hasta el siguiente t_reenganche. Un re-punteo con la cuerda sonando NO es un\n"
-        "# enganche. Al empezar a alimentar con objetivo puesto y ring vacio, la primera ventana con senal es t_reenganche.\n"
+        "# Definicion de enganche (acordada con el consumidor). La ventana es FIJA: 4096 frames (la del estimador fino)\n"
+        "# sobre la senal mono alimentada 0,5*(L+R), en una grilla alineada al frame 0 del flujo e independiente de la\n"
+        "# tanda; antes se usaba el rms del bloque drenado y un bloque de silencio digital al comienzo de cada pasada\n"
+        "# abria enganches espurios (55 sobre 41 archivos). t_reenganche = cambio de objetivo (el frame exacto del\n"
+        "# evento), o (con objetivo puesto) el INICIO de la primera ventana con rms >= 0,001 que sigue a una ventana con\n"
+        "# rms < 0,001; al empezar a alimentar con objetivo puesto, la primera ventana con senal (sin ventana previa) es\n"
+        "# t_reenganche. El enganche dura hasta el siguiente t_reenganche. Un re-punteo con la cuerda sonando NO es un\n"
+        "# enganche (no hay ventana < 0,001 en el medio).\n"
         "#\n"
-        "# Se alimenta la NOTA (noteEndFrames) por AnalysisThread::drainOnce() sin thread, con setTargetHz(hz del\n"
+        "# Se alimenta la NOTA (noteEndFrames) por AnalysisThread::drainOnce() sin thread, en TANDAS DE 256 FRAMES\n"
+        "# (kProductionChunkFrames) drenadas hasta ring vacio tras cada una, como un callback de captura: con tandas de\n"
+        "# 8192 el modo rapido tiraba el resto de la tanda al re-enganchar y la primera lectura salia hasta 93 ms tarde\n"
+        "# (la primera linea de base, descartada). Con setTargetHz(hz del\n"
         "# manifiesto) y los candidatos del instrumento, aplicados con el ring VACIO (un drainOnce antes de escribir:\n"
         "# si no, skipToNewest tira el primer bloque, el ataque, como hacia sweepFile). Tiempos en frames del ring (exactos) y en segundos; errores en\n"
         "# cents contra el ORACULO INSTANTANEO corpus-v1-oraculo-corto.tsv (tramo con t_fin mas cercano <= t de la\n"
@@ -697,6 +822,74 @@ TEST(LatchInstrumentCorpus, OracleDescribesTheSameFilesAsTheManifest) {
     EXPECT_GT(checked, 0);
 }
 
+/// Posiciones ABSOLUTAS del ring (t0 + t_primera, t0 + t_conv) de la primera lectura y de la primera
+/// convergencia de la PRIMERA pasada, alimentada en tandas de `chunkFrames`; −1 si no llegaron.
+struct AbsoluteLatchTimes {
+    int64_t firstFrames = -1;
+    int64_t convFrames = -1;
+    size_t latchCount = 0;
+};
+
+AbsoluteLatchTimes absoluteTimesAtChunk(const wav::WavData& data, const corpus::Entry& e,
+                                        const std::vector<OracleSegment>& segments, int chunkFrames) {
+    const FedRun run = feedTwice(data, e, chunkFrames);
+    const FirstPassOfRun first = firstPassOfRun(run);
+    Params prm;
+    prm.sampleRate = run.rate;
+    const std::vector<Latch> latches = latch::measure(first.pubs, first.windows, run.events, segments, prm);
+    AbsoluteLatchTimes out;
+    out.latchCount = latches.size();
+    for (const Latch& l : latches) {
+        if (l.firstReadingFrames >= 0 && (out.firstFrames < 0 || l.t0Frames + l.firstReadingFrames < out.firstFrames))
+            out.firstFrames = l.t0Frames + l.firstReadingFrames;
+        if (l.convergedFrames >= 0 && (out.convFrames < 0 || l.t0Frames + l.convergedFrames < out.convFrames))
+            out.convFrames = l.t0Frames + l.convergedFrames;
+    }
+    return out;
+}
+
+TEST(LatchInstrumentCorpus, ChunkSizeInProductionRangeDoesNotMoveTheMeasurement) {
+    // Atrapa: un instrumento que mide el arnes y no el motor. La posicion del ring a la que el motor
+    // publica la primera lectura y la primera convergencia tiene que ser la MISMA alimentando en 256 o
+    // en 1024 frames (callbacks reales), EXACTA: asi se midio en los 41 archivos. Los enganches
+    // salen de la ventana fija de 4096 y no de la tanda, asi que su cantidad tambien coincide. El
+    // control negativo: con el ring entero (8192) el
+    // modo rapido tira el resto de la tanda al re-enganchar y la posicion SI se mueve; si no se
+    // moviera en ningun archivo, este test no discriminaria el defecto que vino a cerrar.
+    const std::string dir = corpus::defaultCorpusDir();
+    const corpus::State st = corpus::stateOf(dir, corpus::manifestPath());
+    if (st != corpus::State::kVerified) GTEST_SKIP() << missingCorpusMessage(st);
+    std::map<std::string, OracleFile> oracle;
+    ASSERT_EQ(loadOracle(oraclePath(), &oracle), "");
+
+    std::vector<corpus::Entry> entries = corpus::entriesOf(corpus::manifestPath());
+#ifdef WMA_TEST_UNDER_SANITIZER
+    {
+        std::vector<corpus::Entry> kept;
+        for (size_t i = 0; i < entries.size(); i += 4) kept.push_back(entries[i]);
+        entries = kept;
+    }
+#endif
+    constexpr int kWholeRing = static_cast<int>(wma::analysis::AnalysisRing::kCapacityFrames);
+    int wholeRingMoves = 0;
+    for (const corpus::Entry& e : entries) {
+        const wav::WavData data = wav::readWav((dir + "/" + e.name).c_str());
+        ASSERT_GT(data.sampleRate, 0) << e.name;
+        const auto& segs = oracle.at(e.name).segments;
+        const AbsoluteLatchTimes small = absoluteTimesAtChunk(data, e, segs, kProductionChunkFrames);
+        const AbsoluteLatchTimes wide = absoluteTimesAtChunk(data, e, segs, 1024);
+        const AbsoluteLatchTimes ring = absoluteTimesAtChunk(data, e, segs, kWholeRing);
+        EXPECT_EQ(small.latchCount, wide.latchCount) << e.name << ": la cantidad de enganches no depende de la tanda";
+        EXPECT_EQ(small.firstFrames, wide.firstFrames) << e.name << ": primera lectura, 256 vs 1024";
+        EXPECT_EQ(small.convFrames, wide.convFrames) << e.name << ": primera convergencia, 256 vs 1024";
+        if (small.firstFrames != ring.firstFrames || small.convFrames != ring.convFrames) ++wholeRingMoves;
+    }
+    EXPECT_GT(wholeRingMoves, 0) << "con tandas de " << kWholeRing << " la medicion no cambia en ningun archivo: "
+                                 << "el test no discrimina";
+    std::printf("tanda %d vs ring entero: %d de %zu archivos mueven la primera lectura o la convergencia\n",
+                kProductionChunkFrames, wholeRingMoves, entries.size());
+}
+
 TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
     const std::string dir = corpus::defaultCorpusDir();
     const corpus::State st = corpus::stateOf(dir, corpus::manifestPath());
@@ -734,15 +927,14 @@ TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
         ASSERT_EQ(of.frames, static_cast<long long>(data.numFrames)) << e.name;
 
         const FedRun run = feedTwice(data, e);
-        std::vector<Publication> firstPass;
-        for (const Publication& p : run.pubs)
-            if (p.pos <= run.frames1) firstPass.push_back(p);
+        const FirstPassOfRun first = firstPassOfRun(run);
         const Params prm = [&] { Params q; q.sampleRate = run.rate; return q; }();
-        const std::vector<Latch> latches = latch::measure(firstPass, run.events, of.segments, prm);
+        const std::vector<Latch> latches = latch::measure(first.pubs, first.windows, run.events, of.segments, prm);
         ASSERT_FALSE(latches.empty()) << e.name << ": la nota no abrio ningun enganche";
         // La definicion, verificada sobre material real: el segundo ataque llega con la cuerda
-        // sonando (la nota se corta en un bloque >= 0,002), asi que NO puede abrir enganche.
-        EXPECT_EQ(latch::measure(run.pubs, run.events, of.segments, prm).size(), latches.size())
+        // sonando (ninguna ventana de 4096 de las dos pasadas queda bajo 0,001 en la costura), asi
+        // que NO puede abrir enganche.
+        EXPECT_EQ(latch::measure(run.pubs, run.windows, run.events, of.segments, prm).size(), latches.size())
             << e.name << ": el re-punteo abrio un enganche nuevo";
 
         const Pass2 p2 = measurePass2(run);

@@ -2,12 +2,19 @@
 # Motor medido: commit 1351b7e (el de hoy, sin cambio de produccion). Al regenerar tras un cambio de motor
 # INTENCIONAL, actualizar este commit en `baselineHeader()` (test_latch_instrument.cpp).
 #
-# Definicion de enganche (acordada con el consumidor): t_reenganche = cambio de objetivo, o (con objetivo
-# puesto) la primera ventana con senal (rms >= 0,001 del bloque mono drenado) despues de una ventana con
-# rms < 0,001; el enganche dura hasta el siguiente t_reenganche. Un re-punteo con la cuerda sonando NO es un
-# enganche. Al empezar a alimentar con objetivo puesto y ring vacio, la primera ventana con senal es t_reenganche.
+# Definicion de enganche (acordada con el consumidor). La ventana es FIJA: 4096 frames (la del estimador fino)
+# sobre la senal mono alimentada 0,5*(L+R), en una grilla alineada al frame 0 del flujo e independiente de la
+# tanda; antes se usaba el rms del bloque drenado y un bloque de silencio digital al comienzo de cada pasada
+# abria enganches espurios (55 sobre 41 archivos). t_reenganche = cambio de objetivo (el frame exacto del
+# evento), o (con objetivo puesto) el INICIO de la primera ventana con rms >= 0,001 que sigue a una ventana con
+# rms < 0,001; al empezar a alimentar con objetivo puesto, la primera ventana con senal (sin ventana previa) es
+# t_reenganche. El enganche dura hasta el siguiente t_reenganche. Un re-punteo con la cuerda sonando NO es un
+# enganche (no hay ventana < 0,001 en el medio).
 #
-# Se alimenta la NOTA (noteEndFrames) por AnalysisThread::drainOnce() sin thread, con setTargetHz(hz del
+# Se alimenta la NOTA (noteEndFrames) por AnalysisThread::drainOnce() sin thread, en TANDAS DE 256 FRAMES
+# (kProductionChunkFrames) drenadas hasta ring vacio tras cada una, como un callback de captura: con tandas de
+# 8192 el modo rapido tiraba el resto de la tanda al re-enganchar y la primera lectura salia hasta 93 ms tarde
+# (la primera linea de base, descartada). Con setTargetHz(hz del
 # manifiesto) y los candidatos del instrumento, aplicados con el ring VACIO (un drainOnce antes de escribir:
 # si no, skipToNewest tira el primer bloque, el ataque, como hacia sweepFile). Tiempos en frames del ring (exactos) y en segundos; errores en
 # cents contra el ORACULO INSTANTANEO corpus-v1-oraculo-corto.tsv (tramo con t_fin mas cercano <= t de la
@@ -20,44 +27,44 @@
 # Regenerar (corre la suite y ESCRIBE en vez de comparar; el test queda SKIPPED):
 #   WMA_LATCH_BASELINE_UPDATE=1 bash scripts/run-cpp-tests.sh -R LatchInstrumentCorpus
 # archivo	enganche	t0_frames	t_primera_frames	t_primera_s	t_conv_frames	t_conv_s	n_lecturas	n_sin_oraculo	err_primera_c	sigma_primera_c	mediana_abs_c	p90_abs_c	max_abs_c	cobertura	t_primera2_frames	t_primera2_s	t_conv2_frames	t_conv2_s	sueltas2
-bajo-acustico_A1.wav	1	0	57344	1.300	57344	1.300	43	0	0.320	0.084	0.210	0.394	0.651	0.070	2048	0.046	2048	0.046	1
-bajo-acustico_D2.wav	1	0	57344	1.300	57344	1.300	24	0	0.069	0.016	0.062	0.127	0.137	0.000	6144	0.139	nan	nan	2
-bajo-acustico_E1.wav	1	0	57344	1.300	86016	1.950	71	0	1.879	0.218	0.359	1.061	1.879	0.070	2048	0.046	2048	0.046	4
-bajo-acustico_G2.wav	1	0	81920	1.858	81920	1.858	17	0	-0.070	0.000	0.029	0.070	0.104	0.000	2048	0.046	2048	0.046	2
-bajo-dedos_D2.wav	1	0	90112	2.043	90112	2.043	28	0	0.112	0.043	0.142	0.255	0.277	0.000	47104	1.068	96256	2.183	2
-bajo-dedos_G2.wav	1	0	180224	4.087	180224	4.087	22	0	-0.006	0.002	0.083	0.130	0.143	0.000	2048	0.046	141312	3.204	4
-bajo-fretless_A1.wav	1	0	81920	1.858	81920	1.858	69	0	0.074	0.002	0.291	0.683	0.767	0.000	2048	0.046	2048	0.046	2
-bajo-fretless_D2.wav	1	0	57344	1.300	126976	2.879	49	0	-0.139	0.405	0.131	0.464	2.028	0.020	2048	0.046	2048	0.046	2
-bajo-fretless_E1.wav	1	0	81920	1.858	81920	1.858	70	0	-1.077	0.034	0.247	0.729	1.270	0.014	6144	0.139	10240	0.232	3
-bajo-fretless_G2.wav	1	0	81920	1.858	81920	1.858	54	0	-0.280	0.000	0.202	0.385	0.478	0.000	2048	0.046	2048	0.046	2
-bajo-pua_A1.wav	1	0	204800	4.644	204800	4.644	4	0	0.205	0.036	0.132	0.212	0.212	0.500	40960	0.929	204800	4.644	3
-bajo-pua_D2.wav	1	0	180224	4.087	nan	nan	22	0	0.377	0.171	0.305	0.402	0.448	0.636	22528	0.511	nan	nan	4
-bajo-pua_E1.wav	1	0	57344	1.300	57344	1.300	41	0	-0.319	0.034	0.109	0.319	0.600	0.634	2048	0.046	2048	0.046	5
-guitarra-acero_A2.wav	1	0	81920	1.858	81920	1.858	64	0	0.653	0.002	1.590	2.318	3.521	0.250	10240	0.232	75776	1.718	3
-guitarra-acero_B3.wav	1	0	81920	1.858	81920	1.858	26	0	0.593	0.003	1.337	2.322	2.336	0.000	2048	0.046	100352	2.276	1
-guitarra-acero_D3.wav	1	0	57344	1.300	81920	1.858	59	0	1.151	0.231	1.413	2.397	2.883	0.000	2048	0.046	2048	0.046	2
-guitarra-acero_E2.wav	1	0	147456	3.344	147456	3.344	27	0	1.404	0.001	1.404	2.696	3.521	0.000	2048	0.046	2048	0.046	6
-guitarra-acero_E4.wav	1	0	65536	1.486	65536	1.486	14	0	-1.866	0.004	1.627	2.177	2.481	0.000	10240	0.232	10240	0.232	2
-guitarra-acero_G3.wav	1	0	81920	1.858	81920	1.858	30	0	0.676	0.001	1.563	2.229	2.732	0.000	2048	0.046	2048	0.046	3
-guitarra-jazz_A2.wav	1	0	57344	1.300	57344	1.300	79	0	0.054	0.029	0.064	0.127	0.190	0.051	2048	0.046	2048	0.046	3
-guitarra-jazz_B3.wav	1	0	57344	1.300	57344	1.300	31	0	0.049	0.042	0.115	0.144	0.146	0.097	2048	0.046	2048	0.046	1
-guitarra-jazz_D3.wav	1	0	57344	1.300	57344	1.300	59	0	0.174	0.056	0.016	0.174	0.185	0.051	2048	0.046	2048	0.046	3
-guitarra-jazz_E2.wav	1	0	57344	1.300	57344	1.300	79	0	-0.655	0.035	0.541	0.783	0.871	0.000	2048	0.046	2048	0.046	3
-guitarra-jazz_E4.wav	1	0	57344	1.300	57344	1.300	31	0	0.104	0.036	0.114	0.126	0.141	0.000	2048	0.046	2048	0.046	2
-guitarra-jazz_G3.wav	1	0	131072	2.972	131072	2.972	20	0	0.005	0.000	0.005	0.011	0.014	0.000	22528	0.511	96256	2.183	3
-guitarra-limpia_A2.wav	1	0	81920	1.858	81920	1.858	69	0	0.577	0.030	0.319	0.577	0.831	0.043	2048	0.046	2048	0.046	3
-guitarra-limpia_B3.wav	1	0	106496	2.415	106496	2.415	40	0	-0.000	0.000	0.005	0.012	0.015	0.000	2048	0.046	2048	0.046	1
-guitarra-limpia_D3.wav	1	0	106496	2.415	106496	2.415	57	0	-0.191	0.006	0.067	0.148	0.213	0.000	2048	0.046	2048	0.046	2
-guitarra-limpia_E2.wav	1	0	81920	1.858	81920	1.858	69	0	-0.005	0.000	0.127	0.373	0.508	0.000	2048	0.046	2048	0.046	2
-guitarra-limpia_E4.wav	1	0	106496	2.415	106496	2.415	12	0	-0.024	0.001	0.014	0.026	0.026	0.000	6144	0.139	6144	0.139	2
-guitarra-limpia_G3.wav	1	0	131072	2.972	131072	2.972	26	0	0.004	0.000	0.009	0.024	0.030	0.077	88064	1.997	112640	2.554	2
-guitarra-nylon_A2.wav	1	0	106496	2.415	106496	2.415	58	0	-0.053	0.000	0.032	0.059	0.064	0.000	6144	0.139	6144	0.139	3
-guitarra-nylon_B3.wav	1	0	81920	1.858	81920	1.858	15	0	0.129	0.063	0.082	0.123	0.129	0.267	2048	0.046	2048	0.046	2
-guitarra-nylon_D3.wav	1	0	106496	2.415	118784	2.694	57	0	0.081	0.135	0.029	0.073	0.102	0.982	2048	0.046	2048	0.046	2
-guitarra-nylon_E2.wav	1	0	57344	1.300	110592	2.508	60	0	-3.664	3.266	0.309	0.523	3.992	0.067	100352	2.276	100352	2.276	1
-guitarra-nylon_E4.wav	1	0	81920	1.858	81920	1.858	10	0	0.002	0.000	0.002	0.003	0.004	0.000	2048	0.046	71680	1.625	1
-guitarra-nylon_G3.wav	1	0	81920	1.858	81920	1.858	39	0	0.056	0.000	0.064	0.098	0.101	0.000	2048	0.046	2048	0.046	2
+bajo-acustico_A1.wav	1	0	53248	1.207	53248	1.207	353	0	2.079	0.084	0.587	1.443	2.079	0.000	768	0.017	768	0.017	2
+bajo-acustico_D2.wav	1	0	53248	1.207	53248	1.207	201	0	0.697	0.097	0.329	0.615	0.697	0.000	512	0.012	512	0.012	3
+bajo-acustico_E1.wav	1	0	57344	1.300	86016	1.950	561	0	1.879	0.218	0.370	1.102	1.879	0.061	768	0.017	768	0.017	5
+bajo-acustico_G2.wav	1	0	77824	1.765	nan	nan	145	0	-0.754	0.329	0.445	0.753	0.754	0.062	256	0.006	4096	0.093	2
+bajo-dedos_D2.wav	1	0	90112	2.043	90112	2.043	224	0	0.112	0.043	0.150	0.255	0.277	0.000	47104	1.068	96256	2.183	2
+bajo-dedos_G2.wav	1	0	176128	3.994	176128	3.994	185	0	-0.219	0.010	0.087	0.170	0.219	0.065	256	0.006	256	0.006	4
+bajo-fretless_A1.wav	1	0	77824	1.765	77824	1.765	561	0	-0.146	0.002	0.281	0.683	0.767	0.000	256	0.006	256	0.006	2
+bajo-fretless_D2.wav	1	0	110592	2.508	110592	2.508	433	0	-0.014	0.000	0.145	0.425	0.469	0.000	256	0.006	256	0.006	2
+bajo-fretless_E1.wav	1	0	77824	1.765	77824	1.765	568	0	-0.689	0.055	0.295	0.839	1.478	0.069	256	0.006	256	0.006	4
+bajo-fretless_G2.wav	1	0	77824	1.765	77824	1.765	441	0	-0.248	0.001	0.198	0.394	0.471	0.000	256	0.006	256	0.006	2
+bajo-pua_A1.wav	1	0	204800	4.644	204800	4.644	32	0	0.205	0.036	0.060	0.212	0.212	0.531	40960	0.929	204800	4.644	3
+bajo-pua_D2.wav	1	0	176128	3.994	nan	nan	185	0	0.401	0.169	0.298	0.403	0.450	0.627	256	0.006	nan	nan	4
+bajo-pua_E1.wav	1	0	57344	1.300	57344	1.300	320	0	-0.319	0.034	0.110	0.319	0.438	0.613	256	0.006	256	0.006	5
+guitarra-acero_A2.wav	1	0	77824	1.765	77824	1.765	521	0	-2.144	0.002	1.602	2.349	5.139	0.232	512	0.012	75776	1.718	4
+guitarra-acero_B3.wav	1	0	77824	1.765	77824	1.765	217	0	-1.873	0.002	1.562	2.309	2.344	0.000	768	0.017	768	0.017	2
+guitarra-acero_D3.wav	1	0	77824	1.765	77824	1.765	465	0	-2.669	0.001	1.550	2.397	2.885	0.000	512	0.012	512	0.012	4
+guitarra-acero_E2.wav	1	0	135168	3.065	135168	3.065	225	0	2.233	0.021	1.283	2.708	3.525	0.000	768	0.017	768	0.017	7
+guitarra-acero_E4.wav	1	0	61440	1.393	61440	1.393	121	0	2.278	0.018	1.908	2.197	2.451	0.000	256	0.006	256	0.006	2
+guitarra-acero_G3.wav	1	0	53248	1.207	53248	1.207	265	0	-2.133	0.091	1.542	2.414	2.736	0.000	512	0.012	512	0.012	4
+guitarra-jazz_A2.wav	1	0	53248	1.207	53248	1.207	577	0	0.093	0.054	0.071	0.124	0.183	0.104	256	0.006	256	0.006	3
+guitarra-jazz_B3.wav	1	0	53248	1.207	53248	1.207	257	0	0.060	0.076	0.116	0.134	0.137	0.268	256	0.006	256	0.006	1
+guitarra-jazz_D3.wav	1	0	126976	2.879	126976	2.879	321	0	0.005	0.001	0.009	0.026	0.030	0.000	256	0.006	256	0.006	3
+guitarra-jazz_E2.wav	1	0	126976	2.879	126976	2.879	369	0	-0.281	0.002	0.524	0.758	0.817	0.000	256	0.006	256	0.006	3
+guitarra-jazz_E4.wav	1	0	77824	1.765	77824	1.765	129	0	-0.183	0.007	0.148	0.182	0.185	0.000	256	0.006	256	0.006	2
+guitarra-jazz_G3.wav	1	0	126976	2.879	126976	2.879	169	0	0.005	0.000	0.005	0.013	0.015	0.000	256	0.006	256	0.006	3
+guitarra-limpia_A2.wav	1	0	53248	1.207	102400	2.322	481	0	-1.208	0.451	0.310	0.608	1.208	0.017	256	0.006	256	0.006	3
+guitarra-limpia_B3.wav	1	0	102400	2.322	102400	2.322	329	0	-0.008	0.000	0.005	0.012	0.015	0.000	256	0.006	256	0.006	1
+guitarra-limpia_D3.wav	1	0	102400	2.322	102400	2.322	465	0	-0.032	0.025	0.063	0.147	0.241	0.155	256	0.006	256	0.006	2
+guitarra-limpia_E2.wav	1	0	77824	1.765	77824	1.765	561	0	-0.118	0.008	0.127	0.365	0.502	0.014	256	0.006	256	0.006	2
+guitarra-limpia_E4.wav	1	0	102400	2.322	102400	2.322	105	0	-0.082	0.004	0.069	0.104	0.109	0.000	256	0.006	256	0.006	3
+guitarra-limpia_G3.wav	1	0	126976	2.879	126976	2.879	217	0	0.015	0.001	0.008	0.024	0.030	0.028	256	0.006	256	0.006	2
+guitarra-nylon_A2.wav	1	0	102400	2.322	102400	2.322	473	0	-0.015	0.000	0.032	0.060	0.064	0.000	256	0.006	256	0.006	3
+guitarra-nylon_B3.wav	1	0	77824	1.765	102400	2.322	129	0	0.376	0.196	0.220	0.376	0.380	1.000	512	0.012	512	0.012	3
+guitarra-nylon_D3.wav	1	0	77824	1.765	139264	3.158	481	0	0.302	1.135	0.042	0.110	0.306	1.000	256	0.006	256	0.006	2
+guitarra-nylon_E2.wav	1	0	102400	2.322	102400	2.322	473	0	-0.398	0.001	0.289	0.502	0.616	0.000	256	0.006	256	0.006	1
+guitarra-nylon_E4.wav	1	0	77824	1.765	77824	1.765	89	0	0.001	0.000	0.001	0.004	0.004	0.090	512	0.012	512	0.012	2
+guitarra-nylon_G3.wav	1	0	77824	1.765	77824	1.765	321	0	0.006	0.001	0.056	0.094	0.101	0.000	256	0.006	256	0.006	2
 ukelele_A4.wav	1	0	nan	nan	nan	nan	0	0	nan	nan	nan	nan	nan	nan	65536	1.486	65536	1.486	0
-ukelele_C4.wav	1	0	81920	1.858	81920	1.858	14	0	0.002	0.000	0.004	0.005	0.008	0.000	6144	0.139	108544	2.461	3
-ukelele_E4.wav	1	0	73728	1.672	73728	1.672	14	0	-0.004	0.000	0.002	0.004	0.004	0.071	2048	0.046	67584	1.533	1
-ukelele_G4.wav	1	0	nan	nan	nan	nan	0	0	nan	nan	nan	nan	nan	nan	6144	0.139	79872	1.811	1
+ukelele_C4.wav	1	0	77824	1.765	77824	1.765	121	0	-0.099	0.084	0.061	0.099	0.102	1.000	256	0.006	256	0.006	3
+ukelele_E4.wav	1	0	73728	1.672	73728	1.672	105	0	-0.004	0.000	0.002	0.004	0.004	0.076	512	0.012	512	0.012	2
+ukelele_G4.wav	1	0	77824	1.765	77824	1.765	9	0	-0.003	0.000	0.003	0.003	0.003	0.000	256	0.006	256	0.006	2

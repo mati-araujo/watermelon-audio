@@ -3,18 +3,24 @@
  * ENGANCHE.
  *
  * Es el nucleo PURO del instrumento: recibe la secuencia de publicaciones de una corrida (ya
- * registradas por quien alimento el motor), los cambios de objetivo y un oraculo instantaneo, y
- * devuelve las cifras por enganche. No lee archivos ni toca el motor; por eso se prueba con
+ * registradas por quien alimento el motor), la serie de rms por VENTANA FIJA de la senal alimentada,
+ * los cambios de objetivo y un oraculo instantaneo, y devuelve las cifras por enganche. No lee archivos ni toca el motor; por eso se prueba con
  * secuencias a mano (`test_latch_instrument.cpp`, suite `LatchInstrument`) sin corpus. Quien
  * alimenta el motor y la linea de base commiteada viven en ese mismo test.
  *
  * DEFINICION DE ENGANCHE (acordada con el consumidor; es literal, no se reinterpreta)
  * -----------------------------------------------------------------------------------
- * t_reenganche = cambio de objetivo, o (con objetivo puesto) la primera ventana con senal
- * (rms >= 0,001 del bloque mono drenado) despues de una ventana con rms < 0,001. El enganche dura
+ * La «ventana» es FIJA: `kLatchWindowFrames` (4096, la del estimador fino) sobre la senal mono
+ * alimentada (0,5·(L+R), la mezcla del ring), en una grilla alineada al frame 0 del flujo e
+ * independiente de la tanda con que se drene (`windowLevels`). La definicion NO depende de cuantos
+ * frames se drenan por vez: con el rms del bloque drenado, un bloque de silencio digital al comienzo
+ * de cada archivo abria enganches espurios.
+ *
+ * t_reenganche = cambio de objetivo (el frame exacto del evento), o —con objetivo puesto— el INICIO
+ * de la primera ventana con rms >= 0,001 que sigue a una ventana con rms < 0,001. El enganche dura
  * hasta el siguiente t_reenganche. Un re-punteo con la cuerda sonando NO es un enganche: no hay
- * ventana bajo 0,001 en el medio. Al empezar a alimentar con objetivo puesto y ring vacio, la
- * primera ventana con senal es t_reenganche.
+ * ventana bajo 0,001 en el medio. Al empezar a alimentar con objetivo puesto, la primera ventana con
+ * senal (sin ventana previa) es t_reenganche.
  *
  * 🔴 EL ORACULO ES INSTANTANEO, NO SOSTENIDO. Contra la altura sostenida de la nota, el glide del
  * ataque se lee como error del motor aunque el motor este siguiendo bien a la cuerda (REQ-055 D4).
@@ -34,18 +40,23 @@
 
 namespace wma_test::latch {
 
+/// La ventana fija del estimador fino, en frames. La unica que usa la definicion de enganche.
+inline constexpr int kLatchWindowFrames = 4096;
+
 /// Una publicacion del analisis, tal como la vio quien alimento el motor.
 struct Publication {
-    /// `ring.readPosition()` ANTES y DESPUES de `drainOnce()`: el bloque drenado es
-    /// [posStart, pos). La publicacion se fecha en `pos` (cuando el motor la dio); el INICIO de la
-    /// ventana con senal —`t0` de un enganche por senal— es `posStart`.
-    int64_t posStart = 0;
+    /// `ring.readPosition()` DESPUES de `drainOnce()`: la publicacion se fecha cuando el motor la dio.
     int64_t pos = 0;
     int state = -1;
     /// Altura publicada en Hz absolutos: `targetHz · 2^(cents/1200)`. NaN = sin lectura fina.
     double hz = std::numeric_limits<double>::quiet_NaN();
     double sigmaCents = std::numeric_limits<double>::quiet_NaN();
-    double rms = 0.0;   ///< `kSnapLevelRms`: el rms del bloque drenado
+};
+
+/// El rms de la ventana de `kLatchWindowFrames` que empieza en `start` (frames del flujo alimentado).
+struct Window {
+    int64_t start = 0;
+    double rms = 0.0;
 };
 
 /// `AnalysisThread::setTargetHz` en `pos` (frames del ring). `hasTarget = false` = se quito el objetivo.
@@ -69,6 +80,23 @@ struct Params {
 };
 
 inline constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+
+/// Agrega al flujo mono la mezcla del ring (`0,5f·(l + r)`, en float) de `frames` frames estereo.
+inline void appendMonoMix(std::vector<float>* out, const float* interleaved, int frames) {
+    for (int i = 0; i < frames; ++i) out->push_back(0.5f * (interleaved[2 * i] + interleaved[2 * i + 1]));
+}
+
+/// El rms de cada ventana COMPLETA de `windowFrames`, en la grilla que arranca en el frame 0 del
+/// flujo. Una cola incompleta no es ventana: no se mide con menos muestras que las otras.
+inline std::vector<Window> windowLevels(const std::vector<float>& mono, int windowFrames) {
+    std::vector<Window> out;
+    for (size_t s = 0; s + windowFrames <= mono.size(); s += windowFrames) {
+        double acc = 0.0;
+        for (int i = 0; i < windowFrames; ++i) acc += static_cast<double>(mono[s + i]) * mono[s + i];
+        out.push_back({static_cast<int64_t>(s), std::sqrt(acc / windowFrames)});
+    }
+    return out;
+}
 
 struct Latch {
     enum class Cause { kTargetChange, kSignalAfterSilence };
@@ -143,40 +171,58 @@ inline void finish(Latch& l) {
 }  // namespace detail
 
 /**
- * Las cifras por enganche de una corrida. `events` va ordenado por `pos`, `pubs` por `pos`.
+ * Las cifras por enganche de una corrida. `events` va ordenado por `pos`, `pubs` por `pos`,
+ * `windows` por `start`.
  *
- * Un evento sin publicacion posterior no abre enganche: no hay nada que medir en el.
- * Sin objetivo puesto (ningun evento, o el ultimo con `hasTarget = false`) no hay enganche y las
- * publicaciones no se atribuyen a nadie.
+ * Los t0 salen SOLO de los eventos y de las ventanas: las publicaciones se atribuyen despues al
+ * ultimo enganche con t0 < pos, asi que ni la cantidad de enganches ni sus t0 dependen de la
+ * granularidad con que se publico. Un evento con ventana de por medio vacia es un enganche sin
+ * lecturas. Sin objetivo puesto (ningun evento, o el ultimo con `hasTarget = false`) no hay enganche
+ * y las publicaciones no se atribuyen a nadie.
  */
-inline std::vector<Latch> measure(const std::vector<Publication>& pubs,
+inline std::vector<Latch> measure(const std::vector<Publication>& pubs, const std::vector<Window>& windows,
                                   const std::vector<TargetEvent>& events,
                                   const std::vector<OracleSegment>& oracle, const Params& params) {
-    std::vector<Latch> latches;
+    struct Opening {
+        int64_t t0;
+        Latch::Cause cause;
+        bool open;   ///< false = se quito el objetivo
+    };
+    std::vector<Opening> openings;
     size_t nextEvent = 0;
     bool targetSet = false;
-    bool prevSilent = true;   // "ring vacio al empezar": la primera ventana con senal abre enganche
-    bool open = false;
+    bool prevSilent = true;   // sin ventana previa: la primera ventana con senal abre enganche
 
-    for (const Publication& pub : pubs) {
-        while (nextEvent < events.size() && events[nextEvent].pos < pub.pos) {
-            const TargetEvent& ev = events[nextEvent++];
-            targetSet = ev.hasTarget;
-            open = targetSet;
-            if (targetSet) latches.push_back(detail::openLatch(Latch::Cause::kTargetChange, ev.pos, params));
-        }
-
-        const bool signal = pub.rms >= params.signalFloor;
-        // Un cambio de objetivo y la primera ventana con senal en el MISMO instante son un solo
-        // enganche (el caso normal al empezar a alimentar); en instantes distintos son dos.
-        if (targetSet && signal && prevSilent && !(open && latches.back().t0Frames == pub.posStart)) {
-            latches.push_back(detail::openLatch(Latch::Cause::kSignalAfterSilence, pub.posStart, params));
-            open = true;
-        }
+    const auto applyEvent = [&](const TargetEvent& ev) {
+        targetSet = ev.hasTarget;
+        openings.push_back({ev.pos, Latch::Cause::kTargetChange, targetSet});
+    };
+    for (const Window& w : windows) {
+        // Un evento en el instante de la ventana va ANTES: si ademas tiene senal, es un solo enganche.
+        while (nextEvent < events.size() && events[nextEvent].pos <= w.start) applyEvent(events[nextEvent++]);
+        const bool signal = w.rms >= params.signalFloor;
+        const bool sameInstant = !openings.empty() && openings.back().open && openings.back().t0 == w.start;
+        if (targetSet && signal && prevSilent && !sameInstant)
+            openings.push_back({w.start, Latch::Cause::kSignalAfterSilence, true});
         prevSilent = !signal;
-        if (!targetSet || !open) continue;
+    }
+    while (nextEvent < events.size()) applyEvent(events[nextEvent++]);
 
-        Latch& l = latches.back();
+    std::vector<Latch> latches;
+    std::vector<int> latchOf(openings.size(), -1);
+    for (size_t i = 0; i < openings.size(); ++i) {
+        if (!openings[i].open) continue;
+        latchOf[i] = static_cast<int>(latches.size());
+        latches.push_back(detail::openLatch(openings[i].cause, openings[i].t0, params));
+    }
+
+    int current = -1;   // indice en `openings`
+    size_t nextOpening = 0;
+    for (const Publication& pub : pubs) {
+        while (nextOpening < openings.size() && openings[nextOpening].t0 < pub.pos) current = static_cast<int>(nextOpening++);
+        if (current < 0 || latchOf[current] < 0) continue;
+
+        Latch& l = latches[latchOf[current]];
         ++l.publications;
         const bool hasReading = !std::isnan(pub.hz);
         if (hasReading) {

@@ -16,7 +16,8 @@ thread RT (`../CLAUDE.md`).
 - `python3 scripts/spectrum-by-segment.py archivo.wav --f0 HZ`: la tabla de dB POR TRAMOS
   (Hann 250 ms) que separa hipotesis sobre un timbre real.
 - La VARA del enganche (REQ-055): `tests/support/LatchInstrument.h` (nucleo puro) y
-  `tests/test_latch_instrument.cpp`; mide t_primera / t_conv / error por enganche contra el oraculo
+  `tests/test_latch_instrument.cpp`; el enganche se define sobre una ventana FIJA de 4096 frames
+  (no sobre la tanda drenada; se alimenta en tandas de 256); mide t_primera / t_conv / error por enganche contra el oraculo
   corto `tests/corpus-v1-oraculo-corto.tsv` (`corpus-reference-pitch.py --short`, desde la raiz, ver
   su docstring) y compara con `tests/baseline/enganche-corpus-v1.tsv`. Esa linea de base se regenera
   con `WMA_LATCH_BASELINE_UPDATE=1 bash scripts/run-cpp-tests.sh -R LatchInstrumentCorpus` y su diff
