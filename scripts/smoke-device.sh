@@ -2918,6 +2918,9 @@ JSON
     af_log "$tmp/j3.log" sin-lectura
     expect "j3: el afinador sin lectura = FAIL" 1 "$tmp/j3.log" afinador "$fa"
     expect_line "j3: ... y dice sin-lectura" '^FAIL +afinador/lectura-juicio-estimulo +quedo-en=sin-lectura ' "$tmp/j3.log" afinador "$fa"
+    # "Quedo" es el ULTIMO tick: arranca sin lectura y queda midiendo => dice midiendo.
+    af_sed "$tmp/j3.log" "$tmp/j7.log" "$(tk juicio "$ne_j")s/ t-ms=(240|320) estado=sin-lectura hz=- nota=A4 cents=- / t-ms=\1 estado=midiendo hz=439.8 nota=A4 cents=- /"
+    expect_line "j7: dice el estado en que QUEDO (el ultimo tick)" '^FAIL +afinador/lectura-juicio-estimulo +quedo-en=midiendo .*sin-lectura=2' "$tmp/j7.log" afinador "$fa"
     af_sed "$tmp/af-verde.log" "$tmp/j4.log" "$(tk juicio "$ne_j")s/ nota=A4 / nota=E4 /"
     expect "j4: enganchado en otra nota (E4) = FAIL" 1 "$tmp/j4.log" afinador "$fa"
     expect_line "j4: ... enganchado-en-otra-nota" '^FAIL +afinador/lectura-juicio-estimulo +enganchado-en-otra-nota nota=E4 ' "$tmp/j4.log" afinador "$fa"
@@ -2967,6 +2970,13 @@ JSON
     af_sed "$tmp/af-verde.log" "$tmp/r5.log" "/ step=juicio-estimulo /s/ backend=OBOE / backend=LIBUSB /"
     expect "r5: el A4 del afinador por libusb (no el parlante) = FAIL" 1 "$tmp/r5.log" afinador "$fa"
 
+    # Una ventana que salio BLOQUEADO (una precondicion que la bloquea a ELLA) deja su lectura sin
+    # juzgar: hereda el BLOQUEADO, como el juicio del sensor en S3.
+    python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); f["planes"]["afinador"]["precondiciones"][1]["depende"] = ["juicio-estimulo"]; json.dump(f, open(sys.argv[2], "w"))' "$fa" "$tmp/ficha-af-ventana.json"
+    af_sed "$tmp/af-verde.log" "$tmp/v1.log" "/ id=t-af-mic .*fase:juicio/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /;}"
+    expect_line "v1: la ventana bloqueada bloquea su lectura" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-mic .*la ventana salio BLOQUEADO' "$tmp/v1.log" afinador "$tmp/ficha-af-ventana.json"
+    expect_no_line "v1: ... que no sale PASS" '^PASS +afinador/lectura-juicio-estimulo ' "$tmp/v1.log" afinador "$tmp/ficha-af-ventana.json"
+
     # La fase reproduccion NO da PASS ni FAIL de AC-053.13: registra estado y Hz. Ni enganchada en
     # A4 es PASS, ni en otra nota es FAIL.
     af_log "$tmp/o1.log" enganchado enganchado
@@ -3008,6 +3018,7 @@ JSON
     # El seguidor de S3 no le pregunta nada al oido por el afinador (lo juzga su snapshot, D9).
     seguir_reset; seguir_case "$tmp/af-verde.log"
     is_eq "S4: el seguidor no consulta al sensor por el afinador" "$(calls)" 0
+    is_eq "S4: ... ni le registra juicios" "$(grep -c . "$tmp/seg.sensor" || true)" 0
 
     # La ficha: el mismo id en dos planes es valido (gemelo del mutante "id duplicado en el mismo plan");
     # `umbral-dbfs` es de una precondicion de APP, numerica y en dBFS.
@@ -3021,7 +3032,8 @@ JSON
     }
     af_mutante "umbral-dbfs en una de host" "f['planes']['afinador']['precondiciones'][0]['umbral-dbfs'] = -30"
     af_mutante "umbral-dbfs que no es un numero" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = '-30'"
-    af_mutante "umbral-dbfs booleano" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = True"
+    # False y no True: True vale 1 y ya lo rechaza el rango; False vale 0, que esta en rango.
+    af_mutante "umbral-dbfs booleano" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = False"
     af_mutante "umbral-dbfs positivo (no es dBFS)" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = 3"
     af_mutante "umbral-dbfs debajo de -160" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = -400"
     af_mutante "depende de una lectura que no existe" "f['planes']['afinador']['precondiciones'][1]['depende'] = ['lectura-juicio-ruido']"
