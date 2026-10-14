@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace wma_test {
@@ -236,13 +237,16 @@ TEST(LatchInstrument, ReadingsWithoutOracleAreCountedApartNotAsError) {
     EXPECT_TRUE(std::isnan(l[0].firstErrorCents));
 
     const std::vector<OracleSegment> oracle2 = {{0.0, 0.15, 100.0}};
-    const std::vector<Publication> pubs2 = {pub(100, 500.0, kMeas), pub(200, hzAt(100.0, 3.0), kMeas)};
+    // σ = 2: 2σ = 4 c cubre el error de 3 c. Cubierta 1 de 1 con oraculo; si la lectura sin oraculo entrara al
+    // denominador seria 1/2.
+    const std::vector<Publication> pubs2 = {pub(100, 500.0, kMeas, 2.0), pub(200, hzAt(100.0, 3.0), kMeas, 2.0)};
     l = latch::measure(pubs2, loudWins(2), {{0, true}}, oracle2, params());
     ASSERT_EQ(l.size(), 1u);
     EXPECT_EQ(l[0].noOracle, 1);
     EXPECT_EQ(l[0].withError, 1);
     EXPECT_NEAR(l[0].maxAbsCents, 3.0, 1e-9) << "la lectura sin oraculo no entra a los percentiles";
-    EXPECT_NEAR(l[0].coverage, 0.0, 1e-12) << "y tampoco al denominador de la cobertura";
+    EXPECT_EQ(l[0].covered, 1);
+    EXPECT_NEAR(l[0].coverage, 1.0, 1e-12) << "y tampoco al denominador de la cobertura";
 }
 
 TEST(LatchInstrument, ErrorHasThePublishedOverOracleSign) {
@@ -349,21 +353,67 @@ TEST(LatchInstrument, SilenceStraddlingTwoWindowsWithoutFillingOneOpensNoLatch) 
     EXPECT_EQ(latch::measure({pub(150)}, levels, {{0, true}}, kNoOracle, params()).size(), 1u);
 }
 
-TEST(LatchInstrument, TheLatchesDoNotDependOnPublicationGranularity) {
-    // Atrapa: volver a medir el enganche con el bloque drenado. Misma serie de ventanas, publicadas
-    // cada 100 frames o cada 25: mismos t0 y mismas cuentas de lecturas, salvo el instante exacto
-    // de la primera lectura (que sigue a la publicacion).
-    std::vector<float> mono = monoRun(30, false);
-    append(&mono, monoRun(270, true));
-    const auto levels = latch::windowLevels(mono, kWin);
-    std::vector<Publication> coarse, fine;
-    for (int64_t pos = 100; pos <= 300; pos += 100) coarse.push_back(pub(pos, pos >= 200 ? 100.0 : kNan));
-    for (int64_t pos = 25; pos <= 300; pos += 25) fine.push_back(pub(pos, pos >= 200 ? 100.0 : kNan));
-    const auto a = latch::measure(coarse, levels, {{0, true}}, kNoOracle, params());
-    const auto b = latch::measure(fine, levels, {{0, true}}, kNoOracle, params());
-    ASSERT_EQ(a.size(), b.size());
-    for (size_t i = 0; i < a.size(); ++i) EXPECT_EQ(a[i].t0Frames, b[i].t0Frames);
-    EXPECT_EQ(a.size(), 1u);
+/// Sub-bloque de los tests del nucleo: 20 frames (el de produccion, 256, es la misma regla a otra escala).
+constexpr int kSub = 20;
+
+TEST(LatchInstrument, AnAttackMidWindowDatesT0AtItsSubBlockNotAtTheWindowEdge) {
+    // Atrapa: fechar t0 en el borde de la ventana con senal. Ventana 0 muda, ventana 1 (100..199) con el ataque
+    // en el frame 165: t0 es 160 (inicio del sub-bloque 160..179), no 100. Con t0 = 100 la primera lectura
+    // saldria 60 ms mas larga de lo que tardo el motor. La DECISION silencio/senal sigue siendo la ventana.
+    std::vector<float> mono = monoRun(165, false);
+    append(&mono, monoRun(35, true));
+    const auto levels = latch::windowLevels(mono, kWin, kSub);
+    ASSERT_EQ(levels.size(), 2u);
+    EXPECT_EQ(levels[1].start, 100);
+    EXPECT_EQ(levels[1].onset, 160);
+    const auto l = latch::measure({pub(100), pub(200, 100.0, kMeas)}, levels, {{0, true}}, kNoOracle, params());
+    ASSERT_EQ(l.size(), 2u);
+    EXPECT_EQ(l[1].cause, Latch::Cause::kSignalAfterSilence);
+    EXPECT_EQ(l[1].t0Frames, 160);
+    EXPECT_EQ(l[1].firstReadingFrames, 40);
+}
+
+TEST(LatchInstrument, TheOnsetIsTheFirstSubBlockAtTheFloorNotTheFirstLoudFrame) {
+    // Atrapa: un onset por muestra (165) en lugar de por sub-bloque de la grilla alineada al frame 0 (160), y
+    // un sub-bloque bajo el piso tomado como senal. 0,0005 en 160..179 es silencio; el ataque real llega en 180.
+    std::vector<float> mono = monoRun(100, false);
+    append(&mono, std::vector<float>(80, 0.0005f));
+    append(&mono, monoRun(20, true));
+    const auto levels = latch::windowLevels(mono, kWin, kSub);
+    ASSERT_EQ(levels.size(), 2u);
+    EXPECT_EQ(levels[1].onset, 180);
+}
+
+TEST(LatchInstrument, AnEventBetweenTheWindowStartAndTheAttackKeepsTheLatchesOrdered) {
+    // Atrapa: un enganche por senal fechado en el ataque (160) que queda ANTES en la lista que un evento
+    // anterior (130) y atribuye mal las publicaciones. El evento va primero y su enganche termina en el ataque.
+    std::vector<float> mono = monoRun(165, false);
+    append(&mono, monoRun(35, true));
+    const auto levels = latch::windowLevels(mono, kWin, kSub);
+    const auto l = latch::measure({pub(140, 100.0, kMeas), pub(200, 100.0, kMeas)}, levels, {{0, true}, {130, true}},
+                                  kNoOracle, params());
+    ASSERT_EQ(l.size(), 3u);
+    EXPECT_EQ(l[1].t0Frames, 130);
+    EXPECT_EQ(l[2].t0Frames, 160);
+    EXPECT_EQ(l[1].publications, 1);
+    EXPECT_EQ(l[2].publications, 1);
+}
+
+TEST(LatchInstrument, FrameRangeKeepsMinMaxOfThoseThatArrivedAndCountsTheRest) {
+    // Atrapa: tomar el -1 de "no llego" como el minimo (rango que arranca en -1), perder cuantas no llegaron, o
+    // devolver 0 cuando ninguna llego.
+    auto r = latch::frameRange({300, -1, 100, 200, -1});
+    EXPECT_EQ(r.min, 100);
+    EXPECT_EQ(r.max, 300);
+    EXPECT_EQ(r.missing, 2);
+    r = latch::frameRange({-1, -1});
+    EXPECT_EQ(r.min, -1);
+    EXPECT_EQ(r.max, -1);
+    EXPECT_EQ(r.missing, 2);
+    r = latch::frameRange({7});
+    EXPECT_EQ(r.min, 7);
+    EXPECT_EQ(r.max, 7);
+    EXPECT_EQ(r.missing, 0);
 }
 
 TEST(LatchInstrument, WindowLevelsIsTheRmsOfCompleteWindowsOnAGridFromFrameZero) {
@@ -395,7 +445,9 @@ constexpr Col kCols[] = {
     {"t_conv_frames", true},   {"t_conv_s", false},       {"n_lecturas", true},       {"n_sin_oraculo", true},
     {"err_primera_c", false},  {"sigma_primera_c", false}, {"mediana_abs_c", false},  {"p90_abs_c", false},
     {"max_abs_c", false},      {"cobertura", false},      {"t_primera2_frames", true}, {"t_primera2_s", false},
-    {"t_conv2_frames", true},  {"t_conv2_s", false},      {"sueltas2", true}};
+    {"t_conv2_frames", true},  {"t_conv2_s", false},      {"sueltas2", true},
+    {"t_primera_min_frames", true}, {"t_primera_max_frames", true}, {"t_primera_sin_lectura", true},
+    {"t_conv_min_frames", true},    {"t_conv_max_frames", true},    {"t_conv_sin_lectura", true}};
 constexpr size_t kNumCols = sizeof(kCols) / sizeof(kCols[0]);
 constexpr double kTolerance = 0.002;
 
@@ -479,7 +531,7 @@ std::vector<std::string> diffRows(const std::map<std::string, Row>& want, const 
 Row sampleRow() {
     Row r{};
     r.name = "a.wav";
-    const double base[kNumCols] = {1, 0, 4096, 0.093, 8192, 0.186, 30, 2, 1.5, 0.4, 0.8, 2.1, 3.3, 0.9, 100, 0.002, 200, 0.004, 0};
+    const double base[kNumCols] = {1, 0, 4096, 0.093, 8192, 0.186, 30, 2, 1.5, 0.4, 0.8, 2.1, 3.3, 0.9, 100, 0.002, 200, 0.004, 0, 4096, 4352, 0, 8192, 8448, 1};
     for (size_t i = 0; i < kNumCols; ++i) r.v[i] = base[i];
     return r;
 }
@@ -634,22 +686,26 @@ struct FedRun {
     std::vector<latch::Window> windows;
 };
 
-// 🔴 EL TAMANO DE TANDA ES PARTE DE LO QUE SE MIDE. Escribir el ring entero (8192 frames) antes de
-// drenar hace que el modo rapido, al re-enganchar el objetivo (`skipToNewest` en AnalysisThread),
-// tire lo que queda de la tanda: hasta 6144 frames del ataque. Con tandas de 8192 los 39 t_primera de
-// la primera linea de base salian multiplos exactos de 8192 (escalon de 186 ms a 44,1 kHz) y, por
-// ejemplo, bajo-acustico_A1 leia en el frame 57344 en vez del 53248 que da con 2048 o menos. En un
-// dispositivo la captura llega en callbacks de ~100-500 frames y el hilo de analisis drena cada ~5 ms:
-// 256 es de ese orden. Tandas <= 2048 no cambian la medicion (lo exige `ChunkSizeInProductionRange`).
+// 🔴 EL TAMANO DE TANDA ES PARTE DE LO QUE SE MIDE, Y EL MOTOR DE HOY DEPENDE DE LA PARTICION DEL FLUJO.
+// La cifra canonica es la del motor alimentado en tandas de 256 (determinista, comparable); la linea de
+// base trae ademas el RANGO sobre `kRangeChunks`. Medido con el motor del commit 1351b7e: con tandas que
+// dividen a 4096 (64..4096) los 41 archivos dan la misma posicion de ring, pero con 96/192/240/480/960/1536
+// (bursts tipicos de Android) t_primera se mueve en 37-40 de los 41 (bajo-fretless_D2: 2,51 s con 256 contra
+// ~1,21 s con otra; bajo-pua_A1: 4,64 contra ~4,09 s) y algun archivo converge con una tanda y no con otra.
+// Es una propiedad del motor, no del instrumento: lo que se mide queda declarado en el TSV y cualquier
+// cambio del motor (S1/S2) aparece en su diff. Escribir el ring entero (8192 frames) antes de drenar
+// ademas hace que el modo rapido, al re-enganchar, tire el resto de la tanda: no es una tanda de captura.
 constexpr int kProductionChunkFrames = 256;
+constexpr int kRangeChunks[] = {96, 192, 240, kProductionChunkFrames, 480, 960, 1536};
+constexpr size_t kNumRangeChunks = sizeof(kRangeChunks) / sizeof(kRangeChunks[0]);
 
 FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e, int chunkFrames = kProductionChunkFrames) {
     FedRun run;
     run.rate = data.sampleRate;
     const int frames = corpus::noteEndFrames(data);
+    // El flujo mono con que se miden las ventanas se arma tanda a tanda, a medida que se escribe al ring:
+    // si el alimentador perdiera o duplicara frames al partir, la serie de ventanas cambiaria con la tanda.
     std::vector<float> fedMono;
-    for (int pass = 0; pass < 2; ++pass) latch::appendMonoMix(&fedMono, data.buffer.data(), frames);
-    run.windows = latch::windowLevels(fedMono, latch::kLatchWindowFrames);
     wma::analysis::AnalysisRing ring;
     wma::analysis::AnalysisSnapshot snapshot;
     wma::analysis::AnalysisThread analysis(ring, snapshot);
@@ -670,7 +726,9 @@ FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e, int chunkFram
         int written = 0;
         while (written < frames) {
             const int chunk = std::min(frames - written, chunkFrames);
-            ring.writeStereo(data.buffer.data() + static_cast<size_t>(written) * 2, chunk);
+            const float* src = data.buffer.data() + static_cast<size_t>(written) * 2;
+            latch::appendMonoMix(&fedMono, src, chunk);
+            ring.writeStereo(src, chunk);
             written += chunk;
             for (;;) {
                 if (analysis.drainOnce() == wma::analysis::AnalysisThread::DrainOutcome::kRingEmpty) break;
@@ -690,6 +748,7 @@ FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e, int chunkFram
         }
         if (pass == 0) run.frames1 = static_cast<int64_t>(ring.readPosition());
     }
+    run.windows = latch::windowLevels(fedMono, latch::kLatchWindowFrames);
     return run;
 }
 
@@ -736,7 +795,8 @@ Pass2 measurePass2(const FedRun& run) {
 double secOf(int64_t frames, int rate) { return frames < 0 ? kNan : static_cast<double>(frames) / rate; }
 double framesOrNan(int64_t frames) { return frames < 0 ? kNan : static_cast<double>(frames); }
 
-Row rowOf(const std::string& name, int engage, const Latch& l, const Pass2& p2, int rate) {
+Row rowOf(const std::string& name, int engage, const Latch& l, const Pass2& p2, int rate, const latch::FrameRange& first,
+          const latch::FrameRange& conv) {
     Row r{};
     r.name = name;
     const double v[kNumCols] = {static_cast<double>(engage),
@@ -757,7 +817,13 @@ Row rowOf(const std::string& name, int engage, const Latch& l, const Pass2& p2, 
                                 secOf(p2.firstFrames, rate),
                                 framesOrNan(p2.convFrames),
                                 secOf(p2.convFrames, rate),
-                                static_cast<double>(p2.dropped)};
+                                static_cast<double>(p2.dropped),
+                                framesOrNan(first.min),
+                                framesOrNan(first.max),
+                                static_cast<double>(first.missing),
+                                framesOrNan(conv.min),
+                                framesOrNan(conv.max),
+                                static_cast<double>(conv.missing)};
     for (size_t i = 0; i < kNumCols; ++i) r.v[i] = v[i];
     return r;
 }
@@ -768,21 +834,34 @@ std::string baselineHeader() {
         "# Motor medido: commit 1351b7e (el de hoy, sin cambio de produccion). Al regenerar tras un cambio de motor\n"
         "# INTENCIONAL, actualizar este commit en `baselineHeader()` (test_latch_instrument.cpp).\n"
         "#\n"
+        "# 🔴 ESTA CIFRA ES DEL MOTOR ALIMENTADO EN TANDAS DE 256 FRAMES, Y EL MOTOR DE HOY DEPENDE DE LA PARTICION DEL\n"
+        "# FLUJO. Con tandas que dividen a 4096 (64..4096) los 41 archivos dan la misma posicion de ring; con tandas\n"
+        "# que no (96, 192, 240, 480, 960, 1536: bursts tipicos de Android) t_primera se mueve en 37-40 de 41 archivos\n"
+        "# (bajo-fretless_D2: 2,51 s con 256 contra ~1,21 s con otra; bajo-pua_A1: 4,64 contra ~4,09 s) y algun archivo\n"
+        "# converge con una tanda y no con otra. Por eso la fila trae el RANGO sobre el conjunto fijo de tandas\n"
+        "# {96, 192, 240, 256, 480, 960, 1536}: t_*_min_frames / t_*_max_frames son el minimo y el maximo de t_primera /\n"
+        "# t_conv (frames desde t0) sobre las tandas donde LLEGO; t_*_sin_lectura, en cuantas de las 7 no llego (si no\n"
+        "# llego en ninguna, min y max son nan). 256 esta en el conjunto: min <= t_*_frames <= max cuando llega. El rango\n"
+        "# se compara EXACTO, como el resto: cualquier cambio del motor que mueva la dependencia de la tanda aparece\n"
+        "# en el diff. Es una propiedad del motor; este instrumento la mide y la declara, no la arregla.\n"
+        "#\n"
         "# Definicion de enganche (acordada con el consumidor). La ventana es FIJA: 4096 frames (la del estimador fino)\n"
         "# sobre la senal mono alimentada 0,5*(L+R), en una grilla alineada al frame 0 del flujo e independiente de la\n"
-        "# tanda; antes se usaba el rms del bloque drenado y un bloque de silencio digital al comienzo de cada pasada\n"
-        "# abria enganches espurios (55 sobre 41 archivos). t_reenganche = cambio de objetivo (el frame exacto del\n"
-        "# evento), o (con objetivo puesto) el INICIO de la primera ventana con rms >= 0,001 que sigue a una ventana con\n"
-        "# rms < 0,001; al empezar a alimentar con objetivo puesto, la primera ventana con senal (sin ventana previa) es\n"
-        "# t_reenganche. El enganche dura hasta el siguiente t_reenganche. Un re-punteo con la cuerda sonando NO es un\n"
-        "# enganche (no hay ventana < 0,001 en el medio).\n"
+        "# tanda; la DECISION silencio/senal se toma con esa ventana (antes se usaba el rms del bloque drenado y un\n"
+        "# bloque de silencio digital al comienzo de cada pasada abria enganches espurios: 55 sobre 41 archivos).\n"
+        "# t_reenganche = cambio de objetivo (el frame exacto del evento), o (con objetivo puesto) el ATAQUE de la\n"
+        "# primera ventana con rms >= 0,001 que sigue a una ventana con rms < 0,001, fechado en el inicio del primer\n"
+        "# SUB-BLOQUE de 256 frames (grilla desde el frame 0) con rms >= 0,001 dentro de esa ventana, no en el borde de\n"
+        "# la ventana; al empezar a alimentar con objetivo puesto, la primera ventana con senal (sin ventana previa)\n"
+        "# es t_reenganche. El enganche dura hasta el siguiente t_reenganche. Un re-punteo con la cuerda sonando NO es\n"
+        "# un enganche (no hay ventana < 0,001 en el medio).\n"
         "#\n"
         "# Se alimenta la NOTA (noteEndFrames) por AnalysisThread::drainOnce() sin thread, en TANDAS DE 256 FRAMES\n"
         "# (kProductionChunkFrames) drenadas hasta ring vacio tras cada una, como un callback de captura: con tandas de\n"
         "# 8192 el modo rapido tiraba el resto de la tanda al re-enganchar y la primera lectura salia hasta 93 ms tarde\n"
-        "# (la primera linea de base, descartada). Con setTargetHz(hz del\n"
-        "# manifiesto) y los candidatos del instrumento, aplicados con el ring VACIO (un drainOnce antes de escribir:\n"
-        "# si no, skipToNewest tira el primer bloque, el ataque, como hacia sweepFile). Tiempos en frames del ring (exactos) y en segundos; errores en\n"
+        "# (la primera linea de base, descartada). Con setTargetHz(hz del manifiesto) y los candidatos del\n"
+        "# instrumento, aplicados con el ring VACIO (un drainOnce antes de escribir: si no, skipToNewest tira el primer\n"
+        "# bloque, el ataque, como hacia sweepFile). Tiempos en frames del ring (exactos) y en segundos; errores en\n"
         "# cents contra el ORACULO INSTANTANEO corpus-v1-oraculo-corto.tsv (tramo con t_fin mas cercano <= t de la\n"
         "# publicacion); cobertura = fraccion de lecturas con oraculo y |error| <= 2 sigma. n_lecturas = publicaciones\n"
         "# con cents; n_sin_oraculo = de esas, las que no tuvieron tramo con hz. Las columnas *2 son el RE-PUNTEO: la\n"
@@ -822,6 +901,54 @@ TEST(LatchInstrumentCorpus, OracleDescribesTheSameFilesAsTheManifest) {
     EXPECT_GT(checked, 0);
 }
 
+/// Una nota sintetica: silencio hasta `attackFrame` y despues un tono de 440 Hz. `noteEndFrames` la corta
+/// en un multiplo de 2048, asi que sobra cola muda para que haya al menos dos ventanas completas.
+wav::WavData syntheticNote(int attackFrame, int totalFrames) {
+    wav::WavData d;
+    d.sampleRate = 48000;
+    d.numChannels = 2;
+    d.numFrames = totalFrames;
+    d.buffer.assign(static_cast<size_t>(totalFrames) * 2, 0.0f);
+    for (int i = attackFrame; i < totalFrames; ++i) {
+        const float v = 0.3f * static_cast<float>(std::sin(2.0 * 3.14159265358979 * 440.0 * i / d.sampleRate));
+        d.buffer[static_cast<size_t>(i) * 2] = v;
+        d.buffer[static_cast<size_t>(i) * 2 + 1] = v;
+    }
+    return d;
+}
+
+bool sameWindows(const std::vector<latch::Window>& a, const std::vector<latch::Window>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (a[i].start != b[i].start || a[i].rms != b[i].rms || a[i].onset != b[i].onset) return false;
+    return true;
+}
+
+TEST(LatchInstrument, TheWindowsTheFeederBuildsDoNotDependOnTheChunkSize) {
+    // Atrapa: un alimentador que pierde, duplica o parte mal el flujo al escribirlo en tandas (la cola de la
+    // ultima tanda, p. ej.), de modo que la serie de ventanas, y con ella los t0, cambie con la tanda. Las
+    // tandas incluyen una que NO divide a 4096 (960) y otra que no divide ni a 2048 (240). Con el ataque en el
+    // frame 8000 (a mitad de la ventana 4096..8191) t0 sale 7936 con todas.
+    corpus::Entry e;
+    e.trueHz = 440.0;
+    const wav::WavData note = syntheticNote(8000, 40960 + 4096);
+    const FedRun ref = feedTwice(note, e, kProductionChunkFrames);
+    ASSERT_GE(ref.windows.size(), 4u);
+    EXPECT_EQ(ref.windows[1].start, 4096);
+    EXPECT_EQ(ref.windows[1].onset, 7936);
+    for (int chunk : {64, 240, 960, 2048}) {
+        const FedRun other = feedTwice(note, e, chunk);
+        EXPECT_TRUE(sameWindows(ref.windows, other.windows)) << "tanda " << chunk;
+        EXPECT_EQ(ref.frames1, other.frames1) << "tanda " << chunk;
+    }
+    Params prm;
+    prm.sampleRate = ref.rate;
+    const FirstPassOfRun first = firstPassOfRun(ref);
+    const auto l = latch::measure(first.pubs, first.windows, ref.events, kNoOracle, prm);
+    ASSERT_EQ(l.size(), 2u) << "el evento del objetivo (silencio) y el ataque";
+    EXPECT_EQ(l[1].t0Frames, 7936) << "t0 en el sub-bloque del ataque, no en el borde 4096 de la ventana";
+}
+
 /// Posiciones ABSOLUTAS del ring (t0 + t_primera, t0 + t_conv) de la primera lectura y de la primera
 /// convergencia de la PRIMERA pasada, alimentada en tandas de `chunkFrames`; −1 si no llegaron.
 struct AbsoluteLatchTimes {
@@ -830,16 +957,58 @@ struct AbsoluteLatchTimes {
     size_t latchCount = 0;
 };
 
+/// Un archivo alimentado en UNA tanda: la corrida y los enganches de su primera pasada.
+struct ChunkRun {
+    int chunk = 0;
+    FedRun run;
+    std::vector<Latch> latches;
+};
+
+ChunkRun runChunk(const wav::WavData& data, const corpus::Entry& e, const std::vector<OracleSegment>& segments, int chunk) {
+    ChunkRun out;
+    out.chunk = chunk;
+    out.run = feedTwice(data, e, chunk);
+    const FirstPassOfRun first = firstPassOfRun(out.run);
+    Params prm;
+    prm.sampleRate = out.run.rate;
+    out.latches = latch::measure(first.pubs, first.windows, out.run.events, segments, prm);
+    return out;
+}
+
+/// El archivo en cada tanda de `kRangeChunks`, una por thread: cada corrida tiene su propio ring, snapshot y
+/// motor, y nada se comparte mas que los datos de entrada, de solo lectura. Los resultados se leen despues del join.
+std::vector<ChunkRun> runAllRangeChunks(const wav::WavData& data, const corpus::Entry& e,
+                                        const std::vector<OracleSegment>& segments) {
+    std::vector<ChunkRun> out(kNumRangeChunks);
+    std::vector<std::thread> workers;
+    for (size_t i = 0; i < kNumRangeChunks; ++i)
+        workers.emplace_back([&, i] { out[i] = runChunk(data, e, segments, kRangeChunks[i]); });
+    for (std::thread& t : workers) t.join();
+    return out;
+}
+
+size_t canonicalIndex() {
+    for (size_t i = 0; i < kNumRangeChunks; ++i)
+        if (kRangeChunks[i] == kProductionChunkFrames) return i;
+    return 0;
+}
+
+/// Para el enganche `idx`, el rango de t_primera / t_conv sobre las tandas.
+std::pair<latch::FrameRange, latch::FrameRange> rangesOf(const std::vector<ChunkRun>& runs, size_t idx) {
+    std::vector<int64_t> first, conv;
+    for (const ChunkRun& r : runs) {
+        first.push_back(r.latches[idx].firstReadingFrames);
+        conv.push_back(r.latches[idx].convergedFrames);
+    }
+    return {latch::frameRange(first), latch::frameRange(conv)};
+}
+
 AbsoluteLatchTimes absoluteTimesAtChunk(const wav::WavData& data, const corpus::Entry& e,
                                         const std::vector<OracleSegment>& segments, int chunkFrames) {
-    const FedRun run = feedTwice(data, e, chunkFrames);
-    const FirstPassOfRun first = firstPassOfRun(run);
-    Params prm;
-    prm.sampleRate = run.rate;
-    const std::vector<Latch> latches = latch::measure(first.pubs, first.windows, run.events, segments, prm);
+    const ChunkRun r = runChunk(data, e, segments, chunkFrames);
     AbsoluteLatchTimes out;
-    out.latchCount = latches.size();
-    for (const Latch& l : latches) {
+    out.latchCount = r.latches.size();
+    for (const Latch& l : r.latches) {
         if (l.firstReadingFrames >= 0 && (out.firstFrames < 0 || l.t0Frames + l.firstReadingFrames < out.firstFrames))
             out.firstFrames = l.t0Frames + l.firstReadingFrames;
         if (l.convergedFrames >= 0 && (out.convFrames < 0 || l.t0Frames + l.convergedFrames < out.convFrames))
@@ -848,46 +1017,48 @@ AbsoluteLatchTimes absoluteTimesAtChunk(const wav::WavData& data, const corpus::
     return out;
 }
 
-TEST(LatchInstrumentCorpus, ChunkSizeInProductionRangeDoesNotMoveTheMeasurement) {
-    // Atrapa: un instrumento que mide el arnes y no el motor. La posicion del ring a la que el motor
-    // publica la primera lectura y la primera convergencia tiene que ser la MISMA alimentando en 256 o
-    // en 1024 frames (callbacks reales), EXACTA: asi se midio en los 41 archivos. Los enganches
-    // salen de la ventana fija de 4096 y no de la tanda, asi que su cantidad tambien coincide. El
-    // control negativo: con el ring entero (8192) el
-    // modo rapido tira el resto de la tanda al re-enganchar y la posicion SI se mueve; si no se
-    // moviera en ningun archivo, este test no discriminaria el defecto que vino a cerrar.
+/// Bajo sanitizer cada archivo cuesta varias veces mas: se mide 1 de cada 4; el conjunto completo lo exigen
+/// los jobs sin sanitizer.
+std::vector<corpus::Entry> corpusEntriesForThisBuild(bool* subset) {
+    std::vector<corpus::Entry> entries = corpus::entriesOf(corpus::manifestPath());
+#ifdef WMA_TEST_UNDER_SANITIZER
+    *subset = true;
+    std::vector<corpus::Entry> kept;
+    for (size_t i = 0; i < entries.size(); i += 4) kept.push_back(entries[i]);
+    return kept;
+#else
+    *subset = false;
+    return entries;
+#endif
+}
+
+TEST(LatchInstrumentCorpus, ChunkSizesThatDivideTheWindowDoNotMoveTheMeasurement) {
+    // Atrapa: un instrumento que mide el arnes y no el motor. Con tandas que dividen a 4096 (256 y 1024) la
+    // posicion de ring de la primera lectura y de la primera convergencia, y la cantidad de enganches, es la
+    // MISMA en los 41 archivos (EXACTA). Se mide asi, no esta demostrado: la hipotesis es que el motor
+    // publica en multiplos de su ventana y una tanda que la divide cae justo en ellos. Vale SOLO para
+    // divisores de 4096: con 96/192/240/480/960/1536 el motor SI se mueve, y eso no se afirma aca sino que lo
+    // fija el rango de la linea de base y lo imprime `MeasuresTheLatchesAgainstTheCommittedBaseline`.
     const std::string dir = corpus::defaultCorpusDir();
     const corpus::State st = corpus::stateOf(dir, corpus::manifestPath());
     if (st != corpus::State::kVerified) GTEST_SKIP() << missingCorpusMessage(st);
     std::map<std::string, OracleFile> oracle;
     ASSERT_EQ(loadOracle(oraclePath(), &oracle), "");
 
-    std::vector<corpus::Entry> entries = corpus::entriesOf(corpus::manifestPath());
-#ifdef WMA_TEST_UNDER_SANITIZER
-    {
-        std::vector<corpus::Entry> kept;
-        for (size_t i = 0; i < entries.size(); i += 4) kept.push_back(entries[i]);
-        entries = kept;
-    }
-#endif
-    constexpr int kWholeRing = static_cast<int>(wma::analysis::AnalysisRing::kCapacityFrames);
-    int wholeRingMoves = 0;
+    bool subset = false;
+    const std::vector<corpus::Entry> entries = corpusEntriesForThisBuild(&subset);
+    ASSERT_EQ(4096 % kProductionChunkFrames, 0);
+    ASSERT_EQ(4096 % 1024, 0);
     for (const corpus::Entry& e : entries) {
         const wav::WavData data = wav::readWav((dir + "/" + e.name).c_str());
         ASSERT_GT(data.sampleRate, 0) << e.name;
         const auto& segs = oracle.at(e.name).segments;
         const AbsoluteLatchTimes small = absoluteTimesAtChunk(data, e, segs, kProductionChunkFrames);
         const AbsoluteLatchTimes wide = absoluteTimesAtChunk(data, e, segs, 1024);
-        const AbsoluteLatchTimes ring = absoluteTimesAtChunk(data, e, segs, kWholeRing);
         EXPECT_EQ(small.latchCount, wide.latchCount) << e.name << ": la cantidad de enganches no depende de la tanda";
         EXPECT_EQ(small.firstFrames, wide.firstFrames) << e.name << ": primera lectura, 256 vs 1024";
         EXPECT_EQ(small.convFrames, wide.convFrames) << e.name << ": primera convergencia, 256 vs 1024";
-        if (small.firstFrames != ring.firstFrames || small.convFrames != ring.convFrames) ++wholeRingMoves;
     }
-    EXPECT_GT(wholeRingMoves, 0) << "con tandas de " << kWholeRing << " la medicion no cambia en ningun archivo: "
-                                 << "el test no discrimina";
-    std::printf("tanda %d vs ring entero: %d de %zu archivos mueven la primera lectura o la convergencia\n",
-                kProductionChunkFrames, wholeRingMoves, entries.size());
 }
 
 TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
@@ -899,25 +1070,17 @@ TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
     const std::string why = loadOracle(oraclePath(), &oracle);
     ASSERT_EQ(why, "") << "el corpus esta y el oraculo corto no: esto FALLA, no se saltea";
 
-    // Bajo sanitizer cada archivo cuesta varias veces mas: se mide un subconjunto (1 de cada 4) y se
-    // compara contra SUS filas; el conjunto completo lo exigen los jobs sin sanitizer.
-    std::vector<corpus::Entry> entries = corpus::entriesOf(corpus::manifestPath());
-#ifdef WMA_TEST_UNDER_SANITIZER
-    constexpr bool kSubset = true;
-    {
-        std::vector<corpus::Entry> kept;
-        for (size_t i = 0; i < entries.size(); i += 4) kept.push_back(entries[i]);
-        entries = kept;
-    }
-#else
-    constexpr bool kSubset = false;
-#endif
+    bool kSubset = false;
+    const std::vector<corpus::Entry> entries = corpusEntriesForThisBuild(&kSubset);
 
     std::map<std::string, Row> rows;
     std::vector<Latch> allLatches;
-    std::vector<double> tFirst, tConv, tFirst2;
-    std::printf("\n%-24s %7s %2s | %7s %7s %5s %7s %7s %7s %7s %5s | %7s %7s %3s\n", "archivo", "hz", "n", "t_prim", "t_conv",
-                "lect", "e_prim", "med|e|", "p90|e|", "max|e|", "cob", "t_prim2", "t_conv2", "sue");
+    std::vector<double> tFirst, tConv, tFirst2, tFirstWorst, tConvWorst;
+    int filesMoved = 0, filesMovedFirst = 0;
+    double widestSpreadSec = 0.0;
+    std::string widestName;
+    std::printf("\n%-24s %7s %2s | %7s %7s %5s %7s %7s %7s %7s %5s | %7s %7s %3s | %7s %7s\n", "archivo", "hz", "n", "t_prim",
+                "t_conv", "lect", "e_prim", "med|e|", "p90|e|", "max|e|", "cob", "t_prim2", "t_conv2", "sue", "prim_mx", "conv_mx");
     for (const corpus::Entry& e : entries) {
         const wav::WavData data = wav::readWav((dir + "/" + e.name).c_str());
         ASSERT_GT(data.sampleRate, 0) << e.name;
@@ -926,11 +1089,15 @@ TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
         ASSERT_EQ(of.rate, data.sampleRate) << e.name;
         ASSERT_EQ(of.frames, static_cast<long long>(data.numFrames)) << e.name;
 
-        const FedRun run = feedTwice(data, e);
-        const FirstPassOfRun first = firstPassOfRun(run);
-        const Params prm = [&] { Params q; q.sampleRate = run.rate; return q; }();
-        const std::vector<Latch> latches = latch::measure(first.pubs, first.windows, run.events, of.segments, prm);
+        const std::vector<ChunkRun> runs = runAllRangeChunks(data, e, of.segments);
+        const ChunkRun& canon = runs[canonicalIndex()];
+        const FedRun& run = canon.run;
+        const std::vector<Latch>& latches = canon.latches;
         ASSERT_FALSE(latches.empty()) << e.name << ": la nota no abrio ningun enganche";
+        // Los enganches salen de eventos y ventanas: ninguna tanda cambia su cantidad.
+        for (const ChunkRun& r : runs)
+            ASSERT_EQ(r.latches.size(), latches.size()) << e.name << ": tanda " << r.chunk << " cambio la cantidad de enganches";
+        const Params prm = [&] { Params q; q.sampleRate = run.rate; return q; }();
         // La definicion, verificada sobre material real: el segundo ataque llega con la cuerda
         // sonando (ninguna ventana de 4096 de las dos pasadas queda bajo 0,001 en la costura), asi
         // que NO puede abrir enganche.
@@ -938,25 +1105,47 @@ TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
             << e.name << ": el re-punteo abrio un enganche nuevo";
 
         const Pass2 p2 = measurePass2(run);
+        bool moved = false, movedFirst = false;
         for (size_t i = 0; i < latches.size(); ++i) {
             const Latch& l = latches[i];
-            const Row r = rowOf(e.name, static_cast<int>(i) + 1, l, p2, run.rate);
+            const auto [rFirst, rConv] = rangesOf(runs, i);
+            const Row r = rowOf(e.name, static_cast<int>(i) + 1, l, p2, run.rate, rFirst, rConv);
             rows[keyOf(r.name, r.v[0])] = r;
-            std::printf("%-24s %7.2f %2zu | %7.3f %7.3f %5d %+7.2f %7.2f %7.2f %7.2f %5.2f | %7.3f %7.3f %3d\n", e.name.c_str(),
-                        e.trueHz, i + 1, l.firstReadingSec, l.convergedSec, l.readings, l.firstErrorCents, l.medianAbsCents,
-                        l.p90AbsCents, l.maxAbsCents, l.coverage, secOf(p2.firstFrames, run.rate), secOf(p2.convFrames, run.rate),
-                        p2.dropped);
+            std::printf("%-24s %7.2f %2zu | %7.3f %7.3f %5d %+7.2f %7.2f %7.2f %7.2f %5.2f | %7.3f %7.3f %3d | %7.3f %7.3f\n",
+                        e.name.c_str(), e.trueHz, i + 1, l.firstReadingSec, l.convergedSec, l.readings, l.firstErrorCents,
+                        l.medianAbsCents, l.p90AbsCents, l.maxAbsCents, l.coverage, secOf(p2.firstFrames, run.rate),
+                        secOf(p2.convFrames, run.rate), p2.dropped, secOf(rFirst.max, run.rate), secOf(rConv.max, run.rate));
             allLatches.push_back(l);
             if (!std::isnan(l.firstReadingSec)) tFirst.push_back(l.firstReadingSec);
             if (!std::isnan(l.convergedSec)) tConv.push_back(l.convergedSec);
+            if (rFirst.max >= 0) tFirstWorst.push_back(secOf(rFirst.max, run.rate));
+            if (rConv.max >= 0) tConvWorst.push_back(secOf(rConv.max, run.rate));
+            for (const ChunkRun& other : runs) {
+                const Latch& o = other.latches[i];
+                if (o.firstReadingFrames != l.firstReadingFrames) movedFirst = moved = true;
+                if (o.convergedFrames != l.convergedFrames) moved = true;
+            }
+            if (rFirst.max >= 0 && secOf(rFirst.max - rFirst.min, run.rate) > widestSpreadSec) {
+                widestSpreadSec = secOf(rFirst.max - rFirst.min, run.rate);
+                widestName = e.name;
+            }
         }
+        filesMoved += moved;
+        filesMovedFirst += movedFirst;
         if (p2.firstFrames >= 0) tFirst2.push_back(secOf(p2.firstFrames, run.rate));
     }
     const latch::Pooled pooled = latch::poolLatchErrors(allLatches);
     std::printf("\nenganches=%zu archivos=%zu\n", allLatches.size(), entries.size());
-    std::printf("t_primera: n=%zu mediana %.3f max %.3f | t_conv: n=%zu mediana %.3f max %.3f | t_primera2: n=%zu mediana %.3f max %.3f\n",
-                tFirst.size(), medianOf(tFirst), maxOf(tFirst), tConv.size(), medianOf(tConv), maxOf(tConv), tFirst2.size(),
-                medianOf(tFirst2), maxOf(tFirst2));
+    std::printf("t_primera (tanda %d): n=%zu mediana %.3f max %.3f | peor de la particion: n=%zu mediana %.3f max %.3f\n",
+                kProductionChunkFrames, tFirst.size(), medianOf(tFirst), maxOf(tFirst), tFirstWorst.size(), medianOf(tFirstWorst),
+                maxOf(tFirstWorst));
+    std::printf("t_conv    (tanda %d): n=%zu mediana %.3f max %.3f | peor de la particion: n=%zu mediana %.3f max %.3f\n",
+                kProductionChunkFrames, tConv.size(), medianOf(tConv), maxOf(tConv), tConvWorst.size(), medianOf(tConvWorst),
+                maxOf(tConvWorst));
+    std::printf("t_primera2: n=%zu mediana %.3f max %.3f\n", tFirst2.size(), medianOf(tFirst2), maxOf(tFirst2));
+    std::printf("tandas que NO dividen a 4096 (96,192,240,480,960,1536) vs %d: %d de %zu archivos mueven t_primera, %d mueven t_primera "
+                "o t_conv; rango mas ancho de t_primera %.3f s (%s)\n",
+                kProductionChunkFrames, filesMovedFirst, entries.size(), filesMoved, widestSpreadSec, widestName.c_str());
     std::printf("|error| de %d lecturas con oraculo: mediana %.3f p90 %.3f max %.3f c | cobertura 2sigma %.3f\n", pooled.withError,
                 pooled.medianAbsCents, pooled.p90AbsCents, pooled.maxAbsCents, pooled.coverage);
 

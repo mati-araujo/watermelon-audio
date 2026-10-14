@@ -12,15 +12,19 @@
  * -----------------------------------------------------------------------------------
  * La «ventana» es FIJA: `kLatchWindowFrames` (4096, la del estimador fino) sobre la senal mono
  * alimentada (0,5·(L+R), la mezcla del ring), en una grilla alineada al frame 0 del flujo e
- * independiente de la tanda con que se drene (`windowLevels`). La definicion NO depende de cuantos
- * frames se drenan por vez: con el rms del bloque drenado, un bloque de silencio digital al comienzo
- * de cada archivo abria enganches espurios.
+ * independiente de la tanda con que se drene (`windowLevels`). La DECISION silencio/senal se toma
+ * con esa ventana: con el rms del bloque drenado, un bloque de silencio digital al comienzo de cada
+ * archivo abria enganches espurios.
  *
- * t_reenganche = cambio de objetivo (el frame exacto del evento), o —con objetivo puesto— el INICIO
- * de la primera ventana con rms >= 0,001 que sigue a una ventana con rms < 0,001. El enganche dura
- * hasta el siguiente t_reenganche. Un re-punteo con la cuerda sonando NO es un enganche: no hay
- * ventana bajo 0,001 en el medio. Al empezar a alimentar con objetivo puesto, la primera ventana con
- * senal (sin ventana previa) es t_reenganche.
+ * t_reenganche = cambio de objetivo (el frame exacto del evento), o —con objetivo puesto— el ATAQUE
+ * de la primera ventana con rms >= 0,001 que sigue a una ventana con rms < 0,001. El ataque se fecha
+ * en el inicio del primer SUB-BLOQUE de `kLatchSubBlockFrames` (256, grilla alineada al frame 0) con
+ * rms >= 0,001 dentro de esa ventana, no en el borde de la ventana: un ataque en el frame 8000 tras
+ * silencio es t0 = 7936, no 4096 (que inflaba t_primera hasta 85 ms). El enganche dura hasta el
+ * siguiente t_reenganche. Un re-punteo con la cuerda sonando NO es un enganche: no hay ventana bajo
+ * 0,001 en el medio. Al empezar a alimentar con objetivo puesto, la primera ventana con senal (sin
+ * ventana previa) es t_reenganche; si el evento cae en el inicio de esa misma ventana es UN solo
+ * enganche, fechado en el evento.
  *
  * 🔴 EL ORACULO ES INSTANTANEO, NO SOSTENIDO. Contra la altura sostenida de la nota, el glide del
  * ataque se lee como error del motor aunque el motor este siguiendo bien a la cuerda (REQ-055 D4).
@@ -43,6 +47,12 @@ namespace wma_test::latch {
 /// La ventana fija del estimador fino, en frames. La unica que usa la definicion de enganche.
 inline constexpr int kLatchWindowFrames = 4096;
 
+/// La granularidad con que se fecha el ataque dentro de una ventana con senal, en frames.
+inline constexpr int kLatchSubBlockFrames = 256;
+
+/// El piso de senal de la definicion de enganche. Es el `kSilenceFloor` del motor.
+inline constexpr double kLatchSignalFloor = 0.001;
+
 /// Una publicacion del analisis, tal como la vio quien alimento el motor.
 struct Publication {
     /// `ring.readPosition()` DESPUES de `drainOnce()`: la publicacion se fecha cuando el motor la dio.
@@ -57,6 +67,10 @@ struct Publication {
 struct Window {
     int64_t start = 0;
     double rms = 0.0;
+    /// Inicio del primer sub-bloque con senal dentro de la ventana (donde se fecha t0). -1 = no
+    /// calculado: la ventana se fecha en `start`.
+    int64_t onset = -1;
+    int64_t t0() const { return onset >= 0 ? onset : start; }
 };
 
 /// `AnalysisThread::setTargetHz` en `pos` (frames del ring). `hasTarget = false` = se quito el objetivo.
@@ -75,8 +89,7 @@ struct OracleSegment {
 
 struct Params {
     int sampleRate = 48000;
-    /// El piso de senal de la definicion de enganche. Es el `kSilenceFloor` del motor.
-    double signalFloor = 0.001;
+    double signalFloor = kLatchSignalFloor;
 };
 
 inline constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
@@ -87,13 +100,29 @@ inline void appendMonoMix(std::vector<float>* out, const float* interleaved, int
 }
 
 /// El rms de cada ventana COMPLETA de `windowFrames`, en la grilla que arranca en el frame 0 del
-/// flujo. Una cola incompleta no es ventana: no se mide con menos muestras que las otras.
-inline std::vector<Window> windowLevels(const std::vector<float>& mono, int windowFrames) {
+/// flujo, y el inicio de su primer sub-bloque de `subBlockFrames` con rms >= `signalFloor`. Una cola
+/// incompleta no es ventana: no se mide con menos muestras que las otras. `windowFrames` debe ser
+/// multiplo de `subBlockFrames`: asi la ventana con senal siempre tiene algun sub-bloque con senal.
+inline std::vector<Window> windowLevels(const std::vector<float>& mono, int windowFrames,
+                                        int subBlockFrames = kLatchSubBlockFrames,
+                                        double signalFloor = kLatchSignalFloor) {
     std::vector<Window> out;
     for (size_t s = 0; s + windowFrames <= mono.size(); s += windowFrames) {
         double acc = 0.0;
         for (int i = 0; i < windowFrames; ++i) acc += static_cast<double>(mono[s + i]) * mono[s + i];
-        out.push_back({static_cast<int64_t>(s), std::sqrt(acc / windowFrames)});
+        Window w;
+        w.start = static_cast<int64_t>(s);
+        w.rms = std::sqrt(acc / windowFrames);
+        w.onset = w.start;
+        for (int b = 0; b + subBlockFrames <= windowFrames; b += subBlockFrames) {
+            double sub = 0.0;
+            for (int i = 0; i < subBlockFrames; ++i) sub += static_cast<double>(mono[s + b + i]) * mono[s + b + i];
+            if (std::sqrt(sub / subBlockFrames) >= signalFloor) {
+                w.onset = w.start + b;
+                break;
+            }
+        }
+        out.push_back(w);
     }
     return out;
 }
@@ -201,9 +230,14 @@ inline std::vector<Latch> measure(const std::vector<Publication>& pubs, const st
         // Un evento en el instante de la ventana va ANTES: si ademas tiene senal, es un solo enganche.
         while (nextEvent < events.size() && events[nextEvent].pos <= w.start) applyEvent(events[nextEvent++]);
         const bool signal = w.rms >= params.signalFloor;
-        const bool sameInstant = !openings.empty() && openings.back().open && openings.back().t0 == w.start;
-        if (targetSet && signal && prevSilent && !sameInstant)
-            openings.push_back({w.start, Latch::Cause::kSignalAfterSilence, true});
+        if (signal && prevSilent) {
+            // Los eventos anteriores al ataque van antes que su enganche: `openings` queda ordenada por t0.
+            const int64_t attack = w.t0();
+            while (nextEvent < events.size() && events[nextEvent].pos <= attack) applyEvent(events[nextEvent++]);
+            const bool sameInstant = !openings.empty() && openings.back().open &&
+                                     (openings.back().t0 == w.start || openings.back().t0 == attack);
+            if (targetSet && !sameInstant) openings.push_back({attack, Latch::Cause::kSignalAfterSilence, true});
+        }
         prevSilent = !signal;
     }
     while (nextEvent < events.size()) applyEvent(events[nextEvent++]);
@@ -253,6 +287,27 @@ inline std::vector<Latch> measure(const std::vector<Publication>& pubs, const st
     }
     for (Latch& l : latches) detail::finish(l);
     return latches;
+}
+
+/// El rango de un tiempo (frames desde t0) sobre varias corridas del mismo enganche. Las corridas donde no
+/// llego (-1) NO entran a min/max: se cuentan en `missing`. Sin ninguna que llegue, min = max = -1.
+struct FrameRange {
+    int64_t min = -1;
+    int64_t max = -1;
+    int missing = 0;
+};
+
+inline FrameRange frameRange(const std::vector<int64_t>& framesPerRun) {
+    FrameRange r;
+    for (int64_t f : framesPerRun) {
+        if (f < 0) {
+            ++r.missing;
+            continue;
+        }
+        r.min = r.min < 0 ? f : std::min(r.min, f);
+        r.max = std::max(r.max, f);
+    }
+    return r;
 }
 
 /// Los errores de VARIOS enganches juntos (todas las publicaciones, no el promedio de medianas).
