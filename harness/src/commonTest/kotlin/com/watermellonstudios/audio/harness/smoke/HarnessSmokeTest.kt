@@ -204,10 +204,15 @@ class HarnessSmokeTest {
         )
     }
 
+    /**
+     * REQ-053 S4: `afinador` entra al plan ANTES de `usb`. Bug que atrapa: un afinador después de
+     * `usb`, que espera a un humano y deja el motor parado por libusb.
+     */
     @Test
     fun theWholePlanRunsInTheCanonicalOrder() {
         val plan = assertIs<SmokePlan.Valid>(SmokePlan.parse("todo"))
-        assertEquals(listOf("salida", "captura", "sf2", "sf3", "usb"), plan.panels.map { it.id })
+        assertEquals(listOf("salida", "captura", "sf2", "sf3", "afinador", "usb"), plan.panels.map { it.id })
+        assertEquals(listOf(Panel.AFINADOR), assertIs<SmokePlan.Valid>(SmokePlan.parse("afinador")).panels)
     }
 
     /** Bug que atrapa: correr `usb` (que espera a un humano) antes que los automáticos. */
