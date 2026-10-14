@@ -2,18 +2,11 @@
 #include "../platform/Logger.h"
 #include "../platform/Platform.h"  // WD-1.2 — flushDenormalsRtSafe()
 
-// Oboe is Android-only. The input *capture* path (opening a mic/line stream)
-// lives entirely behind this guard; the rest of InputNode — DSP, gain, noise
+// The input *capture* path (opening a mic/line stream) lives behind
+// watermelon_audio::INodeCaptureStream (backends/): Oboe on Android, nothing on
+// iOS yet, a fake in the host suite. The rest of InputNode — DSP, gain, noise
 // gate, level metering, the ring buffers — is portable and compiles everywhere.
-// On iOS the stream methods are inert (no capture yet); a CoreAudio input
-// adapter would slot in at this same seam. See AudioEngine.cpp for the same
-// WMA_HAS_OBOE pattern.
-#if defined(__ANDROID__)
-#define WMA_HAS_OBOE 1
-#include <oboe/Oboe.h>
-#else
-#define WMA_HAS_OBOE 0
-#endif
+#include "../backends/PlatformBackends.h"
 
 #include <cmath>
 #include <algorithm>
@@ -128,87 +121,6 @@ struct InFlightGuard {
 
 }  // namespace
 
-#if WMA_HAS_OBOE
-// ========== OBOE ADAPTER (WA-2.0) ==========
-// Concentrates every Oboe dependency of InputNode: the callback inheritance and
-// the stream handle. InputNode only sees it through an opaque pointer, which is
-// what keeps <oboe/Oboe.h> out of InputNode.h and lets the core be built for
-// platforms that have no Oboe. A CoreAudio adapter would sit at this same seam.
-class InputOboeAdapter : public oboe::AudioStreamDataCallback {
-public:
-    explicit InputOboeAdapter(InputNode* node) : mNode(node) {}
-
-    oboe::DataCallbackResult onAudioReady(oboe::AudioStream* stream,
-                                          void* audioData,
-                                          int32_t numFrames) override {
-        // RT path: one pointer hop plus getChannelCount(), which in Oboe is a
-        // plain member read. No allocation, no locking, no indirect call setup.
-        //
-        // REQ-009 S3 (3.2b) — el xrun de ESTE stream. En AAudio es la lectura de
-        // un contador que el propio stream lleva; en OpenSL ES el metodo base
-        // devuelve `ErrorUnimplemented` y ahi el nodo se entera de que no sabe,
-        // en vez de que le pasen un cero que significaria "todo bien".
-        //
-        // El adaptador NO decide nada con esto: lo pasa crudo. La regla de que
-        // es una costura vive en `InputNode::noteCaptureXRuns()`, que la suite
-        // de host SI compila y SI puede manejar — este bloque, no (esta adentro
-        // de `#if WMA_HAS_OBOE`).
-        const oboe::ResultWithValue<int32_t> xRuns = stream->getXRunCount();
-        return mNode->processInputBlock(static_cast<float*>(audioData),
-                                        numFrames,
-                                        stream->getChannelCount(),
-                                        xRuns ? xRuns.value()
-                                              : InputNode::kCaptureXRunsUnknown)
-                   ? oboe::DataCallbackResult::Continue
-                   : oboe::DataCallbackResult::Stop;
-    }
-
-    // Owned here rather than in InputNode so the header stays Oboe-free.
-    std::shared_ptr<oboe::AudioStream> stream;
-
-private:
-    InputNode* mNode;
-};
-
-void InputNode::BackendAdapterDeleter::operator()(void* p) const {
-    delete static_cast<InputOboeAdapter*>(p);
-}
-
-namespace {
-
-// The nested deleter type is private, so the adapter is reached by casting the
-// raw void* rather than by a helper that would have to name that type.
-InputOboeAdapter* asAdapter(void* p) {
-    return static_cast<InputOboeAdapter*>(p);
-}
-
-oboe::InputPreset inputPresetForSource(InputSource source) {
-    switch (source) {
-        case InputSource::MIC:
-            // VoicePerformance is optimized for low-latency music/voice
-            return oboe::InputPreset::VoicePerformance;
-        case InputSource::LINE_IN:
-            // Unprocessed gives raw audio without AGC/noise suppression
-            return oboe::InputPreset::Unprocessed;
-        case InputSource::USB_DAC:
-            return oboe::InputPreset::Unprocessed;
-        case InputSource::BLUETOOTH:
-            return oboe::InputPreset::Generic;
-        default:
-            return oboe::InputPreset::Generic;
-    }
-}
-
-}  // namespace
-
-#else  // !WMA_HAS_OBOE
-
-// Without Oboe nothing populates mBackendAdapter, but the deleter is declared in
-// the header and must still link.
-void InputNode::BackendAdapterDeleter::operator()(void*) const {}
-
-#endif  // WMA_HAS_OBOE
-
 InputNode::InputNode()
     : mRingBuffer(48000 * 2 * RING_BUFFER_SECONDS)  // Initial size: 1 second stereo at 48kHz
     , mMonitoringBuffer(48000 * 2 * RING_BUFFER_SECONDS)  // Same size for monitoring
@@ -264,111 +176,54 @@ void InputNode::reset() {
 }
 
 bool InputNode::createInputStream() {
-#if !WMA_HAS_OBOE
-    // No capture backend on this platform yet (iOS input is future work). The
-    // node still exists and processes; it just never has a live input stream.
-    return false;
-#else
-    // The adapter is created on first use and then kept for the lifetime of the
-    // node: Oboe holds a raw pointer to it while a stream is open, so it must
-    // outlive every stream it is registered with.
-    if (!mBackendAdapter) {
-        mBackendAdapter.reset(new InputOboeAdapter(this));
-    }
-    auto* adapter = asAdapter(mBackendAdapter.get());
-
-    oboe::AudioStreamBuilder builder;
-
-    // Use Shared mode for better device routing compatibility
-    // This allows proper switching when USB DAC or other devices are connected
-    builder.setDirection(oboe::Direction::Input)
-            ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-            ->setSharingMode(oboe::SharingMode::Shared)  // Changed from Exclusive for device routing
-            ->setFormat(oboe::AudioFormat::Float)
-            ->setChannelCount(oboe::ChannelCount::Stereo)
-            // Don't force sample rate - let system choose best rate for the device
-            ->setDataCallback(adapter)
-            ->setInputPreset(inputPresetForSource(mInputSource.load()));
-
-    oboe::Result result = builder.openStream(adapter->stream);
-
-    if (result != oboe::Result::OK) {
-        LOGE("Failed to open input stream: %s", oboe::convertToText(result));
-        return false;
-    }
+    if (!mCaptureStream) return false;
+    if (!mCaptureStream->openCaptureStream(mInputSource.load())) return false;
 
     // Update latency with actual measurement
     updateLatency();
-
-    auto& stream = adapter->stream;
-    auto framesPerBurst = stream->getFramesPerBurst();
-    auto actualSampleRate = stream->getSampleRate();
-    auto deviceId = stream->getDeviceId();
-    auto sharingMode = stream->getSharingMode();
-
-    // DEBUG: Detailed stream info for routing diagnostics
-    LOGI("=== INPUT STREAM OPENED ===");
-    LOGI("  Sample rate: %d Hz", actualSampleRate);
-    LOGI("  Channel count: %d", stream->getChannelCount());
-    LOGI("  Sharing mode: %s", sharingMode == oboe::SharingMode::Shared ? "Shared" : "Exclusive");
-    LOGI("  Performance mode: %s",
-         stream->getPerformanceMode() == oboe::PerformanceMode::LowLatency ? "LowLatency" :
-         stream->getPerformanceMode() == oboe::PerformanceMode::PowerSaving ? "PowerSaving" : "None");
-    LOGI("  Device ID: %d", deviceId);
-    LOGI("  Frames per burst: %d", framesPerBurst);
-    LOGI("  Buffer capacity: %d frames", stream->getBufferCapacityInFrames());
     LOGI("  Latency: %.1f ms", getInputLatencyMs());
-    LOGI("===========================");
 
     // Store actual sample rate for reference
-    mSampleRate = actualSampleRate;
+    mSampleRate = mCaptureStream->captureStreamSampleRate();
 
     return true;
-#endif  // WMA_HAS_OBOE
 }
 
 void InputNode::closeInputStream() {
-#if WMA_HAS_OBOE
-    auto* adapter = asAdapter(mBackendAdapter.get());
-    if (adapter && adapter->stream) {
-        adapter->stream->stop();
-        adapter->stream->close();
-        adapter->stream.reset();
-        LOGI("Input stream closed");
+    if (mCaptureStream && mCaptureStream->isCaptureStreamOpen()) {
+        mCaptureStream->stopAndCloseCaptureStream();
     }
-#endif
 }
 
 bool InputNode::startInputStream() {
-#if !WMA_HAS_OBOE
-    return false;  // No capture backend on this platform (see createInputStream).
-#else
     if (mInputStreamRunning.load()) {
         LOGI("Input stream already running");
         return true;
     }
 
-    auto* adapter = asAdapter(mBackendAdapter.get());
-    if (!adapter || !adapter->stream) {
+    if (!mCaptureStream) {
+        mCaptureStream = watermelon_audio::createNodeCaptureStream(*this);
+        if (!mCaptureStream) {
+            return false;  // No capture backend on this platform.
+        }
+    }
+
+    if (!mCaptureStream->isCaptureStreamOpen()) {
         if (!createInputStream()) {
             return false;
         }
-        adapter = asAdapter(mBackendAdapter.get());
     }
 
-    oboe::Result result = adapter->stream->requestStart();
-    if (result != oboe::Result::OK) {
-        LOGE("Failed to start input stream: %s", oboe::convertToText(result));
+    if (!mCaptureStream->startCaptureStream()) {
         return false;
     }
 
     mInputStreamRunning.store(true);
-    // El stream de Oboe SI sabe a que rate quedo, y es la fuente mas confiable
-    // que hay para el camino de captura.
-    setCaptureSampleRate(adapter->stream->getSampleRate());
+    // El stream SI sabe a que rate quedo, y es la fuente mas confiable que hay
+    // para el camino de captura.
+    setCaptureSampleRate(mCaptureStream->captureStreamSampleRate());
     LOGI("Input stream started");
     return true;
-#endif  // WMA_HAS_OBOE
 }
 
 void InputNode::stopInputStream() {
@@ -646,37 +501,7 @@ float InputNode::getInputLatencyMs() const {
 }
 
 void InputNode::updateLatency() {
-#if !WMA_HAS_OBOE
-    mInputLatencyFrames.store(0);
-    return;
-#else
-    auto* adapter = asAdapter(mBackendAdapter.get());
-    if (!adapter || !adapter->stream) {
-        mInputLatencyFrames.store(0);
-        return;
-    }
-    auto& stream = adapter->stream;
-
-    // Try to get actual latency from Oboe
-    // calculateLatencyMillis() returns the estimated latency in milliseconds
-    oboe::ResultWithValue<double> latencyResult = stream->calculateLatencyMillis();
-
-    if (latencyResult.error() == oboe::Result::OK) {
-        // Convert ms to frames
-        double latencyMs = latencyResult.value();
-        int64_t latencyFrames = static_cast<int64_t>(latencyMs * stream->getSampleRate() / 1000.0);
-        mInputLatencyFrames.store(latencyFrames);
-        LOGI("Input latency measured: %.1fms (%lld frames)", latencyMs, (long long)latencyFrames);
-    } else {
-        // Fallback to estimate: framesPerBurst * 2 (double buffering)
-        auto framesPerBurst = stream->getFramesPerBurst();
-        int64_t estimatedFrames = framesPerBurst * 2;
-        mInputLatencyFrames.store(estimatedFrames);
-        LOGI("Input latency estimated: %.1fms (%lld frames) - actual measurement unavailable",
-             static_cast<float>(estimatedFrames) / stream->getSampleRate() * 1000.0f,
-             (long long)estimatedFrames);
-    }
-#endif  // WMA_HAS_OBOE
+    mInputLatencyFrames.store(mCaptureStream ? mCaptureStream->captureStreamLatencyFrames() : 0);
 }
 
 // Monitoring functions

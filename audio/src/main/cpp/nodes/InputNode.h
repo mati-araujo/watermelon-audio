@@ -7,6 +7,7 @@
 #include "../dsp/DCBlocker.h"
 #include "../analysis/AnalysisRing.h"
 #include "../platform/RtCounter.h"
+#include "../backends/INodeCaptureStream.h"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -39,7 +40,7 @@ enum class InputSource {
  * output processing thread via a lock-free ring buffer.
  *
  * The capture backend (Oboe on Android) is kept out of this header on purpose:
- * every backend detail lives behind the opaque adapter below, so including this
+ * every backend detail lives behind INodeCaptureStream (backends/), so including this
  * file does not drag a platform audio API into the translation unit. That is
  * what allows the core to be compiled for platforms without Oboe (WA-2.0).
  */
@@ -299,13 +300,9 @@ private:
     void closeInputStream();
 
 private:
-    // Opaque handle to the capture-backend adapter defined in InputNode.cpp.
-    // It owns both the backend callback inheritance and the stream handle, so
-    // no backend type has to appear here. void* plus a custom deleter is used
-    // because unique_ptr cannot delete an incomplete type; the deleter is
-    // defined in the .cpp where the adapter is complete.
-    struct BackendAdapterDeleter { void operator()(void* p) const; };
-    std::unique_ptr<void, BackendAdapterDeleter> mBackendAdapter;
+    // Stream de captura propio del nodo, creado en el primer startInputStream()
+    // por createNodeCaptureStream(). Nulo si la plataforma no tiene uno.
+    std::unique_ptr<watermelon_audio::INodeCaptureStream> mCaptureStream;
 
     std::atomic<bool> mInputStreamRunning{false};
 

@@ -197,6 +197,7 @@ set(API_SOURCES
 # Backend System (USB Audio Low Latency Driver)
 set(BACKEND_SOURCES
         backends/OboeBackend.cpp
+        backends/OboeCaptureStream.cpp
         backends/BackendManager.cpp
         backends/PlatformBackends.cpp
         backends/LibusbBackend.cpp
