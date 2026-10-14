@@ -37,13 +37,34 @@ struct WmaEngine {
      * puntero (el escritor deja de recibir trabajo) pero no libera nada; lo
      * unico que arranca y para de verdad es el thread que drena.
      *
-     * Se liberan en `wma_engine_destroy()`, DESPUES de parar el stream de
-     * entrada, que es el unico momento en que se sabe que no queda un callback
+     * Se liberan en `wma_engine_destroy()`, DESPUES de `shutdownCapture()` del
+     * stream de entrada, que es el unico momento en que se sabe que no queda un callback
      * de captura en vuelo. */
     std::unique_ptr<wma::analysis::AnalysisRing> analysisRing;
     std::unique_ptr<wma::analysis::AnalysisSnapshot> analysisSnapshot;
     std::unique_ptr<wma::analysis::AnalysisThread> analysisThread;
     std::mutex analysisMutex;
+    /* Serializa ENTEROS todos los caminos de control que abren, cierran o re-preparan la
+     * captura del InputNode (REQ-054.1): `wma_tuner_start/stop`, `wma_input_start/stop`,
+     * `wma_set_audio_mode`, `wma_input_set_source` y `wma_input_release`. NO
+     * `wma_engine_destroy` (destruye el mutex; ahi no hay concurrencia legitima).
+     *
+     * Dos razones. (1) «bit Tuner <=> afinador corriendo» se rompe si un stop se cuela entre
+     * el acquire y el arranque del analisis. (2) `InputNode::prepare()` (resize de rings y
+     * buffers, via `reconfigureForRate`) podia correr desde DOS hilos de control a la vez:
+     * `AudioEngine::reconfigureInputNodeForRate` no sostiene `mInputNodeMutex` mientras
+     * re-prepara y el fallback `SinNodoPublicado` de `wmaReconfigureTrasArrancarCaptura` no
+     * toma nada. Lo encontro TSan con `StartStopFromTwoControlThreads...` (carrera sobre
+     * `AudioNode::mSampleRate`).
+     *
+     * ORDEN DE LOCKS (ninguna funcion de la C API que lo toma llama a otra que lo tome):
+     *   captureLifecycleMutex -> analysisMutex   -> InputNode::mCaptureMutex
+     *   captureLifecycleMutex -> inputNodeMutex  -> InputNode::mCaptureMutex
+     *   lado JNI: engineMutex -> captureLifecycleMutex
+     *
+     * DEUDA CONOCIDA, fuera de alcance: el reconfigure que dispara el hilo de reapertura del
+     * `BackendManager` (`AudioEngine::onInputStreamConfigChanged`) NO pasa por este mutex. */
+    std::mutex captureLifecycleMutex;
 
     /* Mode system */
     std::atomic<int> currentMode{0};

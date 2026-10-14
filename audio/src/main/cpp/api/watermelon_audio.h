@@ -892,6 +892,10 @@ WMA_API bool wma_tuner_start(WmaEngine* engine);
 /**
  * Stop draining. The capture thread stops being handed work immediately; the
  * ring and the last snapshot stay alive and readable.
+ *
+ * Also releases the tuner's claim on the input capture: if the tuner was its last
+ * owner the capture is closed before this returns; if wma_input_start() or an
+ * input mode still wants it, it stays open. Idempotent.
  */
 WMA_API void wma_tuner_stop(WmaEngine* engine);
 

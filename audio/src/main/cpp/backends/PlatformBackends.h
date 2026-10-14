@@ -18,8 +18,11 @@
 #pragma once
 
 #include "IAudioBackend.h"
+#include "INodeCaptureStream.h"
 
 #include <memory>
+
+class InputNode;
 
 namespace watermelon_audio {
 
@@ -61,5 +64,21 @@ std::unique_ptr<IAudioBackend> createUsbAudioBackend();
  * @return The USB backend, or nullptr if @p backend is not one.
  */
 LibusbBackend* asLibusbBackend(IAudioBackend* backend);
+
+/**
+ * Create the capture stream a InputNode opens for ITSELF (the one behind
+ * `wma_tuner_start`), as opposed to the engine's duplex backend.
+ *
+ * It exists as a factory so InputNode names no platform type and the host suite
+ * can substitute a fake by swapping this one translation unit. The stream error
+ * path of the node (REQ-054 S2) is routed through this seam too.
+ *
+ * Android: Oboe. iOS and elsewhere: nullptr — the node has no capture of its own
+ * there, and InputNode::startInputStream() reports false.
+ *
+ * @param node The node whose processInputBlock() the stream's callback feeds. It
+ *             must outlive the returned stream.
+ */
+std::unique_ptr<INodeCaptureStream> createNodeCaptureStream(InputNode& node);
 
 } // namespace watermelon_audio

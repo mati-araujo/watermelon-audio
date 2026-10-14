@@ -22,11 +22,12 @@
 # unresolved.
 #
 # Still missing on iOS, and NOT a link gap: audio capture. InputNode's
-# createInputStream()/startInputStream() return false on any platform without
-# Oboe, so the node exists and processes but never has a live input stream.
-# Full-duplex / guitar FX on iOS needs a CoreAudio capture adapter at that seam.
+# startInputStream() returns false on any platform whose createNodeCaptureStream()
+# (backends/PlatformBackends.cpp) gives nullptr — iOS today — so the
+# node exists and processes but never has a live input stream.
+# Full-duplex / guitar FX on iOS needs a CoreAudio INodeCaptureStream at that seam.
 #
-# Excluded by design (D4 / platform): jni/, usb/, OboeBackend, LibusbBackend,
+# Excluded by design (D4 / platform): jni/, usb/, OboeBackend, OboeCaptureStream, LibusbBackend,
 # PlatformAndroid.cpp.
 #
 # Build both slices with: scripts/build-ios.sh

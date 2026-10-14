@@ -156,10 +156,11 @@ void wma_engine_destroy(WmaEngine* engine) {
     if (!engine) return;
     // El orden importa y es el unico correcto: primero se para el stream de
     // captura, y recien ahi se puede liberar el ring. Al reves, un callback de
-    // captura en vuelo escribiria en memoria liberada. `stopInputStream()`
-    // junta el thread del stream, asi que despues de esa linea no queda ninguno.
+    // captura en vuelo escribiria en memoria liberada. `shutdownCapture()` borra
+    // todos los dueños y junta el thread del stream, asi que despues de esa linea
+    // no queda ninguno.
     if (engine->inputNode) {
-        engine->inputNode->stopInputStream();
+        engine->inputNode->shutdownCapture();
         engine->inputNode->setAnalysisRing(nullptr);
     }
     if (engine->analysisThread) {
@@ -836,12 +837,13 @@ void wmaAttachInputForMode(WmaEngine* engine) {
     const bool backendDeliversInput =
         (backendType == watermelon_audio::BackendType::LIBUSB);
 
+    // El modo es el dueño Consumer (REQ-054.1): re-adquirir en cada cambio de modo es
+    // idempotente, y `wma_input_stop` lo suelta.
     if (backendDeliversInput) {
-        if (engine->inputNode->isInputStreamRunning()) {
-            engine->inputNode->stopInputStream();
-        }
-    } else if (!engine->inputNode->isInputStreamRunning()) {
-        engine->inputNode->startInputStream();
+        engine->inputNode->acquireCapture(InputNode::CaptureOwner::Consumer, false);
+        engine->inputNode->closeOwnStreamForExternalDelivery();
+    } else {
+        engine->inputNode->acquireCapture(InputNode::CaptureOwner::Consumer, true);
     }
 
     engine->inputNode->setMonitoringEnabled(true);
@@ -870,6 +872,9 @@ void wma_set_audio_mode(WmaEngine* engine, int mode) {
     }
 
     auto audioMode = static_cast<watermelon_audio::AudioMode>(mode);
+
+    // El modo adjunta/suelta la captura del nodo y re-prepara: ver captureLifecycleMutex.
+    std::lock_guard<std::mutex> captureLifecycle(engine->captureLifecycleMutex);
 
     try {
         switch (audioMode) {
@@ -957,14 +962,21 @@ bool wma_mode_requires_input(int mode) {
  */
 bool wma_input_start(WmaEngine* engine) {
     if (!engine) return false;
+    std::lock_guard<std::mutex> captureLifecycle(engine->captureLifecycleMutex);
     if (!ensureInputNode(engine)) return false;
 
-    if (engine->inputNode->startInputStream()) {
+    using Acquire = InputNode::CaptureAcquire;
+    const auto acquired =
+        engine->inputNode->acquireCapture(InputNode::CaptureOwner::Consumer, true);
+    if (acquired != Acquire::NotRunning) {
         wmaReconfigureTrasArrancarCaptura(engine);   // REQ-012.4 — ver el helper
         return true;
     }
 
-    if (!engine->backendManager) return false;
+    if (!engine->backendManager) {
+        engine->inputNode->releaseCapture(InputNode::CaptureOwner::Consumer);
+        return false;
+    }
 
     // The caller explicitly asked for the microphone, so a stream reopen is
     // authorized: every backend decides on capture when it opens. The mode path
@@ -979,7 +991,12 @@ bool wma_input_start(WmaEngine* engine) {
         /*allowRestart=*/true);
 
     using Outcome = watermelon_audio::BackendManager::CaptureOutcome;
-    return outcome == Outcome::LIVE || outcome == Outcome::PENDING;
+    if (outcome == Outcome::LIVE || outcome == Outcome::PENDING) return true;
+
+    // Fallo informado: el consumidor no va a llamar `stop()`, asi que su bit no puede quedar
+    // puesto (taparia el cierre del afinador). En esta rama la captura propia no corre.
+    engine->inputNode->releaseCapture(InputNode::CaptureOwner::Consumer);
+    return false;
 }
 
 bool wma_input_is_starting(const WmaEngine* engine) {
@@ -989,9 +1006,12 @@ bool wma_input_is_starting(const WmaEngine* engine) {
 
 void wma_input_stop(WmaEngine* engine) {
     if (!engine) return;
+    std::lock_guard<std::mutex> captureLifecycle(engine->captureLifecycleMutex);
 
+    // Suelta SÓLO al dueño Consumer: si el afinador sigue corriendo, la captura sigue
+    // abierta (REQ-054.1).
     if (engine->inputNode) {
-        engine->inputNode->stopInputStream();
+        engine->inputNode->releaseCapture(InputNode::CaptureOwner::Consumer);
     }
 
     // Withdraw the request either way: on the backend-capture path there is no
@@ -1016,7 +1036,9 @@ bool wma_input_is_running(const WmaEngine* engine) {
 }
 
 void wma_input_set_source(WmaEngine* engine, int source) {
-    if (!engine || !engine->inputNode) return;
+    if (!engine) return;
+    std::lock_guard<std::mutex> captureLifecycle(engine->captureLifecycleMutex);
+    if (!engine->inputNode) return;
     if (source < 0 || source > 2) {
         WMA_LOGE("wma_input_set_source: invalid source %d", source);
         return;
@@ -1148,6 +1170,9 @@ bool wmaEnsureAnalysis(WmaEngine* e) {
 
 bool wma_tuner_start(WmaEngine* engine) {
     if (!engine || !engine->engine) return false;
+    // Start y stop ENTEROS bajo este lock: «bit Tuner <=> afinador corriendo» se rompe si
+    // un stop se intercala entre el acquire y el arranque del analisis. Ver el mutex.
+    std::lock_guard<std::mutex> lifecycle(engine->captureLifecycleMutex);
     if (!wmaEnsureInputNode(engine)) return false;   // sin captura no hay que analizar
     if (!wmaEnsureAnalysis(engine)) return false;
 
@@ -1166,15 +1191,17 @@ bool wma_tuner_start(WmaEngine* engine) {
     // pedir un afinador.
     engine->engine->setInputNode(engine->inputNode);
 
-    // Cuando el backend NO entrega la captura por `onAudioReady` (o sea todo lo
-    // que no es USB), la entrada llega por un stream propio del nodo y hay que
-    // abrirlo. En el host devuelve false y no pasa nada: ahi la captura entra
-    // por el callback, que es justo el otro brazo de este if.
+    // El afinador es el dueño Tuner de la captura (REQ-054.1). Cuando el backend NO
+    // entrega la captura por `onAudioReady` (o sea todo lo que no es USB), la entrada
+    // llega por un stream propio del nodo y hay que abrirlo; con USB sólo se registra
+    // al dueño. Sin captura propia (host sin fake) abrir falla y no pasa nada: ahi la
+    // captura entra por el callback.
     const auto backendType = watermelon_audio::BackendManager::getInstance().getCurrentType();
     const bool backendDeliversInput =
         (backendType == watermelon_audio::BackendType::LIBUSB);
-    if (!backendDeliversInput && !engine->inputNode->isInputStreamRunning()) {
-        engine->inputNode->startInputStream();
+    const auto acquired = engine->inputNode->acquireCapture(
+        InputNode::CaptureOwner::Tuner, !backendDeliversInput);
+    if (acquired == InputNode::CaptureAcquire::Opened) {
         // REQ-012.4 — EL CAMINO DEL AFINADOR EN ANDROID. Ver el helper: este stream
         // no pasa por el backend, asi que sin esto el DSP de entrada se queda con el
         // rate provisional justo en el caso de uso que motiva el REQ.
@@ -1182,7 +1209,10 @@ bool wma_tuner_start(WmaEngine* engine) {
     }
 
     std::lock_guard<std::mutex> lock(engine->analysisMutex);
-    if (!engine->analysisThread || !engine->analysisRing) return false;
+    if (!engine->analysisThread || !engine->analysisRing) {
+        engine->inputNode->releaseCapture(InputNode::CaptureOwner::Tuner);
+        return false;
+    }
 
     // El rate MEDIDO, no el que se preparo: `getCaptureSampleRate()` devuelve 0
     // mientras no haya stream de entrada abierto, y ese 0 tiene que llegar tal
@@ -1198,18 +1228,36 @@ bool wma_tuner_start(WmaEngine* engine) {
     if (engine->inputNode) {
         engine->inputNode->setAnalysisRing(engine->analysisRing.get());
     }
-    return engine->analysisThread->isRunning();
+    if (engine->analysisThread->isRunning()) return true;
+
+    // El analisis no arranco: sin afinador corriendo no hay dueño Tuner. Soltarlo evita
+    // dejar el microfono abierto sin nadie que lo escuche (y sin escritor para el ring).
+    if (engine->inputNode) {
+        engine->inputNode->setAnalysisRing(nullptr);
+        engine->inputNode->releaseCapture(InputNode::CaptureOwner::Tuner);
+    }
+    return false;
 }
 
 void wma_tuner_stop(WmaEngine* engine) {
     if (!engine) return;
+    std::lock_guard<std::mutex> lifecycle(engine->captureLifecycleMutex);
     // Desenganchar PRIMERO: el escritor deja de recibir trabajo antes de que el
     // lector se vaya. Al reves habria una ventana en que la captura sigue
     // llenando un ring que ya nadie drena.
     if (engine->inputNode) engine->inputNode->setAnalysisRing(nullptr);
-    std::lock_guard<std::mutex> lock(engine->analysisMutex);
-    if (engine->analysisThread) engine->analysisThread->stop();
+    {
+        std::lock_guard<std::mutex> lock(engine->analysisMutex);
+        if (engine->analysisThread) engine->analysisThread->stop();
+    }
     // El ring y el snapshot NO se liberan: ver la nota en watermelon_audio_internal.h.
+    //
+    // Recien con el analisis parado se suelta al dueño Tuner: si era el ultimo, la
+    // captura se cierra ANTES de devolver. Si hay un consumidor (AudioInput o el modo)
+    // la captura sigue abierta para el.
+    if (engine->inputNode) {
+        engine->inputNode->releaseCapture(InputNode::CaptureOwner::Tuner);
+    }
 }
 
 bool wma_tuner_is_running(const WmaEngine* engine) {
@@ -1404,12 +1452,13 @@ float wma_input_get_monitoring_volume(const WmaEngine* engine) {
 
 void wma_input_release(WmaEngine* engine) {
     if (!engine) return;
+    std::lock_guard<std::mutex> captureLifecycle(engine->captureLifecycleMutex);
     // Under the mutex, like wmaEnsureInputNode: creating and destroying the node
     // race against each other, and the JNI's releaseInputNode() (which used to
     // take this lock itself) now delegates here.
     std::lock_guard<std::mutex> lock(engine->inputNodeMutex);
     if (engine->inputNode) {
-        engine->inputNode->stopInputStream();
+        engine->inputNode->shutdownCapture();
         engine->inputNode.reset();
     }
 }
