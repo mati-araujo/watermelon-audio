@@ -677,19 +677,22 @@ internal class IosAudioBridge : IAudioNativeBridge, ITunerDiagnostics {
     //      serializa con `analysisMutex` y el volcado no toca el stream de entrada.
 
     /**
-     * El path pedido de la toma viva: el nativo nombra el archivo según `valid` y no lo devuelve.
-     * Atómico: start y stop pueden venir de hilos distintos.
+     * Los paths pedidos: el nativo nombra el archivo según `valid` y no lo devuelve. `active` es el
+     * del último start que devolvió true; `pending`, el del último que devolvió false (puede haber
+     * dejado la toma viva si venció el techo del buzón). Un start rechazado por toma viva no pisa el
+     * activo. Inmutable en un [AtomicReference]: start y stop pueden venir de hilos distintos.
      */
-    private val dumpPath = AtomicReference<String?>(null)
+    private data class DumpPaths(val active: String? = null, val pending: String? = null)
+
+    private val dumpPaths = AtomicReference(DumpPaths())
 
     override fun startTunerInputDump(path: String): Boolean {
-        // Se recuerda ANTES de llamar: un start que devuelve false puede dejar la toma viva (el techo
-        // del buzón venció) y el stop siguiente la cierra. Un start rechazado porque ya hay una toma
-        // no puede pisar el path de la viva: se restituye el anterior.
-        val previous = dumpPath.getAndSet(path)
         val started = wma_tuner_diag_input_dump_start(engine, path)
-        if (!started && previous != null) dumpPath.compareAndSet(path, previous)
-        return started
+        while (true) {
+            val current = dumpPaths.value
+            val next = if (started) current.copy(active = path) else current.copy(pending = path)
+            if (dumpPaths.compareAndSet(current, next)) return started
+        }
     }
 
     override fun stopTunerInputDump(): TunerInputDumpResult? = memScoped {
@@ -697,7 +700,8 @@ internal class IosAudioBridge : IAudioNativeBridge, ITunerDiagnostics {
         if (!wma_tuner_diag_input_dump_stop(engine, values, TunerInputDumpResult.VALUE_COUNT)) {
             return@memScoped null
         }
-        val requested = dumpPath.getAndSet(null) ?: return@memScoped null
+        val taken = dumpPaths.getAndSet(DumpPaths())
+        val requested = taken.active ?: taken.pending ?: return@memScoped null
         TunerInputDumpResult.fromNative(
             LongArray(TunerInputDumpResult.VALUE_COUNT) { values[it] },
             requested,

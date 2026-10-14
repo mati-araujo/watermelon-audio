@@ -64,15 +64,26 @@ fun TunerInputDumpControl(dumpDir: String?, sink: SmokeSink, modifier: Modifier 
     var result by remember { mutableStateOf<TunerInputDumpResult?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
 
+    // Si el análisis no respondió, la toma puede seguir viva: se ofrece Detener una vez más.
+    var stopRetried by remember { mutableStateOf(false) }
+
     // Cierra la toma y publica el veredicto: pantalla y línea de log cuentan lo mismo.
     fun finishTake() {
         val closed = diagnostics?.stopTunerInputDump()
-        recordingPath = null
-        startedAt = null
         if (closed == null) {
             result = null
-            message = DUMP_STOP_WITHOUT_TAKE_TEXT
+            message = tunerInputDumpStopFailedText(canRetry = !stopRetried)
+            if (stopRetried) {
+                recordingPath = null
+                startedAt = null
+                stopRetried = false
+            } else {
+                stopRetried = true
+            }
         } else {
+            recordingPath = null
+            startedAt = null
+            stopRetried = false
             result = closed
             message = null
             sink.emit(tunerInputDumpLogLine(closed))
@@ -119,7 +130,15 @@ fun TunerInputDumpControl(dumpDir: String?, sink: SmokeSink, modifier: Modifier 
                                     elapsedSeconds = 0L
                                     message = null
                                 } else {
-                                    message = tunerInputDumpStartFailedText(path)
+                                    // false no prueba que no haya toma: si el techo del buzón venció
+                                    // puede haber quedado viva, y sin esto nadie la cierra.
+                                    val orphan = diagnostics.stopTunerInputDump()
+                                    if (orphan == null) {
+                                        message = tunerInputDumpStartFailedText(path)
+                                    } else {
+                                        message = tunerInputDumpStartFailedButClosedText(path, orphan)
+                                        sink.emit(tunerInputDumpLogLine(orphan))
+                                    }
                                 }
                             }
                         },

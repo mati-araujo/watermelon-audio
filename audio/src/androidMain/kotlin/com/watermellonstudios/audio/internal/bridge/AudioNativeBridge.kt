@@ -1831,25 +1831,26 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
     // trabaria un `startTuner()`/`stopTuner()` concurrente por ese rato sin ganar nada.
 
     override fun startTunerInputDump(path: String): Boolean = synchronized(dumpLock) {
-        // El path se recuerda ANTES de llamar: un start que devuelve false puede dejar la toma viva
-        // (el techo del buzon vencio) y el stop siguiente la cierra. Un start rechazado porque ya
-        // hay una toma no puede pisar el path de la viva: se restituye el anterior.
-        val previous = dumpPath
-        dumpPath = path
         val started = nativeTunerDiagInputDumpStart(path)
-        if (!started && previous != null) dumpPath = previous
+        // Un start que devuelve false puede dejar la toma viva (el techo del buzon vencio) y el stop
+        // siguiente la cierra; por eso se recuerda el ultimo false aparte del ultimo true: un start
+        // rechazado porque ya hay una toma no puede pisar el path de la viva.
+        if (started) activePath = path else pendingPath = path
         started
     }
 
     override fun stopTunerInputDump(): TunerInputDumpResult? = synchronized(dumpLock) {
         val values = nativeTunerDiagInputDumpStop() ?: return@synchronized null
         // El nativo no devuelve el path: nombra el archivo segun `valid`, con la regla que Kotlin repite.
-        val requested = dumpPath.also { dumpPath = null }
+        val requested = activePath ?: pendingPath
+        activePath = null
+        pendingPath = null
         TunerInputDumpResult.fromNative(values, requested ?: return@synchronized null)
     }
 
     private val dumpLock = Any()
-    private var dumpPath: String? = null
+    private var activePath: String? = null
+    private var pendingPath: String? = null
 
     override fun captureIntonation(slot: Int): Boolean = nativeIntonationCapture(slot)
     override fun resetIntonation() = nativeIntonationReset()

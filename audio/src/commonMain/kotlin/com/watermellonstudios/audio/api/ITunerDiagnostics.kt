@@ -36,15 +36,18 @@ interface ITunerDiagnostics {
      * detener.
      *
      * @return false si no hay motor, si ya hay una toma en curso, si el archivo no se puede crear
-     *   (directorio inexistente, sin permiso) o si el análisis no aplicó el pedido a tiempo.
+     *   (directorio inexistente, sin permiso) o si el análisis no aplicó el
+     *   pedido a tiempo. En este último caso la toma puede haber quedado viva: un false no prueba que
+     *   no la haya, así que quien lo recibe llama a [stopTunerInputDump].
      */
     fun startTunerInputDump(path: String): Boolean
 
     /**
      * Detiene la toma, cierra el archivo y devuelve su veredicto.
      *
-     * @return null si no había toma en curso — **no** un resultado de ceros, que se leería como una
-     *   toma vacía.
+     * @return null si no se cerró ninguna toma: no había una, o el análisis no respondió a tiempo y
+     *   la toma sigue viva (reintentar el stop la cierra) — **no** un resultado de ceros, que se
+     *   leería como una toma vacía.
      */
     fun stopTunerInputDump(): TunerInputDumpResult?
 }

@@ -228,6 +228,47 @@ class TunerDiagnosticsJniTest {
     }
 
     /**
+     * Un start rechazado porque ya hay una toma NO pisa el path de la viva: el stop informa el de la
+     * que sí está grabando.
+     *
+     * Mata: un puente que recuerda el último pedido sin mirar si el nativo lo aceptó (el resultado
+     * apuntaría a `otra.invalid.wav`, un archivo que no existe).
+     */
+    @Test
+    fun `un start rechazado por toma viva no pisa el path de la viva`() {
+        ensureEngine()
+
+        assertTrue(start(pathOf("viva.wav")))
+        assertFalse(start(pathOf("otra.wav")), "ya hay una toma: el nativo rechaza")
+        val r = assertNotNull(stop())
+
+        assertEquals(pathOf("viva.invalid.wav"), r.path)
+        assertTrue(File(r.path).isFile)
+    }
+
+    /**
+     * Un start fallido sin toma no contamina el path de la toma siguiente, ni sobrevive a un stop
+     * que devuelve null.
+     *
+     * Mata: un path "pendiente" que gana sobre el de un start posterior que sí arrancó, o que se
+     * cuela en el resultado de una toma ajena.
+     */
+    @Test
+    fun `un start fallido sin toma no contamina el path de la toma siguiente`() {
+        ensureEngine()
+
+        assertFalse(start(pathOf("no/existe/a.wav")))
+        assertFalse(start(pathOf("no/existe/b.wav")))
+        assertNull(stop())
+
+        assertTrue(start(pathOf("buena.wav")))
+        assertFalse(start(pathOf("no/existe/c.wav")), "rechazado por toma viva (y de paso sin directorio)")
+        val r = assertNotNull(stop())
+
+        assertEquals(pathOf("buena.invalid.wav"), r.path)
+    }
+
+    /**
      * Un path con un carácter no ASCII llega INTACTO al disco.
      *
      * El `jstring` cruza por `GetStringUTFChars` (UTF-8 modificado, idéntico a UTF-8 para el BMP): un

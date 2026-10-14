@@ -47,7 +47,20 @@ internal fun tunerInputDumpStatusText(
 internal fun tunerInputDumpStartFailedText(path: String): String =
     "no se pudo empezar a grabar en $path (¿directorio inexistente o sin permiso, ya hay una toma, o no hay motor?)"
 
-internal const val DUMP_STOP_WITHOUT_TAKE_TEXT = "no había toma en curso"
+/**
+ * `stop` devolvió null: no se cerró ninguna toma. Puede ser que no hubiera, o que el análisis no
+ * respondiera a tiempo y la toma siga viva; el texto no afirma una sola. [canRetry] es si el botón
+ * todavía ofrece Detener una vez más.
+ */
+internal fun tunerInputDumpStopFailedText(canRetry: Boolean): String =
+    "no se cerró ninguna toma (no había, o el análisis no respondió)" +
+        if (canRetry) "; reintentá Detener" else ""
+
+/** `start` devolvió false pero el `stop` de limpieza encontró una toma viva y la cerró. */
+@OptIn(InternalWatermelonApi::class)
+internal fun tunerInputDumpStartFailedButClosedText(path: String, closed: TunerInputDumpResult): String =
+    "el arranque falló pero quedó una toma; se cerró:\n" + tunerInputDumpResultText(closed) +
+        "\n(pedido: $path)"
 
 internal const val DUMP_UNAVAILABLE_TEXT = "este puente no ofrece el diagnóstico del afinador"
 

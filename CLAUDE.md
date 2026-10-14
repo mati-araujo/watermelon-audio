@@ -45,7 +45,7 @@ citar** cualquier otro numero; por que, en `docs/dev/conteos-que-envejecen.md`.
 | `kt-commonMain` | 100 | archivos .kt en commonMain |
 | `kt-androidMain` | 22 | archivos .kt en androidMain |
 | `kt-iosMain` | 6 | archivos .kt en iosMain |
-| `bridge-loc` | 3750 | LOC de AudioNativeBridge.kt |
+| `bridge-loc` | 3751 | LOC de AudioNativeBridge.kt |
 | `bridge-external` | 321 | `external fun` en AudioNativeBridge |
 | `jniexport-bridge` | 310 | JNIEXPORT en jni_audio_bridge.cpp |
 | `jniexport-total` | 323 | JNIEXPORT en todo jni/*.cpp |

@@ -121,4 +121,24 @@ class TunerInputDumpTextTest {
         assertEquals("grabando · 12s\n/s/a.wav.part", recording)
         assertTrue("NO ESTÁ CORRIENDO" in tunerInputDumpStatusText("/s/a.wav", 12, tunerRunning = false))
     }
+
+    /** Bug que atrapa: un stop que no cerró nada presentado como "no había toma" (y la toma viva huérfana). */
+    @Test
+    fun aStopThatClosedNothingDoesNotClaimThereWasNoTakeAndOffersTheRetry() {
+        val first = tunerInputDumpStopFailedText(canRetry = true)
+        assertTrue("no se cerró ninguna toma" in first)
+        assertTrue("el análisis no respondió" in first)
+        assertTrue("reintentá Detener" in first)
+        assertFalse("no había toma en curso" in first)
+        assertFalse("reintentá" in tunerInputDumpStopFailedText(canRetry = false))
+    }
+
+    /** Bug que atrapa: ocultar que el arranque falló, o no mostrar el veredicto de la toma que se cerró. */
+    @Test
+    fun aFailedStartThatLeftATakeSaysSoAndShowsTheNormalResult() {
+        val closed = result(path = "/sdcard/a.wav")
+        val text = tunerInputDumpStartFailedButClosedText("/sdcard/a.wav", closed)
+        assertTrue(text.startsWith("el arranque falló pero quedó una toma; se cerró:"))
+        assertTrue(tunerInputDumpResultText(closed) in text)
+    }
 }
