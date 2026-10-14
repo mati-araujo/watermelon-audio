@@ -104,9 +104,12 @@ interface ITuner {
      * - **También la sostiene un consumidor** (su `AudioInput` arrancado antes o después que el
      *   afinador, o el modo): `stop()` la deja abierta y la cierra el `AudioInput.stop()` del
      *   consumidor, que es el último dueño. Es simétrico: `AudioInput.stop()` con el afinador
-     *   corriendo tampoco le cierra la captura al afinador.
-     * - **El backend entrega la entrada por callback** (USB, iOS): no hay stream propio que abrir
-     *   ni que cerrar; `start()`/`stop()` no tocan ninguno.
+     *   corriendo tampoco le cierra la captura al afinador. El modo cuenta como consumidor
+     *   desde que se entra a INPUT_FX o MIX hasta el `AudioInput.stop()`, aunque en el medio se
+     *   vuelva a otro modo: volver de modo no suelta la captura (tampoco la cerraba antes).
+     * - **El backend entrega la entrada por callback** (USB, iOS): el afinador no abre ni cierra
+     *   ningún stream propio; `start()`/`stop()` no tocan ninguno, tampoco el que haya abierto
+     *   un `AudioInput` (ése lo cierra su `stop()`).
      *
      * Llamarlo dos veces, o sin [start] previo, es inofensivo: no suelta lo de otro dueño.
      */

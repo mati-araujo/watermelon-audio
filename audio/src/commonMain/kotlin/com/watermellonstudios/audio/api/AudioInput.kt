@@ -77,7 +77,11 @@ interface AudioInput {
      * Si un [ITuner] está corriendo, la captura queda abierta para él y la cierra su
      * [ITuner.stop], que es el último dueño (la regla está en [ITuner.stop]). Un modo de audio
      * con entrada (INPUT_FX, MIX) cuenta como este mismo consumidor: `stop()` también suelta lo
-     * que abrió el modo. Llamarlo sin [start] previo es inofensivo.
+     * que abrió el modo. Llamarlo sin [start] previo es inofensivo, y un [start] que devolvió
+     * `false` no deja nada tomado.
+     *
+     * Por eso, **con un afinador corriendo, [isRunning] puede seguir en `true` después de
+     * `stop()`**: la captura sigue viva, para él.
      */
     fun stop()
 
