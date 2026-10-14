@@ -190,7 +190,9 @@ public:
      *
      * Con `openOwnStream == false` (backend que entrega la entrada por callback: USB) sólo
      * registra al dueño. Si abrir falla el bit queda puesto: el dueño sigue queriendo la
-     * captura y su `releaseCapture` tiene que poder soltarla.
+     * captura y su `releaseCapture` tiene que poder soltarla. Quien le informa el fallo a SU
+     * llamador (`wma_input_start` devolviendo false) lo suelta él mismo: ese llamador no va a
+     * hacer `stop()`.
      *
      * REGLAS (REQ-054.1)
      *   - Es un CONJUNTO de dueños (un bit cada uno), NO un conteo. Los llamadores no estan
@@ -218,7 +220,8 @@ public:
      */
     CaptureAcquire acquireCapture(CaptureOwner owner, bool openOwnStream);
 
-    /// Saca el bit del dueño; si era el ultimo, cierra el stream propio. Sin el bit: no hace nada.
+    /// Saca el bit del dueño; si ningun dueño restante pidio stream propio, lo cierra (si hay
+    /// algo abierto). Sin el bit: no hace nada.
     void releaseCapture(CaptureOwner owner);
 
     /// Borra todos los dueños y cierra el stream propio. Destruccion del nodo / del motor.
