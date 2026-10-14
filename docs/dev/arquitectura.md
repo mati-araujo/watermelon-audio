@@ -73,3 +73,40 @@ harness/iosApp/         Proyecto de Xcode. Embebe el framework de :harness, NO e
                         CADisableMinimumFrameDurationOnPhone (sin esta ultima
                         Compose aborta al arrancar)
 ```
+
+## Los duenos de la captura (REQ-054)
+
+**Problema.** `ITuner.stop()` no soltaba la captura que abrio `start()`: el microfono quedaba
+abierto hasta un `AudioInput.stop()` (medido por Tunio en un g42, 2026-09-28). Cerrar siempre
+rompe al consumidor con su propio `AudioInput`; no cerrar nunca es el bug.
+
+**La regla.** La captura propia del `InputNode` tiene dos duenos, bits de `CaptureOwner`:
+`Consumer` (`wma_input_start/stop` y los modos INPUT_FX / MIX, sin bit propio: `wma_input_stop`
+siempre cerro lo que abrio el modo) y `Tuner` (`wma_tuner_start/stop`). Cada uno suelta sólo lo
+suyo y **cierra el ultimo**. Es simetrica: `AudioInput.stop()` con el afinador corriendo no lo deja
+sordo. USB e iOS entregan la entrada por callback y el afinador no les abre stream: una segunda
+mascara, `mOwnStreamOwners`, guarda quien pidio stream **propio** y se cierra cuando no queda
+ninguno. Si corre lo dice sólo `mInputStreamRunning` (el atomico del callback; el hilo RT no ve
+mutex ni mascara). Invariante: corre => `mOwnStreamOwners != vacio`.
+
+**Quien abre y cierra.** `startInputStream/stopInputStream` son privados: todo pasa por
+`acquireCapture / releaseCapture / shutdownCapture / closeOwnStreamForExternalDelivery` bajo
+`mCaptureMutex`. `acquireCapture` devuelve `CaptureAcquire` porque re-preparar el motor tira el
+audio en vuelo y lo decide el llamador, despues de soltar el mutex. `captureLifecycleMutex` (en
+`WmaEngine`) abarca tuner start/stop, input start/stop/set_source/release y `set_audio_mode`.
+Orden, todo en hilos de control: `engineMutex` -> `captureLifecycleMutex` ->
+(`analysisMutex` | `inputNodeMutex`) -> `mCaptureMutex`.
+
+**El seam.** `backends/INodeCaptureStream.h` esconde el stream de Oboe (`createNodeCaptureStream()`
+en `PlatformBackends.cpp`; iOS: nullptr). El host no puede ver el stream de Oboe: sin el seam,
+abrir y cerrar no son observables. La suite de host usa un `FakeCaptureStream` (apagado por
+defecto) que cuenta aperturas, cierres y violaciones.
+
+**Descartado.**
+- *Conteo de referencias*: los llamadores no estan balanceados (el modo re-adquiere en cada
+  `set_audio_mode`; `AudioInput.stop()` sin `start()`); con bits dos acquire valen uno.
+- *El afinador recuerda si abrio*: si arranca primero, su `stop` cierra la captura del consumidor.
+- *Registro en `BackendManager`*: gobierna la captura del backend, no el stream propio del nodo.
+
+**Deuda.** Volver de INPUT_FX a otro modo no suelta `Consumer`; `onInputStreamConfigChanged` no
+pasa por `captureLifecycleMutex`.
