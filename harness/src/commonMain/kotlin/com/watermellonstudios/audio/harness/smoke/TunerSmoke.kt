@@ -64,16 +64,26 @@ enum class TunerPhase(val id: String, val configuration: TuningConfiguration, va
 }
 
 /**
- * Lo que el plan lee además del afinador: el nivel de la ENTRADA del motor (con él se mide el piso,
- * independiente de lo que publique el afinador) y contra qué Hz mide el motor (el objetivo global que
- * empujó el último afinador, ver TunerFactory). Las dos lecturas son para el "por qué" de AC-053.14.
+ * Lo que el plan necesita de la entrada y del motor además del afinador: el nivel de la ENTRADA (con
+ * él se mide el piso, independiente de lo que publique el afinador), contra qué Hz mide el motor (el
+ * objetivo global que empujó el último afinador, ver TunerFactory) y cerrar la captura.
+ *
+ * Cerrarla es parte del contrato porque `ITuner.stop()` NO cierra el stream de captura que abrió
+ * `start()` (review de S4): sin esto el micrófono queda abierto para el panel siguiente (`usb`), con el
+ * stream de Oboe escribiendo en el nodo de entrada a la par del motor.
  */
 interface TunerProbe {
-    /** El pico de la entrada en dBFS (el mayor de los dos canales), o `null` sin nodo de entrada. */
-    fun inputPeakDbfs(): Float?
+    /** El pico LINEAL de la entrada (el mayor de los dos canales), o `null` sin nodo de entrada. */
+    fun inputPeak(): Float?
 
     /** La frecuencia objetivo vigente en el motor (0 = sin objetivo), o `null` si no se puede leer. */
     fun engineTargetHz(): Float?
+
+    /** Si el stream de captura sigue abierto. */
+    fun inputRunning(): Boolean
+
+    /** Cierra el stream de captura (sin soltar el nodo: eso es `release`). */
+    fun stopInput()
 }
 
 /**
@@ -98,15 +108,34 @@ data class ThresholdRequest(val dbfs: Float?, val problem: String?) {
 
 /**
  * `piso-silencio` de una fase: la entrada no pasó del umbral en la ventana de silencio. `null`
- * (no se emite línea ⇒ no-verificable, AC-053.3) sin umbral o sin una sola lectura de la entrada:
- * un piso no medido nunca es cumplido.
+ * (no se emite línea ⇒ no-verificable, AC-053.3) sin umbral o sin una sola lectura CON SEÑAL de la
+ * entrada: un piso no medido nunca es cumplido, y un silencio digital no es una sala en silencio.
+ *
+ * Decide con el número que ESCRIBE (un decimal), no con el crudo: el juez sólo ve lo escrito y
+ * verifica que lo afirmado cuadre con eso.
  */
 fun silenceFloor(phase: TunerPhase, maxInputDbfs: Float?, readings: Int, thresholdDbfs: Float?): PreconditionReading? {
-    if (thresholdDbfs == null || maxInputDbfs == null) return null
+    if (thresholdDbfs == null || maxInputDbfs == null || maxInputDbfs.isNaN()) return null
+    val shown = decimal1(maxInputDbfs)
+    val threshold = decimal1(thresholdDbfs)
     return PreconditionReading(
-        maxInputDbfs < thresholdDbfs,
-        "fase:${phase.id},entrada-max-dbfs:${decimal1(maxInputDbfs)},umbral-dbfs:${decimal1(thresholdDbfs)},lecturas:$readings",
+        tenths(maxInputDbfs) < tenths(thresholdDbfs),
+        "fase:${phase.id},entrada-max-dbfs:$shown,umbral-dbfs:$threshold,lecturas:$readings",
     )
+}
+
+/** Un valor en décimas, como lo escribe [decimal1] (los infinitos quedan en los extremos). */
+private fun tenths(x: Float): Long = when {
+    x == Float.NEGATIVE_INFINITY -> Long.MIN_VALUE
+    x == Float.POSITIVE_INFINITY -> Long.MAX_VALUE
+    else -> (x * 10f).roundToLong()
+}
+
+/** dBFS de un pico lineal: −inf para el silencio digital, `null` para la ausencia o NaN. */
+fun peakDbfs(linear: Float?): Float? = when {
+    linear == null || linear.isNaN() -> null
+    linear <= 0f -> Float.NEGATIVE_INFINITY
+    else -> 20f * log10(linear)
 }
 
 /**
@@ -116,7 +145,7 @@ fun silenceFloor(phase: TunerPhase, maxInputDbfs: Float?, readings: Int, thresho
  * `fase n t-ms estado hz nota cents convergido rate perdidos estado-motor nivel-dbfs entrada-dbfs`.
  * Una ausencia se escribe `-`, nunca un cero plausible.
  */
-fun reportTunerTick(r: SmokeReporter, phase: TunerPhase, n: Int, tMs: Long, reading: TunerReading?, inputDbfs: Float?) {
+fun reportTunerTick(r: SmokeReporter, phase: TunerPhase, n: Int, tMs: Long, reading: TunerReading?, inputPeak: Float?) {
     val s = reading?.snapshot
     r.report(
         Panel.AFINADOR.id, TunerWindows.TICK_STEP, true,
@@ -130,7 +159,7 @@ fun reportTunerTick(r: SmokeReporter, phase: TunerPhase, n: Int, tMs: Long, read
         "perdidos" to s?.droppedFrames,
         "estado-motor" to s?.state,
         "nivel-dbfs" to decimal1(s?.levelRms?.let { if (it > 0f) 20f * log10(it) else Float.NEGATIVE_INFINITY }),
-        "entrada-dbfs" to decimal1(inputDbfs),
+        "entrada-dbfs" to decimal1(peakDbfs(inputPeak)),
     )
 }
 
@@ -162,8 +191,13 @@ fun decimal1(x: Float?): String {
  *    `step=<fase>-control` con lo que rindió el motor. Durante la ventana, un tick cada
  *    [TUNER_POLL_MS]; el pico de salida se lee cada [PEAK_POLL_MS] (la captura del motor guarda ~43 ms).
  * 4. Al cerrar el silencio, `step=precondicion id=piso-silencio` con la entrada medida y el umbral
- *    que mandó el script (sin umbral o sin lecturas, no se emite: no-verificable).
- * 5. Pase lo que pase, la cuerda vuelve a `null` (el motor queda sin objetivo) y el afinador se para.
+ *    que mandó el script (sin umbral o sin una lectura con señal, no se emite: no-verificable).
+ * 5. Pase lo que pase, la cuerda vuelve a `null` (el motor queda sin objetivo), el afinador se para
+ *    y la captura se cierra ([TunerProbe.stopInput]). Al final del panel, `step=parada` afirma que la
+ *    entrada quedó cerrada.
+ *
+ * `t-ms` es el desplazamiento NOMINAL dentro de la ventana (la suma de las pausas pedidas), no un
+ * reloj: con el teléfono cargado la ventana real dura algo más. Ninguna regla del juez depende de él.
  *
  * El juicio sobre lo que LEYÓ el afinador lo hace el script con los ticks: acá no se decide si
  * enganchó. Lo que devuelve [run] es si el plan corrió como se declaró (arranques y ventanas).
@@ -179,6 +213,12 @@ class TunerWindows(
     private val stimulusMs: Long = STIMULUS_MS,
     private val silenceMs: Long = SILENCE_MS,
 ) {
+    init {
+        // Ventanas de ticks enteros: con otra duración, la última lectura caería fuera (o ninguna).
+        require(stimulusMs > 0 && stimulusMs % TUNER_POLL_MS == 0L) { "stimulusMs no es multiplo de $TUNER_POLL_MS" }
+        require(silenceMs > 0 && silenceMs % TUNER_POLL_MS == 0L) { "silenceMs no es multiplo de $TUNER_POLL_MS" }
+        require(TUNER_POLL_MS % PEAK_POLL_MS == 0L)
+    }
 
     suspend fun run(r: SmokeReporter, seed: Long, fixture: String): Boolean {
         val unavailable = when {
@@ -196,6 +236,7 @@ class TunerWindows(
                     )
                 }
             }
+            stopped(r)
             return false
         }
         val previousType = port.engineType()
@@ -210,7 +251,13 @@ class TunerWindows(
             port.noteOff()
             port.setEngineType(previousType)
         }
-        return all
+        return stopped(r) && all
+    }
+
+    /** `step=parada`: la captura que abrió el afinador quedó cerrada. */
+    private fun stopped(r: SmokeReporter): Boolean {
+        val running = probe.inputRunning()
+        return r.report(PANEL, "parada", !running, "entrada-corriendo" to running, *reason(if (running) "entrada-abierta" else null))
     }
 
     private suspend fun phase(r: SmokeReporter, phase: TunerPhase, seed: Long, fixture: String): Boolean {
@@ -244,6 +291,8 @@ class TunerWindows(
             // El motor queda sin objetivo: el panel de la UI (sin cuerda) no hereda el A4 del plan.
             if (phase.selectedString != null) tuner.selectedString = null
             tuner.stop()
+            // `stop()` no cierra la captura que abrió `start()`: se cierra acá (review de S4).
+            probe.stopInput()
         }
     }
 
@@ -265,7 +314,7 @@ class TunerWindows(
         var elapsed = 0L
         var ticks = 0
         var maxInput: Float? = null
-        var inputReadings = 0
+        var inputReadings = 0   // las lecturas de la entrada CON señal (pico > 0)
         try {
             while (elapsed < windowMs) {
                 val step = minOf(PEAK_POLL_MS, windowMs - elapsed)
@@ -273,12 +322,14 @@ class TunerWindows(
                 elapsed += step
                 peak = maxOf(peak, port.outputPeak())
                 if (elapsed % TUNER_POLL_MS == 0L) {
-                    val input = probe.inputPeakDbfs()?.takeIf { !it.isNaN() }
+                    val input = probe.inputPeak()?.takeIf { !it.isNaN() }
                     reportTunerTick(r, phase, n, elapsed, tuner.reading(), input)
                     ticks++
-                    if (input != null) {
+                    // Un pico de 0 no es una medición del piso: es silencio digital (ver silenceFloor).
+                    if (input != null && input > 0f) {
                         inputReadings++
-                        maxInput = maxOf(maxInput ?: input, input)
+                        val db = 20f * log10(input)
+                        maxInput = maxOf(maxInput ?: db, db)
                     }
                 }
             }
@@ -314,7 +365,8 @@ class TunerWindows(
             PANEL, step, motivo == null,
             "n" to n, "de" to of, "tipo" to "silencio", "ruta" to Route.SYSTEM.id, "backend" to backend,
             "ventana-ms" to windowMs, "frames" to frames, "pico" to formatPeak(peak), "ticks" to ticks,
-            "entrada-max-dbfs" to decimal1(maxInput), "umbral-dbfs" to decimal1(floorThresholdDbfs),
+            "entrada-max-dbfs" to decimal1(maxInput), "entrada-lecturas" to inputReadings,
+            "umbral-dbfs" to decimal1(floorThresholdDbfs),
             *reason(motivo),
         )
         // El piso, medido en ESTA ventana de silencio (D9, AC-053.12).
@@ -341,7 +393,7 @@ class TunerWindows(
 
         /** El A4 sostenido: el afinador tiene que pasar a `enganchado` dentro de esta ventana. */
         const val STIMULUS_MS = 4000L
-        const val SILENCE_MS = 3000L
+        const val SILENCE_MS = 3200L
 
         /** Cada cuánto se lee el pico de salida (la captura del motor guarda ~2048 muestras, ~43 ms). */
         const val PEAK_POLL_MS = 40L

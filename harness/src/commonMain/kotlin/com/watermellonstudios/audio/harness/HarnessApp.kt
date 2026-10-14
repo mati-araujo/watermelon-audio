@@ -101,8 +101,9 @@ fun HarnessApp(platform: HarnessPlatform) {
     val fixtures = remember { Fixtures(platform.writeFile) }
 
     platform.smokeRequest?.let { request ->
-        // REQ-053 S4: una VISTA de la entrada para medir el piso mientras el afinador es su dueño.
-        // Sólo se lee (`metering()`): ni start, ni stop, ni release, que le quitarían el nodo.
+        // REQ-053 S4: una VISTA de la entrada, para medir el piso mientras el afinador es su dueño y
+        // para cerrar la captura al terminar cada fase (`ITuner.stop()` no la cierra). Nunca `release`,
+        // que le quitaría el nodo.
         val tunerInput = remember { AudioInputFactory.create() }
         LaunchedEffect(request) {
             SmokePlanRunner(
@@ -118,8 +119,10 @@ fun HarnessApp(platform: HarnessPlatform) {
                     port = sfPort,
                     newTuner = { TunerFactory.create(it) },
                     probe = object : TunerProbe {
-                        override fun inputPeakDbfs(): Float? = tunerInput.metering()?.let { maxOf(it.levelDbLeft, it.levelDbRight) }
+                        override fun inputPeak(): Float? = tunerInput.metering()?.peakLinear
                         override fun engineTargetHz(): Float? = bridge.getTunerTargetHz()
+                        override fun inputRunning(): Boolean = tunerInput.isRunning
+                        override fun stopInput() = tunerInput.stop()
                     },
                     floorThresholdDbfs = request.thresholdsDbfs[SmokePreconditions.SILENCE_FLOOR],
                 ),

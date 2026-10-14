@@ -195,7 +195,7 @@ EXPECTED = {
     # lecturas de DERIVED.
     "afinador": ["fixture", "carga", "preset",
                  "reproduccion-arranque", "reproduccion-estimulo", "reproduccion-control",
-                 "juicio-arranque", "juicio-estimulo", "juicio-control", "descarga"],
+                 "juicio-arranque", "juicio-estimulo", "juicio-control", "parada", "descarga"],
 }
 ORDER = ["salida", "captura", "sf2", "sf3", "afinador", "usb"]
 # Pasos que se piden SOLO si hubo dialogo de permiso (REQ-050 S1): el broadcast falso que manda el
@@ -238,7 +238,10 @@ TUNER_REPRODUCTION, TUNER_JUDGMENT = TUNER_PHASES
 TUNER_STATES = ("sin-lectura", "midiendo", "enganchado")
 TUNER_LOCKED = "enganchado"
 # D12: PASS = enganchado en la nota del estimulo, sin tolerancia en cents (los cents son de REQ-051).
+# Y contra el objetivo del MOTOR en esa nota: el que reporta el cierre de la ventana (`objetivo-motor-hz`,
+# con un decimal). Otra vista del afinador puede haber empujado otro (TunerFactory: gana el ultimo).
 TUNER_NOTE = "A4"
+TUNER_NOTE_HZ = 440.0
 # Las ventanas del afinador: el paso de cierre -> (fase, tipo).
 TUNER_WINDOWS = {"%s-%s" % (f, k): (f, k) for f in TUNER_PHASES for k in (STIMULUS, CONTROL)}
 # Las filas que arma el JUEZ, no la app: lo que leyo el afinador en cada ventana. Existen para que la
@@ -421,6 +424,9 @@ def load_setup(path):
                     u = p["umbral-dbfs"]
                     if isinstance(u, bool) or not isinstance(u, (int, float)) or not (UMBRAL_MIN <= u <= 0):
                         raise BadSetup("%s: umbral-dbfs tiene que ser un numero en dBFS (%d..0)" % (where, UMBRAL_MIN))
+                    # Un decimal: viaja con uno (`extras`) y el juez compara la evidencia contra la ficha.
+                    if abs(u * 10 - round(u * 10)) > 1e-6:
+                        raise BadSetup("%s: umbral-dbfs con un decimal como mucho (viaja a la app con uno): %r" % (where, u))
                 allowed = COMMON_KEYS | {"ventana-humana", "umbral-dbfs"}
             else:
                 raise BadSetup("%s: verificador desconocido %r (host o app)" % (where, verifier))
@@ -853,7 +859,14 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
             evidence = ";".join(f.get("evidencia", "-") for f in right)
             bad = [f for f in right if f.get("cumplida") not in ("true", "false") or f.get("ok") != f.get("cumplida")]
             incoherent = [f for f in right if "umbral-dbfs" in p and not measured_coherently(f, p["umbral-dbfs"])]
-            if incoherent and not bad:
+            # S4 (review): el afinador emite sus precondiciones de app UNA POR FASE (`fase:<f>` en la
+            # evidencia). La que falta deja esa fase sin verificar, aunque la otra este cumplida.
+            phases_missing = [ph for ph in TUNER_PHASES if panel == TUNER and p["verificador"] == "app"
+                              and not any(re.search(r"(?:\A|,)fase:%s(?:,|\Z)" % ph, f.get("evidencia", "")) for f in right)]
+            if phases_missing and not bad:
+                state = "no-verificable"
+                evidence = "falta-la-linea-de-la-fase:%s:%s" % (",".join(phases_missing), evidence)
+            elif incoherent and not bad:
                 # S4: la app midio contra OTRO umbral que el de la ficha (un extra que no llego bien), o
                 # lo que dice no cuadra con su propia medicion. La linea no prueba nada de esta ficha.
                 state = "no-verificable"
@@ -919,7 +932,11 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
 
     def judge_step(panel, step, f, pending):
         bs = blockers(panel, step)
-        if not known_step(panel, step):
+        if step in DERIVED.get(panel, []):
+            # S4 (review): las lecturas del afinador las arma el JUEZ con los ticks. Una que emita la app
+            # no es un PASS paralelo al veredicto: FAIL, antes que cualquier bloqueo.
+            add("FAIL", panel, step, "paso-del-juez: la app no emite lecturas: " + extras(f), observed(f))
+        elif not known_step(panel, step):
             # Auditoria de REQ-053 (bajo): un paso que el juez no conoce no es PASS aunque diga
             # ok=true. Primero que nada: ni un bloqueo ni una espera humana lo pueden tapar.
             add("FAIL", panel, step, "paso-desconocido: " + extras(f), observed(f))
@@ -1168,8 +1185,12 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
                     verdict(OBSERVED, "quedo-en=%s hz=%s nota=%s cents=%s %s" % (
                         last.get("estado", "-"), last.get("hz", "-"), last.get("nota", "-"), last.get("cents", "-"), summary))
                     continue
+                engine_hz = number(f.get("objetivo-motor-hz"))
                 on_note = next((t for t in mine if t.get("estado") == TUNER_LOCKED and t.get("nota") == TUNER_NOTE), None)
-                if on_note is not None:
+                if engine_hz is None or abs(engine_hz - TUNER_NOTE_HZ) > 0.05:
+                    verdict("FAIL", "objetivo-del-motor-no-es-%s objetivo-motor-hz=%s (se esperaba %.1f) %s" % (
+                        TUNER_NOTE, f.get("objetivo-motor-hz", "-"), TUNER_NOTE_HZ, summary))
+                elif on_note is not None:
                     verdict("PASS", "enganchado %s %s" % (say(on_note), summary), on_note)
                 elif first_lock is not None:
                     verdict("FAIL", "enganchado-en-otra-nota %s (se esperaba %s) %s" % (say(first_lock), TUNER_NOTE, summary), first_lock)
@@ -2835,6 +2856,7 @@ JSON
                 fi
             done
         done
+        echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=parada ok=true entrada-corriendo=false"
         echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=descarga ok=true queda-cargado=false"
     }
     # af_log <destino> [estado en juicio] [estado en reproduccion]: la corrida `--plan afinador`.
@@ -2905,6 +2927,13 @@ JSON
     expect_line "p6b: ... no-verificable, no incumplida" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-piso estado=no-verificable' "$tmp/p6b.log" afinador "$fa"
     af_sed "$tmp/af-verde.log" "$tmp/p6c.log" "/ id=t-af-piso .*fase:juicio/s/,umbral-dbfs:-30.0//"
     expect "p6c: el piso sin umbral en la evidencia = BLOQUEADO" 4 "$tmp/p6c.log" afinador "$fa"
+    # Una linea por FASE (review de S4): sin la del piso de juicio, ese silencio no tiene piso medido
+    # aunque el de reproduccion este bien => no-verificable. Igual con el mic de una fase.
+    grep -v ' id=t-af-piso .*fase:juicio' "$tmp/af-verde.log" > "$tmp/p8.log"
+    expect "p8: sin el piso de la fase juicio = BLOQUEADO" 4 "$tmp/p8.log" afinador "$fa"
+    expect_line "p8: ... no-verificable por la fase que falta" '^BLOQUEADO +afinador/lectura-juicio-control +precondicion=t-af-piso estado=no-verificable evidencia=falta-la-linea-de-la-fase:juicio' "$tmp/p8.log" afinador "$fa"
+    grep -v ' id=t-af-mic .*fase:reproduccion' "$tmp/af-verde.log" > "$tmp/p9.log"
+    expect "p9: sin el mic de la fase reproduccion = BLOQUEADO" 4 "$tmp/p9.log" afinador "$fa"
     # Con un piso incumplido, un juicio que FALLARIA tampoco se juzga: el ruido de la sala lo explica.
     af_log "$tmp/p7-0.log" midiendo
     af_sed "$tmp/p7-0.log" "$tmp/p7.log" "/ id=t-af-piso .*fase:juicio/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /; s/entrada-max-dbfs:-58.0/entrada-max-dbfs:-20.0/;}"
@@ -2926,6 +2955,13 @@ JSON
     expect_line "j4: ... enganchado-en-otra-nota" '^FAIL +afinador/lectura-juicio-estimulo +enganchado-en-otra-nota nota=E4 ' "$tmp/j4.log" afinador "$fa"
     af_sed "$tmp/af-verde.log" "$tmp/j4b.log" "$(tk juicio "$ne_j")s/ nota=A4 / nota=- /"
     expect "j4b: enganchado sin objetivo (nota=-) en juicio = FAIL" 1 "$tmp/j4b.log" afinador "$fa"
+    # El juicio es contra el A4 del MOTOR: si el motor media contra otro objetivo (otra vista del
+    # afinador empujo el suyo, TunerFactory), los cents no son del A4 aunque el tick diga nota=A4.
+    af_sed "$tmp/af-verde.log" "$tmp/j8.log" "/ step=juicio-estimulo /s/ objetivo-motor-hz=440.0/ objetivo-motor-hz=329.6/"
+    expect "j8: el motor no media contra el A4 = FAIL" 1 "$tmp/j8.log" afinador "$fa"
+    expect_line "j8: ... objetivo-del-motor" '^FAIL +afinador/lectura-juicio-estimulo +objetivo-del-motor-no-es-A4 objetivo-motor-hz=329.6' "$tmp/j8.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/j8b.log" "/ step=juicio-estimulo /s/ objetivo-motor-hz=440.0/ objetivo-motor-hz=-/"
+    expect "j8b: sin el objetivo del motor no hay PASS" 1 "$tmp/j8b.log" afinador "$fa"
     # Pasa a enganchado DENTRO de la ventana: el primer tick sin lectura, el segundo midiendo, el
     # tercero enganchado en A4, el ultimo midiendo otra vez. Basta un tick.
     af_sed "$tmp/af-verde.log" "$tmp/j5.log" "$(tk juicio "$ne_j")s/ t-ms=80 estado=enganchado hz=440.0 nota=A4 cents=1.2 / t-ms=80 estado=sin-lectura hz=- nota=- cents=- /; $(tk juicio "$ne_j")s/ t-ms=(160|320) estado=enganchado hz=440.0 nota=A4 cents=1.2 / t-ms=\1 estado=midiendo hz=440.0 nota=A4 cents=- /"
@@ -3012,6 +3048,16 @@ JSON
     af_sed "$tmp/af-verde.log" "$tmp/w2.log" "/ step=juicio-(estimulo|control) /{s/ n=1 / n=X /; s/ n=2 / n=1 /; s/ n=X / n=2 /;}; $(tk juicio 1)s/ n=1 / n=Y /; $(tk juicio 2)s/ n=2 / n=1 /; / fase=juicio n=Y /s/ n=Y / n=2 /"
     expect "w2: juicio en otro orden que el de la semilla = FAIL" 1 "$tmp/w2.log" afinador "$fa"
     expect_line "w2: ... afinador/orden-juicio" '^FAIL +afinador/orden-juicio ' "$tmp/w2.log" afinador "$fa"
+    # La captura que abrio el afinador queda cerrada al final del panel (review de S4: en `todo` sigue
+    # `usb`): `parada` es un paso obligatorio.
+    grep -v ' step=parada ' "$tmp/af-verde.log" > "$tmp/s1.log"
+    expect_line "s1: sin parada = FALTA" '^FAIL +afinador/parada +FALTA' "$tmp/s1.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/s2.log" "s/ step=parada ok=true entrada-corriendo=false/ step=parada ok=false entrada-corriendo=true motivo=entrada-abierta/"
+    expect "s2: el mic quedo abierto = FAIL" 1 "$tmp/s2.log" afinador "$fa"
+    # Las lecturas son del JUEZ: una que emita la app es FAIL (no un PASS paralelo al veredicto).
+    { grep -m1 ' step=juicio-estimulo ' "$tmp/af-verde.log" | sed -E 's/ step=juicio-estimulo / step=lectura-juicio-estimulo /'; } | before_fin "$tmp/af-verde.log" "$tmp/d1.log"
+    expect "d1: la app emite una lectura = FAIL" 1 "$tmp/d1.log" afinador "$fa"
+    expect_line "d1: ... paso-del-juez" '^FAIL +afinador/lectura-juicio-estimulo +paso-del-juez' "$tmp/d1.log" afinador "$fa"
     # Los ticks no son veredictos (como `escuchar`): no tienen fila propia.
     expect_no_line "S4: un tick no es un paso" '^[A-Z-]+ +afinador/afinador ' "$tmp/af-verde.log" afinador "$fa"
 
@@ -3036,6 +3082,11 @@ JSON
     af_mutante "umbral-dbfs booleano" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = False"
     af_mutante "umbral-dbfs positivo (no es dBFS)" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = 3"
     af_mutante "umbral-dbfs debajo de -160" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = -400"
+    # Un decimal (review de S4): el extra lo manda con uno y el juez compara con la ficha; -31.25 se
+    # mandaria -31.2 y la corrida quedaria no-verificable para siempre.
+    af_mutante "umbral-dbfs con dos decimales" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = -31.25"
+    python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); f["planes"]["afinador"]["precondiciones"][2]["umbral-dbfs"] = -31.2; json.dump(f, open(sys.argv[2], "w"))' "$fa" "$tmp/fa-312.json"
+    is_eq "ficha: umbral-dbfs con un decimal es valido y viaja igual" "$(smoke_py extras "$tmp/fa-312.json" afinador | tail -1)" "-31.2"
     af_mutante "depende de una lectura que no existe" "f['planes']['afinador']['precondiciones'][1]['depende'] = ['lectura-juicio-ruido']"
 
     # Los umbrales de la ficha viajan a la app por extra (`harness.smoke.umbral-dbfs.<id>`): el script

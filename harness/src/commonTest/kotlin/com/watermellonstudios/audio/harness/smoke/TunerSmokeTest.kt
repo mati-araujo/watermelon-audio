@@ -83,6 +83,8 @@ class TunerSmokeTest {
         override fun start(): Boolean {
             created += "start"
             running = startAccepts
+            // Como `wma_tuner_start`: abre el stream de captura propio. `stop()` NO lo cierra.
+            if (startAccepts) captureOpen = true
             return startAccepts
         }
         override fun stop() {
@@ -105,11 +107,18 @@ class TunerSmokeTest {
                 else -> TunerReading(target, snapshot(cents = null, hz = null))
             }
         }
-    private var inputDbfs: () -> Float? = { if (port.noteIsOn) -12f else -58f }
+    /** El pico LINEAL de la entrada: 0,25 (−12 dBFS) con la nota, 10^(−58/20) (−58 dBFS) en silencio. */
+    private var inputLevel: () -> Float? = { if (port.noteIsOn) 0.25f else SILENCE_PEAK }
+    private var captureOpen = false
 
     private val probe = object : TunerProbe {
-        override fun inputPeakDbfs(): Float? = inputDbfs()
+        override fun inputPeak(): Float? = inputLevel()
         override fun engineTargetHz(): Float? = engine.targetHz
+        override fun inputRunning(): Boolean = captureOpen
+        override fun stopInput() {
+            created += "cerrar-entrada"
+            captureOpen = false
+        }
     }
 
     private val events = mutableListOf<String>()
@@ -171,13 +180,15 @@ class TunerSmokeTest {
     @Test
     fun aTickCarriesPhaseWindowStateHzNoteCentsConvergedRateAndDropped() {
         val reading = TunerReading(a4(), snapshot(cents = 1.25f, hz = 440.06f, state = TunerState.CONVERGED, rate = 48000, dropped = 7, rms = 0.1f))
-        val line = tickLine(reading, phase = TunerPhase.JUDGMENT, n = 2, tMs = 480, input = -12.34f)
+        val line = tickLine(reading, phase = TunerPhase.JUDGMENT, n = 2, tMs = 480, input = 0.25f)
         assertEquals(
             "HARNESS-SMOKE v=1 run=t panel=afinador step=afinador ok=true fase=juicio n=2 t-ms=480 " +
                 "estado=enganchado hz=440.1 nota=A4 cents=1.3 convergido=true rate=48000 perdidos=7 " +
-                "estado-motor=CONVERGED nivel-dbfs=-20.0 entrada-dbfs=-12.3",
+                "estado-motor=CONVERGED nivel-dbfs=-20.0 entrada-dbfs=-12.0",
             line,
         )
+        // Silencio digital en la entrada: −inf, no un número plausible.
+        assertEquals("-inf", field(tickLine(reading, input = 0f), "entrada-dbfs"))
     }
 
     /**
@@ -224,7 +235,50 @@ class TunerSmokeTest {
         assertEquals("A4", TunerPhase.JUDGMENT.configuration.targetForString(TunerPhase.JUDGMENT.selectedString!!)?.note?.name)
         assertNull(TunerPhase.REPRODUCTION.selectedString)
         // La reproducción nunca toca la cuerda; el juicio la elige antes de arrancar y la suelta al final.
-        assertEquals(listOf("start", "stop", "cuerda=1", "start", "cuerda=null", "stop"), created)
+        assertEquals(
+            listOf("start", "stop", "cerrar-entrada", "cuerda=1", "start", "cuerda=null", "stop", "cerrar-entrada"),
+            created,
+        )
+    }
+
+    /**
+     * Bug que atrapa (review de S4): el micrófono abierto después del afinador. `stop()` del afinador
+     * no cierra el stream de captura que abrió `start()`; en `todo` lo que sigue es `usb`, y el stream
+     * de Oboe seguiría escribiendo en el nodo de entrada junto con el motor por libusb. Cada fase cierra
+     * la entrada, y el panel lo AFIRMA con `step=parada`.
+     */
+    @Test
+    fun theCaptureIsClosedAfterEachPhaseAndThePanelSaysSo() = runTest {
+        windows().run(reporter, seed = 12345L, fixture = "f.sf2")
+        assertFalse(captureOpen)
+        val stop = lines.single { step(it) == "parada" }
+        assertEquals("true", field(stop, "ok"))
+        assertEquals("false", field(stop, "entrada-corriendo"))
+        assertTrue(lines.indexOf(stop) > lines.indexOfLast { step(it).startsWith("juicio-") })
+        // Si la entrada no se cierra (un stop que no anda), la parada lo dice.
+        events.clear()
+        val stuck = TunerWindows(
+            port = port,
+            newTuner = { FakeTuner(it, engine) },
+            probe = object : TunerProbe by probe {
+                override fun stopInput() {}
+            },
+            floorThresholdDbfs = -30f,
+            pause = {},
+        )
+        assertFalse(stuck.run(reporter, seed = 12345L, fixture = "f.sf2"))
+        assertEquals("false", field(lines.single { step(it) == "parada" }, "ok"))
+    }
+
+    /** Bug que atrapa: ventanas que no son múltiplo del período del tick (podrían quedar sin ticks). */
+    @Test
+    fun theWindowsAreWholeTicks() {
+        assertFailsWith<IllegalArgumentException> {
+            TunerWindows(port, { FakeTuner(it, engine) }, probe, -30f, pause = {}, stimulusMs = 4010L)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            TunerWindows(port, { FakeTuner(it, engine) }, probe, -30f, pause = {}, silenceMs = 30L)
+        }
     }
 
     /**
@@ -392,14 +446,17 @@ class TunerSmokeTest {
     fun eachPhaseStopsTheTunerAndClearsTheStringEvenIfSomethingThrows() = runTest {
         behavior = { _, _, _ -> throw IllegalStateException("puente") }
         assertFailsWith<IllegalStateException> { windows().run(reporter, seed = 1L, fixture = "f.sf2") }
-        assertEquals(listOf("start", "stop"), created)
+        assertEquals(listOf("start", "stop", "cerrar-entrada"), created)
         assertFalse(port.noteIsOn)
         assertEquals(3, port.currentType)
         created.clear()
         configurations.clear()
         behavior = { noteOn, target, _ -> if (noteOn && target != null) throw IllegalStateException("puente") else null }
         assertFailsWith<IllegalStateException> { windows().run(reporter, seed = 1L, fixture = "f.sf2") }
-        assertEquals(listOf("start", "stop", "cuerda=1", "start", "cuerda=null", "stop"), created)
+        assertEquals(
+            listOf("start", "stop", "cerrar-entrada", "cuerda=1", "start", "cuerda=null", "stop", "cerrar-entrada"),
+            created,
+        )
         assertEquals(0f, engine.targetHz)
         assertFalse(port.noteIsOn)
     }
@@ -417,7 +474,20 @@ class TunerSmokeTest {
         assertEquals("fase:juicio,entrada-max-dbfs:-50.0,umbral-dbfs:-25.0,lecturas:10", met.evidence)
         assertFalse(assertNotNull(silenceFloor(TunerPhase.JUDGMENT, -20f, 10, -25f)).met)
         assertFalse(assertNotNull(silenceFloor(TunerPhase.JUDGMENT, -25f, 10, -25f)).met)
-        assertTrue(assertNotNull(silenceFloor(TunerPhase.REPRODUCTION, Float.NEGATIVE_INFINITY, 3, -25f)).met)
+        assertTrue(assertNotNull(silenceFloor(TunerPhase.REPRODUCTION, -90f, 3, -25f)).met)
+    }
+
+    /**
+     * Bug que atrapa (review de S4): la app decide con el número crudo y escribe el redondeado. Con
+     * −25,04 dBFS contra −25: crudo, "cumplida"; escrito, `-25.0` contra `-25.0`, y el juez (que sólo
+     * ve lo escrito) la da incoherente. La app decide con lo que escribe.
+     */
+    @Test
+    fun theFloorDecidesWithTheNumberItWrites() {
+        val r = assertNotNull(silenceFloor(TunerPhase.JUDGMENT, -25.04f, 5, -25f))
+        assertFalse(r.met)
+        assertTrue("entrada-max-dbfs:-25.0,umbral-dbfs:-25.0" in r.evidence)
+        assertTrue(assertNotNull(silenceFloor(TunerPhase.JUDGMENT, -25.06f, 5, -25f)).met)
     }
 
     /**
@@ -440,7 +510,7 @@ class TunerSmokeTest {
         val floor = preconditions(SmokePreconditions.SILENCE_FLOOR)
         assertEquals(listOf("reproduccion", "juicio"), floor.map { field(it, "evidencia")!!.substringAfter("fase:").substringBefore(',') })
         assertTrue(floor.all { field(it, "cumplida") == "true" && field(it, "ok") == "true" })
-        assertTrue(floor.all { "entrada-max-dbfs:-58.0,umbral-dbfs:-30.0" in field(it, "evidencia")!! })
+        assertTrue(floor.all { "entrada-max-dbfs:-58.0,umbral-dbfs:-30.0,lecturas:40" in field(it, "evidencia")!! })
         // Cada línea va después del cierre de su ventana de silencio.
         for (phase in TunerPhase.entries) {
             val close = lines.indexOfFirst { step(it) == "${phase.id}-control" }
@@ -463,10 +533,27 @@ class TunerSmokeTest {
     /** Bug que atrapa: un piso con lecturas de entrada inválidas (NaN) que lo vuelven "cumplido". */
     @Test
     fun aFloorWithoutInputReadingsIsNotClaimed() = runTest {
-        inputDbfs = { if (port.noteIsOn) -12f else Float.NaN }
+        inputLevel = { if (port.noteIsOn) 0.25f else Float.NaN }
         windows(threshold = -30f).run(reporter, seed = 12345L, fixture = "f.sf2")
         assertTrue(preconditions(SmokePreconditions.SILENCE_FLOOR).isEmpty())
         assertEquals("-", field(lines.first { step(it) == "juicio-control" }, "entrada-max-dbfs"))
+        assertEquals("0", field(lines.first { step(it) == "juicio-control" }, "entrada-lecturas"))
+    }
+
+    /**
+     * Bug que atrapa (review de S4): un silencio DIGITAL (pico 0 en cada lectura: el mic silenciado
+     * por el control de privacidad, o una captura que "corre" sin entregar) dado por sala en silencio.
+     * El medidor dice −120 dBFS, que pasa cualquier umbral, sin haber medido nada. Sin una sola lectura
+     * con señal, la app no afirma el piso (el juez lo da no-verificable).
+     */
+    @Test
+    fun aDigitalSilenceIsNotAQuietRoom() = runTest {
+        inputLevel = { if (port.noteIsOn) 0.25f else 0f }
+        windows(threshold = -30f).run(reporter, seed = 12345L, fixture = "f.sf2")
+        assertTrue(preconditions(SmokePreconditions.SILENCE_FLOOR).isEmpty())
+        val silence = lines.first { step(it) == "juicio-control" }
+        assertEquals("0", field(silence, "entrada-lecturas"))
+        assertEquals("-", field(silence, "entrada-max-dbfs"))
     }
 
     /**
@@ -519,10 +606,15 @@ class TunerSmokeTest {
         phase: TunerPhase = TunerPhase.REPRODUCTION,
         n: Int = 1,
         tMs: Long = 80,
-        input: Float? = -40f,
+        input: Float? = 0.01f,
     ): String {
         reportTunerTick(reporter, phase, n, tMs, reading, input)
         return lines.last()
+    }
+
+    private companion object {
+        /** 10^(−58/20): el pico lineal de −58 dBFS. */
+        const val SILENCE_PEAK = 0.0012589254f
     }
 
     private fun snapshot(
