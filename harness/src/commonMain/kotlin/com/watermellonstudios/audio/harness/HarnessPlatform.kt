@@ -41,5 +41,14 @@ class HarnessPlatform(
  *   es `null`, la corrida se reporta como inválida en vez de correr con un default callado.
  * @property seed la semilla del orden de las ventanas de escucha (`--es harness.smoke.semilla`,
  *   REQ-053 S3), o `null` si no vino.
+ * @property thresholdsDbfs los umbrales de las precondiciones de la app, por id
+ *   (`--es harness.smoke.umbral-dbfs.<id> <dBFS>`, REQ-053 S4): el script los saca de la ficha, que la
+ *   app no lee. Sin el suyo, la app no afirma esa precondición.
  */
-data class SmokeRequest(val plan: String, val run: String, val problem: String? = null, val seed: Long? = null)
+data class SmokeRequest(
+    val plan: String,
+    val run: String,
+    val problem: String? = null,
+    val seed: Long? = null,
+    val thresholdsDbfs: Map<String, Float> = emptyMap(),
+)

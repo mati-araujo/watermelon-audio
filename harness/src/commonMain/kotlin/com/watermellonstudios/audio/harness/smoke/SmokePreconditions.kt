@@ -10,11 +10,18 @@ package com.watermellonstudios.audio.harness.smoke
  * eso es BLOQUEADO — nunca cumplida.
  */
 object SmokePreconditions {
-    /** Panel `captura`: el stream de entrada abrió. */
+    /** Panel `captura` (y `afinador`, una por fase): el stream de entrada abrió. */
     const val MIC_OPENS: String = "mic-abre"
 
     /** Panel `usb`: el permiso USB del harness, con su ventana humana (D13). */
     const val USB_PERMISSION: String = "permiso-usb"
+
+    /**
+     * Panel `afinador` (REQ-053 S4): el piso de la entrada en la ventana de silencio de cada fase,
+     * contra el umbral que la ficha declara y el script manda por extra. `mic-abre` es la misma de
+     * `captura` ([MIC_OPENS]), emitida por fase.
+     */
+    const val SILENCE_FLOOR: String = "piso-silencio"
 }
 
 /** Lo que la app afirma de una precondición: cumplida o no, y lo que vio. */
