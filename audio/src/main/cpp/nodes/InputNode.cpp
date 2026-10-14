@@ -138,9 +138,9 @@ InputNode::InputNode()
 }
 
 InputNode::~InputNode() {
-    stopInputStream();
+    shutdownCapture();
 #if defined(WMA_TEST_HOOKS)
-    // WD-1.3 — ver la nota de los ganchos arriba. Va DESPUES de stopInputStream()
+    // WD-1.3 — ver la nota de los ganchos arriba. Va DESPUES de shutdownCapture()
     // para que el registro cubra la destruccion entera, no solo su comienzo.
     gInputNodeDtorThread.store(std::this_thread::get_id(), std::memory_order_release);
     gInputNodeDtorCount.fetch_add(1, std::memory_order_release);
@@ -231,6 +231,33 @@ void InputNode::stopInputStream() {
     closeInputStream();
     mRingBuffer.clear();
     LOGI("Input stream stopped");
+}
+
+InputNode::CaptureAcquire InputNode::acquireCapture(CaptureOwner owner, bool openOwnStream) {
+    std::lock_guard<std::mutex> lock(mCaptureMutex);
+    mCaptureOwners |= static_cast<uint8_t>(owner);
+    if (mInputStreamRunning.load()) return CaptureAcquire::AlreadyRunning;
+    if (!openOwnStream) return CaptureAcquire::NotRunning;
+    return startInputStream() ? CaptureAcquire::Opened : CaptureAcquire::NotRunning;
+}
+
+void InputNode::releaseCapture(CaptureOwner owner) {
+    std::lock_guard<std::mutex> lock(mCaptureMutex);
+    const auto bit = static_cast<uint8_t>(owner);
+    if ((mCaptureOwners & bit) == 0) return;
+    mCaptureOwners = static_cast<uint8_t>(mCaptureOwners & ~bit);
+    if (mCaptureOwners == 0) stopInputStream();
+}
+
+void InputNode::shutdownCapture() {
+    std::lock_guard<std::mutex> lock(mCaptureMutex);
+    mCaptureOwners = 0;
+    stopInputStream();
+}
+
+void InputNode::closeOwnStreamForExternalDelivery() {
+    std::lock_guard<std::mutex> lock(mCaptureMutex);
+    if (mInputStreamRunning.load()) stopInputStream();
 }
 
 bool InputNode::isInputStreamRunning() const {
@@ -435,6 +462,9 @@ void InputNode::process(AudioBuffer& inputBuffer, int numFrames) {
 void InputNode::setInputSource(InputSource source) {
     if (mInputSource.load() == source) return;
 
+    // Bajo el mutex de la captura: el reinicio no puede intercalarse con un acquire/release
+    // de otro dueño. Los dueños quedan como estaban.
+    std::lock_guard<std::mutex> lock(mCaptureMutex);
     bool wasRunning = mInputStreamRunning.load();
 
     if (wasRunning) {

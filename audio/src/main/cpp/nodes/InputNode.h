@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 /**
@@ -167,9 +168,61 @@ private:
 
 public:
 
-    // Stream management
-    bool startInputStream();
-    void stopInputStream();
+    /**
+     * @brief Quien le pide la captura propia al nodo (REQ-054.1).
+     *
+     * `Consumer` = `wma_input_start/stop` y el modo INPUT_FX / MIX (un solo dueño: el modo
+     * no tiene bit propio, porque `wma_input_stop` siempre cerro lo que abrio el modo).
+     * `Tuner` = `wma_tuner_start/stop`. Valores = bits de `mCaptureOwners`.
+     */
+    enum class CaptureOwner : uint8_t { Consumer = 1, Tuner = 2 };
+
+    /// Que paso con ESTA llamada de `acquireCapture`. El llamador decide con esto si
+    /// re-prepara el motor (tira el audio en vuelo): sólo tras `Opened` o `AlreadyRunning`.
+    enum class CaptureAcquire {
+        Opened,          ///< esta llamada abrio y arranco el stream propio
+        AlreadyRunning,  ///< ya corria (otro dueño, o este mismo): no se toco
+        NotRunning       ///< no corre: el backend entrega la entrada, o abrir fallo
+    };
+
+    /**
+     * @brief Pone el bit del dueño y, si `openOwnStream` y no corre, abre el stream propio.
+     *
+     * Con `openOwnStream == false` (backend que entrega la entrada por callback: USB) sólo
+     * registra al dueño. Si abrir falla el bit queda puesto: el dueño sigue queriendo la
+     * captura y su `releaseCapture` tiene que poder soltarla.
+     *
+     * REGLAS (REQ-054.1)
+     *   - Es un CONJUNTO de dueños (un bit cada uno), NO un conteo. Los llamadores no estan
+     *     balanceados: el modo re-adquiere en cada `set_audio_mode`, y Tunio hace
+     *     `AudioInput.stop()` sin `start()`. Con bit, dos acquire valen uno y un release sin
+     *     acquire no resta nada; con conteo, cada desbalance cerraria la captura de otro.
+     *   - `releaseCapture` saca el bit y cierra sólo si la mascara quedo vacia.
+     *   - Una unica fuente de verdad sobre si corre: `mInputStreamRunning` (el atomico que lee
+     *     el callback). La mascara dice quien la quiere, no si corre.
+     *   - Invariante: corre => hay algun dueño. `dueños != vacio && !corre` sólo si el backend
+     *     entrega la entrada o si abrir fallo; nunca por el stop de otro.
+     *
+     * ORDEN DE LOCKS (todos de hilos de control; el hilo RT nunca ve `mCaptureMutex`):
+     *   `captureLifecycleMutex` -> `analysisMutex` -> `mCaptureMutex`
+     *   `captureLifecycleMutex` -> `inputNodeMutex` -> `mCaptureMutex`
+     *   lado JNI: `engineMutex` -> `captureLifecycleMutex`
+     * (`captureLifecycleMutex` vive en `WmaEngine`; ver `watermelon_audio_internal.h`.)
+     * Bajo `mCaptureMutex` no se llama al motor ni se espera a otro lock: el re-prepare
+     * (`wmaReconfigureTrasArrancarCaptura`) lo hace el llamador DESPUES de que esto devuelva.
+     */
+    CaptureAcquire acquireCapture(CaptureOwner owner, bool openOwnStream);
+
+    /// Saca el bit del dueño; si era el ultimo, cierra el stream propio. Sin el bit: no hace nada.
+    void releaseCapture(CaptureOwner owner);
+
+    /// Borra todos los dueños y cierra el stream propio. Destruccion del nodo / del motor.
+    void shutdownCapture();
+
+    /// USB: el backend pasa a entregar la entrada, asi que el stream propio sobra. Lo cierra
+    /// si corre y CONSERVA los dueños (siguen queriendo la captura, ahora por el backend).
+    void closeOwnStreamForExternalDelivery();
+
     bool isInputStreamRunning() const;
 
     // Configuration
@@ -296,8 +349,17 @@ public:
     void feedExternalInput(const float* inputData, int numFrames);
 
 private:
+    // Abren y cierran el stream propio SIN tocar los dueños. Privados a proposito: nadie
+    // abre ni cierra salteando el registro. Requieren `mCaptureMutex` tomado.
+    bool startInputStream();
+    void stopInputStream();
     bool createInputStream();
     void closeInputStream();
+
+    /// Serializa el registro de dueños y toda apertura/cierre del stream propio.
+    std::mutex mCaptureMutex;
+    /// Bits de `CaptureOwner`. Bajo `mCaptureMutex`.
+    uint8_t mCaptureOwners = 0;
 
 private:
     // Stream de captura propio del nodo, creado en el primer startInputStream()
