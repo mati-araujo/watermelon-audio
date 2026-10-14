@@ -28,7 +28,6 @@ import com.watermellonstudios.audio.domain.tuning.Tuning
 import com.watermellonstudios.audio.domain.tuning.TuningConfiguration
 import com.watermellonstudios.audio.harness.smoke.PANEL_TUNING
 import com.watermellonstudios.audio.harness.smoke.TUNER_POLL_MS
-import com.watermellonstudios.audio.harness.smoke.TunerReadout
 import kotlinx.coroutines.delay
 
 /**
@@ -122,16 +121,8 @@ fun TunerControl(modifier: Modifier = Modifier) {
             Text("Afinador", style = MaterialTheme.typography.titleMedium)
 
             Text(
-                text = when (TunerReadout.of(reading)) {
-                    // Tres estados y no dos. Ver el KDoc.
-                    TunerReadout.NO_READING -> if (running) "sin lectura (el motor no publicó nada)" else "detenido"
-                    TunerReadout.MEASURING -> "midiendo · sin enganche"
-                    TunerReadout.LOCKED -> reading?.let { r ->
-                        "${r.cents?.oneDecimal()} cents" +
-                            (r.target?.let { " · objetivo ${it.note.name}" } ?: " · sin objetivo") +
-                            (if (r.isConverged) " · convergido" else "")
-                    }.orEmpty()
-                },
+                // Tres estados y no dos. Ver el KDoc y `tunerStatusText`.
+                text = tunerStatusText(reading, running, hasSelectedString = selected != null),
                 fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall,
             )
