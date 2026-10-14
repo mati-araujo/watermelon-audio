@@ -116,6 +116,7 @@ def parse_wav(data, name):
     if len(data) < 12 or data[0:4] != b'RIFF' or data[8:12] != b'WAVE':
         raise SystemExit(f"{name}: no es un WAV RIFF/WAVE")
     fmt = wmad_raw = pcm = None
+    data_declared = 0
     pos = 12
     while pos + 8 <= len(data):
         cid, size = data[pos:pos + 4], struct.unpack_from('<I', data, pos + 4)[0]
@@ -125,6 +126,7 @@ def parse_wav(data, name):
             fmt = data[body:end]
         elif cid == b'data' and pcm is None:
             pcm = data[body:end]
+            data_declared = size
         elif cid == b'wmad':
             wmad_raw = data[body:end]
         pos = body + size + (size & 1)        # los chunks se alinean a par
@@ -166,6 +168,14 @@ def parse_wav(data, name):
         raise SystemExit(f"{name}: chunk wmad de {len(wmad_raw)} bytes (esperaba {WMAD_SIZE})")
     if not ALLOW_INVALID:
         why = invalid_reason(name, sr, wmad)
+        # Un float32 con wmad lo escribio el volcado, que declara cuanto escribio: un `data` mas
+        # corto que lo declarado, o con otros frames que wmad, es un archivo cortado o con huecos.
+        # El PCM16 viejo, sin wmad, conserva la tolerancia a una captura cortada.
+        if why is None and wmad is not None and code == 'f':
+            if data_declared != len(pcm) or len(pcm) != n * ch * width:
+                why = f"el chunk data declara {data_declared} bytes y hay {len(pcm)} (archivo cortado)"
+            elif wmad["frames_written"] != n:
+                why = f"wmad framesWritten={wmad['frames_written']} y el archivo tiene {n} frames"
         if why:
             raise SystemExit(f"{name}: toma rechazada, {why} (--allow-invalid para leerla igual)")
     return mono, sr, n, wmad
@@ -541,16 +551,18 @@ def self_test_formats():
             try: read("bad.wav", data); failures.append(f"{what}: tenia que rechazarse")
             except SystemExit: pass
         # wmad: el valido pasa; cada causa de rechazo, por separado.
-        ok = riff(fmt_chunk(3, 1, 44100, 32), pack(mono_vals), wmad_chunk())
+        mk = lambda **kw: wmad_chunk(written=len(mono_vals), **kw)
+        ok = riff(fmt_chunk(3, 1, 44100, 32), pack(mono_vals), mk())
         got, _, info = read("ok.wav", ok)
-        if got != mono_vals or info["wmad"]["frames_written"] != 1000:
+        if got != mono_vals or info["wmad"]["frames_written"] != len(mono_vals):
             failures.append("wmad valido: no se acepto o no se parseo")
         pay = pack(mono_vals)
-        cases = (("valid=0", "v0.wav", wmad_chunk(valid=0)), ("lost>0", "l.wav", wmad_chunk(lost=3)),
-                 ("discontinuities>0", "dc.wav", wmad_chunk(disc=1)),
-                 ("rate distinto", "r.wav", wmad_chunk(rate=48000)),
-                 ("version 2", "v2.wav", wmad_chunk(version=2)),
-                 ("nombre .invalid.wav", "toma.invalid.wav", wmad_chunk()))
+        cases = (("valid=0", "v0.wav", mk(valid=0)), ("lost>0", "l.wav", mk(lost=3)),
+                 ("discontinuities>0", "dc.wav", mk(disc=1)),
+                 ("rate distinto", "r.wav", mk(rate=48000)),
+                 ("version 2", "v2.wav", mk(version=2)),
+                 ("nombre .invalid.wav", "toma.invalid.wav", mk()),
+                 ("framesWritten distinto de los frames", "fw.wav", wmad_chunk(written=len(mono_vals) + 1)))
         for what, name, wm in cases:
             data = riff(fmt_chunk(3, 1, 44100, 32), pay, wm)
             ALLOW_INVALID = False
@@ -560,6 +572,22 @@ def self_test_formats():
             try: read(name, data)
             except SystemExit: failures.append(f"wmad {what}: --allow-invalid tenia que dejarlo pasar")
             ALLOW_INVALID = False
+        # data truncado: el header declara mas bytes de los que hay (toma cortada a mitad de copia).
+        cut = riff(fmt_chunk(3, 1, 44100, 32), pay, mk())
+        cut = cut[:-12]
+        ALLOW_INVALID = False
+        try: read("cut.wav", cut); failures.append("float32 con wmad y data truncado: tenia que rechazarse")
+        except SystemExit: pass
+        ALLOW_INVALID = True
+        try: read("cut.wav", cut)
+        except SystemExit: failures.append("data truncado: --allow-invalid tenia que dejarlo pasar")
+        ALLOW_INVALID = False
+        # La tolerancia vieja sigue: PCM16 sin wmad con data declarado de mas se lee.
+        short = riff(fmt_chunk(1, 1, 44100, 16), struct.pack('<6h', *ints))[:-4]
+        try: got, _, _ = read("old.wav", short)
+        except SystemExit: failures.append("PCM16 sin wmad truncado: la tolerancia vieja se perdio")
+        else:
+            if got != [v / 32768.0 for v in ints[:4]]: failures.append("PCM16 truncado: frames mal leidos")
     return failures
 
 def synth(sr, secs, hz_of_t, harmonics=6):
