@@ -1,7 +1,7 @@
 ---
 title: "Aviso a NoisyPad — bump a 2.22.0"
 type: reference
-status: draft
+status: current
 created: 2026-10-02
 released: 2026-10-05
 ---
@@ -20,7 +20,8 @@ desenchufe).
 > `audio-android`, `audio-iosarm64`, `audio-iossimulatorarm64`), con 2.21.0 como control positivo y
 > 9.9.9 como control negativo (404).
 >
-> **SIN ENVIAR.** Lo envía el humano y se marca acá.
+> **Enviado por el humano el 2026-10-12.** La línea de stb_vorbis y TinySoundFont de §3 se agregó después
+> del envío y va aparte, como posdata.
 > Medido: NoisyPad `db7145ca` compila con **0 errores** contra las ramas de REQ-050 S2 y S3 y contra
 > master. Compilamos en un worktree descartable contra `mavenLocal` y no editamos nada de ustedes.
 
@@ -172,6 +173,14 @@ click.
   finito no se retiene, y el release sigue en la última frecuencia válida.
 - Hueco que queda declarado: llamar a `connectDevice` y `disconnectDevice` **a la vez desde hilos
   distintos** no está protegido. Si los llaman desde Main, como hoy, no les pega.
+- **Abierto, no lo arregla 2.22.0: un `.sf3` o `.sf2` hostil puede tumbar el proceso.** El decodificador
+  Ogg que usamos para `.sf3` (stb_vorbis 1.22, sin cambios upstream desde 2021) tiene 12 CVE públicas sin
+  arreglo upstream. La más alta es CVE-2026-89266 (CVSS 8.8, en `start_decoder`). Además, nuestro fuzzing
+  encontró lecturas fuera de rango en el parser de TinySoundFont con un `.sf2` armado. Les pega a ustedes,
+  porque importan y descargan fonts (`SoundFontRepositoryImpl.importFromFile`, `SoundFontDownloadManager`).
+  Los fonts que vienen con la app no disparan nada. Lo cierra **REQ-048**: pasamos al fork de stb_vorbis de
+  SDL_mixer y validamos el font antes de usarlo. Les avisamos cuando salga. Hasta entonces, la mitigación es
+  cargar sólo fonts de origen confiable.
 
 ## 4 · Cómo lo verificamos
 - **Smoke en su g42 con la UGREEN CM720** (`smoke-20261001-181848-74184`): 40 PASS, 0 FAIL. Las tres
