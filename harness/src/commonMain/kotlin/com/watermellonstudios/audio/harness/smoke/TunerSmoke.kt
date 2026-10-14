@@ -64,8 +64,8 @@ enum class TunerPhase(val id: String, val configuration: TuningConfiguration, va
 }
 
 /**
- * Lo que el plan necesita de la entrada y del motor además del afinador: el nivel de la ENTRADA (con
- * él se mide el piso, independiente de lo que publique el afinador), contra qué Hz mide el motor (el
+ * Lo que el plan necesita de la entrada y del motor además del afinador: el pico de la ENTRADA
+ * (informativo: `entrada-dbfs`, no juzga nada, ver [silenceFloor]), contra qué Hz mide el motor (el
  * objetivo global que empujó el último afinador, ver TunerFactory) y cerrar la captura.
  *
  * Cerrarla es parte del contrato porque `ITuner.stop()` NO cierra el stream de captura que abrió
@@ -107,22 +107,30 @@ data class ThresholdRequest(val dbfs: Float?, val problem: String?) {
 }
 
 /**
- * `piso-silencio` de una fase: la entrada no pasó del umbral en la ventana de silencio. `null`
- * (no se emite línea ⇒ no-verificable, AC-053.3) sin umbral o sin una sola lectura CON SEÑAL de la
- * entrada: un piso no medido nunca es cumplido, y un silencio digital no es una sala en silencio.
+ * `piso-silencio` de una fase: el NIVEL del afinador (`nivel-dbfs`, el RMS de lo que analizó en cada
+ * tick, [FLOOR_METER]) no pasó del umbral en la ventana de silencio. `null` (no se emite línea ⇒
+ * no-verificable, AC-053.3) sin umbral o sin una sola lectura CON SEÑAL: un piso no medido nunca es
+ * cumplido, y un silencio digital no es una sala en silencio.
+ *
+ * Por qué el nivel del afinador y no la entrada (corrida 4.6 en el g42, 2026-10-14): el medidor de
+ * entrada de `:audio` RETIENE el pico y decae ~0,3 dB/s; el silencio que siguió al A4 midió −4,1 dBFS
+ * con la sala callada (un BLOQUEADO falso), y el nivel del afinador, −43,4 (≈ −15 con el A4).
  *
  * Decide con el número que ESCRIBE (un decimal), no con el crudo: el juez sólo ve lo escrito y
- * verifica que lo afirmado cuadre con eso.
+ * verifica que lo afirmado cuadre con eso. La evidencia nombra el medidor: el juez exige el de la ficha.
  */
-fun silenceFloor(phase: TunerPhase, maxInputDbfs: Float?, readings: Int, thresholdDbfs: Float?): PreconditionReading? {
-    if (thresholdDbfs == null || maxInputDbfs == null || maxInputDbfs.isNaN()) return null
-    val shown = decimal1(maxInputDbfs)
+fun silenceFloor(phase: TunerPhase, maxLevelDbfs: Float?, readings: Int, thresholdDbfs: Float?): PreconditionReading? {
+    if (thresholdDbfs == null || maxLevelDbfs == null || maxLevelDbfs.isNaN()) return null
+    val shown = decimal1(maxLevelDbfs)
     val threshold = decimal1(thresholdDbfs)
     return PreconditionReading(
-        tenths(maxInputDbfs) < tenths(thresholdDbfs),
-        "fase:${phase.id},entrada-max-dbfs:$shown,umbral-dbfs:$threshold,lecturas:$readings",
+        tenths(maxLevelDbfs) < tenths(thresholdDbfs),
+        "fase:${phase.id},medidor:$FLOOR_METER,nivel-max-dbfs:$shown,umbral-dbfs:$threshold,lecturas:$readings",
     )
 }
+
+/** El medidor del piso, tal como lo nombra la evidencia y lo declara la ficha (`medidor`). */
+const val FLOOR_METER = "nivel-afinador"
 
 /** Un valor en décimas, como lo escribe [decimal1] (los infinitos quedan en los extremos). */
 private fun tenths(x: Float): Long = when {
@@ -190,8 +198,9 @@ fun decimal1(x: Float?): String {
  *    de la nota anterior no cae en el silencio), la ventana, y su cierre `step=<fase>-estimulo` /
  *    `step=<fase>-control` con lo que rindió el motor. Durante la ventana, un tick cada
  *    [TUNER_POLL_MS]; el pico de salida se lee cada [PEAK_POLL_MS] (la captura del motor guarda ~43 ms).
- * 4. Al cerrar el silencio, `step=precondicion id=piso-silencio` con la entrada medida y el umbral
- *    que mandó el script (sin umbral o sin una lectura con señal, no se emite: no-verificable).
+ * 4. Al cerrar el silencio, `step=precondicion id=piso-silencio` con el nivel del afinador medido y
+ *    el umbral que mandó el script (sin umbral o sin una lectura con señal, no se emite:
+ *    no-verificable). El pico de la entrada se emite (tick y cierre) pero no juzga nada.
  * 5. Pase lo que pase, la cuerda vuelve a `null` (el motor queda sin objetivo), el afinador se para
  *    y la captura se cierra ([TunerProbe.stopInput]). Al final del panel, `step=parada` afirma que la
  *    entrada quedó cerrada.
@@ -313,8 +322,9 @@ class TunerWindows(
         var peak = 0f
         var elapsed = 0L
         var ticks = 0
-        var maxInput: Float? = null
-        var inputReadings = 0   // las lecturas de la entrada CON señal (pico > 0)
+        var maxInput: Float? = null      // informativo: el medidor de entrada retiene el pico
+        var maxLevel: Float? = null      // el piso: el nivel del afinador
+        var levelReadings = 0            // las lecturas del afinador CON señal (RMS > 0)
         try {
             while (elapsed < windowMs) {
                 val step = minOf(PEAK_POLL_MS, windowMs - elapsed)
@@ -323,13 +333,16 @@ class TunerWindows(
                 peak = maxOf(peak, port.outputPeak())
                 if (elapsed % TUNER_POLL_MS == 0L) {
                     val input = probe.inputPeak()?.takeIf { !it.isNaN() }
-                    reportTunerTick(r, phase, n, elapsed, tuner.reading(), input)
+                    val reading = tuner.reading()
+                    reportTunerTick(r, phase, n, elapsed, reading, input)
                     ticks++
-                    // Un pico de 0 no es una medición del piso: es silencio digital (ver silenceFloor).
-                    if (input != null && input > 0f) {
-                        inputReadings++
-                        val db = 20f * log10(input)
-                        maxInput = maxOf(maxInput ?: db, db)
+                    peakDbfs(input)?.let { db -> maxInput = maxOf(maxInput ?: db, db) }
+                    // Un RMS de 0 no es una medición del piso: es silencio digital (ver silenceFloor).
+                    val rms = reading?.snapshot?.levelRms
+                    if (rms != null && rms > 0f && rms.isFinite()) {
+                        levelReadings++
+                        val db = 20f * log10(rms)
+                        maxLevel = maxOf(maxLevel ?: db, db)
                     }
                 }
             }
@@ -365,12 +378,13 @@ class TunerWindows(
             PANEL, step, motivo == null,
             "n" to n, "de" to of, "tipo" to "silencio", "ruta" to Route.SYSTEM.id, "backend" to backend,
             "ventana-ms" to windowMs, "frames" to frames, "pico" to formatPeak(peak), "ticks" to ticks,
-            "entrada-max-dbfs" to decimal1(maxInput), "entrada-lecturas" to inputReadings,
+            "entrada-max-dbfs" to decimal1(maxInput),
+            "nivel-max-dbfs" to decimal1(maxLevel), "nivel-lecturas" to levelReadings,
             "umbral-dbfs" to decimal1(floorThresholdDbfs),
             *reason(motivo),
         )
         // El piso, medido en ESTA ventana de silencio (D9, AC-053.12).
-        silenceFloor(phase, maxInput, inputReadings, floorThresholdDbfs)?.let {
+        silenceFloor(phase, maxLevel, levelReadings, floorThresholdDbfs)?.let {
             r.precondition(PANEL, SmokePreconditions.SILENCE_FLOOR, it.met, it.evidence)
         }
         return ok

@@ -43,10 +43,11 @@
         {
           "id": "piso-silencio",
           "verificador": "app",
-          "umbral-dbfs": -25.0,
-          "descripcion": "UMBRAL PROVISIONAL (se fija en la tarea 4.6 con la medicion en el g42; hasta entonces no esta medido). La app mide el pico de la ENTRADA del motor (no lo que publica el afinador) en la ventana de silencio de cada fase y lo compara con este umbral (un decimal), que el script le manda por extra (harness.smoke.umbral-dbfs.<id>). Una linea por fase: la que falta deja esa fase no-verificable. Sin umbral, o sin una sola lectura con senal (pico 0 en todas: silencio DIGITAL, no una sala en silencio), la app no la emite: no-verificable. Un ruido en la sala explica tanto un enganche en el silencio como un afinador que no engancha el A4: bloquea lo que el afinador leyo, en las dos fases.",
+          "umbral-dbfs": -30.0,
+          "medidor": "nivel-afinador",
+          "descripcion": "El piso es el NIVEL del afinador: el maximo de nivel-dbfs (el RMS de lo que analizo en cada tick) en la ventana de silencio de cada fase, contra este umbral (un decimal), que el script le manda por extra (harness.smoke.umbral-dbfs.<id>). El umbral sale de la corrida 4.6 en el g42 (smoke-20261014-130356-73587-06ef6ccbd71c, 2026-10-14, sala en silencio): maximo en silencio -43.4 dBFS en las dos fases, y el A4 por el parlante del orden de -15. La entrada del motor (entrada-dbfs) se emite en cada tick y en el cierre del silencio pero NO juzga nada: su medidor retiene el pico y decae ~0.3 dB/s, y el silencio que siguio al A4 midio -4 dBFS con la sala callada. Una linea por fase: la que falta deja esa fase no-verificable. Sin umbral, o sin una sola lectura del afinador con senal (RMS 0 en todas: silencio DIGITAL, no una sala en silencio), la app no la emite: no-verificable. Un ruido en la sala explica tanto un enganche en el silencio como un afinador que no engancha el A4: bloquea lo que el afinador leyo, en las dos fases.",
           "depende": ["lectura-*"],
-          "remedio": "Silencio en la sala (nadie hablando, sin musica ni ventiladores cerca del telefono) y volver a correr el plan. Si la evidencia es la-app-no-emitio-su-linea y el control dice entrada-lecturas=0, la entrada no entrego senal: revisar que el acceso al microfono no este bloqueado (control de privacidad de Android) y correr --plan captura. El script no toca nada del telefono."
+          "remedio": "Silencio en la sala (nadie hablando, sin musica ni ventiladores cerca del telefono) y volver a correr el plan. Si la evidencia es la-app-no-emitio-su-linea y el control dice nivel-lecturas=0, la entrada no entrego senal: revisar que el acceso al microfono no este bloqueado (control de privacidad de Android) y correr --plan captura. El script no toca nada del telefono."
         }
       ]
     },

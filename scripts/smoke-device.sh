@@ -84,10 +84,13 @@
 #
 # REQ-053 S4 — el afinador (`--plan afinador`, D9, D17). Lo juzga el SNAPSHOT del afinador, no un oido:
 #   - Precondiciones (ficha): el permiso del mic (host), que el mic abre y el piso de la entrada en
-#     silencio (las dos de app, una linea por fase). El umbral del piso lo declara la ficha y viaja a
+#     silencio (las dos de app, una linea por fase). El piso es el NIVEL del afinador (`nivel-dbfs`, el
+#     RMS de su snapshot), no la entrada (`entrada-dbfs`), que retiene el pico (corrida 4.6): la
+#     entrada se emite y no juzga nada. El umbral y el medidor los declara la ficha; el umbral viaja a
 #     la app por extra (`--es harness.smoke.umbral-dbfs.<id> <dBFS>`, `smoke_py extras`): la app no
-#     lee la ficha. El juez verifica que la app midio contra ESE umbral y que lo que dice cuadra con su
-#     medicion; si no, no-verificable. El volumen multimedia no se verifica ni se toca (D3).
+#     lee la ficha. El juez verifica que la app midio con ESE medidor contra ESE umbral y que lo que
+#     dice cuadra con su medicion; si no, no-verificable. El volumen multimedia no se verifica ni se
+#     toca (D3).
 #   - Dos fases, con el mismo A4 del fixture .sf2 por el parlante (D5): `reproduccion` (la
 #     configuracion del panel de la UI, sin cuerda: AC-053.14) y `juicio` (ukelele high-G, cuerda 1 =
 #     A4: AC-053.13). Cada fase: `<fase>-arranque`, una ventana de estimulo y una de silencio en el
@@ -427,7 +430,11 @@ def load_setup(path):
                     # Un decimal: viaja con uno (`extras`) y el juez compara la evidencia contra la ficha.
                     if abs(u * 10 - round(u * 10)) > 1e-6:
                         raise BadSetup("%s: umbral-dbfs con un decimal como mucho (viaja a la app con uno): %r" % (where, u))
-                allowed = COMMON_KEYS | {"ventana-humana", "umbral-dbfs"}
+                # S4 (corrida 4.6): con que mide la app lo que compara contra el umbral. El juez exige que
+                # la evidencia lo nombre. Solo junto a umbral-dbfs.
+                if "medidor" in p and ("umbral-dbfs" not in p or not isinstance(p["medidor"], str) or not KEY.match(p["medidor"])):
+                    raise BadSetup("%s: medidor va con umbral-dbfs y es un id [a-z0-9-]+" % where)
+                allowed = COMMON_KEYS | {"ventana-humana", "umbral-dbfs", "medidor"}
             else:
                 raise BadSetup("%s: verificador desconocido %r (host o app)" % (where, verifier))
             unknown = set(p) - allowed
@@ -858,7 +865,7 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
         else:
             evidence = ";".join(f.get("evidencia", "-") for f in right)
             bad = [f for f in right if f.get("cumplida") not in ("true", "false") or f.get("ok") != f.get("cumplida")]
-            incoherent = [f for f in right if "umbral-dbfs" in p and not measured_coherently(f, p["umbral-dbfs"])]
+            incoherent = [f for f in right if "umbral-dbfs" in p and not measured_coherently(f, p["umbral-dbfs"], p.get("medidor"))]
             # S4 (review): el afinador emite sus precondiciones de app UNA POR FASE (`fase:<f>` en la
             # evidencia). La que falta deja esa fase sin verificar, aunque la otra este cumplida.
             phases_missing = [ph for ph in TUNER_PHASES if panel == TUNER and p["verificador"] == "app"
@@ -885,11 +892,15 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
         return {"id": p["id"], "plan": panel, "verificador": p["verificador"], "cumplida": state == "cumplida",
                 "estado": state, "evidencia": evidence, "remedio": p["remedio"], "depende": list(p["depende"])}
 
-    def measured_coherently(f, threshold):
-        """La evidencia de una medicion con umbral (`entrada-max-dbfs:<x>,umbral-dbfs:<u>`) es de ESTA
-        ficha (u == umbral) y sostiene lo que dice (cumplida == x < u)."""
+    def measured_coherently(f, threshold, meter):
+        """La evidencia de una medicion con umbral (`medidor:<m>,nivel-max-dbfs:<x>,umbral-dbfs:<u>`) es
+        de ESTA ficha (u == umbral, y m == el `medidor` que declara, si declara uno) y sostiene lo que dice
+        (cumplida == x < u). S4, corrida 4.6: el piso se mide con el nivel del afinador; uno medido con
+        la entrada (que retiene el pico) no prueba el piso de esta ficha."""
         ev = f.get("evidencia", "")
-        m_x = re.search(r"(?:\A|,)entrada-max-dbfs:(-?(?:[0-9]+(?:\.[0-9]+)?|inf))(?:,|\Z)", ev)
+        if meter is not None and not re.search(r"(?:\A|,)medidor:%s(?:,|\Z)" % re.escape(meter), ev):
+            return False
+        m_x = re.search(r"(?:\A|,)nivel-max-dbfs:(-?(?:[0-9]+(?:\.[0-9]+)?|inf))(?:,|\Z)", ev)
         m_u = re.search(r"(?:\A|,)umbral-dbfs:(-?[0-9]+(?:\.[0-9]+)?)(?:,|\Z)", ev)
         if not m_x or not m_u:
             return False
