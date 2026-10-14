@@ -23,6 +23,10 @@ import kotlin.random.Random
  *   `control`, cada una con su aviso `escuchar`, REQ-053 S3), `descarga`, y el rechazo: `fixture`
  *   (el archivo trucho) + `no-soundfont`.
  * - `sf3`: `fixture`, `carga`, `preset`, `nota`, las dos ventanas, `descarga`.
+ * - `afinador` (REQ-053 S4): el fixture `.sf2` (`fixture`, `carga`, `preset`), y por fase
+ *   (`reproduccion`, `juicio`) `<fase>-arranque`, sus dos ventanas (`<fase>-estimulo`,
+ *   `<fase>-control`) con un tick `step=afinador` cada [TUNER_POLL_MS], las precondiciones `mic-abre`
+ *   y `piso-silencio`, y `descarga`. Ver [TunerWindows].
  * - `usb`: el fixture `.sf2` (`fixture`, `carga`, `preset`), `motor-parado` (acá), los que emita el
  *   panel de la plataforma (ver `UsbHarness` en androidMain), que toca las dos ventanas POR LIBUSB
  *   con la función que recibe, y `descarga`. Sin USB en la plataforma,
@@ -47,6 +51,8 @@ class SmokePlanRunner(
      */
     private val usb: (suspend (SmokeReporter, suspend (SmokeReporter) -> Boolean) -> Boolean)?,
     private val windows: ListeningWindows,
+    /** REQ-053 S4: las ventanas del afinador (el A4 por el parlante y el silencio, por fase). */
+    private val tuner: TunerWindows,
     private val pause: suspend (Long) -> Unit = { delay(it) },
 ) {
 
@@ -106,6 +112,7 @@ class SmokePlanRunner(
         Panel.CAPTURA -> capture(r)
         Panel.SF2 -> sf2(r)
         Panel.SF3 -> sf3(r)
+        Panel.AFINADOR -> tunerPanel(r)
         Panel.USB -> usb?.let { runUsb -> usbPanel(r, runUsb) }
             ?: r.report(panel.id, "disponible", false, "motivo" to "no-aplica")
     }
@@ -213,6 +220,18 @@ class SmokePlanRunner(
         val junk = fixtures.notASoundFont(r, p)
         val rejected = junk != null && soundFont.loadRejects(r, p, junk, Fixtures.NOT_A_SOUNDFONT)
         return played && rejected
+    }
+
+    private suspend fun tunerPanel(r: SmokeReporter): Boolean {
+        val p = Panel.AFINADOR.id
+        return runTunerPanel(
+            loadFixture = {
+                val fixture = fixtures.materialize(r, p, Fixtures.SF2)
+                fixture != null && soundFont.load(r, p, fixture, Fixtures.SF2)
+            },
+            windows = { tuner.run(r, seeded.seed, Fixtures.SF2) },
+            unload = { soundFont.unload(r, p) },
+        )
     }
 
     private suspend fun sf3(r: SmokeReporter): Boolean {

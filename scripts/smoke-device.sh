@@ -17,9 +17,11 @@
 #      los permisos de runtime del manifest, o sea RECORD_AUDIO; el permiso USB NO es de runtime y
 #      no se concede asi — es el dialogo del sistema, un gesto humano);
 #   4. verifica las precondiciones de HOST de la ficha para el plan pedido, por adb y en SOLO
-#      LECTURA, antes de disparar el plan (REQ-053, AC-053.1);
+#      LECTURA, antes de disparar el plan (REQ-053, AC-053.1); su salida cruda queda en
+#      <out>/precondiciones-host/<plan>/<id>.txt (el mismo id puede vivir en dos planes);
 #   5. dispara el plan con un extra de intent (MainActivity, build debug):
 #        am start ... --es harness.smoke <plan> --es harness.smoke.run <id> --es harness.smoke.semilla <n>
+#          [--es harness.smoke.umbral-dbfs.<id> <dBFS> ...]   (S4: los umbrales de la ficha)
 #   6. lee las lineas `HARNESS-SMOKE` de ESA corrida (filtra por run=<id>; el buffer de logcat no
 #      se borra, es del device) hasta `panel=plan step=fin`, o hasta el techo; mientras tanto SIGUE
 #      las ventanas de escucha y le pregunta al sensor por cada una (REQ-053 S3, abajo);
@@ -80,8 +82,30 @@
 #     numeros: REQ-051), "la suite no se corta" (ya lo miden las filas de la suite) y "captura:
 #     hablarle al microfono" (el estimulo hacia el mic es S4, el afinador, o REQ-051).
 #
+# REQ-053 S4 — el afinador (`--plan afinador`, D9, D17). Lo juzga el SNAPSHOT del afinador, no un oido:
+#   - Precondiciones (ficha): el permiso del mic (host), que el mic abre y el piso de la entrada en
+#     silencio (las dos de app, una linea por fase). El piso es el NIVEL del afinador (`nivel-dbfs`, el
+#     RMS de su snapshot), no la entrada (`entrada-dbfs`), que retiene el pico (corrida 4.6): la
+#     entrada se emite y no juzga nada. El umbral y el medidor los declara la ficha; el umbral viaja a
+#     la app por extra (`--es harness.smoke.umbral-dbfs.<id> <dBFS>`, `smoke_py extras`): la app no
+#     lee la ficha. El juez verifica que la app midio con ESE medidor contra ESE umbral y que lo que
+#     dice cuadra con su medicion; si no, no-verificable. El volumen multimedia no se verifica ni se
+#     toca (D3).
+#   - Dos fases, con el mismo A4 del fixture .sf2 por el parlante (D5): `reproduccion` (la
+#     configuracion del panel de la UI, sin cuerda: AC-053.14) y `juicio` (ukelele high-G, cuerda 1 =
+#     A4: AC-053.13). Cada fase: `<fase>-arranque`, una ventana de estimulo y una de silencio en el
+#     orden de la semilla (clave `afinador-<fase>`), y un tick `step=afinador` cada 80 ms con fase,
+#     ventana, estado (sin-lectura / midiendo / enganchado), Hz, nota, cents, convergido, rate y
+#     perdidos. Un tick no es un veredicto.
+#   - El juez arma con los ticks una fila por ventana, `lectura-<fase>-<estimulo|control>`: el silencio
+#     es el control en las dos fases (un enganche ahi es FAIL); el estimulo de juicio es PASS solo con
+#     `enganchado` en A4 (sin tolerancia en cents, D12) y si no, FAIL que dice en que estado QUEDO (el
+#     ultimo tick) o en que otra nota engancho; el estimulo de reproduccion es OBSERVADO (estado y Hz,
+#     no mueve el exit). Sin ticks, FAIL sin-ticks. Una ventana que el motor no rindio es FAIL y su
+#     lectura no se juzga; una precondicion incumplida la deja BLOQUEADO.
+#
 # Exit: 1 algun FAIL > 4 algun BLOQUEADO > 3 HUMANO pendiente > 0 todo PASS · 2 uso/infra (tambien
-# una ficha invalida).
+# una ficha invalida). OBSERVADO (S4) no mueve el exit.
 # Una fila de la suite USB NO-APLICA (linea con aplica=false: el device no ofrece su config, REQ-050
 # S3) no mueve el exit: se lista aparte y no cuenta como cobertura. La vieja marca medido=false (D11
 # de MINI-038: el runner ignoraba el rate de la fila) ya no existe y, si reaparece, es FAIL.
@@ -91,16 +115,19 @@
 # `pasos` ({panel, paso, veredicto, detalle, observado, precondiciones}), `semilla`, `semilla-origen`,
 # `orden` ({panel: [estimulo|control, ...]}, lo que da la semilla) y `sensor` ({panel, n, tipo,
 # estimulo, ruta, sensor, veredicto, evidencia, consultado, juicio}, una por ventana cerrada).
-# `observado` es lo que emitio la app para ese paso (null si no lo emitio).
+# `observado` es lo que emitio la app para ese paso (null si no lo emitio). S4: `afinador` ({fase, tipo,
+# n, ticks, estados, ultimo, primer-enganche, veredicto, detalle}, una por ventana del afinador) y
+# OBSERVADO en `resumen`.
 #
 # El formato de las lineas vive en un solo lugar:
 #   harness/src/commonMain/kotlin/com/watermellonstudios/audio/harness/smoke/HarnessSmoke.kt
 # y lo fija HarnessSmokeTest. Los pasos que cada panel emite estan en SmokePlanRunner (salida,
-# captura, sf2, sf3) y en UsbHarness (usb); EXPECTED, abajo, es la otra punta de ese contrato. Las
-# precondiciones que emite la app estan en SmokePreconditions.
+# captura, sf2, sf3), en TunerSmoke (afinador, con su tick; lo fija TunerSmokeTest) y en UsbHarness
+# (usb); EXPECTED, abajo, es la otra punta de ese contrato. Las precondiciones que emite la app estan
+# en SmokePreconditions.
 #
 # Uso:
-#   ANDROID_SERIAL=<serial> bash scripts/smoke-device.sh [--plan todo|salida,sf2,...]
+#   ANDROID_SERIAL=<serial> bash scripts/smoke-device.sh [--plan todo|salida,sf2,afinador,...]
 #        [--usb-espera-s 120] [--techo-s N] [--out DIR] [--no-build] [--setup FICHA]
 #        [--sensor oido-humano|ninguno]
 #   bash scripts/smoke-device.sh --self-test
@@ -166,8 +193,14 @@ EXPECTED = {
             "wake-lock", "streaming-start", "streaming-stats", "reconectar-mismo", "conectar-otro",
             "suite", "streaming-stop", "estimulo", "control",
             "backend-restaurado", "desconectar", "descarga"],
+    # REQ-053 S4: el A4 del fixture .sf2 por el parlante, y por fase (reproduccion, juicio) su
+    # arranque y sus dos ventanas. Los ticks (step=afinador) no son pasos: el juez los usa para las
+    # lecturas de DERIVED.
+    "afinador": ["fixture", "carga", "preset",
+                 "reproduccion-arranque", "reproduccion-estimulo", "reproduccion-control",
+                 "juicio-arranque", "juicio-estimulo", "juicio-control", "parada", "descarga"],
 }
-ORDER = ["salida", "captura", "sf2", "sf3", "usb"]
+ORDER = ["salida", "captura", "sf2", "sf3", "afinador", "usb"]
 # Pasos que se piden SOLO si hubo dialogo de permiso (REQ-050 S1): el broadcast falso que manda el
 # script mientras el dialogo esta pendiente, y el juicio de la app sobre lo que paso.
 WITH_DIALOG = {"usb": ["broadcast-falso", "permiso-falso"]}
@@ -195,6 +228,48 @@ NOT_DISCRIMINATING_REMEDY = ("Repetir la corrida contestando SOLO lo que se oye:
 # El margen entre la espera de la respuesta y la pausa que la app deja despues de cada ventana: la
 # respuesta tiene que llegar ANTES de que la app avise la ventana siguiente (ver seguir()).
 ANSWER_MARGIN_S = 3
+# --- REQ-053 S4: el afinador (D9, D12, D17) ------------------------------------------------------
+# Lo juzga el SNAPSHOT del afinador, no un sensor: la app emite un tick por lectura (`step=afinador`,
+# con fase, ventana, estado y Hz) y el juez decide con los ticks de cada ventana una fila DERIVADA
+# `lectura-<fase>-<estimulo|control>`. La fase `reproduccion` (la configuracion del panel, sin cuerda)
+# se OBSERVA: su estimulo no da PASS ni FAIL de AC-053.13. La `juicio` (el A4) si. El silencio de cada
+# fase es el control: un enganche ahi es FAIL.
+TUNER = "afinador"
+TUNER_TICK = "afinador"
+TUNER_PHASES = ("reproduccion", "juicio")
+TUNER_REPRODUCTION, TUNER_JUDGMENT = TUNER_PHASES
+TUNER_STATES = ("sin-lectura", "midiendo", "enganchado")
+TUNER_LOCKED = "enganchado"
+# D12: PASS = enganchado en la nota del estimulo, sin tolerancia en cents (los cents son de REQ-051).
+# Y contra el objetivo del MOTOR en esa nota: el que reporta el cierre de la ventana (`objetivo-motor-hz`,
+# con un decimal). Otra vista del afinador puede haber empujado otro (TunerFactory: gana el ultimo).
+TUNER_NOTE = "A4"
+TUNER_NOTE_HZ = 440.0
+# Las ventanas del afinador: el paso de cierre -> (fase, tipo).
+TUNER_WINDOWS = {"%s-%s" % (f, k): (f, k) for f in TUNER_PHASES for k in (STIMULUS, CONTROL)}
+# Las filas que arma el JUEZ, no la app: lo que leyo el afinador en cada ventana. Existen para que la
+# ficha pueda bloquearlas (`depende`) y el JSON las nombre.
+DERIVED = {TUNER: ["lectura-%s-%s" % (f, k) for f in TUNER_PHASES for k in (STIMULUS, CONTROL)]}
+# El veredicto de lo que se registra sin juzgar (la fase reproduccion, AC-053.14): no mueve el exit.
+OBSERVED = "OBSERVADO"
+VERDICTS = ("PASS", "FAIL", "BLOQUEADO", "HUMANO", "NO-APLICA", OBSERVED)
+
+
+def order_key(panel, phase=None):
+    """La clave del orden de las ventanas: el panel, o `afinador-<fase>` (TunerPhase.orderKey)."""
+    return "%s-%s" % (panel, phase) if phase else panel
+
+
+ORDER_KEYS = AUDIBLE + tuple(order_key(TUNER, f) for f in TUNER_PHASES)
+
+
+def window_kind(panel, step):
+    """`estimulo` / `control` si el paso cierra una ventana (de escucha, o del afinador); si no, None."""
+    if panel in AUDIBLE and step in WINDOW_STEPS:
+        return step
+    if panel == TUNER and step in TUNER_WINDOWS:
+        return TUNER_WINDOWS[step][1]
+    return None
 
 
 def window_order(seed, panel):
@@ -217,7 +292,7 @@ def number(v):
 
 # La ruta que declara cada plan audible (AC-053.8, "por la ruta declarada"): sf2/sf3 por la salida
 # del sistema, usb por la placa (libusb). El juez la cruza con el backend que REPORTA el motor.
-EXPECTED_ROUTE = {"sf2": "sistema", "sf3": "sistema", "usb": "libusb"}
+EXPECTED_ROUTE = {"sf2": "sistema", "sf3": "sistema", "usb": "libusb", "afinador": "sistema"}
 # El silencio de un control: por debajo de -40 dBFS, el mismo umbral con el que el harness dice que
 # algo sono (SoundFontCheck.MIN_PEAK).
 CONTROL_MAX_PEAK = 0.01
@@ -240,7 +315,7 @@ def window_rendered(f):
     frames, peak = number(f.get("frames")), number(f.get("pico"))
     if not route_ok(f) or f.get("ok") != "true" or frames is None or frames <= 0 or peak is None:
         return False
-    if f.get("step") == STIMULUS:
+    if window_kind(f.get("panel"), f.get("step")) == STIMULUS:
         return peak > 0
     return peak < CONTROL_MAX_PEAK
 # REQ-053 S1: la linea que trae una precondicion verificada (de la app, o del host con
@@ -271,6 +346,9 @@ CHECKS = {
     "usb-placa-no-reclamada": {"tarjeta": int, "clase": int},
 }
 COMMON_KEYS = {"id", "verificador", "depende", "remedio", "descripcion"}
+# El piso del medidor de entrada (InputMetering.SILENT): por debajo no hay dBFS. ThresholdRequest en la
+# app usa el mismo rango.
+UMBRAL_MIN = -160
 
 
 class BadSetup(Exception):
@@ -279,7 +357,7 @@ class BadSetup(Exception):
 
 def known_steps(panel):
     # `suite-1` representa a las filas `suite-N`, que no estan en EXPECTED.
-    return EXPECTED[panel] + WITH_DIALOG.get(panel, []) + (["suite-1"] if panel == "usb" else [])
+    return EXPECTED[panel] + WITH_DIALOG.get(panel, []) + DERIVED.get(panel, []) + (["suite-1"] if panel == "usb" else [])
 
 
 def known_step(panel, step):
@@ -309,7 +387,7 @@ def load_setup(path):
         raise BadSetup('formato desconocido (se espera "formato": 1)')
     if set(doc) - {"formato", "descripcion", "planes"} or not isinstance(doc.get("planes"), dict):
         raise BadSetup('se espera {"formato", "descripcion", "planes"} y "planes" como objeto')
-    seen, out = set(), {}
+    out = {}
     for panel, body in doc["planes"].items():
         if panel not in EXPECTED:
             raise BadSetup("plan desconocido: '%s'" % panel)
@@ -317,6 +395,9 @@ def load_setup(path):
                 or not isinstance(body.get("precondiciones"), list)):
             raise BadSetup("%s: se espera {\"precondiciones\": [...]}" % panel)
         out[panel] = []
+        # S4: el id es unico DENTRO del plan. La misma precondicion puede vivir en dos planes (el
+        # permiso del microfono en captura y en afinador): el juez la evalua por (plan, id).
+        seen = set()
         for p in body["precondiciones"]:
             if not isinstance(p, dict):
                 raise BadSetup("%s: una precondicion no es un objeto" % panel)
@@ -340,7 +421,20 @@ def load_setup(path):
             elif verifier == "app":
                 if "ventana-humana" in p and not isinstance(p["ventana-humana"], bool):
                     raise BadSetup("%s: ventana-humana tiene que ser true o false" % where)
-                allowed = COMMON_KEYS | {"ventana-humana"}
+                # S4: el umbral de una medicion de la app (el piso del afinador). La app no lee la
+                # ficha: el script se lo manda por extra (harness.smoke.umbral-dbfs.<id>).
+                if "umbral-dbfs" in p:
+                    u = p["umbral-dbfs"]
+                    if isinstance(u, bool) or not isinstance(u, (int, float)) or not (UMBRAL_MIN <= u <= 0):
+                        raise BadSetup("%s: umbral-dbfs tiene que ser un numero en dBFS (%d..0)" % (where, UMBRAL_MIN))
+                    # Un decimal: viaja con uno (`extras`) y el juez compara la evidencia contra la ficha.
+                    if abs(u * 10 - round(u * 10)) > 1e-6:
+                        raise BadSetup("%s: umbral-dbfs con un decimal como mucho (viaja a la app con uno): %r" % (where, u))
+                # S4 (corrida 4.6): con que mide la app lo que compara contra el umbral. El juez exige que
+                # la evidencia lo nombre. Solo junto a umbral-dbfs.
+                if "medidor" in p and ("umbral-dbfs" not in p or not isinstance(p["medidor"], str) or not KEY.match(p["medidor"])):
+                    raise BadSetup("%s: medidor va con umbral-dbfs y es un id [a-z0-9-]+" % where)
+                allowed = COMMON_KEYS | {"ventana-humana", "umbral-dbfs", "medidor"}
             else:
                 raise BadSetup("%s: verificador desconocido %r (host o app)" % (where, verifier))
             unknown = set(p) - allowed
@@ -615,11 +709,26 @@ def host(adb, serial, setup_path, requested, run, pkg, evidence_dir):
             except Unverifiable as e:
                 met, evidence = "no-verificable", str(e)
             if evidence_dir:
-                os.makedirs(evidence_dir, exist_ok=True)
-                with open(os.path.join(evidence_dir, "%s.txt" % p["id"]), "w", encoding="utf-8") as f:
+                # Por plan (S4): el mismo id puede vivir en dos planes, y con `todo` uno pisaria al otro.
+                os.makedirs(os.path.join(evidence_dir, panel), exist_ok=True)
+                with open(os.path.join(evidence_dir, panel, "%s.txt" % p["id"]), "w", encoding="utf-8") as f:
                     f.write("".join(sh.log))
             print("HARNESS-SMOKE v=1 run=%s panel=%s step=%s ok=%s id=%s cumplida=%s evidencia=%s verificador=host"
                   % (run, panel, PRECOND, "true" if met == "true" else "false", p["id"], met, value(evidence)))
+
+
+def extras(setup_path, requested):
+    """S4: los umbrales que la ficha declara para las precondiciones de la APP del plan pedido, como
+    argumentos de `am start` (uno por linea): `--es harness.smoke.umbral-dbfs.<id> <dBFS>`. La app no
+    lee la ficha; el script le manda lo que necesita para medir. Los ids salen de la ficha (validados
+    [a-z0-9-]+) y el valor es un numero formateado aca: nada de la ficha llega crudo al `sh` del telefono."""
+    setup = load_setup(setup_path)
+    for panel in plan_panels(requested) or []:
+        for p in setup.get(panel, []):
+            if p["verificador"] == "app" and "umbral-dbfs" in p:
+                print("--es")
+                print("harness.smoke.umbral-dbfs.%s" % p["id"])
+                print("%.1f" % p["umbral-dbfs"])
 
 
 # --- El juez -------------------------------------------------------------------------------------
@@ -629,6 +738,7 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
     rows = []        # {veredicto, panel, paso, detalle, observado, precondiciones}
     preconditions = []
     sensor_entries = []   # S3: un registro por ventana cerrada, con lo que dijo el sensor y su juicio
+    tuner_entries = []    # S4: una por ventana del afinador, con lo que leyo y su veredicto
     seed, seed_origin, orders = None, None, {}
 
     def add(v, panel, step, detail="", observed=None, blockers=()):
@@ -643,7 +753,7 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
         return {k: v for k, v in f.items() if k not in ("v", "run", "panel", "step")}
 
     def finish(code):
-        counts = {k: sum(1 for r in rows if r["veredicto"] == k) for k in ("PASS", "FAIL", "BLOQUEADO", "HUMANO", "NO-APLICA")}
+        counts = {k: sum(1 for r in rows if r["veredicto"] == k) for k in VERDICTS}
         if json_out:
             doc = {"formato": 1, "run": run, "plan": requested, "ficha": setup_path, "exit": code,
                    "resumen": counts, "lineas-host-descartadas": discarded, "host-en-log": taken_from_log,
@@ -653,7 +763,9 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
                    "precondiciones": preconditions,
                    "pasos": [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows],
                    # S3: cada ventana cerrada, con el juicio del sensor (o por que no se lo consulto).
-                   "sensor": [{k: v for k, v in e.items() if not k.startswith("_")} for e in sensor_entries]}
+                   "sensor": [{k: v for k, v in e.items() if not k.startswith("_")} for e in sensor_entries],
+                   # S4: cada ventana del afinador, con su ultimo estado, sus Hz y su veredicto.
+                   "afinador": tuner_entries}
             try:
                 with open(json_out, "w", encoding="utf-8") as f:
                     json.dump(doc, f, ensure_ascii=False, indent=2)
@@ -753,7 +865,21 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
         else:
             evidence = ";".join(f.get("evidencia", "-") for f in right)
             bad = [f for f in right if f.get("cumplida") not in ("true", "false") or f.get("ok") != f.get("cumplida")]
-            if bad:
+            incoherent = [f for f in right if "umbral-dbfs" in p and not measured_coherently(f, p["umbral-dbfs"], p.get("medidor"))]
+            # S4 (review): el afinador emite sus precondiciones de app UNA POR FASE (`fase:<f>` en la
+            # evidencia). La que falta deja esa fase sin verificar, aunque la otra este cumplida.
+            phases_missing = [ph for ph in TUNER_PHASES if panel == TUNER and p["verificador"] == "app"
+                              and not any(re.search(r"(?:\A|,)fase:%s(?:,|\Z)" % ph, f.get("evidencia", "")) for f in right)]
+            if phases_missing and not bad:
+                state = "no-verificable"
+                evidence = "falta-la-linea-de-la-fase:%s:%s" % (",".join(phases_missing), evidence)
+            elif incoherent and not bad:
+                # S4: la app midio contra OTRO umbral que el de la ficha (un extra que no llego bien), o
+                # lo que dice no cuadra con su propia medicion. La linea no prueba nada de esta ficha.
+                state = "no-verificable"
+                evidence = "umbral-o-medicion-incoherente-con-la-ficha:umbral-ficha=%s:%s" % (
+                    p["umbral-dbfs"], ";".join(f.get("evidencia", "-") for f in incoherent))
+            elif bad:
                 # Incluye la de host que dice cumplida=no-verificable (adb fallo, salida ilegible).
                 state = "no-verificable"
                 if any(f.get("cumplida") != "no-verificable" for f in bad):
@@ -765,6 +891,21 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
                 evidence = ";".join(f.get("evidencia", "-") for f in right if f.get("cumplida") == "false")
         return {"id": p["id"], "plan": panel, "verificador": p["verificador"], "cumplida": state == "cumplida",
                 "estado": state, "evidencia": evidence, "remedio": p["remedio"], "depende": list(p["depende"])}
+
+    def measured_coherently(f, threshold, meter):
+        """La evidencia de una medicion con umbral (`medidor:<m>,nivel-max-dbfs:<x>,umbral-dbfs:<u>`) es
+        de ESTA ficha (u == umbral, y m == el `medidor` que declara, si declara uno) y sostiene lo que dice
+        (cumplida == x < u). S4, corrida 4.6: el piso se mide con el nivel del afinador; uno medido con
+        la entrada (que retiene el pico) no prueba el piso de esta ficha."""
+        ev = f.get("evidencia", "")
+        if meter is not None and not re.search(r"(?:\A|,)medidor:%s(?:,|\Z)" % re.escape(meter), ev):
+            return False
+        m_x = re.search(r"(?:\A|,)nivel-max-dbfs:(-?(?:[0-9]+(?:\.[0-9]+)?|inf))(?:,|\Z)", ev)
+        m_u = re.search(r"(?:\A|,)umbral-dbfs:(-?[0-9]+(?:\.[0-9]+)?)(?:,|\Z)", ev)
+        if not m_x or not m_u:
+            return False
+        x, u = float(m_x.group(1)), float(m_u.group(1))
+        return abs(u - float(threshold)) < 0.05 and (f.get("cumplida") == "true") == (x < u)
 
     judged = [p for p in ORDER if (wanted is not None and p in wanted) or p in panels]
     for panel in judged:
@@ -802,7 +943,11 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
 
     def judge_step(panel, step, f, pending):
         bs = blockers(panel, step)
-        if not known_step(panel, step):
+        if step in DERIVED.get(panel, []):
+            # S4 (review): las lecturas del afinador las arma el JUEZ con los ticks. Una que emita la app
+            # no es un PASS paralelo al veredicto: FAIL, antes que cualquier bloqueo.
+            add("FAIL", panel, step, "paso-del-juez: la app no emite lecturas: " + extras(f), observed(f))
+        elif not known_step(panel, step):
             # Auditoria de REQ-053 (bajo): un paso que el juez no conoce no es PASS aunque diga
             # ok=true. Primero que nada: ni un bloqueo ni una espera humana lo pueden tapar.
             add("FAIL", panel, step, "paso-desconocido: " + extras(f), observed(f))
@@ -828,10 +973,10 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
             add("NO-APLICA", panel, step, extras(f), observed(f))
         elif f.get("aplica") == "false":
             add("FAIL", panel, step, "aplica=false fuera de una fila de la suite: " + extras(f), observed(f))
-        elif step in WINDOW_STEPS and not window_rendered(f):
+        elif window_kind(panel, step) and not window_rendered(f):
             # AC-053.8: el motor no rindio la ventana como se declaro. El juez mira los numeros
             # (frames, pico), no solo el ok: un ok=true con frames=0 tambien es FAIL.
-            add("FAIL", panel, step, "%s no-rendido: %s" % (step, extras(f)), observed(f))
+            add("FAIL", panel, step, "%s no-rendido: %s" % (window_kind(panel, step), extras(f)), observed(f))
         elif f.get("ok") == "true":
             add("PASS", panel, step, extras(f), observed(f))
         else:
@@ -861,7 +1006,7 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
 
     # --- S3 (AC-053.10): la semilla y el orden de las ventanas. ------------------------------
     windows = []   # (panel, linea de cierre, fila de su veredicto)
-    window_lines = [f for f in lines if f.get("step") in WINDOW_STEPS and f.get("panel") in AUDIBLE]
+    window_lines = [f for f in lines if window_kind(f.get("panel"), f.get("step"))]
     app_seed = inicio[0].get("semilla") if inicio else None
     if app_seed is not None and not re.fullmatch(r"[0-9]+", app_seed):
         add("FAIL", "plan", "semilla", "la app registro una semilla ilegible: %s" % app_seed)
@@ -877,12 +1022,19 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
         add("FAIL", "plan", "semilla", "sin semilla registrada: el orden de las ventanas no se puede reproducir")
     if seed is not None:
         orders.update({p: window_order(seed, p) for p in judged if p in AUDIBLE})
-    for panel in [p for p in judged if p in AUDIBLE and p in orders]:
-        mine_w = [f for f in window_lines if f.get("panel") == panel]
-        ran = [(f.get("n"), f.get("step")) for f in mine_w]
-        want = [(str(i + 1), k) for i, k in enumerate(orders[panel])]
+        # S4: el afinador ordena cada fase con su clave (TunerPhase.orderKey en el harness).
+        if TUNER in judged:
+            orders.update({order_key(TUNER, f): window_order(seed, order_key(TUNER, f)) for f in TUNER_PHASES})
+    groups = [(p, p, None) for p in judged if p in AUDIBLE] + \
+        [(TUNER, order_key(TUNER, f), f) for f in TUNER_PHASES if TUNER in judged]
+    for panel, key, phase in [g for g in groups if g[1] in orders]:
+        mine_w = [f for f in window_lines if f.get("panel") == panel
+                  and (phase is None or TUNER_WINDOWS.get(f.get("step"), ("",))[0] == phase)]
+        ran = [(f.get("n"), window_kind(panel, f.get("step"))) for f in mine_w]
+        want = [(str(i + 1), k) for i, k in enumerate(orders[key])]
         if mine_w and ran != want[:len(ran)]:
-            add("FAIL", panel, "orden", "las ventanas no siguen la semilla %d: corrio %s, la semilla da %s"
+            add("FAIL", panel, "orden" if phase is None else "orden-" + phase,
+                "las ventanas no siguen la semilla %d: corrio %s, la semilla da %s"
                 % (seed, ",".join("%s:%s" % x for x in ran), ",".join("%s:%s" % x for x in want)))
 
     # --- S3 (AC-053.8..10): el juicio del sensor sobre cada ventana cerrada. ------------------
@@ -894,6 +1046,8 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
         not_discriminating = {}   # sensor -> controles en los que dijo "presente"
         listens = {(f.get("panel"), f.get("n")): f for f in lines if f.get("step") == LISTEN}
         for panel, f, wrow in windows:
+            if panel not in AUDIBLE:
+                continue   # S4: al afinador lo juzga su snapshot (judge_tuner), no un sensor.
             key = (panel, f.get("n"))
             used.add(key)
             recs = by_key.get(key, [])
@@ -967,6 +1121,93 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
                                % (NOT_DISCRIMINATING, ",".join(where), NOT_DISCRIMINATING_REMEDY, old))
                     row["_entry"]["juicio"] = "BLOQUEADO"
 
+    # --- S4 (AC-053.12, AC-053.13): lo que LEYO el afinador en cada ventana. ---------------------
+    def judge_tuner():
+        ticks = [f for f in lines if f.get("panel") == TUNER and f.get("step") == TUNER_TICK]
+        closes = {}
+        for panel, f, row in windows:
+            if panel == TUNER:
+                closes.setdefault(TUNER_WINDOWS[f.get("step")], (f, row))
+        for phase in TUNER_PHASES:
+            for kind in (STIMULUS, CONTROL):
+                step = "lectura-%s-%s" % (phase, kind)
+                f, wrow = closes.get((phase, kind), (None, None))
+                # Un tick es de la ventana con su fase Y su numero: asi lo emite la app.
+                mine = [t for t in ticks if f is not None and t.get("fase") == phase and t.get("n") == f.get("n")]
+                counts = {}
+                for t in mine:
+                    counts[t.get("estado", "-")] = counts.get(t.get("estado", "-"), 0) + 1
+                last = mine[-1] if mine else {}
+                first_lock = next((t for t in mine if t.get("estado") == TUNER_LOCKED), None)
+                entry = {"fase": phase, "tipo": kind, "n": int(f["n"]) if f and (f.get("n") or "").isdigit() else None,
+                         "ticks": len(mine), "estados": counts,
+                         "ultimo": {k: last.get(k) for k in ("estado", "hz", "nota", "cents", "convergido", "rate", "perdidos")} if mine else None,
+                         "primer-enganche": {k: first_lock.get(k) for k in ("t-ms", "hz", "nota", "cents")} if first_lock else None,
+                         "veredicto": None, "detalle": None}
+                tuner_entries.append(entry)
+
+                def say(t):
+                    return "nota=%s hz=%s cents=%s t-ms=%s" % (t.get("nota", "-"), t.get("hz", "-"), t.get("cents", "-"), t.get("t-ms", "-"))
+                summary = "(ticks=%d %s; ultimo: estado=%s %s rate=%s perdidos=%s)" % (
+                    len(mine), " ".join("%s=%d" % kv for kv in sorted(counts.items())) or "-",
+                    last.get("estado", "-"), say(last), last.get("rate", "-"), last.get("perdidos", "-"))
+
+                def verdict(v, detail, observed_fields=None):
+                    entry["veredicto"], entry["detalle"] = v, detail
+                    add(v, TUNER, step, detail, observed_fields if observed_fields is not None else (last or None))
+
+                bs = blockers(TUNER, step)
+                if bs:
+                    # AC-053.12: con una precondicion incumplida el afinador NO se juzga; lo leido queda.
+                    entry["veredicto"], entry["detalle"] = "BLOQUEADO", "precondicion"
+                    blocked(TUNER, step, bs, summary, last or None)
+                    continue
+                if f is None:
+                    verdict("FAIL", "sin-ventana: la app no cerro la ventana %s-%s %s" % (phase, kind, summary))
+                    continue
+                if wrow["veredicto"] in ("BLOQUEADO", "HUMANO"):
+                    # La ventana no se juzgo (una precondicion de la ventana): lo leido tampoco.
+                    bsw = [b for b in blocking if b["plan"] == TUNER and b["id"] in wrow["precondiciones"]]
+                    entry["veredicto"], entry["detalle"] = wrow["veredicto"], "la-ventana-salio-%s" % wrow["veredicto"]
+                    if bsw:
+                        blocked(TUNER, step, bsw, "la ventana salio BLOQUEADO; " + summary, last or None)
+                    else:
+                        add(wrow["veredicto"], TUNER, step, "la ventana salio %s; %s" % (wrow["veredicto"], summary), last or None)
+                    continue
+                if wrow["veredicto"] != "PASS":
+                    # El motor no rindio la ventana como se declaro (AC-053.8): el afinador no se juzga.
+                    entry["detalle"] = "ventana-no-rendida"
+                    continue
+                if not mine:
+                    verdict("FAIL", "sin-ticks: el afinador no emitio ninguna lectura en la ventana %s/%s" % (phase, f.get("n")))
+                    continue
+                bad_ticks = [t for t in mine if t.get("estado") not in TUNER_STATES]
+                if bad_ticks:
+                    verdict("FAIL", "tick-ilegible: estado=%s %s" % (bad_ticks[0].get("estado", "-"), summary))
+                    continue
+                if kind == CONTROL:
+                    if first_lock is not None:
+                        verdict("FAIL", "enganchado-en-silencio %s %s" % (say(first_lock), summary), first_lock)
+                    else:
+                        verdict("PASS", "sin-enganche-en-silencio %s" % summary)
+                    continue
+                if phase == TUNER_REPRODUCTION:
+                    # AC-053.14: se registra en que estado quedo y con que Hz. Ni PASS ni FAIL.
+                    verdict(OBSERVED, "quedo-en=%s hz=%s nota=%s cents=%s %s" % (
+                        last.get("estado", "-"), last.get("hz", "-"), last.get("nota", "-"), last.get("cents", "-"), summary))
+                    continue
+                engine_hz = number(f.get("objetivo-motor-hz"))
+                on_note = next((t for t in mine if t.get("estado") == TUNER_LOCKED and t.get("nota") == TUNER_NOTE), None)
+                if engine_hz is None or abs(engine_hz - TUNER_NOTE_HZ) > 0.05:
+                    verdict("FAIL", "objetivo-del-motor-no-es-%s objetivo-motor-hz=%s (se esperaba %.1f) %s" % (
+                        TUNER_NOTE, f.get("objetivo-motor-hz", "-"), TUNER_NOTE_HZ, summary))
+                elif on_note is not None:
+                    verdict("PASS", "enganchado %s %s" % (say(on_note), summary), on_note)
+                elif first_lock is not None:
+                    verdict("FAIL", "enganchado-en-otra-nota %s (se esperaba %s) %s" % (say(first_lock), TUNER_NOTE, summary), first_lock)
+                else:
+                    verdict("FAIL", "quedo-en=%s %s" % (last.get("estado", "-"), summary))
+
     human_pending = set()
     for panel in [p for p in ORDER if p in panels]:
         mine = [f for f in lines if f.get("panel") == panel]
@@ -981,15 +1222,17 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
         seen = set()
         for f in mine:
             step = f.get("step")
-            if step in (HUMAN, PRECOND, LISTEN):
+            if step in (HUMAN, PRECOND, LISTEN) or (panel == TUNER and step == TUNER_TICK):
                 continue
             seen.add(step)
             before = len(rows)
             judge_step(panel, step, f, pending)
-            if step in WINDOW_STEPS and len(rows) > before:
+            if window_kind(panel, step) and len(rows) > before:
                 windows.append((panel, f, rows[-1]))
         missing_steps(panel, seen, waits, pending)
     judge_windows()
+    if TUNER in panels:
+        judge_tuner()
 
     fin = [f for f in lines if f.get("panel") == "plan" and f.get("step") == "fin"]
     if not fin:
@@ -1027,9 +1270,10 @@ def judge(log, run, requested, setup_path, json_out, host_log=None, host_in_log=
         for r in not_applicable:
             print("%-9s  %-*s  %s" % (r["veredicto"], width, "%s/%s" % (r["panel"], r["paso"]), r["detalle"]))
 
-    n = {k: sum(1 for r in rows if r["veredicto"] == k) for k in ("PASS", "FAIL", "BLOQUEADO", "HUMANO", "NO-APLICA")}
-    print("\nresumen: %d PASS · %d FAIL · %d BLOQUEADO · %d HUMANO · %d NO-APLICA"
-          % (n["PASS"], n["FAIL"], n["BLOQUEADO"], n["HUMANO"], n["NO-APLICA"]))
+    n = {k: sum(1 for r in rows if r["veredicto"] == k) for k in VERDICTS}
+    # S4: OBSERVADO (la fase reproduccion del afinador) se cuenta y no mueve el exit.
+    print("\nresumen: %d PASS · %d FAIL · %d BLOQUEADO · %d HUMANO · %d NO-APLICA · %d %s"
+          % (n["PASS"], n["FAIL"], n["BLOQUEADO"], n["HUMANO"], n["NO-APLICA"], n[OBSERVED], OBSERVED))
     # S3: un juicio de sensor sin dato (?, sin respuesta, sin TTY, --sensor ninguno) es HUMANO pendiente.
     pending = [r for r in rows if r["veredicto"] == "HUMANO"
                and (r["panel"] in human_pending or r["panel"] == "plan" or r["paso"].startswith("sensor-"))]
@@ -1277,7 +1521,7 @@ def main(argv):
                 sys.exit(2)
             judge(pos[0], pos[1], pos[2], pos[3], opt.get("--json") or None, opt.get("--host-log") or None,
                   host_in_log="--host-en-log" in flags, sensor_log=opt.get("--sensor-log") or None, cli_seed=seed)
-        elif mode == "orden" and len(args) == 2 and re.fullmatch(r"[0-9]+", args[0]) and args[1] in AUDIBLE:
+        elif mode == "orden" and len(args) == 2 and re.fullmatch(r"[0-9]+", args[0]) and args[1] in ORDER_KEYS:
             print(" ".join(window_order(int(args[0]), args[1])))
         elif mode == "seguir" and len(args) == 5 and args[3] in SENSORS:
             follow(*args)
@@ -1289,6 +1533,8 @@ def main(argv):
             print("veredicto=%s sensor=%s evidencia=%s" % (res["veredicto"], res["sensor"], res["evidencia"]))
         elif mode == "host" and len(args) in (6, 7):
             host(*args[:6], evidence_dir=args[6] if len(args) == 7 else None)
+        elif mode == "extras" and len(args) == 2:
+            extras(args[0], args[1])
         elif mode == "validar" and len(args) == 1:
             setup = load_setup(args[0])
             print("ficha valida: %d precondiciones en %d planes"
@@ -1348,12 +1594,17 @@ sensor_valid() {
 # Cuantos paneles audibles (sf2, sf3, usb) tiene el plan: cada uno toca dos ventanas.
 audible_panels() {
     local plan="$1" p n=0
-    [[ "$plan" == todo ]] && plan="salida,captura,sf2,sf3,usb"
+    [[ "$plan" == todo ]] && plan="salida,captura,sf2,sf3,afinador,usb"
     local IFS=,
     for p in $plan; do
         case "$p" in sf2|sf3|usb) n=$((n + 1)) ;; esac
     done
     echo "$n"
+}
+
+# REQ-053 S4: si el plan corre el afinador (dos fases de ~20 s, sin nadie que conteste).
+tuner_in_plan() {
+    [[ "$1" == todo || ",$1," == *,afinador,* ]]
 }
 
 # --plan viaja por el `sh` del telefono (am start --es): solo `todo` o paneles conocidos separados
@@ -1366,7 +1617,7 @@ plan_valid() {
     [[ "$plan" == todo ]] && return 0
     local IFS=,
     for p in $plan; do
-        case "$p" in salida|captura|sf2|sf3|usb) ;; *) return 1 ;; esac
+        case "$p" in salida|captura|sf2|sf3|afinador|usb) ;; *) return 1 ;; esac
     done
 }
 
@@ -1461,6 +1712,9 @@ self_test() {
 JSON
 
     local failures=0
+    # REQ-053 S4: `todo` incluye ahora el afinador. Los casos de S1-S3 juzgan corridas de los cinco
+    # paneles de antes, y se les pide ESE plan explicito: con `todo` saldrian FAIL plan/pedido (es M9).
+    local cinco=salida,captura,sf2,sf3,usb
     # judged <archivo> <plan> <ficha>: corre el juez y deja su salida en $tmp/out y su exit en
     # $tmp/out.rc. Cacheado por CONTENIDO (log + ficha + plan): varios casos miran la misma corrida.
     judged() {
@@ -1475,7 +1729,7 @@ JSON
         cat "$tmp/juez-$key.rc"
     }
     expect() {  # expect <nombre> <exit esperado> <archivo> [plan pedido] [ficha]
-        local name="$1" want="$2" file="$3" plan="${4:-todo}" setup="${5:-$ficha}" got
+        local name="$1" want="$2" file="$3" plan="${4:-$cinco}" setup="${5:-$ficha}" got
         got="$(judged "$file" "$plan" "$setup")"
         if [[ "$got" == "$want" ]]; then
             printf '  ok    %-58s exit %s\n' "$name" "$got"
@@ -1487,7 +1741,7 @@ JSON
     }
 
     expect_line() {  # expect_line <nombre> <regex que TIENE que aparecer> <archivo> [plan] [ficha]
-        local name="$1" re="$2" file="$3" plan="${4:-todo}" setup="${5:-$ficha}"
+        local name="$1" re="$2" file="$3" plan="${4:-$cinco}" setup="${5:-$ficha}"
         judged "$file" "$plan" "$setup" > /dev/null
         if grep -Eq -- "$re" "$tmp/out"; then
             printf '  ok    %-58s\n' "$name"
@@ -1497,7 +1751,7 @@ JSON
         fi
     }
     expect_no_line() {  # expect_no_line <nombre> <regex que NO puede aparecer> <archivo> [plan] [ficha]
-        local name="$1" re="$2" file="$3" plan="${4:-todo}" setup="${5:-$ficha}"
+        local name="$1" re="$2" file="$3" plan="${4:-$cinco}" setup="${5:-$ficha}"
         judged "$file" "$plan" "$setup" > /dev/null
         if grep -Eq -- "$re" "$tmp/out"; then
             printf '  MAL   %-58s aparece /%s/\n' "$name" "$re"
@@ -1593,15 +1847,15 @@ JSON
     local want_base
     want_base="$(sed -nE 's/^# exit-esperado: ([0-9]+).*/\1/p' "$SELFTEST_LOG" | head -1)"
     [[ -n "$want_base" ]] || { echo "self-test: FAIL — el log grabado no declara '# exit-esperado:'" >&2; return 1; }
-    expect "control: el log grabado (anterior a S3) sin ventanas = FALTA" 1 "$SELFTEST_LOG" todo "$vacia"
-    expect_line "control: sf2/estimulo sale FALTA" '^FAIL +sf2/estimulo +FALTA' "$SELFTEST_LOG" todo "$vacia"
-    expect_line "control: usb/control sale FALTA" '^FAIL +usb/control +FALTA' "$SELFTEST_LOG" todo "$vacia"
+    expect "control: el log grabado (anterior a S3) sin ventanas = FALTA" 1 "$SELFTEST_LOG" "$cinco" "$vacia"
+    expect_line "control: sf2/estimulo sale FALTA" '^FAIL +sf2/estimulo +FALTA' "$SELFTEST_LOG" "$cinco" "$vacia"
+    expect_line "control: usb/control sale FALTA" '^FAIL +usb/control +FALTA' "$SELFTEST_LOG" "$cinco" "$vacia"
     {
         win sf2; win sf3; usb_font_pre; win usb libusb; usb_font_post
         sens sf2; sens sf3; sens usb
     } | before_fin "$SELFTEST_LOG" "$tmp/control-s30.log"
     with_seed < "$tmp/control-s30.log" > "$tmp/control-s3.log"
-    expect "control + S3 inyectado, ficha sin precondiciones = el exit grabado" "$want_base" "$tmp/control-s3.log" todo "$vacia"
+    expect "control + S3 inyectado, ficha sin precondiciones = el exit grabado" "$want_base" "$tmp/control-s3.log" "$cinco" "$vacia"
 
     # Una version del control donde todo lo automatico pasa y el humano ya actuo: exit 0. Se arma
     # quitando del log los pasos USB (queda pendiente) — ver abajo — asi que primero el caso verde
@@ -1627,7 +1881,7 @@ JSON
     expect "M2b: un paso desconocido con ok=true es FAIL" 1 "$tmp/m2b.log" "$auto"
     expect_line "M2b: ... y sale como FAIL paso-desconocido" '^FAIL +sf2/sensor-control +paso-desconocido' "$tmp/m2b.log" "$auto"
     { grep -m1 'panel=usb step=suite-1 ' "$SELFTEST_LOG" | sed -E 's/step=suite-1 /step=suite-7 /'; } | before_fin "$tmp/control-s3.log" "$tmp/m2c.log"
-    expect_no_line "M2b: una fila suite-N sigue siendo conocida" '^FAIL +usb/suite-7 +paso-desconocido' "$tmp/m2c.log" todo "$vacia"
+    expect_no_line "M2b: una fila suite-N sigue siendo conocida" '^FAIL +usb/suite-7 +paso-desconocido' "$tmp/m2c.log" "$cinco" "$vacia"
 
     # M2: UN paso faltante da rojo.
     grep -v 'panel=salida step=frames ' "$tmp/verde.log" > "$tmp/m2.log"
@@ -1708,8 +1962,11 @@ JSON
     expect "M8: permiso dado y conectar falla" 1 "$tmp/m8.log"
 
     # M9: se pidio `todo` y la app corrio menos (una regresion en el plan): FAIL aunque lo que
+    # (S4: `todo` incluye el afinador, asi que tambien una corrida de los cinco paneles de S3.)
     # corrio haya pasado.
     expect "M9: la app corrio menos que el plan pedido" 1 "$tmp/verde.log" todo
+    expect_line "M9: todo es con el afinador (S4)" '^FAIL +plan/pedido .*se pidio .todo. y la app corrio .salida,captura,sf2,sf3,usb.' \
+        "$tmp/control-s3.log" todo "$vacia"
 
     # REQ-050 S3 — M10: NO-MEDIDO ya no existe (el runner aplica el rate de cada fila). Una fila que
     # vuelve a traer medido=false es FAIL, tambien con ok=true: es la regresion a MINI-039.
@@ -1790,7 +2047,7 @@ JSON
     expect_line "M16: permiso-falso sale FAIL" '^FAIL +usb/permiso-falso ' "$tmp/m16.log"
     with_usb "$tmp/m16b.log" 's/step=broadcast-falso ok=true/step=broadcast-falso ok=false/'
     expect "M16b: el broadcast falso no se despacho" 1 "$tmp/m16b.log"
-    expect_no_line "M17: sin dialogo no se piden los pasos del falso" '^FAIL +usb/(broadcast|permiso)-falso ' "$SELFTEST_LOG" todo "$vacia"
+    expect_no_line "M17: sin dialogo no se piden los pasos del falso" '^FAIL +usb/(broadcast|permiso)-falso ' "$SELFTEST_LOG" "$cinco" "$vacia"
 
     # =====================================================================================
     # REQ-053 S1 — AC-053.6, una regla por bloque. Cada uno es un mutante del log + la ficha de
@@ -1921,13 +2178,13 @@ JSON
 
     # AC-053.5 / D12 — el JSON de la corrida: run id, cada paso con lo OBSERVADO (tambien los
     # bloqueados: S2 lee de ahi el claim_interface), cada precondicion y el sensor (vacio hasta S3).
-    expect_json "json: run, exit y un juicio de sensor por ventana" "$tmp/a2.log" todo \
+    expect_json "json: run, exit y un juicio de sensor por ventana" "$tmp/a2.log" "$cinco" \
         "j['run'] == '$run' and j['exit'] == 4 and len(j['sensor']) == 6"
-    expect_json "json: el bloqueado guarda lo observado" "$tmp/a2.log" todo \
+    expect_json "json: el bloqueado guarda lo observado" "$tmp/a2.log" "$cinco" \
         "[p for p in j['pasos'] if p['panel'] == 'usb' and p['paso'] == 'streaming-start' and p['veredicto'] == 'BLOQUEADO' and p['observado'].get('error') == 'STREAMING_ERROR' and p['precondiciones'] == ['t-host-usb']]"
-    expect_json "json: el no emitido guarda observado nulo" "$tmp/a3.log" todo \
+    expect_json "json: el no emitido guarda observado nulo" "$tmp/a3.log" "$cinco" \
         "[p for p in j['pasos'] if p['paso'] == 'desconectar' and p['veredicto'] == 'BLOQUEADO' and p['observado'] is None]"
-    expect_json "json: cada precondicion con sus campos" "$tmp/a2.log" todo \
+    expect_json "json: cada precondicion con sus campos" "$tmp/a2.log" "$cinco" \
         "[p for p in j['precondiciones'] if p['id'] == 't-host-usb' and p['verificador'] == 'host' and p['cumplida'] is False and p['estado'] == 'incumplida' and p['evidencia'] == 'prueba-t-host-usb' and p['remedio'] == 'REMEDIO-T-HOST-USB'] and [p for p in j['precondiciones'] if p['id'] == 't-permiso' and p['cumplida'] is True]"
     expect_json "json: una no verificable nunca es cumplida" "$tmp/b2.log" "$auto" \
         "[p for p in j['precondiciones'] if p['id'] == 't-app-cap' and p['cumplida'] is False and p['estado'] == 'no-verificable']"
@@ -1944,7 +2201,9 @@ JSON
     ficha_mutante "chequeo de host desconocido" "f['planes']['captura']['precondiciones'][0]['chequeo'] = 'adivinar'"
     ficha_mutante "sin remedio" "del f['planes']['captura']['precondiciones'][1]['remedio']"
     ficha_mutante "remedio vacio" "f['planes']['captura']['precondiciones'][1]['remedio'] = ' '"
-    ficha_mutante "id duplicado" "f['planes']['usb']['precondiciones'][0]['id'] = 't-host-cap'"
+    # S4: el id es unico DENTRO de un plan (la misma precondicion, el permiso del microfono, vive en
+    # captura y en afinador). Repetido en el mismo plan sigue siendo invalido; en dos planes, no (gemelo abajo).
+    ficha_mutante "id duplicado en el mismo plan" "f['planes']['usb']['precondiciones'][1]['id'] = 't-usb-clase'"
     ficha_mutante "id con mayusculas" "f['planes']['captura']['precondiciones'][1]['id'] = 'T-App'"
     ficha_mutante "clave desconocida (typo)" "f['planes']['captura']['precondiciones'][1]['dependen'] = ['start']"
     ficha_mutante "verificador desconocido" "f['planes']['captura']['precondiciones'][1]['verificador'] = 'telefono'"
@@ -1992,9 +2251,15 @@ JSON
         printf '  MAL   %-58s falta: %s\n' "ficha real: cada id de app tiene su precondition() en el harness" "${missing_app:-(no hay ids de app)}"
         failures=$((failures + 1))
     fi
-    # Su mutante: el harness sin la llamada que emite mic... (la primera de app de la ficha).
+    # Su mutante: el harness sin NINGUNA llamada que emita la primera de app de la ficha. Todas: desde S4
+    # la misma precondicion la emiten dos paneles (captura y afinador), y borrar una sola no la silencia.
     cp -R harness/src "$tmp/harness-src"
-    grep -rl 'precondition(.*SmokePreconditions\.' "$tmp/harness-src" | head -1 | xargs sed -i.bak '/precondition(.*SmokePreconditions\./d'
+    local first_app first_const
+    first_app="$(smoke_py ids "$real" | awk '$3 == "app" {print $2; exit}')"
+    first_const="$(grep -rhE --include='*.kt' "const val [A-Z_]+: String = \"$first_app\"" "$tmp/harness-src" | sed -E 's/.*const val ([A-Z_]+):.*/\1/' | head -1)"
+    # (sin \b: el sed de macOS no lo conoce)
+    grep -rlE "precondition\(.*SmokePreconditions\.$first_const([^A-Z_]|\$)" "$tmp/harness-src" \
+        | xargs sed -i.bak -E "/precondition\(.*SmokePreconditions\.$first_const([^A-Z_]|\$)/d"
     find "$tmp/harness-src" -name '*.bak' -delete
     if [[ -n "$(app_ids_not_emitted "$tmp/harness-src" "$real")" ]]; then
         printf '  ok    %-58s\n' "... y el chequeo ve una llamada borrada"
@@ -2006,14 +2271,16 @@ JSON
     # precondicion): nada se verifico, asi que captura y usb salen BLOQUEADO — y con cada una
     # cumplida, el control vuelve a 0. El control NO se re-graba (1.9): la app nueva agrega lineas
     # pero no cambia ninguna de las que el control ya tiene.
-    expect "control + ficha real: nada verificado = 4" 4 "$tmp/control-s3.log" todo "$real"
-    expect_line "control + ficha real: usb/conectar no-verificable" '^BLOQUEADO +usb/conectar +precondicion=.* estado=no-verificable' "$tmp/control-s3.log" todo "$real"
-    expect_line "control + ficha real: usb/estimulo no-verificable" '^BLOQUEADO +usb/estimulo +precondicion=.* estado=no-verificable' "$tmp/control-s3.log" todo "$real"
-    expect_line "control + ficha real: salida/frames se juzga" '^PASS +salida/frames ' "$tmp/control-s3.log" todo "$real"
+    expect "control + ficha real: nada verificado = 4" 4 "$tmp/control-s3.log" "$cinco" "$real"
+    expect_line "control + ficha real: usb/conectar no-verificable" '^BLOQUEADO +usb/conectar +precondicion=.* estado=no-verificable' "$tmp/control-s3.log" "$cinco" "$real"
+    expect_line "control + ficha real: usb/estimulo no-verificable" '^BLOQUEADO +usb/estimulo +precondicion=.* estado=no-verificable' "$tmp/control-s3.log" "$cinco" "$real"
+    expect_line "control + ficha real: salida/frames se juzga" '^PASS +salida/frames ' "$tmp/control-s3.log" "$cinco" "$real"
     smoke_py ids "$real" | while read -r panel id verifier; do
+        # El control es de los cinco paneles de antes: el afinador (S4) no esta en su plan.
+        [[ ",$cinco," == *",$panel,"* ]] || continue
         if [[ "$verifier" == host ]]; then pre "$panel" "$id" true host; else pre "$panel" "$id" true; fi
     done | before_fin "$tmp/control-s3.log" "$tmp/control-cumplido.log"
-    expect "control + ficha real, todo cumplido = el exit grabado" "$want_base" "$tmp/control-cumplido.log" todo "$real"
+    expect "control + ficha real, todo cumplido = el exit grabado" "$want_base" "$tmp/control-cumplido.log" "$cinco" "$real"
 
     # S-1 (security-auditor): logcat filtra por TAG, asi que cualquier app puede escribir una linea
     # `verificador=host`. El juez recibe las del host por SEPARADO y descarta las que lleguen por el
@@ -2139,6 +2406,8 @@ SPY
         fi
     }
     plan_case "S-3 control: un plan valido llega a adb (el espia anda)" salida 2 si
+    plan_case "S4: afinador es un plan valido (llega a adb)" afinador 2 si
+    plan_case "S4: afinador en una lista es un plan valido" 'sf2,afinador' 2 si
     plan_case "S-3: todo,usb no es un plan (todo va solo)" 'todo,usb' 2 no
     plan_case "S-3: --plan 'todo;id' es exit 2 sin llamar a adb" 'todo;id' 2 no
     plan_case "S-3: un panel desconocido es exit 2 sin adb" 'salida,nada' 2 no
@@ -2477,7 +2746,7 @@ PTY
     # audioserver ya NO bloquean: son observaciones (depende: []), y los pasos se juzgan. Lo que bloquea
     # es la placa reclamada, que se ve en /dev/snd. El log es el grabado, con las precondiciones del
     # host de cada modo en su archivo aparte (como en la corrida).
-    python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); del f["planes"]["captura"]; json.dump(f, open(sys.argv[2], "w"))' "$real" "$tmp/ficha-usb-real.json"
+    python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); del f["planes"]["captura"]; f["planes"].pop("afinador", None); json.dump(f, open(sys.argv[2], "w"))' "$real" "$tmp/ficha-usb-real.json"
     d14_case() {  # d14_case <modo del adb falso> <archivo de salida>
         FAKE_MODE="$1" FAKE_SERIAL=falso-123 FAKE_DIR="$tmp/host" \
             smoke_py host "$tmp/host/adb" falso-123 "$tmp/ficha-usb-real.json" usb "$run" "$PKG" "$tmp/host/evidencia-d14-$1" > "$tmp/d14-$1.txt" 2>&1 || true
@@ -2493,22 +2762,22 @@ PTY
     local id_permiso
     id_permiso="$(python3 -c 'import json,sys; print([p["id"] for p in json.load(open(sys.argv[1]))["planes"]["usb"]["precondiciones"] if p.get("ventana-humana")][0])' "$real_ficha")"
     d14_case noisypad-vivo "$tmp/d14-vivo.log"
-    expect "D14: NoisyPad vivo y la salida USB tomada, exit 0" 0 "$tmp/d14-vivo.log" todo "$real_ficha"
-    expect_line "D14: con NoisyPad vivo streaming-start se juzga: PASS" '^PASS +usb/streaming-start ' "$tmp/d14-vivo.log" todo "$real_ficha"
-    expect_no_line "D14: nada sale BLOQUEADO con NoisyPad vivo" '^BLOQUEADO ' "$tmp/d14-vivo.log" todo "$real_ficha"
-    expect_json "D14: el JSON registra la observacion de NoisyPad" "$tmp/d14-vivo.log" todo \
+    expect "D14: NoisyPad vivo y la salida USB tomada, exit 0" 0 "$tmp/d14-vivo.log" "$cinco" "$real_ficha"
+    expect_line "D14: con NoisyPad vivo streaming-start se juzga: PASS" '^PASS +usb/streaming-start ' "$tmp/d14-vivo.log" "$cinco" "$real_ficha"
+    expect_no_line "D14: nada sale BLOQUEADO con NoisyPad vivo" '^BLOQUEADO ' "$tmp/d14-vivo.log" "$cinco" "$real_ficha"
+    expect_json "D14: el JSON registra la observacion de NoisyPad" "$tmp/d14-vivo.log" "$cinco" \
         "[p for p in j['precondiciones'] if p['id'] == '$id_app' and p['estado'] == 'incumplida' and p['depende'] == [] and 'noisypad' in p['evidencia']]" "$real_ficha"
-    expect_json "D14: ... y la de la tarjeta ALSA tomada" "$tmp/d14-vivo.log" todo \
+    expect_json "D14: ... y la de la tarjeta ALSA tomada" "$tmp/d14-vivo.log" "$cinco" \
         "[p for p in j['precondiciones'] if p['id'] == '$id_alsa' and p['estado'] == 'incumplida' and p['depende'] == [] and 'standby=no' in p['evidencia']]" "$real_ficha"
-    expect_json "D14: ... y la placa no reclamada, cumplida, bloqueante" "$tmp/d14-vivo.log" todo \
+    expect_json "D14: ... y la placa no reclamada, cumplida, bloqueante" "$tmp/d14-vivo.log" "$cinco" \
         "[p for p in j['precondiciones'] if p['id'] == '$id_reclamada' and p['estado'] == 'cumplida' and p['depende']]" "$real_ficha"
     d14_case reclamada "$tmp/d14-reclamada.log"
-    expect "D14: placa reclamada bloquea (exit 4)" 4 "$tmp/d14-reclamada.log" todo "$real_ficha"
-    expect_line "D14: streaming-start BLOQUEADO por la placa reclamada, con su remedio" "^BLOQUEADO +usb/streaming-start +precondicion=$id_reclamada estado=incumplida evidencia=placa-enumerada-sin-controlC1:otro-proceso-la-reclama remedio=Cerrar la app que tenga la placa tomada.*El script no sabe quien la tiene" "$tmp/d14-reclamada.log" todo "$real_ficha"
-    expect_line "D14: usb/dispositivos (no depende) se juzga" '^PASS +usb/dispositivos ' "$tmp/d14-reclamada.log" todo "$real_ficha"
+    expect "D14: placa reclamada bloquea (exit 4)" 4 "$tmp/d14-reclamada.log" "$cinco" "$real_ficha"
+    expect_line "D14: streaming-start BLOQUEADO por la placa reclamada, con su remedio" "^BLOQUEADO +usb/streaming-start +precondicion=$id_reclamada estado=incumplida evidencia=placa-enumerada-sin-controlC1:otro-proceso-la-reclama remedio=Cerrar la app que tenga la placa tomada.*El script no sabe quien la tiene" "$tmp/d14-reclamada.log" "$cinco" "$real_ficha"
+    expect_line "D14: usb/dispositivos (no depende) se juzga" '^PASS +usb/dispositivos ' "$tmp/d14-reclamada.log" "$cinco" "$real_ficha"
     d14_case sin-placa "$tmp/d14-sin-placa.log"
-    expect_line "D14: sin placa bloquea la de placa enumerada" "^BLOQUEADO +usb/streaming-start +precondicion=$id_placa " "$tmp/d14-sin-placa.log" todo "$real_ficha"
-    expect_no_line "D14: ... y la de placa reclamada no duplica el bloqueo" "precondicion=$id_reclamada" "$tmp/d14-sin-placa.log" todo "$real_ficha"
+    expect_line "D14: sin placa bloquea la de placa enumerada" "^BLOQUEADO +usb/streaming-start +precondicion=$id_placa " "$tmp/d14-sin-placa.log" "$cinco" "$real_ficha"
+    expect_no_line "D14: ... y la de placa reclamada no duplica el bloqueo" "precondicion=$id_reclamada" "$tmp/d14-sin-placa.log" "$cinco" "$real_ficha"
     # El orden (la carrera): el harness reclama la placa al arrancar, asi que el host la mira ANTES.
     local host_at start_at
     host_at="$(grep -nE '^    host_lines="\$\(smoke_py host ' "$0" | head -1 | cut -d: -f1)"
@@ -2533,12 +2802,345 @@ PTY
         failures=$((failures + 1))
     fi
 
+    # =====================================================================================
+    # REQ-053 S4 — el afinador (AC-053.12..14, D9, D12, D17). Lo juzga el SNAPSHOT del afinador, no
+    # un oido: la app emite un tick por lectura (`step=afinador`, con fase, ventana, estado y Hz) y el
+    # juez decide con los ticks de cada ventana. Dos fases: `reproduccion` (la configuracion del panel,
+    # sin cuerda: se OBSERVA, no da PASS ni FAIL de AC-053.13) y `juicio` (el A4). Cada fase tiene su
+    # ventana de silencio, que es el control (un enganche ahi es FAIL) y donde la app mide el piso.
+    # Una ficha de prueba propia, con los mismos chequeos que la real, y su gemelo verde (exit 0).
+    # =====================================================================================
+    local fa="$tmp/ficha-af.json"
+    cat > "$fa" <<'JSON'
+{"formato": 1, "planes": {"afinador": {"precondiciones": [
+  {"id": "t-af-host", "verificador": "host", "chequeo": "permiso-runtime", "permiso": "android.permission.RECORD_AUDIO",
+   "depende": ["*-arranque", "lectura-*"], "remedio": "REMEDIO-T-AF-HOST"},
+  {"id": "t-af-mic", "verificador": "app", "depende": ["lectura-*"], "remedio": "REMEDIO-T-AF-MIC"},
+  {"id": "t-af-piso", "verificador": "app", "umbral-dbfs": -30, "medidor": "nivel-afinador", "depende": ["lectura-*"], "remedio": "REMEDIO-T-AF-PISO"}
+]}}}
+JSON
+    local ord_afr ord_afj
+    ord_afr="$(smoke_py orden "$SEM" afinador-reproduccion)"; ord_afj="$(smoke_py orden "$SEM" afinador-juicio)"
+    # Con la semilla de prueba las dos fases tienen ordenes distintos: un juez que use la clave de la
+    # otra fase (o la del panel) se ve.
+    is_eq "S4: con la semilla de prueba las fases van en ordenes distintos" "$([[ "$ord_afr" != "$ord_afj" ]]; echo $?)" 0
+    # af_n <fase> <estimulo|control>: el numero de esa ventana en su fase.
+    af_n() {
+        local o="$ord_afr"; [[ "$1" == juicio ]] && o="$ord_afj"
+        tr ' ' '\n' <<< "$o" | grep -n -x "$2" | cut -d: -f1
+    }
+    # af_ticks <fase> <n> <estado> <nota> [cuantos]: los ticks de una ventana, como los emite la app.
+    af_ticks() {
+        local fase="$1" n="$2" estado="$3" nota="$4" k="${5:-4}" i hz cents
+        for ((i = 1; i <= k; i++)); do
+            case "$estado" in
+                enganchado) hz=440.0; cents=1.2 ;;
+                midiendo) hz=440.0; cents=- ;;
+                *) hz=-; cents=- ;;
+            esac
+            echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=afinador ok=true fase=$fase n=$n t-ms=$((i * 80)) estado=$estado hz=$hz nota=$nota cents=$cents convergido=false rate=48000 perdidos=0 estado-motor=MEASURING nivel-dbfs=-30.0 entrada-dbfs=-40.0"
+        done
+    }
+    # af_panel [estado en el estimulo de juicio] [estado en el estimulo de reproduccion]: el panel
+    # entero y sano (con sus precondiciones de app cumplidas), como lo emite el harness.
+    af_panel() {
+        local ej="${1:-enganchado}" er="${2:-midiendo}" fase kind n cfg cuerda obj objhz nota st
+        echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=fixture ok=true archivo=wma-fixture.sf2"
+        echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=carga ok=true archivo=wma-fixture.sf2 cargado=true presets=1"
+        echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=preset ok=true indice=0"
+        for fase in reproduccion juicio; do
+            cfg=guitar_standard; cuerda=-; obj=-; objhz=0.0; nota=-
+            [[ "$fase" == juicio ]] && { cfg=ukulele_high_g; cuerda=1; obj=A4; objhz=440.0; nota=A4; }
+            echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=precondicion ok=true id=t-af-mic cumplida=true evidencia=fase:$fase,aceptado:true,corriendo:true,espera-ms:0"
+            echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=$fase-arranque ok=true config=$cfg cuerda=$cuerda objetivo=$obj objetivo-motor-hz=$objhz aceptado=true corriendo=true"
+            n=0
+            for kind in $([[ "$fase" == juicio ]] && echo "$ord_afj" || echo "$ord_afr"); do
+                n=$((n + 1))
+                if [[ "$kind" == estimulo ]]; then
+                    st="$er"; [[ "$fase" == juicio ]] && st="$ej"
+                    af_ticks "$fase" "$n" "$st" "$nota"
+                    echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=$fase-estimulo ok=true n=$n de=2 sono=A4 hz=440 nota=69 archivo=wma-fixture.sf2 preset=0 ruta=sistema backend=OBOE ventana-ms=4000 frames=192000 pico=0.2100 ticks=4 objetivo-motor-hz=$objhz"
+                else
+                    af_ticks "$fase" "$n" midiendo "$nota"
+                    echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=$fase-control ok=true n=$n de=2 tipo=silencio ruta=sistema backend=OBOE ventana-ms=3000 frames=144000 pico=0.0000 ticks=4 entrada-max-dbfs=-4.0 nivel-max-dbfs=-58.0 nivel-lecturas=4 umbral-dbfs=-30.0"
+                    echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=precondicion ok=true id=t-af-piso cumplida=true evidencia=fase:$fase,medidor:nivel-afinador,nivel-max-dbfs:-58.0,umbral-dbfs:-30.0,lecturas:4"
+                fi
+            done
+        done
+        echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=parada ok=true entrada-corriendo=false"
+        echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=descarga ok=true queda-cargado=false"
+    }
+    # af_log <destino> [estado en juicio] [estado en reproduccion]: la corrida `--plan afinador`.
+    af_log() {
+        {
+            echo "HARNESS-SMOKE v=1 run=$run panel=plan step=inicio ok=true plan=afinador semilla=$SEM semilla-origen=script"
+            pre afinador t-af-host true host
+            af_panel "${2:-enganchado}" "${3:-midiendo}"
+            echo "HARNESS-SMOKE v=1 run=$run panel=plan step=fin ok=true fallidos=- motor-detenido=true"
+        } > "$1"
+    }
+    # af_sed <origen> <destino> <sed>: un mutante del log.
+    af_sed() { sed -E "$3" "$1" > "$2"; }
+    local ne_j nc_j ne_r nc_r
+    ne_j="$(af_n juicio estimulo)"; nc_j="$(af_n juicio control)"; ne_r="$(af_n reproduccion estimulo)"; nc_r="$(af_n reproduccion control)"
+    # El tick de la ventana <n> de la fase <f>: el sed que lo direcciona.
+    tk() { echo "/ step=afinador ok=true fase=$1 n=$2 /"; }
+
+    # --- El gemelo: el afinador lee el A4 en juicio, nada en los silencios, y la reproduccion se observa.
+    af_log "$tmp/af-verde.log"
+    expect "S4 gemelo: afinador sano = 0" 0 "$tmp/af-verde.log" afinador "$fa"
+    expect_line "S4 gemelo: enganchado en A4 en juicio = PASS" '^PASS +afinador/lectura-juicio-estimulo +enganchado nota=A4 ' "$tmp/af-verde.log" afinador "$fa"
+    expect_line "S4 gemelo: el silencio de juicio sin enganche = PASS" '^PASS +afinador/lectura-juicio-control ' "$tmp/af-verde.log" afinador "$fa"
+    expect_line "S4 gemelo: el silencio de reproduccion sin enganche = PASS" '^PASS +afinador/lectura-reproduccion-control ' "$tmp/af-verde.log" afinador "$fa"
+    expect_line "S4 gemelo: la reproduccion se OBSERVA, con estado y Hz" '^OBSERVADO +afinador/lectura-reproduccion-estimulo +quedo-en=midiendo hz=440.0 ' "$tmp/af-verde.log" afinador "$fa"
+    expect_line "S4 gemelo: el resumen cuenta lo observado" '^resumen: .* · 1 OBSERVADO$' "$tmp/af-verde.log" afinador "$fa"
+    expect_line "S4 gemelo: la ventana rendida del estimulo = PASS" '^PASS +afinador/juicio-estimulo ' "$tmp/af-verde.log" afinador "$fa"
+    expect_json "S4 json: las dos fases con su ultimo estado, Hz y veredicto" "$tmp/af-verde.log" afinador \
+        "len(j['afinador']) == 4 and [x for x in j['afinador'] if x['fase'] == 'juicio' and x['tipo'] == 'estimulo' and x['veredicto'] == 'PASS' and x['ultimo']['estado'] == 'enganchado' and x['ultimo']['hz'] == '440.0' and x['ticks'] == 4 and x['primer-enganche']['nota'] == 'A4'] and [x for x in j['afinador'] if x['fase'] == 'reproduccion' and x['tipo'] == 'estimulo' and x['veredicto'] == 'OBSERVADO' and x['ultimo']['estado'] == 'midiendo' and x['estados'] == {'midiendo': 4}] and j['resumen']['OBSERVADO'] == 1" "$fa"
+    expect_json "S4 json: el orden de cada fase sale de la semilla" "$tmp/af-verde.log" afinador \
+        "j['orden']['afinador-juicio'] == '$ord_afj'.split() and j['orden']['afinador-reproduccion'] == '$ord_afr'.split()" "$fa"
+    # `todo` es con el afinador: una corrida de `--plan afinador` no es `todo`.
+    expect "S4: --plan afinador juzgado como todo = FAIL plan/pedido" 1 "$tmp/af-verde.log" todo "$fa"
+
+    # --- AC-053.12: las precondiciones. Incumplida o no verificable => BLOQUEADO con su remedio, y el
+    # afinador NO se juzga (ni PASS ni FAIL), aunque sus ticks digan algo.
+    af_sed "$tmp/af-verde.log" "$tmp/p1.log" "$(set_pre t-af-host false)"
+    expect "p1: sin RECORD_AUDIO (host) = BLOQUEADO" 4 "$tmp/p1.log" afinador "$fa"
+    expect_line "p1: lectura-juicio-estimulo BLOQUEADO con el remedio" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-host estado=incumplida .*remedio=REMEDIO-T-AF-HOST' "$tmp/p1.log" afinador "$fa"
+    expect_line "p1: el arranque tambien (depende del permiso)" '^BLOQUEADO +afinador/juicio-arranque +precondicion=t-af-host ' "$tmp/p1.log" afinador "$fa"
+    expect_no_line "p1: ninguna lectura sale PASS, FAIL ni OBSERVADO" '^(PASS|FAIL|OBSERVADO) +afinador/lectura-' "$tmp/p1.log" afinador "$fa"
+    expect_line "p1: la ventana rendida (no depende) se juzga" '^PASS +afinador/juicio-estimulo ' "$tmp/p1.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/p2.log" "/ id=t-af-mic .*fase:juicio/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /; s/corriendo:true/corriendo:false/;}"
+    expect "p2: el mic no abrio en juicio = BLOQUEADO" 4 "$tmp/p2.log" afinador "$fa"
+    expect_line "p2: lectura-juicio-estimulo BLOQUEADO por el mic" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-mic estado=incumplida .*remedio=REMEDIO-T-AF-MIC' "$tmp/p2.log" afinador "$fa"
+    expect_line "p2: el arranque no depende del mic: se juzga" '^PASS +afinador/juicio-arranque ' "$tmp/p2.log" afinador "$fa"
+    # El mic que no abre es la MISMA observacion que el arranque: el arranque falla visible (FAIL), no
+    # queda tapado por el bloqueo (la regla de S1 para `start` en captura).
+    af_sed "$tmp/p2.log" "$tmp/p2b.log" "s/ step=juicio-arranque ok=true (.*) corriendo=true/ step=juicio-arranque ok=false \1 corriendo=false motivo=no-quedo-corriendo/"
+    expect "p2b: el arranque que falla es FAIL aunque el mic bloquee" 1 "$tmp/p2b.log" afinador "$fa"
+    expect_line "p2b: juicio-arranque sale FAIL" '^FAIL +afinador/juicio-arranque ' "$tmp/p2b.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/p3.log" "/ id=t-af-piso .*fase:reproduccion/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /; s/nivel-max-dbfs:-58.0/nivel-max-dbfs:-20.0/;}"
+    expect "p3: la sala no esta en silencio (reproduccion) = BLOQUEADO" 4 "$tmp/p3.log" afinador "$fa"
+    expect_line "p3: con el piso medido y el remedio" '^BLOQUEADO +afinador/lectura-juicio-control +precondicion=t-af-piso estado=incumplida evidencia=fase:reproduccion,medidor:nivel-afinador,nivel-max-dbfs:-20.0,umbral-dbfs:-30.0.*remedio=REMEDIO-T-AF-PISO' "$tmp/p3.log" afinador "$fa"
+    grep -v ' id=t-af-piso ' "$tmp/af-verde.log" > "$tmp/p4.log"
+    expect "p4: sin linea del piso = no-verificable, BLOQUEADO" 4 "$tmp/p4.log" afinador "$fa"
+    expect_line "p4: ... con su estado" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-piso estado=no-verificable evidencia=la-app-no-emitio-su-linea' "$tmp/p4.log" afinador "$fa"
+    # La app midio contra OTRO umbral que el de la ficha (un extra que no llego bien): la linea no
+    # prueba nada de ESTA ficha => no-verificable, aunque diga cumplida.
+    af_sed "$tmp/af-verde.log" "$tmp/p5.log" "/ id=t-af-piso .*fase:juicio/s/nivel-max-dbfs:-58.0,umbral-dbfs:-30.0/nivel-max-dbfs:-20.0,umbral-dbfs:-10.0/"
+    expect "p5: el piso medido contra otro umbral = BLOQUEADO" 4 "$tmp/p5.log" afinador "$fa"
+    expect_line "p5: ... no-verificable, con la evidencia" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-piso estado=no-verificable evidencia=umbral-o-medicion-incoherente-con-la-ficha' "$tmp/p5.log" afinador "$fa"
+    # S4, corrida 4.6: el piso se mide con el NIVEL del afinador (`medidor:nivel-afinador`, lo declara la
+    # ficha). Una linea medida con otro medidor (la entrada, que retiene el pico) o sin decir cual no
+    # prueba el piso de esta ficha => no-verificable.
+    af_sed "$tmp/af-verde.log" "$tmp/p10.log" "/ id=t-af-piso .*fase:juicio/s/medidor:nivel-afinador/medidor:entrada/"
+    expect "p10: el piso medido con otro medidor = BLOQUEADO" 4 "$tmp/p10.log" afinador "$fa"
+    expect_line "p10: ... no-verificable" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-piso estado=no-verificable evidencia=umbral-o-medicion-incoherente-con-la-ficha' "$tmp/p10.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/p11.log" "/ id=t-af-piso .*fase:juicio/s/medidor:nivel-afinador,//"
+    expect "p11: el piso sin medidor = BLOQUEADO" 4 "$tmp/p11.log" afinador "$fa"
+    # La app dice cumplida y su propia medicion la desmiente (-20 no esta debajo de -30).
+    af_sed "$tmp/af-verde.log" "$tmp/p6.log" "/ id=t-af-piso .*fase:juicio/s/nivel-max-dbfs:-58.0/nivel-max-dbfs:-20.0/"
+    expect "p6: cumplida con la medicion encima del umbral = BLOQUEADO" 4 "$tmp/p6.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/p6b.log" "/ id=t-af-piso .*fase:juicio/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /;}"
+    expect "p6b: incumplida con la medicion debajo del umbral = BLOQUEADO" 4 "$tmp/p6b.log" afinador "$fa"
+    expect_line "p6b: ... no-verificable, no incumplida" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-piso estado=no-verificable' "$tmp/p6b.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/p6c.log" "/ id=t-af-piso .*fase:juicio/s/,umbral-dbfs:-30.0//"
+    expect "p6c: el piso sin umbral en la evidencia = BLOQUEADO" 4 "$tmp/p6c.log" afinador "$fa"
+    # Una linea por FASE (review de S4): sin la del piso de juicio, ese silencio no tiene piso medido
+    # aunque el de reproduccion este bien => no-verificable. Igual con el mic de una fase.
+    grep -v ' id=t-af-piso .*fase:juicio' "$tmp/af-verde.log" > "$tmp/p8.log"
+    expect "p8: sin el piso de la fase juicio = BLOQUEADO" 4 "$tmp/p8.log" afinador "$fa"
+    expect_line "p8: ... no-verificable por la fase que falta" '^BLOQUEADO +afinador/lectura-juicio-control +precondicion=t-af-piso estado=no-verificable evidencia=falta-la-linea-de-la-fase:juicio' "$tmp/p8.log" afinador "$fa"
+    grep -v ' id=t-af-mic .*fase:reproduccion' "$tmp/af-verde.log" > "$tmp/p9.log"
+    expect "p9: sin el mic de la fase reproduccion = BLOQUEADO" 4 "$tmp/p9.log" afinador "$fa"
+    # Con un piso incumplido, un juicio que FALLARIA tampoco se juzga: el ruido de la sala lo explica.
+    af_log "$tmp/p7-0.log" midiendo
+    af_sed "$tmp/p7-0.log" "$tmp/p7.log" "/ id=t-af-piso .*fase:juicio/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /; s/nivel-max-dbfs:-58.0/nivel-max-dbfs:-20.0/;}"
+    expect "p7: piso incumplido y el afinador sin enganche = BLOQUEADO, no FAIL" 4 "$tmp/p7.log" afinador "$fa"
+
+    # --- AC-053.13: el juicio. PASS solo con `enganchado` en A4 dentro de la ventana; si no, FAIL que
+    # dice en que estado QUEDO (el ultimo tick); un enganche en otra nota es FAIL.
+    af_log "$tmp/j2.log" midiendo
+    expect "j2: el afinador se queda midiendo = FAIL" 1 "$tmp/j2.log" afinador "$fa"
+    expect_line "j2: ... y dice en cual estado quedo" '^FAIL +afinador/lectura-juicio-estimulo +quedo-en=midiendo ' "$tmp/j2.log" afinador "$fa"
+    af_log "$tmp/j3.log" sin-lectura
+    expect "j3: el afinador sin lectura = FAIL" 1 "$tmp/j3.log" afinador "$fa"
+    expect_line "j3: ... y dice sin-lectura" '^FAIL +afinador/lectura-juicio-estimulo +quedo-en=sin-lectura ' "$tmp/j3.log" afinador "$fa"
+    # "Quedo" es el ULTIMO tick: arranca sin lectura y queda midiendo => dice midiendo.
+    af_sed "$tmp/j3.log" "$tmp/j7.log" "$(tk juicio "$ne_j")s/ t-ms=(240|320) estado=sin-lectura hz=- nota=A4 cents=- / t-ms=\1 estado=midiendo hz=439.8 nota=A4 cents=- /"
+    expect_line "j7: dice el estado en que QUEDO (el ultimo tick)" '^FAIL +afinador/lectura-juicio-estimulo +quedo-en=midiendo .*sin-lectura=2' "$tmp/j7.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/j4.log" "$(tk juicio "$ne_j")s/ nota=A4 / nota=E4 /"
+    expect "j4: enganchado en otra nota (E4) = FAIL" 1 "$tmp/j4.log" afinador "$fa"
+    expect_line "j4: ... enganchado-en-otra-nota" '^FAIL +afinador/lectura-juicio-estimulo +enganchado-en-otra-nota nota=E4 ' "$tmp/j4.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/j4b.log" "$(tk juicio "$ne_j")s/ nota=A4 / nota=- /"
+    expect "j4b: enganchado sin objetivo (nota=-) en juicio = FAIL" 1 "$tmp/j4b.log" afinador "$fa"
+    # El juicio es contra el A4 del MOTOR: si el motor media contra otro objetivo (otra vista del
+    # afinador empujo el suyo, TunerFactory), los cents no son del A4 aunque el tick diga nota=A4.
+    af_sed "$tmp/af-verde.log" "$tmp/j8.log" "/ step=juicio-estimulo /s/ objetivo-motor-hz=440.0/ objetivo-motor-hz=329.6/"
+    expect "j8: el motor no media contra el A4 = FAIL" 1 "$tmp/j8.log" afinador "$fa"
+    expect_line "j8: ... objetivo-del-motor" '^FAIL +afinador/lectura-juicio-estimulo +objetivo-del-motor-no-es-A4 objetivo-motor-hz=329.6' "$tmp/j8.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/j8b.log" "/ step=juicio-estimulo /s/ objetivo-motor-hz=440.0/ objetivo-motor-hz=-/"
+    expect "j8b: sin el objetivo del motor no hay PASS" 1 "$tmp/j8b.log" afinador "$fa"
+    # Pasa a enganchado DENTRO de la ventana: el primer tick sin lectura, el segundo midiendo, el
+    # tercero enganchado en A4, el ultimo midiendo otra vez. Basta un tick.
+    af_sed "$tmp/af-verde.log" "$tmp/j5.log" "$(tk juicio "$ne_j")s/ t-ms=80 estado=enganchado hz=440.0 nota=A4 cents=1.2 / t-ms=80 estado=sin-lectura hz=- nota=- cents=- /; $(tk juicio "$ne_j")s/ t-ms=(160|320) estado=enganchado hz=440.0 nota=A4 cents=1.2 / t-ms=\1 estado=midiendo hz=440.0 nota=A4 cents=- /"
+    expect "j5: engancha a mitad de la ventana = PASS" 0 "$tmp/j5.log" afinador "$fa"
+    expect_line "j5: ... desde el tick en que engancho" '^PASS +afinador/lectura-juicio-estimulo +enganchado nota=A4 .*t-ms=240 ' "$tmp/j5.log" afinador "$fa"
+    # Los ticks se asocian a su ventana por fase Y numero: los del estimulo de juicio renumerados como
+    # los del silencio dejan al estimulo sin ticks y enganchan el silencio; pasados a la fase
+    # reproduccion, el juicio queda sin ticks y la reproduccion los observa.
+    af_sed "$tmp/af-verde.log" "$tmp/j6.log" "$(tk juicio "$ne_j")s/ n=$ne_j / n=$nc_j /"
+    expect_line "j6: los ticks de otra ventana no hacen PASS" '^FAIL +afinador/lectura-juicio-estimulo +sin-ticks' "$tmp/j6.log" afinador "$fa"
+    expect_line "j6: ... y enganchan la ventana a la que se asocian" '^FAIL +afinador/lectura-juicio-control +enganchado-en-silencio ' "$tmp/j6.log" afinador "$fa"
+    grep -v "$(tk reproduccion "$ne_r" | tr -d /)" "$tmp/af-verde.log" \
+        | sed -E "$(tk juicio "$ne_j")s/ fase=juicio n=$ne_j / fase=reproduccion n=$ne_r /" > "$tmp/j6b.log"
+    expect_line "j6b: los ticks de otra fase no hacen PASS" '^FAIL +afinador/lectura-juicio-estimulo +sin-ticks' "$tmp/j6b.log" afinador "$fa"
+    expect_line "j6b: ... y los observa su fase" '^OBSERVADO +afinador/lectura-reproduccion-estimulo +quedo-en=enganchado ' "$tmp/j6b.log" afinador "$fa"
+
+    # La ventana de silencio es el control, en LAS DOS fases: un enganche ahi es FAIL.
+    af_sed "$tmp/af-verde.log" "$tmp/c1.log" "$(tk juicio "$nc_j")s/ t-ms=160 estado=midiendo hz=440.0 nota=A4 cents=- / t-ms=160 estado=enganchado hz=440.0 nota=A4 cents=0.4 /"
+    expect "c1: enganchado en el silencio de juicio = FAIL" 1 "$tmp/c1.log" afinador "$fa"
+    expect_line "c1: ... enganchado-en-silencio, con el tick" '^FAIL +afinador/lectura-juicio-control +enganchado-en-silencio nota=A4 .*t-ms=160' "$tmp/c1.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/c2.log" "$(tk reproduccion "$nc_r")s/ t-ms=80 estado=midiendo hz=440.0 nota=- cents=- / t-ms=80 estado=enganchado hz=440.0 nota=- cents=0.4 /"
+    expect "c2: enganchado en el silencio de reproduccion = FAIL" 1 "$tmp/c2.log" afinador "$fa"
+    expect_line "c2: ... la fase reproduccion SI da FAIL por su control" '^FAIL +afinador/lectura-reproduccion-control +enganchado-en-silencio ' "$tmp/c2.log" afinador "$fa"
+
+    # Estimulo no rendido (frames 0 o pico 0): FAIL por la ventana y el afinador NO se juzga — ni
+    # siquiera con ticks enganchados en A4 (la misma regla que AC-053.8).
+    af_sed "$tmp/af-verde.log" "$tmp/r1.log" "/ step=juicio-estimulo /s/ frames=[0-9]+ / frames=0 /"
+    expect "r1: el A4 no se rindio (frames=0) = FAIL" 1 "$tmp/r1.log" afinador "$fa"
+    expect_line "r1: juicio-estimulo sale FAIL no-rendido" '^FAIL +afinador/juicio-estimulo +estimulo no-rendido' "$tmp/r1.log" afinador "$fa"
+    expect_no_line "r1: el afinador no se juzga" 'afinador/lectura-juicio-estimulo ' "$tmp/r1.log" afinador "$fa"
+    expect_json "r1: el JSON lo dice" "$tmp/r1.log" afinador \
+        "[x for x in j['afinador'] if x['fase'] == 'juicio' and x['tipo'] == 'estimulo' and x['veredicto'] is None and x['detalle'] == 'ventana-no-rendida']" "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/r2.log" "/ step=juicio-estimulo /s/ pico=[0-9.]+ / pico=0.0000 /"
+    expect "r2: el A4 sin senal (pico=0) = FAIL" 1 "$tmp/r2.log" afinador "$fa"
+    expect_no_line "r2: el afinador no se juzga" 'afinador/lectura-juicio-estimulo ' "$tmp/r2.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/r3.log" "/ step=reproduccion-estimulo /s/ frames=[0-9]+ / frames=0 /"
+    expect "r3: el A4 de reproduccion no se rindio = FAIL" 1 "$tmp/r3.log" afinador "$fa"
+    expect_no_line "r3: ... y no se observa" 'afinador/lectura-reproduccion-estimulo ' "$tmp/r3.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/r4.log" "/ step=juicio-control /s/ pico=0.0000 / pico=0.2000 /; $(tk juicio "$nc_j")s/ estado=midiendo hz=440.0 nota=A4 cents=- / estado=enganchado hz=440.0 nota=A4 cents=0.4 /"
+    expect "r4: un silencio en el que sono algo = FAIL por la ventana" 1 "$tmp/r4.log" afinador "$fa"
+    expect_no_line "r4: ... y su enganche no se juzga (no era silencio)" 'afinador/lectura-juicio-control ' "$tmp/r4.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/r5.log" "/ step=juicio-estimulo /s/ backend=OBOE / backend=LIBUSB /"
+    expect "r5: el A4 del afinador por libusb (no el parlante) = FAIL" 1 "$tmp/r5.log" afinador "$fa"
+
+    # Una ventana que salio BLOQUEADO (una precondicion que la bloquea a ELLA) deja su lectura sin
+    # juzgar: hereda el BLOQUEADO, como el juicio del sensor en S3.
+    python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); f["planes"]["afinador"]["precondiciones"][1]["depende"] = ["juicio-estimulo"]; json.dump(f, open(sys.argv[2], "w"))' "$fa" "$tmp/ficha-af-ventana.json"
+    af_sed "$tmp/af-verde.log" "$tmp/v1.log" "/ id=t-af-mic .*fase:juicio/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /;}"
+    expect_line "v1: la ventana bloqueada bloquea su lectura" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-mic .*la ventana salio BLOQUEADO' "$tmp/v1.log" afinador "$tmp/ficha-af-ventana.json"
+    expect_no_line "v1: ... que no sale PASS" '^PASS +afinador/lectura-juicio-estimulo ' "$tmp/v1.log" afinador "$tmp/ficha-af-ventana.json"
+
+    # La fase reproduccion NO da PASS ni FAIL de AC-053.13: registra estado y Hz. Ni enganchada en
+    # A4 es PASS, ni en otra nota es FAIL.
+    af_log "$tmp/o1.log" enganchado enganchado
+    af_sed "$tmp/o1.log" "$tmp/o1b.log" "$(tk reproduccion "$ne_r")s/ nota=- / nota=E4 /"
+    expect "o1: reproduccion enganchada en A4 = 0 (se observa)" 0 "$tmp/o1.log" afinador "$fa"
+    expect_line "o1: ... OBSERVADO, no PASS" '^OBSERVADO +afinador/lectura-reproduccion-estimulo +quedo-en=enganchado ' "$tmp/o1.log" afinador "$fa"
+    expect "o1b: reproduccion enganchada en otra nota = 0 (se observa)" 0 "$tmp/o1b.log" afinador "$fa"
+    expect_line "o1b: ... OBSERVADO con la nota" '^OBSERVADO +afinador/lectura-reproduccion-estimulo +quedo-en=enganchado .*nota=E4' "$tmp/o1b.log" afinador "$fa"
+    af_log "$tmp/o2.log" enganchado sin-lectura
+    expect_line "o2: reproduccion sin lectura se observa" '^OBSERVADO +afinador/lectura-reproduccion-estimulo +quedo-en=sin-lectura hz=- ' "$tmp/o2.log" afinador "$fa"
+
+    # Sin ticks no hay lectura que juzgar: FAIL sin-ticks, nunca PASS (ni OBSERVADO).
+    grep -v "$(tk juicio "$ne_j" | tr -d /)" "$tmp/af-verde.log" > "$tmp/t1.log"
+    expect "t1: el estimulo de juicio sin ticks = FAIL" 1 "$tmp/t1.log" afinador "$fa"
+    expect_line "t1: ... sin-ticks" '^FAIL +afinador/lectura-juicio-estimulo +sin-ticks' "$tmp/t1.log" afinador "$fa"
+    grep -v "$(tk reproduccion "$ne_r" | tr -d /)" "$tmp/af-verde.log" > "$tmp/t2.log"
+    expect_line "t2: la reproduccion sin ticks = FAIL, no OBSERVADO" '^FAIL +afinador/lectura-reproduccion-estimulo +sin-ticks' "$tmp/t2.log" afinador "$fa"
+    grep -v "$(tk juicio "$nc_j" | tr -d /)" "$tmp/af-verde.log" > "$tmp/t3.log"
+    expect_line "t3: un silencio sin ticks = FAIL, no PASS" '^FAIL +afinador/lectura-juicio-control +sin-ticks' "$tmp/t3.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/t4.log" "$(tk juicio "$ne_j")s/ t-ms=80 estado=enganchado / t-ms=80 estado=afinado /"
+    expect_line "t4: un tick con un estado que no existe = FAIL" '^FAIL +afinador/lectura-juicio-estimulo +tick-ilegible' "$tmp/t4.log" afinador "$fa"
+    grep -v ' step=afinador ' "$tmp/af-verde.log" > "$tmp/t5.log"
+    expect "t5: una corrida sin ningun tick = FAIL" 1 "$tmp/t5.log" afinador "$fa"
+    expect_no_line "t5: ninguna lectura sale PASS ni OBSERVADO" '^(PASS|OBSERVADO) +afinador/lectura-' "$tmp/t5.log" afinador "$fa"
+    is_eq "t5: las cuatro lecturas salen sin-ticks" "$(judged "$tmp/t5.log" afinador "$fa" > /dev/null; grep -cE '^FAIL +afinador/lectura-.* +sin-ticks' "$tmp/out")" 4
+
+    # La ventana del juicio que no cerro: FALTA, y su lectura tampoco se juzga como PASS.
+    grep -v ' step=juicio-estimulo ' "$tmp/af-verde.log" > "$tmp/w1.log"
+    expect "w1: sin el cierre de la ventana = FAIL" 1 "$tmp/w1.log" afinador "$fa"
+    expect_line "w1: ... FALTA" '^FAIL +afinador/juicio-estimulo +FALTA' "$tmp/w1.log" afinador "$fa"
+    expect_line "w1: ... y la lectura sale FAIL sin-ventana" '^FAIL +afinador/lectura-juicio-estimulo +sin-ventana' "$tmp/w1.log" afinador "$fa"
+    # El orden de las ventanas de una fase sale de la semilla, como en S3.
+    af_sed "$tmp/af-verde.log" "$tmp/w2.log" "/ step=juicio-(estimulo|control) /{s/ n=1 / n=X /; s/ n=2 / n=1 /; s/ n=X / n=2 /;}; $(tk juicio 1)s/ n=1 / n=Y /; $(tk juicio 2)s/ n=2 / n=1 /; / fase=juicio n=Y /s/ n=Y / n=2 /"
+    expect "w2: juicio en otro orden que el de la semilla = FAIL" 1 "$tmp/w2.log" afinador "$fa"
+    expect_line "w2: ... afinador/orden-juicio" '^FAIL +afinador/orden-juicio ' "$tmp/w2.log" afinador "$fa"
+    # La captura que abrio el afinador queda cerrada al final del panel (review de S4: en `todo` sigue
+    # `usb`): `parada` es un paso obligatorio.
+    grep -v ' step=parada ' "$tmp/af-verde.log" > "$tmp/s1.log"
+    expect_line "s1: sin parada = FALTA" '^FAIL +afinador/parada +FALTA' "$tmp/s1.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/s2.log" "s/ step=parada ok=true entrada-corriendo=false/ step=parada ok=false entrada-corriendo=true motivo=entrada-abierta/"
+    expect "s2: el mic quedo abierto = FAIL" 1 "$tmp/s2.log" afinador "$fa"
+    # Las lecturas son del JUEZ: una que emita la app es FAIL (no un PASS paralelo al veredicto).
+    { grep -m1 ' step=juicio-estimulo ' "$tmp/af-verde.log" | sed -E 's/ step=juicio-estimulo / step=lectura-juicio-estimulo /'; } | before_fin "$tmp/af-verde.log" "$tmp/d1.log"
+    expect "d1: la app emite una lectura = FAIL" 1 "$tmp/d1.log" afinador "$fa"
+    expect_line "d1: ... paso-del-juez" '^FAIL +afinador/lectura-juicio-estimulo +paso-del-juez' "$tmp/d1.log" afinador "$fa"
+    # Los ticks no son veredictos (como `escuchar`): no tienen fila propia.
+    expect_no_line "S4: un tick no es un paso" '^[A-Z-]+ +afinador/afinador ' "$tmp/af-verde.log" afinador "$fa"
+
+    # El seguidor de S3 no le pregunta nada al oido por el afinador (lo juzga su snapshot, D9).
+    seguir_reset; seguir_case "$tmp/af-verde.log"
+    is_eq "S4: el seguidor no consulta al sensor por el afinador" "$(calls)" 0
+    is_eq "S4: ... ni le registra juicios" "$(grep -c . "$tmp/seg.sensor" || true)" 0
+
+    # La ficha: el mismo id en dos planes es valido (gemelo del mutante "id duplicado en el mismo plan");
+    # `umbral-dbfs` es de una precondicion de APP, numerica y en dBFS.
+    python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); a=json.load(open(sys.argv[2])); f["planes"]["afinador"]=a["planes"]["afinador"]; f["planes"]["afinador"]["precondiciones"][1]["id"]="t-app-cap"; json.dump(f, open(sys.argv[3], "w"))' \
+        "$ficha" "$fa" "$tmp/ficha-dos-planes.json"
+    expect "ficha: el mismo id en dos planes es valido" 0 "$tmp/verde.log" "$auto" "$tmp/ficha-dos-planes.json"
+    af_mutante() {  # af_mutante <nombre> <expresion python que muta f, la ficha del afinador>
+        python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); exec(sys.argv[2]); json.dump(f, open(sys.argv[3], "w"))' \
+            "$fa" "$2" "$tmp/fam.json"
+        expect "ficha: $1" 2 "$tmp/af-verde.log" afinador "$tmp/fam.json"
+    }
+    af_mutante "umbral-dbfs en una de host" "f['planes']['afinador']['precondiciones'][0]['umbral-dbfs'] = -30"
+    af_mutante "umbral-dbfs que no es un numero" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = '-30'"
+    # False y no True: True vale 1 y ya lo rechaza el rango; False vale 0, que esta en rango.
+    af_mutante "umbral-dbfs booleano" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = False"
+    af_mutante "umbral-dbfs positivo (no es dBFS)" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = 3"
+    af_mutante "umbral-dbfs debajo de -160" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = -400"
+    # Un decimal (review de S4): el extra lo manda con uno y el juez compara con la ficha; -31.25 se
+    # mandaria -31.2 y la corrida quedaria no-verificable para siempre.
+    af_mutante "medidor en una de host" "f['planes']['afinador']['precondiciones'][0]['medidor'] = 'nivel-afinador'"
+    af_mutante "medidor sin umbral-dbfs" "f['planes']['afinador']['precondiciones'][1]['medidor'] = 'nivel-afinador'"
+    af_mutante "medidor que no es un id" "f['planes']['afinador']['precondiciones'][2]['medidor'] = 'Nivel Afinador'"
+    af_mutante "umbral-dbfs con dos decimales" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = -31.25"
+    python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); f["planes"]["afinador"]["precondiciones"][2]["umbral-dbfs"] = -31.2; json.dump(f, open(sys.argv[2], "w"))' "$fa" "$tmp/fa-312.json"
+    is_eq "ficha: umbral-dbfs con un decimal es valido y viaja igual" "$(smoke_py extras "$tmp/fa-312.json" afinador | tail -1)" "-31.2"
+    af_mutante "depende de una lectura que no existe" "f['planes']['afinador']['precondiciones'][1]['depende'] = ['lectura-juicio-ruido']"
+
+    # Los umbrales de la ficha viajan a la app por extra (`harness.smoke.umbral-dbfs.<id>`): el script
+    # los saca de la ficha, sin ningun id escrito, y solo los del plan pedido.
+    is_eq "S4 extras: el umbral del piso va por extra" "$(smoke_py extras "$fa" afinador | tr '\n' ' ')" "--es harness.smoke.umbral-dbfs.t-af-piso -30.0 "
+    is_eq "S4 extras: un plan sin umbrales no manda nada" "$(smoke_py extras "$fa" sf2 | tr '\n' ' ')" ""
+    is_eq "S4 extras: todo incluye al afinador" "$(smoke_py extras "$fa" todo | wc -l | tr -d ' ')" 3
+    local body4
+    body4="$(awk '/^run_device\(\) \{/ {on = 1} on {print} on && /^\}/ {exit}' "$0")"
+    is_eq "S4 extras: la corrida los saca de la ficha que juzga" "$(grep -cE '^ +done < <\(smoke_py extras "\$setup" "\$plan"\)' <<< "$body4")" 1
+    is_eq "S4 extras: y van en el am start" "$(grep -cE -- '--es harness\.smoke\.semilla "\$seed" \$\{extras\[@\]\+"\$\{extras\[@\]\}"\}' <<< "$body4")" 1
+
+    # La ficha REAL del afinador: las tres precondiciones de AC-053.12, por su chequeo y no por su id
+    # (el script no copia ninguno): el permiso del mic por host, y dos de app, una con umbral.
+    is_eq "S4 ficha real: afinador con permiso de host y dos de app, una con umbral" \
+        "$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["planes"]["afinador"]["precondiciones"]; print(sorted((x["verificador"], x.get("chequeo", "-"), "umbral-dbfs" in x) for x in p))' "$real")" \
+        "[('app', '-', False), ('app', '-', True), ('host', 'permiso-runtime', False)]"
+    is_eq "S4 ficha real: las dos de app del afinador ya las emite el harness" \
+        "$(app_ids_not_emitted harness/src "$real")" ""
+    # Corrida 4.6 (g42, 2026-10-14): el piso se mide con el nivel del afinador, umbral -30.0, y la
+    # descripcion dice de que corrida sale (ya no es provisional).
+    is_eq "S4 ficha real: el piso con el nivel del afinador, -30.0, de la corrida 4.6" \
+        "$(python3 -c 'import json,sys; p=[x for x in json.load(open(sys.argv[1]))["planes"]["afinador"]["precondiciones"] if "umbral-dbfs" in x][0]; print(p.get("medidor"), p["umbral-dbfs"], "smoke-20261014-130356-73587-06ef6ccbd71c" in p["descripcion"], "PROVISIONAL" in p["descripcion"])' "$real")" \
+        "nivel-afinador -30.0 True False"
+
     # La corrida REAL de S3 (g42, 2026-10-09, `--plan todo`, D16): el motor rindio las seis ventanas
     # por su ruta y el oido contesto "presente" al control sf2/1 (pico medido 0,0000). Es AC-053.10
     # sobre un device: los seis juicios de ese sensor salen BLOQUEADO `sensor-no-discrimina` y el exit
-    # es 4. Se juzga con los tres archivos que dejo el script, sin tocarlos.
+    # es 4. Se juzga con los tres archivos que dejo el script, sin tocarlos. Se pidio `todo`, que el
+    # 09/10 eran los cinco paneles: desde S4 `todo` incluye el afinador, asi que se le pide ese plan.
     local g42=scripts/smoke-device-fixtures/g42-20261009-control-oido g42_rc=0
-    bash "$0" --veredicto "$g42/harness-smoke.txt" smoke-20261009-151024-71665-c9dfa086034b todo \
+    bash "$0" --veredicto "$g42/harness-smoke.txt" smoke-20261009-151024-71665-c9dfa086034b "$cinco" \
         --host-log "$g42/precondiciones-host.txt" --sensor-log "$g42/sensor.txt" --semilla 1787862246 \
         > "$tmp/g42.out" 2>&1 || g42_rc=$?
     g42_check() {  # g42_check <nombre> <condicion: 0 = ok>
@@ -2553,12 +3155,40 @@ PTY
     g42_check "g42 real: 50 PASS, 0 FAIL, 6 BLOQUEADO, 0 HUMANO" \
         "$(grep -q '^resumen: 50 PASS · 0 FAIL · 6 BLOQUEADO · 0 HUMANO' "$tmp/g42.out"; echo $?)"
 
+    # REQ-053 S4 (4.6, D18): dos corridas REALES de `--plan afinador` en el g42 (2026-10-14), juzgadas con
+    # la ficha real y los dos archivos que dejo el script, sin tocarlos (el registro del sensor estaba
+    # vacio: el afinador no consulta al oido). La referencia verde reproduce el "sin reaccion" en la fase
+    # reproduccion (OBSERVADO quedo-en=midiendo, con el motor sin objetivo) y engancha el A4 en juicio. La
+    # de control atrapa en device un tick enganchado en el silencio de juicio (440,4 Hz a -48 dBFS).
+    local af42=scripts/smoke-device-fixtures/g42-20261014-afinador af42_rc=0
+    bash "$0" --veredicto "$af42/harness-smoke.txt" smoke-20261014-132651-61763-0e6e66b78669 afinador \
+        --host-log "$af42/precondiciones-host.txt" --semilla 1552609212 > "$tmp/af42.out" 2>&1 || af42_rc=$?
+    g42_check "g42 afinador: exit 0" "$([[ $af42_rc == 0 ]]; echo $?)"
+    g42_check "g42 afinador: la reproduccion se observa sin enganche (quedo midiendo)" \
+        "$(grep -qE '^OBSERVADO +afinador/lectura-reproduccion-estimulo +quedo-en=midiendo hz=440.0 nota=- cents=- \(ticks=50 midiendo=50;' "$tmp/af42.out"; echo $?)"
+    g42_check "g42 afinador: ... con el motor sin objetivo" \
+        "$(grep -qE '^PASS +afinador/reproduccion-arranque +.*objetivo-motor-hz=0.0 ' "$tmp/af42.out"; echo $?)"
+    g42_check "g42 afinador: el juicio engancha el A4 = PASS" \
+        "$(grep -qE '^PASS +afinador/lectura-juicio-estimulo +enganchado nota=A4 ' "$tmp/af42.out"; echo $?)"
+    g42_check "g42 afinador: los dos silencios sin enganche y el piso cumplido" \
+        "$([[ $(grep -cE '^PASS +afinador/lectura-(reproduccion|juicio)-control +sin-enganche-en-silencio' "$tmp/af42.out") == 2 ]] && grep -qE '^ +cumplida +afinador/[a-z-]+ \(app\) +fase:reproduccion,medidor:nivel-afinador,nivel-max-dbfs:-41.7,' "$tmp/af42.out"; echo $?)"
+    g42_check "g42 afinador: 16 PASS, 0 FAIL, 1 OBSERVADO" \
+        "$(grep -q '^resumen: 16 PASS · 0 FAIL · 0 BLOQUEADO · 0 HUMANO · 0 NO-APLICA · 1 OBSERVADO$' "$tmp/af42.out"; echo $?)"
+    local af42c=scripts/smoke-device-fixtures/g42-20261014-afinador-control af42c_rc=0
+    bash "$0" --veredicto "$af42c/harness-smoke.txt" smoke-20261014-132457-59977-a2e3bf7c1af1 afinador \
+        --host-log "$af42c/precondiciones-host.txt" --semilla 541460330 > "$tmp/af42c.out" 2>&1 || af42c_rc=$?
+    g42_check "g42 afinador control: exit 1" "$([[ $af42c_rc == 1 ]]; echo $?)"
+    g42_check "g42 afinador control: el silencio de juicio atrapa el enganche" \
+        "$(grep -qE '^FAIL +afinador/lectura-juicio-control +enganchado-en-silencio nota=A4 hz=440.4 cents=0.5 t-ms=3040 ' "$tmp/af42c.out"; echo $?)"
+    g42_check "g42 afinador control: es el unico FAIL (el A4 de juicio = PASS)" \
+        "$([[ $(grep -c '^FAIL ' "$tmp/af42c.out") == 1 ]] && grep -qE '^PASS +afinador/lectura-juicio-estimulo ' "$tmp/af42c.out"; echo $?)"
+
     rm -rf "$tmp"
     if (( failures )); then
         echo "self-test: FAIL — $failures caso(s) con el veredicto equivocado" >&2
         return 1
     fi
-    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado, otra corrida, y (REQ-053) precondicion incumplida, no verificable, BLOQUEADO que no suma PASS, precedencia del exit, permiso negado vs ventana vencida, ficha invalida, verificadores de host, (D14) placa reclamada vs observaciones y (S3) estimulo no rendido sin consulta, s/n/? del sensor, controles que invalidan al sensor (tambien en la corrida real del g42) y el orden de la semilla"
+    echo "self-test: OK — el juez distingue verde, ok=false, faltante, sin fin, humano pendiente, humano hecho, fallo con permiso, plan recortado, no aplicable, NO-MEDIDO retirado, otra corrida, y (REQ-053) precondicion incumplida, no verificable, BLOQUEADO que no suma PASS, precedencia del exit, permiso negado vs ventana vencida, ficha invalida, verificadores de host, (D14) placa reclamada vs observaciones y (S3) estimulo no rendido sin consulta, s/n/? del sensor, controles que invalidan al sensor (tambien en la corrida real del g42) y el orden de la semilla, y (S4) el afinador: precondiciones que no lo dejan juzgar, enganche en A4, el estado en que quedo, el silencio como control en las dos fases, la reproduccion que se observa y sin-ticks"
 }
 
 # El adb falso del self-test y sus casos. Devuelve la cantidad de casos MAL.
@@ -2674,6 +3304,13 @@ FAKE
     done
     host_case ok t-host-cap true;  host_case ok t-usb-clase true;  host_case ok t-host-usb true;  host_case ok t-alsa true
     host_case ok t-reclamada true
+    # S4: la salida cruda de cada precondicion de host va por PLAN: el mismo id puede vivir en dos planes
+    # (el permiso del mic, en captura y en afinador) y con `todo` uno pisaria al otro.
+    if [[ -s "$evid/evidencia-ok/captura/t-host-cap.txt" && -s "$evid/evidencia-ok/usb/t-usb-clase.txt" ]]; then
+        printf '  ok    %-58s\n' "host: la evidencia cruda va en <dir>/<plan>/<id>.txt"
+    else
+        printf '  MAL   %-58s\n' "host: la evidencia cruda va en <dir>/<plan>/<id>.txt"; bad=$((bad + 1))
+    fi
     host_case incumplida t-host-cap false; host_case incumplida t-usb-clase false
     host_case incumplida t-host-usb false; host_case incumplida t-alsa false
     for mode in falla basura denegado cortado rc-1; do
@@ -2809,17 +3446,27 @@ run_device() {
         esac
     done
     # --plan viaja al `sh` del telefono: se valida ANTES de cualquier llamada a adb.
-    plan_valid "$plan" || { echo "FAIL — --plan invalido: '$plan' (todo, o paneles de salida,captura,sf2,sf3,usb separados por comas)" >&2; exit 2; }
+    plan_valid "$plan" || { echo "FAIL — --plan invalido: '$plan' (todo, o paneles de salida,captura,sf2,sf3,afinador,usb separados por comas)" >&2; exit 2; }
     [[ "$usb_wait" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL — --usb-espera-s tiene que ser un entero > 0: '$usb_wait'" >&2; exit 2; }
     [[ -z "$ceiling" || "$ceiling" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL — --techo-s tiene que ser un entero > 0: '$ceiling'" >&2; exit 2; }
     # REQ-053 S3: el sensor tambien se valida antes de tocar el telefono.
     sensor_valid "$sensor" || { echo "FAIL — --sensor invalido: '$sensor' (oido-humano o ninguno)" >&2; exit 2; }
     # El techo cubre la espera humana, la suite USB (3 tests de 5 s), las ventanas de escucha (dos por
-    # panel audible, ~20 s cada una con la pausa para contestar) y el resto con holgura.
-    ceiling="${ceiling:-$((usb_wait + 120 + 50 * $(audible_panels "$plan")))}"
+    # panel audible, ~20 s cada una con la pausa para contestar), el afinador (S4: dos fases de ~20 s)
+    # y el resto con holgura.
+    local tuner_s=0
+    tuner_in_plan "$plan" && tuner_s=60
+    ceiling="${ceiling:-$((usb_wait + 120 + 50 * $(audible_panels "$plan") + tuner_s))}"
     # REQ-053 S1: una ficha que no se entiende no puede decidir que bloquear. Se valida antes de
     # tocar nada: es un error de uso (exit 2), no un juicio.
     smoke_py validar "$setup" || exit 2
+    # REQ-053 S4: los umbrales de las mediciones de la app (el piso del afinador) salen de la ficha y
+    # viajan por extra: la app no la lee. `extras` los formatea (ids [a-z0-9-]+, numeros), asi que
+    # nada de la ficha llega crudo al `sh` del telefono.
+    local extras=() x
+    while IFS= read -r x; do
+        extras+=("$x")
+    done < <(smoke_py extras "$setup" "$plan")
 
     if [[ -z "${ANDROID_SERIAL:-}" ]]; then
         echo "FAIL — falta ANDROID_SERIAL. Este script no elige device: nunca toca uno que no le nombraron." >&2
@@ -2906,7 +3553,7 @@ run_device() {
 
     # REQ-053 S1 (AC-053.1, D4): las precondiciones del HOST, antes de disparar el plan. Solo
     # lectura (D3: el script no cambia nada del telefono). Cada una deja su linea en la captura,
-    # firmada `verificador=host`, y su salida cruda en $out/precondiciones-host/<id>.txt. Las de la
+    # firmada `verificador=host`, y su salida cruda en $out/precondiciones-host/<plan>/<id>.txt. Las de la
     # app las emite la app durante la corrida; el juez cruza las dos con la ficha al final.
     echo "=== precondiciones del host (ficha: $setup) ==="
     local host_lines
@@ -2964,7 +3611,7 @@ run_device() {
     adb_ shell am force-stop "$PKG"
     adb_ shell am start -n "$ACTIVITY" \
         --es harness.smoke "$plan" --es harness.smoke.run "$run" \
-        --es harness.smoke.usb-espera-s "$usb_wait" --es harness.smoke.semilla "$seed" | tr -d '\r'
+        --es harness.smoke.usb-espera-s "$usb_wait" --es harness.smoke.semilla "$seed" ${extras[@]+"${extras[@]}"} | tr -d '\r'
 
     # Mientras corre, el log para mirar (esperando-humano, fin) junta host y captura; el que se
     # JUZGA es el de la app solo, con el del host aparte.

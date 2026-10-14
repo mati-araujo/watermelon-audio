@@ -27,11 +27,15 @@ import androidx.compose.ui.unit.dp
 import com.watermellonstudios.audio.api.AudioEngineFactory
 import com.watermellonstudios.audio.api.AudioInputFactory
 import com.watermellonstudios.audio.api.InternalWatermelonApi
+import com.watermellonstudios.audio.api.TunerFactory
 import com.watermellonstudios.audio.harness.smoke.HarnessSmoke
 import com.watermellonstudios.audio.harness.smoke.ListeningWindows
 import com.watermellonstudios.audio.harness.smoke.SmokePlanRunner
 import com.watermellonstudios.audio.harness.smoke.SmokeReporter
+import com.watermellonstudios.audio.harness.smoke.SmokePreconditions
 import com.watermellonstudios.audio.harness.smoke.SmokeSink
+import com.watermellonstudios.audio.harness.smoke.TunerProbe
+import com.watermellonstudios.audio.harness.smoke.TunerWindows
 import com.watermellonstudios.audio.harness.smoke.stopEngineForUsb
 import com.watermellonstudios.audio.harness.soundfont.BridgeSoundFontPort
 import com.watermellonstudios.audio.harness.soundfont.Fixtures
@@ -97,6 +101,10 @@ fun HarnessApp(platform: HarnessPlatform) {
     val fixtures = remember { Fixtures(platform.writeFile) }
 
     platform.smokeRequest?.let { request ->
+        // REQ-053 S4: una VISTA de la entrada, para medir el piso mientras el afinador es su dueño y
+        // para cerrar la captura al terminar cada fase (`ITuner.stop()` no la cierra). Nunca `release`,
+        // que le quitaría el nodo.
+        val tunerInput = remember { AudioInputFactory.create() }
         LaunchedEffect(request) {
             SmokePlanRunner(
                 engine = engine,
@@ -107,6 +115,17 @@ fun HarnessApp(platform: HarnessPlatform) {
                 fixtures = fixtures,
                 usb = platform.usbSmoke,
                 windows = ListeningWindows(sfPort),
+                tuner = TunerWindows(
+                    port = sfPort,
+                    newTuner = { TunerFactory.create(it) },
+                    probe = object : TunerProbe {
+                        override fun inputPeak(): Float? = tunerInput.metering()?.peakLinear
+                        override fun engineTargetHz(): Float? = bridge.getTunerTargetHz()
+                        override fun inputRunning(): Boolean = tunerInput.isRunning
+                        override fun stopInput() = tunerInput.stop()
+                    },
+                    floorThresholdDbfs = request.thresholdsDbfs[SmokePreconditions.SILENCE_FLOOR],
+                ),
             ).run(request.plan, SmokeReporter(sink, run = request.run), request.problem, request.seed)
         }
     }

@@ -21,6 +21,36 @@
         }
       ]
     },
+    "afinador": {
+      "descripcion": "REQ-053 S4 (D9, D17): el A4 del fixture .sf2 por el parlante hacia el mic del propio telefono, y el afinador del harness lo tiene que LEER. Juzga el snapshot del afinador, no el oido. El volumen multimedia NO es una precondicion verificada: el script no lo lee ni lo toca (D3). Antes de correr, subirlo a un nivel audible; si la fase juicio falla con entrada-dbfs baja en los ticks de la ventana de estimulo, es eso.",
+      "precondiciones": [
+        {
+          "id": "record-audio",
+          "verificador": "host",
+          "chequeo": "permiso-runtime",
+          "permiso": "android.permission.RECORD_AUDIO",
+          "descripcion": "La misma de captura: sin el permiso, el afinador no abre la entrada. Bloquea el arranque de cada fase y lo que leyo el afinador.",
+          "depende": ["*-arranque", "lectura-*"],
+          "remedio": "Conceder el microfono al harness: adb -s $ANDROID_SERIAL shell pm grant com.watermellonstudios.audio.harness android.permission.RECORD_AUDIO (o reinstalarlo con install -g), y volver a correr el plan."
+        },
+        {
+          "id": "mic-abre",
+          "verificador": "app",
+          "descripcion": "La misma de captura, emitida por fase: el afinador arranco (start() acepto y quedo corriendo). Es la misma observacion que <fase>-arranque, asi que NO lo bloquea (si fallara la libreria, saldria BLOQUEADO en vez de FAIL): bloquea lo que el afinador leyo.",
+          "depende": ["lectura-*"],
+          "remedio": "Cerrar lo que tenga tomado el microfono (una llamada, una grabadora, un asistente de voz) y volver a correr el plan."
+        },
+        {
+          "id": "piso-silencio",
+          "verificador": "app",
+          "umbral-dbfs": -30.0,
+          "medidor": "nivel-afinador",
+          "descripcion": "El piso es el NIVEL del afinador: el maximo de nivel-dbfs (el RMS de lo que analizo en cada tick) en la ventana de silencio de cada fase, contra este umbral (un decimal), que el script le manda por extra (harness.smoke.umbral-dbfs.<id>). El umbral sale de la corrida 4.6 en el g42 (smoke-20261014-130356-73587-06ef6ccbd71c, 2026-10-14, sala en silencio): maximo en silencio -43.4 dBFS en las dos fases, y el A4 por el parlante del orden de -15. La entrada del motor (entrada-dbfs) se emite en cada tick y en el cierre del silencio pero NO juzga nada: su medidor retiene el pico y decae ~0.3 dB/s, y el silencio que siguio al A4 midio -4 dBFS con la sala callada. Una linea por fase: la que falta deja esa fase no-verificable. Sin umbral, o sin una sola lectura del afinador con senal (RMS 0 en todas: silencio DIGITAL, no una sala en silencio), la app no la emite: no-verificable. Un ruido en la sala explica tanto un enganche en el silencio como un afinador que no engancha el A4: bloquea lo que el afinador leyo, en las dos fases.",
+          "depende": ["lectura-*"],
+          "remedio": "Silencio en la sala (nadie hablando, sin musica ni ventiladores cerca del telefono) y volver a correr el plan. Si la evidencia es la-app-no-emitio-su-linea y el control dice nivel-lecturas=0, la entrada no entrego senal: revisar que el acceso al microfono no este bloqueado (control de privacidad de Android) y correr --plan captura. El script no toca nada del telefono."
+        }
+      ]
+    },
     "usb": {
       "precondiciones": [
         {

@@ -36,6 +36,8 @@ package com.watermellonstudios.audio.harness.smoke
  *   (`n`, `de`, `estimulo`, `ruta`, `en-ms`, `ventana-ms`), y es CIEGO — el de un estímulo y el de un
  *   control son la misma línea salvo `n`. Al cerrar la ventana la app emite `step=estimulo` o
  *   `step=control` con lo que el motor rindió (ver `ListeningWindows`).
+ * - `step=afinador` (REQ-053 S4) tampoco es un veredicto: es un tick del afinador (ver `TunerSmoke`).
+ *   Las filas `lectura-<fase>-<tipo>` las arma el JUEZ con esos ticks: `format` rechaza ese prefijo.
  * - `step=sensor` (REQ-053 S3) es el juicio de un sensor sobre una ventana. Lo escribe el SCRIPT en
  *   su propio registro, nunca la app: `format` lo rechaza, y el juez descarta el que llegue por
  *   logcat (cualquier app puede escribir con el tag).
@@ -63,6 +65,9 @@ object HarnessSmoke {
 
     /** REQ-053 S3: el juicio de un sensor. Lo escribe el script; la app no lo puede armar. */
     const val STEP_SENSOR: String = "sensor"
+
+    /** REQ-053 S4: el prefijo de las filas que el juez arma con los ticks del afinador. */
+    const val STEP_TUNER_READING: String = "lectura-"
 
     /** La clave con la que el SCRIPT firma sus precondiciones de host. La app no la puede escribir. */
     private const val FIELD_VERIFIER: String = "verificador"
@@ -95,6 +100,8 @@ object HarnessSmoke {
         require(step != STEP_PRECONDITION) { "una precondicion se arma con precondition(), no con format()" }
         // Ni `sensor` ni nada que empiece así: la fila `sensor-control` del juez no tiene gemelo de la app.
         require(!step.startsWith(STEP_SENSOR)) { "un juicio de sensor lo registra el script, no la app" }
+        // REQ-053 S4: las filas `lectura-<fase>-<tipo>` del afinador las arma el juez con los ticks.
+        require(!step.startsWith(STEP_TUNER_READING)) { "una lectura del afinador la juzga el script, no la app" }
         return line(run, panel, step, ok, fields, applicable)
     }
 

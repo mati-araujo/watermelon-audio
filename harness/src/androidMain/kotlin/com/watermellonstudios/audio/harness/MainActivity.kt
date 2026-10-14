@@ -7,7 +7,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import com.watermellonstudios.audio.harness.smoke.HarnessSmoke
 import com.watermellonstudios.audio.harness.smoke.SeedRequest
+import com.watermellonstudios.audio.harness.smoke.SmokePreconditions
 import com.watermellonstudios.audio.harness.smoke.SmokeSink
+import com.watermellonstudios.audio.harness.smoke.ThresholdRequest
 import com.watermellonstudios.audio.harness.soundfont.SoundFontFdPicker
 import com.watermellonstudios.audio.harness.usb.UsbHarness
 import com.watermellonstudios.audio.harness.usb.UsbPanel
@@ -26,7 +28,8 @@ import java.io.File
  * ```
  *
  * La semilla (REQ-053 S3) fija el orden de las ventanas de escucha; la manda `smoke-device.sh` y la
- * registra en el JSON de la corrida.
+ * registra en el JSON de la corrida. El umbral del piso del afinador (REQ-053 S4) llega como
+ * `--es harness.smoke.umbral-dbfs.<id> <dBFS>`: el script lo saca de la ficha de setup.
  *
  * corre la secuencia automática y emite sus líneas `HARNESS-SMOKE` con `run=<id>`. Sólo en un
  * build DEBUGGABLE: el extra no es una puerta que un release deba tener abierta. Sólo en el primer
@@ -48,12 +51,14 @@ class MainActivity : ComponentActivity() {
         val waitProblem = if (rawWait != null && waitS == null) "usb-espera-s-invalido:$rawWait" else null
         val humanWaitMs = (waitS ?: DEFAULT_USB_WAIT_S) * 1000
         val seed = SeedRequest.parse(intent?.getStringExtra(EXTRA_SEED))
+        val floor = ThresholdRequest.parse(intent?.getStringExtra(EXTRA_THRESHOLD_PREFIX + SmokePreconditions.SILENCE_FLOOR))
         val request = if (debuggable && plan != null && savedInstanceState == null) {
             SmokeRequest(
                 plan = plan,
                 run = intent.getStringExtra(EXTRA_RUN) ?: "adb-${System.currentTimeMillis()}",
-                problem = waitProblem ?: seed.problem,
+                problem = waitProblem ?: seed.problem ?: floor.problem,
                 seed = seed.seed,
+                thresholdsDbfs = floor.dbfs?.let { mapOf(SmokePreconditions.SILENCE_FLOOR to it) } ?: emptyMap(),
             )
         } else {
             null
@@ -84,6 +89,7 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_RUN = "harness.smoke.run"
         const val EXTRA_USB_WAIT_S = "harness.smoke.usb-espera-s"
         const val EXTRA_SEED = "harness.smoke.semilla"
+        const val EXTRA_THRESHOLD_PREFIX = "harness.smoke.umbral-dbfs."
         const val DEFAULT_USB_WAIT_S = 120L
     }
 }

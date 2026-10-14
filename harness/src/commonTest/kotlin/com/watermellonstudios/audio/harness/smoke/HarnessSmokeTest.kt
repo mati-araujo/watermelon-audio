@@ -195,6 +195,17 @@ class HarnessSmokeTest {
         assertEquals(SeedRequest(null, "semilla-invalida:-"), SeedRequest.parse(""))
     }
 
+    /**
+     * REQ-053 S4 (review): las filas `lectura-<fase>-<tipo>` las arma el JUEZ con los ticks. Bug que
+     * atrapa: una app que las emite y deja en el JSON un PASS paralelo al veredicto del juez.
+     */
+    @Test
+    fun aTunerReadingVerdictIsTheJudgesNotTheApps() {
+        assertFailsWith<IllegalArgumentException> { HarnessSmoke.format("r", "afinador", "lectura-juicio-estimulo", true) }
+        assertFailsWith<IllegalArgumentException> { HarnessSmoke.format("r", "afinador", "lectura-x", false) }
+        assertTrue(HarnessSmoke.format("r", "afinador", "juicio-estimulo", true).contains(" step=juicio-estimulo "))
+    }
+
     /** Bug que atrapa: una evidencia vacía parte la línea (`evidencia=` sin valor) en vez de `-`. */
     @Test
     fun aPreconditionWithoutEvidenceSaysDash() {
@@ -204,10 +215,15 @@ class HarnessSmokeTest {
         )
     }
 
+    /**
+     * REQ-053 S4: `afinador` entra al plan ANTES de `usb`. Bug que atrapa: un afinador después de
+     * `usb`, que espera a un humano y deja el motor parado por libusb.
+     */
     @Test
     fun theWholePlanRunsInTheCanonicalOrder() {
         val plan = assertIs<SmokePlan.Valid>(SmokePlan.parse("todo"))
-        assertEquals(listOf("salida", "captura", "sf2", "sf3", "usb"), plan.panels.map { it.id })
+        assertEquals(listOf("salida", "captura", "sf2", "sf3", "afinador", "usb"), plan.panels.map { it.id })
+        assertEquals(listOf(Panel.AFINADOR), assertIs<SmokePlan.Valid>(SmokePlan.parse("afinador")).panels)
     }
 
     /** Bug que atrapa: correr `usb` (que espera a un humano) antes que los automáticos. */

@@ -7,12 +7,14 @@ package com.watermellonstudios.audio.harness.smoke
  * <plan>`): una lista separada por comas de [Panel.id], o `todo`. El orden de ejecución es SIEMPRE
  * el de [Panel], no el del texto: `usb` va último porque espera un gesto humano y no puede frenar a
  * los que no lo necesitan, y `salida` va primero porque los SoundFont necesitan el motor andando.
+ * `afinador` (REQ-053 S4) va antes de `usb`: no espera a nadie, y `usb` deja el motor parado.
  */
 enum class Panel(val id: String) {
     SALIDA("salida"),
     CAPTURA("captura"),
     SF2("sf2"),
     SF3("sf3"),
+    AFINADOR("afinador"),
     USB("usb"),
 }
 
