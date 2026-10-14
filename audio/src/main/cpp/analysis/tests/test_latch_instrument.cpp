@@ -282,7 +282,7 @@ TEST(LatchInstrument, PooledStatisticsUseAllPublicationsNotTheMeanOfMedians) {
                                            pub(500, kLoud, hzAt(100.0, 1.0), kMeas, 1.0)};
     const auto l = latch::measure(pubs, {{0, true}, {250, true}}, oracle, params());
     ASSERT_EQ(l.size(), 2u);
-    const auto pooled = latch::pool(l);
+    const auto pooled = latch::poolLatchErrors(l);
     EXPECT_EQ(pooled.withError, 4);
     EXPECT_NEAR(pooled.medianAbsCents, 1.0, 1e-9);
     EXPECT_NEAR(pooled.maxAbsCents, 10.0, 1e-9);
@@ -760,7 +760,7 @@ TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
         }
         if (p2.firstFrames >= 0) tFirst2.push_back(secOf(p2.firstFrames, run.rate));
     }
-    const latch::Pooled pooled = latch::pool(allLatches);
+    const latch::Pooled pooled = latch::poolLatchErrors(allLatches);
     std::printf("\nenganches=%zu archivos=%zu\n", allLatches.size(), entries.size());
     std::printf("t_primera: n=%zu mediana %.3f max %.3f | t_conv: n=%zu mediana %.3f max %.3f | t_primera2: n=%zu mediana %.3f max %.3f\n",
                 tFirst.size(), medianOf(tFirst), maxOf(tFirst), tConv.size(), medianOf(tConv), maxOf(tConv), tFirst2.size(),

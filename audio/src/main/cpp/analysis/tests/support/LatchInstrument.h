@@ -219,7 +219,7 @@ struct Pooled {
     double coverage = kNaN;
 };
 
-inline Pooled pool(const std::vector<Latch>& latches) {
+inline Pooled poolLatchErrors(const std::vector<Latch>& latches) {
     Pooled out;
     std::vector<double> all;
     for (const Latch& l : latches) {
