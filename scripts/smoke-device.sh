@@ -2805,7 +2805,7 @@ PTY
   {"id": "t-af-host", "verificador": "host", "chequeo": "permiso-runtime", "permiso": "android.permission.RECORD_AUDIO",
    "depende": ["*-arranque", "lectura-*"], "remedio": "REMEDIO-T-AF-HOST"},
   {"id": "t-af-mic", "verificador": "app", "depende": ["lectura-*"], "remedio": "REMEDIO-T-AF-MIC"},
-  {"id": "t-af-piso", "verificador": "app", "umbral-dbfs": -30, "depende": ["lectura-*"], "remedio": "REMEDIO-T-AF-PISO"}
+  {"id": "t-af-piso", "verificador": "app", "umbral-dbfs": -30, "medidor": "nivel-afinador", "depende": ["lectura-*"], "remedio": "REMEDIO-T-AF-PISO"}
 ]}}}
 JSON
     local ord_afr ord_afj
@@ -2851,8 +2851,8 @@ JSON
                     echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=$fase-estimulo ok=true n=$n de=2 sono=A4 hz=440 nota=69 archivo=wma-fixture.sf2 preset=0 ruta=sistema backend=OBOE ventana-ms=4000 frames=192000 pico=0.2100 ticks=4 objetivo-motor-hz=$objhz"
                 else
                     af_ticks "$fase" "$n" midiendo "$nota"
-                    echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=$fase-control ok=true n=$n de=2 tipo=silencio ruta=sistema backend=OBOE ventana-ms=3000 frames=144000 pico=0.0000 ticks=4 entrada-max-dbfs=-58.0 umbral-dbfs=-30.0"
-                    echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=precondicion ok=true id=t-af-piso cumplida=true evidencia=fase:$fase,entrada-max-dbfs:-58.0,umbral-dbfs:-30.0,lecturas:4"
+                    echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=$fase-control ok=true n=$n de=2 tipo=silencio ruta=sistema backend=OBOE ventana-ms=3000 frames=144000 pico=0.0000 ticks=4 entrada-max-dbfs=-4.0 nivel-max-dbfs=-58.0 nivel-lecturas=4 umbral-dbfs=-30.0"
+                    echo "HARNESS-SMOKE v=1 run=$run panel=afinador step=precondicion ok=true id=t-af-piso cumplida=true evidencia=fase:$fase,medidor:nivel-afinador,nivel-max-dbfs:-58.0,umbral-dbfs:-30.0,lecturas:4"
                 fi
             done
         done
@@ -2908,19 +2908,27 @@ JSON
     af_sed "$tmp/p2.log" "$tmp/p2b.log" "s/ step=juicio-arranque ok=true (.*) corriendo=true/ step=juicio-arranque ok=false \1 corriendo=false motivo=no-quedo-corriendo/"
     expect "p2b: el arranque que falla es FAIL aunque el mic bloquee" 1 "$tmp/p2b.log" afinador "$fa"
     expect_line "p2b: juicio-arranque sale FAIL" '^FAIL +afinador/juicio-arranque ' "$tmp/p2b.log" afinador "$fa"
-    af_sed "$tmp/af-verde.log" "$tmp/p3.log" "/ id=t-af-piso .*fase:reproduccion/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /; s/entrada-max-dbfs:-58.0/entrada-max-dbfs:-20.0/;}"
+    af_sed "$tmp/af-verde.log" "$tmp/p3.log" "/ id=t-af-piso .*fase:reproduccion/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /; s/nivel-max-dbfs:-58.0/nivel-max-dbfs:-20.0/;}"
     expect "p3: la sala no esta en silencio (reproduccion) = BLOQUEADO" 4 "$tmp/p3.log" afinador "$fa"
-    expect_line "p3: con el piso medido y el remedio" '^BLOQUEADO +afinador/lectura-juicio-control +precondicion=t-af-piso estado=incumplida evidencia=fase:reproduccion,entrada-max-dbfs:-20.0,umbral-dbfs:-30.0.*remedio=REMEDIO-T-AF-PISO' "$tmp/p3.log" afinador "$fa"
+    expect_line "p3: con el piso medido y el remedio" '^BLOQUEADO +afinador/lectura-juicio-control +precondicion=t-af-piso estado=incumplida evidencia=fase:reproduccion,medidor:nivel-afinador,nivel-max-dbfs:-20.0,umbral-dbfs:-30.0.*remedio=REMEDIO-T-AF-PISO' "$tmp/p3.log" afinador "$fa"
     grep -v ' id=t-af-piso ' "$tmp/af-verde.log" > "$tmp/p4.log"
     expect "p4: sin linea del piso = no-verificable, BLOQUEADO" 4 "$tmp/p4.log" afinador "$fa"
     expect_line "p4: ... con su estado" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-piso estado=no-verificable evidencia=la-app-no-emitio-su-linea' "$tmp/p4.log" afinador "$fa"
     # La app midio contra OTRO umbral que el de la ficha (un extra que no llego bien): la linea no
     # prueba nada de ESTA ficha => no-verificable, aunque diga cumplida.
-    af_sed "$tmp/af-verde.log" "$tmp/p5.log" "/ id=t-af-piso .*fase:juicio/s/entrada-max-dbfs:-58.0,umbral-dbfs:-30.0/entrada-max-dbfs:-20.0,umbral-dbfs:-10.0/"
+    af_sed "$tmp/af-verde.log" "$tmp/p5.log" "/ id=t-af-piso .*fase:juicio/s/nivel-max-dbfs:-58.0,umbral-dbfs:-30.0/nivel-max-dbfs:-20.0,umbral-dbfs:-10.0/"
     expect "p5: el piso medido contra otro umbral = BLOQUEADO" 4 "$tmp/p5.log" afinador "$fa"
     expect_line "p5: ... no-verificable, con la evidencia" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-piso estado=no-verificable evidencia=umbral-o-medicion-incoherente-con-la-ficha' "$tmp/p5.log" afinador "$fa"
+    # S4, corrida 4.6: el piso se mide con el NIVEL del afinador (`medidor:nivel-afinador`, lo declara la
+    # ficha). Una linea medida con otro medidor (la entrada, que retiene el pico) o sin decir cual no
+    # prueba el piso de esta ficha => no-verificable.
+    af_sed "$tmp/af-verde.log" "$tmp/p10.log" "/ id=t-af-piso .*fase:juicio/s/medidor:nivel-afinador/medidor:entrada/"
+    expect "p10: el piso medido con otro medidor = BLOQUEADO" 4 "$tmp/p10.log" afinador "$fa"
+    expect_line "p10: ... no-verificable" '^BLOQUEADO +afinador/lectura-juicio-estimulo +precondicion=t-af-piso estado=no-verificable evidencia=umbral-o-medicion-incoherente-con-la-ficha' "$tmp/p10.log" afinador "$fa"
+    af_sed "$tmp/af-verde.log" "$tmp/p11.log" "/ id=t-af-piso .*fase:juicio/s/medidor:nivel-afinador,//"
+    expect "p11: el piso sin medidor = BLOQUEADO" 4 "$tmp/p11.log" afinador "$fa"
     # La app dice cumplida y su propia medicion la desmiente (-20 no esta debajo de -30).
-    af_sed "$tmp/af-verde.log" "$tmp/p6.log" "/ id=t-af-piso .*fase:juicio/s/entrada-max-dbfs:-58.0/entrada-max-dbfs:-20.0/"
+    af_sed "$tmp/af-verde.log" "$tmp/p6.log" "/ id=t-af-piso .*fase:juicio/s/nivel-max-dbfs:-58.0/nivel-max-dbfs:-20.0/"
     expect "p6: cumplida con la medicion encima del umbral = BLOQUEADO" 4 "$tmp/p6.log" afinador "$fa"
     af_sed "$tmp/af-verde.log" "$tmp/p6b.log" "/ id=t-af-piso .*fase:juicio/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /;}"
     expect "p6b: incumplida con la medicion debajo del umbral = BLOQUEADO" 4 "$tmp/p6b.log" afinador "$fa"
@@ -2936,7 +2944,7 @@ JSON
     expect "p9: sin el mic de la fase reproduccion = BLOQUEADO" 4 "$tmp/p9.log" afinador "$fa"
     # Con un piso incumplido, un juicio que FALLARIA tampoco se juzga: el ruido de la sala lo explica.
     af_log "$tmp/p7-0.log" midiendo
-    af_sed "$tmp/p7-0.log" "$tmp/p7.log" "/ id=t-af-piso .*fase:juicio/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /; s/entrada-max-dbfs:-58.0/entrada-max-dbfs:-20.0/;}"
+    af_sed "$tmp/p7-0.log" "$tmp/p7.log" "/ id=t-af-piso .*fase:juicio/{s/ ok=true / ok=false /; s/ cumplida=true / cumplida=false /; s/nivel-max-dbfs:-58.0/nivel-max-dbfs:-20.0/;}"
     expect "p7: piso incumplido y el afinador sin enganche = BLOQUEADO, no FAIL" 4 "$tmp/p7.log" afinador "$fa"
 
     # --- AC-053.13: el juicio. PASS solo con `enganchado` en A4 dentro de la ventana; si no, FAIL que
@@ -3084,6 +3092,9 @@ JSON
     af_mutante "umbral-dbfs debajo de -160" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = -400"
     # Un decimal (review de S4): el extra lo manda con uno y el juez compara con la ficha; -31.25 se
     # mandaria -31.2 y la corrida quedaria no-verificable para siempre.
+    af_mutante "medidor en una de host" "f['planes']['afinador']['precondiciones'][0]['medidor'] = 'nivel-afinador'"
+    af_mutante "medidor sin umbral-dbfs" "f['planes']['afinador']['precondiciones'][1]['medidor'] = 'nivel-afinador'"
+    af_mutante "medidor que no es un id" "f['planes']['afinador']['precondiciones'][2]['medidor'] = 'Nivel Afinador'"
     af_mutante "umbral-dbfs con dos decimales" "f['planes']['afinador']['precondiciones'][2]['umbral-dbfs'] = -31.25"
     python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); f["planes"]["afinador"]["precondiciones"][2]["umbral-dbfs"] = -31.2; json.dump(f, open(sys.argv[2], "w"))' "$fa" "$tmp/fa-312.json"
     is_eq "ficha: umbral-dbfs con un decimal es valido y viaja igual" "$(smoke_py extras "$tmp/fa-312.json" afinador | tail -1)" "-31.2"
@@ -3106,9 +3117,11 @@ JSON
         "[('app', '-', False), ('app', '-', True), ('host', 'permiso-runtime', False)]"
     is_eq "S4 ficha real: las dos de app del afinador ya las emite el harness" \
         "$(app_ids_not_emitted harness/src "$real")" ""
-    local real_umbral
-    real_umbral="$(python3 -c 'import json,sys; print([x for x in json.load(open(sys.argv[1]))["planes"]["afinador"]["precondiciones"] if "umbral-dbfs" in x][0]["descripcion"])' "$real")"
-    is_eq "S4 ficha real: el umbral del piso esta marcado PROVISIONAL (4.6)" "$([[ "$real_umbral" == *PROVISIONAL* ]]; echo $?)" 0
+    # Corrida 4.6 (g42, 2026-10-14): el piso se mide con el nivel del afinador, umbral -30.0, y la
+    # descripcion dice de que corrida sale (ya no es provisional).
+    is_eq "S4 ficha real: el piso con el nivel del afinador, -30.0, de la corrida 4.6" \
+        "$(python3 -c 'import json,sys; p=[x for x in json.load(open(sys.argv[1]))["planes"]["afinador"]["precondiciones"] if "umbral-dbfs" in x][0]; print(p.get("medidor"), p["umbral-dbfs"], "smoke-20261014-130356-73587-06ef6ccbd71c" in p["descripcion"], "PROVISIONAL" in p["descripcion"])' "$real")" \
+        "nivel-afinador -30.0 True False"
 
     # La corrida REAL de S3 (g42, 2026-10-09, `--plan todo`, D16): el motor rindio las seis ventanas
     # por su ruta y el oido contesto "presente" al control sf2/1 (pico medido 0,0000). Es AC-053.10

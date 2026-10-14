@@ -102,13 +102,22 @@ class TunerSmokeTest {
     private var behavior: (noteOn: Boolean, target: StringTarget?, engineHz: Float) -> TunerReading? =
         { noteOn, target, engineHz ->
             when {
-                noteOn && engineHz > 0f -> TunerReading(target, snapshot(cents = 1.25f, hz = 440.1f))
-                noteOn -> TunerReading(target, snapshot(cents = null, hz = 440.1f))
-                else -> TunerReading(target, snapshot(cents = null, hz = null))
+                noteOn && engineHz > 0f -> TunerReading(target, snapshot(cents = 1.25f, hz = 440.1f, rms = tunerRms()))
+                noteOn -> TunerReading(target, snapshot(cents = null, hz = 440.1f, rms = tunerRms()))
+                else -> TunerReading(target, snapshot(cents = null, hz = null, rms = tunerRms()))
             }
         }
-    /** El pico LINEAL de la entrada: 0,25 (−12 dBFS) con la nota, 10^(−58/20) (−58 dBFS) en silencio. */
-    private var inputLevel: () -> Float? = { if (port.noteIsOn) 0.25f else SILENCE_PEAK }
+    /**
+     * El RMS de lo que analiza el afinador (`nivel-dbfs`, con el que se mide el piso): 0,18 (≈ −15 dBFS,
+     * el A4 medido en el g42) con la nota, 10^(−58/20) (−58 dBFS) en silencio.
+     */
+    private var tunerRms: () -> Float = { if (port.noteIsOn) 0.18f else SILENCE_PEAK }
+
+    /**
+     * El pico LINEAL de la entrada (`entrada-dbfs`, informativo): RETIENE el pico, como el medidor de
+     * `:audio` medido en el g42 (decae ~0,3 dB/s): −4 dBFS también en el silencio que sigue al A4.
+     */
+    private var inputLevel: () -> Float? = { 0.63f }
     private var captureOpen = false
 
     private val probe = object : TunerProbe {
@@ -464,14 +473,15 @@ class TunerSmokeTest {
     // --- 4.2: la precondición del piso ---------------------------------------------------------
 
     /**
-     * Bug que atrapa: un piso "cumplido" a la par del umbral, o una evidencia sin los dos números (el
-     * juez verifica que la app midió contra el umbral de la FICHA y que lo que dice cuadra con ellos).
+     * Bug que atrapa: un piso "cumplido" a la par del umbral, o una evidencia sin el medidor y los dos
+     * números (el juez verifica que la app midió con el medidor y contra el umbral de la FICHA, y que lo
+     * que dice cuadra con ellos).
      */
     @Test
-    fun theFloorIsMetOnlyBelowTheThresholdAndTheEvidenceCarriesBothNumbers() {
-        val met = assertNotNull(silenceFloor(TunerPhase.JUDGMENT, maxInputDbfs = -50f, readings = 10, thresholdDbfs = -25f))
+    fun theFloorIsMetOnlyBelowTheThresholdAndTheEvidenceCarriesTheMeterAndBothNumbers() {
+        val met = assertNotNull(silenceFloor(TunerPhase.JUDGMENT, maxLevelDbfs = -50f, readings = 10, thresholdDbfs = -25f))
         assertTrue(met.met)
-        assertEquals("fase:juicio,entrada-max-dbfs:-50.0,umbral-dbfs:-25.0,lecturas:10", met.evidence)
+        assertEquals("fase:juicio,medidor:nivel-afinador,nivel-max-dbfs:-50.0,umbral-dbfs:-25.0,lecturas:10", met.evidence)
         assertFalse(assertNotNull(silenceFloor(TunerPhase.JUDGMENT, -20f, 10, -25f)).met)
         assertFalse(assertNotNull(silenceFloor(TunerPhase.JUDGMENT, -25f, 10, -25f)).met)
         assertTrue(assertNotNull(silenceFloor(TunerPhase.REPRODUCTION, -90f, 3, -25f)).met)
@@ -486,7 +496,7 @@ class TunerSmokeTest {
     fun theFloorDecidesWithTheNumberItWrites() {
         val r = assertNotNull(silenceFloor(TunerPhase.JUDGMENT, -25.04f, 5, -25f))
         assertFalse(r.met)
-        assertTrue("entrada-max-dbfs:-25.0,umbral-dbfs:-25.0" in r.evidence)
+        assertTrue("nivel-max-dbfs:-25.0,umbral-dbfs:-25.0" in r.evidence)
         assertTrue(assertNotNull(silenceFloor(TunerPhase.JUDGMENT, -25.06f, 5, -25f)).met)
     }
 
@@ -496,13 +506,13 @@ class TunerSmokeTest {
      */
     @Test
     fun withoutAThresholdOrAMeasurementTheFloorIsNotClaimed() {
-        assertNull(silenceFloor(TunerPhase.JUDGMENT, maxInputDbfs = -50f, readings = 10, thresholdDbfs = null))
-        assertNull(silenceFloor(TunerPhase.JUDGMENT, maxInputDbfs = null, readings = 0, thresholdDbfs = -25f))
+        assertNull(silenceFloor(TunerPhase.JUDGMENT, maxLevelDbfs = -50f, readings = 10, thresholdDbfs = null))
+        assertNull(silenceFloor(TunerPhase.JUDGMENT, maxLevelDbfs = null, readings = 0, thresholdDbfs = -25f))
     }
 
     /**
      * Bug que atrapa: medir el piso con el estímulo sonando (sale incumplido siempre) o una sola vez
-     * por corrida. Es una línea por fase, medida en SU ventana de silencio, con la entrada del motor.
+     * por corrida. Es una línea por fase, medida en SU ventana de silencio, con el nivel del afinador.
      */
     @Test
     fun theFloorIsMeasuredInEachPhasesSilenceWindowOnly() = runTest {
@@ -510,7 +520,7 @@ class TunerSmokeTest {
         val floor = preconditions(SmokePreconditions.SILENCE_FLOOR)
         assertEquals(listOf("reproduccion", "juicio"), floor.map { field(it, "evidencia")!!.substringAfter("fase:").substringBefore(',') })
         assertTrue(floor.all { field(it, "cumplida") == "true" && field(it, "ok") == "true" })
-        assertTrue(floor.all { "entrada-max-dbfs:-58.0,umbral-dbfs:-30.0,lecturas:40" in field(it, "evidencia")!! })
+        assertTrue(floor.all { "medidor:nivel-afinador,nivel-max-dbfs:-58.0,umbral-dbfs:-30.0,lecturas:40" in field(it, "evidencia")!! })
         // Cada línea va después del cierre de su ventana de silencio.
         for (phase in TunerPhase.entries) {
             val close = lines.indexOfFirst { step(it) == "${phase.id}-control" }
@@ -518,8 +528,27 @@ class TunerSmokeTest {
             assertTrue(close in 0 until line, phase.id)
         }
         val silence = lines.first { step(it) == "juicio-control" }
-        assertEquals("-58.0", field(silence, "entrada-max-dbfs"))
+        assertEquals("-58.0", field(silence, "nivel-max-dbfs"))
+        assertEquals("40", field(silence, "nivel-lecturas"))
         assertEquals("-30.0", field(silence, "umbral-dbfs"))
+    }
+
+    /**
+     * Bug que atrapa (corrida 4.6 en el g42): medir el piso con el medidor de ENTRADA, que retiene el
+     * pico y decae ~0,3 dB/s. El silencio que sigue al A4 midió −4,1 dBFS con la sala callada (un
+     * BLOQUEADO falso); el nivel del afinador dio −43,4. La entrada se sigue emitiendo (tick y cierre),
+     * pero no juzga nada: con la entrada en −4 dBFS y el nivel en −58, el piso se cumple.
+     */
+    @Test
+    fun theFloorIsTheTunersLevelNotTheInputMetersRetainedPeak() = runTest {
+        windows(threshold = -30f).run(reporter, seed = 12345L, fixture = "f.sf2")
+        val silence = lines.first { step(it) == "juicio-control" }
+        assertEquals("-4.0", field(silence, "entrada-max-dbfs"))
+        assertTrue(ticks().all { field(it, "entrada-dbfs") == "-4.0" })
+        val floor = preconditions(SmokePreconditions.SILENCE_FLOOR)
+        assertEquals(2, floor.size)
+        assertTrue(floor.all { field(it, "cumplida") == "true" })
+        assertTrue(floor.none { "entrada" in field(it, "evidencia")!! })
     }
 
     /** Bug que atrapa: un piso "medido" sin umbral que el script mandó (una corrida a mano). */
@@ -530,30 +559,34 @@ class TunerSmokeTest {
         assertEquals("-", field(lines.first { step(it) == "juicio-control" }, "umbral-dbfs"))
     }
 
-    /** Bug que atrapa: un piso con lecturas de entrada inválidas (NaN) que lo vuelven "cumplido". */
+    /** Bug que atrapa: un piso sin lecturas del afinador (sin snapshot, o NaN) dado por cumplido. */
     @Test
-    fun aFloorWithoutInputReadingsIsNotClaimed() = runTest {
-        inputLevel = { if (port.noteIsOn) 0.25f else Float.NaN }
+    fun aFloorWithoutTunerReadingsIsNotClaimed() = runTest {
+        behavior = { noteOn, target, _ -> if (noteOn) TunerReading(target, snapshot(cents = null, hz = 440f, rms = 0.18f)) else null }
         windows(threshold = -30f).run(reporter, seed = 12345L, fixture = "f.sf2")
         assertTrue(preconditions(SmokePreconditions.SILENCE_FLOOR).isEmpty())
-        assertEquals("-", field(lines.first { step(it) == "juicio-control" }, "entrada-max-dbfs"))
-        assertEquals("0", field(lines.first { step(it) == "juicio-control" }, "entrada-lecturas"))
+        assertEquals("-", field(lines.first { step(it) == "juicio-control" }, "nivel-max-dbfs"))
+        assertEquals("0", field(lines.first { step(it) == "juicio-control" }, "nivel-lecturas"))
+        events.clear()
+        tunerRms = { if (port.noteIsOn) 0.18f else Float.NaN }
+        behavior = { _, target, _ -> TunerReading(target, snapshot(cents = null, hz = null, rms = tunerRms())) }
+        windows(threshold = -30f).run(reporter, seed = 12345L, fixture = "f.sf2")
+        assertTrue(preconditions(SmokePreconditions.SILENCE_FLOOR).isEmpty())
     }
 
     /**
-     * Bug que atrapa (review de S4): un silencio DIGITAL (pico 0 en cada lectura: el mic silenciado
-     * por el control de privacidad, o una captura que "corre" sin entregar) dado por sala en silencio.
-     * El medidor dice −120 dBFS, que pasa cualquier umbral, sin haber medido nada. Sin una sola lectura
-     * con señal, la app no afirma el piso (el juez lo da no-verificable).
+     * Bug que atrapa (review de S4): un silencio DIGITAL (RMS 0 en cada lectura: el mic silenciado por
+     * el control de privacidad, o una captura que "corre" sin entregar) dado por sala en silencio. Sin
+     * una sola lectura con señal, la app no afirma el piso (el juez lo da no-verificable).
      */
     @Test
     fun aDigitalSilenceIsNotAQuietRoom() = runTest {
-        inputLevel = { if (port.noteIsOn) 0.25f else 0f }
+        tunerRms = { if (port.noteIsOn) 0.18f else 0f }
         windows(threshold = -30f).run(reporter, seed = 12345L, fixture = "f.sf2")
         assertTrue(preconditions(SmokePreconditions.SILENCE_FLOOR).isEmpty())
         val silence = lines.first { step(it) == "juicio-control" }
-        assertEquals("0", field(silence, "entrada-lecturas"))
-        assertEquals("-", field(silence, "entrada-max-dbfs"))
+        assertEquals("0", field(silence, "nivel-lecturas"))
+        assertEquals("-", field(silence, "nivel-max-dbfs"))
     }
 
     /**
