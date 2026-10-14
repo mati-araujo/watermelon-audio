@@ -297,11 +297,18 @@ class TunerWindows(
             }
             return started && windowsOk
         } finally {
-            // El motor queda sin objetivo: el panel de la UI (sin cuerda) no hereda el A4 del plan.
-            if (phase.selectedString != null) tuner.selectedString = null
-            tuner.stop()
-            // `stop()` no cierra la captura que abrió `start()`: se cierra acá (review de S4).
-            probe.stopInput()
+            // Tres cierres, cada uno aunque el anterior tire (security-auditor del REQ): el motor sin
+            // objetivo (el panel de la UI, sin cuerda, no hereda el A4 del plan), el afinador parado, y la
+            // captura cerrada, que `stop()` no cierra (review de S4).
+            try {
+                try {
+                    if (phase.selectedString != null) tuner.selectedString = null
+                } finally {
+                    tuner.stop()
+                }
+            } finally {
+                probe.stopInput()
+            }
         }
     }
 
