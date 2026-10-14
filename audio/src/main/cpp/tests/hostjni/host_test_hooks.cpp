@@ -43,6 +43,7 @@
 #include "api/watermelon_audio.h"
 #include "backends/BackendManager.h"
 #include "core/tests/support/FakeAudioBackend.h"
+#include "core/tests/support/FakeCaptureStream.h"
 #include "jni/jni_common.h"
 
 namespace {
@@ -134,6 +135,73 @@ Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativeSetNegotia
     backend->setNegotiatedChannelCount(channelCount);
     backend->setNegotiatedLowLatency(lowLatency == JNI_TRUE);
     return JNI_TRUE;
+}
+
+// ---- Captura propia del InputNode (REQ-054.1) -------------------------------
+//
+// El `FakeCaptureStream` esta APAGADO por defecto: en el host real (y en `InputNodeJniTest`,
+// cuyo "hueco declarado" depende de eso) `startInputStream()` informa false. Estas palancas lo
+// encienden para UN test y lo devuelven a ese estado, y leen lo que el fake conto.
+//
+// Como las otras, devuelven `false` cuando no pudieron accionar y el envoltorio Kotlin lo
+// convierte en `fail(...)`: `Enable`/`Disable` rechazan actuar con una captura ABIERTA, porque
+// reiniciar los contadores bajo un stream vivo los desincroniza de la realidad (el fake se
+// creeria cerrado) y el test siguiente mediria basura con nombre de medicion. Los lectores son
+// lecturas puras: el fake esta compilado en este .so, siempre hay algo que leer.
+
+/** Reinicia contadores y ENCIENDE la fabrica. Antes de que el motor pida su stream. */
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativeFakeCaptureEnable(
+    JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    if (wma_test::fakeCaptureStreamIsOpen()) return JNI_FALSE;
+    wma_test::resetFakeCaptureStream();
+    wma_test::setFakeCaptureStreamAvailable(true);
+    return JNI_TRUE;
+}
+
+/** Apaga la fabrica y pone los contadores en 0 (el estado de arranque del proceso). */
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativeFakeCaptureDisable(
+    JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    if (wma_test::fakeCaptureStreamIsOpen()) return JNI_FALSE;
+    wma_test::resetFakeCaptureStream();
+    return JNI_TRUE;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativeFakeCaptureOpens(
+    JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    return wma_test::fakeCaptureStreamOpens();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativeFakeCaptureCloses(
+    JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    return wma_test::fakeCaptureStreamCloses();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativeFakeCaptureViolations(
+    JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    return wma_test::fakeCaptureStreamViolations();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativeFakeCaptureIsOpen(
+    JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    return wma_test::fakeCaptureStreamIsOpen() ? JNI_TRUE : JNI_FALSE;
 }
 
 }  // extern "C"

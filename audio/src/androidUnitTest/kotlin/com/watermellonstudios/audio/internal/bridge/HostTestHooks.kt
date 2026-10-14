@@ -68,7 +68,67 @@ internal object HostTestHooks {
         }
     }
 
+    // ---- Captura propia del InputNode (REQ-054.1) ----------------------------------------------
+
+    /**
+     * Enciende el `FakeCaptureStream` y pone sus contadores en 0. **Apagado por defecto** en el
+     * host real: sin esto `startInputStream()` informa false y la captura "no existe" (el hueco
+     * declarado de `InputNodeJniTest`). Llamalo ANTES de arrancar la captura, y devolvelo con
+     * [disableFakeCapture] cuando el test termina.
+     */
+    fun enableFakeCapture() {
+        JniHarness.requireNativeLibrary()
+        if (!nativeFakeCaptureEnable()) {
+            fail(
+                "no pude encender el stream de captura falso: hay una captura ABIERTA de un test " +
+                    "anterior. Reiniciar los contadores bajo un stream vivo los desincroniza de la " +
+                    "realidad; destruí el motor (resetEngine) antes.",
+            )
+        }
+    }
+
+    /** Apaga el fake y vuelve a "sin captura" (el estado de arranque del proceso). */
+    fun disableFakeCapture() {
+        JniHarness.requireNativeLibrary()
+        if (!nativeFakeCaptureDisable()) {
+            fail(
+                "no pude apagar el stream de captura falso: sigue ABIERTO. Alguien dejó la captura " +
+                    "arriba; destruí el motor (resetEngine) antes de apagarlo.",
+            )
+        }
+    }
+
+    /** Veces que el fake abrió el stream desde el último [enableFakeCapture]. */
+    fun fakeCaptureOpens(): Int {
+        JniHarness.requireNativeLibrary()
+        return nativeFakeCaptureOpens()
+    }
+
+    /** Veces que lo cerró. */
+    fun fakeCaptureCloses(): Int {
+        JniHarness.requireNativeLibrary()
+        return nativeFakeCaptureCloses()
+    }
+
+    /** Usos ilegales: abrir abierto, arrancar cerrado, cerrar cerrado, destruirse abierto. */
+    fun fakeCaptureViolations(): Int {
+        JniHarness.requireNativeLibrary()
+        return nativeFakeCaptureViolations()
+    }
+
+    /** Si el stream está abierto ahora. */
+    fun fakeCaptureIsOpen(): Boolean {
+        JniHarness.requireNativeLibrary()
+        return nativeFakeCaptureIsOpen()
+    }
+
     private external fun nativeResetEngine(): Boolean
     private external fun nativeSetStartFails(fails: Boolean): Boolean
     private external fun nativeSetNegotiatedStream(channelCount: Int, lowLatency: Boolean): Boolean
+    private external fun nativeFakeCaptureEnable(): Boolean
+    private external fun nativeFakeCaptureDisable(): Boolean
+    private external fun nativeFakeCaptureOpens(): Int
+    private external fun nativeFakeCaptureCloses(): Int
+    private external fun nativeFakeCaptureViolations(): Int
+    private external fun nativeFakeCaptureIsOpen(): Boolean
 }
