@@ -131,7 +131,7 @@ class TunerInputDumpResultTest {
      * devuelve NaN (una toma que nunca recibió audio no puede mostrar "NaN s" en la app).
      */
     @Test
-    fun `seconds divide en Double, no desborda y es cero sin rate`() {
+    fun `seconds divide en Double sin desbordar y es cero sin rate`() {
         fun secondsOf(frames: Long, rate: Long): Double =
             assertNotNull(TunerInputDumpResult.fromNative(longArrayOf(frames, 0, 0, rate, 0, 1, 1), "x.wav")).seconds
 
