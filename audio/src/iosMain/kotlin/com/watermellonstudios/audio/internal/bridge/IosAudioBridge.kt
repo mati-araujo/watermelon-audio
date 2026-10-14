@@ -4,8 +4,11 @@ import com.watermellonstudios.audio.api.EffectChainSnapshot
 import com.watermellonstudios.audio.api.EffectParameterUpdate
 import com.watermellonstudios.audio.api.IAudioNativeBridge
 import com.watermellonstudios.audio.api.ILooperBridge
+import com.watermellonstudios.audio.api.ITunerDiagnostics
+import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.api.LooperStateListener
 import com.watermellonstudios.audio.api.NativeEffectSnapshot
+import com.watermellonstudios.audio.api.TunerInputDumpResult
 import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
@@ -29,6 +32,7 @@ import kotlinx.cinterop.MemScope
 import kotlinx.cinterop.cstr
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.IntVar
+import kotlinx.cinterop.LongVar
 import kotlinx.cinterop.FloatVar
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.CPointerVar
@@ -42,6 +46,7 @@ import kotlinx.cinterop.ptr
 import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
+import kotlin.concurrent.AtomicReference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -164,8 +169,9 @@ private val looperEventTrampoline = staticCFunction<Int, Int, Float, COpaquePoin
     }
 }
 
-@OptIn(ExperimentalForeignApi::class)
-internal class IosAudioBridge : IAudioNativeBridge {
+// `InternalWatermelonApi` es el opt-in del supertipo `ITunerDiagnostics` (tooling del harness).
+@OptIn(ExperimentalForeignApi::class, InternalWatermelonApi::class)
+internal class IosAudioBridge : IAudioNativeBridge, ITunerDiagnostics {
 
     private val concurrency = BridgeConcurrency()
 
@@ -666,6 +672,37 @@ internal class IosAudioBridge : IAudioNativeBridge {
     }
 
     override fun lockTunerString(index: Int): Boolean = wma_tuner_lock_string(engine, index)
+
+    // ---- Diagnóstico, sin contrato (REQ-055 S0). Mismo contrato que en Android: la C API
+    //      serializa con `analysisMutex` y el volcado no toca el stream de entrada.
+
+    /**
+     * El path pedido de la toma viva: el nativo nombra el archivo según `valid` y no lo devuelve.
+     * Atómico: start y stop pueden venir de hilos distintos.
+     */
+    private val dumpPath = AtomicReference<String?>(null)
+
+    override fun startTunerInputDump(path: String): Boolean {
+        // Se recuerda ANTES de llamar: un start que devuelve false puede dejar la toma viva (el techo
+        // del buzón venció) y el stop siguiente la cierra. Un start rechazado porque ya hay una toma
+        // no puede pisar el path de la viva: se restituye el anterior.
+        val previous = dumpPath.getAndSet(path)
+        val started = wma_tuner_diag_input_dump_start(engine, path)
+        if (!started && previous != null) dumpPath.compareAndSet(path, previous)
+        return started
+    }
+
+    override fun stopTunerInputDump(): TunerInputDumpResult? = memScoped {
+        val values = allocArray<LongVar>(TunerInputDumpResult.VALUE_COUNT)
+        if (!wma_tuner_diag_input_dump_stop(engine, values, TunerInputDumpResult.VALUE_COUNT)) {
+            return@memScoped null
+        }
+        val requested = dumpPath.getAndSet(null) ?: return@memScoped null
+        TunerInputDumpResult.fromNative(
+            LongArray(TunerInputDumpResult.VALUE_COUNT) { values[it] },
+            requested,
+        )
+    }
 
     /**
      * El puerto offline (REQ-015 S2) — **la única `wma_tuner_*` que no recibe `engine`**.

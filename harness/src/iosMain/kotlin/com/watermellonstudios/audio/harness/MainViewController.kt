@@ -7,7 +7,10 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
 import platform.Foundation.NSData
+import platform.Foundation.NSDocumentDirectory
+import platform.Foundation.NSSearchPathForDirectoriesInDomains
 import platform.Foundation.NSTemporaryDirectory
+import platform.Foundation.NSUserDomainMask
 import platform.Foundation.create
 import platform.Foundation.writeToFile
 import platform.UIKit.UIViewController
@@ -32,9 +35,15 @@ fun MainViewController(): UIViewController = ComposeUIViewController {
         HarnessPlatform(
             smokeSink = SmokeSink { line -> println(line) },
             writeFile = ::writeTempFile,
+            dumpDir = documentsDirectory(),
         ),
     )
 }
+
+/** Documents de la app: donde las tomas del afinador se bajan (Archivos / Finder) sin herramientas. */
+private fun documentsDirectory(): String? =
+    NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, true)
+        .firstOrNull() as? String
 
 @OptIn(ExperimentalForeignApi::class, BetaInteropApi::class)
 private fun writeTempFile(name: String, bytes: ByteArray): String {

@@ -1290,6 +1290,42 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeAnalyz
     return result;
 }
 
+// ---- Diagnostico, sin contrato (REQ-055 S0) ---------------------------------
+// El volcado a WAV de lo que el afinador ve. Sin mutex propio, igual que la intonacion: la C API
+// serializa con `analysisMutex`. NO crea el motor ni arranca el afinador (sin afinador corriendo no
+// entra audio): sin motor, `start` es false y `stop` es null.
+
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerDiagInputDumpStart(
+    JNIEnv* env, jobject thiz, jstring path) {
+    (void)thiz;
+    if (path == nullptr) return JNI_FALSE;
+    // UTF-8 modificado: identico a UTF-8 para el BMP, que es todo lo que un nombre de archivo usa.
+    const char* chars = env->GetStringUTFChars(path, nullptr);
+    if (chars == nullptr) return JNI_FALSE;   // OOM: la excepcion ya quedo pendiente
+    const bool ok = wma_tuner_diag_input_dump_start(g_wmaEngine, chars);
+    env->ReleaseStringUTFChars(path, chars);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+/// null (y no ceros) sin toma o sin motor: un cero es un dato plausible, ver MINI-003.
+JNIEXPORT jlongArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerDiagInputDumpStop(
+    JNIEnv* env, jobject thiz) {
+    (void)thiz;
+    int64_t values[WMA_TUNER_DUMP_STATS_VALUES];
+    if (!wma_tuner_diag_input_dump_stop(g_wmaEngine, values, WMA_TUNER_DUMP_STATS_VALUES)) {
+        return nullptr;
+    }
+    // `jlong` no es `int64_t` en todas las ABIs (long long contra long): se copia, no se castea.
+    jlong out[WMA_TUNER_DUMP_STATS_VALUES];
+    for (int i = 0; i < WMA_TUNER_DUMP_STATS_VALUES; ++i) out[i] = static_cast<jlong>(values[i]);
+    jlongArray result = env->NewLongArray(WMA_TUNER_DUMP_STATS_VALUES);
+    if (result == nullptr) return nullptr;
+    env->SetLongArrayRegion(result, 0, WMA_TUNER_DUMP_STATS_VALUES, out);
+    return result;
+}
+
 JNIEXPORT void JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeReleaseInputNode(
     JNIEnv* env, jobject thiz) {

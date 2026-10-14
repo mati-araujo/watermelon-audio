@@ -15,6 +15,7 @@
 #include "../analysis/AnalysisRing.h"
 #include "../analysis/AnalysisSnapshot.h"
 #include "../analysis/AnalysisThread.h"
+#include "../analysis/TunerInputDump.h"
 
 #include <memory>
 #include <atomic>
@@ -44,6 +45,12 @@ struct WmaEngine {
     std::unique_ptr<wma::analysis::AnalysisSnapshot> analysisSnapshot;
     std::unique_ptr<wma::analysis::AnalysisThread> analysisThread;
     std::mutex analysisMutex;
+
+    /* Diagnostico (REQ-055 S0): el volcado a WAV de la entrada del afinador. Se crea la primera
+     * vez que se pide una toma y vive hasta `wma_engine_destroy()`, igual que el ring: el hilo
+     * de analisis guarda su puntero mientras la toma esta armada, y se libera DESPUES de parar
+     * ese hilo. Lo protege `analysisMutex`. */
+    std::unique_ptr<wma::analysis::TunerInputDump> tunerInputDump;
 
     /* Mode system */
     std::atomic<int> currentMode{0};

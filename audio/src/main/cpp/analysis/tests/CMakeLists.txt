@@ -46,10 +46,14 @@ add_executable(analysis_tests
     test_latch_instrument.cpp
     test_temporal_oracle.cpp
     test_spectral_support.cpp
+    test_input_dump.cpp
+    test_wav_file_dump_sink.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisThread.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../TunerInputDump.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../WavFileDumpSink.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../SpectralSupportProbe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../OfflineAnalysis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../PhaseSlopeEstimator.cpp

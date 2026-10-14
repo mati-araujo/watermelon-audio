@@ -5,7 +5,10 @@ import com.watermellonstudios.audio.api.EffectChainSnapshot
 import com.watermellonstudios.audio.api.IAudioNativeBridge
 import com.watermellonstudios.audio.api.IEffectStateProvider
 import com.watermellonstudios.audio.api.IEffectStateWriter
+import com.watermellonstudios.audio.api.ITunerDiagnostics
+import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.api.NativeEffectSnapshot
+import com.watermellonstudios.audio.api.TunerInputDumpResult
 import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
@@ -96,7 +99,10 @@ import kotlinx.coroutines.withContext
  * @see IEffectStateProvider For read operations interface
  * @see IEffectStateWriter For write operations interface
  */
-class AudioNativeBridge private constructor() : IAudioNativeBridge {
+// El opt-in es del supertipo `ITunerDiagnostics` (tooling del harness): se acota a la clase porque
+// es lo unico que el compilador deja anotar para implementar una interfaz marcada.
+@OptIn(InternalWatermelonApi::class)
+class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagnostics {
 
     companion object {
         private const val TAG = "AudioNativeBridge"
@@ -1818,6 +1824,33 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     ): FloatArray? =
         nativeAnalyzeTunerBufferWithCandidates(samples, channels, sampleRate, targetHz, candidatesHz)
 
+    // ---- Diagnostico, sin contrato (REQ-055 S0) ------------------------------
+    // Sin mutex de categoria, y no es un olvido: el volcado no abre ni cierra el stream de
+    // entrada (que es lo que INPUT serializa), y la C API ya lo serializa con `analysisMutex`.
+    // El `stop` espera a lo sumo el techo del buzon de analisis (2 s): si estuviera bajo INPUT
+    // trabaria un `startTuner()`/`stopTuner()` concurrente por ese rato sin ganar nada.
+
+    override fun startTunerInputDump(path: String): Boolean = synchronized(dumpLock) {
+        // El path se recuerda ANTES de llamar: un start que devuelve false puede dejar la toma viva
+        // (el techo del buzon vencio) y el stop siguiente la cierra. Un start rechazado porque ya
+        // hay una toma no puede pisar el path de la viva: se restituye el anterior.
+        val previous = dumpPath
+        dumpPath = path
+        val started = nativeTunerDiagInputDumpStart(path)
+        if (!started && previous != null) dumpPath = previous
+        started
+    }
+
+    override fun stopTunerInputDump(): TunerInputDumpResult? = synchronized(dumpLock) {
+        val values = nativeTunerDiagInputDumpStop() ?: return@synchronized null
+        // El nativo no devuelve el path: nombra el archivo segun `valid`, con la regla que Kotlin repite.
+        val requested = dumpPath.also { dumpPath = null }
+        TunerInputDumpResult.fromNative(values, requested ?: return@synchronized null)
+    }
+
+    private val dumpLock = Any()
+    private var dumpPath: String? = null
+
     override fun captureIntonation(slot: Int): Boolean = nativeIntonationCapture(slot)
     override fun resetIntonation() = nativeIntonationReset()
     override fun intonationState(): Int = nativeIntonationState()
@@ -2219,6 +2252,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeGetTunerSnapshot(): FloatArray?
     private external fun nativeSetTunerCandidates(hz: FloatArray): Boolean
     private external fun nativeLockTunerString(index: Int): Boolean
+    private external fun nativeTunerDiagInputDumpStart(path: String): Boolean
+    private external fun nativeTunerDiagInputDumpStop(): LongArray?
     private external fun nativeAnalyzeTunerBuffer(
         samples: FloatArray,
         channels: Int,

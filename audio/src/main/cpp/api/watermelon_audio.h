@@ -1278,6 +1278,55 @@ WMA_API bool wma_tuner_analyze_buffer_with_candidates(
     const float* candidates_hz, int candidate_count, float* out_values);
 
 /* ================================================================
+ * 12c. Diagnostics, NO CONTRACT (REQ-055 S0)
+ *
+ * Tooling to MEASURE the tuner, not part of what the library offers a
+ * consumer. Anything in this section can change or disappear in any release,
+ * and the Kotlin side marks it @InternalWatermelonApi (error level). Do not
+ * build a feature on it.
+ * ================================================================ */
+
+/**
+ * Number of int64 values wma_tuner_diag_input_dump_stop() writes, in this order:
+ * 0 framesWritten, 1 framesLost, 2 discontinuities, 3 sampleRate, 4 inputSource,
+ * 5 valid (0/1), 6 finalized (0/1).
+ *
+ * finalized is 1 when the file was closed and named by the rule above ("<path>"
+ * or "<path minus .wav>.invalid.wav"). 0 means closing or renaming failed: the
+ * data is in "<path>.part" (or nowhere if even that could not be written), no
+ * file with the final name exists, and valid is 0.
+ */
+#define WMA_TUNER_DUMP_STATS_VALUES 7
+
+/**
+ * Start recording EXACTLY what the tuner sees (the mono signal after the input
+ * DSP, at the stamped capture rate) to a float32 WAV. The file is written to
+ * "<path>.part" and named when the take is stopped: "<path>" if healthy,
+ * "<path minus .wav>.invalid.wav" if audio was lost or the capture was
+ * discontinuous. A WAV with holes never carries a healthy name.
+ *
+ * Does NOT start the tuner: with no tuner running no audio reaches the
+ * recording. Returns true even then; the take just closes invalid.
+ *
+ * @return false for a null engine, a null or empty path, a take already in
+ *         progress, a file that cannot be created, or a request the analysis
+ *         thread did not apply in time.
+ */
+WMA_API bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path);
+
+/**
+ * Stop the take, close the file and report it.
+ *
+ * @param[out] out_values  WMA_TUNER_DUMP_STATS_VALUES int64 values. Exactly that
+ *                         many are written, even if count is larger.
+ * @param count            capacity of out_values; must be >= the constant above.
+ * @return false (out_values untouched, take left running) for a null engine or
+ *         out_values, a too-small count, no take in progress, or a disarm the
+ *         analysis thread did not apply in time.
+ */
+WMA_API bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_values, int count);
+
+/* ================================================================
  * 13. Dual Touch
  * ================================================================ */
 

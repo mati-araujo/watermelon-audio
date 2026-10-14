@@ -11,6 +11,7 @@
 #include "watermelon_audio_internal.h"
 
 #include "../analysis/OfflineAnalysis.h"
+#include "../analysis/WavFileDumpSink.h"
 #include "../core/AudioMode.h"
 #include "../voice/VoiceTypes.h"
 #include "../platform/Logger.h"
@@ -164,8 +165,15 @@ void wma_engine_destroy(WmaEngine* engine) {
     }
     if (engine->analysisThread) {
         engine->analysisThread->stop();
+        // Una toma viva se cierra ANTES de liberar nada: con el hilo ya parado el desarme se
+        // aplica directo (el productor queda confirmado desarmado) y el archivo se nombra.
+        if (engine->tunerInputDump && engine->tunerInputDump->takeActive()) {
+            engine->analysisThread->setInputDump(nullptr);
+            engine->tunerInputDump->endTake();
+        }
         engine->analysisThread.reset();
     }
+    engine->tunerInputDump.reset();
     engine->analysisSnapshot.reset();
     engine->analysisRing.reset();
     if (engine->inputNode) {
@@ -1296,6 +1304,60 @@ bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values) {
     // salio desgarrada. Devolver ceros seria devolver una medicion que nadie
     // hizo — la leccion de los dos stubs que mentian.
     return engine->analysisSnapshot->read(out_values);
+}
+
+/* ================================================================
+ * 12c. Diagnostico, sin contrato (REQ-055 S0)
+ * ================================================================ */
+
+static_assert(WMA_TUNER_DUMP_STATS_VALUES == wma::analysis::kInputDumpStatsValues,
+              "WMA_TUNER_DUMP_STATS_VALUES quedo desincronizado de kInputDumpStatsValues");
+
+bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path) {
+    if (!engine || !path || path[0] == '\0') return false;
+    if (!wmaEnsureAnalysis(engine)) return false;
+    std::lock_guard<std::mutex> lock(engine->analysisMutex);
+    if (!engine->analysisThread) return false;
+    try {
+        if (!engine->tunerInputDump) {
+            engine->tunerInputDump = std::make_unique<wma::analysis::TunerInputDump>();
+        }
+        wma::analysis::TunerInputDump& dump = *engine->tunerInputDump;
+        if (dump.takeActive()) return false;
+
+        // La fuente de ESTA toma: si cambia a mitad, el analisis lo anota como discontinuidad.
+        if (!dump.beginTake(std::make_unique<wma::analysis::WavFileDumpSink>(), path,
+                            wma_input_get_source(engine))) {
+            return false;
+        }
+        if (engine->analysisThread->setInputDump(&dump)) return true;
+
+        // El hilo no aplico el armado. Se pide el desarme; la toma solo se cierra si el productor
+        // quedo confirmado desarmado (precondicion de `endTake`). Si tampoco, queda activa y
+        // `stop` la cierra cuando el hilo vuelva.
+        if (engine->analysisThread->setInputDump(nullptr)) dump.endTake();
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_values, int count) {
+    if (!engine || !out_values || count < WMA_TUNER_DUMP_STATS_VALUES) return false;
+    std::lock_guard<std::mutex> lock(engine->analysisMutex);
+    if (!engine->tunerInputDump || !engine->tunerInputDump->takeActive()) return false;
+    if (engine->analysisThread && !engine->analysisThread->setInputDump(nullptr)) return false;
+
+    std::string finalPath;
+    const wma::analysis::InputDumpStats st = engine->tunerInputDump->endTake(&finalPath);
+    out_values[0] = static_cast<int64_t>(st.framesWritten);
+    out_values[1] = static_cast<int64_t>(st.framesLost);
+    out_values[2] = static_cast<int64_t>(st.discontinuities);
+    out_values[3] = st.sampleRate;
+    out_values[4] = st.inputSource;
+    out_values[5] = st.valid ? 1 : 0;
+    out_values[6] = finalPath.empty() ? 0 : 1;
+    return true;
 }
 
 /**
