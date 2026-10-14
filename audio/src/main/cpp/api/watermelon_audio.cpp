@@ -973,7 +973,10 @@ bool wma_input_start(WmaEngine* engine) {
         return true;
     }
 
-    if (!engine->backendManager) return false;
+    if (!engine->backendManager) {
+        engine->inputNode->releaseCapture(InputNode::CaptureOwner::Consumer);
+        return false;
+    }
 
     // The caller explicitly asked for the microphone, so a stream reopen is
     // authorized: every backend decides on capture when it opens. The mode path
@@ -988,7 +991,12 @@ bool wma_input_start(WmaEngine* engine) {
         /*allowRestart=*/true);
 
     using Outcome = watermelon_audio::BackendManager::CaptureOutcome;
-    return outcome == Outcome::LIVE || outcome == Outcome::PENDING;
+    if (outcome == Outcome::LIVE || outcome == Outcome::PENDING) return true;
+
+    // Fallo informado: el consumidor no va a llamar `stop()`, asi que su bit no puede quedar
+    // puesto (taparia el cierre del afinador). En esta rama la captura propia no corre.
+    engine->inputNode->releaseCapture(InputNode::CaptureOwner::Consumer);
+    return false;
 }
 
 bool wma_input_is_starting(const WmaEngine* engine) {

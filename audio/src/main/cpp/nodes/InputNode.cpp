@@ -236,8 +236,12 @@ void InputNode::stopInputStream() {
 InputNode::CaptureAcquire InputNode::acquireCapture(CaptureOwner owner, bool openOwnStream) {
     std::lock_guard<std::mutex> lock(mCaptureMutex);
     mCaptureOwners |= static_cast<uint8_t>(owner);
+    if (!openOwnStream) {
+        return mInputStreamRunning.load() ? CaptureAcquire::AlreadyRunning
+                                          : CaptureAcquire::NotRunning;
+    }
+    mOwnStreamOwners |= static_cast<uint8_t>(owner);
     if (mInputStreamRunning.load()) return CaptureAcquire::AlreadyRunning;
-    if (!openOwnStream) return CaptureAcquire::NotRunning;
     return startInputStream() ? CaptureAcquire::Opened : CaptureAcquire::NotRunning;
 }
 
@@ -246,18 +250,28 @@ void InputNode::releaseCapture(CaptureOwner owner) {
     const auto bit = static_cast<uint8_t>(owner);
     if ((mCaptureOwners & bit) == 0) return;
     mCaptureOwners = static_cast<uint8_t>(mCaptureOwners & ~bit);
-    if (mCaptureOwners == 0) stopInputStream();
+    mOwnStreamOwners = static_cast<uint8_t>(mOwnStreamOwners & ~bit);
+    if (mOwnStreamOwners == 0) closeOwnStreamIfAny();
 }
 
 void InputNode::shutdownCapture() {
     std::lock_guard<std::mutex> lock(mCaptureMutex);
     mCaptureOwners = 0;
+    mOwnStreamOwners = 0;
     stopInputStream();
 }
 
 void InputNode::closeOwnStreamForExternalDelivery() {
     std::lock_guard<std::mutex> lock(mCaptureMutex);
-    if (mInputStreamRunning.load()) stopInputStream();
+    mOwnStreamOwners = 0;
+    closeOwnStreamIfAny();
+}
+
+void InputNode::closeOwnStreamIfAny() {
+    // `stopInputStream` limpia `mRingBuffer` (indices SPSC): sin stream propio ese ring lo
+    // puede estar escribiendo `feedExternalInput` (USB), asi que no se llama en vacio.
+    const bool ownStreamOpen = mCaptureStream && mCaptureStream->isCaptureStreamOpen();
+    if (mInputStreamRunning.load() || ownStreamOpen) stopInputStream();
 }
 
 bool InputNode::isInputStreamRunning() const {
