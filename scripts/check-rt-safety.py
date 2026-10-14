@@ -126,6 +126,10 @@ RT_ROOTS = {
     "InputNode::processInputBlock",
     # Callbacks de backend: cada uno corre en el thread RT de su plataforma.
     "OboeBackend::onAudioReady",
+    # Stream de captura PROPIO del InputNode (REQ-054.1): su callback corre en el thread
+    # de entrada de Oboe y despacha a InputNode::processInputBlock. Raiz por derecho
+    # propio: lo que haga antes de despachar tambien es RT.
+    "OboeCaptureStream::onAudioReady",
     "SplitBackend::InputCallback::onAudioReady",
     "SplitBackend::OutputCallback::onAudioReady",
     "RoundTripMeasurer::onAudioReady",

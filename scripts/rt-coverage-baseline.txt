@@ -47,6 +47,7 @@ audio/src/main/cpp/analysis/StrobeTracker.h::StrobeTracker::phaseBreaksTheLine
 audio/src/main/cpp/analysis/StrobeTracker.h::StrobeTracker::stretchCents
 audio/src/main/cpp/backends/DriftResampler.cpp::DriftResampler::process
 audio/src/main/cpp/backends/OboeBackend.cpp::OboeBackend::onAudioReady
+audio/src/main/cpp/backends/OboeCaptureStream.cpp::OboeCaptureStream::onAudioReady
 audio/src/main/cpp/backends/SplitBackend.cpp::SplitBackend::InputCallback::onAudioReady
 audio/src/main/cpp/backends/SplitBackend.cpp::SplitBackend::OutputCallback::onAudioReady
 audio/src/main/cpp/backends/SplitBackend.cpp::SplitBackend::handleInput
