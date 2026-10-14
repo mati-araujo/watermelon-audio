@@ -148,6 +148,17 @@ protected:
         expectNoViolations();
     }
 
+    /// Deja al manager en LIBUSB (el backend entrega la entrada): ver el comentario del archivo.
+    void selectUsbBackend() {
+        auto usb = std::make_unique<FakeAudioBackend>();
+        usb->setType(watermelon_audio::BackendType::LIBUSB);
+        auto& manager = watermelon_audio::BackendManager::getInstance();
+        watermelon_audio::BackendManagerTestAccess::adopt(manager, std::move(usb));
+        ASSERT_TRUE(manager.selectBackend(watermelon_audio::BackendType::LIBUSB));
+        ASSERT_EQ(manager.getCurrentType(), watermelon_audio::BackendType::LIBUSB)
+            << "el manager no quedo en LIBUSB: el test mediria el camino OBOE con nombre de USB";
+    }
+
     double framesAnalyzed() const {
         return wma_test::readCoherentValueOr(CApiSnapshot{mWma}, kSnapFramesAnalyzed, 0.0);
     }
@@ -303,6 +314,22 @@ TEST_F(CaptureOwnership, AC054_2_ASecondTunerStopDoesNotReleaseTheConsumer) {
     expectNoViolations();
 }
 
+// Bug que atrapa: `wma_input_start` que devuelve false deja el bit Consumer puesto; el
+// consumidor no llamara `stop()`, y despues `tuner_stop` no cierra (el microfono queda abierto).
+TEST_F(CaptureOwnership, AC054_2_AFailedInputStartLeavesNoConsumerOwner) {
+    setFakeCaptureStreamOpenFails(true);
+    ASSERT_FALSE(wma_input_start(mWma)) << "sin stream propio ni backend, el start informa fallo";
+    expectClosed(0, 0, "input_start fallido");
+
+    setFakeCaptureStreamOpenFails(false);
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    expectOpen(1, 0, "el afinador abre");
+
+    wma_tuner_stop(mWma);
+    expectClosed(1, 1, "tuner_stop cierra: el Consumer fallido no es dueño");
+    expectNoViolations();
+}
+
 // --- La mitad simetrica: AudioInput.stop() ya no apaga al afinador que sigue corriendo. -------
 
 // Bug que atrapa: `wma_input_stop` cierra SIEMPRE y deja al afinador corriendo sobre una captura
@@ -349,6 +376,20 @@ TEST_F(CaptureOwnership, AC054_2_InputStopWithoutInputStartKeepsTheTunersCapture
     expectNoViolations();
 }
 
+// Bug que atrapa: el cambio de fuente (stop+start del stream) pierde a los dueños: el stream
+// reabierto queda sin quien lo cierre, y `tuner_stop` lo deja abierto.
+TEST_F(CaptureOwnership, AC054_1_ChangingTheInputSourceKeepsTheTunerAsOwner) {
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    expectOpen(1, 0, "tuner_start");
+
+    wma_input_set_source(mWma, 1);
+    expectOpen(2, 1, "set_source reinicia el stream con el afinador vivo");
+
+    wma_tuner_stop(mWma);
+    expectClosed(2, 2, "tuner_stop cierra el stream reiniciado");
+    expectNoViolations();
+}
+
 // ============================================================================
 // AC-054.3 — un backend que entrega la entrada por callback: ningún stream propio.
 // ============================================================================
@@ -371,6 +412,55 @@ TEST_F(CaptureOwnership, AC054_3_ABackendThatDeliversInputNeverSeesAStreamOpenOr
     wma_tuner_stop(mWma);
     EXPECT_EQ(fakeCaptureStreamOpens(), 0);
     EXPECT_EQ(fakeCaptureStreamCloses(), 0) << "el afinador cerro un stream que no abrio";
+    expectNoViolations();
+}
+
+// Bug que atrapa: con USB, `input_stop` deja abierto el stream propio "para el afinador" (que
+// sólo se registro) y lo cierra `tuner_stop`, que sobre USB no debe tocar ningun stream.
+TEST_F(CaptureOwnership, AC054_3_UsbInputStopClosesTheOwnStreamEvenWithTheTunerRegistered) {
+    selectUsbBackend();
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    EXPECT_EQ(fakeCaptureStreamOpens(), 0);
+
+    ASSERT_TRUE(wma_input_start(mWma)) << "input_start sobre USB sigue abriendo el stream propio";
+    expectOpen(1, 0, "input_start abre");
+
+    wma_input_stop(mWma);
+    expectClosed(1, 1, "input_stop cierra lo que abrio el consumidor");
+
+    wma_tuner_stop(mWma);
+    expectClosed(1, 1, "tuner_stop sobre USB no abre ni cierra nada");
+    expectNoViolations();
+}
+
+// Bug que atrapa: con USB, `tuner_stop` cierra el stream propio que abrio el consumidor (la
+// regla "ultimo dueño" sin distinguir quien pidio el stream propio).
+TEST_F(CaptureOwnership, AC054_3_UsbTunerStopKeepsTheConsumersOwnStream) {
+    selectUsbBackend();
+    ASSERT_TRUE(wma_input_start(mWma));
+    ASSERT_TRUE(wma_tuner_start(mWma));
+    expectOpen(1, 0, "consumidor + afinador registrado");
+
+    wma_tuner_stop(mWma);
+    expectOpen(1, 0, "tuner_stop: el stream es del consumidor");
+
+    wma_input_stop(mWma);
+    expectClosed(1, 1, "input_stop cierra");
+    expectNoViolations();
+}
+
+// Bug que atrapa: borrar `closeOwnStreamForExternalDelivery()` de `wmaAttachInputForMode`: el
+// modo entra con USB y el stream propio que ya corria sigue peleando con el del backend.
+TEST_F(CaptureOwnership, AC054_3_EnteringAModeOnUsbClosesTheOwnStream) {
+    ASSERT_TRUE(wma_input_start(mWma));
+    expectOpen(1, 0, "input_start sobre el backend de sistema");
+
+    selectUsbBackend();
+    wma_set_audio_mode(mWma, kModeInputFx);
+    expectClosed(1, 1, "el modo sobre USB cierra el stream propio");
+
+    wma_input_stop(mWma);
+    expectClosed(1, 1, "input_stop posterior no cierra ni abre nada mas");
     expectNoViolations();
 }
 
