@@ -328,4 +328,4 @@ internal object MediaCodecAacEncoder : IAacEncoder {
 }
 
 /** En Android, el AAC lo hace MediaCodec. */
-internal val platformAacEncoder: IAacEncoder = MediaCodecAacEncoder
+internal actual val platformAacEncoder: IAacEncoder = MediaCodecAacEncoder
