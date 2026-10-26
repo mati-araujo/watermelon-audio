@@ -35,12 +35,53 @@
 #include "../platform/Logger.h"
 
 #include <algorithm>
+#if WMA_POC_RT_STATS
+#include <atomic>
+#include <mach/mach_time.h>
+#endif
 #include <cstring>
 
 #define LOG_TAG "CoreAudioBackend"
 #define LOGI(...) wma::logMessage(wma::LogLevel::INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGW(...) wma::logMessage(wma::LogLevel::WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) wma::logMessage(wma::LogLevel::ERROR, LOG_TAG, __VA_ARGS__)
+
+
+#if WMA_POC_RT_STATS
+// PoC MINI-028: contadores del render block, escritos sólo desde el hilo de audio.
+static std::atomic<uint64_t> gPocBlocks{0}, gPocSumNs{0}, gPocMaxNs{0},
+    gPocOverBudget{0}, gPocDiscontinuities{0}, gPocLastFrames{0};
+static std::atomic<double> gPocNextSampleTime{-1.0};
+
+static uint64_t pocTicksToNs(uint64_t t) {
+    static mach_timebase_info_data_t tb = [] { mach_timebase_info_data_t i; mach_timebase_info(&i); return i; }();
+    return t * tb.numer / tb.denom;
+}
+
+static void wma_poc_rt_stats_note(const AudioTimeStamp* ts, AVAudioFrameCount frames,
+                                  uint64_t ticks, double sampleRate) {
+    const uint64_t ns = pocTicksToNs(ticks);
+    gPocBlocks.fetch_add(1, std::memory_order_relaxed);
+    gPocSumNs.fetch_add(ns, std::memory_order_relaxed);
+    if (ns > gPocMaxNs.load(std::memory_order_relaxed)) gPocMaxNs.store(ns, std::memory_order_relaxed);
+    const double budgetNs = sampleRate > 0 ? (double)frames / sampleRate * 1e9 : 0;
+    if (budgetNs > 0 && (double)ns > budgetNs) gPocOverBudget.fetch_add(1, std::memory_order_relaxed);
+    if (ts && (ts->mFlags & kAudioTimeStampSampleTimeValid)) {
+        const double expected = gPocNextSampleTime.load(std::memory_order_relaxed);
+        if (expected >= 0 && ts->mSampleTime != expected) gPocDiscontinuities.fetch_add(1, std::memory_order_relaxed);
+        gPocNextSampleTime.store(ts->mSampleTime + frames, std::memory_order_relaxed);
+    }
+    gPocLastFrames.store(frames, std::memory_order_relaxed);
+}
+
+extern "C" void wma_poc_get_rt_stats(uint64_t* blocks, uint64_t* sumNs, uint64_t* maxNs,
+                                     uint64_t* overBudget, uint64_t* discontinuities,
+                                     uint64_t* lastFrames) {
+    *blocks = gPocBlocks.load(); *sumNs = gPocSumNs.load(); *maxNs = gPocMaxNs.load();
+    *overBudget = gPocOverBudget.load(); *discontinuities = gPocDiscontinuities.load();
+    *lastFrames = gPocLastFrames.load();
+}
+#endif
 
 namespace watermelon_audio {
 
@@ -519,6 +560,22 @@ BackendResult CoreAudioBackend::openEngineLocked() {
         }
         return noErr;
     };
+
+#if WMA_POC_RT_STATS
+    // PoC MINI-028 (NoisyPad): instrumenta el render block para la espiga de
+    // macOS. Apagado por defecto; sólo lo enciende macos-poc/CMakeLists.txt.
+    {
+        AVAudioSourceNodeRenderBlock inner = renderBlock;
+        renderBlock = ^OSStatus(BOOL* isSilence, const AudioTimeStamp* ts,
+                                AVAudioFrameCount frameCount, AudioBufferList* out) {
+            const uint64_t t0 = mach_absolute_time();
+            const OSStatus st = inner(isSilence, ts, frameCount, out);
+            wma_poc_rt_stats_note(ts, frameCount, mach_absolute_time() - t0,
+                                  negotiatedSampleRate);
+            return st;
+        };
+    }
+#endif
 
     // ---- 5. Wire up the engine graph ----
     AVAudioEngine* engine = [[AVAudioEngine alloc] init];
