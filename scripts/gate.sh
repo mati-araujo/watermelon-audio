@@ -442,6 +442,11 @@ sim_step() {
 gate_build() {
     say "build — la mitad Android"
     step build kotlin-unit        ./gradlew :audio:testDebugUnitTest || return 1
+    # REQ-055 S1 — el target JVM es lo UNICO que prueba que jvmSharedMain no toca
+    # `android.*`: el compile de Android ve esas fuentes con android.jar en el
+    # classpath y no rechaza nada. Sin este paso, la primera compilacion de
+    # desktop seria la del publish, con publicaciones ya subidas a medias.
+    step build compile-desktop    ./gradlew :audio:compileKotlinDesktop || return 1
     step build assemble-debug     ./gradlew :audio:assembleDebug || return 1
     step build harness-android    bash scripts/build-harness.sh --android-only || return 1
     step build assemble-release   ./gradlew :audio:assembleRelease || return 1

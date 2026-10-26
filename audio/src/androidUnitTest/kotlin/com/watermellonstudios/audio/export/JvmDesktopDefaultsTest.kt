@@ -1,12 +1,16 @@
 package com.watermellonstudios.audio.export
 
+import com.watermellonstudios.audio.callback.AudioLogger
 import com.watermellonstudios.audio.callback.StderrAudioLogger
+import com.watermellonstudios.audio.callback.platformDefaultAudioLogger
+import com.watermellonstudios.audio.internal.bridge.LogcatAudioLogger
 import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -14,6 +18,15 @@ import kotlin.test.assertTrue
  * `desktopTest` no lo corre ningún gate; los `actual` de desktop sólo los enlazan.
  */
 class JvmDesktopDefaultsTest {
+
+    // Bug que atrapa: un copy-paste que deja a Android con el encoder que lanza (o con
+    // el logger de stderr). Compila, el gate queda verde, y en NoisyPad
+    // `looperExportMixCompressed` pasa a lanzar en vez de devolver `.success`.
+    @Test
+    fun `en Android los defaults de la plataforma son MediaCodec y logcat`() {
+        assertSame<IAacEncoder>(MediaCodecAacEncoder, platformAacEncoder)
+        assertSame<AudioLogger>(LogcatAudioLogger, platformDefaultAudioLogger)
+    }
 
     // Bug que atrapa: un encoder de desktop que "termina" sin AAC —un Result vacío o un
     // success=true— y el export comprimido le dice a la UI que salió bien.
