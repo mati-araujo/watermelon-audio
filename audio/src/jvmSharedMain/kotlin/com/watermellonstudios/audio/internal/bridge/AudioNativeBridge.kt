@@ -1,11 +1,12 @@
 package com.watermellonstudios.audio.internal.bridge
 
-import android.util.Log
 import com.watermellonstudios.audio.api.EffectChainSnapshot
 import com.watermellonstudios.audio.api.IAudioNativeBridge
 import com.watermellonstudios.audio.api.IEffectStateProvider
 import com.watermellonstudios.audio.api.IEffectStateWriter
 import com.watermellonstudios.audio.api.NativeEffectSnapshot
+import com.watermellonstudios.audio.callback.AudioLogger
+import com.watermellonstudios.audio.callback.platformDefaultAudioLogger
 import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
@@ -17,6 +18,7 @@ import com.watermellonstudios.audio.domain.looper.LevelEnvelope
 import com.watermellonstudios.audio.domain.looper.PitchSeries
 import com.watermellonstudios.audio.domain.usb.StreamPreference
 import com.watermellonstudios.audio.export.Mp4AacTranscoder
+import com.watermellonstudios.audio.export.platformAacEncoder
 import com.watermellonstudios.audio.internal.native.NativeLibraryLoader
 import com.watermellonstudios.audio.api.EffectParameterUpdate
 import com.watermellonstudios.audio.internal.optimization.JniMetrics
@@ -100,6 +102,16 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     companion object {
         private const val TAG = "AudioNativeBridge"
+
+        /**
+         * A dónde van los logs del bridge: [platformDefaultAudioLogger], que en Android es
+         * `LogcatAudioLogger` —el mismo tag, nivel y texto que cuando esto llamaba al
+         * `Log` de Android directo— y en desktop el de su `actual` (REQ-055 S1).
+         *
+         * Las llamadas no pasan `params`: con el mapa vacío `LogcatAudioLogger` escribe
+         * el mensaje tal cual, sin sufijo ni asignación extra.
+         */
+        private val logger: AudioLogger = platformDefaultAudioLogger
         const val MAX_EFFECTS = 12
 
         @Volatile
@@ -126,10 +138,11 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * disciplina en vez de reinventarla: dos implementaciones del mismo contrato
      * divergen en silencio, y el bug resultante sólo aparece en una plataforma.
      *
-     * Se le pasa [LogcatAudioLogger] porque el default de la librería es no-op y
-     * perder estos errores de logcat sería una regresión de diagnosticabilidad.
+     * Se le pasa [logger] (el de la plataforma: logcat en Android) porque el default
+     * de la librería es no-op y perder estos errores de logcat sería una regresión de
+     * diagnosticabilidad.
      */
-    private val concurrency = BridgeConcurrency(logger = LogcatAudioLogger)
+    private val concurrency = BridgeConcurrency(logger = logger)
 
     // Note: Real-time params (setXY, setFrequency) are lock-free
 
@@ -251,13 +264,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
             }
 
             if (result != 0) {
-                Log.e(TAG, "setMultipleEffectParameters: native returned error $result")
+                logger.error(TAG, "setMultipleEffectParameters: native returned error $result")
                 return@guarded Result.failure(
                     NativeBridgeException.fromCode(result, "setMultipleEffectParameters")
                 )
             }
 
-            Log.d(TAG, "setMultipleEffectParameters: ${updates.size} updates applied")
+            logger.debug(TAG, "setMultipleEffectParameters: ${updates.size} updates applied")
             Result.success(Unit)
 
         }
@@ -286,7 +299,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
             // no es gratis, y no dice nada que el consumidor no sepa (review de S2).
             Result.success(Unit)
         } else {
-            Log.w(TAG, "$operation: el motor devolvió $this")
+            logger.warn(TAG, "$operation: el motor devolvió $this")
             Result.failure(NativeBridgeException.fromCode(this, operation))
         }
 
@@ -379,7 +392,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     private fun Int.logSiFallo(operation: String) {
         if (this != NativeErrorCode.SUCCESS.code) {
-            Log.w(
+            logger.warn(
                 TAG,
                 "$operation (variante Sync): el motor devolvió $this " +
                     "(${NativeErrorCode.fromCode(this)}) y un Unit no puede transportarlo. " +
@@ -512,7 +525,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         return try {
             nativeIsEngineInitialized()
         } catch (e: Exception) {
-            Log.e(TAG, "isEngineInitialized: exception", e)
+            logger.error(TAG, "isEngineInitialized: exception", e)
             false
         }
     }
@@ -684,7 +697,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override fun setXY(x: Float, y: Float, coalesce: Boolean) {
         if (!x.isFinite() || !y.isFinite()) {
-            Log.w(TAG, "setXY: invalid values")
+            logger.warn(TAG, "setXY: invalid values")
             return
         }
 
@@ -722,7 +735,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override fun setFrequencyAndAmplitude(frequency: Float, amplitude: Float) {
         if (!frequency.isFinite() || !amplitude.isFinite()) {
-            Log.w(TAG, "setFrequencyAndAmplitude: invalid values")
+            logger.warn(TAG, "setFrequencyAndAmplitude: invalid values")
             return
         }
         nativeSetFrequencyAndAmplitude(
@@ -740,7 +753,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override fun setFrequencyRange(minHz: Float, maxHz: Float) {
         if (!minHz.isFinite() || !maxHz.isFinite() || maxHz <= minHz) {
-            Log.w(TAG, "setFrequencyRange: invalid range ($minHz, $maxHz)")
+            logger.warn(TAG, "setFrequencyRange: invalid range ($minHz, $maxHz)")
             return
         }
         val clampedMin = minHz.coerceIn(8f, 20000f)
@@ -756,7 +769,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override fun setOscillatorType(type: Int) {
         if (type !in 0..4) {
-            Log.w(TAG, "setOscillatorType: invalid type $type")
+            logger.warn(TAG, "setOscillatorType: invalid type $type")
             return
         }
         nativeSetOscillatorType(type)
@@ -771,7 +784,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override fun setEngineType(type: Int) {
         if (type < 0 || type > 6) {
-            Log.w(TAG, "setEngineType: invalid type $type")
+            logger.warn(TAG, "setEngineType: invalid type $type")
             return
         }
         nativeSetEngineType(type)
@@ -785,7 +798,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override fun setEngineParameter(paramId: Int, value: Float) {
         if (paramId < 0 || paramId > 5) {
-            Log.w(TAG, "setEngineParameter: invalid paramId $paramId")
+            logger.warn(TAG, "setEngineParameter: invalid paramId $paramId")
             return
         }
         nativeSetEngineParameter(paramId, value)
@@ -835,7 +848,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override fun loadSoundFont(data: ByteArray): Boolean {
         if (data.isEmpty()) {
-            Log.w(TAG, "loadSoundFont: empty data")
+            logger.warn(TAG, "loadSoundFont: empty data")
             return false
         }
         return nativeLoadSoundFont(data)
@@ -851,7 +864,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override fun loadSoundFontFromPath(path: String): Boolean {
         if (path.isBlank()) {
-            Log.w(TAG, "loadSoundFontFromPath: empty path")
+            logger.warn(TAG, "loadSoundFontFromPath: empty path")
             return false
         }
         return nativeLoadSoundFontFromPath(path)
@@ -862,7 +875,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * open file descriptor, using mmap (zero-copy).
      *
      * Intended for SoundFonts bundled inside a Play Asset Delivery install-time
-     * asset pack, which Android exposes only as an [android.content.res.AssetFileDescriptor]
+     * asset pack, which Android exposes only as an `AssetFileDescriptor`
      * (fd + startOffset + declaredLength) — not a plain path. Mapping the region
      * directly avoids the seed-to-storage copy that duplicates the file in
      * `filesDir`.
@@ -891,11 +904,11 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     fun loadSoundFontFromFd(fd: Int, offset: Long, length: Long): Boolean {
         if (fd < 0) {
-            Log.w(TAG, "loadSoundFontFromFd: invalid fd=$fd")
+            logger.warn(TAG, "loadSoundFontFromFd: invalid fd=$fd")
             return false
         }
         if (length <= 0L || offset < 0L) {
-            Log.w(TAG, "loadSoundFontFromFd: invalid region (offset=$offset, length=$length)")
+            logger.warn(TAG, "loadSoundFontFromFd: invalid region (offset=$offset, length=$length)")
             return false
         }
         return nativeLoadSoundFontFromFd(fd, offset, length)
@@ -915,7 +928,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override fun setSoundFontPreset(presetIndex: Int) {
         if (presetIndex < 0) {
-            Log.w(TAG, "setSoundFontPreset: invalid index $presetIndex")
+            logger.warn(TAG, "setSoundFontPreset: invalid index $presetIndex")
             return
         }
         nativeSetSoundFontPreset(presetIndex)
@@ -1235,20 +1248,20 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     override suspend fun addEffect(type: EffectType): Result<Int> = concurrency.guarded(BridgeConcurrency.Category.EFFECTS, "addEffect") {
         val engineInit = isEngineInitialized()
-        Log.d(TAG, "addEffect: engineInitialized=$engineInit")
+        logger.debug(TAG, "addEffect: engineInitialized=$engineInit")
 
         if (!engineInit) {
-            Log.e(TAG, "addEffect: engine NOT initialized!")
+            logger.error(TAG, "addEffect: engine NOT initialized!")
             return@guarded Result.failure(
                 NativeBridgeException.EngineNotInitialized()
             )
         }
 
         val currentSize = nativeGetEffectChainSize()
-        Log.d(TAG, "addEffect: currentSize=$currentSize, MAX_EFFECTS=$MAX_EFFECTS")
+        logger.debug(TAG, "addEffect: currentSize=$currentSize, MAX_EFFECTS=$MAX_EFFECTS")
 
         if (currentSize >= MAX_EFFECTS) {
-            Log.w(TAG, "addEffect: chain full")
+            logger.warn(TAG, "addEffect: chain full")
             return@guarded Result.failure(
                 NativeBridgeException.EffectChainFull(MAX_EFFECTS)
             )
@@ -1259,7 +1272,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         }
 
         if (result < 0) {
-            Log.e(TAG, "addEffect: native returned error $result")
+            logger.error(TAG, "addEffect: native returned error $result")
             return@guarded Result.failure(
                 NativeBridgeException.fromCode(result, "addEffect")
             )
@@ -1268,7 +1281,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         // Invalidate snapshot cache after adding effect
         invalidateSnapshotCache()
 
-        Log.d(TAG, "addEffect: type=${type.displayName}, index=$result")
+        logger.debug(TAG, "addEffect: type=${type.displayName}, index=$result")
         Result.success(result)
 
     }
@@ -1286,7 +1299,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         }
 
         if (result != 0) {
-            Log.e(TAG, "removeEffect: native returned error $result")
+            logger.error(TAG, "removeEffect: native returned error $result")
             return@guarded Result.failure(
                 NativeBridgeException.fromCode(result, "removeEffect")
             )
@@ -1295,7 +1308,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         // Invalidate snapshot cache after removing effect
         invalidateSnapshotCache()
 
-        Log.d(TAG, "removeEffect: index=$index")
+        logger.debug(TAG, "removeEffect: index=$index")
         Result.success(Unit)
 
     }
@@ -1331,7 +1344,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         }
 
         if (result != 0) {
-            Log.e(TAG, "setParameter: native returned error $result")
+            logger.error(TAG, "setParameter: native returned error $result")
             return@guarded Result.failure(
                 NativeBridgeException.fromCode(result, "setParameter")
             )
@@ -1379,13 +1392,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
             }
 
             if (result != 0) {
-                Log.e(TAG, "setParametersBatch: native returned error $result")
+                logger.error(TAG, "setParametersBatch: native returned error $result")
                 return@guarded Result.failure(
                     NativeBridgeException.fromCode(result, "setParametersBatch")
                 )
             }
 
-            Log.d(TAG, "setParametersBatch: ${parameters.size} params for effect $effectIndex")
+            logger.debug(TAG, "setParametersBatch: ${parameters.size} params for effect $effectIndex")
             Result.success(Unit)
 
         }
@@ -1403,13 +1416,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
             val result = nativeSetEffectBypass(effectIndex, bypassed)
 
             if (result != 0) {
-                Log.e(TAG, "setBypass: native returned error $result")
+                logger.error(TAG, "setBypass: native returned error $result")
                 return@guarded Result.failure(
                     NativeBridgeException.fromCode(result, "setBypass")
                 )
             }
 
-            Log.d(TAG, "setBypass: index=$effectIndex, bypassed=$bypassed")
+            logger.debug(TAG, "setBypass: index=$effectIndex, bypassed=$bypassed")
             Result.success(Unit)
 
         }
@@ -1419,13 +1432,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
             val result = nativeSetEffectsBypass(bypassed)
 
             if (result != 0) {
-                Log.e(TAG, "setEffectsBypass: native returned error $result")
+                logger.error(TAG, "setEffectsBypass: native returned error $result")
                 return@guarded Result.failure(
                     NativeBridgeException.fromCode(result, "setEffectsBypass")
                 )
             }
 
-            Log.d(TAG, "setEffectsBypass: bypassed=$bypassed")
+            logger.debug(TAG, "setEffectsBypass: bypassed=$bypassed")
             Result.success(Unit)
 
         }
@@ -1452,13 +1465,13 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
             val result = nativeReorderEffects(fromIndex, toIndex)
 
             if (result != 0) {
-                Log.e(TAG, "reorderEffects: native returned error $result")
+                logger.error(TAG, "reorderEffects: native returned error $result")
                 return@guarded Result.failure(
                     NativeBridgeException.fromCode(result, "reorderEffects")
                 )
             }
 
-            Log.d(TAG, "reorderEffects: $fromIndex -> $toIndex")
+            logger.debug(TAG, "reorderEffects: $fromIndex -> $toIndex")
             Result.success(Unit)
 
         }
@@ -1469,12 +1482,12 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         // (vs. 20ms × N when removing per-effect). Scene-load fast path.
         val result = nativeClearAllEffects()
         if (result != 0) {
-            Log.e(TAG, "clearAllEffects: native call failed (code=$result)")
+            logger.error(TAG, "clearAllEffects: native call failed (code=$result)")
             return@guarded Result.failure(
                 NativeBridgeException.fromCode(result, "clearAllEffects")
             )
         }
-        Log.d(TAG, "clearAllEffects: all effects removed (atomic)")
+        logger.debug(TAG, "clearAllEffects: all effects removed (atomic)")
         Result.success(Unit)
     }
 
@@ -1503,7 +1516,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
                     val engineInitialized = isEngineInitialized()
 
                     if (chainSize > 0 || !engineInitialized) {
-                        Log.d(TAG, "getEffectChainSnapshot: chainSize=$chainSize, engineInitialized=$engineInitialized")
+                        logger.debug(TAG, "getEffectChainSnapshot: chainSize=$chainSize, engineInitialized=$engineInitialized")
                     }
 
                     for (i in 0 until chainSize) {
@@ -1617,7 +1630,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
             )
         }
         nativeSetAudioMode(mode)
-        Log.d(TAG, "setAudioMode: mode=$mode")
+        logger.debug(TAG, "setAudioMode: mode=$mode")
         Result.success(Unit)
     }
 
@@ -1653,7 +1666,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     suspend fun startInputStream(): Result<Boolean> = concurrency.guarded(BridgeConcurrency.Category.INPUT, "startInputStream") {
         val success = nativeStartInputStream()
-        Log.d(TAG, "startInputStream: success=$success")
+        logger.debug(TAG, "startInputStream: success=$success")
         Result.success(success)
     }
 
@@ -1668,7 +1681,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     suspend fun stopInputStream(): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.INPUT, "stopInputStream") {
         nativeStopInputStream()
-        Log.d(TAG, "stopInputStream: success")
+        logger.debug(TAG, "stopInputStream: success")
         Result.success(Unit)
     }
 
@@ -1880,7 +1893,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     suspend fun setMonitoringEnabled(enabled: Boolean): Result<Unit> = concurrency.guarded(BridgeConcurrency.Category.INPUT, "setMonitoringEnabled") {
         nativeSetMonitoringEnabled(enabled)
-        Log.d(TAG, "setMonitoringEnabled: enabled=$enabled")
+        logger.debug(TAG, "setMonitoringEnabled: enabled=$enabled")
         Result.success(Unit)
     }
 
@@ -2042,11 +2055,11 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
             if (param.validate(value)) {
                 Result.success(value)
             } else {
-                Log.w(TAG, "Parameter $paramId value $value out of range, clamping")
+                logger.warn(TAG, "Parameter $paramId value $value out of range, clamping")
                 Result.success(param.clamp(value))
             }
         } else {
-            Log.w(TAG, "Unknown parameter $paramId for ${effectType.displayName}")
+            logger.warn(TAG, "Unknown parameter $paramId for ${effectType.displayName}")
             Result.success(value)
         }
     }
@@ -2891,7 +2904,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      */
     override fun setArpEnabled(enabled: Boolean) {
         nativeSetArpEnabled(enabled)
-        Log.d(TAG, "Arp enabled: $enabled")
+        logger.debug(TAG, "Arp enabled: $enabled")
     }
 
     /** Check if arpeggiator is currently enabled */
@@ -3545,7 +3558,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     override fun looperImportTrackResult(trackIndex: Int, filePath: String, sampleRate: Int): Result<Unit> {
         val code = nativeLooperImportTrackResult(trackIndex, filePath, sampleRate)
         if (code == NativeErrorCode.SUCCESS.code) return Result.success(Unit)
-        Log.e(TAG, "looperImportTrack($trackIndex, $filePath): native returned $code")
+        logger.error(TAG, "looperImportTrack($trackIndex, $filePath): native returned $code")
         return Result.failure(NativeBridgeException.fromCode(code, "track $trackIndex: $filePath"))
     }
 
@@ -3601,7 +3614,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Export the current mix to a compressed AAC LC file (.m4a, MPEG-4 container).
      *
      * Pipeline: render a temporary lossless WAV via [looperExportMixPro], then
-     * transcode it with Android's MediaCodec (hardware-accelerated) into AAC.
+     * transcode it into AAC with the platform encoder (on Android, MediaCodec,
+     * hardware-accelerated; on the JVM there is none yet and it fails explicitly).
      * Result is typically 8–12× smaller than 24-bit WAV at 192 kbps with
      * transparent quality for most material — ideal for sharing via messaging apps.
      *
@@ -3653,8 +3667,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         }
         onProgress?.invoke(0.7f)
 
-        // Phase 2: WAV → AAC. Reserve [0.7..1.0] for this step.
-        val result = Mp4AacTranscoder.wavToM4a(
+        // Phase 2: WAV → AAC. Reserve [0.7..1.0] for this step. Por la interfaz y no por
+        // MediaCodec: el bridge se comparte con la JVM (REQ-055 S1).
+        val result = platformAacEncoder.wavToM4a(
             wavPath = tempWavPath,
             m4aPath = m4aFilePath,
             bitrateBps = bitrateBps,

@@ -24,8 +24,15 @@ diferencia este DECLARADA CON SU VALOR. Lo usan S2, S3 y el cierre de REQ-047.
 
 QUE COMPARA
 -----------
-Las CUATRO publicaciones (`audio`, `audio-android`, `audio-iosarm64`,
-`audio-iossimulatorarm64`) son obligatorias; si falta una, no hay veredicto.
+Las CINCO publicaciones (`audio`, `audio-android`, `audio-iosarm64`,
+`audio-iossimulatorarm64`, `audio-desktop`) son obligatorias; si falta una, no hay
+veredicto. Una sola excepcion, la de las publicaciones NUEVAS (`NEW_PUBLICATIONS`,
+hoy `audio-desktop`, REQ-055 S1): una version BASE anterior a ellas no las tiene, asi
+que pueden faltar en la base —y SOLO en la base, nunca en el head— y SOLO por un 404
+del registro o un archivo ausente (el POM); si el POM esta y falta el `.module`, o la
+lectura falla por cualquier otra causa, es "no pude leer". Lo que falta no se pierde ni
+se perdona: sus hechos salen como `(ausente) -> valor` y hay que declararlos, uno por
+uno, como cualquier otra diferencia.
   - POM: packaging y cada dependencia —de `<dependencies>` y de
     `<dependencyManagement>`—, indexada por grupo:artefacto[:classifier], con
     version, scope, type, optional y sus exclusiones. Una repetida es ilegible.
@@ -82,8 +89,8 @@ V leeria el mismo directorio de los dos lados). Su alineacion, `.comment`,
 
 LO QUE NO ABRE
 --------------
-Los klibs de iOS (`.klib`) y el `.jar` de metadata comun NO se abren: de esas
-publicaciones se comparan solo el POM y el `.module`. Una diferencia que viva
+Los klibs de iOS (`.klib`), el `.jar` de `audio-desktop` y el `.jar` de metadata
+comun NO se abren: de esas publicaciones se comparan solo el POM y el `.module`. Una diferencia que viva
 adentro de un klib este instrumento no la ve.
 
 DECLARAR NO ES SILENCIAR: ES UN TRINQUETE SOBRE EL VALOR
@@ -149,7 +156,9 @@ REPO = Path(__file__).resolve().parent.parent
 GROUP = "com.watermellonstudios"
 GROUP_PATH = GROUP.replace(".", "/")
 REGISTRY = "https://maven.pkg.github.com/mati-araujo/watermelon-audio"
-PUBLICATIONS = ["audio", "audio-android", "audio-iosarm64", "audio-iossimulatorarm64"]
+PUBLICATIONS = ["audio", "audio-android", "audio-iosarm64", "audio-iossimulatorarm64", "audio-desktop"]
+# Publicaciones que una version BASE anterior puede no tener (el head las exige siempre).
+NEW_PUBLICATIONS = {"audio-desktop": "REQ-055 S1"}
 AAR_PUBLICATION = "audio-android"
 SIZE_TOLERANCE = 0.05
 TEXT_SUFFIXES = (".xml", ".txt", ".pro", ".properties", ".json", ".MF")
@@ -172,6 +181,11 @@ UNPINNED_SO = "libwatermelon_audio.so"
 
 class ReadError(Exception):
     """Algo que no se pudo leer o bajar. Nunca se convierte en un pase."""
+
+
+class NotPublished(ReadError):
+    """Esa publicacion no existe en esa version (404 / archivo ausente). Sigue siendo
+    ReadError: solo `collect(allow_missing=...)` la perdona, y solo para el POM."""
 
 
 def sha(data: bytes) -> str:
@@ -484,8 +498,16 @@ class LocalM2(Source):
     def get(self, artifact: str, ext: str) -> bytes:
         p = self.root / GROUP_PATH / artifact / self.version / f"{artifact}-{self.version}.{ext}"
         if not p.is_file():
-            raise ReadError(f"falta {p} — ¿corriste publishToMavenLocal con esa version?")
+            raise NotPublished(f"falta {p} — ¿corriste publishToMavenLocal con esa version?")
         return p.read_bytes()
+
+
+def _registry_error(name: str, code: int) -> ReadError:
+    """Solo el 404 es "no esta publicada"; el resto (401, 500...) es un fallo de lectura.
+    Sin la cabecera: el mensaje no puede llevar la credencial."""
+    if code == 404:
+        return NotPublished(f"{name}: HTTP 404 del registro (no publicada)")
+    return ReadError(f"{name}: HTTP {code} del registro")
 
 
 class Registry(Source):
@@ -513,8 +535,7 @@ class Registry(Source):
             with urllib.request.urlopen(req, timeout=120) as r:
                 data = r.read()
         except urllib.error.HTTPError as e:
-            # Sin la cabecera: el mensaje no puede llevar la credencial.
-            raise ReadError(f"{name}: HTTP {e.code} del registro")
+            raise _registry_error(name, e.code)
         except urllib.error.URLError as e:
             raise ReadError(f"{name}: {e.reason}")
         self.cache.mkdir(parents=True, exist_ok=True)
@@ -534,12 +555,15 @@ class DirSource(Source):
     def get(self, artifact: str, ext: str) -> bytes:
         p = self.root / f"{artifact}-{self.version}.{ext}"
         if not p.is_file():
-            raise ReadError(f"falta {p}")
+            raise NotPublished(f"falta {p}")
         return p.read_bytes()
 
 
-def collect(src: Source) -> tuple[dict[str, str], dict[str, int], dict[str, str]]:
-    """Las CUATRO publicaciones, siempre: no hay forma de pedir menos.
+def collect(src: Source, allow_missing: frozenset[str] = frozenset()
+            ) -> tuple[dict[str, str], dict[str, int], dict[str, str]]:
+    """Las CINCO publicaciones, siempre, salvo las de `allow_missing` cuyo POM no esta
+    publicado (`NotPublished`): esa se saltea entera y no aporta hechos. Si el POM esta,
+    el resto de la publicacion es obligatorio.
 
     Que una publicacion aporte hechos no se chequea aparte porque no puede no
     hacerlo: `src.get` falla si falta el POM o el `.module`, el POM aporta siempre
@@ -551,7 +575,13 @@ def collect(src: Source) -> tuple[dict[str, str], dict[str, int], dict[str, str]
     sizes: dict[str, int] = {}
     info: dict[str, str] = {}
     for art in PUBLICATIONS:
-        facts.update(pom_facts(src.get(art, "pom"), art, src.version))
+        try:
+            pom = src.get(art, "pom")
+        except NotPublished:
+            if art in allow_missing:
+                continue
+            raise
+        facts.update(pom_facts(pom, art, src.version))
         facts.update(module_facts(src.get(art, "module"), art, src.version))
         if art == AAR_PUBLICATION:
             f, s, i = aar_facts(src.get(art, "aar"), src.version)
@@ -738,7 +768,7 @@ class Observation:
 
 
 def observe(base: Source, head: Source) -> Observation:
-    fa, sa, ia = collect(base)
+    fa, sa, ia = collect(base, allow_missing=frozenset(NEW_PUBLICATIONS))
     fb, sb, ib = collect(head)
     diffs = diff_facts(fa, fb)
     rows, size_row = size_diff(sa, sb)
@@ -1432,6 +1462,56 @@ def self_test() -> int:
     # 4. Lo ilegible sale con codigo 2.
     for name, kw in UNREADABLE_CASES:
         attempt(f"ilegible: {name}", lambda kw=kw: raises_read_error(lambda: observe_sides(kw)))
+    # 4b. Publicaciones NUEVAS (REQ-055 S1): pueden faltar en la base, y solo en la base.
+    new_arts = sorted(NEW_PUBLICATIONS)
+    without_new = tuple(x for x in PUBLICATIONS if x not in NEW_PUBLICATIONS)
+    without_art = lambda art: tuple(x for x in PUBLICATIONS if x != art)  # noqa: E731
+    new_prefixes = tuple(f"{kind}:{n}/" for n in new_arts for kind in ("pom", "module"))
+
+    def new_in_head_only():
+        o = observe_sides({}, {"publications": without_new})
+        seen = {k for k, _, _ in o.diffs}
+        ok = (bool(seen) and all(k.startswith(new_prefixes) for k in seen)
+              and all(va == ABSENT and vb != ABSENT for _, va, vb in o.diffs)
+              and {n for n in new_arts for k in seen if k.startswith(f"pom:{n}/")} == set(new_arts)
+              and {n for n in new_arts for k in seen if k.startswith(f"module:{n}/")} == set(new_arts))
+        return ok, f"vio {sorted(seen)}"
+    attempt("nueva publicacion ausente en la base: solo sus hechos, todos (ausente) -> valor", new_in_head_only)
+
+    def new_rojo_until_declared():
+        rc, detail, seen = run({}, {}, {"publications": without_new})
+        if rc != 1 or set(detail["undeclared"]) != seen:
+            return False, f"sin declarar: rc={rc} {detail}"
+        exp = {k: (va, vb, "caso") for k, va, vb in observe_sides({}, {"publications": without_new}).diffs}
+        rc2, detail2, _ = run({}, exp, {"publications": without_new})
+        return rc2 == 0, f"declaradas: rc={rc2} {detail2}"
+    attempt("nueva publicacion ausente en la base: ROJO hasta declarar (ausente) -> valor, VERDE declarada",
+            new_rojo_until_declared)
+
+    attempt("ilegible: una publicacion nueva ausente en el HEAD",
+            lambda: raises_read_error(lambda: observe_sides({"publications": without_new})))
+    attempt("ilegible: falta en la base una publicacion que NO es nueva",
+            lambda: raises_read_error(lambda: observe_sides({}, {"publications": without_art("audio-android")})))
+
+    def new_pom_without_module():
+        with tempfile.TemporaryDirectory() as t:
+            write_side(Path(t) / "base", "2.21.0", publications=without_new)
+            for n in new_arts:
+                (Path(t) / "base" / f"{n}-2.21.0.pom").write_bytes(make_pom(n, "2.21.0", dict(DEFAULT_SIDE)))
+            write_side(Path(t) / "head", "2.21.0-local")
+            return observe(DirSource(Path(t) / "base", "2.21.0", "base"),
+                           DirSource(Path(t) / "head", "2.21.0-local", "head"))
+    attempt("ilegible: la base tiene el POM de la nueva pero no su .module",
+            lambda: raises_read_error(new_pom_without_module))
+
+    def registry_codes():
+        e404, e500, e401 = (_registry_error("x.pom", c) for c in (404, 500, 401))
+        ok = (isinstance(e404, NotPublished)
+              and all(type(e) is ReadError for e in (e500, e401))
+              and all(isinstance(e, ReadError) for e in (e404, e500, e401)))
+        return ok, f"{type(e404).__name__} {type(e500).__name__} {type(e401).__name__}"
+    attempt("registro: 404 es NotPublished; 500 y 401 son ReadError comun", registry_codes)
+
     attempt("ilegible: un .so que no es ELF", lambda: raises_read_error(lambda: elf_facts(b"no soy un elf", "x.so")))
     attempt("ilegible: un ELF sin seccion dinamica",
             lambda: raises_read_error(lambda: elf_facts(make_elf(64, comment=CLANG, dynamic_section=False), "x.so")))

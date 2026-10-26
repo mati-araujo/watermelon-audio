@@ -828,6 +828,14 @@ jobs:
         if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:testDebugUnitTest
 
+      # REQ-055 S1 — el target JVM es lo unico que prueba que jvmSharedMain (el
+      # bridge compartido) no toca `android.*`: el compile de Android lo ve con
+      # android.jar en el classpath. Sin esto, la primera compilacion de desktop
+      # seria la del publish.
+      - name: Compile desktop (JVM) — REQ-055 S1
+        if: steps.attest.outputs.valid != 'true'
+        run: ./gradlew :audio:compileKotlinDesktop
+
       - name: Build debug
         if: steps.attest.outputs.valid != 'true'
         run: ./gradlew :audio:assembleDebug

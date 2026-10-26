@@ -13,7 +13,10 @@ editar en un directorio con `CLAUDE.md`, leelo.
 audio/src/
   commonMain/kotlin/   Kotlin puro, cero deps de Android: api/ (AudioEngine, IAudioNativeBridge,
                        IEffectManager, IInputBridge, factories), domain/, callback/, internal/
-  androidMain/kotlin/  JNI bridge (AudioNativeBridge), USB, mode
+  jvmSharedMain/kotlin/ JNI bridge (AudioNativeBridge) compartido Android + JVM, sin android.*;
+                       logger y AAC inyectados por expect/actual (REQ-055 S1)
+  androidMain/kotlin/  USB, mode, logcat, MediaCodec (MediaCodecAacEncoder)
+  desktopMain/kotlin/  target jvm("desktop"): actual minimos (stderr, loadLibrary, sin AAC)
   iosMain/kotlin/      IosAudioBridge sobre cinterop, AudioSessionManager, NativeLibraryLoader no-op
   commonTest/ iosTest/
   androidUnitTest/     el ARNES JNI: ejecuta JNIEXPORT reales en la JVM del host
@@ -43,9 +46,11 @@ citar** cualquier otro numero; por que, en `docs/dev/conteos-que-envejecen.md`.
 | métrica | valor | qué mide |
 |---|---|---|
 | `kt-commonMain` | 99 | archivos .kt en commonMain |
-| `kt-androidMain` | 22 | archivos .kt en androidMain |
+| `kt-androidMain` | 20 | archivos .kt en androidMain |
 | `kt-iosMain` | 6 | archivos .kt en iosMain |
-| `bridge-loc` | 3715 | LOC de AudioNativeBridge.kt |
+| `kt-jvmSharedMain` | 5 | archivos .kt en jvmSharedMain (Android + desktop) |
+| `kt-desktopMain` | 5 | archivos .kt en desktopMain |
+| `bridge-loc` | 3730 | LOC de AudioNativeBridge.kt |
 | `bridge-external` | 319 | `external fun` en AudioNativeBridge |
 | `jniexport-bridge` | 308 | JNIEXPORT en jni_audio_bridge.cpp |
 | `jniexport-total` | 321 | JNIEXPORT en todo jni/*.cpp |

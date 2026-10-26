@@ -5,6 +5,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.util.Log
+import com.watermellonstudios.audio.export.Mp4AacTranscoder.Result
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -13,49 +14,28 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Transcode a stereo (or mono) WAV file into an AAC LC M4A container using
- * Android's hardware-accelerated MediaCodec encoder.
+ * La implementación MediaCodec de [IAacEncoder]: WAV → AAC LC en un `.m4a` con el
+ * encoder acelerado por hardware de Android. Es el cuerpo que hasta REQ-055 S1 vivía en
+ * [Mp4AacTranscoder.wavToM4a]; se separó para que el bridge, compartido con la JVM,
+ * dependa de la interfaz y no de MediaCodec. El tag de log sigue siendo
+ * `Mp4AacTranscoder`: logcat no se entera.
  *
  * Supports input formats: 16-bit PCM, 24-bit PCM, 32-bit IEEE float (mono or stereo).
  * Output is always 2-channel AAC LC inside an MPEG-4 container (.m4a).
  *
- * Use case: convert the lossless WAV produced by [com.watermellonstudios.audio.internal.bridge.AudioNativeBridge.looperExportMixPro]
- * into a compressed file ~10x smaller, suitable for sharing via WhatsApp/Telegram/email.
- *
  * NOT RT-safe — runs on Dispatchers.IO. The encoder/muxer are released even on failure.
  */
-object Mp4AacTranscoder {
+internal object MediaCodecAacEncoder : IAacEncoder {
     private const val TAG = "Mp4AacTranscoder"
     private const val MIME_AAC = "audio/mp4a-latm"
     private const val INPUT_TIMEOUT_US = 10_000L
     private const val FRAMES_PER_CHUNK = 1024
 
-    /** Common AAC bitrates (bps). Higher = better quality, larger file. */
-    object Bitrate {
-        const val LOW = 96_000     // ~720 KB/min, voice-quality
-        const val MEDIUM = 128_000 // ~960 KB/min, podcast-quality
-        const val HIGH = 192_000   // ~1.4 MB/min, transparent for most music
-        const val PREMIUM = 256_000 // ~1.9 MB/min, near-CD for AAC LC
-    }
-
-    data class Result(
-        val success: Boolean,
-        val bytesWritten: Long = 0L,
-        val durationMs: Long = 0L,
-        val error: String? = null
-    )
-
-    /**
-     * @param wavPath    Source WAV path (must exist, valid RIFF/WAVE header).
-     * @param m4aPath    Destination M4A path (overwritten if exists).
-     * @param bitrateBps Target bitrate; default 192 kbps. See [Bitrate].
-     * @param onProgress Optional callback in [0..1], invoked from IO thread.
-     */
-    suspend fun wavToM4a(
+    override suspend fun wavToM4a(
         wavPath: String,
         m4aPath: String,
-        bitrateBps: Int = Bitrate.HIGH,
-        onProgress: ((Float) -> Unit)? = null
+        bitrateBps: Int,
+        onProgress: ((Float) -> Unit)?
     ): Result = withContext(Dispatchers.IO) {
         val src = File(wavPath)
         if (!src.exists() || src.length() < 44) {
@@ -346,3 +326,6 @@ object Mp4AacTranscoder {
         return (v shr 8).toShort()
     }
 }
+
+/** En Android, el AAC lo hace MediaCodec. */
+internal actual val platformAacEncoder: IAacEncoder = MediaCodecAacEncoder

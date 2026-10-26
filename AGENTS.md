@@ -171,7 +171,7 @@ Versión Linux/CI: `scripts/bench-agent-loop.sh -l <label> -g <gen> -j <n> [-s]`
 
 ### Nuevo JNI function
 1. C++: agregar en `jni/jni_audio_bridge.cpp`
-2. Kotlin: agregar `private external fun` en `AudioNativeBridge.kt` (androidMain)
+2. Kotlin: agregar `private external fun` en `AudioNativeBridge.kt` (jvmSharedMain, compartido con el target JVM: cero `android.*`)
 3. Wrapper con mutex apropiado y `Result<T>`
 4. Si es parte del API publico: agregar a `IAudioNativeBridge` interface (commonMain)
 5. Considerar: agregar a C API `watermelon_audio.h/cpp`

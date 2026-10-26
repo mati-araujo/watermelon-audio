@@ -130,7 +130,10 @@ val jniHarnessCoverage by tasks.registering {
     }
 }
 
-tasks.withType<Test>().configureEach {
+// Sólo los unit tests de Android (`test<Variante>UnitTest`): son los que corren el arnés.
+// El `desktopTest` del target JVM (REQ-055 S1) es otra cosa: sin este filtro borraba
+// build/jni-coverage en su doFirst y su finalizador fallaba con "no dejó cobertura".
+tasks.withType<Test>().named { it.endsWith("UnitTest") }.configureEach {
     // Hacen falta LAS DOS lineas, y esto NO es ceremonia: lo destapo el control
     // positivo de esta etapa. Con solo `dependsOn` —que unicamente ORDENA— se
     // renombro el simbolo del lado C++, la libreria se reconstruyo SIN el, y
