@@ -34,6 +34,15 @@
 #include <thread>
 #include <vector>
 
+// REQ-055 S4: acceso de test a la parte privada del guard por pista.
+struct AudioLooperTestAccess {
+    using ReadScope = AudioLooper::ExportReadScope;
+    static uint32_t bit(int track) { return 1u << track; }
+    static uint32_t readMask(const AudioLooper& l) {
+        return l.mExportReadMask.load(std::memory_order_acquire);
+    }
+};
+
 namespace {
 
 constexpr int kSR = 48000;
@@ -1282,4 +1291,83 @@ TEST(AudioLooper, Req045ADirectoryIsAnIoFailureAndNotAFormatOne) {
         << "el lector completo tiene que rechazarlo igual";
 
     std::filesystem::remove_all(dir, ec);
+}
+
+// ======================= REQ-055 S4 — el guard es por pista =======================
+//
+// AC-055.2 también durante la COPIA a RAM: mientras un exportador lee la pista A,
+// el hilo de audio sólo descarta la captura de A. Se fuerza el solapamiento
+// sosteniendo el ReadScope desde el test y llamando a process() con él tomado
+// (sin hilos, sin reloj).
+namespace {
+
+// Graba `frames` de rampa en `track` (ya preparado) con bloques de 256.
+int64_t req055RecordRamp(AudioLooper& looper, int track, int frames, int64_t pf) {
+    looper.startRecording(track);
+    std::vector<float> blk(256 * 2);
+    for (int done = 0; done < frames;) {
+        const int n = std::min(256, frames - done);
+        for (int i = 0; i < n; ++i) blk[i * 2] = blk[i * 2 + 1] = req055Ramp(done + i);
+        looper.process(blk.data(), n, pf);
+        pf += n;
+        done += n;
+    }
+    return pf;
+}
+
+int req055RampMismatches(const AudioLooper& looper, int track) {
+    const TrackBuffer& t = looper.getTrack(track);
+    int bad = 0;
+    for (int i = 0; i < looper.getTrackLengthFrames(track); ++i) {
+        if (t.sampleAt(i, 0) != req055Ramp(i) || t.sampleAt(i, 1) != req055Ramp(i)) ++bad;
+    }
+    return bad;
+}
+
+}  // namespace
+
+// Bug que atrapa: un guard que sigue siendo global (o una máscara mal desplazada)
+// descarta la toma de B mientras se copia A.
+TEST(AudioLooper, Req055ReadingOneTrackDoesNotBlockCaptureOfAnother) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.setTailMs(0);
+    const int kA = kSR / 4;
+    const int kB = kSR / 2;
+    int64_t pf = 0;
+    ASSERT_TRUE(looper.prepareTrack(0, kA, kSR));
+    pf = req055RecordRamp(looper, 0, kA, pf);
+    ASSERT_TRUE(looper.isTrackPlaying(0));
+
+    ASSERT_TRUE(looper.prepareTrack(1, kB, kSR));
+    {
+        const AudioLooperTestAccess::ReadScope reading(looper, AudioLooperTestAccess::bit(0));
+        ASSERT_EQ(AudioLooperTestAccess::readMask(looper), AudioLooperTestAccess::bit(0));
+        pf = req055RecordRamp(looper, 1, kB, pf);
+    }
+    EXPECT_EQ(AudioLooperTestAccess::readMask(looper), 0u) << "el scope no soltó su bit";
+    EXPECT_EQ(looper.getTrackLengthFrames(1), kB) << "se descartó captura de B mientras se leía A";
+    EXPECT_EQ(req055RampMismatches(looper, 1), 0);
+}
+
+// Bug que atrapa: un RT que deja de mirar la máscara (o mira otra pista) escribe
+// en la pista que el exportador está copiando — snapshot roto. Es el contrato que
+// ExportGuardBlocksOverdubDuringSnapshot cubre para el mixdown, acá por pista y
+// para la grabación.
+TEST(AudioLooper, Req055ReadingATrackStillBlocksItsOwnCapture) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.setTailMs(0);
+    const int kB = kSR / 4;
+    ASSERT_TRUE(looper.prepareTrack(1, kB, kSR));
+    int64_t pf = 0;
+    {
+        const AudioLooperTestAccess::ReadScope reading(looper, AudioLooperTestAccess::bit(1));
+        pf = req055RecordRamp(looper, 1, kB, pf);
+        EXPECT_EQ(looper.getTrackLengthFrames(1), 0)
+            << "el hilo de audio escribió la pista que se estaba leyendo";
+    }
+    // Control: sin el scope, la misma grabación sí escribe.
+    pf = req055RecordRamp(looper, 1, kB, pf);
+    EXPECT_EQ(looper.getTrackLengthFrames(1), kB);
 }

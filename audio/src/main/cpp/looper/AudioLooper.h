@@ -1459,6 +1459,9 @@ private:
 
     // The offline exporter reads track buffers + the export-guard atomics below.
     friend class wm::LooperExporter;
+    // Host tests hold an ExportReadScope directly to pin the RT side of the
+    // per-track guard deterministically (REQ-055 S4). Defined only in tests.
+    friend struct AudioLooperTestAccess;
 
     /**
      * @brief RAII marker of an export OPERATION, end to end (copy, render, disk
