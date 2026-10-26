@@ -228,10 +228,10 @@ public:
         bool overdubbing = mOverdubbing.load(std::memory_order_acquire);
 
         // ---- CAPTURE (recording or overdub) ----
-        // Skip ALL destructive writes (overdub, recording) while an export is in
-        // progress to avoid mid-snapshot mutation. Playback is read-only and
-        // unaffected.
-        const bool exportActive = mExportInProgress.load(std::memory_order_acquire);
+        // Skip ALL destructive writes (overdub, recording) while an exporter is
+        // reading track buffers (ExportReadScope) to avoid mid-snapshot mutation.
+        // Playback is read-only and unaffected.
+        const bool exportActive = mExportReadMask.load(std::memory_order_acquire) != 0;
         if (recTrack >= 0 && recTrack < MAX_TRACKS && !exportActive) {
             int trackLen = mTracks[recTrack].getLengthFrames();
 
@@ -779,7 +779,7 @@ public:
     bool trimTrack(int trackIndex) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return false;
         if (mRecordingTrack.load(std::memory_order_acquire) == trackIndex) return false;
-        if (mExportInProgress.load(std::memory_order_acquire)) return false;
+        if (mExportReadMask.load(std::memory_order_acquire) != 0) return false;
         return mTracks[trackIndex].trimToLength();
     }
 
@@ -855,10 +855,11 @@ public:
     /**
      * @brief Export mix of all active tracks to a WAV file.
      *
-     * Uses an "export guard" (mExportInProgress) that the audio thread checks
-     * before running overdub or finalize, so the buffer contents read during
-     * export cannot be mutated mid-snapshot. Playback continues normally during
-     * export. clear()/importTrack() callers are expected to also respect the
+     * While the tracks are rendered, an ExportReadScope makes the audio thread
+     * skip destructive writes (record, overdub, finalize), so the buffer
+     * contents read during export cannot be mutated mid-snapshot; the limiter,
+     * resample and disk write run after it is released. Playback continues
+     * normally during export. clear()/importTrack() callers are expected to also respect the
      * guard (enforced by JNI serialization on the UI/IO thread).
      *
      * @param filePath Output file path.
@@ -1077,7 +1078,7 @@ public:
         const int recTrack = mRecordingTrack.load(std::memory_order_acquire);
         const bool isOverdub = mOverdubbing.load(std::memory_order_acquire);
         const bool busyWriting = (recTrack == index);
-        const bool inExport = mExportInProgress.load(std::memory_order_acquire);
+        const bool inExport = mExportReadMask.load(std::memory_order_acquire) != 0;
 
         if (busyWriting && (isOverdub || !inExport)) {
             // QW-6: serve the live incremental waveform instead of a stale cache.
@@ -1268,7 +1269,7 @@ public:
     bool finalizeFreeLoop(int index, int loopStart, int loopEnd, int tailFrames) {
         if (index < 0 || index >= MAX_TRACKS) return false;
         if (mRecordingTrack.load(std::memory_order_acquire) == index) return false;
-        if (mExportInProgress.load(std::memory_order_acquire)) return false;
+        if (mExportReadMask.load(std::memory_order_acquire) != 0) return false;
         return mTracks[index].finalizeFreeLoop(loopStart, loopEnd, tailFrames);
     }
 
@@ -1460,10 +1461,10 @@ private:
     friend class wm::LooperExporter;
 
     /**
-     * @brief RAII guard that disables overdub mutation and clear()/import for
-     *        the duration of an export. The audio thread checks
-     *        mExportInProgress before performing destructive writes. Kept here
-     *        (not in LooperExporter) because it toggles the RT guard atomic.
+     * @brief RAII marker of an export OPERATION, end to end (copy, render, disk
+     *        write): drives isExportInProgress() and resets cancel/progress. It
+     *        does NOT block the audio thread — that is ExportReadScope, which is
+     *        held only while track buffers are actually read (REQ-055 S4).
      */
     class ExportGuard {
     public:
@@ -1479,6 +1480,36 @@ private:
         ExportGuard& operator=(const ExportGuard&) = delete;
     private:
         AudioLooper& mLooper;
+    };
+
+    /**
+     * @brief RAII scope during which an exporter READS the buffers of the tracks
+     *        in `mask`. The audio thread skips destructive writes (record,
+     *        overdub, wrap-mix tail) while it is held, so the copy sees an
+     *        immutable snapshot. Hold it for the copy/render only, never for disk
+     *        IO: every block it covers is capture the audio thread throws away.
+     *        IO thread only.
+     */
+    class ExportReadScope {
+    public:
+        static constexpr uint32_t allTracks() {
+            return (MAX_TRACKS_HW >= 32) ? ~0u : ((1u << MAX_TRACKS_HW) - 1u);
+        }
+        ExportReadScope(AudioLooper& l, uint32_t mask) : mLooper(l), mMask(mask) {
+            mLooper.mExportReadMask.fetch_or(mMask, std::memory_order_seq_cst);
+        }
+        ~ExportReadScope() { release(); }
+        /** End the read early (idempotent): the rest of the export is RAM/disk only. */
+        void release() {
+            if (mMask == 0) return;
+            mLooper.mExportReadMask.fetch_and(~mMask, std::memory_order_release);
+            mMask = 0;
+        }
+        ExportReadScope(const ExportReadScope&) = delete;
+        ExportReadScope& operator=(const ExportReadScope&) = delete;
+    private:
+        AudioLooper& mLooper;
+        uint32_t mMask;
     };
 
     void updateExportProgress(float p) {
@@ -1603,9 +1634,13 @@ private:
                                     // 750ms covers most natural decays (pads, reverb tails,
                                     // long pianos). NoisyPad can override via setTailMs().
 
-    // Export progress + cancellation. exportInProgress acts as a guard the
-    // audio thread should consult before destructive writes (overdub, clear).
+    // Export progress + cancellation. mExportInProgress is the public "an export
+    // is running" flag (ExportGuard); it does not gate the audio thread.
     mutable std::atomic<bool>  mExportInProgress{false};
+    // Bit t set = an exporter is reading track t's buffer (ExportReadScope). This,
+    // not mExportInProgress, is what the audio thread consults before writing.
+    std::atomic<uint32_t>      mExportReadMask{0};
+    static_assert(MAX_TRACKS_HW <= 32, "mExportReadMask holds one bit per track");
     mutable std::atomic<bool>  mCancelExport{false};
     mutable std::atomic<float> mExportProgress{0.0f};
     // Target export rate (0 = engine rate). Set from the UI before an export.

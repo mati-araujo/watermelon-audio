@@ -120,7 +120,11 @@ std::vector<float> LooperExporter::resampleStereo(const float* in, int inFrames,
 
 bool LooperExporter::exportMixInternal(const char* filePath, const ExportOptions& opts) {
     if (!filePath) return false;
-    AudioLooper::ExportGuard guard(mL);
+    AudioLooper::ExportGuard guard(mL);   // the operation (isExportInProgress)
+    // A mixdown reads EVERY track: the read scope stays global, but only for the
+    // render. Limiter, resample and the disk write work on mixBuffer and run after
+    // it is released (REQ-055 S4).
+    AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::allTracks());
 
     const ExportSnapshot snap = takeSnapshot();
     if (snap.frames <= 0) return false;
@@ -147,6 +151,7 @@ bool LooperExporter::exportMixInternal(const char* filePath, const ExportOptions
         if (snap.tracks[t].active && !snap.tracks[t].muted) ++activeCount;
     }
     if (activeCount == 0) {
+        reading.release();
         // All tracks muted/inactive — write silence (still useful for count-in tests).
         return wav::writeWav(filePath, mixBuffer.data(), totalFrames,
                              sr, opts.bitDepth, opts.metadata);
@@ -164,6 +169,7 @@ bool LooperExporter::exportMixInternal(const char* filePath, const ExportOptions
                                 static_cast<float>(activeCount));
     }
 
+    reading.release();   // render done: nothing below reads a track buffer
     if (mL.mCancelExport.load(std::memory_order_acquire)) return false;
 
     if (opts.applyLimiter) {
@@ -203,7 +209,11 @@ bool LooperExporter::exportMix(const char* filePath, const ExportOptions& opts) 
 
 int LooperExporter::exportStems(const char* directory, const ExportOptions& opts) {
     if (!directory) return -1;
-    const AudioLooper::ExportGuard guard(mL);
+    const AudioLooper::ExportGuard guard(mL);   // the operation (isExportInProgress)
+    // Stems stay a consistent multi-track snapshot: the read scope is global and
+    // held for the whole loop (each stem is rendered and written in turn). Not
+    // narrowed in REQ-055 S4: buffering every stem first would cost N x the RAM.
+    const AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::allTracks());
 
     const ExportSnapshot snap = takeSnapshot();
     if (snap.frames <= 0) return -1;
@@ -273,32 +283,40 @@ bool LooperExporter::exportTrack(int trackIndex, const char* filePath,
     if (trackIndex < 0 || trackIndex >= AudioLooper::MAX_TRACKS) return false;
     if (!mL.mTracks[trackIndex].isActive()) return false;
 
-    const AudioLooper::ExportGuard guard(mL);
-    const TrackBuffer& track = mL.mTracks[trackIndex];
-    int len = track.getLengthFrames();
-    int sr = track.getSampleRate();
+    const AudioLooper::ExportGuard guard(mL);   // the operation (isExportInProgress)
+    // REQ-055 S4: the read scope covers only the COPY to RAM; the (slow) disk write
+    // runs outside it, so the audio thread does not drop capture while it lasts.
+    std::vector<float> dense;
+    int writeLen = 0;
+    int sr = 0;
+    {
+        const AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::allTracks());
+        const TrackBuffer& track = mL.mTracks[trackIndex];
+        const int len = track.getLengthFrames();
+        sr = track.getSampleRate();
 
-    // If a custom loop region is defined, export only the region.
-    int regionStart = track.getLoopStart();
-    int regionEnd = track.getLoopEnd();
-    int writeStart = 0;
-    int writeLen = len;
-    if (regionStart > 0 || regionEnd < len) {
-        int regionLen = regionEnd - regionStart;
-        if (regionLen > 0) {
-            writeStart = regionStart;
-            writeLen = regionLen;
+        // If a custom loop region is defined, export only the region.
+        const int regionStart = track.getLoopStart();
+        const int regionEnd = track.getLoopEnd();
+        int writeStart = 0;
+        writeLen = len;
+        if (regionStart > 0 || regionEnd < len) {
+            const int regionLen = regionEnd - regionStart;
+            if (regionLen > 0) {
+                writeStart = regionStart;
+                writeLen = regionLen;
+            }
         }
-    }
-    if (writeLen <= 0) return false;
+        if (writeLen <= 0) return false;
 
-    // Materialise a dense copy of the region (storage-agnostic: works for the
-    // paged backend too). IO thread under the guard — the transient copy is fine.
-    std::vector<float> dense(static_cast<size_t>(writeLen) * 2);
-    for (int i = 0; i < writeLen; ++i) {
-        dense[i * 2]     = track.sampleAt(writeStart + i, 0);
-        dense[i * 2 + 1] = track.sampleAt(writeStart + i, 1);
-    }
+        // Materialise a dense copy of the region (storage-agnostic: works for the
+        // paged backend too). IO thread, under the read scope.
+        dense.resize(static_cast<size_t>(writeLen) * 2);
+        for (int i = 0; i < writeLen; ++i) {
+            dense[i * 2]     = track.sampleAt(writeStart + i, 0);
+            dense[i * 2 + 1] = track.sampleAt(writeStart + i, 1);
+        }
+    }  // read scope released: from here on nothing reads the track buffer
     return wav::writeWav(filePath, dense.data(), writeLen, sr,
                          opts.bitDepth, opts.metadata);
 }
@@ -308,18 +326,27 @@ bool LooperExporter::captureTrack(int trackIndex, const char* filePath,
     if (trackIndex < 0 || trackIndex >= AudioLooper::MAX_TRACKS) return false;
     if (!mL.mTracks[trackIndex].isActive()) return false;
 
-    const AudioLooper::ExportGuard guard(mL);
-    const TrackBuffer& track = mL.mTracks[trackIndex];
-    const int len = track.getLengthFrames();
-    const int sr = track.getSampleRate();
-    if (len <= 0) return false;
+    const AudioLooper::ExportGuard guard(mL);   // the operation (isExportInProgress)
+    // REQ-055 S4 (AC-055.2): the read scope covers only the COPY to RAM. The WAV
+    // write runs outside it: NoisyPad saves every take as it closes, and with the
+    // write under the scope the audio thread dropped the start of the next take.
+    std::vector<float> dense;
+    int len = 0;
+    int sr = 0;
+    {
+        const AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::allTracks());
+        const TrackBuffer& track = mL.mTracks[trackIndex];
+        len = track.getLengthFrames();
+        sr = track.getSampleRate();
+        if (len <= 0) return false;
 
-    // Full-buffer dense copy (storage-agnostic). IO thread under the guard.
-    std::vector<float> dense(static_cast<size_t>(len) * 2);
-    for (int i = 0; i < len; ++i) {
-        dense[i * 2]     = track.sampleAt(i, 0);
-        dense[i * 2 + 1] = track.sampleAt(i, 1);
-    }
+        // Full-buffer dense copy (storage-agnostic). IO thread, under the read scope.
+        dense.resize(static_cast<size_t>(len) * 2);
+        for (int i = 0; i < len; ++i) {
+            dense[i * 2]     = track.sampleAt(i, 0);
+            dense[i * 2 + 1] = track.sampleAt(i, 1);
+        }
+    }  // read scope released: from here on nothing reads the track buffer
     wav::WavMetadata meta;
     return wav::writeWav(filePath, dense.data(), len, sr, bitDepth, meta);
 }
