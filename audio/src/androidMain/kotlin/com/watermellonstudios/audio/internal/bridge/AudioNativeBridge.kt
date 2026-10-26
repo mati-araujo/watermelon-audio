@@ -18,6 +18,7 @@ import com.watermellonstudios.audio.domain.looper.LevelEnvelope
 import com.watermellonstudios.audio.domain.looper.PitchSeries
 import com.watermellonstudios.audio.domain.usb.StreamPreference
 import com.watermellonstudios.audio.export.Mp4AacTranscoder
+import com.watermellonstudios.audio.export.platformAacEncoder
 import com.watermellonstudios.audio.internal.native.NativeLibraryLoader
 import com.watermellonstudios.audio.api.EffectParameterUpdate
 import com.watermellonstudios.audio.internal.optimization.JniMetrics
@@ -3613,7 +3614,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
      * Export the current mix to a compressed AAC LC file (.m4a, MPEG-4 container).
      *
      * Pipeline: render a temporary lossless WAV via [looperExportMixPro], then
-     * transcode it with Android's MediaCodec (hardware-accelerated) into AAC.
+     * transcode it into AAC with the platform encoder (on Android, MediaCodec,
+     * hardware-accelerated; on the JVM there is none yet and it fails explicitly).
      * Result is typically 8–12× smaller than 24-bit WAV at 192 kbps with
      * transparent quality for most material — ideal for sharing via messaging apps.
      *
@@ -3665,8 +3667,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
         }
         onProgress?.invoke(0.7f)
 
-        // Phase 2: WAV → AAC. Reserve [0.7..1.0] for this step.
-        val result = Mp4AacTranscoder.wavToM4a(
+        // Phase 2: WAV → AAC. Reserve [0.7..1.0] for this step. Por la interfaz y no por
+        // MediaCodec: el bridge se comparte con la JVM (REQ-055 S1).
+        val result = platformAacEncoder.wavToM4a(
             wavPath = tempWavPath,
             m4aPath = m4aFilePath,
             bitrateBps = bitrateBps,
