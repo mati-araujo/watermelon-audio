@@ -19,10 +19,16 @@
 #include "WavFile.h"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -698,6 +704,122 @@ TEST(AudioLooper, CancelExportMidwayWritesNothing) {
     EXPECT_FALSE(result.load()) << "cancelled export must report failure";
     EXPECT_FALSE(std::filesystem::exists(out.path))
         << "cancelled export must not leave a partial file";
+}
+
+// ======================= REQ-055 S4 — la captura de una toma no descarta otra =====
+//
+// AC-055.2: WHEN se cierra una toma y se arranca a grabar otra pista inmediatamente
+// THE SYSTEM SHALL capturar todos los frames de la segunda.
+//
+// Con el historial de tomas, NoisyPad guarda cada toma (`captureTrack`) apenas se
+// cierra. Antes, `captureTrack` tenía el ExportGuard GLOBAL tomado durante la copia
+// Y la escritura a disco, y mientras tanto `process()` descartaba la captura de
+// CUALQUIER pista: el arranque de la toma siguiente se perdía en silencio.
+//
+// Cómo se fuerza el solapamiento sin reloj (REQ-002): el destino del WAV es un FIFO
+// cuyo lector abrimos nosotros y NO drenamos. El escritor sólo puede poner datos en
+// el pipe estando dentro de `writeWav` (o sea, después de la copia), y no puede
+// terminar mientras no leamos: la toma de A pesa más que cualquier buffer de pipe.
+// Esperamos a que haya bytes en el pipe (condición, no duración), grabamos B entera
+// con la escritura de A bloqueada a mitad, y recién después drenamos.
+namespace {
+
+// Valor conocido por frame: un frame perdido o corrido no puede dar el mismo valor.
+float req055Ramp(int i) { return static_cast<float>((i % 1000) + 1) / 2000.0f; }
+
+// Lee el FIFO hasta que el escritor lo cierra. Devuelve los bytes leídos.
+size_t req055Drain(int fd) {
+    const int flags = fcntl(fd, F_GETFL);
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    std::vector<char> buf(64 * 1024);
+    size_t total = 0;
+    while (true) {
+        const ssize_t n = read(fd, buf.data(), buf.size());
+        if (n > 0) { total += static_cast<size_t>(n); continue; }
+        if (n < 0 && errno == EINTR) continue;
+        break;  // 0 = el escritor cerró; <0 = error, el total lo delata
+    }
+    return total;
+}
+
+}  // namespace
+
+TEST(AudioLooper, Req055CaptureOfATakeDoesNotDropTheNextTake) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.setTailMs(0);  // sin cola: la toma de B termina exactamente en kB frames
+
+    // GIVEN: la pista A grabada y cerrada (sonando). 2 s en float32 estéreo =
+    // 768 KB, más que el buffer de un pipe en macOS y en Linux.
+    const int kA = 2 * kSR;
+    int64_t pf = 0;
+    ASSERT_TRUE(looper.prepareTrack(0, kA, kSR));
+    looper.startRecording(0);
+    pf = feed(looper, 0.5f, kA, 256, pf);
+    ASSERT_TRUE(looper.isTrackPlaying(0));
+    ASSERT_FALSE(looper.isRecording());
+
+    const std::filesystem::path fifo = wma_test::fixturePath("wm_r055_capture.fifo");
+    std::error_code ec;
+    std::filesystem::remove(fifo, ec);
+    ASSERT_EQ(mkfifo(fifo.c_str(), 0600), 0) << "mkfifo: " << std::strerror(errno);
+    const int rd = open(fifo.c_str(), O_RDONLY | O_NONBLOCK);
+    ASSERT_GE(rd, 0) << "open FIFO: " << std::strerror(errno);
+
+    // ... y su captura en curso, en otro hilo (el IO de NoisyPad).
+    std::atomic<bool> captureDone{false};
+    std::atomic<bool> captureOk{false};
+    std::thread capturer([&] {
+        captureOk.store(looper.captureTrack(0, fifo.c_str(), wav::BitDepth::FLOAT_32));
+        captureDone.store(true);
+    });
+    const bool writing = wma_test::waitUntil([&] {
+        pollfd p{rd, POLLIN, 0};
+        return poll(&p, 1, 0) > 0 && (p.revents & POLLIN) != 0;
+    }, std::chrono::milliseconds(10000));
+
+    // WHEN: se arranca a grabar B en el bloque siguiente, con la escritura de A a mitad.
+    const int kB = kSR / 2;
+    int recorded = 0;
+    if (writing) {
+        EXPECT_TRUE(looper.prepareTrack(1, kB, kSR));
+        looper.startRecording(1);
+        std::vector<float> blk(256 * 2);
+        while (recorded < kB) {
+            const int n = std::min(256, kB - recorded);
+            for (int i = 0; i < n; ++i) {
+                blk[i * 2] = blk[i * 2 + 1] = req055Ramp(recorded + i);
+            }
+            looper.process(blk.data(), n, pf);
+            pf += n;
+            recorded += n;
+        }
+    }
+    // Precondición que hace válido el test: la captura de A SIGUE en curso (no puede
+    // terminar sin que drenemos el pipe), así que B se grabó entera solapada con ella.
+    const bool overlapped = writing && !captureDone.load();
+
+    const size_t bytes = req055Drain(rd);
+    capturer.join();
+    close(rd);
+    std::filesystem::remove(fifo, ec);
+
+    ASSERT_TRUE(writing) << "la captura de A nunca llegó a escribir el WAV";
+    ASSERT_TRUE(overlapped) << "la captura de A terminó antes de grabar B: no hubo solapamiento";
+    EXPECT_TRUE(captureOk.load()) << "la captura de A falló";
+    EXPECT_GE(bytes, static_cast<size_t>(kA) * 2 * sizeof(float))
+        << "el WAV de A salió incompleto";
+
+    // THEN: B tiene todos sus frames, con el valor que se le dio a cada uno.
+    EXPECT_EQ(looper.getTrackLengthFrames(1), kB)
+        << "frames de B descartados mientras se escribía A";
+    const TrackBuffer& b = looper.getTrack(1);
+    int mismatches = 0;
+    const int lenB = looper.getTrackLengthFrames(1);
+    for (int i = 0; i < lenB; ++i) {
+        if (b.sampleAt(i, 0) != req055Ramp(i) || b.sampleAt(i, 1) != req055Ramp(i)) ++mismatches;
+    }
+    EXPECT_EQ(mismatches, 0) << "B tiene frames corridos o perdidos";
 }
 
 // ======================= Quantized sync-arm =======================
