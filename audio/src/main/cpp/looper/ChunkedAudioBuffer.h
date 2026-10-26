@@ -232,7 +232,7 @@ public:
 
     // ---------------- Export iteration (F2.3) ----------------
 
-    /** Direct page access for the offline exporter (reads under ExportGuard). */
+    /** Direct page access for the offline exporter (reads under ExportReadScope). */
     const Chunk* pageAt(int page) const {
         return (page >= 0 && page < static_cast<int>(mPages.size())) ? mPages[page] : nullptr;
     }

@@ -21,9 +21,15 @@ namespace wm {
  *
  * It operates on an AudioLooper by reference and is declared a friend of it, so
  * it reads track buffers and the export-guard atomics directly, exactly as the
- * inline code used to. The RT snapshot contract is unchanged: an
- * AudioLooper::ExportGuard is held for the whole export so the audio thread
- * skips destructive writes while the buffers are read.
+ * inline code used to. Two guards (REQ-055 S4):
+ *  - AudioLooper::ExportGuard marks the whole OPERATION (isExportInProgress,
+ *    cancel, progress). It does not touch the audio thread.
+ *  - AudioLooper::ExportReadScope is the RT snapshot contract: while it is held
+ *    the audio thread skips destructive writes into the tracks in its mask. It
+ *    covers only the READ of the buffers, never the disk write, and it is per
+ *    track: captureTrack/exportTrack pause only the track they copy; exportMix
+ *    and exportStems read every track and hold all of them (mix: until the render
+ *    ends; stems: for the whole loop).
  *
  * Lifetime: construct a transient LooperExporter around an AudioLooper for a
  * single call (AudioLooper's public export* / importTrack methods do exactly
@@ -52,7 +58,7 @@ private:
         float pan = 0.0f;
         // Read through the track (sampleAt) rather than a raw pointer, so export
         // works with both the dense and the paged (chunked) storage. Valid only
-        // while the ExportGuard is held.
+        // while the ExportReadScope is held.
         const TrackBuffer* track = nullptr;
     };
 
