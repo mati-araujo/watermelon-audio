@@ -8,7 +8,9 @@
 ## Nueva funcion JNI
 
 1. C++: agregar en `jni/jni_audio_bridge.cpp`.
-2. Kotlin: `private external fun` en `AudioNativeBridge.kt` (androidMain).
+2. Kotlin: `private external fun` en `AudioNativeBridge.kt` (`jvmSharedMain`, compartido con el
+   target JVM: cero `android.*` ahi; la ruta que leen los gates esta en
+   `scripts/jni_bridge_source.py`).
 3. Wrapper con mutex apropiado y `Result<T>`.
 4. Si es API publica: agregar a `IAudioNativeBridge` (commonMain).
 5. Considerar la C API `watermelon_audio.h/cpp` (`python3 scripts/c-api-gap.py` mide el gap).

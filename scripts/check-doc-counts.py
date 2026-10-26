@@ -163,13 +163,16 @@ def _baseline_reparto() -> str:
     return " / ".join(f"{cats[k]} {k}" for k in sorted(cats))
 
 
-BRIDGE = "audio/src/androidMain/kotlin/com/watermellonstudios/audio/internal/bridge/AudioNativeBridge.kt"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from jni_bridge_source import BRIDGE_KT_REL as BRIDGE, KOTLIN_SOURCE_SET  # noqa: E402
 
 # nombre -> (descripcion para el humano, medicion)
 METRICAS: dict[str, tuple[str, callable]] = {
     "kt-commonMain":   ("archivos .kt en commonMain",            lambda: _contar_archivos("audio/src/commonMain", ".kt")),
     "kt-androidMain":  ("archivos .kt en androidMain",           lambda: _contar_archivos("audio/src/androidMain", ".kt")),
     "kt-iosMain":      ("archivos .kt en iosMain",               lambda: _contar_archivos("audio/src/iosMain", ".kt")),
+    "kt-jvmSharedMain":(f"archivos .kt en {KOTLIN_SOURCE_SET} (Android + desktop)", lambda: _contar_archivos(f"audio/src/{KOTLIN_SOURCE_SET}", ".kt")),
+    "kt-desktopMain":  ("archivos .kt en desktopMain",           lambda: _contar_archivos("audio/src/desktopMain", ".kt")),
     "bridge-loc":      ("LOC de AudioNativeBridge.kt",           lambda: _lineas(BRIDGE)),
     "bridge-external": ("`external fun` en AudioNativeBridge",   lambda: _contar_regex(BRIDGE, r"external fun")),
     "jniexport-bridge":("JNIEXPORT en jni_audio_bridge.cpp",     lambda: _contar_regex("audio/src/main/cpp/jni/jni_audio_bridge.cpp", r"^JNIEXPORT\b")),

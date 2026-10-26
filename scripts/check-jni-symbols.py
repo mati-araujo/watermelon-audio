@@ -37,8 +37,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-BRIDGE_KT = REPO / ("audio/src/androidMain/kotlin/com/watermellonstudios/audio"
-                    "/internal/bridge/AudioNativeBridge.kt")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from jni_bridge_source import BRIDGE_KT_REL  # noqa: E402 — el source set, en un solo lugar
+
+BRIDGE_KT = REPO / BRIDGE_KT_REL
 
 # Una sola ABI a propósito: las cuatro salen del mismo CMake con las mismas
 # fuentes, así que leer las cuatro cuadruplica el costo sin agregar una pregunta.

@@ -38,6 +38,8 @@ camino critico de un PR atestado (`local_first.md` §2).
   sostiene: si el parser abarca menos prototipos de los que hay en el arbol, FALLA. Sin baseline:
   nacio en cero desajustes. Las tres preguntas: `audio/src/main/cpp/jni/CLAUDE.md`.
 - `check-jni-symbols.py` (MINI-001): sólo NOMBRES contra el `.so`.
+- La ruta del bridge Kotlin que leen `check-jni-symbols`, `check-jni-signatures` y
+  `check-doc-counts` es UNA constante: `jni_bridge_source.py` (el source set, REQ-055 S1).
 - `check-release-flags.py` (MINI-036): las flags EFECTIVAS del `.so` de `assembleRelease` en las 4
   ABIs: -O3, FP seguras, `-ftree-vectorize`, `-flto=thin` y `-g` en cada objeto, con la semantica
   del driver (GANA LA ULTIMA: un `-fno-lto` al final anula); SIN `-ffinite-math-only` ni lo que lo

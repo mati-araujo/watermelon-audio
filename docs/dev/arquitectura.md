@@ -18,8 +18,11 @@ audio/src/
                                 currentDeviceCapabilities
     domain/device/      DeviceCapabilities (interfaz de hechos) + Snapshot
     domain/input/       InputSource + InputMetering (snapshot de 7 valores)
-  androidMain/kotlin/   21 files — JNI bridge, USB, platform-specific
-    internal/bridge/    AudioNativeBridge (3357 LOC, 308 external funs)
+  jvmSharedMain/kotlin/ JNI bridge compartido Android + JVM (REQ-055 S1, sin android.*)
+    internal/bridge/    AudioNativeBridge (conteos: tabla del CLAUDE.md raiz)
+    export/             Mp4AacTranscoder (API) + IAacEncoder, expect platformAacEncoder
+  androidMain/kotlin/   USB, platform-specific; MediaCodecAacEncoder, LogcatAudioLogger
+  desktopMain/kotlin/   target jvm("desktop"): actual minimos (stderr, loadLibrary, sin AAC)
     internal/usb/       USB audio driver (DataStore, BroadcastReceiver)
     internal/mode/      ModeTransitionManagerImpl, NativeModeStateWriter
   iosMain/kotlin/       6 files — IosAudioBridge (sobre cinterop), AudioBridgeProvider,
