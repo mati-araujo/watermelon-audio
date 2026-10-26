@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <thread>
 #include "../platform/Logger.h"
 #include "../platform/RtCounter.h"
 
@@ -228,11 +229,28 @@ public:
         bool overdubbing = mOverdubbing.load(std::memory_order_acquire);
 
         // ---- CAPTURE (recording or overdub) ----
-        // Skip ALL destructive writes (overdub, recording) while an exporter is
-        // reading track buffers (ExportReadScope) to avoid mid-snapshot mutation.
+        // Skip the destructive writes (overdub, recording, tail) into recTrack
+        // while an exporter is reading THAT track (ExportReadScope bit), to avoid
+        // mid-snapshot mutation. Other tracks keep capturing (REQ-055 S4).
         // Playback is read-only and unaffected.
-        const bool exportActive = mExportReadMask.load(std::memory_order_acquire) != 0;
-        if (recTrack >= 0 && recTrack < MAX_TRACKS && !exportActive) {
+        //
+        // Handshake with ExportReadScope (Dekker, all seq_cst): publish "writing
+        // recTrack" BEFORE reading the mask, clear it AFTER the last write. The
+        // exporter sets its bit, then waits while this marks its track. Either we
+        // see the bit and skip, or it sees us and waits for this block to end —
+        // it can never copy a track this block is still writing. Two atomic
+        // stores and one load per block: no lock, no alloc, no wait on this side.
+        bool captureThisBlock = false;
+        if (recTrack >= 0 && recTrack < MAX_TRACKS) {
+            mCaptureWritingTrack.store(recTrack, std::memory_order_seq_cst);
+            const uint32_t reading = mExportReadMask.load(std::memory_order_seq_cst);
+            captureThisBlock = (reading & (1u << recTrack)) == 0;
+            if (!captureThisBlock) {
+                // Skipped: stop marking at once, the exporter need not wait for us.
+                mCaptureWritingTrack.store(-1, std::memory_order_seq_cst);
+            }
+        }
+        if (captureThisBlock) {
             int trackLen = mTracks[recTrack].getLengthFrames();
 
             if (overdubbing && trackLen > 0) {
@@ -338,6 +356,11 @@ public:
                     mLoopFinalizedDuringRec.store(false, std::memory_order_release);
                 }
             }
+        }
+
+        if (captureThisBlock) {
+            // Last write of this block into recTrack is done: release the exporter.
+            mCaptureWritingTrack.store(-1, std::memory_order_seq_cst);
         }
 
         // ---- PLAYBACK (mix all tracks into temp buffer, apply master volume) ----
@@ -779,7 +802,7 @@ public:
     bool trimTrack(int trackIndex) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return false;
         if (mRecordingTrack.load(std::memory_order_acquire) == trackIndex) return false;
-        if (mExportReadMask.load(std::memory_order_acquire) != 0) return false;
+        if (isTrackBeingRead(trackIndex)) return false;
         return mTracks[trackIndex].trimToLength();
     }
 
@@ -1078,7 +1101,8 @@ public:
         const int recTrack = mRecordingTrack.load(std::memory_order_acquire);
         const bool isOverdub = mOverdubbing.load(std::memory_order_acquire);
         const bool busyWriting = (recTrack == index);
-        const bool inExport = mExportReadMask.load(std::memory_order_acquire) != 0;
+        // The audio thread skips writes into `index` only while ITS bit is set.
+        const bool inExport = isTrackBeingRead(index);
 
         if (busyWriting && (isOverdub || !inExport)) {
             // QW-6: serve the live incremental waveform instead of a stale cache.
@@ -1269,7 +1293,7 @@ public:
     bool finalizeFreeLoop(int index, int loopStart, int loopEnd, int tailFrames) {
         if (index < 0 || index >= MAX_TRACKS) return false;
         if (mRecordingTrack.load(std::memory_order_acquire) == index) return false;
-        if (mExportReadMask.load(std::memory_order_acquire) != 0) return false;
+        if (isTrackBeingRead(index)) return false;
         return mTracks[index].finalizeFreeLoop(loopStart, loopEnd, tailFrames);
     }
 
@@ -1498,8 +1522,12 @@ private:
         static constexpr uint32_t allTracks() {
             return (MAX_TRACKS_HW >= 32) ? ~0u : ((1u << MAX_TRACKS_HW) - 1u);
         }
+        static constexpr uint32_t track(int index) { return 1u << index; }
+
+        /** Returns only once the audio thread cannot write any track in `mask`. */
         ExportReadScope(AudioLooper& l, uint32_t mask) : mLooper(l), mMask(mask) {
             mLooper.mExportReadMask.fetch_or(mMask, std::memory_order_seq_cst);
+            mLooper.waitForCaptureBlockOutside(mMask);
         }
         ~ExportReadScope() { release(); }
         /** End the read early (idempotent): the rest of the export is RAM/disk only. */
@@ -1514,6 +1542,28 @@ private:
         AudioLooper& mLooper;
         uint32_t mMask;
     };
+
+    /** True while an exporter holds an ExportReadScope over `index`. */
+    bool isTrackBeingRead(int index) const {
+        return (mExportReadMask.load(std::memory_order_acquire) & (1u << index)) != 0;
+    }
+
+    /**
+     * @brief IO thread, other half of the process() handshake: after the bits of
+     *        `mask` are published, wait while the audio thread is inside a capture
+     *        block into one of those tracks. That block read the mask BEFORE our
+     *        bit landed (otherwise it would not be marking), so it may be writing;
+     *        every later block sees the bit and skips. Bounded by one audio block.
+     *        With the audio stopped the mark is -1 and this returns at once.
+     *        The same yield loop as TrackBuffer::waitForRenderIdle().
+     */
+    void waitForCaptureBlockOutside(uint32_t mask) const {
+        while (true) {
+            const int w = mCaptureWritingTrack.load(std::memory_order_seq_cst);
+            if (w < 0 || (mask & (1u << w)) == 0) return;
+            std::this_thread::yield();
+        }
+    }
 
     void updateExportProgress(float p) {
         if (p < 0.0f) p = 0.0f;
@@ -1643,6 +1693,10 @@ private:
     // Bit t set = an exporter is reading track t's buffer (ExportReadScope). This,
     // not mExportInProgress, is what the audio thread consults before writing.
     std::atomic<uint32_t>      mExportReadMask{0};
+    // Track the audio thread is writing in the current block (-1 = none). Set
+    // before it reads mExportReadMask, cleared after its last write; the other
+    // half of the ExportReadScope handshake.
+    std::atomic<int>           mCaptureWritingTrack{-1};
     static_assert(MAX_TRACKS_HW <= 32, "mExportReadMask holds one bit per track");
     mutable std::atomic<bool>  mCancelExport{false};
     mutable std::atomic<float> mExportProgress{0.0f};

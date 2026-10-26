@@ -41,6 +41,10 @@ struct AudioLooperTestAccess {
     static uint32_t readMask(const AudioLooper& l) {
         return l.mExportReadMask.load(std::memory_order_acquire);
     }
+    // Simula al hilo de audio a mitad de un bloque de captura sobre `track`.
+    static void setCaptureWritingTrack(AudioLooper& l, int track) {
+        l.mCaptureWritingTrack.store(track, std::memory_order_seq_cst);
+    }
 };
 
 namespace {
@@ -1370,4 +1374,47 @@ TEST(AudioLooper, Req055ReadingATrackStillBlocksItsOwnCapture) {
     // Control: sin el scope, la misma grabación sí escribe.
     pf = req055RecordRamp(looper, 1, kB, pf);
     EXPECT_EQ(looper.getTrackLengthFrames(1), kB);
+}
+
+// El otro lado del handshake: un scope que se toma con el hilo de audio a mitad de
+// un bloque que escribe ESA pista no vuelve hasta que el bloque termina. Bug que
+// atrapa: la ventana TOCTOU (el RT leyó la máscara antes que el bit y sigue
+// escribiendo mientras el exportador ya copia). El bloque en vuelo se simula
+// fijando la marca que process() pone mientras escribe.
+TEST(AudioLooper, Req055ReadScopeWaitsForTheCaptureBlockInFlight) {
+    AudioLooper looper;
+    using A = AudioLooperTestAccess;
+
+    A::setCaptureWritingTrack(looper, 0);   // RT "escribiendo" la pista 0
+    std::atomic<bool> entered{false};
+    std::atomic<bool> leave{false};
+    std::thread io([&] {
+        const A::ReadScope reading(looper, A::bit(0));
+        entered.store(true);
+        while (!leave.load()) std::this_thread::yield();
+    });
+    ASSERT_TRUE(wma_test::waitUntil([&] { return A::readMask(looper) == A::bit(0); }))
+        << "el scope nunca publicó su bit";
+    wma_test::sleepFixed(std::chrono::milliseconds(50));   // ausencia: no debe entrar
+    const bool enteredWhileWriting = entered.load();
+    A::setCaptureWritingTrack(looper, -1);  // el bloque terminó
+    const bool enteredAfter = wma_test::waitUntil([&] { return entered.load(); });
+    leave.store(true);
+    io.join();
+    EXPECT_FALSE(enteredWhileWriting)
+        << "el exportador empezó a leer con el hilo de audio escribiendo la pista";
+    EXPECT_TRUE(enteredAfter) << "el scope no volvió al terminar el bloque";
+    EXPECT_EQ(A::readMask(looper), 0u);
+
+    // Un bloque que escribe OTRA pista no lo demora.
+    A::setCaptureWritingTrack(looper, 1);
+    std::atomic<bool> enteredOther{false};
+    std::thread io2([&] {
+        const A::ReadScope reading(looper, A::bit(0));
+        enteredOther.store(true);
+    });
+    const bool notDelayed = wma_test::waitUntil([&] { return enteredOther.load(); });
+    A::setCaptureWritingTrack(looper, -1);  // por si falló: que el hilo pueda salir
+    io2.join();
+    EXPECT_TRUE(notDelayed) << "la captura de la pista 1 demoró la lectura de la 0";
 }

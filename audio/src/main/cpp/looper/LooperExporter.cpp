@@ -290,7 +290,8 @@ bool LooperExporter::exportTrack(int trackIndex, const char* filePath,
     int writeLen = 0;
     int sr = 0;
     {
-        const AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::allTracks());
+        // Per-track (REQ-055 S4): only this track's capture pauses during the copy.
+        const AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::track(trackIndex));
         const TrackBuffer& track = mL.mTracks[trackIndex];
         const int len = track.getLengthFrames();
         sr = track.getSampleRate();
@@ -334,7 +335,8 @@ bool LooperExporter::captureTrack(int trackIndex, const char* filePath,
     int len = 0;
     int sr = 0;
     {
-        const AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::allTracks());
+        // Per-track (REQ-055 S4): only this track's capture pauses during the copy.
+        const AudioLooper::ExportReadScope reading(mL, AudioLooper::ExportReadScope::track(trackIndex));
         const TrackBuffer& track = mL.mTracks[trackIndex];
         len = track.getLengthFrames();
         sr = track.getSampleRate();
