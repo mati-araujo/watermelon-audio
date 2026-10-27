@@ -18,8 +18,15 @@
  * Un cursor PROPIO sobre el ring, que mueve el hilo de analisis (el unico productor) sin tocar
  * `mRead`/`mDropped`/`mTorn` ni el scratch del analisis: el analisis queda bit a bit igual con y
  * sin toma. Lo copiado entra a una cola SPSC preasignada; un hilo escritor propio de la toma la
- * vacia hacia un `IDumpSink`. El productor NUNCA espera: sin lugar en la cola esos frames se pierden,
- * se cuentan, y la toma queda invalida.
+ * vacia hacia un `IDumpSink`. El productor NUNCA espera: sin lugar en la cola esos frames se pierden
+ * y se cuentan.
+ *
+ * EL MAPA DE CORTES (0.6, D16/D25/D26). Una perdida o una costura que se puede UBICAR en el archivo
+ * (ring pisado antes de copiar, cola llena, costura de captura) se anota como corte en el `wmad` y
+ * la toma sigue siendo sana: quien la mide corta ahi. Lo que no se puede ubicar (tope de toma, error
+ * del sink, reset del ring, cambio de fuente, reinicio del afinador, cambio de rate, mapa lleno) la
+ * deja invalida. La coordenada de un corte es el frame del ARCHIVO: `mFramesQueued` en el momento
+ * (igual al frame del archivo mientras el sink no falla; si falla, la toma ya es invalida).
  *
  * Nucleo puro: ni `fopen` ni disco aca. El borde de E/S es `IDumpSink` (`WavFileDumpSink` en disco,
  * un sink en memoria en los tests).
@@ -73,15 +80,42 @@ std::string invalidDumpPathFor(const std::string& path);
 /// nunca uno con el nombre que la app le pase.
 bool hasWavExtension(const std::string& path);
 
+/// Un CORTE de la toma (REQ-055 S0 · 0.6, D16/D25): una perdida o una costura UBICADA en el archivo.
+/// La coordenada es el frame DEL ARCHIVO (el indice en `data`), la que cortan oraculo e instrumento.
+///   kind 1 (perdida): `lostFrames` frames que faltan JUSTO ANTES de `fileFrame`; `fileSpan` = 0.
+///   kind 2 (costura de captura, D25): el salto cae en algun frame de [fileFrame, fileFrame +
+///           fileSpan]; cuantos frames se perdieron no se sabe (`lostFrames` = 0 = desconocido).
+struct InputDumpCut {
+    uint64_t fileFrame = 0;
+    uint64_t lostFrames = 0;
+    uint32_t fileSpan = 0;
+    uint32_t kind = 0;
+};
+inline constexpr uint32_t kInputDumpCutLoss = 1;
+inline constexpr uint32_t kInputDumpCutSeam = 2;
+/// Capacidad FIJA del mapa (preasignado: el productor no asigna). El corte 257 ya no se puede
+/// ubicar: va a `unlocated*` y la toma queda invalida.
+inline constexpr uint32_t kInputDumpCutCapacity = 256;
+
 struct InputDumpStats {
     uint64_t framesWritten = 0;    ///< frames que el sink acepto
-    uint64_t framesLost = 0;       ///< pisados en el ring antes de copiar + cola llena + error del sink
-    uint64_t discontinuities = 0;  ///< costura de captura cruzada, retroceso de posiciones (reset del
-                                   ///< ring), cambio de fuente, cambio de rate dentro de la toma
+    uint64_t framesLost = 0;       ///< TOTAL: ubicados (suma de `lostFrames` de los cortes) +
+                                   ///< `unlocatedFrames`
+    uint64_t discontinuities = 0;  ///< TOTAL: avisos de costura vistos + `unlocatedDiscontinuities`
     int32_t sampleRate = 0;        ///< el estampado al llegar el primer bloque; 0 = nunca llego audio
     int32_t inputSource = -1;      ///< la que paso el control al arrancar la toma
-    bool valid = false;            ///< framesLost == 0 && discontinuities == 0 && sampleRate > 0 &&
-                                   ///< framesWritten > 0 && el sink no fallo (abrir/escribir/cerrar)
+    /// unlocatedFrames == 0 && unlocatedDiscontinuities == 0 && sampleRate > 0 && framesWritten > 0
+    /// && el sink no fallo (abrir/escribir/cerrar). Una toma con cortes UBICADOS es valida: el
+    /// mapa los declara y quien la mide no mide a traves de ellos.
+    bool valid = false;
+    /// Perdidas que no se pueden ubicar en el archivo: tope de toma, error del sink, el mapa lleno.
+    uint64_t unlocatedFrames = 0;
+    /// Discontinuidades que no se pueden ubicar: reset del ring, cambio de fuente, reinicio del
+    /// afinador con la toma viva (D26), cambio de rate, rate <= 0, una costura con el mapa lleno.
+    uint64_t unlocatedDiscontinuities = 0;
+    /// El mapa, ordenado por `fileFrame` (estable). Solo valen los primeros `cutCount`.
+    uint32_t cutCount = 0;
+    InputDumpCut cuts[kInputDumpCutCapacity] = {};
 };
 
 /// Cuantos valores lleva el resumen de una toma en la C API (`WMA_TUNER_DUMP_STATS_VALUES`): los
@@ -89,14 +123,26 @@ struct InputDumpStats {
 inline constexpr int kInputDumpStatsValues = 7;
 
 /// Header WAV fijo: RIFF/WAVE + fmt (18 bytes: formato 3 IEEE float, 1 canal, rate, byteRate =
-/// rate * 4, blockAlign 4, 32 bits, cbSize 0) + fact (4: frames) + wmad (40 bytes: u32 version = 1,
-/// u64 framesWritten, u64 framesLost, u64 discontinuities, i32 sampleRate, i32 inputSource,
-/// u32 valid) + data (framesWritten * 4). Todo little-endian.
+/// rate * 4, blockAlign 4, 32 bits, cbSize 0) + fact (4: frames) + wmad + data (framesWritten * 4).
+/// Todo little-endian.
+///
+/// `wmad` v2 (REQ-055 S0 · 0.6), cuerpo de `kInputDumpWmadBodyBytes`, CAPACIDAD FIJA: los 40 bytes
+/// de v1 en sus offsets (u32 version = 2, u64 framesWritten, u64 framesLost, u64 discontinuities,
+/// i32 sampleRate, i32 inputSource, u32 valid; lost y discontinuities siguen siendo TOTALES) + u64
+/// unlocatedFrames, u64 unlocatedDiscontinuities, u32 cutCount, u32 cutCapacity (= 256) + 256 x
+/// {u64 fileFrame, u64 lostFrames, u32 fileSpan, u32 kind} (los que pasan de cutCount, en cero).
 ///
 /// Los tamanos de RIFF, fact y data son de 32 bits, como manda el formato. Que nunca den la vuelta
 /// lo garantiza `kMaxTakeFrames` (una toma no escribe mas que eso), no la esperanza de que la toma
 /// sea corta. PRECONDICION: `s.framesWritten <= kMaxTakeFrames`.
-inline constexpr size_t kInputDumpHeaderBytes = 106;
+inline constexpr uint32_t kInputDumpWmadVersion = 2;
+inline constexpr size_t kInputDumpCutBytes = 24;
+inline constexpr size_t kInputDumpWmadBodyBytes = 64 + kInputDumpCutBytes * kInputDumpCutCapacity;
+/// RIFF/WAVE (12) + fmt (8 + 18) + fact (8 + 4) + wmad (8 + cuerpo) + cabecera de data (8).
+inline constexpr size_t kInputDumpHeaderBytes = 12 + 26 + 12 + 8 + kInputDumpWmadBodyBytes + 8;
+static_assert(kInputDumpWmadBodyBytes == 6208, "wmad v2: 40 de v1 + 24 + 256 cortes de 24");
+static_assert(kInputDumpWmadBodyBytes % 2 == 0, "un chunk RIFF de largo impar lleva relleno");
+static_assert(kInputDumpHeaderBytes == 6274, "el header del volcado v2");
 void writeInputDumpHeader(uint8_t* out /* kInputDumpHeaderBytes */, const InputDumpStats& s);
 
 /// TOPE DE FRAMES POR TOMA (hallazgo 4 del security-auditor): 2^28 = ~93 min a 48 kHz, 1 GiB de
@@ -172,25 +218,33 @@ public:
     void armAtRing(const AnalysisRing& ring) noexcept;
 
     /// Copia [cursor, writePosition) del ring a la cola, en trozos, con `copyForInputDump`. Anota:
-    /// el retroceso de posiciones (cursor > writePosition: reset del ring), el cruce de
-    /// `captureSeamPosition()` (toda costura mayor que la ultima vista cuenta EN CUANTO SE VE, sin
-    /// esperar a cruzarla: invalida de mas a proposito) y el rate (el primero > 0
-    /// queda en la toma; uno distinto despues es una discontinuidad). `tryPush` es todo o nada: sin
-    /// lugar, esos frames se pierden y se cuentan, y el cursor sigue. Lo que pase del tope por toma
-    /// (`maxTakeFrames` encolados) tambien se pierde y se cuenta. NUNCA espera ni asigna.
+    /// - el retroceso de posiciones (cursor > writePosition: reset del ring): NO ubicada;
+    /// - lo pisado en el ring antes de copiar y lo que no entro en la cola (`tryPush` es todo o
+    ///   nada; el cursor sigue): corte de PERDIDA en el frame del archivo donde falta;
+    /// - la costura de captura (D25): el ring guarda solo la mas lejana y avisa asincrono, asi que
+    ///   entre dos lecturas puede haber una oculta. Se anota el TRAMO [lo, f(S)], `lo` = el frame
+    ///   del archivo en la lectura ANTERIOR de la costura (todo aviso posterior vale >= el cursor de
+    ///   entonces). Una S por delante del cursor queda pendiente y la copia se TOPA en S (cambia el
+    ///   troceo, no los bits) para cerrar el tramo exacto; una perdida que salta S lo cierra ahi;
+    ///   pendiente al cerrar la toma, `endTake` lo cierra en `framesWritten`;
+    /// - el rate (el primero > 0 queda en la toma; uno distinto despues, o frames con rate <= 0:
+    ///   NO ubicada).
+    /// Lo que pase del tope por toma (`maxTakeFrames` encolados) se pierde: NO ubicada. Un corte que
+    /// no entra en el mapa (lleno) tambien. NUNCA espera ni asigna.
     void captureFromRing(const AnalysisRing& ring, int captureRate) noexcept;
 
-    /// Anota una discontinuidad que el ring no ve (cambio de fuente, el afinador parado y vuelto a
-    /// arrancar). Solo incrementa un atomico.
+    /// Anota una discontinuidad NO UBICADA (cambio de fuente, el afinador parado y vuelto a
+    /// arrancar con la toma viva, D26): deja la toma invalida. Solo incrementa un atomico; la llaman
+    /// el hilo de analisis y el control (`AnalysisThread::start`).
     void noteInputDiscontinuity() noexcept {
-        mDiscontinuities.fetch_add(1, std::memory_order_relaxed);
+        mUnlocatedDiscontinuities.fetch_add(1, std::memory_order_relaxed);
     }
 
     // ---- contadores observables (cualquier hilo, atomicos) ----
 
     /// Frames que entraron a la cola en esta toma.
     uint64_t framesQueued() const noexcept { return mFramesQueued.load(std::memory_order_relaxed); }
-    /// Mismo significado que `InputDumpStats::framesLost`, hasta ahora.
+    /// Mismo significado que `InputDumpStats::framesLost` (el TOTAL), hasta ahora.
     uint64_t framesLost() const noexcept {
         return mLostByProducer.load(std::memory_order_relaxed) +
                mLostByWriter.load(std::memory_order_relaxed);
@@ -212,6 +266,19 @@ private:
     bool tryPushFrames(const float* src, size_t n) noexcept;
     void writerLoop();
 
+    // ---- el mapa de cortes (solo el hilo de analisis, salvo `endTake` tras el desarme) ----
+
+    /// Corte de PERDIDA de `lost` frames en el frame del archivo actual (`mFramesQueued`). Se
+    /// fusiona con la ultima perdida si cae en el mismo frame; sin lugar en el mapa, NO ubicada.
+    void noteDumpLocatedLoss(uint64_t lost) noexcept;
+    /// Cierra el tramo de la costura pendiente en el frame del archivo `hi`.
+    void closeDumpSeamSpan(uint64_t hi) noexcept;
+    /// Anota el tramo de costura [lo, hi]: se fusiona con el ultimo tramo de costura si lo toca; sin
+    /// lugar en el mapa, NO ubicada.
+    void noteDumpSeamSpan(uint64_t lo, uint64_t hi) noexcept;
+    /// Mira la costura del ring (antes y despues de copiar) y abre/extiende/cierra el tramo.
+    void readDumpSeam(const AnalysisRing& ring) noexcept;
+
     /// Tope de frames encolados por toma (<= kMaxTakeFrames). Fijo desde el constructor.
     const uint64_t mMaxTakeFrames;
 
@@ -226,6 +293,20 @@ private:
     uint64_t mCursor = 0;
     uint64_t mLastSeam = 0;
     int mLastRate = 0;
+    /// El mapa, preasignado (es un arreglo del objeto): el productor lo llena sin asignar.
+    InputDumpCut mCuts[kInputDumpCutCapacity] = {};
+    uint32_t mCutCount = 0;
+    /// Indice en `mCuts` del ultimo tramo de costura y de la ultima perdida; -1 = ninguno.
+    int mLastSeamCut = -1;
+    int mLastLossCut = -1;
+    /// Frame del archivo en la lectura anterior de la costura (el `lo` de un tramo nuevo).
+    uint64_t mSeamReadFrame = 0;
+    /// Costura delante del cursor (posicion del ring) y el `lo` de su tramo.
+    bool mSeamPending = false;
+    uint64_t mPendingSeam = 0;
+    uint64_t mPendingSeamLo = 0;
+    /// Avisos de costura vistos (va al total `discontinuities`).
+    uint64_t mSeamNotices = 0;
 
     std::atomic<bool> mActive{false};
     std::atomic<bool> mStopWriter{false};
@@ -234,7 +315,9 @@ private:
     std::atomic<uint64_t> mFramesWritten{0};
     std::atomic<uint64_t> mLostByProducer{0};
     std::atomic<uint64_t> mLostByWriter{0};
-    std::atomic<uint64_t> mDiscontinuities{0};
+    /// La parte de `mLostByProducer` que no se pudo ubicar (tope de toma, mapa lleno).
+    std::atomic<uint64_t> mUnlocatedByProducer{0};
+    std::atomic<uint64_t> mUnlocatedDiscontinuities{0};
     std::atomic<int> mSampleRate{0};
 
     // De la toma: los fija `beginTake` antes de arrancar el escritor.

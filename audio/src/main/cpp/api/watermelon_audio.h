@@ -1295,6 +1295,17 @@ WMA_API bool wma_tuner_analyze_buffer_with_candidates(
  * 0 framesWritten, 1 framesLost, 2 discontinuities, 3 sampleRate, 4 inputSource,
  * 5 valid (0/1), 6 finalized (0/1).
  *
+ * framesLost and discontinuities are TOTALS. valid is 1 only if every loss and
+ * discontinuity could be LOCATED in the file (frames overwritten in the analysis
+ * ring before they were copied, the recording queue full, a capture seam): the
+ * "wmad" chunk (version 2) lists each one as a cut (file frame, length; a seam
+ * has an unknown length) and whoever measures the take cuts there. So valid = 1
+ * with framesLost or discontinuities > 0 is a healthy take WITH cuts. Anything
+ * that cannot be located makes it 0: the per-take cap, a write error, a ring
+ * reset, an input source change, the tuner restarted with the take running, a
+ * rate change or unknown rate, more than 256 cuts. valid also needs a known
+ * rate, at least one frame and a file that was written without errors.
+ *
  * finalized is 1 when the file was closed and named by the rule above ("<path>"
  * or "<path minus .wav>.invalid.wav"). 0 means closing or renaming failed —
  * including a file that already had the final name when the take closed, which
@@ -1327,7 +1338,9 @@ WMA_API bool wma_tuner_analyze_buffer_with_candidates(
  * DSP, at the stamped capture rate) to a float32 WAV. The file is written to
  * "<path>.part" and named when the take is stopped: "<path>" if healthy,
  * "<path minus .wav>.invalid.wav" if audio was lost or the capture was
- * discontinuous. A WAV with holes never carries a healthy name.
+ * discontinuous in a way the file cannot locate. A WAV with holes never carries
+ * a healthy name unless its "wmad" chunk declares every one of them (see
+ * WMA_TUNER_DUMP_STATS_VALUES).
  *
  * Does NOT start the tuner: with no tuner running no audio reaches the
  * recording. Returns true even then; the take just closes invalid.

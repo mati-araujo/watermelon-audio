@@ -295,15 +295,16 @@ bool tagAt(const std::vector<uint8_t>& h, size_t off, const char* tag) {
 
 /// Verifica CADA campo del header contra `s`, por offset. Sirve para el header que arma
 /// `writeInputDumpHeader` y para el que el nucleo le entrega al sink al cerrar una toma.
+/// Layout `wmad` v2 (REQ-055 S0 · 0.6): los 40 de v1 en sus offsets + lo no ubicado + el mapa.
 void expectHeaderMatches(const std::vector<uint8_t>& h, const InputDumpStats& s) {
     ASSERT_EQ(h.size(), kInputDumpHeaderBytes);
-    ASSERT_EQ(kInputDumpHeaderBytes, size_t{106});
+    ASSERT_EQ(kInputDumpHeaderBytes, size_t{6274});
     const uint64_t frames = s.framesWritten;
 
     // RIFF / WAVE
     EXPECT_TRUE(tagAt(h, 0, "RIFF"));
-    // Tamano del RIFF = archivo - 8 = 4 (WAVE) + 26 (fmt) + 12 (fact) + 48 (wmad) + 8 + datos.
-    EXPECT_EQ(rdLE(h, 4, 4), 98 + 4 * frames) << "el tamano del RIFF no cierra con el archivo";
+    // Tamano del RIFF = archivo - 8 = 4 (WAVE) + 26 (fmt) + 12 (fact) + 6216 (wmad) + 8 + datos.
+    EXPECT_EQ(rdLE(h, 4, 4), 6266 + 4 * frames) << "el tamano del RIFF no cierra con el archivo";
     EXPECT_TRUE(tagAt(h, 8, "WAVE"));
 
     // fmt (18 bytes): formato 3 = IEEE float, 1 canal, rate, byteRate = rate*4, blockAlign 4, 32 bits.
@@ -322,20 +323,54 @@ void expectHeaderMatches(const std::vector<uint8_t>& h, const InputDumpStats& s)
     EXPECT_EQ(rdLE(h, 42, 4), 4u);
     EXPECT_EQ(rdLE(h, 46, 4), frames);
 
-    // wmad (40): version=1, u64 frames, u64 lost, u64 discontinuities, i32 rate, i32 source, u32 valid.
+    // wmad (6208): la parte de v1 en sus offsets, version=2.
     EXPECT_TRUE(tagAt(h, 50, "wmad"));
-    EXPECT_EQ(rdLE(h, 54, 4), 40u);
-    EXPECT_EQ(rdLE(h, 58, 4), 1u) << "version";
+    EXPECT_EQ(rdLE(h, 54, 4), 6208u);
+    EXPECT_EQ(rdLE(h, 58, 4), 2u) << "version";
     EXPECT_EQ(rdLE(h, 62, 8), frames);
     EXPECT_EQ(rdLE(h, 70, 8), s.framesLost) << "u64: un u32 perderia el alto";
     EXPECT_EQ(rdLE(h, 78, 8), s.discontinuities) << "u64: un u32 perderia el alto";
     EXPECT_EQ(static_cast<int32_t>(rdLE(h, 86, 4)), s.sampleRate);
     EXPECT_EQ(static_cast<int32_t>(rdLE(h, 90, 4)), s.inputSource) << "i32 con signo";
     EXPECT_EQ(rdLE(h, 94, 4), s.valid ? 1u : 0u);
+    // v2: lo no ubicado, el conteo, la capacidad y cada corte (los que sobran, en cero).
+    EXPECT_EQ(rdLE(h, 98, 8), s.unlocatedFrames);
+    EXPECT_EQ(rdLE(h, 106, 8), s.unlocatedDiscontinuities);
+    EXPECT_EQ(rdLE(h, 114, 4), s.cutCount);
+    EXPECT_EQ(rdLE(h, 118, 4), 256u) << "capacidad fija";
+    for (uint32_t i = 0; i < 256; ++i) {
+        const size_t c = 122 + 24 * static_cast<size_t>(i);
+        const InputDumpCut want = i < s.cutCount ? s.cuts[i] : InputDumpCut{};
+        EXPECT_EQ(rdLE(h, c, 8), want.fileFrame) << "corte " << i;
+        EXPECT_EQ(rdLE(h, c + 8, 8), want.lostFrames) << "corte " << i;
+        EXPECT_EQ(rdLE(h, c + 16, 4), want.fileSpan) << "corte " << i;
+        EXPECT_EQ(rdLE(h, c + 20, 4), want.kind) << "corte " << i;
+    }
 
     // data.
-    EXPECT_TRUE(tagAt(h, 98, "data"));
-    EXPECT_EQ(rdLE(h, 102, 4), 4 * frames);
+    EXPECT_TRUE(tagAt(h, 6266, "data"));
+    EXPECT_EQ(rdLE(h, 6270, 4), 4 * frames);
+}
+
+/// Suma de lo perdido que el mapa UBICA: con `unlocatedFrames` tiene que dar el total.
+uint64_t locatedLost(const InputDumpStats& s) {
+    uint64_t sum = 0;
+    for (uint32_t i = 0; i < s.cutCount; ++i) sum += s.cuts[i].lostFrames;
+    return sum;
+}
+
+/// Lo que el archivo DEBERIA tener: `fed` (todo lo alimentado desde el armado) sin los frames que
+/// cada corte de perdida declara, en su lugar. Si el mapa miente en un frame, no coincide.
+std::vector<float> fedMinusLossCuts(const std::vector<float>& fed, const InputDumpStats& s) {
+    std::vector<float> out;
+    size_t src = 0;
+    for (uint32_t i = 0; i < s.cutCount; ++i) {
+        if (s.cuts[i].kind != kInputDumpCutLoss) continue;
+        while (out.size() < s.cuts[i].fileFrame && src < fed.size()) out.push_back(fed[src++]);
+        src += static_cast<size_t>(s.cuts[i].lostFrames);
+    }
+    while (src < fed.size()) out.push_back(fed[src++]);
+    return out;
 }
 
 }  // namespace
@@ -403,8 +438,11 @@ TEST(InputDumpCap, Hallazgo4_ATakePastTheInjectedCapIsInvalidWithTheExcessLostAn
     EXPECT_EQ(firstMismatch(r.got, head), -1L) << "lo escrito no es el principio de la toma";
 
     expectHeaderMatches(r.header, r.st);
-    EXPECT_EQ(rdLE(r.header, 102, 4), kTestCap * 4) << "data = lo escrito, no lo alimentado";
+    EXPECT_EQ(rdLE(r.header, 6270, 4), kTestCap * 4) << "data = lo escrito, no lo alimentado";
     EXPECT_EQ(rdLE(r.header, 70, 8), 4281u - kTestCap) << "wmad.lost";
+    // 0.6: el exceso no se puede ubicar (no hay archivo despues del tope): no va al mapa.
+    EXPECT_EQ(r.st.unlocatedFrames, 4281u - kTestCap);
+    EXPECT_EQ(r.st.cutCount, 0u);
 }
 
 /**
@@ -431,8 +469,8 @@ TEST(InputDumpCap, Hallazgo4_TheProductionCapFitsTheThirtyTwoBitHeader) {
     s.sampleRate = 48000;
     std::vector<uint8_t> h(kInputDumpHeaderBytes, 0);
     writeInputDumpHeader(h.data(), s);
-    EXPECT_EQ(rdLE(h, 4, 4), 98u + kMaxTakeFrames * 4u) << "el RIFF dio la vuelta en el tope";
-    EXPECT_EQ(rdLE(h, 102, 4), kMaxTakeFrames * 4u);
+    EXPECT_EQ(rdLE(h, 4, 4), 6266u + kMaxTakeFrames * 4u) << "el RIFF dio la vuelta en el tope";
+    EXPECT_EQ(rdLE(h, 6270, 4), kMaxTakeFrames * 4u);
     EXPECT_EQ(rdLE(h, 46, 4), kMaxTakeFrames);
 }
 
@@ -696,7 +734,9 @@ TEST(InputDumpProduction, ArmedAndUnarmedAnalysisPublishTheSameSnapshotsBitForBi
     // El volcado no fue letra muerta: capturo, y anoto lo que paso.
     EXPECT_GT(take.dump.framesQueued(), 0u);
     EXPECT_GT(take.dump.framesLost(), 0u) << "el desborde del ring tiene que figurar en la toma";
-    EXPECT_FALSE(closeTake(armed, take).valid);
+    const InputDumpStats st = closeTake(armed, take);
+    EXPECT_GT(st.cutCount, 0u) << "el desborde y la costura van al mapa";
+    EXPECT_FALSE(st.valid) << "el cambio de fuente no se ubica";
 }
 
 // ===========================================================================
@@ -704,7 +744,8 @@ TEST(InputDumpProduction, ArmedAndUnarmedAnalysisPublishTheSameSnapshotsBitForBi
 // ===========================================================================
 
 /**
- * AC-055.1 — ESCRITOR TRABADO: la cola se llena, se CUENTA, y la toma queda invalida.
+ * AC-055.1 — ESCRITOR TRABADO: la cola se llena, se CUENTA y se UBICA (0.6): la toma sale sana con
+ * sus cortes declarados, y el archivo es lo alimentado menos exactamente lo que el mapa dice.
  *
  * Cola chica y sink frenado: el escritor queda clavado dentro de appendSamples, la cola se llena
  * y el productor tiene que descartar. Determinista (drainOnce sin hilo): se empuja de a 512
@@ -714,7 +755,7 @@ TEST(InputDumpProduction, ArmedAndUnarmedAnalysisPublishTheSameSnapshotsBitForBi
  * toma invalida al cerrar. Mutantes que mata: `framesLost += n` omitido en la rama de cola
  * llena; `valid` que ignora framesLost; finishPart(valid=true) con perdidas.
  */
-TEST(InputDumpLoss, AFullQueueIsCountedAndTheTakeIsInvalid) {
+TEST(InputDumpLoss, AFullQueueIsCountedLocatedAndTheTakeStaysHealthy) {
     Take take(kSmallQueue);
     DumpRig rig;
     take.sink->setBrake(true);
@@ -738,19 +779,20 @@ TEST(InputDumpLoss, AFullQueueIsCountedAndTheTakeIsInvalid) {
 
     std::string finalPath;
     const InputDumpStats st = closeTake(rig, take, &finalPath);
-    EXPECT_FALSE(st.valid);
+    EXPECT_TRUE(st.valid) << "una perdida UBICADA no invalida (0.6): el mapa la declara";
     EXPECT_GT(st.framesLost, 0u);
+    EXPECT_EQ(st.unlocatedFrames, 0u);
+    EXPECT_GT(st.cutCount, 0u);
+    EXPECT_EQ(locatedLost(st), st.framesLost) << "toda la perdida de la cola esta en el mapa";
     EXPECT_GT(st.framesWritten, 0u);
     EXPECT_EQ(st.framesWritten, take.dump.framesQueued());
-    EXPECT_FALSE(take.sink->finishValid) << "finishPart tiene que recibir valid=false";
-    EXPECT_EQ(finalPath, invalidDumpPathFor(kPath));
-    EXPECT_NE(finalPath, kPath);
+    EXPECT_TRUE(take.sink->finishValid);
+    EXPECT_EQ(finalPath, kPath);
 
-    // Lo que si se escribio es contenido real y en orden: el primer lote entro entero.
+    // Lo escrito es lo alimentado menos lo que el mapa declara, bit a bit y en su lugar.
     const std::vector<float> got = take.sink->samplesCopy();
     const std::vector<float> expected = rig.since(armedAt);
-    ASSERT_GE(got.size(), 512u);
-    EXPECT_EQ(std::memcmp(got.data(), expected.data(), 512 * sizeof(float)), 0);
+    EXPECT_EQ(firstMismatch(got, fedMinusLossCuts(expected, st)), -1L);
 
     // Y el header lo dice: el contador del wmad es el de la toma.
     expectHeaderMatches(take.sink->headerCopy(), st);
@@ -811,14 +853,15 @@ TEST(InputDumpLoss, AStalledWriterNeverStallsTheAnalysis) {
     std::string finalPath;
     const InputDumpStats st = closeTake(rig, take, &finalPath);
     rig.thread.stop();
-    EXPECT_FALSE(st.valid);
     EXPECT_GT(st.framesLost, 0u);
-    EXPECT_FALSE(take.sink->finishValid);
-    EXPECT_EQ(finalPath, invalidDumpPathFor(kPath));
+    EXPECT_EQ(locatedLost(st), st.framesLost) << "la perdida de la cola se ubica (0.6)";
+    EXPECT_TRUE(st.valid);
+    EXPECT_TRUE(take.sink->finishValid);
+    EXPECT_EQ(finalPath, kPath);
 }
 
 /**
- * AC-055.1 — RING PISADO ANTES DE COPIAR: la perdida es EXACTA y la toma, invalida.
+ * AC-055.1 — RING PISADO ANTES DE COPIAR: la perdida es EXACTA, ubicada (0.6) y la toma, sana.
  *
  * Mas de la capacidad efectiva (kCapacityFrames - kDumpTearGuardFrames) escritos entre dos ticks:
  * lo mas viejo ya no se acepta. Lo que falta se
@@ -844,23 +887,27 @@ TEST(InputDumpLoss, ARingOverwrittenBeforeTheCopyIsCountedExactly) {
 
     EXPECT_EQ(st.framesLost, 12288u - kEff) << "lo pisado: (w - kEff) - cursor";
     EXPECT_EQ(st.framesWritten, static_cast<uint64_t>(kEff));
-    EXPECT_FALSE(st.valid);
-    EXPECT_FALSE(take.sink->finishValid);
-    EXPECT_EQ(finalPath, invalidDumpPathFor(kPath));
+    ASSERT_EQ(st.cutCount, 1u);
+    EXPECT_EQ(st.cuts[0].fileFrame, 0u) << "falta antes del primer frame del archivo";
+    EXPECT_EQ(st.cuts[0].lostFrames, 12288u - kEff);
+    EXPECT_EQ(st.cuts[0].kind, kInputDumpCutLoss);
+    EXPECT_TRUE(st.valid);
+    EXPECT_TRUE(take.sink->finishValid);
+    EXPECT_EQ(finalPath, kPath);
     EXPECT_EQ(firstMismatch(take.sink->samplesCopy(), tail), -1L)
         << "lo que sobrevive es la cola del ring";
     expectHeaderMatches(take.sink->headerCopy(), st);
 }
 
 /**
- * AC-055.1 — COSTURA DE CAPTURA cruzada dentro de la toma => discontinuidad, toma invalida.
+ * AC-055.1 — COSTURA DE CAPTURA cruzada dentro de la toma => corte UBICADO (D25), toma sana.
  *
  * Una costura (`reportCaptureDiscontinuity`) es audio perdido ANTES del ring: el ring ve frames
  * contiguos y el hueco esta en el CONTENIDO. Para el volcado es la peor clase de hueco, porque
  * nada del ring la delata. Bug que atrapa: ignorar la costura (el WAV tiene un salto de senal y
  * nombre de sano). Mutante que mata: no consultar captureSeamPosition().
  */
-TEST(InputDumpDiscontinuity, ACaptureSeamCrossedInsideTheTakeInvalidatesIt) {
+TEST(InputDumpDiscontinuity, ACaptureSeamCrossedInsideTheTakeIsALocatedCut) {
     Take take;
     DumpRig rig;
     ASSERT_TRUE(take.begin());
@@ -874,10 +921,17 @@ TEST(InputDumpDiscontinuity, ACaptureSeamCrossedInsideTheTakeInvalidatesIt) {
 
     std::string finalPath;
     const InputDumpStats st = closeTake(rig, take, &finalPath);
-    EXPECT_GE(st.discontinuities, 1u);
-    EXPECT_FALSE(st.valid);
-    EXPECT_FALSE(take.sink->finishValid);
-    EXPECT_EQ(finalPath, invalidDumpPathFor(kPath));
+    EXPECT_EQ(st.discontinuities, 1u);
+    EXPECT_EQ(st.unlocatedDiscontinuities, 0u);
+    ASSERT_EQ(st.cutCount, 1u);
+    // Avisada entre dos vueltas, con el cursor en 1000: el tramo es ese frame exacto.
+    EXPECT_EQ(st.cuts[0].kind, kInputDumpCutSeam);
+    EXPECT_EQ(st.cuts[0].fileFrame, 1000u);
+    EXPECT_EQ(st.cuts[0].fileSpan, 0u);
+    EXPECT_EQ(st.cuts[0].lostFrames, 0u) << "el largo de una costura no se conoce";
+    EXPECT_TRUE(st.valid);
+    EXPECT_EQ(finalPath, kPath);
+    expectHeaderMatches(take.sink->headerCopy(), st);
 }
 
 /**
@@ -901,8 +955,13 @@ TEST(InputDumpDiscontinuity, ASeamInsideASingleChunkIsSeenByTheNextTickAtTheLate
     rig.thread.drainOnce();
 
     const InputDumpStats st = closeTake(rig, take);
-    EXPECT_GE(st.discontinuities, 1u);
-    EXPECT_FALSE(st.valid);
+    EXPECT_EQ(st.discontinuities, 1u);
+    ASSERT_EQ(st.cutCount, 1u);
+    // El aviso cayo despues del armado (la lectura anterior, frame 0) y antes de la copia: el
+    // tramo es [0, f(500)], y la copia se topo en 500 para cerrarlo exacto.
+    EXPECT_EQ(st.cuts[0].fileFrame, 0u);
+    EXPECT_EQ(st.cuts[0].fileSpan, 500u);
+    EXPECT_TRUE(st.valid);
 }
 
 /**
@@ -929,6 +988,7 @@ TEST(InputDumpDiscontinuity, ASeamBeforeArmingDoesNotInvalidateTheTake) {
 
     const InputDumpStats st = closeTake(rig, take);
     EXPECT_EQ(st.discontinuities, 0u);
+    EXPECT_EQ(st.cutCount, 0u) << "una costura previa a la toma no le pertenece";
     EXPECT_TRUE(st.valid) << "una costura previa a la toma invalido una toma sana";
 }
 
@@ -940,7 +1000,7 @@ TEST(InputDumpDiscontinuity, ASeamBeforeArmingDoesNotInvalidateTheTake) {
  * (el WAV cruza el salto con nombre de sano). Mutante que mata: armAtRing sin comparar la costura
  * contra el cursor de armado.
  */
-TEST(InputDumpDiscontinuity, APendingSeamAheadOfTheCursorWhenArmingInvalidatesTheTake) {
+TEST(InputDumpDiscontinuity, APendingSeamAheadOfTheCursorWhenArmingIsCutExactly) {
     Take take;
     DumpRig rig;
     rig.write(1000);
@@ -954,8 +1014,12 @@ TEST(InputDumpDiscontinuity, APendingSeamAheadOfTheCursorWhenArmingInvalidatesTh
     }
 
     const InputDumpStats st = closeTake(rig, take);
-    EXPECT_GE(st.discontinuities, 1u);
-    EXPECT_FALSE(st.valid) << "la toma cruzo un hueco anunciado antes de armar y quedo sana";
+    EXPECT_EQ(st.discontinuities, 1u);
+    ASSERT_EQ(st.cutCount, 1u) << "la toma cruzo un hueco anunciado antes de armar sin declararlo";
+    EXPECT_EQ(st.cuts[0].kind, kInputDumpCutSeam);
+    EXPECT_EQ(st.cuts[0].fileFrame, 0u);
+    EXPECT_EQ(st.cuts[0].fileSpan, 3000u) << "f(4000) con el armado en 1000";
+    EXPECT_TRUE(st.valid);
 }
 
 /**
@@ -965,7 +1029,7 @@ TEST(InputDumpDiscontinuity, APendingSeamAheadOfTheCursorWhenArmingInvalidatesTh
  * antes de que el cursor cruce S1. Bug que atrapa: contar solo la costura vigente al cruzarla; el
  * hueco S1 se cruza sin que nadie lo cuente. Mutante que mata: contar la costura recien al cruzarla.
  */
-TEST(InputDumpDiscontinuity, ANearSeamSupersededByAFarOneStillInvalidatesTheTake) {
+TEST(InputDumpDiscontinuity, ANearSeamSupersededByAFarOneStaysInsideTheCut) {
     Take take;
     DumpRig rig;
     ASSERT_TRUE(take.begin());
@@ -983,17 +1047,19 @@ TEST(InputDumpDiscontinuity, ANearSeamSupersededByAFarOneStillInvalidatesTheTake
     }
 
     const InputDumpStats st = closeTake(rig, take);
-    EXPECT_GE(st.discontinuities, 1u);
-    EXPECT_FALSE(st.valid);
+    EXPECT_EQ(st.discontinuities, 2u);
+    ASSERT_EQ(st.cutCount, 1u) << "la lejana extiende el tramo de la cercana: una sola entrada";
+    // S1 = 3000 (frame 3000 del archivo) queda adentro; S2 no se cruzo: cierra en lo escrito.
+    EXPECT_EQ(st.cuts[0].fileFrame, 1000u);
+    EXPECT_EQ(st.cuts[0].fileFrame + st.cuts[0].fileSpan, 5000u);
+    EXPECT_TRUE(st.valid);
 }
 
 /**
- * AC-055.1 — UNA COSTURA AVISADA DENTRO DE LA TOMA Y TODAVIA NO CRUZADA AL CERRAR: INVALIDA, A PROPOSITO.
- *
- * El hueco anunciado esta por delante del cursor; puede que la toma cierre antes de llegar. Se
- * cuenta en cuanto se ve: invalida de mas es aceptable, sana con un hueco al lado no.
+ * AC-055.1 — UNA COSTURA AVISADA Y TODAVIA NO CRUZADA AL CERRAR: `endTake` cierra su tramo en lo
+ * escrito (0.6). Mutante que mata: la pendiente olvidada al cerrar (toma sana sin el corte).
  */
-TEST(InputDumpDiscontinuity, ASeamAnnouncedButNotYetCrossedAtCloseInvalidatesOnPurpose) {
+TEST(InputDumpDiscontinuity, ASeamAnnouncedButNotYetCrossedAtCloseIsCutToTheEnd) {
     Take take;
     DumpRig rig;
     ASSERT_TRUE(take.begin());
@@ -1007,7 +1073,10 @@ TEST(InputDumpDiscontinuity, ASeamAnnouncedButNotYetCrossedAtCloseInvalidatesOnP
 
     const InputDumpStats st = closeTake(rig, take);
     EXPECT_EQ(st.discontinuities, 1u);
-    EXPECT_FALSE(st.valid);
+    ASSERT_EQ(st.cutCount, 1u);
+    EXPECT_EQ(st.cuts[0].fileFrame, 1000u);
+    EXPECT_EQ(st.cuts[0].fileSpan, 1000u) << "cierra en framesWritten (2000)";
+    EXPECT_TRUE(st.valid);
 }
 
 /**
@@ -1033,6 +1102,7 @@ TEST(InputDumpDiscontinuity, ASourceChangeInsideTheTakeInvalidatesIt) {
     std::string finalPath;
     const InputDumpStats st = closeTake(rig, take, &finalPath);
     EXPECT_GE(st.discontinuities, 1u);
+    EXPECT_GE(st.unlocatedDiscontinuities, 1u) << "no se puede ubicar";
     EXPECT_FALSE(st.valid);
     EXPECT_EQ(finalPath, invalidDumpPathFor(kPath));
 }
@@ -1071,6 +1141,7 @@ TEST(InputDumpDiscontinuity, ARateChangeMidTakeInvalidatesItAndKeepsTheFirstRate
 
     const InputDumpStats st = closeTake(rig, take);
     EXPECT_GE(st.discontinuities, 1u);
+    EXPECT_GE(st.unlocatedDiscontinuities, 1u) << "no se puede ubicar";
     EXPECT_FALSE(st.valid);
     EXPECT_EQ(st.sampleRate, kRate) << "el rate de la toma es el del primer bloque";
 }
@@ -1103,6 +1174,7 @@ TEST(InputDumpDiscontinuity, ARingResetInsideTheTakeIsDetectedAndTheCursorReloca
     const InputDumpStats st = closeTake(rig, take);
 
     EXPECT_GE(st.discontinuities, 1u);
+    EXPECT_GE(st.unlocatedDiscontinuities, 1u) << "no se puede ubicar";
     EXPECT_FALSE(st.valid);
     const std::vector<float> got = take.sink->samplesCopy();
     ASSERT_GE(got.size(), 1000u) << "tras el reset el volcado dejo de capturar";
@@ -1163,6 +1235,8 @@ TEST(InputDumpLoss, ASinkErrorDiscardsTheRestAndCountsItAsLost) {
     const InputDumpStats st = take.dump.endTake(&finalPath);
     EXPECT_EQ(st.framesWritten, 500u) << "lo que el sink rechazo no es 'escrito'";
     EXPECT_EQ(st.framesLost, 1000u) << "todo lo que se saco de la cola tras el error es perdida";
+    EXPECT_EQ(st.unlocatedFrames, 1000u) << "lo que el sink no escribio no se puede ubicar";
+    EXPECT_EQ(st.cutCount, 0u);
     EXPECT_FALSE(st.valid);
     EXPECT_FALSE(take.sink->finishValid);
     EXPECT_EQ(finalPath, invalidDumpPathFor(kPath));
@@ -1205,7 +1279,7 @@ TEST(InputDumpLoss, AFailedCloseIsNeverReportedAsAHealthyTake) {
  * lee como 4294967295), rate 44100 (byteRate 176400 delata 'rate*2'). Un guardia de 16 bytes
  * detras del buffer detecta un header que escribe de mas.
  * Mutantes que mata: formato 1 en vez de 3; blockAlign/byteRate mal; u32 en los contadores;
- * offsets corridos; escribir mas de 106 bytes.
+ * offsets corridos; escribir mas de 6274 bytes.
  */
 TEST(InputDumpHeader, EveryFieldSitsAtItsOffsetWithItsWidth) {
     InputDumpStats s;
@@ -1215,11 +1289,18 @@ TEST(InputDumpHeader, EveryFieldSitsAtItsOffsetWithItsWidth) {
     s.sampleRate = 44100;
     s.inputSource = -1;
     s.valid = false;
+    // v2: cada campo nuevo con un alto que un u32 perderia, y un corte de cada clase.
+    s.unlocatedFrames = (uint64_t{1} << 34) + 3;
+    s.unlocatedDiscontinuities = (uint64_t{1} << 35) + 1;
+    s.cutCount = 2;
+    s.cuts[0] = InputDumpCut{(uint64_t{1} << 36) + 9, (uint64_t{1} << 37) + 2, 0, kInputDumpCutLoss};
+    s.cuts[1] = InputDumpCut{(uint64_t{1} << 38) + 4, 0, 0xFFFFFFF0u, kInputDumpCutSeam};
+    s.cuts[2] = InputDumpCut{77, 77, 77, 77};   // pasa de cutCount: no se escribe
 
     std::vector<uint8_t> buf(kInputDumpHeaderBytes + 16, 0xAB);
     writeInputDumpHeader(buf.data(), s);
     for (size_t i = kInputDumpHeaderBytes; i < buf.size(); ++i) {
-        ASSERT_EQ(buf[i], 0xAB) << "el header escribio mas alla de sus 106 bytes (offset " << i << ")";
+        ASSERT_EQ(buf[i], 0xAB) << "el header escribio mas alla de sus 6274 bytes (offset " << i << ")";
     }
     buf.resize(kInputDumpHeaderBytes);
     ASSERT_NO_FATAL_FAILURE(expectHeaderMatches(buf, s));
@@ -1230,9 +1311,19 @@ TEST(InputDumpHeader, EveryFieldSitsAtItsOffsetWithItsWidth) {
     ok.sampleRate = 32000;
     ok.inputSource = 3;
     ok.valid = true;
-    std::vector<uint8_t> buf2(kInputDumpHeaderBytes, 0);
+    std::vector<uint8_t> buf2(kInputDumpHeaderBytes, 0xCD);   // basura: los cortes vacios van en 0
     writeInputDumpHeader(buf2.data(), ok);
     ASSERT_NO_FATAL_FAILURE(expectHeaderMatches(buf2, ok));
+
+    // El mapa LLENO: el corte 255 cae en el ultimo slot, pegado a `data`.
+    InputDumpStats full = ok;
+    full.cutCount = kInputDumpCutCapacity;
+    for (uint32_t i = 0; i < kInputDumpCutCapacity; ++i) {
+        full.cuts[i] = InputDumpCut{1000u + i, i + 1u, 0, kInputDumpCutLoss};
+    }
+    std::vector<uint8_t> buf3(kInputDumpHeaderBytes, 0);
+    writeInputDumpHeader(buf3.data(), full);
+    ASSERT_NO_FATAL_FAILURE(expectHeaderMatches(buf3, full));
 }
 
 /**
@@ -1382,11 +1473,16 @@ TEST(InputDumpLifecycle, ASecondTakeStartsFromZeroAndIsNotPoisonedByTheFirst) {
     DumpRig rig;
     ASSERT_TRUE(take.begin());
     ASSERT_TRUE(rig.thread.setInputDump(&take.dump));
-    for (int i = 0; i < 3; ++i) rig.write(4096);   // pisa el ring: perdida
+    for (int i = 0; i < 3; ++i) rig.write(4096);   // pisa el ring: perdida (ubicada)
+    rig.thread.drainOnce();
+    rig.ring.reportCaptureDiscontinuity();          // costura: un corte mas en el mapa
+    rig.thread.onSourceChanged();                   // y una no ubicada: invalida
+    rig.write(300);
     rig.thread.drainOnce();
     const InputDumpStats first = closeTake(rig, take);
     ASSERT_FALSE(first.valid);
     ASSERT_GT(first.framesLost, 0u);
+    ASSERT_GT(first.cutCount, 0u);
 
     auto sink2 = std::make_shared<SinkState>();
     ASSERT_TRUE(take.dump.beginTake(std::make_unique<MemorySink>(sink2), "segunda.wav", 1));
@@ -1404,6 +1500,8 @@ TEST(InputDumpLifecycle, ASecondTakeStartsFromZeroAndIsNotPoisonedByTheFirst) {
     EXPECT_EQ(second.framesWritten, 700u);
     EXPECT_EQ(second.framesLost, 0u);
     EXPECT_EQ(second.discontinuities, 0u);
+    EXPECT_EQ(second.unlocatedDiscontinuities, 0u);
+    EXPECT_EQ(second.cutCount, 0u) << "el mapa de la toma anterior se heredo";
     EXPECT_EQ(second.inputSource, 1);
     EXPECT_TRUE(second.valid) << "la toma anterior enveneno a esta";
     EXPECT_EQ(finalPath, "segunda.wav");
@@ -1510,6 +1608,7 @@ TEST(InputDumpMailbox, RestartingTheAnalysisMidTakeInvalidatesIt) {
 
     const InputDumpStats st = take.dump.endTake();
     EXPECT_GE(st.discontinuities, 1u);
+    EXPECT_GE(st.unlocatedDiscontinuities, 1u) << "D26: el reinicio no se ubica";
     EXPECT_FALSE(st.valid);
 }
 

@@ -58,7 +58,9 @@ constexpr int kRate32 = 32000;
 constexpr int kBlockFrames = 256;
 constexpr int kChunkBlocks = 4;                              // 1024 frames por tanda
 constexpr int kChunkFrames = kBlockFrames * kChunkBlocks;
-constexpr size_t kHeaderBytes = 106;                         // header fijo del volcado
+/// El header fijo del volcado (wmad v2, REQ-055 S0 · 0.6): la constante del nucleo, no un numero a
+/// mano que se queda viejo cuando el formato cambia.
+constexpr size_t kHeaderBytes = wma::analysis::kInputDumpHeaderBytes;
 constexpr int64_t kSentinel64 = -7777777777777LL;            // no es 0 ni un contador plausible
 
 /// Empuja el rate negociado hasta el motor, por el mismo camino que un device (ver
@@ -266,7 +268,7 @@ protected:
         ASSERT_GT(maxDiff, 0.05f) << "el DSP de entrada no altero la senal: el test no discrimina";
 
         // EL VEREDICTO: el WAV es, bit a bit, lo que sale del ring de un InputNode identico.
-        // memcpy y no reinterpret_cast: los datos arrancan en el offset 106, que no es multiplo de 4.
+        // memcpy y no reinterpret_cast: los datos arrancan en el offset kHeaderBytes, que no es multiplo de 4.
         std::vector<float> got(12288);
         std::memcpy(got.data(), bytes.data() + kHeaderBytes, got.size() * sizeof(float));
         long mismatch = -1;
@@ -651,8 +653,8 @@ TEST_F(TunerDumpApiTest, DestroyingTheEngineWithALiveTakeClosesAndNamesTheFile) 
     EXPECT_EQ(rdLE(bytes, 24, 4), static_cast<uint64_t>(kRate44));
 }
 
-/// AC-055.1 — lo mismo SIN frames: el archivo queda cerrado y nombrado como INVALIDO (header de
-/// 106 bytes, sin datos). Mutante que mata: destroy que solo cierra tomas con datos.
+/// AC-055.1 — lo mismo SIN frames: el archivo queda cerrado y nombrado como INVALIDO (solo el
+/// header, sin datos). Mutante que mata: destroy que solo cierra tomas con datos.
 TEST_F(TunerDumpApiTest, DestroyingTheEngineWithAnEmptyLiveTakeLeavesAnInvalidNamedFile) {
     const std::string path = pathOf("vacia.wav");
     ASSERT_TRUE(wma_tuner_diag_input_dump_start(mWma, path.c_str()));

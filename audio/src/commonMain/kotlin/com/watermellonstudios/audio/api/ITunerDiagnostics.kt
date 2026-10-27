@@ -70,9 +70,13 @@ interface ITunerDiagnostics {
 /**
  * El veredicto de una toma de [ITunerDiagnostics]: qué se grabó y si se puede usar.
  *
- * [valid] es `false` ante **cualquier** pérdida o discontinuidad, aunque sea de un frame: una toma
- * así sirve para diagnosticar y no para medir. [path] es el archivo FINAL: el pedido si es válida,
- * el de [invalidPathFor] si no.
+ * [valid] es `false` ante cualquier pérdida o discontinuidad que el archivo **no puede ubicar**
+ * (tope de la toma, error del disco, reset del ring, cambio de fuente, reinicio del afinador con la
+ * toma viva, cambio de rate, más de 256 cortes): una toma así sirve para diagnosticar y no para
+ * medir. Una pérdida o una costura de captura UBICADA no la invalida: el chunk `wmad` del WAV (v2)
+ * declara cada corte (frame del archivo y largo) y quien mide corta ahí. Por eso [valid] con
+ * [framesLost] o [discontinuities] mayores que 0 es una toma sana **con cortes**. [path] es el
+ * archivo FINAL: el pedido si es válida, el de [invalidPathFor] si no.
  *
  * [path] lo informa el NATIVO (el sink sabe qué dejó), no se reconstruye con el path pedido.
  *
