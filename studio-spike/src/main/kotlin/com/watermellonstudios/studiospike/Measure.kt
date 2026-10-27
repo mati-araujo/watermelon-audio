@@ -62,7 +62,7 @@ class Measure(
             return finish(false)
         }
         line(
-            "dispositivo: id=${info.deviceId} tasa=${f(info.rate, 0)} Hz buffer pedido=${info.bufferRequested} " +
+            "dispositivo: id=${info.deviceId} tasa nominal=${f(info.nominalRate, 0)} Hz stream=${f(info.rate, 0)} Hz buffer pedido=${info.bufferRequested} " +
                 "efectivo=${info.bufferActual} rango=[${info.bufferMin}..${info.bufferMax}] " +
                 "setStatus=${info.bufferSetStatus} listenerStatus=${info.listenerStatus}",
         )
@@ -106,7 +106,15 @@ class Measure(
             }
             onEdt { engine.selectEngine(type) }
             sleep(300)
+            // Que suene NO alcanza: tiene que ser el engine pedido (review de S3).
+            val actualType = engine.bridge.getEngineType()
+            if (actualType != type) {
+                line("${ENGINES[type]}: el motor quedo en ${ENGINES.getOrElse(actualType) { "$actualType" }} -> FALLA")
+                all = false
+                continue
+            }
             var peak = 0f
+            val levels = mutableListOf<Double>()
             val t0 = System.nanoTime()
             var pressed = false
             var i = 0
@@ -121,15 +129,23 @@ class Measure(
                 } else {
                     onEdt { engine.drag(x, y) }
                 }
-                peak = maxOf(peak, engine.outputRms())
+                val rms = engine.outputRms()
+                peak = maxOf(peak, rms)
+                levels += db(rms)
                 i++
                 sleep(20)
             }
             onEdt { engine.release() }
             val peakDb = db(peak)
-            val ok = peakDb >= floorDb + 20.0 && peakDb >= -70.0
+            // Sostenido, no un transitorio: al menos la mitad de las lecturas de los 3 s
+            // por encima de -70 dBFS y de piso + 20 dB (con piso en silencio digital, el
+            // +20 dB solo no exige nada).
+            val threshold = maxOf(-70.0, floorDb + 20.0)
+            val above = levels.count { it >= threshold }.toDouble() / levels.size.coerceAtLeast(1)
+            val ok = above >= 0.5
             all = all && ok
-            line("${ENGINES[type]}: max RMS ${f(peakDb, 1)} dBFS (piso + ${f(peakDb - floorDb, 1)} dB) -> ${if (ok) "SUENA" else "FALLA"}")
+            line("${ENGINES[type]} (getEngineType=$actualType): max RMS ${f(peakDb, 1)} dBFS (piso + ${f(peakDb - floorDb, 1)} dB), " +
+                "${f(above * 100, 0)} % de ${levels.size} lecturas >= ${f(threshold, 1)} dBFS -> ${if (ok) "SUENA" else "FALLA"}")
             sleep(300)
         }
         return all
@@ -139,9 +155,10 @@ class Measure(
         line()
         line("## 2. toque->sonido (cadena software, $touches toques en el EDT)")
         onEdt { engine.selectEngine(0) }
-        SpikeNative.reset()
-        sleep(100)
-        while (readTouchSamples() == null) sleep(10)  // el RT aplicó el reset
+        if (!resetApplied()) {
+            line("FALLA: el RT no aplico el reset en 2 s (no hay render)")
+            return false
+        }
         val rnd = Random(55)
         repeat(touches) {
             val x = rnd.nextFloat(); val y = rnd.nextFloat()
@@ -152,9 +169,14 @@ class Measure(
         }
         sleep(100)
         val samples = readTouchSamples().orEmpty()
-        line("toques registrados por el render: ${samples.size} de $touches")
+        val marks = RenderStats.read()?.touchMarks ?: -1
+        line("toques: $touches pedidos, $marks estampados, ${samples.size} registrados por el render")
         val valid = samples.filter { it.bufferHostNs > 0 }
         line("con mHostTime valido: ${valid.size}")
+        // Un toque pisado antes de llegar a un bloque es, por construccion, de los lentos:
+        // si falta alguno, el percentil no vale.
+        val complete = marks == touches.toLong() && samples.size == touches && valid.size == samples.size
+        if (!complete) line("FALLA: faltan toques (pisados o sin mHostTime); los percentiles no valen")
         if (valid.isEmpty()) return false
         fun ms(xs: List<Long>) = xs.map { it / 1e6 }.sorted()
         val toRender = ms(samples.map { it.renderEntryNs - it.touchNs })
@@ -169,15 +191,24 @@ class Measure(
         row("toque->DAC (HAL dev+stream ${f(info.hostToDacMs)} ms)", toDac)
         row("toque->DAC + safety offset", toDacSo)
         line("frames por bloque en los toques: ${samples.map { it.frames }.distinct().sorted()}")
-        line("SIN MEDIR: HID -> evento de ventana -> AWT -> Compose (antes del handler); DAC -> aire")
-        return pct(toDacSo, 99.0) <= 20.0
+        // Semantica de mHostTime: si es el instante en que el bloque entra al dispositivo,
+        // mHostTime - entrada al render ~= buffer + safety offset.
+        val ahead = ms(valid.map { it.bufferHostNs - it.renderEntryNs })
+        line("mHostTime - entrada al render: p50=${f(pct(ahead, 50.0))} ms; buffer + safety = " +
+            "${f((info.bufferActual + info.safetyOffset) / info.rate * 1000.0)} ms")
+        line("SIN MEDIR: HID -> evento de ventana -> AWT -> Compose (antes del handler); la rampa de " +
+            "mSynthVolume dentro del primer bloque (el inicio audible puede caer hasta un bloque despues " +
+            "de mHostTime); DAC -> aire")
+        return complete && pct(toDacSo, 99.0) <= 20.0
     }
 
     private fun phaseXruns(info: DeviceInfo): Boolean {
         line()
         line("## 3. xruns, ${f(xrunMinutes, 1)} min tocando (buffer efectivo ${info.bufferActual} frames)")
-        SpikeNative.reset()
-        sleep(100)
+        if (!resetApplied()) {
+            line("FALLA: el RT no aplico el reset en 2 s (no hay render)")
+            return false
+        }
         val rnd = Random(3)
         val end = System.nanoTime() + (xrunMinutes * 60e9).toLong()
         val t0 = System.nanoTime()
@@ -215,7 +246,28 @@ class Measure(
         line("bloques esperados a ${info.bufferActual} frames en ${f(seconds, 0)} s: ~${f(expected, 0)}; vistos ${s.blocks}")
         val xruns = s.halOverloads + s.discontinuities
         line("XRUNS = overloads HAL (${s.halOverloads}) + discontinuidades (${s.discontinuities}) = $xruns")
-        return xruns == 0L && s.blocks > 0
+        // Cero xruns sólo vale si el instrumento podía verlos (review de S3): el stream
+        // corrió todo el tiempo, con reloj de muestras, con listener, y a 256 frames.
+        val checks = listOf(
+            "bloques vistos dentro de ±1 % de los esperados" to (kotlin.math.abs(s.blocks - expected) <= 0.01 * expected),
+            "todos los bloques con mSampleTime valido" to (s.sampleTimeInvalid == 0L),
+            "listener de overload registrado" to (info.listenerStatus == 0),
+            "buffer efectivo = 256 y todos los bloques de 256" to
+                (info.bufferActual == 256 && s.minFrames == 256L && s.maxFrames == 256L),
+        )
+        checks.forEach { (name, ok) -> line("  ${if (ok) "ok" else "FALLA"}: $name") }
+        return xruns == 0L && checks.all { it.second }
+    }
+
+    /** Pide el reset y espera a que el RT lo aplique (techo 2 s): polling con deadline. */
+    private fun resetApplied(): Boolean {
+        SpikeNative.reset()
+        val deadline = System.nanoTime() + 2_000_000_000L
+        while (System.nanoTime() < deadline) {
+            if (readTouchSamples() != null) return true
+            sleep(10)
+        }
+        return false
     }
 
     private fun fmt(s: RenderStats) =

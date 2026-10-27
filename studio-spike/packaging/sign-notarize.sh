@@ -48,6 +48,7 @@ fi
 
 NAME="$(basename "$APP" .app)"
 mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"   # absoluto: el paso 1 entra con cd a un temporal
 SIGNED="$OUT/$NAME.app"
 rm -rf "$SIGNED"
 ditto "$APP" "$SIGNED"
@@ -70,7 +71,7 @@ while IFS= read -r -d '' jar; do
     mkdir -p "$work"
     (cd "$work" && unzip -q -o "$jar" $entries)
     while IFS= read -r e; do
-        sign "$work/$e" 2>/dev/null
+        sign "$work/$e"
         echo "   firmado $(basename "$jar")!/$e"
     done <<< "$entries"
     (cd "$work" && zip -q "$jar" $entries)
@@ -81,7 +82,7 @@ MAIN="$SIGNED/Contents/MacOS/$NAME"
 while IFS= read -r -d '' f; do
     [[ "$f" == "$MAIN" ]] && continue
     if is_macho "$f"; then
-        sign "$f" 2>/dev/null
+        sign "$f"
         echo "   firmado ${f#$SIGNED/}"
     fi
 done < <(find "$SIGNED/Contents" -type f -print0 | sort -z -r)

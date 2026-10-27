@@ -84,6 +84,10 @@ struct MacDiagState {
     std::atomic<uint64_t> halOverloads{0};
     std::atomic<uint64_t> budgetNumTicks{0};   // ticks mach por frame * 2^20 (punto fijo)
     std::atomic<uint64_t> pendingTouch{0};
+    // Toques estampados desde el ultimo reset (thread de control). Si es mayor que los
+    // que registro el RT, hubo toques pisados antes de llegar a un bloque: el lector lo
+    // tiene que ver, porque los pisados son justo los de latencia mas alta.
+    std::atomic<uint64_t> touchMarks{0};
     std::atomic<uint32_t> resetRequested{0};
     std::atomic<uint32_t> resetApplied{0};
 
@@ -258,6 +262,7 @@ int wma_macos_diag_render_stats(WmaMacRenderStats* out) {
     out->lastFrames        = d.rtLastFrames.load(std::memory_order_relaxed);
     out->minFrames         = d.rtMinFrames.load(std::memory_order_relaxed);
     out->maxFrames         = d.rtMaxFrames.load(std::memory_order_relaxed);
+    out->touchMarks        = d.touchMarks.load(std::memory_order_relaxed);
     return 1;
 }
 
@@ -273,12 +278,14 @@ int wma_macos_diag_device_info(WmaMacDeviceInfo* out) {
 void wma_macos_diag_reset(void) {
     auto& d = watermelon_audio::macDiag();
     d.halOverloads.store(0, std::memory_order_relaxed);
+    d.touchMarks.store(0, std::memory_order_relaxed);
     d.resetRequested.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void wma_macos_diag_mark_touch(void) {
-    watermelon_audio::macDiag().pendingTouch.store(mach_absolute_time(),
-                                                   std::memory_order_release);
+    auto& d = watermelon_audio::macDiag();
+    d.touchMarks.fetch_add(1, std::memory_order_relaxed);
+    d.pendingTouch.store(mach_absolute_time(), std::memory_order_release);
 }
 
 int wma_macos_diag_touch_samples(WmaMacTouchSample* out, int max) {
@@ -998,8 +1005,19 @@ BackendResult CoreAudioBackend::openEngineLocked() {
         AudioUnit au = engine.outputNode.audioUnit;
         if (au != nullptr) {
             UInt32 size = sizeof(macAuDevice);
-            AudioUnitGetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
-                                 kAudioUnitScope_Global, 0, &macAuDevice, &size);
+            const OSStatus devStatus = AudioUnitGetProperty(
+                au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                &macAuDevice, &size);
+            if (devStatus != noErr) {
+                LOGW("macOS: no pude leer el dispositivo de la AUHAL (OSStatus %d)", (int)devStatus);
+                macAuDevice = macDevice;
+            } else if (macAuDevice != macDevice) {
+                // La tasa y el rango se negociaron contra el de salida por defecto; si la
+                // AUHAL quedo en otro (cambio de dispositivo durante el open) se dice, y el
+                // paso 6b publica la tasa nominal del que de verdad suena.
+                LOGW("macOS: la AUHAL usa el dispositivo %u y se negocio contra %u",
+                     (unsigned)macAuDevice, (unsigned)macDevice);
+            }
             macBufferStatus = AudioUnitSetProperty(au, kAudioDevicePropertyBufferFrameSize,
                                                    kAudioUnitScope_Global, 0, &macBufferTarget,
                                                    sizeof(macBufferTarget));
@@ -1029,12 +1047,26 @@ BackendResult CoreAudioBackend::openEngineLocked() {
     {
         const AudioObjectID dev = macAuDevice != kAudioObjectUnknown ? macAuDevice : macDevice;
         UInt32 actualFrames = 0, devLat = 0, safety = 0;
-        macGetProp(dev, kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal,
-                   sizeof(actualFrames), &actualFrames);
-        macGetProp(dev, kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput,
-                   sizeof(devLat), &devLat);
-        macGetProp(dev, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput,
-                   sizeof(safety), &safety);
+        Float64 devNominal = 0;
+        // Una lectura que falla se dice: sin ella, la latencia volveria a ser "solo el
+        // buffer" en silencio, que es el defecto del hallazgo 2.
+        const OSStatus stFrames = macGetProp(dev, kAudioDevicePropertyBufferFrameSize,
+            kAudioObjectPropertyScopeGlobal, sizeof(actualFrames), &actualFrames);
+        const OSStatus stLat = macGetProp(dev, kAudioDevicePropertyLatency,
+            kAudioObjectPropertyScopeOutput, sizeof(devLat), &devLat);
+        const OSStatus stSafety = macGetProp(dev, kAudioDevicePropertySafetyOffset,
+            kAudioObjectPropertyScopeOutput, sizeof(safety), &safety);
+        const OSStatus stRate = macGetProp(dev, kAudioDevicePropertyNominalSampleRate,
+            kAudioObjectPropertyScopeGlobal, sizeof(devNominal), &devNominal);
+        if (stFrames != noErr || stLat != noErr || stSafety != noErr || stRate != noErr) {
+            LOGW("macOS: lecturas del HAL fallidas (buffer %d, latencia %d, safety %d, tasa %d): "
+                 "la latencia publicada no las incluye", (int)stFrames, (int)stLat,
+                 (int)stSafety, (int)stRate);
+        }
+        if (stRate == noErr && std::lround(devNominal) != std::lround(negotiatedSampleRate)) {
+            LOGW("macOS: el dispositivo %u corre a %.0f Hz y el stream abrio a %.0f Hz: "
+                 "AVAudioEngine remuestrea", (unsigned)dev, devNominal, negotiatedSampleRate);
+        }
         const UInt32 streamLat = macFirstOutputStreamLatency(dev);
 
         if (actualFrames > 0) {
@@ -1049,7 +1081,15 @@ BackendResult CoreAudioBackend::openEngineLocked() {
             macNsToTicks(1e9 / negotiatedSampleRate * static_cast<double>(1u << 20)),
             std::memory_order_relaxed);
 
-        OSStatus listenerStatus = noErr;
+        // El estado reporta si HAY listener sobre `dev`, no si se intento: un 0 sin
+        // listener haria pasar por limpio un contador que no puede contar.
+        if (gMacListenedDevice != kAudioObjectUnknown && gMacListenedDevice != dev) {
+            AudioObjectRemovePropertyListener(gMacListenedDevice, &kMacOverloadAddress,
+                                              macOverloadListener, nullptr);
+            gMacListenedDevice = kAudioObjectUnknown;
+        }
+        OSStatus listenerStatus = (dev == kAudioObjectUnknown)
+            ? static_cast<OSStatus>(kAudioHardwareBadDeviceError) : noErr;
         if (gMacListenedDevice == kAudioObjectUnknown && dev != kAudioObjectUnknown) {
             listenerStatus = AudioObjectAddPropertyListener(dev, &kMacOverloadAddress,
                                                             macOverloadListener, nullptr);
@@ -1063,7 +1103,8 @@ BackendResult CoreAudioBackend::openEngineLocked() {
 
         WmaMacDeviceInfo info{};
         info.deviceId               = dev;
-        info.nominalSampleRate      = negotiatedSampleRate;
+        info.nominalSampleRate      = stRate == noErr ? devNominal : 0.0;
+        info.streamSampleRate       = negotiatedSampleRate;
         info.bufferFramesRequested  = macBufferTarget;
         info.bufferFramesActual     = actualFrames;
         info.bufferFramesMin        = static_cast<uint32_t>(macBufferRange.mMinimum);
@@ -1166,6 +1207,10 @@ void CoreAudioBackend::closeEngineLocked() {
         AudioObjectRemovePropertyListener(gMacListenedDevice, &kMacOverloadAddress,
                                           macOverloadListener, nullptr);
         gMacListenedDevice = kAudioObjectUnknown;
+    }
+    {
+        std::lock_guard<std::mutex> lock(macDiag().deviceMutex);
+        macDiag().deviceValid = false;  // el dispositivo del stream que se cierra ya no vale
     }
     // La unica escritura de un `rt*` fuera del RT, y es segura: aca el engine ya esta
     // detenido (stop() drena los callbacks antes; en un start() fallido nunca corrio).

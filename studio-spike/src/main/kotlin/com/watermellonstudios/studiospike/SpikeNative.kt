@@ -7,10 +7,10 @@ package com.watermellonstudios.studiospike
  */
 object SpikeNative {
     /** [blocks, overBudget, discontinuities, sampleTimeInvalid, halOverloads,
-     *  maxRenderNs, sumRenderNs, lastFrames, minFrames, maxFrames] */
+     *  maxRenderNs, sumRenderNs, lastFrames, minFrames, maxFrames, touchMarks] */
     external fun renderStats(): LongArray?
 
-    /** [deviceId, nominalRate, bufReq, bufActual, bufMin, bufMax, devLat, safety,
+    /** [deviceId, nominalRate, streamRate, bufReq, bufActual, bufMin, bufMax, devLat, safety,
      *  streamLat, presentationLatencySec, bufferSetStatus, listenerStatus] */
     external fun deviceInfo(): DoubleArray?
 
@@ -26,18 +26,19 @@ data class RenderStats(
     val blocks: Long, val overBudget: Long, val discontinuities: Long,
     val sampleTimeInvalid: Long, val halOverloads: Long, val maxRenderNs: Long,
     val sumRenderNs: Long, val lastFrames: Long, val minFrames: Long, val maxFrames: Long,
+    val touchMarks: Long,
 ) {
     val meanRenderUs: Double get() = if (blocks > 0) sumRenderNs / 1e3 / blocks else 0.0
 
     companion object {
         fun read(): RenderStats? = SpikeNative.renderStats()?.let {
-            RenderStats(it[0], it[1], it[2], it[3], it[4], it[5], it[6], it[7], it[8], it[9])
+            RenderStats(it[0], it[1], it[2], it[3], it[4], it[5], it[6], it[7], it[8], it[9], it[10])
         }
     }
 }
 
 data class DeviceInfo(
-    val deviceId: Int, val rate: Double, val bufferRequested: Int, val bufferActual: Int,
+    val deviceId: Int, val nominalRate: Double, val rate: Double, val bufferRequested: Int, val bufferActual: Int,
     val bufferMin: Int, val bufferMax: Int, val deviceLatency: Int, val safetyOffset: Int,
     val streamLatency: Int, val presentationLatencySec: Double, val bufferSetStatus: Int,
     val listenerStatus: Int,
@@ -53,8 +54,8 @@ data class DeviceInfo(
     companion object {
         fun read(): DeviceInfo? = SpikeNative.deviceInfo()?.let {
             DeviceInfo(
-                it[0].toInt(), it[1], it[2].toInt(), it[3].toInt(), it[4].toInt(), it[5].toInt(),
-                it[6].toInt(), it[7].toInt(), it[8].toInt(), it[9], it[10].toInt(), it[11].toInt(),
+                it[0].toInt(), it[1], it[2], it[3].toInt(), it[4].toInt(), it[5].toInt(), it[6].toInt(),
+                it[7].toInt(), it[8].toInt(), it[9].toInt(), it[10], it[11].toInt(), it[12].toInt(),
             )
         }
     }

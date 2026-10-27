@@ -38,11 +38,13 @@ typedef struct WmaMacRenderStats {
     uint64_t lastFrames;         /* frames del ultimo bloque */
     uint64_t minFrames;          /* bloque mas chico visto (0 si ninguno) */
     uint64_t maxFrames;          /* bloque mas grande visto */
+    uint64_t touchMarks;         /* toques estampados desde el reset (registrados o pisados) */
 } WmaMacRenderStats;
 
 typedef struct WmaMacDeviceInfo {
     uint32_t deviceId;
-    double   nominalSampleRate;       /* kAudioDevicePropertyNominalSampleRate */
+    double   nominalSampleRate;       /* kAudioDevicePropertyNominalSampleRate del que suena (0 si fallo) */
+    double   streamSampleRate;        /* tasa con la que abrio el grafo (la del motor) */
     uint32_t bufferFramesRequested;   /* lo que pidio el backend */
     uint32_t bufferFramesActual;      /* kAudioDevicePropertyBufferFrameSize despues de start */
     uint32_t bufferFramesMin;         /* kAudioDevicePropertyBufferFrameSizeRange */
@@ -52,7 +54,7 @@ typedef struct WmaMacDeviceInfo {
     uint32_t streamLatencyFrames;     /* kAudioStreamPropertyLatency, primer stream de salida */
     double   presentationLatencySec;  /* AVAudioOutputNode.presentationLatency (control cruzado) */
     int32_t  bufferSetStatus;         /* OSStatus de fijar el buffer (0 = ok) */
-    int32_t  overloadListenerStatus;  /* OSStatus de registrar el listener (0 = ok) */
+    int32_t  overloadListenerStatus;  /* 0 = HAY listener de overload sobre deviceId */
 } WmaMacDeviceInfo;
 
 typedef struct WmaMacTouchSample {

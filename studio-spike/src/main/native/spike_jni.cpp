@@ -16,7 +16,7 @@ Java_com_watermellonstudios_studiospike_SpikeNative_renderStats(JNIEnv* env, job
     const jlong v[] = {
         (jlong)s.blocks, (jlong)s.overBudget, (jlong)s.discontinuities,
         (jlong)s.sampleTimeInvalid, (jlong)s.halOverloads, (jlong)s.maxRenderNs,
-        (jlong)s.sumRenderNs, (jlong)s.lastFrames, (jlong)s.minFrames, (jlong)s.maxFrames,
+        (jlong)s.sumRenderNs, (jlong)s.lastFrames, (jlong)s.minFrames, (jlong)s.maxFrames, (jlong)s.touchMarks,
     };
     const jsize n = (jsize)(sizeof(v) / sizeof(v[0]));
     jlongArray out = env->NewLongArray(n);
@@ -29,7 +29,7 @@ Java_com_watermellonstudios_studiospike_SpikeNative_deviceInfo(JNIEnv* env, jobj
     WmaMacDeviceInfo d{};
     if (!wma_macos_diag_device_info(&d)) return nullptr;
     const jdouble v[] = {
-        (jdouble)d.deviceId, d.nominalSampleRate, (jdouble)d.bufferFramesRequested,
+        (jdouble)d.deviceId, d.nominalSampleRate, d.streamSampleRate, (jdouble)d.bufferFramesRequested,
         (jdouble)d.bufferFramesActual, (jdouble)d.bufferFramesMin, (jdouble)d.bufferFramesMax,
         (jdouble)d.deviceLatencyFrames, (jdouble)d.safetyOffsetFrames,
         (jdouble)d.streamLatencyFrames, d.presentationLatencySec,
