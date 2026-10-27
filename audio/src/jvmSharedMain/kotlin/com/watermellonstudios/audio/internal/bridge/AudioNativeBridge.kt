@@ -101,8 +101,10 @@ import kotlinx.coroutines.withContext
  * @see IEffectStateProvider For read operations interface
  * @see IEffectStateWriter For write operations interface
  */
-// El opt-in es del supertipo `ITunerDiagnostics` (tooling del harness): se acota a la clase porque
-// es lo unico que el compilador deja anotar para implementar una interfaz marcada.
+// El opt-in de la clase es por el SUPERTIPO `ITunerDiagnostics` (tooling del harness): nombrarlo en
+// la lista de supertipos ya lo exige. NO alcanza para el uso: las overrides llevan
+// `@InternalWatermelonApi` (propagan el requisito), asi que
+// `AudioNativeBridge.getInstance().startTunerInputDump(p)` sin opt-in no compila (hallazgo 2).
 @OptIn(InternalWatermelonApi::class)
 class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagnostics {
 
@@ -1843,6 +1845,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
     // El `stop` espera a lo sumo el techo del buzon de analisis (2 s): si estuviera bajo INPUT
     // trabaria un `startTuner()`/`stopTuner()` concurrente por ese rato sin ganar nada.
 
+    @InternalWatermelonApi
     override fun startTunerInputDump(path: String): Boolean = synchronized(dumpLock) {
         val started = nativeTunerDiagInputDumpStart(path)
         // Un start que devuelve false puede dejar la toma viva (el techo del buzon vencio) y el stop
@@ -1852,6 +1855,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
         started
     }
 
+    @InternalWatermelonApi
     override fun stopTunerInputDump(): TunerInputDumpResult? = synchronized(dumpLock) {
         val values = nativeTunerDiagInputDumpStop() ?: return@synchronized null
         // El nativo no devuelve el path: nombra el archivo segun `valid`, con la regla que Kotlin repite.

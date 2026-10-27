@@ -169,7 +169,8 @@ private val looperEventTrampoline = staticCFunction<Int, Int, Float, COpaquePoin
     }
 }
 
-// `InternalWatermelonApi` es el opt-in del supertipo `ITunerDiagnostics` (tooling del harness).
+// `InternalWatermelonApi` es el opt-in del supertipo `ITunerDiagnostics` (tooling del harness). Las
+// overrides lo PROPAGAN con `@InternalWatermelonApi`: el opt-in de la clase no abre su uso (hallazgo 2).
 @OptIn(ExperimentalForeignApi::class, InternalWatermelonApi::class)
 internal class IosAudioBridge : IAudioNativeBridge, ITunerDiagnostics {
 
@@ -686,6 +687,7 @@ internal class IosAudioBridge : IAudioNativeBridge, ITunerDiagnostics {
 
     private val dumpPaths = AtomicReference(DumpPaths())
 
+    @InternalWatermelonApi
     override fun startTunerInputDump(path: String): Boolean {
         val started = wma_tuner_diag_input_dump_start(engine, path)
         while (true) {
@@ -695,6 +697,7 @@ internal class IosAudioBridge : IAudioNativeBridge, ITunerDiagnostics {
         }
     }
 
+    @InternalWatermelonApi
     override fun stopTunerInputDump(): TunerInputDumpResult? = memScoped {
         val values = allocArray<LongVar>(TunerInputDumpResult.VALUE_COUNT)
         if (!wma_tuner_diag_input_dump_stop(engine, values, TunerInputDumpResult.VALUE_COUNT)) {
