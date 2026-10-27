@@ -32,11 +32,17 @@ package com.watermellonstudios.audio.api
 interface ITunerDiagnostics {
 
     /**
-     * Empieza a grabar a [path] (un `.wav`). El archivo se escribe a `<path>.part` y se nombra al
-     * detener.
+     * Empieza a grabar a [path], que tiene que terminar en `.wav`. El archivo se escribe a
+     * `<path>.part` y se nombra al detener.
      *
-     * @return false si no hay motor, si ya hay una toma en curso, si el archivo no se puede crear
-     *   (directorio inexistente, sin permiso) o si el análisis no aplicó el
+     * **Nunca pisa nada que ya esté en el disco**: si `<path>`, su `.invalid.wav` o `<path>.part` ya
+     * existen (un symlink incluido), no arranca; si el nombre final aparece durante la toma, al
+     * detener no se lo reemplaza y la toma queda sin finalizar ([TunerInputDumpResult.finalized]).
+     *
+     * @return false si no hay motor, si [path] no termina en `.wav`, si tiene un `'\u0000'` o un
+     *   surrogate suelto (no se lo puede nombrar en disco tal cual), si ya hay una toma en curso, si
+     *   el archivo no se puede crear (directorio inexistente, sin permiso, nombre ocupado) o si el
+     *   análisis no aplicó el
      *   pedido a tiempo. En este último caso la toma puede haber quedado viva: un false no prueba que
      *   no la haya, así que quien lo recibe llama a [stopTunerInputDump].
      */
@@ -59,7 +65,8 @@ interface ITunerDiagnostics {
  * así sirve para diagnosticar y no para medir. [path] es el archivo FINAL: el pedido si es válida,
  * el de [invalidPathFor] si no.
  *
- * [finalized] es `false` si el archivo no se pudo cerrar o renombrar: entonces [valid] es `false`,
+ * [finalized] es `false` si el archivo no se pudo cerrar o renombrar —incluido un nombre final que
+ * otro archivo ocupó durante la toma, que nunca se reemplaza—: entonces [valid] es `false`,
  * [path] es `<pedido>.part` (donde quedó lo escrito, si algo se escribió) y no existe ningún archivo
  * con el nombre final. Quien lo muestre tiene que decir que se revise ese `.part`, no ofrecer un
  * `x.invalid.wav` que no está.

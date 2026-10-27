@@ -23,8 +23,8 @@ import kotlin.test.assertTrue
  * AC-055.1 — el corpus se captura por el camino del afinador; este volcado es su instrumento y el
  * JNI es por donde lo maneja la app. Esta clase ejerce `nativeTunerDiagInputDumpStart` y
  * `nativeTunerDiagInputDumpStop` contra un `JNIEnv` real: lo que el gate de símbolos y el de
- * firmas NO ven y acá sí —que el `jstring` llegue entero al disco, que el `jlongArray` salga con
- * 7 valores y con el orden que Kotlin espera, que "sin toma" cruce como `null` y no como un array
+ * firmas NO ven y acá sí —que los bytes UTF-8 del path (un `jbyteArray`) lleguen enteros al
+ * disco, que el `jlongArray` salga con 7 valores y con el orden que Kotlin espera, que "sin toma" cruce como `null` y no como un array
  * de ceros— se mide con valores que cruzaron.
  *
  * ## Qué NO prueba, y el hueco declarado
@@ -269,23 +269,29 @@ class TunerDiagnosticsJniTest {
         assertEquals(pathOf("buena.invalid.wav"), r.path)
     }
 
-    /**
-     * Un path con un carácter no ASCII llega INTACTO al disco.
-     *
-     * El `jstring` cruza por `GetStringUTFChars` (UTF-8 modificado, idéntico a UTF-8 para el BMP): un
-     * puente que lo trate como bytes de 8 bits, o que corte por `jchar`, crea un archivo con otro
-     * nombre y el consumidor no lo encuentra. Se compara en NFC porque macOS puede devolver el nombre
-     * descompuesto. La premisa —que la JVM codifique nombres de archivo en UTF-8— falla ruidosa: sin
-     * ella el test no distinguiría un bug del puente de una JVM con locale ASCII.
-     */
-    @Test
-    fun `un path con un caracter no ASCII llega intacto al disco`() {
+    /** La premisa de los tests de nombres: sin ella no se distingue un bug del puente de un locale ASCII. */
+    private fun requireUtf8FileNames() {
         val jnu = System.getProperty("sun.jnu.encoding").orEmpty()
         assertTrue(
             jnu.equals("UTF-8", ignoreCase = true) || jnu.equals("UTF8", ignoreCase = true),
             "premisa rota: la JVM codifica los nombres de archivo en '$jnu', no en UTF-8; este test " +
                 "no puede distinguir un bug del puente de un locale ASCII. Corré con LANG=C.UTF-8.",
         )
+    }
+
+    /** Los nombres del directorio, en NFC (macOS puede devolverlos descompuestos). */
+    private fun namesInDir(): List<String> =
+        dir.list().orEmpty().map { Normalizer.normalize(it, Normalizer.Form.NFC) }
+
+    /**
+     * Un path con un carácter no ASCII del BMP llega INTACTO al disco.
+     *
+     * Un puente que trate el path como bytes de 8 bits, o que corte por `jchar`, crea un archivo con
+     * otro nombre y el consumidor no lo encuentra.
+     */
+    @Test
+    fun `un path con un caracter no ASCII llega intacto al disco`() {
+        requireUtf8FileNames()
         ensureEngine()
         val requested = pathOf("toma-ñ.wav")
 
@@ -294,8 +300,85 @@ class TunerDiagnosticsJniTest {
 
         assertEquals(TunerInputDumpResult.invalidPathFor(requested), r.path)
         assertTrue(File(r.path).isFile, "el archivo no esta en el path que Kotlin espera: el nombre no llegó intacto")
-        val names = dir.list().orEmpty().map { Normalizer.normalize(it, Normalizer.Form.NFC) }
+        val names = namesInDir()
         assertTrue("toma-ñ.invalid.wav" in names, "archivos en el directorio: $names")
         assertEquals(1, names.size, "sobró algún archivo (un .part, o un nombre mal codificado): $names")
+    }
+
+    /**
+     * Hallazgo 3 — un carácter FUERA DEL BMP (un emoji) queda en el disco con ESE nombre exacto, y
+     * `TunerInputDumpResult.path` es ese archivo.
+     *
+     * Es lo que el `jstring` no podía: `GetStringUTFChars` da UTF-8 *modificado*, que parte 🎸 en dos
+     * surrogates de 3 bytes (`ED A0 BC ED BE B8`); el archivo queda con otro nombre (o el FS lo
+     * rechaza) y el resultado apunta a uno que no existe. Mutante que mata: volver al `jstring`.
+     */
+    @Test
+    fun `hallazgo 3 - un path con un emoji queda en disco con ese nombre exacto`() {
+        requireUtf8FileNames()
+        ensureEngine()
+        val requested = pathOf("toma-\uD83C\uDFB8.wav")   // "toma-🎸.wav"
+
+        assertTrue(start(requested), "el path es válido: el start tiene que andar")
+        val r = assertNotNull(stop())
+
+        assertEquals(pathOf("toma-\uD83C\uDFB8.invalid.wav"), r.path)
+        assertTrue(File(r.path).isFile, "el resultado apunta a un archivo que no está en el disco")
+        assertEquals(listOf("toma-\uD83C\uDFB8.invalid.wav"), namesInDir(), "el nombre en disco no es el pedido")
+        // Los bytes del nombre en disco son UTF-8 real (4 bytes para el emoji), no CESU-8.
+        val onDisk = namesInDir().single().toByteArray(Charsets.UTF_8)
+        assertEquals(
+            listOf(0xF0, 0x9F, 0x8E, 0xB8),
+            onDisk.drop(5).take(4).map { it.toInt() and 0xFF },
+            "el emoji no quedó como UTF-8 de 4 bytes",
+        )
+    }
+
+    /**
+     * Hallazgo 3 — un path con `\u0000` se rechaza y no crea NADA: ni el prefijo, ni un `.part`.
+     *
+     * El path elegido haría daño si cruzara: `ok.wav\u0000.wav` truncado por C es `ok.wav`, un path
+     * válido que el start aceptaría. Mutante que mata: el JNI que arma el string con `c_str()` del
+     * array (o sin buscar el 0) y sin la guarda de Kotlin.
+     */
+    @Test
+    fun `hallazgo 3 - un path con NUL se rechaza y no crea nada`() {
+        ensureEngine()
+        assertFalse(start(pathOf("ok.wav\u0000.wav")), "un path con NUL no puede arrancar una toma")
+        assertNull(stop(), "un start rechazado no deja toma")
+        assertEquals(emptyList(), namesInDir(), "el rechazo creó algo en el directorio")
+    }
+
+    /**
+     * Hallazgo 3 — un surrogate suelto se rechaza en el puente y no crea nada: no tiene UTF-8, y
+     * codificarlo con reemplazo (U+FFFD) crearía un archivo con otro nombre que el del resultado.
+     * Mutante que mata: el puente que codifica con `encodeToByteArray()` sin la guarda compartida.
+     */
+    @Test
+    fun `hallazgo 3 - un surrogate suelto se rechaza y no crea nada`() {
+        ensureEngine()
+        assertFalse(start(pathOf("toma-\uD83C.wav")), "un surrogate suelto no tiene nombre en disco")
+        assertNull(stop())
+        assertEquals(emptyList(), namesInDir(), "el rechazo creó algo en el directorio")
+    }
+
+    /**
+     * Hallazgo 3 — el JNI mismo rechaza un byte 0 adentro del array, aunque Kotlin no lo filtrara.
+     *
+     * Es la segunda línea: la `external fun` es privada pero el `.so` la expone a cualquiera que la
+     * llame. Se invoca por reflexión con los bytes de `ok.wav\0.wav`, que un `c_str()` truncaría a
+     * `ok.wav` (válido). Mutante que mata: quitar el `find('\0')` del JNI.
+     */
+    @Test
+    fun `hallazgo 3 - el JNI rechaza un byte 0 dentro del array`() {
+        ensureEngine()
+        val bytes = (pathOf("ok.wav") + "\u0000.wav").toByteArray(Charsets.UTF_8)
+        val native = AudioNativeBridge::class.java
+            .getDeclaredMethod("nativeTunerDiagInputDumpStart", ByteArray::class.java)
+            .apply { isAccessible = true }
+        val started = jni("nativeTunerDiagInputDumpStart") { native.invoke(it, bytes) as Boolean }
+        if (started) AudioNativeBridge.getInstance().stopTunerInputDump()
+        assertFalse(started, "el JNI aceptó un path con un 0 adentro (y grabó en el prefijo)")
+        assertEquals(emptyList(), namesInDir(), "el rechazo creó algo en el directorio")
     }
 }

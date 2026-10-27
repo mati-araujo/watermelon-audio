@@ -32,6 +32,7 @@
 #include <optional>
 #include <unordered_map>
 #include <memory>
+#include <string>
 #include <vector>
 
 // External declarations from jni_usb.cpp for USB volume
@@ -1298,17 +1299,27 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeAnalyz
 // serializa con `analysisMutex`. NO crea el motor ni arranca el afinador (sin afinador corriendo no
 // entra audio): sin motor, `start` es false y `stop` es null.
 
+/// El path llega como los bytes UTF-8 REALES (`String.encodeToByteArray()` en Kotlin), no como
+/// `jstring`: `GetStringUTFChars` da UTF-8 *modificado*, que parte un caracter fuera del BMP en dos
+/// surrogates de 3 bytes y codifica U+0000 como C0 80, y el archivo quedaria con otro nombre
+/// (hallazgo 3). El string se arma con el LARGO del array; un byte 0 adentro se rechaza, porque C lo
+/// leeria como fin y grabaria en el prefijo.
 JNIEXPORT jboolean JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerDiagInputDumpStart(
-    JNIEnv* env, jobject thiz, jstring path) {
+    JNIEnv* env, jobject thiz, jbyteArray pathUtf8) {
     (void)thiz;
-    if (path == nullptr) return JNI_FALSE;
-    // UTF-8 modificado: identico a UTF-8 para el BMP, que es todo lo que un nombre de archivo usa.
-    const char* chars = env->GetStringUTFChars(path, nullptr);
-    if (chars == nullptr) return JNI_FALSE;   // OOM: la excepcion ya quedo pendiente
-    const bool ok = wma_tuner_diag_input_dump_start(g_wmaEngine, chars);
-    env->ReleaseStringUTFChars(path, chars);
-    return ok ? JNI_TRUE : JNI_FALSE;
+    if (pathUtf8 == nullptr) return JNI_FALSE;
+    const jsize len = env->GetArrayLength(pathUtf8);
+    if (len <= 0) return JNI_FALSE;
+    try {   // una excepcion de C++ no puede cruzar la frontera JNI
+        std::string path(static_cast<size_t>(len), '\0');
+        env->GetByteArrayRegion(pathUtf8, 0, len, reinterpret_cast<jbyte*>(path.data()));
+        if (path.find('\0') != std::string::npos) return JNI_FALSE;
+        const bool ok = wma_tuner_diag_input_dump_start(g_wmaEngine, path.c_str());
+        return ok ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
 }
 
 /// null (y no ceros) sin toma o sin motor: un cero es un dato plausible, ver MINI-003.

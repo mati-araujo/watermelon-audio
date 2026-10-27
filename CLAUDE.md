@@ -45,12 +45,12 @@ citar** cualquier otro numero; por que, en `docs/dev/conteos-que-envejecen.md`.
 <!-- BEGIN conteos-medidos — los escribe scripts/check-doc-counts.py, NO la mano -->
 | métrica | valor | qué mide |
 |---|---|---|
-| `kt-commonMain` | 100 | archivos .kt en commonMain |
+| `kt-commonMain` | 101 | archivos .kt en commonMain |
 | `kt-androidMain` | 20 | archivos .kt en androidMain |
 | `kt-iosMain` | 6 | archivos .kt en iosMain |
 | `kt-jvmSharedMain` | 6 | archivos .kt en jvmSharedMain (Android + desktop) |
 | `kt-desktopMain` | 5 | archivos .kt en desktopMain |
-| `bridge-loc` | 3822 | LOC de AudioNativeBridge.kt |
+| `bridge-loc` | 3831 | LOC de AudioNativeBridge.kt |
 | `bridge-external` | 338 | `external fun` en AudioNativeBridge |
 | `jniexport-bridge` | 327 | JNIEXPORT en jni_audio_bridge.cpp |
 | `jniexport-total` | 340 | JNIEXPORT en todo jni/*.cpp |

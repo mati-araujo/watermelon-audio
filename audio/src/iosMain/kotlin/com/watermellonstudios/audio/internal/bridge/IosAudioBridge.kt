@@ -689,6 +689,11 @@ internal class IosAudioBridge : IAudioNativeBridge, ITunerDiagnostics {
 
     @InternalWatermelonApi
     override fun startTunerInputDump(path: String): Boolean {
+        // Hallazgo 3: cinterop convierte el `String` a `const char*` en UTF-8 (`cstr`), pero un NUL
+        // lo corta ahí y un surrogate suelto se vuelve U+FFFD: el archivo tendría otro nombre que el
+        // del resultado. Con la guarda compartida ninguno de los dos llega, y lo que cruza son
+        // exactamente los bytes de `encodeToByteArray()`. Rechazado acá, no se llama al nativo.
+        if (tunerDumpPathUtf8(path) == null) return false
         val started = wma_tuner_diag_input_dump_start(engine, path)
         while (true) {
             val current = dumpPaths.value

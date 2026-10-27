@@ -1847,7 +1847,11 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
 
     @InternalWatermelonApi
     override fun startTunerInputDump(path: String): Boolean = synchronized(dumpLock) {
-        val started = nativeTunerDiagInputDumpStart(path)
+        // Hallazgo 3: los bytes UTF-8 exactos, o nada. Un NUL o un surrogate suelto cambiarian el
+        // nombre del archivo y el resultado apuntaria a otro: se rechaza sin llamar al nativo (y sin
+        // tocar los paths recordados, porque ninguna toma pudo quedar viva).
+        val utf8 = tunerDumpPathUtf8(path) ?: return@synchronized false
+        val started = nativeTunerDiagInputDumpStart(utf8)
         // Un start que devuelve false puede dejar la toma viva (el techo del buzon vencio) y el stop
         // siguiente la cierra; por eso se recuerda el ultimo false aparte del ultimo true: un start
         // rechazado porque ya hay una toma no puede pisar el path de la viva.
@@ -2270,7 +2274,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
     private external fun nativeGetTunerSnapshot(): FloatArray?
     private external fun nativeSetTunerCandidates(hz: FloatArray): Boolean
     private external fun nativeLockTunerString(index: Int): Boolean
-    private external fun nativeTunerDiagInputDumpStart(path: String): Boolean
+    /** [pathUtf8]: UTF-8 real, sin terminador (ver [tunerDumpPathUtf8]); no un `jstring`. */
+    private external fun nativeTunerDiagInputDumpStart(pathUtf8: ByteArray): Boolean
     private external fun nativeTunerDiagInputDumpStop(): LongArray?
     private external fun nativeAnalyzeTunerBuffer(
         samples: FloatArray,
