@@ -112,3 +112,16 @@ bool wmaEnsureInputNode(WmaEngine* engine);
  * @return false if the seam could not be created.
  */
 bool wmaEnsureAnalysis(WmaEngine* engine);
+
+#if defined(WMA_TEST_HOOKS)
+#include <atomic>
+/**
+ * COMPUERTA DE TEST (WMA_TEST_HOOKS): las proximas N esperas del buzon del volcado del afinador
+ * (`AnalysisThread::setInputDump` desde `wma_tuner_diag_input_dump_start/stop`) se informan como
+ * "el techo de 2 s vencio", aunque el hilo haya aplicado el pedido. Es el estado que el control ve
+ * con un hilo de analisis trabado (bugs A y B de REQ-055 S0), sin trabar un hilo ni esperar 2 s.
+ * Solo existe en los binarios de test (core_tests, el `.so` del arnes de host); el que shippea no
+ * la lleva.
+ */
+extern std::atomic<int> gTunerDumpForcedMailboxTimeouts;
+#endif

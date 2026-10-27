@@ -122,6 +122,29 @@ internal object HostTestHooks {
         return nativeFakeCaptureIsOpen()
     }
 
+    // ---- El buzón del volcado del afinador (REQ-055 S0, bugs A y B) ------------------------------
+
+    /**
+     * Las próximas [count] esperas del buzón del volcado del afinador (`start`/`stop`) se informan
+     * como "venció el techo de 2 s", aunque el hilo de análisis haya aplicado el pedido: el estado
+     * que el control ve con el hilo trabado, sin trabarlo. Devolvelo a 0 al terminar.
+     */
+    fun forceTunerDumpMailboxTimeouts(count: Int) {
+        JniHarness.requireNativeLibrary()
+        if (!nativeForceTunerDumpMailboxTimeouts(count)) fail("la palanca del buzón rechazó count=$count")
+    }
+
+    /**
+     * Cuántas esperas forzadas quedan sin consumir. Un test que la accionó afirma 0: si no, la
+     * palanca no disparó y el test mide el camino feliz con nombre de camino de fallo.
+     */
+    fun pendingTunerDumpMailboxTimeouts(): Int {
+        JniHarness.requireNativeLibrary()
+        return nativePendingTunerDumpMailboxTimeouts()
+    }
+
+    private external fun nativeForceTunerDumpMailboxTimeouts(count: Int): Boolean
+    private external fun nativePendingTunerDumpMailboxTimeouts(): Int
     private external fun nativeResetEngine(): Boolean
     private external fun nativeSetStartFails(fails: Boolean): Boolean
     private external fun nativeSetNegotiatedStream(channelCount: Int, lowLatency: Boolean): Boolean

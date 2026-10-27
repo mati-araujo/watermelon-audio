@@ -162,6 +162,14 @@ bool WavFileDumpSink::openPart(const std::string& path, size_t headerBytes) {
     // O_NOFOLLOW lo repite explicito. O_CLOEXEC: un exec del proceso no hereda el descriptor.
     const int fd = ::open(part.c_str(), O_CREAT | O_EXCL | O_NOFOLLOW | O_WRONLY | O_CLOEXEC, 0644);
     if (fd < 0) return false;
+    struct stat created{};
+    if (::fstat(fd, &created) != 0) {
+        ::close(fd);
+        ::unlink(part.c_str());   // lo creamos recien, en exclusiva: es nuestro
+        return false;
+    }
+    mPartDev = static_cast<unsigned long long>(created.st_dev);
+    mPartIno = static_cast<unsigned long long>(created.st_ino);
     mFile = ::fdopen(fd, "wb");
     if (mFile == nullptr) {
         ::close(fd);
@@ -197,6 +205,25 @@ std::string WavFileDumpSink::finishPart(const uint8_t* header, size_t headerByte
     const std::string finalPath = valid ? mPath : invalidDumpPathFor(mPath);
     if (!renameWithoutReplacing(mPath + ".part", finalPath)) return "";
     return finalPath;
+}
+
+std::string WavFileDumpSink::partPath() const { return mPath.empty() ? "" : mPath + ".part"; }
+
+bool WavFileDumpSink::abortPart() {
+    // Lo que se aborta se descarta: un error al cerrar no cambia que el archivo se borra.
+    closeFile();
+    if (mPath.empty()) return true;   // nunca abrio: no hay nada nuestro en disco
+    const std::string part = mPath + ".part";
+    mPath.clear();
+
+    struct stat st{};
+    if (::lstat(part.c_str(), &st) != 0) return errno == ENOENT;   // ya no esta: nada quedo
+    // Solo el archivo que creamos con O_EXCL. Uno que lo reemplazo (u otro symlink) no es nuestro.
+    if (static_cast<unsigned long long>(st.st_dev) != mPartDev ||
+        static_cast<unsigned long long>(st.st_ino) != mPartIno || !S_ISREG(st.st_mode)) {
+        return false;
+    }
+    return ::unlink(part.c_str()) == 0 || errno == ENOENT;
 }
 
 }  // namespace wma::analysis

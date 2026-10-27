@@ -82,4 +82,27 @@ class IosTunerDiagnosticsTest {
         assertTrue(exists(r.path), "el resultado apunta a un archivo que no está en el disco")
         assertFalse(exists("$requested.part"))
     }
+
+    /**
+     * BugA (REQ-055 S0) — un start rechazado porque ya hay una toma no cambia el path que informa el
+     * stop: es el de la toma que corrió, y lo dice el nativo (`wma_tuner_diag_input_dump_stop_with_path`).
+     * El techo del buzón no se puede forzar acá (el `.a` de iOS no lleva la compuerta de test); el caso
+     * con el techo lo cubren `core_tests` y el arnés JNI.
+     * Mutante que mata: un puente que nombra el resultado con el último path pedido.
+     */
+    @Test
+    fun bugA_aRejectedStartDoesNotChangeTheStopPath() {
+        val first = tmp + "req055-bugA-$suffix-viva.wav"
+        val second = tmp + "req055-bugA-$suffix-otra.wav"
+        val invalid = tmp + "req055-bugA-$suffix-viva.invalid.wav"
+        created += listOf(invalid, "$first.part", "$second.part", tmp + "req055-bugA-$suffix-otra.invalid.wav")
+
+        assertTrue(bridge.startTunerInputDump(first))
+        assertFalse(bridge.startTunerInputDump(second), "ya hay una toma: el nativo rechaza")
+        val r = assertNotNull(bridge.stopTunerInputDump())
+
+        assertEquals(invalid, r.path, "el stop informó otro archivo que el de la toma que corrió")
+        assertTrue(exists(r.path))
+        assertFalse(exists("$second.part"), "el start rechazado abrió un archivo")
+    }
 }

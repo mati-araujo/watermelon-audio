@@ -24,7 +24,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -34,9 +36,13 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <string>
 #include <system_error>
 #include <vector>
+
+// Definida en TunerInputDump.cpp bajo WMA_TEST_HOOKS: el hilo escritor "no se puede crear".
+extern std::atomic<bool> gTunerInputDumpFailWriterThread;
 
 namespace {
 
@@ -517,3 +523,147 @@ TEST_F(WavSinkTest, Hallazgo1_TheStepsRunInOrderLinkBeforeCheckAndTheLastOneIsRe
     EXPECT_EQ(readText(to), kForeign);
     EXPECT_EQ(readText(from), "otro");
 }
+
+// ---------------------------------------------------------------------------
+// BUG B (REQ-055 S0): un start que devuelve false no deja NADA de su toma en disco
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Los nombres que hay en el directorio, ordenados: lo que el disco dice, sin suponer nombres.
+std::vector<std::string> namesIn(const fs::path& dir) {
+    std::vector<std::string> names;
+    for (const auto& e : fs::directory_iterator(dir)) names.push_back(e.path().filename().string());
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+}  // namespace
+
+/**
+ * BugB — `abortPart` borra el `.part` que el sink creo, con lo escrito adentro, y el mismo nombre se
+ * puede volver a usar.
+ *
+ * Bug que atrapa: el aborto que cierra en vez de borrar (queda el `.part`, y el chequeo de no-pisar
+ * de `openPart` rechaza para siempre ese nombre). Mutante que mata: `abortPart` que solo cierra.
+ */
+TEST_F(WavSinkTest, BugB_AbortPartRemovesThePartItCreatedAndTheNameIsReusable) {
+    const std::string path = pathOf("abortada.wav");
+    {
+        WavFileDumpSink sink;
+        ASSERT_TRUE(sink.openPart(path, kInputDumpHeaderBytes));
+        const std::vector<float> some(512, 0.25f);
+        ASSERT_TRUE(sink.appendSamples(some.data(), some.size()));
+        EXPECT_EQ(sink.partPath(), path + ".part");
+        EXPECT_TRUE(sink.abortPart()) << "el .part era nuestro y se pudo borrar";
+        EXPECT_TRUE(namesIn(dir).empty()) << "quedo algo de la toma abortada";
+        EXPECT_EQ(sink.partPath(), "") << "abortado, el sink no tiene temporal";
+        EXPECT_TRUE(sink.abortPart()) << "abortar dos veces no tiene nada que borrar";
+    }
+    WavFileDumpSink again;
+    ASSERT_TRUE(again.openPart(path, kInputDumpHeaderBytes)) << "el nombre quedo bloqueado";
+    const auto h = headerFor(0, false);
+    EXPECT_EQ(again.finishPart(h.data(), h.size(), false), pathOf("abortada.invalid.wav"));
+}
+
+/**
+ * BugB — NUNCA se borra un archivo que el sink no creo. Si durante la toma alguien reemplazo el
+ * `.part` (un rename encima), el aborto no lo toca y lo dice (false).
+ *
+ * Bug que atrapa: un aborto que hace `unlink(path + ".part")` a ciegas y borra un archivo ajeno.
+ * Mutante que mata: quitar el chequeo de dispositivo/inodo.
+ */
+TEST_F(WavSinkTest, BugB_AbortPartNeverRemovesAFileItDidNotCreate) {
+    const std::string path = pathOf("ajena.wav");
+    WavFileDumpSink sink;
+    ASSERT_TRUE(sink.openPart(path, kInputDumpHeaderBytes));
+
+    const std::string foreign = pathOf("ajeno.bin");
+    { std::ofstream(foreign, std::ios::binary) << "no es de la toma"; }
+    ASSERT_EQ(std::rename(foreign.c_str(), (path + ".part").c_str()), 0)
+        << "premisa: el .part de la toma quedo reemplazado por un archivo ajeno";
+
+    EXPECT_FALSE(sink.abortPart()) << "el nombre lo ocupa un archivo ajeno: no se borra, y se dice";
+    ASSERT_TRUE(exists(path + ".part")) << "se borro un archivo que el sink no creo";
+    const auto bytes = readFile(path + ".part");
+    EXPECT_EQ(std::string(bytes.begin(), bytes.end()), "no es de la toma");
+}
+
+/**
+ * BugB — un `beginTake` que abre el `.part` y no puede crear el hilo escritor devuelve false SIN
+ * dejar archivos (antes: un `x.invalid.wav` que nadie reportaba), y el mismo nombre vuelve a andar.
+ *
+ * Se fuerza con la compuerta `gTunerInputDumpFailWriterThread` (WMA_TEST_HOOKS): lanza la excepcion
+ * del constructor del hilo justo donde se crearia, con el `.part` ya abierto.
+ * Mutante que mata: el `catch` que cierra la toma con `finishPart(false)` en vez de abortarla.
+ */
+TEST_F(WavSinkTest, BugB_AWriterThreadThatCannotStartLeavesNothingAndTheNameIsReusable) {
+    const std::string path = pathOf("sin-hilo.wav");
+    TunerInputDump dump;
+
+    gTunerInputDumpFailWriterThread.store(true);
+    const bool began = dump.beginTake(std::make_unique<WavFileDumpSink>(), path, 0);
+    gTunerInputDumpFailWriterThread.store(false);
+
+    EXPECT_FALSE(began) << "sin hilo escritor no hay toma";
+    EXPECT_FALSE(dump.takeActive());
+    EXPECT_TRUE(namesIn(dir).empty()) << "un start fallido dejo archivos de su toma";
+    EXPECT_EQ(dump.abortResidue(), "") << "el borrado anduvo: no hay residuo que reportar";
+
+    ASSERT_TRUE(dump.beginTake(std::make_unique<WavFileDumpSink>(), path, 0))
+        << "el nombre de un start fallido tiene que poder volver a usarse";
+    std::string finalPath;
+    dump.endTake(&finalPath);
+    EXPECT_EQ(finalPath, pathOf("sin-hilo.invalid.wav"));
+    EXPECT_EQ(namesIn(dir), std::vector<std::string>{"sin-hilo.invalid.wav"});
+}
+
+/**
+ * BugB — `abortTake` sobre una toma VIVA (con escritor corriendo y muestras escritas) para el
+ * escritor, borra el `.part` y no deja nada; el nombre se puede volver a usar.
+ *
+ * Mutante que mata: `abortTake` implementado como `endTake` (queda un `.invalid.wav`).
+ */
+TEST_F(WavSinkTest, BugB_AbortTakeOnALiveTakeLeavesNothingAndTheNameIsReusable) {
+    const std::string path = pathOf("viva.wav");
+    TunerInputDump dump;
+    ASSERT_TRUE(dump.beginTake(std::make_unique<WavFileDumpSink>(), path, 0));
+    ASSERT_TRUE(exists(path + ".part")) << "premisa: la toma tiene su temporal";
+
+    EXPECT_TRUE(dump.abortTake());
+    EXPECT_FALSE(dump.takeActive());
+    EXPECT_TRUE(namesIn(dir).empty()) << "el aborto dejo archivos";
+    EXPECT_TRUE(dump.abortTake()) << "sin toma, abortar no hace nada";
+
+    ASSERT_TRUE(dump.beginTake(std::make_unique<WavFileDumpSink>(), path, 0));
+    std::string finalPath;
+    dump.endTake(&finalPath);
+    EXPECT_EQ(finalPath, pathOf("viva.invalid.wav"));
+}
+
+/**
+ * BugA — `endTake` informa el archivo que REALMENTE quedo: el nombre final si se pudo nombrar, el
+ * `.part` si no. Es la verdad que la C API le pasa al puente en vez de que este la reconstruya.
+ *
+ * Mutante que mata: `leftPath` = el nombre final aunque el renombre haya fallado (apuntaria a un
+ * archivo ajeno, el que ocupo el nombre).
+ */
+TEST_F(WavSinkTest, BugA_EndTakeReportsTheFileThatActuallyStayedOnDisk) {
+    const std::string named = pathOf("nombrada.wav");
+    TunerInputDump dump;
+    ASSERT_TRUE(dump.beginTake(std::make_unique<WavFileDumpSink>(), named, 0));
+    std::string finalPath;
+    std::string leftPath;
+    dump.endTake(&finalPath, &leftPath);
+    EXPECT_EQ(leftPath, pathOf("nombrada.invalid.wav"));
+    EXPECT_EQ(leftPath, finalPath);
+
+    const std::string blocked = pathOf("bloqueada.wav");
+    ASSERT_TRUE(dump.beginTake(std::make_unique<WavFileDumpSink>(), blocked, 0));
+    fs::create_directory(pathOf("bloqueada.invalid.wav"));   // ocupa el nombre durante la toma
+    dump.endTake(&finalPath, &leftPath);
+    EXPECT_EQ(finalPath, "") << "no se pudo nombrar";
+    EXPECT_EQ(leftPath, blocked + ".part");
+    EXPECT_TRUE(fs::is_regular_file(leftPath)) << "el archivo informado no es el que quedo";
+}
+

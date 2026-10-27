@@ -24,7 +24,7 @@ import kotlin.test.assertTrue
  * JNI es por donde lo maneja la app. Esta clase ejerce `nativeTunerDiagInputDumpStart` y
  * `nativeTunerDiagInputDumpStop` contra un `JNIEnv` real: lo que el gate de símbolos y el de
  * firmas NO ven y acá sí —que los bytes UTF-8 del path (un `jbyteArray`) lleguen enteros al
- * disco, que el `jlongArray` salga con 7 valores y con el orden que Kotlin espera, que "sin toma" cruce como `null` y no como un array
+ * disco, que los 7 valores salgan en el orden que Kotlin espera y el path que informa el nativo cruce intacto, que "sin toma" cruce como `null` y no como un array
  * de ceros— se mide con valores que cruzaron.
  *
  * ## Qué NO prueba, y el hueco declarado
@@ -89,6 +89,7 @@ class TunerDiagnosticsJniTest {
 
     @After
     fun tearDown() {
+        HostTestHooks.forceTunerDumpMailboxTimeouts(0)
         // Una toma que haya quedado viva (un test que falló a mitad) no puede contaminar al siguiente
         // ni dejar el afinador corriendo. Directo: no es cobertura, es limpieza.
         val bridge = AudioNativeBridge.getInstance()
@@ -267,6 +268,61 @@ class TunerDiagnosticsJniTest {
         val r = assertNotNull(stop())
 
         assertEquals(pathOf("buena.invalid.wav"), r.path)
+    }
+
+    /**
+     * BugA (REQ-055 S0) — un start que vence el techo del buzón en el armado Y en el desarme deja la
+     * toma VIVA; un start posterior, rechazado, no puede cambiar el path que informa el stop.
+     *
+     * Antes, los dos starts devolvían false y el puente recordaba el ÚLTIMO como "pendiente": el stop
+     * nombraba `segunda.invalid.wav`, un archivo que no existe, mientras `primera.invalid.wav` quedaba
+     * sin reportar. El techo se fuerza con [HostTestHooks.forceTunerDumpMailboxTimeouts].
+     * Mutante que mata: un puente que arma el path con el último pedido en vez del que informa el nativo.
+     */
+    @Test
+    fun `BugA - un start rechazado con una toma viva de un start fallido no cambia el path del stop`() {
+        ensureEngine()
+        val first = pathOf("primera.wav")
+        try {
+            HostTestHooks.forceTunerDumpMailboxTimeouts(2)
+            assertFalse(start(first), "armado y desarme vencieron el techo: el start dice false")
+            assertEquals(0, HostTestHooks.pendingTunerDumpMailboxTimeouts(), "premisa: la palanca disparó dos veces")
+        } finally {
+            HostTestHooks.forceTunerDumpMailboxTimeouts(0)
+        }
+        assertTrue(File("$first.part").isFile, "premisa: la toma quedó viva con su temporal")
+
+        assertFalse(start(pathOf("segunda.wav")), "ya hay una toma viva: el nativo rechaza")
+        val r = assertNotNull(stop(), "había una toma viva: el stop la cierra")
+
+        assertEquals(pathOf("primera.invalid.wav"), r.path, "el stop informó otro archivo que el de la toma")
+        assertTrue(File(r.path).isFile)
+        assertEquals(listOf("primera.invalid.wav"), dir.list().orEmpty().sorted(), "archivos de más en el disco")
+    }
+
+    /**
+     * BugB (REQ-055 S0) — un start cuyo armado vence el techo (y cuyo desarme sí se confirma) devuelve
+     * false y no deja NADA en disco; el mismo nombre se puede volver a usar.
+     *
+     * Antes quedaba `x.invalid.wav`: nadie lo reportaba (el start dijo false) y, con el chequeo de
+     * no-pisar, ese nombre ya no se podía usar. Mutante que mata: cerrar la toma en vez de abortarla.
+     */
+    @Test
+    fun `BugB - un start que vence el techo no deja archivos y el nombre se puede reusar`() {
+        ensureEngine()
+        val path = pathOf("techo.wav")
+        try {
+            HostTestHooks.forceTunerDumpMailboxTimeouts(1)
+            assertFalse(start(path), "el armado venció el techo: el start dice false")
+            assertEquals(0, HostTestHooks.pendingTunerDumpMailboxTimeouts(), "premisa: la palanca disparó")
+        } finally {
+            HostTestHooks.forceTunerDumpMailboxTimeouts(0)
+        }
+        assertEquals(emptyList(), dir.list().orEmpty().toList(), "un start fallido dejó archivos de su toma")
+        assertNull(stop(), "el desarme se confirmó: no queda toma")
+
+        assertTrue(start(path), "el nombre de un start fallido quedó bloqueado")
+        assertEquals(pathOf("techo.invalid.wav"), assertNotNull(stop()).path)
     }
 
     /** La premisa de los tests de nombres: sin ella no se distingue un bug del puente de un locale ASCII. */

@@ -142,6 +142,16 @@ target_link_libraries(watermelon_audio PRIVATE
     Threads::Threads
 )
 
+# REQ-055 S0 (bugs A y B del volcado del afinador): la compuerta que informa un techo vencido del
+# buzon vive en la C API bajo `WMA_TEST_HOOKS`, y la JVM la acciona por `host_test_hooks.cpp`. Se
+# define SOLO en esas dos TUs y SOLO en este `.so`: el de Android (AGP) y el de iOS no la llevan, y
+# el resto de este `.so` (InputNode, analysis) compila igual que antes.
+set_source_files_properties(
+    ${WMA_CPP_ROOT}/api/watermelon_audio.cpp
+    host_test_hooks.cpp
+    PROPERTIES COMPILE_DEFINITIONS WMA_TEST_HOOKS=1
+)
+
 # Un .so acepta simbolos indefinidos por default y falla RECIEN al cargarse — o
 # sea, dentro del test, como un `UnsatisfiedLinkError` que parece del arnes.
 # Esto lo convierte en un error de LINK, que dice el nombre del simbolo.

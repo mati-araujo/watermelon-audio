@@ -46,7 +46,6 @@ import kotlinx.cinterop.ptr
 import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
-import kotlin.concurrent.AtomicReference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -677,16 +676,6 @@ internal class IosAudioBridge : IAudioNativeBridge, ITunerDiagnostics {
     // ---- Diagnóstico, sin contrato (REQ-055 S0). Mismo contrato que en Android: la C API
     //      serializa con `analysisMutex` y el volcado no toca el stream de entrada.
 
-    /**
-     * Los paths pedidos: el nativo nombra el archivo según `valid` y no lo devuelve. `active` es el
-     * del último start que devolvió true; `pending`, el del último que devolvió false (puede haber
-     * dejado la toma viva si venció el techo del buzón). Un start rechazado por toma viva no pisa el
-     * activo. Inmutable en un [AtomicReference]: start y stop pueden venir de hilos distintos.
-     */
-    private data class DumpPaths(val active: String? = null, val pending: String? = null)
-
-    private val dumpPaths = AtomicReference(DumpPaths())
-
     @InternalWatermelonApi
     override fun startTunerInputDump(path: String): Boolean {
         // Hallazgo 3: cinterop convierte el `String` a `const char*` en UTF-8 (`cstr`), pero un NUL
@@ -694,25 +683,24 @@ internal class IosAudioBridge : IAudioNativeBridge, ITunerDiagnostics {
         // del resultado. Con la guarda compartida ninguno de los dos llega, y lo que cruza son
         // exactamente los bytes de `encodeToByteArray()`. Rechazado acá, no se llama al nativo.
         if (tunerDumpPathUtf8(path) == null) return false
-        val started = wma_tuner_diag_input_dump_start(engine, path)
-        while (true) {
-            val current = dumpPaths.value
-            val next = if (started) current.copy(active = path) else current.copy(pending = path)
-            if (dumpPaths.compareAndSet(current, next)) return started
-        }
+        // Sin estado de este lado (bug A de REQ-055 S0): el path del resultado lo informa el stop
+        // nativo. Recordar acá el último pedido era lo que un start rechazado podía pisar.
+        return wma_tuner_diag_input_dump_start(engine, path)
     }
 
     @InternalWatermelonApi
     override fun stopTunerInputDump(): TunerInputDumpResult? = memScoped {
         val values = allocArray<LongVar>(TunerInputDumpResult.VALUE_COUNT)
-        if (!wma_tuner_diag_input_dump_stop(engine, values, TunerInputDumpResult.VALUE_COUNT)) {
+        val path = allocArray<ByteVar>(WMA_TUNER_DUMP_PATH_CAPACITY)
+        if (!wma_tuner_diag_input_dump_stop_with_path(
+                engine, values, TunerInputDumpResult.VALUE_COUNT, path, WMA_TUNER_DUMP_PATH_CAPACITY,
+            )
+        ) {
             return@memScoped null
         }
-        val taken = dumpPaths.getAndSet(DumpPaths())
-        val requested = taken.active ?: taken.pending ?: return@memScoped null
         TunerInputDumpResult.fromNative(
             LongArray(TunerInputDumpResult.VALUE_COUNT) { values[it] },
-            requested,
+            path.toKString(),
         )
     }
 

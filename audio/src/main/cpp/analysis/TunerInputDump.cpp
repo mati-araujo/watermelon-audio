@@ -5,6 +5,20 @@
 #include <chrono>
 #include <cstring>
 
+#if defined(WMA_TEST_HOOKS)
+#include <system_error>
+
+// ===========================================================================
+// COMPUERTA DE TEST (WMA_TEST_HOOKS) — la define solo analysis/tests.
+//
+// Que `std::thread` no pueda crear el hilo escritor (EAGAIN: el proceso sin hilos) no se provoca
+// desde un test sin tumbar la suite. Con la compuerta, `beginTake` lanza la MISMA excepcion que el
+// constructor del hilo justo donde el hilo se crearia, con el `.part` ya abierto: el estado del
+// bug B. En el binario que shippea esto compila a nada.
+// ===========================================================================
+std::atomic<bool> gTunerInputDumpFailWriterThread{false};
+#endif
+
 namespace wma::analysis {
 
 namespace {
@@ -107,22 +121,44 @@ bool TunerInputDump::beginTake(std::unique_ptr<IDumpSink> sink, const std::strin
     mPath = path;
     mInputSource = inputSource;
     try {
+#if defined(WMA_TEST_HOOKS)
+        if (gTunerInputDumpFailWriterThread.load(std::memory_order_acquire)) {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        }
+#endif
         mWriter = std::thread([this] { writerLoop(); });
     } catch (...) {
-        // Sin hilo no hay toma: se cierra lo abierto (queda nombrado como invalido) y se avisa.
-        const InputDumpStats none;
-        uint8_t header[kInputDumpHeaderBytes];
-        writeInputDumpHeader(header, none);
-        mSink->finishPart(header, sizeof header, false);
-        mSink.reset();
+        // Sin hilo no hay toma, y el start va a devolver false: en disco no puede quedar nada de
+        // ella (bug B). Ningun hilo escribe el temporal (el escritor no llego a existir): se borra.
+        abortSink();
         return false;
     }
     mActive.store(true, std::memory_order_release);
     return true;
 }
 
-InputDumpStats TunerInputDump::endTake(std::string* finalPath) {
+bool TunerInputDump::abortSink() {
+    mAbortResidue.clear();
+    if (!mSink) return true;
+    const std::string part = mSink->partPath();
+    const bool clean = mSink->abortPart();
+    if (!clean) mAbortResidue = part.empty() ? mPath + ".part" : part;
+    mSink.reset();
+    return clean;
+}
+
+bool TunerInputDump::abortTake() {
+    if (!mActive.exchange(false, std::memory_order_acq_rel)) return true;
+    // El orden es el contrato: el escritor se para y se junta ANTES de borrar, asi nadie escribe
+    // el temporal mientras se lo borra (ni lo recrea: el sink ya esta abierto, no reabre).
+    mStopWriter.store(true, std::memory_order_release);
+    if (mWriter.joinable()) mWriter.join();
+    return abortSink();
+}
+
+InputDumpStats TunerInputDump::endTake(std::string* finalPath, std::string* leftPath) {
     if (finalPath != nullptr) finalPath->clear();
+    if (leftPath != nullptr) leftPath->clear();
     InputDumpStats s;
     if (!mActive.exchange(false, std::memory_order_acq_rel)) return s;
 
@@ -144,6 +180,7 @@ InputDumpStats TunerInputDump::endTake(std::string* finalPath) {
     std::string finalName = mSink->finishPart(header, sizeof header, s.valid);
     // Sin archivo nombrado no hay WAV sano que ofrecer, aunque cada frame se haya escrito.
     if (finalName.empty()) s.valid = false;
+    if (leftPath != nullptr) *leftPath = finalName.empty() ? mSink->partPath() : finalName;
     if (finalPath != nullptr) *finalPath = std::move(finalName);
     mSink.reset();
     return s;

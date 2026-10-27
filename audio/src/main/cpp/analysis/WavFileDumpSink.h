@@ -17,6 +17,11 @@
  *     sin truncar ni seguir nada.
  *   - `finishPart` renombra con `renameWithoutReplacing`: si el destino aparecio durante la toma,
  *     el `.part` queda, el path devuelto es "" (=> `finalized = 0`) y el destino no se toca.
+ *   - `abortPart` (un start que devuelve false, bug B) borra el `.part` solo si sigue siendo el que
+ *     `openPart` creo (dispositivo + inodo del descriptor `O_EXCL`); uno ajeno en ese nombre no se
+ *     toca. Entre ese chequeo y el `unlink` queda una ventana (POSIX no tiene un unlink-si-es-este):
+ *     alguien con permiso de escritura en el directorio que reemplace el `.part` justo ahi pierde
+ *     su archivo. Es la misma clase de ventana que el ultimo escalon del renombre, y del mismo dueno.
  *
  * POSIX, no `std::`: es el borde de E/S (el nucleo no lo ve). Compila para Android, iOS/macOS y
  * el host Linux del CI; nada de `android/` ni `jni.h` (regla de portabilidad del repo).
@@ -77,12 +82,21 @@ public:
     /// `invalidDumpPathFor(path)`. "" si algo fallo, incluido un destino que ya existe: entonces el
     /// `.part` queda con los datos y el destino intacto.
     std::string finishPart(const uint8_t* header, size_t headerBytes, bool valid) override;
+    /// `<path>.part` desde un `openPart` exitoso; "" si nunca abrio (o se aborto).
+    std::string partPath() const override;
+    /// Cierra y borra `<path>.part` SOLO si sigue siendo el archivo que `openPart` creo (mismo
+    /// dispositivo e inodo que el descriptor creado con `O_EXCL`). Si en ese nombre hay otro
+    /// archivo, no lo toca y devuelve false. Ver el contrato en `IDumpSink::abortPart`.
+    bool abortPart() override;
 
 private:
     void closeFile() noexcept;
 
     std::FILE* mFile = nullptr;
     std::string mPath;
+    /// La identidad del `.part` que `openPart` creo: lo unico que `abortPart` borra.
+    unsigned long long mPartDev = 0;
+    unsigned long long mPartIno = 0;
 };
 
 }  // namespace wma::analysis

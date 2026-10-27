@@ -54,6 +54,15 @@ public:
     /// Reescribe el header en el offset 0, cierra y nombra: valid => `path`; !valid =>
     /// `invalidDumpPathFor(path)`. Devuelve el path final, o "" si fallo.
     virtual std::string finishPart(const uint8_t* header, size_t headerBytes, bool valid) = 0;
+    /// Donde quedo lo escrito si `finishPart` no pudo nombrarlo: el de disco, `<path>.part`. ""
+    /// si el sink no deja nada en disco (memoria) o nunca abrio. Valido despues de `finishPart`.
+    virtual std::string partPath() const = 0;
+    /// ABORTA la toma (bug B de REQ-055 S0): cierra y BORRA el temporal que `openPart` creo, y solo
+    /// ese. Nunca borra un archivo que el sink no creo: si en `partPath()` hay otro (lo reemplazaron
+    /// durante la toma), no se toca. true si en disco no quedo nada en ese nombre; false si algo
+    /// quedo (el borrado fallo, o el nombre lo ocupa un archivo ajeno). PRECONDICION: nadie mas
+    /// escribe al sink (el escritor de la toma ya se junto).
+    virtual bool abortPart() = 0;
 };
 
 /// "x.wav" -> "x.invalid.wav"; si no termina en ".wav": path + ".invalid.wav".
@@ -124,12 +133,34 @@ public:
     /// el hilo escritor. NO arma la captura: eso lo aplica `AnalysisThread` por su buzon. false si
     /// ya hay una toma activa (sin abrir el sink: abrir el mismo `.part` truncaria la viva), si
     /// `sink` es null, si `path` es vacio, o si `openPart` falla (sin hilo vivo en ese caso).
+    ///
+    /// Un false DESPUES de abrir el sink (no se pudo crear el hilo escritor) aborta: el temporal
+    /// se borra con `IDumpSink::abortPart` y en disco no queda nada de la toma (bug B). Si el borrado
+    /// no pudo, `abortResidue()` dice que quedo.
     bool beginTake(std::unique_ptr<IDumpSink> sink, const std::string& path, int inputSource);
+
+    /// ABORTA la toma en vez de cerrarla (bug B de REQ-055 S0): la usa quien devuelve false tras un
+    /// `beginTake` exitoso (el armado no se aplico a tiempo), para que un start fallido no deje un
+    /// `.invalid.wav` que nadie reporta y que, con el chequeo de no-pisar, bloquea ese nombre.
+    /// PRECONDICION, igual que `endTake`: el productor ya esta desarmado. El ORDEN es lo que hace
+    /// seguro el borrado: primero se para y se junta el escritor (nadie escribe el temporal), y
+    /// recien despues `IDumpSink::abortPart` lo borra. true si en disco no quedo nada de la toma;
+    /// false si algo quedo (`abortResidue()`). Sin toma activa: true, sin tocar nada.
+    bool abortTake();
+
+    /// Que quedo en disco del ultimo aborto que no pudo borrar su temporal; "" si el ultimo aborto
+    /// (o ninguno) no dejo nada. Para que quien aborto lo deje constando (log, fuera del RT).
+    const std::string& abortResidue() const noexcept { return mAbortResidue; }
 
     /// Cierra la toma. PRECONDICION: el productor ya esta desarmado (`AnalysisThread` aplico el
     /// desarme). El escritor vacia la cola, se junta, se parchea el header y se nombra el archivo.
     /// Sin toma activa devuelve stats vacias con valid = false y finalPath "".
-    InputDumpStats endTake(std::string* finalPath = nullptr);
+    ///
+    /// `finalPath`: el nombre final ("" si el sink no pudo nombrar). `leftPath`: el archivo que
+    /// REALMENTE quedo en disco de esta toma (bug A de REQ-055 S0): el nombre final si se pudo
+    /// nombrar, si no `IDumpSink::partPath()`. Es la verdad que la C API le devuelve al puente; el
+    /// puente no la reconstruye con el path que le pidieron.
+    InputDumpStats endTake(std::string* finalPath = nullptr, std::string* leftPath = nullptr);
 
     bool takeActive() const noexcept { return mActive.load(std::memory_order_acquire); }
 
@@ -211,6 +242,11 @@ private:
     std::string mPath;
     int mInputSource = -1;
     std::thread mWriter;
+    /// Lo que dejo en disco el ultimo aborto que no pudo borrar ("" si nada). Solo el control.
+    std::string mAbortResidue;
+
+    /// Borra el temporal del sink (ya sin escritor) y lo suelta; anota el residuo si quedo algo.
+    bool abortSink();
 };
 
 }  // namespace wma::analysis

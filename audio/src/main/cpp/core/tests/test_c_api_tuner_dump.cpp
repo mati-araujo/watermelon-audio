@@ -119,6 +119,7 @@ protected:
     }
 
     std::string pathOf(const std::string& name) const { return (mDir / name).string(); }
+    const fs::path& dir() const { return mDir; }
     static bool exists(const std::string& p) { return fs::exists(fs::path(p)); }
 
     /// Afinador arrancado al `rate` negociado, con la fuente pedida ya consumida por el analisis.
@@ -651,6 +652,149 @@ TEST_F(TunerDumpApiTest, DestroyingTheEngineWithAnEmptyLiveTakeLeavesAnInvalidNa
     ASSERT_EQ(bytes.size(), kHeaderBytes);
     EXPECT_EQ(rdLE(bytes, 94, 4), 0u) << "wmad.valid";
     EXPECT_EQ(rdLE(bytes, 62, 8), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// BUGS A Y B (REQ-055 S0): el techo del buzon, el start fallido y el path que informa el stop
+// ---------------------------------------------------------------------------
+//
+// El techo de 2 s del buzon se fuerza con la compuerta `gTunerDumpForcedMailboxTimeouts`
+// (WMA_TEST_HOOKS, solo en los binarios de test): las proximas N esperas se informan como vencidas
+// aunque el hilo haya aplicado el pedido, que es lo que el control ve con el hilo trabado.
+
+/// Los nombres del directorio de la toma, ordenados: lo que el disco dice.
+std::vector<std::string> namesIn(const fs::path& dir) {
+    std::vector<std::string> names;
+    for (const auto& e : fs::directory_iterator(dir)) names.push_back(e.path().filename().string());
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+/// El stop con path, con un buffer del tamano que exige el contrato.
+struct StopWithPath {
+    bool ok = false;
+    std::array<int64_t, WMA_TUNER_DUMP_STATS_VALUES> values = sentinelStats();
+    std::string path;
+};
+StopWithPath stopWithPath(WmaEngine* e) {
+    StopWithPath r;
+    std::vector<char> buf(WMA_TUNER_DUMP_PATH_CAPACITY, 'X');
+    r.ok = wma_tuner_diag_input_dump_stop_with_path(e, r.values.data(), WMA_TUNER_DUMP_STATS_VALUES,
+                                                    buf.data(), WMA_TUNER_DUMP_PATH_CAPACITY);
+    if (r.ok) r.path = buf.data();
+    return r;
+}
+
+/// Suelta la compuerta aunque el test falle a mitad: no puede contaminar al siguiente.
+struct ForcedMailboxTimeouts {
+    explicit ForcedMailboxTimeouts(int n) { gTunerDumpForcedMailboxTimeouts.store(n); }
+    ~ForcedMailboxTimeouts() { gTunerDumpForcedMailboxTimeouts.store(0); }
+};
+
+/**
+ * BugB — un start cuyo ARMADO vence el techo (y cuyo desarme si se confirma) devuelve false SIN
+ * dejar nada en disco, y el mismo nombre se puede volver a usar.
+ *
+ * Antes: la toma se cerraba con `endTake` y quedaba `x.invalid.wav`, que nadie reportaba (el start
+ * dijo false) y que el chequeo de no-pisar convertia en un nombre bloqueado para siempre.
+ * Mutante que mata: volver a `endTake` en esa rama.
+ */
+TEST_F(TunerDumpApiTest, BugB_AStartWhoseArmingTimesOutLeavesNothingAndTheNameIsReusable) {
+    ASSERT_NO_FATAL_FAILURE(bringUpTuner(kRate44));
+    const std::string path = pathOf("techo.wav");
+    {
+        ForcedMailboxTimeouts force(1);
+        EXPECT_FALSE(wma_tuner_diag_input_dump_start(mWma, path.c_str()));
+        EXPECT_EQ(gTunerDumpForcedMailboxTimeouts.load(), 0) << "premisa: la compuerta disparo";
+    }
+    ASSERT_NE(mWma->tunerInputDump, nullptr);
+    EXPECT_FALSE(mWma->tunerInputDump->takeActive()) << "el desarme se confirmo: no queda toma";
+    EXPECT_TRUE(namesIn(dir()).empty()) << "un start fallido dejo archivos de su toma";
+    auto v = sentinelStats();
+    EXPECT_FALSE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
+
+    ASSERT_TRUE(wma_tuner_diag_input_dump_start(mWma, path.c_str()))
+        << "el nombre de un start fallido quedo bloqueado";
+    const StopWithPath r = stopWithPath(mWma);
+    ASSERT_TRUE(r.ok);
+    EXPECT_EQ(r.path, pathOf("techo.invalid.wav"));
+}
+
+/**
+ * BugA — un start que vence el techo del armado Y del desarme deja la toma VIVA (no se puede borrar
+ * un `.part` que el productor quizas sigue escribiendo). Un start posterior, rechazado, no cambia
+ * nada de ella: el stop informa el archivo de LA TOMA QUE CORRIO, no el del ultimo pedido.
+ *
+ * Mutante que mata: un puente (o una C API) que nombra el resultado con el ultimo path pedido.
+ */
+TEST_F(TunerDumpApiTest, BugA_ARejectedStartDoesNotChangeThePathOfTheTakeThatLives) {
+    ASSERT_NO_FATAL_FAILURE(bringUpTuner(kRate44));
+    const std::string first = pathOf("primera.wav");
+    const std::string second = pathOf("segunda.wav");
+    {
+        ForcedMailboxTimeouts force(2);
+        EXPECT_FALSE(wma_tuner_diag_input_dump_start(mWma, first.c_str()));
+        EXPECT_EQ(gTunerDumpForcedMailboxTimeouts.load(), 0) << "premisa: armado y desarme vencieron";
+    }
+    ASSERT_TRUE(mWma->tunerInputDump->takeActive()) << "sin desarme confirmado la toma sigue viva";
+    EXPECT_TRUE(exists(first + ".part")) << "el temporal de una toma viva no se borra";
+
+    EXPECT_FALSE(wma_tuner_diag_input_dump_start(mWma, second.c_str())) << "ya hay una toma";
+    EXPECT_EQ(namesIn(dir()), std::vector<std::string>{"primera.wav.part"})
+        << "el start rechazado toco el disco";
+
+    const StopWithPath r = stopWithPath(mWma);
+    ASSERT_TRUE(r.ok);
+    EXPECT_EQ(r.path, pathOf("primera.invalid.wav")) << "el stop informo otro archivo que el de la toma";
+    EXPECT_EQ(r.values[6], 1) << "finalized";
+    EXPECT_EQ(namesIn(dir()), std::vector<std::string>{"primera.invalid.wav"});
+}
+
+/**
+ * BugA — `stop_with_path` informa el archivo que QUEDO: el `.invalid.wav` de una toma sin audio, y
+ * el `.part` cuando el nombre final lo ocupo otro durante la toma (finalized = 0). Los 7 valores
+ * son los mismos que los de `stop`.
+ *
+ * Mutante que mata: informar el nombre final aunque no se haya podido renombrar.
+ */
+TEST_F(TunerDumpApiTest, BugA_StopWithPathReportsTheFileTheTakeLeft) {
+    const std::string path = pathOf("bloqueada.wav");
+    ASSERT_TRUE(wma_tuner_diag_input_dump_start(mWma, path.c_str()));
+    fs::create_directory(pathOf("bloqueada.invalid.wav"));
+    const StopWithPath r = stopWithPath(mWma);
+    ASSERT_TRUE(r.ok);
+    EXPECT_EQ(r.values[6], 0) << "no se pudo nombrar";
+    EXPECT_EQ(r.values[5], 0);
+    EXPECT_EQ(r.path, path + ".part");
+    EXPECT_TRUE(fs::is_regular_file(r.path));
+}
+
+/**
+ * BugA — los contratos de `stop_with_path`: un buffer nulo o chico se rechaza SIN cerrar la toma y
+ * sin tocar nada; sin toma, false y el buffer intacto. Mutante que mata: cerrar la toma antes de
+ * validar el buffer (la toma se pierde sin que nadie sepa su archivo).
+ */
+TEST_F(TunerDumpApiTest, BugA_StopWithPathRefusesASmallBufferWithoutKillingTheTake) {
+    const std::string path = pathOf("viva.wav");
+    ASSERT_TRUE(wma_tuner_diag_input_dump_start(mWma, path.c_str()));
+
+    auto v = sentinelStats();
+    std::vector<char> buf(WMA_TUNER_DUMP_PATH_CAPACITY, 'X');
+    EXPECT_FALSE(wma_tuner_diag_input_dump_stop_with_path(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES,
+                                                          nullptr, WMA_TUNER_DUMP_PATH_CAPACITY));
+    EXPECT_FALSE(wma_tuner_diag_input_dump_stop_with_path(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES,
+                                                          buf.data(), WMA_TUNER_DUMP_PATH_CAPACITY - 1));
+    EXPECT_FALSE(wma_tuner_diag_input_dump_stop_with_path(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES - 1,
+                                                          buf.data(), WMA_TUNER_DUMP_PATH_CAPACITY));
+    EXPECT_TRUE(allSentinels(v));
+    EXPECT_EQ(buf[0], 'X') << "un rechazo escribio el buffer";
+    EXPECT_TRUE(mWma->tunerInputDump->takeActive()) << "un stop rechazado cerro la toma";
+
+    const StopWithPath r = stopWithPath(mWma);
+    ASSERT_TRUE(r.ok);
+    EXPECT_EQ(r.path, pathOf("viva.invalid.wav"));
+    const StopWithPath none = stopWithPath(mWma);
+    EXPECT_FALSE(none.ok) << "sin toma no hay nada que informar";
 }
 
 }  // namespace wma_test

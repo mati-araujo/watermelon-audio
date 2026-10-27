@@ -139,6 +139,7 @@ struct SinkState {
     std::atomic<bool> failOpen{false};
     std::atomic<bool> failAppends{false};
     std::atomic<bool> failFinish{false};
+    int abortCalls = 0;       // bajo `mu`
 
     void setBrake(bool on) {
         {
@@ -198,6 +199,17 @@ public:
         // Lo que hace el sink de disco: nombrar segun `valid`. El nucleo es quien decide `valid`.
         mS->finalPath = valid ? mS->openedPath : invalidDumpPathFor(mS->openedPath);
         return mS->finalPath;
+    }
+
+    std::string partPath() const override {
+        std::lock_guard<std::mutex> l(mS->mu);
+        return mS->openedPath + ".part";
+    }
+
+    bool abortPart() override {
+        std::lock_guard<std::mutex> l(mS->mu);
+        ++mS->abortCalls;
+        return true;
     }
 
 private:
@@ -1807,4 +1819,26 @@ TEST(InputDumpRing, AWriterLappingTheCopyMidFlightMakesTheCopyBeDiscardedAndCoun
     EXPECT_EQ(out.front(), static_cast<float>(written - kEff));
     EXPECT_EQ(out[kEff - 1], static_cast<float>(written - 1));
     EXPECT_EQ(cursor, written);
+}
+
+/**
+ * BugB (REQ-055 S0) — `abortTake` ABORTA el sink y nunca lo nombra: ni `finishPart` (que dejaria un
+ * `.invalid.wav`) ni contadores de una toma que no existio. Despues, la siguiente toma arranca.
+ *
+ * Mutante que mata: `abortTake` que delega en `endTake`.
+ */
+TEST(TunerInputDumpAbort, BugB_AbortTakeAbortsTheSinkWithoutNamingIt) {
+    Take t;
+    ASSERT_TRUE(t.begin());
+    EXPECT_TRUE(t.dump.abortTake());
+    EXPECT_FALSE(t.dump.takeActive());
+    {
+        std::lock_guard<std::mutex> l(t.sink->mu);
+        EXPECT_EQ(t.sink->abortCalls, 1);
+        EXPECT_EQ(t.sink->finishCalls, 0) << "una toma abortada no se nombra";
+    }
+    EXPECT_TRUE(t.begin()) << "tras abortar, la siguiente toma tiene que poder arrancar";
+    std::string finalPath;
+    t.dump.endTake(&finalPath);
+    EXPECT_EQ(finalPath, invalidDumpPathFor(kPath));
 }

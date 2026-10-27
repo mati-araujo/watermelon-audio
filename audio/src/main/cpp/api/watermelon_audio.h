@@ -1308,6 +1308,21 @@ WMA_API bool wma_tuner_analyze_buffer_with_candidates(
 #define WMA_TUNER_DUMP_STATS_VALUES 7
 
 /**
+ * Longest path (in bytes, terminator excluded) wma_tuner_diag_input_dump_start()
+ * accepts. Longer ones are refused: no file system the library runs on can
+ * create them anyway.
+ */
+#define WMA_TUNER_DUMP_PATH_MAX 4096
+
+/**
+ * Capacity (bytes, terminator included) that wma_tuner_diag_input_dump_stop_with_path()
+ * requires: the longest file a take can leave, "<path minus .wav>.invalid.wav"
+ * (8 bytes longer than the path), plus the terminator:
+ * WMA_TUNER_DUMP_PATH_MAX + 8 + 1. A literal so every binding reads it as a constant.
+ */
+#define WMA_TUNER_DUMP_PATH_CAPACITY 4105
+
+/**
  * Start recording EXACTLY what the tuner sees (the mono signal after the input
  * DSP, at the stamped capture rate) to a float32 WAV. The file is written to
  * "<path>.part" and named when the take is stopped: "<path>" if healthy,
@@ -1321,11 +1336,21 @@ WMA_API bool wma_tuner_analyze_buffer_with_candidates(
  * start if "<path>", its ".invalid.wav" name or "<path>.part" already exist (a
  * symlink included).
  *
- * @param path  UTF-8, must end in ".wav" (lowercase).
+ * @param path  UTF-8, must end in ".wav" (lowercase), at most
+ *              WMA_TUNER_DUMP_PATH_MAX bytes.
  * @return false for a null engine, a null or empty path, a path that does not
- *         end in ".wav", a take already in progress, a file that cannot be
- *         created or already exists, or a request the analysis thread did not
- *         apply in time.
+ *         end in ".wav" or is too long, a take already in progress, a file
+ *         that cannot be created or already exists, or a request the analysis
+ *         thread did not apply in time.
+ *
+ *         A false leaves NOTHING of the refused take on disk: no "<path>.part",
+ *         no named file. A false never touches a take already in progress.
+ *         One case leaves a take running: the analysis thread applied neither
+ *         the arming nor the disarming in time, so the ".part" may still be
+ *         written to and cannot be removed. That take is still this path's;
+ *         stop it (wma_tuner_diag_input_dump_stop_with_path() says which file
+ *         it left). If removing the ".part" of a refused take fails, the
+ *         failure is logged with the file's name.
  */
 WMA_API bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path);
 
@@ -1340,6 +1365,26 @@ WMA_API bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path
  *         analysis thread did not apply in time.
  */
 WMA_API bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_values, int count);
+
+/**
+ * wma_tuner_diag_input_dump_stop(), plus the file the take ACTUALLY left on
+ * disk, from the native side: the requested path if valid, its ".invalid.wav"
+ * name if not, "<path>.part" if it could not be named (finalized = 0).
+ *
+ * Use this one rather than rebuilding the name from the path you passed to
+ * start: after a start that returned false with a take still running, the
+ * running take is not necessarily the last path you asked for.
+ *
+ * @param[out] out_path  NUL-terminated UTF-8, the same bytes start received
+ *                       plus the suffix. Untouched when this returns false.
+ * @param path_capacity  must be >= WMA_TUNER_DUMP_PATH_CAPACITY.
+ * @return false (out_values and out_path untouched, take left running) for
+ *         everything stop() refuses, a null out_path or a too-small
+ *         path_capacity.
+ */
+WMA_API bool wma_tuner_diag_input_dump_stop_with_path(WmaEngine* engine, int64_t* out_values,
+                                                      int count, char* out_path,
+                                                      int path_capacity);
 
 /* ================================================================
  * 13. Dual Touch

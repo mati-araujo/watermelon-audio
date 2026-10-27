@@ -33,6 +33,7 @@
 #include <unordered_map>
 #include <memory>
 #include <string>
+#include <cstring>
 #include <vector>
 
 // External declarations from jni_usb.cpp for USB volume
@@ -1322,22 +1323,37 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerD
     }
 }
 
-/// null (y no ceros) sin toma o sin motor: un cero es un dato plausible, ver MINI-003.
-JNIEXPORT jlongArray JNICALL
+/// Cierra la toma, llena `values` (WMA_TUNER_DUMP_STATS_VALUES) y devuelve los bytes UTF-8 del
+/// archivo que la toma DEJO en disco, segun el nativo (bug A de REQ-055 S0: el puente no lo
+/// reconstruye con el path que pidio). null (y `values` sin tocar) sin toma, sin motor o con un
+/// `values` de otro largo: un cero es un dato plausible, ver MINI-003.
+JNIEXPORT jbyteArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerDiagInputDumpStop(
-    JNIEnv* env, jobject thiz) {
+    JNIEnv* env, jobject thiz, jlongArray values) {
     (void)thiz;
-    int64_t values[WMA_TUNER_DUMP_STATS_VALUES];
-    if (!wma_tuner_diag_input_dump_stop(g_wmaEngine, values, WMA_TUNER_DUMP_STATS_VALUES)) {
+    if (values == nullptr || env->GetArrayLength(values) != WMA_TUNER_DUMP_STATS_VALUES) {
         return nullptr;
     }
-    // `jlong` no es `int64_t` en todas las ABIs (long long contra long): se copia, no se castea.
-    jlong out[WMA_TUNER_DUMP_STATS_VALUES];
-    for (int i = 0; i < WMA_TUNER_DUMP_STATS_VALUES; ++i) out[i] = static_cast<jlong>(values[i]);
-    jlongArray result = env->NewLongArray(WMA_TUNER_DUMP_STATS_VALUES);
-    if (result == nullptr) return nullptr;
-    env->SetLongArrayRegion(result, 0, WMA_TUNER_DUMP_STATS_VALUES, out);
-    return result;
+    try {   // una excepcion de C++ no puede cruzar la frontera JNI
+        // Se reserva ANTES de cerrar la toma: un bad_alloc despues la perderia sin informarla.
+        std::vector<char> path(WMA_TUNER_DUMP_PATH_CAPACITY, '\0');
+        int64_t stats[WMA_TUNER_DUMP_STATS_VALUES];
+        if (!wma_tuner_diag_input_dump_stop_with_path(g_wmaEngine, stats, WMA_TUNER_DUMP_STATS_VALUES,
+                                                      path.data(), WMA_TUNER_DUMP_PATH_CAPACITY)) {
+            return nullptr;
+        }
+        // `jlong` no es `int64_t` en todas las ABIs (long long contra long): se copia, no se castea.
+        jlong out[WMA_TUNER_DUMP_STATS_VALUES];
+        for (int i = 0; i < WMA_TUNER_DUMP_STATS_VALUES; ++i) out[i] = static_cast<jlong>(stats[i]);
+        env->SetLongArrayRegion(values, 0, WMA_TUNER_DUMP_STATS_VALUES, out);
+        const jsize len = static_cast<jsize>(std::strlen(path.data()));
+        jbyteArray result = env->NewByteArray(len);
+        if (result == nullptr) return nullptr;
+        env->SetByteArrayRegion(result, 0, len, reinterpret_cast<const jbyte*>(path.data()));
+        return result;
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 JNIEXPORT void JNICALL

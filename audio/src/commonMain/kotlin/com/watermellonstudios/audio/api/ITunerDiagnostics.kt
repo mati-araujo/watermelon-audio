@@ -39,12 +39,16 @@ interface ITunerDiagnostics {
      * existen (un symlink incluido), no arranca; si el nombre final aparece durante la toma, al
      * detener no se lo reemplaza y la toma queda sin finalizar ([TunerInputDumpResult.finalized]).
      *
-     * @return false si no hay motor, si [path] no termina en `.wav`, si tiene un `'\u0000'` o un
-     *   surrogate suelto (no se lo puede nombrar en disco tal cual), si ya hay una toma en curso, si
-     *   el archivo no se puede crear (directorio inexistente, sin permiso, nombre ocupado) o si el
-     *   análisis no aplicó el
-     *   pedido a tiempo. En este último caso la toma puede haber quedado viva: un false no prueba que
-     *   no la haya, así que quien lo recibe llama a [stopTunerInputDump].
+     * @return false si no hay motor, si [path] no termina en `.wav` o pasa de 4096 bytes en UTF-8, si
+     *   tiene un `'\u0000'` o un surrogate suelto (no se lo puede nombrar en disco tal cual), si ya
+     *   hay una toma en curso, si el archivo no se puede crear (directorio inexistente, sin permiso,
+     *   nombre ocupado) o si el análisis no aplicó el pedido a tiempo.
+     *
+     *   **Un false no deja nada de esta toma en disco** (ni `.part` ni archivo nombrado), y nunca
+     *   toca una toma que ya estaba en curso. Una sola excepción: si el análisis no aplicó ni el
+     *   armado ni el desarme, la toma queda viva (su `.part` se puede seguir escribiendo y no se
+     *   borra). Un false no prueba que no la haya, así que quien lo recibe llama a
+     *   [stopTunerInputDump], cuyo [TunerInputDumpResult.path] dice qué archivo dejó.
      */
     fun startTunerInputDump(path: String): Boolean
 
@@ -64,6 +68,8 @@ interface ITunerDiagnostics {
  * [valid] es `false` ante **cualquier** pérdida o discontinuidad, aunque sea de un frame: una toma
  * así sirve para diagnosticar y no para medir. [path] es el archivo FINAL: el pedido si es válida,
  * el de [invalidPathFor] si no.
+ *
+ * [path] lo informa el NATIVO (el sink sabe qué dejó), no se reconstruye con el path pedido.
  *
  * [finalized] es `false` si el archivo no se pudo cerrar o renombrar —incluido un nombre final que
  * otro archivo ocupó durante la toma, que nunca se reemplaza—: entonces [valid] es `false`,
@@ -93,12 +99,20 @@ data class TunerInputDumpResult(
 
         /**
          * Arma el resultado con los [VALUE_COUNT] valores nativos, en el orden de la C API:
-         * framesWritten, framesLost, discontinuities, sampleRate, inputSource, valid (0/1), finalized (0/1).
+         * framesWritten, framesLost, discontinuities, sampleRate, inputSource, valid (0/1), finalized (0/1),
+         * y el archivo que la toma dejó en disco, **tal como lo informa el nativo**
+         * (`wma_tuner_diag_input_dump_stop_with_path`).
          *
-         * @return null si [values] es null o no tiene exactamente [VALUE_COUNT] valores.
+         * El path no se reconstruye con el pedido (bug A de REQ-055 S0): tras un start que devolvió
+         * false con la toma viva, el último path pedido no es necesariamente el de la toma que
+         * corrió. El que sabe qué archivo quedó es el sink.
+         *
+         * @return null si [values] es null o no tiene exactamente [VALUE_COUNT] valores, o si
+         *   [nativePath] es null o vacío (una toma cerrada siempre deja un archivo).
          */
-        fun fromNative(values: LongArray?, requestedPath: String): TunerInputDumpResult? {
+        fun fromNative(values: LongArray?, nativePath: String?): TunerInputDumpResult? {
             if (values == null || values.size != VALUE_COUNT) return null
+            if (nativePath.isNullOrEmpty()) return null
             val finalized = values[6] != 0L
             // Sin archivo nombrado no hay toma sana, diga lo que diga el índice 5.
             val valid = finalized && values[5] != 0L
@@ -110,18 +124,15 @@ data class TunerInputDumpResult(
                 inputSource = values[4].toInt(),
                 valid = valid,
                 finalized = finalized,
-                path = when {
-                    !finalized -> "$requestedPath.part"
-                    valid -> requestedPath
-                    else -> invalidPathFor(requestedPath)
-                },
+                path = nativePath,
             )
         }
 
         /**
          * El nombre que el nativo le da a una toma inválida: `x.wav` -> `x.invalid.wav`, y si no
-         * termina en `.wav`, `path + ".invalid.wav"`. La misma regla que `invalidDumpPathFor` de C++:
-         * Kotlin predice el nombre sin leer el disco.
+         * termina en `.wav`, `path + ".invalid.wav"`. La misma regla que `invalidDumpPathFor` de C++.
+         * Sirve para PREDECIR el nombre (mostrarlo, buscarlo); el [path] de un resultado no sale de
+         * acá sino del nativo.
          */
         fun invalidPathFor(path: String): String =
             if (path.endsWith(WAV_EXTENSION)) {

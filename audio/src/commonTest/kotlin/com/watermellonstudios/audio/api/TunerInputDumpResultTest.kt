@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
  * REQ-055 S0 · 0.1 — el resultado del volcado a WAV de la entrada del afinador, del lado Kotlin.
  *
  * AC-055.1 — el corpus se captura por el camino del afinador. Esta clase prueba el último eslabón
- * antes de la app: cómo los siete `Long` que devuelve la frontera nativa se vuelven un
+ * antes de la app: cómo los siete `Long` y el path que devuelve la frontera nativa se vuelven un
  * [TunerInputDumpResult]. Es lógica pura, sin motor ni disco, y es donde se rompería en silencio:
  * un índice corrido hace que "perdidas" se lea como "frames escritos", y la app mostraría una toma
  * sana con el contador equivocado.
@@ -61,43 +61,56 @@ class TunerInputDumpResultTest {
     }
 
     /**
-     * `valid` es el último valor: 1 = sana, 0 = no. Y es la que decide el path final.
+     * BugA (REQ-055 S0) — el path del resultado es EL QUE INFORMA EL NATIVO, tal cual, sea cual sea
+     * la combinación de `valid` y `finalized`: Kotlin no lo reconstruye con un path pedido.
      *
-     * Bug que atrapa: un `valid` invertido, o ignorado al armar el path (la app le mostraría al
-     * usuario el nombre de una toma sana para un archivo que quedó con `.invalid`). Mutante que
-     * mata: path siempre el pedido; path siempre el inválido; `valid` leído de otro índice.
+     * Bug que atrapa: un `fromNative` que vuelve a derivar el nombre (con el último path pedido, que
+     * tras un start rechazado no es el de la toma que corrió). Mutante que mata: recalcular el path
+     * con `invalidPathFor`/`.part` en vez de usar el del nativo.
      */
     @Test
-    fun `el path final es el pedido si es valida y el invalido si no`() {
-        val ok = assertNotNull(TunerInputDumpResult.fromNative(values(valid = 1L), "dir/toma.wav"))
-        assertTrue(ok.valid)
-        assertEquals("dir/toma.wav", ok.path, "una toma válida queda en el path pedido")
+    fun `BugA - el path es el que informa el nativo, sin reconstruirlo`() {
+        // Un path que NINGUNA regla de nombres produce a partir de otro: si sale igual, viajó.
+        val native = "dir/la-que-corrio.invalid.wav"
+        for (valid in longArrayOf(0L, 1L)) {
+            for (finalized in longArrayOf(0L, 1L)) {
+                val r = assertNotNull(TunerInputDumpResult.fromNative(values(valid, finalized), native))
+                assertEquals(native, r.path, "valid=$valid finalized=$finalized")
+            }
+        }
+    }
 
-        val bad = assertNotNull(TunerInputDumpResult.fromNative(values(valid = 0L), "dir/toma.wav"))
+    /** Sin path nativo no hay resultado: una toma cerrada siempre deja un archivo. */
+    @Test
+    fun `BugA - sin path nativo no hay resultado`() {
+        assertNull(TunerInputDumpResult.fromNative(values(), null))
+        assertNull(TunerInputDumpResult.fromNative(values(), ""))
+    }
+
+    /**
+     * `valid` es el índice 5: 1 = sana, 0 = no, y no depende del path.
+     * Mutante que mata: `valid` leído de otro índice o invertido.
+     */
+    @Test
+    fun `valid sale del indice 5`() {
+        assertTrue(assertNotNull(TunerInputDumpResult.fromNative(values(valid = 1L), "dir/toma.wav")).valid)
+        val bad = assertNotNull(TunerInputDumpResult.fromNative(values(valid = 0L), "dir/toma.invalid.wav"))
         assertFalse(bad.valid)
-        assertEquals("dir/toma.invalid.wav", bad.path, "una inválida queda con el nombre de inválida")
-        assertEquals(TunerInputDumpResult.invalidPathFor("dir/toma.wav"), bad.path)
-
         // Y el resto de los campos no depende de `valid`.
         assertEquals(132_300L, bad.framesWritten)
         assertEquals(7L, bad.framesLost)
     }
 
     /**
-     * `finalized = 0` (no se pudo cerrar o renombrar): el archivo es `<pedido>.part`, NUNCA el
-     * `.invalid` que no existe, y la toma no es válida aunque el índice `valid` dijera 1.
-     *
-     * Bug que atrapa: calcular el path solo con `valid` (apunta a `x.invalid.wav`, inexistente) o
-     * dejar pasar un `valid = 1` sobre un archivo que nunca se nombró. Mutante que mata: ignorar
-     * `values[6]`.
+     * `finalized = 0` (no se pudo cerrar o renombrar): la toma no es válida aunque el índice `valid`
+     * dijera 1. Mutante que mata: ignorar `values[6]`.
      */
     @Test
-    fun `una toma sin finalizar apunta al part y nunca es valida`() {
+    fun `una toma sin finalizar nunca es valida`() {
         for (valid in longArrayOf(0L, 1L)) {
-            val r = assertNotNull(TunerInputDumpResult.fromNative(values(valid = valid, finalized = 0L), "dir/toma.wav"))
+            val r = assertNotNull(TunerInputDumpResult.fromNative(values(valid = valid, finalized = 0L), "dir/toma.wav.part"))
             assertFalse(r.finalized)
             assertFalse(r.valid, "sin archivo nombrado no hay toma sana (valid nativo = $valid)")
-            assertEquals("dir/toma.wav.part", r.path)
         }
     }
 
@@ -150,7 +163,7 @@ class TunerInputDumpResultTest {
      */
     @Test
     fun `una toma vacia es un resultado y no un null`() {
-        val r = assertNotNull(TunerInputDumpResult.fromNative(longArrayOf(0, 0, 0, 0, 0, 0, 1), "t.wav"))
+        val r = assertNotNull(TunerInputDumpResult.fromNative(longArrayOf(0, 0, 0, 0, 0, 0, 1), "t.invalid.wav"))
         assertEquals(0L, r.framesWritten)
         assertFalse(r.valid)
         assertEquals("t.invalid.wav", r.path)

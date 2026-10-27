@@ -50,11 +50,11 @@ citar** cualquier otro numero; por que, en `docs/dev/conteos-que-envejecen.md`.
 | `kt-iosMain` | 6 | archivos .kt en iosMain |
 | `kt-jvmSharedMain` | 6 | archivos .kt en jvmSharedMain (Android + desktop) |
 | `kt-desktopMain` | 5 | archivos .kt en desktopMain |
-| `bridge-loc` | 3831 | LOC de AudioNativeBridge.kt |
+| `bridge-loc` | 3821 | LOC de AudioNativeBridge.kt |
 | `bridge-external` | 338 | `external fun` en AudioNativeBridge |
 | `jniexport-bridge` | 327 | JNIEXPORT en jni_audio_bridge.cpp |
 | `jniexport-total` | 340 | JNIEXPORT en todo jni/*.cpp |
-| `wma-api` | 290 | declaraciones WMA_API en la C API |
+| `wma-api` | 291 | declaraciones WMA_API en la C API |
 | `analysis-files` | 23 | fuentes .h/.cpp en cpp/analysis/ (sin tests/) |
 | `callers-baseline` | 1 callback-externo / 13 deuda / 2 entrada / 65 sonda-de-tests | reparto del baseline de llamadores |
 | `ver-kotlin` | 2.4.20 | version de Kotlin |
