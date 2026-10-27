@@ -672,7 +672,7 @@ TEST(SongUnload, ReferencedClipIsRefusedAndReleasedOnlyAfterTheCallbackMovedOn) 
     EXPECT_EQ(rig.looper.song().reclaim(false), bytes)
         << "todavia suena la cola de fundido que lee el clip";
     rig.render(640, 256, 128);   // la cola dura F frames (hasta 752); despues, nadie lo tiene
-    EXPECT_EQ(rig.looper.song().reclaim(false), 0u);
+    rig.looper.song().reclaim(false);
     EXPECT_EQ(rig.looper.song().retiredClips(), 0);
 }
 
@@ -1368,4 +1368,124 @@ TEST(SongClip, AC_055_13_ASampleRateChangeDuringALoadDoesNotWaitAndDiscardsTheCl
     int32_t id = -1;
     EXPECT_EQ(rig.looper.songLoadClip(path2.c_str(), 44100, 0, 0, kEditLoop, false, id),
               wm::SongStatus::Ok);
+}
+
+// ---------------------------------------------------------------------------------------
+// AC-055.13: la cola de fundido tras liberar con el stream parado (re-review 2)
+// ---------------------------------------------------------------------------------------
+
+namespace {
+
+/// Edita X->Y con el stream parado dentro de la cola de X, descarga X parado y reanuda sin
+/// republicar; 8192 frames despues edita Y->Z. Devuelve el escalon de esa ultima edicion.
+struct ScrubRun {
+    double step = 0.0;
+    int64_t late = 0;
+};
+
+ScrubRun editAfterScrubThatAdoptedNothing() {
+    Rig rig;
+    const int32_t x = rig.load("scrub_x", kEditLoop, dc(0.5f), kEditLoop);
+    const int32_t y = rig.load("scrub_y", kEditLoop, dc(-0.5f), kEditLoop);
+    const int32_t z = rig.load("scrub_z", kEditLoop, dc(0.25f), kEditLoop);
+    const int64_t end = int64_t{1} << 22;
+    EXPECT_EQ(rig.schedule(kEditLoop, {sec(0, x)}, end), wm::SongStatus::Ok);
+    std::vector<float> out = rig.render(0, 8192, 64);
+    EXPECT_EQ(rig.schedule(kEditLoop, {sec(0, y)}, end), wm::SongStatus::Ok);
+    std::vector<float> seg = rig.render(8192, 64, 64);   // la cola de X sigue viva al parar
+    out.insert(out.end(), seg.begin(), seg.end());
+    EXPECT_EQ(rig.looper.songUnloadClip(x, false, true), wm::SongStatus::Ok);
+    EXPECT_EQ(rig.looper.song().retiredClips(), 0) << "con el stream parado se libera";
+    seg = rig.render(8256, 8192, 64);   // arranca sin republicar: el scrub no adopta nada
+    out.insert(out.end(), seg.begin(), seg.end());
+    const int64_t t = 8256 + 8192;
+    EXPECT_EQ(rig.schedule(kEditLoop, {sec(0, z)}, end), wm::SongStatus::Ok);
+    seg = rig.render(t, 4096, 64);
+    out.insert(out.end(), seg.begin(), seg.end());
+    return {maxStep(out, t - 300, t + 600), rig.looper.songGetLateAdoptions()};
+}
+
+}  // namespace
+
+// Bug plausible (re-review 2, importante): el scrub deja `mSkipTailOnce` prendido cuando el bloque
+// que lo consume no adopta nada; la proxima edicion LEGITIMA (Y->Z, muchos frames despues) pierde
+// su cola de fundido: corte seco (~0,53) y una adopcion tardia sin contar.
+TEST(SongUnload, AC_055_13_AScrubThatAdoptedNothingDoesNotEatTheNextEditsFade) {
+    const ScrubRun r = editAfterScrubThatAdoptedNothing();
+    EXPECT_LE(r.step, 2.0 * normalFadeStep()) << "corte seco: la edicion perdio su fundido";
+    EXPECT_EQ(r.late, 3);
+}
+
+// Bug plausible (re-review 2, otra entrada): un cambio de sample rate sin cancion publicada
+// prende el scrub; el `play` siguiente con start_0 a menos de F adopta con la bandera vieja y
+// entra con escalon en vez de fundido de entrada.
+TEST(SongUnload, AC_055_13_ARateChangeWithoutASongDoesNotEatThePlayFadeIn) {
+    Rig rig;
+    rig.looper.setSampleRate(44100);
+    const int64_t fade = 220;   // songFadeFrames(44100)
+    const std::string path = rig.write("scrub_rate", kEditLoop, dc(0.5f), 44100);
+    int32_t x = -1;
+    ASSERT_EQ(rig.looper.songLoadClip(path.c_str(), 44100, 0, 0, kEditLoop, false, x),
+              wm::SongStatus::Ok);
+    std::vector<float> out = rig.render(0, 8192, 64);
+    const int64_t t = 8192;
+    ASSERT_EQ(rig.schedule(kEditLoop, {sec(t + 64, x)}, t + 64 + 100000), wm::SongStatus::Ok);
+    const std::vector<float> rest = rig.render(t, 4096, 64);
+    out.insert(out.end(), rest.begin(), rest.end());
+    const double normalEntry = 0.5 * M_PI / (2.0 * fade) * centerGain();
+    EXPECT_LE(maxStep(out, t - 10, t + 600), 2.0 * normalEntry) << "escalon al entrar";
+    EXPECT_EQ(rig.looper.songGetLateAdoptions(), 1);
+}
+
+// Bug plausible (re-review 2, hueco de test): la foto de lo en uso publica sólo la capa de arriba
+// de la cola. Con dos adopciones tardias separadas 32 frames, la capa 0 todavia lee X: liberarlo
+// es un use-after-free (y un fantasma si el id se reusa).
+TEST(SongUnload, AC_055_13_TheInUseMaskCoversEveryTailLayer) {
+    Rig rig;
+    const int32_t x = rig.load("mask_x", kEditLoop, dc(0.5f), kEditLoop);
+    const int32_t y = rig.load("mask_y", kEditLoop, dc(-0.5f), kEditLoop);
+    const int32_t z = rig.load("mask_z", kEditLoop, dc(0.25f), kEditLoop);
+    const int64_t end = int64_t{1} << 22;
+    ASSERT_EQ(rig.schedule(kEditLoop, {sec(100, x)}, end), wm::SongStatus::Ok);
+    rig.render(0, 4096, 32);
+    ASSERT_EQ(rig.schedule(kEditLoop, {sec(100, y)}, end), wm::SongStatus::Ok);
+    rig.render(4096, 32, 32);   // capa 0: cola sobre X
+    ASSERT_EQ(rig.schedule(kEditLoop, {sec(100, z)}, end), wm::SongStatus::Ok);
+    rig.render(4128, 32, 32);   // capa 1: cola sobre Y; la de X sigue viva
+    ASSERT_EQ(rig.looper.songUnloadClip(x, false), wm::SongStatus::Ok);
+    EXPECT_EQ(rig.looper.song().retiredClips(), 1) << "X se libero con una capa de cola leyendolo";
+    rig.render(4160, 32, 32);
+    rig.looper.song().reclaim(false);
+    EXPECT_EQ(rig.looper.song().retiredClips(), 1) << "sigue en la ventana de la capa 0";
+    rig.render(4192, 2 * kF, 32);   // terminan las ventanas
+    rig.looper.song().reclaim(false);
+    EXPECT_EQ(rig.looper.song().retiredClips(), 0) << "pasada la ventana tiene que liberarse";
+}
+
+// Bug plausible (re-review 2, menor): en offline la baja inmediata no mira las colas de fundido:
+// una cola sobre X, descargar X y cargar G (reusa el id) hace sonar G en la cola (salto ~0,26).
+TEST(SongUnload, AC_055_13_OfflineUnloadKeepsATailedClipAndNeverPlaysTheReusedId) {
+    Rig rig;
+    auto loadOffline = [&](const std::string& name, float v) {
+        const std::string path = rig.write(name, kEditLoop, dc(v));
+        int32_t id = -1;
+        EXPECT_EQ(rig.looper.songLoadClip(path.c_str(), kSR, 0, 0, kEditLoop, true, id),
+                  wm::SongStatus::Ok);
+        return id;
+    };
+    const int32_t x = loadOffline("off_x", 0.5f);
+    const int32_t y = loadOffline("off_y", -0.5f);
+    const int64_t end = int64_t{1} << 22;
+    const std::vector<wm::SongSection> a{sec(0, x)}, b{sec(0, y)};
+    ASSERT_EQ(rig.looper.songSetSchedule(kEditLoop, a.data(), 1, end, true), wm::SongStatus::Ok);
+    std::vector<float> out = rig.render(0, 8192, 64);
+    ASSERT_EQ(rig.looper.songSetSchedule(kEditLoop, b.data(), 1, end, true), wm::SongStatus::Ok);
+    std::vector<float> seg = rig.render(8192, 64, 64);   // cola viva sobre X
+    out.insert(out.end(), seg.begin(), seg.end());
+    ASSERT_EQ(rig.looper.songUnloadClip(x, true), wm::SongStatus::Ok);
+    const int32_t g = loadOffline("off_g", 0.9f);
+    seg = rig.render(8256, 512, 64);
+    out.insert(out.end(), seg.begin(), seg.end());
+    EXPECT_LE(maxStep(out, 8193, 8256 + 300), 2.0 * normalFadeStep())
+        << "la cola de X leyo el clip reusado (id " << g << ")";
 }

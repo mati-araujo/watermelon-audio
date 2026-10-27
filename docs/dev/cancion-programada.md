@@ -86,8 +86,10 @@ la **verifica** con un handshake Dekker, todo `seq_cst`: el control levanta `mFr
 bloque abierto (no libera: queda el camino diferido) o el RT ve el congelamiento (ese bloque
 no lee ningun clip: silencio de cancion un bloque, el precio de una carrera con el arranque).
 Al liberar se levanta `mScrub`: las colas del RT pueden apuntar a ids que se reusan, asi que el
-RT las descarta y la primera adopcion siguiente no congela cola (se pierde ese fundido, una vez).
-Un cambio de sample rate hace lo mismo. Offline sigue liberando de inmediato (`immediate`).
+RT las descarta y la adopcion de ESE bloque no congela cola (se pierde ese fundido, una vez); si
+ese bloque no adopta nada la bandera se apaga igual y no se come la edicion siguiente.
+Un cambio de sample rate hace lo mismo. Offline libera de inmediato (`immediate`) salvo un clip que
+una capa de cola todavia lee (`mTailMask`): queda retirado hasta que termina la ventana.
 
 ## Apagar la agenda
 

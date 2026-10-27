@@ -545,6 +545,7 @@ public:
         mBlockFrame = blockFrame;
         mBlockFrames = numFrames;
         adoptSongSchedule(blockFrame);
+        mSkipTailOnce = false;   // vale para UN bloque: si no adopto nada, no se arrastra
         pruneSongTails(blockFrame);
         mBlockSection = songSectionAt(*mCur, blockFrame);
         return mCur->count > 0 || blockFrame < mTailUntil;
@@ -616,16 +617,17 @@ public:
     void endSongBlock() {
         const int s = songSectionAt(*mCur, mBlockFrame + mBlockFrames - 1);
         mSection.store(s >= 0 && s < mCur->count ? s : -1, std::memory_order_relaxed);
-        uint64_t mask = mCur->clipMask;
+        uint64_t tails = 0;
         for (int t = 0; t < kSongMaxTracks; ++t) {
             const Voice& v = mVoices[t];
             if (mBlockFrame >= v.tailEnd) continue;
             for (int j = 0; j < v.tails; ++j) {
-                if (v.tail[j].seg.cur >= 0) mask |= 1ULL << v.tail[j].seg.cur;
-                if (v.tail[j].seg.nxt >= 0) mask |= 1ULL << v.tail[j].seg.nxt;
+                if (v.tail[j].seg.cur >= 0) tails |= 1ULL << v.tail[j].seg.cur;
+                if (v.tail[j].seg.nxt >= 0) tails |= 1ULL << v.tail[j].seg.nxt;
             }
         }
-        mInUseMask.store(mask, std::memory_order_release);
+        mTailMask.store(tails, std::memory_order_relaxed);
+        mInUseMask.store(mCur->clipMask | tails, std::memory_order_release);
         mMaskSeq.store(mAdoptedSeq, std::memory_order_release);
         mBlocksRun.bump();
         mRtInBlock.store(false, std::memory_order_release);
@@ -694,7 +696,9 @@ private:
         for (int i = 0; i < kSongMaxClips; ++i) {
             Slot& s = mSlots[i];
             if (s.state != SlotState::Retired) continue;
-            if (immediate || (maskSeq >= s.retireSeq && !((inUse >> i) & 1ULL))) {
+            // Offline no hay RT concurrente, pero una cola de fundido puede seguir leyendo el clip.
+            const bool tailed = (mTailMask.load(std::memory_order_relaxed) >> i) & 1ULL;
+            if ((immediate && !tailed) || (maskSeq >= s.retireSeq && !((inUse >> i) & 1ULL))) {
                 freeSlotLocked(i);
             } else {
                 pending = true;
@@ -994,6 +998,7 @@ private:
     std::atomic<int32_t> mSection{-1};
     std::atomic<int64_t> mLate{0};
     std::atomic<uint64_t> mInUseMask{0};
+    std::atomic<uint64_t> mTailMask{0};   // RT -> control: lo que leen las colas (baja offline)
     std::atomic<uint64_t> mMaskSeq{0};
     std::atomic<bool> mFreeze{false};     // control: "estoy liberando sin esperar al RT"
     std::atomic<bool> mRtInBlock{false};  // RT: dentro de un bloque de la cancion
