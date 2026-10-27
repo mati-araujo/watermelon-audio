@@ -1381,6 +1381,9 @@ static_assert(WMA_TUNER_DUMP_STATS_VALUES == wma::analysis::kInputDumpStatsValue
 
 bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path) {
     if (!engine || !path || path[0] == '\0') return false;
+    // El volcado solo crea `.wav` (hallazgo 1): el path lo arma la app y no puede usarse para
+    // crear un archivo de cualquier nombre. El sink, ademas, nunca pisa uno que ya exista.
+    if (!wma::analysis::hasWavExtension(path)) return false;
     if (!wmaEnsureAnalysis(engine)) return false;
     std::lock_guard<std::mutex> lock(engine->analysisMutex);
     if (!engine->analysisThread) return false;

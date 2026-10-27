@@ -168,7 +168,8 @@ class TunerDiagnosticsJniTest {
     /**
      * Una toma que no se pudo NOMBRAR cruza como `finalized = false` y apunta al `.part`.
      *
-     * Se fuerza con un DIRECTORIO donde iría el `.invalid.wav`: el `rename` del `.part` falla. Sin el
+     * Se fuerza con un DIRECTORIO que aparece, durante la toma, donde iría el `.invalid.wav`: el
+     * renombre (que nunca reemplaza) falla. Con el nombre ocupado ANTES el start ya rechaza. Sin el
      * séptimo valor Kotlin calcularía `toma.invalid.wav`, que existe... como directorio vacío.
      * Mata: ignorar `finalized` al armar el path; el JNI que copie 6 valores en vez de 7.
      */
@@ -176,9 +177,9 @@ class TunerDiagnosticsJniTest {
     fun `una toma que no se pudo nombrar cruza sin finalizar y apunta al part`() {
         ensureEngine()
         val path = pathOf("toma.wav")
-        assertTrue(File(pathOf("toma.invalid.wav")).mkdir(), "premisa: un directorio ocupa el nombre final")
 
         assertTrue(start(path))
+        assertTrue(File(pathOf("toma.invalid.wav")).mkdir(), "premisa: un directorio ocupa el nombre final")
         val r = assertNotNull(stop())
 
         assertFalse(r.finalized)

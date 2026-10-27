@@ -28,12 +28,14 @@ void putTag(uint8_t* p, const char (&tag)[5]) { std::memcpy(p, tag, 4); }
 
 }  // namespace
 
-std::string invalidDumpPathFor(const std::string& path) {
+bool hasWavExtension(const std::string& path) {
     // Solo la extension FINAL cuenta: el ".wav" de un directorio no es la del archivo.
-    const bool hasWav = path.size() >= kWavExtensionLen &&
-                        path.compare(path.size() - kWavExtensionLen, kWavExtensionLen,
-                                     kWavExtension) == 0;
-    if (!hasWav) return path + ".invalid.wav";
+    return path.size() >= kWavExtensionLen &&
+           path.compare(path.size() - kWavExtensionLen, kWavExtensionLen, kWavExtension) == 0;
+}
+
+std::string invalidDumpPathFor(const std::string& path) {
+    if (!hasWavExtension(path)) return path + ".invalid.wav";
     return path.substr(0, path.size() - kWavExtensionLen) + ".invalid.wav";
 }
 

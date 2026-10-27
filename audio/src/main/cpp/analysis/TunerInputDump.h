@@ -59,6 +59,11 @@ public:
 /// "x.wav" -> "x.invalid.wav"; si no termina en ".wav": path + ".invalid.wav".
 std::string invalidDumpPathFor(const std::string& path);
 
+/// true si `path` termina en ".wav" (minusculas, la extension que nombra el volcado). La C API
+/// rechaza cualquier otro (hallazgo 1 del security-auditor): el volcado solo crea archivos `.wav`,
+/// nunca uno con el nombre que la app le pase.
+bool hasWavExtension(const std::string& path);
+
 struct InputDumpStats {
     uint64_t framesWritten = 0;    ///< frames que el sink acepto
     uint64_t framesLost = 0;       ///< pisados en el ring antes de copiar + cola llena + error del sink

@@ -13,6 +13,9 @@
  *     reservado, o el header se escribiera al final, el archivo no se abre.
  *   - Las muestras llegan BIT A BIT: son floats crudos, no texto ni cuantizados.
  *
+ *   - HALLAZGO 1 (security-auditor de REQ-055): el diagnostico no destruye archivos. Ni el `.part`
+ *     ni el nombre final pisan, truncan o siguen (symlink) algo que ya estaba en el disco.
+ *
  * Corre contra un directorio temporal propio, que se borra al terminar.
  */
 
@@ -21,6 +24,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -224,12 +228,14 @@ TEST_F(WavSinkTest, OpenPartFailsWhenTheDirectoryDoesNotExist) {
  */
 TEST_F(WavSinkTest, AFailedRenameReturnsAnEmptyPathInsteadOfAFalseOne) {
     const std::string path = pathOf("ocupado.wav");
+    WavFileDumpSink sink;
+    ASSERT_TRUE(sink.openPart(path, kInputDumpHeaderBytes));
+
+    // El directorio aparece DURANTE la toma: con el nombre ocupado antes, `openPart` ya rechaza
+    // (hallazgo 1, ver `AnExistingFinalNameRejectsTheOpenAndIsLeftUntouched`).
     std::error_code ec;
     fs::create_directories(fs::path(path) / "adentro", ec);   // un directorio NO vacio con ese nombre
     ASSERT_FALSE(ec);
-
-    WavFileDumpSink sink;
-    ASSERT_TRUE(sink.openPart(path, kInputDumpHeaderBytes));
     const std::vector<float> samples = {0.1f, 0.2f};
     ASSERT_TRUE(sink.appendSamples(samples.data(), samples.size()));
     const std::vector<uint8_t> header = headerFor(2, true);
@@ -242,4 +248,165 @@ TEST_F(WavSinkTest, FinishingATakeThatWasNeverOpenedReturnsEmpty) {
     WavFileDumpSink sink;
     const std::vector<uint8_t> header = headerFor(0, false);
     EXPECT_EQ(sink.finishPart(header.data(), header.size(), false), "");
+}
+
+// ===========================================================================
+// HALLAZGO 1 (security-auditor de REQ-055): el diagnostico no destruye archivos.
+// El path lo arma la app; un nombre repetido o un symlink plantado no pueden costar un archivo ajeno.
+// ===========================================================================
+
+namespace {
+
+void writeBytes(const std::string& path, const std::string& content) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << content;
+}
+
+std::string readText(const std::string& path) {
+    const std::vector<uint8_t> b = readFile(path);
+    return std::string(b.begin(), b.end());
+}
+
+/// Un contenido que delata cualquier escritura: ni ceros ni un header de WAV.
+const std::string kForeign = "contenido-ajeno: no es un WAV y no se puede tocar\x01\x02";
+
+}  // namespace
+
+/**
+ * Hallazgo 1 — UN `.part` QUE YA EXISTE NO SE TRUNCA: `openPart` falla y lo deja byte a byte.
+ *
+ * Bug que atrapa: `fopen(part, "wb")` trunca lo que hubiera con ese nombre (otra toma viva de otro
+ * proceso, o un archivo del usuario). Mutante que mata: abrir sin `O_EXCL` (o con `fopen "wb"`).
+ */
+TEST_F(WavSinkTest, Hallazgo1_APreexistingPartIsNeverTruncatedAndTheOpenFails) {
+    const std::string path = pathOf("toma.wav");
+    writeBytes(path + ".part", kForeign);
+
+    WavFileDumpSink sink;
+    EXPECT_FALSE(sink.openPart(path, kInputDumpHeaderBytes)) << "abrio sobre un .part ajeno";
+    EXPECT_EQ(readText(path + ".part"), kForeign) << "el .part ajeno cambio";
+    EXPECT_FALSE(exists(path));
+    EXPECT_EQ(sink.finishPart(headerFor(0, false).data(), kInputDumpHeaderBytes, false), "")
+        << "un open fallido no deja nada que cerrar";
+    EXPECT_EQ(readText(path + ".part"), kForeign) << "el cierre de un open fallido toco el .part";
+}
+
+/**
+ * Hallazgo 1 — UN SYMLINK EN EL LUGAR DEL `.part` NO SE SIGUE, apunte a un archivo o a nada.
+ *
+ * Bug que atrapa: un symlink plantado en `<path>.part` que redirige la escritura a otro archivo
+ * (lo trunca) o lo crea donde apunta. Mutantes que mata: abrir sin `O_EXCL` y sin `O_NOFOLLOW`.
+ */
+TEST_F(WavSinkTest, Hallazgo1_ASymlinkAtThePartIsNeverFollowed) {
+    const std::string victim = pathOf("victima.bin");
+    writeBytes(victim, kForeign);
+    const std::string path = pathOf("toma.wav");
+    std::error_code ec;
+    fs::create_symlink(victim, path + ".part", ec);
+    ASSERT_FALSE(ec) << "premisa: no pude crear el symlink";
+
+    WavFileDumpSink sink;
+    EXPECT_FALSE(sink.openPart(path, kInputDumpHeaderBytes)) << "siguio el symlink del .part";
+    EXPECT_EQ(readText(victim), kForeign) << "el archivo apuntado por el symlink cambio";
+
+    // Colgante: el destino del symlink NO puede aparecer.
+    const std::string ghost = pathOf("fantasma.bin");
+    const std::string path2 = pathOf("toma2.wav");
+    fs::create_symlink(ghost, path2 + ".part", ec);
+    ASSERT_FALSE(ec);
+    EXPECT_FALSE(sink.openPart(path2, kInputDumpHeaderBytes)) << "siguio un symlink colgante";
+    EXPECT_FALSE(exists(ghost)) << "el open creo el archivo al que apuntaba el symlink colgante";
+}
+
+/**
+ * Hallazgo 1 — SI EL NOMBRE FINAL YA EXISTE, `openPart` RECHAZA de entrada (sano o `.invalid`).
+ *
+ * El veredicto (sano o invalido) se sabe recien al cerrar, asi que se exige libre cualquiera de los
+ * dos: si no, la toma correria minutos para terminar en un `.part` sin nombre. No crea el `.part`.
+ * Mutante que mata: no chequear el nombre final al abrir (o solo uno de los dos).
+ */
+TEST_F(WavSinkTest, Hallazgo1_AnExistingFinalNameRejectsTheOpenAndIsLeftUntouched) {
+    for (const std::string occupied : {"toma.wav", "toma.invalid.wav"}) {
+        SCOPED_TRACE(occupied);
+        const std::string path = pathOf("toma.wav");
+        writeBytes(pathOf(occupied), kForeign);
+
+        WavFileDumpSink sink;
+        EXPECT_FALSE(sink.openPart(path, kInputDumpHeaderBytes));
+        EXPECT_FALSE(exists(path + ".part")) << "un open rechazado dejo un .part";
+        EXPECT_EQ(readText(pathOf(occupied)), kForeign);
+        fs::remove(pathOf(occupied));
+    }
+}
+
+/**
+ * Hallazgo 1 — UN DESTINO QUE APARECE DURANTE LA TOMA QUEDA INTACTO, byte a byte, y la toma no se
+ * nombra: `finishPart` devuelve "" (=> `finalized = 0`) y los datos quedan en el `.part`.
+ *
+ * Bug que atrapa: `rename(2)` reemplaza el destino en silencio, asi que una toma que cierra sobre
+ * un archivo del usuario lo destruye. Vale para los dos nombres (sana e invalida).
+ * Mutante que mata: `std::rename` en lugar de `renameWithoutReplacing`.
+ */
+TEST_F(WavSinkTest, Hallazgo1_AFinalNameThatAppearsDuringTheTakeIsNeverReplaced) {
+    for (const bool valid : {true, false}) {
+        SCOPED_TRACE(valid ? "toma sana" : "toma invalida");
+        const std::string path = pathOf(valid ? "sana.wav" : "rota.wav");
+        const std::string finalName = valid ? path : invalidDumpPathFor(path);
+
+        WavFileDumpSink sink;
+        ASSERT_TRUE(sink.openPart(path, kInputDumpHeaderBytes));
+        const std::vector<float> samples = {0.5f, -0.5f, 0.25f};
+        ASSERT_TRUE(sink.appendSamples(samples.data(), samples.size()));
+        writeBytes(finalName, kForeign);   // aparece mientras la toma corre
+
+        const std::vector<uint8_t> header = headerFor(samples.size(), valid);
+        EXPECT_EQ(sink.finishPart(header.data(), header.size(), valid), "")
+            << "devolvio un nombre que no es el de la toma";
+        EXPECT_EQ(readText(finalName), kForeign) << "el cierre piso el archivo que ya estaba";
+
+        const std::vector<uint8_t> part = readFile(path + ".part");
+        ASSERT_EQ(part.size(), kInputDumpHeaderBytes + samples.size() * sizeof(float))
+            << "los datos de la toma no quedaron en el .part";
+        EXPECT_EQ(std::memcmp(part.data(), header.data(), kInputDumpHeaderBytes), 0);
+    }
+}
+
+/**
+ * Hallazgo 1 — CADA ESCALON DEL RENOMBRE SIN REEMPLAZO: con el destino ocupado no lo toca y deja
+ * el origen; con el destino libre, mueve.
+ *
+ * En el host solo se alcanza el primer escalon (macOS y el ext4 del CI soportan el nativo): los
+ * otros dos son los de un FUSE/sdcardfs de Android, y sin esto nadie los ejecutaria.
+ * Mutantes que mata: un escalon que cae a `rename(2)` sin mirar el destino; `link` sin `unlink`
+ * del origen (quedan los dos nombres); un escalon que devuelve true sin mover.
+ */
+TEST_F(WavSinkTest, Hallazgo1_EveryStepOfTheNoReplaceRenameKeepsAnExistingDestination) {
+    const std::array<NoReplaceRenameStep, 3> steps = {NoReplaceRenameStep::kNative,
+                                                      NoReplaceRenameStep::kLinkUnlink,
+                                                      NoReplaceRenameStep::kCheckThenRename};
+    int i = 0;
+    for (const NoReplaceRenameStep step : steps) {
+        SCOPED_TRACE("escalon " + std::to_string(i));
+        const std::string from = pathOf("origen-" + std::to_string(i));
+        const std::string to = pathOf("destino-" + std::to_string(i));
+        const std::string dirTo = pathOf("dir-" + std::to_string(i));
+        ++i;
+
+        writeBytes(from, "nuevo");
+        writeBytes(to, kForeign);
+        EXPECT_FALSE(renameWithoutReplacing(from, to, step)) << "reemplazo un archivo";
+        EXPECT_EQ(readText(to), kForeign);
+        EXPECT_EQ(readText(from), "nuevo") << "el origen se perdio con el destino ocupado";
+
+        std::error_code ec;
+        fs::create_directories(fs::path(dirTo) / "adentro", ec);
+        ASSERT_FALSE(ec);
+        EXPECT_FALSE(renameWithoutReplacing(from, dirTo, step)) << "reemplazo un directorio";
+        EXPECT_TRUE(fs::is_directory(fs::path(dirTo) / "adentro"));
+
+        fs::remove(to);
+        EXPECT_TRUE(renameWithoutReplacing(from, to, step)) << "con el destino libre tiene que mover";
+        EXPECT_EQ(readText(to), "nuevo");
+        EXPECT_FALSE(exists(from)) << "quedaron los dos nombres";
+    }
 }

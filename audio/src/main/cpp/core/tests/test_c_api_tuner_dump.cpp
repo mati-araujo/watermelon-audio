@@ -515,27 +515,89 @@ TEST_F(TunerDumpApiTest, ASourceChangeMidTakeInvalidatesItThroughTheRealPath) {
 }
 
 /**
- * AC-055.1 — UNA TOMA QUE NO SE PUDO NOMBRAR DICE `finalized = 0`, Y EL ARCHIVO ES EL `.part`.
+ * AC-055.1 + hallazgo 1 — UNA TOMA QUE NO SE PUDO NOMBRAR DICE `finalized = 0`, EL ARCHIVO ES EL
+ * `.part`, Y LO QUE OCUPABA EL NOMBRE FINAL QUEDA INTACTO, BYTE A BYTE.
  *
- * El destino pedido es un DIRECTORIO existente: el `rename` del `.part` falla. Kotlin no puede
- * predecir `x.invalid.wav` (no existe): tiene que saber que el archivo quedo como `<pedido>.part`.
- * Bug que atrapa: reportar solo `valid` y dejar que el consumidor apunte a un archivo inexistente.
- * Mutante que mata: out_values[6] fijo en 1 (o ausente).
+ * Un archivo ajeno aparece con el nombre final MIENTRAS la toma corre (con el nombre ocupado antes,
+ * el start ya rechaza: `StartRefusesAPathWhoseFinalNameIsTaken`). Kotlin no puede predecir
+ * `x.invalid.wav` (no es de la toma): tiene que saber que el archivo quedo como `<pedido>.part`.
+ * Bugs que atrapa: reportar solo `valid` y dejar que el consumidor apunte a un archivo que no es el
+ * suyo; un cierre que reemplaza el archivo ajeno (`rename(2)` lo hace en silencio).
+ * Mutantes que mata: out_values[6] fijo en 1 (o ausente); `std::rename` en el sink.
  */
 TEST_F(TunerDumpApiTest, ATakeThatCouldNotBeNamedReportsNotFinalizedAndKeepsThePart) {
     ASSERT_NO_FATAL_FAILURE(bringUpTuner(kRate44));
     const std::string path = pathOf("destino.wav");
-    std::error_code ec;
-    ASSERT_TRUE(fs::create_directory(fs::path(path), ec)) << "premisa: el destino es un directorio";
     ASSERT_TRUE(wma_tuner_diag_input_dump_start(mWma, path.c_str()));
     ASSERT_NO_FATAL_FAILURE(feedPaced(2));
+
+    // Sin audio perdido la toma seria sana: el nombre que se le ocupa es el pedido.
+    const std::string foreign = "archivo del usuario: no se toca";
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << foreign;
+    }
 
     const auto v = stopTake();
     EXPECT_EQ(v[0], 2 * kChunkFrames) << "los frames se escribieron";
     EXPECT_EQ(v[5], 0) << "sin archivo nombrado no hay toma sana, aunque cada frame se escribiera";
     EXPECT_EQ(v[6], 0) << "finalized";
+    const std::vector<uint8_t> after = readFile(path);
+    EXPECT_EQ(std::string(after.begin(), after.end()), foreign) << "el cierre piso el archivo ajeno";
     EXPECT_TRUE(exists(path + ".part")) << "el archivo real es el .part";
+    EXPECT_EQ(readFile(path + ".part").size(),
+              kHeaderBytes + static_cast<size_t>(2 * kChunkFrames) * sizeof(float));
     EXPECT_FALSE(exists(pathOf("destino.invalid.wav")));
+}
+
+/**
+ * Hallazgo 1 — `start` RECHAZA UN PATH QUE NO TERMINA EN `.wav`, sin crear nada ni dejar toma.
+ *
+ * El path lo arma la app: sin esto el diagnostico crea un archivo de cualquier nombre (y con el
+ * `.part` y el `.invalid.wav`, tres). La extension se exige en minusculas, la misma que usa el
+ * nombre del invalido. Mutante que mata: no validar la extension en la C API.
+ */
+TEST_F(TunerDumpApiTest, Hallazgo1_StartRejectsAPathThatDoesNotEndInWav) {
+    for (const char* name : {"toma", "toma.txt", "toma.wav.txt", "toma.WAV", "toma.wa", "toma.wav/"}) {
+        SCOPED_TRACE(name);
+        const std::string path = pathOf(name);
+        EXPECT_FALSE(wma_tuner_diag_input_dump_start(mWma, path.c_str()));
+        EXPECT_FALSE(exists(path + ".part"));
+        EXPECT_FALSE(exists(path));
+        if (mWma->tunerInputDump) EXPECT_FALSE(mWma->tunerInputDump->takeActive());
+    }
+    EXPECT_EQ(std::distance(fs::directory_iterator(fs::path(pathOf("x")).parent_path()),
+                            fs::directory_iterator{}), 0)
+        << "un start rechazado creo algo en el directorio";
+
+    // Y el mismo nombre con `.wav` si arranca: lo que se rechazo es la extension.
+    const std::string ok = pathOf("toma.wav");
+    EXPECT_TRUE(wma_tuner_diag_input_dump_start(mWma, ok.c_str()));
+    auto v = sentinelStats();
+    EXPECT_TRUE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
+}
+
+/**
+ * Hallazgo 1 — `start` RECHAZA SI EL NOMBRE FINAL (sano o invalido) O EL `.part` YA EXISTEN, y los
+ * deja byte a byte.
+ *
+ * Mutantes que mata: abrir el `.part` con truncado (`fopen "wb"`); no mirar el nombre final al abrir.
+ */
+TEST_F(TunerDumpApiTest, Hallazgo1_StartRefusesAPathWhoseFinalNameIsTaken) {
+    const std::string path = pathOf("ocupada.wav");
+    const std::string foreign = "no se toca";
+    for (const std::string& taken : {path, pathOf("ocupada.invalid.wav"), path + ".part"}) {
+        SCOPED_TRACE(taken);
+        {
+            std::ofstream out(taken, std::ios::binary);
+            out << foreign;
+        }
+        EXPECT_FALSE(wma_tuner_diag_input_dump_start(mWma, path.c_str()));
+        if (mWma->tunerInputDump) EXPECT_FALSE(mWma->tunerInputDump->takeActive());
+        const std::vector<uint8_t> after = readFile(taken);
+        EXPECT_EQ(std::string(after.begin(), after.end()), foreign);
+        fs::remove(taken);
+    }
 }
 
 // ---------------------------------------------------------------------------

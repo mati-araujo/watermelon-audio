@@ -1296,9 +1296,14 @@ WMA_API bool wma_tuner_analyze_buffer_with_candidates(
  * 5 valid (0/1), 6 finalized (0/1).
  *
  * finalized is 1 when the file was closed and named by the rule above ("<path>"
- * or "<path minus .wav>.invalid.wav"). 0 means closing or renaming failed: the
- * data is in "<path>.part" (or nowhere if even that could not be written), no
- * file with the final name exists, and valid is 0.
+ * or "<path minus .wav>.invalid.wav"). 0 means closing or renaming failed —
+ * including a file that already had the final name when the take closed, which
+ * is never replaced: the data is in "<path>.part" (or nowhere if even that
+ * could not be written), nothing was written under the final name, and valid
+ * is 0.
+ *
+ * A take never writes more than 2^28 frames (~93 min at 48 kHz): past that,
+ * every frame counts as lost and the take closes invalid.
  */
 #define WMA_TUNER_DUMP_STATS_VALUES 7
 
@@ -1312,9 +1317,15 @@ WMA_API bool wma_tuner_analyze_buffer_with_candidates(
  * Does NOT start the tuner: with no tuner running no audio reaches the
  * recording. Returns true even then; the take just closes invalid.
  *
- * @return false for a null engine, a null or empty path, a take already in
- *         progress, a file that cannot be created, or a request the analysis
- *         thread did not apply in time.
+ * Never overwrites, truncates or follows anything already on disk: it refuses to
+ * start if "<path>", its ".invalid.wav" name or "<path>.part" already exist (a
+ * symlink included).
+ *
+ * @param path  UTF-8, must end in ".wav" (lowercase).
+ * @return false for a null engine, a null or empty path, a path that does not
+ *         end in ".wav", a take already in progress, a file that cannot be
+ *         created or already exists, or a request the analysis thread did not
+ *         apply in time.
  */
 WMA_API bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path);
 
