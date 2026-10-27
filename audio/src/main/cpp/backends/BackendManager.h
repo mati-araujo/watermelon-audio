@@ -155,6 +155,22 @@ public:
      */
     static void setGlobalInstance(BackendManager* instance);
 
+    /**
+     * Register @p instance as the global one ONLY if none is registered (REQ-055 S2).
+     *
+     * `wma_engine_create()` used to call setGlobalInstance() unconditionally, so a
+     * SECOND engine (an offline render instance) stole the global from the live
+     * one, and destroying it left the global null: every JNI entry point that goes
+     * through getInstance() then drove the wrong manager, or the default static
+     * one. First registered wins; the JNI forces its live engine with
+     * setGlobalInstance() regardless of order.
+     * @return true if @p instance is now the global one.
+     */
+    static bool registerGlobalIfUnset(BackendManager* instance);
+
+    /** Clear the global pointer ONLY if it is @p instance (compare-and-swap). */
+    static void clearGlobalIf(BackendManager* instance);
+
     // Prevent copy/move
     BackendManager(const BackendManager&) = delete;
     BackendManager& operator=(const BackendManager&) = delete;

@@ -84,6 +84,18 @@ bool wmaEnsureInputNode(WmaEngine* e) {
 static bool ensureInputNode(WmaEngine* e) { return wmaEnsureInputNode(e); }
 
 /**
+ * The BackendManager OF THIS ENGINE (REQ-055 S2). Functions that take a handle
+ * ask their own engine's manager, not the global one: with a second instance in
+ * the process (offline render) they are different objects. The handle-less
+ * backend functions (wma_select_backend, wma_usb_*...) keep operating on the
+ * global, which is the live engine's.
+ */
+static watermelon_audio::BackendManager& managerOf(const WmaEngine* e) {
+    return (e && e->backendManager) ? *e->backendManager
+                                    : watermelon_audio::BackendManager::getInstance();
+}
+
+/**
  * @brief Re-prepara el nodo con el rate que el stream de captura negocio (REQ-012.4).
  *
  * 🔴 POR QUE HACE FALTA UN CABLE APARTE PARA ESTE CAMINO. `startInputStream()` abre
@@ -142,10 +154,14 @@ WmaEngine* wma_engine_create(void) {
 
         // Create BackendManager owned by this engine (Phase 0D)
         e->backendManager = std::make_unique<watermelon_audio::BackendManager>();
-        // Register as global instance so legacy code (JNI, AudioEngine) can find it
-        watermelon_audio::BackendManager::setGlobalInstance(e->backendManager.get());
+        // Register as global instance so legacy code (JNI, AudioEngine) can find it —
+        // but only if there is none yet (REQ-055 S2): a second engine (an offline
+        // render instance) must not steal the live engine's manager. The engine
+        // itself never goes through the global: it gets its own manager below.
+        watermelon_audio::BackendManager::registerGlobalIfUnset(e->backendManager.get());
 
         e->engine = std::make_unique<AudioEngine>();
+        e->engine->setBackendManager(e->backendManager.get());
         return e;
     } catch (...) {
         return nullptr;
@@ -178,7 +194,9 @@ void wma_engine_destroy(WmaEngine* engine) {
     }
     // Clear global instance before destroying BackendManager
     if (engine->backendManager) {
-        watermelon_audio::BackendManager::setGlobalInstance(nullptr);
+        // Only if it is ours: destroying an offline instance must not unregister
+        // the live engine's manager (REQ-055 S2).
+        watermelon_audio::BackendManager::clearGlobalIf(engine->backendManager.get());
         engine->backendManager.reset();
     }
     delete engine;
@@ -833,7 +851,7 @@ void wmaAttachInputForMode(WmaEngine* engine) {
         return;
     }
 
-    const auto backendType = watermelon_audio::BackendManager::getInstance().getCurrentType();
+    const auto backendType = managerOf(engine).getCurrentType();
     const bool backendDeliversInput =
         (backendType == watermelon_audio::BackendType::LIBUSB);
 
@@ -1196,7 +1214,7 @@ bool wma_tuner_start(WmaEngine* engine) {
     // llega por un stream propio del nodo y hay que abrirlo; con USB sólo se registra
     // al dueño. Sin captura propia (host sin fake) abrir falla y no pasa nada: ahi la
     // captura entra por el callback.
-    const auto backendType = watermelon_audio::BackendManager::getInstance().getCurrentType();
+    const auto backendType = managerOf(engine).getCurrentType();
     const bool backendDeliversInput =
         (backendType == watermelon_audio::BackendType::LIBUSB);
     const auto acquired = engine->inputNode->acquireCapture(
@@ -2666,7 +2684,7 @@ int wma_get_latency_report(const WmaEngine* engine, char* buffer, int buffer_siz
         // carries it and AudioEngine logs it at start— and the report threw it
         // away. On the USB path that left a latency report with no mention of
         // USB, which is the first thing you would want to know.
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = managerOf(engine);
         report += "Backend: ";
         report += watermelon_audio::backendTypeToString(manager.getCurrentType());
         report += "\n";
@@ -2726,18 +2744,22 @@ void wma_get_output_levels(const WmaEngine* engine, float* out_levels) {
  * 23. Configuration / Logging
  * ================================================================ */
 
-/* Static storage for C callback — bridged to C++ LogCallback. */
-static WmaLogCallback g_cLogCallback = nullptr;
+/* Static storage for C callback — bridged to C++ LogCallback.
+ *
+ * Atomic since REQ-055 S2: it is process-wide (shared by every engine instance)
+ * and read from whatever thread logs, so a plain pointer written by
+ * wma_set_log_callback while another instance logs was a data race. */
+static std::atomic<WmaLogCallback> g_cLogCallback{nullptr};
 
 static void wmaLogBridge(wma::LogLevel level, const char* tag, const char* msg) {
-    WmaLogCallback cb = g_cLogCallback;
+    WmaLogCallback cb = g_cLogCallback.load(std::memory_order_acquire);
     if (cb) {
         cb(static_cast<WmaLogLevel>(static_cast<int>(level)), tag, msg);
     }
 }
 
 void wma_set_log_callback(WmaLogCallback callback) {
-    g_cLogCallback = callback;
+    g_cLogCallback.store(callback, std::memory_order_release);
     wma::setLogCallback(callback ? wmaLogBridge : nullptr);
 }
 
@@ -2787,4 +2809,78 @@ void wma_log_batch_free(WmaLogBatch* batch) {
 
 const char* wma_get_version(void) {
     return WMA_VERSION_STRING;
+}
+
+/* ================================================================
+ * 24. Offline render by handle (REQ-055 S2, ADR-0008)
+ * ================================================================
+ *
+ * Thin over AudioEngine::startOffline / renderBlock / stop, with two jobs the
+ * engine methods do not have: (1) TYPED errors instead of a bool, so a caller
+ * can tell "bad argument" from "wrong state"; (2) never touching a LIVE engine —
+ * an engine running on a device is refused, not stopped and not converted. */
+
+namespace {
+
+/// Running on a device (started by wma_engine_start), as opposed to offline.
+bool wmaRunsLive(const WmaEngine* e) {
+    const auto state = static_cast<EngineState>(e->engine->getEngineState());
+    return state != EngineState::Stopped && !e->engine->isOffline();
+}
+
+constexpr int kWmaOfflineMaxBlockFrames = 4096;   // AudioEngine::startOffline's cap
+
+}  // namespace
+
+WmaResult wma_offline_start(WmaEngine* engine, int sample_rate, int max_block_frames) {
+    WMA_CHECK(engine);
+    if (sample_rate <= 0 || max_block_frames <= 0 ||
+        max_block_frames > kWmaOfflineMaxBlockFrames) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    if (wmaRunsLive(engine)) {
+        WMA_LOGE("wma_offline_start: the engine is running on a device; refused");
+        return WMA_ERROR_INVALID_OPERATION;
+    }
+    // An offline instance never stays as the global BackendManager: if it was the
+    // first engine created it registered itself, and the handle-less backend calls
+    // would configure it instead of the live engine created later (review of S2).
+    if (engine->backendManager) {
+        watermelon_audio::BackendManager::clearGlobalIf(engine->backendManager.get());
+    }
+    // A restart is a stop + start: that is what makes the second render of an
+    // instance reproduce the first (startOffline resets the chain).
+    if (engine->engine->isOffline()) {
+        engine->engine->stop();
+    }
+    return engine->engine->startOffline(sample_rate, max_block_frames)
+               ? WMA_OK
+               : WMA_ERROR_INVALID_OPERATION;
+}
+
+WmaResult wma_offline_render(WmaEngine* engine, float* output, const float* input,
+                             int frames) {
+    WMA_CHECK(engine);
+    if (!engine->engine->isOffline()) {
+        return WMA_ERROR_INVALID_OPERATION;
+    }
+    if (output == nullptr || frames <= 0 ||
+        frames > engine->engine->offlineMaxBlockFrames()) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    return engine->engine->renderBlock(output, input, frames)
+               ? WMA_OK
+               : WMA_ERROR_INVALID_OPERATION;
+}
+
+WmaResult wma_offline_stop(WmaEngine* engine) {
+    WMA_CHECK(engine);
+    if (wmaRunsLive(engine)) {
+        WMA_LOGE("wma_offline_stop: the engine is running on a device; refused");
+        return WMA_ERROR_INVALID_OPERATION;
+    }
+    if (engine->engine->isOffline()) {
+        engine->engine->stop();
+    }
+    return WMA_OK;
 }

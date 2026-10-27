@@ -435,7 +435,7 @@ bool AudioEngine::start(int fadeTimeMs) {
     if (mUseBackendManager.load(std::memory_order_acquire)) {
         LOGI("Starting via BackendManager...");
 
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = ownBackendManager();
 
         // Ensure callback is set
         manager.setCallback(this);
@@ -891,7 +891,7 @@ void AudioEngine::stop() {
     if (mUseBackendManager.load(std::memory_order_acquire)) {
         LOGI("Stopping via BackendManager...");
 
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = ownBackendManager();
 
         // MINI-033 — el rate se despublica ANTES de soltar el stream, igual que en
         // `setLegacyStream(nullptr)` del camino Oboe: un lector RT no puede ver un rate
@@ -2141,7 +2141,7 @@ bool AudioEngine::queryStreamInfo(int32_t& sampleRate, int32_t& bufferSize, doub
     //
     // Try BackendManager first (works for both USB and Oboe-via-backend paths)
     if (mUseBackendManager.load(std::memory_order_acquire)) {
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = ownBackendManager();
         if (manager.isRunning()) {
             auto info = manager.activeStreamInfo();
             sampleRate = info.sampleRate;
@@ -2192,7 +2192,7 @@ bool AudioEngine::getStreamInfoEx(int32_t& sampleRate, int32_t& bufferSize,
     lowLatency = -1;
 
     if (mUseBackendManager.load(std::memory_order_acquire)) {
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = ownBackendManager();
         if (manager.isRunning()) {
             auto info = manager.activeStreamInfo();
             sampleRate = info.sampleRate;
@@ -2286,6 +2286,11 @@ bool AudioEngine::startOffline(int sampleRate, int maxBlockFrames) {
 
     configureComponentsWithSampleRate(sampleRate, maxBlockFrames);
 
+    // REQ-055 S2 — el reseteo EXPLICITO. `configure...` re-prepara, pero preparar no
+    // es resetear: varias piezas conservan su cola o su fase a traves de `prepare()`,
+    // y un segundo render de la misma instancia arrancaba con la cola del primero.
+    resetChainForOfflineRender();
+
     // Fade de largo cero: un render offline tiene que ser determinista desde el
     // primer sample. Una rampa de arranque haria que el bloque 0 no sea
     // comparable con el bloque 0 de la corrida siguiente.
@@ -2301,6 +2306,53 @@ bool AudioEngine::startOffline(int sampleRate, int maxBlockFrames) {
     LOGI("startOffline: %d Hz, bloques de hasta %d frames, sin device",
          sampleRate, maxBlockFrames);
     return true;
+}
+
+watermelon_audio::BackendManager& AudioEngine::ownBackendManager() const {
+    return mBackendManager ? *mBackendManager : watermelon_audio::BackendManager::getInstance();
+}
+
+void AudioEngine::resetChainForOfflineRender() {
+    // Cada linea es un estado que sobrevive a `prepare()` y que un render anterior
+    // (o un toque anterior en esta instancia) deja cargado. Se midio cuales hacen
+    // falta con `OfflineHandle.*ARestartedInstance*` y su mutante (sin esta funcion,
+    // el segundo render diverge): docs/dev/render-offline.md.
+    //
+    // NO se tocan la configuracion (tipo de engine, parametros, preset, cadena de
+    // efectos y sus parametros, volumenes) ni el CONTENIDO del looper: eso es la
+    // entrada del render, no su estado.
+
+    // Colas de reverb/delay, fases de LFO y RNG de cada efecto. En vivo lo despacha
+    // el thread de audio (`requestResetEffectChain`); aca no hay thread de audio.
+    mEffectChain.reset();
+    mResetEffectChainPending.store(false, std::memory_order_release);
+
+    // Osciladores y moduladores (fases y LFOs del oscilador clasico).
+    for (int i = 0; i < mOscBank.getOscillatorCount(); ++i) {
+        if (auto* osc = mOscBank.getPrimaryOscillator(i)) osc->resetForRender();
+        if (auto* osc2 = mOscBank.getSecondaryOscillator(i)) osc2->resetForRender();
+    }
+    for (int i = 0; i < mOscBank.getModulatorCount(); ++i) {
+        if (auto* mod = mOscBank.getModulator(i)) mod->reset();
+    }
+
+    // Engines (lineas de retardo, fases, granos, semillas) y voces de SoundFont.
+    mEngineDispatcher.reset();
+    if (mVoiceManager) mVoiceManager->reset();
+    mArpSequencer.resetForRender();
+    mArpSfPrevMidiNote = -1;
+    // La rampa de synth volume es POR BLOQUE (del valor del bloque anterior al
+    // actual): sin esto el primer bloque rampea desde el ultimo volumen del render
+    // anterior, y una instancia nueva desde 1,0. Se arranca EN el volumen pedido:
+    // un export no tiene por que entrar con un fundido, y asi el arranque tampoco
+    // depende del tamaño de bloque (medido: con 1,0 -> 0,7, -26 dB de error entre
+    // bloques de 64 y de 1024).
+    mSynthVolumePrev = mSynthVolume.load(std::memory_order_acquire);
+
+    // Etapa de salida (DC blocker, limitador, dither) y lo que solo se observa.
+    mOutputStage.reset();
+    mWaveformCapture.clear();
+    mDualTouch.requestEnvelopeRestart();
 }
 
 bool AudioEngine::renderBlock(float* output, const float* input, int frames) {
@@ -2485,7 +2537,7 @@ void AudioEngine::setUseBackendManager(bool enabled) {
 
     if (enabled) {
         // Register this AudioEngine as the callback for BackendManager
-        auto& manager = watermelon_audio::BackendManager::getInstance();
+        auto& manager = ownBackendManager();
         manager.setCallback(this);
 
         // MINI-007 — aca habia un tercer `manager.setSampleRate(preferido)`, la

@@ -524,8 +524,26 @@ private:
      * que el llamador los suelte (los tres caminos de carga hacen `munmap` o pierden
      * el buffer justo después). Thread de control. `nullptr` si tsf no pudo parsear.
      */
+    /**
+     * Process-wide lock around tsf_load_memory (REQ-055 S2).
+     *
+     * stb_vorbis (the SF3 decoder vendored next to tsf) rewrites a STATIC CRC
+     * table (`crc_table`, filled by `crc32_init()` on every Vorbis stream open).
+     * The values are identical, but two instances loading an .sf3 on two threads
+     * write it concurrently: a data race. Loading is control-thread only, so the
+     * lock never meets the audio thread; it only orders two loads.
+     */
+    static std::mutex& decodeMutex() {
+        static std::mutex m;
+        return m;
+    }
+
     ActiveFont* parseFont(const void* data, size_t size) {
-        tsf* sf = tsf_load_memory(data, static_cast<int>(size));
+        tsf* sf = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(decodeMutex());
+            sf = tsf_load_memory(data, static_cast<int>(size));
+        }
         if (!sf) return nullptr;
         ActiveFont* font = new ActiveFont{sf, {}};
         font->modulators.buildFromFontBytes(data, size);

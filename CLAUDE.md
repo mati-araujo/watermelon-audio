@@ -48,15 +48,15 @@ citar** cualquier otro numero; por que, en `docs/dev/conteos-que-envejecen.md`.
 | `kt-commonMain` | 99 | archivos .kt en commonMain |
 | `kt-androidMain` | 20 | archivos .kt en androidMain |
 | `kt-iosMain` | 6 | archivos .kt en iosMain |
-| `kt-jvmSharedMain` | 5 | archivos .kt en jvmSharedMain (Android + desktop) |
+| `kt-jvmSharedMain` | 6 | archivos .kt en jvmSharedMain (Android + desktop) |
 | `kt-desktopMain` | 5 | archivos .kt en desktopMain |
-| `bridge-loc` | 3730 | LOC de AudioNativeBridge.kt |
-| `bridge-external` | 319 | `external fun` en AudioNativeBridge |
-| `jniexport-bridge` | 308 | JNIEXPORT en jni_audio_bridge.cpp |
-| `jniexport-total` | 321 | JNIEXPORT en todo jni/*.cpp |
-| `wma-api` | 285 | declaraciones WMA_API en la C API |
+| `bridge-loc` | 3786 | LOC de AudioNativeBridge.kt |
+| `bridge-external` | 336 | `external fun` en AudioNativeBridge |
+| `jniexport-bridge` | 325 | JNIEXPORT en jni_audio_bridge.cpp |
+| `jniexport-total` | 338 | JNIEXPORT en todo jni/*.cpp |
+| `wma-api` | 288 | declaraciones WMA_API en la C API |
 | `analysis-files` | 19 | fuentes .h/.cpp en cpp/analysis/ (sin tests/) |
-| `callers-baseline` | 1 callback-externo / 15 deuda / 1 entrada / 64 sonda-de-tests | reparto del baseline de llamadores |
+| `callers-baseline` | 1 callback-externo / 13 deuda / 2 entrada / 63 sonda-de-tests | reparto del baseline de llamadores |
 | `ver-kotlin` | 2.4.20 | version de Kotlin |
 | `ver-agp` | 9.4.1 | version de AGP |
 <!-- END conteos-medidos -->

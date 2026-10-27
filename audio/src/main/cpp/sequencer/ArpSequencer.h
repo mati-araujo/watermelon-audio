@@ -229,6 +229,30 @@ public:
                  sampleRate, mGateAttackRate, mGateReleaseRate, mTouchDebounceSamples);
     }
 
+    /**
+     * @brief Vuelve el estado de AUDIO al de una instancia recien construida (REQ-055 S2).
+     *
+     * Paso, contador, envolvente de gate y la SEMILLA del xorshift: sin esto, un
+     * segundo render offline de la misma instancia sigue la secuencia aleatoria
+     * donde la dejo el primero (probabilidad, variacion de velocidad, RANDOM,
+     * shuffle) y no reproduce el buffer. La configuracion (patron, swing...) no se
+     * toca. El patron se reconstruye con la semilla nueva en el proximo process().
+     *
+     * NO es para un motor en vivo: escribe estado del thread de audio. Lo llama
+     * `AudioEngine::resetChainForOfflineRender()`, donde no hay thread de audio.
+     */
+    void resetForRender() {
+        mCurrentStep = 0;
+        mSampleCounter = 0;
+        mCurrentStepActive = true;
+        mCurrentVelocity = 1.0f;
+        mRngState = kInitialRngState;
+        mGateEnvelopeLevel = 0.0f;
+        mSamplesSinceLastTouch.store(0, std::memory_order_relaxed);
+        mNeedsReset.store(false, std::memory_order_relaxed);
+        mNeedsPatternRebuild.store(true, std::memory_order_release);
+    }
+
     // ==================== PROCESS (audio thread, RT-safe) ====================
 
     /**
@@ -668,7 +692,8 @@ private:
     int64_t mSampleCounter = 0;              ///< Sample counter within current step
     bool mCurrentStepActive = true;          ///< Whether current step passed probability check
     float mCurrentVelocity = 1.0f;           ///< Current step velocity (after variation)
-    uint32_t mRngState = 0x12345678;         ///< PRNG state (xorshift32)
+    static constexpr uint32_t kInitialRngState = 0x12345678;
+    uint32_t mRngState = kInitialRngState;   ///< PRNG state (xorshift32)
     std::atomic<int> mSamplesSinceLastTouch{0}; ///< Debounce counter (atomic: written by audio, read by UI)
     int mTouchDebounceSamples = 1440;        ///< ~30ms (updated in prepare() for actual sample rate)
 
