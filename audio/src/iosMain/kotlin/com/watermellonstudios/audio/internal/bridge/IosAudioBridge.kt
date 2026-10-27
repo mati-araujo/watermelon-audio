@@ -692,7 +692,7 @@ internal class IosAudioBridge : IAudioNativeBridge, ITunerDiagnostics {
     override fun stopTunerInputDump(): TunerInputDumpResult? = memScoped {
         val values = allocArray<LongVar>(TunerInputDumpResult.VALUE_COUNT)
         val path = allocArray<ByteVar>(WMA_TUNER_DUMP_PATH_CAPACITY)
-        if (!wma_tuner_diag_input_dump_stop_with_path(
+        if (!wma_tuner_diag_input_dump_stop(
                 engine, values, TunerInputDumpResult.VALUE_COUNT, path, WMA_TUNER_DUMP_PATH_CAPACITY,
             )
         ) {

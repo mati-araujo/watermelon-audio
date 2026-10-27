@@ -87,6 +87,13 @@ std::array<int64_t, WMA_TUNER_DUMP_STATS_VALUES> sentinelStats() {
     return v;
 }
 
+/// El stop cuando el test mira solo los 7 valores: le pasa un buffer de path del tamano del
+/// contrato. Los contratos del path (nulo, chico) los prueban los tests `BugA_StopWith…`.
+bool stopValues(WmaEngine* e, int64_t* values, int count) {
+    std::vector<char> path(WMA_TUNER_DUMP_PATH_CAPACITY, '\0');
+    return wma_tuner_diag_input_dump_stop(e, values, count, path.data(), WMA_TUNER_DUMP_PATH_CAPACITY);
+}
+
 bool allSentinels(const std::array<int64_t, WMA_TUNER_DUMP_STATS_VALUES>& v) {
     for (int64_t x : v) {
         if (x != kSentinel64) return false;
@@ -193,7 +200,7 @@ protected:
     /// Cierra la toma por la C API y devuelve los 7 valores.
     std::array<int64_t, WMA_TUNER_DUMP_STATS_VALUES> stopTake() {
         std::array<int64_t, WMA_TUNER_DUMP_STATS_VALUES> v = sentinelStats();
-        EXPECT_TRUE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
+        EXPECT_TRUE(stopValues(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
         return v;
     }
 
@@ -342,12 +349,12 @@ TEST_F(TunerDumpApiTest, StartRejectionsLeaveNothingHalfDone) {
         EXPECT_FALSE(mWma->tunerInputDump->takeActive()) << "un rechazo dejo una toma armada";
     }
     auto v = sentinelStats();
-    EXPECT_FALSE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES))
+    EXPECT_FALSE(stopValues(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES))
         << "no hay toma que cerrar";
 
     // Y tras tantos rechazos, un start valido SI anda.
     EXPECT_TRUE(wma_tuner_diag_input_dump_start(mWma, good.c_str()));
-    EXPECT_TRUE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
+    EXPECT_TRUE(stopValues(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
 }
 
 /**
@@ -363,20 +370,20 @@ TEST_F(TunerDumpApiTest, StopContractsLeaveSentinelsAndNeverKillALiveTakeOnBadAr
     auto v = sentinelStats();
 
     // Sin toma.
-    EXPECT_FALSE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
+    EXPECT_FALSE(stopValues(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
     EXPECT_TRUE(allSentinels(v)) << "sin toma, out_values no se toca";
 
     // Argumentos nulos.
-    EXPECT_FALSE(wma_tuner_diag_input_dump_stop(nullptr, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
+    EXPECT_FALSE(stopValues(nullptr, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
     EXPECT_TRUE(allSentinels(v));
-    EXPECT_FALSE(wma_tuner_diag_input_dump_stop(mWma, nullptr, WMA_TUNER_DUMP_STATS_VALUES));
+    EXPECT_FALSE(stopValues(mWma, nullptr, WMA_TUNER_DUMP_STATS_VALUES));
 
     // Con una toma VIVA: un count chico (< 7) se rechaza sin tocar nada ni cerrar la toma.
     const std::string path = pathOf("viva.wav");
     ASSERT_TRUE(wma_tuner_diag_input_dump_start(mWma, path.c_str()));
     for (int bad : {6, 1, 0, -1}) {
         v = sentinelStats();
-        EXPECT_FALSE(wma_tuner_diag_input_dump_stop(mWma, v.data(), bad)) << "count " << bad;
+        EXPECT_FALSE(stopValues(mWma, v.data(), bad)) << "count " << bad;
         EXPECT_TRUE(allSentinels(v)) << "count " << bad << ": no se toca out_values";
         ASSERT_NE(mWma->tunerInputDump, nullptr);
         EXPECT_TRUE(mWma->tunerInputDump->takeActive())
@@ -386,7 +393,7 @@ TEST_F(TunerDumpApiTest, StopContractsLeaveSentinelsAndNeverKillALiveTakeOnBadAr
     // count > 7: escribe EXACTAMENTE 7.
     std::array<int64_t, 9> wide;
     wide.fill(kSentinel64);
-    ASSERT_TRUE(wma_tuner_diag_input_dump_stop(mWma, wide.data(), 9));
+    ASSERT_TRUE(stopValues(mWma, wide.data(), 9));
     for (int i = 0; i < WMA_TUNER_DUMP_STATS_VALUES; ++i) {
         EXPECT_NE(wide[static_cast<size_t>(i)], kSentinel64) << "el indice " << i << " no se escribio";
     }
@@ -396,7 +403,7 @@ TEST_F(TunerDumpApiTest, StopContractsLeaveSentinelsAndNeverKillALiveTakeOnBadAr
 
     // Un segundo stop ya no tiene toma.
     v = sentinelStats();
-    EXPECT_FALSE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
+    EXPECT_FALSE(stopValues(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
     EXPECT_TRUE(allSentinels(v));
 }
 
@@ -575,7 +582,7 @@ TEST_F(TunerDumpApiTest, Hallazgo1_StartRejectsAPathThatDoesNotEndInWav) {
     const std::string ok = pathOf("toma.wav");
     EXPECT_TRUE(wma_tuner_diag_input_dump_start(mWma, ok.c_str()));
     auto v = sentinelStats();
-    EXPECT_TRUE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
+    EXPECT_TRUE(stopValues(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
 }
 
 /**
@@ -679,8 +686,8 @@ struct StopWithPath {
 StopWithPath stopWithPath(WmaEngine* e) {
     StopWithPath r;
     std::vector<char> buf(WMA_TUNER_DUMP_PATH_CAPACITY, 'X');
-    r.ok = wma_tuner_diag_input_dump_stop_with_path(e, r.values.data(), WMA_TUNER_DUMP_STATS_VALUES,
-                                                    buf.data(), WMA_TUNER_DUMP_PATH_CAPACITY);
+    r.ok = wma_tuner_diag_input_dump_stop(e, r.values.data(), WMA_TUNER_DUMP_STATS_VALUES,
+                                         buf.data(), WMA_TUNER_DUMP_PATH_CAPACITY);
     if (r.ok) r.path = buf.data();
     return r;
 }
@@ -711,7 +718,7 @@ TEST_F(TunerDumpApiTest, BugB_AStartWhoseArmingTimesOutLeavesNothingAndTheNameIs
     EXPECT_FALSE(mWma->tunerInputDump->takeActive()) << "el desarme se confirmo: no queda toma";
     EXPECT_TRUE(namesIn(dir()).empty()) << "un start fallido dejo archivos de su toma";
     auto v = sentinelStats();
-    EXPECT_FALSE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
+    EXPECT_FALSE(stopValues(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
 
     ASSERT_TRUE(wma_tuner_diag_input_dump_start(mWma, path.c_str()))
         << "el nombre de un start fallido quedo bloqueado";
@@ -751,9 +758,8 @@ TEST_F(TunerDumpApiTest, BugA_ARejectedStartDoesNotChangeThePathOfTheTakeThatLiv
 }
 
 /**
- * BugA — `stop_with_path` informa el archivo que QUEDO: el `.invalid.wav` de una toma sin audio, y
- * el `.part` cuando el nombre final lo ocupo otro durante la toma (finalized = 0). Los 7 valores
- * son los mismos que los de `stop`.
+ * BugA — `stop` informa el archivo que QUEDO: el `.invalid.wav` de una toma sin audio, y
+ * el `.part` cuando el nombre final lo ocupo otro durante la toma (finalized = 0).
  *
  * Mutante que mata: informar el nombre final aunque no se haya podido renombrar.
  */
@@ -770,7 +776,7 @@ TEST_F(TunerDumpApiTest, BugA_StopWithPathReportsTheFileTheTakeLeft) {
 }
 
 /**
- * BugA — los contratos de `stop_with_path`: un buffer nulo o chico se rechaza SIN cerrar la toma y
+ * BugA — los contratos del path de `stop`: un buffer nulo o chico se rechaza SIN cerrar la toma y
  * sin tocar nada; sin toma, false y el buffer intacto. Mutante que mata: cerrar la toma antes de
  * validar el buffer (la toma se pierde sin que nadie sepa su archivo).
  */
@@ -780,12 +786,12 @@ TEST_F(TunerDumpApiTest, BugA_StopWithPathRefusesASmallBufferWithoutKillingTheTa
 
     auto v = sentinelStats();
     std::vector<char> buf(WMA_TUNER_DUMP_PATH_CAPACITY, 'X');
-    EXPECT_FALSE(wma_tuner_diag_input_dump_stop_with_path(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES,
-                                                          nullptr, WMA_TUNER_DUMP_PATH_CAPACITY));
-    EXPECT_FALSE(wma_tuner_diag_input_dump_stop_with_path(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES,
-                                                          buf.data(), WMA_TUNER_DUMP_PATH_CAPACITY - 1));
-    EXPECT_FALSE(wma_tuner_diag_input_dump_stop_with_path(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES - 1,
-                                                          buf.data(), WMA_TUNER_DUMP_PATH_CAPACITY));
+    EXPECT_FALSE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES,
+                                                nullptr, WMA_TUNER_DUMP_PATH_CAPACITY));
+    EXPECT_FALSE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES,
+                                                buf.data(), WMA_TUNER_DUMP_PATH_CAPACITY - 1));
+    EXPECT_FALSE(wma_tuner_diag_input_dump_stop(mWma, v.data(), WMA_TUNER_DUMP_STATS_VALUES - 1,
+                                                buf.data(), WMA_TUNER_DUMP_PATH_CAPACITY));
     EXPECT_TRUE(allSentinels(v));
     EXPECT_EQ(buf[0], 'X') << "un rechazo escribio el buffer";
     EXPECT_TRUE(mWma->tunerInputDump->takeActive()) << "un stop rechazado cerro la toma";

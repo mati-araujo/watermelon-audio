@@ -85,7 +85,7 @@ class IosTunerDiagnosticsTest {
 
     /**
      * BugA (REQ-055 S0) — un start rechazado porque ya hay una toma no cambia el path que informa el
-     * stop: es el de la toma que corrió, y lo dice el nativo (`wma_tuner_diag_input_dump_stop_with_path`).
+     * stop: es el de la toma que corrió, y lo dice el nativo (`wma_tuner_diag_input_dump_stop`).
      * El techo del buzón no se puede forzar acá (el `.a` de iOS no lleva la compuerta de test); el caso
      * con el techo lo cubren `core_tests` y el arnés JNI.
      * Mutante que mata: un puente que nombra el resultado con el último path pedido.

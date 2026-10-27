@@ -1315,7 +1315,7 @@ WMA_API bool wma_tuner_analyze_buffer_with_candidates(
 #define WMA_TUNER_DUMP_PATH_MAX 4096
 
 /**
- * Capacity (bytes, terminator included) that wma_tuner_diag_input_dump_stop_with_path()
+ * Capacity (bytes, terminator included) that wma_tuner_diag_input_dump_stop()
  * requires: the longest file a take can leave, "<path minus .wav>.invalid.wav"
  * (8 bytes longer than the path), plus the terminator:
  * WMA_TUNER_DUMP_PATH_MAX + 8 + 1. A literal so every binding reads it as a constant.
@@ -1348,44 +1348,36 @@ WMA_API bool wma_tuner_analyze_buffer_with_candidates(
  *         One case leaves a take running: the analysis thread applied neither
  *         the arming nor the disarming in time, so the ".part" may still be
  *         written to and cannot be removed. That take is still this path's;
- *         stop it (wma_tuner_diag_input_dump_stop_with_path() says which file
+ *         stop it (wma_tuner_diag_input_dump_stop() says which file
  *         it left). If removing the ".part" of a refused take fails, the
  *         failure is logged with the file's name.
  */
 WMA_API bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path);
 
 /**
- * Stop the take, close the file and report it.
+ * Stop the take, close the file and report it: the stats and the file the take
+ * ACTUALLY left on disk, from the native side — the requested path if valid,
+ * its ".invalid.wav" name if not, "<path>.part" if it could not be named
+ * (finalized = 0).
+ *
+ * Use out_path rather than rebuilding the name from the path you passed to
+ * start: after a start that returned false with a take still running, the
+ * running take is not necessarily the last path you asked for.
  *
  * @param[out] out_values  WMA_TUNER_DUMP_STATS_VALUES int64 values. Exactly that
  *                         many are written, even if count is larger.
  * @param count            capacity of out_values; must be >= the constant above.
- * @return false (out_values untouched, take left running) for a null engine or
- *         out_values, a too-small count, no take in progress, or a disarm the
- *         analysis thread did not apply in time.
+ * @param[out] out_path    NUL-terminated UTF-8, the same bytes start received
+ *                         plus the suffix.
+ * @param path_capacity    capacity of out_path; must be >= WMA_TUNER_DUMP_PATH_CAPACITY.
+ * @return false (out_values and out_path untouched, take left running) for a
+ *         null engine, out_values or out_path, a too-small count or
+ *         path_capacity, no take in progress, or a disarm the analysis thread
+ *         did not apply in time. Out of memory while closing is the one false
+ *         that may have closed the take.
  */
-WMA_API bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_values, int count);
-
-/**
- * wma_tuner_diag_input_dump_stop(), plus the file the take ACTUALLY left on
- * disk, from the native side: the requested path if valid, its ".invalid.wav"
- * name if not, "<path>.part" if it could not be named (finalized = 0).
- *
- * Use this one rather than rebuilding the name from the path you passed to
- * start: after a start that returned false with a take still running, the
- * running take is not necessarily the last path you asked for.
- *
- * @param[out] out_path  NUL-terminated UTF-8, the same bytes start received
- *                       plus the suffix. Untouched when this returns false.
- * @param path_capacity  must be >= WMA_TUNER_DUMP_PATH_CAPACITY.
- * @return false (out_values and out_path untouched, take left running) for
- *         everything stop() refuses, a null out_path or a too-small
- *         path_capacity. Out of memory while closing is the one false that
- *         may have closed the take.
- */
-WMA_API bool wma_tuner_diag_input_dump_stop_with_path(WmaEngine* engine, int64_t* out_values,
-                                                      int count, char* out_path,
-                                                      int path_capacity);
+WMA_API bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_values, int count,
+                                            char* out_path, int path_capacity);
 
 /* ================================================================
  * 13. Dual Touch

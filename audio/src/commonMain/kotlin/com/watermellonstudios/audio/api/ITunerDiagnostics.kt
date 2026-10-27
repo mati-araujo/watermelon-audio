@@ -105,7 +105,7 @@ data class TunerInputDumpResult(
          * Arma el resultado con los [VALUE_COUNT] valores nativos, en el orden de la C API:
          * framesWritten, framesLost, discontinuities, sampleRate, inputSource, valid (0/1), finalized (0/1),
          * y el archivo que la toma dejó en disco, **tal como lo informa el nativo**
-         * (`wma_tuner_diag_input_dump_stop_with_path`).
+         * (`wma_tuner_diag_input_dump_stop`).
          *
          * El path no se reconstruye con el pedido (bug A de REQ-055 S0): tras un start que devolvió
          * false con la toma viva, el último path pedido no es necesariamente el de la toma que

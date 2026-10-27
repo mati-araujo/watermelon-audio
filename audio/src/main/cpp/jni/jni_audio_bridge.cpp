@@ -1338,8 +1338,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerD
         // Se reserva ANTES de cerrar la toma: un bad_alloc despues la perderia sin informarla.
         std::vector<char> path(WMA_TUNER_DUMP_PATH_CAPACITY, '\0');
         int64_t stats[WMA_TUNER_DUMP_STATS_VALUES];
-        if (!wma_tuner_diag_input_dump_stop_with_path(g_wmaEngine, stats, WMA_TUNER_DUMP_STATS_VALUES,
-                                                      path.data(), WMA_TUNER_DUMP_PATH_CAPACITY)) {
+        if (!wma_tuner_diag_input_dump_stop(g_wmaEngine, stats, WMA_TUNER_DUMP_STATS_VALUES,
+                                            path.data(), WMA_TUNER_DUMP_PATH_CAPACITY)) {
             return nullptr;
         }
         // `jlong` no es `int64_t` en todas las ABIs (long long contra long): se copia, no se castea.

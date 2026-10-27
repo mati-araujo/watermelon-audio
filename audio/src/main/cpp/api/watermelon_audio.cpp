@@ -1418,7 +1418,7 @@ void abortRefusedTunerDump(wma::analysis::TunerInputDump& dump) {
 bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path) {
     if (!engine || !path || path[0] == '\0') return false;
     // El tope de largo hace que el archivo que una toma deja siempre quepa en
-    // WMA_TUNER_DUMP_PATH_CAPACITY (el contrato de stop_with_path).
+    // WMA_TUNER_DUMP_PATH_CAPACITY (el contrato de stop).
     if (std::strlen(path) > WMA_TUNER_DUMP_PATH_MAX) return false;
     // El volcado solo crea `.wav` (hallazgo 1): el path lo arma la app y no puede usarse para
     // crear un archivo de cualquier nombre. El sink, ademas, nunca pisa uno que ya exista.
@@ -1450,7 +1450,7 @@ bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path) {
         // false no deja archivos (bug B: cerrarla dejaba un `.invalid.wav` que nadie reportaba y
         // que bloqueaba el nombre). Si el desarme tampoco se confirma, el productor puede seguir
         // escribiendo y nada se borra: la toma queda activa y `stop` la cierra cuando el hilo
-        // vuelva, informando su archivo (stop_with_path).
+        // vuelva, informando su archivo (stop).
         if (tunerDumpMailbox(engine, nullptr)) abortRefusedTunerDump(dump);
         return false;
     } catch (...) {
@@ -1458,41 +1458,29 @@ bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path) {
     }
 }
 
-namespace {
-
-/// El cuerpo comun de los dos stops. `leftPath` (si no es null) recibe el archivo que la toma dejo.
-bool stopTunerDump(WmaEngine* engine, int64_t* out_values, std::string* leftPath) {
-    std::lock_guard<std::mutex> lock(engine->analysisMutex);
-    if (!engine->tunerInputDump || !engine->tunerInputDump->takeActive()) return false;
-    if (engine->analysisThread && !tunerDumpMailbox(engine, nullptr)) return false;
-
-    std::string finalPath;
-    const wma::analysis::InputDumpStats st = engine->tunerInputDump->endTake(&finalPath, leftPath);
-    out_values[0] = static_cast<int64_t>(st.framesWritten);
-    out_values[1] = static_cast<int64_t>(st.framesLost);
-    out_values[2] = static_cast<int64_t>(st.discontinuities);
-    out_values[3] = st.sampleRate;
-    out_values[4] = st.inputSource;
-    out_values[5] = st.valid ? 1 : 0;
-    out_values[6] = finalPath.empty() ? 0 : 1;
-    return true;
-}
-
-}  // namespace
-
-bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_values, int count) {
-    if (!engine || !out_values || count < WMA_TUNER_DUMP_STATS_VALUES) return false;
-    return stopTunerDump(engine, out_values, nullptr);
-}
-
-bool wma_tuner_diag_input_dump_stop_with_path(WmaEngine* engine, int64_t* out_values, int count,
-                                              char* out_path, int path_capacity) {
+bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_values, int count,
+                                    char* out_path, int path_capacity) {
     if (!engine || !out_values || count < WMA_TUNER_DUMP_STATS_VALUES) return false;
     if (!out_path || path_capacity < WMA_TUNER_DUMP_PATH_CAPACITY) return false;
     try {
         std::string leftPath;
         int64_t values[WMA_TUNER_DUMP_STATS_VALUES];
-        if (!stopTunerDump(engine, values, &leftPath)) return false;
+        {
+            std::lock_guard<std::mutex> lock(engine->analysisMutex);
+            if (!engine->tunerInputDump || !engine->tunerInputDump->takeActive()) return false;
+            if (engine->analysisThread && !tunerDumpMailbox(engine, nullptr)) return false;
+
+            std::string finalPath;
+            const wma::analysis::InputDumpStats st =
+                engine->tunerInputDump->endTake(&finalPath, &leftPath);
+            values[0] = static_cast<int64_t>(st.framesWritten);
+            values[1] = static_cast<int64_t>(st.framesLost);
+            values[2] = static_cast<int64_t>(st.discontinuities);
+            values[3] = st.sampleRate;
+            values[4] = st.inputSource;
+            values[5] = st.valid ? 1 : 0;
+            values[6] = finalPath.empty() ? 0 : 1;
+        }
         // El start acota el path: lo que la toma deja siempre cabe. Si no cupiera seria un
         // invariante roto; se trunca en un borde de byte antes que escribir fuera del buffer.
         const size_t n = std::min(leftPath.size(), static_cast<size_t>(path_capacity) - 1);
