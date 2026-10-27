@@ -40,7 +40,8 @@ import com.watermellonstudios.audio.domain.error.NativeErrorCode
  *
  * Mismas operaciones que el vivo, sobre el handle. El orden importa: [start] **primero** y
  * [songLoadClip] después (el start puede cambiar el sample rate y eso invalida los clips); el
- * ancla `P0` es [songGetPlayFrame] tras el start. Con la instancia cerrada, las que devuelven
+ * ancla `P0` es [songGetPlayFrame] tras el start. El start apaga la agenda (también al reiniciar,
+ * como una instancia fresca): [songSetSchedule] va después. Con la instancia cerrada, las que devuelven
  * `Result` fallan con `EngineNotInitialized` sin cruzar, y las lecturas dan `-1` / `0` / `-1`.
  *
  * La superficie es la mínima que pide S2 (motor, SoundFont y preset, cadena de

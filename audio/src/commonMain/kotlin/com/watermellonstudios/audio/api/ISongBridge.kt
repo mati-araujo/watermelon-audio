@@ -21,7 +21,8 @@ package com.watermellonstudios.audio.api
  * - **Offline: primero `start`, después [songLoadClip].** El start puede cambiar el sample
  *   rate del motor, y eso invalida los clips cargados (están resampleados al viejo) y apaga
  *   la agenda. El ancla `P0` es [songGetPlayFrame] tras el `start`; la agenda va en
- *   `P0 + offsets`.
+ *   `P0 + offsets`. Todo `start` (también el reinicio) deja la agenda apagada, como en una
+ *   instancia fresca: se publica DESPUÉS del `start` (una publicada antes se descarta).
  * - **Vivo:** un cambio de sample rate del motor también invalida los clips.
  * - Mientras hay una agenda publicada, grabar o armar el looper no hace nada, y
  *   [songSetSchedule] da `INVALID_OPERATION` si hay una grabación armada o en curso.

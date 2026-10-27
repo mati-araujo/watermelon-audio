@@ -33,7 +33,9 @@ umbrales que S11 y S15 citan. Los numeros tienen fecha; los tests que los vigila
 
 Contrato: **misma configuracion + mismas llamadas en los mismos frames + mismo bloque ⇒ el
 mismo buffer bit a bit**, en una instancia fresca o reusada. `wma_offline_start` llama a
-`AudioEngine::resetChainForOfflineRender()` despues de preparar.
+`AudioEngine::resetChainForOfflineRender()` despues de preparar. La cancion programada tambien
+parte de vacio: el start apaga su agenda (hay que publicarla despues del start; los clips se
+conservan), ver `cancion-programada.md`.
 
 Medido el 2026-10-26, suite de host Debug y Release (-O3), 48 kHz, cadena de 5 efectos con
 estado (chorus, random reso, delay, tape echo, hall reverb), agenda de 16 gestos

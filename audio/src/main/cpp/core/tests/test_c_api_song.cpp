@@ -52,7 +52,7 @@ std::filesystem::path songFixture(const std::string& name) {
 /// Un clip de `kLoop` frames: un seno de `period` frames (entero de periodos en el loop, o sea un
 /// loop sin costura, como una toma) con fase inicial `phase`.
 std::string writeSine(const std::string& name, float period, float phase, float amp = 0.8f,
-                      int frames = kLoop) {
+                      int frames = kLoop, int rate = kRate) {
     std::vector<float> buf(static_cast<size_t>(frames) * 2);
     for (int n = 0; n < frames; ++n) {
         const float v = amp * std::sin(6.2831853f * static_cast<float>(n) / period + phase);
@@ -60,13 +60,13 @@ std::string writeSine(const std::string& name, float period, float phase, float 
         buf[static_cast<size_t>(n) * 2 + 1] = v;
     }
     const auto path = songFixture(name);
-    EXPECT_TRUE(wav::writeWav(path.c_str(), buf.data(), frames, kRate, wav::BitDepth::FLOAT_32));
+    EXPECT_TRUE(wav::writeWav(path.c_str(), buf.data(), frames, rate, wav::BitDepth::FLOAT_32));
     return path.string();
 }
 
-int32_t loadClip(WmaEngine* e, const std::string& path, int64_t loop = kLoop) {
+int32_t loadClip(WmaEngine* e, const std::string& path, int64_t loop = kLoop, int rate = kRate) {
     int32_t id = -1;
-    EXPECT_EQ(wma_song_load_clip(e, path.c_str(), kRate, 0, 0, loop, &id), WMA_OK);
+    EXPECT_EQ(wma_song_load_clip(e, path.c_str(), rate, 0, 0, loop, &id), WMA_OK);
     return id;
 }
 
@@ -250,6 +250,55 @@ TEST_F(SongApi, AC_055_12_ASecondOfflineRenderOfTheSameInstanceReproducesTheFirs
                           renders[0].size() * sizeof(float)),
               0)
         << "el segundo render no reproduce el primero";
+    wma_offline_stop(e);
+    wma_engine_destroy(e);
+}
+
+// Bug plausible (review 4): el segundo render de un handle no da los bits de uno fresco cuando el
+// start deja banderas de otra vida (scrub por el cambio 48000 -> 44100 solo en la instancia
+// fresca, agenda dirty o ya adoptada). A 44,1 kHz la fresca cambia de rate y la reiniciada no.
+TEST_F(SongApi, AC_055_13_ExportingTwiceFromTheSameHandleGivesTheBitsOfAFreshOne) {
+    constexpr int kRate2 = 44100;
+    constexpr int kBlock2 = 512;
+    mFiles.push_back(songFixture("twice_a"));
+    const std::string pa = writeSine("twice_a", 400.0f, 1.0f, 0.8f, kLoop, kRate2);
+    const auto exportOnce = [&](WmaEngine* e, bool publish) {
+        EXPECT_EQ(wma_offline_start(e, kRate2, kBlock2), WMA_OK);
+        const int32_t a = loadClip(e, pa, kLoop, kRate2);
+        const int64_t p0 = wma_transport_get_play_frame(e);
+        if (publish) {
+            const WmaSongSection s = section(p0 + 2 * kLoop, a);
+            EXPECT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 50 * kLoop), WMA_OK);
+        }
+        return renderBlocks(e, 6 * kLoop);
+    };
+    WmaEngine* fresh = quietEngine();
+    ASSERT_NE(fresh, nullptr);
+    const std::vector<float> ref = exportOnce(fresh, true);
+    ASSERT_GT(peakOf(ref), 0.2f);
+    wma_offline_stop(fresh);
+    wma_engine_destroy(fresh);
+
+    WmaEngine* e = quietEngine();
+    ASSERT_NE(e, nullptr);
+    const std::vector<float> first = exportOnce(e, true);
+    ASSERT_EQ(first.size(), ref.size());
+    EXPECT_EQ(std::memcmp(first.data(), ref.data(), ref.size() * sizeof(float)), 0);
+    // El segundo start del mismo handle: la agenda del primero no suena si no se republica...
+    ASSERT_EQ(wma_offline_start(e, kRate2, kBlock2), WMA_OK);
+    const std::vector<float> silent = renderBlocks(e, 6 * kLoop);
+    EXPECT_LT(peakOf(silent), 1e-3f) << "sono la agenda del render anterior";   // solo dither
+    // ...y republicada da los bits de una instancia fresca.
+    const std::vector<float> second = [&] {
+        EXPECT_EQ(wma_offline_start(e, kRate2, kBlock2), WMA_OK);
+        const int64_t p0 = wma_transport_get_play_frame(e);
+        const WmaSongSection s = section(p0 + 2 * kLoop, 0);
+        EXPECT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 50 * kLoop), WMA_OK);
+        return renderBlocks(e, 6 * kLoop);
+    }();
+    ASSERT_EQ(second.size(), ref.size());
+    EXPECT_EQ(std::memcmp(second.data(), ref.data(), ref.size() * sizeof(float)), 0)
+        << "la segunda exportacion no da los bits de una fresca";
     wma_offline_stop(e);
     wma_engine_destroy(e);
 }

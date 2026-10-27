@@ -73,8 +73,12 @@ un control humano no genera). No aloca: es un arreglo fijo por voz.
 - Un cambio de sample rate del motor invalida los clips (estan resampleados al viejo) y apaga la
   agenda. En un handle offline: `wma_offline_start` PRIMERO, los clips despues.
 - Offline: `P0 = wma_transport_get_play_frame(e)` tras `wma_offline_start`; la agenda va en
-  `P0 + offsets`. `wma_offline_start` reinicia las voces (smoothers, colas) pero no la agenda ni el
-  play frame.
+  `P0 + offsets`. `wma_offline_start` deja el estado canonico de una instancia fresca: reinicia las voces
+  (smoothers, colas), baja `mScrub`/`mSkipTailOnce` y APAGA la agenda (`mCur` vacia, tambien la
+  publicacion pendiente de antes del start); los clips y el play frame no se tocan. La agenda se
+  publica DESPUES del start: asi el arranque depende solo de las llamadas desde el start, no de
+  dirty/scrub de la vida anterior (exportar dos veces desde el mismo handle da los mismos bits que
+  una instancia fresca, tambien a 44,1 kHz).
 
 ## Clips retirados con el motor parado
 

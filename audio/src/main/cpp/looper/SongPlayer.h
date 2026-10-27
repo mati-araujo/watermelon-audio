@@ -499,11 +499,37 @@ public:
         return mReservedBytes.load(std::memory_order_relaxed);
     }
 
-    /// Un render offline arranca de cero: sin colas de fundido ni smoothers del render anterior.
+    /// Un render offline arranca de un estado canonico, el de una instancia fresca: voces y colas
+    /// limpias, flags de scrub bajos y la agenda APAGADA (vacia, sin publicacion pendiente). Asi el
+    /// comienzo depende solo de las llamadas hechas desde el start: una agenda se publica despues.
+    /// Los clips cargados no se tocan. El llamador garantiza que no hay RT (offline, stream parado).
     void resetVoicesForRender() {
+        std::lock_guard<std::mutex> lock(mCtl);
         for (int t = 0; t < kSongMaxTracks; ++t) mVoices[t] = Voice{};
         mTailUntil = 0;
-        mFromEmptyOnce = true;
+        for (int i = 0; i < 3; ++i) {
+            SongAgenda& a = mAgendas[i];
+            a.loopFrames = 1;
+            a.endFrame = 0;
+            a.fade = 0;
+            a.clipMask = 0;
+            a.seq = mSeq;
+            a.count = 0;
+            a.checksum = songAgendaChecksum(a);
+        }
+        mFront = 0;
+        mBack = 2;
+        mMiddle.store(1, std::memory_order_release);
+        mCur = &mAgendas[0];
+        mAdoptedSeq = mSeq;
+        mPubMask = 0;
+        mPubCount = 0;
+        mActive.store(false, std::memory_order_release);
+        mSection.store(-1, std::memory_order_relaxed);
+        mInUseMask.store(0, std::memory_order_release);
+        mMaskSeq.store(mSeq, std::memory_order_release);
+        mScrub.store(false, std::memory_order_release);
+        mSkipTailOnce = false;
     }
 
     size_t reservedBytes() const { return mReservedBytes.load(std::memory_order_relaxed); }
@@ -547,7 +573,6 @@ public:
         mBlockFrames = numFrames;
         adoptSongSchedule(blockFrame);
         mSkipTailOnce = false;   // vale para UN bloque: si no adopto nada, no se arrastra
-        mFromEmptyOnce = false;  // idem: solo la primera adopcion del render parte de vacio
         pruneSongTails(blockFrame);
         mBlockSection = songSectionAt(*mCur, blockFrame);
         return mCur->count > 0 || blockFrame < mTailUntil;
@@ -754,22 +779,10 @@ private:
         // El tramo viejo se lee ANTES del intercambio: despues, el slot viejo queda en el medio y
         // el control puede reescribirlo.
         SongSegment before[kSongMaxTracks];
-        // Tras resetVoicesForRender la agenda vieja no cuenta: se adopta como desde una instancia
-        // fresca (agenda vacia, loop 1, fade 0), sin fundido ni cola de lo que sono antes.
-        const bool fromEmpty = mFromEmptyOnce;
-        mFromEmptyOnce = false;
-        const int64_t oldLoop = fromEmpty ? 1 : mCur->loopFrames;
-        const int64_t oldFade = fromEmpty ? 0 : mCur->fade;
-        if (fromEmpty) {
-            SongSegment none{};
-            none.cur = kSongSilence;
-            none.nxt = kSongSilence;
-            none.kind = kSongFadeNone;
-            for (int t = 0; t < kSongMaxTracks; ++t) before[t] = none;
-        } else {
-            const int sOld = songSectionAt(*mCur, blockFrame);
-            for (int t = 0; t < kSongMaxTracks; ++t) before[t] = songSegmentAt(*mCur, sOld, t);
-        }
+        const int64_t oldLoop = mCur->loopFrames;
+        const int64_t oldFade = mCur->fade;
+        const int sOld = songSectionAt(*mCur, blockFrame);
+        for (int t = 0; t < kSongMaxTracks; ++t) before[t] = songSegmentAt(*mCur, sOld, t);
         const uint32_t got = mMiddle.exchange(static_cast<uint32_t>(mFront),
                                               std::memory_order_acq_rel);
         mFront = static_cast<int>(got & 3u);
@@ -1031,7 +1044,6 @@ private:
     int mBlockSection = 0;
     int64_t mTailUntil = 0;
     bool mSkipTailOnce = false;
-    bool mFromEmptyOnce = false;   // offline, sin RT concurrente: lo arma resetVoicesForRender
     bool mClipsFrozen = false;   // este bloque no lee clips (el control esta liberando)
     Voice mVoices[kSongMaxTracks];
 };

@@ -2130,7 +2130,10 @@ WMA_API WmaResult wma_looper_import_track_ex(WmaEngine* engine, int track_index,
  * and the audio running (a live stream, or wma_offline_render). The looper does
  * NOT need to be playing. For an offline render read the anchor with
  * wma_transport_get_play_frame() after wma_offline_start and publish
- * P0 + offsets. wma_offline_start does not reset the play frame.
+ * P0 + offsets. wma_offline_start does not reset the play frame, but it SWITCHES THE
+ * SONG OFF: the agenda is empty (a published-but-unadopted one is dropped too) and the
+ * voices are clean, as in a fresh instance. Publish the agenda AFTER the start; the loaded
+ * clips are kept. So a restarted render begins exactly as a fresh one.
  *
  * While an agenda is published the looper's own record/arm calls do nothing:
  * wma_looper_start_recording, _start_recording_with_pre_roll and _start_overdub
@@ -2191,7 +2194,8 @@ WMA_API WmaResult wma_song_load_clip(WmaEngine* engine, const char* path, int sa
 WMA_API WmaResult wma_song_unload_clip(WmaEngine* engine, int32_t id);
 
 /**
- * Publish the whole agenda. @p count = 0 switches the song off (the song fades out
+ * Publish the whole agenda. After wma_offline_start the agenda is off until this is called
+ * again. @p count = 0 switches the song off (the song fades out
  * over F if it was sounding) and the looper goes back to its takes -- which return
  * at full gain at once, with no fade-in: a take that is playing on a track steps in
  * when the song's tail ends. A song-only project has no takes, so nothing to hear.
@@ -2524,6 +2528,12 @@ WMA_API const char* wma_get_version(void);
  *
  * If the instance is already rendering offline it is stopped and started
  * again — that restart is what makes a second render reproduce the first.
+ *
+ * The programmed song starts from the canonical state of a fresh instance: its
+ * voices and fade tails are reset and its agenda is switched OFF (including one
+ * published before this call and not yet adopted), so whatever sounds depends only
+ * on the calls made since the start. Loaded clips are kept; call
+ * wma_song_set_schedule after the start.
  *
  * @param sample_rate       Hz, > 0.
  * @param max_block_frames  Largest block a later wma_offline_render() may ask

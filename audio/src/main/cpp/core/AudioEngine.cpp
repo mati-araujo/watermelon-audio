@@ -2331,8 +2331,9 @@ void AudioEngine::resetChainForOfflineRender() {
     mEffectChain.reset();
     mResetEffectChainPending.store(false, std::memory_order_release);
 
-    // Las voces de la cancion programada (smoothers, colas de fundido). La agenda y los clips son
-    // la ENTRADA del render, como el contenido del looper, y no se tocan.
+    // La cancion programada: voces (smoothers, colas de fundido) y agenda APAGADA, como una
+    // instancia fresca. Los clips son la ENTRADA del render y no se tocan; la agenda se publica
+    // despues del start.
     mAudioLooper.resetSongForRender();
 
     // Osciladores y moduladores (fases y LFOs del oscilador clasico).

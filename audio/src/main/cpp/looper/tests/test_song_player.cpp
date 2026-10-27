@@ -18,6 +18,7 @@
 #include "SongPlayer.h"
 #include "WavFile.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -1517,37 +1518,143 @@ TEST(SongUnload, AC_055_13_OfflineUnloadKeepsAClipThatTheNextAdoptionWillTail) {
         << "la cola de A leyo el clip reusado (id " << g << ")";
 }
 
+// ---------------------------------------------------------------------------------------
+// Render offline reiniciado (AC-055.13): el start deja un estado canonico, el de una instancia
+// fresca, sin importar lo que dejo el render anterior ni las banderas de scrub/dirty.
+// El orden es el REAL de AudioEngine::startOffline: setSampleRate (que invalida y levanta el
+// scrub si el rate cambia) y despues resetSongForRender.
+// ---------------------------------------------------------------------------------------
+namespace {
+
+constexpr int64_t kRstStart = 4096;
+const int64_t kRstEnd = int64_t{1} << 22;
+
+class OfflineSong {
+public:
+    explicit OfflineSong(int rate) : mRate(rate) {}
+
+    void start() {
+        rig.looper.setSampleRate(mRate);
+        rig.looper.resetSongForRender();
+    }
+    int32_t load(const std::string& name, float v) {
+        const std::string path = rig.write(name, kEditLoop, dc(v), mRate);
+        int32_t id = -1;
+        EXPECT_EQ(rig.looper.songLoadClip(path.c_str(), mRate, 0, 0, kEditLoop, true, id),
+                  wm::SongStatus::Ok);
+        return id;
+    }
+    void publish(int64_t at, int32_t clip) {
+        const std::vector<wm::SongSection> s{sec(at, clip)};
+        EXPECT_EQ(rig.looper.songSetSchedule(kEditLoop, s.data(), 1, kRstEnd, true),
+                  wm::SongStatus::Ok);
+    }
+    std::vector<float> render(int64_t frames = 1024) { return rig.render(kRstStart, frames, 64); }
+
+    Rig rig;
+
+private:
+    int mRate;
+};
+
+bool sameBits(const std::vector<float>& a, const std::vector<float>& b) {
+    return a.size() == b.size() &&
+           std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+}
+
+bool allZero(const std::vector<float>& v) {
+    return std::all_of(v.begin(), v.end(), [](float f) { return f == 0.0f; });
+}
+
+/// Fresca: start, cargar, publicar, renderizar. Es la referencia de los casos de abajo.
+std::vector<float> freshRender(int rate) {
+    OfflineSong f(rate);
+    f.start();
+    const int32_t y = f.load("rst_fy", -0.5f);
+    f.publish(kRstStart, y);
+    return f.render();
+}
+
+}  // namespace
+
 // Bug plausible (review 3): un render offline reiniciado arranca con la agenda del render
 // anterior en `mCur`: la primera adopcion la congela como cola y suena un clip ajeno. Tiene que
 // dar los mismos bits que una instancia fresca.
 TEST(SongOffline, AC_055_13_ARestartedRenderLeavesNoTailOfThePreviousSchedule) {
-    constexpr int64_t kStart = 4096;
-    const int64_t end = int64_t{1} << 22;
-    auto run = [&](bool reuse) {
-        Rig rig;
-        auto loadOffline = [&](const std::string& name, float v) {
-            const std::string path = rig.write(name, kEditLoop, dc(v));
-            int32_t id = -1;
-            EXPECT_EQ(rig.looper.songLoadClip(path.c_str(), kSR, 0, 0, kEditLoop, true, id),
-                      wm::SongStatus::Ok);
-            return id;
-        };
-        const int32_t x = loadOffline("rst_x", 0.5f);
-        const int32_t y = loadOffline("rst_y", -0.5f);
-        if (reuse) {
-            const std::vector<wm::SongSection> a{sec(0, x)};
-            EXPECT_EQ(rig.looper.songSetSchedule(kEditLoop, a.data(), 1, end, true),
-                      wm::SongStatus::Ok);
-            rig.render(0, kStart, 64);
-            rig.looper.resetSongForRender();
-        }
-        const std::vector<wm::SongSection> b{sec(kStart, y)};
-        EXPECT_EQ(rig.looper.songSetSchedule(kEditLoop, b.data(), 1, end, true),
-                  wm::SongStatus::Ok);
-        return rig.render(kStart, 1024, 64);
-    };
-    const std::vector<float> fresh = run(false), reused = run(true);
-    ASSERT_EQ(fresh.size(), reused.size());
-    EXPECT_EQ(0, std::memcmp(fresh.data(), reused.data(), fresh.size() * sizeof(float)))
+    OfflineSong r(kSR);
+    r.start();
+    const int32_t x = r.load("rst_x", 0.5f);
+    const int32_t y = r.load("rst_y", -0.5f);
+    r.publish(0, x);
+    r.rig.render(0, kRstStart, 64);
+    r.start();
+    r.publish(kRstStart, y);
+    EXPECT_TRUE(sameBits(freshRender(kSR), r.render()))
         << "el render reiniciado arranco con un fundido de la agenda anterior";
+}
+
+// Bug plausible (review 4, caso A): la instancia reusada no republica y la agenda que adopto el
+// render anterior sigue sonando, a ganancia plena, mientras la fresca (sin agenda) calla.
+TEST(SongOffline, AC_055_13_AStartedRenderPlaysNoScheduleItDidNotPublishAfterTheStart) {
+    OfflineSong r(kSR);
+    r.start();
+    const int32_t y = r.load("rst_ay", -0.5f);
+    r.publish(kRstStart, y);
+    r.render(1024);   // adopta
+    r.start();
+    const std::vector<float> after = r.render(2048);
+    EXPECT_TRUE(allZero(after)) << "sono la agenda del render anterior";
+
+    OfflineSong f(kSR);
+    f.start();
+    f.load("rst_ay", -0.5f);
+    EXPECT_TRUE(sameBits(f.render(2048), after));
+}
+
+// Bug plausible (review 4, caso B): un unload con el motor parado dejo mScrub levantado antes del
+// start; el reset no lo baja y la primera adopcion salta las colas (sin fundido) a diferencia de
+// una instancia fresca.
+TEST(SongOffline, AC_055_13_AScrubLeftBeforeTheStartDoesNotChangeTheRender) {
+    OfflineSong r(kSR);
+    r.start();
+    const int32_t y = r.load("rst_by", -0.5f);
+    const int32_t z = r.load("rst_bz", 0.25f);
+    r.publish(kRstStart, y);   // con el RT sin avanzar, el unload cae por el camino del handshake
+    ASSERT_EQ(r.rig.looper.songUnloadClip(z, false, true), wm::SongStatus::Ok);
+    ASSERT_EQ(r.rig.looper.song().retiredClips(), 0) << "tenia que liberar con el handshake";
+    r.start();
+    r.publish(kRstStart, y);
+    EXPECT_TRUE(sameBits(freshRender(kSR), r.render()))
+        << "el scrub previo al start cambio el arranque";
+}
+
+// Bug plausible (review 4, caso F): a 44,1 kHz la instancia fresca viene de 48000 -> 44100 (scrub
+// levantado por invalidateForRate) y la reiniciada no cambia de rate (sin scrub): exportar dos
+// veces la misma cancion desde el mismo handle daba dos archivos distintos.
+TEST(SongOffline, AC_055_13_ExportingTwiceAt44100GivesTheSameBitsAsAFreshInstance) {
+    constexpr int kSR2 = 44100;
+    OfflineSong r(kSR2);
+    r.start();
+    const int32_t y = r.load("rst_fy", -0.5f);
+    r.publish(kRstStart, y);
+    const std::vector<float> first = r.render();
+    r.start();
+    r.publish(kRstStart, y);
+    const std::vector<float> second = r.render();
+    const std::vector<float> fresh = freshRender(kSR2);
+    EXPECT_TRUE(sameBits(fresh, first)) << "la primera exportacion difiere de una fresca";
+    EXPECT_TRUE(sameBits(fresh, second)) << "la segunda exportacion difiere de una fresca";
+}
+
+// Bug plausible: una agenda publicada ANTES del start (pendiente, sin adoptar) sobrevive al reset
+// y suena; el comienzo del render dependeria de llamadas anteriores al start.
+TEST(SongOffline, AC_055_13_ASchedulePublishedBeforeTheStartDoesNotSound) {
+    OfflineSong r(kSR);
+    r.start();
+    const int32_t y = r.load("rst_gy", -0.5f);
+    r.publish(0, y);
+    r.start();
+    const std::vector<float> out = r.render(2048);
+    EXPECT_TRUE(allZero(out)) << "sono una publicacion anterior al start";
+    EXPECT_FALSE(r.rig.looper.song().active());
 }
