@@ -672,7 +672,7 @@ TEST(SongUnload, ReferencedClipIsRefusedAndReleasedOnlyAfterTheCallbackMovedOn) 
     EXPECT_EQ(rig.looper.song().reclaim(false), bytes)
         << "todavia suena la cola de fundido que lee el clip";
     rig.render(640, 256, 128);   // la cola dura F frames (hasta 752); despues, nadie lo tiene
-    rig.looper.song().reclaim(false);
+    EXPECT_EQ(rig.looper.song().reclaim(false), 0u);
     EXPECT_EQ(rig.looper.song().retiredClips(), 0);
 }
 
@@ -1488,4 +1488,66 @@ TEST(SongUnload, AC_055_13_OfflineUnloadKeepsATailedClipAndNeverPlaysTheReusedId
     out.insert(out.end(), seg.begin(), seg.end());
     EXPECT_LE(maxStep(out, 8193, 8256 + 300), 2.0 * normalFadeStep())
         << "la cola de X leyo el clip reusado (id " << g << ")";
+}
+
+// Bug plausible (review 3): offline libera al instante un clip que la PROXIMA adopcion va a
+// congelar como cola. Agenda B publicada y no adoptada; la agenda adoptada (A) nombra X; X no esta
+// en la publicada, asi que el unload pasa; cargar G reusa el id y la cola de A lee G (escalon).
+TEST(SongUnload, AC_055_13_OfflineUnloadKeepsAClipThatTheNextAdoptionWillTail) {
+    Rig rig;
+    auto loadOffline = [&](const std::string& name, float v) {
+        const std::string path = rig.write(name, kEditLoop, dc(v));
+        int32_t id = -1;
+        EXPECT_EQ(rig.looper.songLoadClip(path.c_str(), kSR, 0, 0, kEditLoop, true, id),
+                  wm::SongStatus::Ok);
+        return id;
+    };
+    const int32_t x = loadOffline("off2_x", 0.5f);
+    const int32_t y = loadOffline("off2_y", -0.5f);
+    const int64_t end = int64_t{1} << 22;
+    const std::vector<wm::SongSection> a{sec(0, x)}, b{sec(0, y)};
+    ASSERT_EQ(rig.looper.songSetSchedule(kEditLoop, a.data(), 1, end, true), wm::SongStatus::Ok);
+    std::vector<float> out = rig.render(0, 8192, 64);
+    ASSERT_EQ(rig.looper.songSetSchedule(kEditLoop, b.data(), 1, end, true), wm::SongStatus::Ok);
+    ASSERT_EQ(rig.looper.songUnloadClip(x, true), wm::SongStatus::Ok);
+    const int32_t g = loadOffline("off2_g", 0.9f);
+    std::vector<float> seg = rig.render(8192, 512, 64);   // adopta B: la cola de A lee X
+    out.insert(out.end(), seg.begin(), seg.end());
+    EXPECT_LE(maxStep(out, 8180, 8192 + 300), 2.0 * normalFadeStep())
+        << "la cola de A leyo el clip reusado (id " << g << ")";
+}
+
+// Bug plausible (review 3): un render offline reiniciado arranca con la agenda del render
+// anterior en `mCur`: la primera adopcion la congela como cola y suena un clip ajeno. Tiene que
+// dar los mismos bits que una instancia fresca.
+TEST(SongOffline, AC_055_13_ARestartedRenderLeavesNoTailOfThePreviousSchedule) {
+    constexpr int64_t kStart = 4096;
+    const int64_t end = int64_t{1} << 22;
+    auto run = [&](bool reuse) {
+        Rig rig;
+        auto loadOffline = [&](const std::string& name, float v) {
+            const std::string path = rig.write(name, kEditLoop, dc(v));
+            int32_t id = -1;
+            EXPECT_EQ(rig.looper.songLoadClip(path.c_str(), kSR, 0, 0, kEditLoop, true, id),
+                      wm::SongStatus::Ok);
+            return id;
+        };
+        const int32_t x = loadOffline("rst_x", 0.5f);
+        const int32_t y = loadOffline("rst_y", -0.5f);
+        if (reuse) {
+            const std::vector<wm::SongSection> a{sec(0, x)};
+            EXPECT_EQ(rig.looper.songSetSchedule(kEditLoop, a.data(), 1, end, true),
+                      wm::SongStatus::Ok);
+            rig.render(0, kStart, 64);
+            rig.looper.resetSongForRender();
+        }
+        const std::vector<wm::SongSection> b{sec(kStart, y)};
+        EXPECT_EQ(rig.looper.songSetSchedule(kEditLoop, b.data(), 1, end, true),
+                  wm::SongStatus::Ok);
+        return rig.render(kStart, 1024, 64);
+    };
+    const std::vector<float> fresh = run(false), reused = run(true);
+    ASSERT_EQ(fresh.size(), reused.size());
+    EXPECT_EQ(0, std::memcmp(fresh.data(), reused.data(), fresh.size() * sizeof(float)))
+        << "el render reiniciado arranco con un fundido de la agenda anterior";
 }

@@ -2179,9 +2179,12 @@ WMA_API WmaResult wma_song_load_clip(WmaEngine* engine, const char* path, int sa
 /**
  * Retire a clip. Its memory is released once the audio thread can no longer be
  * reading it (it advanced past the agenda that dropped it and no voice holds it),
- * at the next song call; an offline engine, and an engine with no stream (stopped),
- * release at once -- the stopped case is verified against the audio thread before
- * freeing (a callback starting concurrently mutes the song for one block instead).
+ * at the next song call. An offline engine releases at the next control call after a
+ * block in which no fade tail and no adopted agenda reads it (so an unload followed by a
+ * load with no render in between, near the memory cap, can fail with
+ * WMA_ERROR_MEMORY_BUDGET or WMA_ERROR_PARAMETER_OUT_OF_RANGE). An engine with no stream
+ * (stopped) releases at once -- verified against the audio thread before freeing (a
+ * callback starting concurrently mutes the song for one block instead).
  * @return WMA_OK; WMA_ERROR_INVALID_OPERATION if it does not exist, was already
  *         retired, or the PUBLISHED agenda references it.
  */

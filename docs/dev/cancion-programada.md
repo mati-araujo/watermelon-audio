@@ -20,7 +20,7 @@ salida, bit a bit, que uno de 4096.
 | clip | control | buffer denso inmutable de L frames, decodificado con `wm::decodeWavToRate` (el mismo camino que `importTrack`), recortado con `wm::clampLoopRegion` y normalizado (`normalizeSongClip`). Cuenta contra el presupuesto del looper |
 | agenda | control -> RT | triple buffer wait-free de 3 slots preasignados (tope 1024 secciones). El control escribe la agenda ENTERA y la intercambia con el slot del medio; el RT la adopta al inicio del bloque. Estado por seccion, no deltas |
 | voz | RT | una por pista: los tres smoothers de `TrackBuffer::mixInto` (volumen, mute, paneo) y una pila de hasta `kSongMaxTails` (8) colas para las adopciones tardias |
-| liberacion | control | sacar un clip de la agenda no lo libera: el RT publica al final de cada bloque que agenda adopto y que clips tiene en uso (la agenda mas todas las capas de cola); el control libera cuando esa foto es posterior a la baja y el clip no figura. Offline libera de inmediato; con el motor sin stream, tras el handshake de abajo |
+| liberacion | control | sacar un clip de la agenda no lo libera: el RT publica al final de cada bloque que agenda adopto y que clips tiene en uso (la agenda mas todas las capas de cola); el control libera cuando esa foto es posterior a la baja y el clip no figura. Offline libera en la proxima llamada de control tras un bloque en el que ninguna cola ni la agenda adoptada lo lean; con el motor sin stream, tras el handshake de abajo |
 
 El mutex de la cancion es propio (`mCtl`). Nunca se toma el del motor para decodificar, y
 **tampoco se decodifica con `mCtl` tomado**: `load_clip` reserva slot y bytes bajo el lock
@@ -88,8 +88,10 @@ no lee ningun clip: silencio de cancion un bloque, el precio de una carrera con 
 Al liberar se levanta `mScrub`: las colas del RT pueden apuntar a ids que se reusan, asi que el
 RT las descarta y la adopcion de ESE bloque no congela cola (se pierde ese fundido, una vez); si
 ese bloque no adopta nada la bandera se apaga igual y no se come la edicion siguiente.
-Un cambio de sample rate hace lo mismo. Offline libera de inmediato (`immediate`) salvo un clip que
-una capa de cola todavia lee (`mTailMask`): queda retirado hasta que termina la ventana.
+Un cambio de sample rate hace lo mismo. Offline (`immediate`) no espera la foto del RT, pero tampoco libera un clip
+que la agenda adoptada o una capa de cola todavia leen (`mInUseMask`): queda retirado hasta un bloque
+en que nadie lo lea. Un `unload`+`load` sin render en el medio cerca del tope puede dar
+MEMORY_BUDGET / PARAMETER_OUT_OF_RANGE.
 
 ## Apagar la agenda
 

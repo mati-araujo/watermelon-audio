@@ -55,7 +55,9 @@ interface ISongBridge {
     /**
      * `INVALID_OPERATION` si el clip no existe o lo referencia la agenda publicada. La memoria
      * se libera cuando el callback ya no puede estar leyéndolo; con el motor sin stream, al
-     * instante (se verifica antes de liberar).
+     * instante (se verifica antes de liberar). Offline, en la próxima llamada de control tras un
+     * bloque en el que ninguna cola ni la agenda adoptada lo lean: un `unload` + `load` sin render
+     * en el medio, cerca del tope, puede dar `MEMORY_BUDGET` o `PARAMETER_OUT_OF_RANGE`.
      */
     fun songUnloadClip(clipId: Int): Result<Unit>
 

@@ -503,6 +503,7 @@ public:
     void resetVoicesForRender() {
         for (int t = 0; t < kSongMaxTracks; ++t) mVoices[t] = Voice{};
         mTailUntil = 0;
+        mFromEmptyOnce = true;
     }
 
     size_t reservedBytes() const { return mReservedBytes.load(std::memory_order_relaxed); }
@@ -546,6 +547,7 @@ public:
         mBlockFrames = numFrames;
         adoptSongSchedule(blockFrame);
         mSkipTailOnce = false;   // vale para UN bloque: si no adopto nada, no se arrastra
+        mFromEmptyOnce = false;  // idem: solo la primera adopcion del render parte de vacio
         pruneSongTails(blockFrame);
         mBlockSection = songSectionAt(*mCur, blockFrame);
         return mCur->count > 0 || blockFrame < mTailUntil;
@@ -626,7 +628,6 @@ public:
                 if (v.tail[j].seg.nxt >= 0) tails |= 1ULL << v.tail[j].seg.nxt;
             }
         }
-        mTailMask.store(tails, std::memory_order_relaxed);
         mInUseMask.store(mCur->clipMask | tails, std::memory_order_release);
         mMaskSeq.store(mAdoptedSeq, std::memory_order_release);
         mBlocksRun.bump();
@@ -696,9 +697,9 @@ private:
         for (int i = 0; i < kSongMaxClips; ++i) {
             Slot& s = mSlots[i];
             if (s.state != SlotState::Retired) continue;
-            // Offline no hay RT concurrente, pero una cola de fundido puede seguir leyendo el clip.
-            const bool tailed = (mTailMask.load(std::memory_order_relaxed) >> i) & 1ULL;
-            if ((immediate && !tailed) || (maskSeq >= s.retireSeq && !((inUse >> i) & 1ULL))) {
+            // Offline no hay RT concurrente, pero la agenda adoptada y las colas de fundido siguen
+            // leyendo el clip, y la proxima adopcion congela la adoptada como cola.
+            if ((immediate || maskSeq >= s.retireSeq) && !((inUse >> i) & 1ULL)) {
                 freeSlotLocked(i);
             } else {
                 pending = true;
@@ -753,10 +754,22 @@ private:
         // El tramo viejo se lee ANTES del intercambio: despues, el slot viejo queda en el medio y
         // el control puede reescribirlo.
         SongSegment before[kSongMaxTracks];
-        const int64_t oldLoop = mCur->loopFrames;
-        const int64_t oldFade = mCur->fade;
-        const int sOld = songSectionAt(*mCur, blockFrame);
-        for (int t = 0; t < kSongMaxTracks; ++t) before[t] = songSegmentAt(*mCur, sOld, t);
+        // Tras resetVoicesForRender la agenda vieja no cuenta: se adopta como desde una instancia
+        // fresca (agenda vacia, loop 1, fade 0), sin fundido ni cola de lo que sono antes.
+        const bool fromEmpty = mFromEmptyOnce;
+        mFromEmptyOnce = false;
+        const int64_t oldLoop = fromEmpty ? 1 : mCur->loopFrames;
+        const int64_t oldFade = fromEmpty ? 0 : mCur->fade;
+        if (fromEmpty) {
+            SongSegment none{};
+            none.cur = kSongSilence;
+            none.nxt = kSongSilence;
+            none.kind = kSongFadeNone;
+            for (int t = 0; t < kSongMaxTracks; ++t) before[t] = none;
+        } else {
+            const int sOld = songSectionAt(*mCur, blockFrame);
+            for (int t = 0; t < kSongMaxTracks; ++t) before[t] = songSegmentAt(*mCur, sOld, t);
+        }
         const uint32_t got = mMiddle.exchange(static_cast<uint32_t>(mFront),
                                               std::memory_order_acq_rel);
         mFront = static_cast<int>(got & 3u);
@@ -998,7 +1011,6 @@ private:
     std::atomic<int32_t> mSection{-1};
     std::atomic<int64_t> mLate{0};
     std::atomic<uint64_t> mInUseMask{0};
-    std::atomic<uint64_t> mTailMask{0};   // RT -> control: lo que leen las colas (baja offline)
     std::atomic<uint64_t> mMaskSeq{0};
     std::atomic<bool> mFreeze{false};     // control: "estoy liberando sin esperar al RT"
     std::atomic<bool> mRtInBlock{false};  // RT: dentro de un bloque de la cancion
@@ -1019,6 +1031,7 @@ private:
     int mBlockSection = 0;
     int64_t mTailUntil = 0;
     bool mSkipTailOnce = false;
+    bool mFromEmptyOnce = false;   // offline, sin RT concurrente: lo arma resetVoicesForRender
     bool mClipsFrozen = false;   // este bloque no lee clips (el control esta liberando)
     Voice mVoices[kSongMaxTracks];
 };
