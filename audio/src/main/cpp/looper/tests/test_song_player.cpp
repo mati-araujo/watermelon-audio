@@ -882,3 +882,490 @@ TEST(SongSchedule, TheAgendaChecksumNoticesAnyChangedField) {
     EXPECT_TRUE(changed([](wm::SongAgenda& b) { b.fade = 0; }));
     EXPECT_TRUE(changed([](wm::SongAgenda& b) { b.count = 1; }));
 }
+
+// ---------------------------------------------------------------------------------------
+// AC-055.13: reprogramar DENTRO de un fundido, colas encadenadas, carga fuera del lock
+// ---------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr int64_t kEditLoop = 2048;
+
+/// Salto maximo entre muestras consecutivas del canal izquierdo en [from, to).
+double maxStep(const std::vector<float>& out, int64_t from, int64_t to) {
+    double worst = 0.0;
+    for (int64_t f = std::max<int64_t>(from, 1); f < to; ++f) {
+        worst = std::max(worst, double(std::abs(out[static_cast<size_t>(f) * 2] -
+                                                out[static_cast<size_t>(f - 1) * 2])));
+    }
+    return worst;
+}
+
+/// El salto de un fundido NORMAL del mayor barrido que usan estos tests (+0,5 a -0,5, diferencia
+/// 1,0), medido con el mismo motor sin editar nada: la vara contra la que se mide un click.
+double normalFadeStep() {
+    Rig rig;
+    const int32_t x = rig.load("edit_base_x", kEditLoop, dc(0.5f), kEditLoop);
+    const int32_t z = rig.load("edit_base_z", kEditLoop, dc(-0.5f), kEditLoop);
+    const int64_t s0 = 4096, s1 = s0 + 8192;
+    EXPECT_EQ(rig.schedule(kEditLoop, {sec(s0, x), sec(s1, z)}, s1 + 8192), wm::SongStatus::Ok);
+    const std::vector<float> out = rig.render(0, s1 + 1000, 64);
+    const double step = maxStep(out, s1 - kF - 8, s1 + 8);
+    EXPECT_GT(step, 0.001) << "el fundido normal no se midio";
+    return step;
+}
+
+struct EditRun {
+    std::vector<float> out;   // estereo intercalado, indexado por frame absoluto
+    int64_t late = 0;
+};
+
+/// Renderiza [0, upTo) en bloques de `block`, deja que `edit` publique, y sigue hasta `total`.
+EditRun runWithEdit(int block, int64_t upTo, int64_t total,
+                    const std::function<void(Rig&)>& setup, const std::function<void(Rig&)>& edit) {
+    Rig rig;
+    setup(rig);
+    EditRun run;
+    run.out = rig.render(0, upTo, block);
+    edit(rig);
+    const std::vector<float> rest = rig.render(upTo, total - upTo, block);
+    run.out.insert(run.out.end(), rest.begin(), rest.end());
+    run.late = rig.looper.songGetLateAdoptions();
+    return run;
+}
+
+}  // namespace
+
+// Bug plausible (BLOQUEANTE 1, S1): la adopcion compara el estado ESTABLE y no ve el fundido de
+// borde en curso. Cambiar el clip de la seccion SIGUIENTE cuando faltan 128 frames para B (dentro
+// de [B-F, B)) cambia lo que suena (cur*gOut + nxt*gIn) de un frame al otro: salto de ~0,36 y
+// late_adoptions en 0. Tiene que ser un fundido cercano al de un borde normal y contarse.
+TEST(SongLateAdoption, AC_055_13_ChangingTheNextClipInsideTheEntryFadeDoesNotClickAndIsCounted) {
+    const int64_t s0 = 4096, s1 = s0 + 8192, end = s1 + 8192, t = s1 - 128;
+    const double base = normalFadeStep();
+    EditRun reference;
+    for (int block : {32, 64, 128}) {
+        SCOPED_TRACE(block);
+        int32_t x = -1, w = -1;
+        const EditRun run = runWithEdit(
+            block, t, end + 500,
+            [&](Rig& rig) {
+                x = rig.load("s1_x", kEditLoop, dc(0.5f), kEditLoop);
+                const int32_t z = rig.load("s1_z", kEditLoop, dc(0.25f), kEditLoop);
+                w = rig.load("s1_w", kEditLoop, dc(-0.5f), kEditLoop);
+                ASSERT_EQ(rig.schedule(kEditLoop, {sec(s0, x), sec(s1, z)}, end), wm::SongStatus::Ok);
+            },
+            [&](Rig& rig) {
+                ASSERT_EQ(rig.schedule(kEditLoop, {sec(s0, x), sec(s1, w)}, end), wm::SongStatus::Ok);
+            });
+        EXPECT_LE(maxStep(run.out, t - 300, t + 400), 2.0 * base)
+            << "click al reprogramar dentro del fundido de entrada (fundido normal: " << base << ")";
+        EXPECT_EQ(run.late, 1) << "la edicion cambia lo que suena en t: es tardia";
+        EXPECT_NEAR(run.out[static_cast<size_t>(s1 + 1000) * 2], -0.5f * centerGain(), 1e-6)
+            << "el estado final es el clip nuevo";
+        if (reference.out.empty()) {
+            reference = run;
+        } else {
+            EXPECT_EQ(std::memcmp(run.out.data(), reference.out.data(),
+                                  run.out.size() * sizeof(float)), 0)
+                << "la salida depende del tamaño de bloque";
+        }
+    }
+}
+
+// Bug plausible (BLOQUEANTE 1, S2): la cola de la adopcion tardia guarda UN clip a ganancia 1 y
+// pierde el fundido de borde que sonaba: cambiar el clip de la seccion que suena dentro de
+// [B-F, B) deja saltar la salida (~0,33) aunque late_adoptions cuente 1.
+TEST(SongLateAdoption, AC_055_13_ChangingTheSoundingClipInsideTheExitFadeKeepsTheFadeInTheTail) {
+    const int64_t s0 = 4096, s1 = s0 + 8192, end = s1 + 8192, t = s1 - 128;
+    const double base = normalFadeStep();
+    EditRun reference;
+    for (int block : {32, 64, 128}) {
+        SCOPED_TRACE(block);
+        int32_t x = -1, y = -1, z = -1;
+        const EditRun run = runWithEdit(
+            block, t, end + 500,
+            [&](Rig& rig) {
+                x = rig.load("s2_x", kEditLoop, dc(0.5f), kEditLoop);
+                z = rig.load("s2_z", kEditLoop, dc(-0.5f), kEditLoop);
+                y = rig.load("s2_y", kEditLoop, dc(0.1f), kEditLoop);
+                ASSERT_EQ(rig.schedule(kEditLoop, {sec(s0, x), sec(s1, z)}, end), wm::SongStatus::Ok);
+            },
+            [&](Rig& rig) {
+                ASSERT_EQ(rig.schedule(kEditLoop, {sec(s0, y), sec(s1, z)}, end), wm::SongStatus::Ok);
+            });
+        EXPECT_LE(maxStep(run.out, t - 300, t + 400), 2.0 * base)
+            << "click al reprogramar la seccion que suena dentro de su fundido de salida";
+        EXPECT_EQ(run.late, 1);
+        EXPECT_NEAR(run.out[static_cast<size_t>(s1 + 1000) * 2], -0.5f * centerGain(), 1e-6);
+        if (reference.out.empty()) {
+            reference = run;
+        } else {
+            EXPECT_EQ(std::memcmp(run.out.data(), reference.out.data(),
+                                  run.out.size() * sizeof(float)), 0);
+        }
+    }
+}
+
+// Bug plausible (BLOQUEANTE 1, S3): dos adopciones tardias separadas por menos de F; la cola de
+// la segunda arranca desde el estado estable del clip viejo y no hereda la cola en curso: la
+// salida salta ~0,5 cuando se corta la primera cola.
+TEST(SongLateAdoption, AC_055_13_ASecondEditInsideTheFirstTailInheritsTheTailInProgress) {
+    const int64_t s0 = 4096, end = s0 + 16384, t = s0 + 4096;
+    const double base = normalFadeStep();
+    EditRun reference;
+    for (int block : {32, 64}) {
+        SCOPED_TRACE(block);
+        int32_t x = -1, y = -1, z = -1;
+        Rig rig;
+        x = rig.load("s3_x", kEditLoop, dc(0.5f), kEditLoop);
+        y = rig.load("s3_y", kEditLoop, dc(-0.5f), kEditLoop);
+        z = rig.load("s3_z", kEditLoop, dc(0.1f), kEditLoop);
+        ASSERT_EQ(rig.schedule(kEditLoop, {sec(s0, x)}, end), wm::SongStatus::Ok);
+        EditRun run;
+        run.out = rig.render(0, t, block);
+        ASSERT_EQ(rig.schedule(kEditLoop, {sec(s0, y)}, end), wm::SongStatus::Ok);
+        std::vector<float> part = rig.render(t, 64, block);
+        run.out.insert(run.out.end(), part.begin(), part.end());
+        ASSERT_EQ(rig.schedule(kEditLoop, {sec(s0, z)}, end), wm::SongStatus::Ok);
+        part = rig.render(t + 64, end + 500 - (t + 64), block);
+        run.out.insert(run.out.end(), part.begin(), part.end());
+        run.late = rig.looper.songGetLateAdoptions();
+        EXPECT_LE(maxStep(run.out, t - 100, t + 600), 2.0 * base)
+            << "click al encadenar dos ediciones dentro de F";
+        EXPECT_EQ(run.late, 2);
+        EXPECT_NEAR(run.out[static_cast<size_t>(t + 1000) * 2], 0.1f * centerGain(), 1e-6)
+            << "pasadas ambas colas queda el ultimo clip, sin restos de los anteriores";
+        if (reference.out.empty()) {
+            reference = run;
+        } else {
+            EXPECT_EQ(std::memcmp(run.out.data(), reference.out.data(),
+                                  run.out.size() * sizeof(float)), 0);
+        }
+    }
+}
+
+// Bug plausible (BLOQUEANTE 1, S4): la edicion mueve el borde siguiente de modo que el frame de
+// adopcion cae dentro del NUEVO [B'-F, B'): el clip y la fase de t son los mismos, asi que el
+// estado estable no cambia, pero el fundido de borde ya esta andando y aparece de golpe.
+TEST(SongLateAdoption, AC_055_13_MovingTheNextBorderSoTheAdoptionLandsInItsFadeDoesNotClick) {
+    const int64_t s0 = 4096, s1 = s0 + 8192, end = s1 + 16384, t = s0 + 4096;
+    const double base = normalFadeStep();
+    EditRun reference;
+    for (int block : {32, 64, 128}) {
+        SCOPED_TRACE(block);
+        int32_t x = -1, z = -1;
+        const EditRun run = runWithEdit(
+            block, t, end + 500,
+            [&](Rig& rig) {
+                x = rig.load("s4_x", kEditLoop, dc(0.5f), kEditLoop);
+                z = rig.load("s4_z", kEditLoop, dc(-0.5f), kEditLoop);
+                ASSERT_EQ(rig.schedule(kEditLoop, {sec(s0, x), sec(s1, z)}, end), wm::SongStatus::Ok);
+            },
+            [&](Rig& rig) {
+                ASSERT_EQ(rig.schedule(kEditLoop, {sec(s0, x), sec(t + 128, z)}, end),
+                          wm::SongStatus::Ok);
+            });
+        EXPECT_LE(maxStep(run.out, t - 300, t + 700), 2.0 * base)
+            << "click al mover el borde siguiente hasta caer en su propio fundido";
+        EXPECT_EQ(run.late, 1);
+        EXPECT_NEAR(run.out[static_cast<size_t>(t + 1500) * 2], -0.5f * centerGain(), 1e-6);
+        if (reference.out.empty()) {
+            reference = run;
+        } else {
+            EXPECT_EQ(std::memcmp(run.out.data(), reference.out.data(),
+                                  run.out.size() * sizeof(float)), 0);
+        }
+    }
+}
+
+// Bug plausible (BLOQUEANTE 1, `play` tardio): el start_0 de una agenda nueva cae a menos de F
+// del frame de adopcion; el fundido de entrada ya paso en parte y la salida arranca a mitad de
+// rampa (escalon desde el silencio), ni rechazado ni contado.
+TEST(SongLateAdoption, AC_055_13_PlayWhoseFirstStartIsLessThanFAwayFadesInFromTheAdoption) {
+    const int64_t t = 4096, end = t + 20000;
+    EditRun reference;
+    for (int block : {32, 64, 128}) {
+        SCOPED_TRACE(block);
+        int32_t x = -1;
+        const EditRun run = runWithEdit(
+            block, t, end + 500,
+            [&](Rig& rig) { x = rig.load("s5_x", kEditLoop, dc(0.5f), kEditLoop); },
+            [&](Rig& rig) {
+                ASSERT_EQ(rig.schedule(kEditLoop, {sec(t + 64, x)}, end), wm::SongStatus::Ok);
+            });
+        // La entrada normal (raised cosine de 0,5) tiene pendiente maxima 0,5*pi/(2F)*g; tolera 2x.
+        const double normalEntry = 0.5 * M_PI / (2.0 * kF) * centerGain();
+        EXPECT_LE(maxStep(run.out, t - 100, t + 600), 2.0 * normalEntry)
+            << "escalon al entrar con el fundido de entrada ya empezado";
+        EXPECT_EQ(run.late, 1) << "el fundido de entrada truncado se cuenta como adopcion tardia";
+        EXPECT_NEAR(run.out[static_cast<size_t>(t + 1000) * 2], 0.5f * centerGain(), 1e-6);
+        if (reference.out.empty()) {
+            reference = run;
+        } else {
+            EXPECT_EQ(std::memcmp(run.out.data(), reference.out.data(),
+                                  run.out.size() * sizeof(float)), 0);
+        }
+    }
+}
+
+// Bug plausible (la otra cara): un `play` con start_0 LEJOS no es tardio ni agrega fundidos
+// (se cuenta 0 y la salida es el fundido de entrada normal). Guarda contra un arreglo que cuente
+// o suavice cualquier diferencia futura.
+TEST(SongLateAdoption, AC_055_13_AFutureOnlyChangeIsNeitherCountedNorSmoothed) {
+    const int64_t t = 4096, s0 = t + 4 * kF, end = s0 + 20000;
+    Rig rig;
+    const int32_t x = rig.load("s6_x", kEditLoop, dc(0.5f), kEditLoop);
+    std::vector<float> out = rig.render(0, t, 64);
+    ASSERT_EQ(rig.schedule(kEditLoop, {sec(s0, x)}, end), wm::SongStatus::Ok);
+    const std::vector<float> rest = rig.render(t, end + 500 - t, 64);
+    out.insert(out.end(), rest.begin(), rest.end());
+    EXPECT_EQ(rig.looper.songGetLateAdoptions(), 0);
+    for (int64_t f = s0 - kF; f < s0; ++f) {
+        const double want = 0.5 * 0.5 * (1.0 - std::cos(M_PI * double(f - (s0 - kF)) / kF));
+        ASSERT_NEAR(out[static_cast<size_t>(f) * 2], want * centerGain(), 1e-6) << f;
+    }
+}
+
+// Bug plausible (MENOR 5): `start[1] - start[0]` con INT64_MIN desborda (UB) y la agenda pasa
+// la validacion con un start negativo disfrazado de salto enorme; igual con end_frame.
+TEST(SongSchedule, AC_055_13_ValidationDoesNotOverflowOnExtremeFrames) {
+    Rig rig;
+    const int32_t c0 = rig.load("ov0", kEditLoop, dc(0.1f), kEditLoop);
+    using S = wm::SongStatus;
+    EXPECT_EQ(rig.schedule(kEditLoop, {sec(1, c0), sec(INT64_MIN, c0)}, 100000), S::OutOfRange);
+    EXPECT_EQ(rig.schedule(kEditLoop, {sec(0, c0), sec(INT64_MIN, c0)}, 100000), S::OutOfRange);
+    EXPECT_EQ(rig.schedule(kEditLoop, {sec(1, c0)}, INT64_MIN), S::OutOfRange);
+    EXPECT_EQ(rig.schedule(kEditLoop, {sec(INT64_MIN, c0)}, 100000), S::OutOfRange);
+    EXPECT_EQ(rig.schedule(kEditLoop, {sec(1, c0)}, INT64_MAX), S::OutOfRange)
+        << "INT64_MAX es el centinela de 'sin borde siguiente'";
+    // lo valido sigue valiendo, incluso muy lejos
+    EXPECT_EQ(rig.schedule(kEditLoop, {sec(INT64_MAX / 2, c0)}, INT64_MAX / 2 + 100000), S::Ok);
+}
+
+// Bug plausible (MENOR 3): la grabacion armada se dispara con la cancion activa (la carrera
+// entre set_schedule y arm no tiene lock comun): startRecording no hace nada pero se limpia el
+// armado y se cuenta como disparado, y el llamador cree que grabo.
+TEST(SongSchedule, AC_055_13_AnArmedRecordingThatFiresUnderTheSongIsNotCountedAsTriggered) {
+    Rig rig;
+    const int32_t c0 = rig.load("arm0", kEditLoop, dc(0.1f), kEditLoop);
+    ASSERT_TRUE(rig.looper.prepareTrack(1, 4800, kSR));
+    rig.looper.armRecording(1, 0);
+    ASSERT_EQ(rig.looper.getArmedTrack(), 1);
+    // la carrera: set_schedule leyo recordingBusy=false ANTES de que se armara
+    wm::SongContext ctx;
+    ctx.sampleRate = kSR;
+    ctx.maxActiveTracks = 8;
+    ctx.budgetBytes = rig.looper.getMemoryBudgetBytes();
+    const wm::SongSection s = sec(5000, c0);
+    ASSERT_EQ(rig.looper.song().setSchedule(kEditLoop, &s, 1, 9000, ctx), wm::SongStatus::Ok);
+    ASSERT_TRUE(rig.looper.song().active());
+    rig.render(0, 256, 256);
+    EXPECT_FALSE(rig.looper.isRecording());
+    EXPECT_EQ(rig.looper.getArmedTriggered(), 0)
+        << "el disparo se conto aunque la cancion impidio grabar";
+    EXPECT_EQ(rig.looper.getArmedTrack(), -1) << "el armado fantasma sigue vivo";
+}
+
+// ---------------------------------------------------------------------------------------
+// Clips retirados con el callback parado; carga fuera del lock
+// ---------------------------------------------------------------------------------------
+
+// Bug plausible (IMPORTANTE 2): con el stream parado la foto del RT queda en la ultima agenda y
+// cada unload+load retiene slot y bytes: a los 64 ciclos el pool da PARAMETER_OUT_OF_RANGE.
+TEST(SongUnload, AC_055_13_WithTheCallbackStoppedRetiredClipsAreReleasedAtOnce) {
+    Rig rig;
+    const int32_t c0 = rig.load("stop0", kEditLoop, dc(0.3f), kEditLoop);
+    const std::string path = rig.write("stop_cycle", kEditLoop, dc(0.3f));
+    ASSERT_EQ(rig.schedule(kEditLoop, {sec(100, c0)}, 100 + 50000), wm::SongStatus::Ok);
+    rig.render(0, 512, 256);   // el RT adopta y publica su foto; despues el stream se para
+    ASSERT_EQ(rig.looper.songSetSchedule(kEditLoop, nullptr, 0, 0, false, true), wm::SongStatus::Ok);
+    ASSERT_EQ(rig.looper.songUnloadClip(c0, false, true), wm::SongStatus::Ok);
+    EXPECT_EQ(rig.looper.song().retiredClips(), 0) << "el clip quedo retenido con el callback parado";
+    EXPECT_EQ(rig.looper.song().reservedBytes(), 0u);
+    for (int i = 0; i < 3 * wm::kSongMaxClips; ++i) {
+        int32_t id = -1;
+        ASSERT_EQ(rig.looper.songLoadClip(path.c_str(), kSR, 0, 0, kEditLoop, false, id, true),
+                  wm::SongStatus::Ok)
+            << "ciclo " << i << ": el pool se agoto con clips retirados";
+        ASSERT_EQ(rig.looper.songUnloadClip(id, false, true), wm::SongStatus::Ok);
+    }
+    EXPECT_EQ(rig.looper.song().reservedBytes(), 0u);
+}
+
+// Bug plausible (IMPORTANTE 2, la carrera): "parado" es una pista, no una prueba. Con un bloque
+// ABIERTO (el callback esta leyendo clips) liberar sin esperar es un use-after-free; el control
+// tiene que verificarlo y retener.
+TEST(SongUnload, AC_055_13_AStoppedHintNeverFreesWhileABlockIsOpen) {
+    Rig rig;
+    const int32_t c0 = rig.load("blk0", kEditLoop, dc(0.3f), kEditLoop);
+    ASSERT_EQ(rig.schedule(kEditLoop, {sec(100, c0)}, 100 + 50000), wm::SongStatus::Ok);
+    rig.render(0, 512, 256);
+    ASSERT_EQ(rig.looper.songSetSchedule(kEditLoop, nullptr, 0, 0, false), wm::SongStatus::Ok);
+    rig.looper.beginBlock(512, 256);   // el callback esta adentro de un bloque
+    ASSERT_EQ(rig.looper.songUnloadClip(c0, false, true), wm::SongStatus::Ok);
+    EXPECT_EQ(rig.looper.song().retiredClips(), 1) << "se libero con un bloque abierto";
+    std::vector<float> buf(256 * 2, 0.0f);
+    rig.looper.process(buf.data(), 256, 512);   // el bloque termina
+    EXPECT_EQ(rig.looper.song().reclaim(false, true), 0u);
+    EXPECT_EQ(rig.looper.song().retiredClips(), 0);
+}
+
+// Bug plausible (IMPORTANTE 2, ghost): liberar con el callback parado y reutilizar el id deja a
+// las colas de fundido del RT apuntando a un clip que ya es OTRO: al reanudar suena un clip
+// ajeno fundiendose a la salida.
+TEST(SongUnload, AC_055_13_ReusingAReleasedIdDoesNotResurrectItInTheFadeTail) {
+    Rig rig;
+    const int32_t old = rig.load("ghost_old", kEditLoop, dc(0.5f), kEditLoop);
+    ASSERT_EQ(rig.schedule(kEditLoop, {sec(100, old)}, 100 + 50000), wm::SongStatus::Ok);
+    rig.render(0, 1024, 256);   // suena el clip viejo
+    // el stream se para: se apaga, se descarga y se carga OTRO clip (reusa el id)
+    ASSERT_EQ(rig.looper.songSetSchedule(kEditLoop, nullptr, 0, 0, false, true), wm::SongStatus::Ok);
+    ASSERT_EQ(rig.looper.songUnloadClip(old, false, true), wm::SongStatus::Ok);
+    const int32_t fresh = rig.load("ghost_new", kEditLoop, dc(0.9f), kEditLoop);
+    ASSERT_EQ(fresh, old) << "el test espera que el id se reuse";
+    ASSERT_EQ(rig.schedule(kEditLoop, {sec(20000, fresh)}, 20000 + 50000), wm::SongStatus::Ok);
+    // el stream arranca: a esta altura no suena nada
+    const std::vector<float> out = rig.render(2048, 4 * kF, 64);
+    for (size_t i = 0; i < out.size(); ++i) {
+        ASSERT_EQ(out[i], 0.0f) << "suena un fantasma en la muestra " << i;
+    }
+}
+
+// Bug plausible (IMPORTANTE 2, carrera real): con una pista de "parado" equivocada y el callback
+// corriendo, el control libera mientras el RT lee. Bajo ASan es un use-after-free; bajo TSan,
+// una carrera sobre la tabla de clips.
+TEST(SongUnload, AC_055_13_RacingTheCallbackWithAWrongStoppedHintNeverFreesAClipInUse) {
+    Rig rig;
+    const std::string path = rig.write("race_hint", kEditLoop, dc(0.3f));
+    std::atomic<bool> stop{false};
+    std::atomic<int64_t> frame{0};
+    std::thread rt([&] {
+        std::vector<float> buf(64 * 2);
+        while (!stop.load(std::memory_order_acquire)) {
+            const int64_t f = frame.load(std::memory_order_relaxed);
+            std::fill(buf.begin(), buf.end(), 0.0f);
+            rig.looper.beginBlock(f, 64);
+            rig.looper.process(buf.data(), 64, f);
+            frame.store(f + 64, std::memory_order_relaxed);
+        }
+    });
+    int loaded = 0;
+    for (int i = 0; i < 200; ++i) {
+        int32_t id = -1;
+        if (rig.looper.songLoadClip(path.c_str(), kSR, 0, 0, kEditLoop, false, id, true) !=
+            wm::SongStatus::Ok) {
+            continue;
+        }
+        ++loaded;
+        const int64_t now = frame.load(std::memory_order_relaxed);
+        std::vector<wm::SongSection> secs = {sec(std::max<int64_t>(0, now - 500), id),
+                                              sec(now + 1000, id)};
+        EXPECT_EQ(rig.looper.songSetSchedule(kEditLoop, secs.data(), 2, now + 100000, false, true),
+                  wm::SongStatus::Ok);
+        if (i % 3 == 0) {
+            const int64_t until = frame.load() + 256;
+            wma_test::waitUntil([&] { return frame.load() >= until; });
+        }
+        EXPECT_EQ(rig.looper.songSetSchedule(kEditLoop, nullptr, 0, 0, false, true),
+                  wm::SongStatus::Ok);
+        EXPECT_EQ(rig.looper.songUnloadClip(id, false, true), wm::SongStatus::Ok);
+    }
+    EXPECT_GT(loaded, 0);   // el pool puede llenarse de retirados en uso: depende del reparto de hilos
+    stop.store(true, std::memory_order_release);
+    rt.join();
+    EXPECT_EQ(rig.looper.song().reclaim(false, true), 0u) << "fuga de clips retirados";
+}
+
+namespace {
+
+/// Una carga en curso detenida DENTRO de la decodificacion, para probar que el control sigue vivo.
+class SlowLoad {
+public:
+    SlowLoad(Rig& rig, const std::string& path, int sampleRate) : mRig(rig) {
+        mRig.looper.song().setLoadHook([this] {
+            mInDecode.store(true, std::memory_order_release);
+            wma_test::waitUntil([this] { return mRelease.load(std::memory_order_acquire); },
+                                std::chrono::milliseconds(20000));
+        });
+        mThread = std::thread([this, path, sampleRate] {
+            mStatus = mRig.looper.songLoadClip(path.c_str(), sampleRate, 0, 0, kEditLoop, false, mId);
+        });
+        mStarted = wma_test::waitUntil([this] { return mInDecode.load(std::memory_order_acquire); },
+                                       std::chrono::milliseconds(5000));
+    }
+    ~SlowLoad() { finish(); }
+    bool started() const { return mStarted; }
+    /// Corre `fn` en otro hilo y dice si termino mientras la carga seguia detenida.
+    bool completesWhileLoading(const std::function<void()>& fn) {
+        std::atomic<bool> done{false};
+        std::thread t([&] {
+            fn();
+            done.store(true, std::memory_order_release);
+        });
+        const bool ok = wma_test::waitUntil([&] { return done.load(std::memory_order_acquire); },
+                                            std::chrono::milliseconds(3000));
+        if (!ok) release();   // que el hilo pueda terminar y el join no cuelgue
+        t.join();
+        return ok;
+    }
+    void release() { mRelease.store(true, std::memory_order_release); }
+    wm::SongStatus finish() {
+        release();
+        if (mThread.joinable()) mThread.join();
+        return mStatus;
+    }
+    int32_t id() const { return mId; }
+
+private:
+    Rig& mRig;
+    std::atomic<bool> mInDecode{false};
+    std::atomic<bool> mRelease{false};
+    std::thread mThread;
+    bool mStarted = false;
+    wm::SongStatus mStatus = wm::SongStatus::Io;
+    int32_t mId = -1;
+};
+
+}  // namespace
+
+// Bug plausible (IMPORTANTE 4): loadClip decodifica con el mutex de control tomado: una edicion
+// sonando (set_schedule) espera la decodificacion de otro clip, segundos con un archivo grande.
+TEST(SongClip, AC_055_13_ScheduleAndUnloadDoNotWaitForASlowLoad) {
+    Rig rig;
+    const int32_t c0 = rig.load("slow0", kEditLoop, dc(0.3f), kEditLoop);
+    const std::string path = rig.write("slow_big", kEditLoop, dc(0.2f));
+    ASSERT_EQ(rig.schedule(kEditLoop, {sec(100, c0)}, 100 + 50000), wm::SongStatus::Ok);
+    SlowLoad load(rig, path, kSR);
+    ASSERT_TRUE(load.started());
+    EXPECT_TRUE(load.completesWhileLoading([&] {
+        EXPECT_EQ(rig.schedule(kEditLoop, {sec(100, c0), sec(10000, c0)}, 100 + 50000),
+                  wm::SongStatus::Ok);
+    })) << "set_schedule espero a la decodificacion de otro clip";
+    EXPECT_TRUE(load.completesWhileLoading([&] {
+        EXPECT_EQ(rig.looper.songUnloadClip(77, false), wm::SongStatus::InvalidOperation);
+    })) << "unload espero a la decodificacion de otro clip";
+    EXPECT_EQ(load.finish(), wm::SongStatus::Ok);
+    EXPECT_EQ(rig.looper.song().reservedBytes(), 2u * kEditLoop * 2 * sizeof(float))
+        << "la reserva se contabiliza una sola vez";
+}
+
+// Bug plausible (IMPORTANTE 4): el cambio de sample rate (con el RT en quiesce) se bloquea en el
+// mutex toda la decodificacion; y el clip que se estaba decodificando se instala despues al rate
+// viejo (suena a otra altura). Tiene que descartarse con un error que diga la causa.
+TEST(SongClip, AC_055_13_ASampleRateChangeDuringALoadDoesNotWaitAndDiscardsTheClip) {
+    Rig rig;
+    const std::string path = rig.write("slow_sr", kEditLoop, dc(0.2f));
+    SlowLoad load(rig, path, kSR);
+    ASSERT_TRUE(load.started());
+    EXPECT_TRUE(load.completesWhileLoading([&] { rig.looper.setSampleRate(44100); }))
+        << "el cambio de sample rate espero a la decodificacion (audio en quiesce)";
+    EXPECT_EQ(load.finish(), wm::SongStatus::InvalidOperation)
+        << "el clip decodificado al rate viejo no puede instalarse";
+    EXPECT_EQ(rig.looper.song().reservedBytes(), 0u);
+    // el slot quedo libre y el siguiente clip (al rate nuevo) carga
+    const std::string path2 = rig.write("slow_sr2", 4096, dc(0.2f), 44100);
+    int32_t id = -1;
+    EXPECT_EQ(rig.looper.songLoadClip(path2.c_str(), 44100, 0, 0, kEditLoop, false, id),
+              wm::SongStatus::Ok);
+}

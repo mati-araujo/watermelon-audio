@@ -18,16 +18,24 @@
  *    la agenda ENTERA en su slot y la intercambia con el del medio; el RT la adopta al inicio del
  *    bloque si esta fresca. Estado por seccion, no deltas: una agenda perdida no corrompe nada.
  *  - VOCES (RT): una por pista, con sus tres smoothers (volumen, mute, paneo, los mismos que
- *    TrackBuffer::mixInto) y un carril de cola para el fundido de una adopcion tardia.
+ *    TrackBuffer::mixInto) y una pila de COLAS para el fundido de las adopciones tardias.
  *
  * Fundido F = max(64, round(0,005 * SR)) en [B - F, B) antes de cada borde B: equal-power (cuarto
  * de seno/coseno) para cambio de clip o salto de fase, coseno elevado para entrar/salir de
  * silencio; nada si el mismo clip sigue alineado. El estado de B rige exacto desde B.
  *
+ * Adopcion tardia: si lo que suena EN EL FRAME DE ADOPCION t cambia (incluido un fundido de borde
+ * ya empezado), la voz congela el SEGMENTO viejo (cur, nxt, bordes, fundido) y lo renderiza como una
+ * cola: exactamente lo que renderizaba la agenda vieja, a ganancia gOut en [t, t + F) mientras lo
+ * nuevo entra con gIn. Una segunda adopcion dentro de la ventana apila otra cola; el peso de cada
+ * capa es el producto de las ganancias de los eventos que la alcanzan, asi que es recursivamente
+ * correcto con un tope fijo (kSongMaxTails) y sin allocation.
+ *
  * Liberacion de clips: sacar un clip de la agenda no lo libera. El RT publica al final de cada
  * bloque que agenda adopto y que clips tiene en uso (la agenda adoptada mas las colas); el
  * control libera recien cuando esa foto es posterior a la baja y el clip no figura. En offline no
- * hay hilo RT concurrente y se libera de inmediato.
+ * hay hilo RT concurrente y se libera de inmediato; con el stream parado (pista del motor) se
+ * libera tras verificar, con un handshake Dekker, que el RT no esta dentro de un bloque.
  */
 
 #include "LooperExporter.h"
@@ -39,6 +47,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -49,6 +58,7 @@ namespace wm {
 constexpr int kSongMaxTracks = 16;      // = AudioLooper::MAX_TRACKS_HW (static_assert alla)
 constexpr int kSongMaxClips = 64;
 constexpr int kSongMaxSections = 1024;
+constexpr int kSongMaxTails = 8;        // adopciones tardias encadenadas dentro de una ventana F
 constexpr int32_t kSongSilence = -1;
 
 /// Que le paso a una operacion de control de la cancion.
@@ -80,6 +90,7 @@ struct SongContext {
     size_t usedBytes = 0;        ///< RAM reservada por las TOMAS (los clips los cuenta el SongPlayer)
     bool recordingBusy = false;  ///< grabando o armado
     bool immediate = false;      ///< offline: ningun hilo RT concurrente, se libera sin esperar
+    bool rtStopped = false;      ///< pista del motor: sin stream. Se verifica antes de liberar
 };
 
 /// F de un sample rate: 5 ms, con piso de 64 frames.
@@ -258,22 +269,46 @@ inline void songFadeGains(int kind, int64_t j, int64_t fade, float& gOut, float&
     }
 }
 
-/// Que suena en una pista en el frame `f`, sin contar fundidos (el estado "estable").
-struct SongState {
-    int32_t clip;
-    int64_t phase;
-    int64_t loop;
-};
-
-inline SongState songStateAt(const SongAgenda& a, int64_t f, int track) {
-    SongState st{kSongSilence, 0, a.loopFrames};
-    const int s = songSectionAt(a, f);
-    if (s >= 0 && s < a.count) {
-        st.clip = a.clips[s][track];
-        if (st.clip >= 0) st.phase = songPosMod(f - a.starts[s], a.loopFrames);
-    }
-    return st;
+/// Un tramo esta dentro de su fundido de borde en `t` (a ganancia de entrada > 0).
+inline bool songSegmentInFade(const SongSegment& g, int64_t t) {
+    return g.kind != kSongFadeNone && t > g.fadeBegin;
 }
+
+/// Suena algo en `t`: un clip de la seccion o, dentro del fundido, el de la siguiente.
+inline bool songSegmentAudibleAt(const SongSegment& g, int64_t t) {
+    return g.cur >= 0 || (songSegmentInFade(g, t) && g.nxt >= 0);
+}
+
+/// Los dos tramos dan la MISMA salida en `t`: si es asi, la agenda nueva toma el relevo sin
+/// escalon (lo que difiera mas adelante entra desde ganancia 0, o lo trae la agenda misma).
+inline bool songSegmentsAlikeAt(const SongSegment& o, int64_t oLoop, int64_t oFade,
+                                const SongSegment& n, int64_t nLoop, int64_t nFade, int64_t t) {
+    if (o.cur != n.cur) return false;
+    if (o.cur >= 0 && (oLoop != nLoop || songPosMod(t - o.startCur, oLoop) !=
+                                             songPosMod(t - n.startCur, nLoop))) {
+        return false;
+    }
+    const bool oIn = songSegmentInFade(o, t);
+    if (oIn != songSegmentInFade(n, t)) return false;
+    if (!oIn) return true;
+    if (o.nxt != n.nxt || o.kind != n.kind || o.fadeBegin != n.fadeBegin || oFade != nFade) {
+        return false;
+    }
+    return o.nxt < 0 || (oLoop == nLoop && songPosMod(t - o.startNxt, oLoop) ==
+                                               songPosMod(t - n.startNxt, nLoop));
+}
+
+/// Una capa de cola: el tramo que renderizaba la agenda vieja en el frame de adopcion `evStart`,
+/// congelado, y el evento (la adopcion) que lo retira.
+struct SongTail {
+    SongSegment seg;
+    int64_t loop;       ///< L de la agenda vieja
+    int64_t segFade;    ///< F de la agenda vieja (su propio fundido de borde)
+    int64_t evStart;    ///< frame de la adopcion
+    int64_t evFade;     ///< F de la agenda nueva: duracion de la ventana
+    int64_t evEnd;      ///< evStart + evFade
+    int evKind;         ///< equal-power si suenan los dos lados, coseno elevado si no
+};
 
 class SongPlayer {
 public:
@@ -305,57 +340,86 @@ public:
         if (path == nullptr || sampleRate <= 0 || loopFrames <= 0 || loopFrames > INT32_MAX) {
             return SongStatus::OutOfRange;
         }
-        std::lock_guard<std::mutex> lock(mCtl);
-        reclaimLocked(ctx.immediate);
-        int slot = -1;
-        for (int i = 0; i < kSongMaxClips; ++i) {
-            if (mSlots[i].state == SlotState::Free) { slot = i; break; }
-        }
-        if (slot < 0) return SongStatus::OutOfRange;   // pool lleno (retirados pendientes incluidos)
+        // Una decodificacion a la vez: el presupuesto se mide contra los clips ya instalados, y
+        // dos decodificaciones simultaneas sumarian su pico transitorio sin que nadie lo cuente.
+        // Ni set_schedule ni unload ni el cambio de sample rate esperan este mutex.
+        std::lock_guard<std::mutex> serial(mLoadSerial);
 
         const size_t clipBytes = static_cast<size_t>(loopFrames) * 2 * sizeof(float);
-        const size_t used = ctx.usedBytes + mReservedBytes.load(std::memory_order_relaxed);
-        if (used + clipBytes > ctx.budgetBytes) return SongStatus::BudgetExceeded;
+        int slot = -1;
+        uint64_t ticket = 0;
+        size_t used = 0;
+        {
+            std::lock_guard<std::mutex> lock(mCtl);
+            reclaimLocked(ctx.immediate, ctx.rtStopped);
+            for (int i = 0; i < kSongMaxClips; ++i) {
+                if (mSlots[i].state == SlotState::Free) { slot = i; break; }
+            }
+            if (slot < 0) return SongStatus::OutOfRange;   // pool lleno (retirados pendientes incluidos)
+            used = ctx.usedBytes + mReservedBytes.load(std::memory_order_relaxed);
+            if (used + clipBytes > ctx.budgetBytes) return SongStatus::BudgetExceeded;
+            // Se reserva el slot y los bytes bajo el lock; decodificar y hornear ocurre afuera.
+            Slot& s = mSlots[slot];
+            s.state = SlotState::Reserved;
+            s.frames = loopFrames;
+            ticket = s.ticket = ++mTicketCounter;
+            mReservedBytes.fetch_add(clipBytes, std::memory_order_relaxed);
+        }
 
+        if (mLoadHook) mLoadHook();
         DecodedStereo decoded;
         const ImportStatus st = decodeWavToRate(path, sampleRate, ctx.budgetBytes, used,
                                                 &SongPlayer::denseReservationBytes, decoded);
+        SongStatus result = SongStatus::Ok;
+        std::vector<float> baked;
         switch (st) {
             case ImportStatus::Ok: break;
             case ImportStatus::InvalidTrack:
-            case ImportStatus::InvalidArgument: return SongStatus::OutOfRange;
-            case ImportStatus::Io: return SongStatus::Io;
-            case ImportStatus::UnsupportedFormat: return SongStatus::UnsupportedFormat;
-            case ImportStatus::BudgetExceeded: return SongStatus::BudgetExceeded;
-            case ImportStatus::OutOfMemory: return SongStatus::OutOfMemory;
+            case ImportStatus::InvalidArgument: result = SongStatus::OutOfRange; break;
+            case ImportStatus::Io: result = SongStatus::Io; break;
+            case ImportStatus::UnsupportedFormat: result = SongStatus::UnsupportedFormat; break;
+            case ImportStatus::BudgetExceeded: result = SongStatus::BudgetExceeded; break;
+            case ImportStatus::OutOfMemory: result = SongStatus::OutOfMemory; break;
         }
-        try {
-            Slot& s = mSlots[slot];
-            s.storage = bakeSongClip(decoded.samples.data(), decoded.frames, regionStart, regionEnd,
+        if (result == SongStatus::Ok) {
+            try {
+                baked = bakeSongClip(decoded.samples.data(), decoded.frames, regionStart, regionEnd,
                                      loopFrames, songFadeFrames(sampleRate));
-            s.frames = loopFrames;
-            s.sampleRate = sampleRate;
-            s.state = SlotState::Loaded;
-            mClips[slot].frames.store(loopFrames, std::memory_order_relaxed);
-            mClips[slot].data.store(s.storage.data(), std::memory_order_release);
-            mReservedBytes.fetch_add(clipBytes, std::memory_order_relaxed);
-        } catch (const std::bad_alloc&) {
-            return SongStatus::OutOfMemory;
+            } catch (const std::bad_alloc&) {
+                result = SongStatus::OutOfMemory;
+            }
         }
+
+        std::lock_guard<std::mutex> lock(mCtl);
+        Slot& s = mSlots[slot];
+        if (s.state != SlotState::Reserved || s.ticket != ticket) {
+            // invalidateForRate libero la reserva mientras se decodificaba: el clip esta
+            // resampleado al rate viejo y ya no sirve.
+            return SongStatus::InvalidOperation;
+        }
+        if (result != SongStatus::Ok) {
+            freeSlotLocked(slot);
+            return result;
+        }
+        s.storage = std::move(baked);
+        s.sampleRate = sampleRate;
+        s.state = SlotState::Loaded;
+        mClips[slot].frames.store(loopFrames, std::memory_order_relaxed);
+        mClips[slot].data.store(s.storage.data(), std::memory_order_release);
         outId = slot;
         return SongStatus::Ok;
     }
 
     SongStatus unloadClip(int32_t id, const SongContext& ctx) {
         std::lock_guard<std::mutex> lock(mCtl);
-        reclaimLocked(ctx.immediate);
+        reclaimLocked(ctx.immediate, ctx.rtStopped);
         if (id < 0 || id >= kSongMaxClips || mSlots[id].state != SlotState::Loaded) {
             return SongStatus::InvalidOperation;
         }
         if ((mPubMask >> id) & 1ULL) return SongStatus::InvalidOperation;   // la agenda lo usa
         mSlots[id].state = SlotState::Retired;
         mSlots[id].retireSeq = mSeq;
-        reclaimLocked(ctx.immediate);
+        reclaimLocked(ctx.immediate, ctx.rtStopped);
         return SongStatus::Ok;
     }
 
@@ -364,7 +428,7 @@ public:
                            int64_t endFrame, const SongContext& ctx) {
         if (count < 0 || count > kSongMaxSections) return SongStatus::OutOfRange;
         std::lock_guard<std::mutex> lock(mCtl);
-        reclaimLocked(ctx.immediate);
+        reclaimLocked(ctx.immediate, ctx.rtStopped);
         const int64_t fade = fadeFor(ctx.sampleRate);
 
         if (count == 0) {
@@ -375,14 +439,19 @@ public:
         if (sections == nullptr || loopFrames <= 0 || loopFrames > INT32_MAX) {
             return SongStatus::OutOfRange;
         }
-        // 1. forma de la agenda
+        // 1. forma de la agenda. Estrictamente creciente ANTES de restar: con starts[0] >= 0 y cada
+        // start mayor que el anterior, ninguna resta desborda (INT64_MIN - 1 era UB y pasaba).
+        // end_frame < INT64_MAX: ese valor es el centinela de "sin borde siguiente".
+        const int64_t minSection = std::max<int64_t>(2 * fade, 1);
         if (sections[0].startFrame < 0) return SongStatus::OutOfRange;
         for (int32_t k = 1; k < count; ++k) {
-            if (sections[k].startFrame - sections[k - 1].startFrame < std::max<int64_t>(2 * fade, 1)) {
+            const int64_t prev = sections[k - 1].startFrame;
+            if (sections[k].startFrame <= prev || sections[k].startFrame - prev < minSection) {
                 return SongStatus::OutOfRange;   // no creciente, o una seccion < 2F
             }
         }
-        if (endFrame - sections[count - 1].startFrame < std::max<int64_t>(2 * fade, 1)) {
+        const int64_t last = sections[count - 1].startFrame;
+        if (endFrame <= last || endFrame == INT64_MAX || endFrame - last < minSection) {
             return SongStatus::OutOfRange;
         }
         // 2. pistas: un clip en una pista que no esta activa nunca sonaria
@@ -413,18 +482,20 @@ public:
 
     /// Un cambio de sample rate invalida los clips (estan resampleados al viejo) y apaga la agenda.
     /// El llamador garantiza que el hilo RT esta quiesced (configureComponentsWithSampleRate).
+    /// Libera tambien las reservas de cargas en curso: su `loadClip` termina con InvalidOperation.
     void invalidateForRate(int newSampleRate) {
         std::lock_guard<std::mutex> lock(mCtl);
         if (mPubCount > 0) publishLocked(1, nullptr, 0, 0, fadeFor(newSampleRate), 0);
+        mScrub.store(true, std::memory_order_release);
         for (int i = 0; i < kSongMaxClips; ++i) {
             if (mSlots[i].state != SlotState::Free) freeSlotLocked(i);
         }
     }
 
     /// Libera lo retirado que el RT ya no puede estar leyendo. Devuelve los bytes que quedan.
-    size_t reclaim(bool immediate) {
+    size_t reclaim(bool immediate, bool rtStopped = false) {
         std::lock_guard<std::mutex> lock(mCtl);
-        reclaimLocked(immediate);
+        reclaimLocked(immediate, rtStopped);
         return mReservedBytes.load(std::memory_order_relaxed);
     }
 
@@ -453,6 +524,8 @@ public:
     void setVerifyAgendas(bool on) { mVerify.store(on, std::memory_order_relaxed); }
     /// Fuerza F (frames) en las agendas que se publiquen desde ahora; < 0 vuelve al derivado del SR.
     void setFadeOverride(int frames) { mFadeOverride.store(frames, std::memory_order_relaxed); }
+    /// Gancho de test: corre en loadClip justo antes de decodificar. Se fija antes de cargar.
+    void setLoadHook(std::function<void()> hook) { mLoadHook = std::move(hook); }
 
     // ===================================================================
     // RT. Nombres unicos a proposito: el walker de check-rt-safety.py resuelve por nombre.
@@ -461,9 +534,18 @@ public:
     /// Adopta la agenda fresca y deja listo el bloque. @return true si la cancion se hace cargo
     /// de las pistas en este bloque (agenda activa o una cola de fundido sonando).
     bool beginSongBlock(int64_t blockFrame, int numFrames) {
+        // Handshake con reclaimWhileIdleLocked: primero se publica "estoy adentro", despues se mira
+        // si el control esta liberando. Si lo esta, este bloque no lee ningun clip.
+        mRtInBlock.store(true, std::memory_order_seq_cst);
+        mClipsFrozen = mFreeze.load(std::memory_order_seq_cst);
+        if (mScrub.load(std::memory_order_relaxed) && mScrub.exchange(false, std::memory_order_acq_rel)) {
+            scrubSongTails();
+            mSkipTailOnce = true;
+        }
         mBlockFrame = blockFrame;
         mBlockFrames = numFrames;
         adoptSongSchedule(blockFrame);
+        pruneSongTails(blockFrame);
         mBlockSection = songSectionAt(*mCur, blockFrame);
         return mCur->count > 0 || blockFrame < mTailUntil;
     }
@@ -511,9 +593,9 @@ public:
         while (f < bEnd) {
             const SongSegment g = songSegmentAt(a, s, track);
             const bool inFade = f >= g.fadeBegin;
-            const bool late = f < v.lateEnd;
+            const bool late = f < v.tailEnd;
             int64_t e = std::min(bEnd, inFade ? g.bn : g.fadeBegin);
-            if (late) e = std::min(e, v.lateEnd);
+            if (late) e = std::min(e, v.tailEnd);
             if (!inFade && !late) {
                 renderSongSteady(songClipData(g.cur, a.loopFrames),
                                  g.cur >= 0 ? songPosMod(f - g.startCur, a.loopFrames) : 0,
@@ -524,7 +606,10 @@ public:
             f = e;
             if (f >= g.bn) s = g.sNext;
         }
-        if (bEnd >= v.lateEnd) v.tailClip = kSongSilence;
+        if (bEnd >= v.tailEnd) {
+            v.tails = 0;
+            v.tailEnd = 0;
+        }
     }
 
     /// Cierra el bloque: publica la seccion, la foto de lo que esta en uso y avanza el contador.
@@ -533,17 +618,21 @@ public:
         mSection.store(s >= 0 && s < mCur->count ? s : -1, std::memory_order_relaxed);
         uint64_t mask = mCur->clipMask;
         for (int t = 0; t < kSongMaxTracks; ++t) {
-            if (mVoices[t].tailClip >= 0 && mBlockFrame < mVoices[t].lateEnd) {
-                mask |= 1ULL << mVoices[t].tailClip;
+            const Voice& v = mVoices[t];
+            if (mBlockFrame >= v.tailEnd) continue;
+            for (int j = 0; j < v.tails; ++j) {
+                if (v.tail[j].seg.cur >= 0) mask |= 1ULL << v.tail[j].seg.cur;
+                if (v.tail[j].seg.nxt >= 0) mask |= 1ULL << v.tail[j].seg.nxt;
             }
         }
         mInUseMask.store(mask, std::memory_order_release);
         mMaskSeq.store(mAdoptedSeq, std::memory_order_release);
         mBlocksRun.bump();
+        mRtInBlock.store(false, std::memory_order_release);
     }
 
 private:
-    enum class SlotState { Free, Loaded, Retired };
+    enum class SlotState { Free, Reserved, Loaded, Retired };   // Reserved: decodificando, sin instalar
 
     struct Slot {
         std::vector<float> storage;
@@ -551,6 +640,7 @@ private:
         int sampleRate = 0;
         SlotState state = SlotState::Free;
         uint64_t retireSeq = 0;
+        uint64_t ticket = 0;   ///< identidad de la reserva: la carga sabe si la invalidaron
     };
 
     /// Lo unico del clip que ve el RT.
@@ -563,13 +653,9 @@ private:
         float vol = 1.0f;
         float mute = 1.0f;
         float pan = 0.0f;
-        int32_t tailClip = kSongSilence;   ///< carril de cola de una adopcion tardia
-        int64_t tailPhase0 = 0;
-        int64_t tailLoop = 1;
-        int64_t lateStart = 0;
-        int64_t lateEnd = 0;
-        int64_t lateFade = 1;
-        int lateKind = kSongFadeCos;
+        int tails = 0;         ///< capas de cola vivas, la mas vieja primero
+        int64_t tailEnd = 0;   ///< fin de la ventana del evento mas tardio
+        SongTail tail[kSongMaxTails]{};
     };
 
     struct BlockGain {
@@ -597,17 +683,41 @@ private:
                                  std::memory_order_relaxed);
         std::vector<float>().swap(s.storage);
         s.frames = 0;
+        s.ticket = 0;
         s.state = SlotState::Free;
     }
 
-    void reclaimLocked(bool immediate) {
+    void reclaimLocked(bool immediate, bool rtStopped) {
         const uint64_t maskSeq = mMaskSeq.load(std::memory_order_acquire);
         const uint64_t inUse = mInUseMask.load(std::memory_order_acquire);
+        bool pending = false;
         for (int i = 0; i < kSongMaxClips; ++i) {
             Slot& s = mSlots[i];
             if (s.state != SlotState::Retired) continue;
-            if (immediate || (maskSeq >= s.retireSeq && !((inUse >> i) & 1ULL))) freeSlotLocked(i);
+            if (immediate || (maskSeq >= s.retireSeq && !((inUse >> i) & 1ULL))) {
+                freeSlotLocked(i);
+            } else {
+                pending = true;
+            }
         }
+        if (pending && rtStopped) reclaimWhileIdleLocked();
+    }
+
+    /// Con el stream parado la foto del RT no avanza y la baja espera para siempre. "Parado" es una
+    /// pista del motor, no una prueba: se verifica con un handshake Dekker (todo seq_cst). El
+    /// control levanta mFreeze y recien despues mira mRtInBlock; el RT sube mRtInBlock y recien
+    /// despues mira mFreeze. En el orden total, o el control ve el bloque abierto (y no libera) o
+    /// el RT ve el congelamiento (y ese bloque no lee ningun clip). Las colas del RT pueden apuntar
+    /// a ids que se liberan y se reusan: mScrub las descarta antes de la proxima adopcion.
+    void reclaimWhileIdleLocked() {
+        mFreeze.store(true, std::memory_order_seq_cst);
+        if (!mRtInBlock.load(std::memory_order_seq_cst)) {
+            mScrub.store(true, std::memory_order_release);
+            for (int i = 0; i < kSongMaxClips; ++i) {
+                if (mSlots[i].state == SlotState::Retired) freeSlotLocked(i);
+            }
+        }
+        mFreeze.store(false, std::memory_order_release);
     }
 
     void publishLocked(int64_t loopFrames, const SongSection* sections, int32_t count,
@@ -636,10 +746,13 @@ private:
 
     void adoptSongSchedule(int64_t blockFrame) {
         if (!(mMiddle.load(std::memory_order_relaxed) & kDirty)) return;
-        // El estado viejo se lee ANTES del intercambio: despues, el slot viejo queda en el medio y
+        // El tramo viejo se lee ANTES del intercambio: despues, el slot viejo queda en el medio y
         // el control puede reescribirlo.
-        SongState before[kSongMaxTracks];
-        for (int t = 0; t < kSongMaxTracks; ++t) before[t] = songStateAt(*mCur, blockFrame, t);
+        SongSegment before[kSongMaxTracks];
+        const int64_t oldLoop = mCur->loopFrames;
+        const int64_t oldFade = mCur->fade;
+        const int sOld = songSectionAt(*mCur, blockFrame);
+        for (int t = 0; t < kSongMaxTracks; ++t) before[t] = songSegmentAt(*mCur, sOld, t);
         const uint32_t got = mMiddle.exchange(static_cast<uint32_t>(mFront),
                                               std::memory_order_acq_rel);
         mFront = static_cast<int>(got & 3u);
@@ -649,31 +762,81 @@ private:
         if (mVerify.load(std::memory_order_relaxed) && songAgendaChecksum(*mCur) != mCur->checksum) {
             mTorn.bump();
         }
+        const int64_t fade = mCur->fade;
+        const int sNew = songSectionAt(*mCur, blockFrame);
+        // Tras un liberado con el stream parado la agenda vieja puede nombrar ids que ya son otros
+        // clips: esta adopcion no puede congelarla como cola (se pierde, una vez, ese fundido).
+        const bool skipTails = mSkipTailOnce;
+        mSkipTailOnce = false;
         bool late = false;
-        for (int t = 0; t < kSongMaxTracks; ++t) {
-            const SongState now = songStateAt(*mCur, blockFrame, t);
-            const SongState& was = before[t];
-            const bool changed = was.clip != now.clip ||
-                                 (was.clip >= 0 && (was.phase != now.phase || was.loop != now.loop));
-            if (!changed) continue;
+        const int tailTracks = skipTails ? 0 : kSongMaxTracks;
+        for (int t = 0; t < tailTracks; ++t) {
+            const SongSegment now = songSegmentAt(*mCur, sNew, t);
+            if (songSegmentsAlikeAt(before[t], oldLoop, oldFade, now, mCur->loopFrames, fade,
+                                    blockFrame)) {
+                continue;
+            }
             late = true;
-            Voice& v = mVoices[t];
-            v.tailClip = was.clip;
-            v.tailPhase0 = was.phase;
-            v.tailLoop = was.loop;
-            v.lateStart = blockFrame;
-            v.lateFade = std::max<int64_t>(mCur->fade, 1);
-            v.lateEnd = mCur->fade > 0 ? blockFrame + mCur->fade : blockFrame;
-            v.lateKind = (was.clip >= 0 && now.clip >= 0) ? kSongFadeEqual : kSongFadeCos;
+            if (fade > 0) {
+                const bool both = songSegmentAudibleAt(before[t], blockFrame) &&
+                                  songSegmentAudibleAt(now, blockFrame);
+                pushSongTail(mVoices[t], before[t], oldLoop, oldFade, blockFrame, fade,
+                             both ? kSongFadeEqual : kSongFadeCos);
+            }
         }
         if (late && mCur->count > 0) mLate.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /// Apila la capa de cola. Con el tope lleno cae la mas vieja (su peso ya es el producto de
+    /// kSongMaxTails ganancias de salida: inaudible salvo adopciones de a pocos frames).
+    void pushSongTail(Voice& v, const SongSegment& seg, int64_t loop, int64_t segFade, int64_t t,
+                      int64_t fade, int kind) {
+        if (v.tails == kSongMaxTails) {
+            for (int i = 1; i < kSongMaxTails; ++i) v.tail[i - 1] = v.tail[i];
+            v.tails = kSongMaxTails - 1;
+        }
+        SongTail& tl = v.tail[v.tails++];
+        tl.seg = seg;
+        tl.loop = loop;
+        tl.segFade = segFade;
+        tl.evStart = t;
+        tl.evFade = fade;
+        tl.evEnd = t + fade;
+        tl.evKind = kind;
+        v.tailEnd = std::max(v.tailEnd, tl.evEnd);
+    }
+
+    /// Descarta las capas que ya no pesan: la capa j se apaga cuando termina cualquier evento
+    /// k >= j (su gOut llego a 0); lo que queda se renumera y la mas vieja deja de tener gIn.
+    void pruneSongTails(int64_t blockFrame) {
         int64_t until = 0;
-        for (int t = 0; t < kSongMaxTracks; ++t) until = std::max(until, mVoices[t].lateEnd);
+        for (int t = 0; t < kSongMaxTracks; ++t) {
+            Voice& v = mVoices[t];
+            int k = v.tails - 1;
+            while (k >= 0 && v.tail[k].evEnd > blockFrame) --k;
+            if (k >= 0) {
+                const int drop = k + 1;
+                for (int i = drop; i < v.tails; ++i) v.tail[i - drop] = v.tail[i];
+                v.tails -= drop;
+            }
+            v.tailEnd = 0;
+            for (int j = 0; j < v.tails; ++j) v.tailEnd = std::max(v.tailEnd, v.tail[j].evEnd);
+            until = std::max(until, v.tailEnd);
+        }
         mTailUntil = until;
     }
 
+    /// Un liberado con el stream parado puede dejar ids reusados: las colas viejas se tiran.
+    void scrubSongTails() {
+        for (int t = 0; t < kSongMaxTracks; ++t) {
+            mVoices[t].tails = 0;
+            mVoices[t].tailEnd = 0;
+        }
+        mTailUntil = 0;
+    }
+
     const float* songClipData(int32_t id, int64_t loopFrames) const {
-        if (id < 0 || id >= kSongMaxClips) return nullptr;
+        if (mClipsFrozen || id < 0 || id >= kSongMaxClips) return nullptr;
         const float* p = mClips[id].data.load(std::memory_order_acquire);
         if (p == nullptr || mClips[id].frames.load(std::memory_order_relaxed) != loopFrames) {
             return nullptr;
@@ -704,13 +867,56 @@ private:
         }
     }
 
-    /// Frame a frame: dentro de un fundido de borde y/o de la cola de una adopcion tardia.
+    /// Un tramo congelado de la agenda vieja en el frame `x`: cur antes del fundido, la mezcla
+    /// cur/nxt dentro y nxt estable desde el borde.
+    void songTailFrame(const SongTail& tl, const float* curP, const float* nxtP, int64_t x,
+                       float& l, float& r) const {
+        const SongSegment& g = tl.seg;
+        l = 0.0f;
+        r = 0.0f;
+        if (x < g.fadeBegin) {
+            if (curP != nullptr) {
+                const int64_t p = songPosMod(x - g.startCur, tl.loop) * 2;
+                l = curP[p];
+                r = curP[p + 1];
+            }
+        } else if (x >= g.bn) {
+            if (nxtP != nullptr) {
+                const int64_t p = songPosMod(x - g.startNxt, tl.loop) * 2;
+                l = nxtP[p];
+                r = nxtP[p + 1];
+            }
+        } else {
+            float gOut = 0.0f;
+            float gIn = 0.0f;
+            songFadeGains(g.kind, x - g.fadeBegin, tl.segFade, gOut, gIn);
+            if (curP != nullptr) {
+                const int64_t p = songPosMod(x - g.startCur, tl.loop) * 2;
+                l += curP[p] * gOut;
+                r += curP[p + 1] * gOut;
+            }
+            if (nxtP != nullptr) {
+                const int64_t p = songPosMod(x - g.startNxt, tl.loop) * 2;
+                l += nxtP[p] * gIn;
+                r += nxtP[p + 1] * gIn;
+            }
+        }
+    }
+
+    /// Frame a frame: dentro de un fundido de borde y/o de las colas de adopciones tardias.
+    /// salida = vivo * gIn_ultimo + sum_j capa_j * (gIn_{j-1} * prod_{k>=j} gOut_k).
     void renderSongSlow(const Voice& v, const SongAgenda& a, const SongSegment& g, bool inFade,
                         int64_t f, int64_t e, BlockGain& c) const {
         const int64_t loop = a.loopFrames;
         const float* curP = songClipData(g.cur, loop);
         const float* nxtP = inFade ? songClipData(g.nxt, loop) : nullptr;
-        const float* tailP = f < v.lateEnd ? songClipData(v.tailClip, v.tailLoop) : nullptr;
+        const int n = f < v.tailEnd ? v.tails : 0;
+        const float* tailCur[kSongMaxTails];
+        const float* tailNxt[kSongMaxTails];
+        for (int j = 0; j < n; ++j) {
+            tailCur[j] = songClipData(v.tail[j].seg.cur, v.tail[j].loop);
+            tailNxt[j] = songClipData(v.tail[j].seg.nxt, v.tail[j].loop);
+        }
         for (int64_t x = f; x < e; ++x) {
             float l = 0.0f;
             float r = 0.0f;
@@ -733,16 +939,30 @@ private:
                 l = curP[p];
                 r = curP[p + 1];
             }
-            if (x < v.lateEnd) {
-                float gOut = 0.0f;
-                float gIn = 0.0f;
-                songFadeGains(v.lateKind, x - v.lateStart, v.lateFade, gOut, gIn);
-                l *= gIn;
-                r *= gIn;
-                if (tailP != nullptr) {
-                    const int64_t p = songPosMod(v.tailPhase0 + (x - v.lateStart), v.tailLoop) * 2;
-                    l += tailP[p] * gOut;
-                    r += tailP[p + 1] * gOut;
+            if (n > 0) {
+                float evOut[kSongMaxTails];
+                float evIn[kSongMaxTails];
+                for (int k = 0; k < n; ++k) {
+                    const SongTail& tl = v.tail[k];
+                    if (x >= tl.evEnd) {
+                        evOut[k] = 0.0f;
+                        evIn[k] = 1.0f;
+                    } else {
+                        songFadeGains(tl.evKind, x - tl.evStart, tl.evFade, evOut[k], evIn[k]);
+                    }
+                }
+                l *= evIn[n - 1];
+                r *= evIn[n - 1];
+                float weight = 1.0f;
+                for (int j = n - 1; j >= 0; --j) {
+                    weight *= evOut[j];
+                    if (weight == 0.0f) break;
+                    float tl = 0.0f;
+                    float tr = 0.0f;
+                    songTailFrame(v.tail[j], tailCur[j], tailNxt[j], x, tl, tr);
+                    const float w = j >= 1 ? weight * evIn[j - 1] : weight;
+                    l += tl * w;
+                    r += tr * w;
                 }
             }
             const int64_t i = x - c.b0;
@@ -756,6 +976,8 @@ private:
     // ---- estado ----
 
     // Control (bajo mCtl)
+    std::mutex mLoadSerial;   // orden de toma: mLoadSerial -> mCtl
+    uint64_t mTicketCounter = 0;
     mutable std::mutex mCtl;
     Slot mSlots[kSongMaxClips];
     int mBack = 2;
@@ -773,7 +995,11 @@ private:
     std::atomic<int64_t> mLate{0};
     std::atomic<uint64_t> mInUseMask{0};
     std::atomic<uint64_t> mMaskSeq{0};
+    std::atomic<bool> mFreeze{false};     // control: "estoy liberando sin esperar al RT"
+    std::atomic<bool> mRtInBlock{false};  // RT: dentro de un bloque de la cancion
+    std::atomic<bool> mScrub{false};      // control -> RT: descarta las colas antes de adoptar
     std::atomic<bool> mVerify{false};
+    std::function<void()> mLoadHook;
     std::atomic<int> mFadeOverride{-1};
     wma::RtCounter mBlocksRun;
     wma::RtCounter mAdopted;
@@ -787,6 +1013,8 @@ private:
     int mBlockFrames = 0;
     int mBlockSection = 0;
     int64_t mTailUntil = 0;
+    bool mSkipTailOnce = false;
+    bool mClipsFrozen = false;   // este bloque no lee clips (el control esta liberando)
     Voice mVoices[kSongMaxTracks];
 };
 

@@ -243,9 +243,15 @@ public:
             if (playFrame + numFrames > trigger) {
                 // The trigger falls inside (or before) this block — start now.
                 // We accept up to one block of jitter (≤ ~10ms) for now.
-                startRecording(armed);
-                mArmedTrack.store(-1, std::memory_order_release);
-                mArmedTriggered.fetch_add(1, std::memory_order_relaxed);
+                if (mSong.active()) {
+                    // Carrera con songSetSchedule: el armado llego antes que la agenda y startRecording
+                    // no graba bajo la cancion. Se descarta sin contarlo como disparado.
+                    mArmedTrack.store(-1, std::memory_order_release);
+                } else {
+                    startRecording(armed);
+                    mArmedTrack.store(-1, std::memory_order_release);
+                    mArmedTriggered.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
 
@@ -1003,13 +1009,13 @@ public:
 
     wm::SongStatus songLoadClip(const char* path, int sampleRate, int64_t regionStart,
                                 int64_t regionEnd, int64_t loopFrames, bool offline,
-                                int32_t& outId) {
+                                int32_t& outId, bool rtStopped = false) {
         return mSong.loadClip(path, sampleRate, regionStart, regionEnd, loopFrames,
-                              songContext(offline), outId);
+                              songContext(offline, rtStopped), outId);
     }
 
-    wm::SongStatus songUnloadClip(int32_t id, bool offline) {
-        return mSong.unloadClip(id, songContext(offline));
+    wm::SongStatus songUnloadClip(int32_t id, bool offline, bool rtStopped = false) {
+        return mSong.unloadClip(id, songContext(offline, rtStopped));
     }
 
     /**
@@ -1018,9 +1024,10 @@ public:
      *        se rechaza; con grabacion armada o en curso, esto da InvalidOperation.
      */
     wm::SongStatus songSetSchedule(int64_t loopFrames, const wm::SongSection* sections,
-                                   int32_t count, int64_t endFrame, bool offline) {
-        const wm::SongStatus st =
-            mSong.setSchedule(loopFrames, sections, count, endFrame, songContext(offline));
+                                   int32_t count, int64_t endFrame, bool offline,
+                                   bool rtStopped = false) {
+        const wm::SongStatus st = mSong.setSchedule(loopFrames, sections, count, endFrame,
+                                                    songContext(offline, rtStopped));
         if (st == wm::SongStatus::Ok && count > 0) mEnabled.store(true, std::memory_order_release);
         return st;
     }
@@ -1735,7 +1742,7 @@ private:
     bool mBlockOpen{false};
     bool mSongBlockActive{false};
 
-    wm::SongContext songContext(bool offline) const {
+    wm::SongContext songContext(bool offline, bool rtStopped = false) const {
         wm::SongContext ctx;
         ctx.sampleRate = mSampleRate.load(std::memory_order_acquire);
         ctx.maxActiveTracks = mMaxActiveTracks.load(std::memory_order_acquire);
@@ -1744,6 +1751,7 @@ private:
         ctx.recordingBusy = mRecordingTrack.load(std::memory_order_acquire) >= 0 ||
                             mArmedTrack.load(std::memory_order_acquire) >= 0;
         ctx.immediate = offline;
+        ctx.rtStopped = rtStopped;
         return ctx;
     }
 

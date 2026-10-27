@@ -38,7 +38,11 @@ interface ISongBridge {
      *
      * Falla con `MEMORY_BUDGET` (los clips cuentan contra el presupuesto del looper),
      * `UNSUPPORTED_FORMAT`, `IO`, `MEMORY` o `PARAMETER_OUT_OF_RANGE` (pool lleno,
-     * `loopFrames <= 0`, `sampleRate <= 0`).
+     * `loopFrames <= 0`, `sampleRate <= 0`), e `INVALID_OPERATION` si el sample rate del motor
+     * cambió mientras se decodificaba (el clip quedó al rate viejo y se descarta).
+     *
+     * Decodificar no frena al resto: [songSetSchedule], [songUnloadClip] y el cambio de sample
+     * rate no esperan a una carga en curso (sí otra [songLoadClip]: se serializan).
      */
     fun songLoadClip(
         path: String,
@@ -48,7 +52,11 @@ interface ISongBridge {
         loopFrames: Long,
     ): Result<Int>
 
-    /** `INVALID_OPERATION` si el clip no existe o lo referencia la agenda publicada. */
+    /**
+     * `INVALID_OPERATION` si el clip no existe o lo referencia la agenda publicada. La memoria
+     * se libera cuando el callback ya no puede estar leyéndolo; con el motor sin stream, al
+     * instante (se verifica antes de liberar).
+     */
     fun songUnloadClip(clipId: Int): Result<Unit>
 
     /**
@@ -56,9 +64,13 @@ interface ISongBridge {
      * `MAX_TRACKS` ids por sección, `SILENCE` = pista en silencio. [sectionStarts] vacío
      * apaga la canción (y el looper vuelve a sus tomas). Habilita el looper.
      *
+     * Apagar funde la canción a silencio en `F`, pero las tomas del looper vuelven de golpe,
+     * sin fundido de entrada: con una toma sonando en una pista, el paso de la canción a la
+     * toma puede clickear. Studio no mezcla tomas con canción.
+     *
      * `PARAMETER_OUT_OF_RANGE`: largos que no cierran, más de `MAX_SECTIONS`, starts no
-     * estrictamente crecientes, sección más corta que dos fundidos, clip en una pista
-     * inactiva. `INVALID_OPERATION`: clip inexistente, de otro `loopFrames`, o grabación.
+     * estrictamente crecientes o negativos, sección más corta que dos fundidos, `endFrame` menor
+     * que el último start + 2 fundidos (o `Long.MAX_VALUE`), clip en una pista inactiva. `INVALID_OPERATION`: clip inexistente, de otro `loopFrames`, o grabación.
      */
     fun songSetSchedule(
         loopFrames: Long,
@@ -68,8 +80,10 @@ interface ISongBridge {
     ): Result<Unit>
 
     /**
-     * Índice, **dentro de la agenda publicada**, de la sección que contiene el último frame
-     * del bloque más reciente; `-1` inactiva, antes del primer start o pasado el `endFrame`.
+     * Índice, **dentro de la agenda ADOPTADA por el callback**, de la sección que contiene el
+     * último frame del bloque más reciente; `-1` inactiva, antes del primer start o pasado el
+     * `endFrame`. Puede ir un bloque atrás de la agenda recién publicada: tras reprogramar, el
+     * índice sigue siendo el de la agenda vieja hasta que el callback adopta la nueva.
      */
     fun songGetSection(): Int
 

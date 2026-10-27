@@ -2555,6 +2555,11 @@ WmaResult songResult(wm::SongStatus st) {
     return WMA_ERROR_UNKNOWN;
 }
 
+/// Pista, no prueba: el motor no tiene stream. El SongPlayer verifica antes de liberar sin esperar.
+bool songStreamStopped(const WmaEngine* engine) {
+    return static_cast<EngineState>(engine->engine->getEngineState()) == EngineState::Stopped;
+}
+
 static_assert(WMA_SONG_MAX_TRACKS == wm::kSongMaxTracks &&
               WMA_SONG_MAX_CLIPS == wm::kSongMaxClips &&
               WMA_SONG_MAX_SECTIONS == wm::kSongMaxSections &&
@@ -2572,7 +2577,7 @@ WmaResult wma_song_load_clip(WmaEngine* engine, const char* path, int sample_rat
         int32_t id = -1;
         const wm::SongStatus st = engine->engine->getAudioLooper().songLoadClip(
             path, sample_rate, region_start, region_end, loop_frames,
-            engine->engine->isOffline(), id);
+            engine->engine->isOffline(), id, songStreamStopped(engine));
         if (st == wm::SongStatus::Ok) *out_id = id;
         return songResult(st);
     } catch (...) {
@@ -2583,7 +2588,7 @@ WmaResult wma_song_load_clip(WmaEngine* engine, const char* path, int sample_rat
 WmaResult wma_song_unload_clip(WmaEngine* engine, int32_t id) {
     WMA_CHECK(engine);
     return songResult(engine->engine->getAudioLooper().songUnloadClip(
-        id, engine->engine->isOffline()));
+        id, engine->engine->isOffline(), songStreamStopped(engine)));
 }
 
 WmaResult wma_song_set_schedule(WmaEngine* engine, int64_t loop_frames,
@@ -2603,7 +2608,8 @@ WmaResult wma_song_set_schedule(WmaEngine* engine, int64_t loop_frames,
             }
         }
         return songResult(engine->engine->getAudioLooper().songSetSchedule(
-            loop_frames, converted.data(), count, end_frame, engine->engine->isOffline()));
+            loop_frames, converted.data(), count, end_frame, engine->engine->isOffline(),
+            songStreamStopped(engine)));
     } catch (...) {
         return WMA_ERROR_UNKNOWN;
     }

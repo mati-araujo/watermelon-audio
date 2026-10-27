@@ -2164,7 +2164,13 @@ typedef struct {
  * @return WMA_OK; WMA_ERROR_MEMORY_BUDGET (clips + takes over the looper's budget);
  *         WMA_ERROR_UNSUPPORTED_FORMAT; WMA_ERROR_IO; WMA_ERROR_MEMORY;
  *         WMA_ERROR_PARAMETER_OUT_OF_RANGE (pool full, loop_frames <= 0,
- *         sample_rate <= 0, NULL path or out_id); WMA_ERROR_NOT_INITIALIZED.
+ *         sample_rate <= 0, NULL path or out_id); WMA_ERROR_INVALID_OPERATION (the
+ *         engine's sample rate changed while decoding: the clip was built for the old
+ *         rate and is discarded); WMA_ERROR_NOT_INITIALIZED.
+ *
+ * Decoding happens OUTSIDE the song's control mutex: wma_song_set_schedule,
+ * wma_song_unload_clip and a sample-rate change never wait for a slow load (only
+ * another wma_song_load_clip does).
  */
 WMA_API WmaResult wma_song_load_clip(WmaEngine* engine, const char* path, int sample_rate,
                                      int64_t region_start, int64_t region_end,
@@ -2173,20 +2179,24 @@ WMA_API WmaResult wma_song_load_clip(WmaEngine* engine, const char* path, int sa
 /**
  * Retire a clip. Its memory is released once the audio thread can no longer be
  * reading it (it advanced past the agenda that dropped it and no voice holds it),
- * at the next song call; an offline engine releases at once.
+ * at the next song call; an offline engine, and an engine with no stream (stopped),
+ * release at once -- the stopped case is verified against the audio thread before
+ * freeing (a callback starting concurrently mutes the song for one block instead).
  * @return WMA_OK; WMA_ERROR_INVALID_OPERATION if it does not exist, was already
  *         retired, or the PUBLISHED agenda references it.
  */
 WMA_API WmaResult wma_song_unload_clip(WmaEngine* engine, int32_t id);
 
 /**
- * Publish the whole agenda. @p count = 0 switches the song off (an immediate fade
- * if it was sounding) and the looper goes back to its takes.
+ * Publish the whole agenda. @p count = 0 switches the song off (the song fades out
+ * over F if it was sounding) and the looper goes back to its takes -- which return
+ * at full gain at once, with no fade-in: a take that is playing on a track steps in
+ * when the song's tail ends. A song-only project has no takes, so nothing to hear.
  *
  * @return WMA_OK;
  *         WMA_ERROR_PARAMETER_OUT_OF_RANGE: count > WMA_SONG_MAX_SECTIONS; a start
  *           not strictly increasing or negative; a section shorter than 2F;
- *           end_frame < last start + 2F; a clip on a track >= the active tracks
+ *           end_frame < last start + 2F (or INT64_MAX); a clip on a track >= the active tracks
  *           (a track with no clip must be WMA_SONG_SILENCE); loop_frames <= 0.
  *         WMA_ERROR_INVALID_OPERATION: a clip that does not exist / was retired, a
  *           clip built for another loop_frames or sample rate, a recording in
@@ -2196,12 +2206,15 @@ WMA_API WmaResult wma_song_set_schedule(WmaEngine* engine, int64_t loop_frames,
                                         const WmaSongSection* sections, int32_t count,
                                         int64_t end_frame);
 
-/** Index in the last published agenda of the section containing the last frame of the
- *  most recent block; -1 when inactive, before the first start or after end_frame. */
+/** Index, in the agenda the callback has ADOPTED, of the section containing the last frame
+ *  of the most recent block; -1 when inactive, before the first start or after end_frame.
+ *  It can lag the last published agenda by a block: after republishing it keeps the old
+ *  agenda's index until the callback adopts the new one. */
 WMA_API int32_t wma_song_get_section(const WmaEngine* engine);
 
-/** Adoptions that changed what was sounding at the adoption frame (an edit of the
- *  section that plays): each one fades over [t, t + F). */
+/** Adoptions that changed what was sounding at the adoption frame t (an edit of the
+ *  section that plays, or of a border whose fade is already running at t): each one
+ *  fades over [t, t + F), and two within F chain their fades. */
 WMA_API int64_t wma_song_get_late_adoptions(const WmaEngine* engine);
 
 /* ================================================================

@@ -597,4 +597,28 @@ TEST_F(SongApi, AC_055_13_LiveSongFollowsThePlayFrameAndPublishesItsSection) {
     live.tearDown();
 }
 
+// Bug plausible (AC-055.13, IMPORTANTE 2): un motor SIN stream (parado, no offline) retiene cada
+// clip descargado porque ningun callback avanza la foto del RT: tras 64 ciclos load+unload el
+// pool da PARAMETER_OUT_OF_RANGE y los bytes de los clips muertos cuentan contra el presupuesto.
+TEST_F(SongApi, AC_055_13_AStoppedEngineReleasesARetiredClipAtOnce) {
+    WmaEngine* e = quietEngine();
+    ASSERT_NE(e, nullptr);
+    ASSERT_FALSE(e->engine->isOffline());
+    const std::string pa = sine("stopped_a", 400.0f, 1.0f);
+    const int32_t first = loadClip(e, pa);
+    const WmaSongSection s = section(100000, first);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, 200000), WMA_OK);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, nullptr, 0, 0), WMA_OK);
+    ASSERT_EQ(wma_song_unload_clip(e, first), WMA_OK);
+    auto& song = e->engine->getAudioLooper().song();
+    EXPECT_EQ(song.retiredClips(), 0) << "con el motor parado el clip no espera a un callback";
+    for (int k = 0; k < 3 * WMA_SONG_MAX_CLIPS; ++k) {
+        int32_t id = -1;
+        ASSERT_EQ(wma_song_load_clip(e, pa.c_str(), kRate, 0, 0, kLoop, &id), WMA_OK) << k;
+        ASSERT_EQ(wma_song_unload_clip(e, id), WMA_OK) << k;
+    }
+    EXPECT_EQ(song.reservedBytes(), 0u);
+    wma_engine_destroy(e);
+}
+
 }  // namespace wma_test
