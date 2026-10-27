@@ -32,6 +32,9 @@ class TrackBuffer {
 public:
     static constexpr int CROSSFADE_FRAMES = 128;  // ~2.7ms @ 48kHz — minimum/fallback for very short loops
     static constexpr float DEFAULT_SEAM_CROSSFADE_MS = 50.0f;  // long, musical crossfade at the loop seam
+    // Minimo de una region de loop pedida con setLoopRegion, topeado a lo que queda de
+    // pista desde el start (ver setLoopRegion).
+    static constexpr int MIN_LOOP_REGION_FRAMES = 1024;
 
     TrackBuffer() = default;
     ~TrackBuffer() = default;
@@ -691,12 +694,25 @@ public:
 
     // ========== Loop Region (lock-free) ==========
 
+    /**
+     * @brief Region de loop [start, end) en frames; `end <= 0` = hasta el final.
+     *
+     * Siempre queda dentro de la pista y no vacia: `0 <= start < end <= length`. Una
+     * region mas corta que MIN_LOOP_REGION_FRAMES se estira por el FIN hasta el minimo,
+     * pero nunca mas alla de `length`: si la pista (o lo que queda desde `start`) es mas
+     * corta que el minimo, la region llega hasta el final y nada mas. No se inventa audio.
+     *
+     * Antes era `std::clamp(end, s + 1024, length)`: con `s + 1024 > length` el rango
+     * quedaba invertido (UB) y el fin terminaba PASADO el largo (toma de 59 frames →
+     * region [0, 1024), NoisyPad S10 sobre 2.22.1).
+     */
     void setLoopRegion(int start, int end) {
         int length = mLengthFrames.load(std::memory_order_acquire);
         if (length <= 0) return;
-        int s = std::clamp(start, 0, length - 1);
-        int e = (end <= 0) ? length : std::clamp(end, s + 1024, length);
-        if (e - s < 1024) e = std::min(s + 1024, length);  // Enforce minimum
+        const int s = std::clamp(start, 0, length - 1);
+        int e = (end <= 0) ? length : std::clamp(end, s + 1, length);  // s + 1 <= length
+        const int minLen = std::min(MIN_LOOP_REGION_FRAMES, length - s);
+        if (e - s < minLen) e = s + minLen;
         mLoopStart.store(s, std::memory_order_release);
         mLoopEnd.store(e, std::memory_order_release);
 

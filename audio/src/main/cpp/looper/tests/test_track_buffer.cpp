@@ -600,3 +600,79 @@ TEST(TrackBuffer, Req045TheBudgetFormulaCoversTheRealReservation) {
     EXPECT_LE(formula, 2 * tb.reservedBytes())
         << "la fórmula no puede ser un cheque en blanco: eso rechazaría imports que entran";
 }
+
+// ========== Region de loop: el minimo con pistas y regiones cortas ==========
+//
+// `setLoopRegion` hacia `std::clamp(end, s + 1024, length)`. Con `s + 1024 > length` el
+// rango queda invertido (`lo > hi`), que es UB, y en la practica devolvia `lo`: el fin
+// quedaba PASADO el largo de la pista. Medido en NoisyPad S10 contra 2.22.1: una toma de
+// 59 frames quedo con la region [0, 1024), y el motor leia 965 frames que no existen.
+//
+// El contrato: la region nunca pasa de `length`, nunca queda vacia ni invertida, y el
+// minimo se topea a lo que queda de pista desde el start (no se inventa audio).
+
+namespace {
+
+// Una pista grabada de exactamente `frames` frames.
+void recordTrack(TrackBuffer& tb, int frames) {
+    ASSERT_GT(tb.allocate(frames, 48000), 0u);
+    writeConstant(tb, 0.5f, frames);
+    ASSERT_EQ(tb.getLengthFrames(), frames);
+}
+
+}  // namespace
+
+TEST(TrackBuffer, LoopRegionOnATrackShorterThanTheMinimumStaysInsideTheTrack) {
+    constexpr int kLen = 59;  // la toma de S10
+    static_assert(kLen < TrackBuffer::MIN_LOOP_REGION_FRAMES);
+    TrackBuffer tb;
+    recordTrack(tb, kLen);
+
+    tb.setLoopRegion(0, kLen);  // la pista entera, pedida explicita
+    EXPECT_EQ(tb.getLoopStart(), 0);
+    EXPECT_EQ(tb.getLoopEnd(), kLen) << "el fin paso el largo de la pista";
+
+    tb.setLoopRegion(10, 30);  // mas corta que el minimo Y que la pista
+    EXPECT_EQ(tb.getLoopStart(), 10);
+    EXPECT_EQ(tb.getLoopEnd(), kLen)
+        << "el minimo se topea a lo que queda desde el start, no se inventa audio";
+}
+
+TEST(TrackBuffer, TrimmedRegionShorterThanTheMinimumAtTheEndOfALongTrack) {
+    constexpr int kLen = 48000;
+    TrackBuffer tb;
+    recordTrack(tb, kLen);
+
+    // Recorte de 600 frames que termina donde termina la pista: no hay 1024 por delante.
+    tb.setLoopRegion(kLen - 600, kLen);
+    EXPECT_EQ(tb.getLoopStart(), kLen - 600);
+    EXPECT_EQ(tb.getLoopEnd(), kLen);
+    EXPECT_EQ(tb.getLoopLength(), 600);
+
+    // En el medio de la pista SI hay lugar: el minimo se cumple estirando el fin.
+    tb.setLoopRegion(1000, 1500);
+    EXPECT_EQ(tb.getLoopStart(), 1000);
+    EXPECT_EQ(tb.getLoopEnd(), 1000 + TrackBuffer::MIN_LOOP_REGION_FRAMES);
+}
+
+TEST(TrackBuffer, LoopRegionWithStartNearTheEndNeverPassesTheLength) {
+    constexpr int kLen = 48000;
+    TrackBuffer tb;
+    recordTrack(tb, kLen);
+
+    tb.setLoopRegion(kLen - 1, kLen + 5000);  // un frame antes del final, fin desbordado
+    EXPECT_EQ(tb.getLoopStart(), kLen - 1);
+    EXPECT_EQ(tb.getLoopEnd(), kLen);
+
+    tb.setLoopRegion(kLen + 10, kLen + 20);  // start pasado el final: se lleva al ultimo frame
+    EXPECT_EQ(tb.getLoopStart(), kLen - 1);
+    EXPECT_EQ(tb.getLoopEnd(), kLen);
+
+    tb.setLoopRegion(kLen - 100, 0);  // end <= 0 = hasta el final
+    EXPECT_EQ(tb.getLoopStart(), kLen - 100);
+    EXPECT_EQ(tb.getLoopEnd(), kLen);
+
+    tb.setLoopRegion(kLen - 100, kLen - 300);  // invertida: no puede quedar invertida
+    EXPECT_EQ(tb.getLoopStart(), kLen - 100);
+    EXPECT_EQ(tb.getLoopEnd(), kLen);
+}
