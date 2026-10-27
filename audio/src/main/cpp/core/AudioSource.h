@@ -37,6 +37,16 @@ public:
         mPhase = 0.0f;
     }
 
+    /**
+     * @brief Vuelve el estado de AUDIO al de una instancia recien construida
+     * (REQ-055 S2): fase, smoothers, semilla de ruido. No toca frecuencia ni
+     * amplitud objetivo (son la entrada). Lo llama el reseteo del render offline,
+     * sin thread de audio corriendo.
+     */
+    virtual void resetForRender() {
+        mPhase = 0.0f;
+    }
+
     // Método puro que cada oscilador debe implementar
     virtual void render(float* audioData, int32_t numFrames) = 0;
 

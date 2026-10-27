@@ -15,6 +15,7 @@
 
 #include "jni_common.h"
 #include "../api/watermelon_audio.h"
+#include "../api/watermelon_audio_internal.h"
 #include "../core/AudioEngine.h"
 #include "../core/AudioMode.h"
 #include "../nodes/InputNode.h"
@@ -29,6 +30,8 @@
 #include <algorithm>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
+#include <memory>
 #include <vector>
 
 // External declarations from jni_usb.cpp for USB volume
@@ -3838,6 +3841,328 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetLog
         JNIEnv* env, jobject thiz) {
     (void)env; (void)thiz;
     return static_cast<jint>(wma_log_capture_dropped());
+}
+
+} // extern "C"
+
+// ==================== Offline render by handle (REQ-055 S2, ADR-0008) ====================
+//
+// EL SEGUNDO MODELO DE ESTE ARCHIVO. Todo lo de arriba opera sobre el motor GLOBAL
+// (`g_wmaEngine`, el vivo). Lo de abajo opera sobre instancias de render offline
+// identificadas por un handle opaco `jlong`. Las dos no se tocan: ninguna funcion de
+// aca lee `g_wmaEngine` ni toma `g_jniState.engineMutex` (ver jni/CLAUDE.md).
+//
+// EL HANDLE NO ES EL PUNTERO. Es un id monotono (1, 2, 3...) que un registro mapea a
+// la instancia. Con el puntero crudo, un handle destruido es un use-after-free, y uno
+// reciclado —el allocator devuelve la misma direccion a la instancia siguiente— es
+// peor: el llamador opera en silencio sobre la instancia de OTRO. Con un id que no se
+// reusa, un handle 0, desconocido o ya destruido es un WMA_ERROR_NOT_INITIALIZED, y
+// nunca UB.
+//
+// POR QUE EL REGISTRO NO BLOQUEA AL VIVO. Su mutex lo toman SOLO estas funciones,
+// desde hilos de control (nunca el callback RT, que no entra a JNI), y solo para
+// buscar/insertar/sacar en el mapa: la operacion corre con el lock SUELTO, sobre un
+// `shared_ptr` que mantiene viva la instancia. Un destroy concurrente con un render
+// saca la entrada del mapa; la instancia muere cuando el render suelta su referencia.
+// El `opMutex` de cada instancia serializa TODA operacion sobre ella —start, render,
+// stop y los setters—. En el vivo un setter concurrente con el callback es seguro porque
+// el callback esta acotado por el periodo del buffer y corre con prioridad RT (el
+// `clearAllEffects` espera 20 ms antes de liberar, el snapshot es doble buffer). Un
+// render offline es un hilo comun de la JVM con bloques de hasta 85 ms: ninguna de las
+// dos garantias vale, y un `clearAllEffects` a la par de un `render` era un
+// use-after-free (review de S2). El mutex es de la instancia: el vivo no lo toma nunca.
+
+namespace {
+
+struct OfflineSlot {
+    explicit OfflineSlot(WmaEngine* e) : engine(e) {}
+    ~OfflineSlot() { wma_engine_destroy(engine); }
+    OfflineSlot(const OfflineSlot&) = delete;
+    OfflineSlot& operator=(const OfflineSlot&) = delete;
+
+    WmaEngine* const engine;
+    std::mutex opMutex;            // toda operacion de esta instancia (ver arriba)
+    std::vector<float> scratch;    // destino del render antes de copiar al FloatArray
+};
+
+// En el HEAP y NUNCA destruido, igual que `g_wmaEngine`: un static con destructor
+// correria `wma_engine_destroy` de los renderers que nadie cerro DURANTE la destruccion
+// estatica del `exit()` —con `LogCaptureBuffer` ya destruido y hilos daemon de la JVM
+// todavia entrando aca— (review de S2). Lo vacia `JNI_OnUnload`.
+struct OfflineRegistry {
+    std::mutex mutex;
+    std::unordered_map<jlong, std::shared_ptr<OfflineSlot>> slots;
+    jlong nextHandle = 1;
+};
+
+OfflineRegistry& offlineRegistry() {
+    static OfflineRegistry* const registry = new OfflineRegistry();
+    return *registry;
+}
+
+std::shared_ptr<OfflineSlot> offlineSlot(jlong handle) {
+    auto& reg = offlineRegistry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    auto it = reg.slots.find(handle);
+    return it == reg.slots.end() ? nullptr : it->second;
+}
+
+constexpr jint kOfflineUnknownHandle = static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
+
+}  // namespace
+
+void releaseOfflineHandles() {
+    std::unordered_map<jlong, std::shared_ptr<OfflineSlot>> drained;
+    {
+        auto& reg = offlineRegistry();
+        std::lock_guard<std::mutex> lock(reg.mutex);
+        drained.swap(reg.slots);
+    }
+    // Las instancias se destruyen aca, con el lock suelto (o en el hilo que las este
+    // renderizando, cuando suelte su referencia).
+}
+
+extern "C" {
+
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineCreate(
+    JNIEnv* env, jobject thiz) {
+    WmaEngine* engine = wma_engine_create();
+    if (!engine) {
+        LOGE("nativeOfflineCreate: wma_engine_create failed");
+        return 0;
+    }
+    std::shared_ptr<OfflineSlot> slot;
+    try {
+        slot = std::make_shared<OfflineSlot>(engine);
+    } catch (...) {
+        wma_engine_destroy(engine);
+        return 0;
+    }
+    // Una instancia offline NUNCA queda como BackendManager global (review de S2): si se
+    // creo antes que el vivo, `wma_engine_create` la registro, y las entradas de
+    // USB/backend que no pasan por `ensureEngine()` manejarian su manager —que ademas
+    // muere con el handle—. Sin global, `getInstance()` cae al de fallback hasta que el
+    // vivo se registre.
+    watermelon_audio::BackendManager::clearGlobalIf(engine->backendManager.get());
+    auto& reg = offlineRegistry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    const jlong handle = reg.nextHandle++;
+    reg.slots.emplace(handle, std::move(slot));
+    return handle;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineDestroy(
+    JNIEnv* env, jobject thiz, jlong handle) {
+    std::shared_ptr<OfflineSlot> slot;
+    {
+        auto& reg = offlineRegistry();
+        std::lock_guard<std::mutex> lock(reg.mutex);
+        auto it = reg.slots.find(handle);
+        if (it == reg.slots.end()) return kOfflineUnknownHandle;
+        slot = std::move(it->second);
+        reg.slots.erase(it);
+    }
+    // La instancia se destruye aca —o en el hilo que la este renderizando, cuando
+    // suelte su referencia—, siempre con el lock del registro SUELTO.
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineStart(
+    JNIEnv* env, jobject thiz, jlong handle, jint sampleRate, jint maxBlockFrames) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    slot->scratch.clear();   // un start fallido no deja un render "arrancado"
+    const WmaResult r = wma_offline_start(slot->engine, sampleRate, maxBlockFrames);
+    if (r == WMA_OK) {
+        try {
+            slot->scratch.assign(static_cast<size_t>(maxBlockFrames) * 2, 0.0f);
+        } catch (...) {
+            const WmaResult stopped = wma_offline_stop(slot->engine);
+            return static_cast<jint>(stopped == WMA_OK ? WMA_ERROR_MEMORY : stopped);
+        }
+    }
+    return static_cast<jint>(r);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineRender(
+    JNIEnv* env, jobject thiz, jlong handle, jfloatArray output, jint frames) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    // El tope ANTES de multiplicar: `frames * 2` con un jint arbitrario desborda.
+    constexpr jint kMaxOfflineBlockFrames = 4096;   // el de wma_offline_start
+    if (output == nullptr || frames <= 0 || frames > kMaxOfflineBlockFrames) {
+        return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    }
+    const jsize needed = static_cast<jsize>(frames) * 2;
+    if (env->GetArrayLength(output) < needed) {
+        return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    }
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    // `scratch` mide 2 x maxBlockFrames mientras hay un render arrancado POR ESTE
+    // handle, y esta vacio fuera de el (stop lo vacia): el estado se decide sin tocar
+    // el motor, y nunca se renderiza sobre un buffer mas chico que el pedido.
+    if (slot->scratch.empty()) {
+        return static_cast<jint>(WMA_ERROR_INVALID_OPERATION);
+    }
+    if (static_cast<size_t>(needed) > slot->scratch.size()) {
+        return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    }
+    const WmaResult r = wma_offline_render(slot->engine, slot->scratch.data(), nullptr, frames);
+    if (r == WMA_OK) {
+        env->SetFloatArrayRegion(output, 0, needed, slot->scratch.data());
+    }
+    return static_cast<jint>(r);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineStop(
+    JNIEnv* env, jobject thiz, jlong handle) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    const WmaResult r = wma_offline_stop(slot->engine);
+    if (r == WMA_OK) {
+        slot->scratch.clear();
+        slot->scratch.shrink_to_fit();
+    }
+    return static_cast<jint>(r);
+}
+
+// --- Configuracion por handle: pasamanos 1:1 a la `wma_*` que ya toma un WmaEngine*.
+// Es el mecanismo de configuracion de la instancia offline (no hay un duplicado por
+// setter): la C API ya era por handle. Se agrega una cuando un consumidor la necesita.
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetEngineType(
+    JNIEnv* env, jobject thiz, jlong handle, jint type) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (type < 0 || type > 6) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    wma_set_engine_type(slot->engine, type);
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetEngineParameter(
+    JNIEnv* env, jobject thiz, jlong handle, jint paramId, jfloat value) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    wma_set_engine_param(slot->engine, paramId, value);
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetMasterVolume(
+    JNIEnv* env, jobject thiz, jlong handle, jfloat volume) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    wma_set_master_volume(slot->engine, volume);
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetXY(
+    JNIEnv* env, jobject thiz, jlong handle, jfloat x, jfloat y) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    wma_set_xy(slot->engine, x, y);
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetFrequencyAndAmplitude(
+    JNIEnv* env, jobject thiz, jlong handle, jfloat frequency, jfloat amplitude) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    wma_set_frequency_amplitude(slot->engine, frequency, amplitude);
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineLoadSoundFontFromPath(
+    JNIEnv* env, jobject thiz, jlong handle, jstring path) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (path == nullptr) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    const char* pathStr = env->GetStringUTFChars(path, nullptr);
+    if (!pathStr) return static_cast<jint>(WMA_ERROR_MEMORY);
+    const bool loaded = wma_sf_load_path(slot->engine, pathStr);
+    env->ReleaseStringUTFChars(path, pathStr);
+    // wma_sf_load_path no dice por que fallo (archivo, formato): IO es la causa del
+    // camino por ruta, y la que el llamador puede actuar.
+    return static_cast<jint>(loaded ? WMA_OK : WMA_ERROR_IO);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetSoundFontPreset(
+    JNIEnv* env, jobject thiz, jlong handle, jint presetIndex) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (presetIndex < 0 || presetIndex >= wma_sf_get_preset_count(slot->engine)) {
+        return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    }
+    wma_sf_set_preset(slot->engine, presetIndex);
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSfNoteOn(
+    JNIEnv* env, jobject thiz, jlong handle, jint touchId, jint midiNote, jfloat velocity) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    wma_sf_note_on(slot->engine, touchId, midiNote, velocity);
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSfNoteOff(
+    JNIEnv* env, jobject thiz, jlong handle, jint touchId) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    wma_sf_note_off(slot->engine, touchId);
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineAddEffect(
+    JNIEnv* env, jobject thiz, jlong handle, jint typeId) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    // >= 0: indice del efecto; < 0: WmaResult (el mismo reparto que wma_effect_add).
+    return static_cast<jint>(wma_effect_add(slot->engine, typeId));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineClearAllEffects(
+    JNIEnv* env, jobject thiz, jlong handle) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_effect_clear_all(slot->engine));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetEffectParameter(
+    JNIEnv* env, jobject thiz, jlong handle, jint index, jint paramId, jfloat value) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_effect_set_param(slot->engine, index, paramId, value));
 }
 
 } // extern "C"

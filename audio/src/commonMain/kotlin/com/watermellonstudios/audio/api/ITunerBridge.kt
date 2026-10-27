@@ -27,8 +27,9 @@ interface ITunerBridge {
     fun startTunerSync(): Boolean
 
     /**
-     * Para de analizar. El último snapshot **sigue siendo legible**, para que la
-     * UI no parpadee a vacío cuando el usuario suelta la cuerda.
+     * Para de analizar y suelta la captura del afinador: la cierra si no queda otro
+     * dueño (la regla del dueño: [ITuner.stop]). El último snapshot **sigue siendo
+     * legible**, para que la UI no parpadee a vacío cuando el usuario suelta la cuerda.
      */
     fun stopTunerSync()
 

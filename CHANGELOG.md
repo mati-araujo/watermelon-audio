@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.22.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.22.0...v2.22.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **looper:** escribir el WAV de una toma ya no descarta la captura ([d0f8295](https://github.com/mati-araujo/watermelon-audio/commit/d0f8295b027335ea25ea98a2543bf2f63168fc59))
+* **looper:** escribir una toma no descarta la captura de otras pistas ([216e9d9](https://github.com/mati-araujo/watermelon-audio/commit/216e9d96a3c49b8f5240fbac5c2a75ba2be20c94))
+* **looper:** lectores de export contados por pista, no un bit ([bc7d360](https://github.com/mati-araujo/watermelon-audio/commit/bc7d360c2a76fcab608c7d6c33c67d14685ed444))
+* **looper:** leer una pista para exportar sólo pausa la captura de esa ([1ed5b8c](https://github.com/mati-araujo/watermelon-audio/commit/1ed5b8c1e27bd90c07e0812ce247eabb4c9da507))
+* **tuner:** ITuner.stop() suelta la captura que abrio start() ([379735a](https://github.com/mati-araujo/watermelon-audio/commit/379735ad39581bf060705de14a3a2af2daf098e4))
+
 ## [2.22.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.21.0...v2.22.0) (2026-10-05)
 
 

@@ -17,6 +17,7 @@
 #include "../nodes/InputNode.h"
 #include "../api/watermelon_audio.h"
 #include "../api/watermelon_audio_internal.h"
+#include "../backends/BackendManager.h"
 #include <algorithm>
 
 // ==================== Global State Definitions ====================
@@ -45,6 +46,13 @@ bool ensureEngineLocked() {
         LOGI("Creating AudioEngine via WmaEngine (Phase 0D)");
         g_wmaEngine = wma_engine_create();
         if (g_wmaEngine) {
+            // REQ-055 S2: the global BackendManager is THE LIVE ENGINE's, whatever
+            // was created first. `wma_engine_create()` only registers when none is
+            // registered, so an offline handle created before the first live call
+            // would otherwise keep it, and every USB/backend entry point of this
+            // file (they go through getInstance()) would drive the offline engine.
+            watermelon_audio::BackendManager::setGlobalInstance(
+                g_wmaEngine->backendManager.get());
             // Set raw pointer for fast JNI access (non-owning)
             g_jniState.engine = g_wmaEngine->engine.get();
             return true;
@@ -173,6 +181,10 @@ JNIEXPORT void JNI_OnUnload(JavaVM* vm, void* reserved) {
     }
 
     std::lock_guard<std::mutex> lock(g_jniState.engineMutex);
+
+    // The offline-render instances first: they are independent engines, and nothing
+    // else would ever destroy the ones nobody closed (REQ-055 S2).
+    releaseOfflineHandles();
 
     // Stop and release InputNode first (drops both handles — see releaseInputNode).
     // Must run before g_wmaEngine is cleared: it reaches through it.

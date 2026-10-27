@@ -39,6 +39,20 @@ void BackendManager::setGlobalInstance(BackendManager* instance) {
     g_globalInstance.store(instance, std::memory_order_release);
 }
 
+bool BackendManager::registerGlobalIfUnset(BackendManager* instance) {
+    BackendManager* expected = nullptr;
+    if (g_globalInstance.compare_exchange_strong(expected, instance,
+                                                 std::memory_order_acq_rel)) {
+        return true;
+    }
+    return expected == instance;
+}
+
+void BackendManager::clearGlobalIf(BackendManager* instance) {
+    BackendManager* expected = instance;
+    g_globalInstance.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
+}
+
 BackendManager::BackendManager() {
     LOGI("BackendManager initialized");
 

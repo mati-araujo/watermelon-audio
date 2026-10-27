@@ -70,6 +70,14 @@ public:
 private:
     ParameterSmoother mFreqSmoother;
     ParameterSmoother mAmpSmoother;
+
+public:
+    // REQ-055 S2: el estado de una instancia recien construida (smoothers en 0).
+    void resetForRender() override {
+        AudioSource::resetForRender();
+        mFreqSmoother.reset(0.0f);
+        mAmpSmoother.reset(0.0f);
+    }
 };
 
 // 2. SQUARE WAVE (Agresiva, tipo Gameboy/Chiptune)
@@ -121,6 +129,14 @@ public:
 private:
     ParameterSmoother mFreqSmoother;
     ParameterSmoother mAmpSmoother;
+
+public:
+    // REQ-055 S2: el estado de una instancia recien construida (smoothers en 0).
+    void resetForRender() override {
+        AudioSource::resetForRender();
+        mFreqSmoother.reset(0.0f);
+        mAmpSmoother.reset(0.0f);
+    }
 };
 
 // 3. SAWTOOTH WAVE (Rica en armónicos, zumbido)
@@ -170,6 +186,14 @@ public:
 private:
     ParameterSmoother mFreqSmoother;
     ParameterSmoother mAmpSmoother;
+
+public:
+    // REQ-055 S2: el estado de una instancia recien construida (smoothers en 0).
+    void resetForRender() override {
+        AudioSource::resetForRender();
+        mFreqSmoother.reset(0.0f);
+        mAmpSmoother.reset(0.0f);
+    }
 };
 
 // 4. TRIANGLE WAVE (Aflautada pero con bordes)
@@ -212,6 +236,14 @@ public:
 private:
     ParameterSmoother mFreqSmoother;
     ParameterSmoother mAmpSmoother;
+
+public:
+    // REQ-055 S2: el estado de una instancia recien construida (smoothers en 0).
+    void resetForRender() override {
+        AudioSource::resetForRender();
+        mFreqSmoother.reset(0.0f);
+        mAmpSmoother.reset(0.0f);
+    }
 };
 
 // 5. WHITE NOISE (Aleatorio, percusivo/efectos)
@@ -265,6 +297,14 @@ public:
 private:
     uint32_t mRngState;  // Estado del RNG thread-local
     ParameterSmoother mAmpSmoother;
+
+public:
+    // REQ-055 S2: la misma semilla que el constructor, y el smoother en 0.
+    void resetForRender() override {
+        AudioSource::resetForRender();
+        mRngState = 12345;
+        mAmpSmoother.reset(0.0f);
+    }
 };
 
 // ========== FILTROS PARA PROCESAMIENTO DE AUDIO ==========
@@ -465,4 +505,16 @@ private:
     OscillatorToneFilter mFilterL;  // Filtro para canal izquierdo
     OscillatorToneFilter mFilterR;  // Filtro para canal derecho
     float mCurrentCenterFreq = 1000.0f;
+
+public:
+    // REQ-055 S2: semilla del constructor, smoothers en 0, filtros vacios y en 1 kHz.
+    void resetForRender() override {
+        AudioSource::resetForRender();
+        mRngState = 54321;
+        mAmpSmoother.reset(0.0f);
+        mCenterFreqSmoother.reset(0.0f);
+        mFilterL.reset();
+        mFilterR.reset();
+        updateFilters(1000.0f, static_cast<float>(mSampleRate));
+    }
 };

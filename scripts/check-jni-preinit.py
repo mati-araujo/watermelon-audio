@@ -122,7 +122,9 @@ LECTURA = {"get", "is", "has", "find", "detect", "analyze", "count",
 ACCION = {"start", "stop", "pause", "resume", "trigger", "release", "update", "arm",
           "cancel", "export", "import", "capture", "prepare", "trim", "save",
           "restore", "reset", "finalize", "apply",
-          "create", "destroy", "free", "abort", "note", "select"}
+          "create", "destroy", "free", "abort", "note", "select",
+          # REQ-055 S2: `wma_offline_render` produce un bloque, no deja estado.
+          "render"}
 
 # Configuracion que NO nombra el handle y entra al conjunto de todos modos, con su razon.
 #

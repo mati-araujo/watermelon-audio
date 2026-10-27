@@ -2,6 +2,7 @@
 #define LFO_H
 
 #include <atomic>
+#include <cstdint>
 #include <cmath>
 #include <algorithm>
 #include "DSPMath.h"
@@ -145,6 +146,13 @@ private:
     float mRandomPrev{0.0f};             ///< Previous random target
     float mRandomNext{0.0f};             ///< Next random target
     float mRandomSmoothPhase{0.0f};      ///< Interpolation phase [0, 1)
+
+    // REQ-055 S2: the random waveforms draw from a PER-INSTANCE xorshift32 with a
+    // fixed seed, restored by reset(). It used to be a `thread_local std::mt19937`
+    // seeded from `std::random_device` — unseedable, so a render with a RANDOM
+    // LFO could never be reproduced, and shared by every LFO on the thread.
+    static constexpr uint32_t kRandomSeed = 0x9E3779B9u;
+    uint32_t mRandomState{kRandomSeed};
 
     /**
      * @brief Update phase increment based on current rate

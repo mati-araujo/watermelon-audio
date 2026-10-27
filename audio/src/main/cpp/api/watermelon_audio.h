@@ -892,6 +892,10 @@ WMA_API bool wma_tuner_start(WmaEngine* engine);
 /**
  * Stop draining. The capture thread stops being handed work immediately; the
  * ring and the last snapshot stay alive and readable.
+ *
+ * Also releases the tuner's claim on the input capture: if the tuner was its last
+ * owner the capture is closed before this returns; if wma_input_start() or an
+ * input mode still wants it, it stays open. Idempotent.
  */
 WMA_API void wma_tuner_stop(WmaEngine* engine);
 
@@ -2397,6 +2401,89 @@ WMA_API void wma_log_batch_free(WmaLogBatch* batch);
 
 /** Get version string (e.g., "0.1.0"). */
 WMA_API const char* wma_get_version(void);
+
+/* ================================================================
+ * 24. Offline render by handle (REQ-055 S2, ADR-0008)
+ * ================================================================
+ *
+ * A SECOND engine instance renders into a caller-owned buffer, with no device,
+ * no audio thread and no lock shared with the live engine. The handle is the
+ * same `WmaEngine*` that `wma_engine_create()` returns, and that is the whole
+ * configuration mechanism: every existing `wma_*` function that takes a
+ * `WmaEngine*` (engine type and params, SoundFont load and preset, effect
+ * chain, master volume, x/y, note on/off...) configures an offline instance
+ * exactly as it configures the live one. There is no per-setter duplicate.
+ *
+ * Lifecycle: wma_engine_create -> configure -> wma_offline_start ->
+ * wma_offline_render (N times) -> wma_offline_stop -> wma_engine_destroy.
+ *
+ * DETERMINISM CONTRACT. Same configuration + same input (the same calls at the
+ * same block boundaries) + same block size => bit-identical output, whether
+ * the instance is fresh or was used before. wma_offline_start() explicitly
+ * resets the chain state (reverb and delay tails, LFO phases and random
+ * generators, oscillator phases and smoothers, voices, synth-engine state,
+ * arpeggiator) so a second start renders the same buffer as the first. Measured
+ * (docs/dev/render-offline.md) on the 7 engines. Across DIFFERENT block sizes
+ * (input applied at the same frames) the buffer is also bit-identical unless the
+ * synth volume or an engine parameter changes mid-render: those two apply once
+ * per block. So an export fixes its block size. The looper's CONTENT is input,
+ * not state: wma_offline_start does not clear recorded tracks.
+ *
+ * Threading: calls on ONE offline instance must not overlap — configure between
+ * renders, not during one. The live engine tolerates a setter racing its callback
+ * because the callback is short and real-time (e.g. effect removal waits 20 ms
+ * before freeing); an offline render is an ordinary thread rendering up to 4096
+ * frames, and neither guarantee holds. Different instances may run in parallel.
+ * Rendering never touches the live engine. Destroying a handle while another
+ * thread uses it is the caller's error (C has no way to detect a destroyed
+ * pointer); the JNI layer serializes every call per instance and detects
+ * destroyed handles.
+ *
+ * Backend functions WITHOUT a handle (wma_select_backend, wma_usb_*...) act on
+ * the global BackendManager: the first engine created registers it, and an
+ * instance that starts an offline render gives it up. So a C consumer creates its
+ * LIVE engine first: an offline instance created before it holds the slot until
+ * wma_offline_start, and the live engine created in between is not registered.
+ * (The JNI layer always registers its live engine, in any order.)
+ */
+
+/**
+ * Start (or restart) an offline render on @p engine, resetting the chain state.
+ *
+ * If the instance is already rendering offline it is stopped and started
+ * again — that restart is what makes a second render reproduce the first.
+ *
+ * @param sample_rate       Hz, > 0.
+ * @param max_block_frames  Largest block a later wma_offline_render() may ask
+ *                          for, 1..4096 (the effect chain's scratch size).
+ * @return WMA_OK; WMA_ERROR_NOT_INITIALIZED for NULL;
+ *         WMA_ERROR_PARAMETER_OUT_OF_RANGE for a bad rate or block size;
+ *         WMA_ERROR_INVALID_OPERATION if the engine is running on a device
+ *         (a live engine is never hijacked into offline mode).
+ */
+WMA_API WmaResult wma_offline_start(WmaEngine* engine, int sample_rate, int max_block_frames);
+
+/**
+ * Render @p frames frames into @p output (interleaved stereo, frames*2 floats,
+ * overwritten). @p input is interleaved stereo or NULL (no input).
+ *
+ * @return WMA_OK; WMA_ERROR_NOT_INITIALIZED for NULL engine;
+ *         WMA_ERROR_PARAMETER_OUT_OF_RANGE for NULL output or frames outside
+ *         1..max_block_frames; WMA_ERROR_INVALID_OPERATION if no offline render
+ *         was started.
+ */
+WMA_API WmaResult wma_offline_render(WmaEngine* engine, float* output, const float* input,
+                                     int frames);
+
+/**
+ * Stop an offline render. Idempotent: an instance that is not rendering
+ * returns WMA_OK.
+ *
+ * @return WMA_OK; WMA_ERROR_NOT_INITIALIZED for NULL;
+ *         WMA_ERROR_INVALID_OPERATION if the engine is running on a device (this
+ *         call never stops a live engine).
+ */
+WMA_API WmaResult wma_offline_stop(WmaEngine* engine);
 
 /* ================================================================ */
 

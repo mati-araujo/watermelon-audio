@@ -913,13 +913,19 @@ float EffectChain::getParameter(size_t index, int paramId) const {
 // NOTE: getNumParams is a free function used by savePreset/loadPreset.
 // It now delegates to a static registry instance for backward compatibility.
 // TODO(Phase 1F): Consider making this an EffectChain method that uses mRegistry.
+//
+// REQ-055 S2: the registry is filled INSIDE the magic-static initializer. It used
+// to be `static bool initialized` checked and written outside it, so two engine
+// instances calling savePreset/loadPreset on two threads raced on the flag and on
+// registerBuiltinEffects() writing the same registry twice. C++11 guarantees the
+// initializer of a function-local static runs exactly once, thread-safely.
 static EffectRegistry& getGlobalRegistry() {
     static EffectRegistry reg;
-    static bool initialized = false;
-    if (!initialized) {
+    static const bool initialized = [] {
         registerBuiltinEffects(reg);
-        initialized = true;
-    }
+        return true;
+    }();
+    (void)initialized;
     return reg;
 }
 

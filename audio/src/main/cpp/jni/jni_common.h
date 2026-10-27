@@ -122,6 +122,12 @@ bool ensureInputNode();
  */
 void releaseInputNode();
 
+/**
+ * Destroy every offline-render instance still registered (REQ-055 S2). Called by
+ * JNI_OnUnload; defined next to the `nativeOffline*` entry points.
+ */
+void releaseOfflineHandles();
+
 // ==================== JNI Cache ====================
 
 /**

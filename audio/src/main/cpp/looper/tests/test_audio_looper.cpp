@@ -19,14 +19,41 @@
 #include "WavFile.h"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
+
+// REQ-055 S4: acceso de test a la parte privada del guard por pista.
+struct AudioLooperTestAccess {
+    using ReadScope = AudioLooper::ExportReadScope;
+    static uint32_t bit(int track) { return 1u << track; }
+    // Máscara de las pistas con al menos un lector (ExportReadScope) activo.
+    static uint32_t readMask(const AudioLooper& l) {
+        uint32_t m = 0;
+        for (int t = 0; t < AudioLooper::MAX_TRACKS_HW; ++t) {
+            if (l.mExportReaders[t].load(std::memory_order_acquire) != 0) m |= 1u << t;
+        }
+        return m;
+    }
+    static int captureWritingTrack(const AudioLooper& l) {
+        return l.mCaptureWritingTrack.load(std::memory_order_seq_cst);
+    }
+    // Simula al hilo de audio a mitad de un bloque de captura sobre `track`.
+    static void setCaptureWritingTrack(AudioLooper& l, int track) {
+        l.mCaptureWritingTrack.store(track, std::memory_order_seq_cst);
+    }
+};
 
 namespace {
 
@@ -614,7 +641,15 @@ static float wavMaxAbs(const std::string& path) {
 // overdub writes so the render sees an immutable snapshot (plan §4.1). We hold an
 // overdub active on a playing track and hammer process() from another thread for
 // the whole duration of a deliberately large export; the exported mix must still
-// contain only the ORIGINAL content. Then, with the guard released, the same
+// contain only the ORIGINAL content.
+//
+// REQ-055 S4: the RT guard is now the ExportReadScope, not isExportInProgress().
+// The public flag covers the whole operation and goes up a moment BEFORE the read
+// scope (and stays up after it, through limiter + disk write). Hammering on the
+// public flag let an overdub land in that first moment — before the render reads
+// anything, so it is part of the state being exported, not a torn snapshot — and
+// failed under ASan, whose slowness widens that moment. The test now hammers
+// exactly while the read is in progress, which is the contract it pins. Then, with the guard released, the same
 // overdub DOES change the track — proving the guard (not a broken overdub) is what
 // held the snapshot still. Storage-agnostic: runs under both backends.
 TEST(AudioLooper, ExportGuardBlocksOverdubDuringSnapshot) {
@@ -648,8 +683,8 @@ TEST(AudioLooper, ExportGuardBlocksOverdubDuringSnapshot) {
     });
     std::vector<float> blk(512 * 2, 0.9f);
     while (!exportDone.load()) {
-        if (looper.isExportInProgress()) looper.process(blk.data(), 512);
-        else                             std::this_thread::yield();
+        if (AudioLooperTestAccess::readMask(looper) != 0) looper.process(blk.data(), 512);
+        else                                              std::this_thread::yield();
     }
     exporter.join();
 
@@ -698,6 +733,122 @@ TEST(AudioLooper, CancelExportMidwayWritesNothing) {
     EXPECT_FALSE(result.load()) << "cancelled export must report failure";
     EXPECT_FALSE(std::filesystem::exists(out.path))
         << "cancelled export must not leave a partial file";
+}
+
+// ======================= REQ-055 S4 — la captura de una toma no descarta otra =====
+//
+// AC-055.2: WHEN se cierra una toma y se arranca a grabar otra pista inmediatamente
+// THE SYSTEM SHALL capturar todos los frames de la segunda.
+//
+// Con el historial de tomas, NoisyPad guarda cada toma (`captureTrack`) apenas se
+// cierra. Antes, `captureTrack` tenía el ExportGuard GLOBAL tomado durante la copia
+// Y la escritura a disco, y mientras tanto `process()` descartaba la captura de
+// CUALQUIER pista: el arranque de la toma siguiente se perdía en silencio.
+//
+// Cómo se fuerza el solapamiento sin reloj (REQ-002): el destino del WAV es un FIFO
+// cuyo lector abrimos nosotros y NO drenamos. El escritor sólo puede poner datos en
+// el pipe estando dentro de `writeWav` (o sea, después de la copia), y no puede
+// terminar mientras no leamos: la toma de A pesa más que cualquier buffer de pipe.
+// Esperamos a que haya bytes en el pipe (condición, no duración), grabamos B entera
+// con la escritura de A bloqueada a mitad, y recién después drenamos.
+namespace {
+
+// Valor conocido por frame: un frame perdido o corrido no puede dar el mismo valor.
+float req055Ramp(int i) { return static_cast<float>((i % 1000) + 1) / 2000.0f; }
+
+// Lee el FIFO hasta que el escritor lo cierra. Devuelve los bytes leídos.
+size_t req055Drain(int fd) {
+    const int flags = fcntl(fd, F_GETFL);
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    std::vector<char> buf(64 * 1024);
+    size_t total = 0;
+    while (true) {
+        const ssize_t n = read(fd, buf.data(), buf.size());
+        if (n > 0) { total += static_cast<size_t>(n); continue; }
+        if (n < 0 && errno == EINTR) continue;
+        break;  // 0 = el escritor cerró; <0 = error, el total lo delata
+    }
+    return total;
+}
+
+}  // namespace
+
+TEST(AudioLooper, Req055CaptureOfATakeDoesNotDropTheNextTake) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.setTailMs(0);  // sin cola: la toma de B termina exactamente en kB frames
+
+    // GIVEN: la pista A grabada y cerrada (sonando). 2 s en float32 estéreo =
+    // 768 KB, más que el buffer de un pipe en macOS y en Linux.
+    const int kA = 2 * kSR;
+    int64_t pf = 0;
+    ASSERT_TRUE(looper.prepareTrack(0, kA, kSR));
+    looper.startRecording(0);
+    pf = feed(looper, 0.5f, kA, 256, pf);
+    ASSERT_TRUE(looper.isTrackPlaying(0));
+    ASSERT_FALSE(looper.isRecording());
+
+    const std::filesystem::path fifo = wma_test::fixturePath("wm_r055_capture.fifo");
+    std::error_code ec;
+    std::filesystem::remove(fifo, ec);
+    ASSERT_EQ(mkfifo(fifo.c_str(), 0600), 0) << "mkfifo: " << std::strerror(errno);
+    const int rd = open(fifo.c_str(), O_RDONLY | O_NONBLOCK);
+    ASSERT_GE(rd, 0) << "open FIFO: " << std::strerror(errno);
+
+    // ... y su captura en curso, en otro hilo (el IO de NoisyPad).
+    std::atomic<bool> captureDone{false};
+    std::atomic<bool> captureOk{false};
+    std::thread capturer([&] {
+        captureOk.store(looper.captureTrack(0, fifo.c_str(), wav::BitDepth::FLOAT_32));
+        captureDone.store(true);
+    });
+    const bool writing = wma_test::waitUntil([&] {
+        pollfd p{rd, POLLIN, 0};
+        return poll(&p, 1, 0) > 0 && (p.revents & POLLIN) != 0;
+    }, std::chrono::milliseconds(10000));
+
+    // WHEN: se arranca a grabar B en el bloque siguiente, con la escritura de A a mitad.
+    const int kB = kSR / 2;
+    int recorded = 0;
+    if (writing) {
+        EXPECT_TRUE(looper.prepareTrack(1, kB, kSR));
+        looper.startRecording(1);
+        std::vector<float> blk(256 * 2);
+        while (recorded < kB) {
+            const int n = std::min(256, kB - recorded);
+            for (int i = 0; i < n; ++i) {
+                blk[i * 2] = blk[i * 2 + 1] = req055Ramp(recorded + i);
+            }
+            looper.process(blk.data(), n, pf);
+            pf += n;
+            recorded += n;
+        }
+    }
+    // Precondición que hace válido el test: la captura de A SIGUE en curso (no puede
+    // terminar sin que drenemos el pipe), así que B se grabó entera solapada con ella.
+    const bool overlapped = writing && !captureDone.load();
+
+    const size_t bytes = req055Drain(rd);
+    capturer.join();
+    close(rd);
+    std::filesystem::remove(fifo, ec);
+
+    ASSERT_TRUE(writing) << "la captura de A nunca llegó a escribir el WAV";
+    ASSERT_TRUE(overlapped) << "la captura de A terminó antes de grabar B: no hubo solapamiento";
+    EXPECT_TRUE(captureOk.load()) << "la captura de A falló";
+    EXPECT_GE(bytes, static_cast<size_t>(kA) * 2 * sizeof(float))
+        << "el WAV de A salió incompleto";
+
+    // THEN: B tiene todos sus frames, con el valor que se le dio a cada uno.
+    EXPECT_EQ(looper.getTrackLengthFrames(1), kB)
+        << "frames de B descartados mientras se escribía A";
+    const TrackBuffer& b = looper.getTrack(1);
+    int mismatches = 0;
+    const int lenB = looper.getTrackLengthFrames(1);
+    for (int i = 0; i < lenB; ++i) {
+        if (b.sampleAt(i, 0) != req055Ramp(i) || b.sampleAt(i, 1) != req055Ramp(i)) ++mismatches;
+    }
+    EXPECT_EQ(mismatches, 0) << "B tiene frames corridos o perdidos";
 }
 
 // ======================= Quantized sync-arm =======================
@@ -1160,4 +1311,184 @@ TEST(AudioLooper, Req045ADirectoryIsAnIoFailureAndNotAFormatOne) {
         << "el lector completo tiene que rechazarlo igual";
 
     std::filesystem::remove_all(dir, ec);
+}
+
+// ======================= REQ-055 S4 — el guard es por pista =======================
+//
+// AC-055.2 también durante la COPIA a RAM: mientras un exportador lee la pista A,
+// el hilo de audio sólo descarta la captura de A. Se fuerza el solapamiento
+// sosteniendo el ReadScope desde el test y llamando a process() con él tomado
+// (sin hilos, sin reloj).
+namespace {
+
+// Graba `frames` de rampa en `track` (ya preparado) con bloques de 256.
+int64_t req055RecordRamp(AudioLooper& looper, int track, int frames, int64_t pf) {
+    looper.startRecording(track);
+    std::vector<float> blk(256 * 2);
+    for (int done = 0; done < frames;) {
+        const int n = std::min(256, frames - done);
+        for (int i = 0; i < n; ++i) blk[i * 2] = blk[i * 2 + 1] = req055Ramp(done + i);
+        looper.process(blk.data(), n, pf);
+        pf += n;
+        done += n;
+    }
+    return pf;
+}
+
+int req055RampMismatches(const AudioLooper& looper, int track) {
+    const TrackBuffer& t = looper.getTrack(track);
+    int bad = 0;
+    for (int i = 0; i < looper.getTrackLengthFrames(track); ++i) {
+        if (t.sampleAt(i, 0) != req055Ramp(i) || t.sampleAt(i, 1) != req055Ramp(i)) ++bad;
+    }
+    return bad;
+}
+
+}  // namespace
+
+// Bug que atrapa: un guard que sigue siendo global (o una máscara mal desplazada)
+// descarta la toma de B mientras se copia A.
+TEST(AudioLooper, Req055ReadingOneTrackDoesNotBlockCaptureOfAnother) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.setTailMs(0);
+    const int kA = kSR / 4;
+    const int kB = kSR / 2;
+    int64_t pf = 0;
+    ASSERT_TRUE(looper.prepareTrack(0, kA, kSR));
+    pf = req055RecordRamp(looper, 0, kA, pf);
+    ASSERT_TRUE(looper.isTrackPlaying(0));
+
+    ASSERT_TRUE(looper.prepareTrack(1, kB, kSR));
+    {
+        const AudioLooperTestAccess::ReadScope reading(looper, AudioLooperTestAccess::bit(0));
+        ASSERT_EQ(AudioLooperTestAccess::readMask(looper), AudioLooperTestAccess::bit(0));
+        pf = req055RecordRamp(looper, 1, kB, pf);
+    }
+    EXPECT_EQ(AudioLooperTestAccess::readMask(looper), 0u) << "el scope no soltó su bit";
+    EXPECT_EQ(looper.getTrackLengthFrames(1), kB) << "se descartó captura de B mientras se leía A";
+    EXPECT_EQ(req055RampMismatches(looper, 1), 0);
+}
+
+// Bug que atrapa: un RT que deja de mirar la máscara (o mira otra pista) escribe
+// en la pista que el exportador está copiando — snapshot roto. Es el contrato que
+// ExportGuardBlocksOverdubDuringSnapshot cubre para el mixdown, acá por pista y
+// para la grabación.
+TEST(AudioLooper, Req055ReadingATrackStillBlocksItsOwnCapture) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.setTailMs(0);
+    const int kB = kSR / 4;
+    ASSERT_TRUE(looper.prepareTrack(1, kB, kSR));
+    int64_t pf = 0;
+    {
+        const AudioLooperTestAccess::ReadScope reading(looper, AudioLooperTestAccess::bit(1));
+        pf = req055RecordRamp(looper, 1, kB, pf);
+        EXPECT_EQ(looper.getTrackLengthFrames(1), 0)
+            << "el hilo de audio escribió la pista que se estaba leyendo";
+    }
+    // Control: sin el scope, la misma grabación sí escribe.
+    pf = req055RecordRamp(looper, 1, kB, pf);
+    EXPECT_EQ(looper.getTrackLengthFrames(1), kB);
+}
+
+// El otro lado del handshake: un scope que se toma con el hilo de audio a mitad de
+// un bloque que escribe ESA pista no vuelve hasta que el bloque termina. Bug que
+// atrapa: la ventana TOCTOU (el RT leyó la máscara antes que el bit y sigue
+// escribiendo mientras el exportador ya copia). El bloque en vuelo se simula
+// fijando la marca que process() pone mientras escribe.
+TEST(AudioLooper, Req055ReadScopeWaitsForTheCaptureBlockInFlight) {
+    AudioLooper looper;
+    using A = AudioLooperTestAccess;
+
+    A::setCaptureWritingTrack(looper, 0);   // RT "escribiendo" la pista 0
+    std::atomic<bool> entered{false};
+    std::atomic<bool> leave{false};
+    std::thread io([&] {
+        const A::ReadScope reading(looper, A::bit(0));
+        entered.store(true);
+        while (!leave.load()) std::this_thread::yield();
+    });
+    ASSERT_TRUE(wma_test::waitUntil([&] { return A::readMask(looper) == A::bit(0); }))
+        << "el scope nunca publicó su bit";
+    wma_test::sleepFixed(std::chrono::milliseconds(50));   // ausencia: no debe entrar
+    const bool enteredWhileWriting = entered.load();
+    A::setCaptureWritingTrack(looper, -1);  // el bloque terminó
+    const bool enteredAfter = wma_test::waitUntil([&] { return entered.load(); });
+    leave.store(true);
+    io.join();
+    EXPECT_FALSE(enteredWhileWriting)
+        << "el exportador empezó a leer con el hilo de audio escribiendo la pista";
+    EXPECT_TRUE(enteredAfter) << "el scope no volvió al terminar el bloque";
+    EXPECT_EQ(A::readMask(looper), 0u);
+
+    // Un bloque que escribe OTRA pista no lo demora.
+    A::setCaptureWritingTrack(looper, 1);
+    std::atomic<bool> enteredOther{false};
+    std::thread io2([&] {
+        const A::ReadScope reading(looper, A::bit(0));
+        enteredOther.store(true);
+    });
+    const bool notDelayed = wma_test::waitUntil([&] { return enteredOther.load(); });
+    A::setCaptureWritingTrack(looper, -1);  // por si falló: que el hilo pueda salir
+    io2.join();
+    EXPECT_TRUE(notDelayed) << "la captura de la pista 1 demoró la lectura de la 0";
+}
+
+// Dos lecturas solapadas de la misma pista (p. ej. stems en un hilo y la captura de
+// una toma en otro): la primera que termina NO puede rehabilitar la escritura que
+// la otra todavía está leyendo. Bug que atrapa: un guard de un bit por pista (o el
+// bool global de antes), donde soltar uno borra el del otro.
+TEST(AudioLooper, Req055OverlappingReadsOfATrackKeepItBlockedUntilTheLast) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.setTailMs(0);
+    using A = AudioLooperTestAccess;
+    const int kB = kSR / 4;
+    ASSERT_TRUE(looper.prepareTrack(1, kB, kSR));
+    int64_t pf = 0;
+    {
+        A::ReadScope stems(looper, AudioLooper::MAX_TRACKS_HW >= 32
+                                       ? ~0u : ((1u << AudioLooper::MAX_TRACKS_HW) - 1u));
+        {
+            A::ReadScope capture(looper, A::bit(1));
+        }  // la captura terminó; los stems siguen leyendo la pista 1
+        EXPECT_EQ(A::readMask(looper) & A::bit(1), A::bit(1)) << "soltar un lector liberó al otro";
+        pf = req055RecordRamp(looper, 1, kB, pf);
+        EXPECT_EQ(looper.getTrackLengthFrames(1), 0)
+            << "el hilo de audio escribió una pista que los stems todavía leen";
+    }
+    EXPECT_EQ(A::readMask(looper), 0u);
+    pf = req055RecordRamp(looper, 1, kB, pf);
+    EXPECT_EQ(looper.getTrackLengthFrames(1), kB);
+}
+
+// La mitad RT del handshake: process() no puede dejar la marca puesta al salir de
+// ningún camino de captura — una marca colgada deja al próximo exportador de esa
+// pista esperando para siempre. Caminos: graba, salta (pista en lectura) y termina
+// la toma (remaining <= 0 limpia mRecordingTrack en el mismo bloque).
+TEST(AudioLooper, Req055ProcessNeverLeavesTheWriteMarkBehind) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+    looper.setTailMs(0);
+    using A = AudioLooperTestAccess;
+    const int kB = 1024;
+    ASSERT_TRUE(looper.prepareTrack(1, kB, kSR));
+    looper.startRecording(1);
+    std::vector<float> blk(256 * 2, 0.25f);
+
+    looper.process(blk.data(), 256, 0);                       // graba
+    // ASSERT, no EXPECT: con la marca colgada, el ReadScope de abajo esperaría
+    // para siempre y el test se colgaría en vez de dar rojo.
+    ASSERT_EQ(A::captureWritingTrack(looper), -1) << "camino: captura";
+    {
+        const A::ReadScope reading(looper, A::bit(1));
+        looper.process(blk.data(), 256, 256);                 // salta
+        EXPECT_EQ(A::captureWritingTrack(looper), -1) << "camino: salto";
+    }
+    looper.process(blk.data(), 256, 512);
+    looper.process(blk.data(), 256, 768);
+    looper.process(blk.data(), 256, 1024);                    // termina la toma
+    EXPECT_FALSE(looper.isRecording());
+    EXPECT_EQ(A::captureWritingTrack(looper), -1) << "camino: fin de toma";
 }

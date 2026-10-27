@@ -34,6 +34,7 @@ namespace oboe { class AudioStream; }
 
 // Forward declarations (full includes in AudioEngine.cpp)
 class InputNode;
+namespace watermelon_audio { class BackendManager; }
 
 // Include for shared_ptr atomic operations
 #include <memory>
@@ -186,6 +187,27 @@ public:
 
     /// true si el motor arranco con startOffline() (WD-2.1).
     bool isOffline() const { return mOfflineMode.load(std::memory_order_acquire); }
+
+    /// El `maxBlockFrames` del render offline en curso; 0 fuera de el (REQ-055 S2).
+    int offlineMaxBlockFrames() const {
+        return mOfflineMaxBlockFrames.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief El `BackendManager` de ESTA instancia (REQ-055 S2).
+     *
+     * Hasta S2 el motor iba siempre a `BackendManager::getInstance()`, el global. Con
+     * un solo motor por proceso eran el mismo objeto; con una segunda instancia (el
+     * render offline de Studio) el motor offline le preguntaba el rate y el estado al
+     * stream del VIVO, y `setUseBackendManager(true)` le robaba el callback. Lo fija
+     * `wma_engine_create()`; sin fijar (un `AudioEngine` construido a mano en un
+     * test), cae al global como antes.
+     *
+     * No lo toma ownership. Se fija antes de usar el motor y no cambia despues.
+     */
+    void setBackendManager(watermelon_audio::BackendManager* manager) {
+        mBackendManager = manager;
+    }
 
     /**
      * @brief Detiene el motor con fade out
@@ -1393,6 +1415,19 @@ private:
 #else
     std::atomic<bool> mUseBackendManager{true};
 #endif
+
+    // El manager propio (REQ-055 S2); nullptr = el global. Ver setBackendManager().
+    watermelon_audio::BackendManager* mBackendManager = nullptr;
+    watermelon_audio::BackendManager& ownBackendManager() const;
+
+    /**
+     * Reseteo EXPLICITO del estado de la cadena al iniciar un render offline
+     * (REQ-055 S2, ADR-0008 §2): colas de reverb/delay, fases de LFO y osciladores,
+     * generadores aleatorios, voces, estado de los engines y del arpegiador. Lo
+     * llama `startOffline()` despues de preparar y antes de publicar Running: sin
+     * thread de audio en un motor offline, no hay nadie con quien carrerear.
+     */
+    void resetChainForOfflineRender();
 
     // Pre-allocated AudioBuffers for node-based processing
     AudioBuffer mOscillatorBuffer;  // Oscillator output (non-interleaved)
