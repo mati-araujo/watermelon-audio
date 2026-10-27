@@ -69,7 +69,7 @@ class TunerInputDumpResultTest {
      * con `invalidPathFor`/`.part` en vez de usar el del nativo.
      */
     @Test
-    fun `BugA - el path es el que informa el nativo, sin reconstruirlo`() {
+    fun `BugA - el path es el que informa el nativo sin reconstruirlo`() {
         // Un path que NINGUNA regla de nombres produce a partir de otro: si sale igual, viajó.
         val native = "dir/la-que-corrio.invalid.wav"
         for (valid in longArrayOf(0L, 1L)) {

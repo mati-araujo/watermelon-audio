@@ -45,10 +45,14 @@ interface ITunerDiagnostics {
      *   nombre ocupado) o si el análisis no aplicó el pedido a tiempo.
      *
      *   **Un false no deja nada de esta toma en disco** (ni `.part` ni archivo nombrado), y nunca
-     *   toca una toma que ya estaba en curso. Una sola excepción: si el análisis no aplicó ni el
-     *   armado ni el desarme, la toma queda viva (su `.part` se puede seguir escribiendo y no se
-     *   borra). Un false no prueba que no la haya, así que quien lo recibe llama a
-     *   [stopTunerInputDump], cuyo [TunerInputDumpResult.path] dice qué archivo dejó.
+     *   toca una toma que ya estaba en curso. Dos excepciones:
+     *   - si el análisis no aplicó ni el armado ni el desarme, la toma queda viva (su `.part` se
+     *     puede seguir escribiendo y no se borra). Un false no prueba que no la haya, así que quien
+     *     lo recibe llama a [stopTunerInputDump], cuyo [TunerInputDumpResult.path] dice qué archivo
+     *     dejó;
+     *   - si el `.part` de la toma abortada no se pudo borrar (permisos, o el nombre lo ocupa un
+     *     archivo que la toma no creó y que nunca se borra), queda `<path>.part` sin toma viva y el
+     *     nativo lo deja logueado con su nombre. Mientras exista, ese path no vuelve a arrancar.
      */
     fun startTunerInputDump(path: String): Boolean
 

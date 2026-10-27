@@ -145,7 +145,10 @@ target_link_libraries(watermelon_audio PRIVATE
 # REQ-055 S0 (bugs A y B del volcado del afinador): la compuerta que informa un techo vencido del
 # buzon vive en la C API bajo `WMA_TEST_HOOKS`, y la JVM la acciona por `host_test_hooks.cpp`. Se
 # define SOLO en esas dos TUs y SOLO en este `.so`: el de Android (AGP) y el de iOS no la llevan, y
-# el resto de este `.so` (InputNode, analysis) compila igual que antes.
+# el resto de este `.so` (InputNode, analysis) compila igual que antes. Salvedad, la misma que
+# core_tests ya acepta: `watermelon_audio.cpp` incluye `AnalysisSnapshot.h`, cuyos inline
+# `publish/read` llevan compuertas bajo la macro, asi que en este `.so` hay dos definiciones (con y
+# sin compuerta) y el linker elige una. Inocuo: nadie levanta `gSnapshotHold*` en el arnes.
 set_source_files_properties(
     ${WMA_CPP_ROOT}/api/watermelon_audio.cpp
     host_test_hooks.cpp

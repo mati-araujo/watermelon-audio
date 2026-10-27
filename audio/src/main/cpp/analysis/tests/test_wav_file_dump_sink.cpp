@@ -43,6 +43,8 @@
 
 // Definida en TunerInputDump.cpp bajo WMA_TEST_HOOKS: el hilo escritor "no se puede crear".
 extern std::atomic<bool> gTunerInputDumpFailWriterThread;
+// Idem: cuantas veces se borro el temporal con el escritor sin juntar (tiene que quedar en 0).
+extern std::atomic<int> gTunerInputDumpAbortsWithLiveWriter;
 
 namespace {
 
@@ -665,5 +667,44 @@ TEST_F(WavSinkTest, BugA_EndTakeReportsTheFileThatActuallyStayedOnDisk) {
     EXPECT_EQ(finalPath, "") << "no se pudo nombrar";
     EXPECT_EQ(leftPath, blocked + ".part");
     EXPECT_TRUE(fs::is_regular_file(leftPath)) << "el archivo informado no es el que quedo";
+}
+
+/**
+ * BugB — el ORDEN del aborto: el escritor se para y se JUNTA antes de borrar el temporal (nadie
+ * escribe un archivo que se esta borrando). La compuerta `gTunerInputDumpAbortsWithLiveWriter`
+ * cuenta los borrados con el hilo escritor todavia sin juntar.
+ *
+ * Mutante que mata: `abortTake` que borra (`abortSink`) antes del `join`.
+ */
+TEST_F(WavSinkTest, BugB_AbortTakeJoinsTheWriterBeforeRemovingThePart) {
+    gTunerInputDumpAbortsWithLiveWriter.store(0);
+    TunerInputDump dump;
+    ASSERT_TRUE(dump.beginTake(std::make_unique<WavFileDumpSink>(), pathOf("orden.wav"), 0));
+    EXPECT_TRUE(dump.abortTake());
+    EXPECT_EQ(gTunerInputDumpAbortsWithLiveWriter.load(), 0)
+        << "se borro el temporal con el hilo escritor vivo";
+    EXPECT_TRUE(namesIn(dir).empty());
+}
+
+/**
+ * BugB — la constancia de un borrado fallido es de ESA toma: un start posterior que falla por otra
+ * causa (sin abrir nada) no hereda el residuo del aborto anterior, o el log mentiria su archivo.
+ *
+ * El residuo se provoca con un `.part` reemplazado por un archivo ajeno, que el aborto no borra.
+ * Mutante que mata: no limpiar el residuo al entrar a `beginTake`.
+ */
+TEST_F(WavSinkTest, BugB_AnAbortResidueBelongsOnlyToTheTakeThatLeftIt) {
+    const std::string path = pathOf("residuo.wav");
+    TunerInputDump dump;
+    ASSERT_TRUE(dump.beginTake(std::make_unique<WavFileDumpSink>(), path, 0));
+    const std::string foreign = pathOf("ajeno.bin");
+    { std::ofstream(foreign, std::ios::binary) << "ajeno"; }
+    ASSERT_EQ(std::rename(foreign.c_str(), (path + ".part").c_str()), 0);
+
+    EXPECT_FALSE(dump.abortTake()) << "el nombre lo ocupa un archivo ajeno: no se borra";
+    EXPECT_EQ(dump.abortResidue(), path + ".part") << "el residuo tiene que nombrar lo que quedo";
+
+    EXPECT_FALSE(dump.beginTake(std::make_unique<WavFileDumpSink>(), pathOf("no/existe/b.wav"), 0));
+    EXPECT_EQ(dump.abortResidue(), "") << "un start que no abrio nada heredo el residuo de otra toma";
 }
 

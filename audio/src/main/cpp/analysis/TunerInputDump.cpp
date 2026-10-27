@@ -17,6 +17,9 @@
 // bug B. En el binario que shippea esto compila a nada.
 // ===========================================================================
 std::atomic<bool> gTunerInputDumpFailWriterThread{false};
+// Cuantas veces se borro el temporal con el hilo escritor todavia sin juntar: el orden que
+// `abortTake` promete (juntar, despues borrar) es que esto quede en cero.
+std::atomic<int> gTunerInputDumpAbortsWithLiveWriter{0};
 #endif
 
 namespace wma::analysis {
@@ -101,6 +104,8 @@ TunerInputDump::~TunerInputDump() { endTake(); }
 bool TunerInputDump::beginTake(std::unique_ptr<IDumpSink> sink, const std::string& path,
                                int inputSource) {
     if (mActive.load(std::memory_order_acquire)) return false;
+    // El residuo es del ULTIMO aborto: un start que falla por otra causa no hereda el de antes.
+    mAbortResidue.clear();
     if (!sink || path.empty()) return false;
 
     // Todo se reinicia ANTES de abrir: una toma mala no puede envenenar a la siguiente.
@@ -139,6 +144,9 @@ bool TunerInputDump::beginTake(std::unique_ptr<IDumpSink> sink, const std::strin
 
 bool TunerInputDump::abortSink() {
     mAbortResidue.clear();
+#if defined(WMA_TEST_HOOKS)
+    if (mWriter.joinable()) gTunerInputDumpAbortsWithLiveWriter.fetch_add(1);
+#endif
     if (!mSink) return true;
     const std::string part = mSink->partPath();
     const bool clean = mSink->abortPart();

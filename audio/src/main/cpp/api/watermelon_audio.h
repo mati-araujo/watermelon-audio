@@ -1380,7 +1380,8 @@ WMA_API bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_valu
  * @param path_capacity  must be >= WMA_TUNER_DUMP_PATH_CAPACITY.
  * @return false (out_values and out_path untouched, take left running) for
  *         everything stop() refuses, a null out_path or a too-small
- *         path_capacity.
+ *         path_capacity. Out of memory while closing is the one false that
+ *         may have closed the take.
  */
 WMA_API bool wma_tuner_diag_input_dump_stop_with_path(WmaEngine* engine, int64_t* out_values,
                                                       int count, char* out_path,
