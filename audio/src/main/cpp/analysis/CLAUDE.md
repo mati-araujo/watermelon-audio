@@ -29,4 +29,10 @@ thread RT (`../CLAUDE.md`).
   gate: correrlo a mano si se toca el detector), nunca el motor. Linea de base en
   `tests/baseline/ataque-corpus-v1.tsv`, mismo comando de regeneracion. La toma del g42 sale SKIPPED.
 
+- EL MAPA DE CORTES (REQ-055 0.6): el volcado (`TunerInputDump`) escribe `wmad` v2 con hasta 256 cortes UBICADOS
+  (frame del ARCHIVO; perdida con largo, costura como tramo de largo desconocido) y la toma sale sana; lo no ubicable la
+  deja `.invalid.wav`. El oraculo emite `# corte NOMBRE INI FIN PERDIDOS|?`, mide por segmento y excluye el ataque cuya
+  guarda `[t0 - 2048, tEnd]` toca un corte (`# ataque-excluido`); el instrumento (`cutTouchesSpan`) usa la MISMA regla.
+  Si se toca una, se toca la otra y se corre el `--self-test`.
+
 Los numeros del snapshot (cuantos valores lleva) driftean: se cuentan del codigo, no de un doc.

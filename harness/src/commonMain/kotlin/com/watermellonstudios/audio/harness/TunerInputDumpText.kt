@@ -88,10 +88,13 @@ private fun invalidReasons(r: TunerInputDumpResult): List<String> = buildList {
 /** El veredicto de la toma, con todo lo que el humano necesita para decidir y para bajar el archivo. */
 @OptIn(InternalWatermelonApi::class)
 internal fun tunerInputDumpResultText(r: TunerInputDumpResult): String = buildString {
-    append(if (!r.finalized) "SIN CERRAR" else if (r.valid) "VÁLIDA" else "INVÁLIDA")
+    val withCuts = r.valid && (r.framesLost > 0 || r.discontinuities > 0)
+    append(if (!r.finalized) "SIN CERRAR" else if (withCuts) "VÁLIDA, con cortes" else if (r.valid) "VÁLIDA" else "INVÁLIDA")
     append(" · ${r.seconds.toFloat().oneDecimal()} s · ${r.sampleRate} Hz · ${sourceLabel(r.inputSource)}")
     append("\nframes ${r.framesWritten} · perdidos ${r.framesLost} · discontinuidades ${r.discontinuities}")
     invalidReasons(r).forEach { append("\n  - $it") }
+    // REQ-055 S0 · 0.6: pérdidas y costuras UBICADAS no invalidan; el wmad del WAV las declara.
+    if (withCuts) append("\nlos cortes van declarados en el archivo (wmad): se mide sin cruzarlos")
     if (!r.valid) append("\nesta toma NO sirve para medir")
     append("\n${r.path}")
     if (r.finalized) {

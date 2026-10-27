@@ -69,6 +69,23 @@ class TunerInputDumpTextTest {
         assertTrue(text.endsWith("adb pull /sdcard/a.invalid.wav"), text)
     }
 
+    /**
+     * REQ-055 S0 · 0.6 — Bug que atrapa: una toma sana con cortes ubicados presentada como "VÁLIDA" a
+     * secas (el humano no sabe que hay huecos declarados) o como inválida (la re-graba sin motivo).
+     */
+    @Test
+    fun aValidTakeWithLocatedCutsSaysSoAndIsStillUsable() {
+        val text = tunerInputDumpResultText(result(lost = 512, discontinuities = 1))
+        assertTrue(text.startsWith("VÁLIDA, con cortes · 3.0 s"), text)
+        assertTrue("los cortes van declarados en el archivo" in text, text)
+        assertTrue(text.endsWith("adb pull /sdcard/a.wav"), text)
+        assertFalse("NO sirve" in text, text)
+        val onlySeam = tunerInputDumpResultText(result(discontinuities = 2))
+        assertTrue(onlySeam.startsWith("VÁLIDA, con cortes"), onlySeam)
+        assertFalse("con cortes" in tunerInputDumpResultText(result()))
+        assertFalse("con cortes" in tunerInputDumpResultText(result(lost = 7, valid = false, path = "/s/a.invalid.wav")))
+    }
+
     /** Bug que atrapa: una toma vacía (sin afinador) que se presenta sin decir por qué. */
     @Test
     fun anEmptyTakeSaysNoAudioEnteredAndTheRateIsUnknown() {
