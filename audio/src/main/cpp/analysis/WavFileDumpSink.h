@@ -37,11 +37,28 @@ enum class NoReplaceRenameStep {
     kCheckThenRename,  ///< lstat(to) y rename: el TOCTOU entre los dos se acepta (ver el .cpp)
 };
 
+/// Como termino un escalon del renombre.
+enum class RenameStepOutcome {
+    kDone,          ///< renombrado
+    kExists,        ///< el destino existe: no se toca nada, y no se baja de escalon
+    kUnsupported,   ///< el kernel o el sistema de archivos no lo soporta: se prueba el siguiente
+    kFailed,        ///< otro error (permiso, disco): no se insiste
+};
+
+/// La clasificacion de un errno de rename/link. Expuesta para que los tests fijen que un EINVAL
+/// (FUSE, sdcardfs) baja de escalon y no aborta el nombrado.
+RenameStepOutcome classifyRenameErrno(int err);
+
+/// El escalon nativo: lo inyecta un test para alcanzar el paso a los siguientes, que en el host
+/// nunca ocurre solo. nullptr = el del sistema.
+using NativeRenameStep = RenameStepOutcome (*)(const std::string& from, const std::string& to);
+
 /// Renombra `from` a `to` SIN reemplazar nunca un `to` existente (archivo, directorio o symlink).
 /// Empieza por `firstStep` y baja al siguiente escalon solo si el anterior no esta soportado por el
 /// kernel o el sistema de archivos. false si `to` existe o si algo fallo: `from` queda donde estaba.
 bool renameWithoutReplacing(const std::string& from, const std::string& to,
-                            NoReplaceRenameStep firstStep = NoReplaceRenameStep::kNative);
+                            NoReplaceRenameStep firstStep = NoReplaceRenameStep::kNative,
+                            NativeRenameStep native = nullptr);
 
 class WavFileDumpSink final : public IDumpSink {
 public:

@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -409,4 +410,59 @@ TEST_F(WavSinkTest, Hallazgo1_EveryStepOfTheNoReplaceRenameKeepsAnExistingDestin
         EXPECT_EQ(readText(to), "nuevo");
         EXPECT_FALSE(exists(from)) << "quedaron los dos nombres";
     }
+}
+
+/**
+ * Hallazgo 1 — LOS ERRNO QUE DICEN "ESTE FS NO SABE" BAJAN DE ESCALON; EL DESTINO OCUPADO CORTA.
+ *
+ * En Android el nativo da EINVAL en FUSE/sdcardfs y ENOSYS sin renameat2; si eso abortara, ninguna
+ * toma quedaria nombrada ahi. Mutantes que mata: EINVAL/ENOSYS/EPERM clasificados como fallo;
+ * EEXIST clasificado como "no soportado" (bajaria al escalon con TOCTOU).
+ */
+TEST(WavSinkRename, Hallazgo1_UnsupportedErrnosFallThroughAndAnOccupiedDestinationStops) {
+    for (int e : {EINVAL, ENOSYS, ENOTSUP, EPERM, EXDEV}) {
+        EXPECT_EQ(classifyRenameErrno(e), RenameStepOutcome::kUnsupported) << "errno " << e;
+    }
+    EXPECT_EQ(classifyRenameErrno(EEXIST), RenameStepOutcome::kExists);
+    EXPECT_EQ(classifyRenameErrno(ENOTEMPTY), RenameStepOutcome::kExists);
+    EXPECT_EQ(classifyRenameErrno(EIO), RenameStepOutcome::kFailed);
+    EXPECT_EQ(classifyRenameErrno(ENOSPC), RenameStepOutcome::kFailed);
+}
+
+namespace {
+RenameStepOutcome nativeUnsupported(const std::string&, const std::string&) {
+    return RenameStepOutcome::kUnsupported;
+}
+RenameStepOutcome nativeFailed(const std::string&, const std::string&) {
+    return RenameStepOutcome::kFailed;
+}
+}  // namespace
+
+/**
+ * Hallazgo 1 — CON EL NATIVO NO SOPORTADO (Android 29, FUSE) EL RENOMBRE BAJA DE ESCALON: mueve si
+ * el destino esta libre y no lo toca si esta ocupado. Con el nativo FALLIDO no insiste.
+ *
+ * En el host el nativo siempre resuelve: sin inyectarlo nadie ejecutaria el paso de escalon.
+ * Mutantes que mata: el escalon nativo que devuelve sin bajar (toda toma en Android 29 quedaria
+ * `finalized = 0`); bajar de escalon tras un fallo real.
+ */
+TEST_F(WavSinkTest, Hallazgo1_AnUnsupportedNativeStepFallsThroughWithoutEverReplacing) {
+    const std::string from = pathOf("origen");
+    const std::string to = pathOf("destino");
+    writeBytes(from, "nuevo");
+    writeBytes(to, kForeign);
+    EXPECT_FALSE(renameWithoutReplacing(from, to, NoReplaceRenameStep::kNative, nativeUnsupported));
+    EXPECT_EQ(readText(to), kForeign);
+    EXPECT_EQ(readText(from), "nuevo");
+
+    fs::remove(to);
+    EXPECT_FALSE(renameWithoutReplacing(from, to, NoReplaceRenameStep::kNative, nativeFailed))
+        << "un fallo real del nativo no se reintenta por otro escalon";
+    EXPECT_TRUE(exists(from));
+    EXPECT_FALSE(exists(to));
+
+    EXPECT_TRUE(renameWithoutReplacing(from, to, NoReplaceRenameStep::kNative, nativeUnsupported))
+        << "con el nativo no soportado y el destino libre tiene que nombrar por el escalon siguiente";
+    EXPECT_EQ(readText(to), "nuevo");
+    EXPECT_FALSE(exists(from));
 }

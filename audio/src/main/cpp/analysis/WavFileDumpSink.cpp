@@ -23,21 +23,11 @@ namespace wma::analysis {
 static_assert(std::endian::native == std::endian::little,
               "el WAV es little-endian y las muestras se escriben tal cual las tiene la CPU");
 
-namespace {
-
-/// Como termino un escalon del renombre.
-enum class Outcome {
-    kDone,          ///< renombrado
-    kExists,        ///< el destino existe: no se toca nada, y no se baja de escalon
-    kUnsupported,   ///< el kernel o el sistema de archivos no lo soporta: se prueba el siguiente
-    kFailed,        ///< otro error (permiso, disco): no se insiste
-};
-
-Outcome classify(int err) {
+RenameStepOutcome classifyRenameErrno(int err) {
     switch (err) {
         case EEXIST:
         case ENOTEMPTY:   // un directorio no vacio en el destino (algunos FS lo dicen asi)
-            return Outcome::kExists;
+            return RenameStepOutcome::kExists;
         case EINVAL:      // flag que el FS no entiende (FUSE, sdcardfs)
         case ENOSYS:      // syscall que el kernel no tiene
         case ENOTSUP:
@@ -48,11 +38,15 @@ Outcome classify(int err) {
         case EACCES:      // link(2) negado por la politica (SELinux) donde rename(2) se permite
         case EMLINK:
         case EXDEV:
-            return Outcome::kUnsupported;
+            return RenameStepOutcome::kUnsupported;
         default:
-            return Outcome::kFailed;
+            return RenameStepOutcome::kFailed;
     }
 }
+
+namespace {
+
+using Outcome = RenameStepOutcome;
 
 /// true salvo que `lstat` diga ENOENT: ante la duda (sin permiso para mirar), se asume ocupado.
 bool mayExist(const std::string& path) {
@@ -87,13 +81,13 @@ bool renameat2Allowed() {
 Outcome renameNative(const std::string& from, const std::string& to) {
 #if defined(__APPLE__)
     if (::renamex_np(from.c_str(), to.c_str(), RENAME_EXCL) == 0) return Outcome::kDone;
-    return classify(errno);
+    return classifyRenameErrno(errno);
 #elif defined(__linux__) && defined(SYS_renameat2)
     if (!renameat2Allowed()) return Outcome::kUnsupported;
     if (::syscall(SYS_renameat2, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), kRenameNoReplace) == 0) {
         return Outcome::kDone;
     }
-    return classify(errno);
+    return classifyRenameErrno(errno);
 #else
     (void)from;
     (void)to;
@@ -104,7 +98,7 @@ Outcome renameNative(const std::string& from, const std::string& to) {
 /// link(2) falla con EEXIST si el destino existe, sin carrera: es el no-reemplazo atomico de los
 /// FS que no entienden los flags del nativo pero si enlaces duros.
 Outcome renameByLink(const std::string& from, const std::string& to) {
-    if (::link(from.c_str(), to.c_str()) != 0) return classify(errno);
+    if (::link(from.c_str(), to.c_str()) != 0) return classifyRenameErrno(errno);
     if (::unlink(from.c_str()) == 0) return Outcome::kDone;
     // Quedaron los dos nombres sobre el mismo archivo: se deshace el nuevo, que es nuestro, para
     // que el estado sea "no se nombro" (el `.part` sigue con los datos) y no uno a medias.
@@ -126,10 +120,10 @@ Outcome renameAfterCheck(const std::string& from, const std::string& to) {
 }  // namespace
 
 bool renameWithoutReplacing(const std::string& from, const std::string& to,
-                            NoReplaceRenameStep firstStep) {
+                            NoReplaceRenameStep firstStep, NativeRenameStep native) {
     switch (firstStep) {
         case NoReplaceRenameStep::kNative: {
-            const Outcome o = renameNative(from, to);
+            const Outcome o = native != nullptr ? native(from, to) : renameNative(from, to);
             if (o != Outcome::kUnsupported) return o == Outcome::kDone;
             [[fallthrough]];
         }

@@ -67,9 +67,10 @@ interface ITunerDiagnostics {
  *
  * [finalized] es `false` si el archivo no se pudo cerrar o renombrar —incluido un nombre final que
  * otro archivo ocupó durante la toma, que nunca se reemplaza—: entonces [valid] es `false`,
- * [path] es `<pedido>.part` (donde quedó lo escrito, si algo se escribió) y no existe ningún archivo
- * con el nombre final. Quien lo muestre tiene que decir que se revise ese `.part`, no ofrecer un
- * `x.invalid.wav` que no está.
+ * [path] es `<pedido>.part` (donde quedó lo escrito, si algo se escribió) y la toma no escribió
+ * nada con el nombre final. Ese nombre PUEDE existir: si otro archivo lo ocupó durante la toma, es
+ * ese archivo ajeno, intacto, y no es la toma. Quien lo muestre tiene que decir que se revise el
+ * `.part`, no ofrecer (ni borrar) un `x.wav`/`x.invalid.wav` que no es suyo.
  */
 @InternalWatermelonApi
 data class TunerInputDumpResult(

@@ -148,6 +148,12 @@ tasks.withType<Test>().named { it.endsWith("UnitTest") }.configureEach {
     inputs.files(buildHostJniLib.map { it.outputs.files })
         .withPropertyName("hostJniHarnessLibrary")
         .withPathSensitivity(PathSensitivity.NONE)
+    // Hallazgo 2 de REQ-055: `TunerDiagnosticsOptInTest` lee la FUENTE del puente de iOS, que no es
+    // input de esta task (no compila en la JVM). Sin declararla, quitarle el marcador dejaba el test
+    // UP-TO-DATE y verde sin correr (medido). Misma trampa que la de arriba.
+    inputs.files(file("src/iosMain/kotlin/com/watermellonstudios/audio/internal/bridge/IosAudioBridge.kt"))
+        .withPropertyName("iosBridgeSourceForOptInTest")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
     // D4: así es como la librería aparece sin tocar `androidMain`. Se APENDEA al
     // valor que traiga el runtime en vez de reemplazarlo: pisarlo deja a la JVM
     // sin sus propias librerías nativas.
