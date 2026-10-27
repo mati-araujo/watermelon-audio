@@ -79,10 +79,20 @@ inline constexpr int kInputDumpStatsValues = 7;
 /// u64 framesWritten, u64 framesLost, u64 discontinuities, i32 sampleRate, i32 inputSource,
 /// u32 valid) + data (framesWritten * 4). Todo little-endian.
 ///
-/// Los tamanos de RIFF y data son de 32 bits, como manda el formato: pasan de ~1.000 millones de
-/// frames (6 h a 48 kHz) y se truncan. Una toma de diagnostico no llega ni cerca.
+/// Los tamanos de RIFF, fact y data son de 32 bits, como manda el formato. Que nunca den la vuelta
+/// lo garantiza `kMaxTakeFrames` (una toma no escribe mas que eso), no la esperanza de que la toma
+/// sea corta. PRECONDICION: `s.framesWritten <= kMaxTakeFrames`.
 inline constexpr size_t kInputDumpHeaderBytes = 106;
 void writeInputDumpHeader(uint8_t* out /* kInputDumpHeaderBytes */, const InputDumpStats& s);
+
+/// TOPE DE FRAMES POR TOMA (hallazgo 4 del security-auditor): 2^28 = ~93 min a 48 kHz, 1 GiB de
+/// datos. Holgado para el protocolo de medicion (una guitarra, ~10 min) y lejos del limite de 32 bits
+/// del RIFF (4 GiB): con el tope, el header no puede dar la vuelta aunque la app nunca llame a stop.
+/// Pasado el tope, cada frame cuenta como perdido y la toma cierra invalida (`.invalid.wav`).
+inline constexpr uint64_t kMaxTakeFrames = uint64_t{1} << 28;
+static_assert(kInputDumpHeaderBytes - 8 + kMaxTakeFrames * sizeof(float) <= UINT32_MAX,
+              "el tope de frames tiene que caber en el tamano de 32 bits del RIFF (y del data)");
+static_assert(kMaxTakeFrames <= UINT32_MAX, "el tope tiene que caber en el fact de 32 bits");
 
 class TunerInputDump {
 public:
@@ -91,7 +101,12 @@ public:
 
     /// Preasigna la cola (potencia de dos; se redondea hacia arriba) y el scratch. Es lo unico que
     /// asigna: `captureFromRing` corre en el hilo de analisis y no puede.
-    explicit TunerInputDump(size_t queueFrames = kDefaultQueueFrames);
+    ///
+    /// `maxTakeFrames` es el tope por toma; se inyecta (como el sink) para que un test lo cruce sin
+    /// escribir 1 GiB. Solo puede BAJAR: un valor mayor que `kMaxTakeFrames` se recorta a el, asi que
+    /// ningun llamador consigue un header que de la vuelta.
+    explicit TunerInputDump(size_t queueFrames = kDefaultQueueFrames,
+                            uint64_t maxTakeFrames = kMaxTakeFrames);
     /// Si quedo una toma viva: la cierra (`endTake`) y junta el escritor.
     ~TunerInputDump();
 
@@ -125,7 +140,8 @@ public:
     /// `captureSeamPosition()` (toda costura mayor que la ultima vista cuenta EN CUANTO SE VE, sin
     /// esperar a cruzarla: invalida de mas a proposito) y el rate (el primero > 0
     /// queda en la toma; uno distinto despues es una discontinuidad). `tryPush` es todo o nada: sin
-    /// lugar, esos frames se pierden y se cuentan, y el cursor sigue. NUNCA espera ni asigna.
+    /// lugar, esos frames se pierden y se cuentan, y el cursor sigue. Lo que pase del tope por toma
+    /// (`maxTakeFrames` encolados) tambien se pierde y se cuenta. NUNCA espera ni asigna.
     void captureFromRing(const AnalysisRing& ring, int captureRate) noexcept;
 
     /// Anota una discontinuidad que el ring no ve (cambio de fuente, el afinador parado y vuelto a
@@ -159,6 +175,9 @@ private:
 
     bool tryPushFrames(const float* src, size_t n) noexcept;
     void writerLoop();
+
+    /// Tope de frames encolados por toma (<= kMaxTakeFrames). Fijo desde el constructor.
+    const uint64_t mMaxTakeFrames;
 
     // Cola SPSC de floats (1 frame = 1 float). Productor: hilo de analisis; consumidor: escritor.
     std::vector<float> mQueue;

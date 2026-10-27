@@ -74,8 +74,9 @@ void writeInputDumpHeader(uint8_t* out, const InputDumpStats& s) {
     putU32(out + 102, dataBytes);
 }
 
-TunerInputDump::TunerInputDump(size_t queueFrames)
-    : mQueue(std::bit_ceil(std::max<size_t>(queueFrames, 1)), 0.0f),
+TunerInputDump::TunerInputDump(size_t queueFrames, uint64_t maxTakeFrames)
+    : mMaxTakeFrames(std::min(maxTakeFrames, kMaxTakeFrames)),
+      mQueue(std::bit_ceil(std::max<size_t>(queueFrames, 1)), 0.0f),
       mQueueMask(mQueue.size() - 1),
       mChunk(std::min(kChunkFrames, mQueue.size()), 0.0f) {}
 
@@ -176,11 +177,19 @@ void TunerInputDump::captureFromRing(const AnalysisRing& ring, int captureRate) 
         if (lost > 0) mLostByProducer.fetch_add(lost, std::memory_order_relaxed);
         if (n > 0) {
             copied += static_cast<uint64_t>(n);
-            if (tryPushFrames(mChunk.data(), static_cast<size_t>(n))) {
-                mFramesQueued.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+            // El tope por toma: lo que no entra se pierde y se cuenta (la toma queda invalida). Solo
+            // este hilo encola, asi que `mFramesQueued` no se mueve entre la lectura y el push.
+            const uint64_t queued = mFramesQueued.load(std::memory_order_relaxed);
+            const uint64_t room = mMaxTakeFrames > queued ? mMaxTakeFrames - queued : 0;
+            const uint64_t accepted = std::min<uint64_t>(static_cast<uint64_t>(n), room);
+            const uint64_t overCap = static_cast<uint64_t>(n) - accepted;
+            if (overCap > 0) mLostByProducer.fetch_add(overCap, std::memory_order_relaxed);
+            if (accepted == 0) continue;
+            if (tryPushFrames(mChunk.data(), static_cast<size_t>(accepted))) {
+                mFramesQueued.fetch_add(accepted, std::memory_order_relaxed);
             } else {
                 // Cola llena: el escritor no da abasto. Nunca se espera; se pierde y se cuenta.
-                mLostByProducer.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+                mLostByProducer.fetch_add(accepted, std::memory_order_relaxed);
             }
             continue;
         }

@@ -44,6 +44,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -208,7 +209,9 @@ private:
 struct Take {
     std::shared_ptr<SinkState> sink = std::make_shared<SinkState>();
     TunerInputDump dump;
-    explicit Take(size_t queueFrames = TunerInputDump::kDefaultQueueFrames) : dump(queueFrames) {}
+    explicit Take(size_t queueFrames = TunerInputDump::kDefaultQueueFrames,
+                  uint64_t maxTakeFrames = kMaxTakeFrames)
+        : dump(queueFrames, maxTakeFrames) {}
     ~Take() { sink->setBrake(false); }
 
     bool begin(const std::string& path = kPath, int source = kSource) {
@@ -324,6 +327,102 @@ void expectHeaderMatches(const std::vector<uint8_t>& h, const InputDumpStats& s)
 }
 
 }  // namespace
+
+// ===========================================================================
+// HALLAZGO 4 (security-auditor de REQ-055): EL TOPE DE FRAMES POR TOMA
+// ===========================================================================
+
+namespace {
+
+/// Arma una toma con tope `cap`, empuja los bloques `blocks` (drenando tras cada uno) y la cierra.
+struct CappedRun {
+    InputDumpStats st;
+    std::string finalPath;
+    std::vector<float> expected;   // todo lo escrito al ring desde el armado
+    std::vector<float> got;
+    std::vector<uint8_t> header;
+};
+
+CappedRun runCapped(uint64_t cap, std::initializer_list<int> blocks) {
+    CappedRun r;
+    Take take(TunerInputDump::kDefaultQueueFrames, cap);
+    DumpRig rig;
+    EXPECT_TRUE(take.begin());
+    EXPECT_TRUE(rig.thread.setInputDump(&take.dump));
+    const uint64_t armedAt = rig.ring.writePosition();
+    for (int n : blocks) {
+        rig.write(n);
+        rig.thread.drainOnce();
+    }
+    r.expected = rig.since(armedAt);
+    const uint64_t toWrite = std::min<uint64_t>(r.expected.size(), cap);
+    EXPECT_TRUE(waitUntil([&] { return take.dump.framesWritten() == toWrite; }))
+        << "el escritor no llego a escribir lo encolado";
+    r.st = closeTake(rig, take, &r.finalPath);
+    r.got = take.sink->samplesCopy();
+    r.header = take.sink->headerCopy();
+    return r;
+}
+
+}  // namespace
+
+/**
+ * Hallazgo 4 — UNA TOMA QUE PASA EL TOPE: se escribe exactamente hasta el tope, el EXCESO cuenta
+ * como perdido (ni mas ni menos), la toma queda INVALIDA y el header dice lo que de verdad hay.
+ *
+ * El tope se inyecta (3000, que no es multiplo de ningun trozo de copia) para no escribir 1 GiB.
+ * Bugs que atrapa: un header de 32 bits que da la vuelta en una toma larga (con el tope de
+ * produccion no puede); frames de mas descartados sin contar (WAV truncado con nombre de sano).
+ * Mutantes que mata: ignorar el tope; descartar el exceso sin sumarlo a `lost`; cortar en el trozo
+ * entero que cruza el tope (perderia frames que cabian).
+ */
+TEST(InputDumpCap, Hallazgo4_ATakePastTheInjectedCapIsInvalidWithTheExcessLostAndACoherentHeader) {
+    constexpr uint64_t kTestCap = 3000;
+    const CappedRun r = runCapped(kTestCap, {700, 1500, 33, 2048});
+    ASSERT_EQ(r.expected.size(), 4281u);
+
+    EXPECT_EQ(r.st.framesWritten, kTestCap) << "se escribe hasta el tope, ni un frame mas ni menos";
+    EXPECT_EQ(r.st.framesLost, 4281u - kTestCap) << "lost tiene que ser exactamente el exceso";
+    EXPECT_EQ(r.st.discontinuities, 0u);
+    EXPECT_FALSE(r.st.valid) << "una toma cortada por el tope no es una toma sana";
+    EXPECT_EQ(r.finalPath, invalidDumpPathFor(kPath));
+
+    const std::vector<float> head(r.expected.begin(), r.expected.begin() + kTestCap);
+    EXPECT_EQ(firstMismatch(r.got, head), -1L) << "lo escrito no es el principio de la toma";
+
+    expectHeaderMatches(r.header, r.st);
+    EXPECT_EQ(rdLE(r.header, 102, 4), kTestCap * 4) << "data = lo escrito, no lo alimentado";
+    EXPECT_EQ(rdLE(r.header, 70, 8), 4281u - kTestCap) << "wmad.lost";
+}
+
+/**
+ * Hallazgo 4 — LLEGAR JUSTO AL TOPE NO ES PASARLO: la toma sigue sana.
+ *
+ * Mutante que mata: un `>=` donde va `>` (o un tope que reserva un frame de mas): perderia el
+ * ultimo frame que cabia y declararia invalida una toma completa.
+ */
+TEST(InputDumpCap, Hallazgo4_ATakeThatEndsExactlyAtTheCapIsStillValid) {
+    const CappedRun r = runCapped(2233, {700, 1500, 33});
+    EXPECT_EQ(r.st.framesWritten, 2233u);
+    EXPECT_EQ(r.st.framesLost, 0u);
+    EXPECT_TRUE(r.st.valid);
+    EXPECT_EQ(r.finalPath, kPath);
+    EXPECT_EQ(firstMismatch(r.got, r.expected), -1L);
+}
+
+/// Hallazgo 4 — el tope de produccion es el documentado y el header de 32 bits lo aguanta (lo
+/// fija tambien un `static_assert`). Mutante que mata: subir el tope sin mirar el RIFF.
+TEST(InputDumpCap, Hallazgo4_TheProductionCapFitsTheThirtyTwoBitHeader) {
+    EXPECT_EQ(kMaxTakeFrames, uint64_t{1} << 28);
+    InputDumpStats s;
+    s.framesWritten = kMaxTakeFrames;
+    s.sampleRate = 48000;
+    std::vector<uint8_t> h(kInputDumpHeaderBytes, 0);
+    writeInputDumpHeader(h.data(), s);
+    EXPECT_EQ(rdLE(h, 4, 4), 98u + kMaxTakeFrames * 4u) << "el RIFF dio la vuelta en el tope";
+    EXPECT_EQ(rdLE(h, 102, 4), kMaxTakeFrames * 4u);
+    EXPECT_EQ(rdLE(h, 46, 4), kMaxTakeFrames);
+}
 
 // ===========================================================================
 // 1. FIDELIDAD
