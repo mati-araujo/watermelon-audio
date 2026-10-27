@@ -475,6 +475,25 @@ TEST(AudioLooper, Mini021MasterLoopIsTheRegionNotTheBuffer) {
         << "el maestro sigue midiendo el buffer (4800) en vez de la vuelta (1800)";
 }
 
+// Una toma mas corta que el minimo de region, importada y con su region pedida entera
+// (el caso de NoisyPad S10 contra 2.22.1): la region quedaba [0, 1024) en una pista de
+// 59 frames, y el maestro media 1024 frames que no existen.
+TEST(AudioLooper, ShortTakeRegionStaysInsideTheTake) {
+    AudioLooper looper;
+    looper.setSampleRate(kSR);
+
+    WavTempFile src("wm_short_take_region.wav");
+    ASSERT_TRUE(makeWav(src.str(), /*frames=*/59, kSR, 0.4f));
+    ASSERT_TRUE(looper.importTrack(0, src.str().c_str(), kSR));
+    ASSERT_EQ(looper.getTrackLengthFrames(0), 59);
+
+    looper.setTrackLoopRegion(0, 0, 59);
+
+    EXPECT_EQ(looper.getTrackLoopStart(0), 0);
+    EXPECT_EQ(looper.getTrackLoopEnd(0), 59) << "la region paso el largo de la toma";
+    EXPECT_EQ(looper.getMasterLoopFrames(), 59);
+}
+
 // AC-021.2 — `getProgress()` and `getMasterLoopFrames()` describe the SAME track.
 //
 // 🔑 The two used to pick separately AND in different units: progress relative to

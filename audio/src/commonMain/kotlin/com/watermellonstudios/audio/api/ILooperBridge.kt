@@ -200,6 +200,13 @@ interface ILooperBridge {
 
     // ==================== REGIÓN DE LOOP ====================
 
+    /**
+     * Región `[startFrame, endFrame)` de la pista; `endFrame <= 0` = hasta el final.
+     *
+     * Queda siempre dentro de la pista y no vacía (`0 <= start < end <= largo`). Una región
+     * de menos de 1024 frames se estira por el fin hasta 1024, nunca más allá del largo: en
+     * una toma (o un resto desde `startFrame`) más corta, llega hasta el final y nada más.
+     */
     fun looperSetTrackLoopRegion(trackIndex: Int, startFrame: Long, endFrame: Long)
     fun looperResetTrackLoopRegion(trackIndex: Int)
     fun looperGetTrackLoopStart(trackIndex: Int): Int
