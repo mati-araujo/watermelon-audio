@@ -38,6 +38,85 @@
 extern "C" float getUsbOutputVolumeInternal();
 extern "C" float getUsbInputVolumeInternal();
 
+// ==================== Cancion programada (REQ-055 S11): marshaling ====================
+//
+// Lo que NO es una llamada a la C API vive aca: validar y COPIAR los arrays del llamador
+// a memoria propia ANTES de cruzar. Nada de `GetPrimitiveArrayCritical` ni de pins
+// vivos durante `wma_song_*`: set_schedule publica una agenda de hasta 1024 secciones y
+// load_clip decodifica un archivo, y ambas pueden tardar. La llamada a `wma_song_*` queda
+// en cada JNIEXPORT (no aca) para que `check-jni-results.py` y `check-jni-preinit.py`
+// las vean donde las miran.
+namespace {
+
+// Serializa load/unload/set_schedule del motor VIVO. Es de la cancion y de control: NUNCA
+// `engineMutex`, que un load que decodifica un WAV dejaria tomado. El handle offline usa
+// su `opMutex`; los dos modelos no comparten ninguno. En el heap y sin destructor, como
+// `offlineRegistry()`: lo pueden alcanzar hilos de la JVM durante el exit().
+std::mutex& liveSongMutex() {
+    static std::mutex* const m = new std::mutex();
+    return *m;
+}
+
+// starts.size == n, clips.size == n * 16, n <= 1024. Un largo que no cierra se rechaza
+// SIN cruzar: la C API no puede saber cuantos int32 hay detras de un puntero.
+WmaResult readSongSchedule(JNIEnv* env, jlongArray starts, jintArray clips,
+                           std::vector<WmaSongSection>& out) {
+    if (starts == nullptr || clips == nullptr) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    const jsize n = env->GetArrayLength(starts);
+    const jsize m = env->GetArrayLength(clips);
+    if (n < 0 || n > WMA_SONG_MAX_SECTIONS) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    if (static_cast<int64_t>(m) != static_cast<int64_t>(n) * WMA_SONG_MAX_TRACKS) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    try {
+        std::vector<jlong> s(static_cast<size_t>(n));
+        std::vector<jint> c(static_cast<size_t>(m));
+        if (n > 0) {
+            env->GetLongArrayRegion(starts, 0, n, s.data());
+            env->GetIntArrayRegion(clips, 0, m, c.data());
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                return WMA_ERROR_UNKNOWN;
+            }
+        }
+        out.assign(static_cast<size_t>(n), WmaSongSection{});
+        for (jsize k = 0; k < n; ++k) {
+            out[static_cast<size_t>(k)].start_frame = s[static_cast<size_t>(k)];
+            for (int t = 0; t < WMA_SONG_MAX_TRACKS; ++t) {
+                out[static_cast<size_t>(k)].clip[t] =
+                    c[static_cast<size_t>(k) * WMA_SONG_MAX_TRACKS + static_cast<size_t>(t)];
+            }
+        }
+    } catch (...) {
+        return WMA_ERROR_MEMORY;
+    }
+    return WMA_OK;
+}
+
+// La ruta a std::string y el jstring liberado ANTES de decodificar.
+WmaResult readSongPath(JNIEnv* env, jstring path, std::string& out) {
+    if (path == nullptr) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    ScopedUtfChars chars(env, path);
+    if (!chars.isValid()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return WMA_ERROR_MEMORY;
+    }
+    try {
+        out.assign(chars.c_str());
+    } catch (...) {
+        return WMA_ERROR_MEMORY;
+    }
+    return WMA_OK;
+}
+
+// El id va en outId[0] SOLO si la carga salio bien; un array ausente o vacio se rechaza
+// antes de decodificar (no se paga una decodificacion para no poder devolver el id).
+bool songOutIdUsable(JNIEnv* env, jintArray outId) {
+    return outId != nullptr && env->GetArrayLength(outId) >= 1;
+}
+
+}  // namespace
+
 extern "C" {
 
 // ==================== Lifecycle Functions ====================
@@ -3807,6 +3886,66 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetLog
     return static_cast<jint>(wma_log_capture_dropped());
 }
 
+// ==================== Cancion programada, motor VIVO (REQ-055 S11) ====================
+//
+// Ver docs/dev/cancion-programada.md. load/unload/set_schedule van bajo el mutex PROPIO de
+// la cancion (`liveSongMutex`), no bajo `engineMutex`. Las lecturas no crean el motor:
+// antes del init contestan lo que la C API declara (-1 / 0).
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSongLoadClip(
+    JNIEnv* env, jobject thiz, jstring path, jint sampleRate, jlong regionStart,
+    jlong regionEnd, jlong loopFrames, jintArray outId) {
+    if (!ensureEngine()) return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
+    if (!songOutIdUsable(env, outId)) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    std::string file;
+    const WmaResult read = readSongPath(env, path, file);
+    if (read != WMA_OK) return static_cast<jint>(read);
+    std::lock_guard<std::mutex> guard(liveSongMutex());
+    int32_t id = -1;
+    const WmaResult r = wma_song_load_clip(g_wmaEngine, file.c_str(), sampleRate,
+                                           regionStart, regionEnd, loopFrames, &id);
+    if (r == WMA_OK) {
+        const jint out = id;
+        env->SetIntArrayRegion(outId, 0, 1, &out);
+    }
+    return static_cast<jint>(r);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSongUnloadClip(
+    JNIEnv* env, jobject thiz, jint id) {
+    if (!ensureEngine()) return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
+    std::lock_guard<std::mutex> guard(liveSongMutex());
+    return static_cast<jint>(wma_song_unload_clip(g_wmaEngine, id));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSongSetSchedule(
+    JNIEnv* env, jobject thiz, jlong loopFrames, jlongArray starts, jintArray clips,
+    jlong endFrame) {
+    if (!ensureEngine()) return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
+    std::vector<WmaSongSection> sections;
+    const WmaResult read = readSongSchedule(env, starts, clips, sections);
+    if (read != WMA_OK) return static_cast<jint>(read);
+    std::lock_guard<std::mutex> guard(liveSongMutex());
+    return static_cast<jint>(wma_song_set_schedule(
+        g_wmaEngine, loopFrames, sections.data(), static_cast<int32_t>(sections.size()),
+        endFrame));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSongGetSection(
+    JNIEnv* env, jobject thiz) {
+    return wma_song_get_section(g_wmaEngine);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSongGetLateAdoptions(
+    JNIEnv* env, jobject thiz) {
+    return static_cast<jlong>(wma_song_get_late_adoptions(g_wmaEngine));
+}
+
 } // extern "C"
 
 // ==================== Offline render by handle (REQ-055 S2, ADR-0008) ====================
@@ -4127,6 +4266,86 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflin
     if (!slot) return kOfflineUnknownHandle;
     std::lock_guard<std::mutex> op(slot->opMutex);
     return static_cast<jint>(wma_effect_set_param(slot->engine, index, paramId, value));
+}
+
+// --- Cancion programada por handle (REQ-055 S11): 1:1 con las nativeSong* del vivo, por el
+// registro y el `opMutex` de la instancia. Nunca leen `g_wmaEngine` ni `liveSongMutex()`.
+// Un load decodifica con el `opMutex` tomado: en este handle espera al render, que es lo
+// que se quiere (el start invalida clips; ver el orden en docs/dev/cancion-programada.md).
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongLoadClip(
+    JNIEnv* env, jobject thiz, jlong handle, jstring path, jint sampleRate, jlong regionStart,
+    jlong regionEnd, jlong loopFrames, jintArray outId) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    if (!songOutIdUsable(env, outId)) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    std::string file;
+    const WmaResult read = readSongPath(env, path, file);
+    if (read != WMA_OK) return static_cast<jint>(read);
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    int32_t id = -1;
+    const WmaResult r = wma_song_load_clip(slot->engine, file.c_str(), sampleRate,
+                                           regionStart, regionEnd, loopFrames, &id);
+    if (r == WMA_OK) {
+        const jint out = id;
+        env->SetIntArrayRegion(outId, 0, 1, &out);
+    }
+    return static_cast<jint>(r);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongUnloadClip(
+    JNIEnv* env, jobject thiz, jlong handle, jint id) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_song_unload_clip(slot->engine, id));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongSetSchedule(
+    JNIEnv* env, jobject thiz, jlong handle, jlong loopFrames, jlongArray starts,
+    jintArray clips, jlong endFrame) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::vector<WmaSongSection> sections;
+    const WmaResult read = readSongSchedule(env, starts, clips, sections);
+    if (read != WMA_OK) return static_cast<jint>(read);
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_song_set_schedule(
+        slot->engine, loopFrames, sections.data(), static_cast<int32_t>(sections.size()),
+        endFrame));
+}
+
+// Las tres lecturas devuelven el default de "no hay nada" (-1 / 0 / -1) ante un handle
+// desconocido; el dueño Kotlin (OfflineRenderer) ni siquiera cruza con un handle cerrado.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongGetSection(
+    JNIEnv* env, jobject thiz, jlong handle) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return -1;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return wma_song_get_section(slot->engine);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongGetLateAdoptions(
+    JNIEnv* env, jobject thiz, jlong handle) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return 0;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jlong>(wma_song_get_late_adoptions(slot->engine));
+}
+
+// El ancla de la agenda: `P0` tras `nativeOfflineStart`. El play frame NO se reinicia.
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongGetPlayFrame(
+    JNIEnv* env, jobject thiz, jlong handle) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return -1;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jlong>(wma_transport_get_play_frame(slot->engine));
 }
 
 } // extern "C"

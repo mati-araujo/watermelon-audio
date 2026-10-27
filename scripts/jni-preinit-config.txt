@@ -75,5 +75,8 @@ nativeSetVoiceStealingStrategy
 nativeSetXY
 nativeSfSetAmbience
 nativeSfSetTouchExpression
+nativeSongLoadClip
+nativeSongSetSchedule
+nativeSongUnloadClip
 nativeTransportSetBeatsPerBar
 nativeUnloadSoundFont
