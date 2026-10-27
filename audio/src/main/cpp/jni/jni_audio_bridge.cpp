@@ -20,11 +20,22 @@
 #include "../core/AudioMode.h"
 #include "../nodes/InputNode.h"
 #include "../backends/BackendManager.h"
+// REQ-055 S3: `WMA_JNI_USB` (default 1) recorta las JNIEXPORT de USB para el dylib de
+// desktop (`desktop/CMakeLists.txt` pasa 0), que no compila `usb/` ni `LibusbBackend`
+// ni stubs. Con 1 —Android y el arnes de host— el archivo es el mismo de siempre. En
+// desktop, llamar a una `external fun` de USB da UnsatisfiedLinkError: no hay USB (D4).
+#ifndef WMA_JNI_USB
+#define WMA_JNI_USB 1
+#endif
+#if WMA_JNI_USB
 #include "../backends/LibusbBackend.h"
 #include "../backends/UsbTransferStatsArray.h"
+#endif
 #include "../looper/LooperEventDispatcher.h"
+#if WMA_JNI_USB
 #include "../usb/UsbSnapshotCodec.h"
 #include "../usb/RoundTripMeasurer.h"
+#endif
 #include "../voice/VoiceTypes.h"
 #include <cmath>
 #include <algorithm>
@@ -34,9 +45,11 @@
 #include <memory>
 #include <vector>
 
+#if WMA_JNI_USB
 // External declarations from jni_usb.cpp for USB volume
 extern "C" float getUsbOutputVolumeInternal();
 extern "C" float getUsbInputVolumeInternal();
+#endif
 
 extern "C" {
 
@@ -1651,6 +1664,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeApplyA
     wma_apply_automation(g_wmaEngine, axis, normalizedValue);
 }
 
+#if WMA_JNI_USB  // ---- desde aca hasta nativeGetUsbHealthStatus: USB (ver arriba) ----
 // ==================== USB Device Functions ====================
 
 // USB device state structure (defined in jni_usb.cpp)
@@ -2202,6 +2216,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     }
     return result;
 }
+#endif  // WMA_JNI_USB
 
 // Android-only for the same reason as createSplitBackend: the body compiles for
 // iOS, but fallbackToOboe() *is* the USB-disconnect recovery path — it clears
@@ -2303,6 +2318,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetOut
     return result;
 }
 
+#if WMA_JNI_USB  // ---- volumen USB: vive en jni_usb.cpp (ver arriba) ----
 // ==================== USB Volume Functions (Phase 1 - Gain Staging) ====================
 
 // USB Volume state - defined in jni_usb.cpp
@@ -2385,6 +2401,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeIsUsbI
     JNIEnv* env, jobject thiz) {
     return g_usbInputMuted.load(std::memory_order_relaxed) ? JNI_TRUE : JNI_FALSE;
 }
+
+#endif  // WMA_JNI_USB
 
 // ==================== Arpeggiator (Phase 7) ====================
 //
@@ -3597,6 +3615,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     return wma_looper_get_dropped_events(g_wmaEngine);
 }
 
+#if WMA_JNI_USB  // ---- desde aca hasta nativeGetUsbRtEnv: USB (ver arriba) ----
 // ==================== USB Round-Trip Loopback Test (Fase 5) ====================
 //
 // A single global measurer installed on the running LibusbBackend via
@@ -3765,6 +3784,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetUsb
     if (result) env->SetFloatArrayRegion(result, 0, 6, v);
     return result;
 }
+#endif  // WMA_JNI_USB
 
 // ==================== Native Log Capture (App V §3.2) ====================
 
