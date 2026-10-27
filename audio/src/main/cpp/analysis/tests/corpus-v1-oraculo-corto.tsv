@@ -1,7 +1,9 @@
 # comando: scripts/corpus-reference-pitch.py --short --dir audio/src/main/cpp/analysis/tests/corpus --tsv audio/src/main/cpp/analysis/tests/corpus-v1-oraculo-corto.tsv
 # ventana_min_s 0.1 (y >= 10 periodos del centro, Hann) hop_s 0.05 span_cents ±150.0 piso_dbfs -60.0
+# ataques (REQ-055 D11): grilla 128 frames desde el frame 0, antes/despues = media en 2048 frames, subida >= 6.0 dB en la energia cruda o en la de la primera diferencia, fondo previo = percentil 0.1 de los bloques, piso -60.0 dBFS, refractario 0.15 s, tolerancia 256 frames. Linea: '# ataque ARCHIVO frame N'
 # archivo	t_ini_s	t_fin_s	hz	cents_vs_centro	nivel_dbfs
 # archivo bajo-acustico_A1.wav sha256 1caed2331ed11e7a49e88f6cb0e208846a3917b810938aed4fdf8590a4c8c141 rate 44100 frames 324864
+# ataque bajo-acustico_A1.wav frame 512
 bajo-acustico_A1.wav	0.0000	0.1818	53.76104	-39.445	-20.74
 bajo-acustico_A1.wav	0.0500	0.2318	55.55592	+17.411	-20.45
 bajo-acustico_A1.wav	0.1000	0.2818	55.73897	+23.106	-21.22
@@ -147,6 +149,7 @@ bajo-acustico_A1.wav	7.0500	7.2318	nan	nan	-inf
 bajo-acustico_A1.wav	7.1000	7.2818	nan	nan	-inf
 bajo-acustico_A1.wav	7.1500	7.3318	nan	nan	-inf
 # archivo bajo-acustico_D2.wav sha256 1c2a99b91b19bea32ec05714f0e09ab225e73f3e6536b82958d6df966e43419f rate 44100 frames 317248
+# ataque bajo-acustico_D2.wav frame 384
 bajo-acustico_D2.wav	0.0000	0.1362	71.73695	-40.058	-20.78
 bajo-acustico_D2.wav	0.0500	0.1862	74.70021	+30.017	-20.80
 bajo-acustico_D2.wav	0.1000	0.2362	73.51651	+2.364	-21.86
@@ -290,6 +293,7 @@ bajo-acustico_D2.wav	6.9500	7.0862	nan	nan	-inf
 bajo-acustico_D2.wav	7.0000	7.1362	nan	nan	-inf
 bajo-acustico_D2.wav	7.0500	7.1862	nan	nan	-inf
 # archivo bajo-acustico_E1.wav sha256 e988b5e47c81a9ed7763722c942f22bf2ff03aef1400cbf6496a7e20cb65f767 rate 44100 frames 330432
+# ataque bajo-acustico_E1.wav frame 640
 bajo-acustico_E1.wav	0.0000	0.2427	40.27860	-39.302	-20.71
 bajo-acustico_E1.wav	0.0500	0.2927	41.28112	+3.261	-20.55
 bajo-acustico_E1.wav	0.1000	0.3427	41.96582	+31.740	-21.01
@@ -437,6 +441,7 @@ bajo-acustico_E1.wav	7.1500	7.3927	nan	nan	-inf
 bajo-acustico_E1.wav	7.2000	7.4427	nan	nan	-inf
 bajo-acustico_E1.wav	7.2500	7.4927	nan	nan	-inf
 # archivo bajo-acustico_G2.wav sha256 0bc64e10a5453d77d313341d48f744d27b3c802a8dcc2ddbcc32460b88d55e42 rate 44100 frames 340032
+# ataque bajo-acustico_G2.wav frame 128
 bajo-acustico_G2.wav	0.0000	0.1020	97.93330	-1.159	-18.84
 bajo-acustico_G2.wav	0.0500	0.1520	99.14087	+20.058	-17.20
 bajo-acustico_G2.wav	0.1000	0.2020	97.54369	-8.060	-17.92
@@ -591,6 +596,7 @@ bajo-acustico_G2.wav	7.5000	7.6020	nan	nan	-inf
 bajo-acustico_G2.wav	7.5500	7.6520	nan	nan	-inf
 bajo-acustico_G2.wav	7.6000	7.7020	nan	nan	-inf
 # archivo bajo-dedos_A1.wav sha256 9d54ce075add9f9af7221f616dd9badbc28e4b7afd36e177b023a27a0205eb4f rate 44100 frames 319616
+# ataque bajo-dedos_A1.wav frame 128
 bajo-dedos_A1.wav	0.0000	0.1818	54.46478	-16.930	-20.19
 bajo-dedos_A1.wav	0.0500	0.2318	54.97672	-0.733	-20.31
 bajo-dedos_A1.wav	0.1000	0.2818	55.15677	+4.928	-20.75
@@ -734,6 +740,7 @@ bajo-dedos_A1.wav	6.9500	7.1318	nan	nan	-inf
 bajo-dedos_A1.wav	7.0000	7.1818	nan	nan	-inf
 bajo-dedos_A1.wav	7.0500	7.2318	nan	nan	-inf
 # archivo bajo-dedos_D2.wav sha256 161a12f83664cc3089483cf32f173bca2e0bcc03505a3c7fa71045c5f9dcb771 rate 44100 frames 319424
+# ataque bajo-dedos_D2.wav frame 256
 bajo-dedos_D2.wav	0.0000	0.1362	72.85548	-13.273	-21.87
 bajo-dedos_D2.wav	0.0500	0.1862	73.74262	+7.681	-21.89
 bajo-dedos_D2.wav	0.1000	0.2362	73.64012	+5.273	-22.43
@@ -878,6 +885,7 @@ bajo-dedos_D2.wav	7.0000	7.1362	nan	nan	-inf
 bajo-dedos_D2.wav	7.0500	7.1862	nan	nan	-inf
 bajo-dedos_D2.wav	7.1000	7.2362	nan	nan	-inf
 # archivo bajo-dedos_E1.wav sha256 7d091626e01aac8bd48baef7b88773825b1e8ee1c536b6081b95f40a3136e59c rate 44100 frames 319808
+# ataque bajo-dedos_E1.wav frame 128
 bajo-dedos_E1.wav	0.0000	0.2427	41.69951	+20.719	-21.87
 bajo-dedos_E1.wav	0.0500	0.2927	41.66687	+19.363	-22.25
 bajo-dedos_E1.wav	0.1000	0.3427	41.72203	+21.653	-23.08
@@ -1020,6 +1028,7 @@ bajo-dedos_E1.wav	6.9000	7.1427	nan	nan	-inf
 bajo-dedos_E1.wav	6.9500	7.1927	nan	nan	-inf
 bajo-dedos_E1.wav	7.0000	7.2427	nan	nan	-inf
 # archivo bajo-dedos_G2.wav sha256 ea8411e59fa11e5b882f5feac9116e97272176fb43ba3d674326e40e54cb1e77 rate 44100 frames 319104
+# ataque bajo-dedos_G2.wav frame 128
 bajo-dedos_G2.wav	0.0000	0.1020	95.74416	-40.297	-22.11
 bajo-dedos_G2.wav	0.0500	0.1520	97.73196	-4.721	-22.18
 bajo-dedos_G2.wav	0.1000	0.2020	97.81483	-3.254	-22.19
@@ -1164,6 +1173,7 @@ bajo-dedos_G2.wav	7.0000	7.1020	nan	nan	-inf
 bajo-dedos_G2.wav	7.0500	7.1520	nan	nan	-inf
 bajo-dedos_G2.wav	7.1000	7.2020	nan	nan	-inf
 # archivo bajo-fretless_A1.wav sha256 c73f8973d2ea0d80cef2052e436dfde8b85b2a12d284eb6b9bff816c867de359 rate 44100 frames 317568
+# ataque bajo-fretless_A1.wav frame 0
 bajo-fretless_A1.wav	0.0000	0.1818	54.80686	-6.090	-21.22
 bajo-fretless_A1.wav	0.0500	0.2318	54.93366	-2.089	-21.15
 bajo-fretless_A1.wav	0.1000	0.2818	54.87841	-3.831	-21.48
@@ -1306,6 +1316,7 @@ bajo-fretless_A1.wav	6.9000	7.0818	nan	nan	-inf
 bajo-fretless_A1.wav	6.9500	7.1318	nan	nan	-inf
 bajo-fretless_A1.wav	7.0000	7.1818	nan	nan	-inf
 # archivo bajo-fretless_D2.wav sha256 6af332f61ea3121fcfb247afd9e410033debf54042fe4b2cb53472cd0e538fb9 rate 44100 frames 317056
+# ataque bajo-fretless_D2.wav frame 0
 bajo-fretless_D2.wav	0.0000	0.1362	73.61242	+4.621	-19.12
 bajo-fretless_D2.wav	0.0500	0.1862	73.61294	+4.633	-18.47
 bajo-fretless_D2.wav	0.1000	0.2362	73.60879	+4.536	-18.05
@@ -1449,6 +1460,7 @@ bajo-fretless_D2.wav	6.9500	7.0862	nan	nan	-inf
 bajo-fretless_D2.wav	7.0000	7.1362	nan	nan	-inf
 bajo-fretless_D2.wav	7.0500	7.1862	nan	nan	-inf
 # archivo bajo-fretless_E1.wav sha256 06b6698803bc55a62b657ef49e4cb0a03ed55ee7e6ee923ac2327db650078a8a rate 44100 frames 318208
+# ataque bajo-fretless_E1.wav frame 0
 bajo-fretless_E1.wav	0.0000	0.2427	41.05963	-6.053	-21.21
 bajo-fretless_E1.wav	0.0500	0.2927	41.14464	-2.472	-21.19
 bajo-fretless_E1.wav	0.1000	0.3427	41.13637	-2.820	-21.33
@@ -1590,6 +1602,7 @@ bajo-fretless_E1.wav	6.8500	7.0927	nan	nan	-inf
 bajo-fretless_E1.wav	6.9000	7.1427	nan	nan	-inf
 bajo-fretless_E1.wav	6.9500	7.1927	nan	nan	-inf
 # archivo bajo-fretless_G2.wav sha256 0f048cf2b1b606d8ba18a9e612cf88b7959b57d9ed975e1c49f72b1de56a54d0 rate 44100 frames 316096
+# ataque bajo-fretless_G2.wav frame 0
 bajo-fretless_G2.wav	0.0000	0.1020	98.08114	+1.453	-19.18
 bajo-fretless_G2.wav	0.0500	0.1520	98.09195	+1.644	-19.00
 bajo-fretless_G2.wav	0.1000	0.2020	98.08820	+1.578	-19.55
@@ -1733,6 +1746,7 @@ bajo-fretless_G2.wav	6.9500	7.0520	nan	nan	-inf
 bajo-fretless_G2.wav	7.0000	7.1020	nan	nan	-inf
 bajo-fretless_G2.wav	7.0500	7.1520	nan	nan	-inf
 # archivo bajo-pua_A1.wav sha256 f1071715fc3372d7140d8ab35cc13c295cb0f2ff08707e2d1dec462b55221171 rate 44100 frames 329280
+# ataque bajo-pua_A1.wav frame 128
 bajo-pua_A1.wav	0.0000	0.1818	54.89112	-3.431	-24.81
 bajo-pua_A1.wav	0.0500	0.2318	54.98880	-0.353	-24.73
 bajo-pua_A1.wav	0.1000	0.2818	54.94372	-1.773	-25.11
@@ -1880,6 +1894,7 @@ bajo-pua_A1.wav	7.1500	7.3318	nan	nan	-inf
 bajo-pua_A1.wav	7.2000	7.3818	nan	nan	-inf
 bajo-pua_A1.wav	7.2500	7.4318	nan	nan	-inf
 # archivo bajo-pua_D2.wav sha256 f32a016c75d90fc2474ca3a860ebb72f64d940fbcd67815d9a2767051ace3937 rate 44100 frames 328896
+# ataque bajo-pua_D2.wav frame 128
 bajo-pua_D2.wav	0.0000	0.1362	72.95341	-10.947	-23.50
 bajo-pua_D2.wav	0.0500	0.1862	73.35412	-1.464	-23.19
 bajo-pua_D2.wav	0.1000	0.2362	73.37187	-1.045	-23.75
@@ -2028,6 +2043,7 @@ bajo-pua_D2.wav	7.2000	7.3362	nan	nan	-inf
 bajo-pua_D2.wav	7.2500	7.3862	nan	nan	-inf
 bajo-pua_D2.wav	7.3000	7.4362	nan	nan	-inf
 # archivo bajo-pua_E1.wav sha256 1e59ec3e669618e3a6c861d57880ad63410f8c8b011f89bf429b421a8a37126c rate 44100 frames 329280
+# ataque bajo-pua_E1.wav frame 0
 bajo-pua_E1.wav	0.0000	0.2427	41.15367	-2.093	-25.37
 bajo-pua_E1.wav	0.0500	0.2927	41.16291	-1.704	-25.41
 bajo-pua_E1.wav	0.1000	0.3427	41.16251	-1.721	-25.74
@@ -2174,6 +2190,7 @@ bajo-pua_E1.wav	7.1000	7.3427	nan	nan	-inf
 bajo-pua_E1.wav	7.1500	7.3927	nan	nan	-inf
 bajo-pua_E1.wav	7.2000	7.4427	nan	nan	-inf
 # archivo bajo-pua_G2.wav sha256 097e43eef959f4bf4ae4168b2776ce0e836207b28d756ecab48e3cb430ee50df rate 44100 frames 328448
+# ataque bajo-pua_G2.wav frame 0
 bajo-pua_G2.wav	0.0000	0.1020	97.97766	-0.375	-24.30
 bajo-pua_G2.wav	0.0500	0.1520	97.95534	-0.769	-24.97
 bajo-pua_G2.wav	0.1000	0.2020	97.94072	-1.027	-26.16
@@ -2322,6 +2339,7 @@ bajo-pua_G2.wav	7.2000	7.3020	nan	nan	-inf
 bajo-pua_G2.wav	7.2500	7.3520	nan	nan	-inf
 bajo-pua_G2.wav	7.3000	7.4020	nan	nan	-inf
 # archivo guitarra-acero_A2.wav sha256 876c6f1e3c8d4c31bd95bd544f49cd5987bba160c113ce73172fc978ce8f8bcf rate 44100 frames 324736
+# ataque guitarra-acero_A2.wav frame 256
 guitarra-acero_A2.wav	0.0000	0.1000	107.11389	-46.029	-24.83
 guitarra-acero_A2.wav	0.0500	0.1500	108.31870	-26.665	-24.63
 guitarra-acero_A2.wav	0.1000	0.2000	110.13033	+2.050	-26.81
@@ -2469,6 +2487,7 @@ guitarra-acero_A2.wav	7.1500	7.2500	nan	nan	-inf
 guitarra-acero_A2.wav	7.2000	7.3000	nan	nan	-inf
 guitarra-acero_A2.wav	7.2500	7.3500	nan	nan	-inf
 # archivo guitarra-acero_B3.wav sha256 9269829f3a8304e6ce99b5d0951f45058df76b4f7b1942779b554f9390ad5075 rate 44100 frames 322048
+# ataque guitarra-acero_B3.wav frame 512
 guitarra-acero_B3.wav	0.0000	0.1000	246.46111	-3.372	-27.26
 guitarra-acero_B3.wav	0.0500	0.1500	247.37224	+3.016	-27.14
 guitarra-acero_B3.wav	0.1000	0.2000	247.50495	+3.945	-28.03
@@ -2615,6 +2634,7 @@ guitarra-acero_B3.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-acero_B3.wav	7.1500	7.2500	nan	nan	-inf
 guitarra-acero_B3.wav	7.2000	7.3000	nan	nan	-inf
 # archivo guitarra-acero_D3.wav sha256 ef5618710869582803448510537609502a33ba0f36d8444a11914bfb613111fa rate 44100 frames 323904
+# ataque guitarra-acero_D3.wav frame 128
 guitarra-acero_D3.wav	0.0000	0.1000	146.06700	-9.048	-28.49
 guitarra-acero_D3.wav	0.0500	0.1500	146.55398	-3.286	-28.58
 guitarra-acero_D3.wav	0.1000	0.2000	146.55980	-3.217	-28.99
@@ -2761,6 +2781,7 @@ guitarra-acero_D3.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-acero_D3.wav	7.1500	7.2500	nan	nan	-inf
 guitarra-acero_D3.wav	7.2000	7.3000	nan	nan	-inf
 # archivo guitarra-acero_E2.wav sha256 0b8a439d35056f0f77c9d0e41a70165b5867c8544190e20979f8d855dc06f1bd rate 44100 frames 325440
+# ataque guitarra-acero_E2.wav frame 512
 guitarra-acero_E2.wav	0.0000	0.1213	81.77278	-13.373	-26.52
 guitarra-acero_E2.wav	0.0500	0.1713	82.25479	-3.198	-26.37
 guitarra-acero_E2.wav	0.1000	0.2213	82.67217	+5.564	-27.08
@@ -2908,6 +2929,7 @@ guitarra-acero_E2.wav	7.1500	7.2713	nan	nan	-inf
 guitarra-acero_E2.wav	7.2000	7.3213	nan	nan	-inf
 guitarra-acero_E2.wav	7.2500	7.3713	nan	nan	-inf
 # archivo guitarra-acero_E4.wav sha256 65669993e708435ee6cc06957bb1430cdd6f8290807056f2a5a634da53d73c30 rate 44100 frames 320512
+# ataque guitarra-acero_E4.wav frame 128
 guitarra-acero_E4.wav	0.0000	0.1000	328.74814	-4.625	-28.15
 guitarra-acero_E4.wav	0.0500	0.1500	329.28368	-1.807	-29.34
 guitarra-acero_E4.wav	0.1000	0.2000	329.54620	-0.427	-30.67
@@ -3053,6 +3075,7 @@ guitarra-acero_E4.wav	7.0500	7.1500	nan	nan	-inf
 guitarra-acero_E4.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-acero_E4.wav	7.1500	7.2500	nan	nan	-inf
 # archivo guitarra-acero_G3.wav sha256 9c589cf775d99548cf21aa2d1f5d81089f1360ad51156ffb70e0b1b66cdc23dd rate 44100 frames 323072
+# ataque guitarra-acero_G3.wav frame 384
 guitarra-acero_G3.wav	0.0000	0.1000	195.61662	-3.370	-26.67
 guitarra-acero_G3.wav	0.0500	0.1500	194.83533	-10.298	-27.08
 guitarra-acero_G3.wav	0.1000	0.2000	194.63797	-12.052	-28.42
@@ -3199,6 +3222,7 @@ guitarra-acero_G3.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-acero_G3.wav	7.1500	7.2500	nan	nan	-inf
 guitarra-acero_G3.wav	7.2000	7.3000	nan	nan	-inf
 # archivo guitarra-jazz_A2.wav sha256 e1f618900292c1fc7af9b7e14c16ae0d1d75e671791cf6e791a8e351f45f5d7b rate 44100 frames 321216
+# ataque guitarra-jazz_A2.wav frame 128
 guitarra-jazz_A2.wav	0.0000	0.1000	110.40631	+6.383	-20.69
 guitarra-jazz_A2.wav	0.0500	0.1500	110.20745	+3.262	-21.29
 guitarra-jazz_A2.wav	0.1000	0.2000	110.08107	+1.275	-22.26
@@ -3344,6 +3368,7 @@ guitarra-jazz_A2.wav	7.0500	7.1500	nan	nan	-inf
 guitarra-jazz_A2.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-jazz_A2.wav	7.1500	7.2500	nan	nan	-inf
 # archivo guitarra-jazz_B3.wav sha256 8456432996ca117fc17d35c4862d8342d51f644defbc0669ec962f5b3f6960b5 rate 44100 frames 319488
+# ataque guitarra-jazz_B3.wav frame 128
 guitarra-jazz_B3.wav	0.0000	0.1000	246.96932	+0.194	-22.49
 guitarra-jazz_B3.wav	0.0500	0.1500	247.23012	+2.021	-24.48
 guitarra-jazz_B3.wav	0.1000	0.2000	247.16945	+1.596	-26.86
@@ -3488,6 +3513,7 @@ guitarra-jazz_B3.wav	7.0000	7.1000	nan	nan	-inf
 guitarra-jazz_B3.wav	7.0500	7.1500	nan	nan	-inf
 guitarra-jazz_B3.wav	7.1000	7.2000	nan	nan	-inf
 # archivo guitarra-jazz_D3.wav sha256 f8bcf56194fb2d7584cc32e98b6a6f0d05ad1b418388fa6ed7db608743ba31be rate 44100 frames 320192
+# ataque guitarra-jazz_D3.wav frame 0
 guitarra-jazz_D3.wav	0.0000	0.1000	146.76530	-0.791	-21.21
 guitarra-jazz_D3.wav	0.0500	0.1500	147.07212	+2.824	-21.42
 guitarra-jazz_D3.wav	0.1000	0.2000	147.04268	+2.478	-22.07
@@ -3633,6 +3659,7 @@ guitarra-jazz_D3.wav	7.0500	7.1500	nan	nan	-inf
 guitarra-jazz_D3.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-jazz_D3.wav	7.1500	7.2500	nan	nan	-inf
 # archivo guitarra-jazz_E2.wav sha256 4f490128cc1bb1ef4296ce80e1fbd9e8f82303cc60b8fc2c0fe216e9fa9d0e6f rate 44100 frames 321216
+# ataque guitarra-jazz_E2.wav frame 128
 guitarra-jazz_E2.wav	0.0000	0.1213	83.06013	+13.669	-21.51
 guitarra-jazz_E2.wav	0.0500	0.1713	82.44463	+0.793	-21.80
 guitarra-jazz_E2.wav	0.1000	0.2213	82.49375	+1.824	-22.49
@@ -3778,6 +3805,7 @@ guitarra-jazz_E2.wav	7.0500	7.1713	nan	nan	-inf
 guitarra-jazz_E2.wav	7.1000	7.2213	nan	nan	-inf
 guitarra-jazz_E2.wav	7.1500	7.2713	nan	nan	-inf
 # archivo guitarra-jazz_E4.wav sha256 812b2f87dbb31bc72d0bb268e7fc029ea9c3e69d5de682ee6ea02a9c49a1b322 rate 44100 frames 318720
+# ataque guitarra-jazz_E4.wav frame 128
 guitarra-jazz_E4.wav	0.0000	0.1000	330.40391	+4.073	-25.31
 guitarra-jazz_E4.wav	0.0500	0.1500	330.21728	+3.095	-26.42
 guitarra-jazz_E4.wav	0.1000	0.2000	330.22409	+3.130	-27.98
@@ -3922,6 +3950,7 @@ guitarra-jazz_E4.wav	7.0000	7.1000	nan	nan	-inf
 guitarra-jazz_E4.wav	7.0500	7.1500	nan	nan	-inf
 guitarra-jazz_E4.wav	7.1000	7.2000	nan	nan	-inf
 # archivo guitarra-jazz_G3.wav sha256 81ccb22f8da8dd035cdfffec663ec00f048e86f30bc89e63573fa1ef18413504 rate 44100 frames 319488
+# ataque guitarra-jazz_G3.wav frame 0
 guitarra-jazz_G3.wav	0.0000	0.1000	195.69029	-2.718	-22.20
 guitarra-jazz_G3.wav	0.0500	0.1500	195.98233	-0.136	-22.40
 guitarra-jazz_G3.wav	0.1000	0.2000	195.93511	-0.553	-23.26
@@ -4066,6 +4095,7 @@ guitarra-jazz_G3.wav	7.0000	7.1000	nan	nan	-inf
 guitarra-jazz_G3.wav	7.0500	7.1500	nan	nan	-inf
 guitarra-jazz_G3.wav	7.1000	7.2000	nan	nan	-inf
 # archivo guitarra-limpia_A2.wav sha256 5fe6581d62cc658b1e4475de85343b95d8fa03640dbe5befad4903e43d386bb3 rate 44100 frames 323904
+# ataque guitarra-limpia_A2.wav frame 0
 guitarra-limpia_A2.wav	0.0000	0.1000	110.88227	+13.830	-27.43
 guitarra-limpia_A2.wav	0.0500	0.1500	109.93143	-1.080	-28.58
 guitarra-limpia_A2.wav	0.1000	0.2000	110.03688	+0.580	-29.26
@@ -4212,6 +4242,7 @@ guitarra-limpia_A2.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-limpia_A2.wav	7.1500	7.2500	nan	nan	-inf
 guitarra-limpia_A2.wav	7.2000	7.3000	nan	nan	-inf
 # archivo guitarra-limpia_B3.wav sha256 4a2521df2b1ab5b232acee1e1e2b450a277ee76cefa289e6125fe229d799575d rate 44100 frames 322496
+# ataque guitarra-limpia_B3.wav frame 128
 guitarra-limpia_B3.wav	0.0000	0.1000	246.91952	-0.155	-26.80
 guitarra-limpia_B3.wav	0.0500	0.1500	246.96838	+0.187	-27.41
 guitarra-limpia_B3.wav	0.1000	0.2000	246.91443	-0.191	-27.81
@@ -4358,6 +4389,7 @@ guitarra-limpia_B3.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-limpia_B3.wav	7.1500	7.2500	nan	nan	-inf
 guitarra-limpia_B3.wav	7.2000	7.3000	nan	nan	-inf
 # archivo guitarra-limpia_D3.wav sha256 823fd3baeacd526a5662f179250264b579ebf08233636e8feabed393e29f384a rate 44100 frames 323584
+# ataque guitarra-limpia_D3.wav frame 0
 guitarra-limpia_D3.wav	0.0000	0.1000	147.50654	+7.930	-25.95
 guitarra-limpia_D3.wav	0.0500	0.1500	146.74793	-0.996	-27.15
 guitarra-limpia_D3.wav	0.1000	0.2000	146.89223	+0.706	-28.01
@@ -4504,6 +4536,7 @@ guitarra-limpia_D3.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-limpia_D3.wav	7.1500	7.2500	nan	nan	-inf
 guitarra-limpia_D3.wav	7.2000	7.3000	nan	nan	-inf
 # archivo guitarra-limpia_E2.wav sha256 c699ac10c7aa7c9845bb0c87652ff29edaa8e972f86c808087801fb04f33f4d2 rate 44100 frames 324160
+# ataque guitarra-limpia_E2.wav frame 0
 guitarra-limpia_E2.wav	0.0000	0.1213	82.15066	-5.391	-26.72
 guitarra-limpia_E2.wav	0.0500	0.1713	82.37479	-0.675	-26.76
 guitarra-limpia_E2.wav	0.1000	0.2213	82.43627	+0.617	-27.36
@@ -4650,6 +4683,7 @@ guitarra-limpia_E2.wav	7.1000	7.2213	nan	nan	-inf
 guitarra-limpia_E2.wav	7.1500	7.2713	nan	nan	-inf
 guitarra-limpia_E2.wav	7.2000	7.3213	nan	nan	-inf
 # archivo guitarra-limpia_E4.wav sha256 882a6d96725eb6890806cc7fa39b1441a56fcefad77ce209ac4fdd6705457fa6 rate 44100 frames 322368
+# ataque guitarra-limpia_E4.wav frame 128
 guitarra-limpia_E4.wav	0.0000	0.1000	329.69651	+0.362	-25.52
 guitarra-limpia_E4.wav	0.0500	0.1500	329.60933	-0.096	-26.37
 guitarra-limpia_E4.wav	0.1000	0.2000	329.53488	-0.487	-27.87
@@ -4796,6 +4830,7 @@ guitarra-limpia_E4.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-limpia_E4.wav	7.1500	7.2500	nan	nan	-inf
 guitarra-limpia_E4.wav	7.2000	7.3000	nan	nan	-inf
 # archivo guitarra-limpia_G3.wav sha256 251e35ea69ccc7c6b23a65ca58383a01ee7f2b146e3bd171f0d84152a185d133 rate 44100 frames 323392
+# ataque guitarra-limpia_G3.wav frame 128
 guitarra-limpia_G3.wav	0.0000	0.1000	196.88823	+7.848	-25.72
 guitarra-limpia_G3.wav	0.0500	0.1500	196.00820	+0.093	-25.96
 guitarra-limpia_G3.wav	0.1000	0.2000	196.08067	+0.733	-26.73
@@ -4942,6 +4977,7 @@ guitarra-limpia_G3.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-limpia_G3.wav	7.1500	7.2500	nan	nan	-inf
 guitarra-limpia_G3.wav	7.2000	7.3000	nan	nan	-inf
 # archivo guitarra-nylon_A2.wav sha256 65e356fe67e768ca4d1e300f5e31ab8f0cab23989d2012f780445e7f8181bc7c rate 44100 frames 335552
+# ataque guitarra-nylon_A2.wav frame 128
 guitarra-nylon_A2.wav	0.0000	0.1000	101.24495	-143.584	-25.04
 guitarra-nylon_A2.wav	0.0500	0.1500	111.53010	+23.916	-23.23
 guitarra-nylon_A2.wav	0.1000	0.2000	110.81367	+12.759	-24.71
@@ -5094,6 +5130,7 @@ guitarra-nylon_A2.wav	7.4000	7.5000	nan	nan	-inf
 guitarra-nylon_A2.wav	7.4500	7.5500	nan	nan	-inf
 guitarra-nylon_A2.wav	7.5000	7.6000	nan	nan	-inf
 # archivo guitarra-nylon_B3.wav sha256 d81fcae66625457b82820cf64947b1afce989e478054c477b4a1bd8ec2f28d56 rate 44100 frames 328768
+# ataque guitarra-nylon_B3.wav frame 128
 guitarra-nylon_B3.wav	0.0000	0.1000	244.44445	-17.596	-25.74
 guitarra-nylon_B3.wav	0.0500	0.1500	247.71094	+5.385	-24.88
 guitarra-nylon_B3.wav	0.1000	0.2000	247.46786	+3.685	-26.19
@@ -5243,6 +5280,7 @@ guitarra-nylon_B3.wav	7.2500	7.3500	nan	nan	-inf
 guitarra-nylon_B3.wav	7.3000	7.4000	nan	nan	-inf
 guitarra-nylon_B3.wav	7.3500	7.4500	nan	nan	-inf
 # archivo guitarra-nylon_D3.wav sha256 0ea574afd8adb8aeb920913245e6c585310057c005f4f3783da6714dafbaa671 rate 44100 frames 334400
+# ataque guitarra-nylon_D3.wav frame 128
 guitarra-nylon_D3.wav	0.0000	0.1000	146.30155	-6.270	-26.30
 guitarra-nylon_D3.wav	0.0500	0.1500	146.86931	+0.435	-24.44
 guitarra-nylon_D3.wav	0.1000	0.2000	146.80660	-0.304	-24.72
@@ -5394,6 +5432,7 @@ guitarra-nylon_D3.wav	7.3500	7.4500	nan	nan	-inf
 guitarra-nylon_D3.wav	7.4000	7.5000	nan	nan	-inf
 guitarra-nylon_D3.wav	7.4500	7.5500	nan	nan	-inf
 # archivo guitarra-nylon_E2.wav sha256 a84af544045d372ea279ca0b10386f0feaa1e87f77c63259844bf124fb0278f7 rate 44100 frames 336960
+# ataque guitarra-nylon_E2.wav frame 128
 guitarra-nylon_E2.wav	0.0000	0.1213	87.69606	+107.697	-25.15
 guitarra-nylon_E2.wav	0.0500	0.1713	82.81799	+8.615	-24.16
 guitarra-nylon_E2.wav	0.1000	0.2213	84.48521	+43.121	-25.23
@@ -5546,6 +5585,7 @@ guitarra-nylon_E2.wav	7.4000	7.5213	nan	nan	-inf
 guitarra-nylon_E2.wav	7.4500	7.5713	nan	nan	-inf
 guitarra-nylon_E2.wav	7.5000	7.6213	nan	nan	-inf
 # archivo guitarra-nylon_E4.wav sha256 24fe92609c5042599e7e1ceef04308c7322b3caa55f10813d47f2e287f190aef rate 44100 frames 322752
+# ataque guitarra-nylon_E4.wav frame 128
 guitarra-nylon_E4.wav	0.0000	0.1000	331.68651	+10.780	-24.70
 guitarra-nylon_E4.wav	0.0500	0.1500	331.30238	+8.774	-24.57
 guitarra-nylon_E4.wav	0.1000	0.2000	331.39381	+9.252	-25.60
@@ -5692,6 +5732,7 @@ guitarra-nylon_E4.wav	7.1000	7.2000	nan	nan	-inf
 guitarra-nylon_E4.wav	7.1500	7.2500	nan	nan	-inf
 guitarra-nylon_E4.wav	7.2000	7.3000	nan	nan	-inf
 # archivo guitarra-nylon_G3.wav sha256 66d2fc080e8f6c078bdf00a55a5e4fb6beeb14d26fae7952cbbce382753bb5e8 rate 44100 frames 331136
+# ataque guitarra-nylon_G3.wav frame 0
 guitarra-nylon_G3.wav	0.0000	0.1000	194.56084	-12.739	-21.96
 guitarra-nylon_G3.wav	0.0500	0.1500	196.27415	+2.440	-21.79
 guitarra-nylon_G3.wav	0.1000	0.2000	193.88664	-18.748	-25.22
@@ -5842,6 +5883,7 @@ guitarra-nylon_G3.wav	7.3000	7.4000	nan	nan	-inf
 guitarra-nylon_G3.wav	7.3500	7.4500	nan	nan	-inf
 guitarra-nylon_G3.wav	7.4000	7.5000	nan	nan	-inf
 # archivo ukelele_A4.wav sha256 6b33e84bc195789412e1a450bd39ee3ecfa2d1c5eb0bc6439f145d48a8f0332f rate 44100 frames 316992
+# ataque ukelele_A4.wav frame 256
 ukelele_A4.wav	0.0000	0.1000	439.86566	-0.529	-26.52
 ukelele_A4.wav	0.0500	0.1500	441.18872	+4.671	-27.30
 ukelele_A4.wav	0.1000	0.2000	440.97794	+3.844	-29.20
@@ -5985,6 +6027,7 @@ ukelele_A4.wav	6.9500	7.0500	nan	nan	-inf
 ukelele_A4.wav	7.0000	7.1000	nan	nan	-inf
 ukelele_A4.wav	7.0500	7.1500	nan	nan	-inf
 # archivo ukelele_C4.wav sha256 79fdcceb5b0c602c6d5396a4d1595085fea691d7a09981ed1209362618714065 rate 44100 frames 326848
+# ataque ukelele_C4.wav frame 0
 ukelele_C4.wav	0.0000	0.1000	260.57039	-6.997	-25.65
 ukelele_C4.wav	0.0500	0.1500	262.37507	+4.953	-24.64
 ukelele_C4.wav	0.1000	0.2000	262.20892	+3.856	-25.67
@@ -6133,6 +6176,7 @@ ukelele_C4.wav	7.2000	7.3000	nan	nan	-inf
 ukelele_C4.wav	7.2500	7.3500	nan	nan	-inf
 ukelele_C4.wav	7.3000	7.4000	nan	nan	-inf
 # archivo ukelele_E4.wav sha256 24fe92609c5042599e7e1ceef04308c7322b3caa55f10813d47f2e287f190aef rate 44100 frames 322752
+# ataque ukelele_E4.wav frame 128
 ukelele_E4.wav	0.0000	0.1000	331.68651	+10.780	-24.70
 ukelele_E4.wav	0.0500	0.1500	331.30238	+8.774	-24.57
 ukelele_E4.wav	0.1000	0.2000	331.39381	+9.252	-25.60
@@ -6279,6 +6323,7 @@ ukelele_E4.wav	7.1000	7.2000	nan	nan	-inf
 ukelele_E4.wav	7.1500	7.2500	nan	nan	-inf
 ukelele_E4.wav	7.2000	7.3000	nan	nan	-inf
 # archivo ukelele_G4.wav sha256 c9338243710f7715d2a0476b1f60d673fd3a9f7fc4c757e8c516f22578668908 rate 44100 frames 319936
+# ataque ukelele_G4.wav frame 128
 ukelele_G4.wav	0.0000	0.1000	391.85159	-0.635	-22.90
 ukelele_G4.wav	0.0500	0.1500	392.90362	+4.006	-22.12
 ukelele_G4.wav	0.1000	0.2000	392.47588	+2.121	-23.46

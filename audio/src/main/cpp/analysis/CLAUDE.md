@@ -24,5 +24,9 @@ thread RT (`../CLAUDE.md`).
   su docstring) y compara con `tests/baseline/enganche-corpus-v1.tsv`. Esa linea de base se regenera
   con `WMA_LATCH_BASELINE_UPDATE=1 bash scripts/run-cpp-tests.sh -R LatchInstrumentCorpus` y su diff
   ES la revision.
+- POR ATAQUE (REQ-055 D11, `measureAttacks`): t0 de cada punteo lo da el ORACULO (lineas `# ataque` del
+  TSV corto, detector de `corpus-reference-pitch.py`, probado por su `--self-test`, que NO corre en el
+  gate: correrlo a mano si se toca el detector), nunca el motor. Linea de base en
+  `tests/baseline/ataque-corpus-v1.tsv`, mismo comando de regeneracion. La toma del g42 sale SKIPPED.
 
 Los numeros del snapshot (cuantos valores lleva) driftean: se cuentan del codigo, no de un doc.

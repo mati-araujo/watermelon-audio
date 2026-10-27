@@ -1,6 +1,6 @@
 /**
  * LatchInstrument.h — REQ-055 S0. LA VARA: cuanto tarda y cuanto se equivoca el afinador por
- * ENGANCHE.
+ * ENGANCHE y POR ATAQUE (`measureAttacks`, mas abajo: t0 del oraculo, D11).
  *
  * Es el nucleo PURO del instrumento: recibe la secuencia de publicaciones de una corrida (ya
  * registradas por quien alimento el motor), la serie de rms por VENTANA FIJA de la senal alimentada,
@@ -287,6 +287,157 @@ inline std::vector<Latch> measure(const std::vector<Publication>& pubs, const st
     }
     for (Latch& l : latches) detail::finish(l);
     return latches;
+}
+
+// =====================================================================================
+// POR ATAQUE (REQ-055 D11, AC-055.2)
+// =====================================================================================
+//
+// La definicion de enganche no se cumple en un telefono: la sala del g42 esta a -48,5 dBFS y ninguna
+// ventana baja de 0,001, asi que un re-punteo nunca abre enganche. Por eso se mide ademas POR ATAQUE:
+//
+//   · t0 de cada ataque lo da el ORACULO (`scripts/corpus-reference-pitch.py`, lineas `# ataque` del
+//     TSV corto), NUNCA el motor (R-API-48). Aca es un dato de entrada: ni las publicaciones ni el
+//     nivel lo mueven.
+//   · El ataque i dura (t0_i, t0_{i+1}] (o hasta el final del flujo): una publicacion con pos == t0
+//     es ANTERIOR (el motor no habia visto ninguna muestra del ataque) y una con pos == t0_{i+1} es
+//     del ataque i (todavia no vio el siguiente).
+//   · `t_primera` = primera publicacion con cents (no NaN) DESPUES de t0; `t_conv` = primer CONVERGED
+//     despues de t0. Si la ultima publicacion con pos <= t0 ya traia cents (o CONVERGED), el ataque
+//     viene ARRASTRADO: el motor no solto la lectura de antes. Se marca, no se descarta; un `t_primera`
+//     arrastrado no es una latencia del ataque.
+//   · El error de cada publicacion es contra el oraculo instantaneo con la regla del enganche: el tramo
+//     de `t_fin` mas cercano que no supera la publicacion (`segmentFor`).
+//   · Error a 250 ms y a 1 s: la lectura VISIBLE en t0 + Δ (la ultima publicacion en (t0, t0 + Δ]),
+//     contra el tramo ya terminado en t0 + Δ. Sin publicacion propia del ataque, o con NaN, no hay
+//     lectura (NaN, contada aparte); si t0 + Δ cae despues del final del ataque, no aplica (NaN).
+//
+// Nada de esto toca el motor: es aritmetica sobre lo que el motor ya publico.
+
+/// Los instantes desde el ataque en que se lee el error visible, en segundos.
+inline constexpr double kAttackProbeEarlySec = 0.25;
+inline constexpr double kAttackProbeLateSec = 1.0;
+
+/// La lectura visible en t0 + Δ.
+struct Probe {
+    bool applies = false;   ///< t0 + Δ cae dentro del ataque
+    bool reading = false;   ///< habia una publicacion propia del ataque con cents
+    double errorCents = kNaN;
+    double sigmaCents = kNaN;
+    bool covered = false;   ///< |error| <= 2σ
+};
+
+struct Attack {
+    int64_t t0Frames = 0;
+    double t0Sec = 0.0;
+    int64_t endFrames = 0;   ///< el final del ataque: el siguiente t0 o el final del flujo
+    bool readingCarried = false;     ///< la ultima publicacion <= t0 traia cents
+    bool convergedCarried = false;   ///< la ultima publicacion <= t0 era CONVERGED
+
+    int publications = 0;
+    int readings = 0;
+    int64_t firstReadingFrames = -1;
+    double firstReadingSec = kNaN;
+    int64_t convergedFrames = -1;
+    double convergedSec = kNaN;
+
+    int withError = 0;
+    int noOracle = 0;
+    int covered = 0;
+    double firstErrorCents = kNaN;
+    double firstSigmaCents = kNaN;
+    double medianAbsCents = kNaN;
+    double p90AbsCents = kNaN;
+    double maxAbsCents = kNaN;
+    double coverage = kNaN;
+    std::vector<double> absErrors;
+
+    Probe early;   ///< a kAttackProbeEarlySec
+    Probe late;    ///< a kAttackProbeLateSec
+};
+
+namespace detail {
+
+inline Probe probeAt(const std::vector<Publication>& pubs, const std::vector<OracleSegment>& oracle,
+                     const Attack& a, double deltaSec, int rate) {
+    Probe p;
+    const int64_t at = a.t0Frames + static_cast<int64_t>(std::llround(deltaSec * rate));
+    if (at > a.endFrames) return p;
+    p.applies = true;
+    const Publication* visible = nullptr;
+    for (const Publication& pub : pubs) {
+        if (pub.pos <= a.t0Frames) continue;
+        if (pub.pos > at) break;
+        visible = &pub;
+    }
+    if (visible == nullptr || std::isnan(visible->hz)) return p;
+    p.reading = true;
+    p.sigmaCents = visible->sigmaCents;
+    const OracleSegment* seg = segmentFor(oracle, static_cast<double>(at) / rate);
+    if (seg == nullptr || !(seg->hz > 0.0) || !std::isfinite(seg->hz)) return p;
+    p.errorCents = 1200.0 * std::log2(visible->hz / seg->hz);
+    p.covered = std::fabs(p.errorCents) <= 2.0 * visible->sigmaCents;
+    return p;
+}
+
+}  // namespace detail
+
+/**
+ * Las cifras por ataque. `pubs` ordenadas por `pos`; `attackFrames` (del ORACULO) ordenados y
+ * dentro de [0, streamEndFrames); `streamEndFrames` = frames alimentados.
+ */
+inline std::vector<Attack> measureAttacks(const std::vector<Publication>& pubs, const std::vector<int64_t>& attackFrames,
+                                          const std::vector<OracleSegment>& oracle, int64_t streamEndFrames,
+                                          const Params& params) {
+    std::vector<Attack> out;
+    for (size_t i = 0; i < attackFrames.size(); ++i) {
+        Attack a;
+        a.t0Frames = attackFrames[i];
+        a.t0Sec = static_cast<double>(a.t0Frames) / params.sampleRate;
+        a.endFrames = i + 1 < attackFrames.size() ? attackFrames[i + 1] : streamEndFrames;
+        const Publication* before = nullptr;
+        for (const Publication& pub : pubs) {
+            if (pub.pos <= a.t0Frames) {
+                before = &pub;
+                continue;
+            }
+            if (pub.pos > a.endFrames) break;
+            ++a.publications;
+            const bool hasReading = !std::isnan(pub.hz);
+            if (pub.state == wma::analysis::kStateConverged && a.convergedFrames < 0) {
+                a.convergedFrames = pub.pos - a.t0Frames;
+                a.convergedSec = static_cast<double>(a.convergedFrames) / params.sampleRate;
+            }
+            if (!hasReading) continue;
+            ++a.readings;
+            const bool first = a.readings == 1;
+            if (first) {
+                a.firstReadingFrames = pub.pos - a.t0Frames;
+                a.firstReadingSec = static_cast<double>(a.firstReadingFrames) / params.sampleRate;
+                a.firstSigmaCents = pub.sigmaCents;
+            }
+            const OracleSegment* seg = segmentFor(oracle, static_cast<double>(pub.pos) / params.sampleRate);
+            if (seg == nullptr || !(seg->hz > 0.0) || !std::isfinite(seg->hz)) {
+                ++a.noOracle;
+                continue;
+            }
+            const double err = 1200.0 * std::log2(pub.hz / seg->hz);
+            if (first) a.firstErrorCents = err;
+            ++a.withError;
+            a.absErrors.push_back(std::fabs(err));
+            if (std::fabs(err) <= 2.0 * pub.sigmaCents) ++a.covered;   // σ NaN: la comparacion es falsa
+        }
+        a.readingCarried = before != nullptr && !std::isnan(before->hz);
+        a.convergedCarried = before != nullptr && before->state == wma::analysis::kStateConverged;
+        a.medianAbsCents = median(a.absErrors);
+        a.p90AbsCents = percentile(a.absErrors, 0.9);
+        a.maxAbsCents = a.absErrors.empty() ? kNaN : *std::max_element(a.absErrors.begin(), a.absErrors.end());
+        a.coverage = a.withError > 0 ? static_cast<double>(a.covered) / a.withError : kNaN;
+        a.early = detail::probeAt(pubs, oracle, a, kAttackProbeEarlySec, params.sampleRate);
+        a.late = detail::probeAt(pubs, oracle, a, kAttackProbeLateSec, params.sampleRate);
+        out.push_back(std::move(a));
+    }
+    return out;
 }
 
 /// El rango de un tiempo (frames desde t0) sobre varias corridas del mismo enganche. Las corridas donde no

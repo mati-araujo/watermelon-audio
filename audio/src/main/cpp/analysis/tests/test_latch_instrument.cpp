@@ -1,7 +1,9 @@
 /**
  * test_latch_instrument.cpp — REQ-055 S0. La vara del afinador: tiempo y error POR ENGANCHE.
  *
- * Dos suites:
+ * Suites:
+ *   · `AttackInstrument`       el nucleo POR ATAQUE (D11): t0 del oraculo, sobre secuencias a mano.
+ *   · `LatchInstrumentRealTake` la toma del g42: SKIPPED mientras no exista.
  *   · `LatchInstrument`        el nucleo (`support/LatchInstrument.h`) sobre secuencias a mano,
  *                              SIN corpus. Un instrumento que no puede fallar no mide nada: cada
  *                              test dice que bug del instrumento atrapa.
@@ -631,10 +633,13 @@ struct OracleFile {
     int rate = 0;
     long long frames = 0;
     std::vector<OracleSegment> segments;
+    /// Los ataques del archivo, en frames, como los detecto el ORACULO (`# ataque NOMBRE frame N`).
+    std::vector<int64_t> attacks;
 };
 
 /// El oraculo corto: `# archivo NOMBRE sha256 HEX rate HZ frames N` antes de las filas de cada
-/// archivo, y por fila `nombre t_ini t_fin hz cents nivel`. Devuelve el motivo si no se pudo leer.
+/// archivo, sus ataques como `# ataque NOMBRE frame N` (REQ-055 D11), y por fila `nombre t_ini t_fin hz
+/// cents nivel`. Devuelve el motivo si no se pudo leer.
 std::string loadOracle(const std::string& path, std::map<std::string, OracleFile>* out) {
     bool ok = false;
     const std::string text = slurp(path, &ok);
@@ -657,6 +662,9 @@ std::string loadOracle(const std::string& path, std::map<std::string, OracleFile
                 f.sha = sha;
                 f.rate = rate;
                 f.frames = frames;
+            } else if (std::sscanf(line.c_str(), "# ataque %511s frame %lld", name, &frames) == 2) {
+                if (current.empty() || current != name) return std::string("ataque de ") + name + " fuera de su cabecera";
+                (*out)[current].attacks.push_back(static_cast<int64_t>(frames));
             }
             continue;
         }
@@ -1170,6 +1178,480 @@ TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
     for (const std::string& d : diffs) ADD_FAILURE() << d;
     EXPECT_TRUE(diffs.empty()) << diffs.size() << " diferencias contra la linea de base: si el cambio es el buscado, "
                                   "regenerar con WMA_LATCH_BASELINE_UPDATE=1 y revisar el diff del TSV";
+}
+
+// =====================================================================================
+// POR ATAQUE (AC-055.2, D11): el nucleo sin corpus
+// =====================================================================================
+//
+// Rate de 1000 frames/s como arriba: Δ de 250 ms son 250 frames.
+
+std::vector<Publication> readingsEvery(int64_t from, int64_t to, int64_t step, double hz, int state = kMeas,
+                                       double sigma = 1.0) {
+    std::vector<Publication> out;
+    for (int64_t p = from; p <= to; p += step) out.push_back(pub(p, hz, state, sigma));
+    return out;
+}
+
+TEST(AttackInstrument, T0IsTheOraclesFrameNotAPublicationOfTheEngine) {
+    // AC-055.2. Atrapa: t0 tomado del motor (la primera publicacion despues del ataque, o la primera
+    // con lectura) en vez del frame que dio el oraculo. Con t0 = 1037 fuera de la grilla de
+    // publicaciones, t_primera tiene que salir 1300 - 1037 = 263 exactos, y t_conv 1500 - 1037.
+    const std::vector<Publication> pubs{pub(1100), pub(1200), pub(1300, 440.0), pub(1500, 440.0, kConv)};
+    const auto a = latch::measureAttacks(pubs, {1037}, kNoOracle, 5000, params());
+    ASSERT_EQ(a.size(), 1u);
+    EXPECT_EQ(a[0].t0Frames, 1037);
+    EXPECT_EQ(a[0].firstReadingFrames, 263);
+    EXPECT_NEAR(a[0].firstReadingSec, 0.263, 1e-12);
+    EXPECT_EQ(a[0].convergedFrames, 463);
+    EXPECT_EQ(a[0].publications, 4);
+    EXPECT_EQ(a[0].readings, 2);
+    EXPECT_FALSE(a[0].readingCarried);
+}
+
+TEST(AttackInstrument, ARepluckWithTheStringSoundingIsAnAttackAndItsReadingComesCarried) {
+    // AC-055.2. Atrapa: un instrumento que solo abre ataques tras silencio (la definicion de enganche),
+    // que en el g42 no ve ningun re-punteo; y uno que no marca la lectura arrastrada, que reportaria
+    // t_primera = 50 ms como si el motor hubiera leido el re-punteo en 50 ms.
+    std::vector<Publication> pubs = readingsEvery(100, 3000, 100, 440.0, kConv);
+    const auto a = latch::measureAttacks(pubs, {50, 2020}, kNoOracle, 3000, params());
+    ASSERT_EQ(a.size(), 2u);
+    EXPECT_FALSE(a[0].readingCarried);
+    EXPECT_FALSE(a[0].convergedCarried);
+    EXPECT_TRUE(a[1].readingCarried);
+    EXPECT_TRUE(a[1].convergedCarried);
+    EXPECT_EQ(a[1].firstReadingFrames, 80) << "2100 - 2020: la primera publicacion DESPUES de t0";
+    EXPECT_EQ(a[0].endFrames, 2020);
+    EXPECT_EQ(a[1].endFrames, 3000);
+}
+
+TEST(AttackInstrument, APublicationAtOrBeforeT0IsNeverTheFirstReading) {
+    // AC-055.2. Atrapa: contar como primera lectura una publicacion anterior a t0 (o en t0 mismo:
+    // `pos` es la posicion del ring DESPUES de drenar, y con pos == t0 el motor no vio ninguna muestra
+    // del ataque). Con `<` en vez de `<=` t_primera sale 0.
+    const std::vector<Publication> pubs{pub(900, 440.0), pub(1000, 440.0), pub(1040), pub(1090, 441.0)};
+    const auto a = latch::measureAttacks(pubs, {1000}, kNoOracle, 2000, params());
+    ASSERT_EQ(a.size(), 1u);
+    EXPECT_EQ(a[0].firstReadingFrames, 90);
+    EXPECT_EQ(a[0].publications, 2) << "solo las de (t0, fin]";
+    EXPECT_TRUE(a[0].readingCarried) << "la de pos == t0 traia cents";
+    EXPECT_FALSE(a[0].convergedCarried);
+}
+
+TEST(AttackInstrument, APublicationAtTheNextT0BelongsToThePreviousAttack) {
+    // AC-055.2. Atrapa: el borde entre ataques corrido un frame (una publicacion contada en los dos,
+    // o en ninguno).
+    const std::vector<Publication> pubs{pub(1500, 440.0), pub(2000, 440.0), pub(2001, 440.0)};
+    const auto a = latch::measureAttacks(pubs, {1000, 2000}, kNoOracle, 3000, params());
+    ASSERT_EQ(a.size(), 2u);
+    EXPECT_EQ(a[0].publications, 2);
+    EXPECT_EQ(a[1].publications, 1);
+    EXPECT_EQ(a[1].firstReadingFrames, 1);
+}
+
+TEST(AttackInstrument, NoReadingOrNoConvergenceIsMissingNotZero) {
+    // AC-055.2. Atrapa: un ataque sin lectura que se agrega como t = 0 (bajaria la mediana).
+    const auto a = latch::measureAttacks({pub(1100), pub(1200, kNan, kMeas)}, {1000}, kNoOracle, 2000, params());
+    ASSERT_EQ(a.size(), 1u);
+    EXPECT_EQ(a[0].firstReadingFrames, -1);
+    EXPECT_TRUE(std::isnan(a[0].firstReadingSec));
+    EXPECT_EQ(a[0].convergedFrames, -1);
+    EXPECT_TRUE(std::isnan(a[0].medianAbsCents));
+    EXPECT_TRUE(std::isnan(a[0].coverage));
+    EXPECT_FALSE(a[0].early.reading);
+    EXPECT_TRUE(a[0].early.applies);
+}
+
+TEST(AttackInstrument, EachPublicationIsJudgedByTheSegmentAlreadyFinishedNeverALaterOne) {
+    // AC-055.2. Atrapa: comparar contra un tramo del oraculo POSTERIOR a la publicacion (o el de t_ini
+    // mas cercano): premiaria un adelanto que el motor no puede tener. La publicacion de t = 1,30 s
+    // tiene que medirse contra el tramo que termino en 1,20 (440 Hz), no contra el de 1,35 (hzAt +10 c).
+    const std::vector<OracleSegment> oracle{{1.0, 1.2, 440.0}, {1.15, 1.35, hzAt(440.0, 10.0)}};
+    const auto a = latch::measureAttacks({pub(1300, hzAt(440.0, 3.0), kMeas, 2.0)}, {1000}, oracle, 2000, params());
+    ASSERT_EQ(a.size(), 1u);
+    ASSERT_EQ(a[0].withError, 1);
+    EXPECT_NEAR(a[0].firstErrorCents, 3.0, 1e-9);
+    EXPECT_EQ(a[0].covered, 1) << "3 c <= 2σ = 4 c";
+}
+
+TEST(AttackInstrument, TheEarlyAndLateProbesReadTheVisiblePublicationAgainstTheFinishedSegment) {
+    // AC-055.2. Atrapa: el error «a 250 ms» tomado de la publicacion MAS CERCANA (incluso posterior) en vez
+    // de la visible en t0 + 250, o contra el oraculo de despues de ese instante. t0 = 1000: visible a
+    // 1250 es la de 1240 (+4 c); la de 1260 (+20 c) todavia no existia. El tramo terminado en 1,25 s es
+    // el de [1,10, 1,25] a 440; el de [1,15, 1,30] (+30 c) no habia terminado.
+    const std::vector<OracleSegment> oracle{{1.10, 1.25, 440.0}, {1.15, 1.30, hzAt(440.0, 30.0)},
+                                            {1.85, 2.00, hzAt(440.0, -1.0)}, {1.90, 2.05, hzAt(440.0, 50.0)}};
+    const std::vector<Publication> pubs{pub(1240, hzAt(440.0, 4.0), kMeas, 1.5), pub(1260, hzAt(440.0, 20.0)),
+                                        pub(1990, hzAt(440.0, -0.5), kConv, 0.3), pub(2001, hzAt(440.0, 9.0))};
+    const auto a = latch::measureAttacks(pubs, {1000}, oracle, 3000, params());
+    ASSERT_EQ(a.size(), 1u);
+    ASSERT_TRUE(a[0].early.applies && a[0].early.reading);
+    EXPECT_NEAR(a[0].early.errorCents, 4.0, 1e-9);
+    EXPECT_NEAR(a[0].early.sigmaCents, 1.5, 1e-12);
+    EXPECT_FALSE(a[0].early.covered) << "4 c > 2σ = 3 c";
+    ASSERT_TRUE(a[0].late.applies && a[0].late.reading);
+    EXPECT_NEAR(a[0].late.errorCents, 0.5, 1e-9) << "-0,5 c publicado contra -1 c del tramo terminado en 2,00 s";
+    EXPECT_TRUE(a[0].late.covered) << "0,5 c <= 2σ = 0,6 c";
+}
+
+TEST(AttackInstrument, AProbeNeverReadsACarriedPublicationAndDoesNotApplyPastTheAttack) {
+    // AC-055.2. Atrapa: la lectura arrastrada de antes de t0 contada como lectura «a 250 ms» del ataque
+    // nuevo; y una sonda que mira pasado el final del ataque (lo que ya es del siguiente).
+    const std::vector<OracleSegment> oracle{{0.0, 0.5, 440.0}};
+    const std::vector<Publication> pubs{pub(900, 440.0), pub(1300, 440.0)};
+    const auto a = latch::measureAttacks(pubs, {1000, 1600}, oracle, 2000, params());
+    ASSERT_EQ(a.size(), 2u);
+    EXPECT_TRUE(a[0].early.applies);
+    EXPECT_FALSE(a[0].early.reading) << "en (1000, 1250] no hay publicacion propia; la de 900 es arrastrada";
+    EXPECT_TRUE(std::isnan(a[0].early.errorCents));
+    EXPECT_FALSE(a[0].late.applies) << "1000 + 1000 > 1600, el final del ataque";
+    EXPECT_FALSE(a[1].late.applies) << "1600 + 1000 > 2000, el final del flujo";
+    EXPECT_TRUE(a[1].early.applies);
+}
+
+TEST(AttackInstrument, PercentilesAndCoveragePerAttack) {
+    // AC-055.2. Atrapa: percentiles o cobertura que mezclan ataques (los del segundo en el primero), y la
+    // lectura sin oraculo contada como error. Ataque 1: errores 1..4 c con σ 1,6 (2σ = 3,2: cubre 1, 2, 3);
+    // ataque 2: una lectura de 10 c y una sin oraculo.
+    std::vector<Publication> pubs;
+    for (int c = 1; c <= 4; ++c) pubs.push_back(pub(1000 + 100 * c, hzAt(440.0, c), kMeas, 1.6));
+    pubs.push_back(pub(2100, hzAt(440.0, 10.0), kMeas, 1.0));
+    const std::vector<OracleSegment> withHole{{0.0, 1.0, 440.0}, {1.0, 2.15, kNan}};
+    pubs.push_back(pub(2200, 440.0, kMeas, 1.0));
+    const auto a = latch::measureAttacks(pubs, {1000, 2000}, withHole, 3000, params());
+    ASSERT_EQ(a.size(), 2u);
+    EXPECT_EQ(a[0].withError, 4);
+    EXPECT_NEAR(a[0].medianAbsCents, 2.5, 1e-9);
+    EXPECT_NEAR(a[0].p90AbsCents, 4.0, 1e-9);
+    EXPECT_NEAR(a[0].coverage, 0.75, 1e-12);
+    EXPECT_EQ(a[1].withError, 1);
+    EXPECT_EQ(a[1].noOracle, 1);
+    EXPECT_NEAR(a[1].maxAbsCents, 10.0, 1e-9);
+}
+
+TEST(AttackInstrument, OracleAttackLinesAreReadUnderTheirFile) {
+    // AC-055.2. Atrapa: un `# ataque` atribuido al archivo equivocado (o leido como comentario y
+    // perdido): los t0 de un archivo serian los de otro.
+    const std::string tmp = corpus::makeTempDir();
+    const std::string path = tmp + "/oraculo.tsv";
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    ASSERT_NE(f, nullptr);
+    const std::string text = "# comando: x\n# archivo a.wav sha256 aa rate 48000 frames 100\n# ataque a.wav frame 7\n"
+                             "a.wav\t0.0\t0.1\t440\t0\t-20\n# archivo b.wav sha256 bb rate 48000 frames 100\n"
+                             "# ataque b.wav frame 0\n# ataque b.wav frame 4096\n";
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+    std::map<std::string, OracleFile> oracle;
+    const std::string why = loadOracle(path, &oracle);
+    std::remove(path.c_str());
+    ASSERT_EQ(why, "");
+    EXPECT_EQ(oracle["a.wav"].attacks, (std::vector<int64_t>{7}));
+    EXPECT_EQ(oracle["b.wav"].attacks, (std::vector<int64_t>{0, 4096}));
+    std::map<std::string, OracleFile> bad;
+    const std::string badPath = path + ".mal";
+    f = std::fopen(badPath.c_str(), "wb");
+    ASSERT_NE(f, nullptr);
+    const std::string badText = "# archivo a.wav sha256 aa rate 48000 frames 100\n# ataque b.wav frame 7\n";
+    std::fwrite(badText.data(), 1, badText.size(), f);
+    std::fclose(f);
+    EXPECT_NE(loadOracle(badPath, &bad), "") << "un ataque de otro archivo es un error, no se descarta";
+    std::remove(badPath.c_str());
+    corpus::removeTempDir(tmp);
+}
+
+// =====================================================================================
+// POR ATAQUE: la linea de base sobre corpus-v1 y la toma real
+// =====================================================================================
+
+constexpr Col kAttackCols[] = {
+    {"ataque", true},          {"pasada", true},          {"t0_frames", true},       {"arrastrada_lectura", true},
+    {"arrastrada_conv", true}, {"t_primera_frames", true}, {"t_primera_s", false},   {"t_conv_frames", true},
+    {"t_conv_s", false},       {"n_publicaciones", true}, {"n_lecturas", true},      {"n_sin_oraculo", true},
+    {"err_primera_c", false},  {"sigma_primera_c", false}, {"mediana_abs_c", false}, {"p90_abs_c", false},
+    {"max_abs_c", false},      {"cobertura", false},      {"lect_250ms", true},      {"err_250ms_c", false},
+    {"sigma_250ms_c", false},  {"cub_250ms", true},       {"lect_1s", true},         {"err_1s_c", false},
+    {"sigma_1s_c", false},     {"cub_1s", true}};
+constexpr size_t kNumAttackCols = sizeof(kAttackCols) / sizeof(kAttackCols[0]);
+
+struct AttackRow {
+    std::string name;
+    double v[kNumAttackCols];
+};
+
+std::string formatAttackRow(const AttackRow& r) {
+    std::string out = r.name;
+    for (size_t i = 0; i < kNumAttackCols; ++i) out += "\t" + formatNumber(r.v[i], kAttackCols[i].exact);
+    return out;
+}
+
+bool parseAttackBaseline(const std::string& text, std::map<std::string, AttackRow>* out) {
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t eol = text.find('\n', pos);
+        if (eol == std::string::npos) eol = text.size();
+        const std::string line = text.substr(pos, eol - pos);
+        pos = eol + 1;
+        if (line.empty() || line[0] == '#') continue;
+        AttackRow r{};
+        const size_t tab = line.find('\t');
+        if (tab == std::string::npos) return false;
+        r.name = line.substr(0, tab);
+        size_t cur = tab + 1;
+        for (size_t i = 0; i < kNumAttackCols; ++i) {
+            const size_t next = line.find('\t', cur);
+            const std::string cell = line.substr(cur, next == std::string::npos ? std::string::npos : next - cur);
+            if (cell.empty()) return false;
+            r.v[i] = std::strtod(cell.c_str(), nullptr);
+            if ((i + 1 < kNumAttackCols) != (next != std::string::npos)) return false;
+            cur = next + 1;
+        }
+        (*out)[keyOf(r.name, r.v[0])] = r;
+    }
+    return true;
+}
+
+std::vector<std::string> diffAttackRows(const std::map<std::string, AttackRow>& want,
+                                        const std::map<std::string, AttackRow>& got, bool requireSameSet) {
+    std::vector<std::string> out;
+    for (const auto& [key, g] : got) {
+        const auto it = want.find(key);
+        if (it == want.end()) {
+            out.push_back(key + ": no esta en la linea de base por ataque");
+            continue;
+        }
+        for (size_t i = 0; i < kNumAttackCols; ++i)
+            if (!sameValue(it->second.v[i], g.v[i], kAttackCols[i].exact))
+                out.push_back(key + " " + kAttackCols[i].name + ": base " +
+                              formatNumber(it->second.v[i], kAttackCols[i].exact) + ", ahora " +
+                              formatNumber(g.v[i], kAttackCols[i].exact));
+    }
+    if (requireSameSet)
+        for (const auto& kv : want)
+            if (got.find(kv.first) == got.end()) out.push_back(kv.first + ": esta en la linea de base por ataque y no se midio");
+    return out;
+}
+
+double flag(bool b) { return b ? 1.0 : 0.0; }
+double probeFlag(const latch::Probe& p, bool value) { return p.applies ? flag(value) : kNan; }
+
+AttackRow attackRowOf(const std::string& name, int index, int pass, const latch::Attack& a, int rate) {
+    AttackRow r{};
+    r.name = name;
+    const double v[kNumAttackCols] = {static_cast<double>(index),
+                                      static_cast<double>(pass),
+                                      static_cast<double>(a.t0Frames),
+                                      flag(a.readingCarried),
+                                      flag(a.convergedCarried),
+                                      framesOrNan(a.firstReadingFrames),
+                                      secOf(a.firstReadingFrames, rate),
+                                      framesOrNan(a.convergedFrames),
+                                      secOf(a.convergedFrames, rate),
+                                      static_cast<double>(a.publications),
+                                      static_cast<double>(a.readings),
+                                      static_cast<double>(a.noOracle),
+                                      a.firstErrorCents,
+                                      a.firstSigmaCents,
+                                      a.medianAbsCents,
+                                      a.p90AbsCents,
+                                      a.maxAbsCents,
+                                      a.coverage,
+                                      probeFlag(a.early, a.early.reading),
+                                      a.early.errorCents,
+                                      a.early.sigmaCents,
+                                      probeFlag(a.early, a.early.covered),
+                                      probeFlag(a.late, a.late.reading),
+                                      a.late.errorCents,
+                                      a.late.sigmaCents,
+                                      probeFlag(a.late, a.late.covered)};
+    for (size_t i = 0; i < kNumAttackCols; ++i) r.v[i] = v[i];
+    return r;
+}
+
+TEST(AttackInstrument, AttackBaselineRowsRoundTripAndCompareExactOnFrames) {
+    // AC-055.2. Atrapa: una columna de la linea de base por ataque que se escribe y no se lee (desplaza
+    // las siguientes), y una comparacion con tolerancia en los frames.
+    latch::Attack a;
+    a.t0Frames = 4096;
+    a.firstReadingFrames = 2048;
+    a.early.applies = true;
+    a.early.reading = true;
+    a.early.errorCents = 1.25;
+    const AttackRow r = attackRowOf("a.wav", 3, 2, a, 48000);
+    std::map<std::string, AttackRow> parsed;
+    ASSERT_TRUE(parseAttackBaseline("# cabecera\n" + formatAttackRow(r) + "\n", &parsed));
+    std::map<std::string, AttackRow> got{{keyOf("a.wav", 3), r}};
+    EXPECT_TRUE(diffAttackRows(parsed, got, true).empty());
+    got.begin()->second.v[5] += 1;   // un frame de t_primera
+    EXPECT_EQ(diffAttackRows(parsed, got, true).size(), 1u);
+    EXPECT_TRUE(std::isnan(parsed.begin()->second.v[22])) << "la sonda de 1 s no aplica: nan, no 0";
+    EXPECT_FALSE(parseAttackBaseline("a.wav\t1\t2\n", &parsed));
+}
+
+std::string attackBaselinePath() { return std::string(WMA_ANALYSIS_GOLDEN_DIR) + "/../baseline/ataque-corpus-v1.tsv"; }
+
+std::string attackBaselineHeader() {
+    std::string h =
+        "# Linea de base POR ATAQUE del afinador sobre corpus-v1 (REQ-055 S0, D11, AC-055.2). Una fila por ataque.\n"
+        "# Motor medido: el de 1351b7e (sin cambio de produccion en S0). Al regenerar tras un cambio de motor\n"
+        "# INTENCIONAL, actualizar este commit en `attackBaselineHeader()` (test_latch_instrument.cpp).\n"
+        "#\n"
+        "# t0 de cada ataque lo da el ORACULO (lineas `# ataque` de corpus-v1-oraculo-corto.tsv, detector de\n"
+        "# scripts/corpus-reference-pitch.py: subida >= 6 dB de la energia cruda o de la primera diferencia en 2048\n"
+        "# frames contra los 2048 previos, fechada en la grilla de 128, refractario 0,15 s; tolerancia 256 frames),\n"
+        "# nunca el motor. Se alimenta como la linea de base del enganche (feedTwice): la NOTA dos veces seguidas sin\n"
+        "# tocar el objetivo, en TANDAS FIJAS DE 256 FRAMES drenadas hasta ring vacio. pasada 1 = los ataques del\n"
+        "# archivo; pasada 2 = los mismos, corridos noteEndFrames: el RE-PUNTEO con la cuerda sonando. El oraculo de\n"
+        "# la pasada 2 son los tramos del archivo corridos igual (los que terminan pasado noteEndFrames no se usan).\n"
+        "#\n"
+        "# El ataque dura (t0, siguiente t0] (o hasta el final del flujo). t_primera / t_conv = primera publicacion\n"
+        "# con cents / con CONVERGED despues de t0, en frames del ring desde t0. arrastrada_* = 1 si la ultima\n"
+        "# publicacion con pos <= t0 ya traia cents / CONVERGED: el motor no solto la lectura de antes, y entonces\n"
+        "# t_primera no es una latencia del ataque. Errores en cents contra el ORACULO INSTANTANEO (tramo de t_fin\n"
+        "# mas cercano <= t de la publicacion); cobertura = fraccion con |error| <= 2 sigma. *_250ms / *_1s = la\n"
+        "# lectura VISIBLE en t0 + 0,25 s / t0 + 1 s (ultima publicacion en (t0, t0 + Δ]) contra el tramo ya\n"
+        "# terminado en ese instante; lect = 1 si habia lectura propia del ataque, cub = 1 si |error| <= 2 sigma;\n"
+        "# nan = no aplica (t0 + Δ pasado el final del ataque). `nan` en el resto = no llego / no aplica.\n"
+        "#\n"
+        "# EL DIFF DE ESTE ARCHIVO ES LA REVISION. Frames y banderas exactos; lo demas con tolerancia 0,002.\n"
+        "# Regenerar (corre la suite y ESCRIBE en vez de comparar; el test queda SKIPPED):\n"
+        "#   WMA_LATCH_BASELINE_UPDATE=1 bash scripts/run-cpp-tests.sh -R LatchInstrumentCorpus\n"
+        "# archivo";
+    for (const Col& c : kAttackCols) h += std::string("\t") + c.name;
+    return h + "\n";
+}
+
+/// Resumen de un conjunto de ataques para imprimir: mediana / p90 / max.
+std::string summary(const char* label, std::vector<double> v) {
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "%s n=%zu mediana %.3f p90 %.3f max %.3f", label, v.size(), latch::median(v),
+                  latch::percentile(v, 0.9), maxOf(v));
+    return buf;
+}
+
+TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
+    // AC-055.2 (D11). La linea de base POR ATAQUE del motor de hoy. Atrapa: cualquier cambio del analisis
+    // que mueva un t_primera / t_conv por ataque en un frame, o el error / σ / cobertura en mas de 0,002.
+    const std::string dir = corpus::defaultCorpusDir();
+    const corpus::State st = corpus::stateOf(dir, corpus::manifestPath());
+    if (st != corpus::State::kVerified) GTEST_SKIP() << missingCorpusMessage(st);
+    std::map<std::string, OracleFile> oracle;
+    ASSERT_EQ(loadOracle(oraclePath(), &oracle), "") << "el corpus esta y el oraculo corto no: esto FALLA";
+
+    bool subset = false;
+    const std::vector<corpus::Entry> entries = corpusEntriesForThisBuild(&subset);
+    std::map<std::string, AttackRow> rows;
+    std::vector<double> first[3], conv[3], e250[3], e1s[3];   // [0] pasada 1, [1] pasada 2, [2] todas
+    std::vector<latch::Attack> all[3];
+    int carried = 0, noRead250 = 0, applies250 = 0, cov250 = 0, with250 = 0;
+    std::printf("\n%-24s %2s %1s %7s | %1s %7s %7s | %7s %7s %5s %7s %7s\n", "archivo", "n", "p", "t0_s", "a", "t_prim",
+                "t_conv", "e_250", "e_1s", "cob", "med|e|", "max|e|");
+    for (const corpus::Entry& e : entries) {
+        const wav::WavData data = wav::readWav((dir + "/" + e.name).c_str());
+        ASSERT_GT(data.sampleRate, 0) << e.name;
+        const OracleFile& of = oracle.at(e.name);
+        ASSERT_EQ(of.rate, data.sampleRate) << e.name;
+        ASSERT_EQ(of.frames, static_cast<long long>(data.numFrames)) << e.name;
+        ASSERT_FALSE(of.attacks.empty()) << e.name << ": el oraculo no declara ningun ataque (regenerarlo con --short)";
+
+        // t0 y el corte de la nota salen del ARCHIVO y del oraculo, no del ring: noteEndFrames es lo que
+        // se alimento en cada pasada.
+        const int64_t noteEnd = corpus::noteEndFrames(data);
+        const FedRun run = feedTwice(data, e, kProductionChunkFrames);
+        ASSERT_EQ(run.frames1, noteEnd) << e.name << ": el alimentador no escribio la nota entera";
+        std::vector<int64_t> t0s;
+        std::vector<int> passOf;
+        for (int pass = 0; pass < 2; ++pass)
+            for (int64_t a : of.attacks)
+                if (a < noteEnd) {
+                    t0s.push_back(a + pass * noteEnd);
+                    passOf.push_back(pass + 1);
+                }
+        const double cut = static_cast<double>(noteEnd) / data.sampleRate;
+        std::vector<OracleSegment> segs;
+        for (int pass = 0; pass < 2; ++pass)
+            for (const OracleSegment& sg : of.segments)
+                if (sg.tFin <= cut) segs.push_back({sg.tIni + pass * cut, sg.tFin + pass * cut, sg.hz});
+        Params prm;
+        prm.sampleRate = run.rate;
+        const std::vector<latch::Attack> attacks = latch::measureAttacks(run.pubs, t0s, segs, 2 * noteEnd, prm);
+        ASSERT_EQ(attacks.size(), t0s.size());
+        for (size_t i = 0; i < attacks.size(); ++i) {
+            const latch::Attack& a = attacks[i];
+            EXPECT_EQ(a.t0Frames, t0s[i]) << "t0 es el del oraculo";
+            const int p = passOf[i] - 1;
+            const AttackRow r = attackRowOf(e.name, static_cast<int>(i) + 1, passOf[i], a, run.rate);
+            rows[keyOf(r.name, r.v[0])] = r;
+            std::printf("%-24s %2zu %1d %7.3f | %1d %7.3f %7.3f | %+7.2f %+7.2f %5.2f %7.2f %7.2f\n", e.name.c_str(), i + 1,
+                        passOf[i], a.t0Sec, a.readingCarried ? 1 : 0, a.firstReadingSec, a.convergedSec, a.early.errorCents,
+                        a.late.errorCents, a.coverage, a.medianAbsCents, a.maxAbsCents);
+            for (int k : {p, 2}) {
+                all[k].push_back(a);
+                if (a.firstReadingFrames >= 0) first[k].push_back(a.firstReadingSec);
+                if (a.convergedFrames >= 0) conv[k].push_back(a.convergedSec);
+                if (!std::isnan(a.early.errorCents)) e250[k].push_back(std::fabs(a.early.errorCents));
+                if (!std::isnan(a.late.errorCents)) e1s[k].push_back(std::fabs(a.late.errorCents));
+            }
+            carried += a.readingCarried;
+            if (a.early.applies) {
+                ++applies250;
+                noRead250 += !a.early.reading;
+                if (!std::isnan(a.early.errorCents)) {
+                    ++with250;
+                    cov250 += a.early.covered;
+                }
+            }
+        }
+    }
+    const char* names[3] = {"pasada 1 (ataque)", "pasada 2 (re-punteo)", "todas"};
+    for (int k = 0; k < 3; ++k) {
+        const latch::Pooled pooled = [&] {
+            std::vector<Latch> asLatches;
+            for (const latch::Attack& a : all[k]) {
+                Latch l;
+                l.absErrors = a.absErrors;
+                l.withError = a.withError;
+                l.covered = a.covered;
+                asLatches.push_back(l);
+            }
+            return latch::poolLatchErrors(asLatches);
+        }();
+        std::printf("\n[%s] ataques=%zu\n  %s\n  %s\n  %s\n  %s\n  |error| de %d publicaciones: mediana %.3f p90 %.3f max %.3f c | "
+                    "cobertura 2sigma %.3f\n",
+                    names[k], all[k].size(), summary("t_primera s:", first[k]).c_str(), summary("t_conv s:   ", conv[k]).c_str(),
+                    summary("|err 250ms| c:", e250[k]).c_str(), summary("|err 1s| c:   ", e1s[k]).c_str(), pooled.withError,
+                    pooled.medianAbsCents, pooled.p90AbsCents, pooled.maxAbsCents, pooled.coverage);
+    }
+    std::printf("\narrastradas=%d | a 250 ms: aplica %d, sin lectura propia %d, con error %d, cubiertas a 2sigma %d\n", carried,
+                applies250, noRead250, with250, cov250);
+
+    if (const char* upd = std::getenv("WMA_LATCH_BASELINE_UPDATE"); upd != nullptr && std::string(upd) == "1") {
+        if (subset) GTEST_SKIP() << "no se regenera la linea de base bajo sanitizer: solo se midio un subconjunto";
+        std::string text = attackBaselineHeader();
+        for (const auto& kv : rows) text += formatAttackRow(kv.second) + "\n";
+        std::FILE* f = std::fopen(attackBaselinePath().c_str(), "wb");
+        ASSERT_NE(f, nullptr) << "no se pudo escribir " << attackBaselinePath();
+        std::fwrite(text.data(), 1, text.size(), f);
+        std::fclose(f);
+        GTEST_SKIP() << "linea de base por ataque REGENERADA en " << attackBaselinePath() << ": revisar el diff.";
+    }
+    bool ok = false;
+    const std::string text = slurp(attackBaselinePath(), &ok);
+    ASSERT_TRUE(ok) << "falta " << attackBaselinePath() << ". Con corpus presente esto FALLA";
+    std::map<std::string, AttackRow> want;
+    ASSERT_TRUE(parseAttackBaseline(text, &want)) << attackBaselinePath() << " tiene filas mal formadas";
+    const std::vector<std::string> diffs = diffAttackRows(want, rows, !subset);
+    for (const std::string& d : diffs) ADD_FAILURE() << d;
+    EXPECT_TRUE(diffs.empty()) << diffs.size() << " diferencias contra la linea de base por ataque";
+}
+
+TEST(LatchInstrumentRealTake, MeasuresTheAttacksOfTheG42Take) {
+    // AC-055.1 / AC-055.2. La toma real del g42 (S0, tareas 0.2/0.3) todavia no existe: SKIPPED, nunca
+    // passed. Cuando su manifiesto aparezca, esto FALLA hasta que el alimentador por ataque de la toma
+    // (objetivo por cuerda, su oraculo y su linea de base) exista: un SKIPPED no se vuelve PASSED sin medir.
+    const std::string manifest = std::string(WMA_ANALYSIS_GOLDEN_DIR) + "/../corpus-g42-manifest.txt";
+    if (!corpus::fileExists(manifest))
+        GTEST_SKIP() << "sin la toma real del g42 (" << manifest << "): S0 tareas 0.2/0.3. Esto NO cuenta como cobertura";
+    FAIL() << "aparecio " << manifest << " y el instrumento por ataque todavia no la alimenta (REQ-055 S0, tarea 0.3)";
 }
 
 }  // namespace

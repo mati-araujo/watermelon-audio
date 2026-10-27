@@ -440,6 +440,95 @@ def short_track(mono, sr, center, win_s=0.1, hop_s=0.05, floor_db=-60.0, span=15
         rows.append((start / sr, (start + n) / sr, hz, cc, db))
     return rows
 
+# --- REQ-055 (D11): los ATAQUES, detectados por el oraculo -----------------------------------------
+#
+# El instrumento mide POR ATAQUE (AC-055.2): t0 de cada punteo lo fija ESTE script, nunca el motor
+# (R-API-48). No puede depender de que el nivel caiga bajo 0,001: en el g42 la sala esta a -48,5 dBFS
+# y ninguna ventana baja de ahi. Un ataque es una SUBIDA de energia respecto del nivel previo, con la
+# cuerda sonando o no. El metodo, con sus parametros fijos:
+#
+#   · dos energias: la cruda (x²) y la de la primera diferencia ((x[n]-x[n-1])²), que realza el
+#     transitorio de banda ancha de la pua o el dedo. La cruda sola no ve un re-punteo agudo sobre una
+#     cuerda grave fuerte; la diferencia sola no ve una nota grave pura bajo ruido blanco (la diferencia
+#     atenua E2 en -39 dB);
+#   · en cada punto t de una grilla de ONSET_BLOCK frames desde el frame 0: ANTES = la media de cada
+#     energia en [t - ONSET_WINDOW, t), DESPUES = en [t, t + ONSET_WINDOW). La ventana (2048 frames,
+#     ~2 periodos de E1) es larga a proposito: la energia de un bloque de 128 frames de un seno grave
+#     oscila con la fase y abria un «ataque» cada refractario en los bajos de corpus-v1;
+#   · los frames anteriores al archivo valen el FONDO del archivo (el percentil ONSET_BACKGROUND_PCT de
+#     la energia de sus bloques de 128): una toma que arranca en el ruido de sala no abre un ataque en el
+#     frame 0, y un render que arranca con la nota, si;
+#   · candidato en t si el rms crudo de DESPUES >= ONSET_FLOOR_DBFS y alguna energia de DESPUES supera a
+#     la de ANTES en >= ONSET_RISE_DB;
+#   · t0 = el inicio del PRIMER bloque de 128 en [t, t + ONSET_WINDOW) con rms crudo >= el piso y cuya
+#     energia (de la que subio) supera a la de ANTES en ONSET_RISE_DB: el candidato llega antes que el ataque (su ventana de
+#     despues ya lo contiene), el bloque lo fecha;
+#   · refractario: el siguiente candidato se busca desde t0 + ONSET_REFRACTORY_S.
+#
+# Tolerancia declarada: ONSET_TOLERANCE_FRAMES contra el frame verdadero del ataque (la grilla de 128
+# mas el bloque en que la subida todavia no alcanza), probada en `self_test_attacks`. Lo que NO
+# detecta, a proposito: una subida de menos de ONSET_RISE_DB en las dos energias (un re-punteo apenas
+# mas fuerte que lo que ya sonaba), y dos ataques a menos del refractario (cuentan como uno).
+ONSET_BLOCK = 128
+ONSET_WINDOW = 2048
+ONSET_RISE_DB = 6.0
+ONSET_FLOOR_DBFS = -60.0
+ONSET_REFRACTORY_S = 0.15
+ONSET_TOLERANCE_FRAMES = 256
+ONSET_BACKGROUND_PCT = 0.10
+
+def detect_attacks(mono, sr, block=ONSET_BLOCK, window=ONSET_WINDOW, rise_db=ONSET_RISE_DB,
+                   floor_dbfs=ONSET_FLOOR_DBFS, refractory_s=ONSET_REFRACTORY_S):
+    """Los frames de cada ataque de `mono` (ver arriba). Lista ordenada de enteros."""
+    n = len(mono)
+    if n < block:
+        return []
+    rise = 10.0 ** (rise_db / 10.0)
+    floor = 10.0 ** (floor_dbfs / 10.0)           # sobre la energia (rms²)
+    refractory = int(round(refractory_s * sr))
+    # Sumas acumuladas de las dos energias: cualquier media de un tramo sale en O(1).
+    cr, cd = [0.0], [0.0]
+    prev = 0.0
+    for v in mono:
+        cr.append(cr[-1] + v * v)
+        d = v - prev
+        cd.append(cd[-1] + d * d)
+        prev = v
+    blocks = n // block
+    pct = lambda c: sorted((c[(k + 1) * block] - c[k * block]) / block for k in range(blocks))[
+        min(blocks - 1, int(ONSET_BACKGROUND_PCT * blocks))]
+    bg = (pct(cr), pct(cd))
+    def mean(c, b, lo, hi):                       # media en [lo, hi); lo < 0 vale el fondo
+        pre = max(0, -lo)
+        lo, hi = max(lo, 0), min(hi, n)
+        return ((c[hi] - c[lo]) + pre * b) / ((hi - lo) + pre) if hi > lo or pre else 0.0
+    out = []
+    t = 0
+    while t + block <= n:
+        before = (mean(cr, bg[0], t - window, t), mean(cd, bg[1], t - window, t))
+        after = (mean(cr, bg[0], t, t + window), mean(cd, bg[1], t, t + window))
+        rose = [i for i in (0, 1) if after[i] >= rise * before[i]]
+        if after[0] < floor or not rose:
+            t += block
+            continue
+        t0 = None
+        for k in range(t, min(t + window, n - block + 1), block):
+            if (cr[k + block] - cr[k]) / block < floor:
+                continue                          # el bloque tiene que tener senal, no solo subir
+            if any(((cr, cd)[i][k + block] - (cr, cd)[i][k]) / block >= rise * before[i] for i in rose):
+                t0 = k
+                break
+        if t0 is None:                            # la subida esta en la cola parcial: no se fecha
+            t += block
+            continue
+        out.append(t0)
+        t = t0 + refractory
+        t += (-t) % block                         # vuelve a la grilla
+    return out
+
+def format_attacks(name, attacks):
+    return [f"# ataque {name} frame {a}" for a in attacks]
+
 def format_short(name, rows):
     nan = lambda v, f: "nan" if v != v else format(v, f)
     return ["\t".join((name, f"{t0:.4f}", f"{t1:.4f}", nan(hz, ".5f"), nan(c, "+.3f"), f"{db:.2f}"))
@@ -640,9 +729,71 @@ def self_test_short():
         failures.append(f"hop 0,1 s: inicios {ts}")
     return failures
 
+def noise(n, dbfs, seed=55):
+    """Ruido blanco uniforme determinista con rms `dbfs` (LCG: sin depender del `random` de la version)."""
+    amp = 10.0 ** (dbfs / 20.0) * math.sqrt(3.0)
+    x, out = seed, []
+    for _ in range(n):
+        x = (1103515245 * x + 12345) & 0x7FFFFFFF
+        out.append(amp * (2.0 * x / 0x7FFFFFFF - 1.0))
+    return out
+
+def pluck(sr, secs, hz, tau, amp=0.3, harmonics=6):
+    """Una nota punteada: armonicos 1/k con decaimiento exponencial `tau` s desde el frame 0."""
+    n = int(secs * sr)
+    norm = amp / sum(1.0 / k for k in range(1, harmonics + 1))
+    w = 2.0 * math.pi * hz / sr
+    return [norm * math.exp(-i / (tau * sr)) * sum(math.sin(k * w * i) / k for k in range(1, harmonics + 1))
+            for i in range(n)]
+
+def mix_at(base, add, at):
+    out = list(base)
+    for i, v in enumerate(add):
+        if at + i < len(out): out[at + i] += v
+    return out
+
+def self_test_attacks():
+    """El detector de ataques contra onsets CONOCIDOS. Devuelve los fallos."""
+    failures = []
+    tol = ONSET_TOLERANCE_FRAMES
+    def check(label, got, want):
+        if len(got) != len(want) or any(abs(g - w) > tol for g, w in zip(got, want)):
+            failures.append(f"{label}: detecto {got}, esperaba {want} (±{tol} frames)")
+    for sr in (44100, 48000):
+        # (a) silencio digital y una nota a mitad de bloque: un ataque, en su frame.
+        sig = mix_at([0.0] * (2 * sr), pluck(sr, 1.5, NOMINAL["G3"], 0.8), 10_037)
+        check(f"desde silencio@{sr}", detect_attacks(sig, sr), [10_037])
+        # (b) ruido de sala a -48 dBFS solo, 3 s: ningun ataque (con el fondo encima del 0,001 del motor).
+        check(f"ruido -48 dBFS@{sr}", detect_attacks(noise(3 * sr, -48.0), sr), [])
+        # (c) sobre ese fondo: un punteo y un RE-PUNTEO con la cuerda sonando (decayo e^-1,2: -10,4 dB)
+        # sin que ninguna ventana baje del fondo, y una nota grave pura (E2) que solo ve la energia cruda.
+        base = noise(5 * sr, -48.0)
+        a1, a2, a3 = int(0.5 * sr) + 77, int(1.7 * sr) + 5, int(3.6 * sr) + 200
+        sig = mix_at(base, pluck(sr, 1.2, NOMINAL["G3"], 1.0), a1)
+        sig = mix_at(sig, pluck(sr, 1.6, NOMINAL["G3"], 1.0), a2)
+        sig = mix_at(sig, [0.05 * math.sin(2.0 * math.pi * NOMINAL["E2"] * i / sr) for i in range(sr)], a3)
+        check(f"ruido + punteo + re-punteo + E2@{sr}", detect_attacks(sig, sr), [a1, a2, a3])
+        # (d) re-punteo AGUDO sobre una cuerda grave fuerte: la energia cruda casi no sube (< 1 dB),
+        # el transitorio de la diferencia si. Atrapa un detector con una sola de las dos energias.
+        low = pluck(sr, 2.0, NOMINAL["E2"], 3.0, amp=0.5, harmonics=1)
+        a4 = int(1.0 * sr) + 31
+        sig = mix_at(low, pluck(sr, 0.8, NOMINAL["E4"], 0.5, amp=0.2, harmonics=8), a4)
+        check(f"re-punteo agudo sobre grave@{sr}", detect_attacks(sig, sr), [0, a4])
+    # (e) el refractario: dos ataques a 50 ms son uno; a 300 ms, dos.
+    sr = 48000
+    for gap_s, want in ((0.05, 1), (0.30, 2)):
+        sig = mix_at([0.0] * sr, pluck(sr, 0.2, 440.0, 0.02), 4800)
+        sig = mix_at(sig, pluck(sr, 0.5, 440.0, 0.3), 4800 + int(gap_s * sr))
+        got = detect_attacks(sig, sr)
+        if len(got) != want: failures.append(f"refractario {gap_s} s: {len(got)} ataques ({got}), esperaba {want}")
+    # (f) una nota que decae sola no tiene segundo ataque, y bajo el piso no hay ninguno.
+    check("decae sola", detect_attacks(pluck(sr, 3.0, 110.0, 0.7), sr), [0])
+    check("bajo el piso", detect_attacks(noise(sr, -66.0), sr), [])
+    return failures
+
 def self_test():
     """El instrumento contra series CONOCIDAS, en las dos direcciones. Sale con 1 si falla."""
-    failures = self_test_partials() + self_test_formats() + self_test_short()
+    failures = self_test_partials() + self_test_formats() + self_test_short() + self_test_attacks()
     for f in failures: print("SELF-TEST FALLO:", f)
     print("self-test:", "ROJO" if failures else "verde", f"({len(failures)} fallos)")
     return 1 if failures else 0
@@ -659,12 +810,20 @@ def run_short(a, files):
         print("# comando: " + " ".join(sys.argv), file=out)
         print(f"# ventana_min_s {a.short_win} (y >= {SHORT_PERIODS} periodos del centro, Hann) "
               f"hop_s {a.short_hop} span_cents ±{a.span_cents} piso_dbfs {a.short_floor_dbfs}", file=out)
+        print(f"# ataques (REQ-055 D11): grilla {ONSET_BLOCK} frames desde el frame 0, antes/despues = media en "
+              f"{ONSET_WINDOW} frames, subida >= {ONSET_RISE_DB} dB en la energia cruda o en la de la primera "
+              f"diferencia, fondo previo = percentil {ONSET_BACKGROUND_PCT} de los bloques, piso "
+              f"{ONSET_FLOOR_DBFS} dBFS, refractario {ONSET_REFRACTORY_S} s, tolerancia "
+              f"{ONSET_TOLERANCE_FRAMES} frames. Linea: '# ataque ARCHIVO frame N'", file=out)
         print("# archivo\tt_ini_s\tt_fin_s\thz\tcents_vs_centro\tnivel_dbfs", file=out)
         for path in files:
             name = os.path.basename(path)
             mono, sr, info = read_wav(path)
             center = a.nominal or nominal_for(name)
             print(f"# archivo {name} sha256 {info['sha256']} rate {sr} frames {info['frames']}", file=out)
+            attacks = detect_attacks(mono, sr)
+            if attacks:
+                print("\n".join(format_attacks(name, attacks)), file=out)
             rows = short_track(mono, sr, center, a.short_win, a.short_hop, a.short_floor_dbfs, a.span_cents)
             print("\n".join(format_short(name, rows)), file=out)
             out.flush()
