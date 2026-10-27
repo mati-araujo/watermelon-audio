@@ -102,6 +102,8 @@ Outcome renameByLink(const std::string& from, const std::string& to) {
     if (::unlink(from.c_str()) == 0) return Outcome::kDone;
     // Quedaron los dos nombres sobre el mismo archivo: se deshace el nuevo, que es nuestro, para
     // que el estado sea "no se nombro" (el `.part` sigue con los datos) y no uno a medias.
+    // Si tambien eso falla quedan los dos nombres sobre la toma (dos unlink fallidos seguidos en el
+    // mismo directorio: no se vio nunca); se reporta como fallo igual, el `.part` tiene los datos.
     ::unlink(to.c_str());
     return Outcome::kFailed;
 }
@@ -120,7 +122,8 @@ Outcome renameAfterCheck(const std::string& from, const std::string& to) {
 }  // namespace
 
 bool renameWithoutReplacing(const std::string& from, const std::string& to,
-                            NoReplaceRenameStep firstStep, NativeRenameStep native) {
+                            NoReplaceRenameStep firstStep, RenameStepFn native,
+                            RenameStepFn link) {
     switch (firstStep) {
         case NoReplaceRenameStep::kNative: {
             const Outcome o = native != nullptr ? native(from, to) : renameNative(from, to);
@@ -128,7 +131,7 @@ bool renameWithoutReplacing(const std::string& from, const std::string& to,
             [[fallthrough]];
         }
         case NoReplaceRenameStep::kLinkUnlink: {
-            const Outcome o = renameByLink(from, to);
+            const Outcome o = link != nullptr ? link(from, to) : renameByLink(from, to);
             if (o != Outcome::kUnsupported) return o == Outcome::kDone;
             [[fallthrough]];
         }

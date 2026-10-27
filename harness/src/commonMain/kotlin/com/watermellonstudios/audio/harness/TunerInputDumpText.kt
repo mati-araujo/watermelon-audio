@@ -97,7 +97,8 @@ internal fun tunerInputDumpResultText(r: TunerInputDumpResult): String = buildSt
     if (r.finalized) {
         append("\n${adbPullCommand(r.path)}")
     } else {
-        // No hay archivo con nombre final: un `adb pull` apuntaría a algo que no existe.
+        // La toma no tiene nombre final (si existe uno, es un archivo ajeno que no se tocó): un
+        // `adb pull` apuntaría a algo que no es la toma.
         append("\nNO SE PUDO CERRAR NI RENOMBRAR el archivo: revisá ese .part en el teléfono (puede faltar o estar incompleto).")
     }
 }

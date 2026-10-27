@@ -19,27 +19,25 @@ import kotlin.test.assertTrue
  */
 class TunerDiagnosticsOptInTest {
 
-    private val sources = listOf(
-        "src/jvmSharedMain/kotlin/com/watermellonstudios/audio/internal/bridge/AudioNativeBridge.kt",
-        "src/iosMain/kotlin/com/watermellonstudios/audio/internal/bridge/IosAudioBridge.kt",
-    )
-
-    /** El módulo `:audio`, buscado hacia arriba desde el directorio de trabajo del test. */
-    private fun moduleFile(relative: String): File {
-        var dir: File? = File(System.getProperty("user.dir")).absoluteFile
-        while (dir != null) {
-            File(dir, relative).takeIf { it.isFile }?.let { return it }
-            File(dir, "audio/$relative").takeIf { it.isFile }?.let { return it }
-            dir = dir.parentFile
-        }
-        error("no encontré $relative desde ${System.getProperty("user.dir")}")
+    /**
+     * Las dos fuentes, por la propiedad que fija `audio/build.gradle.kts` (la misma lista que declara
+     * como input de la task). Sin la propiedad o sin el archivo, rojo: nunca se busca otra copia.
+     */
+    private fun sources(): List<File> {
+        val raw = System.getProperty("wma.optInBridgeSources")
+        assertTrue(!raw.isNullOrBlank(), "falta wma.optInBridgeSources: corré el test por gradle")
+        val files = raw!!.split(File.pathSeparator).map(::File)
+        assertEquals(2, files.size, "se esperaban los dos puentes: $files")
+        files.forEach { assertTrue(it.isFile, "no existe ${it.path}: ¿se movió el puente?") }
+        return files
     }
 
     @Test
     fun `hallazgo 2 - las overrides del diagnostico propagan el opt-in en los dos puentes`() {
         val override = Regex("""^\s*override fun (startTunerInputDump|stopTunerInputDump)\b""")
-        for (relative in sources) {
-            val lines = moduleFile(relative).readLines()
+        for (source in sources()) {
+            val relative = source.name
+            val lines = source.readLines()
             val found = lines.indices.filter { override.containsMatchIn(lines[it]) }
             assertEquals(2, found.size, "$relative: se esperaban las dos overrides, hay ${found.size}")
             for (i in found) {

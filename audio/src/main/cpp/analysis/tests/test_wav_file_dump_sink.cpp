@@ -28,6 +28,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -436,6 +437,18 @@ RenameStepOutcome nativeUnsupported(const std::string&, const std::string&) {
 RenameStepOutcome nativeFailed(const std::string&, const std::string&) {
     return RenameStepOutcome::kFailed;
 }
+int gLinkCalls = 0;
+/// Un escalon de link que se cuenta y nombra con un rename plano SOLO si el destino esta libre.
+RenameStepOutcome linkCounted(const std::string& from, const std::string& to) {
+    ++gLinkCalls;
+    if (fs::exists(fs::symlink_status(to))) return RenameStepOutcome::kExists;
+    return std::rename(from.c_str(), to.c_str()) == 0 ? RenameStepOutcome::kDone
+                                                      : RenameStepOutcome::kFailed;
+}
+RenameStepOutcome linkUnsupported(const std::string&, const std::string&) {
+    ++gLinkCalls;
+    return RenameStepOutcome::kUnsupported;
+}
 }  // namespace
 
 /**
@@ -465,4 +478,42 @@ TEST_F(WavSinkTest, Hallazgo1_AnUnsupportedNativeStepFallsThroughWithoutEverRepl
         << "con el nativo no soportado y el destino libre tiene que nombrar por el escalon siguiente";
     EXPECT_EQ(readText(to), "nuevo");
     EXPECT_FALSE(exists(from));
+}
+
+/**
+ * Hallazgo 1 — EL ORDEN DE LOS ESCALONES: con el nativo no soportado nombra el de LINK (atomico),
+ * no el de lstat+rename (con TOCTOU); y con link tampoco soportado (sdcardfs, FUSE de Android 29)
+ * se llega al ultimo, que nombra si el destino esta libre y no lo toca si esta ocupado.
+ *
+ * Mutantes que matan: saltar del nativo directo al ultimo escalon (pierde el no-reemplazo atomico);
+ * un escalon de link terminal (toda toma en Android 29 sobre sdcardfs quedaria `finalized = 0`).
+ */
+TEST_F(WavSinkTest, Hallazgo1_TheStepsRunInOrderLinkBeforeCheckAndTheLastOneIsReached) {
+    const std::string from = pathOf("origen");
+    const std::string to = pathOf("destino");
+    writeBytes(from, "nuevo");
+
+    gLinkCalls = 0;
+    EXPECT_TRUE(renameWithoutReplacing(from, to, NoReplaceRenameStep::kNative, nativeUnsupported,
+                                       linkCounted));
+    EXPECT_EQ(gLinkCalls, 1) << "con el nativo no soportado tiene que nombrar el escalon de link";
+    EXPECT_EQ(readText(to), "nuevo");
+
+    // Link tampoco soportado: el ultimo escalon nombra si esta libre...
+    const std::string to2 = pathOf("destino2");
+    gLinkCalls = 0;
+    EXPECT_TRUE(renameWithoutReplacing(to, to2, NoReplaceRenameStep::kNative, nativeUnsupported,
+                                       linkUnsupported))
+        << "sin nativo ni link el ultimo escalon tiene que nombrar";
+    EXPECT_EQ(gLinkCalls, 1);
+    EXPECT_EQ(readText(to2), "nuevo");
+    EXPECT_FALSE(exists(to));
+
+    // ...y no toca un destino ocupado.
+    writeBytes(from, "otro");
+    writeBytes(to, kForeign);
+    EXPECT_FALSE(renameWithoutReplacing(from, to, NoReplaceRenameStep::kNative, nativeUnsupported,
+                                        linkUnsupported));
+    EXPECT_EQ(readText(to), kForeign);
+    EXPECT_EQ(readText(from), "otro");
 }

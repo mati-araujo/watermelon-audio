@@ -49,16 +49,16 @@ enum class RenameStepOutcome {
 /// (FUSE, sdcardfs) baja de escalon y no aborta el nombrado.
 RenameStepOutcome classifyRenameErrno(int err);
 
-/// El escalon nativo: lo inyecta un test para alcanzar el paso a los siguientes, que en el host
-/// nunca ocurre solo. nullptr = el del sistema.
-using NativeRenameStep = RenameStepOutcome (*)(const std::string& from, const std::string& to);
+/// Un escalon reemplazable: los tests inyectan el nativo y el de link para alcanzar el paso a los
+/// siguientes, que en el host nunca ocurre solo (ahi los dos se soportan). nullptr = el del sistema.
+using RenameStepFn = RenameStepOutcome (*)(const std::string& from, const std::string& to);
 
 /// Renombra `from` a `to` SIN reemplazar nunca un `to` existente (archivo, directorio o symlink).
 /// Empieza por `firstStep` y baja al siguiente escalon solo si el anterior no esta soportado por el
 /// kernel o el sistema de archivos. false si `to` existe o si algo fallo: `from` queda donde estaba.
 bool renameWithoutReplacing(const std::string& from, const std::string& to,
                             NoReplaceRenameStep firstStep = NoReplaceRenameStep::kNative,
-                            NativeRenameStep native = nullptr);
+                            RenameStepFn native = nullptr, RenameStepFn link = nullptr);
 
 class WavFileDumpSink final : public IDumpSink {
 public:
