@@ -85,8 +85,17 @@ float, asi que el script trae su parser RIFF: PCM16 (igual que siempre, la salid
 viejos es identica byte a byte), float32 IEEE y WAVE_FORMAT_EXTENSIBLE con subformato PCM16 o float,
 mono o estereo (estereo = 0,5·(L+R)). Cualquier otra cosa es SystemExit. Una toma con huecos no puede
 ser oraculo de nada: se RECHAZA si el nombre termina en `.invalid.wav`, o si `wmad` dice valid=0,
-framesLost>0 o discontinuities>0, o su rate no es el de fmt (o su version no es la 1). Solo
-`--allow-invalid` la lee igual.
+framesLost>0 o discontinuities>0 (v1), o su rate no es el de fmt (o su version no es la 1 ni la 2).
+Solo `--allow-invalid` la lee igual.
+
+`wmad` v2 (REQ-055 0.6) trae el MAPA DE CORTES: una toma valida puede tener perdidas y costuras
+UBICADAS (framesLost y discontinuities son totales; unlocated* tiene que ser 0 si valid=1). Cada corte
+es un intervalo cerrado [ini, fin] en frames del archivo: perdida -> ini=fin=fileFrame; costura de
+captura -> [fileFrame, fileFrame+fileSpan]. Un v2 incoherente (chunk != 64+24*capacidad, cutCount >
+capacidad, kind fuera de {1,2}, cortes desordenados o fuera de [0, framesWritten], valid=1 con
+unlocated>0, framesLost != suma de perdidas + unlocatedFrames) se rechaza. Con cortes, el oraculo
+mide POR SEGMENTO (ninguna ventana mezcla frames de dos lados de un corte) y excluye el ataque que
+toca un corte (ver `split_attacks`).
 """
 import argparse, hashlib, math, operator, os, struct, sys, wave
 
@@ -102,6 +111,14 @@ NOMINAL = {"E1": 41.20344, "A1": 55.0, "D2": 73.41619, "G2": 97.99886,
 WMAD_FMT = '<IQQQiiI'
 WMAD_SIZE = struct.calcsize(WMAD_FMT)
 assert WMAD_SIZE == 40
+# v2: tras los 40 de v1, u64 unlocatedFrames, u64 unlocatedDiscontinuities, u32 cutCount, u32
+# cutCapacity; despues cutCapacity slots de {u64 fileFrame, u64 lostFrames, u32 fileSpan, u32 kind}.
+WMAD_V2_FMT = '<QQII'
+WMAD_CUT_FMT = '<QQII'
+WMAD_V2_HEAD = WMAD_SIZE + struct.calcsize(WMAD_V2_FMT)
+WMAD_CUT_SIZE = struct.calcsize(WMAD_CUT_FMT)
+assert WMAD_V2_HEAD == 64 and WMAD_CUT_SIZE == 24
+CUT_LOSS, CUT_SEAM = 1, 2
 WAVE_FORMAT_PCM, WAVE_FORMAT_FLOAT, WAVE_FORMAT_EXTENSIBLE = 1, 3, 0xFFFE
 
 # Si es True, una toma marcada como invalida se lee igual (`--allow-invalid`). Una toma con huecos
@@ -161,11 +178,10 @@ def parse_wav(data, name):
     else:
         mono = [(vals[i] + vals[i + 1]) / 65536.0 for i in range(0, n * ch, ch)]
     wmad = None
-    if wmad_raw is not None and len(wmad_raw) >= WMAD_SIZE:
-        k = ("version", "frames_written", "frames_lost", "discontinuities", "rate", "input_source", "valid")
-        wmad = dict(zip(k, struct.unpack_from(WMAD_FMT, wmad_raw, 0)))
-    elif wmad_raw is not None and not ALLOW_INVALID:
-        raise SystemExit(f"{name}: chunk wmad de {len(wmad_raw)} bytes (esperaba {WMAD_SIZE})")
+    if wmad_raw is not None:
+        wmad, bad = parse_wmad(wmad_raw)
+        if bad and not ALLOW_INVALID:
+            raise SystemExit(f"{name}: toma rechazada, {bad} (--allow-invalid para leerla igual)")
     if not ALLOW_INVALID:
         why = invalid_reason(name, sr, wmad)
         # Un float32 con wmad lo escribio el volcado, que declara cuanto escribio: un `data` mas
@@ -180,17 +196,54 @@ def parse_wav(data, name):
             raise SystemExit(f"{name}: toma rechazada, {why} (--allow-invalid para leerla igual)")
     return mono, sr, n, wmad
 
+def parse_wmad(raw):
+    """(wmad|None, problema|None). `wmad["cuts"]` = [(ini, fin, perdidos|None)] en frames del archivo
+    (perdidos None = costura, largo desconocido); vacio si la toma es v1 o el chunk es incoherente."""
+    if len(raw) < WMAD_SIZE:
+        return None, f"chunk wmad de {len(raw)} bytes (esperaba {WMAD_SIZE})"
+    k = ("version", "frames_written", "frames_lost", "discontinuities", "rate", "input_source", "valid")
+    w = dict(zip(k, struct.unpack_from(WMAD_FMT, raw, 0)))
+    w["cuts"] = []
+    if w["version"] != 2:
+        return w, None
+    if len(raw) < WMAD_V2_HEAD:
+        return w, f"chunk wmad v2 de {len(raw)} bytes (esperaba al menos {WMAD_V2_HEAD})"
+    unl_frames, unl_disc, count, cap = struct.unpack_from(WMAD_V2_FMT, raw, WMAD_SIZE)
+    w.update(unlocated_frames=unl_frames, unlocated_discontinuities=unl_disc, cut_count=count, cut_capacity=cap)
+    if len(raw) != WMAD_V2_HEAD + WMAD_CUT_SIZE * cap:
+        return w, f"chunk wmad v2 de {len(raw)} bytes (esperaba {WMAD_V2_HEAD + WMAD_CUT_SIZE * cap} = 64 + 24*{cap})"
+    if count > cap:
+        return w, f"wmad cutCount={count} mayor que cutCapacity={cap}"
+    cuts, prev, lost_sum = [], 0, 0
+    for i in range(count):
+        frame, lost, span, kind = struct.unpack_from(WMAD_CUT_FMT, raw, WMAD_V2_HEAD + WMAD_CUT_SIZE * i)
+        if kind not in (CUT_LOSS, CUT_SEAM):
+            return w, f"wmad corte {i} con kind={kind} (esperaba 1 o 2)"
+        if frame < prev:
+            return w, f"wmad cortes desordenados: el {i} cae en {frame} y el anterior en {prev}"
+        if frame + span > w["frames_written"]:
+            return w, f"wmad corte {i} [{frame}, {frame + span}] fuera de [0, framesWritten={w['frames_written']}]"
+        prev, lost_sum = frame, lost_sum + lost
+        cuts.append((frame, frame + span if kind == CUT_SEAM else frame, lost if kind == CUT_LOSS else None))
+    if w["valid"] and (unl_frames > 0 or unl_disc > 0):
+        return w, f"wmad valid=1 con unlocatedFrames={unl_frames} unlocatedDiscontinuities={unl_disc}"
+    if w["frames_lost"] != lost_sum + unl_frames:
+        return w, f"wmad framesLost={w['frames_lost']} y la suma de los cortes ({lost_sum}) + unlocatedFrames ({unl_frames}) es otra"
+    w["cuts"] = cuts
+    return w, None
+
 def invalid_reason(name, sr, wmad):
     """Por que una toma no puede ser oraculo, o None. Una toma con huecos no mide la altura de nada."""
     if name.endswith(".invalid.wav"):
         return "el nombre dice .invalid.wav"
     if wmad is None:
         return None
-    if wmad["version"] != 1:
+    if wmad["version"] not in (1, 2):
         return f"wmad version {wmad['version']} desconocida"
     if not wmad["valid"]: return "wmad valid=0"
-    if wmad["frames_lost"] > 0: return f"wmad framesLost={wmad['frames_lost']}"
-    if wmad["discontinuities"] > 0: return f"wmad discontinuities={wmad['discontinuities']}"
+    if wmad["version"] == 1:       # en v2 las perdidas ubicadas son cortes, no invalidez
+        if wmad["frames_lost"] > 0: return f"wmad framesLost={wmad['frames_lost']}"
+        if wmad["discontinuities"] > 0: return f"wmad discontinuities={wmad['discontinuities']}"
     if wmad["rate"] != sr: return f"el rate de wmad ({wmad['rate']}) no es el de fmt ({sr})"
     return None
 
@@ -416,11 +469,12 @@ def locate(x, sr, center, span, prev):
     r = refine_peak(logmag, c0, 1.5, 15.0)
     return r if r is not None and abs(r) <= span else None
 
-def short_track(mono, sr, center, win_s=0.1, hop_s=0.05, floor_db=-60.0, span=150.0):
+def short_track(mono, sr, center, win_s=0.1, hop_s=0.05, floor_db=-60.0, span=150.0, offset=0):
     """Altura instantanea por tramos cortos. Devuelve [(t_ini, t_fin, hz, cents_vs_centro, dbfs)].
 
     Ventana Hann de max(win_s, 10 periodos del centro); hop fijo. Bajo `floor_db` (RMS del tramo) o
-    sin pico en ±span el hz es nan: no hay altura que declarar, y no se inventa una."""
+    sin pico en ±span el hz es nan: no hay altura que declarar, y no se inventa una. `offset` es el
+    frame del archivo en que empieza `mono` (un segmento): los tiempos salen del archivo."""
     n = int(round(max(win_s, SHORT_PERIODS / center) * sr))
     hop = max(1, int(round(hop_s * sr)))
     hann = hann_window(n)
@@ -437,7 +491,7 @@ def short_track(mono, sr, center, win_s=0.1, hop_s=0.05, floor_db=-60.0, span=15
             c = locate(list(map(operator.mul, seg, hann)), sr, center, span, prev)
         prev, prev_db = c, db
         hz, cc = (math.nan, math.nan) if c is None else (detune(center, c), c)
-        rows.append((start / sr, (start + n) / sr, hz, cc, db))
+        rows.append(((start + offset) / sr, (start + offset + n) / sr, hz, cc, db))
     return rows
 
 # --- REQ-055 (D11): los ATAQUES, detectados por el oraculo -----------------------------------------
@@ -526,8 +580,43 @@ def detect_attacks(mono, sr, block=ONSET_BLOCK, window=ONSET_WINDOW, rise_db=ONS
         t += (-t) % block                         # vuelve a la grilla
     return out
 
-def format_attacks(name, attacks):
-    return [f"# ataque {name} frame {a}" for a in attacks]
+def segments_of(n, cuts):
+    """Los segmentos [a, b) de un archivo de `n` frames que ningun corte toca. Un corte [ini, fin]
+    deja [.., ini) antes y desde `fin` despues; los frames de [ini, fin) de una costura no son de nadie."""
+    segs, cursor = [], 0
+    for ini, fin, _ in cuts:
+        ini, fin = min(ini, n), min(fin, n)
+        if ini > cursor: segs.append((cursor, ini))
+        cursor = max(cursor, fin)
+    if n > cursor: segs.append((cursor, n))
+    return segs
+
+def detect_attacks_cut(mono, sr, cuts):
+    """`detect_attacks` por segmento (el salto de un corte no es un ataque que el detector deba ver
+    a traves): frames del archivo, ordenados."""
+    return [a + t for a, b in segments_of(len(mono), cuts) for t in detect_attacks(mono[a:b], sr)]
+
+def short_track_cut(mono, sr, cuts, center, *args):
+    """`short_track` por segmento: ninguna ventana mezcla frames de dos lados de un corte."""
+    return [r for a, b in segments_of(len(mono), cuts) for r in short_track(mono[a:b], sr, center, *args, offset=a)]
+
+def split_attacks(attacks, n, cuts):
+    """(conservados, excluidos). El ataque t0 dura hasta tEnd = el t0 del siguiente (o `n`); su guarda
+    es [t0 - ONSET_WINDOW, tEnd] cerrado: se excluye si toca un corte [ini, fin]. REGLA EXACTA que
+    comparte el instrumento C++: no tocar un borde en uno solo de los dos lados."""
+    kept, excluded = [], []
+    for i, t0 in enumerate(attacks):
+        t_end = attacks[i + 1] if i + 1 < len(attacks) else n
+        hit = any(ini <= t_end and fin >= t0 - ONSET_WINDOW for ini, fin, _ in cuts)
+        (excluded if hit else kept).append(t0)
+    return kept, excluded
+
+def format_attacks(name, attacks, excluded=()):
+    tagged = sorted([(a, "ataque") for a in attacks] + [(a, "ataque-excluido") for a in excluded])
+    return [f"# {tag} {name} frame {a}" for a, tag in tagged]
+
+def format_cuts(name, cuts):
+    return [f"# corte {name} {ini} {fin} {'?' if lost is None else lost}" for ini, fin, lost in cuts]
 
 def format_short(name, rows):
     nan = lambda v, f: "nan" if v != v else format(v, f)
@@ -599,6 +688,16 @@ def fmt_chunk(tag, ch, sr, bits, extensible=None):
 
 def wmad_chunk(version=1, written=1000, lost=0, disc=0, rate=44100, source=1, valid=1):
     return struct.pack(WMAD_FMT, version, written, lost, disc, rate, source, valid)
+
+def wmad_v2_chunk(written=1000, lost=0, disc=0, rate=44100, source=1, valid=1, unl_frames=0, unl_disc=0,
+                  cuts=(), count=None, cap=256, slots=None, version=2):
+    """wmad v2 a mano. `cuts` = [(fileFrame, lostFrames, fileSpan, kind)]; `slots` fuerza cuantos
+    slots lleva el cuerpo (default `cap`)."""
+    body = struct.pack(WMAD_FMT, version, written, lost, disc, rate, source, valid)
+    body += struct.pack(WMAD_V2_FMT, unl_frames, unl_disc, len(cuts) if count is None else count, cap)
+    slot = [struct.pack(WMAD_CUT_FMT, *c) for c in cuts]
+    slot += [b'\0' * WMAD_CUT_SIZE] * ((cap if slots is None else slots) - len(slot))
+    return body + b''.join(slot)
 
 def f32(v): return struct.unpack('<f', struct.pack('<f', v))[0]
 
@@ -677,6 +776,102 @@ def self_test_formats():
         except SystemExit: failures.append("PCM16 sin wmad truncado: la tolerancia vieja se perdio")
         else:
             if got != [v / 32768.0 for v in ints[:4]]: failures.append("PCM16 truncado: frames mal leidos")
+    return failures
+
+def self_test_cuts():
+    """wmad v2 (cortes), segmentos y exclusion de ataques. Devuelve los fallos."""
+    import tempfile
+    failures = []
+    global ALLOW_INVALID
+    n = 1000
+    pay = struct.pack('<%df' % n, *([0.0] * n))
+    mk = lambda **kw: wmad_v2_chunk(**kw)
+    good = [(100, 7, 0, CUT_LOSS), (400, 0, 50, CUT_SEAM), (900, 5, 0, CUT_LOSS)]
+    with tempfile.TemporaryDirectory() as d:
+        def read(name, wm, payload=pay):
+            p = os.path.join(d, name)
+            with open(p, 'wb') as f: f.write(riff(fmt_chunk(3, 1, 44100, 32), payload, wm))
+            return read_wav(p)
+        _, _, info = read("v2.wav", mk(lost=12, disc=3, cuts=good))
+        if info["wmad"]["cuts"] != [(100, 100, 7), (400, 450, None), (900, 900, 5)]:
+            failures.append(f"v2 valido: cortes mal parseados {info['wmad']['cuts']}")
+        _, _, info = read("v2sin.wav", mk())
+        if info["wmad"]["cuts"] != []: failures.append("v2 sin cortes: tenia que dar lista vacia")
+        _, _, info = read("v1.wav", wmad_chunk(written=n))
+        if info["wmad"]["cuts"] != []: failures.append("v1 valida: tenia que dar lista vacia")
+        cases = (("chunk mas largo que 64+24*cap", mk(cuts=good, lost=12, slots=257)),
+                 ("chunk mas corto que 64+24*cap", mk(cuts=good, lost=12, slots=255)),
+                 ("cutCount > cutCapacity", mk(cuts=good, lost=12, count=257)),
+                 ("cutCount mayor que la capacidad chica", mk(cuts=good, lost=12, cap=3, count=4)),
+                 ("kind 3", mk(cuts=[(100, 7, 0, 3)], lost=7)),
+                 ("kind 0", mk(cuts=[(100, 7, 0, 0)], lost=7)),
+                 ("cortes desordenados", mk(cuts=[(400, 5, 0, CUT_LOSS), (399, 7, 0, CUT_LOSS)], lost=12)),
+                 ("perdida fuera de framesWritten", mk(cuts=[(n + 1, 7, 0, CUT_LOSS)], lost=7)),
+                 ("costura que se pasa de framesWritten", mk(cuts=[(990, 0, 11, CUT_SEAM)])),
+                 ("valid=1 con unlocatedFrames", mk(unl_frames=3, lost=3)),
+                 ("valid=1 con unlocatedDiscontinuities", mk(unl_disc=1, disc=1)),
+                 ("framesLost != suma", mk(cuts=good, lost=13)),
+                 ("framesLost < suma", mk(cuts=good, lost=11)),
+                 ("valid=0", mk(cuts=good, lost=12, valid=0)),
+                 ("rate distinto", mk(cuts=good, lost=12, rate=48000)),
+                 ("framesWritten distinto de los frames", mk(cuts=good, lost=12, written=n + 1)),
+                 ("version 3", mk(cuts=good, lost=12, version=3)))
+        for what, wm in cases:
+            ALLOW_INVALID = False
+            try: read("c.wav", wm); failures.append(f"wmad v2 {what}: tenia que rechazarse")
+            except SystemExit: pass
+        # un borde exacto SI pasa: costura que termina en framesWritten y perdida en el mismo frame que otra.
+        ALLOW_INVALID = False
+        try: read("borde.wav", mk(cuts=[(500, 4, 0, CUT_LOSS), (500, 3, 0, CUT_LOSS), (990, 0, 10, CUT_SEAM)], lost=7))
+        except SystemExit as e: failures.append(f"wmad v2 en el borde exacto: se rechazo ({e})")
+        # unlocated>0 con valid=0 y --allow-invalid se lee sin romper; ni el chunk de tamano malo.
+        ALLOW_INVALID = True
+        for wm in (mk(unl_frames=3, lost=3, valid=0), mk(cuts=good, lost=12, slots=257), mk(count=999)):
+            try: read("a.wav", wm)
+            except SystemExit as e: failures.append(f"wmad v2 incoherente con --allow-invalid: {e}")
+        ALLOW_INVALID = False
+    # segmentos
+    if segments_of(100, [(40, 40, 3)]) != [(0, 40), (40, 100)]: failures.append("segmentos de una perdida")
+    if segments_of(100, [(40, 60, None)]) != [(0, 40), (60, 100)]: failures.append("segmentos de una costura")
+    if segments_of(100, [(40, 60, None), (50, 50, 2)]) != [(0, 40), (60, 100)]: failures.append("perdida dentro de costura")
+    if segments_of(100, [(0, 0, 1), (100, 100, 1)]) != [(0, 100)]: failures.append("cortes en los extremos")
+    if segments_of(100, []) != [(0, 100)]: failures.append("sin cortes")
+    # un corte de perdida en medio de una nota sostenida, con salto de fase: ninguna ventana lo cruza
+    sr, F = 44100, 44100
+    G3 = NOMINAL["G3"]
+    a_part = synth(sr, 1.0, lambda t: G3)
+    b_part = [v for v in synth(sr, 1.0, lambda t: G3)][777:]     # el mismo tono, con otra fase: un salto
+    sig = a_part[:F] + b_part
+    cuts = [(F, F, 777)]
+    rows = short_track_cut(sig, sr, cuts, G3)
+    wins = [(round(r[0] * sr), round(r[1] * sr)) for r in rows]
+    if not wins or not any(b <= F for a, b in wins) or not any(a >= F for a, b in wins):
+        failures.append("corte sostenido: faltan tramos de un lado")
+    if any(a < F < b for a, b in wins): failures.append("corte sostenido: un tramo cruza el corte")
+    if any(r[3] != r[3] or abs(r[3]) > 0.1 for r in rows):
+        failures.append("corte sostenido: un tramo lee otra altura que el tono")
+    found = detect_attacks_cut(sig, sr, cuts)
+    if found != [0, F]:      # el segmento posterior arranca con la nota: el detector lo ve como ataque, y se excluye
+        failures.append(f"corte sostenido: el detector corre por segmento y esperaba [0, {F}], dio {found}")
+    kept, excl = split_attacks(found, len(sig), cuts)
+    if kept: failures.append(f"corte sostenido: ataque sin excluir {kept}")
+    # exclusion: borde +-1. Un solo ataque, tEnd = n.
+    n2 = 50000
+    for fin, want in ((27952, [30000]), (27951, [])):
+        k, e = split_attacks([30000], n2, [(20000, fin, None)])
+        if e != want or k != ([] if want else [30000]): failures.append(f"borde de la guarda (fin {fin}): excluidos {e}")
+    # y el borde de tEnd: dos ataques, una perdida en el tEnd del primero o un frame despues.
+    for f, want_k in ((40000, []), (40001, [10000])):
+        k, e = split_attacks([10000, 40000], n2, [(f, f, 1)])
+        if k != want_k or e != sorted(set([10000, 40000]) - set(want_k)):
+            failures.append(f"borde de tEnd (perdida en {f}): conservados {k}, excluidos {e}")
+    if split_attacks([30000], n2, [(20000, 20000, 1)])[0] != [30000]: failures.append("corte lejano: no debia excluir")
+    if split_attacks([30000], n2, [])[0] != [30000]: failures.append("sin cortes: no debia excluir")
+    # formato
+    if format_cuts("a.wav", [(5, 5, 3), (7, 9, None)]) != ["# corte a.wav 5 5 3", "# corte a.wav 7 9 ?"]:
+        failures.append("formato de '# corte'")
+    if format_attacks("a.wav", [1, 9], [4]) != ["# ataque a.wav frame 1", "# ataque-excluido a.wav frame 4", "# ataque a.wav frame 9"]:
+        failures.append("formato de '# ataque-excluido'")
     return failures
 
 def synth(sr, secs, hz_of_t, harmonics=6):
@@ -793,7 +988,7 @@ def self_test_attacks():
 
 def self_test():
     """El instrumento contra series CONOCIDAS, en las dos direcciones. Sale con 1 si falla."""
-    failures = self_test_partials() + self_test_formats() + self_test_short() + self_test_attacks()
+    failures = self_test_partials() + self_test_formats() + self_test_short() + self_test_attacks() + self_test_cuts()
     for f in failures: print("SELF-TEST FALLO:", f)
     print("self-test:", "ROJO" if failures else "verde", f"({len(failures)} fallos)")
     return 1 if failures else 0
@@ -816,15 +1011,26 @@ def run_short(a, files):
               f"{ONSET_FLOOR_DBFS} dBFS, refractario {ONSET_REFRACTORY_S} s, tolerancia "
               f"{ONSET_TOLERANCE_FRAMES} frames. Linea: '# ataque ARCHIVO frame N'", file=out)
         print("# archivo\tt_ini_s\tt_fin_s\thz\tcents_vs_centro\tnivel_dbfs", file=out)
+        cuts_doc = False
         for path in files:
             name = os.path.basename(path)
             mono, sr, info = read_wav(path)
             center = a.nominal or nominal_for(name)
             print(f"# archivo {name} sha256 {info['sha256']} rate {sr} frames {info['frames']}", file=out)
-            attacks = detect_attacks(mono, sr)
-            if attacks:
-                print("\n".join(format_attacks(name, attacks)), file=out)
-            rows = short_track(mono, sr, center, a.short_win, a.short_hop, a.short_floor_dbfs, a.span_cents)
+            cuts = info["wmad"]["cuts"] if info["wmad"] else []
+            if cuts and not cuts_doc:
+                cuts_doc = True       # solo si hay cortes: sin ellos la cabecera es la de siempre, byte a byte
+                print("# cortes (REQ-055 0.6): intervalo cerrado [INI, FIN] en frames del archivo; perdida: INI=FIN, "
+                      "faltan PERDIDOS frames justo antes de INI; costura de captura: el salto cae en un frame de "
+                      "[INI, FIN], PERDIDOS '?'. Linea: '# corte ARCHIVO INI FIN PERDIDOS'. Detector y tramos corren por "
+                      f"segmento; el ataque cuya guarda [t0 - {ONSET_WINDOW}, t0 del siguiente o fin] toca un corte va "
+                      "como '# ataque-excluido ARCHIVO frame N'", file=out)
+            if cuts:
+                print("\n".join(format_cuts(name, cuts)), file=out)
+            attacks, excluded = split_attacks(detect_attacks_cut(mono, sr, cuts), len(mono), cuts)
+            if attacks or excluded:
+                print("\n".join(format_attacks(name, attacks, excluded)), file=out)
+            rows = short_track_cut(mono, sr, cuts, center, a.short_win, a.short_hop, a.short_floor_dbfs, a.span_cents)
             print("\n".join(format_short(name, rows)), file=out)
             out.flush()
     finally:
