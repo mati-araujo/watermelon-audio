@@ -30,12 +30,14 @@
 
 namespace wma_test {
 namespace {
-FakeAudioBackend* g_lastCreated = nullptr;
+// Atomico desde REQ-055 S2: dos motores creados a la vez (render offline en
+// paralelo) escriben aca desde hilos distintos. El TSan de Linux lo vio.
+std::atomic<FakeAudioBackend*> g_lastCreated{nullptr};
 }  // namespace
 
-FakeAudioBackend* lastCreatedSystemBackend() { return g_lastCreated; }
+FakeAudioBackend* lastCreatedSystemBackend() { return g_lastCreated.load(); }
 
-void resetLastCreatedSystemBackend() { g_lastCreated = nullptr; }
+void resetLastCreatedSystemBackend() { g_lastCreated.store(nullptr); }
 
 // ---- Captura propia del InputNode (REQ-054) --------------------------------
 namespace {
@@ -165,7 +167,7 @@ namespace watermelon_audio {
 
 std::unique_ptr<IAudioBackend> createSystemAudioBackend() {
     auto backend = std::make_unique<wma_test::FakeAudioBackend>();
-    wma_test::g_lastCreated = backend.get();
+    wma_test::g_lastCreated.store(backend.get());
     return backend;
 }
 
