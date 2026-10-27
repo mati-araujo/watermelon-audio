@@ -122,6 +122,9 @@ public:
         return nullptr;
     }
 
+    /** Number of modulator slots, including slot 0 (nullptr = NONE). */
+    int getModulatorCount() const { return static_cast<int>(mModulators.size()); }
+
     /** Get modulator by index (index 0 is nullptr = NONE) */
     SignalModulator* getModulator(int index) const {
         if (index >= 0 && index < static_cast<int>(mModulators.size()))

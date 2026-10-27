@@ -140,6 +140,9 @@ add_executable(core_tests
     test_capture_gap_mailbox.cpp
     test_capture_sample_rate.cpp
     test_offline_render.cpp
+    test_offline_handle.cpp
+    test_offline_static_state.cpp
+    test_offline_render_checks.cpp
     test_fx_track_routing.cpp
     test_fade_lifecycle.cpp
     test_usb_stream_start.cpp

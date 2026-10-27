@@ -3712,6 +3712,62 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     )
 
     fun looperResetTelemetry() = nativeLooperResetTelemetry()
+
+    // ==================== Offline render by handle (REQ-055 S2, ADR-0008) ====================
+    //
+    // EL SEGUNDO MODELO DEL BRIDGE: todo lo de arriba opera sobre el motor GLOBAL (el
+    // vivo); esto, sobre instancias de render offline identificadas por un handle
+    // opaco. El consumidor no las usa directo: las posee [OfflineRenderer], que cierra
+    // el handle una sola vez. Cada una devuelve el `WmaResult` crudo (o un indice
+    // `>= 0` en `offlineAddEffect`); un handle 0, desconocido o ya destruido es
+    // `WMA_ERROR_NOT_INITIALIZED` (-1), nunca un crash. No toman ningun lock de este
+    // objeto ni del motor vivo.
+
+    internal fun offlineCreate(): Long = nativeOfflineCreate()
+    internal fun offlineDestroy(handle: Long): Int = nativeOfflineDestroy(handle)
+    internal fun offlineStart(handle: Long, sampleRate: Int, maxBlockFrames: Int): Int =
+        nativeOfflineStart(handle, sampleRate, maxBlockFrames)
+    internal fun offlineRender(handle: Long, output: FloatArray, frames: Int): Int =
+        nativeOfflineRender(handle, output, frames)
+    internal fun offlineStop(handle: Long): Int = nativeOfflineStop(handle)
+    internal fun offlineSetEngineType(handle: Long, type: Int): Int =
+        nativeOfflineSetEngineType(handle, type)
+    internal fun offlineSetEngineParameter(handle: Long, paramId: Int, value: Float): Int =
+        nativeOfflineSetEngineParameter(handle, paramId, value)
+    internal fun offlineSetMasterVolume(handle: Long, volume: Float): Int =
+        nativeOfflineSetMasterVolume(handle, volume)
+    internal fun offlineSetXY(handle: Long, x: Float, y: Float): Int = nativeOfflineSetXY(handle, x, y)
+    internal fun offlineSetFrequencyAndAmplitude(handle: Long, frequency: Float, amplitude: Float): Int =
+        nativeOfflineSetFrequencyAndAmplitude(handle, frequency, amplitude)
+    internal fun offlineLoadSoundFontFromPath(handle: Long, path: String): Int =
+        nativeOfflineLoadSoundFontFromPath(handle, path)
+    internal fun offlineSetSoundFontPreset(handle: Long, presetIndex: Int): Int =
+        nativeOfflineSetSoundFontPreset(handle, presetIndex)
+    internal fun offlineSfNoteOn(handle: Long, touchId: Int, midiNote: Int, velocity: Float): Int =
+        nativeOfflineSfNoteOn(handle, touchId, midiNote, velocity)
+    internal fun offlineSfNoteOff(handle: Long, touchId: Int): Int = nativeOfflineSfNoteOff(handle, touchId)
+    internal fun offlineAddEffect(handle: Long, typeId: Int): Int = nativeOfflineAddEffect(handle, typeId)
+    internal fun offlineClearAllEffects(handle: Long): Int = nativeOfflineClearAllEffects(handle)
+    internal fun offlineSetEffectParameter(handle: Long, index: Int, paramId: Int, value: Float): Int =
+        nativeOfflineSetEffectParameter(handle, index, paramId, value)
+
+    private external fun nativeOfflineCreate(): Long
+    private external fun nativeOfflineDestroy(handle: Long): Int
+    private external fun nativeOfflineStart(handle: Long, sampleRate: Int, maxBlockFrames: Int): Int
+    private external fun nativeOfflineRender(handle: Long, output: FloatArray, frames: Int): Int
+    private external fun nativeOfflineStop(handle: Long): Int
+    private external fun nativeOfflineSetEngineType(handle: Long, type: Int): Int
+    private external fun nativeOfflineSetEngineParameter(handle: Long, paramId: Int, value: Float): Int
+    private external fun nativeOfflineSetMasterVolume(handle: Long, volume: Float): Int
+    private external fun nativeOfflineSetXY(handle: Long, x: Float, y: Float): Int
+    private external fun nativeOfflineSetFrequencyAndAmplitude(handle: Long, frequency: Float, amplitude: Float): Int
+    private external fun nativeOfflineLoadSoundFontFromPath(handle: Long, path: String): Int
+    private external fun nativeOfflineSetSoundFontPreset(handle: Long, presetIndex: Int): Int
+    private external fun nativeOfflineSfNoteOn(handle: Long, touchId: Int, midiNote: Int, velocity: Float): Int
+    private external fun nativeOfflineSfNoteOff(handle: Long, touchId: Int): Int
+    private external fun nativeOfflineAddEffect(handle: Long, typeId: Int): Int
+    private external fun nativeOfflineClearAllEffects(handle: Long): Int
+    private external fun nativeOfflineSetEffectParameter(handle: Long, index: Int, paramId: Int, value: Float): Int
 }
 
 /**
