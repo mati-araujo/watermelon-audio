@@ -129,6 +129,11 @@ RT_ROOTS = {
     "SplitBackend::InputCallback::onAudioReady",
     "SplitBackend::OutputCallback::onAudioReady",
     "RoundTripMeasurer::onAudioReady",
+    # CoreAudio en macOS (REQ-055 S3). El render block es un bloque de ObjC y el
+    # walker no lo ve; lo NUEVO que corre adentro vive en estas dos funciones con
+    # nombre para que si lo vea. El resto del bloque sigue sin cubrir (ya lo estaba).
+    "CoreAudioMacDiag::noteRenderEnter",
+    "CoreAudioMacDiag::noteRenderExit",
     # La cadena de efectos y la etapa de salida: llamadas desde el callback.
     "EffectChain::process",
     "OutputStage::processOutput",
