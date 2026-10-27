@@ -74,6 +74,7 @@ class MainActivity : ComponentActivity() {
             usbSmoke = { reporter, listen -> usbHarness.runAutomatic(reporter, humanWaitMs, listen) },
             soundFontExtras = { check, reporter -> SoundFontFdPicker(check, reporter) },
             smokeRequest = request,
+            tunerReadSink = SmokeSink { line -> Log.i(TUNER_READ_TAG, line) },
         )
         setContent { HarnessApp(platform) }
     }

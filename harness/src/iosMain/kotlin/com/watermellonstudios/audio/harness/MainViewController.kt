@@ -32,6 +32,7 @@ fun MainViewController(): UIViewController = ComposeUIViewController {
         HarnessPlatform(
             smokeSink = SmokeSink { line -> println(line) },
             writeFile = ::writeTempFile,
+            tunerReadSink = SmokeSink { line -> println(line) },
         ),
     )
 }
