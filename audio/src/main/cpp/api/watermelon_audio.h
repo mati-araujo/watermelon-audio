@@ -1686,7 +1686,12 @@ WMA_API void  wma_looper_set_master_volume(WmaEngine* engine, float volume);
 WMA_API float wma_looper_get_master_volume(const WmaEngine* engine);
 
 /**
- * Set loop region for a track (start/end in frames).
+ * Set loop region for a track (start/end in frames; end <= 0 = to the end of the track).
+ *
+ * The stored region always satisfies 0 <= start < end <= track length. A region
+ * shorter than 1024 frames is stretched at its END up to 1024, but never past the
+ * track length: on a track (or a tail from `start`) shorter than that, the region
+ * just runs to the end. Before 2.22.2 that case left end PAST the length.
  *
  * 64-bit on purpose, and it has to stay that way: AudioLooper::setTrackLoopRegion
  * takes int64_t and saturates into int32 itself, because TrackBuffer still stores
