@@ -1281,6 +1281,12 @@ void AudioEngine::applyEffectsAndLooper(float* output, int32_t numFrames) {
     // Sin ninguna pista marcada —el caso por defecto y el que corre hoy para todo
     // el mundo— `mixFxTracks` no toca el buffer y esto cuesta una comparación por
     // pista, sin una sola pasada extra sobre las muestras.
+    //
+    // REQ-055 S11 — el play frame del bloque se toma UNA vez, aca, antes de las dos pasadas del
+    // looper: la cancion programada deriva su fase de el, y las pistas ruteadas a la cadena
+    // (esta pasada) y el resto (`process()`) tienen que ver el mismo frame.
+    const int64_t playFrameAtBlockStart = mTransport.getPlayFrame();
+    mAudioLooper.beginBlock(playFrameAtBlockStart, numFrames);
     mAudioLooper.mixFxTracks(mOutputStage.getTempBuffer(), numFrames);
 
     // Effects
@@ -1293,11 +1299,9 @@ void AudioEngine::applyEffectsAndLooper(float* output, int32_t numFrames) {
     mPreRollRing.write(output, numFrames);
 
     // ---- TRANSPORT TICK ----
-    // Snapshot Transport's play position BEFORE the tick so we pass the
-    // block-start frame to the looper (not the post-tick frame).
-    const int64_t playFrameAtBlockStart = mTransport.getPlayFrame();
-    // Emits any scheduled metronome clicks for this audio block. RT-safe; runs
-    // before the looper so the click is mixed by AudioLooper::process.
+    // `playFrameAtBlockStart` (arriba) es el frame de inicio del bloque, no el posterior al tick.
+    // Emits any scheduled metronome clicks for this audio block. RT-safe; runs before the looper
+    // so the click is mixed by AudioLooper::process.
     mTransport.tick(numFrames, mAudioLooper);
 
     // ---- FADE (applied to synth + FX only — NOT to loops) ----
@@ -2327,6 +2331,10 @@ void AudioEngine::resetChainForOfflineRender() {
     mEffectChain.reset();
     mResetEffectChainPending.store(false, std::memory_order_release);
 
+    // Las voces de la cancion programada (smoothers, colas de fundido). La agenda y los clips son
+    // la ENTRADA del render, como el contenido del looper, y no se tocan.
+    mAudioLooper.resetSongForRender();
+
     // Osciladores y moduladores (fases y LFOs del oscilador clasico).
     for (int i = 0; i < mOscBank.getOscillatorCount(); ++i) {
         if (auto* osc = mOscBank.getPrimaryOscillator(i)) osc->resetForRender();
@@ -2666,6 +2674,8 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
         // y esa pasada SALTEA las pistas marcadas. Sin esta llamada, una pista
         // marcada no la mezclaría nadie y quedaría MUDA con USB INPUT_FX activo
         // — un modo entero donde el flag apagaría la pista en vez de rutearla.
+        const int64_t usbPlayFrameAtBlockStart = mTransport.getPlayFrame();
+        mAudioLooper.beginBlock(usbPlayFrameAtBlockStart, numFrames);
         mAudioLooper.mixFxTracks(mOutputStage.getTempBuffer(), numFrames);
 
         // 3. Process through effect chain (INPUT → EFFECTS → OUTPUT)
@@ -2675,7 +2685,6 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
         // Without this the USB direct INPUT_FX fast-path bypasses the looper entirely:
         // no recording, no playback of existing tracks, no transport advance.
         mPreRollRing.write(outputData, numFrames);
-        const int64_t usbPlayFrameAtBlockStart = mTransport.getPlayFrame();
         mTransport.tick(numFrames, mAudioLooper);
         mAudioLooper.process(outputData, numFrames, usbPlayFrameAtBlockStart);
 

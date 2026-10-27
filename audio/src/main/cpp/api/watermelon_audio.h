@@ -2104,6 +2104,106 @@ WMA_API bool wma_looper_import_track(WmaEngine* engine, int track_index,
 WMA_API WmaResult wma_looper_import_track_ex(WmaEngine* engine, int track_index,
                                              const char* file_path, int sample_rate);
 
+/* ----------------------------------------------------------------
+ * Programmed song (REQ-055 S11): an agenda of sections, each with one clip per
+ * track, mixed by the audio callback instead of the looper's takes.
+ *
+ * Time is the Transport PLAY FRAME (wma_transport_get_play_frame), an absolute
+ * int64 that is never reset. Section k rules in [start_k, start_{k+1}) (the last
+ * one until end_frame); a track's phase in it is (frame - start_k) mod L, so the
+ * output depends on the frame and not on the block size.
+ *
+ * A clip is a dense, immutable buffer of exactly L stereo frames, built OFF the
+ * audio thread (decode + resample + trim + normalise). The agenda is published to
+ * the callback through a wait-free triple buffer and adopted at the start of a
+ * block; republishing while it plays is the supported way to edit.
+ *
+ * Fade F = max(64, round(0.005 * sample_rate)) frames in [B - F, B) before every
+ * border B: equal-power for a clip change or a phase jump, raised cosine to enter
+ * or leave silence (also the start at start_0 and the end at end_frame), nothing
+ * when the same clip stays aligned. The new state rules EXACTLY from B (the
+ * downbeat enters at full gain; the pre-entry plays the clip's tail). Before the
+ * first start and from end_frame the tracks are silent -- they do NOT fall back to
+ * the looper's takes while an agenda is published.
+ *
+ * What it needs to sound: the looper enabled (wma_song_set_schedule enables it)
+ * and the audio running (a live stream, or wma_offline_render). The looper does
+ * NOT need to be playing. For an offline render read the anchor with
+ * wma_transport_get_play_frame() after wma_offline_start and publish
+ * P0 + offsets. wma_offline_start does not reset the play frame.
+ *
+ * While an agenda is published the looper's own record/arm calls do nothing:
+ * wma_looper_start_recording, _start_recording_with_pre_roll and _start_overdub
+ * are no-ops, wma_looper_arm_* return -1. Mute, volume, pan and send-to-fx of
+ * the tracks apply to the song's voices; per-track peak and progress do not.
+ *
+ * A sample-rate change of the engine invalidates every clip (they were
+ * resampled to the old rate) and switches the agenda off: load the clips again.
+ *
+ * The clips count against the looper's memory budget, together with the takes.
+ * ---------------------------------------------------------------- */
+
+#define WMA_SONG_MAX_TRACKS   16
+#define WMA_SONG_MAX_CLIPS    64
+#define WMA_SONG_MAX_SECTIONS 1024
+#define WMA_SONG_SILENCE      (-1)
+
+typedef struct {
+    int64_t start_frame;                     /* ABSOLUTE play frame of the Transport */
+    int32_t clip[WMA_SONG_MAX_TRACKS];       /* clip id per track; WMA_SONG_SILENCE = silence */
+} WmaSongSection;
+
+/**
+ * Decode + resample to @p sample_rate OFF the audio thread, bake the trim
+ * [region_start, region_end) (frames ALREADY resampled; region_end <= 0 = the whole
+ * take; clamped like a track's loop region) and normalise to @p loop_frames: a view
+ * (take >= L), a tiling (L a multiple of the take) or a tiling with a faded
+ * junction (otherwise). Takes its own mutex, never the engine's.
+ *
+ * @param out_id  receives the clip id (0..WMA_SONG_MAX_CLIPS-1)
+ * @return WMA_OK; WMA_ERROR_MEMORY_BUDGET (clips + takes over the looper's budget);
+ *         WMA_ERROR_UNSUPPORTED_FORMAT; WMA_ERROR_IO; WMA_ERROR_MEMORY;
+ *         WMA_ERROR_PARAMETER_OUT_OF_RANGE (pool full, loop_frames <= 0,
+ *         sample_rate <= 0, NULL path or out_id); WMA_ERROR_NOT_INITIALIZED.
+ */
+WMA_API WmaResult wma_song_load_clip(WmaEngine* engine, const char* path, int sample_rate,
+                                     int64_t region_start, int64_t region_end,
+                                     int64_t loop_frames, int32_t* out_id);
+
+/**
+ * Retire a clip. Its memory is released once the audio thread can no longer be
+ * reading it (it advanced past the agenda that dropped it and no voice holds it),
+ * at the next song call; an offline engine releases at once.
+ * @return WMA_OK; WMA_ERROR_INVALID_OPERATION if it does not exist, was already
+ *         retired, or the PUBLISHED agenda references it.
+ */
+WMA_API WmaResult wma_song_unload_clip(WmaEngine* engine, int32_t id);
+
+/**
+ * Publish the whole agenda. @p count = 0 switches the song off (an immediate fade
+ * if it was sounding) and the looper goes back to its takes.
+ *
+ * @return WMA_OK;
+ *         WMA_ERROR_PARAMETER_OUT_OF_RANGE: count > WMA_SONG_MAX_SECTIONS; a start
+ *           not strictly increasing or negative; a section shorter than 2F;
+ *           end_frame < last start + 2F; a clip on a track >= the active tracks
+ *           (a track with no clip must be WMA_SONG_SILENCE); loop_frames <= 0.
+ *         WMA_ERROR_INVALID_OPERATION: a clip that does not exist / was retired, a
+ *           clip built for another loop_frames or sample rate, a recording in
+ *           progress or armed.
+ */
+WMA_API WmaResult wma_song_set_schedule(WmaEngine* engine, int64_t loop_frames,
+                                        const WmaSongSection* sections, int32_t count,
+                                        int64_t end_frame);
+
+/** Index in the last published agenda of the section containing the last frame of the
+ *  most recent block; -1 when inactive, before the first start or after end_frame. */
+WMA_API int32_t wma_song_get_section(const WmaEngine* engine);
+
+/** Adoptions that changed what was sounding at the adoption frame (an edit of the
+ *  section that plays): each one fades over [t, t + F). */
+WMA_API int64_t wma_song_get_late_adoptions(const WmaEngine* engine);
+
 /* ================================================================
  * 20. Transport (musical clock & metronome)
  * ================================================================

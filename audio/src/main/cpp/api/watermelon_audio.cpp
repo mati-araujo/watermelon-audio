@@ -2538,6 +2538,87 @@ WmaResult wma_looper_import_track_ex(WmaEngine* engine, int track_index,
     }
 }
 
+/* ---------------- Programmed song (REQ-055 S11) ---------------- */
+
+namespace {
+
+WmaResult songResult(wm::SongStatus st) {
+    switch (st) {
+        case wm::SongStatus::Ok:               return WMA_OK;
+        case wm::SongStatus::OutOfRange:       return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+        case wm::SongStatus::InvalidOperation: return WMA_ERROR_INVALID_OPERATION;
+        case wm::SongStatus::Io:               return WMA_ERROR_IO;
+        case wm::SongStatus::UnsupportedFormat: return WMA_ERROR_UNSUPPORTED_FORMAT;
+        case wm::SongStatus::BudgetExceeded:   return WMA_ERROR_MEMORY_BUDGET;
+        case wm::SongStatus::OutOfMemory:      return WMA_ERROR_MEMORY;
+    }
+    return WMA_ERROR_UNKNOWN;
+}
+
+static_assert(WMA_SONG_MAX_TRACKS == wm::kSongMaxTracks &&
+              WMA_SONG_MAX_CLIPS == wm::kSongMaxClips &&
+              WMA_SONG_MAX_SECTIONS == wm::kSongMaxSections &&
+              WMA_SONG_SILENCE == wm::kSongSilence,
+              "la C API de la cancion y el motor comparten los topes");
+
+}  // namespace
+
+WmaResult wma_song_load_clip(WmaEngine* engine, const char* path, int sample_rate,
+                             int64_t region_start, int64_t region_end, int64_t loop_frames,
+                             int32_t* out_id) {
+    WMA_CHECK(engine);
+    if (path == nullptr || out_id == nullptr) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    try {
+        int32_t id = -1;
+        const wm::SongStatus st = engine->engine->getAudioLooper().songLoadClip(
+            path, sample_rate, region_start, region_end, loop_frames,
+            engine->engine->isOffline(), id);
+        if (st == wm::SongStatus::Ok) *out_id = id;
+        return songResult(st);
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
+WmaResult wma_song_unload_clip(WmaEngine* engine, int32_t id) {
+    WMA_CHECK(engine);
+    return songResult(engine->engine->getAudioLooper().songUnloadClip(
+        id, engine->engine->isOffline()));
+}
+
+WmaResult wma_song_set_schedule(WmaEngine* engine, int64_t loop_frames,
+                                const WmaSongSection* sections, int32_t count,
+                                int64_t end_frame) {
+    WMA_CHECK(engine);
+    if (count < 0 || count > WMA_SONG_MAX_SECTIONS) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    if (count > 0 && sections == nullptr) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    try {
+        // Copia a un buffer del control (la agenda tiene hasta 1024 secciones): el C struct y
+        // el del motor tienen el mismo layout, pero no se asume.
+        std::vector<wm::SongSection> converted(static_cast<size_t>(count));
+        for (int32_t k = 0; k < count; ++k) {
+            converted[static_cast<size_t>(k)].startFrame = sections[k].start_frame;
+            for (int t = 0; t < WMA_SONG_MAX_TRACKS; ++t) {
+                converted[static_cast<size_t>(k)].clip[t] = sections[k].clip[t];
+            }
+        }
+        return songResult(engine->engine->getAudioLooper().songSetSchedule(
+            loop_frames, converted.data(), count, end_frame, engine->engine->isOffline()));
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
+int32_t wma_song_get_section(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, -1);
+    return engine->engine->getAudioLooper().songGetSection();
+}
+
+int64_t wma_song_get_late_adoptions(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().songGetLateAdoptions();
+}
+
 bool wma_looper_import_track(WmaEngine* engine, int track_index,
                               const char* file_path, int sample_rate) {
     // Untouched: AudioLooper::importTrack is itself importTrackChecked with the
