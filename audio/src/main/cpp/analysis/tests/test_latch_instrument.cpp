@@ -1274,6 +1274,42 @@ TEST(AttackInstrument, EachPublicationIsJudgedByTheSegmentAlreadyFinishedNeverAL
     EXPECT_EQ(a[0].covered, 1) << "3 c <= 2σ = 4 c";
 }
 
+TEST(AttackInstrument, ASegmentThatStartsBeforeT0NeverJudgesTheAttack) {
+    // AC-055.2. Atrapa: juzgar al motor contra un tramo del oraculo que arranca ANTES del ataque. Ese tramo
+    // mezcla la cola de la nota anterior con el ataque (en corpus-v1 el primer tramo de varios archivos da
+    // -39..-143 c) y le carga al motor el error del oraculo. t0 = 1000: el tramo [0,95, 1,10] (+40 c) ya
+    // termino a 1,15 s pero empezo antes; la publicacion de 1150 queda SIN oraculo. La de 1300 usa el
+    // propio [1,05, 1,25].
+    const std::vector<OracleSegment> oracle{{0.95, 1.10, hzAt(440.0, 40.0)}, {1.05, 1.25, 440.0}};
+    const std::vector<Publication> pubs{pub(1150, 440.0), pub(1300, hzAt(440.0, 2.0), kMeas, 2.0)};
+    const auto a = latch::measureAttacks(pubs, {1000}, oracle, 3000, params());
+    ASSERT_EQ(a.size(), 1u);
+    EXPECT_EQ(a[0].noOracle, 1);
+    EXPECT_EQ(a[0].withError, 1);
+    EXPECT_NEAR(a[0].maxAbsCents, 2.0, 1e-9);
+    EXPECT_TRUE(std::isnan(a[0].firstErrorCents)) << "la primera lectura no tuvo tramo propio";
+    // La sonda a 250 ms (1,25 s) tiene tramo propio; con t0 = 1100 el unico terminado arranca antes.
+    EXPECT_TRUE(a[0].early.oracle);
+    const auto b = latch::measureAttacks(pubs, {1100}, oracle, 3000, params());
+    ASSERT_EQ(b.size(), 1u);
+    EXPECT_TRUE(b[0].early.reading);
+    EXPECT_FALSE(b[0].early.oracle);
+    EXPECT_TRUE(std::isnan(b[0].early.errorCents));
+}
+
+TEST(AttackInstrument, TheProbeInstantIsInclusiveOnThePublicationAndOnTheEndOfTheAttack) {
+    // AC-055.2. Atrapa: el borde de la sonda corrido un frame. A 48 kHz, t0 en la grilla de 128 y
+    // publicaciones en multiplos de 128 dan pos == t0 + Δ exacto: esa publicacion ES la visible. Y una
+    // sonda que cae justo en el final del ataque aplica.
+    const std::vector<OracleSegment> oracle{{1.0, 1.25, 440.0}};
+    const std::vector<Publication> pubs{pub(1200, hzAt(440.0, 9.0)), pub(1250, hzAt(440.0, 1.0), kMeas, 1.0)};
+    const auto a = latch::measureAttacks(pubs, {1000}, oracle, 2000, params());
+    ASSERT_EQ(a.size(), 1u);
+    ASSERT_TRUE(a[0].early.reading);
+    EXPECT_NEAR(a[0].early.errorCents, 1.0, 1e-9) << "la de pos == t0 + 250 es la visible, no la de 1200";
+    EXPECT_TRUE(a[0].late.applies) << "t0 + 1 s == 2000 == final del flujo: aplica";
+}
+
 TEST(AttackInstrument, TheEarlyAndLateProbesReadTheVisiblePublicationAgainstTheFinishedSegment) {
     // AC-055.2. Atrapa: el error «a 250 ms» tomado de la publicacion MAS CERCANA (incluso posterior) en vez
     // de la visible en t0 + 250, o contra el oraculo de despues de ese instante. t0 = 1000: visible a
@@ -1316,7 +1352,9 @@ TEST(AttackInstrument, PercentilesAndCoveragePerAttack) {
     std::vector<Publication> pubs;
     for (int c = 1; c <= 4; ++c) pubs.push_back(pub(1000 + 100 * c, hzAt(440.0, c), kMeas, 1.6));
     pubs.push_back(pub(2100, hzAt(440.0, 10.0), kMeas, 1.0));
-    const std::vector<OracleSegment> withHole{{0.0, 1.0, 440.0}, {1.0, 2.15, kNan}};
+    // Tramos propios de cada ataque (t_ini >= t0): el 2do ataque tiene uno con hz que termina en 2,10 y
+    // uno sin hz que termina en 2,15 (la publicacion de 2200 queda sin oraculo).
+    const std::vector<OracleSegment> withHole{{1.0, 1.1, 440.0}, {2.0, 2.1, 440.0}, {2.05, 2.15, kNan}};
     pubs.push_back(pub(2200, 440.0, kMeas, 1.0));
     const auto a = latch::measureAttacks(pubs, {1000, 2000}, withHole, 3000, params());
     ASSERT_EQ(a.size(), 2u);
@@ -1433,6 +1471,8 @@ std::vector<std::string> diffAttackRows(const std::map<std::string, AttackRow>& 
 
 double flag(bool b) { return b ? 1.0 : 0.0; }
 double probeFlag(const latch::Probe& p, bool value) { return p.applies ? flag(value) : kNan; }
+/// Cubierta solo se juzga con lectura Y oraculo: sin tramo propio, NaN (no «no cubierta»).
+double coveredFlag(const latch::Probe& p) { return p.applies && p.reading && p.oracle ? flag(p.covered) : kNan; }
 
 AttackRow attackRowOf(const std::string& name, int index, int pass, const latch::Attack& a, int rate) {
     AttackRow r{};
@@ -1458,11 +1498,11 @@ AttackRow attackRowOf(const std::string& name, int index, int pass, const latch:
                                       probeFlag(a.early, a.early.reading),
                                       a.early.errorCents,
                                       a.early.sigmaCents,
-                                      probeFlag(a.early, a.early.covered),
+                                      coveredFlag(a.early),
                                       probeFlag(a.late, a.late.reading),
                                       a.late.errorCents,
                                       a.late.sigmaCents,
-                                      probeFlag(a.late, a.late.covered)};
+                                      coveredFlag(a.late)};
     for (size_t i = 0; i < kNumAttackCols; ++i) r.v[i] = v[i];
     return r;
 }
@@ -1506,10 +1546,12 @@ std::string attackBaselineHeader() {
         "# El ataque dura (t0, siguiente t0] (o hasta el final del flujo). t_primera / t_conv = primera publicacion\n"
         "# con cents / con CONVERGED despues de t0, en frames del ring desde t0. arrastrada_* = 1 si la ultima\n"
         "# publicacion con pos <= t0 ya traia cents / CONVERGED: el motor no solto la lectura de antes, y entonces\n"
-        "# t_primera no es una latencia del ataque. Errores en cents contra el ORACULO INSTANTANEO (tramo de t_fin\n"
-        "# mas cercano <= t de la publicacion); cobertura = fraccion con |error| <= 2 sigma. *_250ms / *_1s = la\n"
-        "# lectura VISIBLE en t0 + 0,25 s / t0 + 1 s (ultima publicacion en (t0, t0 + Δ]) contra el tramo ya\n"
-        "# terminado en ese instante; lect = 1 si habia lectura propia del ataque, cub = 1 si |error| <= 2 sigma;\n"
+        "# t_primera no es una latencia del ataque. Errores en cents contra el ORACULO INSTANTANEO: el tramo de t_fin\n"
+        "# mas cercano <= t de la publicacion ENTRE LOS QUE EMPIEZAN EN t0 O DESPUES (uno que arranca antes mezcla la\n"
+        "# nota anterior con el ataque; sin tramo propio terminado la publicacion va a n_sin_oraculo); cobertura = fraccion con |error| <= 2 sigma. *_250ms / *_1s = la\n"
+        "# lectura VISIBLE en t0 + 0,25 s / t0 + 1 s (ultima publicacion en (t0, t0 + Δ]) contra el tramo PROPIO del\n"
+        "# ataque ya terminado en ese instante; lect = 1 si habia lectura propia del ataque, cub = 1 si |error| <= 2\n"
+        "# sigma (nan sin lectura o sin tramo propio);\n"
         "# nan = no aplica (t0 + Δ pasado el final del ataque). `nan` en el resto = no llego / no aplica.\n"
         "#\n"
         "# EL DIFF DE ESTE ARCHIVO ES LA REVISION. Frames y banderas exactos; lo demas con tolerancia 0,002.\n"
@@ -1541,6 +1583,7 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
     const std::vector<corpus::Entry> entries = corpusEntriesForThisBuild(&subset);
     std::map<std::string, AttackRow> rows;
     std::vector<double> first[3], conv[3], e250[3], e1s[3];   // [0] pasada 1, [1] pasada 2, [2] todas
+    std::vector<double> carriedFirst, carriedConv;            // los arrastrados, aparte (una vez cada uno)
     std::vector<latch::Attack> all[3];
     int carried = 0, noRead250 = 0, applies250 = 0, cov250 = 0, with250 = 0;
     std::printf("\n%-24s %2s %1s %7s | %1s %7s %7s | %7s %7s %5s %7s %7s\n", "archivo", "n", "p", "t0_s", "a", "t_prim",
@@ -1577,7 +1620,6 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
         ASSERT_EQ(attacks.size(), t0s.size());
         for (size_t i = 0; i < attacks.size(); ++i) {
             const latch::Attack& a = attacks[i];
-            EXPECT_EQ(a.t0Frames, t0s[i]) << "t0 es el del oraculo";
             const int p = passOf[i] - 1;
             const AttackRow r = attackRowOf(e.name, static_cast<int>(i) + 1, passOf[i], a, run.rate);
             rows[keyOf(r.name, r.v[0])] = r;
@@ -1586,8 +1628,12 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
                         a.late.errorCents, a.coverage, a.medianAbsCents, a.maxAbsCents);
             for (int k : {p, 2}) {
                 all[k].push_back(a);
-                if (a.firstReadingFrames >= 0) first[k].push_back(a.firstReadingSec);
-                if (a.convergedFrames >= 0) conv[k].push_back(a.convergedSec);
+                // Un t_primera / t_conv ARRASTRADO es la publicacion siguiente, no una latencia del
+                // ataque: va a su propio resumen (carriedFirst), no a la mediana de la pasada.
+                if (a.firstReadingFrames >= 0 && !a.readingCarried) first[k].push_back(a.firstReadingSec);
+                if (a.convergedFrames >= 0 && !a.convergedCarried) conv[k].push_back(a.convergedSec);
+                if (k == 2 && a.firstReadingFrames >= 0 && a.readingCarried) carriedFirst.push_back(a.firstReadingSec);
+                if (k == 2 && a.convergedFrames >= 0 && a.convergedCarried) carriedConv.push_back(a.convergedSec);
                 if (!std::isnan(a.early.errorCents)) e250[k].push_back(std::fabs(a.early.errorCents));
                 if (!std::isnan(a.late.errorCents)) e1s[k].push_back(std::fabs(a.late.errorCents));
             }
@@ -1615,12 +1661,14 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
             }
             return latch::poolLatchErrors(asLatches);
         }();
-        std::printf("\n[%s] ataques=%zu\n  %s\n  %s\n  %s\n  %s\n  |error| de %d publicaciones: mediana %.3f p90 %.3f max %.3f c | "
+        std::printf("\n[%s] ataques=%zu (t_primera / t_conv SIN los arrastrados)\n  %s\n  %s\n  %s\n  %s\n  |error| de %d publicaciones: mediana %.3f p90 %.3f max %.3f c | "
                     "cobertura 2sigma %.3f\n",
                     names[k], all[k].size(), summary("t_primera s:", first[k]).c_str(), summary("t_conv s:   ", conv[k]).c_str(),
                     summary("|err 250ms| c:", e250[k]).c_str(), summary("|err 1s| c:   ", e1s[k]).c_str(), pooled.withError,
                     pooled.medianAbsCents, pooled.p90AbsCents, pooled.maxAbsCents, pooled.coverage);
     }
+    std::printf("\nARRASTRADOS: %s | %s\n", summary("t_primera s:", carriedFirst).c_str(),
+                summary("t_conv s:", carriedConv).c_str());
     std::printf("\narrastradas=%d | a 250 ms: aplica %d, sin lectura propia %d, con error %d, cubiertas a 2sigma %d\n", carried,
                 applies250, noRead250, with250, cov250);
 

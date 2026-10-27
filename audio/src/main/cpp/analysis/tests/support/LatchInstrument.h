@@ -306,10 +306,12 @@ inline std::vector<Latch> measure(const std::vector<Publication>& pubs, const st
 //     despues de t0. Si la ultima publicacion con pos <= t0 ya traia cents (o CONVERGED), el ataque
 //     viene ARRASTRADO: el motor no solto la lectura de antes. Se marca, no se descarta; un `t_primera`
 //     arrastrado no es una latencia del ataque.
-//   · El error de cada publicacion es contra el oraculo instantaneo con la regla del enganche: el tramo
-//     de `t_fin` mas cercano que no supera la publicacion (`segmentFor`).
+//   · El error de cada publicacion es contra el oraculo instantaneo: el tramo de `t_fin` mas cercano
+//     que no supera la publicacion, ENTRE LOS QUE EMPIEZAN EN t0 O DESPUES (`attackSegmentFor`). Un tramo
+//     que arranca antes de t0 mezcla la nota anterior con el ataque; sin tramo propio terminado la
+//     publicacion cuenta como sin oraculo.
 //   · Error a 250 ms y a 1 s: la lectura VISIBLE en t0 + Δ (la ultima publicacion en (t0, t0 + Δ]),
-//     contra el tramo ya terminado en t0 + Δ. Sin publicacion propia del ataque, o con NaN, no hay
+//     contra el tramo propio del ataque ya terminado en t0 + Δ. Sin publicacion propia del ataque, o con NaN, no hay
 //     lectura (NaN, contada aparte); si t0 + Δ cae despues del final del ataque, no aplica (NaN).
 //
 // Nada de esto toca el motor: es aritmetica sobre lo que el motor ya publico.
@@ -322,6 +324,7 @@ inline constexpr double kAttackProbeLateSec = 1.0;
 struct Probe {
     bool applies = false;   ///< t0 + Δ cae dentro del ataque
     bool reading = false;   ///< habia una publicacion propia del ataque con cents
+    bool oracle = false;    ///< habia un tramo del oraculo propio del ataque, terminado, con hz
     double errorCents = kNaN;
     double sigmaCents = kNaN;
     bool covered = false;   ///< |error| <= 2σ
@@ -358,6 +361,18 @@ struct Attack {
 
 namespace detail {
 
+/// Como `segmentFor`, pero sólo entre los tramos que EMPIEZAN en el ataque o despues (`t_ini >= t0`).
+/// Un tramo que arranca antes de t0 mezcla la cola de la nota anterior con el ataque (en corpus-v1 el
+/// primer tramo de varios archivos da -39..-143 c): juzgar al motor contra él le carga el error del
+/// oraculo. Sin tramo propio terminado, la publicacion queda sin oraculo (`noOracle`).
+inline const OracleSegment* attackSegmentFor(const std::vector<OracleSegment>& oracle, double t0Sec, double tPub) {
+    const OracleSegment* best = nullptr;
+    for (const OracleSegment& s : oracle) {
+        if (s.tIni >= t0Sec && s.tFin <= tPub && (best == nullptr || s.tFin > best->tFin)) best = &s;
+    }
+    return best;
+}
+
 inline Probe probeAt(const std::vector<Publication>& pubs, const std::vector<OracleSegment>& oracle,
                      const Attack& a, double deltaSec, int rate) {
     Probe p;
@@ -373,8 +388,9 @@ inline Probe probeAt(const std::vector<Publication>& pubs, const std::vector<Ora
     if (visible == nullptr || std::isnan(visible->hz)) return p;
     p.reading = true;
     p.sigmaCents = visible->sigmaCents;
-    const OracleSegment* seg = segmentFor(oracle, static_cast<double>(at) / rate);
+    const OracleSegment* seg = attackSegmentFor(oracle, a.t0Sec, static_cast<double>(at) / rate);
     if (seg == nullptr || !(seg->hz > 0.0) || !std::isfinite(seg->hz)) return p;
+    p.oracle = true;
     p.errorCents = 1200.0 * std::log2(visible->hz / seg->hz);
     p.covered = std::fabs(p.errorCents) <= 2.0 * visible->sigmaCents;
     return p;
@@ -416,7 +432,7 @@ inline std::vector<Attack> measureAttacks(const std::vector<Publication>& pubs, 
                 a.firstReadingSec = static_cast<double>(a.firstReadingFrames) / params.sampleRate;
                 a.firstSigmaCents = pub.sigmaCents;
             }
-            const OracleSegment* seg = segmentFor(oracle, static_cast<double>(pub.pos) / params.sampleRate);
+            const OracleSegment* seg = detail::attackSegmentFor(oracle, a.t0Sec, static_cast<double>(pub.pos) / params.sampleRate);
             if (seg == nullptr || !(seg->hz > 0.0) || !std::isfinite(seg->hz)) {
                 ++a.noOracle;
                 continue;
