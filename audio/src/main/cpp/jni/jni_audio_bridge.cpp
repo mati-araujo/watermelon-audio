@@ -1326,7 +1326,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerD
 /// Cierra la toma, llena `values` (WMA_TUNER_DUMP_STATS_VALUES) y devuelve los bytes UTF-8 del
 /// archivo que la toma DEJO en disco, segun el nativo (bug A de REQ-055 S0: el puente no lo
 /// reconstruye con el path que pidio). null (y `values` sin tocar) sin toma, sin motor o con un
-/// `values` de otro largo: un cero es un dato plausible, ver MINI-003.
+/// `values` de otro largo: un cero es un dato plausible, ver MINI-003. Sin memoria despues de
+/// cerrar (el `NewByteArray`) tambien da null, con la toma ya cerrada y `values` escrito.
 JNIEXPORT jbyteArray JNICALL
 Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerDiagInputDumpStop(
     JNIEnv* env, jobject thiz, jlongArray values) {

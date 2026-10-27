@@ -378,9 +378,18 @@ TEST_F(TunerDumpApiTest, StopContractsLeaveSentinelsAndNeverKillALiveTakeOnBadAr
     EXPECT_TRUE(allSentinels(v));
     EXPECT_FALSE(stopValues(mWma, nullptr, WMA_TUNER_DUMP_STATS_VALUES));
 
-    // Con una toma VIVA: un count chico (< 7) se rechaza sin tocar nada ni cerrar la toma.
+    // Con una toma VIVA: argumentos nulos o un count chico (< 7) se rechazan sin tocar nada ni
+    // cerrar la toma. Los nulos se repiten aca porque sin toma el false sale por "no hay toma" y
+    // no prueba nada: con la toma viva, un chequeo de nulos movido despues del cierre la mataria.
     const std::string path = pathOf("viva.wav");
     ASSERT_TRUE(wma_tuner_diag_input_dump_start(mWma, path.c_str()));
+    EXPECT_FALSE(stopValues(mWma, nullptr, WMA_TUNER_DUMP_STATS_VALUES));
+    ASSERT_NE(mWma->tunerInputDump, nullptr);
+    EXPECT_TRUE(mWma->tunerInputDump->takeActive()) << "un stop con out_values nulo cerro la toma";
+    v = sentinelStats();
+    EXPECT_FALSE(stopValues(nullptr, v.data(), WMA_TUNER_DUMP_STATS_VALUES));
+    EXPECT_TRUE(allSentinels(v));
+    EXPECT_TRUE(mWma->tunerInputDump->takeActive());
     for (int bad : {6, 1, 0, -1}) {
         v = sentinelStats();
         EXPECT_FALSE(stopValues(mWma, v.data(), bad)) << "count " << bad;

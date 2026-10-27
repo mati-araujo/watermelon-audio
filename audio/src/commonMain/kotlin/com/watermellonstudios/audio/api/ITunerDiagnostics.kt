@@ -61,7 +61,8 @@ interface ITunerDiagnostics {
      *
      * @return null si no se cerró ninguna toma: no había una, o el análisis no respondió a tiempo y
      *   la toma sigue viva (reintentar el stop la cierra) — **no** un resultado de ceros, que se
-     *   leería como una toma vacía.
+     *   leería como una toma vacía. Única excepción: sin memoria al cerrar, la toma puede haber
+     *   quedado cerrada igual (el null no lo distingue).
      */
     fun stopTunerInputDump(): TunerInputDumpResult?
 }
