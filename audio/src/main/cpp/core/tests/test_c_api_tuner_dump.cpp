@@ -583,7 +583,9 @@ TEST_F(TunerDumpApiTest, Hallazgo1_StartRejectsAPathThatDoesNotEndInWav) {
         EXPECT_FALSE(wma_tuner_diag_input_dump_start(mWma, path.c_str()));
         EXPECT_FALSE(exists(path + ".part"));
         EXPECT_FALSE(exists(path));
-        if (mWma->tunerInputDump) EXPECT_FALSE(mWma->tunerInputDump->takeActive());
+        if (mWma->tunerInputDump) {
+            EXPECT_FALSE(mWma->tunerInputDump->takeActive());
+        }
     }
     EXPECT_EQ(std::distance(fs::directory_iterator(fs::path(pathOf("x")).parent_path()),
                             fs::directory_iterator{}), 0)
@@ -612,7 +614,9 @@ TEST_F(TunerDumpApiTest, Hallazgo1_StartRefusesAPathWhoseFinalNameIsTaken) {
             out << foreign;
         }
         EXPECT_FALSE(wma_tuner_diag_input_dump_start(mWma, path.c_str()));
-        if (mWma->tunerInputDump) EXPECT_FALSE(mWma->tunerInputDump->takeActive());
+        if (mWma->tunerInputDump) {
+            EXPECT_FALSE(mWma->tunerInputDump->takeActive());
+        }
         const std::vector<uint8_t> after = readFile(taken);
         EXPECT_EQ(std::string(after.begin(), after.end()), foreign);
         fs::remove(taken);
