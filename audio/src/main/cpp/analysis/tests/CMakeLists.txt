@@ -45,6 +45,8 @@ add_executable(analysis_tests
     test_corpus_sweep.cpp
     test_temporal_oracle.cpp
     test_spectral_support.cpp
+    test_interleaved_grids.cpp
+    test_block_invariance.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp

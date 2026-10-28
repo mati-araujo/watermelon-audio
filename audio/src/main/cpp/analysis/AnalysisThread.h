@@ -47,8 +47,9 @@ namespace wma::analysis {
 
 class AnalysisThread {
 public:
-    /// Frames que intenta drenar por vuelta. Un cuarto del ring: deja margen
-    /// para que el escritor no lo alcance mientras copia.
+    /// Capacidad del buffer de lectura. Un cuarto del ring: deja margen para que el
+    /// escritor no lo alcance mientras copia. Desde REQ-057 una vuelta lee a lo sumo lo que
+    /// falta para cerrar el tick (`kTickFrames`), no esto.
     static constexpr int kDrainFrames = AnalysisRing::kCapacityFrames / 4;
 
     AnalysisThread(AnalysisRing& ring, AnalysisSnapshot& snapshot)
@@ -234,9 +235,27 @@ public:
      */
     static constexpr double kSpectralSupportFloorDb = SpectralSupportProbe::kSupportFloorDb;
 
-    /// Que paso en una vuelta de `drainOnce()`. `kRingEmpty` es la unica que el
-    /// llamador tiene que tratar distinto: el thread duerme, el puerto termina.
-    enum class DrainOutcome { kPublished, kSkipped, kRingEmpty };
+    /**
+     * Que paso en una vuelta de `drainOnce()`. `kRingEmpty` es la unica que el
+     * llamador tiene que tratar distinto: el thread duerme, el puerto termina.
+     *
+     * REQ-057 (D-D, D31): `kAccumulated` = consumio audio pero el tick de `kTickFrames` frames no
+     * cerro, asi que NO publico. `kPublished` = cerro un tick y publico un snapshot nuevo.
+     */
+    enum class DrainOutcome { kPublished, kAccumulated, kSkipped, kRingEmpty };
+
+    /**
+     * REQ-057 (D-D, D31) — EL RELOJ DE TICK: todo lo que DECIDE (modo rapido, ausencia, nivel,
+     * publicacion) corre cada 1024 frames absolutos de audio analizado, no por drenado.
+     *
+     * Con un drenado por vuelta, el reenganche del modo rapido quedaba alineado al bloque del
+     * llamador y su `skipToNewest()` tiraba lo que hubiera en el ring: la serie de publicaciones
+     * dependia de si el audio llegaba de a 16 o de a 8192 frames (medido por REQ-055 S0: 40 de 41
+     * archivos de `corpus-v1` cambiaban `t_primera`). Cada lectura se limita a lo que falta para
+     * cerrar el tick; el detector y el strobe procesan cada lectura (no dependen de donde cae el
+     * corte) y las decisiones esperan al cierre. 1024 es el hop de la serie densa de las rejillas.
+     */
+    static constexpr int kTickFrames = 1024;
 
     /**
      * @brief UNA vuelta del analisis, sin nada del thread adentro (REQ-015 S1).
@@ -314,7 +333,7 @@ private:
     /// UNA lectura sin altura y apagaba la aguja sobre una cuerda audible.
     AbsenceGate mAbsence;
 
-    /// Si la ultima pasada del detector produjo un veredicto NUEVO. Su ventana es
+    /// Si el ULTIMO TICK (REQ-057) tuvo un veredicto NUEVO del detector. Su ventana es
     /// NO SOLAPADA y mas larga que un bloque, asi que sin esto la compuerta contaria
     /// la misma evidencia varias veces (REQ-019.2).
     bool mFreshPitchVerdict = false;
@@ -395,6 +414,13 @@ private:
      * depurar esto.
      */
     uint64_t mLastCaptureSeam{0};
+
+    /// REQ-057: el tick en curso. Frames leidos, suma de cuadrados (acumulada muestra a muestra: el
+    /// mismo orden de sumas con cualquier corte) y si algun veredicto grueso fue nuevo.
+    int mTickFill{0};
+    double mTickSumSq{0.0};
+    bool mTickFreshVerdict{false};
+    void resetTick() noexcept { mTickFill = 0; mTickSumSq = 0.0; mTickFreshVerdict = false; }
 };
 
 }  // namespace wma::analysis

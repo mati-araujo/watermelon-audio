@@ -1251,6 +1251,12 @@ WMA_API bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values);
  * @return false if the arguments do not describe analysable audio, or if the
  *         analysis never got to publish. The buffer is left UNTOUCHED in that
  *         case — zeros would be a measurement nobody made.
+ *
+ * SHORT BUFFERS (REQ-057, D31): the analysis decides and publishes once per
+ * 1024-frame tick. A buffer of fewer than 1024 frames never closes a tick, so
+ * it returns false and never publishes. In a longer buffer, the tail of fewer
+ * than 1024 frames is integrated into the analysis but does not appear in the
+ * snapshot: the values describe the last COMPLETE tick.
  */
 WMA_API bool wma_tuner_analyze_buffer(const float* samples, int frames, int channels,
                                       int sample_rate, float target_hz, float* out_values);
