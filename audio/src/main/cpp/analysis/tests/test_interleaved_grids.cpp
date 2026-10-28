@@ -524,9 +524,11 @@ TEST(InterleavedGrids, ASilentWindowCutsTheThreadAndInvalidatesTheChain) {
             // cuatro rejillas— lo afirman (1) y (2), y la recuperacion, la aserción final.
         }
 
-        if (kDev > 0.0) EXPECT_NE(turnsAtGap, 0)
-            << "antes del hueco la rejilla 0 no agrego ninguna vuelta: A4 a +50 c esta fuera del rango de hoy, "
-               "asi que sin la serie densa el escenario no se puede leer y el test no ejerce la cadena";
+        if (kDev > 0.0) {
+            EXPECT_NE(turnsAtGap, 0)
+                << "antes del hueco la rejilla 0 no agrego ninguna vuelta: A4 a +50 c esta fuera del rango de hoy, "
+                   "asi que sin la serie densa el escenario no se puede leer y el test no ejerce la cadena";
+        }
         EXPECT_TRUE(readingBeforeGapOk) << "antes del hueco no habia lectura a +50 c ± 0,1: el escenario no sirve";
         EXPECT_TRUE(silentSeen) << "ningun cierre vio silencio: el hueco no es una ventana entera";
         ASSERT_TRUE(t->hasMeasurement()) << "5 s despues del hueco no volvio a medir";
