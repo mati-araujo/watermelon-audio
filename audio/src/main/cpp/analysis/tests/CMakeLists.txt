@@ -50,6 +50,8 @@ add_executable(analysis_tests
     test_block_invariance.cpp
     test_input_dump.cpp
     test_input_dump_cuts.cpp
+    test_take_manifest.cpp
+    test_take_feeder.cpp
     test_wav_file_dump_sink.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
