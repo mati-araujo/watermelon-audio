@@ -1,0 +1,201 @@
+# Mezcla de la cancion, bus «Espacio», master y taps (REQ-055 S12)
+
+Lo que Studio usa para mezclar la cancion programada (`docs/dev/cancion-programada.md`), escucharla
+con un master y exportar WAV y stems por render offline (`docs/dev/render-offline.md`). Contrato de la
+C API: seccion 25 de `api/watermelon_audio.h` (mas `wma_offline_render_taps` en la 24). El diseno de
+NoisyPad es su ADR-0013 (privado); aca esta lo que cambia en watermelon-audio, en lenguaje de este
+repo. Version: **2.24.0**.
+
+## El grafo
+
+```
+por pista t (solo con la cancion activa):
+  SongVoice_t -> ganancia_t (smoother) -> paneo_t (EqualPowerPanLUT) -> seco_t --+--------------> Σ seco
+                                                                                 \- x envio_t -> Σ envio
+                       Σ envio -> DelayEffect 100 % wet (ms)  x retorno_delay  --+
+                                  ReverbEffect 100 % wet      x retorno_reverb --+-> retorno FX
+  premezcla = Σ seco + retorno FX  ->  master del looper (wma_looper_set_master_volume)  ->  bus del motor
+  bus del motor -> perfil de salida:
+     PROTECTED (default)  OutputStage de siempre                 -> device
+     MASTER               MasterStage -> volumen de monitoreo    -> device
+     RAW (solo offline)   nada                                   -> buffer del llamador
+```
+
+## Cambio de contrato de la voz (2.24.0)
+
+Hasta 2.23.0 la voz de la cancion (`SongPlayer::renderSongVoice`) tomaba volumen, paneo, mute y
+`sendToFx` del `TrackBuffer` de su pista, la misma que toca la escucha de tomas. Desde 2.24.0:
+
+- **Con la cancion activa, esos cuatro controles del `TrackBuffer` no se aplican a las voces.** La voz
+  se gobierna solo por `wma_mix_set_track` (ganancia lineal, paneo, envio) y por la agenda. El mute es
+  ganancia 0.
+- **Ninguna voz entra a la cadena de escena** (`EffectChain`): todas suenan en la pasada no-FX. Una
+  pista marcada `sendToFx` no cambia eso mientras la cancion este activa.
+- Los smoothers de la voz arrancan **en su target** al activarse la cancion (inactiva -> activa) y en
+  `wma_offline_start`: el primer bloque no rampea desde ganancia 1 / paneo 0.
+- Un smoother se clava en el target a menos de 1e-6: un envio «0» no deja un residuo que mantenga vivo
+  el bus.
+- Sin cancion activa nada cambia: las tomas siguen por `TrackBuffer::mixInto`.
+
+Anexo a ADR-0007 (cancion sobre el looper): la frase «una `SongVoice` por pista respeta volumen,
+paneo, mute de usuario y envio al FX» queda reemplazada por lo de arriba. La memoria de clips duplicada
+mientras corre un trabajo offline (D-S11-6) es aceptada: cada instancia offline es independiente.
+
+Anexo a ADR-0008 (render offline por handle): el contrato de determinismo cubre los taps
+(`wma_offline_render_taps`: misma configuracion + mismas llamadas + mismo bloque => mismos taps, bit a
+bit), el perfil RAW (solo offline) y el procesador de master (`wma_master_*`): tras `reset`, la misma
+entrada da la misma salida con cualquier tamano de bloque.
+
+## La API
+
+| funcion | rangos (fuera de rango o no finito => `PARAMETER_OUT_OF_RANGE`, nada se aplica) |
+|---|---|
+| `wma_mix_set_track(track, gain, pan, send)` | pista < pistas activas; ganancia 0..2; paneo -1..1; envio 0..1 |
+| `wma_mix_set_space(WmaMixSpace*)` | retornos 0..1; tamano 0,1..2; decay 0,1..10 s; damping 0..1; predelay 0..100 ms; cortes 20..500 / 1000..20000 Hz; delay 1..2000 ms; feedback 0..0,95 |
+| `wma_mix_set_master(WmaMixMaster*)` | ganancia -60..+40 dB; techo -20..0 dBTP; release 1..2000 ms |
+| `wma_mix_set_output_profile(p)` | PROTECTED / MASTER / RAW; RAW fuera de un render offline => `INVALID_OPERATION` |
+| `wma_offline_render_taps(mix, fx, tracks, track_count, frames)` | frames 1..max_block; track_count 0..pistas activas; sin start => `INVALID_OPERATION` |
+| `wma_mix_get_master_latency_frames`, `wma_get_xrun_count` | lecturas; 0 para NULL |
+| `wma_master_create/configure/reset/process/get_latency_frames/destroy` | sample rate 8000..192000; frames 1..`WMA_MASTER_MAX_FRAMES` (2^20) |
+
+- **Hilos.** Los setters son stores atomicos de escalares independientes (sin consistencia entre si: el
+  suavizado tapa el desfase de un bloque); el callback los lee una vez por bloque. Los parametros del
+  espacio los **aplica el hilo que procesa** (los setters de reverb/biquad no son atomicos): un contador de
+  version avisa. No hay mutex ni alloc en el camino RT.
+- **El bus se crea perezosamente**, en el hilo que hace la primera `wma_mix_set_track/space`, se publica
+  por un puntero atomico y **no se libera mientras viva el motor**. Un motor que nunca llama (el movil) no
+  paga memoria ni CPU. Un cambio de sample rate lo re-prepara con el RT quiesced (como al resto). Un
+  bloque mas grande que lo dimensionado (4096 frames) salta el bus y se cuenta
+  (`AudioLooper::getSongBusOverflowBlocks`), no aloca.
+- **El primer juego de parametros de un bus fresco** fija el tiempo del delay de una (`DelayEffect::reset`
+  sobre ~1,5 MB, una vez): sin eso el suavizado de 50 ms lo desliza desde el default de 250 ms.
+- **Los taps** se toman despues del master del looper (cada uno con la misma rampa), asi que
+  `premezcla == Σ pistas + FX` por construccion del grafo, hasta el redondeo de float (~1e-7: la suma se
+  hace en otro orden). Un bloque sin cancion deja todos los taps en cero.
+- `wma_get_xrun_count` lo refresca el callback cada ~500 bloques: va atrasado. Una instancia offline da 0.
+
+## `MasterStage` (`dsp/MasterStage.h`)
+
+Ganancia (dB, rampa lineal por bloque) -> limitador brickwall true-peak. No reemplaza a `LookaheadLimiter`
+(el movil lo sigue usando: mide pico de muestra y no garantiza su techo).
+
+- **Deteccion:** sobremuestreo 4x con el FIR polifasico de ITU-R BS.1770-4 anexo 2 (4 fases x 12 taps),
+  enlazado entre canales. El registro del instante `j` describe las posiciones `[j-6, j-5)`.
+- **Lookahead fijo de 5 ms** (`D` frames; 240 a 48 kHz). La salida es la entrada demorada `D` frames por la
+  ganancia: **latencia declarada = `D`**.
+- **Ganancia:** requerida `techo / pico`, **minimo sobre una ventana de `D+3` registros** (deque monotona de
+  capacidad fija), limitada en subida por una release exponencial y suavizada por una **media movil entera
+  (Q24) de `D-12` muestras**. La media de `N` valores cada uno <= lo requerido cubre toda muestra que un pico
+  puede tocar (el rizado del FIR incluido, +-7 muestras): la ganancia baja *antes* de que el pico salga de la
+  linea de retardo. No hay residuo de redondeo, asi que **por debajo del umbral la ganancia es exactamente 1 y la
+  salida es la entrada demorada, bit a bit** (tambien tras una release completa).
+- **Guarda final:** clamp al techo (`clampHits()` cuenta las veces que actua: en operacion normal, 0).
+- **RT:** todo el estado (anillo de 2048 frames, deque, anillo de la media) se dimensiona en `prepareMaster`,
+  una vez, para el sample rate maximo (192 kHz). `processMaster` evoluciona muestra a muestra: la salida es
+  la misma con bloques de 1, 64 o 4096 (con parametros fijos). Entradas no finitas se anulan.
+- **Desvio del diseno, medido:** la deteccion suma **+0,1 dB de holgura**. El FIR de 4x subestima la
+  reconstruccion ideal: hasta ~0,07 dB con ruido limitado a 0,2 fs, ~0,4 dB a 0,45 fs, y hasta **9 dB** con
+  ruido blanco pleno (la reconstruccion ideal de ruido blanco se excursiona mucho mas que sus muestras). Por eso
+  la garantia contra una referencia de 16x (<= techo + 0,1 dB) vale para material con la banda de un programa
+  (la bateria de `test_master_stage.cpp` usa ruido de banda limitada a 0,25 / 0,35 fs), y para ruido blanco pleno
+  vale contra el medidor BS.1770 de 4x, que es la definicion de dBTP.
+
+## Perfiles de salida
+
+`AudioEngine::applyMasterAndProtectOutput` elige por perfil. **PROTECTED es el default y es exactamente la cadena
+de 2.23.0** (volumen maestro, limitador con lookahead, soft clip TANH, dither, hard limit): lo verifica
+`OutputProfiles.ProtectedIsTheTwoTwentyThreeOutputBitForBit` (hash FNV-1a de 60 bloques, capturado compilando
+`core/tests/support/OutputGoldenScenario.h` contra `96ca8d61` antes de tocar la cadena; solo macOS arm64, porque
+`tanh` y `sin` de otra libm difieren en el ultimo bit) y, en todas las plataformas,
+`ProtectedEqualsTheOldChainAppliedToTheRawMix`. Para recapturar el hash: compilar el mismo header contra el
+arbol de 2.23.0 (un ejecutable `golden_gen` como `sf_render_preset`), no contra este.
+
+- **MASTER** reemplaza a `OutputStage::processOutput` por `MasterStage` y aplica **despues** el volumen de
+  monitoreo (`wma_set_master_volume`): bajar el volumen no cambia lo que hace el limitador ni lo que mide un export.
+  La salida es identica a `wma_master_process` sobre la misma entrada (`MasterProfileEqualsTheStandaloneMaster...`).
+  Al entrar a MASTER el master arranca de cero (no suena lo que quedo en su linea de retardo).
+- **RAW** no aplica nada (ni el volumen de monitoreo). Solo se acepta en una instancia offline; con device da
+  `INVALID_OPERATION`. Defensa en profundidad: el callback trata RAW como PROTECTED si el motor no esta en modo
+  offline, y `stop()` de una instancia offline devuelve el perfil a PROTECTED.
+- Los medidores de salida estan en la cola de los tres perfiles.
+
+## JNI y Kotlin
+
+- **Vivo:** `nativeMixSetTrack / SetSpace(FloatArray[10]) / SetMaster(FloatArray[3]) / SetOutputProfile`,
+  `nativeGetXRunCount`. **Por handle:** las mismas con `nativeOfflineMix*` (se agrego `nativeOfflineMixSetMaster`
+  para que `OfflineRenderer` implemente el mismo `ISongMixBridge`), mas `nativeOfflineRenderTaps(handle,
+  FloatArray, frames, trackCount)`. **Master:** `nativeMasterCreate/Configure/Reset/Process/Latency/Destroy`.
+- **Taps:** UN `FloatArray` `[premezcla | FX | pista 0 | ... | pista N-1]`, cada region `frames*2` floats (estereo
+  intercalado). El largo se valida (`>= frames*2*(2+trackCount)`, en 64 bits) **antes** de renderizar y de
+  escribir: un array corto da `PARAMETER_OUT_OF_RANGE` y el motor no avanza ni un bloque.
+- **El procesador de master es un id, no un puntero:** un registro (en el heap, vaciado por `JNI_OnUnload`) lo
+  mapea al `WmaMaster*`; un id desconocido, cerrado o ya destruido da `NOT_INITIALIZED` y nunca toca memoria; los
+  ids no se reusan. Cada slot tiene su mutex. `process` copia a un scratch, procesa y copia de vuelta.
+- **Arrays de espacio y master** se leen completos a la pila: nulo o de otro largo => `PARAMETER_OUT_OF_RANGE`. El
+  perfil entra como `jint` y se valida **antes** de convertirlo al enum.
+- **Kotlin** (`audio/api`, commonMain): `ISongMixBridge` (lo implementan `AudioNativeBridge` y `OfflineRenderer`),
+  `IOfflineTapRenderer` (solo `OfflineRenderer`), `IMasterProcessor` y los tipos `SongSpace`, `MasterParams`,
+  `OutputProfile`. `MasterProcessor` (jvmSharedMain, `AutoCloseable`). **No** se inflaron `ISongBridge` ni
+  `ILooperBridge`; iOS no las implementa en v1. Cerrado el dueno: `EngineNotInitialized` sin cruzar.
+- Arnes: `SongMixJniTest` (frontera: taps ida y vuelta, arrays cortos, ids, handle cerrado).
+
+## Guardas -> el test que cae
+
+
+| guarda | test |
+|---|---|
+| pico de muestra <= techo y true-peak <= techo + 0,1 dB | `MasterStage.BatteryNeverExceeds...`, `CeilingHoldsAtOtherRates...`, `FullBandWhiteNoiseHoldsTheBs1770Meter` |
+| deteccion 4x (no solo pico de muestra) | las mismas (un mutante de solo pico de muestra las pone rojas) |
+| ventana del minimo / lookahead | las mismas (mutante `mWindow = D/4`) |
+| ganancia exactamente 1 bajo el umbral y tras la release | `BelowThresholdIsTheDelayedInput...`, `GainReturnsToExactUnity...` |
+| latencia declarada = medida | `DeclaredLatencyEqualsMeasuredImpulseDelay`, `TheDeclaredMasterLatency...` |
+| salida invariante al bloque; fresca = reusada | `OutputIsBitExactAcrossBlockSizes`, `FreshAndResetInstancesAgree` |
+| rampa lineal por bloque; reset salta al objetivo | `GainRampsLinearlyPerBlockAndResetSnaps` |
+| 0 alloc en `processMaster` | `ProcessDoesNotAllocate` |
+| send 0 => FX 0 y salida = Σ secos | `SongMix.SendZeroGives...` |
+| salida RAW = Σ taps + FX; taps con la rampa del master | `RawOutputEqualsTheSumOfTheTapsPlusTheFxReturn` |
+| envio post-fader y post-paneo | `SendIsPostFaderAndPostPan` |
+| ley de paneo del looper | `PanLawIsTheLooperEqualPowerOne` |
+| snap al target (activacion y start) | `FirstBlockStartsAtTheMixTarget...`, `SongVoice.ReactivatingTheSong...` |
+| el `TrackBuffer` no alcanza a la cancion; ninguna voz a la cadena | `TrackBufferControlsHaveNoEffect...`, `SongVoice.TrackBufferControlsDoNotReach...` |
+| fresca = reusada con bus | `AReusedInstanceWithTheBusGivesTheBitsOfAFreshOne` |
+| el envio apagado no corta la cola ni alimenta el bus para siempre | `TurningTheSendOffLetsTheTailDecay...` |
+| 0 alloc / sin carrera / costo del callback | `ABurstOfMixSettersAgainstTheCallback...` (TSan en la suite de sanitizers) |
+| PROTECTED = 2.23.0 | `ProtectedIsTheTwoTwentyThreeOutputBitForBit`, `ProtectedEqualsTheOldChain...` |
+| MASTER = `wma_master_process`; el volumen va despues | `MasterProfileEqualsTheStandaloneMaster...` |
+| RAW nunca con device ni tras dejar de ser offline | `RawIsRefusedOnAnEngineThatIsNotOffline`, `AnInstanceThatStopsBeingOffline...` |
+| medidores en la cola de los tres perfiles | `TheOutputMetersAreAtTheTailOfAllThreeProfiles` |
+| rangos y NULL de la C API | `test_c_api_mix.cpp` |
+| JNI: array de taps corto, handle/ids cerrados, arrays mal formados | `SongMixJniTest` |
+
+## Lo medido
+
+Host macOS arm64 (M-series), 2026-10-28. Los numeros no se escriben a mano en otro doc.
+
+| medicion | Debug (-O0) | Release (-O3) |
+|---|---|---|
+| callback con 8 pistas de cancion + bus + master MASTER, 256 frames, rafaga de setters (6000 callbacks): maximo | 1408 us | 147-173 us |
+| idem, p99 | 601 us | 117-123 us |
+| periodo del callback a 48 kHz | 5333 us | 5333 us |
+| pasada offline con 8 taps de pista + bus, bloque 4096, 10 s de audio, CPU del hilo | skipped | **118-123x** tiempo real (0,081-0,084 s de CPU) |
+
+El maximo de Release es el 3 % del periodo. El piso de 10x del diseno se cumple con >10x de margen.
+La rafaga (`SongMix.ABurstOfMixSettersAgainstTheCallbackAllocatesNothingAndStaysInsideThePeriod`) imprime
+`[ mix ]`; el costo del export, `[ COSTO   ]`. Para reproducirlo con la suite en Release:
+
+```bash
+cmake -S audio/src/main/cpp/tests -B /tmp/wma-rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DFETCHCONTENT_BASE_DIR=$PWD/audio/src/main/cpp/tests/.deps
+cmake --build /tmp/wma-rel --target core_tests
+/tmp/wma-rel/core_tests/core_tests --gtest_filter='SongMix.APassWith*:SongMix.ABurst*'
+```
+
+En el gate (Debug) el test de costo sale SKIPPED, nunca con el umbral bajado; el del periodo solo se afirma sin
+sanitizers (con ellos el callback es mas lento por construccion).
+
+## Limites conocidos
+
+- El bus se dimensiona a 4096 frames; un callback vivo mas grande salta el bus ese bloque (cuenta, no aloca).
+- El master del export (`MasterStage` por `wma_master_*`) y el vivo comparten codigo, no estado: Studio los
+  mantiene en el mismo punto con `reset` + `configure` antes de procesar.
+- El hash de 2.23.0 es de macOS arm64; en otras plataformas vale la prueba estructural.

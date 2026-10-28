@@ -108,7 +108,7 @@ TEST_F(CApiFixture, RawIsRefusedOnAnEngineThatIsNotOffline) {
         << "un motor con device acepto RAW";
     EXPECT_EQ(mWma->engine->getOutputProfile(), AudioEngine::OutputProfile::Protected);
     EXPECT_EQ(wma_mix_set_output_profile(mWma, WMA_OUTPUT_MASTER), WMA_OK);
-    EXPECT_EQ(wma_mix_set_output_profile(mWma, static_cast<WmaOutputProfile>(7)),
+    EXPECT_EQ(wma_mix_set_output_profile(mWma, static_cast<WmaOutputProfile>(3)),   // 3 cabe en el rango del enum
               WMA_ERROR_PARAMETER_OUT_OF_RANGE);
     EXPECT_EQ(wma_mix_set_output_profile(nullptr, WMA_OUTPUT_MASTER), WMA_ERROR_NOT_INITIALIZED);
 }

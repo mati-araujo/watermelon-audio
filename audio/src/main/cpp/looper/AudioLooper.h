@@ -1069,6 +1069,12 @@ public:
         mSongMix[track].send.store(send, std::memory_order_relaxed);
     }
 
+    /// La ganancia vigente de la mezcla de la cancion para `track` (sonda: 0 si no existe).
+    float getSongMixTrackGain(int track) const {
+        return track >= 0 && track < MAX_TRACKS_HW ? mSongMix[track].gain.load(std::memory_order_relaxed)
+                                                   : 0.0f;
+    }
+
     /// Control, cualquier hilo. El RT aplica el conjunto al bus cuando ve la version nueva.
     void setSongMixSpace(const wm::SongSpaceParams& p) {
         mSongSpace.reverbReturn.store(p.reverbReturn, std::memory_order_relaxed);

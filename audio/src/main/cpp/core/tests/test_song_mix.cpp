@@ -384,6 +384,51 @@ TEST_F(SongMix, TurningTheSendOffLetsTheTailDecayInsteadOfCuttingItOrFeedingItFo
     EXPECT_GT(peakOf(later.tracks[0]), 0.1f) << "la cancion ya no suena: el test no prueba nada";
 }
 
+// Defecto: el costo de la pasada del export (motor + bus + 8 taps de pista) cae por debajo del
+// piso de 10x tiempo real que prometio el diseno. CPU DEL HILO (el reloj de pared mediria la carga de
+// la maquina). Debug y sanitizers: SKIPPED, nunca PASSED ni con el umbral bajado; se corre con la
+// suite en Release (docs/dev/mezcla-y-master.md).
+TEST_F(SongMix, APassWithEightTrackTapsRendersAtLeastTenTimesFasterThanRealTime) {
+    WMA_SKIP_IF_SANITIZED();
+#if !defined(__OPTIMIZE__)
+    GTEST_SKIP() << "el costo se mide en un build optimizado (la suite del gate es Debug)";
+#endif
+    constexpr double kMinRealTimeFactor = 10.0;
+    constexpr int kSeconds = 10;
+    constexpr int kBlockFrames = 4096;   // el bloque del export (ADR-0013 §10)
+    constexpr int kTracks = 8;
+    WmaEngine* e = wma_engine_create();
+    mEngines.push_back(e);
+    wma_set_audio_mode(e, 0);
+    wma_set_synth_volume(e, 0.0f);
+    ASSERT_EQ(wma_offline_start(e, kRate, kBlockFrames), WMA_OK);
+    ASSERT_EQ(wma_mix_set_output_profile(e, WMA_OUTPUT_RAW), WMA_OK);
+    WmaSongSection sec{};
+    sec.start_frame = wma_transport_get_play_frame(e) + kLoop;
+    for (int t = 0; t < WMA_SONG_MAX_TRACKS; ++t) sec.clip[t] = WMA_SONG_SILENCE;
+    for (int t = 0; t < kTracks; ++t) {
+        sec.clip[t] = loadClip(e, tone("perf_" + std::to_string(t), 50.0f + 13.0f * t, 0.2f * t));
+        ASSERT_EQ(wma_mix_set_track(e, t, 0.7f, -0.8f + 0.2f * t, 0.4f), WMA_OK);
+    }
+    const WmaMixSpace sp = space(0.6f, 0.5f);
+    ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &sec, 1, sec.start_frame + (kSeconds + 1) * kRate), WMA_OK);
+    std::vector<float> mix(kBlockFrames * 2), fx(kBlockFrames * 2), tracks(static_cast<size_t>(kTracks) * kBlockFrames * 2);
+    const int blocks = kSeconds * kRate / kBlockFrames;
+    timespec a{}, b{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &a);
+    for (int i = 0; i < blocks; ++i) {
+        ASSERT_EQ(wma_offline_render_taps(e, mix.data(), fx.data(), tracks.data(), kTracks, kBlockFrames), WMA_OK);
+    }
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &b);
+    const double cpu = static_cast<double>(b.tv_sec - a.tv_sec) + static_cast<double>(b.tv_nsec - a.tv_nsec) * 1e-9;
+    const double factor = static_cast<double>(blocks) * kBlockFrames / kRate / cpu;
+    std::printf("[ COSTO   ] pasada con bus + %d taps de pista, bloque %d: %.1fx tiempo real (%.3f s de CPU)\n",
+                kTracks, kBlockFrames, factor, cpu);
+    RecordProperty("real_time_factor", std::to_string(factor));
+    EXPECT_GE(factor, kMinRealTimeFactor);
+}
+
 namespace {
 
 struct LiveMix {
