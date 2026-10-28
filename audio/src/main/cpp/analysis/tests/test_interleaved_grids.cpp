@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <random>
 #include <string>
@@ -1271,6 +1272,44 @@ TEST(InterleavedGridsCost, TheFourGridsCostAFractionOfRealTimeAndTheNumberIsPrin
                 kBlock, wholePct);
     RecordProperty("analisis_entero_pct", std::to_string(wholePct));
     EXPECT_LT(wholeBest / kSeconds, kCeiling) << "el analisis entero cuesta " << wholePct << " % del tiempo real";
+}
+
+/**
+ * Hallazgo del security-auditor de REQ-057: una muestra Inf (o un objetivo Inf) hace NaN el `raw`
+ * del Goertzel, la vuelta `turns` sale NaN, `NaN != 0` es true y la guarda de coherencia no lo frena
+ * (`std::max(worst, NaN)` devuelve `worst`). Sin el chequeo de finitud se convertia NaN a int (UB).
+ *
+ * Lo que se afirma sin sanitizer: en los cierres que ven el NaN la coherencia NO se evalua
+ * (`lastCoherenceSpreadRad() < 0`, su valor de "no hubo vuelta que juzgar"). Mutante: sacar el
+ * `isfinite(turns)` ⇒ la guarda corre con NaN y deja la dispersion en 0 ⇒ rojo (y UBSan, ademas,
+ * ve la conversion). Un tono a 0 c no suma vueltas nunca, asi que antes del Inf la dispersion
+ * tambien es negativa: lo que cambia es sólo lo que pasa con el NaN.
+ */
+TEST(InterleavedGrids, AnInfSampleNeverReachesTheTurnCount) {
+    constexpr int kRate = 48000;
+    constexpr double kTarget = 440.0;
+    constexpr int kHop = InterleavedPhaseEstimator::kHopFrames;
+    InterleavedPhaseEstimator est;
+    est.prepare(kRate);
+    est.setTarget(kTarget);
+
+    std::vector<float> sig = pureSine(kTarget, kRate, 24 * kHop);
+    sig[static_cast<size_t>(12 * kHop + 100)] = std::numeric_limits<float>::infinity();
+
+    int closesWithNaN = 0;
+    for (int h = 0; h < 24; ++h) {
+        est.process(sig.data() + static_cast<size_t>(h) * kHop, kHop);
+        if (h < 12) continue;
+        for (int g = 0; g < InterleavedPhaseEstimator::kGrids; ++g) {
+            const PhaseSlopeEstimator& e = est.grid(g);
+            if (std::isnan(e.lastRawPhase())) ++closesWithNaN;
+            EXPECT_LT(e.lastCoherenceSpreadRad(), 0.0)
+                << "hop " << h << " rejilla " << g << ": la guarda de coherencia se evaluo con una vuelta NaN";
+            EXPECT_GE(e.turnsAdded(), 0) << "hop " << h << " rejilla " << g;
+        }
+    }
+    // Premisa: el Inf llego de verdad al Goertzel. Sin esto el test pasa sin ejercer nada.
+    EXPECT_GT(closesWithNaN, 0) << "ningun cierre vio el Inf: el test no ejerce la rama";
 }
 
 }  // namespace

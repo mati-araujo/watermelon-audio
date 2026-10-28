@@ -202,7 +202,12 @@ void PhaseSlopeEstimator::closeWindow() {
             while (e[3] > M_PI) e[3] -= 2.0 * M_PI;
             while (e[3] < -M_PI) e[3] += 2.0 * M_PI;
             const double turns = std::round((e[0] + e[1] + e[2] + e[3] - d) / (2.0 * M_PI));
-            if (turns != 0.0) {
+            if (!std::isfinite(turns)) {
+                // Un Inf en el audio (o un objetivo Inf) da `raw` NaN: `NaN != 0` es true y la guarda de
+                // coherencia no lo frena (`std::max(worst, NaN)` devuelve `worst`), asi que sin esto se
+                // convertia NaN a int, que es UB. Sin vuelta que sumar, el incremento queda sin resolver.
+                unresolved = true;
+            } else if (turns != 0.0) {
                 // Mediana de 4 = promedio de los dos centrales, sin ordenar un array: el minimo y el
                 // maximo salen de la suma menos los extremos.
                 double lo = e[0], hi = e[0];

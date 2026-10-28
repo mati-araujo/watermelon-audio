@@ -183,6 +183,15 @@ de captura y **no lo reporta** es indetectable. El motor converge sobre ese huec
 saberlo. Está escrito como test (`CaptureDiscontinuity.NobodyReportedItSoNobodyCanKnow`) para que
 el día que entre un backend nuevo sin reportar, se sepa exactamente qué se pierde.
 
+**Con las rejillas de REQ-057 esto empeora un poco, y se dice.** Un hueco aislado de 512 frames
+sin reportar en A4 a 48 kHz sale `CONVERGIDO` con 0,873 c de error a +10 c (σ 0,061), contra
+0,641 c (σ 0,099) del motor anterior, y ahora también publica lectura fina a +50 c (0,449 c,
+σ 0,076), donde antes no había lectura. Lo fija
+`InterleavedGrids.ASingleUnreportedLostGapStillPublishesAConvergedReadingOffByLessThanOneCent`.
+La guarda de coherencia de la serie densa (0,3 rad, D33 de REQ-057) frena el hueco **periódico**
+(`NobodyReported…` sigue sin lectura), no el aislado: con 0,2 rad desaparece el caso de +50 c, pero
+ese umbral queda a 1,1× del máximo sano del barrido grande (0,178 rad). Queda para un MINI.
+
 **El motor lo publica**, en el índice 15 del snapshot (`inputDiscontinuity` en Kotlin): distingue
 *"todavía no convergí"* —esperar— de *"la entrada llegó rota"* —revisar el cable—, que son dos
 acciones opuestas para el usuario. **No** es `droppedFrames > 0`: ese contador es acumulado y
