@@ -38,6 +38,7 @@ set(LOOPER_TESTED_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/OfflineAnalysis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/AnalysisThread.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/AnalysisRing.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/TunerInputDump.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/PhaseSlopeEstimator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/StrobeTracker.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/InharmonicityEstimator.cpp
@@ -62,6 +63,7 @@ add_executable(looper_tests
     test_pre_roll_ring.cpp
     test_pan_lut.cpp
     test_track_analysis.cpp
+    test_song_player.cpp
     ${LOOPER_TESTED_SOURCES}
 )
 
@@ -98,6 +100,7 @@ add_executable(looper_tests_dense
     test_pre_roll_ring.cpp
     test_pan_lut.cpp
     test_track_analysis.cpp
+    test_song_player.cpp
     ${LOOPER_TESTED_SOURCES}
 )
 target_include_directories(looper_tests_dense PRIVATE

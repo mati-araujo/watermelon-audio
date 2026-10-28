@@ -1288,6 +1288,117 @@ WMA_API bool wma_tuner_analyze_buffer_with_candidates(
     const float* candidates_hz, int candidate_count, float* out_values);
 
 /* ================================================================
+ * 12c. Diagnostics, NO CONTRACT (REQ-055 S0)
+ *
+ * Tooling to MEASURE the tuner, not part of what the library offers a
+ * consumer. Anything in this section can change or disappear in any release,
+ * and the Kotlin side marks it @InternalWatermelonApi (error level). Do not
+ * build a feature on it.
+ * ================================================================ */
+
+/**
+ * Number of int64 values wma_tuner_diag_input_dump_stop() writes, in this order:
+ * 0 framesWritten, 1 framesLost, 2 discontinuities, 3 sampleRate, 4 inputSource,
+ * 5 valid (0/1), 6 finalized (0/1).
+ *
+ * framesLost and discontinuities are TOTALS. valid is 1 only if every loss and
+ * discontinuity could be LOCATED in the file (frames overwritten in the analysis
+ * ring before they were copied, the recording queue full, a capture seam): the
+ * "wmad" chunk (version 2) lists each one as a cut (file frame, length; a seam
+ * has an unknown length) and whoever measures the take cuts there. So valid = 1
+ * with framesLost or discontinuities > 0 is a healthy take WITH cuts. Anything
+ * that cannot be located makes it 0: the per-take cap, a write error, a ring
+ * reset, an input source change, the tuner restarted with the take running, a
+ * rate change or unknown rate, more than 256 cuts. valid also needs a known
+ * rate, at least one frame and a file that was written without errors.
+ *
+ * finalized is 1 when the file was closed and named by the rule above ("<path>"
+ * or "<path minus .wav>.invalid.wav"). 0 means closing or renaming failed —
+ * including a file that already had the final name when the take closed, which
+ * is never replaced: the data is in "<path>.part" (or nowhere if even that
+ * could not be written), nothing was written under the final name, and valid
+ * is 0.
+ *
+ * A take never writes more than 2^28 frames (~93 min at 48 kHz): past that,
+ * every frame counts as lost and the take closes invalid.
+ */
+#define WMA_TUNER_DUMP_STATS_VALUES 7
+
+/**
+ * Longest path (in bytes, terminator excluded) wma_tuner_diag_input_dump_start()
+ * accepts. Longer ones are refused: no file system the library runs on can
+ * create them anyway.
+ */
+#define WMA_TUNER_DUMP_PATH_MAX 4096
+
+/**
+ * Capacity (bytes, terminator included) that wma_tuner_diag_input_dump_stop()
+ * requires: the longest file a take can leave, "<path minus .wav>.invalid.wav"
+ * (8 bytes longer than the path), plus the terminator:
+ * WMA_TUNER_DUMP_PATH_MAX + 8 + 1. A literal so every binding reads it as a constant.
+ */
+#define WMA_TUNER_DUMP_PATH_CAPACITY 4105
+
+/**
+ * Start recording EXACTLY what the tuner sees (the mono signal after the input
+ * DSP, at the stamped capture rate) to a float32 WAV. The file is written to
+ * "<path>.part" and named when the take is stopped: "<path>" if healthy,
+ * "<path minus .wav>.invalid.wav" if audio was lost or the capture was
+ * discontinuous in a way the file cannot locate. A WAV with holes never carries
+ * a healthy name unless its "wmad" chunk declares every one of them (see
+ * WMA_TUNER_DUMP_STATS_VALUES).
+ *
+ * Does NOT start the tuner: with no tuner running no audio reaches the
+ * recording. Returns true even then; the take just closes invalid.
+ *
+ * Never overwrites, truncates or follows anything already on disk: it refuses to
+ * start if "<path>", its ".invalid.wav" name or "<path>.part" already exist (a
+ * symlink included).
+ *
+ * @param path  UTF-8, must end in ".wav" (lowercase), at most
+ *              WMA_TUNER_DUMP_PATH_MAX bytes.
+ * @return false for a null engine, a null or empty path, a path that does not
+ *         end in ".wav" or is too long, a take already in progress, a file
+ *         that cannot be created or already exists, or a request the analysis
+ *         thread did not apply in time.
+ *
+ *         A false leaves NOTHING of the refused take on disk: no "<path>.part",
+ *         no named file. A false never touches a take already in progress.
+ *         One case leaves a take running: the analysis thread applied neither
+ *         the arming nor the disarming in time, so the ".part" may still be
+ *         written to and cannot be removed. That take is still this path's;
+ *         stop it (wma_tuner_diag_input_dump_stop() says which file
+ *         it left). If removing the ".part" of a refused take fails, the
+ *         failure is logged with the file's name.
+ */
+WMA_API bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path);
+
+/**
+ * Stop the take, close the file and report it: the stats and the file the take
+ * ACTUALLY left on disk, from the native side — the requested path if valid,
+ * its ".invalid.wav" name if not, "<path>.part" if it could not be named
+ * (finalized = 0).
+ *
+ * Use out_path rather than rebuilding the name from the path you passed to
+ * start: after a start that returned false with a take still running, the
+ * running take is not necessarily the last path you asked for.
+ *
+ * @param[out] out_values  WMA_TUNER_DUMP_STATS_VALUES int64 values. Exactly that
+ *                         many are written, even if count is larger.
+ * @param count            capacity of out_values; must be >= the constant above.
+ * @param[out] out_path    NUL-terminated UTF-8, the same bytes start received
+ *                         plus the suffix.
+ * @param path_capacity    capacity of out_path; must be >= WMA_TUNER_DUMP_PATH_CAPACITY.
+ * @return false (out_values and out_path untouched, take left running) for a
+ *         null engine, out_values or out_path, a too-small count or
+ *         path_capacity, no take in progress, or a disarm the analysis thread
+ *         did not apply in time. Out of memory while closing is the one false
+ *         that may have closed the take.
+ */
+WMA_API bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_values, int count,
+                                            char* out_path, int path_capacity);
+
+/* ================================================================
  * 13. Dual Touch
  * ================================================================ */
 
@@ -2110,6 +2221,126 @@ WMA_API bool wma_looper_import_track(WmaEngine* engine, int track_index,
 WMA_API WmaResult wma_looper_import_track_ex(WmaEngine* engine, int track_index,
                                              const char* file_path, int sample_rate);
 
+/* ----------------------------------------------------------------
+ * Programmed song (REQ-055 S11): an agenda of sections, each with one clip per
+ * track, mixed by the audio callback instead of the looper's takes.
+ *
+ * Time is the Transport PLAY FRAME (wma_transport_get_play_frame), an absolute
+ * int64 that is never reset. Section k rules in [start_k, start_{k+1}) (the last
+ * one until end_frame); a track's phase in it is (frame - start_k) mod L, so the
+ * output depends on the frame and not on the block size.
+ *
+ * A clip is a dense, immutable buffer of exactly L stereo frames, built OFF the
+ * audio thread (decode + resample + trim + normalise). The agenda is published to
+ * the callback through a wait-free triple buffer and adopted at the start of a
+ * block; republishing while it plays is the supported way to edit.
+ *
+ * Fade F = max(64, round(0.005 * sample_rate)) frames in [B - F, B) before every
+ * border B: equal-power for a clip change or a phase jump, raised cosine to enter
+ * or leave silence (also the start at start_0 and the end at end_frame), nothing
+ * when the same clip stays aligned. The new state rules EXACTLY from B (the
+ * downbeat enters at full gain; the pre-entry plays the clip's tail). Before the
+ * first start and from end_frame the tracks are silent -- they do NOT fall back to
+ * the looper's takes while an agenda is published.
+ *
+ * What it needs to sound: the looper enabled (wma_song_set_schedule enables it)
+ * and the audio running (a live stream, or wma_offline_render). The looper does
+ * NOT need to be playing. For an offline render read the anchor with
+ * wma_transport_get_play_frame() after wma_offline_start and publish
+ * P0 + offsets. wma_offline_start does not reset the play frame, but it SWITCHES THE
+ * SONG OFF: the agenda is empty (a published-but-unadopted one is dropped too) and the
+ * voices are clean, as in a fresh instance. Publish the agenda AFTER the start; the loaded
+ * clips are kept. So a restarted render begins exactly as a fresh one.
+ *
+ * While an agenda is published the looper's own record/arm calls do nothing:
+ * wma_looper_start_recording, _start_recording_with_pre_roll and _start_overdub
+ * are no-ops, wma_looper_arm_* return -1. Mute, volume, pan and send-to-fx of
+ * the tracks apply to the song's voices; per-track peak and progress do not.
+ *
+ * A sample-rate change of the engine invalidates every clip (they were
+ * resampled to the old rate) and switches the agenda off: load the clips again.
+ *
+ * The clips count against the looper's memory budget, together with the takes.
+ * ---------------------------------------------------------------- */
+
+#define WMA_SONG_MAX_TRACKS   16
+#define WMA_SONG_MAX_CLIPS    64
+#define WMA_SONG_MAX_SECTIONS 1024
+#define WMA_SONG_SILENCE      (-1)
+
+typedef struct {
+    int64_t start_frame;                     /* ABSOLUTE play frame of the Transport */
+    int32_t clip[WMA_SONG_MAX_TRACKS];       /* clip id per track; WMA_SONG_SILENCE = silence */
+} WmaSongSection;
+
+/**
+ * Decode + resample to @p sample_rate OFF the audio thread, bake the trim
+ * [region_start, region_end) (frames ALREADY resampled; region_end <= 0 = the whole
+ * take; clamped like a track's loop region) and normalise to @p loop_frames: a view
+ * (take >= L), a tiling (L a multiple of the take) or a tiling with a faded
+ * junction (otherwise). Takes its own mutex, never the engine's.
+ *
+ * @param out_id  receives the clip id (0..WMA_SONG_MAX_CLIPS-1)
+ * @return WMA_OK; WMA_ERROR_MEMORY_BUDGET (clips + takes over the looper's budget);
+ *         WMA_ERROR_UNSUPPORTED_FORMAT; WMA_ERROR_IO; WMA_ERROR_MEMORY;
+ *         WMA_ERROR_PARAMETER_OUT_OF_RANGE (pool full, loop_frames <= 0,
+ *         sample_rate <= 0, NULL path or out_id); WMA_ERROR_INVALID_OPERATION (the
+ *         engine's sample rate changed while decoding: the clip was built for the old
+ *         rate and is discarded); WMA_ERROR_NOT_INITIALIZED.
+ *
+ * Decoding happens OUTSIDE the song's control mutex: wma_song_set_schedule,
+ * wma_song_unload_clip and a sample-rate change never wait for a slow load (only
+ * another wma_song_load_clip does).
+ */
+WMA_API WmaResult wma_song_load_clip(WmaEngine* engine, const char* path, int sample_rate,
+                                     int64_t region_start, int64_t region_end,
+                                     int64_t loop_frames, int32_t* out_id);
+
+/**
+ * Retire a clip. Its memory is released once the audio thread can no longer be
+ * reading it (it advanced past the agenda that dropped it and no voice holds it),
+ * at the next song call. An offline engine releases at the next control call after a
+ * block in which no fade tail and no adopted agenda reads it (so an unload followed by a
+ * load with no render in between, near the memory cap, can fail with
+ * WMA_ERROR_MEMORY_BUDGET or WMA_ERROR_PARAMETER_OUT_OF_RANGE). An engine with no stream
+ * (stopped) releases at once -- verified against the audio thread before freeing (a
+ * callback starting concurrently mutes the song for one block instead).
+ * @return WMA_OK; WMA_ERROR_INVALID_OPERATION if it does not exist, was already
+ *         retired, or the PUBLISHED agenda references it.
+ */
+WMA_API WmaResult wma_song_unload_clip(WmaEngine* engine, int32_t id);
+
+/**
+ * Publish the whole agenda. After wma_offline_start the agenda is off until this is called
+ * again. @p count = 0 switches the song off (the song fades out
+ * over F if it was sounding) and the looper goes back to its takes -- which return
+ * at full gain at once, with no fade-in: a take that is playing on a track steps in
+ * when the song's tail ends. A song-only project has no takes, so nothing to hear.
+ *
+ * @return WMA_OK;
+ *         WMA_ERROR_PARAMETER_OUT_OF_RANGE: count > WMA_SONG_MAX_SECTIONS; a start
+ *           not strictly increasing or negative; a section shorter than 2F;
+ *           end_frame < last start + 2F (or INT64_MAX); a clip on a track >= the active tracks
+ *           (a track with no clip must be WMA_SONG_SILENCE); loop_frames <= 0.
+ *         WMA_ERROR_INVALID_OPERATION: a clip that does not exist / was retired, a
+ *           clip built for another loop_frames or sample rate, a recording in
+ *           progress or armed.
+ */
+WMA_API WmaResult wma_song_set_schedule(WmaEngine* engine, int64_t loop_frames,
+                                        const WmaSongSection* sections, int32_t count,
+                                        int64_t end_frame);
+
+/** Index, in the agenda the callback has ADOPTED, of the section containing the last frame
+ *  of the most recent block; -1 when inactive, before the first start or after end_frame.
+ *  It can lag the last published agenda by a block: after republishing it keeps the old
+ *  agenda's index until the callback adopts the new one. */
+WMA_API int32_t wma_song_get_section(const WmaEngine* engine);
+
+/** Adoptions that changed what was sounding at the adoption frame t (an edit of the
+ *  section that plays, or of a border whose fade is already running at t): each one
+ *  fades over [t, t + F), and two within F chain their fades. */
+WMA_API int64_t wma_song_get_late_adoptions(const WmaEngine* engine);
+
 /* ================================================================
  * 20. Transport (musical clock & metronome)
  * ================================================================
@@ -2414,6 +2645,12 @@ WMA_API const char* wma_get_version(void);
  *
  * If the instance is already rendering offline it is stopped and started
  * again — that restart is what makes a second render reproduce the first.
+ *
+ * The programmed song starts from the canonical state of a fresh instance: its
+ * voices and fade tails are reset and its agenda is switched OFF (including one
+ * published before this call and not yet adopted), so whatever sounds depends only
+ * on the calls made since the start. Loaded clips are kept; call
+ * wma_song_set_schedule after the start.
  *
  * @param sample_rate       Hz, > 0.
  * @param max_block_frames  Largest block a later wma_offline_render() may ask

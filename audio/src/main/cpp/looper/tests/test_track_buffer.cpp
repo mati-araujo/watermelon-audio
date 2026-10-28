@@ -676,3 +676,31 @@ TEST(TrackBuffer, LoopRegionWithStartNearTheEndNeverPassesTheLength) {
     EXPECT_EQ(tb.getLoopStart(), kLen - 100);
     EXPECT_EQ(tb.getLoopEnd(), kLen);
 }
+
+// Bug plausible: la funcion libre se desincroniza de setLoopRegion (el recorte horneado de un
+// clip y la region de una pista dejarian de coincidir) o vuelve al clamp invertido de #403.
+TEST(TrackBuffer, ClampLoopRegionIsTheFunctionSetLoopRegionUses) {
+    constexpr int kLens[] = {0, 1, 59, 1024, 1025, 48000};
+    constexpr int kStarts[] = {-5, 0, 10, 1000, 47999, 60000};
+    constexpr int kEnds[] = {-1, 0, 5, 30, 1500, 48000, 99999};
+    for (int len : kLens) {
+        for (int s : kStarts) {
+            for (int e : kEnds) {
+                const wm::LoopRegion r = wm::clampLoopRegion(s, e, len);
+                if (len <= 0) {
+                    EXPECT_EQ(r.start, 0);
+                    EXPECT_EQ(r.end, 0);
+                    continue;
+                }
+                EXPECT_GE(r.start, 0) << len << "," << s << "," << e;
+                EXPECT_LT(r.start, r.end);
+                EXPECT_LE(r.end, len) << "el fin paso el largo: " << len << "," << s << "," << e;
+                TrackBuffer tb;
+                recordTrack(tb, len);
+                tb.setLoopRegion(s, e);
+                EXPECT_EQ(tb.getLoopStart(), r.start);
+                EXPECT_EQ(tb.getLoopEnd(), r.end);
+            }
+        }
+    }
+}

@@ -11,6 +11,7 @@
 #include "watermelon_audio_internal.h"
 
 #include "../analysis/OfflineAnalysis.h"
+#include "../analysis/WavFileDumpSink.h"
 #include "../core/AudioMode.h"
 #include "../voice/VoiceTypes.h"
 #include "../platform/Logger.h"
@@ -181,8 +182,15 @@ void wma_engine_destroy(WmaEngine* engine) {
     }
     if (engine->analysisThread) {
         engine->analysisThread->stop();
+        // Una toma viva se cierra ANTES de liberar nada: con el hilo ya parado el desarme se
+        // aplica directo (el productor queda confirmado desarmado) y el archivo se nombra.
+        if (engine->tunerInputDump && engine->tunerInputDump->takeActive()) {
+            engine->analysisThread->setInputDump(nullptr);
+            engine->tunerInputDump->endTake();
+        }
         engine->analysisThread.reset();
     }
+    engine->tunerInputDump.reset();
     engine->analysisSnapshot.reset();
     engine->analysisRing.reset();
     if (engine->inputNode) {
@@ -1364,6 +1372,127 @@ bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values) {
     return engine->analysisSnapshot->read(out_values);
 }
 
+/* ================================================================
+ * 12c. Diagnostico, sin contrato (REQ-055 S0)
+ * ================================================================ */
+
+static_assert(WMA_TUNER_DUMP_STATS_VALUES == wma::analysis::kInputDumpStatsValues,
+              "WMA_TUNER_DUMP_STATS_VALUES quedo desincronizado de kInputDumpStatsValues");
+static_assert(sizeof(".invalid.wav") - sizeof(".wav") == 8 && sizeof(".part") - 1 <= 8,
+              "WMA_TUNER_DUMP_PATH_CAPACITY suma 8: el sufijo mas largo que una toma agrega");
+static_assert(WMA_TUNER_DUMP_PATH_CAPACITY == WMA_TUNER_DUMP_PATH_MAX + 8 + 1,
+              "WMA_TUNER_DUMP_PATH_CAPACITY es el path mas largo, su sufijo y el terminador");
+
+#if defined(WMA_TEST_HOOKS)
+std::atomic<int> gTunerDumpForcedMailboxTimeouts{0};
+#endif
+
+namespace {
+
+/// El buzon del volcado (`AnalysisThread::setInputDump`), con la compuerta de test que informa un
+/// techo vencido. Bajo `analysisMutex`.
+bool tunerDumpMailbox(WmaEngine* engine, wma::analysis::TunerInputDump* dump) {
+    const bool applied = engine->analysisThread->setInputDump(dump);
+#if defined(WMA_TEST_HOOKS)
+    int forced = gTunerDumpForcedMailboxTimeouts.load(std::memory_order_acquire);
+    while (forced > 0) {
+        if (gTunerDumpForcedMailboxTimeouts.compare_exchange_weak(forced, forced - 1,
+                                                                  std::memory_order_acq_rel)) {
+            return false;
+        }
+    }
+#endif
+    return applied;
+}
+
+/// Un start que devuelve false no deja nada de su toma (bug B). Si el borrado no pudo, se dice.
+void abortRefusedTunerDump(wma::analysis::TunerInputDump& dump) {
+    if (dump.abortTake()) return;
+    WMA_LOGE("wma_tuner_diag_input_dump_start: la toma rechazada dejo '%s' en disco "
+             "(no se pudo borrar, o el nombre ya no es el archivo que se creo)",
+             dump.abortResidue().c_str());
+}
+
+}  // namespace
+
+bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path) {
+    if (!engine || !path || path[0] == '\0') return false;
+    // El tope de largo hace que el archivo que una toma deja siempre quepa en
+    // WMA_TUNER_DUMP_PATH_CAPACITY (el contrato de stop).
+    if (std::strlen(path) > WMA_TUNER_DUMP_PATH_MAX) return false;
+    // El volcado solo crea `.wav` (hallazgo 1): el path lo arma la app y no puede usarse para
+    // crear un archivo de cualquier nombre. El sink, ademas, nunca pisa uno que ya exista.
+    if (!wma::analysis::hasWavExtension(path)) return false;
+    if (!wmaEnsureAnalysis(engine)) return false;
+    std::lock_guard<std::mutex> lock(engine->analysisMutex);
+    if (!engine->analysisThread) return false;
+    try {
+        if (!engine->tunerInputDump) {
+            engine->tunerInputDump = std::make_unique<wma::analysis::TunerInputDump>();
+        }
+        wma::analysis::TunerInputDump& dump = *engine->tunerInputDump;
+        if (dump.takeActive()) return false;
+
+        // La fuente de ESTA toma: si cambia a mitad, el analisis lo anota como discontinuidad.
+        // Un false de `beginTake` no deja nada en disco: o no abrio, o aborto lo que abrio.
+        if (!dump.beginTake(std::make_unique<wma::analysis::WavFileDumpSink>(), path,
+                            wma_input_get_source(engine))) {
+            if (!dump.abortResidue().empty()) {
+                WMA_LOGE("wma_tuner_diag_input_dump_start: la toma rechazada dejo '%s' en disco",
+                         dump.abortResidue().c_str());
+            }
+            return false;
+        }
+        if (tunerDumpMailbox(engine, &dump)) return true;
+
+        // El hilo no aplico el armado. Se pide el desarme; con el productor confirmado desarmado
+        // (la precondicion de `abortTake`) la toma se ABORTA: este start devuelve false, y un
+        // false no deja archivos (bug B: cerrarla dejaba un `.invalid.wav` que nadie reportaba y
+        // que bloqueaba el nombre). Si el desarme tampoco se confirma, el productor puede seguir
+        // escribiendo y nada se borra: la toma queda activa y `stop` la cierra cuando el hilo
+        // vuelva, informando su archivo (stop).
+        if (tunerDumpMailbox(engine, nullptr)) abortRefusedTunerDump(dump);
+        return false;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_values, int count,
+                                    char* out_path, int path_capacity) {
+    if (!engine || !out_values || count < WMA_TUNER_DUMP_STATS_VALUES) return false;
+    if (!out_path || path_capacity < WMA_TUNER_DUMP_PATH_CAPACITY) return false;
+    try {
+        std::string leftPath;
+        int64_t values[WMA_TUNER_DUMP_STATS_VALUES];
+        {
+            std::lock_guard<std::mutex> lock(engine->analysisMutex);
+            if (!engine->tunerInputDump || !engine->tunerInputDump->takeActive()) return false;
+            if (engine->analysisThread && !tunerDumpMailbox(engine, nullptr)) return false;
+
+            std::string finalPath;
+            const wma::analysis::InputDumpStats st =
+                engine->tunerInputDump->endTake(&finalPath, &leftPath);
+            values[0] = static_cast<int64_t>(st.framesWritten);
+            values[1] = static_cast<int64_t>(st.framesLost);
+            values[2] = static_cast<int64_t>(st.discontinuities);
+            values[3] = st.sampleRate;
+            values[4] = st.inputSource;
+            values[5] = st.valid ? 1 : 0;
+            values[6] = finalPath.empty() ? 0 : 1;
+        }
+        // El start acota el path: lo que la toma deja siempre cabe. Si no cupiera seria un
+        // invariante roto; se trunca en un borde de byte antes que escribir fuera del buffer.
+        const size_t n = std::min(leftPath.size(), static_cast<size_t>(path_capacity) - 1);
+        std::memcpy(out_path, leftPath.data(), n);
+        out_path[n] = '\0';
+        std::copy(values, values + WMA_TUNER_DUMP_STATS_VALUES, out_values);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 /**
  * REQ-015 S2 — el puerto offline. **No lleva motor, y no lo busca por atras.**
  *
@@ -2536,6 +2665,93 @@ WmaResult wma_looper_import_track_ex(WmaEngine* engine, int track_index,
     } catch (...) {
         return WMA_ERROR_UNKNOWN;
     }
+}
+
+/* ---------------- Programmed song (REQ-055 S11) ---------------- */
+
+namespace {
+
+WmaResult songResult(wm::SongStatus st) {
+    switch (st) {
+        case wm::SongStatus::Ok:               return WMA_OK;
+        case wm::SongStatus::OutOfRange:       return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+        case wm::SongStatus::InvalidOperation: return WMA_ERROR_INVALID_OPERATION;
+        case wm::SongStatus::Io:               return WMA_ERROR_IO;
+        case wm::SongStatus::UnsupportedFormat: return WMA_ERROR_UNSUPPORTED_FORMAT;
+        case wm::SongStatus::BudgetExceeded:   return WMA_ERROR_MEMORY_BUDGET;
+        case wm::SongStatus::OutOfMemory:      return WMA_ERROR_MEMORY;
+    }
+    return WMA_ERROR_UNKNOWN;
+}
+
+/// Pista, no prueba: el motor no tiene stream. El SongPlayer verifica antes de liberar sin esperar.
+bool songStreamStopped(const WmaEngine* engine) {
+    return static_cast<EngineState>(engine->engine->getEngineState()) == EngineState::Stopped;
+}
+
+static_assert(WMA_SONG_MAX_TRACKS == wm::kSongMaxTracks &&
+              WMA_SONG_MAX_CLIPS == wm::kSongMaxClips &&
+              WMA_SONG_MAX_SECTIONS == wm::kSongMaxSections &&
+              WMA_SONG_SILENCE == wm::kSongSilence,
+              "la C API de la cancion y el motor comparten los topes");
+
+}  // namespace
+
+WmaResult wma_song_load_clip(WmaEngine* engine, const char* path, int sample_rate,
+                             int64_t region_start, int64_t region_end, int64_t loop_frames,
+                             int32_t* out_id) {
+    WMA_CHECK(engine);
+    if (path == nullptr || out_id == nullptr) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    try {
+        int32_t id = -1;
+        const wm::SongStatus st = engine->engine->getAudioLooper().songLoadClip(
+            path, sample_rate, region_start, region_end, loop_frames,
+            engine->engine->isOffline(), id, songStreamStopped(engine));
+        if (st == wm::SongStatus::Ok) *out_id = id;
+        return songResult(st);
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
+WmaResult wma_song_unload_clip(WmaEngine* engine, int32_t id) {
+    WMA_CHECK(engine);
+    return songResult(engine->engine->getAudioLooper().songUnloadClip(
+        id, engine->engine->isOffline(), songStreamStopped(engine)));
+}
+
+WmaResult wma_song_set_schedule(WmaEngine* engine, int64_t loop_frames,
+                                const WmaSongSection* sections, int32_t count,
+                                int64_t end_frame) {
+    WMA_CHECK(engine);
+    if (count < 0 || count > WMA_SONG_MAX_SECTIONS) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    if (count > 0 && sections == nullptr) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    try {
+        // Copia a un buffer del control (la agenda tiene hasta 1024 secciones): el C struct y
+        // el del motor tienen el mismo layout, pero no se asume.
+        std::vector<wm::SongSection> converted(static_cast<size_t>(count));
+        for (int32_t k = 0; k < count; ++k) {
+            converted[static_cast<size_t>(k)].startFrame = sections[k].start_frame;
+            for (int t = 0; t < WMA_SONG_MAX_TRACKS; ++t) {
+                converted[static_cast<size_t>(k)].clip[t] = sections[k].clip[t];
+            }
+        }
+        return songResult(engine->engine->getAudioLooper().songSetSchedule(
+            loop_frames, converted.data(), count, end_frame, engine->engine->isOffline(),
+            songStreamStopped(engine)));
+    } catch (...) {
+        return WMA_ERROR_UNKNOWN;
+    }
+}
+
+int32_t wma_song_get_section(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, -1);
+    return engine->engine->getAudioLooper().songGetSection();
+}
+
+int64_t wma_song_get_late_adoptions(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getAudioLooper().songGetLateAdoptions();
 }
 
 bool wma_looper_import_track(WmaEngine* engine, int track_index,
