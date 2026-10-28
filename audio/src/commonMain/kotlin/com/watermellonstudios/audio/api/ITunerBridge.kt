@@ -167,6 +167,11 @@ interface ITunerBridge {
      *   o `null` si los argumentos no describen audio analizable o el análisis nunca llegó a
      *   publicar. **`null` y "todo en cero" no son lo mismo**: la C API deja el buffer intacto
      *   cuando falla, justamente para que nadie lea ceros como una medición.
+     *
+     * **Buffers cortos (REQ-057, D31):** el análisis decide y publica una vez por tick de 1024
+     * frames. Con menos de 1024 frames nunca cierra un tick: devuelve `null` y no publica. En un
+     * buffer más largo, la cola de menos de 1024 frames se integra al análisis pero no aparece en
+     * el snapshot: los valores describen el último tick completo.
      */
     fun analyzeTunerBuffer(
         samples: FloatArray,
