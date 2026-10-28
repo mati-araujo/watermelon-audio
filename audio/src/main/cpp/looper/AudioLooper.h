@@ -127,10 +127,12 @@ public:
         if (sampleRate <= 0) return;
         // Los clips de la cancion estan resampleados al rate viejo: un cambio los invalida y
         // apaga la agenda (el llamador, configureComponentsWithSampleRate, ya paro el callback).
+        // El rate se publica bajo el mismo lock con que publishSongBus lo lee: un bus creado en
+        // paralelo queda preparado al rate nuevo, o lo re-prepara este mismo metodo.
+        std::lock_guard<std::mutex> busLock(mSongBusCtlMutex);
         if (sampleRate != mSampleRate.load(std::memory_order_acquire)) {
             mSong.invalidateForRate(sampleRate);
             // El bus «Espacio» (si existe) se re-prepara aca, con el RT quiesced como el resto.
-            std::lock_guard<std::mutex> busLock(mSongBusCtlMutex);
             if (wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire)) {
                 bus->prepareSpaceBus(sampleRate, mSongBusMaxFrames.load(std::memory_order_relaxed));
             }
@@ -438,7 +440,10 @@ public:
         // `mixInto` avanza el playhead y los tres smoothers: mezclar una pista
         // dos veces por bloque no duplica su audio, le corre el tiempo al doble.
         mixTracksInto(mLooperMixBuf.data(), numFrames, /*wantSendToFx=*/false);
-        if (mSongBlockActive) finishSongMix(mLooperMixBuf.data(), numFrames);
+        // Con la cancion inactiva el bus sigue procesando con envio cero mientras haya cola.
+        const bool songTaps = mSongBlockActive
+                                  ? (finishSongMix(mLooperMixBuf.data(), numFrames), true)
+                                  : runSongBusTail(mLooperMixBuf.data(), numFrames);
 
         // Apply master volume + accumulate into main output.
         // We replace the per-sample smoothing+accumulate scalar loop with two
@@ -463,7 +468,7 @@ public:
                                   masterVolStart, masterVolEnd);
         // Los taps (REQ-055 S12) se toman DESPUES del master del looper: cada uno recibe la misma
         // rampa, asi premezcla = suma de taps por construccion del grafo.
-        if (mSongBlockActive) rampSongTaps(numFrames, masterVolStart, masterVolEnd);
+        if (songTaps) rampSongTaps(numFrames, masterVolStart, masterVolEnd);
         // Accumulate mix into output (SIMD). applyHeadroom=false → straight sum
         // (we don't want the default -6dB headroom; master vol already applied).
         simd::addStereoBuffers(audioData, audioData, mLooperMixBuf.data(), numFrames,
@@ -1057,6 +1062,10 @@ public:
         mSong.resetVoicesForRender();
         mSongWasActive = false;
         mSongSpaceSeen = ~0u;   // el bus reaplica sus parametros en el primer bloque
+        mSongBusLive = false;
+        mSongBusStale = false;
+        mSongBusQuietFrames = 0;
+        mSongBusTailFrames = 0;
         if (wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire)) bus->resetSpaceBus();
     }
 
@@ -1095,13 +1104,15 @@ public:
 
     /**
      * @brief Publica el bus «Espacio» (control). El looper NO es su dueño y el dueño no lo libera
-     *        mientras el RT pueda correr. Las memorias del bloque se dimensionan ANTES de
-     *        publicar el puntero, asi el RT que lo ve ya encuentra los buffers.
+     *        mientras el RT pueda correr. Lo prepara AL RATE ACTUAL bajo el lock que serializa con
+     *        setSampleRate, y dimensiona las memorias del bloque ANTES de publicar el puntero, asi
+     *        el RT que lo ve ya encuentra los buffers.
      */
     void publishSongBus(wm::ISongSpaceBus* bus, int maxBlockFrames) {
         if (bus == nullptr || maxBlockFrames <= 0) return;
         std::lock_guard<std::mutex> busLock(mSongBusCtlMutex);
         mSongBusMaxFrames.store(std::max(maxBlockFrames, 1), std::memory_order_relaxed);
+        bus->prepareSpaceBus(mSampleRate.load(std::memory_order_acquire), maxBlockFrames);
         sizeSongBusBuffers(maxBlockFrames);
         mSongBus.store(bus, std::memory_order_release);
     }
@@ -1858,10 +1869,18 @@ private:
     std::atomic<int> mSongBusMaxFrames{4096};
     std::mutex mSongBusCtlMutex;                 // control: dimensionar / re-preparar el bus
     bool mSongBusRun{false};                     // audio thread: el bus corre en ESTE bloque
+    // Cola del bus tras desactivarse la cancion (D-S12-18). Todo del audio thread.
+    bool mSongBusLive{false};                    // el bus puede tener cola audible
+    bool mSongBusStale{false};                   // se apago con cola audible: reiniciar al reactivar
+    int64_t mSongBusQuietFrames{0};              // frames seguidos con el retorno bajo el umbral
+    int64_t mSongBusTailFrames{0};               // frames de cola desde que la cancion se apago
     std::vector<float> mSongSendBuf;
     std::vector<float> mSongFxBuf;
     std::vector<float> mSongScratch;
     wma::RtCounter mSongBusOverflow;
+    static constexpr float kSongTailSilence = 1e-6f;          // -120 dBFS
+    static constexpr double kSongTailQuietSeconds = 2.5;      // > el delay maximo (2 s)
+    static constexpr int64_t kSongTailMaxSeconds = 30;
     // Taps de la pasada offline (un solo hilo): ver armSongTaps().
     float* mTapFx{nullptr};
     float* mTapTracks{nullptr};
@@ -1996,8 +2015,7 @@ private:
     void mixSongVoices(float* dry, int numFrames, int maxActive) {
         const size_t needed = static_cast<size_t>(numFrames) * 2;
         wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire);
-        mSongBusRun = bus != nullptr && mSongSendBuf.size() >= needed &&
-                      mSongFxBuf.size() >= needed && mSongScratch.size() >= needed;
+        mSongBusRun = bus != nullptr && songBusFits(*bus, numFrames);
         if (bus != nullptr && !mSongBusRun) mSongBusOverflow.bump();   // bloque mas grande que el bus
         if (mSongBusRun) std::memset(mSongSendBuf.data(), 0, sizeof(float) * needed);
 
@@ -2036,6 +2054,15 @@ private:
         if (!mSongBusRun) return;
         wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire);
         if (bus == nullptr) return;
+        if (mSongBusStale) {
+            // La cola anterior se corto en el tope con eco audible: no suena al reactivar.
+            bus->resetSpaceBus();
+            mSongSpaceSeen = ~0u;
+            mSongBusStale = false;
+        }
+        mSongBusLive = true;
+        mSongBusQuietFrames = 0;
+        mSongBusTailFrames = 0;
         const uint32_t version = mSongSpaceVersion.load(std::memory_order_acquire);
         if (version != mSongSpaceSeen) {
             mSongSpaceSeen = version;
@@ -2046,6 +2073,55 @@ private:
         if (mTapFx != nullptr && numFrames <= mTapFrames) {
             std::memcpy(mTapFx, mSongFxBuf.data(), sizeof(float) * static_cast<size_t>(numFrames) * 2);
         }
+    }
+
+    /// Los tres buffers del bloque y la capacidad PROPIA del bus alcanzan para `numFrames`.
+    bool songBusFits(const wm::ISongSpaceBus& bus, int numFrames) const {
+        const size_t needed = static_cast<size_t>(numFrames) * 2;
+        return mSongSendBuf.size() >= needed && mSongFxBuf.size() >= needed &&
+               mSongScratch.size() >= needed && numFrames <= bus.spaceBusCapacityFrames();
+    }
+
+    /**
+     * @brief Bloque SIN cancion: el bus procesa con envio cero y su cola suena natural, hasta que
+     *        el retorno quede bajo -120 dBFS durante mas que el delay maximo (2 s) o se cumpla el
+     *        tope. Sin memset grande ni alloc. Devuelve si el FX de este bloque entro a la mezcla
+     *        (los taps lo toman). AUDIO THREAD.
+     */
+    bool runSongBusTail(float* dry, int numFrames) {
+        if (!mSongBusLive) return false;
+        wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire);
+        if (bus == nullptr) return false;
+        if (!songBusFits(*bus, numFrames)) {
+            mSongBusOverflow.bump();
+            mSongBusLive = false;
+            mSongBusStale = true;
+            return false;
+        }
+        const size_t n = static_cast<size_t>(numFrames) * 2;
+        std::memset(mSongSendBuf.data(), 0, sizeof(float) * n);
+        const uint32_t version = mSongSpaceVersion.load(std::memory_order_acquire);
+        if (version != mSongSpaceSeen) {
+            mSongSpaceSeen = version;
+            bus->applySpaceParams(loadSongSpace());
+        }
+        bus->runSpaceBus(mSongSendBuf.data(), mSongFxBuf.data(), numFrames);
+        simd::addStereoBuffers(dry, dry, mSongFxBuf.data(), numFrames, /*applyHeadroom=*/false);
+        if (mTapFx != nullptr && numFrames <= mTapFrames) {
+            std::memcpy(mTapFx, mSongFxBuf.data(), sizeof(float) * n);
+        }
+        float peak = 0.0f;
+        for (size_t i = 0; i < n; ++i) peak = std::max(peak, std::abs(mSongFxBuf[i]));
+        const int64_t rate = mSampleRate.load(std::memory_order_acquire);
+        mSongBusQuietFrames = peak < kSongTailSilence ? mSongBusQuietFrames + numFrames : 0;
+        mSongBusTailFrames += numFrames;
+        if (static_cast<double>(mSongBusQuietFrames) >= static_cast<double>(rate) * kSongTailQuietSeconds) {
+            mSongBusLive = false;   // el residuo es < -120 dBFS: no hace falta vaciar nada
+        } else if (mSongBusTailFrames >= rate * kSongTailMaxSeconds) {
+            mSongBusLive = false;
+            mSongBusStale = true;
+        }
+        return true;
     }
 
     void rampSongTaps(int numFrames, float gainStart, float gainEnd) {
@@ -2075,9 +2151,12 @@ private:
     }
 
     /// Control; el llamador toma mSongBusCtlMutex. Solo crece, y el RT no la lee hasta ver el bus.
+    /// El bus crece con los buffers (sin reiniciarse): el guardia del bloque compara con los dos.
     void sizeSongBusBuffers(int maxBlockFrames) {
-        const size_t needed = static_cast<size_t>(std::max(
-            maxBlockFrames, mSongBusMaxFrames.load(std::memory_order_relaxed))) * 2;
+        const int frames = std::max(maxBlockFrames, mSongBusMaxFrames.load(std::memory_order_relaxed));
+        mSongBusMaxFrames.store(frames, std::memory_order_relaxed);
+        if (wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire)) bus->reserveSpaceBus(frames);
+        const size_t needed = static_cast<size_t>(frames) * 2;
         if (mSongSendBuf.size() < needed) mSongSendBuf.resize(needed, 0.0f);
         if (mSongFxBuf.size() < needed) mSongFxBuf.resize(needed, 0.0f);
         if (mSongScratch.size() < needed) mSongScratch.resize(needed, 0.0f);

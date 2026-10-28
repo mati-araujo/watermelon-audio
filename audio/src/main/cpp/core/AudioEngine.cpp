@@ -2426,13 +2426,18 @@ bool AudioEngine::ensureSongBus() {
     if (mSongBus) return true;
     try {
         auto bus = std::make_unique<wm::SongSpaceBusImpl>();
-        bus->prepareSpaceBus(mAudioLooper.getSampleRate(), 4096);
+        // publishSongBus lo prepara al rate vigente bajo el lock de setSampleRate.
         mAudioLooper.publishSongBus(bus.get(), 4096);
         mSongBus = std::move(bus);
         return true;
     } catch (const std::exception&) {
         return false;
     }
+}
+
+float AudioEngine::songDelayMaxMs() const {
+    const int rate = std::max(mAudioLooper.getSampleRate(), 1);
+    return static_cast<float>(DelayEffect::kMaxDelaySamples) * 1000.0f / static_cast<float>(rate);
 }
 
 bool AudioEngine::setSongMixTrack(int track, float gain, float pan, float send) {

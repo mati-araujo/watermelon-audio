@@ -93,7 +93,9 @@ audio/src/main/cpp/core/OutputStage.h::OutputStage::getTempBuffer
 audio/src/main/cpp/core/OutputStage.h::OutputStage::getTempBufferSize
 audio/src/main/cpp/core/OutputStage.h::OutputStage::meterFinalOutput
 audio/src/main/cpp/core/SongSpaceBus.h::SongSpaceBusImpl::applySpaceParams
+audio/src/main/cpp/core/SongSpaceBus.h::SongSpaceBusImpl::resetSpaceBus
 audio/src/main/cpp/core/SongSpaceBus.h::SongSpaceBusImpl::runSpaceBus
+audio/src/main/cpp/core/SongSpaceBus.h::SongSpaceBusImpl::spaceBusCapacityFrames
 audio/src/main/cpp/core/SynthEngineDispatcher.cpp::SynthEngineDispatcher::applyCrossfade
 audio/src/main/cpp/core/SynthEngineDispatcher.cpp::SynthEngineDispatcher::detectCrossfadeAndGetType
 audio/src/main/cpp/core/SynthEngineDispatcher.cpp::SynthEngineDispatcher::getDualTouchEngine
@@ -222,6 +224,7 @@ audio/src/main/cpp/effects/DecimatorEffect.cpp::DecimatorEffect::reset
 audio/src/main/cpp/effects/DelayEffect.cpp::DelayEffect::process
 audio/src/main/cpp/effects/DelayEffect.cpp::DelayEffect::reset
 audio/src/main/cpp/effects/DelayEffect.cpp::DelayEffect::setFeedback
+audio/src/main/cpp/effects/DelayEffect.cpp::DelayEffect::snapDelayTimeToTarget
 audio/src/main/cpp/effects/DistortionEffect.cpp::DistortionEffect::applyDistortion
 audio/src/main/cpp/effects/DistortionEffect.cpp::DistortionEffect::applyGate
 audio/src/main/cpp/effects/DistortionEffect.cpp::DistortionEffect::applyPedalToneStack
@@ -351,6 +354,8 @@ audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::mixTracksInto
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::process
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::processImpl
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::rampSongTaps
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::runSongBusTail
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::songBusFits
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::startRecording
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::triggerClick
 audio/src/main/cpp/looper/ChunkedAudioBuffer.h::ChunkedAudioBuffer::contiguousRun

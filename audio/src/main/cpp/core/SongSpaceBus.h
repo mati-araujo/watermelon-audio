@@ -16,6 +16,7 @@
 #include "../looper/SongSpaceBus.h"
 
 #include <algorithm>
+#include <atomic>
 #include <vector>
 
 namespace wm {
@@ -28,10 +29,19 @@ public:
         mReverb.setMix(1.0f);
         mDelay.setWet(1.0f);
         mDelay.setSync(false);
-        const size_t needed = static_cast<size_t>(std::max(maxBlockFrames, 1)) * 2;
-        if (mDelayOut.size() < needed) mDelayOut.resize(needed, 0.0f);
+        reserveSpaceBus(maxBlockFrames);
         mFresh = true;
         resetSpaceBus();
+    }
+
+    void reserveSpaceBus(int maxBlockFrames) override {
+        const size_t needed = static_cast<size_t>(std::max(maxBlockFrames, 1)) * 2;
+        if (mDelayOut.size() < needed) mDelayOut.resize(needed, 0.0f);
+        mCapacityFrames.store(static_cast<int>(mDelayOut.size() / 2), std::memory_order_release);
+    }
+
+    int spaceBusCapacityFrames() const override {
+        return mCapacityFrames.load(std::memory_order_acquire);
     }
 
     void applySpaceParams(const SongSpaceParams& p) override {
@@ -47,9 +57,10 @@ public:
         mDelayReturn = p.delayReturn;
         // El primer juego de parametros de una instancia fresca fija el tiempo del delay de una:
         // sin esto el suavizado de 50 ms lo desliza desde el default (250 ms) y dos exports
-        // coinciden pero ninguno suena al tiempo pedido en sus primeros ecos.
+        // coinciden pero ninguno suena al tiempo pedido en sus primeros ecos. Solo el suavizado:
+        // las lineas ya las vacio prepareSpaceBus en control (reset() son ~1,5 MB de memset).
         if (mFresh) {
-            mDelay.reset();
+            mDelay.snapDelayTimeToTarget();
             mFresh = false;
         }
     }
@@ -74,6 +85,7 @@ private:
     ReverbEffect mReverb;
     DelayEffect mDelay;
     std::vector<float> mDelayOut;
+    std::atomic<int> mCapacityFrames{0};
     float mReverbReturn = 0.0f;
     float mDelayReturn = 0.0f;
     bool mFresh = true;

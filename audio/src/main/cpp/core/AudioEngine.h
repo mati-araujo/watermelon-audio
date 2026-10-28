@@ -211,6 +211,9 @@ public:
     /// Fija la mezcla de una pista de la cancion. Crea el bus la primera vez.
     bool setSongMixTrack(int track, float gain, float pan, float send);
     bool setSongMixSpace(const wm::SongSpaceParams& params);
+    /// Tiempo maximo del delay del bus «Espacio» (ms) al sample rate vigente: la linea del
+    /// DelayEffect tiene un largo fijo en muestras, asi que a 192 kHz son ~1000 ms, no 2000.
+    float songDelayMaxMs() const;
     /// Parametros del master (cualquier hilo; los lee el RT una vez por bloque).
     void setMasterStageParams(const wm::MasterParams& params) { mMasterStage.configureMaster(params); }
     /// false si RAW y el motor no esta en un render offline (nunca salida sin proteger a un DAC).

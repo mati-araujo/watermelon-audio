@@ -1747,3 +1747,229 @@ TEST(SongOffline, AC_055_13_ASchedulePublishedBeforeTheStartDoesNotSound) {
     EXPECT_TRUE(allZero(out)) << "sono una publicacion anterior al start";
     EXPECT_FALSE(r.rig.looper.song().active());
 }
+
+// ---------------------------------------------------------------------------------------
+// Bus «Espacio»: su guardia de bloque y su preparacion al rate (REQ-055 S12, hallazgos del review)
+// ---------------------------------------------------------------------------------------
+namespace {
+
+/// Un bus que no procesa nada pero registra lo que el looper le pide. `runSpaceBus` con mas frames
+/// que su capacidad es la escritura fuera de limites que un bus real (DelayEffect) convertiria en
+/// un heap overflow.
+class RecordingBus final : public wm::ISongSpaceBus {
+public:
+    /// `growable`: la capacidad crece con prepare/reserve (como el bus real); si no, queda fija.
+    explicit RecordingBus(int capacity, bool growable = true)
+        : capacityFrames(capacity), mGrowable(growable) {}
+    void prepareSpaceBus(int sampleRate, int maxBlockFrames) override {
+        preparedRate.store(sampleRate);
+        reserveSpaceBus(maxBlockFrames);
+    }
+    void reserveSpaceBus(int maxBlockFrames) override {
+        if (mGrowable) capacityFrames.store(std::max(capacityFrames.load(), maxBlockFrames));
+    }
+    int spaceBusCapacityFrames() const override { return capacityFrames.load(); }
+    void applySpaceParams(const wm::SongSpaceParams&) override { ++applies; }
+    void runSpaceBus(const float*, float* fxOut, int frames) override {
+        ++runs;
+        if (frames > capacityFrames.load()) ++overruns;
+        std::fill(fxOut, fxOut + static_cast<size_t>(frames) * 2, returnLevel);
+    }
+    void resetSpaceBus() override { ++resets; }
+
+    std::atomic<int> capacityFrames;
+    std::atomic<int> preparedRate{0};
+    float returnLevel = 0.0f;   // lo que devuelve el bus en cada muestra
+    int runs = 0;
+    int overruns = 0;
+    int resets = 0;
+    int applies = 0;
+
+private:
+    const bool mGrowable;
+};
+
+constexpr int64_t kBusLoop = 2048;
+
+/// Una cancion de un clip en DC que suena desde el frame 0 hasta mucho despues del render.
+void playSongFromTheStart(Rig& rig) {
+    const int32_t id = rig.load("bus_dc", kBusLoop, dc(0.1f), kBusLoop);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(0, id)}, 1 << 24), wm::SongStatus::Ok);
+}
+
+}  // namespace
+
+// Bug plausible (BLOQUEANTE del review): el guardia de bloque mira solo los buffers del looper y no
+// la capacidad propia del bus, asi que un bloque mayor que lo que el bus dimensiono le llega a
+// `runSpaceBus` y escribe fuera de su memoria. El bloque grande salta el bus y se cuenta; los
+// chicos siguen pasando por el.
+TEST(SongBus, ABlockLargerThanTheBusCapacitySkipsTheBusAndIsCounted) {
+    Rig rig;
+    RecordingBus bus(256, /*growable=*/false);
+    rig.looper.publishSongBus(&bus, 4096);   // los buffers del looper alcanzan; el bus, no
+    rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+    playSongFromTheStart(rig);
+    (void)rig.render(0, 256 * 4, 256);
+    EXPECT_EQ(bus.runs, 4);
+    EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 0);
+    (void)rig.render(2048, 1000, 1000);
+    EXPECT_EQ(bus.overruns, 0) << "el bus recibio un bloque mayor que su capacidad";
+    EXPECT_EQ(bus.runs, 4) << "el bloque grande no tenia que correr el bus";
+    EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 1);
+}
+
+// Bug plausible: prepareMixBuffer agranda los buffers del looper pero no el bus (el escenario del
+// review: prepareMixBuffer(8192) y un bloque de 6000). El bus crece con ellos y corre el bloque.
+TEST(SongBus, PrepareMixBufferGrowsTheBusSoALargeBlockStillRunsIt) {
+    Rig rig;
+    RecordingBus bus(256);
+    rig.looper.publishSongBus(&bus, 256);
+    rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+    rig.looper.prepareMixBuffer(8192);
+    playSongFromTheStart(rig);
+    (void)rig.render(0, 6000, 6000);
+    EXPECT_EQ(bus.runs, 1);
+    EXPECT_EQ(bus.overruns, 0);
+    EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 0);
+}
+
+// Bug plausible (hallazgo 3): el bus se prepara con un rate leido FUERA del lock de setSampleRate y
+// queda publicado al rate viejo. Publicar prepara al rate vigente, y un cambio de rate concurrente
+// termina con el bus en el rate final, cualquiera sea el orden.
+TEST(SongBus, APublishedBusIsPreparedAtTheCurrentRate) {
+    Rig rig;
+    rig.looper.setSampleRate(44100);
+    RecordingBus bus(256);
+    rig.looper.publishSongBus(&bus, 256);
+    EXPECT_EQ(bus.preparedRate.load(), 44100);
+    rig.looper.setSampleRate(32000);
+    EXPECT_EQ(bus.preparedRate.load(), 32000) << "un cambio de rate no re-preparo el bus";
+}
+
+TEST(SongBus, ARateChangeRacingTheBusCreationLeavesTheBusAtTheFinalRate) {
+    int stale = 0;
+    for (int iter = 0; iter < 150; ++iter) {
+        Rig rig;
+        RecordingBus bus(256);
+        std::atomic<bool> go{false};
+        std::thread changer([&] {
+            while (!go.load()) std::this_thread::yield();
+            for (int i = 0; i < 40; ++i) rig.looper.setSampleRate(i % 2 == 0 ? 44100 : 32000);
+            rig.looper.setSampleRate(44100);
+        });
+        go.store(true);
+        rig.looper.publishSongBus(&bus, 256);
+        changer.join();
+        if (bus.preparedRate.load() != 44100) ++stale;
+    }
+    EXPECT_EQ(stale, 0) << "el bus quedo preparado a un rate que ya no era el vigente";
+}
+
+// ---------------------------------------------------------------------------------------
+// La cola del bus tras desactivarse la cancion (D-S12-18)
+// ---------------------------------------------------------------------------------------
+namespace {
+
+constexpr int kTailBlock = 512;
+// Tolerancia de un bloque: el que ya corrio como cola dentro de playAndRemoveSong.
+constexpr int kPreTail = kTailBlock;
+
+/// Una cancion sobre un bus que devuelve `level`; tras 4096 frames se saca la agenda (count == 0) y
+/// se esperan dos bloques a que la voz termine su fundido. Devuelve el frame siguiente.
+int64_t playAndRemoveSong(Rig& rig, RecordingBus& bus, float level) {
+    bus.returnLevel = level;
+    rig.looper.publishSongBus(&bus, kTailBlock);
+    rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+    const int32_t id = rig.load("tail_dc", kBusLoop, dc(0.1f), kBusLoop);
+    EXPECT_EQ(rig.schedule(kBusLoop, {sec(0, id)}, 1 << 24), wm::SongStatus::Ok);
+    (void)rig.render(0, 4096, kTailBlock);
+    EXPECT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
+    (void)rig.render(4096, 2 * kTailBlock, kTailBlock);
+    return 4096 + 2 * kTailBlock;
+}
+
+}  // namespace
+
+// Bug plausible (BLOQUEANTE del review): el bus corre solo con la cancion activa, asi que al
+// terminarla (o sacar la agenda) la cola se corta en seco. Con la cancion terminada el bus sigue
+// procesando bloque a bloque, tambien con el transporte parado (play frame < 0).
+TEST(SongBusTail, TheBusKeepsRunningAfterTheSongEndsAndWithTheTransportStopped) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    const int64_t next = playAndRemoveSong(rig, bus, 0.25f);
+    const int runsWhenTheSongEnded = bus.runs;
+    (void)rig.render(next, kTailBlock * 4, kTailBlock);
+    EXPECT_EQ(bus.runs, runsWhenTheSongEnded + 4) << "el bus no corrio con la cancion terminada";
+    std::vector<float> out(kTailBlock * 2, 0.0f);
+    rig.looper.beginBlock(-1, kTailBlock);
+    rig.looper.process(out.data(), kTailBlock, -1);
+    EXPECT_EQ(bus.runs, runsWhenTheSongEnded + 5) << "el bus no corrio con el transporte parado";
+}
+
+// Bug plausible: la cola no llega al audio (el retorno se calcula pero no se suma a la salida).
+TEST(SongBusTail, TheTailReturnReachesTheOutput) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    const int64_t next = playAndRemoveSong(rig, bus, 0.25f);
+    const std::vector<float> out = rig.render(next, kTailBlock * 8, kTailBlock);
+    float peak = 0.0f;
+    for (size_t i = out.size() / 2; i < out.size(); ++i) peak = std::max(peak, std::abs(out[i]));
+    EXPECT_GT(peak, 0.1f) << "la cola del bus no suena con la cancion terminada";
+}
+
+// Bug plausible: el bus nunca se apaga (corre para siempre tras la primera cancion) o se apaga a
+// los pocos bloques. Con un retorno bajo -120 dBFS se apaga tras 2,5 s seguidos (mas que el delay
+// maximo, para no confundir el hueco entre dos ecos con el final) y NO se reinicia al reactivar:
+// el residuo es inaudible.
+TEST(SongBusTail, AQuietTailStopsTheBusAfterTwoAndAHalfSecondsWithoutResettingIt) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    int64_t next = playAndRemoveSong(rig, bus, 0.0f);
+    const int runsAtEnd = bus.runs;
+    (void)rig.render(next, kSR * 10, kTailBlock);
+    next += kSR * 10;
+    const int tailRuns = bus.runs - runsAtEnd;
+    EXPECT_GE(tailRuns * kTailBlock, kSR * 5 / 2 - kPreTail) << "se apago antes de 2,5 s de silencio";
+    EXPECT_LE(tailRuns * kTailBlock, kSR * 5 / 2 + kTailBlock) << "no se apaga: el bus corre para siempre";
+    // Reactivar la cancion tras un apagado por silencio: sin reinicio (nada audible que vaciar).
+    const int32_t id = rig.load("tail_dc2", kBusLoop, dc(0.1f), kBusLoop);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(next + 2 * kBusLoop, id)}, next + 6 * kBusLoop),
+              wm::SongStatus::Ok);
+    (void)rig.render(next, kBusLoop * 4, kTailBlock);
+    EXPECT_EQ(bus.resets, 0);
+}
+
+// Bug plausible: sin tope, un eco que no decae (feedback alto, delay largo) mantiene el bus vivo
+// para siempre; y al cortarlo con eco audible, reactivar la cancion lo haria sonar de golpe. El
+// tope es de 30 s y la reactivacion posterior reinicia el bus y reaplica sus parametros.
+TEST(SongBusTail, ALoudTailIsCappedAtThirtySecondsAndTheBusIsResetOnReactivation) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    int64_t next = playAndRemoveSong(rig, bus, 0.5f);
+    const int runsAtEnd = bus.runs;
+    (void)rig.render(next, kSR * 40, kTailBlock);
+    next += kSR * 40;
+    const int tailRuns = bus.runs - runsAtEnd;
+    EXPECT_GE(tailRuns * kTailBlock, kSR * 30 - kPreTail) << "el tope corto antes de 30 s";
+    EXPECT_LE(tailRuns * kTailBlock, kSR * 30 + kTailBlock) << "sin tope: el bus sigue vivo";
+    EXPECT_EQ(bus.resets, 0);
+    const int appliesBefore = bus.applies;
+    const int32_t id = rig.load("tail_dc3", kBusLoop, dc(0.1f), kBusLoop);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(next + 2 * kBusLoop, id)}, next + 6 * kBusLoop),
+              wm::SongStatus::Ok);
+    (void)rig.render(next, kBusLoop * 4, kTailBlock);
+    EXPECT_EQ(bus.resets, 1) << "reactivar tras el tope no reinicio el bus: suena el eco viejo";
+    EXPECT_GT(bus.applies, appliesBefore) << "tras reiniciar hay que reaplicar los parametros";
+}
+
+// Bug plausible: un bloque mayor que la capacidad del bus en plena cola lo corre igual (el mismo
+// desborde del review, ahora por el camino de la cola): salta, se cuenta y el bus se da por viejo.
+TEST(SongBusTail, ABlockLargerThanTheBusCapacityDuringTheTailSkipsTheBus) {
+    Rig rig;
+    RecordingBus bus(kTailBlock, /*growable=*/false);
+    const int64_t next = playAndRemoveSong(rig, bus, 0.25f);
+    rig.looper.prepareMixBuffer(4096);   // los buffers del looper alcanzan; el bus, no
+    (void)rig.render(next, kTailBlock * 4, kTailBlock * 4);
+    EXPECT_EQ(bus.overruns, 0);
+    EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 1);
+}

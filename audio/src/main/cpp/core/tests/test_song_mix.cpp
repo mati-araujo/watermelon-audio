@@ -11,6 +11,8 @@
 #include "tests/support/TestSanitizer.h"
 #include "tests/support/TestWait.h"
 
+#include "core/SongSpaceBus.h"
+#include "looper/AudioLooper.h"
 #include "looper/WavFile.h"
 
 #include <algorithm>
@@ -274,22 +276,25 @@ TEST_F(SongMix, PanLawIsTheLooperEqualPowerOne) {
 }
 
 // Defecto: el primer bloque rampea desde una voz fresca (ganancia 1, paneo 0) hacia la mezcla
-// pedida: un export con una pista a -12 dB arranca con un fundido. Una vez completo el fundido
-// de entrada de la agenda, el tap tiene la ganancia del target (no la de un smoother a medio camino).
+// pedida: un export con una pista a -12 dB arranca con un fundido. La cancion arranca EN el frame
+// actual, asi que la voz suena ya en el primer bloque que la ve activa: ahi la ganancia tiene que
+// ser la del target (un smoother sin clavar da un tap casi del doble de fuerte y con canal L).
 TEST_F(SongMix, FirstBlockStartsAtTheMixTargetWithoutARamp) {
     const std::string pa = tone("s_a", 100.0f, 1.5707963f, 0.5f);   // coseno: pico en el frame 0
     WmaEngine* e = offlineEngine();
     const int32_t a = loadClip(e, pa);
     ASSERT_EQ(wma_mix_set_track(e, 0, 0.25f, 1.0f, 0.0f), WMA_OK);
-    scheduleSong(e, a, WMA_SONG_SILENCE);
-    const Rendered r = renderTaps(e, 5, 1);
-    const size_t from = static_cast<size_t>(2 * kLoop + 600) * 2;   // pasado el fundido de entrada
+    const int64_t p0 = wma_transport_get_play_frame(e);
+    const WmaSongSection s = section2(p0, a, WMA_SONG_SILENCE);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 12 * kLoop), WMA_OK);
+    const Rendered r = renderTaps(e, 1, 1);
     float peakL = 0.0f, peakR = 0.0f;
-    for (size_t i = from; i < from + 1000; i += 2) {
+    for (size_t i = 0; i < static_cast<size_t>(kBlock) * 2; i += 2) {
         peakL = std::max(peakL, std::abs(r.tracks[0][i]));
         peakR = std::max(peakR, std::abs(r.tracks[0][i + 1]));
     }
-    EXPECT_NEAR(peakR, 0.5f * 0.25f, 1e-4f);
+    ASSERT_GT(peakR, 0.05f) << "la voz no suena en el primer bloque: el test no prueba nada";
+    EXPECT_NEAR(peakR, 0.5f * 0.25f, 1e-4f) << "el primer bloque rampea desde la voz fresca";
     EXPECT_LT(peakL, 1e-5f) << "el paneo no estaba en su target en el primer bloque";
 }
 
@@ -382,6 +387,213 @@ TEST_F(SongMix, TurningTheSendOffLetsTheTailDecayInsteadOfCuttingItOrFeedingItFo
     const Rendered later = renderTaps(e, 2, 1);
     EXPECT_LT(peakOf(later.fx), 1e-3f) << "el envio no se apago: el bus sigue alimentado";
     EXPECT_GT(peakOf(later.tracks[0]), 0.1f) << "la cancion ya no suena: el test no prueba nada";
+}
+
+// Defecto (BLOQUEANTE del review): al sacar la agenda el bus deja de procesar y la cola se corta en
+// seco (y, al reactivar, suenan los ecos congelados). Con envio 1, delay 125 ms y realimentacion
+// 0,9, tras sacar la agenda la cola sigue sonando y decae como en un DAW: sigue siendo audible en
+// el bloque siguiente, cada segundo vale ~0,43 del anterior, y la premezcla sigue siendo la suma
+// de los taps (el retorno de la cola tambien entra al tap de FX).
+TEST_F(SongMix, TheTailKeepsDecayingAfterTheScheduleIsRemoved) {
+    const std::string pa = tone("c_a", 100.0f, 0.0f);
+    WmaEngine* e = offlineEngine();
+    const int32_t a = loadClip(e, pa);
+    ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 1.0f), WMA_OK);
+    WmaMixSpace sp = space(0.0f, 1.0f);
+    sp.delay_feedback = 0.9f;
+    ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+    const int64_t p0 = wma_transport_get_play_frame(e);
+    const WmaSongSection s = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 600 * kLoop), WMA_OK);
+    const Rendered playing = renderTaps(e, 8, 1);
+    const float peakWhilePlaying = peakOf(playing.fx, playing.fx.size() / 2);
+    ASSERT_GT(peakWhilePlaying, 0.3f);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, nullptr, 0, 0), WMA_OK);
+    (void)renderTaps(e, 1, 1);   // el fundido de salida de la voz
+    const Rendered tail = renderTaps(e, 40, 1);   // 4 s
+    const size_t second = static_cast<size_t>(kRate) * 2;
+    const float w0 = peakOf(tail.fx, 0, second / 2), w1 = peakOf(tail.fx, second, second + second / 2);
+    const float w2 = peakOf(tail.fx, 2 * second, 2 * second + second / 2);
+    EXPECT_GT(w0, 0.05f) << "la cola se corto en seco al sacar la agenda";
+    EXPECT_LT(w1, 0.7f * w0);
+    EXPECT_LT(w2, 0.7f * w1);
+    EXPECT_GT(w2, 0.0f);
+    std::vector<float> sum(tail.mix.size());
+    for (size_t i = 0; i < sum.size(); ++i) sum[i] = tail.tracks[0][i] + tail.fx[i];
+    EXPECT_LE(maxDiff(tail.mix, sum), 1e-6) << "la cola no entra al tap de FX";
+}
+
+// Defecto (BLOQUEANTE del review): el bus queda congelado con la cola cuando se saca la agenda y al
+// reprogramar con envio 0 suenan los ecos viejos a su nivel de entonces (pico 0,87 en la sonda). Con
+// la cola corriendo mientras no hay cancion, al reprogramar 4 s despues la cola ya decayo (un
+// segundo vale ~0,43), y como el bus no se reinicia, sigue ahi (no es cero).
+TEST_F(SongMix, AScheduleReprogrammedDuringTheTailFindsTheDecayedTailNotAFrozenOne) {
+    const std::string pa = tone("c_b", 100.0f, 0.0f);
+    WmaEngine* e = offlineEngine();
+    const int32_t a = loadClip(e, pa);
+    ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 1.0f), WMA_OK);
+    WmaMixSpace sp = space(0.0f, 1.0f);
+    sp.delay_feedback = 0.9f;
+    ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+    const int64_t p0 = wma_transport_get_play_frame(e);
+    const WmaSongSection s = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 600 * kLoop), WMA_OK);
+    const Rendered playing = renderTaps(e, 8, 1);
+    const float peakWhilePlaying = peakOf(playing.fx, playing.fx.size() / 2);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, nullptr, 0, 0), WMA_OK);
+    (void)renderTaps(e, 41, 1);   // 4 s de cola
+    ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 0.0f), WMA_OK);   // envio 0 al reactivar
+    const int64_t p1 = wma_transport_get_play_frame(e);
+    const WmaSongSection again = section2(p1 + 2 * kLoop, a, WMA_SONG_SILENCE);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &again, 1, p1 + 600 * kLoop), WMA_OK);
+    const Rendered back = renderTaps(e, 3, 1);
+    const float resumed = peakOf(back.fx);
+    EXPECT_LT(resumed, 0.2f * peakWhilePlaying) << "suenan los ecos congelados de antes de sacar la agenda";
+    EXPECT_GT(resumed, 1e-5f) << "la cola se reinicio al reactivar: se corto en seco";
+}
+
+// Defecto: tras agotarse la cola (retorno bajo -120 dBFS por mas del delay maximo) el bus tiene que
+// quedar mudo y reactivar con envio 0 no puede traer nada (< 1e-6): ni residuo congelado ni eco.
+TEST_F(SongMix, AfterTheTailIsGoneReactivatingWithSendZeroGivesNoFx) {
+    const std::string pa = tone("c_c", 100.0f, 0.0f);
+    WmaEngine* e = offlineEngine();
+    const int32_t a = loadClip(e, pa);
+    ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 1.0f), WMA_OK);
+    const WmaMixSpace sp = space(0.5f, 1.0f);   // realimentacion 0,4 y reverb: cola de ~2 s
+    ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+    const int64_t p0 = wma_transport_get_play_frame(e);
+    const WmaSongSection s = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 600 * kLoop), WMA_OK);
+    const Rendered playing = renderTaps(e, 8, 1);
+    ASSERT_GT(peakOf(playing.fx), 0.1f);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, nullptr, 0, 0), WMA_OK);
+    (void)renderTaps(e, 1, 1);
+    const Rendered early = renderTaps(e, 5, 1);
+    EXPECT_GT(peakOf(early.fx), 1e-3f) << "la cola no suena tras sacar la agenda";
+    (void)renderTaps(e, 120, 1);   // 12 s: agotada y apagada
+    ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 0.0f), WMA_OK);
+    const int64_t p1 = wma_transport_get_play_frame(e);
+    const WmaSongSection again = section2(p1 + 2 * kLoop, a, WMA_SONG_SILENCE);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &again, 1, p1 + 600 * kLoop), WMA_OK);
+    const Rendered back = renderTaps(e, 4, 1);
+    EXPECT_LT(peakOf(back.fx), 1e-6f);
+    EXPECT_GT(peakOf(back.tracks[0]), 0.1f) << "la cancion no suena: el test no prueba nada";
+}
+
+// Defecto (BLOQUEANTE del review): prepareMixBuffer agranda los buffers del looper pero no el bus; un
+// bloque mayor que el delay del bus escribe fuera de memoria (heap overflow bajo ASan en
+// DelayEffect::process) y el contador de saltos queda en 0. El export offline no pasa de 4096
+// frames, asi que el escenario del callback vivo (prepareMixBuffer(8192), bloque de 6000) se maneja
+// con el looper y el bus REAL a mano. Con la capacidad del bus creciendo con los buffers el bloque
+// corre con el bus, devuelve algo, y nada se salta.
+TEST_F(SongMix, ABlockLargerThanThePreparedMixBufferStillRunsTheRealBusWithoutOverflowing) {
+    constexpr int kBig = 6000;
+    const std::string pa = tone("g_a", 100.0f, 0.0f);
+    AudioLooper looper;
+    looper.setEnabled(true);
+    wm::SongSpaceBusImpl bus;
+    looper.publishSongBus(&bus, 4096);
+    looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+    wm::SongSpaceParams params;
+    params.delayReturn = 1.0f;
+    params.delayTimeMs = 125.0f;
+    looper.setSongMixSpace(params);
+    looper.prepareMixBuffer(8192);
+    ASSERT_GE(bus.spaceBusCapacityFrames(), 8192);
+    int32_t id = -1;
+    ASSERT_EQ(looper.songLoadClip(pa.c_str(), kRate, 0, 0, kLoop, false, id), wm::SongStatus::Ok);
+    wm::SongSection sec;
+    sec.startFrame = 0;
+    sec.clip[0] = id;
+    ASSERT_EQ(looper.songSetSchedule(kLoop, &sec, 1, int64_t{1} << 24, false), wm::SongStatus::Ok);
+    std::vector<float> out(kBig * 2);
+    float peak = 0.0f;
+    for (int b = 0; b < 12; ++b) {
+        std::fill(out.begin(), out.end(), 0.0f);
+        const int64_t frame = static_cast<int64_t>(b) * kBig;
+        looper.beginBlock(frame, kBig);
+        looper.process(out.data(), kBig, frame);
+        peak = std::max(peak, peakOf(out));
+    }
+    EXPECT_EQ(looper.getSongBusOverflowBlocks(), 0);
+    EXPECT_GT(peak, 0.1f);
+}
+
+// Defecto (hallazgo 7 del review): la primera aplicacion de parametros de un bus fresco corre en el
+// callback y hacia DelayEffect::reset (~1,5 MB de memset en el RT), redundante con el reset de
+// prepareSpaceBus en control. Lo unico que el RT tiene que hacer es clavar el tiempo del delay en
+// su objetivo SIN vaciar la linea: lo que entro al delay antes de esa primera aplicacion sigue ahi
+// y su eco llega al tiempo pedido (125 ms = 6000 frames).
+TEST_F(SongMix, TheFirstParameterApplyPinsTheDelayTimeWithoutClearingTheLine) {
+    wm::SongSpaceBusImpl bus;
+    bus.prepareSpaceBus(kRate, 4096);
+    std::vector<float> send(kBlock * 2, 0.0f), fx(kBlock * 2, 0.0f);
+    send[0] = send[1] = 1.0f;   // un impulso en el frame 0, antes de aplicar nada
+    bus.runSpaceBus(send.data(), fx.data(), kBlock);
+    wm::SongSpaceParams p;
+    p.delayReturn = 1.0f;
+    p.delayTimeMs = 125.0f;
+    p.delayFeedback = 0.0f;
+    bus.applySpaceParams(p);   // la primera: clava el tiempo, no vacia
+    std::fill(send.begin(), send.end(), 0.0f);
+    float echo = 0.0f;
+    int64_t echoAt = -1;
+    for (int64_t done = kBlock; done < 8000; done += kBlock) {
+        bus.runSpaceBus(send.data(), fx.data(), kBlock);
+        for (int i = 0; i < kBlock; ++i) {
+            const float v = std::abs(fx[static_cast<size_t>(i) * 2]);
+            if (v > echo) {
+                echo = v;
+                echoAt = done + i;
+            }
+        }
+    }
+    EXPECT_GT(echo, 0.2f) << "el primer apply vacio la linea del delay (memset en el RT)";
+    EXPECT_NEAR(static_cast<double>(echoAt), 6000.0, 4.0) << "el tiempo no esta clavado en su objetivo";
+}
+
+// Defecto (hallazgo 4): un cambio de sample rate no re-prepara el bus y el delay conserva su tiempo
+// en muestras del rate viejo. 125 ms son 6000 muestras a 48 kHz y 5512 a 44,1 kHz: el primer eco
+// (retorno del delay solo, realimentacion 0) tiene que llegar al retardo del rate NUEVO.
+TEST_F(SongMix, TheDelayTimeFollowsASampleRateChangeOfTheEngine) {
+    constexpr int kNewRate = 44100;
+    constexpr int kLoop2 = 4410;
+    std::vector<float> clip(static_cast<size_t>(kLoop2) * 2, 0.0f);
+    for (int n = 0; n < kLoop2; ++n) {
+        clip[static_cast<size_t>(n) * 2] = clip[static_cast<size_t>(n) * 2 + 1] = 0.5f;   // DC
+    }
+    const auto path = mixFixture("sr_dc");
+    mFiles.push_back(path);
+    ASSERT_TRUE(wav::writeWav(path.c_str(), clip.data(), kLoop2, kNewRate, wav::BitDepth::FLOAT_32));
+
+    WmaEngine* e = offlineEngine();   // 48 kHz: aca nace el bus
+    ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 1.0f), WMA_OK);
+    WmaMixSpace sp = space(0.0f, 1.0f);
+    sp.delay_feedback = 0.0f;
+    ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+    ASSERT_EQ(wma_offline_start(e, kNewRate, kBlock), WMA_OK);   // 44,1 kHz: el bus se re-prepara
+    ASSERT_EQ(wma_mix_set_output_profile(e, WMA_OUTPUT_RAW), WMA_OK);
+    int32_t id = -1;
+    ASSERT_EQ(wma_song_load_clip(e, path.c_str(), kNewRate, 0, 0, kLoop2, &id), WMA_OK);
+    // La cancion arranca con DC desde el frame 0 de la seccion (despues del fundido de entrada).
+    const int64_t p0 = wma_transport_get_play_frame(e);
+    const WmaSongSection s = section2(p0 + 1000, id, WMA_SONG_SILENCE);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop2, &s, 1, p0 + 100 * kLoop2), WMA_OK);
+    constexpr int kFrames = 12000;
+    std::vector<float> mix(kBlock * 2), fx(kBlock * 2), tr(kBlock * 2);
+    int64_t firstDry = -1, firstFx = -1;
+    for (int done = 0; done < kFrames; done += kBlock) {
+        ASSERT_EQ(wma_offline_render_taps(e, mix.data(), fx.data(), tr.data(), 1, kBlock), WMA_OK);
+        for (int i = 0; i < kBlock; ++i) {
+            if (firstDry < 0 && std::abs(tr[static_cast<size_t>(i) * 2]) > 1e-4f) firstDry = done + i;
+            if (firstFx < 0 && std::abs(fx[static_cast<size_t>(i) * 2]) > 1e-4f) firstFx = done + i;
+        }
+    }
+    ASSERT_GE(firstDry, 0);
+    ASSERT_GE(firstFx, 0) << "el delay no devolvio nada";
+    const double delay125ms = 125.0 * kNewRate / 1000.0;   // 5512,5 muestras
+    EXPECT_NEAR(static_cast<double>(firstFx - firstDry), delay125ms, 4.0)
+        << "el delay conserva el tiempo en muestras del rate viejo (6000)";
 }
 
 // Defecto: el costo de la pasada del export (motor + bus + 8 taps de pista) cae por debajo del

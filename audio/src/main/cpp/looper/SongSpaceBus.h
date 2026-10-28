@@ -33,6 +33,13 @@ public:
     /// Control, con el RT quiesced: sample rate y bloque maximo. Puede alocar.
     virtual void prepareSpaceBus(int sampleRate, int maxBlockFrames) = 0;
 
+    /// Control, con el RT quiesced: agranda lo que dimensiona `maxBlockFrames` SIN reiniciar el
+    /// estado. Solo crece.
+    virtual void reserveSpaceBus(int maxBlockFrames) = 0;
+
+    /// Bloque mas grande (frames) que `runSpaceBus` acepta. RT: lo lee el guardia de cada bloque.
+    virtual int spaceBusCapacityFrames() const = 0;
+
     /// RT: aplica los parametros (los setters de los efectos no son atomicos entre si, por eso los
     /// corre el hilo que procesa).
     virtual void applySpaceParams(const SongSpaceParams& params) = 0;
