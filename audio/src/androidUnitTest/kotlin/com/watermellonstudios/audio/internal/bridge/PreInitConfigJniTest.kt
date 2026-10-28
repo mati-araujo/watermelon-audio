@@ -1,5 +1,8 @@
 package com.watermellonstudios.audio.internal.bridge
 
+import com.watermellonstudios.audio.api.MasterParams
+import com.watermellonstudios.audio.api.OutputProfile
+import com.watermellonstudios.audio.api.SongSpace
 import com.watermellonstudios.audio.domain.input.CaptureOutcome
 import com.watermellonstudios.audio.domain.usb.UsbLatencyProfile
 import kotlinx.coroutines.runBlocking
@@ -107,6 +110,13 @@ class PreInitConfigJniTest {
             "nativeLooperSetTrackSendToFx" to { b -> b.looperSetTrackSendToFx(0, true) },
             "nativeLooperSetTrackSpeed" to { b -> b.looperSetTrackSpeed(0, 1.5f) },
             "nativeLooperSetTrackVolume" to { b -> b.looperSetTrackVolume(0, 0.7f) },
+            // REQ-055 S12: la mezcla de la canción también crea el motor (sin abrir stream).
+            "nativeMixSetMaster" to { b -> b.mixSetMaster(MasterParams(gainDb = 3f)) },
+            "nativeMixSetOutputProfile" to { b -> b.mixSetOutputProfile(OutputProfile.MASTER) },
+            "nativeMixSetSpace" to { b ->
+                b.mixSetSpace(SongSpace(0.5f, 0.8f, 2f, 0.5f, 20f, 80f, 12_000f, 0.3f, 250f, 0.4f))
+            },
+            "nativeMixSetTrack" to { b -> b.mixSetTrack(0, 0.8f, 0.1f, 0.2f) },
             "nativeSetArpEnabled" to { b -> b.setArpEnabled(true) },
             "nativeSetArpGateLength" to { b -> b.setArpGateLength(0.5f) },
             "nativeSetArpLatch" to { b -> b.setArpLatch(true) },

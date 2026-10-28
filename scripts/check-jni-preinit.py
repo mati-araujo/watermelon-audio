@@ -126,6 +126,12 @@ ACCION = {"start", "stop", "pause", "resume", "trigger", "release", "update", "a
           # REQ-055 S2: `wma_offline_render` produce un bloque, no deja estado.
           "render"}
 
+# REQ-055 S12: `wma_master_*` opera sobre un procesador de master por ID (su propio registro),
+# no sobre el motor: no hay motor que crear antes ni configuracion que se pierda. Se clasifica por
+# prefijo y NO agregando `configure`/`process` a los verbos: sin motor un `wma_input_configure_*`
+# nuevo tiene que seguir siendo un verbo SIN CLASIFICAR (lo prueba el self-test, M12).
+ACCION_PREFIJO = ("wma_master_",)
+
 # Configuracion que NO nombra el handle y entra al conjunto de todos modos, con su razon.
 #
 # 🔴 Viaja por `BackendManager::getInstance()`, y ahi esta el defecto: sin motor ese
@@ -205,6 +211,8 @@ def clasificar(call: str) -> str | None:
     None NO es "no es configuracion": es "no se sabe", y el llamador lo convierte en
     FALLA. Un verbo nuevo tiene que aparecer en el diff del PR, no volverse verde solo.
     """
+    if call.startswith(ACCION_PREFIJO):
+        return "accion"
     for parte in call[4:].split("_"):
         if parte in CONFIG:
             return "config"

@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include "../platform/Logger.h"
@@ -129,8 +130,9 @@ public:
         if (sampleRate != mSampleRate.load(std::memory_order_acquire)) {
             mSong.invalidateForRate(sampleRate);
             // El bus «Espacio» (si existe) se re-prepara aca, con el RT quiesced como el resto.
+            std::lock_guard<std::mutex> busLock(mSongBusCtlMutex);
             if (wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire)) {
-                bus->prepareSpaceBus(sampleRate, mSongBusMaxFrames);
+                bus->prepareSpaceBus(sampleRate, mSongBusMaxFrames.load(std::memory_order_relaxed));
             }
         }
         mSampleRate.store(sampleRate, std::memory_order_release);
@@ -161,6 +163,7 @@ public:
             mFxBusBuf.resize(needed, 0.0f);
         }
         // REQ-055 S12: el bus de la cancion, solo si alguien lo creo (el movil no paga nada).
+        std::lock_guard<std::mutex> busLock(mSongBusCtlMutex);
         if (mSongBus.load(std::memory_order_acquire) != nullptr) sizeSongBusBuffers(maxBlockFrames);
     }
 
@@ -1097,8 +1100,9 @@ public:
      */
     void publishSongBus(wm::ISongSpaceBus* bus, int maxBlockFrames) {
         if (bus == nullptr || maxBlockFrames <= 0) return;
-        mSongBusMaxFrames = std::max(maxBlockFrames, 1);
-        sizeSongBusBuffers(mSongBusMaxFrames);
+        std::lock_guard<std::mutex> busLock(mSongBusCtlMutex);
+        mSongBusMaxFrames.store(std::max(maxBlockFrames, 1), std::memory_order_relaxed);
+        sizeSongBusBuffers(maxBlockFrames);
         mSongBus.store(bus, std::memory_order_release);
     }
     bool hasSongBus() const { return mSongBus.load(std::memory_order_acquire) != nullptr; }
@@ -1851,7 +1855,8 @@ private:
     std::atomic<uint32_t> mSongSpaceVersion{0};
     uint32_t mSongSpaceSeen{0};                  // audio thread
     std::atomic<wm::ISongSpaceBus*> mSongBus{nullptr};
-    int mSongBusMaxFrames{4096};
+    std::atomic<int> mSongBusMaxFrames{4096};
+    std::mutex mSongBusCtlMutex;                 // control: dimensionar / re-preparar el bus
     bool mSongBusRun{false};                     // audio thread: el bus corre en ESTE bloque
     std::vector<float> mSongSendBuf;
     std::vector<float> mSongFxBuf;
@@ -2069,8 +2074,10 @@ private:
         return p;
     }
 
+    /// Control; el llamador toma mSongBusCtlMutex. Solo crece, y el RT no la lee hasta ver el bus.
     void sizeSongBusBuffers(int maxBlockFrames) {
-        const size_t needed = static_cast<size_t>(std::max(maxBlockFrames, mSongBusMaxFrames)) * 2;
+        const size_t needed = static_cast<size_t>(std::max(
+            maxBlockFrames, mSongBusMaxFrames.load(std::memory_order_relaxed))) * 2;
         if (mSongSendBuf.size() < needed) mSongSendBuf.resize(needed, 0.0f);
         if (mSongFxBuf.size() < needed) mSongFxBuf.resize(needed, 0.0f);
         if (mSongScratch.size() < needed) mSongScratch.resize(needed, 0.0f);
