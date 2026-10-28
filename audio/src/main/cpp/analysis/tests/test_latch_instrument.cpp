@@ -635,6 +635,11 @@ struct OracleFile {
     std::vector<OracleSegment> segments;
     /// Los ataques del archivo, en frames, como los detecto el ORACULO (`# ataque NOMBRE frame N`).
     std::vector<int64_t> attacks;
+    /// Los cortes del archivo (`# corte NOMBRE INI FIN PERDIDOS`), intervalo cerrado en frames del archivo.
+    std::vector<latch::FrameCut> cuts;
+    /// Cuantos `# ataque-excluido` declaro el oraculo: no son ataques a medir (los t0 salen de `# ataque`); se
+    /// cuentan aparte y quien quiera chequear la regla los compara con lo que excluye `measureAttacks`.
+    std::vector<int64_t> excludedAttacks;
 };
 
 /// El oraculo corto: `# archivo NOMBRE sha256 HEX rate HZ frames N` antes de las filas de cada
@@ -655,13 +660,19 @@ std::string loadOracle(const std::string& path, std::map<std::string, OracleFile
         if (line[0] == '#') {
             char name[512] = {0}, sha[256] = {0};
             int rate = 0;
-            long long frames = 0;
+            long long frames = 0, fin = 0;
             if (std::sscanf(line.c_str(), "# archivo %511s sha256 %255s rate %d frames %lld", name, sha, &rate, &frames) == 4) {
                 current = name;
                 OracleFile& f = (*out)[current];
                 f.sha = sha;
                 f.rate = rate;
                 f.frames = frames;
+            } else if (std::sscanf(line.c_str(), "# ataque-excluido %511s frame %lld", name, &frames) == 2) {
+                if (current.empty() || current != name) return std::string("ataque-excluido de ") + name + " fuera de su cabecera";
+                (*out)[current].excludedAttacks.push_back(static_cast<int64_t>(frames));
+            } else if (std::sscanf(line.c_str(), "# corte %511s %lld %lld", name, &frames, &fin) == 3) {
+                if (current.empty() || current != name) return std::string("corte de ") + name + " fuera de su cabecera";
+                (*out)[current].cuts.push_back({static_cast<int64_t>(frames), static_cast<int64_t>(fin)});
             } else if (std::sscanf(line.c_str(), "# ataque %511s frame %lld", name, &frames) == 2) {
                 if (current.empty() || current != name) return std::string("ataque de ") + name + " fuera de su cabecera";
                 (*out)[current].attacks.push_back(static_cast<int64_t>(frames));
@@ -675,6 +686,16 @@ std::string loadOracle(const std::string& path, std::map<std::string, OracleFile
         (*out)[current].segments.push_back({tIni, tFin, hz});
     }
     return "";
+}
+
+/// Los t0 que se le pasan a `measureAttacks`: la UNION ordenada de `# ataque` y `# ataque-excluido`. El oraculo
+/// calcula tEnd con el siguiente ataque DETECTADO, tambien el que sale excluido; sin el, el tEnd de un ataque
+/// conservado se estira distinto y C++ lo excluye (o no) por una regla que no es la del oraculo.
+std::vector<int64_t> attackT0sForMeasure(const OracleFile& f) {
+    std::vector<int64_t> t0s = f.attacks;
+    t0s.insert(t0s.end(), f.excludedAttacks.begin(), f.excludedAttacks.end());
+    std::sort(t0s.begin(), t0s.end());
+    return t0s;
 }
 
 std::string missingCorpusMessage(corpus::State st) {
@@ -972,25 +993,27 @@ struct ChunkRun {
     std::vector<Latch> latches;
 };
 
-ChunkRun runChunk(const wav::WavData& data, const corpus::Entry& e, const std::vector<OracleSegment>& segments, int chunk) {
+ChunkRun runChunk(const wav::WavData& data, const corpus::Entry& e, const std::vector<OracleSegment>& segments, int chunk,
+                  const std::vector<latch::FrameCut>& cuts = {}) {
     ChunkRun out;
     out.chunk = chunk;
     out.run = feedTwice(data, e, chunk);
     const FirstPassOfRun first = firstPassOfRun(out.run);
     Params prm;
     prm.sampleRate = out.run.rate;
-    out.latches = latch::measure(first.pubs, first.windows, out.run.events, segments, prm);
+    out.latches = latch::measure(first.pubs, first.windows, out.run.events, segments, prm, cuts, out.run.frames1);
     return out;
 }
 
 /// El archivo en cada tanda de `kRangeChunks`, una por thread: cada corrida tiene su propio ring, snapshot y
 /// motor, y nada se comparte mas que los datos de entrada, de solo lectura. Los resultados se leen despues del join.
 std::vector<ChunkRun> runAllRangeChunks(const wav::WavData& data, const corpus::Entry& e,
-                                        const std::vector<OracleSegment>& segments) {
+                                        const std::vector<OracleSegment>& segments,
+                                        const std::vector<latch::FrameCut>& cuts = {}) {
     std::vector<ChunkRun> out(kNumRangeChunks);
     std::vector<std::thread> workers;
     for (size_t i = 0; i < kNumRangeChunks; ++i)
-        workers.emplace_back([&, i] { out[i] = runChunk(data, e, segments, kRangeChunks[i]); });
+        workers.emplace_back([&, i] { out[i] = runChunk(data, e, segments, kRangeChunks[i], cuts); });
     for (std::thread& t : workers) t.join();
     return out;
 }
@@ -1083,6 +1106,7 @@ TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
 
     std::map<std::string, Row> rows;
     std::vector<Latch> allLatches;
+    size_t excludedLatches = 0;
     std::vector<double> tFirst, tConv, tFirst2, tFirstWorst, tConvWorst;
     int filesMoved = 0, filesMovedFirst = 0;
     double widestSpreadSec = 0.0;
@@ -1097,7 +1121,7 @@ TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
         ASSERT_EQ(of.rate, data.sampleRate) << e.name;
         ASSERT_EQ(of.frames, static_cast<long long>(data.numFrames)) << e.name;
 
-        const std::vector<ChunkRun> runs = runAllRangeChunks(data, e, of.segments);
+        const std::vector<ChunkRun> runs = runAllRangeChunks(data, e, of.segments, of.cuts);
         const ChunkRun& canon = runs[canonicalIndex()];
         const FedRun& run = canon.run;
         const std::vector<Latch>& latches = canon.latches;
@@ -1116,6 +1140,10 @@ TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
         bool moved = false, movedFirst = false;
         for (size_t i = 0; i < latches.size(); ++i) {
             const Latch& l = latches[i];
+            if (l.excludedByCut) {   // sin cifras: ni fila, ni resumen, ni el conteo de enganches
+                ++excludedLatches;
+                continue;
+            }
             const auto [rFirst, rConv] = rangesOf(runs, i);
             const Row r = rowOf(e.name, static_cast<int>(i) + 1, l, p2, run.rate, rFirst, rConv);
             rows[keyOf(r.name, r.v[0])] = r;
@@ -1143,7 +1171,7 @@ TEST(LatchInstrumentCorpus, MeasuresTheLatchesAgainstTheCommittedBaseline) {
         if (p2.firstFrames >= 0) tFirst2.push_back(secOf(p2.firstFrames, run.rate));
     }
     const latch::Pooled pooled = latch::poolLatchErrors(allLatches);
-    std::printf("\nenganches=%zu archivos=%zu\n", allLatches.size(), entries.size());
+    std::printf("\nenganches=%zu excluidos_por_corte=%zu archivos=%zu\n", allLatches.size(), excludedLatches, entries.size());
     std::printf("t_primera (tanda %d): n=%zu mediana %.3f max %.3f | peor de la particion: n=%zu mediana %.3f max %.3f\n",
                 kProductionChunkFrames, tFirst.size(), medianOf(tFirst), maxOf(tFirst), tFirstWorst.size(), medianOf(tFirstWorst),
                 maxOf(tFirstWorst));
@@ -1367,6 +1395,121 @@ TEST(AttackInstrument, PercentilesAndCoveragePerAttack) {
     EXPECT_NEAR(a[1].maxAbsCents, 10.0, 1e-9);
 }
 
+// Los cortes (REQ-055 0.6): la guarda de un ataque es [t0 - 2048, tEnd], cerrada; 2048 = la ventana del
+// detector del oraculo. Ataques de los tests: A1 en 5000 (guarda [2952, 8000]) y A2 en 8000 (guarda
+// [5952, 12000], el flujo termina en 12000). Un corte en [2952, 5951] toca SOLO a A1.
+constexpr int64_t kCutStreamEnd = 12000;
+
+std::vector<Publication> cutPubs() {
+    return {pub(5100, 440.0, kMeas), pub(5200, 440.0, kConv), pub(8100, 440.0, kMeas), pub(8300, 440.0, kConv)};
+}
+
+/// Que ataques de {5000, 8000} excluye un corte [ini, fin].
+std::vector<bool> attackExclusions(int64_t ini, int64_t fin) {
+    const auto a = latch::measureAttacks(cutPubs(), {5000, 8000}, kNoOracle, kCutStreamEnd, params(), {{ini, fin}});
+    return {a[0].excludedByCut, a[1].excludedByCut};
+}
+
+TEST(AttackInstrumentCuts, ACutInsideAnAttackExcludesItWithoutFiguresAndTheNextOneIsMeasuredAsWithoutCuts) {
+    // AC-055.2. Atrapa: un instrumento que mide a traves de un corte (sin exclusion); uno que excluye pero deja
+    // sus publicaciones/lecturas/t_conv en las cifras (o en las del ataque vecino); uno que no lo cuenta aparte
+    // (`excludedByCut`); y uno que, al excluir, altera la medicion del ataque siguiente sin corte.
+    const auto without = latch::measureAttacks(cutPubs(), {5000, 8000}, kNoOracle, kCutStreamEnd, params());
+    const auto cut = latch::measureAttacks(cutPubs(), {5000, 8000}, kNoOracle, kCutStreamEnd, params(), {{5300, 5300}});
+    ASSERT_EQ(cut.size(), 2u);
+    EXPECT_FALSE(without[0].excludedByCut);
+    EXPECT_TRUE(cut[0].excludedByCut);
+    EXPECT_EQ(cut[0].publications, 0);
+    EXPECT_EQ(cut[0].readings, 0);
+    EXPECT_EQ(cut[0].firstReadingFrames, -1);
+    EXPECT_EQ(cut[0].convergedFrames, -1);
+    EXPECT_TRUE(cut[0].absErrors.empty());
+    EXPECT_FALSE(cut[0].early.applies);
+    EXPECT_FALSE(cut[1].excludedByCut);
+    EXPECT_EQ(cut[1].t0Frames, 8000);
+    EXPECT_EQ(cut[1].publications, without[1].publications);
+    EXPECT_EQ(cut[1].publications, 2);
+    EXPECT_EQ(cut[1].readings, without[1].readings);
+    EXPECT_EQ(cut[1].firstReadingFrames, without[1].firstReadingFrames);
+    EXPECT_EQ(cut[1].convergedFrames, without[1].convergedFrames);
+    EXPECT_EQ(cut[1].convergedFrames, 300);
+}
+
+TEST(AttackInstrumentCuts, TheEndOfAnAttackIsTheNextDetectedOneEvenIfThatOneIsExcluded) {
+    // AC-055.2. Atrapa: armar la lista de t0 sólo con `# ataque`, sin los `# ataque-excluido`. A = 5000, B = 20000,
+    // fin del flujo 22000, corte en 21000: toca la guarda de B ([17952, 22000]) y no la de A ([2952, 20000]). Con B
+    // en la lista A se mide; sin B, el tEnd de A se estira a 22000 y A se excluye sola de este lado.
+    const std::vector<Publication> pubs{pub(5100, 440.0, kMeas), pub(5200, 440.0, kConv)};
+    const std::vector<latch::FrameCut> cuts{{21000, 21000}};
+    const auto withB = latch::measureAttacks(pubs, {5000, 20000}, kNoOracle, 22000, params(), cuts);
+    ASSERT_EQ(withB.size(), 2u);
+    EXPECT_FALSE(withB[0].excludedByCut);
+    EXPECT_EQ(withB[0].publications, 2);
+    EXPECT_TRUE(withB[1].excludedByCut);
+    const auto withoutB = latch::measureAttacks(pubs, {5000}, kNoOracle, 22000, params(), cuts);
+    ASSERT_EQ(withoutB.size(), 1u);
+    EXPECT_TRUE(withoutB[0].excludedByCut) << "sin B el tEnd de A se estira hasta el corte: eso es lo que el test evita";
+}
+
+TEST(AttackInstrumentCuts, TheGuardIsClosedAndExactOnBothSides) {
+    // AC-055.2. Atrapa: borde mal puesto en cualquiera de los dos lados (< en vez de <=, guarda de 2047 o de
+    // 2049 frames). Lado bajo (A1, t0 = 5000): fin == 2951 NO toca, fin == 2952 SI. Lado alto (A2, tEnd = 12000):
+    // ini == 12001 NO toca, ini == 12000 SI. Un corte que toca a A2 solo por su borde alto no toca a A1.
+    EXPECT_EQ(attackExclusions(2951, 2951), (std::vector<bool>{false, false})) << "fin = t0 - 2049";
+    EXPECT_EQ(attackExclusions(2952, 2952), (std::vector<bool>{true, false})) << "fin = t0 - 2048";
+    EXPECT_EQ(attackExclusions(100, 2951), (std::vector<bool>{false, false})) << "un tramo largo que termina fuera";
+    EXPECT_EQ(attackExclusions(100, 2952), (std::vector<bool>{true, false})) << "el mismo tramo, 1 frame mas";
+    EXPECT_EQ(attackExclusions(12001, 12500), (std::vector<bool>{false, false})) << "ini = tEnd + 1";
+    EXPECT_EQ(attackExclusions(12000, 12500), (std::vector<bool>{false, true})) << "ini = tEnd";
+    EXPECT_EQ(attackExclusions(8001, 8001), (std::vector<bool>{false, true})) << "tEnd de A1 es 8000: 8001 ya no es de A1";
+    EXPECT_EQ(attackExclusions(8000, 8000), (std::vector<bool>{true, true})) << "tEnd de A1 incluido";
+}
+
+// Enganches: t0 = 3000 (guarda [952, 8000]) y t0 = 8000 (guarda [5952, 12000], fin del flujo 12000).
+std::vector<Latch> cutLatches(const std::vector<latch::FrameCut>& cuts) {
+    return latch::measure({pub(3100, 440.0, kMeas), pub(3200, 440.0, kConv), pub(8100, 440.0, kMeas), pub(8300, 440.0, kConv)},
+                          loudWins(1), {{3000, true}, {8000, true}}, kNoOracle, params(), cuts, kCutStreamEnd);
+}
+
+std::vector<bool> latchExclusions(int64_t ini, int64_t fin) {
+    const auto l = cutLatches({{ini, fin}});
+    return {l.at(0).excludedByCut, l.at(1).excludedByCut};
+}
+
+TEST(LatchInstrumentCuts, ACutExcludesTheLatchItTouchesAndNextOneIsMeasuredAsWithoutCuts) {
+    // AC-055.2. Atrapa: el enganche que cruza un corte medido igual (sin exclusion), excluido pero sumado a
+    // las cifras (t_primera, t_conv, pooled) o sin contar; y el enganche siguiente alterado por el corte.
+    const auto without = cutLatches({});
+    const auto cut = cutLatches({{3300, 3300}});
+    ASSERT_EQ(cut.size(), 2u);
+    ASSERT_EQ(without.size(), 2u);
+    EXPECT_FALSE(without[0].excludedByCut);
+    EXPECT_TRUE(cut[0].excludedByCut);
+    EXPECT_EQ(cut[0].publications, 0);
+    EXPECT_EQ(cut[0].firstReadingFrames, -1);
+    EXPECT_EQ(cut[0].convergedFrames, -1);
+    EXPECT_EQ(cut[0].readings, 0);
+    EXPECT_EQ(without[0].firstReadingFrames, 100);
+    EXPECT_FALSE(cut[1].excludedByCut);
+    EXPECT_EQ(cut[1].publications, without[1].publications);
+    EXPECT_EQ(cut[1].firstReadingFrames, without[1].firstReadingFrames);
+    EXPECT_EQ(cut[1].convergedFrames, without[1].convergedFrames);
+    EXPECT_EQ(cut[1].convergedFrames, 300);
+    EXPECT_EQ(latch::poolLatchErrors(cut).withError, 0);
+}
+
+TEST(LatchInstrumentCuts, TheLatchGuardIsClosedAndExactOnBothSides) {
+    // AC-055.2. Atrapa: el borde +-1 de la guarda de un enganche. Lado bajo (t0 = 3000): fin == 951 NO toca,
+    // fin == 952 SI. Lado alto (ultimo enganche, fin del flujo 12000): ini == 12001 NO, 12000 SI. El final de un
+    // enganche es la apertura siguiente (8000): ini == 8001 ya no es del primero.
+    EXPECT_EQ(latchExclusions(951, 951), (std::vector<bool>{false, false})) << "fin = t0 - 2049";
+    EXPECT_EQ(latchExclusions(952, 952), (std::vector<bool>{true, false})) << "fin = t0 - 2048";
+    EXPECT_EQ(latchExclusions(12001, 12001), (std::vector<bool>{false, false})) << "ini = tEnd + 1";
+    EXPECT_EQ(latchExclusions(12000, 12000), (std::vector<bool>{false, true})) << "ini = tEnd";
+    EXPECT_EQ(latchExclusions(8001, 8001), (std::vector<bool>{false, true}));
+    EXPECT_EQ(latchExclusions(8000, 8000), (std::vector<bool>{true, true}));
+}
+
 TEST(AttackInstrument, OracleAttackLinesAreReadUnderTheirFile) {
     // AC-055.2. Atrapa: un `# ataque` atribuido al archivo equivocado (o leido como comentario y
     // perdido): los t0 de un archivo serian los de otro.
@@ -1376,7 +1519,8 @@ TEST(AttackInstrument, OracleAttackLinesAreReadUnderTheirFile) {
     ASSERT_NE(f, nullptr);
     const std::string text = "# comando: x\n# archivo a.wav sha256 aa rate 48000 frames 100\n# ataque a.wav frame 7\n"
                              "a.wav\t0.0\t0.1\t440\t0\t-20\n# archivo b.wav sha256 bb rate 48000 frames 100\n"
-                             "# ataque b.wav frame 0\n# ataque b.wav frame 4096\n";
+                             "# ataque b.wav frame 0\n# ataque b.wav frame 4096\n# corte b.wav 5000 5000 3\n# corte b.wav 9000 9500 ?\n"
+                             "# ataque-excluido b.wav frame 8192\n";
     std::fwrite(text.data(), 1, text.size(), f);
     std::fclose(f);
     std::map<std::string, OracleFile> oracle;
@@ -1384,7 +1528,16 @@ TEST(AttackInstrument, OracleAttackLinesAreReadUnderTheirFile) {
     std::remove(path.c_str());
     ASSERT_EQ(why, "");
     EXPECT_EQ(oracle["a.wav"].attacks, (std::vector<int64_t>{7}));
-    EXPECT_EQ(oracle["b.wav"].attacks, (std::vector<int64_t>{0, 4096}));
+    EXPECT_EQ(oracle["b.wav"].attacks, (std::vector<int64_t>{0, 4096})) << "el excluido NO es un ataque a medir";
+    EXPECT_EQ(oracle["b.wav"].excludedAttacks, (std::vector<int64_t>{8192}));
+    // AC-055.2. Atrapa: pasar a `measureAttacks` sólo `# ataque` (el tEnd de un ataque conservado se estira).
+    EXPECT_EQ(attackT0sForMeasure(oracle["b.wav"]), (std::vector<int64_t>{0, 4096, 8192})) << "la union, ordenada";
+    EXPECT_EQ(attackT0sForMeasure(oracle["a.wav"]), (std::vector<int64_t>{7}));
+    ASSERT_EQ(oracle["b.wav"].cuts.size(), 2u) << "un `# corte` perdido o atribuido a otro archivo";
+    EXPECT_EQ(oracle["b.wav"].cuts[0].ini, 5000);
+    EXPECT_EQ(oracle["b.wav"].cuts[0].fin, 5000);
+    EXPECT_EQ(oracle["b.wav"].cuts[1].fin, 9500) << "PERDIDOS `?` no rompe la lectura";
+    EXPECT_TRUE(oracle["a.wav"].cuts.empty());
     std::map<std::string, OracleFile> bad;
     const std::string badPath = path + ".mal";
     f = std::fopen(badPath.c_str(), "wb");
@@ -1394,6 +1547,16 @@ TEST(AttackInstrument, OracleAttackLinesAreReadUnderTheirFile) {
     std::fclose(f);
     EXPECT_NE(loadOracle(badPath, &bad), "") << "un ataque de otro archivo es un error, no se descarta";
     std::remove(badPath.c_str());
+    for (const char* stray : {"# corte b.wav 1 2 0\n", "# ataque-excluido b.wav frame 7\n"}) {
+        f = std::fopen(badPath.c_str(), "wb");
+        ASSERT_NE(f, nullptr);
+        const std::string t = std::string("# archivo a.wav sha256 aa rate 48000 frames 100\n") + stray;
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+        std::map<std::string, OracleFile> bad2;
+        EXPECT_NE(loadOracle(badPath, &bad2), "") << stray << " de otro archivo es un error";
+        std::remove(badPath.c_str());
+    }
     corpus::removeTempDir(tmp);
 }
 
@@ -1585,6 +1748,7 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
     std::vector<double> first[3], conv[3], e250[3], e1s[3];   // [0] pasada 1, [1] pasada 2, [2] todas
     std::vector<double> carriedFirst, carriedConv;            // los arrastrados, aparte (una vez cada uno)
     std::vector<latch::Attack> all[3];
+    size_t excludedAttacksTotal = 0;
     int carried = 0, noRead250 = 0, applies250 = 0, cov250 = 0, with250 = 0;
     std::printf("\n%-24s %2s %1s %7s | %1s %7s %7s | %7s %7s %5s %7s %7s\n", "archivo", "n", "p", "t0_s", "a", "t_prim",
                 "t_conv", "e_250", "e_1s", "cob", "med|e|", "max|e|");
@@ -1603,11 +1767,17 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
         ASSERT_EQ(run.frames1, noteEnd) << e.name << ": el alimentador no escribio la nota entera";
         std::vector<int64_t> t0s;
         std::vector<int> passOf;
+        // El oraculo calcula tEnd con el siguiente ataque DETECTADO, tambien el que sale `# ataque-excluido`:
+        // la lista de t0 es la UNION ordenada de los dos, o el tEnd de un ataque conservado se estira distinto.
+        const std::vector<int64_t> detected = attackT0sForMeasure(of);
+        std::vector<int64_t> expectedExcluded;
         for (int pass = 0; pass < 2; ++pass)
-            for (int64_t a : of.attacks)
+            for (int64_t a : detected)
                 if (a < noteEnd) {
                     t0s.push_back(a + pass * noteEnd);
                     passOf.push_back(pass + 1);
+                    if (std::find(of.excludedAttacks.begin(), of.excludedAttacks.end(), a) != of.excludedAttacks.end())
+                        expectedExcluded.push_back(a + pass * noteEnd);
                 }
         const double cut = static_cast<double>(noteEnd) / data.sampleRate;
         std::vector<OracleSegment> segs;
@@ -1616,14 +1786,26 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
                 if (sg.tFin <= cut) segs.push_back({sg.tIni + pass * cut, sg.tFin + pass * cut, sg.hz});
         Params prm;
         prm.sampleRate = run.rate;
-        const std::vector<latch::Attack> attacks = latch::measureAttacks(run.pubs, t0s, segs, 2 * noteEnd, prm);
+        // Los cortes del archivo caen en las dos pasadas (la nota se alimenta dos veces).
+        std::vector<latch::FrameCut> cuts;
+        for (int pass = 0; pass < 2; ++pass)
+            for (const latch::FrameCut& c : of.cuts) cuts.push_back({c.ini + pass * noteEnd, c.fin + pass * noteEnd});
+        const std::vector<latch::Attack> attacks = latch::measureAttacks(run.pubs, t0s, segs, 2 * noteEnd, prm, cuts);
         ASSERT_EQ(attacks.size(), t0s.size());
+        std::vector<int64_t> markedExcluded;
+        for (size_t i = 0; i < attacks.size(); ++i)
+            if (attacks[i].excludedByCut) markedExcluded.push_back(t0s[i]);
+        excludedAttacksTotal += markedExcluded.size();
+        ASSERT_EQ(markedExcluded, expectedExcluded)
+            << e.name << ": los ataques que C++ excluye por corte no son los `# ataque-excluido` del oraculo (regla distinta)";
+        int rowOrdinal = 0;
         for (size_t i = 0; i < attacks.size(); ++i) {
             const latch::Attack& a = attacks[i];
+            if (a.excludedByCut) continue;   // sin cifras: no entra a ninguna fila ni resumen
             const int p = passOf[i] - 1;
-            const AttackRow r = attackRowOf(e.name, static_cast<int>(i) + 1, passOf[i], a, run.rate);
+            const AttackRow r = attackRowOf(e.name, ++rowOrdinal, passOf[i], a, run.rate);
             rows[keyOf(r.name, r.v[0])] = r;
-            std::printf("%-24s %2zu %1d %7.3f | %1d %7.3f %7.3f | %+7.2f %+7.2f %5.2f %7.2f %7.2f\n", e.name.c_str(), i + 1,
+            std::printf("%-24s %2zu %1d %7.3f | %1d %7.3f %7.3f | %+7.2f %+7.2f %5.2f %7.2f %7.2f\n", e.name.c_str(), static_cast<size_t>(rowOrdinal),
                         passOf[i], a.t0Sec, a.readingCarried ? 1 : 0, a.firstReadingSec, a.convergedSec, a.early.errorCents,
                         a.late.errorCents, a.coverage, a.medianAbsCents, a.maxAbsCents);
             for (int k : {p, 2}) {
@@ -1648,6 +1830,7 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
             }
         }
     }
+    std::printf("\nataques excluidos_por_corte=%zu\n", excludedAttacksTotal);
     const char* names[3] = {"pasada 1 (ataque)", "pasada 2 (re-punteo)", "todas"};
     for (int k = 0; k < 3; ++k) {
         const latch::Pooled pooled = [&] {

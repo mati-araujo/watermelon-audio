@@ -127,6 +127,25 @@ inline std::vector<Window> windowLevels(const std::vector<float>& mono, int wind
     return out;
 }
 
+/// Un corte del volcado ubicado en el archivo (`# corte NOMBRE INI FIN PERDIDOS` del oraculo), en frames,
+/// intervalo CERRADO: una perdida es ini == fin == el frame donde falta; una costura [fileFrame, fileFrame + span].
+struct FrameCut {
+    int64_t ini = 0;
+    int64_t fin = 0;
+};
+
+/// La ventana del detector del oraculo: la guarda de un ataque empieza 2048 frames antes de su t0, porque
+/// el detector mira 2048 antes y 2048 despues. Es LA MISMA regla que usa el oraculo; no se cambia aca.
+inline constexpr int64_t kCutGuardFrames = 2048;
+
+/// Cierto si algun corte toca la guarda [t0 - 2048, tEnd] (cerrada) de un ataque o enganche.
+inline bool cutTouchesSpan(const std::vector<FrameCut>& cuts, int64_t t0, int64_t tEnd) {
+    for (const FrameCut& c : cuts) {
+        if (c.ini <= tEnd && c.fin >= t0 - kCutGuardFrames) return true;
+    }
+    return false;
+}
+
 struct Latch {
     enum class Cause { kTargetChange, kSignalAfterSilence };
     Cause cause = Cause::kTargetChange;
@@ -151,6 +170,8 @@ struct Latch {
     double maxAbsCents = kNaN;
     double coverage = kNaN;      ///< covered / withError
     std::vector<double> absErrors;   ///< |error| de cada lectura con oraculo, para agregar entre enganches
+    /// Lo toca un corte: sale SIN cifras (todo en cero/-1/NaN) y quien agrega debe contarlo aparte.
+    bool excludedByCut = false;
 };
 
 /// Mediana de un vector (promedio de los dos centrales si n es par). NaN si esta vacio.
@@ -211,7 +232,8 @@ inline void finish(Latch& l) {
  */
 inline std::vector<Latch> measure(const std::vector<Publication>& pubs, const std::vector<Window>& windows,
                                   const std::vector<TargetEvent>& events,
-                                  const std::vector<OracleSegment>& oracle, const Params& params) {
+                                  const std::vector<OracleSegment>& oracle, const Params& params,
+                                  const std::vector<FrameCut>& cuts = {}, int64_t streamEndFrames = -1) {
     struct Opening {
         int64_t t0;
         Latch::Cause cause;
@@ -248,6 +270,10 @@ inline std::vector<Latch> measure(const std::vector<Publication>& pubs, const st
         if (!openings[i].open) continue;
         latchOf[i] = static_cast<int>(latches.size());
         latches.push_back(detail::openLatch(openings[i].cause, openings[i].t0, params));
+        // El enganche dura hasta la siguiente apertura (o el final del flujo; sin el, la ultima publicacion).
+        int64_t end = streamEndFrames >= 0 ? streamEndFrames : (pubs.empty() ? openings[i].t0 : pubs.back().pos);
+        if (i + 1 < openings.size()) end = openings[i + 1].t0;
+        latches.back().excludedByCut = cutTouchesSpan(cuts, openings[i].t0, end);
     }
 
     int current = -1;   // indice en `openings`
@@ -257,6 +283,7 @@ inline std::vector<Latch> measure(const std::vector<Publication>& pubs, const st
         if (current < 0 || latchOf[current] < 0) continue;
 
         Latch& l = latches[latchOf[current]];
+        if (l.excludedByCut) continue;
         ++l.publications;
         const bool hasReading = !std::isnan(pub.hz);
         if (hasReading) {
@@ -355,6 +382,9 @@ struct Attack {
     double coverage = kNaN;
     std::vector<double> absErrors;
 
+    /// Lo toca un corte: sale SIN cifras y quien agrega debe contarlo aparte, no sumarlo.
+    bool excludedByCut = false;
+
     Probe early;   ///< a kAttackProbeEarlySec
     Probe late;    ///< a kAttackProbeLateSec
 };
@@ -400,17 +430,23 @@ inline Probe probeAt(const std::vector<Publication>& pubs, const std::vector<Ora
 
 /**
  * Las cifras por ataque. `pubs` ordenadas por `pos`; `attackFrames` (del ORACULO) ordenados y
- * dentro de [0, streamEndFrames); `streamEndFrames` = frames alimentados.
+ * dentro de [0, streamEndFrames); `streamEndFrames` = frames alimentados. Un ataque cuya guarda toca un
+ * corte (`cutTouchesSpan`) vuelve con `excludedByCut` y sin cifras.
  */
 inline std::vector<Attack> measureAttacks(const std::vector<Publication>& pubs, const std::vector<int64_t>& attackFrames,
                                           const std::vector<OracleSegment>& oracle, int64_t streamEndFrames,
-                                          const Params& params) {
+                                          const Params& params, const std::vector<FrameCut>& cuts = {}) {
     std::vector<Attack> out;
     for (size_t i = 0; i < attackFrames.size(); ++i) {
         Attack a;
         a.t0Frames = attackFrames[i];
         a.t0Sec = static_cast<double>(a.t0Frames) / params.sampleRate;
         a.endFrames = i + 1 < attackFrames.size() ? attackFrames[i + 1] : streamEndFrames;
+        if (cutTouchesSpan(cuts, a.t0Frames, a.endFrames)) {
+            a.excludedByCut = true;
+            out.push_back(std::move(a));
+            continue;
+        }
         const Publication* before = nullptr;
         for (const Publication& pub : pubs) {
             if (pub.pos <= a.t0Frames) {
