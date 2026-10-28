@@ -136,6 +136,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // que el WAV mezclaria dos senales bajo un solo header.
             if (mDump != nullptr) mDump->noteInputDiscontinuity();
             mRing.skipToNewest();
+            resetTick();
             mStrobe.reset();
             mDetector.reset();
             mFastMode.reset();
@@ -163,6 +164,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             mStrobe.prepare(rate);
             mDetector.prepare(rate);
             mPreparedRate = rate;
+            resetTick();
             mAppliedTarget = 0.0;      // `prepare()` reinicia: hay que re-aplicar
             mLastUserTarget = -1.0;
         }
@@ -183,6 +185,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // de leerlo deja al analisis sin ver un solo frame — ni el rate de captura se
             // publicaria. Es un rojo MEDIDO, no una precaucion (AC-030.4).
             if (target > 0.0) mRing.skipToNewest();
+            resetTick();   // la rejilla del strobe arranca con el objetivo: el tick, tambien
         }
         const bool measuring = mPreparedRate > 0 && mAppliedTarget > 0.0;
 
@@ -191,7 +194,9 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
         // microfono entrego. No toca mRead/mDropped/mTorn ni mScratch.
         if (mDump != nullptr) mDump->captureFromRing(mRing, rate);
 
-        const int got = mRing.read(mScratch.data(), kDrainFrames);
+        // Nunca mas de lo que falta para cerrar el tick (REQ-057): el corte del tick es de AUDIO,
+        // no del bloque con que llego.
+        const int got = mRing.read(mScratch.data(), kTickFrames - mTickFill);
         mTicks.fetch_add(1, std::memory_order_relaxed);
 
         // --- REQ-009 S2 · LA GUARDA: el Δ de frames pisados, no el acumulado ---
@@ -315,6 +320,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // este contador viene a cerrar.
             if (!mStrobe.sawInputDiscontinuity()) ++mDiscontinuityCount;
             mStrobe.noteInputDiscontinuity();
+            resetTick();
         }
 
         // 🔴 EL BLOQUE DE ESTA VUELTA SE DESCARTA, Y SOLO POR EL EJE DE CAPTURA.
@@ -349,12 +355,10 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             return DrainOutcome::kSkipped;
         }
 
-        double sumSq = 0.0;
         for (int i = 0; i < got; ++i) {
             const double v = mScratch[static_cast<size_t>(i)];
-            sumSq += v * v;
+            mTickSumSq += v * v;
         }
-        const float rms = static_cast<float>(std::sqrt(sumSq / got));
         mFramesAnalyzed += static_cast<uint64_t>(got);
 
         // Se lee POR TICK, no una vez: es lo unico que hace que un cambio de
@@ -376,7 +380,8 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // El `bool` que devuelve NO se descarta: dice si esta pasada produjo un
             // veredicto NUEVO. La compuerta de ausencia lo necesita para no contar la
             // misma evidencia una vez por bloque leido (REQ-019.2).
-            mFreshPitchVerdict = mDetector.process(mScratch.data(), got);
+            const bool freshThisRead = mDetector.process(mScratch.data(), got);
+            mTickFreshVerdict = mTickFreshVerdict || freshThisRead;
 
             // REQ-031 S1 — la sonda de soporte espectral come el MISMO bloque que el
             // detector, y se evalua SOLO cuando el detector produjo un veredicto nuevo: es
@@ -384,7 +389,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // Entre veredictos la altura no cambia, asi que su soporte tampoco — y por eso la
             // bandera no puede parpadear mas rapido que el propio detector.
             mSupportProbe.pushMono(mScratch.data(), got);
-            if (mFreshPitchVerdict) {
+            if (freshThisRead) {
                 if (!mDetector.hasPitch()) {
                     mSupportDb = std::numeric_limits<double>::quiet_NaN();
                 } else if (mSupportProbe.isPrimed()) {
@@ -402,13 +407,28 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             mStrobe.process(mScratch.data(), got);
         }
 
+        // --- el tick (REQ-057, D31) -------------------------------------------
+        //
+        // Hasta aca el audio se integro; lo que DECIDE espera a tener un tick entero. Con menos de
+        // 1024 frames nada se publica: el snapshot sale cada 1024 frames de audio, con el rms de
+        // esos 1024 (antes, el de lo que hubiera en el drenado).
+        mTickFill += got;
+        if (mTickFill < kTickFrames) return DrainOutcome::kAccumulated;
+        const float rms = static_cast<float>(std::sqrt(mTickSumSq / kTickFrames));
+        mFreshPitchVerdict = mTickFreshVerdict;
+        const bool tickFreshVerdict = mTickFreshVerdict;
+        resetTick();
+
         // --- el modo rapido elige el objetivo, si hay candidatos --------------
         //
         // Aca se cierra el hueco que quedaba desde S4: el motor publicaba que
         // nota suena, pero convertir eso en "la cuerda que el musico quiso" y
         // empujarla como objetivo lo tenia que hacer el consumidor. Con la lista
         // de cuerdas puesta, lo hace el motor.
-        if (mPreparedRate > 0 && mFastMode.candidateCount() > 0) {
+        //
+        // Solo en un tick con veredicto grueso NUEVO (REQ-057): sin dato nuevo no hay evidencia
+        // nueva que contar, y el modo rapido no puede depender de cuantas vueltas dio el lazo.
+        if (mPreparedRate > 0 && mFastMode.candidateCount() > 0 && tickFreshVerdict) {
             mFastMode.update(mDetector.hasPitch() ? mDetector.frequencyHz() : 0.0,
                              mDetector.clarity());
             const double picked = mFastMode.lockedTargetHz();
@@ -416,7 +436,9 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
                 mTargetAppliedByFastMode.bump();
                 mStrobe.setTarget(picked);
                 mAppliedTarget = picked;
-                mRing.skipToNewest();
+                // SIN `skipToNewest()` (REQ-057): lo que queda en el ring ya es audio de la cuerda
+                // NUEVA, y tirarlo hacia depender el arranque del bloque del llamador. El strobe
+                // arranca su rejilla en el proximo frame, igual que el tick (ya reiniciado).
             }
         }
 

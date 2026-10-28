@@ -4,6 +4,7 @@ namespace wma::analysis {
 
 void StrobeTracker::prepare(int sampleRate) {
     for (auto& p : mPartials) p.prepare(sampleRate);
+    for (auto& a : mAdmission) a = PartialAdmission::kNoMeasurement;
     // `prepare()` de cada parcial reinicia su objetivo, asi que el nuestro deja
     // de estar aplicado: re-aplicarlo es responsabilidad de quien nos prepara.
     mTargetHz = 0.0;
@@ -26,6 +27,7 @@ void StrobeTracker::setTarget(double fundamentalHz) {
     mHasMeasurement = false;
     mSuppressUntilNextClose = false;
     mWindowRestarts = 0;
+    for (auto& a : mAdmission) a = PartialAdmission::kNoMeasurement;
 }
 
 void StrobeTracker::reset() {
@@ -56,9 +58,9 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     bool anySignal = false;
     bool closed = false;
     for (auto& p : mPartials) {
-        // Los cuatro cierran su ventana en la MISMA muestra: mismo largo, misma alimentacion.
+        // La rejilla 0 de los cuatro cierra en la MISMA muestra: mismo largo, misma alimentacion.
         closed = p.process(mono, numFrames) || closed;
-        anySignal = anySignal || p.hasSignal();
+        anySignal = anySignal || p.grid(0).hasSignal();
     }
     mHasSignal = anySignal;
     if (closed) mSuppressUntilNextClose = false;
@@ -95,46 +97,65 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     double vals[kPartials];
     double sigmas[kPartials];
     int orders[kPartials];      // el orden del parcial (1..4): lo pide el ajuste de S2
+    int pidx[kPartials];        // el indice del parcial, para la sonda de admision
     int valid = 0;
     int order = 0;
     bool breaks = false;        // REQ-036: algun parcial admisible tiene la fase fuera de una recta
     int contradicted = 0;       // REQ-036: parciales CON energia descartados por desacuerdo (signo, mediana)
-    for (const auto& p : mPartials) {
+    for (int pi = 0; pi < kPartials; ++pi) {
+        const InterleavedPhaseEstimator& grids = mPartials[pi];
+        const PhaseSlopeEstimator& p = grids.grid(0);   // D-B: se publica la rejilla 0
         ++order;
+        mAdmission[pi] = PartialAdmission::kNoMeasurement;
         if (!p.hasMeasurement()) continue;
         // REQ-036 (R-PITCH-62) — sin veredicto de tendencia no hay admision: son las primeras 12
         // ventanas, donde el rizado de las cuerdas graves y la falta de dos mitades hacen que "es
         // una recta" no se pueda afirmar. Va antes que todo lo demas por la misma razon que el piso
         // de energia: un parcial que no se puede verificar no vota.
-        if (!p.phaseTrendEvaluable()) continue;
+        if (!p.phaseTrendEvaluable()) { mAdmission[pi] = PartialAdmission::kNoTrendVerdict; continue; }
         const double sigma = p.uncertaintyCents();
-        if (!(sigma > 0.0) || !std::isfinite(sigma)) continue;
-        if (!std::isfinite(p.cents())) continue;
-        // REQ-027 — ?habia algo que medir en este bin? Va ANTES del descarte por
-        // dominio y del de mediana, y el orden importa: un parcial que no mide
-        // nada no puede VOTAR el consenso que decide a quien se descarta. Con
-        // tono puro los tres parciales de fuga son MAYORIA, asi que la mediana la
-        // fijaban ellos y el unico dato bueno quedaba de outlier.
-        if (p.goertzelBinToRmsRatio() < kMinBinToRmsRatio) continue;
+        if (!(sigma > 0.0) || !std::isfinite(sigma) || !std::isfinite(p.cents())) {
+            mAdmission[pi] = PartialAdmission::kBadUncertainty;
+            continue;
+        }
         // Sin control no se descarta nada: no se PUEDE saber quien esta en
         // dominio, y adivinarlo con la propia fase es el auto-engaño que
         // documenta `setCoarseFrequencyHz`. Lo que corresponde entonces es que
         // la lectura salga sin verificar —`domainVerified()` en false— y que
         // quien publica decida; aca no se inventa un veredicto.
-        if (mDomainVerified && !p.canMeasureDeviation(coarse)) continue;
+        //
+        // REQ-057 (D22/D28): el rango es el de la rejilla DENSA del parcial (hop 1024, κ = 0,9).
+        if (mDomainVerified && !grids.canMeasureDenseDeviation(coarse)) { mAdmission[pi] = PartialAdmission::kOutOfRange; continue; }
+        //
+        // El dominio va ANTES que la energia solo para que la sonda diga la causa: un parcial
+        // fuera de su rango tambien se queda sin energia en su bin (el pico cae fuera del lobulo
+        // de Hann), y es fisica del rango, no ausencia de señal. Los dos solo descartan.
+        //
+        // REQ-027 — ?habia algo que medir en este bin? Va ANTES del descarte por
+        // mediana, y el orden importa: un parcial que no mide
+        // nada no puede VOTAR el consenso que decide a quien se descarta. Con
+        // tono puro los tres parciales de fuga son MAYORIA, asi que la mediana la
+        // fijaban ellos y el unico dato bueno quedaba de outlier.
+        if (p.goertzelBinToRmsRatio() < kMinBinToRmsRatio) { mAdmission[pi] = PartialAdmission::kNoEnergy; continue; }
         // REQ-014 S2 (AC-014.3) — y ademas el SIGNO tiene que coincidir con el
         // control. La guarda de arriba se apoya en la MAGNITUD de la gruesa, y
         // con una cuerda inarmonica esa magnitud queda corta justo en el borde:
         // deja pasar un fundamental aliasado que vuelve con el signo dado
         // vuelta. Publicar eso le dice al musico que afloje lo que hay que
         // apretar, que es peor que no decir nada. Ver `contradictsControl`.
-        if (mDomainVerified && contradictsControl(p.cents(), coarse)) { ++contradicted; continue; }
+        if (mDomainVerified && contradictsControl(p.cents(), coarse)) {
+            mAdmission[pi] = PartialAdmission::kSignContradiction;
+            ++contradicted;
+            continue;
+        }
         // REQ-036 — el parcial es admisible por todo lo demas: si su fase no es una recta, la
         // ventana ENTERA se quebro (un glide sesga a los cuatro por igual) y se reinicia abajo.
         breaks = breaks || phaseBreaksTheLine(p.phaseTrendScore(), p.phaseTrendDeltaCents());
+        mAdmission[pi] = PartialAdmission::kAdmitted;
         vals[valid] = p.cents();
         sigmas[valid] = sigma;
         orders[valid] = order;
+        pidx[valid] = pi;
         ++valid;
     }
 
@@ -147,7 +168,7 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     // S1: +1,38 c con el 4to solo). Al quebrarse, este cierre no publica; el siguiente juzga la
     // mitad nueva.
     if (closed && breaks) {
-        for (auto& p : mPartials) p.restartKeepingNewestHalf();
+        for (auto& p : mPartials) p.restartAtBreak();
         mSuppressUntilNextClose = true;
         ++mWindowRestarts;
     }
@@ -222,10 +243,15 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         int kept = 0;
         for (int i = 0; i < valid; ++i) {
             if (i != best &&
-                std::abs(vals[i] - median) > kMaxPartialDisagreementCents) { ++contradicted; continue; }
+                std::abs(vals[i] - median) > kMaxPartialDisagreementCents) {
+                mAdmission[pidx[i]] = PartialAdmission::kMedianOutlier;
+                ++contradicted;
+                continue;
+            }
             vals[kept] = vals[i];
             sigmas[kept] = sigmas[i];
             orders[kept] = orders[i];
+            pidx[kept] = pidx[i];
             ++kept;
         }
         valid = kept;
@@ -245,7 +271,10 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     // Dominio y energia no cuentan como desacuerdo: son fisica (un parcial fuera de su rango de
     // captura, un bin sin señal), y REQ-003 exige que los parciales se caigan de a uno sin apagar la
     // lectura hasta que quede el fundamental solo.
-    if (valid == 1 && contradicted > 0) valid = 0;
+    if (valid == 1 && contradicted > 0) {
+        mAdmission[pidx[0]] = PartialAdmission::kContradictedAlone;
+        valid = 0;
+    }
 
     mPartialsUsed = valid;
 

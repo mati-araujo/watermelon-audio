@@ -465,6 +465,10 @@ inline Outcome sweepFile(const std::string& path, const Entry& e) {
     analysis.setCandidates(e.candidatesHz.empty() ? nullptr : e.candidatesHz.data(),
                            static_cast<int>(e.candidatesHz.size()));
 
+    // REQ-057 (D27): objetivo y candidatos se aplican con el ring VACIO, como en produccion; sin este
+    // drenado el `skipToNewest()` del reenganche tira la primera tanda y la cuerda arranca a 0,37 s.
+    analysis.drainOnce();
+
     const int capacity = static_cast<int>(wma::analysis::AnalysisRing::kCapacityFrames);
     int written = 0;
     // REQ-036 S1 — la reconstruccion de la historia de fases, por parcial.
@@ -476,7 +480,11 @@ inline Outcome sweepFile(const std::string& path, const Entry& e) {
         // `readWav` devuelve SIEMPRE estereo intercalado (duplica el mono): el layout del ring.
         ring.writeStereo(data.buffer.data() + static_cast<size_t>(written) * 2, chunk);
         written += chunk;
-        while (analysis.drainOnce() != wma::analysis::AnalysisThread::DrainOutcome::kRingEmpty) {
+        for (;;) {
+            const auto outcome = analysis.drainOnce();
+            if (outcome == wma::analysis::AnalysisThread::DrainOutcome::kRingEmpty) break;
+            // Un drenado que solo acumula (D31) no publico: releer el snapshot duplicaria la ultima.
+            if (outcome != wma::analysis::AnalysisThread::DrainOutcome::kPublished) continue;
             float v[wma::analysis::kSnapshotValueCount];
             if (!snapshot.read(v)) continue;
             ++o.publications;
