@@ -33,7 +33,7 @@ import kotlin.test.assertTrue
  * todas las tomas de acá son de CERO frames: el camino con datos —el WAV con contenido, los
  * contadores no nulos— lo cubre `core/tests/test_c_api_tuner_dump.cpp`, que sí maneja el backend.
  * Una toma de cero frames igual discrimina lo que importa de la frontera: que cierra como
- * INVÁLIDA (el path pedido NO existe; el `.invalid` sí), que el header escrito es el de 106 bytes y
+ * INVÁLIDA (el path pedido NO existe; el `.invalid` sí), que el header escrito es el de 6274 bytes (wmad v2) y
  * que el nombre viaja intacto.
  *
  * Los dos `startTunerSync`/`stopTunerSync` de acá se llaman DIRECTO y no por [JniHarness.exercise]
@@ -52,8 +52,14 @@ class TunerDiagnosticsJniTest {
         /** Trinquete bidireccional: ver `JniCoverage.ratchet`. Su diff es la revisión. */
         private val COVERED = setOf("nativeTunerDiagInputDumpStart", "nativeTunerDiagInputDumpStop")
 
-        /** Largo del header fijo del volcado (RIFF/WAVE + fmt + fact + wmad + data). */
-        private const val HEADER_BYTES = 106L
+        /**
+         * Largo del header fijo del volcado (RIFF/WAVE + fmt + fact + wmad v2 + data): es
+         * `kInputDumpHeaderBytes` de `TunerInputDump.h` (REQ-055 S0 · 0.6), que Kotlin no puede leer;
+         * el `static_assert` de alla lo fija en 6274 y este test lo cruza por la frontera JNI.
+         */
+        private const val HEADER_BYTES = 6274L
+        /** Donde empieza la etiqueta `data`: justo despues del wmad v2 (58 + 6208). */
+        private const val DATA_TAG_OFFSET = 6266
 
         @JvmStatic
         @AfterClass
@@ -119,7 +125,7 @@ class TunerDiagnosticsJniTest {
      *
      * Mata: el `jlongArray` con otro largo u otro orden de campos; un resultado "valid" sobre cero
      * frames (un WAV vacío con nombre de sano); el rename que no ocurre (queda el `.part`) o que
-     * deja el nombre pedido; el header que no es el de 106 bytes; un segundo start que no se rechaza
+     * deja el nombre pedido; el header que no es el de 6274 bytes; un segundo start que no se rechaza
      * (truncaría el temporal de la toma viva) o que deja la toma a medias.
      */
     @Test
@@ -151,7 +157,7 @@ class TunerDiagnosticsJniTest {
         assertFalse(File(path).exists(), "el nombre PEDIDO no puede existir: es el de una toma sana")
         assertFalse(File("$path.part").exists(), "quedó el temporal: el cierre no hizo el rename")
 
-        // El header: 106 bytes (sin datos), con las etiquetas en su lugar y el wmad al día.
+        // El header: 6274 bytes (sin datos), con las etiquetas en su lugar y el wmad al día.
         val bytes = File(invalid).readBytes()
         assertEquals(HEADER_BYTES, bytes.size.toLong(), "sin frames el archivo es sólo el header")
         assertEquals("RIFF", ascii(bytes, 0, 4))
@@ -159,8 +165,8 @@ class TunerDiagnosticsJniTest {
         assertEquals("fmt ", ascii(bytes, 12, 4))
         assertEquals("fact", ascii(bytes, 38, 4))
         assertEquals("wmad", ascii(bytes, 50, 4))
-        assertEquals("data", ascii(bytes, 98, 4))
-        assertEquals(1, bytes[58].toInt(), "wmad.version")
+        assertEquals("data", ascii(bytes, DATA_TAG_OFFSET, 4))
+        assertEquals(2, bytes[58].toInt(), "wmad.version (v2: el mapa de cortes)")
         assertEquals(0, bytes[94].toInt(), "wmad.valid")
 
         assertNull(stop(), "la toma ya se cerró: un segundo stop no tiene nada que devolver")
