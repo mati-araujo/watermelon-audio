@@ -45,6 +45,8 @@
 
 namespace wma::analysis {
 
+class TunerInputDump;
+
 class AnalysisThread {
 public:
     /// Frames que intenta drenar por vuelta. Un cuarto del ring: deja margen
@@ -182,6 +184,25 @@ public:
     void onSourceChanged() noexcept {
         mSourceChanged.store(true, std::memory_order_release);
     }
+
+    /**
+     * @brief Diagnostico (REQ-055 S0): arma (`dump` != null) o desarma (null) el volcado de la
+     *        entrada. Lo llama el thread de control CON `analysisMutex` tomado.
+     *
+     * EL VOLCADO LO TOCA SOLO EL HILO DE ANALISIS, y por eso viaja por un buzon. Es el unico
+     * productor de la cola: si el control armara desde afuera, el cursor y el productor serian
+     * dos escritores del mismo estado. Corriendo, el control publica el pedido y espera a que la
+     * vuelta siguiente lo aplique (techo 2 s, por polling); parado, lo aplica el llamador directo.
+     * Mismo patron que `mCandidatesDirty`/`mSourceChanged`, con un numero de pedido en vez de
+     * una bandera porque aca el control tiene que saber CUANDO se aplico.
+     *
+     * @return false si el hilo corriendo no lo aplico dentro del techo.
+     */
+    bool setInputDump(TunerInputDump* dump) noexcept;
+
+    /// La toma armada ahora mismo, o null. Para tests: solo es valida con el hilo parado o desde
+    /// el propio hilo de analisis, igual que el resto de su estado.
+    const TunerInputDump* inputDumpForTest() const noexcept { return mDump; }
 
     /// Engancha a mano a una cuerda (el musico la elige). -1 suelta.
     void lockString(int index) noexcept {
@@ -369,6 +390,19 @@ private:
     // construye su propio `AnalysisThread`, asi que arrancan en cero solos.
     wma::RtCounter mTargetAppliedByUser;
     wma::RtCounter mTargetAppliedByFastMode;
+
+    /// REQ-055 S0. La toma armada: la toca SOLO el hilo de analisis (o el control con el hilo
+    /// parado), por eso no es atomica. El pedido del control viaja en el buzon de abajo.
+    TunerInputDump* mDump{nullptr};
+    std::atomic<TunerInputDump*> mDumpRequest{nullptr};
+    /// Se incrementa DESPUES de publicar `mDumpRequest`; el lazo mira solo este numero.
+    std::atomic<uint64_t> mDumpRequestSeq{0};
+    /// El ultimo pedido que el lazo aplico: lo que el control espera.
+    std::atomic<uint64_t> mDumpAppliedSeq{0};
+    /// El ultimo pedido que el aplicador vio. Del hilo de analisis (o del control con el hilo parado).
+    uint64_t mDumpSeenSeq{0};
+
+    void applyInputDump(TunerInputDump* dump) noexcept;
 
     std::thread mThread;
     std::atomic<bool> mRunning{false};

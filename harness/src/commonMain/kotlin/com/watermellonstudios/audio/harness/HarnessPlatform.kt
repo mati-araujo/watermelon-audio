@@ -24,6 +24,11 @@ import com.watermellonstudios.audio.harness.soundfont.SoundFontCheck
  * @property soundFontExtras controles de SoundFont que sólo existen en una plataforma (en Android,
  *   el selector de archivos del sistema que carga por fd).
  * @property smokeRequest el plan pedido por adb, si lo hay.
+ * @property dumpDir el directorio donde el control de grabación de la entrada del afinador deja sus
+ *   WAV (REQ-055 S0), o `null` si la plataforma no dio uno. En Android es el externo propio de la app
+ *   (se baja con `adb pull` sin root); en iOS, Documents.
+ * @property tunerReadSink a dónde van las líneas `TUNER-READ` del panel del afinador (MINI-053):
+ *   logcat con el tag `WMA-TUNER-READ` en Android, stdout en iOS. `null`: el panel no las emite.
  */
 class HarnessPlatform(
     val smokeSink: SmokeSink,
@@ -32,6 +37,8 @@ class HarnessPlatform(
     val usbSmoke: (suspend (SmokeReporter, suspend (SmokeReporter) -> Boolean) -> Boolean)? = null,
     val soundFontExtras: (@Composable (SoundFontCheck, SmokeReporter) -> Unit)? = null,
     val smokeRequest: SmokeRequest? = null,
+    val dumpDir: String? = null,
+    val tunerReadSink: SmokeSink? = null,
 )
 
 /**

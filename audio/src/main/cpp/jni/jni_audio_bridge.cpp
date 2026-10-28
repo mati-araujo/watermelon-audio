@@ -32,6 +32,8 @@
 #include <optional>
 #include <unordered_map>
 #include <memory>
+#include <string>
+#include <cstring>
 #include <vector>
 
 // External declarations from jni_usb.cpp for USB volume
@@ -1370,6 +1372,68 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeAnalyz
     if (result == nullptr) return nullptr;
     env->SetFloatArrayRegion(result, 0, WMA_TUNER_SNAPSHOT_VALUES, values);
     return result;
+}
+
+// ---- Diagnostico, sin contrato (REQ-055 S0) ---------------------------------
+// El volcado a WAV de lo que el afinador ve. Sin mutex propio, igual que la intonacion: la C API
+// serializa con `analysisMutex`. NO crea el motor ni arranca el afinador (sin afinador corriendo no
+// entra audio): sin motor, `start` es false y `stop` es null.
+
+/// El path llega como los bytes UTF-8 REALES (`String.encodeToByteArray()` en Kotlin), no como
+/// `jstring`: `GetStringUTFChars` da UTF-8 *modificado*, que parte un caracter fuera del BMP en dos
+/// surrogates de 3 bytes y codifica U+0000 como C0 80, y el archivo quedaria con otro nombre
+/// (hallazgo 3). El string se arma con el LARGO del array; un byte 0 adentro se rechaza, porque C lo
+/// leeria como fin y grabaria en el prefijo.
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerDiagInputDumpStart(
+    JNIEnv* env, jobject thiz, jbyteArray pathUtf8) {
+    (void)thiz;
+    if (pathUtf8 == nullptr) return JNI_FALSE;
+    const jsize len = env->GetArrayLength(pathUtf8);
+    if (len <= 0) return JNI_FALSE;
+    try {   // una excepcion de C++ no puede cruzar la frontera JNI
+        std::string path(static_cast<size_t>(len), '\0');
+        env->GetByteArrayRegion(pathUtf8, 0, len, reinterpret_cast<jbyte*>(path.data()));
+        if (path.find('\0') != std::string::npos) return JNI_FALSE;
+        const bool ok = wma_tuner_diag_input_dump_start(g_wmaEngine, path.c_str());
+        return ok ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
+/// Cierra la toma, llena `values` (WMA_TUNER_DUMP_STATS_VALUES) y devuelve los bytes UTF-8 del
+/// archivo que la toma DEJO en disco, segun el nativo (bug A de REQ-055 S0: el puente no lo
+/// reconstruye con el path que pidio). null (y `values` sin tocar) sin toma, sin motor o con un
+/// `values` de otro largo: un cero es un dato plausible, ver MINI-003. Sin memoria despues de
+/// cerrar (el `NewByteArray`) tambien da null, con la toma ya cerrada y `values` escrito.
+JNIEXPORT jbyteArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerDiagInputDumpStop(
+    JNIEnv* env, jobject thiz, jlongArray values) {
+    (void)thiz;
+    if (values == nullptr || env->GetArrayLength(values) != WMA_TUNER_DUMP_STATS_VALUES) {
+        return nullptr;
+    }
+    try {   // una excepcion de C++ no puede cruzar la frontera JNI
+        // Se reserva ANTES de cerrar la toma: un bad_alloc despues la perderia sin informarla.
+        std::vector<char> path(WMA_TUNER_DUMP_PATH_CAPACITY, '\0');
+        int64_t stats[WMA_TUNER_DUMP_STATS_VALUES];
+        if (!wma_tuner_diag_input_dump_stop(g_wmaEngine, stats, WMA_TUNER_DUMP_STATS_VALUES,
+                                            path.data(), WMA_TUNER_DUMP_PATH_CAPACITY)) {
+            return nullptr;
+        }
+        // `jlong` no es `int64_t` en todas las ABIs (long long contra long): se copia, no se castea.
+        jlong out[WMA_TUNER_DUMP_STATS_VALUES];
+        for (int i = 0; i < WMA_TUNER_DUMP_STATS_VALUES; ++i) out[i] = static_cast<jlong>(stats[i]);
+        env->SetLongArrayRegion(values, 0, WMA_TUNER_DUMP_STATS_VALUES, out);
+        const jsize len = static_cast<jsize>(std::strlen(path.data()));
+        jbyteArray result = env->NewByteArray(len);
+        if (result == nullptr) return nullptr;
+        env->SetByteArrayRegion(result, 0, len, reinterpret_cast<const jbyte*>(path.data()));
+        return result;
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 JNIEXPORT void JNICALL
