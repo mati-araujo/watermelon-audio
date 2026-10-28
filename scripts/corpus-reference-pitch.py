@@ -78,6 +78,18 @@ cada archivo va precedido de `# archivo NOMBRE sha256 HEX rate HZ frames N`: el 
 oraculo al archivo EXACTO. Limite conocido: con 10 periodos (E1, E2) la fuga del 2do armonico en la
 ventana de Hann sesga el pico hasta ~0,1 c segun la fase; con la ventana de 0,1 s es < 0,002 c.
 
+UN CENTRO POR TRAMO (REQ-055, `--short --centros MANIFIESTO`)
+-------------------------------------------------------------
+Una toma real recorre las seis cuerdas: un centro por archivo no sirve. Con `--centros` el centro de
+CADA tramo es el HZ del ULTIMO `# objetivo NOMBRE FRAME HZ` del manifiesto de tomas para ese archivo
+con FRAME <= el frame en que EMPIEZA el tramo. Un tramo que empieza antes del primer objetivo no tiene
+centro: sale con hz y cents `nan` (el nivel si se mide; no se inventa centro). Al cambiar el centro
+el seguimiento se reinicia y la ventana es la de ESE centro (max(`--short-win`, 10 periodos)); los
+cents de la fila son contra su centro. Un archivo sin ningun `# objetivo` es SystemExit; los FRAME
+de un archivo tienen que ser estrictamente crecientes y venir despues de la linea de su toma.
+Excluyente con `--nominal`; exige `--short`. Sin `--centros` la salida es la de siempre, byte a byte;
+con el, la cabecera suma la linea `# centros:`.
+
 LECTURA DE WAV Y TOMAS INVALIDAS
 --------------------------------
 El afinador vuelca su entrada a WAV float32 mono con un chunk propio `wmad`; el modulo `wave` no lee
@@ -476,28 +488,51 @@ def locate(x, sr, center, span, prev):
     r = refine_peak(logmag, c0, 1.5, 15.0)
     return r if r is not None and abs(r) <= span else None
 
-def short_track(mono, sr, center, win_s=0.1, hop_s=0.05, floor_db=-60.0, span=150.0, offset=0):
+def center_at(centers, frame):
+    """El HZ del ultimo objetivo `(frame, hz)` con frame <= `frame`, o None si no hay ninguno."""
+    hz = None
+    for f, h in centers:
+        if f > frame: break
+        hz = h
+    return hz
+
+def short_track(mono, sr, center, win_s=0.1, hop_s=0.05, floor_db=-60.0, span=150.0, offset=0, centers=None):
     """Altura instantanea por tramos cortos. Devuelve [(t_ini, t_fin, hz, cents_vs_centro, dbfs)].
 
     Ventana Hann de max(win_s, 10 periodos del centro); hop fijo. Bajo `floor_db` (RMS del tramo) o
     sin pico en ±span el hz es nan: no hay altura que declarar, y no se inventa una. `offset` es el
-    frame del archivo en que empieza `mono` (un segmento): los tiempos salen del archivo."""
-    n = int(round(max(win_s, SHORT_PERIODS / center) * sr))
+    frame del archivo en que empieza `mono` (un segmento): los tiempos salen del archivo.
+
+    `centers=[(frame, hz), ...]` (crecientes; frames del archivo) reemplaza a `center`: cada tramo usa
+    el hz del ultimo con frame <= su inicio, y sin ninguno sale nan (ventana `win_s`, nivel medido)."""
     hop = max(1, int(round(hop_s * sr)))
-    hann = hann_window(n)
-    rows, prev, prev_db = [], None, None
-    for start in range(0, len(mono) - n + 1, hop):
+    n_of = lambda cen: int(round(max(win_s, SHORT_PERIODS / cen) * sr))
+    rows, prev, prev_db, prev_cen = [], None, None, None
+    if centers is None:
+        n = n_of(center)
+        starts = range(0, len(mono) - n + 1, hop)
+    else:
+        starts = range(0, len(mono), hop)
+    for start in starts:
+        if centers is None:
+            cen = center
+        else:
+            cen = center_at(centers, start + offset)
+            n = int(round(win_s * sr)) if cen is None else n_of(cen)
+            if start + n > len(mono): continue
+            if cen != prev_cen: prev = None           # los cents de `locate` son relativos al centro
         seg = mono[start:start + n]
+        hann = hann_window(n)
         rms = math.sqrt(sum(map(operator.mul, seg, seg)) / n)
         db = 20.0 * math.log10(rms) if rms > 0.0 else -math.inf
         c = None
-        if db >= floor_db:
+        if db >= floor_db and cen is not None:
             # Un salto de nivel (ataque nuevo, fin de nota) invalida el seguimiento: se re-barre.
             if prev_db is not None and abs(db - prev_db) > 10.0:
                 prev = None
-            c = locate(list(map(operator.mul, seg, hann)), sr, center, span, prev)
-        prev, prev_db = c, db
-        hz, cc = (math.nan, math.nan) if c is None else (detune(center, c), c)
+            c = locate(list(map(operator.mul, seg, hann)), sr, cen, span, prev)
+        prev, prev_db, prev_cen = c, db, cen
+        hz, cc = (math.nan, math.nan) if c is None else (detune(cen, c), c)
         rows.append(((start + offset) / sr, (start + offset + n) / sr, hz, cc, db))
     return rows
 
@@ -603,9 +638,36 @@ def detect_attacks_cut(mono, sr, cuts):
     a traves): frames del archivo, ordenados."""
     return [a + t for a, b in segments_of(len(mono), cuts) for t in detect_attacks(mono[a:b], sr)]
 
-def short_track_cut(mono, sr, cuts, center, *args):
+def short_track_cut(mono, sr, cuts, center, *args, centers=None):
     """`short_track` por segmento: ninguna ventana mezcla frames de dos lados de un corte."""
-    return [r for a, b in segments_of(len(mono), cuts) for r in short_track(mono[a:b], sr, center, *args, offset=a)]
+    return [r for a, b in segments_of(len(mono), cuts)
+            for r in short_track(mono[a:b], sr, center, *args, offset=a, centers=centers)]
+
+def parse_centers(path):
+    """`{archivo: [(frame, hz), ...]}` de los `# objetivo NOMBRE FRAME HZ` del manifiesto de tomas.
+    Sale (SystemExit) si un objetivo precede a la linea de su toma o sus FRAME no crecen estrictamente."""
+    tomas, out = set(), {}
+    with open(path) as f:
+        for ln, line in enumerate(f, 1):
+            t = line.split()
+            if not t: continue
+            if t[0] != '#': tomas.add(t[0]); continue
+            if len(t) < 2 or t[1] != 'objetivo': continue
+            if len(t) != 5: raise SystemExit(f"{path}:{ln}: '# objetivo NOMBRE FRAME HZ' mal formado")
+            name = t[2]
+            try: frame, hz = int(t[3]), float(t[4])
+            except ValueError: raise SystemExit(f"{path}:{ln}: FRAME o HZ no numerico")
+            if name not in tomas: raise SystemExit(f"{path}:{ln}: '# objetivo {name}' antes de la linea de su toma")
+            if not hz > 0.0: raise SystemExit(f"{path}:{ln}: HZ debe ser > 0")
+            lst = out.setdefault(name, [])
+            if lst and frame <= lst[-1][0]:
+                raise SystemExit(f"{path}:{ln}: FRAME {frame} de {name} no crece (anterior {lst[-1][0]})")
+            lst.append((frame, hz))
+    return out
+
+def centers_for(table, name, path):
+    if not table.get(name): raise SystemExit(f"{name}: sin '# objetivo' en {path}")
+    return table[name]
 
 def split_attacks(attacks, n, cuts):
     """(conservados, excluidos). El ataque t0 dura hasta tEnd = el t0 del siguiente (o `n`); su guarda
@@ -933,6 +995,58 @@ def self_test_short():
         failures.append(f"hop 0,1 s: inicios {ts}")
     return failures
 
+def self_test_centers():
+    """`--centros`: un centro por tramo, de dos cuerdas con un objetivo en el silencio. Devuelve los fallos."""
+    import tempfile
+    failures = []
+    sr, E, A = 44100, 82.407, 110.0
+    sig = [0.0] * int(3.0 * sr)
+    sig = mix_at(sig, synth(sr, 1.2, lambda t: E), int(0.1 * sr))      # E2: [0,1 ; 1,3) s
+    sig = mix_at(sig, synth(sr, 1.2, lambda t: A), int(1.8 * sr))      # A2: [1,8 ; 3,0) s
+    f1, f2 = int(0.25 * sr), int(1.33 * sr)                            # el 2do objetivo cae en el silencio
+    with tempfile.TemporaryDirectory() as d:
+        mf = os.path.join(d, "m.txt")
+        with open(mf, "w") as f:
+            f.write(f"x.wav {'0' * 64} 1 {sr} {len(sig)} guitarra prueba\n# objetivo x.wav {f1} {E}\n"
+                    f"# objetivo x.wav {f2} {A}\n# otro comentario\ny.wav {'0' * 64} 1 {sr} 10 guitarra sin objetivo\n")
+        table = parse_centers(mf)
+        if table != {"x.wav": [(f1, E), (f2, A)]}: failures.append(f"parser: {table}")
+        rows = short_track(sig, sr, None, centers=table["x.wav"])
+        for t0, t1, h, c, db in rows:
+            inside = lambda a, b: t0 >= a and t1 <= b
+            if t0 * sr < f1 - 0.5:
+                if not (h != h and c != c): failures.append(f"t={t0:.2f}: antes del primer objetivo no es nan ({h})")
+                if t0 >= 0.1 and not db > -40: failures.append(f"t={t0:.2f}: el nivel del tramo sin centro no se mide ({db})")
+            elif inside(0.25, 1.3) or inside(1.8, 3.0):
+                want = E if t0 < 1.5 else A
+                if not abs(cents(h, want)) <= 0.5: failures.append(f"t={t0:.2f}: {h} contra {want} (tope 0,5 c)")
+                if not abs(c) <= 0.5: failures.append(f"t={t0:.2f}: cents vs su centro {c}")
+        # el tramo que EMPIEZA antes del 2do objetivo y TERMINA despues usa el centro E2: su inicio manda.
+        straddle = [r for r in rows if r[0] * sr < f2 <= r[1] * sr and r[0] < 1.3 and r[0] >= 1.2]
+        if not straddle: failures.append("sin tramo a caballo del 2do objetivo")
+        for t0, t1, h, c, db in straddle:
+            if not abs(c) <= 30.0 or not abs(cents(h, E)) <= 30.0: failures.append(f"a caballo t={t0:.3f}: {h} ({c}) no es E2")
+        # los tramos tras el cambio de centro usan la ventana del centro nuevo (A2: 0,1 s; E2: 10/82,4 = 0,121 s).
+        w = {round(r[1] - r[0], 3) for r in rows if r[0] > 1.5 and r[2] == r[2]}
+        if w != {0.1}: failures.append(f"ventana tras el cambio a A2: {w}")
+        if not any(abs((r[1] - r[0]) - 10.0 / E) < 1e-3 for r in rows if 0.25 <= r[0] < 1.2):
+            failures.append("la ventana de E2 no es de 10 periodos")
+        if any(r[1] * sr > len(sig) + 0.5 for r in rows): failures.append("un tramo pasa el fin del segmento")
+        # por segmento: la grilla arranca en el inicio de cada uno y el offset se respeta.
+        cut = short_track_cut(sig, sr, [(f2, f2, 0)], None, centers=table["x.wav"])
+        if not cut or any(not (r[0] * sr + 0.5 >= 0) for r in cut): failures.append("short_track_cut con centros")
+        for name in ("y.wav", "z.wav"):
+            try: centers_for(table, name, mf); failures.append(f"{name} sin objetivo no salio")
+            except SystemExit: pass
+        bad = ((f"# objetivo x.wav 5 1.0\nx.wav {'0' * 64} 1 1 1 g\n", "objetivo antes de su toma"),
+               (f"x.wav {'0' * 64} 1 1 1 g\n# objetivo x.wav 5 1.0\n# objetivo x.wav 5 2.0\n", "FRAME repetido"),
+               (f"x.wav {'0' * 64} 1 1 1 g\n# objetivo x.wav 9 1.0\n# objetivo x.wav 5 2.0\n", "FRAME decreciente"))
+        for text, what in bad:
+            with open(mf, "w") as f: f.write(text)
+            try: parse_centers(mf); failures.append(f"parser acepto {what}")
+            except SystemExit: pass
+    return failures
+
 def noise(n, dbfs, seed=55):
     """Ruido blanco uniforme determinista con rms `dbfs` (LCG: sin depender del `random` de la version)."""
     amp = 10.0 ** (dbfs / 20.0) * math.sqrt(3.0)
@@ -997,7 +1111,7 @@ def self_test_attacks():
 
 def self_test():
     """El instrumento contra series CONOCIDAS, en las dos direcciones. Sale con 1 si falla."""
-    failures = self_test_partials() + self_test_formats() + self_test_short() + self_test_attacks() + self_test_cuts()
+    failures = self_test_partials() + self_test_formats() + self_test_short() + self_test_attacks() + self_test_cuts() + self_test_centers()
     for f in failures: print("SELF-TEST FALLO:", f)
     print("self-test:", "ROJO" if failures else "verde", f"({len(failures)} fallos)")
     return 1 if failures else 0
@@ -1019,12 +1133,19 @@ def run_short(a, files):
               f"diferencia, fondo previo = percentil {ONSET_BACKGROUND_PCT} de los bloques, piso "
               f"{ONSET_FLOOR_DBFS} dBFS, refractario {ONSET_REFRACTORY_S} s, tolerancia "
               f"{ONSET_TOLERANCE_FRAMES} frames. Linea: '# ataque ARCHIVO frame N'", file=out)
+        if a.centros:
+            print("# centros: el centro de cada tramo es el HZ del ultimo '# objetivo' con FRAME <= su inicio "
+                  f"({a.centros})", file=out)
         print("# archivo\tt_ini_s\tt_fin_s\thz\tcents_vs_centro\tnivel_dbfs", file=out)
         cuts_doc = False
+        table = parse_centers(a.centros) if a.centros else None
         for path in files:
             name = os.path.basename(path)
             mono, sr, info = read_wav(path)
-            center = a.nominal or nominal_for(name)
+            if a.centros:
+                center, centers = None, centers_for(table, name, a.centros)
+            else:
+                center, centers = a.nominal or nominal_for(name), None
             print(f"# archivo {name} sha256 {info['sha256']} rate {sr} frames {info['frames']}", file=out)
             cuts = info["wmad"]["cuts"] if info["wmad"] else []
             if cuts and not cuts_doc:
@@ -1039,7 +1160,8 @@ def run_short(a, files):
             attacks, excluded = split_attacks(detect_attacks_cut(mono, sr, cuts), len(mono), cuts)
             if attacks or excluded:
                 print("\n".join(format_attacks(name, attacks, excluded)), file=out)
-            rows = short_track_cut(mono, sr, cuts, center, a.short_win, a.short_hop, a.short_floor_dbfs, a.span_cents)
+            rows = short_track_cut(mono, sr, cuts, center, a.short_win, a.short_hop, a.short_floor_dbfs, a.span_cents,
+                                 centers=centers)
             print("\n".join(format_short(name, rows)), file=out)
             out.flush()
     finally:
@@ -1063,6 +1185,9 @@ def main():
     ap.add_argument("--short-hop", type=float, default=0.05, help="salto entre tramos, en s")
     ap.add_argument("--short-floor-dbfs", type=float, default=-60.0, help="bajo este RMS el hz es nan")
     ap.add_argument("--span-cents", type=float, default=150.0, help="busqueda ±N cents del centro")
+    ap.add_argument("--centros", metavar="MANIFIESTO",
+                    help="con --short: el centro de cada tramo es el HZ del ultimo '# objetivo NOMBRE FRAME HZ' "
+                         "del manifiesto con FRAME <= su inicio (excluyente con --nominal)")
     ap.add_argument("--tsv", help="con --short: escribe el TSV (con cabecera) a este archivo")
     ap.add_argument("--allow-invalid", action="store_true",
                     help="leer tambien tomas con huecos / .invalid.wav (nunca para un oraculo)")
@@ -1075,6 +1200,10 @@ def main():
             if a.dir else [a.wav]
     if not files or files == [None]:
         ap.error("falta el .wav o --dir")
+    if a.centros and not a.short:
+        ap.error("--centros exige --short")
+    if a.centros and a.nominal:
+        ap.error("--centros y --nominal son excluyentes")
     if a.short:
         sys.exit(run_short(a, files))
     for path in files:

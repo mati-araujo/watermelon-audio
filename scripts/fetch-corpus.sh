@@ -20,7 +20,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MANIFEST="$REPO_ROOT/audio/src/main/cpp/analysis/tests/corpus-manifest.txt"
+MANIFEST="${WMA_CORPUS_MANIFEST:-$REPO_ROOT/audio/src/main/cpp/analysis/tests/corpus-manifest.txt}"
 CORPUS_DIR="${WMA_CORPUS_DIR:-$REPO_ROOT/audio/src/main/cpp/analysis/tests/corpus}"
 CORPUS_URL_BASE="${WMA_CORPUS_URL_BASE:-https://github.com/mati-araujo/watermelon-audio/releases/download/corpus-v1}"
 VERIFY_ONLY=0
