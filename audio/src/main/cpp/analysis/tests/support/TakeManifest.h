@@ -15,7 +15,8 @@
  *     # objetivo NOMBRE FRAME HZ           la cuerda que el usuario eligio, aplicada en FRAME
  *     # aplauso NOMBRE FRAME               el aplauso de sincronizacion (D9): exactamente uno
  *
- * Cualquier otra linea `#` es comentario. Reglas propias (`parseTakeManifest`): ningun dato antes de
+ * Cualquier otra linea `#` es comentario, salvo una cuya primera palabra empiece (sin importar
+ * mayusculas ni un `#` pegado) con corte/objetivo/aplauso: es un dato mal escrito y se rechaza. Reglas propias (`parseTakeManifest`): ningun dato antes de
  * la linea de su toma; cortes estrictamente crecientes en INI con INI <= FIN <= FRAMES; `# objetivo`
  * no vacio, estrictamente creciente, en [0, FRAMES), con HZ de una cuerda de FAMILIA en
  * `catalogStrings()` y nunca dentro de (INI, FIN] de una costura; un solo `# aplauso`, en [0, FRAMES).
@@ -39,6 +40,7 @@
 #include "Corpus.h"
 #include "SyntheticSignal.h"
 
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -155,9 +157,19 @@ inline std::string parseTakeManifest(const std::string& text, TakeManifest* out)
         if (w.empty()) continue;
         const std::string where = "linea " + std::to_string(lineNo) + ": ";
         if (w[0][0] == '#') {
-            if (w[0] != "#" || w.size() < 2) continue;   // comentario
-            const std::string& kind = w[1];
-            if (kind != "corte" && kind != "objetivo" && kind != "aplauso") continue;
+            // Un dato mal escrito (`#objetivo`, `# Objetivo`, `# objetivos`) NO es un comentario: tomarlo
+            // como tal perderia un cambio de cuerda que ningun cruce delata (el `# corte` lo delatarian las
+            // tres vias; el `# objetivo` y el `# aplauso`, no). Un comentario no puede empezar con esas palabras.
+            const bool spaced = w[0] == "#";
+            if (spaced && w.size() < 2) continue;
+            std::string head = spaced ? w[1] : w[0].substr(1);
+            for (char& ch : head) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            const bool looksLikeData = head.rfind("corte", 0) == 0 || head.rfind("objetivo", 0) == 0 ||
+                                       head.rfind("aplauso", 0) == 0;
+            const std::string& kind = spaced ? w[1] : w[0];
+            if (!looksLikeData) continue;   // comentario
+            if (!spaced || (kind != "corte" && kind != "objetivo" && kind != "aplauso"))
+                return where + "'" + line + "' parece un dato mal escrito (va '# corte|objetivo|aplauso NOMBRE ...')";
             if (w.size() < 3) return where + "'# " + kind + "' sin nombre de toma";
             TakeEntry* e = find(w[2]);
             if (e == nullptr) return where + "'# " + kind + " " + w[2] + "' antes de la linea de su toma";
@@ -243,25 +255,40 @@ inline bool slurpTakeFile(const std::string& path, std::string* out) {
  * declarada que falta tambien; un sha256 distinto, o un manifiesto que no pasa su gramatica, es
  * `kCorrupt`. Solo `kVerified` habilita medir.
  */
-inline corpus::State takeStateOf(const std::string& dir, const std::string& manifestPath) {
+///
+/// `why` (opcional) recibe el MOTIVO de lo que no es `kVerified`: quien salte la medicion tiene que
+/// poder decir por que (un HZ mal tipeado en el manifiesto no puede pasar por "no hay toma").
+inline corpus::State takeStateOf(const std::string& dir, const std::string& manifestPath, std::string* why = nullptr) {
+    auto because = [why](corpus::State st, const std::string& r) {
+        if (why != nullptr) *why = r;
+        return st;
+    };
     std::string text;
-    if (!slurpTakeFile(manifestPath, &text)) return corpus::State::kAbsent;
+    if (!slurpTakeFile(manifestPath, &text)) return because(corpus::State::kAbsent, "no existe " + manifestPath);
     TakeManifest m;
-    if (!parseTakeManifest(text, &m).empty()) return corpus::State::kCorrupt;
-    if (m.takes.empty()) return corpus::State::kAbsent;
+    const std::string bad = parseTakeManifest(text, &m);
+    if (!bad.empty()) return because(corpus::State::kCorrupt, "manifiesto invalido: " + bad);
+    if (m.takes.empty()) return because(corpus::State::kAbsent, "el manifiesto no declara tomas");
     bool corrupt = false;
+    std::string corruptWhy;
     for (const TakeEntry& e : m.takes) {
         const std::string path = dir + "/" + e.name;
-        if (!corpus::fileExists(path)) return corpus::State::kAbsent;
-        if (corpus::sha256Of(path) != e.sha256) corrupt = true;
+        if (!corpus::fileExists(path)) return because(corpus::State::kAbsent, "falta " + path);
+        if (corpus::sha256Of(path) != e.sha256) {
+            corrupt = true;
+            corruptWhy = e.name + ": sha256 no coincide";
+        }
     }
+    if (why != nullptr) *why = corruptWhy;
     return corrupt ? corpus::State::kCorrupt : corpus::State::kVerified;
 }
 
 /// Lo que dice el `wmad` v2 de un archivo, leido por offsets literales.
 struct WmadV2 {
     int fmtRate = 0;
+    int fmtTag = 0;
     int fmtChannels = 0;
+    int fmtBits = 0;
     uint64_t dataBytes = 0;
     uint64_t framesWritten = 0;
     uint64_t framesLost = 0;
@@ -284,7 +311,7 @@ inline uint64_t takeLE(const uint8_t* p, int bytes) {
 
 /**
  * El `wmad` v2 del archivo `bytes` (que se llama `name`), con los rechazos del oraculo: nombre
- * `.invalid.wav`; RIFF sin fmt/data/wmad; version != 2; chunk != 64 + 24·cutCapacity; cutCount >
+ * `.invalid.wav`; RIFF sin fmt/data/wmad; fmt que no es float32 mono; version != 2; chunk != 64 + 24·cutCapacity; cutCount >
  * cutCapacity; kind fuera de {1, 2}; cortes desordenados (fileFrame decreciente) o fuera de
  * [0, framesWritten]; perdida con fileSpan; costura con lostFrames; valid = 0; unlocated* > 0;
  * framesLost != suma de perdidas + unlocatedFrames; rate de `wmad` != el de fmt; `data` !=
@@ -315,7 +342,9 @@ inline std::string parseWmadV2Chunk(const std::vector<uint8_t>& bytes, const std
         }
         if (std::memcmp(id, "fmt ", 4) == 0 && size >= 16) {
             haveFmt = true;
+            out->fmtTag = static_cast<int>(takeLE(bytes.data() + body + 0, 2));
             out->fmtChannels = static_cast<int>(takeLE(bytes.data() + body + 2, 2));
+            out->fmtBits = static_cast<int>(takeLE(bytes.data() + body + 14, 2));
             out->fmtRate = static_cast<int>(takeLE(bytes.data() + body + 4, 4));
         } else if (std::memcmp(id, "data", 4) == 0 && !haveData) {
             haveData = true;
@@ -328,6 +357,8 @@ inline std::string parseWmadV2Chunk(const std::vector<uint8_t>& bytes, const std
     }
     if (!haveFmt) return name + ": falta el chunk fmt";
     if (!haveData) return name + ": falta el chunk data";
+    if (out->fmtTag != 3 || out->fmtChannels != 1 || out->fmtBits != 32)
+        return name + ": el volcado es float32 mono (fmt 3, 1 canal, 32 bits)";
     if (wm == nullptr) return name + ": falta el chunk wmad";
     if (wmSize < 64) return name + ": chunk wmad de " + std::to_string(wmSize) + " bytes (v2 pide al menos 64)";
     const uint32_t version = static_cast<uint32_t>(takeLE(wm + 0, 4));

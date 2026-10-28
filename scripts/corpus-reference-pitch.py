@@ -651,7 +651,11 @@ def parse_centers(path):
         for ln, line in enumerate(f, 1):
             t = line.split()
             if not t: continue
-            if t[0] != '#': tomas.add(t[0]); continue
+            if not t[0].startswith('#'): tomas.add(t[0]); continue
+            head = (t[1] if t[0] == '#' and len(t) > 1 else t[0][1:]).lower()
+            if head.startswith('objetivo') and (t[0] != '#' or t[1] != 'objetivo'):
+                # un objetivo mal escrito no es un comentario: se perderia un cambio de cuerda en silencio
+                raise SystemExit(f"{path}:{ln}: '{line.strip()}' parece un '# objetivo' mal escrito")
             if len(t) < 2 or t[1] != 'objetivo': continue
             if len(t) != 5: raise SystemExit(f"{path}:{ln}: '# objetivo NOMBRE FRAME HZ' mal formado")
             name = t[2]
@@ -1040,7 +1044,9 @@ def self_test_centers():
             except SystemExit: pass
         bad = ((f"# objetivo x.wav 5 1.0\nx.wav {'0' * 64} 1 1 1 g\n", "objetivo antes de su toma"),
                (f"x.wav {'0' * 64} 1 1 1 g\n# objetivo x.wav 5 1.0\n# objetivo x.wav 5 2.0\n", "FRAME repetido"),
-               (f"x.wav {'0' * 64} 1 1 1 g\n# objetivo x.wav 9 1.0\n# objetivo x.wav 5 2.0\n", "FRAME decreciente"))
+               (f"x.wav {'0' * 64} 1 1 1 g\n# objetivo x.wav 9 1.0\n# objetivo x.wav 5 2.0\n", "FRAME decreciente"),
+               (f"x.wav {'0' * 64} 1 1 1 g\n# objetivo x.wav 5 1.0\n#objetivo x.wav 9 2.0\n", "'#objetivo' pegado"),
+               (f"x.wav {'0' * 64} 1 1 1 g\n# objetivo x.wav 5 1.0\n# Objetivo x.wav 9 2.0\n", "'# Objetivo'"))
         for text, what in bad:
             with open(mf, "w") as f: f.write(text)
             try: parse_centers(mf); failures.append(f"parser acepto {what}")

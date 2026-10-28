@@ -151,8 +151,9 @@ TEST(TakeFeeder, TheFedStreamIsTheFileBitForBit) {
     ASSERT_EQ(base.frames, data.numFrames) << "readWav no leyo la toma";
     ASSERT_EQ(kTakeFeedRate, data.sampleRate);
 
-    // Un objetivo en el medio de la toma obliga otra particion mas (el silencio previo se prueba en otro test:
-    // aca el nivel no importa, asi que se pone el objetivo en el frame 0 y otro pegado a un corte).
+    // Los cortes parten la grilla; el silencio previo a un objetivo se prueba en otro test (aca el nivel no
+    // importa, asi que el objetivo va en el frame 0). `fedMono` se arma del mismo `src` que se
+    // escribe: un error SOLO en el argumento de `writeStereo` no lo ve este test (lo ven los de avisos y descarte).
     const std::vector<TakeCutLine> cuts = {{30000, 30000, 12}, {60000, 61000, -1}};
     const TakeFeedRun run = feedTakeWithCuts(data, cuts, base.targets);
     ASSERT_EQ("", run.error);

@@ -217,6 +217,10 @@ std::vector<TakeRejectCase> takeRejectCases() {
         takePut(b, kTakeWmad + 12, 18 + 5, 8);
     });
     add("framesLost != suma de las perdidas", [](std::vector<uint8_t>* b) { takePut(b, kTakeWmad + 12, 999, 8); });
+    // El volcado es float32 mono: un fmt de otra cosa con el mismo `data` miente sobre los frames.
+    add("fmt PCM (tag 1)", [](std::vector<uint8_t>* b) { takePut(b, 20, 1, 2); });
+    add("fmt estereo", [](std::vector<uint8_t>* b) { takePut(b, 22, 2, 2); });
+    add("fmt de 16 bits", [](std::vector<uint8_t>* b) { takePut(b, 34, 16, 2); });
     add("rate del wmad != rate de fmt", [](std::vector<uint8_t>* b) { takePut(b, kTakeFmtRate, 44100, 4); });
     // `data` mas corto que framesWritten·4 (el archivo conserva los bytes: no es un archivo cortado).
     add("data != framesWritten*4", [](std::vector<uint8_t>* b) { takePut(b, kTakeDataHeader + 4, kTakeTestFrames * 4 - 4, 4); });
@@ -589,7 +593,8 @@ TEST(TakeManifest, CommentsBlanksAndCrlfAreHarmless) {
     std::vector<std::string> l = takeGrammarLines();
     std::string text = "# un comentario\n\n   \n";
     for (const std::string& s : l) text += s + "\r\n";
-    text += "# nota: este corte no es un dato\n# corte-no-es-un-dato\n";
+    // Un comentario puede NOMBRAR un corte; no puede EMPEZAR como un dato (eso es un dato mal escrito).
+    text += "# nota: este corte no es un dato\n# el corte-no-es-un-dato\n";
     TakeManifest m;
     EXPECT_EQ("", parseTakeManifest(text, &m));
     ASSERT_EQ(1u, m.takes.size());
@@ -642,6 +647,11 @@ std::vector<TakeGrammarCase> takeGrammarCases() {
     // caso de arriba no lo distingue: sin su aplauso la toma ya falla por otra regla).
     add("copia de un dato antes de la linea de su toma", [](std::vector<std::string>* l) { l->insert(l->begin(), (*l)[kTakeLineTargetA]); });
     add("dato de una toma que no existe", [](std::vector<std::string>* l) { (*l)[kTakeLineClap] = "# aplauso otra.wav 5000"; });
+    // Un dato mal escrito no es un comentario: tomarlo como tal pierde un cambio de cuerda sin que nada lo cruce.
+    add("'#objetivo' pegado", [](std::vector<std::string>* l) { (*l)[kTakeLineTargetB].replace(0, 2, "#"); });
+    add("'# Objetivo' con mayuscula", [](std::vector<std::string>* l) { (*l)[kTakeLineTargetB].replace(2, 1, "O"); });
+    add("'# objetivos' en plural", [](std::vector<std::string>* l) { (*l)[kTakeLineTargetB].replace(2, 8, "objetivos"); });
+    add("'# Aplauso' con mayuscula", [](std::vector<std::string>* l) { (*l)[kTakeLineClap].replace(2, 1, "A"); });
     add("objetivos desordenados", [](std::vector<std::string>* l) { std::swap((*l)[kTakeLineTargetA], (*l)[kTakeLineTargetB]); });
     add("objetivo repetido (no estrictamente creciente)", [n](std::vector<std::string>* l) { (*l)[kTakeLineTargetB] = "# objetivo " + n + " 20000 110.000"; });
     add("objetivo fuera de la familia (123 Hz no es cuerda)", [n](std::vector<std::string>* l) { (*l)[kTakeLineTargetB] = "# objetivo " + n + " 150000 123.0"; });
@@ -770,6 +780,10 @@ TEST(TakeManifest, TheStateIsAbsentCorruptOrVerifiedAndNeverVerifiedByDefault) {
     broken = broken.substr(0, broken.find("# aplauso"));
     ASSERT_TRUE(takeWriteText(manifest, broken));
     EXPECT_EQ(corpus_ns::State::kCorrupt, takeStateOf(fx.dir, manifest)) << "gramatica rota";
+    // Y dice POR QUE (quien saltee la medicion tiene que poder decirlo): atrapa el motivo perdido.
+    std::string why;
+    EXPECT_EQ(corpus_ns::State::kCorrupt, takeStateOf(fx.dir, manifest, &why));
+    EXPECT_NE(std::string::npos, why.find("aplauso")) << why;
 }
 
 // D35. atrapa: con dos tomas, una buena y una con el sha distinto, el conjunto queda verificado (la corrupta
