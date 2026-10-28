@@ -42,6 +42,9 @@ add_executable(dsp_tests
     test_dc_blocker.cpp
     test_dsp_math.cpp
     test_noise_gate.cpp
+    test_master_stage.cpp
+    # REQ-055 S12: cuenta las allocations del hilo ("0 alloc en processMaster")
+    ../../core/tests/support/rtalloc_counter.cpp
 )
 
 target_link_libraries(dsp_tests PRIVATE watermelon-dsp GTest::gtest_main)
