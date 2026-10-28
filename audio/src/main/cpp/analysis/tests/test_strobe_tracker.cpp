@@ -12,6 +12,11 @@
  * cuarta parte. Sobre cuerdas reales (la mas aguda es A4 = 440) con desajustes de
  * un par de cents eso sobra; sobre C7 no habria margen. El AC-001.3 esta escrito
  * sobre cuerdas, y por eso.
+ *
+ * REQ-057 S1: el rango de captura de ARRIBA es el de hop 4096 (el de hoy en el estimador suelto).
+ * El del TRACKER pasa a salir del hop de la serie densa (1024) con margen κ = 0,9; los tests de
+ * `StrobeRange.*` lo leen de `captureRangeCents()` de mas abajo, que ahora delega en la constante
+ * de produccion. Las cifras de arriba (5,86 Hz a 48 kHz) describen al estimador suelto.
  */
 
 #include "support/SyntheticSignal.h"
@@ -562,12 +567,16 @@ TEST(GoldenStrobe, TheConvergenceCurveMatchesItsGolden) {
 // cambio de rate, que es exactamente lo que este repo ya se comio.
 // ===========================================================================
 
-/// El rango en cents que el parcial `n` puede medir sobre un objetivo `f0`.
+/// El rango en cents que el parcial `n` puede medir sobre un objetivo `f0`, EN PRODUCCION.
+///
+/// REQ-057 S1 (D22/D28): el rango sale del HOP de la serie densa (1024), no de la ventana (4096), y
+/// lleva el margen κ = 0,9: `1200·log2(1 + κ·fs/(2·hop·n·f0))`. Se lee de la constante publica
+/// (`InterleavedPhaseEstimator::denseRangeCents`) y no se copia: esta funcion cambio de PARAMETRO,
+/// no de aserciones, y los tests de abajo siguen midiendo «dentro de su rango» de produccion. Las
+/// cifras que aparecen en los comentarios (30,5 c ...) son las del rango VIEJO (hop 4096) salvo
+/// que digan lo contrario; el nuevo de E4 a 48 kHz es 107,4 c (la formula lo da, no una tabla).
 double captureRangeCents(double f0, int partial, int rate = kRate) {
-    const double dfMax = static_cast<double>(rate)
-                       / (2.0 * static_cast<double>(
-                              wma::analysis::PhaseSlopeEstimator::kWindowFrames));
-    return 1200.0 * std::log2(1.0 + dfMax / (f0 * partial));
+    return wma::analysis::InterleavedPhaseEstimator::denseRangeCents(rate, f0 * partial);
 }
 
 /// Hasta donde engancha el modo rapido, o sea el regimen que el usuario recorre.
@@ -698,21 +707,39 @@ TEST(StrobeRange, TheUsableRangeReachesTheFundamentalLimit) {
  * existe.
  */
 TEST(StrobeRange, UncertaintyCannotTellInsideFromOutsideTheCaptureRange) {
-    // E4: limite del fundamental 30,5 c. Bien afuera, con la lectura rota.
-    const double f0 = 329.628;
-    // SIN control: es el escenario en el que la guarda no puede intervenir, que
-    // es donde se ve si σ sola distingue algo. Con control la lectura ni se
-    // publicaria, y el test no mediria lo que dice medir.
-    const StrobeTracker outside = measure(f0, -2.0 * captureRangeCents(f0, 1),
-                                          kThreeSeconds);
-    ASSERT_TRUE(outside.hasMeasurement());
+    // REQ-057 S1: la premisa («fuera de rango aliasa con σ chica») sigue siendo cierta en la
+    // PRIMITIVA —un `PhaseSlopeEstimator` solo, una rejilla, rango de hop 4096— y es la razon por
+    // la que la vuelta la fija la serie densa. En el tracker ya no hay un «afuera» aliasado: ver
+    // abajo. Las aserciones originales se conservan, sobre la primitiva.
+    const double f0 = 329.628;   // E4
+    wma::analysis::PhaseSlopeEstimator est;
+    est.prepare(kRate);
+    est.setTarget(f0);
+    // SIN control: la primitiva no tiene ninguno, que es donde se ve si σ sola distingue algo.
+    const double outsideCents = -2.0 * est.captureRangeCents();
+    const std::vector<float> sig = string4(f0, outsideCents, kThreeSeconds);
+    for (int i = 0; i < kThreeSeconds; i += 512) est.process(sig.data() + i, std::min(512, kThreeSeconds - i));
+    ASSERT_TRUE(est.hasMeasurement());
 
-    const double err = std::fabs(outside.cents() - (-2.0 * captureRangeCents(f0, 1)));
+    const double err = std::fabs(est.cents() - outsideCents);
     ASSERT_GT(err, 10.0) << "el caso elegido ya no esta roto: revisar el test, no el motor";
 
-    EXPECT_LE(outside.uncertaintyCents(), StrobeTracker::kConvergedUncertaintyCents)
-        << "σ = " << outside.uncertaintyCents()
+    EXPECT_LE(est.uncertaintyCents(), StrobeTracker::kConvergedUncertaintyCents)
+        << "σ = " << est.uncertaintyCents()
         << " — si esto falla, σ EMPEZO a avisar y la guarda puede simplificarse";
+
+    // Y lo que el tracker hace desde REQ-057: a ≥ 1,1x del rango denso (E4 a 48 kHz, 107,4 c) los
+    // cuatro parciales caen por ENERGIA —el pico sale del lobulo principal de Hann, cuyo borde es el
+    // del hop 1024— y no hay lectura. Medido en E4 a 48 kHz, sin control, 3 s, k = 1,1 … 3,0 del rango
+    // denso, ambos signos: 0 lecturas (sonda de admision: kNoEnergy en los cuatro).
+    for (const double k : {1.1, 1.5, 2.0}) {
+        for (const double sign : {-1.0, +1.0}) {
+            const StrobeTracker t = measure(f0, sign * k * captureRangeCents(f0, 1), kThreeSeconds);
+            EXPECT_FALSE(t.hasMeasurement())
+                << "a " << k << "x el rango denso hay lectura (" << t.cents() << " c): el aliasing "
+                   "silencioso volvio al tracker";
+        }
+    }
 }
 
 
@@ -748,8 +775,8 @@ TEST(StrobeRange, WithoutAnExternalControlTheReadingIsNotDomainVerified) {
  * fundamental en E4 estan fuera p2, p3 y p4, y **p1 tiene que seguir midiendo**.
  */
 TEST(StrobeRange, PartialsAreDroppedOneByOneInsteadOfShuttingTheReadingDown) {
-    const double f0 = 329.628;                       // E4: limite del fundamental 30,5 c
-    const double d = -0.70 * captureRangeCents(f0, 1);
+    const double f0 = 329.628;                       // E4: limite del fundamental 107,4 c (30,5 c con hop 4096)
+    const double d = -0.70 * captureRangeCents(f0, 1);   // -75,2 c: el parcial 2 (54,5 c) ya queda afuera
 
     const StrobeTracker t = measureWithCoarse(f0, d, kThreeSeconds);
 

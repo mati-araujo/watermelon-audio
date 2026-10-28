@@ -82,9 +82,11 @@ data class TunerSnapshot(
      * Con esto puede dibujar el tramo en el que el número de al lado es
      * confiable — y advertir en el resto en vez de quedarse muda.
      *
-     * **En cents y no en Hz** porque la ventana del estimador es fija en Hz, así
-     * que su alcance en cents cambia con el registro: ~±119 en un E2 grave
-     * contra ~±23 en A4. Y **depende del sample rate**, así que se lee por
+     * **En cents y no en Hz** porque el paso de las rejillas del estimador (1024
+     * frames) es fijo en Hz, así que su alcance en cents cambia con el registro:
+     * ~±395 en un E2 grave contra ~±81 en A4 a 48 kHz (REQ-057: `1200·log2(1 +
+     * 0,9·fs/(2·1024·f0))`; antes, con la ventana de 4096, ~±119 contra ~±23).
+     * Y **depende del sample rate**, así que se lee por
      * snapshot y no se hornea en una constante: un device que negocia 44,1 kHz
      * da un rango más angosto que uno a 48.
      */

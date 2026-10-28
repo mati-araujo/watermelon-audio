@@ -43,6 +43,12 @@
  * y no sobre el rango A0-C7 entero, y por eso corre DESPUES de la deteccion
  * gruesa de S4, que ya dejo el objetivo cerca.
  *
+ * REQ-057 S1: eso describe el estimador SUELTO (ventana de 4096). Cada parcial tiene
+ * ahora cuatro rejillas intercaladas (`InterleavedPhaseEstimator`) y su rango sale del
+ * hop de 1024 con margen κ = 0,9: `1200·log2(1 + 0,9·fs/(2·1024·n·f0))`, o sea 4 veces
+ * el de arriba. Se admite al parcial `n` solo si ese rango cubre la desviacion gruesa;
+ * la lectura publicada sigue saliendo de la rejilla 0 (el estimador de hoy).
+ *
  * RT: `prepare()` es del thread de control y es lo unico que asigna. `process()`
  * no asigna ni toma locks — corre en el thread de analisis.
  */
@@ -55,6 +61,22 @@
 #include <limits>
 
 namespace wma::analysis {
+
+/**
+ * REQ-057 S1 — por que `StrobeTracker::process()` admitio o no a un parcial en su ultima llamada.
+ * Es una SONDA: la lectura sola no distingue «fuera de rango» de «descartado por la mediana».
+ */
+enum class PartialAdmission {
+    kAdmitted,
+    kNoMeasurement,
+    kNoTrendVerdict,
+    kBadUncertainty,
+    kNoEnergy,
+    kOutOfRange,
+    kSignContradiction,
+    kMedianOutlier,
+    kContradictedAlone,
+};
 
 class StrobeTracker {
 public:
@@ -356,7 +378,7 @@ public:
     /// El angulo del disco, envuelto a (-π, π]. Es la fase de la desafinacion
     /// ACUMULADA del fundamental: gira a velocidad proporcional a la desviacion
     /// en cents, y al perder la señal se CONGELA en vez de saltar a cero.
-    double phaseAngle() const noexcept { return mPartials[0].phaseAngle(); }
+    double phaseAngle() const noexcept { return mPartials[0].grid(0).phaseAngle(); }
 
     /**
      * REQ-003 (AC-003.7) — EL CONTROL, que tiene que ser INDEPENDIENTE DE LA FASE.
@@ -491,8 +513,12 @@ public:
      * El dominio de la lectura COMBINADA, en cents: el del parcial de orden mas
      * bajo, que es el mas ancho. Es lo que un consumidor necesita para dibujar
      * hasta donde vale la aguja (lo publica S2, AC-003.4).
+     *
+     * REQ-057 (D22/D28): sale del hop de la serie densa (1024) con margen κ = 0,9,
+     * `1200·log2(1 + κ·fs/(2·1024·f0))`, y no de la ventana de 4096. Si la rejilla 0
+     * arrastra un incremento sin cadena completa, vuelve al de hop 4096.
      */
-    double usableRangeCents() const noexcept { return mPartials[0].captureRangeCents(); }
+    double usableRangeCents() const noexcept { return mPartials[0].denseCaptureRangeCents(); }
 
     bool hasSignal() const noexcept { return mHasSignal; }
     bool hasMeasurement() const noexcept { return mHasMeasurement; }
@@ -501,13 +527,13 @@ public:
     }
 
     // --- 6.12: las cuatro fases, para que S7 no re-analice ------------------
-    double partialCents(int i) const noexcept { return mPartials[i].cents(); }
+    double partialCents(int i) const noexcept { return mPartials[i].grid(0).cents(); }
     double partialUncertaintyCents(int i) const noexcept {
-        return mPartials[i].uncertaintyCents();
+        return mPartials[i].grid(0).uncertaintyCents();
     }
-    double partialPhase(int i) const noexcept { return mPartials[i].phaseAngle(); }
+    double partialPhase(int i) const noexcept { return mPartials[i].grid(0).phaseAngle(); }
     bool partialHasMeasurement(int i) const noexcept {
-        return mPartials[i].hasMeasurement();
+        return mPartials[i].grid(0).hasMeasurement();
     }
     double partialTargetHz(int i) const noexcept {
         return mTargetHz > 0.0 ? mTargetHz * (i + 1) : 0.0;
@@ -516,10 +542,18 @@ public:
     /// REQ-036 S1 — sonda de solo lectura: el estimador del parcial `i`, para que un test lea
     /// su ventana de regresion (`regressionPhaseAt`) y su energia de bin. Ver la nota en
     /// `PhaseSlopeEstimator::regressionPhaseCount()`. Produccion no la llama.
-    const PhaseSlopeEstimator& partialEstimator(int i) const noexcept { return mPartials[i]; }
+    const PhaseSlopeEstimator& partialEstimator(int i) const noexcept { return mPartials[i].grid(0); }
+
+    /// REQ-057 S1 — sonda: las cuatro rejillas del parcial `i`. Produccion no la llama.
+    const InterleavedPhaseEstimator& partialGrids(int i) const noexcept { return mPartials[i]; }
+
+    /// REQ-057 S1 — sonda: por que se admitio o no al parcial `i` en el ultimo `process()`.
+    PartialAdmission partialAdmission(int i) const noexcept { return mAdmission[i]; }
 
 private:
-    PhaseSlopeEstimator mPartials[kPartials];
+    InterleavedPhaseEstimator mPartials[kPartials];
+    PartialAdmission mAdmission[kPartials]{PartialAdmission::kNoMeasurement, PartialAdmission::kNoMeasurement,
+                                           PartialAdmission::kNoMeasurement, PartialAdmission::kNoMeasurement};
     double mTargetHz{0.0};
     double mCents{0.0};
     double mUncertaintyCents{0.0};
