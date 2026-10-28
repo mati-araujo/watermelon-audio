@@ -51,7 +51,7 @@ entrada da la misma salida con cualquier tamano de bloque.
 | funcion | rangos (fuera de rango o no finito => `PARAMETER_OUT_OF_RANGE`, nada se aplica) |
 |---|---|
 | `wma_mix_set_track(track, gain, pan, send)` | pista < pistas activas; ganancia 0..2; paneo -1..1; envio 0..1 |
-| `wma_mix_set_space(WmaMixSpace*)` | retornos 0..1; tamano 0,1..2; decay 0,1..10 s; damping 0..1; predelay 0..100 ms; cortes 20..500 / 1000..20000 Hz; delay 1..2000 ms **y que quepa en la linea del delay al sample rate vigente** (192000 muestras: 2000 ms hasta 96 kHz, ~1000 ms a 192 kHz); feedback 0..0,95 |
+| `wma_mix_set_space(WmaMixSpace*)` | retornos 0..1; tamano 0,1..2; decay 0,1..10 s; damping 0..0,95; predelay 0..100 ms; cortes 20..500 / 1000..20000 Hz; delay 1..2000 ms **y que quepa en la linea del delay al sample rate vigente** (192000 muestras: 2000 ms hasta 96 kHz, ~1000 ms a 192 kHz); feedback 0..0,9 |
 | `wma_mix_set_master(WmaMixMaster*)` | ganancia -60..+40 dB; techo -20..0 dBTP; release 1..2000 ms |
 | `wma_mix_set_output_profile(p)` | PROTECTED / MASTER / RAW; RAW fuera de un render offline => `INVALID_OPERATION` |
 | `wma_offline_render_taps(mix, fx, tracks, track_count, frames)` | frames 1..max_block; track_count 0..pistas activas; sin start => `INVALID_OPERATION` |
@@ -89,15 +89,24 @@ entrada da la misma salida con cualquier tamano de bloque.
   no confundir el hueco entre dos ecos con el final). El silencio se mide **antes de los retornos** (la
   salida 100 % wet de la reverb y del delay, `spaceBusPreReturnPeak`): con un retorno en 0 la salida es
   muda pero las lineas pueden seguir llenas, y apagar ahi dejaba la realimentacion congelada (a 0,95 el
-  eco volvia al reactivar). **No hay tope por tiempo**: cortar una cola audible obligaria a vaciar las
-  lineas (`resetSpaceBus`, ~1,5 MB de memset) en el callback al reactivar, y Ambient (delay 1,5 tiempos,
-  realimentacion 0,5) a <= 60 bpm ya pasaba los 30 s del tope viejo. La realimentacion maxima (0,95) agota
-  el bus sola (~67 s por cada 250 ms de delay; el peor caso, 2 s, ~9 min). Como el unico corte es el de
-  silencio (< -120 dBFS, con retornos <= 1), no hay corte audible y no hace falta fundido. Si la cancion
+  eco volvia al reactivar). **No hay tope por tiempo
+  para una cola audible sana**: cortarla obligaria a vaciar las lineas (`resetSpaceBus`, ~1,5 MB de memset) en el
+  callback al reactivar, y Ambient (delay 1,5 tiempos, realimentacion 0,5) a <= 60 bpm ya pasaba los 30 s del tope
+  viejo. Lo que garantiza que la cola se agota son **los rangos de la C API**: realimentacion <= **0,9** y damping
+  de la reverb <= **0,95**. El interpolador cubico del delay (`cubicInterpolate`, Bourke, `a2 = y2 - y0` sin 0,5)
+  tiene ganancia maxima **1,0887** (fraccion 0,5, ~9,4 kHz a 48 kHz): con 0,95 y un tiempo fraccional (250,0104 ms)
+  cada vuelta ganaba y la cola divergia (3,8e-4 a 40 s, 22398 a 180 s); con 0,9 · 1,0887 = 0,98 la linea es estable
+  con cualquier fraccion (un tono normal pierde ~35 s por cada 250 ms de delay a 0,9; el peor caso, un tono de ~9,4 kHz con fraccion 0,5, pierde solo el 2 % por vuelta: ~190 s por cada 250 ms, y con delays largos pasa los 10 min del tope, que lo corta con fundido). Con
+  damping 1 los combs de la reverb quedan en DC y el bus nunca baja de 1e-6. **Guarda de seguridad** (defensa en
+  profundidad, no la via normal): si el bus produce una muestra no finita o un pico > 16 (los clamps de los efectos
+  son +-4), ese bloque del retorno sale en cero, el bus se da por viejo y se cuenta
+  (`AudioLooper::getSongBusGuardTrips`); y un **tope de 10 min de cola** corta con un fundido lineal de un bloque y
+  tambien lo da por viejo. La proxima activacion reinicia un bus viejo: ese memset en el RT queda solo para estas
+  fallas. Si la cancion
   se reactiva durante la cola, la cola sigue (no se reinicia). **Costo de mantenerlo vivo** (medido en
-  Release, ver abajo): ~24 us por callback de 256 frames, 0,44 % del periodo. El unico `resetSpaceBus`
-  que queda en el RT es el de la falta contada de un bloque mayor que la capacidad del bus (el bus se da
-  por viejo y la proxima activacion lo reinicia); con la capacidad de `publishSongBus` no ocurre por
+  Release, ver abajo): ~24 us por callback de 256 frames, 0,44 % del periodo. Los unicos `resetSpaceBus`
+  que quedan en el RT son los de las fallas contadas: un bloque mayor que la capacidad del bus y la guarda de
+  seguridad (el bus se da por viejo y la proxima activacion lo reinicia); con la capacidad de `publishSongBus` no ocurre por
   configuracion, y esa falta ya salta el bloque (sin fundido: no hay estado del bus con que hacerlo). El
   tap de FX recibe el retorno de la cola, asi que `premezcla == Σ pistas + FX` tambien ahi. Offline:
   `resetSongForRender` reinicia todo (instancia fresca) y el determinismo no cambia.
@@ -241,6 +250,9 @@ sanitizers (con ellos el callback es mas lento por construccion).
 
 ## Limites conocidos
 
+- **Deuda preexistente (issue aparte, no se toca aca):** `cubicInterpolate` (`dsp/DSPMath.h`) tiene ganancia maxima 1,0887 y
+  `DelayEffect` lo usa con tiempo fraccional: con realimentacion > 0,9186 diverge. Afecta tambien al `DelayEffect` de la cadena
+  de escena del movil (PROTECTED tiene que seguir igual bit a bit a 2.23.0, por eso el bus se protege con el rango de la C API).
 - El bus se crea para `max(4096, lo que prepareMixBuffer ya dimensiono)` y crece con `prepareMixBuffer`; un callback vivo mas grande que eso
   salta el bus ese bloque (cuenta, no aloca).
 - La carrera "cambio de rate vs. creacion del bus" tiene un test de estres (`ARateChangeRacingTheBusCreation...`)

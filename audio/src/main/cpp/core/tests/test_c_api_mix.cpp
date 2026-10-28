@@ -88,13 +88,13 @@ TEST_F(MixApi, SetSpaceValidatesAllTenFieldsAndRejectsNull) {
         {&WmaMixSpace::reverb_return, 0.0f, 1.0f},
         {&WmaMixSpace::reverb_size, 0.1f, 2.0f},
         {&WmaMixSpace::reverb_decay_s, 0.1f, 10.0f},
-        {&WmaMixSpace::reverb_damping, 0.0f, 1.0f},
+        {&WmaMixSpace::reverb_damping, 0.0f, 0.95f},
         {&WmaMixSpace::reverb_predelay_ms, 0.0f, 100.0f},
         {&WmaMixSpace::reverb_low_cut_hz, 20.0f, 500.0f},
         {&WmaMixSpace::reverb_high_cut_hz, 1000.0f, 20000.0f},
         {&WmaMixSpace::delay_return, 0.0f, 1.0f},
         {&WmaMixSpace::delay_time_ms, 1.0f, 2000.0f},
-        {&WmaMixSpace::delay_feedback, 0.0f, 0.95f},
+        {&WmaMixSpace::delay_feedback, 0.0f, 0.9f},
     };
     for (const Field& f : fields) {
         for (float v : {f.low, f.high}) {

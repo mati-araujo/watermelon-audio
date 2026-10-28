@@ -2742,13 +2742,13 @@ typedef struct {
     float reverb_return;        /* 0..1   */
     float reverb_size;          /* 0.1..2 */
     float reverb_decay_s;       /* 0.1..10 s */
-    float reverb_damping;       /* 0..1   */
+    float reverb_damping;       /* 0..0.95 (1 leaves the reverb combs at DC: the bus would never go quiet) */
     float reverb_predelay_ms;   /* 0..100 ms */
     float reverb_low_cut_hz;    /* 20..500 Hz */
     float reverb_high_cut_hz;   /* 1000..20000 Hz */
     float delay_return;         /* 0..1   */
     float delay_time_ms;        /* 1..2000 ms, and at most the delay line at the current sample rate (~1000 ms at 192 kHz): else PARAMETER_OUT_OF_RANGE. Never tempo-synced: the caller computes it */
-    float delay_feedback;       /* 0..0.95 */
+    float delay_feedback;       /* 0..0.9 (the delay interpolator peaks at 1.0887: above ~0.9186 a fractional time diverges) */
 } WmaMixSpace;
 
 /** The master: gain, then a brickwall true-peak limiter. */

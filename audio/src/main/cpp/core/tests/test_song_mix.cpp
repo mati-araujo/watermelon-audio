@@ -167,16 +167,17 @@ protected:
         }
     }
 
-    /// Una cancion de una pista con envio 1 y un delay de 250 ms con la realimentacion al maximo
-    /// (0,95); la agenda ya se saco. Es la sonda del review: cola de ~67 s.
-    WmaEngine* echoingEngineWithoutSchedule(const std::string& name, float delayReturn) {
-        const std::string pa = tone(name, 100.0f, 0.0f);
+    /// Una cancion de una pista con envio 1 y un delay con la realimentacion al maximo de la C API
+    /// (0,9); la agenda ya se saco. Con 250 ms la cola dura ~35 s.
+    WmaEngine* echoingEngineWithoutSchedule(const std::string& name, float delayReturn,
+                                            float delayMs = 250.0f, float period = 100.0f) {
+        const std::string pa = tone(name, period, 0.0f);
         WmaEngine* e = offlineEngine();
         const int32_t a = loadClip(e, pa);
         EXPECT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 1.0f), WMA_OK);
         mEchoSpace = space(0.0f, delayReturn);
-        mEchoSpace.delay_time_ms = 250.0f;
-        mEchoSpace.delay_feedback = 0.95f;
+        mEchoSpace.delay_time_ms = delayMs;
+        mEchoSpace.delay_feedback = 0.9f;
         EXPECT_EQ(wma_mix_set_space(e, &mEchoSpace), WMA_OK);
         const int64_t p0 = wma_transport_get_play_frame(e);
         const WmaSongSection s = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
@@ -511,7 +512,7 @@ TEST_F(SongMix, AfterTheTailIsGoneReactivatingWithSendZeroGivesNoFx) {
 }
 
 // Defecto (hallazgo 1 del re-review): el silencio se media DESPUES de los retornos. Con el retorno
-// del delay en 0 el bus se apagaba a los 2,5 s sin marcarse viejo, con la realimentacion (0,95) de
+// del delay en 0 el bus se apagaba a los 2,5 s sin marcarse viejo, con la realimentacion (0,9) de
 // la linea congelada; al subir el retorno y reprogramar con envio 0 volvia el eco (pico 0,328 en la
 // sonda). Midiendo la salida 100 % wet, el bus sigue hasta que las lineas decaen de verdad.
 TEST_F(SongMix, AReturnAtZeroDoesNotSwitchOffABusWhoseLinesAreStillFull) {
@@ -520,7 +521,7 @@ TEST_F(SongMix, AReturnAtZeroDoesNotSwitchOffABusWhoseLinesAreStillFull) {
     WmaMixSpace muted = mEchoSpace;
     muted.delay_return = 0.0f;
     ASSERT_EQ(wma_mix_set_space(e, &muted), WMA_OK);
-    skip(e, static_cast<int64_t>(kRate) * 90);   // 0,95^n < 1e-6 tarda ~67 s
+    skip(e, static_cast<int64_t>(kRate) * 60);   // 0,9^n < 1e-6 tarda ~35 s
     ASSERT_EQ(wma_mix_set_space(e, &mEchoSpace), WMA_OK);
     ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 0.0f), WMA_OK);
     const int64_t p1 = wma_transport_get_play_frame(e);
@@ -533,7 +534,7 @@ TEST_F(SongMix, AReturnAtZeroDoesNotSwitchOffABusWhoseLinesAreStillFull) {
 // El mismo escenario con el retorno mudo sin pasar de ahi: si solo se mira la salida, el bus se
 // apaga a los 2,5 s y la linea queda congelada; con la medicion antes del retorno sigue corriendo y
 // decae. Se ve en el tap de FX cuando el retorno vuelve a 1 a los 10 s: el eco que suena es el
-// decaido (0,95^40 = 0,13 del inicial), no el congelado.
+// decaido (0,9^16 = 0,19 del inicial), no el congelado.
 TEST_F(SongMix, AMutedReturnKeepsTheLineDecayingInsteadOfFreezingIt) {
     WmaEngine* e = echoingEngineWithoutSchedule("h1b", 1.0f);
     const Rendered before = renderTaps(e, 5, 1);
@@ -542,7 +543,7 @@ TEST_F(SongMix, AMutedReturnKeepsTheLineDecayingInsteadOfFreezingIt) {
     WmaMixSpace muted = mEchoSpace;
     muted.delay_return = 0.0f;
     ASSERT_EQ(wma_mix_set_space(e, &muted), WMA_OK);
-    skip(e, static_cast<int64_t>(kRate) * 10);   // 40 ecos de 250 ms: 0,95^40 = 0,13
+    skip(e, static_cast<int64_t>(kRate) * 4);   // 16 ecos de 250 ms: 0,9^16 = 0,19
     ASSERT_EQ(wma_mix_set_space(e, &mEchoSpace), WMA_OK);
     const Rendered after = renderTaps(e, 12, 1);
     EXPECT_GT(peakOf(after.fx), 0.02f) << "la linea se vacio o se corto";
@@ -551,9 +552,9 @@ TEST_F(SongMix, AMutedReturnKeepsTheLineDecayingInsteadOfFreezingIt) {
 
 // Defecto (hallazgo 3 del re-review): una cola que sigue audible a los 30 s se cortaba en el tope sin
 // fundido (un salto del tamano de la muestra). Sin tope por tiempo ya no hay corte audible: el eco
-// (0,95 por 250 ms) sigue pasando por los 30 s sin discontinuidad ni vaciado del bus.
+// (0,9 por 1000 ms) sigue pasando por los 30 s sin discontinuidad ni vaciado del bus.
 TEST_F(SongMix, ALoudTailGoesPastThirtySecondsWithoutAStep) {
-    WmaEngine* e = echoingEngineWithoutSchedule("h3", 1.0f);
+    WmaEngine* e = echoingEngineWithoutSchedule("h3", 1.0f, 1000.0f);
     skip(e, static_cast<int64_t>(kRate) * 29 + kRate / 2);
     const Rendered around = renderTaps(e, 20, 1);   // 29,5 s .. 31,5 s
     const float level = peakOf(around.fx);
@@ -564,6 +565,64 @@ TEST_F(SongMix, ALoudTailGoesPastThirtySecondsWithoutAStep) {
     }
     EXPECT_LT(step, 0.2 * level) << "salto en el fx: un corte sin fundido";
     EXPECT_GT(peakOf(around.fx, around.fx.size() - 2 * kBlock), 1e-5f) << "se corto antes del final";
+}
+
+// Defecto (BLOQUEANTE del review de be8d1a70): el interpolador cubico del delay (Bourke) llega a una
+// ganancia de 1,0887 hacia los 9,4 kHz (a 48 kHz) con un tiempo fraccional; con realimentacion > 0,9186
+// cada vuelta ganaba y la cola divergia sin tope (22398 a los 180 s). Con el maximo que acepta la C API
+// (0,9 · 1,0887 = 0,98) el peor caso (tono de 9,4 kHz, fraccion 0,5: 1200,5 muestras = 25,0104 ms; el
+// mismo retardo a 250 ms tarda 10x mas, ~190 s) decae, el bus se apaga y no queda eco. La realimentacion
+// de la sonda (0,95) se rechaza.
+TEST_F(SongMix, AFractionalDelayAtTheMaximumFeedbackWithATopTonePassesAndTheBusGoesQuiet) {
+    WmaEngine* e = echoingEngineWithoutSchedule("i1", 1.0f, 25.0104f, 48000.0f / 9400.0f);
+    const Rendered early = renderTaps(e, 5, 1);
+    ASSERT_GT(peakOf(early.fx), 0.05f) << "la cola no suena: el test no prueba nada";
+    WmaMixSpace over = mEchoSpace;
+    over.delay_feedback = 0.95f;
+    EXPECT_EQ(wma_mix_set_space(e, &over), WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    skip(e, static_cast<int64_t>(kRate) * 40);   // 0,98^n < 1e-6 tarda ~19 s, mas los 2,5 s de silencio
+    const Rendered late = renderTaps(e, 4, 1);
+    for (const float v : late.fx) ASSERT_TRUE(std::isfinite(v));
+    EXPECT_LT(peakOf(late.fx), 1e-6f) << "la cola no decayo: el bus diverge o no se apaga";
+    auto& looper = e->engine->getAudioLooper();
+    EXPECT_FALSE(looper.isSongBusLive()) << "el bus sigue vivo tras agotarse la cola";
+    EXPECT_EQ(looper.getSongBusGuardTrips(), 0) << "la guarda tuvo que salvar un bus que no se agota solo";
+}
+
+// Defecto (hallazgo 2 del review): con damping 1 el filtro de cada comb de la reverb no actualiza su
+// estado (`filtered = prev`): queda congelado y el bus no baja de 1e-6 (pico antes de los retornos 1,88e-6
+// constante en la sonda). El maximo que acepta la C API es 0,95 (1 se rechaza: es lo que este test ata);
+// con 0,95 puesto durante la cola de un ruido de +-4 y corte bajo en 20 Hz el bus se agota y se apaga.
+TEST_F(SongMix, AReverbTailOfLoudNoiseWithTheMaximumDampingEndsAndTheBusGoesQuiet) {
+    std::vector<float> noise(static_cast<size_t>(kLoop) * 2);
+    uint32_t seed = 12345u;
+    for (float& v : noise) {
+        seed = seed * 1664525u + 1013904223u;
+        v = (static_cast<float>(seed >> 8) / static_cast<float>(1u << 24) * 2.0f - 1.0f) * 2.0f;
+    }
+    const auto path = mixFixture("i2_noise");
+    mFiles.push_back(path);
+    ASSERT_TRUE(wav::writeWav(path.c_str(), noise.data(), kLoop, kRate, wav::BitDepth::FLOAT_32));
+    WmaEngine* e = offlineEngine();
+    const int32_t a = loadClip(e, path.string());
+    ASSERT_EQ(wma_mix_set_track(e, 0, 2.0f, 0.0f, 1.0f), WMA_OK);   // +-4 al bus
+    WmaMixSpace sp = space(1.0f, 0.0f);
+    sp.reverb_low_cut_hz = 20.0f;
+    ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+    WmaMixSpace one = sp;
+    one.reverb_damping = 1.0f;
+    EXPECT_EQ(wma_mix_set_space(e, &one), WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    const int64_t p0 = wma_transport_get_play_frame(e);
+    const WmaSongSection s = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 600 * kLoop), WMA_OK);
+    ASSERT_GT(peakOf(renderTaps(e, 8, 1).fx), 0.1f);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, nullptr, 0, 0), WMA_OK);
+    sp.reverb_damping = 0.95f;   // durante la cola
+    ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+    skip(e, static_cast<int64_t>(kRate) * 30);
+    const Rendered late = renderTaps(e, 4, 1);
+    EXPECT_LT(peakOf(late.fx), 1e-6f);
+    EXPECT_FALSE(e->engine->getAudioLooper().isSongBusLive()) << "el bus de la reverb no se apaga";
 }
 
 // Defecto (BLOQUEANTE del review): prepareMixBuffer agranda los buffers del looper pero no el bus; un

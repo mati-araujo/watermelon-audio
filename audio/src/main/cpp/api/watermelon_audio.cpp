@@ -3160,14 +3160,14 @@ WmaResult wma_mix_set_space(WmaEngine* engine, const WmaMixSpace* space) {
     if (space == nullptr || !wmaInRange(space->reverb_return, 0.0f, 1.0f) ||
         !wmaInRange(space->reverb_size, 0.1f, 2.0f) ||
         !wmaInRange(space->reverb_decay_s, 0.1f, 10.0f) ||
-        !wmaInRange(space->reverb_damping, 0.0f, 1.0f) ||
+        !wmaInRange(space->reverb_damping, 0.0f, 0.95f) ||
         !wmaInRange(space->reverb_predelay_ms, 0.0f, 100.0f) ||
         !wmaInRange(space->reverb_low_cut_hz, 20.0f, 500.0f) ||
         !wmaInRange(space->reverb_high_cut_hz, 1000.0f, 20000.0f) ||
         !wmaInRange(space->delay_return, 0.0f, 1.0f) ||
         !wmaInRange(space->delay_time_ms, 1.0f,
                     std::min(2000.0f, engine->engine->songDelayMaxMs())) ||
-        !wmaInRange(space->delay_feedback, 0.0f, 0.95f)) {
+        !wmaInRange(space->delay_feedback, 0.0f, 0.9f)) {
         return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
     }
     wm::SongSpaceParams p;
