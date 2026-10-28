@@ -192,7 +192,7 @@ fun HarnessApp(platform: HarnessPlatform) {
                 // dispositivo, es EL CONTROL DE AC-010.1: no tiene @OptIn, asi
                 // que su compilacion afirma que `TunerFactory` alcanza sin tocar
                 // la superficie interna. Ver el KDoc de TunerControl.
-                TunerControl()
+                TunerControl(readSink = platform.tunerReadSink)
 
                 // Control 9b — grabar lo que el afinador ve (REQ-055). Aparte de TunerControl a
                 // proposito: ese archivo no puede tener @OptIn; este llega al puente interno.

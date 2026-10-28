@@ -27,8 +27,10 @@ import com.watermellonstudios.audio.api.TunerReading
 import com.watermellonstudios.audio.domain.tuning.Tuning
 import com.watermellonstudios.audio.domain.tuning.TuningConfiguration
 import com.watermellonstudios.audio.harness.smoke.PANEL_TUNING
+import com.watermellonstudios.audio.harness.smoke.SmokeSink
 import com.watermellonstudios.audio.harness.smoke.TUNER_POLL_MS
 import kotlinx.coroutines.delay
+import kotlin.time.TimeSource
 
 /**
  * Control 9 — el afinador. **Y, sobre todo, el control de AC-010.1.**
@@ -82,9 +84,13 @@ import kotlinx.coroutines.delay
  * por tick el mismo estado que este texto. Compartirlos es lo que hace que la reproducción sea la
  * del panel y no una copia que se desvía. El panel no cambia de comportamiento: sin cuerda por
  * defecto (D17, AC-053.14: primero se reproduce, después se arregla).
+ *
+ * @param readSink si no es `null`, recibe una línea [tunerReadLine] por lectura (MINI-053): logcat
+ *   con el tag [TUNER_READ_TAG] en Android, stdout en iOS. Se emite en el mismo tick de UI que ya
+ *   lee; no agrega lecturas ni trabajo al hilo de audio o de análisis.
  */
 @Composable
-fun TunerControl(modifier: Modifier = Modifier) {
+fun TunerControl(modifier: Modifier = Modifier, readSink: SmokeSink? = null) {
     // La configuración es obligatoria: no hay default honesto para "contra qué afinar".
     // Ver el KDoc de TunerFactory.
     val tuner: ITuner = remember {
@@ -106,8 +112,10 @@ fun TunerControl(modifier: Modifier = Modifier) {
     // parado gasta cruces para leer lo mismo.
     LaunchedEffect(running) {
         if (!running) return@LaunchedEffect
+        val loopStart = TimeSource.Monotonic.markNow()
         while (true) {
             reading = tuner.reading()
+            readSink?.emit(tunerReadLine(loopStart.elapsedNow().inWholeMilliseconds, reading))
             running = tuner.isRunning
             delay(TUNER_POLL_MS)
         }

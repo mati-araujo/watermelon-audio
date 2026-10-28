@@ -36,6 +36,7 @@ fun MainViewController(): UIViewController = ComposeUIViewController {
             smokeSink = SmokeSink { line -> println(line) },
             writeFile = ::writeTempFile,
             dumpDir = documentsDirectory(),
+            tunerReadSink = SmokeSink { line -> println(line) },
         ),
     )
 }

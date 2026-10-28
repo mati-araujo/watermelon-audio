@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
             smokeRequest = request,
             // Externo y propio de la app: `adb pull` lo baja sin root y se borra al desinstalar.
             dumpDir = getExternalFilesDir(null)?.absolutePath,
+            tunerReadSink = SmokeSink { line -> Log.i(TUNER_READ_TAG, line) },
         )
         setContent { HarnessApp(platform) }
     }
