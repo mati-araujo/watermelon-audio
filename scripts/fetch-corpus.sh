@@ -34,10 +34,20 @@ mkdir -p "$CORPUS_DIR"
 
 while IFS= read -r line; do
     case "$line" in ''|\#*) continue ;; esac
+    # Sin globbing: un `*` del manifiesto no se expande contra el directorio actual.
+    set -f
     # shellcheck disable=SC2086
     set -- $line
+    set +f
     name="$1"; want="$2"
     entries=$((entries + 1))
+    # El nombre es un archivo DENTRO de CORPUS_DIR: ni subdirectorios, ni `..`, ni ocultos.
+    case "$name" in
+        */*|.*)
+            printf '  🔴 nombre invalido en el manifiesto: %s\n' "$name" >&2
+            failed=$((failed + 1))
+            continue ;;
+    esac
     dest="$CORPUS_DIR/$name"
 
     if [ ! -f "$dest" ] && [ "$VERIFY_ONLY" -eq 0 ]; then
@@ -47,6 +57,15 @@ while IFS= read -r line; do
         # descubrir en la corrida SIGUIENTE.
         if ! curl -fsSL -o "$dest.part" "$CORPUS_URL_BASE/$name"; then
             printf '  🔴 no se pudo bajar %s de %s\n' "$name" "$CORPUS_URL_BASE" >&2
+            rm -f "$dest.part"
+            failed=$((failed + 1))
+            continue
+        fi
+        # El checksum ANTES de darle el nombre: un asset reemplazado nunca queda con nombre de corpus.
+        got_part="$(shasum -a 256 "$dest.part" | cut -d' ' -f1)"
+        if [ "$got_part" != "$want" ]; then
+            printf '  🔴 CHECKSUM NO COINCIDE en lo bajado de %s\n     esperado %s\n     obtenido %s\n' \
+                   "$name" "$want" "$got_part" >&2
             rm -f "$dest.part"
             failed=$((failed + 1))
             continue
