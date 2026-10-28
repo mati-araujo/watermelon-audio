@@ -221,6 +221,24 @@ std::vector<TakeRejectCase> takeRejectCases() {
     add("fmt PCM (tag 1)", [](std::vector<uint8_t>* b) { takePut(b, 20, 1, 2); });
     add("fmt estereo", [](std::vector<uint8_t>* b) { takePut(b, 22, 2, 2); });
     add("fmt de 16 bits", [](std::vector<uint8_t>* b) { takePut(b, 34, 16, 2); });
+    // Desbordes de u64 (security-auditor): hoy el oraculo Python los rechaza (enteros sin limite).
+    // La ultima perdida pasa a costura que empieza cerca de 2^64: `frame + span` da la vuelta a 10.
+    add("costura cuyo fin da la vuelta en u64", [](std::vector<uint8_t>* b) {
+        takePut(b, takeCutOffset(2), UINT64_MAX - 9, 8);
+        takePut(b, takeCutOffset(2) + 8, 0, 8);
+        takePut(b, takeCutOffset(2) + 16, 20, 4);
+        takePut(b, takeCutOffset(2) + 20, 2, 4);
+        takePut(b, kTakeWmad + 12, 7, 8);
+    });
+    // lostFrames de 2^64 - 1 en el primer corte: la suma (2^64 - 1) + 11 da 10, y framesLost dice 10.
+    add("suma de perdidas que da la vuelta en u64", [](std::vector<uint8_t>* b) {
+        takePut(b, takeCutOffset(0) + 8, UINT64_MAX, 8);
+        takePut(b, kTakeWmad + 12, 10, 8);
+    });
+    // framesWritten = 2^62 + N: por 4 da la vuelta a 4·N, que es justo el `data` del archivo.
+    add("framesWritten·4 que da la vuelta en u64", [](std::vector<uint8_t>* b) {
+        takePut(b, kTakeWmad + 4, (uint64_t{1} << 62) + kTakeTestFrames, 8);
+    });
     add("rate del wmad != rate de fmt", [](std::vector<uint8_t>* b) { takePut(b, kTakeFmtRate, 44100, 4); });
     // `data` mas corto que framesWritten·4 (el archivo conserva los bytes: no es un archivo cortado).
     add("data != framesWritten*4", [](std::vector<uint8_t>* b) { takePut(b, kTakeDataHeader + 4, kTakeTestFrames * 4 - 4, 4); });
@@ -631,6 +649,17 @@ TEST(TakeManifest, EachDataLineGoesToTheTakeItNames) {
 }
 
 /// Una modificacion de la toma sana que la grámatica tiene que rechazar, con el motivo en el nombre.
+/// Renombra la toma en TODAS sus lineas (cabecera y datos): asi el unico defecto es el nombre.
+void takeRenameAll(std::vector<std::string>* l, const std::string& from, const std::string& to) {
+    for (std::string& s : *l) {
+        size_t at = 0;
+        while ((at = s.find(from, at)) != std::string::npos) {
+            s.replace(at, from.size(), to);
+            at += to.size();
+        }
+    }
+}
+
 struct TakeGrammarCase {
     std::string what;
     std::function<void(std::vector<std::string>*)> edit;
@@ -652,6 +681,12 @@ std::vector<TakeGrammarCase> takeGrammarCases() {
     add("'# Objetivo' con mayuscula", [](std::vector<std::string>* l) { (*l)[kTakeLineTargetB].replace(2, 1, "O"); });
     add("'# objetivos' en plural", [](std::vector<std::string>* l) { (*l)[kTakeLineTargetB].replace(2, 8, "objetivos"); });
     add("'# Aplauso' con mayuscula", [](std::vector<std::string>* l) { (*l)[kTakeLineClap].replace(2, 1, "A"); });
+    // El NOMBRE termina en un path y en el popen de `sha256Of` entre comillas simples (security-auditor).
+    add("NOMBRE con comilla simple", [n](std::vector<std::string>* l) { takeRenameAll(l, n, "x'y.wav"); });
+    add("NOMBRE con barra", [n](std::vector<std::string>* l) { takeRenameAll(l, n, "a/b.wav"); });
+    add("NOMBRE que sube de directorio", [n](std::vector<std::string>* l) { takeRenameAll(l, n, "../x.wav"); });
+    add("NOMBRE con punto inicial", [n](std::vector<std::string>* l) { takeRenameAll(l, n, ".x.wav"); });
+    add("NOMBRE con $", [n](std::vector<std::string>* l) { takeRenameAll(l, n, "x$y.wav"); });
     add("objetivos desordenados", [](std::vector<std::string>* l) { std::swap((*l)[kTakeLineTargetA], (*l)[kTakeLineTargetB]); });
     add("objetivo repetido (no estrictamente creciente)", [n](std::vector<std::string>* l) { (*l)[kTakeLineTargetB] = "# objetivo " + n + " 20000 110.000"; });
     add("objetivo fuera de la familia (123 Hz no es cuerda)", [n](std::vector<std::string>* l) { (*l)[kTakeLineTargetB] = "# objetivo " + n + " 150000 123.0"; });
@@ -693,6 +728,18 @@ std::vector<TakeGrammarCase> takeGrammarCases() {
 // familia o en (INI, FIN] de una costura, uno y solo un aplauso, al menos un objetivo, sha hex de 64, rate y frames
 // positivos, familia conocida, cortes estrictamente crecientes y dentro de [0, FRAMES]). Cada caso es UNA edicion
 // de la toma sana, que antes se comprueba que pasa.
+// security-auditor. atrapa: un filtro de NOMBRE de mas que rechace una toma legitima ('_', '-', '.' interior,
+// mayusculas, digitos) o uno de menos (cada caso de rechazo de nombre esta en `takeGrammarCases`, con la toma
+// renombrada en todas sus lineas para que el nombre sea el unico defecto).
+TEST(TakeManifest, ALegitimateTakeNameIsAccepted) {
+    for (const std::string to : {"G42_criolla-20261028.v1.wav", "a.wav", "_x", "-x.wav", "9"}) {
+        SCOPED_TRACE(to);
+        std::vector<std::string> l = takeGrammarLines();
+        takeRenameAll(&l, kTakeGrammarName, to);
+        EXPECT_EQ("", takeGrammarParse(l));
+    }
+}
+
 TEST(TakeManifest, EachGrammarRuleRejectsItsOwnCase) {
     ASSERT_EQ("", takeGrammarParse(takeGrammarLines())) << "la toma sana de la que parten los casos";
     for (const TakeGrammarCase& c : takeGrammarCases()) {

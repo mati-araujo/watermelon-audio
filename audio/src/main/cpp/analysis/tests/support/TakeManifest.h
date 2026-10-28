@@ -103,6 +103,18 @@ inline bool parseTakeUInt(const std::string& s, int64_t* out) {
     return true;
 }
 
+/// Un NOMBRE de toma: `^[A-Za-z0-9_-][A-Za-z0-9._-]*$`. Ni `/`, ni `.` inicial, ni comillas: el nombre
+/// termina en un path (`dir + "/" + nombre`) y en el `popen` de `corpus::sha256Of`, entre comillas simples.
+inline bool isValidTakeName(const std::string& n) {
+    if (n.empty() || n[0] == '.') return false;
+    for (char ch : n) {
+        const bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' ||
+                        ch == '-' || ch == '.';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 /// Las palabras de una linea separadas por blancos.
 inline std::vector<std::string> takeWords(const std::string& line) {
     std::vector<std::string> w;
@@ -209,6 +221,7 @@ inline std::string parseTakeManifest(const std::string& text, TakeManifest* out)
         int64_t rate = 0;
         if (w.size() < 6) return where + "toma ilegible (NOMBRE SHA256 RELEASE RATE FRAMES FAMILIA desc)";
         e.name = w[0];
+        if (!isValidTakeName(e.name)) return where + "NOMBRE invalido (solo [A-Za-z0-9._-], sin '.' inicial): " + e.name;
         e.sha256 = w[1];
         e.release = w[2];
         if (e.sha256.size() != 64) return where + "sha256 de " + e.name + " no tiene 64 caracteres";
@@ -311,7 +324,7 @@ inline uint64_t takeLE(const uint8_t* p, int bytes) {
 
 /**
  * El `wmad` v2 del archivo `bytes` (que se llama `name`), con los rechazos del oraculo: nombre
- * `.invalid.wav`; RIFF sin fmt/data/wmad; fmt que no es float32 mono; version != 2; chunk != 64 + 24·cutCapacity; cutCount >
+ * `.invalid.wav`; RIFF sin fmt/data/wmad; (sin aritmetica que de la vuelta en u64); fmt que no es float32 mono; version != 2; chunk != 64 + 24·cutCapacity; cutCount >
  * cutCapacity; kind fuera de {1, 2}; cortes desordenados (fileFrame decreciente) o fuera de
  * [0, framesWritten]; perdida con fileSpan; costura con lostFrames; valid = 0; unlocated* > 0;
  * framesLost != suma de perdidas + unlocatedFrames; rate de `wmad` != el de fmt; `data` !=
@@ -387,9 +400,12 @@ inline std::string parseWmadV2Chunk(const std::vector<uint8_t>& bytes, const std
         const std::string which = name + ": wmad corte " + std::to_string(i);
         if (kind != 1 && kind != 2) return which + " con kind " + std::to_string(kind) + " (1 o 2)";
         if (frame < prev) return which + " desordenado";
-        if (frame + span > out->framesWritten) return which + " fuera de [0, framesWritten]";
+        // Sin `frame + span`: con un frame cerca de 2^64 la suma da la vuelta y entra en rango.
+        if (span > out->framesWritten || frame > out->framesWritten - span) return which + " fuera de [0, framesWritten]";
         if (kind == 1 && span != 0) return which + ": perdida con fileSpan";
         if (kind == 2 && lost != 0) return which + ": costura con lostFrames";
+        // Invariante: lostSum <= framesLost (sin sumar: la suma de u64 da la vuelta).
+        if (lost > out->framesLost - lostSum) return name + ": wmad framesLost no es la suma de los cortes + unlocatedFrames";
         prev = frame;
         lostSum += lost;
         TakeCutLine line;
@@ -401,10 +417,10 @@ inline std::string parseWmadV2Chunk(const std::vector<uint8_t>& bytes, const std
     if (out->valid == 0) return name + ": wmad valid=0";
     if (out->unlocatedFrames > 0 || out->unlocatedDiscontinuities > 0)
         return name + ": wmad con perdidas o discontinuidades NO ubicadas";
-    if (out->framesLost != lostSum + out->unlocatedFrames)
+    if (out->unlocatedFrames != out->framesLost - lostSum)
         return name + ": wmad framesLost no es la suma de los cortes + unlocatedFrames";
     if (out->sampleRate != out->fmtRate) return name + ": el rate de wmad no es el de fmt";
-    if (out->dataBytes != out->framesWritten * 4)
+    if (out->framesWritten > UINT64_MAX / 4 || out->dataBytes != out->framesWritten * 4)
         return name + ": data de " + std::to_string(out->dataBytes) + " bytes y framesWritten·4 es otro";
     return "";
 }
