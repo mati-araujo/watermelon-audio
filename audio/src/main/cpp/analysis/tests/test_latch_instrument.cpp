@@ -860,8 +860,11 @@ Row rowOf(const std::string& name, int engage, const Latch& l, const Pass2& p2, 
 std::string baselineHeader() {
     std::string h =
         "# Linea de base del ENGANCHE del afinador sobre corpus-v1 (REQ-055 S0). Una fila por archivo y enganche.\n"
-        "# Motor medido: commit 1351b7e (el de hoy, sin cambio de produccion). Al regenerar tras un cambio de motor\n"
-        "# INTENCIONAL, actualizar este commit en `baselineHeader()` (test_latch_instrument.cpp).\n"
+        "# Motor medido: el de REQ-057 S1 (cuatro rejillas y tick de 1024 frames, D27-D34), regenerada el 2026-10-28.\n"
+        "# La anterior media el de 1351b7e. Al regenerar tras un cambio de motor INTENCIONAL, actualizar esta linea en\n"
+        "# `baselineHeader()` (test_latch_instrument.cpp).\n"
+        "# Desde REQ-057 S1 el motor NO depende de la particion (AC-057.5): el parrafo de abajo describe al de\n"
+        "# 1351b7e, y con el de ahora el rango de cada fila deberia ser un punto (min == max).\n"
         "#\n"
         "# 🔴 ESTA CIFRA ES DEL MOTOR ALIMENTADO EN TANDAS DE 256 FRAMES, Y EL MOTOR DE HOY DEPENDE DE LA PARTICION DEL\n"
         "# FLUJO. Con tandas que dividen a 4096 (64..4096) los 41 archivos dan la misma posicion de ring; con tandas\n"
@@ -1695,8 +1698,9 @@ std::string attackBaselinePath() { return std::string(WMA_ANALYSIS_GOLDEN_DIR) +
 std::string attackBaselineHeader() {
     std::string h =
         "# Linea de base POR ATAQUE del afinador sobre corpus-v1 (REQ-055 S0, D11, AC-055.2). Una fila por ataque.\n"
-        "# Motor medido: el de 1351b7e (sin cambio de produccion en S0). Al regenerar tras un cambio de motor\n"
-        "# INTENCIONAL, actualizar este commit en `attackBaselineHeader()` (test_latch_instrument.cpp).\n"
+        "# Motor medido: el de REQ-057 S1 (cuatro rejillas y tick de 1024 frames, D27-D34), regenerada el 2026-10-28;\n"
+        "# la anterior media el de 1351b7e. Al regenerar tras un cambio de motor INTENCIONAL, actualizar esta linea en\n"
+        "# `attackBaselineHeader()` (test_latch_instrument.cpp).\n"
         "#\n"
         "# t0 de cada ataque lo da el ORACULO (lineas `# ataque` de corpus-v1-oraculo-corto.tsv, detector de\n"
         "# scripts/corpus-reference-pitch.py: subida >= 6 dB de la energia cruda o de la primera diferencia en 2048\n"
