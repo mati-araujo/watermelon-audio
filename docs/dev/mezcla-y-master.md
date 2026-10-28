@@ -51,7 +51,7 @@ entrada da la misma salida con cualquier tamano de bloque.
 | funcion | rangos (fuera de rango o no finito => `PARAMETER_OUT_OF_RANGE`, nada se aplica) |
 |---|---|
 | `wma_mix_set_track(track, gain, pan, send)` | pista < pistas activas; ganancia 0..2; paneo -1..1; envio 0..1 |
-| `wma_mix_set_space(WmaMixSpace*)` | retornos 0..1; tamano 0,1..2; decay 0,1..10 s; damping 0..1; predelay 0..100 ms; cortes 20..500 / 1000..20000 Hz; delay 1..2000 ms; feedback 0..0,95 |
+| `wma_mix_set_space(WmaMixSpace*)` | retornos 0..1; tamano 0,1..2; decay 0,1..10 s; damping 0..1; predelay 0..100 ms; cortes 20..500 / 1000..20000 Hz; delay 1..2000 ms **y que quepa en la linea del delay al sample rate vigente** (192000 muestras: 2000 ms hasta 96 kHz, ~1000 ms a 192 kHz); feedback 0..0,95 |
 | `wma_mix_set_master(WmaMixMaster*)` | ganancia -60..+40 dB; techo -20..0 dBTP; release 1..2000 ms |
 | `wma_mix_set_output_profile(p)` | PROTECTED / MASTER / RAW; RAW fuera de un render offline => `INVALID_OPERATION` |
 | `wma_offline_render_taps(mix, fx, tracks, track_count, frames)` | frames 1..max_block; track_count 0..pistas activas; sin start => `INVALID_OPERATION` |
@@ -64,14 +64,38 @@ entrada da la misma salida con cualquier tamano de bloque.
   version avisa. No hay mutex ni alloc en el camino RT.
 - **El bus se crea perezosamente**, en el hilo que hace la primera `wma_mix_set_track/space`, se publica
   por un puntero atomico y **no se libera mientras viva el motor**. Un motor que nunca llama (el movil) no
-  paga memoria ni CPU. Un cambio de sample rate lo re-prepara con el RT quiesced (como al resto). Un
-  bloque mas grande que lo dimensionado (4096 frames) salta el bus y se cuenta
-  (`AudioLooper::getSongBusOverflowBlocks`), no aloca.
-- **El primer juego de parametros de un bus fresco** fija el tiempo del delay de una (`DelayEffect::reset`
-  sobre ~1,5 MB, una vez): sin eso el suavizado de 50 ms lo desliza desde el default de 250 ms.
+  paga memoria ni CPU. `publishSongBus` lo prepara **al rate vigente, bajo el mismo lock con que
+  `setSampleRate` publica el rate**: un cambio de rate concurrente con la creacion deja el bus en el rate
+  final (si gana la creacion, lo re-prepara `setSampleRate`; si gana el cambio, la creacion lee el rate
+  nuevo). Un cambio de sample rate lo re-prepara con el RT quiesced (como al resto).
+- **Capacidad.** El bus tiene SU capacidad en frames (`ISongSpaceBus::spaceBusCapacityFrames`, el
+  `mDelayOut` del bus): crece con `prepareMixBuffer` (`reserveSpaceBus`, sin reiniciar el estado) y el
+  guardia de cada bloque exige que alcancen los tres buffers del looper **y** esa capacidad. Un bloque
+  mas grande salta el bus y se cuenta (`AudioLooper::getSongBusOverflowBlocks`), no aloca. Antes el
+  guardia miraba solo los buffers del looper: con `prepareMixBuffer(8192)` y un bloque de 6000 el delay
+  del bus (fijo en 4096) escribia fuera de su memoria.
+- **El primer juego de parametros de un bus fresco** clava el suavizado del tiempo del delay en su
+  objetivo (`DelayEffect::snapDelayTimeToTarget`): sin eso el suavizado de 50 ms lo desliza desde el
+  default de 250 ms. Las lineas ya las vacio `prepareSpaceBus` en control; en el RT no hay memset (el
+  `reset()` que habia ahi eran ~1,5 MB: 850 us en Debug en el host, contra < 1 us ahora).
+- **Tiempo del delay y sample rate.** La linea del `DelayEffect` es de largo fijo en muestras; la C API
+  rechaza (`PARAMETER_OUT_OF_RANGE`, nada se aplica) un `delay_time_ms` que no cabe al rate vigente
+  (`AudioEngine::songDelayMaxMs`). Si despues el rate sube, el `DelayEffect` acota en silencio al
+  maximo de su linea hasta la proxima llamada de `wma_mix_set_space`.
+- **La cola del bus (D-S12-18).** Con la cancion inactiva (agenda sacada o transporte parado) el bus
+  sigue procesando **con envio cero**: la cola suena y decae como en un DAW, en vez de cortarse en seco
+  y quedar congelada hasta la proxima activacion. Se apaga cuando el retorno FX queda bajo -120 dBFS
+  (pico de bloque < 1e-6) durante **2,5 s seguidos** (mas que el delay maximo de 2 s, para no confundir
+  el hueco entre dos ecos con el final) o al llegar al **tope de 30 s** de cola. Si la cancion se
+  reactiva durante la cola, la cola sigue (no se reinicia en el RT). Un apagado por silencio no vacia
+  nada (el residuo es < -120 dBFS); un apagado **por tope** (eco todavia audible) deja el bus "viejo" y
+  la primera activacion siguiente lo reinicia y reaplica sus parametros: es el unico `resetSpaceBus` en
+  el RT (memset de la linea, una vez, en un caso raro). El tap de FX recibe el retorno de la cola, asi
+  que `premezcla == Σ pistas + FX` tambien ahi. Offline: `resetSongForRender` reinicia todo (instancia
+  fresca) y el determinismo no cambia.
 - **Los taps** se toman despues del master del looper (cada uno con la misma rampa), asi que
   `premezcla == Σ pistas + FX` por construccion del grafo, hasta el redondeo de float (~1e-7: la suma se
-  hace en otro orden). Un bloque sin cancion deja todos los taps en cero.
+  hace en otro orden). Un bloque sin cancion deja en cero los taps de pista; el de FX lleva la cola del bus mientras dura.
 - `wma_get_xrun_count` lo refresca el callback cada ~500 bloques: va atrasado. Una instancia offline da 0.
 
 ## `MasterStage` (`dsp/MasterStage.h`)
@@ -107,7 +131,9 @@ de 2.23.0** (volumen maestro, limitador con lookahead, soft clip TANH, dither, h
 `OutputProfiles.ProtectedIsTheTwoTwentyThreeOutputBitForBit` (hash FNV-1a de 60 bloques, capturado compilando
 `core/tests/support/OutputGoldenScenario.h` contra `96ca8d61` antes de tocar la cadena; solo macOS arm64, porque
 `tanh` y `sin` de otra libm difieren en el ultimo bit) y, en todas las plataformas,
-`ProtectedEqualsTheOldChainAppliedToTheRawMix`. Para recapturar el hash: compilar el mismo header contra el
+`ProtectedEqualsTheOldChainAppliedToTheRawMix` (con volumen maestro 0,6: con 1,0 un cambio de lugar del volumen no se ve;
+el `setMasterVolume(1.4f)` inicial del escenario del golden lo acota el motor a 1,0, tanto en 2.23.0 como ahora, y se deja tal cual
+para no cambiar la captura). Para recapturar el hash: compilar el mismo header contra el
 arbol de 2.23.0 (un ejecutable `golden_gen` como `sf_render_preset`), no contra este.
 
 - **MASTER** reemplaza a `OutputStage::processOutput` por `MasterStage` y aplica **despues** el volumen de
@@ -156,10 +182,19 @@ arbol de 2.23.0 (un ejecutable `golden_gen` como `sf_render_preset`), no contra 
 | salida RAW = Σ taps + FX; taps con la rampa del master | `RawOutputEqualsTheSumOfTheTapsPlusTheFxReturn` |
 | envio post-fader y post-paneo | `SendIsPostFaderAndPostPan` |
 | ley de paneo del looper | `PanLawIsTheLooperEqualPowerOne` |
-| snap al target (activacion y start) | `FirstBlockStartsAtTheMixTarget...`, `SongVoice.ReactivatingTheSong...` |
+| snap al target (activacion y start; la voz suena ya en el primer bloque) | `FirstBlockStartsAtTheMixTarget...`, `SongVoice.ReactivatingTheSong...` |
 | el `TrackBuffer` no alcanza a la cancion; ninguna voz a la cadena | `TrackBufferControlsHaveNoEffect...`, `SongVoice.TrackBufferControlsDoNotReach...` |
 | fresca = reusada con bus | `AReusedInstanceWithTheBusGivesTheBitsOfAFreshOne` |
 | el envio apagado no corta la cola ni alimenta el bus para siempre | `TurningTheSendOffLetsTheTailDecay...` |
+| la cola sigue tras sacar la agenda y decae; entra al tap de FX | `TheTailKeepsDecayingAfterTheScheduleIsRemoved`, `SongBusTail.TheBusKeepsRunning...`, `SongBusTail.TheTailReturnReachesTheOutput` |
+| reprogramar durante la cola no la encuentra congelada ni reiniciada | `AScheduleReprogrammedDuringTheTailFindsTheDecayedTail...` |
+| la cola se apaga a los -120 dBFS (2,5 s) o al tope (30 s); el tope reinicia al reactivar | `SongBusTail.AQuietTailStops...`, `SongBusTail.ALoudTailIsCapped...`, `AfterTheTailIsGoneReactivating...` |
+| el bloque mayor que la capacidad del bus lo salta y se cuenta (nunca escribe fuera) | `SongBus.ABlockLargerThanTheBusCapacity...`, `SongBusTail.ABlockLargerThanTheBusCapacityDuringTheTail...`, `SongMix.ABlockLargerThanThePreparedMixBuffer...` (ASan) |
+| `prepareMixBuffer` agranda tambien el bus | `SongBus.PrepareMixBufferGrowsTheBus...` |
+| el bus se prepara al rate vigente al crearse y al cambiar el rate | `SongBus.APublishedBusIsPreparedAtTheCurrentRate`, `SongBus.ARateChangeRacingTheBusCreation...`, `SongMix.TheDelayTimeFollowsASampleRateChange...` |
+| el master se prepara al rate del motor | `OutputProfiles.TheMasterIsPreparedAtTheRateTheEngineStartsAt` |
+| el primer apply no vacia la linea del delay | `SongMix.TheFirstParameterApplyPinsTheDelayTime...` |
+| el tiempo del delay cabe en la linea al rate vigente | `MixApi.TheDelayTimeIsRejectedWhenItDoesNotFit...` |
 | 0 alloc / sin carrera / costo del callback | `ABurstOfMixSettersAgainstTheCallback...` (TSan en la suite de sanitizers) |
 | PROTECTED = 2.23.0 | `ProtectedIsTheTwoTwentyThreeOutputBitForBit`, `ProtectedEqualsTheOldChain...` |
 | MASTER = `wma_master_process`; el volumen va despues | `MasterProfileEqualsTheStandaloneMaster...` |
@@ -195,7 +230,10 @@ sanitizers (con ellos el callback es mas lento por construccion).
 
 ## Limites conocidos
 
-- El bus se dimensiona a 4096 frames; un callback vivo mas grande salta el bus ese bloque (cuenta, no aloca).
+- El bus se crea para 4096 frames y crece con `prepareMixBuffer`; un callback vivo mas grande que eso
+  salta el bus ese bloque (cuenta, no aloca).
+- La carrera "cambio de rate vs. creacion del bus" tiene un test de estres (`ARateChangeRacingTheBusCreation...`)
+  que es probabilistico: la extension del lock de `setSampleRate` la cubre el diseno, no un test determinista.
 - El master del export (`MasterStage` por `wma_master_*`) y el vivo comparten codigo, no estado: Studio los
   mantiene en el mismo punto con `reset` + `configure` antes de procesar.
 - El hash de 2.23.0 es de macOS arm64; en otras plataformas vale la prueba estructural.

@@ -74,14 +74,17 @@ TEST(OutputProfiles, ProtectedIsTheTwoTwentyThreeOutputBitForBit) {
 }
 
 // Defecto (portable): el perfil PROTECTED ya no es "el volumen maestro y luego OutputStage": se
-// cuela una etapa antes o despues, o el volumen cambia de lugar. La salida PROTECTED tiene que ser
-// la de un OutputStage de siempre aplicado al volumen maestro sobre la salida RAW del mismo bloque.
+// cuela una etapa antes o despues, o el volumen cambia de lugar (despues del limitador y el soft
+// clip en vez de antes). La salida PROTECTED tiene que ser la de un OutputStage de siempre
+// aplicado, tras el volumen maestro, a la salida RAW del mismo bloque. Con volumen 1,0 esa
+// diferencia de orden no existe: el volumen es 0,6 (el motor lo acota a 1,0).
 TEST(OutputProfiles, ProtectedEqualsTheOldChainAppliedToTheRawMix) {
     constexpr int kBlocks = 40;
-    WmaEngine* raw = soundingEngine(1.0f, 1.0f);
+    constexpr float kVolume = 0.6f;
+    WmaEngine* raw = soundingEngine(1.0f, kVolume);
     ASSERT_EQ(wma_mix_set_output_profile(raw, WMA_OUTPUT_RAW), WMA_OK);
     const std::vector<float> premix = renderBlocks(raw, kBlocks);
-    WmaEngine* prot = soundingEngine(1.0f, 1.0f);
+    WmaEngine* prot = soundingEngine(1.0f, kVolume);
     const std::vector<float> protectedOut = renderBlocks(prot, kBlocks);
     ASSERT_GT(peakOf(premix), 0.5f);
 
@@ -89,6 +92,7 @@ TEST(OutputProfiles, ProtectedEqualsTheOldChainAppliedToTheRawMix) {
     reference.prepare(kRate, 0);
     reference.reset();
     std::vector<float> expected = premix;
+    for (float& v : expected) v *= kVolume;   // RAW no aplica el volumen: PROTECTED lo aplica primero
     for (int b = 0; b < kBlocks; ++b) {
         reference.processOutput(expected.data() + static_cast<size_t>(b) * kBlock * 2, kBlock);
     }
@@ -96,6 +100,23 @@ TEST(OutputProfiles, ProtectedEqualsTheOldChainAppliedToTheRawMix) {
     EXPECT_FALSE(sameBits(protectedOut, premix)) << "PROTECTED no hizo nada";
     wma_engine_destroy(raw);
     wma_engine_destroy(prot);
+}
+
+// Defecto (hallazgo 4 del review): el master no se re-prepara con el sample rate del motor, asi que
+// la latencia declarada (5 ms) y el techo siguen en el rate del constructor (48 kHz) tras arrancar
+// a otro. La latencia del master del motor es la del procesador independiente creado al mismo rate.
+TEST(OutputProfiles, TheMasterIsPreparedAtTheRateTheEngineStartsAt) {
+    for (const int rate : {44100, 96000}) {
+        WmaEngine* e = wma_engine_create();
+        ASSERT_EQ(wma_offline_start(e, rate, kBlock), WMA_OK);
+        WmaMaster* standalone = wma_master_create(rate);
+        ASSERT_NE(standalone, nullptr);
+        EXPECT_EQ(wma_mix_get_master_latency_frames(e), wma_master_get_latency_frames(standalone))
+            << "rate " << rate;
+        EXPECT_NE(wma_mix_get_master_latency_frames(e), 240);
+        wma_master_destroy(standalone);
+        wma_engine_destroy(e);
+    }
 }
 
 // Defecto: RAW sale float sin proteger a un DAC. En un motor con device (o que no esta en un render

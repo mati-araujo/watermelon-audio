@@ -10,7 +10,8 @@
  *
  * La senal esta pensada para ejercitar TODA la cadena: un seno fuerte que activa el limitador
  * con lookahead, el soft clip TANH y el dither, y un cambio del volumen maestro a mitad de camino
- * (la rampa del volumen).
+ * (de 1,0 a 0,35). El `setMasterVolume(1.4f)` inicial queda tal cual: el motor lo acota a 1,0 en
+ * 2.23.0 y ahora, y cambiar la llamada cambiaria la captura.
  */
 
 #include "../../AudioEngine.h"
