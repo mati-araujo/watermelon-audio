@@ -2,6 +2,7 @@ package com.watermellonstudios.audio.internal.bridge
 
 import com.watermellonstudios.audio.api.EffectChainSnapshot
 import com.watermellonstudios.audio.api.IAudioNativeBridge
+import com.watermellonstudios.audio.api.ISongBridge
 import com.watermellonstudios.audio.api.IEffectStateProvider
 import com.watermellonstudios.audio.api.IEffectStateWriter
 import com.watermellonstudios.audio.api.ITunerDiagnostics
@@ -106,7 +107,7 @@ import kotlinx.coroutines.withContext
 // `@InternalWatermelonApi` (propagan el requisito), asi que
 // `AudioNativeBridge.getInstance().startTunerInputDump(p)` sin opt-in no compila (hallazgo 2).
 @OptIn(InternalWatermelonApi::class)
-class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagnostics {
+class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagnostics, ISongBridge {
 
     companion object {
         private const val TAG = "AudioNativeBridge"
@@ -3748,6 +3749,60 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
 
     fun looperResetTelemetry() = nativeLooperResetTelemetry()
 
+    // ==================== Canción programada, motor VIVO (REQ-055 S11) ====================
+    //
+    // `AudioNativeBridge.getInstance()` ES el `ISongBridge` vivo. Las operaciones de carga y
+    // agenda tienen su mutex PROPIO del lado nativo (nunca `engineMutex`: un load decodifica
+    // un archivo). El play frame es el de siempre, [transportGetPlayFrame].
+
+    override fun songLoadClip(
+        path: String,
+        sampleRate: Int,
+        regionStartFrame: Long,
+        regionEndFrame: Long,
+        loopFrames: Long,
+    ): Result<Int> {
+        val outId = IntArray(1) { ISongBridge.SILENCE }
+        val code = nativeSongLoadClip(path, sampleRate, regionStartFrame, regionEndFrame, loopFrames, outId)
+        return if (code == NativeErrorCode.SUCCESS.code) {
+            Result.success(outId[0])
+        } else {
+            Result.failure(NativeBridgeException.fromCode(code, "songLoadClip($path)"))
+        }
+    }
+
+    override fun songUnloadClip(clipId: Int): Result<Unit> =
+        songResult(nativeSongUnloadClip(clipId), "songUnloadClip($clipId)")
+
+    override fun songSetSchedule(
+        loopFrames: Long,
+        sectionStarts: LongArray,
+        clips: IntArray,
+        endFrame: Long,
+    ): Result<Unit> = songResult(
+        nativeSongSetSchedule(loopFrames, sectionStarts, clips, endFrame),
+        "songSetSchedule(${sectionStarts.size} secciones)",
+    )
+
+    override fun songGetSection(): Int = nativeSongGetSection()
+    override fun songGetLateAdoptions(): Long = nativeSongGetLateAdoptions()
+    override fun songGetPlayFrame(): Long = nativeTransportGetPlayFrame()
+
+    private fun songResult(code: Int, context: String): Result<Unit> =
+        if (code == NativeErrorCode.SUCCESS.code) {
+            Result.success(Unit)
+        } else {
+            Result.failure(NativeBridgeException.fromCode(code, context))
+        }
+
+    private external fun nativeSongLoadClip(
+        path: String, sampleRate: Int, regionStart: Long, regionEnd: Long, loopFrames: Long, outId: IntArray,
+    ): Int
+    private external fun nativeSongUnloadClip(id: Int): Int
+    private external fun nativeSongSetSchedule(loopFrames: Long, starts: LongArray, clips: IntArray, endFrame: Long): Int
+    private external fun nativeSongGetSection(): Int
+    private external fun nativeSongGetLateAdoptions(): Long
+
     // ==================== Offline render by handle (REQ-055 S2, ADR-0008) ====================
     //
     // EL SEGUNDO MODELO DEL BRIDGE: todo lo de arriba opera sobre el motor GLOBAL (el
@@ -3803,6 +3858,31 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
     private external fun nativeOfflineAddEffect(handle: Long, typeId: Int): Int
     private external fun nativeOfflineClearAllEffects(handle: Long): Int
     private external fun nativeOfflineSetEffectParameter(handle: Long, index: Int, paramId: Int, value: Float): Int
+
+    // Canción programada por handle (REQ-055 S11): 1:1 con las `nativeSong*` del vivo.
+    internal fun offlineSongLoadClip(
+        handle: Long, path: String, sampleRate: Int, regionStart: Long, regionEnd: Long, loopFrames: Long,
+        outId: IntArray,
+    ): Int = nativeOfflineSongLoadClip(handle, path, sampleRate, regionStart, regionEnd, loopFrames, outId)
+    internal fun offlineSongUnloadClip(handle: Long, id: Int): Int = nativeOfflineSongUnloadClip(handle, id)
+    internal fun offlineSongSetSchedule(
+        handle: Long, loopFrames: Long, starts: LongArray, clips: IntArray, endFrame: Long,
+    ): Int = nativeOfflineSongSetSchedule(handle, loopFrames, starts, clips, endFrame)
+    internal fun offlineSongGetSection(handle: Long): Int = nativeOfflineSongGetSection(handle)
+    internal fun offlineSongGetLateAdoptions(handle: Long): Long = nativeOfflineSongGetLateAdoptions(handle)
+    internal fun offlineSongGetPlayFrame(handle: Long): Long = nativeOfflineSongGetPlayFrame(handle)
+
+    private external fun nativeOfflineSongLoadClip(
+        handle: Long, path: String, sampleRate: Int, regionStart: Long, regionEnd: Long, loopFrames: Long,
+        outId: IntArray,
+    ): Int
+    private external fun nativeOfflineSongUnloadClip(handle: Long, id: Int): Int
+    private external fun nativeOfflineSongSetSchedule(
+        handle: Long, loopFrames: Long, starts: LongArray, clips: IntArray, endFrame: Long,
+    ): Int
+    private external fun nativeOfflineSongGetSection(handle: Long): Int
+    private external fun nativeOfflineSongGetLateAdoptions(handle: Long): Long
+    private external fun nativeOfflineSongGetPlayFrame(handle: Long): Long
 }
 
 /**

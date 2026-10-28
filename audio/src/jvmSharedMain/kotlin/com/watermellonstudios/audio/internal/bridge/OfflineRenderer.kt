@@ -1,5 +1,6 @@
 package com.watermellonstudios.audio.internal.bridge
 
+import com.watermellonstudios.audio.api.ISongBridge
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.error.NativeErrorCode
 
@@ -35,6 +36,14 @@ import com.watermellonstudios.audio.domain.error.NativeErrorCode
  * Los setters que en la C API son `void` (tipo y parámetro de engine, volumen, x/y,
  * notas) sólo pueden fallar por el handle: la C API no informa un valor rechazado.
  *
+ * ## La canción programada ([ISongBridge], REQ-055 S11)
+ *
+ * Mismas operaciones que el vivo, sobre el handle. El orden importa: [start] **primero** y
+ * [songLoadClip] después (el start puede cambiar el sample rate y eso invalida los clips); el
+ * ancla `P0` es [songGetPlayFrame] tras el start. El start apaga la agenda (también al reiniciar,
+ * como una instancia fresca): [songSetSchedule] va después. Con la instancia cerrada, las que devuelven
+ * `Result` fallan con `EngineNotInitialized` sin cruzar, y las lecturas dan `-1` / `0` / `-1`.
+ *
  * La superficie es la mínima que pide S2 (motor, SoundFont y preset, cadena de
  * efectos, parámetros, gestos x/y y notas). Lo que falte se agrega como un
  * pasamanos más a la `wma_*` que ya toma un `WmaEngine*`, no como una copia del
@@ -43,7 +52,7 @@ import com.watermellonstudios.audio.domain.error.NativeErrorCode
 class OfflineRenderer private constructor(
     private val bridge: AudioNativeBridge,
     initialHandle: Long,
-) : AutoCloseable {
+) : AutoCloseable, ISongBridge {
 
     private val lock = Any()
 
@@ -128,6 +137,42 @@ class OfflineRenderer private constructor(
 
     fun setEffectParameter(index: Int, paramId: Int, value: Float): Result<Unit> =
         call("setEffectParameter") { bridge.offlineSetEffectParameter(it, index, paramId, value) }
+
+    override fun songLoadClip(
+        path: String,
+        sampleRate: Int,
+        regionStartFrame: Long,
+        regionEndFrame: Long,
+        loopFrames: Long,
+    ): Result<Int> = withHandle("songLoadClip") { h ->
+        val outId = IntArray(1) { ISongBridge.SILENCE }
+        val code = bridge.offlineSongLoadClip(h, path, sampleRate, regionStartFrame, regionEndFrame, loopFrames, outId)
+        if (code == NativeErrorCode.SUCCESS.code) {
+            Result.success(outId[0])
+        } else {
+            Result.failure(NativeBridgeException.fromCode(code, "OfflineRenderer.songLoadClip($path)"))
+        }
+    }
+
+    override fun songUnloadClip(clipId: Int): Result<Unit> =
+        call("songUnloadClip") { bridge.offlineSongUnloadClip(it, clipId) }
+
+    override fun songSetSchedule(
+        loopFrames: Long,
+        sectionStarts: LongArray,
+        clips: IntArray,
+        endFrame: Long,
+    ): Result<Unit> = call("songSetSchedule") {
+        bridge.offlineSongSetSchedule(it, loopFrames, sectionStarts, clips, endFrame)
+    }
+
+    override fun songGetSection(): Int = handle.let { if (it == 0L) -1 else bridge.offlineSongGetSection(it) }
+
+    override fun songGetLateAdoptions(): Long =
+        handle.let { if (it == 0L) 0L else bridge.offlineSongGetLateAdoptions(it) }
+
+    override fun songGetPlayFrame(): Long =
+        handle.let { if (it == 0L) -1L else bridge.offlineSongGetPlayFrame(it) }
 
     /**
      * Libera la instancia nativa. Idempotente: la segunda llamada no cruza. Un render
