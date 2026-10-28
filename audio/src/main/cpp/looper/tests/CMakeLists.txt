@@ -63,6 +63,7 @@ add_executable(looper_tests
     test_pre_roll_ring.cpp
     test_pan_lut.cpp
     test_track_analysis.cpp
+    test_song_player.cpp
     ${LOOPER_TESTED_SOURCES}
 )
 
@@ -99,6 +100,7 @@ add_executable(looper_tests_dense
     test_pre_roll_ring.cpp
     test_pan_lut.cpp
     test_track_analysis.cpp
+    test_song_player.cpp
     ${LOOPER_TESTED_SOURCES}
 )
 target_include_directories(looper_tests_dense PRIVATE

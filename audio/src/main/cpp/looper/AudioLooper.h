@@ -9,6 +9,7 @@
 #include "MetronomeClick.h"
 #include "LooperExportTypes.h"
 #include "TrackAnalysis.h"
+#include "SongPlayer.h"
 #include "../dsp/SIMDUtils.h"
 #include <algorithm>
 #include <atomic>
@@ -122,6 +123,11 @@ public:
      */
     void setSampleRate(int sampleRate) {
         if (sampleRate <= 0) return;
+        // Los clips de la cancion estan resampleados al rate viejo: un cambio los invalida y
+        // apaga la agenda (el llamador, configureComponentsWithSampleRate, ya paro el callback).
+        if (sampleRate != mSampleRate.load(std::memory_order_acquire)) {
+            mSong.invalidateForRate(sampleRate);
+        }
         mSampleRate.store(sampleRate, std::memory_order_release);
         mClick.setSampleRate(sampleRate);
     }
@@ -203,7 +209,25 @@ public:
         return true;
     }
 
+    /**
+     * @brief Abre el bloque de la cancion programada: adopta la agenda fresca y fija el frame del
+     *        bloque (REQ-055 S11). AUDIO THREAD. El dueño del reloj lo llama UNA vez por bloque,
+     *        con el play frame al inicio del bloque, ANTES de `mixFxTracks()` y de `process()`:
+     *        las dos pasadas del bloque ven la misma fase. `process()` lo cierra. Sin esta
+     *        llamada (playFrame < 0, o tests que llaman a `process()` solos) la cancion no suena
+     *        y las pistas siguen por `TrackBuffer::mixInto`.
+     */
+    void beginBlock(int64_t playFrame, int numFrames) {
+        mBlockOpen = playFrame >= 0;
+        mSongBlockActive = mBlockOpen && mSong.beginSongBlock(playFrame, numFrames);
+    }
+
     void process(float* audioData, int numFrames, int64_t playFrame = -1) {
+        processImpl(audioData, numFrames, playFrame);
+        endLooperBlock();
+    }
+
+    void processImpl(float* audioData, int numFrames, int64_t playFrame) {
         if (!mEnabled.load(std::memory_order_acquire)) {
             mClick.render(audioData, numFrames);
             return;
@@ -219,9 +243,15 @@ public:
             if (playFrame + numFrames > trigger) {
                 // The trigger falls inside (or before) this block — start now.
                 // We accept up to one block of jitter (≤ ~10ms) for now.
-                startRecording(armed);
-                mArmedTrack.store(-1, std::memory_order_release);
-                mArmedTriggered.fetch_add(1, std::memory_order_relaxed);
+                if (mSong.active()) {
+                    // Carrera con songSetSchedule: el armado llego antes que la agenda y startRecording
+                    // no graba bajo la cancion. Se descarta sin contarlo como disparado.
+                    mArmedTrack.store(-1, std::memory_order_release);
+                } else {
+                    startRecording(armed);
+                    mArmedTrack.store(-1, std::memory_order_release);
+                    mArmedTriggered.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
 
@@ -512,6 +542,7 @@ public:
 
     void startRecording(int trackIndex) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return;
+        if (mSong.active()) return;   // la cancion programada ocupa las pistas (REQ-055 S11)
         const int loopCap = mTracks[trackIndex].getLoopCapacityFrames();
         if (loopCap <= 0) return;
         // Total frames to capture = loop body + wrap-mix tail window. The tail is
@@ -545,6 +576,7 @@ public:
      */
     void startRecordingWithPreRoll(int trackIndex, const float* preRollData, int preRollFrames) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return;
+        if (mSong.active()) return;
         const int capacity = mTracks[trackIndex].getCapacityFrames();
         if (capacity <= 0) return;
         if (preRollFrames < 0) preRollFrames = 0;
@@ -582,6 +614,7 @@ public:
      */
     void armRecording(int trackIndex, int64_t triggerFrame) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return;
+        if (mSong.active()) return;
         if (mTracks[trackIndex].getCapacityFrames() <= 0) return;
         mSyncRefTrack.store(-1, std::memory_order_release);  // plain arm = no phase-lock
         mSyncStartOffset.store(0, std::memory_order_release);
@@ -624,6 +657,7 @@ public:
     int64_t armSyncedToLoop(int trackIndex, int64_t playFrameNow, int latencyFrames,
                             int quantumFrames = 0) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return -1;
+        if (mSong.active()) return -1;
         if (mTracks[trackIndex].getCapacityFrames() <= 0) return -1;
         if (latencyFrames < 0) latencyFrames = 0;
 
@@ -749,6 +783,7 @@ public:
 
     void startOverdub(int trackIndex) {
         if (trackIndex < 0 || trackIndex >= MAX_TRACKS) return;
+        if (mSong.active()) return;
         if (!mTracks[trackIndex].isActive()) return;
         mOverdubbing.store(true, std::memory_order_release);
         mRecordingTrack.store(trackIndex, std::memory_order_release);
@@ -966,6 +1001,45 @@ public:
     bool isExportInProgress() const {
         return mExportInProgress.load(std::memory_order_acquire);
     }
+
+    // ========== Cancion programada (REQ-055 S11) ==========
+    //
+    // Control (hilo de UI / IO), con el mutex propio de la cancion. `offline` = ningun hilo RT
+    // concurrente (render offline): los clips retirados se liberan de inmediato.
+
+    wm::SongStatus songLoadClip(const char* path, int sampleRate, int64_t regionStart,
+                                int64_t regionEnd, int64_t loopFrames, bool offline,
+                                int32_t& outId, bool rtStopped = false) {
+        return mSong.loadClip(path, sampleRate, regionStart, regionEnd, loopFrames,
+                              songContext(offline, rtStopped), outId);
+    }
+
+    wm::SongStatus songUnloadClip(int32_t id, bool offline, bool rtStopped = false) {
+        return mSong.unloadClip(id, songContext(offline, rtStopped));
+    }
+
+    /**
+     * @brief Publica la agenda (`count == 0` la apaga). Habilita el looper: el callback ya no
+     *        retorna antes de mezclar. Mientras haya agenda las tomas no suenan y grabar/armar
+     *        se rechaza; con grabacion armada o en curso, esto da InvalidOperation.
+     */
+    wm::SongStatus songSetSchedule(int64_t loopFrames, const wm::SongSection* sections,
+                                   int32_t count, int64_t endFrame, bool offline,
+                                   bool rtStopped = false) {
+        const wm::SongStatus st = mSong.setSchedule(loopFrames, sections, count, endFrame,
+                                                    songContext(offline, rtStopped));
+        if (st == wm::SongStatus::Ok && count > 0) mEnabled.store(true, std::memory_order_release);
+        return st;
+    }
+
+    int32_t songGetSection() const { return mSong.getSection(); }
+    int64_t songGetLateAdoptions() const { return mSong.getLateAdoptions(); }
+
+    /// Un render offline arranca de cero: sin colas de fundido ni smoothers del render anterior.
+    void resetSongForRender() { mSong.resetVoicesForRender(); }
+
+    wm::SongPlayer& song() { return mSong; }
+    const wm::SongPlayer& song() const { return mSong; }
 
     // ========== Telemetry (lock-free counters) ==========
     //
@@ -1640,6 +1714,11 @@ private:
     // already hold audio, which under-counts the chunk pool's full-capacity
     // pre-reservation until a take is trimmed to its recorded length.
     size_t getTotalReservedBytes() const {
+        return getTracksReservedBytes() + mSong.reservedBytes();
+    }
+
+    // Lo reservado por las tomas solas; los clips de la cancion los cuenta el SongPlayer.
+    size_t getTracksReservedBytes() const {
         size_t total = 0;
         for (int i = 0; i < MAX_TRACKS_HW; ++i) total += mTracks[i].reservedBytes();
         return total;
@@ -1655,6 +1734,26 @@ private:
     }
 
     TrackBuffer mTracks[MAX_TRACKS_HW];
+
+    // Cancion programada. beginBlock()/endLooperBlock() y mSongBlockActive son del audio thread.
+    wm::SongPlayer mSong;
+    static_assert(wm::kSongMaxTracks == MAX_TRACKS_HW,
+                  "las voces de la cancion cubren las mismas pistas que el looper");
+    bool mBlockOpen{false};
+    bool mSongBlockActive{false};
+
+    wm::SongContext songContext(bool offline, bool rtStopped = false) const {
+        wm::SongContext ctx;
+        ctx.sampleRate = mSampleRate.load(std::memory_order_acquire);
+        ctx.maxActiveTracks = mMaxActiveTracks.load(std::memory_order_acquire);
+        ctx.budgetBytes = mMemoryBudgetBytes.load(std::memory_order_acquire);
+        ctx.usedBytes = getTracksReservedBytes();
+        ctx.recordingBusy = mRecordingTrack.load(std::memory_order_acquire) >= 0 ||
+                            mArmedTrack.load(std::memory_order_acquire) >= 0;
+        ctx.immediate = offline;
+        ctx.rtStopped = rtStopped;
+        return ctx;
+    }
 
     // Runtime capabilities (plan §3.2). setCapabilities()/getters are UI thread;
     // mMaxActiveTracks is read from the audio thread each block (atomic).
@@ -1754,10 +1853,25 @@ private:
         bool any = false;
         for (int t = 0; t < maxActive; ++t) {
             if (mTracks[t].sendsToFx() != wantSendToFx) continue;
-            mTracks[t].mixInto(dst, numFrames);
+            if (mSongBlockActive) {
+                // Con la cancion activa la pista no cae al TrackBuffer: la voz de la cancion
+                // respeta el volumen, el paneo y el mute del usuario y el envio a efectos.
+                mSong.renderSongVoice(t, dst, numFrames, mTracks[t].getVolume(),
+                                      mTracks[t].getPan(), mTracks[t].isMuted());
+            } else {
+                mTracks[t].mixInto(dst, numFrames);
+            }
             any = true;
         }
         return any;
+    }
+
+    /// Cierra el bloque abierto por beginBlock(): publica seccion y lo que queda en uso.
+    void endLooperBlock() {
+        if (!mBlockOpen) return;
+        mSong.endSongBlock();
+        mBlockOpen = false;
+        mSongBlockActive = false;
     }
 
     /**
