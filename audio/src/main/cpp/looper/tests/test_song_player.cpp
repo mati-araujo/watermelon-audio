@@ -485,7 +485,7 @@ TEST(SongClip, LoadingFromAFileResamplesBakesAndSounds) {
 // esta activa). Cada caso es un check distinto; el borde exacto (2F) tiene que pasar.
 TEST(SongSchedule, ValidationRejectsMalformedAgendasAndAcceptsTheExactEdge) {
     Rig rig;
-    constexpr int64_t kLoop = 2048;
+    static constexpr int64_t kLoop = 2048;
     const int32_t c0 = rig.load("v0", kLoop, dc(0.1f), kLoop);
     const int32_t other = rig.load("v1", 1024, dc(0.1f), 1024);
     const auto st = [&](std::vector<wm::SongSection> s, int64_t end, int64_t loop = kLoop) {
