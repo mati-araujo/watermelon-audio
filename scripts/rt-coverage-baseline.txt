@@ -356,6 +356,7 @@ audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::processImpl
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::rampSongTaps
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::runSongBusTail
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::songBusFits
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::songBusOutOfControl
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::startRecording
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::triggerClick
 audio/src/main/cpp/looper/ChunkedAudioBuffer.h::ChunkedAudioBuffer::contiguousRun
