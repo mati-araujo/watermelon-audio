@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.23.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.22.1...v2.23.0) (2026-10-28)
+
+
+### Features
+
+* **looper:** API de cancion por JNI e ISongBridge ([6765777](https://github.com/mati-araujo/watermelon-audio/commit/67657775dc811fa543f79c1cd40ea32905dd4dcd))
+* **looper:** canción programada por frame con fundido en las uniones ([4f7b081](https://github.com/mati-araujo/watermelon-audio/commit/4f7b081648f18c2fb25dbc0f95e47d259a3cbf2e))
+* **looper:** canción programada por frame para NoisyPad Studio (S11) ([7da1ef2](https://github.com/mati-araujo/watermelon-audio/commit/7da1ef29e0fbabe6341ecd46702e0bfd8777bda3))
+* **offline:** render offline por handle en la API C y JNI ([fe94e02](https://github.com/mati-araujo/watermelon-audio/commit/fe94e0232cb497877ab31d2e6d8e7febf0c6973a))
+
+
+### Bug Fixes
+
+* **looper:** la región de loop ya no pasa el largo de una pista corta ([144d1bd](https://github.com/mati-araujo/watermelon-audio/commit/144d1bdf093e076fdf10a2dc9a61e3caf64cd186))
+
 ## [2.22.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.22.0...v2.22.1) (2026-10-26)
 
 
