@@ -192,7 +192,7 @@ fun HarnessApp(platform: HarnessPlatform) {
                 // dispositivo, es EL CONTROL DE AC-010.1: no tiene @OptIn, asi
                 // que su compilacion afirma que `TunerFactory` alcanza sin tocar
                 // la superficie interna. Ver el KDoc de TunerControl.
-                TunerControl()
+                TunerControl(readSink = platform.tunerReadSink)
 
                 // Control 10 — SoundFont (MINI-038): los fixtures .sf2/.sf3 generados, y en
                 // Android el selector del sistema por fd.
