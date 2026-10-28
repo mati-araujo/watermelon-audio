@@ -1282,6 +1282,117 @@ WMA_API bool wma_tuner_analyze_buffer_with_candidates(
     const float* candidates_hz, int candidate_count, float* out_values);
 
 /* ================================================================
+ * 12c. Diagnostics, NO CONTRACT (REQ-055 S0)
+ *
+ * Tooling to MEASURE the tuner, not part of what the library offers a
+ * consumer. Anything in this section can change or disappear in any release,
+ * and the Kotlin side marks it @InternalWatermelonApi (error level). Do not
+ * build a feature on it.
+ * ================================================================ */
+
+/**
+ * Number of int64 values wma_tuner_diag_input_dump_stop() writes, in this order:
+ * 0 framesWritten, 1 framesLost, 2 discontinuities, 3 sampleRate, 4 inputSource,
+ * 5 valid (0/1), 6 finalized (0/1).
+ *
+ * framesLost and discontinuities are TOTALS. valid is 1 only if every loss and
+ * discontinuity could be LOCATED in the file (frames overwritten in the analysis
+ * ring before they were copied, the recording queue full, a capture seam): the
+ * "wmad" chunk (version 2) lists each one as a cut (file frame, length; a seam
+ * has an unknown length) and whoever measures the take cuts there. So valid = 1
+ * with framesLost or discontinuities > 0 is a healthy take WITH cuts. Anything
+ * that cannot be located makes it 0: the per-take cap, a write error, a ring
+ * reset, an input source change, the tuner restarted with the take running, a
+ * rate change or unknown rate, more than 256 cuts. valid also needs a known
+ * rate, at least one frame and a file that was written without errors.
+ *
+ * finalized is 1 when the file was closed and named by the rule above ("<path>"
+ * or "<path minus .wav>.invalid.wav"). 0 means closing or renaming failed —
+ * including a file that already had the final name when the take closed, which
+ * is never replaced: the data is in "<path>.part" (or nowhere if even that
+ * could not be written), nothing was written under the final name, and valid
+ * is 0.
+ *
+ * A take never writes more than 2^28 frames (~93 min at 48 kHz): past that,
+ * every frame counts as lost and the take closes invalid.
+ */
+#define WMA_TUNER_DUMP_STATS_VALUES 7
+
+/**
+ * Longest path (in bytes, terminator excluded) wma_tuner_diag_input_dump_start()
+ * accepts. Longer ones are refused: no file system the library runs on can
+ * create them anyway.
+ */
+#define WMA_TUNER_DUMP_PATH_MAX 4096
+
+/**
+ * Capacity (bytes, terminator included) that wma_tuner_diag_input_dump_stop()
+ * requires: the longest file a take can leave, "<path minus .wav>.invalid.wav"
+ * (8 bytes longer than the path), plus the terminator:
+ * WMA_TUNER_DUMP_PATH_MAX + 8 + 1. A literal so every binding reads it as a constant.
+ */
+#define WMA_TUNER_DUMP_PATH_CAPACITY 4105
+
+/**
+ * Start recording EXACTLY what the tuner sees (the mono signal after the input
+ * DSP, at the stamped capture rate) to a float32 WAV. The file is written to
+ * "<path>.part" and named when the take is stopped: "<path>" if healthy,
+ * "<path minus .wav>.invalid.wav" if audio was lost or the capture was
+ * discontinuous in a way the file cannot locate. A WAV with holes never carries
+ * a healthy name unless its "wmad" chunk declares every one of them (see
+ * WMA_TUNER_DUMP_STATS_VALUES).
+ *
+ * Does NOT start the tuner: with no tuner running no audio reaches the
+ * recording. Returns true even then; the take just closes invalid.
+ *
+ * Never overwrites, truncates or follows anything already on disk: it refuses to
+ * start if "<path>", its ".invalid.wav" name or "<path>.part" already exist (a
+ * symlink included).
+ *
+ * @param path  UTF-8, must end in ".wav" (lowercase), at most
+ *              WMA_TUNER_DUMP_PATH_MAX bytes.
+ * @return false for a null engine, a null or empty path, a path that does not
+ *         end in ".wav" or is too long, a take already in progress, a file
+ *         that cannot be created or already exists, or a request the analysis
+ *         thread did not apply in time.
+ *
+ *         A false leaves NOTHING of the refused take on disk: no "<path>.part",
+ *         no named file. A false never touches a take already in progress.
+ *         One case leaves a take running: the analysis thread applied neither
+ *         the arming nor the disarming in time, so the ".part" may still be
+ *         written to and cannot be removed. That take is still this path's;
+ *         stop it (wma_tuner_diag_input_dump_stop() says which file
+ *         it left). If removing the ".part" of a refused take fails, the
+ *         failure is logged with the file's name.
+ */
+WMA_API bool wma_tuner_diag_input_dump_start(WmaEngine* engine, const char* path);
+
+/**
+ * Stop the take, close the file and report it: the stats and the file the take
+ * ACTUALLY left on disk, from the native side — the requested path if valid,
+ * its ".invalid.wav" name if not, "<path>.part" if it could not be named
+ * (finalized = 0).
+ *
+ * Use out_path rather than rebuilding the name from the path you passed to
+ * start: after a start that returned false with a take still running, the
+ * running take is not necessarily the last path you asked for.
+ *
+ * @param[out] out_values  WMA_TUNER_DUMP_STATS_VALUES int64 values. Exactly that
+ *                         many are written, even if count is larger.
+ * @param count            capacity of out_values; must be >= the constant above.
+ * @param[out] out_path    NUL-terminated UTF-8, the same bytes start received
+ *                         plus the suffix.
+ * @param path_capacity    capacity of out_path; must be >= WMA_TUNER_DUMP_PATH_CAPACITY.
+ * @return false (out_values and out_path untouched, take left running) for a
+ *         null engine, out_values or out_path, a too-small count or
+ *         path_capacity, no take in progress, or a disarm the analysis thread
+ *         did not apply in time. Out of memory while closing is the one false
+ *         that may have closed the take.
+ */
+WMA_API bool wma_tuner_diag_input_dump_stop(WmaEngine* engine, int64_t* out_values, int count,
+                                            char* out_path, int path_capacity);
+
+/* ================================================================
  * 13. Dual Touch
  * ================================================================ */
 

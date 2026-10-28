@@ -194,6 +194,10 @@ fun HarnessApp(platform: HarnessPlatform) {
                 // la superficie interna. Ver el KDoc de TunerControl.
                 TunerControl(readSink = platform.tunerReadSink)
 
+                // Control 9b — grabar lo que el afinador ve (REQ-055). Aparte de TunerControl a
+                // proposito: ese archivo no puede tener @OptIn; este llega al puente interno.
+                TunerInputDumpControl(platform.dumpDir, platform.smokeSink)
+
                 // Control 10 — SoundFont (MINI-038): los fixtures .sf2/.sf3 generados, y en
                 // Android el selector del sistema por fd.
                 SoundFontControl(sfPort, sfCheck, fixtures, uiReporter, platform.soundFontExtras)

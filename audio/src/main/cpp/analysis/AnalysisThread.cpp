@@ -1,4 +1,5 @@
 #include "AnalysisThread.h"
+#include "TunerInputDump.h"
 
 #include <algorithm>
 #include <chrono>
@@ -13,6 +14,10 @@ constexpr float kSilenceFloor = 0.001f;
 /// Cada cuanto vuelve a mirar el ring cuando no habia nada. 5 ms es holgado
 /// contra los ~170 ms que el ring aguanta antes de pisar.
 constexpr auto kIdleNap = std::chrono::milliseconds(5);
+/// Cuanto espera el control a que el lazo aplique un armado/desarmado del volcado. Con el lazo
+/// girando se aplica en una vuelta (~5 ms): llegar al techo es un hilo trabado, no una demora.
+constexpr auto kDumpMailboxCeiling = std::chrono::seconds(2);
+constexpr auto kDumpMailboxPoll = std::chrono::milliseconds(1);
 }  // namespace
 
 void AnalysisThread::start(int captureSampleRate) {
@@ -26,7 +31,35 @@ void AnalysisThread::start(int captureSampleRate) {
     if (captureSampleRate > 0 && mRing.captureRate() <= 0) {
         mRing.setCaptureRate(captureSampleRate);
     }
+    // Un afinador parado y vuelto a arrancar con una toma viva EMPALMA dos tramos: mientras
+    // estuvo parado nadie escribio al ring, y el cursor del volcado seguiria como si nada. Una
+    // toma que todavia no recibio frames no tiene nada que empalmar (armar el volcado antes de
+    // arrancar el afinador es el orden natural).
+    if (mDump != nullptr && mDump->framesQueued() > 0) mDump->noteInputDiscontinuity();
     mThread = std::thread([this] { drainLoop(); });
+}
+
+bool AnalysisThread::setInputDump(TunerInputDump* dump) noexcept {
+    if (!mRunning.load(std::memory_order_acquire)) {
+        // Parado, el lazo no corre: se aplica aca. Un pedido que quedo sin aplicar (techo vencido)
+        // deja de valer, o el proximo `start()` armaria un volcado que el control ya cerro.
+        mDumpSeenSeq = mDumpRequestSeq.load(std::memory_order_acquire);
+        applyInputDump(dump);
+        return true;
+    }
+    mDumpRequest.store(dump, std::memory_order_release);
+    const uint64_t seq = mDumpRequestSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const auto deadline = std::chrono::steady_clock::now() + kDumpMailboxCeiling;
+    while (mDumpAppliedSeq.load(std::memory_order_acquire) < seq) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(kDumpMailboxPoll);
+    }
+    return true;
+}
+
+void AnalysisThread::applyInputDump(TunerInputDump* dump) noexcept {
+    mDump = dump;
+    if (dump != nullptr) dump->armAtRing(mRing);
 }
 
 void AnalysisThread::stop() {
@@ -63,6 +96,17 @@ void AnalysisThread::drainLoop() {
 AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
     const float nan = std::numeric_limits<float>::quiet_NaN();
     {
+        // --- diagnostico: el buzon del volcado (REQ-055 S0) -------------------
+        //
+        // Sin toma armada esto es UN load atomico por vuelta. Va al tope, antes que todo lo
+        // demas, para que lo escrito despues del armado entre completo en la toma.
+        const uint64_t dumpSeq = mDumpRequestSeq.load(std::memory_order_acquire);
+        if (dumpSeq != mDumpSeenSeq) {
+            mDumpSeenSeq = dumpSeq;
+            applyInputDump(mDumpRequest.load(std::memory_order_acquire));
+            mDumpAppliedSeq.store(dumpSeq, std::memory_order_release);
+        }
+
         // --- la configuracion se mira ANTES de drenar ------------------------
         //
         // El orden no es cosmetico: al cambiar el objetivo hay que descartar lo
@@ -88,6 +132,9 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
         // siguiera acumulando fase entre dos señales distintas publicaria un
         // numero perfectamente formado que no mide nada.
         if (mSourceChanged.exchange(false, std::memory_order_acq_rel)) {
+            // El ring ve contiguos los frames de las dos fuentes: solo el volcado puede avisar
+            // que el WAV mezclaria dos senales bajo un solo header.
+            if (mDump != nullptr) mDump->noteInputDiscontinuity();
             mRing.skipToNewest();
             mStrobe.reset();
             mDetector.reset();
@@ -138,6 +185,11 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             if (target > 0.0) mRing.skipToNewest();
         }
         const bool measuring = mPreparedRate > 0 && mAppliedTarget > 0.0;
+
+        // El volcado copia del ring con su PROPIO cursor, ANTES de que el analisis lo toque: los
+        // `skipToNewest()` de arriba descartan lo que el estimador no debe ver, no lo que el
+        // microfono entrego. No toca mRead/mDropped/mTorn ni mScratch.
+        if (mDump != nullptr) mDump->captureFromRing(mRing, rate);
 
         const int got = mRing.read(mScratch.data(), kDrainFrames);
         mTicks.fetch_add(1, std::memory_order_relaxed);

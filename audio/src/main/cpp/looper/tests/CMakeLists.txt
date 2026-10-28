@@ -38,6 +38,7 @@ set(LOOPER_TESTED_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/OfflineAnalysis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/AnalysisThread.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/AnalysisRing.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/TunerInputDump.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/PhaseSlopeEstimator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/StrobeTracker.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../analysis/InharmonicityEstimator.cpp
