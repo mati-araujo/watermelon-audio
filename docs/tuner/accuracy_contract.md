@@ -101,9 +101,11 @@ sigue publicando, así que el usuario conserva "qué nota es" cuando pierde "cu�
 **Un medidor de ±50 cents existe en toda cuerda del catálogo (B0 a E5), a 44,1 y 48 kHz**
 (`InterleavedGrids.EveryCatalogStringIsMeasuredWithinPlusMinusFiftyCents`; el borde de E5 a
 44,1 kHz —lee a ±50, no a ±51— lo fija `TheEdgeOfTheCatalogE5At44kReadsAtFiftyAndNotAtFiftyOne`),
-**salvo un hueco declarado** a 44,1 kHz (no pasa a 48 kHz): B0 desde +25 cents y E1 por encima de
-+25 cents no tienen lectura fina (la compuerta de tendencia reinicia en bucle; preexistente). Lo fija
-`InterleavedGrids.TheDeclaredGapB0AndE1Above25CentsAt44kHasNoFineReadingButTheCoarseOne`, que da rojo el día que se cierre.
+**salvo un hueco declarado** a 44,1 kHz (no pasa a 48 kHz): B0 y E1 desde +25 cents, con el
++25 incluido (D30), quedan fuera de la promesa: en los casos medidos no hay lectura fina porque la
+compuerta de tendencia reinicia en bucle (preexistente). E1 a +25 c sí lee, pero el contrato no lo
+promete. Lo fija
+`InterleavedGrids.TheDeclaredGapB0AndE1From25CentsAt44kHasNoFineReadingButTheCoarseOne`, que da rojo el día que se cierre.
 Con 1 o 2 parciales admitidos —el caso común a ±50 c en las agudas— la σ es la de antes, todavía
 optimista: su verificación es de REQ-058.
 

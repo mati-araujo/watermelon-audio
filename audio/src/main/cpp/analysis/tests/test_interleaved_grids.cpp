@@ -984,7 +984,7 @@ TEST(InterleavedGrids, TheUsableRangeIsTheDenseFormulaWithKappaNineTenths) {
 
 /**
  * AC-057.3 — «medir dentro de ±50 c en toda cuerda del catalogo (B0 a E5) a 44,1 y 48 kHz, salvo
- * B0 y E1 por encima de +25 c a 44,1 kHz» (D30, ver el test del hueco).
+ * B0 y E1 desde +25 c a 44,1 kHz» (D30, +25 incluido; humano, 2026-10-28; ver el test del hueco).
  *
  * Catalogo + E5 × 44,1/48 k × {±50, ±25} c × B ∈ {0, 1e-4}, ruido 0,005 (uniforme, semilla fija),
  * 3 s, bloques de 256 y el control grueso simulado CON su error de peor caso (0,21 c hacia el
@@ -1011,12 +1011,11 @@ TEST(InterleavedGrids, EveryCatalogStringIsMeasuredWithinPlusMinusFiftyCents) {
             for (const double dev : {+50.0, -50.0, +25.0, -25.0}) {
                 for (const double B : {0.0, 1.0e-4}) {
                     // El hueco declarado (D30): se excluye EXPLICITAMENTE y lo fija otro test.
-                    // E1 se excluye solo por ENCIMA de +25 c (a +25 c lee 25,000: AC-057.3 dice
-                    // «por encima de +25 c»). B0 se excluye tambien EN +25 c: DESVIO PENDIENTE DE
-                    // LA SPEC —con la señal de este test B0 a +25 c no lee con B = 0 ni 1e-4
+                    // AC-057.3 / D30 excluyen B0 y E1 DESDE +25 c, con el +25 incluido (humano,
+                    // 2026-10-28): con la señal de este test B0 a +25 c no lee con B = 0 ni 1e-4
                     // (identico en HEAD: la compuerta de tendencia reinicia en bucle por el rizado
-                    // de las graves) y D30 lo midio dentro del hueco con B = 5e-4—; lo decide el
-                    // humano via el lider. El hueco depende de la señal, no solo de la cuerda.
+                    // de las graves). E1 a +25 c SI lee (25,000), asi que se sigue verificando aca:
+                    // el test pide mas que el AC. El hueco depende de la señal, no solo de la cuerda.
                     const bool isB0 = std::string(s.name) == "bajo B0";
                     const bool isE1 = std::string(s.name) == "bajo E1";
                     const bool declaredGap = rate == 44100 && ((isB0 && dev >= 25.0) || (isE1 && dev > 25.0));
@@ -1132,7 +1131,7 @@ std::vector<float> architectString(int rate, double f0, double cents, double B, 
 }
 
 /**
- * AC-057.3 / D30 — EL HUECO DECLARADO Y PREEXISTENTE: B0 y E1 por encima de +25 c a 44,1 kHz no
+ * AC-057.3 / D30 — EL HUECO DECLARADO Y PREEXISTENTE: B0 y E1 desde +25 c a 44,1 kHz no
  * tienen lectura fina (la compuerta de tendencia reinicia en bucle por el rizado de las graves),
  * pero la gruesa SI publica. A 48 kHz no pasa.
  *
@@ -1150,7 +1149,7 @@ std::vector<float> architectString(int rate, double f0, double cents, double B, 
  * Mutante: ninguno de codigo (fija un hueco que existe hoy). Si una rama nueva lo cerrara, este
  * test avisa que la excepcion de la spec ya no corresponde.
  */
-TEST(InterleavedGrids, TheDeclaredGapB0AndE1Above25CentsAt44kHasNoFineReadingButTheCoarseOne) {
+TEST(InterleavedGrids, TheDeclaredGapB0AndE1From25CentsAt44kHasNoFineReadingButTheCoarseOne) {
     // AC-057.3 (D30)
     constexpr int kRate = 44100;
     constexpr int kFrames = 6 * kRate;
