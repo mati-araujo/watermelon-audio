@@ -1775,11 +1775,13 @@ public:
         if (frames > capacityFrames.load()) ++overruns;
         std::fill(fxOut, fxOut + static_cast<size_t>(frames) * 2, returnLevel);
     }
+    float spaceBusPreReturnPeak() const override { return preReturnPeak; }
     void resetSpaceBus() override { ++resets; }
 
     std::atomic<int> capacityFrames;
     std::atomic<int> preparedRate{0};
     float returnLevel = 0.0f;   // lo que devuelve el bus en cada muestra
+    float preReturnPeak = 0.0f; // lo que el bus reporta tener adentro, antes de sus retornos
     int runs = 0;
     int overruns = 0;
     int resets = 0;
@@ -1831,6 +1833,23 @@ TEST(SongBus, PrepareMixBufferGrowsTheBusSoALargeBlockStillRunsIt) {
     EXPECT_EQ(bus.runs, 1);
     EXPECT_EQ(bus.overruns, 0);
     EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 0);
+}
+
+// Bug plausible (hallazgo 4 del re-review): publishSongBus fijaba la capacidad en lo que le pasaba el
+// llamador (4096) aunque prepareMixBuffer ya hubiera dimensionado el looper mas grande (framesPerBurst
+// > 1024). Un bus creado DESPUES de prepareMixBuffer(8192) tiene que procesar un bloque de 6000.
+TEST(SongBus, ABusCreatedAfterPrepareMixBufferTakesTheLargerCapacity) {
+    Rig rig;
+    rig.looper.prepareMixBuffer(8192);
+    RecordingBus bus(256);
+    rig.looper.publishSongBus(&bus, 4096);
+    EXPECT_GE(bus.spaceBusCapacityFrames(), 8192);
+    rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+    playSongFromTheStart(rig);
+    (void)rig.render(0, 6000, 6000);
+    EXPECT_EQ(bus.runs, 1);
+    EXPECT_EQ(bus.overruns, 0);
+    EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 0) << "el bloque de 6000 salto el bus";
 }
 
 // Bug plausible (hallazgo 3): el bus se prepara con un rate leido FUERA del lock de setSampleRate y
@@ -1939,27 +1958,47 @@ TEST(SongBusTail, AQuietTailStopsTheBusAfterTwoAndAHalfSecondsWithoutResettingIt
     EXPECT_EQ(bus.resets, 0);
 }
 
-// Bug plausible: sin tope, un eco que no decae (feedback alto, delay largo) mantiene el bus vivo
-// para siempre; y al cortarlo con eco audible, reactivar la cancion lo haria sonar de golpe. El
-// tope es de 30 s y la reactivacion posterior reinicia el bus y reaplica sus parametros.
-TEST(SongBusTail, ALoudTailIsCappedAtThirtySecondsAndTheBusIsResetOnReactivation) {
+// Bug plausible (hallazgos 2 y 3 del re-review): un tope por tiempo cortaba una cola audible (sin
+// fundido) y obligaba a vaciar las lineas del bus (~1,5 MB de memset) en el RT al reactivar. Sin
+// tope: una cola que sigue audible a los 30 s sigue sonando, y reactivar la cancion NO reinicia el
+// bus (ni un solo reset en el RT).
+TEST(SongBusTail, ALoudTailIsNotCutAtThirtySecondsAndReactivatingNeverResetsTheBus) {
     Rig rig;
     RecordingBus bus(kTailBlock);
     int64_t next = playAndRemoveSong(rig, bus, 0.5f);
     const int runsAtEnd = bus.runs;
-    (void)rig.render(next, kSR * 40, kTailBlock);
+    const std::vector<float> out = rig.render(next, kSR * 40, kTailBlock);
     next += kSR * 40;
-    const int tailRuns = bus.runs - runsAtEnd;
-    EXPECT_GE(tailRuns * kTailBlock, kSR * 30 - kPreTail) << "el tope corto antes de 30 s";
-    EXPECT_LE(tailRuns * kTailBlock, kSR * 30 + kTailBlock) << "sin tope: el bus sigue vivo";
-    EXPECT_EQ(bus.resets, 0);
-    const int appliesBefore = bus.applies;
+    EXPECT_GE((bus.runs - runsAtEnd) * kTailBlock, kSR * 40 - kPreTail) << "el bus se corto con la cola audible";
+    float last = 0.0f;
+    for (size_t i = out.size() - 2 * kTailBlock; i < out.size(); ++i) last = std::max(last, std::abs(out[i]));
+    EXPECT_GT(last, 0.1f) << "la cola dejo de sonar";
     const int32_t id = rig.load("tail_dc3", kBusLoop, dc(0.1f), kBusLoop);
     ASSERT_EQ(rig.schedule(kBusLoop, {sec(next + 2 * kBusLoop, id)}, next + 6 * kBusLoop),
               wm::SongStatus::Ok);
     (void)rig.render(next, kBusLoop * 4, kTailBlock);
-    EXPECT_EQ(bus.resets, 1) << "reactivar tras el tope no reinicio el bus: suena el eco viejo";
-    EXPECT_GT(bus.applies, appliesBefore) << "tras reiniciar hay que reaplicar los parametros";
+    EXPECT_EQ(bus.resets, 0) << "reactivar vacio el bus en el RT";
+}
+
+// Bug plausible (hallazgo 1 del re-review): el silencio se media DESPUES de los retornos. Con un
+// retorno en 0 la salida es muda pero las lineas internas siguen llenas: el bus se apagaba a los
+// 2,5 s sin marcarse viejo y su realimentacion quedaba congelada. Un bus que dice tener contenido
+// (pico antes de retornos) sigue vivo aunque su salida sea 0; cuando lo vacia, se apaga.
+TEST(SongBusTail, ABusWithSilentOutputButFullLinesStaysAlive) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    bus.preReturnPeak = 0.5f;
+    int64_t next = playAndRemoveSong(rig, bus, 0.0f);
+    const int runsAtEnd = bus.runs;
+    (void)rig.render(next, kSR * 10, kTailBlock);
+    next += kSR * 10;
+    EXPECT_GE((bus.runs - runsAtEnd) * kTailBlock, kSR * 10 - kPreTail) << "se apago con las lineas llenas";
+    bus.preReturnPeak = 0.0f;
+    const int runsDrained = bus.runs;
+    (void)rig.render(next, kSR * 10, kTailBlock);
+    const int drainedRuns = bus.runs - runsDrained;
+    EXPECT_GE(drainedRuns * kTailBlock, kSR * 5 / 2 - kPreTail);
+    EXPECT_LE(drainedRuns * kTailBlock, kSR * 5 / 2 + kTailBlock) << "vacio y no se apaga";
 }
 
 // Bug plausible: un bloque mayor que la capacidad del bus en plena cola lo corre igual (el mismo

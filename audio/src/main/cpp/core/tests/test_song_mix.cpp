@@ -158,6 +158,36 @@ protected:
         return r;
     }
 
+    /// Renderiza `frames` con taps y descarta todo: para dejar pasar una cola larga sin guardarla.
+    void skip(WmaEngine* e, int64_t frames) {
+        std::vector<float> mix(kBlock * 2), fx(kBlock * 2), tr(kBlock * 2);
+        for (int64_t done = 0; done < frames; done += kBlock) {
+            const int n = static_cast<int>(std::min<int64_t>(kBlock, frames - done));
+            ASSERT_EQ(wma_offline_render_taps(e, mix.data(), fx.data(), tr.data(), 1, n), WMA_OK);
+        }
+    }
+
+    /// Una cancion de una pista con envio 1 y un delay de 250 ms con la realimentacion al maximo
+    /// (0,95); la agenda ya se saco. Es la sonda del review: cola de ~67 s.
+    WmaEngine* echoingEngineWithoutSchedule(const std::string& name, float delayReturn) {
+        const std::string pa = tone(name, 100.0f, 0.0f);
+        WmaEngine* e = offlineEngine();
+        const int32_t a = loadClip(e, pa);
+        EXPECT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 1.0f), WMA_OK);
+        mEchoSpace = space(0.0f, delayReturn);
+        mEchoSpace.delay_time_ms = 250.0f;
+        mEchoSpace.delay_feedback = 0.95f;
+        EXPECT_EQ(wma_mix_set_space(e, &mEchoSpace), WMA_OK);
+        const int64_t p0 = wma_transport_get_play_frame(e);
+        const WmaSongSection s = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
+        EXPECT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 600 * kLoop), WMA_OK);
+        (void)renderTaps(e, 8, 1);
+        EXPECT_EQ(wma_song_set_schedule(e, kLoop, nullptr, 0, 0), WMA_OK);
+        return e;
+    }
+
+    WmaMixSpace mEchoSpace{};
+
     /// Cancion de dos pistas: arranca a los 2 loops y dura 6.
     void scheduleSong(WmaEngine* e, int32_t a, int32_t b) {
         const int64_t p0 = wma_transport_get_play_frame(e);
@@ -480,6 +510,62 @@ TEST_F(SongMix, AfterTheTailIsGoneReactivatingWithSendZeroGivesNoFx) {
     EXPECT_GT(peakOf(back.tracks[0]), 0.1f) << "la cancion no suena: el test no prueba nada";
 }
 
+// Defecto (hallazgo 1 del re-review): el silencio se media DESPUES de los retornos. Con el retorno
+// del delay en 0 el bus se apagaba a los 2,5 s sin marcarse viejo, con la realimentacion (0,95) de
+// la linea congelada; al subir el retorno y reprogramar con envio 0 volvia el eco (pico 0,328 en la
+// sonda). Midiendo la salida 100 % wet, el bus sigue hasta que las lineas decaen de verdad.
+TEST_F(SongMix, AReturnAtZeroDoesNotSwitchOffABusWhoseLinesAreStillFull) {
+    WmaEngine* e = echoingEngineWithoutSchedule("h1", 1.0f);
+    skip(e, kRate / 2);
+    WmaMixSpace muted = mEchoSpace;
+    muted.delay_return = 0.0f;
+    ASSERT_EQ(wma_mix_set_space(e, &muted), WMA_OK);
+    skip(e, static_cast<int64_t>(kRate) * 90);   // 0,95^n < 1e-6 tarda ~67 s
+    ASSERT_EQ(wma_mix_set_space(e, &mEchoSpace), WMA_OK);
+    ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 0.0f), WMA_OK);
+    const int64_t p1 = wma_transport_get_play_frame(e);
+    const WmaSongSection again = section2(p1 + 2 * kLoop, 0, WMA_SONG_SILENCE);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &again, 1, p1 + 600 * kLoop), WMA_OK);
+    const Rendered back = renderTaps(e, 4, 1);
+    EXPECT_LT(peakOf(back.fx), 1e-6f) << "volvio el eco congelado de la linea del delay";
+}
+
+// El mismo escenario con el retorno mudo sin pasar de ahi: si solo se mira la salida, el bus se
+// apaga a los 2,5 s y la linea queda congelada; con la medicion antes del retorno sigue corriendo y
+// decae. Se ve en el tap de FX cuando el retorno vuelve a 1 a los 10 s: el eco que suena es el
+// decaido (0,95^40 = 0,13 del inicial), no el congelado.
+TEST_F(SongMix, AMutedReturnKeepsTheLineDecayingInsteadOfFreezingIt) {
+    WmaEngine* e = echoingEngineWithoutSchedule("h1b", 1.0f);
+    const Rendered before = renderTaps(e, 5, 1);
+    const float level = peakOf(before.fx);
+    ASSERT_GT(level, 0.3f);
+    WmaMixSpace muted = mEchoSpace;
+    muted.delay_return = 0.0f;
+    ASSERT_EQ(wma_mix_set_space(e, &muted), WMA_OK);
+    skip(e, static_cast<int64_t>(kRate) * 10);   // 40 ecos de 250 ms: 0,95^40 = 0,13
+    ASSERT_EQ(wma_mix_set_space(e, &mEchoSpace), WMA_OK);
+    const Rendered after = renderTaps(e, 12, 1);
+    EXPECT_GT(peakOf(after.fx), 0.02f) << "la linea se vacio o se corto";
+    EXPECT_LT(peakOf(after.fx), 0.3f * level) << "la linea quedo congelada: no decayo mientras estuvo muda";
+}
+
+// Defecto (hallazgo 3 del re-review): una cola que sigue audible a los 30 s se cortaba en el tope sin
+// fundido (un salto del tamano de la muestra). Sin tope por tiempo ya no hay corte audible: el eco
+// (0,95 por 250 ms) sigue pasando por los 30 s sin discontinuidad ni vaciado del bus.
+TEST_F(SongMix, ALoudTailGoesPastThirtySecondsWithoutAStep) {
+    WmaEngine* e = echoingEngineWithoutSchedule("h3", 1.0f);
+    skip(e, static_cast<int64_t>(kRate) * 29 + kRate / 2);
+    const Rendered around = renderTaps(e, 20, 1);   // 29,5 s .. 31,5 s
+    const float level = peakOf(around.fx);
+    EXPECT_GT(level, 1e-4f) << "la cola dejo de sonar antes de los 31 s";
+    double step = 0.0;
+    for (size_t i = 2; i < around.fx.size(); ++i) {
+        step = std::max(step, double(std::abs(around.fx[i] - around.fx[i - 2])));
+    }
+    EXPECT_LT(step, 0.2 * level) << "salto en el fx: un corte sin fundido";
+    EXPECT_GT(peakOf(around.fx, around.fx.size() - 2 * kBlock), 1e-5f) << "se corto antes del final";
+}
+
 // Defecto (BLOQUEANTE del review): prepareMixBuffer agranda los buffers del looper pero no el bus; un
 // bloque mayor que el delay del bus escribe fuera de memoria (heap overflow bajo ASan en
 // DelayEffect::process) y el contador de saltos queda en 0. El export offline no pasa de 4096
@@ -639,6 +725,56 @@ TEST_F(SongMix, APassWithEightTrackTapsRendersAtLeastTenTimesFasterThanRealTime)
                 kTracks, kBlockFrames, factor, cpu);
     RecordProperty("real_time_factor", std::to_string(factor));
     EXPECT_GE(factor, kMinRealTimeFactor);
+}
+
+// Defecto (hallazgo 2 del re-review): la cola no tiene tope, asi que el bus corre con envio cero
+// hasta que sus lineas se agotan (Ambient a 60 bpm: delay 1,5 s, realimentacion 0,5, ~35 s). Lo que
+// cuesta mantenerlo vivo por callback de 256 frames tiene que ser una fraccion chica del periodo.
+// CPU DEL HILO; Debug y sanitizers: SKIPPED. Imprime `[ COLA    ]`.
+TEST_F(SongMix, KeepingTheBusAliveForTheTailCostsAFractionOfTheCallbackPeriod) {
+    WMA_SKIP_IF_SANITIZED();
+#if !defined(__OPTIMIZE__)
+    GTEST_SKIP() << "el costo se mide en un build optimizado (la suite del gate es Debug)";
+#endif
+    constexpr int kCb = 256;
+    constexpr int kFive = 5 * kRate / kCb;
+    WmaEngine* e = wma_engine_create();
+    mEngines.push_back(e);
+    wma_set_audio_mode(e, 0);
+    wma_set_synth_volume(e, 0.0f);
+    ASSERT_EQ(wma_offline_start(e, kRate, kCb), WMA_OK);
+    ASSERT_EQ(wma_mix_set_output_profile(e, WMA_OUTPUT_RAW), WMA_OK);
+    const int32_t a = loadClip(e, tone("cola", 100.0f, 0.0f));
+    ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 1.0f), WMA_OK);
+    WmaMixSpace sp = space(0.45f, 0.45f);
+    sp.delay_time_ms = 1500.0f;
+    sp.delay_feedback = 0.5f;
+    ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+    const int64_t p0 = wma_transport_get_play_frame(e);
+    const WmaSongSection s = section2(p0 + kLoop, a, WMA_SONG_SILENCE);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 600 * kLoop), WMA_OK);
+    std::vector<float> mix(kCb * 2), fx(kCb * 2), tr(kCb * 2);
+    auto cpuUs = [&](int callbacks) {
+        timespec t0{}, t1{};
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t0);
+        for (int i = 0; i < callbacks; ++i) {
+            EXPECT_EQ(wma_offline_render_taps(e, mix.data(), fx.data(), tr.data(), 1, kCb), WMA_OK);
+        }
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t1);
+        const double s = static_cast<double>(t1.tv_sec - t0.tv_sec) + static_cast<double>(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+        return s * 1e6 / callbacks;
+    };
+    (void)cpuUs(2 * kRate / kCb);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, nullptr, 0, 0), WMA_OK);
+    (void)cpuUs(2);
+    const double live = cpuUs(kFive);   // la cola suena y el bus corre
+    (void)cpuUs(100 * kRate / kCb);     // agotada
+    const double idle = cpuUs(kFive);   // el bus ya se apago
+    const double period = 1e6 * kCb / kRate;
+    std::printf("[ COLA    ] callback de %d frames: cola viva %.2f us, bus apagado %.2f us (periodo %.0f us)\n",
+                kCb, live, idle, period);
+    RecordProperty("tail_cb_us", std::to_string(live));
+    EXPECT_LT(live - idle, 0.10 * period) << "mantener el bus vivo cuesta mas del 10 % del periodo";
 }
 
 namespace {

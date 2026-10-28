@@ -84,15 +84,23 @@ entrada da la misma salida con cualquier tamano de bloque.
   maximo de su linea hasta la proxima llamada de `wma_mix_set_space`.
 - **La cola del bus (D-S12-18).** Con la cancion inactiva (agenda sacada o transporte parado) el bus
   sigue procesando **con envio cero**: la cola suena y decae como en un DAW, en vez de cortarse en seco
-  y quedar congelada hasta la proxima activacion. Se apaga cuando el retorno FX queda bajo -120 dBFS
-  (pico de bloque < 1e-6) durante **2,5 s seguidos** (mas que el delay maximo de 2 s, para no confundir
-  el hueco entre dos ecos con el final) o al llegar al **tope de 30 s** de cola. Si la cancion se
-  reactiva durante la cola, la cola sigue (no se reinicia en el RT). Un apagado por silencio no vacia
-  nada (el residuo es < -120 dBFS); un apagado **por tope** (eco todavia audible) deja el bus "viejo" y
-  la primera activacion siguiente lo reinicia y reaplica sus parametros: es el unico `resetSpaceBus` en
-  el RT (memset de la linea, una vez, en un caso raro). El tap de FX recibe el retorno de la cola, asi
-  que `premezcla == Σ pistas + FX` tambien ahi. Offline: `resetSongForRender` reinicia todo (instancia
-  fresca) y el determinismo no cambia.
+  y quedar congelada hasta la proxima activacion. Se apaga cuando **todo lo que hay dentro del bus** queda
+  bajo -120 dBFS (pico de bloque < 1e-6) durante **2,5 s seguidos** (mas que el delay maximo de 2 s, para
+  no confundir el hueco entre dos ecos con el final). El silencio se mide **antes de los retornos** (la
+  salida 100 % wet de la reverb y del delay, `spaceBusPreReturnPeak`): con un retorno en 0 la salida es
+  muda pero las lineas pueden seguir llenas, y apagar ahi dejaba la realimentacion congelada (a 0,95 el
+  eco volvia al reactivar). **No hay tope por tiempo**: cortar una cola audible obligaria a vaciar las
+  lineas (`resetSpaceBus`, ~1,5 MB de memset) en el callback al reactivar, y Ambient (delay 1,5 tiempos,
+  realimentacion 0,5) a <= 60 bpm ya pasaba los 30 s del tope viejo. La realimentacion maxima (0,95) agota
+  el bus sola (~67 s por cada 250 ms de delay; el peor caso, 2 s, ~9 min). Como el unico corte es el de
+  silencio (< -120 dBFS, con retornos <= 1), no hay corte audible y no hace falta fundido. Si la cancion
+  se reactiva durante la cola, la cola sigue (no se reinicia). **Costo de mantenerlo vivo** (medido en
+  Release, ver abajo): ~24 us por callback de 256 frames, 0,44 % del periodo. El unico `resetSpaceBus`
+  que queda en el RT es el de la falta contada de un bloque mayor que la capacidad del bus (el bus se da
+  por viejo y la proxima activacion lo reinicia); con la capacidad de `publishSongBus` no ocurre por
+  configuracion, y esa falta ya salta el bloque (sin fundido: no hay estado del bus con que hacerlo). El
+  tap de FX recibe el retorno de la cola, asi que `premezcla == Σ pistas + FX` tambien ahi. Offline:
+  `resetSongForRender` reinicia todo (instancia fresca) y el determinismo no cambia.
 - **Los taps** se toman despues del master del looper (cada uno con la misma rampa), asi que
   `premezcla == Σ pistas + FX` por construccion del grafo, hasta el redondeo de float (~1e-7: la suma se
   hace en otro orden). Un bloque sin cancion deja en cero los taps de pista; el de FX lleva la cola del bus mientras dura.
@@ -188,7 +196,9 @@ arbol de 2.23.0 (un ejecutable `golden_gen` como `sf_render_preset`), no contra 
 | el envio apagado no corta la cola ni alimenta el bus para siempre | `TurningTheSendOffLetsTheTailDecay...` |
 | la cola sigue tras sacar la agenda y decae; entra al tap de FX | `TheTailKeepsDecayingAfterTheScheduleIsRemoved`, `SongBusTail.TheBusKeepsRunning...`, `SongBusTail.TheTailReturnReachesTheOutput` |
 | reprogramar durante la cola no la encuentra congelada ni reiniciada | `AScheduleReprogrammedDuringTheTailFindsTheDecayedTail...` |
-| la cola se apaga a los -120 dBFS (2,5 s) o al tope (30 s); el tope reinicia al reactivar | `SongBusTail.AQuietTailStops...`, `SongBusTail.ALoudTailIsCapped...`, `AfterTheTailIsGoneReactivating...` |
+| la cola se apaga a los -120 dBFS (2,5 s), medido antes de los retornos; sin tope ni reset en el RT | `SongBusTail.AQuietTailStops...`, `SongBusTail.ABusWithSilentOutputButFullLinesStaysAlive`, `SongBusTail.ALoudTailIsNotCutAtThirtySeconds...`, `AfterTheTailIsGoneReactivating...` |
+| un retorno en 0 no congela la linea; la cola pasa los 30 s sin salto | `SongMix.AReturnAtZeroDoesNotSwitchOff...`, `AMutedReturnKeepsTheLineDecaying...`, `ALoudTailGoesPastThirtySecondsWithoutAStep` |
+| un bus creado tras `prepareMixBuffer` toma la capacidad mayor | `SongBus.ABusCreatedAfterPrepareMixBufferTakesTheLargerCapacity` |
 | el bloque mayor que la capacidad del bus lo salta y se cuenta (nunca escribe fuera) | `SongBus.ABlockLargerThanTheBusCapacity...`, `SongBusTail.ABlockLargerThanTheBusCapacityDuringTheTail...`, `SongMix.ABlockLargerThanThePreparedMixBuffer...` (ASan) |
 | `prepareMixBuffer` agranda tambien el bus | `SongBus.PrepareMixBufferGrowsTheBus...` |
 | el bus se prepara al rate vigente al crearse y al cambiar el rate | `SongBus.APublishedBusIsPreparedAtTheCurrentRate`, `SongBus.ARateChangeRacingTheBusCreation...`, `SongMix.TheDelayTimeFollowsASampleRateChange...` |
@@ -213,16 +223,17 @@ Host macOS arm64 (M-series), 2026-10-28. Los numeros no se escriben a mano en ot
 | idem, p99 | 601 us | 117-123 us |
 | periodo del callback a 48 kHz | 5333 us | 5333 us |
 | pasada offline con 8 taps de pista + bus, bloque 4096, 10 s de audio, CPU del hilo | skipped | **118-123x** tiempo real (0,081-0,084 s de CPU) |
+| cola del bus viva (reverb + delay 1,5 s, realimentacion 0,5, envio 0), callback de 256 frames, CPU del hilo | skipped | **28,5 us** contra 4,9 us con el bus apagado: +23,6 us = **0,44 %** del periodo |
 
 El maximo de Release es el 3 % del periodo. El piso de 10x del diseno se cumple con >10x de margen.
 La rafaga (`SongMix.ABurstOfMixSettersAgainstTheCallbackAllocatesNothingAndStaysInsideThePeriod`) imprime
-`[ mix ]`; el costo del export, `[ COSTO   ]`. Para reproducirlo con la suite en Release:
+`[ mix ]`; el costo del export, `[ COSTO   ]`; el de la cola, `[ COLA    ]`. Para reproducirlo con la suite en Release:
 
 ```bash
 cmake -S audio/src/main/cpp/tests -B /tmp/wma-rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DFETCHCONTENT_BASE_DIR=$PWD/audio/src/main/cpp/tests/.deps
 cmake --build /tmp/wma-rel --target core_tests
-/tmp/wma-rel/core_tests/core_tests --gtest_filter='SongMix.APassWith*:SongMix.ABurst*'
+/tmp/wma-rel/core_tests/core_tests --gtest_filter='SongMix.APassWith*:SongMix.ABurst*:SongMix.Keeping*'
 ```
 
 En el gate (Debug) el test de costo sale SKIPPED, nunca con el umbral bajado; el del periodo solo se afirma sin
@@ -230,7 +241,7 @@ sanitizers (con ellos el callback es mas lento por construccion).
 
 ## Limites conocidos
 
-- El bus se crea para 4096 frames y crece con `prepareMixBuffer`; un callback vivo mas grande que eso
+- El bus se crea para `max(4096, lo que prepareMixBuffer ya dimensiono)` y crece con `prepareMixBuffer`; un callback vivo mas grande que eso
   salta el bus ese bloque (cuenta, no aloca).
 - La carrera "cambio de rate vs. creacion del bus" tiene un test de estres (`ARateChangeRacingTheBusCreation...`)
   que es probabilistico: la extension del lock de `setSampleRate` la cubre el diseno, no un test determinista.

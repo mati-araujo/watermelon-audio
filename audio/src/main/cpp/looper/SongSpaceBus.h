@@ -47,6 +47,10 @@ public:
     /// RT: `fxOut` (estereo intercalado) recibe el retorno del bus para el envio `send`.
     virtual void runSpaceBus(const float* send, float* fxOut, int frames) = 0;
 
+    /// RT: pico de la ultima `runSpaceBus` ANTES de aplicar los retornos (la salida 100 % wet de la
+    /// reverb y del delay). Mide si las lineas internas decayeron aunque un retorno este en 0.
+    virtual float spaceBusPreReturnPeak() const { return 0.0f; }
+
     /// Estado de una instancia fresca (colas, LFOs, suavizado del delay al target). Sin alocar.
     virtual void resetSpaceBus() = 0;
 };

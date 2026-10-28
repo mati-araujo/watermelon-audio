@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <vector>
 
 namespace wm {
@@ -70,14 +71,21 @@ public:
         // Los efectos reciben `float*` no const: el bus no escribe sobre el envio.
         mReverb.process(const_cast<float*>(send), fxOut, frames);
         mDelay.process(const_cast<float*>(send), mDelayOut.data(), frames);
+        float peak = 0.0f;
         for (size_t i = 0; i < n; ++i) {
-            fxOut[i] = fxOut[i] * mReverbReturn + mDelayOut[i] * mDelayReturn;
+            const float wetReverb = fxOut[i], wetDelay = mDelayOut[i];
+            peak = std::max(peak, std::max(std::abs(wetReverb), std::abs(wetDelay)));
+            fxOut[i] = wetReverb * mReverbReturn + wetDelay * mDelayReturn;
         }
+        mPreReturnPeak = peak;
     }
+
+    float spaceBusPreReturnPeak() const override { return mPreReturnPeak; }
 
     void resetSpaceBus() override {
         mReverb.reset();
         mDelay.reset();
+        mPreReturnPeak = 0.0f;
         mFresh = true;
     }
 
@@ -88,6 +96,7 @@ private:
     std::atomic<int> mCapacityFrames{0};
     float mReverbReturn = 0.0f;
     float mDelayReturn = 0.0f;
+    float mPreReturnPeak = 0.0f;
     bool mFresh = true;
 };
 

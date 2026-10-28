@@ -166,6 +166,9 @@ public:
         }
         // REQ-055 S12: el bus de la cancion, solo si alguien lo creo (el movil no paga nada).
         std::lock_guard<std::mutex> busLock(mSongBusCtlMutex);
+        if (maxBlockFrames > mMixPreparedFrames.load(std::memory_order_relaxed)) {
+            mMixPreparedFrames.store(maxBlockFrames, std::memory_order_relaxed);   // lo lee publishSongBus
+        }
         if (mSongBus.load(std::memory_order_acquire) != nullptr) sizeSongBusBuffers(maxBlockFrames);
     }
 
@@ -1065,7 +1068,6 @@ public:
         mSongBusLive = false;
         mSongBusStale = false;
         mSongBusQuietFrames = 0;
-        mSongBusTailFrames = 0;
         if (wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire)) bus->resetSpaceBus();
     }
 
@@ -1106,14 +1108,17 @@ public:
      * @brief Publica el bus «Espacio» (control). El looper NO es su dueño y el dueño no lo libera
      *        mientras el RT pueda correr. Lo prepara AL RATE ACTUAL bajo el lock que serializa con
      *        setSampleRate, y dimensiona las memorias del bloque ANTES de publicar el puntero, asi
-     *        el RT que lo ve ya encuentra los buffers.
+     *        el RT que lo ve ya encuentra los buffers. La capacidad es al menos la que
+     *        prepareMixBuffer ya le dio al looper: un bus creado despues de un prepareMixBuffer
+     *        grande no queda mas chico que el bloque que el callback puede entregar.
      */
     void publishSongBus(wm::ISongSpaceBus* bus, int maxBlockFrames) {
         if (bus == nullptr || maxBlockFrames <= 0) return;
         std::lock_guard<std::mutex> busLock(mSongBusCtlMutex);
-        mSongBusMaxFrames.store(std::max(maxBlockFrames, 1), std::memory_order_relaxed);
-        bus->prepareSpaceBus(mSampleRate.load(std::memory_order_acquire), maxBlockFrames);
-        sizeSongBusBuffers(maxBlockFrames);
+        const int frames = std::max(maxBlockFrames, mMixPreparedFrames.load(std::memory_order_relaxed));
+        mSongBusMaxFrames.store(frames, std::memory_order_relaxed);
+        bus->prepareSpaceBus(mSampleRate.load(std::memory_order_acquire), frames);
+        sizeSongBusBuffers(frames);
         mSongBus.store(bus, std::memory_order_release);
     }
     bool hasSongBus() const { return mSongBus.load(std::memory_order_acquire) != nullptr; }
@@ -1867,20 +1872,19 @@ private:
     uint32_t mSongSpaceSeen{0};                  // audio thread
     std::atomic<wm::ISongSpaceBus*> mSongBus{nullptr};
     std::atomic<int> mSongBusMaxFrames{4096};
+    std::atomic<int> mMixPreparedFrames{0};      // el bloque mas grande que prepareMixBuffer dimensiono
     std::mutex mSongBusCtlMutex;                 // control: dimensionar / re-preparar el bus
     bool mSongBusRun{false};                     // audio thread: el bus corre en ESTE bloque
     // Cola del bus tras desactivarse la cancion (D-S12-18). Todo del audio thread.
     bool mSongBusLive{false};                    // el bus puede tener cola audible
-    bool mSongBusStale{false};                   // se apago con cola audible: reiniciar al reactivar
-    int64_t mSongBusQuietFrames{0};              // frames seguidos con el retorno bajo el umbral
-    int64_t mSongBusTailFrames{0};               // frames de cola desde que la cancion se apago
+    bool mSongBusStale{false};                   // un bloque no entro al bus con cola audible: reiniciar al reactivar
+    int64_t mSongBusQuietFrames{0};              // frames seguidos con el bus bajo el umbral
     std::vector<float> mSongSendBuf;
     std::vector<float> mSongFxBuf;
     std::vector<float> mSongScratch;
     wma::RtCounter mSongBusOverflow;
     static constexpr float kSongTailSilence = 1e-6f;          // -120 dBFS
     static constexpr double kSongTailQuietSeconds = 2.5;      // > el delay maximo (2 s)
-    static constexpr int64_t kSongTailMaxSeconds = 30;
     // Taps de la pasada offline (un solo hilo): ver armSongTaps().
     float* mTapFx{nullptr};
     float* mTapTracks{nullptr};
@@ -2062,7 +2066,6 @@ private:
         }
         mSongBusLive = true;
         mSongBusQuietFrames = 0;
-        mSongBusTailFrames = 0;
         const uint32_t version = mSongSpaceVersion.load(std::memory_order_acquire);
         if (version != mSongSpaceSeen) {
             mSongSpaceSeen = version;
@@ -2083,10 +2086,14 @@ private:
     }
 
     /**
-     * @brief Bloque SIN cancion: el bus procesa con envio cero y su cola suena natural, hasta que
-     *        el retorno quede bajo -120 dBFS durante mas que el delay maximo (2 s) o se cumpla el
-     *        tope. Sin memset grande ni alloc. Devuelve si el FX de este bloque entro a la mezcla
-     *        (los taps lo toman). AUDIO THREAD.
+     * @brief Bloque SIN cancion: el bus procesa con envio cero y su cola suena natural hasta que
+     *        TODO lo que hay dentro de el quede bajo -120 dBFS durante mas que el delay maximo
+     *        (2 s). El silencio se mide ANTES de los retornos (la salida 100 % wet de la reverb y
+     *        del delay), asi un retorno en 0 no apaga un bus cuyas lineas siguen llenas. No hay
+     *        tope por tiempo: cortar una cola audible obligaria a vaciar las lineas (memset de
+     *        ~1,5 MB) en el RT al reactivar; la realimentacion maxima (0,95) agota el bus sola.
+     *        Sin memset grande ni alloc. Devuelve si el FX de este bloque entro a la mezcla (los
+     *        taps lo toman). AUDIO THREAD.
      */
     bool runSongBusTail(float* dry, int numFrames) {
         if (!mSongBusLive) return false;
@@ -2110,16 +2117,14 @@ private:
         if (mTapFx != nullptr && numFrames <= mTapFrames) {
             std::memcpy(mTapFx, mSongFxBuf.data(), sizeof(float) * n);
         }
-        float peak = 0.0f;
+        // Lo que el bus tiene adentro (antes de los retornos) y lo que de verdad sale: un retorno
+        // <= 1 deja el segundo por debajo del primero, pero un bus de prueba solo reporta la salida.
+        float peak = bus->spaceBusPreReturnPeak();
         for (size_t i = 0; i < n; ++i) peak = std::max(peak, std::abs(mSongFxBuf[i]));
         const int64_t rate = mSampleRate.load(std::memory_order_acquire);
         mSongBusQuietFrames = peak < kSongTailSilence ? mSongBusQuietFrames + numFrames : 0;
-        mSongBusTailFrames += numFrames;
         if (static_cast<double>(mSongBusQuietFrames) >= static_cast<double>(rate) * kSongTailQuietSeconds) {
-            mSongBusLive = false;   // el residuo es < -120 dBFS: no hace falta vaciar nada
-        } else if (mSongBusTailFrames >= rate * kSongTailMaxSeconds) {
-            mSongBusLive = false;
-            mSongBusStale = true;
+            mSongBusLive = false;   // todo < -120 dBFS: no hace falta vaciar nada
         }
         return true;
     }
