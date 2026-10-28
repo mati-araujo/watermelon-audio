@@ -14,8 +14,13 @@
  * posiciones del ring y frames analizados, que son del alimentador y del contrato del ring; de la altura
  * publicada, sólo que sigue al objetivo declarado con una tolerancia amplia.
  *
- * La posicion de una publicacion es `ring.readPosition()` despues de `drainOnce()`: con piezas de <= 256
- * frames y el ring drenado, la publicacion de una pieza que termina en P esta en pos == P.
+ * La posicion de una publicacion es `ring.readPosition()` cuando `drainOnce()` cierra un tick. Desde REQ-057 (D31)
+ * el motor publica cada `AnalysisThread::kTickFrames` frames analizados, contados desde el ultimo ORIGEN del tick:
+ * el objetivo aplicado, el aviso cruzado de una perdida (en su frame) o el FIN de una costura (lo que sigue al
+ * descarte). Por eso estos tests derivan la serie esperada de esos origenes y de la constante del motor
+ * (`takeTickGrid`), y la comparan ENTERA: un aviso corrido un frame corre todas las publicaciones que siguen.
+ * Lo que el motor analizo de un tick que un origen corto no se publica nunca: los frames analizados se afirman
+ * en cada publicacion (`pos` menos lo descartado antes de `pos`), no contra el largo del archivo.
  */
 
 #include "support/SyntheticTake.h"
@@ -41,6 +46,9 @@ using wma::analysis::kSnapFramesAnalyzed;
 using wma::analysis::kSnapInputDiscontinuity;
 
 constexpr int kTakeFeedRate = 48000;
+
+/// La cadencia de publicacion del motor (REQ-057, D31): de la constante, nunca un numero escrito aca.
+constexpr int64_t kTakeTick = wma::analysis::AnalysisThread::kTickFrames;
 
 /// La altura de la cuerda `name` del catalogo compartido ("guitarra A2").
 double takeStringHz(const std::string& name) {
@@ -94,16 +102,6 @@ TakeFeedRun takeRun(const TakeBase& b, const std::vector<TakeCutLine>& cuts) {
     return feedTakeWithCuts(takeStereoOf(b.mono, kTakeFeedRate), cuts, b.targets);
 }
 
-/// El indice de la (unica) publicacion con pos == `pos`; -1 si no hay; -2 si hay mas de una.
-int takePubAt(const TakeFeedRun& run, int64_t pos) {
-    int found = -1;
-    for (size_t i = 0; i < run.pubs.size(); ++i) {
-        if (run.pubs[i].pos != pos) continue;
-        found = found == -1 ? static_cast<int>(i) : -2;
-    }
-    return found;
-}
-
 /// El indice de la primera publicacion con pos > `pos`; -1 si no hay.
 int takeFirstPubAfter(const TakeFeedRun& run, int64_t pos) {
     for (size_t i = 0; i < run.pubs.size(); ++i)
@@ -111,14 +109,54 @@ int takeFirstPubAfter(const TakeFeedRun& run, int64_t pos) {
     return -1;
 }
 
-int64_t takeAnalyzedOf(const TakeFeedRun& run) {
-    return static_cast<int64_t>(run.snaps.back()[kSnapFramesAnalyzed]);
-}
-
 int64_t takeCountAt(const TakeFeedRun& run, size_t i) { return static_cast<int64_t>(run.snaps[i][kSnapDiscontinuityCount]); }
 
-/// El primer multiplo de la tanda estrictamente mayor que `f`.
-int64_t takeNextGridAfter(int64_t f) { return (f / kTakeChunkFrames + 1) * kTakeChunkFrames; }
+/// Un tramo que el motor integra de corrido: el tick arranca en `from` (un objetivo, el cruce de una perdida, el FIN de
+/// una costura) y lo corta `to` (el origen siguiente, el INI de una costura o el final del archivo).
+struct TakeTickSpan {
+    int64_t from = 0;
+    int64_t to = 0;
+};
+
+/// Las posiciones de las publicaciones: en cada tramo, `from + kTakeTick·k` (k >= 1) mientras no pase de `to`. El
+/// tick que `to` deja a medias no publica.
+std::vector<int64_t> takeTickGrid(const std::vector<TakeTickSpan>& spans) {
+    std::vector<int64_t> grid;
+    for (const TakeTickSpan& sp : spans)
+        for (int64_t p = sp.from + kTakeTick; p <= sp.to; p += kTakeTick) grid.push_back(p);
+    return grid;
+}
+
+std::vector<int64_t> takePositionsOf(const TakeFeedRun& run) {
+    std::vector<int64_t> pos;
+    for (const latch::Publication& p : run.pubs) pos.push_back(p.pos);
+    return pos;
+}
+
+/// Que cada publicacion traiga como frames analizados EXACTAMENTE su `pos` menos lo descartado antes de `pos`
+/// (`skipIni`/`skipFin`: el tramo de una costura; vacio si skipIni == skipFin). Atrapa descartar de mas o de menos
+/// en cualquier punto de la toma, no solo al final.
+void takeExpectAnalyzedIsPosMinusSkipped(const TakeFeedRun& run, int64_t skipIni, int64_t skipFin) {
+    for (size_t i = 0; i < run.pubs.size(); ++i) {
+        const int64_t pos = run.pubs[i].pos;
+        const int64_t skipped = pos > skipIni ? std::min(pos, skipFin) - skipIni : 0;
+        EXPECT_EQ(pos - std::max<int64_t>(0, skipped), static_cast<int64_t>(run.snaps[i][kSnapFramesAnalyzed]))
+            << "frames analizados de la publicacion " << i << " (pos " << pos << ")";
+    }
+}
+
+/// El aviso de discontinuidad: todas las publicaciones con pos <= `at` traen el contador en 0 y la marca baja; la
+/// PRIMERA con pos > `at` lo trae en 1 y la marca alta; todas las que siguen, en 1 (un solo evento).
+void takeExpectOneEventAfter(const TakeFeedRun& run, int64_t at) {
+    const int first = takeFirstPubAfter(run, at);
+    ASSERT_GT(first, 0) << "no hay publicaciones a los dos lados de " << at;
+    for (size_t i = 0; i < run.pubs.size(); ++i) {
+        const bool after = static_cast<int>(i) >= first;
+        EXPECT_EQ(after ? 1 : 0, takeCountAt(run, i)) << "contador de la publicacion " << i << " (pos " << run.pubs[i].pos << ")";
+    }
+    EXPECT_EQ(0.0f, run.snaps[static_cast<size_t>(first) - 1][kSnapInputDiscontinuity]) << "la marca se levanto antes de " << at;
+    EXPECT_EQ(1.0f, run.snaps[static_cast<size_t>(first)][kSnapInputDiscontinuity]) << "la marca viva de la lectura que arrastra el hueco";
+}
 
 // ============================ las constantes del contrato ============================
 
@@ -175,77 +213,66 @@ TEST(TakeFeeder, ATakeWithoutCutsAndACutAtFrameZeroAreNeverAnnounced) {
     ASSERT_EQ("", none.error);
     ASSERT_FALSE(none.pubs.empty());
     for (size_t i = 0; i < none.pubs.size(); ++i) { EXPECT_EQ(0, takeCountAt(none, i)) << "publicacion " << i; }
-    EXPECT_EQ(base.frames, takeAnalyzedOf(none));
+    // Sin cortes el unico origen del tick es el objetivo del frame 0: si algo descartara o reiniciara, la serie se
+    // correria (y los frames analizados de cada publicacion dejarian de ser su pos).
+    EXPECT_EQ(takeTickGrid({{0, base.frames}}), takePositionsOf(none));
+    takeExpectAnalyzedIsPosMinusSkipped(none, 0, 0);
 
     const TakeFeedRun zero = takeRun(base, {{0, 1000, -1}});
     ASSERT_EQ("", zero.error);
     ASSERT_FALSE(zero.pubs.empty());
     for (size_t i = 0; i < zero.pubs.size(); ++i) { EXPECT_EQ(0, takeCountAt(zero, i)) << "publicacion " << i; }
-    EXPECT_EQ(base.frames, takeAnalyzedOf(zero)) << "una costura en el frame 0 no se avisa: no descarta nada";
+    EXPECT_EQ(takeTickGrid({{0, base.frames}}), takePositionsOf(zero)) << "una costura en el frame 0 no se avisa: no corre el tick";
+    takeExpectAnalyzedIsPosMinusSkipped(zero, 0, 0);
     EXPECT_EQ(base.frames, zero.ringWritePosition);
 }
 
 // ============================ la perdida ============================
 
-// AC-055.1 / D38. Una perdida en F reinicia la integracion SIN descartar nada, en el frame exacto: hay una
-// publicacion con pos == F que todavia trae el contador de antes, y la siguiente lo trae +1; el motor analizo
-// todos los frames del archivo.
-// atrapa: sin aviso (el contador no sube: el ataque siguiente arrastra la integracion de antes), aviso en F±1
-// frame (no hay pieza que termine en F) o en F±1 tanda (la publicacion de F ya trae el +1), y la perdida
-// avisada como una costura con descarte (frames analizados < frames).
+// AC-055.1 / D38. Una perdida en F reinicia la integracion SIN descartar nada, en el frame exacto: el tick vuelve a
+// arrancar en F (las publicaciones siguen en F + tick·k), la primera publicacion despues de F trae el contador +1 y
+// ninguna de antes lo trae; cada publicacion analizo todos los frames hasta su pos.
+// atrapa: sin aviso (el contador no sube y el tick sigue la serie desde 0), aviso en F±1 frame o en F±1 tanda (la
+// serie despues de F queda corrida), y la perdida avisada como una costura con descarte (se pierde lo que sigue a F:
+// la serie arranca despues y los frames analizados quedan por debajo de pos).
 TEST(TakeFeeder, ALossResetsAtItsExactFrameWithoutDiscarding) {
-    const int64_t F = 30000;   // no es multiplo de 256: la grilla se parte ahi
+    const int64_t F = 30000;   // no es multiplo de 256 ni de la cadencia: la grilla se parte ahi
     ASSERT_NE(0, F % kTakeChunkFrames);
+    ASSERT_NE(0, F % kTakeTick);
     const TakeBase base({F});
     const TakeFeedRun run = takeRun(base, {{F, F, 12}});
     ASSERT_EQ("", run.error);
     ASSERT_EQ(run.pubs.size(), run.snaps.size());
 
-    const int at = takePubAt(run, F);
-    ASSERT_GE(at, 0) << "no hay una unica publicacion con pos == F";
-    const int64_t before = takeCountAt(run, static_cast<size_t>(at));
-    for (int i = 0; i <= at; ++i) {
-        EXPECT_EQ(before, takeCountAt(run, static_cast<size_t>(i))) << "el contador cambio antes de F, en la publicacion " << i;
-        EXPECT_EQ(0.0f, run.snaps[static_cast<size_t>(i)][kSnapInputDiscontinuity]) << "la marca se levanto antes de F, en la publicacion " << i;
-    }
-    ASSERT_LT(static_cast<size_t>(at) + 1, run.pubs.size());
-    const size_t next = static_cast<size_t>(at) + 1;
-    EXPECT_EQ(takeNextGridAfter(F), run.pubs[next].pos) << "la pieza que sigue a F no se descarto";
-    EXPECT_EQ(before + 1, takeCountAt(run, next)) << "el aviso cruzo la costura: un evento mas";
-    EXPECT_EQ(1.0f, run.snaps[next][kSnapInputDiscontinuity]) << "la marca viva de la lectura que arrastra el hueco";
-    EXPECT_EQ(before + 1, takeCountAt(run, run.snaps.size() - 1)) << "un solo evento en toda la toma";
-    EXPECT_EQ(base.frames, takeAnalyzedOf(run)) << "una perdida no descarta ni un frame";
+    EXPECT_EQ(takeTickGrid({{0, F}, {F, base.frames}}), takePositionsOf(run)) << "el tick tiene que volver a arrancar en F";
+    takeExpectOneEventAfter(run, F);
+    takeExpectAnalyzedIsPosMinusSkipped(run, 0, 0);
 }
 
 // ============================ la costura ============================
 
-// AC-055.1 / D38. Una costura [INI, FIN] se descarta EXACTAMENTE: el motor no analiza [INI, FIN), ninguna
-// publicacion cae en (INI, FIN] y la primera despues de FIN ya trae el evento.
+// AC-055.1 / D38. Una costura [INI, FIN] se descarta EXACTAMENTE: el motor no analiza [INI, FIN), el tick vuelve a
+// arrancar en FIN (ninguna publicacion cae en (INI, FIN]), la primera despues de FIN ya trae el evento y ninguna de
+// antes lo trae, y cada publicacion analizo su pos menos lo descartado antes de ella.
 // atrapa: `report(0)` (descarta una pieza y no el tramo), el aviso en FIN (integra a traves del salto y descarta
 // de mas), la tanda sin partir en FIN (descarta hasta el final de la tanda, de mas), sin aviso.
 TEST(TakeFeeder, ASeamDiscardsExactlyItsSpan) {
-    const int64_t INI = 60000, FIN = 61000;
+    const int64_t INI = 60000, FIN = 61000;   // ni INI ni FIN caen en la grilla ni en la cadencia
     ASSERT_NE(0, FIN % kTakeChunkFrames);
+    ASSERT_NE(0, INI % kTakeTick);
+    ASSERT_NE(0, FIN % kTakeTick);
     const TakeBase base({60500});
     const TakeFeedRun run = takeRun(base, {{INI, FIN, -1}});
     ASSERT_EQ("", run.error);
     ASSERT_EQ(run.pubs.size(), run.snaps.size());
 
-    EXPECT_EQ(base.frames - (FIN - INI), takeAnalyzedOf(run)) << "frames analizados = frames - (FIN - INI)";
     EXPECT_EQ(base.frames, run.ringWritePosition) << "todo frame del archivo se escribe al ring";
     for (const latch::Publication& p : run.pubs) {
         EXPECT_FALSE(p.pos > INI && p.pos <= FIN) << "publicacion en pos " << p.pos << " dentro del tramo descartado";
     }
-
-    const int at = takePubAt(run, INI);
-    ASSERT_GE(at, 0) << "no hay publicacion con pos == INI";
-    const int64_t before = takeCountAt(run, static_cast<size_t>(at));
-    for (int i = 0; i <= at; ++i) { EXPECT_EQ(before, takeCountAt(run, static_cast<size_t>(i))); }
-    const int after = takeFirstPubAfter(run, FIN);
-    ASSERT_GE(after, 0);
-    EXPECT_EQ(takeNextGridAfter(FIN), run.pubs[static_cast<size_t>(after)].pos) << "la primera pieza despues de FIN se analiza entera";
-    EXPECT_EQ(before + 1, takeCountAt(run, static_cast<size_t>(after)));
-    EXPECT_EQ(before + 1, takeCountAt(run, run.snaps.size() - 1)) << "un solo evento por la costura";
+    EXPECT_EQ(takeTickGrid({{0, INI}, {FIN, base.frames}}), takePositionsOf(run)) << "el tick tiene que volver a arrancar en FIN";
+    takeExpectAnalyzedIsPosMinusSkipped(run, INI, FIN);
+    takeExpectOneEventAfter(run, INI);
 }
 
 // AC-055.1 / D38 («pérdida dentro de una costura pendiente: el máximo del ring la absorbe, no adelanta FIN»).
@@ -258,18 +285,13 @@ TEST(TakeFeeder, ALossInsideASeamDoesNotMoveItsEnd) {
     ASSERT_EQ("", run.error);
     ASSERT_EQ(run.pubs.size(), run.snaps.size());
 
-    EXPECT_EQ(base.frames - (FIN - INI), takeAnalyzedOf(run)) << "el descarte sigue siendo exactamente [INI, FIN)";
     EXPECT_EQ(base.frames, run.ringWritePosition);
     for (const latch::Publication& p : run.pubs) {
         EXPECT_FALSE(p.pos > INI && p.pos <= FIN) << "publicacion en pos " << p.pos << " dentro de la costura";
     }
-    const int at = takePubAt(run, INI);
-    ASSERT_GE(at, 0);
-    const int64_t before = takeCountAt(run, static_cast<size_t>(at));
-    const int after = takeFirstPubAfter(run, FIN);
-    ASSERT_GE(after, 0);
-    EXPECT_EQ(takeNextGridAfter(FIN), run.pubs[static_cast<size_t>(after)].pos);
-    EXPECT_EQ(before + 1, takeCountAt(run, static_cast<size_t>(after))) << "la costura y la perdida de adentro son UN evento";
+    EXPECT_EQ(takeTickGrid({{0, INI}, {FIN, base.frames}}), takePositionsOf(run)) << "el descarte sigue siendo exactamente [INI, FIN)";
+    takeExpectAnalyzedIsPosMinusSkipped(run, INI, FIN);
+    takeExpectOneEventAfter(run, INI);   // la costura y la perdida de adentro son UN evento
 }
 
 // ============================ los objetivos ============================
@@ -301,17 +323,20 @@ double takeLastHzIn(const TakeFeedRun& run, int64_t from, int64_t to) {
 double takeCentsBetween(double hz, double ref) { return 1200.0 * std::log2(hz / ref); }
 
 // AC-055.2 / D39. Los objetivos se aplican con el ring VACIO: antes del primer objetivo no hay lectura (con un
-// golpe de A2 sonando), cada objetivo queda registrado en su frame, el motor analiza TODOS los frames (el
-// `skipToNewest` no descarta nada) y la altura publicada sigue a la cuerda declarada, no a la anterior.
-// atrapa: aplicar el objetivo sin drenar (el primer drain despues lo descarta la pieza siguiente: frames analizados
-// < frames), un objetivo aplicado antes o despues de su frame, una lectura con hz sin objetivo, y un objetivo
-// nuevo que no llega al motor (la lectura se queda en la cuerda anterior).
+// golpe de A2 sonando), cada objetivo queda registrado en su frame y el tick vuelve a arrancar ahi, el motor analiza
+// TODOS los frames (el `skipToNewest` no descarta nada: cada publicacion analizo su pos) y la altura publicada sigue
+// a la cuerda declarada, no a la anterior.
+// atrapa: aplicar el objetivo sin drenar (el primer drain despues descarta la pieza siguiente: el tick arranca tarde y
+// los frames analizados quedan por debajo de pos), un objetivo aplicado antes o despues de su frame, una lectura con
+// hz sin objetivo, y un objetivo nuevo que no llega al motor (la lectura se queda en la cuerda anterior).
 TEST(TakeFeeder, TargetsApplyWithTheRingEmpty) {
     const TakeTwoStrings t;
     const TakeFeedRun run = feedTakeWithCuts(takeStereoOf(t.mono, kTakeFeedRate), {}, t.targets);
     ASSERT_EQ("", run.error);
     EXPECT_EQ(t.frames, run.ringWritePosition);
-    EXPECT_EQ(t.frames, takeAnalyzedOf(run)) << "el objetivo con el ring vacio no descarta ni un frame";
+    ASSERT_EQ(run.pubs.size(), run.snaps.size());
+    EXPECT_EQ(takeTickGrid({{0, t.F1}, {t.F1, t.F2}, {t.F2, t.frames}}), takePositionsOf(run)) << "el tick arranca en cada objetivo";
+    takeExpectAnalyzedIsPosMinusSkipped(run, 0, 0);   // el objetivo con el ring vacio no descarta ni un frame
 
     ASSERT_EQ(2u, run.events.size());
     EXPECT_EQ(t.F1, run.events[0].pos);
@@ -325,7 +350,7 @@ TEST(TakeFeeder, TargetsApplyWithTheRingEmpty) {
         ++before;
         EXPECT_TRUE(std::isnan(p.hz)) << "lectura con hz en pos " << p.pos << " antes del primer objetivo";
     }
-    EXPECT_GT(before, 100) << "el golpe de antes del objetivo se alimento (si no, la ausencia de lecturas no prueba nada)";
+    EXPECT_EQ(t.F1 / kTakeTick, before) << "el golpe de antes del objetivo se alimento (si no, la ausencia de lecturas no prueba nada)";
 
     const double a = takeLastHzIn(run, t.F1, t.F2);
     ASSERT_FALSE(std::isnan(a)) << "ninguna lectura de A2 con su objetivo";
