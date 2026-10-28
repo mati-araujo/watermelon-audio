@@ -48,6 +48,8 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace wma::analysis {
@@ -65,6 +67,9 @@ public:
      * Potencia de dos por costumbre del repo, no por necesidad: acá no hay FFT.
      */
     static constexpr int kWindowFrames = 4096;
+
+    /// Separacion entre rejillas vecinas (REQ-057): un cuarto de ventana.
+    static constexpr int kHopFrames = kWindowFrames / 4;
 
     /// Ventanas que entran en la regresion. 48 a 48 kHz son ~4,1 s: cubre los
     /// 3 s del AC con margen, y acota la memoria a un `double[48]`.
@@ -231,6 +236,84 @@ public:
     void restartKeepingNewestHalf();
 
     /**
+     * REQ-057 — como `restartKeepingNewestHalf()`, pero conservando las `keep` fases mas nuevas
+     * (acotado a las que hay). Las rejillas 1-3 de `InterleavedPhaseEstimator` la usan para
+     * descartar toda ventana que empiece antes que la mas vieja que conservo la rejilla 0.
+     */
+    void restartKeepingNewestPhases(int keep);
+
+    /**
+     * REQ-057 (D-A) — EL CONTEXTO DE LA SERIE DENSA para el PROXIMO cierre.
+     *
+     * Lo fija `InterleavedPhaseEstimator` justo antes de que cierre esta rejilla: `valid` dice que
+     * los cinco `raw` de los ultimos cierres densos existen (ninguno fue silencio),
+     * `priorIncrements` son los tres primeros incrementos `wrap(raw_{j+1} - raw_j -
+     * refHopAdvance())` y `prevDenseRaw` el `raw` del cierre denso inmediato anterior. Con el, el
+     * cierre completa los cuatro incrementos `e_j`, `S = Σ e_j`, y con `M = round((S - d)/2π)`
+     * distinto de cero suma las vueltas que el desenvuelto de 4096 no puede ver (`d += 2π·M`).
+     *
+     * GUARDA DE COHERENCIA: `M` se aplica SOLO si los cuatro `e_j` son coherentes entre si
+     * (`kDenseCoherenceMaxRad`). Un patron periodico (huecos de captura sin reportar) hace que la
+     * serie densa parezca una recta a otra frecuencia, con `M != 0` y los `e_j` dispares: ahi no se
+     * aplica y el incremento queda marcado sin resolver.
+     *
+     * 🔴 SIN CONTEXTO VALIDO EL CIERRE HACE EXACTAMENTE LA CUENTA DE SIEMPRE, y el contexto se
+     * consume: vale para UN cierre y se borra. Un cierre silencioso lo borra tambien.
+     */
+    void setDenseWrapContext(bool valid, const double* priorIncrements, double prevDenseRaw) noexcept {
+        mCtxValid = valid;
+        for (int i = 0; i < 3; ++i) mCtxPrior[i] = valid ? priorIncrements[i] : 0.0;
+        mCtxPrevRaw = prevDenseRaw;
+    }
+
+    /**
+     * Cota de `max_j |wrap(e_j - mediana(e))|` para aplicar `M` (rad), tal como la expone
+     * `lastCoherenceSpreadRad()` en cada cierre con `M != 0`.
+     *
+     * FUENTE VERSIONADA: `InterleavedGrids.TheCoherenceThresholdSitsBetweenHealthyClosesAndAnUnreportedGap`
+     * mide e imprime las dos cifras (`[coherencia] ...`, propiedades `healthyMaxRad` y `gapMinRad`):
+     *   · cadenas sanas (B0, E2, G3, A4, E5 × ±50/±25 c × 44,1/48 k × ruido 0/0,01 × B 0/1e-4/5e-4,
+     *     3 s, parciales dentro de su rango): maximo 0,095 rad;
+     *   · hueco de captura sin reportar (`CaptureDiscontinuity.NobodyReportedItSoNobodyCanKnow`, A4 a
+     *     48 k, 1024 frames cada 4 bloques): minimo 0,370 rad, maximo 0,755.
+     * Medicion del scratchpad de la etapa, NO versionada (barrido grande, guarda apagada, B tambien
+     * 1e-4, 246 022 cierres sanos): maximo sano 0,178 rad; 285 cierres del hueco, 0,370 a 0,755.
+     * 0,3 deja ≥ 1,7x sobre lo sano y 19 % bajo el hueco PERIODICO. Un hueco AISLADO no reportado
+     * deja cierres a 0,272–0,274 rad que se aceptan (ver
+     * `InterleavedGrids.ASingleUnreportedLostGapStillPublishesAConvergedReadingOffByLessThanOneCent`).
+     */
+    static constexpr double kDenseCoherenceMaxRad = 0.3;
+
+    /// Cuanto avanza la fase de la referencia en `kHopFrames`: `fmod(ω·1024, 2π)`.
+    double refHopAdvance() const noexcept { return mRefHop; }
+
+    /// El `atan2` del ultimo cierre con señal. Solo vale si `lastCloseProducedPhase()`.
+    double lastRawPhase() const noexcept { return mLastRawPhase; }
+
+    /// false si el ultimo cierre fue silencioso (rms < `kSilenceFloor`): no hay fase nueva.
+    bool lastCloseProducedPhase() const noexcept { return mLastCloseProducedPhase; }
+
+    /// Vueltas de 2π (en valor absoluto) que la serie densa agrego a los incrementos desde el reset.
+    int turnsAdded() const noexcept { return mTurnsAdded; }
+
+    /// `max_j |wrap(e_j - mediana(e))|` (rad) del ultimo cierre, o −1 si ese cierre no llego a
+    /// calcularlo (silencio, sin contexto de cadena, o `M = 0`). Es la cantidad que la guarda
+    /// compara con `kDenseCoherenceMaxRad`, se calcule o no el rechazo.
+    double lastCoherenceSpreadRad() const noexcept { return mLastCoherenceSpread; }
+
+    /**
+     * REQ-057 (invariante 3) — `true` si alguna fase de la ventana de regresion tiene un incremento
+     * que se resolvio SIN la cadena densa completa. Mientras sea true, el rango de captura efectivo
+     * de esta rejilla es el de hop 4096: ese incremento solo es confiable dentro de el.
+     */
+    bool regressionHasUnresolvedIncrement() const noexcept {
+        for (int i = 0; i < mCount; ++i) {
+            if (mUnresolved[static_cast<size_t>(i)]) return true;
+        }
+        return false;
+    }
+
+    /**
      * REQ-036 S1 — SONDA DE SOLO LECTURA sobre la ventana de regresion: cuantas fases tiene hoy
      * (`regressionPhaseCount()`, hasta `kMaxWindows`) y la fase desenvuelta de la ventana `i`
      * (`regressionPhaseAt(i)`, la mas vieja en 0). Es EXACTAMENTE lo que la regresion de
@@ -300,6 +383,8 @@ private:
 
     /// Fase DESENVUELTA por ventana. La regresion corre sobre esto.
     std::vector<double> mPhases;
+    /// Paralelo a `mPhases`: el incremento que llego a esa fase se resolvio sin cadena completa.
+    std::vector<unsigned char> mUnresolved;
     int mCount{0};
     double mUnwrapped{0.0};
     double mLastRawPhase{0.0};
@@ -314,9 +399,110 @@ private:
     /// Ver `goertzelBinToRmsRatio()`. Se recalcula en cada `closeWindow()`.
     double mBinToRmsRatio{0.0};
     double mWrappedPhase{0.0};
+    /// REQ-057: ver `setDenseWrapContext()`.
+    bool mCtxValid{false};
+    double mCtxPrior[3]{0.0, 0.0, 0.0};
+    double mCtxPrevRaw{0.0};
+    double mRefHop{0.0};
+    bool mLastCloseProducedPhase{false};
+    int mTurnsAdded{0};
+    double mLastCoherenceSpread{-1.0};
     bool mHasSignal{false};
     bool mHasMeasurement{false};
     int mWindowsTotal{0};
+};
+
+/**
+ * REQ-057 S1 — CUATRO REJILLAS INTERCALADAS (hop 1024) SOBRE EL ESTIMADOR DE HOY.
+ *
+ * Cada rejilla es un `PhaseSlopeEstimator` (ventana 4096, regresion y tendencia de siempre) que
+ * arranca `g·1024` frames despues de la anterior, o sea que cada 1024 frames cierra exactamente
+ * una. Los cierres de las cuatro forman la SERIE DENSA, y el `raw` de los ultimos cinco es la
+ * CADENA DE VUELTAS: la rejilla que cierra pliega su diferencia de 4096 a ±π como siempre (`d`), y
+ * la cadena dice cuantas vueltas de 2π le faltan (`M`, ver `setDenseWrapContext()`). Dentro del
+ * rango de hoy `M = 0` y la rejilla 0 es, bit a bit, el estimador de hoy; fuera de el, la serie
+ * densa desenvuelve hasta `|Δf| < fs/(2·1024)`, cuatro veces mas lejos.
+ *
+ * La cadena NO es la serie que se regresa: sobrevive a un quiebre de fase (el audio es contiguo)
+ * y se borra con `reset()`, `setTarget()`, `prepare()` y con todo cierre silencioso.
+ *
+ * RT-SAFETY: `prepare()` es el unico que asigna; el resto es aritmetica fija sobre arrays de
+ * tamaño fijo.
+ */
+class InterleavedPhaseEstimator {
+public:
+    static constexpr int kGrids = 4;
+    static constexpr int kHopFrames = PhaseSlopeEstimator::kHopFrames;
+
+    /**
+     * El margen del rango denso (D28): el borde del hop 1024 es el nulo del lobulo principal de
+     * Hann (±2 bins = ±fs/2048), y un parcial admitido ahi lee mal. Medido por el architect en
+     * prototipo (REQ-057 D-C): hasta 0,85 del rango, 0 fallas > 0,1 c; a 0,90, 3 de 120 (A1 p4 a
+     * +145 c con ruido); a 0,93-0,98, parciales que leen hasta 52 c mal.
+     */
+    static constexpr double kRangeMargin = 0.9;
+
+    /// `1200·log2(1 + κ·fs/(2·hop·f))`: el rango de un parcial apuntado a `targetHz`. 0 sin rate
+    /// o sin objetivo.
+    static double denseRangeCents(int sampleRate, double targetHz) noexcept {
+        if (sampleRate <= 0 || targetHz <= 0.0) return 0.0;
+        const double dfMax = kRangeMargin * static_cast<double>(sampleRate)
+                           / (2.0 * static_cast<double>(kHopFrames));
+        return 1200.0 * std::log2(1.0 + dfMax / targetHz);
+    }
+
+    void prepare(int sampleRate);
+    void setTarget(double targetHz);
+    void reset();
+
+    /// @return true si cerro la rejilla 0 (la que se publica) en esta llamada.
+    bool process(const float* mono, int numFrames);
+
+    /// Rejilla `g` (0..3). La 0 es el estimador de hoy.
+    const PhaseSlopeEstimator& grid(int g) const noexcept { return mGrid[g]; }
+
+    /**
+     * El rango del parcial: el denso, salvo que la rejilla 0 arrastre un incremento resuelto sin
+     * cadena completa (invariante 3 de D-A), que solo es confiable dentro del rango de hop 4096.
+     */
+    ///
+    /// 🔴 NO SE LLAMA `captureRangeCents`/`canMeasureDeviation` COMO LOS DEL ESTIMADOR SUELTO: un
+    /// segundo metodo con el mismo nombre simple vuelve ambigua la llamada y `check-rt-safety.py`
+    /// deja de seguirla (medido: el walker perdio `PhaseSlopeEstimator::captureRangeCents`).
+    double denseCaptureRangeCents() const noexcept {
+        if (mGrid[0].regressionHasUnresolvedIncrement()) return mGrid[0].captureRangeCents();
+        return denseRangeCents(mSampleRate, mTargetHz);
+    }
+
+    bool canMeasureDenseDeviation(double cents) const noexcept {
+        const double range = denseCaptureRangeCents();
+        return range > 0.0 && std::fabs(cents) < range;
+    }
+
+    /// El quiebre de fase (R-PITCH-63) en las cuatro rejillas a la vez: la 0 conserva su mitad
+    /// nueva (`count - count/2`) y las 1-3 descartan toda ventana que empiece antes que la mas
+    /// vieja que conservo la 0 (`min(count, keep0 - 1)`). La cadena de vueltas no se toca.
+    void restartAtBreak();
+
+private:
+    PhaseSlopeEstimator mGrid[kGrids];
+    int mSampleRate{0};
+    double mTargetHz{0.0};
+    /// Frames consumidos desde el ultimo reset: la rejilla `g` ve el audio desde `g·kHopFrames`.
+    /// 64 bits: en armeabi-v7a/x86 `long` son 32 y desbordaria a las 2^31 frames (12,4 h a 48 k).
+    int64_t mFrame{0};
+    /// Los `raw` de los ultimos cinco cierres densos (el mas nuevo al final) y si cada uno tenia fase.
+    double mChainRaw[kGrids + 1]{};
+    bool mChainOk[kGrids + 1]{};
+    int mChainCount{0};
+
+public:
+    using FrameCounter = decltype(mFrame);
+    static_assert(std::numeric_limits<FrameCounter>::digits >= 63,
+                  "mFrame debe sobrevivir 2^31 frames en ABIs de 32 bits");
+private:
+    void clearChain() noexcept;
+    void pushChain(double raw, bool ok) noexcept;
 };
 
 }  // namespace wma::analysis

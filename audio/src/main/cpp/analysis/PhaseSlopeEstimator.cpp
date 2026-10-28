@@ -1,5 +1,6 @@
 #include "PhaseSlopeEstimator.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace wma::analysis {
@@ -57,6 +58,7 @@ void PhaseSlopeEstimator::prepare(int sampleRate) {
             0.5 - 0.5 * std::cos(2.0 * M_PI * i / static_cast<double>(kWindowFrames));
     }
     mPhases.assign(static_cast<size_t>(kMaxWindows), 0.0);
+    mUnresolved.assign(static_cast<size_t>(kMaxWindows), 0);
 
     reset();
 }
@@ -69,10 +71,12 @@ void PhaseSlopeEstimator::setTarget(double targetHz) {
         // Ver la nota de `mRefAdvance` en el header: sin esto se mide la fase
         // del objetivo, que no dice nada, en vez de la deriva contra el.
         mRefAdvance = std::fmod(mOmega * static_cast<double>(kWindowFrames), 2.0 * M_PI);
+        mRefHop = std::fmod(mOmega * static_cast<double>(kHopFrames), 2.0 * M_PI);
     } else {
         mOmega = 0.0;
         mCoeff = 0.0;
         mRefAdvance = 0.0;
+        mRefHop = 0.0;
     }
     // La fase acumulada contra el objetivo VIEJO no dice nada del nuevo: seguir
     // integrando sobre ella daria una pendiente que mezcla dos mediciones.
@@ -96,6 +100,11 @@ void PhaseSlopeEstimator::reset() {
     mHasSignal = false;
     mHasMeasurement = false;
     mWindowsTotal = 0;
+    mCtxValid = false;
+    mLastCloseProducedPhase = false;
+    mTurnsAdded = 0;
+    mLastCoherenceSpread = -1.0;
+    std::fill(mUnresolved.begin(), mUnresolved.end(), static_cast<unsigned char>(0));
 }
 
 bool PhaseSlopeEstimator::process(const float* mono, int numFrames) {
@@ -155,12 +164,18 @@ void PhaseSlopeEstimator::closeWindow() {
         // consumidor que `cents()` es viejo: la lectura anterior no se borra,
         // pero tampoco se presenta como actual.
         mHavePrevPhase = false;   // el hilo de fase se corto
+        mLastCloseProducedPhase = false;
+        mLastCoherenceSpread = -1.0;
+        mCtxValid = false;        // un cierre silencioso invalida la cadena densa
         mCount = 0;
         mHasMeasurement = false;
         return;
     }
 
     const double raw = std::atan2(imag, real);
+    mLastCloseProducedPhase = true;
+    mLastCoherenceSpread = -1.0;
+    bool unresolved = false;
 
     if (!mHavePrevPhase) {
         mUnwrapped = raw;
@@ -179,9 +194,42 @@ void PhaseSlopeEstimator::closeWindow() {
         double d = (raw - mLastRawPhase) - mRefAdvance;
         while (d > M_PI) d -= 2.0 * M_PI;
         while (d < -M_PI) d += 2.0 * M_PI;
+        if (mCtxValid) {
+            // REQ-057 (D-A): el cuarto incremento cierra la cadena de cinco cierres densos. Si la
+            // suma de los cuatro (cada uno acotado a ±π por su propio pliegue) difiere de `d` en
+            // vueltas enteras, esas vueltas son las que el pliegue de 4096 no pudo ver.
+            double e[4] = {mCtxPrior[0], mCtxPrior[1], mCtxPrior[2], (raw - mCtxPrevRaw) - mRefHop};
+            while (e[3] > M_PI) e[3] -= 2.0 * M_PI;
+            while (e[3] < -M_PI) e[3] += 2.0 * M_PI;
+            const double turns = std::round((e[0] + e[1] + e[2] + e[3] - d) / (2.0 * M_PI));
+            if (turns != 0.0) {
+                // Mediana de 4 = promedio de los dos centrales, sin ordenar un array: el minimo y el
+                // maximo salen de la suma menos los extremos.
+                double lo = e[0], hi = e[0];
+                for (int j = 1; j < 4; ++j) { lo = std::min(lo, e[j]); hi = std::max(hi, e[j]); }
+                const double median = 0.5 * (e[0] + e[1] + e[2] + e[3] - lo - hi);
+                double worst = 0.0;
+                for (int j = 0; j < 4; ++j) {
+                    double dev = e[j] - median;
+                    while (dev > M_PI) dev -= 2.0 * M_PI;
+                    while (dev < -M_PI) dev += 2.0 * M_PI;
+                    worst = std::max(worst, std::fabs(dev));
+                }
+                mLastCoherenceSpread = worst;
+                if (worst < kDenseCoherenceMaxRad) {
+                    d += 2.0 * M_PI * turns;
+                    mTurnsAdded += static_cast<int>(std::fabs(turns));
+                } else {
+                    unresolved = true;
+                }
+            }
+        } else {
+            unresolved = true;
+        }
         mUnwrapped += d;
         mLastRawPhase = raw;
     }
+    mCtxValid = false;   // el contexto vale para UN cierre
 
     // El angulo que consume el strobe es la fase de la DESAFINACION acumulada,
     // envuelta a ±π — no la fase cruda del Goertzel.
@@ -196,12 +244,15 @@ void PhaseSlopeEstimator::closeWindow() {
 
     // --- ventana deslizante de fases ----------------------------------------
     if (mCount < kMaxWindows) {
+        mUnresolved[static_cast<size_t>(mCount)] = unresolved ? 1 : 0;
         mPhases[static_cast<size_t>(mCount++)] = mUnwrapped;
     } else {
         for (int i = 1; i < kMaxWindows; ++i) {
             mPhases[static_cast<size_t>(i - 1)] = mPhases[static_cast<size_t>(i)];
+            mUnresolved[static_cast<size_t>(i - 1)] = mUnresolved[static_cast<size_t>(i)];
         }
         mPhases[static_cast<size_t>(kMaxWindows - 1)] = mUnwrapped;
+        mUnresolved[static_cast<size_t>(kMaxWindows - 1)] = unresolved ? 1 : 0;
     }
 
     regressOverWindow();
@@ -255,14 +306,109 @@ void PhaseSlopeEstimator::regressOverWindow() {
 }
 
 void PhaseSlopeEstimator::restartKeepingNewestHalf() {
+    restartKeepingNewestPhases(mCount - mCount / 2);
+}
+
+void PhaseSlopeEstimator::restartKeepingNewestPhases(int keepWanted) {
     if (mCount <= 0) return;
-    const int keep = mCount - mCount / 2;
+    const int keep = std::clamp(keepWanted, 0, mCount);
     const int from = mCount - keep;
     for (int i = 0; i < keep; ++i) {
         mPhases[static_cast<size_t>(i)] = mPhases[static_cast<size_t>(from + i)];
+        mUnresolved[static_cast<size_t>(i)] = mUnresolved[static_cast<size_t>(from + i)];
     }
     mCount = keep;
     regressOverWindow();
+}
+
+// ---------------------------------------------------------------------------
+// REQ-057 S1 — InterleavedPhaseEstimator
+// ---------------------------------------------------------------------------
+
+namespace {
+double wrapToPi(double x) {
+    while (x > M_PI) x -= 2.0 * M_PI;
+    while (x < -M_PI) x += 2.0 * M_PI;
+    return x;
+}
+}  // namespace
+
+void InterleavedPhaseEstimator::clearChain() noexcept {
+    mChainCount = 0;
+    for (int i = 0; i <= kGrids; ++i) { mChainRaw[i] = 0.0; mChainOk[i] = false; }
+}
+
+void InterleavedPhaseEstimator::pushChain(double raw, bool ok) noexcept {
+    for (int i = 0; i < kGrids; ++i) { mChainRaw[i] = mChainRaw[i + 1]; mChainOk[i] = mChainOk[i + 1]; }
+    mChainRaw[kGrids] = raw;
+    mChainOk[kGrids] = ok;
+    if (mChainCount <= kGrids) ++mChainCount;
+}
+
+void InterleavedPhaseEstimator::prepare(int sampleRate) {
+    mSampleRate = sampleRate > 0 ? sampleRate : 0;
+    mTargetHz = 0.0;
+    for (auto& g : mGrid) g.prepare(sampleRate);
+    mFrame = 0;
+    clearChain();
+}
+
+void InterleavedPhaseEstimator::setTarget(double targetHz) {
+    mTargetHz = targetHz > 0.0 ? targetHz : 0.0;
+    for (auto& g : mGrid) g.setTarget(targetHz);
+    mFrame = 0;
+    clearChain();
+}
+
+void InterleavedPhaseEstimator::reset() {
+    for (auto& g : mGrid) g.reset();
+    mFrame = 0;
+    clearChain();
+}
+
+bool InterleavedPhaseEstimator::process(const float* mono, int numFrames) {
+    if (mono == nullptr || numFrames <= 0 || mSampleRate <= 0 || mTargetHz <= 0.0) return false;
+
+    constexpr int64_t kHop = kHopFrames;
+    constexpr int64_t kWindow = PhaseSlopeEstimator::kWindowFrames;
+    bool closedGrid0 = false;
+    int pos = 0;
+    while (pos < numFrames) {
+        // Segmentos que no cruzan un multiplo de 1024: a lo sumo una rejilla cierra, y al final.
+        const int64_t toBoundary = kHop - (mFrame % kHop);
+        const int seg = static_cast<int>(std::min<int64_t>(toBoundary, numFrames - pos));
+        const int64_t endFrame = mFrame + seg;
+        int closing = -1;
+        if (endFrame % kHop == 0 && endFrame >= kWindow) {
+            closing = static_cast<int>((endFrame / kHop - kGrids) % kGrids);
+            // Cuatro cierres anteriores mas este = la cadena de cinco. Los tres incrementos que ya
+            // estan completos se suman aca; el cuarto lo cierra la rejilla con su propio `raw`.
+            const bool valid = mChainCount >= kGrids && mChainOk[1] && mChainOk[2] && mChainOk[3] && mChainOk[4];
+            double prior[3] = {0.0, 0.0, 0.0};
+            if (valid) {
+                const double ref = mGrid[0].refHopAdvance();
+                for (int i = 1; i < kGrids; ++i) prior[i - 1] = wrapToPi(mChainRaw[i + 1] - mChainRaw[i] - ref);
+            }
+            mGrid[closing].setDenseWrapContext(valid, prior, mChainRaw[kGrids]);
+        }
+        for (int g = 0; g < kGrids; ++g) {
+            if (endFrame <= static_cast<int64_t>(g) * kHop) continue;   // la rejilla g aun no arranco
+            if (mGrid[g].process(mono + pos, seg) && g == 0) closedGrid0 = true;
+        }
+        mFrame = endFrame;
+        pos += seg;
+        if (closing >= 0) pushChain(mGrid[closing].lastRawPhase(), mGrid[closing].lastCloseProducedPhase());
+    }
+    return closedGrid0;
+}
+
+void InterleavedPhaseEstimator::restartAtBreak() {
+    const int count0 = mGrid[0].regressionPhaseCount();
+    const int keep0 = count0 - count0 / 2;
+    mGrid[0].restartKeepingNewestPhases(keep0);
+    for (int g = 1; g < kGrids; ++g) {
+        mGrid[g].restartKeepingNewestPhases(std::min(mGrid[g].regressionPhaseCount(), std::max(keep0 - 1, 0)));
+    }
 }
 
 }  // namespace wma::analysis
