@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -109,6 +110,25 @@ TEST_F(MixApi, SetSpaceValidatesAllTenFieldsAndRejectsNull) {
             EXPECT_EQ(wma_mix_set_space(e, &bad), WMA_ERROR_PARAMETER_OUT_OF_RANGE) << "valor " << v;
         }
     }
+}
+
+// Defecto (hallazgo 5 del review): el delay acepta 1..2000 ms a cualquier sample rate pero su linea
+// tiene un largo fijo en muestras (192000): a 192 kHz el maximo real es 1000 ms y lo demas se
+// acotaba en silencio. Fuera de la linea al rate vigente => PARAMETER_OUT_OF_RANGE y no se aplica.
+TEST_F(MixApi, TheDelayTimeIsRejectedWhenItDoesNotFitTheLineAtTheCurrentRate) {
+    WmaMixSpace s = goodSpace();
+    for (const auto& c : {std::pair<int, float>{48000, 2000.0f}, {96000, 2000.0f}, {192000, 1000.0f}}) {
+        ASSERT_EQ(wma_offline_start(e, c.first, 256), WMA_OK);
+        s.delay_time_ms = c.second;
+        EXPECT_EQ(wma_mix_set_space(e, &s), WMA_OK) << c.first << " Hz, " << c.second << " ms";
+    }
+    // a 192 kHz (el rate vigente) 1000 ms cabe y 1100 no; a 96 kHz 2000 ms cabe aun
+    s.delay_time_ms = 1100.0f;
+    EXPECT_EQ(wma_mix_set_space(e, &s), WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    s.delay_time_ms = 2000.0f;
+    EXPECT_EQ(wma_mix_set_space(e, &s), WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    ASSERT_EQ(wma_offline_start(e, 96000, 256), WMA_OK);
+    EXPECT_EQ(wma_mix_set_space(e, &s), WMA_OK);
 }
 
 TEST_F(MixApi, SetMasterAndProfileAndLatencyErrors) {

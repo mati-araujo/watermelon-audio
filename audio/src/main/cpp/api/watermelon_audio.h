@@ -2747,7 +2747,7 @@ typedef struct {
     float reverb_low_cut_hz;    /* 20..500 Hz */
     float reverb_high_cut_hz;   /* 1000..20000 Hz */
     float delay_return;         /* 0..1   */
-    float delay_time_ms;        /* 1..2000 ms (never tempo-synced: the caller computes it) */
+    float delay_time_ms;        /* 1..2000 ms, and at most the delay line at the current sample rate (~1000 ms at 192 kHz): else PARAMETER_OUT_OF_RANGE. Never tempo-synced: the caller computes it */
     float delay_feedback;       /* 0..0.95 */
 } WmaMixSpace;
 
