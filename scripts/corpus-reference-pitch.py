@@ -182,6 +182,9 @@ def parse_wav(data, name):
         wmad, bad = parse_wmad(wmad_raw)
         if bad and not ALLOW_INVALID:
             raise SystemExit(f"{name}: toma rechazada, {bad} (--allow-invalid para leerla igual)")
+        if bad:
+            print(f"{name}: AVISO wmad incoherente ({bad}): se descartan sus cortes y se mide a traves de "
+                  "cortes no declarados", file=sys.stderr)
     if not ALLOW_INVALID:
         why = invalid_reason(name, sr, wmad)
         # Un float32 con wmad lo escribio el volcado, que declara cuanto escribio: un `data` mas
@@ -223,6 +226,10 @@ def parse_wmad(raw):
             return w, f"wmad cortes desordenados: el {i} cae en {frame} y el anterior en {prev}"
         if frame + span > w["frames_written"]:
             return w, f"wmad corte {i} [{frame}, {frame + span}] fuera de [0, framesWritten={w['frames_written']}]"
+        if kind == CUT_LOSS and span != 0:
+            return w, f"wmad corte {i}: una perdida con fileSpan={span} (tiene que ser 0)"
+        if kind == CUT_SEAM and lost != 0:
+            return w, f"wmad corte {i}: una costura con lostFrames={lost} (tiene que ser 0)"
         prev, lost_sum = frame, lost_sum + lost
         cuts.append((frame, frame + span if kind == CUT_SEAM else frame, lost if kind == CUT_LOSS else None))
     if w["valid"] and (unl_frames > 0 or unl_disc > 0):
@@ -803,6 +810,8 @@ def self_test_cuts():
                  ("chunk mas corto que 64+24*cap", mk(cuts=good, lost=12, slots=255)),
                  ("cutCount > cutCapacity", mk(cuts=good, lost=12, count=257)),
                  ("cutCount mayor que la capacidad chica", mk(cuts=good, lost=12, cap=3, count=4)),
+                 ("perdida con fileSpan != 0", mk(cuts=[(100, 7, 5, CUT_LOSS)], lost=7)),
+                 ("costura con lostFrames != 0", mk(cuts=[(100, 7, 5, CUT_SEAM)], lost=7)),
                  ("kind 3", mk(cuts=[(100, 7, 0, 3)], lost=7)),
                  ("kind 0", mk(cuts=[(100, 7, 0, 0)], lost=7)),
                  ("cortes desordenados", mk(cuts=[(400, 5, 0, CUT_LOSS), (399, 7, 0, CUT_LOSS)], lost=12)),
