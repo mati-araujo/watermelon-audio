@@ -10,6 +10,7 @@
 #include "LooperExportTypes.h"
 #include "TrackAnalysis.h"
 #include "SongPlayer.h"
+#include "SongSpaceBus.h"
 #include "../dsp/SIMDUtils.h"
 #include <algorithm>
 #include <atomic>
@@ -127,6 +128,10 @@ public:
         // apaga la agenda (el llamador, configureComponentsWithSampleRate, ya paro el callback).
         if (sampleRate != mSampleRate.load(std::memory_order_acquire)) {
             mSong.invalidateForRate(sampleRate);
+            // El bus «Espacio» (si existe) se re-prepara aca, con el RT quiesced como el resto.
+            if (wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire)) {
+                bus->prepareSpaceBus(sampleRate, mSongBusMaxFrames);
+            }
         }
         mSampleRate.store(sampleRate, std::memory_order_release);
         mClick.setSampleRate(sampleRate);
@@ -155,6 +160,8 @@ public:
         if (mFxBusBuf.size() < needed) {
             mFxBusBuf.resize(needed, 0.0f);
         }
+        // REQ-055 S12: el bus de la cancion, solo si alguien lo creo (el movil no paga nada).
+        if (mSongBus.load(std::memory_order_acquire) != nullptr) sizeSongBusBuffers(maxBlockFrames);
     }
 
     // ========== Audio thread (RT-safe) ==========
@@ -220,6 +227,9 @@ public:
     void beginBlock(int64_t playFrame, int numFrames) {
         mBlockOpen = playFrame >= 0;
         mSongBlockActive = mBlockOpen && mSong.beginSongBlock(playFrame, numFrames);
+        // Inactiva -> activa: las voces arrancan en su mezcla, sin rampa desde una instancia fresca.
+        if (mSongBlockActive && !mSongWasActive) mSong.snapVoicesToMix();
+        mSongWasActive = mSongBlockActive;
     }
 
     void process(float* audioData, int numFrames, int64_t playFrame = -1) {
@@ -425,6 +435,7 @@ public:
         // `mixInto` avanza el playhead y los tres smoothers: mezclar una pista
         // dos veces por bloque no duplica su audio, le corre el tiempo al doble.
         mixTracksInto(mLooperMixBuf.data(), numFrames, /*wantSendToFx=*/false);
+        if (mSongBlockActive) finishSongMix(mLooperMixBuf.data(), numFrames);
 
         // Apply master volume + accumulate into main output.
         // We replace the per-sample smoothing+accumulate scalar loop with two
@@ -447,6 +458,9 @@ public:
         // Apply linear ramp to the mix buffer in-place (SIMD).
         simd::applyStereoGainRamp(mLooperMixBuf.data(), numFrames,
                                   masterVolStart, masterVolEnd);
+        // Los taps (REQ-055 S12) se toman DESPUES del master del looper: cada uno recibe la misma
+        // rampa, asi premezcla = suma de taps por construccion del grafo.
+        if (mSongBlockActive) rampSongTaps(numFrames, masterVolStart, masterVolEnd);
         // Accumulate mix into output (SIMD). applyHeadroom=false → straight sum
         // (we don't want the default -6dB headroom; master vol already applied).
         simd::addStereoBuffers(audioData, audioData, mLooperMixBuf.data(), numFrames,
@@ -1036,7 +1050,72 @@ public:
     int64_t songGetLateAdoptions() const { return mSong.getLateAdoptions(); }
 
     /// Un render offline arranca de cero: sin colas de fundido ni smoothers del render anterior.
-    void resetSongForRender() { mSong.resetVoicesForRender(); }
+    void resetSongForRender() {
+        mSong.resetVoicesForRender();
+        mSongWasActive = false;
+        mSongSpaceSeen = ~0u;   // el bus reaplica sus parametros en el primer bloque
+        if (wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire)) bus->resetSpaceBus();
+    }
+
+    // ===== Mezcla propia de la cancion (REQ-055 S12, ADR-0013 §1) =====
+    // Con la cancion activa la voz se gobierna SOLO por esto (+ la agenda): el volumen, paneo, mute
+    // y sendToFx del TrackBuffer no la tocan, y ninguna voz entra a la cadena de escena.
+
+    /// Control, cualquier hilo. Escalares independientes: el RT los lee una vez por bloque.
+    void setSongMixTrack(int track, float gain, float pan, float send) {
+        if (track < 0 || track >= MAX_TRACKS_HW) return;
+        mSongMix[track].gain.store(gain, std::memory_order_relaxed);
+        mSongMix[track].pan.store(pan, std::memory_order_relaxed);
+        mSongMix[track].send.store(send, std::memory_order_relaxed);
+    }
+
+    /// Control, cualquier hilo. El RT aplica el conjunto al bus cuando ve la version nueva.
+    void setSongMixSpace(const wm::SongSpaceParams& p) {
+        mSongSpace.reverbReturn.store(p.reverbReturn, std::memory_order_relaxed);
+        mSongSpace.reverbSize.store(p.reverbSize, std::memory_order_relaxed);
+        mSongSpace.reverbDecayS.store(p.reverbDecayS, std::memory_order_relaxed);
+        mSongSpace.reverbDamping.store(p.reverbDamping, std::memory_order_relaxed);
+        mSongSpace.reverbPreDelayMs.store(p.reverbPreDelayMs, std::memory_order_relaxed);
+        mSongSpace.reverbLowCutHz.store(p.reverbLowCutHz, std::memory_order_relaxed);
+        mSongSpace.reverbHighCutHz.store(p.reverbHighCutHz, std::memory_order_relaxed);
+        mSongSpace.delayReturn.store(p.delayReturn, std::memory_order_relaxed);
+        mSongSpace.delayTimeMs.store(p.delayTimeMs, std::memory_order_relaxed);
+        mSongSpace.delayFeedback.store(p.delayFeedback, std::memory_order_relaxed);
+        mSongSpaceVersion.fetch_add(1, std::memory_order_release);
+    }
+
+    /**
+     * @brief Publica el bus «Espacio» (control). El looper NO es su dueño y el dueño no lo libera
+     *        mientras el RT pueda correr. Las memorias del bloque se dimensionan ANTES de
+     *        publicar el puntero, asi el RT que lo ve ya encuentra los buffers.
+     */
+    void publishSongBus(wm::ISongSpaceBus* bus, int maxBlockFrames) {
+        if (bus == nullptr || maxBlockFrames <= 0) return;
+        mSongBusMaxFrames = std::max(maxBlockFrames, 1);
+        sizeSongBusBuffers(mSongBusMaxFrames);
+        mSongBus.store(bus, std::memory_order_release);
+    }
+    bool hasSongBus() const { return mSongBus.load(std::memory_order_acquire) != nullptr; }
+    int64_t getSongBusOverflowBlocks() const { return static_cast<int64_t>(mSongBusOverflow.get()); }
+
+    /**
+     * @brief Taps de una pasada offline (REQ-055 S12). `fx` y `tracks` (trackCount x frames x 2)
+     *        llegan EN CERO y reciben, para el bloque que se va a renderizar, el retorno del bus y
+     *        el seco post-fader/post-paneo de cada pista, ya con el master del looper. Solo el
+     *        render offline (un hilo) los arma; el callback vivo no los toca.
+     */
+    void armSongTaps(float* fx, float* tracks, int trackCount, int frames) {
+        mTapFx = fx;
+        mTapTracks = tracks;
+        mTapTrackCount = trackCount;
+        mTapFrames = frames;
+    }
+    void disarmSongTaps() {
+        mTapFx = nullptr;
+        mTapTracks = nullptr;
+        mTapTrackCount = 0;
+        mTapFrames = 0;
+    }
 
     wm::SongPlayer& song() { return mSong; }
     const wm::SongPlayer& song() const { return mSong; }
@@ -1741,6 +1820,42 @@ private:
                   "las voces de la cancion cubren las mismas pistas que el looper");
     bool mBlockOpen{false};
     bool mSongBlockActive{false};
+    bool mSongWasActive{false};
+
+    // Mezcla propia de la cancion (REQ-055 S12). Todo escalar, atomico e independiente.
+    struct SongTrackMix {
+        std::atomic<float> gain{1.0f};
+        std::atomic<float> pan{0.0f};
+        std::atomic<float> send{0.0f};
+    };
+    SongTrackMix mSongMix[MAX_TRACKS_HW];
+    struct SongSpaceAtomics {
+        std::atomic<float> reverbReturn{0.0f};
+        std::atomic<float> reverbSize{0.8f};
+        std::atomic<float> reverbDecayS{2.0f};
+        std::atomic<float> reverbDamping{0.5f};
+        std::atomic<float> reverbPreDelayMs{20.0f};
+        std::atomic<float> reverbLowCutHz{80.0f};
+        std::atomic<float> reverbHighCutHz{12000.0f};
+        std::atomic<float> delayReturn{0.0f};
+        std::atomic<float> delayTimeMs{250.0f};
+        std::atomic<float> delayFeedback{0.35f};
+    };
+    SongSpaceAtomics mSongSpace;
+    std::atomic<uint32_t> mSongSpaceVersion{0};
+    uint32_t mSongSpaceSeen{0};                  // audio thread
+    std::atomic<wm::ISongSpaceBus*> mSongBus{nullptr};
+    int mSongBusMaxFrames{4096};
+    bool mSongBusRun{false};                     // audio thread: el bus corre en ESTE bloque
+    std::vector<float> mSongSendBuf;
+    std::vector<float> mSongFxBuf;
+    std::vector<float> mSongScratch;
+    wma::RtCounter mSongBusOverflow;
+    // Taps de la pasada offline (un solo hilo): ver armSongTaps().
+    float* mTapFx{nullptr};
+    float* mTapTracks{nullptr};
+    int mTapTrackCount{0};
+    int mTapFrames{0};
 
     wm::SongContext songContext(bool offline, bool rtStopped = false) const {
         wm::SongContext ctx;
@@ -1850,20 +1965,109 @@ private:
      */
     bool mixTracksInto(float* dst, int numFrames, bool wantSendToFx) {
         const int maxActive = mMaxActiveTracks.load(std::memory_order_relaxed);
+        if (mSongBlockActive) {
+            // Con la cancion activa NINGUNA voz entra a la cadena de escena: todas suenan en la
+            // pasada no-FX, con la mezcla propia de la cancion.
+            if (wantSendToFx) return false;
+            mixSongVoices(dst, numFrames, maxActive);
+            return true;
+        }
         bool any = false;
         for (int t = 0; t < maxActive; ++t) {
             if (mTracks[t].sendsToFx() != wantSendToFx) continue;
-            if (mSongBlockActive) {
-                // Con la cancion activa la pista no cae al TrackBuffer: la voz de la cancion
-                // respeta el volumen, el paneo y el mute del usuario y el envio a efectos.
-                mSong.renderSongVoice(t, dst, numFrames, mTracks[t].getVolume(),
-                                      mTracks[t].getPan(), mTracks[t].isMuted());
-            } else {
-                mTracks[t].mixInto(dst, numFrames);
-            }
+            mTracks[t].mixInto(dst, numFrames);
             any = true;
         }
         return any;
+    }
+
+    /// Las voces de la cancion: seco post-fader/post-paneo en `dry`; el envio, en mSongSendBuf.
+    void mixSongVoices(float* dry, int numFrames, int maxActive) {
+        const size_t needed = static_cast<size_t>(numFrames) * 2;
+        wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire);
+        mSongBusRun = bus != nullptr && mSongSendBuf.size() >= needed &&
+                      mSongFxBuf.size() >= needed && mSongScratch.size() >= needed;
+        if (bus != nullptr && !mSongBusRun) mSongBusOverflow.bump();   // bloque mas grande que el bus
+        if (mSongBusRun) std::memset(mSongSendBuf.data(), 0, sizeof(float) * needed);
+
+        for (int t = 0; t < maxActive; ++t) {
+            const float gain = mSongMix[t].gain.load(std::memory_order_relaxed);
+            const float pan = mSongMix[t].pan.load(std::memory_order_relaxed);
+            const float send = mSongMix[t].send.load(std::memory_order_relaxed);
+            float* tap = (mTapTracks != nullptr && t < mTapTrackCount && numFrames <= mTapFrames)
+                             ? mTapTracks + static_cast<size_t>(t) * static_cast<size_t>(mTapFrames) * 2
+                             : nullptr;
+            const bool toBus = mSongBusRun && (send > 0.0f || mSong.voiceSendActive(t));
+            float* dest = dry;
+            if (tap != nullptr) {
+                dest = tap;
+            } else if (toBus) {
+                dest = mSongScratch.data();
+                std::memset(dest, 0, sizeof(float) * needed);
+            }
+            float sendStart = 0.0f, sendEnd = 0.0f;
+            mSong.renderSongVoice(t, dest, numFrames, gain, pan, send, sendStart, sendEnd);
+            if (dest != dry) simd::addStereoBuffers(dry, dry, dest, numFrames, /*applyHeadroom=*/false);
+            if (toBus) {
+                const float inc = (sendEnd - sendStart) / static_cast<float>(numFrames);
+                float* sendBuf = mSongSendBuf.data();
+                for (int i = 0; i < numFrames; ++i) {
+                    const float g = sendStart + inc * static_cast<float>(i);
+                    sendBuf[i * 2] += dest[i * 2] * g;
+                    sendBuf[i * 2 + 1] += dest[i * 2 + 1] * g;
+                }
+            }
+        }
+    }
+
+    /// Corre el bus «Espacio» sobre el envio y suma su retorno a la premezcla (antes del master).
+    void finishSongMix(float* dry, int numFrames) {
+        if (!mSongBusRun) return;
+        wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire);
+        if (bus == nullptr) return;
+        const uint32_t version = mSongSpaceVersion.load(std::memory_order_acquire);
+        if (version != mSongSpaceSeen) {
+            mSongSpaceSeen = version;
+            bus->applySpaceParams(loadSongSpace());
+        }
+        bus->runSpaceBus(mSongSendBuf.data(), mSongFxBuf.data(), numFrames);
+        simd::addStereoBuffers(dry, dry, mSongFxBuf.data(), numFrames, /*applyHeadroom=*/false);
+        if (mTapFx != nullptr && numFrames <= mTapFrames) {
+            std::memcpy(mTapFx, mSongFxBuf.data(), sizeof(float) * static_cast<size_t>(numFrames) * 2);
+        }
+    }
+
+    void rampSongTaps(int numFrames, float gainStart, float gainEnd) {
+        if (numFrames > mTapFrames) return;
+        if (mTapFx != nullptr) simd::applyStereoGainRamp(mTapFx, numFrames, gainStart, gainEnd);
+        if (mTapTracks == nullptr) return;
+        for (int t = 0; t < mTapTrackCount; ++t) {
+            simd::applyStereoGainRamp(
+                mTapTracks + static_cast<size_t>(t) * static_cast<size_t>(mTapFrames) * 2, numFrames,
+                gainStart, gainEnd);
+        }
+    }
+
+    wm::SongSpaceParams loadSongSpace() const {
+        wm::SongSpaceParams p;
+        p.reverbReturn = mSongSpace.reverbReturn.load(std::memory_order_relaxed);
+        p.reverbSize = mSongSpace.reverbSize.load(std::memory_order_relaxed);
+        p.reverbDecayS = mSongSpace.reverbDecayS.load(std::memory_order_relaxed);
+        p.reverbDamping = mSongSpace.reverbDamping.load(std::memory_order_relaxed);
+        p.reverbPreDelayMs = mSongSpace.reverbPreDelayMs.load(std::memory_order_relaxed);
+        p.reverbLowCutHz = mSongSpace.reverbLowCutHz.load(std::memory_order_relaxed);
+        p.reverbHighCutHz = mSongSpace.reverbHighCutHz.load(std::memory_order_relaxed);
+        p.delayReturn = mSongSpace.delayReturn.load(std::memory_order_relaxed);
+        p.delayTimeMs = mSongSpace.delayTimeMs.load(std::memory_order_relaxed);
+        p.delayFeedback = mSongSpace.delayFeedback.load(std::memory_order_relaxed);
+        return p;
+    }
+
+    void sizeSongBusBuffers(int maxBlockFrames) {
+        const size_t needed = static_cast<size_t>(std::max(maxBlockFrames, mSongBusMaxFrames)) * 2;
+        if (mSongSendBuf.size() < needed) mSongSendBuf.resize(needed, 0.0f);
+        if (mSongFxBuf.size() < needed) mSongFxBuf.resize(needed, 0.0f);
+        if (mSongScratch.size() < needed) mSongScratch.resize(needed, 0.0f);
     }
 
     /// Cierra el bloque abierto por beginBlock(): publica seccion y lo que queda en uso.

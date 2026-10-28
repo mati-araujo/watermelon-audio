@@ -29,6 +29,7 @@ namespace oboe { class AudioStream; }
 #include "../looper/AudioLooper.h"
 #include "../looper/Transport.h"
 #include "../looper/PreRollRing.h"
+#include "../dsp/MasterStage.h"
 #include "FadeController.h"
 #include "ChordHarmony.h"
 
@@ -184,6 +185,40 @@ public:
      * @param frames  <= maxBlockFrames declarado en startOffline().
      */
     bool renderBlock(float* output, const float* input, int frames);
+
+    /**
+     * @brief Como renderBlock(), mas los taps de la mezcla de la cancion (REQ-055 S12).
+     *
+     * @param output      premezcla (con el perfil RAW) o la salida del perfil vigente.
+     * @param fx          frames*2 floats: el retorno del bus «Espacio», con el master del looper.
+     * @param tracks      trackCount*frames*2 floats: el seco post-fader/post-paneo de cada pista.
+     * @return false si no es un render offline en curso, o los argumentos no sirven.
+     *         `fx` y `tracks` se ponen en cero antes de renderizar; un bloque sin cancion los deja asi.
+     */
+    bool renderBlockTaps(float* output, float* fx, float* tracks, int trackCount, int frames);
+
+    // ===== Mezcla y master de la cancion (REQ-055 S12, ADR-0013) =====
+
+    /// Perfil de salida de applyMasterAndProtectOutput.
+    enum class OutputProfile : int {
+        Protected = 0,   ///< la cadena de siempre (default; Android e iOS)
+        Master = 1,      ///< MasterStage (ganancia + limitador true-peak) y despues el volumen de monitoreo
+        Raw = 2,         ///< nada. Solo una instancia offline
+    };
+
+    /// Crea (la primera vez) y publica el bus «Espacio». Control; el RT puede estar corriendo.
+    bool ensureSongBus();
+    /// Fija la mezcla de una pista de la cancion. Crea el bus la primera vez.
+    bool setSongMixTrack(int track, float gain, float pan, float send);
+    bool setSongMixSpace(const wm::SongSpaceParams& params);
+    /// Parametros del master (cualquier hilo; los lee el RT una vez por bloque).
+    void setMasterStageParams(const wm::MasterParams& params) { mMasterStage.configureMaster(params); }
+    /// false si RAW y el motor no esta en un render offline (nunca salida sin proteger a un DAC).
+    bool setOutputProfile(OutputProfile profile);
+    OutputProfile getOutputProfile() const {
+        return static_cast<OutputProfile>(mOutputProfile.load(std::memory_order_acquire));
+    }
+    int masterStageLatencyFrames() const { return mMasterStage.latencyFrames(); }
 
     /// true si el motor arranco con startOffline() (WD-2.1).
     bool isOffline() const { return mOfflineMode.load(std::memory_order_acquire); }
@@ -1183,6 +1218,16 @@ private:
     // ========== OUTPUT STAGE (Phase 1E) ==========
     // DC blocker, limiter, soft clipper, ditherer + scratch buffer
     OutputStage mOutputStage;
+
+    // Perfil de salida (REQ-055 S12). `mOutputProfileSeen` es del thread de audio y de nadie mas:
+    // al ver MASTER por primera vez en una racha, el master arranca de cero (no suena lo que quedo
+    // en su linea de retardo de la ultima vez).
+    wm::MasterStage mMasterStage;
+    std::atomic<int> mOutputProfile{0};
+    int mOutputProfileSeen{0};
+    // El bus «Espacio» lo posee el motor (el looper guarda un puntero): nunca se libera con el RT vivo.
+    std::mutex mSongBusMutex;
+    std::unique_ptr<wm::ISongSpaceBus> mSongBus;
 
     // ========== WAVEFORM CAPTURE (RT-Safe, Phase 1E) ==========
     WaveformCapture mWaveformCapture;  // RT-safe double-buffered waveform

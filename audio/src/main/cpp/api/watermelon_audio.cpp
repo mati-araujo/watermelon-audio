@@ -3089,6 +3089,23 @@ WmaResult wma_offline_render(WmaEngine* engine, float* output, const float* inpu
                : WMA_ERROR_INVALID_OPERATION;
 }
 
+WmaResult wma_offline_render_taps(WmaEngine* engine, float* mix, float* fx_return, float* tracks,
+                                  int32_t track_count, int frames) {
+    WMA_CHECK(engine);
+    if (!engine->engine->isOffline()) {
+        return WMA_ERROR_INVALID_OPERATION;
+    }
+    if (mix == nullptr || fx_return == nullptr || frames <= 0 ||
+        frames > engine->engine->offlineMaxBlockFrames() || track_count < 0 ||
+        track_count > engine->engine->getAudioLooper().getMaxActiveTracks() ||
+        (track_count > 0 && tracks == nullptr)) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    return engine->engine->renderBlockTaps(mix, fx_return, tracks, track_count, frames)
+               ? WMA_OK
+               : WMA_ERROR_INVALID_OPERATION;
+}
+
 WmaResult wma_offline_stop(WmaEngine* engine) {
     WMA_CHECK(engine);
     if (wmaRunsLive(engine)) {
@@ -3099,4 +3116,141 @@ WmaResult wma_offline_stop(WmaEngine* engine) {
         engine->engine->stop();
     }
     return WMA_OK;
+}
+
+// ========== 25. Song mix, master and output profiles (REQ-055 S12, ADR-0013) ==========
+
+struct WmaMaster {
+    wm::MasterStage stage;
+};
+
+namespace {
+
+bool wmaInRange(float v, float lo, float hi) {
+    return std::isfinite(v) && v >= lo && v <= hi;
+}
+
+bool wmaValidMaster(const WmaMixMaster& m) {
+    return wmaInRange(m.gain_db, -60.0f, 40.0f) && wmaInRange(m.ceiling_dbtp, -20.0f, 0.0f) &&
+           wmaInRange(m.release_ms, 1.0f, 2000.0f);
+}
+
+wm::MasterParams wmaMasterParams(const WmaMixMaster& m) {
+    wm::MasterParams p;
+    p.gainDb = m.gain_db;
+    p.ceilingDbtp = m.ceiling_dbtp;
+    p.releaseMs = m.release_ms;
+    return p;
+}
+
+}  // namespace
+
+WmaResult wma_mix_set_track(WmaEngine* engine, int32_t track, float gain, float pan, float send) {
+    WMA_CHECK(engine);
+    if (track < 0 || track >= engine->engine->getAudioLooper().getMaxActiveTracks() ||
+        !wmaInRange(gain, 0.0f, 2.0f) || !wmaInRange(pan, -1.0f, 1.0f) ||
+        !wmaInRange(send, 0.0f, 1.0f)) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    return engine->engine->setSongMixTrack(track, gain, pan, send) ? WMA_OK : WMA_ERROR_MEMORY;
+}
+
+WmaResult wma_mix_set_space(WmaEngine* engine, const WmaMixSpace* space) {
+    WMA_CHECK(engine);
+    if (space == nullptr || !wmaInRange(space->reverb_return, 0.0f, 1.0f) ||
+        !wmaInRange(space->reverb_size, 0.1f, 2.0f) ||
+        !wmaInRange(space->reverb_decay_s, 0.1f, 10.0f) ||
+        !wmaInRange(space->reverb_damping, 0.0f, 1.0f) ||
+        !wmaInRange(space->reverb_predelay_ms, 0.0f, 100.0f) ||
+        !wmaInRange(space->reverb_low_cut_hz, 20.0f, 500.0f) ||
+        !wmaInRange(space->reverb_high_cut_hz, 1000.0f, 20000.0f) ||
+        !wmaInRange(space->delay_return, 0.0f, 1.0f) ||
+        !wmaInRange(space->delay_time_ms, 1.0f, 2000.0f) ||
+        !wmaInRange(space->delay_feedback, 0.0f, 0.95f)) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    wm::SongSpaceParams p;
+    p.reverbReturn = space->reverb_return;
+    p.reverbSize = space->reverb_size;
+    p.reverbDecayS = space->reverb_decay_s;
+    p.reverbDamping = space->reverb_damping;
+    p.reverbPreDelayMs = space->reverb_predelay_ms;
+    p.reverbLowCutHz = space->reverb_low_cut_hz;
+    p.reverbHighCutHz = space->reverb_high_cut_hz;
+    p.delayReturn = space->delay_return;
+    p.delayTimeMs = space->delay_time_ms;
+    p.delayFeedback = space->delay_feedback;
+    return engine->engine->setSongMixSpace(p) ? WMA_OK : WMA_ERROR_MEMORY;
+}
+
+WmaResult wma_mix_set_master(WmaEngine* engine, const WmaMixMaster* master) {
+    WMA_CHECK(engine);
+    if (master == nullptr || !wmaValidMaster(*master)) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    engine->engine->setMasterStageParams(wmaMasterParams(*master));
+    return WMA_OK;
+}
+
+WmaResult wma_mix_set_output_profile(WmaEngine* engine, WmaOutputProfile profile) {
+    WMA_CHECK(engine);
+    if (profile != WMA_OUTPUT_PROTECTED && profile != WMA_OUTPUT_MASTER &&
+        profile != WMA_OUTPUT_RAW) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    return engine->engine->setOutputProfile(static_cast<AudioEngine::OutputProfile>(profile))
+               ? WMA_OK
+               : WMA_ERROR_INVALID_OPERATION;
+}
+
+int32_t wma_mix_get_master_latency_frames(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->masterStageLatencyFrames();
+}
+
+int32_t wma_get_xrun_count(const WmaEngine* engine) {
+    WMA_CHECK_VAL(engine, 0);
+    return engine->engine->getXRunCount();
+}
+
+WmaMaster* wma_master_create(int sample_rate) {
+    if (sample_rate < wm::MasterStage::kMinSampleRate ||
+        sample_rate > wm::MasterStage::kMaxSampleRate) {
+        return nullptr;
+    }
+    try {
+        auto* m = new WmaMaster();
+        m->stage.prepareMaster(sample_rate);
+        return m;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+WmaResult wma_master_configure(WmaMaster* master, const WmaMixMaster* params) {
+    if (master == nullptr) return WMA_ERROR_NOT_INITIALIZED;
+    if (params == nullptr || !wmaValidMaster(*params)) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    master->stage.configureMaster(wmaMasterParams(*params));
+    return WMA_OK;
+}
+
+WmaResult wma_master_reset(WmaMaster* master) {
+    if (master == nullptr) return WMA_ERROR_NOT_INITIALIZED;
+    master->stage.resetMaster();
+    return WMA_OK;
+}
+
+WmaResult wma_master_process(WmaMaster* master, float* inout, int frames) {
+    if (master == nullptr) return WMA_ERROR_NOT_INITIALIZED;
+    if (inout == nullptr || frames <= 0 || frames > WMA_MASTER_MAX_FRAMES) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    master->stage.processMaster(inout, frames);
+    return WMA_OK;
+}
+
+int32_t wma_master_get_latency_frames(const WmaMaster* master) {
+    return master == nullptr ? 0 : master->stage.latencyFrames();
+}
+
+void wma_master_destroy(WmaMaster* master) {
+    delete master;
 }

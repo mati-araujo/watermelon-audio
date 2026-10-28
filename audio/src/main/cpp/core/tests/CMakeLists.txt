@@ -182,6 +182,7 @@ add_executable(core_tests
     test_c_api_looper.cpp
     test_c_api_looper_analysis.cpp
     test_c_api_song.cpp
+    test_song_mix.cpp
     support/rtalloc_counter.cpp
     test_time_dependence_probe.cpp
     test_c_api_routing.cpp

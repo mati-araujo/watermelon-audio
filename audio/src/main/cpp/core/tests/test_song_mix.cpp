@@ -1,0 +1,512 @@
+/**
+ * test_song_mix.cpp — la mezcla propia de la cancion y su bus «Espacio» (REQ-055 S12, W2),
+ * con el motor entero y los taps de `wma_offline_render_taps`.
+ *
+ * Cada test responde a un defecto plausible (cabecera de cada uno). Los taps son la unica forma
+ * de ver el seco por pista y el retorno del bus sin suponer nada del reverb.
+ */
+
+#include "support/CApiFixture.h"
+#include "support/RtAllocCounter.h"
+#include "tests/support/TestSanitizer.h"
+#include "tests/support/TestWait.h"
+
+#include "looper/WavFile.h"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <unistd.h>
+
+#include <gtest/gtest.h>
+
+namespace wma_test {
+namespace {
+
+constexpr int kRate = 48000;
+constexpr int kLoop = 4800;   // 100 ms
+constexpr int kBlock = 512;
+
+std::filesystem::path mixFixture(const std::string& name) {
+    return std::filesystem::temp_directory_path() /
+           ("wm" + std::to_string(static_cast<long long>(getpid())) + "_smix_" + name + ".wav");
+}
+
+std::string writeTone(const std::string& name, float period, float phase, float amp) {
+    std::vector<float> buf(static_cast<size_t>(kLoop) * 2);
+    for (int n = 0; n < kLoop; ++n) {
+        const float v = amp * std::sin(6.2831853f * static_cast<float>(n) / period + phase);
+        buf[static_cast<size_t>(n) * 2] = v;
+        buf[static_cast<size_t>(n) * 2 + 1] = v;
+    }
+    const auto path = mixFixture(name);
+    EXPECT_TRUE(wav::writeWav(path.c_str(), buf.data(), kLoop, kRate, wav::BitDepth::FLOAT_32));
+    return path.string();
+}
+
+int32_t loadClip(WmaEngine* e, const std::string& path) {
+    int32_t id = -1;
+    EXPECT_EQ(wma_song_load_clip(e, path.c_str(), kRate, 0, 0, kLoop, &id), WMA_OK);
+    return id;
+}
+
+WmaSongSection section2(int64_t start, int32_t clip0, int32_t clip1) {
+    WmaSongSection s{};
+    s.start_frame = start;
+    for (int t = 0; t < WMA_SONG_MAX_TRACKS; ++t) s.clip[t] = WMA_SONG_SILENCE;
+    s.clip[0] = clip0;
+    s.clip[1] = clip1;
+    return s;
+}
+
+WmaMixSpace space(float reverbReturn, float delayReturn) {
+    WmaMixSpace s{};
+    s.reverb_return = reverbReturn;
+    s.reverb_size = 0.9f;
+    s.reverb_decay_s = 1.5f;
+    s.reverb_damping = 0.4f;
+    s.reverb_predelay_ms = 12.0f;
+    s.reverb_low_cut_hz = 90.0f;
+    s.reverb_high_cut_hz = 9000.0f;
+    s.delay_return = delayReturn;
+    s.delay_time_ms = 125.0f;
+    s.delay_feedback = 0.4f;
+    return s;
+}
+
+struct Rendered {
+    std::vector<float> mix, fx;
+    std::vector<std::vector<float>> tracks;   // por pista, estereo intercalado
+};
+
+float peakOf(const std::vector<float>& v, size_t from = 0, size_t to = SIZE_MAX) {
+    float p = 0.0f;
+    for (size_t i = from; i < std::min(to, v.size()); ++i) p = std::max(p, std::abs(v[i]));
+    return p;
+}
+
+double maxDiff(const std::vector<float>& a, const std::vector<float>& b) {
+    double w = 0.0;
+    for (size_t i = 0; i < std::min(a.size(), b.size()); ++i) w = std::max(w, double(std::abs(a[i] - b[i])));
+    return w;
+}
+
+bool sameBits(const std::vector<float>& a, const std::vector<float>& b) {
+    return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+}
+
+class SongMix : public ::testing::Test {
+protected:
+    void SetUp() override { wma::setLogCallback([](wma::LogLevel, const char*, const char*) {}); }
+    void TearDown() override {
+        for (const auto& p : mFiles) {
+            std::error_code ec;
+            std::filesystem::remove(p, ec);
+        }
+        for (WmaEngine* e : mEngines) wma_engine_destroy(e);
+        wma::setLogCallback(nullptr);
+    }
+
+    std::string tone(const std::string& name, float period, float phase, float amp = 0.3f) {
+        mFiles.push_back(mixFixture(name));
+        return writeTone(name, period, phase, amp);
+    }
+
+    /// Un motor offline en el estado que usa un export: sin instrumento, salida RAW.
+    WmaEngine* offlineEngine(WmaOutputProfile profile = WMA_OUTPUT_RAW) {
+        WmaEngine* e = wma_engine_create();
+        mEngines.push_back(e);
+        wma_set_audio_mode(e, 0);
+        wma_set_master_volume(e, 1.0f);
+        wma_set_synth_volume(e, 0.0f);
+        wma_set_frequency_amplitude(e, 440.0f, 0.0f);
+        EXPECT_EQ(wma_offline_start(e, kRate, kBlock), WMA_OK);
+        EXPECT_EQ(wma_mix_set_output_profile(e, profile), WMA_OK);
+        return e;
+    }
+
+    /// Programa 2 pistas (un tono cada una) y renderiza `loops` loops con taps.
+    Rendered renderTaps(WmaEngine* e, int loops, int trackCount = 2) {
+        const int64_t total = static_cast<int64_t>(loops) * kLoop;
+        Rendered r;
+        r.mix.assign(static_cast<size_t>(total) * 2, 0.0f);
+        r.fx.assign(static_cast<size_t>(total) * 2, 0.0f);
+        r.tracks.assign(static_cast<size_t>(trackCount), std::vector<float>(static_cast<size_t>(total) * 2, 0.0f));
+        std::vector<float> mix(kBlock * 2), fx(kBlock * 2), tr(static_cast<size_t>(trackCount) * kBlock * 2);
+        for (int64_t done = 0; done < total; done += kBlock) {
+            const int n = static_cast<int>(std::min<int64_t>(kBlock, total - done));
+            EXPECT_EQ(wma_offline_render_taps(e, mix.data(), fx.data(), tr.data(), trackCount, n), WMA_OK);
+            const size_t at = static_cast<size_t>(done) * 2;
+            std::copy_n(mix.begin(), static_cast<size_t>(n) * 2, r.mix.begin() + at);
+            std::copy_n(fx.begin(), static_cast<size_t>(n) * 2, r.fx.begin() + at);
+            for (int t = 0; t < trackCount; ++t) {
+                std::copy_n(tr.begin() + static_cast<size_t>(t) * n * 2, static_cast<size_t>(n) * 2,
+                            r.tracks[static_cast<size_t>(t)].begin() + at);
+            }
+        }
+        return r;
+    }
+
+    /// Cancion de dos pistas: arranca a los 2 loops y dura 6.
+    void scheduleSong(WmaEngine* e, int32_t a, int32_t b) {
+        const int64_t p0 = wma_transport_get_play_frame(e);
+        const WmaSongSection s = section2(p0 + 2 * kLoop, a, b);
+        EXPECT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 12 * kLoop), WMA_OK);
+    }
+
+    std::vector<std::filesystem::path> mFiles;
+    std::vector<WmaEngine*> mEngines;
+};
+
+}  // namespace
+
+// Defecto: un envio que no se apaga con send = 0 (el bus recibe algo, o el retorno deja un
+// residuo) o una salida que no es la suma de los secos. Con los retornos al maximo y los dos
+// envios en cero el retorno es exactamente 0 y la premezcla, la suma de las dos pistas.
+TEST_F(SongMix, SendZeroGivesNoFxAndTheMixIsTheSumOfTheDryTaps) {
+    const std::string pa = tone("z_a", 100.0f, 0.0f), pb = tone("z_b", 75.0f, 1.0f);
+    WmaEngine* e = offlineEngine();
+    const int32_t a = loadClip(e, pa), b = loadClip(e, pb);
+    ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 0.0f), WMA_OK);
+    ASSERT_EQ(wma_mix_set_track(e, 1, 1.0f, 0.3f, 0.0f), WMA_OK);
+    const WmaMixSpace sp = space(1.0f, 1.0f);
+    ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+    scheduleSong(e, a, b);
+    const Rendered r = renderTaps(e, 7);
+    ASSERT_GT(peakOf(r.tracks[0]), 0.1f);
+    ASSERT_GT(peakOf(r.tracks[1]), 0.1f);
+    EXPECT_EQ(peakOf(r.fx), 0.0f) << "send 0 y el retorno no es cero";
+    std::vector<float> sum(r.mix.size());
+    for (size_t i = 0; i < sum.size(); ++i) sum[i] = r.tracks[0][i] + r.tracks[1][i];
+    EXPECT_LE(maxDiff(r.mix, sum), 1e-6);
+}
+
+// Defecto: la salida RAW deja de ser la suma de los taps (un tap sin la rampa del master del
+// looper, el retorno sumado dos veces, una pista contada en el tap y no en la mezcla). Con
+// envios y retornos activos: salida = Σ taps de pista + FX, a 1e-6. El retorno tiene que sonar.
+TEST_F(SongMix, RawOutputEqualsTheSumOfTheTapsPlusTheFxReturn) {
+    const std::string pa = tone("r_a", 100.0f, 0.0f), pb = tone("r_b", 75.0f, 1.0f);
+    WmaEngine* e = offlineEngine();
+    const int32_t a = loadClip(e, pa), b = loadClip(e, pb);
+    ASSERT_EQ(wma_mix_set_track(e, 0, 0.8f, -0.5f, 0.6f), WMA_OK);
+    ASSERT_EQ(wma_mix_set_track(e, 1, 1.3f, 0.7f, 0.3f), WMA_OK);
+    const WmaMixSpace sp = space(0.7f, 0.5f);
+    ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+    wma_looper_set_master_volume(e, 0.6f);   // los taps van DESPUES del master del looper
+    scheduleSong(e, a, b);
+    const Rendered r = renderTaps(e, 7);
+    ASSERT_GT(peakOf(r.fx), 0.02f) << "el bus no devuelve nada: el test no prueba nada";
+    std::vector<float> sum(r.mix.size());
+    for (size_t i = 0; i < sum.size(); ++i) sum[i] = r.tracks[0][i] + r.tracks[1][i] + r.fx[i];
+    EXPECT_LE(maxDiff(r.mix, sum), 1e-6);
+    // el master del looper llego a cada tap: sin el, un tap seria ~1/0,6 mayor que su parte de mix
+    EXPECT_LT(peakOf(r.tracks[0]), 0.8f * 0.3f / 0.6f);
+}
+
+// Defecto: el envio es PRE-fader (o pre-paneo). Dos configuraciones con el MISMO seco-por-envio
+// (ganancia 0,5 x envio 1 contra ganancia 1 x envio 0,5) tienen que dar el mismo retorno; un
+// mutante pre-fader da el doble en la primera. Y con paneo -1 el delay (estereo) solo devuelve
+// por L: el envio sale del seco POST-paneo.
+TEST_F(SongMix, SendIsPostFaderAndPostPan) {
+    const std::string pa = tone("pf_a", 100.0f, 0.0f);
+    const auto fxFor = [&](float gain, float pan, float send) {
+        WmaEngine* e = offlineEngine();
+        const int32_t a = loadClip(e, pa);
+        EXPECT_EQ(wma_mix_set_track(e, 0, gain, pan, send), WMA_OK);
+        const WmaMixSpace sp = space(0.0f, 1.0f);   // solo el delay (estereo, sin mezclar L y R)
+        EXPECT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+        const int64_t p0 = wma_transport_get_play_frame(e);
+        const WmaSongSection s = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
+        EXPECT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 12 * kLoop), WMA_OK);
+        return renderTaps(e, 7, 1);
+    };
+    const Rendered halfGain = fxFor(0.5f, 0.0f, 1.0f);
+    const Rendered halfSend = fxFor(1.0f, 0.0f, 0.5f);
+    ASSERT_GT(peakOf(halfGain.fx), 0.02f);
+    EXPECT_LE(maxDiff(halfGain.fx, halfSend.fx), 1e-6) << "el envio no es post-fader";
+
+    const Rendered left = fxFor(1.0f, -1.0f, 1.0f);
+    const Rendered centre = fxFor(1.0f, 0.0f, 1.0f);
+    float peakR = 0.0f, peakLeftL = 0.0f, peakCentreL = 0.0f;
+    for (size_t i = 0; i < left.fx.size(); i += 2) {
+        peakLeftL = std::max(peakLeftL, std::abs(left.fx[i]));
+        peakR = std::max(peakR, std::abs(left.fx[i + 1]));
+        peakCentreL = std::max(peakCentreL, std::abs(centre.fx[i]));
+    }
+    ASSERT_GT(peakLeftL, 0.02f);
+    EXPECT_EQ(peakR, 0.0f) << "con paneo -1 el envio sale tambien por R: es pre-paneo";
+    EXPECT_NEAR(peakLeftL / peakCentreL, 1.0f / 0.7071f, 0.01f);
+}
+
+// Defecto: la ley de paneo no es la del looper (EqualPowerPanLUT): -1 deja pasar canal R, o el
+// centro no esta a -3 dB.
+TEST_F(SongMix, PanLawIsTheLooperEqualPowerOne) {
+    const std::string pa = tone("p_a", 100.0f, 0.0f, 0.5f);
+    const auto tapsFor = [&](float pan) {
+        WmaEngine* e = offlineEngine();
+        const int32_t a = loadClip(e, pa);
+        EXPECT_EQ(wma_mix_set_track(e, 0, 1.0f, pan, 0.0f), WMA_OK);
+        const int64_t p0 = wma_transport_get_play_frame(e);
+        const WmaSongSection s = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
+        EXPECT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 12 * kLoop), WMA_OK);
+        return renderTaps(e, 7, 1);
+    };
+    const auto chPeak = [](const Rendered& r, int ch) {
+        float p = 0.0f;
+        for (size_t i = static_cast<size_t>(ch); i < r.tracks[0].size(); i += 2) p = std::max(p, std::abs(r.tracks[0][i]));
+        return p;
+    };
+    const Rendered left = tapsFor(-1.0f), centre = tapsFor(0.0f), right = tapsFor(1.0f);
+    EXPECT_EQ(chPeak(left, 1), 0.0f);
+    EXPECT_NEAR(chPeak(left, 0), 0.5f, 0.005f);
+    EXPECT_LT(chPeak(right, 0), 1e-7f);   // cos(pi/2) en float: -4e-8, no 0
+    EXPECT_NEAR(chPeak(centre, 0) / 0.5f, 0.7071f, 0.003f);
+    EXPECT_NEAR(chPeak(centre, 1) / 0.5f, 0.7071f, 0.003f);
+}
+
+// Defecto: el primer bloque rampea desde una voz fresca (ganancia 1, paneo 0) hacia la mezcla
+// pedida: un export con una pista a -12 dB arranca con un fundido. Una vez completo el fundido
+// de entrada de la agenda, el tap tiene la ganancia del target (no la de un smoother a medio camino).
+TEST_F(SongMix, FirstBlockStartsAtTheMixTargetWithoutARamp) {
+    const std::string pa = tone("s_a", 100.0f, 1.5707963f, 0.5f);   // coseno: pico en el frame 0
+    WmaEngine* e = offlineEngine();
+    const int32_t a = loadClip(e, pa);
+    ASSERT_EQ(wma_mix_set_track(e, 0, 0.25f, 1.0f, 0.0f), WMA_OK);
+    scheduleSong(e, a, WMA_SONG_SILENCE);
+    const Rendered r = renderTaps(e, 5, 1);
+    const size_t from = static_cast<size_t>(2 * kLoop + 600) * 2;   // pasado el fundido de entrada
+    float peakL = 0.0f, peakR = 0.0f;
+    for (size_t i = from; i < from + 1000; i += 2) {
+        peakL = std::max(peakL, std::abs(r.tracks[0][i]));
+        peakR = std::max(peakR, std::abs(r.tracks[0][i + 1]));
+    }
+    EXPECT_NEAR(peakR, 0.5f * 0.25f, 1e-4f);
+    EXPECT_LT(peakL, 1e-5f) << "el paneo no estaba en su target en el primer bloque";
+}
+
+// Defecto (cambio de contrato): el volumen, paneo, mute o sendToFx de la pista del looper siguen
+// alcanzando a la cancion. Mismos taps con los controles del TrackBuffer en extremos.
+TEST_F(SongMix, TrackBufferControlsHaveNoEffectWhileTheSongIsActive) {
+    const std::string pa = tone("t_a", 100.0f, 0.0f), pb = tone("t_b", 75.0f, 1.0f);
+    const auto run = [&](bool moveTrackBuffer) {
+        WmaEngine* e = offlineEngine();
+        const int32_t a = loadClip(e, pa), b = loadClip(e, pb);
+        EXPECT_EQ(wma_mix_set_track(e, 0, 0.9f, -0.2f, 0.4f), WMA_OK);
+        EXPECT_EQ(wma_mix_set_track(e, 1, 0.7f, 0.5f, 0.2f), WMA_OK);
+        const WmaMixSpace sp = space(0.6f, 0.4f);
+        EXPECT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+        if (moveTrackBuffer) {
+            for (int t = 0; t < 2; ++t) {
+                wma_looper_set_track_volume(e, t, 0.05f);
+                wma_looper_set_track_pan(e, t, 1.0f);
+                wma_looper_set_track_muted(e, t, true);
+                wma_looper_set_track_send_to_fx(e, t, true);
+            }
+        }
+        scheduleSong(e, a, b);
+        return renderTaps(e, 7);
+    };
+    const Rendered plain = run(false), moved = run(true);
+    ASSERT_GT(peakOf(plain.mix), 0.1f);
+    EXPECT_TRUE(sameBits(plain.mix, moved.mix));
+    EXPECT_TRUE(sameBits(plain.fx, moved.fx));
+    EXPECT_TRUE(sameBits(plain.tracks[0], moved.tracks[0]));
+    EXPECT_TRUE(sameBits(plain.tracks[1], moved.tracks[1]));
+}
+
+// Defecto: el bus no vuelve al estado de una instancia fresca en wma_offline_start (la cola del
+// reverb o el delay del render anterior suena en el siguiente, o el tiempo del delay se desliza
+// desde el default). Una instancia reusada tiene que dar los bits de una fresca, con bus.
+TEST_F(SongMix, AReusedInstanceWithTheBusGivesTheBitsOfAFreshOne) {
+    const std::string pa = tone("f_a", 100.0f, 0.0f), pb = tone("f_b", 75.0f, 1.0f);
+    const auto configure = [&](WmaEngine* e) {
+        const int32_t a = loadClip(e, pa), b = loadClip(e, pb);
+        EXPECT_EQ(wma_mix_set_track(e, 0, 0.9f, -0.2f, 0.7f), WMA_OK);
+        EXPECT_EQ(wma_mix_set_track(e, 1, 0.7f, 0.5f, 0.5f), WMA_OK);
+        const WmaMixSpace sp = space(0.8f, 0.6f);
+        EXPECT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+        scheduleSong(e, a, b);
+        return renderTaps(e, 8);
+    };
+    WmaEngine* reused = offlineEngine();
+    const int32_t a0 = loadClip(reused, pa), b0 = loadClip(reused, pb);
+    ASSERT_EQ(wma_mix_set_track(reused, 0, 1.4f, 0.9f, 1.0f), WMA_OK);   // otra mezcla, y crea el bus
+    WmaMixSpace dirty = space(1.0f, 1.0f);
+    dirty.delay_time_ms = 333.0f;
+    ASSERT_EQ(wma_mix_set_space(reused, &dirty), WMA_OK);
+    scheduleSong(reused, a0, b0);
+    (void)renderTaps(reused, 8);   // ensucia voces, bus y master
+    ASSERT_EQ(wma_offline_start(reused, kRate, kBlock), WMA_OK);   // reinicio de la misma instancia
+    ASSERT_EQ(wma_mix_set_output_profile(reused, WMA_OUTPUT_RAW), WMA_OK);
+    wma_song_unload_clip(reused, a0);
+    wma_song_unload_clip(reused, b0);
+    const Rendered second = configure(reused);
+    WmaEngine* fresh = offlineEngine();
+    const Rendered first = configure(fresh);
+    ASSERT_GT(peakOf(first.fx), 0.02f);
+    EXPECT_TRUE(sameBits(first.mix, second.mix));
+    EXPECT_TRUE(sameBits(first.fx, second.fx));
+    EXPECT_TRUE(sameBits(first.tracks[0], second.tracks[0]));
+    EXPECT_TRUE(sameBits(first.tracks[1], second.tracks[1]));
+}
+
+// Defecto: un envio que se apaga deja el bus alimentado (el smoother del envio nunca llega a 0, o
+// el bus se corta de golpe y la cola desaparece). Tras pasar el envio a 0 la cola del delay SIGUE
+// sonando (el bus no se corta) y se agota con su realimentacion: 0,4 por eco de 125 ms.
+TEST_F(SongMix, TurningTheSendOffLetsTheTailDecayInsteadOfCuttingItOrFeedingItForever) {
+    const std::string pa = tone("o_a", 100.0f, 0.0f);
+    WmaEngine* e = offlineEngine();
+    const int32_t a = loadClip(e, pa);
+    ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 1.0f), WMA_OK);
+    const WmaMixSpace sp = space(0.0f, 1.0f);
+    ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+    const int64_t p0 = wma_transport_get_play_frame(e);
+    const WmaSongSection s = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
+    ASSERT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 60 * kLoop), WMA_OK);
+    const Rendered on = renderTaps(e, 7, 1);
+    ASSERT_GT(peakOf(on.fx), 0.3f);
+    ASSERT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 0.0f), WMA_OK);
+    (void)renderTaps(e, 1, 1);                    // el smoother del envio llega a 0
+    const Rendered justAfter = renderTaps(e, 2, 1);
+    EXPECT_GT(peakOf(justAfter.fx), 0.02f) << "el bus se corto de golpe";
+    (void)renderTaps(e, 20, 1);
+    const Rendered later = renderTaps(e, 2, 1);
+    EXPECT_LT(peakOf(later.fx), 1e-3f) << "el envio no se apago: el bus sigue alimentado";
+    EXPECT_GT(peakOf(later.tracks[0]), 0.1f) << "la cancion ya no suena: el test no prueba nada";
+}
+
+namespace {
+
+struct LiveMix {
+    WmaEngine* e = nullptr;
+    FakeAudioBackend* fake = nullptr;
+    void bringUp() {
+        resetLastCreatedSystemBackend();
+        e = wma_engine_create();
+        ASSERT_NE(e, nullptr);
+        fake = lastCreatedSystemBackend();
+        ASSERT_NE(fake, nullptr);
+        fake->setNegotiatedSampleRate(kRate);
+        wma_set_use_backend_manager(e, true);
+        ASSERT_TRUE(wma_select_backend(1));
+        wma_set_audio_mode(e, 0);
+        wma_set_master_volume(e, 1.0f);
+        wma_set_frequency_amplitude(e, 440.0f, 0.0f);
+        ASSERT_EQ(wma_engine_start(e, 0), WMA_OK);
+    }
+    void tearDown() {
+        if (e == nullptr) return;
+        wma_engine_stop(e, 0);
+        wma_engine_destroy(e);
+        e = nullptr;
+    }
+};
+
+int64_t threadCpuNs() {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+
+}  // namespace
+
+// Defecto: el callback aloca o se bloquea cuando llegan setters de mezcla (el bus se crea en RT,
+// un setter toma un lock, los parametros del bus se aplican desde el hilo de control en vez de
+// desde el que procesa -> carrera, que TSan ve). Una rafaga de setters de mezcla / espacio /
+// master / perfil contra el callback en marcha con 8 pistas, bus y perfil MASTER. Mide el costo
+// del callback contra su periodo (maximo y p99) con el metodo de AC-055.13.
+TEST_F(SongMix, ABurstOfMixSettersAgainstTheCallbackAllocatesNothingAndStaysInsideThePeriod) {
+    constexpr int kTracks = 8;
+    LiveMix live;
+    live.bringUp();
+    ASSERT_NE(live.e, nullptr);
+    ASSERT_EQ(wma_mix_set_output_profile(live.e, WMA_OUTPUT_RAW), WMA_ERROR_INVALID_OPERATION);
+    ASSERT_EQ(wma_mix_set_output_profile(live.e, WMA_OUTPUT_MASTER), WMA_OK);
+    int32_t clips[kTracks];
+    for (int t = 0; t < kTracks; ++t) {
+        clips[t] = loadClip(live.e, tone("live_" + std::to_string(t), 60.0f + 11.0f * t, 0.3f * t));
+    }
+    // una seccion con un clip por pista, republicada desde el principio (como Studio)
+    for (int t = 0; t < kTracks; ++t) ASSERT_EQ(wma_mix_set_track(live.e, t, 0.5f, 0.2f * t - 0.7f, 0.3f), WMA_OK);
+    const WmaMixSpace sp0 = space(0.5f, 0.4f);
+    ASSERT_EQ(wma_mix_set_space(live.e, &sp0), WMA_OK);
+    const WmaMixMaster m0 = {0.0f, -1.0f, 150.0f};
+    ASSERT_EQ(wma_mix_set_master(live.e, &m0), WMA_OK);
+
+    {
+        std::vector<float> warm(512);
+        for (int i = 0; i < 10; ++i) live.fake->callback()->onAudioReady(warm.data(), nullptr, 256);
+        WmaSongSection s{};
+        s.start_frame = wma_transport_get_play_frame(live.e) + 2 * kLoop;
+        for (int t = 0; t < WMA_SONG_MAX_TRACKS; ++t) s.clip[t] = t < kTracks ? clips[t] : WMA_SONG_SILENCE;
+        ASSERT_EQ(wma_song_set_schedule(live.e, kLoop, &s, 1, s.start_frame + 100000 * kLoop), WMA_OK);
+    }
+
+    constexpr int kCallbackFrames = 256;
+    constexpr double kPeriodNs = 1e9 * kCallbackFrames / kRate;
+    std::atomic<bool> stop{false};
+    std::atomic<int64_t> allocs{-1};
+    std::vector<int64_t> costs;
+    costs.reserve(2000000);
+    std::atomic<int64_t> blocks{0};
+    std::atomic<int64_t> rtBlocks{0};
+    std::thread rt([&] {
+        std::vector<float> buf(static_cast<size_t>(kCallbackFrames) * 2);
+        for (int i = 0; i < 40; ++i) live.fake->callback()->onAudioReady(buf.data(), nullptr, kCallbackFrames);
+        armAllocCounter();
+        while (!stop.load(std::memory_order_acquire)) {
+            const int64_t t0 = threadCpuNs();
+            live.fake->callback()->onAudioReady(buf.data(), nullptr, kCallbackFrames);
+            if (costs.size() < costs.capacity()) costs.push_back(threadCpuNs() - t0);
+            rtBlocks.fetch_add(1, std::memory_order_relaxed);
+        }
+        allocs.store(disarmAllocCounter());
+        blocks.store(static_cast<int64_t>(costs.size()));
+    });
+
+    constexpr int kBursts = 1000;
+    constexpr int64_t kMinBlocks = 6000;   // ~32 s de audio de callbacks reales
+    for (int i = 0; i < kBursts || rtBlocks.load(std::memory_order_relaxed) < kMinBlocks; ++i) {
+        for (int t = 0; t < kTracks; ++t) {
+            const float g = 0.2f + 0.8f * static_cast<float>((i + t) % 5) / 4.0f;
+            EXPECT_EQ(wma_mix_set_track(live.e, t, g, -1.0f + 0.25f * static_cast<float>((i + t) % 9),
+                                        0.1f * static_cast<float>((i * 3 + t) % 11)), WMA_OK);
+        }
+        WmaMixSpace sp = space(0.1f * static_cast<float>(i % 10), 0.1f * static_cast<float>((i + 3) % 10));
+        sp.delay_time_ms = 50.0f + static_cast<float>(i % 40) * 10.0f;
+        sp.reverb_low_cut_hz = 40.0f + static_cast<float>(i % 20) * 20.0f;
+        EXPECT_EQ(wma_mix_set_space(live.e, &sp), WMA_OK);
+        const WmaMixMaster m = {static_cast<float>(i % 12) - 6.0f, -1.0f - 0.1f * static_cast<float>(i % 5),
+                                50.0f + static_cast<float>(i % 7) * 20.0f};
+        EXPECT_EQ(wma_mix_set_master(live.e, &m), WMA_OK);
+        EXPECT_EQ(wma_mix_set_output_profile(live.e, (i % 2) != 0 ? WMA_OUTPUT_MASTER : WMA_OUTPUT_PROTECTED), WMA_OK);
+        std::this_thread::yield();
+    }
+    stop.store(true, std::memory_order_release);
+    rt.join();
+
+    EXPECT_EQ(allocs.load(), 0) << "el callback alocó mientras llegaban setters de mezcla";
+    EXPECT_EQ(live.e->engine->getAudioLooper().getSongBusOverflowBlocks(), 0);
+    std::sort(costs.begin(), costs.end());
+    ASSERT_FALSE(costs.empty());
+    const double maxUs = static_cast<double>(costs.back()) / 1000.0;
+    const double p99Us = static_cast<double>(costs[costs.size() * 99 / 100]) / 1000.0;
+    std::printf("[ mix ] 8 pistas + bus + master, %d frames: %lld callbacks, max %.1f us, p99 %.1f us "
+                "(periodo %.1f us)\n", kCallbackFrames, static_cast<long long>(blocks.load()), maxUs,
+                p99Us, kPeriodNs / 1000.0);
+#ifndef WMA_TEST_UNDER_SANITIZER
+    EXPECT_LT(static_cast<double>(costs.back()), kPeriodNs) << "un callback tardo mas que su periodo";
+#endif
+    live.tearDown();
+}
+
+}  // namespace wma_test

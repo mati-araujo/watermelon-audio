@@ -304,19 +304,20 @@ struct VoiceCase {
 
 }  // namespace
 
-// Bug plausible: la voz de la cancion se aparta de la pista del looper en nivel, paneo, mute o
-// envio a efectos (volumen aplicado dos veces, canales cruzados, el envio ignorado y la pista
-// mezclada en la pasada equivocada). Mismo audio, mismo L, mismos setters: tienen que dar lo
-// mismo que mixInto. Se mira la parte del loop sin el crossfade de costura de mixInto.
-TEST(SongVoice, AC_055_12_MatchesTrackBufferMixIntoForVolumePanMuteAndSend) {
+// Bug plausible: la voz de la cancion se aparta de la pista del looper en nivel o paneo (volumen
+// aplicado dos veces, canales cruzados, el mute no apaga). Con la mezcla PROPIA de la cancion
+// (REQ-055 S12) la voz tiene que dar lo mismo que `TrackBuffer::mixInto` con el volumen y el
+// paneo equivalentes. Se mira la parte del loop sin el crossfade de costura de mixInto. El envio
+// no tiene bus en este rig: no cambia el seco.
+TEST(SongVoice, AC_055_12_MatchesTrackBufferMixIntoForGainAndPan) {
     constexpr int kLen = 48000;
     constexpr int kBlock = 240;
-    constexpr int kPreroll = 4800;   // 20 bloques: los smoothers de las dos pistas parten igual
+    constexpr int kPreroll = 4800;   // 20 bloques: el smoother de la pista de referencia converge
     const VoiceCase cases[] = {
         {"plain", 0.7f, -0.4f, false, false},
         {"loud-right", 1.6f, 0.9f, false, false},
         {"muted", 0.7f, -0.4f, true, false},
-        {"send-to-fx", 0.7f, -0.4f, false, true},
+        {"send-without-bus", 0.7f, -0.4f, false, true},
     };
     const auto sample = [](int n, int ch) {
         return ch == 0 ? 0.6f * std::sin(6.2831853f * float(n) / 137.0f)
@@ -329,43 +330,37 @@ TEST(SongVoice, AC_055_12_MatchesTrackBufferMixIntoForVolumePanMuteAndSend) {
         const std::string path = a.write("vc_audio", kLen, sample);
         ASSERT_TRUE(a.looper.importTrack(0, path.c_str(), kSR));
         a.looper.resumeTrack(0);
-        // B: la cancion con el mismo audio
+        a.looper.setTrackVolume(0, c.volume);
+        a.looper.setTrackPan(0, c.pan);
+        a.looper.setTrackMuted(0, c.muted);
+        // B: la cancion con el mismo audio y su mezcla propia
         Rig b;
         int32_t id = -1;
         ASSERT_EQ(b.looper.songLoadClip(path.c_str(), kSR, 0, 0, kLen, false, id),
                   wm::SongStatus::Ok);
-        for (Rig* r : {&a, &b}) {
-            r->looper.setTrackVolume(0, c.volume);
-            r->looper.setTrackPan(0, c.pan);
-            r->looper.setTrackMuted(0, c.muted);
-            r->looper.setTrackSendToFx(0, c.sendToFx);
-        }
+        b.looper.setSongMixTrack(0, c.muted ? 0.0f : c.volume, c.pan, c.sendToFx ? 0.5f : 0.0f);
         ASSERT_EQ(b.schedule(kLen, {sec(kPreroll, id)}, kPreroll + 3 * kLen), wm::SongStatus::Ok);
 
-        const auto runBlock = [&](Rig& r, int64_t frame, std::vector<float>& fx,
-                                  std::vector<float>& main) {
-            std::fill(fx.begin(), fx.end(), 0.0f);
+        const auto runBlock = [&](Rig& r, int64_t frame, std::vector<float>& main) {
             std::fill(main.begin(), main.end(), 0.0f);
             r.looper.beginBlock(frame, kBlock);
-            r.looper.mixFxTracks(fx.data(), kBlock);
             r.looper.process(main.data(), kBlock, frame);
         };
-        std::vector<float> fxA(kBlock * 2), mainA(kBlock * 2), fxB(kBlock * 2), mainB(kBlock * 2);
+        std::vector<float> mainA(kBlock * 2), mainB(kBlock * 2);
         for (int64_t f = 0; f < kPreroll; f += kBlock) {
-            runBlock(a, f, fxA, mainA);
-            runBlock(b, f, fxB, mainB);
+            runBlock(a, f, mainA);
+            runBlock(b, f, mainB);
         }
         a.looper.resetTrackPlayHead(0);   // A y B arrancan el loop en el mismo frame
 
         double worst = 0.0;
         double peak = 0.0;
         for (int64_t k = 0; k < (kLen - 2400 - kBlock) / kBlock; ++k) {
-            runBlock(a, kPreroll + k * kBlock, fxA, mainA);
-            runBlock(b, kPreroll + k * kBlock, fxB, mainB);
+            runBlock(a, kPreroll + k * kBlock, mainA);
+            runBlock(b, kPreroll + k * kBlock, mainB);
             for (int i = 0; i < kBlock * 2; ++i) {
-                worst = std::max({worst, double(std::abs(fxA[i] - fxB[i])),
-                                  double(std::abs(mainA[i] - mainB[i]))});
-                peak = std::max({peak, double(std::abs(fxA[i])), double(std::abs(mainA[i]))});
+                worst = std::max(worst, double(std::abs(mainA[i] - mainB[i])));
+                peak = std::max(peak, double(std::abs(mainA[i])));
             }
         }
         if (c.muted) {
@@ -375,6 +370,98 @@ TEST(SongVoice, AC_055_12_MatchesTrackBufferMixIntoForVolumePanMuteAndSend) {
         }
         EXPECT_LT(worst, 1e-5) << "la voz de la cancion se aparta de mixInto";
     }
+}
+
+// Bug plausible (cambio de contrato, REQ-055 S12): el volumen, paneo, mute o sendToFx del
+// TrackBuffer siguen alcanzando a la voz de la cancion (la escucha de tomas de S10 y la mezcla de
+// Studio se pisarian), o una pista marcada sendToFx sigue entrando a la cadena de escena. Dos
+// rigs con la MISMA cancion y la misma mezcla propia: uno con el TrackBuffer en los defaults y
+// otro con sus cuatro controles movidos a valores extremos tienen que dar los mismos bits, y la
+// pasada de la cadena (mixFxTracks) no recibe nada de la cancion.
+TEST(SongVoice, AC_055_12_TrackBufferControlsDoNotReachTheSongVoices) {
+    constexpr int kLen = 12000;
+    constexpr int kBlock = 240;
+    const auto sample = [](int n, int ch) {
+        return ch == 0 ? 0.5f * std::sin(6.2831853f * float(n) / 100.0f)
+                       : 0.3f * std::sin(6.2831853f * float(n) / 47.0f);
+    };
+    const auto build = [&](Rig& r, bool moveTrackBuffer) {
+        const std::string path = r.write("tb_audio", kLen, sample);
+        int32_t id = -1;
+        EXPECT_EQ(r.looper.songLoadClip(path.c_str(), kSR, 0, 0, kLen, false, id),
+                  wm::SongStatus::Ok);
+        r.looper.setSongMixTrack(0, 0.8f, 0.25f, 0.0f);
+        if (moveTrackBuffer) {
+            r.looper.setTrackVolume(0, 0.05f);
+            r.looper.setTrackPan(0, -1.0f);
+            r.looper.setTrackMuted(0, true);
+            r.looper.setTrackSendToFx(0, true);
+        }
+        EXPECT_EQ(r.schedule(kLen, {sec(kBlock, id)}, 6 * kLen), wm::SongStatus::Ok);
+    };
+    Rig plain, moved;
+    build(plain, false);
+    build(moved, true);
+    std::vector<float> outPlain, outMoved;
+    for (int64_t f = 0; f < 5 * kLen; f += kBlock) {
+        std::vector<float> fx(kBlock * 2, 0.0f), mainP(kBlock * 2, 0.0f), mainM(kBlock * 2, 0.0f);
+        plain.looper.beginBlock(f, kBlock);
+        plain.looper.process(mainP.data(), kBlock, f);
+        moved.looper.beginBlock(f, kBlock);
+        EXPECT_FALSE(moved.looper.mixFxTracks(fx.data(), kBlock)) << "una voz entro a la cadena de escena";
+        moved.looper.process(mainM.data(), kBlock, f);
+        for (float v : fx) ASSERT_EQ(v, 0.0f);
+        outPlain.insert(outPlain.end(), mainP.begin(), mainP.end());
+        outMoved.insert(outMoved.end(), mainM.begin(), mainM.end());
+    }
+    float peak = 0.0f;
+    for (float v : outPlain) peak = std::max(peak, std::abs(v));
+    ASSERT_GT(peak, 0.1f) << "no suena: no prueba nada";
+    ASSERT_EQ(std::memcmp(outPlain.data(), outMoved.data(), outPlain.size() * sizeof(float)), 0);
+}
+
+// Bug plausible: el primer bloque de la cancion rampea desde los valores de una voz fresca
+// (ganancia 1, paneo 0) hacia la mezcla pedida: un export con una pista a -6 dB arranca con un
+// fundido de los primeros milisegundos. La ganancia del PRIMER frame ya es la del target.
+TEST(SongVoice, AC_055_12_FirstBlockStartsAtTheMixTargetWithoutARamp) {
+    constexpr int kLen = 12000;
+    constexpr int kBlock = 240;
+    Rig r;
+    int32_t id = r.load("snap", kLen, dc(0.5f), kLen);
+    r.looper.setSongMixTrack(0, 0.25f, 1.0f, 0.0f);   // -12 dB, todo a la derecha
+    ASSERT_EQ(r.schedule(kLen, {sec(kBlock, id)}, 6 * kLen), wm::SongStatus::Ok);
+    // La agenda entra en kBlock con fundido de entrada de F: despues del fundido, estado estable.
+    const std::vector<float> out = r.render(0, 4 * kBlock, kBlock);
+    const int64_t atFrame = kBlock + kF + 10;   // ya con el fundido completo, en el segundo bloque
+    ASSERT_LT(atFrame, 4 * kBlock);
+    // pan +1: L = 0, R = ganancia * 1. Un smoother que parte de (1, 0) todavia no llego (0,995^n
+    // tarda ~900 muestras): se veria L > 0 y R > 0,125 + algo de L.
+    EXPECT_NEAR(out[static_cast<size_t>(atFrame) * 2], 0.0f, 1e-6f);
+    EXPECT_NEAR(out[static_cast<size_t>(atFrame) * 2 + 1], 0.5f * 0.25f, 1e-6f);
+}
+
+// Bug plausible: al reactivarse la cancion (segunda vez en la vida del motor, sin start offline
+// de por medio) las voces conservan el estado del smoother de la vez anterior y rampean hacia la
+// mezcla nueva en vez de arrancar en ella. El snap es de la ACTIVACION, no solo del primer uso.
+TEST(SongVoice, AC_055_12_ReactivatingTheSongStartsAtTheNewMixTarget) {
+    constexpr int kLen = 12000;
+    constexpr int kBlock = 240;
+    Rig r;
+    const int32_t id = r.load("react", kLen, dc(0.5f), kLen);
+    r.looper.setSongMixTrack(0, 1.0f, 0.0f, 0.0f);
+    ASSERT_EQ(r.schedule(kLen, {sec(kBlock, id)}, 4 * kLen), wm::SongStatus::Ok);
+    (void)r.render(0, 8 * kBlock, kBlock);   // activa, suena con ganancia 1 centrada
+    // apagar y dejar pasar la cola de fundido: la cancion queda inactiva
+    ASSERT_EQ(r.looper.songSetSchedule(kLen, nullptr, 0, 0, false), wm::SongStatus::Ok);
+    (void)r.render(8 * kBlock, 8 * kBlock, kBlock);
+    // otra mezcla, y reprogramar: la voz tiene que arrancar EN ella
+    r.looper.setSongMixTrack(0, 0.25f, 1.0f, 0.0f);
+    const int64_t from = 16 * kBlock;
+    ASSERT_EQ(r.schedule(kLen, {sec(from + kBlock, id)}, from + 4 * kLen), wm::SongStatus::Ok);
+    const std::vector<float> out = r.render(from, 4 * kBlock, kBlock);
+    const size_t at = static_cast<size_t>(kBlock + kF + 10) * 2;
+    EXPECT_NEAR(out[at], 0.0f, 1e-6f);
+    EXPECT_NEAR(out[at + 1], 0.5f * 0.25f, 1e-6f);
 }
 
 // ---------------------------------------------------------------------------------------

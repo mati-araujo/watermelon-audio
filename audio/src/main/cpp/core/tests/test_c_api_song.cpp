@@ -226,16 +226,15 @@ TEST_F(SongApi, AC_055_12_FiveSectionsRenderedOfflineHaveNoDiscontinuitiesAtTheJ
 }
 
 // Bug plausible: el segundo render de una misma instancia no reproduce el primero (las voces
-// conservan los smoothers de volumen/paneo del render anterior). El volumen != 1 hace que el
-// primer bloque rampee, asi que un smoother sin reiniciar cambia la salida.
+// conservan los smoothers de ganancia/paneo del render anterior). La ganancia != 1 hace que un
+// smoother sin reiniciar cambie la salida.
 TEST_F(SongApi, AC_055_12_ASecondOfflineRenderOfTheSameInstanceReproducesTheFirst) {
     WmaEngine* e = quietEngine();
     ASSERT_NE(e, nullptr);
     const std::string pa = sine("repro_a", 400.0f, 1.0f);
     ASSERT_EQ(wma_offline_start(e, kRate, kBlock), WMA_OK);
     const int32_t a = loadClip(e, pa);
-    wma_looper_set_track_volume(e, 0, 0.5f);
-    wma_looper_set_track_pan(e, 0, 0.6f);
+    ASSERT_EQ(wma_mix_set_track(e, 0, 0.5f, 0.6f, 0.0f), WMA_OK);
     std::vector<float> renders[2];
     for (int pass = 0; pass < 2; ++pass) {
         ASSERT_EQ(wma_offline_start(e, kRate, kBlock), WMA_OK);   // un reinicio, no un render nuevo
@@ -305,8 +304,9 @@ TEST_F(SongApi, AC_055_13_ExportingTwiceFromTheSameHandleGivesTheBitsOfAFreshOne
 
 // Bug plausible: dos pistas se pisan o una se pierde (la agenda lee la fila equivocada, el
 // mezclador cuenta una pista dos veces) o el volumen de la pista no llega a la voz de la
-// cancion. El mezclado es lineal: pista 0 sola + pista 1 sola == las dos juntas.
-TEST_F(SongApi, AC_055_12_TwoTracksMixLinearlyAndTheTrackVolumeReachesTheSong) {
+// cancion (ahora: la ganancia de wma_mix_set_track). El mezclado es lineal: pista 0 sola +
+// pista 1 sola == las dos juntas.
+TEST_F(SongApi, AC_055_12_TwoTracksMixLinearlyAndTheSongMixGainReachesTheSong) {
     // Amplitud baja: el recorte suave de la etapa de salida no es lineal y a 0,4 ya se lleva 3 %.
     const std::string pa = sine("mix_a", 400.0f, 1.0f, 0.2f);
     const std::string pb = sine("mix_b", 300.0f, 2.0f, 0.2f);
@@ -315,7 +315,7 @@ TEST_F(SongApi, AC_055_12_TwoTracksMixLinearlyAndTheTrackVolumeReachesTheSong) {
         EXPECT_EQ(wma_offline_start(e, kRate, kBlock), WMA_OK);
         const int32_t a = loadClip(e, pa);
         const int32_t b = loadClip(e, pb);
-        wma_looper_set_track_volume(e, 0, vol0);
+        EXPECT_EQ(wma_mix_set_track(e, 0, vol0, 0.0f, 0.0f), WMA_OK);   // la mezcla PROPIA de la cancion (S12)
         const int64_t p0 = wma_transport_get_play_frame(e);
         const WmaSongSection s = section(p0 + 2 * kLoop, t0 ? a : WMA_SONG_SILENCE,
                                          t1 ? b : WMA_SONG_SILENCE);

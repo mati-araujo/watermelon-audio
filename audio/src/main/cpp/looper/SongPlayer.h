@@ -17,8 +17,8 @@
  *  - AGENDA (control -> RT): un triple buffer wait-free de slots preasignados. El control escribe
  *    la agenda ENTERA en su slot y la intercambia con el del medio; el RT la adopta al inicio del
  *    bloque si esta fresca. Estado por seccion, no deltas: una agenda perdida no corrompe nada.
- *  - VOCES (RT): una por pista, con sus tres smoothers (volumen, mute, paneo, los mismos que
- *    TrackBuffer::mixInto) y una pila de COLAS para el fundido de las adopciones tardias.
+ *  - VOCES (RT): una por pista, con sus tres smoothers (ganancia, paneo y envio; la mezcla
+ *    es PROPIA de la cancion, REQ-055 S12, y no la del TrackBuffer) y una pila de COLAS para el fundido de las adopciones tardias.
  *
  * Fundido F = max(64, round(0,005 * SR)) en [B - F, B) antes de cada borde B: equal-power (cuarto
  * de seno/coseno) para cambio de clip o salto de fase, coseno elevado para entrar/salir de
@@ -532,6 +532,17 @@ public:
         mSkipTailOnce = false;
     }
 
+    /// La cancion pasa de inactiva a activa: cada voz arranca en su target de mezcla, sin rampa.
+    /// Lo llama el hilo RT al abrir el primer bloque activo.
+    void snapVoicesToMix() {
+        for (int t = 0; t < kSongMaxTracks; ++t) mVoices[t].snap = true;
+    }
+
+    /// RT: la voz todavia arrastra envio (el smoother no llego a 0), aunque el target ya sea 0.
+    bool voiceSendActive(int track) const {
+        return track >= 0 && track < kSongMaxTracks && mVoices[track].send > 0.0f;
+    }
+
     size_t reservedBytes() const { return mReservedBytes.load(std::memory_order_relaxed); }
     bool active() const { return mActive.load(std::memory_order_acquire); }
     int32_t getSection() const { return mSection.load(std::memory_order_relaxed); }
@@ -578,31 +589,47 @@ public:
         return mCur->count > 0 || blockFrame < mTailUntil;
     }
 
-    /// Mezcla (suma) la voz de `track` en `dst` (estereo intercalado, `n` frames del bloque).
-    void renderSongVoice(int track, float* dst, int n, float volTarget, float panTarget,
-                         bool muted) {
+    /// Mezcla (suma) la voz de `track` en `dst` (estereo intercalado, `n` frames del bloque) con la
+    /// mezcla PROPIA de la cancion (REQ-055 S12): ganancia lineal, paneo y envio al bus «Espacio».
+    /// Nada del TrackBuffer interviene. Devuelve en `sendStart/sendEnd` la ganancia de envio al
+    /// inicio y al final del bloque (rampa lineal, como la ganancia de la voz).
+    void renderSongVoice(int track, float* dst, int n, float gainTarget, float panTarget,
+                         float sendTarget, float& sendStart, float& sendEnd) {
+        sendStart = 0.0f;
+        sendEnd = 0.0f;
         if (track < 0 || track >= kSongMaxTracks || n <= 0) return;
         Voice& v = mVoices[track];
         const SongAgenda& a = *mCur;
 
-        // Ganancia por bloque (vol x mute x paneo), la misma que TrackBuffer::mixInto: los tres
-        // one-pole avanzan en forma cerrada al valor del final del bloque y la ganancia efectiva
-        // rampea lineal entre los extremos.
+        // Primer bloque tras activarse la cancion o tras el start offline: la voz arranca EN su
+        // target, sin rampa desde los valores de una instancia fresca (ganancia 1, paneo 0).
+        if (v.snap) {
+            v.vol = gainTarget;
+            v.pan = panTarget;
+            v.send = sendTarget;
+            v.snap = false;
+        }
+
+        // Ganancia por bloque (vol x paneo; el mute es ganancia 0): los tres one-pole avanzan en
+        // forma cerrada al valor del final del bloque y la ganancia efectiva rampea lineal entre
+        // los extremos. Al acercarse al target a menos de kSettle, se clava en el: un one-pole
+        // nunca llega, y un envio «0» que deja un residuo de 1e-30 no es un envio apagado.
         constexpr float kSmoothCoeff = 0.995f;
-        const float muteTarget = muted ? 0.0f : 1.0f;
+        constexpr float kSettle = 1.0e-6f;
         const float alphaPow = std::pow(kSmoothCoeff, static_cast<float>(n));
-        const float volEnd = v.vol == volTarget ? volTarget
-                                                : alphaPow * v.vol + (1.0f - alphaPow) * volTarget;
-        const float muteEnd = v.mute == muteTarget
-                                  ? muteTarget
-                                  : alphaPow * v.mute + (1.0f - alphaPow) * muteTarget;
-        const float panEnd = v.pan == panTarget ? panTarget
-                                                : alphaPow * v.pan + (1.0f - alphaPow) * panTarget;
+        const auto advance = [alphaPow](float cur, float target) {
+            if (cur == target) return target;
+            const float next = alphaPow * cur + (1.0f - alphaPow) * target;
+            return std::fabs(next - target) < kSettle ? target : next;
+        };
+        const float volEnd = advance(v.vol, gainTarget);
+        const float panEnd = advance(v.pan, panTarget);
+        const float sendNext = advance(v.send, sendTarget);
         const auto& panLut = wm::EqualPowerPanLUT::instance();
         const auto pp0 = panLut.lookup(v.pan);
         const auto pp1 = panLut.lookup(panEnd);
-        const float gS = v.vol * v.mute;
-        const float gE = volEnd * muteEnd;
+        const float gS = v.vol;
+        const float gE = volEnd;
         const float invN = 1.0f / static_cast<float>(n);
         BlockGain bg;
         bg.dst = dst;
@@ -611,9 +638,11 @@ public:
         bg.gR = gS * pp0.r;
         bg.gLinc = (gE * pp1.l - bg.gL) * invN;
         bg.gRinc = (gE * pp1.r - bg.gR) * invN;
+        sendStart = v.send;
+        sendEnd = sendNext;
         v.vol = volEnd;
-        v.mute = muteEnd;
         v.pan = panEnd;
+        v.send = sendNext;
 
         const int64_t bEnd = mBlockFrame + n;
         int s = mBlockSection;
@@ -679,8 +708,9 @@ private:
 
     struct Voice {
         float vol = 1.0f;
-        float mute = 1.0f;
         float pan = 0.0f;
+        float send = 0.0f;
+        bool snap = true;      ///< el proximo bloque arranca en el target (activacion / start offline)
         int tails = 0;         ///< capas de cola vivas, la mas vieja primero
         int64_t tailEnd = 0;   ///< fin de la ventana del evento mas tardio
         SongTail tail[kSongMaxTails]{};
