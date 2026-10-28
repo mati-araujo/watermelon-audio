@@ -485,12 +485,14 @@ TEST(SongClip, LoadingFromAFileResamplesBakesAndSounds) {
 // esta activa). Cada caso es un check distinto; el borde exacto (2F) tiene que pasar.
 TEST(SongSchedule, ValidationRejectsMalformedAgendasAndAcceptsTheExactEdge) {
     Rig rig;
-    static constexpr int64_t kLoop = 2048;
+    constexpr int64_t kLoop = 2048;
     const int32_t c0 = rig.load("v0", kLoop, dc(0.1f), kLoop);
     const int32_t other = rig.load("v1", 1024, dc(0.1f), 1024);
-    const auto st = [&](std::vector<wm::SongSection> s, int64_t end, int64_t loop = kLoop) {
+    // Sin argumento por defecto: GCC no acepta una variable local en un default.
+    const auto stLoop = [&](std::vector<wm::SongSection> s, int64_t end, int64_t loop) {
         return rig.schedule(loop, s, end);
     };
+    const auto st = [&](std::vector<wm::SongSection> s, int64_t end) { return stLoop(s, end, kLoop); };
     using S = wm::SongStatus;
     const int64_t a = 5000;
     // starts no crecientes / iguales
@@ -504,7 +506,7 @@ TEST(SongSchedule, ValidationRejectsMalformedAgendasAndAcceptsTheExactEdge) {
     EXPECT_EQ(st({sec(a, c0)}, a + 2 * kF), S::Ok);
     // start negativo, loop <= 0
     EXPECT_EQ(st({sec(-1, c0)}, 5000), S::OutOfRange);
-    EXPECT_EQ(st({sec(a, c0)}, a + 5000, 0), S::OutOfRange);
+    EXPECT_EQ(stLoop({sec(a, c0)}, a + 5000, 0), S::OutOfRange);
     // clip en la pista 8 (>= activas por defecto)
     {
         wm::SongSection s = sec(a, c0);
