@@ -416,6 +416,34 @@ TEST(InputDumpCuts, ALossThatJumpsThePendingSeamClosesTheSpanThere) {
 }
 
 /**
+ * AC-055.1 — UNA PERDIDA QUE ADELANTA EL CURSOR SIN LLEGAR A LA COSTURA: la copia se recorta en S y
+ * el tramo cierra EXACTO en f(S), no en el final del trozo copiado (hallazgo del code-reviewer).
+ *
+ * Armado en 300, 1000 copiados, S = 1300 + 500; 4396 escritos: 300 pisados (cursor a 1600 < S) y
+ * la copia de 500 pasaria S. Mutante que mata: sin el recorte (el tramo sale de 500 y no de 200).
+ */
+TEST(InputDumpCuts, ALossShortOfThePendingSeamStillClosesTheSpanExactly) {
+    Rig rig;
+    rig.arm();
+    rig.write(1000);
+    rig.drainAndFlush();
+    rig.ring.reportCaptureDiscontinuity(500);
+    rig.write(4396);
+    rig.drainAndFlush();
+
+    const InputDumpStats st = rig.close();
+    ASSERT_EQ(st.cutCount, 2u);
+    EXPECT_EQ(st.cuts[0].kind, kInputDumpCutLoss);
+    EXPECT_EQ(st.cuts[0].fileFrame, 1000u);
+    EXPECT_EQ(st.cuts[0].lostFrames, 300u);
+    EXPECT_EQ(st.cuts[1].kind, kInputDumpCutSeam);
+    EXPECT_EQ(st.cuts[1].fileFrame, 1000u);
+    EXPECT_EQ(st.cuts[1].fileSpan, 200u) << "f(S) = 1000 + (1800 - 1600)";
+    EXPECT_TRUE(st.valid);
+    EXPECT_EQ(firstMismatch(rig.sink->samplesCopy(), fedMinusLossCuts(rig.fed, st)), -1L);
+}
+
+/**
  * AC-055.1 — EL MAPA SALE ORDENADO por frame del archivo: un tramo de costura se anota al CERRARSE,
  * despues de una perdida que cae adentro de el, pero va antes en el mapa.
  *

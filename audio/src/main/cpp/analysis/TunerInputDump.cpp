@@ -311,7 +311,10 @@ void TunerInputDump::readDumpSeam(const AnalysisRing& ring) noexcept {
     const uint64_t lo = mSeamReadFrame;
     mSeamReadFrame = mFramesQueued.load(std::memory_order_relaxed);
     if (seam < mLastSeam) {
-        mLastSeam = seam;   // el ring se reseteo: el retroceso de posicion ya se anoto aparte
+        // El ring se reseteo. El retroceso de posicion se anota aparte, pero un reset que cae entre
+        // la lectura de la posicion y la de la costura no lo ve: se anota tambien aca (no ubicado).
+        mLastSeam = seam;
+        noteInputDiscontinuity();
         return;
     }
     if (seam == mLastSeam) return;
@@ -360,7 +363,7 @@ void TunerInputDump::captureFromRing(const AnalysisRing& ring, int captureRate) 
 
         const uint64_t before = mCursor;
         uint64_t lost = 0;
-        const int n = ring.copyForInputDump(mCursor, mChunk.data(), static_cast<int>(want), lost);
+        int n = ring.copyForInputDump(mCursor, mChunk.data(), static_cast<int>(want), lost);
         if (lost > 0) {
             // Pisado en el ring antes de copiar: falta JUSTO ANTES de lo que se encola ahora.
             mLostByProducer.fetch_add(lost, std::memory_order_relaxed);
@@ -368,6 +371,16 @@ void TunerInputDump::captureFromRing(const AnalysisRing& ring, int captureRate) 
             // Una perdida que salta la costura pendiente cierra el tramo ahi.
             if (mSeamPending && mCursor - static_cast<uint64_t>(n > 0 ? n : 0) >= mPendingSeam) {
                 closeDumpSeamSpan(mFramesQueued.load(std::memory_order_relaxed));
+            }
+        }
+        // Una perdida que adelanto el cursor sin llegar a S deja la copia (calculada con el cursor
+        // viejo) pasando por encima de S: se recorta en S y el resto se copia en la vuelta que sigue,
+        // asi el tramo cierra EXACTO en f(S).
+        if (mSeamPending && n > 0) {
+            const uint64_t from = mCursor - static_cast<uint64_t>(n);
+            if (from < mPendingSeam && mCursor > mPendingSeam) {
+                n = static_cast<int>(mPendingSeam - from);
+                mCursor = mPendingSeam;
             }
         }
         if (n > 0) {
