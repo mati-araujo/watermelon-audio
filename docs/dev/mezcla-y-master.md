@@ -212,8 +212,13 @@ arbol de 2.23.0 (un ejecutable `golden_gen` como `sf_render_preset`), no contra 
   siguientes. Bajarlo con clips adentro **no libera nada** (la carga siguiente falla con `MEMORY_BUDGET`) y las pistas
   nunca bajan de la activa mas alta. **`start` no lo toca**: sobrevive a reiniciar el render de la misma instancia
   (otra instancia nace con los defaults).
+- **Fabricas** (`audio.api`, jvmSharedMain: Android y desktop; iOS no las implementa en v1):
+  `OfflineRendererFactory.create(): Result<IOfflineRenderer>` y `MasterProcessorFactory.create(sampleRate):
+  Result<IMasterProcessor>`. `IOfflineRenderer` (commonMain) es `ISongBridge + ISongMixBridge + IOfflineTapRenderer +
+  AutoCloseable` mas `start`, `render`, `stop` y `setLooperCapabilities`: un consumidor no importa
+  `audio.internal.bridge`. `OfflineRenderer` y `MasterProcessor` siguen siendo publicos por compatibilidad.
 - Arnes: `OfflineLooperCapabilitiesJniTest` (ida y vuelta de presupuesto y pistas, rangos, `start`, handle muerto),
-  y `SongApi.AC_055_12b_...` en
+  `OfflineFactoriesJniTest` (las fabricas por la interfaz publica), y `SongApi.AC_055_12b_...` en
   `test_c_api_song.cpp` (la C API sobre un motor offline).
 
 ## Guardas -> el test que cae
@@ -259,6 +264,7 @@ arbol de 2.23.0 (un ejecutable `golden_gen` como `sf_render_preset`), no contra 
 | capacidades: el techo de pistas y de presupuesto se rechaza tipado y no se aplica nada a medias | `OfflineLooperCapabilitiesJniTest` (fuera de rango) |
 | capacidades: sobreviven a `start`; bajar el presupuesto no suelta clips | `OfflineLooperCapabilitiesJniTest` (start), `SongApi.AC_055_12b_...` |
 | capacidades: handle muerto => `NOT_INITIALIZED` antes de mirar el rango | `OfflineLooperCapabilitiesJniTest` (handle cerrado) |
+| fabricas: una instancia por `create`; el master rechaza un rate fuera de 8000..192000 | `OfflineFactoriesJniTest` |
 
 ## Lo medido
 

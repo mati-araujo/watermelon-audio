@@ -1,5 +1,6 @@
 package com.watermellonstudios.audio.internal.bridge
 
+import com.watermellonstudios.audio.api.IOfflineRenderer
 import com.watermellonstudios.audio.api.IOfflineTapRenderer
 import com.watermellonstudios.audio.api.ISongBridge
 import com.watermellonstudios.audio.api.ISongMixBridge
@@ -64,7 +65,7 @@ import com.watermellonstudios.audio.domain.error.NativeErrorCode
 class OfflineRenderer private constructor(
     private val bridge: AudioNativeBridge,
     initialHandle: Long,
-) : AutoCloseable, ISongBridge, ISongMixBridge, IOfflineTapRenderer {
+) : IOfflineRenderer {
 
     private val lock = Any()
 
@@ -95,14 +96,14 @@ class OfflineRenderer private constructor(
     internal val nativeHandle: Long get() = handle
 
     /** Arranca (o re-arranca) un render, reseteando la cadena. Bloque máximo 1..4096. */
-    fun start(sampleRate: Int, maxBlockFrames: Int): Result<Unit> =
+    override fun start(sampleRate: Int, maxBlockFrames: Int): Result<Unit> =
         call("start") { bridge.offlineStart(it, sampleRate, maxBlockFrames) }
 
     /**
      * Renderiza [frames] frames en [output] (estéreo intercalado: `frames * 2` floats,
      * se sobreescriben). [frames] no puede pasar el `maxBlockFrames` de [start].
      */
-    fun render(output: FloatArray, frames: Int): Result<Unit> {
+    override fun render(output: FloatArray, frames: Int): Result<Unit> {
         if (frames <= 0 || frames > MAX_BLOCK_FRAMES || output.size < frames * 2) {
             return Result.failure(
                 NativeBridgeException.fromCode(NativeErrorCode.PARAMETER_OUT_OF_RANGE.code, "OfflineRenderer.render"),
@@ -112,7 +113,7 @@ class OfflineRenderer private constructor(
     }
 
     /** Detiene el render. Idempotente. */
-    fun stop(): Result<Unit> = call("stop") { bridge.offlineStop(it) }
+    override fun stop(): Result<Unit> = call("stop") { bridge.offlineStop(it) }
 
     fun setEngineType(type: Int): Result<Unit> = call("setEngineType") { bridge.offlineSetEngineType(it, type) }
 
@@ -166,7 +167,7 @@ class OfflineRenderer private constructor(
      * adentro no libera nada (la próxima carga falla si ya se pasó) y [maxTracks] nunca baja de
      * la pista activa más alta. [start] no lo toca: sobrevive a reiniciar el render.
      */
-    fun setLooperCapabilities(budgetBytes: Long, maxTracks: Int): Result<Unit> =
+    override fun setLooperCapabilities(budgetBytes: Long, maxTracks: Int): Result<Unit> =
         call("setLooperCapabilities") { bridge.offlineLooperSetCapabilities(it, budgetBytes, maxTracks) }
 
     override fun songLoadClip(
