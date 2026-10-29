@@ -28,6 +28,7 @@
 #include "../voice/VoiceTypes.h"
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -4141,6 +4142,10 @@ struct OfflineSlot {
     std::mutex opMutex;            // toda operacion de esta instancia (ver arriba)
     std::vector<float> scratch;    // destino del render antes de copiar al FloatArray
     std::vector<float> tapScratch; // idem para los taps: [premezcla | FX | pista 0 | ...]
+    // Pista mas alta con clip en CUALQUIER agenda publicada con exito desde el ultimo start, +1
+    // (0 = ninguna). Solo sube entre starts: el RT adopta una agenda mas chica en el bloque
+    // siguiente y deja una cola de fundido en la pista vieja. Bajo `opMutex`.
+    int songTracksInUse = 0;
 };
 
 // En el HEAP y NUNCA destruido, igual que `g_wmaEngine`: un static con destructor
@@ -4239,6 +4244,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflin
     slot->scratch.clear();   // un start fallido no deja un render "arrancado"
     const WmaResult r = wma_offline_start(slot->engine, sampleRate, maxBlockFrames);
     if (r == WMA_OK) {
+        slot->songTracksInUse = 0;   // el start apaga la agenda (resetSongForRender)
         try {
             slot->scratch.assign(static_cast<size_t>(maxBlockFrames) * 2, 0.0f);
         } catch (...) {
@@ -4426,6 +4432,36 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflin
     return static_cast<jint>(wma_effect_set_param(slot->engine, index, paramId, value));
 }
 
+// Capacidades del looper de la instancia (REQ-055 S12b): el presupuesto de clips y las pistas
+// activas. Como la C API, 0 deja el valor como estaba; a diferencia de ella, lo que no cabe (o
+// dejaria sin pista a la agenda de la cancion) no se recorta en silencio: se rechaza sin aplicar
+// nada. maxFreeSeconds no se cruza (no hay tomas libres).
+constexpr int kLooperTracksHw = 16;   // AudioLooper::MAX_TRACKS_HW
+// 64 GiB, o lo que cabe en size_t donde es de 32 bits: una cota de cordura, no un presupuesto.
+constexpr uint64_t kLooperBudgetCeiling =
+    std::min<uint64_t>(std::numeric_limits<size_t>::max(), uint64_t{1} << 36);
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineLooperSetCapabilities(
+    JNIEnv* env, jobject thiz, jlong handle, jlong budgetBytes, jint maxTracks) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    // El cast a sin signo manda un presupuesto negativo por encima del techo.
+    if (static_cast<uint64_t>(budgetBytes) > kLooperBudgetCeiling ||
+        maxTracks < 0 || maxTracks > kLooperTracksHw) {
+        return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    }
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    // El recorte del looper mira sus tomas, no las voces de la cancion: bajar las pistas por
+    // debajo de alguna usada desde el ultimo start las apagaria sin avisar (o cortaria su cola
+    // de fundido). 0 deja el valor, no baja nada.
+    if (maxTracks > 0 && maxTracks < slot->songTracksInUse) {
+        return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    }
+    wma_looper_set_capabilities(slot->engine, budgetBytes, maxTracks, 0);
+    return static_cast<jint>(WMA_OK);
+}
+
 // --- Cancion programada por handle (REQ-055 S11): 1:1 con las nativeSong* del vivo, por el
 // registro y el `opMutex` de la instancia. Nunca leen `g_wmaEngine` ni `liveSongMutex()`.
 // Un load decodifica con el `opMutex` tomado: en este handle espera al render, que es lo
@@ -4471,9 +4507,19 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflin
     const WmaResult read = readSongSchedule(env, starts, clips, sections);
     if (read != WMA_OK) return static_cast<jint>(read);
     std::lock_guard<std::mutex> op(slot->opMutex);
-    return static_cast<jint>(wma_song_set_schedule(
+    const WmaResult r = wma_song_set_schedule(
         slot->engine, loopFrames, sections.data(), static_cast<int32_t>(sections.size()),
-        endFrame));
+        endFrame);
+    if (r == WMA_OK) {
+        int highest = slot->songTracksInUse;
+        for (const WmaSongSection& sec : sections) {
+            for (int t = highest; t < WMA_SONG_MAX_TRACKS; ++t) {
+                if (sec.clip[t] != WMA_SONG_SILENCE) highest = t + 1;
+            }
+        }
+        slot->songTracksInUse = highest;
+    }
+    return static_cast<jint>(r);
 }
 
 // Las tres lecturas devuelven el default de "no hay nada" (-1 / 0 / -1) ante un handle

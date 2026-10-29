@@ -1,5 +1,6 @@
 package com.watermellonstudios.audio.internal.bridge
 
+import com.watermellonstudios.audio.api.IOfflineRenderer
 import com.watermellonstudios.audio.api.IOfflineTapRenderer
 import com.watermellonstudios.audio.api.ISongBridge
 import com.watermellonstudios.audio.api.ISongMixBridge
@@ -64,7 +65,7 @@ import com.watermellonstudios.audio.domain.error.NativeErrorCode
 class OfflineRenderer private constructor(
     private val bridge: AudioNativeBridge,
     initialHandle: Long,
-) : AutoCloseable, ISongBridge, ISongMixBridge, IOfflineTapRenderer {
+) : IOfflineRenderer {
 
     private val lock = Any()
 
@@ -95,14 +96,14 @@ class OfflineRenderer private constructor(
     internal val nativeHandle: Long get() = handle
 
     /** Arranca (o re-arranca) un render, reseteando la cadena. Bloque máximo 1..4096. */
-    fun start(sampleRate: Int, maxBlockFrames: Int): Result<Unit> =
+    override fun start(sampleRate: Int, maxBlockFrames: Int): Result<Unit> =
         call("start") { bridge.offlineStart(it, sampleRate, maxBlockFrames) }
 
     /**
      * Renderiza [frames] frames en [output] (estéreo intercalado: `frames * 2` floats,
      * se sobreescriben). [frames] no puede pasar el `maxBlockFrames` de [start].
      */
-    fun render(output: FloatArray, frames: Int): Result<Unit> {
+    override fun render(output: FloatArray, frames: Int): Result<Unit> {
         if (frames <= 0 || frames > MAX_BLOCK_FRAMES || output.size < frames * 2) {
             return Result.failure(
                 NativeBridgeException.fromCode(NativeErrorCode.PARAMETER_OUT_OF_RANGE.code, "OfflineRenderer.render"),
@@ -112,7 +113,7 @@ class OfflineRenderer private constructor(
     }
 
     /** Detiene el render. Idempotente. */
-    fun stop(): Result<Unit> = call("stop") { bridge.offlineStop(it) }
+    override fun stop(): Result<Unit> = call("stop") { bridge.offlineStop(it) }
 
     fun setEngineType(type: Int): Result<Unit> = call("setEngineType") { bridge.offlineSetEngineType(it, type) }
 
@@ -149,6 +150,29 @@ class OfflineRenderer private constructor(
 
     fun setEffectParameter(index: Int, paramId: Int, value: Float): Result<Unit> =
         call("setEffectParameter") { bridge.offlineSetEffectParameter(it, index, paramId, value) }
+
+    /**
+     * El techo del looper de esta instancia (REQ-055 S12b): el presupuesto de memoria de los clips
+     * de la canción y las pistas activas. Una instancia nace con 48 MiB y 8 pistas (el default del
+     * looper, no el que el consumidor use en vivo): un export cuyos clips pasen de eso falla con
+     * [NativeBridgeException.MemoryBudgetExceeded] y una pista >= 8 con `PARAMETER_OUT_OF_RANGE`
+     * en [mixSetTrack].
+     *
+     * Como en la C API, **0 deja el valor como estaba**. A diferencia de ella, lo que no cabe no se
+     * recorta: [budgetBytes] fuera de `0..64 GiB` (en armeabi-v7a y x86 el techo es `SIZE_MAX`),
+     * [maxTracks] fuera de `0..16` o menor que la pista más alta (índice desde 0) usada por una
+     * agenda publicada desde el último [start] más 1 (el looper no mira las voces de la canción y
+     * las apagaría en silencio) falla con `PARAMETER_OUT_OF_RANGE` sin aplicar ninguno de los dos.
+     * Ese piso sólo sube entre dos [start]: apagar la agenda no lo baja, la pista deja una cola
+     * de fundido; para bajar las pistas hay que reiniciar con [start].
+     *
+     * Cuándo: **antes de [songLoadClip]**. El presupuesto se mide en cada carga contra lo ya
+     * cargado, así que valerlo después sólo afecta a las cargas siguientes; bajarlo con clips
+     * adentro no libera nada (la próxima carga falla si ya se pasó) y [maxTracks] no baja de
+     * el piso de la agenda. [start] reinicia ese piso, pero no lo toca: sobrevive a reiniciar el render.
+     */
+    override fun setLooperCapabilities(budgetBytes: Long, maxTracks: Int): Result<Unit> =
+        call("setLooperCapabilities") { bridge.offlineLooperSetCapabilities(it, budgetBytes, maxTracks) }
 
     override fun songLoadClip(
         path: String,

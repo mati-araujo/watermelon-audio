@@ -4,7 +4,7 @@ Lo que Studio usa para mezclar la cancion programada (`docs/dev/cancion-programa
 con un master y exportar WAV y stems por render offline (`docs/dev/render-offline.md`). Contrato de la
 C API: seccion 25 de `api/watermelon_audio.h` (mas `wma_offline_render_taps` en la 24). El diseno de
 NoisyPad es su ADR-0013 (privado); aca esta lo que cambia en watermelon-audio, en lenguaje de este
-repo. Version: **2.25.0**.
+repo. Version base: **2.25.0**; la 2.27.0 (S12b) agrega las capacidades del looper por handle y las fabricas publicas.
 
 ## El grafo
 
@@ -197,6 +197,36 @@ arbol de 2.23.0 (un ejecutable `golden_gen` como `sf_render_preset`), no contra 
   `ILooperBridge`; iOS no las implementa en v1. Cerrado el dueno: `EngineNotInitialized` sin cruzar.
 - Arnes: `SongMixJniTest` (frontera: taps ida y vuelta, arrays cortos, ids, handle cerrado).
 
+### Capacidades del looper por handle y fabricas publicas (2.27.0, S12b)
+
+- **`OfflineRenderer.setLooperCapabilities(budgetBytes, maxTracks): Result<Unit>`** cruza
+  `wma_looper_set_capabilities` (que ya aceptaba el handle) por `nativeOfflineLooperSetCapabilities`: el registro
+  de handles, el `opMutex` de la instancia, nunca el motor vivo. Una instancia offline nace con **48 MiB de clips y
+  8 pistas** (el default del looper), no con lo que use el vivo del consumidor (192 MiB en el desktop).
+- **Rangos:** como en la C API, **0 deja el valor como estaba**. A diferencia de ella, lo que no cabe no se recorta
+  en silencio: `budgetBytes` fuera de `0..64 GiB` (en armeabi-v7a y x86 el techo es `SIZE_MAX`, 4 GiB - 1) y `maxTracks`
+  fuera de `0..16` dan `PARAMETER_OUT_OF_RANGE` y **no se aplica ninguno de los dos**. Tambien lo da un
+  `maxTracks` menor que la pista mas alta (indice desde 0) usada por una agenda publicada con exito desde el
+  ultimo `start`, mas 1 (`set(0,12)`, agenda en la pista 10, `set(0,8)`): el recorte del looper mira sus tomas,
+  no las voces de la cancion, y la apagaria en silencio. El piso **solo sube** entre dos `start`: apagar la
+  agenda no lo baja, porque el RT la adopta en el bloque siguiente y la pista vieja deja una cola de fundido
+  (240 frames a 48 kHz) que bajar las pistas cortaria con un clic. Para bajarlas hay que re-`start`
+  (que apaga la agenda y vuelve el piso a 0), o llamar antes de agendar. Un handle muerto gana al rango
+  (`NOT_INITIALIZED`). `maxFreeSeconds` no se cruza (una instancia offline no graba tomas libres).
+- **Cuando:** el presupuesto se mide en **cada** `songLoadClip` contra lo ya cargado (`clipBytes = loopFrames * 8`),
+  y las pistas en cada `mixSetTrack`. Por eso se llama **antes de cargar clips**: despues solo vale para las cargas
+  siguientes. Bajarlo con clips adentro **no libera nada** (la carga siguiente falla con `MEMORY_BUDGET`) y las pistas
+  no bajan del piso de la agenda (se rechaza, ver arriba). **`start` no toca las capacidades** (solo el piso de pistas): sobreviven a reiniciar el render de la misma instancia
+  (otra instancia nace con los defaults).
+- **Fabricas** (`audio.api`, jvmSharedMain: Android y desktop; iOS no las implementa en v1):
+  `OfflineRendererFactory.create(): Result<IOfflineRenderer>` y `MasterProcessorFactory.create(sampleRate):
+  Result<IMasterProcessor>`. `IOfflineRenderer` (commonMain) es `ISongBridge + ISongMixBridge + IOfflineTapRenderer +
+  AutoCloseable` mas `start`, `render`, `stop` y `setLooperCapabilities`: un consumidor no importa
+  `audio.internal.bridge`. `OfflineRenderer` y `MasterProcessor` siguen siendo publicos por compatibilidad.
+- Arnes: `OfflineLooperCapabilitiesJniTest` (ida y vuelta de presupuesto y pistas, rangos, `start`, handle muerto),
+  `OfflineFactoriesJniTest` (las fabricas por la interfaz publica), y `SongApi.AC_055_12b_...` en
+  `test_c_api_song.cpp` (la C API sobre un motor offline).
+
 ## Guardas -> el test que cae
 
 
@@ -236,6 +266,11 @@ arbol de 2.23.0 (un ejecutable `golden_gen` como `sf_render_preset`), no contra 
 | medidores en la cola de los tres perfiles | `TheOutputMetersAreAtTheTailOfAllThreeProfiles` |
 | rangos y NULL de la C API | `test_c_api_mix.cpp` |
 | JNI: array de taps corto, handle/ids cerrados, arrays mal formados | `SongMixJniTest` |
+| capacidades por handle: presupuesto y pistas llegan al looper de LA instancia (no al vivo) y se aplican al byte | `OfflineLooperCapabilitiesJniTest` (presupuesto, pistas), `SongApi.AC_055_12b_...` |
+| capacidades: el techo de pistas y de presupuesto se rechaza tipado y no se aplica nada a medias | `OfflineLooperCapabilitiesJniTest` (fuera de rango) |
+| capacidades: sobreviven a `start`; bajar el presupuesto no suelta clips | `OfflineLooperCapabilitiesJniTest` (start), `SongApi.AC_055_12b_...` |
+| capacidades: handle muerto => `NOT_INITIALIZED` antes de mirar el rango | `OfflineLooperCapabilitiesJniTest` (handle cerrado) |
+| fabricas: una instancia por `create`; el master rechaza un rate fuera de 8000..192000 | `OfflineFactoriesJniTest` |
 
 ## Lo medido
 
