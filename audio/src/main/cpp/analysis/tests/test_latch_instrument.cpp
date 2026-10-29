@@ -902,7 +902,8 @@ Row rowOf(const std::string& name, int engage, const Latch& l, const Pass2& p2, 
 std::string baselineHeader() {
     std::string h =
         "# Linea de base del ENGANCHE del afinador sobre corpus-v1 (REQ-055 S0). Una fila por archivo y enganche.\n"
-        "# Motor medido: el de REQ-057 S1 (cuatro rejillas y tick de 1024 frames, D27-D34), regenerada el 2026-10-28.\n"
+        "# Motor medido: el de REQ-058 S1 (lectura temprana MEASURING y re-punteo por segmentos, D-1..D-3), regenerada el\n"
+        "# 2026-10-28; la anterior media el de REQ-057 S1 (cuatro rejillas y tick de 1024 frames, D27-D34).\n"
         "# La anterior media el de 1351b7e. Al regenerar tras un cambio de motor INTENCIONAL, actualizar esta linea en\n"
         "# `baselineHeader()` (test_latch_instrument.cpp).\n"
         "# Desde REQ-057 S1 el motor NO depende de la particion (AC-057.5): el parrafo de abajo describe al de\n"
@@ -1869,8 +1870,8 @@ std::string attackBaselinePath() { return std::string(WMA_ANALYSIS_GOLDEN_DIR) +
 std::string attackBaselineHeader() {
     std::string h =
         "# Linea de base POR ATAQUE del afinador sobre corpus-v1 (REQ-055 S0, D11, AC-055.2). Una fila por ataque.\n"
-        "# Motor medido: el de REQ-057 S1 (cuatro rejillas y tick de 1024 frames, D27-D34), regenerada el 2026-10-28;\n"
-        "# la anterior media el de 1351b7e. Al regenerar tras un cambio de motor INTENCIONAL, actualizar esta linea en\n"
+        "# Motor medido: el de REQ-058 S1 (lectura temprana MEASURING y re-punteo por segmentos, D-1..D-3), regenerada el\n"
+        "# 2026-10-28; la anterior media el de REQ-057 S1. Al regenerar tras un cambio de motor INTENCIONAL, actualizar esta linea en\n"
         "# `attackBaselineHeader()` (test_latch_instrument.cpp).\n"
         "#\n"
         "# t0 de cada ataque lo da el ORACULO (lineas `# ataque` de corpus-v1-oraculo-corto.tsv, detector de\n"
