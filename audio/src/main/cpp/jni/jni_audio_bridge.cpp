@@ -4142,7 +4142,9 @@ struct OfflineSlot {
     std::mutex opMutex;            // toda operacion de esta instancia (ver arriba)
     std::vector<float> scratch;    // destino del render antes de copiar al FloatArray
     std::vector<float> tapScratch; // idem para los taps: [premezcla | FX | pista 0 | ...]
-    // Pista mas alta con clip en la agenda publicada, +1 (0 = agenda vacia). Bajo `opMutex`.
+    // Pista mas alta con clip en CUALQUIER agenda publicada con exito desde el ultimo start, +1
+    // (0 = ninguna). Solo sube entre starts: el RT adopta una agenda mas chica en el bloque
+    // siguiente y deja una cola de fundido en la pista vieja. Bajo `opMutex`.
     int songTracksInUse = 0;
 };
 
@@ -4451,7 +4453,8 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflin
     }
     std::lock_guard<std::mutex> op(slot->opMutex);
     // El recorte del looper mira sus tomas, no las voces de la cancion: bajar las pistas por
-    // debajo de la agenda publicada las apagaria sin avisar. 0 deja el valor, no baja nada.
+    // debajo de alguna usada desde el ultimo start las apagaria sin avisar (o cortaria su cola
+    // de fundido). 0 deja el valor, no baja nada.
     if (maxTracks > 0 && maxTracks < slot->songTracksInUse) {
         return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
     }
@@ -4508,7 +4511,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflin
         slot->engine, loopFrames, sections.data(), static_cast<int32_t>(sections.size()),
         endFrame);
     if (r == WMA_OK) {
-        int highest = 0;
+        int highest = slot->songTracksInUse;
         for (const WmaSongSection& sec : sections) {
             for (int t = highest; t < WMA_SONG_MAX_TRACKS; ++t) {
                 if (sec.clip[t] != WMA_SONG_SILENCE) highest = t + 1;

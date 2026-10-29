@@ -192,7 +192,7 @@ class OfflineLooperCapabilitiesJniTest {
     // Bug plausible: el recorte del looper mira sólo sus tomas y no la agenda de la canción: bajar las
     // pistas por debajo de una pista agendada la apaga en silencio (`Success` y la pista 10 calla).
     @Test
-    fun `AC-055_12b bajar las pistas por debajo de la agenda de la cancion se rechaza y no apaga nada`() {
+    fun `AC-055_12b bajar las pistas por debajo de la agenda de la cancion se rechaza aun con la agenda apagada`() {
         val r = newRenderer()
         try {
             assertTrue(caps(r, 192 * MIB, 12).isSuccess)
@@ -212,10 +212,94 @@ class OfflineLooperCapabilitiesJniTest {
 
             assertTrue(caps(r, 0, 11).isSuccess, "justo la pista más alta + 1")
             assertTrue(caps(r, 0, 0).isSuccess, "el cero no baja nada")
-            // apagada la agenda, ya se puede bajar
+            // apagar la agenda NO habilita bajar: el RT la adopta en el bloque siguiente y la pista 10 aún tiene cola
             assertTrue(r.songSetSchedule(1, LongArray(0), IntArray(0), 0).isSuccess)
-            assertTrue(caps(r, 0, 8).isSuccess, "sin agenda no hay pista que apagar")
+            assertIs<NativeBridgeException.ParameterOutOfRange>(caps(r, 0, 8).failure(), "agenda apagada, cola viva")
+            assertTrue(r.track(10).isSuccess)
+            // sólo el start vuelve a permitirlo (resetSongForRender)
+            assertTrue(r.start(RATE, BLOCK).isSuccess)
+            JniCoverage.record(OWNER, "nativeOfflineStart")
+            assertTrue(caps(r, 0, 8).isSuccess, "tras el start no hay pista que apagar")
             assertIs<NativeBridgeException.ParameterOutOfRange>(r.track(10).failure())
+        } finally {
+            r.close()
+            JniCoverage.record(OWNER, "nativeOfflineDestroy")
+        }
+    }
+
+    private fun OfflineRenderer.schedule(a: Int, track: Int, p0: Long): Result<Unit> {
+        val row = IntArray(ISongBridge.MAX_TRACKS) { ISongBridge.SILENCE }.also { it[track] = a }
+        return songSetSchedule(CLIP_FRAMES, longArrayOf(p0 + 9_600), row, p0 + 96_000)
+            .also { JniCoverage.record(OWNER, "nativeOfflineSongSetSchedule") }
+    }
+
+    // Bug plausible (el probe del reviewer): el contador baja con la agenda vacía y el set(0,8) corta la
+    // cola de fundido de la pista 10 (clic, maxDiff 0,43) devolviendo Success. El render tras el intento
+    // debe ser idéntico al de un control que no lo intentó.
+    @Test
+    fun `AC-055_12b con la pista 10 sonando y la agenda vacia bajar a 8 se rechaza y el render no cambia`() {
+        fun run(tryLower: Boolean): FloatArray {
+            val r = newRenderer()
+            try {
+                assertTrue(caps(r, 0, 12).isSuccess)
+                val a = r.songLoadClip(clipPath, RATE, 0, 0, FILE_FRAMES.toLong()).getOrThrow()
+                JniCoverage.record(OWNER, "nativeOfflineSongLoadClip")
+                assertTrue(r.track(10).isSuccess)
+                val p0 = r.songGetPlayFrame()
+                JniCoverage.record(OWNER, "nativeOfflineSongGetPlayFrame")
+                val row = IntArray(ISongBridge.MAX_TRACKS) { ISongBridge.SILENCE }.also { it[10] = a }
+                assertTrue(r.songSetSchedule(FILE_FRAMES.toLong(), longArrayOf(p0), row, p0 + 48_000).isSuccess)
+                JniCoverage.record(OWNER, "nativeOfflineSongSetSchedule")
+                val buf = FloatArray(BLOCK * 2)
+                repeat(10) { assertTrue(r.render(buf, BLOCK).isSuccess) }
+                assertTrue(r.songSetSchedule(1, LongArray(0), IntArray(0), 0).isSuccess)
+                if (tryLower) assertIs<NativeBridgeException.ParameterOutOfRange>(caps(r, 0, 8).failure())
+                assertTrue(r.render(buf, BLOCK).isSuccess)
+                return buf.copyOf()
+            } finally {
+                r.close()
+                JniCoverage.record(OWNER, "nativeOfflineDestroy")
+            }
+        }
+        val control = run(tryLower = false)
+        assertTrue(control.any { it != 0f }, "el control tiene que tener la cola sonando")
+        assertTrue(control.contentEquals(run(tryLower = true)), "el intento rechazado no cambia el render")
+    }
+
+    // Bug plausible: el contador se actualiza aunque la agenda falle. Buena en la pista 3 (necesita 4);
+    // la fallida pone un clip inexistente en la pista 10 y no puede subirlo a 11.
+    @Test
+    fun `AC-055_12b una agenda fallida no cambia el contador de pistas`() {
+        val r = newRenderer()
+        try {
+            assertTrue(caps(r, 0, 12).isSuccess)
+            val a = r.load().getOrThrow()
+            val p0 = r.songGetPlayFrame()
+            JniCoverage.record(OWNER, "nativeOfflineSongGetPlayFrame")
+            assertTrue(r.schedule(a, 3, p0).isSuccess)
+            assertTrue(r.schedule(a + 1_000, 10, p0).isFailure, "clip inexistente")
+            assertIs<NativeBridgeException.ParameterOutOfRange>(caps(r, 0, 3).failure(), "la pista 3 necesita 4")
+            assertTrue(caps(r, 0, 8).isSuccess, "la agenda fallida no subió el contador a 11")
+        } finally {
+            r.close()
+            JniCoverage.record(OWNER, "nativeOfflineDestroy")
+        }
+    }
+
+    // Bug plausible: el start no vuelve el contador a 0 y la instancia queda atada para siempre a la
+    // agenda más alta que tuvo.
+    @Test
+    fun `AC-055_12b el start vuelve el contador de pistas a cero`() {
+        val r = newRenderer()
+        try {
+            assertTrue(caps(r, 0, 12).isSuccess)
+            val a = r.load().getOrThrow()
+            assertTrue(r.schedule(a, 10, r.songGetPlayFrame()).isSuccess)
+            JniCoverage.record(OWNER, "nativeOfflineSongGetPlayFrame")
+            assertIs<NativeBridgeException.ParameterOutOfRange>(caps(r, 0, 8).failure())
+            assertTrue(r.start(RATE, BLOCK).isSuccess)
+            JniCoverage.record(OWNER, "nativeOfflineStart")
+            assertTrue(caps(r, 0, 8).isSuccess)
         } finally {
             r.close()
             JniCoverage.record(OWNER, "nativeOfflineDestroy")

@@ -160,14 +160,16 @@ class OfflineRenderer private constructor(
      *
      * Como en la C API, **0 deja el valor como estaba**. A diferencia de ella, lo que no cabe no se
      * recorta: [budgetBytes] fuera de `0..64 GiB` (en armeabi-v7a y x86 el techo es `SIZE_MAX`),
-     * [maxTracks] fuera de `0..16` o menor que la pista más alta de la agenda de la canción
-     * publicada (el looper no mira las voces de la canción y la apagaría en silencio) falla con
-     * `PARAMETER_OUT_OF_RANGE` sin aplicar ninguno de los dos.
+     * [maxTracks] fuera de `0..16` o menor que la pista más alta (índice desde 0) usada por una
+     * agenda publicada desde el último [start] más 1 (el looper no mira las voces de la canción y
+     * las apagaría en silencio) falla con `PARAMETER_OUT_OF_RANGE` sin aplicar ninguno de los dos.
+     * Ese piso sólo sube entre dos [start]: apagar la agenda no lo baja, la pista deja una cola
+     * de fundido; para bajar las pistas hay que reiniciar con [start].
      *
      * Cuándo: **antes de [songLoadClip]**. El presupuesto se mide en cada carga contra lo ya
      * cargado, así que valerlo después sólo afecta a las cargas siguientes; bajarlo con clips
      * adentro no libera nada (la próxima carga falla si ya se pasó) y [maxTracks] no baja de
-     * la pista más alta de la agenda. [start] no lo toca: sobrevive a reiniciar el render.
+     * el piso de la agenda. [start] reinicia ese piso, pero no lo toca: sobrevive a reiniciar el render.
      */
     override fun setLooperCapabilities(budgetBytes: Long, maxTracks: Int): Result<Unit> =
         call("setLooperCapabilities") { bridge.offlineLooperSetCapabilities(it, budgetBytes, maxTracks) }

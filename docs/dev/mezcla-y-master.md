@@ -206,14 +206,17 @@ arbol de 2.23.0 (un ejecutable `golden_gen` como `sf_render_preset`), no contra 
 - **Rangos:** como en la C API, **0 deja el valor como estaba**. A diferencia de ella, lo que no cabe no se recorta
   en silencio: `budgetBytes` fuera de `0..64 GiB` (en armeabi-v7a y x86 el techo es `SIZE_MAX`, 4 GiB - 1) y `maxTracks`
   fuera de `0..16` dan `PARAMETER_OUT_OF_RANGE` y **no se aplica ninguno de los dos**. Tambien lo da un
-  `maxTracks` menor que la pista mas alta de la **agenda publicada** de la cancion (`set(0,12)`, agenda en la
-  pista 10, `set(0,8)`): el recorte del looper mira sus tomas, no las voces de la cancion, y la apagaria en
-  silencio. Se apaga la agenda (o se llama antes de agendar) para poder bajar. Un handle muerto gana al rango
+  `maxTracks` menor que la pista mas alta (indice desde 0) usada por una agenda publicada con exito desde el
+  ultimo `start`, mas 1 (`set(0,12)`, agenda en la pista 10, `set(0,8)`): el recorte del looper mira sus tomas,
+  no las voces de la cancion, y la apagaria en silencio. El piso **solo sube** entre dos `start`: apagar la
+  agenda no lo baja, porque el RT la adopta en el bloque siguiente y la pista vieja deja una cola de fundido
+  (240 frames a 48 kHz) que bajar las pistas cortaria con un clic. Para bajarlas hay que re-`start`
+  (que apaga la agenda y vuelve el piso a 0), o llamar antes de agendar. Un handle muerto gana al rango
   (`NOT_INITIALIZED`). `maxFreeSeconds` no se cruza (una instancia offline no graba tomas libres).
 - **Cuando:** el presupuesto se mide en **cada** `songLoadClip` contra lo ya cargado (`clipBytes = loopFrames * 8`),
   y las pistas en cada `mixSetTrack`. Por eso se llama **antes de cargar clips**: despues solo vale para las cargas
   siguientes. Bajarlo con clips adentro **no libera nada** (la carga siguiente falla con `MEMORY_BUDGET`) y las pistas
-  no bajan de la pista mas alta de la agenda (se rechaza, ver arriba). **`start` no lo toca**: sobrevive a reiniciar el render de la misma instancia
+  no bajan del piso de la agenda (se rechaza, ver arriba). **`start` no toca las capacidades** (solo el piso de pistas): sobreviven a reiniciar el render de la misma instancia
   (otra instancia nace con los defaults).
 - **Fabricas** (`audio.api`, jvmSharedMain: Android y desktop; iOS no las implementa en v1):
   `OfflineRendererFactory.create(): Result<IOfflineRenderer>` y `MasterProcessorFactory.create(sampleRate):
