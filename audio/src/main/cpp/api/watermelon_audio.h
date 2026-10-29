@@ -2254,8 +2254,10 @@ WMA_API WmaResult wma_looper_import_track_ex(WmaEngine* engine, int track_index,
  *
  * While an agenda is published the looper's own record/arm calls do nothing:
  * wma_looper_start_recording, _start_recording_with_pre_roll and _start_overdub
- * are no-ops, wma_looper_arm_* return -1. Mute, volume, pan and send-to-fx of
- * the tracks apply to the song's voices; per-track peak and progress do not.
+ * are no-ops, wma_looper_arm_* return -1. CONTRACT CHANGE (2.25.0): the song has its
+ * OWN mix (section 25, wma_mix_set_track). While the song is active the track's
+ * mute, volume, pan and send-to-fx do NOT apply to its voices, and no voice enters
+ * the scene's effect chain; per-track peak and progress do not apply either.
  *
  * A sample-rate change of the engine invalidates every clip (they were
  * resampled to the old rate) and switches the agenda off: load the clips again.
@@ -2675,6 +2677,31 @@ WMA_API WmaResult wma_offline_render(WmaEngine* engine, float* output, const flo
                                      int frames);
 
 /**
+ * Like wma_offline_render() (no input), plus the TAPS of the programmed song's mix, in ONE
+ * pass (REQ-055 S12, ADR-0013 §5). All buffers are interleaved stereo and are OVERWRITTEN:
+ *  - @p mix        frames*2 floats: the engine output (with the RAW output profile: the
+ *                  pre-master mix; see wma_mix_set_output_profile).
+ *  - @p fx_return  frames*2 floats: the "Space" bus return.
+ *  - @p tracks     track_count * frames * 2 floats: the DRY signal of tracks 0..track_count-1,
+ *                  post-fader and post-pan; track t starts at tracks + t*frames*2.
+ * The taps are taken AFTER the looper's master gain (each one gets the same ramp), so with
+ * the RAW profile and the synth volume at 0:  mix == fx_return + sum(tracks)  up to float
+ * rounding (~1e-7, not exactly: the sum is done in a different order). A block in which the
+ * song is not active leaves every tap at 0.
+ *
+ * Same determinism contract as wma_offline_render(): same configuration + same calls + same
+ * block size => the same bits in every tap.
+ *
+ * @return WMA_OK; WMA_ERROR_NOT_INITIALIZED for NULL engine;
+ *         WMA_ERROR_INVALID_OPERATION if no offline render was started;
+ *         WMA_ERROR_PARAMETER_OUT_OF_RANGE for NULL mix / fx_return, NULL tracks with
+ *         track_count > 0, track_count < 0 or > the engine's active tracks, or frames outside
+ *         1..max_block_frames.
+ */
+WMA_API WmaResult wma_offline_render_taps(WmaEngine* engine, float* mix, float* fx_return,
+                                          float* tracks, int32_t track_count, int frames);
+
+/**
  * Stop an offline render. Idempotent: an instance that is not rendering
  * returns WMA_OK.
  *
@@ -2683,6 +2710,134 @@ WMA_API WmaResult wma_offline_render(WmaEngine* engine, float* output, const flo
  *         call never stops a live engine).
  */
 WMA_API WmaResult wma_offline_stop(WmaEngine* engine);
+
+/* ================================================================
+ * 25. Song mix, master and output profiles (REQ-055 S12, ADR-0013)
+ * ================================================================
+ *
+ * The programmed song (section 19) has its OWN mix: one gain, pan and send per track,
+ * plus a single send bus ("Space": a 100 % wet reverb in parallel with a 100 % wet delay,
+ * each with its own return). While the song is active the voices depend ONLY on this mix
+ * and the agenda; the looper TrackBuffer's volume/pan/mute/send-to-fx do not apply to them.
+ *
+ *   per track:  voice -> gain -> pan (equal power, -3 dB at centre) -> dry
+ *                                                   \-> x send -> Space bus
+ *   premix = sum(dry) + Space return  ->  looper master  ->  output profile
+ *
+ * RANGES, enforced at this boundary: a non-finite or out-of-range value is
+ * WMA_ERROR_PARAMETER_OUT_OF_RANGE and NOTHING is applied (never clamped in silence).
+ *
+ * THREADING. The setters are atomic stores, safe to call from any thread while the
+ * engine runs; the audio thread reads them once per block and smooths them (the same
+ * one-pole as the rest of the looper). The first wma_mix_set_track / wma_mix_set_space
+ * creates the Space bus on the calling thread and keeps it until the engine is destroyed
+ * (an engine that never calls them pays no memory and no CPU). Mix values set while the
+ * engine is OFFLINE take effect from frame 0 with no ramp: the first block of a song
+ * (and the first one after wma_offline_start) starts AT the target.
+ */
+
+/** Where the engine output is taken. */
+typedef enum {
+    WMA_OUTPUT_PROTECTED = 0,   /* default: the limiter / soft clip / dither chain of 2.23.0, bit for bit */
+    WMA_OUTPUT_MASTER    = 1,   /* the Studio master (gain + true-peak limiter), then the monitoring volume */
+    WMA_OUTPUT_RAW       = 2    /* nothing is applied. OFFLINE instances only */
+} WmaOutputProfile;
+
+/** The Space bus. Units and ranges in the field comments. */
+typedef struct {
+    float reverb_return;        /* 0..1   */
+    float reverb_size;          /* 0.1..2 */
+    float reverb_decay_s;       /* 0.1..10 s */
+    float reverb_damping;       /* 0..0.95 (1 leaves the reverb combs at DC: the bus would never go quiet) */
+    float reverb_predelay_ms;   /* 0..100 ms */
+    float reverb_low_cut_hz;    /* 20..500 Hz */
+    float reverb_high_cut_hz;   /* 1000..20000 Hz */
+    float delay_return;         /* 0..1   */
+    float delay_time_ms;        /* 1..2000 ms, and at most the delay line at the current sample rate (~1000 ms at 192 kHz): else PARAMETER_OUT_OF_RANGE. Never tempo-synced: the caller computes it */
+    float delay_feedback;       /* 0..0.9 (the delay interpolator peaks at 1.0887: above ~0.9186 a fractional time diverges) */
+} WmaMixSpace;
+
+/** The master: gain, then a brickwall true-peak limiter. */
+typedef struct {
+    float gain_db;        /* -60..+40 dB, applied with a linear ramp per block */
+    float ceiling_dbtp;   /* -20..0 dBTP (the default of the Studio is -1) */
+    float release_ms;     /* 1..2000 ms */
+} WmaMixMaster;
+
+/**
+ * Mix of the song's track @p track: linear @p gain 0..2 (0 = mute, 2 = +6 dB), @p pan -1..1,
+ * @p send 0..1 (post-fader, post-pan).
+ * @return WMA_OK; WMA_ERROR_NOT_INITIALIZED for NULL; WMA_ERROR_PARAMETER_OUT_OF_RANGE for a
+ *         track < 0 or >= the engine's active tracks, or a non-finite / out-of-range value;
+ *         WMA_ERROR_MEMORY if the Space bus could not be created.
+ */
+WMA_API WmaResult wma_mix_set_track(WmaEngine* engine, int32_t track, float gain, float pan,
+                                    float send);
+
+/** The Space bus (all ten fields are validated together). Same errors as wma_mix_set_track
+ *  (NULL @p space is WMA_ERROR_PARAMETER_OUT_OF_RANGE). */
+WMA_API WmaResult wma_mix_set_space(WmaEngine* engine, const WmaMixSpace* space);
+
+/**
+ * The master used by the MASTER output profile. Takes effect on the next block. Same errors
+ * (NULL @p master is WMA_ERROR_PARAMETER_OUT_OF_RANGE).
+ */
+WMA_API WmaResult wma_mix_set_master(WmaEngine* engine, const WmaMixMaster* master);
+
+/**
+ * Select where the engine output is taken. PROTECTED is the default and leaves a device
+ * output exactly as in 2.23.0. MASTER replaces OutputStage with the master and applies the
+ * monitoring volume (wma_set_master_volume) AFTER it. RAW applies nothing: the engine
+ * output is the premix, unprotected float; it exists only on an OFFLINE instance, never
+ * with a device. An instance that stops being offline goes back to PROTECTED.
+ * @return WMA_OK; WMA_ERROR_NOT_INITIALIZED for NULL; WMA_ERROR_PARAMETER_OUT_OF_RANGE for
+ *         a value that is not a WmaOutputProfile; WMA_ERROR_INVALID_OPERATION for RAW when
+ *         the engine is not rendering offline.
+ */
+WMA_API WmaResult wma_mix_set_output_profile(WmaEngine* engine, WmaOutputProfile profile);
+
+/** Frames the master delays its output (its lookahead, 5 ms; 240 at 48 kHz). The same
+ *  value for the live MASTER profile and for a WmaMaster of the same sample rate. 0 for NULL. */
+WMA_API int32_t wma_mix_get_master_latency_frames(const WmaEngine* engine);
+
+/**
+ * Callback underruns the backend reported (Oboe XRun count), monotonic since the stream
+ * opened. Refreshed by the audio thread about every 500 callbacks, so it lags. 0 for NULL
+ * and for an offline instance.
+ */
+WMA_API int32_t wma_get_xrun_count(const WmaEngine* engine);
+
+/**
+ * A master without an engine: the SAME code the MASTER profile runs, to pass a rendered
+ * premix through the master (and measure) without playing it. One handle per stream; not
+ * thread-safe (the caller serialises). After wma_master_reset, the same input gives the same
+ * output bits whatever the block size.
+ */
+typedef struct WmaMaster WmaMaster;
+
+#define WMA_MASTER_MAX_FRAMES (1 << 20)   /* largest block wma_master_process accepts */
+
+/** @return NULL for a sample rate outside 8000..192000, or on out-of-memory. */
+WMA_API WmaMaster* wma_master_create(int sample_rate);
+
+/** Takes effect on the next wma_master_process (gain ramps linearly over that block).
+ *  @return WMA_OK; WMA_ERROR_NOT_INITIALIZED for NULL; WMA_ERROR_PARAMETER_OUT_OF_RANGE. */
+WMA_API WmaResult wma_master_configure(WmaMaster* master, const WmaMixMaster* params);
+
+/** Back to the state of a fresh handle; the current gain jumps to the configured one (no
+ *  ramp), so configure + reset + process starts AT the target. */
+WMA_API WmaResult wma_master_reset(WmaMaster* master);
+
+/** In place, interleaved stereo. The output is delayed by wma_master_get_latency_frames().
+ *  @return WMA_OK; WMA_ERROR_NOT_INITIALIZED for NULL;
+ *          WMA_ERROR_PARAMETER_OUT_OF_RANGE for NULL @p inout or frames outside
+ *          1..WMA_MASTER_MAX_FRAMES. */
+WMA_API WmaResult wma_master_process(WmaMaster* master, float* inout, int frames);
+
+WMA_API int32_t wma_master_get_latency_frames(const WmaMaster* master);
+
+/** NULL is a no-op. */
+WMA_API void wma_master_destroy(WmaMaster* master);
 
 /* ================================================================ */
 

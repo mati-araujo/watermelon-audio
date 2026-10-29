@@ -3,6 +3,10 @@ package com.watermellonstudios.audio.internal.bridge
 import com.watermellonstudios.audio.api.EffectChainSnapshot
 import com.watermellonstudios.audio.api.IAudioNativeBridge
 import com.watermellonstudios.audio.api.ISongBridge
+import com.watermellonstudios.audio.api.ISongMixBridge
+import com.watermellonstudios.audio.api.MasterParams
+import com.watermellonstudios.audio.api.OutputProfile
+import com.watermellonstudios.audio.api.SongSpace
 import com.watermellonstudios.audio.api.IEffectStateProvider
 import com.watermellonstudios.audio.api.IEffectStateWriter
 import com.watermellonstudios.audio.api.ITunerDiagnostics
@@ -107,7 +111,7 @@ import kotlinx.coroutines.withContext
 // `@InternalWatermelonApi` (propagan el requisito), asi que
 // `AudioNativeBridge.getInstance().startTunerInputDump(p)` sin opt-in no compila (hallazgo 2).
 @OptIn(InternalWatermelonApi::class)
-class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagnostics, ISongBridge {
+class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagnostics, ISongBridge, ISongMixBridge {
 
     companion object {
         private const val TAG = "AudioNativeBridge"
@@ -3803,6 +3807,32 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
     private external fun nativeSongGetSection(): Int
     private external fun nativeSongGetLateAdoptions(): Long
 
+    // ==================== Mezcla propia de la canción, motor VIVO (REQ-055 S12) ====================
+    //
+    // `AudioNativeBridge.getInstance()` ES el `ISongMixBridge` vivo. Stores atómicos del lado
+    // nativo: no toman ningún mutex del bridge. Los arrays de espacio y master cruzan con el orden
+    // de campos de `WmaMixSpace` / `WmaMixMaster` (ver [toNativeArray]).
+
+    override fun mixSetTrack(track: Int, gain: Float, pan: Float, send: Float): Result<Unit> =
+        songResult(nativeMixSetTrack(track, gain, pan, send), "mixSetTrack($track)")
+
+    override fun mixSetSpace(space: SongSpace): Result<Unit> =
+        songResult(nativeMixSetSpace(space.toNativeArray()), "mixSetSpace")
+
+    override fun mixSetMaster(master: MasterParams): Result<Unit> =
+        songResult(nativeMixSetMaster(master.toNativeArray()), "mixSetMaster")
+
+    override fun mixSetOutputProfile(profile: OutputProfile): Result<Unit> =
+        songResult(nativeMixSetOutputProfile(profile.code), "mixSetOutputProfile($profile)")
+
+    override fun getXRunCount(): Int = nativeGetXRunCount()
+
+    private external fun nativeMixSetTrack(track: Int, gain: Float, pan: Float, send: Float): Int
+    private external fun nativeMixSetSpace(space: FloatArray): Int
+    private external fun nativeMixSetMaster(master: FloatArray): Int
+    private external fun nativeMixSetOutputProfile(profile: Int): Int
+    private external fun nativeGetXRunCount(): Int
+
     // ==================== Offline render by handle (REQ-055 S2, ADR-0008) ====================
     //
     // EL SEGUNDO MODELO DEL BRIDGE: todo lo de arriba opera sobre el motor GLOBAL (el
@@ -3883,6 +3913,36 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
     private external fun nativeOfflineSongGetSection(handle: Long): Int
     private external fun nativeOfflineSongGetLateAdoptions(handle: Long): Long
     private external fun nativeOfflineSongGetPlayFrame(handle: Long): Long
+
+    // Mezcla, taps y master por handle (REQ-055 S12): 1:1 con las `nativeMix*` del vivo, más los
+    // taps y el procesador de master (otro registro de ids: el id no es un puntero).
+    internal fun offlineMixSetTrack(handle: Long, track: Int, gain: Float, pan: Float, send: Float): Int =
+        nativeOfflineMixSetTrack(handle, track, gain, pan, send)
+    internal fun offlineMixSetSpace(handle: Long, space: FloatArray): Int = nativeOfflineMixSetSpace(handle, space)
+    internal fun offlineMixSetMaster(handle: Long, master: FloatArray): Int = nativeOfflineMixSetMaster(handle, master)
+    internal fun offlineMixSetOutputProfile(handle: Long, profile: Int): Int =
+        nativeOfflineMixSetOutputProfile(handle, profile)
+    internal fun offlineRenderTaps(handle: Long, out: FloatArray, frames: Int, trackCount: Int): Int =
+        nativeOfflineRenderTaps(handle, out, frames, trackCount)
+
+    internal fun masterCreate(sampleRate: Int): Long = nativeMasterCreate(sampleRate)
+    internal fun masterConfigure(id: Long, params: FloatArray): Int = nativeMasterConfigure(id, params)
+    internal fun masterReset(id: Long): Int = nativeMasterReset(id)
+    internal fun masterProcess(id: Long, buffer: FloatArray, frames: Int): Int = nativeMasterProcess(id, buffer, frames)
+    internal fun masterLatency(id: Long): Int = nativeMasterLatency(id)
+    internal fun masterDestroy(id: Long): Int = nativeMasterDestroy(id)
+
+    private external fun nativeOfflineMixSetTrack(handle: Long, track: Int, gain: Float, pan: Float, send: Float): Int
+    private external fun nativeOfflineMixSetSpace(handle: Long, space: FloatArray): Int
+    private external fun nativeOfflineMixSetMaster(handle: Long, master: FloatArray): Int
+    private external fun nativeOfflineMixSetOutputProfile(handle: Long, profile: Int): Int
+    private external fun nativeOfflineRenderTaps(handle: Long, out: FloatArray, frames: Int, trackCount: Int): Int
+    private external fun nativeMasterCreate(sampleRate: Int): Long
+    private external fun nativeMasterConfigure(id: Long, params: FloatArray): Int
+    private external fun nativeMasterReset(id: Long): Int
+    private external fun nativeMasterProcess(id: Long, buffer: FloatArray, frames: Int): Int
+    private external fun nativeMasterLatency(id: Long): Int
+    private external fun nativeMasterDestroy(id: Long): Int
 }
 
 /**
@@ -3899,3 +3959,12 @@ internal object UsbStreamStartStatus {
     const val INVALID_MODE = 5
     const val START_FAILED = 6
 }
+
+/** El orden de campos de `WmaMixSpace`: lo lee `nativeMixSetSpace` / `nativeOfflineMixSetSpace`. */
+internal fun SongSpace.toNativeArray(): FloatArray = floatArrayOf(
+    reverbReturn, reverbSize, reverbDecaySeconds, reverbDamping, reverbPreDelayMs,
+    reverbLowCutHz, reverbHighCutHz, delayReturn, delayTimeMs, delayFeedback,
+)
+
+/** El orden de campos de `WmaMixMaster`: ganancia, techo, release. */
+internal fun MasterParams.toNativeArray(): FloatArray = floatArrayOf(gainDb, ceilingDbtp, releaseMs)

@@ -1,6 +1,11 @@
 package com.watermellonstudios.audio.internal.bridge
 
+import com.watermellonstudios.audio.api.IOfflineTapRenderer
 import com.watermellonstudios.audio.api.ISongBridge
+import com.watermellonstudios.audio.api.ISongMixBridge
+import com.watermellonstudios.audio.api.MasterParams
+import com.watermellonstudios.audio.api.OutputProfile
+import com.watermellonstudios.audio.api.SongSpace
 import com.watermellonstudios.audio.domain.error.NativeBridgeException
 import com.watermellonstudios.audio.domain.error.NativeErrorCode
 
@@ -44,6 +49,13 @@ import com.watermellonstudios.audio.domain.error.NativeErrorCode
  * como una instancia fresca): [songSetSchedule] va después. Con la instancia cerrada, las que devuelven
  * `Result` fallan con `EngineNotInitialized` sin cruzar, y las lecturas dan `-1` / `0` / `-1`.
  *
+ * ## La mezcla de la canción y los taps ([ISongMixBridge], [IOfflineTapRenderer], REQ-055 S12)
+ *
+ * Mismos setters que el vivo, sobre el handle, entre renders. Un export fija el perfil
+ * [OutputProfile.RAW] **después** del [start] (parar o reiniciar vuelve a `PROTECTED`) y renderiza
+ * con [renderTaps]: UN [FloatArray] `[premezcla | FX | pista 0 | …]` por bloque. [getXRunCount] da
+ * 0: una instancia offline no tiene stream.
+ *
  * La superficie es la mínima que pide S2 (motor, SoundFont y preset, cadena de
  * efectos, parámetros, gestos x/y y notas). Lo que falte se agrega como un
  * pasamanos más a la `wma_*` que ya toma un `WmaEngine*`, no como una copia del
@@ -52,7 +64,7 @@ import com.watermellonstudios.audio.domain.error.NativeErrorCode
 class OfflineRenderer private constructor(
     private val bridge: AudioNativeBridge,
     initialHandle: Long,
-) : AutoCloseable, ISongBridge {
+) : AutoCloseable, ISongBridge, ISongMixBridge, IOfflineTapRenderer {
 
     private val lock = Any()
 
@@ -173,6 +185,31 @@ class OfflineRenderer private constructor(
 
     override fun songGetPlayFrame(): Long =
         handle.let { if (it == 0L) -1L else bridge.offlineSongGetPlayFrame(it) }
+
+    override fun mixSetTrack(track: Int, gain: Float, pan: Float, send: Float): Result<Unit> =
+        call("mixSetTrack") { bridge.offlineMixSetTrack(it, track, gain, pan, send) }
+
+    override fun mixSetSpace(space: SongSpace): Result<Unit> =
+        call("mixSetSpace") { bridge.offlineMixSetSpace(it, space.toNativeArray()) }
+
+    override fun mixSetMaster(master: MasterParams): Result<Unit> =
+        call("mixSetMaster") { bridge.offlineMixSetMaster(it, master.toNativeArray()) }
+
+    override fun mixSetOutputProfile(profile: OutputProfile): Result<Unit> =
+        call("mixSetOutputProfile") { bridge.offlineMixSetOutputProfile(it, profile.code) }
+
+    override fun getXRunCount(): Int = 0
+
+    override fun renderTaps(buffer: FloatArray, frames: Int, trackCount: Int): Result<Unit> {
+        if (frames <= 0 || frames > MAX_BLOCK_FRAMES || trackCount < 0 || trackCount > ISongBridge.MAX_TRACKS ||
+            buffer.size.toLong() < frames.toLong() * 2L * (2L + trackCount.toLong())
+        ) {
+            return Result.failure(
+                NativeBridgeException.fromCode(NativeErrorCode.PARAMETER_OUT_OF_RANGE.code, "OfflineRenderer.renderTaps"),
+            )
+        }
+        return call("renderTaps") { bridge.offlineRenderTaps(it, buffer, frames, trackCount) }
+    }
 
     /**
      * Libera la instancia nativa. Idempotente: la segunda llamada no cruza. Un render

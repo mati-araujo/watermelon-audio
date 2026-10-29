@@ -51,6 +51,9 @@ public:
     /// Full output protection chain: limiter -> soft clip -> dither -> hard limit.
     void processOutput(float* stereoData, int numFrames);
 
+    /// Mide la salida final sin procesarla: la cola de los perfiles MASTER y RAW (REQ-055 S12).
+    void meterFinalOutput(const float* stereoData, int numFrames) { updateMeters(stereoData, numFrames); }
+
     /// Lightweight output protection (no limiter, no dither — USB direct path).
     void processOutputLightweight(float* stereoData, int numFrames);
 
