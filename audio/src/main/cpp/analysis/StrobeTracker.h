@@ -210,7 +210,7 @@ public:
 
     /**
      * D-3 / D14 — «MISMA NOTA» para agrupar un segmento nuevo con los viejos:
-     *   · la gruesa a ≤ `kSameNoteCoarseCents` de la lectura del veredicto del segmento anterior;
+     *   · la gruesa a ≤ `kSameNoteCoarseCents` de la ultima lectura publicada del grupo anterior;
      *   · el segmento nuevo ASENTADO (`deriva ≤ max(σ_ruido, kSettledDriftFloorCents)` con `kEarlyWindow`
      *     fases densas) y su altura a ≤ `kCompatibleSigmas`·√(σ_nuevo² + σ_viejo²) de la vieja.
      * Hasta el asiento el segmento nuevo esta EN ESPERA: los viejos se conservan sin agruparse, la lectura
@@ -690,10 +690,10 @@ private:
     /// D-3: el segmento del veredicto (id de las fases nuevas) y la espera hasta el asiento.
     unsigned char mVerdictSegment{0};
     bool mSegmentWaiting{false};
-    /// La ultima lectura del VEREDICTO (el grupo de segmentos viejos), contra la que se juzga «misma nota».
-    bool mHaveVerdictReading{false};
-    double mLastVerdictCents{0.0};
-    double mLastVerdictSigma{0.0};
+    /// La ultima lectura publicada del grupo vigente (veredicto o temprana), contra la que se juzga «misma nota».
+    bool mHaveGroupReading{false};
+    double mGroupCents{0.0};
+    double mGroupSigma{0.0};
     /// Del ultimo camino temprano: la σ sin deriva, la deriva y el minimo de fases densas de los admitidos.
     double mEarlySigmaNoise{0.0};
     double mEarlyDrift{0.0};

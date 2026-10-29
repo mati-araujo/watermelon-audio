@@ -241,12 +241,15 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         return true;
     }
     combineVerdictReadings(closed);
-    if (mHasMeasurement) {
-        mHaveVerdictReading = true;
-        mLastVerdictCents = mCents;
-        mLastVerdictSigma = mUncertaintyCents;
-    }
     if (!mHasMeasurement) combineEarlyReadings();
+    // D-3: la ULTIMA lectura del grupo vigente (del veredicto o temprana: la que se publico) es contra
+    // la que se juzga «misma nota» en el proximo ataque. Una nota corta que nunca llego al veredicto
+    // (ukelele_A4 en corpus-v1) igual tiene lecturas tempranas con su σ.
+    if (mHasMeasurement) {
+        mHaveGroupReading = true;
+        mGroupCents = mCents;
+        mGroupSigma = mUncertaintyCents;
+    }
     return true;
 }
 
@@ -425,9 +428,9 @@ void StrobeTracker::clearAttackTracking() noexcept {
     mReadingIsEarly = false;
     mVerdictSegment = 0;
     mSegmentWaiting = false;
-    mHaveVerdictReading = false;
-    mLastVerdictCents = 0.0;
-    mLastVerdictSigma = 0.0;
+    mHaveGroupReading = false;
+    mGroupCents = 0.0;
+    mGroupSigma = 0.0;
     mEarlySigmaNoise = 0.0;
     mEarlyDrift = 0.0;
     mEarlyMinPhases = 0;
@@ -484,12 +487,12 @@ void StrobeTracker::trackAttackBlock(const float* mono, int numFrames, int64_t e
     }
     mSuppressUntilNextClose = false;
     const double coarse = coarseDeviationCents();
-    const bool coarseElsewhere = mHaveVerdictReading && std::isfinite(coarse) &&
-                                 std::fabs(coarse - mLastVerdictCents) > kSameNoteCoarseCents;
-    if (!mHaveVerdictReading || coarseElsewhere) {
-        // Sin lectura vieja contra la que juzgar, o la gruesa ya esta en otra nota (criterio 2): reinicio.
+    const bool coarseElsewhere = mHaveGroupReading && std::isfinite(coarse) &&
+                                 std::fabs(coarse - mGroupCents) > kSameNoteCoarseCents;
+    if (!mHaveGroupReading || coarseElsewhere) {
+        // Sin ninguna lectura vieja contra la que juzgar, o la gruesa ya esta en otra nota (criterio 2): reinicio.
         for (auto& p : mPartials) p.keepOnlyPhaseSegment(mVerdictSegment);
-        mHaveVerdictReading = false;
+        mHaveGroupReading = false;
         mSegmentWaiting = false;
         return;
     }
@@ -501,10 +504,10 @@ void StrobeTracker::settleWaitingSegment() {
     if (mEarlyMinPhases < InterleavedPhaseEstimator::kEarlyWindow) return;
     if (mEarlyDrift > std::max(mEarlySigmaNoise, kSettledDriftFloorCents)) return;   // sigue el glide
     const double coarse = coarseDeviationCents();
-    const bool coarseElsewhere = std::isfinite(coarse) && std::fabs(coarse - mLastVerdictCents) > kSameNoteCoarseCents;
+    const bool coarseElsewhere = std::isfinite(coarse) && std::fabs(coarse - mGroupCents) > kSameNoteCoarseCents;
     const double tolerance =
-        kCompatibleSigmas * std::sqrt(mEarlySigmaNoise * mEarlySigmaNoise + mLastVerdictSigma * mLastVerdictSigma);
-    const bool compatible = !coarseElsewhere && std::fabs(mCents - mLastVerdictCents) <= tolerance;
+        kCompatibleSigmas * std::sqrt(mEarlySigmaNoise * mEarlySigmaNoise + mGroupSigma * mGroupSigma);
+    const bool compatible = !coarseElsewhere && std::fabs(mCents - mGroupCents) <= tolerance;
     for (auto& p : mPartials) {
         if (compatible) {
             // Se une al grupo DESDE EL ASIENTO: lo que el segmento nuevo junto hasta aca (el glide, si lo
@@ -515,7 +518,7 @@ void StrobeTracker::settleWaitingSegment() {
             p.keepOnlyPhaseSegment(mVerdictSegment);
         }
     }
-    if (!compatible) mHaveVerdictReading = false;
+    if (!compatible) mHaveGroupReading = false;
     mSegmentWaiting = false;
 }
 
