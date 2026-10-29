@@ -71,10 +71,10 @@ public:
 
     /// Carga un clip de `loop` frames desde un audio nuevo; devuelve su id.
     int32_t load(const std::string& name, int frames, const std::function<float(int, int)>& sample,
-                 int64_t loop, int64_t rs = 0, int64_t re = 0) {
-        const std::string path = write(name, frames, sample);
+                 int64_t loop, int64_t rs = 0, int64_t re = 0, int rate = kSR) {
+        const std::string path = write(name, frames, sample, rate);
         int32_t id = -1;
-        EXPECT_EQ(looper.songLoadClip(path.c_str(), kSR, rs, re, loop, false, id),
+        EXPECT_EQ(looper.songLoadClip(path.c_str(), rate, rs, re, loop, false, id),
                   wm::SongStatus::Ok);
         return id;
     }
@@ -1771,8 +1771,12 @@ public:
     }
     int spaceBusCapacityFrames() const override { return capacityFrames.load(); }
     void applySpaceParams(const wm::SongSpaceParams&) override { ++applies; }
-    void runSpaceBus(const float*, float* fxOut, int frames) override {
+    void runSpaceBus(const float* send, float* fxOut, int frames) override {
         ++runs;
+        for (int i = 0; i < frames * 2; ++i) {
+            sendMax = std::max(sendMax, send[i]);
+            sendMin = std::min(sendMin, send[i]);
+        }
         if (frames > capacityFrames.load()) ++overruns;
         std::fill(fxOut, fxOut + static_cast<size_t>(frames) * 2, returnLevel);
     }
@@ -1783,6 +1787,8 @@ public:
     std::atomic<int> preparedRate{0};
     float returnLevel = 0.0f;   // lo que devuelve el bus en cada muestra
     float preReturnPeak = 0.0f; // lo que el bus reporta tener adentro, antes de sus retornos
+    float sendMax = 0.0f;       // el mayor y el menor envio que recibio, sin tocar
+    float sendMin = 0.0f;
     int runs = 0;
     int overruns = 0;
     int resets = 0;
@@ -1891,16 +1897,18 @@ TEST(SongBus, ARateChangeRacingTheBusCreationLeavesTheBusAtTheFinalRate) {
 namespace {
 
 constexpr int kTailBlock = 512;
+// Tope de cola de los tests (el real es 600 s): simular 10 min por test no entra en el timeout de TSan.
+constexpr int kTestCapSeconds = 4;
 // Tolerancia de un bloque: el que ya corrio como cola dentro de playAndRemoveSong.
 constexpr int kPreTail = kTailBlock;
 
 /// Una cancion sobre un bus que devuelve `level`; tras 4096 frames se saca la agenda (count == 0) y
 /// se esperan dos bloques a que la voz termine su fundido. Devuelve el frame siguiente.
-int64_t playAndRemoveSong(Rig& rig, RecordingBus& bus, float level) {
+int64_t playAndRemoveSong(Rig& rig, RecordingBus& bus, float level, int rate = kSR) {
     bus.returnLevel = level;
     rig.looper.publishSongBus(&bus, kTailBlock);
     rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
-    const int32_t id = rig.load("tail_dc", kBusLoop, dc(0.1f), kBusLoop);
+    const int32_t id = rig.load("tail_dc", kBusLoop, dc(0.1f), kBusLoop, 0, 0, rate);
     EXPECT_EQ(rig.schedule(kBusLoop, {sec(0, id)}, 1 << 24), wm::SongStatus::Ok);
     (void)rig.render(0, 4096, kTailBlock);
     EXPECT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
@@ -2025,18 +2033,11 @@ TEST(SongBusTail, ATailThatNeverEndsIsCappedAtTenMinutesWithAFixedFiftyMilliseco
         Rig rig;
         RecordingBus bus(kTailBlock);
         int64_t next = playAndRemoveSong(rig, bus, 0.5f);
-        const int runsAtEnd = bus.runs;
-        constexpr int64_t kLeadBlocks = static_cast<int64_t>(kSR) * 600 / kTailBlock - 8;
-        constexpr int64_t kChunk = kTailBlock * 937;   // multiplo del bloque: ningun bloque corto
-        while (bus.runs - runsAtEnd < kLeadBlocks - 937) {
-            (void)rig.render(next, kChunk, kTailBlock);
-            next += kChunk;
-        }
-        while (bus.runs - runsAtEnd < kLeadBlocks) {
-            (void)rig.render(next, kTailBlock, kTailBlock);
-            next += kTailBlock;
-        }
-        ASSERT_EQ(rig.looper.getSongBusTailCaps(), 0) << "el tope corto antes de los 10 min";
+        rig.looper.setSongBusTailMaxSecondsForTest(kTestCapSeconds);
+        constexpr int64_t kLeadBlocks = static_cast<int64_t>(kSR) * kTestCapSeconds / kTailBlock - 8;
+        (void)rig.render(next, kLeadBlocks * kTailBlock, kTailBlock);
+        next += kLeadBlocks * kTailBlock;
+        ASSERT_EQ(rig.looper.getSongBusTailCaps(), 0) << "el tope corto antes de tiempo";
         const int64_t tailFrames = kSR / 2;
         const std::vector<float> out = rig.render(next, tailFrames, finalBlock);
         next += tailFrames;
@@ -2065,17 +2066,18 @@ TEST(SongBusTail, ATailThatNeverEndsIsCappedAtTenMinutesWithAFixedFiftyMilliseco
 }
 
 // Bug plausible (mutante de finishSongMix): la cuenta de cola no se pone a cero al reactivar la
-// cancion, asi que colas cortas y sucesivas se suman hasta el tope de 10 min. Tres activaciones con
-// una cola de 300 s cada una (900 s en total, cada una bajo el tope) no cortan ninguna: la tercera
-// sigue sonando sus 300 s completos.
+// cancion, asi que colas cortas y sucesivas se suman hasta el tope. Tres activaciones con una cola
+// de 3/4 del tope cada una (2,25 topes en total, cada una bajo el tope) no cortan ninguna: la
+// tercera sigue sonando completa.
 TEST(SongBusTail, SeveralShortTailsDoNotAccumulateTowardsTheTenMinuteCap) {
     Rig rig;
     RecordingBus bus(kTailBlock);
+    rig.looper.setSongBusTailMaxSecondsForTest(kTestCapSeconds);
     int64_t next = playAndRemoveSong(rig, bus, 0.5f);
     for (int cycle = 0; cycle < 3; ++cycle) {
         SCOPED_TRACE(cycle);
         const int runsBefore = bus.runs;
-        constexpr int64_t kTail = static_cast<int64_t>(kSR) * 300;
+        constexpr int64_t kTail = static_cast<int64_t>(kSR) * (kTestCapSeconds * 3 / 4);
         (void)rig.render(next, kTail, kTailBlock);
         next += kTail;
         EXPECT_GE((bus.runs - runsBefore) * kTailBlock, kTail - kPreTail) << "la cola se corto antes de tiempo";
@@ -2094,20 +2096,13 @@ TEST(SongBusTail, SeveralShortTailsDoNotAccumulateTowardsTheTenMinuteCap) {
 
 namespace {
 
-/// Avanza una cola sin fin (bus que devuelve 0,5) hasta que el tope la esta fundiendo: el ultimo
+/// Con el tope de cola en kTestCapSeconds, avanza una cola sin fin (bus que devuelve 0,5) hasta que el tope la esta fundiendo: el ultimo
 /// bloque ya baja de 0,45 y todavia no llego a 0. Devuelve el frame siguiente.
 int64_t renderUntilTheCapIsFading(Rig& rig, RecordingBus& bus, int64_t next) {
-    const int runsAtEnd = bus.runs;
-    constexpr int64_t kLeadBlocks = static_cast<int64_t>(kSR) * 600 / kTailBlock - 8;
-    constexpr int64_t kChunk = kTailBlock * 937;
-    while (bus.runs - runsAtEnd < kLeadBlocks - 937) {
-        (void)rig.render(next, kChunk, kTailBlock);
-        next += kChunk;
-    }
-    while (bus.runs - runsAtEnd < kLeadBlocks) {
-        (void)rig.render(next, kTailBlock, kTailBlock);
-        next += kTailBlock;
-    }
+    rig.looper.setSongBusTailMaxSecondsForTest(kTestCapSeconds);
+    constexpr int64_t kLeadBlocks = static_cast<int64_t>(kSR) * kTestCapSeconds / kTailBlock - 8;
+    (void)rig.render(next, kLeadBlocks * kTailBlock, kTailBlock);
+    next += kLeadBlocks * kTailBlock;
     for (int i = 0; i < 16; ++i) {
         const std::vector<float> out = rig.render(next, kTailBlock, kTailBlock);
         next += kTailBlock;
@@ -2128,7 +2123,7 @@ float maxStepOf(const std::vector<float>& out) {
 // Bug plausible (review de 042a0c27, hallazgo 3): reactivar la cancion en medio del fundido del tope
 // hace saltar el retorno de left/total a 1 en una muestra (un click de ~0,2 con el bus a 0,5). El
 // retorno sube en 50 ms desde donde iba: la salida (voz en silencio) arranca donde cerro el
-// fundido y sube sin saltos, no se cuenta tope y la cola siguiente dura sus 590 s
+// fundido y sube sin saltos, no se cuenta tope y la cola siguiente dura sus kTestCapSeconds - 1 s
 // (hallazgo 2: sin reiniciar el fundido se cortaba a los ~29 ms).
 TEST(SongBusTail, ReactivatingMidFadeRaisesTheReturnWithoutAStepAndLeavesNoStaleFade) {
     Rig rig;
@@ -2150,10 +2145,80 @@ TEST(SongBusTail, ReactivatingMidFadeRaisesTheReturnWithoutAStepAndLeavesNoStale
     ASSERT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
     (void)rig.render(next, 2 * kTailBlock, kTailBlock);
     next += 2 * kTailBlock;
-    constexpr int64_t kTail = static_cast<int64_t>(kSR) * 590;
+    constexpr int64_t kTail = static_cast<int64_t>(kSR) * (kTestCapSeconds - 1);
     (void)rig.render(next, kTail, kTailBlock);
     EXPECT_EQ(rig.looper.getSongBusTailCaps(), 0) << "el fundido viejo corto la cola siguiente";
     EXPECT_TRUE(rig.looper.isSongBusLive());
+}
+
+// Bug plausible (mutante de runSongBusTail, review de 9219db8d): la subida del retorno solo corre
+// con la cancion activa y se omite en los bloques de cola. Reactivar a mitad del fundido y parar la
+// cancion ANTES de que la subida termine (50 ms) deja el retorno en el valor del fundido (~0,43) y
+// el primer bloque de cola lo salta a 0,5 de golpe.
+TEST(SongBusTail, TheRiseKeepsGoingThroughTheTailIfTheSongStopsBeforeItEnds) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    int64_t next = playAndRemoveSong(rig, bus, 0.5f);
+    next = renderUntilTheCapIsFading(rig, bus, next);
+    rig.looper.setSongMixTrack(0, 0.0f, 0.0f, 1.0f);
+    const int32_t id = rig.load("rise_tail", kBusLoop, dc(0.1f), kBusLoop);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(next, id)}, next + (1 << 24)), wm::SongStatus::Ok);
+    std::vector<float> out = rig.render(next, 2 * kTailBlock, kTailBlock);   // 1024 frames < 2400 de la subida
+    next += 2 * kTailBlock;
+    ASSERT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
+    const std::vector<float> after = rig.render(next, 4 * kTailBlock, kTailBlock);
+    out.insert(out.end(), after.begin(), after.end());
+    EXPECT_LT(maxStepOf(out), 0.001f) << "la subida del retorno se corto al pasar a la cola";
+    EXPECT_NEAR(out[out.size() - 2], 0.5f, 1e-5f);
+}
+
+// Bug plausible (review de 9219db8d): la subida acumulaba ganancia en float y su duracion dependia
+// del bloque: a 192 kHz con bloques de 1 frame el incremento por frame puede quedar bajo la
+// resolucion de un float cerca de 1 y la subida no termina nunca. Con un contador entero de frames
+// dura lo que el fundido (50 ms = 9600 frames a 192 kHz) cuente el bloque que cuente.
+TEST(SongBusTail, TheRiseLastsFiftyMillisecondsWithOneFrameBlocksAt192kHz) {
+    constexpr int kRate = 192000;
+    Rig rig;
+    rig.looper.setSampleRate(kRate);
+    RecordingBus bus(kTailBlock);
+    rig.looper.setSongBusTailMaxSecondsForTest(kTestCapSeconds);
+    int64_t next = playAndRemoveSong(rig, bus, 0.5f, kRate);
+    constexpr int64_t kLeadBlocks = static_cast<int64_t>(kRate) * kTestCapSeconds / kTailBlock - 8;
+    (void)rig.render(next, kLeadBlocks * kTailBlock, kTailBlock);
+    next += kLeadBlocks * kTailBlock;
+    ASSERT_EQ(rig.looper.getSongBusTailCaps(), 0);
+    bool fading = false;
+    for (int i = 0; i < 12 * kTailBlock + kRate / 20 && !fading; ++i) {
+        fading = rig.render(next, 1, 1)[0] < 0.25f;   // a mitad del fundido: la subida tiene recorrido
+        ++next;
+    }
+    ASSERT_TRUE(fading) << "el tope no empezo a fundir";
+    rig.looper.setSongMixTrack(0, 0.0f, 0.0f, 1.0f);
+    const int32_t id = rig.load("rise_192", kBusLoop, dc(0.1f), kBusLoop, 0, 0, kRate);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(next, id)}, next + (1 << 24)), wm::SongStatus::Ok);
+    const int64_t riseFrames = kRate / 20;
+    const std::vector<float> out = rig.render(next, riseFrames + 64, 1);
+    EXPECT_LT(out[static_cast<size_t>(riseFrames - 3) * 2], 0.5f - 2e-5f) << "la subida termino antes de 50 ms";
+    EXPECT_NEAR(out[static_cast<size_t>(riseFrames + 1) * 2], 0.5f, 1e-6f) << "la subida no termino a los 50 ms";
+}
+
+// Bug plausible (review de 9219db8d): el recorte del envio a +-limite se confunde con ponerlo en 0
+// (lo finito y enorme tambien se anulaba). El bus recibe el limite con el signo de la muestra, no 0 ni 3e38.
+TEST(SongBus, AHugeFiniteSendReachesTheBusClampedToTheLimitAndNotZeroed) {
+    for (const float huge : {3e38f, -3e38f}) {
+        SCOPED_TRACE(huge);
+        Rig rig;
+        RecordingBus bus(256);
+        rig.looper.publishSongBus(&bus, 256);
+        rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+        const int32_t id = rig.load("huge_send", kBusLoop, dc(huge), kBusLoop);
+        ASSERT_EQ(rig.schedule(kBusLoop, {sec(0, id)}, 1 << 24), wm::SongStatus::Ok);
+        (void)rig.render(0, 1024, 256);
+        const float seen = huge > 0 ? bus.sendMax : -bus.sendMin;
+        EXPECT_GT(seen, 1.0f) << "el envio enorme llego al bus anulado";
+        EXPECT_LT(seen, 1e6f) << "el envio enorme llego al bus sin recortar";
+        EXPECT_GE(rig.looper.getSongBusGuardTrips(), 1);
+    }
 }
 
 // Bug plausible (mutante de resetSongForRender): un render offline arranca de cero. Si un fundido a

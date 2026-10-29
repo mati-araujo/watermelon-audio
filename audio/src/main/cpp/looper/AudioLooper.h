@@ -1074,6 +1074,7 @@ public:
         mSongBusFadeLeft = -1;
         mSongBusRiseGain = 1.0f;
         mSongBusRiseInc = 0.0f;
+        mSongBusRiseLeft = 0;
         if (wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire)) bus->resetSpaceBus();
     }
 
@@ -1129,12 +1130,14 @@ public:
     }
     bool hasSongBus() const { return mSongBus.load(std::memory_order_acquire) != nullptr; }
     int64_t getSongBusOverflowBlocks() const { return static_cast<int64_t>(mSongBusOverflow.get()); }
-    /// Bloques cuyo envio traia una muestra no finita (se escribio 0 antes de entrar al bus).
+    /// Bloques cuyo envio traia una muestra no finita (se escribio 0) o de modulo > kSongSendLimit (se recorto).
     int64_t getSongBusGuardTrips() const { return static_cast<int64_t>(mSongBusGuard.get()); }
-    /// Colas cortadas por el tope de kSongTailMaxSeconds (con fundido).
+    /// Colas cortadas por el tope de la cola (600 s por defecto, con fundido).
     int64_t getSongBusTailCaps() const { return static_cast<int64_t>(mSongBusCaps.get()); }
     /// Sonda de test: el bus puede tener cola audible (lo lee el hilo que renderiza).
     bool isSongBusLive() const { return mSongBusLive; }
+    /// Sonda de test, FUERA del RT y antes de renderizar: acorta el tope de la cola (default 600 s) para no simular 10 min.
+    void setSongBusTailMaxSecondsForTest(double seconds) { mSongTailMaxSeconds = std::max(0.01, seconds); }
 
     /**
      * @brief Taps de una pasada offline (REQ-055 S12). `fx` y `tracks` (trackCount x frames x 2)
@@ -1893,8 +1896,10 @@ private:
     int64_t mSongBusQuietFrames{0};              // frames seguidos con el bus bajo el umbral
     int64_t mSongBusTailFrames{0};               // frames de cola desde que la cancion dejo de alimentar el bus
     int64_t mSongBusFadeLeft{-1};                // frames que le quedan al fundido del tope; -1 = no hay fundido
+    double mSongTailMaxSeconds{kSongTailDefaultMaxSeconds};   // tope de la cola; solo la sonda de test lo cambia, fuera del RT
+    int64_t mSongBusRiseLeft{0};                 // frames que le quedan a la subida; 0 = no sube
     float mSongBusRiseGain{1.0f};                // ganancia del retorno mientras sube tras reactivar a mitad del fundido
-    float mSongBusRiseInc{0.0f};                 // incremento por frame de esa subida; 0 = no sube
+    float mSongBusRiseInc{0.0f};                 // incremento por frame de esa subida
     std::vector<float> mSongSendBuf;
     std::vector<float> mSongFxBuf;
     std::vector<float> mSongScratch;
@@ -1905,7 +1910,7 @@ private:
     static constexpr double kSongTailQuietSeconds = 2.5;      // > el delay maximo (2 s)
     // Tope de la cola (defensa en profundidad: con los rangos de la C API el bus se apaga solo) y
     // duracion FIJA del fundido que la cierra, repartida en los bloques que hagan falta.
-    static constexpr double kSongTailMaxSeconds = 600.0;
+    static constexpr double kSongTailDefaultMaxSeconds = 600.0;
     static constexpr double kSongTailFadeSeconds = 0.05;
     static constexpr float kSongSendLimit = 64.0f;            // tope del envio al bus: 16 pistas x ganancia 2 x clip ~1, con margen
     // Taps de la pasada offline (un solo hilo): ver armSongTaps().
@@ -2115,23 +2120,21 @@ private:
     }
 
     void startSongBusRise(float fromGain) {
+        mSongBusRiseLeft = songTailFadeFrames();
         mSongBusRiseGain = fromGain;
-        mSongBusRiseInc = (1.0f - fromGain) / static_cast<float>(songTailFadeFrames());
+        mSongBusRiseInc = (1.0f - fromGain) / static_cast<float>(mSongBusRiseLeft);
     }
 
-    /// Aplica a mSongFxBuf la subida del retorno (si la hay) y la avanza. AUDIO THREAD.
+    /// Aplica a mSongFxBuf la subida del retorno (si la hay) y la avanza. Dura los mismos frames
+    /// que el fundido, cuente el bloque que cuente. AUDIO THREAD.
     void riseSongBusReturn(int numFrames) {
-        if (mSongBusRiseInc <= 0.0f) return;
-        const float inc = mSongBusRiseInc;
+        if (mSongBusRiseLeft <= 0) return;
+        const int ramp = static_cast<int>(std::min<int64_t>(numFrames, mSongBusRiseLeft));
         const float start = mSongBusRiseGain;
-        const float end = std::min(1.0f, start + inc * static_cast<float>(numFrames));
-        const int ramp = end >= 1.0f ? std::min(numFrames, static_cast<int>(std::ceil((1.0f - start) / inc))) : numFrames;
-        simd::applyStereoGainRamp(mSongFxBuf.data(), ramp, start, std::min(1.0f, start + inc * static_cast<float>(ramp)));
-        mSongBusRiseGain = std::min(1.0f, start + inc * static_cast<float>(ramp));
-        if (end >= 1.0f) {
-            mSongBusRiseGain = 1.0f;
-            mSongBusRiseInc = 0.0f;
-        }
+        mSongBusRiseLeft -= ramp;
+        const float end = mSongBusRiseLeft == 0 ? 1.0f : std::min(1.0f, start + mSongBusRiseInc * static_cast<float>(ramp));
+        simd::applyStereoGainRamp(mSongFxBuf.data(), ramp, start, end);
+        mSongBusRiseGain = end;
     }
 
     /**
@@ -2171,7 +2174,7 @@ private:
      *        del delay), asi un retorno en 0 no apaga un bus cuyas lineas siguen llenas. Con los
      *        rangos de la C API (realimentacion <= 0,9, damping <= 0,95) la linea del delay es
      *        estable con cualquier fraccion y la cola se agota sola. Un corte de seguridad, solo
-     *        para un bus fuera de control: el tope de kSongTailMaxSeconds, que cierra con un FUNDIDO
+     *        para un bus fuera de control: el tope de la cola (600 s), que cierra con un FUNDIDO
      *        de kSongTailFadeSeconds (50 ms) repartido en los bloques que hagan falta, y marca el
      *        bus viejo: lo reinicia la proxima activacion (memset en el RT, falla ya contada).
      *        Sin alloc. Devuelve si el FX de este bloque entro a la mezcla (los taps lo toman).
@@ -2199,7 +2202,7 @@ private:
         const int64_t rate = mSampleRate.load(std::memory_order_acquire);
         if (mSongBusFadeLeft < 0) {
             mSongBusTailFrames += numFrames;
-            if (static_cast<double>(mSongBusTailFrames) >= static_cast<double>(rate) * kSongTailMaxSeconds) {
+            if (static_cast<double>(mSongBusTailFrames) >= static_cast<double>(rate) * mSongTailMaxSeconds) {
                 mSongBusFadeLeft = std::max<int64_t>(1, static_cast<int64_t>(static_cast<double>(rate) * kSongTailFadeSeconds));
             }
         }
