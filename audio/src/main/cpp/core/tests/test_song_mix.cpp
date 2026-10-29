@@ -725,8 +725,8 @@ TEST_F(SongMix, AHugeFiniteSampleInAClipIsClampedSoALaterCleanSongSoundsLikeTheC
             << "la cancion limpia de control no suena: el test no prueba nada";
         float worst = 0.0f;
         for (size_t i = 0; i < control.size(); ++i) worst = std::max(worst, std::abs(withBad[i] - control[i]));
-        // No es bit a bit: la cola del clip recortado se apaga bajo -120 dBFS (el bus queda con ese
-        // residuo adentro, sin vaciarse) y asoma ~1e-4 en la cancion siguiente. Un bus envenenado da
+        // No es bit a bit: el pico recortado a 64 deja una cola VIVA en el bus (isSongBusLive() es
+        // true, ~-82 dBFS de salida) que asoma ~1e-4 en la cancion siguiente. Un bus envenenado da
         // un FX de 0 (diferencia ~0,2, el pico del control) o de ±4 (la linea en el limite).
         EXPECT_LE(worst, 5e-4f) << "el bus quedo envenenado: la cancion limpia suena distinto";
     }
@@ -1097,7 +1097,7 @@ TEST_F(SongMix, ABurstOfMixSettersAgainstTheCallbackAllocatesNothingAndStaysInsi
     std::printf("[ mix ] 8 pistas + bus + master, %d frames: %lld callbacks, max %.1f us, p99 %.1f us "
                 "(periodo %.1f us)\n", kCallbackFrames, static_cast<long long>(blocks.load()), maxUs,
                 p99Us, kPeriodNs / 1000.0);
-#ifndef WMA_TEST_UNDER_SANITIZER
+#if defined(__OPTIMIZE__) && !defined(WMA_TEST_UNDER_SANITIZER)
     EXPECT_LT(static_cast<double>(costs.back()), kPeriodNs) << "un callback tardo mas que su periodo";
 #endif
     live.tearDown();

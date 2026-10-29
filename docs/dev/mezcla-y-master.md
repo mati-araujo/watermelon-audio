@@ -281,9 +281,12 @@ sanitizers (con ellos el callback es mas lento por construccion).
 | Guarda | Test |
 |---|---|
 | Saneo del envio no finito (NaN, Inf, −Inf; reverb y delay) y cancion limpia posterior bit a bit igual | `SongMix.ANonFiniteSampleInAClipNeverPoisonsTheRealBusSoALaterCleanSongSoundsTheSame` |
-| Recorte del envio a ±64 (3e38, 1e37, −3e38; reverb y delay): cancion limpia posterior = control (≤ 5e-4; queda el residuo bajo −120 dBFS) y bloque contado | `SongMix.AHugeFiniteSampleInAClipIsClampedSoALaterCleanSongSoundsLikeTheControl` |
-| Reactivar a mitad del fundido: sin escalon, sin tope contado, la cola siguiente dura 590 s | `SongBusTail.ReactivatingMidFadeRaisesTheReturnWithoutAStepAndLeavesNoStaleFade` |
+| Recorte del envio a ±64 (3e38, 1e37, −3e38; reverb y delay): cancion limpia posterior = control (≤ 5e-4; no es un residuo bajo −120 dBFS: el bus sigue vivo con la cola del pico recortado a 64, ≈ −82 dBFS) y bloque contado | `SongMix.AHugeFiniteSampleInAClipIsClampedSoALaterCleanSongSoundsLikeTheControl` |
+| Reactivar a mitad del fundido: sin escalon, sin tope contado, la cola siguiente dura el tope menos 1 s (los tests acortan el tope con una sonda) | `SongBusTail.ReactivatingMidFadeRaisesTheReturnWithoutAStepAndLeavesNoStaleFade` |
 | `resetSongForRender` borra fundido y subida a medias | `SongBusTail.AnOfflineRenderStartsFromScratchAfterAHalfFinishedFadeOrRise` |
+| La subida del retorno sigue en los bloques de cola si la cancion para antes de los 50 ms | `SongBusTail.TheRiseKeepsGoingThroughTheTailIfTheSongStopsBeforeItEnds` |
+| La subida dura 50 ms con bloques de 1 frame a 192 kHz (contador entero de frames) | `SongBusTail.TheRiseLastsFiftyMillisecondsWithOneFrameBlocksAt192kHz` |
+| Un envio finito enorme llega al bus recortado al limite con su signo, no anulado | `SongBus.AHugeFiniteSendReachesTheBusClampedToTheLimitAndNotZeroed` |
 | Sin guarda por pico: material fuerte por el delay a 0,9 no se corta, no se reinicia y es continuo | `SongMix.LoudPeriodicMaterialThroughTheDelayAtMaximumFeedbackIsNeverCutOrResetAndIsContinuous` |
-| Tope de 10 min con fundido de 50 ms, con bloques de 1, 256 y 512 frames (`RecordingBus`) | `SongBusTail.ATailThatNeverEndsIsCappedAtTenMinutesWithAFixedFiftyMillisecondFade` |
+| Tope de cola (600 s; los tests lo acortan a 4 s con una sonda) con fundido de 50 ms, con bloques de 1, 256 y 512 frames (`RecordingBus`) | `SongBusTail.ATailThatNeverEndsIsCappedAtTenMinutesWithAFixedFiftyMillisecondFade` |
 | La cuenta de la cola se pone a 0 al activar (`finishSongMix`) (`RecordingBus`) | `SongBusTail.SeveralShortTailsDoNotAccumulateTowardsTheTenMinuteCap` |
