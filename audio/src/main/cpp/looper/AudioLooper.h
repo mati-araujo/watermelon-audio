@@ -13,6 +13,7 @@
 #include "SongSpaceBus.h"
 #include "../dsp/SIMDUtils.h"
 #include <algorithm>
+#include <limits>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -1069,6 +1070,7 @@ public:
         mSongBusStale = false;
         mSongBusQuietFrames = 0;
         mSongBusTailFrames = 0;
+        mSongBusFadeLeft = -1;
         if (wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire)) bus->resetSpaceBus();
     }
 
@@ -1124,8 +1126,10 @@ public:
     }
     bool hasSongBus() const { return mSongBus.load(std::memory_order_acquire) != nullptr; }
     int64_t getSongBusOverflowBlocks() const { return static_cast<int64_t>(mSongBusOverflow.get()); }
-    /// Veces que la guarda de seguridad corto el bus (salida no finita, pico absurdo o tope de cola).
+    /// Bloques cuyo envio traia una muestra no finita (se escribio 0 antes de entrar al bus).
     int64_t getSongBusGuardTrips() const { return static_cast<int64_t>(mSongBusGuard.get()); }
+    /// Colas cortadas por el tope de kSongTailMaxSeconds (con fundido).
+    int64_t getSongBusTailCaps() const { return static_cast<int64_t>(mSongBusCaps.get()); }
     /// Sonda de test: el bus puede tener cola audible (lo lee el hilo que renderiza).
     bool isSongBusLive() const { return mSongBusLive; }
 
@@ -1885,17 +1889,19 @@ private:
     bool mSongBusStale{false};                   // un bloque no entro al bus con cola audible: reiniciar al reactivar
     int64_t mSongBusQuietFrames{0};              // frames seguidos con el bus bajo el umbral
     int64_t mSongBusTailFrames{0};               // frames de cola desde que la cancion dejo de alimentar el bus
+    int64_t mSongBusFadeLeft{-1};                // frames que le quedan al fundido del tope; -1 = no hay fundido
     std::vector<float> mSongSendBuf;
     std::vector<float> mSongFxBuf;
     std::vector<float> mSongScratch;
     wma::RtCounter mSongBusOverflow;
     wma::RtCounter mSongBusGuard;
+    wma::RtCounter mSongBusCaps;
     static constexpr float kSongTailSilence = 1e-6f;          // -120 dBFS
     static constexpr double kSongTailQuietSeconds = 2.5;      // > el delay maximo (2 s)
-    // Guarda de seguridad (defensa en profundidad: con los rangos de la C API el bus es estable y
-    // se apaga solo). Los clamps de los efectos son +-4, asi que 16 es un bus fuera de control.
-    static constexpr float kSongBusMaxLevel = 16.0f;
+    // Tope de la cola (defensa en profundidad: con los rangos de la C API el bus se apaga solo) y
+    // duracion FIJA del fundido que la cierra, repartida en los bloques que hagan falta.
     static constexpr double kSongTailMaxSeconds = 600.0;
+    static constexpr double kSongTailFadeSeconds = 0.05;
     // Taps de la pasada offline (un solo hilo): ver armSongTaps().
     float* mTapFx{nullptr};
     float* mTapTracks{nullptr};
@@ -2070,7 +2076,7 @@ private:
         wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire);
         if (bus == nullptr) return;
         if (mSongBusStale) {
-            // Un bloque salto el bus, o la guarda lo corto: su estado no es confiable, no suena al reactivar.
+            // Un bloque salto el bus, o el tope de la cola lo corto: su estado no es confiable, no suena al reactivar.
             bus->resetSpaceBus();
             mSongSpaceSeen = ~0u;
             mSongBusStale = false;
@@ -2078,13 +2084,14 @@ private:
         mSongBusLive = true;
         mSongBusQuietFrames = 0;
         mSongBusTailFrames = 0;
+        mSongBusFadeLeft = -1;
         const uint32_t version = mSongSpaceVersion.load(std::memory_order_acquire);
         if (version != mSongSpaceSeen) {
             mSongSpaceSeen = version;
             bus->applySpaceParams(loadSongSpace());
         }
+        sanitizeSongSend(numFrames);
         bus->runSpaceBus(mSongSendBuf.data(), mSongFxBuf.data(), numFrames);
-        if (songBusOutOfControl(*bus, numFrames)) return;
         simd::addStereoBuffers(dry, dry, mSongFxBuf.data(), numFrames, /*applyHeadroom=*/false);
         if (mTapFx != nullptr && numFrames <= mTapFrames) {
             std::memcpy(mTapFx, mSongFxBuf.data(), sizeof(float) * static_cast<size_t>(numFrames) * 2);
@@ -2092,22 +2099,24 @@ private:
     }
 
     /**
-     * @brief Guarda del bus (AUDIO THREAD). Si su ultimo bloque tiene una muestra no finita o un
-     *        pico por encima de kSongBusMaxLevel, el retorno de ESE bloque se silencia, el bus pasa a
-     *        viejo (la proxima activacion lo reinicia: el memset en el RT queda para esta falla) y se
-     *        cuenta. Devuelve si actuo. Un NaN no compara <=, asi que cae sin llamar a isfinite.
+     * @brief Saneo del envio (AUDIO THREAD): una muestra no finita (un clip con NaN/Inf) se escribe
+     *        como 0 antes de que entre al bus, y el bloque se cuenta. Los efectos ya ponen en cero su
+     *        salida no finita, pero sus lineas internas quedarian envenenadas para siempre. No hay
+     *        guarda por pico: la salida del delay no tiene un techo fisico util (realimentacion 0,9 da
+     *        ~10x el envio, ~50x cerca de 9,4 kHz) y con realimentacion <= 0,9 la linea es estable.
+     *        `!(|v| <= max)` es verdadero tambien para NaN.
      */
-    bool songBusOutOfControl(const wm::ISongSpaceBus& bus, int numFrames) {
+    void sanitizeSongSend(int numFrames) {
+        float* send = mSongSendBuf.data();
         const size_t n = static_cast<size_t>(numFrames) * 2;
-        const float* fx = mSongFxBuf.data();
-        bool ok = bus.spaceBusPreReturnPeak() <= kSongBusMaxLevel;
-        for (size_t i = 0; i < n; ++i) ok &= std::abs(fx[i]) <= kSongBusMaxLevel;
-        if (ok) return false;
-        std::memset(mSongFxBuf.data(), 0, sizeof(float) * n);
-        mSongBusGuard.bump();
-        mSongBusLive = false;
-        mSongBusStale = true;
-        return true;
+        bool bad = false;
+        for (size_t i = 0; i < n; ++i) {
+            if (!(std::abs(send[i]) <= std::numeric_limits<float>::max())) {
+                send[i] = 0.0f;
+                bad = true;
+            }
+        }
+        if (bad) mSongBusGuard.bump();
     }
 
     /// Los tres buffers del bloque y la capacidad PROPIA del bus alcanzan para `numFrames`.
@@ -2123,10 +2132,10 @@ private:
      *        (2 s). El silencio se mide ANTES de los retornos (la salida 100 % wet de la reverb y
      *        del delay), asi un retorno en 0 no apaga un bus cuyas lineas siguen llenas. Con los
      *        rangos de la C API (realimentacion <= 0,9, damping <= 0,95) la linea del delay es
-     *        estable con cualquier fraccion y la cola se agota sola. Dos cortes de seguridad, solo
-     *        para un bus fuera de control: la guarda de songBusOutOfControl (no finito / pico
-     *        absurdo) y un tope de kSongTailMaxSeconds, que cierra con un FUNDIDO de un bloque. Los
-     *        dos marcan el bus viejo y lo reinicia la proxima activacion (el unico memset en el RT).
+     *        estable con cualquier fraccion y la cola se agota sola. Un corte de seguridad, solo
+     *        para un bus fuera de control: el tope de kSongTailMaxSeconds, que cierra con un FUNDIDO
+     *        de kSongTailFadeSeconds (50 ms) repartido en los bloques que hagan falta, y marca el
+     *        bus viejo: lo reinicia la proxima activacion (memset en el RT, falla ya contada).
      *        Sin alloc. Devuelve si el FX de este bloque entro a la mezcla (los taps lo toman).
      *        AUDIO THREAD.
      */
@@ -2148,22 +2157,34 @@ private:
             bus->applySpaceParams(loadSongSpace());
         }
         bus->runSpaceBus(mSongSendBuf.data(), mSongFxBuf.data(), numFrames);
-        if (songBusOutOfControl(*bus, numFrames)) return false;
         const int64_t rate = mSampleRate.load(std::memory_order_acquire);
-        mSongBusTailFrames += numFrames;
-        const bool capped = static_cast<double>(mSongBusTailFrames) >=
-                            static_cast<double>(rate) * kSongTailMaxSeconds;
-        if (capped) {
-            simd::applyStereoGainRamp(mSongFxBuf.data(), numFrames, 1.0f, 0.0f);
-            mSongBusGuard.bump();
-            mSongBusLive = false;
-            mSongBusStale = true;
+        if (mSongBusFadeLeft < 0) {
+            mSongBusTailFrames += numFrames;
+            if (static_cast<double>(mSongBusTailFrames) >= static_cast<double>(rate) * kSongTailMaxSeconds) {
+                mSongBusFadeLeft = std::max<int64_t>(1, static_cast<int64_t>(static_cast<double>(rate) * kSongTailFadeSeconds));
+            }
+        }
+        const bool fading = mSongBusFadeLeft >= 0;
+        if (fading) {
+            const int64_t total = std::max<int64_t>(1, static_cast<int64_t>(static_cast<double>(rate) * kSongTailFadeSeconds));
+            const int64_t left = mSongBusFadeLeft;
+            const int ramp = static_cast<int>(std::min<int64_t>(numFrames, left));
+            simd::applyStereoGainRamp(mSongFxBuf.data(), ramp, static_cast<float>(left) / static_cast<float>(total),
+                                      static_cast<float>(left - ramp) / static_cast<float>(total));
+            std::memset(mSongFxBuf.data() + static_cast<size_t>(ramp) * 2, 0,
+                        sizeof(float) * static_cast<size_t>(numFrames - ramp) * 2);
+            mSongBusFadeLeft = left - ramp;
+            if (mSongBusFadeLeft == 0) {
+                mSongBusCaps.bump();
+                mSongBusLive = false;
+                mSongBusStale = true;
+            }
         }
         simd::addStereoBuffers(dry, dry, mSongFxBuf.data(), numFrames, /*applyHeadroom=*/false);
         if (mTapFx != nullptr && numFrames <= mTapFrames) {
             std::memcpy(mTapFx, mSongFxBuf.data(), sizeof(float) * n);
         }
-        if (capped) return true;
+        if (fading) return true;
         // Lo que el bus tiene adentro (antes de los retornos) y lo que de verdad sale: un retorno
         // <= 1 deja el segundo por debajo del primero, pero un bus de prueba solo reporta la salida.
         float peak = bus->spaceBusPreReturnPeak();

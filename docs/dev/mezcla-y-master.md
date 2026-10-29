@@ -97,17 +97,25 @@ entrada da la misma salida con cualquier tamano de bloque.
   tiene ganancia maxima **1,0887** (fraccion 0,5, ~9,4 kHz a 48 kHz): con 0,95 y un tiempo fraccional (250,0104 ms)
   cada vuelta ganaba y la cola divergia (3,8e-4 a 40 s, 22398 a 180 s); con 0,9 · 1,0887 = 0,98 la linea es estable
   con cualquier fraccion (un tono normal pierde ~35 s por cada 250 ms de delay a 0,9; el peor caso, un tono de ~9,4 kHz con fraccion 0,5, pierde solo el 2 % por vuelta: ~190 s por cada 250 ms, y con delays largos pasa los 10 min del tope, que lo corta con fundido). Con
-  damping 1 los combs de la reverb quedan en DC y el bus nunca baja de 1e-6. **Guarda de seguridad** (defensa en
-  profundidad, no la via normal): si el bus produce una muestra no finita o un pico > 16 (los clamps de los efectos
-  son +-4), ese bloque del retorno sale en cero, el bus se da por viejo y se cuenta
-  (`AudioLooper::getSongBusGuardTrips`); y un **tope de 10 min de cola** corta con un fundido lineal de un bloque y
-  tambien lo da por viejo. La proxima activacion reinicia un bus viejo: ese memset en el RT queda solo para estas
-  fallas. Si la cancion
+  damping 1 los combs de la reverb quedan en DC y el bus nunca baja de 1e-6. **Saneo de la entrada del
+  bus** (`sanitizeSongSend`): antes de `runSpaceBus`, toda muestra no finita del envio (un clip con NaN/Inf) se
+  escribe 0 y el bloque se cuenta (`AudioLooper::getSongBusGuardTrips`). Reverb y delay ya ponen en cero su salida no
+  finita, pero sus lineas internas quedaban en NaN para siempre y el bus se apagaba «por silencio» sin marcarse viejo;
+  con la entrada saneada no entra nada que las envenene, y no hace falta reiniciar el bus en el RT. **No hay guarda por
+  pico absoluto** (la de pico > 16 se saco): `DelayEffect` no acota su salida y con realimentacion 0,9 el wet llega a
+  ~10x el envio con material periodico (~50x cerca de 9,4 kHz con fraccion 0,5), asi que no hay un umbral fisico que no
+  corte material legitimo (ganancia 2, paneo −1, seno de 100 Hz a escala plena, 250 ms, realimentacion 0,9 lo pasaba
+  cada ~4 s); con realimentacion <= 0,9 la linea es estable (verificado a 44,1/48/96/192 kHz con fraccion 0,5). El
+  **tope de 10 min de cola** cierra con un fundido lineal de **duracion fija, 50 ms**, repartido en los bloques que
+  hagan falta (con bloques de 1 frame dura lo mismo que con 512), cuenta el tope (`getSongBusTailCaps`) y da el bus por
+  viejo. La cuenta de la cola vuelve a 0 con cada activacion de la cancion. La proxima activacion reinicia un bus
+  viejo: ese memset en el RT queda solo para el tope y para el bloque mayor que la capacidad del bus (falla ya
+  contada). Si la cancion
   se reactiva durante la cola, la cola sigue (no se reinicia). **Costo de mantenerlo vivo** (medido en
   Release, ver abajo): ~24 us por callback de 256 frames, 0,44 % del periodo. Los unicos `resetSpaceBus`
-  que quedan en el RT son los de las fallas contadas: un bloque mayor que la capacidad del bus y la guarda de
-  seguridad (el bus se da por viejo y la proxima activacion lo reinicia); con la capacidad de `publishSongBus` no ocurre por
-  configuracion, y esa falta ya salta el bloque (sin fundido: no hay estado del bus con que hacerlo). El
+  que quedan en el RT son los de las fallas contadas: un bloque mayor que la capacidad del bus y el tope de la cola (el
+  bus se da por viejo y la proxima activacion lo reinicia); con la capacidad de `publishSongBus` el primero no ocurre
+  por configuracion, y esa falta ya salta el bloque (sin fundido: no hay estado del bus con que hacerlo). El
   tap de FX recibe el retorno de la cola, asi que `premezcla == Σ pistas + FX` tambien ahi. Offline:
   `resetSongForRender` reinicia todo (instancia fresca) y el determinismo no cambia.
 - **Los taps** se toman despues del master del looper (cada uno con la misma rampa), asi que
@@ -260,3 +268,12 @@ sanitizers (con ellos el callback es mas lento por construccion).
 - El master del export (`MasterStage` por `wma_master_*`) y el vivo comparten codigo, no estado: Studio los
   mantiene en el mismo punto con `reset` + `configure` antes de procesar.
 - El hash de 2.23.0 es de macOS arm64; en otras plataformas vale la prueba estructural.
+
+**Guarda -> test que cae** (bus REAL salvo donde se aclara):
+
+| Guarda | Test |
+|---|---|
+| Saneo del envio no finito (NaN, Inf, −Inf; reverb y delay) y cancion limpia posterior bit a bit igual | `SongMix.ANonFiniteSampleInAClipNeverPoisonsTheRealBusSoALaterCleanSongSoundsTheSame` |
+| Sin guarda por pico: material fuerte por el delay a 0,9 no se corta, no se reinicia y es continuo | `SongMix.LoudPeriodicMaterialThroughTheDelayAtMaximumFeedbackIsNeverCutOrResetAndIsContinuous` |
+| Tope de 10 min con fundido de 50 ms, con bloques de 1, 256 y 512 frames (`RecordingBus`) | `SongBusTail.ATailThatNeverEndsIsCappedAtTenMinutesWithAFixedFiftyMillisecondFade` |
+| La cuenta de la cola se pone a 0 al activar (`finishSongMix`) (`RecordingBus`) | `SongBusTail.SeveralShortTailsDoNotAccumulateTowardsTheTenMinuteCap` |

@@ -2014,86 +2014,80 @@ TEST(SongBusTail, ABlockLargerThanTheBusCapacityDuringTheTailSkipsTheBus) {
     EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 1);
 }
 
-// Bug plausible (D-S12-19, defensa en profundidad): un bus que produce un valor no finito o un
-// pico absurdo (> 16; los clamps de los efectos son +-4) envenena la salida y, con el tiempo,
-// sus lineas. El bloque del retorno sale en cero, el bus se da por viejo, se cuenta UNA vez y la
-// proxima activacion de la cancion lo reinicia; mientras tanto la salida es finita.
-TEST(SongBusTail, ABusProducingNonFiniteOrAbsurdValuesIsSilencedCountedAndResetOnTheNextActivation) {
-    constexpr float kNan = std::numeric_limits<float>::quiet_NaN();
-    constexpr float kInf = std::numeric_limits<float>::infinity();
-    for (const float bad : {kNan, kInf, -kInf, 100.0f}) {
-        SCOPED_TRACE(bad);
+// Bug plausible (D-S12-19): una cola que no se agota nunca (un bus fuera de control con valores
+// finitos y chicos) corre para siempre. A los 10 min el tope la corta con un FUNDIDO de duracion FIJA
+// (50 ms) repartido en los bloques que hagan falta, NO en uno solo: con bloques de 1 frame, de 256 y
+// de 512 el fundido dura lo mismo (2400 muestras), ningun salto entre muestras vecinas (el retorno
+// vale 0,5: un corte seco saltaria ~0,5), el bus se da por viejo y se cuenta como tope.
+TEST(SongBusTail, ATailThatNeverEndsIsCappedAtTenMinutesWithAFixedFiftyMillisecondFade) {
+    for (const int finalBlock : {1, 256, kTailBlock}) {
+        SCOPED_TRACE(finalBlock);
         Rig rig;
         RecordingBus bus(kTailBlock);
-        int64_t next = playAndRemoveSong(rig, bus, 0.25f);
-        ASSERT_EQ(rig.looper.getSongBusGuardTrips(), 0);
-        bus.returnLevel = bad;
-        std::vector<float> out = rig.render(next, kTailBlock, kTailBlock);
-        next += kTailBlock;
-        for (const float v : out) ASSERT_TRUE(std::isfinite(v)) << "el valor roto llego a la salida";
-        EXPECT_EQ(rig.looper.getSongBusGuardTrips(), 1);
-        EXPECT_FALSE(rig.looper.isSongBusLive()) << "el bus roto sigue corriendo";
-        const int runsAfterTrip = bus.runs;
-        bus.returnLevel = 0.25f;
-        out = rig.render(next, kTailBlock * 4, kTailBlock);
-        next += kTailBlock * 4;
-        EXPECT_EQ(bus.runs, runsAfterTrip) << "el bus corrio tras la guarda";
-        EXPECT_EQ(bus.resets, 0) << "el reinicio no espera a la proxima activacion";
-        const int32_t id = rig.load("tail_guard", kBusLoop, dc(0.1f), kBusLoop);
+        int64_t next = playAndRemoveSong(rig, bus, 0.5f);
+        const int runsAtEnd = bus.runs;
+        constexpr int64_t kLeadBlocks = static_cast<int64_t>(kSR) * 600 / kTailBlock - 8;
+        constexpr int64_t kChunk = kTailBlock * 937;   // multiplo del bloque: ningun bloque corto
+        while (bus.runs - runsAtEnd < kLeadBlocks - 937) {
+            (void)rig.render(next, kChunk, kTailBlock);
+            next += kChunk;
+        }
+        while (bus.runs - runsAtEnd < kLeadBlocks) {
+            (void)rig.render(next, kTailBlock, kTailBlock);
+            next += kTailBlock;
+        }
+        ASSERT_EQ(rig.looper.getSongBusTailCaps(), 0) << "el tope corto antes de los 10 min";
+        const int64_t tailFrames = kSR / 2;
+        const std::vector<float> out = rig.render(next, tailFrames, finalBlock);
+        next += tailFrames;
+        float maxStep = 0.0f;
+        int fading = 0, quiet = 0;
+        for (size_t i = 0; i < out.size(); i += 2) {
+            if (i >= 2) maxStep = std::max(maxStep, std::abs(out[i] - out[i - 2]));
+            if (std::abs(out[i]) > 1e-4f && std::abs(out[i] - 0.5f) > 1e-4f) ++fading;
+            if (std::abs(out[i]) <= 1e-4f) ++quiet;
+        }
+        EXPECT_EQ(rig.looper.getSongBusTailCaps(), 1);
+        EXPECT_EQ(rig.looper.getSongBusGuardTrips(), 0);
+        EXPECT_FALSE(rig.looper.isSongBusLive());
+        EXPECT_LT(maxStep, 0.001f) << "el tope corto en seco";
+        EXPECT_NEAR(fading, kSR / 20, 12) << "el fundido no dura 50 ms con este tamano de bloque";
+        EXPECT_NEAR(out[out.size() - 2], 0.0f, 1e-6f) << "tras el tope queda sonido";
+        EXPECT_GT(quiet, kSR / 4) << "tras el fundido no queda silencio";
+        const int runsAtCap = bus.runs;
+        const int32_t id = rig.load("tail_cap", kBusLoop, dc(0.1f), kBusLoop);
         ASSERT_EQ(rig.schedule(kBusLoop, {sec(next + 2 * kBusLoop, id)}, next + 6 * kBusLoop),
                   wm::SongStatus::Ok);
-        out = rig.render(next, kBusLoop * 4, kTailBlock);
-        EXPECT_EQ(bus.resets, 1) << "un bus viejo no se reinicio al reactivar";
-        EXPECT_EQ(rig.looper.getSongBusGuardTrips(), 1);
-        for (const float v : out) ASSERT_TRUE(std::isfinite(v));
+        (void)rig.render(next, kBusLoop * 4, kTailBlock);
+        EXPECT_EQ(bus.resets, 1) << "el bus cortado por el tope no se reinicio al reactivar";
+        EXPECT_GT(bus.runs, runsAtCap);
     }
 }
 
-// Bug plausible: con la cancion ACTIVA el bus tambien tiene que estar guardado (el camino de
-// finishSongMix no es el de la cola): un NaN en pleno tema no puede llegar a la salida.
-TEST(SongBus, ABusProducingNaNWhileTheSongPlaysNeverReachesTheOutput) {
-    Rig rig;
-    RecordingBus bus(kTailBlock);
-    bus.returnLevel = std::numeric_limits<float>::quiet_NaN();
-    rig.looper.publishSongBus(&bus, kTailBlock);
-    rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
-    const int32_t id = rig.load("guard_dc", kBusLoop, dc(0.1f), kBusLoop);
-    ASSERT_EQ(rig.schedule(kBusLoop, {sec(0, id)}, 1 << 24), wm::SongStatus::Ok);
-    const std::vector<float> out = rig.render(0, 8 * kTailBlock, kTailBlock);
-    for (const float v : out) ASSERT_TRUE(std::isfinite(v)) << "el NaN del bus llego a la salida";
-    EXPECT_GE(rig.looper.getSongBusGuardTrips(), 1);
-}
-
-// Bug plausible (D-S12-19): una cola que no se agota nunca (un bus fuera de control con valores
-// finitos y chicos) corre para siempre. A los 10 min el tope la corta con un FUNDIDO de un bloque,
-// no en seco: ningun salto entre muestras vecinas en toda la cola (el retorno vale 0,5, asi que un
-// corte seco saltaria ~0,5), el bus se da por viejo y se cuenta.
-TEST(SongBusTail, ATailThatNeverEndsIsCappedAtTenMinutesWithAFadeNotACut) {
+// Bug plausible (mutante de finishSongMix): la cuenta de cola no se pone a cero al reactivar la
+// cancion, asi que colas cortas y sucesivas se suman hasta el tope de 10 min. Tres activaciones con
+// una cola de 300 s cada una (900 s en total, cada una bajo el tope) no cortan ninguna: la tercera
+// sigue sonando sus 300 s completos.
+TEST(SongBusTail, SeveralShortTailsDoNotAccumulateTowardsTheTenMinuteCap) {
     Rig rig;
     RecordingBus bus(kTailBlock);
     int64_t next = playAndRemoveSong(rig, bus, 0.5f);
-    const int runsAtEnd = bus.runs;
-    float maxStep = 0.0f, lastL = 0.0f;
-    bool first = true;
-    constexpr int64_t kChunk = kTailBlock * 937;   // multiplo del bloque: ningun bloque corto
-    for (int chunk = 0; chunk < 62; ++chunk) {
-        const std::vector<float> out = rig.render(next, kChunk, kTailBlock);
-        next += kChunk;
-        for (size_t i = 0; i < out.size(); i += 2) {
-            if (!first) maxStep = std::max(maxStep, std::abs(out[i] - lastL));
-            lastL = out[i];
-            first = false;
-        }
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        SCOPED_TRACE(cycle);
+        const int runsBefore = bus.runs;
+        constexpr int64_t kTail = static_cast<int64_t>(kSR) * 300;
+        (void)rig.render(next, kTail, kTailBlock);
+        next += kTail;
+        EXPECT_GE((bus.runs - runsBefore) * kTailBlock, kTail - kPreTail) << "la cola se corto antes de tiempo";
+        EXPECT_EQ(rig.looper.getSongBusTailCaps(), 0) << "las colas se acumularon hasta el tope";
+        const int32_t id = rig.load("tail_acc" + std::to_string(cycle), kBusLoop, dc(0.1f), kBusLoop);
+        ASSERT_EQ(rig.schedule(kBusLoop, {sec(next, id)}, next + (1 << 24)), wm::SongStatus::Ok);
+        (void)rig.render(next, 4 * kBusLoop, kTailBlock);
+        next += 4 * kBusLoop;
+        ASSERT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
+        (void)rig.render(next, 2 * kTailBlock, kTailBlock);
+        next += 2 * kTailBlock;
     }
-    const int tailRuns = bus.runs - runsAtEnd;
-    EXPECT_GE(tailRuns * kTailBlock, kSR * 600 - kPreTail) << "el tope corto antes de los 10 min";
-    EXPECT_LE(tailRuns * kTailBlock, kSR * 600 + kTailBlock) << "no hay tope: el bus sigue vivo";
-    EXPECT_EQ(rig.looper.getSongBusGuardTrips(), 1);
-    EXPECT_LT(maxStep, 0.01f) << "el tope corto en seco";
-    EXPECT_NEAR(lastL, 0.0f, 1e-6f) << "tras el tope queda sonido";
-    const int32_t id = rig.load("tail_cap", kBusLoop, dc(0.1f), kBusLoop);
-    ASSERT_EQ(rig.schedule(kBusLoop, {sec(next + 2 * kBusLoop, id)}, next + 6 * kBusLoop),
-              wm::SongStatus::Ok);
-    (void)rig.render(next, kBusLoop * 4, kTailBlock);
-    EXPECT_EQ(bus.resets, 1) << "el bus cortado por el tope no se reinicio al reactivar";
+    EXPECT_EQ(bus.resets, 0);
+    EXPECT_TRUE(rig.looper.isSongBusLive());
 }

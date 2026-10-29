@@ -23,6 +23,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -43,10 +44,13 @@ std::filesystem::path mixFixture(const std::string& name) {
            ("wm" + std::to_string(static_cast<long long>(getpid())) + "_smix_" + name + ".wav");
 }
 
-std::string writeTone(const std::string& name, float period, float phase, float amp) {
+/// `badValue` reemplaza la muestra `badFrame` (ambos canales) cuando `badFrame >= 0`.
+std::string writeTone(const std::string& name, float period, float phase, float amp, int badFrame = -1,
+                      float badValue = 0.0f) {
     std::vector<float> buf(static_cast<size_t>(kLoop) * 2);
     for (int n = 0; n < kLoop; ++n) {
-        const float v = amp * std::sin(6.2831853f * static_cast<float>(n) / period + phase);
+        float v = amp * std::sin(6.2831853f * static_cast<float>(n) / period + phase);
+        if (n == badFrame) v = badValue;
         buf[static_cast<size_t>(n) * 2] = v;
         buf[static_cast<size_t>(n) * 2 + 1] = v;
     }
@@ -118,9 +122,10 @@ protected:
         wma::setLogCallback(nullptr);
     }
 
-    std::string tone(const std::string& name, float period, float phase, float amp = 0.3f) {
+    std::string tone(const std::string& name, float period, float phase, float amp = 0.3f, int badFrame = -1,
+                     float badValue = 0.0f) {
         mFiles.push_back(mixFixture(name));
-        return writeTone(name, period, phase, amp);
+        return writeTone(name, period, phase, amp, badFrame, badValue);
     }
 
     /// Un motor offline en el estado que usa un export: sin instrumento, salida RAW.
@@ -586,7 +591,7 @@ TEST_F(SongMix, AFractionalDelayAtTheMaximumFeedbackWithATopTonePassesAndTheBusG
     EXPECT_LT(peakOf(late.fx), 1e-6f) << "la cola no decayo: el bus diverge o no se apaga";
     auto& looper = e->engine->getAudioLooper();
     EXPECT_FALSE(looper.isSongBusLive()) << "el bus sigue vivo tras agotarse la cola";
-    EXPECT_EQ(looper.getSongBusGuardTrips(), 0) << "la guarda tuvo que salvar un bus que no se agota solo";
+    EXPECT_EQ(looper.getSongBusGuardTrips(), 0) << "el saneo del envio tuvo que actuar sobre un clip finito";
 }
 
 // Defecto (hallazgo 2 del review): con damping 1 el filtro de cada comb de la reverb no actualiza su
@@ -623,6 +628,92 @@ TEST_F(SongMix, AReverbTailOfLoudNoiseWithTheMaximumDampingEndsAndTheBusGoesQuie
     const Rendered late = renderTaps(e, 4, 1);
     EXPECT_LT(peakOf(late.fx), 1e-6f);
     EXPECT_FALSE(e->engine->getAudioLooper().isSongBusLive()) << "el bus de la reverb no se apaga";
+}
+
+// Defecto (BLOQUEANTE del review de 8855c93d): una muestra NaN/Inf en un clip entraba al bus; reverb y
+// delay ponen en cero su salida no finita pero sus lineas internas quedaban en NaN para siempre, el bus
+// se apagaba «por silencio» sin marcarse viejo y la cancion limpia que venia despues daba FX 0. Con el
+// bus REAL: el envio se sanea antes de entrar (el bloque se cuenta), el FX es finito, y una cancion
+// limpia posterior suena bit a bit igual que en un motor cuyo clip tenia un 0 en esa muestra.
+TEST_F(SongMix, ANonFiniteSampleInAClipNeverPoisonsTheRealBusSoALaterCleanSongSoundsTheSame) {
+    constexpr float kNan = std::numeric_limits<float>::quiet_NaN();
+    constexpr float kInf = std::numeric_limits<float>::infinity();
+    struct Case { const char* name; float bad; float reverb; float delay; };
+    for (const Case& c : {Case{"nan_rv", kNan, 1.0f, 0.0f}, Case{"inf_rv", kInf, 1.0f, 0.0f},
+                          Case{"ninf_rv", -kInf, 1.0f, 0.0f}, Case{"nan_dl", kNan, 0.0f, 1.0f},
+                          Case{"inf_dl", kInf, 0.0f, 1.0f}}) {
+        SCOPED_TRACE(c.name);
+        const auto run = [&](const std::string& tag, float bad, int64_t& guardTrips) {
+            const std::string poisoned = tone(tag + "_p", 100.0f, 0.0f, 0.3f, 100, bad);
+            const std::string clean = tone(tag + "_c", 75.0f, 1.0f);
+            WmaEngine* e = offlineEngine();
+            const int32_t a = loadClip(e, poisoned), b = loadClip(e, clean);
+            EXPECT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 1.0f), WMA_OK);
+            WmaMixSpace sp = space(c.reverb, c.delay);
+            sp.delay_time_ms = 100.0f;
+            EXPECT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+            const int64_t p0 = wma_transport_get_play_frame(e);
+            const WmaSongSection s1 = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
+            EXPECT_EQ(wma_song_set_schedule(e, kLoop, &s1, 1, p0 + 600 * kLoop), WMA_OK);
+            Rendered first = renderTaps(e, 6, 1);
+            EXPECT_EQ(wma_song_set_schedule(e, kLoop, nullptr, 0, 0), WMA_OK);
+            const Rendered tail = renderTaps(e, 20, 1);
+            const int64_t p1 = wma_transport_get_play_frame(e);
+            const WmaSongSection s2 = section2(p1 + 2 * kLoop, b, WMA_SONG_SILENCE);
+            EXPECT_EQ(wma_song_set_schedule(e, kLoop, &s2, 1, p1 + 600 * kLoop), WMA_OK);
+            Rendered second = renderTaps(e, 8, 1);
+            guardTrips = e->engine->getAudioLooper().getSongBusGuardTrips();
+            for (const float v : first.fx) EXPECT_TRUE(std::isfinite(v)) << "el NaN llego al retorno";
+            for (const float v : tail.fx) EXPECT_TRUE(std::isfinite(v)) << "el NaN llego a la cola";
+            for (const float v : second.fx) EXPECT_TRUE(std::isfinite(v));
+            first.fx.insert(first.fx.end(), tail.fx.begin(), tail.fx.end());
+            first.fx.insert(first.fx.end(), second.fx.begin(), second.fx.end());
+            return first.fx;
+        };
+        int64_t trips = 0, controlTrips = 0;
+        const std::vector<float> withBad = run(std::string(c.name) + "_a", c.bad, trips);
+        const std::vector<float> control = run(std::string(c.name) + "_b", 0.0f, controlTrips);
+        EXPECT_GE(trips, 1) << "el envio no finito no se conto";
+        EXPECT_EQ(controlTrips, 0);
+        EXPECT_GT(peakOf(control, control.size() - static_cast<size_t>(kLoop) * 2), 0.01f)
+            << "la cancion limpia de control no suena: el test no prueba nada";
+        EXPECT_TRUE(sameBits(withBad, control)) << "el bus quedo envenenado: la cancion limpia suena distinto";
+    }
+}
+
+// Defecto (BLOQUEANTE del review de 8855c93d): la guarda por pico absoluto (> 16) cortaba material
+// legitimo. La salida wet del delay llega a ~10x el envio con feedback 0,9 y material periodico; con
+// ganancia 2, paneo −1, seno de 100 Hz a escala plena, envio 1 y 250 ms, el FX pasaba de 16 cada
+// ~4 s, se ponia a cero y el bus se reiniciaba (memset de 1,5 MB en el RT). Ahora: ni un disparo, el
+// FX nunca baja a cero en un bloque una vez que suena, y su salto entre muestras queda acotado.
+TEST_F(SongMix, LoudPeriodicMaterialThroughTheDelayAtMaximumFeedbackIsNeverCutOrResetAndIsContinuous) {
+    for (const float delayReturn : {0.25f, 0.0f}) {
+        SCOPED_TRACE(delayReturn);
+        const std::string pa = tone(delayReturn > 0.0f ? "pk_a" : "pk_b", 480.0f, 0.0f, 1.0f);
+        WmaEngine* e = offlineEngine();
+        const int32_t a = loadClip(e, pa);
+        ASSERT_EQ(wma_mix_set_track(e, 0, 2.0f, -1.0f, 1.0f), WMA_OK);
+        WmaMixSpace sp = space(0.3f, delayReturn);
+        sp.delay_time_ms = 250.0f;
+        sp.delay_feedback = 0.9f;
+        ASSERT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+        const int64_t p0 = wma_transport_get_play_frame(e);
+        const WmaSongSection s = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
+        ASSERT_EQ(wma_song_set_schedule(e, kLoop, &s, 1, p0 + 400 * kLoop), WMA_OK);
+        const Rendered r = renderTaps(e, 220, 1);   // 22 s: la guarda vieja disparaba cada ~4 s
+        EXPECT_EQ(e->engine->getAudioLooper().getSongBusGuardTrips(), 0);
+        const size_t from = static_cast<size_t>(kRate) * 2;   // pasados los primeros 2 s
+        double step = 0.0;
+        for (size_t i = from + 2; i < r.fx.size(); i += 2) {
+            step = std::max(step, double(std::abs(r.fx[i] - r.fx[i - 2])));
+        }
+        const float peak = peakOf(r.fx);
+        for (size_t blockStart = from; blockStart + kBlock * 2 <= r.fx.size(); blockStart += kBlock * 2) {
+            ASSERT_GT(peakOf(r.fx, blockStart, blockStart + kBlock * 2), 1e-4f)
+                << "un bloque del FX quedo en cero en " << blockStart / 2 << " frames";
+        }
+        EXPECT_LT(step, 0.3 * peak) << "salto en el FX: un corte";
+    }
 }
 
 // Defecto (BLOQUEANTE del review): prepareMixBuffer agranda los buffers del looper pero no el bus; un
