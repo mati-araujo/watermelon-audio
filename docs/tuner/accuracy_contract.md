@@ -89,7 +89,7 @@ durante el glide del ataque, al que la σ de los residuos es ciega (R-PITCH-52).
 saliendo sólo del veredicto de 12 ventanas con la σ de siempre ≤ 0,1, y una lectura temprana puede
 tener σ ≤ 0,1 y ser `MEASURING` (R-PITCH-62). El estado es la señal de convergencia; la σ sola no.
 `CONVERGED` es bit a bit el de antes sólo si el ataque sale del **silencio** (rms < 0,001) o llega
-antes de la primera fase: el golden y la primera pulsada del corpus, de pre-roll silencioso. Todo
+antes de la primera fase, y no queda pendiente un re-punteo anterior sin asentar: el golden y la primera pulsada del corpus, de pre-roll silencioso. Todo
 ataque sobre señal viva abre un segmento y lo cambia: un **re-punteo** de la misma nota converge
 antes, porque las 12 ventanas se acumulan entre segmentos (0,369 s de mediana, 39 de 41,
 `EarlyReadingCorpus.ARepluckReadsItsOwnSegmentWithin250ms`); una clavija girada o una nota nueva con
