@@ -330,6 +330,28 @@ public:
     int regressionPhaseCount() const noexcept { return mCount; }
     double regressionPhaseAt(int i) const noexcept { return mPhases[static_cast<size_t>(i)]; }
 
+    // ---- REQ-058 S1 (D-3): SEGMENTOS — pendiente comun, intercepto por segmento ----------------
+    //
+    // Cada fase guardada lleva el id del segmento en que cerro su ventana. Con UN solo id en la ventana
+    // la regresion es la de siempre (`regressPhaseLine`, bit a bit); con varios, la pendiente es COMUN y
+    // cada segmento tiene su intercepto: `b = Σ_s Σ(x−x̄_s)(y−ȳ_s) / Σ_s Σ(x−x̄_s)²`, g.l. `n − S − 1`. La
+    // tendencia de R-PITCH-62 se calcula igual, por mitades, cada mitad con sus interceptos. El
+    // estimador solo regresa: quien decide que segmentos se agrupan es `StrobeTracker`.
+
+    /// El id que llevan las fases que cierren desde ahora.
+    void setPhaseSegment(unsigned char id) noexcept { mSegmentId = id; }
+    unsigned char phaseSegment() const noexcept { return mSegmentId; }
+    /// El id de la fase `i` de la ventana de regresion (la mas vieja en 0). Sonda para tests.
+    unsigned char regressionPhaseSegmentAt(int i) const noexcept { return mPhaseSegment[i]; }
+    /// Cuantos segmentos distintos hay en la ventana de regresion.
+    int regressionSegmentCount() const noexcept;
+    /// Descarta la fase mas NUEVA (su ventana contiene el ataque) y recalcula.
+    void dropNewestPhase();
+    /// Conserva solo las fases del segmento `id` (descarta los demas) y recalcula.
+    void keepOnlyPhasesOfSegment(unsigned char id);
+    /// Descarta las fases del segmento `id` y recalcula.
+    void dropPhasesOfSegment(unsigned char id);
+
 private:
     void closeWindow();
     /// La regresion y la tendencia sobre `mPhases[0, mCount)`. La llaman `closeWindow()` y
@@ -385,6 +407,12 @@ private:
     std::vector<double> mPhases;
     /// Paralelo a `mPhases`: el incremento que llego a esa fase se resolvio sin cadena completa.
     std::vector<unsigned char> mUnresolved;
+    /// REQ-058 (D-3): paralelo a `mPhases`, el id de segmento de cada fase. Arreglo fijo del objeto.
+    unsigned char mPhaseSegment[kMaxWindows]{};
+    unsigned char mSegmentId{0};
+    /// Compacta la ventana conservando las fases con `keep(i)` verdadero, y recalcula.
+    template <typename Keep>
+    void compactPhases(Keep keep);
     int mCount{0};
     double mUnwrapped{0.0};
     double mLastRawPhase{0.0};
@@ -554,6 +582,22 @@ public:
     /// El ajuste corto (D-1) sobre una serie dada: puro, para que un test lo ejercite sin audio.
     static DenseEarlyFit fitDensePhases(const double* phases, int count, int sampleRate, double targetHz) noexcept;
 
+    // ---- REQ-058 S1 (D-3): el segmento en el camino del VEREDICTO ----------------------------------
+
+    /// Abre el segmento `id` en las cuatro rejillas desde `startFrame`: descarta la fase de la ventana que
+    /// contiene el ataque (empezo en `(startFrame − 4096, startFrame)`) y, de ahora en mas, las que cierren
+    /// habiendo empezado ahi; las siguientes llevan `id`. Las fases viejas quedan con su id: agruparlas o
+    /// descartarlas lo decide `StrobeTracker` (`keepOnlyPhaseSegment` / `dropPhaseSegment`).
+    void openPhaseSegment(int64_t startFrame, unsigned char id);
+    void keepOnlyPhaseSegment(unsigned char id);
+    void dropPhaseSegment(unsigned char id);
+    /// `true` si alguna rejilla tiene fases en su ventana de regresion.
+    bool hasRegressionPhases() const noexcept {
+        for (const auto& g : mGrid)
+            if (g.regressionPhaseCount() > 0) return true;
+        return false;
+    }
+
 private:
     PhaseSlopeEstimator mGrid[kGrids];
     int mSampleRate{0};
@@ -564,6 +608,11 @@ private:
     double mDensePrevRaw{0.0};
     int64_t mDenseSegmentStart{0};
     DenseEarlyFit mEarlyFit{};
+    /// D-3: las ventanas que empezaron en `(mRejectWindowsBefore − 4096, mRejectWindowsBefore)` contienen
+    /// el ataque y no entran a la regresion. −1 = ninguna.
+    int64_t mRejectWindowsBefore{-1};
+    /// Inicio de la ventana de la fase mas nueva de cada rejilla (−1 = sin fase).
+    int64_t mNewestWindowStart[kGrids]{-1, -1, -1, -1};
     /// Frames consumidos desde el ultimo reset: la rejilla `g` ve el audio desde `g·kHopFrames`.
     /// 64 bits: en armeabi-v7a/x86 `long` son 32 y desbordaria a las 2^31 frames (12,4 h a 48 k).
     int64_t mFrame{0};

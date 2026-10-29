@@ -207,9 +207,25 @@ public:
      * valores: ver la tarea 1.6 en el archivo de etapa.
      */
     static constexpr double kAttackFloor = 0.001;
+
+    /**
+     * D-3 / D14 — «MISMA NOTA» para agrupar un segmento nuevo con los viejos:
+     *   · la gruesa a ≤ `kSameNoteCoarseCents` de la lectura del veredicto del segmento anterior;
+     *   · el segmento nuevo ASENTADO (`deriva ≤ max(σ_ruido, kSettledDriftFloorCents)` con `kEarlyWindow`
+     *     fases densas) y su altura a ≤ `kCompatibleSigmas`·√(σ_nuevo² + σ_viejo²) de la vieja.
+     * Hasta el asiento el segmento nuevo esta EN ESPERA: los viejos se conservan sin agruparse, la lectura
+     * sale del camino temprano del nuevo y `CONVERGED` no puede salir. Asentado y compatible, se une al
+     * grupo desde el asiento (sus fases del glide quedan afuera); incompatible, se descartan los viejos.
+     * Valores de la propuesta del architect (D-3); su medicion, en la tarea 1.6 de la etapa.
+     */
+    static constexpr double kSameNoteCoarseCents = 50.0;
+    static constexpr double kCompatibleSigmas = 3.0;
+    static constexpr double kSettledDriftFloorCents = 0.05;
     static constexpr double kAttackRiseRatio = 2.0;
     static constexpr int kAttackRefractoryBlocks = 4;
     static constexpr int kAttackBlockFrames = 1024;
+    /// Cuantos bloques anteriores forman la referencia del ataque (su maximo). Ver `trackAttackBlock`.
+    static constexpr int kAttackHistoryBlocks = 4;
 
     /**
      * Umbral de B por debajo (o por encima de `kMaxInharmonicityB` menos esto) del cual el ajuste
@@ -450,6 +466,9 @@ public:
     /// Ataques que detecto el motor desde el ultimo reset/objetivo. Sonda para tests.
     int attacksDetected() const noexcept { return mAttacksDetected; }
 
+    /// D-3: `true` mientras un segmento nuevo espera asentarse para decidir si se agrupa. Sonda para tests.
+    bool segmentIsWaiting() const noexcept { return mSegmentWaiting; }
+
     /// Desviacion combinada contra el objetivo, en cents. Solo vale si
     /// `hasMeasurement()`.
     double cents() const noexcept { return mCents; }
@@ -663,10 +682,22 @@ private:
     bool mReadingIsEarly{false};
     /// El detector de ataque (D-3): rms del bloque de 1024 en curso, alineado a la grilla de las rejillas.
     double mAttackBlockSumSq{0.0};
-    double mAttackPrevBlockRms{0.0};
+    double mAttackHistory[kAttackHistoryBlocks]{0.0, 0.0, 0.0, 0.0};   ///< rms de los ultimos bloques, el mas nuevo en 0
+    int mAttackHistoryCount{0};
     int mAttackRefractoryBlocks{0};
     int mAttacksDetected{0};
     int64_t mSegmentStartFrame{0};
+    /// D-3: el segmento del veredicto (id de las fases nuevas) y la espera hasta el asiento.
+    unsigned char mVerdictSegment{0};
+    bool mSegmentWaiting{false};
+    /// La ultima lectura del VEREDICTO (el grupo de segmentos viejos), contra la que se juzga «misma nota».
+    bool mHaveVerdictReading{false};
+    double mLastVerdictCents{0.0};
+    double mLastVerdictSigma{0.0};
+    /// Del ultimo camino temprano: la σ sin deriva, la deriva y el minimo de fases densas de los admitidos.
+    double mEarlySigmaNoise{0.0};
+    double mEarlyDrift{0.0};
+    int mEarlyMinPhases{0};
 
     /// El camino de hoy (veredicto), sin cambios: combina la rejilla 0 de los cuatro parciales.
     void combineVerdictReadings(bool closed);
@@ -674,6 +705,8 @@ private:
     void combineEarlyReadings();
     /// D-3: acumula el rms del bloque de 1024 y, en su borde, decide si hubo ataque.
     void trackAttackBlock(const float* mono, int numFrames, int64_t endFrame);
+    /// D-3: con el segmento nuevo en espera, decide si ya se asento y si se agrupa o reinicia.
+    void settleWaitingSegment();
     void clearAttackTracking() noexcept;
 };
 

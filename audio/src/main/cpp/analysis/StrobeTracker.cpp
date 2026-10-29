@@ -230,8 +230,22 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     for (auto& p : mPartials) anySignal = anySignal || p.grid(0).hasSignal();
     mHasSignal = anySignal;
 
-    combineVerdictReadings(closed);
     mReadingIsEarly = false;
+    if (mSegmentWaiting) {
+        // D-3: en espera, el veredicto no publica ni juzga quiebres (sus fases mezclan dos segmentos sin
+        // agrupar); la lectura sale del camino temprano del segmento nuevo.
+        mPartialsUsed = 0;
+        mHasMeasurement = false;
+        combineEarlyReadings();
+        settleWaitingSegment();
+        return true;
+    }
+    combineVerdictReadings(closed);
+    if (mHasMeasurement) {
+        mHaveVerdictReading = true;
+        mLastVerdictCents = mCents;
+        mLastVerdictSigma = mUncertaintyCents;
+    }
     if (!mHasMeasurement) combineEarlyReadings();
     return true;
 }
@@ -403,11 +417,20 @@ void StrobeTracker::combineVerdictReadings(bool closed) {
 
 void StrobeTracker::clearAttackTracking() noexcept {
     mAttackBlockSumSq = 0.0;
-    mAttackPrevBlockRms = 0.0;
+    for (auto& h : mAttackHistory) h = 0.0;
+    mAttackHistoryCount = 0;
     mAttackRefractoryBlocks = 0;
     mAttacksDetected = 0;
     mSegmentStartFrame = 0;
     mReadingIsEarly = false;
+    mVerdictSegment = 0;
+    mSegmentWaiting = false;
+    mHaveVerdictReading = false;
+    mLastVerdictCents = 0.0;
+    mLastVerdictSigma = 0.0;
+    mEarlySigmaNoise = 0.0;
+    mEarlyDrift = 0.0;
+    mEarlyMinPhases = 0;
 }
 
 void StrobeTracker::trackAttackBlock(const float* mono, int numFrames, int64_t endFrame) {
@@ -418,21 +441,82 @@ void StrobeTracker::trackAttackBlock(const float* mono, int numFrames, int64_t e
     if (endFrame % kAttackBlockFrames != 0) return;
     const double rms = std::sqrt(mAttackBlockSumSq / static_cast<double>(kAttackBlockFrames));
     mAttackBlockSumSq = 0.0;
-    const double prev = mAttackPrevBlockRms;
-    mAttackPrevBlockRms = rms;
+    // La referencia es el MAXIMO de los `kAttackHistoryBlocks` bloques anteriores, no el anterior solo:
+    // en B0 (30,87 Hz, 1429 frames de periodo a 44,1 k) un bloque de 1024 es menos de un periodo y su rms
+    // oscila con la fase de la onda; contra el bloque anterior eso disparaba ataques en medio de la nota
+    // sostenida (medido: `StrobeTrackerTest.ItStillMeetsTheBudgetWithTheFundamentalTwentyDbDown`, B0 leia
+    // 2,03 c en vez de 1,00). Cuatro bloques son 2,9 periodos de B0.
+    double reference = 0.0;
+    for (int i = 0; i < mAttackHistoryCount; ++i) reference = std::max(reference, mAttackHistory[i]);
+    const bool previousSilent = mAttackHistoryCount > 0 && mAttackHistory[0] < kAttackFloor;
+    for (int i = kAttackHistoryBlocks - 1; i > 0; --i) mAttackHistory[i] = mAttackHistory[i - 1];
+    mAttackHistory[0] = rms;
+    if (mAttackHistoryCount < kAttackHistoryBlocks) ++mAttackHistoryCount;
     if (mAttackRefractoryBlocks > 0) {
         --mAttackRefractoryBlocks;
         return;
     }
     // El primer bloque desde el reset no tiene con que compararse: no es un ataque, es el comienzo.
     if (endFrame <= kAttackBlockFrames) return;
-    if (!(rms >= kAttackFloor) || !(rms >= kAttackRiseRatio * prev)) return;
+    if (!(rms >= kAttackFloor) || !(rms >= kAttackRiseRatio * reference)) return;
     mAttackRefractoryBlocks = kAttackRefractoryBlocks;
     ++mAttacksDetected;
     mSegmentStartFrame = endFrame - kAttackBlockFrames;
     // (1) de D-3: la serie densa del segmento nuevo no acepta ventanas que empiecen antes del bloque
     // del ataque. La ventana que cerro en este mismo borde empezo 3072 frames antes: se va con el resto.
     for (auto& p : mPartials) p.openDenseSegmentAt(mSegmentStartFrame);
+
+    // (2) de D-3, en el camino del VEREDICTO. Un ataque sin ninguna fase todavia (los primeros 4096 frames
+    // de la integracion) no lo toca: eso deja bit a bit las notas de una sola pulsada. Y uno que sale del
+    // SILENCIO tampoco: el silencio ya reinicia cada rejilla en su ventana (rms < 0,001, como hoy), y
+    // abrir un segmento encima descartaria ventanas que hoy si producen fase.
+    if (previousSilent) return;
+    bool anyPhases = false;
+    for (const auto& p : mPartials) anyPhases = anyPhases || p.hasRegressionPhases();
+    if (!anyPhases) return;
+    const unsigned char previousWaiting = mVerdictSegment;
+    const bool wasWaiting = mSegmentWaiting;
+    ++mVerdictSegment;
+    for (auto& p : mPartials) {
+        // Un re-punteo DURANTE la espera: el segmento que esperaba no llego a asentarse y no se agrupa.
+        if (wasWaiting) p.dropPhaseSegment(previousWaiting);
+        p.openPhaseSegment(mSegmentStartFrame, mVerdictSegment);
+    }
+    mSuppressUntilNextClose = false;
+    const double coarse = coarseDeviationCents();
+    const bool coarseElsewhere = mHaveVerdictReading && std::isfinite(coarse) &&
+                                 std::fabs(coarse - mLastVerdictCents) > kSameNoteCoarseCents;
+    if (!mHaveVerdictReading || coarseElsewhere) {
+        // Sin lectura vieja contra la que juzgar, o la gruesa ya esta en otra nota (criterio 2): reinicio.
+        for (auto& p : mPartials) p.keepOnlyPhaseSegment(mVerdictSegment);
+        mHaveVerdictReading = false;
+        mSegmentWaiting = false;
+        return;
+    }
+    mSegmentWaiting = true;
+}
+
+void StrobeTracker::settleWaitingSegment() {
+    if (!mHasMeasurement || !mReadingIsEarly) return;   // el segmento nuevo todavia no lee
+    if (mEarlyMinPhases < InterleavedPhaseEstimator::kEarlyWindow) return;
+    if (mEarlyDrift > std::max(mEarlySigmaNoise, kSettledDriftFloorCents)) return;   // sigue el glide
+    const double coarse = coarseDeviationCents();
+    const bool coarseElsewhere = std::isfinite(coarse) && std::fabs(coarse - mLastVerdictCents) > kSameNoteCoarseCents;
+    const double tolerance =
+        kCompatibleSigmas * std::sqrt(mEarlySigmaNoise * mEarlySigmaNoise + mLastVerdictSigma * mLastVerdictSigma);
+    const bool compatible = !coarseElsewhere && std::fabs(mCents - mLastVerdictCents) <= tolerance;
+    for (auto& p : mPartials) {
+        if (compatible) {
+            // Se une al grupo DESDE EL ASIENTO: lo que el segmento nuevo junto hasta aca (el glide, si lo
+            // hubo) queda afuera, como hace R-PITCH-63; las fases que cierren desde ahora se agrupan.
+            p.dropPhaseSegment(mVerdictSegment);
+        } else {
+            // Clavija girada o nota distinta: los viejos se descartan (R-PITCH-63).
+            p.keepOnlyPhaseSegment(mVerdictSegment);
+        }
+    }
+    if (!compatible) mHaveVerdictReading = false;
+    mSegmentWaiting = false;
 }
 
 void StrobeTracker::combineEarlyReadings() {
@@ -511,6 +595,11 @@ void StrobeTracker::combineEarlyReadings() {
     drift /= static_cast<double>(valid);
     const double sigma = std::sqrt(sigmaC * sigmaC + drift * drift);
     if (!std::isfinite(C) || !std::isfinite(sigma)) return;
+    int minPhases = InterleavedPhaseEstimator::kMaxDensePhases;
+    for (int i = 0; i < valid; ++i) minPhases = std::min(minPhases, mPartials[pidx[i]].denseEarlyFit().n);
+    mEarlySigmaNoise = sigmaC;
+    mEarlyDrift = drift;
+    mEarlyMinPhases = minPhases;
     mCents = C;
     mUncertaintyCents = sigma;
     mPartialsUsed = valid;
