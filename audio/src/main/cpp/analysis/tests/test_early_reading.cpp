@@ -746,6 +746,43 @@ TEST(Segments, ATurnedPegDiscardsTheOldSegments) {
     EXPECT_EQ(pubs.back().state, wma::analysis::kStateConverged);
 }
 
+TEST(Segments, ATurnedPegAfterAVerdictMeasuringWithDriftDoesNotPool) {
+    // Decision del lider (2026-10-29): la referencia de «misma nota» usa la σ de HOY del veredicto, no la
+    // publicada (que lleva la deriva temprana). Primera nota con vibrato lento (±6 c a 1,5 Hz) y ruido: el
+    // veredicto queda MEASURING (σ de hoy > 0,1) y publica una σ inflada por la deriva; despues, re-punteo
+    // con la clavija girada a +3 c. No se agrupa: la lectura final es la nueva. Mutante «referencia con la
+    // σ inflada» ⇒ la tolerancia crece a varios c, se agrupa con el vibrato y la lectura queda corrida.
+    constexpr int rate = kSegRate;
+    // El re-punteo cae a 1,2 s: con esta señal (determinista) la primera lectura del veredicto, entre 1,11 y
+    // 1,26 s, es MEASURING con σ de hoy 0,50-0,58 c y deriva temprana de 0,9-4 c (medido al escribir el test).
+    constexpr double repluck = 1.2;
+    const int split = static_cast<int>(repluck * rate);
+    auto first = partialsWithPitchTrajectory(kSegF0, 1e-4, oneOverNAmplitudes(4, 0.4), rate, split,
+                                             [](double t) { return 6.0 * std::sin(2.0 * M_PI * 1.5 * t); });
+    applyDecay(first, rate, 2.0);
+    const double second = 3.0;
+    // Mas fuerte (×3) para que el detector lo vea como ataque sobre una nota que todavia suena.
+    auto next = partialsWithPitchTrajectory(detune(kSegF0, second), 1e-4, oneOverNAmplitudes(4, 1.2), rate, 3 * rate,
+                                            [](double) { return 0.0; }, 1.234);
+    applyDecay(next, rate, 1.5);
+    first.insert(first.end(), next.begin(), next.end());
+    addWhiteNoise(&first, 0.002, 77u);
+    const auto pubs = runEngine(first, rate, kSegF0);
+    // Precondicion: antes del re-punteo hubo MEASURING del veredicto con la deriva >= 1 c sobre la σ de hoy.
+    int inflated = 0;
+    for (const Pub& p : pubs)
+        if (p.sec < repluck && p.sec > repluck - 0.1 && !p.early && !std::isnan(p.cents) && !std::isnan(p.verdictSigma) &&
+            p.state == wma::analysis::kStateMeasuring && p.sigma > p.verdictSigma + 1.0)
+            ++inflated;
+    ASSERT_GT(inflated, 0) << "el escenario no produjo una MEASURING del veredicto con deriva: no ejerce el caso";
+    int wrongConverged = 0;
+    for (const Pub& p : pubs)
+        if (p.sec > repluck + 0.3 && isConverged(p) && std::fabs(p.cents - second) > 0.1) ++wrongConverged;
+    EXPECT_EQ(wrongConverged, 0) << "CONVERGED lejos de la clavija nueva: se agrupo con la nota vieja";
+    ASSERT_TRUE(hasCents(pubs.back()));
+    EXPECT_NEAR(pubs.back().cents, second, 0.1);
+}
+
 TEST(Segments, ASemitoneRestarts) {
     // AC-058.7 (criterio 2): re-punteo a un semitono con el mismo objetivo ⇒ la gruesa queda a > 50 c y se
     // reinicia. Mutante «no reiniciar ante 1 semitono» ⇒ lectura mezclada.

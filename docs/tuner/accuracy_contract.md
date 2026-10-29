@@ -214,7 +214,7 @@ compuerta).
 | **Robustez contra corpus grabado** (NFR-8) | 🔴 **sin correr.** El corpus no existe todavía; el mecanismo para bajarlo y verificarlo sí (`scripts/fetch-corpus.sh`), y los tests que dependen de él salen **SKIPPED**, nunca PASSED. |
 | **σ de las lecturas MEASURING del camino del veredicto** (REQ-058, D50) | 🔴 **hueco declarado.** Contra el oráculo corto de f0 de corpus-v1 y con su ruido propio sumado (\|err\| ≤ 2·√(σ² + σ_or²)), las MEASURING que salen del veredicto (12 ventanas, σ > 0,1) cubren 0,567 en (0,25, 1] s con k ≥ 3 (n = 238), 0,833 asentadas con k = 2 (n = 288) y 0,724 asentadas con k ≥ 3 (n = 2501); las tempranas, 0,951 / 0,963 / 0,937. Su σ es la de hoy con la deriva temprana como piso; `CONVERGED` no está en el hueco (lo juzga el trinquete). Fuente: `EarlyReadingCorpus.MeasuringIsCoveredPerStratumAgainstF0`. |
 
-Estas tres filas están vacías **a propósito**. Una corrida que no verificó no puede pasar por
+Estas filas están vacías **a propósito**. Una corrida que no verificó no puede pasar por
 una que sí — la misma regla que gobierna `regen-golden.sh` y la atestación del gate local.
 
 ---
