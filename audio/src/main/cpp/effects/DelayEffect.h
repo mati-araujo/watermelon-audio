@@ -8,6 +8,9 @@
 
 class DelayEffect : public Effect {
 public:
+    /// Largo de cada linea (L y R), en muestras: el techo del tiempo, de 2000 ms hasta 96 kHz.
+    static constexpr int kMaxDelaySamples = 96000 * 2;
+
     DelayEffect();
 
     void setDelayTime(float dt);
@@ -22,6 +25,9 @@ public:
     float getParam(int paramId) override;
     void setSampleRate(int sampleRate) override;
     void reset() override;
+
+    /// Clava el suavizado del tiempo en su objetivo SIN vaciar las lineas (reset() hace las dos).
+    void snapDelayTimeToTarget();
 
 private:
     int mSampleRate = 48000;

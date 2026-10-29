@@ -24,6 +24,7 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -70,10 +71,10 @@ public:
 
     /// Carga un clip de `loop` frames desde un audio nuevo; devuelve su id.
     int32_t load(const std::string& name, int frames, const std::function<float(int, int)>& sample,
-                 int64_t loop, int64_t rs = 0, int64_t re = 0) {
-        const std::string path = write(name, frames, sample);
+                 int64_t loop, int64_t rs = 0, int64_t re = 0, int rate = kSR) {
+        const std::string path = write(name, frames, sample, rate);
         int32_t id = -1;
-        EXPECT_EQ(looper.songLoadClip(path.c_str(), kSR, rs, re, loop, false, id),
+        EXPECT_EQ(looper.songLoadClip(path.c_str(), rate, rs, re, loop, false, id),
                   wm::SongStatus::Ok);
         return id;
     }
@@ -304,19 +305,20 @@ struct VoiceCase {
 
 }  // namespace
 
-// Bug plausible: la voz de la cancion se aparta de la pista del looper en nivel, paneo, mute o
-// envio a efectos (volumen aplicado dos veces, canales cruzados, el envio ignorado y la pista
-// mezclada en la pasada equivocada). Mismo audio, mismo L, mismos setters: tienen que dar lo
-// mismo que mixInto. Se mira la parte del loop sin el crossfade de costura de mixInto.
-TEST(SongVoice, AC_055_12_MatchesTrackBufferMixIntoForVolumePanMuteAndSend) {
+// Bug plausible: la voz de la cancion se aparta de la pista del looper en nivel o paneo (volumen
+// aplicado dos veces, canales cruzados, el mute no apaga). Con la mezcla PROPIA de la cancion
+// (REQ-055 S12) la voz tiene que dar lo mismo que `TrackBuffer::mixInto` con el volumen y el
+// paneo equivalentes. Se mira la parte del loop sin el crossfade de costura de mixInto. El envio
+// no tiene bus en este rig: no cambia el seco.
+TEST(SongVoice, AC_055_12_MatchesTrackBufferMixIntoForGainAndPan) {
     constexpr int kLen = 48000;
     constexpr int kBlock = 240;
-    constexpr int kPreroll = 4800;   // 20 bloques: los smoothers de las dos pistas parten igual
+    constexpr int kPreroll = 4800;   // 20 bloques: el smoother de la pista de referencia converge
     const VoiceCase cases[] = {
         {"plain", 0.7f, -0.4f, false, false},
         {"loud-right", 1.6f, 0.9f, false, false},
         {"muted", 0.7f, -0.4f, true, false},
-        {"send-to-fx", 0.7f, -0.4f, false, true},
+        {"send-without-bus", 0.7f, -0.4f, false, true},
     };
     const auto sample = [](int n, int ch) {
         return ch == 0 ? 0.6f * std::sin(6.2831853f * float(n) / 137.0f)
@@ -329,43 +331,37 @@ TEST(SongVoice, AC_055_12_MatchesTrackBufferMixIntoForVolumePanMuteAndSend) {
         const std::string path = a.write("vc_audio", kLen, sample);
         ASSERT_TRUE(a.looper.importTrack(0, path.c_str(), kSR));
         a.looper.resumeTrack(0);
-        // B: la cancion con el mismo audio
+        a.looper.setTrackVolume(0, c.volume);
+        a.looper.setTrackPan(0, c.pan);
+        a.looper.setTrackMuted(0, c.muted);
+        // B: la cancion con el mismo audio y su mezcla propia
         Rig b;
         int32_t id = -1;
         ASSERT_EQ(b.looper.songLoadClip(path.c_str(), kSR, 0, 0, kLen, false, id),
                   wm::SongStatus::Ok);
-        for (Rig* r : {&a, &b}) {
-            r->looper.setTrackVolume(0, c.volume);
-            r->looper.setTrackPan(0, c.pan);
-            r->looper.setTrackMuted(0, c.muted);
-            r->looper.setTrackSendToFx(0, c.sendToFx);
-        }
+        b.looper.setSongMixTrack(0, c.muted ? 0.0f : c.volume, c.pan, c.sendToFx ? 0.5f : 0.0f);
         ASSERT_EQ(b.schedule(kLen, {sec(kPreroll, id)}, kPreroll + 3 * kLen), wm::SongStatus::Ok);
 
-        const auto runBlock = [&](Rig& r, int64_t frame, std::vector<float>& fx,
-                                  std::vector<float>& main) {
-            std::fill(fx.begin(), fx.end(), 0.0f);
+        const auto runBlock = [&](Rig& r, int64_t frame, std::vector<float>& main) {
             std::fill(main.begin(), main.end(), 0.0f);
             r.looper.beginBlock(frame, kBlock);
-            r.looper.mixFxTracks(fx.data(), kBlock);
             r.looper.process(main.data(), kBlock, frame);
         };
-        std::vector<float> fxA(kBlock * 2), mainA(kBlock * 2), fxB(kBlock * 2), mainB(kBlock * 2);
+        std::vector<float> mainA(kBlock * 2), mainB(kBlock * 2);
         for (int64_t f = 0; f < kPreroll; f += kBlock) {
-            runBlock(a, f, fxA, mainA);
-            runBlock(b, f, fxB, mainB);
+            runBlock(a, f, mainA);
+            runBlock(b, f, mainB);
         }
         a.looper.resetTrackPlayHead(0);   // A y B arrancan el loop en el mismo frame
 
         double worst = 0.0;
         double peak = 0.0;
         for (int64_t k = 0; k < (kLen - 2400 - kBlock) / kBlock; ++k) {
-            runBlock(a, kPreroll + k * kBlock, fxA, mainA);
-            runBlock(b, kPreroll + k * kBlock, fxB, mainB);
+            runBlock(a, kPreroll + k * kBlock, mainA);
+            runBlock(b, kPreroll + k * kBlock, mainB);
             for (int i = 0; i < kBlock * 2; ++i) {
-                worst = std::max({worst, double(std::abs(fxA[i] - fxB[i])),
-                                  double(std::abs(mainA[i] - mainB[i]))});
-                peak = std::max({peak, double(std::abs(fxA[i])), double(std::abs(mainA[i]))});
+                worst = std::max(worst, double(std::abs(mainA[i] - mainB[i])));
+                peak = std::max(peak, double(std::abs(mainA[i])));
             }
         }
         if (c.muted) {
@@ -375,6 +371,98 @@ TEST(SongVoice, AC_055_12_MatchesTrackBufferMixIntoForVolumePanMuteAndSend) {
         }
         EXPECT_LT(worst, 1e-5) << "la voz de la cancion se aparta de mixInto";
     }
+}
+
+// Bug plausible (cambio de contrato, REQ-055 S12): el volumen, paneo, mute o sendToFx del
+// TrackBuffer siguen alcanzando a la voz de la cancion (la escucha de tomas de S10 y la mezcla de
+// Studio se pisarian), o una pista marcada sendToFx sigue entrando a la cadena de escena. Dos
+// rigs con la MISMA cancion y la misma mezcla propia: uno con el TrackBuffer en los defaults y
+// otro con sus cuatro controles movidos a valores extremos tienen que dar los mismos bits, y la
+// pasada de la cadena (mixFxTracks) no recibe nada de la cancion.
+TEST(SongVoice, AC_055_12_TrackBufferControlsDoNotReachTheSongVoices) {
+    constexpr int kLen = 12000;
+    constexpr int kBlock = 240;
+    const auto sample = [](int n, int ch) {
+        return ch == 0 ? 0.5f * std::sin(6.2831853f * float(n) / 100.0f)
+                       : 0.3f * std::sin(6.2831853f * float(n) / 47.0f);
+    };
+    const auto build = [&](Rig& r, bool moveTrackBuffer) {
+        const std::string path = r.write("tb_audio", kLen, sample);
+        int32_t id = -1;
+        EXPECT_EQ(r.looper.songLoadClip(path.c_str(), kSR, 0, 0, kLen, false, id),
+                  wm::SongStatus::Ok);
+        r.looper.setSongMixTrack(0, 0.8f, 0.25f, 0.0f);
+        if (moveTrackBuffer) {
+            r.looper.setTrackVolume(0, 0.05f);
+            r.looper.setTrackPan(0, -1.0f);
+            r.looper.setTrackMuted(0, true);
+            r.looper.setTrackSendToFx(0, true);
+        }
+        EXPECT_EQ(r.schedule(kLen, {sec(kBlock, id)}, 6 * kLen), wm::SongStatus::Ok);
+    };
+    Rig plain, moved;
+    build(plain, false);
+    build(moved, true);
+    std::vector<float> outPlain, outMoved;
+    for (int64_t f = 0; f < 5 * kLen; f += kBlock) {
+        std::vector<float> fx(kBlock * 2, 0.0f), mainP(kBlock * 2, 0.0f), mainM(kBlock * 2, 0.0f);
+        plain.looper.beginBlock(f, kBlock);
+        plain.looper.process(mainP.data(), kBlock, f);
+        moved.looper.beginBlock(f, kBlock);
+        EXPECT_FALSE(moved.looper.mixFxTracks(fx.data(), kBlock)) << "una voz entro a la cadena de escena";
+        moved.looper.process(mainM.data(), kBlock, f);
+        for (float v : fx) ASSERT_EQ(v, 0.0f);
+        outPlain.insert(outPlain.end(), mainP.begin(), mainP.end());
+        outMoved.insert(outMoved.end(), mainM.begin(), mainM.end());
+    }
+    float peak = 0.0f;
+    for (float v : outPlain) peak = std::max(peak, std::abs(v));
+    ASSERT_GT(peak, 0.1f) << "no suena: no prueba nada";
+    ASSERT_EQ(std::memcmp(outPlain.data(), outMoved.data(), outPlain.size() * sizeof(float)), 0);
+}
+
+// Bug plausible: el primer bloque de la cancion rampea desde los valores de una voz fresca
+// (ganancia 1, paneo 0) hacia la mezcla pedida: un export con una pista a -6 dB arranca con un
+// fundido de los primeros milisegundos. La ganancia del PRIMER frame ya es la del target.
+TEST(SongVoice, AC_055_12_FirstBlockStartsAtTheMixTargetWithoutARamp) {
+    constexpr int kLen = 12000;
+    constexpr int kBlock = 240;
+    Rig r;
+    int32_t id = r.load("snap", kLen, dc(0.5f), kLen);
+    r.looper.setSongMixTrack(0, 0.25f, 1.0f, 0.0f);   // -12 dB, todo a la derecha
+    ASSERT_EQ(r.schedule(kLen, {sec(kBlock, id)}, 6 * kLen), wm::SongStatus::Ok);
+    // La agenda entra en kBlock con fundido de entrada de F: despues del fundido, estado estable.
+    const std::vector<float> out = r.render(0, 4 * kBlock, kBlock);
+    const int64_t atFrame = kBlock + kF + 10;   // ya con el fundido completo, en el segundo bloque
+    ASSERT_LT(atFrame, 4 * kBlock);
+    // pan +1: L = 0, R = ganancia * 1. Un smoother que parte de (1, 0) todavia no llego (0,995^n
+    // tarda ~900 muestras): se veria L > 0 y R > 0,125 + algo de L.
+    EXPECT_NEAR(out[static_cast<size_t>(atFrame) * 2], 0.0f, 1e-6f);
+    EXPECT_NEAR(out[static_cast<size_t>(atFrame) * 2 + 1], 0.5f * 0.25f, 1e-6f);
+}
+
+// Bug plausible: al reactivarse la cancion (segunda vez en la vida del motor, sin start offline
+// de por medio) las voces conservan el estado del smoother de la vez anterior y rampean hacia la
+// mezcla nueva en vez de arrancar en ella. El snap es de la ACTIVACION, no solo del primer uso.
+TEST(SongVoice, AC_055_12_ReactivatingTheSongStartsAtTheNewMixTarget) {
+    constexpr int kLen = 12000;
+    constexpr int kBlock = 240;
+    Rig r;
+    const int32_t id = r.load("react", kLen, dc(0.5f), kLen);
+    r.looper.setSongMixTrack(0, 1.0f, 0.0f, 0.0f);
+    ASSERT_EQ(r.schedule(kLen, {sec(kBlock, id)}, 4 * kLen), wm::SongStatus::Ok);
+    (void)r.render(0, 8 * kBlock, kBlock);   // activa, suena con ganancia 1 centrada
+    // apagar y dejar pasar la cola de fundido: la cancion queda inactiva
+    ASSERT_EQ(r.looper.songSetSchedule(kLen, nullptr, 0, 0, false), wm::SongStatus::Ok);
+    (void)r.render(8 * kBlock, 8 * kBlock, kBlock);
+    // otra mezcla, y reprogramar: la voz tiene que arrancar EN ella
+    r.looper.setSongMixTrack(0, 0.25f, 1.0f, 0.0f);
+    const int64_t from = 16 * kBlock;
+    ASSERT_EQ(r.schedule(kLen, {sec(from + kBlock, id)}, from + 4 * kLen), wm::SongStatus::Ok);
+    const std::vector<float> out = r.render(from, 4 * kBlock, kBlock);
+    const size_t at = static_cast<size_t>(kBlock + kF + 10) * 2;
+    EXPECT_NEAR(out[at], 0.0f, 1e-6f);
+    EXPECT_NEAR(out[at + 1], 0.5f * 0.25f, 1e-6f);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1659,4 +1747,515 @@ TEST(SongOffline, AC_055_13_ASchedulePublishedBeforeTheStartDoesNotSound) {
     const std::vector<float> out = r.render(2048);
     EXPECT_TRUE(allZero(out)) << "sono una publicacion anterior al start";
     EXPECT_FALSE(r.rig.looper.song().active());
+}
+
+// ---------------------------------------------------------------------------------------
+// Bus «Espacio»: su guardia de bloque y su preparacion al rate (REQ-055 S12, hallazgos del review)
+// ---------------------------------------------------------------------------------------
+namespace {
+
+/// Un bus que no procesa nada pero registra lo que el looper le pide. `runSpaceBus` con mas frames
+/// que su capacidad es la escritura fuera de limites que un bus real (DelayEffect) convertiria en
+/// un heap overflow.
+class RecordingBus final : public wm::ISongSpaceBus {
+public:
+    /// `growable`: la capacidad crece con prepare/reserve (como el bus real); si no, queda fija.
+    explicit RecordingBus(int capacity, bool growable = true)
+        : capacityFrames(capacity), mGrowable(growable) {}
+    void prepareSpaceBus(int sampleRate, int maxBlockFrames) override {
+        preparedRate.store(sampleRate);
+        reserveSpaceBus(maxBlockFrames);
+    }
+    void reserveSpaceBus(int maxBlockFrames) override {
+        if (mGrowable) capacityFrames.store(std::max(capacityFrames.load(), maxBlockFrames));
+    }
+    int spaceBusCapacityFrames() const override { return capacityFrames.load(); }
+    void applySpaceParams(const wm::SongSpaceParams&) override { ++applies; }
+    void runSpaceBus(const float* send, float* fxOut, int frames) override {
+        ++runs;
+        for (int i = 0; i < frames * 2; ++i) {
+            sendMax = std::max(sendMax, send[i]);
+            sendMin = std::min(sendMin, send[i]);
+        }
+        if (frames > capacityFrames.load()) ++overruns;
+        std::fill(fxOut, fxOut + static_cast<size_t>(frames) * 2, returnLevel);
+    }
+    float spaceBusPreReturnPeak() const override { return preReturnPeak; }
+    void resetSpaceBus() override { ++resets; }
+
+    std::atomic<int> capacityFrames;
+    std::atomic<int> preparedRate{0};
+    float returnLevel = 0.0f;   // lo que devuelve el bus en cada muestra
+    float preReturnPeak = 0.0f; // lo que el bus reporta tener adentro, antes de sus retornos
+    float sendMax = 0.0f;       // el mayor y el menor envio que recibio, sin tocar
+    float sendMin = 0.0f;
+    int runs = 0;
+    int overruns = 0;
+    int resets = 0;
+    int applies = 0;
+
+private:
+    const bool mGrowable;
+};
+
+constexpr int64_t kBusLoop = 2048;
+
+/// Una cancion de un clip en DC que suena desde el frame 0 hasta mucho despues del render.
+void playSongFromTheStart(Rig& rig) {
+    const int32_t id = rig.load("bus_dc", kBusLoop, dc(0.1f), kBusLoop);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(0, id)}, 1 << 24), wm::SongStatus::Ok);
+}
+
+}  // namespace
+
+// Bug plausible (BLOQUEANTE del review): el guardia de bloque mira solo los buffers del looper y no
+// la capacidad propia del bus, asi que un bloque mayor que lo que el bus dimensiono le llega a
+// `runSpaceBus` y escribe fuera de su memoria. El bloque grande salta el bus y se cuenta; los
+// chicos siguen pasando por el.
+TEST(SongBus, ABlockLargerThanTheBusCapacitySkipsTheBusAndIsCounted) {
+    Rig rig;
+    RecordingBus bus(256, /*growable=*/false);
+    rig.looper.publishSongBus(&bus, 4096);   // los buffers del looper alcanzan; el bus, no
+    rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+    playSongFromTheStart(rig);
+    (void)rig.render(0, 256 * 4, 256);
+    EXPECT_EQ(bus.runs, 4);
+    EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 0);
+    (void)rig.render(2048, 1000, 1000);
+    EXPECT_EQ(bus.overruns, 0) << "el bus recibio un bloque mayor que su capacidad";
+    EXPECT_EQ(bus.runs, 4) << "el bloque grande no tenia que correr el bus";
+    EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 1);
+}
+
+// Bug plausible: prepareMixBuffer agranda los buffers del looper pero no el bus (el escenario del
+// review: prepareMixBuffer(8192) y un bloque de 6000). El bus crece con ellos y corre el bloque.
+TEST(SongBus, PrepareMixBufferGrowsTheBusSoALargeBlockStillRunsIt) {
+    Rig rig;
+    RecordingBus bus(256);
+    rig.looper.publishSongBus(&bus, 256);
+    rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+    rig.looper.prepareMixBuffer(8192);
+    playSongFromTheStart(rig);
+    (void)rig.render(0, 6000, 6000);
+    EXPECT_EQ(bus.runs, 1);
+    EXPECT_EQ(bus.overruns, 0);
+    EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 0);
+}
+
+// Bug plausible (hallazgo 4 del re-review): publishSongBus fijaba la capacidad en lo que le pasaba el
+// llamador (4096) aunque prepareMixBuffer ya hubiera dimensionado el looper mas grande (framesPerBurst
+// > 1024). Un bus creado DESPUES de prepareMixBuffer(8192) tiene que procesar un bloque de 6000.
+TEST(SongBus, ABusCreatedAfterPrepareMixBufferTakesTheLargerCapacity) {
+    Rig rig;
+    rig.looper.prepareMixBuffer(8192);
+    RecordingBus bus(256);
+    rig.looper.publishSongBus(&bus, 4096);
+    EXPECT_GE(bus.spaceBusCapacityFrames(), 8192);
+    rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+    playSongFromTheStart(rig);
+    (void)rig.render(0, 6000, 6000);
+    EXPECT_EQ(bus.runs, 1);
+    EXPECT_EQ(bus.overruns, 0);
+    EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 0) << "el bloque de 6000 salto el bus";
+}
+
+// Bug plausible (hallazgo 3): el bus se prepara con un rate leido FUERA del lock de setSampleRate y
+// queda publicado al rate viejo. Publicar prepara al rate vigente, y un cambio de rate concurrente
+// termina con el bus en el rate final, cualquiera sea el orden.
+TEST(SongBus, APublishedBusIsPreparedAtTheCurrentRate) {
+    Rig rig;
+    rig.looper.setSampleRate(44100);
+    RecordingBus bus(256);
+    rig.looper.publishSongBus(&bus, 256);
+    EXPECT_EQ(bus.preparedRate.load(), 44100);
+    rig.looper.setSampleRate(32000);
+    EXPECT_EQ(bus.preparedRate.load(), 32000) << "un cambio de rate no re-preparo el bus";
+}
+
+TEST(SongBus, ARateChangeRacingTheBusCreationLeavesTheBusAtTheFinalRate) {
+    int stale = 0;
+    for (int iter = 0; iter < 150; ++iter) {
+        Rig rig;
+        RecordingBus bus(256);
+        std::atomic<bool> go{false};
+        std::thread changer([&] {
+            while (!go.load()) std::this_thread::yield();
+            for (int i = 0; i < 40; ++i) rig.looper.setSampleRate(i % 2 == 0 ? 44100 : 32000);
+            rig.looper.setSampleRate(44100);
+        });
+        go.store(true);
+        rig.looper.publishSongBus(&bus, 256);
+        changer.join();
+        if (bus.preparedRate.load() != 44100) ++stale;
+    }
+    EXPECT_EQ(stale, 0) << "el bus quedo preparado a un rate que ya no era el vigente";
+}
+
+// ---------------------------------------------------------------------------------------
+// La cola del bus tras desactivarse la cancion (D-S12-18)
+// ---------------------------------------------------------------------------------------
+namespace {
+
+constexpr int kTailBlock = 512;
+// Tope de cola de los tests (el real es 600 s): simular 10 min por test no entra en el timeout de TSan.
+constexpr int kTestCapSeconds = 4;
+// Tolerancia de un bloque: el que ya corrio como cola dentro de playAndRemoveSong.
+constexpr int kPreTail = kTailBlock;
+
+/// Una cancion sobre un bus que devuelve `level`; tras 4096 frames se saca la agenda (count == 0) y
+/// se esperan dos bloques a que la voz termine su fundido. Devuelve el frame siguiente.
+int64_t playAndRemoveSong(Rig& rig, RecordingBus& bus, float level, int rate = kSR) {
+    bus.returnLevel = level;
+    rig.looper.publishSongBus(&bus, kTailBlock);
+    rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+    const int32_t id = rig.load("tail_dc", kBusLoop, dc(0.1f), kBusLoop, 0, 0, rate);
+    EXPECT_EQ(rig.schedule(kBusLoop, {sec(0, id)}, 1 << 24), wm::SongStatus::Ok);
+    (void)rig.render(0, 4096, kTailBlock);
+    EXPECT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
+    (void)rig.render(4096, 2 * kTailBlock, kTailBlock);
+    return 4096 + 2 * kTailBlock;
+}
+
+}  // namespace
+
+// Bug plausible (BLOQUEANTE del review): el bus corre solo con la cancion activa, asi que al
+// terminarla (o sacar la agenda) la cola se corta en seco. Con la cancion terminada el bus sigue
+// procesando bloque a bloque, tambien con el transporte parado (play frame < 0).
+TEST(SongBusTail, TheBusKeepsRunningAfterTheSongEndsAndWithTheTransportStopped) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    const int64_t next = playAndRemoveSong(rig, bus, 0.25f);
+    const int runsWhenTheSongEnded = bus.runs;
+    (void)rig.render(next, kTailBlock * 4, kTailBlock);
+    EXPECT_EQ(bus.runs, runsWhenTheSongEnded + 4) << "el bus no corrio con la cancion terminada";
+    std::vector<float> out(kTailBlock * 2, 0.0f);
+    rig.looper.beginBlock(-1, kTailBlock);
+    rig.looper.process(out.data(), kTailBlock, -1);
+    EXPECT_EQ(bus.runs, runsWhenTheSongEnded + 5) << "el bus no corrio con el transporte parado";
+}
+
+// Bug plausible: la cola no llega al audio (el retorno se calcula pero no se suma a la salida).
+TEST(SongBusTail, TheTailReturnReachesTheOutput) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    const int64_t next = playAndRemoveSong(rig, bus, 0.25f);
+    const std::vector<float> out = rig.render(next, kTailBlock * 8, kTailBlock);
+    float peak = 0.0f;
+    for (size_t i = out.size() / 2; i < out.size(); ++i) peak = std::max(peak, std::abs(out[i]));
+    EXPECT_GT(peak, 0.1f) << "la cola del bus no suena con la cancion terminada";
+}
+
+// Bug plausible: el bus nunca se apaga (corre para siempre tras la primera cancion) o se apaga a
+// los pocos bloques. Con un retorno bajo -120 dBFS se apaga tras 2,5 s seguidos (mas que el delay
+// maximo, para no confundir el hueco entre dos ecos con el final) y NO se reinicia al reactivar:
+// el residuo es inaudible.
+TEST(SongBusTail, AQuietTailStopsTheBusAfterTwoAndAHalfSecondsWithoutResettingIt) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    int64_t next = playAndRemoveSong(rig, bus, 0.0f);
+    const int runsAtEnd = bus.runs;
+    (void)rig.render(next, kSR * 10, kTailBlock);
+    next += kSR * 10;
+    const int tailRuns = bus.runs - runsAtEnd;
+    EXPECT_GE(tailRuns * kTailBlock, kSR * 5 / 2 - kPreTail) << "se apago antes de 2,5 s de silencio";
+    EXPECT_LE(tailRuns * kTailBlock, kSR * 5 / 2 + kTailBlock) << "no se apaga: el bus corre para siempre";
+    // Reactivar la cancion tras un apagado por silencio: sin reinicio (nada audible que vaciar).
+    const int32_t id = rig.load("tail_dc2", kBusLoop, dc(0.1f), kBusLoop);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(next + 2 * kBusLoop, id)}, next + 6 * kBusLoop),
+              wm::SongStatus::Ok);
+    (void)rig.render(next, kBusLoop * 4, kTailBlock);
+    EXPECT_EQ(bus.resets, 0);
+}
+
+// Bug plausible (hallazgos 2 y 3 del re-review): un tope por tiempo cortaba una cola audible (sin
+// fundido) y obligaba a vaciar las lineas del bus (~1,5 MB de memset) en el RT al reactivar. Sin
+// tope: una cola que sigue audible a los 30 s sigue sonando, y reactivar la cancion NO reinicia el
+// bus (ni un solo reset en el RT).
+TEST(SongBusTail, ALoudTailIsNotCutAtThirtySecondsAndReactivatingNeverResetsTheBus) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    int64_t next = playAndRemoveSong(rig, bus, 0.5f);
+    const int runsAtEnd = bus.runs;
+    const std::vector<float> out = rig.render(next, kSR * 40, kTailBlock);
+    next += kSR * 40;
+    EXPECT_GE((bus.runs - runsAtEnd) * kTailBlock, kSR * 40 - kPreTail) << "el bus se corto con la cola audible";
+    float last = 0.0f;
+    for (size_t i = out.size() - 2 * kTailBlock; i < out.size(); ++i) last = std::max(last, std::abs(out[i]));
+    EXPECT_GT(last, 0.1f) << "la cola dejo de sonar";
+    const int32_t id = rig.load("tail_dc3", kBusLoop, dc(0.1f), kBusLoop);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(next + 2 * kBusLoop, id)}, next + 6 * kBusLoop),
+              wm::SongStatus::Ok);
+    (void)rig.render(next, kBusLoop * 4, kTailBlock);
+    EXPECT_EQ(bus.resets, 0) << "reactivar vacio el bus en el RT";
+}
+
+// Bug plausible (hallazgo 1 del re-review): el silencio se media DESPUES de los retornos. Con un
+// retorno en 0 la salida es muda pero las lineas internas siguen llenas: el bus se apagaba a los
+// 2,5 s sin marcarse viejo y su realimentacion quedaba congelada. Un bus que dice tener contenido
+// (pico antes de retornos) sigue vivo aunque su salida sea 0; cuando lo vacia, se apaga.
+TEST(SongBusTail, ABusWithSilentOutputButFullLinesStaysAlive) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    bus.preReturnPeak = 0.5f;
+    int64_t next = playAndRemoveSong(rig, bus, 0.0f);
+    const int runsAtEnd = bus.runs;
+    (void)rig.render(next, kSR * 10, kTailBlock);
+    next += kSR * 10;
+    EXPECT_GE((bus.runs - runsAtEnd) * kTailBlock, kSR * 10 - kPreTail) << "se apago con las lineas llenas";
+    bus.preReturnPeak = 0.0f;
+    const int runsDrained = bus.runs;
+    (void)rig.render(next, kSR * 10, kTailBlock);
+    const int drainedRuns = bus.runs - runsDrained;
+    EXPECT_GE(drainedRuns * kTailBlock, kSR * 5 / 2 - kPreTail);
+    EXPECT_LE(drainedRuns * kTailBlock, kSR * 5 / 2 + kTailBlock) << "vacio y no se apaga";
+}
+
+// Bug plausible: un bloque mayor que la capacidad del bus en plena cola lo corre igual (el mismo
+// desborde del review, ahora por el camino de la cola): salta, se cuenta y el bus se da por viejo.
+TEST(SongBusTail, ABlockLargerThanTheBusCapacityDuringTheTailSkipsTheBus) {
+    Rig rig;
+    RecordingBus bus(kTailBlock, /*growable=*/false);
+    const int64_t next = playAndRemoveSong(rig, bus, 0.25f);
+    rig.looper.prepareMixBuffer(4096);   // los buffers del looper alcanzan; el bus, no
+    (void)rig.render(next, kTailBlock * 4, kTailBlock * 4);
+    EXPECT_EQ(bus.overruns, 0);
+    EXPECT_EQ(rig.looper.getSongBusOverflowBlocks(), 1);
+}
+
+// Bug plausible (D-S12-19): una cola que no se agota nunca (un bus fuera de control con valores
+// finitos y chicos) corre para siempre. A los 10 min el tope la corta con un FUNDIDO de duracion FIJA
+// (50 ms) repartido en los bloques que hagan falta, NO en uno solo: con bloques de 1 frame, de 256 y
+// de 512 el fundido dura lo mismo (2400 muestras), ningun salto entre muestras vecinas (el retorno
+// vale 0,5: un corte seco saltaria ~0,5), el bus se da por viejo y se cuenta como tope.
+TEST(SongBusTail, ATailThatNeverEndsIsCappedAtTenMinutesWithAFixedFiftyMillisecondFade) {
+    for (const int finalBlock : {1, 256, kTailBlock}) {
+        SCOPED_TRACE(finalBlock);
+        Rig rig;
+        RecordingBus bus(kTailBlock);
+        int64_t next = playAndRemoveSong(rig, bus, 0.5f);
+        rig.looper.setSongBusTailMaxSecondsForTest(kTestCapSeconds);
+        constexpr int64_t kLeadBlocks = static_cast<int64_t>(kSR) * kTestCapSeconds / kTailBlock - 8;
+        (void)rig.render(next, kLeadBlocks * kTailBlock, kTailBlock);
+        next += kLeadBlocks * kTailBlock;
+        ASSERT_EQ(rig.looper.getSongBusTailCaps(), 0) << "el tope corto antes de tiempo";
+        const int64_t tailFrames = kSR / 2;
+        const std::vector<float> out = rig.render(next, tailFrames, finalBlock);
+        next += tailFrames;
+        float maxStep = 0.0f;
+        int fading = 0, quiet = 0;
+        for (size_t i = 0; i < out.size(); i += 2) {
+            if (i >= 2) maxStep = std::max(maxStep, std::abs(out[i] - out[i - 2]));
+            if (std::abs(out[i]) > 1e-4f && std::abs(out[i] - 0.5f) > 1e-4f) ++fading;
+            if (std::abs(out[i]) <= 1e-4f) ++quiet;
+        }
+        EXPECT_EQ(rig.looper.getSongBusTailCaps(), 1);
+        EXPECT_EQ(rig.looper.getSongBusGuardTrips(), 0);
+        EXPECT_FALSE(rig.looper.isSongBusLive());
+        EXPECT_LT(maxStep, 0.001f) << "el tope corto en seco";
+        EXPECT_NEAR(fading, kSR / 20, 12) << "el fundido no dura 50 ms con este tamano de bloque";
+        EXPECT_NEAR(out[out.size() - 2], 0.0f, 1e-6f) << "tras el tope queda sonido";
+        EXPECT_GT(quiet, kSR / 4) << "tras el fundido no queda silencio";
+        const int runsAtCap = bus.runs;
+        const int32_t id = rig.load("tail_cap", kBusLoop, dc(0.1f), kBusLoop);
+        ASSERT_EQ(rig.schedule(kBusLoop, {sec(next + 2 * kBusLoop, id)}, next + 6 * kBusLoop),
+                  wm::SongStatus::Ok);
+        (void)rig.render(next, kBusLoop * 4, kTailBlock);
+        EXPECT_EQ(bus.resets, 1) << "el bus cortado por el tope no se reinicio al reactivar";
+        EXPECT_GT(bus.runs, runsAtCap);
+    }
+}
+
+// Bug plausible (mutante de finishSongMix): la cuenta de cola no se pone a cero al reactivar la
+// cancion, asi que colas cortas y sucesivas se suman hasta el tope. Tres activaciones con una cola
+// de 3/4 del tope cada una (2,25 topes en total, cada una bajo el tope) no cortan ninguna: la
+// tercera sigue sonando completa.
+TEST(SongBusTail, SeveralShortTailsDoNotAccumulateTowardsTheTenMinuteCap) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    rig.looper.setSongBusTailMaxSecondsForTest(kTestCapSeconds);
+    int64_t next = playAndRemoveSong(rig, bus, 0.5f);
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        SCOPED_TRACE(cycle);
+        const int runsBefore = bus.runs;
+        constexpr int64_t kTail = static_cast<int64_t>(kSR) * (kTestCapSeconds * 3 / 4);
+        (void)rig.render(next, kTail, kTailBlock);
+        next += kTail;
+        EXPECT_GE((bus.runs - runsBefore) * kTailBlock, kTail - kPreTail) << "la cola se corto antes de tiempo";
+        EXPECT_EQ(rig.looper.getSongBusTailCaps(), 0) << "las colas se acumularon hasta el tope";
+        const int32_t id = rig.load("tail_acc" + std::to_string(cycle), kBusLoop, dc(0.1f), kBusLoop);
+        ASSERT_EQ(rig.schedule(kBusLoop, {sec(next, id)}, next + (1 << 24)), wm::SongStatus::Ok);
+        (void)rig.render(next, 4 * kBusLoop, kTailBlock);
+        next += 4 * kBusLoop;
+        ASSERT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
+        (void)rig.render(next, 2 * kTailBlock, kTailBlock);
+        next += 2 * kTailBlock;
+    }
+    EXPECT_EQ(bus.resets, 0);
+    EXPECT_TRUE(rig.looper.isSongBusLive());
+}
+
+namespace {
+
+/// Con el tope de cola en kTestCapSeconds, avanza una cola sin fin (bus que devuelve 0,5) hasta que el tope la esta fundiendo: el ultimo
+/// bloque ya baja de 0,45 y todavia no llego a 0. Devuelve el frame siguiente.
+int64_t renderUntilTheCapIsFading(Rig& rig, RecordingBus& bus, int64_t next) {
+    rig.looper.setSongBusTailMaxSecondsForTest(kTestCapSeconds);
+    constexpr int64_t kLeadBlocks = static_cast<int64_t>(kSR) * kTestCapSeconds / kTailBlock - 8;
+    (void)rig.render(next, kLeadBlocks * kTailBlock, kTailBlock);
+    next += kLeadBlocks * kTailBlock;
+    for (int i = 0; i < 16; ++i) {
+        const std::vector<float> out = rig.render(next, kTailBlock, kTailBlock);
+        next += kTailBlock;
+        if (out[out.size() - 2] < 0.45f) return next;
+    }
+    ADD_FAILURE() << "el tope no empezo a fundir";
+    return next;
+}
+
+float maxStepOf(const std::vector<float>& out) {
+    float step = 0.0f;
+    for (size_t i = 2; i < out.size(); i += 2) step = std::max(step, std::abs(out[i] - out[i - 2]));
+    return step;
+}
+
+}  // namespace
+
+// Bug plausible (review de 042a0c27, hallazgo 3): reactivar la cancion en medio del fundido del tope
+// hace saltar el retorno de left/total a 1 en una muestra (un click de ~0,2 con el bus a 0,5). El
+// retorno sube en 50 ms desde donde iba: la salida (voz en silencio) arranca donde cerro el
+// fundido y sube sin saltos, no se cuenta tope y la cola siguiente dura sus kTestCapSeconds - 1 s
+// (hallazgo 2: sin reiniciar el fundido se cortaba a los ~29 ms).
+TEST(SongBusTail, ReactivatingMidFadeRaisesTheReturnWithoutAStepAndLeavesNoStaleFade) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    int64_t next = playAndRemoveSong(rig, bus, 0.5f);
+    next = renderUntilTheCapIsFading(rig, bus, next);
+    ASSERT_EQ(rig.looper.getSongBusTailCaps(), 0);
+    rig.looper.setSongMixTrack(0, 0.0f, 0.0f, 1.0f);   // la voz en silencio: la salida es solo el retorno del bus
+    const int32_t id = rig.load("mf_a", kBusLoop, dc(0.1f), kBusLoop);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(next, id)}, next + (1 << 24)), wm::SongStatus::Ok);
+    const std::vector<float> out = rig.render(next, 8 * kTailBlock, kTailBlock);
+    next += 8 * kTailBlock;
+    EXPECT_LT(maxStepOf(out), 0.01f) << "el retorno salto al reactivar a mitad del fundido";
+    // El bloque anterior (fundido) cerro en ~0,39: la subida arranca de ahi, no de 0,5.
+    EXPECT_LT(out[0], 0.42f) << "el retorno salto a 1 en la primera muestra de la reactivacion";
+    EXPECT_GT(out[0], 0.3f);
+    EXPECT_NEAR(out[out.size() - 2], 0.5f, 1e-5f) << "el retorno no volvio a 1";
+    EXPECT_EQ(rig.looper.getSongBusTailCaps(), 0) << "reactivar a mitad del fundido conto un tope";
+    ASSERT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
+    (void)rig.render(next, 2 * kTailBlock, kTailBlock);
+    next += 2 * kTailBlock;
+    constexpr int64_t kTail = static_cast<int64_t>(kSR) * (kTestCapSeconds - 1);
+    (void)rig.render(next, kTail, kTailBlock);
+    EXPECT_EQ(rig.looper.getSongBusTailCaps(), 0) << "el fundido viejo corto la cola siguiente";
+    EXPECT_TRUE(rig.looper.isSongBusLive());
+}
+
+// Bug plausible (mutante de runSongBusTail, review de 9219db8d): la subida del retorno solo corre
+// con la cancion activa y se omite en los bloques de cola. Reactivar a mitad del fundido y parar la
+// cancion ANTES de que la subida termine (50 ms) deja el retorno en el valor del fundido (~0,43) y
+// el primer bloque de cola lo salta a 0,5 de golpe.
+TEST(SongBusTail, TheRiseKeepsGoingThroughTheTailIfTheSongStopsBeforeItEnds) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    int64_t next = playAndRemoveSong(rig, bus, 0.5f);
+    next = renderUntilTheCapIsFading(rig, bus, next);
+    rig.looper.setSongMixTrack(0, 0.0f, 0.0f, 1.0f);
+    const int32_t id = rig.load("rise_tail", kBusLoop, dc(0.1f), kBusLoop);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(next, id)}, next + (1 << 24)), wm::SongStatus::Ok);
+    std::vector<float> out = rig.render(next, 2 * kTailBlock, kTailBlock);   // 1024 frames < 2400 de la subida
+    next += 2 * kTailBlock;
+    ASSERT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
+    const std::vector<float> after = rig.render(next, 4 * kTailBlock, kTailBlock);
+    out.insert(out.end(), after.begin(), after.end());
+    EXPECT_LT(maxStepOf(out), 0.001f) << "la subida del retorno se corto al pasar a la cola";
+    EXPECT_NEAR(out[out.size() - 2], 0.5f, 1e-5f);
+}
+
+// Bug plausible (review de 9219db8d): la subida acumulaba ganancia en float y su duracion dependia
+// del bloque: a 192 kHz con bloques de 1 frame el incremento por frame puede quedar bajo la
+// resolucion de un float cerca de 1 y la subida no termina nunca. Con un contador entero de frames
+// dura lo que el fundido (50 ms = 9600 frames a 192 kHz) cuente el bloque que cuente.
+TEST(SongBusTail, TheRiseLastsFiftyMillisecondsWithOneFrameBlocksAt192kHz) {
+    constexpr int kRate = 192000;
+    Rig rig;
+    rig.looper.setSampleRate(kRate);
+    RecordingBus bus(kTailBlock);
+    rig.looper.setSongBusTailMaxSecondsForTest(kTestCapSeconds);
+    int64_t next = playAndRemoveSong(rig, bus, 0.5f, kRate);
+    constexpr int64_t kLeadBlocks = static_cast<int64_t>(kRate) * kTestCapSeconds / kTailBlock - 8;
+    (void)rig.render(next, kLeadBlocks * kTailBlock, kTailBlock);
+    next += kLeadBlocks * kTailBlock;
+    ASSERT_EQ(rig.looper.getSongBusTailCaps(), 0);
+    bool fading = false;
+    for (int i = 0; i < 12 * kTailBlock + kRate / 20 && !fading; ++i) {
+        fading = rig.render(next, 1, 1)[0] < 0.25f;   // a mitad del fundido: la subida tiene recorrido
+        ++next;
+    }
+    ASSERT_TRUE(fading) << "el tope no empezo a fundir";
+    rig.looper.setSongMixTrack(0, 0.0f, 0.0f, 1.0f);
+    const int32_t id = rig.load("rise_192", kBusLoop, dc(0.1f), kBusLoop, 0, 0, kRate);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(next, id)}, next + (1 << 24)), wm::SongStatus::Ok);
+    const int64_t riseFrames = kRate / 20;
+    const std::vector<float> out = rig.render(next, riseFrames + 64, 1);
+    EXPECT_LT(out[static_cast<size_t>(riseFrames - 3) * 2], 0.5f - 2e-5f) << "la subida termino antes de 50 ms";
+    EXPECT_NEAR(out[static_cast<size_t>(riseFrames + 1) * 2], 0.5f, 1e-6f) << "la subida no termino a los 50 ms";
+}
+
+// Bug plausible (review de 9219db8d): el recorte del envio a +-limite se confunde con ponerlo en 0
+// (lo finito y enorme tambien se anulaba). El bus recibe el limite con el signo de la muestra, no 0 ni 3e38.
+TEST(SongBus, AHugeFiniteSendReachesTheBusClampedToTheLimitAndNotZeroed) {
+    for (const float huge : {3e38f, -3e38f}) {
+        SCOPED_TRACE(huge);
+        Rig rig;
+        RecordingBus bus(256);
+        rig.looper.publishSongBus(&bus, 256);
+        rig.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+        const int32_t id = rig.load("huge_send", kBusLoop, dc(huge), kBusLoop);
+        ASSERT_EQ(rig.schedule(kBusLoop, {sec(0, id)}, 1 << 24), wm::SongStatus::Ok);
+        (void)rig.render(0, 1024, 256);
+        const float seen = huge > 0 ? bus.sendMax : -bus.sendMin;
+        EXPECT_GT(seen, 1.0f) << "el envio enorme llego al bus anulado";
+        EXPECT_LT(seen, 1e6f) << "el envio enorme llego al bus sin recortar";
+        EXPECT_GE(rig.looper.getSongBusGuardTrips(), 1);
+    }
+}
+
+// Bug plausible (mutante de resetSongForRender): un render offline arranca de cero. Si un fundido a
+// medias (o una subida a medias) sobrevive al reinicio, la cancion del render siguiente arranca con
+// el retorno por debajo de 1 y la salida difiere de la de un looper fresco.
+TEST(SongBusTail, AnOfflineRenderStartsFromScratchAfterAHalfFinishedFadeOrRise) {
+    const auto playFrom = [&](Rig& rig, RecordingBus& bus, int64_t at) {
+        const int32_t id = rig.load("rs_x", kBusLoop, dc(0.1f), kBusLoop);
+        EXPECT_EQ(rig.schedule(kBusLoop, {sec(at, id)}, at + (1 << 24)), wm::SongStatus::Ok);
+        return rig.render(at, 6 * kTailBlock, kTailBlock);
+    };
+    for (const bool midRise : {false, true}) {
+        SCOPED_TRACE(midRise);
+        Rig rig;
+        RecordingBus bus(kTailBlock);
+        int64_t next = playAndRemoveSong(rig, bus, 0.5f);
+        next = renderUntilTheCapIsFading(rig, bus, next);
+        if (midRise) {
+            const int32_t id = rig.load("rs_r", kBusLoop, dc(0.1f), kBusLoop);
+            ASSERT_EQ(rig.schedule(kBusLoop, {sec(next, id)}, next + (1 << 24)), wm::SongStatus::Ok);
+            (void)rig.render(next, kTailBlock, kTailBlock);
+            next += kTailBlock;
+        }
+        ASSERT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
+        rig.looper.resetSongForRender();
+        bus.resets = 0;
+        const std::vector<float> got = playFrom(rig, bus, next + 4 * kBusLoop);
+
+        Rig fresh;
+        RecordingBus freshBus(kTailBlock);
+        freshBus.returnLevel = 0.5f;
+        fresh.looper.publishSongBus(&freshBus, kTailBlock);
+        fresh.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+        const std::vector<float> want = playFrom(fresh, freshBus, next + 4 * kBusLoop);
+        ASSERT_EQ(got.size(), want.size());
+        float worst = 0.0f;
+        for (size_t i = 0; i < got.size(); ++i) worst = std::max(worst, std::abs(got[i] - want[i]));
+        EXPECT_LE(worst, 1e-6f) << "el fundido o la subida sobrevivieron al reinicio del render";
+    }
 }

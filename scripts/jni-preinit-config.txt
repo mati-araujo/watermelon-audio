@@ -22,6 +22,10 @@ nativeLooperSetTrackPlayCount
 nativeLooperSetTrackSendToFx
 nativeLooperSetTrackSpeed
 nativeLooperSetTrackVolume
+nativeMixSetMaster
+nativeMixSetOutputProfile
+nativeMixSetSpace
+nativeMixSetTrack
 nativeSetArpEnabled
 nativeSetArpGateLength
 nativeSetArpLatch
