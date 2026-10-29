@@ -482,6 +482,10 @@ public:
     /// Frames consumidos desde el ultimo reset/objetivo (la grilla de 1024 de las rejillas parte de 0).
     int64_t framesSinceReset() const noexcept { return mPartials[0].framesSinceReset(); }
 
+    /// La σ del VEREDICTO de la ultima llamada, antes de sumarle la deriva temprana (la «σ de hoy»); NaN si
+    /// la lectura no es del veredicto. Sonda para tests: la publicada es `uncertaintyCents()`.
+    double verdictUncertaintyCents() const noexcept { return mVerdictUncertaintyCents; }
+
     /// Ataques que detecto el motor desde el ultimo reset/objetivo. Sonda para tests.
     int attacksDetected() const noexcept { return mAttacksDetected; }
 
@@ -697,6 +701,7 @@ private:
 
     // ---- REQ-058 S1 ----------------------------------------------------------------------------
     bool mReadingIsEarly{false};
+    double mVerdictUncertaintyCents{std::numeric_limits<double>::quiet_NaN()};
     /// El detector de ataque (D-3): rms del bloque de 1024 en curso, alineado a la grilla de las rejillas.
     double mAttackBlockSumSq{0.0};
     double mAttackHistory[kAttackHistoryBlocks]{0.0, 0.0, 0.0, 0.0};   ///< rms de los ultimos bloques, el mas nuevo en 0
@@ -721,6 +726,16 @@ private:
     void combineVerdictReadings(bool closed);
     /// El camino temprano (D-1): solo se llama si el veredicto no dejo lectura.
     void combineEarlyReadings();
+    /// La lectura temprana que daria el estado vigente, sin publicarla.
+    struct EarlyReading {
+        double cents = 0.0;
+        double sigma = 0.0;
+        double sigmaNoise = 0.0;
+        double drift = 0.0;
+        int partials = 0;
+        int minPhases = 0;
+    };
+    bool evaluateEarlyReading(EarlyReading* out) const;
     /// D-3: acumula el rms del bloque de 1024 y, en su borde, decide si hubo ataque.
     void trackAttackBlock(const float* mono, int numFrames, int64_t endFrame);
     /// D-3: con el segmento nuevo en espera, decide si ya se asento y si se agrupa o reinicia.

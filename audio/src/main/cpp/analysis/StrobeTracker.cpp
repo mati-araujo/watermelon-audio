@@ -240,12 +240,23 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
         // agrupar); la lectura sale del camino temprano del segmento nuevo.
         mPartialsUsed = 0;
         mHasMeasurement = false;
+        mVerdictUncertaintyCents = std::numeric_limits<double>::quiet_NaN();
         combineEarlyReadings();
         settleWaitingSegment();
         return true;
     }
     combineVerdictReadings(closed);
     if (!mHasMeasurement) combineEarlyReadings();
+    // Decision del lider (2026-10-28): una lectura del VEREDICTO que todavia es MEASURING (σ de hoy > 0,1)
+    // publica max(σ de hoy, deriva del ajuste temprano vigente). La σ de hoy es ciega al glide que el
+    // veredicto todavia arrastra; la deriva temprana lo ve. El estado no cambia: sigue MEASURING porque
+    // el maximo es >= σ de hoy > 0,1, y una CONVERGED publica la σ de hoy bit a bit (no se toca).
+    mVerdictUncertaintyCents = (mHasMeasurement && !mReadingIsEarly) ? mUncertaintyCents
+                                                                     : std::numeric_limits<double>::quiet_NaN();
+    if (mHasMeasurement && !mReadingIsEarly && mUncertaintyCents > kConvergedUncertaintyCents) {
+        EarlyReading r;
+        if (evaluateEarlyReading(&r) && r.drift > mUncertaintyCents) mUncertaintyCents = r.drift;
+    }
     // D-3: la ULTIMA lectura del grupo vigente (del veredicto o temprana: la que se publico) es contra
     // la que se juzga «misma nota» en el proximo ataque. Una nota corta que nunca llego al veredicto
     // (ukelele_A4 en corpus-v1) igual tiene lecturas tempranas con su σ.
@@ -438,6 +449,7 @@ void StrobeTracker::clearAttackTracking() noexcept {
     mReadingIsEarly = false;
     mVerdictSegment = 0;
     mSegmentWaiting = false;
+    mVerdictUncertaintyCents = std::numeric_limits<double>::quiet_NaN();
     mHaveGroupReading = false;
     mGroupCents = 0.0;
     mGroupSigma = 0.0;
@@ -538,7 +550,7 @@ void StrobeTracker::settleWaitingSegment() {
     mSegmentWaiting = false;
 }
 
-void StrobeTracker::combineEarlyReadings() {
+bool StrobeTracker::evaluateEarlyReading(EarlyReading* out) const {
     const double coarse = coarseDeviationCents();
     double vals[kPartials];
     double sigmas[kPartials];
@@ -574,7 +586,7 @@ void StrobeTracker::combineEarlyReadings() {
         driftSigmaOf[pidx[i]] = driftSigmas[i];
     }
     valid = pruneByConsensus(vals, sigmas, orders, pidx, valid, &contradicted, nullptr);
-    if (valid == 0) return;   // mHasMeasurement sigue en false: no se inventa una lectura
+    if (valid == 0) return false;   // no se inventa una lectura
 
     double C = vals[0];
     double sigmaResiduals = sigmas[0];
@@ -585,11 +597,14 @@ void StrobeTracker::combineEarlyReadings() {
     }
     // D-1: k ≥ 3, la σ de los residuos con la PROPAGADA como piso (con 1 g.l. los residuos pasan
     // |t| ≤ 2 solo el 70 % de las veces aun con el modelo perfecto); k = 2 (D29, D48), la propagacion
-    // del ajuste de dos puntos y NO `√Σσ²`; k = 1, la del parcial.
+    // del ajuste de dos puntos con `√Σσ²` como piso (decision del lider, 2026-10-28: la propagada sola
+    // cubria 0,946 en la sintesis de 2 parciales y `√Σσ²` sola mas; el maximo da 0,963 con 2,84× de no
+    // inflacion, medido en el scratchpad y fijado por `EarlyReading.TwoPartialsCoveredAtTwoSigma`); k = 1,
+    // la del parcial.
     const double sigmaProp = propagatedStretchSigma(sigmas, orders, valid, B);
     double sigmaC = sigmas[0];
     if (valid >= 3) sigmaC = std::max(sigmaResiduals, sigmaProp);
-    else if (valid == 2) sigmaC = sigmaProp;
+    else if (valid == 2) sigmaC = std::max(sigmaProp, std::sqrt(sigmas[0] * sigmas[0] + sigmas[1] * sigmas[1]));
     // D-1: la deriva SIN SESGO por parcial, `√max(0, deriva_n² − σ(deriva_n)²)` (en una nota estable la
     // curvatura es ruido y su esperanza al cuadrado es su varianza: el termino se anula en vez de inflar
     // σ), y la MEDIA de los admitidos (un glide corre a los cuatro parciales los mismos cents).
@@ -607,15 +622,27 @@ void StrobeTracker::combineEarlyReadings() {
     }
     drift /= static_cast<double>(valid);
     const double sigma = std::sqrt(sigmaC * sigmaC + drift * drift);
-    if (!std::isfinite(C) || !std::isfinite(sigma)) return;
+    if (!std::isfinite(C) || !std::isfinite(sigma)) return false;
     int minPhases = InterleavedPhaseEstimator::kMaxDensePhases;
     for (int i = 0; i < valid; ++i) minPhases = std::min(minPhases, mPartials[pidx[i]].denseEarlyFit().n);
-    mEarlySigmaNoise = sigmaC;
-    mEarlyDrift = drift;
-    mEarlyMinPhases = minPhases;
-    mCents = C;
-    mUncertaintyCents = sigma;
-    mPartialsUsed = valid;
+    out->cents = C;
+    out->sigma = sigma;
+    out->sigmaNoise = sigmaC;
+    out->drift = drift;
+    out->partials = valid;
+    out->minPhases = minPhases;
+    return true;
+}
+
+void StrobeTracker::combineEarlyReadings() {
+    EarlyReading r;
+    if (!evaluateEarlyReading(&r)) return;   // mHasMeasurement sigue en false
+    mEarlySigmaNoise = r.sigmaNoise;
+    mEarlyDrift = r.drift;
+    mEarlyMinPhases = r.minPhases;
+    mCents = r.cents;
+    mUncertaintyCents = r.sigma;
+    mPartialsUsed = r.partials;
     mHasMeasurement = true;
     mReadingIsEarly = true;
     // REQ-009 S2: la marca del hueco NO se baja aca. La baja la primera lectura del VEREDICTO, como
