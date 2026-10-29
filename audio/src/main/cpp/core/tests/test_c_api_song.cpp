@@ -432,6 +432,46 @@ TEST_F(SongApi, ThePoolHasAFixedSizeAndTheClipsCountAgainstTheMemoryBudget) {
     wma_engine_destroy(e);
 }
 
+// Bug plausible: wma_looper_set_capabilities no llega al looper de una instancia offline (o el
+// start de un render lo devuelve a los 48 MiB / 8 pistas): un export con clips de mas de 48 MiB
+// o de 9 pistas falla aunque el consumidor haya pedido mas. Es la unica C API que vive por
+// handle y NoisyPad la cruza con nativeOfflineLooperSetCapabilities.
+TEST_F(SongApi, AC_055_12b_TheCapabilitiesOfAnOfflineInstanceSetTheClipBudgetAndTheTrackCount) {
+    constexpr int64_t kClipFrames = 1572864;   // 12 MiB (frames * 2 * 4)
+    constexpr int64_t kMiB = 1024 * 1024;
+    WmaEngine* e = quietEngine();
+    ASSERT_NE(e, nullptr);
+    const std::string clip = writeSine("caps_a", 400.0f, 0.0f);
+    int32_t id = -1;
+    ASSERT_EQ(wma_offline_start(e, kRate, kBlock), WMA_OK);
+    for (int k = 0; k < 4; ++k) {
+        ASSERT_EQ(wma_song_load_clip(e, clip.c_str(), kRate, 0, 0, kClipFrames, &id), WMA_OK) << k;
+    }
+    EXPECT_EQ(wma_song_load_clip(e, clip.c_str(), kRate, 0, 0, kClipFrames, &id),
+              WMA_ERROR_MEMORY_BUDGET) << "48 MiB de nacimiento";
+    EXPECT_EQ(wma_mix_set_track(e, 8, 1.0f, 0.0f, 0.0f), WMA_ERROR_PARAMETER_OUT_OF_RANGE)
+        << "8 pistas de nacimiento";
+
+    wma_looper_set_capabilities(e, 60 * kMiB, 12, 0);
+    EXPECT_EQ(wma_song_load_clip(e, clip.c_str(), kRate, 0, 0, kClipFrames, &id), WMA_OK);
+    EXPECT_EQ(wma_song_load_clip(e, clip.c_str(), kRate, 0, 0, kClipFrames, &id),
+              WMA_ERROR_MEMORY_BUDGET) << "el tope nuevo se aplica al byte";
+    EXPECT_EQ(wma_mix_set_track(e, 11, 1.0f, 0.0f, 0.0f), WMA_OK);
+    EXPECT_EQ(wma_mix_set_track(e, 12, 1.0f, 0.0f, 0.0f), WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+
+    wma_looper_set_capabilities(e, 0, 0, 0);   // 0 = dejar como estaba
+    EXPECT_EQ(wma_mix_set_track(e, 11, 1.0f, 0.0f, 0.0f), WMA_OK);
+    EXPECT_EQ(wma_song_load_clip(e, clip.c_str(), kRate, 0, 0, kClipFrames, &id),
+              WMA_ERROR_MEMORY_BUDGET);
+
+    // un nuevo start no lo devuelve al default
+    ASSERT_EQ(wma_offline_start(e, kRate, kBlock), WMA_OK);
+    EXPECT_EQ(wma_mix_set_track(e, 11, 1.0f, 0.0f, 0.0f), WMA_OK);
+    wma_looper_set_capabilities(e, 192 * kMiB, 0, 0);
+    EXPECT_EQ(wma_song_load_clip(e, clip.c_str(), kRate, 0, 0, kClipFrames, &id), WMA_OK);
+    wma_engine_destroy(e);
+}
+
 // Bug plausible: un camino de la cancion toca el play frame (reset al armar, al cargar, al
 // reprogramar o al apagar): el ancla P0 de NoisyPad deja de valer y la cancion suena corrida.
 // El play frame avanza exactamente lo renderizado, sin saltos, con la cancion adentro.

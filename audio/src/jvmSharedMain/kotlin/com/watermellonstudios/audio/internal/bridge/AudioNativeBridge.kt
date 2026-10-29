@@ -3870,6 +3870,8 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
     internal fun offlineClearAllEffects(handle: Long): Int = nativeOfflineClearAllEffects(handle)
     internal fun offlineSetEffectParameter(handle: Long, index: Int, paramId: Int, value: Float): Int =
         nativeOfflineSetEffectParameter(handle, index, paramId, value)
+    internal fun offlineLooperSetCapabilities(handle: Long, budgetBytes: Long, maxTracks: Int): Int =
+        nativeOfflineLooperSetCapabilities(handle, budgetBytes, maxTracks)
 
     private external fun nativeOfflineCreate(): Long
     private external fun nativeOfflineDestroy(handle: Long): Int
@@ -3888,6 +3890,7 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
     private external fun nativeOfflineAddEffect(handle: Long, typeId: Int): Int
     private external fun nativeOfflineClearAllEffects(handle: Long): Int
     private external fun nativeOfflineSetEffectParameter(handle: Long, index: Int, paramId: Int, value: Float): Int
+    private external fun nativeOfflineLooperSetCapabilities(handle: Long, budgetBytes: Long, maxTracks: Int): Int
 
     // Canción programada por handle (REQ-055 S11): 1:1 con las `nativeSong*` del vivo.
     internal fun offlineSongLoadClip(

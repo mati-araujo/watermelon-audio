@@ -150,6 +150,25 @@ class OfflineRenderer private constructor(
     fun setEffectParameter(index: Int, paramId: Int, value: Float): Result<Unit> =
         call("setEffectParameter") { bridge.offlineSetEffectParameter(it, index, paramId, value) }
 
+    /**
+     * El techo del looper de esta instancia (REQ-055 S12b): el presupuesto de memoria de los clips
+     * de la canción y las pistas activas. Una instancia nace con 48 MiB y 8 pistas (el default del
+     * looper, no el que el consumidor use en vivo): un export cuyos clips pasen de eso falla con
+     * [NativeBridgeException.MemoryBudgetExceeded] y una pista >= 8 con `PARAMETER_OUT_OF_RANGE`
+     * en [mixSetTrack].
+     *
+     * Como en la C API, **0 deja el valor como estaba**. A diferencia de ella, lo que no cabe no se
+     * recorta: [budgetBytes] fuera de `0..64 GiB` o [maxTracks] fuera de `0..16` falla con
+     * `PARAMETER_OUT_OF_RANGE` sin aplicar ninguno de los dos.
+     *
+     * Cuándo: **antes de [songLoadClip]**. El presupuesto se mide en cada carga contra lo ya
+     * cargado, así que valerlo después sólo afecta a las cargas siguientes; bajarlo con clips
+     * adentro no libera nada (la próxima carga falla si ya se pasó) y [maxTracks] nunca baja de
+     * la pista activa más alta. [start] no lo toca: sobrevive a reiniciar el render.
+     */
+    fun setLooperCapabilities(budgetBytes: Long, maxTracks: Int): Result<Unit> =
+        call("setLooperCapabilities") { bridge.offlineLooperSetCapabilities(it, budgetBytes, maxTracks) }
+
     override fun songLoadClip(
         path: String,
         sampleRate: Int,

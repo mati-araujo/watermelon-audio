@@ -28,6 +28,7 @@
 #include "../voice/VoiceTypes.h"
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -4424,6 +4425,29 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflin
     if (!slot) return kOfflineUnknownHandle;
     std::lock_guard<std::mutex> op(slot->opMutex);
     return static_cast<jint>(wma_effect_set_param(slot->engine, index, paramId, value));
+}
+
+// Capacidades del looper de la instancia (REQ-055 S12b): el presupuesto de clips y las pistas
+// activas. Como la C API, 0 deja el valor como estaba; a diferencia de ella, lo que no cabe no se
+// recorta en silencio: se rechaza sin aplicar nada. maxFreeSeconds no se cruza (no hay tomas libres).
+constexpr int kLooperTracksHw = 16;   // AudioLooper::MAX_TRACKS_HW
+// 64 GiB, o lo que cabe en size_t donde es de 32 bits: una cota de cordura, no un presupuesto.
+constexpr uint64_t kLooperBudgetCeiling =
+    std::min<uint64_t>(std::numeric_limits<size_t>::max(), uint64_t{1} << 36);
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineLooperSetCapabilities(
+    JNIEnv* env, jobject thiz, jlong handle, jlong budgetBytes, jint maxTracks) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    // El cast a sin signo manda un presupuesto negativo por encima del techo.
+    if (static_cast<uint64_t>(budgetBytes) > kLooperBudgetCeiling ||
+        maxTracks < 0 || maxTracks > kLooperTracksHw) {
+        return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    }
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    wma_looper_set_capabilities(slot->engine, budgetBytes, maxTracks, 0);
+    return static_cast<jint>(WMA_OK);
 }
 
 // --- Cancion programada por handle (REQ-055 S11): 1:1 con las nativeSong* del vivo, por el
