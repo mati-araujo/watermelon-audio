@@ -53,6 +53,7 @@ add_executable(analysis_tests
     test_take_manifest.cpp
     test_take_feeder.cpp
     test_wav_file_dump_sink.cpp
+    test_early_reading.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/McLeodPitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../dsp/BiquadFilter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../AnalysisRing.cpp
