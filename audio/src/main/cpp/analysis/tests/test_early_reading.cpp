@@ -78,6 +78,7 @@ struct Pub {
     bool bMeasured = false;
     double segmentStartSec = 0.0;   ///< inicio del segmento vigente del motor, en segundos del flujo
     int attacks = 0;                ///< ataques que detecto el motor hasta aca
+    double verdictSigma = NAN;      ///< la σ del veredicto antes de la deriva temprana (NaN si no es del veredicto)
 };
 
 /// Alimenta `mono` al motor entero en tandas de 256 (como el instrumento), objetivo puesto con el ring
@@ -117,6 +118,7 @@ std::vector<Pub> runEngine(const std::vector<float>& mono, int rate, double targ
             p.segmentStartSec =
                 static_cast<double>(ring.readPosition() - (s.framesSinceReset() - s.segmentStartFrame())) / rate;
             p.attacks = s.attacksDetected();
+            p.verdictSigma = s.verdictUncertaintyCents();
             out.push_back(p);
         }
     }
@@ -499,7 +501,7 @@ TEST(EarlyReading, StableThreePartialsCoveredAtTwoSigma) {
 
 TEST(EarlyReading, AStableNoteDoesNotInflateSigma) {
     // AC-058.5: sobre una nota estable (sintesis de 1 a 4 parciales) la mediana de σ/|error| de las
-    // tempranas no supera 3. Mutante «deriva sin restar su σ» ⇒ infla.
+    // tempranas no supera 3,5 (D49, PROVISIONAL). Mutante «deriva sin restar su σ» ⇒ infla.
     for (int np = 1; np <= 4; ++np) {
         const Honesty h = stableHonesty(np);
         char label[64];
@@ -507,7 +509,10 @@ TEST(EarlyReading, AStableNoteDoesNotInflateSigma) {
         reportHonesty(label, h);
         RecordProperty("no_inflacion_" + std::to_string(np) + "p_centesimas", static_cast<int>(h.medianRatio() * 100.0));
         ASSERT_GT(h.n, 100);
-        EXPECT_LE(h.medianRatio(), 3.0) << np << " parciales";
+        // D49 (coordinadora, 2026-10-28): sobre SINTESIS el umbral es 3,5× PROVISIONAL hasta el acero (medido:
+        // 0,01 / 2,84 / 3,36 / 3,41 con 1/2/3/4 parciales; el piso de σ propagada de k >= 3 es conservador
+        // sobre una serie limpia). Sobre el corpus asentado sigue 3× (`EarlyErrorAndSettledSigmaAgainstF0`).
+        EXPECT_LE(h.medianRatio(), 3.5) << np << " parciales";
     }
 }
 
@@ -557,6 +562,32 @@ TEST(States, NoConvergedBeforeTheVerdictOnGlides) {
         for (const Pub& p : pubs)
             if (p.early && !std::isnan(p.cents) && p.sigma <= StrobeTracker::kConvergedUncertaintyCents) ++earlySmall;
     EXPECT_GT(earlySmall, 0) << "ninguna temprana con σ ≤ 0,1: el control positivo del mutante no existe";
+}
+
+TEST(States, AVerdictMeasuringPublishesTheEarlyDriftAndConvergedKeepsTodaysSigma) {
+    // Decision del lider (2026-10-28): una MEASURING del VEREDICTO (σ de hoy > 0,1) publica max(σ de hoy,
+    // deriva del ajuste temprano vigente); una CONVERGED publica la σ de hoy bit a bit, y el estado sale
+    // de la σ de hoy. Sobre los 24 glides.
+    int converged = 0, verdictMeasuring = 0, raised = 0;
+    for (const GlideRun& g : glideRuns())
+        for (const Pub& p : g.pubs) {
+            if (std::isnan(p.cents) || p.early || std::isnan(p.verdictSigma)) continue;
+            const float today = static_cast<float>(p.verdictSigma);
+            if (p.state == wma::analysis::kStateConverged) {
+                ++converged;
+                EXPECT_EQ(static_cast<float>(p.sigma), today) << "una CONVERGED no publica la σ de hoy a " << p.sec << " s";
+                EXPECT_LE(p.verdictSigma, StrobeTracker::kConvergedUncertaintyCents);
+            } else {
+                ++verdictMeasuring;
+                EXPECT_GE(static_cast<float>(p.sigma), today);
+                if (static_cast<float>(p.sigma) > today) ++raised;
+            }
+        }
+    std::printf("  [REQ-058] glides: CONVERGED %d; MEASURING del veredicto %d, con la deriva temprana arriba %d\n", converged,
+                verdictMeasuring, raised);
+    EXPECT_GT(converged, 0);
+    // Los glides sinteticos no dejan MEASURING del veredicto (pasan de temprana a CONVERGED): el control
+    // positivo de la regla corre sobre corpus-v1, `EarlyReadingCorpus.VerdictMeasuringTakesTheEarlyDrift`.
 }
 
 TEST(Inharmonicity, NotMeasuredFromAnEarlyReading) {

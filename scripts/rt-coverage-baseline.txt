@@ -68,6 +68,7 @@ audio/src/main/cpp/analysis/PhaseSlopeEstimator.h::PhaseSlopeEstimator::setDense
 audio/src/main/cpp/analysis/PhaseSlopeEstimator.h::PhaseSlopeEstimator::setPhaseSegment
 audio/src/main/cpp/analysis/StrobeTracker.cpp::StrobeTracker::combineEarlyReadings
 audio/src/main/cpp/analysis/StrobeTracker.cpp::StrobeTracker::combineVerdictReadings
+audio/src/main/cpp/analysis/StrobeTracker.cpp::StrobeTracker::evaluateEarlyReading
 audio/src/main/cpp/analysis/StrobeTracker.cpp::StrobeTracker::process
 audio/src/main/cpp/analysis/StrobeTracker.cpp::StrobeTracker::settleWaitingSegment
 audio/src/main/cpp/analysis/StrobeTracker.cpp::StrobeTracker::trackAttackBlock

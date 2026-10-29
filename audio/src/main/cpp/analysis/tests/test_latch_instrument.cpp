@@ -719,6 +719,8 @@ struct FedRun {
     /// REQ-058 (D48, B5): alineado con `pubs`. En una CONVERGED del veredicto con k = 2, la σ que daria la
     /// propagacion exacta del ajuste de dos puntos (la del camino temprano) en vez de `√Σσ²`; NaN en el resto.
     std::vector<double> verdictK2ExactSigma;
+    /// Alineado con `pubs`: la σ del veredicto ANTES de la deriva temprana (`verdictUncertaintyCents`).
+    std::vector<double> verdictSigma;
 };
 
 // 🔴 EL TAMANO DE TANDA ES PARTE DE LO QUE SE MIDE, Y EL MOTOR DE HOY DEPENDE DE LA PARTICION DEL FLUJO.
@@ -780,7 +782,8 @@ FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e, int chunkFram
             ring.writeStereo(src, chunk);
             written += chunk;
             for (;;) {
-                if (analysis.drainOnce() == wma::analysis::AnalysisThread::DrainOutcome::kRingEmpty) break;
+                const auto outcome = analysis.drainOnce();
+                if (outcome == wma::analysis::AnalysisThread::DrainOutcome::kRingEmpty) break;
                 float v[wma::analysis::kSnapshotValueCount];
                 if (!snapshot.read(v)) continue;
                 Publication p;
@@ -815,6 +818,11 @@ FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e, int chunkFram
                         k2 = wma::analysis::StrobeTracker::propagatedStretchSigma(sg, ord, 2, B);
                 }
                 run.verdictK2ExactSigma.push_back(k2);
+                // Solo en un drenado que PUBLICO el snapshot leido: tras un kAccumulated el snapshot es el del tick
+                // anterior y la sonda ya avanzo.
+                run.verdictSigma.push_back(outcome == wma::analysis::AnalysisThread::DrainOutcome::kPublished
+                                               ? s.verdictUncertaintyCents()
+                                               : kNan);
             }
         }
         if (pass == 0) run.frames1 = static_cast<int64_t>(ring.readPosition());
@@ -2099,6 +2107,10 @@ struct EarlyCorpus {
     std::vector<int64_t> convergedBigSigmaOrEarly;   ///< publicaciones CONVERGED con σ > 0,1 o tempranas
     int convergedVerdictK2 = 0;                      ///< CONVERGED del veredicto con k = 2
     int convergedLostWithExactK2 = 0;                ///< de esas, cuantas pasarian σ > 0,1 con la propagacion exacta
+    int verdictMeasuring = 0;                        ///< MEASURING del veredicto con cents
+    int verdictMeasuringRaised = 0;                  ///< de esas, las que publicaron la deriva temprana
+    int verdictMeasuringBelowToday = 0;              ///< MEASURING del veredicto con σ publicada < σ de hoy
+    int convergedNotToday = 0;                       ///< CONVERGED cuya σ publicada no es la de hoy
 };
 
 const EarlyCorpus& earlyCorpus() {
@@ -2140,6 +2152,14 @@ const EarlyCorpus& earlyCorpus() {
             c.attacks.push_back({e.name, e.name.substr(0, u), e.name.substr(u + 1, e.name.size() - u - 5), passOf[i], run.rate,
                                  attacks[i]});
         }
+        for (size_t i = 0; i < run.pubs.size(); ++i) {
+            const Publication& p = run.pubs[i];
+            if (p.state != wma::analysis::kStateMeasuring || p.early || std::isnan(p.hz) || std::isnan(run.verdictSigma[i])) continue;
+            const float today = static_cast<float>(run.verdictSigma[i]);
+            ++c.verdictMeasuring;
+            if (static_cast<float>(p.sigmaCents) > today) ++c.verdictMeasuringRaised;
+            if (static_cast<float>(p.sigmaCents) < today) ++c.verdictMeasuringBelowToday;
+        }
         DetectorFile df;
         df.file = e.name;
         df.noteEnd = noteEnd;
@@ -2155,6 +2175,10 @@ const EarlyCorpus& earlyCorpus() {
             if (p.state != wma::analysis::kStateConverged) continue;
             if (p.early || p.sigmaCents > wma::analysis::StrobeTracker::kConvergedUncertaintyCents)
                 c.convergedBigSigmaOrEarly.push_back(p.pos);
+            if (!p.early && !std::isnan(p.hz) && !std::isnan(run.verdictSigma[i])) {
+                const float today = static_cast<float>(run.verdictSigma[i]);
+                if (static_cast<float>(p.sigmaCents) != today) ++c.convergedNotToday;
+            }
             if (!std::isnan(run.verdictK2ExactSigma[i])) {
                 ++c.convergedVerdictK2;
                 if (run.verdictK2ExactSigma[i] > wma::analysis::StrobeTracker::kConvergedUncertaintyCents)
@@ -2235,30 +2259,127 @@ TEST(EarlyReadingCorpus, EveryAttackReadsWithin500msAndKeepsReading) {
     EXPECT_GE(fracB, 0.90);
 }
 
+// ---- D50: el ruido propio del oraculo corto de f0 (σ_or), versionado como dato ---------------------
+
+/// `corpus-v1-sigma-oraculo-f0.tsv` (`scripts/corpus-oracle-sigma.py`): σ_or por (clase, fase); fase 1 =
+/// «ataque» ((0,25, 1] s, que vale tambien para (0, 0,25]) y 2 = «asentada».
+std::string oracleSigmaPath() { return std::string(WMA_ANALYSIS_GOLDEN_DIR) + "/../corpus-v1-sigma-oraculo-f0.tsv"; }
+
+using OracleSigma = std::map<std::pair<std::string, int>, std::pair<int, double>>;   // (clase, fase) -> (n, σ_or)
+
+bool loadOracleSigma(OracleSigma* out) {
+    bool ok = false;
+    const std::string text = slurp(oracleSigmaPath(), &ok);
+    if (!ok) return false;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t eol = text.find('\n', pos);
+        if (eol == std::string::npos) eol = text.size();
+        const std::string line = text.substr(pos, eol - pos);
+        pos = eol + 1;
+        if (line.empty() || line[0] == '#') continue;
+        char cls[256] = {0}, ph[64] = {0};
+        int n = 0;
+        double sg = 0.0;
+        if (std::sscanf(line.c_str(), "%255s %63s %d %lf", cls, ph, &n, &sg) != 4) return false;
+        (*out)[{cls, std::string(ph) == "asentada" ? 2 : 1}] = {n, sg};
+    }
+    return !out->empty();
+}
+
+/// El MISMO procedimiento de `scripts/corpus-oracle-sigma.py`, sobre el oraculo de f0 versionado.
+OracleSigma recomputeOracleSigma(const std::map<std::string, OracleFile>& f0) {
+    std::map<std::pair<std::string, int>, std::vector<double>> vals;
+    for (const auto& [name, of] : f0) {
+        const std::vector<OracleSegment>& rs = of.segments;
+        if (of.attacks.empty() || rs.size() < 2 || of.rate <= 0) continue;
+        const double t0 = static_cast<double>(of.attacks.front()) / of.rate;
+        const double win = rs[0].tFin - rs[0].tIni, hop = rs[1].tIni - rs[0].tIni;
+        const int k = std::max(1, static_cast<int>(std::ceil(win / hop - 1e-9)));
+        const std::string cls = name.substr(0, name.find('_'));
+        for (int i = k; i + k < static_cast<int>(rs.size()); ++i) {
+            const OracleSegment &a = rs[i - k], &b = rs[i], &c = rs[i + k];
+            if (std::isnan(a.hz) || std::isnan(b.hz) || std::isnan(c.hz) || a.tIni < t0) continue;
+            const double since = b.tIni - t0;
+            if (since < 0.25) continue;
+            const double d = -(1200.0 * std::log2(a.hz / b.hz) + 1200.0 * std::log2(c.hz / b.hz)) / 2.0;
+            vals[{cls, since <= 1.0 ? 1 : 2}].push_back(std::fabs(d) / std::sqrt(1.5));
+        }
+    }
+    OracleSigma out;
+    for (auto& [key, v] : vals) out[key] = {static_cast<int>(v.size()), 1.4826 * latch::median(v)};
+    return out;
+}
+
+TEST(EarlyReadingCorpus, TheOracleSigmaIsTheVersionedOne) {
+    // D50: σ_or se fija ANTES de juzgar. Este test recomputa desde el oraculo de f0 versionado, con el
+    // procedimiento del script, y lo compara con el dato versionado: una recalibracion (cambiar el
+    // procedimiento o editar el TSV a mano para que la cobertura pase) es roja.
+    std::map<std::string, OracleFile> f0;
+    ASSERT_EQ(loadOracle(oracleF0Path(), &f0), "");
+    OracleSigma want;
+    ASSERT_TRUE(loadOracleSigma(&want)) << "falta o esta mal formado " << oracleSigmaPath();
+    const OracleSigma got = recomputeOracleSigma(f0);
+    ASSERT_EQ(got.size(), want.size());
+    for (const auto& [key, v] : want) {
+        const auto it = got.find(key);
+        ASSERT_NE(it, got.end()) << key.first << " fase " << key.second;
+        EXPECT_EQ(it->second.first, v.first) << key.first << " fase " << key.second << ": n";
+        EXPECT_NEAR(it->second.second, v.second, 6e-5) << key.first << " fase " << key.second << ": σ_or";
+    }
+}
+
+/// D50: la cobertura de AC-058.4 por estrato GLOBAL (fase × k, 2 contra >= 3) sobre las MEASURING, con
+/// |err| <= 2·√(σ² + σ_or²). Donde corpus-v1 no llega a 95 %, el piso es PROVISIONAL en lo medido (con
+/// margen de 0,01 para que una regresion sea roja); fuente: este test, cifras en la spec al lado de AC-058.4.
+struct StratumFloor {
+    const char* key;
+    double floor;
+};
+constexpr StratumFloor kCoverageFloors[] = {
+    {"0|k3", 0.95},   // (0, 0,25]  k >= 3
+    {"1|k2", 0.77},   // (0,25, 1]  k = 2     PROVISIONAL (D50)
+    {"1|k3", 0.94},   // (0,25, 1]  k >= 3    PROVISIONAL (D50)
+    {"2|k2", 0.89},   // asentada   k = 2     PROVISIONAL (D50)
+    {"2|k3", 0.89},   // asentada   k >= 3    PROVISIONAL (D50)
+};
+
 TEST(EarlyReadingCorpus, MeasuringIsCoveredPerStratumAgainstF0) {
-    // AC-058.4 (D43, D21, D47): las MEASURING con cents contra el oraculo corto de f0, por fase × k
-    // (2 contra >= 3), cobertura de 2σ >= 95 % en el global de corpus-v1; por clase de material se REPORTA.
+    // AC-058.4 (D43, D21, D47, D50): las MEASURING con cents contra el oraculo corto de f0. Se reporta
+    // tambien |err| <= 2σ (sin el oraculo), por camino y por clase.
     const EarlyCorpus& c = earlyCorpus();
     if (!c.skip.empty()) GTEST_SKIP() << c.skip;
-    std::map<std::string, latch::CoverageCell> cells;
+    OracleSigma sigmaOr;
+    ASSERT_TRUE(loadOracleSigma(&sigmaOr)) << "falta " << oracleSigmaPath();
+    struct Cell { int n = 0, cov = 0, covOr = 0; };
+    std::map<std::string, Cell> cells;
     for (const EarlyCorpusAttack& x : c.attacks)
         for (const latch::JudgedPublication& j : x.a.judged) {
             if (j.state != wma::analysis::kStateMeasuring) continue;
-            const std::string key = std::to_string(latch::phaseStratum(j.sinceT0Sec)) + "|k" +
-                                    std::to_string(latch::partialsStratum(j.partials));
-            cells["ALL|" + key].add(j);
-            cells[x.cls + "|" + key].add(j);
-            cells[std::string(j.early ? "temprana|" : "veredicto|") + key].add(j);
+            const int ph = latch::phaseStratum(j.sinceT0Sec);
+            const auto it = sigmaOr.find({x.cls, std::max(ph, 1)});
+            ASSERT_NE(it, sigmaOr.end()) << "sin σ_or para " << x.cls;
+            const double sor = it->second.second;
+            const bool covOr = std::fabs(j.errorCents) <= 2.0 * std::sqrt(j.sigmaCents * j.sigmaCents + sor * sor);
+            const std::string key = std::to_string(ph) + "|k" + std::to_string(latch::partialsStratum(j.partials));
+            for (const std::string& k : {"ALL|" + key, x.cls + "|" + key, std::string(j.early ? "temprana|" : "veredicto|") + key}) {
+                Cell& cell = cells[k];
+                ++cell.n;
+                cell.cov += j.covered ? 1 : 0;
+                cell.covOr += covOr ? 1 : 0;
+            }
         }
-    std::printf("\n  [REQ-058 AC-058.4] MEASURING contra f0 por estrato (fase 0 = (0, 0,25] s, 1 = (0,25, 1], 2 = asentada):\n");
+    std::printf("\n  [REQ-058 AC-058.4] MEASURING contra f0 por estrato (fase 0 = (0, 0,25] s, 1 = (0,25, 1], 2 = asentada):"
+                " cobertura 2σ | con σ_or (D50)\n");
     for (const auto& [key, cell] : cells)
-        std::printf("    %-34s n=%5d cobertura %.3f  mediana σ/|error| %.2f\n", key.c_str(), cell.n, cell.coverage(),
-                    cell.medianRatio());
-    for (const auto& [key, cell] : cells) {
-        if (key.rfind("ALL|", 0) != 0 || key.find("|k1") != std::string::npos) continue;   // D21: 2 contra >= 3
-        RecordProperty("cobertura_" + key, static_cast<int>(cell.coverage() * 1000.0));
-        if (cell.n < 20) continue;
-        EXPECT_GE(cell.coverage(), 0.95) << key;
+        std::printf("    %-34s n=%5d  %.3f | %.3f\n", key.c_str(), cell.n, static_cast<double>(cell.cov) / cell.n,
+                    static_cast<double>(cell.covOr) / cell.n);
+    for (const StratumFloor& f : kCoverageFloors) {
+        const auto it = cells.find(std::string("ALL|") + f.key);
+        ASSERT_NE(it, cells.end()) << f.key;
+        const double cov = static_cast<double>(it->second.covOr) / it->second.n;
+        RecordProperty(std::string("cobertura_sigma_or_") + f.key, static_cast<int>(cov * 1000.0));
+        EXPECT_GE(cov, f.floor) << "estrato " << f.key << " (n=" << it->second.n << ")";
     }
 }
 
@@ -2306,6 +2427,20 @@ TEST(EarlyReadingCorpus, ConvergedOnlyFromTheVerdictWithSmallSigma) {
     RecordProperty("converged_k2", c.convergedVerdictK2);
     RecordProperty("converged_k2_perdidas_con_exacta", c.convergedLostWithExactK2);
     EXPECT_TRUE(c.convergedBigSigmaOrEarly.empty()) << c.convergedBigSigmaOrEarly.size() << " CONVERGED con σ > 0,1 o tempranas";
+}
+
+TEST(EarlyReadingCorpus, VerdictMeasuringTakesTheEarlyDrift) {
+    // Decision del lider (2026-10-28): una MEASURING del veredicto publica max(σ de hoy, deriva temprana);
+    // una CONVERGED, la σ de hoy bit a bit. Mutante «sin el maximo» ⇒ ninguna sube (rojo en el control).
+    const EarlyCorpus& c = earlyCorpus();
+    if (!c.skip.empty()) GTEST_SKIP() << c.skip;
+    std::printf("\n  [REQ-058] MEASURING del veredicto: %d, con la deriva temprana arriba de la σ de hoy: %d\n", c.verdictMeasuring,
+                c.verdictMeasuringRaised);
+    RecordProperty("measuring_veredicto", c.verdictMeasuring);
+    RecordProperty("measuring_veredicto_con_deriva", c.verdictMeasuringRaised);
+    EXPECT_EQ(c.verdictMeasuringBelowToday, 0);
+    EXPECT_EQ(c.convergedNotToday, 0) << "una CONVERGED no publico la σ de hoy";
+    EXPECT_GT(c.verdictMeasuringRaised, 0) << "control: ninguna MEASURING del veredicto tomo la deriva temprana";
 }
 
 TEST(EarlyReadingCorpus, TheEngineAttackDetectorAgainstTheOracle) {
