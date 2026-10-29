@@ -536,13 +536,7 @@ void StrobeTracker::combineEarlyReadings() {
         const InterleavedPhaseEstimator& grids = mPartials[pi];
         const InterleavedPhaseEstimator::DenseEarlyFit& f = grids.denseEarlyFit();
         // D46: el arbitraje de signo (R-PITCH-38) se relaja SOLO aca y SOLO lejos del borde del rango.
-        // Cerca del borde —la gruesa o la fina a la mitad del rango o mas— un alias puede dar vuelta
-        // el signo, y ahi se arbitra como siempre. Lejos del borde la gruesa del ataque (p90 14,5 c)
-        // contradice en signo a la fina sin que haya alias: medido en prototipo, frenaba 3 de 41
-        // archivos de corpus-v1 hasta 0,65-1,02 s, y relajado las 100 tempranas > 10 c que suma
-        // quedan dentro de su 2σ.
-        const double halfRange = 0.5 * grids.denseCaptureRangeCents();
-        const bool nearEdge = std::fabs(coarse) >= halfRange || std::fabs(f.cents) >= halfRange;
+        const bool nearEdge = earlyPathArbitratesSign(coarse, f.cents, grids.denseCaptureRangeCents());
         const PartialAdmission a =
             gatePartialReading(f.n >= InterleavedPhaseEstimator::kEarlyMinPhases, /*trendEvaluable=*/true, f.cents,
                                f.sigmaCents, f.binToRmsRatio, grids, coarse, mDomainVerified, nearEdge);

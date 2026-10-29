@@ -728,16 +728,43 @@ TEST(Segments, RewritingTheSameTargetKeepsSegments) {
     }
 }
 
+TEST(Segments, TheAttackDetectorDoesNotDependOnTheCallerBlock) {
+    // D-5: el detector decide en los bordes de la grilla de 1024 del strobe, no por llamada. Alimentando
+    // el MISMO re-punteo al strobe en bloques de 256, 1000 y 8192, los ataques y el inicio del segmento
+    // son los mismos. Mutante «detector por llamada (sin partir en los bordes)» ⇒ con 8192 el rms del
+    // bloque sale de otra cuenta y el ataque cambia.
+    const std::vector<float> sig = repluck(kSegFirstCents);
+    int attacks[3] = {0, 0, 0};
+    int64_t start[3] = {0, 0, 0};
+    const int blocks[3] = {256, 1000, 8192};
+    for (int b = 0; b < 3; ++b) {
+        StrobeTracker t;
+        t.prepare(kSegRate);
+        t.setTarget(kSegF0);
+        t.setCoarseFrequencyHz(detune(kSegF0, kSegFirstCents));
+        for (size_t off = 0; off < sig.size(); off += static_cast<size_t>(blocks[b]))
+            t.process(sig.data() + off, static_cast<int>(std::min<size_t>(static_cast<size_t>(blocks[b]), sig.size() - off)));
+        attacks[b] = t.attacksDetected();
+        start[b] = t.segmentStartFrame();
+    }
+    EXPECT_EQ(attacks[0], 1) << "el re-punteo tiene que abrir exactamente un segmento";
+    for (int b = 1; b < 3; ++b) {
+        EXPECT_EQ(attacks[b], attacks[0]) << "bloque " << blocks[b];
+        EXPECT_EQ(start[b], start[0]) << "bloque " << blocks[b];
+    }
+}
+
 TEST(Segments, TheAttackRampOpensOneSegment) {
-    // D-3: la rampa de un ataque que sube en varios bloques (+6 dB, +6 dB, +6 dB) abre UN segmento.
+    // D-3: la rampa de un ataque que sube en varios bloques (+8 dB, +8 dB, +8 dB) abre UN segmento.
     // Mutante «sin refractario» ⇒ 2-3 aperturas.
     constexpr int rate = kSegRate;
     auto sig = partialsWithPitchTrajectory(kSegF0, 1e-4, oneOverNAmplitudes(4, 0.4), rate, 3 * rate, [](double) { return 0.0; });
-    // Silencio NO: la nota arranca bajita (0,02) y sube ×2 por bloque de 1024 durante 4 bloques desde 1 s.
+    // Silencio NO: la nota arranca bajita (0,02) y sube ×2,5 (+8 dB) por bloque de 1024 durante ~3,3
+    // bloques desde 1 s: sin refractario cada bloque de la rampa es un ataque.
     const int rampStart = rate;
     for (int i = 0; i < static_cast<int>(sig.size()); ++i) {
         double g = 0.02;
-        if (i >= rampStart) g = std::min(1.0, 0.02 * std::pow(2.0, (i - rampStart) / 1024.0 + 1.0));
+        if (i >= rampStart) g = std::min(1.0, 0.02 * std::pow(2.5, (i - rampStart) / 1024.0 + 1.0));
         sig[i] = static_cast<float>(sig[i] * g);
     }
     const auto pubs = runEngine(sig, rate, kSegF0);
@@ -790,6 +817,36 @@ TEST(SignOutsideRange, TheEarlyPathStillDropsAnAliasNearTheEdge) {
     EXPECT_GT(far.readings, 0) << "lejos del borde el camino temprano tendria que leer con el signo relajado";
     EXPECT_FALSE(far.anyVerdict);
     EXPECT_NEAR(far.lastCents, -3.0, 0.05);
+}
+
+TEST(SignOutsideRange, TheEarlyPathArbitratesTheSignOnlyNearTheEdge) {
+    // D46, la regla sola. Con la serie densa y κ = 0,9 un alias de un tono puro cae fuera del lobulo de
+    // Hann y lo descarta el PISO DE ENERGIA antes que el signo (el test de arriba): por eso la regla se
+    // afirma aparte. Mutante «signo relajado tambien cerca del borde» (nunca arbitra) ⇒ rojo; mutante
+    // «arbitra siempre» (el veredicto) ⇒ rojo en la mitad lejos del borde.
+    constexpr double kRange = 36.0;
+    EXPECT_TRUE(StrobeTracker::earlyPathArbitratesSign(18.0, -3.0, kRange)) << "la gruesa a la mitad del rango";
+    EXPECT_TRUE(StrobeTracker::earlyPathArbitratesSign(2.0, -18.0, kRange)) << "la fina a la mitad del rango";
+    EXPECT_TRUE(StrobeTracker::earlyPathArbitratesSign(-35.0, 30.0, kRange));
+    EXPECT_FALSE(StrobeTracker::earlyPathArbitratesSign(17.9, -17.9, kRange)) << "lejos del borde no se arbitra";
+    EXPECT_FALSE(StrobeTracker::earlyPathArbitratesSign(3.0, -3.0, kRange));
+}
+
+TEST(EarlyReading, APureToneReadsOnlyTheFundamental) {
+    // REQ-027 en el camino temprano: con un tono puro los parciales 2-4 son FUGA y su ajuste da σ chica;
+    // el piso de energia del bin (0,05 sobre la ventana del ultimo cierre denso) los deja afuera y la
+    // temprana es la del fundamental solo. Mutante «admision temprana sin piso de energia» ⇒ la fuga
+    // entra al ajuste estirado y corre la lectura.
+    constexpr int rate = 48000;
+    const auto pubs = runEngine(pureSine(detune(82.40689, 1.0), rate, rate, 0.3), rate, 82.40689);
+    int early = 0;
+    for (const Pub& p : pubs) {
+        if (!p.early || std::isnan(p.cents)) continue;
+        ++early;
+        EXPECT_EQ(p.k, 1) << "a " << p.sec << " s entraron parciales de fuga";
+        EXPECT_NEAR(p.cents, 1.0, 0.05) << "a " << p.sec << " s";
+    }
+    EXPECT_GT(early, 0);
 }
 
 }  // namespace

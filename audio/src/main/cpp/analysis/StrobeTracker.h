@@ -237,6 +237,18 @@ public:
     static constexpr double kStretchFitEdgeB = 1e-9;
 
     /**
+     * D46 — ¿el camino temprano arbitra el signo de este parcial contra la gruesa? Solo CERCA del borde
+     * de su rango (la gruesa o la fina a la mitad del rango o mas), donde un alias puede dar vuelta el
+     * signo. Lejos del borde la gruesa del ataque (p90 14,5 c) contradice en signo a la fina sin que haya
+     * alias: medido en prototipo, frenaba 3 de 41 archivos de corpus-v1 hasta 0,65-1,02 s, y relajado
+     * las 100 tempranas > 10 c que suma quedan dentro de su 2σ. El veredicto arbitra siempre (R-PITCH-38).
+     */
+    static bool earlyPathArbitratesSign(double coarseCents, double fineCents, double rangeCents) noexcept {
+        const double half = 0.5 * rangeCents;
+        return std::fabs(coarseCents) >= half || std::fabs(fineCents) >= half;
+    }
+
+    /**
      * La σ que el AJUSTE ESTIRADO propaga desde la σ de cada parcial (D-1, «piso» de k ≥ 3 y la σ de
      * k = 2, D29): `√Σ w_i²·σ_i²`, con `w_i = ∂C/∂cents_i` la SENSIBILIDAD REAL del ajuste en el B
      * encontrado. Dentro de la busqueda es el peso del intercepto de la recta en `x_i =
