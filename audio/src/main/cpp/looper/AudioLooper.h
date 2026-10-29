@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <limits>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -1071,6 +1072,8 @@ public:
         mSongBusQuietFrames = 0;
         mSongBusTailFrames = 0;
         mSongBusFadeLeft = -1;
+        mSongBusRiseGain = 1.0f;
+        mSongBusRiseInc = 0.0f;
         if (wm::ISongSpaceBus* bus = mSongBus.load(std::memory_order_acquire)) bus->resetSpaceBus();
     }
 
@@ -1890,6 +1893,8 @@ private:
     int64_t mSongBusQuietFrames{0};              // frames seguidos con el bus bajo el umbral
     int64_t mSongBusTailFrames{0};               // frames de cola desde que la cancion dejo de alimentar el bus
     int64_t mSongBusFadeLeft{-1};                // frames que le quedan al fundido del tope; -1 = no hay fundido
+    float mSongBusRiseGain{1.0f};                // ganancia del retorno mientras sube tras reactivar a mitad del fundido
+    float mSongBusRiseInc{0.0f};                 // incremento por frame de esa subida; 0 = no sube
     std::vector<float> mSongSendBuf;
     std::vector<float> mSongFxBuf;
     std::vector<float> mSongScratch;
@@ -1902,6 +1907,7 @@ private:
     // duracion FIJA del fundido que la cierra, repartida en los bloques que hagan falta.
     static constexpr double kSongTailMaxSeconds = 600.0;
     static constexpr double kSongTailFadeSeconds = 0.05;
+    static constexpr float kSongSendLimit = 64.0f;            // tope del envio al bus: 16 pistas x ganancia 2 x clip ~1, con margen
     // Taps de la pasada offline (un solo hilo): ver armSongTaps().
     float* mTapFx{nullptr};
     float* mTapTracks{nullptr};
@@ -2081,6 +2087,10 @@ private:
             mSongSpaceSeen = ~0u;
             mSongBusStale = false;
         }
+        if (mSongBusFadeLeft > 0) {
+            // Reactivada a mitad del fundido: el retorno sube desde donde iba, sin escalon.
+            startSongBusRise(static_cast<float>(mSongBusFadeLeft) / static_cast<float>(songTailFadeFrames()));
+        }
         mSongBusLive = true;
         mSongBusQuietFrames = 0;
         mSongBusTailFrames = 0;
@@ -2092,18 +2102,45 @@ private:
         }
         sanitizeSongSend(numFrames);
         bus->runSpaceBus(mSongSendBuf.data(), mSongFxBuf.data(), numFrames);
+        riseSongBusReturn(numFrames);
         simd::addStereoBuffers(dry, dry, mSongFxBuf.data(), numFrames, /*applyHeadroom=*/false);
         if (mTapFx != nullptr && numFrames <= mTapFrames) {
             std::memcpy(mTapFx, mSongFxBuf.data(), sizeof(float) * static_cast<size_t>(numFrames) * 2);
         }
     }
 
+    int64_t songTailFadeFrames() const {
+        const double rate = static_cast<double>(mSampleRate.load(std::memory_order_acquire));
+        return std::max<int64_t>(1, static_cast<int64_t>(rate * kSongTailFadeSeconds));
+    }
+
+    void startSongBusRise(float fromGain) {
+        mSongBusRiseGain = fromGain;
+        mSongBusRiseInc = (1.0f - fromGain) / static_cast<float>(songTailFadeFrames());
+    }
+
+    /// Aplica a mSongFxBuf la subida del retorno (si la hay) y la avanza. AUDIO THREAD.
+    void riseSongBusReturn(int numFrames) {
+        if (mSongBusRiseInc <= 0.0f) return;
+        const float inc = mSongBusRiseInc;
+        const float start = mSongBusRiseGain;
+        const float end = std::min(1.0f, start + inc * static_cast<float>(numFrames));
+        const int ramp = end >= 1.0f ? std::min(numFrames, static_cast<int>(std::ceil((1.0f - start) / inc))) : numFrames;
+        simd::applyStereoGainRamp(mSongFxBuf.data(), ramp, start, std::min(1.0f, start + inc * static_cast<float>(ramp)));
+        mSongBusRiseGain = std::min(1.0f, start + inc * static_cast<float>(ramp));
+        if (end >= 1.0f) {
+            mSongBusRiseGain = 1.0f;
+            mSongBusRiseInc = 0.0f;
+        }
+    }
+
     /**
      * @brief Saneo del envio (AUDIO THREAD): una muestra no finita (un clip con NaN/Inf) se escribe
-     *        como 0 antes de que entre al bus, y el bloque se cuenta. Los efectos ya ponen en cero su
-     *        salida no finita, pero sus lineas internas quedarian envenenadas para siempre. No hay
-     *        guarda por pico: la salida del delay no tiene un techo fisico util (realimentacion 0,9 da
-     *        ~10x el envio, ~50x cerca de 9,4 kHz) y con realimentacion <= 0,9 la linea es estable.
+     *        como 0 y una de modulo > kSongSendLimit (64) se recorta a ese limite; en ambos casos el
+     *        bloque se cuenta (`getSongBusGuardTrips`). Un clip float WAV con 3e38 es finito pero la
+     *        reverb suma L+R y desborda a Inf, y sus lineas quedarian envenenadas. 64 = 16 pistas x
+     *        ganancia 2 x clip ~1 con margen para float > 1: ningun envio legitimo lo alcanza. No es
+     *        una guarda por pico de la SALIDA (el delay a 0,9 llega a ~50x el envio y eso es normal).
      *        `!(|v| <= max)` es verdadero tambien para NaN.
      */
     void sanitizeSongSend(int numFrames) {
@@ -2111,8 +2148,9 @@ private:
         const size_t n = static_cast<size_t>(numFrames) * 2;
         bool bad = false;
         for (size_t i = 0; i < n; ++i) {
-            if (!(std::abs(send[i]) <= std::numeric_limits<float>::max())) {
-                send[i] = 0.0f;
+            const float v = send[i];
+            if (!(std::abs(v) <= kSongSendLimit)) {
+                send[i] = std::abs(v) <= std::numeric_limits<float>::max() ? std::copysign(kSongSendLimit, v) : 0.0f;
                 bad = true;
             }
         }
@@ -2157,6 +2195,7 @@ private:
             bus->applySpaceParams(loadSongSpace());
         }
         bus->runSpaceBus(mSongSendBuf.data(), mSongFxBuf.data(), numFrames);
+        riseSongBusReturn(numFrames);
         const int64_t rate = mSampleRate.load(std::memory_order_acquire);
         if (mSongBusFadeLeft < 0) {
             mSongBusTailFrames += numFrames;

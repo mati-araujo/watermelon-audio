@@ -354,10 +354,13 @@ audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::mixTracksInto
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::process
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::processImpl
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::rampSongTaps
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::riseSongBusReturn
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::runSongBusTail
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::sanitizeSongSend
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::songBusFits
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::songTailFadeFrames
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::startRecording
+audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::startSongBusRise
 audio/src/main/cpp/looper/AudioLooper.h::AudioLooper::triggerClick
 audio/src/main/cpp/looper/ChunkedAudioBuffer.h::ChunkedAudioBuffer::contiguousRun
 audio/src/main/cpp/looper/LooperEventDispatcher.h::LooperEventDispatcher::pushFromRT

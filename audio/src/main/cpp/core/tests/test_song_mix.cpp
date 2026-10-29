@@ -681,6 +681,57 @@ TEST_F(SongMix, ANonFiniteSampleInAClipNeverPoisonsTheRealBusSoALaterCleanSongSo
     }
 }
 
+// Defecto (BLOQUEANTE del review de 042a0c27): el saneo solo descartaba lo no finito. Una muestra
+// FINITA enorme (3e38, un float WAV crudo) hace que la reverb sume L+R y desborde a Inf: sus lineas
+// quedaban en NaN, la salida en 0 y el bus muerto sin contarse. Con el bus REAL el envio se acota a
+// ±kSongSendLimit (y el bloque se cuenta): la cancion limpia posterior da el FX del control.
+TEST_F(SongMix, AHugeFiniteSampleInAClipIsClampedSoALaterCleanSongSoundsLikeTheControl) {
+    struct Case { const char* name; float bad; float reverb; float delay; };
+    for (const Case& c : {Case{"big_rv", 3e38f, 1.0f, 0.0f}, Case{"big_dl", 3e38f, 0.0f, 1.0f},
+                          Case{"mid_rv", 1e37f, 1.0f, 0.0f}, Case{"mid_dl", 1e37f, 0.0f, 1.0f},
+                          Case{"nbig_rv", -3e38f, 1.0f, 0.0f}}) {
+        SCOPED_TRACE(c.name);
+        const auto run = [&](const std::string& tag, float bad, int64_t& guardTrips) {
+            const std::string poisoned = tone(tag + "_p", 100.0f, 0.0f, 0.3f, 100, bad);
+            const std::string clean = tone(tag + "_c", 75.0f, 1.0f);
+            WmaEngine* e = offlineEngine();
+            const int32_t a = loadClip(e, poisoned), b = loadClip(e, clean);
+            EXPECT_EQ(wma_mix_set_track(e, 0, 1.0f, 0.0f, 1.0f), WMA_OK);
+            WmaMixSpace sp = space(c.reverb, c.delay);
+            sp.delay_time_ms = 100.0f;
+            EXPECT_EQ(wma_mix_set_space(e, &sp), WMA_OK);
+            const int64_t p0 = wma_transport_get_play_frame(e);
+            const WmaSongSection s1 = section2(p0 + 2 * kLoop, a, WMA_SONG_SILENCE);
+            EXPECT_EQ(wma_song_set_schedule(e, kLoop, &s1, 1, p0 + 600 * kLoop), WMA_OK);
+            const Rendered first = renderTaps(e, 6, 1);
+            EXPECT_EQ(wma_song_set_schedule(e, kLoop, nullptr, 0, 0), WMA_OK);
+            (void)renderTaps(e, 20, 1);
+            const int64_t p1 = wma_transport_get_play_frame(e);
+            const WmaSongSection s2 = section2(p1 + 2 * kLoop, b, WMA_SONG_SILENCE);
+            EXPECT_EQ(wma_song_set_schedule(e, kLoop, &s2, 1, p1 + 600 * kLoop), WMA_OK);
+            const Rendered second = renderTaps(e, 8, 1);
+            guardTrips = e->engine->getAudioLooper().getSongBusGuardTrips();
+            for (const float v : first.fx) EXPECT_TRUE(std::isfinite(v));
+            for (const float v : second.fx) EXPECT_TRUE(std::isfinite(v));
+            return second.fx;
+        };
+        int64_t trips = 0, controlTrips = 0;
+        const std::vector<float> withBad = run(std::string(c.name) + "_a", c.bad, trips);
+        const std::vector<float> control = run(std::string(c.name) + "_b", 0.0f, controlTrips);
+        EXPECT_GE(trips, 1) << "el envio enorme no se conto";
+        EXPECT_EQ(controlTrips, 0);
+        ASSERT_EQ(withBad.size(), control.size());
+        EXPECT_GT(peakOf(control, control.size() - static_cast<size_t>(kLoop) * 2), 0.01f)
+            << "la cancion limpia de control no suena: el test no prueba nada";
+        float worst = 0.0f;
+        for (size_t i = 0; i < control.size(); ++i) worst = std::max(worst, std::abs(withBad[i] - control[i]));
+        // No es bit a bit: la cola del clip recortado se apaga bajo -120 dBFS (el bus queda con ese
+        // residuo adentro, sin vaciarse) y asoma ~1e-4 en la cancion siguiente. Un bus envenenado da
+        // un FX de 0 (diferencia ~0,2, el pico del control) o de ±4 (la linea en el limite).
+        EXPECT_LE(worst, 5e-4f) << "el bus quedo envenenado: la cancion limpia suena distinto";
+    }
+}
+
 // Defecto (BLOQUEANTE del review de 8855c93d): la guarda por pico absoluto (> 16) cortaba material
 // legitimo. La salida wet del delay llega a ~10x el envio con feedback 0,9 y material periodico; con
 // ganancia 2, paneo −1, seno de 100 Hz a escala plena, envio 1 y 250 ms, el FX pasaba de 16 cada

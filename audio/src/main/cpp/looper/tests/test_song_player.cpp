@@ -2091,3 +2091,106 @@ TEST(SongBusTail, SeveralShortTailsDoNotAccumulateTowardsTheTenMinuteCap) {
     EXPECT_EQ(bus.resets, 0);
     EXPECT_TRUE(rig.looper.isSongBusLive());
 }
+
+namespace {
+
+/// Avanza una cola sin fin (bus que devuelve 0,5) hasta que el tope la esta fundiendo: el ultimo
+/// bloque ya baja de 0,45 y todavia no llego a 0. Devuelve el frame siguiente.
+int64_t renderUntilTheCapIsFading(Rig& rig, RecordingBus& bus, int64_t next) {
+    const int runsAtEnd = bus.runs;
+    constexpr int64_t kLeadBlocks = static_cast<int64_t>(kSR) * 600 / kTailBlock - 8;
+    constexpr int64_t kChunk = kTailBlock * 937;
+    while (bus.runs - runsAtEnd < kLeadBlocks - 937) {
+        (void)rig.render(next, kChunk, kTailBlock);
+        next += kChunk;
+    }
+    while (bus.runs - runsAtEnd < kLeadBlocks) {
+        (void)rig.render(next, kTailBlock, kTailBlock);
+        next += kTailBlock;
+    }
+    for (int i = 0; i < 16; ++i) {
+        const std::vector<float> out = rig.render(next, kTailBlock, kTailBlock);
+        next += kTailBlock;
+        if (out[out.size() - 2] < 0.45f) return next;
+    }
+    ADD_FAILURE() << "el tope no empezo a fundir";
+    return next;
+}
+
+float maxStepOf(const std::vector<float>& out) {
+    float step = 0.0f;
+    for (size_t i = 2; i < out.size(); i += 2) step = std::max(step, std::abs(out[i] - out[i - 2]));
+    return step;
+}
+
+}  // namespace
+
+// Bug plausible (review de 042a0c27, hallazgo 3): reactivar la cancion en medio del fundido del tope
+// hace saltar el retorno de left/total a 1 en una muestra (un click de ~0,2 con el bus a 0,5). El
+// retorno sube en 50 ms desde donde iba: la salida (voz en silencio) arranca donde cerro el
+// fundido y sube sin saltos, no se cuenta tope y la cola siguiente dura sus 590 s
+// (hallazgo 2: sin reiniciar el fundido se cortaba a los ~29 ms).
+TEST(SongBusTail, ReactivatingMidFadeRaisesTheReturnWithoutAStepAndLeavesNoStaleFade) {
+    Rig rig;
+    RecordingBus bus(kTailBlock);
+    int64_t next = playAndRemoveSong(rig, bus, 0.5f);
+    next = renderUntilTheCapIsFading(rig, bus, next);
+    ASSERT_EQ(rig.looper.getSongBusTailCaps(), 0);
+    rig.looper.setSongMixTrack(0, 0.0f, 0.0f, 1.0f);   // la voz en silencio: la salida es solo el retorno del bus
+    const int32_t id = rig.load("mf_a", kBusLoop, dc(0.1f), kBusLoop);
+    ASSERT_EQ(rig.schedule(kBusLoop, {sec(next, id)}, next + (1 << 24)), wm::SongStatus::Ok);
+    const std::vector<float> out = rig.render(next, 8 * kTailBlock, kTailBlock);
+    next += 8 * kTailBlock;
+    EXPECT_LT(maxStepOf(out), 0.01f) << "el retorno salto al reactivar a mitad del fundido";
+    // El bloque anterior (fundido) cerro en ~0,39: la subida arranca de ahi, no de 0,5.
+    EXPECT_LT(out[0], 0.42f) << "el retorno salto a 1 en la primera muestra de la reactivacion";
+    EXPECT_GT(out[0], 0.3f);
+    EXPECT_NEAR(out[out.size() - 2], 0.5f, 1e-5f) << "el retorno no volvio a 1";
+    EXPECT_EQ(rig.looper.getSongBusTailCaps(), 0) << "reactivar a mitad del fundido conto un tope";
+    ASSERT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
+    (void)rig.render(next, 2 * kTailBlock, kTailBlock);
+    next += 2 * kTailBlock;
+    constexpr int64_t kTail = static_cast<int64_t>(kSR) * 590;
+    (void)rig.render(next, kTail, kTailBlock);
+    EXPECT_EQ(rig.looper.getSongBusTailCaps(), 0) << "el fundido viejo corto la cola siguiente";
+    EXPECT_TRUE(rig.looper.isSongBusLive());
+}
+
+// Bug plausible (mutante de resetSongForRender): un render offline arranca de cero. Si un fundido a
+// medias (o una subida a medias) sobrevive al reinicio, la cancion del render siguiente arranca con
+// el retorno por debajo de 1 y la salida difiere de la de un looper fresco.
+TEST(SongBusTail, AnOfflineRenderStartsFromScratchAfterAHalfFinishedFadeOrRise) {
+    const auto playFrom = [&](Rig& rig, RecordingBus& bus, int64_t at) {
+        const int32_t id = rig.load("rs_x", kBusLoop, dc(0.1f), kBusLoop);
+        EXPECT_EQ(rig.schedule(kBusLoop, {sec(at, id)}, at + (1 << 24)), wm::SongStatus::Ok);
+        return rig.render(at, 6 * kTailBlock, kTailBlock);
+    };
+    for (const bool midRise : {false, true}) {
+        SCOPED_TRACE(midRise);
+        Rig rig;
+        RecordingBus bus(kTailBlock);
+        int64_t next = playAndRemoveSong(rig, bus, 0.5f);
+        next = renderUntilTheCapIsFading(rig, bus, next);
+        if (midRise) {
+            const int32_t id = rig.load("rs_r", kBusLoop, dc(0.1f), kBusLoop);
+            ASSERT_EQ(rig.schedule(kBusLoop, {sec(next, id)}, next + (1 << 24)), wm::SongStatus::Ok);
+            (void)rig.render(next, kTailBlock, kTailBlock);
+            next += kTailBlock;
+        }
+        ASSERT_EQ(rig.schedule(kBusLoop, {}, 0), wm::SongStatus::Ok);
+        rig.looper.resetSongForRender();
+        bus.resets = 0;
+        const std::vector<float> got = playFrom(rig, bus, next + 4 * kBusLoop);
+
+        Rig fresh;
+        RecordingBus freshBus(kTailBlock);
+        freshBus.returnLevel = 0.5f;
+        fresh.looper.publishSongBus(&freshBus, kTailBlock);
+        fresh.looper.setSongMixTrack(0, 1.0f, 0.0f, 1.0f);
+        const std::vector<float> want = playFrom(fresh, freshBus, next + 4 * kBusLoop);
+        ASSERT_EQ(got.size(), want.size());
+        float worst = 0.0f;
+        for (size_t i = 0; i < got.size(); ++i) worst = std::max(worst, std::abs(got[i] - want[i]));
+        EXPECT_LE(worst, 1e-6f) << "el fundido o la subida sobrevivieron al reinicio del render";
+    }
+}

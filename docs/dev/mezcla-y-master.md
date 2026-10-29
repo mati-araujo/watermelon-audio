@@ -99,16 +99,23 @@ entrada da la misma salida con cualquier tamano de bloque.
   con cualquier fraccion (un tono normal pierde ~35 s por cada 250 ms de delay a 0,9; el peor caso, un tono de ~9,4 kHz con fraccion 0,5, pierde solo el 2 % por vuelta: ~190 s por cada 250 ms, y con delays largos pasa los 10 min del tope, que lo corta con fundido). Con
   damping 1 los combs de la reverb quedan en DC y el bus nunca baja de 1e-6. **Saneo de la entrada del
   bus** (`sanitizeSongSend`): antes de `runSpaceBus`, toda muestra no finita del envio (un clip con NaN/Inf) se
-  escribe 0 y el bloque se cuenta (`AudioLooper::getSongBusGuardTrips`). Reverb y delay ya ponen en cero su salida no
-  finita, pero sus lineas internas quedaban en NaN para siempre y el bus se apagaba «por silencio» sin marcarse viejo;
-  con la entrada saneada no entra nada que las envenene, y no hace falta reiniciar el bus en el RT. **No hay guarda por
-  pico absoluto** (la de pico > 16 se saco): `DelayEffect` no acota su salida y con realimentacion 0,9 el wet llega a
+  escribe 0, y toda de modulo > **`kSongSendLimit` = 64** se recorta a ±64; el bloque se cuenta en los dos casos
+  (`AudioLooper::getSongBusGuardTrips`, un solo contador). Reverb y delay ya ponen en cero su salida no
+  finita, pero sus lineas internas quedaban en NaN para siempre y el bus se apagaba «por silencio» sin marcarse viejo.
+  El limite hace falta porque un float WAV crudo con una muestra 3e38 es finito y aun asi la reverb suma L+R
+  (`(inL + inR) * 0,5`) y desborda a Inf (con 5e37–2e38 el FX quedaba clavado en ±4 durante segundos). 64 =
+  16 pistas x ganancia 2 x clip ~1, con margen para un float > 1: ningun envio legitimo lo alcanza. Con el envio
+  en ±64 las lineas no desbordan: el delay a 0,9 llega a ~50x el envio (3200) y la reverb tiene ganancia < 1 por
+  vuelta, ordenes de magnitud bajo el limite del float (los dos tests con el bus real lo miden). No hay reinicio del bus en el RT. **No hay guarda por
+  pico de la SALIDA** (la de pico > 16 se saco): `DelayEffect` no acota su salida y con realimentacion 0,9 el wet llega a
   ~10x el envio con material periodico (~50x cerca de 9,4 kHz con fraccion 0,5), asi que no hay un umbral fisico que no
   corte material legitimo (ganancia 2, paneo −1, seno de 100 Hz a escala plena, 250 ms, realimentacion 0,9 lo pasaba
   cada ~4 s); con realimentacion <= 0,9 la linea es estable (verificado a 44,1/48/96/192 kHz con fraccion 0,5). El
   **tope de 10 min de cola** cierra con un fundido lineal de **duracion fija, 50 ms**, repartido en los bloques que
   hagan falta (con bloques de 1 frame dura lo mismo que con 512), cuenta el tope (`getSongBusTailCaps`) y da el bus por
-  viejo. La cuenta de la cola vuelve a 0 con cada activacion de la cancion. La proxima activacion reinicia un bus
+  viejo. La cuenta de la cola vuelve a 0 con cada activacion de la cancion. **Reactivar en medio del fundido**
+  cancela el fundido (sin contar tope ni marcar el bus viejo) y el retorno vuelve a 1 con una rampa lineal de 50 ms
+  desde la ganancia en que iba (`startSongBusRise`), sin escalon; `resetSongForRender` borra fundido y subida. La proxima activacion reinicia un bus
   viejo: ese memset en el RT queda solo para el tope y para el bloque mayor que la capacidad del bus (falla ya
   contada). Si la cancion
   se reactiva durante la cola, la cola sigue (no se reinicia). **Costo de mantenerlo vivo** (medido en
@@ -274,6 +281,9 @@ sanitizers (con ellos el callback es mas lento por construccion).
 | Guarda | Test |
 |---|---|
 | Saneo del envio no finito (NaN, Inf, −Inf; reverb y delay) y cancion limpia posterior bit a bit igual | `SongMix.ANonFiniteSampleInAClipNeverPoisonsTheRealBusSoALaterCleanSongSoundsTheSame` |
+| Recorte del envio a ±64 (3e38, 1e37, −3e38; reverb y delay): cancion limpia posterior = control (≤ 5e-4; queda el residuo bajo −120 dBFS) y bloque contado | `SongMix.AHugeFiniteSampleInAClipIsClampedSoALaterCleanSongSoundsLikeTheControl` |
+| Reactivar a mitad del fundido: sin escalon, sin tope contado, la cola siguiente dura 590 s | `SongBusTail.ReactivatingMidFadeRaisesTheReturnWithoutAStepAndLeavesNoStaleFade` |
+| `resetSongForRender` borra fundido y subida a medias | `SongBusTail.AnOfflineRenderStartsFromScratchAfterAHalfFinishedFadeOrRise` |
 | Sin guarda por pico: material fuerte por el delay a 0,9 no se corta, no se reinicia y es continuo | `SongMix.LoudPeriodicMaterialThroughTheDelayAtMaximumFeedbackIsNeverCutOrResetAndIsContinuous` |
 | Tope de 10 min con fundido de 50 ms, con bloques de 1, 256 y 512 frames (`RecordingBus`) | `SongBusTail.ATailThatNeverEndsIsCappedAtTenMinutesWithAFixedFiftyMillisecondFade` |
 | La cuenta de la cola se pone a 0 al activar (`finishSongMix`) (`RecordingBus`) | `SongBusTail.SeveralShortTailsDoNotAccumulateTowardsTheTenMinuteCap` |
