@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.27.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.26.0...v2.27.0) (2026-10-29)
+
+
+### Features
+
+* **api:** fábricas públicas del render offline y del master ([00bcd48](https://github.com/mati-araujo/watermelon-audio/commit/00bcd48c253dfd52476d2f43307dc7788f8b8ce3))
+* **offline:** capacidades del looper por handle offline ([6f72501](https://github.com/mati-araujo/watermelon-audio/commit/6f72501bf61d2d8e07c3449bf6648beacb135829))
+* **offline:** capacidades por handle y fabricas publicas del render ([f96a3be](https://github.com/mati-araujo/watermelon-audio/commit/f96a3be04aa763c3b162bb74d90ae8360c48fd7e))
+
+
+### Bug Fixes
+
+* **offline:** el piso de pistas de la canción sólo sube entre starts ([4bdc711](https://github.com/mati-araujo/watermelon-audio/commit/4bdc71120c52cab27e6fc57a9cfaa6cb22634fc6))
+* **offline:** rechaza bajar las pistas bajo la agenda de la cancion ([d7258a4](https://github.com/mati-araujo/watermelon-audio/commit/d7258a46cd0002fcdfb2f9173644533c47bb2acc))
+
 ## [2.26.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.25.0...v2.26.0) (2026-10-29)
 
 
