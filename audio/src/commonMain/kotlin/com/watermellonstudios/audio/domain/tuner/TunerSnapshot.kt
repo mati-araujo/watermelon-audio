@@ -263,7 +263,8 @@ enum class TunerState {
 
     /**
      * La medición pasó el veredicto de tendencia (12 ventanas de fase, ~1 s; en un re-punteo de
-     * la misma nota se acumulan entre segmentos) **y** su σ es ≤ 0,1 cents (R-PITCH-62). Nunca antes del veredicto, aunque una lectura temprana tenga σ chica.
+     * la misma nota se acumulan entre segmentos) **y** su σ es ≤ 0,1 cents (R-PITCH-62). Nunca
+     * antes del veredicto, aunque una lectura temprana tenga σ chica.
      */
     CONVERGED,
 
