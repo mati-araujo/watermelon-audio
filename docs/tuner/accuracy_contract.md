@@ -88,10 +88,14 @@ un **término de deriva** —la curvatura del ajuste, sin sesgo—, que es lo qu
 durante el glide del ataque, al que la σ de los residuos es ciega (R-PITCH-52). `CONVERGED` sigue
 saliendo sólo del veredicto de 12 ventanas con la σ de siempre ≤ 0,1, y una lectura temprana puede
 tener σ ≤ 0,1 y ser `MEASURING` (R-PITCH-62). El estado es la señal de convergencia; la σ sola no.
-Sobre una pulsada aislada `CONVERGED` es bit a bit el de antes (el golden y el `t_conv` de la
-primera pulsada del corpus). En un **re-punteo** de la misma nota llega antes, porque las 12
-ventanas se acumulan entre segmentos en vez de reiniciarse: 0,369 s de mediana, 39 de 41
-(`EarlyReadingCorpus.ARepluckReadsItsOwnSegmentWithin250ms`).
+`CONVERGED` es bit a bit el de antes sólo si el ataque sale del **silencio** (rms < 0,001) o llega
+antes de la primera fase: el golden y la primera pulsada del corpus, de pre-roll silencioso. Todo
+ataque sobre señal viva abre un segmento y lo cambia: un **re-punteo** de la misma nota converge
+antes, porque las 12 ventanas se acumulan entre segmentos (0,369 s de mediana, 39 de 41,
+`EarlyReadingCorpus.ARepluckReadsItsOwnSegmentWithin250ms`); una clavija girada o una nota nueva con
+la cuerda sonando dejan el veredicto en espera o lo reinician en el ataque; y un punteo sobre ruido
+de sala (rms ≥ 0,001) descarta en el ataque las fases previas — **sin medir**, ver la tabla del
+final.
 
 Honesta se mide por **cobertura**: |error contra el oráculo corto de f0| ≤ 2·√(σ² + σ_or²), con
 σ_or el ruido propio del oráculo, versionado en
@@ -257,6 +261,7 @@ compuerta).
 | **CPU sostenido en dispositivo** (NFR-1) | 🔴 **sin medir.** Todo número de costo que imprima la suite es un **techo**, no la medida: el build de host compila en `Debug`. Requiere hardware. |
 | **Sesión de 10 min sin throttling** (NFR-5) | 🔴 **sin medir.** Requiere hardware. |
 | **Robustez contra corpus grabado** (NFR-8) | 🔴 **sin correr.** El corpus no existe todavía; el mecanismo para bajarlo y verificarlo sí (`scripts/fetch-corpus.sh`), y los tests que dependen de él salen **SKIPPED**, nunca PASSED. |
+| **`CONVERGED` de un punteo sobre ruido de sala** (REQ-058) | 🔴 **sin medir.** Un ataque que no sale del silencio (rms ≥ 0,001, como el ruido del teléfono) abre un segmento y descarta las fases previas; antes se arrastraban hasta el reinicio por quiebre. El corpus no lo ejerce (pre-rolls de silencio). Lo mediría una síntesis con ruido a −45 dBFS antes del punteo, corrida en 2.25 y en 2.26. |
 | **σ de la lectura temprana con 1 parcial** (REQ-058) | 🔴 **hueco declarado.** Sobre síntesis estable de un parcial, cobertura 2σ 0 (n = 480) y σ / error 0,01: la σ es la propagada, y sin ajuste estirado la lectura es la del parcial, no f0. Fuente: `EarlyReading.AStableNoteDoesNotInflateSigma`. |
 | **σ de las lecturas MEASURING del camino del veredicto** (REQ-058, D50) | 🔴 **hueco declarado.** Contra el oráculo corto de f0 de corpus-v1 y con su ruido propio sumado (\|err\| ≤ 2·√(σ² + σ_or²)), las MEASURING que salen del veredicto (12 ventanas, σ > 0,1) cubren 0,567 en (0,25, 1] s con k ≥ 3 (n = 238), 0,833 asentadas con k = 2 (n = 288) y 0,724 asentadas con k ≥ 3 (n = 2501); las tempranas, 0,951 / 0,963 / 0,937. Su σ es la de hoy con la deriva temprana como piso; `CONVERGED` no está en el hueco (lo juzga el trinquete). Fuente: `EarlyReadingCorpus.MeasuringIsCoveredPerStratumAgainstF0`. |
 

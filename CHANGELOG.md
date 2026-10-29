@@ -25,15 +25,24 @@ del ataque puede estar a varios cents de donde la cuerda termina, y su σ lo cub
 leía *"`cents` no nulo"* como *"convergido"* tiene que mirar el estado: `CONVERGED` sigue saliendo
 sólo del veredicto con σ ≤ 0,1, y una lectura temprana puede tener σ ≤ 0,1 y seguir en `MEASURING`.
 
-**`CONVERGED` cambia en un solo caso, el re-punteo de la misma nota.** Sobre una pulsada aislada es
-bit a bit el de antes: valor, σ y tiempo. Al re-puntear, el motor ya no reinicia: abre un segmento y
-las 12 ventanas del veredicto se acumulan entre segmentos compatibles, así que vuelve a converger
-antes (0,369 s de mediana sobre `corpus-v1`, 39 de 41, contra ≥ 1,02 s con el reinicio). Las release
-notes de `v2.26.0` dicen *"`t_conv` idéntico"*: vale para la primera pulsada.
+**`CONVERGED` es bit a bit el de antes —valor, σ y tiempo— sólo si el ataque sale del silencio**
+(rms < 0,001) o llega antes de la primera fase: es el caso del golden y de la primera pulsada de
+`corpus-v1`, cuyos pre-rolls son silencio. **Todo ataque sobre señal viva abre un segmento** y
+cambia `CONVERGED`:
+- re-puntear la misma nota: las 12 ventanas se acumulan entre segmentos y vuelve a converger antes
+  (0,369 s de mediana sobre `corpus-v1`, 39 de 41, contra ≥ 1,02 s con el reinicio);
+- girar la clavija o cambiar de nota con la cuerda sonando: el veredicto queda en espera
+  (`MEASURING`) o reinicia en el ataque, donde antes seguía publicando el `CONVERGED` viejo hasta el
+  corte por tendencia;
+- 🔴 **un punteo sobre ruido de sala** (rms ≥ 0,001, como el del teléfono): descarta en el ataque
+  las fases que antes arrastraba. **No está medido**; lo leemos del código.
 
-**Con un solo parcial con energía, la σ temprana no cubre** (0 % sobre síntesis estable: es la σ
+Las release notes de `v2.26.0` dicen *"`t_conv` idéntico"*: vale sólo para el ataque desde silencio.
+
+**Con un solo parcial admitido, la σ temprana no cubre** (0 % sobre síntesis estable: es la σ
 propagada, cien veces más chica que el error), y sin ajuste estirado la lectura es la de ese parcial,
-no f0. Es un hueco declarado en `docs/tuner/accuracy_contract.md`.
+no f0: si el admitido no es el fundamental, el sesgo es su estiramiento. Pasa a ±50 c en las agudas.
+Es un hueco declarado en `docs/tuner/accuracy_contract.md`.
 
 **Qué NO cambia:** la C API, JNI, `AnalysisSnapshot` y la superficie de Kotlin. Una `MEASURING` del
 camino del veredicto publica una σ igual o mayor que antes, y su cobertura sigue sin llegar al 95 %
