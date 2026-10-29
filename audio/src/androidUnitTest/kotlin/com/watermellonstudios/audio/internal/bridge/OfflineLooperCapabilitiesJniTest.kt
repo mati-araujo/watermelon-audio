@@ -168,9 +168,9 @@ class OfflineLooperCapabilitiesJniTest {
         try {
             assertTrue(caps(r, 192 * MIB, 12).isSuccess)
             val a = r.load().getOrThrow()
+            // mismo rate: el start no invalida los clips, y la agenda de `a` es válida antes de bajar
             assertTrue(r.start(RATE, BLOCK).isSuccess)
             JniCoverage.record(OWNER, "nativeOfflineStart")
-            // el start invalida los clips (sample rate); lo que importa es que el presupuesto siguió en 192
             repeat(DEFAULT_BUDGET_CLIPS + 1) { assertTrue(r.load().isSuccess, "tras el start, clip $it") }
             assertTrue(r.track(11).isSuccess, "las pistas sobrevivieron al start")
 
@@ -179,10 +179,43 @@ class OfflineLooperCapabilitiesJniTest {
             val p0 = r.songGetPlayFrame()
             JniCoverage.record(OWNER, "nativeOfflineSongGetPlayFrame")
             val row = IntArray(ISongBridge.MAX_TRACKS) { ISongBridge.SILENCE }.also { it[0] = a }
-            val scheduled = r.songSetSchedule(4_800, longArrayOf(p0 + 9_600), row, p0 + 96_000)
+            // `a` sigue cargado tras bajar el presupuesto a 1 MiB: si se hubiera soltado, la agenda fallaría
+            val scheduled = r.songSetSchedule(CLIP_FRAMES, longArrayOf(p0 + 9_600), row, p0 + 96_000)
             JniCoverage.record(OWNER, "nativeOfflineSongSetSchedule")
-            // `a` quedó invalidado por el start: la agenda lo rechaza. Un clip posterior al start sigue valiendo.
-            assertTrue(scheduled.isFailure, "el clip anterior al start no se puede agendar")
+            assertTrue(scheduled.isSuccess, "el clip cargado antes de bajar el presupuesto sigue agendable")
+        } finally {
+            r.close()
+            JniCoverage.record(OWNER, "nativeOfflineDestroy")
+        }
+    }
+
+    // Bug plausible: el recorte del looper mira sólo sus tomas y no la agenda de la canción: bajar las
+    // pistas por debajo de una pista agendada la apaga en silencio (`Success` y la pista 10 calla).
+    @Test
+    fun `AC-055_12b bajar las pistas por debajo de la agenda de la cancion se rechaza y no apaga nada`() {
+        val r = newRenderer()
+        try {
+            assertTrue(caps(r, 192 * MIB, 12).isSuccess)
+            val a = r.load().getOrThrow()
+            val p0 = r.songGetPlayFrame()
+            JniCoverage.record(OWNER, "nativeOfflineSongGetPlayFrame")
+            val row = IntArray(ISongBridge.MAX_TRACKS) { ISongBridge.SILENCE }.also { it[10] = a }
+            assertTrue(r.songSetSchedule(CLIP_FRAMES, longArrayOf(p0 + 9_600), row, p0 + 96_000).isSuccess)
+            JniCoverage.record(OWNER, "nativeOfflineSongSetSchedule")
+
+            assertIs<NativeBridgeException.ParameterOutOfRange>(caps(r, 0, 8).failure(), "pista 10 agendada")
+            assertIs<NativeBridgeException.ParameterOutOfRange>(caps(r, 0, 10).failure(), "la pista 10 necesita 11")
+            assertTrue(r.track(10).isSuccess, "el rechazo no tocó las pistas")
+            // rechazar el par no aplica el presupuesto: el quinto clip de 12 MiB sigue entrando con 192 MiB
+            assertIs<NativeBridgeException.ParameterOutOfRange>(caps(r, 1 * MIB, 8).failure())
+            assertTrue(r.load().isSuccess, "el presupuesto no se aplicó a medias")
+
+            assertTrue(caps(r, 0, 11).isSuccess, "justo la pista más alta + 1")
+            assertTrue(caps(r, 0, 0).isSuccess, "el cero no baja nada")
+            // apagada la agenda, ya se puede bajar
+            assertTrue(r.songSetSchedule(1, LongArray(0), IntArray(0), 0).isSuccess)
+            assertTrue(caps(r, 0, 8).isSuccess, "sin agenda no hay pista que apagar")
+            assertIs<NativeBridgeException.ParameterOutOfRange>(r.track(10).failure())
         } finally {
             r.close()
             JniCoverage.record(OWNER, "nativeOfflineDestroy")

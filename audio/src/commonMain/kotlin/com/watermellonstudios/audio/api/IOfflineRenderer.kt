@@ -29,8 +29,9 @@ interface IOfflineRenderer : ISongBridge, ISongMixBridge, IOfflineTapRenderer, A
     /**
      * El techo del looper de esta instancia: el presupuesto de memoria de los clips y las pistas
      * activas. Una instancia nace con 48 MiB y 8 pistas. **0 deja el valor como estaba**;
-     * [budgetBytes] fuera de `0..64 GiB` o [maxTracks] fuera de `0..16` falla con
-     * `PARAMETER_OUT_OF_RANGE` sin aplicar ninguno. Se llama **antes** de cargar clips: sólo
+     * [budgetBytes] fuera de `0..64 GiB` (en armeabi-v7a y x86 el techo es `SIZE_MAX`),
+     * [maxTracks] fuera de `0..16` o menor que la pista más alta de la agenda de la canción
+     * publicada, falla con `PARAMETER_OUT_OF_RANGE` sin aplicar ninguno. Se llama **antes** de cargar clips: sólo
      * afecta a las cargas siguientes (bajarlo no libera lo ya cargado) y sobrevive a [start].
      */
     fun setLooperCapabilities(budgetBytes: Long, maxTracks: Int): Result<Unit>
