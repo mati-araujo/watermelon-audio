@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.25.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.24.0...v2.25.0) (2026-10-29)
+
+
+### Features
+
+* **jni:** mezcla, taps y master por JNI y ISongMixBridge (S12 W5) ([f6cb853](https://github.com/mati-araujo/watermelon-audio/commit/f6cb85395de4239eef5e64ad4df617c7fbc6677c))
+* **studio:** mezcla de la cancion, bus Espacio, taps y master ([2c53c4e](https://github.com/mati-araujo/watermelon-audio/commit/2c53c4e552ffcd226dd87d40c785fc84020d57a7))
+
 ## [2.24.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.23.0...v2.24.0) (2026-10-28)
 
 
