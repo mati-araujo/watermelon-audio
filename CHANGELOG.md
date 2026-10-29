@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.23.0...v2.24.0) (2026-10-28)
+
+
+### Features
+
+* **tuner:** la lectura fina mide ±50 c en toda cuerda del catálogo (REQ-057 S1) ([b41a967](https://github.com/mati-araujo/watermelon-audio/commit/b41a96787f3cdfc8f8013e64185241b594ccf1bb))
+
 ## [2.23.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.22.1...v2.23.0) (2026-10-28)
 
 

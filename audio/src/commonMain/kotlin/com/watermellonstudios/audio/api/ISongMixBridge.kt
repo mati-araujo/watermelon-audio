@@ -5,7 +5,7 @@ package com.watermellonstudios.audio.api
  * por pista, el bus «Espacio» y el master. Contrato de la C API: sección 25 de
  * `watermelon_audio.h`; el diseño y las mediciones: `docs/dev/mezcla-y-master.md`.
  *
- * ## Cambio de contrato (2.24.0)
+ * ## Cambio de contrato (2.25.0)
  *
  * Con la canción activa, el volumen, paneo, mute y envío a efectos del `TrackBuffer`
  * ([ILooperBridge]) **ya no alcanzan a las voces** y ninguna voz entra a la cadena de la escena:

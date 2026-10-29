@@ -78,31 +78,59 @@ ponderado de los cuatro parciales. En una cuerda real e inarmónica esos parcial
 física —con B = 1e-3 leen 0,865 / 3,455 / 7,756 / 13,740 cents— y el peso 1/σ² era MAYOR en los
 altos, o sea en los más estirados.
 
-**Rango útil de la lectura fina (REQ-003).** El strobe no mide cualquier desajuste: el
-desenvuelto de fase acota la captura a `|Δf| < fs/(2N)`, así que el rango **depende del objetivo
-y del sample rate** y se deriva —no se tabula, porque una tabla queda stale con el primer cambio
-de rate:
+**Rango útil de la lectura fina (REQ-003, REQ-057).** El strobe no mide cualquier desajuste: el
+desenvuelto de fase acota la captura de cada parcial a `|Δf| < fs/(2·H)`, donde `H` es el **hop**
+de la serie de fases, no el largo de la ventana. Cada parcial tiene cuatro rejillas intercaladas
+(ventana N = 4096, desfasadas H = 1024 frames): cada una es el estimador de antes, y la serie
+densa que forman entre las cuatro fija la vuelta de 2π del desenvuelto. El rango **depende del
+objetivo y del sample rate** y se deriva —no se tabula, porque una tabla queda stale con el primer
+cambio de rate—:
 
-    rango_cents(f0) = 1200 · log2(1 + fs / (2·N·f0))          N = 4096
+    rango_cents(n·f0) = 1200 · log2(1 + κ · fs / (2·H·n·f0))      H = 1024, κ = 0,9
 
-A 48 kHz eso da ±118,9 cents en E2, ±51,0 en G3, ±30,5 en E4 y ±22,9 en A4: **cuanto más aguda
-la cuerda, más angosto**. Fuera de ese rango el motor publica **ausencia** —NaN— en vez de un
-número, porque la lectura aliasada no sale mal de forma visible: sale mal con σ ≈ 0 y estado
-`CONVERGIDO`. La detección gruesa se sigue publicando, así que el usuario conserva "qué nota es"
-cuando pierde "cuánto exactamente".
+Un parcial vota sólo si la detección gruesa cae dentro de SU rango (orden n), y el índice 14 es la
+misma fórmula con n = 1. κ = 0,9 es un margen contra el borde: `fs/(2H)` es el nulo del lóbulo
+principal de Hann, y cerca de ahí un parcial lee mal (medición del checkpoint de diseño de
+REQ-057 S1, en su etapa). Con la fórmula, a 44,1 / 48 kHz: E2 ±365,7 / ±394,6 c, G3 ±163,2 /
+±177,0, E4 ±98,9 / ±107,4, A4 ±74,6 / ±81,1 y E5 ±50,2 / ±54,5. Lo vigila
+`InterleavedGrids.TheUsableRangeIsTheDenseFormulaWithKappaNineTenths`.
 
-Verificado por `StrobeRange.*` sobre las 14 cuerdas del catálogo, en los dos signos.
+Fuera de ese rango el motor publica **ausencia** —NaN— en vez de un número. La detección gruesa se
+sigue publicando, así que el usuario conserva "qué nota es" cuando pierde "cuánto exactamente".
+
+**Un medidor de ±50 cents existe en toda cuerda del catálogo (B0 a E5), a 44,1 y 48 kHz**
+(`InterleavedGrids.EveryCatalogStringIsMeasuredWithinPlusMinusFiftyCents`; el borde de E5 a
+44,1 kHz —lee a ±50, no a ±51— lo fija `TheEdgeOfTheCatalogE5At44kReadsAtFiftyAndNotAtFiftyOne`),
+**salvo un hueco declarado** a 44,1 kHz (no pasa a 48 kHz): B0 y E1 desde +25 cents, con el
++25 incluido (D30), quedan fuera de la promesa: en los casos medidos no hay lectura fina porque la
+compuerta de tendencia reinicia en bucle (preexistente). E1 a +25 c sí lee, pero el contrato no lo
+promete. Lo fija
+`InterleavedGrids.TheDeclaredGapB0AndE1From25CentsAt44kHasNoFineReadingButTheCoarseOne`, que da rojo el día que se cierre.
+Con 1 o 2 parciales admitidos —el caso común a ±50 c en las agudas— la σ es la de antes, todavía
+optimista: su verificación es de REQ-058.
 
 **El motor lo publica**, en el índice 14 del snapshot y en cents, computado contra el objetivo y
 el rate vigentes (`usableRangeCents` en Kotlin, `null` sin objetivo). Un consumidor no tiene que
-conocer `N` ni rehacer la conversión: dibuja el tramo donde la aguja es confiable y advierte en
+conocer `H` ni rehacer la conversión: dibuja el tramo donde la aguja es confiable y advierte en
 el resto. Que ese número y la guarda no puedan divergir lo verifica
-`AnalysisThread.ThePublishedRangePredictsWhereTheFineReadingExists`, que falla tanto si el rango
-publicado se **infla** como si se **achica**.
+`AnalysisThread.ThePublishedRangePredictsWhereTheFineReadingExists` a 0,97 y 1,03 del rango
+publicado, que falla tanto si el rango se **infla** como si se **achica**.
 
-⚠️ **Lo que esto le dice a un consumidor que dibuja un medidor de ±50 cents:** existe en E2, A2,
-D3 y G3, y **no** en B3, E4 ni A4. Ensancharlo exige bajar `N`, que mueve el presupuesto de
-exactitud entero y no está en este REQ.
+**Cadencia (REQ-057, D31).** El snapshot se publica cada 1024 frames de audio analizado (≈ 23 ms a
+44,1 kHz), con el rms de esos 1024 frames, y nunca antes de los primeros 1024. La serie de
+publicaciones no depende del tamaño de bloque con el que llega el audio
+(`BlockSize.ThePublicationSeriesDoesNotDependOnTheBlockSize`, y sobre `corpus-v1`
+`CorpusRobustness.TheRatchetHoldsForEveryBlockSize` con bloques de 16, 256, 1000 y 8192).
+
+El modo rápido decide una vez por veredicto grueso nuevo dentro del tick, no una vez por drenado:
+sus contadores (soltar el enganche tras `kSilentUpdatesToRelease` lecturas sin altura, el «quieto»
+de `kStableCentsPerUpdate`) cuentan veredictos. En vivo, soltar el enganche en silencio pasa a
+tardar tres veredictos del detector en vez de tres drenados (propuesta, a medir en device).
+
+**Costo.** Las cuatro rejillas cuadruplican el fino; el costo en host (Debug) lo imprime
+`InterleavedGridsCost.TheFourGridsCostAFractionOfRealTimeAndTheNumberIsPrinted` (en su corrida de
+REQ-057 S1, host de desarrollo a 48 kHz: el fino de 4 parciales de 0,134 % a 0,537 % del tiempo real y el análisis
+entero, 1,81 %; la cifra vigente es la que imprime el test). En device no está medido.
 
 **Latencias por modo:** detección gruesa ≤ 100 ms desde el onset; conmutación de cuerda en modo
 rápido 85,3 ms; el strobe declara convergencia cuando 1σ ≤ 0,1 cents, lo que en la cuerda más
@@ -156,6 +184,15 @@ faltar es una lectura falsa.**
 de captura y **no lo reporta** es indetectable. El motor converge sobre ese hueco y no tiene cómo
 saberlo. Está escrito como test (`CaptureDiscontinuity.NobodyReportedItSoNobodyCanKnow`) para que
 el día que entre un backend nuevo sin reportar, se sepa exactamente qué se pierde.
+
+**Con las rejillas de REQ-057 esto empeora un poco, y se dice.** Un hueco aislado de 512 frames
+sin reportar en A4 a 48 kHz sale `CONVERGIDO` con 0,873 c de error a +10 c (σ 0,061), contra
+0,641 c (σ 0,099) del motor anterior, y ahora también publica lectura fina a +50 c (0,449 c,
+σ 0,076), donde antes no había lectura. Lo fija
+`InterleavedGrids.ASingleUnreportedLostGapStillPublishesAConvergedReadingOffByLessThanOneCent`.
+La guarda de coherencia de la serie densa (0,3 rad, D33 de REQ-057) frena el hueco **periódico**
+(`NobodyReported…` sigue sin lectura), no el aislado: con 0,2 rad desaparece el caso de +50 c, pero
+ese umbral queda a 1,1× del máximo sano del barrido grande (0,178 rad). Queda para un MINI.
 
 **El motor lo publica**, en el índice 15 del snapshot (`inputDiscontinuity` en Kotlin): distingue
 *"todavía no convergí"* —esperar— de *"la entrada llegó rota"* —revisar el cable—, que son dos

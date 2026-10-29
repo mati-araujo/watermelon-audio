@@ -4,7 +4,7 @@ Lo que Studio usa para mezclar la cancion programada (`docs/dev/cancion-programa
 con un master y exportar WAV y stems por render offline (`docs/dev/render-offline.md`). Contrato de la
 C API: seccion 25 de `api/watermelon_audio.h` (mas `wma_offline_render_taps` en la 24). El diseno de
 NoisyPad es su ADR-0013 (privado); aca esta lo que cambia en watermelon-audio, en lenguaje de este
-repo. Version: **2.24.0**.
+repo. Version: **2.25.0**.
 
 ## El grafo
 
@@ -21,10 +21,10 @@ por pista t (solo con la cancion activa):
      RAW (solo offline)   nada                                   -> buffer del llamador
 ```
 
-## Cambio de contrato de la voz (2.24.0)
+## Cambio de contrato de la voz (2.25.0)
 
 Hasta 2.23.0 la voz de la cancion (`SongPlayer::renderSongVoice`) tomaba volumen, paneo, mute y
-`sendToFx` del `TrackBuffer` de su pista, la misma que toca la escucha de tomas. Desde 2.24.0:
+`sendToFx` del `TrackBuffer` de su pista, la misma que toca la escucha de tomas. Desde 2.25.0:
 
 - **Con la cancion activa, esos cuatro controles del `TrackBuffer` no se aplican a las voces.** La voz
   se gobierna solo por `wma_mix_set_track` (ganancia lineal, paneo, envio) y por la agenda. El mute es

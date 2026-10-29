@@ -19,7 +19,7 @@ salida, bit a bit, que uno de 4096.
 |---|---|---|
 | clip | control | buffer denso inmutable de L frames, decodificado con `wm::decodeWavToRate` (el mismo camino que `importTrack`), recortado con `wm::clampLoopRegion` y normalizado (`normalizeSongClip`). Cuenta contra el presupuesto del looper |
 | agenda | control -> RT | triple buffer wait-free de 3 slots preasignados (tope 1024 secciones). El control escribe la agenda ENTERA y la intercambia con el slot del medio; el RT la adopta al inicio del bloque. Estado por seccion, no deltas |
-| voz | RT | una por pista: tres smoothers (ganancia, paneo y envio; los mismos one-pole que `TrackBuffer::mixInto`, pero con la **mezcla propia de la cancion** desde 2.24.0: `docs/dev/mezcla-y-master.md`) y una pila de hasta `kSongMaxTails` (8) colas para las adopciones tardias |
+| voz | RT | una por pista: tres smoothers (ganancia, paneo y envio; los mismos one-pole que `TrackBuffer::mixInto`, pero con la **mezcla propia de la cancion** desde 2.25.0: `docs/dev/mezcla-y-master.md`) y una pila de hasta `kSongMaxTails` (8) colas para las adopciones tardias |
 | liberacion | control | sacar un clip de la agenda no lo libera: el RT publica al final de cada bloque que agenda adopto y que clips tiene en uso (la agenda mas todas las capas de cola); el control libera cuando esa foto es posterior a la baja y el clip no figura. Offline libera en la proxima llamada de control tras un bloque en el que ninguna cola ni la agenda adoptada lo lean; con el motor sin stream, tras el handshake de abajo |
 
 El mutex de la cancion es propio (`mCtl`). Nunca se toma el del motor para decodificar, y

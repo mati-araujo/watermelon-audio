@@ -1251,6 +1251,12 @@ WMA_API bool wma_tuner_get_snapshot(const WmaEngine* engine, float* out_values);
  * @return false if the arguments do not describe analysable audio, or if the
  *         analysis never got to publish. The buffer is left UNTOUCHED in that
  *         case — zeros would be a measurement nobody made.
+ *
+ * SHORT BUFFERS (REQ-057, D31): the analysis decides and publishes once per
+ * 1024-frame tick. A buffer of fewer than 1024 frames never closes a tick, so
+ * it returns false and never publishes. In a longer buffer, the tail of fewer
+ * than 1024 frames is integrated into the analysis but does not appear in the
+ * snapshot: the values describe the last COMPLETE tick.
  */
 WMA_API bool wma_tuner_analyze_buffer(const float* samples, int frames, int channels,
                                       int sample_rate, float target_hz, float* out_values);
@@ -2248,7 +2254,7 @@ WMA_API WmaResult wma_looper_import_track_ex(WmaEngine* engine, int track_index,
  *
  * While an agenda is published the looper's own record/arm calls do nothing:
  * wma_looper_start_recording, _start_recording_with_pre_roll and _start_overdub
- * are no-ops, wma_looper_arm_* return -1. CONTRACT CHANGE (2.24.0): the song has its
+ * are no-ops, wma_looper_arm_* return -1. CONTRACT CHANGE (2.25.0): the song has its
  * OWN mix (section 25, wma_mix_set_track). While the song is active the track's
  * mute, volume, pan and send-to-fx do NOT apply to its voices, and no voice enters
  * the scene's effect chain; per-track peak and progress do not apply either.
