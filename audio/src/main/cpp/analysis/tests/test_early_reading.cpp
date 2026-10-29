@@ -759,6 +759,35 @@ TEST(Segments, RewritingTheSameTargetKeepsSegments) {
     }
 }
 
+TEST(Segments, APluckAfterRoomNoiseReadsAtOnceAndDoesNotPoolTheNoise) {
+    // Review de S1 (B1/B2): 2 s de ruido de sala (xorshift a −48,5 dBFS: el rms nunca baja de 0,001, asi
+    // que no hay silencio que reinicie las rejillas) con el objetivo cargado y, despues, un punteo con
+    // glide (−20 c, τ 0,3 s). La primera lectura llega en <= 250 ms del punteo (el ruido no deja una
+    // referencia de «misma nota» que lo ponga en espera) y ninguna CONVERGED sale lejos de la altura
+    // (las fases del ruido no se agrupan con la nota).
+    constexpr int rate = kSegRate;
+    constexpr double noiseSec = 2.0;
+    std::vector<float> sig(static_cast<size_t>(noiseSec * rate), 0.0f);
+    addWhiteNoise(&sig, std::pow(10.0, -48.5 / 20.0) * std::sqrt(3.0), 4242u);
+    auto note = partialsWithPitchTrajectory(detune(kSegF0, kSegFirstCents), 1e-4, oneOverNAmplitudes(4, 0.4), rate,
+                                            3 * rate, [](double t) { return -20.0 * std::exp(-t / 0.3); });
+    applyDecay(note, rate, 1.5);
+    addWhiteNoise(&note, std::pow(10.0, -48.5 / 20.0) * std::sqrt(3.0), 4343u);
+    sig.insert(sig.end(), note.begin(), note.end());
+    const auto pubs = runEngine(sig, rate, kSegF0);
+    const Pub* first = firstAfter(pubs, noiseSec, hasCents);
+    ASSERT_NE(first, nullptr);
+    EXPECT_LE(first->sec - noiseSec, 0.25) << "el punteo despues del ruido tardo en leer";
+    int wrong = 0;
+    for (const Pub& p : pubs) {
+        if (p.sec <= noiseSec || !isConverged(p)) continue;
+        const double truth = kSegFirstCents - 20.0 * std::exp(-(p.sec - noiseSec) / 0.3);
+        if (std::fabs(p.cents - truth) > 0.1) ++wrong;
+    }
+    EXPECT_EQ(wrong, 0) << "CONVERGED lejos de la altura: se agruparon fases del ruido";
+    EXPECT_NEAR(pubs.back().cents, kSegFirstCents, 0.1);
+}
+
 TEST(Segments, TheAttackDetectorDoesNotDependOnTheCallerBlock) {
     // D-5: el detector decide en los bordes de la grilla de 1024 del strobe, no por llamada. Alimentando
     // el MISMO re-punteo al strobe en bloques de 256, 1000 y 8192, los ataques y el inicio del segmento

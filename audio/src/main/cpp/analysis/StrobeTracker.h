@@ -221,6 +221,13 @@ public:
     static constexpr double kSameNoteCoarseCents = 50.0;
     static constexpr double kCompatibleSigmas = 3.0;
     static constexpr double kSettledDriftFloorCents = 0.05;
+    /**
+     * D-3: la ultima lectura verificada del grupo vale como referencia de «misma nota» durante 4 ventanas
+     * (16384 frames, 0,34 s a 48 k). Pasado eso sin ninguna lectura verificada, la nota se apago o el
+     * control la perdio, y el proximo ataque reinicia. En corpus-v1 la cola de cada nota tiene lecturas
+     * hasta el final (tiempo con cents 0,994), asi que el re-punteo de la pasada 2 no la ve vencida.
+     */
+    static constexpr int64_t kGroupReadingMaxAgeFrames = 4 * 4096;
     static constexpr double kAttackRiseRatio = 2.0;
     static constexpr int kAttackRefractoryBlocks = 4;
     static constexpr int kAttackBlockFrames = 1024;
@@ -704,6 +711,7 @@ private:
     bool mHaveGroupReading{false};
     double mGroupCents{0.0};
     double mGroupSigma{0.0};
+    int64_t mGroupReadingFrame{0};
     /// Del ultimo camino temprano: la σ sin deriva, la deriva y el minimo de fases densas de los admitidos.
     double mEarlySigmaNoise{0.0};
     double mEarlyDrift{0.0};

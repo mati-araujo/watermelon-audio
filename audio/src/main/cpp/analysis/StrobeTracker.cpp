@@ -231,6 +231,10 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     mHasSignal = anySignal;
 
     mReadingIsEarly = false;
+    // El control de dominio de ESTA llamada. `combineVerdictReadings` lo vuelve a calcular igual (el
+    // veredicto queda bit a bit); hace falta aca porque en espera el veredicto no corre y el camino
+    // temprano no puede admitir con el control del drenado anterior al ataque (review de S1, B1).
+    mDomainVerified = std::isfinite(coarseDeviationCents());
     if (mSegmentWaiting) {
         // D-3: en espera, el veredicto no publica ni juzga quiebres (sus fases mezclan dos segmentos sin
         // agrupar); la lectura sale del camino temprano del segmento nuevo.
@@ -245,10 +249,16 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     // D-3: la ULTIMA lectura del grupo vigente (del veredicto o temprana: la que se publico) es contra
     // la que se juzga «misma nota» en el proximo ataque. Una nota corta que nunca llego al veredicto
     // (ukelele_A4 en corpus-v1) igual tiene lecturas tempranas con su σ.
-    if (mHasMeasurement) {
+    //
+    // Solo cuenta una lectura VERIFICADA contra la gruesa (la que `AnalysisThread` puede publicar): sobre
+    // ruido de sala sin altura gruesa el camino temprano puede tener lectura interna, y agrupar un punteo
+    // contra eso juntaria fases de ruido (review de S1, B2). Y la referencia caduca: ver
+    // `kGroupReadingMaxAgeFrames`.
+    if (mHasMeasurement && mDomainVerified) {
         mHaveGroupReading = true;
         mGroupCents = mCents;
         mGroupSigma = mUncertaintyCents;
+        mGroupReadingFrame = mPartials[0].framesSinceReset();
     }
     return true;
 }
@@ -431,6 +441,7 @@ void StrobeTracker::clearAttackTracking() noexcept {
     mHaveGroupReading = false;
     mGroupCents = 0.0;
     mGroupSigma = 0.0;
+    mGroupReadingFrame = 0;
     mEarlySigmaNoise = 0.0;
     mEarlyDrift = 0.0;
     mEarlyMinPhases = 0;
@@ -481,11 +492,15 @@ void StrobeTracker::trackAttackBlock(const float* mono, int numFrames, int64_t e
     const bool wasWaiting = mSegmentWaiting;
     ++mVerdictSegment;
     for (auto& p : mPartials) {
-        // Un re-punteo DURANTE la espera: el segmento que esperaba no llego a asentarse y no se agrupa.
-        if (wasWaiting) p.dropPhaseSegment(previousWaiting);
+        // Primero se abre (descarta la ventana que contiene el ataque con el inicio de ventana vigente) y
+        // DESPUES, si habia un re-punteo esperando, se descarta ese segmento: no llego a asentarse.
         p.openPhaseSegment(mSegmentStartFrame, mVerdictSegment);
+        if (wasWaiting) p.dropPhaseSegment(previousWaiting);
     }
     mSuppressUntilNextClose = false;
+    // Una referencia vieja (la nota se apago en el ruido y el control la perdio) no es «el segmento
+    // anterior»: el punteo nuevo reinicia.
+    if (mHaveGroupReading && endFrame - mGroupReadingFrame > kGroupReadingMaxAgeFrames) mHaveGroupReading = false;
     const double coarse = coarseDeviationCents();
     const bool coarseElsewhere = mHaveGroupReading && std::isfinite(coarse) &&
                                  std::fabs(coarse - mGroupCents) > kSameNoteCoarseCents;
@@ -501,6 +516,7 @@ void StrobeTracker::trackAttackBlock(const float* mono, int numFrames, int64_t e
 
 void StrobeTracker::settleWaitingSegment() {
     if (!mHasMeasurement || !mReadingIsEarly) return;   // el segmento nuevo todavia no lee
+    if (!mDomainVerified) return;                       // sin control no se juzga «misma nota»
     if (mEarlyMinPhases < InterleavedPhaseEstimator::kEarlyWindow) return;
     if (mEarlyDrift > std::max(mEarlySigmaNoise, kSettledDriftFloorCents)) return;   // sigue el glide
     const double coarse = coarseDeviationCents();
