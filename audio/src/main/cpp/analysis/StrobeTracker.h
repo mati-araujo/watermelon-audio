@@ -478,8 +478,6 @@ public:
     /// Ataques que detecto el motor desde el ultimo reset/objetivo. Sonda para tests.
     int attacksDetected() const noexcept { return mAttacksDetected; }
 
-    /// D-3: `true` mientras un segmento nuevo espera asentarse para decidir si se agrupa. Sonda para tests.
-    bool segmentIsWaiting() const noexcept { return mSegmentWaiting; }
 
     /// Desviacion combinada contra el objetivo, en cents. Solo vale si
     /// `hasMeasurement()`.

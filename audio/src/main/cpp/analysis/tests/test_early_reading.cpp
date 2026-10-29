@@ -384,6 +384,37 @@ TEST(EarlyReading, ASilentWindowEmptiesTheDenseSeries) {
     EXPECT_EQ(g.denseEarlyFit().n, 0);
 }
 
+TEST(Segments, TheCommonSlopeIgnoresTheInterceptJump) {
+    // D-3: pendiente COMUN, intercepto por segmento. Un seno a +5 c con un salto de fase de 2 rad en el
+    // frame 40960 (un re-punteo sin cambio de altura): con el segmento abierto ahi, la rejilla 0 regresa
+    // dos segmentos y lee +5 c con σ chica. Mutante «una sola recta sobre los dos segmentos» ⇒ el salto
+    // de fase se lee como pendiente.
+    constexpr int rate = 48000;
+    constexpr double target = 196.0;
+    constexpr int jump = 40960;
+    auto g = preparedGrids(rate, target);
+    const double hz = detune(target, 5.0);
+    std::vector<float> sig(static_cast<size_t>(3 * rate));
+    for (size_t i = 0; i < sig.size(); ++i) {
+        const double ph = 2.0 * M_PI * hz * static_cast<double>(i) / rate + (static_cast<int>(i) >= jump ? 2.0 : 0.0);
+        sig[i] = static_cast<float>(0.3 * std::sin(ph));
+    }
+    g.process(sig.data(), jump);
+    const int before = g.grid(0).regressionPhaseCount();
+    ASSERT_GT(before, 4);
+    g.openPhaseSegment(jump, 1);
+    g.process(sig.data() + jump, static_cast<int>(sig.size()) - jump);
+    const auto& g0 = g.grid(0);
+    ASSERT_EQ(g0.regressionSegmentCount(), 2) << "la rejilla 0 no conservo los dos segmentos";
+    ASSERT_TRUE(g0.hasMeasurement());
+    EXPECT_NEAR(g0.cents(), 5.0, 0.01);
+    EXPECT_LT(g0.uncertaintyCents(), 0.01);
+    // Y conservando solo el segmento nuevo, una sola recta: la de siempre.
+    g.keepOnlyPhaseSegment(1);
+    EXPECT_EQ(g.grid(0).regressionSegmentCount(), 1);
+    EXPECT_NEAR(g.grid(0).cents(), 5.0, 0.01);
+}
+
 TEST(Segments, TheNewSegmentStartsAfterTheAttackBlock) {
     // D-3 (1): abierto el segmento en el frame F, ninguna ventana que empiece antes de F entra a la
     // serie densa; la primera es la que empieza en F y cierra en F + 4096. Mutante «aceptar ventanas

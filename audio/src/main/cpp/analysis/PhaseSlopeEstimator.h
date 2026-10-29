@@ -340,10 +340,7 @@ public:
 
     /// El id que llevan las fases que cierren desde ahora.
     void setPhaseSegment(unsigned char id) noexcept { mSegmentId = id; }
-    unsigned char phaseSegment() const noexcept { return mSegmentId; }
-    /// El id de la fase `i` de la ventana de regresion (la mas vieja en 0). Sonda para tests.
-    unsigned char regressionPhaseSegmentAt(int i) const noexcept { return mPhaseSegment[i]; }
-    /// Cuantos segmentos distintos hay en la ventana de regresion.
+    /// Cuantos segmentos distintos hay en la ventana de regresion. Sonda para tests.
     int regressionSegmentCount() const noexcept;
     /// Descarta la fase mas NUEVA (su ventana contiene el ataque) y recalcula.
     void dropNewestPhase();
