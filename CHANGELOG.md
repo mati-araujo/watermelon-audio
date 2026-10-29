@@ -13,6 +13,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **tuner:** «misma nota» con la σ de hoy, no con la publicada ([f12b107](https://github.com/mati-araujo/watermelon-audio/commit/f12b1076a57720269434ffb6140198bc48b48f5c))
 * **tuner:** lectura temprana con σ honesta antes del veredicto (REQ-058 S1) ([f2231a0](https://github.com/mati-araujo/watermelon-audio/commit/f2231a0dede1c2130760cee77138aba37f8967d6))
 
+### Nota agregada a mano — `MEASURING` ahora trae número (REQ-058)
+
+> Se agregó **después** de cortar el tag, en REQ-058 S2. Las release notes de `v2.26.0` en GitHub
+> traen los mismos avisos, copiados del PR #412.
+
+**Lo que cambia sin tocar una línea:** antes del veredicto de 12 ventanas (~1 s) `cents` salía
+`null`; desde 2.26.0 llega desde **~0,19 s de cada ataque** (mediana sobre `corpus-v1`) con su σ, en
+estado `MEASURING`. Es la **altura instantánea**, no una predicción de la asentada: durante el glide
+del ataque puede estar a varios cents de donde la cuerda termina, y su σ lo cubre. Un consumidor que
+leía *"`cents` no nulo"* como *"convergido"* tiene que mirar el estado: `CONVERGED` sigue saliendo
+sólo del veredicto con σ ≤ 0,1, y una lectura temprana puede tener σ ≤ 0,1 y seguir en `MEASURING`.
+
+**`CONVERGED` es bit a bit el de antes —valor, σ y tiempo— sólo si el ataque sale del silencio**
+(rms < 0,001) o llega antes de la primera fase, **y** no queda pendiente un re-punteo anterior sin
+asentar: es el caso del golden y de la primera pulsada de
+`corpus-v1`, cuyos pre-rolls son silencio. **Todo ataque sobre señal viva abre un segmento** y
+cambia `CONVERGED`:
+- re-puntear la misma nota: las 12 ventanas se acumulan entre segmentos y vuelve a converger antes
+  (0,369 s de mediana sobre `corpus-v1`, 39 de 41, contra ≥ 1,02 s con el reinicio);
+- girar la clavija o cambiar de nota con la cuerda sonando: el veredicto queda en espera
+  (`MEASURING`) o reinicia en el ataque, donde antes seguía publicando el `CONVERGED` viejo hasta el
+  corte por tendencia;
+- 🔴 **un punteo sobre ruido de sala** (rms ≥ 0,001, como el del teléfono): descarta en el ataque
+  las fases que antes arrastraba. **No está medido**; lo leemos del código.
+
+Las release notes de `v2.26.0` dicen *"`t_conv` idéntico"*: vale sólo para ese caso.
+
+**Con un solo parcial admitido, la σ temprana no cubre** (0 % sobre síntesis estable: es la σ
+propagada, cien veces más chica que el error), y sin ajuste estirado la lectura es la de ese parcial,
+no f0: si el admitido no es el fundamental, el sesgo es su estiramiento. Es el caso común con la
+cuerda aguda desafinada cerca de ±50 c, donde sólo un parcial cae en su rango útil.
+Es un hueco declarado en `docs/tuner/accuracy_contract.md`.
+
+**Qué NO cambia:** la C API, JNI, `AnalysisSnapshot` y la superficie de Kotlin. Una `MEASURING` del
+camino del veredicto publica una σ igual o mayor que antes, y su cobertura sigue sin llegar al 95 %
+(el otro hueco declarado).
+
+**Lo que un consumidor puede retirar:** las guardas que existían para tapar el segundo ciego tras
+cada punteo. En Tunio, la envolvente E de REQ-027 (*midiendo* sin número adentro de la envolvente
+de la gruesa) y la compuerta del tick marcado de MINI-018, una vez que las vuelva a medir sobre
+2.26.0. La tolerancia de *"afinado"* sigue siendo de la app, y con una lectura temprana tiene que
+contar con σ.
+
+**Lo PROVISIONAL:** los umbrales por cuerda, la no inflación (≤ 3,5×) y los estratos de cobertura
+por debajo del 95 % esperan al corpus de acero y al del g42. Las cifras, en
+`docs/tuner/accuracy_contract.md`.
+
 ## [2.25.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.24.0...v2.25.0) (2026-10-29)
 
 

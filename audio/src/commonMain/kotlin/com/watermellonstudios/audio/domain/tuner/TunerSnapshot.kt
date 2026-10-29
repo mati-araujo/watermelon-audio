@@ -24,11 +24,28 @@ package com.watermellonstudios.audio.domain.tuner
  * @property droppedFrames   Frames que el análisis nunca vio porque el ring los
  *   pisó. Si sube sostenidamente, el análisis no llega.
  * @property state    Ver [TunerState].
- * @property cents        Desviación contra el objetivo, o null si no hay dato.
+ * @property cents        Desviación contra el objetivo, o null si no hay dato. Que haya número no
+ *   dice que convergió: eso lo dice sólo [state]. Con [TunerState.MEASURING] el número es de una de
+ *   dos clases, que el snapshot no distingue:
+ *   - la **lectura temprana** (desde v2.26.0, R-PITCH-65): desde ~0,2 s de cada ataque, y otra vez
+ *     cuando el veredicto se corta o espera a un segmento nuevo, la **altura instantánea** —no una
+ *     predicción de la asentada (R-PITCH-67)—. Durante el glide del ataque puede estar a varios
+ *     cents de donde la cuerda se asienta, y con 2 o más parciales su σ lo cubre. No se separa de la
+ *     otra por el tiempo desde el ataque;
+ *   - la lectura del **veredicto con σ > 0,1**, que ya existía antes de v2.26.0 y ahora publica
+ *     max(su σ, la deriva temprana); esa σ todavía es optimista.
+ *   Los dos huecos de σ —ésa, y la temprana con un solo parcial— están en
+ *   `docs/tuner/accuracy_contract.md`.
  * @property phaseAngle   Ángulo de fase acumulado en radianes, envuelto a ±π, o
  *   null. Lo publica el motor ya integrado a propósito: si la app tuviera que
  *   integrarlo, un frame perdido correría la fase para siempre.
- * @property uncertainty  Incertidumbre de la medición, o null si no hay dato.
+ * @property uncertainty  Incertidumbre (1σ, en cents) de [cents], o null si no hay dato. Sale de
+ *   los residuos del ajuste entre parciales (con 3 o más; con menos, de la propagada) (R-PITCH-52);
+ *   en la lectura temprana se le suma en cuadratura un término de deriva que crece con el glide del
+ *   ataque, y una [TunerState.MEASURING] del veredicto publica max(su σ, esa deriva). La promesa sobre las
+ *   [TunerState.MEASURING] es |error| ≤ 2σ en el 95 % de las lecturas: los estratos medidos, los
+ *   PROVISIONAL y los huecos, en `docs/tuner/accuracy_contract.md`. Una lectura temprana puede
+ *   tener σ ≤ 0,1 y seguir en [TunerState.MEASURING]: "convergió" lo dice [state], no este número.
  * @property inputDiscontinuity `true` si esta lectura arrastra un hueco en la
  *   entrada (REQ-009). Ver el KDoc del campo: es lo que distingue "todavía no"
  *   de "la entrada llegó rota".
@@ -239,10 +256,18 @@ enum class TunerState {
     /** Hay señal, pero el estimador no enganchó una altura. */
     NO_LOCK,
 
-    /** Midiendo, todavía sin converger. */
+    /**
+     * Midiendo, todavía sin converger. Puede traer `cents` + σ: la lectura temprana de cada
+     * ataque (la altura instantánea, R-PITCH-65/67) o la del veredicto que todavía no convergió;
+     * ver `TunerSnapshot.cents`. También puede venir sin `cents`: es ausencia, no cero.
+     */
     MEASURING,
 
-    /** La incertidumbre bajó del umbral declarado. */
+    /**
+     * La medición pasó el veredicto de tendencia (12 ventanas de fase, ~1 s; en un re-punteo de
+     * la misma nota se acumulan entre segmentos) **y** su σ es ≤ 0,1 cents (R-PITCH-62). Nunca
+     * antes del veredicto, aunque una lectura temprana tenga σ chica.
+     */
     CONVERGED,
 
     /**

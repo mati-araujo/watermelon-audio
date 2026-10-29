@@ -511,7 +511,7 @@ TEST(EarlyReading, AStableNoteDoesNotInflateSigma) {
         RecordProperty("no_inflacion_" + std::to_string(np) + "p_centesimas", static_cast<int>(h.medianRatio() * 100.0));
         ASSERT_GT(h.n, 100);
         // D49 (coordinadora, 2026-10-28): sobre SINTESIS el umbral es 3,5× PROVISIONAL hasta el acero (medido:
-        // 0,01 / 2,84 / 3,36 / 3,41 con 1/2/3/4 parciales; el piso de σ propagada de k >= 3 es conservador
+        // 0,01 / 2,84 / 3,36 / 3,40 con 1/2/3/4 parciales; el piso de σ propagada de k >= 3 es conservador
         // sobre una serie limpia). Sobre el corpus asentado sigue 3× (`EarlyErrorAndSettledSigmaAgainstF0`).
         EXPECT_LE(h.medianRatio(), 3.5) << np << " parciales";
     }

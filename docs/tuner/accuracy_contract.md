@@ -40,6 +40,8 @@ es la clase de mentira que un usuario con un Peterson al lado descubre en treint
 | **Strobe** | incertidumbre (1σ) a 3 s, peor caso (B0 del bajo) | **0,0017 cents** | — |
 | **Detección gruesa** (S4) | error de identificación, peor caso (C7) | **0,21 cents** | 50 |
 | **Detección gruesa** | claridad mínima sobre el rango A0–C7 | **0,967** | — |
+| **Lectura temprana** (REQ-058) | peor error antes del veredicto, B0/E2/A4 a 0,5 y 1 s | **0,1188 cents** | — |
+| **Lectura temprana** | peor error en σ antes del veredicto (cobertura: ≤ 2) | **0,231 σ** | 2 |
 | **Modo rápido** (S5) | saltos de cuerda durante un barrido desde floja | **0** | 0 |
 | **Modo rápido** | latencia de conmutación de cuerda | **85,3 ms** | 150 |
 | **Intonación** (S9) | error de la diferencia de dos medidas | **< 0,0001 cents** | 0,1 |
@@ -78,6 +80,46 @@ ponderado de los cuatro parciales. En una cuerda real e inarmónica esos parcial
 física —con B = 1e-3 leen 0,865 / 3,455 / 7,756 / 13,740 cents— y el peso 1/σ² era MAYOR en los
 altos, o sea en los más estirados.
 
+**Y antes del veredicto hay σ también (REQ-058).** Desde v2.26.0 el motor publica `cents` + σ en
+`MEASURING` desde ~0,2 s de cada ataque: la **altura instantánea**, la pendiente de un ajuste
+cuadrático sobre las últimas 5–8 fases de la serie densa, sin extrapolar (R-PITCH-65/67). Su σ es
+max(residuos, propagada) con ≥ 3 parciales y max(propagada, √Σσ²) con 2, sumada en cuadratura con
+un **término de deriva** —la curvatura del ajuste, sin sesgo—, que es lo que la vuelve honesta
+durante el glide del ataque, al que la σ de los residuos es ciega (R-PITCH-52). `CONVERGED` sigue
+saliendo sólo del veredicto de 12 ventanas con la σ de siempre ≤ 0,1, y una lectura temprana puede
+tener σ ≤ 0,1 y ser `MEASURING` (R-PITCH-62). El estado es la señal de convergencia; la σ sola no.
+`CONVERGED` es bit a bit el de antes sólo si el ataque sale del **silencio** (rms < 0,001) o llega
+antes de la primera fase, y no queda pendiente un re-punteo anterior sin asentar: el golden y la primera pulsada del corpus, de pre-roll silencioso. Todo
+ataque sobre señal viva abre un segmento y lo cambia: un **re-punteo** de la misma nota converge
+antes, porque las 12 ventanas se acumulan entre segmentos (0,369 s de mediana, 39 de 41,
+`EarlyReadingCorpus.ARepluckReadsItsOwnSegmentWithin250ms`); una clavija girada o una nota nueva con
+la cuerda sonando dejan el veredicto en espera o lo reinician en el ataque; y un punteo sobre ruido
+de sala (rms ≥ 0,001) descarta en el ataque las fases previas — **sin medir**, ver la tabla del
+final.
+
+Honesta se mide por **cobertura**: |error contra el oráculo corto de f0| ≤ 2·√(σ² + σ_or²), con
+σ_or el ruido propio del oráculo, versionado en
+`audio/src/main/cpp/analysis/tests/corpus-v1-sigma-oraculo-f0.tsv`. Sobre `corpus-v1`
+(`EarlyReadingCorpus.MeasuringIsCoveredPerStratumAgainstF0`, que sale SKIPPED sin el corpus):
+
+| estrato de las `MEASURING` | cubre | n | piso |
+|---|---|---|---|
+| (0, 0,25] s, ≥ 3 parciales | 0,951 | 789 | 0,95 PROVISIONAL |
+| (0,25, 1] s, 2 parciales | 0,787 | 122 | 0,77 PROVISIONAL |
+| (0,25, 1] s, ≥ 3 parciales | 0,950 | 7423 | 0,94 PROVISIONAL |
+| asentada, 2 parciales | 0,909 | 526 | 0,89 PROVISIONAL |
+| asentada, ≥ 3 parciales | 0,906 | 16924 | 0,89 PROVISIONAL |
+
+Los 24 glides sintéticos de REQ-036 cubren 0,983 a 2σ (`EarlyReading.GlidesAreCoveredAtTwoSigma`).
+El error temprano contra f0 en `corpus-v1`: p90 **1,449 c**, mediana 0,078 c; en los primeros
+250 ms, p90 9,159 c —es el glide, y σ lo cubre— (`EarlyReadingCorpus.EarlyErrorAndSettledSigmaAgainstF0`).
+Y la σ no se infla: sobre una nota estable sintética, σ / error real de 2,84 / 3,36 / 3,40 con
+2 / 3 / 4 parciales, contra un techo de 3,5 PROVISIONAL (`EarlyReading.AStableNoteDoesNotInflateSigma`).
+**Con 1 parcial la σ temprana no cubre**: σ / error de 0,01 y cobertura 0 sobre la misma síntesis.
+Es la σ propagada, que mide precisión y no exactitud, y sin ajuste estirado la lectura es la del
+parcial, no f0. Hueco declarado al final de este documento.
+Los PROVISIONAL esperan al corpus de acero y al del g42; la base es un ataque por archivo y pasada.
+
 **Rango útil de la lectura fina (REQ-003, REQ-057).** El strobe no mide cualquier desajuste: el
 desenvuelto de fase acota la captura de cada parcial a `|Δf| < fs/(2·H)`, donde `H` es el **hop**
 de la serie de fases, no el largo de la ventana. Cada parcial tiene cuatro rejillas intercaladas
@@ -106,8 +148,9 @@ sigue publicando, así que el usuario conserva "qué nota es" cuando pierde "cu�
 compuerta de tendencia reinicia en bucle (preexistente). E1 a +25 c sí lee, pero el contrato no lo
 promete. Lo fija
 `InterleavedGrids.TheDeclaredGapB0AndE1From25CentsAt44kHasNoFineReadingButTheCoarseOne`, que da rojo el día que se cierre.
-Con 1 o 2 parciales admitidos —el caso común a ±50 c en las agudas— la σ es la de antes, todavía
-optimista: su verificación es de REQ-058.
+Con 2 parciales admitidos —el caso común a ±50 c en las agudas, junto con el de 1— REQ-058 verificó
+la σ de la lectura temprana (la tabla de cobertura de arriba, filas de 2 parciales); con 1 no cubre. La del camino del
+veredicto sigue siendo la de antes, y no cubre: es el hueco declarado al final de este documento.
 
 **El motor lo publica**, en el índice 14 del snapshot y en cents, computado contra el objetivo y
 el rate vigentes (`usableRangeCents` en Kotlin, `null` sin objetivo). Un consumidor no tiene que
@@ -133,8 +176,14 @@ REQ-057 S1, host de desarrollo a 48 kHz: el fino de 4 parciales de 0,134 % a 0,5
 entero, 1,81 %; la cifra vigente es la que imprime el test). En device no está medido.
 
 **Latencias por modo:** detección gruesa ≤ 100 ms desde el onset; conmutación de cuerda en modo
-rápido 85,3 ms; el strobe declara convergencia cuando 1σ ≤ 0,1 cents, lo que en la cuerda más
-grave del catálogo (B0) ocurre pasados los **0,5 s** y en A4 es inmediato.
+rápido 85,3 ms; **lectura temprana** (`cents` + σ en `MEASURING`, REQ-058) a **0,186 s** de mediana
+del ataque y 0,206 s de p90 sobre `corpus-v1` con objetivo = la cuerda elegida, 80 de 82 ataques
+con lectura en 500 ms, y `cents` en el 98,7 % del tiempo pasados 250 ms
+(`EarlyReadingCorpus.FirstReadingWithinTheBudget`, `…EveryAttackReadsWithin500msAndKeepsReading`);
+un re-punteo de la misma nota vuelve a leer a 0,183 s de mediana sin perder lo integrado. El strobe
+declara `CONVERGED` sólo con el veredicto de 12 ventanas (1,02 s a 48 kHz, 1,11 a 44,1) y 1σ ≤ 0,1
+cents: nunca antes del veredicto, aunque la σ temprana ya esté por debajo (en A4 lo está desde la
+primera lectura).
 
 🔴 **σ NO ES SUFICIENTE PARA DECLARAR CONVERGENCIA, y esa es la segunda vez que pasa (REQ-009).**
 `1σ ≤ 0,1 cents` es **necesario y no suficiente**: σ mide la linealidad del ajuste, y una señal
@@ -212,6 +261,8 @@ compuerta).
 | **CPU sostenido en dispositivo** (NFR-1) | 🔴 **sin medir.** Todo número de costo que imprima la suite es un **techo**, no la medida: el build de host compila en `Debug`. Requiere hardware. |
 | **Sesión de 10 min sin throttling** (NFR-5) | 🔴 **sin medir.** Requiere hardware. |
 | **Robustez contra corpus grabado** (NFR-8) | 🔴 **sin correr.** El corpus no existe todavía; el mecanismo para bajarlo y verificarlo sí (`scripts/fetch-corpus.sh`), y los tests que dependen de él salen **SKIPPED**, nunca PASSED. |
+| **`CONVERGED` de un punteo sobre ruido de sala** (REQ-058) | 🔴 **sin medir.** Un ataque que no sale del silencio (rms ≥ 0,001, como el ruido del teléfono) abre un segmento y descarta las fases previas; antes se arrastraban hasta el reinicio por quiebre. El corpus no lo ejerce (pre-rolls de silencio). Lo mediría una síntesis con ruido a −45 dBFS antes del punteo, corrida en 2.25 y en 2.26. |
+| **σ de la lectura temprana con 1 parcial** (REQ-058) | 🔴 **hueco declarado.** Sobre síntesis estable de un parcial, cobertura 2σ 0 (n = 480) y σ / error 0,01: la σ es la propagada, y sin ajuste estirado la lectura es la del parcial, no f0. Fuente: `EarlyReading.AStableNoteDoesNotInflateSigma`. |
 | **σ de las lecturas MEASURING del camino del veredicto** (REQ-058, D50) | 🔴 **hueco declarado.** Contra el oráculo corto de f0 de corpus-v1 y con su ruido propio sumado (\|err\| ≤ 2·√(σ² + σ_or²)), las MEASURING que salen del veredicto (12 ventanas, σ > 0,1) cubren 0,567 en (0,25, 1] s con k ≥ 3 (n = 238), 0,833 asentadas con k = 2 (n = 288) y 0,724 asentadas con k ≥ 3 (n = 2501); las tempranas, 0,951 / 0,963 / 0,937. Su σ es la de hoy con la deriva temprana como piso; `CONVERGED` no está en el hueco (lo juzga el trinquete). Fuente: `EarlyReadingCorpus.MeasuringIsCoveredPerStratumAgainstF0`. |
 
 Estas filas están vacías **a propósito**. Una corrida que no verificó no puede pasar por
@@ -229,4 +280,6 @@ fast_mode_sweep_switches = 0
 intonation_worst_error_cents = 0.0001
 inharmonicity_max_correction_cents = 2.4678
 crystal_50ppm_cents = 0.0866
+early_worst_error_cents = 0.118808
+early_worst_error_sigmas = 0.2308
 -->

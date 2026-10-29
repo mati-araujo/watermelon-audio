@@ -111,6 +111,27 @@ TEST(AccuracyContract, TheDeclaredFiguresMatchTheirGoldens) {
             << "el contrato declara una incertidumbre que el golden no respalda";
     }
 
+    // --- lectura temprana (REQ-058): las filas de antes del veredicto -------
+    //
+    // A 0,5 y 1 s el veredicto de 12 ventanas (1,02 s a 48 kHz) todavia no
+    // llego, asi que esas filas del golden son la lectura temprana. El contrato
+    // declara su peor error y su peor error medido en σ: la cobertura que
+    // promete es <= 2.
+    {
+        double worstErr = 0.0, worstInSigmas = 0.0;
+        for (const auto& r : goldenRows("strobe_convergence")) {
+            if (r.seconds > 1.0 + 1e-9) continue;
+            const double err = std::abs(r.cents - 1.0);
+            worstErr = std::max(worstErr, err);
+            worstInSigmas = std::max(worstInSigmas, err / r.uncertainty);
+        }
+        EXPECT_NEAR(at(c, "early_worst_error_cents"), worstErr, tolFor(worstErr))
+            << "el contrato declara un error de la lectura temprana que el golden no respalda";
+        EXPECT_NEAR(at(c, "early_worst_error_sigmas"), worstInSigmas, tolFor(worstInSigmas))
+            << "el contrato declara una cobertura de la lectura temprana que el golden no respalda";
+        EXPECT_LE(worstInSigmas, 2.0) << "una lectura temprana del golden sale de su 2σ";
+    }
+
     // --- deteccion gruesa ---------------------------------------------------
     {
         double worst = 0.0, minClarity = 1.0;

@@ -121,6 +121,12 @@ interface ITuner {
      * La lectura actual, o `null` si todavía no hay ninguna.
      *
      * `null` **no es** "afinado" ni "cero": es ausencia de dato, y hay que dibujarla distinto.
+     *
+     * Una lectura con [TunerReading.cents] no nulo **no es una lectura convergida**: desde
+     * v2.26.0 el motor publica además la altura instantánea de cada ataque en
+     * [com.watermellonstudios.audio.domain.tuner.TunerState.MEASURING], con su σ en
+     * `snapshot.uncertainty` (R-PITCH-65/67). Para decir "afinado" con esa lectura, la tolerancia
+     * es de la app y tiene que contar con σ; [TunerReading.isConverged] es la señal del motor.
      */
     fun reading(): TunerReading?
 }
@@ -144,6 +150,9 @@ data class TunerReading(
      *
      * `null` cuando el motor todavía no tiene una medición — que **no** es lo mismo que 0,0:
      * cero cents es "afinado exacto", un valor plausible que una UI dibujaría como lectura.
+     *
+     * No nulo tampoco es "convergido": antes del veredicto es la altura instantánea, con su σ en
+     * `snapshot.uncertainty` (R-PITCH-65/67). Ver [isConverged].
      */
     val cents: Float? get() = snapshot.cents
 
