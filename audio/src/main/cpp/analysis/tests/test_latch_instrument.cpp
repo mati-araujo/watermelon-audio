@@ -596,6 +596,8 @@ TEST(LatchInstrument, BaselineRowsRoundTripThroughTheirTextForm) {
 // =====================================================================================
 
 std::string oraclePath() { return std::string(WMA_ANALYSIS_GOLDEN_DIR) + "/../corpus-v1-oraculo-corto.tsv"; }
+/// REQ-058 (D43): el oraculo corto de f0 (`corpus-reference-pitch.py --short --partials 4`).
+std::string oracleF0Path() { return std::string(WMA_ANALYSIS_GOLDEN_DIR) + "/../corpus-v1-oraculo-corto-f0.tsv"; }
 std::string baselinePath() { return std::string(WMA_ANALYSIS_GOLDEN_DIR) + "/../baseline/enganche-corpus-v1.tsv"; }
 
 std::string slurp(const std::string& path, bool* ok) {
@@ -728,7 +730,21 @@ constexpr int kProductionChunkFrames = 256;
 constexpr int kRangeChunks[] = {96, 192, 240, kProductionChunkFrames, 480, 960, 1536};
 constexpr size_t kNumRangeChunks = sizeof(kRangeChunks) / sizeof(kRangeChunks[0]);
 
-FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e, int chunkFrames = kProductionChunkFrames) {
+/// REQ-058 (D48): la cuerda del catalogo que el usuario eligio para esta nota: el candidato mas cercano a
+/// `hz_verdadero` (sin candidatos, el mismo `hz_verdadero`). AC-058.1 se mide con este objetivo.
+double chosenStringHz(const corpus::Entry& e) {
+    double best = e.trueHz;
+    double bestDist = INFINITY;
+    for (double h : e.candidatesHz) {
+        const double d = std::fabs(std::log2(h / e.trueHz));
+        if (d < bestDist) { bestDist = d; best = h; }
+    }
+    return best;
+}
+
+/// `targetHz` <= 0: el objetivo es `hz_verdadero` (el protocolo de las lineas de base de REQ-055/057).
+FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e, int chunkFrames = kProductionChunkFrames,
+                 double targetHz = 0.0) {
     FedRun run;
     run.rate = data.sampleRate;
     const int frames = corpus::noteEndFrames(data);
@@ -739,7 +755,7 @@ FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e, int chunkFram
     wma::analysis::AnalysisSnapshot snapshot;
     wma::analysis::AnalysisThread analysis(ring, snapshot);
     ring.setCaptureRate(data.sampleRate);
-    analysis.setTargetHz(e.trueHz);
+    analysis.setTargetHz(targetHz > 0.0 ? targetHz : e.trueHz);
     run.events.push_back({static_cast<int64_t>(ring.readPosition()), true});
     analysis.setCandidates(e.candidatesHz.empty() ? nullptr : e.candidatesHz.data(),
                            static_cast<int>(e.candidatesHz.size()));
@@ -772,6 +788,12 @@ FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e, int chunkFram
                 // la altura absoluta sale del objetivo de ESTA publicacion.
                 if (!std::isnan(cents))
                     p.hz = analysis.strobe().targetHz() * std::pow(2.0, static_cast<double>(cents) / 1200.0);
+                // REQ-058 (D-7): las sondas del strobe en ESTA publicacion. El segmento se lleva al RING:
+                // el strobe cuenta frames desde su ultimo reset/objetivo y consumio exactamente lo drenado.
+                const wma::analysis::StrobeTracker& s = analysis.strobe();
+                p.partials = std::isnan(cents) ? 0 : s.partialsUsed();
+                p.early = !std::isnan(cents) && s.readingIsEarly();
+                p.segmentStart = p.pos - (s.framesSinceReset() - s.segmentStartFrame());
                 run.pubs.push_back(p);
             }
         }
@@ -1564,6 +1586,97 @@ TEST(AttackInstrument, OracleAttackLinesAreReadUnderTheirFile) {
 }
 
 // =====================================================================================
+// REQ-058 S1 (D-7, tarea 1.1): t_vuelta, cobertura en el tiempo y estratos, con secuencias a mano
+// =====================================================================================
+
+Publication seg(int64_t pos, double hz, int64_t segmentStart, int partials = 3, bool early = true, double sigma = 1.0,
+                int state = kMeas) {
+    Publication p = pub(pos, hz, state, sigma);
+    p.segmentStart = segmentStart;
+    p.partials = partials;
+    p.early = early;
+    return p;
+}
+
+TEST(AttackInstrument, TheReturnIsTheFirstReadingOfTheSegmentOpenedAtTheAttack) {
+    // AC-058.7 (D-7). Atrapa: contar como vuelta la lectura ARRASTRADA del segmento viejo (lo que mide
+    // `t_primera` del re-punteo hoy) y una holgura distinta de 1024 frames. t0 = 3000.
+    const std::vector<Publication> pubs{seg(2900, 440.0, 0), seg(3100, 440.0, 0),   // segmento viejo: no es vuelta
+                                        seg(3200, kNan, 1975),                    // empieza a 1025 antes: no cuenta
+                                        seg(3300, 440.0, 1975),                   // con cents pero del segmento de antes
+                                        seg(3400, 440.0, 1976),                   // a 1024 antes: SI
+                                        seg(3500, 440.0, 3000)};
+    const auto a = latch::measureAttacks(pubs, {3000}, kNoOracle, 5000, params());
+    ASSERT_EQ(a.size(), 1u);
+    EXPECT_EQ(a[0].firstReadingFrames, 100) << "t_primera sigue siendo la primera con cents, arrastrada o no";
+    EXPECT_EQ(a[0].returnFrames, 400);
+    EXPECT_NEAR(a[0].returnSec, 0.4, 1e-12);
+    // Sin sonda del segmento (−1) no hay vuelta que medir, aunque haya cents.
+    const auto b = latch::measureAttacks({pub(3100, 440.0)}, {3000}, kNoOracle, 5000, params());
+    EXPECT_EQ(b[0].returnFrames, -1);
+    EXPECT_TRUE(std::isnan(b[0].returnSec));
+}
+
+TEST(AttackInstrument, TimeCoverageCountsFromAQuarterSecondWhileTheOracleDeclaresPitch) {
+    // AC-058.11 b (D-7). Atrapa: contar desde t0 y no desde t0 + 0,25 s (con 250 frames exactos la
+    // publicacion es del ataque: no cuenta), y contar publicaciones donde el oraculo no declara altura.
+    // t0 = 1000; tramos propios: [1,0 ; 1,2] con hz, [1,3 ; 1,6] sin hz (nan).
+    const std::vector<OracleSegment> oracle{{1.0, 1.2, 440.0}, {1.3, 1.6, kNan}};
+    const std::vector<Publication> pubs{pub(1200, 440.0),   // 0,2 s: antes del cuarto de segundo
+                                        pub(1250, 440.0),   // 0,25 s exactos: todavia no
+                                        pub(1300, 440.0),   // cuenta, con cents
+                                        pub(1400),          // cuenta, sin cents
+                                        pub(1700, 440.0)};  // el tramo propio mas nuevo no declara altura
+    const auto a = latch::measureAttacks(pubs, {1000}, oracle, 5000, params());
+    ASSERT_EQ(a.size(), 1u);
+    EXPECT_EQ(a[0].soundingPublications, 2);
+    EXPECT_EQ(a[0].soundingWithCents, 1);
+}
+
+TEST(AttackInstrument, JudgedPublicationsCarryTheirStratumAndPath) {
+    // AC-058.4 (D21, D-7). Atrapa: perder los parciales o el camino de la publicacion al juzgarla, y
+    // juzgar una sin oraculo propio.
+    const std::vector<OracleSegment> oracle{{1.0, 1.1, 440.0}};
+    const std::vector<Publication> pubs{seg(1050, 440.0, 1000, 2, true, 1.0),               // sin tramo terminado
+                                        seg(1200, hzAt(440.0, 1.5), 1000, 2, true, 1.0),    // k = 2, cubierta
+                                        seg(1300, hzAt(440.0, 3.0), 1000, 4, false, 1.0, kConv)};   // k = 4, no
+    const auto a = latch::measureAttacks(pubs, {1000}, oracle, 5000, params());
+    ASSERT_EQ(a[0].judged.size(), 2u);
+    EXPECT_NEAR(a[0].judged[0].sinceT0Sec, 0.2, 1e-12);
+    EXPECT_EQ(a[0].judged[0].partials, 2);
+    EXPECT_TRUE(a[0].judged[0].early);
+    EXPECT_TRUE(a[0].judged[0].covered);
+    EXPECT_NEAR(a[0].judged[0].errorCents, 1.5, 1e-9);
+    EXPECT_EQ(a[0].judged[1].partials, 4);
+    EXPECT_FALSE(a[0].judged[1].early);
+    EXPECT_EQ(a[0].judged[1].state, kConv);
+    EXPECT_FALSE(a[0].judged[1].covered);
+}
+
+TEST(LatchInstrument, StrataBordersGoToThePreviousPhaseAndThreeOrMorePartialsAreOne) {
+    // D21 (D-7). Atrapa: los bordes de 250 ms y 1 s del lado equivocado, y k = 2 mezclado con k >= 3.
+    EXPECT_EQ(latch::phaseStratum(0.001), 0);
+    EXPECT_EQ(latch::phaseStratum(0.25), 0);
+    EXPECT_EQ(latch::phaseStratum(0.2501), 1);
+    EXPECT_EQ(latch::phaseStratum(1.0), 1);
+    EXPECT_EQ(latch::phaseStratum(1.0001), 2);
+    EXPECT_EQ(latch::partialsStratum(1), 1);
+    EXPECT_EQ(latch::partialsStratum(2), 2);
+    EXPECT_EQ(latch::partialsStratum(3), 3);
+    EXPECT_EQ(latch::partialsStratum(4), 3);
+    latch::CoverageCell c;
+    c.add({0.1, 3, true, kMeas, 1.0, 1.0, true});
+    c.add({0.1, 3, true, kMeas, -4.0, 1.0, false});
+    c.add({0.1, 3, true, kMeas, 0.0, 1.0, true});   // |error| = 0: cubre, pero no entra a σ/|error|
+    EXPECT_EQ(c.n, 3);
+    EXPECT_NEAR(c.coverage(), 2.0 / 3.0, 1e-12);
+    ASSERT_EQ(c.ratio.size(), 2u);
+    EXPECT_NEAR(c.medianRatio(), 0.625, 1e-12) << "mediana de {1, 0,25}";
+    EXPECT_STRNE(latch::degenerateStringWarning(5), "");
+    EXPECT_STREQ(latch::degenerateStringWarning(6), "");
+}
+
+// =====================================================================================
 // POR ATAQUE: la linea de base sobre corpus-v1 y la toma real
 // =====================================================================================
 
@@ -1574,7 +1687,10 @@ constexpr Col kAttackCols[] = {
     {"err_primera_c", false},  {"sigma_primera_c", false}, {"mediana_abs_c", false}, {"p90_abs_c", false},
     {"max_abs_c", false},      {"cobertura", false},      {"lect_250ms", true},      {"err_250ms_c", false},
     {"sigma_250ms_c", false},  {"cub_250ms", true},       {"lect_1s", true},         {"err_1s_c", false},
-    {"sigma_1s_c", false},     {"cub_1s", true}};
+    {"sigma_1s_c", false},     {"cub_1s", true},
+    // REQ-058 S1 (D-7): la vuelta, la cobertura en el tiempo y las MEASURING contra el oraculo de f0 (D43).
+    {"t_vuelta_frames", true}, {"t_vuelta_s", false},     {"frac_tiempo_cents", false},
+    {"n_measuring_f0", true},  {"cob_measuring_f0", false}, {"p90_measuring_f0_c", false}};
 constexpr size_t kNumAttackCols = sizeof(kAttackCols) / sizeof(kAttackCols[0]);
 
 struct AttackRow {
@@ -1640,9 +1756,36 @@ double probeFlag(const latch::Probe& p, bool value) { return p.applies ? flag(va
 /// Cubierta solo se juzga con lectura Y oraculo: sin tramo propio, NaN (no «no cubierta»).
 double coveredFlag(const latch::Probe& p) { return p.applies && p.reading && p.oracle ? flag(p.covered) : kNan; }
 
-AttackRow attackRowOf(const std::string& name, int index, int pass, const latch::Attack& a, int rate) {
+/// Las MEASURING con cents de un ataque juzgadas contra el oraculo de f0 (D43): cuantas, su cobertura y su p90.
+struct MeasuringF0 {
+    int n = 0;
+    double coverage = kNan;
+    double p90 = kNan;
+};
+
+MeasuringF0 measuringF0Of(const latch::Attack* f0) {
+    MeasuringF0 m;
+    if (f0 == nullptr) return m;
+    int covered = 0;
+    std::vector<double> abs;
+    for (const latch::JudgedPublication& j : f0->judged) {
+        if (j.state != wma::analysis::kStateMeasuring) continue;
+        ++m.n;
+        covered += j.covered ? 1 : 0;
+        abs.push_back(std::fabs(j.errorCents));
+    }
+    if (m.n > 0) {
+        m.coverage = static_cast<double>(covered) / m.n;
+        m.p90 = latch::percentile(abs, 0.9);
+    }
+    return m;
+}
+
+AttackRow attackRowOf(const std::string& name, int index, int pass, const latch::Attack& a, int rate,
+                      const latch::Attack* f0 = nullptr) {
     AttackRow r{};
     r.name = name;
+    const MeasuringF0 mf0 = measuringF0Of(f0);
     const double v[kNumAttackCols] = {static_cast<double>(index),
                                       static_cast<double>(pass),
                                       static_cast<double>(a.t0Frames),
@@ -1668,7 +1811,15 @@ AttackRow attackRowOf(const std::string& name, int index, int pass, const latch:
                                       probeFlag(a.late, a.late.reading),
                                       a.late.errorCents,
                                       a.late.sigmaCents,
-                                      coveredFlag(a.late)};
+                                      coveredFlag(a.late),
+                                      framesOrNan(a.returnFrames),
+                                      secOf(a.returnFrames, rate),
+                                      a.soundingPublications > 0
+                                          ? static_cast<double>(a.soundingWithCents) / a.soundingPublications
+                                          : kNan,
+                                      static_cast<double>(mf0.n),
+                                      mf0.coverage,
+                                      mf0.p90};
     for (size_t i = 0; i < kNumAttackCols; ++i) r.v[i] = v[i];
     return r;
 }
@@ -1720,6 +1871,11 @@ std::string attackBaselineHeader() {
         "# ataque ya terminado en ese instante; lect = 1 si habia lectura propia del ataque, cub = 1 si |error| <= 2\n"
         "# sigma (nan sin lectura o sin tramo propio);\n"
         "# nan = no aplica (t0 + Δ pasado el final del ataque). `nan` en el resto = no llego / no aplica.\n"
+        "# REQ-058 S1 (D-7): t_vuelta = primera publicacion con cents DEL SEGMENTO que el motor abrio en el ataque\n"
+        "# (segmentStart >= t0 - 1024; nan = ninguna: la lectura sigue siendo la del segmento viejo o no hay);\n"
+        "# frac_tiempo_cents = publicaciones con cents / publicaciones pasados 0,25 s del ataque mientras su tramo\n"
+        "# propio del oraculo declara altura (AC-058.11 b); *_measuring_f0 = las publicaciones MEASURING con cents\n"
+        "# contra el oraculo corto de f0 (corpus-v1-oraculo-corto-f0.tsv, D43): cuantas, cobertura 2 sigma, p90 |error|.\n"
         "#\n"
         "# EL DIFF DE ESTE ARCHIVO ES LA REVISION. Frames y banderas exactos; lo demas con tolerancia 0,002.\n"
         "# Regenerar (corre la suite y ESCRIBE en vez de comparar; el test queda SKIPPED):\n"
@@ -1745,6 +1901,8 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
     if (st != corpus::State::kVerified) GTEST_SKIP() << missingCorpusMessage(st);
     std::map<std::string, OracleFile> oracle;
     ASSERT_EQ(loadOracle(oraclePath(), &oracle), "") << "el corpus esta y el oraculo corto no: esto FALLA";
+    std::map<std::string, OracleFile> oracleF0;
+    ASSERT_EQ(loadOracle(oracleF0Path(), &oracleF0), "") << "el corpus esta y el oraculo corto de f0 no: esto FALLA";
 
     bool subset = false;
     const std::vector<corpus::Entry> entries = corpusEntriesForThisBuild(&subset);
@@ -1796,6 +1954,13 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
             for (const latch::FrameCut& c : of.cuts) cuts.push_back({c.ini + pass * noteEnd, c.fin + pass * noteEnd});
         const std::vector<latch::Attack> attacks = latch::measureAttacks(run.pubs, t0s, segs, 2 * noteEnd, prm, cuts);
         ASSERT_EQ(attacks.size(), t0s.size());
+        // REQ-058 (D43): las mismas publicaciones contra el oraculo corto de f0, para las MEASURING.
+        ASSERT_EQ(oracleF0.at(e.name).sha, of.sha) << e.name << ": los dos oraculos cortos no describen el mismo archivo";
+        std::vector<OracleSegment> segsF0;
+        for (int pass = 0; pass < 2; ++pass)
+            for (const OracleSegment& sg : oracleF0.at(e.name).segments)
+                if (sg.tFin <= cut) segsF0.push_back({sg.tIni + pass * cut, sg.tFin + pass * cut, sg.hz});
+        const std::vector<latch::Attack> attacksF0 = latch::measureAttacks(run.pubs, t0s, segsF0, 2 * noteEnd, prm, cuts);
         std::vector<int64_t> markedExcluded;
         for (size_t i = 0; i < attacks.size(); ++i)
             if (attacks[i].excludedByCut) markedExcluded.push_back(t0s[i]);
@@ -1807,7 +1972,7 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
             const latch::Attack& a = attacks[i];
             if (a.excludedByCut) continue;   // sin cifras: no entra a ninguna fila ni resumen
             const int p = passOf[i] - 1;
-            const AttackRow r = attackRowOf(e.name, ++rowOrdinal, passOf[i], a, run.rate);
+            const AttackRow r = attackRowOf(e.name, ++rowOrdinal, passOf[i], a, run.rate, &attacksF0[i]);
             rows[keyOf(r.name, r.v[0])] = r;
             std::printf("%-24s %2zu %1d %7.3f | %1d %7.3f %7.3f | %+7.2f %+7.2f %5.2f %7.2f %7.2f\n", e.name.c_str(), static_cast<size_t>(rowOrdinal),
                         passOf[i], a.t0Sec, a.readingCarried ? 1 : 0, a.firstReadingSec, a.convergedSec, a.early.errorCents,
