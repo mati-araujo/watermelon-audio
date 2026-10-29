@@ -550,6 +550,12 @@ public:
      */
     static constexpr double kOverlapSlopeFactor[5] = {3.3263, 2.6546, 2.3470, 2.1783, 2.0730};
     static constexpr double kOverlapCurvatureFactor[5] = {2.1429, 1.9814, 1.8901, 1.8358, 1.8004};
+    // El ajuste corto indexa estas tablas con `n - 4`, n en [kEarlyMinPhases, kEarlyWindow]: que nunca se
+    // salga (security-auditor de REQ-058).
+    static_assert(kEarlyMinPhases >= 4 && kEarlyMinPhases <= kEarlyWindow, "n minimo del ajuste corto fuera de rango");
+    static_assert(kEarlyWindow - 4 < static_cast<int>(sizeof(kOverlapSlopeFactor) / sizeof(kOverlapSlopeFactor[0])) &&
+                      kEarlyWindow - 4 < static_cast<int>(sizeof(kOverlapCurvatureFactor) / sizeof(kOverlapCurvatureFactor[0])),
+                  "kEarlyWindow excede las tablas del factor de solape");
 
     /// El ajuste corto de la serie densa (D-1), por parcial. `n == 0` = no hay ajuste (menos de
     /// `kEarlyMinPhases` fases, o sin objetivo).

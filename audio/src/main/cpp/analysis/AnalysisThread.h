@@ -241,6 +241,10 @@ public:
      * en el contrato de exactitud.
      */
     static constexpr double kConvergedUncertaintyCents = 0.1;
+    // REQ-058: el estado de una MEASURING del veredicto con la deriva temprana en su σ publicada solo es
+    // invariante si el umbral del estado es el mismo que el del strobe (que decide cuando aplicar el maximo).
+    static_assert(kConvergedUncertaintyCents == StrobeTracker::kConvergedUncertaintyCents,
+                  "el umbral de CONVERGED de AnalysisThread y StrobeTracker tiene que ser uno");
 
     /**
      * Por debajo de esto, la altura detectada NO tiene soporte espectral (REQ-031).

@@ -268,7 +268,10 @@ bool StrobeTracker::process(const float* mono, int numFrames) {
     if (mHasMeasurement && mDomainVerified) {
         mHaveGroupReading = true;
         mGroupCents = mCents;
-        mGroupSigma = mUncertaintyCents;
+        // La σ de HOY, no la publicada: una MEASURING del veredicto publica max(σ de hoy, deriva temprana), y
+        // una tolerancia de agrupamiento que crece con esa deriva agrupa una clavija girada, que es lo que
+        // AC-058.7 prohibe (decision del lider, 2026-10-29). Para una temprana es su σ (sin ese maximo).
+        mGroupSigma = std::isnan(mVerdictUncertaintyCents) ? mUncertaintyCents : mVerdictUncertaintyCents;
         mGroupReadingFrame = mPartials[0].framesSinceReset();
     }
     return true;
