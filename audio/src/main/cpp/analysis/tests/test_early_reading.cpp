@@ -776,10 +776,11 @@ TEST(Segments, ATurnedPegAfterAVerdictMeasuringWithDriftDoesNotPool) {
     bool detected = false;
     for (const Pub& p : pubs) {
         if (p.attacks > attacksBefore) { detected = true; break; }
-        if (!p.early && !std::isnan(p.cents) && !std::isnan(p.verdictSigma)) lastBefore = &p;
+        if (!std::isnan(p.cents)) lastBefore = &p;   // la ultima lectura de CUALQUIER camino: la que el motor toma
     }
     ASSERT_TRUE(detected) << "el re-punteo no se detecto como ataque: el test no ejerce el caso";
     ASSERT_NE(lastBefore, nullptr);
+    ASSERT_FALSE(lastBefore->early) << "la referencia fue una temprana: el arreglo y el mutante coinciden";
     ASSERT_EQ(lastBefore->state, wma::analysis::kStateMeasuring) << "la referencia fue CONVERGED, no una MEASURING inflada";
     ASSERT_GT(lastBefore->sigma, lastBefore->verdictSigma + 1.0) << "la referencia no tenia la deriva temprana arriba";
     int wrongConverged = 0;
