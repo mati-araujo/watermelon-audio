@@ -478,7 +478,8 @@ void reportHonesty(const char* label, const Honesty& h) {
 }
 
 TEST(EarlyReading, TwoPartialsCoveredAtTwoSigma) {
-    // AC-058.4 (estrato k = 2, D29). Mutante «√Σσ² en vez de la propagacion del ajuste» ⇒ rojo.
+    // AC-058.4 (estrato k = 2, D29): σ = max(propagada, √Σσ²) (decision del lider). Mutante «sin el piso √Σσ²»
+    // (la propagada sola) ⇒ 0,946, rojo.
     const Honesty h = stableHonesty(2, 2, 2);
     reportHonesty("estable, 2 parciales (k = 2)", h);
     RecordProperty("cobertura_k2_milesimas", static_cast<int>(h.coverage() * 1000.0));

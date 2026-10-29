@@ -2101,6 +2101,7 @@ struct DetectorFile {
 
 struct EarlyCorpus {
     bool ran = false;
+    bool subset = false;   ///< bajo sanitizer se mide uno de cada cuatro archivos: los umbrales GLOBALES no aplican
     std::vector<DetectorFile> detector;
     std::string skip;
     std::vector<EarlyCorpusAttack> attacks;
@@ -2123,8 +2124,7 @@ const EarlyCorpus& earlyCorpus() {
     std::map<std::string, OracleFile> oracle;
     const std::string why = loadOracle(oracleF0Path(), &oracle);
     if (!why.empty()) { c.skip = "el corpus esta y el oraculo corto de f0 no (" + why + "): esto FALLA"; return c; }
-    bool subset = false;
-    for (const corpus::Entry& e : corpusEntriesForThisBuild(&subset)) {
+    for (const corpus::Entry& e : corpusEntriesForThisBuild(&c.subset)) {
         const wav::WavData data = wav::readWav((dir + "/" + e.name).c_str());
         if (data.sampleRate <= 0 || !oracle.count(e.name)) { c.skip = e.name + ": sin audio u oraculo"; return c; }
         const OracleFile& of = oracle.at(e.name);
@@ -2374,6 +2374,9 @@ TEST(EarlyReadingCorpus, MeasuringIsCoveredPerStratumAgainstF0) {
     for (const auto& [key, cell] : cells)
         std::printf("    %-34s n=%5d  %.3f | %.3f\n", key.c_str(), cell.n, static_cast<double>(cell.cov) / cell.n,
                     static_cast<double>(cell.covOr) / cell.n);
+    // Los pisos son del GLOBAL de corpus-v1: bajo sanitizer (uno de cada cuatro archivos) se reporta y no se
+    // afirma, igual que el trinquete de `test_block_invariance.cpp`.
+    if (c.subset) return;
     for (const StratumFloor& f : kCoverageFloors) {
         const auto it = cells.find(std::string("ALL|") + f.key);
         ASSERT_NE(it, cells.end()) << f.key;
