@@ -1169,9 +1169,18 @@ TEST(InterleavedGrids, TheDeclaredGapB0AndE1From25CentsAt44kHasNoFineReadingButT
         float out[wma::analysis::kSnapshotValueCount];
         ASSERT_TRUE(wma::analysis::analyzeBuffer(stereo.data(), kFrames, kRate, c.hz, out)) << c.label;
 
-        EXPECT_TRUE(std::isnan(out[wma::analysis::kSnapCents]))
-            << c.label << ": HAY lectura fina (" << out[wma::analysis::kSnapCents]
+        // REQ-058 S1: el hueco es del VEREDICTO (la compuerta de tendencia reinicia en bucle) y sigue
+        // ahi: nunca `CONVERGED`. Desde REQ-058 el camino temprano SI publica donde el veredicto no
+        // tiene lectura (D-1), y aca lee a ≤ 0,2 c del desvio (medido al escribir S1): esa lectura es
+        // MEASURING por construccion (AC-058.6). La excepcion de AC-057.3 queda para S2 de REQ-058.
+        EXPECT_NE(static_cast<int>(out[wma::analysis::kSnapState]), wma::analysis::kStateConverged)
+            << c.label << ": el veredicto CONVERGIO (" << out[wma::analysis::kSnapCents]
             << " c) — si esto da rojo, cerrá la excepción de AC-057.3 (MINI-054)";
+        if (!std::isnan(out[wma::analysis::kSnapCents])) {
+            EXPECT_EQ(static_cast<int>(out[wma::analysis::kSnapState]), wma::analysis::kStateMeasuring) << c.label;
+            EXPECT_NEAR(out[wma::analysis::kSnapCents], c.dev, 1.0)
+                << c.label << ": la lectura temprana sobre el hueco del veredicto esta lejos del desvio";
+        }
         EXPECT_GT(out[wma::analysis::kSnapDetectedHz], 0.0f)
             << c.label << ": ni la gruesa publica; el hueco declarado es solo el de la fina (D30)";
     }

@@ -196,6 +196,60 @@ public:
      */
     int windowRestarts() const noexcept { return mWindowRestarts; }
 
+    // ---- REQ-058 S1: constantes del camino temprano y del detector de ataque -----------------
+
+    /**
+     * D-3 — EL DETECTOR DE ATAQUE DEL MOTOR (no el del oraculo, R-API-48): rms de bloques de 1024
+     * frames alineados a la grilla de las rejillas; ataque si `rms_j ≥ kAttackFloor` y
+     * `rms_j ≥ kAttackRiseRatio·rms_{j−1}` (+6 dB), salvo el primer bloque desde el reset, con un
+     * refractario de `kAttackRefractoryBlocks` bloques. Sin refractario la rampa del ataque de
+     * corpus-v1 disparaba 2–3 veces seguidas (prototipo del architect, REQ-058 S1 D-3). Fuente de los
+     * valores: ver la tarea 1.6 en el archivo de etapa.
+     */
+    static constexpr double kAttackFloor = 0.001;
+    static constexpr double kAttackRiseRatio = 2.0;
+    static constexpr int kAttackRefractoryBlocks = 4;
+    static constexpr int kAttackBlockFrames = 1024;
+
+    /**
+     * Umbral de B por debajo (o por encima de `kMaxInharmonicityB` menos esto) del cual el ajuste
+     * estirado quedo en el BORDE de su busqueda: ahi `C` es la media de `cents_n − estiramiento` y su
+     * sensibilidad a cada parcial es 1/k, no la del intercepto de la recta en n². 1e-9 esta 4 ordenes
+     * por debajo del B de una cuerda real (~1e-5 nylon) y 25 veces por encima del ancho final de la
+     * busqueda (5e-3·0,618⁴⁰ ≈ 4e-11).
+     */
+    static constexpr double kStretchFitEdgeB = 1e-9;
+
+    /**
+     * La σ que el AJUSTE ESTIRADO propaga desde la σ de cada parcial (D-1, «piso» de k ≥ 3 y la σ de
+     * k = 2, D29): `√Σ w_i²·σ_i²`, con `w_i = ∂C/∂cents_i` la SENSIBILIDAD REAL del ajuste en el B
+     * encontrado. Dentro de la busqueda es el peso del intercepto de la recta en `x_i =
+     * n_i²/(1 + B·n_i²)` (la derivada del estiramiento en B); con B en el borde es 1/k. Con k = 2 y B
+     * interior es exactamente `(n₂⁴σ₁² + n₁⁴σ₂²)/(n₂² − n₁²)²` (B → 0).
+     */
+    static double propagatedStretchSigma(const double* sigmas, const int* orders, int k, double B) noexcept {
+        if (k <= 0) return 0.0;
+        if (k == 1) return sigmas[0];
+        const bool atEdge = B <= kStretchFitEdgeB || B >= kMaxInharmonicityB - kStretchFitEdgeB;
+        double x[4] = {0.0, 0.0, 0.0, 0.0};
+        double xm = 0.0;
+        for (int i = 0; i < k; ++i) {
+            const double n2 = static_cast<double>(orders[i]) * static_cast<double>(orders[i]);
+            x[i] = n2 / (1.0 + B * n2);
+            xm += x[i];
+        }
+        xm /= static_cast<double>(k);
+        double sxx = 0.0;
+        for (int i = 0; i < k; ++i) sxx += (x[i] - xm) * (x[i] - xm);
+        double var = 0.0;
+        for (int i = 0; i < k; ++i) {
+            const double w = (atEdge || !(sxx > 0.0)) ? 1.0 / static_cast<double>(k)
+                                                     : 1.0 / static_cast<double>(k) - xm * (x[i] - xm) / sxx;
+            var += w * w * sigmas[i] * sigmas[i];
+        }
+        return std::sqrt(var);
+    }
+
     /// Techo de la busqueda de B. 5e-3 cubre con holgura el rango publicado de
     /// cuerdas reales (~1e-5 nylon a ~5e-4 acero); `physicsB()` da 1,28e-5 para
     /// la prima de una guitarra y 1,05e-4 para su bordona.
@@ -249,7 +303,7 @@ public:
      */
     static bool fitStretchedSeries(const double* cents, const double* sigmas,
                                    const int* orders, int k,
-                                   double* outC, double* outSigmaC) noexcept {
+                                   double* outC, double* outSigmaC, double* outB = nullptr) noexcept {
         if (k < kMinPartialsForStretchFit) return false;
 
         const auto sseFor = [&](double B, double* Cout) {
@@ -283,7 +337,9 @@ public:
         }
 
         double C = 0.0;
-        const double sse = sseFor(0.5 * (lo + hi), &C);
+        const double bFit = 0.5 * (lo + hi);
+        const double sse = sseFor(bFit, &C);
+        if (outB != nullptr) *outB = bFit;
         const int dof = k - 2;
         if (!std::isfinite(sse) || !std::isfinite(C)) return false;
 
@@ -367,6 +423,32 @@ public:
     bool sawInputDiscontinuity() const noexcept { return mSawDiscontinuity; }
 
     bool process(const float* mono, int numFrames);
+
+    // ---- REQ-058 S1: LA LECTURA TEMPRANA (D-1, D-2) -------------------------------------------
+    //
+    // Dos caminos, y uno solo publica por llamada:
+    //   1. el del VEREDICTO, el de hoy intacto (rejilla 0, admision con veredicto de R-PITCH-62,
+    //      serie estirada, R-PITCH-63): la UNICA fuente de `CONVERGED`;
+    //   2. el TEMPRANO: el ajuste corto de la serie densa del segmento vigente
+    //      (`InterleavedPhaseEstimator::denseEarlyFit`), con la MISMA admision y el MISMO ajuste
+    //      estirado. Publica SOLO cuando el veredicto no tiene lectura (antes de las 12 ventanas,
+    //      tras un quiebre de R-PITCH-63, cuando la admision con veredicto se cae en la cola).
+    // Donde hoy hay lectura del veredicto el numero publicado es el de hoy, bit a bit: no hay un
+    // segundo escritor del mismo valor. Lo nuevo vive donde hoy se publica NaN.
+
+    /// `true` si la lectura vigente (`hasMeasurement()`) salio del camino temprano. Una temprana es
+    /// SIEMPRE `MEASURING` (D45): quien publica no la declara convergida aunque su σ sea ≤ 0,1.
+    bool readingIsEarly() const noexcept { return mReadingIsEarly; }
+
+    /// Frame (desde el ultimo reset/objetivo) en que empezo el segmento vigente: el bloque de 1024 del
+    /// ultimo ataque que detecto el motor (D-3), o 0. Sonda para el instrumento (`t_vuelta`).
+    int64_t segmentStartFrame() const noexcept { return mSegmentStartFrame; }
+
+    /// Frames consumidos desde el ultimo reset/objetivo (la grilla de 1024 de las rejillas parte de 0).
+    int64_t framesSinceReset() const noexcept { return mPartials[0].framesSinceReset(); }
+
+    /// Ataques que detecto el motor desde el ultimo reset/objetivo. Sonda para tests.
+    int attacksDetected() const noexcept { return mAttacksDetected; }
 
     /// Desviacion combinada contra el objetivo, en cents. Solo vale si
     /// `hasMeasurement()`.
@@ -522,8 +604,10 @@ public:
 
     bool hasSignal() const noexcept { return mHasSignal; }
     bool hasMeasurement() const noexcept { return mHasMeasurement; }
+    /// REQ-058 (AC-058.6, D45): convergida SOLO desde el camino del veredicto. Una temprana con σ ≤ 0,1
+    /// sigue midiendo.
     bool converged() const noexcept {
-        return mHasMeasurement && mUncertaintyCents <= kConvergedUncertaintyCents;
+        return mHasMeasurement && !mReadingIsEarly && mUncertaintyCents <= kConvergedUncertaintyCents;
     }
 
     // --- 6.12: las cuatro fases, para que S7 no re-analice ------------------
@@ -574,6 +658,23 @@ private:
      */
     bool mSuppressUntilNextClose{false};
     int mWindowRestarts{0};
+
+    // ---- REQ-058 S1 ----------------------------------------------------------------------------
+    bool mReadingIsEarly{false};
+    /// El detector de ataque (D-3): rms del bloque de 1024 en curso, alineado a la grilla de las rejillas.
+    double mAttackBlockSumSq{0.0};
+    double mAttackPrevBlockRms{0.0};
+    int mAttackRefractoryBlocks{0};
+    int mAttacksDetected{0};
+    int64_t mSegmentStartFrame{0};
+
+    /// El camino de hoy (veredicto), sin cambios: combina la rejilla 0 de los cuatro parciales.
+    void combineVerdictReadings(bool closed);
+    /// El camino temprano (D-1): solo se llama si el veredicto no dejo lectura.
+    void combineEarlyReadings();
+    /// D-3: acumula el rms del bloque de 1024 y, en su borde, decide si hubo ataque.
+    void trackAttackBlock(const float* mono, int numFrames, int64_t endFrame);
+    void clearAttackTracking() noexcept;
 };
 
 }  // namespace wma::analysis

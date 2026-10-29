@@ -484,10 +484,86 @@ public:
     /// vieja que conservo la 0 (`min(count, keep0 - 1)`). La cadena de vueltas no se toca.
     void restartAtBreak();
 
+    // ---- REQ-058 S1 (D-1): LA SERIE DENSA DEL SEGMENTO Y SU AJUSTE CORTO -------------------------
+    //
+    // En cada cierre con fase, sea cual sea la rejilla, la fase cruda entra a una serie DESENVUELTA:
+    // `D_k = D_{k-1} + wrap(raw_k - raw_{k-1} - refHop)`, el mismo incremento `e_j` de la cadena de
+    // vueltas (dentro del rango denso es exacto). Sobre las ultimas `n = min(cuenta, kEarlyWindow)`
+    // fases se ajusta un cuadratico CENTRADO `D = a + b·u + c·(u² − ū²)`, `u = i − (n−1)/2`: con abscisas
+    // simetricas `b` es la frecuencia en el CENTRO de la ventana (lo que la cuerda hizo, no una
+    // prediccion: R-PITCH-67) y `c` la curvatura (el glide). Lo consume el camino temprano de
+    // `StrobeTracker`; la rejilla 0 y su regresion no se tocan (bit a bit).
+    //
+    // La serie es la del SEGMENTO vigente: una ventana que empieza antes de `openDenseSegmentAt()` no
+    // entra, y un cierre silencioso la vacia. Sobrevive a un quiebre de R-PITCH-63 (es lo que publica
+    // despues de uno). Memoria del objeto, no de `prepare()`.
+
+    /// Fases de la serie densa que se guardan. 64 = 16 ventanas de 4096: holgado sobre `kEarlyWindow`.
+    static constexpr int kMaxDensePhases = 64;
+
+    /**
+     * W = 8 fases densas (D-1). Medido por el architect en prototipo sobre corpus-v1 (REQ-058 S1,
+     * «Umbrales provisionales»): cobertura de 2σ 0,677 con W = 8 contra 0,661 (12) y 0,645 (16), y p90
+     * de `t_primera` 0,276 s contra 0,342 s. La ventana corta es la que sigue al glide.
+     */
+    static constexpr int kEarlyWindow = 8;
+
+    /**
+     * n ≥ 5 (D-1): el cuadratico tiene 3 parametros, asi que con 5 fases quedan 2 grados de libertad
+     * para la σ de los residuos. Con 4 (1 g.l.) se adelanta 23 ms y la σ empeora (prototipo).
+     * Primera lectura posible: 4096 + 4·1024 = 8192 frames desde el inicio del segmento.
+     */
+    static constexpr int kEarlyMinPhases = 5;
+
+    /**
+     * La correccion por SOLAPE de 75 % de las ventanas Hann (D-1), por n = 4..8 (indice n − 4). La
+     * correlacion del ruido entre fases vecinas es `ρ(d) = Σw(m)w(m+d·1024)/Σw²` = 1 / 0,6592 / 0,1667 /
+     * 0,0075 (d = 0..3), y el factor es √(varianza verdadera del estimador MCO bajo esa covarianza /
+     * la que reporta la formula iid con el `s²` de los residuos, en esperanza). Es geometria de la
+     * ventana (como la ganancia coherente N/4 de REQ-027), no una calibracion: la recomputa de la Hann
+     * `EarlyReading.OverlapFactorMatchesTheHannWindow` (tolerancia 1e-4).
+     */
+    static constexpr double kOverlapSlopeFactor[5] = {3.3263, 2.6546, 2.3470, 2.1783, 2.0730};
+    static constexpr double kOverlapCurvatureFactor[5] = {2.1429, 1.9814, 1.8901, 1.8358, 1.8004};
+
+    /// El ajuste corto de la serie densa (D-1), por parcial. `n == 0` = no hay ajuste (menos de
+    /// `kEarlyMinPhases` fases, o sin objetivo).
+    struct DenseEarlyFit {
+        int n = 0;
+        double cents = 0.0;        ///< de `b`: la frecuencia del centro de la ventana
+        double sigmaCents = 0.0;   ///< error estandar de `b` con residuos del cuadratico × f_s(n)
+        double driftCents = 0.0;   ///< `c·(n−1)` CON SIGNO: cuanto cambia la frecuencia entre el centro y el borde
+        double driftSigmaCents = 0.0;   ///< error estandar de `driftCents` × f_c(n)
+        double binToRmsRatio = 0.0;     ///< energia del bin en la ventana del ULTIMO cierre denso
+    };
+
+    /// El ultimo ajuste corto. Se recalcula UNA vez por cierre denso (D-6), no por llamada.
+    const DenseEarlyFit& denseEarlyFit() const noexcept { return mEarlyFit; }
+
+    /// Abre un segmento (D-3): vacia la serie densa y desde ahora no acepta ventanas que empiecen
+    /// antes de `startFrame` (frames desde el ultimo reset de este estimador). La rejilla 0 y la
+    /// cadena de vueltas no se tocan.
+    void openDenseSegmentAt(int64_t startFrame) noexcept;
+
+    /// Cuantas fases tiene la serie densa del segmento. Sonda para tests.
+    int densePhaseCount() const noexcept { return mDenseCount; }
+
+    /// Frames consumidos desde el ultimo reset (la grilla de 1024 de las rejillas parte de 0).
+    int64_t framesSinceReset() const noexcept { return mFrame; }
+
+    /// El ajuste corto (D-1) sobre una serie dada: puro, para que un test lo ejercite sin audio.
+    static DenseEarlyFit fitDensePhases(const double* phases, int count, int sampleRate, double targetHz) noexcept;
+
 private:
     PhaseSlopeEstimator mGrid[kGrids];
     int mSampleRate{0};
     double mTargetHz{0.0};
+    double mDense[kMaxDensePhases]{};
+    int mDenseCount{0};
+    bool mDenseHavePrev{false};
+    double mDensePrevRaw{0.0};
+    int64_t mDenseSegmentStart{0};
+    DenseEarlyFit mEarlyFit{};
     /// Frames consumidos desde el ultimo reset: la rejilla `g` ve el audio desde `g·kHopFrames`.
     /// 64 bits: en armeabi-v7a/x86 `long` son 32 y desbordaria a las 2^31 frames (12,4 h a 48 k).
     int64_t mFrame{0};
@@ -503,6 +579,8 @@ public:
 private:
     void clearChain() noexcept;
     void pushChain(double raw, bool ok) noexcept;
+    void clearDenseSeries() noexcept;
+    void pushDensePhase(const PhaseSlopeEstimator& closing, int64_t windowStart) noexcept;
 };
 
 }  // namespace wma::analysis

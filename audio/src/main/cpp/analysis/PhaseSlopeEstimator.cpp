@@ -338,6 +338,94 @@ double wrapToPi(double x) {
 }
 }  // namespace
 
+InterleavedPhaseEstimator::DenseEarlyFit InterleavedPhaseEstimator::fitDensePhases(const double* phases, int count,
+                                                                                   int sampleRate,
+                                                                                   double targetHz) noexcept {
+    DenseEarlyFit f;
+    const int n = std::min(count, kEarlyWindow);
+    if (phases == nullptr || n < kEarlyMinPhases || sampleRate <= 0 || targetHz <= 0.0) return f;
+    const double* y = phases + (count - n);
+    // Abscisas centradas: Σu = 0 y Σu·(u² − ū²) = 0, asi que las tres columnas son ortogonales y cada
+    // coeficiente sale de su propia suma. `b` es a la vez el lineal del cuadratico y la pendiente de
+    // la recta sola.
+    const double half = 0.5 * static_cast<double>(n - 1);
+    double su2 = 0.0, ym = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double u = static_cast<double>(i) - half;
+        su2 += u * u;
+        ym += y[i];
+    }
+    ym /= static_cast<double>(n);
+    const double u2m = su2 / static_cast<double>(n);
+    double suy = 0.0, sv2 = 0.0, svy = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double u = static_cast<double>(i) - half;
+        const double v = u * u - u2m;
+        suy += u * (y[i] - ym);
+        sv2 += v * v;
+        svy += v * (y[i] - ym);
+    }
+    const double b = suy / su2;
+    const double c = sv2 > 0.0 ? svy / sv2 : 0.0;
+    double rss = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double u = static_cast<double>(i) - half;
+        const double r = y[i] - (ym + b * u + c * (u * u - u2m));
+        rss += r * r;
+    }
+    const double s2 = rss / static_cast<double>(n - 3);
+    const int fi = n - 4;   // n en [kEarlyMinPhases, kEarlyWindow] = [5, 8]
+    const double seB = std::sqrt(s2 / su2) * kOverlapSlopeFactor[fi];
+    const double seC = sv2 > 0.0 ? std::sqrt(s2 / sv2) * kOverlapCurvatureFactor[fi] : 0.0;
+    const double hzPerRad = static_cast<double>(sampleRate) / (2.0 * M_PI * static_cast<double>(kHopFrames));
+    const double centsPerHz = 1200.0 / (std::log(2.0) * targetHz);
+    const double span = static_cast<double>(n - 1);
+    f.n = n;
+    f.cents = 1200.0 * std::log2(1.0 + b * hzPerRad / targetHz);
+    f.sigmaCents = std::fabs(seB * hzPerRad * centsPerHz);
+    f.driftCents = c * span * hzPerRad * centsPerHz;
+    f.driftSigmaCents = std::fabs(seC * span * hzPerRad * centsPerHz);
+    if (!std::isfinite(f.cents) || !std::isfinite(f.sigmaCents) || !std::isfinite(f.driftCents) ||
+        !std::isfinite(f.driftSigmaCents)) {
+        return DenseEarlyFit{};   // NaN/Inf en el audio: no hay ajuste, no una lectura inventada
+    }
+    return f;
+}
+
+void InterleavedPhaseEstimator::clearDenseSeries() noexcept {
+    mDenseCount = 0;
+    mDenseHavePrev = false;
+    mDensePrevRaw = 0.0;
+    mEarlyFit = DenseEarlyFit{};
+}
+
+void InterleavedPhaseEstimator::openDenseSegmentAt(int64_t startFrame) noexcept {
+    clearDenseSeries();
+    mDenseSegmentStart = startFrame;
+}
+
+void InterleavedPhaseEstimator::pushDensePhase(const PhaseSlopeEstimator& closing, int64_t windowStart) noexcept {
+    if (!closing.lastCloseProducedPhase()) {   // silencio: el hilo de fase se corto
+        clearDenseSeries();
+        return;
+    }
+    if (windowStart < mDenseSegmentStart) return;   // la ventana empezo antes del segmento
+    const double raw = closing.lastRawPhase();
+    double d = 0.0;
+    if (mDenseHavePrev && mDenseCount > 0) {
+        d = mDense[mDenseCount - 1] + wrapToPi(raw - mDensePrevRaw - mGrid[0].refHopAdvance());
+    }
+    if (mDenseCount == kMaxDensePhases) {
+        for (int i = 1; i < kMaxDensePhases; ++i) mDense[i - 1] = mDense[i];
+        --mDenseCount;
+    }
+    mDense[mDenseCount++] = d;
+    mDensePrevRaw = raw;
+    mDenseHavePrev = true;
+    mEarlyFit = fitDensePhases(mDense, mDenseCount, mSampleRate, mTargetHz);
+    mEarlyFit.binToRmsRatio = closing.goertzelBinToRmsRatio();
+}
+
 void InterleavedPhaseEstimator::clearChain() noexcept {
     mChainCount = 0;
     for (int i = 0; i <= kGrids; ++i) { mChainRaw[i] = 0.0; mChainOk[i] = false; }
@@ -356,6 +444,7 @@ void InterleavedPhaseEstimator::prepare(int sampleRate) {
     for (auto& g : mGrid) g.prepare(sampleRate);
     mFrame = 0;
     clearChain();
+    openDenseSegmentAt(0);
 }
 
 void InterleavedPhaseEstimator::setTarget(double targetHz) {
@@ -363,12 +452,14 @@ void InterleavedPhaseEstimator::setTarget(double targetHz) {
     for (auto& g : mGrid) g.setTarget(targetHz);
     mFrame = 0;
     clearChain();
+    openDenseSegmentAt(0);
 }
 
 void InterleavedPhaseEstimator::reset() {
     for (auto& g : mGrid) g.reset();
     mFrame = 0;
     clearChain();
+    openDenseSegmentAt(0);
 }
 
 bool InterleavedPhaseEstimator::process(const float* mono, int numFrames) {
@@ -402,7 +493,10 @@ bool InterleavedPhaseEstimator::process(const float* mono, int numFrames) {
         }
         mFrame = endFrame;
         pos += seg;
-        if (closing >= 0) pushChain(mGrid[closing].lastRawPhase(), mGrid[closing].lastCloseProducedPhase());
+        if (closing >= 0) {
+            pushChain(mGrid[closing].lastRawPhase(), mGrid[closing].lastCloseProducedPhase());
+            pushDensePhase(mGrid[closing], endFrame - kWindow);   // REQ-058 (D-1)
+        }
     }
     return closedGrid0;
 }

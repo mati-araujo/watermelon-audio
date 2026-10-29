@@ -74,6 +74,11 @@ struct BlockRun {
     bool hasFine = false;
     int lastFineState = -1;
     double lastFineErrCents = NAN;
+    // REQ-058 (D44): la ULTIMA publicacion `CONVERGED` de la nota y su error. Con lecturas tempranas
+    // (MEASURING) en la cola, la ultima lectura fina deja de medir el veredicto; el trinquete afirma
+    // sobre esta.
+    bool hasConverged = false;
+    double lastConvergedErrCents = NAN;
 };
 
 /**
@@ -130,6 +135,13 @@ BlockRun runAtBlock(const float* stereo, int frames, int rate, double target,
             }
             if (p.state == wma::analysis::kStateConverged && std::isnan(r.convergedFrames))
                 r.convergedFrames = p.frames;
+            if (p.state == wma::analysis::kStateConverged && !std::isnan(cents)) {
+                r.hasConverged = true;
+                if (trueHz > 0.0) {
+                    const double hz = th->strobe().targetHz() * std::pow(2.0, static_cast<double>(cents) / 1200.0);
+                    r.lastConvergedErrCents = 1200.0 * std::log2(hz / trueHz);
+                }
+            }
         }
     }
     r.fastModeApplied = th->targetAppliedByFastMode();
@@ -336,10 +348,12 @@ TEST(CorpusRobustness, TheRatchetHoldsForEveryBlockSize) {
         std::string worst = "-";
         for (size_t i = 0; i < entries.size(); ++i) {
             const BlockRun& r = runs[b][i];
-            if (!r.hasFine || r.lastFineState != wma::analysis::kStateConverged) continue;
+            // REQ-058 (D44): sobre la ULTIMA publicacion CONVERGED de la nota, no sobre la ultima
+            // lectura fina (que con tempranas en la cola puede ser una MEASURING honesta).
+            if (!r.hasConverged) continue;
             ++converged;
-            if (std::fabs(r.lastFineErrCents) > maxErr) {
-                maxErr = std::fabs(r.lastFineErrCents);
+            if (std::fabs(r.lastConvergedErrCents) > maxErr) {
+                maxErr = std::fabs(r.lastConvergedErrCents);
                 worst = entries[i].name;
             }
         }

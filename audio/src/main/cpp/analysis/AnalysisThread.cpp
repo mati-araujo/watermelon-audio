@@ -600,7 +600,11 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
         } else if (!haveReading) {
             state = kStateMeasuring;       // integrando, todavia sin pendiente
         } else {
-            state = mStrobe.uncertaintyCents() <= kConvergedUncertaintyCents
+            // REQ-058 (AC-058.6, D45): `CONVERGED` sale SOLO del camino del veredicto (R-PITCH-62, 12
+            // ventanas). Una lectura temprana es `MEASURING` aunque su σ sea ≤ 0,1 —una sintesis limpia
+            // la tiene a 0,5 s—: el estado derivado solo de σ publicaba 164 `CONVERGED` antes de 1 s
+            // sobre los glides de REQ-036 (prototipo; lo mata `States.NoConvergedBeforeTheVerdictOnGlides`).
+            state = (!mStrobe.readingIsEarly() && mStrobe.uncertaintyCents() <= kConvergedUncertaintyCents)
                         ? kStateConverged
                         : kStateMeasuring;
         }
@@ -630,7 +634,10 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
 
         // La inarmonicidad se lee de lo que el strobe YA calculo: cuatro fases
         // que discrepan entre si son, literalmente, la rigidez de la cuerda.
-        const bool haveB = haveReading && mInharmonicity.estimateFrom(mStrobe);
+        // REQ-058 (D-2): B sale SOLO del camino del veredicto. Los `partialCents` que lee
+        // `estimateFrom` son los de la rejilla 0, que antes del veredicto no son los que publico la
+        // lectura temprana: mezclar las dos fuentes daria un B de otra medicion.
+        const bool haveB = haveReading && !mStrobe.readingIsEarly() && mInharmonicity.estimateFrom(mStrobe);
         values[kSnapInharmonicityB] = haveB ? static_cast<float>(mInharmonicity.b()) : nan;
         values[kSnapInharmonicityMeasured] = haveB ? 1.0f : 0.0f;
 
