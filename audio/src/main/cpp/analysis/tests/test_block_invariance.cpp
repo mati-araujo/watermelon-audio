@@ -25,6 +25,7 @@
 #include "AnalysisRing.h"
 #include "AnalysisSnapshot.h"
 #include "AnalysisThread.h"
+#include "OfflineAnalysis.h"
 
 #include <gtest/gtest.h>
 
@@ -53,6 +54,7 @@ struct Pub {
     float frames = 0.0f;       ///< kSnapFramesAnalyzed
     int state = -1;            ///< kSnapState
     uint32_t centsBits = 0;    ///< kSnapCents, BIT A BIT (NaN incluido)
+    bool early = false;        ///< REQ-058: la lectura salio del camino temprano (no entra a la igualdad)
 };
 
 bool operator==(const Pub& a, const Pub& b) {
@@ -121,6 +123,7 @@ BlockRun runAtBlock(const float* stereo, int frames, int rate, double target,
             p.frames = lastFrames;
             p.state = static_cast<int>(v[wma::analysis::kSnapState]);
             std::memcpy(&p.centsBits, &v[wma::analysis::kSnapCents], sizeof p.centsBits);
+            p.early = !std::isnan(v[wma::analysis::kSnapCents]) && th->strobe().readingIsEarly();
             r.series.push_back(p);
 
             const float cents = v[wma::analysis::kSnapCents];
@@ -177,6 +180,17 @@ std::string firstDifference(const std::vector<Pub>& ref, const std::vector<Pub>&
     return "";
 }
 
+/// REQ-058 (D-3): una cuerda que decae (τ 1 s) y se RE-PUNTEA en `repluckFrame` con fase nueva.
+std::vector<float> repluckedString(double hz, int rate, int frames, int repluckFrame) {
+    auto first = inharmonicString(hz, 1.0e-4, 4, rate, repluckFrame);
+    applyDecay(first, rate, 1.0);
+    auto second = partialsWithPitchTrajectory(hz, 1.0e-4, oneOverNAmplitudes(4), rate, frames - repluckFrame,
+                                              [](double) { return 0.0; }, 0.777);
+    applyDecay(second, rate, 1.0);
+    first.insert(first.end(), second.begin(), second.end());
+    return first;
+}
+
 std::vector<double> guitarCandidates() {
     std::vector<double> hz;
     for (const CatalogString& s : catalogStrings())
@@ -213,15 +227,19 @@ TEST(BlockSize, ThePublicationSeriesDoesNotDependOnTheBlockSize) {
     // AC-057.5
     constexpr int kRate = 48000;
     constexpr int kFrames = 4 * kRate;
-    struct Signal { const char* label; double f0; double dev; double target; bool mustRetarget; };
-    const Signal kSignals[] = {{"E2 +30 c, objetivo E2", 82.407, +30.0, 82.407, false},
-                               {"E4 +40 c, objetivo E4 (fuera del rango de hoy)", 329.628, +40.0, 329.628, false},
-                               {"A2 +10 c, objetivo del usuario E2 (reenganche del modo rapido)", 110.0, +10.0, 82.407, true}};
+    struct Signal { const char* label; double f0; double dev; double target; bool mustRetarget; bool repluck; };
+    const Signal kSignals[] = {{"E2 +30 c, objetivo E2", 82.407, +30.0, 82.407, false, false},
+                               {"E4 +40 c, objetivo E4 (fuera del rango de hoy)", 329.628, +40.0, 329.628, false, false},
+                               {"A2 +10 c, objetivo del usuario E2 (reenganche del modo rapido)", 110.0, +10.0, 82.407, true, false},
+                               // REQ-058 S1 (D-5, tarea 1.7): las tempranas y un RE-PUNTEO (segmento) a mitad.
+                               {"D3 +2 c con re-punteo a 2 s (tempranas y segmentos)", 146.832, +2.0, 146.832, false, true}};
     const std::vector<double> cands = guitarCandidates();
 
     for (const Signal& sg : kSignals) {
         SCOPED_TRACE(sg.label);
-        const std::vector<float> stereo = toStereo(inharmonicString(detune(sg.f0, sg.dev), 1.0e-4, 4, kRate, kFrames));
+        const std::vector<float> stereo =
+            toStereo(sg.repluck ? repluckedString(detune(sg.f0, sg.dev), kRate, kFrames, 2 * kRate)
+                                : inharmonicString(detune(sg.f0, sg.dev), 1.0e-4, 4, kRate, kFrames));
         BlockRun runs[kBlockCount];
         for (int b = 0; b < kBlockCount; ++b) {
             runs[b] = runAtBlock(stereo.data(), kFrames, kRate, sg.target, cands, detune(sg.f0, sg.dev), kBlocks[b]);
@@ -231,6 +249,10 @@ TEST(BlockSize, ThePublicationSeriesDoesNotDependOnTheBlockSize) {
 
         const BlockRun& ref = runs[1];   // 256
         ASSERT_FALSE(std::isnan(ref.firstFineFrames)) << "la señal no produjo ninguna lectura fina: el test no mide nada";
+        // REQ-058: la serie incluye publicaciones TEMPRANAS (si no, la invariancia no dice nada de ellas).
+        int early = 0;
+        for (const Pub& p : ref.series) early += p.early ? 1 : 0;
+        EXPECT_GT(early, 0) << "ninguna publicacion temprana: la serie no ejerce el camino temprano";
         if (sg.mustRetarget) {
             EXPECT_GE(ref.fastModeApplied, 1u) << "el modo rapido no reengancho: el escenario no ejerce el caso";
         }
@@ -400,6 +422,49 @@ TEST(CorpusRobustness, TheRatchetHoldsForEveryBlockSize) {
     EXPECT_TRUE(differing.empty())
         << differing.size() << " diferencias entre bloques (AC-057.5: t_primera, t_conv y los cents no pueden "
         << "depender del bloque del llamador):" << msg;
+}
+
+
+/**
+ * REQ-058 S1 (AC-058.9, D-5, tarea 1.7): el puerto offline (`analyzeBuffer`, tandas del tamaño del ring)
+ * da la MISMA lectura final, bit a bit, que el alimentador vivo en tandas de 256 sobre una nota con
+ * re-punteo: las tempranas y los segmentos viven en `StrobeTracker` y no dependen del bloque. El vivo
+ * replica lo que hace el puerto con el objetivo puesto: la primera tanda (lo que habia en el ring al
+ * aplicarlo) se descarta. Mutante (estructural): un camino propio en `analyzeBuffer`.
+ */
+TEST(OfflineParity, FinalReadingIsBitIdenticalWithARepluck) {
+    constexpr int kRate = 48000;
+    constexpr int kFrames = 4 * kRate;
+    const double hz = detune(146.832, +2.0);
+    const std::vector<float> stereo = toStereo(repluckedString(hz, kRate, kFrames, 2 * kRate));
+    for (double cut : {3.0, 2.3}) {   // la final asentada y una en plena espera del segmento nuevo
+        SCOPED_TRACE("corte a " + std::to_string(cut) + " s");
+        const int frames = static_cast<int>(cut * kRate);
+        float off[wma::analysis::kSnapshotValueCount];
+        ASSERT_TRUE(wma::analysis::analyzeBuffer(stereo.data(), frames, kRate, 146.832, off));
+
+        auto ring = std::make_unique<AnalysisRing>();
+        auto snap = std::make_unique<AnalysisSnapshot>();
+        auto th = std::make_unique<AnalysisThread>(*ring, *snap);
+        ring->setCaptureRate(kRate);
+        th->setTargetHz(146.832);
+        const int first = std::min(frames, static_cast<int>(AnalysisRing::kCapacityFrames));
+        ring->writeStereo(stereo.data(), first);
+        while (th->drainOnce() != Outcome::kRingEmpty) {}
+        for (int w = first; w < frames; w += 256) {
+            ring->writeStereo(stereo.data() + static_cast<size_t>(w) * 2, std::min(256, frames - w));
+            while (th->drainOnce() != Outcome::kRingEmpty) {}
+        }
+        float live[wma::analysis::kSnapshotValueCount];
+        ASSERT_TRUE(snap->read(live));
+        ASSERT_FALSE(std::isnan(off[wma::analysis::kSnapCents])) << "el puerto no publico lectura: el test no compara nada";
+        for (int i = 0; i < wma::analysis::kSnapshotValueCount; ++i) {
+            uint32_t a = 0, b = 0;
+            std::memcpy(&a, &off[i], sizeof a);
+            std::memcpy(&b, &live[i], sizeof b);
+            EXPECT_EQ(a, b) << "valor " << i << " del snapshot: offline " << off[i] << ", vivo " << live[i];
+        }
+    }
 }
 
 }  // namespace

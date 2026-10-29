@@ -76,11 +76,13 @@ struct Pub {
     bool early = false;
     int k = 0;
     bool bMeasured = false;
+    double segmentStartSec = 0.0;   ///< inicio del segmento vigente del motor, en segundos del flujo
+    int attacks = 0;                ///< ataques que detecto el motor hasta aca
 };
 
 /// Alimenta `mono` al motor entero en tandas de 256 (como el instrumento), objetivo puesto con el ring
 /// vacio, y registra cada publicacion.
-std::vector<Pub> runEngine(const std::vector<float>& mono, int rate, double target) {
+std::vector<Pub> runEngine(const std::vector<float>& mono, int rate, double target, double rewriteTargetAtSec = -1.0) {
     wma::analysis::AnalysisRing ring;
     wma::analysis::AnalysisSnapshot snap;
     wma::analysis::AnalysisThread th(ring, snap);
@@ -93,6 +95,10 @@ std::vector<Pub> runEngine(const std::vector<float>& mono, int rate, double targ
         const int c = static_cast<int>(std::min<size_t>(256, mono.size() - off));
         for (int i = 0; i < c; ++i) st[2 * i] = st[2 * i + 1] = mono[off + i];
         ring.writeStereo(st.data(), c);
+        if (rewriteTargetAtSec >= 0.0 && static_cast<double>(off) / rate >= rewriteTargetAtSec) {
+            th.setTargetHz(target);   // REQ-030: reescribir el MISMO objetivo no llega al strobe
+            rewriteTargetAtSec = -1.0;
+        }
         for (;;) {
             const auto o = th.drainOnce();
             if (o == wma::analysis::AnalysisThread::DrainOutcome::kRingEmpty) break;
@@ -107,6 +113,10 @@ std::vector<Pub> runEngine(const std::vector<float>& mono, int rate, double targ
             p.early = th.strobe().readingIsEarly();
             p.k = th.strobe().partialsUsed();
             p.bMeasured = v[wma::analysis::kSnapInharmonicityMeasured] > 0.5f;
+            const StrobeTracker& s = th.strobe();
+            p.segmentStartSec =
+                static_cast<double>(ring.readPosition() - (s.framesSinceReset() - s.segmentStartFrame())) / rate;
+            p.attacks = s.attacksDetected();
             out.push_back(p);
         }
     }
@@ -561,6 +571,225 @@ TEST(EarlyReading, SigmaFallsUntilConvergedOnASteadyNote) {
         ++checked;
     }
     EXPECT_EQ(checked, 6);
+}
+
+
+// =============================================================================================
+// D-3 — los segmentos: re-punteo de la misma nota, clavija girada, semitono, glide, objetivo reescrito
+// =============================================================================================
+
+constexpr int kSegRate = 48000;
+constexpr double kSegF0 = 146.83238;     // D3
+constexpr double kSegFirstCents = 2.0;   // la primera nota, contra el objetivo
+constexpr double kRepluckSec = 2.5;
+
+/// Una nota de D3 a `kSegFirstCents` que decae (τ 1 s) y, a `kRepluckSec`, un RE-PUNTEO a `secondCents`
+/// con fase nueva, amplitud llena y, si `glideX != 0`, un glide de ataque `glideX·e^(−t/τ)` hacia ella.
+std::vector<float> repluck(double secondCents, double glideX = 0.0, double glideTau = 0.2, double totalSec = 5.0) {
+    const int split = static_cast<int>(kRepluckSec * kSegRate);
+    const int total = static_cast<int>(totalSec * kSegRate);
+    auto first = partialsWithPitchTrajectory(detune(kSegF0, kSegFirstCents), 1e-4, oneOverNAmplitudes(4, 0.4), kSegRate,
+                                             split, [](double) { return 0.0; });
+    applyDecay(first, kSegRate, 1.0);
+    auto second = partialsWithPitchTrajectory(detune(kSegF0, secondCents), 1e-4, oneOverNAmplitudes(4, 0.4), kSegRate,
+                                              total - split,
+                                              [glideX, glideTau](double t) { return glideX * std::exp(-t / glideTau); }, 1.234);
+    applyDecay(second, kSegRate, 1.0);
+    first.insert(first.end(), second.begin(), second.end());
+    addWhiteNoise(&first, 0.0005, 99u);
+    return first;
+}
+
+/// La primera publicacion despues de `t` que cumple `pred`, o nullptr.
+template <typename Pred>
+const Pub* firstAfter(const std::vector<Pub>& pubs, double t, Pred pred) {
+    for (const Pub& p : pubs)
+        if (p.sec > t && pred(p)) return &p;
+    return nullptr;
+}
+
+/// La ultima publicacion en (t0, t], o nullptr.
+const Pub* visibleAt(const std::vector<Pub>& pubs, double t0, double t) {
+    const Pub* v = nullptr;
+    for (const Pub& p : pubs) {
+        if (p.sec <= t0) continue;
+        if (p.sec > t) break;
+        v = &p;
+    }
+    return v;
+}
+
+bool hasCents(const Pub& p) { return !std::isnan(p.cents); }
+bool isConverged(const Pub& p) { return p.state == wma::analysis::kStateConverged; }
+
+TEST(Segments, ARepluckOfTheSameNoteKeepsSigma) {
+    // AC-058.7: re-punteo de la MISMA nota sin glide. La lectura vuelve en <= 250 ms con el segmento nuevo,
+    // la σ no vuelve a su valor inicial (a 0,5 s del re-punteo es menos de la mitad de la de 0,5 s del
+    // primer ataque) y CONVERGED vuelve antes de 0,6 s. Mutante «reset por ataque» (descartar los segmentos
+    // viejos) ⇒ la σ a 0,5 s es la de un arranque y CONVERGED tarda las 12 ventanas (~1,02 s).
+    const auto pubs = runEngine(repluck(kSegFirstCents), kSegRate, kSegF0);
+    const Pub* back = firstAfter(pubs, kRepluckSec, [](const Pub& p) { return hasCents(p) && p.segmentStartSec >= kRepluckSec - 0.03; });
+    ASSERT_NE(back, nullptr) << "no volvio la lectura del segmento nuevo";
+    EXPECT_LE(back->sec - kRepluckSec, 0.25);
+    const Pub* first05 = visibleAt(pubs, 0.0, 0.5);
+    const Pub* second05 = visibleAt(pubs, kRepluckSec, kRepluckSec + 0.5);
+    ASSERT_TRUE(first05 && second05 && hasCents(*first05) && hasCents(*second05));
+    std::printf("  [REQ-058 D-3] re-punteo: vuelve a %.3f s, σ a 0,5 s %.4f (primer ataque %.4f)\n", back->sec - kRepluckSec,
+                second05->sigma, first05->sigma);
+    EXPECT_LT(second05->sigma, 0.5 * first05->sigma);
+    const Pub* conv = firstAfter(pubs, kRepluckSec, [](const Pub& p) { return isConverged(p) && p.segmentStartSec >= kRepluckSec - 0.03; });
+    ASSERT_NE(conv, nullptr) << "CONVERGED no volvio tras el re-punteo";
+    EXPECT_LT(conv->sec - kRepluckSec, 0.6);
+    EXPECT_NEAR(pubs.back().cents, kSegFirstCents, 0.1);
+}
+
+TEST(Segments, NoCarriedReadingAfterARepluck) {
+    // D-3 (3): desde que el motor detecta el ataque y hasta la primera lectura del segmento nuevo, se
+    // publica MEASURING SIN cents. Mutante «conservar la lectura vieja tras el ataque» ⇒ cents arrastrados.
+    const auto pubs = runEngine(repluck(kSegFirstCents), kSegRate, kSegF0);
+    int carried = 0, gap = 0;
+    for (const Pub& p : pubs) {
+        if (p.sec <= kRepluckSec || p.attacks == 0) continue;
+        if (p.segmentStartSec < kRepluckSec - 0.03) continue;   // antes de que el motor lo detecte
+        if (!hasCents(p)) { ++gap; continue; }
+        if (!p.early && gap == 0) ++carried;
+        break;
+    }
+    EXPECT_EQ(carried, 0) << "la lectura vieja siguio publicandose despues del ataque detectado";
+    EXPECT_GT(gap, 0) << "control: entre el ataque y la lectura nueva hay publicaciones sin cents";
+}
+
+TEST(Segments, ConvergedReturnsWithAccumulatedWindows) {
+    // AC-058.7: las 12 ventanas de la puerta de CONVERGED se cuentan ACUMULADAS entre segmentos compatibles.
+    // Mutante «contar solo el segmento vigente» ⇒ CONVERGED no antes de 12·4096 frames (1,02 s).
+    const auto pubs = runEngine(repluck(kSegFirstCents), kSegRate, kSegF0);
+    const Pub* conv = firstAfter(pubs, kRepluckSec, [](const Pub& p) { return isConverged(p) && p.segmentStartSec >= kRepluckSec - 0.03; });
+    ASSERT_NE(conv, nullptr);
+    EXPECT_LT(conv->sec - kRepluckSec, 12.0 * 4096.0 / kSegRate * 0.8);
+}
+
+TEST(Segments, ATurnedPegDiscardsTheOldSegments) {
+    // AC-058.7: re-punteo a +3 c de la primera (clavija girada): pendientes incompatibles ⇒ los segmentos
+    // viejos se descartan y la lectura es la nueva. Mutante «compartir pendiente» ⇒ la lectura queda entre
+    // las dos alturas.
+    const double second = kSegFirstCents + 3.0;
+    const auto pubs = runEngine(repluck(second), kSegRate, kSegF0);
+    int wrongConverged = 0;
+    for (const Pub& p : pubs)
+        if (p.sec > kRepluckSec + 0.3 && isConverged(p) && std::fabs(p.cents - second) > 0.1) ++wrongConverged;
+    EXPECT_EQ(wrongConverged, 0);
+    ASSERT_TRUE(hasCents(pubs.back()));
+    EXPECT_NEAR(pubs.back().cents, second, 0.1);
+    EXPECT_EQ(pubs.back().state, wma::analysis::kStateConverged);
+}
+
+TEST(Segments, ASemitoneRestarts) {
+    // AC-058.7 (criterio 2): re-punteo a un semitono con el mismo objetivo ⇒ la gruesa queda a > 50 c y se
+    // reinicia. Mutante «no reiniciar ante 1 semitono» ⇒ lectura mezclada.
+    const double second = kSegFirstCents + 100.0;
+    const auto pubs = runEngine(repluck(second), kSegRate, kSegF0);
+    int wrong = 0;
+    for (const Pub& p : pubs)
+        if (p.sec > kRepluckSec + 0.4 && hasCents(p) && std::fabs(p.cents - second) > 5.0) ++wrong;
+    EXPECT_EQ(wrong, 0) << "lecturas lejos del semitono nuevo despues del re-punteo";
+    ASSERT_TRUE(hasCents(pubs.back()));
+    EXPECT_NEAR(pubs.back().cents, second, 0.1);
+}
+
+TEST(Segments, AGlidingRepluckIsNotPooledUntilSettled) {
+    // D-3: re-punteo de la misma nota CON glide de ataque (−20 c, τ 0,2 s): mientras glidea el segmento
+    // nuevo espera (sin agrupar) y CONVERGED no sale; ninguna CONVERGED equivocada. Mutante «agrupar durante
+    // el glide» ⇒ la lectura promedia el glide con la nota asentada.
+    const auto pubs = runEngine(repluck(kSegFirstCents, -20.0, 0.2), kSegRate, kSegF0);
+    int wrongConverged = 0;
+    for (const Pub& p : pubs) {
+        if (p.sec <= kRepluckSec || !isConverged(p)) continue;
+        const double truth = kSegFirstCents - 20.0 * std::exp(-(p.sec - kRepluckSec) / 0.2);
+        if (std::fabs(p.cents - truth) > 0.1) ++wrongConverged;
+    }
+    EXPECT_EQ(wrongConverged, 0);
+    const Pub* conv = firstAfter(pubs, kRepluckSec, isConverged);
+    ASSERT_NE(conv, nullptr);
+    EXPECT_GT(conv->sec - kRepluckSec, 0.3) << "CONVERGED salio en pleno glide";
+    EXPECT_NEAR(pubs.back().cents, kSegFirstCents, 0.1);
+}
+
+TEST(Segments, RewritingTheSameTargetKeepsSegments) {
+    // AC-058.7 / REQ-030: reescribir el MISMO objetivo a mitad de la nota no reinicia nada: la lectura no
+    // tiene hueco y el estado convergido se mantiene. Mutante «setTarget al reescribir el mismo valor» ⇒
+    // hueco de lectura y CONVERGED que se pierde.
+    const auto pubs = runEngine(repluck(kSegFirstCents), kSegRate, kSegF0, 1.8);
+    const Pub* before = visibleAt(pubs, 0.0, 1.79);
+    ASSERT_TRUE(before && isConverged(*before));
+    for (const Pub& p : pubs) {
+        if (p.sec < 1.8 || p.sec > 2.4) continue;
+        EXPECT_TRUE(hasCents(p)) << "hueco de lectura a " << p.sec << " s tras reescribir el objetivo";
+        EXPECT_TRUE(isConverged(p)) << "se perdio CONVERGED a " << p.sec << " s";
+    }
+}
+
+TEST(Segments, TheAttackRampOpensOneSegment) {
+    // D-3: la rampa de un ataque que sube en varios bloques (+6 dB, +6 dB, +6 dB) abre UN segmento.
+    // Mutante «sin refractario» ⇒ 2-3 aperturas.
+    constexpr int rate = kSegRate;
+    auto sig = partialsWithPitchTrajectory(kSegF0, 1e-4, oneOverNAmplitudes(4, 0.4), rate, 3 * rate, [](double) { return 0.0; });
+    // Silencio NO: la nota arranca bajita (0,02) y sube ×2 por bloque de 1024 durante 4 bloques desde 1 s.
+    const int rampStart = rate;
+    for (int i = 0; i < static_cast<int>(sig.size()); ++i) {
+        double g = 0.02;
+        if (i >= rampStart) g = std::min(1.0, 0.02 * std::pow(2.0, (i - rampStart) / 1024.0 + 1.0));
+        sig[i] = static_cast<float>(sig[i] * g);
+    }
+    const auto pubs = runEngine(sig, rate, kSegF0);
+    ASSERT_FALSE(pubs.empty());
+    EXPECT_EQ(pubs.back().attacks, 1) << "la rampa abrio " << pubs.back().attacks << " segmentos";
+}
+
+
+// =============================================================================================
+// D46 — el signo se relaja SOLO en el camino temprano y SOLO lejos del borde del rango
+// =============================================================================================
+
+/// Alimenta un seno puro a `devCents` del objetivo con la gruesa FIJA en `coarseCents` (el test controla
+/// el control) durante `seconds`; devuelve cuantas llamadas dejaron lectura y la ultima.
+struct EarlyProbe {
+    int readings = 0;
+    double lastCents = NAN;
+    bool anyVerdict = false;
+};
+
+EarlyProbe probeEarly(double target, double devCents, double coarseCents, double seconds) {
+    constexpr int rate = 48000;
+    StrobeTracker t;
+    t.prepare(rate);
+    t.setTarget(target);
+    t.setCoarseFrequencyHz(detune(target, coarseCents));
+    const auto sig = pureSine(detune(target, devCents), rate, static_cast<int>(seconds * rate), 0.3);
+    EarlyProbe out;
+    for (size_t off = 0; off < sig.size(); off += 256) {
+        t.process(sig.data() + off, static_cast<int>(std::min<size_t>(256, sig.size() - off)));
+        if (t.hasMeasurement()) {
+            ++out.readings;
+            out.lastCents = t.cents();
+            out.anyVerdict = out.anyVerdict || !t.readingIsEarly();
+        }
+    }
+    return out;
+}
+
+TEST(SignOutsideRange, TheEarlyPathStillDropsAnAliasNearTheEdge) {
+    // D46 / AC-014.3 donde aplica. 1000 Hz a 48 k: el rango denso del parcial 1 es 36,1 c (κ = 0,9) y la
+    // serie densa aliasa pasados 40,1 c. Una cuerda a +45 c se lee −36 c; con la gruesa en +35 c (adentro
+    // del rango y a mas de la mitad: CERCA del borde) el signo contradice y el parcial se cae: ninguna
+    // lectura. Mutante «signo relajado tambien cerca del borde» ⇒ publica −36 c.
+    const EarlyProbe nearEdge = probeEarly(1000.0, 45.0, 35.0, 0.6);
+    EXPECT_EQ(nearEdge.readings, 0) << "el alias cerca del borde se publico: " << nearEdge.lastCents << " c";
+    // Control: LEJOS del borde (gruesa +3 c, fina −3 c: signos opuestos y fuera de la zona muerta de 1 c)
+    // el camino temprano NO arbitra y lee; el veredicto todavia no existe (0,6 s).
+    const EarlyProbe far = probeEarly(1000.0, -3.0, 3.0, 0.6);
+    EXPECT_GT(far.readings, 0) << "lejos del borde el camino temprano tendria que leer con el signo relajado";
+    EXPECT_FALSE(far.anyVerdict);
+    EXPECT_NEAR(far.lastCents, -3.0, 0.05);
 }
 
 }  // namespace

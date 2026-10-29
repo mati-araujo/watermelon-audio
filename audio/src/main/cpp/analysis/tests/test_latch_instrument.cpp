@@ -30,6 +30,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -715,6 +716,9 @@ struct FedRun {
     std::vector<TargetEvent> events;
     /// rms por ventana fija de la senal alimentada (las DOS pasadas, en una sola grilla desde 0).
     std::vector<latch::Window> windows;
+    /// REQ-058 (D48, B5): alineado con `pubs`. En una CONVERGED del veredicto con k = 2, la σ que daria la
+    /// propagacion exacta del ajuste de dos puntos (la del camino temprano) en vez de `√Σσ²`; NaN en el resto.
+    std::vector<double> verdictK2ExactSigma;
 };
 
 // 🔴 EL TAMANO DE TANDA ES PARTE DE LO QUE SE MIDE, Y EL MOTOR DE HOY DEPENDE DE LA PARTICION DEL FLUJO.
@@ -795,6 +799,22 @@ FedRun feedTwice(const wav::WavData& data, const corpus::Entry& e, int chunkFram
                 p.early = !std::isnan(cents) && s.readingIsEarly();
                 p.segmentStart = p.pos - (s.framesSinceReset() - s.segmentStartFrame());
                 run.pubs.push_back(p);
+                double k2 = kNan;
+                if (p.state == wma::analysis::kStateConverged && !p.early && p.partials == 2) {
+                    double c[2], sg[2];
+                    int ord[2], n = 0;
+                    for (int i = 0; i < wma::analysis::StrobeTracker::kPartials && n < 2; ++i) {
+                        if (s.partialAdmission(i) != wma::analysis::PartialAdmission::kAdmitted) continue;
+                        c[n] = s.partialCents(i);
+                        sg[n] = s.partialUncertaintyCents(i);
+                        ord[n] = i + 1;
+                        ++n;
+                    }
+                    double C = 0.0, sres = 0.0, B = 0.0;
+                    if (n == 2 && wma::analysis::StrobeTracker::fitStretchedSeries(c, sg, ord, 2, &C, &sres, &B))
+                        k2 = wma::analysis::StrobeTracker::propagatedStretchSigma(sg, ord, 2, B);
+                }
+                run.verdictK2ExactSigma.push_back(k2);
             }
         }
         if (pass == 0) run.frames1 = static_cast<int64_t>(ring.readPosition());
@@ -2042,6 +2062,307 @@ TEST(LatchInstrumentCorpus, MeasuresTheAttacksAgainstTheCommittedBaseline) {
     const std::vector<std::string> diffs = diffAttackRows(want, rows, !subset);
     for (const std::string& d : diffs) ADD_FAILURE() << d;
     EXPECT_TRUE(diffs.empty()) << diffs.size() << " diferencias contra la linea de base por ataque";
+}
+
+// =====================================================================================
+// REQ-058 S1 — LA LECTURA TEMPRANA SOBRE corpus-v1 (AC-058.1, .2, .4, .5, .6, .7, .11)
+// =====================================================================================
+//
+// Una corrida por archivo con el objetivo = LA CUERDA DEL CATALOGO que el usuario eligio (D48; con
+// `hz_verdadero` + candidatos el modo rapido re-engancha y reinicia: esa cifra va en la linea de base
+// por ataque, aparte). Los errores, contra el oraculo corto de f0 (D43). Los umbrales de D20/D21 son
+// PROVISIONAL (D47): se afirman en el GLOBAL de corpus-v1 y se REPORTAN por cuerda con su n.
+
+struct EarlyCorpusAttack {
+    std::string file;
+    std::string cls;       ///< clase de material: el prefijo del nombre
+    std::string string;    ///< la cuerda: el sufijo del nombre
+    int pass = 0;
+    int rate = 0;
+    latch::Attack a;
+};
+
+/// Los ataques que detecto el MOTOR (cambios de `segmentStart`, en frames del ring) contra los del oraculo.
+struct DetectorFile {
+    std::string file;
+    int64_t noteEnd = 0;
+    std::vector<int64_t> engine;
+    std::vector<int64_t> oracle;   ///< t0 de las dos pasadas
+};
+
+struct EarlyCorpus {
+    bool ran = false;
+    std::vector<DetectorFile> detector;
+    std::string skip;
+    std::vector<EarlyCorpusAttack> attacks;
+    std::vector<int64_t> convergedBigSigmaOrEarly;   ///< publicaciones CONVERGED con σ > 0,1 o tempranas
+    int convergedVerdictK2 = 0;                      ///< CONVERGED del veredicto con k = 2
+    int convergedLostWithExactK2 = 0;                ///< de esas, cuantas pasarian σ > 0,1 con la propagacion exacta
+};
+
+const EarlyCorpus& earlyCorpus() {
+    static EarlyCorpus c;
+    if (c.ran) return c;
+    c.ran = true;
+    const std::string dir = corpus::defaultCorpusDir();
+    const corpus::State st = corpus::stateOf(dir, corpus::manifestPath());
+    if (st != corpus::State::kVerified) { c.skip = missingCorpusMessage(st); return c; }
+    std::map<std::string, OracleFile> oracle;
+    const std::string why = loadOracle(oracleF0Path(), &oracle);
+    if (!why.empty()) { c.skip = "el corpus esta y el oraculo corto de f0 no (" + why + "): esto FALLA"; return c; }
+    bool subset = false;
+    for (const corpus::Entry& e : corpusEntriesForThisBuild(&subset)) {
+        const wav::WavData data = wav::readWav((dir + "/" + e.name).c_str());
+        if (data.sampleRate <= 0 || !oracle.count(e.name)) { c.skip = e.name + ": sin audio u oraculo"; return c; }
+        const OracleFile& of = oracle.at(e.name);
+        const int64_t noteEnd = corpus::noteEndFrames(data);
+        const FedRun run = feedTwice(data, e, kProductionChunkFrames, chosenStringHz(e));
+        std::vector<int64_t> t0s;
+        std::vector<int> passOf;
+        for (int pass = 0; pass < 2; ++pass)
+            for (int64_t a : attackT0sForMeasure(of))
+                if (a < noteEnd) { t0s.push_back(a + pass * noteEnd); passOf.push_back(pass + 1); }
+        const double cut = static_cast<double>(noteEnd) / data.sampleRate;
+        std::vector<OracleSegment> segs;
+        for (int pass = 0; pass < 2; ++pass)
+            for (const OracleSegment& sg : of.segments)
+                if (sg.tFin <= cut) segs.push_back({sg.tIni + pass * cut, sg.tFin + pass * cut, sg.hz});
+        Params prm;
+        prm.sampleRate = run.rate;
+        std::vector<latch::FrameCut> cuts;
+        for (int pass = 0; pass < 2; ++pass)
+            for (const latch::FrameCut& k : of.cuts) cuts.push_back({k.ini + pass * noteEnd, k.fin + pass * noteEnd});
+        const auto attacks = latch::measureAttacks(run.pubs, t0s, segs, 2 * noteEnd, prm, cuts);
+        const size_t u = e.name.find('_');
+        for (size_t i = 0; i < attacks.size(); ++i) {
+            if (attacks[i].excludedByCut) continue;
+            c.attacks.push_back({e.name, e.name.substr(0, u), e.name.substr(u + 1, e.name.size() - u - 5), passOf[i], run.rate,
+                                 attacks[i]});
+        }
+        DetectorFile df;
+        df.file = e.name;
+        df.noteEnd = noteEnd;
+        df.oracle = t0s;
+        int64_t lastSeg = -1;
+        for (const Publication& p : run.pubs) {
+            if (p.segmentStart > 0 && p.segmentStart != lastSeg) df.engine.push_back(p.segmentStart);
+            lastSeg = p.segmentStart;
+        }
+        c.detector.push_back(df);
+        for (size_t i = 0; i < run.pubs.size(); ++i) {
+            const Publication& p = run.pubs[i];
+            if (p.state != wma::analysis::kStateConverged) continue;
+            if (p.early || p.sigmaCents > wma::analysis::StrobeTracker::kConvergedUncertaintyCents)
+                c.convergedBigSigmaOrEarly.push_back(p.pos);
+            if (!std::isnan(run.verdictK2ExactSigma[i])) {
+                ++c.convergedVerdictK2;
+                if (run.verdictK2ExactSigma[i] > wma::analysis::StrobeTracker::kConvergedUncertaintyCents)
+                    ++c.convergedLostWithExactK2;
+            }
+        }
+    }
+    return c;
+}
+
+/// Lectura PROPIA del ataque: en la pasada 1, `t_primera` (no hay nada antes); en la 2, `t_vuelta` (la
+/// arrastrada del segmento viejo no es una lectura del re-punteo).
+double ownReadingSec(const EarlyCorpusAttack& x) { return x.pass == 1 ? x.a.firstReadingSec : x.a.returnSec; }
+
+TEST(EarlyReadingCorpus, FirstReadingWithinTheBudget) {
+    // AC-058.1 (D47 PROVISIONAL: global). t_primera de la pasada 1 con la cuerda elegida: mediana <= 0,25 s
+    // y p90 <= 0,5 s. Mutante: el motor de hoy (publicacion detras del veredicto) ⇒ mediana 1,765 s.
+    const EarlyCorpus& c = earlyCorpus();
+    if (!c.skip.empty()) GTEST_SKIP() << c.skip;
+    std::vector<double> all;
+    int missing = 0;
+    std::map<std::string, std::vector<double>> byString;
+    for (const EarlyCorpusAttack& x : c.attacks) {
+        if (x.pass != 1) continue;
+        const double t = x.a.firstReadingSec;
+        if (std::isnan(t)) ++missing;
+        all.push_back(std::isnan(t) ? INFINITY : t);
+        byString[x.string].push_back(std::isnan(t) ? INFINITY : t);
+    }
+    std::printf("\n  [REQ-058 AC-058.1] t_primera pasada 1, cuerda elegida: n=%zu mediana %.3f p90 %.3f max %.3f s (sin lectura %d)\n",
+                all.size(), latch::median(all), latch::percentile(all, 0.9), maxOf(all), missing);
+    for (const auto& [str, v] : byString)
+        std::printf("    %-4s n=%zu mediana %.3f p90 %.3f%s\n", str.c_str(), v.size(), latch::median(v), latch::percentile(v, 0.9),
+                    latch::degenerateStringWarning(static_cast<int>(v.size())));
+    RecordProperty("t_primera_mediana_ms", static_cast<int>(latch::median(all) * 1000.0));
+    RecordProperty("t_primera_p90_ms", static_cast<int>(latch::percentile(all, 0.9) * 1000.0));
+    ASSERT_FALSE(all.empty());
+    EXPECT_LE(latch::median(all), 0.25);
+    EXPECT_LE(latch::percentile(all, 0.9), 0.5);
+}
+
+TEST(EarlyReadingCorpus, EveryAttackReadsWithin500msAndKeepsReading) {
+    // AC-058.11 (D47 PROVISIONAL: global). (a) >= 95 % de los ataques (las dos pasadas) con lectura PROPIA
+    // en 500 ms; (b) >= 90 % de las publicaciones con cents desde 0,25 s mientras el oraculo declara altura.
+    // Mutante: el motor de hoy ⇒ 0/41 en la pasada 1.
+    const EarlyCorpus& c = earlyCorpus();
+    if (!c.skip.empty()) GTEST_SKIP() << c.skip;
+    int n = 0, within = 0, sounding = 0, withCents = 0;
+    int nPass[3] = {0, 0, 0}, withinPass[3] = {0, 0, 0};
+    std::map<std::string, std::array<int, 4>> byString;   // ataques, en 500 ms, sonando, con cents
+    for (const EarlyCorpusAttack& x : c.attacks) {
+        const double t = ownReadingSec(x);
+        const bool ok = !std::isnan(t) && t <= 0.5;
+        ++n;
+        within += ok;
+        ++nPass[x.pass];
+        withinPass[x.pass] += ok;
+        sounding += x.a.soundingPublications;
+        withCents += x.a.soundingWithCents;
+        auto& b = byString[x.string];
+        b[0] += 1;
+        b[1] += ok;
+        b[2] += x.a.soundingPublications;
+        b[3] += x.a.soundingWithCents;
+    }
+    const double fracA = n ? static_cast<double>(within) / n : NAN;
+    const double fracB = sounding ? static_cast<double>(withCents) / sounding : NAN;
+    std::printf("\n  [REQ-058 AC-058.11] lectura propia en 500 ms: %d/%d = %.3f (pasada 1 %d/%d, pasada 2 %d/%d) | "
+                "tiempo con cents desde 0,25 s: %d/%d = %.3f\n",
+                within, n, fracA, withinPass[1], nPass[1], withinPass[2], nPass[2], withCents, sounding, fracB);
+    for (const auto& [str, b] : byString)
+        std::printf("    %-4s ataques %d, en 500 ms %d, tiempo %.3f%s\n", str.c_str(), b[0], b[1],
+                    b[2] ? static_cast<double>(b[3]) / b[2] : NAN, latch::degenerateStringWarning(b[0]));
+    RecordProperty("ataques_500ms_milesimas", static_cast<int>(fracA * 1000.0));
+    RecordProperty("tiempo_con_cents_milesimas", static_cast<int>(fracB * 1000.0));
+    ASSERT_GT(n, 0);
+    EXPECT_GE(fracA, 0.95);
+    EXPECT_GE(fracB, 0.90);
+}
+
+TEST(EarlyReadingCorpus, MeasuringIsCoveredPerStratumAgainstF0) {
+    // AC-058.4 (D43, D21, D47): las MEASURING con cents contra el oraculo corto de f0, por fase × k
+    // (2 contra >= 3), cobertura de 2σ >= 95 % en el global de corpus-v1; por clase de material se REPORTA.
+    const EarlyCorpus& c = earlyCorpus();
+    if (!c.skip.empty()) GTEST_SKIP() << c.skip;
+    std::map<std::string, latch::CoverageCell> cells;
+    for (const EarlyCorpusAttack& x : c.attacks)
+        for (const latch::JudgedPublication& j : x.a.judged) {
+            if (j.state != wma::analysis::kStateMeasuring) continue;
+            const std::string key = std::to_string(latch::phaseStratum(j.sinceT0Sec)) + "|k" +
+                                    std::to_string(latch::partialsStratum(j.partials));
+            cells["ALL|" + key].add(j);
+            cells[x.cls + "|" + key].add(j);
+            cells[std::string(j.early ? "temprana|" : "veredicto|") + key].add(j);
+        }
+    std::printf("\n  [REQ-058 AC-058.4] MEASURING contra f0 por estrato (fase 0 = (0, 0,25] s, 1 = (0,25, 1], 2 = asentada):\n");
+    for (const auto& [key, cell] : cells)
+        std::printf("    %-34s n=%5d cobertura %.3f  mediana σ/|error| %.2f\n", key.c_str(), cell.n, cell.coverage(),
+                    cell.medianRatio());
+    for (const auto& [key, cell] : cells) {
+        if (key.rfind("ALL|", 0) != 0 || key.find("|k1") != std::string::npos) continue;   // D21: 2 contra >= 3
+        RecordProperty("cobertura_" + key, static_cast<int>(cell.coverage() * 1000.0));
+        if (cell.n < 20) continue;
+        EXPECT_GE(cell.coverage(), 0.95) << key;
+    }
+}
+
+TEST(EarlyReadingCorpus, EarlyErrorAndSettledSigmaAgainstF0) {
+    // AC-058.2 (p90 |error| <= 5 c de las tempranas, global; por fase se reporta) y AC-058.5 sobre los
+    // tramos asentados (mediana σ/|error| <= 3 de las MEASURING en la fase asentada).
+    const EarlyCorpus& c = earlyCorpus();
+    if (!c.skip.empty()) GTEST_SKIP() << c.skip;
+    std::vector<double> early, byPhase[3];
+    latch::CoverageCell settled;
+    std::map<std::string, std::vector<double>> byClass;
+    for (const EarlyCorpusAttack& x : c.attacks)
+        for (const latch::JudgedPublication& j : x.a.judged) {
+            if (j.early) {
+                early.push_back(std::fabs(j.errorCents));
+                byPhase[latch::phaseStratum(j.sinceT0Sec)].push_back(std::fabs(j.errorCents));
+                byClass[x.cls].push_back(std::fabs(j.errorCents));
+            }
+            if (j.state == wma::analysis::kStateMeasuring && latch::phaseStratum(j.sinceT0Sec) == 2) settled.add(j);
+        }
+    std::printf("\n  [REQ-058 AC-058.2] |error| temprano contra f0: n=%zu mediana %.3f p90 %.3f c | (0, 0,25]: p90 %.3f | "
+                "(0,25, 1]: p90 %.3f | asentada: p90 %.3f\n",
+                early.size(), latch::median(early), latch::percentile(early, 0.9), latch::percentile(byPhase[0], 0.9),
+                latch::percentile(byPhase[1], 0.9), latch::percentile(byPhase[2], 0.9));
+    for (const auto& [cls, v] : byClass)
+        std::printf("    %-20s n=%5zu mediana %.3f p90 %.3f\n", cls.c_str(), v.size(), latch::median(v), latch::percentile(v, 0.9));
+    std::printf("  [REQ-058 AC-058.5] MEASURING asentadas: n=%d mediana σ/|error| %.2f\n", settled.n, settled.medianRatio());
+    RecordProperty("p90_error_temprano_milicents", static_cast<int>(latch::percentile(early, 0.9) * 1000.0));
+    RecordProperty("no_inflacion_asentada_centesimas", static_cast<int>(settled.medianRatio() * 100.0));
+    ASSERT_FALSE(early.empty());
+    EXPECT_LE(latch::percentile(early, 0.9), 5.0);
+    if (settled.n >= 20) EXPECT_LE(settled.medianRatio(), 3.0);
+}
+
+TEST(EarlyReadingCorpus, ConvergedOnlyFromTheVerdictWithSmallSigma) {
+    // AC-058.6 sobre el corpus: cero CONVERGED con σ > 0,1 y ninguna temprana CONVERGED. Imprime ademas
+    // la medicion de B5 / D48 para S2: cuantas CONVERGED del veredicto con k = 2 perderian el estado con
+    // la propagacion exacta del ajuste de dos puntos.
+    const EarlyCorpus& c = earlyCorpus();
+    if (!c.skip.empty()) GTEST_SKIP() << c.skip;
+    std::printf("\n  [REQ-058 D48/B5] CONVERGED del veredicto con k = 2: %d; con la σ exacta de dos puntos pasarian σ > 0,1: %d\n",
+                c.convergedVerdictK2, c.convergedLostWithExactK2);
+    RecordProperty("converged_k2", c.convergedVerdictK2);
+    RecordProperty("converged_k2_perdidas_con_exacta", c.convergedLostWithExactK2);
+    EXPECT_TRUE(c.convergedBigSigmaOrEarly.empty()) << c.convergedBigSigmaOrEarly.size() << " CONVERGED con σ > 0,1 o tempranas";
+}
+
+TEST(EarlyReadingCorpus, TheEngineAttackDetectorAgainstTheOracle) {
+    // D-3, tarea 1.6: el detector del motor (+6 dB sobre bloques de 1024, refractario 4) contra los
+    // ataques del oraculo. Un ataque del motor «acierta» si cae en [t0 − 1024, t0 + 4096] de un ataque del
+    // oraculo; los demas son ataques FALSOS (abren un segmento en medio de la nota). Fuente de las cifras
+    // de la tarea 1.6. Afirma lo que AC-058.7 necesita: todo re-punteo de la pasada 2 se detecta.
+    const EarlyCorpus& c = earlyCorpus();
+    if (!c.skip.empty()) GTEST_SKIP() << c.skip;
+    int hits[3] = {0, 0, 0}, oracleN[3] = {0, 0, 0}, falses[3] = {0, 0, 0};
+    std::string missedPass2;
+    for (const DetectorFile& d : c.detector) {
+        std::vector<bool> used(d.engine.size(), false);
+        for (int64_t t0 : d.oracle) {
+            const int pass = t0 < d.noteEnd ? 1 : 2;
+            ++oracleN[pass];
+            bool hit = false;
+            for (size_t i = 0; i < d.engine.size(); ++i)
+                if (!used[i] && d.engine[i] >= t0 - 1024 && d.engine[i] <= t0 + 4096) { used[i] = hit = true; break; }
+            hits[pass] += hit;
+            if (!hit && pass == 2) missedPass2 += " " + d.file;
+        }
+        for (size_t i = 0; i < d.engine.size(); ++i)
+            if (!used[i]) {
+                ++falses[d.engine[i] < d.noteEnd ? 1 : 2];
+                std::printf("    ataque FALSO del motor: %s frame %lld (nota de %lld)\n", d.file.c_str(),
+                            static_cast<long long>(d.engine[i]), static_cast<long long>(d.noteEnd));
+            }
+    }
+    std::printf("\n  [REQ-058 D-3] detector del motor: pasada 1 %d/%d ataques del oraculo (falsos %d) | pasada 2 %d/%d (falsos %d)%s%s\n",
+                hits[1], oracleN[1], falses[1], hits[2], oracleN[2], falses[2], missedPass2.empty() ? "" : " | sin detectar:",
+                missedPass2.c_str());
+    RecordProperty("detector_pasada2_aciertos", hits[2]);
+    RecordProperty("detector_falsos", falses[1] + falses[2]);
+    EXPECT_EQ(hits[2], oracleN[2]) << "re-punteos sin detectar:" << missedPass2;
+}
+
+TEST(EarlyReadingCorpus, ARepluckReadsItsOwnSegmentWithin250ms) {
+    // AC-058.7 (D47 PROVISIONAL: global): en el re-punteo (pasada 2) la primera lectura DEL SEGMENTO NUEVO
+    // llega en <= 250 ms de mediana. Mutante: conservar la lectura vieja tras el ataque (sin segmentos) ⇒
+    // t_vuelta nan (la lectura es la del segmento viejo).
+    const EarlyCorpus& c = earlyCorpus();
+    if (!c.skip.empty()) GTEST_SKIP() << c.skip;
+    std::vector<double> v, conv, convFirst;
+    int missing = 0;
+    for (const EarlyCorpusAttack& x : c.attacks) {
+        if (x.pass == 1 && x.a.convergedFrames >= 0) convFirst.push_back(x.a.convergedSec);
+        if (x.pass != 2) continue;
+        if (std::isnan(x.a.returnSec)) ++missing;
+        v.push_back(std::isnan(x.a.returnSec) ? INFINITY : x.a.returnSec);
+        if (x.a.returnConvergedFrames >= 0)
+            conv.push_back(static_cast<double>(x.a.returnConvergedFrames) / x.rate);
+    }
+    std::printf("\n  [REQ-058 AC-058.7] t_vuelta pasada 2: n=%zu mediana %.3f p90 %.3f s (sin vuelta %d) | CONVERGED propio del "
+                "re-punteo en %zu de %zu, mediana %.3f s (pasada 1: %zu, mediana %.3f s)\n",
+                v.size(), latch::median(v), latch::percentile(v, 0.9), missing, conv.size(), v.size(), latch::median(conv),
+                convFirst.size(), latch::median(convFirst));
+    RecordProperty("t_vuelta_mediana_ms", static_cast<int>(latch::median(v) * 1000.0));
+    ASSERT_FALSE(v.empty());
+    EXPECT_LE(latch::median(v), 0.25);
 }
 
 TEST(LatchInstrumentRealTake, MeasuresTheAttacksOfTheG42Take) {

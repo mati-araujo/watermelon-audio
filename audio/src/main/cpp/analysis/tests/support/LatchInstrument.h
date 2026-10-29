@@ -418,6 +418,9 @@ struct Attack {
     /// cuenta: es lo que `t_primera` del re-punteo mide hoy (0,003 s) y lo que no deja ver AC-058.7.
     int64_t returnFrames = -1;
     double returnSec = kNaN;
+    /// Lo mismo para `CONVERGED`: la primera del segmento abierto en el ataque (AC-058.7: las 12 ventanas se
+    /// cuentan acumuladas entre segmentos compatibles, asi que vuelve antes que desde cero).
+    int64_t returnConvergedFrames = -1;
     /// AC-058.11 b — publicaciones pasados `kTimeCoverageFromSec` del ataque mientras el oraculo declara
     /// altura (un tramo PROPIO del ataque, terminado, con hz), y cuantas de esas traen cents.
     int soundingPublications = 0;
@@ -494,11 +497,13 @@ inline std::vector<Attack> measureAttacks(const std::vector<Publication>& pubs, 
             ++a.publications;
             const bool hasReading = !std::isnan(pub.hz);
             const double sinceT0 = static_cast<double>(pub.pos - a.t0Frames) / params.sampleRate;
-            if (hasReading && a.returnFrames < 0 && pub.segmentStart >= 0 &&
-                pub.segmentStart >= a.t0Frames - kReturnSegmentSlackFrames) {
+            const bool ownSegment = pub.segmentStart >= 0 && pub.segmentStart >= a.t0Frames - kReturnSegmentSlackFrames;
+            if (hasReading && a.returnFrames < 0 && ownSegment) {
                 a.returnFrames = pub.pos - a.t0Frames;
                 a.returnSec = static_cast<double>(a.returnFrames) / params.sampleRate;
             }
+            if (hasReading && ownSegment && a.returnConvergedFrames < 0 && pub.state == wma::analysis::kStateConverged)
+                a.returnConvergedFrames = pub.pos - a.t0Frames;
             if (sinceT0 > kTimeCoverageFromSec) {
                 const OracleSegment* own = detail::attackSegmentFor(oracle, a.t0Sec, static_cast<double>(pub.pos) / params.sampleRate);
                 if (own != nullptr && own->hz > 0.0 && std::isfinite(own->hz)) {
