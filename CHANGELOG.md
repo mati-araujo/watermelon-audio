@@ -23,11 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 estado `MEASURING`. Es la **altura instantánea**, no una predicción de la asentada: durante el glide
 del ataque puede estar a varios cents de donde la cuerda termina, y su σ lo cubre. Un consumidor que
 leía *"`cents` no nulo"* como *"convergido"* tiene que mirar el estado: `CONVERGED` sigue saliendo
-sólo del veredicto con σ ≤ 0,1, bit a bit como antes, y una lectura temprana puede tener σ ≤ 0,1 y
-seguir en `MEASURING`.
+sólo del veredicto con σ ≤ 0,1, y una lectura temprana puede tener σ ≤ 0,1 y seguir en `MEASURING`.
 
-**Qué NO cambia:** `CONVERGED` (su valor, su σ y su tiempo), la C API, JNI, `AnalysisSnapshot` y la
-superficie de Kotlin. Una `MEASURING` del camino del veredicto publica una σ igual o mayor que antes.
+**`CONVERGED` cambia en un solo caso, el re-punteo de la misma nota.** Sobre una pulsada aislada es
+bit a bit el de antes: valor, σ y tiempo. Al re-puntear, el motor ya no reinicia: abre un segmento y
+las 12 ventanas del veredicto se acumulan entre segmentos compatibles, así que vuelve a converger
+antes (0,369 s de mediana sobre `corpus-v1`, 39 de 41, contra ≥ 1,02 s con el reinicio). Las release
+notes de `v2.26.0` dicen *"`t_conv` idéntico"*: vale para la primera pulsada.
+
+**Con un solo parcial con energía, la σ temprana no cubre** (0 % sobre síntesis estable: es la σ
+propagada, cien veces más chica que el error), y sin ajuste estirado la lectura es la de ese parcial,
+no f0. Es un hueco declarado en `docs/tuner/accuracy_contract.md`.
+
+**Qué NO cambia:** la C API, JNI, `AnalysisSnapshot` y la superficie de Kotlin. Una `MEASURING` del
+camino del veredicto publica una σ igual o mayor que antes, y su cobertura sigue sin llegar al 95 %
+(el otro hueco declarado).
 
 **Lo que un consumidor puede retirar:** las guardas que existían para tapar el segundo ciego tras
 cada punteo. En Tunio, la envolvente E de REQ-027 (*midiendo* sin número adentro de la envolvente

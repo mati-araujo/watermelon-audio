@@ -123,7 +123,7 @@ interface ITuner {
      * `null` **no es** "afinado" ni "cero": es ausencia de dato, y hay que dibujarla distinto.
      *
      * Una lectura con [TunerReading.cents] no nulo **no es una lectura convergida**: desde
-     * v2.26.0 el motor publica la altura instantánea de cada ataque en
+     * v2.26.0 el motor publica además la altura instantánea de cada ataque en
      * [com.watermellonstudios.audio.domain.tuner.TunerState.MEASURING], con su σ en
      * `snapshot.uncertainty` (R-PITCH-65/67). Para decir "afinado" con esa lectura, la tolerancia
      * es de la app y tiene que contar con σ; [TunerReading.isConverged] es la señal del motor.

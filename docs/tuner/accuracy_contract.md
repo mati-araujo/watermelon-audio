@@ -83,11 +83,15 @@ altos, o sea en los más estirados.
 **Y antes del veredicto hay σ también (REQ-058).** Desde v2.26.0 el motor publica `cents` + σ en
 `MEASURING` desde ~0,2 s de cada ataque: la **altura instantánea**, la pendiente de un ajuste
 cuadrático sobre las últimas 5–8 fases de la serie densa, sin extrapolar (R-PITCH-65/67). Su σ es
-max(residuos, propagada) con ≥ 3 parciales y max(propagada, √Σσ²) con 2, más un **término de
-deriva** —la curvatura del ajuste, sin sesgo—, que es lo que la vuelve honesta durante el glide del
-ataque, al que la σ de los residuos es ciega (R-PITCH-52). `CONVERGED` no cambia: sigue saliendo
-sólo del veredicto de 12 ventanas con la σ de siempre ≤ 0,1, y una lectura temprana puede tener
-σ ≤ 0,1 y ser `MEASURING` (R-PITCH-62). El estado es la señal de convergencia; la σ sola no.
+max(residuos, propagada) con ≥ 3 parciales y max(propagada, √Σσ²) con 2, sumada en cuadratura con
+un **término de deriva** —la curvatura del ajuste, sin sesgo—, que es lo que la vuelve honesta
+durante el glide del ataque, al que la σ de los residuos es ciega (R-PITCH-52). `CONVERGED` sigue
+saliendo sólo del veredicto de 12 ventanas con la σ de siempre ≤ 0,1, y una lectura temprana puede
+tener σ ≤ 0,1 y ser `MEASURING` (R-PITCH-62). El estado es la señal de convergencia; la σ sola no.
+Sobre una pulsada aislada `CONVERGED` es bit a bit el de antes (el golden y el `t_conv` de la
+primera pulsada del corpus). En un **re-punteo** de la misma nota llega antes, porque las 12
+ventanas se acumulan entre segmentos en vez de reiniciarse: 0,369 s de mediana, 39 de 41
+(`EarlyReadingCorpus.ARepluckReadsItsOwnSegmentWithin250ms`).
 
 Honesta se mide por **cobertura**: |error contra el oráculo corto de f0| ≤ 2·√(σ² + σ_or²), con
 σ_or el ruido propio del oráculo, versionado en
@@ -105,8 +109,11 @@ Honesta se mide por **cobertura**: |error contra el oráculo corto de f0| ≤ 2�
 Los 24 glides sintéticos de REQ-036 cubren 0,983 a 2σ (`EarlyReading.GlidesAreCoveredAtTwoSigma`).
 El error temprano contra f0 en `corpus-v1`: p90 **1,449 c**, mediana 0,078 c; en los primeros
 250 ms, p90 9,159 c —es el glide, y σ lo cubre— (`EarlyReadingCorpus.EarlyErrorAndSettledSigmaAgainstF0`).
-Y la σ no se infla: sobre una nota estable sintética, σ / error real de 0,01 / 2,84 / 3,36 / 3,41
-con 1 / 2 / 3 / 4 parciales, contra un techo de 3,5 PROVISIONAL (`EarlyReading.AStableNoteDoesNotInflateSigma`).
+Y la σ no se infla: sobre una nota estable sintética, σ / error real de 2,84 / 3,36 / 3,40 con
+2 / 3 / 4 parciales, contra un techo de 3,5 PROVISIONAL (`EarlyReading.AStableNoteDoesNotInflateSigma`).
+**Con 1 parcial la σ temprana no cubre**: σ / error de 0,01 y cobertura 0 sobre la misma síntesis.
+Es la σ propagada, que mide precisión y no exactitud, y sin ajuste estirado la lectura es la del
+parcial, no f0. Hueco declarado al final de este documento.
 Los PROVISIONAL esperan al corpus de acero y al del g42; la base es un ataque por archivo y pasada.
 
 **Rango útil de la lectura fina (REQ-003, REQ-057).** El strobe no mide cualquier desajuste: el
@@ -137,8 +144,8 @@ sigue publicando, así que el usuario conserva "qué nota es" cuando pierde "cu�
 compuerta de tendencia reinicia en bucle (preexistente). E1 a +25 c sí lee, pero el contrato no lo
 promete. Lo fija
 `InterleavedGrids.TheDeclaredGapB0AndE1From25CentsAt44kHasNoFineReadingButTheCoarseOne`, que da rojo el día que se cierre.
-Con 1 o 2 parciales admitidos —el caso común a ±50 c en las agudas— REQ-058 verificó la σ de la
-lectura temprana (la tabla de cobertura de arriba, filas de 2 parciales). La del camino del
+Con 2 parciales admitidos —el caso común a ±50 c en las agudas, junto con el de 1— REQ-058 verificó
+la σ de la lectura temprana (la tabla de cobertura de arriba, filas de 2 parciales); con 1 no cubre. La del camino del
 veredicto sigue siendo la de antes, y no cubre: es el hueco declarado al final de este documento.
 
 **El motor lo publica**, en el índice 14 del snapshot y en cents, computado contra el objetivo y
@@ -250,6 +257,7 @@ compuerta).
 | **CPU sostenido en dispositivo** (NFR-1) | 🔴 **sin medir.** Todo número de costo que imprima la suite es un **techo**, no la medida: el build de host compila en `Debug`. Requiere hardware. |
 | **Sesión de 10 min sin throttling** (NFR-5) | 🔴 **sin medir.** Requiere hardware. |
 | **Robustez contra corpus grabado** (NFR-8) | 🔴 **sin correr.** El corpus no existe todavía; el mecanismo para bajarlo y verificarlo sí (`scripts/fetch-corpus.sh`), y los tests que dependen de él salen **SKIPPED**, nunca PASSED. |
+| **σ de la lectura temprana con 1 parcial** (REQ-058) | 🔴 **hueco declarado.** Sobre síntesis estable de un parcial, cobertura 2σ 0 (n = 480) y σ / error 0,01: la σ es la propagada, y sin ajuste estirado la lectura es la del parcial, no f0. Fuente: `EarlyReading.AStableNoteDoesNotInflateSigma`. |
 | **σ de las lecturas MEASURING del camino del veredicto** (REQ-058, D50) | 🔴 **hueco declarado.** Contra el oráculo corto de f0 de corpus-v1 y con su ruido propio sumado (\|err\| ≤ 2·√(σ² + σ_or²)), las MEASURING que salen del veredicto (12 ventanas, σ > 0,1) cubren 0,567 en (0,25, 1] s con k ≥ 3 (n = 238), 0,833 asentadas con k = 2 (n = 288) y 0,724 asentadas con k ≥ 3 (n = 2501); las tempranas, 0,951 / 0,963 / 0,937. Su σ es la de hoy con la deriva temprana como piso; `CONVERGED` no está en el hueco (lo juzga el trinquete). Fuente: `EarlyReadingCorpus.MeasuringIsCoveredPerStratumAgainstF0`. |
 
 Estas filas están vacías **a propósito**. Una corrida que no verificó no puede pasar por
