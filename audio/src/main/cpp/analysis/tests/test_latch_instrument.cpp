@@ -2290,7 +2290,9 @@ TEST(EarlyReadingCorpus, EarlyErrorAndSettledSigmaAgainstF0) {
     RecordProperty("no_inflacion_asentada_centesimas", static_cast<int>(settled.medianRatio() * 100.0));
     ASSERT_FALSE(early.empty());
     EXPECT_LE(latch::percentile(early, 0.9), 5.0);
-    if (settled.n >= 20) EXPECT_LE(settled.medianRatio(), 3.0);
+    if (settled.n >= 20) {
+        EXPECT_LE(settled.medianRatio(), 3.0);
+    }
 }
 
 TEST(EarlyReadingCorpus, ConvergedOnlyFromTheVerdictWithSmallSigma) {
