@@ -768,13 +768,20 @@ TEST(Segments, ATurnedPegAfterAVerdictMeasuringWithDriftDoesNotPool) {
     first.insert(first.end(), next.begin(), next.end());
     addWhiteNoise(&first, 0.002, 77u);
     const auto pubs = runEngine(first, rate, kSegF0);
-    // Precondicion: antes del re-punteo hubo MEASURING del veredicto con la deriva >= 1 c sobre la σ de hoy.
-    int inflated = 0;
-    for (const Pub& p : pubs)
-        if (p.sec < repluck && p.sec > repluck - 0.1 && !p.early && !std::isnan(p.cents) && !std::isnan(p.verdictSigma) &&
-            p.state == wma::analysis::kStateMeasuring && p.sigma > p.verdictSigma + 1.0)
-            ++inflated;
-    ASSERT_GT(inflated, 0) << "el escenario no produjo una MEASURING del veredicto con deriva: no ejerce el caso";
+    // Precondicion, sobre lo que el motor juzgo: el re-punteo se detecto como ataque, y la ULTIMA lectura del
+    // veredicto antes de esa deteccion es MEASURING con la deriva >= 1 c sobre la σ de hoy (la referencia que
+    // el mutante infla). Sin las dos, el test no ejerce el caso aunque termine en +3 c.
+    const Pub* lastBefore = nullptr;
+    const int attacksBefore = [&] { int n = 0; for (const Pub& p : pubs) if (p.sec <= repluck) n = p.attacks; return n; }();
+    bool detected = false;
+    for (const Pub& p : pubs) {
+        if (p.attacks > attacksBefore) { detected = true; break; }
+        if (!p.early && !std::isnan(p.cents) && !std::isnan(p.verdictSigma)) lastBefore = &p;
+    }
+    ASSERT_TRUE(detected) << "el re-punteo no se detecto como ataque: el test no ejerce el caso";
+    ASSERT_NE(lastBefore, nullptr);
+    ASSERT_EQ(lastBefore->state, wma::analysis::kStateMeasuring) << "la referencia fue CONVERGED, no una MEASURING inflada";
+    ASSERT_GT(lastBefore->sigma, lastBefore->verdictSigma + 1.0) << "la referencia no tenia la deriva temprana arriba";
     int wrongConverged = 0;
     for (const Pub& p : pubs)
         if (p.sec > repluck + 0.3 && isConverged(p) && std::fabs(p.cents - second) > 0.1) ++wrongConverged;

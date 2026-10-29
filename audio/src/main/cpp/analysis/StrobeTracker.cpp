@@ -605,6 +605,7 @@ bool StrobeTracker::evaluateEarlyReading(EarlyReading* out) const {
     // inflacion, medido en el scratchpad y fijado por `EarlyReading.TwoPartialsCoveredAtTwoSigma`); k = 1,
     // la del parcial.
     const double sigmaProp = propagatedStretchSigma(sigmas, orders, valid, B);
+    if (!std::isfinite(sigmaProp)) return false;   // ver la guarda de k > kPartials: no se publica sin el piso
     double sigmaC = sigmas[0];
     if (valid >= 3) sigmaC = std::max(sigmaResiduals, sigmaProp);
     else if (valid == 2) sigmaC = std::max(sigmaProp, std::sqrt(sigmas[0] * sigmas[0] + sigmas[1] * sigmas[1]));

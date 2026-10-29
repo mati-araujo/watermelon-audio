@@ -265,7 +265,7 @@ public:
     static double propagatedStretchSigma(const double* sigmas, const int* orders, int k, double B) noexcept {
         if (k <= 0) return 0.0;
         // Mas parciales que los que rastrea el strobe no puede pasar (el llamador cuenta sobre kPartials); si
-        // pasara, NaN: el camino temprano descarta una σ no finita en vez de leer fuera de `x`.
+        // pasara, NaN, y `evaluateEarlyReading` descarta la lectura en vez de leer fuera de `x`.
         if (k > kPartials) return std::numeric_limits<double>::quiet_NaN();
         if (k == 1) return sigmas[0];
         const bool atEdge = B <= kStretchFitEdgeB || B >= kMaxInharmonicityB - kStretchFitEdgeB;
