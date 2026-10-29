@@ -61,6 +61,12 @@ struct Publication {
     /// Altura publicada en Hz absolutos: `targetHz · 2^(cents/1200)`. NaN = sin lectura fina.
     double hz = std::numeric_limits<double>::quiet_NaN();
     double sigmaCents = std::numeric_limits<double>::quiet_NaN();
+    // REQ-058 S1 (D-7): las sondas del strobe en esta publicacion, que llena quien alimenta el motor.
+    int partials = 0;            ///< parciales usados (`partialsUsed()`); 0 sin lectura
+    bool early = false;          ///< la lectura salio del camino temprano (`readingIsEarly()`)
+    /// Frame del RING en que empezo el segmento vigente del motor (`segmentStartFrame()` llevado al ring).
+    /// -1 = desconocido: ninguna publicacion cuenta como vuelta.
+    int64_t segmentStart = -1;
 };
 
 /// El rms de la ventana de `kLatchWindowFrames` que empieza en `start` (frames del flujo alimentado).
@@ -357,6 +363,24 @@ struct Probe {
     bool covered = false;   ///< |error| <= 2σ
 };
 
+/// REQ-058 S1 — una publicacion con cents y oraculo, juzgada (insumo de los estratos de D21).
+struct JudgedPublication {
+    double sinceT0Sec = 0.0;   ///< (pos − t0)/rate: la FASE de la nota
+    int partials = 0;
+    bool early = false;
+    int state = -1;
+    double errorCents = kNaN;
+    double sigmaCents = kNaN;
+    bool covered = false;      ///< |error| <= 2σ
+};
+
+/// La holgura con que un segmento del motor cuenta como abierto EN el ataque: el detector del motor fecha
+/// en bloques de 1024 alineados a su rejilla y el del oraculo en la grilla de 128 (D-7).
+inline constexpr int64_t kReturnSegmentSlackFrames = 1024;
+
+/// AC-058.11 b — desde cuando se cuenta la cobertura en el tiempo, en segundos desde t0.
+inline constexpr double kTimeCoverageFromSec = 0.25;
+
 struct Attack {
     int64_t t0Frames = 0;
     double t0Sec = 0.0;
@@ -387,6 +411,22 @@ struct Attack {
 
     Probe early;   ///< a kAttackProbeEarlySec
     Probe late;    ///< a kAttackProbeLateSec
+
+    // ---- REQ-058 S1 (D-7) ----
+    /// `t_vuelta`: la primera publicacion con cents DEL SEGMENTO ABIERTO EN ESTE ATAQUE (su
+    /// `segmentStart >= t0 − kReturnSegmentSlackFrames`). Una lectura arrastrada del segmento viejo no
+    /// cuenta: es lo que `t_primera` del re-punteo mide hoy (0,003 s) y lo que no deja ver AC-058.7.
+    int64_t returnFrames = -1;
+    double returnSec = kNaN;
+    /// Lo mismo para `CONVERGED`: la primera del segmento abierto en el ataque (AC-058.7: las 12 ventanas se
+    /// cuentan acumuladas entre segmentos compatibles, asi que vuelve antes que desde cero).
+    int64_t returnConvergedFrames = -1;
+    /// AC-058.11 b — publicaciones pasados `kTimeCoverageFromSec` del ataque mientras el oraculo declara
+    /// altura (un tramo PROPIO del ataque, terminado, con hz), y cuantas de esas traen cents.
+    int soundingPublications = 0;
+    int soundingWithCents = 0;
+    /// Las publicaciones con cents y oraculo, juzgadas una por una: el insumo de los ESTRATOS (D21).
+    std::vector<JudgedPublication> judged;
 };
 
 namespace detail {
@@ -456,6 +496,21 @@ inline std::vector<Attack> measureAttacks(const std::vector<Publication>& pubs, 
             if (pub.pos > a.endFrames) break;
             ++a.publications;
             const bool hasReading = !std::isnan(pub.hz);
+            const double sinceT0 = static_cast<double>(pub.pos - a.t0Frames) / params.sampleRate;
+            const bool ownSegment = pub.segmentStart >= 0 && pub.segmentStart >= a.t0Frames - kReturnSegmentSlackFrames;
+            if (hasReading && a.returnFrames < 0 && ownSegment) {
+                a.returnFrames = pub.pos - a.t0Frames;
+                a.returnSec = static_cast<double>(a.returnFrames) / params.sampleRate;
+            }
+            if (hasReading && ownSegment && a.returnConvergedFrames < 0 && pub.state == wma::analysis::kStateConverged)
+                a.returnConvergedFrames = pub.pos - a.t0Frames;
+            if (sinceT0 > kTimeCoverageFromSec) {
+                const OracleSegment* own = detail::attackSegmentFor(oracle, a.t0Sec, static_cast<double>(pub.pos) / params.sampleRate);
+                if (own != nullptr && own->hz > 0.0 && std::isfinite(own->hz)) {
+                    ++a.soundingPublications;
+                    if (hasReading) ++a.soundingWithCents;
+                }
+            }
             if (pub.state == wma::analysis::kStateConverged && a.convergedFrames < 0) {
                 a.convergedFrames = pub.pos - a.t0Frames;
                 a.convergedSec = static_cast<double>(a.convergedFrames) / params.sampleRate;
@@ -478,6 +533,8 @@ inline std::vector<Attack> measureAttacks(const std::vector<Publication>& pubs, 
             ++a.withError;
             a.absErrors.push_back(std::fabs(err));
             if (std::fabs(err) <= 2.0 * pub.sigmaCents) ++a.covered;   // σ NaN: la comparacion es falsa
+            a.judged.push_back({sinceT0, pub.partials, pub.early, pub.state, err, pub.sigmaCents,
+                                std::fabs(err) <= 2.0 * pub.sigmaCents});
         }
         a.readingCarried = before != nullptr && !std::isnan(before->hz);
         a.convergedCarried = before != nullptr && before->state == wma::analysis::kStateConverged;
@@ -536,6 +593,38 @@ inline Pooled poolLatchErrors(const std::vector<Latch>& latches) {
     out.maxAbsCents = all.empty() ? kNaN : *std::max_element(all.begin(), all.end());
     out.coverage = out.withError > 0 ? static_cast<double>(out.covered) / out.withError : kNaN;
     return out;
+}
+
+// =====================================================================================
+// REQ-058 S1 (D-7): ESTRATOS, POR CUERDA Y NO INFLACION
+// =====================================================================================
+
+/// La fase de la nota (D21): 0 = (0, 0,25] s, 1 = (0,25, 1] s, 2 = asentada (> 1 s). Los bordes van
+/// con la fase ANTERIOR: una publicacion a 0,25 s exactos es del ataque.
+inline int phaseStratum(double sinceT0Sec) { return sinceT0Sec <= 0.25 ? 0 : (sinceT0Sec <= 1.0 ? 1 : 2); }
+
+/// Los parciales usados como estrato (D21): 1, 2 o 3 (= «3 o mas»).
+inline int partialsStratum(int partials) { return partials <= 1 ? 1 : (partials == 2 ? 2 : 3); }
+
+/// Una celda de estrato: cobertura de 2σ y σ/|error|.
+struct CoverageCell {
+    int n = 0;
+    int covered = 0;
+    std::vector<double> ratio;   ///< σ/|error| (sin los |error| == 0)
+    void add(const JudgedPublication& j) {
+        ++n;
+        if (j.covered) ++covered;
+        if (std::fabs(j.errorCents) > 0.0) ratio.push_back(j.sigmaCents / std::fabs(j.errorCents));
+    }
+    double coverage() const { return n > 0 ? static_cast<double>(covered) / n : kNaN; }
+    double medianRatio() const { return median(ratio); }
+};
+
+/// D20/D47: con n <= 5 ataques por cuerda (corpus-v1 tiene UNO por archivo y pasada) un p90 es el maximo
+/// y un 95 % es todo-o-nada. Lo imprime quien reporta por cuerda, al lado de la cifra.
+inline constexpr int kDegenerateStringAttacks = 5;
+inline const char* degenerateStringWarning(int attacks) {
+    return attacks <= kDegenerateStringAttacks ? " (n <= 5: el p90 es el maximo y el 95 % es todo-o-nada)" : "";
 }
 
 }  // namespace wma_test::latch

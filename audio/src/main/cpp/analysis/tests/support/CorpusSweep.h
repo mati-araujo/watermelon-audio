@@ -165,7 +165,8 @@ struct Outcome {
          */
         double detectedHz = 0.0;
         float spectralSupport = NAN;
-        bool fine = false;             ///< trajo lectura fina (kSnapCents no NaN)
+        bool fine = false;             ///< trajo lectura fina DEL VEREDICTO (kSnapCents no NaN, no temprana)
+        bool early = false;            ///< REQ-058: trajo lectura TEMPRANA (kSnapCents no NaN, `readingIsEarly`)
         double centsAbs = NAN;         ///< la fina en Hz absolutos contra trueHz
         double strobeC = NAN;          ///< cents contra el objetivo del strobe
         double sigma = NAN;
@@ -529,7 +530,11 @@ inline Outcome sweepFile(const std::string& path, const Entry& e) {
                 pub.sigma = s.uncertaintyCents();
                 pub.targetHz = s.targetHz();
                 const float centsNow = v[wma::analysis::kSnapCents];
-                pub.fine = !std::isnan(centsNow);
+                // REQ-058 S1: «lectura fina» en este barrido es la del VEREDICTO (rejilla 0), que es lo
+                // que sus pruebas reconstruyen y juzgan; una temprana (`readingIsEarly`) es otra fuente
+                // y se marca aparte.
+                pub.early = !std::isnan(centsNow) && analysis.strobe().readingIsEarly();
+                pub.fine = !std::isnan(centsNow) && !pub.early;
                 if (pub.fine) {
                     pub.centsAbs = 1200.0 * std::log2(pub.targetHz * std::pow(2.0, static_cast<double>(centsNow) / 1200.0) / e.trueHz);
                     double fitB = NAN;
@@ -543,7 +548,9 @@ inline Outcome sweepFile(const std::string& path, const Entry& e) {
                 ++o.convergedWithoutSupport;
             }
             const float cents = v[wma::analysis::kSnapCents];
-            if (!std::isnan(cents)) {
+            // REQ-058 S1: el resultado del archivo es la ultima lectura del VEREDICTO; las tempranas no
+            // lo pisan (ver `Publication::early`).
+            if (!std::isnan(cents) && !analysis.strobe().readingIsEarly()) {
                 o.published = true;
                 o.lastReadingSec = static_cast<double>(written) / data.sampleRate;
                 o.readingState = o.state;

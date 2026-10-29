@@ -78,6 +78,17 @@ cada archivo va precedido de `# archivo NOMBRE sha256 HEX rate HZ frames N`: el 
 oraculo al archivo EXACTO. Limite conocido: con 10 periodos (E1, E2) la fuga del 2do armonico en la
 ventana de Hann sesga el pico hasta ~0,1 c segun la fase; con la ventana de 0,1 s es < 0,002 c.
 
+EL ORACULO CORTO DE f0 (REQ-058 D43, `--short --partials N`)
+-------------------------------------------------------------
+El motor publica f0 (el intercepto del ajuste inarmonico, D12) y el oraculo corto mide H1: en el acero
+quedan ~2 c de diferencia que ninguna σ honesta cubre. Con `--partials N` cada tramo mide ademas los
+parciales 2..N alrededor de n·H1 y ajusta el mismo modelo que `--partials` del modo largo; la columna
+`hz` es entonces f0, y se suman `h1_hz`, `k` (parciales que entraron) y `B`. Ver `short_f0`.
+
+    python3 scripts/corpus-reference-pitch.py --short --partials 4 --dir DIR --tsv OUT.tsv
+
+Sin `--partials` (o con 1) la salida del modo corto es la de siempre, byte a byte.
+
 UN CENTRO POR TRAMO (REQ-055, `--short --centros MANIFIESTO`)
 -------------------------------------------------------------
 Una toma real recorre las seis cuerdas: un centro por archivo no sirve. Con `--centros` el centro de
@@ -488,6 +499,43 @@ def locate(x, sr, center, span, prev):
     r = refine_peak(logmag, c0, 1.5, 15.0)
     return r if r is not None and abs(r) <= span else None
 
+# --- REQ-058 (D43): el oraculo corto de f0 ---------------------------------------------------------
+#
+# El oraculo corto mide H1, y el motor publica f0: el intercepto C del ajuste inarmonico (D12). En una
+# cuerda con rigidez H1 = f0·√(1+B), y sobre el acero el motor queda ~2 c bajo un oraculo H1 con σ 0,001
+# (guitarra-acero_A2, diseño de REQ-058 S1, B1). Con `--short --partials N` cada tramo mide ademas los
+# parciales 2..N alrededor de n·H1 (±SHORT_PARTIAL_SPAN c, el mismo `locate` del tramo) y ajusta el MISMO
+# modelo que `--partials` (`fit_stretched`: C libre, B en [0, 5e-3]): f0 = H1·2^(C/1200). Un parcial a
+# menos de SHORT_PARTIAL_MIN_DB respecto de H1 no es un parcial (ruido con pico) y no entra, igual que lo
+# que senala `format_partials`. Con un solo parcial util no hay B que ajustar: f0 = H1 y k = 1 lo dice.
+SHORT_PARTIAL_SPAN = 30.0
+SHORT_PARTIAL_MIN_DB = -40.0
+
+def short_f0(x_win, sr, h1, partials):
+    """(f0, k, B) del tramo ya enventanado `x_win` con H1 en `h1` Hz: el ajuste estirado sobre los
+    parciales 1..`partials` medidos en el tramo. k = parciales que entraron al ajuste."""
+    def mag(hz):
+        return goertzel_fast(x_win, 2.0 * math.cos(2.0 * math.pi * hz / sr))
+    m1 = mag(h1)
+    fit = {1: 0.0}
+    for n in range(2, partials + 1):
+        if n * h1 * (1.0 + SHORT_PARTIAL_SPAN / 1200.0) >= 0.5 * sr: break
+        c = locate(x_win, sr, n * h1, SHORT_PARTIAL_SPAN, None)
+        if c is None: continue
+        hz = detune(n * h1, c)
+        if m1 <= 0.0 or 20.0 * math.log10(max(mag(hz), 1e-300) / m1) < SHORT_PARTIAL_MIN_DB: continue
+        fit[n] = c
+    if len(fit) < 2:
+        return h1, 1, math.nan
+    B, C, _ = fit_stretched(fit)
+    return detune(h1, C), len(fit), B
+
+def format_short_f0(name, rows):
+    nan = lambda v, f: "nan" if v != v else format(v, f)
+    return ["\t".join((name, f"{t0:.4f}", f"{t1:.4f}", nan(hz, ".5f"), nan(c, "+.3f"), f"{db:.2f}", nan(h1, ".5f"),
+                       str(k), nan(B, ".2e")))
+            for t0, t1, hz, c, db, h1, k, B in rows]
+
 def center_at(centers, frame):
     """El HZ del ultimo objetivo `(frame, hz)` con frame <= `frame`, o None si no hay ninguno."""
     hz = None
@@ -496,7 +544,8 @@ def center_at(centers, frame):
         hz = h
     return hz
 
-def short_track(mono, sr, center, win_s=0.1, hop_s=0.05, floor_db=-60.0, span=150.0, offset=0, centers=None):
+def short_track(mono, sr, center, win_s=0.1, hop_s=0.05, floor_db=-60.0, span=150.0, offset=0, centers=None,
+                partials=1):
     """Altura instantanea por tramos cortos. Devuelve [(t_ini, t_fin, hz, cents_vs_centro, dbfs)].
 
     Ventana Hann de max(win_s, 10 periodos del centro); hop fijo. Bajo `floor_db` (RMS del tramo) o
@@ -504,7 +553,10 @@ def short_track(mono, sr, center, win_s=0.1, hop_s=0.05, floor_db=-60.0, span=15
     frame del archivo en que empieza `mono` (un segmento): los tiempos salen del archivo.
 
     `centers=[(frame, hz), ...]` (crecientes; frames del archivo) reemplaza a `center`: cada tramo usa
-    el hz del ultimo con frame <= su inicio, y sin ninguno sale nan (ventana `win_s`, nivel medido)."""
+    el hz del ultimo con frame <= su inicio, y sin ninguno sale nan (ventana `win_s`, nivel medido).
+
+    `partials > 1` (REQ-058, D43): ademas de H1, mide en el MISMO tramo los parciales 2..`partials` y
+    devuelve tuplas de 8: (t_ini, t_fin, f0, cents_f0_vs_centro, dbfs, h1_hz, k, B). Ver `short_f0`."""
     hop = max(1, int(round(hop_s * sr)))
     n_of = lambda cen: int(round(max(win_s, SHORT_PERIODS / cen) * sr))
     rows, prev, prev_db, prev_cen = [], None, None, None
@@ -530,9 +582,15 @@ def short_track(mono, sr, center, win_s=0.1, hop_s=0.05, floor_db=-60.0, span=15
             # Un salto de nivel (ataque nuevo, fin de nota) invalida el seguimiento: se re-barre.
             if prev_db is not None and abs(db - prev_db) > 10.0:
                 prev = None
-            c = locate(list(map(operator.mul, seg, hann)), sr, cen, span, prev)
+            x_win = list(map(operator.mul, seg, hann))
+            c = locate(x_win, sr, cen, span, prev)
         prev, prev_db, prev_cen = c, db, cen
         hz, cc = (math.nan, math.nan) if c is None else (detune(cen, c), c)
+        if partials > 1:
+            f0, k, B = (math.nan, 0, math.nan) if c is None else short_f0(x_win, sr, hz, partials)
+            cf = math.nan if f0 != f0 else cents(f0, cen)
+            rows.append(((start + offset) / sr, (start + offset + n) / sr, f0, cf, db, hz, k, B))
+            continue
         rows.append(((start + offset) / sr, (start + offset + n) / sr, hz, cc, db))
     return rows
 
@@ -638,10 +696,10 @@ def detect_attacks_cut(mono, sr, cuts):
     a traves): frames del archivo, ordenados."""
     return [a + t for a, b in segments_of(len(mono), cuts) for t in detect_attacks(mono[a:b], sr)]
 
-def short_track_cut(mono, sr, cuts, center, *args, centers=None):
+def short_track_cut(mono, sr, cuts, center, *args, centers=None, partials=1):
     """`short_track` por segmento: ninguna ventana mezcla frames de dos lados de un corte."""
     return [r for a, b in segments_of(len(mono), cuts)
-            for r in short_track(mono[a:b], sr, center, *args, offset=a, centers=centers)]
+            for r in short_track(mono[a:b], sr, center, *args, offset=a, centers=centers, partials=partials)]
 
 def parse_centers(path):
     """`{archivo: [(frame, hz), ...]}` de los `# objetivo NOMBRE FRAME HZ` del manifiesto de tomas.
@@ -999,6 +1057,33 @@ def self_test_short():
         failures.append(f"hop 0,1 s: inicios {ts}")
     return failures
 
+def self_test_short_f0():
+    """El oraculo corto de f0 (REQ-058 D43) contra una cuerda con B CONOCIDO. Devuelve los fallos."""
+    failures = []
+    for sr in (44100, 48000):
+        for name, f0, B in (("E2 B=5e-4", NOMINAL["E2"], 5e-4), ("A2 B=1e-4", NOMINAL["A2"], 1e-4),
+                            ("G3 B=0", NOMINAL["G3"], 0.0)):
+            n_, amp = int(1.0 * sr), 0.3
+            sig = [0.0] * n_
+            for k in range(1, 5):
+                fk = k * f0 * math.sqrt(1.0 + B * k * k)
+                w = 2.0 * math.pi * fk / sr
+                for i in range(n_): sig[i] += amp / k * math.sin(w * i)
+            rows = short_track(sig, sr, f0, partials=4)
+            if not rows: failures.append(f"f0 {name}@{sr}: sin tramos"); continue
+            for t0, t1, hz, c, db, h1, k, Bfit in rows:
+                # f0 a <= 0,1 c de la verdad, con los cuatro parciales, y H1 corrido por 600·log2(1+B).
+                if not abs(cents(hz, f0)) <= 0.1 or k != 4:
+                    failures.append(f"f0 {name}@{sr} t={t0:.2f}: f0 a {cents(hz, f0):+.3f} c con k={k}"); break
+                if not abs(cents(h1, f0) - 600.0 * math.log2(1.0 + B)) <= 0.1:
+                    failures.append(f"f0 {name}@{sr} t={t0:.2f}: H1 a {cents(h1, f0):+.3f} c"); break
+    # Un tono puro (un solo parcial con energia): f0 = H1 y k = 1, no un ajuste sobre ruido.
+    rows = short_track([0.3 * math.sin(2.0 * math.pi * 196.0 * i / 48000) for i in range(48000)], 48000, 196.0,
+                       partials=4)
+    if not rows or any(r[6] != 1 or r[2] != r[5] for r in rows):
+        failures.append("tono puro: deberia dar k = 1 y f0 = H1")
+    return failures
+
 def self_test_centers():
     """`--centros`: un centro por tramo, de dos cuerdas con un objetivo en el silencio. Devuelve los fallos."""
     import tempfile
@@ -1117,7 +1202,7 @@ def self_test_attacks():
 
 def self_test():
     """El instrumento contra series CONOCIDAS, en las dos direcciones. Sale con 1 si falla."""
-    failures = self_test_partials() + self_test_formats() + self_test_short() + self_test_attacks() + self_test_cuts() + self_test_centers()
+    failures = self_test_partials() + self_test_formats() + self_test_short() + self_test_short_f0() + self_test_attacks() + self_test_cuts() + self_test_centers()
     for f in failures: print("SELF-TEST FALLO:", f)
     print("self-test:", "ROJO" if failures else "verde", f"({len(failures)} fallos)")
     return 1 if failures else 0
@@ -1142,7 +1227,14 @@ def run_short(a, files):
         if a.centros:
             print("# centros: el centro de cada tramo es el HZ del ultimo '# objetivo' con FRAME <= su inicio "
                   f"({a.centros})", file=out)
-        print("# archivo\tt_ini_s\tt_fin_s\thz\tcents_vs_centro\tnivel_dbfs", file=out)
+        if a.partials > 1:
+            # Solo con --partials: sin el, la cabecera y las filas son las de siempre, byte a byte.
+            print(f"# f0 (REQ-058 D43): hz = f0 del ajuste estirado (C libre, B en [0, 5e-3]) sobre los parciales "
+                  f"1..{a.partials} del tramo, cada uno buscado en ±{SHORT_PARTIAL_SPAN} c de n·H1 y descartado bajo "
+                  f"{SHORT_PARTIAL_MIN_DB} dB respecto de H1; con un solo parcial util, f0 = H1 (k = 1)", file=out)
+            print("# archivo\tt_ini_s\tt_fin_s\thz\tcents_vs_centro\tnivel_dbfs\th1_hz\tk\tB", file=out)
+        else:
+            print("# archivo\tt_ini_s\tt_fin_s\thz\tcents_vs_centro\tnivel_dbfs", file=out)
         cuts_doc = False
         table = parse_centers(a.centros) if a.centros else None
         for path in files:
@@ -1167,8 +1259,8 @@ def run_short(a, files):
             if attacks or excluded:
                 print("\n".join(format_attacks(name, attacks, excluded)), file=out)
             rows = short_track_cut(mono, sr, cuts, center, a.short_win, a.short_hop, a.short_floor_dbfs, a.span_cents,
-                                 centers=centers)
-            print("\n".join(format_short(name, rows)), file=out)
+                                 centers=centers, partials=a.partials)
+            print("\n".join(format_short_f0(name, rows) if a.partials > 1 else format_short(name, rows)), file=out)
             out.flush()
     finally:
         if a.tsv: out.close()
