@@ -57,10 +57,14 @@ import com.watermellonstudios.audio.domain.error.NativeErrorCode
  * con [renderTaps]: UN [FloatArray] `[premezcla | FX | pista 0 | …]` por bloque. [getXRunCount] da
  * 0: una instancia offline no tiene stream.
  *
- * La superficie es la mínima que pide S2 (motor, SoundFont y preset, cadena de
- * efectos, parámetros, gestos x/y y notas). Lo que falte se agrega como un
- * pasamanos más a la `wma_*` que ya toma un `WmaEngine*`, no como una copia del
- * bridge global.
+ * ## La configuración del motor ([IOfflineSynthControl], REQ-055 S2 y S15)
+ *
+ * Motor, oscilador, modulador, rango de frecuencia, SoundFont y preset, BPM, cadena de efectos
+ * (con bypass), ruteo y gestos x/y y notas: la superficie que pide el re-render de una toma. Lo que
+ * falte se agrega como un pasamanos más a la `wma_*` que ya toma un `WmaEngine*`, no como una copia
+ * del bridge global. El orden de uso del re-render está en el KDoc de [IOfflineRenderer].
+ * Los valores fuera de rango se rechazan (`ParameterOutOfRange`) en lugar de descartarse en
+ * silencio como en vivo; las consultas del font dan `null` sin font, con un índice inválido o cerrada.
  */
 class OfflineRenderer private constructor(
     private val bridge: AudioNativeBridge,
@@ -115,41 +119,75 @@ class OfflineRenderer private constructor(
     /** Detiene el render. Idempotente. */
     override fun stop(): Result<Unit> = call("stop") { bridge.offlineStop(it) }
 
-    fun setEngineType(type: Int): Result<Unit> = call("setEngineType") { bridge.offlineSetEngineType(it, type) }
+    override fun setEngineType(type: Int): Result<Unit> = call("setEngineType") { bridge.offlineSetEngineType(it, type) }
 
-    fun setEngineParameter(paramId: Int, value: Float): Result<Unit> =
+    override fun setEngineParameter(paramId: Int, value: Float): Result<Unit> =
         call("setEngineParameter") { bridge.offlineSetEngineParameter(it, paramId, value) }
 
-    fun setMasterVolume(volume: Float): Result<Unit> =
+    override fun setMasterVolume(volume: Float): Result<Unit> =
         call("setMasterVolume") { bridge.offlineSetMasterVolume(it, volume) }
 
-    fun setXY(x: Float, y: Float): Result<Unit> = call("setXY") { bridge.offlineSetXY(it, x, y) }
+    override fun setXY(x: Float, y: Float): Result<Unit> = call("setXY") { bridge.offlineSetXY(it, x, y) }
 
-    fun setFrequencyAndAmplitude(frequency: Float, amplitude: Float): Result<Unit> =
+    override fun setFrequencyAndAmplitude(frequency: Float, amplitude: Float): Result<Unit> =
         call("setFrequencyAndAmplitude") { bridge.offlineSetFrequencyAndAmplitude(it, frequency, amplitude) }
 
-    fun loadSoundFont(path: String): Result<Unit> =
+    override fun loadSoundFont(path: String): Result<Unit> =
         call("loadSoundFont") { bridge.offlineLoadSoundFontFromPath(it, path) }
 
-    fun setSoundFontPreset(presetIndex: Int): Result<Unit> =
+    override fun setSoundFontPreset(presetIndex: Int): Result<Unit> =
         call("setSoundFontPreset") { bridge.offlineSetSoundFontPreset(it, presetIndex) }
 
-    fun soundFontNoteOn(touchId: Int, midiNote: Int, velocity: Float): Result<Unit> =
+    override fun soundFontNoteOn(touchId: Int, midiNote: Int, velocity: Float): Result<Unit> =
         call("soundFontNoteOn") { bridge.offlineSfNoteOn(it, touchId, midiNote, velocity) }
 
-    fun soundFontNoteOff(touchId: Int): Result<Unit> =
+    override fun soundFontNoteOff(touchId: Int): Result<Unit> =
         call("soundFontNoteOff") { bridge.offlineSfNoteOff(it, touchId) }
 
     /** Agrega un efecto al final de la cadena; devuelve su índice. */
-    fun addEffect(typeId: Int): Result<Int> = withHandle("addEffect") { h ->
+    override fun addEffect(typeId: Int): Result<Int> = withHandle("addEffect") { h ->
         val code = bridge.offlineAddEffect(h, typeId)
         if (code >= 0) Result.success(code) else Result.failure(NativeBridgeException.fromCode(code, "OfflineRenderer.addEffect"))
     }
 
-    fun clearAllEffects(): Result<Unit> = call("clearAllEffects") { bridge.offlineClearAllEffects(it) }
+    override fun clearAllEffects(): Result<Unit> = call("clearAllEffects") { bridge.offlineClearAllEffects(it) }
 
-    fun setEffectParameter(index: Int, paramId: Int, value: Float): Result<Unit> =
+    override fun setEffectParameter(index: Int, paramId: Int, value: Float): Result<Unit> =
         call("setEffectParameter") { bridge.offlineSetEffectParameter(it, index, paramId, value) }
+
+    override fun setOscillatorType(typeId: Int): Result<Unit> =
+        call("setOscillatorType") { bridge.offlineSetOscillatorType(it, typeId) }
+
+    override fun setModulatorType(typeId: Int): Result<Unit> =
+        call("setModulatorType") { bridge.offlineSetModulatorType(it, typeId) }
+
+    override fun setFrequencyRange(minHz: Float, maxHz: Float): Result<Unit> =
+        call("setFrequencyRange") { bridge.offlineSetFrequencyRange(it, minHz, maxHz) }
+
+    override fun setBpm(bpm: Float): Result<Unit> = call("setBpm") { bridge.offlineSetBpm(it, bpm) }
+
+    override fun setEffectBypass(index: Int, bypass: Boolean): Result<Unit> =
+        call("setEffectBypass") { bridge.offlineSetEffectBypass(it, index, bypass) }
+
+    override fun setRoutingMode(mode: Int): Result<Unit> =
+        call("setRoutingMode") { bridge.offlineSetRoutingMode(it, mode) }
+
+    override fun setParallelMix(mix: Float): Result<Unit> =
+        call("setParallelMix") { bridge.offlineSetParallelMix(it, mix) }
+
+    override fun setFeedbackAmount(amount: Float): Result<Unit> =
+        call("setFeedbackAmount") { bridge.offlineSetFeedbackAmount(it, amount) }
+
+    override fun sfSetTouchExpression(touchId: Int, expression: Float): Result<Unit> =
+        call("sfSetTouchExpression") { bridge.offlineSfSetTouchExpression(it, touchId, expression) }
+
+    override fun sfNoteOffAll(): Result<Unit> = call("sfNoteOffAll") { bridge.offlineSfNoteOffAll(it) }
+
+    override fun getSoundFontPresetKeyRange(presetIndex: Int): IntArray? =
+        handle.let { if (it == 0L) null else bridge.offlineGetSoundFontPresetKeyRange(it, presetIndex) }
+
+    override fun getSoundFontPresetBankProgram(presetIndex: Int): IntArray? =
+        handle.let { if (it == 0L) null else bridge.offlineGetSoundFontPresetBankProgram(it, presetIndex) }
 
     /**
      * El techo del looper de esta instancia (REQ-055 S12b): el presupuesto de memoria de los clips

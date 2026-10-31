@@ -13,6 +13,7 @@
 #include "../analysis/OfflineAnalysis.h"
 #include "../analysis/WavFileDumpSink.h"
 #include "../core/AudioMode.h"
+#include "../looper/OnsetDetection.h"
 #include "../voice/VoiceTypes.h"
 #include "../platform/Logger.h"
 #include "../platform/LogCaptureBuffer.h"
@@ -2416,6 +2417,17 @@ int wma_looper_detect_onsets(const WmaEngine* engine, int track_index,
     if (!out_onsets || max_onsets <= 0) return 0;
     const int written = engine->engine->getAudioLooper().detectTrackOnsets(
         track_index, out_onsets, max_onsets, hop_frames, sensitivity);
+    return written < 0 ? 0 : written;
+}
+
+int wma_detect_onsets(const float* interleaved_stereo, int frames, int sample_rate,
+                      int* out_onsets, int max_onsets, int hop_frames, float sensitivity) {
+    if (!interleaved_stereo || frames <= 0 || !out_onsets || max_onsets <= 0) return 0;
+    const int written = wma::onset::detect(
+        [interleaved_stereo](int frame, int channel) {
+            return interleaved_stereo[static_cast<size_t>(frame) * 2 + static_cast<size_t>(channel)];
+        },
+        frames, sample_rate, hop_frames, sensitivity, out_onsets, max_onsets);
     return written < 0 ? 0 : written;
 }
 

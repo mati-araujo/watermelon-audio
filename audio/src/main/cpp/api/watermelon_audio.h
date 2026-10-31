@@ -1883,6 +1883,29 @@ WMA_API int wma_looper_detect_onsets(const WmaEngine* engine, int track_index,
                                       int hop_frames, float sensitivity);
 
 /**
+ * Detect onsets in an arbitrary stereo buffer (REQ-055 S15): the SAME algorithm as
+ * wma_looper_detect_onsets() — one implementation, `looper/OnsetDetection.h` — over a
+ * buffer the caller owns instead of a looper track. Stateless: no engine, no looper, no
+ * allocation of engine state. Not RT: it allocates three vectors of `frames / hop_frames`
+ * floats; call it from a UI/IO thread.
+ *
+ * @param interleaved_stereo  `frames * 2` floats, L R L R...; read only
+ * @param frames              Frames in the buffer
+ * @param sample_rate         Hz; sets the minimum gap between onsets (~50 ms)
+ * @param out_onsets          Frame of each onset, ascending, relative to the start of the
+ *                            buffer
+ * @param max_onsets          Capacity of out_onsets; nothing is written past it
+ * @param hop_frames          Analysis window (256 = 5.3 ms at 48 kHz); below 32 is raised to 32
+ * @param sensitivity         > 1 = more onsets, < 1 = fewer (1.0 by default)
+ * @return number of onsets written, never negative; 0 for a null pointer, a capacity or a
+ *         frame count <= 0, silence, or a buffer too short for four windows. The result is
+ *         bit-identical to wma_looper_detect_onsets() on a track holding the same samples.
+ */
+WMA_API int wma_detect_onsets(const float* interleaved_stereo, int frames, int sample_rate,
+                               int* out_onsets, int max_onsets, int hop_frames,
+                               float sensitivity);
+
+/**
  * La serie de PITCH de una pista, offline, en frames del buffer (REQ-043, WV-3.2).
  *
  * Recorre la region `[loopStart, loopEnd)` de la pista con el preset de voz del motor

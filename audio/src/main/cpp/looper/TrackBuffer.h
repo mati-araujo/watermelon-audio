@@ -1,5 +1,6 @@
 #pragma once
 
+#include "OnsetDetection.h"
 #include "PanLUT.h"
 #include "TrackStorage.h"
 #include "../platform/Logger.h"
@@ -837,88 +838,13 @@ public:
     int detectOnsets(int* outOnsets, int maxOnsets,
                      int hopFrames, float sensitivity) const {
         if (!outOnsets || maxOnsets <= 0) return 0;
-        if (hopFrames < 32) hopFrames = 32;
         const int len = mLengthFrames.load(std::memory_order_acquire);
-        if (len <= hopFrames * 4) return 0;
         if (mStore.capacityFrames() < len) return 0;
-
-        const int numWin = len / hopFrames;
-        if (numWin < 4) return 0;
-
-        std::vector<float> energy, smoothed, flux;
-        try {
-            energy.assign(static_cast<size_t>(numWin), 0.0f);
-            smoothed.assign(static_cast<size_t>(numWin), 0.0f);
-            flux.assign(static_cast<size_t>(numWin), 0.0f);
-        } catch (...) {
-            return 0;
-        }
-
-        // 1) Short-time energy per window.
-        for (int w = 0; w < numWin; ++w) {
-            const int base = w * hopFrames;
-            float e = 0.0f;
-            for (int i = 0; i < hopFrames; ++i) {
-                const float l = mStore.sample(base + i, 0);
-                const float r = mStore.sample(base + i, 1);
-                e += l * l + r * r;
-            }
-            energy[w] = e;
-        }
-
-        // 1b) Smooth the energy (±2-window moving average) BEFORE the flux. A
-        // sustained/tonal note whose period exceeds the hop makes the raw windowed
-        // energy oscillate every block, which the flux reads as a stream of false
-        // onsets (a held synth pad reported >100 onsets / 6 s). Averaging over a few
-        // windows flattens that wobble while a real transient still steps the
-        // smoothed energy up sharply.
-        const int sm = 2;
-        for (int w = 0; w < numWin; ++w) {
-            const int a = std::max(0, w - sm);
-            const int b = std::min(numWin - 1, w + sm);
-            float sum = 0.0f;
-            for (int k = a; k <= b; ++k) sum += energy[k];
-            smoothed[w] = sum / static_cast<float>(b - a + 1);
-        }
-
-        // 2) Positive log-energy flux on the smoothed envelope.
-        for (int w = 1; w < numWin; ++w) {
-            const float d = std::log(smoothed[w] + 1e-9f) - std::log(smoothed[w - 1] + 1e-9f);
-            flux[w] = (d > 0.0f) ? d : 0.0f;
-        }
-
-        // 3) Adaptive peak-pick.
-        const float mult = (sensitivity > 0.01f) ? (1.0f / sensitivity) : 1.0f;
-        // Absolute log-energy flux floor (≈ +3 dB jump). The adaptive threshold
-        // alone adapts UP with the local flux, so sustained/tonal material (whose
-        // windowed energy wobbles every block) trips it constantly — a take of a
-        // held synth pad reported ~88 onsets / 5 s. A real transient jumps energy
-        // by several dB (flux ≫ this); steady-tone wobble does not. Scales with the
-        // sensitivity knob so the param still works.
-        const float minFlux = 0.5f * mult;
-        const int half = 8;  // local-mean window (± windows)
-        const int minGapWin =
-            std::max(1, static_cast<int>(0.05f * static_cast<float>(mSampleRate)
-                                         / static_cast<float>(hopFrames)));
-        int count = 0;
-        int lastOnsetWin = -minGapWin - 1;
-        for (int w = 1; w < numWin - 1 && count < maxOnsets; ++w) {
-            const float f = flux[w];
-            if (f <= minFlux) continue;
-            const int a = std::max(1, w - half);
-            const int b = std::min(numWin - 1, w + half);
-            float sum = 0.0f;
-            int n = 0;
-            for (int k = a; k < b; ++k) { sum += flux[k]; ++n; }
-            const float localMean = (n > 0) ? sum / static_cast<float>(n) : 0.0f;
-            const float threshold = localMean * 1.5f * mult + 1.0e-4f;
-            if (f > threshold && f >= flux[w - 1] && f > flux[w + 1]
-                && (w - lastOnsetWin) >= minGapWin) {
-                outOnsets[count++] = w * hopFrames;
-                lastOnsetWin = w;
-            }
-        }
-        return count;
+        // El algoritmo vive en OnsetDetection.h: el mismo corre sobre un buffer cualquiera
+        // (`wma_detect_onsets`, el re-render de Studio).
+        return wma::onset::detect(
+            [this](int frame, int channel) { return mStore.sample(frame, channel); },
+            len, mSampleRate, hopFrames, sensitivity, outOnsets, maxOnsets);
     }
 
     /**

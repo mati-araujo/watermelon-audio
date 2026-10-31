@@ -3873,6 +3873,39 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
     internal fun offlineLooperSetCapabilities(handle: Long, budgetBytes: Long, maxTracks: Int): Int =
         nativeOfflineLooperSetCapabilities(handle, budgetBytes, maxTracks)
 
+    // Re-render de tomas (REQ-055 S15): el resto de la configuracion por handle. Los `Int` son el
+    // `WmaResult` crudo; las dos consultas del font devuelven `null` con un handle desconocido,
+    // sin font o con un indice invalido (la misma forma que las del vivo).
+    internal fun offlineSetOscillatorType(handle: Long, typeId: Int): Int =
+        nativeOfflineSetOscillatorType(handle, typeId)
+    internal fun offlineSetModulatorType(handle: Long, typeId: Int): Int =
+        nativeOfflineSetModulatorType(handle, typeId)
+    internal fun offlineSetFrequencyRange(handle: Long, minHz: Float, maxHz: Float): Int =
+        nativeOfflineSetFrequencyRange(handle, minHz, maxHz)
+    internal fun offlineSetBpm(handle: Long, bpm: Float): Int = nativeOfflineSetBpm(handle, bpm)
+    internal fun offlineSetEffectBypass(handle: Long, index: Int, bypass: Boolean): Int =
+        nativeOfflineSetEffectBypass(handle, index, bypass)
+    internal fun offlineSetRoutingMode(handle: Long, mode: Int): Int = nativeOfflineSetRoutingMode(handle, mode)
+    internal fun offlineSetParallelMix(handle: Long, mix: Float): Int = nativeOfflineSetParallelMix(handle, mix)
+    internal fun offlineSetFeedbackAmount(handle: Long, amount: Float): Int =
+        nativeOfflineSetFeedbackAmount(handle, amount)
+    internal fun offlineSfSetTouchExpression(handle: Long, touchId: Int, expression: Float): Int =
+        nativeOfflineSfSetTouchExpression(handle, touchId, expression)
+    internal fun offlineSfNoteOffAll(handle: Long): Int = nativeOfflineSfNoteOffAll(handle)
+    internal fun offlineGetSoundFontPresetKeyRange(handle: Long, presetIndex: Int): IntArray? =
+        nativeOfflineGetSoundFontPresetKeyRange(handle, presetIndex)
+    internal fun offlineGetSoundFontPresetBankProgram(handle: Long, presetIndex: Int): IntArray? =
+        nativeOfflineGetSoundFontPresetBankProgram(handle, presetIndex)
+
+    /**
+     * Onsets de un buffer estereo intercalado del llamador (REQ-055 S15), sin motor ni handle.
+     * Devuelve los escritos en [out] (`>= 0`) o un `WmaResult` negativo. No por el motor vivo: es
+     * la misma funcion pura que usa el looper.
+     */
+    internal fun detectOnsets(
+        stereo: FloatArray, frames: Int, sampleRate: Int, hopFrames: Int, sensitivity: Float, out: IntArray,
+    ): Int = nativeDetectOnsets(stereo, frames, sampleRate, hopFrames, sensitivity, out)
+
     private external fun nativeOfflineCreate(): Long
     private external fun nativeOfflineDestroy(handle: Long): Int
     private external fun nativeOfflineStart(handle: Long, sampleRate: Int, maxBlockFrames: Int): Int
@@ -3891,6 +3924,21 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagno
     private external fun nativeOfflineClearAllEffects(handle: Long): Int
     private external fun nativeOfflineSetEffectParameter(handle: Long, index: Int, paramId: Int, value: Float): Int
     private external fun nativeOfflineLooperSetCapabilities(handle: Long, budgetBytes: Long, maxTracks: Int): Int
+    private external fun nativeOfflineSetOscillatorType(handle: Long, typeId: Int): Int
+    private external fun nativeOfflineSetModulatorType(handle: Long, typeId: Int): Int
+    private external fun nativeOfflineSetFrequencyRange(handle: Long, minHz: Float, maxHz: Float): Int
+    private external fun nativeOfflineSetBpm(handle: Long, bpm: Float): Int
+    private external fun nativeOfflineSetEffectBypass(handle: Long, index: Int, bypass: Boolean): Int
+    private external fun nativeOfflineSetRoutingMode(handle: Long, mode: Int): Int
+    private external fun nativeOfflineSetParallelMix(handle: Long, mix: Float): Int
+    private external fun nativeOfflineSetFeedbackAmount(handle: Long, amount: Float): Int
+    private external fun nativeOfflineSfSetTouchExpression(handle: Long, touchId: Int, expression: Float): Int
+    private external fun nativeOfflineSfNoteOffAll(handle: Long): Int
+    private external fun nativeOfflineGetSoundFontPresetKeyRange(handle: Long, presetIndex: Int): IntArray?
+    private external fun nativeOfflineGetSoundFontPresetBankProgram(handle: Long, presetIndex: Int): IntArray?
+    private external fun nativeDetectOnsets(
+        stereo: FloatArray, frames: Int, sampleRate: Int, hopFrames: Int, sensitivity: Float, out: IntArray,
+    ): Int
 
     // Canción programada por handle (REQ-055 S11): 1:1 con las `nativeSong*` del vivo.
     internal fun offlineSongLoadClip(
