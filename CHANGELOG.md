@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.28.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.27.0...v2.28.0) (2026-10-31)
+
+
+### Features
+
+* **offline:** superficie de re-render de tomas (REQ-055 S15) ([62bf327](https://github.com/mati-araujo/watermelon-audio/commit/62bf327e6760356633389db297c862822ca3bb35))
+* **offline:** superficie de re-render de tomas (REQ-055 S15) ([563638b](https://github.com/mati-araujo/watermelon-audio/commit/563638b327d1afcdd126784dcff9c68ca3763dda))
+
 ## [2.27.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.26.0...v2.27.0) (2026-10-29)
 
 
