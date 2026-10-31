@@ -3053,7 +3053,12 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeDetect
         return static_cast<jint>(WMA_ERROR_MEMORY);
     }
     jfloat* samples = env->GetFloatArrayElements(stereo, nullptr);
-    if (samples == nullptr) return static_cast<jint>(WMA_ERROR_MEMORY);
+    if (samples == nullptr) {
+        // GetFloatArrayElements deja un OutOfMemoryError pendiente: se limpia para que Kotlin reciba
+        // el WMA_ERROR_MEMORY del contrato (`Result.failure`) y no la excepcion cruda.
+        env->ExceptionClear();
+        return static_cast<jint>(WMA_ERROR_MEMORY);
+    }
     const int n = wma_detect_onsets(samples, frames, sampleRate, reinterpret_cast<int*>(onsets.data()),
                                     capacity, hopFrames, sensitivity);
     env->ReleaseFloatArrayElements(stereo, samples, JNI_ABORT);

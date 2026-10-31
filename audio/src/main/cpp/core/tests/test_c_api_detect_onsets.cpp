@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdint>
+#include <string>
 #include <vector>
 
 namespace {
@@ -175,5 +177,92 @@ TEST(DetectOnsets, AC_055_15_FramesAreRelativeToTheStartOfTheBuffer) {
     for (int onset : cut) {
         EXPECT_NE(std::find(full.begin(), full.end(), onset + shift), full.end())
             << "onset " << onset << " del recorte no corresponde a ninguno del buffer completo";
+    }
+}
+
+// ---- Golden de 2.27.0 -------------------------------------------------------------------------
+// Los frames de abajo los dio `TrackBuffer::detectOnsets` ANTES de extraer `wma::onset::detect`
+// (commit 31451966, el master que publico 2.27.0), sobre ESTE buffer. Los tests de equivalencia de
+// arriba comparan la implementacion nueva consigo misma; esto la compara con la vieja.
+// Si los senos/exp de otra libm movieran un frame, ver primero que el buffer siga teniendo 6 golpes
+// bien separados antes de tocar los numeros: un cambio legitimo del algoritmo se re-calibra a
+// proposito (S2 calibro hop 256 = 10 ms), no se acomoda aca.
+namespace {
+
+constexpr int kGoldRate = 48000;
+constexpr int kGoldFrames = 240000;   // 5 s
+
+/// Golpes de seno decreciente (algunos con rafaga de ruido), un piso de ruido y un tono sostenido
+/// desde la mitad: todo con aritmetica entera (LCG) o floats simples, determinista.
+std::vector<float> goldenBuffer() {
+    std::vector<float> stereo(static_cast<size_t>(kGoldFrames) * 2, 0.0f);
+    uint32_t lcg = 12345u;
+    auto noise = [&lcg]() {
+        lcg = lcg * 1664525u + 1013904223u;
+        return (static_cast<float>(lcg >> 8) / 8388608.0f) - 1.0f;   // [-1, 1)
+    };
+    for (int n = 0; n < kGoldFrames; ++n) {
+        const float floorNoise = 0.003f * noise();
+        float l = floorNoise;
+        float r = floorNoise * 0.5f;
+        if (n >= 150000) {   // tono sostenido: no es un golpe, es energia estable
+            const float t = 0.12f * std::sin(2.0f * static_cast<float>(M_PI) * 440.0f *
+                                              static_cast<float>(n - 150000) / kGoldRate);
+            l += t;
+            r += t;
+        }
+        stereo[2 * n] = l;
+        stereo[2 * n + 1] = r;
+    }
+    const int starts[] = {20000, 50000, 80000, 110000, 135000, 190000};
+    const float amps[] = {0.7f, 0.25f, 0.6f, 0.4f, 0.7f, 0.5f};
+    for (int k = 0; k < 6; ++k) {
+        for (int i = 0; i < 7000 && starts[k] + i < kGoldFrames; ++i) {
+            const float env = std::exp(-static_cast<float>(i) / 1500.0f);
+            float v = amps[k] * env * std::sin(2.0f * static_cast<float>(M_PI) * 330.0f *
+                                                static_cast<float>(i) / kGoldRate);
+            if (k % 2 == 1 && i < 2000) v += 0.3f * env * noise();   // golpe con ataque ruidoso
+            stereo[2 * (starts[k] + i)] += v;
+            stereo[2 * (starts[k] + i) + 1] += v;
+        }
+    }
+    return stereo;
+}
+
+struct OnsetGolden {
+    int hop;
+    float sensitivity;
+    std::vector<int> frames;
+};
+
+const std::vector<OnsetGolden>& onsetGoldens() {
+    static const std::vector<OnsetGolden> g = {
+        {256, 1.0f, {19456, 49408, 79360, 109312, 134400, 149504, 189440}},
+        {128, 1.0f, {19712, 49664, 79744, 109696, 134656, 149632, 189696}},
+        {256, 1.5f, {19456, 49408, 79360, 109312, 134400, 149504, 189440}},
+        {128, 4.0f, {19712, 49664, 79744, 109696, 134656, 149632, 189696, 192000}},
+        {512, 0.5f, {18944, 48640, 78848, 108544, 133632, 148992, 188928}},
+    };
+    return g;
+}
+
+}  // namespace
+
+// Bug plausible: un cambio del algoritmo respecto del de 2.27.0 (otra constante, otra ventana de
+// suavizado, otro orden de float, otro piso de energia) que los tests de equivalencia no ven porque
+// mueven las DOS rutas a la vez. Frames EXACTOS, por la C API y por el looper, en tres hops y
+// cuatro sensibilidades; el buffer lleva golpes, ruido y un tono sostenido.
+TEST(DetectOnsets, AC_055_15_GoldenFramesOfRelease2_27_0ByCApiAndByTheLooper) {
+    const auto stereo = goldenBuffer();
+    for (const auto& g : onsetGoldens()) {
+        const std::string at = "hop " + std::to_string(g.hop) + " sens " + std::to_string(g.sensitivity);
+        std::vector<int> out(256, -1);
+        const int n = wma_detect_onsets(stereo.data(), kGoldFrames, kGoldRate, out.data(),
+                                        static_cast<int>(out.size()), g.hop, g.sensitivity);
+        ASSERT_GE(n, 0) << at;
+        out.resize(static_cast<size_t>(n));
+        EXPECT_EQ(out, g.frames) << "wma_detect_onsets, " << at;
+        EXPECT_EQ(wma_test::onsetsOf(stereo, kGoldRate, g.hop, g.sensitivity), g.frames)
+            << "TrackBuffer::detectOnsets, " << at;
     }
 }

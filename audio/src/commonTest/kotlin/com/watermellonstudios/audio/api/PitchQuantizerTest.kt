@@ -76,8 +76,10 @@ class PitchQuantizerTest {
         configureGlobal(Config("defaults", major, 0, 9, 3, false))
     }
 
-    // Bug plausible: la extracción cambió el orden de operaciones en float o perdió un estado: el
-    // re-render cantaría otras notas que el pad en vivo (la regla es una, no dos copias que derivan).
+    // Bug plausible: la instancia y el delegado derivan entre sí (un estado que una ruta no copia, una
+    // configuración que no llega). OJO: compara la implementación nueva consigo misma (ScaleQuantizer
+    // delega en PitchQuantizer), así que NO atrapa un cambio de orden de float ni de redondeo respecto
+    // del algoritmo viejo: eso lo cubre PitchQuantizerGoldenTest, con valores de 2.27.0.
     @Test
     fun `AC-055_15 una instancia da la misma secuencia que ScaleQuantizer en todas las configuraciones`() {
         for (c in configs) {
