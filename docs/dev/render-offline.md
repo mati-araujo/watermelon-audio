@@ -207,3 +207,63 @@ en cada union conocida, un salto |x[n] - x[n-1]| > `kJumpFloor` (0,005) que supe
 - Vale para re-render con bloque <= 256 y hop 256 (con bloque 512 la cuantizacion sola llega
   a 10,7 ms). No cubre el muestreo de gestos a ritmo de UI ni el coalescer: eso es de los
   gestos, no del render, y S15 lo mide contra la toma real.
+
+## Re-render de tomas (REQ-055 S15)
+
+Re-renderizar una toma es reproducir su sonido en una instancia offline: el mismo engine, la misma
+cadena y los mismos gestos, a un buffer que Studio compara contra la grabación. S15 agrega la
+superficie que faltaba para hacerlo sin importar `audio.internal`, sin tocar el motor vivo, el hilo de
+audio ni el `ScaleQuantizer` global (el perfil `PROTECTED` y los golden de 2.27.0 quedan bit a bit).
+
+**`IOfflineSynthControl`** (`audio.api`, commonMain; `IOfflineRenderer` la extiende). Los setters que
+ya tenía la clase interna (`setEngineType`, `setEngineParameter`, `setMasterVolume`, `setXY`,
+`setFrequencyAndAmplitude`, `loadSoundFont`, `setSoundFontPreset`, `soundFontNoteOn/Off`, `addEffect`,
+`clearAllEffects`, `setEffectParameter`) más: `setOscillatorType`, `setModulatorType`,
+`setFrequencyRange`, `setBpm`, `setEffectBypass`, `setRoutingMode`, `setParallelMix`,
+`setFeedbackAmount`, `sfSetTouchExpression`, `sfNoteOffAll` y las consultas `getSoundFontPresetKeyRange`
+/ `getSoundFontPresetBankProgram` (`IntArray?`, `null` sin font, con índice inválido o cerrada). Cada
+una es un pasamanos `nativeOffline*` a la `wma_*` que ya tomaba un `WmaEngine*`, serializado por el
+`opMutex` de la instancia.
+
+- **Se rechaza, no se descarta.** La C API ignora en silencio un valor fuera de rango en sus `void`
+  (oscilador fuera de 0..4, ruteo fuera de 0..5, rango con `max <= min`), y `std::clamp` deja pasar un
+  NaN hasta el Transport y los efectos. En el vivo eso lo filtra Kotlin; el offline lo rechaza en el
+  JNI con `PARAMETER_OUT_OF_RANGE` (más `NaN`/`Inf` en BPM, mezcla, feedback y expresión), porque un
+  re-render con un valor ignorado suena como otra toma sin avisar. `setModulatorType` y
+  `setEffectBypass` propagan el `WmaResult` de la C API (`INVALID_PARAMETER_ID`, `INVALID_EFFECT_INDEX`).
+- **`setFrequencyRange` no suena.** El rango lo lee sólo el mapeo XY del `OscillatorNode`
+  (`updateXY`/dual touch); `wma_set_xy` mapea con `50 + x * 1950` y los gestos del re-render entran por
+  frecuencia directa. Se fija por orden de uso; no tiene control negativo audible
+  (`test_offline_rerender.cpp` lo dice).
+
+**El orden de uso**, el de `IOfflineRenderer`: `start(sr, 128)` → `mixSetOutputProfile(RAW)` (el
+start vuelve a `PROTECTED`) → engine → oscilador → parámetros de engine → modulador → rango de
+frecuencia → SoundFont + preset → BPM → cadena (`clearAllEffects`, `addEffect` en orden, parámetros,
+bypass) → ruteo / mezcla paralela / feedback → bloques de render con los gestos en el borde de bloque.
+**El bloque es fijo en 128** (hop 256 de los onsets = 2 bloques; ver arriba la excepción entre
+bloques: synth volume y parámetros de engine a mitad del render dependen del tamaño de bloque).
+
+**`PitchQuantizer`** (`audio.api`): el algoritmo de `ScaleQuantizer` como INSTANCIA, con su
+histéresis, escala, raíz, rango de octavas y rango del engine. Un trabajo de re-render usa la suya y
+cuantiza sus gestos con la regla del pad (mismos números, mismo orden de operaciones en float);
+`ScaleQuantizer` es un delegado delgado sobre una instancia por defecto y conserva su API y su
+`currentMidiNoteFlow`. Usar una instancia no mueve el global
+(`PitchQuantizerTest`: secuencia idéntica a `ScaleQuantizer` en 8 configuraciones, ida y vuelta).
+`QuantizationResult` pasó a `audio.api` (alias en `internal.util`).
+
+**`OnsetAnalysis`** (`audio.api`, jvmSharedMain) sobre **`wma_detect_onsets`**: el algoritmo de
+`TrackBuffer::detectOnsets`, extraído a `looper/OnsetDetection.h` (`wma::onset::detect`, parametrizado
+por un accesor de muestra) y llamado por las dos. El resultado es idéntico al del looper sobre el mismo
+contenido (`DetectOnsets.AC_055_15_MatchesTheLooperDetectorOnTheSameContentExactly`, con 5 hops y 3
+sensibilidades), así que **la calibración de S2 (hop 256, margen de 10 ms) vale para los dos caminos**.
+No es RT: reserva tres vectores de `frames / hop` floats. Frames ascendentes y relativos al inicio del
+buffer. 🔴 Un golpe se ubica ANTES de su frame, no en él: la energía se suaviza con ±2 ventanas antes
+del flujo, y con golpes sintéticos el onset cae 544..704 frames antes (2,1..2,75 hops). El "≤ 1 hop"
+de S15 es la DIFERENCIA entre dos renders (el criterio de `RenderChecks.h`), no la distancia al frame
+del golpe. La entrada llega de la JVM del consumidor y no es de confianza: `nativeDetectOnsets` valida
+`frames * 2` en 64 bits contra el largo real del array, la capacidad de salida es el largo real de
+`out`, y el guard `hop * 4` ya no desborda con un hop enorme.
+
+**Sigue sin sonar offline** el sistema de voces polifónicas (`wma_voice_enable`,
+`wma_voice_update_multi_touch`; ver «Pendiente, no medido» arriba): un re-render de una toma hecha con
+voces polifónicas no las reproduce.

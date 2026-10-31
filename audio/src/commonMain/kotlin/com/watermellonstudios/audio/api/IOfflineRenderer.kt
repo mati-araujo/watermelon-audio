@@ -12,8 +12,19 @@ package com.watermellonstudios.audio.api
  *
  * El orden de un export: [setLooperCapabilities] → [start] → perfil RAW (`mixSetOutputProfile`) →
  * cargas → agenda → [renderTaps] por bloque → [close].
+ *
+ * ## El orden del re-render de una toma (REQ-055 S15)
+ *
+ * [start] (`sampleRate`, bloque **128**) → `mixSetOutputProfile(RAW)` (el start vuelve el perfil a
+ * `PROTECTED`) → [setEngineType] → [setOscillatorType] → [setEngineParameter] → [setModulatorType] →
+ * [setFrequencyRange] → [loadSoundFont] + [setSoundFontPreset] → [setBpm] → la cadena ([clearAllEffects],
+ * [addEffect] en orden, [setEffectParameter], [setEffectBypass]) → [setRoutingMode] / [setParallelMix] /
+ * [setFeedbackAmount] → los bloques de [render], con los gestos ([setFrequencyAndAmplitude],
+ * [soundFontNoteOn], [sfSetTouchExpression]…) aplicados en el borde del bloque que corresponde. Un
+ * re-render fija su bloque: un cambio de synth volume o de parámetro de engine a mitad del render
+ * depende del tamaño de bloque. No suenan offline las voces polifónicas (`docs/dev/render-offline.md`).
  */
-interface IOfflineRenderer : ISongBridge, ISongMixBridge, IOfflineTapRenderer, AutoCloseable {
+interface IOfflineRenderer : IOfflineSynthControl, ISongBridge, ISongMixBridge, IOfflineTapRenderer, AutoCloseable {
     /**
      * Arranca (o re-arranca) un render, reseteando la cadena. [maxBlockFrames] 1..4096. Cambiar el
      * sample rate invalida los clips ya cargados y apaga la agenda; vuelve el perfil a `PROTECTED`.
