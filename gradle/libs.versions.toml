@@ -17,8 +17,8 @@ minSdk = "29"
 harnessCompileSdk = "37"
 
 # Build Tools
-agp = "9.4.1"
-kotlin = "2.4.20"
+agp = "9.5.0"
+kotlin = "2.4.21"
 cmake = "3.22.1"
 ndk = "30.0.16248370"
 
@@ -33,7 +33,7 @@ datastore = "1.2.1"
 # scripts/check-no-ui-in-library.sh lo hace fallar si algun dia las ve.
 # Declarar una version en el catalogo NO es depender de ella: el catalogo dice
 # que existe, el classpath dice quien la usa. El gate mide el classpath.
-composeMultiplatform = "1.12.1"
+composeMultiplatform = "1.12.2"
 activityCompose = "1.13.0"
 
 # Testing
