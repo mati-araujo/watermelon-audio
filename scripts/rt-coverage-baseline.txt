@@ -250,6 +250,7 @@ audio/src/main/cpp/effects/CabinetSimulator.cpp::CabinetSimulator::processFirSam
 audio/src/main/cpp/effects/CabinetSimulator.cpp::CabinetSimulator::reset
 audio/src/main/cpp/effects/ChorusEffect.cpp::ChorusEffect::interpolatedRead
 audio/src/main/cpp/effects/ChorusEffect.cpp::ChorusEffect::process
+audio/src/main/cpp/effects/ChorusEffect.cpp::ChorusEffect::readTap
 audio/src/main/cpp/effects/ChorusEffect.cpp::ChorusEffect::reset
 audio/src/main/cpp/effects/ComplexTremEffect.cpp::ComplexTremEffect::process
 audio/src/main/cpp/effects/ComplexTremEffect.cpp::ComplexTremEffect::reset

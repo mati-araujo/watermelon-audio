@@ -77,16 +77,24 @@ void ChorusEffect::process(float* input, float* output, int numFrames) {
     }
 }
 
-float ChorusEffect::interpolatedRead(const std::array<float, MAX_DELAY_SAMPLES>& line, float delaySamples) const {
-    float readPos = static_cast<float>(mWriteIndex) - delaySamples;
+ChorusEffect::ReadTap ChorusEffect::readTap(int writeIndex, float delaySamples) {
+    float readPos = static_cast<float>(writeIndex) - delaySamples;
     if (readPos < 0) readPos += MAX_DELAY_SAMPLES;
 
     int index0 = static_cast<int>(readPos);
-    int index1 = (index0 + 1) % MAX_DELAY_SAMPLES;
     float frac = readPos - static_cast<float>(index0);
+    // Un readPos negativo diminuto, más MAX_DELAY_SAMPLES, redondea a 4800,0f: es el mismo punto
+    // que el índice 0, nombrado del otro lado del wrap.
+    if (index0 >= MAX_DELAY_SAMPLES) index0 -= MAX_DELAY_SAMPLES;
+    const int index1 = (index0 + 1) % MAX_DELAY_SAMPLES;
+    return {index0, index1, frac};
+}
+
+float ChorusEffect::interpolatedRead(const std::array<float, MAX_DELAY_SAMPLES>& line, float delaySamples) const {
+    const ReadTap tap = readTap(mWriteIndex, delaySamples);
 
     // Linear interpolation
-    return line[index0] * (1.0f - frac) + line[index1] * frac;
+    return line[tap.index0] * (1.0f - tap.frac) + line[tap.index1] * tap.frac;
 }
 
 void ChorusEffect::reset() {
