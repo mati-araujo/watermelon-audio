@@ -7,6 +7,7 @@
 #
 #   bash scripts/gate.sh                     # el gate completo + atestacion
 #   bash scripts/gate.sh --only ios          # un solo gate, SIN atestar (iterar)
+#   bash scripts/gate.sh --only windows-cross  # compila el arbol para Windows (MinGW), sin atestar
 #   bash scripts/gate.sh --with-sanitizers   # + ASan/UBSan local (opt-in)
 #   bash scripts/gate.sh --no-amend          # escribe la atestacion, no commitea
 #
@@ -67,13 +68,13 @@ while [ $# -gt 0 ]; do
         --with-sanitizers) DO_SANITIZERS=1; shift ;;
         --no-amend)        DO_AMEND=0; shift ;;
         -h|--help)         sed -n '2,30p' "$0"; exit 0 ;;
-        *) printf 'uso: %s [--only ios|build|cpp-tests-macos] [--with-sanitizers] [--no-amend]\n' "$0" >&2; exit 2 ;;
+        *) printf 'uso: %s [--only ios|build|cpp-tests-macos|windows-cross] [--with-sanitizers] [--no-amend]\n' "$0" >&2; exit 2 ;;
     esac
 done
 
 case "$ONLY" in
-    ""|ios|build|cpp-tests-macos) ;;
-    *) printf 'gate desconocido: %s (ios | build | cpp-tests-macos)\n' "$ONLY" >&2; exit 2 ;;
+    ""|ios|build|cpp-tests-macos|windows-cross) ;;
+    *) printf 'gate desconocido: %s (ios | build | cpp-tests-macos | windows-cross)\n' "$ONLY" >&2; exit 2 ;;
 esac
 
 # --- infraestructura -------------------------------------------------------
@@ -176,6 +177,8 @@ step() {
     else
         printf 'FALLO (rc=%s, %ss)\n' "$rc" "$(( t1 - t0 ))"
         printf '     log: /tmp/wma-gate-%s-%s.log\n' "$gate" "$label"
+        # La cola del log: en un contenedor /tmp muere con el, y el motivo del rojo con el.
+        [ -z "${GATE_VERBOSE:-}" ] && tail -n 25 "/tmp/wma-gate-${gate}-${label}.log" | sed 's/^/     | /'
         [ "$rc" -eq 124 ] && printf '     (venció el timeout de %ss)\n' "$SIMCTL_TIMEOUT"
         FAILED_STEP="$gate:$label"
         return 1
@@ -215,6 +218,8 @@ observe_versions() {
     IOS_SDK_V="$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null)"
     CMAKE_V="$(cmake --version 2>/dev/null | head -1 | sed -E 's/cmake version //')"
     NINJA_V="$(ninja --version 2>/dev/null)"
+    # El GCC del cruce a Windows: el del prefijo que usara el gate (default: Homebrew mingw-w64).
+    MINGW_V="$("${WMA_CROSS_PREFIX:-x86_64-w64-mingw32-}g++" -dumpfullversion 2>/dev/null)"
     JVM_V="$(./gradlew --version 2>/dev/null | sed -nE 's/^Launcher JVM: +([0-9.]+).*/\1/p')"
     SIM_RUNTIME_V="$(xcrun simctl list runtimes -j 2>/dev/null | python3 -c '
 import json,sys
@@ -223,10 +228,10 @@ print(sorted(rs, key=lambda v: [int(x) for x in v.split(".")])[-1] if rs else ""
 }
 
 check_pins() {
-    python3 - "$PINS" "$XCODE_V" "$CLANG_V" "$IOS_SDK_V" "$SIM_RUNTIME_V" "$CMAKE_V" "$NINJA_V" "$JVM_V" <<'PY'
+    python3 - "$PINS" "$XCODE_V" "$CLANG_V" "$IOS_SDK_V" "$SIM_RUNTIME_V" "$CMAKE_V" "$NINJA_V" "$JVM_V" "$MINGW_V" <<'PY'
 import json, sys
 pins = json.load(open(sys.argv[1]))
-keys = ["xcode", "clang", "ios_sdk", "simulator_runtime", "cmake", "ninja", "launcher_jvm"]
+keys = ["xcode", "clang", "ios_sdk", "simulator_runtime", "cmake", "ninja", "launcher_jvm", "mingw_w64_gcc"]
 bad = []
 for key, got in zip(keys, sys.argv[2:]):
     want = pins.get(key, "")
@@ -239,8 +244,13 @@ if bad:
 PY
 }
 
-observe_versions
-if check_pins; then
+if [ "$ONLY" = "windows-cross" ]; then
+    # Corre tambien en un contenedor, donde el resto del toolchain no existe (y `./gradlew
+    # --version` intentaria bajar Gradle); check.py valida SU compilador contra el pin.
+    # --only no atesta, asi que no hay nada que proteger.
+    PINS_OK=0
+    printf '  toolchain: lo valida windows-cross/check.py contra %s\n' "$PINS"
+elif { observe_versions; check_pins; }; then
     PINS_OK=1
     printf '  toolchain: coincide con %s\n' "$PINS"
 else
@@ -286,6 +296,7 @@ print(next((x["udid"] for v in d.values() for x in v if "iPhone" in x["name"]), 
 
 gate_guardrails() {
     say "guardrails (segundos, y fallan rapido)"
+    step guardrails portability-self bash scripts/check-cpp-portability.sh --self-test || return 1
     step guardrails portability   bash scripts/check-cpp-portability.sh || return 1
     step guardrails no-ui         bash scripts/check-no-ui-in-library.sh || return 1
     # WD-1.1 — el --self-test va PRIMERO y no es ceremonia: si el parser se
@@ -371,6 +382,15 @@ gate_guardrails() {
 gate_cpp_tests_macos() {
     say "cpp-tests-macos — la suite bajo Apple clang + libc++"
     step cpp-tests-macos suite    bash scripts/run-cpp-tests.sh || return 1
+}
+
+gate_windows_cross() {
+    say "windows-cross — el arbol compila para Windows (MinGW-w64, -Werror, sin ejecutar)"
+    # REQ-061: compila los OBJETOS de desktop/ y de la suite de host. El self-test primero,
+    # como los lints: un parser de `FAILED:` roto dejaria el gate verde para siempre.
+    # Baseline-trinquete en scripts/windows-cross/baseline.txt (lo vacia REQ-061 S2).
+    step windows-cross self-test  python3 scripts/windows-cross/check.py --self-test || return 1
+    step windows-cross objects    python3 scripts/windows-cross/check.py || return 1
 }
 
 gate_ios() {
@@ -498,7 +518,10 @@ start_heartbeat
 ( nap "$GLOBAL_TIMEOUT"; printf '\n!! el gate supero el techo global de %ss — abortando\n' "$GLOBAL_TIMEOUT" >&2; kill -9 $$ 2>/dev/null ) >/dev/null &
 GLOBAL_WATCHER=$!
 
-sim_hygiene
+# Higiene de simulador sólo si el gate la necesita: windows-cross corre en un contenedor.
+if [ -z "$ONLY" ] || [ "$ONLY" = "ios" ]; then
+    sim_hygiene
+fi
 
 RC=0
 if [ -n "$ONLY" ]; then
@@ -506,11 +529,13 @@ if [ -n "$ONLY" ]; then
         ios)             gate_ios || RC=1 ;;
         build)           gate_build || RC=1 ;;
         cpp-tests-macos) gate_cpp_tests_macos || RC=1 ;;
+        windows-cross)   gate_windows_cross || RC=1 ;;
     esac
 else
     # Orden fail-fast: lo que cuesta segundos y falla seguido, primero.
     gate_guardrails       || RC=1
     [ "$RC" -eq 0 ] && { gate_cpp_tests_macos || RC=1; }
+    [ "$RC" -eq 0 ] && { gate_windows_cross || RC=1; }
     [ "$RC" -eq 0 ] && { gate_ios   || RC=1; }
     [ "$RC" -eq 0 ] && { gate_build || RC=1; }
     [ "$RC" -eq 0 ] && [ "$DO_SANITIZERS" -eq 1 ] && { gate_sanitizers || RC=1; }
@@ -602,11 +627,11 @@ EOF
 fi
 
 python3 - "$ATTESTATION" "$DIGEST" "$RESULTS" "$TOTAL" \
-         "$XCODE_V" "$CLANG_V" "$IOS_SDK_V" "$SIM_RUNTIME_V" "$CMAKE_V" "$NINJA_V" "$JVM_V" <<'PY'
+         "$XCODE_V" "$CLANG_V" "$IOS_SDK_V" "$SIM_RUNTIME_V" "$CMAKE_V" "$NINJA_V" "$JVM_V" "$MINGW_V" <<'PY'
 import json, subprocess, sys, time
 
 out, digest, results, total = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-xcode, clang, ios_sdk, sim_rt, cmake, ninja, jvm = sys.argv[5:12]
+xcode, clang, ios_sdk, sim_rt, cmake, ninja, jvm, mingw = sys.argv[5:13]
 
 durations = {}
 for line in open(results):
@@ -623,16 +648,17 @@ doc = {
     "schema": 1,
     "digest": digest,
     "gates": {
-        # Los tres gates que el CI puede saltear. Los guardrails y los sanitizers
-        # NO figuran: los primeros los reproduce el job `cpp-tests` de ubuntu y
-        # los segundos jamas se atestan.
+        # Los tres gates que el CI puede saltear, mas `windows-cross` (REQ-061), que el CI
+        # todavia no consulta: figura para que el dia que lo haga la prueba ya exista. Los
+        # guardrails y los sanitizers NO figuran: los primeros los reproduce el job
+        # `cpp-tests` de ubuntu y los segundos jamas se atestan.
         name: {"status": "pass", "seconds": durations.get(name, 0)}
-        for name in ("cpp-tests-macos", "ios", "build")
+        for name in ("cpp-tests-macos", "ios", "build", "windows-cross")
     },
     "versions": {
         "xcode": xcode, "clang": clang, "ios_sdk": ios_sdk,
         "simulator_runtime": sim_rt, "cmake": cmake, "ninja": ninja,
-        "launcher_jvm": jvm,
+        "launcher_jvm": jvm, "mingw_w64_gcc": mingw,
     },
     "total_seconds": total,
     "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
