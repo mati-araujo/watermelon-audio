@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  REQ-055 S3 — entitlements MINIMOS del .app de la espiga bajo hardened runtime.
+
+  Sólo lo que la JVM necesita para compilar (JIT de HotSpot). Lo que deliberadamente
+  NO está, contra el default de Compose/jpackage:
+    - com.apple.security.cs.disable-library-validation: el dylib del motor viaja
+      DENTRO del bundle firmado con la misma identidad, así que library validation
+      tiene que aceptarlo sin apagarla (ADR-0009 §4, D12);
+    - com.apple.security.device.audio-input: la espiga sólo hace salida;
+    - allow-dyld-environment-variables / debugger: no hacen falta para correr.
+  allow-unsigned-executable-memory se agrega sólo si la medición muestra que HotSpot
+  lo exige (ver el reporte de S3).
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+</dict>
+</plist>
