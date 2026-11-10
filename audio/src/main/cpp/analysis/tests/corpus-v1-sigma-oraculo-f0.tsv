@@ -1,0 +1,23 @@
+# sigma del oraculo corto de f0 por clase y fase (REQ-058 S1, D50). Generado por
+#   python3 scripts/corpus-oracle-sigma.py corpus-v1-oraculo-corto-f0.tsv
+# procedimiento: ver el docstring del script. fase 'ataque' = (0,25, 1] s desde el primer ataque del
+# oraculo, y vale tambien para (0, 0,25]; 'asentada' = > 1 s. n = segundas diferencias usadas.
+# clase	fase	n	sigma_or_c
+bajo-acustico	asentada	196	0.0561
+bajo-acustico	ataque	60	0.1060
+bajo-dedos	asentada	304	0.0479
+bajo-dedos	ataque	60	0.3454
+bajo-fretless	asentada	302	0.1449
+bajo-fretless	ataque	64	0.4701
+bajo-pua	asentada	309	0.0728
+bajo-pua	ataque	62	0.2717
+guitarra-acero	asentada	369	3.1033
+guitarra-acero	ataque	90	2.0449
+guitarra-jazz	asentada	398	0.0185
+guitarra-jazz	ataque	92	0.0310
+guitarra-limpia	asentada	441	0.0379
+guitarra-limpia	ataque	93	0.1159
+guitarra-nylon	asentada	374	0.0314
+guitarra-nylon	ataque	91	0.5864
+ukelele	asentada	108	0.0107
+ukelele	ataque	61	0.1348

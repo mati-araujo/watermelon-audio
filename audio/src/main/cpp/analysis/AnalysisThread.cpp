@@ -1,4 +1,5 @@
 #include "AnalysisThread.h"
+#include "TunerInputDump.h"
 
 #include <algorithm>
 #include <chrono>
@@ -13,6 +14,10 @@ constexpr float kSilenceFloor = 0.001f;
 /// Cada cuanto vuelve a mirar el ring cuando no habia nada. 5 ms es holgado
 /// contra los ~170 ms que el ring aguanta antes de pisar.
 constexpr auto kIdleNap = std::chrono::milliseconds(5);
+/// Cuanto espera el control a que el lazo aplique un armado/desarmado del volcado. Con el lazo
+/// girando se aplica en una vuelta (~5 ms): llegar al techo es un hilo trabado, no una demora.
+constexpr auto kDumpMailboxCeiling = std::chrono::seconds(2);
+constexpr auto kDumpMailboxPoll = std::chrono::milliseconds(1);
 }  // namespace
 
 void AnalysisThread::start(int captureSampleRate) {
@@ -26,7 +31,35 @@ void AnalysisThread::start(int captureSampleRate) {
     if (captureSampleRate > 0 && mRing.captureRate() <= 0) {
         mRing.setCaptureRate(captureSampleRate);
     }
+    // Un afinador parado y vuelto a arrancar con una toma viva EMPALMA dos tramos: mientras
+    // estuvo parado nadie escribio al ring, y el cursor del volcado seguiria como si nada. Una
+    // toma que todavia no recibio frames no tiene nada que empalmar (armar el volcado antes de
+    // arrancar el afinador es el orden natural).
+    if (mDump != nullptr && mDump->framesQueued() > 0) mDump->noteInputDiscontinuity();
     mThread = std::thread([this] { drainLoop(); });
+}
+
+bool AnalysisThread::setInputDump(TunerInputDump* dump) noexcept {
+    if (!mRunning.load(std::memory_order_acquire)) {
+        // Parado, el lazo no corre: se aplica aca. Un pedido que quedo sin aplicar (techo vencido)
+        // deja de valer, o el proximo `start()` armaria un volcado que el control ya cerro.
+        mDumpSeenSeq = mDumpRequestSeq.load(std::memory_order_acquire);
+        applyInputDump(dump);
+        return true;
+    }
+    mDumpRequest.store(dump, std::memory_order_release);
+    const uint64_t seq = mDumpRequestSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const auto deadline = std::chrono::steady_clock::now() + kDumpMailboxCeiling;
+    while (mDumpAppliedSeq.load(std::memory_order_acquire) < seq) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(kDumpMailboxPoll);
+    }
+    return true;
+}
+
+void AnalysisThread::applyInputDump(TunerInputDump* dump) noexcept {
+    mDump = dump;
+    if (dump != nullptr) dump->armAtRing(mRing);
 }
 
 void AnalysisThread::stop() {
@@ -63,6 +96,17 @@ void AnalysisThread::drainLoop() {
 AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
     const float nan = std::numeric_limits<float>::quiet_NaN();
     {
+        // --- diagnostico: el buzon del volcado (REQ-055 S0) -------------------
+        //
+        // Sin toma armada esto es UN load atomico por vuelta. Va al tope, antes que todo lo
+        // demas, para que lo escrito despues del armado entre completo en la toma.
+        const uint64_t dumpSeq = mDumpRequestSeq.load(std::memory_order_acquire);
+        if (dumpSeq != mDumpSeenSeq) {
+            mDumpSeenSeq = dumpSeq;
+            applyInputDump(mDumpRequest.load(std::memory_order_acquire));
+            mDumpAppliedSeq.store(dumpSeq, std::memory_order_release);
+        }
+
         // --- la configuracion se mira ANTES de drenar ------------------------
         //
         // El orden no es cosmetico: al cambiar el objetivo hay que descartar lo
@@ -88,7 +132,11 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
         // siguiera acumulando fase entre dos señales distintas publicaria un
         // numero perfectamente formado que no mide nada.
         if (mSourceChanged.exchange(false, std::memory_order_acq_rel)) {
+            // El ring ve contiguos los frames de las dos fuentes: solo el volcado puede avisar
+            // que el WAV mezclaria dos senales bajo un solo header.
+            if (mDump != nullptr) mDump->noteInputDiscontinuity();
             mRing.skipToNewest();
+            resetTick();
             mStrobe.reset();
             mDetector.reset();
             mFastMode.reset();
@@ -116,6 +164,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             mStrobe.prepare(rate);
             mDetector.prepare(rate);
             mPreparedRate = rate;
+            resetTick();
             mAppliedTarget = 0.0;      // `prepare()` reinicia: hay que re-aplicar
             mLastUserTarget = -1.0;
         }
@@ -136,10 +185,18 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // de leerlo deja al analisis sin ver un solo frame — ni el rate de captura se
             // publicaria. Es un rojo MEDIDO, no una precaucion (AC-030.4).
             if (target > 0.0) mRing.skipToNewest();
+            resetTick();   // la rejilla del strobe arranca con el objetivo: el tick, tambien
         }
         const bool measuring = mPreparedRate > 0 && mAppliedTarget > 0.0;
 
-        const int got = mRing.read(mScratch.data(), kDrainFrames);
+        // El volcado copia del ring con su PROPIO cursor, ANTES de que el analisis lo toque: los
+        // `skipToNewest()` de arriba descartan lo que el estimador no debe ver, no lo que el
+        // microfono entrego. No toca mRead/mDropped/mTorn ni mScratch.
+        if (mDump != nullptr) mDump->captureFromRing(mRing, rate);
+
+        // Nunca mas de lo que falta para cerrar el tick (REQ-057): el corte del tick es de AUDIO,
+        // no del bloque con que llego.
+        const int got = mRing.read(mScratch.data(), kTickFrames - mTickFill);
         mTicks.fetch_add(1, std::memory_order_relaxed);
 
         // --- REQ-009 S2 · LA GUARDA: el Δ de frames pisados, no el acumulado ---
@@ -263,6 +320,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // este contador viene a cerrar.
             if (!mStrobe.sawInputDiscontinuity()) ++mDiscontinuityCount;
             mStrobe.noteInputDiscontinuity();
+            resetTick();
         }
 
         // 🔴 EL BLOQUE DE ESTA VUELTA SE DESCARTA, Y SOLO POR EL EJE DE CAPTURA.
@@ -297,12 +355,10 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             return DrainOutcome::kSkipped;
         }
 
-        double sumSq = 0.0;
         for (int i = 0; i < got; ++i) {
             const double v = mScratch[static_cast<size_t>(i)];
-            sumSq += v * v;
+            mTickSumSq += v * v;
         }
-        const float rms = static_cast<float>(std::sqrt(sumSq / got));
         mFramesAnalyzed += static_cast<uint64_t>(got);
 
         // Se lee POR TICK, no una vez: es lo unico que hace que un cambio de
@@ -324,7 +380,8 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // El `bool` que devuelve NO se descarta: dice si esta pasada produjo un
             // veredicto NUEVO. La compuerta de ausencia lo necesita para no contar la
             // misma evidencia una vez por bloque leido (REQ-019.2).
-            mFreshPitchVerdict = mDetector.process(mScratch.data(), got);
+            const bool freshThisRead = mDetector.process(mScratch.data(), got);
+            mTickFreshVerdict = mTickFreshVerdict || freshThisRead;
 
             // REQ-031 S1 — la sonda de soporte espectral come el MISMO bloque que el
             // detector, y se evalua SOLO cuando el detector produjo un veredicto nuevo: es
@@ -332,7 +389,7 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             // Entre veredictos la altura no cambia, asi que su soporte tampoco — y por eso la
             // bandera no puede parpadear mas rapido que el propio detector.
             mSupportProbe.pushMono(mScratch.data(), got);
-            if (mFreshPitchVerdict) {
+            if (freshThisRead) {
                 if (!mDetector.hasPitch()) {
                     mSupportDb = std::numeric_limits<double>::quiet_NaN();
                 } else if (mSupportProbe.isPrimed()) {
@@ -350,13 +407,28 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
             mStrobe.process(mScratch.data(), got);
         }
 
+        // --- el tick (REQ-057, D31) -------------------------------------------
+        //
+        // Hasta aca el audio se integro; lo que DECIDE espera a tener un tick entero. Con menos de
+        // 1024 frames nada se publica: el snapshot sale cada 1024 frames de audio, con el rms de
+        // esos 1024 (antes, el de lo que hubiera en el drenado).
+        mTickFill += got;
+        if (mTickFill < kTickFrames) return DrainOutcome::kAccumulated;
+        const float rms = static_cast<float>(std::sqrt(mTickSumSq / kTickFrames));
+        mFreshPitchVerdict = mTickFreshVerdict;
+        const bool tickFreshVerdict = mTickFreshVerdict;
+        resetTick();
+
         // --- el modo rapido elige el objetivo, si hay candidatos --------------
         //
         // Aca se cierra el hueco que quedaba desde S4: el motor publicaba que
         // nota suena, pero convertir eso en "la cuerda que el musico quiso" y
         // empujarla como objetivo lo tenia que hacer el consumidor. Con la lista
         // de cuerdas puesta, lo hace el motor.
-        if (mPreparedRate > 0 && mFastMode.candidateCount() > 0) {
+        //
+        // Solo en un tick con veredicto grueso NUEVO (REQ-057): sin dato nuevo no hay evidencia
+        // nueva que contar, y el modo rapido no puede depender de cuantas vueltas dio el lazo.
+        if (mPreparedRate > 0 && mFastMode.candidateCount() > 0 && tickFreshVerdict) {
             mFastMode.update(mDetector.hasPitch() ? mDetector.frequencyHz() : 0.0,
                              mDetector.clarity());
             const double picked = mFastMode.lockedTargetHz();
@@ -364,7 +436,9 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
                 mTargetAppliedByFastMode.bump();
                 mStrobe.setTarget(picked);
                 mAppliedTarget = picked;
-                mRing.skipToNewest();
+                // SIN `skipToNewest()` (REQ-057): lo que queda en el ring ya es audio de la cuerda
+                // NUEVA, y tirarlo hacia depender el arranque del bloque del llamador. El strobe
+                // arranca su rejilla en el proximo frame, igual que el tick (ya reiniciado).
             }
         }
 
@@ -526,7 +600,11 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
         } else if (!haveReading) {
             state = kStateMeasuring;       // integrando, todavia sin pendiente
         } else {
-            state = mStrobe.uncertaintyCents() <= kConvergedUncertaintyCents
+            // REQ-058 (AC-058.6, D45): `CONVERGED` sale SOLO del camino del veredicto (R-PITCH-62, 12
+            // ventanas). Una lectura temprana es `MEASURING` aunque su σ sea ≤ 0,1 —una sintesis limpia
+            // la tiene a 0,5 s—: el estado derivado solo de σ publicaba 164 `CONVERGED` antes de 1 s
+            // sobre los glides de REQ-036 (prototipo; lo mata `States.NoConvergedBeforeTheVerdictOnGlides`).
+            state = (!mStrobe.readingIsEarly() && mStrobe.uncertaintyCents() <= kConvergedUncertaintyCents)
                         ? kStateConverged
                         : kStateMeasuring;
         }
@@ -556,7 +634,10 @@ AnalysisThread::DrainOutcome AnalysisThread::drainOnce() {
 
         // La inarmonicidad se lee de lo que el strobe YA calculo: cuatro fases
         // que discrepan entre si son, literalmente, la rigidez de la cuerda.
-        const bool haveB = haveReading && mInharmonicity.estimateFrom(mStrobe);
+        // REQ-058 (D-2): B sale SOLO del camino del veredicto. Los `partialCents` que lee
+        // `estimateFrom` son los de la rejilla 0, que antes del veredicto no son los que publico la
+        // lectura temprana: mezclar las dos fuentes daria un B de otra medicion.
+        const bool haveB = haveReading && !mStrobe.readingIsEarly() && mInharmonicity.estimateFrom(mStrobe);
         values[kSnapInharmonicityB] = haveB ? static_cast<float>(mInharmonicity.b()) : nan;
         values[kSnapInharmonicityMeasured] = haveB ? 1.0f : 0.0f;
 

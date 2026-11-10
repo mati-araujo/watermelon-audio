@@ -575,7 +575,14 @@ TEST(SpectralSupport, AC0315_WithoutAPublishedPitchTheGateDoesNotAct) {
     bool sinAltura = false;
     for (int bloque = 0; bloque < 4 && !sinAltura; ++bloque) {
         ring.writeStereo(ruido.data(), AnalysisThread::kDrainFrames);
-        ASSERT_EQ(analysis.drainOnce(), AnalysisThread::DrainOutcome::kPublished);
+        // REQ-057 (D31): un drainOnce() consume a lo sumo UN tick (1024 frames) y publica al cerrarlo;
+        // el bloque de 2048 son dos. Se drena el bloque entero y se afirma lo mismo que antes —que
+        // publico—, ahora una vez por tick.
+        int publicaciones = 0;
+        for (auto o = analysis.drainOnce(); o != AnalysisThread::DrainOutcome::kRingEmpty; o = analysis.drainOnce()) {
+            if (o == AnalysisThread::DrainOutcome::kPublished) ++publicaciones;
+        }
+        ASSERT_EQ(publicaciones, AnalysisThread::kDrainFrames / AnalysisThread::kTickFrames);
         ASSERT_TRUE(snapshot.read(v));
         sinAltura = v[kSnapDetectedHz] == 0.0f;
     }

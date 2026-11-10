@@ -1,7 +1,11 @@
 # Cobertura C API vs JNI — WA-0.1
 
 **Requerimiento:** `docs/kmp/kmp_requirements.md` § 5, WA-0.1
-**Actualizado:** 2026-09-17 (recuento contra el árbol tras REQ-043 S2). De este refresh, el REQ
+**Actualizado:** 2026-10-27: §3 re-medido contra el árbol tras REQ-055 S11 (307/282/219 → 336/293/227;
+el REQ aporta 11 JNI de la canción programada —5 `nativeSong*` vivas y 6 `nativeOfflineSong*`—
+y 5 `wma_song_*`; el resto es drift desde el 2026-09-17). El detalle de §4 en adelante NO se
+re-midió y conserva la salida de 2026-09-17: para el detalle, `python3 scripts/c-api-gap.py --markdown`.
+Refresh anterior: 2026-09-17 (recuento contra el árbol tras REQ-043 S2). De este refresh, el REQ
 aporta **+2/+2/+2** (305/280/217 → 307/282/219: `wma_looper_analyze_pitch` y
 `wma_looper_get_level_envelope`, con su JNI del mismo nombre, cubiertas por match exacto; el
 C API había subido en S1 y este doc no se re-midió hasta S2). El refresh anterior (2026-09-15,
@@ -67,28 +71,29 @@ existentes desde siempre— e inflaban el neto en ~14%. Se corrigió al cerrar
 
 | Métrica | Valor |
 |---|---|
-| JNIEXPORT (entry points) | 307 |
-| Funciones `wma_*` | 282 |
-| Cubiertas (match exacto) | 219 |
-| **Gap total** | **88** |
+| JNIEXPORT (entry points) | 336 |
+| Funciones `wma_*` | 293 |
+| Cubiertas (match exacto) | 227 |
+| **Gap total** | **109** |
 | — USB, no se porta (D4) | 32 |
-| — **Gap portable** | **56** |
-| — con near-match (revisar) | 39 |
-| — **neto a implementar** | **~17** |
+| — **Gap portable** | **77** |
+| — con near-match (revisar) | 42 |
+| — **neto a implementar** | **~35** |
 
 ### Gap portable por categoría
 
 | Categoría | Funciones |
 |---|---|
+| Otros | 17 |
 | Input / monitor | 12 |
-| Otros | 8 |
-| Engine / lifecycle | 8 |
-| Analysis | 7 |
-| Looper | 7 |
-| Voice / polyphony | 6 |
-| Oscillator / synth | 4 |
+| Engine / lifecycle | 9 |
+| Analysis | 9 |
+| Voice / polyphony | 8 |
+| Looper | 8 |
+| Oscillator / synth | 5 |
+| Effects | 4 |
 | Benchmark / diagnostics | 3 |
-| Effects | 1 |
+| Mixer / Regions | 2 |
 
 ---
 

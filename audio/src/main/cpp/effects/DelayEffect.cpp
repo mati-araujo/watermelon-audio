@@ -5,7 +5,7 @@
 #include <cmath>
 
 namespace {
-constexpr int MAX_DELAY_SAMPLES = 96000 * 2;
+constexpr int MAX_DELAY_SAMPLES = DelayEffect::kMaxDelaySamples;
 constexpr float DENORMAL_THRESHOLD = 1e-20f;
 }
 
@@ -150,4 +150,8 @@ void DelayEffect::updateDelaySamples() {
     }
     newDelaySamples = std::clamp(newDelaySamples, 1.0f, static_cast<float>(MAX_DELAY_SAMPLES - 3));
     delaySamplesTarget.store(newDelaySamples, std::memory_order_release);
+}
+
+void DelayEffect::snapDelayTimeToTarget() {
+    delaySamplesSmoother.reset(delaySamplesTarget.load(std::memory_order_relaxed));
 }

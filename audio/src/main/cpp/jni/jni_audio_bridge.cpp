@@ -39,10 +39,13 @@
 #include "../voice/VoiceTypes.h"
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <memory>
+#include <string>
+#include <cstring>
 #include <vector>
 
 #if WMA_JNI_USB
@@ -50,6 +53,85 @@
 extern "C" float getUsbOutputVolumeInternal();
 extern "C" float getUsbInputVolumeInternal();
 #endif
+
+// ==================== Cancion programada (REQ-055 S11): marshaling ====================
+//
+// Lo que NO es una llamada a la C API vive aca: validar y COPIAR los arrays del llamador
+// a memoria propia ANTES de cruzar. Nada de `GetPrimitiveArrayCritical` ni de pins
+// vivos durante `wma_song_*`: set_schedule publica una agenda de hasta 1024 secciones y
+// load_clip decodifica un archivo, y ambas pueden tardar. La llamada a `wma_song_*` queda
+// en cada JNIEXPORT (no aca) para que `check-jni-results.py` y `check-jni-preinit.py`
+// las vean donde las miran.
+namespace {
+
+// Serializa load/unload/set_schedule del motor VIVO. Es de la cancion y de control: NUNCA
+// `engineMutex`, que un load que decodifica un WAV dejaria tomado. El handle offline usa
+// su `opMutex`; los dos modelos no comparten ninguno. En el heap y sin destructor, como
+// `offlineRegistry()`: lo pueden alcanzar hilos de la JVM durante el exit().
+std::mutex& liveSongMutex() {
+    static std::mutex* const m = new std::mutex();
+    return *m;
+}
+
+// starts.size == n, clips.size == n * 16, n <= 1024. Un largo que no cierra se rechaza
+// SIN cruzar: la C API no puede saber cuantos int32 hay detras de un puntero.
+WmaResult readSongSchedule(JNIEnv* env, jlongArray starts, jintArray clips,
+                           std::vector<WmaSongSection>& out) {
+    if (starts == nullptr || clips == nullptr) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    const jsize n = env->GetArrayLength(starts);
+    const jsize m = env->GetArrayLength(clips);
+    if (n < 0 || n > WMA_SONG_MAX_SECTIONS) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    if (static_cast<int64_t>(m) != static_cast<int64_t>(n) * WMA_SONG_MAX_TRACKS) {
+        return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    }
+    try {
+        std::vector<jlong> s(static_cast<size_t>(n));
+        std::vector<jint> c(static_cast<size_t>(m));
+        if (n > 0) {
+            env->GetLongArrayRegion(starts, 0, n, s.data());
+            env->GetIntArrayRegion(clips, 0, m, c.data());
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                return WMA_ERROR_UNKNOWN;
+            }
+        }
+        out.assign(static_cast<size_t>(n), WmaSongSection{});
+        for (jsize k = 0; k < n; ++k) {
+            out[static_cast<size_t>(k)].start_frame = s[static_cast<size_t>(k)];
+            for (int t = 0; t < WMA_SONG_MAX_TRACKS; ++t) {
+                out[static_cast<size_t>(k)].clip[t] =
+                    c[static_cast<size_t>(k) * WMA_SONG_MAX_TRACKS + static_cast<size_t>(t)];
+            }
+        }
+    } catch (...) {
+        return WMA_ERROR_MEMORY;
+    }
+    return WMA_OK;
+}
+
+// La ruta a std::string y el jstring liberado ANTES de decodificar.
+WmaResult readSongPath(JNIEnv* env, jstring path, std::string& out) {
+    if (path == nullptr) return WMA_ERROR_PARAMETER_OUT_OF_RANGE;
+    ScopedUtfChars chars(env, path);
+    if (!chars.isValid()) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return WMA_ERROR_MEMORY;
+    }
+    try {
+        out.assign(chars.c_str());
+    } catch (...) {
+        return WMA_ERROR_MEMORY;
+    }
+    return WMA_OK;
+}
+
+// El id va en outId[0] SOLO si la carga salio bien; un array ausente o vacio se rechaza
+// antes de decodificar (no se paga una decodificacion para no poder devolver el id).
+bool songOutIdUsable(JNIEnv* env, jintArray outId) {
+    return outId != nullptr && env->GetArrayLength(outId) >= 1;
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -1304,6 +1386,68 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeAnalyz
     if (result == nullptr) return nullptr;
     env->SetFloatArrayRegion(result, 0, WMA_TUNER_SNAPSHOT_VALUES, values);
     return result;
+}
+
+// ---- Diagnostico, sin contrato (REQ-055 S0) ---------------------------------
+// El volcado a WAV de lo que el afinador ve. Sin mutex propio, igual que la intonacion: la C API
+// serializa con `analysisMutex`. NO crea el motor ni arranca el afinador (sin afinador corriendo no
+// entra audio): sin motor, `start` es false y `stop` es null.
+
+/// El path llega como los bytes UTF-8 REALES (`String.encodeToByteArray()` en Kotlin), no como
+/// `jstring`: `GetStringUTFChars` da UTF-8 *modificado*, que parte un caracter fuera del BMP en dos
+/// surrogates de 3 bytes y codifica U+0000 como C0 80, y el archivo quedaria con otro nombre
+/// (hallazgo 3). El string se arma con el LARGO del array; un byte 0 adentro se rechaza, porque C lo
+/// leeria como fin y grabaria en el prefijo.
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerDiagInputDumpStart(
+    JNIEnv* env, jobject thiz, jbyteArray pathUtf8) {
+    (void)thiz;
+    if (pathUtf8 == nullptr) return JNI_FALSE;
+    const jsize len = env->GetArrayLength(pathUtf8);
+    if (len <= 0) return JNI_FALSE;
+    try {   // una excepcion de C++ no puede cruzar la frontera JNI
+        std::string path(static_cast<size_t>(len), '\0');
+        env->GetByteArrayRegion(pathUtf8, 0, len, reinterpret_cast<jbyte*>(path.data()));
+        if (path.find('\0') != std::string::npos) return JNI_FALSE;
+        const bool ok = wma_tuner_diag_input_dump_start(g_wmaEngine, path.c_str());
+        return ok ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
+/// Cierra la toma, llena `values` (WMA_TUNER_DUMP_STATS_VALUES) y devuelve los bytes UTF-8 del
+/// archivo que la toma DEJO en disco, segun el nativo (bug A de REQ-055 S0: el puente no lo
+/// reconstruye con el path que pidio). null (y `values` sin tocar) sin toma, sin motor o con un
+/// `values` de otro largo: un cero es un dato plausible, ver MINI-003. Sin memoria despues de
+/// cerrar (el `NewByteArray`) tambien da null, con la toma ya cerrada y `values` escrito.
+JNIEXPORT jbyteArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeTunerDiagInputDumpStop(
+    JNIEnv* env, jobject thiz, jlongArray values) {
+    (void)thiz;
+    if (values == nullptr || env->GetArrayLength(values) != WMA_TUNER_DUMP_STATS_VALUES) {
+        return nullptr;
+    }
+    try {   // una excepcion de C++ no puede cruzar la frontera JNI
+        // Se reserva ANTES de cerrar la toma: un bad_alloc despues la perderia sin informarla.
+        std::vector<char> path(WMA_TUNER_DUMP_PATH_CAPACITY, '\0');
+        int64_t stats[WMA_TUNER_DUMP_STATS_VALUES];
+        if (!wma_tuner_diag_input_dump_stop(g_wmaEngine, stats, WMA_TUNER_DUMP_STATS_VALUES,
+                                            path.data(), WMA_TUNER_DUMP_PATH_CAPACITY)) {
+            return nullptr;
+        }
+        // `jlong` no es `int64_t` en todas las ABIs (long long contra long): se copia, no se castea.
+        jlong out[WMA_TUNER_DUMP_STATS_VALUES];
+        for (int i = 0; i < WMA_TUNER_DUMP_STATS_VALUES; ++i) out[i] = static_cast<jlong>(stats[i]);
+        env->SetLongArrayRegion(values, 0, WMA_TUNER_DUMP_STATS_VALUES, out);
+        const jsize len = static_cast<jsize>(std::strlen(path.data()));
+        jbyteArray result = env->NewByteArray(len);
+        if (result == nullptr) return nullptr;
+        env->SetByteArrayRegion(result, 0, len, reinterpret_cast<const jbyte*>(path.data()));
+        return result;
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 JNIEXPORT void JNICALL
@@ -2903,6 +3047,43 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeLooper
     return result;
 }
 
+// REQ-055 S15 — onsets sobre un buffer del llamador (`wma_detect_onsets`), sin motor ni handle.
+// Devuelve los onsets escritos (>= 0) o un WmaResult negativo. Los tamanos se validan ANTES de
+// multiplicar (`frames * 2` en 64 bits contra el largo REAL del array) y la capacidad de salida es
+// el largo del array de salida, nunca un entero aparte: no se escribe fuera de `out`. La entrada
+// se lee sin copiar de vuelta (JNI_ABORT) y sin tener el array "critico": el analisis dura mas
+// que lo que una seccion critica admite.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeDetectOnsets(
+    JNIEnv* env, jobject thiz, jfloatArray stereo, jint frames, jint sampleRate, jint hopFrames,
+    jfloat sensitivity, jintArray out) {
+    if (stereo == nullptr || out == nullptr || frames <= 0 ||
+        static_cast<int64_t>(env->GetArrayLength(stereo)) < static_cast<int64_t>(frames) * 2) {
+        return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    }
+    const jsize capacity = env->GetArrayLength(out);
+    if (capacity <= 0) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    static_assert(sizeof(jint) == sizeof(int), "onset buffer is reinterpreted as int*");
+    std::vector<jint> onsets;
+    try {
+        onsets.assign(static_cast<size_t>(capacity), 0);
+    } catch (...) {
+        return static_cast<jint>(WMA_ERROR_MEMORY);
+    }
+    jfloat* samples = env->GetFloatArrayElements(stereo, nullptr);
+    if (samples == nullptr) {
+        // GetFloatArrayElements deja un OutOfMemoryError pendiente: se limpia para que Kotlin reciba
+        // el WMA_ERROR_MEMORY del contrato (`Result.failure`) y no la excepcion cruda.
+        env->ExceptionClear();
+        return static_cast<jint>(WMA_ERROR_MEMORY);
+    }
+    const int n = wma_detect_onsets(samples, frames, sampleRate, reinterpret_cast<int*>(onsets.data()),
+                                    capacity, hopFrames, sensitivity);
+    env->ReleaseFloatArrayElements(stereo, samples, JNI_ABORT);
+    if (n > 0) env->SetIntArrayRegion(out, 0, n, onsets.data());
+    return static_cast<jint>(n);
+}
+
 // REQ-043 (WV-3.2) — la serie de pitch de una pista, offline. Kotlin llama DOS veces:
 // primero con los tres arrays en null para que `outHopFrames[0]` traiga el hop real y
 // pueda dimensionar por la cota `(loopEnd - loopStart) / hop + 1`; después con los
@@ -3827,6 +4008,156 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetLog
     return static_cast<jint>(wma_log_capture_dropped());
 }
 
+// ==================== Cancion programada, motor VIVO (REQ-055 S11) ====================
+//
+// Ver docs/dev/cancion-programada.md. load/unload/set_schedule van bajo el mutex PROPIO de
+// la cancion (`liveSongMutex`), no bajo `engineMutex`. Las lecturas no crean el motor:
+// antes del init contestan lo que la C API declara (-1 / 0).
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSongLoadClip(
+    JNIEnv* env, jobject thiz, jstring path, jint sampleRate, jlong regionStart,
+    jlong regionEnd, jlong loopFrames, jintArray outId) {
+    if (!ensureEngine()) return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
+    if (!songOutIdUsable(env, outId)) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    std::string file;
+    const WmaResult read = readSongPath(env, path, file);
+    if (read != WMA_OK) return static_cast<jint>(read);
+    std::lock_guard<std::mutex> guard(liveSongMutex());
+    int32_t id = -1;
+    const WmaResult r = wma_song_load_clip(g_wmaEngine, file.c_str(), sampleRate,
+                                           regionStart, regionEnd, loopFrames, &id);
+    if (r == WMA_OK) {
+        const jint out = id;
+        env->SetIntArrayRegion(outId, 0, 1, &out);
+    }
+    return static_cast<jint>(r);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSongUnloadClip(
+    JNIEnv* env, jobject thiz, jint id) {
+    if (!ensureEngine()) return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
+    std::lock_guard<std::mutex> guard(liveSongMutex());
+    return static_cast<jint>(wma_song_unload_clip(g_wmaEngine, id));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSongSetSchedule(
+    JNIEnv* env, jobject thiz, jlong loopFrames, jlongArray starts, jintArray clips,
+    jlong endFrame) {
+    if (!ensureEngine()) return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
+    std::vector<WmaSongSection> sections;
+    const WmaResult read = readSongSchedule(env, starts, clips, sections);
+    if (read != WMA_OK) return static_cast<jint>(read);
+    std::lock_guard<std::mutex> guard(liveSongMutex());
+    return static_cast<jint>(wma_song_set_schedule(
+        g_wmaEngine, loopFrames, sections.data(), static_cast<int32_t>(sections.size()),
+        endFrame));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSongGetSection(
+    JNIEnv* env, jobject thiz) {
+    return wma_song_get_section(g_wmaEngine);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeSongGetLateAdoptions(
+    JNIEnv* env, jobject thiz) {
+    return static_cast<jlong>(wma_song_get_late_adoptions(g_wmaEngine));
+}
+
+} // extern "C"
+
+// ==================== Mezcla propia de la cancion, motor VIVO (REQ-055 S12) ====================
+//
+// Ver docs/dev/mezcla-y-master.md. Son stores atomicos del lado nativo (y la creacion perezosa
+// del bus, con su propio mutex): no toman `engineMutex` ni el mutex de la cancion. Los arrays de
+// espacio y master se leen COMPLETOS a la pila antes de cruzar; uno nulo o de otro largo da
+// PARAMETER_OUT_OF_RANGE sin tocar nada. Lo mismo que hace el handle, abajo.
+
+namespace {
+
+constexpr jsize kSpaceFloats = 10;   // el orden de WmaMixSpace
+constexpr jsize kMasterFloats = 3;   // el orden de WmaMixMaster
+
+/// Copia exactamente `count` floats de `array`. Falso (y `out` intacto) si es null o de otro largo.
+bool readExactFloats(JNIEnv* env, jfloatArray array, jsize count, float* out) {
+    if (array == nullptr || env->GetArrayLength(array) != count) return false;
+    env->GetFloatArrayRegion(array, 0, count, out);
+    return env->ExceptionCheck() == JNI_FALSE;
+}
+
+bool toSpace(JNIEnv* env, jfloatArray array, WmaMixSpace& out) {
+    float v[kSpaceFloats];
+    if (!readExactFloats(env, array, kSpaceFloats, v)) return false;
+    out = WmaMixSpace{v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9]};
+    return true;
+}
+
+bool toMaster(JNIEnv* env, jfloatArray array, WmaMixMaster& out) {
+    float v[kMasterFloats];
+    if (!readExactFloats(env, array, kMasterFloats, v)) return false;
+    out = WmaMixMaster{v[0], v[1], v[2]};
+    return true;
+}
+
+/// El perfil entra como jint: se valida ANTES de convertirlo al enum (un valor fuera de rango no
+/// es un `WmaOutputProfile`).
+bool toProfile(jint raw, WmaOutputProfile& out) {
+    if (raw < WMA_OUTPUT_PROTECTED || raw > WMA_OUTPUT_RAW) return false;
+    out = static_cast<WmaOutputProfile>(raw);
+    return true;
+}
+
+constexpr jint kMixOutOfRange = static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+
+}  // namespace
+
+extern "C" {
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeMixSetTrack(
+    JNIEnv* env, jobject thiz, jint track, jfloat gain, jfloat pan, jfloat send) {
+    if (!ensureEngine()) return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
+    return static_cast<jint>(wma_mix_set_track(g_wmaEngine, track, gain, pan, send));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeMixSetSpace(
+    JNIEnv* env, jobject thiz, jfloatArray space) {
+    if (!ensureEngine()) return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
+    WmaMixSpace s;
+    if (!toSpace(env, space, s)) return kMixOutOfRange;
+    return static_cast<jint>(wma_mix_set_space(g_wmaEngine, &s));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeMixSetMaster(
+    JNIEnv* env, jobject thiz, jfloatArray master) {
+    if (!ensureEngine()) return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
+    WmaMixMaster m;
+    if (!toMaster(env, master, m)) return kMixOutOfRange;
+    return static_cast<jint>(wma_mix_set_master(g_wmaEngine, &m));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeMixSetOutputProfile(
+    JNIEnv* env, jobject thiz, jint profile) {
+    if (!ensureEngine()) return static_cast<jint>(WMA_ERROR_NOT_INITIALIZED);
+    WmaOutputProfile p;
+    if (!toProfile(profile, p)) return kMixOutOfRange;
+    return static_cast<jint>(wma_mix_set_output_profile(g_wmaEngine, p));
+}
+
+// Una lectura: no crea el motor (antes del init contesta 0, como la C API).
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeGetXRunCount(
+    JNIEnv* env, jobject thiz) {
+    return static_cast<jint>(wma_get_xrun_count(g_wmaEngine));
+}
+
 } // extern "C"
 
 // ==================== Offline render by handle (REQ-055 S2, ADR-0008) ====================
@@ -3867,6 +4198,11 @@ struct OfflineSlot {
     WmaEngine* const engine;
     std::mutex opMutex;            // toda operacion de esta instancia (ver arriba)
     std::vector<float> scratch;    // destino del render antes de copiar al FloatArray
+    std::vector<float> tapScratch; // idem para los taps: [premezcla | FX | pista 0 | ...]
+    // Pista mas alta con clip en CUALQUIER agenda publicada con exito desde el ultimo start, +1
+    // (0 = ninguna). Solo sube entre starts: el RT adopta una agenda mas chica en el bloque
+    // siguiente y deja una cola de fundido en la pista vieja. Bajo `opMutex`.
+    int songTracksInUse = 0;
 };
 
 // En el HEAP y NUNCA destruido, igual que `g_wmaEngine`: un static con destructor
@@ -3895,7 +4231,10 @@ constexpr jint kOfflineUnknownHandle = static_cast<jint>(WMA_ERROR_NOT_INITIALIZ
 
 }  // namespace
 
+void releaseMasterHandles();   // abajo: el registro del procesador de master
+
 void releaseOfflineHandles() {
+    releaseMasterHandles();
     std::unordered_map<jlong, std::shared_ptr<OfflineSlot>> drained;
     {
         auto& reg = offlineRegistry();
@@ -3962,6 +4301,7 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflin
     slot->scratch.clear();   // un start fallido no deja un render "arrancado"
     const WmaResult r = wma_offline_start(slot->engine, sampleRate, maxBlockFrames);
     if (r == WMA_OK) {
+        slot->songTracksInUse = 0;   // el start apaga la agenda (resetSongForRender)
         try {
             slot->scratch.assign(static_cast<size_t>(maxBlockFrames) * 2, 0.0f);
         } catch (...) {
@@ -4147,6 +4487,499 @@ Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflin
     if (!slot) return kOfflineUnknownHandle;
     std::lock_guard<std::mutex> op(slot->opMutex);
     return static_cast<jint>(wma_effect_set_param(slot->engine, index, paramId, value));
+}
+
+// --- Re-render de tomas (REQ-055 S15): el resto de la configuracion del motor por handle, en el
+// mismo patron. Donde la C API descarta en silencio un valor fuera de rango (los `void`), la
+// instancia offline lo RECHAZA tipado: el re-render es un export, y un valor ignorado se oiria
+// como una toma distinta sin que nadie lo sepa. Un float no finito tampoco pasa (el clamp de
+// std::clamp deja pasar un NaN hasta el Transport y los efectos). Nada de esto toca `g_wmaEngine`.
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetOscillatorType(
+    JNIEnv* env, jobject thiz, jlong handle, jint typeId) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (typeId < 0 || typeId > 4) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    wma_set_oscillator_type(slot->engine, typeId);
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetModulatorType(
+    JNIEnv* env, jobject thiz, jlong handle, jint typeId) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_set_modulator_type(slot->engine, typeId));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetFrequencyRange(
+    JNIEnv* env, jobject thiz, jlong handle, jfloat minHz, jfloat maxHz) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (!std::isfinite(minHz) || !std::isfinite(maxHz) || maxHz <= minHz) {
+        return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    }
+    wma_set_frequency_range(slot->engine, minHz, maxHz);
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetBpm(
+    JNIEnv* env, jobject thiz, jlong handle, jfloat bpm) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (!std::isfinite(bpm)) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    wma_set_bpm(slot->engine, bpm);   // el motor recorta a 20..300
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetEffectBypass(
+    JNIEnv* env, jobject thiz, jlong handle, jint index, jboolean bypass) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_effect_set_bypass(slot->engine, index, bypass == JNI_TRUE));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetRoutingMode(
+    JNIEnv* env, jobject thiz, jlong handle, jint mode) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (mode < 0 || mode > 5) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    wma_set_routing_mode(slot->engine, mode);
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetParallelMix(
+    JNIEnv* env, jobject thiz, jlong handle, jfloat mix) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (!std::isfinite(mix)) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    wma_set_parallel_mix(slot->engine, mix);   // el motor recorta a 0..1
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSetFeedbackAmount(
+    JNIEnv* env, jobject thiz, jlong handle, jfloat amount) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (!std::isfinite(amount)) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    wma_set_feedback_amount(slot->engine, amount);   // el motor recorta a 0..0,95
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSfSetTouchExpression(
+    JNIEnv* env, jobject thiz, jlong handle, jint touchId, jfloat expression) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (!std::isfinite(expression)) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    wma_sf_set_touch_expression(slot->engine, touchId, expression);   // touch fuera de rango: lo ignora la C API
+    return static_cast<jint>(WMA_OK);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSfNoteOffAll(
+    JNIEnv* env, jobject thiz, jlong handle) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    wma_sf_note_off_all(slot->engine);
+    return static_cast<jint>(WMA_OK);
+}
+
+// Las dos consultas del font de la instancia: la misma forma que las del vivo (IntArray de 2, o
+// null sin font / indice invalido). Un handle desconocido tambien da null.
+JNIEXPORT jintArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineGetSoundFontPresetKeyRange(
+    JNIEnv* env, jobject thiz, jlong handle, jint presetIndex) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return nullptr;
+    int minKey = 0, maxKey = 127;
+    {
+        std::lock_guard<std::mutex> op(slot->opMutex);
+        if (!wma_sf_get_preset_key_range(slot->engine, presetIndex, &minKey, &maxKey)) return nullptr;
+    }
+    jintArray result = env->NewIntArray(2);
+    if (!result) return nullptr;
+    jint buf[2] = { minKey, maxKey };
+    env->SetIntArrayRegion(result, 0, 2, buf);
+    return result;
+}
+
+JNIEXPORT jintArray JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineGetSoundFontPresetBankProgram(
+    JNIEnv* env, jobject thiz, jlong handle, jint presetIndex) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return nullptr;
+    int bank = -1, program = -1;
+    {
+        std::lock_guard<std::mutex> op(slot->opMutex);
+        if (!wma_sf_get_preset_bank_program(slot->engine, presetIndex, &bank, &program)) return nullptr;
+    }
+    jintArray result = env->NewIntArray(2);
+    if (!result) return nullptr;
+    jint buf[2] = { bank, program };
+    env->SetIntArrayRegion(result, 0, 2, buf);
+    return result;
+}
+
+// Capacidades del looper de la instancia (REQ-055 S12b): el presupuesto de clips y las pistas
+// activas. Como la C API, 0 deja el valor como estaba; a diferencia de ella, lo que no cabe (o
+// dejaria sin pista a la agenda de la cancion) no se recorta en silencio: se rechaza sin aplicar
+// nada. maxFreeSeconds no se cruza (no hay tomas libres).
+constexpr int kLooperTracksHw = 16;   // AudioLooper::MAX_TRACKS_HW
+// 64 GiB, o lo que cabe en size_t donde es de 32 bits: una cota de cordura, no un presupuesto.
+constexpr uint64_t kLooperBudgetCeiling =
+    std::min<uint64_t>(std::numeric_limits<size_t>::max(), uint64_t{1} << 36);
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineLooperSetCapabilities(
+    JNIEnv* env, jobject thiz, jlong handle, jlong budgetBytes, jint maxTracks) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    // El cast a sin signo manda un presupuesto negativo por encima del techo.
+    if (static_cast<uint64_t>(budgetBytes) > kLooperBudgetCeiling ||
+        maxTracks < 0 || maxTracks > kLooperTracksHw) {
+        return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    }
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    // El recorte del looper mira sus tomas, no las voces de la cancion: bajar las pistas por
+    // debajo de alguna usada desde el ultimo start las apagaria sin avisar (o cortaria su cola
+    // de fundido). 0 deja el valor, no baja nada.
+    if (maxTracks > 0 && maxTracks < slot->songTracksInUse) {
+        return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    }
+    wma_looper_set_capabilities(slot->engine, budgetBytes, maxTracks, 0);
+    return static_cast<jint>(WMA_OK);
+}
+
+// --- Cancion programada por handle (REQ-055 S11): 1:1 con las nativeSong* del vivo, por el
+// registro y el `opMutex` de la instancia. Nunca leen `g_wmaEngine` ni `liveSongMutex()`.
+// Un load decodifica con el `opMutex` tomado: en este handle espera al render, que es lo
+// que se quiere (el start invalida clips; ver el orden en docs/dev/cancion-programada.md).
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongLoadClip(
+    JNIEnv* env, jobject thiz, jlong handle, jstring path, jint sampleRate, jlong regionStart,
+    jlong regionEnd, jlong loopFrames, jintArray outId) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    if (!songOutIdUsable(env, outId)) return static_cast<jint>(WMA_ERROR_PARAMETER_OUT_OF_RANGE);
+    std::string file;
+    const WmaResult read = readSongPath(env, path, file);
+    if (read != WMA_OK) return static_cast<jint>(read);
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    int32_t id = -1;
+    const WmaResult r = wma_song_load_clip(slot->engine, file.c_str(), sampleRate,
+                                           regionStart, regionEnd, loopFrames, &id);
+    if (r == WMA_OK) {
+        const jint out = id;
+        env->SetIntArrayRegion(outId, 0, 1, &out);
+    }
+    return static_cast<jint>(r);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongUnloadClip(
+    JNIEnv* env, jobject thiz, jlong handle, jint id) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_song_unload_clip(slot->engine, id));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongSetSchedule(
+    JNIEnv* env, jobject thiz, jlong handle, jlong loopFrames, jlongArray starts,
+    jintArray clips, jlong endFrame) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::vector<WmaSongSection> sections;
+    const WmaResult read = readSongSchedule(env, starts, clips, sections);
+    if (read != WMA_OK) return static_cast<jint>(read);
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    const WmaResult r = wma_song_set_schedule(
+        slot->engine, loopFrames, sections.data(), static_cast<int32_t>(sections.size()),
+        endFrame);
+    if (r == WMA_OK) {
+        int highest = slot->songTracksInUse;
+        for (const WmaSongSection& sec : sections) {
+            for (int t = highest; t < WMA_SONG_MAX_TRACKS; ++t) {
+                if (sec.clip[t] != WMA_SONG_SILENCE) highest = t + 1;
+            }
+        }
+        slot->songTracksInUse = highest;
+    }
+    return static_cast<jint>(r);
+}
+
+// Las tres lecturas devuelven el default de "no hay nada" (-1 / 0 / -1) ante un handle
+// desconocido; el dueño Kotlin (OfflineRenderer) ni siquiera cruza con un handle cerrado.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongGetSection(
+    JNIEnv* env, jobject thiz, jlong handle) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return -1;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return wma_song_get_section(slot->engine);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongGetLateAdoptions(
+    JNIEnv* env, jobject thiz, jlong handle) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return 0;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jlong>(wma_song_get_late_adoptions(slot->engine));
+}
+
+// El ancla de la agenda: `P0` tras `nativeOfflineStart`. El play frame NO se reinicia.
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineSongGetPlayFrame(
+    JNIEnv* env, jobject thiz, jlong handle) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return -1;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jlong>(wma_transport_get_play_frame(slot->engine));
+}
+
+} // extern "C"
+
+// ==================== Mezcla, taps y master por handle (REQ-055 S12, ADR-0013) ====================
+//
+// Las del handle siguen el modelo de arriba (registro de ids, `opMutex`, nunca `g_wmaEngine`).
+// El PROCESADOR DE MASTER es otro handle con su propio registro: un `WmaMaster*` tampoco cruza
+// como puntero crudo (un id que no se reusa; uno desconocido o ya destruido da NOT_INITIALIZED y
+// nunca toca memoria). Cada uno tiene su mutex: no es thread-safe por si mismo.
+
+namespace {
+
+struct MasterSlot {
+    explicit MasterSlot(WmaMaster* m) : master(m) {}
+    ~MasterSlot() { wma_master_destroy(master); }
+    MasterSlot(const MasterSlot&) = delete;
+    MasterSlot& operator=(const MasterSlot&) = delete;
+
+    WmaMaster* const master;
+    std::mutex opMutex;
+    std::vector<float> scratch;   // el bloque en proceso; crece a lo sumo al mayor pedido
+};
+
+// En el HEAP y nunca destruido, como el registro offline (ver arriba); lo vacia JNI_OnUnload.
+struct MasterRegistry {
+    std::mutex mutex;
+    std::unordered_map<jlong, std::shared_ptr<MasterSlot>> slots;
+    jlong nextHandle = 1;
+};
+
+MasterRegistry& masterRegistry() {
+    static MasterRegistry* const registry = new MasterRegistry();
+    return *registry;
+}
+
+std::shared_ptr<MasterSlot> masterSlot(jlong id) {
+    auto& reg = masterRegistry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    auto it = reg.slots.find(id);
+    return it == reg.slots.end() ? nullptr : it->second;
+}
+
+}  // namespace
+
+void releaseMasterHandles() {
+    std::unordered_map<jlong, std::shared_ptr<MasterSlot>> drained;
+    auto& reg = masterRegistry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    drained.swap(reg.slots);
+}
+
+extern "C" {
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineMixSetTrack(
+    JNIEnv* env, jobject thiz, jlong handle, jint track, jfloat gain, jfloat pan, jfloat send) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_mix_set_track(slot->engine, track, gain, pan, send));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineMixSetSpace(
+    JNIEnv* env, jobject thiz, jlong handle, jfloatArray space) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    WmaMixSpace s;
+    if (!toSpace(env, space, s)) return kMixOutOfRange;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_mix_set_space(slot->engine, &s));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineMixSetMaster(
+    JNIEnv* env, jobject thiz, jlong handle, jfloatArray master) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    WmaMixMaster m;
+    if (!toMaster(env, master, m)) return kMixOutOfRange;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_mix_set_master(slot->engine, &m));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineMixSetOutputProfile(
+    JNIEnv* env, jobject thiz, jlong handle, jint profile) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    WmaOutputProfile p;
+    if (!toProfile(profile, p)) return kMixOutOfRange;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_mix_set_output_profile(slot->engine, p));
+}
+
+// Los taps de una pasada en UN FloatArray: [premezcla | FX | pista 0 | ... | pista N-1], cada
+// region `frames * 2` floats (estereo intercalado). El tamano se valida ANTES de renderizar y de
+// escribir: un array corto da PARAMETER_OUT_OF_RANGE y el motor no avanza ni un bloque.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeOfflineRenderTaps(
+    JNIEnv* env, jobject thiz, jlong handle, jfloatArray out, jint frames, jint trackCount) {
+    auto slot = offlineSlot(handle);
+    if (!slot) return kOfflineUnknownHandle;
+    constexpr jint kMaxOfflineBlockFrames = 4096;   // el de wma_offline_start
+    if (out == nullptr || frames <= 0 || frames > kMaxOfflineBlockFrames || trackCount < 0 ||
+        trackCount > AudioLooper::MAX_TRACKS_HW) {
+        return kMixOutOfRange;
+    }
+    // 64 bits: frames <= 4096 y trackCount <= 16 no desbordan, pero el producto se hace ancho.
+    const int64_t block = static_cast<int64_t>(frames) * 2;
+    const int64_t needed = block * (2 + static_cast<int64_t>(trackCount));
+    if (static_cast<int64_t>(env->GetArrayLength(out)) < needed) return kMixOutOfRange;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (slot->scratch.empty()) return static_cast<jint>(WMA_ERROR_INVALID_OPERATION);
+    if (slot->tapScratch.size() < static_cast<size_t>(needed)) {
+        try {
+            slot->tapScratch.assign(static_cast<size_t>(needed), 0.0f);
+        } catch (...) {
+            return static_cast<jint>(WMA_ERROR_MEMORY);
+        }
+    }
+    float* base = slot->tapScratch.data();
+    const WmaResult r = wma_offline_render_taps(
+        slot->engine, base, base + block, trackCount > 0 ? base + 2 * block : nullptr, trackCount,
+        frames);
+    if (r == WMA_OK) {
+        env->SetFloatArrayRegion(out, 0, static_cast<jsize>(needed), base);
+    }
+    return static_cast<jint>(r);
+}
+
+// ---- Procesador de master por id ----
+
+JNIEXPORT jlong JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeMasterCreate(
+    JNIEnv* env, jobject thiz, jint sampleRate) {
+    WmaMaster* master = wma_master_create(sampleRate);
+    if (!master) return 0;
+    std::shared_ptr<MasterSlot> slot;
+    try {
+        slot = std::make_shared<MasterSlot>(master);
+    } catch (...) {
+        wma_master_destroy(master);
+        return 0;
+    }
+    auto& reg = masterRegistry();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    const jlong id = reg.nextHandle++;
+    reg.slots.emplace(id, std::move(slot));
+    return id;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeMasterConfigure(
+    JNIEnv* env, jobject thiz, jlong id, jfloatArray params) {
+    auto slot = masterSlot(id);
+    if (!slot) return kOfflineUnknownHandle;
+    WmaMixMaster m;
+    if (!toMaster(env, params, m)) return kMixOutOfRange;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_master_configure(slot->master, &m));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeMasterReset(
+    JNIEnv* env, jobject thiz, jlong id) {
+    auto slot = masterSlot(id);
+    if (!slot) return kOfflineUnknownHandle;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_master_reset(slot->master));
+}
+
+// En el lugar: el bloque se copia a un scratch, se procesa y se copia de vuelta. El tamano del
+// array se valida ANTES de tocarlo, y `frames` se acota ANTES de multiplicar.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeMasterProcess(
+    JNIEnv* env, jobject thiz, jlong id, jfloatArray buffer, jint frames) {
+    auto slot = masterSlot(id);
+    if (!slot) return kOfflineUnknownHandle;
+    if (buffer == nullptr || frames <= 0 || frames > WMA_MASTER_MAX_FRAMES) return kMixOutOfRange;
+    const jsize needed = static_cast<jsize>(frames) * 2;
+    if (env->GetArrayLength(buffer) < needed) return kMixOutOfRange;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    if (slot->scratch.size() < static_cast<size_t>(needed)) {
+        try {
+            slot->scratch.assign(static_cast<size_t>(needed), 0.0f);
+        } catch (...) {
+            return static_cast<jint>(WMA_ERROR_MEMORY);
+        }
+    }
+    env->GetFloatArrayRegion(buffer, 0, needed, slot->scratch.data());
+    if (env->ExceptionCheck() == JNI_TRUE) return static_cast<jint>(WMA_ERROR_UNKNOWN);
+    const WmaResult r = wma_master_process(slot->master, slot->scratch.data(), frames);
+    if (r == WMA_OK) {
+        env->SetFloatArrayRegion(buffer, 0, needed, slot->scratch.data());
+    }
+    return static_cast<jint>(r);
+}
+
+// Una lectura: un id desconocido da 0, como la C API para NULL.
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeMasterLatency(
+    JNIEnv* env, jobject thiz, jlong id) {
+    auto slot = masterSlot(id);
+    if (!slot) return 0;
+    std::lock_guard<std::mutex> op(slot->opMutex);
+    return static_cast<jint>(wma_master_get_latency_frames(slot->master));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_AudioNativeBridge_nativeMasterDestroy(
+    JNIEnv* env, jobject thiz, jlong id) {
+    std::shared_ptr<MasterSlot> slot;
+    {
+        auto& reg = masterRegistry();
+        std::lock_guard<std::mutex> lock(reg.mutex);
+        auto it = reg.slots.find(id);
+        if (it == reg.slots.end()) return kOfflineUnknownHandle;
+        slot = std::move(it->second);
+        reg.slots.erase(it);
+    }
+    // El slot se destruye aca (o en el hilo que lo este procesando, al soltar su referencia).
+    return static_cast<jint>(WMA_OK);
 }
 
 } // extern "C"

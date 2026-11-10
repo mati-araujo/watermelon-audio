@@ -1,5 +1,6 @@
 #include "PhaseSlopeEstimator.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace wma::analysis {
@@ -45,6 +46,57 @@ bool regressPhaseLine(const double* y, int n, double* slope, double* intercept, 
     return true;
 }
 
+/**
+ * REQ-058 (D-3) — la regresion con pendiente COMUN e intercepto por segmento (`ids[i]` el segmento de la
+ * fase i). Con un solo segmento delega en `regressPhaseLine`, asi que el resultado es bit a bit el de
+ * siempre. @return false si no hay dispersion en x dentro de los segmentos o no quedan grados de libertad.
+ */
+bool regressSegmentedPhaseLine(const double* y, const unsigned char* ids, int n, double* slope, double* slopeStdErr) {
+    bool single = true;
+    for (int i = 1; i < n; ++i) single = single && ids[i] == ids[0];
+    if (single) {
+        double intercept = 0.0;
+        return regressPhaseLine(y, n, slope, &intercept, slopeStdErr);
+    }
+    // Por segmento: n_s, Σx, Σy. Los ids son a lo sumo 256 distintos; se recorren en orden de aparicion.
+    double sxx = 0.0, sxy = 0.0;
+    int segments = 0;
+    bool seen[256] = {};
+    for (int i = 0; i < n; ++i) {
+        const unsigned char id = ids[i];
+        if (seen[id]) continue;
+        seen[id] = true;
+        ++segments;
+        double cnt = 0.0, sx = 0.0, sy = 0.0;
+        for (int j = i; j < n; ++j)
+            if (ids[j] == id) { cnt += 1.0; sx += j; sy += y[j]; }
+        const double xm = sx / cnt, ym = sy / cnt;
+        for (int j = i; j < n; ++j)
+            if (ids[j] == id) { sxx += (j - xm) * (j - xm); sxy += (j - xm) * (y[j] - ym); }
+    }
+    if (sxx <= 0.0) return false;
+    *slope = sxy / sxx;
+    double sse = 0.0;
+    for (int k = 0; k < 256; ++k) seen[k] = false;
+    for (int i = 0; i < n; ++i) {
+        const unsigned char id = ids[i];
+        if (seen[id]) continue;
+        seen[id] = true;
+        double cnt = 0.0, sx = 0.0, sy = 0.0;
+        for (int j = i; j < n; ++j)
+            if (ids[j] == id) { cnt += 1.0; sx += j; sy += y[j]; }
+        const double xm = sx / cnt, ym = sy / cnt;
+        for (int j = i; j < n; ++j)
+            if (ids[j] == id) {
+                const double r = y[j] - (ym + *slope * (j - xm));
+                sse += r * r;
+            }
+    }
+    const int dof = n - segments - 1;
+    *slopeStdErr = dof > 0 ? std::sqrt(sse / static_cast<double>(dof) / sxx) : 0.0;
+    return true;
+}
+
 }  // namespace
 
 void PhaseSlopeEstimator::prepare(int sampleRate) {
@@ -57,6 +109,7 @@ void PhaseSlopeEstimator::prepare(int sampleRate) {
             0.5 - 0.5 * std::cos(2.0 * M_PI * i / static_cast<double>(kWindowFrames));
     }
     mPhases.assign(static_cast<size_t>(kMaxWindows), 0.0);
+    mUnresolved.assign(static_cast<size_t>(kMaxWindows), 0);
 
     reset();
 }
@@ -69,10 +122,12 @@ void PhaseSlopeEstimator::setTarget(double targetHz) {
         // Ver la nota de `mRefAdvance` en el header: sin esto se mide la fase
         // del objetivo, que no dice nada, en vez de la deriva contra el.
         mRefAdvance = std::fmod(mOmega * static_cast<double>(kWindowFrames), 2.0 * M_PI);
+        mRefHop = std::fmod(mOmega * static_cast<double>(kHopFrames), 2.0 * M_PI);
     } else {
         mOmega = 0.0;
         mCoeff = 0.0;
         mRefAdvance = 0.0;
+        mRefHop = 0.0;
     }
     // La fase acumulada contra el objetivo VIEJO no dice nada del nuevo: seguir
     // integrando sobre ella daria una pendiente que mezcla dos mediciones.
@@ -96,6 +151,12 @@ void PhaseSlopeEstimator::reset() {
     mHasSignal = false;
     mHasMeasurement = false;
     mWindowsTotal = 0;
+    mCtxValid = false;
+    mLastCloseProducedPhase = false;
+    mTurnsAdded = 0;
+    mLastCoherenceSpread = -1.0;
+    std::fill(mUnresolved.begin(), mUnresolved.end(), static_cast<unsigned char>(0));
+    mSegmentId = 0;
 }
 
 bool PhaseSlopeEstimator::process(const float* mono, int numFrames) {
@@ -155,12 +216,18 @@ void PhaseSlopeEstimator::closeWindow() {
         // consumidor que `cents()` es viejo: la lectura anterior no se borra,
         // pero tampoco se presenta como actual.
         mHavePrevPhase = false;   // el hilo de fase se corto
+        mLastCloseProducedPhase = false;
+        mLastCoherenceSpread = -1.0;
+        mCtxValid = false;        // un cierre silencioso invalida la cadena densa
         mCount = 0;
         mHasMeasurement = false;
         return;
     }
 
     const double raw = std::atan2(imag, real);
+    mLastCloseProducedPhase = true;
+    mLastCoherenceSpread = -1.0;
+    bool unresolved = false;
 
     if (!mHavePrevPhase) {
         mUnwrapped = raw;
@@ -179,9 +246,47 @@ void PhaseSlopeEstimator::closeWindow() {
         double d = (raw - mLastRawPhase) - mRefAdvance;
         while (d > M_PI) d -= 2.0 * M_PI;
         while (d < -M_PI) d += 2.0 * M_PI;
+        if (mCtxValid) {
+            // REQ-057 (D-A): el cuarto incremento cierra la cadena de cinco cierres densos. Si la
+            // suma de los cuatro (cada uno acotado a ±π por su propio pliegue) difiere de `d` en
+            // vueltas enteras, esas vueltas son las que el pliegue de 4096 no pudo ver.
+            double e[4] = {mCtxPrior[0], mCtxPrior[1], mCtxPrior[2], (raw - mCtxPrevRaw) - mRefHop};
+            while (e[3] > M_PI) e[3] -= 2.0 * M_PI;
+            while (e[3] < -M_PI) e[3] += 2.0 * M_PI;
+            const double turns = std::round((e[0] + e[1] + e[2] + e[3] - d) / (2.0 * M_PI));
+            if (!std::isfinite(turns)) {
+                // Un Inf en el audio (o un objetivo Inf) da `raw` NaN: `NaN != 0` es true y la guarda de
+                // coherencia no lo frena (`std::max(worst, NaN)` devuelve `worst`), asi que sin esto se
+                // convertia NaN a int, que es UB. Sin vuelta que sumar, el incremento queda sin resolver.
+                unresolved = true;
+            } else if (turns != 0.0) {
+                // Mediana de 4 = promedio de los dos centrales, sin ordenar un array: el minimo y el
+                // maximo salen de la suma menos los extremos.
+                double lo = e[0], hi = e[0];
+                for (int j = 1; j < 4; ++j) { lo = std::min(lo, e[j]); hi = std::max(hi, e[j]); }
+                const double median = 0.5 * (e[0] + e[1] + e[2] + e[3] - lo - hi);
+                double worst = 0.0;
+                for (int j = 0; j < 4; ++j) {
+                    double dev = e[j] - median;
+                    while (dev > M_PI) dev -= 2.0 * M_PI;
+                    while (dev < -M_PI) dev += 2.0 * M_PI;
+                    worst = std::max(worst, std::fabs(dev));
+                }
+                mLastCoherenceSpread = worst;
+                if (worst < kDenseCoherenceMaxRad) {
+                    d += 2.0 * M_PI * turns;
+                    mTurnsAdded += static_cast<int>(std::fabs(turns));
+                } else {
+                    unresolved = true;
+                }
+            }
+        } else {
+            unresolved = true;
+        }
         mUnwrapped += d;
         mLastRawPhase = raw;
     }
+    mCtxValid = false;   // el contexto vale para UN cierre
 
     // El angulo que consume el strobe es la fase de la DESAFINACION acumulada,
     // envuelta a ±π — no la fase cruda del Goertzel.
@@ -196,12 +301,18 @@ void PhaseSlopeEstimator::closeWindow() {
 
     // --- ventana deslizante de fases ----------------------------------------
     if (mCount < kMaxWindows) {
+        mUnresolved[static_cast<size_t>(mCount)] = unresolved ? 1 : 0;
+        mPhaseSegment[mCount] = mSegmentId;
         mPhases[static_cast<size_t>(mCount++)] = mUnwrapped;
     } else {
         for (int i = 1; i < kMaxWindows; ++i) {
             mPhases[static_cast<size_t>(i - 1)] = mPhases[static_cast<size_t>(i)];
+            mUnresolved[static_cast<size_t>(i - 1)] = mUnresolved[static_cast<size_t>(i)];
+            mPhaseSegment[i - 1] = mPhaseSegment[i];
         }
         mPhases[static_cast<size_t>(kMaxWindows - 1)] = mUnwrapped;
+        mUnresolved[static_cast<size_t>(kMaxWindows - 1)] = unresolved ? 1 : 0;
+        mPhaseSegment[kMaxWindows - 1] = mSegmentId;
     }
 
     regressOverWindow();
@@ -216,8 +327,9 @@ void PhaseSlopeEstimator::regressOverWindow() {
 
     // --- regresion lineal: fase contra indice de ventana ---------------------
     const int n = mCount;
-    double slope = 0.0, intercept = 0.0, slopeStdErr = 0.0;
-    if (!regressPhaseLine(mPhases.data(), n, &slope, &intercept, &slopeStdErr)) {
+    double slope = 0.0, slopeStdErr = 0.0;
+    // REQ-058 (D-3): con un solo segmento, `regressPhaseLine` de siempre; con varios, pendiente comun.
+    if (!regressSegmentedPhaseLine(mPhases.data(), mPhaseSegment, n, &slope, &slopeStdErr)) {
         mHasMeasurement = false;
         mTrendEvaluable = false;
         return;
@@ -242,9 +354,9 @@ void PhaseSlopeEstimator::regressOverWindow() {
     mTrendEvaluable = false;
     if (n >= kMinWindowsForTrendVerdict) {
         const int mid = n / 2;
-        double s1 = 0.0, i1 = 0.0, e1 = 0.0, s2 = 0.0, i2 = 0.0, e2 = 0.0;
-        if (regressPhaseLine(mPhases.data(), mid, &s1, &i1, &e1) &&
-            regressPhaseLine(mPhases.data() + mid, n - mid, &s2, &i2, &e2)) {
+        double s1 = 0.0, e1 = 0.0, s2 = 0.0, e2 = 0.0;
+        if (regressSegmentedPhaseLine(mPhases.data(), mPhaseSegment, mid, &s1, &e1) &&
+            regressSegmentedPhaseLine(mPhases.data() + mid, mPhaseSegment + mid, n - mid, &s2, &e2)) {
             const double diff = s2 - s1;
             const double se = std::sqrt(e1 * e1 + e2 * e2);
             mTrendScore = se > 0.0 ? diff / se : (diff == 0.0 ? 0.0 : 1e300);
@@ -255,14 +367,277 @@ void PhaseSlopeEstimator::regressOverWindow() {
 }
 
 void PhaseSlopeEstimator::restartKeepingNewestHalf() {
+    restartKeepingNewestPhases(mCount - mCount / 2);
+}
+
+void PhaseSlopeEstimator::restartKeepingNewestPhases(int keepWanted) {
     if (mCount <= 0) return;
-    const int keep = mCount - mCount / 2;
+    const int keep = std::clamp(keepWanted, 0, mCount);
     const int from = mCount - keep;
     for (int i = 0; i < keep; ++i) {
         mPhases[static_cast<size_t>(i)] = mPhases[static_cast<size_t>(from + i)];
+        mUnresolved[static_cast<size_t>(i)] = mUnresolved[static_cast<size_t>(from + i)];
+        mPhaseSegment[i] = mPhaseSegment[from + i];
     }
     mCount = keep;
     regressOverWindow();
+}
+
+template <typename Keep>
+void PhaseSlopeEstimator::compactPhases(Keep keep) {
+    int kept = 0;
+    for (int i = 0; i < mCount; ++i) {
+        if (!keep(i)) continue;
+        mPhases[static_cast<size_t>(kept)] = mPhases[static_cast<size_t>(i)];
+        mUnresolved[static_cast<size_t>(kept)] = mUnresolved[static_cast<size_t>(i)];
+        mPhaseSegment[kept] = mPhaseSegment[i];
+        ++kept;
+    }
+    if (kept == mCount) return;
+    mCount = kept;
+    regressOverWindow();
+}
+
+int PhaseSlopeEstimator::regressionSegmentCount() const noexcept {
+    int segments = 0;
+    for (int i = 0; i < mCount; ++i) {
+        bool first = true;
+        for (int j = 0; j < i && first; ++j) first = mPhaseSegment[j] != mPhaseSegment[i];
+        segments += first ? 1 : 0;
+    }
+    return segments;
+}
+
+void PhaseSlopeEstimator::dropNewestPhase() {
+    if (mCount <= 0) return;
+    const int last = mCount - 1;
+    compactPhases([last](int i) { return i != last; });
+}
+
+void PhaseSlopeEstimator::keepOnlyPhasesOfSegment(unsigned char id) {
+    compactPhases([this, id](int i) { return mPhaseSegment[i] == id; });
+}
+
+void PhaseSlopeEstimator::dropPhasesOfSegment(unsigned char id) {
+    compactPhases([this, id](int i) { return mPhaseSegment[i] != id; });
+}
+
+// ---------------------------------------------------------------------------
+// REQ-057 S1 — InterleavedPhaseEstimator
+// ---------------------------------------------------------------------------
+
+namespace {
+double wrapToPi(double x) {
+    while (x > M_PI) x -= 2.0 * M_PI;
+    while (x < -M_PI) x += 2.0 * M_PI;
+    return x;
+}
+}  // namespace
+
+InterleavedPhaseEstimator::DenseEarlyFit InterleavedPhaseEstimator::fitDensePhases(const double* phases, int count,
+                                                                                   int sampleRate,
+                                                                                   double targetHz) noexcept {
+    DenseEarlyFit f;
+    const int n = std::min(count, kEarlyWindow);
+    if (phases == nullptr || n < kEarlyMinPhases || sampleRate <= 0 || targetHz <= 0.0) return f;
+    const double* y = phases + (count - n);
+    // Abscisas centradas: Σu = 0 y Σu·(u² − ū²) = 0, asi que las tres columnas son ortogonales y cada
+    // coeficiente sale de su propia suma. `b` es a la vez el lineal del cuadratico y la pendiente de
+    // la recta sola.
+    const double half = 0.5 * static_cast<double>(n - 1);
+    double su2 = 0.0, ym = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double u = static_cast<double>(i) - half;
+        su2 += u * u;
+        ym += y[i];
+    }
+    ym /= static_cast<double>(n);
+    const double u2m = su2 / static_cast<double>(n);
+    double suy = 0.0, sv2 = 0.0, svy = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double u = static_cast<double>(i) - half;
+        const double v = u * u - u2m;
+        suy += u * (y[i] - ym);
+        sv2 += v * v;
+        svy += v * (y[i] - ym);
+    }
+    const double b = suy / su2;
+    const double c = sv2 > 0.0 ? svy / sv2 : 0.0;
+    double rss = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double u = static_cast<double>(i) - half;
+        const double r = y[i] - (ym + b * u + c * (u * u - u2m));
+        rss += r * r;
+    }
+    const double s2 = rss / static_cast<double>(n - 3);
+    const int fi = n - 4;   // n en [kEarlyMinPhases, kEarlyWindow] = [5, 8]
+    const double seB = std::sqrt(s2 / su2) * kOverlapSlopeFactor[fi];
+    const double seC = sv2 > 0.0 ? std::sqrt(s2 / sv2) * kOverlapCurvatureFactor[fi] : 0.0;
+    const double hzPerRad = static_cast<double>(sampleRate) / (2.0 * M_PI * static_cast<double>(kHopFrames));
+    const double centsPerHz = 1200.0 / (std::log(2.0) * targetHz);
+    const double span = static_cast<double>(n - 1);
+    f.n = n;
+    f.cents = 1200.0 * std::log2(1.0 + b * hzPerRad / targetHz);
+    f.sigmaCents = std::fabs(seB * hzPerRad * centsPerHz);
+    f.driftCents = c * span * hzPerRad * centsPerHz;
+    f.driftSigmaCents = std::fabs(seC * span * hzPerRad * centsPerHz);
+    if (!std::isfinite(f.cents) || !std::isfinite(f.sigmaCents) || !std::isfinite(f.driftCents) ||
+        !std::isfinite(f.driftSigmaCents)) {
+        return DenseEarlyFit{};   // NaN/Inf en el audio: no hay ajuste, no una lectura inventada
+    }
+    return f;
+}
+
+void InterleavedPhaseEstimator::clearDenseSeries() noexcept {
+    mDenseCount = 0;
+    mDenseHavePrev = false;
+    mDensePrevRaw = 0.0;
+    mEarlyFit = DenseEarlyFit{};
+}
+
+void InterleavedPhaseEstimator::openDenseSegmentAt(int64_t startFrame) noexcept {
+    clearDenseSeries();
+    mDenseSegmentStart = startFrame;
+}
+
+void InterleavedPhaseEstimator::pushDensePhase(const PhaseSlopeEstimator& closing, int64_t windowStart) noexcept {
+    if (!closing.lastCloseProducedPhase()) {   // silencio: el hilo de fase se corto
+        clearDenseSeries();
+        return;
+    }
+    if (windowStart < mDenseSegmentStart) return;   // la ventana empezo antes del segmento
+    const double raw = closing.lastRawPhase();
+    double d = 0.0;
+    if (mDenseHavePrev && mDenseCount > 0) {
+        d = mDense[mDenseCount - 1] + wrapToPi(raw - mDensePrevRaw - mGrid[0].refHopAdvance());
+    }
+    if (mDenseCount == kMaxDensePhases) {
+        for (int i = 1; i < kMaxDensePhases; ++i) mDense[i - 1] = mDense[i];
+        --mDenseCount;
+    }
+    mDense[mDenseCount++] = d;
+    mDensePrevRaw = raw;
+    mDenseHavePrev = true;
+    mEarlyFit = fitDensePhases(mDense, mDenseCount, mSampleRate, mTargetHz);
+    mEarlyFit.binToRmsRatio = closing.goertzelBinToRmsRatio();
+}
+
+void InterleavedPhaseEstimator::openPhaseSegment(int64_t startFrame, unsigned char id) {
+    constexpr int64_t kWindow = PhaseSlopeEstimator::kWindowFrames;
+    for (int g = 0; g < kGrids; ++g) {
+        const int64_t s = mNewestWindowStart[g];
+        if (mGrid[g].regressionPhaseCount() > 0 && s >= 0 && s < startFrame && s > startFrame - kWindow) {
+            mGrid[g].dropNewestPhase();
+        }
+        mGrid[g].setPhaseSegment(id);
+    }
+    mRejectWindowsBefore = startFrame;
+}
+
+void InterleavedPhaseEstimator::keepOnlyPhaseSegment(unsigned char id) {
+    for (auto& g : mGrid) g.keepOnlyPhasesOfSegment(id);
+}
+
+void InterleavedPhaseEstimator::dropPhaseSegment(unsigned char id) {
+    for (auto& g : mGrid) g.dropPhasesOfSegment(id);
+}
+
+void InterleavedPhaseEstimator::clearChain() noexcept {
+    mChainCount = 0;
+    for (int i = 0; i <= kGrids; ++i) { mChainRaw[i] = 0.0; mChainOk[i] = false; }
+}
+
+void InterleavedPhaseEstimator::pushChain(double raw, bool ok) noexcept {
+    for (int i = 0; i < kGrids; ++i) { mChainRaw[i] = mChainRaw[i + 1]; mChainOk[i] = mChainOk[i + 1]; }
+    mChainRaw[kGrids] = raw;
+    mChainOk[kGrids] = ok;
+    if (mChainCount <= kGrids) ++mChainCount;
+}
+
+void InterleavedPhaseEstimator::prepare(int sampleRate) {
+    mSampleRate = sampleRate > 0 ? sampleRate : 0;
+    mTargetHz = 0.0;
+    for (auto& g : mGrid) g.prepare(sampleRate);
+    mFrame = 0;
+    clearChain();
+    openDenseSegmentAt(0);
+    mRejectWindowsBefore = -1;
+    for (auto& w : mNewestWindowStart) w = -1;
+}
+
+void InterleavedPhaseEstimator::setTarget(double targetHz) {
+    mTargetHz = targetHz > 0.0 ? targetHz : 0.0;
+    for (auto& g : mGrid) g.setTarget(targetHz);
+    mFrame = 0;
+    clearChain();
+    openDenseSegmentAt(0);
+    mRejectWindowsBefore = -1;
+    for (auto& w : mNewestWindowStart) w = -1;
+}
+
+void InterleavedPhaseEstimator::reset() {
+    for (auto& g : mGrid) g.reset();
+    mFrame = 0;
+    clearChain();
+    openDenseSegmentAt(0);
+    mRejectWindowsBefore = -1;
+    for (auto& w : mNewestWindowStart) w = -1;
+}
+
+bool InterleavedPhaseEstimator::process(const float* mono, int numFrames) {
+    if (mono == nullptr || numFrames <= 0 || mSampleRate <= 0 || mTargetHz <= 0.0) return false;
+
+    constexpr int64_t kHop = kHopFrames;
+    constexpr int64_t kWindow = PhaseSlopeEstimator::kWindowFrames;
+    bool closedGrid0 = false;
+    int pos = 0;
+    while (pos < numFrames) {
+        // Segmentos que no cruzan un multiplo de 1024: a lo sumo una rejilla cierra, y al final.
+        const int64_t toBoundary = kHop - (mFrame % kHop);
+        const int seg = static_cast<int>(std::min<int64_t>(toBoundary, numFrames - pos));
+        const int64_t endFrame = mFrame + seg;
+        int closing = -1;
+        if (endFrame % kHop == 0 && endFrame >= kWindow) {
+            closing = static_cast<int>((endFrame / kHop - kGrids) % kGrids);
+            // Cuatro cierres anteriores mas este = la cadena de cinco. Los tres incrementos que ya
+            // estan completos se suman aca; el cuarto lo cierra la rejilla con su propio `raw`.
+            const bool valid = mChainCount >= kGrids && mChainOk[1] && mChainOk[2] && mChainOk[3] && mChainOk[4];
+            double prior[3] = {0.0, 0.0, 0.0};
+            if (valid) {
+                const double ref = mGrid[0].refHopAdvance();
+                for (int i = 1; i < kGrids; ++i) prior[i - 1] = wrapToPi(mChainRaw[i + 1] - mChainRaw[i] - ref);
+            }
+            mGrid[closing].setDenseWrapContext(valid, prior, mChainRaw[kGrids]);
+        }
+        for (int g = 0; g < kGrids; ++g) {
+            if (endFrame <= static_cast<int64_t>(g) * kHop) continue;   // la rejilla g aun no arranco
+            if (mGrid[g].process(mono + pos, seg) && g == 0) closedGrid0 = true;
+        }
+        mFrame = endFrame;
+        pos += seg;
+        if (closing >= 0) {
+            pushChain(mGrid[closing].lastRawPhase(), mGrid[closing].lastCloseProducedPhase());
+            pushDensePhase(mGrid[closing], endFrame - kWindow);   // REQ-058 (D-1)
+            // REQ-058 (D-3): una ventana que contiene el ataque del segmento vigente no entra a la regresion.
+            const int64_t start = endFrame - kWindow;
+            if (mGrid[closing].lastCloseProducedPhase()) {
+                mNewestWindowStart[closing] = start;
+                if (mRejectWindowsBefore >= 0 && start < mRejectWindowsBefore && start > mRejectWindowsBefore - kWindow) {
+                    mGrid[closing].dropNewestPhase();
+                }
+            }
+        }
+    }
+    return closedGrid0;
+}
+
+void InterleavedPhaseEstimator::restartAtBreak() {
+    const int count0 = mGrid[0].regressionPhaseCount();
+    const int keep0 = count0 - count0 / 2;
+    mGrid[0].restartKeepingNewestPhases(keep0);
+    for (int g = 1; g < kGrids; ++g) {
+        mGrid[g].restartKeepingNewestPhases(std::min(mGrid[g].regressionPhaseCount(), std::max(keep0 - 1, 0)));
+    }
 }
 
 }  // namespace wma::analysis

@@ -4,8 +4,11 @@ import com.watermellonstudios.audio.api.EffectChainSnapshot
 import com.watermellonstudios.audio.api.EffectParameterUpdate
 import com.watermellonstudios.audio.api.IAudioNativeBridge
 import com.watermellonstudios.audio.api.ILooperBridge
+import com.watermellonstudios.audio.api.ITunerDiagnostics
+import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.api.LooperStateListener
 import com.watermellonstudios.audio.api.NativeEffectSnapshot
+import com.watermellonstudios.audio.api.TunerInputDumpResult
 import com.watermellonstudios.audio.domain.effect.EffectParameter
 import com.watermellonstudios.audio.domain.effect.EffectType
 import com.watermellonstudios.audio.domain.engine.EngineParameterDef
@@ -29,6 +32,7 @@ import kotlinx.cinterop.MemScope
 import kotlinx.cinterop.cstr
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.IntVar
+import kotlinx.cinterop.LongVar
 import kotlinx.cinterop.FloatVar
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.CPointerVar
@@ -164,8 +168,10 @@ private val looperEventTrampoline = staticCFunction<Int, Int, Float, COpaquePoin
     }
 }
 
-@OptIn(ExperimentalForeignApi::class)
-internal class IosAudioBridge : IAudioNativeBridge {
+// `InternalWatermelonApi` es el opt-in del supertipo `ITunerDiagnostics` (tooling del harness). Las
+// overrides lo PROPAGAN con `@InternalWatermelonApi`: el opt-in de la clase no abre su uso (hallazgo 2).
+@OptIn(ExperimentalForeignApi::class, InternalWatermelonApi::class)
+internal class IosAudioBridge : IAudioNativeBridge, ITunerDiagnostics {
 
     private val concurrency = BridgeConcurrency()
 
@@ -666,6 +672,37 @@ internal class IosAudioBridge : IAudioNativeBridge {
     }
 
     override fun lockTunerString(index: Int): Boolean = wma_tuner_lock_string(engine, index)
+
+    // ---- Diagnóstico, sin contrato (REQ-055 S0). Mismo contrato que en Android: la C API
+    //      serializa con `analysisMutex` y el volcado no toca el stream de entrada.
+
+    @InternalWatermelonApi
+    override fun startTunerInputDump(path: String): Boolean {
+        // Hallazgo 3: cinterop convierte el `String` a `const char*` en UTF-8 (`cstr`), pero un NUL
+        // lo corta ahí y un surrogate suelto se vuelve U+FFFD: el archivo tendría otro nombre que el
+        // del resultado. Con la guarda compartida ninguno de los dos llega, y lo que cruza son
+        // exactamente los bytes de `encodeToByteArray()`. Rechazado acá, no se llama al nativo.
+        if (tunerDumpPathUtf8(path) == null) return false
+        // Sin estado de este lado (bug A de REQ-055 S0): el path del resultado lo informa el stop
+        // nativo. Recordar acá el último pedido era lo que un start rechazado podía pisar.
+        return wma_tuner_diag_input_dump_start(engine, path)
+    }
+
+    @InternalWatermelonApi
+    override fun stopTunerInputDump(): TunerInputDumpResult? = memScoped {
+        val values = allocArray<LongVar>(TunerInputDumpResult.VALUE_COUNT)
+        val path = allocArray<ByteVar>(WMA_TUNER_DUMP_PATH_CAPACITY)
+        if (!wma_tuner_diag_input_dump_stop(
+                engine, values, TunerInputDumpResult.VALUE_COUNT, path, WMA_TUNER_DUMP_PATH_CAPACITY,
+            )
+        ) {
+            return@memScoped null
+        }
+        TunerInputDumpResult.fromNative(
+            LongArray(TunerInputDumpResult.VALUE_COUNT) { values[it] },
+            path.toKString(),
+        )
+    }
 
     /**
      * El puerto offline (REQ-015 S2) — **la única `wma_tuner_*` que no recibe `engine`**.

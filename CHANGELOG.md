@@ -5,6 +5,114 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.28.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.27.0...v2.28.0) (2026-10-31)
+
+
+### Features
+
+* **offline:** superficie de re-render de tomas (REQ-055 S15) ([62bf327](https://github.com/mati-araujo/watermelon-audio/commit/62bf327e6760356633389db297c862822ca3bb35))
+* **offline:** superficie de re-render de tomas (REQ-055 S15) ([563638b](https://github.com/mati-araujo/watermelon-audio/commit/563638b327d1afcdd126784dcff9c68ca3763dda))
+
+## [2.27.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.26.0...v2.27.0) (2026-10-29)
+
+
+### Features
+
+* **api:** fábricas públicas del render offline y del master ([00bcd48](https://github.com/mati-araujo/watermelon-audio/commit/00bcd48c253dfd52476d2f43307dc7788f8b8ce3))
+* **offline:** capacidades del looper por handle offline ([6f72501](https://github.com/mati-araujo/watermelon-audio/commit/6f72501bf61d2d8e07c3449bf6648beacb135829))
+* **offline:** capacidades por handle y fabricas publicas del render ([f96a3be](https://github.com/mati-araujo/watermelon-audio/commit/f96a3be04aa763c3b162bb74d90ae8360c48fd7e))
+
+
+### Bug Fixes
+
+* **offline:** el piso de pistas de la canción sólo sube entre starts ([4bdc711](https://github.com/mati-araujo/watermelon-audio/commit/4bdc71120c52cab27e6fc57a9cfaa6cb22634fc6))
+* **offline:** rechaza bajar las pistas bajo la agenda de la cancion ([d7258a4](https://github.com/mati-araujo/watermelon-audio/commit/d7258a46cd0002fcdfb2f9173644533c47bb2acc))
+
+## [2.26.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.25.0...v2.26.0) (2026-10-29)
+
+
+### Features
+
+* **tuner:** «misma nota» con la σ de hoy, no con la publicada ([f12b107](https://github.com/mati-araujo/watermelon-audio/commit/f12b1076a57720269434ffb6140198bc48b48f5c))
+* **tuner:** lectura temprana con σ honesta antes del veredicto (REQ-058 S1) ([f2231a0](https://github.com/mati-araujo/watermelon-audio/commit/f2231a0dede1c2130760cee77138aba37f8967d6))
+
+### Nota agregada a mano — `MEASURING` ahora trae número (REQ-058)
+
+> Se agregó **después** de cortar el tag, en REQ-058 S2. Las release notes de `v2.26.0` en GitHub
+> traen los mismos avisos, copiados del PR #412.
+
+**Lo que cambia sin tocar una línea:** antes del veredicto de 12 ventanas (~1 s) `cents` salía
+`null`; desde 2.26.0 llega desde **~0,19 s de cada ataque** (mediana sobre `corpus-v1`) con su σ, en
+estado `MEASURING`. Es la **altura instantánea**, no una predicción de la asentada: durante el glide
+del ataque puede estar a varios cents de donde la cuerda termina, y su σ lo cubre. Un consumidor que
+leía *"`cents` no nulo"* como *"convergido"* tiene que mirar el estado: `CONVERGED` sigue saliendo
+sólo del veredicto con σ ≤ 0,1, y una lectura temprana puede tener σ ≤ 0,1 y seguir en `MEASURING`.
+
+**`CONVERGED` es bit a bit el de antes —valor, σ y tiempo— sólo si el ataque sale del silencio**
+(rms < 0,001) o llega antes de la primera fase, **y** no queda pendiente un re-punteo anterior sin
+asentar: es el caso del golden y de la primera pulsada de
+`corpus-v1`, cuyos pre-rolls son silencio. **Todo ataque sobre señal viva abre un segmento** y
+cambia `CONVERGED`:
+- re-puntear la misma nota: las 12 ventanas se acumulan entre segmentos y vuelve a converger antes
+  (0,369 s de mediana sobre `corpus-v1`, 39 de 41, contra ≥ 1,02 s con el reinicio);
+- girar la clavija o cambiar de nota con la cuerda sonando: el veredicto queda en espera
+  (`MEASURING`) o reinicia en el ataque, donde antes seguía publicando el `CONVERGED` viejo hasta el
+  corte por tendencia;
+- 🔴 **un punteo sobre ruido de sala** (rms ≥ 0,001, como el del teléfono): descarta en el ataque
+  las fases que antes arrastraba. **No está medido**; lo leemos del código.
+
+Las release notes de `v2.26.0` dicen *"`t_conv` idéntico"*: vale sólo para ese caso.
+
+**Con un solo parcial admitido, la σ temprana no cubre** (0 % sobre síntesis estable: es la σ
+propagada, cien veces más chica que el error), y sin ajuste estirado la lectura es la de ese parcial,
+no f0: si el admitido no es el fundamental, el sesgo es su estiramiento. Es el caso común con la
+cuerda aguda desafinada cerca de ±50 c, donde sólo un parcial cae en su rango útil.
+Es un hueco declarado en `docs/tuner/accuracy_contract.md`.
+
+**Qué NO cambia:** la C API, JNI, `AnalysisSnapshot` y la superficie de Kotlin. Una `MEASURING` del
+camino del veredicto publica una σ igual o mayor que antes, y su cobertura sigue sin llegar al 95 %
+(el otro hueco declarado).
+
+**Lo que un consumidor puede retirar:** las guardas que existían para tapar el segundo ciego tras
+cada punteo. En Tunio, la envolvente E de REQ-027 (*midiendo* sin número adentro de la envolvente
+de la gruesa) y la compuerta del tick marcado de MINI-018, una vez que las vuelva a medir sobre
+2.26.0. La tolerancia de *"afinado"* sigue siendo de la app, y con una lectura temprana tiene que
+contar con σ.
+
+**Lo PROVISIONAL:** los umbrales por cuerda, la no inflación (≤ 3,5×) y los estratos de cobertura
+por debajo del 95 % esperan al corpus de acero y al del g42. Las cifras, en
+`docs/tuner/accuracy_contract.md`.
+
+## [2.25.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.24.0...v2.25.0) (2026-10-29)
+
+
+### Features
+
+* **jni:** mezcla, taps y master por JNI y ISongMixBridge (S12 W5) ([f6cb853](https://github.com/mati-araujo/watermelon-audio/commit/f6cb85395de4239eef5e64ad4df617c7fbc6677c))
+* **studio:** mezcla de la cancion, bus Espacio, taps y master ([2c53c4e](https://github.com/mati-araujo/watermelon-audio/commit/2c53c4e552ffcd226dd87d40c785fc84020d57a7))
+
+## [2.24.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.23.0...v2.24.0) (2026-10-28)
+
+
+### Features
+
+* **tuner:** la lectura fina mide ±50 c en toda cuerda del catálogo (REQ-057 S1) ([b41a967](https://github.com/mati-araujo/watermelon-audio/commit/b41a96787f3cdfc8f8013e64185241b594ccf1bb))
+
+## [2.23.0](https://github.com/mati-araujo/watermelon-audio/compare/v2.22.1...v2.23.0) (2026-10-28)
+
+
+### Features
+
+* **looper:** API de cancion por JNI e ISongBridge ([6765777](https://github.com/mati-araujo/watermelon-audio/commit/67657775dc811fa543f79c1cd40ea32905dd4dcd))
+* **looper:** canción programada por frame con fundido en las uniones ([4f7b081](https://github.com/mati-araujo/watermelon-audio/commit/4f7b081648f18c2fb25dbc0f95e47d259a3cbf2e))
+* **looper:** canción programada por frame para NoisyPad Studio (S11) ([7da1ef2](https://github.com/mati-araujo/watermelon-audio/commit/7da1ef29e0fbabe6341ecd46702e0bfd8777bda3))
+* **offline:** render offline por handle en la API C y JNI ([fe94e02](https://github.com/mati-araujo/watermelon-audio/commit/fe94e0232cb497877ab31d2e6d8e7febf0c6973a))
+
+
+### Bug Fixes
+
+* **looper:** la región de loop ya no pasa el largo de una pista corta ([144d1bd](https://github.com/mati-araujo/watermelon-audio/commit/144d1bdf093e076fdf10a2dc9a61e3caf64cd186))
+
 ## [2.22.1](https://github.com/mati-araujo/watermelon-audio/compare/v2.22.0...v2.22.1) (2026-10-26)
 
 

@@ -15,6 +15,8 @@ cmake_minimum_required(VERSION 3.22.1)
 add_library(watermelon-analysis STATIC
     AnalysisRing.cpp
     AnalysisThread.cpp
+    TunerInputDump.cpp
+    WavFileDumpSink.cpp
     SpectralSupportProbe.cpp
     OfflineAnalysis.cpp
     PhaseSlopeEstimator.cpp

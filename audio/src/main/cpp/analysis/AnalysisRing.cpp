@@ -27,6 +27,9 @@ std::atomic<bool> gAnalysisRingIsInCopy{false};
 
 namespace wma::analysis {
 
+static_assert(AnalysisRing::kDumpTearGuardFrames < AnalysisRing::kCapacityFrames,
+              "la guarda del volcado no puede comerse el ring entero");
+
 int AnalysisRing::read(float* out, int maxFrames) noexcept {
     if (out == nullptr || maxFrames <= 0) return 0;
 
@@ -76,6 +79,55 @@ int AnalysisRing::read(float* out, int maxFrames) noexcept {
     }
 
     mRead.store(r + n, std::memory_order_relaxed);
+    return static_cast<int>(n);
+}
+
+int AnalysisRing::copyForInputDump(uint64_t& cursor, float* out, int maxFrames,
+                                  uint64_t& lostFrames) const noexcept {
+    if (out == nullptr || maxFrames <= 0) return 0;
+
+    uint64_t c = cursor;
+    const uint64_t w = mWritten.load(std::memory_order_acquire);
+    if (c > w) return 0;   // precondicion rota: el llamador resuelve el retroceso, no esta funcion
+
+    // Capacidad EFECTIVA `kDumpWindowFrames`, no `kCapacityFrames`: ver el .h.
+    if (w - c > kDumpWindowFrames) {
+        lostFrames += (w - kDumpWindowFrames) - c;
+        c = w - kDumpWindowFrames;
+    }
+    const uint64_t avail = w - c;
+    if (avail == 0) {
+        cursor = c;
+        return 0;
+    }
+
+    const uint64_t want = static_cast<uint64_t>(maxFrames);
+    const uint32_t n = static_cast<uint32_t>(avail < want ? avail : want);
+    for (uint32_t i = 0; i < n; ++i) {
+        out[i] = mBuffer[static_cast<uint32_t>(c + i) & kMask].load(std::memory_order_relaxed);
+    }
+
+#if defined(WMA_TEST_HOOKS)
+    if (gAnalysisRingHoldAfterCopy.load(std::memory_order_acquire)) {
+        gAnalysisRingIsInCopy.store(true, std::memory_order_release);
+        while (gAnalysisRingHoldAfterCopy.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        gAnalysisRingIsInCopy.store(false, std::memory_order_release);
+    }
+#endif
+
+    // Sin esta valla las lecturas relajadas de arriba pueden quedar DESPUES del re-chequeo en una
+    // CPU debil (ARM64), y el re-chequeo validaria una copia que todavia no se hizo.
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const uint64_t w2 = mWritten.load(std::memory_order_acquire);
+    if (w2 - c > kDumpWindowFrames) {
+        lostFrames += (w2 - kDumpWindowFrames) - c;
+        cursor = w2 - kDumpWindowFrames;
+        return 0;
+    }
+
+    cursor = c + n;
     return static_cast<int>(n);
 }
 

@@ -143,6 +143,8 @@ add_executable(core_tests
     test_offline_handle.cpp
     test_offline_static_state.cpp
     test_offline_render_checks.cpp
+    test_offline_rerender.cpp
+    test_c_api_detect_onsets.cpp
     test_fx_track_routing.cpp
     test_fade_lifecycle.cpp
     test_usb_stream_start.cpp
@@ -176,10 +178,16 @@ add_executable(core_tests
     test_c_api_mode.cpp
     test_c_api_analysis.cpp
     test_c_api_tuner.cpp
+    test_c_api_tuner_dump.cpp
     test_c_api_transport.cpp
     test_c_api_diagnostics.cpp
     test_c_api_looper.cpp
     test_c_api_looper_analysis.cpp
+    test_c_api_song.cpp
+    test_song_mix.cpp
+    test_output_profiles.cpp
+    test_c_api_mix.cpp
+    support/rtalloc_counter.cpp
     test_time_dependence_probe.cpp
     test_c_api_routing.cpp
     test_c_api_logcapture.cpp

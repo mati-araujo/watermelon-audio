@@ -41,6 +41,7 @@
 #include <mutex>
 
 #include "api/watermelon_audio.h"
+#include "api/watermelon_audio_internal.h"
 #include "backends/BackendManager.h"
 #include "core/tests/support/FakeAudioBackend.h"
 #include "core/tests/support/FakeCaptureStream.h"
@@ -202,6 +203,30 @@ Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativeFakeCaptur
     (void)env;
     (void)thiz;
     return wma_test::fakeCaptureStreamIsOpen() ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * REQ-055 S0 (bugs A y B): las proximas `count` esperas del buzon del volcado del afinador se
+ * informan como techo vencido (ver `gTunerDumpForcedMailboxTimeouts` en
+ * `watermelon_audio_internal.h`). `count` < 0 se rechaza con false.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativeForceTunerDumpMailboxTimeouts(
+    JNIEnv* env, jobject thiz, jint count) {
+    (void)env;
+    (void)thiz;
+    if (count < 0) return JNI_FALSE;
+    gTunerDumpForcedMailboxTimeouts.store(count, std::memory_order_release);
+    return JNI_TRUE;
+}
+
+/// Cuantas de esas esperas forzadas quedan sin consumir: el test afirma 0 (la palanca disparo).
+JNIEXPORT jint JNICALL
+Java_com_watermellonstudios_audio_internal_bridge_HostTestHooks_nativePendingTunerDumpMailboxTimeouts(
+    JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    return gTunerDumpForcedMailboxTimeouts.load(std::memory_order_acquire);
 }
 
 }  // extern "C"

@@ -2,12 +2,31 @@
 
 #include "LooperExportTypes.h"
 #include "WavFile.h"
+#include <cstddef>
 #include <vector>
 
 class AudioLooper;  // friend of this class; full definition in AudioLooper.h
 class TrackBuffer;  // read via sampleAt() so export works on both storage backends
 
 namespace wm {
+
+/// Audio estereo intercalado ya decodificado y resampleado a la frecuencia pedida.
+struct DecodedStereo {
+    std::vector<float> samples;
+    int frames = 0;
+};
+
+/**
+ * @brief Decodifica `filePath` (WAV) y lo resamplea a `sampleRate` SIN tocar ninguna pista:
+ *        los pasos 1-4 de `importTrackChecked` (REQ-045 D6). NO es RT.
+ * @param budgetBytes  techo de RAM reservada; acota la decodificacion de la fuente y la reserva.
+ * @param usedBytes    RAM ya reservada, sin contar el destino.
+ * @param reservationBytesFor  lo que reserva el destino para `frames` (p. ej. el paginado
+ *                     redondea a chunks).
+ */
+ImportStatus decodeWavToRate(const char* filePath, int sampleRate, size_t budgetBytes,
+                             size_t usedBytes, size_t (*reservationBytesFor)(int),
+                             DecodedStereo& out);
 
 /**
  * @class LooperExporter

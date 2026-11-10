@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "SongSpaceBus.h"
 
 // Oboe is Android-only. Everywhere else the engine runs exclusively through
 // BackendManager/IAudioBackend — which is the path iOS uses with
@@ -137,6 +138,9 @@ void AudioEngine::OboeAdapterDeleter::operator()(void*) const {}
 } while(0)
 
 AudioEngine::AudioEngine() {
+    // REQ-055 S12: el master dimensiona su estado una vez (48 KB); nunca mas en el RT.
+    mMasterStage.prepareMaster(48000);
+
     // Wire looper event dispatcher into AudioLooper BEFORE starting the
     // dispatcher worker thread, so the first audio callback can already push.
     mAudioLooper.setEventDispatcher(&mLooperEventDispatcher);
@@ -869,6 +873,9 @@ void AudioEngine::stop() {
         mFadeCtrl.cancel();
         mOfflineMode.store(false, std::memory_order_release);
         mOfflineMaxBlockFrames.store(0, std::memory_order_release);
+        // Una instancia que deja de ser offline no conserva RAW: la proxima salida a un device
+        // vuelve por la cadena protegida.
+        mOutputProfile.store(static_cast<int>(OutputProfile::Protected), std::memory_order_release);
         transitionToState(EngineState::Stopped);
         LOGI("Motor offline detenido");
         return;
@@ -1281,6 +1288,12 @@ void AudioEngine::applyEffectsAndLooper(float* output, int32_t numFrames) {
     // Sin ninguna pista marcada —el caso por defecto y el que corre hoy para todo
     // el mundo— `mixFxTracks` no toca el buffer y esto cuesta una comparación por
     // pista, sin una sola pasada extra sobre las muestras.
+    //
+    // REQ-055 S11 — el play frame del bloque se toma UNA vez, aca, antes de las dos pasadas del
+    // looper: la cancion programada deriva su fase de el, y las pistas ruteadas a la cadena
+    // (esta pasada) y el resto (`process()`) tienen que ver el mismo frame.
+    const int64_t playFrameAtBlockStart = mTransport.getPlayFrame();
+    mAudioLooper.beginBlock(playFrameAtBlockStart, numFrames);
     mAudioLooper.mixFxTracks(mOutputStage.getTempBuffer(), numFrames);
 
     // Effects
@@ -1293,11 +1306,9 @@ void AudioEngine::applyEffectsAndLooper(float* output, int32_t numFrames) {
     mPreRollRing.write(output, numFrames);
 
     // ---- TRANSPORT TICK ----
-    // Snapshot Transport's play position BEFORE the tick so we pass the
-    // block-start frame to the looper (not the post-tick frame).
-    const int64_t playFrameAtBlockStart = mTransport.getPlayFrame();
-    // Emits any scheduled metronome clicks for this audio block. RT-safe; runs
-    // before the looper so the click is mixed by AudioLooper::process.
+    // `playFrameAtBlockStart` (arriba) es el frame de inicio del bloque, no el posterior al tick.
+    // Emits any scheduled metronome clicks for this audio block. RT-safe; runs before the looper
+    // so the click is mixed by AudioLooper::process.
     mTransport.tick(numFrames, mAudioLooper);
 
     // ---- FADE (applied to synth + FX only — NOT to loops) ----
@@ -1703,6 +1714,19 @@ void AudioEngine::handleMixMonitoring(float* output, int32_t numFrames,
 }
 
 void AudioEngine::applyMasterAndProtectOutput(float* output, int32_t numFrames) {
+    // Perfil de salida (REQ-055 S12). PROTECTED es el default y es EXACTAMENTE lo de siempre;
+    // RAW solo vale en un render offline (si el motor salio de offline con RAW pendiente, o nunca
+    // lo estuvo, se trata como PROTECTED: nunca sale float sin proteger a un DAC).
+    int profile = mOutputProfile.load(std::memory_order_acquire);
+    if (profile == static_cast<int>(OutputProfile::Raw) &&
+        !mOfflineMode.load(std::memory_order_acquire)) {
+        profile = static_cast<int>(OutputProfile::Protected);
+    }
+    if (profile != mOutputProfileSeen) {
+        if (profile == static_cast<int>(OutputProfile::Master)) mMasterStage.resetMaster();
+        mOutputProfileSeen = profile;
+    }
+
     // ---- MASTER VOLUME ----
     // The level of everything that leaves: instrument, effects, loops AND the
     // monitored input, which is why this runs here and not inside
@@ -1712,16 +1736,31 @@ void AudioEngine::applyMasterAndProtectOutput(float* output, int32_t numFrames) 
     // Upstream of this, and deliberately: the looper's recording tap. The master
     // is a monitoring level, not part of the take.
     const float masterVol = mMasterVolume.load(std::memory_order_acquire);
-    if (masterVol != 1.0f) {
-        simd::applyStereoGain(output, numFrames, masterVol);
+
+    if (profile == static_cast<int>(OutputProfile::Protected)) {
+        if (masterVol != 1.0f) {
+            simd::applyStereoGain(output, numFrames, masterVol);
+        }
+
+        // ---- OUTPUT PROTECTION ----
+        // Exactly once per block, on the signal that actually leaves. OutputStage's
+        // own contract says every path converges here last; MIX used to break that
+        // by running the chain a second time over a buffer this one had already
+        // metered.
+        mOutputStage.processOutput(output, numFrames);
+        return;
     }
 
-    // ---- OUTPUT PROTECTION ----
-    // Exactly once per block, on the signal that actually leaves. OutputStage's
-    // own contract says every path converges here last; MIX used to break that
-    // by running the chain a second time over a buffer this one had already
-    // metered.
-    mOutputStage.processOutput(output, numFrames);
+    if (profile == static_cast<int>(OutputProfile::Master)) {
+        // El limitador va ANTES del volumen de monitoreo: bajar el volumen no cambia lo que
+        // hace el limitador ni lo que mide el export.
+        mMasterStage.processMaster(output, numFrames);
+        if (masterVol != 1.0f) {
+            simd::applyStereoGain(output, numFrames, masterVol);
+        }
+    }
+    // RAW: nada. Los medidores quedan en la cola de los tres perfiles.
+    mOutputStage.meterFinalOutput(output, numFrames);
 }
 
 // ========== DECOMPOSED processAudioBlock ==========
@@ -2327,6 +2366,11 @@ void AudioEngine::resetChainForOfflineRender() {
     mEffectChain.reset();
     mResetEffectChainPending.store(false, std::memory_order_release);
 
+    // La cancion programada: voces (smoothers, colas de fundido) y agenda APAGADA, como una
+    // instancia fresca. Los clips son la ENTRADA del render y no se tocan; la agenda se publica
+    // despues del start.
+    mAudioLooper.resetSongForRender();
+
     // Osciladores y moduladores (fases y LFOs del oscilador clasico).
     for (int i = 0; i < mOscBank.getOscillatorCount(); ++i) {
         if (auto* osc = mOscBank.getPrimaryOscillator(i)) osc->resetForRender();
@@ -2351,8 +2395,69 @@ void AudioEngine::resetChainForOfflineRender() {
 
     // Etapa de salida (DC blocker, limitador, dither) y lo que solo se observa.
     mOutputStage.reset();
+    // El master (linea de retardo, deque, ganancia) de una instancia fresca (REQ-055 S12).
+    mMasterStage.resetMaster();
+    mOutputProfileSeen = mOutputProfile.load(std::memory_order_acquire);
     mWaveformCapture.clear();
     mDualTouch.requestEnvelopeRestart();
+}
+
+bool AudioEngine::renderBlockTaps(float* output, float* fx, float* tracks, int trackCount,
+                                  int frames) {
+    if (output == nullptr || fx == nullptr || frames <= 0 || trackCount < 0 ||
+        (trackCount > 0 && tracks == nullptr) || trackCount > AudioLooper::MAX_TRACKS_HW) {
+        return false;
+    }
+    if (!mOfflineMode.load(std::memory_order_acquire) ||
+        frames > mOfflineMaxBlockFrames.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const size_t block = static_cast<size_t>(frames) * 2;
+    std::fill_n(fx, block, 0.0f);
+    if (trackCount > 0) std::fill_n(tracks, block * static_cast<size_t>(trackCount), 0.0f);
+    mAudioLooper.armSongTaps(fx, tracks, trackCount, frames);
+    const bool ok = renderBlock(output, nullptr, frames);
+    mAudioLooper.disarmSongTaps();
+    return ok;
+}
+
+bool AudioEngine::ensureSongBus() {
+    std::lock_guard<std::mutex> lock(mSongBusMutex);
+    if (mSongBus) return true;
+    try {
+        auto bus = std::make_unique<wm::SongSpaceBusImpl>();
+        // publishSongBus lo prepara al rate vigente bajo el lock de setSampleRate.
+        mAudioLooper.publishSongBus(bus.get(), 4096);
+        mSongBus = std::move(bus);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+float AudioEngine::songDelayMaxMs() const {
+    const int rate = std::max(mAudioLooper.getSampleRate(), 1);
+    return static_cast<float>(DelayEffect::kMaxDelaySamples) * 1000.0f / static_cast<float>(rate);
+}
+
+bool AudioEngine::setSongMixTrack(int track, float gain, float pan, float send) {
+    if (!ensureSongBus()) return false;
+    mAudioLooper.setSongMixTrack(track, gain, pan, send);
+    return true;
+}
+
+bool AudioEngine::setSongMixSpace(const wm::SongSpaceParams& params) {
+    if (!ensureSongBus()) return false;
+    mAudioLooper.setSongMixSpace(params);
+    return true;
+}
+
+bool AudioEngine::setOutputProfile(OutputProfile profile) {
+    if (profile == OutputProfile::Raw && !mOfflineMode.load(std::memory_order_acquire)) {
+        return false;
+    }
+    mOutputProfile.store(static_cast<int>(profile), std::memory_order_release);
+    return true;
 }
 
 bool AudioEngine::renderBlock(float* output, const float* input, int frames) {
@@ -2520,6 +2625,7 @@ void AudioEngine::configureComponentsWithSampleRate(int sampleRate, int maxBlock
 
     // Configure output stage (DC blocker, limiter, ditherer)
     mOutputStage.prepare(sampleRate, 0);
+    mMasterStage.prepareMaster(sampleRate);
     LOGI("OutputStage configured at %dHz", sampleRate);
 }
 
@@ -2666,6 +2772,8 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
         // y esa pasada SALTEA las pistas marcadas. Sin esta llamada, una pista
         // marcada no la mezclaría nadie y quedaría MUDA con USB INPUT_FX activo
         // — un modo entero donde el flag apagaría la pista en vez de rutearla.
+        const int64_t usbPlayFrameAtBlockStart = mTransport.getPlayFrame();
+        mAudioLooper.beginBlock(usbPlayFrameAtBlockStart, numFrames);
         mAudioLooper.mixFxTracks(mOutputStage.getTempBuffer(), numFrames);
 
         // 3. Process through effect chain (INPUT → EFFECTS → OUTPUT)
@@ -2675,7 +2783,6 @@ watermelon_audio::IAudioCallback::Result AudioEngine::onAudioReady(
         // Without this the USB direct INPUT_FX fast-path bypasses the looper entirely:
         // no recording, no playback of existing tracks, no transport advance.
         mPreRollRing.write(outputData, numFrames);
-        const int64_t usbPlayFrameAtBlockStart = mTransport.getPlayFrame();
         mTransport.tick(numFrames, mAudioLooper);
         mAudioLooper.process(outputData, numFrames, usbPlayFrameAtBlockStart);
 

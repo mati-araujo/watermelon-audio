@@ -42,6 +42,21 @@ constexpr int kRate   = 48000;   // el rango de 30,50 c del comentario de REQ-00
 constexpr int kFrames = 1024;
 constexpr double kE4  = 329.6276;
 
+/**
+ * REQ-057 S1 — EL RANGO DE PRODUCCION, no el de 4096.
+ *
+ * Este archivo se escribio asumiendo el rango de hop 4096 de E4 a 48 kHz (30,50 c, el de los
+ * comentarios de arriba): el barrido de abajo se armaba con cents ABSOLUTOS alrededor de ese borde
+ * (−45 … +35). Con las rejillas el rango de E4 pasa a ser el del hop 1024 con κ = 0,9 (107,4 c): a
+ * −35 c ya no hay aliasing —el caso reportado dejo de estar fuera de rango— y el barrido ya no
+ * ejercia el borde. Los puntos pasan a ser FRACCIONES de ese rango leidas de la constante publica
+ * (`InterleavedPhaseEstimator::denseRangeCents`), con las mismas fracciones del barrido viejo
+ * (45/30,5 = 1,475 … 25/30,5 = 0,82): el caso sigue estando alrededor del borde. La asercion de
+ * signo NO se debilita.
+ */
+const double kProductionRangeCents =
+    wma::analysis::InterleavedPhaseEstimator::denseRangeCents(kRate, kE4);
+
 /// Inarmonicidad de una cuerda de acero real. NO es un valor de laboratorio:
 /// con B = 0 el defecto es INALCANZABLE, medido en 103 puntos de barrido.
 constexpr double kSteelB = 1.0e-3;
@@ -145,6 +160,17 @@ TEST(SignOutsideRange, TheReportedCaseNeverPublishesTheOppositeSign) {
             << ": le dice al musico que afloje lo que hay que apretar";
     }
     SUCCEED() << "publicado=" << (r.published ? "si" : "no") << " cents=" << r.cents;
+
+    // REQ-057 S1: el mismo caso EN EL MISMO LUGAR RELATIVO del borde (35/30,5 = 1,148 del rango),
+    // ahora que el rango de produccion de E4 es el de hop 1024. A −35 c el caso original ya no
+    // esta fuera de rango; esto si.
+    const double scaled = -(35.0 / 30.5) * kProductionRangeCents;
+    const Reading s = measureAt(scaled, kSteelB);
+    if (s.published) {
+        EXPECT_LT(s.cents, 0.0)
+            << "la cuerda esta " << -scaled << " cents ABAJO (1,148 del rango de produccion) y el motor publico "
+            << s.cents << ": le dice al musico que afloje lo que hay que apretar";
+    }
 }
 
 /**
@@ -166,8 +192,11 @@ TEST(SignOutsideRange, NoDeviationEverPublishesTheOppositeSign) {
     // cuestan lo mismo. Se conservan los positivos aunque las cuatro
     // inversiones medidas fueran todas del lado bemol: son el control de que la
     // guarda no se volvio "callate si es negativo".
-    for (double real : {-45.0, -40.0, -35.0, -32.0, -31.5, -30.0, -25.0,
-                         25.0,  30.0,  31.5,  32.0,  35.0}) {
+    // Las fracciones son las del barrido viejo sobre el rango de 30,5 c (−45/30,5 … +35/30,5),
+    // aplicadas al rango de PRODUCCION (ver `kProductionRangeCents`).
+    for (double frac : {-1.475, -1.311, -1.148, -1.049, -1.033, -0.984, -0.820,
+                         0.820,  0.984,  1.033,  1.049,  1.148}) {
+        const double real = frac * kProductionRangeCents;
         const Reading r = measureAt(real, kSteelB);
         if (!r.published) continue;
         ++published;

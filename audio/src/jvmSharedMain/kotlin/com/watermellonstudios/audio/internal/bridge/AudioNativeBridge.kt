@@ -2,9 +2,17 @@ package com.watermellonstudios.audio.internal.bridge
 
 import com.watermellonstudios.audio.api.EffectChainSnapshot
 import com.watermellonstudios.audio.api.IAudioNativeBridge
+import com.watermellonstudios.audio.api.ISongBridge
+import com.watermellonstudios.audio.api.ISongMixBridge
+import com.watermellonstudios.audio.api.MasterParams
+import com.watermellonstudios.audio.api.OutputProfile
+import com.watermellonstudios.audio.api.SongSpace
 import com.watermellonstudios.audio.api.IEffectStateProvider
 import com.watermellonstudios.audio.api.IEffectStateWriter
+import com.watermellonstudios.audio.api.ITunerDiagnostics
+import com.watermellonstudios.audio.api.InternalWatermelonApi
 import com.watermellonstudios.audio.api.NativeEffectSnapshot
+import com.watermellonstudios.audio.api.TunerInputDumpResult
 import com.watermellonstudios.audio.callback.AudioLogger
 import com.watermellonstudios.audio.callback.platformDefaultAudioLogger
 import com.watermellonstudios.audio.domain.effect.EffectParameter
@@ -98,7 +106,12 @@ import kotlinx.coroutines.withContext
  * @see IEffectStateProvider For read operations interface
  * @see IEffectStateWriter For write operations interface
  */
-class AudioNativeBridge private constructor() : IAudioNativeBridge {
+// El opt-in de la clase es por el SUPERTIPO `ITunerDiagnostics` (tooling del harness): nombrarlo en
+// la lista de supertipos ya lo exige. NO alcanza para el uso: las overrides llevan
+// `@InternalWatermelonApi` (propagan el requisito), asi que
+// `AudioNativeBridge.getInstance().startTunerInputDump(p)` sin opt-in no compila (hallazgo 2).
+@OptIn(InternalWatermelonApi::class)
+class AudioNativeBridge private constructor() : IAudioNativeBridge, ITunerDiagnostics, ISongBridge, ISongMixBridge {
 
     companion object {
         private const val TAG = "AudioNativeBridge"
@@ -1831,6 +1844,30 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     ): FloatArray? =
         nativeAnalyzeTunerBufferWithCandidates(samples, channels, sampleRate, targetHz, candidatesHz)
 
+    // ---- Diagnostico, sin contrato (REQ-055 S0) ------------------------------
+    // Sin mutex de categoria, y no es un olvido: el volcado no abre ni cierra el stream de
+    // entrada (que es lo que INPUT serializa), y la C API ya lo serializa con `analysisMutex`.
+    // El `stop` espera a lo sumo el techo del buzon de analisis (2 s): si estuviera bajo INPUT
+    // trabaria un `startTuner()`/`stopTuner()` concurrente por ese rato sin ganar nada.
+
+    @InternalWatermelonApi
+    override fun startTunerInputDump(path: String): Boolean {
+        // Hallazgo 3: los bytes UTF-8 exactos, o nada. Un NUL o un surrogate suelto cambiarian el
+        // nombre del archivo y el resultado apuntaria a otro: se rechaza sin llamar al nativo.
+        val utf8 = tunerDumpPathUtf8(path) ?: return false
+        // Sin estado de este lado (bug A de REQ-055 S0): el path del resultado lo informa el stop
+        // nativo. Recordar aca el ultimo pedido era lo que un start rechazado podia pisar.
+        return nativeTunerDiagInputDumpStart(utf8)
+    }
+
+    @InternalWatermelonApi
+    override fun stopTunerInputDump(): TunerInputDumpResult? {
+        val values = LongArray(TunerInputDumpResult.VALUE_COUNT)
+        // El archivo que la toma dejo, segun el sink: los bytes que el start recibio + el sufijo.
+        val path = nativeTunerDiagInputDumpStop(values) ?: return null
+        return TunerInputDumpResult.fromNative(values, path.decodeToString())
+    }
+
     override fun captureIntonation(slot: Int): Boolean = nativeIntonationCapture(slot)
     override fun resetIntonation() = nativeIntonationReset()
     override fun intonationState(): Int = nativeIntonationState()
@@ -2232,6 +2269,9 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeGetTunerSnapshot(): FloatArray?
     private external fun nativeSetTunerCandidates(hz: FloatArray): Boolean
     private external fun nativeLockTunerString(index: Int): Boolean
+    /** [pathUtf8]: UTF-8 real, sin terminador (ver [tunerDumpPathUtf8]); no un `jstring`. */
+    private external fun nativeTunerDiagInputDumpStart(pathUtf8: ByteArray): Boolean
+    private external fun nativeTunerDiagInputDumpStop(values: LongArray): ByteArray?
     private external fun nativeAnalyzeTunerBuffer(
         samples: FloatArray,
         channels: Int,
@@ -3713,6 +3753,86 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
 
     fun looperResetTelemetry() = nativeLooperResetTelemetry()
 
+    // ==================== Canción programada, motor VIVO (REQ-055 S11) ====================
+    //
+    // `AudioNativeBridge.getInstance()` ES el `ISongBridge` vivo. Las operaciones de carga y
+    // agenda tienen su mutex PROPIO del lado nativo (nunca `engineMutex`: un load decodifica
+    // un archivo). El play frame es el de siempre, [transportGetPlayFrame].
+
+    override fun songLoadClip(
+        path: String,
+        sampleRate: Int,
+        regionStartFrame: Long,
+        regionEndFrame: Long,
+        loopFrames: Long,
+    ): Result<Int> {
+        val outId = IntArray(1) { ISongBridge.SILENCE }
+        val code = nativeSongLoadClip(path, sampleRate, regionStartFrame, regionEndFrame, loopFrames, outId)
+        return if (code == NativeErrorCode.SUCCESS.code) {
+            Result.success(outId[0])
+        } else {
+            Result.failure(NativeBridgeException.fromCode(code, "songLoadClip($path)"))
+        }
+    }
+
+    override fun songUnloadClip(clipId: Int): Result<Unit> =
+        songResult(nativeSongUnloadClip(clipId), "songUnloadClip($clipId)")
+
+    override fun songSetSchedule(
+        loopFrames: Long,
+        sectionStarts: LongArray,
+        clips: IntArray,
+        endFrame: Long,
+    ): Result<Unit> = songResult(
+        nativeSongSetSchedule(loopFrames, sectionStarts, clips, endFrame),
+        "songSetSchedule(${sectionStarts.size} secciones)",
+    )
+
+    override fun songGetSection(): Int = nativeSongGetSection()
+    override fun songGetLateAdoptions(): Long = nativeSongGetLateAdoptions()
+    override fun songGetPlayFrame(): Long = nativeTransportGetPlayFrame()
+
+    private fun songResult(code: Int, context: String): Result<Unit> =
+        if (code == NativeErrorCode.SUCCESS.code) {
+            Result.success(Unit)
+        } else {
+            Result.failure(NativeBridgeException.fromCode(code, context))
+        }
+
+    private external fun nativeSongLoadClip(
+        path: String, sampleRate: Int, regionStart: Long, regionEnd: Long, loopFrames: Long, outId: IntArray,
+    ): Int
+    private external fun nativeSongUnloadClip(id: Int): Int
+    private external fun nativeSongSetSchedule(loopFrames: Long, starts: LongArray, clips: IntArray, endFrame: Long): Int
+    private external fun nativeSongGetSection(): Int
+    private external fun nativeSongGetLateAdoptions(): Long
+
+    // ==================== Mezcla propia de la canción, motor VIVO (REQ-055 S12) ====================
+    //
+    // `AudioNativeBridge.getInstance()` ES el `ISongMixBridge` vivo. Stores atómicos del lado
+    // nativo: no toman ningún mutex del bridge. Los arrays de espacio y master cruzan con el orden
+    // de campos de `WmaMixSpace` / `WmaMixMaster` (ver [toNativeArray]).
+
+    override fun mixSetTrack(track: Int, gain: Float, pan: Float, send: Float): Result<Unit> =
+        songResult(nativeMixSetTrack(track, gain, pan, send), "mixSetTrack($track)")
+
+    override fun mixSetSpace(space: SongSpace): Result<Unit> =
+        songResult(nativeMixSetSpace(space.toNativeArray()), "mixSetSpace")
+
+    override fun mixSetMaster(master: MasterParams): Result<Unit> =
+        songResult(nativeMixSetMaster(master.toNativeArray()), "mixSetMaster")
+
+    override fun mixSetOutputProfile(profile: OutputProfile): Result<Unit> =
+        songResult(nativeMixSetOutputProfile(profile.code), "mixSetOutputProfile($profile)")
+
+    override fun getXRunCount(): Int = nativeGetXRunCount()
+
+    private external fun nativeMixSetTrack(track: Int, gain: Float, pan: Float, send: Float): Int
+    private external fun nativeMixSetSpace(space: FloatArray): Int
+    private external fun nativeMixSetMaster(master: FloatArray): Int
+    private external fun nativeMixSetOutputProfile(profile: Int): Int
+    private external fun nativeGetXRunCount(): Int
+
     // ==================== Offline render by handle (REQ-055 S2, ADR-0008) ====================
     //
     // EL SEGUNDO MODELO DEL BRIDGE: todo lo de arriba opera sobre el motor GLOBAL (el
@@ -3750,6 +3870,41 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     internal fun offlineClearAllEffects(handle: Long): Int = nativeOfflineClearAllEffects(handle)
     internal fun offlineSetEffectParameter(handle: Long, index: Int, paramId: Int, value: Float): Int =
         nativeOfflineSetEffectParameter(handle, index, paramId, value)
+    internal fun offlineLooperSetCapabilities(handle: Long, budgetBytes: Long, maxTracks: Int): Int =
+        nativeOfflineLooperSetCapabilities(handle, budgetBytes, maxTracks)
+
+    // Re-render de tomas (REQ-055 S15): el resto de la configuracion por handle. Los `Int` son el
+    // `WmaResult` crudo; las dos consultas del font devuelven `null` con un handle desconocido,
+    // sin font o con un indice invalido (la misma forma que las del vivo).
+    internal fun offlineSetOscillatorType(handle: Long, typeId: Int): Int =
+        nativeOfflineSetOscillatorType(handle, typeId)
+    internal fun offlineSetModulatorType(handle: Long, typeId: Int): Int =
+        nativeOfflineSetModulatorType(handle, typeId)
+    internal fun offlineSetFrequencyRange(handle: Long, minHz: Float, maxHz: Float): Int =
+        nativeOfflineSetFrequencyRange(handle, minHz, maxHz)
+    internal fun offlineSetBpm(handle: Long, bpm: Float): Int = nativeOfflineSetBpm(handle, bpm)
+    internal fun offlineSetEffectBypass(handle: Long, index: Int, bypass: Boolean): Int =
+        nativeOfflineSetEffectBypass(handle, index, bypass)
+    internal fun offlineSetRoutingMode(handle: Long, mode: Int): Int = nativeOfflineSetRoutingMode(handle, mode)
+    internal fun offlineSetParallelMix(handle: Long, mix: Float): Int = nativeOfflineSetParallelMix(handle, mix)
+    internal fun offlineSetFeedbackAmount(handle: Long, amount: Float): Int =
+        nativeOfflineSetFeedbackAmount(handle, amount)
+    internal fun offlineSfSetTouchExpression(handle: Long, touchId: Int, expression: Float): Int =
+        nativeOfflineSfSetTouchExpression(handle, touchId, expression)
+    internal fun offlineSfNoteOffAll(handle: Long): Int = nativeOfflineSfNoteOffAll(handle)
+    internal fun offlineGetSoundFontPresetKeyRange(handle: Long, presetIndex: Int): IntArray? =
+        nativeOfflineGetSoundFontPresetKeyRange(handle, presetIndex)
+    internal fun offlineGetSoundFontPresetBankProgram(handle: Long, presetIndex: Int): IntArray? =
+        nativeOfflineGetSoundFontPresetBankProgram(handle, presetIndex)
+
+    /**
+     * Onsets de un buffer estereo intercalado del llamador (REQ-055 S15), sin motor ni handle.
+     * Devuelve los escritos en [out] (`>= 0`) o un `WmaResult` negativo. No por el motor vivo: es
+     * la misma funcion pura que usa el looper.
+     */
+    internal fun detectOnsets(
+        stereo: FloatArray, frames: Int, sampleRate: Int, hopFrames: Int, sensitivity: Float, out: IntArray,
+    ): Int = nativeDetectOnsets(stereo, frames, sampleRate, hopFrames, sensitivity, out)
 
     private external fun nativeOfflineCreate(): Long
     private external fun nativeOfflineDestroy(handle: Long): Int
@@ -3768,6 +3923,77 @@ class AudioNativeBridge private constructor() : IAudioNativeBridge {
     private external fun nativeOfflineAddEffect(handle: Long, typeId: Int): Int
     private external fun nativeOfflineClearAllEffects(handle: Long): Int
     private external fun nativeOfflineSetEffectParameter(handle: Long, index: Int, paramId: Int, value: Float): Int
+    private external fun nativeOfflineLooperSetCapabilities(handle: Long, budgetBytes: Long, maxTracks: Int): Int
+    private external fun nativeOfflineSetOscillatorType(handle: Long, typeId: Int): Int
+    private external fun nativeOfflineSetModulatorType(handle: Long, typeId: Int): Int
+    private external fun nativeOfflineSetFrequencyRange(handle: Long, minHz: Float, maxHz: Float): Int
+    private external fun nativeOfflineSetBpm(handle: Long, bpm: Float): Int
+    private external fun nativeOfflineSetEffectBypass(handle: Long, index: Int, bypass: Boolean): Int
+    private external fun nativeOfflineSetRoutingMode(handle: Long, mode: Int): Int
+    private external fun nativeOfflineSetParallelMix(handle: Long, mix: Float): Int
+    private external fun nativeOfflineSetFeedbackAmount(handle: Long, amount: Float): Int
+    private external fun nativeOfflineSfSetTouchExpression(handle: Long, touchId: Int, expression: Float): Int
+    private external fun nativeOfflineSfNoteOffAll(handle: Long): Int
+    private external fun nativeOfflineGetSoundFontPresetKeyRange(handle: Long, presetIndex: Int): IntArray?
+    private external fun nativeOfflineGetSoundFontPresetBankProgram(handle: Long, presetIndex: Int): IntArray?
+    private external fun nativeDetectOnsets(
+        stereo: FloatArray, frames: Int, sampleRate: Int, hopFrames: Int, sensitivity: Float, out: IntArray,
+    ): Int
+
+    // Canción programada por handle (REQ-055 S11): 1:1 con las `nativeSong*` del vivo.
+    internal fun offlineSongLoadClip(
+        handle: Long, path: String, sampleRate: Int, regionStart: Long, regionEnd: Long, loopFrames: Long,
+        outId: IntArray,
+    ): Int = nativeOfflineSongLoadClip(handle, path, sampleRate, regionStart, regionEnd, loopFrames, outId)
+    internal fun offlineSongUnloadClip(handle: Long, id: Int): Int = nativeOfflineSongUnloadClip(handle, id)
+    internal fun offlineSongSetSchedule(
+        handle: Long, loopFrames: Long, starts: LongArray, clips: IntArray, endFrame: Long,
+    ): Int = nativeOfflineSongSetSchedule(handle, loopFrames, starts, clips, endFrame)
+    internal fun offlineSongGetSection(handle: Long): Int = nativeOfflineSongGetSection(handle)
+    internal fun offlineSongGetLateAdoptions(handle: Long): Long = nativeOfflineSongGetLateAdoptions(handle)
+    internal fun offlineSongGetPlayFrame(handle: Long): Long = nativeOfflineSongGetPlayFrame(handle)
+
+    private external fun nativeOfflineSongLoadClip(
+        handle: Long, path: String, sampleRate: Int, regionStart: Long, regionEnd: Long, loopFrames: Long,
+        outId: IntArray,
+    ): Int
+    private external fun nativeOfflineSongUnloadClip(handle: Long, id: Int): Int
+    private external fun nativeOfflineSongSetSchedule(
+        handle: Long, loopFrames: Long, starts: LongArray, clips: IntArray, endFrame: Long,
+    ): Int
+    private external fun nativeOfflineSongGetSection(handle: Long): Int
+    private external fun nativeOfflineSongGetLateAdoptions(handle: Long): Long
+    private external fun nativeOfflineSongGetPlayFrame(handle: Long): Long
+
+    // Mezcla, taps y master por handle (REQ-055 S12): 1:1 con las `nativeMix*` del vivo, más los
+    // taps y el procesador de master (otro registro de ids: el id no es un puntero).
+    internal fun offlineMixSetTrack(handle: Long, track: Int, gain: Float, pan: Float, send: Float): Int =
+        nativeOfflineMixSetTrack(handle, track, gain, pan, send)
+    internal fun offlineMixSetSpace(handle: Long, space: FloatArray): Int = nativeOfflineMixSetSpace(handle, space)
+    internal fun offlineMixSetMaster(handle: Long, master: FloatArray): Int = nativeOfflineMixSetMaster(handle, master)
+    internal fun offlineMixSetOutputProfile(handle: Long, profile: Int): Int =
+        nativeOfflineMixSetOutputProfile(handle, profile)
+    internal fun offlineRenderTaps(handle: Long, out: FloatArray, frames: Int, trackCount: Int): Int =
+        nativeOfflineRenderTaps(handle, out, frames, trackCount)
+
+    internal fun masterCreate(sampleRate: Int): Long = nativeMasterCreate(sampleRate)
+    internal fun masterConfigure(id: Long, params: FloatArray): Int = nativeMasterConfigure(id, params)
+    internal fun masterReset(id: Long): Int = nativeMasterReset(id)
+    internal fun masterProcess(id: Long, buffer: FloatArray, frames: Int): Int = nativeMasterProcess(id, buffer, frames)
+    internal fun masterLatency(id: Long): Int = nativeMasterLatency(id)
+    internal fun masterDestroy(id: Long): Int = nativeMasterDestroy(id)
+
+    private external fun nativeOfflineMixSetTrack(handle: Long, track: Int, gain: Float, pan: Float, send: Float): Int
+    private external fun nativeOfflineMixSetSpace(handle: Long, space: FloatArray): Int
+    private external fun nativeOfflineMixSetMaster(handle: Long, master: FloatArray): Int
+    private external fun nativeOfflineMixSetOutputProfile(handle: Long, profile: Int): Int
+    private external fun nativeOfflineRenderTaps(handle: Long, out: FloatArray, frames: Int, trackCount: Int): Int
+    private external fun nativeMasterCreate(sampleRate: Int): Long
+    private external fun nativeMasterConfigure(id: Long, params: FloatArray): Int
+    private external fun nativeMasterReset(id: Long): Int
+    private external fun nativeMasterProcess(id: Long, buffer: FloatArray, frames: Int): Int
+    private external fun nativeMasterLatency(id: Long): Int
+    private external fun nativeMasterDestroy(id: Long): Int
 }
 
 /**
@@ -3784,3 +4010,12 @@ internal object UsbStreamStartStatus {
     const val INVALID_MODE = 5
     const val START_FAILED = 6
 }
+
+/** El orden de campos de `WmaMixSpace`: lo lee `nativeMixSetSpace` / `nativeOfflineMixSetSpace`. */
+internal fun SongSpace.toNativeArray(): FloatArray = floatArrayOf(
+    reverbReturn, reverbSize, reverbDecaySeconds, reverbDamping, reverbPreDelayMs,
+    reverbLowCutHz, reverbHighCutHz, delayReturn, delayTimeMs, delayFeedback,
+)
+
+/** El orden de campos de `WmaMixMaster`: ganancia, techo, release. */
+internal fun MasterParams.toNativeArray(): FloatArray = floatArrayOf(gainDb, ceilingDbtp, releaseMs)

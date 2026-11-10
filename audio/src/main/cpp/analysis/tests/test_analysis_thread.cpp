@@ -859,19 +859,33 @@ TEST(AnalysisThread, ThePublishedRangePredictsWhereTheFineReadingExists) {
     // inventado, siete veces el real— pasaba los 8 tests. Lo que lo mata es
     // exigir que CERCA DEL BORDE INTERIOR la lectura todavia exista: con 150
     // inventado, a 135 cents no hay ninguna.
+    //
+    // REQ-057 S1 (AC-057.3): ES LA ASERCION «EN LAS DOS DIRECCIONES» — que el rango no se INFLE ni
+    // se ACHIQUE — y por eso el borde se pega al rango: −0,97·range (adentro: tiene que haber
+    // lectura) y −1,03·range (afuera: no tiene que haber). Antes eran −0,90 y −1,5, con un 10 % y
+    // un 50 % de holgura que dejaban pasar un rango inflado hasta ~1,5x o achicado hasta ~0,9x. Con
+    // el rango nuevo (hop 1024, κ = 0,9) a ±3 % hay margen de sobra para el error de la gruesa
+    // (0,21 c) y ninguno para un κ equivocado.
+    //
+    // Mutantes (A4 a 44,1 kHz: rango publicado 74,6 c; sin κ seria 82,7): (i) publicar el rango SIN
+    // κ pero admitir con κ ⇒ el borde interior cae a −0,97·82,7 = −80,2 c, donde el motor ya no mide:
+    // rojo en «adentro»; (ii) admitir con κ = 1 y publicar con κ = 0,9 ⇒ a −1,03·74,6 = −76,9 c el
+    // parcial 1 todavia entra y hay lectura fuera de lo declarado: rojo en «afuera».
     std::array<float, kSnapshotValueCount> nearEdge{};
-    ASSERT_TRUE(runAt(-0.90 * range, nearEdge)) << "LA MUESTRA SALIO CORTA en el borde interior";
+    ASSERT_TRUE(runAt(-0.97 * range, nearEdge)) << "LA MUESTRA SALIO CORTA en el borde interior";
     EXPECT_FALSE(std::isnan(nearEdge[kSnapCents]))
-        << "el rango dice " << range << " y a " << (-0.90 * range)
+        << "el rango dice " << range << " y a " << (-0.97 * range)
         << " cents —adentro— no publico nada: el rango publicado es mas grande "
-           "que el real";
+           "que el real (AC-057.3: el rango no se puede inflar)";
 
-    // 3. FUERA del rango publicado: ausente. Se toma 1,5x para no medir el borde.
+    // 3. FUERA del rango publicado: ausente. A 1,03x —no 1,5x— para que un rango ACHICADO
+    // tampoco pase: si el motor midiera hasta 1,5x lo declarado, el rango seria falso por defecto.
     std::array<float, kSnapshotValueCount> outside{};
-    ASSERT_TRUE(runAt(-1.5 * range, outside)) << "LA MUESTRA SALIO CORTA fuera del rango";
+    ASSERT_TRUE(runAt(-1.03 * range, outside)) << "LA MUESTRA SALIO CORTA fuera del rango";
     EXPECT_TRUE(std::isnan(outside[kSnapCents]))
-        << "el rango dice " << range << " y a " << (-1.5 * range)
-        << " cents igual publico " << outside[kSnapCents];
+        << "el rango dice " << range << " y a " << (-1.03 * range)
+        << " cents igual publico " << outside[kSnapCents]
+        << " (AC-057.3: el rango no se puede achicar; fuera de lo declarado no hay lectura)";
 }
 
 /**
