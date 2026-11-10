@@ -86,6 +86,41 @@ TEST(ModulationSmoke, AutoPanStable)      { AutoPanEffect fx;     smokeEffect(fx
 TEST(ModulationSmoke, ComplexTremStable)  { ComplexTremEffect fx; smokeEffect(fx); }
 TEST(ModulationSmoke, RandomResoStable)   { RandomResoEffect fx;  smokeEffect(fx); }
 
+// Leer `k + ε` samples atrás de `writeIndex = k` da un readPos negativo diminuto; sumarle
+// MAX_DELAY_SAMPLES en float lo redondea a 4800,0f, y el índice caía fuera de la línea. Lo
+// encontraron EffectProperties/RateInvariance bajo la libstdc++ de GCC 15 con aserciones. Este
+// test lo afirma sin depender del modo de hardening de la biblioteca estándar.
+TEST(ModulationChorus, ReadTapStaysInsideTheLineAtEveryWriteIndex) {
+    constexpr int kMax = ChorusEffect::MAX_DELAY_SAMPLES;
+    int bordesFuera = 0;
+    for (int k = 1; k < kMax; ++k) {
+        const float justPast = std::nextafter(static_cast<float>(k), static_cast<float>(kMax));
+        for (const float delay : {1.0f, static_cast<float>(k), justPast, static_cast<float>(kMax - 1)}) {
+            const ChorusEffect::ReadTap tap = ChorusEffect::readTap(k, delay);
+            const bool dentro = tap.index0 >= 0 && tap.index0 < kMax && tap.index1 >= 0 &&
+                                tap.index1 < kMax && tap.frac >= 0.0f && tap.frac <= 1.0f;
+            if (!dentro) {
+                ++bordesFuera;
+                if (bordesFuera <= 3) {
+                    ADD_FAILURE() << "writeIndex=" << k << " delay=" << delay << " -> index0="
+                                  << tap.index0 << " index1=" << tap.index1 << " frac=" << tap.frac;
+                }
+            }
+        }
+    }
+    EXPECT_EQ(bordesFuera, 0);
+}
+
+// El borde sólo cambia de qué lado se nombra el mismo punto: leer justo después del wrap tiene
+// que dar lo mismo que leer en el índice 0.
+TEST(ModulationChorus, ReadTapAtTheWrapNamesTheSamePointAsIndexZero) {
+    const float justPast = std::nextafter(3.0f, 4.0f);
+    const ChorusEffect::ReadTap tap = ChorusEffect::readTap(3, justPast);
+    const float pos = static_cast<float>(tap.index0) + tap.frac;
+    const bool esCero = pos < 1e-3f || pos > ChorusEffect::MAX_DELAY_SAMPLES - 1e-3f;
+    EXPECT_TRUE(esCero) << "index0=" << tap.index0 << " frac=" << tap.frac;
+}
+
 TEST(ModulationDryNull, ChorusMixZeroIsDry) {
     ChorusEffect fx;
     expectDryNull(fx, ChorusEffect::MIX, 0.0f);  // MIX is 0-100 -> 0 = dry
